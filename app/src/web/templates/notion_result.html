@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}노션 보내기 결과 · 기업분석{% endblock %}
+
+{# 노션 전송 결과.
+   ★ 노션에는 «되돌리기»가 없다. 중간에 실패하면 반쯤 만들어진 페이지가 남는다.
+     그 사실을 숨기지 않고 사용자에게 그대로 알린다 — 안 알리면 사용자가
+     노션에 이상한 페이지가 있는 줄 모른 채 지나간다. #}
+
+{% block content %}
+<div class="card">
+  {% if notion.success %}
+    <div class="stopped-icon">✅</div>
+    <h1>노션으로 보냈습니다</h1>
+    <p class="lede">{{ report.company }} · {{ report.job }}</p>
+    {% if notion.page_url %}
+      <div class="btn-row">
+        <a class="btn" href="{{ notion.page_url }}" target="_blank" rel="noopener"
+           style="line-height:1.6">노션에서 열기</a>
+      </div>
+    {% endif %}
+
+  {% elif notion.partial %}
+    {# ★ 가장 조심해서 알려야 하는 경우 #}
+    <div class="stopped-icon">⚠️</div>
+    <h1>일부만 만들어졌습니다</h1>
+    <p class="lede">
+      노션에 페이지는 만들어졌는데 <strong>내용을 다 넣기 전에 실패했습니다.</strong>
+    </p>
+    <div class="warn-line">
+      <span>⚠️</span>
+      <span>
+        <b>노션에 반쪽짜리 페이지가 남아 있습니다.</b>
+        노션에서 직접 지우신 뒤 다시 시도해 주세요 —
+        그냥 다시 보내면 <strong>페이지가 두 개</strong>가 됩니다.
+      </span>
+    </div>
+    {% if notion.page_url %}
+      <div class="btn-row">
+        <a class="btn ghost" href="{{ notion.page_url }}" target="_blank" rel="noopener"
+           style="line-height:1.6">만들다 만 페이지 열기</a>
+      </div>
+    {% endif %}
+
+  {% else %}
+    <div class="stopped-icon">📭</div>
+    <h1>보내지 못했습니다</h1>
+    <p class="lede">노션에는 <strong>아무것도 만들어지지 않았습니다.</strong></p>
+  {% endif %}
+
+  {% if notion.error %}
+    <p class="muted" style="margin-top:14px">사유: {{ notion.error }}</p>
+  {% endif %}
+
+  <div class="btn-row">
+    <a class="btn ghost" href="/result/{{ job_id }}" style="line-height:1.6">
+      보고서로 돌아가기
+    </a>
+  </div>
+</div>
+{% endblock %}

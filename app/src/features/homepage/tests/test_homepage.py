@@ -1,0 +1,432 @@
+"""홈페이지 수집 시험 — 가짜 `fetch`만 쓴다. 실제 접속은 하지 않는다.
+
+정본: 확정/03_수집/2_규칙/01_소스정책.md · 확정/03_수집/1_흐름/02_실패처리.md
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from src.features.homepage.constants import (
+    MAX_CHARS_PER_PAGE,
+    MAX_PAGES,
+    MAX_TOTAL_CHARS,
+)
+from src.features.homepage.logic import (
+    HomepageCertNameMismatchError,
+    HomepageFetchError,
+    collect_homepage_fragments,
+    strip_html,
+)
+
+ROOT = "http://example.com"
+
+
+def _fake_fetch(pages: dict[str, str], fail: frozenset[str] = frozenset()) -> tuple:
+    """가짜 접속 함수를 만든다.
+
+    Args:
+        pages: 주소 → HTML(또는 robots.txt 글자) 매핑. 없는 주소는 접속 실패로 본다.
+        fail: 등록돼 있어도 일부러 실패시킬 주소 집합.
+
+    Returns:
+        (fetch 함수, 호출된 주소를 순서대로 담는 리스트). 리스트로 몇 번 불렸는지 확인한다.
+    """
+    calls: list[str] = []
+
+    def fetch(url: str) -> str:
+        calls.append(url)
+        if url in fail or url not in pages:
+            raise HomepageFetchError(f"가짜 접속 실패: {url}")
+        return pages[url]
+
+    return fetch, calls
+
+
+# ── 정상 수집 ────────────────────────────────────────────
+
+
+def test_정상_수집이면_ok와_조각을_돌려준다():
+    pages = {
+        ROOT: '<html><body><h1>회사소개</h1><p>' + ("우리는 좋은 회사입니다. " * 10) + '</p>'
+        '<a href="/about">회사소개</a></body></html>',
+        f"{ROOT}/about": (
+            "<html><body><p>" + ("기술 중심 회사입니다. " * 10) + "</p></body></html>"
+        ),
+    }
+    fetch, _calls = _fake_fetch(pages)
+
+    result = collect_homepage_fragments(ROOT, fetch=fetch)
+
+    assert result.state == "ok"
+    assert len(result.fragments) == 2
+    for frag in result.fragments:
+        assert frag["종류"] == "홈페이지"
+        assert frag["원문"]
+        assert frag["출처"].startswith(ROOT)
+
+
+def test_스킴이_없는_주소도_받는다():
+    pages = {ROOT: "<html><body><p>" + ("소개 문단입니다. " * 10) + "</p></body></html>"}
+    fetch, _calls = _fake_fetch(pages)
+
+    result = collect_homepage_fragments("example.com", fetch=fetch)
+
+    assert result.state == "ok"
+
+
+def test_홈페이지_주소가_비어있으면_none():
+    fetch, calls = _fake_fetch({})
+
+    result = collect_homepage_fragments("", fetch=fetch)
+
+    assert result.state == "none"
+    assert calls == []  # 주소가 없으면 접속 자체를 시도하지 않는다
+
+
+# ── 접속 실패 (⚠️ 못 가져옴) ─────────────────────────────
+
+
+def test_루트_접속_실패는_failed로_돌아온다():
+    fetch, _calls = _fake_fetch({}, fail=frozenset({ROOT}))
+
+    result = collect_homepage_fragments(ROOT, fetch=fetch)
+
+    assert result.state == "failed"
+    assert result.fragments == []
+    assert "접속 실패" in result.detail
+
+
+def test_낱장_페이지_실패는_전체_실패로_보지_않는다():
+    """루트는 됐는데 하위 페이지 하나가 실패해도 루트 조각은 살아남는다."""
+    pages = {
+        ROOT: "<html><body><p>" + ("루트 소개 문단입니다. " * 10) + "</p>"
+        '<a href="/about">회사소개</a></body></html>',
+    }
+    fetch, _calls = _fake_fetch(pages, fail=frozenset({f"{ROOT}/about"}))
+
+    result = collect_homepage_fragments(ROOT, fetch=fetch)
+
+    assert result.state == "ok"
+    assert len(result.fragments) == 1
+
+
+# ── robots.txt 금지 ──────────────────────────────────────
+
+
+def test_robots_금지_경로는_건너뛴다():
+    pages = {
+        ROOT: "<html><body><p>" + ("루트 소개 문단입니다. " * 10) + "</p>"
+        '<a href="/about">회사소개</a></body></html>',
+        f"{ROOT}/robots.txt": "User-agent: *\nDisallow: /about\n",
+        f"{ROOT}/about": (
+            "<html><body><p>" + ("금지된 페이지입니다. " * 10) + "</p></body></html>"
+        ),
+    }
+    fetch, calls = _fake_fetch(pages)
+
+    result = collect_homepage_fragments(ROOT, fetch=fetch)
+
+    assert result.state == "ok"
+    assert all("/about" not in frag["출처"] for frag in result.fragments)
+    assert f"{ROOT}/about" not in calls  # 금지된 페이지는 아예 요청하지 않는다
+
+
+def test_robots_txt를_못_가져오면_허용으로_본다():
+    """robots.txt가 없는 사이트가 대부분이므로, 못 가져온 것을 금지로 해석하지 않는다."""
+    pages = {
+        ROOT: "<html><body><p>" + ("루트 소개 문단입니다. " * 10) + "</p></body></html>",
+    }
+    fetch, _calls = _fake_fetch(pages)  # robots.txt 라우트를 아예 등록하지 않음 = 접속 실패
+
+    result = collect_homepage_fragments(ROOT, fetch=fetch)
+
+    assert result.state == "ok"
+
+
+# ── 상한 ─────────────────────────────────────────────────
+
+
+def test_최대_페이지_수를_넘지_않는다():
+    links = "".join(f'<a href="/page{i}">페이지{i}</a>' for i in range(20))
+    pages = {ROOT: f"<html><body><p>루트</p>{links}</body></html>"}
+    for i in range(20):
+        pages[f"{ROOT}/page{i}"] = (
+            "<html><body><p>" + (f"페이지{i} 내용입니다. " * 10) + "</p></body></html>"
+        )
+    fetch, calls = _fake_fetch(pages)
+
+    result = collect_homepage_fragments(ROOT, fetch=fetch)
+
+    page_calls = [c for c in calls if not c.endswith("robots.txt")]
+    assert len(page_calls) <= MAX_PAGES
+    assert len(result.fragments) <= MAX_PAGES
+
+
+def test_전체_글자수_상한을_넘지_않는다():
+    """페이지마다 MAX_CHARS_PER_PAGE에 가깝게 채워 실제로 상한에 걸리는지 본다."""
+
+    def page_html(tag: str) -> str:
+        return f"<html><body><p>{(tag + '내용 ') * 800}</p></body></html>"  # 3000자 훌쩍 넘음
+
+    links = "".join(f'<a href="/p{i}">페이지{i}</a>' for i in range(5))
+    pages = {ROOT: f"<html><body><p>{('루트내용 ') * 800}</p>{links}</body></html>"}
+    for i in range(5):
+        pages[f"{ROOT}/p{i}"] = page_html(f"고유{i}")
+    fetch, _calls = _fake_fetch(pages)
+
+    result = collect_homepage_fragments(ROOT, fetch=fetch)
+
+    total = sum(len(f["원문"]) for f in result.fragments)
+    assert total <= MAX_TOTAL_CHARS
+    # 상한 «근처»까지는 채웠는지 — 그냥 우연히 안 넘긴 게 아니라 실제로 잘랐는지 확인
+    assert total > MAX_TOTAL_CHARS - MAX_CHARS_PER_PAGE
+
+
+# ── 빈 페이지 ─────────────────────────────────────────────
+
+
+def test_빈_페이지면_none으로_돌아온다():
+    pages = {ROOT: "<html><body><script>var x = 1;</script></body></html>"}
+    fetch, _calls = _fake_fetch(pages)
+
+    result = collect_homepage_fragments(ROOT, fetch=fetch)
+
+    assert result.state == "none"
+    assert result.fragments == []
+
+
+# ── HTML 태그 제거 ────────────────────────────────────────
+
+
+def test_HTML_태그와_스크립트를_제거한다():
+    raw = (
+        "<html><head><style>body{color:red}</style></head>"
+        "<body><h1>제목</h1><p>본문 &amp; 내용</p>"
+        "<script>alert('x')</script></body></html>"
+    )
+
+    text = strip_html(raw)
+
+    assert "<" not in text
+    assert "script" not in text.lower()
+    assert "color:red" not in text
+    assert "제목" in text
+    assert "본문 & 내용" in text
+
+
+# ── 중복 제거 ─────────────────────────────────────────────
+
+
+def test_같은_내용은_중복_제거한다():
+    """서로 다른 두 주소가 완전히 같은 본문을 돌려주면 조각은 하나만 남는다."""
+    mirrored = "<html><body><p>" + ("완전히 같은 문단입니다. " * 10) + "</p></body></html>"
+    pages = {
+        # 루트 자체 문구는 MIN_FRAGMENT_CHARS보다 짧게 둬 루트가 조각으로 안 잡히게 한다
+        ROOT: '<html><body><p>루트.</p>'
+        '<a href="/page-a">A</a><a href="/page-b">B</a></body></html>',
+        f"{ROOT}/page-a": mirrored,
+        f"{ROOT}/page-b": mirrored,
+    }
+    fetch, _calls = _fake_fetch(pages)
+
+    result = collect_homepage_fragments(ROOT, fetch=fetch)
+
+    assert len(result.fragments) == 1
+    assert result.fragments[0]["출처"] in (f"{ROOT}/page-a", f"{ROOT}/page-b")
+
+
+# ── 우선순위 ─────────────────────────────────────────────
+
+
+def test_회사소개_페이지를_우선한다():
+    links = (
+        '<a href="/random1">아무거나1</a>'
+        '<a href="/about">회사소개</a>'
+        '<a href="/random2">아무거나2</a>'
+    )
+    pages = {ROOT: f"<html><body><p>루트</p>{links}</body></html>"}
+    for path in ("random1", "random2", "about"):
+        pages[f"{ROOT}/{path}"] = (
+            "<html><body><p>" + (f"{path} 내용입니다. " * 10) + "</p></body></html>"
+        )
+    fetch, calls = _fake_fetch(pages)
+
+    collect_homepage_fragments(ROOT, fetch=fetch)
+
+    page_calls = [c for c in calls if not c.endswith("robots.txt")]
+    # 루트(0) 다음으로 /about이 /random1·/random2보다 먼저 불려야 한다.
+    assert page_calls.index(f"{ROOT}/about") < page_calls.index(f"{ROOT}/random1")
+    assert page_calls.index(f"{ROOT}/about") < page_calls.index(f"{ROOT}/random2")
+
+
+# ── 확장자 필터 ───────────────────────────────────────────
+
+
+def test_문서_확장자_링크는_따라가지_않는다():
+    pages = {
+        ROOT: "<html><body><p>" + ("루트 소개 문단입니다. " * 10) + "</p>"
+        '<a href="/brochure.pdf">회사소개서</a></body></html>',
+    }
+    fetch, calls = _fake_fetch(pages)
+
+    collect_homepage_fragments(ROOT, fetch=fetch)
+
+    assert f"{ROOT}/brochure.pdf" not in calls
+
+
+# ── 인증서 이름 불일치 우회 (C안, 문제로그 P-46) ──────────
+#
+# 진짜 접속 없이, fetch·lookup_cert_names를 전부 가짜로 주입해 시험한다.
+
+
+def test_인증서_이름이_같은_회사면_그_이름으로_재시도해_성공한다():
+    """로보스타 사례 — robostar.co.kr 인증서엔 www.robostar.com 이 적혀 있다.
+
+    핵심 이름("robostar")이 같으므로 그 이름으로 재시도해 성공해야 한다.
+    """
+    original = "http://robostar.co.kr"
+    retried_url = "http://www.robostar.com"
+    pages = {
+        retried_url: "<html><body><p>" + ("로보스타 소개입니다. " * 10) + "</p></body></html>",
+    }
+
+    def fetch(url: str) -> str:
+        if url == original:
+            raise HomepageCertNameMismatchError(
+                "인증서 이름 불일치: robostar.co.kr", host="robostar.co.kr"
+            )
+        if url in pages:
+            return pages[url]
+        raise HomepageFetchError(f"가짜 접속 실패: {url}")
+
+    def lookup_cert_names(_url: str) -> list[str]:
+        return ["www.robostar.com", "robostar.com"]
+
+    result = collect_homepage_fragments(
+        original, fetch=fetch, lookup_cert_names=lookup_cert_names
+    )
+
+    assert result.state == "ok"
+    assert result.fragments[0]["출처"] == retried_url  # 출처는 «실제로 읽은 주소»
+    assert original in result.detail  # 원래 주소가 기록에 남는다
+    assert retried_url in result.detail
+
+
+def test_인증서_이름이_다른_회사면_재시도하지_않고_실패로_남는다():
+    """하이브 사례 — hiveoil.co.kr 인증서엔 호스팅 업체 도메인 realserver2.com 이 적혀 있다.
+
+    핵심 이름이 다르므로(hiveoil ≠ realserver2) 절대 따라가면 안 된다. ★ 가장 중요한 시험.
+    """
+    original = "http://hiveoil.co.kr"
+
+    def fetch(url: str) -> str:
+        if url == original:
+            raise HomepageCertNameMismatchError(
+                "인증서 이름 불일치: hiveoil.co.kr", host="hiveoil.co.kr"
+            )
+        raise AssertionError(f"따라가면 안 되는 주소로 접속을 시도함: {url}")
+
+    def lookup_cert_names(_url: str) -> list[str]:
+        return ["realserver2.com"]
+
+    result = collect_homepage_fragments(
+        original, fetch=fetch, lookup_cert_names=lookup_cert_names
+    )
+
+    assert result.state == "failed"
+    assert result.fragments == []
+
+
+def test_이름_불일치가_아닌_인증서_오류는_재시도하지_않는다():
+    """만료·자체서명 등은 일반 HomepageFetchError로 온다 — 이름 조회 자체를 시도하면 안 된다."""
+    original = "http://expired.example.com"
+    lookup_calls: list[str] = []
+
+    def fetch(_url: str) -> str:
+        raise HomepageFetchError("인증서가 만료됨(이름 불일치 아님)")
+
+    def lookup_cert_names(url: str) -> list[str]:
+        lookup_calls.append(url)
+        return ["expired.example.com"]
+
+    result = collect_homepage_fragments(
+        original, fetch=fetch, lookup_cert_names=lookup_cert_names
+    )
+
+    assert result.state == "failed"
+    assert lookup_calls == []  # 이름 조회 자체를 시도하지 않았다
+
+
+def test_재시도도_실패하면_failed로_남는다():
+    original = "http://robostar.co.kr"
+
+    def fetch(url: str) -> str:
+        if url == original:
+            raise HomepageCertNameMismatchError(
+                "인증서 이름 불일치", host="robostar.co.kr"
+            )
+        raise HomepageFetchError(f"재시도 주소 접속도 실패: {url}")
+
+    def lookup_cert_names(_url: str) -> list[str]:
+        return ["www.robostar.com"]
+
+    result = collect_homepage_fragments(
+        original, fetch=fetch, lookup_cert_names=lookup_cert_names
+    )
+
+    assert result.state == "failed"
+    assert result.fragments == []
+
+
+def test_재시도는_한_번만_일어난다():
+    original = "http://robostar.co.kr"
+    retried_url = "http://www.robostar.com"
+    calls: list[str] = []
+
+    def fetch(url: str) -> str:
+        calls.append(url)
+        if url == original:
+            raise HomepageCertNameMismatchError(
+                "인증서 이름 불일치", host="robostar.co.kr"
+            )
+        raise HomepageFetchError("재시도도 실패")
+
+    def lookup_cert_names(_url: str) -> list[str]:
+        return ["www.robostar.com"]
+
+    collect_homepage_fragments(original, fetch=fetch, lookup_cert_names=lookup_cert_names)
+
+    assert calls.count(original) == 1
+    assert calls.count(retried_url) == 1  # 재시도는 정확히 1번만
+
+
+def test_www_접두사_차이만_있어도_같은_회사로_본다():
+    original = "http://www.example.co.kr"
+    retried_url = "http://example.co.kr"
+    pages = {
+        retried_url: "<html><body><p>" + ("예시 회사 소개입니다. " * 10) + "</p></body></html>",
+    }
+
+    def fetch(url: str) -> str:
+        if url == original:
+            raise HomepageCertNameMismatchError(
+                "인증서 이름 불일치", host="www.example.co.kr"
+            )
+        if url in pages:
+            return pages[url]
+        raise HomepageFetchError(f"가짜 접속 실패: {url}")
+
+    def lookup_cert_names(_url: str) -> list[str]:
+        return ["example.co.kr"]
+
+    result = collect_homepage_fragments(
+        original, fetch=fetch, lookup_cert_names=lookup_cert_names
+    )
+
+    assert result.state == "ok"
+    assert result.fragments[0]["출처"] == retried_url
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

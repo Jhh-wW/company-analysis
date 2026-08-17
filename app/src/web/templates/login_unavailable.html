@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}로그인 설정이 필요합니다 · 기업분석{% endblock %}
+
+{% block content %}
+<div class="card" data-login-unavailable="true">
+  <div class="stopped-icon">ℹ️</div>
+  <h1>아직 로그인을 사용할 수 없습니다</h1>
+  <p class="lede">
+    현재 서버에는 구글 로그인이 설정되지 않았습니다.
+    관리자 화면을 사용하려면 서버 관리자에게 로그인 설정을 요청해주세요.
+  </p>
+  <p class="muted">
+    로그인 설정값이나 계정 정보는 이 화면에 표시하지 않습니다.
+  </p>
+  <div class="btn-row" style="margin-top:20px">
+    <a class="btn" href="/">처음으로</a>
+  </div>
+</div>
+{% endblock %}

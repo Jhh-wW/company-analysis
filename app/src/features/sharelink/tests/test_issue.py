@@ -1,0 +1,140 @@
+"""열쇠 링크 «발급»을 못 박는다 (문제로그 P-96).
+
+★ 여기서 지키는 것 셋
+  ① 열쇠를 **추측할 수 없다** — 예측 가능하면 남의 링크 예산을 쓸 수 있다
+  ② 주소가 **배포 뒤에도 맞는다** — 상수로 박으면 배포 후 localhost를 가리킨다
+  ③ QR이 **HTML 안에 그대로 들어간다** — XML 선언이 섞이면 화면이 깨진다
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from src.features.sharelink.constants import KEY_HEX_CHARS
+from src.features.sharelink.issue import base_url_of, link_url, new_key, qr_svg
+from src.features.sharelink.logic import is_valid_key
+
+
+# ══════════════════════════════════════════════════════════
+# ① 열쇠 — 추측할 수 없어야 한다
+# ══════════════════════════════════════════════════════════
+
+
+def test_만든_열쇠는_유효한_모양이다():
+    assert is_valid_key(new_key())
+
+
+def test_열쇠_길이가_정해진_대로다():
+    assert len(new_key()) == KEY_HEX_CHARS
+
+
+def test_만들_때마다_다르다():
+    """★ 겹치면 «남의 링크 예산»을 쓰게 된다."""
+    열쇠들 = {new_key() for _ in range(200)}
+
+    assert len(열쇠들) == 200
+
+
+# ══════════════════════════════════════════════════════════
+# ② 주소 — 배포한 뒤에도 맞아야 한다
+# ══════════════════════════════════════════════════════════
+
+
+def test_주소를_만든다():
+    assert link_url("https://example.com", "abcd1234") == "https://example.com/k/abcd1234"
+
+
+def test_끝에_슬래시가_있어도_안_깨진다():
+    """★ 안 떼면 `//k/...`가 되어 주소가 깨진다."""
+    assert link_url("https://example.com/", "abcd1234") == "https://example.com/k/abcd1234"
+
+
+@pytest.mark.parametrize(
+    "요청주소, 기대",
+    [
+        ("http://localhost:8000/admin/access", "http://localhost:8000"),
+        ("https://내도구.com/admin/access?x=1", "https://내도구.com"),
+        ("https://내도구.com", "https://내도구.com"),
+    ],
+)
+def test_지금_접속한_주소에서_서비스_주소를_뽑는다(요청주소: str, 기대: str):
+    """★ 상수로 박으면 **배포한 뒤 링크가 localhost를 가리킨다.**
+
+    지금 접속한 주소에서 뽑으면 배포하든 로컬이든 저절로 맞는다.
+    """
+    assert base_url_of(요청주소) == 기대
+
+
+@pytest.mark.parametrize("이상한주소", ["", "그냥글자", "/admin/access"])
+def test_주소를_못_뽑으면_빈_값(이상한주소: str):
+    """못 뽑았는데 아무 값이나 만들면 «틀린 링크»를 발급하게 된다."""
+    assert base_url_of(이상한주소) == ""
+
+
+# ══════════════════════════════════════════════════════════
+# ③ QR — HTML 안에 그대로 들어가야 한다
+# ══════════════════════════════════════════════════════════
+
+
+def test_QR이_SVG_글자로_나온다():
+    svg = qr_svg("https://example.com/k/abcd1234")
+
+    assert svg.startswith("<svg")
+    assert svg.rstrip().endswith("</svg>")
+
+
+def test_QR에_XML_선언이_없다():
+    """★ HTML 한가운데에 `<?xml …?>`가 들어가면 브라우저가 문서를 잘못 읽는다."""
+    assert "<?xml" not in qr_svg("https://example.com/k/abcd1234")
+
+
+def test_주소가_길어도_QR이_만들어진다():
+    """배포 주소가 길 수 있다 — 여기서 터지면 발급 자체가 막힌다."""
+    긴주소 = "https://" + "a" * 60 + ".example.com/k/" + "b" * 32
+
+    assert qr_svg(긴주소).startswith("<svg")
+
+
+def test_다른_주소는_다른_QR이다():
+    """★ 같은 그림이 나오면 어느 회사 링크인지 구별이 안 된다."""
+    가 = qr_svg("https://example.com/k/1111111111111111")
+    나 = qr_svg("https://example.com/k/2222222222222222")
+
+    assert 가 != 나
+
+
+# ══════════════════════════════════════════════════════════
+# ④ 「배포된 주소인가」 — 죽은 링크를 포폴에 넣지 않게
+# ══════════════════════════════════════════════════════════
+
+
+@pytest.mark.parametrize(
+    "주소",
+    [
+        "http://localhost:8000/k/abc",       # 내 컴퓨터
+        "http://127.0.0.1:8000/k/abc",       # ★ 글자만 보면 놓친다
+        "http://testserver/k/abc",
+        "http://내도구.com/k/abc",            # https가 아니다
+        "",
+        "그냥글자",
+    ],
+)
+def test_배포_안_된_주소는_경고_대상이다(주소: str):
+    """★ 이 주소로 발급해 포폴에 넣으면 인사팀에게는 «안 열리는 링크»가 된다.
+
+    아무것도 없는 것보다 나쁘다 — 「만들었다는데 안 되네」가 되기 때문이다.
+    """
+    from src.features.sharelink.issue import looks_deployed
+
+    assert not looks_deployed(주소)
+
+
+@pytest.mark.parametrize(
+    "주소",
+    ["https://내도구.com/k/abc", "https://xyz.onrender.com/k/abc"],
+)
+def test_배포된_주소는_경고_안_한다(주소: str):
+    """★ 반대 방향 — 멀쩡한 주소에 매번 경고하면 아무도 안 읽게 된다."""
+    from src.features.sharelink.issue import looks_deployed
+
+    assert looks_deployed(주소)

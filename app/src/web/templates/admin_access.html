@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% block title %}초대·링크 관리 · 기업분석{% endblock %}
+
+{# 누가 유료 기능을 쓸 수 있는지 관리하는 화면 (문제로그 P-96).
+
+   ★ 이 화면이 없으면 기능이 있어도 «쓸 방법»이 없다 — DB에 손으로 넣어야 했다.
+   ★ 권한 검사는 라우트(require_admin)가 이미 했다. 여기서 다시 안 본다.
+   ★ 「최악의 하루 지출」을 맨 위에 크게 보여준다 —
+     전체 상한을 두지 않기로 했으므로(사용자 결정), **뿌린 개수가 곧 예산**이다.
+     그 숫자를 안 보여주면 얼마가 나갈지 모르는 채로 두는 셈이 된다. #}
+
+{% block content %}
+
+<div class="card">
+  <h1 style="font-size:19px;margin-bottom:10px">오늘 나간 돈</h1>
+  <div class="hero-nums">
+    <div><b>{{ "{:,.0f}".format(spent_today) }}원</b><span>오늘 실제 지출</span></div>
+    <div><b>{{ links|length }}개</b><span>살아 있는 링크</span></div>
+    <div><b>{{ members|length }}명</b><span>초대한 친구</span></div>
+  </div>
+
+  {# ⚠️ 이 경고를 빼지 않는다 — 사용자가 「전체 상한 없음」을 고른 결과다.
+     위험을 없앤 게 아니라 «본인이 감수하기로» 한 것이므로, 숫자를 계속 보여준다. #}
+  <div class="warn-line" style="margin-top:14px">
+    <span>⚠️</span>
+    <span>
+      <b>전체 상한이 없습니다.</b>
+      지금 구성에서 <strong>최악의 하루 지출은 {{ "{:,.0f}".format(worst_case_krw) }}원</strong>입니다
+      — 링크 {{ links|length }}개 × 3,000원 + 친구 {{ members|length }}명 × 1,000원 + 관리자 5,000원.
+      <br>줄이려면 <strong>안 쓰는 링크를 닫으세요.</strong>
+    </span>
+  </div>
+</div>
+
+{# ══════════════════════════════════════════════════════════
+   회사별 열쇠 링크
+   ══════════════════════════════════════════════════════════ #}
+<div class="card">
+  <h3>회사별 링크 발급</h3>
+  <p class="muted" style="margin-top:6px">
+    포트폴리오에 넣을 링크입니다. 인사팀이 <strong>로그인 없이</strong> 눌러볼 수 있고,
+    <strong>누가 언제 열어봤는지</strong> 기록됩니다.
+  </p>
+
+  <form method="post" action="/admin/link/new" style="margin-top:14px">
+    <div class="field">
+      <label for="link_company">회사 이름<span class="req">*</span></label>
+      <input id="link_company" name="company" required placeholder="예: 카카오">
+    </div>
+    <div class="field">
+      <label for="link_job">지원 직무<span class="req">*</span></label>
+      <input id="link_job" name="job" required placeholder="예: 서비스 기획">
+    </div>
+    <div class="field">
+      <label for="link_note">메모</label>
+      <input id="link_note" name="note" placeholder="예: 하반기 공채, 3/5 지원">
+    </div>
+    <button type="submit" class="btn">링크 만들기</button>
+  </form>
+
+  {% if links %}
+  <table style="margin-top:18px">
+    <tr>
+      <th>회사 · 직무</th><th>열어봄</th><th>미리 구움</th><th></th>
+    </tr>
+    {% for link in links %}
+    <tr>
+      <td>
+        <strong>{{ link.company }}</strong><br>
+        <span class="muted">{{ link.job }}</span>
+        {% if link.note %}<br><span class="muted">{{ link.note }}</span>{% endif %}
+        <br><a href="/admin/link/{{ link.key }}">주소·QR 보기</a>
+      </td>
+      <td>
+        {% if link.opened_count %}
+          <strong>{{ link.opened_count }}회</strong><br>
+          <span class="muted">처음 {{ link.first_opened_at[:16] }}</span>
+        {% else %}
+          <span class="muted">아직 안 봄</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if link.is_baked %}⭕ 됨{% else %}<span class="muted">아직</span>{% endif %}
+      </td>
+      <td>
+        <form method="post" action="/admin/link/delete" style="display:inline">
+          <input type="hidden" name="key" value="{{ link.key }}">
+          <button type="submit" class="btn ghost">닫기</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted" style="margin-top:14px">아직 만든 링크가 없습니다.</p>
+  {% endif %}
+</div>
+
+{# ══════════════════════════════════════════════════════════
+   초대한 친구
+   ══════════════════════════════════════════════════════════ #}
+<div class="card">
+  <h3>친구 초대</h3>
+  <p class="muted" style="margin-top:6px">
+    <strong>여기 있는 사람만</strong> 구글 로그인 후 실제 조사를 할 수 있습니다
+    (하루 1,000원 = 새 회사 약 8곳).
+    <br>명단에 없으면 로그인해도 <strong>데모만</strong> 보입니다.
+  </p>
+
+  <form method="post" action="/admin/invite" style="margin-top:14px">
+    <div class="field">
+      <label for="invite_email">구글 계정 이메일<span class="req">*</span></label>
+      <input id="invite_email" name="email" type="email" required
+             placeholder="friend@gmail.com">
+    </div>
+    <div class="field">
+      <label for="invite_note">메모</label>
+      <input id="invite_note" name="note" placeholder="예: 같은 스터디">
+    </div>
+    <button type="submit" class="btn">초대하기</button>
+  </form>
+
+  {% if members %}
+  <table style="margin-top:18px">
+    <tr><th>이메일</th><th>메모</th><th>초대일</th><th></th></tr>
+    {% for m in members %}
+    <tr>
+      <td>{{ m.email }}</td>
+      <td class="muted">{{ m.note }}</td>
+      <td class="muted">{{ m.invited_at[:10] }}</td>
+      <td>
+        <form method="post" action="/admin/revoke" style="display:inline">
+          <input type="hidden" name="email" value="{{ m.email }}">
+          <button type="submit" class="btn ghost">빼기</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted" style="margin-top:14px">아직 초대한 사람이 없습니다.</p>
+  {% endif %}
+</div>
+
+<div class="btn-row">
+  <a class="btn ghost" href="/admin">관리자 화면으로</a>
+</div>
+{% endblock %}

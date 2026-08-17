@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}기업분석 도구{% endblock %}</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="{% block bodyclass %}{% endblock %}">
+  <header class="topbar">
+    <span class="brand">기업분석</span>
+    {# 지금 무엇으로 돌고 있는지 정직하게 알린다. 진짜인데 「데모」라고 쓰면 거짓말이다. #}
+    {% if is_real %}
+      <span class="tag real" title="실제 공시·뉴스를 조사합니다">실조사</span>
+    {% else %}
+      <span class="tag">데모</span>
+    {% endif %}
+    <span class="spacer"></span>
+    <a href="/">처음으로</a>
+    {% include "_auth_status.html" %}
+  </header>
+
+  <main class="wrap {% block wrapclass %}{% endblock %}">
+    {% block content %}{% endblock %}
+  </main>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

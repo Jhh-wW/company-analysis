@@ -1,0 +1,56 @@
+services:
+  - type: web
+    name: company-analysis-beta
+    runtime: docker
+    plan: starter
+    region: singapore
+    numInstances: 1
+    dockerfilePath: ./app/Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    maxShutdownDelaySeconds: 300
+    autoDeployTrigger: commit
+
+    disk:
+      name: app-data
+      mountPath: /var/data
+      sizeGB: 1
+
+    envVars:
+      # 첫 배포는 AI API 비용 없는 데모다. Render 사용료는 별도이며 관리자만 들어올 수 있다.
+      - key: PIPELINE
+        value: demo
+      - key: BETA_ADMIN_ONLY
+        value: "1"
+
+      # 재배포·재시작 뒤에도 남아야 하는 모든 기록은 영속 디스크에 둔다.
+      - key: APP_DATA_ROOT
+        value: /var/data
+      - key: STORAGE_DB_PATH
+        value: /var/data/storage.db
+      - key: OBSERVABILITY_RECORDS_PATH
+        value: /var/data/observability/runs.jsonl
+      - key: TLDEXTRACT_CACHE
+        value: /var/data/cache/tldextract
+
+      # 실제 값은 저장소에 쓰지 않고 Blueprint 생성 화면에서 직접 입력한다.
+      - key: ADMIN_EMAILS
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REDIRECT_URI
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: DART_API_KEY
+        sync: false
+      - key: NAVER_CLIENT_ID
+        sync: false
+      - key: NAVER_CLIENT_SECRET
+        sync: false
+      - key: NOTION_TOKEN
+        sync: false
+      - key: NOTION_PARENT_PAGE_ID
+        sync: false

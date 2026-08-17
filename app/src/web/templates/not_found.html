@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}회사 이름을 다시 넣어주세요 · 기업분석{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="stopped-icon">🔍</div>
+
+  {% if rejected %}
+    <h1>다른 이름으로 넣어보세요</h1>
+    <p class="lede" style="margin-bottom:14px">
+      <strong>같은 이름을 다시 넣으면 같은 회사가 나옵니다.</strong>
+      정식 법인명 · 영문명 · 옛 사명으로 바꿔서 넣어주세요.
+    </p>
+  {% else %}
+    <h1>「{{ user_input.company }}」을(를) 찾지 못했습니다</h1>
+    <p class="lede" style="margin-bottom:14px">
+      전자공시에 <strong>등록된 이름</strong>과 달라서일 수 있습니다.
+      (예: 11번가 → <strong>십일번가</strong>, 배달의민족 → <strong>우아한형제들</strong>)
+    </p>
+  {% endif %}
+
+  <div class="warn-line" style="background:var(--navy-soft);border-color:var(--navy-line);color:var(--ink-2)">
+    <span>ℹ️</span>
+    <span><b>「이 회사는 다룰 수 없다」는 뜻이 아닙니다.</b>
+    이름을 아직 못 맞춘 것뿐이에요.</span>
+  </div>
+
+  {% if exhausted %}
+    {# 상한 초과 — 여기서도 「대상 아님」 단정이 아니라 가능성 안내다 #}
+    <div class="warn-line" style="margin-top:14px">
+      <span>⚠️</span>
+      <span><b>전자공시(DART)에 없는 회사일 수 있습니다.</b>
+      공개된 재무 자료가 없으면 분석할 근거를 모을 수 없어요.</span>
+    </div>
+    <p class="muted" style="margin-top:14px">
+      이름 다시 넣기를 <strong>{{ max_retry }}번</strong> 쓰셨습니다.
+      할당량은 <strong>차감되지 않았습니다.</strong>
+    </p>
+    <div class="btn-row">
+      <a class="btn" href="/" style="line-height:1.6">처음부터 다시 하기</a>
+    </div>
+
+  {% else %}
+    {# 아직 남았다 — 직무·지역·공고는 그대로 두고 회사 이름만 다시 받는다 #}
+    <form method="post" action="/confirm" style="margin-top:16px">
+      <input type="hidden" name="job" value="{{ user_input.job }}">
+      <input type="hidden" name="region" value="{{ user_input.region }}">
+      <input type="hidden" name="posting_text" value="{{ user_input.posting_text }}">
+      <input type="hidden" name="retry" value="{{ retry + 1 }}">
+
+      <div class="field">
+        <label for="company">회사 이름 다시 넣기</label>
+        <div class="hint">
+          직무 · 지역 · 공고는 <strong>그대로 두었습니다.</strong> 회사 이름만 바꾸시면 됩니다.
+        </div>
+        <input type="text" id="company" name="company" required autocomplete="off"
+               value="{{ user_input.company }}" autofocus>
+      </div>
+
+      <button type="submit" class="btn wide">다시 찾기</button>
+    </form>
+
+    <p class="muted" style="margin-top:14px">
+      {{ max_retry - retry - 1 }}번 더 시도할 수 있습니다.
+      할당량은 <strong>차감되지 않았습니다.</strong>
+    </p>
+  {% endif %}
+</div>
+
+{% if demo_companies %}
+<div class="demo-note" style="margin-top:18px">
+  <div class="t">데모에서 되는 회사</div>
+  <div class="chips">
+    {% for c in demo_companies[:24] %}
+      <button type="button" class="chip {% if c.is_report %}report{% endif %}"
+              data-company="{{ c.company }}">{{ c.company }}</button>
+    {% endfor %}
+  </div>
+</div>
+<script>
+  // 칩을 누르면 위 입력칸에 회사 이름을 넣어준다.
+  document.querySelectorAll('.chip').forEach(function (chip) {
+    chip.addEventListener('click', function () {
+      var box = document.getElementById('company');
+      if (!box) { return; }
+      box.value = chip.dataset.company || '';
+      box.focus();
+    });
+  });
+</script>
+{% endif %}
+{% endblock %}

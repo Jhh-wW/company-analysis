@@ -1,0 +1,437 @@
+"""캐시 1층·2층·별칭 시험.
+
+★ 가장 중요한 시험 묶음은 「다른 회사가 안 섞이는지」다 — 캐시가 틀린 회사의
+  보고서를 돌려주면 최악의 사고이기 때문이다(팀장 지시).
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+from pathlib import Path
+
+from src.features.pipeline.port import Grade, Report
+from src.features.provenance.sources import Source, SourceKind
+from src.features.storage import cache, db
+
+
+def _report(company: str = "가나다전자", grade: Grade = Grade.COMPLETE) -> Report:
+    return Report(
+        company=company,
+        job="영업",
+        corp_type="상장사",
+        grade=grade,
+        sections=[],
+        generated_at="2026-08-15",
+    )
+
+
+def _report_with_news(published_at: str) -> Report:
+    return Report(
+        company="가나다전자",
+        job="영업",
+        corp_type="상장사",
+        grade=Grade.COMPLETE,
+        sections=[],
+        citations=[
+            Source(
+                number=1,
+                kind=SourceKind.NEWS,
+                label="가나다전자 관련 기사",
+                published_at=published_at,
+                domain="example.co.kr",
+            )
+        ],
+        generated_at="2026-08-15",
+    )
+
+
+# ══════════════════════════════════════════════════════════
+# 정규화 · 지문
+# ══════════════════════════════════════════════════════════
+
+
+def test_normalize_job_collapses_whitespace_and_case() -> None:
+    assert cache.normalize_job("  백엔드   개발자  ") == cache.normalize_job("백엔드 개발자")
+    assert cache.normalize_job("Backend Engineer") == cache.normalize_job("backend  engineer")
+
+
+def test_posting_fingerprint_ignores_order_and_spacing() -> None:
+    a = cache.posting_fingerprint(["3년 이상 경력", "  관련 전공  우대 "])
+    b = cache.posting_fingerprint(["관련 전공 우대", "3년 이상 경력"])
+    assert a == b
+
+
+def test_posting_fingerprint_differs_for_different_content() -> None:
+    a = cache.posting_fingerprint(["3년 이상 경력"])
+    b = cache.posting_fingerprint(["5년 이상 경력"])
+    assert a != b
+
+
+# ══════════════════════════════════════════════════════════
+# 1층 — 저장·조회·미스
+# ══════════════════════════════════════════════════════════
+
+
+def test_layer1_save_then_hit(tmp_path: Path) -> None:
+    report = _report()
+    with db.connect(tmp_path / "storage.db") as conn:
+        cache.save_layer1(
+            conn,
+            corp_id="CORP-001",
+            job="영업",
+            requirements=["3년 이상 경력"],
+            report=report,
+            fiscal_year=2025,
+        )
+        hit = cache.get_layer1_hit(
+            conn,
+            corp_id="CORP-001",
+            job="영업",
+            requirements=["3년 이상 경력"],
+            current_fiscal_year=2025,
+        )
+    assert hit == report
+
+
+def test_layer1_has_candidates_before_fingerprint_known(tmp_path: Path) -> None:
+    """4번(캐시 확인)은 지문 없이 회사×직무만으로 "후보가 있는지"만 본다."""
+    with db.connect(tmp_path / "storage.db") as conn:
+        assert cache.has_layer1_candidates(conn, corp_id="CORP-001", job="영업") is False
+        cache.save_layer1(
+            conn,
+            corp_id="CORP-001",
+            job="영업",
+            requirements=["3년 이상 경력"],
+            report=_report(),
+            fiscal_year=2025,
+        )
+        assert cache.has_layer1_candidates(conn, corp_id="CORP-001", job="영업") is True
+
+
+def test_layer1_miss_when_posting_fingerprint_differs(tmp_path: Path) -> None:
+    """같은 회사·직무여도 «다른 공고»면 미스 — 캐시 키에 지문이 들어간 이유(정본 §★)."""
+    with db.connect(tmp_path / "storage.db") as conn:
+        cache.save_layer1(
+            conn,
+            corp_id="CORP-001",
+            job="영업",
+            requirements=["3년 이상 경력"],
+            report=_report(),
+            fiscal_year=2025,
+        )
+        hit = cache.get_layer1_hit(
+            conn,
+            corp_id="CORP-001",
+            job="영업",
+            requirements=["전혀 다른 요구역량"],
+            current_fiscal_year=2025,
+        )
+    assert hit is None
+
+
+def test_layer1_never_leaks_across_different_companies(tmp_path: Path) -> None:
+    """★ 가장 중요한 시험 — 회사명이 같아도(계열사 등) corp_id가 다르면 절대 안 섞인다."""
+    same_looking_report_a = _report(company="가나다전자")
+    same_looking_report_b = _report(company="가나다전자")  # 이름은 같은데 다른 법인
+    requirements = ["3년 이상 경력"]
+
+    with db.connect(tmp_path / "storage.db") as conn:
+        cache.save_layer1(
+            conn,
+            corp_id="CORP-A",
+            job="영업",
+            requirements=requirements,
+            report=same_looking_report_a,
+            fiscal_year=2025,
+        )
+        cache.save_layer1(
+            conn,
+            corp_id="CORP-B",
+            job="영업",
+            requirements=requirements,
+            report=same_looking_report_b,
+            fiscal_year=2025,
+        )
+
+        hit_a = cache.get_layer1_hit(
+            conn, corp_id="CORP-A", job="영업", requirements=requirements,
+            current_fiscal_year=2025,
+        )
+        hit_b = cache.get_layer1_hit(
+            conn, corp_id="CORP-B", job="영업", requirements=requirements,
+            current_fiscal_year=2025,
+        )
+        miss_c = cache.get_layer1_hit(
+            conn, corp_id="CORP-C", job="영업", requirements=requirements,
+            current_fiscal_year=2025,
+        )
+
+    assert hit_a is not None and hit_a.company == "가나다전자"
+    assert hit_b is not None and hit_b.company == "가나다전자"
+    assert hit_a is not hit_b  # 서로 다른 저장물이다(우연히 값이 같아 보일 뿐)
+    assert miss_c is None  # 저장한 적 없는 회사는 당연히 미스
+
+
+def test_layer1_save_twice_same_key_updates_report(tmp_path: Path) -> None:
+    """같은 키로 두 번 저장 — 중복 행이 아니라 덮어써야 한다."""
+    requirements = ["3년 이상 경력"]
+    with db.connect(tmp_path / "storage.db") as conn:
+        cache.save_layer1(
+            conn, corp_id="CORP-001", job="영업", requirements=requirements,
+            report=_report(grade=Grade.PARTIAL), fiscal_year=2025,
+        )
+        cache.save_layer1(
+            conn, corp_id="CORP-001", job="영업", requirements=requirements,
+            report=_report(grade=Grade.COMPLETE), fiscal_year=2025,
+        )
+        count = conn.execute(
+            "SELECT COUNT(*) AS n FROM layer1_cache "
+            "WHERE corp_id = 'CORP-001' AND job_key = ?",
+            (cache.normalize_job("영업"),),
+        ).fetchone()["n"]
+        hit = cache.get_layer1_hit(
+            conn, corp_id="CORP-001", job="영업", requirements=requirements,
+            current_fiscal_year=2025,
+        )
+    assert count == 1
+    assert hit is not None
+    assert hit.grade is Grade.COMPLETE
+
+
+# ══════════════════════════════════════════════════════════
+# 1층 — O9 신선도
+# ══════════════════════════════════════════════════════════
+
+
+def test_layer1_stale_when_fiscal_year_changed(tmp_path: Path) -> None:
+    requirements = ["3년 이상 경력"]
+    with db.connect(tmp_path / "storage.db") as conn:
+        cache.save_layer1(
+            conn, corp_id="CORP-001", job="영업", requirements=requirements,
+            report=_report(), fiscal_year=2024,
+        )
+        hit = cache.get_layer1_hit(
+            conn, corp_id="CORP-001", job="영업", requirements=requirements,
+            current_fiscal_year=2025,  # 사업연도가 바뀌었다
+        )
+    assert hit is None
+
+
+def test_layer1_treated_as_stale_when_fiscal_year_unknown(tmp_path: Path) -> None:
+    """current_fiscal_year를 안 넘기면(모르면) 신선하다고 우기지 않는다(보수적 기본값)."""
+    requirements = ["3년 이상 경력"]
+    with db.connect(tmp_path / "storage.db") as conn:
+        cache.save_layer1(
+            conn, corp_id="CORP-001", job="영업", requirements=requirements,
+            report=_report(), fiscal_year=2025,
+        )
+        hit = cache.get_layer1_hit(
+            conn, corp_id="CORP-001", job="영업", requirements=requirements,
+            current_fiscal_year=None,
+        )
+    assert hit is None
+
+
+def test_layer1_stale_when_news_citation_older_than_3_years(tmp_path: Path) -> None:
+    requirements = ["3년 이상 경력"]
+    old_news_report = _report_with_news(published_at="2020-01-01")
+    with db.connect(tmp_path / "storage.db") as conn:
+        cache.save_layer1(
+            conn, corp_id="CORP-001", job="영업", requirements=requirements,
+            report=old_news_report, fiscal_year=2025,
+        )
+        hit = cache.get_layer1_hit(
+            conn, corp_id="CORP-001", job="영업", requirements=requirements,
+            current_fiscal_year=2025, today=dt.date(2026, 8, 15),
+        )
+    assert hit is None
+
+
+def test_layer1_fresh_when_news_citation_within_3_years(tmp_path: Path) -> None:
+    requirements = ["3년 이상 경력"]
+    recent_news_report = _report_with_news(published_at="2025-06-01")
+    with db.connect(tmp_path / "storage.db") as conn:
+        cache.save_layer1(
+            conn, corp_id="CORP-001", job="영업", requirements=requirements,
+            report=recent_news_report, fiscal_year=2025,
+        )
+        hit = cache.get_layer1_hit(
+            conn, corp_id="CORP-001", job="영업", requirements=requirements,
+            current_fiscal_year=2025, today=dt.date(2026, 8, 15),
+        )
+    assert hit is not None
+
+
+# ══════════════════════════════════════════════════════════
+# 1층 — 보관 상한 (5개, 축출 우선순위)
+# ══════════════════════════════════════════════════════════
+
+
+def test_layer1_evicts_oldest_beyond_cap(tmp_path: Path) -> None:
+    with db.connect(tmp_path / "storage.db") as conn:
+        for i in range(cache.LAYER1_MAX_ENTRIES_PER_JOB + 2):
+            cache.save_layer1(
+                conn,
+                corp_id="CORP-001",
+                job="영업",
+                requirements=[f"요구역량-{i}"],
+                report=_report(),
+                fiscal_year=2025,
+                now=dt.datetime(2026, 1, 1) + dt.timedelta(minutes=i),
+            )
+        count = conn.execute(
+            "SELECT COUNT(*) AS n FROM layer1_cache WHERE corp_id = 'CORP-001'"
+        ).fetchone()["n"]
+        # 가장 먼저 저장한(가장 오래된) 지문 두 개는 지워졌어야 한다.
+        earliest_hit = cache.get_layer1_hit(
+            conn, corp_id="CORP-001", job="영업", requirements=["요구역량-0"],
+            current_fiscal_year=2025,
+        )
+        latest_hit = cache.get_layer1_hit(
+            conn, corp_id="CORP-001", job="영업",
+            requirements=[f"요구역량-{cache.LAYER1_MAX_ENTRIES_PER_JOB + 1}"],
+            current_fiscal_year=2025,
+        )
+    assert count == cache.LAYER1_MAX_ENTRIES_PER_JOB
+    assert earliest_hit is None
+    assert latest_hit is not None
+
+
+def test_layer1_eviction_prefers_stale_fiscal_year_first(tmp_path: Path) -> None:
+    """상한을 넘기면 «가장 오래된 것»이 아니라 «사업연도가 다른 것»을 먼저 지운다.
+
+    시나리오 — 신선(2025)한 항목 여러 개 사이에 옛 사업연도(2024) 하나를 끼워
+    넣는다. 옛 사업연도 항목은 «가장 오래된» 것이 아니다(나이는 중간). 단순
+    "오래된 순" 축출이었다면 가장 먼저 저장한 신선한 항목이 지워져야 하지만,
+    정본(§보관 상한)은 "사업연도가 바뀐 것"을 우선 축출하라고 한다.
+    """
+    cap = cache.LAYER1_MAX_ENTRIES_PER_JOB
+    base = dt.datetime(2026, 1, 1)
+
+    with db.connect(tmp_path / "storage.db") as conn:
+        # 가장 오래된 신선한 항목 — 단순 "오래된 순"이면 이게 축출 1순위여야 한다.
+        cache.save_layer1(
+            conn, corp_id="CORP-001", job="영업", requirements=["신선-가장오래됨"],
+            report=_report(), fiscal_year=2025, now=base,
+        )
+        for i in range(1, cap - 1):
+            cache.save_layer1(
+                conn, corp_id="CORP-001", job="영업", requirements=[f"신선-{i}"],
+                report=_report(), fiscal_year=2025, now=base + dt.timedelta(minutes=i),
+            )
+        # 옛 사업연도 — 나이는 중간이지만 사업연도가 다르다. 여기까지 총 cap개(상한 안).
+        cache.save_layer1(
+            conn, corp_id="CORP-001", job="영업", requirements=["옛-사업연도"],
+            report=_report(), fiscal_year=2024, now=base + dt.timedelta(minutes=cap),
+        )
+        # cap+1번째 — 신선한 항목을 하나 더 넣어 상한을 넘긴다(축출 발생).
+        cache.save_layer1(
+            conn, corp_id="CORP-001", job="영업", requirements=["신선-최신"],
+            report=_report(), fiscal_year=2025, now=base + dt.timedelta(minutes=cap + 1),
+        )
+
+        stale_hit = cache.get_layer1_hit(
+            conn, corp_id="CORP-001", job="영업", requirements=["옛-사업연도"],
+            current_fiscal_year=2025,
+        )
+        oldest_fresh_hit = cache.get_layer1_hit(
+            conn, corp_id="CORP-001", job="영업", requirements=["신선-가장오래됨"],
+            current_fiscal_year=2025,
+        )
+
+    assert stale_hit is None  # 사업연도가 다른 항목이 먼저 축출됐다
+    assert oldest_fresh_hit is not None  # 신선한 항목은(더 오래됐어도) 살아남는다
+
+
+# ══════════════════════════════════════════════════════════
+# 2층 — 회사 단위 수집 자료
+# ══════════════════════════════════════════════════════════
+
+
+def test_layer2_save_and_load_roundtrip_preserves_int_keys(tmp_path: Path) -> None:
+    fragments = {
+        1: {"종류": "공시", "원문": "매출은 전년 대비 늘었다", "출처": ""},
+        2: {"종류": "뉴스", "원문": "회사가 신사업에 진출했다", "출처": "example.co.kr"},
+    }
+    with db.connect(tmp_path / "storage.db") as conn:
+        cache.save_layer2(
+            conn,
+            corp_id="CORP-001",
+            fragments=fragments,
+            filing={"report_nm": "사업보고서", "rcept_no": "20260315000123"},
+            cell_judgments={"1": True, "4-1": False},
+            fiscal_year=2025,
+        )
+        loaded = cache.get_layer2(conn, "CORP-001")
+
+    assert loaded is not None
+    assert loaded.fragments == fragments
+    assert all(isinstance(k, int) for k in loaded.fragments)
+    assert loaded.filing == {"report_nm": "사업보고서", "rcept_no": "20260315000123"}
+    assert loaded.cell_judgments == {"1": True, "4-1": False}
+    assert loaded.fiscal_year == 2025
+
+
+def test_layer2_missing_company_returns_none(tmp_path: Path) -> None:
+    with db.connect(tmp_path / "storage.db") as conn:
+        assert cache.get_layer2(conn, "CORP-없음") is None
+
+
+def test_layer2_never_leaks_across_companies(tmp_path: Path) -> None:
+    with db.connect(tmp_path / "storage.db") as conn:
+        cache.save_layer2(conn, corp_id="CORP-A", fragments={1: {"종류": "뉴스", "원문": "A", "출처": ""}})
+        cache.save_layer2(conn, corp_id="CORP-B", fragments={1: {"종류": "뉴스", "원문": "B", "출처": ""}})
+        a = cache.get_layer2(conn, "CORP-A")
+        b = cache.get_layer2(conn, "CORP-B")
+    assert a is not None and a.fragments[1]["원문"] == "A"
+    assert b is not None and b.fragments[1]["원문"] == "B"
+
+
+def test_layer2_save_twice_replaces_not_duplicates(tmp_path: Path) -> None:
+    with db.connect(tmp_path / "storage.db") as conn:
+        cache.save_layer2(conn, corp_id="CORP-001", fragments={1: {"종류": "뉴스", "원문": "old", "출처": ""}})
+        cache.save_layer2(conn, corp_id="CORP-001", fragments={1: {"종류": "뉴스", "원문": "new", "출처": ""}})
+        count = conn.execute(
+            "SELECT COUNT(*) AS n FROM layer2_cache WHERE corp_id = 'CORP-001'"
+        ).fetchone()["n"]
+        loaded = cache.get_layer2(conn, "CORP-001")
+    assert count == 1
+    assert loaded is not None
+    assert loaded.fragments[1]["원문"] == "new"
+
+
+# ══════════════════════════════════════════════════════════
+# 별칭 캐시
+# ══════════════════════════════════════════════════════════
+
+
+def test_alias_save_and_get(tmp_path: Path) -> None:
+    with db.connect(tmp_path / "storage.db") as conn:
+        assert cache.get_alias(conn, "가나다") is None
+        cache.save_alias(conn, "가나다", "CORP-001")
+        assert cache.get_alias(conn, "가나다") == "CORP-001"
+        assert cache.get_alias(conn, "  가나다  ") == "CORP-001"  # 정규화 후 같은 키
+
+
+def test_alias_invalidate_removes_entry(tmp_path: Path) -> None:
+    with db.connect(tmp_path / "storage.db") as conn:
+        cache.save_alias(conn, "가나다", "CORP-001")
+        cache.invalidate_alias(conn, "가나다")
+        assert cache.get_alias(conn, "가나다") is None
+
+
+# ══════════════════════════════════════════════════════════
+# S2 — 공고 원문이 캐시 경로 어디에도 들어갈 수 없다
+# ══════════════════════════════════════════════════════════
+
+
+def test_save_layer1_signature_has_no_posting_text_parameter() -> None:
+    """`save_layer1`은 `requirements`(요구역량 목록)만 받는다 — 공고 원문을
+    넘길 파라미터 자체가 없다(정본 §도구정의 4 — "요구역량 목록만 캐시").
+    """
+    import inspect
+
+    params = set(inspect.signature(cache.save_layer1).parameters)
+    assert "posting_text" not in params
+    assert "posting" not in params
+    assert {"corp_id", "job", "requirements", "report"} <= params

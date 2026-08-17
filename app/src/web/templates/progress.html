@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}조사 중… · 기업분석{% endblock %}
+
+{% block content %}
+<h1>{{ job.card.legal_name }} 조사 중</h1>
+<p class="lede">
+  공시 자료를 읽고 있습니다. <strong>보통 1~3분</strong> 걸리고, 자료가 많으면 최대 5분까지 갑니다.
+  <br>이 화면을 켜둔 채 기다려 주세요.
+</p>
+
+<div class="card">
+  <ul class="steps" id="steps">
+    {% for key, label in steps %}
+      <li data-key="{{ key }}"><span class="mark">{{ loop.index }}</span><span>{{ label }}</span></li>
+    {% endfor %}
+  </ul>
+</div>
+
+<p class="muted" style="margin-top:14px">
+  공개된 자료가 너무 적은 회사는 보고서를 만들지 못하고 멈춥니다.
+  이때는 <strong>비용이 들지 않습니다</strong>.
+</p>
+
+<script>
+  var JOB_ID = "{{ job.job_id }}";
+  var items = document.querySelectorAll('#steps li');
+
+  function paint(done, current) {
+    items.forEach(function (li) {
+      var key = li.dataset.key;
+      li.classList.remove('done', 'current');
+      if (done.indexOf(key) !== -1) {
+        li.classList.add('done');
+        li.querySelector('.mark').textContent = '✓';
+      } else if (key === current) {
+        li.classList.add('current');
+        li.querySelector('.mark').textContent = '';
+      }
+    });
+  }
+
+  function poll() {
+    fetch('/api/progress/' + JOB_ID)
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.error) { return; }
+        paint(d.done || [], d.current || '');
+        if (d.finished && d.next_url) {
+          window.location.href = d.next_url;
+        } else {
+          setTimeout(poll, 400);
+        }
+      })
+      .catch(function () { setTimeout(poll, 1200); });
+  }
+
+  poll();
+</script>
+{% endblock %}

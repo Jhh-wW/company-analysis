@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}보고서를 만들지 못했습니다 · 기업분석{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="stopped-icon">
+    {% if result.outcome.value.startswith('거부') %}🚫{% elif result.outcome.value.startswith('공고') %}📄{% else %}📭{% endif %}
+  </div>
+  <h1>
+    {% if result.outcome.value == '거부_공공기관' %}이 도구가 다루지 않는 기관입니다
+    {% elif result.outcome.value == '거부_공시없음' %}분석할 근거를 모을 수 없습니다
+    {% elif result.outcome.value == '공고_폐기' %}공고로 보이지 않습니다
+    {% elif result.outcome.value == '자료부족_중단' %}보고서를 만들 수 없습니다
+    {% else %}오류가 났습니다{% endif %}
+  </h1>
+  <p class="lede">{{ result.message }}</p>
+
+  {% if show_quota_note is not sameas false %}
+    <p class="muted">
+      할당량은 <strong>차감되지 않았습니다.</strong>
+    </p>
+  {% endif %}
+
+  <div class="btn-row">
+    <a class="btn" href="/" style="line-height:1.6">
+      {% if result.outcome.value == '공고_폐기' %}공고 다시 올리기{% else %}이름 다시 넣기{% endif %}
+    </a>
+  </div>
+</div>
+
+{% if result.sources %}
+<h2>어디까지 찾아봤나</h2>
+<p class="muted" style="margin-top:-4px">
+  뭘 못 구했는지는 알려드립니다. <strong>조용히 넘어가지 않습니다.</strong>
+</p>
+<table>
+  <tr><th style="width:150px">소스</th><th style="width:110px">결과</th><th>내용</th></tr>
+  {% for s in result.sources %}
+  <tr>
+    <td>{{ s.name }}</td>
+    <td class="center">
+      {% if s.state == 'ok' %}<span class="state-ok">⭕ 찾음</span>
+      {% elif s.state == 'none' %}<span class="state-none">❌ 없음</span>
+      {% else %}<span class="state-failed">⚠️ 못 가져옴</span>{% endif %}
+    </td>
+    <td>{{ s.detail }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}관리자 화면 · 기업분석{% endblock %}
+
+{# 관리자 첫 화면 — 로그인 성공 후 도착하는 곳.
+   ★ 이 화면에 오려면 서버가 이미 require_admin()으로 걸러낸 뒤다 (main.py 쪽 라우트).
+     여기서는 다시 권한을 검사하지 않는다 — 검사는 라우트 함수의 몫이다.
+   필요한 값: auth_email (str) — 지금 로그인한 사람의 이메일. #}
+
+{% block content %}
+<div class="card">
+  <p class="muted" style="margin-bottom:4px">로그인 계정</p>
+  <h1 style="font-size:19px;margin-bottom:4px">{{ auth_email }}</h1>
+  <p class="lede" style="margin-bottom:0">관리자로 로그인하셨습니다.</p>
+</div>
+
+<div class="card">
+  <h3>여기서 할 수 있는 일</h3>
+  <ul style="margin:10px 0 0;padding-left:18px;line-height:1.9">
+    <li><a href="/">회사 조사 시작하기</a> — 공시·뉴스에서 자료를 모아 보고서를 만듭니다.</li>
+    <li><a href="/admin/dashboard"><strong>품질 대시보드</strong></a>
+        — 처리 건수 · 비용 · 지표 6종 · 어느 단계에서 멈추는지.
+        <span class="muted">조사를 한 건이라도 해야 숫자가 채워집니다.</span></li>
+    <li><a href="/admin/access"><strong>초대·링크 관리</strong></a>
+        — <strong>친구 초대</strong>(구글 로그인으로 실제 조사를 쓸 사람) ·
+        <strong>회사별 링크 발급</strong>(포트폴리오용 QR) ·
+        오늘 나간 돈과 <strong>최악의 하루 지출</strong>.</li>
+  </ul>
+
+  {# ★ 없는 기능을 있는 것처럼 보이면 안 된다 — 정직하게 「아직 없다」고 적는다.
+     ⚠️ 기능이 붙을 때마다 이 목록을 «반드시» 같이 고칠 것. 낡은 안내는 거짓말이 된다.
+        실제로 노션이 되는데도 「안 된다」고 적혀 있었다 (P-96에서 발견). #}
+  <div class="warn-line" style="margin-top:16px;background:var(--navy-soft);border-color:var(--navy-line);color:var(--ink-2)">
+    <span>ℹ️</span>
+    <span>
+      <b>알아두실 것</b> —
+      <strong>채용공고 사진</strong>은 올릴 수 있지만
+      <strong>데모에서는 읽지 않습니다</strong> (사진을 읽으면 AI 비용이 들어서입니다).
+      진짜 조사 모드에서는 사진에서 글자를 뽑아 씁니다.
+      <br><strong>인터넷 배포는 아직 안 했습니다</strong> —
+      지금 발급한 링크는 <strong>이 컴퓨터에서만</strong> 열립니다.
+    </span>
+  </div>
+</div>
+
+<div class="btn-row">
+  <a class="btn ghost" href="/auth/logout">로그아웃</a>
+</div>
+{% endblock %}

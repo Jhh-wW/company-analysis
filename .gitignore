@@ -1,0 +1,79 @@
+# 이 저장소는 «기업분석 서비스»에 필요한 파일만 관리한다.
+# 원본 작업 폴더의 기획 과정·실험·캡처는 컴퓨터에 남아 있어도 Git에는 들어오지 않는다.
+/*
+!/.gitignore
+!/.dockerignore
+!/README.md
+!/render.yaml
+!/app/
+!/prototype_v1/
+
+# 웹서비스: 실행 코드·시험·배포/운영 문서만 유지
+/app/*
+!/app/.gitignore
+!/app/README.md
+!/app/Dockerfile
+!/app/requirements.txt
+!/app/conftest.py
+!/app/서버켜기.ps1
+!/app/docs/
+!/app/src/
+!/app/tools/
+/app/tools/*
+!/app/tools/backup_sqlite.py
+!/app/tools/tests/
+
+# 현재 서비스에서 사용하지 않는 옛 기능
+/app/src/features/newsfilter/
+
+# 실제 조사 엔진: 소스와 런타임에서 직접 읽는 도구 3개만 유지
+/prototype_v1/*
+!/prototype_v1/src/
+!/prototype_v1/tools/
+!/prototype_v1/data/
+/prototype_v1/src/features/freshness/
+/prototype_v1/tools/*
+!/prototype_v1/tools/run_pilot.py
+!/prototype_v1/tools/survey_audit_reports.py
+!/prototype_v1/tools/build_goldenset_answer.py
+
+# 관리자 전용 첫 배포의 데모가 직접 읽는 최소 자료
+/prototype_v1/data/*
+!/prototype_v1/data/pilot/
+/prototype_v1/data/pilot/*
+!/prototype_v1/data/pilot/runs.jsonl
+!/prototype_v1/data/pilot/fragments/
+!/prototype_v1/data/pilot/reports/
+
+# 허용된 폴더 안에서도 비밀값·실행 기록·로컬 찌꺼기는 항상 제외
+**/.env
+**/.env.*
+!**/.env.example
+client_secret*.json
+credentials*.json
+*.pem
+*.key
+__pycache__/
+.pytest_cache/
+*.py[cod]
+**/.pytest_tmp_*/
+.playwright-mcp/
+.coverage
+htmlcov/
+.venv/
+venv/
+node_modules/
+.ruff_cache/
+.mypy_cache/
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite3.sha256
+*.tmp
+*.log
+**/backups/
+.DS_Store
+Thumbs.db

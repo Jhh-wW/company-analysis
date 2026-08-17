@@ -1,0 +1,435 @@
+{#
+  공고 이미지 입력 조각 — 파일 고르기 + Ctrl+V 붙여넣기 + 미리보기 + 지우기.
+
+  ★★ 이 조각이 지키는 안전 규칙 ★★
+  (정본: ../../../기획서.ver2/확정/01_식별/1_흐름/03_공고판별.md,
+         ../../../기획서.ver2/확정/99_기준/2_규칙/01_안전과가드레일.md S1·S2)
+
+  1. 여기서 고른 이미지는 «서버로 보내지 않는다». 브라우저의 IndexedDB(원본 그대로
+     담는다 — base64로 부풀리지 않는다)에만 쌓인다. 아래 <input type="file">에는
+     일부러 name 속성을 안 붙였다 — 이 조각이 input.html의 기존
+     <form action="/confirm">... </form> 안에 그대로 끼워져도, 그 폼이 제출될 때
+     이 파일들은 «절대 같이 실려 나가지 않는다» (name 없는 입력은 폼 제출에서 빠진다).
+  2. 실제로 서버에 올라가는 시점은 확인 카드에서 [맞습니다]를 눌러 POST /run이
+     나갈 때뿐이다. 그건 이 조각의 책임이 아니라 «연결 지점»이다 — 아래
+     `window.PostingImageStore`를 파일 맨 아래 안내대로 confirm.html에서 불러
+     그 폼 제출 직전에 붙이면 된다.
+  3. 서버로 넘긴 뒤에는 `window.PostingImageStore.clear()`로 브라우저 쪽 원본도
+     지운다 (S2 — 이미지 원본 잔존 0건). 이것도 confirm.html 쪽 연결 코드가 한다.
+  4. 이 파일은 «전역 API 정의 + (컨테이너가 있으면) 화면 조립» 두 역할을 같이
+     한다. 그래서 input.html뿐 아니라 confirm.html에도 그대로
+     `{% raw %}{% include "_posting_image_field.html" %}{% endraw %}` 해서 끼울 수
+     있다 — confirm.html에는 `#postingImageField`가 없으니 화면은 안 그려지고
+     `window.PostingImageStore` API만 조용히 준비된다.
+
+  ⚠️ 동기화 주의 — 아래 JS 상수(ALLOWED_MIME·MAX_BYTES·MAX_COUNT·MAX_TOTAL_BYTES)는
+     `src/features/posting_image/constants.py`와 값이 같아야 한다. 파이썬 쪽을
+     고치면 여기도 같이 고쳐야 한다 (자동 동기화 안 됨 — 알려진 한계, 최종 보고서 참고).
+     여기 값은 «빠른 사용자 안내»용일 뿐이고, 진짜 검사는 서버의
+     `posting_image.logic.validate_images()`가 한다 (클라이언트 검사를 우회해도
+     서버가 다시 막는다).
+#}
+<div class="posting-image-field" id="postingImageField">
+  {# ★ 글자칸과 «한 상자»에 들어간다. 따로 두면 어느 쪽에 넣을지 헷갈린다.
+     ChatGPT·Slack 같은 요즘 입력창과 같은 구조 — 글자를 치다가 그대로 캡처를 붙여넣는다. #}
+  <p class="posting-image-error" id="postingImageError" role="alert" hidden></p>
+
+  <div class="posting-image-previews" id="postingImagePreviews"></div>
+
+  <div class="posting-image-bar">
+    <button type="button" class="posting-image-attach" id="postingImagePickBtn">
+      <span aria-hidden="true">📎</span> 사진 첨부
+    </button>
+    <input type="file" id="postingImagePicker"
+           accept="image/png,image/jpeg,image/webp" multiple hidden>
+    <span class="spacer"></span>
+    <span class="muted" id="postingImageCount"></span>
+    <button type="button" class="posting-image-clear" id="postingImageClearBtn" hidden>전체 지우기</button>
+  </div>
+</div>
+
+<style>
+  /* ★ 「채용공고」 한 상자 — 글자칸 + 사진이 같은 테두리 안에 있다.
+     따로 두면 사용자가 «어느 쪽에 넣어야 하나»를 고민하게 된다. */
+  .posting-composer {
+    border: 1px solid var(--navy-line);
+    border-radius: 5px;
+    background: #fff;
+    overflow: hidden;
+  }
+  .posting-composer:focus-within { outline: 2px solid var(--navy); outline-offset: 1px; }
+  .posting-composer textarea {
+    border: 0; border-radius: 0; width: 100%; display: block;
+    min-height: 130px; resize: vertical;
+  }
+  .posting-composer textarea:focus { outline: none; }
+  .posting-composer.dragging { outline: 2px dashed var(--navy); outline-offset: 1px; }
+
+  .posting-image-error {
+    margin: 0; padding: 8px 12px;
+    font-size: 13px; color: var(--no); background: #fdf2f2;
+  }
+  .posting-image-previews {
+    display: flex; flex-wrap: wrap; gap: 8px;
+    padding: 0 12px;
+  }
+  .posting-image-previews:not(:empty) { padding: 10px 12px 2px; }
+  .posting-image-thumb {
+    position: relative; width: 84px; height: 84px;
+    border: 1px solid var(--navy-line); border-radius: 4px; overflow: hidden;
+    background: #fafbfc;
+  }
+  .posting-image-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .posting-image-thumb button {
+    position: absolute; top: 2px; right: 2px;
+    width: 20px; height: 20px; line-height: 1;
+    border: 0; border-radius: 50%;
+    background: rgba(0, 0, 0, .6); color: #fff; cursor: pointer;
+    font-size: 12px;
+  }
+  .posting-image-bar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px;
+    border-top: 1px solid var(--navy-line);
+    background: var(--navy-soft);
+  }
+  .posting-image-bar .spacer { flex: 1; }
+  .posting-image-attach {
+    border: 1px solid var(--navy-line); border-radius: 4px;
+    background: #fff; cursor: pointer;
+    padding: 5px 10px; font-size: 13px; color: var(--ink-2);
+  }
+  .posting-image-attach:hover { border-color: var(--navy); color: var(--navy); }
+  .posting-image-clear {
+    border: 0; background: none; cursor: pointer;
+    font-size: 12.5px; color: var(--no); text-decoration: underline;
+  }
+</style>
+
+<script>
+(function () {
+  'use strict';
+
+  // ── 서버 상수와 맞춰야 하는 값 (constants.py 참고, 위 경고 참고) ──
+  var MAX_BYTES = 8 * 1024 * 1024;         // MAX_IMAGE_BYTES
+  var MAX_COUNT = 10;                       // MAX_IMAGE_COUNT
+  var MAX_TOTAL_BYTES = 40 * 1024 * 1024;   // MAX_TOTAL_BYTES
+
+  var ERR = {
+    empty: '빈 이미지 파일입니다. 다시 선택해 주세요.',
+    tooMany: '이미지는 최대 ' + MAX_COUNT + '장까지 올릴 수 있습니다.',
+    tooLarge: '이미지 1장은 최대 ' + Math.floor(MAX_BYTES / 1024 / 1024) + 'MB까지 올릴 수 있습니다.',
+    totalTooLarge: '이미지 전체 용량이 너무 큽니다. 장수를 줄여주세요.',
+    unsupported: '지원하지 않는 이미지 형식입니다. PNG · JPEG · WEBP 형식만 올릴 수 있습니다.'
+  };
+
+  var DB_NAME = 'posting_image_store_v1';
+  var STORE_NAME = 'images';
+  var dbPromise = null;
+
+  // ── IndexedDB 저장소 ──────────────────────────────────
+  // ★ sessionStorage/localStorage 대신 IndexedDB를 쓰는 이유 — 캡처 여러 장을
+  //   base64 문자열로 바꿔 담으면(용량이 1.33배로 불어남) 브라우저별 5~10MB
+  //   저장 한도를 쉽게 넘긴다. IndexedDB는 Blob을 원본 그대로 담을 수 있고
+  //   저장 한도가 훨씬 크다(브라우저 디스크 여유분 기준). 외부 라이브러리가
+  //   아니라 브라우저 표준 API다.
+  function openDb() {
+    if (dbPromise) { return dbPromise; }
+    dbPromise = new Promise(function (resolve, reject) {
+      var req = indexedDB.open(DB_NAME, 1);
+      req.onupgradeneeded = function () {
+        var db = req.result;
+        if (!db.objectStoreNames.contains(STORE_NAME)) {
+          db.createObjectStore(STORE_NAME, { keyPath: 'id', autoIncrement: true });
+        }
+      };
+      req.onsuccess = function () { resolve(req.result); };
+      req.onerror = function () { reject(req.error); };
+    });
+    return dbPromise;
+  }
+
+  function addImageRecord(blob, meta) {
+    return openDb().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx = db.transaction(STORE_NAME, 'readwrite');
+        var req = tx.objectStore(STORE_NAME).add({
+          blob: blob, name: meta.name, mimeType: meta.mimeType, size: meta.size
+        });
+        req.onsuccess = function () { resolve(req.result); };
+        req.onerror = function () { reject(req.error); };
+      });
+    });
+  }
+
+  function removeImageRecord(id) {
+    return openDb().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx = db.transaction(STORE_NAME, 'readwrite');
+        tx.objectStore(STORE_NAME).delete(id);
+        tx.oncomplete = function () { resolve(); };
+        tx.onerror = function () { reject(tx.error); };
+      });
+    });
+  }
+
+  function getAllRecords() {
+    return openDb().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx = db.transaction(STORE_NAME, 'readonly');
+        var req = tx.objectStore(STORE_NAME).getAll();
+        req.onsuccess = function () { resolve(req.result || []); };
+        req.onerror = function () { reject(req.error); };
+      });
+    });
+  }
+
+  function clearAllRecords() {
+    return openDb().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx = db.transaction(STORE_NAME, 'readwrite');
+        tx.objectStore(STORE_NAME).clear();
+        tx.oncomplete = function () { resolve(); };
+        tx.onerror = function () { reject(tx.error); };
+      });
+    });
+  }
+
+  // ── 어느 페이지에서든 쓸 수 있는 전역 API ────────────────
+  // confirm.html은 화면 조각 없이 이 API만 갖다 쓴다 (파일 맨 아래 안내 참고).
+  if (!window.indexedDB) {
+    // 아주 오래된 브라우저 — 이미지 경로를 조용히 포기하고 텍스트 경로만 남긴다.
+    window.PostingImageStore = {
+      count: function () { return Promise.resolve(0); },
+      hasImages: function () { return Promise.resolve(false); },
+      getAllAsFiles: function () { return Promise.resolve([]); },
+      clear: function () { return Promise.resolve(); }
+    };
+    var unsupportedEl = document.getElementById('postingImageField');
+    if (unsupportedEl) {
+      unsupportedEl.innerHTML =
+        '<div class="warn-line"><span>⚠️</span>' +
+        '<span>이 브라우저는 사진 첨부를 지원하지 않습니다. ' +
+        '아래 글자 입력란에 공고 내용을 붙여넣어 주세요.</span></div>';
+    }
+    return;
+  }
+
+  window.PostingImageStore = {
+    count: function () { return getAllRecords().then(function (rows) { return rows.length; }); },
+    hasImages: function () { return getAllRecords().then(function (rows) { return rows.length > 0; }); },
+    // confirm.html이 /run을 보내기 직전에 부른다 — 여기서 처음 File 목록이 된다.
+    getAllAsFiles: function () {
+      return getAllRecords().then(function (rows) {
+        return rows.map(function (r) {
+          return new File([r.blob], r.name || 'capture.png', { type: r.mimeType || 'image/png' });
+        });
+      });
+    },
+    // S2 — 서버로 넘긴 «직후» confirm.html 쪽에서 반드시 불러야 한다.
+    clear: function () { return clearAllRecords(); }
+  };
+
+  // ── 아래부터는 이 페이지에 실제 입력 화면(#postingImageField)이 있을 때만 ──
+  var fieldEl = document.getElementById('postingImageField');
+  if (!fieldEl) { return; }
+
+  var pickerInput = document.getElementById('postingImagePicker');
+  var pickBtn = document.getElementById('postingImagePickBtn');
+  var dropZone = document.getElementById('postingImageField');
+  var previewsEl = document.getElementById('postingImagePreviews');
+  var errorEl = document.getElementById('postingImageError');
+  var countEl = document.getElementById('postingImageCount');
+  var clearBtn = document.getElementById('postingImageClearBtn');
+
+  function showError(msg) {
+    errorEl.textContent = msg;
+    errorEl.hidden = !msg;
+  }
+
+  // 확장자가 아니라 «바이트 자체»로 형식을 본다 (서버 로직과 같은 원칙).
+  // ★ 이건 빠른 사용자 안내일 뿐이다 — 이 검사를 우회해도 서버의
+  //   validate_images()가 다시 막는다 (클라이언트 검사는 신뢰 경계가 아니다).
+  function sniffFormat(bytes) {
+    if (bytes.length >= 4 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47) {
+      return 'image/png';
+    }
+    if (bytes.length >= 3 && bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF) {
+      return 'image/jpeg';
+    }
+    if (bytes.length >= 12 &&
+        bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 && // RIFF
+        bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50   // WEBP
+    ) {
+      return 'image/webp';
+    }
+    return null;
+  }
+
+  function readHeader(file) {
+    return file.slice(0, 12).arrayBuffer().then(function (buf) { return new Uint8Array(buf); });
+  }
+
+  function renderPreviews() {
+    getAllRecords().then(function (rows) {
+      previewsEl.innerHTML = '';
+      rows.forEach(function (r) {
+        var item = document.createElement('div');
+        item.className = 'posting-image-thumb';
+
+        var img = document.createElement('img');
+        img.src = URL.createObjectURL(r.blob);
+        img.alt = r.name || '캡처 이미지';
+
+        var removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'posting-image-remove';
+        removeBtn.setAttribute('aria-label', '이 이미지 지우기');
+        removeBtn.textContent = '×';
+        removeBtn.addEventListener('click', function () {
+          removeImageRecord(r.id).then(renderPreviews);
+        });
+
+        item.appendChild(img);
+        item.appendChild(removeBtn);
+        previewsEl.appendChild(item);
+      });
+      countEl.textContent = rows.length > 0 ? (rows.length + '장 선택됨 (최대 ' + MAX_COUNT + '장)') : '';
+      clearBtn.hidden = rows.length === 0;
+    });
+  }
+
+  function addFiles(fileList) {
+    var files = Array.prototype.slice.call(fileList);
+    if (files.length === 0) { return; }
+
+    getAllRecords().then(function (existing) {
+      var count = existing.length;
+      var total = existing.reduce(function (sum, r) { return sum + r.size; }, 0);
+      var chain = Promise.resolve();
+
+      files.forEach(function (file) {
+        chain = chain.then(function () {
+          if (count >= MAX_COUNT) { showError(ERR.tooMany); return; }
+          if (file.size === 0) { showError(ERR.empty); return; }
+          if (file.size > MAX_BYTES) { showError(ERR.tooLarge); return; }
+          if (total + file.size > MAX_TOTAL_BYTES) { showError(ERR.totalTooLarge); return; }
+
+          return readHeader(file).then(function (bytes) {
+            var mime = sniffFormat(bytes);
+            if (!mime) { showError(ERR.unsupported); return; }
+            return addImageRecord(file, {
+              name: file.name || ('capture-' + Date.now() + '.png'),
+              mimeType: mime,
+              size: file.size
+            }).then(function () {
+              count += 1;
+              total += file.size;
+              showError('');
+            });
+          });
+        });
+      });
+
+      chain.then(renderPreviews);
+    });
+  }
+
+  pickBtn.addEventListener('click', function () { pickerInput.click(); });
+  pickerInput.addEventListener('change', function () {
+    addFiles(pickerInput.files);
+    pickerInput.value = ''; // 같은 파일을 다시 골라도 change가 다시 뜨도록 비운다
+  });
+
+  // ★ paste는 document 전체에서 받는다. contenteditable이 아닌 <div>는 포커스가
+  //   있어도 paste 이벤트를 못 받는 브라우저가 있다. document에서 받으면
+  //   포커스 위치와 무관하게 항상 잡히고, 「파일(이미지) 종류일 때만」 가로채므로
+  //   회사명 등 다른 글자 입력란에 «텍스트»를 붙여넣는 동작은 그대로 둔다
+  //   (clipboardData에 이미지 파일이 없으면 이 리스너는 아무 것도 안 한다).
+  document.addEventListener('paste', function (evt) {
+    var items = (evt.clipboardData && evt.clipboardData.items) || [];
+    var files = [];
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].kind === 'file' && items[i].type.indexOf('image/') === 0) {
+        var f = items[i].getAsFile();
+        if (f) { files.push(f); }
+      }
+    }
+    if (files.length > 0) {
+      evt.preventDefault();
+      addFiles(files);
+    }
+  });
+
+  clearBtn.addEventListener('click', function () {
+    clearAllRecords().then(renderPreviews);
+  });
+
+  renderPreviews(); // 새로고침 등으로 남아있던 이전 선택을 이어서 보여준다
+})();
+</script>
+
+{#
+  ══════════════════════════════════════════════════════════
+  연결 지점 (team-lead가 붙일 곳 — 이 파일은 아래 3곳을 고치지 않는다)
+
+  ★ 아래는 전부 «설명용 예시 코드»다. 이 주석 블록 자체는 Jinja 주석(중첩
+    금지)이라 안에 실제 include/raw 태그를 넣지 않았다 — 그대로 옮겨 적을 때는
+    각 줄 그대로 옮기면 된다.
+  ══════════════════════════════════════════════════════════
+
+  1) input.html — 기존 posting_text textarea 근처에 한 줄 추가한다.
+     문법: include 태그로 이 파일을 끼운다 (파일명 그대로).
+     기존 form(action="/confirm") 안에 넣어도 안전하다 (위 안전 규칙 1 참고) —
+     아래 입력에는 name이 없어서 그 폼 제출에 절대 같이 실리지 않는다.
+
+  2) confirm.html — 기존 form(method="post" action="/run") 바로 앞뒤에 넣는다.
+
+     가. 이 파일을 include 태그로 한 번 더 끼운다 (화면은 안 그려지고
+        window.PostingImageStore API만 조용히 준비된다).
+     나. 실제로 서버에 보낼 자리로 name="posting_images"인 숨김 파일 입력을
+        하나 새로 둔다 (multiple, hidden, accept는 이 파일의 accept와 동일).
+     다. 그 form의 submit 이벤트에서:
+        - evt.preventDefault()로 기본 제출을 막는다
+        - window.PostingImageStore.getAllAsFiles()로 저장해둔 이미지를 File[]로 받는다
+        - new DataTransfer()에 파일들을 담아 위 나. 입력의 .files에 대입한다
+          (이래야 서버가 python-multipart로 정상적인 업로드 파일로 받는다)
+        - window.PostingImageStore.clear()를 불러 브라우저 쪽 원본도 지운다
+          (S2 — 넘긴 «직후»에 지운다)
+        - 그 다음에 form.submit()으로 실제 제출을 진행한다
+     라. 그 form 태그에 enctype="multipart/form-data"를 추가해야 한다
+        (지금은 텍스트 필드만 있어서 없다).
+
+  3) 확인 카드는 [아닙니다](→ /reject)도 있다. 그 경로에서는 이미지를 «지우지
+     않는다» — 회사만 잘못 찾았을 뿐 사진은 그대로 유효하므로, 재입력 화면에서
+     이어서 쓸 수 있게 남겨 둔다 (추가 배선 불필요 — IndexedDB는 그대로 남아 있다).
+
+  4) main.py — /run 라우트가 파일도 받게 고친다. 개념은 이렇다:
+
+       from fastapi import File, UploadFile
+
+       @app.post("/run")
+       async def start_run(
+           ...,
+           posting_images: list[UploadFile] = File(default=[]),
+       ):
+           posting_text_final = posting_text
+           if posting_images:
+               image_bytes = [await f.read() for f in posting_images]
+               from src.features.posting_image.logic import extract_posting_text
+               # extract= 자리에 실제 AI 호출을 주입한다 (예: default_extract,
+               # 또는 pipeline/real.py가 이미 들고 있는 client로 감싼 함수).
+               outcome = extract_posting_text(image_bytes, extract=...)
+               del image_bytes  # ★ S2 — 지역 변수 참조를 없애 원본을 즉시 회수 대상으로
+               if not outcome.ok:
+                   # 확인 카드로 되돌리고 outcome.error를 보여준다 — 텍스트 경로로
+                   # 되돌아갈 수 있게(막다른 길 금지). 절대 조용히 실패시키지 않는다.
+                   ...
+               else:
+                   posting_text_final = outcome.text
+           ...
+
+     ★ `image_bytes`는 이 블록 밖으로 절대 넘기지 않는다 — 그래야 「처리 직후
+       폐기」(S2)가 코드로 보장된다. 파일에 쓰지도, 로그에 찍지도, RunResult에
+       담지도 않는다.
+#}

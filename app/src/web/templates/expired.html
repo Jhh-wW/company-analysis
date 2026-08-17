@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}기간이 지난 링크 · 기업분석{% endblock %}
+
+{# 만들어진 지 두 달이 지난 보고서 링크 (문제로그 P-93).
+
+   ★ 「없는 보고서」처럼 보이게 하지 않는다 — 있었는데 «기간이 지난» 것이고,
+     그 둘은 사용자에게 완전히 다른 뜻이다.
+     없다 = 「내가 주소를 잘못 왔나?」 / 지났다 = 「아, 그렇구나」
+   ★ 막다른 길을 만들지 않는다 — 지금 할 수 있는 일을 반드시 남긴다. #}
+
+{% block content %}
+<div class="card">
+  <div class="stopped-icon">🗓️</div>
+  <h1>기간이 지난 링크입니다</h1>
+  <p class="lede">{{ expired_message }}</p>
+
+  <p class="muted" style="margin-top:14px">
+    <strong>보고서가 잘못된 것이 아닙니다.</strong>
+    같은 회사를 지금 다시 조사하면 <strong>최신 자료로 새 보고서</strong>가 나옵니다.
+  </p>
+
+  <div class="btn-row" style="margin-top:18px">
+    <a class="btn" href="/" style="line-height:1.6">새로 조사하기</a>
+  </div>
+</div>
+{% endblock %}

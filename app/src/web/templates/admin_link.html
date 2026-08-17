@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}{{ link.company }} 링크 · 기업분석{% endblock %}
+
+{# 링크 하나의 «주소와 QR» (문제로그 P-96).
+   ★ QR은 SVG라 인쇄해도 안 깨진다 — 포트폴리오는 인쇄되기도 한다. #}
+
+{% block content %}
+<div class="card">
+  <p class="muted" style="margin-bottom:4px">회사별 링크</p>
+  <h1 style="font-size:19px;margin-bottom:4px">{{ link.company }}</h1>
+  <p class="lede">{{ link.job }}</p>
+
+  <div style="text-align:center;margin:20px 0;background:#fff;padding:16px;border-radius:8px">
+    {{ qr_svg|safe }}
+  </div>
+
+  <p class="muted" style="margin-bottom:4px">포트폴리오에 넣을 주소</p>
+  <p style="word-break:break-all;font-family:monospace;background:var(--navy-soft);
+            padding:10px;border-radius:6px">{{ url }}</p>
+
+  {% if not base_url %}
+  <div class="warn-line" style="margin-top:12px">
+    <span>⚠️</span>
+    <span>서비스 주소를 알아내지 못했습니다 — 위 주소가 틀렸을 수 있습니다.</span>
+  </div>
+  {% endif %}
+
+  {# ★ 「배포된 주소로 보이는가」로 판단한다 — `localhost` 글자만 보면
+     `127.0.0.1`이나 다른 내부 주소를 놓친다 (P-96). #}
+  {% if not is_deployed %}
+  <div class="warn-line" style="margin-top:12px">
+    <span>⚠️</span>
+    <span>
+      <b>이 주소는 내 컴퓨터에서만 열립니다.</b>
+      지금 포트폴리오에 넣으면 인사팀에게는 <strong>안 열리는 링크</strong>가 됩니다.
+      인터넷에 배포한 뒤 <strong>그 주소에서 다시 발급</strong>하세요.
+    </span>
+  </div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>이 링크 상태</h3>
+  <table style="margin-top:10px">
+    <tr><th>열어본 횟수</th>
+        <td>{% if link.opened_count %}<strong>{{ link.opened_count }}회</strong>
+            {% else %}<span class="muted">아직 안 봄</span>{% endif %}</td></tr>
+    <tr><th>처음 열어본 때</th>
+        <td>{{ link.first_opened_at[:16] or "—" }}</td></tr>
+    <tr><th>마지막으로 본 때</th>
+        <td>{{ link.last_opened_at[:16] or "—" }}</td></tr>
+    <tr><th>미리 구운 보고서</th>
+        <td>
+          {% if link.is_baked %}
+            ⭕ <a href="/result/{{ link.report_id }}">보기</a>
+            <br><span class="muted">인사팀이 링크를 누르면 이 보고서가 바로 열립니다 (0원)</span>
+          {% else %}
+            <span class="muted">아직 없음 — 링크를 누르면 첫 화면으로 갑니다</span>
+          {% endif %}
+        </td></tr>
+  </table>
+</div>
+
+<div class="btn-row">
+  <a class="btn ghost" href="/admin/access">링크 목록으로</a>
+</div>
+{% endblock %}

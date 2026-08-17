@@ -1,0 +1,202 @@
+{% extends "base.html" %}
+{% block title %}{{ report.company }} 보고서 · 기업분석{% endblock %}
+{% block wrapclass %}wide{% endblock %}
+
+{% block content %}
+<h1>{{ report.company }}</h1>
+<p class="lede">
+  {{ report.job }}
+  <span class="muted"> · {{ report.corp_type }}{% if report.generated_at %} · {{ report.generated_at }} 생성{% endif %}</span>
+</p>
+
+{# ── 저장해 둔 보고서를 재사용한 경우 ────────────────────
+     ★ 「방금 새로 조사한 것」처럼 보이면 안 된다. 기능만 붙이고 화면을
+        안 고치면 사용자는 캐시가 도는지 모른다 (문제로그 P-63). #}
+{% if result is defined and result and result.cache_hit %}
+<p class="muted">💾 {{ result.message }}</p>
+{% endif %}
+
+{# ── 등급 라벨 — 완성이면 안 띄운다 ─────────────────── #}
+{% if report.grade.value != '완성' %}
+<div class="grade {% if report.grade.value == '부분 완성' %}partial{% else %}incomplete{% endif %}">
+  <span class="icon">{% if report.grade.value == '부분 완성' %}🟡{% else %}🔴{% endif %}</span>
+  <div>
+    <b>{{ grade_note }}</b>
+    {% if report.shortfall_reasons %}
+      <ul>
+        {% for r in report.shortfall_reasons %}<li>{{ r }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{# ── 보고서 본문 — 기획서의 정본 순서(1~9)대로 나온다 ── #}
+{# 근거 번호 — ★ 진짜 보고서처럼 «작은 위첨자 번호»로 달고, 누르면 아래 출처표로 간다.
+   2026-08-16 사용자 지적: 「출처가 링크도 아니라서 어차피 못 읽어」. 맞는 말이라
+   ⓐ 「조각 10·신규사업전망」이라는 **내부 이름을 감추고** ⓑ 번호만 남겨 ⓒ 누르면 가게 했다.
+   ★ 없애지는 않는다 — 「지어내지 않았다」를 사람이 직접 확인할 수 있어야 하고,
+     정본 W5(출처 각주)가 요구하는 항목이다. #}
+{% macro ref(cite) %}
+  {%- set n = citation_number(cite) -%}
+  {# 내부 이름은 title에도 넣지 않는다. 화면에는 아래 출처 목록을 가리키는 번호만 필요하다(P-127). #}
+  {%- if n -%}<a class="ref" href="#src{{ n }}" title="출처 {{ n }}번">{{ n }}</a>{%- endif -%}
+{% endmacro %}
+
+{% macro requirements_block() %}
+  <h2><span class="no">5</span><span class="txt">{{ cell_labels['5'] }}</span></h2>
+  <p class="muted" style="margin-top:-4px">
+    공고 원문 그대로입니다. <strong>다듬지 않았습니다</strong> — 자소서에 그대로 옮겨 쓰시라고요.
+  </p>
+  {% if report.requirements %}
+    <ul>
+      {% for r in report.requirements %}<li>{{ r }}</li>{% endfor %}
+    </ul>
+  {% else %}
+    <div class="empty">
+      <span class="why">비어 있습니다</span> — 올려주신 공고에서 요구 조건을 뽑지 못했습니다
+    </div>
+  {% endif %}
+{% endmacro %}
+
+<div class="report">
+  {% set ns = namespace(shown_5=false) %}
+  {% for s in report.sections %}
+    {% if s.cell == '5' %}
+      {# 5번은 공고 원문이라 본문 문장 대신 요구 조건 목록을 그대로 놓는다 #}
+      {{ requirements_block() }}
+      {% set ns.shown_5 = true %}
+    {% else %}
+      <h2><span class="no">{{ s.cell }}</span><span class="txt">{{ s.title }}</span></h2>
+      {% if s.is_filled %}
+        {# 작가 AI가 이어 쓴 글 (P-110). 근거 대조 검증을 통과한 문장만 여기 온다.
+           ★ 원문은 «버리지 않고» 바로 아래에 접어서 같이 낸다 — 눈으로 대조할 수 있어야 한다. #}
+        {% if s.prose_lines %}
+          {# ★ 문자열 하나를 찍지 않는다. 검증을 통과한 문장마다 실제 출처 번호를
+             붙여야 어느 문장이 어느 원문에 기대는지 사용자가 대조할 수 있다(P-118). #}
+          <p class="prose">
+            {%- for text, cite in s.prose_lines -%}
+              {{ text }}{{ ref(cite) }}{% if not loop.last %} {% endif %}
+            {%- endfor -%}
+          </p>
+          {% if s.lines %}
+            <details class="rawsrc">
+              <summary>{{ raw_source_label }} ({{ s.lines|length }}문장) — {{ raw_source_note }}</summary>
+              <ul>
+                {% for text, cite in s.lines %}
+                  <li>{{ text }}{{ ref(cite) }}</li>
+                {% endfor %}
+              </ul>
+            </details>
+          {% endif %}
+        {% elif s.lines %}
+          {# 출처는 «눌러야» 보인다 (2026-08-16 사용자 지시) — 읽는 흐름을 끊지 않는다.
+             ★ 없애는 것이 아니라 접는 것이다. 근거 없는 문장을 내보내지 않는다는 원칙은 그대로다. #}
+          <ul>
+            {% for text, cite in s.lines %}
+              <li>{{ text }}{{ ref(cite) }}</li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+        {# 숫자는 문장으로 바꾸지 않고 표 그대로 낸다 (결정기록 D13) #}
+        {% for t in s.tables %}
+          <div class="numtable">
+            <div class="cap">
+              {{ t.caption }}{% if t.cite %}<span class="cite">〔{{ t.cite }}〕</span>{% endif %}
+            </div>
+            <div class="scroll">
+              <table class="{{ 'nums' if t.numeric else 'texts' }}">
+                <tr>{% for h in t.headers %}<th>{{ h }}</th>{% endfor %}</tr>
+                {% for row in t.rows %}
+                  <tr>
+                    {% for cell in row %}
+                      <td{% if t.numeric and not loop.first %} class="num"{% endif %}>{{ cell }}</td>
+                    {% endfor %}
+                  </tr>
+                {% endfor %}
+              </table>
+            </div>
+          </div>
+        {% endfor %}
+      {% else %}
+        <div class="empty">
+          <span class="why">비어 있습니다</span> —
+          {{ s.empty_reason or '해당 자료를 찾지 못했습니다' }}
+        </div>
+      {% endif %}
+    {% endif %}
+  {% endfor %}
+
+  {# 기록에 5번 칸 자체가 없던 경우에도 요구 조건은 빠뜨리지 않는다 #}
+  {% if not ns.shown_5 %}{{ requirements_block() }}{% endif %}
+</div>
+
+{# ── 출처 목록 — 본문 문장 뒤 번호가 여기를 가리킨다 (P-24 · D14-1) #}
+{% if report.citations %}
+<h2><span class="no">※</span><span class="txt">출처</span></h2>
+<p class="muted" style="margin-top:-4px">
+  본문 문장 옆의 작은 번호를 누르면 여기로 옵니다.
+  <strong>직접 확인하실 수 있게</strong> 날짜까지 적었습니다.
+</p>
+<div class="scroll">
+  <table class="texts">
+    <tr><th style="width:56px">#</th><th>무엇</th><th style="width:210px">언제</th></tr>
+    {% for c in report.citations %}
+    <tr id="src{{ c.number }}">
+      <td>[{{ c.number }}]</td>
+      <td>{{ c.label }}</td>
+      <td>
+        {%- if c.published_at %}{{ c.published_at }} 보도{% if c.domain %} · {{ c.domain }}{% endif %}
+        {%- elif c.disclosed_at %}{{ c.disclosed_at }} 공시{% if c.collected_at %} · 수집 {{ c.collected_at }}{% endif %}
+        {%- elif c.collected_at %}확인 {{ c.collected_at }}
+        {%- else %}—{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+{# ── 수집 현황 ───────────────────────────────────────────
+     칸별 채움표는 두지 않는다 — 본문의 「비어 있습니다 + 사유」와 완전히 겹친다.
+     소스별 현황은 남긴다. 이게 없으면 «우리 수집기가 고장난 것»과
+     «회사에 원래 자료가 없는 것»을 사용자가 구분할 수 없다.
+     (2026-08-15 사용자 결정) #}
+{% if report.sources %}
+<h2><span class="no">※</span><span class="txt">어디서 가져왔나</span></h2>
+<table>
+  <tr><th style="width:150px">소스</th><th style="width:110px">결과</th><th>내용</th></tr>
+  {% for s in report.sources %}
+  <tr>
+    <td>{{ s.name }}</td>
+    <td class="center">
+      {% if s.state == 'ok' %}<span class="state-ok">⭕ 찾음</span>
+      {% elif s.state == 'none' %}<span class="state-none">❌ 없음</span>
+      {% else %}<span class="state-failed">⚠️ 못 가져옴</span>{% endif %}
+    </td>
+    <td>{{ s.detail }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+<div class="btn-row">
+  <a class="btn" href="/download/{{ job.job_id }}" style="line-height:1.6">
+    워드로 내려받기
+  </a>
+  {# ⚠️ 버튼을 숨기는 것은 «권한»이 아니다 — 진짜 차단은 서버가 매 요청마다 한다.
+     여기 숨기는 것은 «관리자가 아닌 사람에게 못 쓸 버튼을 안 보여주는» 배려일 뿐이다. #}
+  {% if auth_is_admin %}
+    <form method="post" action="/notion/{{ job.job_id }}" style="display:inline">
+      <button type="submit" class="btn ghost">노션으로 보내기</button>
+    </form>
+  {% endif %}
+  <a class="btn ghost" href="/" style="line-height:1.6">다른 회사 조사하기</a>
+</div>
+
+{% if not auth_is_admin %}
+<p class="muted" style="margin-top:16px">
+  노션 보내기는 <strong>관리자만</strong> 쓸 수 있습니다.
+</p>
+{% endif %}
+{% endblock %}

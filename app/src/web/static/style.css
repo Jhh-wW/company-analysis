@@ -1,0 +1,926 @@
+/* 기업분석 도구 — 화면 공통 스타일
+   공통 화면은 기존 디자인을 유지한다. 새 홈페이지 디자인은 파일 끝의
+   `.home-page` 범위 안에서만 덮어써 결과·관리자 화면의 회귀를 막는다. */
+
+/* ══════════════════════════════════════════════════════
+   폰트 — ★ CDN이 아니라 «직접 얹는다»
+   ⚠️ 왜 자체 호스팅인가 — 이 링크는 **회사 인사팀이 연다.**
+     사내망이 외부 CDN(jsdelivr 등)을 막으면 디자인이 통째로 깨진다.
+     1MB를 안고 가는 편이 «열었더니 글꼴이 깨져 있는» 것보다 낫다.
+   ⚠️ 라이선스 — Freesentation·Prata 모두 **SIL Open Font License**로
+     상업적 사용·재배포가 허용된다 (2026-08-16 확인). 유료 폰트를 쓰지 않는다.
+   ══════════════════════════════════════════════════════ */
+@font-face {
+  font-family: "Freesentation";
+  src: url("/static/fonts/Freesentation-4Regular.woff2") format("woff2");
+  font-weight: 400; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: "Freesentation";
+  src: url("/static/fonts/Freesentation-5Medium.woff2") format("woff2");
+  font-weight: 500; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: "Freesentation";
+  src: url("/static/fonts/Freesentation-6SemiBold.woff2") format("woff2");
+  font-weight: 600; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: "Freesentation";
+  src: url("/static/fonts/Freesentation-7Bold.woff2") format("woff2");
+  font-weight: 700; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: "Prata";
+  src: url("/static/fonts/Prata-Regular.woff2") format("woff2");
+  font-weight: 400; font-style: normal; font-display: swap;
+}
+:root {
+  --ink: #222222;
+  --ink-strong: #1b1b1b;
+  --ink-2: #4f606b;
+  --ink-3: #637381;
+  --ink-4: #919eab;
+  --surface: #ffffff;
+  --paper: #fafafb;
+  --paper-2: #f2f4f6;
+  --line: #d8dce1;
+  --line-soft: #e9ecef;
+  --navy: #1b1b1b;
+  --navy-dark: #000000;
+  --navy-soft: #f2f4f6;
+  --navy-line: #d8dce1;
+  --ok: #2f6b4f;
+  --ok-bg: #eef4f1;
+  --part: #8a6a20;
+  --part-bg: #f7f3e9;
+  --no: #99413f;
+  --no-bg: #f7efef;
+  --radius: 4px;
+  --shadow: 0 1px 2px rgba(34, 34, 34, .04), 0 10px 30px -20px rgba(34, 34, 34, .35);
+  --font: "Freesentation", "Malgun Gothic", "맑은 고딕", -apple-system,
+          BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", system-ui, sans-serif;
+  --display: "Prata", Georgia, "Times New Roman", serif;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, "D2Coding", monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── 뼈대 ───────────────────────────────────────────── */
+.topbar {
+  background: var(--surface);
+  color: var(--ink-strong);
+  padding: 16px 26px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.topbar .brand {
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: -.03em;
+}
+.topbar .tag {
+  font-family: var(--display);
+  font-size: 10.5px;
+  color: var(--ink-4);
+  border: 1px solid var(--line);
+  background: transparent;
+  padding: 2px 9px;
+  border-radius: 99px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.topbar .spacer { flex: 1; }
+.topbar a { color: var(--ink-3); text-decoration: none; font-size: 13px; }
+.topbar a:hover { color: var(--ink-strong); text-decoration: underline; }
+
+.wrap { max-width: 780px; margin: 0 auto; padding: 52px 24px 110px; }
+.wrap.wide { max-width: 960px; }
+
+/* ★ 포트폴리오 톤 — 색 블록을 «채우지» 않고 얇은 선으로 나눈다.
+   원본(.pptx)에는 강조색으로 칠한 제목 띠가 한 장도 없다. 대신
+   큰 여백 + 가는 선 + 크기 대비로 위계를 만든다. */
+h1 {
+  font-size: 34px;
+  font-weight: 700;
+  color: var(--ink-strong);
+  letter-spacing: -.035em;
+  margin: 4px 0 6px;
+  line-height: 1.25;
+  text-wrap: balance;
+}
+h2 {
+  font-size: 19px;
+  font-weight: 600;
+  color: var(--ink-strong);
+  letter-spacing: -.03em;
+  margin: 40px 0 14px;
+  padding-bottom: 9px;
+  border-bottom: 1.5px solid var(--ink-strong);
+  line-height: 1.4;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+/* 칸 번호 — 포트폴리오 목차의 「01 · 02 · 03」 표기를 그대로 가져왔다 */
+h2 .no {
+  font-family: var(--display);
+  font-size: 15px;
+  font-weight: 400;
+  color: var(--ink-4);
+  letter-spacing: 0;
+  flex: none;
+}
+h2 .txt { flex: 1; }
+h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink-2);
+  margin: 24px 0 8px;
+  padding-left: 10px;
+  border-left: 2px solid var(--line);
+}
+p { margin: 0 0 12px; }
+.lede { color: var(--ink-2); margin-bottom: 22px; }
+.muted { color: var(--ink-3); font-size: 13px; }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 22px 24px;
+  box-shadow: var(--shadow);
+}
+.card + .card { margin-top: 16px; }
+
+/* ── 입력 폼 ────────────────────────────────────────── */
+.field { margin-bottom: 18px; }
+.field label {
+  display: block;
+  font-weight: 700;
+  font-size: 13.5px;
+  margin-bottom: 5px;
+}
+.field .hint { font-size: 12.5px; color: var(--ink-3); margin-bottom: 6px; }
+.field .req { color: var(--no); margin-left: 3px; }
+
+input[type="text"], textarea, select {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--navy-line);
+  border-radius: 5px;
+  font-family: var(--font);
+  font-size: 14.5px;
+  background: #fff;
+  color: var(--ink);
+}
+textarea { min-height: 150px; resize: vertical; line-height: 1.6; }
+input:focus, textarea:focus, select:focus {
+  outline: 2px solid var(--navy);
+  outline-offset: 1px;
+  border-color: var(--navy);
+}
+
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 600px) { .row2 { grid-template-columns: 1fr; } }
+
+/* ── 버튼 ───────────────────────────────────────────── */
+.btn {
+  display: inline-block;
+  padding: 11px 22px;
+  border: 1px solid var(--navy);
+  border-radius: 5px;
+  background: var(--navy);
+  color: #fff;
+  font-family: var(--font);
+  font-size: 14.5px;
+  font-weight: 700;
+  cursor: pointer;
+  text-decoration: none;
+  text-align: center;
+}
+.btn:hover { background: var(--navy-dark); }
+.btn.ghost { background: #fff; color: var(--navy); }
+.btn.ghost:hover { background: var(--navy-soft); }
+.btn.wide { width: 100%; }
+.btn-row { display: flex; gap: 10px; margin-top: 20px; }
+.btn-row .btn { flex: 1; }
+
+/* ── 확인 카드 ──────────────────────────────────────── */
+.company-card {
+  border: 2px solid var(--navy);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: #fff;
+}
+.company-card .head {
+  background: var(--navy-soft);
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--navy-line);
+}
+.company-card .legal { font-size: 21px; font-weight: 800; letter-spacing: -.02em; }
+.company-card .typed { font-size: 13px; color: var(--ink-3); margin-top: 2px; }
+.company-card .body { padding: 16px 20px; }
+.company-card dl { margin: 0; display: grid; grid-template-columns: 80px 1fr; gap: 8px 14px; }
+.company-card dt { color: var(--ink-3); font-size: 13px; }
+.company-card dd { margin: 0; font-size: 14px; }
+.company-card a { color: var(--navy); }
+
+.warn-line {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  background: var(--part-bg);
+  border: 1px solid var(--part);
+  border-radius: 5px;
+  padding: 10px 13px;
+  font-size: 13.5px;
+  color: var(--part);
+  margin-top: 12px;
+}
+.warn-line b { font-weight: 700; }
+
+/* ── 진행 화면 ──────────────────────────────────────── */
+.steps { list-style: none; padding: 0; margin: 0; }
+.steps li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-3);
+  font-size: 14.5px;
+}
+.steps li:last-child { border-bottom: 0; }
+.steps .mark {
+  flex: none;
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--line);
+  display: grid; place-items: center;
+  font-size: 12px; font-weight: 700;
+}
+.steps li.done { color: var(--ink); }
+.steps li.done .mark { background: var(--ok); border-color: var(--ok); color: #fff; }
+.steps li.current { color: var(--navy); font-weight: 700; }
+.steps li.current .mark {
+  border-color: var(--navy);
+  border-right-color: transparent;
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .steps li.current .mark { animation: none; border-right-color: var(--navy); }
+}
+
+/* ── 등급 라벨 ──────────────────────────────────────── */
+.grade {
+  display: flex;
+  gap: 11px;
+  align-items: flex-start;
+  border-radius: var(--radius);
+  padding: 14px 17px;
+  margin-bottom: 20px;
+  font-size: 14px;
+}
+.grade .icon { font-size: 18px; line-height: 1.2; flex: none; }
+.grade.complete { background: var(--ok-bg); border: 1px solid var(--ok); color: var(--ok); }
+.grade.partial  { background: var(--part-bg); border: 1px solid var(--part); color: var(--part); }
+.grade.incomplete { background: var(--no-bg); border: 1px solid var(--no); color: var(--no); }
+.grade b { font-weight: 800; }
+.grade ul { margin: 6px 0 0; padding-left: 18px; }
+
+/* ── 보고서 본문 ────────────────────────────────────── */
+.report ul { margin: 4px 0 12px; padding-left: 18px; }
+.report li { margin: 4px 0; }
+.cite {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 11.5px;
+  color: var(--ink-3);
+  font-family: var(--mono);
+}
+/* 근거 번호 (2026-08-16 사용자 지적: 「링크도 아니라서 어차피 못 읽어」).
+   ★ 「조각 10·신규사업전망」이라는 **내부 이름을 감추고 번호만** 남긴다 —
+     그 이름은 우리 안에서 쓰는 말이지 읽는 사람이 알 말이 아니다.
+   ★ **누르면 아래 출처표로 간다.** 거기엔 보도일·매체·공시일이 적혀 있어
+     사람이 «직접 확인»할 수 있다. 검증 AI가 하는 일과 별개다 —
+     AI 검증은 우리가 스스로 거는 검사이고, 이건 «읽는 사람이 거는» 검사다.
+   ★ 진짜 기업분석 보고서가 쓰는 방식(작은 위첨자 번호) 그대로다. */
+.ref {
+  font-family: var(--display);
+  font-size: 10px;
+  line-height: 1;
+  vertical-align: super;
+  color: var(--ink-4);
+  text-decoration: none;
+  margin-left: 3px;
+  padding: 0 1px;
+  border-bottom: 1px dotted var(--ink-4);
+}
+.ref:hover { color: var(--ink-strong); border-bottom-color: var(--ink-strong); }
+/* 눌러서 도착한 줄을 잠깐 짚어 준다 — 어디로 왔는지 모르면 링크가 소용없다 */
+tr:target > td { background: var(--paper-2); }
+tr:target > td:first-child { box-shadow: inset 3px 0 0 var(--ink-strong); }
+
+/* 작가 AI가 이어 쓴 글 (P-110) — 근거 대조 검증을 통과한 문장만 온다.
+   ★ 읽는 글이라 목록보다 줄 간격을 넉넉히 준다. */
+.prose {
+  margin: 4px 0 8px;
+  line-height: 1.85;
+  font-size: 15px;
+}
+/* 원문 접기 — ★ 원문을 «버리지 않았다»는 것이 눈에 보여야 한다 */
+.rawsrc {
+  margin: 0 0 14px;
+  border-left: 3px solid var(--line, #dde);
+  padding-left: 10px;
+}
+.rawsrc > summary {
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--ink-3);
+  padding: 3px 0;
+  user-select: none;
+}
+.rawsrc > summary:hover { color: var(--ink-1, #223); }
+.rawsrc ul { margin: 6px 0 4px; }
+.rawsrc li { font-size: 13.5px; color: var(--ink-2, #445); }
+
+.empty {
+  background: var(--no-bg);
+  border: 1px dashed #d99;
+  border-radius: 4px;
+  padding: 9px 12px;
+  margin: 4px 0 12px;
+  font-size: 13.5px;
+}
+.empty .why { color: var(--no); font-weight: 700; }
+
+/* ── 표 ─────────────────────────────────────────────── */
+table { width: 100%; border-collapse: collapse; margin: 8px 0 14px; font-size: 13.5px; }
+th, td { border: 1px solid var(--navy-line); padding: 7px 10px; text-align: left; vertical-align: top; }
+th { background: var(--navy-soft); font-weight: 700; }
+td.center { text-align: center; }
+.state-ok { color: var(--ok); font-weight: 700; }
+.state-none { color: var(--no); font-weight: 700; }
+.state-failed { color: var(--part); font-weight: 700; }
+
+/* ── 데모 안내 ──────────────────────────────────────── */
+.demo-note {
+  background: #fff;
+  border: 1px solid var(--navy-line);
+  border-left: 3px solid var(--navy);
+  border-radius: 5px;
+  padding: 13px 16px;
+  margin-bottom: 20px;
+  font-size: 13.5px;
+}
+.demo-note .t { font-weight: 700; margin-bottom: 4px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.chip {
+  font-size: 12.5px;
+  padding: 4px 11px;
+  border: 1px solid var(--navy-line);
+  border-radius: 99px;
+  background: #fff;
+  cursor: pointer;
+  font-family: var(--font);
+  color: var(--ink-2);
+}
+.chip:hover { background: var(--navy-soft); border-color: var(--navy); }
+.chip.report { border-color: var(--ok); color: var(--ok); }
+
+/* ── 멈춤 화면 ──────────────────────────────────────── */
+.stopped-icon { font-size: 34px; line-height: 1; margin-bottom: 8px; }
+
+:focus-visible { outline: 2px solid var(--navy); outline-offset: 2px; }
+
+/* 「실조사」 배지 — 데모와 확실히 구별되어야 한다. 돈이 나가는 상태이기 때문이다.
+   ★ 회색 팔레트로 옮기면서도 **이 배지만은 칠한다** — 여기서 색을 빼면
+     「지금 돈이 나가는 모드인가」를 훑어보고 알 수 없다. 안전에 관한 표시다. */
+.tag.real {
+  background: var(--ink-strong);
+  color: #fff;
+  border-color: var(--ink-strong);
+  letter-spacing: -.01em;
+  text-transform: none;
+  font-family: var(--font);
+  font-weight: 600;
+}
+
+/* ── 숫자 표 (결정기록 D13) ────────────────────────────
+   재무·회계는 문장으로 바꾸지 않고 표 그대로 낸다.
+   숫자가 많아 가로로 길어지므로 «표만» 가로로 밀리게 한다 — 페이지는 안 밀린다. */
+.numtable { margin: 10px 0 18px; }
+.numtable .cap {
+  font-size: 13px;
+  color: var(--ink-2);
+  margin-bottom: 6px;
+}
+.numtable .scroll { overflow-x: auto; }
+.numtable table { margin: 0; min-width: 380px; }
+.numtable td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 글자 표(8번 교차표) — 줄바꿈을 살리고 열이 찌그러지지 않게 폭을 준다.
+   ★ 숫자 표의 nowrap을 글자 표에 걸면 첫 열이 한 글자 폭이 된다. 그래서 갈라 둔다. */
+.numtable td { vertical-align: top; white-space: pre-line; }
+.numtable table.texts { min-width: 640px; }
+.numtable table.texts td:first-child { width: 38%; }
+.numtable table.texts td:last-child { width: 90px; white-space: nowrap; }
+.numtable td.num { white-space: nowrap; }
+
+/* ── 로그인 상태 조각 (topbar에 끼움, _auth_status.html) ─
+   상단 바가 흰색이므로 로그인 글자도 현재 회색 팔레트로 맞춘다. */
+.auth-status { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.auth-status .auth-email { color: var(--ink-2); }
+.auth-status a { color: var(--ink-2); text-decoration: none; }
+.auth-status a:hover { color: var(--ink-strong); text-decoration: none; }
+.auth-status .auth-action {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-weight: 600;
+}
+.auth-status .auth-action:hover {
+  border-color: var(--ink-4);
+  background: var(--paper-2);
+}
+/* 「관리자」 배지 — 「실조사」 배지(.tag.real)와 헷갈리면 안 된다.
+   ★ 회색 팔레트에서는 «칠하지 않고 테두리만» 줘서 구별한다 —
+     칠한 것(실조사)과 안 칠한 것(관리자)의 대비가 색상 대비보다 또렷하다. */
+.tag.admin {
+  background: transparent;
+  color: var(--ink-2);
+  border: 1px solid var(--ink-4);
+  text-transform: none;
+  font-family: var(--font);
+  font-weight: 600;
+  letter-spacing: -.01em;
+}
+
+/* ══════════════════════════════════════════════════════════
+   품질 대시보드 (08_관측) — 화면 1장 · 영역 6개
+   dashboard.html 전용. 위 규칙은 손대지 않고 아래에만 덧붙인다.
+   ══════════════════════════════════════════════════════════ */
+
+/* 표가 10열까지 가는 화면이라 기본 wide(940px)보다 넓게 쓴다 (기존 .wrap.wide는 안 건드림) */
+.wrap.dash { max-width: 1180px; }
+
+/* ── 막대 (CSS만으로 그리는 비율 막대 — 외부 차트 라이브러리 없음) ── */
+.bar { flex: 1; display: inline-block; height: 8px; background: var(--navy-soft);
+  border-radius: 99px; overflow: hidden; vertical-align: middle; }
+.bar i { display: block; height: 100%; background: var(--navy); border-radius: 99px; }
+
+/* ── 한눈에 보는 상단 요약 (① 서비스 상태의 하이라이트) ── */
+.dash-hero { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
+.hero-status { display: flex; align-items: center; gap: 10px; padding-right: 18px; border-right: 1px solid var(--line); }
+.hero-status .icon { font-size: 26px; }
+.hero-status.bad b { color: var(--no); }
+.hero-status.ok b { color: var(--ok); }
+.hero-nums { display: flex; gap: 26px; flex-wrap: wrap; flex: 1; }
+.hero-nums div { display: flex; flex-direction: column; }
+.hero-nums b { font-size: 19px; letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+.hero-nums span { font-size: 12px; color: var(--ink-3); }
+@media (max-width: 600px) {
+  .hero-status { border-right: 0; border-bottom: 1px solid var(--line); padding: 0 0 12px; width: 100%; }
+}
+
+/* ── 미측정 표시 (회색 ⚪) — 「비어 있습니다」(.empty, 빨강)와 다르다.
+   .empty는 «있어야 하는데 없다»(나쁨), .unmeasured는 «아직 잴 방법이 없다»(중립)이다. */
+.unmeasured { display: flex; gap: 8px; align-items: flex-start; background: var(--navy-soft);
+  border: 1px dashed var(--navy-line); border-radius: 5px; padding: 9px 12px;
+  font-size: 13.5px; color: var(--ink-2); }
+.unmeasured b { color: var(--ink); }
+.unmeasured.block { display: block; margin: 10px 0 18px; }
+.unmeasured.block ul { margin: 6px 0 0; padding-left: 18px; }
+
+/* ── 「0건 고정」 위반 등 심각한 경고 — 기존 .warn-line(주의색)의 빨강 변형 */
+.warn-line.crit { background: var(--no-bg); border-color: var(--no); color: var(--no); }
+
+/* ── 지표 행 (② 보고서 품질 · ②-b AI 판정 검증) ── */
+.metric-row { border: 1px solid var(--line); border-radius: 5px; padding: 12px 15px;
+  margin-bottom: 10px; background: #fff; }
+.metric-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.metric-name { font-weight: 700; font-size: 14.5px; }
+.metric-std { font-size: 12px; color: var(--ink-3); }
+.metric-badges { margin-left: auto; display: flex; align-items: center; gap: 4px; }
+.metric-badges .arrow { color: var(--ink-3); font-size: 11px; }
+.metric-val { display: flex; align-items: center; gap: 10px; }
+.metric-pct { font-weight: 700; font-size: 14px; min-width: 42px; text-align: right;
+  font-variant-numeric: tabular-nums; }
+.metric-threshold { margin: 6px 0 0; font-size: 12px; }
+
+/* 산출 주체 배지 — 코드/AI/사람. 어디에 AI가 닿는지 한눈에 보이게 색을 분리한다. */
+.badge { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 99px; border: 1px solid transparent; }
+.badge-code { background: var(--navy-soft); color: var(--navy); border-color: var(--navy-line); }
+.badge-ai { background: var(--part-bg); color: var(--part); border-color: var(--part); }
+.badge-human { background: var(--ok-bg); color: var(--ok); border-color: var(--ok); }
+
+/* ── 단계별 이탈 (③) — 막대(<summary>)를 누르면 상세가 펼쳐진다. 순수 HTML, JS 없음. ── */
+.funnel-row { border: 1px solid var(--line); border-radius: 5px; margin-bottom: 8px; background: #fff; }
+.funnel-row summary { display: flex; align-items: center; gap: 10px; padding: 10px 14px; cursor: pointer; }
+.funnel-row .sig { font-size: 14px; }
+.funnel-row .fname { min-width: 150px; font-weight: 700; font-size: 13.5px; }
+.funnel-row .fcount { font-size: 12.5px; color: var(--ink-3); white-space: nowrap; }
+.funnel-row .funnel-detail { padding: 10px 14px 12px; font-size: 13.5px; color: var(--ink-2);
+  border-top: 1px solid var(--line); }
+
+/* ── 완성도 분포 (⑤) — 완성/부분완성/미완성 비율 막대 ── */
+.grade-split { margin: 10px 0 6px; }
+.grade-bar { display: flex; height: 14px; border-radius: 99px; overflow: hidden; background: var(--navy-soft); }
+.grade-bar i { display: block; height: 100%; }
+.grade-bar i.ok { background: var(--ok); }
+.grade-bar i.part { background: var(--part); }
+.grade-bar i.no { background: var(--no); }
+.grade-legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; font-size: 13px; color: var(--ink-2); }
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 5px; vertical-align: middle; }
+.dot.ok { background: var(--ok); }
+.dot.part { background: var(--part); }
+.dot.no { background: var(--no); }
+
+/* ── 칸별 채움률 (⑤, D11) — 세는 칸 6개가 각각 몇 %에서 채워지는지 ── */
+.fillbars { margin-top: 8px; }
+.fillbar-row { display: flex; align-items: center; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
+.fillbar-row:last-child { border-bottom: 0; }
+.fillbar-label { width: 190px; flex: none; }
+.fillbar-pct { width: 42px; text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ── 개별 요청 조회 (⑥) — CSS만으로 만든 탭 (라디오 트릭, JS 없음) ── */
+.tabbar { margin-top: 8px; }
+.tabbar input[type="radio"] { position: absolute; opacity: 0; pointer-events: none; }
+.tabbar label { display: inline-block; padding: 6px 16px; border: 1px solid var(--navy-line);
+  border-radius: 99px; margin-right: 6px; margin-bottom: 10px; font-size: 13px; cursor: pointer; color: var(--ink-2); }
+.tabbar input:checked + label { background: var(--navy); border-color: var(--navy); color: #fff; }
+#tab-listed:checked ~ .scroll .recent-table tbody tr:not(.row-listed) { display: none; }
+#tab-unlisted:checked ~ .scroll .recent-table tbody tr:not(.row-unlisted) { display: none; }
+
+/* 표가 10열이라 좁은 화면에서는 표만 가로로 밀리게 한다 (기존 .numtable .scroll과 같은 목적,
+   여기는 .numtable 밖에서 쓰므로 별도로 켠다) */
+.tabbar .scroll { overflow-x: auto; }
+.recent-table th, .recent-table td { font-size: 12.5px; }
+.cell-chip { display: inline-block; font-size: 11.5px; padding: 2px 7px; border-radius: 4px;
+  background: var(--navy-soft); color: var(--navy); margin: 1px 3px 1px 0; }
+.cell-chip.suspect { background: var(--part-bg); color: var(--part); }
+
+/* ══════════════════════════════════════════════════════════
+   홈페이지 — 2026-08-17 기업분석 UI 기준
+   ----------------------------------------------------------
+   이 범위 밖의 결과·확인·관리자 화면은 기존 스타일을 그대로 쓴다.
+   기준: 무채색, 24px 컨테이너, 18px 상호작용 요소, 오류/삭제만 빨강.
+   외부 CDN 없이 이미 포함된 Freesentation을 Geist 계열의 로컬 대체로 쓴다.
+   #737373은 #f5f5f5 위 작은 글자에서 대비가 부족해 #5f5f5f로 보정했다.
+   ══════════════════════════════════════════════════════════ */
+.home-page {
+  --ink: #0a0a0a;
+  --ink-strong: #0a0a0a;
+  --ink-2: #171717;
+  --ink-3: #5f5f5f;
+  --ink-4: #5f5f5f;
+  --surface: #ffffff;
+  --paper: #f5f5f5;
+  --paper-2: #fafafa;
+  --line: #e5e5e5;
+  --line-soft: #e5e5e5;
+  --navy: #0a0a0a;
+  --navy-dark: #171717;
+  --navy-soft: #f5f5f5;
+  --navy-line: #e5e5e5;
+  --ok: #171717;
+  --ok-bg: #fafafa;
+  --part: #5f5f5f;
+  --part-bg: #f5f5f5;
+  --no: #e7000b;
+  --no-bg: #fff2f3;
+  /* 원본 빨강은 아이콘·선에 유지하고, 14px 오류 글자는 AA 대비를 넘긴다. */
+  --home-error-text: #d0000a;
+  --radius: 24px;
+  --home-card-radius: 24px;
+  --home-control-radius: 18px;
+  --home-nested-radius: 10px;
+  --shadow: 0 0 0 1px rgba(23, 23, 23, .05),
+            0 1px 3px rgba(0, 0, 0, .10),
+            0 1px 2px -1px rgba(0, 0, 0, .10);
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "Freesentation", "Malgun Gothic", "맑은 고딕", -apple-system,
+               BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  text-rendering: optimizeLegibility;
+}
+
+.home-page .topbar {
+  min-height: 64px;
+  padding: 12px 24px;
+  gap: 10px;
+  background: var(--surface);
+  border-color: var(--line);
+}
+.home-page .topbar .brand {
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -.025em;
+}
+.home-page .topbar .tag {
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--home-control-radius);
+  background: var(--paper);
+  color: var(--ink-2);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.home-page .topbar .tag.real {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: #fafafa;
+}
+.home-page .topbar a {
+  color: var(--ink-3);
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+}
+.home-page .topbar a:hover { color: var(--ink); text-decoration: none; }
+.home-page .auth-status { min-width: 0; }
+.home-page .auth-status .auth-email {
+  display: block;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.home-page .auth-status .auth-action {
+  min-height: 36px;
+  padding: 6px 12px;
+  border-color: var(--line);
+  border-radius: var(--home-control-radius);
+  background: var(--paper);
+  font-weight: 500;
+}
+.home-page .auth-status .auth-action:hover {
+  border-color: #cfcfcf;
+  background: var(--paper-2);
+}
+
+.home-page .wrap.home {
+  max-width: 900px;
+  padding: 64px 24px 112px;
+}
+.home-page h1 {
+  max-width: 720px;
+  margin: 0 0 32px;
+  color: var(--ink);
+  font-size: clamp(36px, 6vw, 48px);
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -.05em;
+  word-break: keep-all;
+  text-wrap: balance;
+}
+
+.home-page .card {
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--home-card-radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.home-page .field { margin-bottom: 20px; }
+.home-page .field label {
+  margin-bottom: 8px;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 500;
+}
+.home-page .field .hint {
+  margin-bottom: 8px;
+  color: var(--ink-3);
+  font-size: 13px;
+  line-height: 1.56;
+}
+.home-page .field .req { color: var(--home-error-text); }
+.home-page input[type="text"],
+.home-page textarea,
+.home-page select {
+  padding: 11px 14px;
+  border: 1px solid transparent;
+  border-radius: var(--home-control-radius);
+  background: var(--paper);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 14px;
+  transition: background-color .15s ease, border-color .15s ease;
+}
+.home-page input::placeholder,
+.home-page textarea::placeholder {
+  color: var(--ink-3);
+  opacity: 1;
+}
+.home-page input:focus,
+.home-page textarea:focus,
+.home-page select:focus {
+  border-color: var(--line);
+  background: var(--surface);
+  outline: 3px solid var(--ink);
+  outline-offset: 2px;
+}
+.home-page .row2 { gap: 16px; }
+
+.home-page .btn {
+  display: inline-flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: center;
+  padding: 9px 16px;
+  border: 1px solid var(--ink);
+  border-radius: var(--home-control-radius);
+  background: var(--ink);
+  color: #fafafa;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  transition: background-color .15s ease, border-color .15s ease;
+}
+.home-page .btn:hover { background: var(--navy-dark); }
+
+.home-page .demo-note {
+  margin-bottom: 20px;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--home-card-radius);
+  background: var(--surface);
+  color: var(--ink-3);
+  font-size: 14px;
+  box-shadow: none;
+}
+.home-page .demo-note .t { color: var(--ink); font-weight: 600; }
+.home-page .chips { gap: 8px; margin-top: 12px; }
+.home-page .chip {
+  min-height: 34px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--home-control-radius);
+  background: var(--paper);
+  color: var(--ink-2);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+}
+.home-page .chip:hover {
+  border-color: #cfcfcf;
+  background: var(--paper-2);
+  color: var(--ink);
+}
+.home-page .chip.report {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: #fafafa;
+}
+.home-page .chip.report:hover { background: var(--navy-dark); }
+
+/* `_posting_image_field.html`의 인라인 호환 스타일보다 구체적으로 덮어쓴다. */
+.home-page .posting-composer {
+  border: 1px solid transparent;
+  border-radius: var(--home-control-radius);
+  background: var(--paper);
+}
+.home-page .posting-composer:focus-within {
+  border-color: var(--line);
+  outline: 3px solid var(--ink);
+  outline-offset: 2px;
+}
+.home-page .posting-composer textarea {
+  min-height: 150px;
+  padding: 14px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  outline: none;
+}
+.home-page .posting-composer textarea:focus { outline: none; }
+.home-page .posting-composer.dragging {
+  border-color: var(--ink);
+  outline: 3px dashed var(--ink);
+  outline-offset: 2px;
+}
+.home-page .posting-image-error {
+  padding: 10px 14px;
+  background: var(--no-bg);
+  color: var(--home-error-text);
+  font-size: 14px;
+}
+.home-page .posting-image-thumb {
+  border-color: var(--line);
+  border-radius: var(--home-nested-radius);
+  background: var(--paper-2);
+}
+.home-page .posting-image-thumb button {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--home-control-radius);
+  background: var(--no);
+  color: #fff;
+}
+.home-page .posting-image-bar {
+  padding: 10px 14px;
+  border-color: var(--line);
+  background: var(--paper-2);
+}
+.home-page .posting-image-attach {
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--home-control-radius);
+  background: var(--surface);
+  color: var(--ink-2);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+}
+.home-page .posting-image-attach:hover {
+  border-color: #cfcfcf;
+  background: var(--paper);
+  color: var(--ink);
+}
+.home-page .posting-image-clear { color: var(--home-error-text); }
+.home-page .grade.incomplete {
+  border-color: var(--no);
+  border-radius: var(--home-card-radius);
+  background: var(--no-bg);
+  color: var(--home-error-text);
+}
+
+.home-page :focus-visible {
+  outline: 3px solid var(--ink);
+  outline-offset: 3px;
+}
+
+@media (max-width: 700px) {
+  .home-page .topbar {
+    min-height: 0;
+    padding: 12px 16px;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .home-page .topbar .spacer { display: none; }
+  .home-page .topbar > a[href="/"] { margin-left: auto; }
+  .home-page .auth-status {
+    width: 100%;
+    justify-content: flex-end;
+  }
+  .home-page .auth-status .auth-email { max-width: min(58vw, 240px); }
+  .home-page .wrap.home { padding: 48px 16px 80px; }
+  .home-page h1 {
+    margin-bottom: 24px;
+    font-size: clamp(32px, 10vw, 42px);
+  }
+  .home-page .card { padding: 20px; }
+  .home-page input[type="text"],
+  .home-page textarea,
+  .home-page select,
+  .home-page .posting-composer textarea {
+    font-size: 16px;
+  }
+}
+
+@media (max-width: 420px) {
+  .home-page .topbar > a[href="/"] { display: none; }
+  .home-page .auth-status { justify-content: space-between; }
+  .home-page .auth-status .auth-email { max-width: 50vw; }
+  .home-page .card,
+  .home-page .demo-note { padding: 18px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-page input[type="text"],
+  .home-page textarea,
+  .home-page select,
+  .home-page .btn { transition: none; }
+}

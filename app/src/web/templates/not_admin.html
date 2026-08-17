@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}관리자 전용 화면입니다 · 기업분석{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="stopped-icon">🔒</div>
+  <h1>관리자만 볼 수 있는 화면입니다</h1>
+  <p class="lede" style="margin-bottom:14px">
+    {% if auth_email %}
+      <strong>{{ auth_email }}</strong>(으)로 로그인하셨지만, 이 계정은 관리자 이메일 목록에 없습니다.
+    {% else %}
+      관리자 화면에 들어가려면 등록된 관리자 계정으로 로그인해주세요.
+    {% endif %}
+  </p>
+
+  <div class="warn-line" style="background:var(--navy-soft);border-color:var(--navy-line);color:var(--ink-2)">
+    <span>ℹ️</span>
+    <span>
+      {% if auth_email %}
+        다른 관리자 계정으로 다시 로그인하시려면 먼저 로그아웃해주세요.
+      {% elif auth_login_available %}
+        로그인 뒤에도 관리자 이메일인지 서버에서 다시 확인합니다.
+      {% else %}
+        현재 서버에는 구글 로그인이 설정되지 않았습니다. 서버 관리자에게 설정을 요청해주세요.
+      {% endif %}
+    </span>
+  </div>
+
+  <div class="btn-row" style="margin-top:20px">
+    {% if auth_email %}
+      <a class="btn ghost" href="/auth/logout">로그아웃</a>
+    {% else %}
+      <a class="btn" href="/auth/login">
+        {% if auth_login_available %}구글 계정으로 로그인{% else %}로그인 설정 상태 보기{% endif %}
+      </a>
+    {% endif %}
+    <a class="btn" href="/">처음으로</a>
+  </div>
+</div>
+{% endblock %}
