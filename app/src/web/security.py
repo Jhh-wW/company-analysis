@@ -7,12 +7,6 @@ from typing import Any
 
 from starlette.responses import PlainTextResponse
 
-from src.features.posting_image.constants import (
-    MAX_IMAGE_BYTES,
-    MAX_IMAGE_COUNT,
-    MAX_TOTAL_BYTES,
-)
-
 ASGIApp = Callable[
     [
         dict[str, Any],
@@ -25,19 +19,9 @@ ASGIApp = Callable[
 # URL 인코딩된 한글은 글자 하나가 여러 바이트로 늘어난다. 공고 원문 10만 자를
 # 충분히 받되, 정상 폼이라고 보기 어려운 큰 본문은 파싱 전에 닫는다.
 FORM_BODY_MAX_BYTES = 1 * 1024 * 1024
-
-# 이미지 합계 + multipart 머리말·텍스트 필드 1MiB 여유. 이미지 자체 한도는 별도로
-# 더 엄격하게 검사한다. 이 값은 요청 전체를 지키는 바깥 울타리다.
-def _run_body_limit(image_bytes: int, image_count: int, total_bytes: int) -> int:
-    """이미지를 하나라도 0으로 껐으면 큰 multipart 여유도 함께 닫는다."""
-    if image_bytes <= 0 or image_count <= 0 or total_bytes <= 0:
-        return FORM_BODY_MAX_BYTES
-    return total_bytes + FORM_BODY_MAX_BYTES
-
-
-RUN_BODY_MAX_BYTES = _run_body_limit(
-    MAX_IMAGE_BYTES, MAX_IMAGE_COUNT, MAX_TOTAL_BYTES
-)
+# 회사 분석 `/run`도 텍스트 폼뿐이다. 레거시 multipart 형식에만 큰 예외를 주면
+# 사라진 이미지 입력을 통해 공개 경로가 불필요한 메모리를 받게 된다.
+RUN_BODY_MAX_BYTES = FORM_BODY_MAX_BYTES
 
 # 관리자 폼과 로그아웃은 큰 본문이 필요 없다.
 DEFAULT_MUTATION_BODY_MAX_BYTES = 64 * 1024
@@ -70,17 +54,7 @@ def body_limit_for(scope: dict[str, Any]) -> int | None:
         return None
     path = str(scope.get("path", ""))
     if path == "/run":
-        # 큰 여유는 이미지가 실제로 들어갈 multipart 한 종류에만 준다. CSRF
-        # 검사 전에 폼 파서가 실행되므로 일반 폼·이상한 형식까지 13MiB를 허용하면
-        # 공개 전환 뒤 불필요한 메모리 공격면이 생긴다.
-        content_types = [
-            raw_value.decode("latin-1").split(";", 1)[0].strip().lower()
-            for raw_name, raw_value in scope.get("headers", [])
-            if raw_name.lower() == b"content-type"
-        ]
-        if content_types == ["multipart/form-data"]:
-            return RUN_BODY_MAX_BYTES
-        return FORM_BODY_MAX_BYTES
+        return RUN_BODY_MAX_BYTES
     if path in {"/confirm", "/reject"}:
         return FORM_BODY_MAX_BYTES
     return DEFAULT_MUTATION_BODY_MAX_BYTES

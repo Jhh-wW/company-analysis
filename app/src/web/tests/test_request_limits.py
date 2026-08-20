@@ -22,7 +22,6 @@ from src.web.security import (
     FORM_BODY_MAX_BYTES,
     RUN_BODY_MAX_BYTES,
     RequestBodyLimitMiddleware,
-    _run_body_limit,
     body_limit_for,
 )
 
@@ -95,16 +94,6 @@ def _run_asgi_request(
     asyncio.run(RequestBodyLimitMiddleware(downstream)(scope, receive, send))
     status = next(item["status"] for item in sent if item["type"] == "http.response.start")
     return called, status
-
-
-@pytest.mark.parametrize(
-    "image_bytes,image_count,total_bytes",
-    [(0, 4, 12), (5, 0, 12), (5, 4, 0)],
-)
-def test_이미지를_0으로_끄면_run도_글자폼_크기로_줄인다(
-    image_bytes, image_count, total_bytes
-):
-    assert _run_body_limit(image_bytes, image_count, total_bytes) == FORM_BODY_MAX_BYTES
 
 
 def test_content_length가_없어도_실제_본문을_세어_413으로_막는다():
@@ -191,7 +180,7 @@ def test_이상한_content_length도_실제_본문_계수로_우회하지_못한
     assert status == 413
 
 
-def test_run과_confirm은_용도에_맞는_서로_다른_상한을_쓴다():
+def test_run과_confirm은_같은_1MiB_상한을_쓴다():
     assert body_limit_for({"type": "http", "method": "POST", "path": "/confirm"}) == FORM_BODY_MAX_BYTES
     multipart_scope = {
         "type": "http",
@@ -201,7 +190,7 @@ def test_run과_confirm은_용도에_맞는_서로_다른_상한을_쓴다():
     }
     assert body_limit_for(multipart_scope) == RUN_BODY_MAX_BYTES
     assert body_limit_for({"type": "http", "method": "POST", "path": "/run"}) == FORM_BODY_MAX_BYTES
-    assert RUN_BODY_MAX_BYTES == image_constants.MAX_TOTAL_BYTES + 1024 * 1024
+    assert RUN_BODY_MAX_BYTES == FORM_BODY_MAX_BYTES
 
 
 @pytest.mark.parametrize(
@@ -215,9 +204,43 @@ def test_run과_confirm은_용도에_맞는_서로_다른_상한을_쓴다():
         ],
     ],
 )
-def test_run의_multipart가_아닌_본문은_1MiB만_받는다(headers):
+def test_run은_본문형식과_무관하게_1MiB만_받는다(headers):
     scope = {"type": "http", "method": "POST", "path": "/run", "headers": headers}
     assert body_limit_for(scope) == FORM_BODY_MAX_BYTES
+
+
+def test_run의_13MiB_multipart는_파싱전에_413으로_막는다():
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/run",
+            data={"company": "우리엔", "region": "서울"},
+            files={"posting_images": ("legacy.png", b"x" * (13 * 1024 * 1024))},
+        )
+
+    assert response.status_code == 413
+
+
+def test_run의_content_length없는_streaming초과도_413으로_막는다():
+    called, status = _run_asgi_request(
+        path="/run",
+        chunks=[b"a" * FORM_BODY_MAX_BYTES, b"b"],
+        headers=[(b"content-type", b"multipart/form-data; boundary=legacy")],
+    )
+
+    assert called
+    assert status == 413
+
+
+def test_run의_정상_확인폼은_1MiB_아래에서_진행한다(monkeypatch):
+    monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
+    with TestClient(main.app) as client:
+        response = _confirmed_demo_run(
+            client,
+            {"company": "우리엔", "region": "서울"},
+        )
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/progress/")
 
 
 def test_DELETE도_본문_상한을_건너뛰지_못한다():
