@@ -9,7 +9,7 @@ from io import BytesIO
 import pytest
 from PIL import Image
 
-from src.core.constants import AI_COST_KRW_PER_USD
+from src.core.pricing import AI_COST_KRW_PER_USD, usage_cost_krw
 from src.features.budget import provider_budget
 from src.features.posting_image import constants, logic
 
@@ -58,15 +58,15 @@ def test_OCR_빈응답도_이미_쓴_비용을_버리지_않는다():
 
 def test_haiku_사용량을_공통단가와_환율로_계산한다():
     # 입력·출력 각 100만 토큰이라는 단순 경계값이면 1달러+5달러다.
-    assert logic._usage_cost_krw(  # noqa: SLF001 — 비용 계산 회귀를 직접 고정한다
+    assert usage_cost_krw(
         constants.DEFAULT_EXTRACT_MODEL, 1_000_000, 1_000_000
     ) == 6 * AI_COST_KRW_PER_USD
 
 
 def test_dated_model_snapshot_uses_its_exact_alias_price():
-    assert logic._usage_cost_krw(  # noqa: SLF001 - 가격 경계를 직접 고정한다
+    assert usage_cost_krw(
         f"{constants.DEFAULT_EXTRACT_MODEL}-20251001", 1_000_000, 1_000_000
-    ) == logic._usage_cost_krw(  # noqa: SLF001 - 같은 별칭 단가여야 한다
+    ) == usage_cost_krw(
         constants.DEFAULT_EXTRACT_MODEL, 1_000_000, 1_000_000
     )
 
@@ -104,7 +104,7 @@ def test_응답_JSON_파싱실패여도_usage_비용을_보존한다(monkeypatch
     result = logic.default_extract([_png()])
 
     assert result.text == ""
-    assert result.cost_krw == logic._usage_cost_krw(
+    assert result.cost_krw == usage_cost_krw(
         constants.DEFAULT_EXTRACT_MODEL,
         usage.input_tokens,
         usage.output_tokens,
@@ -121,7 +121,7 @@ def test_응답_JSON이_객체가_아니어도_usage_비용을_보존한다(monk
     result = logic.default_extract([_png()])
 
     assert result.text == ""
-    assert result.cost_krw == logic._usage_cost_krw(
+    assert result.cost_krw == usage_cost_krw(
         constants.DEFAULT_EXTRACT_MODEL,
         usage.input_tokens,
         usage.output_tokens,
@@ -145,7 +145,7 @@ def test_응답_text_블록이_없어도_usage_비용을_보존한다(monkeypatc
     result = logic.default_extract([_png()])
 
     assert result.text == ""
-    assert result.cost_krw == logic._usage_cost_krw(
+    assert result.cost_krw == usage_cost_krw(
         constants.DEFAULT_EXTRACT_MODEL,
         usage.input_tokens,
         usage.output_tokens,
@@ -167,7 +167,7 @@ def test_응답_refusal이어도_usage_비용을_보존한다(monkeypatch):
     result = logic.default_extract([_png()])
 
     assert result.text == ""
-    assert result.cost_krw == logic._usage_cost_krw(
+    assert result.cost_krw == usage_cost_krw(
         constants.DEFAULT_EXTRACT_MODEL,
         usage.input_tokens,
         usage.output_tokens,

@@ -257,7 +257,7 @@ def _begin_paid_phase(
     run_id: str,
     phase: str,
     share_key: str,
-    cap_krw: float = 3000.0,
+    cap_krw: float,
     requested_cost_krw: float | None = None,
 ) -> Optional[PaidPhase]:
     """DB 표식과 active 메모리를 요청 스레드 사이에서도 한 전이로 시작한다."""

@@ -40,12 +40,14 @@ from typing import Any, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
-for p in (SRC_DIR, PROJECT_ROOT / "tools"):
+APP_DIR = PROJECT_ROOT.parent / "app"
+for p in (APP_DIR, SRC_DIR, PROJECT_ROOT / "tools"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
 import anthropic  # noqa: E402
 
+from src.core import pricing as ai_pricing  # noqa: E402
 from core.env import load_env  # noqa: E402
 from core.logging_util import log_step  # noqa: E402
 from core.paths import PUBLIC_ORG_REGISTRY  # noqa: E402
@@ -78,8 +80,6 @@ OCR_TEXT_DIR = LOCAL_DATA_DIR / "ocr_samples" / "extracted" / "claude-haiku-4-5"
 RUN_ID = "파일럿_야간50"
 
 MODEL = "claude-haiku-4-5"          # 확정 운영 모델 (3단 조합·비용 목표 정합)
-PRICE_IN, PRICE_OUT = 1.0, 5.0      # USD / MTok
-KRW_PER_USD = 1400
 BUDGET_STOP_USD = 8.0
 AI_NAME_RETRY_MAX = 5               # 층2 재시도 상한 (OWASP LLM06 가드레일)
 AUDIT_WINDOW_YEARS = 3              # 조건 2 창 (P-07 잠정 3년)
@@ -168,10 +168,14 @@ def _ask(client: anthropic.Anthropic, prompt: str, schema: dict[str, Any],
         )
     except anthropic.APIError as e:
         return None, {"error": type(e).__name__, "elapsed": round(time.perf_counter() - t0, 1)}
-    cost = (resp.usage.input_tokens * PRICE_IN + resp.usage.output_tokens * PRICE_OUT) / 1e6
+    cost_krw = ai_pricing.usage_cost_krw(
+        MODEL, resp.usage.input_tokens, resp.usage.output_tokens
+    )
+    cost = cost_krw / ai_pricing.AI_COST_KRW_PER_USD
     _spent_usd += cost
     usage = {"in": resp.usage.input_tokens, "out": resp.usage.output_tokens,
-             "usd": round(cost, 6), "elapsed": round(time.perf_counter() - t0, 1)}
+             "usd": round(cost, 6), "krw": cost_krw,
+             "elapsed": round(time.perf_counter() - t0, 1)}
     if resp.stop_reason == "refusal":
         return None, {**usage, "refusal": True}
     try:

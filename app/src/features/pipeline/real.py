@@ -15,7 +15,6 @@ from __future__ import annotations
 import importlib.util
 import itertools
 import logging
-import math
 import re
 import sys
 import threading
@@ -28,7 +27,6 @@ from typing import Any, Optional
 from src.core import paths
 from src.core.clock import today_kst
 from src.core.constants import (
-    AI_COST_KRW_PER_USD,
     AUDIT_WINDOW_YEARS,
     CACHE_HIT_LAYER1,
     CACHE_HIT_MESSAGE,
@@ -52,7 +50,7 @@ from src.core.constants import (
     VOTE_MIN,
     VOTE_ROUNDS,
 )
-from src.core.pricing import model_price
+from src.core.pricing import usage_cost_krw
 from src.core.citations import citation_number
 from src.features.grading.constants import ACCOUNTING_POLICY_REASON
 from src.features.budget import provider_budget
@@ -519,9 +517,6 @@ def _sections_from(
 #: 1판 대응표에 칸이 없을 때 `_sections_from`이 붙이는 사유. 이것도 갈아 끼울 대상이다.
 _ENGINE_FALLBACK_REASON = "수집 자료에 해당 재료 없음"
 
-#: 단가가 「100만 토큰당」이라 나눠 줄 값.
-_USD_PER_MTOK = 1_000_000
-
 #: 「⚠️ 못 가져옴 = 우리 쪽 실패」를 가리키는 `SourceStatus.state` 값 (port.py 정의).
 _SOURCE_STATE_FAILED = "failed"
 
@@ -642,14 +637,14 @@ def _refresh_empty_reasons(
 
 
 def _step_usage_spent_krw(
-    steps: list[dict[str, Any]], *, model: str, krw_per_usd: float
+    steps: list[dict[str, Any]], *, model: str
 ) -> float:
     """이 단계 목록에 직접 달린 AI 사용량만 원화로 센다.
 
     ★ 엔진 전역 `_spent_usd`의 전후 차이를 쓰면 동시에 본조사가 돌 때 남의 비용까지
       섞인다. client 응답에서 요청별로 모은 입력·출력 토큰만 다시 계산한다.
     """
-    spent_usd = 0.0
+    spent_krw = 0.0
     for step in steps:
         usage = step.get("usage")
         if not isinstance(usage, dict):
@@ -660,9 +655,8 @@ def _step_usage_spent_krw(
         ):
             continue
         used_model = str(usage.get(USAGE_MODEL_KEY) or model)
-        price_in, price_out = model_price(used_model)
-        spent_usd += (tokens_in * price_in + tokens_out * price_out) / _USD_PER_MTOK
-    return round(spent_usd * krw_per_usd, 2)
+        spent_krw += usage_cost_krw(used_model, tokens_in, tokens_out)
+    return round(spent_krw, 2)
 
 
 def _metered_client(metered: _MeteredEngine, client: Any) -> Any:
@@ -678,17 +672,9 @@ def _metered_client(metered: _MeteredEngine, client: Any) -> Any:
 def _request_spent_krw(metered: _MeteredEngine) -> float:
     """계량 껍데기가 이 요청에서 직접 받은 모든 AI 응답 비용."""
     steps = [{"usage": usage} for usage in metered.usages]
-    exchange = getattr(metered, "KRW_PER_USD", AI_COST_KRW_PER_USD)
-    try:
-        exchange = float(exchange)
-    except (TypeError, ValueError):
-        exchange = AI_COST_KRW_PER_USD
-    if not math.isfinite(exchange) or exchange <= 0:
-        exchange = AI_COST_KRW_PER_USD
     return _step_usage_spent_krw(
         steps,
         model=str(getattr(metered, "MODEL", "")),
-        krw_per_usd=exchange,
     )
 
 

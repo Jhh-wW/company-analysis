@@ -33,7 +33,6 @@ class _가짜엔진:
     MODEL = _기본모델
     BLOCK_ORDER = ("1", "4-1", "5")
     GEN_MAX_TOKENS = 3000
-    KRW_PER_USD = 1400
     _spent_usd = 0.0
 
     def __init__(self, 터뜨릴까: bool = False) -> None:

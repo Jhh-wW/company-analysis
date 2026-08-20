@@ -121,8 +121,6 @@ _OUTCOME_MESSAGE: dict[Outcome, str] = {
     Outcome.FAILED: "보고서를 만들다 오류가 났습니다. 잠시 후 다시 시도해주세요.",
 }
 
-#: 기존 조사 기록이 달러로 남긴 비용을 원으로 바꿀 때 쓰는 환율 (1판 엔진과 같은 값).
-_USD_TO_KRW = 1400
 #: 기존 기록에 쓰인 AI 모델. 기록에 없어 1판 설정값을 그대로 적는다.
 #: ★ 꼬리표는 상수에서 가져온다 — 비용을 세는 쪽(`observability`)이 같은 글자를 본다.
 _PILOT_MODEL = f"claude-haiku-4-5 {REPLAY_MODEL_MARK}"

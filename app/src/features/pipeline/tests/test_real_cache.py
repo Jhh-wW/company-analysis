@@ -104,7 +104,6 @@ class FakeEngine:
     """
 
     MODEL = "가짜모델"
-    KRW_PER_USD = 1400
     RAW_DIR = "(가짜)"
     PUBLIC_ORG_REGISTRY = "(가짜)"
     #: 칸 → 그 칸을 채울 수 있는 조각 종류. 가짜라 두 칸만 둔다.

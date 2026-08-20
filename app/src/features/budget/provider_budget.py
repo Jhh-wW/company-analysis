@@ -17,11 +17,9 @@ import json
 import math
 import threading
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_CEILING
 from typing import Any, Iterator
 
-from src.core.constants import AI_COST_KRW_PER_USD
-from src.core.pricing import model_price
+from src.core.pricing import usage_cost_krw
 
 
 # JSON 필드명·role·content block·structured-output schema처럼 사람이 넘긴 본문
@@ -46,22 +44,6 @@ class ProviderBudgetExceeded(RuntimeError):
 
 class ProviderCostInvariantError(RuntimeError):
     """provider 비용 예약 생명주기 자체가 깨졌음."""
-
-
-def _ceil_won_cent(value: Decimal) -> Decimal:
-    return value.quantize(Decimal("0.01"), rounding=ROUND_CEILING)
-
-
-def usage_cost_krw(model: str, tokens_in: int, tokens_out: int) -> float:
-    """중앙 단가표로 usage 비용을 원 단위 소수 둘째 자리까지 올림 계산한다."""
-    if tokens_in < 0 or tokens_out < 0:
-        raise ValueError("provider token 수는 음수일 수 없습니다")
-    price_in, price_out = model_price(model)
-    value = (
-        (Decimal(tokens_in) * Decimal(str(price_in)))
-        + (Decimal(tokens_out) * Decimal(str(price_out)))
-    ) * Decimal(str(AI_COST_KRW_PER_USD)) / Decimal(1_000_000)
-    return float(_ceil_won_cent(value))
 
 
 def estimate_request_tokens(payload: Any) -> int:

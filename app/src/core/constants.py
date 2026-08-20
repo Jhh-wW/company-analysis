@@ -32,10 +32,9 @@ SAMPLING_OK_MODELS: Final[tuple[str, ...]] = (
 )
 
 # ── 모델별 단가 (문제로그 P-76) ───────────────────────────
-# ★ 왜 앱이 따로 갖고 있나 — 1판 엔진의 단가 상수는 **모델을 안 가린다**
-#   (`run_pilot.py`의 `PRICE_IN, PRICE_OUT = 1.0, 5.0` — haiku 값 고정).
-#   앱은 전역 누적값을 쓰지 않고 요청별 provider 응답의 실제 모델·토큰을 이 표로
-#   다시 계산한다. 그래야 Sonnet과 Haiku가 섞인 동시 요청도 각각 정확히 남는다.
+# ★ 앱의 요청별 계량은 provider 응답의 실제 모델·토큰을 이 표로 계산한다.
+#   파일럿도 같은 표와 `core.pricing.usage_cost_krw`를 가져다 쓰므로 Sonnet과
+#   Haiku가 섞이거나 환율이 바뀌어도 admission·장부·OCR과 값이 갈리지 않는다.
 # ⚠️ 참고 단가다. 진짜 청구액은 콘솔이 정한다. (공식 자료 2026-08-16 확인)
 
 #: 모델별 실제 단가 (USD / 100만 토큰) — (입력, 출력).
@@ -53,11 +52,6 @@ MODEL_PRICES_USD_PER_MTOK: Final[dict[str, tuple[float, float]]] = {
 #: 단가를 모르는 모델에 쓸 값. ★ **비싸게** 가정한다 —
 #: 모르는 채 적게 세는 것보다 많이 세는 쪽이 안전하다.
 UNKNOWN_MODEL_PRICE_USD_PER_MTOK: Final[tuple[float, float]] = (15.0, 75.0)
-
-#: AI 비용을 원화로 기록할 때 쓰는 환율 가정.
-#: ★ 1판 엔진과 OCR 실측 도구가 모두 1달러=1,400원으로 계산한다. 앞단 OCR만
-#: 다른 환율을 쓰면 한 요청의 비용을 합칠 때 같은 달러를 서로 다른 원화로 세게 된다.
-AI_COST_KRW_PER_USD: Final[float] = 1400.0
 
 #: 회사 식별 AI 또는 DART 회사 정보 호출이 기술적으로 실패했을 때의 안내.
 #: 「회사가 없음」과 섞으면 반대 방향의 거짓말이 되므로 별도 문구로 둔다.

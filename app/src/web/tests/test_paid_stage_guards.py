@@ -50,8 +50,10 @@ from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import store as share_store
 from src.features.sharelink import tracks as share_tracks
 from src.features.sharelink.constants import (
+    ADMIN_DAILY_BUDGET_KRW,
     KEY_COOKIE_NAME,
     PER_LINK_DAILY_BUDGET_KRW,
+    PER_USER_DAILY_BUDGET_KRW,
 )
 from src.features.storage import db as storage_db
 from src.web import main
@@ -797,6 +799,7 @@ def test_같은링크의_정상진행_세건은_장애표식으로_오인하지_
             run_id=f"healthy-{index}",
             phase=SPEND_PHASE_IDENTIFY,
             share_key=_LINK_A,
+            cap_krw=PER_LINK_DAILY_BUDGET_KRW,
         )
         for index in range(MAX_CONCURRENT_PER_LINK)
     ]
@@ -826,6 +829,7 @@ def test_같은링크_세건을_다른스레드에서_함께마감해도_거짓�
             run_id=f"concurrent-settle-{index}",
             phase=SPEND_PHASE_IDENTIFY,
             share_key=_LINK_A,
+            cap_krw=PER_LINK_DAILY_BUDGET_KRW,
         )
         for index in range(MAX_CONCURRENT_PER_LINK)
     ]
@@ -855,6 +859,7 @@ def test_DB마감뒤_메모리장부실패도_active를_지우고_전체를_fail
         run_id="memory-ledger-failure",
         phase=SPEND_PHASE_IDENTIFY,
         share_key=_LINK_A,
+        cap_krw=PER_LINK_DAILY_BUDGET_KRW,
     )
     assert ticket is not None
 
@@ -881,6 +886,7 @@ def test_to_thread_취소는_비용을_0원확정하지_않고_통장만_닫는�
         run_id="cancelled-run",
         phase=SPEND_PHASE_PIPELINE,
         share_key=_LINK_A,
+        cap_krw=PER_LINK_DAILY_BUDGET_KRW,
     )
     assert ticket is not None
     slot = paid_runtime._reserve_run_slot(share_tracks.Track.LINK, _LINK_A)
@@ -945,6 +951,7 @@ def test_바깥요청이_취소돼도_실제_worker가_끝날때까지_동시자
         run_id="outer-cancelled-run",
         phase=SPEND_PHASE_PIPELINE,
         share_key=_LINK_A,
+        cap_krw=PER_LINK_DAILY_BUDGET_KRW,
     )
     assert ticket is not None
     slot = paid_runtime._reserve_run_slot(share_tracks.Track.LINK, _LINK_A)
@@ -1042,6 +1049,7 @@ def test_본조사_계약밖결과도_active고아없이_미확정으로_마감�
         run_id="invalid-result-run",
         phase=SPEND_PHASE_PIPELINE,
         share_key=_LINK_A,
+        cap_krw=PER_LINK_DAILY_BUDGET_KRW,
     )
     assert ticket is not None
     slot = paid_runtime._reserve_run_slot(share_tracks.Track.LINK, _LINK_A)
@@ -1681,9 +1689,9 @@ def test_링크_사용자_관리자_통장을_재시작뒤_각각_복원하고_�
 @pytest.mark.parametrize(
     ("bucket", "cap"),
     [
-        (_LINK_A, 3000.0),
-        ("user:member@example.com", 1000.0),
-        ("user:admin@example.com", 5000.0),
+        (_LINK_A, PER_LINK_DAILY_BUDGET_KRW),
+        ("user:member@example.com", PER_USER_DAILY_BUDGET_KRW),
+        ("user:admin@example.com", ADMIN_DAILY_BUDGET_KRW),
     ],
 )
 def test_운영기준_minus_1에서는_100원_예상단계와_provider를_열지_않는다(
@@ -1732,7 +1740,7 @@ def test_실제_paid_phase는_0이_아닌_단계예상액을_DB에_먼저_예약
         run_id="nonzero-reservation",
         phase=SPEND_PHASE_PIPELINE,
         share_key=_LINK_A,
-        cap_krw=3000.0,
+        cap_krw=PER_LINK_DAILY_BUDGET_KRW,
     )
 
     assert ticket is not None
@@ -1755,7 +1763,7 @@ def test_kst_자정전에_잡은_예상예약과_실제액은_시작일에_귀�
         run_id="kst-midnight",
         phase=SPEND_PHASE_PIPELINE,
         share_key=_LINK_A,
-        cap_krw=3000.0,
+        cap_krw=PER_LINK_DAILY_BUDGET_KRW,
         requested_cost_krw=100.0,
     )
     assert ticket is not None and ticket.day == first_day

@@ -26,8 +26,7 @@ from typing import Callable, Optional
 
 from PIL import Image, UnidentifiedImageError
 
-from src.core.constants import AI_COST_KRW_PER_USD
-from src.core.pricing import model_price
+from src.core.pricing import usage_cost_krw
 from src.features.budget import provider_budget
 from src.features.posting_image import constants
 
@@ -272,17 +271,6 @@ def extract_posting_text(
     )
 
 
-def _usage_cost_krw(model: str, tokens_in: int, tokens_out: int) -> float:
-    """Anthropic 응답 사용량을 원화로 바꾼다.
-
-    ★ 모르는 모델은 싸게 추정하지 않는다. 원장에 적게 적히면 운영 중단 기준도
-      왜곡되므로 `core.constants`의 보수적인 단가를 그대로 쓴다.
-    """
-    price_in, price_out = model_price(model)
-    usd = (tokens_in * price_in + tokens_out * price_out) / 1_000_000
-    return round(usd * AI_COST_KRW_PER_USD, 2)
-
-
 def default_extract(images: list[bytes]) -> ExtractResult:
     """기본 구현 — 멀티모달 AI(Anthropic)를 직접 불러 글자를 읽는다.
 
@@ -399,7 +387,7 @@ def default_extract(images: list[bytes]) -> ExtractResult:
     if clean_in < 0 or clean_out < 0:
         provider_budget.current().mark_unknown(call_reservation)
         return ExtractResult(text="", model=model, billing_uncertain=True)
-    cost_krw = _usage_cost_krw(
+    cost_krw = usage_cost_krw(
         model,
         clean_in,
         clean_out,

@@ -10,10 +10,10 @@ from types import SimpleNamespace
 import pytest
 
 from src.core.constants import (
-    AI_COST_KRW_PER_USD,
     MODEL_PRICES_USD_PER_MTOK,
     UNKNOWN_MODEL_PRICE_USD_PER_MTOK,
 )
+from src.core.pricing import AI_COST_KRW_PER_USD
 from src.features.budget import provider_budget
 from src.features.pipeline import real
 from src.features.pipeline.port import CompanyCard, Outcome, UserInput
@@ -61,10 +61,8 @@ class FakeMessages:
 class FakeRawEngine:
     MODEL = _HAIKU
 
-    def __init__(self, messages: FakeMessages, *, with_exchange: bool = True):
+    def __init__(self, messages: FakeMessages):
         self.client = SimpleNamespace(messages=messages)
-        if with_exchange:
-            self.KRW_PER_USD = AI_COST_KRW_PER_USD
 
     def _client(self):
         return self.client
@@ -77,7 +75,6 @@ def _client(metered: real._MeteredEngine):
 _ISOLATED_ENGINE_SOURCE = """
 MODEL = "claude-haiku-4-5"
 PRICE_IN, PRICE_OUT = 1.0, 5.0
-KRW_PER_USD = 1400
 BUDGET_STOP_USD = 8.0
 _spent_usd = 0.0
 
@@ -406,9 +403,9 @@ def test_near_prefix_response_model_keeps_conservative_unknown_price():
     assert real._request_spent_krw(metered) == pytest.approx(expected)
 
 
-def test_모르는_응답모델과_환율없는_엔진은_보수적_공통값을_쓴다():
+def test_모르는_응답모델은_보수적_공통값을_쓴다():
     messages = FakeMessages(response_model="future-model")
-    metered = real._MeteredEngine(FakeRawEngine(messages, with_exchange=False))
+    metered = real._MeteredEngine(FakeRawEngine(messages))
 
     _client(metered).messages.create(model=_HAIKU, max_tokens=700)
 

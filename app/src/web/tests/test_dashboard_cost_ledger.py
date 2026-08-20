@@ -16,6 +16,7 @@ from src.features.budget.constants import SPEND_PHASE_IDENTIFY, SPEND_PHASE_OCR
 from src.features.observability import constants as obs
 from src.features.observability.records import RunRecord, append_record
 from src.features.pipeline.demo import DemoPipeline
+from src.features.sharelink.constants import ADMIN_DAILY_BUDGET_KRW
 from src.features.storage import db as storage_db
 from src.web import main
 from src.web import paid_runtime, runtime
@@ -99,6 +100,7 @@ def test_대시보드는_현재_정상실행중인_표식을_비용미확정으�
             run_id="healthy-active-run",
             phase=SPEND_PHASE_IDENTIFY,
             share_key="bucket",
+            cap_krw=ADMIN_DAILY_BUDGET_KRW,
         )
         assert ticket is not None
 
