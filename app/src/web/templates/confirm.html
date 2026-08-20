@@ -59,11 +59,7 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <input type="hidden" name="company" value="{{ user_input.company }}">
     <input type="hidden" name="region" value="{{ user_input.region }}">
-    <input type="hidden" name="legal_name" value="{{ card.legal_name }}">
-    {# 이미 찾은 회사의 내부 열쇠 — 이게 있어야 회사를 다시 안 찾는다 (AI 5회 절약) #}
-    <input type="hidden" name="ref" value="{{ card.ref }}">
-    <input type="hidden" name="address" value="{{ card.address }}">
-    {# 진짜 조사에서만 생기는 서버 쪽 일회용 번호. 비용·권한 값 자체는 싣지 않는다. #}
+    {# 서버 쪽 일회용 번호. 회사 식별값·비용·권한 값 자체는 싣지 않는다. #}
     <input type="hidden" name="paid_attempt_token" value="{{ paid_attempt_token or '' }}">
     <input type="hidden" name="evaluation_consent_grant"
            value="{{ evaluation_consent_grant }}">

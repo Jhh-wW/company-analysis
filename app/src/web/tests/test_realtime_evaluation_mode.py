@@ -714,9 +714,6 @@ def test_jyp_fake_adapters_complete_signed_flow_but_legacy_report_is_gate_stoppe
             "/run",
             data=_jyp_form(
                 csrf,
-                legal_name="(주)제이와이피엔터테인먼트",
-                ref=_hidden(confirmed.text, "ref"),
-                address="서울특별시 강동구 강동대로 205",
                 paid_attempt_token=_hidden(
                     confirmed.text, "paid_attempt_token"
                 ),

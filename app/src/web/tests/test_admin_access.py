@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import re
 import sqlite3
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -28,7 +29,6 @@ from src.features.auth import logic as auth_logic
 from src.features.pipeline.demo import DemoPipeline
 from src.features.pipeline.canonical_demo import (
     DEMO_COMPANY as CANONICAL_DEMO_COMPANY,
-    demo_card as canonical_demo_card,
 )
 from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import store as share_store
@@ -428,18 +428,18 @@ def test_발급하면_바로_주소_화면으로_보낸다(admin: TestClient):
 
 
 def _보고서를_만든다(admin: TestClient) -> str:
-    card = canonical_demo_card()
+    form = {
+        "company": CANONICAL_DEMO_COMPANY,
+        "region": "인천",
+    }
+    confirm = admin.post("/confirm", data=form)
+    token = re.search(
+        r'name="paid_attempt_token" value="([^"]+)"', confirm.text
+    )
+    assert token is not None
     run = admin.post(
         "/run",
-        data={
-            "company": CANONICAL_DEMO_COMPANY,
-            "job": "",
-            "region": "인천",
-            "posting_text": "",
-            "legal_name": card.legal_name,
-            "ref": card.ref,
-            "address": card.address,
-        },
+        data={**form, "paid_attempt_token": token.group(1)},
         follow_redirects=False,
     )
     assert run.status_code == 303

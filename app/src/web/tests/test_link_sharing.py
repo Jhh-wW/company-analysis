@@ -25,8 +25,6 @@ from src.features.budget.sharing import REPORT_ID_HEX_CHARS, REPORT_LINK_MAX_AGE
 from src.features.export_pdf.release import ReleasedPdf, prepare_pdf_release
 from src.features.pipeline.canonical_demo import (
     DEMO_COMPANY as CANONICAL_DEMO_COMPANY,
-    DEMO_REF as CANONICAL_DEMO_REF,
-    demo_card as canonical_demo_card,
 )
 from src.features.pipeline.demo import DemoPipeline
 from src.features.pipeline.port import Outcome
@@ -69,18 +67,20 @@ def approved_pdf_route(monkeypatch):
 def _보고서를_만든다(client: TestClient) -> str:
     """정상 흐름으로 보고서 하나를 만들고 그 주소 번호를 돌려준다."""
     runtime._PIPELINE = DemoPipeline()
-    card = canonical_demo_card()
-    assert card.ref == CANONICAL_DEMO_REF
     form = {
         "company": CANONICAL_DEMO_COMPANY,
-        "job": "",
         "region": "인천 서구",
-        "posting_text": "",
-        "legal_name": card.legal_name,
-        "ref": card.ref,
-        "address": card.address,
     }
-    run = client.post("/run", data=form, follow_redirects=False)
+    confirm = client.post("/confirm", data=form)
+    token = re.search(
+        r'name="paid_attempt_token" value="([^"]+)"', confirm.text
+    )
+    assert token is not None
+    run = client.post(
+        "/run",
+        data={**form, "paid_attempt_token": token.group(1)},
+        follow_redirects=False,
+    )
     job_id = run.headers["location"].rsplit("/", 1)[-1]
     for _ in range(200):
         if client.get(f"/api/progress/{job_id}").json()["finished"]:

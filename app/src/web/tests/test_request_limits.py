@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from io import BytesIO
 
 import pytest
@@ -30,6 +31,28 @@ def _valid_png() -> bytes:
     output = BytesIO()
     Image.new("RGB", (2, 2), color=(255, 255, 255)).save(output, "PNG")
     return output.getvalue()
+
+
+def _confirmed_demo_run(
+    client: TestClient,
+    data: dict[str, str],
+    *,
+    files=None,
+):
+    confirmed = client.post(
+        "/confirm",
+        data={"company": data["company"], "region": data.get("region", "")},
+    )
+    token = re.search(
+        r'name="paid_attempt_token" value="([^"]+)"', confirmed.text
+    )
+    assert token is not None
+    return client.post(
+        "/run",
+        data={**data, "paid_attempt_token": token.group(1)},
+        files=files,
+        follow_redirects=False,
+    )
 
 
 def _run_asgi_request(
@@ -356,9 +379,9 @@ def test_회사분석_run은_옛_이미지필드를_무시하고_OCR을_부르�
 
     monkeypatch.setattr(job_runtime, "extract_posting_text", forbidden_ocr)
     with TestClient(main.app) as client:
-        response = client.post(
-            "/run",
-            data={
+        response = _confirmed_demo_run(
+            client,
+            {
                 "company": "우리엔",
                 "job": "무시할 옛 직무",
                 "region": "서울",
@@ -368,7 +391,6 @@ def test_회사분석_run은_옛_이미지필드를_무시하고_OCR을_부르�
                 "address": "서울",
             },
             files={"posting_images": ("capture.png", _valid_png())},
-            follow_redirects=False,
         )
 
     assert response.status_code == 303
@@ -381,9 +403,9 @@ def test_파일명이_빈_업로드_필드는_파일_없음으로_처리한다(m
     monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
 
     with TestClient(main.app, raise_server_exceptions=False) as client:
-        response = client.post(
-            "/run",
-            data={
+        response = _confirmed_demo_run(
+            client,
+            {
                 "company": "우리엔",
                 "job": "영업",
                 "region": "서울",
@@ -393,7 +415,6 @@ def test_파일명이_빈_업로드_필드는_파일_없음으로_처리한다(m
                 "address": "서울",
             },
             files={"posting_images": ("", b"", "application/octet-stream")},
-            follow_redirects=False,
         )
 
     assert response.status_code == 303
@@ -403,16 +424,15 @@ def test_파일명이_빈_업로드_필드는_파일_없음으로_처리한다(m
 def test_회사분석_run은_공고없이_빈호환필드로_진행한다(monkeypatch):
     monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
     with TestClient(main.app) as client:
-        response = client.post(
-            "/run",
-            data={
+        response = _confirmed_demo_run(
+            client,
+            {
                 "company": "우리엔",
                 "region": "서울",
                 "legal_name": "우리엔",
                 "ref": "재수집-p003",
                 "address": "서울",
             },
-            follow_redirects=False,
         )
 
     assert response.status_code == 303
@@ -425,9 +445,9 @@ def test_run은_옛_image_only요청도_회사분석으로만_처리한다(monke
     monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
 
     with TestClient(main.app, raise_server_exceptions=False) as client:
-        response = client.post(
-            "/run",
-            data={
+        response = _confirmed_demo_run(
+            client,
+            {
                 "company": "우리엔",
                 "job": "영업",
                 "region": "서울",
@@ -444,7 +464,6 @@ def test_run은_옛_image_only요청도_회사분석으로만_처리한다(monke
                     "image/png",
                 )
             },
-            follow_redirects=False,
         )
 
     assert response.status_code == 303

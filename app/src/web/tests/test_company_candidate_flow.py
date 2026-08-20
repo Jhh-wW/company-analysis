@@ -285,7 +285,9 @@ def test_DART_local_후보는_사람이_선택해야만_DART를_다시_부르고
         assert confirmed.status_code == 200
         assert "이 회사가 맞나요?" in confirmed.text
         assert "서울특별시 강동구 강동대로 205" in confirmed.text
-        assert 'value="00258689"' in confirmed.text
+        confirmation_token = _hidden(confirmed.text, "paid_attempt_token")
+        assert job_runtime._PAID_ATTEMPTS[confirmation_token].card.ref == "00258689"
+        assert 'name="ref"' not in confirmed.text
         assert pipeline.search_calls == 1
         assert pipeline.lookup_inputs == ["JYP"]
         assert pipeline.lookup_refs == ["00258689"]
@@ -325,7 +327,9 @@ def test_DART_local_후보선택은_서명된_고유번호를_직접재조회하
         assert "JYP Ent." in confirmed.text
         assert pipeline.lookup_refs == ["00258689"]
         assert pipeline.lookup_inputs == ["JYP"]
-        assert 'value="00258689"' in confirmed.text
+        confirmation_token = _hidden(confirmed.text, "paid_attempt_token")
+        assert job_runtime._PAID_ATTEMPTS[confirmation_token].card.ref == "00258689"
+        assert 'name="ref"' not in confirmed.text
     finally:
         client.close()
 

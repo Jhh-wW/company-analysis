@@ -202,17 +202,14 @@ def _confirm(client: TestClient):
 
 def _확인값(html: str) -> tuple[str, str]:
     token = re.search(r'name="paid_attempt_token" value="([^"]+)"', html)
-    ref = re.search(r'name="ref" value="([^"]+)"', html)
-    assert token is not None and ref is not None
-    return token.group(1), ref.group(1)
+    assert token is not None
+    assert 'name="ref"' not in html
+    return token.group(1), "브라우저가-보내지-않는-ref"
 
 
-def _run_form(token: str, ref: str, **changes: str) -> dict[str, str]:
+def _run_form(token: str, _legacy_ref: str, **changes: str) -> dict[str, str]:
     form = {
         **_FORM,
-        "legal_name": _FORM["company"],
-        "ref": ref,
-        "address": "서울",
         "paid_attempt_token": token,
         "posting_image_consent": "yes",
     }
@@ -454,7 +451,7 @@ def test_OCR_직전_예산검사에_걸리면_extractor를_안_부른다(monkeyp
     assert pipeline.run_calls == 0
 
 
-def test_위조한_입력과_ref는_일회용_확인을_통과하지_못한다(monkeypatch):
+def test_위조한_원입력은_막고_레거시_숨은회사값은_무시한다(monkeypatch):
     pipeline = FakePaidPipeline()
     monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
     client = TestClient(main.app)
@@ -466,16 +463,24 @@ def test_위조한_입력과_ref는_일회용_확인을_통과하지_못한다(m
         data=_run_form(token, ref, company="다른회사"),
         follow_redirects=False,
     )
-    wrong_ref = client.post(
+    forged_hidden_values = client.post(
         "/run",
-        data=_run_form(token, "forged-ref"),
+        data=_run_form(
+            token,
+            ref,
+            legal_name="공격자 회사",
+            ref="forged-ref",
+            address="공격자 주소",
+        ),
         follow_redirects=False,
     )
+    job_id = _기다린다(client, forged_hidden_values)
 
-    # 회사 링크의 회사·직무 범위는 일회용 확인 토큰 검사보다 앞선 서버 인가 경계다.
+    # 회사 링크 범위는 토큰 검사보다 앞선 인가 경계이고, 회사 식별값은 서버 기록만 쓴다.
     assert wrong_input.status_code == 403
-    assert wrong_ref.status_code == 303
-    assert pipeline.run_calls == 0
+    assert forged_hidden_values.status_code == 303
+    assert job_runtime._JOBS[job_id].card.ref == "corp-001"
+    assert pipeline.run_calls == 1
 
 
 def test_확인뒤_통장을_바꾸면_토큰을_쓸_수_없다(monkeypatch):

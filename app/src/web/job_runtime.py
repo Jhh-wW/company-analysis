@@ -138,11 +138,12 @@ class Job:
 
 @dataclass(frozen=True)
 class PaidAttempt:
-    """비용 검사를 통과한 회사 확인과 본조사를 잇는 일회용 서버 기록.
+    """회사 확인과 본조사를 잇는 일회용 서버 기록.
 
-    ★ 숨은 입력칸의 비용·권한·회사 식별값을 믿지 않는다. 브라우저에는 추측할 수
-      없는 `token`만 보내고 실제 값은 서버 메모리에 둔다. 토큰은 `/run`에서 한 번
-      꺼내면 바로 없어져 같은 식별 결과로 OCR·본조사를 반복 호출할 수 없다.
+    ★ 데모·유료 모두 숨은 입력칸의 비용·권한·회사 식별값을 믿지 않는다.
+      브라우저에는 추측할 수 없는 `token`만 보내고 실제 값은 서버 메모리에 둔다.
+      토큰은 `/run`에서 한 번 꺼내면 바로 없어져 같은 식별 결과로 본조사를 반복
+      호출하거나 다른 회사로 바꿔치기할 수 없다.
     """
 
     token: str
@@ -155,6 +156,7 @@ class PaidAttempt:
     models: tuple[str, ...]
     elapsed_sec: float
     created_at: float
+    is_paid: bool = True
 
 
 @dataclass(frozen=True)
@@ -208,6 +210,25 @@ _TASK_JOBS: dict[asyncio.Task[None], Job] = {}
 _UPLOAD_CLOSE_TASKS: set[asyncio.Task[None]] = set()
 _ACCEPTING_JOBS = True
 _SHUTTING_DOWN = False
+
+
+def _abandon_confirmation_attempt(token: str) -> Optional[PaidAttempt]:
+    """확인 시도를 소비하고, 유료 시도라면 대기 관측·ID 예약도 닫는다."""
+    attempt = _PAID_ATTEMPTS.pop(token, None)
+    if attempt is None:
+        return None
+    if attempt.is_paid:
+        record_end(
+            run_id=attempt.run_id,
+            job=attempt.user_input.job,
+            end_step=obs.END_STEP_CONFIRM,
+            cost_krw=attempt.lookup_cost_krw,
+            elapsed_sec=attempt.elapsed_sec,
+            model=_model_label(attempt.models),
+            expected_state=lifecycle.STATE_PENDING,
+        )
+        public_ids.release(attempt.run_id)
+    return attempt
 
 
 def _start_job_runtime() -> None:
@@ -327,17 +348,7 @@ def _sweep_jobs(now: float) -> None:
     # 확인 화면을 닫고 떠난 사람의 일회용 토큰도 영원히 쌓이지 않게 치운다.
     for token, attempt in list(_PAID_ATTEMPTS.items()):
         if now - attempt.created_at > JOB_KEEP_SEC:
-            record_end(
-                run_id=attempt.run_id,
-                job=attempt.user_input.job,
-                end_step=obs.END_STEP_CONFIRM,
-                cost_krw=attempt.lookup_cost_krw,
-                elapsed_sec=attempt.elapsed_sec,
-                model=_model_label(attempt.models),
-                expected_state=lifecycle.STATE_PENDING,
-            )
-            del _PAID_ATTEMPTS[token]
-            public_ids.release(attempt.run_id)
+            _abandon_confirmation_attempt(token)
 
     # Places/DART 후보의 일시 메모리는 5분만 둔다. 응답 원문·주소·홈페이지는 애초에
     # 저장하지 않고, 만료 시 같은 분석 ID 예약도 반환한다.

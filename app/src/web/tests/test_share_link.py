@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 from html.parser import HTMLParser
 
 import pytest
@@ -25,8 +26,6 @@ from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
 from src.features.pipeline.canonical_demo import (
     DEMO_COMPANY as CANONICAL_DEMO_COMPANY,
-    DEMO_REF as CANONICAL_DEMO_REF,
-    demo_card as canonical_demo_card,
 )
 from src.features.pipeline.demo import DemoPipeline
 from src.features.pipeline.port import Outcome
@@ -100,6 +99,15 @@ def _post_run(client: TestClient, form: dict, **kwargs):
     )
     if secret:
         data["csrf_token"] = auth_logic.csrf_token_for_session(secret)
+    if isinstance(runtime._PIPELINE, DemoPipeline):
+        confirmed = client.post("/confirm", data=data)
+        if confirmed.status_code != 200:
+            return confirmed
+        token = re.search(
+            r'name="paid_attempt_token" value="([^"]+)"', confirmed.text
+        )
+        assert token is not None
+        data["paid_attempt_token"] = token.group(1)
     return client.post("/run", data=data, **kwargs)
 
 
@@ -112,16 +120,9 @@ def _post_confirm(client: TestClient, form: dict, **kwargs):
 
 
 def _보고서를_만든다(client: TestClient) -> str:
-    card = canonical_demo_card()
-    assert card.ref == CANONICAL_DEMO_REF
     form = {
         "company": CANONICAL_DEMO_COMPANY,
-        "job": "",
         "region": "인천 서구",
-        "posting_text": "",
-        "legal_name": card.legal_name,
-        "ref": card.ref,
-        "address": card.address,
     }
     run = _post_run(client, form, follow_redirects=False)
     job_id = run.headers["location"].rsplit("/", 1)[-1]

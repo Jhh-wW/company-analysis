@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 
 import pytest
 from fastapi.testclient import TestClient
@@ -44,25 +45,35 @@ def client() -> TestClient:
 
 
 def _폼(회사: str = "우리엔") -> dict:
-    """확인 카드를 거친 «정상» 요청 한 벌. `ref`가 있어야 `/run`이 받아준다."""
-    # ⚠️ 빈 문자열을 넣으면 폼에서 «빠진 것»으로 처리돼 422가 난다. 값을 채운다.
+    """회사 분석의 원 입력 한 벌."""
     return {
         "company": 회사,
         "job": "영업",
         "region": "서울",
         "posting_text": "x",
-        "legal_name": 회사,
-        "ref": "재수집-p003",
-        "address": "-",
     }
 
 
-def _조사시작(client: TestClient, 회사: str = "우리엔"):
+def _조사시작(
+    client: TestClient,
+    회사: str = "우리엔",
+    *,
+    headers: dict[str, str] | None = None,
+):
     form = _폼(회사)
     link_key = client.cookies.get(KEY_COOKIE_NAME) or ""
     if link_key:
         form["csrf_token"] = auth_logic.csrf_token_for_session(link_key)
-    return client.post("/run", data=form, follow_redirects=False)
+    if isinstance(runtime._PIPELINE, DemoPipeline):
+        confirm = client.post("/confirm", data=form, headers=headers)
+        token = re.search(
+            r'name="paid_attempt_token" value="([^"]+)"', confirm.text
+        )
+        assert token is not None
+        form["paid_attempt_token"] = token.group(1)
+    return client.post(
+        "/run", data=form, headers=headers, follow_redirects=False
+    )
 
 
 def _열쇠로_들어온다(client: TestClient) -> None:
@@ -170,11 +181,9 @@ def test_전달_IP를_바꿔도_같은_권한통장의_횟수제한을_우회하
     monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
     codes = []
     for index in range(RATE_MAX_RUNS + 1):
-        response = client.post(
-            "/run",
-            data=_폼(),
+        response = _조사시작(
+            client,
             headers={"X-Forwarded-For": f"203.0.113.{index + 1}"},
-            follow_redirects=False,
         )
         codes.append(response.status_code)
 

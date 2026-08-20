@@ -59,12 +59,9 @@ from src.web import (
 )
 from src.web.recording import record_end, record_run
 from src.web.security import (
-    ADDRESS_MAX_CHARS,
     ATTEMPT_TOKEN_MAX_CHARS,
     COMPANY_MAX_CHARS,
     CSRF_TOKEN_MAX_CHARS,
-    LEGAL_NAME_MAX_CHARS,
-    REFERENCE_MAX_CHARS,
     REGION_MAX_CHARS,
 )
 
@@ -984,7 +981,8 @@ async def confirm_page(
             evaluation_consent_grant=evaluation_consent_grant_value,
         )
 
-    attempt_token = ""
+    attempt_token = uuid.uuid4().hex
+    lookup_models: tuple[str, ...] = ()
     if is_paid:
         lookup_models = paid_runtime._model_tuple(lookup.model)
         if not paid_runtime._begin_observation_pending(
@@ -998,19 +996,20 @@ async def confirm_page(
             return request_helpers._throttled(
                 request, BUSY_MESSAGE, "observation-store"
             )
-        attempt_token = uuid.uuid4().hex
-        job_runtime._PAID_ATTEMPTS[attempt_token] = job_runtime.PaidAttempt(
-            token=attempt_token,
-            run_id=run_id,
-            user_input=user_input,
-            card=card,
-            share_key=share_key,
-            bucket_id=spend_store.bucket_id(share_key),
-            lookup_cost_krw=total_lookup_cost,
-            models=lookup_models,
-            elapsed_sec=lookup_elapsed,
-            created_at=time.monotonic(),
-        )
+    attempt_share_key = resolved_track[1]
+    job_runtime._PAID_ATTEMPTS[attempt_token] = job_runtime.PaidAttempt(
+        token=attempt_token,
+        run_id=run_id,
+        user_input=user_input,
+        card=card,
+        share_key=attempt_share_key,
+        bucket_id=spend_store.bucket_id(attempt_share_key),
+        lookup_cost_krw=total_lookup_cost if is_paid else 0.0,
+        models=lookup_models,
+        elapsed_sec=lookup_elapsed if is_paid else 0.0,
+        created_at=time.monotonic(),
+        is_paid=is_paid,
+    )
 
     return request_helpers.templates.TemplateResponse(
         request=request,
@@ -1062,18 +1061,7 @@ async def reject_card(
     if consent_blocked is not None:
         return consent_blocked
     if paid_attempt_token:
-        attempt = job_runtime._PAID_ATTEMPTS.pop(paid_attempt_token, None)
-        if attempt is not None:
-            public_ids.release(attempt.run_id)
-            record_end(
-                run_id=attempt.run_id,
-                job=attempt.user_input.job,
-                end_step=obs.END_STEP_CONFIRM,
-                cost_krw=attempt.lookup_cost_krw,
-                elapsed_sec=attempt.elapsed_sec,
-                model=paid_runtime._model_label(attempt.models),
-                expected_state=lifecycle.STATE_PENDING,
-            )
+        job_runtime._abandon_confirmation_attempt(paid_attempt_token)
     return request_helpers._retry_screen(
         request,
         user_input,
@@ -1088,9 +1076,6 @@ async def start_run(
     request: Request,
     company: str = Form(..., max_length=COMPANY_MAX_CHARS),
     region: str = Form("", max_length=REGION_MAX_CHARS),
-    legal_name: str = Form("", max_length=LEGAL_NAME_MAX_CHARS),
-    ref: str = Form("", max_length=REFERENCE_MAX_CHARS),
-    address: str = Form("", max_length=ADDRESS_MAX_CHARS),
     paid_attempt_token: str = Form(
         "", max_length=ATTEMPT_TOKEN_MAX_CHARS
     ),
@@ -1111,9 +1096,6 @@ async def start_run(
     is_paid = not isinstance(runtime._PIPELINE, DemoPipeline)
     attempt: Optional[job_runtime.PaidAttempt] = None
     slot_bucket_id = ""
-
-    if not ref:
-        return RedirectResponse("/", status_code=303)
 
     resolved_track = request_helpers._track_of(request)
     scope_blocked = request_helpers.require_share_scope(
@@ -1137,24 +1119,28 @@ async def start_run(
     )
     if consent_blocked is not None:
         return consent_blocked
-    if is_paid:
-        blocked = request_helpers._guard_run(
-            request,
-            count_start=False,
-            resolved_track=resolved_track,
-        )
-        if blocked is not None:
-            return blocked
-        attempt = job_runtime._PAID_ATTEMPTS.get(paid_attempt_token)
-        current_bucket = spend_store.bucket_id(share_key)
-        if (
-            attempt is None
-            or attempt.user_input != original_input
-            or attempt.card.ref != ref
-            or attempt.bucket_id != current_bucket
-        ):
-            return RedirectResponse("/", status_code=303)
+    blocked = request_helpers._guard_run(
+        request,
+        count_start=not is_paid,
+        resolved_track=resolved_track,
+    )
+    if blocked is not None:
+        return blocked
+    attempt = job_runtime._PAID_ATTEMPTS.get(paid_attempt_token)
+    current_bucket = spend_store.bucket_id(share_key)
+    if (
+        attempt is None
+        or time.monotonic() - attempt.created_at > job_runtime.JOB_KEEP_SEC
+        or attempt.is_paid != is_paid
+        or attempt.user_input != original_input
+        or attempt.share_key != share_key
+        or attempt.bucket_id != current_bucket
+    ):
+        if attempt is not None:
+            job_runtime._abandon_confirmation_attempt(paid_attempt_token)
+        return RedirectResponse("/", status_code=303)
 
+    if is_paid:
         slot_bucket_id = (
             paid_runtime._reserve_run_slot(resolved_track[0], share_key) or ""
         )
@@ -1165,8 +1151,7 @@ async def start_run(
 
         if not paid_runtime._mark_observation_running(attempt.run_id):
             paid_runtime._release_run_slot(slot_bucket_id)
-            job_runtime._PAID_ATTEMPTS.pop(paid_attempt_token, None)
-            public_ids.release(attempt.run_id)
+            job_runtime._abandon_confirmation_attempt(paid_attempt_token)
             return RedirectResponse("/", status_code=303)
         job_runtime._PAID_ATTEMPTS.pop(paid_attempt_token, None)
         card = attempt.card
@@ -1175,9 +1160,6 @@ async def start_run(
         upfront_models = attempt.models
         upfront_elapsed = attempt.elapsed_sec
     else:
-        blocked = request_helpers._guard_run(request, resolved_track=resolved_track)
-        if blocked is not None:
-            return blocked
         slot_bucket_id = (
             paid_runtime._reserve_run_slot(resolved_track[0], share_key) or ""
         )
@@ -1185,22 +1167,22 @@ async def start_run(
             return request_helpers._throttled(
                 request, BUSY_MESSAGE, "busy"
             )
-        card = CompanyCard(
-            legal_name=legal_name or company.strip(),
-            typed_name=company.strip(),
-            address=address,
-            ceo="",
-            founded="",
-            ref=ref,
-        )
         try:
             run_id = public_ids.reserve(job_runtime._JOBS)
         except public_ids.PublicIdUnavailable:
             paid_runtime._release_run_slot(slot_bucket_id)
             return job_runtime._storage_unavailable_response(request)
-        upfront_cost = 0.0
-        upfront_models = ()
-        upfront_elapsed = 0.0
+        consumed_attempt = job_runtime._PAID_ATTEMPTS.pop(
+            paid_attempt_token, None
+        )
+        if consumed_attempt is None:
+            public_ids.release(run_id)
+            paid_runtime._release_run_slot(slot_bucket_id)
+            return RedirectResponse("/", status_code=303)
+        card = consumed_attempt.card
+        upfront_cost = consumed_attempt.lookup_cost_krw
+        upfront_models = consumed_attempt.models
+        upfront_elapsed = consumed_attempt.elapsed_sec
 
     return await job_runtime._start_with_reserved_slot(
         request=request,

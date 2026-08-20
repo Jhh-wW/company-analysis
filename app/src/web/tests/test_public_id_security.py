@@ -105,6 +105,20 @@ def _stored_payload(report_id: str) -> str:
         ).fetchone()[0]
 
 
+def _confirmed_demo_run(client: TestClient):
+    form = {"company": _FORM["company"], "region": _FORM["region"]}
+    confirmed = client.post("/confirm", data=form)
+    token = re.search(
+        r'name="paid_attempt_token" value="([^"]+)"', confirmed.text
+    )
+    assert token is not None
+    return client.post(
+        "/run",
+        data={**form, "paid_attempt_token": token.group(1)},
+        follow_redirects=False,
+    )
+
+
 def test_Demo_run은_memory충돌_DB충돌_뒤_16바이트_후보만_사용한다(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -123,7 +137,7 @@ def test_Demo_run은_memory충돌_DB충돌_뒤_16바이트_후보만_사용한�
     monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
 
     with TestClient(main.app) as client:
-        response = client.post("/run", data=_FORM, follow_redirects=False)
+        response = _confirmed_demo_run(client)
 
     assert response.status_code == 303
     assert response.headers["location"] == f"/progress/{fresh_id}"
@@ -152,7 +166,7 @@ def test_Demo_run의_bounded충돌은_503이고_기존_job_report를_보존한�
     monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
 
     with TestClient(main.app) as client:
-        response = client.post("/run", data=_FORM, follow_redirects=False)
+        response = _confirmed_demo_run(client)
 
     assert response.status_code == 503
     assert calls == public_ids.PUBLIC_ID_ALLOCATION_ATTEMPTS
