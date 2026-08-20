@@ -35,11 +35,16 @@ SAMPLING_OK_MODELS: Final[tuple[str, ...]] = (
 # ★ 앱의 요청별 계량은 provider 응답의 실제 모델·토큰을 이 표로 계산한다.
 #   파일럿도 같은 표와 `core.pricing.usage_cost_krw`를 가져다 쓰므로 Sonnet과
 #   Haiku가 섞이거나 환율이 바뀌어도 admission·장부·OCR과 값이 갈리지 않는다.
-# ⚠️ 참고 단가다. 진짜 청구액은 콘솔이 정한다. (공식 자료 2026-08-16 확인)
+# ⚠️ 참고 단가다. 진짜 청구액은 콘솔이 정한다.
+# 공식 확인(2026-08-20):
+# https://platform.claude.com/docs/en/about-claude/models/overview
+# https://platform.claude.com/docs/en/about-claude/pricing
 
 #: 모델별 실제 단가 (USD / 100만 토큰) — (입력, 출력).
 MODEL_PRICES_USD_PER_MTOK: Final[dict[str, tuple[float, float]]] = {
     "claude-haiku-4-5": (1.0, 5.0),
+    # 4.6 이전 모델은 alias와 공식 날짜 snapshot ID가 별개다.
+    "claude-haiku-4-5-20251001": (1.0, 5.0),
     "claude-sonnet-4-6": (3.0, 15.0),
     "claude-sonnet-5": (3.0, 15.0),
     # ★ 4-6은 «지금 쓸 수 있는» 세대라 단가가 반드시 있어야 한다 —
@@ -48,6 +53,9 @@ MODEL_PRICES_USD_PER_MTOK: Final[dict[str, tuple[float, float]]] = {
     "claude-opus-4-6": (5.0, 25.0),
     "claude-opus-4-8": (5.0, 25.0),
     "claude-opus-5": (5.0, 25.0),
+    # 공식 API ID 자체가 날짜 없는 pinned snapshot이다. 가격만 등록하며
+    # GENERATION_MODEL/SAMPLING_OK_MODELS에는 넣지 않아 모델을 활성화하지 않는다.
+    "claude-fable-5": (10.0, 50.0),
 }
 #: 단가를 모르는 모델에 쓸 값. ★ **비싸게** 가정한다 —
 #: 모르는 채 적게 세는 것보다 많이 세는 쪽이 안전하다.

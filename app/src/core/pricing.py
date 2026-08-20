@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import datetime as dt
-import re
 from decimal import Decimal, ROUND_CEILING
 from typing import Final
 
@@ -11,8 +9,6 @@ from src.core.constants import (
     MODEL_PRICES_USD_PER_MTOK,
     UNKNOWN_MODEL_PRICE_USD_PER_MTOK,
 )
-
-_SNAPSHOT_DATE_RE = re.compile(r"[0-9]{8}")
 
 #: AI 사용량을 원화로 기록할 때 쓰는 비용 환율 정본.
 #: provider admission·실제 장부·OCR·파일럿이 모두 아래 ``usage_cost_krw``를
@@ -24,36 +20,17 @@ _WON_CENT = Decimal("0.01")
 
 
 def model_price(model: object) -> tuple[float, float]:
-    """Return a known alias price, including only its strict dated snapshots.
+    """Return a price only for an exact official model ID or alias.
 
-    A provider snapshot is accepted only as ``<known-alias>-YYYYMMDD`` with a
-    real calendar date. Everything else deliberately keeps the conservative
-    unknown-model price.
+    Dated IDs are not constructed from aliases: 4.6+ dateless IDs are already
+    pinned snapshots, while earlier dated snapshots must be listed explicitly.
+    Everything else deliberately keeps the conservative unknown-model price.
     """
     if not isinstance(model, str):
         return UNKNOWN_MODEL_PRICE_USD_PER_MTOK
-
-    exact = MODEL_PRICES_USD_PER_MTOK.get(model)
-    if exact is not None:
-        return exact
-
-    alias, separator, snapshot_date = model.rpartition("-")
-    if (
-        separator != "-"
-        or alias not in MODEL_PRICES_USD_PER_MTOK
-        or _SNAPSHOT_DATE_RE.fullmatch(snapshot_date) is None
-    ):
-        return UNKNOWN_MODEL_PRICE_USD_PER_MTOK
-
-    try:
-        dt.date(
-            int(snapshot_date[:4]),
-            int(snapshot_date[4:6]),
-            int(snapshot_date[6:]),
-        )
-    except ValueError:
-        return UNKNOWN_MODEL_PRICE_USD_PER_MTOK
-    return MODEL_PRICES_USD_PER_MTOK[alias]
+    return MODEL_PRICES_USD_PER_MTOK.get(
+        model, UNKNOWN_MODEL_PRICE_USD_PER_MTOK
+    )
 
 
 def usage_cost_krw(
