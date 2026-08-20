@@ -44,4 +44,4 @@ EXPOSE 10000
 
 # 새로 마운트된 디스크도 appuser가 쓰게 만든 뒤 서버 권한을 즉시 낮춘다.
 # SQLite와 메모리 작업 상태를 한 프로세스만 다루도록 worker는 반드시 1개다.
-CMD ["sh", "-c", "chown -R appuser:appuser /var/data && exec gosu appuser env HOME=/home/appuser python -m uvicorn src.web.main:app --host 0.0.0.0 --port \"${PORT:-10000}\" --workers 1 --forwarded-allow-ips='*' --limit-concurrency 5 --backlog 32 --no-access-log"]
+CMD ["sh", "-c", "chown -R appuser:appuser /var/data && exec gosu appuser env HOME=/home/appuser python -m uvicorn src.web.main:app --host 0.0.0.0 --port \"${PORT:-10000}\" --workers 1 --forwarded-allow-ips='*' --limit-concurrency 20 --backlog 32 --no-access-log"]
