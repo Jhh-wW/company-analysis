@@ -1,0 +1,771 @@
+from __future__ import annotations
+
+from dataclasses import replace
+
+import pytest
+
+from src.features.pipeline.canonical_demo import build_demo_report
+from src.features.pipeline.port import FactRecord, Report
+from src.features.provenance.sources import Source, SourceKind, evidence_text_hash
+from src.features.report_standard.constants import (
+    CANONICAL_CLAIM_TYPES_BY_SECTION,
+    CANONICAL_SECTION_IDS,
+    SECTION_BY_ID,
+    SECTION_SPECS,
+)
+from src.features.spanselect.canonical import CLAIM_TYPES_BY_SECTION
+from src.features.report_standard.publish import (
+    PublishBlockedError,
+    _forbidden_text_problem,
+    build_published_report,
+    fact_evidence_binding,
+    validate_publishable,
+)
+
+
+def _valid_report() -> Report:
+    return build_demo_report()
+
+
+def _replace_fact(report: Report, fact_id: str, **changes: object) -> Report:
+    facts: list[FactRecord] = []
+    for fact in report.fact_records:
+        if fact.fact_id != fact_id:
+            facts.append(fact)
+            continue
+        changed = replace(fact, **changes)
+        facts.append(replace(changed, evidence_binding=fact_evidence_binding(changed)))
+    return replace(report, fact_records=facts)
+
+
+def test_complete_demo_passes_all_nine_sections() -> None:
+    report = _valid_report()
+    validation = validate_publishable(report)
+
+    assert validation.publishable is True
+    assert validation.included_section_ids == CANONICAL_SECTION_IDS
+    assert report.filled_count == 9
+    assert [section.cell for section in report.sections] == list(CANONICAL_SECTION_IDS)
+    for section in report.sections:
+        spec = SECTION_BY_ID[section.cell]
+        assert (section.title, section.display_number, section.tag) == (
+            spec.title,
+            spec.display_number,
+            spec.tag,
+        )
+
+
+def test_section_contract_keeps_semantic_ids_and_display_labels_separate() -> None:
+    assert CANONICAL_SECTION_IDS == tuple(spec.section_id for spec in SECTION_SPECS)
+    assert SECTION_BY_ID["past_changes"].display_number == "4"
+    assert SECTION_BY_ID["past_changes"].tag == "#과거"
+    assert SECTION_BY_ID["current_challenges"].tag == "#현재"
+    assert SECTION_BY_ID["future_strategy"].tag == "#미래"
+
+
+def test_claim_type_is_a_closed_enum_per_section() -> None:
+    report = _replace_fact(
+        _valid_report(),
+        "identity-01",
+        claim_type="company_identity",
+    )
+
+    validation = validate_publishable(report)
+
+    assert validation.publishable is False
+    assert any("허용되지 않는 claim_type" in reason for reason in validation.reasons)
+
+
+def test_upstream_claim_type_enum_is_a_subset_of_the_publish_contract() -> None:
+    for section_id, upstream_types in CLAIM_TYPES_BY_SECTION.items():
+        assert upstream_types <= CANONICAL_CLAIM_TYPES_BY_SECTION[section_id]
+
+
+@pytest.mark.parametrize("missing", CANONICAL_SECTION_IDS)
+def test_every_section_is_required(missing: str) -> None:
+    report = _valid_report()
+    report = replace(
+        report,
+        sections=[section for section in report.sections if section.cell != missing],
+    )
+
+    validation = validate_publishable(report)
+
+    assert validation.publishable is False
+    assert any(missing in reason for reason in validation.reasons)
+    with pytest.raises(PublishBlockedError):
+        build_published_report(report)
+
+
+def test_summary_requires_fact_binding_exact_evidence_and_independent_status() -> None:
+    report = _valid_report()
+    first = report.summary_items[0]
+    broken = replace(
+        first,
+        fact_ids=[],
+        evidence_text="임의 근거",
+        verification_status="verified",
+    )
+
+    validation = validate_publishable(
+        replace(report, summary_items=[broken, *report.summary_items[1:]])
+    )
+
+    assert validation.publishable is False
+    assert any("fact_id가 없습니다" in reason for reason in validation.reasons)
+
+
+def test_summary_text_cannot_change_after_independent_verification() -> None:
+    report = _valid_report()
+    first = replace(report.summary_items[0], text="검증 뒤 바꾼 요약문")
+
+    validation = validate_publishable(
+        replace(report, summary_items=[first, *report.summary_items[1:]])
+    )
+
+    assert validation.publishable is False
+    assert any("결속 지문" in reason for reason in validation.reasons)
+
+
+def test_state_evidence_must_exist_in_source_hash_registry() -> None:
+    report = _valid_report()
+    report = _replace_fact(
+        report,
+        "identity-01",
+        state_evidence="사업 종속회사라는 단어만 맞춘 임의 문장",
+    )
+
+    validation = validate_publishable(report)
+
+    assert validation.publishable is False
+    assert any("원문 해시 등록부" in reason for reason in validation.reasons)
+
+
+def test_external_news_cannot_be_promoted_to_a_core_fact_even_with_complete_metadata() -> None:
+    report = _valid_report()
+    target = report.fact_records[0]
+    source = next(
+        item
+        for item in report.citations
+        if isinstance(item, Source) and item.source_id == target.source_id
+    )
+    source_date = source.published_at or source.disclosed_at or source.collected_at
+    external = replace(
+        source,
+        kind=SourceKind.NEWS,
+        published_at=source_date,
+        disclosed_at="",
+        collected_at="",
+        domain="news.example",
+        publisher="OO경제",
+        host="news.example",
+        url=f"https://news.example/articles/{source.document_id}",
+        source_type="외부 보도",
+    )
+    citations = [
+        external
+        if isinstance(item, Source) and item.source_id == source.source_id
+        else item
+        for item in report.citations
+    ]
+    changed = replace(
+        target,
+        source_type=external.source_type,
+        source_publisher=external.publisher,
+        source_host=external.host,
+        source_url=external.url,
+        source_document_id=external.document_id,
+    )
+    changed = replace(changed, evidence_binding=fact_evidence_binding(changed))
+    facts = [changed if fact.fact_id == target.fact_id else fact for fact in report.fact_records]
+
+    validation = validate_publishable(
+        replace(report, citations=citations, fact_records=facts)
+    )
+
+    assert validation.publishable is False
+    assert any("공식 파트너·규제기관 원문" in reason for reason in validation.reasons)
+
+
+def test_official_web_cannot_swap_to_a_self_declared_news_domain() -> None:
+    report = _valid_report()
+    target = next(fact for fact in report.fact_records if fact.fact_id == "culture-01")
+    source = next(
+        item
+        for item in report.citations
+        if isinstance(item, Source) and item.source_id == target.source_id
+    )
+    forged = replace(
+        source,
+        host="news.example",
+        url="https://news.example/fake-story",
+        document_id="fake-story",
+    )
+    citations = [forged if item is source else item for item in report.citations]
+    changed = replace(
+        target,
+        source_host=forged.host,
+        source_url=forged.url,
+        source_document_id=forged.document_id,
+    )
+    changed = replace(changed, evidence_binding=fact_evidence_binding(changed))
+    facts = [changed if fact.fact_id == target.fact_id else fact for fact in report.fact_records]
+
+    validation = validate_publishable(
+        replace(report, citations=citations, fact_records=facts)
+    )
+
+    assert not validation
+    assert any("정확한 host URL" in reason for reason in validation.reasons)
+
+
+def test_official_web_and_attester_cannot_be_rewritten_together() -> None:
+    report = _valid_report()
+    target = next(fact for fact in report.fact_records if fact.fact_id == "culture-01")
+    website = next(
+        item
+        for item in report.citations
+        if isinstance(item, Source) and item.source_id == target.source_id
+    )
+    attester = next(
+        item
+        for item in report.citations
+        if isinstance(item, Source)
+        and item.source_id == website.domain_attestation_source_id
+    )
+    forged_evidence = "official homepage https://news.example"
+    forged_website = replace(
+        website,
+        host="news.example",
+        url="https://news.example/fake-story",
+        document_id="fake-story",
+        domain_attestation_evidence=forged_evidence,
+    )
+    forged_attester = replace(
+        attester,
+        evidence_hashes=sorted(
+            {*attester.evidence_hashes, evidence_text_hash(forged_evidence)}
+        ),
+    )
+    citations = [
+        forged_website
+        if item is website
+        else forged_attester
+        if item is attester
+        else item
+        for item in report.citations
+    ]
+    changed = replace(
+        target,
+        source_host=forged_website.host,
+        source_url=forged_website.url,
+        source_document_id=forged_website.document_id,
+    )
+    changed = replace(changed, evidence_binding=fact_evidence_binding(changed))
+    facts = [
+        changed if fact.fact_id == target.fact_id else fact
+        for fact in report.fact_records
+    ]
+
+    validation = validate_publishable(
+        replace(report, citations=citations, fact_records=facts)
+    )
+
+    assert validation.publishable is False
+    assert any("provenance seal" in reason for reason in validation.reasons)
+
+
+def test_competitor_filing_cannot_serve_as_self_evidence_in_sections_one_to_eight() -> None:
+    report = _valid_report()
+    target = next(fact for fact in report.fact_records if fact.section_owner == "identity")
+    source = next(
+        item
+        for item in report.citations
+        if isinstance(item, Source) and item.source_id == target.source_id
+    )
+    competitor = replace(source, source_type="비교사 공식 공시", publisher="다른회사")
+    citations = [
+        competitor
+        if isinstance(item, Source) and item.source_id == source.source_id
+        else item
+        for item in report.citations
+    ]
+    changed = replace(
+        target,
+        source_type=competitor.source_type,
+        source_publisher=competitor.publisher,
+    )
+    changed = replace(changed, evidence_binding=fact_evidence_binding(changed))
+    facts = [changed if fact.fact_id == target.fact_id else fact for fact in report.fact_records]
+
+    validation = validate_publishable(
+        replace(report, citations=citations, fact_records=facts)
+    )
+
+    assert validation.publishable is False
+    assert any("비교사 원문을 자사 핵심 근거" in reason for reason in validation.reasons)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "needle"),
+    [
+        ("location", "전혀 다른 페이지", "하위 위치"),
+        ("source_date", "2020-01-01", "source_date"),
+        ("as_of", "2030-01-01", "원문 날짜보다 뒤"),
+    ],
+)
+def test_location_and_two_dates_are_fail_closed(
+    field: str, value: str, needle: str
+) -> None:
+    report = _replace_fact(_valid_report(), "identity-01", **{field: value})
+
+    validation = validate_publishable(report)
+
+    assert validation.publishable is False
+    assert any(needle in reason for reason in validation.reasons)
+
+
+def test_verification_status_and_fact_status_are_separate() -> None:
+    report = _replace_fact(
+        _valid_report(),
+        "future-01",
+        fact_status="actual",
+        verification_status="verified",
+        status="verified",
+    )
+
+    validation = validate_publishable(report)
+
+    assert validation.publishable is False
+    assert any("시간 상태와 모순" in reason for reason in validation.reasons)
+
+
+def test_delivery_cannot_be_rewritten_as_a_main_contract() -> None:
+    report = _replace_fact(
+        _valid_report(),
+        "operations-02",
+        claim="주문 사양 생산품은 가구 제조·유통 고객사와 본계약됐다.",
+    )
+
+    validation = validate_publishable(report)
+
+    assert validation.publishable is False
+    assert any("MOU·계약·납품·매출 상태" in reason for reason in validation.reasons)
+
+
+def test_past_requires_exact_three_recent_completed_fiscal_years() -> None:
+    report = _replace_fact(
+        _valid_report(),
+        "past-fin-2023",
+        fiscal_year=2010,
+        as_of="2010-12-31",
+    )
+
+    validation = validate_publishable(report)
+
+    assert validation.publishable is False
+    assert any("2023~2025" in reason for reason in validation.reasons)
+
+
+def test_past_requires_completed_execution_and_visible_interpretation() -> None:
+    report = _replace_fact(
+        _valid_report(),
+        "past-change-01",
+        claim_type="completed_execution",
+        basis_fact_ids=[],
+    )
+
+    validation = validate_publishable(report)
+
+    assert validation.publishable is False
+    assert any("변화·실행 해석" in reason for reason in validation.reasons)
+
+
+def test_business_requires_customer_market_priority() -> None:
+    report = _replace_fact(_valid_report(), "biz-customer-01", market_priority="")
+
+    validation = validate_publishable(report)
+
+    assert validation.publishable is False
+    assert any("market_priority" in reason for reason in validation.reasons)
+
+
+def test_portfolio_requires_three_distinct_products_and_roles() -> None:
+    report = _replace_fact(_valid_report(), "portfolio-03", product_role="")
+
+    validation = validate_publishable(report)
+
+    assert validation.publishable is False
+    assert any("product_role" in reason for reason in validation.reasons)
+
+
+def test_current_response_must_point_to_same_section_issue() -> None:
+    report = _replace_fact(
+        _valid_report(), "current-02", response_to_fact_id="identity-01"
+    )
+
+    validation = validate_publishable(report)
+
+    assert validation.publishable is False
+    assert any("response_to_fact_id" in reason for reason in validation.reasons)
+
+
+def test_numeric_fact_requires_recomputable_round_half_up_chain() -> None:
+    report = _replace_fact(
+        _valid_report(),
+        "biz-mix-03",
+        numeric_checks=["6.25|1|1|6.2"],
+    )
+
+    validation = validate_publishable(report)
+
+    assert validation.publishable is False
+    assert any("재계산과 다릅니다" in reason for reason in validation.reasons)
+
+
+def test_public_table_cannot_repeat_won_and_eokwon_units() -> None:
+    report = _valid_report()
+    sections = []
+    for section in report.sections:
+        if section.cell != "past_changes":
+            sections.append(section)
+            continue
+        table = section.tables[0]
+        rows = [list(row) for row in table.rows]
+        rows[0][1] = "30,903,000,000원 (309.0억원)"
+        sections.append(replace(section, tables=[replace(table, rows=rows)]))
+
+    validation = validate_publishable(replace(report, sections=sections))
+
+    assert validation.publishable is False
+    assert any("단위를 붙이지" in reason for reason in validation.reasons)
+
+
+def test_public_eokwon_table_requires_hidden_won_ledger() -> None:
+    report = _valid_report()
+    sections = []
+    for section in report.sections:
+        if section.cell != "past_changes":
+            sections.append(section)
+            continue
+        table = section.tables[0]
+        sections.append(replace(section, tables=[replace(table, raw_rows=[])]))
+
+    validation = validate_publishable(replace(report, sections=sections))
+
+    assert validation.publishable is False
+    assert any("원 단위 원값" in reason for reason in validation.reasons)
+
+
+def test_causal_claim_requires_structured_direct_evidence() -> None:
+    report = _replace_fact(
+        _valid_report(),
+        "past-change-01",
+        supports_causality=False,
+        causal_subject="",
+        causal_mechanism="",
+        causal_outcome="",
+        causal_evidence="",
+    )
+
+    validation = validate_publishable(report)
+
+    assert validation.publishable is False
+    assert any("직접 인과 근거" in reason for reason in validation.reasons)
+
+
+def test_comparator_must_be_a_different_official_legal_entity() -> None:
+    report = _replace_fact(
+        _valid_report(),
+        "competition-01",
+        comparator_source_id="JY-S2",
+        comparison_target="주식회사 진영",
+    )
+
+    validation = validate_publishable(report)
+
+    assert validation.publishable is False
+    assert any("source_id가 같습니다" in reason for reason in validation.reasons)
+    assert any("자사와 구분" in reason for reason in validation.reasons)
+
+
+def test_comparison_axes_must_equal_the_context_recomputed_from_both_sources() -> None:
+    report = _valid_report()
+    target = next(fact for fact in report.fact_records if fact.fact_id == "competition-01")
+    forged_conditions = dict(target.comparison_conditions)
+    forged_conditions.update(
+        customer="사업보고서·대상",
+        product="사업보고서·대상",
+        market="사업보고서·대상",
+    )
+    report = _replace_fact(
+        report,
+        target.fact_id,
+        comparison_conditions=forged_conditions,
+    )
+
+    validation = validate_publishable(report)
+
+    assert not validation
+    assert any("다시 계산한 값과 다릅니다" in reason for reason in validation.reasons)
+
+
+def test_comparison_period_definition_and_scope_must_bind_both_raw_payloads() -> None:
+    report = _valid_report()
+    target = next(fact for fact in report.fact_records if fact.fact_id == "competition-01")
+    forged_conditions = dict(target.comparison_conditions)
+    forged_conditions.update(
+        self_period="2099",
+        comparator_period="2099",
+        self_definition="invented",
+        comparator_definition="invented",
+        self_accounting_scope="Mars",
+        comparator_accounting_scope="Mars",
+    )
+    report = _replace_fact(
+        report,
+        target.fact_id,
+        comparison_period="2099",
+        comparison_definition="invented",
+        comparison_scope="Mars",
+        comparison_conditions=forged_conditions,
+    )
+
+    validation = validate_publishable(report)
+
+    assert not validation
+    assert any("비교 기간이 양사 공식 원 payload" in reason for reason in validation.reasons)
+    assert any("지표 정의가 양사 공식 원 payload" in reason for reason in validation.reasons)
+    assert any("회계·사업 범위가 양사 공식 원 payload" in reason for reason in validation.reasons)
+
+
+def test_duplicate_claim_and_repeated_metric_are_blocked() -> None:
+    report = _valid_report()
+    first = report.fact_records[0]
+    duplicate = replace(first, fact_id="duplicate-fact")
+
+    validation = validate_publishable(
+        replace(report, fact_records=[*report.fact_records, duplicate])
+    )
+
+    assert validation.publishable is False
+    assert any("중복" in reason for reason in validation.reasons)
+
+
+def test_excluded_preferences_are_blocked_but_welfare_platform_business_is_allowed() -> None:
+    assert _forbidden_text_problem("임직원 평균보수와 근속연수")
+    assert _forbidden_text_problem("지원자 복리후생 정보")
+    assert _forbidden_text_problem("기업용 복지 플랫폼 사업을 운영한다") == ""
+
+
+@pytest.mark.parametrize("duplicate_number", [1, 0, -1])
+def test_source_numbers_must_be_unique_positive(duplicate_number: int) -> None:
+    report = _valid_report()
+    citations = list(report.citations)
+    citations[1] = replace(citations[1], number=duplicate_number)
+
+    validation = validate_publishable(replace(report, citations=citations))
+
+    assert validation.publishable is False
+    assert any("출처 번호" in reason for reason in validation.reasons)
+
+
+def test_report_company_must_bind_every_fact_legal_entity() -> None:
+    report = _replace_fact(_valid_report(), "identity-01", legal_entity="주식회사 다른회사")
+    validation = validate_publishable(report)
+    assert not validation
+    assert any("report.company" in reason for reason in validation.reasons)
+
+
+def test_fact_and_source_dates_cannot_be_after_report_as_of_date() -> None:
+    report = _valid_report()
+    source = report.citations[0]
+    assert isinstance(source, Source)
+    citations = [
+        replace(item, collected_at="2026-08-20") if item is source else item
+        for item in report.citations
+    ]
+    validation = validate_publishable(replace(report, citations=citations))
+    assert not validation
+    assert any("보고서 기준일 뒤" in reason for reason in validation.reasons)
+
+
+def test_source_host_url_document_identity_is_bound_to_fact() -> None:
+    report = _valid_report()
+    target = report.fact_records[0]
+    source = next(
+        item for item in report.citations
+        if isinstance(item, Source) and item.source_id == target.source_id
+    )
+    changed_source = replace(
+        source,
+        document_id="20260318009999",
+        url="https://kind.krx.co.kr/external/2026/03/18/20260318009999/20260318009999/11011.htm",
+    )
+    citations = [changed_source if item is source else item for item in report.citations]
+    validation = validate_publishable(replace(report, citations=citations))
+    assert not validation
+    assert any("document_id가 등록부와 다릅니다" in reason for reason in validation.reasons)
+
+
+def test_numeric_raw_value_must_exist_in_collected_state_evidence() -> None:
+    report = _valid_report()
+    target = next(fact for fact in report.fact_records if fact.fact_id == "biz-mix-03")
+    evidence = "반기보고서 주요 제품 매출 비중: 열분해유 매출 비율 미공개"
+    report = _replace_fact(
+        report,
+        target.fact_id,
+        state_evidence=evidence,
+        evidence_support_terms=["열분해유", "매출"],
+    )
+    citations = [
+        replace(
+            item,
+            evidence_hashes=sorted({*item.evidence_hashes, evidence_text_hash(evidence)}),
+        )
+        if isinstance(item, Source) and item.source_id == target.source_id
+        else item
+        for item in report.citations
+    ]
+    validation = validate_publishable(replace(report, citations=citations))
+    assert not validation
+    assert any("raw_value 원값" in reason for reason in validation.reasons)
+
+
+def test_public_table_raw_rows_must_exactly_bind_fact_numeric_ledger() -> None:
+    report = _valid_report()
+    sections = []
+    for section in report.sections:
+        if section.cell != "past_changes":
+            sections.append(section)
+            continue
+        table = section.tables[0]
+        raw_rows = [list(row) for row in table.raw_rows]
+        raw_rows[0][1] = "99999999999"
+        sections.append(replace(section, tables=[replace(table, raw_rows=raw_rows)]))
+    validation = validate_publishable(replace(report, sections=sections))
+    assert not validation
+    assert any("원값·표시값·numeric_checks" in reason for reason in validation.reasons)
+
+
+def test_completed_three_fy_facts_without_one_bound_table_are_blocked() -> None:
+    report = _valid_report()
+    sections = [
+        replace(section, tables=[])
+        if section.cell == "past_changes"
+        else section
+        for section in report.sections
+    ]
+    validation = validate_publishable(replace(report, sections=sections))
+    assert not validation
+    assert any("한 개의 공개 실적표" in reason for reason in validation.reasons)
+
+
+@pytest.mark.parametrize(
+    ("fact_id", "claim", "evidence", "needle"),
+    [
+        (
+            "current-01",
+            "해외 신규 유통 문제는 모두 해결 완료됐다.",
+            "반기보고서: 해외 신규 유통 문제는 모두 해결 완료됐다.",
+            "해결 완료된 문제",
+        ),
+        (
+            "future-01",
+            "회사는 열분해 설비 14기 가동을 완료했다.",
+            "기업가치 제고 자료: 열분해 설비 14기 가동 완료",
+            "완료된 실행을 미래 계획",
+        ),
+        (
+            "current-03",
+            "회사는 새 품질시험을 시작할 계획이다.",
+            "반기보고서: 새 품질시험을 시작할 계획이다.",
+            "이미 착수했음",
+        ),
+        (
+            "current-01",
+            "현재 과제는 더 이상 문제가 아니다.",
+            "반기보고서: 현재 과제는 더 이상 문제가 아니다.",
+            "해결 완료된 문제",
+        ),
+        (
+            "future-01",
+            "회사의 확장 계획은 이미 모두 실현됐다.",
+            "기업가치 제고 자료: 회사의 확장 계획은 이미 모두 실현됐다.",
+            "이미 실현·완료된 내용",
+        ),
+    ],
+)
+def test_lexical_time_state_cannot_relabel_resolved_or_completed_events(
+    fact_id: str, claim: str, evidence: str, needle: str
+) -> None:
+    report = _valid_report()
+    original = next(fact for fact in report.fact_records if fact.fact_id == fact_id)
+    report = _replace_fact(
+        report,
+        fact_id,
+        claim=claim,
+        state_evidence=evidence,
+        evidence_support_terms=[term for term in ("문제", "해결", "열분해", "가동") if term in claim and term in evidence],
+    )
+    citations = [
+        replace(item, evidence_hashes=sorted({*item.evidence_hashes, evidence_text_hash(evidence)}))
+        if isinstance(item, Source) and item.source_id == original.source_id
+        else item
+        for item in report.citations
+    ]
+    validation = validate_publishable(replace(report, citations=citations))
+    assert not validation
+    assert any(needle in reason for reason in validation.reasons)
+
+
+def test_semantic_duplicate_cannot_hide_by_reordering_claim_words() -> None:
+    report = _valid_report()
+    original = next(fact for fact in report.fact_records if fact.fact_id == "operations-02")
+    duplicate = replace(
+        original,
+        fact_id="operations-02-paraphrase",
+        relationship_or_action="고객 납품 경로",
+        claim="가구 제조·유통 고객사에 주문 사양 생산품은 납품된다.",
+    )
+    duplicate = replace(duplicate, evidence_binding=fact_evidence_binding(duplicate))
+    validation = validate_publishable(
+        replace(report, fact_records=[*report.fact_records, duplicate])
+    )
+    assert not validation
+    assert any("의미가 같은 사실" in reason for reason in validation.reasons)
+
+
+def test_duplicate_fact_cannot_hide_behind_a_cloned_source_id() -> None:
+    report = _valid_report()
+    original = next(fact for fact in report.fact_records if fact.fact_id == "operations-02")
+    original_source = next(
+        item
+        for item in report.citations
+        if isinstance(item, Source) and item.source_id == original.source_id
+    )
+    clone_source = replace(
+        original_source,
+        number=max(item.number for item in report.citations if isinstance(item, Source)) + 1,
+        source_id="cloned-source-id",
+    )
+    duplicate = replace(
+        original,
+        fact_id="operations-02-cloned-source",
+        source_id=clone_source.source_id,
+        relationship_or_action="가구 고객 대상 생산품 공급 경로",
+        claim="가구 제조·유통 고객사에 주문 사양 생산품은 납품된다.",
+    )
+    duplicate = replace(duplicate, evidence_binding=fact_evidence_binding(duplicate))
+
+    validation = validate_publishable(
+        replace(
+            report,
+            citations=[*report.citations, clone_source],
+            fact_records=[*report.fact_records, duplicate],
+        )
+    )
+
+    assert not validation
+    assert any("URL·document_id" in reason for reason in validation.reasons)
+    assert any("의미가 같은 사실" in reason for reason in validation.reasons)

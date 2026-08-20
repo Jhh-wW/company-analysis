@@ -7,10 +7,15 @@
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from src.features.pipeline.port import Grade, Report
+from src.features.pipeline.canonical_demo import build_demo_report
 from src.features.provenance.sources import Source, SourceKind
+from src.features.report_standard.publish import PublishBlockedError
 from src.features.storage import cache, db
 
 
@@ -41,6 +46,22 @@ def _report_with_news(published_at: str) -> Report:
                 domain="example.co.kr",
             )
         ],
+        generated_at="2026-08-15",
+    )
+
+
+def _company_report() -> Report:
+    return build_demo_report()
+
+
+def _legacy_company_report() -> Report:
+    return Report(
+        company="가나다전자",
+        job="",
+        corp_type="상장사",
+        grade=Grade.COMPLETE,
+        sections=[],
+        requirements=[],
         generated_at="2026-08-15",
     )
 
@@ -126,6 +147,103 @@ def test_layer1_miss_when_posting_fingerprint_differs(tmp_path: Path) -> None:
             requirements=["전혀 다른 요구역량"],
             current_fiscal_year=2025,
         )
+    assert hit is None
+
+
+def test_옛_빈직무_빈공고_항목은_회사분석_캐시에_적중하지_않는다(tmp_path: Path) -> None:
+    with db.connect(tmp_path / "storage.db") as conn:
+        cache.save_layer1(
+            conn,
+            corp_id="CORP-001",
+            job="",
+            requirements=[],
+            report=_report(),
+            fiscal_year=2025,
+        )
+
+        hit = cache.get_company_report_hit(
+            conn,
+            corp_id="CORP-001",
+            current_fiscal_year=2025,
+        )
+
+    assert hit is None
+
+
+def test_회사분석_캐시는_직무와_공고_없이_전용_namespace로_왕복한다(tmp_path: Path) -> None:
+    report = _company_report()
+    with db.connect(tmp_path / "storage.db") as conn:
+        cache.save_company_report(
+            conn,
+            corp_id="CORP-001",
+            report=report,
+            fiscal_year=2025,
+        )
+        hit = cache.get_company_report_hit(
+            conn,
+            corp_id="CORP-001",
+            current_fiscal_year=2025,
+        )
+
+    assert hit == report
+
+
+def test_출고_불가한_canonical_보고서는_캐시에_저장하지_않는다(tmp_path: Path) -> None:
+    invalid = replace(_company_report(), summary_items=[])
+
+    with db.connect(tmp_path / "storage.db") as conn:
+        with pytest.raises(PublishBlockedError):
+            cache.save_company_report(
+                conn,
+                corp_id="CORP-001",
+                report=invalid,
+                fiscal_year=2025,
+            )
+
+
+def test_회사분석_schema_version이_바뀌면_옛_캐시는_미적중한다(
+    tmp_path: Path, monkeypatch
+) -> None:
+    with db.connect(tmp_path / "storage.db") as conn:
+        cache.save_company_report(
+            conn,
+            corp_id="CORP-001",
+            report=_company_report(),
+            fiscal_year=2025,
+        )
+        monkeypatch.setattr(
+            cache,
+            "_COMPANY_ANALYSIS_SCHEMA_REQUIREMENTS",
+            ("schema:company-report-v2",),
+        )
+        hit = cache.get_company_report_hit(
+            conn,
+            corp_id="CORP-001",
+            current_fiscal_year=2025,
+        )
+
+    assert hit is None
+
+
+def test_v2_회사분석_payload는_v3_캐시에_적중하지_않는다(tmp_path: Path) -> None:
+    with db.connect(tmp_path / "storage.db") as conn:
+        # 과거 버전이 새 namespace 아래 잘못 저장된 손상 상태를 직접 재현한다.
+        # 공개 저장 API 자체는 이제 canonical 보고서만 받는다.
+        cache.save_layer1(
+            conn,
+            corp_id="CORP-001",
+            job=cache._COMPANY_ANALYSIS_PRODUCT_KEY,
+            requirements=list(cache._COMPANY_ANALYSIS_SCHEMA_REQUIREMENTS),
+            report=_legacy_company_report(),
+            fiscal_year=2025,
+        )
+
+        hit = cache.get_company_report_hit(
+            conn,
+            corp_id="CORP-001",
+            current_fiscal_year=2025,
+        )
+
     assert hit is None
 
 

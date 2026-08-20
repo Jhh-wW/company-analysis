@@ -1,6 +1,5 @@
 {# 로그인 상태 조각 — base.html의 topbar 안에 {% include "_auth_status.html" %}로 끼워 넣는다.
-   ★ 이 파일 하나만으로는 완전한 화면이 아니다 (extends 하지 않는다). base.html은 건드리지
-     않기 위해 새 파일로만 만들었다 — 실제로 끼우는 작업은 main.py 쪽에서 한다.
+   ★ 이 파일 하나만으로는 완전한 화면이 아니다 (extends 하지 않는다).
 
    필요한 값 (main.py가 _ctx()로 넣어준다):
      auth_email    — 로그인한 사람의 이메일(문자열). 로그인 안 했으면 없음/None.
@@ -10,20 +9,22 @@
      방어선이 아니다. 관리자가 아닌 사람이 주소를 직접 쳐서 들어오는 것을 막는 진짜
      차단은 서버의 require_admin()이 매 요청마다 다시 판정한다
      (기획서 07_출력/4_근거/01_출력근거.md §4 「버튼을 숨기는 것은 권한이 아니다」). #}
+{% if auth_email or auth_login_available %}
 <span class="auth-status"
       data-login-available="{{ 'true' if auth_login_available else 'false' }}">
   {% if auth_email %}
     <span class="auth-email">{{ auth_email }}</span>
     {% if auth_is_admin %}
       <a class="tag admin" href="/admin" aria-label="관리자 화면 열기">관리자</a>
-    {% else %}
-      <a class="auth-action" href="/admin">관리자</a>
     {% endif %}
-    <a class="auth-action" href="/auth/logout">로그아웃</a>
+    <form method="post" action="/auth/logout"
+          style="display:inline;margin:0">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="auth-action" type="submit"
+              style="border:0;background:none;padding:0;cursor:pointer;font:inherit">로그아웃</button>
+    </form>
   {% else %}
-    <a class="auth-action" href="/auth/login">
-      {% if auth_login_available %}로그인{% else %}로그인 설정 필요{% endif %}
-    </a>
-    <a class="auth-action" href="/admin">관리자</a>
+    <a class="auth-action" href="/auth/login">로그인</a>
   {% endif %}
 </span>
+{% endif %}

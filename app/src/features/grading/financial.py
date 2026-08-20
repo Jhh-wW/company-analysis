@@ -17,10 +17,10 @@ import re
 
 from src.features.pipeline.port import ReportTable
 
-#: 재무 API 조각임을 알리는 머리말. 시제품이 붙인 그대로다.
+#: 재무 API 조각임을 알리는 머리말. 조사 엔진이 붙인 그대로다.
 DART_FINANCIAL_PREFIX = "주요계정(DART API):"
 
-#: 항목 구분자. 시제품이 `" · "`로 이어 붙였다.
+#: 항목 구분자. 조사 엔진이 `" · "`로 이어 붙였다.
 _ITEM_SEP = " · "
 
 #: `유동자산 76,330,498,769(2025.12.31 현재)` 를 세 조각으로 가른다.
@@ -58,11 +58,15 @@ def _format_amount(raw: str) -> str:
     return f"{raw} ({value / 억:,.0f}억)"
 
 
-def parse_financial_table(text: str) -> ReportTable | None:
+def parse_financial_table(
+    text: str, *, cite: str = FINANCIAL_CITE
+) -> ReportTable | None:
     """뭉개진 재무 줄을 표로 되돌린다.
 
     Args:
         text: `주요계정(DART API): 유동자산 76,330,498,769(2025.12.31 현재) · …`
+        cite: 표가 가리킬 출처. 진짜 조사에서는 API 이름을, 저장 데모를
+            재생할 때는 원래 조각 번호를 넘긴다.
 
     Returns:
         표. 모양이 안 맞거나 항목이 너무 적으면 None (그때는 원래 규칙대로 처리).
@@ -106,7 +110,7 @@ def parse_financial_table(text: str) -> ReportTable | None:
         caption=FINANCIAL_CAPTION,
         headers=list(FINANCIAL_HEADERS),
         rows=rows,
-        cite=FINANCIAL_CITE,
+        cite=cite,
         numeric=True,
     )
     return table if table.is_valid else None

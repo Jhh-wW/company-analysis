@@ -28,7 +28,10 @@
 
   <div class="btn-row" style="margin-top:20px">
     {% if auth_email %}
-      <a class="btn ghost" href="/auth/logout">로그아웃</a>
+      <form method="post" action="/auth/logout">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="btn ghost" type="submit">로그아웃</button>
+      </form>
     {% else %}
       <a class="btn" href="/auth/login">
         {% if auth_login_available %}구글 계정으로 로그인{% else %}로그인 설정 상태 보기{% endif %}

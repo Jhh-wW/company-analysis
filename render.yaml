@@ -9,7 +9,7 @@ services:
     dockerContext: .
     healthCheckPath: /healthz
     maxShutdownDelaySeconds: 300
-    autoDeployTrigger: commit
+    autoDeployTrigger: checksPass
 
     disk:
       name: app-data
@@ -22,6 +22,10 @@ services:
         value: demo
       - key: BETA_ADMIN_ONLY
         value: "1"
+      - key: SHARE_LINK_MAX_AGE_DAYS
+        value: "60"
+      - key: SHARE_PUBLIC_BASE_URL
+        sync: false
 
       # 재배포·재시작 뒤에도 남아야 하는 모든 기록은 영속 디스크에 둔다.
       - key: APP_DATA_ROOT
@@ -41,6 +45,10 @@ services:
       - key: GOOGLE_CLIENT_SECRET
         sync: false
       - key: GOOGLE_REDIRECT_URI
+        sync: false
+      - key: PDF_RELEASE_PARTICIPANTS
+        sync: false
+      - key: PROVENANCE_SEAL_SECRET
         sync: false
       - key: ANTHROPIC_API_KEY
         sync: false

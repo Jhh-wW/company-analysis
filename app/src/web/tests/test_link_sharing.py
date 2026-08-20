@@ -15,14 +15,25 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
 from src.core.constants import REMOVED_RESULT_COPY_MARKERS
 from src.features.budget.sharing import REPORT_ID_HEX_CHARS, REPORT_LINK_MAX_AGE_DAYS
+from src.features.export_pdf.release import ReleasedPdf, prepare_pdf_release
+from src.features.pipeline.canonical_demo import (
+    DEMO_COMPANY as CANONICAL_DEMO_COMPANY,
+    DEMO_REF as CANONICAL_DEMO_REF,
+    demo_card as canonical_demo_card,
+)
 from src.features.pipeline.demo import DemoPipeline
+from src.features.pipeline.port import Outcome
+from src.features.report_standard import CANONICAL_SECTION_IDS
 from src.web import main
+from src.web import job_runtime, runtime
+from src.web.routers import reports as reports_router
 from src.web.tests._visible_text import visible_text
 
 
@@ -39,23 +50,50 @@ def client():
         yield client
 
 
+@pytest.fixture
+def approved_pdf_route(monkeypatch):
+    """이 파일은 다운로드 헤더만 보므로 승인 완료 경계를 명시적으로 대체한다."""
+
+    def release_state(*, report_id: str, report):
+        del report_id
+        candidate = prepare_pdf_release(report)
+        record = SimpleNamespace(
+            pdf_sha256=candidate.pdf_sha256,
+            record_sha256="a" * 64,
+        )
+        return candidate, ReleasedPdf(content=candidate.pdf_bytes, record=record)
+
+    monkeypatch.setattr(reports_router, "_release_state", release_state)
+
+
 def _보고서를_만든다(client: TestClient) -> str:
     """정상 흐름으로 보고서 하나를 만들고 그 주소 번호를 돌려준다."""
-    main._PIPELINE = DemoPipeline()
+    runtime._PIPELINE = DemoPipeline()
+    card = canonical_demo_card()
+    assert card.ref == CANONICAL_DEMO_REF
     form = {
-        "company": "우리엔",
-        "job": "영업",
-        "region": "서울",
-        "posting_text": "x",
-        "legal_name": "우리엔",
-        "ref": "재수집-p003",
-        "address": "-",
+        "company": CANONICAL_DEMO_COMPANY,
+        "job": "",
+        "region": "인천 서구",
+        "posting_text": "",
+        "legal_name": card.legal_name,
+        "ref": card.ref,
+        "address": card.address,
     }
     run = client.post("/run", data=form, follow_redirects=False)
     job_id = run.headers["location"].rsplit("/", 1)[-1]
     for _ in range(200):
         if client.get(f"/api/progress/{job_id}").json()["finished"]:
             break
+    else:
+        pytest.fail("canonical 데모 조사가 끝나지 않았습니다")
+
+    result = job_runtime._JOBS[job_id].result
+    assert result is not None and result.outcome is Outcome.REPORT
+    assert result.report is not None
+    assert tuple(section.cell for section in result.report.sections) == (
+        CANONICAL_SECTION_IDS
+    )
     return job_id
 
 
@@ -85,24 +123,34 @@ def test_보고서_화면이_검색에_안_걸리게_한다(client: TestClient):
     assert "noindex" in headers.get("x-robots-tag", "")
 
 
-def test_보고서_화면이_주소를_외부로_안_흘린다(client: TestClient):
-    """★ 가장 현실적인 유출 경로 — 보고서 안의 뉴스 링크를 누르면
-    그 사이트에 「어느 주소에서 왔는지」가 자동 전달된다."""
+def test_보고서_HTML은_form_Origin을_보존하는_same_origin정책이다(client: TestClient):
+    """same-origin은 같은 출처 form의 tuple Origin을 살리고 외부 Referer는 막는다."""
     job_id = _보고서를_만든다(client)
 
     headers = client.get(f"/result/{job_id}").headers
 
-    assert headers.get("referrer-policy") == "no-referrer"
+    assert headers.get("referrer-policy") == "same-origin"
 
 
-def test_내려받기에도_같은_보호가_걸린다(client: TestClient):
+def test_내려받기에도_같은_보호가_걸린다(
+    client: TestClient, approved_pdf_route
+):
     job_id = _보고서를_만든다(client)
 
-    headers = client.get(f"/download/{job_id}").headers
-
+    response = client.get(f"/download/pdf/{job_id}")
+    headers = response.headers
+    assert response.status_code == 200
     assert "noindex" in headers.get("x-robots-tag", "")
     assert headers.get("referrer-policy") == "no-referrer"
-    assert ".docx" in headers.get("content-disposition", ""), "내려받기는 계속 돼야 한다"
+    assert ".pdf" in headers.get("content-disposition", "")
+    assert headers.get("cache-control") == "private, no-store"
+    assert headers.get("x-content-type-options") == "nosniff"
+    assert "cookie" in headers.get("vary", "").lower()
+
+    retired = client.get(f"/download/{job_id}")
+    assert retired.status_code == 410
+    assert "PDF 보고서 받기" in retired.text
+    assert "no-store" in retired.headers.get("cache-control", "")
 
 
 # ══════════════════════════════════════════════════════════
@@ -128,7 +176,7 @@ def test_기간이_지난_링크는_안_열린다(client: TestClient, monkeypatc
     """★ P-93 그 자체."""
     job_id = _보고서를_만든다(client)
     지난뒤 = dt.date.today() + dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS + 1)
-    monkeypatch.setattr(main.link_expiry, "is_expired", lambda *a, **k: True)
+    monkeypatch.setattr(job_runtime.link_expiry, "is_expired", lambda *a, **k: True)
 
     response = client.get(f"/result/{job_id}")
 
@@ -140,18 +188,18 @@ def test_기간이_지난_링크는_안_열린다(client: TestClient, monkeypatc
 def test_기간이_지나면_내려받기도_막힌다(client: TestClient, monkeypatch):
     """★ 화면만 막고 파일을 열어 두면 막은 게 아니다."""
     job_id = _보고서를_만든다(client)
-    monkeypatch.setattr(main.link_expiry, "is_expired", lambda *a, **k: True)
+    monkeypatch.setattr(job_runtime.link_expiry, "is_expired", lambda *a, **k: True)
 
-    response = client.get(f"/download/{job_id}")
-
-    assert response.status_code == 410
-    assert "docx" not in response.headers.get("content-disposition", "")
+    for path in (f"/download/{job_id}", f"/download/pdf/{job_id}"):
+        response = client.get(path)
+        assert response.status_code == 410
+        assert "content-disposition" not in response.headers
 
 
 def test_만료_화면이_막다른_길이_아니다(client: TestClient, monkeypatch):
     """★ 「없는 보고서」로 보이면 사용자는 자기가 잘못 왔다고 생각한다."""
     job_id = _보고서를_만든다(client)
-    monkeypatch.setattr(main.link_expiry, "is_expired", lambda *a, **k: True)
+    monkeypatch.setattr(job_runtime.link_expiry, "is_expired", lambda *a, **k: True)
 
     text = client.get(f"/result/{job_id}").text
 

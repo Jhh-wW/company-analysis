@@ -25,8 +25,22 @@ ENV_CLIENT_SECRET: Final[str] = "GOOGLE_CLIENT_SECRET"
 ENV_REDIRECT_URI: Final[str] = "GOOGLE_REDIRECT_URI"
 #: 콤마로 구분한 관리자 이메일 목록. 코드에는 실제 이메일 기본값을 두지 않는다.
 ENV_ADMIN_EMAILS: Final[str] = "ADMIN_EMAILS"
-#: 시험 배포에서 사이트 전체를 관리자 로그인 뒤에 둘지. 정확히 ``1``일 때만 켠다.
+#: 시험 배포에서 사이트 전체를 관리자 로그인 뒤에 둘지. 정확히 ``0``일 때만 끈다.
+#: 누락·오타는 잠금 상태로 남겨 초기 배포가 실수로 공개되지 않게 한다.
 ENV_BETA_ADMIN_ONLY: Final[str] = "BETA_ADMIN_ONLY"
+#: OAuth 비밀값 없이 관리자 화면을 둘러보는 로컬 데모 입구.
+#: 정확히 ``1``이어야 하며, 이 값 하나만으로는 절대 입구가 열리지 않는다.
+ENV_LOCAL_DEMO_AUTH: Final[str] = "LOCAL_DEMO_AUTH"
+#: 로컬 실행기 수명 동안 재진입에 쓰는 root capability. 이를 확인한 브라우저에
+#: 발급하는 grant/state만 2분·1회용이다. 서버가 끝나면 root도 함께 폐기된다.
+#: 플래그·Host 헤더·프록시 주소만으로는 로컬임을 증명할 수 없으므로 반드시 함께 본다.
+ENV_LOCAL_DEMO_AUTH_TOKEN: Final[str] = "LOCAL_DEMO_AUTH_TOKEN"
+#: PDF 출고 참여자 역할과 OAuth subject를 담은 JSON 객체. 이메일은 허용하지
+#: 않는다. 필수 키: author, producer, fact, editorial, visual.
+ENV_PDF_RELEASE_PARTICIPANTS: Final[str] = "PDF_RELEASE_PARTICIPANTS"
+
+#: 로컬 데모 로그인은 실제 OAuth 공급자가 없으므로 고정된 불변 subject를 쓴다.
+LOCAL_DEMO_IDENTITY_SUBJECT: Final[str] = "local-demo:operator"
 
 #: 관리자 전용 시험 중에도 로그인 왕복·로그아웃·배포 상태 확인은 열려 있어야 한다.
 BETA_PUBLIC_PATHS: Final[frozenset[str]] = frozenset(
@@ -34,6 +48,8 @@ BETA_PUBLIC_PATHS: Final[frozenset[str]] = frozenset(
         "/auth/login",
         "/auth/callback",
         "/auth/logout",
+        "/auth/local-demo",
+        "/auth/local-demo/start",
         "/auth/not-admin",
         "/healthz",
     }
@@ -47,6 +63,10 @@ DEFAULT_ADMIN_EMAILS: Final[tuple[str, ...]] = ()
 # ── 쿠키 ──────────────────────────────────────────────────
 #: CSRF 방지용 state를 담아두는 쿠키. 로그인 흐름이 끝나면 바로 지운다.
 STATE_COOKIE_NAME: Final[str] = "auth_state"
+#: 1회용 URL을 검증한 브라우저에만 잠깐 주는 로컬 데모 교환권.
+LOCAL_DEMO_GRANT_COOKIE_NAME: Final[str] = "local_demo_grant"
+#: 로컬 데모 POST를 서버 저장 state와 묶는 전용 쿠키.
+LOCAL_DEMO_STATE_COOKIE_NAME: Final[str] = "local_demo_state"
 #: 로그인한 사람의 세션 토큰을 담는 쿠키.
 SESSION_COOKIE_NAME: Final[str] = "auth_session"
 
@@ -59,8 +79,12 @@ ENV_COOKIE_INSECURE: Final[str] = "AUTH_COOKIE_INSECURE"
 #: state·세션 토큰을 만들 때 쓰는 난수 바이트 수. 32바이트 = 추측이 사실상 불가능한 수준.
 STATE_TOKEN_BYTES: Final[int] = 32
 SESSION_TOKEN_BYTES: Final[int] = 32
+#: 실행기 capability는 32바이트 난수의 소문자 16진수 표현만 받는다.
+LOCAL_DEMO_AUTH_TOKEN_HEX_CHARS: Final[int] = 64
 #: state는 로그인 흐름(리다이렉트 왕복) 동안만 살아있으면 된다.
 STATE_MAX_AGE_SEC: Final[int] = 600  # 10분
+#: capability URL을 깨끗한 주소로 바꾼 뒤 로그인 폼을 끝낼 짧은 시간.
+LOCAL_DEMO_GRANT_MAX_AGE_SEC: Final[int] = 120
 #: 세션 유효시간. 너무 길면 탈취됐을 때 위험이 커지고, 너무 짧으면 자꾸 다시 로그인해야 한다.
 SESSION_MAX_AGE_SEC: Final[int] = 8 * 60 * 60  # 8시간
 

@@ -14,17 +14,28 @@ from __future__ import annotations
 
 from typing import Final
 
+# ── 링크 수명 ─────────────────────────────────────────────
+
+#: 발급 링크가 자동으로 닫힐 때까지의 기본 일수. 수동 ``닫기``는 그대로 즉시 적용된다.
+DEFAULT_LINK_MAX_AGE_DAYS: Final[int] = 60
+ENV_LINK_MAX_AGE_DAYS: Final[str] = "SHARE_LINK_MAX_AGE_DAYS"
+MAX_LINK_MAX_AGE_DAYS: Final[int] = 3650
+
 # ══════════════════════════════════════════════════════════
 # 열쇠 모양
 # ══════════════════════════════════════════════════════════
 
-#: 열쇠에 쓸 무작위 글자 수 (16진수). 16자리 = 64비트.
-#: ★ 보고서 주소(128비트)보다 짧다 — 열쇠는 **QR로 읽히고 주소창에 보인다.**
-#:   너무 길면 QR이 촘촘해져 인식률이 떨어진다. 64비트면 찍어 맞히는 것은 불가능하다.
-KEY_HEX_CHARS: Final[int] = 16
+#: 새 열쇠에 쓸 무작위 글자 수 (16진수). 32자리 = **128비트**.
+#: 링크별 유료 실행 권한을 나타내는 bearer credential이므로 OWASP ASVS의
+#: reference-token 최소 기준보다 짧게 발급하지 않는다.
+KEY_HEX_CHARS: Final[int] = 32
 
 #: 열쇠가 담기는 주소 앞부분. 짧을수록 QR이 성기고 잘 읽힌다.
 KEY_PATH_PREFIX: Final[str] = "/k"
+
+#: QR·외부 복사용 절대 주소의 정본. 배포에서는 요청의 ``Host``를 신뢰하지 않고
+#: 이 환경값(또는 플랫폼이 주는 ``RENDER_EXTERNAL_URL``)만 사용한다.
+ENV_PUBLIC_BASE_URL: Final[str] = "SHARE_PUBLIC_BASE_URL"
 
 #: 열쇠를 기억해 두는 쿠키 이름. 인사팀이 링크로 한 번 들어오면
 #: 그다음부터는 주소를 안 달고 다녀도 같은 링크로 인정된다.

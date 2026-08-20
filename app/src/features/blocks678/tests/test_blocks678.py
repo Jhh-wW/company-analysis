@@ -506,7 +506,7 @@ def _파일럿_상황(path: Path) -> dict[str, list[tuple[str, str]]]:
 def test_전수회귀_파일럿_전체에서_8번_행_수가_실측과_같다():
     """★ 제외 목록·상한을 건드리면 여기가 먼저 깨진다 (D12-b 절차의 자동판)."""
     if not _PILOT_FRAGMENTS_DIR.is_dir() or not paths.PILOT_REPORTS_DIR.is_dir():
-        pytest.skip("파일럿 자료 폴더가 없습니다 (prototype_v1 미배치)")
+        pytest.skip("파일럿 자료 폴더가 없습니다 (analysis_engine 미배치)")
 
     조각파일 = sorted(_PILOT_FRAGMENTS_DIR.glob("*.json"))
     assert len(조각파일) >= _MIN_PILOT_FRAGMENT_FILES, (
@@ -532,7 +532,7 @@ def test_전수회귀_파일럿_전체에서_8번_행_수가_실측과_같다():
 def test_전수회귀_좋은_행_다섯_개가_파일럿에서도_살아_있다():
     """★ 안전핀의 전수판 — 실측 자료 그대로 돌려 좋은 겹침이 남아 있는지 본다."""
     if not _PILOT_FRAGMENTS_DIR.is_dir() or not paths.PILOT_REPORTS_DIR.is_dir():
-        pytest.skip("파일럿 자료 폴더가 없습니다 (prototype_v1 미배치)")
+        pytest.skip("파일럿 자료 폴더가 없습니다 (analysis_engine 미배치)")
 
     기대 = {
         "재수집-p021": {"결제", "해외송금"},

@@ -1,5 +1,5 @@
 """4번 칸(지금 이 회사 상황)이 통째로 비는 것을 고치는 «문장 선택 지시문» 묶음.
 
-1판 엔진(`prototype_v1/tools/run_pilot.py`)의 `generate_and_check`를 **고치지 않고**
+1판 엔진(`analysis_engine/tools/run_pilot.py`)의 `generate_and_check`를 **고치지 않고**
 같은 계약으로 감싼다. 바뀌는 것은 AI에게 주는 지시문과 후보 문장 걸러내기뿐이다.
 """

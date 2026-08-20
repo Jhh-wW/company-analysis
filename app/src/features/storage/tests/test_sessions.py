@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 from src.features.storage import db, sessions
@@ -9,7 +10,8 @@ from src.features.storage import db, sessions
 
 def test_save_then_load_roundtrip(tmp_path: Path) -> None:
     record = sessions.SessionRecord(
-        token="tok-1", email="user@example.com", is_admin=False, expires_at=2_000_000_000.0
+        token="tok-1", email="user@example.com", subject="google:person-1",
+        is_admin=False, expires_at=2_000_000_000.0
     )
     with db.connect(tmp_path / "storage.db") as conn:
         sessions.save_session(conn, record)
@@ -29,7 +31,8 @@ def test_load_none_token_returns_none(tmp_path: Path) -> None:
 
 def test_expired_session_returns_none_and_is_deleted(tmp_path: Path) -> None:
     record = sessions.SessionRecord(
-        token="tok-1", email="user@example.com", is_admin=False, expires_at=1_000.0
+        token="tok-1", email="user@example.com", subject="google:person-1",
+        is_admin=False, expires_at=1_000.0
     )
     with db.connect(tmp_path / "storage.db") as conn:
         sessions.save_session(conn, record)
@@ -41,10 +44,12 @@ def test_expired_session_returns_none_and_is_deleted(tmp_path: Path) -> None:
 
 def test_admin_flag_roundtrips_correctly(tmp_path: Path) -> None:
     admin = sessions.SessionRecord(
-        token="tok-admin", email="admin@example.com", is_admin=True, expires_at=2_000_000_000.0
+        token="tok-admin", email="admin@example.com", subject="google:admin-1",
+        is_admin=True, expires_at=2_000_000_000.0
     )
     normal = sessions.SessionRecord(
-        token="tok-normal", email="user@example.com", is_admin=False, expires_at=2_000_000_000.0
+        token="tok-normal", email="user@example.com", subject="google:user-1",
+        is_admin=False, expires_at=2_000_000_000.0
     )
     with db.connect(tmp_path / "storage.db") as conn:
         sessions.save_session(conn, admin)
@@ -58,10 +63,10 @@ def test_admin_flag_roundtrips_correctly(tmp_path: Path) -> None:
 def test_save_same_token_twice_overwrites(tmp_path: Path) -> None:
     with db.connect(tmp_path / "storage.db") as conn:
         sessions.save_session(
-            conn, sessions.SessionRecord("tok-1", "a@example.com", False, 2_000_000_000.0)
+            conn, sessions.SessionRecord("tok-1", "a@example.com", "google:a", False, 2_000_000_000.0)
         )
         sessions.save_session(
-            conn, sessions.SessionRecord("tok-1", "b@example.com", True, 2_000_000_000.0)
+            conn, sessions.SessionRecord("tok-1", "b@example.com", "google:b", True, 2_000_000_000.0)
         )
         count = conn.execute("SELECT COUNT(*) AS n FROM sessions").fetchone()["n"]
         loaded = sessions.load_session(conn, "tok-1", now=1.0)
@@ -74,7 +79,7 @@ def test_save_same_token_twice_overwrites(tmp_path: Path) -> None:
 def test_delete_session_removes_it(tmp_path: Path) -> None:
     with db.connect(tmp_path / "storage.db") as conn:
         sessions.save_session(
-            conn, sessions.SessionRecord("tok-1", "a@example.com", False, 2_000_000_000.0)
+            conn, sessions.SessionRecord("tok-1", "a@example.com", "google:a", False, 2_000_000_000.0)
         )
         sessions.delete_session(conn, "tok-1")
         assert sessions.load_session(conn, "tok-1", now=1.0) is None
@@ -89,10 +94,42 @@ def test_delete_missing_token_does_not_raise(tmp_path: Path) -> None:
 def test_survives_reconnect_like_a_server_restart(tmp_path: Path) -> None:
     """서버를 껐다 켜도 로그인이 유지되는지 — 연결을 완전히 닫았다 다시 연다."""
     target = tmp_path / "storage.db"
-    record = sessions.SessionRecord("tok-1", "user@example.com", False, 2_000_000_000.0)
+    record = sessions.SessionRecord(
+        "tok-1", "user@example.com", "google:person-1", False, 2_000_000_000.0
+    )
     with db.connect(target) as conn:
         sessions.save_session(conn, record)
 
     with db.connect(target) as conn:
         loaded = sessions.load_session(conn, "tok-1", now=1.0)
     assert loaded == record
+
+
+def test_legacy_email_only_session_is_migrated_then_rejected(tmp_path: Path) -> None:
+    """구 DB 행을 이메일 기반 사람 ID로 승격하지 않고 재로그인시킨다."""
+
+    target = tmp_path / "legacy.db"
+    conn = sqlite3.connect(target)
+    try:
+        conn.execute(
+            "CREATE TABLE sessions (token TEXT PRIMARY KEY, email TEXT NOT NULL, "
+            "is_admin INTEGER NOT NULL, expires_at REAL NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO sessions VALUES (?, ?, ?, ?)",
+            ("old-token", "alias@example.com", 1, 2_000_000_000.0),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with db.connect(target) as migrated:
+        columns = {
+            row["name"] for row in migrated.execute("PRAGMA table_info(sessions)")
+        }
+        assert "subject" in columns
+        assert sessions.load_session(migrated, "old-token", now=1.0) is None
+        count = migrated.execute(
+            "SELECT COUNT(*) AS n FROM sessions WHERE token='old-token'"
+        ).fetchone()["n"]
+    assert count == 0

@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}{{ interruption_title|default('조사가 중단되었습니다') }} · 기업분석{% endblock %}
+{% block bodyclass %}progress-page{% endblock %}
+
+{% block content %}
+<div class="card" role="alert" aria-labelledby="interrupted-title">
+  <div class="stopped-icon" aria-hidden="true">↻</div>
+  <h1 id="interrupted-title">{{ interruption_title|default('조사가 중단되었습니다') }}</h1>
+  <p class="lede">{{ interruption_message }}</p>
+
+  <div class="warn-line" style="margin-top:16px">
+    <span aria-hidden="true">ℹ️</span>
+    <span><b>입력 오류가 아닙니다.</b> {{ interruption_hint|default('입력 화면에서 같은 회사와 직무로 다시 시작해 주세요.') }}</span>
+  </div>
+
+  <div class="btn-row">
+    <a class="btn" href="{{ retry_url }}">{{ retry_label|default('처음부터 다시 조사하기') }}</a>
+  </div>
+</div>
+{% endblock %}

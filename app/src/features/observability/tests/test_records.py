@@ -12,9 +12,11 @@ import pytest
 
 from src.features.observability.constants import (
     CACHE_HIT_NONE,
+    COUNTED_CELLS,
     CORP_TYPE_LISTED,
     END_STEP_COMPLETE,
     GRADE_COMPLETE,
+    TOTAL_CELLS,
 )
 from src.features.observability.records import (
     ReadResult,
@@ -42,7 +44,7 @@ def _record(
     fragments_cited: int = 16,
     sentences_made: int = 27,
     sentences_passed: int = 22,
-    cells_filled: int = 6,
+    cells_filled: int = 9,
     cells_missing: list[str] | None = None,
     cells_suspect: list[str] | None = None,
     grade: str = GRADE_COMPLETE,
@@ -191,8 +193,46 @@ def test_옛_7칸_이력은_파일을_고치지_않고_6칸으로_재해석한�
 
     assert result.skipped == 0
     assert result.records[0].cells_filled == 6
+    assert result.records[0].cell_total == 6
     assert result.records[0].cells_missing == []
     assert path.read_text(encoding="utf-8") == raw_before
+
+
+def test_기존_6칸_JSONL의_미충족_ID와_분모를_그대로_보존한다(tmp_path: Path):
+    """과거 숫자 칸을 근거 없이 canonical 의미 ID로 승격시키지 않는다."""
+    import dataclasses
+    import json
+
+    path = tmp_path / "runs.jsonl"
+    legacy = dataclasses.asdict(_record())
+    legacy["cells_filled"] = 4
+    legacy["cells_missing"] = ["4-1", "4-3"]
+    legacy["cells_suspect"] = ["4-3"]
+    path.write_text(json.dumps(legacy, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    result = read_records(path)
+
+    assert result.skipped == 0
+    assert result.records[0].cells_filled == 4
+    assert result.records[0].cell_total == 6
+    assert result.records[0].cells_missing == ["4-1", "4-3"]
+    assert result.records[0].cells_suspect == ["4-3"]
+
+
+def test_신규_관측_칸은_canonical_1_9장_의미_ID와_순서가_같다():
+    assert COUNTED_CELLS == (
+        "identity",
+        "business_model",
+        "portfolio",
+        "past_changes",
+        "current_challenges",
+        "future_strategy",
+        "operations_partners",
+        "culture",
+        "competitive_position",
+    )
+    assert TOTAL_CELLS == 9
+    assert _record().cell_total == 9
 
 
 # ══════════════════════════════════════════════════════════
@@ -247,7 +287,15 @@ def test_검사_통과_문장이_생성_문장보다_많으면_에러():
 
 def test_누락_의심이_미충족의_부분집합이_아니면_에러():
     with pytest.raises(ValueError, match="누락 의심"):
-        _record(cells_missing=["4-1"], cells_suspect=["4-1", "9"])
+        _record(
+            cells_missing=["current_challenges"],
+            cells_suspect=["current_challenges", "future_strategy"],
+        )
+
+
+def test_모르는_칸_ID는_저장_전에_막는다():
+    with pytest.raises(ValueError, match="모르는 칸 ID"):
+        _record(cells_missing=["made_up_section"])
 
 
 def test_음수_비용은_에러():
@@ -262,7 +310,7 @@ def test_음수_소요시간은_에러():
 
 def test_충족_항목_수가_전체_칸_수를_넘으면_에러():
     with pytest.raises(ValueError, match="cells_filled"):
-        _record(cells_filled=7)  # 현재 세는 칸은 6개뿐이다
+        _record(cells_filled=10)  # canonical 필수 장은 9개다
 
 
 # ══════════════════════════════════════════════════════════
@@ -309,4 +357,5 @@ def test_new_run_id는_매번_다르다():
 def test_now_iso는_ISO8601_형식이다():
     import datetime as dt
 
-    dt.datetime.fromisoformat(now_iso())  # 예외 없이 파싱되면 통과
+    parsed = dt.datetime.fromisoformat(now_iso())  # 예외 없이 파싱되면 통과
+    assert parsed.utcoffset() == dt.timedelta(hours=9)

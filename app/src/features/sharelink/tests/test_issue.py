@@ -11,7 +11,14 @@ from __future__ import annotations
 import pytest
 
 from src.features.sharelink.constants import KEY_HEX_CHARS
-from src.features.sharelink.issue import base_url_of, link_url, new_key, qr_svg
+from src.features.sharelink.issue import (
+    base_url_of,
+    canonical_public_base_url,
+    link_url,
+    new_key,
+    qr_svg,
+    safe_local_base_url,
+)
 from src.features.sharelink.logic import is_valid_key
 
 
@@ -26,6 +33,19 @@ def test_만든_열쇠는_유효한_모양이다():
 
 def test_열쇠_길이가_정해진_대로다():
     assert len(new_key()) == KEY_HEX_CHARS
+
+
+def test_열쇠는_실제로_16바이트_CSPRNG에서_발급한다(monkeypatch):
+    calls = []
+
+    def fake_token_hex(nbytes):
+        calls.append(nbytes)
+        return "a" * (nbytes * 2)
+
+    monkeypatch.setattr("src.features.sharelink.issue.secrets.token_hex", fake_token_hex)
+
+    assert new_key() == "a" * 32
+    assert calls == [16]
 
 
 def test_만들_때마다_다르다():
@@ -69,6 +89,46 @@ def test_지금_접속한_주소에서_서비스_주소를_뽑는다(요청주�
 def test_주소를_못_뽑으면_빈_값(이상한주소: str):
     """못 뽑았는데 아무 값이나 만들면 «틀린 링크»를 발급하게 된다."""
     assert base_url_of(이상한주소) == ""
+
+
+@pytest.mark.parametrize(
+    ("설정", "기대"),
+    [
+        ("https://demo.example", "https://demo.example"),
+        ("https://demo.example/", "https://demo.example"),
+        ("https://demo.example:8443", "https://demo.example:8443"),
+    ],
+)
+def test_검증된_공개_HTTPS_origin만_정본주소로_쓴다(설정: str, 기대: str):
+    assert canonical_public_base_url(설정) == 기대
+
+
+@pytest.mark.parametrize(
+    "설정",
+    [
+        "http://demo.example",
+        "https://localhost:8000",
+        "https://preview.localhost",
+        "https://192.168.0.10",
+        "https://127.0.0.2",
+        "https://user:pass@demo.example",
+        "https://demo.example/path",
+        "https://demo.example?next=1",
+        "https://demo.example#part",
+        "https://demo.example:bad",
+    ],
+)
+def test_위험하거나_공개origin이_아닌_설정은_거절한다(설정: str):
+    assert canonical_public_base_url(설정) == ""
+
+
+def test_로컬_origin은_loopback_HTTP만_허용한다():
+    assert safe_local_base_url("http://127.0.0.1:8000/admin/link/x") == (
+        "http://127.0.0.1:8000"
+    )
+    assert safe_local_base_url("http://evil.example/admin/link/x") == ""
+    assert safe_local_base_url("https://127.0.0.1/admin/link/x") == ""
+    assert safe_local_base_url("http://testserver/admin/link/x") == ""
 
 
 # ══════════════════════════════════════════════════════════

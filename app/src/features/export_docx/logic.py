@@ -1,21 +1,9 @@
-"""보고서를 워드(.docx) 바이트로 바꾼다 — 「② 워드로 받기」.
+"""검증된 ``Report``를 편집 가능한 Word 보고서 바이트로 바꾼다.
 
-★ 세 형태(화면·워드·노션)를 따로 만들지 않는다. 하나의 원본(`Report`)에서
-  «형태만» 바꾼다 — 각각 그리면 한쪽만 고쳤을 때 내용이 갈린다 (P3 위반).
-  정본은 화면(`src/web/templates/result.html`)이다. 이 파일은 그 화면과
-  같은 순서·문구가 나오도록 `Report`를 그대로 훑는다.
-
-★ 출처 목록은 새로 그리지 않는다. `provenance/sources.py`의
-  `render_sources()` 결과를 그대로 옮긴다 — 형태마다 따로 그리면
-  한쪽만 고쳤을 때 출처 표기가 갈린다.
-
-정본:
-  - 확정/07_출력/1_흐름/01_세형태.md          §워드로 받기
-  - 확정/07_출력/2_규칙/01_배치와근거표기.md   §배치 순서 · 빈칸 사유
-
-파일을 디스크에 쓰지 않는다. `build_docx()`는 바이트만 돌려준다 — 웹이
-그 바이트를 그대로 응답으로 내려보낸다 (연결 지점은 이 모듈의 docstring
-아래 `build_download_filename`·`build_content_disposition` 참고).
+canonical 보고서는 공통 출고 게이트를 먼저 통과시킨 뒤 화면·PDF·Notion과
+같은 표지, 핵심 요약, 의미 기반 장 순서와 최종 출처표만 낸다. ``prose_lines``가
+있으면 같은 사실의 근거 원문 ``lines``는 반복하지 않으며, 직무·수집 과정·완성도
+같은 서비스 메타데이터는 문서에 넣지 않는다.
 """
 
 from __future__ import annotations
@@ -23,116 +11,62 @@ from __future__ import annotations
 import datetime as dt
 import io
 import urllib.parse
-from typing import cast
 
 from docx import Document
 from docx.document import Document as DocxDocument
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.opc.constants import RELATIONSHIP_TYPE
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.oxml.shared import OxmlElement
-from docx.shared import Cm, Pt, RGBColor
-from docx.table import _Cell
-from docx.text.run import Run
+from docx.shared import Pt
+from docx.text.paragraph import Paragraph
 
 from src.core.citations import citation_marker
-from src.core.constants import CELL_LABELS, RAW_SOURCE_LABEL, RAW_SOURCE_NOTE
+from src.core.constants import section_display_heading
 from src.features.export_docx.constants import (
-    BULLET_STYLE,
     CITATIONS_NOTE,
+    COLOR_INK_RGB,
     COLOR_MUTED_RGB,
     COLOR_TABLE_HEADER_HEX,
     CONTENT_TYPE_DOCX,
-    EMPTY_DEFAULT_REASON,
-    EMPTY_PREFIX,
     DOCX_SUFFIX,
     FILENAME_ASCII_ALLOWED,
     FILENAME_ASCII_FALLBACK,
     FILENAME_ASCII_MIN_STEM,
     FILENAME_FALLBACK,
     FILENAME_FORBIDDEN_CHARS,
-    FILENAME_PATTERN,
-    FONT_NAME,
-    FONT_SIZE_BODY_PT,
     FONT_SIZE_HEADING_PT,
     FONT_SIZE_MUTED_PT,
+    FONT_SIZE_SUBTITLE_PT,
     FONT_SIZE_TABLE_PT,
     FONT_SIZE_TITLE_PT,
-    GRADE_COLOR,
-    GRADE_ICON,
-    HEADING_COLLECTION,
     HEADING_SOURCES,
-    PAGE_MARGIN_CM,
-    REQUIREMENTS_CELL,
-    REQUIREMENTS_EMPTY_REASON,
-    REQUIREMENTS_NOTE,
-    SOURCE_STATE_LABEL,
-    SOURCES_TABLE_HEADERS,
+    SOURCES_TABLE_WIDTHS_DXA,
+    SUMMARY_TABLE_WIDTHS_DXA,
     TABLE_STYLE,
 )
-from src.features.grading.logic import grade_message
+from src.features.export_docx.document_style import (
+    _add_page_furniture,
+    _clear_personal_metadata,
+    _clear_revision_ids,
+    _column_widths_dxa,
+    _configure_bullet_numbering,
+    _configure_styles,
+    _set_font,
+    _set_page_geometry,
+    _set_table_geometry,
+    _shade_cell,
+)
 from src.features.pipeline.port import (
-    Grade,
     Report,
     ReportSection,
     ReportTable,
-    SourceStatus,
 )
-from src.features.provenance.constants import SOURCES_HEADER
-from src.features.provenance.sources import Source, render_sources
-
-# ══════════════════════════════════════════════════════════
-# 글꼴 — 로마자·동아시아 서체를 같이 지정한다 (한글 깨짐 방지)
-# ══════════════════════════════════════════════════════════
-
-
-def _set_font(
-    run: Run,
-    *,
-    size_pt: int = FONT_SIZE_BODY_PT,
-    bold: bool = False,
-    color_rgb: tuple[int, int, int] | None = None,
-) -> None:
-    """실행(run) 하나에 한글이 깨지지 않는 서체를 강제로 지정한다.
-
-    ★ `run.font.name`만 두면 로마자(ascii)만 바뀌고 한글은 문서 기본 서체로
-      남는다. 워드는 로마자 서체(`w:rFonts/@w:ascii`)와 동아시아 서체
-      (`w:rFonts/@w:eastAsia`)를 따로 관리하기 때문에 둘 다 지정해야 한다.
-      python-docx 공개 API에는 eastAsia 지정이 없어 여기서만 저수준으로 연다.
-    """
-    run.font.name = FONT_NAME
-    run.font.size = Pt(size_pt)
-    run.font.bold = bold
-    if color_rgb is not None:
-        run.font.color.rgb = RGBColor(*color_rgb)
-    r_pr = run.font.element.get_or_add_rPr()
-    r_pr.get_or_add_rFonts().set(qn("w:eastAsia"), FONT_NAME)
-
-
-def _set_default_style(doc: DocxDocument) -> None:
-    """본문 기본 서체(Normal 스타일)를 문서 전체 기본값으로 맞춘다."""
-    normal = doc.styles["Normal"]
-    normal.font.name = FONT_NAME
-    normal.font.size = Pt(FONT_SIZE_BODY_PT)
-    r_pr = normal.font.element.get_or_add_rPr()
-    r_pr.get_or_add_rFonts().set(qn("w:eastAsia"), FONT_NAME)
-
-
-def _set_margins(doc: DocxDocument) -> None:
-    for section in doc.sections:
-        section.left_margin = Cm(PAGE_MARGIN_CM)
-        section.right_margin = Cm(PAGE_MARGIN_CM)
-        section.top_margin = Cm(PAGE_MARGIN_CM)
-        section.bottom_margin = Cm(PAGE_MARGIN_CM)
-
-
-def _shade_cell(cell: _Cell, hex_color: str) -> None:
-    """표 칸 배경을 칠한다. python-docx는 셀 음영 공개 API가 없어 XML을 직접 붙인다."""
-    shd = OxmlElement("w:shd")
-    shd.set(qn("w:val"), "clear")
-    shd.set(qn("w:color"), "auto")
-    shd.set(qn("w:fill"), hex_color)
-    cell._tc.get_or_add_tcPr().append(shd)  # noqa: SLF001 — 공개 API가 없다
-
+from src.features.provenance.sources import Source
+from src.features.report_standard import (
+    SECTION_BY_ID,
+    build_published_report,
+)
 
 # ══════════════════════════════════════════════════════════
 # 문단 헬퍼
@@ -143,6 +77,7 @@ def _add_heading(doc: DocxDocument, text: str, *, level: int) -> None:
     """제목 문단을 추가한다. `level=0`은 회사명(문서 제목), 그 외는 항목 제목."""
     heading = doc.add_heading(text, level=level)
     size = FONT_SIZE_TITLE_PT if level == 0 else FONT_SIZE_HEADING_PT
+    heading.paragraph_format.keep_with_next = True
     for run in heading.runs:
         _set_font(run, size_pt=size, bold=True)
 
@@ -151,24 +86,6 @@ def _add_muted_paragraph(doc: DocxDocument, text: str) -> None:
     paragraph = doc.add_paragraph()
     run = paragraph.add_run(text)
     _set_font(run, size_pt=FONT_SIZE_MUTED_PT, color_rgb=COLOR_MUTED_RGB)
-
-
-def _add_plain_paragraph(doc: DocxDocument, text: str) -> None:
-    paragraph = doc.add_paragraph()
-    run = paragraph.add_run(text)
-    _set_font(run)
-
-
-def _add_bullet_line(doc: DocxDocument, text: str, cite: str) -> None:
-    """본문 문장 한 줄 — `문장〔출처〕` (result.html의 `<li>`와 같은 모양)."""
-    paragraph = doc.add_paragraph(style=BULLET_STYLE)
-    run = paragraph.add_run(text)
-    _set_font(run)
-    marker = citation_marker(cite)
-    if marker:
-        # 내부 ``조각 N·종류``가 아니라 화면과 같은 실제 번호만 내보낸다(P-127).
-        cite_run = paragraph.add_run(f" {marker}")
-        _set_font(cite_run, size_pt=FONT_SIZE_MUTED_PT, color_rgb=COLOR_MUTED_RGB)
 
 
 def _add_cited_prose(doc: DocxDocument, lines: list[tuple[str, str]]) -> None:
@@ -186,18 +103,6 @@ def _add_cited_prose(doc: DocxDocument, lines: list[tuple[str, str]]) -> None:
             _set_font(cite_run, size_pt=FONT_SIZE_MUTED_PT, color_rgb=COLOR_MUTED_RGB)
 
 
-def _add_empty_block(doc: DocxDocument, reason: str) -> None:
-    """빈칸 + 사유 — result.html의 `비어 있습니다 — {사유}`와 같은 문구·순서.
-
-    ★ 사유를 지우지 않는다 — 「왜 비었는지」는 프로그램이 붙인 값이다 (S6).
-    """
-    paragraph = doc.add_paragraph()
-    why_run = paragraph.add_run(EMPTY_PREFIX)
-    _set_font(why_run, bold=True)
-    reason_run = paragraph.add_run(f" — {reason or EMPTY_DEFAULT_REASON}")
-    _set_font(reason_run)
-
-
 # ══════════════════════════════════════════════════════════
 # 표
 # ══════════════════════════════════════════════════════════
@@ -205,11 +110,12 @@ def _add_empty_block(doc: DocxDocument, reason: str) -> None:
 
 def _add_report_table(doc: DocxDocument, table: ReportTable) -> None:
     """숫자·글자 표 하나 — 문장으로 뭉개지 않고 워드 표 그대로 넣는다 (D13)."""
-    caption = doc.add_paragraph()
+    caption = doc.add_paragraph(style="Report Table Caption")
     caption_run = caption.add_run(table.caption)
     _set_font(caption_run, bold=True)
-    if table.cite:
-        cite_run = caption.add_run(f" 〔{table.cite}〕")
+    marker = citation_marker(table.cite)
+    if marker:
+        cite_run = caption.add_run(f" {marker}")
         _set_font(cite_run, size_pt=FONT_SIZE_MUTED_PT, color_rgb=COLOR_MUTED_RGB)
 
     n_cols = len(table.headers)
@@ -221,6 +127,8 @@ def _add_report_table(doc: DocxDocument, table: ReportTable) -> None:
         run = cell.paragraphs[0].add_run(head)
         _set_font(run, bold=True, size_pt=FONT_SIZE_TABLE_PT)
         _shade_cell(cell, COLOR_TABLE_HEADER_HEX)
+        if table.numeric and idx > 0:
+            cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
 
     for row in table.rows:
         cells = docx_table.add_row().cells
@@ -232,33 +140,107 @@ def _add_report_table(doc: DocxDocument, table: ReportTable) -> None:
             _set_font(run, size_pt=FONT_SIZE_TABLE_PT)
             if table.numeric and idx > 0:
                 cells[idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    _set_table_geometry(docx_table, _column_widths_dxa(table))
 
 
-def _add_sources_table(doc: DocxDocument, sources: list[SourceStatus]) -> None:
-    """소스별 수집 현황 — result.html의 「어디서 가져왔나」표와 같은 문구."""
-    _add_heading(doc, HEADING_COLLECTION, level=2)
-    table = doc.add_table(rows=1, cols=len(SOURCES_TABLE_HEADERS))
+def _source_label(source: Source) -> str:
+    label = (source.title or source.label).strip()
+    publisher = source.publisher.strip()
+    if publisher and publisher.casefold() not in label.casefold():
+        return f"{label} · {publisher}"
+    return label
+
+
+def _source_status(source: Source) -> str:
+    parts: list[str] = []
+    if source.published_at:
+        parts.append(f"{source.published_at} 보도")
+    elif source.disclosed_at:
+        parts.append(f"{source.disclosed_at} 공시")
+    elif source.collected_at:
+        parts.append(f"{source.collected_at} 확인")
+    else:
+        parts.append("기준일 미확인")
+    for value in (source.domain, source.source_type, source.fact_status):
+        cleaned = value.strip()
+        if cleaned and cleaned not in parts:
+            parts.append(cleaned)
+    return " · ".join(parts)
+
+
+def _source_used_sections(source: Source) -> str:
+    labels: list[str] = []
+    for section_id in source.used_in:
+        spec = SECTION_BY_ID.get(section_id)
+        label = f"{spec.display_number}장" if spec is not None else section_id.strip()
+        if label and label not in labels:
+            labels.append(label)
+    return " · ".join(labels) or "—"
+
+
+def _add_source_link(paragraph: Paragraph, source: Source) -> None:
+    """자료명에 검증 가능한 원문 링크를 붙이고, 링크도 무채색으로 유지한다."""
+
+    label = _source_label(source)
+    url = source.url.strip()
+    if not url.startswith(("https://", "http://")):
+        run = paragraph.add_run(label)
+        _set_font(run, size_pt=FONT_SIZE_TABLE_PT)
+        return
+
+    relation_id = paragraph.part.relate_to(
+        url,
+        RELATIONSHIP_TYPE.HYPERLINK,
+        is_external=True,
+    )
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), relation_id)
+    run = paragraph.add_run(label)
+    _set_font(
+        run,
+        size_pt=FONT_SIZE_TABLE_PT,
+        color_rgb=COLOR_INK_RGB,
+    )
+    run.font.underline = True
+    hyperlink.append(run._r)  # noqa: SLF001 — python-docx에 외부 링크 공개 API가 없다
+    paragraph._p.append(hyperlink)  # noqa: SLF001
+
+
+def _citations(report: Report) -> list[Source]:
+    citations: list[Source] = []
+    seen_numbers: set[int] = set()
+    for item in report.citations:
+        if not isinstance(item, Source) or item.number in seen_numbers:
+            continue
+        seen_numbers.add(item.number)
+        citations.append(item)
+    return citations
+
+
+def _add_citations_table(doc: DocxDocument, citations: list[Source]) -> None:
+    """원문을 직접 열고 위치·사용 장까지 대조할 수 있는 검증표를 낸다."""
+
+    table = doc.add_table(rows=1, cols=5)
     table.style = TABLE_STYLE
 
-    for idx, head in enumerate(SOURCES_TABLE_HEADERS):
+    for idx, head in enumerate(("#", "자료", "기준일·상태", "원문 위치", "본문 사용 장")):
         cell = table.rows[0].cells[idx]
         run = cell.paragraphs[0].add_run(head)
         _set_font(run, bold=True, size_pt=FONT_SIZE_TABLE_PT)
         _shade_cell(cell, COLOR_TABLE_HEADER_HEX)
 
-    for source in sources:
+    for source in citations:
         cells = table.add_row().cells
-        name_run = cells[0].paragraphs[0].add_run(source.name)
-        _set_font(name_run, size_pt=FONT_SIZE_TABLE_PT)
-
-        state_run = cells[1].paragraphs[0].add_run(
-            SOURCE_STATE_LABEL.get(source.state, source.state)
-        )
-        _set_font(state_run, size_pt=FONT_SIZE_TABLE_PT)
-        cells[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-        detail_run = cells[2].paragraphs[0].add_run(source.detail)
-        _set_font(detail_run, size_pt=FONT_SIZE_TABLE_PT)
+        number_run = cells[0].paragraphs[0].add_run(str(source.number))
+        _set_font(number_run, size_pt=FONT_SIZE_TABLE_PT)
+        _add_source_link(cells[1].paragraphs[0], source)
+        status_run = cells[2].paragraphs[0].add_run(_source_status(source))
+        _set_font(status_run, size_pt=FONT_SIZE_TABLE_PT)
+        location_run = cells[3].paragraphs[0].add_run(source.location.strip() or "—")
+        _set_font(location_run, size_pt=FONT_SIZE_TABLE_PT)
+        usage_run = cells[4].paragraphs[0].add_run(_source_used_sections(source))
+        _set_font(usage_run, size_pt=FONT_SIZE_TABLE_PT)
+    _set_table_geometry(table, SOURCES_TABLE_WIDTHS_DXA)
 
 
 # ══════════════════════════════════════════════════════════
@@ -266,37 +248,70 @@ def _add_sources_table(doc: DocxDocument, sources: list[SourceStatus]) -> None:
 # ══════════════════════════════════════════════════════════
 
 
+def _cover_metadata(report: Report) -> str:
+    values = [
+        report.corp_type.strip(),
+        f"{report.as_of_date.strip()} 기준" if report.as_of_date.strip() else "",
+        report.analysis_period.strip(),
+        (
+            f"최신 실적 {report.latest_performance_period.strip()}"
+            if report.latest_performance_period.strip()
+            else ""
+        ),
+    ]
+    return " · ".join(value for value in values if value)
+
+
 def _add_subtitle(doc: DocxDocument, report: Report) -> None:
-    """`{직무} · {법인형태}[ · {생성일} 생성]` — result.html의 `.lede`와 같은 문구."""
-    paragraph = doc.add_paragraph()
-    job_run = paragraph.add_run(report.job)
-    _set_font(job_run)
-
-    tail = f" · {report.corp_type}"
-    if report.generated_at:
-        tail += f" · {report.generated_at} 생성"
-    tail_run = paragraph.add_run(tail)
-    _set_font(tail_run, color_rgb=COLOR_MUTED_RGB)
+    """생성 과정 대신 회사 유형과 분석 기준만 표지에 둔다."""
+    paragraph = doc.add_paragraph(style="Subtitle")
+    tail_run = paragraph.add_run(_cover_metadata(report))
+    _set_font(
+        tail_run,
+        size_pt=FONT_SIZE_SUBTITLE_PT,
+        color_rgb=COLOR_MUTED_RGB,
+    )
 
 
-def _add_grade_block(doc: DocxDocument, report: Report) -> None:
-    """등급 라벨 — 완성이면 부르지 않는다. result.html의 `.grade` 블록과 같은 문구."""
-    grade_value = report.grade.value
-    icon = GRADE_ICON.get(grade_value, "")
-    note = grade_message(report.grade, report.filled_count)
-    color = GRADE_COLOR.get(grade_value)
+def _add_summary(doc: DocxDocument, report: Report) -> None:
+    if not report.summary_items:
+        return
+    _add_heading(doc, "핵심 요약", level=1)
+    table = doc.add_table(rows=0, cols=3)
+    table.style = TABLE_STYLE
+    for index, item in enumerate(report.summary_items, start=1):
+        cells = table.add_row().cells
+        number_run = cells[0].paragraphs[0].add_run(f"{index:02d}")
+        _set_font(number_run, size_pt=FONT_SIZE_TABLE_PT, bold=True, color_rgb=(255, 255, 255))
+        _shade_cell(cells[0], "171717")
+        text_run = cells[1].paragraphs[0].add_run(item.text.strip())
+        _set_font(text_run, size_pt=FONT_SIZE_TABLE_PT)
+        spec = SECTION_BY_ID.get(item.section_id)
+        related = f"{spec.display_number}장" if spec is not None else ""
+        related_run = cells[2].paragraphs[0].add_run(related)
+        _set_font(related_run, size_pt=FONT_SIZE_MUTED_PT, color_rgb=COLOR_MUTED_RGB)
+        cells[0].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        cells[2].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+    _set_table_geometry(table, SUMMARY_TABLE_WIDTHS_DXA, repeat_header=False)
 
-    paragraph = doc.add_paragraph()
-    if icon:
-        icon_run = paragraph.add_run(f"{icon} ")
-        _set_font(icon_run, bold=True, color_rgb=color)
-    note_run = paragraph.add_run(note)
-    _set_font(note_run, bold=True, color_rgb=color)
 
-    for reason in report.shortfall_reasons:
-        reason_paragraph = doc.add_paragraph(style=BULLET_STYLE)
-        reason_run = reason_paragraph.add_run(reason)
-        _set_font(reason_run)
+def _add_cover(doc: DocxDocument, report: Report) -> None:
+    """회사명/보고서명과 핵심 요약을 첫 페이지의 두 명확한 영역에 배치한다."""
+
+    top_space = doc.add_paragraph()
+    top_space.paragraph_format.space_after = Pt(68)
+    title = doc.add_heading(level=0)
+    title.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    company_run = title.add_run(report.company)
+    _set_font(company_run, size_pt=FONT_SIZE_TITLE_PT, bold=True)
+    company_run.add_break()
+    report_run = title.add_run("분석 보고서")
+    _set_font(report_run, size_pt=FONT_SIZE_TITLE_PT, bold=True)
+    _add_subtitle(doc, report)
+    summary_space = doc.add_paragraph()
+    summary_space.paragraph_format.space_after = Pt(72)
+    _add_summary(doc, report)
+    doc.add_page_break()
 
 
 # ══════════════════════════════════════════════════════════
@@ -304,56 +319,35 @@ def _add_grade_block(doc: DocxDocument, report: Report) -> None:
 # ══════════════════════════════════════════════════════════
 
 
+def _section_heading(section: ReportSection) -> str:
+    if section.display_number:
+        tag = f"  {section.tag}" if section.tag else ""
+        return f"{section.display_number}. {section.title}{tag}"
+    return section_display_heading(section.cell, section.title)
+
+
+def _output_sections(report: Report) -> list[ReportSection]:
+    return list(report.sections)
+
+
 def _add_section(doc: DocxDocument, section: ReportSection) -> None:
-    _add_heading(doc, f"{section.cell}. {section.title}", level=2)
+    _add_heading(doc, _section_heading(section), level=2)
     if not section.is_filled:
-        _add_empty_block(doc, section.empty_reason)
         return
     if section.prose_lines:
         _add_cited_prose(doc, section.prose_lines)
-        if section.lines:
-            _add_muted_paragraph(
-                doc,
-                f"{RAW_SOURCE_LABEL} ({len(section.lines)}문장) — {RAW_SOURCE_NOTE}",
-            )
-            for text, cite in section.lines:
-                _add_bullet_line(doc, text, cite)
-    else:
-        for text, cite in section.lines:
-            _add_bullet_line(doc, text, cite)
     for table in section.tables:
         _add_report_table(doc, table)
 
 
-def _add_requirements_block(doc: DocxDocument, report: Report) -> None:
-    """5번 「이 자리는 뭘 요구하나」 — 공고 원문 목록. result.html의
-    `requirements_block()` 매크로와 같은 문구·순서.
-    """
-    _add_heading(doc, f"{REQUIREMENTS_CELL}. {CELL_LABELS[REQUIREMENTS_CELL]}", level=2)
-    _add_muted_paragraph(doc, REQUIREMENTS_NOTE)
-    if not report.requirements:
-        _add_empty_block(doc, REQUIREMENTS_EMPTY_REASON)
-        return
-    for requirement in report.requirements:
-        _add_bullet_line(doc, requirement, "")
-
-
 def _add_citations(doc: DocxDocument, report: Report) -> None:
-    """출처 — `render_sources()` 결과를 그대로 옮긴다. 따로 그리지 않는다 (P3)."""
-    if not report.citations:
+    citations = _citations(report)
+    if not citations:
         return
-    citations = cast(list[Source], report.citations)
 
     _add_heading(doc, HEADING_SOURCES, level=2)
     _add_muted_paragraph(doc, CITATIONS_NOTE)
-
-    for line in render_sources(citations).splitlines():
-        if line == SOURCES_HEADER:
-            # ★ 워드에는 위에 이미 "출처" 제목이 있어 같은 말(「[출처]」)을
-            #   또 적지 않는다. 출처 한 줄 한 줄의 표기(날짜·언론사 등)는
-            #   여기서 다시 만들지 않고 render_sources()가 만든 그대로 쓴다.
-            continue
-        _add_plain_paragraph(doc, line)
+    _add_citations_table(doc, citations)
 
 
 # ══════════════════════════════════════════════════════════
@@ -364,8 +358,8 @@ def _add_citations(doc: DocxDocument, report: Report) -> None:
 def build_docx(report: Report) -> bytes:
     """보고서 하나를 워드(.docx) 바이트로 만든다.
 
-    화면(`result.html`)과 같은 순서로 훑는다:
-      상단 라벨(부분 보고서일 때만) → 보고서 본문(칸 1~9·附) → 출처 → 수집 현황.
+    canonical 공개본은 표지 → 핵심 요약 → 본문 1~9장 → 출처 순서다.
+    구형 저장본은 공개 내보내지 않는다.
 
     Args:
         report: 06 검증을 통과한(또는 부분 통과한) 보고서 원본.
@@ -374,33 +368,22 @@ def build_docx(report: Report) -> bytes:
         `.docx` 파일 바이트. 디스크에 쓰지 않는다 — 부르는 쪽(웹)이 그대로
         내려보낸다.
     """
+    report = build_published_report(report)
+
     doc = Document()
-    _set_margins(doc)
-    _set_default_style(doc)
+    _set_page_geometry(doc)
+    _configure_styles(doc)
+    _configure_bullet_numbering(doc)
+    _clear_personal_metadata(doc, title=f"{report.company} 분석 보고서")
+    _add_page_furniture(doc, report_title=f"{report.company} 분석 보고서")
+    _add_cover(doc, report)
 
-    _add_heading(doc, report.company, level=0)
-    _add_subtitle(doc, report)
-
-    if report.grade is not Grade.COMPLETE:
-        _add_grade_block(doc, report)
-
-    # ★ result.html과 같은 순서 — 5번 칸을 만나면 요구역량 목록을 그 자리에
-    #   넣는다. 기록에 5번 칸 자체가 없으면(순서가 흐트러진 저장본 등)
-    #   마지막에 한 번 더 넣어 요구역량이 빠지지 않게 한다.
-    shown_requirements = False
-    for section in report.sections:
-        if section.cell == REQUIREMENTS_CELL:
-            _add_requirements_block(doc, report)
-            shown_requirements = True
-            continue
+    for section in _output_sections(report):
         _add_section(doc, section)
-    if not shown_requirements:
-        _add_requirements_block(doc, report)
 
     _add_citations(doc, report)
-    if report.sources:
-        _add_sources_table(doc, report.sources)
 
+    _clear_revision_ids(doc)
     buffer = io.BytesIO()
     doc.save(buffer)
     return buffer.getvalue()
@@ -412,7 +395,7 @@ def build_docx(report: Report) -> bytes:
 
 
 def build_download_filename(report: Report) -> str:
-    """다운로드 파일명 — `회사명_직무_YYYY-MM-DD.docx`.
+    """다운로드 파일명 — `회사명_분석_보고서_YYYY-MM-DD.docx`.
 
     정본: 확정/07_출력/1_흐름/01_세형태.md §워드로 받기
 
@@ -428,12 +411,7 @@ def build_download_filename(report: Report) -> str:
     """
     date = report.generated_at.strip() or dt.date.today().isoformat()
     company = FILENAME_FORBIDDEN_CHARS.sub("", report.company).strip()
-    job = FILENAME_FORBIDDEN_CHARS.sub("", report.job).strip()
-    return FILENAME_PATTERN.format(
-        company=company or FILENAME_FALLBACK,
-        job=job or FILENAME_FALLBACK,
-        date=date,
-    )
+    return f"{company or FILENAME_FALLBACK}_분석_보고서_{date}{DOCX_SUFFIX}"
 
 
 def build_ascii_filename(filename: str) -> str:

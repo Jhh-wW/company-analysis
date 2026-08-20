@@ -28,6 +28,7 @@ class SessionRecord:
 
     token: str
     email: str
+    subject: str
     is_admin: bool
     expires_at: float  # time.time() 기준 초
 
@@ -36,12 +37,19 @@ def save_session(conn: sqlite3.Connection, record: SessionRecord) -> None:
     """세션을 저장한다(같은 토큰이면 덮어쓴다)."""
     conn.execute(
         f"""
-        INSERT INTO {TABLE_SESSIONS} (token, email, is_admin, expires_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO {TABLE_SESSIONS} (token, email, subject, is_admin, expires_at)
+        VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(token) DO UPDATE SET
-            email=excluded.email, is_admin=excluded.is_admin, expires_at=excluded.expires_at
+            email=excluded.email, subject=excluded.subject,
+            is_admin=excluded.is_admin, expires_at=excluded.expires_at
         """,
-        (record.token, record.email, int(record.is_admin), record.expires_at),
+        (
+            record.token,
+            record.email,
+            record.subject,
+            int(record.is_admin),
+            record.expires_at,
+        ),
     )
 
 
@@ -52,10 +60,15 @@ def load_session(
     if not token:
         return None
     row = conn.execute(
-        f"SELECT token, email, is_admin, expires_at FROM {TABLE_SESSIONS} WHERE token = ?",
+        f"SELECT token, email, subject, is_admin, expires_at FROM {TABLE_SESSIONS} WHERE token = ?",
         (token,),
     ).fetchone()
     if row is None:
+        return None
+    # 마이그레이션 전 세션은 이메일만 갖고 있어 동일 인물의 이메일 별칭을 구별할
+    # 수 없다. 승인자 신원으로 승격하지 않고 폐기해 재로그인시킨다.
+    if not isinstance(row["subject"], str) or not row["subject"].strip():
+        conn.execute(f"DELETE FROM {TABLE_SESSIONS} WHERE token = ?", (token,))
         return None
     checked = now if now is not None else dt.datetime.now().timestamp()
     if row["expires_at"] < checked:
@@ -64,6 +77,7 @@ def load_session(
     return SessionRecord(
         token=row["token"],
         email=row["email"],
+        subject=row["subject"],
         is_admin=bool(row["is_admin"]),
         expires_at=row["expires_at"],
     )

@@ -97,11 +97,37 @@ CACHE_HIT_L2: Final[str] = "2층"
 CACHE_HIT_NONE: Final[str] = "없음"
 CACHE_HIT_VALUES: Final[tuple[str, ...]] = (CACHE_HIT_L1, CACHE_HIT_L2, CACHE_HIT_NONE)
 
-# ── 9·10·11. 칸 관련 — core/constants.py COUNTED_CELLS와 값만 맞춘다 ──
-#: 성립 판정·안내·관측에 같이 세는 칸 6개(P-119).
-COUNTED_CELLS: Final[tuple[str, ...]] = ("1", "2", "3", "4-1", "4-2", "4-3")
-#: 위 칸 수. 지표 계산의 분모로 쓴다 (내용 고유성 등).
+# ── 9·10·11. canonical 1~9장 관측 계약 ──────────────────────────
+#: 숫자 표시 번호가 아니라 저장·게이트에서 쓰는 의미 ID를 관측한다.
+#: report_standard를 import하지 않는 feature 독립 규칙 때문에 값을 여기에도
+#: 명시하되, canonical 순서와 정확히 같게 유지한다.
+COUNTED_CELLS: Final[tuple[str, ...]] = (
+    "identity",
+    "business_model",
+    "portfolio",
+    "past_changes",
+    "current_challenges",
+    "future_strategy",
+    "operations_partners",
+    "culture",
+    "competitive_position",
+)
+#: 신규 canonical 기록의 채움 수·미충족 수 분모.
 TOTAL_CELLS: Final[int] = len(COUNTED_CELLS)
+
+#: JSONL에 이미 쌓인 구형 취업보고서 6칸 계약. 신규 기록에는 쓰지
+#: 않고, 읽기·집계 하위 호환을 위해서만 보존한다. 예전의 숨긴 `9`는
+#: 공개 채움 분모에 포함되지 않았다.
+LEGACY_COUNTED_CELLS: Final[tuple[str, ...]] = (
+    "1",
+    "2",
+    "3",
+    "4-1",
+    "4-2",
+    "4-3",
+)
+LEGACY_TOTAL_CELLS: Final[int] = len(LEGACY_COUNTED_CELLS)
+LEGACY_HIDDEN_CELLS: Final[frozenset[str]] = frozenset({"9"})
 
 # ── 12. 판정 등급 · 사람 검토 결과 ────────────────────────
 GRADE_COMPLETE: Final[str] = "완성"

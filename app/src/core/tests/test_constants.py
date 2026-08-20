@@ -37,10 +37,11 @@ def test_부분_완성_문턱은_성립_문턱보다_낮다():
     assert C.PARTIAL_MIN_CELLS < C.MIN_FILLED_CELLS
 
 
-def test_진행_단계는_보고서_흐름_8단계다():
-    assert len(C.PROGRESS_STEPS) == 8
+def test_진행_단계는_회사분석_흐름_7단계다():
+    assert len(C.PROGRESS_STEPS) == 7
     keys = [key for key, _ in C.PROGRESS_STEPS]
     assert len(set(keys)) == len(keys), "단계 키가 겹칩니다"
+    assert "posting" not in keys
 
 
 def test_모든_세는_칸에_이름이_있다():
@@ -51,3 +52,9 @@ def test_모든_세는_칸에_이름이_있다():
 def test_보고서_순서에_모든_칸이_들어_있다():
     for cell in C.CELL_LABELS:
         assert cell in C.REPORT_CELL_ORDER, f"{cell}번이 보고서 순서에서 빠졌습니다"
+
+
+def test_레거시_참고_키는_제목을_중복하지_않는다():
+    assert C.section_display_parts("附", "참고 지표") == ("참고", "지표")
+    assert C.section_display_heading("附", "참고 지표") == "참고 지표"
+    assert C.section_display_heading("1", "사업 구조") == "1. 사업 구조"

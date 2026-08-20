@@ -34,6 +34,36 @@ from src.core.docshape import is_table_of_contents
 #: 여기서 다른 값을 쓰면 「1판은 만들었는데 우리는 버리는」 조각이 생긴다.
 _MIN_CHUNK_CHARS = 200
 
+# 같은 표제가 목차·요약·교차참조·본문에 여러 번 나온다. ``목차인가``만 보면
+# JYP의 「상세 내용은 본문 참조」 요약과 「재무제표 주석을 참조」 교차참조가
+# 본문으로 통과했다. 종류별 실제 내용 표시를 세어 가장 설명력이 큰 덩어리를 고른다.
+_KIND_MARKERS: dict[str, tuple[str, ...]] = {
+    "사업내용": (
+        "사업의 개요", "사업부문", "세부사업내용", "주요 제품", "매출 실적",
+        "음반사업", "매니지먼트사업", "파트너십", "판매", "유통",
+    ),
+    "수익인식": ("수익인식", "고객과의 계약", "수행의무", "거래가격", "한 시점"),
+    "재무": (
+        "요약 연결 재무정보", "연결 재무상태표", "매출액", "영업이익", "당기순이익",
+        "자산", "부채", "현금흐름", "(단위 : 원)",
+    ),
+    "MD&A": (
+        "재무상태", "영업실적", "매출 및 영업이익", "경영성과", "사업부문", "개요",
+        "원가", "수익성",
+    ),
+    "연구개발": (
+        "연구개발활동", "연구개발인력", "담당 조직", "신인개발", "주요계약", "기술개발",
+    ),
+    "특수관계자": ("보고기간말 현재", "관계기업", "종속기업", "특수관계자 거래", "지분율"),
+    "판관비": ("판매비와관리비", "급여", "광고선전비", "지급수수료", "감가상각비"),
+    "매출수주": ("매출 실적", "사업부문", "매출유형", "품 목", "수주", "합계"),
+}
+_WEAK_REFERENCE_MARKERS: tuple[str, ...] = (
+    "상세 내용은 본문",
+    "참조하시기 바랍니다",
+    "기재 하였습니다",
+)
+
 
 def find_body_chunk(
     filing_text: str, heads: Iterable[str], frag_chars: int
@@ -62,6 +92,35 @@ def find_body_chunk(
                 continue          # ★ 목차면 «다음 출현»으로 (1판은 여기서 멈췄다)
             return chunk
     return ""
+
+
+def _body_score(chunk: str, kind: str) -> int:
+    if len(chunk) <= _MIN_CHUNK_CHARS or is_table_of_contents(chunk):
+        return -10_000
+    head = chunk[:320]
+    score = 2 * sum(1 for marker in _KIND_MARKERS.get(kind, ()) if marker in chunk)
+    score -= 6 * sum(1 for marker in _WEAK_REFERENCE_MARKERS if marker in head)
+    if chunk.count("미영위") >= 5:
+        score -= 8
+    if re.search(r"(?:제\s*\d+\s*기|20\d{2}년)", chunk):
+        score += 1
+    return score
+
+
+def find_best_body_chunk(
+    filing_text: str, heads: Iterable[str], frag_chars: int, kind: str
+) -> str:
+    """모든 제한된 표제 출현 중 종류별 내용 표시가 가장 많은 본문을 고른다."""
+
+    candidates: list[tuple[int, int, str]] = []
+    for head in heads:
+        for match in _iter_limited(re.finditer(re.escape(head), filing_text)):
+            chunk = filing_text[match.start(): match.start() + frag_chars].strip()
+            candidates.append((_body_score(chunk, kind), -match.start(), chunk))
+    if not candidates:
+        return ""
+    score, _position, chunk = max(candidates, key=lambda item: (item[0], item[1]))
+    return chunk if score > -10_000 else ""
 
 
 #: 표제 하나당 살펴볼 최대 출현 수.
@@ -112,6 +171,19 @@ def repair(
             본문 = find_body_chunk(filing_text, section_heads.get(종류) or (), frag_chars)
             if 본문:
                 원문 = 본문
+                고침 += 1
+
+        # 목차가 아니어도 요약/교차참조가 실제 본문보다 먼저 나올 수 있다.
+        # DART 주요계정 API 줄은 공시 HTML과 다른 원천이므로 교체하지 않는다.
+        if not str(원문).startswith("주요계정(DART API):"):
+            최선 = find_best_body_chunk(
+                filing_text,
+                section_heads.get(종류) or (),
+                frag_chars,
+                str(종류),
+            )
+            if 최선 and _body_score(최선, str(종류)) >= _body_score(str(원문), str(종류)) + 3:
+                원문 = 최선
                 고침 += 1
 
         # ② 법적 면책 문구로 시작하면 «진짜 내용»부터 다시 뜬다 (P-100).

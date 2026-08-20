@@ -1,4 +1,4 @@
-"""데모용 알맹이 — 시제품이 실제로 돌려 남긴 기록을 «재생»한다.
+"""데모용 알맹이 — 초기 조사 엔진이 실제로 돌려 남긴 기록을 «재생»한다.
 
 ★ 이건 임시다. 진짜 파이프라인을 만들면 이 파일만 갈아끼운다.
   화면 코드는 한 줄도 안 바뀐다 (`port.py` 참조).
@@ -19,9 +19,11 @@ from functools import lru_cache
 from typing import Optional
 
 from src.core import paths
+from src.core.citations import citation_number
 from src.core.constants import (
     CELL_LABELS,
-    HIDDEN_CELLS,
+    COMPANY_FACT_CELLS,
+    COUNTED_CELLS,
     PROGRESS_STEPS,
     SITUATION_CELLS,
     REPLAY_MODEL_MARK,
@@ -30,8 +32,9 @@ from src.core.constants import (
     TABLE_DUMP_REASON,
 )
 from src.features.grading.constants import ACCOUNTING_POLICY_REASON
-from src.features.blocks678.logic import build_block6, build_block7, build_block8
-from src.features.grading.financial import parse_financial_table
+from src.features.homepage.link import browser_url
+from src.features.company_use.logic import build_company_use_section
+from src.features.grading.financial import FINANCIAL_CITE, parse_financial_table
 from src.features.provenance.citations import build_citations
 from src.features.provenance.extra_numbers import build_extra_numbers_section
 from src.features.provenance.sources import Source, SourceKind
@@ -46,7 +49,6 @@ from src.features.spanselect.logic import (
 )
 from src.features.pipeline.port import (
     CompanyCard,
-    Grade,
     Outcome,
     Report,
     ReportSection,
@@ -55,6 +57,13 @@ from src.features.pipeline.port import (
     SourceStatus,
     StepReporter,
     UserInput,
+)
+from src.features.pipeline.canonical_demo import (
+    DEMO_ALIASES as CANONICAL_DEMO_ALIASES,
+    DEMO_COMPANY as CANONICAL_DEMO_COMPANY,
+    DEMO_REF as CANONICAL_DEMO_REF,
+    build_demo_report as build_canonical_demo_report,
+    demo_card as canonical_demo_card,
 )
 
 #: 데모에서 각 단계를 보여주는 간격(초). 진짜 파이프라인에서는 실제 소요 시간이 된다.
@@ -74,7 +83,7 @@ def _step_delay() -> float:
     """
     return 0.0 if os.environ.get("PYTEST_CURRENT_TEST") else _DEMO_STEP_DELAY_SEC
 
-# 시제품 기록의 종료 코드를 우리 종료 종류로 옮긴다.
+# 기존 조사 기록의 종료 코드를 우리 종료 종류로 옮긴다.
 # 왼쪽 문자열은 runs.jsonl에 실제로 찍힌 값의 앞부분이다 (예: "중단_식별실패", "완료_성립미달").
 _OUTCOME_MAP: dict[str, Outcome] = {
     "완료": Outcome.REPORT,
@@ -112,9 +121,9 @@ _OUTCOME_MESSAGE: dict[Outcome, str] = {
     Outcome.FAILED: "보고서를 만들다 오류가 났습니다. 잠시 후 다시 시도해주세요.",
 }
 
-#: 시제품 기록이 달러로 남긴 비용을 원으로 바꿀 때 쓰는 환율 (1판 엔진과 같은 값).
+#: 기존 조사 기록이 달러로 남긴 비용을 원으로 바꿀 때 쓰는 환율 (1판 엔진과 같은 값).
 _USD_TO_KRW = 1400
-#: 시제품이 쓴 AI 모델. 기록에 없어 1판 설정값을 그대로 적는다.
+#: 기존 기록에 쓰인 AI 모델. 기록에 없어 1판 설정값을 그대로 적는다.
 #: ★ 꼬리표는 상수에서 가져온다 — 비용을 세는 쪽(`observability`)이 같은 글자를 본다.
 _PILOT_MODEL = f"claude-haiku-4-5 {REPLAY_MODEL_MARK}"
 
@@ -138,7 +147,7 @@ _LEGAL_ENTITY_TOKENS: tuple[str, ...] = ("주식회사", "(주)", "㈜", "(유)"
 def _clean(value: object) -> str:
     """기록에서 꺼낸 글자를 화면에 쓸 수 있게 다듬는다.
 
-    시제품이 웹에서 긁어온 값이라 `&nbsp;` 같은 HTML 기호가 그대로 섞여 있다.
+    초기 조사 엔진이 웹에서 긁어온 값이라 `&nbsp;` 같은 HTML 기호가 그대로 섞여 있다.
     """
     text = html.unescape(str(value or ""))
     text = text.replace("\xa0", " ")
@@ -180,7 +189,7 @@ def _in_report_order(sections: list[ReportSection]) -> list[ReportSection]:
 
 
 def _outcome_of(raw: str) -> Outcome:
-    """시제품 기록의 종료 문자열을 종료 종류로 옮긴다."""
+    """기존 조사 기록의 종료 문자열을 종료 종류로 옮긴다."""
     for prefix, outcome in _OUTCOME_MAP.items():
         if raw.startswith(prefix):
             return outcome
@@ -197,7 +206,7 @@ def _step(record: dict, name: str) -> Optional[dict]:
 
 @lru_cache(maxsize=1)
 def _load_runs() -> tuple[dict, ...]:
-    """시제품 실행 기록을 읽어 둔다. 한 번만 읽고 재사용한다."""
+    """기존 실행 기록을 읽어 둔다. 한 번만 읽고 재사용한다."""
     if not paths.PILOT_RUNS_FILE.exists():
         return ()
     rows: list[dict] = []
@@ -226,29 +235,23 @@ def available_companies() -> list[dict[str, str]]:
     입력 화면에서 「이 회사들만 됩니다」로 보여준다.
     실제 서비스에서는 이 함수가 없어진다.
     """
-    # 같은 회사를 여러 번 돌린 기록이 있다. 화면에는 한 번만 보여준다.
-    # 여러 기록이 있으면 보고서가 나온 쪽을 남긴다 — 눌렀을 때 결과가 보이는 게 낫다.
-    by_name: dict[str, dict[str, str]] = {}
-    for row in _load_runs():
-        company = (row.get("input") or {}).get("company", "")
-        if not company:
-            continue
-        outcome = _outcome_of(row.get("outcome", ""))
-        item = {
-            "company": company,
-            "job": (row.get("input") or {}).get("job", ""),
-            "outcome": outcome.value,
-            "is_report": "1" if outcome is Outcome.REPORT else "",
+    # 구형 파일럿 15건은 4-1·4-2·4-3·활용 구조이고 사실 원장도 없다.
+    # 새 결과처럼 재생하지 않고 현재 출고 게이트를 실제로 통과한 한 건만 공개한다.
+    return [
+        {
+            "company": CANONICAL_DEMO_COMPANY,
+            "job": "",
+            "outcome": Outcome.REPORT.value,
+            "is_report": "1",
         }
-        key = _normalize(company)
-        kept = by_name.get(key)
-        if kept is None or (not kept["is_report"] and item["is_report"]):
-            by_name[key] = item
+    ]
 
-    items = list(by_name.values())
-    # 보고서가 나온 것을 앞에 둔다 — 눌러봤을 때 결과가 보이는 게 먼저다.
-    items.sort(key=lambda x: (x["is_report"] == "", x["company"]))
-    return items
+
+def _is_canonical_demo_name(name: str) -> bool:
+    normalized = _normalize(name)
+    aliases = {_normalize(item) for item in CANONICAL_DEMO_ALIASES}
+    aliases.add(_normalize(CANONICAL_DEMO_COMPANY))
+    return bool(normalized) and normalized in aliases
 
 
 def _find_record(company: str) -> Optional[dict]:
@@ -257,16 +260,37 @@ def _find_record(company: str) -> Optional[dict]:
     if not target:
         return None
     rows = _load_runs()
-    # 정확히 같은 것 먼저
-    for row in rows:
-        if _normalize((row.get("input") or {}).get("company", "")) == target:
-            return row
-    # 없으면 포함하는 것
+
+    def preferred(candidates: list[dict]) -> Optional[dict]:
+        """목록과 같은 규칙으로 보고서가 나온 기록을 먼저 고른다."""
+        if not candidates:
+            return None
+        return next(
+            (
+                row
+                for row in candidates
+                if _outcome_of(row.get("outcome", "")) is Outcome.REPORT
+            ),
+            candidates[0],
+        )
+
+    # 정확히 같은 것 먼저. 같은 회사를 여러 번 조사했다면 입력 화면의 성공 배지와
+    # 실제 실행이 어긋나지 않도록 보고서가 나온 기록을 우선한다.
+    exact = [
+        row
+        for row in rows
+        if _normalize((row.get("input") or {}).get("company", "")) == target
+    ]
+    if exact:
+        return preferred(exact)
+
+    # 없으면 포함하는 것. 이때도 목록과 같은 성공 우선 규칙을 유지한다.
+    partial = []
     for row in rows:
         name = _normalize((row.get("input") or {}).get("company", ""))
         if name and (target in name or name in target):
-            return row
-    return None
+            partial.append(row)
+    return preferred(partial)
 
 
 def _sources_of(record: dict) -> list[SourceStatus]:
@@ -302,7 +326,7 @@ def _sources_of(record: dict) -> list[SourceStatus]:
 
     # ★ 「아직 연결되지 않음」이라고 말하면 안 된다 — 홈페이지 수집은 **이미 붙어 있다**
     #   (P-35 해소, `features/homepage/`). 없는 것은 «기능»이 아니라 이 저장 기록이다.
-    #   시제품이 이 기록을 만들 때는 홈페이지 수집이 없었을 뿐이다.
+    #   초기 조사 엔진이 이 기록을 만들 때는 홈페이지 수집이 없었을 뿐이다.
     #   기능이 붙었는데 화면이 옛말을 하면 사용자가 「이 도구는 홈페이지를 못 본다」고
     #   잘못 안다 (P-49·P-63과 같은 사고).
     # ★ ❌(없음)로 적지 않는 이유 — 회사에 홈페이지가 없다는 뜻이 되어 버린다 (P-45).
@@ -383,7 +407,12 @@ def _parse_report(text: str) -> tuple[list[ReportSection], list[str], str]:
             sentence, cite = body, ""
 
         # ★ 재무·회계 수치는 «표 그대로» 낸다 (결정기록 D13). 버리지 않는다.
-        table = parse_financial_table(sentence)
+        # 저장 MD의 `조각 N·종류`를 표로 바꾸면서 버리지 않는다. 화면·DOCX의
+        # 표 캡션에는 내부 종류명이 아니라 아래 출처표를 가리키는 번호만 보인다.
+        public_cite = citation_number(cite)
+        table = parse_financial_table(
+            sentence, cite=public_cite or FINANCIAL_CITE
+        )
         if table is not None:
             cur_tables.append(table)
             continue
@@ -420,7 +449,7 @@ def _news_citations(record: dict) -> dict[int, Source]:
       **없는 사실**이다 — 그 기사는 감사보고서에서 나오지 않았다.
 
     Args:
-        record: 시제품 실행 기록 한 줄.
+        record: 기존 실행 기록 한 줄.
 
     Returns:
         조각 번호 → 뉴스 출처. 뉴스 조각이 없으면 빈 표.
@@ -441,7 +470,7 @@ def _news_citations(record: dict) -> dict[int, Source]:
 def _demo_citations(record: dict, sections: list[ReportSection]) -> list[Source]:
     """저장된 보고서에서 출처 목록을 «있는 것만» 만든다.
 
-    ★ 시제품 기록에는 **공시일이 없다** (문제로그 P-24·P-44).
+    ★ 기존 조사 기록에는 **공시일이 없다** (문제로그 P-24·P-44).
       날짜를 지어내지 않는다 — 「어느 보고서 어느 절에서 왔나」만 정직하게 적는다.
       진짜 조사에서는 날짜까지 채워진다.
     ★ 뉴스는 예외다 — 보도일·언론사가 조각 원문에 남아 있어 그대로 옮긴다.
@@ -449,20 +478,36 @@ def _demo_citations(record: dict, sections: list[ReportSection]) -> list[Source]
     collect = _step(record, "6_수집") or {}
     filing_name = str(collect.get("원문") or "")
     news = _news_citations(record)
+    fragments = {
+        number: (kind, text)
+        for number, kind, text in _load_fragments(str(record.get("id", "")))
+    }
     seen: dict[int, Source] = {}
     for section in sections:
-        for _text, cite in section.lines:
+        cites = [cite for _text, cite in section.lines]
+        cites.extend(table.cite for table in section.tables)
+        for cite in cites:
             matched = _CITE_PARTS.match(cite.strip())
-            if matched is None:
-                continue
-            number = int(matched.group("number"))
+            if matched is not None:
+                number = int(matched.group("number"))
+                kind_name = matched.group("kind").strip()
+            else:
+                public_number = citation_number(cite)
+                if not public_number:
+                    continue
+                number = int(public_number)
+                fragment = fragments.get(number)
+                if fragment is None:
+                    continue
+                kind_name = fragment[0]
             if number in seen:
                 continue
-            kind_name = matched.group("kind").strip()
             if kind_name == NEWS_FRAGMENT_KIND and number in news:
                 seen[number] = news[number]
                 continue
-            label = f"{filing_name} · {kind_name}" if filing_name else kind_name
+            stored_kind = f"저장 분류명: {kind_name}"
+            label = f"{filing_name} · {stored_kind}" if filing_name else stored_kind
+            label += " · 공시일·수집일·원문 ID 미저장"
             seen[number] = Source(
                 number=number,
                 kind=SourceKind.NEWS if kind_name == NEWS_FRAGMENT_KIND else SourceKind.FILING,
@@ -489,7 +534,7 @@ def _demo_citations(record: dict, sections: list[ReportSection]) -> list[Source]
 # ★ AI를 부르지 않는다 (0원). 저장된 조각을 낱말 규칙으로만 배치한다.
 #   그래서 «진짜 AI가 고른 배치와는 다르다» — 그 사실을 화면에 밝힌다(아래 안내문).
 
-#: 시제품이 남긴 조각 원문이 들어 있는 폴더 이름 (`prototype_v1/data/pilot/fragments/`).
+#: 기존 조사 기록의 조각 원문이 들어 있는 폴더 이름 (`analysis_engine/data/pilot/fragments/`).
 _PILOT_FRAGMENTS_DIRNAME = "fragments"
 
 #: 문장 가르기. 1판 `run_pilot.split_sentences`와 같은 규칙이다(`(?<=[.!?])\s+`).
@@ -581,7 +626,7 @@ _PROBLEM_CELL_SKIPPED_REASON = (
 
 @lru_cache(maxsize=None)
 def _load_fragments(run_id: str) -> tuple[tuple[int, str, str], ...]:
-    """시제품이 저장해 둔 조각 원문을 읽는다. 한 번 읽고 재사용한다.
+    """조사 엔진이 저장해 둔 조각 원문을 읽는다. 한 번 읽고 재사용한다.
 
     Args:
         run_id: 실행 기록 번호 (예: `"재수집-p010"`).
@@ -797,7 +842,7 @@ def _redraw_situation(
       AI가 고른 문장과 코드가 고른 문장이 한 칸에 섞이면 어느 쪽인지 알 수 없다.
 
     Args:
-        record: 시제품 실행 기록 한 줄.
+        record: 기존 실행 기록 한 줄.
         sections: 저장된 보고서에서 읽어 낸 항목들.
 
     Returns:
@@ -863,38 +908,20 @@ def _load_report(record: dict) -> Optional[Report]:
     if not path.exists():
         return None
 
-    sections, requirements, generated_at = _parse_report(path.read_text(encoding="utf-8"))
-    requirements = requirements or record.get("requirements", [])
-
+    sections, _legacy_requirements, generated_at = _parse_report(path.read_text(encoding="utf-8"))
     # ★ 4번(회사 상황)이 통째로 비었으면 저장된 뉴스 조각에서 «재도출»한다
-    #   (문제로그 P-43). 6·7·8과 같은 자리·같은 방식이다 — AI를 부르지 않는다.
+    #   (문제로그 P-43). AI를 부르지 않는다.
     sections, redrawn_cells = _redraw_situation(record, sections)
 
-    # ★ 6·7·8은 «저장된 것을 버리고» 새로 만든다 (문제로그 P-31 · 결정 D14-3).
-    #   1판은 이 세 칸을 만들지 않고 요구역량을 임의로 흩뿌렸다 — 그 결과는 의미가 없다.
-    job = (record.get("input") or {}).get("job", "")
-    by_cell = {s.cell: s for s in sections}
-    cell4 = {c: (by_cell[c].lines if c in by_cell else []) for c in SITUATION_CELLS}
-    made = {
-        "6": build_block6(by_cell["1"].lines if "1" in by_cell else [], job),
-        "7": build_block7(requirements),
-        "8": build_block8(cell4, requirements),
-    }
-    sections = [made.get(s.cell, s) for s in sections]
-    for cell, section in made.items():
-        if cell not in by_cell:
-            sections.append(section)
-
-    # 附 — 시제품은 직원 현황을 안 받아왔다. 「없다」가 아니라 «왜 없는지»를 적는다 (D14-4).
+    # 附 — 기존 조사 기록에는 직원 현황이 없다. 「없다」가 아니라 «왜 없는지»를 적는다 (D14-4).
     corp_type_raw = record.get("corp_type", "")
     corp_type = "비상장 외감" if "비상장" in corp_type_raw else "상장사"
     # ★ fetch_failed=True인 이유 — 데모는 «회사에 자료가 없어서»가 아니라
-    #   «시제품이 직원 현황을 안 받아왔기 때문»에 비어 있다.
+    #   «당시 조사 엔진이 직원 현황을 안 받아왔기 때문»에 비어 있다.
     #   ❌(회사 사정)와 ⚠️(우리 사정)를 섞으면 사용자가 그 회사를 포기해버린다 (07_출력 §빈칸 사유).
     extra = build_extra_numbers_section(response=None, corp_type=corp_type, fetch_failed=True)
-    sections = [extra if s.cell == "附" else s for s in sections]
-    if "附" not in {s.cell for s in sections}:
-        sections.append(extra)
+    sections = [s for s in sections if s.cell in COMPANY_FACT_CELLS and s.cell != "附"]
+    sections.append(extra)
 
     # ★ 재도출한 칸에 「데모가 다시 고른 것」임을 밝힌다. 8번 표를 만든 «뒤»다 —
     #   안내 줄이 교차표의 재료로 섞이면 근거 없는 행이 생긴다.
@@ -903,23 +930,21 @@ def _load_report(record: dict) -> Optional[Report]:
     # 4-3에 날짜·변경 경고 (W6 · D14-5)
     sections = [append_direction_warning(s) if s.cell == "4-3" else s for s in sections]
 
-    # ★ 보고서에서 아예 빼는 칸 (P-111) — 진짜 조사와 «같아야» 한다.
-    #   갈라지면 데모와 진짜가 다른 보고서를 내놓아 사용자가 다른 문제로 착각한다.
-    sections = [s for s in sections if s.cell not in HIDDEN_CELLS]
+    sections.append(build_company_use_section(sections))
 
     # ★ 등급은 «화면에 실제로 보이는 것»으로 다시 센다.
     #   기록에 저장된 판정(final_cells)을 그대로 쓰면, 표 덩어리를 비운 칸이
     #   여전히 「채워짐」으로 남아 화면과 등급이 어긋난다 (문제로그 P-29).
-    cells = {s.cell: s.is_filled for s in sections}
+    cells = {s.cell: s.is_filled for s in sections if s.cell in COUNTED_CELLS}
     grade, reasons = grade_of(cells)
 
     return Report(
         company=(record.get("input") or {}).get("company", ""),
-        job=(record.get("input") or {}).get("job", ""),
+        job="",
         corp_type=corp_type,
         grade=grade,
         sections=_in_report_order(sections),
-        requirements=requirements,
+        requirements=[],
         sources=_sources_of(record),
         cells=cells,
         shortfall_reasons=reasons,
@@ -941,12 +966,17 @@ def _metrics_of(record: dict, report: Optional[Report]) -> dict:
     deleted = int(verify.get("삭제", 0) or 0)
     cited = 0
     if report is not None:
-        cited = len({
-            cite.split("·")[0].replace("조각", "").strip()
+        cites = [
+            cite
             for section in report.sections
             for _text, cite in section.lines
-            if cite.startswith("조각")
-        })
+        ]
+        cites.extend(
+            table.cite
+            for section in report.sections
+            for table in section.tables
+        )
+        cited = len({number for cite in cites if (number := citation_number(cite))})
     return {
         "corp_type": ("비상장 외감" if "비상장" in str(record.get("corp_type", ""))
                       else "상장사"),
@@ -957,10 +987,10 @@ def _metrics_of(record: dict, report: Optional[Report]) -> dict:
         # ★ 데모는 «0원»이다 (문제로그 P-84).
         #   port.py의 약속은 「**이 요청에** 쓴 AI 비용」이고, 데모는 저장된 것을
         #   그대로 보여줄 뿐 AI를 한 번도 부르지 않는다. 실제로 나간 돈은 0이다.
-        #   예전에는 시제품이 «옛날에» 쓴 돈(`cost_usd`)을 그대로 실었다. 그래서
+        #   예전에는 기존 기록에 담긴 비용(`cost_usd`)을 그대로 실었다. 그래서
         #   이력 791건에 34,222원이 쌓였는데 **그 달 진짜 지출은 약 750원**이었다.
         #   관리 화면의 「이번 달 AI 비용」이 45배로 부풀어, 예산 판단을 망친다.
-        # ⚠️ 원래 얼마였는지는 **1판 기록(`prototype_v1`의 `runs.jsonl`)에 그대로 있다.**
+        # ⚠️ 원래 얼마였는지는 **1판 기록(`analysis_engine`의 `runs.jsonl`)에 그대로 있다.**
         #   여기서 0으로 두어도 정보는 잃지 않는다 — 다른 곳으로 옮겨 적지 않을 뿐이다.
         "cost_krw": 0.0,
         "model": _PILOT_MODEL,
@@ -972,6 +1002,18 @@ class DemoPipeline:
 
     def find_company(self, user_input: UserInput) -> Optional[CompanyCard]:
         """입력한 이름으로 회사 하나를 찾는다."""
+        if _is_canonical_demo_name(user_input.company):
+            card = canonical_demo_card(user_input.company)
+            warning = ""
+            if user_input.region.strip() and not _region_matches(
+                user_input.region, card.address
+            ):
+                warning = (
+                    f"입력하신 지역({user_input.region.strip()})과 본사 주소가 다릅니다. "
+                    "지사·공장이거나 최근 이전했을 수 있습니다."
+                )
+            return replace(card, region_warning=warning)
+
         record = _find_record(user_input.company)
         if record is None:
             return None
@@ -1001,9 +1043,9 @@ class DemoPipeline:
             ceo=_clean(card_data.get("대표")),
             founded=_clean(card_data.get("설립")),
             homepage=_clean(card_data.get("홈페이지")),
-            # ★ 데모는 «주소를 열어 보지 않는다» (P-114) — 네트워크를 안 타는 것이
-            #   데모의 약속이다. 그래서 링크를 걸지 않고 글자로만 보여준다.
-            #   진짜 조사에서는 열어 보고 되는 방식으로 링크를 건다.
+            # 데모는 네트워크를 호출하지 않지만 http(s) 모양을 안전하게 정규화해
+            # 확인 카드에서 실제 링크로 열 수 있게 한다.
+            homepage_url=browser_url(_clean(card_data.get("홈페이지"))),
             region_warning=warning,
             same_name_count=same_name,
             ref=str(record.get("id", "")),
@@ -1025,6 +1067,26 @@ class DemoPipeline:
                 on_step(key)
             time.sleep(_step_delay())
 
+        if card.ref == CANONICAL_DEMO_REF or _is_canonical_demo_name(
+            user_input.company
+        ):
+            report = build_canonical_demo_report()
+            fact_count = len(report.fact_records)
+            return RunResult(
+                outcome=Outcome.REPORT,
+                report=report,
+                sources=[],
+                charged=True,
+                elapsed_sec=0.0,
+                corp_type=report.corp_type,
+                fragments_collected=fact_count,
+                fragments_cited=len(report.citations),
+                sentences_made=fact_count,
+                sentences_passed=fact_count,
+                cost_krw=0.0,
+                model="canonical-demo-v3",
+            )
+
         record = _find_record(user_input.company)
         if record is None:
             return RunResult(
@@ -1036,20 +1098,16 @@ class DemoPipeline:
         elapsed = float(record.get("elapsed_sec", 0) or 0)
 
         if outcome is Outcome.REPORT:
-            report = _load_report(record)
-            if report is None:
-                return RunResult(
-                    outcome=Outcome.FAILED,
-                    message=_OUTCOME_MESSAGE[Outcome.FAILED],
-                    elapsed_sec=elapsed,
-                )
             return RunResult(
-                outcome=Outcome.REPORT,
-                report=report,
-                sources=report.sources,
-                charged=True,  # 보고서가 나가면 1 차감 (3분법)
+                outcome=Outcome.GATE_STOPPED,
+                message=(
+                    "이 저장본은 현재 보고서 구조와 사실 검증 계약을 거치지 않아 "
+                    "새 보고서로 재생하지 않습니다."
+                ),
+                sources=_sources_of(record),
+                charged=False,
                 elapsed_sec=elapsed,
-                **_metrics_of(record, report),
+                **_metrics_of(record, None),
             )
 
         return RunResult(

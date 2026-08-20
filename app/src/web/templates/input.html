@@ -1,104 +1,162 @@
 {% extends "base.html" %}
-{% block title %}회사 조사 시작 · 기업분석{% endblock %}
+{% block title %}지원기업 분석 보고서 · 기업분석{% endblock %}
 {% block bodyclass %}home-page{% endblock %}
 {% block wrapclass %}home{% endblock %}
 
 {% block content %}
-<h1>지원할 회사를 조사해 드립니다</h1>
+<section class="home-hero" aria-labelledby="home-title">
+  <p class="home-eyebrow">COMPANY INTELLIGENCE REPORT</p>
+  <h1 id="home-title" class="brand-mark brand-mark-hero">기업 분석<span class="brand-mark-dot" aria-hidden="true"></span></h1>
+  <p class="home-subtitle">취업준비생을 위한 5분 기업 파악 도구</p>
+</section>
 
-{% if image_error %}
-  {# ★ 막다른 길을 만들지 않는다 — 글자로 붙여넣으면 그대로 진행된다.
-     넣었던 값은 그대로 두어 처음부터 다시 치지 않게 한다. #}
-  <div class="grade incomplete" style="margin-bottom:18px">
-    <span class="icon">🖼️</span>
-    <div>
-      <b>사진을 읽지 못했습니다</b>
-      <p style="margin:6px 0 0">{{ image_error }}</p>
+{% if share_notice %}
+<div class="warn-line" role="status" style="margin-bottom:18px">
+  <span aria-hidden="true">ℹ️</span><span>{{ share_notice }}</span>
+</div>
+{% endif %}
+
+<form class="card analysis-form" id="analysisForm" method="post" action="/confirm"
+      aria-labelledby="analysis-form-title">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  {% if evaluation_workflow_id %}
+  <input type="hidden" name="evaluation_workflow_id"
+         value="{{ evaluation_workflow_id }}">
+  {% endif %}
+  <header class="form-header">
+    <h2 id="analysis-form-title">분석할 회사 정보</h2>
+    <p>필수 정보를 입력한 뒤, 분석할 회사가 맞는지 먼저 확인합니다.</p>
+  </header>
+
+  {% if evaluation_mode %}
+  <section class="evaluation-notice{% if not evaluation_paid_providers %} preview{% endif %}"
+           id="evaluation-notice" aria-labelledby="evaluation-notice-title">
+    <h3 id="evaluation-notice-title">실시간 성능시험</h3>
+    {% if evaluation_paid_providers %}
+      <p><strong>확인 후 외부 서비스 호출과 실제 비용이 발생할 수 있습니다.</strong></p>
+      <p>
+        호출 전 예상비용 운영 기준: 1건 {{ evaluation_per_run_cap_krw | int }}원 ·
+        {{ evaluation_business_day_label }} 하루 {{ evaluation_daily_cap_krw | int }}원
+        (한국시간 기준)
+      </p>
+      <p class="evaluation-cap-note">
+        청구액을 보장하는 hard cap이 아니라, 호출 전에 예상비용 예약을 막는 운영
+        기준입니다. 실제 단가와 사용량에 따라 최종 비용은 넘을 수 있습니다.
+      </p>
+      <label class="evaluation-consent" for="evaluation_paid_consent">
+        <input type="checkbox" id="evaluation_paid_consent"
+               name="evaluation_paid_consent" value="yes" required>
+        외부 서비스 호출과 비용 발생 가능성 및 위 운영 기준을 확인했습니다.
+      </label>
+    {% else %}
+      <p><strong>미리보기에서는 외부 서비스 호출이 0건이며 분석 시작이 잠겨 있습니다.</strong></p>
+      <p>실제 성능시험은 서버를 <code>-EnablePaidProviders</code>로 다시 켜야 합니다.</p>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  {% if share_link %}
+  <div class="warn-line" id="share-scope-note" role="status" style="margin-bottom:16px">
+    <span aria-hidden="true">🔗</span>
+    <span>
+      <strong>{{ share_link.company }} 전용 링크</strong><br>
+      이 링크의 조사 권한은 배정된 회사에만 적용됩니다. 다른 회사는
+      관리자가 별도 링크를 발급해야 합니다.
+    </span>
+  </div>
+  {% endif %}
+
+  {# 샘플 선택은 경고가 아니라 폼을 빠르게 체험하는 보조 진입점이다.
+     실제 조사 모드에서는 절대 노출하지 않는다. #}
+  {% if not share_link and demo_available and not is_real %}
+  {% set visible_samples = demo_companies[:24] %}
+  {% set report_samples = visible_samples | selectattr('is_report') | list %}
+  {% set no_report_samples = visible_samples | rejectattr('is_report') | list %}
+  <section class="demo-note demo-picker" aria-labelledby="demo-picker-title">
+    <div class="t" id="demo-picker-title">샘플 보고서로 먼저 둘러보기</div>
+    <p>실제 외부 조사를 실행하지 않습니다. 현재 출고 기준을 통과한 샘플만 보여드립니다.</p>
+    <div class="chips featured-samples" aria-label="대표 샘플 회사">
+      {% for c in report_samples[:3] %}
+        <button type="button"
+                class="chip report sample-select"
+                data-company="{{ c.company }}"
+                data-featured-sample="true"
+                aria-label="{{ c.company }} 샘플 보고서 선택">
+          <span class="chip-company">{{ c.company }}</span>
+          <span class="chip-state">보고서 있음</span>
+        </button>
+      {% endfor %}
     </div>
-  </div>
-{% endif %}
-{# ★ 「지금은 데모입니다」는 **진짜로 데모로 돌 때만** 말해야 한다.
-   ⚠️ 예전에는 `demo_available`(= 데모 «파일»이 있나)만 봤다. 그래서 진짜 조사
-     모드로 켜도 파일이 남아 있으면 이 상자가 그대로 떠서 거짓 안내가 됐다.
-     머리의 배지는 `is_real`을 따라가는데(P-37) 이 상자만 안 따라갔다.
-   → 파일이 있고 «그리고» 지금 데모로 돌 때만 보여준다. #}
-{% if demo_available and not is_real %}
-<div class="demo-note">
-  <div class="t">지금은 데모입니다</div>
-  실제 조사를 돌리지 않고, <strong>시제품이 미리 돌려둔 결과</strong>를 보여줍니다.
-  아래 회사 중 하나를 눌러보세요. <span class="muted">(진하게 채워진 버튼 = 보고서가 나오는 회사)</span>
-  <div class="chips">
-    {% for c in demo_companies[:24] %}
-      <button type="button"
-              class="chip {% if c.is_report %}report{% endif %}"
-              data-company="{{ c.company }}"
-              data-job="{{ c.job }}"
-              title="{{ c.outcome }}">{{ c.company }}</button>
-    {% endfor %}
-  </div>
-</div>
-{% elif not is_real %}
-{# 진짜 조사 모드 — 돈이 나간다는 사실을 «입력하기 전에» 알려야 한다. #}
-{# ★ 2026-08-16 사용자 지시로 덜어냈다: 「사용자가 꼭 알아야 하는 내용만 넣어」.
-   남긴 것은 둘뿐이다 — ⓐ 돈이 나간다 ⓑ 대체로 얼마.
-   뺀 것: 실측 3건 금액·재조사 할인 설명 — **우리 사정이지 지금 사용자의 결정과 무관하다.** #}
-<div class="demo-note">
-  <div class="t">데모 데이터를 찾지 못했습니다</div>
-  <code>prototype_v1/data/pilot/</code> 폴더가 있어야 합니다.
-</div>
-{% endif %}
+    {% if report_samples[3:] or no_report_samples %}
+    <details class="all-samples">
+      <summary>
+        다른 샘플 보기
+        <span class="summary-count">{{ (report_samples[3:] | length) + (no_report_samples | length) }}개</span>
+      </summary>
+      <div class="chips sample-catalog" aria-label="다른 샘플 회사">
+        {% for c in report_samples[3:] %}
+          <button type="button"
+                  class="chip report sample-select"
+                  data-company="{{ c.company }}"
+                  aria-label="{{ c.company }} 샘플 보고서 선택">
+            <span class="chip-company">{{ c.company }}</span>
+            <span class="chip-state">보고서 있음</span>
+          </button>
+        {% endfor %}
+        {% for c in no_report_samples %}
+          <span class="chip unavailable-sample" aria-disabled="true">
+            <span class="chip-company">{{ c.company }}</span>
+            <span class="chip-state">보고서 없음</span>
+          </span>
+        {% endfor %}
+      </div>
+    </details>
+    {% endif %}
+    <p class="sample-status" id="sampleSelectionStatus" role="status" aria-live="polite" hidden></p>
+  </section>
+  {% elif not share_link and not is_real %}
+  <section class="demo-note demo-empty" role="status">
+    <div class="t">샘플 보고서를 불러오지 못했습니다</div>
+    <p>잠시 후 페이지를 새로 열어 다시 시도해 주세요.</p>
+  </section>
+  {% endif %}
 
-<form class="card" method="post" action="/confirm">
   <div class="field">
     <label for="company">회사 이름<span class="req">*</span></label>
     <input type="text" id="company" name="company" required autocomplete="off"
-           placeholder="예) 카카오페이" value="{{ prefill.company if prefill else '' }}">
-  </div>
-
-  <div class="row2">
-    <div class="field">
-      <label for="job">지원 직무<span class="req">*</span></label>
-      <input type="text" id="job" name="job" required autocomplete="off"
-             placeholder="예) 마케팅" value="{{ prefill.job if prefill else '' }}">
-    </div>
-
-    <div class="field">
-      <label for="region">회사 지역<span class="req">*</span></label>
-      {# 주소는 동명 법인 11.3%를 가르는 «유일한» 단서라 필수다 (기획서 D14-2) #}
-      <input type="text" id="region" name="region" required autocomplete="off"
-             placeholder="예) 서울 성동구" value="{{ prefill.region if prefill else '' }}">
-    </div>
+           maxlength="{{ company_max_chars }}"
+           placeholder="예) 카카오페이" value="{{ prefill.company if prefill else '' }}"
+           {% if share_link %}readonly aria-describedby="share-scope-note"{% endif %}>
   </div>
 
   <div class="field">
-    <label for="posting_text">채용공고</label>
-    <div class="hint">
-      <strong>글자를 붙여넣거나, 캡처를 그대로 Ctrl+V</strong> 하세요. 둘 다 넣어도 됩니다.
-      <br><strong>기업명이 보이게</strong> 넣어주시면 더 정확합니다.
-      개인정보(이름·연락처·생년월일)가 섞여 있으면 <strong>저장하지 않고 지웁니다.</strong>
+    <label for="region">회사 주소 구/군까지 <span class="optional">(선택)</span></label>
+    <div class="hint" id="region-hint">
+      같은 이름의 회사를 구분하는 데 사용합니다. 본사 주소와 달라도 확인 화면에서 선택할 수 있습니다.
     </div>
-
-    {# 글자와 사진을 «한 상자»에 둔다 — 따로 두면 어디에 넣을지 헷갈린다.
-       요즘 입력창(ChatGPT·Slack 등)과 같은 구조다. #}
-    <div class="posting-composer" id="postingComposer">
-      <textarea id="posting_text" name="posting_text"
-                placeholder="공고 내용을 붙여넣거나, 캡처 화면을 Ctrl+V로 붙여넣으세요">{{ prefill.posting_text if prefill else '' }}</textarea>
-      {% include "_posting_image_field.html" %}
-    </div>
+    <input type="text" id="region" name="region" autocomplete="off"
+           maxlength="{{ region_max_chars }}" aria-describedby="region-hint"
+           placeholder="예) 서울 성동구" value="{{ prefill.region if prefill else '' }}">
   </div>
 
-  <button type="submit" class="btn wide">회사 찾기</button>
+  <button type="submit" class="btn wide" id="confirmSubmitButton"
+          {% if evaluation_mode %}aria-describedby="evaluation-notice"{% endif %}
+          {% if evaluation_mode and not evaluation_paid_providers %}disabled{% endif %}>
+    {% if evaluation_mode and not evaluation_paid_providers %}미리보기 · 외부 조사 잠김{% else %}분석할 회사 확인하기{% endif %}
+  </button>
 </form>
 
 <script>
   // 데모 칩을 누르면 폼을 채워준다.
-  document.querySelectorAll('.chip').forEach(function (chip) {
+  document.querySelectorAll('.sample-select').forEach(function (chip) {
     chip.addEventListener('click', function () {
       document.getElementById('company').value = chip.dataset.company || '';
-      document.getElementById('job').value = chip.dataset.job || '';
-      document.getElementById('posting_text').value =
-        '(데모 — 시제품이 저장해 둔 공고를 사용합니다)';
       // 지역은 자동으로 안 채운다. 직접 넣으셔야 같은 이름 회사를 가릅니다.
+      var status = document.getElementById('sampleSelectionStatus');
+      if (status) {
+        status.textContent = chip.dataset.company + '의 회사명을 채웠습니다. 회사 주소를 구/군까지 입력해 주세요.';
+        status.hidden = false;
+      }
       document.getElementById('region').focus();
     });
   });

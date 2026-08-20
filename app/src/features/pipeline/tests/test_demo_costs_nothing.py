@@ -2,7 +2,7 @@
 
 ★ 이 시험이 잡는 것 — **관리 화면의 「이번 달 AI 비용」이 부풀어 오르는 것.**
   데모는 저장된 결과를 그대로 보여줄 뿐 AI를 한 번도 부르지 않는다. **0원이다.**
-  그런데 예전에는 시제품이 «옛날에» 쓴 돈을 그대로 실어 이력에 남겼다.
+  그런데 예전에는 기존 기록에 담긴 비용을 그대로 실어 이력에 남겼다.
   실측 — 이력 **791건에 34,222원**이 쌓였는데 그 달 **진짜 지출은 약 750원**이었다.
   **45배.** 이 숫자를 보고 예산을 판단하면 그대로 틀린다.
 
@@ -22,8 +22,8 @@ import pytest
 from src.features.pipeline.demo import DemoPipeline
 from src.features.pipeline.port import Outcome, UserInput
 
-#: 데모 기록이 있고 보고서가 나오는 회사들.
-_표본 = ("파마리서치", "토스씨엑스", "루트로닉", "우리엔", "카카오", "넥스트증권")
+#: 현재 출고 게이트를 통과한 무료 canonical 데모.
+_표본 = ("(주)진영",)
 
 
 def _데모결과(회사: str):
@@ -56,7 +56,7 @@ def test_보고서가_나와도_0원이다():
 
     이 확인이 없으면, 데모가 전부 실패하는 바람에 통과하는 시험이 된다.
     """
-    result = _데모결과("파마리서치")
+    result = _데모결과("(주)진영")
 
     assert result.outcome is Outcome.REPORT
     assert result.report is not None
@@ -83,18 +83,18 @@ def test_데모를_여러_번_돌려도_비용_합이_0이다():
 def test_어느_모델로_만든_기록인지는_그대로_말한다():
     """0원으로 바꾸느라 «출처»까지 지우면 안 된다.
 
-    ★ 데모 결과는 haiku 시절 기록이다. 지금 진짜 조사는 더 큰 모델을 쓴다.
-      이 표시가 없으면 데모 품질을 지금 품질로 오해한다.
+    저장된 canonical 샘플이라는 표시가 없으면 실제 API 실행으로 오해할 수 있다.
     """
-    result = _데모결과("파마리서치")
+    result = _데모결과("(주)진영")
 
-    assert "시제품 기록" in result.model
+    assert result.model == "canonical-demo-v3"
 
 
 def test_보고서_알맹이는_그대로다():
     """비용만 0으로 바꿨을 뿐, 보여주는 내용은 건드리지 않았다."""
-    result = _데모결과("파마리서치")
+    result = _데모결과("(주)진영")
 
     assert result.report is not None
+    assert result.report.schema_version == "company-report-v3-canonical"
     assert result.fragments_collected > 0
     assert result.sentences_passed > 0

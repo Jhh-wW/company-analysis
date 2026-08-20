@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}회사 후보를 확인해 주세요 · 기업분석{% endblock %}
+{% block bodyclass %}candidate-page{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="stopped-icon" aria-hidden="true">🔎</div>
+  <h1>주소와 함께 찾은 회사 후보입니다</h1>
+  <p class="lede">
+    검색 결과만으로 회사를 자동 확정하지 않습니다. 회사명·주소·홈페이지 근거를
+    비교한 뒤 맞는 후보를 직접 선택해 주세요. 선택하면 전자공시(DART)에서 다시 확인합니다.
+  </p>
+
+  <div class="candidate-list" aria-label="회사 후보 목록">
+    {% for option in candidate_options %}
+      {% set candidate = option.candidate %}
+      <section class="company-card candidate-card">
+        <div class="head">
+          <h2 class="legal">{{ candidate.candidate_name }}</h2>
+        </div>
+        <div class="body">
+          <dl>
+            {% if candidate.english_name and candidate.english_name != candidate.candidate_name %}
+              <dt>DART 영문명</dt><dd>{{ candidate.english_name }}</dd>
+            {% endif %}
+            <dt>회사 주소</dt><dd>{{ candidate.address or '확인되지 않음' }}</dd>
+            <dt>홈페이지</dt>
+            <dd>
+              {% if candidate.homepage %}
+                <a class="company-homepage-link" href="{{ candidate.homepage }}"
+                   target="_blank" rel="noopener noreferrer external">
+                  {{ candidate.homepage }} <span aria-hidden="true">↗</span>
+                </a>
+              {% else %}
+                <span class="muted">확인되지 않음</span>
+              {% endif %}
+            </dd>
+            <dt>일치 근거</dt>
+            <dd>
+              <ul class="candidate-evidence">
+                {% for reason in candidate.evidence %}<li>{{ reason }}</li>{% endfor %}
+              </ul>
+            </dd>
+            {% if candidate.stock_code %}
+              <dt>종목코드</dt><dd>{{ candidate.stock_code }}</dd>
+            {% endif %}
+            {% if candidate.modify_date %}
+              <dt>DART 정보 갱신</dt>
+              <dd>{{ candidate.modify_date[:4] }}-{{ candidate.modify_date[4:6] }}-{{ candidate.modify_date[6:] }}</dd>
+            {% endif %}
+            {% if candidate.source_label %}
+              <dt>후보 출처</dt>
+              <dd>
+                {% if candidate.source_url %}
+                  <a href="{{ candidate.source_url }}" target="_blank"
+                     rel="noopener noreferrer external">{{ candidate.source_label }}</a>
+                {% else %}{{ candidate.source_label }}{% endif %}
+              </dd>
+            {% endif %}
+          </dl>
+
+          {% if candidate.provider_name == 'Google Maps' %}
+            <div class="google-maps-content-attribution">
+              <span class="GMP-attribution" translate="no">Google Maps</span>
+              {% for provider_label, provider_url in candidate.attributions %}
+                <span aria-hidden="true"> · </span>
+                {% if provider_url %}
+                  <a href="{{ provider_url }}" target="_blank"
+                     rel="noopener noreferrer external">{{ provider_label }}</a>
+                {% else %}<span>{{ provider_label }}</span>{% endif %}
+              {% endfor %}
+            </div>
+          {% endif %}
+
+          <form method="post" action="/confirm">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="company" value="{{ user_input.company }}">
+            <input type="hidden" name="region" value="{{ user_input.region }}">
+            <input type="hidden" name="retry" value="{{ retry }}">
+            <input type="hidden" name="candidate_resolution_confirmed" value="yes">
+            <input type="hidden" name="candidate_attempt_token"
+                   value="{{ candidate_attempt_token }}">
+            <input type="hidden" name="candidate_selection_token"
+                   value="{{ option.candidate_selection_token }}">
+            <input type="hidden" name="candidate_index" value="{{ option.candidate_index }}">
+            <input type="hidden" name="candidate_name" value="{{ candidate.candidate_name }}">
+            <input type="hidden" name="candidate_provider" value="{{ candidate.provider_name }}">
+            <input type="hidden" name="candidate_ref" value="{{ candidate.candidate_ref }}">
+            <input type="hidden" name="evaluation_consent_grant"
+                   value="{{ evaluation_consent_grant }}">
+            <button type="submit" class="btn wide">이 후보로 다시 찾기</button>
+          </form>
+        </div>
+      </section>
+    {% endfor %}
+  </div>
+
+  <p class="muted" style="margin-top:16px">
+    유료 AI 회사 식별과 보고서 생성은 아직 시작하지 않았습니다.
+    {% if candidate_search_cost_krw %}
+      유료 장소 검색의 보수적 예상비용 약 {{ '%.0f'|format(candidate_search_cost_krw) }}원은
+      비용 원장에 반영했습니다.
+    {% else %}
+      이 후보 검색은 비용을 사용하지 않았습니다.
+    {% endif %}
+  </p>
+  <div class="btn-row">
+    <a class="btn ghost" href="/">해당 후보 없음 · 직접 다시 입력하기</a>
+  </div>
+</div>
+{% endblock %}

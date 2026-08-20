@@ -1,16 +1,7 @@
-"""★ 화면·워드·노션의 «내용»이 같은지 대조한다.
+"""동일 canonical 보고서가 화면·DOCX·PDF·Notion에서 같은 내용을 내는지 검증한다.
 
-정본: 확정/07_출력/3_기준/01_성공기준.md **P3** —
-「화면 ↔ 워드 ↔ 노션 내용이 다른 건수 = **0건 고정**」
-검사 방법도 정본이 정해 두었다 — 「같은 원본으로 세 형태를 만들고
-**텍스트를 정규화해 비교**한다」.
-
-★ 왜 이 시험이 필요한가
-  화면과 워드를 «따로» 그리면, 한쪽만 고쳤을 때 조용히 갈린다.
-  사용자는 화면을 보고 판단하는데 면접에는 워드를 들고 간다 — 둘이 다르면 사고다.
-
-★ 노션까지 붙은 뒤에는 세 형태를 모두 만든다. 데모에는 작가 본문이 없으므로
-  P-117·P-118 회귀는 표시용 문장과 출처가 든 합성 보고서로 따로 맞댄다.
+출력기는 사실을 새로 만들지 않는다. canonical 출고 게이트가 확정한 회사 사실,
+요약, 의미 기반 장 순서와 출처만 각 매체의 표현 방식으로 바꾼다.
 """
 
 from __future__ import annotations
@@ -23,85 +14,216 @@ from typing import Any
 
 import pytest
 from docx import Document
+from docx.opc.constants import RELATIONSHIP_TYPE
 from fastapi.testclient import TestClient
+from pypdf import PdfReader
 
-from src.core.constants import RAW_SOURCE_LABEL
+from src.core.citations import citation_number
+from src.features.auth import constants as auth_constants
+from src.features.auth import logic as auth_logic
 from src.features.export_docx.logic import build_docx
 from src.features.export_notion.logic import build_blocks
-from src.features.pipeline.demo import DemoPipeline, available_companies
-from src.features.pipeline.port import ReportTable, UserInput
+from src.features.export_pdf.logic import PDFGenerationError, build_pdf
+from src.features.pipeline.canonical_demo import build_demo_report
+from src.features.pipeline.port import (
+    FactRecord,
+    Grade,
+    Report,
+    ReportSection,
+    ReportTable,
+    SourceStatus,
+    SummaryItem,
+)
 from src.features.provenance.sources import Source, SourceKind
-from src.features.storage import reports
+from src.features.report_standard import CANONICAL_SCHEMA_VERSION, SECTION_BY_ID
+from src.features.report_standard.publish import PublishBlockedError
+from src.web import job_runtime
 from src.web import main as web_main
 
 app = web_main.app
 
-#: 이 글자들은 형태마다 달라도 «내용이 다른 것»이 아니다 (여백·기호·꾸밈).
 _NOISE = re.compile(r"[\s·•\-–—\[\]()〔〕「」『』:：,，.]+")
+_LEGACY_META = "LEGACY-JOB-AND-PROCESS-META"
 
 
 def normalize(text: str) -> str:
-    """형태 간 비교용으로 다듬는다 — 정본 「텍스트를 정규화해 비교」."""
+    """매체별 여백·기호 차이를 걷어 내고 실제 글자만 비교한다."""
+
     return _NOISE.sub("", text)
 
 
-def report_of(company: str):
-    pipe = DemoPipeline()
-    item = next(c for c in available_companies() if c["company"] == company)
-    user_input = UserInput(
-        company=company, job=item["job"], region="", posting_text=""
+def _source(number: int, owner: str) -> Source:
+    return Source(
+        number=number,
+        kind=SourceKind.FILING,
+        label=f"공식 문서 {number}",
+        disclosed_at="2026-03-18",
+        source_id=f"src-{number}",
+        title=f"공식 문서 {number}",
+        publisher="가나다 주식회사",
+        host="DART",
+        url=f"https://dart.example/{number}",
+        document_id=f"doc-{number}",
+        location=f"PDF p.{number}",
+        source_type="공식 공시",
+        fact_status="실제",
+        used_in=[owner],
     )
-    result = pipe.run(user_input, pipe.find_company(user_input))
-    assert result.report is not None
-    return result.report
 
 
-def docx_text(report) -> str:
-    """워드 바이트를 다시 열어 «보이는 글자»를 전부 모은다."""
+def _fact(
+    number: int,
+    owner: str,
+    claim: str,
+    *,
+    time_state: str = "standing",
+) -> FactRecord:
+    return FactRecord(
+        fact_id=f"fact-{number}",
+        legal_entity="가나다 주식회사",
+        subject_scope=f"대상-{number}",
+        relationship_or_action=f"행동-{number}",
+        claim=claim,
+        claim_type="공식 사실",
+        section_owner=owner,
+        time_state=time_state,
+        as_of="2026-03-18",
+        source_id=f"src-{number}",
+        source_type="공식 공시",
+        source_title=f"공식 문서 {number}",
+        source_publisher="가나다 주식회사",
+        location=f"PDF p.{number}",
+        status="verified",
+        state_evidence=f"원문 문단 {number}",
+    )
+
+
+def _legacy_incomplete_report() -> Report:
+    claims = {
+        1: "공식 문서가 회사를 기술 중심 기업으로 규정한다",
+        2: "고객 계약과 유지보수가 수익 구조를 이룬다",
+        3: "주력 플랫폼이 고객 접점의 중심 역할을 맡는다",
+        4: "핵심 서비스 | 수익화 연결",
+        5: "제품 중심 구조에서 서비스 결합 구조로 바뀌었다",
+    }
+    owners = {
+        1: "identity",
+        2: "business_model",
+        3: "portfolio",
+        4: "portfolio",
+        5: "past_changes",
+    }
+    facts = [
+        _fact(
+            number,
+            owners[number],
+            claim,
+            time_state="completed" if owners[number] == "past_changes" else "standing",
+        )
+        for number, claim in claims.items()
+    ]
+    sections = [
+        ReportSection(
+            cell="past_changes",
+            title="임시 과거 제목",
+            display_number="99",
+            tag="#틀림",
+            lines=[("과거 원문 반복 금지", "[5]")],
+            prose_lines=[(claims[5], "[5]")],
+            fact_ids=["fact-5"],
+        ),
+        ReportSection(
+            cell="portfolio",
+            title="임시 포트폴리오 제목",
+            display_number="98",
+            lines=[("포트폴리오 원문 반복 금지", "[3]")],
+            prose_lines=[(claims[3], "[3]")],
+            tables=[
+                ReportTable(
+                    caption="포트폴리오 역할",
+                    headers=["구분", "사업적 역할"],
+                    rows=[["핵심 서비스", "수익화 연결"]],
+                    cite="[4]",
+                )
+            ],
+            fact_ids=["fact-3", "fact-4"],
+        ),
+        ReportSection(
+            cell="identity",
+            title="임시 정체성 제목",
+            display_number="97",
+            lines=[("정체성 원문 반복 금지", "[1]")],
+            prose_lines=[(claims[1], "[1]")],
+            fact_ids=["fact-1"],
+        ),
+        ReportSection(
+            cell="business_model",
+            title="임시 사업 제목",
+            display_number="96",
+            lines=[("사업 구조 원문 반복 금지", "[2]")],
+            prose_lines=[(claims[2], "[2]")],
+            fact_ids=["fact-2"],
+        ),
+    ]
+    return Report(
+        company="가나다",
+        job=_LEGACY_META,
+        corp_type="상장사",
+        grade=Grade.PARTIAL,
+        sections=sections,
+        requirements=[_LEGACY_META],
+        sources=[SourceStatus("내부 수집 현황", "failed", _LEGACY_META)],
+        citations=[_source(number, owners[number]) for number in claims],
+        cells={"5": True},
+        shortfall_reasons=[_LEGACY_META],
+        generated_at="2026-08-19",
+        schema_version=CANONICAL_SCHEMA_VERSION,
+        summary_items=[
+            SummaryItem("공식 정체성이 사업 구조와 연결된다", "identity"),
+            SummaryItem("계약과 유지보수가 수익의 두 축이다", "business_model"),
+            SummaryItem("주력 플랫폼이 고객 접점을 묶는다", "portfolio"),
+        ],
+        fact_records=facts,
+        as_of_date="2026-03-18",
+        analysis_period="2023~2025 완료 회계연도",
+        latest_performance_period="2026년 1분기 확정",
+    )
+
+
+def canonical_report() -> Report:
+    """실제 공개 게이트를 통과한 1~9장 보고서에 내부 원문만 구분해 둔다."""
+
+    report = build_demo_report()
+    sections = [
+        replace(
+            section,
+            lines=[(f"내부 감사 원문 {section.cell}", "")],
+        )
+        for section in report.sections
+    ]
+    return replace(report, sections=sections)
+
+
+def _docx_text(report: Report) -> str:
     document = Document(io.BytesIO(build_docx(report)))
-    parts = [p.text for p in document.paragraphs]
+    parts = [paragraph.text for paragraph in document.paragraphs]
     for table in document.tables:
         for row in table.rows:
             parts.extend(cell.text for cell in row.cells)
     return "\n".join(parts)
 
 
-def screen_text(company: str) -> str:
-    """화면 HTML에서 태그를 걷어내고 «보이는 글자»만 남긴다."""
-    item = next(c for c in available_companies() if c["company"] == company)
-    with TestClient(app) as client:
-        form = {
-            "company": company,
-            "job": item["job"],
-            "region": "서울",
-            "posting_text": "x",
-        }
-        confirm = client.post("/confirm", data=form)
-        ref = re.search(r'name="ref" value="([^"]*)"', confirm.text).group(1)
-        run = client.post(
-            "/run", data={**form, "legal_name": company, "ref": ref},
-            follow_redirects=False,
-        )
-        job_id = run.headers["location"].rsplit("/", 1)[-1]
-        for _ in range(60):
-            if client.get(f"/api/progress/{job_id}").json()["finished"]:
-                break
-        html = client.get(f"/result/{job_id}").text
-    body = re.sub(r"(?s)<(script|style).*?</\1>", " ", html)
-    # ★ HTML 기호를 되돌린다 — 화면의 `MD&amp;A`는 사실 `MD&A`다.
-    #   안 되돌리면 «내용은 같은데 다르다»고 잘못 판정한다.
-    return html_lib.unescape(re.sub(r"<[^>]+>", "\n", body))
+def _pdf_text(report: Report) -> str:
+    reader = PdfReader(io.BytesIO(build_pdf(report)))
+    return "\n".join(page.extract_text() or "" for page in reader.pages)
 
 
-def notion_text(report) -> str:
-    """노션 블록의 표 자식까지 내려가 사람이 보게 될 글자를 전부 모은다."""
-
+def _notion_text(report: Report) -> str:
     def rich_text_text(items: list[dict[str, Any]]) -> str:
         return "".join(item["text"]["content"] for item in items)
 
     def block_text(block: dict[str, Any]) -> list[str]:
-        kind = block["type"]
-        payload = block[kind]
+        payload = block[block["type"]]
         parts: list[str] = []
         if "rich_text" in payload:
             parts.append(rich_text_text(payload["rich_text"]))
@@ -112,214 +234,182 @@ def notion_text(report) -> str:
         return parts
 
     return "\n".join(
-        part
+        text
         for block in build_blocks(report)
-        for part in block_text(block)
-        if part
+        for text in block_text(block)
+        if text
     )
 
 
-def _writer_report():
-    """작가 성공·실패·표를 함께 넣고 저장 왕복한 합성 보고서."""
-    base = report_of(COMPANIES[0])
-    section = next(s for s in base.sections if s.cell != "5" and s.lines)
-    written_section = replace(
-        section,
-        lines=[
-            ("첫 번째 근거 원문입니다.", "조각 1·사업보고서"),
-            ("두 번째 근거 원문입니다.", "조각 2·뉴스"),
-        ],
-        prose_lines=[
-            ("검증된 첫 번째 표시용 문장입니다.", "조각 1·사업보고서"),
-            ("검증된 두 번째 표시용 문장입니다.", "조각 2·뉴스"),
-        ],
-        tables=[
-            ReportTable(
-                caption="표시용 글과 함께 남아야 하는 표",
-                headers=["구분", "비중"],
-                rows=[["제품", "60%"]],
-                cite="조각 3·사업보고서",
-                numeric=True,
-            )
-        ],
-    )
-    # ★ 작가나 검증이 실패한 칸은 `prose_lines`가 없다. 이때도 원문이
-    #   세 형태의 본문에서 사라지지 않는지 같은 시험에서 맞댄다.
-    fallback_section = replace(
-        section,
-        cell="2",
-        title="작가 실패 시 원문 복귀",
-        lines=[("작가 실패 뒤 본문으로 돌아온 근거 원문입니다.", "조각 3·사업보고서")],
-        prose_lines=[],
-        tables=[],
-    )
-    report = replace(
-        base,
-        sections=[written_section, fallback_section],
-        citations=[
-            Source(
-                number=1,
-                kind=SourceKind.FILING,
-                label="사업보고서 사업의 내용",
-                disclosed_at="2026-03-15",
-                collected_at="2026-08-16",
-            ),
-            Source(
-                number=2,
-                kind=SourceKind.NEWS,
-                label="회사의 최근 실행 사례",
-                published_at="2026-08-10",
-                domain="example.com",
-            ),
-            Source(
-                number=3,
-                kind=SourceKind.FILING,
-                label="사업보고서 매출 구성",
-                disclosed_at="2026-03-15",
-                collected_at="2026-08-16",
-            ),
-        ],
-        generated_at="2026-08-16",
-    )
-    return reports.report_from_json(reports.report_to_json(report))
-
-
-def _screen_for_report(report, monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
-    job_id = "writer-three-forms-p117"
-    web_main._JOBS.pop(job_id, None)
-    monkeypatch.setattr(web_main, "_load_saved_report", lambda _report_id: report)
+def _screen_text(
+    report: Report,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[str, str]:
+    job_id = "canonical-output-parity"
+    job_runtime._JOBS.pop(job_id, None)
+    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _report_id: report)
+    monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
+    session = auth_logic.create_session("admin@example.com", True)
     with TestClient(app) as client:
-        html = client.get(f"/result/{job_id}").text
+        html = client.get(
+            f"/result/{job_id}",
+            cookies={auth_constants.SESSION_COOKIE_NAME: session.token},
+        ).text
     body = re.sub(r"(?s)<(script|style).*?</\1>", " ", html)
     visible = html_lib.unescape(re.sub(r"<[^>]+>", "\n", body))
     return html, visible
 
 
-#: 보고서가 나오는 데모 회사 중 골고루 (표 있는 곳·6·7·8 있는 곳 포함)
-COMPANIES = ["글로벌머니익스프레스", "로보스타", "파마리서치", "넥스트증권"]
+def _all_outputs(
+    report: Report,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[str, dict[str, str]]:
+    html, screen = _screen_text(report, monkeypatch)
+    return html, {
+        "화면": screen,
+        "DOCX": _docx_text(report),
+        "PDF": _pdf_text(report),
+        "Notion": _notion_text(report),
+    }
 
 
-@pytest.mark.parametrize("company", COMPANIES)
-def test_본문_문장이_워드에_하나도_빠짐없이_들어간다(company):
-    """★ 화면에 있는 사실이 워드에 없으면 P3 위반이다."""
-    report = report_of(company)
-    made = normalize(docx_text(report))
-    missing = [
-        text
+def test_네_출력은_표지_요약_의미장_출처를_같이_낸다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = canonical_report()
+    _html, outputs = _all_outputs(report, monkeypatch)
+
+    expected = [
+        report.company,
+        "분석 보고서",
+        "핵심 요약",
+        *[item.text for item in report.summary_items],
+        *[
+            f"{SECTION_BY_ID[section.cell].display_number}. "
+            f"{SECTION_BY_ID[section.cell].title}"
+            for section in report.sections
+        ],
+        "부록. 출처와 검증 상태",
+        "본문의 번호가 아래 원문을 가리킵니다.",
+        "원문 위치",
+        "본문 사용 장",
+        "완료 사업연도 연결 실적 (단위: 억원)",
+        "프리미엄 아크릴 시트",
+    ]
+    for medium, rendered in outputs.items():
+        for text in expected:
+            assert normalize(text) in normalize(rendered), f"{medium}에 누락: {text}"
+
+
+def test_네_출력은_canonical_순서와_prose우선_계약을_지킨다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = canonical_report()
+    _html, outputs = _all_outputs(report, monkeypatch)
+    headings = [
+        f"{SECTION_BY_ID[section_id].display_number}. {SECTION_BY_ID[section_id].title}"
+        for section_id in SECTION_BY_ID
+    ]
+    raw_lines = [text for section in report.sections for text, _cite in section.lines]
+
+    for medium, rendered in outputs.items():
+        normalized = normalize(rendered)
+        positions = [normalized.index(normalize(heading)) for heading in headings]
+        assert positions == sorted(positions), f"{medium}의 장 순서가 canonical과 다름"
+        for raw in raw_lines:
+            assert normalize(raw) not in normalized, f"{medium}가 근거 원문을 반복함: {raw}"
+        for section in report.sections:
+            for prose, _cite in section.prose_lines:
+                assert normalize(prose) in normalized, f"{medium}에 prose 누락: {prose}"
+
+
+def test_레거시_직무_완성도_AI수집_메타가_있는_부분본은_출력하지_않는다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _legacy_incomplete_report()
+
+    with pytest.raises(PublishBlockedError):
+        build_docx(report)
+    with pytest.raises(PDFGenerationError):
+        build_pdf(report)
+    with pytest.raises(PublishBlockedError):
+        build_blocks(report)
+
+    _html, visible = _screen_text(report, monkeypatch)
+    assert "현재 보고서 기준을 통과한 근거가 충분하지 않아" in visible
+    assert _LEGACY_META not in visible
+
+
+def test_화면_출처번호는_목록으로_이동하는_링크다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    html, _visible = _screen_text(canonical_report(), monkeypatch)
+
+    report = canonical_report()
+    used_numbers = {
+        int(number)
         for section in report.sections
-        for text, _cite in section.lines
-        if normalize(text) not in made
-    ]
-    assert not missing, f"워드에 빠진 문장 {len(missing)}개: {missing[:2]}"
-
-
-@pytest.mark.parametrize("company", COMPANIES)
-def test_빈칸_사유가_워드에도_들어간다(company):
-    """빈칸 사유를 빠뜨리면 「회사에 자료가 없다」로 오해하게 된다."""
-    report = report_of(company)
-    made = normalize(docx_text(report))
-    missing = [
-        s.cell
-        for s in report.sections
-        if not s.is_filled and s.empty_reason and normalize(s.empty_reason) not in made
-    ]
-    assert not missing, f"사유가 빠진 칸: {missing}"
-
-
-@pytest.mark.parametrize("company", COMPANIES)
-def test_요구역량이_원문_그대로_워드에_들어간다(company):
-    """5번은 «다듬지 않는다»가 규칙이다 (출력틀 규칙⑤)."""
-    report = report_of(company)
-    made = normalize(docx_text(report))
-    missing = [r for r in report.requirements if normalize(r) not in made]
-    assert not missing, f"워드에 빠진 요구역량 {len(missing)}개: {missing[:2]}"
-
-
-@pytest.mark.parametrize("company", COMPANIES)
-def test_표의_숫자가_워드에도_들어간다(company):
-    """재무 표를 글자로 뭉개거나 빠뜨리면 안 된다."""
-    report = report_of(company)
-    made = normalize(docx_text(report))
-    missing = [
-        cell
+        for _text, cite in section.prose_lines
+        if (number := citation_number(cite)) is not None
+    }
+    used_numbers.update(
+        int(number)
         for section in report.sections
         for table in section.tables
-        for row in table.rows
-        for cell in row
-        if cell and normalize(cell) not in made
-    ]
-    assert not missing, f"워드에 빠진 표 칸 {len(missing)}개: {missing[:3]}"
-
-
-@pytest.mark.parametrize("company", COMPANIES)
-def test_출처가_화면과_워드_양쪽에_있다(company):
-    """★ 출처가 한쪽에만 있으면 P3 위반이다."""
-    report = report_of(company)
-    if not report.citations:
-        pytest.skip("이 회사는 출처 재료가 없다 (데모 한계 — 문제로그 P-24)")
-    made = normalize(docx_text(report))
-    shown = normalize(screen_text(company))
-    for source in report.citations:
-        assert normalize(source.label) in made, f"워드에 없는 출처: {source.label}"
-        assert normalize(source.label) in shown, f"화면에 없는 출처: {source.label}"
-
-
-@pytest.mark.parametrize("company", COMPANIES)
-def test_화면에_보이는_본문이_워드에도_있다(company):
-    """양쪽을 «실제로» 만들어 맞대어 본다 — 정본이 정한 검사 방법."""
-    report = report_of(company)
-    shown = normalize(screen_text(company))
-    made = normalize(docx_text(report))
-    for section in report.sections:
-        for text, _cite in section.lines:
-            key = normalize(text)
-            if key in shown:
-                assert key in made, f"화면엔 있는데 워드엔 없다: {text[:40]}"
-
-
-def test_검증된_본문_출처_원문이_화면_워드_노션에_모두_있다(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """P-117·P-118·P-127 — 세 형태가 같은 실제 출처 번호를 내는지 맞댄다."""
-    report = _writer_report()
-    html, shown = _screen_for_report(report, monkeypatch)
-    made = docx_text(report)
-    notion = notion_text(report)
-
-    표시용칸 = report.sections[0]
-    복귀칸 = report.sections[1]
-    for text, _cite in 표시용칸.prose_lines + 표시용칸.lines + 복귀칸.lines:
-        assert normalize(text) in normalize(shown)
-        assert normalize(text) in normalize(made)
-        assert normalize(text) in normalize(notion)
-
-    assert RAW_SOURCE_LABEL in shown
-    assert RAW_SOURCE_LABEL in made
-    assert RAW_SOURCE_LABEL in notion
-    assert 'href="#src1"' in html
-    assert 'href="#src2"' in html
-    assert 'title="출처 1번"' in html and 'title="출처 2번"' in html
-    assert "검증된 첫 번째 표시용 문장입니다. 〔1〕" in made
-    assert "검증된 두 번째 표시용 문장입니다. 〔2〕" in made
-    assert "검증된 첫 번째 표시용 문장입니다. 〔1〕" in notion
-    assert "검증된 두 번째 표시용 문장입니다. 〔2〕" in notion
-    for rendered in (made, notion):
-        assert "조각 1·사업보고서" not in rendered
-        assert "조각 2·뉴스" not in rendered
-
-    표글자 = ("표시용 글과 함께 남아야 하는 표", "구분", "비중", "제품", "60%")
-    for text in 표글자:
-        assert normalize(text) in normalize(shown)
-        assert normalize(text) in normalize(made)
-        assert normalize(text) in normalize(notion)
-
-    # 세 형태 모두 표시용 글 → 원문 보기 → 근거 원문 → 표 순서다.
-    순서표 = (
-        "검증된 첫 번째 표시용 문장입니다.",
-        RAW_SOURCE_LABEL,
-        "첫 번째 근거 원문입니다.",
-        "표시용 글과 함께 남아야 하는 표",
+        if (number := citation_number(table.cite)) is not None
     )
-    for rendered in (shown, made, notion):
-        positions = [normalize(rendered).index(normalize(text)) for text in 순서표]
-        assert positions == sorted(positions)
+    for number in used_numbers:
+        assert f'href="#src{number}"' in html
+        assert f'title="출처 {number}번"' in html
+        assert html.count(f'id="src{number}"') == 1
+
+
+def test_네_출력의_출처명은_검증할_원문_URL을_보존한다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = canonical_report()
+    expected = {source.url for source in report.citations}
+
+    html, _visible = _screen_text(report, monkeypatch)
+    assert all(
+        f'href="{url}"' in html and 'rel="noopener noreferrer"' in html
+        for url in expected
+    )
+
+    document = Document(io.BytesIO(build_docx(report)))
+    docx_urls = {
+        relationship.target_ref
+        for relationship in document.part.rels.values()
+        if relationship.reltype == RELATIONSHIP_TYPE.HYPERLINK
+    }
+    assert docx_urls == expected
+
+    reader = PdfReader(io.BytesIO(build_pdf(report)))
+    pdf_urls: set[str] = set()
+    for page in reader.pages:
+        for reference in page.get("/Annots", []):
+            annotation = reference.get_object()
+            action = annotation.get("/A")
+            if action is not None:
+                uri = action.get_object().get("/URI")
+                if uri:
+                    pdf_urls.add(str(uri))
+    assert pdf_urls == expected
+
+    notion_urls: set[str] = set()
+
+    def collect_links(block: dict[str, Any]) -> None:
+        payload = block[block["type"]]
+        rich_text_groups = [payload.get("rich_text", [])]
+        rich_text_groups.extend(payload.get("cells", []))
+        for rich_text in rich_text_groups:
+            for item in rich_text:
+                link = item["text"].get("link")
+                if link:
+                    notion_urls.add(link["url"])
+        for child in payload.get("children", []):
+            collect_links(child)
+
+    for block in build_blocks(report):
+        collect_links(block)
+    assert notion_urls == expected

@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from src.core.constants import REPORT_CELL_ORDER
+from src.features.pipeline import demo as demo_module
 from src.features.pipeline.demo import (
     DemoPipeline,
     _clean,
@@ -19,6 +20,8 @@ from src.features.pipeline.demo import (
     available_companies,
 )
 from src.features.pipeline.port import Outcome, ReportSection, UserInput
+from src.features.report_standard.constants import CANONICAL_SECTION_IDS
+from src.features.report_standard.publish import validate_publishable
 
 # ══════════════════════════════════════════════════════════
 # 글자 다듬기
@@ -132,7 +135,7 @@ def section(cell: str) -> ReportSection:
 def test_뒤죽박죽이어도_정본_순서로_맞춘다():
     """저장된 md에서 5번이 9번 뒤에 붙어 있었다 (문제로그 P-28)."""
     got = _in_report_order([section(c) for c in ["1", "9", "5", "4-1", "3"]])
-    assert [s.cell for s in got] == ["1", "3", "4-1", "5", "9"]
+    assert [s.cell for s in got] == ["1", "3", "4-1", "9", "5"]
 
 
 def test_정본에_없는_번호는_버리지_않고_뒤에_붙인다():
@@ -153,6 +156,45 @@ def test_정본_순서_자체가_이미_정렬돼_있다():
 def test_데모_목록에_같은_회사가_두_번_나오지_않는다():
     names = [c["company"] for c in available_companies()]
     assert len(names) == len(set(names))
+
+
+def test_구형_성공기록이_있어도_목록에는_canonical_데모만_노출한다(monkeypatch):
+    """사실 원장이 없는 옛 보고서를 새 결과처럼 선택할 수 없어야 한다."""
+    failed = {
+        "id": "old-failed",
+        "input": {"company": "가나다전자", "job": "영업"},
+        "outcome": "중단_게이트미달",
+        "steps": [],
+    }
+    report = {
+        "id": "new-report",
+        "input": {"company": "가나다전자", "job": "영업"},
+        "outcome": "완료_성립미달",
+        "steps": [
+            {
+                "step": "3_사람확인",
+                "확인카드": {"회사": "가나다전자", "주소": "서울"},
+            }
+        ],
+    }
+    monkeypatch.setattr(demo_module, "_load_runs", lambda: (failed, report))
+
+    items = available_companies()
+    pipeline = DemoPipeline()
+    user_input = UserInput(
+        company="가나다전자", job="영업", region="서울", posting_text=""
+    )
+    card = pipeline.find_company(
+        user_input
+    )
+
+    assert len(items) == 1
+    assert items[0]["company"] == "(주)진영"
+    assert items[0]["outcome"] == Outcome.REPORT.value
+    assert items[0]["is_report"] == "1"
+    # 내부 호환용 카드 찾기는 남아 있어도 구형 저장본이 목록에 다시 나타나면 안 된다.
+    assert card is not None and card.ref == "new-report"
+    assert pipeline.run(user_input, card).outcome is Outcome.GATE_STOPPED
 
 
 def test_데모_목록은_보고서_나오는_회사를_앞에_둔다():
@@ -192,3 +234,46 @@ def test_보고서가_나오는_회사는_끝까지_돈다():
     assert result.outcome is Outcome.REPORT
     assert result.report is not None
     assert result.report.sections
+
+
+def test_무료_데모도_실서비스와_같은_canonical_출고게이트를_통과한다():
+    pipe = DemoPipeline()
+    user_input = UserInput(company="(주)진영", job="", region="인천 서구")
+    card = pipe.find_company(user_input)
+    assert card is not None
+
+    result = pipe.run(user_input, card)
+    assert result.report is not None
+    validation = validate_publishable(result.report)
+
+    assert validation.ok, validation.reasons
+    assert tuple(section.cell for section in result.report.sections) == CANONICAL_SECTION_IDS
+    assert all(section.guidance_lines == [] for section in result.report.sections)
+    assert result.report.job == "" and result.report.requirements == []
+
+
+def test_목록의_모든_데모가_표시한_종료까지_끝까지_돈다():
+    """홈의 모든 선택지가 확인 뒤 다른 결과로 바뀌거나 깨지지 않는다."""
+    pipe = DemoPipeline()
+    items = available_companies()
+    if not items:
+        pytest.skip("데모 데이터 없음")
+
+    for item in items:
+        user_input = UserInput(
+            company=item["company"],
+            job=item["job"],
+            region="",
+            posting_text="(데모 — 미리 준비한 공고를 사용합니다)",
+        )
+        card = pipe.find_company(user_input)
+        expected = Outcome(item["outcome"])
+        if expected is Outcome.NOT_FOUND:
+            assert card is None, item["company"]
+            continue
+
+        assert card is not None, item["company"]
+        result = pipe.run(user_input, card)
+        assert result.outcome is expected, item["company"]
+        if expected is Outcome.REPORT:
+            assert result.report is not None and result.report.sections, item["company"]

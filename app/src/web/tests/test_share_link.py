@@ -5,7 +5,7 @@
 
 ★ 그래서 링크가 하는 일 셋을 여기서 지킨다:
   ① 로그인 없이 들어와진다
-  ② **누가 언제 열어봤는지** 기록된다 — 인사팀이 내 포폴을 봤는지 아는 유일한 방법이다
+  ② 링크 GET 요청 횟수와 최초·최근 시각이 기록된다 — 미리보기·봇도 포함될 수 있다
   ③ 미리 구운 보고서로 **바로** 간다 (0원·즉시, 예산과 무관)
 
 ⚠️ **아무 글자나 열쇠가 되면 안 된다** — 그러면 주소창에 타이핑해서
@@ -15,52 +15,128 @@
 from __future__ import annotations
 
 import datetime as dt
+from html.parser import HTMLParser
 
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 
+from src.features.auth import constants as auth_constants
+from src.features.auth import logic as auth_logic
+from src.features.pipeline.canonical_demo import (
+    DEMO_COMPANY as CANONICAL_DEMO_COMPANY,
+    DEMO_REF as CANONICAL_DEMO_REF,
+    demo_card as canonical_demo_card,
+)
 from src.features.pipeline.demo import DemoPipeline
+from src.features.pipeline.port import Outcome
+from src.features.report_standard import CANONICAL_SECTION_IDS
 from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import logic as share_logic
 from src.features.sharelink import store as share_store
+from src.features.sharelink import tracks as share_tracks
 from src.features.sharelink.constants import (
     KEY_COOKIE_NAME,
     PER_LINK_DAILY_BUDGET_KRW,
     PUBLIC_BUCKET,
+    PUBLIC_DAILY_BUDGET_KRW,
 )
 from src.features.storage import db as storage_db
-from src.web import main
+from src.web import job_runtime, main
+from src.web import paid_runtime, request_helpers, runtime
 
-_카카오열쇠 = "a1b2c3d4e5f60718"
-_네이버열쇠 = "0f1e2d3c4b5a6978"
+_카카오열쇠 = "a1b2c3d4e5f60718a1b2c3d4e5f60718"
+_네이버열쇠 = "0f1e2d3c4b5a69780f1e2d3c4b5a6978"
+_구형열쇠 = "a1b2c3d4e5f60718"
+
+
+class _MainCounter(HTMLParser):
+    """실제 렌더 HTML의 main landmark 수를 세는 작은 표준 parser."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.count = 0
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag == "main":
+            self.count += 1
+
+
+def _main_count(html: str) -> int:
+    parser = _MainCounter()
+    parser.feed(html)
+    return parser.count
 
 
 @pytest.fixture
 def client():
     """★ 반드시 `with` — 아니면 뒤에서 도는 조사가 취소된다 (P-92 교훈)."""
-    main._PIPELINE = DemoPipeline()
-    with TestClient(main.app) as client:
+    runtime._PIPELINE = DemoPipeline()
+    # 공유 쿠키는 배포 기본값대로 Secure다. HTTPS에서 실제 브라우저처럼 왕복시킨다.
+    with TestClient(main.app, base_url="https://testserver") as client:
         yield client
 
 
-def _링크발급(key: str, company: str, report_id: str = "") -> None:
+def _링크발급(
+    key: str,
+    company: str,
+    report_id: str = "",
+    now_iso: str = "2026-08-16T10:00:00",
+) -> None:
     with storage_db.connect() as conn:
         share_store.save(
             conn, key=key, company=company, job="마케팅",
-            report_id=report_id, now_iso="2026-08-16T10:00:00",
+            report_id=report_id, now_iso=now_iso,
         )
 
 
+def _post_run(client: TestClient, form: dict, **kwargs):
+    """브라우저가 화면에서 받은 권한 쿠키용 CSRF를 함께 보내는 요청."""
+    data = dict(form)
+    secret = (
+        client.cookies.get(auth_constants.SESSION_COOKIE_NAME)
+        or client.cookies.get(KEY_COOKIE_NAME)
+        or ""
+    )
+    if secret:
+        data["csrf_token"] = auth_logic.csrf_token_for_session(secret)
+    return client.post("/run", data=data, **kwargs)
+
+
+def _post_confirm(client: TestClient, form: dict, **kwargs):
+    data = dict(form)
+    secret = client.cookies.get(KEY_COOKIE_NAME) or ""
+    if secret:
+        data["csrf_token"] = auth_logic.csrf_token_for_session(secret)
+    return client.post("/confirm", data=data, **kwargs)
+
+
 def _보고서를_만든다(client: TestClient) -> str:
+    card = canonical_demo_card()
+    assert card.ref == CANONICAL_DEMO_REF
     form = {
-        "company": "우리엔", "job": "영업", "region": "서울", "posting_text": "x",
-        "legal_name": "우리엔", "ref": "재수집-p003", "address": "-",
+        "company": CANONICAL_DEMO_COMPANY,
+        "job": "",
+        "region": "인천 서구",
+        "posting_text": "",
+        "legal_name": card.legal_name,
+        "ref": card.ref,
+        "address": card.address,
     }
-    run = client.post("/run", data=form, follow_redirects=False)
+    run = _post_run(client, form, follow_redirects=False)
     job_id = run.headers["location"].rsplit("/", 1)[-1]
     for _ in range(200):
         if client.get(f"/api/progress/{job_id}").json()["finished"]:
             break
+    else:
+        pytest.fail("canonical 데모 조사가 끝나지 않았습니다")
+
+    result = job_runtime._JOBS[job_id].result
+    assert result is not None and result.outcome is Outcome.REPORT
+    assert result.report is not None
+    assert tuple(section.cell for section in result.report.sections) == (
+        CANONICAL_SECTION_IDS
+    )
     return job_id
 
 
@@ -76,6 +152,7 @@ def test_열쇠_링크로_들어오면_열쇠가_기억된다(client: TestClient
     response = client.get(f"/k/{_카카오열쇠}", follow_redirects=False)
 
     assert response.status_code == 303
+    assert response.headers["referrer-policy"] == "no-referrer"
     assert KEY_COOKIE_NAME in response.cookies
     assert response.cookies[KEY_COOKIE_NAME] == _카카오열쇠
 
@@ -84,16 +161,32 @@ def test_로그인_없이도_첫_화면이_열린다(client: TestClient):
     _링크발급(_카카오열쇠, "카카오")
     client.get(f"/k/{_카카오열쇠}")
 
-    assert client.get("/").status_code == 200
+    landing = client.get("/")
+    assert landing.status_code == 200
+    assert landing.headers["referrer-policy"] == "same-origin"
+
+
+def test_미연결_링크는_회사만_실제입력에_채우고_읽기전용으로_보인다(
+    client: TestClient,
+):
+    _링크발급(_카카오열쇠, "카카오")
+
+    response = client.get(f"/k/{_카카오열쇠}")
+
+    assert 'id="company"' in response.text
+    assert 'value="카카오"' in response.text
+    assert 'name="job"' not in response.text
+    assert response.text.count("readonly") >= 1
+    assert "카카오 전용 링크" in response.text
 
 
 # ══════════════════════════════════════════════════════════
-# ② 열어본 기록 — 인사팀이 봤는지 아는 «유일한» 방법
+# ② 링크 GET 요청 기록 — 사람 식별 지표로 과장하지 않는다
 # ══════════════════════════════════════════════════════════
 
 
 def test_열어보면_기록이_남는다(client: TestClient):
-    """★ 이게 안 되면 「링크로 준다」는 방식을 고른 이유의 절반이 사라진다."""
+    """GET 요청 횟수와 시각을 관찰 지표로 남긴다."""
     _링크발급(_카카오열쇠, "카카오")
 
     client.get(f"/k/{_카카오열쇠}")
@@ -107,7 +200,7 @@ def test_열어보면_기록이_남는다(client: TestClient):
 
 
 def test_처음_열어본_시각은_안_덮인다(client: TestClient):
-    """★ 나중 방문이 덮으면 「언제 처음 봤나」를 영영 못 알게 된다 — 그게 알고 싶은 값이다."""
+    """나중 요청이 최초 요청 시각을 덮지 않는다."""
     _링크발급(_카카오열쇠, "카카오")
     client.get(f"/k/{_카카오열쇠}")
     with storage_db.connect() as conn:
@@ -127,7 +220,7 @@ def test_처음_열어본_시각은_안_덮인다(client: TestClient):
 def test_미리_구운_보고서로_바로_보낸다(client: TestClient):
     """★ 인사팀이 «자기 회사» 보고서를 곧바로 보는 것 — 이 방식의 핵심이다."""
     report_id = _보고서를_만든다(client)
-    _링크발급(_카카오열쇠, "카카오", report_id=report_id)
+    _링크발급(_카카오열쇠, CANONICAL_DEMO_COMPANY, report_id=report_id)
 
     response = client.get(f"/k/{_카카오열쇠}", follow_redirects=False)
 
@@ -160,21 +253,248 @@ def test_이상한_열쇠는_첫_화면으로_보낸다(client: TestClient, 열�
     """
     response = client.get(f"/k/{열쇠}", follow_redirects=False)
 
+    assert response.status_code == 404
+    assert KEY_COOKIE_NAME not in response.cookies
+
+
+@pytest.mark.parametrize("missing_key", [_네이버열쇠, "b" * 32])
+def test_없는_32자리_열쇠를_거절한다(
+    client: TestClient, missing_key: str
+):
+    response = client.get(f"/k/{missing_key}", follow_redirects=False)
+
+    assert response.headers["location"] == "/?share_status=missing"
+    assert KEY_COOKIE_NAME not in response.cookies
+
+
+def test_DB에_남은_16자리_열쇠는_404_cookie삭제_0원이며_행은_보존된다(
+    client: TestClient,
+):
+    _링크발급(_구형열쇠, "기존회사")
+    client.cookies.set(KEY_COOKIE_NAME, _구형열쇠)
+
+    response = client.get(f"/k/{_구형열쇠}", follow_redirects=False)
+
+    assert response.status_code == 404
+    cookie = response.headers.get("set-cookie", "").lower()
+    assert "share_key=" in cookie and "max-age=0" in cookie
+    with storage_db.connect() as conn:
+        stored = share_store.load(conn, _구형열쇠)
+    assert stored is not None
+    assert stored.opened_count == 0
+
+    request = Request(
+        {
+            "type": "http",
+            "headers": [(b"cookie", f"{KEY_COOKIE_NAME}={_구형열쇠}".encode())],
+        }
+    )
+    track, bucket, budget = request_helpers._track_of(request)
+    assert track is share_tracks.Track.PUBLIC
+    assert bucket == PUBLIC_BUCKET
+    assert budget == PUBLIC_DAILY_BUDGET_KRW == 0.0
+
+
+def test_HEAD는_요청횟수를_늘리지않는다(client: TestClient):
+    _링크발급(_카카오열쇠, "카카오")
+
+    response = client.head(f"/k/{_카카오열쇠}")
+
+    assert response.status_code == 405
+    with storage_db.connect() as conn:
+        assert share_store.load(conn, _카카오열쇠).opened_count == 0
+
+
+def test_60일_지난_열쇠는_자동으로_닫히고_열람기록도_남기지_않는다(
+    client: TestClient,
+):
+    _링크발급(_카카오열쇠, "카카오", now_iso="2000-01-01T10:00:00")
+
+    response = client.get(f"/k/{_카카오열쇠}", follow_redirects=False)
+
     assert response.status_code == 303
-    assert response.headers["location"] == "/"
+    assert response.headers["location"] == "/?share_status=expired"
     assert KEY_COOKIE_NAME not in response.cookies
-
-
-def test_없는_열쇠도_첫_화면으로_보낸다(client: TestClient):
-    response = client.get(f"/k/{_네이버열쇠}", follow_redirects=False)
-
-    assert response.headers["location"] == "/"
-    assert KEY_COOKIE_NAME not in response.cookies
+    with storage_db.connect() as conn:
+        assert share_store.load(conn, _카카오열쇠).opened_count == 0
 
 
 def test_이상한_열쇠는_공용_통장으로_묶인다():
     """★ 아무 글자나 새 통장이 되면 링크당 상한이 무의미해진다."""
     assert not share_logic.is_valid_key("아무글자")
+
+
+def test_회사링크는_confirm에서_회사범위를_서버가_강제한다(client: TestClient):
+    _링크발급(_카카오열쇠, "카카오")
+    client.get(f"/k/{_카카오열쇠}")
+
+    response = _post_confirm(
+        client,
+        {
+            "company": "다른회사",
+            "job": "무시할 옛 직무",
+            "region": "서울",
+            "posting_text": "공고",
+        },
+    )
+
+    assert response.status_code == 403
+    assert 'role="alert"' in response.text
+    assert "카카오 분석에만" in response.text
+
+
+def test_회사링크는_옛_직무변조를_권한범위로_쓰지않는다(client: TestClient):
+    _링크발급(_카카오열쇠, "카카오")
+    client.get(f"/k/{_카카오열쇠}")
+
+    response = _post_confirm(
+        client,
+        {
+            "company": "카카오",
+            "job": "변조해도 무시할 옛 직무",
+            "region": "서울",
+            "posting_text": "무시할 옛 공고",
+        },
+    )
+
+    assert response.status_code == 200
+
+
+def test_범위오류_화면은_main_landmark를_중첩하지_않는다(client: TestClient):
+    _링크발급(_카카오열쇠, "카카오")
+    client.get(f"/k/{_카카오열쇠}")
+
+    response = _post_confirm(
+        client,
+        {
+            "company": "다른회사",
+            "job": "마케팅",
+            "region": "서울",
+            "posting_text": "공고",
+        },
+    )
+
+    assert response.status_code == 403
+    assert _main_count(response.text) == 1
+
+
+def test_회사링크는_run에서도_숨은입력_변조를_막는다(client: TestClient):
+    _링크발급(_카카오열쇠, "카카오")
+    client.get(f"/k/{_카카오열쇠}")
+
+    response = _post_run(
+        client,
+        {
+            "company": "다른회사",
+            "job": "마케팅",
+            "region": "서울",
+            "posting_text": "공고",
+            "legal_name": "다른회사",
+            "ref": "재수집-p003",
+            "address": "-",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 403
+    assert "카카오 분석에만" in response.text
+
+
+@pytest.mark.parametrize("kind", ["invalid", "missing", "expired"])
+def test_잘못된_다음링크는_이전_활성쿠키를_지운다(
+    client: TestClient, kind: str
+):
+    _링크발급(_카카오열쇠, "카카오")
+    client.get(f"/k/{_카카오열쇠}")
+    assert client.cookies.get(KEY_COOKIE_NAME) == _카카오열쇠
+
+    if kind == "invalid":
+        target = "zzzz"
+    elif kind == "missing":
+        target = _네이버열쇠
+    else:
+        target = _네이버열쇠
+        _링크발급(target, "네이버", now_iso="2000-01-01T10:00:00")
+
+    response = client.get(f"/k/{target}", follow_redirects=False)
+
+    if kind == "invalid":
+        assert response.status_code == 404
+        assert "location" not in response.headers
+    else:
+        assert response.status_code == 303
+        assert response.headers["location"] == f"/?share_status={kind}"
+    assert client.cookies.get(KEY_COOKIE_NAME) is None
+    assert "Max-Age=0" in response.headers.get("set-cookie", "")
+
+
+def test_링크저장소_장애는_이전쿠키를_지우고_503을_보인다(
+    client: TestClient, monkeypatch
+):
+    _링크발급(_카카오열쇠, "카카오")
+    client.get(f"/k/{_카카오열쇠}")
+
+    def broken_connect(*_args, **_kwargs):
+        raise OSError("DB unavailable")
+
+    monkeypatch.setattr(storage_db, "connect", broken_connect)
+    response = client.get(f"/k/{_네이버열쇠}", follow_redirects=False)
+
+    assert response.status_code == 503
+    assert 'role="alert"' in response.text
+    assert client.cookies.get(KEY_COOKIE_NAME) is None
+    assert _main_count(response.text) == 1
+
+
+def test_연결보고서가_만료되면_죽은결과가_아니라_prefill과_안내로_간다(
+    client: TestClient, monkeypatch
+):
+    report_id = _보고서를_만든다(client)
+    _링크발급(_카카오열쇠, CANONICAL_DEMO_COMPANY, report_id=report_id)
+    monkeypatch.setattr("src.web.job_runtime._link_expired", lambda _report: True)
+
+    opened = client.get(f"/k/{_카카오열쇠}", follow_redirects=False)
+
+    assert opened.status_code == 303
+    assert opened.headers["location"] == "/?share_status=report-expired"
+    page = client.get(opened.headers["location"])
+    assert f'value="{CANONICAL_DEMO_COMPANY}"' in page.text
+    assert 'name="job"' not in page.text
+    assert "기존 보고서의 공유 기간이 지나" in page.text
+
+
+def test_연결보고서가_없어도_prefill과_안내로_간다(client: TestClient):
+    _링크발급(_카카오열쇠, "카카오", report_id="a" * 32)
+
+    opened = client.get(f"/k/{_카카오열쇠}", follow_redirects=False)
+
+    assert opened.headers["location"] == "/?share_status=report-missing"
+    page = client.get(opened.headers["location"])
+    assert 'value="카카오"' in page.text
+    assert "기존 보고서를 찾을 수 없어" in page.text
+
+
+def test_연결보고서_회사가_링크와_다르면_결과를_열지않는다(client: TestClient):
+    report_id = _보고서를_만든다(client)  # canonical 진영 보고서
+    _링크발급(_카카오열쇠, "다른회사", report_id=report_id)
+
+    opened = client.get(f"/k/{_카카오열쇠}", follow_redirects=False)
+
+    assert opened.status_code == 303
+    assert opened.headers["location"] == "/?share_status=report-mismatch"
+    page = client.get(opened.headers["location"])
+    assert 'value="다른회사"' in page.text
+    assert "보고서의 회사가 이 링크와 달라" in page.text
+
+
+def test_robots는_capability_경로를_경로단위로_제외한다(client: TestClient):
+    response = client.get("/robots.txt")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert "Disallow: /k/" in response.text
+    assert "Disallow: /result/" in response.text
+    assert "Disallow: /download/" in response.text
 
 
 # ══════════════════════════════════════════════════════════
@@ -185,24 +505,24 @@ def test_이상한_열쇠는_공용_통장으로_묶인다():
 def test_한_링크가_다_써도_다른_링크는_돈다(client: TestClient, monkeypatch):
     """★ P-94의 핵심 — 「전체 하나」가 아니라 「링크당」을 고른 이유다."""
     _링크발급(_카카오열쇠, "카카오")
-    _링크발급(_네이버열쇠, "네이버")
+    _링크발급(_네이버열쇠, "카카오")
     오늘 = dt.date.today()
-    monkeypatch.setattr(main, "_PIPELINE", object())          # 돈이 드는 것으로 본다
+    monkeypatch.setattr(runtime, "_PIPELINE", object())          # 돈이 드는 것으로 본다
     monkeypatch.setattr(
-        main, "_LINK_SPEND",
+        paid_runtime, "_LINK_SPEND",
         share_logic.add_spend(
             share_logic.DailySpend(day=오늘), _카카오열쇠, 오늘, PER_LINK_DAILY_BUDGET_KRW
         ),
     )
     form = {
-        "company": "우리엔", "job": "영업", "region": "서울", "posting_text": "x",
-        "legal_name": "우리엔", "ref": "재수집-p003", "address": "-",
+        "company": "카카오", "job": "마케팅", "region": "서울", "posting_text": "x",
+        "legal_name": "카카오", "ref": "재수집-p003", "address": "-",
     }
 
     client.cookies.set(KEY_COOKIE_NAME, _카카오열쇠)
-    막힘 = client.post("/run", data=form, follow_redirects=False)
+    막힘 = _post_run(client, form, follow_redirects=False)
     client.cookies.set(KEY_COOKIE_NAME, _네이버열쇠)
-    통과 = client.post("/run", data=form, follow_redirects=False)
+    통과 = _post_run(client, form, follow_redirects=False)
 
     assert 막힘.status_code == 429, "다 쓴 링크는 막혀야 한다"
     assert 통과.status_code == 303, "★ 다른 링크는 멀쩡히 돌아야 한다"
@@ -211,19 +531,19 @@ def test_한_링크가_다_써도_다른_링크는_돈다(client: TestClient, mo
 def test_열쇠_없는_손님도_상한을_받는다(client: TestClient, monkeypatch):
     """★ 안 걸면 「열쇠 없이 들어오는 길」이 상한 없는 구멍이 된다."""
     오늘 = dt.date.today()
-    monkeypatch.setattr(main, "_PIPELINE", object())
+    monkeypatch.setattr(runtime, "_PIPELINE", object())
     monkeypatch.setattr(
-        main, "_LINK_SPEND",
+        paid_runtime, "_LINK_SPEND",
         share_logic.add_spend(
             share_logic.DailySpend(day=오늘), PUBLIC_BUCKET, 오늘, PER_LINK_DAILY_BUDGET_KRW
         ),
     )
     form = {
-        "company": "우리엔", "job": "영업", "region": "서울", "posting_text": "x",
-        "legal_name": "우리엔", "ref": "재수집-p003", "address": "-",
+        "company": "카카오", "job": "마케팅", "region": "서울", "posting_text": "x",
+        "legal_name": "카카오", "ref": "재수집-p003", "address": "-",
     }
 
-    assert client.post("/run", data=form, follow_redirects=False).status_code == 429
+    assert _post_run(client, form, follow_redirects=False).status_code == 403
 
 
 # ══════════════════════════════════════════════════════════
@@ -236,9 +556,6 @@ def test_열쇠_없는_손님도_상한을_받는다(client: TestClient, monkeyp
 
 def _로그인시킨다(client: TestClient, email: str, *, is_admin: bool = False) -> None:
     """이 손님을 «로그인한 상태»로 만든다 (초대 여부는 별개다)."""
-    from src.features.auth import logic as auth_logic
-    from src.features.auth import constants as auth_constants
-
     session = auth_logic.create_session(email, is_admin)
     client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
 
@@ -254,14 +571,14 @@ def test_로그인만_하고_초대_안_됐으면_진짜_조사를_못_한다(
     client: TestClient, monkeypatch
 ):
     """★ P-95 그 자체 — 인터넷의 아무나 로그인해서 돈 쓰는 것을 막는다."""
-    monkeypatch.setattr(main, "_PIPELINE", object())          # 돈이 드는 것으로 본다
+    monkeypatch.setattr(runtime, "_PIPELINE", object())          # 돈이 드는 것으로 본다
     _로그인시킨다(client, "stranger@gmail.com")
     form = {
-        "company": "우리엔", "job": "영업", "region": "서울", "posting_text": "x",
-        "legal_name": "우리엔", "ref": "재수집-p003", "address": "-",
+        "company": "카카오", "job": "마케팅", "region": "서울", "posting_text": "x",
+        "legal_name": "카카오", "ref": "재수집-p003", "address": "-",
     }
 
-    response = client.post("/run", data=form, follow_redirects=False)
+    response = _post_run(client, form, follow_redirects=False)
 
     assert response.status_code == 429
     assert "초대 링크로 들어오신 분만" in response.text
@@ -269,7 +586,7 @@ def test_로그인만_하고_초대_안_됐으면_진짜_조사를_못_한다(
 
 def test_초대한_친구는_진짜_조사를_할_수_있다(client: TestClient, monkeypatch):
     """★ 반대 방향 — 다 막아버리면 친구들이 못 쓴다."""
-    monkeypatch.setattr(main, "_PIPELINE", DemoPipeline())
+    monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
     _초대한다("friend@gmail.com")
     _로그인시킨다(client, "friend@gmail.com")
     form = {
@@ -277,7 +594,7 @@ def test_초대한_친구는_진짜_조사를_할_수_있다(client: TestClient,
         "legal_name": "우리엔", "ref": "재수집-p003", "address": "-",
     }
 
-    assert client.post("/run", data=form, follow_redirects=False).status_code == 303
+    assert _post_run(client, form, follow_redirects=False).status_code == 303
 
 
 def test_링크로_들어와_로그인해도_링크_몫만_쓴다(client: TestClient, monkeypatch):
@@ -288,9 +605,9 @@ def test_링크로_들어와_로그인해도_링크_몫만_쓴다(client: TestCl
     """
     _링크발급(_카카오열쇠, "카카오")
     오늘 = dt.date.today()
-    monkeypatch.setattr(main, "_PIPELINE", object())
+    monkeypatch.setattr(runtime, "_PIPELINE", object())
     monkeypatch.setattr(
-        main, "_LINK_SPEND",
+        paid_runtime, "_LINK_SPEND",
         share_logic.add_spend(
             share_logic.DailySpend(day=오늘), _카카오열쇠, 오늘, PER_LINK_DAILY_BUDGET_KRW
         ),
@@ -298,18 +615,18 @@ def test_링크로_들어와_로그인해도_링크_몫만_쓴다(client: TestCl
     client.cookies.set(KEY_COOKIE_NAME, _카카오열쇠)
     _로그인시킨다(client, "hr@kakao.com")            # 초대 명단에는 없다
     form = {
-        "company": "우리엔", "job": "영업", "region": "서울", "posting_text": "x",
-        "legal_name": "우리엔", "ref": "재수집-p003", "address": "-",
+        "company": "카카오", "job": "마케팅", "region": "서울", "posting_text": "x",
+        "legal_name": "카카오", "ref": "재수집-p003", "address": "-",
     }
 
-    response = client.post("/run", data=form, follow_redirects=False)
+    response = _post_run(client, form, follow_redirects=False)
 
     assert response.status_code == 429, "로그인으로 «몫이 늘면» 안 된다"
 
 
 def test_명단에서_빼면_바로_막힌다(client: TestClient, monkeypatch):
     """★ 되돌릴 방법이 있어야 한다 — 다 썼거나 계정이 넘어갔을 때."""
-    monkeypatch.setattr(main, "_PIPELINE", object())
+    monkeypatch.setattr(runtime, "_PIPELINE", object())
     _초대한다("friend@gmail.com")
     with storage_db.connect() as conn:
         share_allow.revoke(conn, "friend@gmail.com")
@@ -319,7 +636,7 @@ def test_명단에서_빼면_바로_막힌다(client: TestClient, monkeypatch):
         "legal_name": "우리엔", "ref": "재수집-p003", "address": "-",
     }
 
-    assert client.post("/run", data=form, follow_redirects=False).status_code == 429
+    assert _post_run(client, form, follow_redirects=False).status_code == 429
 
 
 def test_모르는_손님도_데모_화면은_그대로_본다(client: TestClient):

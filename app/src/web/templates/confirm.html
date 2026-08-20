@@ -1,9 +1,8 @@
 {% extends "base.html" %}
 {% block title %}이 회사가 맞나요? · 기업분석{% endblock %}
+{% block bodyclass %}confirm-page{% endblock %}
 
 {% block content %}
-{# 브라우저에 담아 둔 사진을 꺼내 쓸 수 있게 조각을 불러온다 (화면은 안 그린다) #}
-{% include "_posting_image_field.html" %}
 <h1>이 회사가 맞나요?</h1>
 
 <div class="company-card">
@@ -21,8 +20,12 @@
         <dt>홈페이지</dt>
         <dd>
           {% if card.homepage_url %}
-            <a href="{{ card.homepage_url }}" target="_blank" rel="noopener">{{ card.homepage }}</a>
-            <span class="muted">← 눌러서 확인해 보세요</span>
+            <a class="company-homepage-link" href="{{ card.homepage_url }}"
+               target="_blank" rel="noopener noreferrer external"
+               aria-label="{{ card.legal_name }} 홈페이지 새 창에서 열기">
+              {{ card.homepage }} <span aria-hidden="true">↗</span>
+            </a>
+            <span class="muted">새 창에서 열립니다</span>
           {% else %}
             <span class="muted">{{ card.homepage }}</span>
           {% endif %}
@@ -48,40 +51,32 @@
       </div>
     {% endif %}
 
-    {% if card.posting_warning %}
-      <div class="warn-line">
-        <span>⚠️</span>
-        <span>{{ card.posting_warning }}</span>
-      </div>
-    {% endif %}
   </div>
 </div>
 
 <div class="btn-row">
-  <form method="post" action="/run" style="flex:1"
-        id="runForm" enctype="multipart/form-data">
+  <form method="post" action="/run" style="flex:1" id="runForm">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <input type="hidden" name="company" value="{{ user_input.company }}">
-    <input type="hidden" name="job" value="{{ user_input.job }}">
     <input type="hidden" name="region" value="{{ user_input.region }}">
-    <input type="hidden" name="posting_text" value="{{ user_input.posting_text }}">
     <input type="hidden" name="legal_name" value="{{ card.legal_name }}">
     {# 이미 찾은 회사의 내부 열쇠 — 이게 있어야 회사를 다시 안 찾는다 (AI 5회 절약) #}
     <input type="hidden" name="ref" value="{{ card.ref }}">
     <input type="hidden" name="address" value="{{ card.address }}">
     {# 진짜 조사에서만 생기는 서버 쪽 일회용 번호. 비용·권한 값 자체는 싣지 않는다. #}
     <input type="hidden" name="paid_attempt_token" value="{{ paid_attempt_token or '' }}">
-    {# ★ 사진은 «여기서 처음» 서버로 간다. 그 전까지는 브라우저에만 있었다. #}
-    <input type="file" id="postingImagesInput" name="posting_images"
-           accept="image/png,image/jpeg,image/webp" multiple hidden>
-    <button type="submit" class="btn wide">맞습니다 — 조사 시작</button>
+    <input type="hidden" name="evaluation_consent_grant"
+           value="{{ evaluation_consent_grant }}">
+    <button type="submit" class="btn wide" id="runSubmitButton">맞습니다 — 조사 시작</button>
   </form>
   <form method="post" action="/reject" style="flex:1">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <input type="hidden" name="company" value="{{ user_input.company }}">
-    <input type="hidden" name="job" value="{{ user_input.job }}">
     <input type="hidden" name="region" value="{{ user_input.region }}">
-    <input type="hidden" name="posting_text" value="{{ user_input.posting_text }}">
     <input type="hidden" name="retry" value="{{ retry }}">
     <input type="hidden" name="paid_attempt_token" value="{{ paid_attempt_token or '' }}">
+    <input type="hidden" name="evaluation_consent_grant"
+           value="{{ evaluation_consent_grant }}">
     <button type="submit" class="btn ghost wide">아닙니다</button>
   </form>
 </div>
@@ -89,36 +84,4 @@
 <p class="muted" style="margin-top:16px">
   주소가 달라도 <strong>막지 않습니다.</strong> 본사와 근무지가 다른 경우가 흔합니다.
 </p>
-{% endblock %}
-
-{% block scripts %}
-<script>
-  // [맞습니다]를 누르는 «순간»에만 사진을 서버로 보낸다 (기획서 — 판정 통과 전 미전송).
-  (function () {
-    var form = document.getElementById('runForm');
-    var input = document.getElementById('postingImagesInput');
-    if (!form || !input || !window.PostingImageStore) { return; }
-
-    form.addEventListener('submit', function (evt) {
-      if (form.dataset.imagesAttached === '1') { return; }   // 두 번 돌지 않게
-      if (!window.PostingImageStore.hasImages()) { return; }
-      evt.preventDefault();
-
-      window.PostingImageStore.getAllAsFiles().then(function (files) {
-        var bucket = new DataTransfer();
-        files.forEach(function (f) { bucket.items.add(f); });
-        input.files = bucket.files;
-        // ★ 넘긴 «직후» 브라우저 쪽 원본을 지운다 (S2).
-        return window.PostingImageStore.clear();
-      }).then(function () {
-        form.dataset.imagesAttached = '1';
-        form.submit();
-      }).catch(function () {
-        // 사진을 못 붙여도 «조사 자체»는 막지 않는다 — 글자만으로도 진행할 수 있다.
-        form.dataset.imagesAttached = '1';
-        form.submit();
-      });
-    });
-  })();
-</script>
 {% endblock %}

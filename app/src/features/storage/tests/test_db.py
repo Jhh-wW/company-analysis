@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from src.features.export_notion import store as notion_store
 from src.features.storage import constants, db
 
 
@@ -27,6 +28,7 @@ def test_connect_creates_missing_parent_dir_and_file(tmp_path: Path) -> None:
         constants.TABLE_LAYER2_CACHE,
         constants.TABLE_ALIAS_CACHE,
         constants.TABLE_SESSIONS,
+        notion_store.TABLE_NOTION_EXPORTS,
     } <= tables
 
 

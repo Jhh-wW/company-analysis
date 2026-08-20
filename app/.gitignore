@@ -1,4 +1,7 @@
 # 돌리면서 쌓이는 것 — 코드가 아니라 «이 컴퓨터의 기록»이라 깃에 올리지 않는다
 data/
+.local_demo/
+.local_evaluation/
+.local_evaluation_runs/
 __pycache__/
 *.pyc

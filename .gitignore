@@ -3,10 +3,19 @@
 /*
 !/.gitignore
 !/.dockerignore
+!/.github/
+!/.github/dependabot.yml
+!/.github/requirements-ci.txt
+!/.github/workflows/
+!/.github/workflows/quality-gate.yml
 !/README.md
+!/CONTRIBUTING.md
+!/SECURITY.md
+!/docs/
+!/docs/**
 !/render.yaml
 !/app/
-!/prototype_v1/
+!/analysis_engine/
 
 # 웹서비스: 실행 코드·시험·배포/운영 문서만 유지
 /app/*
@@ -16,6 +25,8 @@
 !/app/requirements.txt
 !/app/conftest.py
 !/app/서버켜기.ps1
+!/app/로컬데모켜기.ps1
+!/app/실시간성능시험켜기.ps1
 !/app/docs/
 !/app/src/
 !/app/tools/
@@ -27,23 +38,24 @@
 /app/src/features/newsfilter/
 
 # 실제 조사 엔진: 소스와 런타임에서 직접 읽는 도구 3개만 유지
-/prototype_v1/*
-!/prototype_v1/src/
-!/prototype_v1/tools/
-!/prototype_v1/data/
-/prototype_v1/src/features/freshness/
-/prototype_v1/tools/*
-!/prototype_v1/tools/run_pilot.py
-!/prototype_v1/tools/survey_audit_reports.py
-!/prototype_v1/tools/build_goldenset_answer.py
+/analysis_engine/*
+!/analysis_engine/README.md
+!/analysis_engine/src/
+!/analysis_engine/tools/
+!/analysis_engine/data/
+/analysis_engine/src/features/freshness/
+/analysis_engine/tools/*
+!/analysis_engine/tools/run_pilot.py
+!/analysis_engine/tools/survey_audit_reports.py
+!/analysis_engine/tools/build_goldenset_answer.py
 
 # 관리자 전용 첫 배포의 데모가 직접 읽는 최소 자료
-/prototype_v1/data/*
-!/prototype_v1/data/pilot/
-/prototype_v1/data/pilot/*
-!/prototype_v1/data/pilot/runs.jsonl
-!/prototype_v1/data/pilot/fragments/
-!/prototype_v1/data/pilot/reports/
+/analysis_engine/data/*
+!/analysis_engine/data/pilot/
+/analysis_engine/data/pilot/*
+!/analysis_engine/data/pilot/runs.jsonl
+!/analysis_engine/data/pilot/fragments/
+!/analysis_engine/data/pilot/reports/
 
 # 허용된 폴더 안에서도 비밀값·실행 기록·로컬 찌꺼기는 항상 제외
 **/.env
@@ -51,15 +63,35 @@
 !**/.env.example
 client_secret*.json
 credentials*.json
+token*.json
+oauth*.json
+service-account*.json
 *.pem
 *.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+*.bak
+*.backup
+*.doc
+*.docx
+*.xls
+*.xlsx
+*.ppt
+*.pptx
+*.pdf
+*.zip
+*.7z
 __pycache__/
 .pytest_cache/
 *.py[cod]
 **/.pytest_tmp_*/
+/app/.local_demo/
 .playwright-mcp/
 .coverage
 htmlcov/
+/docs/_qa_beginner_guide*/**/*.png
 .venv/
 venv/
 node_modules/

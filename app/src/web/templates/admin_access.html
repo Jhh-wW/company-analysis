@@ -5,28 +5,59 @@
 
    ★ 이 화면이 없으면 기능이 있어도 «쓸 방법»이 없다 — DB에 손으로 넣어야 했다.
    ★ 권한 검사는 라우트(require_admin)가 이미 했다. 여기서 다시 안 본다.
-   ★ 「최악의 하루 지출」을 맨 위에 크게 보여준다 —
-     전체 상한을 두지 않기로 했으므로(사용자 결정), **뿌린 개수가 곧 예산**이다.
-     그 숫자를 안 보여주면 얼마가 나갈지 모르는 채로 두는 셈이 된다. #}
+   ★ 실제 원장과 현재 구성의 호출 전 예상비용 차단 기준을 함께 보여준다.
+     차단 기준은 청구액의 최댓값이 아니므로 둘을 같은 숫자로 표현하지 않는다. #}
 
 {% block content %}
 
+{% if access_error %}
+<div class="warn-line" role="alert" style="margin-bottom:16px">
+  <span>⚠️</span><span><strong>{{ access_error_title or "링크를 만들지 못했습니다." }}</strong><br>{{ access_error }}</span>
+</div>
+{% endif %}
+
+<h1>초대·회사 링크 관리</h1>
+<p class="lede">실제 조사 권한과 회사별 포트폴리오 링크를 한곳에서 관리합니다.</p>
+
+{% if access_data_available %}
 <div class="card">
-  <h1 style="font-size:19px;margin-bottom:10px">오늘 나간 돈</h1>
+  <h2 style="font-size:19px;margin-bottom:10px">
+    오늘 나간 돈 <span class="muted">— {{ business_day_label }}</span>
+  </h2>
   <div class="hero-nums">
     <div><b>{{ "{:,.0f}".format(spent_today) }}원</b><span>오늘 실제 지출</span></div>
-    <div><b>{{ links|length }}개</b><span>살아 있는 링크</span></div>
+    <div><b>{{ "{:,.0f}".format(configured_stop_threshold_krw) }}원</b><span>구성상 차단 기준 합계</span></div>
+    <div><b>{{ active_link_count }}개</b><span>살아 있는 링크</span></div>
     <div><b>{{ members|length }}명</b><span>초대한 친구</span></div>
   </div>
 
-  {# ⚠️ 이 경고를 빼지 않는다 — 사용자가 「전체 상한 없음」을 고른 결과다.
-     위험을 없앤 게 아니라 «본인이 감수하기로» 한 것이므로, 숫자를 계속 보여준다. #}
+  {% if actual_over_threshold_krw > 0 or estimate_overrun_count > 0 %}
+  <div class="warn-line" role="status" style="margin-top:14px">
+    <span>⚠️</span>
+    <span>
+      <b>예상비용과 실제 청구 차이를 확인하세요.</b>
+      오늘 실제 지출은 <strong>{{ "{:,.0f}".format(spent_today) }}원</strong>입니다.
+      {% if actual_over_threshold_krw > 0 %}
+      현재 구성의 차단 기준 합계보다 <strong>{{ "{:,.0f}".format(actual_over_threshold_krw) }}원</strong> 큽니다.
+      {% endif %}
+      {% if estimate_overrun_count > 0 %}
+      호출 전 예상액보다 실제 provider 비용이 컸던 정산은
+      <strong>{{ estimate_overrun_count }}건</strong>, 관측 차액은
+      <strong>{{ "{:,.0f}".format(estimate_overrun_krw) }}원</strong>입니다.
+      {% endif %}
+    </span>
+  </div>
+  {% endif %}
+
   <div class="warn-line" style="margin-top:14px">
     <span>⚠️</span>
     <span>
       <b>전체 상한이 없습니다.</b>
-      지금 구성에서 <strong>최악의 하루 지출은 {{ "{:,.0f}".format(worst_case_krw) }}원</strong>입니다
-      — 링크 {{ links|length }}개 × 3,000원 + 친구 {{ members|length }}명 × 1,000원 + 관리자 5,000원.
+      지금 구성의 <strong>호출 전 예상비용 차단 기준 합계는 {{ "{:,.0f}".format(configured_stop_threshold_krw) }}원</strong>입니다
+      — 살아 있는 링크 {{ active_link_count }}개 × 3,000원 + 친구 {{ members|length }}명 × 1,000원 + 관리자 5,000원.
+      유료 호출 전에 예상비용을 예약하고, 각 링크·친구·관리자 기준에 닿으면 새 호출을 차단합니다.
+      다만 이 값은 실제 청구의 최댓값이 아닙니다. 실제 provider 토큰 집계와 가격·환율 차이로
+      확정 청구액이 예상 예약액이나 이 합계를 넘을 수 있습니다.
       <br>줄이려면 <strong>안 쓰는 링크를 닫으세요.</strong>
     </span>
   </div>
@@ -36,61 +67,90 @@
    회사별 열쇠 링크
    ══════════════════════════════════════════════════════════ #}
 <div class="card">
-  <h3>회사별 링크 발급</h3>
+  <h2 id="company-links-title">회사별 링크 발급</h2>
   <p class="muted" style="margin-top:6px">
     포트폴리오에 넣을 링크입니다. 인사팀이 <strong>로그인 없이</strong> 눌러볼 수 있고,
-    <strong>누가 언제 열어봤는지</strong> 기록됩니다.
+    발급할 때 지정한 <strong>회사에만</strong> 조사 권한이 적용됩니다.
+    링크 GET 요청 횟수와 최초·최근 요청 시각을 기록하지만, 메신저 미리보기·보안 봇·
+    재시도도 포함될 수 있어 사람이나 개인을 식별하는 기록은 아닙니다.
   </p>
 
   <form method="post" action="/admin/link/new" style="margin-top:14px">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div class="field">
       <label for="link_company">회사 이름<span class="req">*</span></label>
-      <input id="link_company" name="company" required placeholder="예: 카카오">
-    </div>
-    <div class="field">
-      <label for="link_job">지원 직무<span class="req">*</span></label>
-      <input id="link_job" name="job" required placeholder="예: 서비스 기획">
+      <input id="link_company" name="company" required placeholder="예: 카카오"
+             value="{{ link_form.company if link_form else '' }}">
     </div>
     <div class="field">
       <label for="link_note">메모</label>
-      <input id="link_note" name="note" placeholder="예: 하반기 공채, 3/5 지원">
+      <input id="link_note" name="note" placeholder="예: 하반기 공채, 3/5 지원"
+             value="{{ link_form.note if link_form else '' }}">
+    </div>
+    <div class="field">
+      <label for="link_report">미리 만든 보고서 <span class="muted">(선택)</span></label>
+      <input id="link_report" name="report_reference"
+             placeholder="결과 화면 주소 또는 32자리 ID"
+             value="{{ link_form.report_reference if link_form else '' }}">
+      <p class="muted" style="margin-top:5px">
+        연결하면 받은 사람이 링크를 눌렀을 때 조사 대기 없이 그 보고서가 바로 열립니다.
+        비워두면 회사가 채워진 첫 화면으로 갑니다.
+        <strong>동명 회사는 보고서를 연결하기 전에 법인명과 주소를 다시 확인하세요.</strong>
+      </p>
     </div>
     <button type="submit" class="btn">링크 만들기</button>
   </form>
 
   {% if links %}
-  <table style="margin-top:18px">
-    <tr>
-      <th>회사 · 직무</th><th>열어봄</th><th>미리 구움</th><th></th>
-    </tr>
+  <p class="muted" id="company-link-close-note" style="margin-top:16px">
+    <strong>회사 링크 닫기</strong>는 해당 <code>/k/…</code> 주소와 링크별 조사 권한을
+    즉시 막습니다. 이미 열어 본 사람이 별도로 저장한 <code>/result/…</code> 보고서
+    주소는 기존 공개 정책에 따라 보고서 생성 후 60일까지 열릴 수 있습니다.
+  </p>
+  <div class="data-table-scroll" role="region" tabindex="0"
+       aria-labelledby="company-links-title">
+  <table aria-labelledby="company-links-title">
+    <thead><tr>
+      <th scope="col">회사</th><th scope="col">링크 요청</th>
+      <th scope="col">연결 보고서</th><th scope="col" aria-label="관리"></th>
+    </tr></thead>
+    <tbody>
     {% for link in links %}
     <tr>
       <td>
         <strong>{{ link.company }}</strong><br>
-        <span class="muted">{{ link.job }}</span>
         {% if link.note %}<br><span class="muted">{{ link.note }}</span>{% endif %}
         <br><a href="/admin/link/{{ link.key }}">주소·QR 보기</a>
+        {% if link.key in expired_link_keys %}<br><strong>자동 만료됨</strong>{% endif %}
       </td>
       <td>
         {% if link.opened_count %}
           <strong>{{ link.opened_count }}회</strong><br>
-          <span class="muted">처음 {{ link.first_opened_at[:16] }}</span>
+          <span class="muted">최초 {{ link.first_opened_at[:16] }}<br>최근 {{ link.last_opened_at[:16] }}</span>
         {% else %}
-          <span class="muted">아직 안 봄</span>
+          <span class="muted">요청 없음</span>
         {% endif %}
       </td>
       <td>
-        {% if link.is_baked %}⭕ 됨{% else %}<span class="muted">아직</span>{% endif %}
+        {% set report_state = report_states.get(link.key, "unavailable") %}
+        {% if report_state == "active" %}⭕ 열림
+        {% elif report_state == "expired" %}<strong>만료됨</strong><br><span class="muted">재연결 필요</span>
+        {% elif report_state == "missing" %}<strong>찾을 수 없음</strong><br><span class="muted">재연결 필요</span>
+        {% elif report_state == "unavailable" %}<strong>확인 불가</strong><br><span class="muted">잠시 후 확인</span>
+        {% else %}<span class="muted">아직 없음</span>{% endif %}
       </td>
       <td>
         <form method="post" action="/admin/link/delete" style="display:inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="key" value="{{ link.key }}">
-          <button type="submit" class="btn ghost">닫기</button>
+          <button type="submit" class="btn ghost" aria-describedby="company-link-close-note">회사 링크 닫기</button>
         </form>
       </td>
     </tr>
     {% endfor %}
+    </tbody>
   </table>
+  </div>
   {% else %}
   <p class="muted" style="margin-top:14px">아직 만든 링크가 없습니다.</p>
   {% endif %}
@@ -100,7 +160,7 @@
    초대한 친구
    ══════════════════════════════════════════════════════════ #}
 <div class="card">
-  <h3>친구 초대</h3>
+  <h2 id="invited-members-title">친구 초대</h2>
   <p class="muted" style="margin-top:6px">
     <strong>여기 있는 사람만</strong> 구글 로그인 후 실제 조사를 할 수 있습니다
     (하루 1,000원 = 새 회사 약 8곳).
@@ -108,6 +168,7 @@
   </p>
 
   <form method="post" action="/admin/invite" style="margin-top:14px">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div class="field">
       <label for="invite_email">구글 계정 이메일<span class="req">*</span></label>
       <input id="invite_email" name="email" type="email" required
@@ -121,8 +182,12 @@
   </form>
 
   {% if members %}
-  <table style="margin-top:18px">
-    <tr><th>이메일</th><th>메모</th><th>초대일</th><th></th></tr>
+  <div class="data-table-scroll" role="region" tabindex="0"
+       aria-labelledby="invited-members-title">
+  <table aria-labelledby="invited-members-title">
+    <thead><tr><th scope="col">이메일</th><th scope="col">메모</th>
+      <th scope="col">초대일</th><th scope="col" aria-label="관리"></th></tr></thead>
+    <tbody>
     {% for m in members %}
     <tr>
       <td>{{ m.email }}</td>
@@ -130,17 +195,30 @@
       <td class="muted">{{ m.invited_at[:10] }}</td>
       <td>
         <form method="post" action="/admin/revoke" style="display:inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="email" value="{{ m.email }}">
           <button type="submit" class="btn ghost">빼기</button>
         </form>
       </td>
     </tr>
     {% endfor %}
+    </tbody>
   </table>
+  </div>
   {% else %}
   <p class="muted" style="margin-top:14px">아직 초대한 사람이 없습니다.</p>
   {% endif %}
 </div>
+{% else %}
+<div class="card">
+  <h2>현재 상태</h2>
+  <p class="lede"><strong>확인 불가</strong></p>
+  <p class="muted">
+    저장된 링크·초대 명단과 비용 원장을 함께 확인할 수 없어 수치와 변경 양식을
+    표시하지 않았습니다. 저장소 상태를 확인한 뒤 이 화면을 다시 열어주세요.
+  </p>
+</div>
+{% endif %}
 
 <div class="btn-row">
   <a class="btn ghost" href="/admin">관리자 화면으로</a>

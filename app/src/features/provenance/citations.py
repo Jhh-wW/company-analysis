@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+import urllib.parse
+from dataclasses import replace
 from typing import Any, Optional
 
 from src.features.provenance.constants import (
@@ -34,7 +36,12 @@ from src.features.provenance.constants import (
     HOMEPAGE_FALLBACK_LABEL,
     NEWS_UNKNOWN_DOMAIN,
 )
-from src.features.provenance.sources import Source, SourceKind
+from src.features.provenance.sources import (
+    Source,
+    SourceKind,
+    evidence_text_hash,
+    seal_collected_source,
+)
 
 #: 뉴스 조각 원문 맨 앞 — `"(2025-03-12 보도 · mk.co.kr) 제목. 설명"`.
 #: 정본은 `run_pilot.collect_news()`의 f-string이다. 여기를 고치면 그쪽도 맞춰야 한다.
@@ -45,13 +52,20 @@ _NEWS_PREFIX_RE = re.compile(
 
 #: DART 공시일(`rcept_dt`)의 원래 모양 — 8자리 숫자(`YYYYMMDD`) 하나뿐이어야 한다.
 _RCEPT_DT_RE = re.compile(r"^\d{8}$")
+_OFFICIAL_PLAN_RE = re.compile(
+    r"계획|예정|목표|향후|추진(?:할|하고자|하려|\s*중)|방침|로드맵|"
+    r"확대할|강화할|진출할|구축할|도입할|개발할|출시할"
+)
+_PLAN_FRAGMENT_KINDS = frozenset({"신규사업전망"})
 
 
 def build_citations(
-    fragments: dict[int, dict[str, str]],
+    fragments: dict[int, dict[str, Any]],
     *,
     filing: Optional[dict[str, Any]],
     collected_on: dt.date,
+    company_publisher: str = "",
+    selected_evidence_by_fragment: Optional[dict[int, list[str]]] = None,
 ) -> list[Source]:
     """수집 조각 목록 + 수집 정보 → 출처 목록.
 
@@ -71,25 +85,84 @@ def build_citations(
     """
     collected_at = collected_on.isoformat()
     sources: list[Source] = []
+    requested = selected_evidence_by_fragment or {}
     for number, frag in sorted(fragments.items()):
         kind = frag.get("종류", "")
         text = frag.get("원문", "")
         if kind == FRAGMENT_KIND_NEWS:
-            sources.append(_news_source(number, text))
+            source = _news_source(number, frag)
         elif kind == FRAGMENT_KIND_HOMEPAGE:
-            sources.append(_homepage_source(number, frag, collected_at))
+            source = _homepage_source(number, frag, collected_at, company_publisher)
         else:
-            sources.append(_filing_source(number, kind, text, filing, collected_at))
+            source = _filing_source(
+                number,
+                kind,
+                text,
+                filing,
+                collected_at,
+                company_publisher,
+                declared_fact_status=str(
+                    frag.get("사실상태") or frag.get("fact_status") or ""
+                ),
+                fragment_document_id=str(frag.get("문서ID") or ""),
+            )
+        sources.append(
+            seal_collected_source(
+                replace(
+                    source,
+                    evidence_hashes=_fragment_evidence_hashes(
+                        frag,
+                        requested.get(number, []),
+                    ),
+                )
+            )
+        )
     return sources
 
 
-def _news_source(number: int, text: str) -> Source:
+def _fragment_evidence_hashes(
+    fragment: dict[str, Any], selected_payloads: list[str]
+) -> list[str]:
+    """수집 payload에서 실제로 확인되는 원문만 해시한다.
+
+    ``selected_payloads``는 작가가 만든 문장을 등록하는 통로가 아니다. 실제
+    ``원문``의 연속 부분 문자열이거나 수집기가 별도로 보존한 ``근거원문``의
+    정확한 항목일 때만 받아들인다. 따라서 공개 문장·표 행이 스스로 원문 해시를
+    만들어 출고되는 경로가 없다.
+    """
+
+    raw_text = str(fragment.get("원문") or "").strip()
+    structured_raw = fragment.get("근거원문") or []
+    if isinstance(structured_raw, str):
+        structured_raw = [structured_raw]
+    structured = {
+        str(payload).strip()
+        for payload in structured_raw
+        if str(payload).strip()
+    } if isinstance(structured_raw, (list, tuple)) else set()
+
+    payloads = {raw_text, *structured} - {""}
+    normalized_raw = " ".join(raw_text.split())
+    for selected in selected_payloads:
+        clean = str(selected or "").strip()
+        if not clean:
+            continue
+        normalized = " ".join(clean.split())
+        if clean in structured or (normalized_raw and normalized in normalized_raw):
+            payloads.add(clean)
+    return sorted(
+        digest for payload in payloads if (digest := evidence_text_hash(payload))
+    )
+
+
+def _news_source(number: int, frag: dict[str, Any]) -> Source:
     """뉴스 조각 — 원문 앞머리에서 보도일·도메인을 뽑는다. 못 뽑으면 비운다.
 
     라벨은 기사 제목을 쓴다. 원문이 `"{제목}. {설명}"` 꼴로 이어붙었으므로
     (`run_pilot.collect_news`) 첫 `". "`까지를 제목으로 본다 — 못 가르면
     잘라내다 지어내는 셈이 되므로 원문 전체를 라벨로 남긴다.
     """
+    text = frag.get("원문", "")
     match = _NEWS_PREFIX_RE.match(text)
     if match is None:
         return Source(number=number, kind=SourceKind.NEWS, label=text.strip())
@@ -109,21 +182,62 @@ def _news_source(number: int, text: str) -> Source:
         label=label,
         published_at=published_at,
         domain=domain,
+        source_id=f"source-{number}",
+        title=label,
+        publisher=domain,
+        host=domain,
+        url=frag.get("출처", "").strip(),
+        document_id=frag.get("문서ID", "").strip(),
+        location="기사 제목·본문 요약",
+        source_type="외부 보도",
+        fact_status="보도 확인",
     )
 
 
-def _homepage_source(number: int, frag: dict[str, str], collected_at: str) -> Source:
+def _homepage_source(
+    number: int,
+    frag: dict[str, Any],
+    collected_at: str,
+    company_publisher: str = "",
+) -> Source:
     """홈페이지 조각 — 실제 읽은 URL을 라벨로 삼는다. URL이 없으면 지어내지 않는다.
 
     ★ 수집일을 반드시 넣는다. 홈페이지는 «언제든 바뀌는» 자료라,
       언제 본 것인지 없으면 사용자가 확인하러 갔을 때 다른 내용을 보게 된다.
     """
     url = frag.get("출처", "").strip()
+    host = urllib.parse.urlparse(url).netloc.lower()
+    path = urllib.parse.urlparse(url).path or "/"
+    document_id = str(frag.get("문서ID") or "").strip()
+    if not document_id and url:
+        # URL 자체가 변하는 웹 문서의 실제 식별자다. 임의 제목을 만들지 않는다.
+        document_id = urllib.parse.urlunparse(
+            ("", "", path, "", urllib.parse.urlparse(url).query, "")
+        ) or "/"
     return Source(
         number=number,
         kind=SourceKind.OTHER,
         label=url or HOMEPAGE_FALLBACK_LABEL,
         collected_at=collected_at,
+        source_id=f"source-{number}",
+        title=frag.get("문서명", "").strip() or url or HOMEPAGE_FALLBACK_LABEL,
+        publisher=frag.get("발행처", "").strip() or company_publisher.strip() or host,
+        host=host,
+        url=url,
+        document_id=document_id,
+        location=frag.get("원문위치", "").strip() or path,
+        source_type="회사 공식 웹",
+        fact_status="기준일 현재 확인",
+        domain_attestation_source_id=str(
+            frag.get("도메인근거SourceID")
+            or frag.get("domain_attestation_source_id")
+            or ""
+        ).strip(),
+        domain_attestation_evidence=str(
+            frag.get("도메인근거원문")
+            or frag.get("domain_attestation_evidence")
+            or ""
+        ).strip(),
     )
 
 
@@ -133,6 +247,9 @@ def _filing_source(
     text: str,
     filing: Optional[dict[str, Any]],
     collected_at: str,
+    company_publisher: str = "",
+    declared_fact_status: str = "",
+    fragment_document_id: str = "",
 ) -> Source:
     """공시 계열 조각 — `filing`의 보고서 이름 + 공시일에 조각 종류를 붙인다.
 
@@ -147,18 +264,60 @@ def _filing_source(
             kind=SourceKind.FILING,
             label=DART_ACCOUNT_FRAGMENT_LABEL,
             collected_at=collected_at,
+            source_id=f"source-{number}",
+            title=DART_ACCOUNT_FRAGMENT_LABEL,
+            publisher=company_publisher.strip() or "금융감독원",
+            host="opendart.fss.or.kr",
+            url="https://opendart.fss.or.kr/api/fnlttSinglAcnt.json",
+            document_id=fragment_document_id.strip() or "fnlttSinglAcnt.json",
+            location="주요계정 API 응답",
+            source_type="공식 재무 API",
+            fact_status="공시 실제값",
         )
 
     report_nm = str((filing or {}).get("report_nm") or "").strip()
     disclosed_at = _format_rcept_dt(str((filing or {}).get("rcept_dt") or "")) if filing else ""
+    document_id = str(
+        (filing or {}).get("rcept_no")
+        or (filing or {}).get("rceptNo")
+        or ""
+    ).strip()
+    url = (
+        f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={document_id}"
+        if document_id
+        else ""
+    )
     label = " · ".join(part for part in (report_nm, kind) if part)
 
+    # 한 공시 조각에는 완료 사실과 아직 미실행인 계획 문장이 함께 있을 수 있다.
+    # 수집기가 명시한 상태를 우선 보존하고, 없을 때는 공식 계획 표지가 있는
+    # 조각임을 기록한다. 개별 FactRecord의 정확한 상태는 이후 원문 문장과
+    # claim_type/time_state 결속 검사가 최종 확정한다.
+    declared = " ".join(declared_fact_status.split())
+    source_fact_status = declared or (
+        "공시 원문(실제·계획 문장 병존 가능)"
+        if kind in _PLAN_FRAGMENT_KINDS or _OFFICIAL_PLAN_RE.search(text)
+        else "공시 실제값"
+    )
+
+    publisher = str((filing or {}).get("corp_name") or "").strip()
+    publisher = publisher or company_publisher.strip()
     return Source(
         number=number,
         kind=SourceKind.FILING,
         label=label,
         disclosed_at=disclosed_at,
         collected_at=collected_at,
+        source_id=f"source-{number}",
+        title=report_nm or label,
+        # 공시를 제출하고 내용에 책임지는 주체는 회사다. DART는 host로 분리한다.
+        publisher=publisher,
+        host="dart.fss.or.kr",
+        url=url,
+        document_id=document_id,
+        location=kind or "공시 본문",
+        source_type="공식 공시",
+        fact_status=source_fact_status,
     )
 
 

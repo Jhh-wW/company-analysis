@@ -28,9 +28,9 @@ from src.core import paths
 from src.features.spanselect import logic as spanselect
 from src.features.spanselect.constants import GENERATION_STEP, VERIFY_STEP
 
-ENGINE_PATH = paths.PROJECT_ROOT / "prototype_v1" / "tools" / "run_pilot.py"
+ENGINE_PATH = paths.PROJECT_ROOT / "analysis_engine" / "tools" / "run_pilot.py"
 DRAFT_CHECK_PATH = (
-    paths.PROJECT_ROOT / "prototype_v1" / "src" / "features" / "draft_check"
+    paths.PROJECT_ROOT / "analysis_engine" / "src" / "features" / "draft_check"
     / "logic.py"
 )
 
@@ -41,7 +41,7 @@ def _load_draft_check() -> Any:
     ★ `import run_pilot`을 하지 않는다 — 그건 `anthropic`·`presidio`를 요구한다.
       이 모듈은 dataclasses만 쓰므로 그대로 불러도 안전하다.
     """
-    name = "prototype_draft_check"
+    name = "analysis_engine_draft_check"
     spec = importlib.util.spec_from_file_location(name, DRAFT_CHECK_PATH)
     assert spec is not None and spec.loader is not None, f"찾지 못함: {DRAFT_CHECK_PATH}"
     module = importlib.util.module_from_spec(spec)
@@ -288,7 +288,7 @@ def test_앞머리를_뗀_문장이_W3_원문대조를_통과한다():
 def test_저장된_조각_전수에서_다듬은_문장이_전부_원문대조를_통과한다():
     """★ 예시 하나가 아니라 **저장된 조각 전수**로 확인한다 (AI 0회·0원).
 
-    1판이 실제로 돌려 남긴 조각(`prototype_v1/data/pilot/fragments/`)을 전부
+    1판이 실제로 돌려 남긴 조각(`analysis_engine/data/pilot/fragments/`)을 전부
     문장으로 쪼개고, 앞머리를 뗀 것마다 1판 W3 대조를 돌린다.
     실측(2026-08-16): 문장 1,519개 중 34개가 다듬어졌고 **대조 실패 0건**.
     """

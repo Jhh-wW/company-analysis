@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+import os
+
 from typing import Final
 
 # ── 허용 형식 — 매직 바이트로 판별한다 ──────────────────
@@ -32,19 +34,61 @@ ALLOWED_MIME_TYPES: Final[tuple[str, ...]] = ("image/png", "image/jpeg", "image/
 
 # ── 크기·장수 상한 (잠정 — 첫 20건 뒤 재검토) ────────────
 
+#: 운영 환경에서는 이 세 값을 더 낮추거나 0으로 꺼둘 수 있다. 코드 상한보다 큰
+#: 값이나 잘못된 값은 시작 오류로 알려준다 — 조용히 다른 값으로 도는 것을 막는다.
+ENV_MAX_IMAGE_BYTES: Final[str] = "POSTING_IMAGE_MAX_BYTES"
+ENV_MAX_IMAGE_COUNT: Final[str] = "POSTING_IMAGE_MAX_COUNT"
+ENV_MAX_TOTAL_BYTES: Final[str] = "POSTING_IMAGE_MAX_TOTAL_BYTES"
+
+HARD_MAX_IMAGE_BYTES: Final[int] = 5 * 1024 * 1024
+HARD_MAX_IMAGE_COUNT: Final[int] = 4
+HARD_MAX_TOTAL_BYTES: Final[int] = 12 * 1024 * 1024
+
+
+def _lowerable_limit(name: str, hard_max: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return hard_max
+    try:
+        requested = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} 환경변수는 0 이상의 정수여야 합니다.") from exc
+    if requested < 0:
+        raise RuntimeError(f"{name} 환경변수는 0 이상의 정수여야 합니다.")
+    if requested > hard_max:
+        raise RuntimeError(
+            f"{name} 환경변수는 안전 상한 {hard_max} 이하여야 합니다."
+        )
+    return requested
+
+
 #: 이미지 1장 최대 용량.
-#: 근거 — `prototype_v1/data/ocr_samples`의 실측 캡처(1920×1080대 PNG)는 이보다
+#: 근거 — `analysis_engine/data/ocr_samples`의 실측 캡처(1920×1080대 PNG)는 이보다
 #: 훨씬 작았다. 4K·멀티모니터 캡처까지 감안해 여유 있게 잡은 잠정 상한이다.
 #: 풀리는 조건 — 실제 사용자 캡처 20건의 용량 분포를 재보면 조정한다.
-MAX_IMAGE_BYTES: Final[int] = 8 * 1024 * 1024  # 8MB
+MAX_IMAGE_BYTES: Final[int] = _lowerable_limit(
+    ENV_MAX_IMAGE_BYTES, HARD_MAX_IMAGE_BYTES
+)
 
 #: 공고 하나를 나눠 찍은 캡처의 최대 장수.
-#: 근거 — `prototype_v1/data/ocr_samples/manifest.jsonl` 실측 8클러스터 중
-#: 최대 9장(원티드-01)이었다. 거기에 여유를 둔 잠정 상한이다.
-MAX_IMAGE_COUNT: Final[int] = 10
+#: 근거 — 작은 Render 인스턴스에서 OCR 모델과 함께 뜰 때 남는 메모리가 적어
+#: 우선 4장으로 제한한다. 더 긴 공고는 글자 붙여넣기를 함께 안내한다.
+MAX_IMAGE_COUNT: Final[int] = _lowerable_limit(
+    ENV_MAX_IMAGE_COUNT, HARD_MAX_IMAGE_COUNT
+)
 
 #: 장수를 다 채워도 전체 요청 용량이 지나치게 커지지 않도록 거는 합계 상한.
-MAX_TOTAL_BYTES: Final[int] = 40 * 1024 * 1024  # 40MB
+MAX_TOTAL_BYTES: Final[int] = _lowerable_limit(
+    ENV_MAX_TOTAL_BYTES, HARD_MAX_TOTAL_BYTES
+)
+
+#: 압축 파일 크기와 별개로 디코딩 때 펼쳐질 픽셀 수를 제한한다. 일반적인 4K
+#: 캡처(약 830만 픽셀)는 허용하되 작은 압축 폭탄이 OCR 앞에서 메모리를 소진하지
+#: 못하게 하는 서버 상한이다.
+MAX_IMAGE_PIXELS: Final[int] = 20_000_000
+
+#: 비정상적으로 길거나 넓은 이미지 한 변의 상한. 전체 픽셀 상한과 함께 적용한다.
+MAX_IMAGE_DIMENSION: Final[int] = 10_000
 
 # ── 오류 문구 (전부 한국어 — 사용자에게 그대로 보여준다) ──
 
@@ -62,6 +106,12 @@ ERROR_TOTAL_TOO_LARGE: Final[str] = (
 )
 ERROR_UNSUPPORTED_FORMAT: Final[str] = (
     "지원하지 않는 이미지 형식입니다. PNG · JPEG · WEBP 형식만 올릴 수 있습니다."
+)
+ERROR_INVALID_IMAGE: Final[str] = (
+    "손상되었거나 올바르지 않은 이미지입니다. PNG · JPEG · WEBP 파일을 다시 선택해 주세요."
+)
+ERROR_RESOLUTION_TOO_LARGE: Final[str] = (
+    "이미지 해상도가 너무 큽니다. 더 작은 이미지로 다시 올려주세요."
 )
 #: 글자 추출 실패(형식 검사는 통과했지만 AI가 못 읽었거나 호출이 실패한 경우).
 #: ★ 막다른 길을 만들지 않는다 — 텍스트로 붙여넣는 경로가 항상 남아 있다고 안내한다.

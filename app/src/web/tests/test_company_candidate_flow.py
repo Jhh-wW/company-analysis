@@ -1,0 +1,1051 @@
+"""DART-local 후보 → 명시 Google fallback → 사용자 선택 → DART 재검증."""
+
+from __future__ import annotations
+
+import asyncio
+import re
+import threading
+import time
+import unicodedata
+
+import httpx
+import pytest
+from fastapi.responses import PlainTextResponse
+from fastapi.testclient import TestClient
+
+from src.features.auth import constants as auth_constants
+from src.features.auth import logic as auth_logic
+from src.features.budget import logic as budget_logic
+from src.features.budget.constants import SPEND_PHASE_CANDIDATE, SPEND_PHASE_IDENTIFY
+from src.features.business_candidate.logic import (
+    ProviderRateLimited,
+    ProviderTimedOut,
+    RawBusinessCandidate,
+)
+from src.features.pipeline.demo import DemoPipeline
+from src.features.pipeline.port import CompanyCard, CompanyLookupResult, UserInput
+from src.features.storage import db as storage_db
+from src.web import (
+    evaluation_mode,
+    job_runtime,
+    main,
+    paid_runtime,
+    public_ids,
+    request_helpers,
+    runtime,
+)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_candidate_state(monkeypatch):
+    from src.features.business_candidate import logic as candidate_logic
+
+    monkeypatch.setattr(candidate_logic, "_RATE_HISTORY", budget_logic.RateHistory())
+    job_runtime._CANDIDATE_ATTEMPTS.clear()
+    job_runtime._CANDIDATE_SEARCH_GRANTS.clear()
+    yield
+    job_runtime._CANDIDATE_ATTEMPTS.clear()
+    job_runtime._CANDIDATE_SEARCH_GRANTS.clear()
+
+
+class CandidateAwareFakeRealPipeline:
+    business_candidate_provider_costs_money = False
+
+    def __init__(self, *, local_candidates: bool = True, candidate_refs: bool = True):
+        self.local_candidates = local_candidates
+        self.candidate_refs = candidate_refs
+        self.search_calls = 0
+        self.lookup_calls = 0
+        self.lookup_inputs: list[str] = []
+        self.lookup_refs: list[str] = []
+
+    def search_business_candidates(self, **kwargs):
+        self.search_calls += 1
+        assert kwargs["company"] == "JYP"
+        assert kwargs["address_hint"] == "서울 강동구"
+        if not self.local_candidates:
+            return []
+        return [
+            RawBusinessCandidate(
+                candidate_name="(주)제이와이피엔터테인먼트",
+                address="서울특별시 강동구 강동대로 205 (성내동, JYP Center)",
+                homepage="https://www.jype.com/",
+                source_label="전자공시(DART) 기업개황 fixture",
+                source_url="https://opendart.fss.or.kr/",
+                provider_name="DART",
+                candidate_ref="00258689" if self.candidate_refs else "",
+                stock_code="035900" if self.candidate_refs else "",
+                modify_date="20221206" if self.candidate_refs else "",
+            )
+        ]
+
+    def find_company_by_ref_metered(
+        self, user_input: UserInput, candidate_ref: str
+    ) -> CompanyLookupResult:
+        self.lookup_calls += 1
+        self.lookup_inputs.append(user_input.company)
+        self.lookup_refs.append(candidate_ref)
+        if candidate_ref != "00258689":
+            return CompanyLookupResult(card=None, failed=True)
+        return CompanyLookupResult(
+            card=CompanyCard(
+                legal_name="JYP Ent.",
+                typed_name=user_input.company,
+                address="서울특별시 강동구 강동대로 205",
+                ceo="정욱",
+                founded="19970425",
+                homepage="jype.com",
+                homepage_url="https://www.jype.com/",
+                ref=candidate_ref,
+            ),
+            model="fake-dart-ref",
+        )
+
+    def find_company_metered(self, user_input: UserInput) -> CompanyLookupResult:
+        self.lookup_calls += 1
+        self.lookup_inputs.append(user_input.company)
+        if user_input.company not in {
+            "(주)제이와이피엔터테인먼트",
+            "JYP 엔터테인먼트",
+        }:
+            return CompanyLookupResult(card=None, model="fake-dart")
+        return CompanyLookupResult(
+            card=CompanyCard(
+                legal_name="(주)제이와이피엔터테인먼트",
+                typed_name=user_input.company,
+                address="서울특별시 강동구 강동대로 205",
+                ceo="정욱",
+                founded="19970425",
+                homepage="jype.com",
+                homepage_url="https://www.jype.com/",
+                ref="fake-dart-jyp-001",
+            ),
+            cost_krw=7.0,
+            model="fake-dart",
+        )
+
+
+class PaidGoogleFixture:
+    costs_money = True
+    accounting_cost_krw = 49.0
+    provider_name = "Google Maps"
+
+    def __init__(self):
+        self.calls = 0
+
+    def search(self, **_kwargs):
+        self.calls += 1
+        return [
+            RawBusinessCandidate(
+                candidate_name="JYP 엔터테인먼트",
+                address="서울특별시 강동구 강동대로 205",
+                homepage="https://www.jype.com/",
+                provider_name="Google Maps",
+                attributions=(("공공 주소 데이터", "https://example.org/source"),),
+            )
+        ]
+
+
+def test_paid_candidate_worker_slot부족은_provider0회_phase취소_0원이다(monkeypatch):
+    from src.features.business_candidate import logic as candidate_logic
+    from src.web.routers import analysis as analysis_router
+
+    class FullWorkerSlots:
+        def acquire(self, *, blocking):
+            assert blocking is False
+            return False
+
+        def release(self):
+            raise AssertionError("획득하지 않은 slot을 반환하면 안 됩니다")
+
+    class RequestFixture:
+        client = type("Client", (), {"host": "127.0.0.1"})()
+
+    provider = PaidGoogleFixture()
+    ticket = object()
+    cancelled: list[object] = []
+    released: list[str] = []
+    monkeypatch.setattr(candidate_logic, "_PROVIDER_WORKER_SLOTS", FullWorkerSlots())
+    monkeypatch.setattr(
+        paid_runtime, "_reserve_run_slot", lambda _track, _bucket: "candidate-slot"
+    )
+    monkeypatch.setattr(
+        paid_runtime, "_release_run_slot", lambda slot: released.append(slot)
+    )
+    monkeypatch.setattr(paid_runtime, "_begin_paid_phase", lambda **_kwargs: ticket)
+    monkeypatch.setattr(
+        paid_runtime,
+        "_call_paid_provider",
+        lambda _ticket, func, *args, **kwargs: func(*args, **kwargs),
+    )
+    monkeypatch.setattr(
+        paid_runtime, "_cancel_paid_phase", lambda phase: cancelled.append(phase)
+    )
+    monkeypatch.setattr(
+        paid_runtime,
+        "_settle_paid_phase",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("provider 미호출 phase를 정산하면 안 됩니다")
+        ),
+    )
+
+    outcome = asyncio.run(
+        analysis_router._resolve_business_candidates(
+            RequestFixture(),  # type: ignore[arg-type]
+            provider=provider,
+            user_input=UserInput(
+                company="JYP",
+                job="매니지먼트",
+                region="서울 강동구",
+                posting_text="채용 공고",
+            ),
+            resolved_track=(object(), "fixture-bucket", 100.0),  # type: ignore[arg-type]
+            allow_paid_provider=True,
+            analysis_run_id="fixture-run",
+        )
+    )
+
+    assert isinstance(outcome, tuple)
+    result, cost_krw = outcome
+    assert result.status is candidate_logic.ResolutionStatus.RATE_LIMITED
+    assert result.provider_called is False
+    assert provider.calls == 0
+    assert cost_krw == 0.0
+    assert cancelled == [ticket]
+    assert released == ["candidate-slot"]
+
+
+def _admin_client() -> tuple[TestClient, str]:
+    client = TestClient(
+        main.app,
+        base_url="http://127.0.0.1:8000",
+        headers={"Origin": "http://127.0.0.1:8000"},
+    )
+    session = auth_logic.create_session("admin@example.com", True)
+    client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
+    return client, auth_logic.csrf_token_for_session(session.token)
+
+
+def _form(csrf: str, **changes: str) -> dict[str, str]:
+    data = {
+        "company": "JYP",
+        "job": "매니지먼트",
+        "region": "서울 강동구",
+        "posting_text": "채용 공고",
+        "posting_image_consent": "yes",
+        "csrf_token": csrf,
+    }
+    data.update(changes)
+    return data
+
+
+def _hidden(body: str, name: str) -> str:
+    found = re.search(
+        rf'name="{re.escape(name)}"\s+value="([^"]*)"', body
+    )
+    assert found is not None, (name, body[:500])
+    return found.group(1)
+
+
+def test_DART_local_후보는_사람이_선택해야만_DART를_다시_부르고_원입력을_보존한다(
+    monkeypatch,
+):
+    pipeline = CandidateAwareFakeRealPipeline(local_candidates=True)
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    client, csrf = _admin_client()
+    try:
+        candidates = client.post("/confirm", data=_form(csrf))
+        assert candidates.status_code == 200
+        assert "주소와 함께 찾은 회사 후보입니다" in candidates.text
+        assert "(주)제이와이피엔터테인먼트" in candidates.text
+        assert "해당 후보 없음 · 직접 다시 입력하기" in candidates.text
+        assert pipeline.search_calls == 1
+        assert pipeline.lookup_calls == 0
+        assert _hidden(candidates.text, "company") == "JYP"
+        attempt_token = _hidden(candidates.text, "candidate_attempt_token")
+        selection_token = _hidden(candidates.text, "candidate_selection_token")
+        index = _hidden(candidates.text, "candidate_index")
+        candidate_name = _hidden(candidates.text, "candidate_name")
+        candidate_provider = _hidden(candidates.text, "candidate_provider")
+        candidate_ref = _hidden(candidates.text, "candidate_ref")
+
+        confirmed = client.post(
+            "/confirm",
+            data=_form(
+                csrf,
+                candidate_resolution_confirmed="yes",
+                candidate_attempt_token=attempt_token,
+                candidate_selection_token=selection_token,
+                candidate_index=index,
+                candidate_name=candidate_name,
+                candidate_provider=candidate_provider,
+                candidate_ref=candidate_ref,
+            ),
+        )
+        assert confirmed.status_code == 200
+        assert "이 회사가 맞나요?" in confirmed.text
+        assert "서울특별시 강동구 강동대로 205" in confirmed.text
+        assert 'value="00258689"' in confirmed.text
+        assert pipeline.search_calls == 1
+        assert pipeline.lookup_inputs == ["JYP"]
+        assert pipeline.lookup_refs == ["00258689"]
+        assert _hidden(confirmed.text, "company") == "JYP"
+    finally:
+        client.close()
+
+
+def test_DART_local_후보선택은_서명된_고유번호를_직접재조회하고_이름AI를_부르지않는다(
+    monkeypatch,
+):
+    pipeline = CandidateAwareFakeRealPipeline(candidate_refs=True)
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    client, csrf = _admin_client()
+    try:
+        candidates = client.post("/confirm", data=_form(csrf))
+        assert candidates.status_code == 200
+        assert "035900" in candidates.text
+        assert "2022-12-06" in candidates.text
+        assert pipeline.lookup_calls == 0  # 점수가 높아도 자동 확정하지 않는다.
+
+        confirmed = client.post(
+            "/confirm",
+            data=_form(
+                csrf,
+                candidate_resolution_confirmed="yes",
+                candidate_attempt_token=_hidden(candidates.text, "candidate_attempt_token"),
+                candidate_selection_token=_hidden(candidates.text, "candidate_selection_token"),
+                candidate_index=_hidden(candidates.text, "candidate_index"),
+                candidate_name=_hidden(candidates.text, "candidate_name"),
+                candidate_provider=_hidden(candidates.text, "candidate_provider"),
+                candidate_ref=_hidden(candidates.text, "candidate_ref"),
+            ),
+        )
+
+        assert confirmed.status_code == 200
+        assert "JYP Ent." in confirmed.text
+        assert pipeline.lookup_refs == ["00258689"]
+        assert pipeline.lookup_inputs == ["JYP"]
+        assert 'value="00258689"' in confirmed.text
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("typed", ["JYP", "jyp", "Jyp", "ＪＹＰ", "JYP Entertainment"])
+def test_대소문자와_영문별칭은_유료AI나_Google전에_DART후보로_멈춘다(
+    monkeypatch, typed
+):
+    pipeline = CandidateAwareFakeRealPipeline(candidate_refs=True)
+
+    def local_search(**kwargs):
+        pipeline.search_calls += 1
+        assert kwargs["company"] == unicodedata.normalize("NFKC", typed)
+        return [
+            RawBusinessCandidate(
+                candidate_name="JYP Ent.",
+                english_name="JYP Entertainment Corporation",
+                address="서울특별시 강동구 강동대로 205",
+                provider_name="DART",
+                candidate_ref="00258689",
+                stock_code="035900",
+                modify_date="20221206",
+                name_match_kind="exact_name",
+                name_similarity=1.0,
+            )
+        ]
+
+    pipeline.search_business_candidates = local_search  # type: ignore[method-assign]
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    from src.features.business_candidate import providers
+
+    monkeypatch.setattr(
+        providers,
+        "configured_provider",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("local alias hit 뒤 Google을 열면 안 됩니다")
+        ),
+    )
+    client, csrf = _admin_client()
+    try:
+        response = client.post("/confirm", data=_form(csrf, company=typed))
+    finally:
+        client.close()
+
+    assert response.status_code == 200
+    assert "주소와 함께 찾은 회사 후보입니다" in response.text
+    assert "JYP Entertainment Corporation" in response.text
+    assert pipeline.search_calls == 1
+    assert pipeline.lookup_calls == 0
+
+
+def test_회사분석_confirm은_옛_직무와_공고필드를_무시한다(monkeypatch):
+    pipeline = CandidateAwareFakeRealPipeline(local_candidates=True)
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    client, csrf = _admin_client()
+    try:
+        response = client.post(
+            "/confirm",
+            data=_form(
+                csrf,
+                job="옛 직무",
+                posting_text="옛 공고",
+                posting_image_consent="yes",
+            ),
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 200
+    assert "주소와 함께 찾은 회사 후보입니다" in response.text
+    attempt = next(iter(job_runtime._CANDIDATE_ATTEMPTS.values()))
+    assert attempt.user_input.job == ""
+    assert attempt.user_input.posting_text == ""
+    assert attempt.posting_image_consent is False
+
+
+@pytest.mark.parametrize(
+    ("posting_text", "posting_image_consent"),
+    [("채용 공고 원문", ""), ("", "yes")],
+)
+def test_일반텍스트와_image_only신호는_confirm후보흐름을_유지한다(
+    monkeypatch, posting_text, posting_image_consent
+):
+    pipeline = CandidateAwareFakeRealPipeline(local_candidates=True)
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    client, csrf = _admin_client()
+    try:
+        response = client.post(
+            "/confirm",
+            data=_form(
+                csrf,
+                posting_text=posting_text,
+                posting_image_consent=posting_image_consent,
+            ),
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 200
+    assert "주소와 함께 찾은 회사 후보입니다" in response.text
+    assert pipeline.search_calls == 1
+    assert pipeline.lookup_calls == 0
+
+
+def test_cold_DART가_공통8초보다_길어도_30초안이면_warm과같은_무료후보를낸다(
+    monkeypatch,
+):
+    from src.features.business_candidate import logic as candidate_logic
+    from src.features.business_candidate import providers
+
+    pipeline = CandidateAwareFakeRealPipeline(local_candidates=False)
+    received_timeouts: list[float] = []
+
+    def cold_local_search(**kwargs):
+        pipeline.search_calls += 1
+        received_timeouts.append(kwargs["timeout_sec"])
+        if pipeline.search_calls == 1:
+            time.sleep(0.03)
+        return [
+            RawBusinessCandidate(
+                candidate_name="JYP Ent.",
+                english_name="JYP Entertainment Corporation",
+                address="서울특별시 강동구 강동대로 205",
+                provider_name="DART",
+                candidate_ref="00258689",
+                stock_code="035900",
+                modify_date="20221206",
+                name_match_kind="acronym_token",
+                name_similarity=1.0,
+            ),
+            RawBusinessCandidate(
+                candidate_name="(주)제이와이피",
+                english_name="JYP Corporation",
+                address="서울특별시 강남구 청담동 123-50",
+                provider_name="DART",
+                candidate_ref="00535454",
+                modify_date="20170630",
+                name_match_kind="acronym_reading",
+                name_similarity=1.0,
+            ),
+        ]
+
+    pipeline.search_business_candidates = cold_local_search  # type: ignore[method-assign]
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    monkeypatch.setattr(candidate_logic, "PROVIDER_TIMEOUT_SEC", 0.005)
+    monkeypatch.setattr(
+        providers,
+        "configured_provider",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("local cold 성공 뒤 Google을 열면 안 됩니다")
+        ),
+    )
+    monkeypatch.setattr(
+        paid_runtime,
+        "_begin_paid_phase",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("local 후보 화면 전에 paid identify를 열면 안 됩니다")
+        ),
+    )
+
+    client, csrf = _admin_client()
+    try:
+        cold_response = client.post("/confirm", data=_form(csrf))
+        warm_response = client.post("/confirm", data=_form(csrf))
+        attempts = [
+            job_runtime._CANDIDATE_ATTEMPTS[
+                _hidden(body.text, "candidate_attempt_token")
+            ]
+            for body in (cold_response, warm_response)
+        ]
+    finally:
+        client.close()
+
+    assert cold_response.status_code == warm_response.status_code == 200
+    for response in (cold_response, warm_response):
+        assert "주소와 함께 찾은 회사 후보입니다" in response.text
+        assert response.text.index("JYP Ent.") < response.text.index("(주)제이와이피")
+    assert received_timeouts == [30.0, 30.0]
+    assert pipeline.lookup_calls == 0
+    assert pipeline.search_calls == 2
+    assert [attempt.candidate_count for attempt in attempts] == [2, 2]
+    assert [attempt.candidate_cost_krw for attempt in attempts] == [0.0, 0.0]
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [ProviderTimedOut, RuntimeError, ProviderRateLimited],
+)
+def test_DART_local_기술실패는_paid_fallback과_보고서quota없이_재시도한다(
+    monkeypatch, error_type
+):
+    from src.features.business_candidate import logic as candidate_logic
+    from src.features.business_candidate import providers
+
+    pipeline = CandidateAwareFakeRealPipeline(local_candidates=False)
+
+    def broken_local_search(**_kwargs):
+        pipeline.search_calls += 1
+        raise error_type("offline fixture failure")
+
+    pipeline.search_business_candidates = broken_local_search  # type: ignore[method-assign]
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    monkeypatch.setattr(paid_runtime, "_RATE_HISTORY", budget_logic.RateHistory())
+    monkeypatch.setattr(
+        paid_runtime,
+        "_begin_paid_phase",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("local 기술실패 뒤 paid phase를 열면 안 됩니다")
+        ),
+    )
+    monkeypatch.setattr(
+        providers,
+        "configured_provider",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("local 기술실패 뒤 Google을 열면 안 됩니다")
+        ),
+    )
+    reserved_before = set(public_ids._RESERVED_IDS)
+
+    client, csrf = _admin_client()
+    try:
+        response = client.post("/confirm", data=_form(csrf))
+    finally:
+        client.close()
+
+    assert response.status_code == 200
+    assert "회사 후보 조회가 잠시 지연됐습니다" in response.text
+    assert "유료 회사 식별이나 외부 후보 검색으로 넘어가지 않았" in response.text
+    assert "이름 재입력 횟수와 보고서 생성 횟수는 차감되지 않았" in response.text
+    assert "Google Maps로 회사 후보 찾기" not in response.text
+    assert _hidden(response.text, "retry") == "0"
+    assert pipeline.search_calls == 1
+    assert pipeline.lookup_calls == 0
+    assert paid_runtime._RATE_HISTORY.starts == {}
+    assert sum(
+        len(starts) for starts in candidate_logic._RATE_HISTORY.starts.values()
+    ) == 1
+    assert set(public_ids._RESERVED_IDS) == reserved_before
+    assert job_runtime._CANDIDATE_ATTEMPTS == {}
+
+
+def test_후보선택_token은_직무주소공고_이미지동의_index를_bind하고_한번만_쓴다(
+    monkeypatch,
+):
+    pipeline = CandidateAwareFakeRealPipeline(local_candidates=True)
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    client, csrf = _admin_client()
+    try:
+        body = client.post("/confirm", data=_form(csrf)).text
+        attempt_token = _hidden(body, "candidate_attempt_token")
+        selection_token = _hidden(body, "candidate_selection_token")
+        index = _hidden(body, "candidate_index")
+        candidate_name = _hidden(body, "candidate_name")
+        candidate_provider = _hidden(body, "candidate_provider")
+        tampered = client.post(
+            "/confirm",
+            data=_form(
+                csrf,
+                posting_image_consent="",
+                candidate_resolution_confirmed="yes",
+                candidate_attempt_token=attempt_token,
+                candidate_selection_token=selection_token,
+                candidate_index=index,
+                candidate_name=candidate_name,
+                candidate_provider=candidate_provider,
+            ),
+        )
+        assert tampered.status_code == 403
+        assert pipeline.lookup_calls == 0
+
+        # 변조 시 one-time attempt도 폐기되어 같은 token을 정상값으로 되살릴 수 없다.
+        replay = client.post(
+            "/confirm",
+            data=_form(
+                csrf,
+                candidate_resolution_confirmed="yes",
+                candidate_attempt_token=attempt_token,
+                candidate_selection_token=selection_token,
+                candidate_index=index,
+                candidate_name=candidate_name,
+                candidate_provider=candidate_provider,
+            ),
+        )
+        assert replay.status_code == 403
+        assert pipeline.lookup_calls == 0
+    finally:
+        client.close()
+
+
+def test_오프라인데모는_외부후보를_부르지_않고_저장목록만_안내한다(monkeypatch):
+    monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
+
+    def forbidden(_pipeline):
+        raise AssertionError("오프라인 데모가 후보 공급자를 호출했습니다")
+
+    from src.features.business_candidate import providers
+
+    monkeypatch.setattr(providers, "configured_local_provider", forbidden)
+    monkeypatch.setattr(providers, "configured_provider", forbidden)
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/confirm",
+            data={
+                "company": "JYP",
+                "job": "매니지먼트",
+                "region": "서울 강동구",
+                "posting_text": "채용 공고",
+            },
+        )
+    assert response.status_code == 200
+    assert "이 회사는 저장된 데모 목록에 없습니다" in response.text
+    assert "미리 저장한 예시 보고서만 재생하는 오프라인 데모" in response.text
+    assert "인터넷이나 DART에서 실시간으로 찾지 않습니다" in response.text
+    assert "데모에서 되는 회사" in response.text
+    assert "전자공시에 등록된 이름과 달라서" not in response.text
+
+
+def test_DART_local후보0건이고_외부검색이꺼졌으면_Google을검색했다고_말하지않는다(
+    monkeypatch,
+):
+    pipeline = CandidateAwareFakeRealPipeline(local_candidates=False)
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    from src.features.business_candidate import providers
+
+    monkeypatch.setattr(
+        providers,
+        "configured_provider",
+        lambda _pipeline, **_kwargs: None,
+    )
+    client, csrf = _admin_client()
+    try:
+        response = client.post("/confirm", data=_form(csrf))
+    finally:
+        client.close()
+
+    assert response.status_code == 200
+    assert "DART 법인목록의 약어·영문명 후보" in response.text
+    assert "추가 외부 후보 검색은 현재 사용할 수 없" in response.text
+    assert "Google Maps 장소 검색에서도" not in response.text
+    assert "보고서 생성 횟수" in response.text
+    assert "완료된 외부 조회 비용은 비용 원장에 기록될 수 있습니다" in response.text
+    assert "할당량은" not in response.text
+    assert pipeline.search_calls == 1
+    assert pipeline.lookup_inputs == ["JYP"]
+
+
+def test_Google은_DART0건뒤_명시버튼으로만_1회호출하고_같은_run_id로_DART재검증한다(
+    monkeypatch,
+):
+    pipeline = CandidateAwareFakeRealPipeline(local_candidates=False)
+    google = PaidGoogleFixture()
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    monkeypatch.setenv(evaluation_mode.ENV_MODE, "1")
+    monkeypatch.setenv(evaluation_mode.ENV_PAID_PROVIDERS, "1")
+    monkeypatch.setattr(request_helpers, "_strict_loopback_http_request", lambda _r: True)
+    from src.features.business_candidate import providers
+
+    monkeypatch.setattr(
+        providers,
+        "configured_provider",
+        lambda _pipeline, **_kwargs: google,
+    )
+    client, csrf = _admin_client()
+    try:
+        workflow_id = _hidden(client.get("/").text, "evaluation_workflow_id")
+        missed = client.post(
+            "/confirm",
+            data=_form(
+                csrf,
+                evaluation_paid_consent="yes",
+                evaluation_workflow_id=workflow_id,
+            ),
+        )
+        assert missed.status_code == 200, missed.text
+        assert "Google Maps로 회사 후보 찾기" in missed.text
+        assert "회사명·입력 주소가 Google에 전송" in missed.text
+        assert google.calls == 0
+        search_grant = _hidden(missed.text, "candidate_search_grant")
+        consent_grant = _hidden(missed.text, "evaluation_consent_grant")
+
+        # signed consent가 빠진 직접 POST는 provider 0회다.
+        denied = client.post(
+            "/confirm",
+            data=_form(
+                csrf,
+                candidate_search_requested="yes",
+                candidate_search_grant=search_grant,
+                evaluation_paid_consent="yes",
+            ),
+        )
+        assert denied.status_code == 422
+        assert google.calls == 0
+
+        candidates = client.post(
+            "/confirm",
+            data=_form(
+                csrf,
+                candidate_search_requested="yes",
+                candidate_search_grant=search_grant,
+                evaluation_consent_grant=consent_grant,
+            ),
+        )
+        assert candidates.status_code == 200
+        assert google.calls == 1
+        assert "Google Maps" in candidates.text
+        assert 'translate="no"' in candidates.text
+        assert "공공 주소 데이터" in candidates.text
+        candidate_attempt_token = _hidden(candidates.text, "candidate_attempt_token")
+        candidate_token = _hidden(candidates.text, "candidate_selection_token")
+        candidate_index = _hidden(candidates.text, "candidate_index")
+        candidate_name = _hidden(candidates.text, "candidate_name")
+        candidate_provider = _hidden(candidates.text, "candidate_provider")
+
+        # 브라우저 refresh/back POST는 49원을 다시 쓰지 않고 같은 후보를 재표시한다.
+        cached = client.post(
+            "/confirm",
+            data=_form(
+                csrf,
+                candidate_search_requested="yes",
+                candidate_search_grant=search_grant,
+                evaluation_consent_grant=consent_grant,
+            ),
+        )
+        assert cached.status_code == 410
+        assert google.calls == 1
+        assert "검색 결과를 서버에 보관하지 않" in cached.text
+
+        confirmed = client.post(
+            "/confirm",
+            data=_form(
+                csrf,
+                candidate_resolution_confirmed="yes",
+                candidate_attempt_token=candidate_attempt_token,
+                candidate_selection_token=candidate_token,
+                candidate_index=candidate_index,
+                candidate_name=candidate_name,
+                candidate_provider=candidate_provider,
+                evaluation_consent_grant=consent_grant,
+            ),
+        )
+        assert confirmed.status_code == 200
+        assert pipeline.lookup_inputs == ["JYP", "JYP 엔터테인먼트"]
+        paid_attempt = job_runtime._PAID_ATTEMPTS[
+            _hidden(confirmed.text, "paid_attempt_token")
+        ]
+        assert paid_attempt.user_input.company == "JYP"
+        assert paid_attempt.lookup_cost_krw == 56.0
+        with storage_db.connect() as conn:
+            rows = [
+                tuple(row)
+                for row in conn.execute(
+                    "SELECT run_id, phase, cost_krw FROM budget_spend_events "
+                    "WHERE phase IN (?, ?) ORDER BY created_at",
+                    (SPEND_PHASE_CANDIDATE, SPEND_PHASE_IDENTIFY),
+                ).fetchall()
+                if float(row[2]) > 0
+            ]
+        candidate_rows = [row for row in rows if row[1] == SPEND_PHASE_CANDIDATE]
+        identify_rows = [row for row in rows if row[1] == SPEND_PHASE_IDENTIFY]
+        assert candidate_rows[-1][2] == 49.0
+        assert identify_rows[-1][2] == 7.0
+        assert candidate_rows[-1][0] == identify_rows[-1][0] == paid_attempt.run_id
+        assert paid_runtime._ACTIVE_PAID_PHASES == set()
+    finally:
+        client.close()
+
+
+def test_Google_attribution의_공급자문자열은_HTML로_실행되지_않는다(monkeypatch):
+    candidate = RawBusinessCandidate(
+        candidate_name="JYP 엔터테인먼트",
+        address="서울 강동구",
+        provider_name="Google Maps",
+        attributions=(("<img src=x onerror=alert(1)>", "https://example.org/"),),
+    )
+    # resolver가 text-only로 바꾼 뒤 Jinja도 escape한다.
+    from src.features.business_candidate import logic
+
+    result = logic.resolve_candidates(
+        type("P", (), {"costs_money": False, "search": lambda self, **_k: [candidate]})(),
+        company="JYP",
+        address_hint="서울",
+        rate_key="escape-attribution",
+        now=100.0,
+    )
+    assert result.candidates
+    # 태그뿐인 attribution은 보이는 안전한 글자가 없으므로 통째로 버린다.
+    assert result.candidates[0].attributions == ()
+
+
+def test_후보를_pop한뒤_첫_guard가막아도_run_id예약을_즉시_반환한다(monkeypatch):
+    pipeline = CandidateAwareFakeRealPipeline(local_candidates=True)
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    client, csrf = _admin_client()
+    try:
+        body = client.post("/confirm", data=_form(csrf)).text
+        attempt_token = _hidden(body, "candidate_attempt_token")
+        attempt = job_runtime._CANDIDATE_ATTEMPTS[attempt_token]
+        assert attempt.run_id in public_ids._RESERVED_IDS
+
+        monkeypatch.setattr(
+            request_helpers,
+            "_guard_run",
+            lambda _request, **kwargs: (
+                PlainTextResponse("시험용 사전 차단", status_code=429)
+                if kwargs.get("count_start") is False
+                else None
+            ),
+        )
+        blocked = client.post(
+            "/confirm",
+            data=_form(
+                csrf,
+                candidate_resolution_confirmed="yes",
+                candidate_attempt_token=attempt_token,
+                candidate_selection_token=_hidden(body, "candidate_selection_token"),
+                candidate_index=_hidden(body, "candidate_index"),
+                candidate_name=_hidden(body, "candidate_name"),
+                candidate_provider=_hidden(body, "candidate_provider"),
+                candidate_ref=_hidden(body, "candidate_ref"),
+            ),
+        )
+        assert blocked.status_code == 429
+        assert attempt_token not in job_runtime._CANDIDATE_ATTEMPTS
+        assert attempt.run_id not in public_ids._RESERVED_IDS
+        assert pipeline.lookup_calls == 0
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda value: f"<script>{value}</script>",
+        lambda value: f"  {value}  ",
+        lambda value: value.replace("(", "（", 1),
+        lambda value: value[:1] + "\u202e" + value[1:],
+    ],
+)
+def test_서명과_같은canonical값으로_줄어드는_raw후보변조도_DART전에_거부한다(
+    monkeypatch, mutate
+):
+    pipeline = CandidateAwareFakeRealPipeline(local_candidates=True)
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    client, csrf = _admin_client()
+    try:
+        body = client.post("/confirm", data=_form(csrf)).text
+        original_name = _hidden(body, "candidate_name")
+        blocked = client.post(
+            "/confirm",
+            data=_form(
+                csrf,
+                candidate_resolution_confirmed="yes",
+                candidate_attempt_token=_hidden(body, "candidate_attempt_token"),
+                candidate_selection_token=_hidden(body, "candidate_selection_token"),
+                candidate_index=_hidden(body, "candidate_index"),
+                candidate_name=mutate(original_name),
+                candidate_provider=_hidden(body, "candidate_provider"),
+            ),
+        )
+        assert blocked.status_code == 403
+        assert pipeline.lookup_calls == 0
+    finally:
+        client.close()
+
+
+def test_share_cookie범위에서는_별칭후보와_서명된후보선택도_닫힌다(monkeypatch):
+    pipeline = CandidateAwareFakeRealPipeline(local_candidates=True)
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    client, csrf = _admin_client()
+    try:
+        body = client.post("/confirm", data=_form(csrf)).text
+        attempt_token = _hidden(body, "candidate_attempt_token")
+        monkeypatch.setattr(request_helpers, "_raw_share_key", lambda _request: "a" * 32)
+        blocked = client.post(
+            "/confirm",
+            data=_form(
+                csrf,
+                candidate_resolution_confirmed="yes",
+                candidate_attempt_token=attempt_token,
+                candidate_selection_token=_hidden(body, "candidate_selection_token"),
+                candidate_index=_hidden(body, "candidate_index"),
+                candidate_name=_hidden(body, "candidate_name"),
+                candidate_provider=_hidden(body, "candidate_provider"),
+            ),
+        )
+        assert blocked.status_code == 403
+        assert pipeline.lookup_calls == 0
+
+        # 새 share 요청은 local alias 공급자도 건너뛰고 기존 exact DART 식별만 쓴다.
+        missed = client.post("/confirm", data=_form(csrf))
+        assert missed.status_code == 200
+        assert pipeline.search_calls == 1
+        assert pipeline.lookup_inputs == ["JYP"]
+    finally:
+        client.close()
+
+
+def test_회사이름을_바꾸면_옛평가동의를_재사용하지_않고_다시_받는다(monkeypatch):
+    pipeline = CandidateAwareFakeRealPipeline(local_candidates=False)
+    google = PaidGoogleFixture()
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    monkeypatch.setenv(evaluation_mode.ENV_MODE, "1")
+    monkeypatch.setenv(evaluation_mode.ENV_PAID_PROVIDERS, "1")
+    monkeypatch.setattr(request_helpers, "_strict_loopback_http_request", lambda _r: True)
+    from src.features.business_candidate import providers
+
+    monkeypatch.setattr(providers, "configured_provider", lambda _p, **_k: google)
+    client, csrf = _admin_client()
+    try:
+        workflow_id = _hidden(client.get("/").text, "evaluation_workflow_id")
+        first = client.post(
+            "/confirm",
+            data=_form(
+                csrf,
+                evaluation_paid_consent="yes",
+                evaluation_workflow_id=workflow_id,
+            ),
+        )
+        assert first.status_code == 200
+        first_grant = _hidden(first.text, "evaluation_consent_grant")
+        assert 'name="evaluation_paid_consent" value="yes" required' in first.text
+
+        no_reconsent = client.post(
+            "/confirm",
+            data=_form(csrf, company="JYPe", retry="1"),
+        )
+        assert no_reconsent.status_code == 422
+        assert google.calls == 0
+
+        retried = client.post(
+            "/confirm",
+            data=_form(
+                csrf,
+                company="JYPe",
+                retry="1",
+                evaluation_paid_consent="yes",
+                evaluation_workflow_id=_hidden(
+                    first.text, "evaluation_workflow_id"
+                ),
+            ),
+        )
+        assert retried.status_code == 200
+        second_grant = _hidden(retried.text, "evaluation_consent_grant")
+        assert second_grant != first_grant
+        assert google.calls == 0
+    finally:
+        client.close()
+
+
+def test_Google검색중_요청취소뒤_같은_grant는_재호출과_재과금하지_않는다(monkeypatch):
+    class BlockingGoogle(PaidGoogleFixture):
+        def __init__(self):
+            super().__init__()
+            self.started = threading.Event()
+            self.finish = threading.Event()
+
+        def search(self, **_kwargs):
+            self.calls += 1
+            self.started.set()
+            assert self.finish.wait(3), "시험 worker 종료 신호를 받지 못했습니다"
+            return []
+
+    pipeline = CandidateAwareFakeRealPipeline(local_candidates=False)
+    google = BlockingGoogle()
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    monkeypatch.setenv(evaluation_mode.ENV_MODE, "1")
+    monkeypatch.setenv(evaluation_mode.ENV_PAID_PROVIDERS, "1")
+    monkeypatch.setattr(request_helpers, "_strict_loopback_http_request", lambda _r: True)
+    from src.features.business_candidate import providers
+
+    monkeypatch.setattr(providers, "configured_provider", lambda _p, **_k: google)
+    client, csrf = _admin_client()
+    workflow_id = _hidden(client.get("/").text, "evaluation_workflow_id")
+    first = client.post(
+        "/confirm",
+        data=_form(
+            csrf,
+            evaluation_paid_consent="yes",
+            evaluation_workflow_id=workflow_id,
+        ),
+    )
+    assert first.status_code == 200
+    search_grant = _hidden(first.text, "candidate_search_grant")
+    consent_grant = _hidden(first.text, "evaluation_consent_grant")
+    session_cookie = client.cookies.get(auth_constants.SESSION_COOKIE_NAME)
+    client.close()
+    search_form = _form(
+        csrf,
+        candidate_search_requested="yes",
+        candidate_search_grant=search_grant,
+        evaluation_consent_grant=consent_grant,
+    )
+
+    async def scenario() -> None:
+        transport = httpx.ASGITransport(app=main.app, client=("127.0.0.1", 43123))
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://127.0.0.1:8000",
+            headers={"Origin": "http://127.0.0.1:8000"},
+            cookies={auth_constants.SESSION_COOKIE_NAME: session_cookie},
+        ) as async_client:
+            task = asyncio.create_task(async_client.post("/confirm", data=search_form))
+            assert await asyncio.to_thread(google.started.wait, 1)
+            task.cancel()
+            google.finish.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            grant = job_runtime._CANDIDATE_SEARCH_GRANTS[search_grant]
+            assert grant.in_flight is False
+            assert grant.resolution_status == "failed"
+            assert not public_ids._RESERVED_IDS
+
+            replay = await async_client.post("/confirm", data=search_form)
+            assert replay.status_code == 200
+            assert "이번에는 사용하지 못했습니다" in replay.text
+            assert "외부 후보 검색으로 넘어가지 않았" not in replay.text
+            assert "외부 후보 검색도 시작하지 않았" not in replay.text
+            assert "완료된 외부 조회 비용은 비용 원장에 기록될 수" in replay.text
+            assert _hidden(replay.text, "retry") == "1"
+            assert google.calls == 1
+
+    asyncio.run(scenario())

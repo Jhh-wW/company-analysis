@@ -1,68 +1,17 @@
-"""진짜 알맹이 — 1판 시제품 엔진(`prototype_v1/tools/run_pilot.py`)을 화면에 연결한다.
+"""실제 조사 엔진을 canonical(v3) 회사분석 파이프라인에 연결한다.
 
-════════════════════════════════════════════════════════════════════
-★★ 이 파일을 돌리면 «돈이 나간다». 고치기 전에 반드시 읽을 것 ★★
+회사 확인 뒤 공식 공시·홈페이지와 검증용 외부 자료를 수집하고, 세 번의 독립
+사실 배치, 작가·검토 분리, 원자 사실 장부, 출고 게이트를 거친다. 직무·채용공고·
+급여·복지 정보는 회사분석 생성 경로에 넣지 않는다. 근거가 부족하거나 정본 계약을
+통과하지 못하면 부분 보고서를 내보내지 않고 ``GATE_STOPPED``로 끝낸다.
 
-1. **돈이 나간다.** 1건당 AI 최대 15회 (이름찾기 5 + 공고판별 1 + 요구역량 1 +
-   생성·검사 2×3회 + 작가 1 + 근거 대조 1). 기획서 상한 15회와 같다.
-   **최근 실측(2026-08-16)**: 작가 전 188원 → 작가·근거 대조 포함 212원.
-2. **실제로 돌려봤다** (2026-08-15~16, 표본 5건·실비 약 292원).
-   ~~한 번도 안 돌려봤다~~ — 그때 나온 것이 문제로그 P-43·P-66·P-67·P-74·P-76이다.
-3. **1판 엔진과 2판 기획서가 어긋나는 곳이 있다** → 아래 「어긋난 곳」 표.
-   고치지 않고 적어만 두었다. 사용자가 정할 일이다.
-4. 켜는 법 — 코드를 고치지 않는다. **환경변수 `PIPELINE=real`** 하나면 된다
-   (`web/main.py`의 `make_pipeline()`). 코드로 켜면 «켜 둔 채 잊어버려» 돈이 샌다.
-   그 전에 `prototype_v1/.env`에 열쇠(DART·네이버·Anthropic)가 있어야 하고,
-   `prototype_v1`의 의존 프로그램(anthropic·presidio 등)이 깔려 있어야 한다.
-════════════════════════════════════════════════════════════════════
-
-# 1판 엔진과 2판 기획서가 어긋난 곳 (고치지 않고 기록만)
-
-| # | 1판이 하는 일 | 2판 기획서 | 문제로그 |
-|---|---|---|---|
-| 1 | 6·7·8번을 만들지 않고 **요구역량을 임의 분배** | 6·7·8은 각각 다른 항목 | **P-31** |
-| 2 | 표 덩어리를 그대로 채움 | **비운다** (D12) | **P-29** |
-| 3 | 보고서에 **출처 목록 절이 없다** | 맨 아래 출처 목록 필수 | **P-24** |
-| 4 | 확인 카드를 **자동 [맞습니다]** 처리 | 사람이 눌러야 함 | — (이 파일이 갈라 놓음) |
-| 5 | 附(참고 숫자)·어려운 말 풀이 **미구현** | 기획서에 있음 | — |
-| 6 | ~~홈페이지 소스 미연결~~ → **홈페이지는 붙였다** (`features/homepage/`). IR·기술블로그는 아직 | 소스 목록에 있음 | **P-35 해소** |
-| 7 | 캐시·할당량 차감 **없음** | 4단계·1단계에 있음 | — (7-a 참고) |
-| 8 | **문장 고르는 지시문이 4축에서 뉴스를 배제** | 4-1은 「언론이 지적한 과제」 포함 | **P-43** → `spanselect/`로 교체 |
-| 9 | **비용 단가가 모델을 안 가린다**(haiku 값 고정) | — | **P-76** ⚠️ 모델 올리면 지표가 3배 어긋난다 |
-
-## 7-a. 캐시 — 지금 어디까지 꽂혔나
-
-| 층 | 상태 |
-|---|---|
-| **1층** (회사 × 직무 × 공고 지문 → 완성 보고서) | ✅ **읽기·쓰기 다 꽂힘** — 이 파일 |
-| **2층** (회사 → 수집 자료 재사용) | ❌ 아직. 저장소 함수(`cache.save_layer2`)는 있다 |
-| **별칭**(통칭 → 고유번호) | ❌ 아직 |
-| **할당량 차감** | ❌ 아직 (1층 히트는 `charged=False`로 «0 차감»만 지킨다) |
-
-**1층 히트여도 공짜는 아니다.** 공고 지문은 5.5(글자 추출) 뒤에야 계산되므로
-5.5의 AI 2회는 그대로 나간다. 대신 «가장 비싼» 8·9 생성 + 10 검증(AI 6회)이
-통째로 빠진다. 정본이 이 맞바꿈을 명시적으로 감수했다 —
-「남의 옛 공고 블록이 나가는 사고는 되돌릴 수 없고, 글자추출은 소액이다」
-(확정/03_수집/2_규칙/03_캐시와저장.md §1층 확정 시점은 5.5 뒤다).
-
-# 이 파일이 하는 일
-
-1판 엔진은 **혼자 도는 배치 스크립트**다. 회사 찾기부터 보고서 쓰기까지 한 번에 한다.
-화면은 그 사이에 **사람의 확인**을 끼워야 하므로 둘로 갈라야 한다.
-
-```
-find_company()  = 2 식별 → 3 확인 카드          ← 여기서 멈추고 사람에게 보여준다
-   ↓ 사람이 [맞습니다]
-run()           = 5 판정 → 5.5 공고 → 6 수집 → 7 게이트 → 8·9 생성 → 10 검증 → 13 출력
-```
-
-**엔진 코드는 고치지 않는다.** 여기서 부르기만 한다.
-1판이 실제로 53건을 돌려 얻은 것(무엇이 걸리는지)을 버리지 않으려는 것이다.
+실제 실행은 유료 API를 사용할 수 있다. ``PIPELINE=real``로만 켜며 필요한 키와
+의존성은 ``analysis_engine/.env`` 및 앱 운영 문서를 따른다. 캐시는
+``company-report-v3-canonical`` 보고서만 반환·저장한다.
 """
 
 from __future__ import annotations
 
-import datetime as dt
 import importlib.util
 import itertools
 import logging
@@ -70,12 +19,14 @@ import math
 import re
 import sys
 import threading
+import time
 from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
 from src.core import paths
+from src.core.clock import today_kst
 from src.core.constants import (
     AI_COST_KRW_PER_USD,
     AUDIT_WINDOW_YEARS,
@@ -83,50 +34,59 @@ from src.core.constants import (
     CACHE_HIT_MESSAGE,
     CACHE_HIT_UNKNOWN_DATE,
     CELL_LABELS,
-    EMP_REPORT_CODE,
+    COMPANY_SOURCE_CELLS,
     EMPTY_REASON_HOMEPAGE,
     GENERATION_MODEL,
-    MODEL_PRICES_USD_PER_MTOK,
     MODEL_LABEL_SEPARATOR,
-    UNKNOWN_MODEL_PRICE_USD_PER_MTOK,
     EMPTY_REASON_JOINER,
     EMPTY_REASON_KIND_NONE,
     EMPTY_REASON_MATERIAL_UNUSED,
+    EMPTY_REASON_NOT_COMPANY_SPECIFIC,
     EMPTY_REASON_NEWS_FAILED,
     EMPTY_REASON_NEWS_NONE,
     EMPTY_REASON_NO_MATERIAL,
-    HIDDEN_CELLS,
     HOMEPAGE_GATE_CELLS,
     REVENUE_CITE,
-    REVENUE_TABLE_CELL,
-    REPORT_CELL_ORDER,
-    SITUATION_CELLS,
     SUBSTANCE_FAILED_REASON,
     TABLE_DUMP_REASON,
     VOTE_MIN,
     VOTE_ROUNDS,
 )
+from src.core.pricing import model_price
+from src.core.citations import citation_number
 from src.features.grading.constants import ACCOUNTING_POLICY_REASON
-from src.features.blocks678.logic import build_block6, build_block7, build_block8
+from src.features.budget import provider_budget
+from src.features.company_performance.logic import build_three_year_table
+from src.features.company_specificity.logic import (
+    filter_prose_lines as filter_specific_prose,
+)
+from src.features.company_comparison import (
+    ComparisonBlockedError,
+    OfficialCompanyBundle,
+    build_competitive_position,
+)
+from src.features.business_candidate.dart_identity import (
+    DartCompanyRecord,
+    build_dart_company_index,
+    generate_dart_company_matches,
+    parse_dart_company_records,
+)
 from src.features.grading.financial import parse_financial_table
 from src.features.homepage import link as homepage_link
 from src.features.homepage.constants import FRAGMENT_KIND as HOMEPAGE_FRAGMENT_KIND
 from src.features.homepage.logic import collect_homepage_fragments
 from src.features.provenance.citations import build_citations
-from src.features.readable import logic as readable_logic
-from src.features.provenance.extra_numbers import build_extra_numbers_section
-from src.features.provenance.freshness import append_direction_warning
 from src.features.spanselect.constants import NEWS_FRAGMENT_KIND, USAGE_MODEL_KEY
-from src.features.spanselect.logic import select_spans
 from src.features.filingclean import extra as filing_extra
 from src.features.filingclean import logic as filing_clean
+from src.features.filingclean import relationships as filing_relationships
 from src.features.newspick import constants as newspick
 from src.features.newspick import logic as newspick_logic
 from src.features.revenuemix import logic as revenuemix
 from src.features.writer import constants as writer
 from src.features.writer import logic as writer_logic
 from src.features.writer import verify as writer_verify
-from src.features.grading.logic import grade_of, is_accounting_policy, is_table_dump
+from src.features.grading.logic import is_accounting_policy, is_table_dump
 from src.features.pipeline.constants import DART_SUCCESS_STATUS
 from src.features.pipeline.port import (
     CompanyCard,
@@ -140,10 +100,29 @@ from src.features.pipeline.port import (
     StepReporter,
     UserInput,
 )
+from src.features.pipeline.canonical_report import (
+    PublishBlockedError,
+    assemble_report_draft,
+    finalize_report,
+    majority_picks,
+    sections_from_picks as canonical_sections_from_picks,
+    write_and_verify_sections,
+)
+from src.features.spanselect.canonical import select_canonical_spans
 from src.features.storage import cache as cache_store
 from src.features.storage import db as storage_db
 
 logger = logging.getLogger(__name__)
+
+# ``_company_catalog``의 공개 모양(고유번호, 이름)은 기존 식별 엔진과 시험이 함께
+# 쓴다. stock_code·modify_date는 그 계약을 깨지 않고 고유번호별 보조 메타데이터로
+# 보존해 fuzzy 후보 정렬에만 사용한다.
+_COMPANY_CATALOG_METADATA: dict[str, tuple[str, str]] = {}
+_COMPANY_CATALOG_ENGLISH_NAMES: dict[str, str] = {}
+_COMPANY_CATALOG_RECORDS: tuple[DartCompanyRecord, ...] = ()
+_COMPANY_CANDIDATE_INDEX_SOURCE: object | None = None
+_COMPANY_CANDIDATE_INDEX = None
+_COMPANY_CANDIDATE_INDEX_LOCK = threading.Lock()
 
 
 #: 1판은 모듈 전역 `_spent_usd`에 비용을 더한다. 보통 `import run_pilot`은
@@ -245,12 +224,26 @@ class _MeteredMessages:
         # provider에 나가는 마지막 경계에서 이 요청의 로컬 모델로 바로잡는다.
         if self._metered.MODEL:
             call_kwargs["model"] = self._metered.MODEL
+        model = str(call_kwargs.get("model", ""))
+        max_tokens = call_kwargs.get("max_tokens")
+        if not isinstance(max_tokens, int):
+            raise provider_budget.ProviderBudgetUnavailable(
+                "provider 출력 token 상한이 명시되지 않았습니다"
+            )
+        call_reservation = provider_budget.current().reserve_call(
+            model=model,
+            input_tokens_upper=provider_budget.estimate_request_tokens(
+                {"args": args, "kwargs": call_kwargs}
+            ),
+            max_tokens=max_tokens,
+        )
         try:
             response = self._messages.create(*args, **call_kwargs)
         except Exception:
             # timeout/API 예외는 서버가 요청을 처리했는지 알 수 없다. 응답이 없다고
             # 0원으로 마감하면 재시작 뒤 예산이 다시 열리므로 표식을 남길 신호를 보낸다.
             self._metered._billing_uncertain = True
+            provider_budget.current().mark_unknown(call_reservation)
             raise
         usage = getattr(response, "usage", None)
         tokens_in = getattr(usage, "input_tokens", None) if usage is not None else None
@@ -259,24 +252,40 @@ class _MeteredMessages:
             # 응답은 왔지만 usage가 없으면 실제 비용을 확정할 수 없다. 0원으로
             # 적지 않고 같은 통장의 진행 중 표식을 남긴다.
             self._metered._billing_uncertain = True
+            provider_budget.current().mark_unknown(call_reservation)
             return response
         try:
             clean_in, clean_out = int(tokens_in), int(tokens_out)
         except (TypeError, ValueError, OverflowError):
             self._metered._billing_uncertain = True
+            provider_budget.current().mark_unknown(call_reservation)
             return response
         if clean_in < 0 or clean_out < 0:
             self._metered._billing_uncertain = True
+            provider_budget.current().mark_unknown(call_reservation)
             return response
+        used_model = str(
+            getattr(response, "model", "") or call_kwargs.get("model", "")
+        )
         self._usages.append(
             {
                 "in": clean_in,
                 "out": clean_out,
-                USAGE_MODEL_KEY: str(
-                    getattr(response, "model", "") or call_kwargs.get("model", "")
-                ),
+                USAGE_MODEL_KEY: used_model,
             }
         )
+        try:
+            provider_budget.current().settle_call(
+                call_reservation,
+                actual_krw=provider_budget.usage_cost_krw(
+                    used_model, clean_in, clean_out
+                ),
+            )
+        except provider_budget.ProviderCostInvariantError:
+            # usage는 먼저 보존했다. 이미 생긴 비용을 숨기지 않고 상위에서
+            # billing-uncertain으로 phase를 닫게 한다.
+            self._metered._billing_uncertain = True
+            raise
         return response
 
     def __getattr__(self, name: str) -> Any:
@@ -324,7 +333,7 @@ def _engine() -> Any:
     ★ 평범한 `import run_pilot`을 쓰지 않는다. 그 방식은 서버 수명 동안 같은 module을
       돌려줘 1판의 `_spent_usd`가 요청 사이에 누적된다(P-144).
     """
-    root = paths.PROJECT_ROOT / "prototype_v1"
+    root = paths.PROJECT_ROOT / "analysis_engine"
     for extra in (root / "src", root / "tools"):
         if str(extra) not in sys.path:
             sys.path.insert(0, str(extra))
@@ -335,17 +344,92 @@ def _engine() -> Any:
 
 
 @lru_cache(maxsize=1)
+def _company_catalog() -> tuple[tuple[str, str], ...]:
+    """전자공시 전체 법인의 기존 (고유번호, 표시명) 호환 목록.
+
+    실제 정본은 같은 XML에서 읽은 immutable 5-field record이며, 이 2-tuple은
+    기존 1판 exact-name index 계약에만 남긴다.
+    """
+    engine = _engine()
+    # 기존 real 개발 실행은 analysis_engine/.env bootstrap에 의존할 수 있다.
+    # 실시간 평가 launcher는 ANALYSIS_ENGINE_DISABLE_DOTENV=1이라 이 호출 자체가
+    # no-op이고, 명시 전달된 환경변수만 사용한다.
+    engine.load_env()
+    xml = engine.download_corpcode(engine.CORPCODE_DIR, engine.UsageCounter())
+    records = parse_dart_company_records(xml)
+    global _COMPANY_CATALOG_RECORDS
+    _COMPANY_CATALOG_RECORDS = records
+    _COMPANY_CATALOG_METADATA.clear()
+    _COMPANY_CATALOG_METADATA.update(
+        {
+            record.corp_code: (record.stock_code, record.modify_date)
+            for record in records
+        }
+    )
+    _COMPANY_CATALOG_ENGLISH_NAMES.clear()
+    _COMPANY_CATALOG_ENGLISH_NAMES.update(
+        {record.corp_code: record.corp_eng_name for record in records}
+    )
+    return tuple((record.corp_code, record.corp_name) for record in records)
+
+
+def _records_from_candidate_catalog(
+    catalog: tuple[object, ...],
+) -> tuple[DartCompanyRecord, ...]:
+    """Accept the legacy fixture tuple shapes at the local-index boundary."""
+    records: list[DartCompanyRecord] = []
+    for raw_entry in catalog:
+        if isinstance(raw_entry, DartCompanyRecord):
+            records.append(raw_entry)
+            continue
+        if not isinstance(raw_entry, (tuple, list)) or len(raw_entry) < 2:
+            continue
+        entry = tuple(raw_entry)
+        corp_code, corp_name = str(entry[0]), str(entry[1])
+        english_name = _COMPANY_CATALOG_ENGLISH_NAMES.get(corp_code, "")
+        stock_code, modify_date = _COMPANY_CATALOG_METADATA.get(corp_code, ("", ""))
+        if len(entry) >= 5:
+            english_name = str(entry[2] or "").strip()
+            stock_code = str(entry[3] or "").strip()
+            modify_date = str(entry[4] or "").strip()
+        elif len(entry) >= 4:
+            stock_code = str(entry[2] or "").strip()
+            modify_date = str(entry[3] or "").strip()
+        elif len(entry) >= 3:
+            stock_code = str(entry[2] or "").strip()
+        records.append(
+            DartCompanyRecord(
+                corp_code=corp_code,
+                corp_name=corp_name,
+                corp_eng_name=english_name,
+                stock_code=stock_code,
+                modify_date=modify_date,
+            )
+        )
+    return tuple(records)
+
+
+def _company_candidate_index():
+    """Cache normalized aliases against the cached catalog tuple identity."""
+    catalog = _company_catalog()
+    global _COMPANY_CANDIDATE_INDEX_SOURCE, _COMPANY_CANDIDATE_INDEX
+    with _COMPANY_CANDIDATE_INDEX_LOCK:
+        if _COMPANY_CANDIDATE_INDEX_SOURCE is not catalog:
+            _COMPANY_CANDIDATE_INDEX = build_dart_company_index(
+                _records_from_candidate_catalog(catalog)
+            )
+            _COMPANY_CANDIDATE_INDEX_SOURCE = catalog
+        return _COMPANY_CANDIDATE_INDEX
+
+
+@lru_cache(maxsize=1)
 def _company_index() -> dict[str, list[str]]:
     """전자공시 전체 법인 이름 색인.
 
     ★ 한 번만 만든다. 10만 곳 넘는 XML을 파싱하므로 요청마다 하면 화면이 멈춘다.
     """
     engine = _engine()
-    from build_goldenset_answer import parse_corpcode  # type: ignore  # noqa: PLC0415
-
-    xml = engine.download_corpcode(engine.CORPCODE_DIR, engine.UsageCounter())
-    corps = parse_corpcode(xml)
-    return engine.build_index([(code, name) for code, name, _ in corps])
+    return engine.build_index(list(_company_catalog()))
 
 
 # ══════════════════════════════════════════════════════════
@@ -401,11 +485,7 @@ def _sections_from(
     empty_reasons = getattr(engine, "EMPTY_REASONS", {})
     cell_substance = engine_cells or {}
     sections: list[ReportSection] = []
-    for cell in REPORT_CELL_ORDER:
-        if cell == "5":
-            # 5번은 공고 원문이라 문장이 아니라 요구역량 목록으로 화면이 그린다.
-            sections.append(ReportSection(cell="5", title=CELL_LABELS["5"]))
-            continue
+    for cell in COMPANY_SOURCE_CELLS:
         lines = by_cell.get(cell, [])
         cell_tables = tables.get(cell, [])
         # ★★ 알맹이 검사(①-b) 반영 — 문장이 «실제로 남아 있는» 칸에만 건다.
@@ -434,29 +514,6 @@ def _sections_from(
             )
         )
     return sections, requirements
-
-
-def _fill_blocks678(
-    sections: list[ReportSection],
-    job: str,
-    requirements: list[str],
-) -> list[ReportSection]:
-    """6·7·8번을 «처음부터» 만들어 덮어쓴다 (문제로그 P-31 · 결정 D14-3).
-
-    ★ 1판 엔진은 이 세 칸을 만들지 않고 요구역량을 5·6·7·8에 임의로 흩뿌렸다.
-      그 결과는 의미가 없으므로 **버리고 새로 만든다.**
-    ★ AI를 부르지 않는다. 전부 코드다.
-    """
-    by_cell = {s.cell: s for s in sections}
-    cell1_lines = by_cell["1"].lines if "1" in by_cell else []
-    cell4_lines = {c: (by_cell[c].lines if c in by_cell else []) for c in SITUATION_CELLS}
-
-    made = {
-        "6": build_block6(cell1_lines, job),
-        "7": build_block7(requirements),
-        "8": build_block8(cell4_lines, requirements),
-    }
-    return [made.get(s.cell, s) for s in sections]
 
 
 #: 1판 대응표에 칸이 없을 때 `_sections_from`이 붙이는 사유. 이것도 갈아 끼울 대상이다.
@@ -521,6 +578,7 @@ def _refresh_empty_reasons(
     engine: Any,
     collected_kinds: set[str],
     news_step: dict[str, Any],
+    specificity_rejected_cells: set[str] | None = None,
 ) -> list[ReportSection]:
     """빈칸 사유를 «실제 수집 결과»로 다시 쓴다 (문제로그 P-67).
 
@@ -539,9 +597,14 @@ def _refresh_empty_reasons(
     homepage_reason = _homepage_reason(homepage_state, homepage_detail)
 
     fixed: list[ReportSection] = []
+    rejected_cells = specificity_rejected_cells or set()
     for section in sections:
         if section.lines or section.tables or section.empty_reason not in replaceable:
             fixed.append(section)
+            continue
+
+        if section.cell in rejected_cells:
+            fixed.append(replace(section, empty_reason=EMPTY_REASON_NOT_COMPANY_SPECIFIC))
             continue
 
         kinds_for_cell = tuple(getattr(engine, "CELL_SOURCES", {}).get(section.cell, ()))
@@ -597,15 +660,18 @@ def _step_usage_spent_krw(
         ):
             continue
         used_model = str(usage.get(USAGE_MODEL_KEY) or model)
-        price_in, price_out = MODEL_PRICES_USD_PER_MTOK.get(
-            used_model, UNKNOWN_MODEL_PRICE_USD_PER_MTOK
-        )
+        price_in, price_out = model_price(used_model)
         spent_usd += (tokens_in * price_in + tokens_out * price_out) / _USD_PER_MTOK
     return round(spent_usd * krw_per_usd, 2)
 
 
 def _metered_client(metered: _MeteredEngine, client: Any) -> Any:
     """계약 검사(AST)가 1판 이름과 앱 껍데기 이름을 섞지 않게 감싼다."""
+    # SDK 내부 retry는 이 경계를 다시 지나지 않아 재호출 예상비용을 따로 잡을 수
+    # 없다. 자동 retry를 끄고 명시적인 재호출만 매번 새 예약을 받게 한다.
+    with_options = getattr(client, "with_options", None)
+    if callable(with_options):
+        client = with_options(max_retries=0)
     return metered.meter_client(client)
 
 
@@ -643,9 +709,36 @@ def _request_billing_uncertain(metered: _MeteredEngine) -> bool:
     return metered.billing_uncertain
 
 
-def _cited_fragment_count(kept: list[Any]) -> int:
-    """실제로 «인용된» 조각이 몇 개인가 — 수집 활용률의 분자."""
-    return len({i.fragment_id for i in kept if i.fragment_id is not None})
+def _first_fragment_cite(
+    frags: dict[int, dict[str, str]],
+    *,
+    kind: str,
+    text_prefix: str = "",
+) -> str:
+    """표가 실제 수집 조각 번호를 가리키게 한다. 못 찾으면 빈 문자열이다."""
+
+    for number, fragment in sorted(frags.items()):
+        if fragment.get("종류") != kind:
+            continue
+        if text_prefix and not str(fragment.get("원문") or "").startswith(text_prefix):
+            continue
+        return f"조각 {number}·{kind}"
+    return ""
+
+
+def _used_citation_numbers(sections: list[ReportSection]) -> set[int]:
+    """최종 화면에서 실제로 가리킨 조각 번호만 모은다."""
+
+    used: set[int] = set()
+    for section in sections:
+        cites = [cite for _text, cite in section.lines]
+        cites += [cite for _text, cite in section.prose_lines]
+        cites += [table.cite for table in section.tables]
+        for cite in cites:
+            number = citation_number(cite)
+            if number:
+                used.add(int(number))
+    return used
 
 
 def _sources_from(steps: list[dict[str, Any]]) -> list[SourceStatus]:
@@ -664,7 +757,12 @@ def _sources_from(steps: list[dict[str, Any]]) -> list[SourceStatus]:
         sources.append(SourceStatus("전자공시", "failed", "공시 원문을 가져오지 못했습니다"))
     elif collect and collect.get("원문"):
         sources.append(
-            SourceStatus("전자공시", "ok", f"{collect['원문']} · 조각 {collect.get('조각수', 0)}개")
+            SourceStatus(
+                "전자공시",
+                "ok",
+                f"{collect['원문']} · 조각 "
+                f"{collect.get('전자공시조각수', collect.get('조각수', 0))}개",
+            )
         )
     else:
         sources.append(SourceStatus("전자공시", "none", "최근 3년 안에 낸 보고서가 없습니다"))
@@ -705,9 +803,154 @@ class RealPipeline:
       서버가 여러 대로 늘어나도 그대로 돈다.
     """
 
+    # corpCode 로컬 색인과 무료 DART 기업개황만 쓰며 AI/Places 비용은 만들지 않는다.
+    business_candidate_provider_costs_money = False
+
+    def search_business_candidates(
+        self, *, company: str, address_hint: str, limit: int, timeout_sec: float
+    ) -> list[dict[str, object]]:
+        """공식 DART 색인 후보를 top-k 기업개황으로 보강해 반환한다.
+
+        exact·영문명·약어·token·긴 오타 후보를 먼저 로컬에서 합치고 ``corp_code``로
+        중복 제거한다. 점수는 화면 순서일 뿐 어느 후보도 자동 확정하지 않는다.
+        """
+        from src.features.business_candidate.logic import (  # noqa: PLC0415
+            score_business_candidate,
+        )
+
+        # company.json은 후보마다 외부 DART 요청 한 번이다. 전체 resolver timeout이
+        # 끝난 뒤 취소할 수 없는 thread가 15번 계속 호출하지 않게 3건으로 hard cap한다.
+        cap = max(1, min(int(limit), 3))
+        deadline = time.monotonic() + max(0.1, float(timeout_sec))
+        all_matches = list(
+            generate_dart_company_matches(
+                _company_candidate_index(), company, limit=max(15, cap * 5)
+            )
+        )
+        # Independent candidate blocks should not let one spelling consume the
+        # whole screen. Keep the first of each evidence kind, then fill by rank.
+        matched = []
+        seen_kinds: set[str] = set()
+        for match in all_matches:
+            if match.match_kind not in seen_kinds:
+                matched.append(match)
+                seen_kinds.add(match.match_kind)
+            if len(matched) >= cap:
+                break
+        if len(matched) < cap:
+            matched.extend(match for match in all_matches if match not in matched)
+        matched = matched[:cap]
+        if not matched:
+            return []
+
+        engine = _MeteredEngine(_engine())
+        engine.load_env()
+        counter = engine.UsageCounter()
+        ranked_out: list[tuple[float, int, str, str, dict[str, object]]] = []
+        for match in matched:
+            if time.monotonic() >= deadline:
+                break
+            record = match.record
+            corp_code = record.corp_code
+            profile = engine.get_json("company.json", {"corp_code": corp_code}, counter)
+            if not isinstance(profile, dict) or profile.get("status") != DART_SUCCESS_STATUS:
+                raise RuntimeError("DART 기업개황 후보 조회가 정상 상태가 아닙니다")
+            candidate_name = str(profile.get("corp_name") or record.corp_name)
+            address = str(profile.get("adres") or "")
+            homepage = homepage_link.workable_url(profile.get("hm_url", ""))
+            score, _evidence = score_business_candidate(
+                query=company,
+                address_hint=address_hint,
+                candidate_name=candidate_name,
+                address=address,
+                homepage=homepage,
+                stock_code=record.stock_code,
+                modify_date=record.modify_date,
+                english_name=record.corp_eng_name,
+                name_match_kind=match.match_kind,
+                name_similarity=match.similarity,
+            )
+            ranked_out.append(
+                (
+                    score,
+                    int(bool(record.stock_code)),
+                    record.modify_date,
+                    corp_code,
+                    {
+                        "candidate_name": candidate_name,
+                        "address": address,
+                        "homepage": homepage,
+                        "source_label": "전자공시(DART) 기업개황",
+                        "source_url": "https://opendart.fss.or.kr/",
+                        "provider_name": "DART",
+                        "candidate_ref": corp_code,
+                        "stock_code": record.stock_code,
+                        "modify_date": record.modify_date,
+                        "english_name": record.corp_eng_name,
+                        "name_match_kind": match.match_kind,
+                        "name_similarity": match.similarity,
+                    },
+                )
+            )
+        ranked_out.sort(
+            key=lambda item: (
+                -item[0],
+                -item[1],
+                -(int(item[2]) if re.fullmatch(r"\d{8}", item[2]) else 0),
+                item[3],
+            )
+        )
+        return [item[4] for item in ranked_out]
+
     def find_company(self, user_input: UserInput) -> Optional[CompanyCard]:
         """2 식별 → 3 확인 카드까지만 한다. 여기서 멈추고 사람에게 보여준다."""
         return self.find_company_metered(user_input).card
+
+    def find_company_by_ref_metered(
+        self, user_input: UserInput, candidate_ref: str
+    ) -> CompanyLookupResult:
+        """사람이 고른 DART 고유번호를 이름 재식별 없이 다시 확인한다.
+
+        후보 점수는 회사를 확정하지 않는다. 후보 화면에서 사용자가 고른 뒤 서명 검증을
+        통과한 고유번호만 이 경로로 들어오며, DART 기업개황을 다시 읽어 확인 카드를
+        만든다. 이름 식별 AI는 호출하지 않는다.
+        """
+        corp_code = str(candidate_ref or "").strip()
+        if re.fullmatch(r"\d{8}", corp_code) is None:
+            return CompanyLookupResult(card=None, failed=True)
+
+        engine = _MeteredEngine(_engine())
+        engine.load_env()
+        counter = engine.UsageCounter()
+        try:
+            profile = engine.get_json(
+                "company.json", {"corp_code": corp_code}, counter
+            )
+            if not isinstance(profile, dict) or profile.get("status") != DART_SUCCESS_STATUS:
+                return CompanyLookupResult(card=None, failed=True)
+            address = str(profile.get("adres") or "").strip()
+            region = user_input.region.strip() or "모름"
+            warning = ""
+            if region != "모름" and not _region_matches(region, address):
+                warning = (
+                    f"입력하신 지역({region})과 본사 주소가 다릅니다. "
+                    "지사·공장이거나 최근 이전했을 수 있습니다."
+                )
+            card = CompanyCard(
+                legal_name=str(profile.get("corp_name") or user_input.company),
+                typed_name=user_input.company,
+                address=address,
+                ceo=str(profile.get("ceo_nm") or ""),
+                founded=str(profile.get("est_dt") or ""),
+                homepage=str(profile.get("hm_url") or ""),
+                homepage_url=homepage_link.workable_url(profile.get("hm_url", "")),
+                region_warning=warning,
+                ref=corp_code,
+            )
+        except Exception:  # noqa: BLE001 — DART 기술 실패를 회사 없음으로 바꾸지 않는다
+            logger.exception("선택한 DART 회사 후보를 다시 확인하지 못했습니다")
+            return CompanyLookupResult(card=None, failed=True)
+        return CompanyLookupResult(card=card)
 
     def find_company_metered(self, user_input: UserInput) -> CompanyLookupResult:
         """회사 확인 카드와 식별 AI 비용을 한 번에 돌려준다.
@@ -833,11 +1076,16 @@ class RealPipeline:
             # 법인 코드를 사람이 확인한 뒤에도 DART가 한도·인증 오류를 돌려줄 수 있다.
             # 빈 회사정보로 계속 가면 기술 실패를 실제 기업 성격으로 오판한다.
             raise RuntimeError("DART 회사정보 응답이 정상 상태가 아닙니다")
+        company_name = (
+            card.legal_name.strip()
+            or str(profile.get("corp_name") or "").strip()
+            or user_input.company.strip()
+        )
 
         # ── 5 판정 (전부 코드 · AI 0회) ──────────────────
         tell("judge")
-        registry = engine.load_public_org_registry(engine.PUBLIC_ORG_REGISTRY)
-        end = dt.date.today()
+        business_date = today_kst()
+        end = business_date
         audit = engine.get_json(
             "list.json",
             {
@@ -849,11 +1097,31 @@ class RealPipeline:
             },
             counter,
         )
-        if not isinstance(audit, dict) or audit.get("status") != DART_SUCCESS_STATUS:
+        if not isinstance(audit, dict):
+            raise RuntimeError("DART 공시목록 응답 모양이 올바르지 않습니다")
+        audit_status = audit.get("status")
+        if not isinstance(audit_status, str):
+            raise RuntimeError("DART 공시목록 상태값 모양이 올바르지 않습니다")
+        audit_rows = audit.get("list")
+        audit_no_data = audit_status == "013"
+        if audit_status == "013":
+            # DART의 013만 「조회 범위에 자료 없음」이라는 정상 빈 결과다. 모순된
+            # 013+비빈 목록은 공급자 응답 이상이므로 거부로 조용히 접지 않는다.
+            if audit_rows not in (None, []):
+                raise RuntimeError("DART 공시목록 013 응답에 비어 있지 않은 목록이 있습니다")
+            audit_rows = []
+        elif audit_status != DART_SUCCESS_STATUS:
             # 오류 응답에는 목록이 없지만 그것은 「감사보고서가 없음」의 증거가 아니다.
             # 빈 목록으로 접으면 비상장 회사를 거부B로 거짓 분류하므로 즉시 실패한다.
             raise RuntimeError("DART 공시목록 응답이 정상 상태가 아닙니다")
-        has_audit = any("감사보고서" in (r.get("report_nm") or "") for r in audit.get("list", []))
+        if not isinstance(audit_rows, list) or not all(
+            isinstance(row, dict) for row in audit_rows
+        ):
+            raise RuntimeError("DART 공시목록 성공 응답의 목록 모양이 올바르지 않습니다")
+        registry = engine.load_public_org_registry(engine.PUBLIC_ORG_REGISTRY)
+        has_audit = any(
+            "감사보고서" in (row.get("report_nm") or "") for row in audit_rows
+        )
         judgment = engine.decide(
             profile.get("corp_cls", ""),
             has_audit,
@@ -865,36 +1133,25 @@ class RealPipeline:
             return RunResult(
                 outcome=outcome,
                 message=_message(outcome),
+                sources=(
+                    [
+                        SourceStatus(
+                            "전자공시",
+                            "none",
+                            "최근 3년 안에 감사보고서 공시가 없습니다",
+                        )
+                    ]
+                    if audit_no_data
+                    else []
+                ),
                 corp_type=judgment.corp_type,
                 cost_krw=_request_spent_krw(engine),
                 model=model,
             )
 
-        # ── 5.5 공고 판별 3층 (AI 2회) ───────────────────
-        tell("posting")
-        posting = user_input.posting_text
-        if not posting.strip():
-            return RunResult(
-                outcome=Outcome.POSTING_DISCARDED,
-                message="채용공고 내용이 비어 있습니다. 공고를 붙여넣어 주세요.",
-                corp_type=judgment.corp_type,
-                cost_krw=_request_spent_krw(engine),
-                model=model,
-            )
-        requirements, discarded = _read_posting(engine, client, posting, steps)
-        if discarded:
-            return RunResult(
-                outcome=Outcome.POSTING_DISCARDED,
-                message=_message(Outcome.POSTING_DISCARDED),
-                corp_type=judgment.corp_type,
-                cost_krw=_request_spent_krw(engine),
-                model=model,
-            )
-
-        # ── 4 캐시 확인 → 1층 확정 (정본 03_수집/2_규칙/03_캐시와저장.md) ──
-        # ★ 왜 여기인가 — 1층 키에는 «공고 지문»이 들어가고, 지문은 5.5가
-        #   요구역량을 뽑은 «뒤»에야 계산된다. 앞당기면 회사×직무만으로 히트해
-        #   「남의 옛 공고로 만든 보고서」가 나간다 (정본 §★ 사고 시나리오).
+        # ── 회사분석 전용 캐시 확인 ──────────────────────
+        # 직무·공고를 읽거나 OCR하지 않는다. 저장소 스키마는 옛 payload를 읽기
+        # 위해 유지하되, 전용 제품/스키마 버전 키로 기존 채용 보고서와 격리한다.
         # ★ 재무 API·최신 공시를 여기서 미리 부르는 이유 — 신선도(O9)가
         #   「저장 당시 사업연도 == 지금 최신 사업연도」를 보기 때문이다.
         #   둘 다 전자공시 조회일 뿐 **AI는 안 부른다**(0원). 미적중이면
@@ -902,10 +1159,8 @@ class RealPipeline:
         financials, fin_years = engine.fetch_financials(corp_code, counter)
         filing = engine.latest_report_rcept(corp_code, judgment.corp_type, counter)
         current_fiscal_year = _current_fiscal_year(fin_years, filing)
-        cached = _cache_lookup(
+        cached = _company_cache_lookup(
             corp_id=corp_code,
-            job=user_input.job,
-            requirements=requirements,
             current_fiscal_year=current_fiscal_year,
         )
         if cached is not None:
@@ -922,7 +1177,7 @@ class RealPipeline:
                 # 정본 00_공통/2_규칙/04_할당량.md — 캐시 반환은 0 차감·무제한.
                 charged=False,
                 corp_type=cached.corp_type or judgment.corp_type,
-                # 이번 요청에서 실제로 쓴 돈 — 5.5 글자추출분은 남는다(0이 아니다).
+                # 이번 요청에서 실제로 쓴 돈 — 신선도 확인을 위한 조회분만 남는다.
                 cost_krw=_request_spent_krw(engine),
                 model=model,
                 # 화면 배지와 대시보드 ⑤가 이 값을 읽는다. 안 실으면 캐시가
@@ -932,26 +1187,15 @@ class RealPipeline:
 
         # ── 6 수집 (AI 0회) ──────────────────────────────
         tell("collect")
-        frags, revenue_tables = _collect(
+        frags, revenue_tables, filing_text = _collect(
             engine, client, profile, user_input, counter, steps,
             financials=financials, fin_years=fin_years, filing=filing,
         )
         sources = _sources_from(steps)
 
-        # ── 7 사전 게이트 — 미달이면 생성 «전에» 멈춘다 (0원) ──
+        # ── 7 사전 게이트 — 원문 자체가 없으면 생성 전에 멈춘다 ──
         tell("gate")
-        kinds = {f["종류"] for f in frags.values()}
-        rough = {c: any(k in kinds for k in srcs) for c, srcs in engine.CELL_SOURCES.items()}
-        # ★ 홈페이지 조각을 게이트가 «세게» 한다 (문제로그 P-72).
-        #   1판의 CELL_SOURCES에는 「홈페이지」가 어느 칸에도 없어서, 홈페이지에서
-        #   재료를 실제로 가져와도 게이트가 모르고 「미달」로 멈춰 세웠다.
-        #   정본은 2·4-2·4-3의 비상장 기본 소스로 홈페이지를 지정한다.
-        if HOMEPAGE_FRAGMENT_KIND in kinds:
-            for cell in HOMEPAGE_GATE_CELLS:
-                if cell in rough:
-                    rough[cell] = True
-        passed, _reasons = engine.establishment(rough)
-        if not passed:
+        if not frags:
             return RunResult(
                 outcome=Outcome.GATE_STOPPED,
                 message=_message(Outcome.GATE_STOPPED),
@@ -962,42 +1206,34 @@ class RealPipeline:
                 model=model,
             )
 
-        # ── 8·9 생성 + 10 검증 — 3회 반복 후 다수결 (AI 6회) ──
+        # ── 8 사실 배치 + 9 원문 대조 — 3회 독립 선택 후 다수결 ──
         tell("generate")
-        rounds: list[dict[str, bool]] = []
-        kept: list[Any] = []
-        sentences_made = 0   # 검사 «전» 생성 문장 수 — 원문 일치율의 분모
+        selection_rounds = []
+        sentences_made = 0
+        company_identity = " ".join(
+            str(value or "").strip()
+            for value in (
+                company_name,
+                profile.get("corp_name"),
+                profile.get("corp_eng_name"),
+            )
+            if str(value or "").strip()
+        )
         for _round in range(VOTE_ROUNDS):
-            # ★ 1판의 배치 지시문 대신 «정본에 맞춘» 지시문을 쓴다 (문제로그 P-43).
-            #   1판 지시문은 4축에 「회사가 직접 말한 문장만」이라 정본이 4-1의
-            #   기본 소스로 지정한 «언론 보도»를 통째로 배제했다. 그래서 뉴스
-            #   후보 106문장이 올라가고도 인용이 0회였다.
-            #   ⚠️ 1판 코드는 한 줄도 안 고쳤다 — 부품만 빌려 쓰는 감싸기다.
-            picked, _deleted = select_spans(
-                client, frags, requirements, user_input.job, steps,
+            picked, rejected = select_canonical_spans(
+                client,
+                frags,
+                steps,
                 engine=engine, model=GENERATION_MODEL,
+                company=company_identity,
             )
-            if not picked:
-                continue
-            ai_ok = engine.substance_check(client, picked, steps)
-            pattern_ok = engine.cell_pattern_ok(picked)
-            rounds.append(
-                {
-                    c: (
-                        any(i.block == c for i in picked)
-                        and ai_ok.get(c, True)
-                        and pattern_ok.get(c, True)
-                    )
-                    for c in engine.CELL_SOURCES
-                }
-            )
-            sentences_made = max(sentences_made, len(picked) + len(_deleted))
-            if len(picked) > len(kept):
-                kept = picked
-        if not rounds:
+            selection_rounds.append(picked)
+            sentences_made += len(picked) + len(rejected)
+        kept = majority_picks(selection_rounds, minimum=VOTE_MIN)
+        if not kept:
             return RunResult(
-                outcome=Outcome.FAILED,
-                message=_message(Outcome.FAILED),
+                outcome=Outcome.GATE_STOPPED,
+                message=_message(Outcome.GATE_STOPPED),
                 sources=sources,
                 corp_type=judgment.corp_type,
                 fragments_collected=len(frags),
@@ -1006,130 +1242,156 @@ class RealPipeline:
             )
 
         tell("verify")
-        # 다수결 — 절대 4칸 문턱 근처에서 실행마다 판정이 흔들리던 문제 대응 (P-23)
-        engine_cells = {
-            c: sum(1 for r in rounds if r.get(c)) >= VOTE_MIN for c in engine.CELL_SOURCES
+        # 구조화 표는 해당 장이 단독 소유한다. 같은 수치를 요약·다른 장에 복제하지 않는다.
+        tables_by_section: dict[str, list[ReportTable]] = {}
+        if revenue_tables:
+            tables_by_section["business_model"] = [ReportTable(**table) for table in revenue_tables]
+
+        financial_cite = _first_fragment_cite(
+            frags, kind="재무", text_prefix="주요계정(DART API):"
+        )
+        performance_table = (
+            build_three_year_table(financials, cite=financial_cite)
+            if financial_cite else None
+        )
+        if performance_table is not None:
+            tables_by_section["past_changes"] = [performance_table]
+
+        sections = canonical_sections_from_picks(
+            kept,
+            frags,
+            tables_by_section=tables_by_section,
+        )
+        sections, written_claims = write_and_verify_sections(
+            engine=engine,
+            client=client,
+            company=company_name,
+            sections=sections,
+            fragments=frags,
+            picks=kept,
+            steps=steps,
+            model=model,
+        )
+        provenance_fragments = {
+            number: dict(fragment) for number, fragment in frags.items()
         }
+        # 실적표의 숨은 근거는 공개 행을 다시 이어 붙인 문자열이 아니라 위에서
+        # build_three_year_table이 실제 DART API 응답으로 만든 payload다.
+        # provenance 생성 단계에만 전달하고 공개 fragment 원문은 바꾸지 않는다.
+        if performance_table is not None and performance_table.evidence_rows:
+            financial_number = citation_number(performance_table.cite)
+            if financial_number:
+                number = int(financial_number)
+                if number in provenance_fragments:
+                    provenance_fragments[number]["근거원문"] = list(
+                        dict.fromkeys(performance_table.evidence_rows)
+                    )
+        selected_evidence: dict[int, list[str]] = {}
+        for claim in written_claims:
+            selected_evidence.setdefault(claim.fragment_id, []).append(claim.evidence)
+        all_citations = build_citations(
+            provenance_fragments,
+            filing=filing,
+            collected_on=business_date,
+            company_publisher=company_name,
+            selected_evidence_by_fragment=selected_evidence,
+        )
+
+        def summary_ask(prompt: str, schema: dict[str, Any], max_tokens: int):
+            previous = getattr(engine, "MODEL", "")
+            try:
+                if model:
+                    engine.MODEL = model
+                payload, usage = engine._ask(client, prompt, schema, max_tokens=max_tokens)
+            finally:
+                if model:
+                    engine.MODEL = previous
+            if isinstance(usage, dict):
+                usage = {**usage, USAGE_MODEL_KEY: model or previous}
+            return payload, usage
+
+        analysis_period, latest_performance_period = _performance_period_labels(
+            performance_table,
+            filing,
+        )
+        try:
+            report = assemble_report_draft(
+                company=company_name,
+                corp_type=judgment.corp_type,
+                sections=sections,
+                written_claims=written_claims,
+                sources=all_citations,
+                steps=steps,
+                as_of_date=business_date.isoformat(),
+                analysis_period=analysis_period,
+                latest_performance_period=latest_performance_period,
+            )
+            # 1~8장이 사실 장부로 잠긴 뒤에만 비교사를 고른다. 자사 공시 문장에
+            # 경쟁 관계가 직접 적힌 DART 법인 1~3곳의 공식 원문을 별도로 받고,
+            # 동일 지표·기간·연결범위인 수치가 있을 때만 9장을 붙인다.
+            report = _attach_competitive_position(
+                report,
+                engine=engine,
+                counter=counter,
+                self_corp_code=corp_code,
+                self_company=company_name,
+                self_financials=financials,
+                self_filing=filing,
+                self_official_text=filing_text,
+                steps=steps,
+                collected_on=business_date.isoformat(),
+            )
+            # 요약은 9장까지 모두 잠긴 뒤 기존 fact_id의 최소 부분집합만으로
+            # 생성한다. finalize_report가 최종 출고 게이트와 공개본 생성을
+            # 정확히 한 번 수행한다.
+            report = finalize_report(
+                report,
+                summary_ask=summary_ask,
+                steps=steps,
+            )
+        except ComparisonBlockedError as exc:
+            steps.append(
+                {
+                    "step": "12_경쟁사비교_출고차단",
+                    "사유": list(exc.reasons),
+                }
+            )
+            return RunResult(
+                outcome=Outcome.GATE_STOPPED,
+                message="양사 공식 원문을 같은 지표·기간·연결범위로 비교할 수 없어 보고서를 내보내지 않았습니다.",
+                sources=sources,
+                corp_type=judgment.corp_type,
+                fragments_collected=len(frags),
+                sentences_made=sentences_made,
+                sentences_passed=len(written_claims),
+                cost_krw=_request_spent_krw(engine),
+                model=model,
+            )
+        except PublishBlockedError as exc:
+            logger.info("canonical 출고 차단: %s", list(exc.validation.reasons))
+            steps.append(
+                {
+                    "step": "13_정본_출고차단",
+                    "사유": list(exc.validation.reasons),
+                }
+            )
+            return RunResult(
+                outcome=Outcome.GATE_STOPPED,
+                message="필수 회사 사실과 검증 근거가 충분하지 않아 보고서를 내보내지 않았습니다.",
+                sources=sources,
+                corp_type=judgment.corp_type,
+                fragments_collected=len(frags),
+                sentences_made=sentences_made,
+                sentences_passed=len(written_claims),
+                cost_krw=_request_spent_krw(engine),
+                model=model,
+            )
 
         # ── 13 출력 ──────────────────────────────────────
         tell("output")
-        # ★ engine_cells를 반드시 넘긴다 — 안 넘기면 AI 3회를 써서 낸 알맹이
-        #   판정이 통째로 버려진다 (문제로그 P-66).
-        sections, extracted = _sections_from(kept, frags, engine, engine_cells)
-        final_requirements = extracted or requirements
-        home_step = next((s for s in steps if s.get("step") == "6_수집_홈페이지"), {})
-        home_state = (
-            "failed" if home_step.get("오류")
-            else "ok" if home_step.get("조각수")
-            else "none" if home_step else ""
-        )
-        # ★ 빈칸 사유를 «실제로 모은 것»으로 다시 쓴다 (문제로그 P-67).
-        #   1판의 고정 문구는 뉴스를 6건 모아 놓고도 「채택된 기사 없음」이라 말했다.
-        sections = _refresh_empty_reasons(
-            sections,
-            home_state,
-            str(home_step.get("오류") or home_step.get("없음") or ""),
-            engine=engine,
-            collected_kinds=kinds,
-            news_step=next((s for s in steps if s.get("step") == "6_수집_뉴스"), {}),
-        )
-        sections = _fill_blocks678(sections, user_input.job, final_requirements)
-
-        # ★ 매출 구성 비중 표를 1번 칸에 붙인다 (P-112).
-        #   ⚠️ 등급 계산 «전»이다 — 표만 있어도 그 칸은 «채워진» 것이다(D13).
-        #     문장이 없어 비던 1번이 이 표로 채워질 수 있다.
-        if revenue_tables:
-            매출표 = [ReportTable(**t) for t in revenue_tables]
-            sections = [
-                replace(s, tables=list(s.tables) + 매출표)
-                if s.cell == REVENUE_TABLE_CELL else s
-                for s in sections
-            ]
-
-        # ★ 보고서에서 아예 빼는 칸 (P-111 · P-115) — 전부 사용자가 화면을 보고 지시한 것.
-        #   ⚠️ **등급 계산 «전»에** 뺀다. 아래 `cells`를 이 목록에서 만들기 때문에
-        #     여기서 빼면 등급에서도 같이 빠진다 — 거의 항상 비던 칸이라 그게 맞다.
-        sections = [s for s in sections if s.cell not in HIDDEN_CELLS]
-
-        # 附(참고 숫자) — 상장사만 나온다. 비상장은 빈칸 + 사유 (D14-4).
-        # ★ 附을 빼기로 했으면 **전자공시를 부르지도 않는다** — 안 쓸 자료를 받으려고
-        #   DART 일일 한도를 깎을 이유가 없다 (2026-08-16).
-        if "附" not in HIDDEN_CELLS:
-            emp_failed = False
-            emp_response: Optional[dict[str, Any]] = None
-            try:
-                emp_response = engine.get_json(
-                    "empSttus.json",
-                    {
-                        "corp_code": corp_code,
-                        "bsns_year": str(dt.date.today().year - 1),
-                        "reprt_code": EMP_REPORT_CODE,
-                    },
-                    counter,
-                )
-            except Exception:  # noqa: BLE001 — 附은 «표시 전용»이라 보고서를 죽이지 않는다
-                emp_failed = True
-            extra = build_extra_numbers_section(
-                response=emp_response, corp_type=judgment.corp_type, fetch_failed=emp_failed
-            )
-            sections = [extra if s.cell == "附" else s for s in sections]
-
-        # 4-3(앞으로 어디로 가나)에 날짜·변경 경고를 붙인다 (W6 · D14-5).
-        sections = [append_direction_warning(s) if s.cell == "4-3" else s for s in sections]
-
-        # 맨 아래 출처 목록 (P-24 · D14-1).
-        # ★ 날짜·출처를 못 구한 항목은 «내보내지 않는다». 반쪽짜리 출처는
-        #   있는 것보다 나쁘다 — 사용자가 확인하러 갔다가 못 찾는다.
-        citations = [c for c in build_citations(
-            frags, filing=filing, collected_on=dt.date.today()
-        ) if c.is_valid]
-
-        # ★ 등급은 «화면에 실제로 나가는 것»으로 센다. 표 덩어리를 버린 칸이
-        #   엔진 판정에는 남아 있어 그대로 쓰면 화면과 어긋난다 (D12).
-        #   6·7·8은 공고 블록이라 세지 않는다 — engine_cells에 없으므로 자동으로 빠진다.
-        #   ★ `in engine_cells`는 **키 검사**다 (「세는 칸인가」). 알맹이 판정의
-        #     «값»은 위 `_sections_from`이 이미 반영해 `is_filled`에 녹아 있다 (P-66).
-        cells = {s.cell: s.is_filled for s in sections if s.cell in engine_cells}
-        grade, shortfall = grade_of(cells)
-
-        # ★ 근거를 «하나의 글»로 잇는다 (P-110) — 사용자 지적: 「지금 이건 글이 아니야」.
-        #   ⚠️ 반드시 **판정(`cells`·`grade`)까지 끝난 뒤**에 한다 —
-        #     칸이 찼는지는 «원문»으로 세야 하고, 작가가 실패해도 등급이 흔들리면 안 된다.
-        #   ★ 원문(`lines`)은 **그대로 남긴다.** 화면에서 「원문 보기」로 접어 같이 낸다.
-        sections, written_cells = _write_prose(
-            engine, client, user_input, sections, steps, model
-        )
-
-        # ★ 공시 문투를 «읽히는 말»로 바꾼다 (P-107) — 「당사는 …습니다」 → 「하이브는 …다」.
-        #   ⚠️ 공고에서 온 문장은 안 건드린다 — `readable`이 출처를 보고 스스로 뺀다.
-        #   ★ AI를 안 쓴다. 정해 둔 낱말·어미를 바꿀 뿐이라 환각이 생길 자리가 없다.
-        #   ★ **작가가 쓴 칸에는 안 돌린다** (2026-08-16 사용자 선택 「작가가 흡수」) —
-        #     작가가 처음부터 3인칭 평서형으로 쓰므로 두 번 손댈 이유가 없다.
-        #     작가가 «실패한» 칸에는 여전히 필요하다.
-        sections = [
-            replace(s, lines=readable_logic.rewrite_lines(s.lines, user_input.company))
-            if s.lines and s.cell not in written_cells else s
-            for s in sections
-        ]
-
-        report = Report(
-            company=user_input.company,
-            job=user_input.job,
-            corp_type=judgment.corp_type,
-            grade=grade,
-            sections=sections,
-            requirements=final_requirements,
-            sources=sources,
-            cells=cells,
-            shortfall_reasons=shortfall,
-            citations=citations,
-            generated_at=dt.date.today().isoformat(),
-        )
 
         # ── 14 저장 — 1층 캐시 (정본 §3 저장 구간) ────────
-        # ★ 키에 쓰는 목록은 «5.5가 뽑은 requirements»다. 화면에 보이는
-        #   `final_requirements`가 아니다 — 다음 요청은 5.5 결과로 조회하므로
-        #   여기서 다른 목록을 쓰면 지문이 어긋나 영원히 미적중이 된다.
+        # 회사분석 전용 버전 키로 저장해 옛 직무·공고 보고서와 섞이지 않는다.
         # ★ 우리 쪽 수집 실패(⚠️)가 낀 결과는 «저장하지 않는다» —
         #   그날만 죽은 소스 때문에 그 회사가 「자료 없는 회사」로 굳는다.
         if _has_failed_source(sources):
@@ -1137,10 +1399,8 @@ class RealPipeline:
                 "수집 실패(⚠️)가 껴 1층 캐시에 저장하지 않습니다 — corp_id=%s", corp_code
             )
         else:
-            _cache_save(
+            _company_cache_save(
                 corp_id=corp_code,
-                job=user_input.job,
-                requirements=requirements,
                 report=report,
                 fiscal_year=current_fiscal_year,
             )
@@ -1152,82 +1412,160 @@ class RealPipeline:
             charged=True,  # 보고서가 나가면 1 차감 (3분법 · D5 — 부분 보고서도 1)
             corp_type=judgment.corp_type,
             fragments_collected=len(frags),
-            fragments_cited=_cited_fragment_count(kept),
+            fragments_cited=len(report.citations),
             sentences_made=sentences_made,
-            sentences_passed=len(kept),
+            sentences_passed=len(written_claims),
             cost_krw=_request_spent_krw(engine),
             model=model,
         )
 
 
-# ══════════════════════════════════════════════════════════
-# 단계별 조각 — run()이 길어지지 않게 갈라 둔다
-# ══════════════════════════════════════════════════════════
-
-def _read_posting(
-    engine: Any,
-    client: Any,
-    posting: str,
-    steps: list[dict[str, Any]],
-) -> tuple[list[str], bool]:
-    """5.5 공고 판별 3층 + 요구역량 뽑기.
-
-    Returns:
-        (요구역량 목록, 폐기했는가)
-
-    ★ 3층 지우개를 반드시 통과시킨다. 개인정보가 그대로 AI로 넘어가면 안 된다.
-    ★ 공고 «원문은 저장하지 않는다» (S2). 요구역량 목록과 지문만 남긴다.
-    """
-    schema = {
-        "type": "object",
-        "properties": {"is_job_posting": {"type": "boolean"}},
-        "required": ["is_job_posting"],
-        "additionalProperties": False,
-    }
-    first, usage = engine._ask(
-        client,
-        (
-            "아래 글이 채용공고인가? 채용공고란 모집 주체인 회사가 사람을 고용하려고 지원자에게 "
-            "직접 알리는 공고 본문이다. 채용 소식을 제3자가 전하거나 논평하는 글, 고용 목적이 "
-            "아닌 모집 글은 채용공고가 아니다. 애매하면 false.\n\n---\n" + posting
-        ),
-        schema,
-    )
-    steps.append({"step": "5.5_1층AI", "usage": usage})
-    if not (first and first.get("is_job_posting")):
-        return [], True
-
-    second = engine.layer2(posting)
-    if not second.passed:
-        return [], True
-
-    erased = engine.erase(posting, run_id="웹")
-    steps.append({"step": "5.5_3층지우개", "검출건수": erased.counts})
-
-    schema_req = {
-        "type": "object",
-        "properties": {"requirements": {"type": "array", "items": {"type": "string"}}},
-        "required": ["requirements"],
-        "additionalProperties": False,
-    }
-    payload, usage = engine._ask(
-        client,
-        (
-            "아래 채용공고에서 지원자에게 요구·우대하는 역량 문장을 **원문 그대로** 목록으로 뽑아라. "
-            "다듬거나 요약하지 마라.\n\n---\n" + erased.text
-        ),
-        schema_req,
-        max_tokens=1200,
-    )
-    steps.append({"step": "5.5_요구역량추출", "usage": usage})
-    requirements = (payload or {}).get("requirements", [])
-    return requirements, not requirements
-
-
 #: 전자공시 보고서 이름 끝에 붙는 결산 기간 — 「감사보고서 (2025.12)」·
 #: 「사업보고서 (2025.12)」. 1판이 실제로 받아 온 116건 전부 이 모양이었다
-#: (`prototype_v1/data/pilot/runs*.jsonl` 실측 · 예외 0건).
-_FILING_PERIOD_PATTERN = re.compile(r"\((\d{4})\.\d{2}\)")
+#: (`analysis_engine/data/pilot/runs*.jsonl` 실측 · 예외 0건).
+_FILING_PERIOD_PATTERN = re.compile(r"\((\d{4})\.(\d{2})\)")
+
+
+def _latest_filing_label(filing: Optional[dict[str, Any]]) -> str:
+    """공시 제목의 보고기간과 보고서 종류를 잃지 않고 표시한다."""
+
+    report_name = str((filing or {}).get("report_nm") or "").strip()
+    matched = _FILING_PERIOD_PATTERN.search(report_name)
+    if matched is None:
+        return report_name or "최신 공식 공시 기준"
+    year, month = matched.groups()
+    if "반기보고서" in report_name:
+        period = "반기"
+    elif "분기보고서" in report_name:
+        period = {"03": "1분기", "09": "3분기"}.get(month, f"{int(month)}월 분기")
+    elif "사업보고서" in report_name or "감사보고서" in report_name:
+        period = "연간"
+    else:
+        period = f"{int(month)}월"
+    return f"{year}년 {period} 공식 공시"
+
+
+def _performance_period_labels(
+    table: Optional[ReportTable],
+    filing: Optional[dict[str, Any]],
+) -> tuple[str, str]:
+    """실제 표·공시 제목에 적힌 기간만 보고서 메타데이터로 옮긴다."""
+
+    years: list[int] = []
+    if table is not None:
+        # canonical 실적표는 행=사업연도, 열=지표다. 연도를 헤더에서 읽으면
+        # 구형 전치 표를 조용히 허용하게 되므로 첫 번째 열만 기준으로 삼는다.
+        for row in table.rows:
+            first_cell = row[0] if row else ""
+            matched = re.fullmatch(r"\s*(20\d{2})\s*", str(first_cell or ""))
+            if matched:
+                years.append(int(matched.group(1)))
+    latest = _latest_filing_label(filing)
+    if years:
+        low, high = min(years), max(years)
+        analysis = f"{low}~{high} 완료 회계연도"
+        return analysis, latest
+
+    return "기준일 전 36개월", latest
+
+
+def _load_official_comparator_bundle(
+    engine: Any,
+    counter: Any,
+    record: DartCompanyRecord,
+) -> OfficialCompanyBundle | None:
+    """DART 고유번호 하나의 기업개황·연간 원문·주요계정을 별도로 받는다."""
+
+    profile = engine.get_json("company.json", {"corp_code": record.corp_code}, counter)
+    if not isinstance(profile, dict) or profile.get("status") != DART_SUCCESS_STATUS:
+        return None
+    official_name = str(profile.get("corp_name") or record.corp_name or "").strip()
+    if not official_name:
+        return None
+    listed = bool(
+        str(record.stock_code or "").strip()
+        or str(profile.get("stock_code") or "").strip()
+        or str(profile.get("corp_cls") or "").strip().upper() in {"Y", "K", "N"}
+    )
+    filing = engine.latest_report_rcept(
+        record.corp_code,
+        "상장사" if listed else "비상장 외감",
+        counter,
+    )
+    financials, _years = engine.fetch_financials(record.corp_code, counter)
+    official_text = ""
+    if filing:
+        path = engine.download_document(filing["rcept_no"], engine.RAW_DIR, counter)
+        official_text = engine.read_filing_text(path)
+    return OfficialCompanyBundle(
+        corp_code=record.corp_code,
+        company_name=official_name,
+        financials=financials,
+        filing=filing,
+        official_text=str(official_text or ""),
+    )
+
+
+def _attach_competitive_position(
+    report: Report,
+    *,
+    engine: Any,
+    counter: Any,
+    self_corp_code: str,
+    self_company: str,
+    self_financials: Optional[dict[str, Any]],
+    self_filing: Optional[dict[str, Any]],
+    self_official_text: str,
+    steps: list[dict[str, Any]],
+    collected_on: str,
+) -> Report:
+    """잠긴 1~8장 초안에 공식 양사 비교 9장을 붙여 내부 초안을 돌려준다."""
+
+    records = _records_from_candidate_catalog(_company_catalog())
+    self_bundle = OfficialCompanyBundle(
+        corp_code=self_corp_code,
+        company_name=self_company,
+        financials=self_financials,
+        filing=self_filing,
+        official_text=self_official_text,
+    )
+    comparison = build_competitive_position(
+        report,
+        self_bundle=self_bundle,
+        catalog=records,
+        fetch_comparator=lambda record: _load_official_comparator_bundle(
+            engine, counter, record
+        ),
+        collected_on=collected_on,
+    )
+    steps.append(
+        {
+            "step": "12_경쟁사비교",
+            "후보": [item.record.corp_name for item in comparison.candidates],
+            "확정사실": len(comparison.facts),
+            "공식출처": len(comparison.sources),
+        }
+    )
+    draft = replace(
+        report,
+        sections=[
+            section
+            for section in report.sections
+            if section.cell != "competitive_position"
+        ]
+        + [comparison.section],
+        citations=[*report.citations, *comparison.sources],
+        fact_records=[
+            fact
+            for fact in report.fact_records
+            if fact.section_owner != "competitive_position"
+        ]
+        + list(comparison.facts),
+        cells={**report.cells, "competitive_position": True},
+    )
+    # 이 객체는 아직 요약도 최종 gate도 거치지 않은 내부 초안이다. 호출자가
+    # 1~9장 전체로 finalize_report를 실행하기 전에는 저장·렌더링하면 안 된다.
+    return draft
 
 
 def _filing_fiscal_year(filing: Optional[dict[str, Any]]) -> Optional[int]:
@@ -1315,6 +1653,41 @@ def _cache_lookup(
     return hit
 
 
+def _company_cache_lookup(
+    *,
+    corp_id: str,
+    current_fiscal_year: Optional[int],
+) -> Optional[Report]:
+    """회사분석 제품 namespace의 캐시만 조회한다."""
+    if not corp_id:
+        return None
+    try:
+        with storage_db.connect() as conn:
+            hit = cache_store.get_company_report_hit(
+                conn,
+                corp_id=corp_id,
+                current_fiscal_year=current_fiscal_year,
+            )
+    except Exception:  # noqa: BLE001 — 캐시 실패가 조사를 막으면 안 된다
+        logger.exception("회사분석 캐시 조회 실패 — 새로 조사합니다 (corp_id=%s)", corp_id)
+        return None
+
+    if hit is None:
+        logger.info(
+            "회사분석 캐시 미적중 — 새로 만듭니다 (corp_id=%s · 최신사업연도=%s)",
+            corp_id,
+            current_fiscal_year,
+        )
+    else:
+        logger.info(
+            "회사분석 캐시 적중 — 생성·검증 AI를 건너뜁니다 "
+            "(corp_id=%s · 조사일=%s)",
+            corp_id,
+            hit.generated_at,
+        )
+    return hit
+
+
 def _cache_save(
     *,
     corp_id: str,
@@ -1344,6 +1717,27 @@ def _cache_save(
             )
     except Exception:  # noqa: BLE001 — 저장 실패가 사용자를 막으면 안 된다
         logger.exception("1층 캐시 저장 실패 (보고서는 정상) — corp_id=%s", corp_id)
+
+
+def _company_cache_save(
+    *,
+    corp_id: str,
+    report: Report,
+    fiscal_year: Optional[int],
+) -> None:
+    """신규 회사분석 보고서를 옛 직무 캐시와 격리해 저장한다."""
+    if not corp_id:
+        return
+    try:
+        with storage_db.connect() as conn:
+            cache_store.save_company_report(
+                conn,
+                corp_id=corp_id,
+                report=report,
+                fiscal_year=fiscal_year,
+            )
+    except Exception:  # noqa: BLE001 — 저장 실패가 사용자를 막으면 안 된다
+        logger.exception("회사분석 캐시 저장 실패 (보고서는 정상) — corp_id=%s", corp_id)
 
 
 def _write_prose(
@@ -1417,10 +1811,17 @@ def _write_prose(
 
     # ★ 검증 뒤에도 문장별 근거를 버리지 않는다(P-118). 문자열 하나로 합치면
     #   내부 sid와 실제 출처의 연결이 끊겨 화면에서 근거 번호를 못 붙인다.
-    prose_lines_by_cell = {
-        cell: writer_logic.to_cited_lines(sents, evidence.get(cell, []))
-        for cell, sents in passed.items()
-    }
+    prose_lines_by_cell = {}
+    for cell, sentences in passed.items():
+        cited = writer_logic.to_cited_lines(sentences, evidence.get(cell, []))
+        cited = filter_specific_prose(
+            cell,
+            cited,
+            lines_by_cell.get(cell, []),
+            company=user_input.company,
+        )
+        if cited:
+            prose_lines_by_cell[cell] = cited
     출처연결버림 = sum(
         len(sents) - len(prose_lines_by_cell.get(cell, []))
         for cell, sents in passed.items()
@@ -1491,7 +1892,7 @@ def _collect_news(
         return []
 
     candidates, dropped = newspick_logic.prefilter(
-        items, company=company, today=dt.date.today()
+        items, company=company, today=today_kst()
     )
     step.update({"검색결과": len(items), "검색별": 검색별, "사전거름": dropped})
     if 첫오류:
@@ -1528,7 +1929,7 @@ def _collect(
     financials: Optional[dict[str, Any]],
     fin_years: list[int],
     filing: Optional[dict[str, Any]],
-) -> tuple[dict[int, dict[str, str]], list[dict]]:
+) -> tuple[dict[int, dict[str, str]], list[dict], str]:
     """6 수집 — 공시 원문 + 재무 API + 뉴스 + 홈페이지를 조각으로 만든다. AI 0회.
 
     Args:
@@ -1539,7 +1940,8 @@ def _collect(
             **출처 목록을 만들 때 쓴다** (P-24). 공시를 못 찾았으면 None.
 
     Returns:
-        조각 목록.
+        조각 목록, 구조화 표, 실제로 내려받은 자사 공식 원문. 마지막 값은
+        9장 비교에서 한쪽 자료만 있는 비교를 막는 데 다시 쓴다.
     """
     filing_text = ""
     if filing:
@@ -1575,6 +1977,18 @@ def _collect(
     if added:
         steps.append({"step": "6_수집_추가절", "더한조각": added})
 
+    # 절 첫머리 밖에 있는 실명 파트너·계약 근거를 최대 3문장만 보충한다.
+    # 전체 절 길이를 늘리지 않아 표·업계 일반론이 후보를 압도하는 일을 막는다.
+    frags, relationship_added = filing_relationships.add_to(frags, filing_text)
+    if relationship_added:
+        steps.append(
+            {"step": "6_수집_파트너관계", "더한조각": relationship_added}
+        )
+
+    # 뉴스·홈페이지를 붙이기 전 개수다. 출처 현황에서 이 값을 쓰지 않으면
+    # "전자공시 조각 21개"에 뉴스·홈페이지까지 섞여 소스별 상태가 틀린다.
+    dart_fragment_count = len(frags)
+
     # ★ 뉴스는 «AI가 번호로» 고른다 (P-108). 1판은 «제목에 회사 이름이 글자 그대로»
     #   있어야 채택해서, 유명한 회사일수록 0건이었다 (하이브 20건 중 0건 실측).
     #   기사가 브랜드·아티스트·제품 이름으로 나가기 때문이다.
@@ -1603,7 +2017,8 @@ def _collect(
     # ★ 매출 구성 비중 표 (P-112) — 사용자가 리포트 11건에서 고른 항목 ①.
     #   **11건이 «전부» 실은 유일한 만장일치 항목**이다.
     #   ⚠️ 지어낼 자리가 없다 — 공시가 비중을 이미 계산해 놓았고 우리는 베낄 뿐이다.
-    revenue_tables = revenuemix.build(filing_text, cite=REVENUE_CITE)
+    revenue_cite = _first_fragment_cite(frags, kind="매출수주") or REVENUE_CITE
+    revenue_tables = revenuemix.build(filing_text, cite=revenue_cite)
     if revenue_tables:
         steps.append({"step": "6_수집_매출구성", "표": len(revenue_tables)})
 
@@ -1612,10 +2027,11 @@ def _collect(
             "step": "6_수집",
             "원문": (filing or {}).get("report_nm"),
             "조각수": len(frags),
+            "전자공시조각수": dart_fragment_count,
             "재무API연도": fin_years,
         }
     )
-    return frags, revenue_tables
+    return frags, revenue_tables, filing_text
 
 
 def _region_matches(typed: str, address: str) -> bool:

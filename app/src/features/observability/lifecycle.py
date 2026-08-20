@@ -29,7 +29,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from typing import Final, Iterator
 
-from src.features.observability.records import RunRecord
+from src.features.observability.records import RunRecord, normalize_persisted_cells
 
 
 TABLE_RUN_LIFECYCLE: Final[str] = "observability_run_lifecycle"
@@ -654,7 +654,7 @@ def _decode_record(raw: str) -> RunRecord:
         data = json.loads(raw)
         if not isinstance(data, dict):
             raise TypeError("최종 관측값 JSON이 객체가 아닙니다")
-        return RunRecord(**data)
+        return RunRecord(**normalize_persisted_cells(data))
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         raise LifecycleCorruptionError("최종 관측값 JSON이 깨졌습니다") from exc
 

@@ -11,6 +11,7 @@ from src.core.constants import (
 )
 from src.features.pipeline.demo import DemoPipeline
 from src.web import main
+from src.web import runtime
 from src.web.tests._visible_text import visible_text
 
 
@@ -26,7 +27,7 @@ def client() -> TestClient:
 def test_첫화면에서_삭제한_설명이_모두_사라졌다(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ):
-    monkeypatch.setattr(main, "_PIPELINE", _가짜진짜알맹이())
+    monkeypatch.setattr(runtime, "_PIPELINE", _가짜진짜알맹이())
 
     response = client.get("/")
 
@@ -39,7 +40,7 @@ def test_첫화면에서_삭제한_설명이_모두_사라졌다(
 def test_회사_확인화면에서_삭제한_설명이_사라졌다(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ):
-    monkeypatch.setattr(main, "_PIPELINE", DemoPipeline())
+    monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
 
     response = client.post(
         "/confirm",

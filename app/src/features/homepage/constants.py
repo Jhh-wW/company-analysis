@@ -38,7 +38,7 @@ MIN_FRAGMENT_CHARS: Final[int] = 80
 # ── 조각 모양 ────────────────────────────────────────────
 
 #: 조각의 「종류」 값. 1판 조각 모양(`{"종류","원문"}`)과 맞춘다.
-#: 정본: `prototype_v1/tools/run_pilot.py`의 `make_fragments`/`collect_news`
+#: 정본: `analysis_engine/tools/run_pilot.py`의 `make_fragments`/`collect_news`
 FRAGMENT_KIND: Final[str] = "홈페이지"
 
 # ── 우선순위 ─────────────────────────────────────────────
@@ -53,12 +53,27 @@ FRAGMENT_KIND: Final[str] = "홈페이지"
 #:   그런 문장은 `vision`·`ir`·`press` 페이지에 있는데, 이 목록에 없어서
 #:   **최대 6쪽 상한에 밀려 사실상 한 번도 안 읽혔다.**
 PRIORITY_PATH_KEYWORDS: Final[tuple[str, ...]] = (
+    "ir-data",
+    "irdata",
+    "earnings",
+    "result",
+    "실적",
     "vision",
     "ir",
     "press",
     "news",
     "esg",
     "sustainability",
+    "career",
+    "careers",
+    "recruit",
+    "recruitment",
+    "jobs",
+    "people",
+    "culture",
+    "채용",
+    "인재",
+    "문화",
     "about",
     "company",
     "companyintro",

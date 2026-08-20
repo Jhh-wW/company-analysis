@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 #: 노션 API 요청 하나를 보내고 JSON 응답을 dict로 돌려주는 함수의 모양.
 #: (method, path, body) -> 응답(dict). 시험에서 가짜로 바꿔 끼운다.
 SendFn = Callable[[str, str, dict], dict]
+SleepFn = Callable[[float], None]
 
 
 class MissingCredentialError(Exception):
@@ -37,7 +39,35 @@ class MissingCredentialError(Exception):
 
 
 class NotionAPIError(Exception):
-    """노션과의 통신이나 응답이 이상하다. 사용자에게 내부 내용을 그대로 보여주지 않는다."""
+    """비밀값 없는 전송 실패 메타데이터.
+
+    ``uncertain``이면 원격 적용 여부를 증명할 수 없으므로 호출자는 상태를
+    저장하고 명시적 중복 위험 확인 없이는 다시 보내면 안 된다.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retry_after: float | None = None,
+        uncertain: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after = retry_after
+        self.uncertain = uncertain
+
+
+def _retry_after_seconds(value: object) -> float | None:
+    """Notion이 쓰는 Retry-After delta-seconds를 제한 범위로 읽는다."""
+    try:
+        seconds = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    if seconds < 0:
+        return None
+    return min(seconds, constants.MAX_RETRY_AFTER_SEC)
 
 
 # ══════════════════════════════════════════════════════════
@@ -80,6 +110,19 @@ def _resolve_config(token: str, parent_page_id: str) -> NotionConfig:
     return NotionConfig(token=resolved_token, parent_page_id=resolved_parent)
 
 
+def is_notion_configured() -> bool:
+    """노션 전송에 필요한 두 설정이 모두 있는지만 돌려준다.
+
+    화면은 이 값으로 실행 가능한 버튼과 설정 안내를 구분한다. 실제 토큰이나
+    페이지 ID는 반환하지 않으므로 템플릿·로그에 비밀값이 섞일 길을 만들지 않는다.
+    """
+    try:
+        _resolve_config("", "")
+    except MissingCredentialError:
+        return False
+    return True
+
+
 # ══════════════════════════════════════════════════════════
 # 실제 네트워크 호출 (기본 구현) — 시험에서는 주입한 가짜로 대체된다
 # ══════════════════════════════════════════════════════════
@@ -110,27 +153,43 @@ def _make_urllib_send(token: str) -> SendFn:
             ) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            # ★ 응답 본문에 우리 쪽 요청 내용(토큰 등)은 없지만, 혹시 모를 노출을 막기
-            #   위해 상태 코드만 사용자에게 보여주고 본문은 로그에만 남긴다.
-            detail = _safe_error_detail(exc)
-            logger.warning("노션 API 오류 status=%s detail=%s", exc.code, detail)
-            raise NotionAPIError(f"노션 API가 오류를 돌려줬습니다 (상태 코드 {exc.code})") from exc
+            # 응답 본문은 기록하지 않는다. 외부 서비스가 요청 원문을 오류 본문에
+            # 되비추면 보고서 내용이 로그에 남을 수 있기 때문이다.
+            logger.warning("노션 API 오류 status=%s", exc.code)
+            retry_after = None
+            if exc.code == 429:
+                header_value = (
+                    exc.headers.get("Retry-After") if exc.headers is not None else None
+                )
+                retry_after = _retry_after_seconds(header_value)
+            raise NotionAPIError(
+                f"노션 API가 오류를 돌려줬습니다 (상태 코드 {exc.code})",
+                status_code=exc.code,
+                retry_after=retry_after,
+                uncertain=exc.code >= 500,
+            ) from exc
         except urllib.error.URLError as exc:
-            logger.warning("노션 서버와 통신 실패: %s", exc)
-            raise NotionAPIError("노션 서버와 통신하지 못했습니다") from exc
+            logger.warning(
+                "노션 서버와 통신 실패 type=%s",
+                type(getattr(exc, "reason", exc)).__name__,
+            )
+            raise NotionAPIError(
+                "노션 서버와 통신하지 못했습니다", uncertain=True
+            ) from exc
+        except (TimeoutError, OSError) as exc:
+            # urllib가 환경에 따라 URLError로 감싸지 않은 TimeoutError/OSError를
+            # 그대로 올리기도 한다. 이 경우에도 웹 500과 내부 메시지 노출을 막는다.
+            logger.warning("노션 서버와 통신 실패 type=%s", type(exc).__name__)
+            raise NotionAPIError(
+                "노션 서버와 통신하지 못했습니다", uncertain=True
+            ) from exc
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            logger.warning("노션 응답을 해석하지 못함: %s", exc)
-            raise NotionAPIError("노션 응답을 해석하지 못했습니다") from exc
+            logger.warning("노션 응답을 해석하지 못함 type=%s", type(exc).__name__)
+            raise NotionAPIError(
+                "노션 응답을 해석하지 못했습니다", uncertain=True
+            ) from exc
 
     return send
-
-
-def _safe_error_detail(exc: urllib.error.HTTPError) -> str:
-    """오류 응답 본문을 로그용으로만 짧게 읽는다. 읽기 실패해도 예외를 더 키우지 않는다."""
-    try:
-        return exc.read().decode("utf-8")[:500]
-    except (OSError, UnicodeDecodeError):
-        return "(응답 본문을 읽지 못함)"
 
 
 # ══════════════════════════════════════════════════════════
@@ -177,6 +236,54 @@ class NotionExportResult:
     error: str = ""
     #: 페이지가 «일부만» 만들어졌을 가능성이 있는가.
     partial: bool = False
+    #: 원격 적용 여부를 증명할 수 없어 자동 재전송하면 안 되는가.
+    uncertain: bool = False
+
+
+def _send_safely(
+    send: SendFn,
+    method: str,
+    path: str,
+    body: dict,
+    *,
+    sleep: SleepFn = time.sleep,
+) -> dict:
+    """전송 어댑터의 예상 밖 실패를 안전한 사용자 오류로 수렴시킨다.
+
+    실제 urllib 어댑터뿐 아니라 시험·향후 교체 어댑터가 ``RuntimeError`` 같은
+    다른 예외를 올려도 보고서 원문이나 비밀값이 응답·로그에 남지 않게 한다.
+    """
+    retries = 0
+    total_wait = 0.0
+    while True:
+        try:
+            response = send(method, path, body)
+        except NotionAPIError as exc:
+            delay = exc.retry_after
+            may_retry = (
+                exc.status_code == 429
+                and delay is not None
+                and retries < constants.MAX_429_RETRIES
+                and total_wait + delay <= constants.MAX_TOTAL_RETRY_WAIT_SEC
+            )
+            if not may_retry:
+                raise
+            sleep(delay)
+            retries += 1
+            total_wait += delay
+            continue
+        except Exception as exc:  # noqa: BLE001 — 어댑터 경계에서 웹 500을 막는다
+            logger.warning("노션 전송 어댑터 실패 type=%s", type(exc).__name__)
+            raise NotionAPIError(
+                "노션 전송 중 예상하지 못한 오류가 났습니다",
+                uncertain=True,
+            ) from exc
+        if not isinstance(response, dict):
+            logger.warning("노션 응답 형식 오류 type=%s", type(response).__name__)
+            raise NotionAPIError(
+                "노션 응답 형식이 올바르지 않습니다", uncertain=True
+            )
+        return response
 
 
 # ══════════════════════════════════════════════════════════
@@ -191,6 +298,7 @@ def send_report_to_notion(
     send: Optional[SendFn] = None,
     token: str = "",
     parent_page_id: str = "",
+    sleep: SleepFn = time.sleep,
 ) -> NotionExportResult:
     """보고서 하나를 노션 페이지로 만든다.
 
@@ -226,10 +334,21 @@ def send_report_to_notion(
 
     try:
         payload = _page_payload(config.parent_page_id, title, chunks[0])
-        created = active_send("POST", constants.PAGES_PATH, payload)
+        created = _send_safely(
+            active_send,
+            "POST",
+            constants.PAGES_PATH,
+            payload,
+            sleep=sleep,
+        )
     except NotionAPIError as exc:
         # ★ 페이지 자체가 안 만들어졌으므로 partial이 아니다 — 노션에 남은 게 없다.
-        return NotionExportResult(success=False, error=str(exc), chunk_count=total)
+        return NotionExportResult(
+            success=False,
+            error=str(exc),
+            chunk_count=total,
+            uncertain=exc.uncertain,
+        )
 
     page_id = created.get("id", "")
     page_url = created.get("url", "")
@@ -238,14 +357,17 @@ def send_report_to_notion(
             success=False,
             error="노션이 페이지 ID를 돌려주지 않았습니다",
             chunk_count=total,
+            uncertain=True,
         )
 
     for order, chunk in enumerate(chunks[1:], start=2):
         try:
-            active_send(
+            _send_safely(
+                active_send,
                 "PATCH",
                 constants.CHILDREN_PATH_TEMPLATE.format(block_id=page_id),
                 {"children": chunk},
+                sleep=sleep,
             )
         except NotionAPIError as exc:
             sent = order - 1

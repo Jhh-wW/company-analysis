@@ -18,6 +18,7 @@ from src.core.constants import (
 )
 from src.features.pipeline.demo import DemoPipeline
 from src.web import main
+from src.web import runtime
 from src.web.tests._visible_text import visible_text
 
 
@@ -31,7 +32,7 @@ def client() -> TestClient:
 
 
 def _진짜모드_첫화면(client: TestClient, monkeypatch) -> str:
-    monkeypatch.setattr(main, "_PIPELINE", _가짜진짜알맹이())
+    monkeypatch.setattr(runtime, "_PIPELINE", _가짜진짜알맹이())
     response = client.get("/")
     assert response.status_code == 200
     return response.text
@@ -118,7 +119,7 @@ def test_실제로_잰_금액은_화면에_안_보인다(client: TestClient, mon
 
 def test_데모_모드에는_금액_안내가_없다(client: TestClient, monkeypatch):
     """★ 공짜인데 돈 얘기를 하면 겁먹고 안 눌러본다 — P-79의 반대 방향."""
-    monkeypatch.setattr(main, "_PIPELINE", DemoPipeline())
+    monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
 
     shown = visible_text(client.get("/").text)
 

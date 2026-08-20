@@ -38,6 +38,13 @@ from src.features.homepage.constants import (
     TIMEOUT_SEC,
     USER_AGENT,
 )
+from src.features.homepage.safe_http import (
+    HomepageResponseError,
+    UnsafeHomepageUrlError,
+    read_limited_text,
+    resolve_safe_target,
+    safe_urlopen,
+)
 
 #: <script>·<style>·<noscript> 안의 글자는 사람이 읽는 본문이 아니므로 뺀다.
 _SKIP_TAGS = frozenset({"script", "style", "noscript"})
@@ -111,8 +118,10 @@ def default_fetch(url: str) -> str:
     """
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as res:  # noqa: S310
-            raw = res.read()
+        with safe_urlopen(req, timeout=TIMEOUT_SEC) as res:
+            return read_limited_text(res, timeout=TIMEOUT_SEC)
+    except (UnsafeHomepageUrlError, HomepageResponseError) as exc:
+        raise HomepageFetchError(f"{type(exc).__name__}: {exc}") from exc
     except urllib.error.URLError as exc:
         if _is_hostname_mismatch(exc):
             host = urllib.parse.urlparse(url).hostname or ""
@@ -122,10 +131,6 @@ def default_fetch(url: str) -> str:
         raise HomepageFetchError(f"{type(exc).__name__}: {exc}") from exc
     except (TimeoutError, OSError) as exc:
         raise HomepageFetchError(f"{type(exc).__name__}: {exc}") from exc
-    try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return raw.decode("cp949", errors="replace")  # 국내 구형 사이트 대응
 
 
 def default_lookup_cert_names(url: str) -> list[str]:
@@ -147,16 +152,21 @@ def default_lookup_cert_names(url: str) -> list[str]:
         인증서의 SAN(DNS 항목)·CN 이름 목록(소문자). 조회 자체가 실패하면
         예외를 던지지 않고 빈 리스트를 돌려준다 — 못 알아내면 그냥 포기다.
     """
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme != "https" or not parsed.hostname:
+    try:
+        target = resolve_safe_target(url)
+    except UnsafeHomepageUrlError:
+        return []
+    if target.scheme != "https":
         return []  # http 주소는 애초에 인증서가 없다
-    host = parsed.hostname
-    port = parsed.port or HTTPS_DEFAULT_PORT
+    host = target.hostname
+    port = target.port or HTTPS_DEFAULT_PORT
 
     context = ssl.create_default_context()
     context.check_hostname = False  # 이름 비교는 우리가 직접 한다 (아래 판정 로직)
     try:
-        with socket.create_connection((host, port), timeout=TIMEOUT_SEC) as sock:
+        # 검증한 공인 IP로 직접 연결한다. Host/SNI는 원래 이름을 유지하므로
+        # 인증서 검증은 평소와 같고 DNS 재바인딩만 막힌다.
+        with socket.create_connection((target.ip, port), timeout=TIMEOUT_SEC) as sock:
             with context.wrap_socket(sock, server_hostname=host) as tls_sock:
                 cert = tls_sock.getpeercert()
     except (OSError, ssl.SSLError, ValueError):
@@ -268,12 +278,19 @@ def collect_homepage_fragments(
     if robots.can_fetch(USER_AGENT, final_url):
         total_chars = _collect_page(final_url, root_html, fragments, seen_text, total_chars)
 
+    # 우선순위 큐를 쓰는 bounded depth 탐색. 예전에는 루트 링크만 한 번 읽어서
+    # ``홈 → IR 자료실 → 최신 분기 상세``의 두 번째 링크를 영원히 못 봤다.
+    # 매 페이지에서 같은 도메인 링크를 더하되 기존 6쪽/글자 상한은 그대로다.
     candidates = sorted(
-        _extract_links(root_html, final_url, parsed_root.netloc), key=_link_priority
+        _extract_links(root_html, final_url, parsed_root.netloc),
+        key=lambda candidate: (_link_priority(candidate), candidate),
     )
-    for link in candidates:
+    queued_urls = set(candidates)
+    while candidates:
         if pages_fetched >= MAX_PAGES or total_chars >= MAX_TOTAL_CHARS:
             break  # 상한 도달 — 더 읽지 않는다 (무한 크롤링 금지)
+        link = candidates.pop(0)
+        queued_urls.discard(link)
         if link in seen_urls:
             continue
         seen_urls.add(link)
@@ -285,6 +302,12 @@ def collect_homepage_fragments(
         except HomepageFetchError:
             continue  # 낱장 페이지 실패는 건너뛴다 — 루트는 이미 접속됐으니 전체 실패가 아니다
         total_chars = _collect_page(link, page_html, fragments, seen_text, total_chars)
+        for discovered in _extract_links(page_html, link, parsed_root.netloc):
+            if discovered in seen_urls or discovered in queued_urls:
+                continue
+            candidates.append(discovered)
+            queued_urls.add(discovered)
+        candidates.sort(key=lambda candidate: (_link_priority(candidate), candidate))
 
     if not fragments:
         detail = "홈페이지에서 쓸 만한 글자를 찾지 못함"
@@ -348,6 +371,14 @@ def _normalize_url(raw: str) -> str:
     """
     candidate = raw.strip()
     if not candidate:
+        return ""
+    if candidate.startswith("//"):
+        candidate = f"https:{candidate}"
+    try:
+        parsed = urllib.parse.urlsplit(candidate)
+    except ValueError:
+        return ""
+    if parsed.scheme and parsed.scheme.lower() not in ("http", "https"):
         return ""
     if not re.match(r"^https?://", candidate, re.IGNORECASE):
         candidate = f"https://{candidate}"

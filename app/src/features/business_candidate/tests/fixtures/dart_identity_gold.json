@@ -1,0 +1,41 @@
+{
+  "records": [
+    {"corp_code":"00258689","corp_name":"JYP Ent.","corp_eng_name":"JYP Entertainment Corporation","stock_code":"035900","modify_date":"20221206"},
+    {"corp_code":"00535454","corp_name":"(주)제이와이피","corp_eng_name":"JYP Corporation","stock_code":"","modify_date":"20170630"},
+    {"corp_code":"00136689","corp_name":"(주)에스엠엔터테인먼트","corp_eng_name":"SM Entertainment Co., Ltd.","stock_code":"041510","modify_date":"20240329"},
+    {"corp_code":"01000001","corp_name":"에스엠","corp_eng_name":"SM Corporation","stock_code":"","modify_date":"20240101"},
+    {"corp_code":"01000002","corp_name":"에스엠","corp_eng_name":"SM Trading Co., Ltd.","stock_code":"","modify_date":"20250101"},
+    {"corp_code":"00999999","corp_name":"스마트미디어","corp_eng_name":"Smart Media Co., Ltd.","stock_code":"","modify_date":"20250102"},
+    {"corp_code":"02000001","corp_name":"알파테크놀로지스","corp_eng_name":"Alpha Technologies Corporation","stock_code":"","modify_date":"20241201"}
+  ],
+  "profiles": {
+    "00258689":{"status":"000","corp_name":"JYP Ent.","adres":"서울특별시 강동구 강동대로 205","hm_url":"jype.com"},
+    "00535454":{"status":"000","corp_name":"(주)제이와이피","adres":"서울특별시 강남구 청담동 123-50","hm_url":"jype.com"},
+    "00136689":{"status":"000","corp_name":"(주)에스엠엔터테인먼트","adres":"서울특별시 성동구 왕십리로 83-21","hm_url":"smentertainment.com"},
+    "01000001":{"status":"000","corp_name":"에스엠","adres":"부산광역시 사상구 학장로 10","hm_url":""},
+    "01000002":{"status":"000","corp_name":"에스엠","adres":"경기도 안산시 단원구 중앙대로 20","hm_url":""},
+    "00999999":{"status":"000","corp_name":"스마트미디어","adres":"서울특별시 금천구 가산로 30","hm_url":"smartmedia.example"},
+    "02000001":{"status":"000","corp_name":"알파테크놀로지스","adres":"대전광역시 유성구 대학로 40","hm_url":"alpha.example"}
+  },
+  "cases": [
+    {"id":"jyp_upper","query":"JYP","address":"서울 강동구","expected":"00258689","also":["00535454"],"top1":true,"no_paid_fallback":true,"forbidden":["00999999"]},
+    {"id":"jyp_lower","query":"jyp","address":"서울 강동구","expected":"00258689","also":["00535454"],"top1":true,"no_paid_fallback":true,"forbidden":["00999999"]},
+    {"id":"jyp_mixed","query":"Jyp","address":"서울 강동구","expected":"00258689","also":["00535454"],"top1":true,"no_paid_fallback":true,"forbidden":["00999999"]},
+    {"id":"jyp_english","query":"JYP Entertainment","address":"서울 강동구","expected":"00258689","also":[],"top1":true,"no_paid_fallback":true,"forbidden":["00535454"]},
+    {"id":"jyp_typo","query":"JYP Entertainmnt","address":"서울 강동구","expected":"00258689","also":[],"top1":true,"no_paid_fallback":true,"forbidden":["00535454"]},
+    {"id":"jyp_moved_address","query":"JYP Entertainment","address":"서울 강남구","expected":"00258689","also":[],"top1":true,"no_paid_fallback":true,"forbidden":[]},
+    {"id":"jyp_korean_qualified","query":"제이와이피 엔터테인먼트","address":"서울 강동구","expected":"00258689","also":["00535454"],"top1":true,"no_paid_fallback":true,"forbidden":["00999999"]},
+    {"id":"jyp_mixed_script_qualified","query":"JYP 엔터테인먼트","address":"서울 강동구","expected":"00258689","also":["00535454"],"top1":true,"no_paid_fallback":true,"forbidden":["00999999"]},
+    {"id":"old_jyp_exact","query":"제이와이피","address":"서울 강남구","expected":"00535454","also":[],"top1":true,"no_paid_fallback":true,"forbidden":[]},
+    {"id":"sm_acronym","query":"SM","address":"서울 성동구","expected":"00136689","also":["01000001","01000002"],"top1":true,"no_paid_fallback":true,"forbidden":["00999999"]},
+    {"id":"sm_dotted","query":"S.M.","address":"서울 성동구","expected":"00136689","also":["01000001","01000002"],"top1":true,"no_paid_fallback":true,"forbidden":["00999999"]},
+    {"id":"sm_homonym_busan","query":"에스엠","address":"부산 사상구","expected":"01000001","also":["01000002","00136689"],"top1":true,"no_paid_fallback":true,"forbidden":["00999999"]},
+    {"id":"sm_korean_current_address","query":"에스엠","address":"서울 성동구","expected":"00136689","also":["01000001","01000002"],"top1":true,"no_paid_fallback":true,"forbidden":["00999999"]},
+    {"id":"stock_code","query":"035900","address":"","expected":"00258689","also":[],"top1":true,"no_paid_fallback":true,"forbidden":[]},
+    {"id":"corp_code","query":"00258689","address":"","expected":"00258689","also":[],"top1":true,"no_paid_fallback":true,"forbidden":[]},
+    {"id":"long_typo","query":"Alpha Technlogies","address":"대전 유성구","expected":"02000001","also":[],"top1":true,"no_paid_fallback":true,"forbidden":[]},
+    {"id":"spaced_acronym_rejected","query":"JY P","address":"서울 강동구","expected":"","also":[],"top1":false,"no_paid_fallback":false,"forbidden":["00258689","00535454"]},
+    {"id":"alphanumeric_acronym_rejected","query":"JYP1","address":"서울 강동구","expected":"","also":[],"top1":false,"no_paid_fallback":false,"forbidden":["00258689","00535454"]},
+    {"id":"confusable_acronym_rejected","query":"JҮP","address":"서울 강동구","expected":"","also":[],"top1":false,"no_paid_fallback":false,"forbidden":["00258689","00535454"]}
+  ]
+}

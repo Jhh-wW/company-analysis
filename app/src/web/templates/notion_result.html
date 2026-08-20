@@ -8,13 +8,26 @@
 
 {% block content %}
 <div class="card">
-  {% if notion.success %}
+  {% if notion_state == 'in_progress' %}
+    <div class="stopped-icon" aria-hidden="true">⏳</div>
+    <h1>노션으로 보내는 중입니다</h1>
+    <p class="lede">
+      같은 보고서의 전송이 이미 진행 중입니다. 중복 페이지를 막기 위해
+      <strong>새 전송은 시작하지 않았습니다.</strong>
+    </p>
+
+  {% elif notion.success %}
     <div class="stopped-icon">✅</div>
-    <h1>노션으로 보냈습니다</h1>
-    <p class="lede">{{ report.company }} · {{ report.job }}</p>
+    {% if notion_reused %}
+      <h1>이미 보낸 노션 페이지입니다</h1>
+      <p class="lede">새 페이지를 만들지 않고 저장된 성공 결과를 다시 열었습니다.</p>
+    {% else %}
+      <h1>노션으로 보냈습니다</h1>
+    {% endif %}
+    <p class="lede">{{ report.company }} 기업분석 보고서</p>
     {% if notion.page_url %}
       <div class="btn-row">
-        <a class="btn" href="{{ notion.page_url }}" target="_blank" rel="noopener"
+      <a class="btn" href="{{ notion.page_url }}" target="_blank" rel="noreferrer noopener"
            style="line-height:1.6">노션에서 열기</a>
       </div>
     {% endif %}
@@ -30,25 +43,57 @@
       <span>⚠️</span>
       <span>
         <b>노션에 반쪽짜리 페이지가 남아 있습니다.</b>
-        노션에서 직접 지우신 뒤 다시 시도해 주세요 —
-        그냥 다시 보내면 <strong>페이지가 두 개</strong>가 됩니다.
+        아래 페이지를 먼저 확인하세요. 자동으로 다시 보내지 않습니다.
+        재시도하면 <strong>새 페이지가 하나 더 생길 수 있습니다.</strong>
       </span>
     </div>
     {% if notion.page_url %}
       <div class="btn-row">
-        <a class="btn ghost" href="{{ notion.page_url }}" target="_blank" rel="noopener"
+      <a class="btn ghost" href="{{ notion.page_url }}" target="_blank" rel="noreferrer noopener"
            style="line-height:1.6">만들다 만 페이지 열기</a>
+      </div>
+    {% endif %}
+
+  {% elif notion.uncertain %}
+    <div class="stopped-icon" aria-hidden="true">❓</div>
+    <h1>전송 결과를 확인할 수 없습니다</h1>
+    <p class="lede">
+      연결이 끊겼거나 서버 응답을 확인하지 못했습니다.
+      <strong>노션 페이지가 이미 생겼을 수 있어 자동 재전송하지 않았습니다.</strong>
+    </p>
+    {% if notion.page_url %}
+      <div class="btn-row">
+      <a class="btn ghost" href="{{ notion.page_url }}" target="_blank" rel="noreferrer noopener"
+           style="line-height:1.6">확인 가능한 페이지 열기</a>
       </div>
     {% endif %}
 
   {% else %}
     <div class="stopped-icon">📭</div>
     <h1>보내지 못했습니다</h1>
-    <p class="lede">노션에는 <strong>아무것도 만들어지지 않았습니다.</strong></p>
+    <p class="lede">
+      확인 가능한 실패로 종료됐습니다. 자동으로 다시 보내지는 않았습니다.
+    </p>
   {% endif %}
 
   {% if notion.error %}
     <p class="muted" style="margin-top:14px">사유: {{ notion.error }}</p>
+  {% endif %}
+
+  {% if notion_retry_allowed %}
+    <form method="post" action="/notion/{{ job_id }}" class="report-action-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="retry_revision" value="{{ notion_revision }}">
+      <div class="warn-line">
+        <label>
+          <input type="checkbox" name="confirm_duplicate" value="yes" required>
+          기존 페이지가 남아 있을 수 있고, 다시 보내면 중복 페이지가 생길 수 있음을 확인했습니다.
+        </label>
+      </div>
+      <div class="btn-row">
+        <button type="submit" class="btn ghost">새 페이지로 명시적으로 다시 보내기</button>
+      </div>
+    </form>
   {% endif %}
 
   <div class="btn-row">

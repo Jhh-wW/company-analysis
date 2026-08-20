@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 import io
+import ipaddress
 import secrets
+from urllib.parse import urlsplit
 
 import segno
 
@@ -31,7 +33,7 @@ def new_key() -> str:
     """추측할 수 없는 새 열쇠를 만든다.
 
     Returns:
-        16진수 열쇠 (기본 16자리 = 64비트).
+        16진수 열쇠 (기본 32자리 = 128비트).
 
     ★ `secrets`를 쓴다 — `random`은 예측 가능해서 열쇠에 쓰면 안 된다.
     """
@@ -79,7 +81,7 @@ def qr_svg(url: str) -> str:
 
 
 def base_url_of(request_url: str) -> str:
-    """지금 접속한 주소에서 «서비스 주소»만 뽑는다.
+    """일반 URL에서 origin을 분리하는 하위 호환 유틸리티.
 
     Args:
         request_url: 요청 주소 전체 (`http://localhost:8000/admin/access` 등).
@@ -87,12 +89,10 @@ def base_url_of(request_url: str) -> str:
     Returns:
         `http://localhost:8000` 부분.
 
-    ★ 왜 필요한가 — 링크를 발급할 때 「우리 서비스 주소가 뭔지」를 알아야 하는데,
-      그걸 상수로 박아 두면 **배포한 뒤에 안 고쳐져서 링크가 localhost를 가리킨다.**
-      지금 접속한 주소에서 뽑으면 배포하든 로컬이든 저절로 맞는다.
+    ⚠️ 요청 URL은 ``Host`` 헤더의 영향을 받으므로 capability QR·외부 복사용 주소에
+      이 함수 결과를 직접 사용하면 안 된다. 그 용도는 ``canonical_public_base_url``
+      또는 엄격한 로컬 전용 ``safe_local_base_url``을 쓴다.
     """
-    from urllib.parse import urlsplit  # noqa: PLC0415
-
     parts = urlsplit(request_url)
     if not parts.scheme or not parts.netloc:
         return ""
@@ -102,6 +102,81 @@ def base_url_of(request_url: str) -> str:
 #: 인터넷에 공개된 주소로 «안 보이는» 호스트들.
 #: ★ 여기 있는 주소로 링크를 발급하면 **인사팀에게는 안 열린다.**
 _LOCAL_HOSTS: tuple[str, ...] = ("localhost", "127.0.0.1", "0.0.0.0", "::1", "testserver")
+
+
+def _is_local_host(host: str) -> bool:
+    normalized = (host or "").lower().rstrip(".")
+    if normalized in _LOCAL_HOSTS or normalized.endswith(".localhost"):
+        return True
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_unspecified
+
+
+def _is_public_host(host: str) -> bool:
+    normalized = (host or "").lower().rstrip(".")
+    if not normalized or _is_local_host(normalized):
+        return False
+    try:
+        # 사설·link-local·예약 IP는 외부 포트폴리오 주소가 아니다.
+        return ipaddress.ip_address(normalized).is_global
+    except ValueError:
+        return True
+
+
+def canonical_public_base_url(value: str) -> str:
+    """설정에서 받은 공개 HTTPS origin만 정규화한다.
+
+    요청의 ``Host``나 ``X-Forwarded-*``는 받지 않는다. 사용자 정보·경로·쿼리·
+    fragment가 붙었거나 로컬 호스트인 값도 거절해 QR에 공격자 origin이 섞이지 않게
+    한다. 잘못된 설정은 빈 문자열로 fail-closed 한다.
+    """
+    raw = (value or "").strip()
+    try:
+        parts = urlsplit(raw)
+        # 잘못된 포트(``:abc``)도 여기서 예외를 내므로 미리 검증한다.
+        _ = parts.port
+    except (TypeError, ValueError):
+        return ""
+    if (
+        parts.scheme.lower() != "https"
+        or not parts.netloc
+        or not parts.hostname
+        or parts.username is not None
+        or parts.password is not None
+        or parts.path not in {"", "/"}
+        or parts.query
+        or parts.fragment
+        or not _is_public_host(parts.hostname)
+    ):
+        return ""
+    return f"https://{parts.netloc.rstrip('/')}"
+
+
+def safe_local_base_url(request_url: str) -> str:
+    """로컬 데모에서만 loopback 요청 origin을 절대 주소로 쓴다.
+
+    배포 origin은 반드시 설정값을 써야 한다. 따라서 공격자가 ``Host: evil.example``
+    를 넣어도 이 함수는 빈 값을 돌려주며, 외부 복사용 URL과 QR은 만들어지지 않는다.
+    ``testserver``는 격리 TestClient 전용 호스트라 로컬 범주에 포함한다.
+    """
+    try:
+        parts = urlsplit((request_url or "").strip())
+        _ = parts.port
+    except (TypeError, ValueError):
+        return ""
+    host = (parts.hostname or "").lower().rstrip(".")
+    if (
+        parts.scheme.lower() != "http"
+        or not _is_local_host(host)
+        or host == "testserver"
+        or parts.username is not None
+        or parts.password is not None
+    ):
+        return ""
+    return f"http://{parts.netloc}"
 
 
 def looks_deployed(url: str) -> bool:
@@ -126,4 +201,4 @@ def looks_deployed(url: str) -> bool:
     if parts.scheme != "https":
         return False
     host = (parts.hostname or "").lower()
-    return bool(host) and host not in _LOCAL_HOSTS
+    return _is_public_host(host)

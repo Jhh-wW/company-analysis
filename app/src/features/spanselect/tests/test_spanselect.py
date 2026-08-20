@@ -40,12 +40,12 @@ def 문장쪼개기(text: str) -> list[str]:
 
 
 # ── 실측 문장 (지어낸 예시가 아니다) ────────────────────
-#: `prototype_v1/data/pilot/reports/재수집-p014.md:22` — 4-3 칸에 실제로 실렸던 문장.
+#: `analysis_engine/data/pilot/reports/재수집-p014.md:22` — 4-3 칸에 실제로 실렸던 문장.
 감사문구_문장 = (
     "이러한 상황은 회사의 계속기업으로서의 존속능력에 대하여 유의적 의문을 "
     "제기할 수 있는 상황을 나타냅니다."
 )
-#: `prototype_v1/data/pilot/fragments/실캡처-자사홈페이지-02.json` — 시세 기사.
+#: `analysis_engine/data/pilot/fragments/실캡처-자사홈페이지-02.json` — 시세 기사.
 시세_뉴스 = (
     "(2026-08-14 보도 · www.topstarnews.net) 로보스타 주가, 8월 14일 85,900원 "
     "0.12% 하락 마감. 14일 KRX 마감 기준, 네이버페이 증권에 따르면 로보스타 "
@@ -140,7 +140,7 @@ def test_프롬프트에_직무와_후보줄과_요구역량이_다_들어간다
 
 def test_블록_조건이_1부터_9까지_다_있다():
     prompt = _프롬프트()
-    for 표시 in ("1(뭘 팔아서", "2(뭘 잘하나", "3(요즘 잘", "4-1(", "4-2(", "4-3(", "9(누구에게"):
+    for 표시 in ("1(뭘 팔아서", "2(뭘 잘하나", "3(요즘 잘", "4-1(", "4-2(", "4-3(", "9(주요 파트너"):
         assert 표시 in prompt
 
 
@@ -328,7 +328,7 @@ def test_1판_엔진의_원래_프롬프트가_그대로_남아_있다():
 
     우리는 엔진을 고치지 않고 앱에서 감싸는 방식을 택했다. 그 전제를 지킨다.
     """
-    engine_path = paths.PROJECT_ROOT / "prototype_v1" / "tools" / "run_pilot.py"
+    engine_path = paths.PROJECT_ROOT / "analysis_engine" / "tools" / "run_pilot.py"
     source = engine_path.read_text(encoding="utf-8")
     assert "4축·9는 회사가 직접 말한 문장만" in source, (
         "1판 엔진의 프롬프트가 바뀌었습니다. 1판은 고치지 않는 것이 이 프로젝트의 규칙입니다."

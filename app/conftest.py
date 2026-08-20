@@ -49,17 +49,19 @@ def _fresh_guards():
     """
     from src.features.budget import logic as budget_logic   # noqa: PLC0415
     from src.features.sharelink import logic as share_logic  # noqa: PLC0415
-    from src.web import main                                 # noqa: PLC0415
+    from src.web import job_runtime, paid_runtime, public_ids  # noqa: PLC0415
 
-    main._JOBS.clear()
-    main._PAID_ATTEMPTS.clear()
-    main._RATE_HISTORY = budget_logic.RateHistory()
-    main._LEDGER = budget_logic.Ledger(day=dt.date.today())
+    job_runtime._JOBS.clear()
+    job_runtime._PAID_ATTEMPTS.clear()
+    with public_ids._RESERVATION_LOCK:
+        public_ids._RESERVED_IDS.clear()
+    paid_runtime._RATE_HISTORY = budget_logic.RateHistory()
+    paid_runtime._LEDGER = budget_logic.Ledger(day=dt.date.today())
     # ★ 예산은 «링크별»로 센다 (P-94) — 이것도 같이 비워야 한다.
-    main._LINK_SPEND = share_logic.DailySpend(day=dt.date.today())
-    main._RUNNING = 0
-    main._RUNNING_BY_BUCKET.clear()
-    main._BUDGET_STORE_HEALTHY = True
-    main._UNRESOLVED_BUCKETS.clear()
-    main._ACTIVE_PAID_PHASES.clear()
+    paid_runtime._LINK_SPEND = share_logic.DailySpend(day=dt.date.today())
+    paid_runtime._RUNNING = 0
+    paid_runtime._RUNNING_BY_BUCKET.clear()
+    paid_runtime._BUDGET_STORE_HEALTHY = True
+    paid_runtime._UNRESOLVED_BUCKETS.clear()
+    paid_runtime._ACTIVE_PAID_PHASES.clear()
     yield

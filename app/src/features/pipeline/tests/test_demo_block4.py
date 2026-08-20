@@ -331,8 +331,6 @@ def test_잘리거나_짧은_토막은_문장으로_안_센다(원문, 남는수
 
 #: 4번(4-1·4-2·4-3)에 문장이 한 줄이라도 들어가는 회사 수. 재도출 전에는 2곳이었다.
 _EXPECTED_SITUATION_FILLED = 9
-#: 8번 교차표가 실제로 나오는 회사 수. 재도출 전에는 1곳이었다.
-_EXPECTED_BLOCK8_SHOWN = 3
 
 
 @lru_cache(maxsize=1)
@@ -366,27 +364,22 @@ def test_실측_4번이_채워지는_회사_수():
     assert len(filled) == _EXPECTED_SITUATION_FILLED, f"4번이 채워진 곳: {filled}"
 
 
-def test_실측_8번_교차표가_나오는_회사_수():
+def test_실측_보고서는_8번_교차표_대신_일반_활용칸을_가진다():
     reports = _demo_reports()
     if not reports:
         pytest.skip("데모 데이터 없음")
 
-    shown = [
-        company
-        for company, report in reports
-        if (_cells_of(report).get("8") and _cells_of(report)["8"].tables)
-    ]
-    assert len(shown) == _EXPECTED_BLOCK8_SHOWN, f"8번이 나온 곳: {shown}"
+    for company, report in reports:
+        cells = _cells_of(report)
+        assert not ({"5", "6", "7", "8"} & set(cells)), company
+        assert "활용" in cells, company
 
 
-def test_실측_안내_줄이_8번_교차표에_섞이지_않는다():
-    """안내는 회사 상황이 아니다. 교차표의 재료가 되면 근거 없는 행이 생긴다."""
+def test_실측_재도출_안내줄은_활용칸의_회사사실로_재사용되지_않는다():
+    """안내는 회사 사실이 아니므로 활용 칸의 인용 문장으로 섞이면 안 된다."""
     for company, report in _demo_reports():
-        block8 = _cells_of(report).get("8")
-        if block8 is None or not block8.tables:
-            continue
-        for row in block8.tables[0].rows:
-            assert _REDRAWN_NOTICE not in " ".join(row), f"{company} 8번에 안내 줄이 섞였다"
+        use = _cells_of(report)["활용"]
+        assert all(sentence != _REDRAWN_NOTICE for sentence, _cite in use.lines), company
 
 
 def test_실측_재도출한_4번에_감사의견_시세_문장이_하나도_없다():

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from src.core.constants import (
     EMPTY_REASON_HOMEPAGE,
+    EMPTY_REASON_NOT_COMPANY_SPECIFIC,
     SUBSTANCE_FAILED_REASON,
     TABLE_DUMP_REASON,
 )
@@ -74,6 +75,16 @@ def test_재료가_있을_때와_없을_때의_사유가_다르다():
 
     assert 있음 != 없음
     assert "못 구했습니다" in 없음
+
+
+def test_다른_회사에도_통하는_일반론은_그_이유를_정확히_말한다():
+    사유 = _사유(
+        _빈칸(),
+        collected_kinds={NEWS_FRAGMENT_KIND},
+        specificity_rejected_cells={"4-1"},
+    )
+
+    assert 사유 == EMPTY_REASON_NOT_COMPANY_SPECIFIC
 
 
 def test_재료가_없으면_소스마다_실제_상태를_말한다():

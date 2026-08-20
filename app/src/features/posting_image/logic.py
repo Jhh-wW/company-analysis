@@ -19,17 +19,26 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from dataclasses import dataclass
+from io import BytesIO
 from typing import Callable, Optional
 
-from src.core.constants import (
-    AI_COST_KRW_PER_USD,
-    MODEL_PRICES_USD_PER_MTOK,
-    UNKNOWN_MODEL_PRICE_USD_PER_MTOK,
-)
+from PIL import Image, UnidentifiedImageError
+
+from src.core.constants import AI_COST_KRW_PER_USD
+from src.core.pricing import model_price
+from src.features.budget import provider_budget
 from src.features.posting_image import constants
 
 logger = logging.getLogger(__name__)
+
+_PIL_FORMAT_TO_MIME = {
+    "PNG": "image/png",
+    "JPEG": "image/jpeg",
+    "WEBP": "image/webp",
+}
+_ALLOWED_PIL_FORMATS = tuple(_PIL_FORMAT_TO_MIME)
 
 
 @dataclass(frozen=True)
@@ -87,10 +96,10 @@ class PostingImageResult:
 
 
 def _sniff_format(data: bytes) -> Optional[str]:
-    """확장자가 아니라 «바이트 자체»로 이미지 형식을 본다.
+    """확장자가 아니라 바이트 시그니처로 후보 이미지 형식을 좁힌다.
 
     Ctrl+V로 붙여넣은 캡처는 확장자가 없거나 브라우저가 임의로 붙인 이름이라
-    확장자를 신뢰할 수 없다 — 반드시 매직 바이트로만 판별한다.
+    확장자를 신뢰할 수 없다. 이 값은 후보 판별일 뿐이며 Pillow 검증과 함께 쓴다.
     """
     if data.startswith(constants.MAGIC_PNG):
         return "image/png"
@@ -98,6 +107,54 @@ def _sniff_format(data: bytes) -> Optional[str]:
         return "image/jpeg"
     if data[:4] == constants.MAGIC_RIFF and data[8:12] == constants.MAGIC_WEBP:
         return "image/webp"
+    return None
+
+
+def _validate_decodable_image(
+    data: bytes, sniffed_mime: str
+) -> Optional[ValidationFailure]:
+    """허용 디코더로 실제 구조와 해상도를 확인한다.
+
+    매직 바이트는 쉽게 위조할 수 있으므로 Pillow가 파일 구조 전체를 검증해야 한다.
+    원본은 메모리에서 읽기만 하며 저장하거나 재인코딩하지 않는다.
+    """
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(BytesIO(data), formats=_ALLOWED_PIL_FORMATS) as image:
+                detected_mime = _PIL_FORMAT_TO_MIME.get(image.format or "")
+                if detected_mime is None or detected_mime != sniffed_mime:
+                    return ValidationFailure(
+                        "형식_불일치", constants.ERROR_UNSUPPORTED_FORMAT
+                    )
+
+                width, height = image.size
+                if (
+                    width <= 0
+                    or height <= 0
+                    or width > constants.MAX_IMAGE_DIMENSION
+                    or height > constants.MAX_IMAGE_DIMENSION
+                    or width * height > constants.MAX_IMAGE_PIXELS
+                ):
+                    return ValidationFailure(
+                        "해상도_초과", constants.ERROR_RESOLUTION_TOO_LARGE
+                    )
+                image.verify()
+
+            # ``verify()``는 컨테이너 구조만 검사하고 픽셀을 읽지 않는다. 검증 뒤의
+            # Image 객체는 사용할 수 없으므로 같은 메모리 바이트를 다시 열어 실제
+            # 픽셀 디코딩까지 끝내야 절단 JPEG·손상 WebP를 provider 전에 막을 수 있다.
+            with Image.open(BytesIO(data), formats=_ALLOWED_PIL_FORMATS) as image:
+                image.load()
+    except (
+        UnidentifiedImageError,
+        OSError,
+        SyntaxError,
+        ValueError,
+        Image.DecompressionBombWarning,
+        Image.DecompressionBombError,
+    ):
+        return ValidationFailure("이미지_손상", constants.ERROR_INVALID_IMAGE)
     return None
 
 
@@ -132,8 +189,12 @@ def validate_images(images: list[bytes]) -> Optional[ValidationFailure]:
                     limit_mb=constants.MAX_IMAGE_BYTES // (1024 * 1024),
                 ),
             )
-        if _sniff_format(data) is None:
+        sniffed_mime = _sniff_format(data)
+        if sniffed_mime is None:
             return ValidationFailure("형식_미지원", constants.ERROR_UNSUPPORTED_FORMAT)
+        decode_failure = _validate_decodable_image(data, sniffed_mime)
+        if decode_failure is not None:
+            return decode_failure
         total_bytes += len(data)
 
     if total_bytes > constants.MAX_TOTAL_BYTES:
@@ -214,12 +275,10 @@ def extract_posting_text(
 def _usage_cost_krw(model: str, tokens_in: int, tokens_out: int) -> float:
     """Anthropic 응답 사용량을 원화로 바꾼다.
 
-    ★ 모르는 모델은 싸게 추정하지 않는다. 원장에 적게 적히면 예산 상한도 함께
-      뚫리므로 `core.constants`의 보수적인 단가를 그대로 쓴다.
+    ★ 모르는 모델은 싸게 추정하지 않는다. 원장에 적게 적히면 운영 중단 기준도
+      왜곡되므로 `core.constants`의 보수적인 단가를 그대로 쓴다.
     """
-    price_in, price_out = MODEL_PRICES_USD_PER_MTOK.get(
-        model, UNKNOWN_MODEL_PRICE_USD_PER_MTOK
-    )
+    price_in, price_out = model_price(model)
     usd = (tokens_in * price_in + tokens_out * price_out) / 1_000_000
     return round(usd * AI_COST_KRW_PER_USD, 2)
 
@@ -255,6 +314,27 @@ def default_extract(images: list[bytes]) -> ExtractResult:
             f"{constants.ENV_ANTHROPIC_API_KEY} 환경변수가 없습니다"
         )
 
+    dimensions: list[tuple[int, int]] = []
+    for data in images:
+        try:
+            with Image.open(BytesIO(data), formats=_ALLOWED_PIL_FORMATS) as image:
+                width, height = image.size
+        except (UnidentifiedImageError, OSError, ValueError) as exc:
+            raise provider_budget.ProviderBudgetUnavailable(
+                "provider 호출 전 이미지 token 수를 추정할 수 없습니다"
+            ) from exc
+        if (
+            width <= 0
+            or height <= 0
+            or width > constants.MAX_IMAGE_DIMENSION
+            or height > constants.MAX_IMAGE_DIMENSION
+            or width * height > constants.MAX_IMAGE_PIXELS
+        ):
+            raise provider_budget.ProviderBudgetUnavailable(
+                "provider 호출 전 이미지가 서버 해상도 상한을 넘었습니다"
+            )
+        dimensions.append((width, height))
+
     schema = {
         "type": "object",
         "properties": {
@@ -282,31 +362,59 @@ def default_extract(images: list[bytes]) -> ExtractResult:
     ]
     content.append({"type": "text", "text": prompt})
 
-    client = anthropic.Anthropic()
-    response = client.messages.create(
+    call_reservation = provider_budget.current().reserve_call(
         model=constants.DEFAULT_EXTRACT_MODEL,
+        input_tokens_upper=(
+            provider_budget.estimate_image_tokens(dimensions)
+            + provider_budget.estimate_request_tokens(
+                {"prompt": prompt, "output_config": schema}
+            )
+        ),
         max_tokens=constants.DEFAULT_EXTRACT_MAX_TOKENS,
-        messages=[{"role": "user", "content": content}],
-        output_config={"format": {"type": "json_schema", "schema": schema}},
     )
+    client = anthropic.Anthropic(max_retries=0)
+    try:
+        response = client.messages.create(
+            model=constants.DEFAULT_EXTRACT_MODEL,
+            max_tokens=constants.DEFAULT_EXTRACT_MAX_TOKENS,
+            messages=[{"role": "user", "content": content}],
+            output_config={"format": {"type": "json_schema", "schema": schema}},
+        )
+    except Exception:
+        provider_budget.current().mark_unknown(call_reservation)
+        raise
     model = str(getattr(response, "model", "") or constants.DEFAULT_EXTRACT_MODEL)
     usage = getattr(response, "usage", None)
     tokens_in = getattr(usage, "input_tokens", None) if usage is not None else None
     tokens_out = getattr(usage, "output_tokens", None) if usage is not None else None
     if tokens_in is None or tokens_out is None:
         # 응답이 왔어도 usage가 없으면 실제 금액을 0원으로 확정할 수 없다.
+        provider_budget.current().mark_unknown(call_reservation)
         return ExtractResult(text="", model=model, billing_uncertain=True)
     try:
         clean_in, clean_out = int(tokens_in), int(tokens_out)
     except (TypeError, ValueError, OverflowError):
+        provider_budget.current().mark_unknown(call_reservation)
         return ExtractResult(text="", model=model, billing_uncertain=True)
     if clean_in < 0 or clean_out < 0:
+        provider_budget.current().mark_unknown(call_reservation)
         return ExtractResult(text="", model=model, billing_uncertain=True)
     cost_krw = _usage_cost_krw(
         model,
         clean_in,
         clean_out,
     )
+    try:
+        provider_budget.current().settle_call(
+            call_reservation,
+            actual_krw=provider_budget.usage_cost_krw(
+                model, clean_in, clean_out
+            ),
+        )
+    except provider_budget.ProviderCostInvariantError:
+        # 실제 usage 금액은 반환값에 보존돼 상위 원장이 숨기지 않는다.
+        logger.critical("OCR provider 비용 예약의 정산 상태가 손상됐습니다")
+        raise
     if getattr(response, "stop_reason", "") == "refusal":
         return ExtractResult(text="", cost_krw=cost_krw, model=model)
     text_block = next((b for b in response.content if b.type == "text"), None)

@@ -232,12 +232,15 @@ def test_칸별_채움률은_완주_건만_본다():
         _record(
             run_id="a",
             end_step=END_STEP_COMPLETE,
-            cells_missing=["4-1", "4-3"],
+            cells_missing=["current_challenges", "future_strategy"],
+            grade=GRADE_COMPLETE,
         ),
         _record(
             run_id="b",
             end_step=END_STEP_COMPLETE,
             cells_missing=[],
+            cells_filled=9,
+            grade=GRADE_COMPLETE,
         ),
         # 완주하지 못한 건 — cells_missing이 기본값(빈 리스트)이라도 채움률에 안 들어가야 한다
         _record(run_id="c", end_step=END_STEP_GATE, cells_missing=[]),
@@ -246,9 +249,36 @@ def test_칸별_채움률은_완주_건만_본다():
     dashboard = build_dashboard(records, today=오늘, model="m")
     rates = dict(dashboard.cell_fill_rate)
 
-    assert rates["4-1"] == 50.0  # 완주 2건 중 1건만 채움
-    assert rates["1"] == 100.0   # 두 완주 건 모두 미충족 목록에 없음
-    assert "9" not in rates
+    assert rates["current_challenges"] == 50.0  # 완주 2건 중 1건만 채움
+    assert rates["identity"] == 100.0           # 두 완주 건 모두 채움
+    assert list(rates) == [
+        "identity",
+        "business_model",
+        "portfolio",
+        "past_changes",
+        "current_challenges",
+        "future_strategy",
+        "operations_partners",
+        "culture",
+        "competitive_position",
+    ]
+
+
+def test_구형_6칸_완주_기록은_canonical_장별_채움률에서_제외한다():
+    records = [
+        _record(
+            run_id="legacy",
+            end_step=END_STEP_COMPLETE,
+            cells_filled=4,
+            cells_missing=["4-1", "4-3"],
+            grade=GRADE_COMPLETE,
+        )
+    ]
+
+    dashboard = build_dashboard(records, today=오늘, model="m")
+
+    assert dashboard.cell_fill_rate == []
+    assert dashboard.recent[0].cell_total == 6
 
 
 def test_완주_건이_없으면_칸별_채움률은_빈_목록이다():
@@ -296,21 +326,29 @@ def test_수집_활용률은_인용_조각_합_나누기_수집_조각_합이다
 
 def test_내용_고유성은_충족_항목_합_나누기_작성_항목_합이다():
     records = [
-        # 옛 채움 수는 신뢰하지 않고 현재 6칸의 미충족 목록으로 재계산한다.
+        # 넘어온 채움 수는 신뢰하지 않고 canonical 9장의 미충족으로 재계산한다.
         _record(
             run_id="a", cells_filled=6,
-            cells_missing=["4-1", "4-3", "9"], grade=GRADE_COMPLETE,
-        ),  # 현재 규칙 4/6
+            cells_missing=[
+                "past_changes",
+                "current_challenges",
+                "future_strategy",
+            ],
+            grade=GRADE_COMPLETE,
+        ),  # canonical 규칙 6/9
         _record(
-            run_id="b", cells_filled=1, cells_missing=[], grade=GRADE_COMPLETE,
-        ),  # 현재 규칙 6/6
+            run_id="b", cells_filled=9, cells_missing=[], grade=GRADE_COMPLETE,
+        ),  # canonical 규칙 9/9
     ]
 
     dashboard = build_dashboard(records, today=오늘, model="m")
 
-    assert dashboard.quality[METRIC_ANSWER_RELEVANCY] == round(10 / 12 * 100, 1)
-    assert [record.cells_filled for record in dashboard.recent] == [4, 6]
-    assert all("9" not in record.cells_missing for record in dashboard.recent)
+    assert dashboard.quality[METRIC_ANSWER_RELEVANCY] == round(15 / 18 * 100, 1)
+    assert [record.cells_filled for record in dashboard.recent] == [6, 9]
+    assert all(
+        "9" not in record.cells_missing and "4-1" not in record.cells_missing
+        for record in dashboard.recent
+    )
 
 
 def test_AI_판정_정합률은_사람이_검토한_건만_분모로_쓴다():
@@ -426,8 +464,8 @@ def test_같은_요청이_여러_줄이면_마지막_것만_센다():
             fragments_cited=5,
             sentences_made=10,
             sentences_passed=8,
-            cells_filled=4,
-            cells_missing=["2", "9"],
+            cells_filled=7,
+            cells_missing=["business_model", "competitive_position"],
             cells_suspect=[],
             grade="완성",
             human_check=human,

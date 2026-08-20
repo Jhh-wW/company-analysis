@@ -120,7 +120,7 @@ def build_auth_url(credentials: GoogleCredentials, state: str) -> str:
 class LoginStart:
     """로그인을 시작할 때 필요한 값.
 
-    main.py는 `auth_url`로 리다이렉트하고, `state`를 (짧은 만료시간의) 쿠키에 심어
+    로그인 라우터는 `auth_url`로 리다이렉트하고, `state`를 (짧은 만료시간의) 쿠키에 심어
     콜백 때 돌아온 state와 대조해야 한다.
     """
 
@@ -240,7 +240,7 @@ def _call_and_parse(request: urllib.request.Request, *, what: str) -> dict:
 
 @dataclass(frozen=True)
 class LoginResult:
-    """로그인 한 번이 끝난 결과. main.py가 이 값으로 세션 쿠키를 심고 다음 화면을 고른다."""
+    """로그인 한 번이 끝난 결과. 로그인 라우터가 세션 쿠키와 다음 화면을 정한다."""
 
     email: str
     is_admin: bool
@@ -252,6 +252,7 @@ def handle_callback(
     state_received: str,
     state_expected: Optional[str],
     *,
+    previous_session_token: Optional[str] = None,
     exchange: ExchangeFn = _default_exchange_code,
     fetch: UserInfoFn = _default_fetch_userinfo,
 ) -> LoginResult:
@@ -264,6 +265,7 @@ def handle_callback(
         code: 구글이 돌려준 인가 코드 (쿼리 파라미터 `code`).
         state_received: 구글이 돌려준 state (쿼리 파라미터 `state`).
         state_expected: 로그인을 시작할 때 쿠키에 심어둔 state. 쿠키가 없었으면 None.
+        previous_session_token: 성공 시 새 세션으로 교체할 현재 브라우저 세션.
         exchange: 코드↔토큰 교환 함수. 시험에서 가짜로 바꿔 끼운다.
         fetch: 사용자 정보 조회 함수. 시험에서 가짜로 바꿔 끼운다.
 
@@ -291,7 +293,13 @@ def handle_callback(
         raise GoogleAuthError("구글이 access_token을 돌려주지 않았습니다")
 
     userinfo = fetch(access_token)
-    email = logic.extract_verified_email(userinfo)  # UnverifiedEmailError는 그대로 전파한다
+    identity = logic.extract_verified_identity(userinfo)
+    email = identity.email
     is_admin = logic.check_admin(email)
-    session = logic.create_session(email, is_admin)
+    session = logic.rotate_session(
+        email,
+        is_admin,
+        subject=identity.subject,
+        previous_token=previous_session_token,
+    )
     return LoginResult(email=email, is_admin=is_admin, session=session)

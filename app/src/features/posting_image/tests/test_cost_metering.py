@@ -4,13 +4,26 @@ from __future__ import annotations
 
 import sys
 import types
+from io import BytesIO
+
+import pytest
+from PIL import Image
 
 from src.core.constants import AI_COST_KRW_PER_USD
+from src.features.budget import provider_budget
 from src.features.posting_image import constants, logic
 
 
+@pytest.fixture(autouse=True)
+def _paid_provider_budget_context():
+    with provider_budget.activate(10_000.0):
+        yield
+
+
 def _png() -> bytes:
-    return constants.MAGIC_PNG + b"valid"
+    output = BytesIO()
+    Image.new("RGB", (2, 2), color=(255, 255, 255)).save(output, "PNG")
+    return output.getvalue()
 
 
 def test_OCR_성공결과가_비용과_모델을_그대로_전달한다():
@@ -50,10 +63,19 @@ def test_haiku_사용량을_공통단가와_환율로_계산한다():
     ) == 6 * AI_COST_KRW_PER_USD
 
 
+def test_dated_model_snapshot_uses_its_exact_alias_price():
+    assert logic._usage_cost_krw(  # noqa: SLF001 - 가격 경계를 직접 고정한다
+        f"{constants.DEFAULT_EXTRACT_MODEL}-20251001", 1_000_000, 1_000_000
+    ) == logic._usage_cost_krw(  # noqa: SLF001 - 같은 별칭 단가여야 한다
+        constants.DEFAULT_EXTRACT_MODEL, 1_000_000, 1_000_000
+    )
+
+
 def _fake_anthropic(
     monkeypatch, *, content, stop_reason="end_turn", include_usage=True
 ):
     usage = types.SimpleNamespace(input_tokens=1_000, output_tokens=100)
+    usage.constructor_calls = []
     response = types.SimpleNamespace(
         model=constants.DEFAULT_EXTRACT_MODEL,
         usage=usage if include_usage else None,
@@ -63,7 +85,11 @@ def _fake_anthropic(
     messages = types.SimpleNamespace(create=lambda **_kwargs: response)
     client = types.SimpleNamespace(messages=messages)
     module = types.ModuleType("anthropic")
-    module.Anthropic = lambda: client
+    def anthropic_client(**kwargs):
+        usage.constructor_calls.append(kwargs)
+        return client
+
+    module.Anthropic = anthropic_client
     monkeypatch.setitem(sys.modules, "anthropic", module)
     monkeypatch.setenv(constants.ENV_ANTHROPIC_API_KEY, "시험용-가짜키")
     return usage
@@ -83,6 +109,7 @@ def test_응답_JSON_파싱실패여도_usage_비용을_보존한다(monkeypatch
         usage.input_tokens,
         usage.output_tokens,
     )
+    assert usage.constructor_calls == [{"max_retries": 0}]
 
 
 def test_응답_JSON이_객체가_아니어도_usage_비용을_보존한다(monkeypatch):
@@ -163,3 +190,21 @@ def test_응답은_왔지만_usage가_없으면_0원으로_확정하지_않는�
 
     assert result.text == ""
     assert result.billing_uncertain is True
+
+
+def test_OCR_예상예약이_부족하면_client도_만들지_않고_provider_0회다(monkeypatch):
+    usage = _fake_anthropic(
+        monkeypatch,
+        content=[
+            types.SimpleNamespace(
+                type="text",
+                text='{"full_text":"채용 공고","is_job_posting":true}',
+            )
+        ],
+    )
+
+    with provider_budget.activate(0.01):
+        with pytest.raises(provider_budget.ProviderBudgetExceeded):
+            logic.default_extract([_png()])
+
+    assert usage.constructor_calls == []

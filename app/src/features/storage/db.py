@@ -2,7 +2,7 @@
 
 ★ 새 의존성을 쓰지 않는다 — 파이썬 표준 `sqlite3`만 쓴다 (팀장 지시).
 
-★ 연결을 오래 들고 있지 않는다. 요청마다 짧게 열고 닫는다 — 화면(`web/main.py`)이
+★ 연결을 오래 들고 있지 않는다. 요청마다 짧게 열고 닫는다 — 웹 요청 코드가
   파이프라인을 `asyncio.to_thread`로 별도 스레드에서 돌리므로(port.py 참고),
   연결 하나를 여러 스레드가 나눠 쓰면 `sqlite3.ProgrammingError`가 난다.
   짧게 열고 닫으면 스레드 안전성을 별도 잠금 코드 없이 얻는다 (자세한 근거는
@@ -84,6 +84,7 @@ _SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
     CREATE TABLE IF NOT EXISTS {constants.TABLE_SESSIONS} (
         token      TEXT PRIMARY KEY,
         email      TEXT NOT NULL,
+        subject    TEXT NOT NULL,
         is_admin   INTEGER NOT NULL,
         expires_at REAL NOT NULL
     )
@@ -99,9 +100,29 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     """
     from src.features.sharelink.allowlist import CREATE_SQL as ALLOWED_SQL  # noqa: PLC0415
     from src.features.sharelink.store import CREATE_SQL as SHARE_LINKS_SQL  # noqa: PLC0415
+    from src.features.export_notion.store import CREATE_SQL as NOTION_EXPORTS_SQL  # noqa: PLC0415
 
-    for statement in (*_SCHEMA_STATEMENTS, SHARE_LINKS_SQL, ALLOWED_SQL):
+    for statement in (
+        *_SCHEMA_STATEMENTS,
+        SHARE_LINKS_SQL,
+        ALLOWED_SQL,
+        NOTION_EXPORTS_SQL,
+    ):
         conn.execute(statement)
+
+    # OAuth ``sub``는 이메일과 달리 계정에서 바뀌지 않는 사람 식별자다. 예전
+    # DB에는 이 열이 없으므로 표를 지우지 않고 nullable 열로만 보탠다. 값이
+    # 없는 예전 세션은 sessions.load_session()이 폐기해 재로그인을 요구한다.
+    session_columns = {
+        str(row[1])
+        for row in conn.execute(
+            f"PRAGMA table_info({constants.TABLE_SESSIONS})"
+        ).fetchall()
+    }
+    if "subject" not in session_columns:
+        conn.execute(
+            f"ALTER TABLE {constants.TABLE_SESSIONS} ADD COLUMN subject TEXT"
+        )
 
 
 @contextmanager

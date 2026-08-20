@@ -352,7 +352,7 @@ def _파일럿_인용_문장() -> list[tuple[str, str]]:
 def test_전수회귀_실측_보고서에_오탐이_없다():
     """★ 실측 보고서 전부에 돌려 «걸린 것이 전부 진짜 회계 문구»임을 못 박는다."""
     if not paths.PILOT_REPORTS_DIR.is_dir():
-        pytest.skip("파일럿 보고서 폴더가 없습니다 (prototype_v1 미배치)")
+        pytest.skip("파일럿 보고서 폴더가 없습니다 (analysis_engine 미배치)")
 
     문장들 = _파일럿_인용_문장()
     assert len(문장들) >= _MIN_PILOT_SENTENCES, (
@@ -378,7 +378,7 @@ def test_전수회귀_실적_문장은_한_건도_안_걸린다():
     회계 낱말을 세는 규칙으로 되돌아가면 여기서 무더기로 걸린다.
     """
     if not paths.PILOT_REPORTS_DIR.is_dir():
-        pytest.skip("파일럿 보고서 폴더가 없습니다 (prototype_v1 미배치)")
+        pytest.skip("파일럿 보고서 폴더가 없습니다 (analysis_engine 미배치)")
 
     실적어 = ("달성", "성장", "증가", "기록하", "매출액")
     걸린_실적문장 = [

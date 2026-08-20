@@ -1,0 +1,100 @@
+name: quality-gate
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TLDEXTRACT_CACHE: ${{ github.workspace }}/.cache/tldextract
+    steps:
+      - name: 검사할 커밋 받기
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: 배포용 Python 준비
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13.15"
+          cache: pip
+          cache-dependency-path: |
+            app/requirements.txt
+            .github/requirements-ci.txt
+      - name: 고정된 앱·시험 의존성 설치
+        run: python -m pip install --requirement app/requirements.txt --requirement .github/requirements-ci.txt
+      - name: 의존성 충돌 확인
+        run: python -m pip check
+      - name: 웹 앱 전체 시험
+        run: python -m pytest app/src app/tools/tests -q --basetemp .pytest_tmp_ci_app
+      - name: 조사 엔진 전체 시험
+        run: python -m pytest analysis_engine/src -q --basetemp .pytest_tmp_ci_engine
+
+  container-smoke:
+    needs: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: 검사할 커밋 받기
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: 배포 컨테이너 빌드
+        run: docker build --file app/Dockerfile --tag company-analysis-smoke:ci .
+      - name: 배포 컨테이너 시작
+        run: |
+          docker run --detach \
+            --name company-analysis-smoke \
+            --publish 127.0.0.1:18080:10000 \
+            --env PIPELINE=demo \
+            --env BETA_ADMIN_ONLY=1 \
+            --env APP_DATA_ROOT=/var/data \
+            --env STORAGE_DB_PATH=/var/data/storage.db \
+            --env OBSERVABILITY_RECORDS_PATH=/var/data/observability/runs.jsonl \
+            --env TLDEXTRACT_CACHE=/var/data/cache/tldextract \
+            company-analysis-smoke:ci
+      - name: 컨테이너 상태 확인
+        run: |
+          for attempt in {1..60}; do
+            status="$(curl --silent --output /tmp/company-analysis-health.json \
+              --write-out '%{http_code}' --max-time 2 \
+              http://127.0.0.1:18080/healthz || true)"
+            if [ "$status" = "200" ]; then
+              cat /tmp/company-analysis-health.json
+              exit 0
+            fi
+            running="$(docker container inspect \
+              --format '{{.State.Running}}' company-analysis-smoke 2>/dev/null || true)"
+            if [ "$running" != "true" ]; then
+              echo "배포 컨테이너가 정상 상태가 되기 전에 멈췄습니다."
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "배포 컨테이너가 120초 안에 HTTP 200을 돌려주지 않았습니다."
+          exit 1
+      - name: 실패 시 배포 로그 표시
+        if: failure()
+        run: |
+          if docker container inspect company-analysis-smoke >/dev/null 2>&1; then
+            docker logs company-analysis-smoke
+          else
+            echo "배포 컨테이너가 만들어지지 않았습니다."
+          fi
+      - name: 시험 컨테이너와 이미지 정리
+        if: always()
+        run: |
+          docker rm --force company-analysis-smoke 2>/dev/null || true
+          docker image rm company-analysis-smoke:ci 2>/dev/null || true

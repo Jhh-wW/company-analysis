@@ -1,6 +1,6 @@
 """출처 재료 뽑기(`citations.py`) 시험.
 
-★ 뉴스 조각 문자열은 1판 엔진(`prototype_v1/tools/run_pilot.py` collect_news)
+★ 뉴스 조각 문자열은 1판 엔진(`analysis_engine/tools/run_pilot.py` collect_news)
   이 실제로 만드는 모양을 그대로 옮겨 썼다 — 줄이면 시험의 뜻이 없어진다.
 """
 
@@ -12,6 +12,7 @@ from src.features.provenance.citations import build_citations
 from src.features.provenance.sources import (
     Source,
     SourceKind,
+    evidence_text_hash,
     parse_sources,
     render_sources,
 )
@@ -79,6 +80,36 @@ def test_공시_조각의_보고서_이름과_공시일이_맞는다():
     assert source.label == "사업보고서 (2025.12) · MD&A"
     assert source.disclosed_at == "2026-03-12"
     assert source.collected_at == "2026-08-15"
+    assert source.publisher == "에스엠"  # DART가 아니라 공시에 책임지는 제출 회사
+    assert source.host == "dart.fss.or.kr"
+
+
+def test_공식_계획_문장이_있는_공시는_무조건_실제값으로_고정하지_않는다():
+    frags = {
+        6: {
+            "종류": "신규사업전망",
+            "원문": "회사는 해외 판매를 확대할 계획이다.",
+        }
+    }
+
+    [source] = build_citations(frags, filing=실제_filing, collected_on=수집일)
+
+    assert "계획" in source.fact_status
+    assert source.source_type == "공식 공시"
+
+
+def test_수집기가_명시한_사실상태를_공시_Source에_그대로_보존한다():
+    frags = {
+        6: {
+            "종류": "사업내용",
+            "원문": "회사는 설비 도입을 추진 중이다.",
+            "사실상태": "공식 미실행 계획",
+        }
+    }
+
+    [source] = build_citations(frags, filing=실제_filing, collected_on=수집일)
+
+    assert source.fact_status == "공식 미실행 계획"
 
 
 def test_filing이_없으면_보고서_이름_없이_조각_종류만_남긴다():
@@ -116,6 +147,24 @@ def test_홈페이지_조각의_URL이_그대로_들어간다():
     [source] = build_citations(frags, filing=None, collected_on=수집일)
     assert source.kind is SourceKind.OTHER
     assert source.label == "https://www.company.co.kr/about"
+
+
+def test_홈페이지_출처도_도메인_대신_회사_발행주체를_보존한다():
+    frags = {
+        4: {
+            "종류": "홈페이지",
+            "원문": "회사 소개...",
+            "출처": "https://www.company.co.kr/about",
+        }
+    }
+    [source] = build_citations(
+        frags,
+        filing=None,
+        collected_on=수집일,
+        company_publisher="주식회사 가나다",
+    )
+    assert source.publisher == "주식회사 가나다"
+    assert source.host == "www.company.co.kr"
 
 
 def test_홈페이지_조각에_출처가_없으면_지어내지_않고_일반_라벨을_쓴다():
@@ -162,4 +211,32 @@ def test_만든_출처_목록을_render_parse로_왕복시켜도_같다():
     assert all(s.is_valid for s in 원본)  # 왕복 보장은 유효한 출처에 대해서만 뜻이 있다
 
     왕복 = parse_sources(render_sources(원본))
-    assert 왕복 == 원본
+    # Markdown은 사람이 보는 표시 필드만 왕복한다. canonical source_id·URL·
+    # 발행처·원문 위치는 Report JSON 등록부가 보존하며 Markdown 파서가 지우면 안 되는
+    # 공개본의 별도 계약이다.
+    표시필드 = lambda s: (
+        s.number,
+        s.kind,
+        s.label,
+        s.disclosed_at,
+        s.collected_at,
+        s.published_at,
+        s.domain,
+    )
+    assert [표시필드(s) for s in 왕복] == [표시필드(s) for s in 원본]
+
+
+def test_selected_evidence_hashes_only_actual_collected_fragment_spans() -> None:
+    raw = "첫 문장. 실제로 수집된 둘째 문장이다."
+    [source] = build_citations(
+        {2: {"종류": "MD&A", "원문": raw}},
+        filing=실제_filing,
+        collected_on=수집일,
+        selected_evidence_by_fragment={
+            2: ["실제로 수집된 둘째 문장이다.", "원문에 없는 지어낸 문장"],
+        },
+    )
+
+    assert evidence_text_hash(raw) in source.evidence_hashes
+    assert evidence_text_hash("실제로 수집된 둘째 문장이다.") in source.evidence_hashes
+    assert evidence_text_hash("원문에 없는 지어낸 문장") not in source.evidence_hashes

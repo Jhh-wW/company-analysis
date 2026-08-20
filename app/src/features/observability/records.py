@@ -21,6 +21,7 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
 
+from src.core import clock
 from src.features.observability.constants import (
     CACHE_HIT_VALUES,
     COUNTED_CELLS,
@@ -28,6 +29,9 @@ from src.features.observability.constants import (
     END_STEP_VALUES,
     GRADE_VALUES,
     HUMAN_CHECK_VALUES,
+    LEGACY_COUNTED_CELLS,
+    LEGACY_HIDDEN_CELLS,
+    LEGACY_TOTAL_CELLS,
     TOTAL_CELLS,
 )
 
@@ -52,7 +56,7 @@ class RunRecord:
     sentences_made: int          # 생성 문장 수
     sentences_passed: int        # 검사 통과 문장 수
     cells_filled: int            # 충족 항목 수
-    cells_missing: list[str]     # 미충족 항목 (예: ["4-1","4-3"])
+    cells_missing: list[str]     # 미충족 canonical 장 ID
     cells_suspect: list[str]     # 누락 의심 항목
     grade: str                   # "완성" | "부분 완성" | "미완성" | ""
     human_check: str             # "일치" | "불일치" | "" (사람 검토, 없으면 빈칸)
@@ -92,12 +96,48 @@ class RunRecord:
             0 <= self.cells_filled <= TOTAL_CELLS,
             f"cells_filled는 0~{TOTAL_CELLS} 사이여야 합니다",
         )
+        cell_ids = [*self.cells_missing, *self.cells_suspect]
+        _require(
+            all(isinstance(cell, str) for cell in cell_ids),
+            "칸 ID는 문자열이어야 합니다",
+        )
+        known_cell_ids = (
+            set(COUNTED_CELLS)
+            | set(LEGACY_COUNTED_CELLS)
+            | set(LEGACY_HIDDEN_CELLS)
+        )
+        _require(
+            set(cell_ids) <= known_cell_ids,
+            "미충족·누락 의심에 모르는 칸 ID가 있습니다",
+        )
+        _require(
+            not (
+                set(cell_ids) & set(COUNTED_CELLS)
+                and set(cell_ids)
+                & (set(LEGACY_COUNTED_CELLS) | set(LEGACY_HIDDEN_CELLS))
+            ),
+            "canonical 장 ID와 구형 칸 ID를 한 행에 섞을 수 없습니다",
+        )
         _require(
             set(self.cells_suspect) <= set(self.cells_missing),
             "누락 의심 항목은 미충족 항목의 부분집합이어야 합니다",
         )
         _require(self.cost_krw >= 0, "cost_krw는 음수일 수 없습니다")
         _require(self.elapsed_sec >= 0, "elapsed_sec는 음수일 수 없습니다")
+
+    @property
+    def cell_total(self) -> int:
+        """개별 이력이 작성된 당시의 채움 분모.
+
+        스키마 필드를 늘려 기존 JSONL을 깨뜨리지 않고, 구형 칸 ID와
+        완성 수로 과거 6칸 기록을 식별한다. 신규 공개본은 게이트 상 항상
+        canonical 9장을 모두 채운다.
+        """
+        return (
+            LEGACY_TOTAL_CELLS
+            if uses_legacy_cell_contract(self)
+            else TOTAL_CELLS
+        )
 
 
 #: `RunRecord`가 실제로 갖는 필드 이름 집합 — JSONL에서 읽은 줄이 이 모양과
@@ -136,8 +176,8 @@ def new_run_id() -> str:
 
 
 def now_iso() -> str:
-    """지금 시각을 `at` 필드 형식(ISO 8601, 초 단위)으로 돌려준다."""
-    return dt.datetime.now().isoformat(timespec="seconds")
+    """지금 시각을 KST offset 포함 ISO 8601 초 단위로 돌려준다."""
+    return clock.iso_now_kst()
 
 
 def append_record(record: RunRecord, path: Path) -> None:
@@ -204,28 +244,47 @@ def _parse_line(line: str) -> RunRecord | None:
         return None
     if set(data.keys()) != _RECORD_FIELD_NAMES:
         return None  # 필드가 늘거나 준 옛 스키마 — 지어내 채우지 않고 건너뛴다
-    data = _reinterpret_legacy_cells(data)
+    data = normalize_persisted_cells(data)
     try:
         return RunRecord(**data)
     except (TypeError, ValueError):
         return None
 
 
-def _reinterpret_legacy_cells(data: dict[str, Any]) -> dict[str, Any]:
-    """옛 7칸 이력을 원본 수정 없이 현재 6칸 규칙으로 읽는다.
+def uses_legacy_cell_contract(record: RunRecord) -> bool:
+    """구형 6칸 이력인지 스키마 필드 추가 없이 판별한다.
+
+    구형과 canonical ID 집합은 겹치지 않는다. ID 목록이 빈 완성
+    기록은 과거 분모의 최대값(6)으로 구분한다. 보고서 없이 멈춘
+    기록(`grade == ""`)은 canonical 운영 흐름으로 다룬다.
+    """
+    if not record.grade:
+        return False
+    ids = set(record.cells_missing) | set(record.cells_suspect)
+    if ids & (set(LEGACY_COUNTED_CELLS) | set(LEGACY_HIDDEN_CELLS)):
+        return True
+    if ids & set(COUNTED_CELLS):
+        return False
+    return record.cells_filled <= LEGACY_TOTAL_CELLS
+
+
+def normalize_persisted_cells(data: dict[str, Any]) -> dict[str, Any]:
+    """옛 6·7칸 이력을 원본 수정 없이 구형 6칸으로 읽는다.
 
     이력 JSONL은 덮어쓰지 않는다. 과거 `cells_filled`는 5·6·7·8번까지
-    센 경우가 있고, `cells_missing`에는 숨긴 9번이 항상 남아 있다.
-    따라서 파일을 읽을 때만 현재 여섯 칸의 미충족 목록으로 채움 수를
-    다시 산출한다. 모양이 다른 깨진 행은 엣대로 건너뛰게 두고,
-    이 함수가 만들어 정상처럼 받아주지 않는다.
+    센 경우가 있고, `cells_missing`에는 숨긴 9번이 남아 있었다.
+    파일을 읽을 때만 옛 여섯 칸의 미충족 목록으로 채움 수를
+    다시 산출한다. canonical 9장으로 승격시키지 않으므로 과거 기록이
+    새 장을 검증했다고 거짓 표시되지 않는다.
     """
     if not data.get("grade"):
         return data
     filled = data.get("cells_filled")
     missing = data.get("cells_missing")
     suspect = data.get("cells_suspect")
-    legacy_cells = set(COUNTED_CELLS) | {"9"}
+    canonical_cells = set(COUNTED_CELLS)
+    legacy_counted = set(LEGACY_COUNTED_CELLS)
+    legacy_cells = legacy_counted | set(LEGACY_HIDDEN_CELLS)
     if (
         not isinstance(filled, int)
         or isinstance(filled, bool)
@@ -237,12 +296,16 @@ def _reinterpret_legacy_cells(data: dict[str, Any]) -> dict[str, Any]:
     ):
         return data
 
+    observed_ids = set(missing) | set(suspect)
+    if observed_ids & canonical_cells:
+        return data
+
     missing_set = set(missing)
-    current_missing = [cell for cell in COUNTED_CELLS if cell in missing_set]
+    current_missing = [cell for cell in LEGACY_COUNTED_CELLS if cell in missing_set]
     suspect_set = set(suspect)
     current_suspect = [cell for cell in current_missing if cell in suspect_set]
     normalized = dict(data)
-    normalized["cells_filled"] = len(COUNTED_CELLS) - len(current_missing)
+    normalized["cells_filled"] = LEGACY_TOTAL_CELLS - len(current_missing)
     normalized["cells_missing"] = current_missing
     normalized["cells_suspect"] = current_suspect
     return normalized

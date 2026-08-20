@@ -59,6 +59,8 @@ class Candidate:
     body: str
     published: Optional[dt.date]
     press: str
+    #: 원 기사 주소. 옛 저장·시험 생성자는 비워도 되지만 신규 수집은 반드시 보존한다.
+    url: str = ""
 
 
 @dataclass(frozen=True)
@@ -215,6 +217,11 @@ def prefilter(
                 press=press_of(
                     getattr(item, "originallink", "") or "",
                     getattr(item, "link", "") or "",
+                ),
+                url=(
+                    getattr(item, "originallink", "")
+                    or getattr(item, "link", "")
+                    or ""
                 ),
             )
         )
@@ -478,7 +485,13 @@ def to_fragments(picked: list[Picked]) -> list[dict[str, str]]:
         c = p.candidate
         날짜 = c.published.isoformat() if c.published else "날짜미상"
         머리 = FRAGMENT_PREFIX.format(date=날짜, press=c.press)
-        out.append({"종류": FRAGMENT_KIND, "원문": f"{머리}{c.title}. {c.body}"})
+        out.append(
+            {
+                "종류": FRAGMENT_KIND,
+                "원문": f"{머리}{c.title}. {c.body}",
+                "출처": c.url,
+            }
+        )
     return out
 
 

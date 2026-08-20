@@ -14,6 +14,7 @@ import pytest
 
 from src.features.budget import spend_store
 from src.features.budget.constants import (
+    SPEND_PHASE_CANDIDATE,
     SPEND_PHASE_IDENTIFY,
     SPEND_PHASE_OCR,
     SPEND_PHASE_PIPELINE,
@@ -610,3 +611,387 @@ def test_월미확정은_다른_달을_섞지_않는다(conn: sqlite3.Connection
 
     assert summary.unresolved_runs == 0
     assert summary.ledger_since == "2026-07-31"
+
+
+@pytest.mark.parametrize("cap", [1000.0, 3000.0, 5000.0])
+def test_cap_minus_1에서_동시_100원_예상예약은_모두_거절한다(
+    tmp_path: Path, cap: float
+):
+    """여러 SQLite 연결도 spent+reserved 검사를 한 write transaction에서 한다."""
+    path = tmp_path / f"near-{int(cap)}.db"
+    bucket = f"bucket-{int(cap)}"
+    setup = sqlite3.connect(path, timeout=10)
+    try:
+        spend_store.ensure_schema(setup)
+        spend_store.append_spend(
+            setup,
+            run_id="seed",
+            phase=SPEND_PHASE_IDENTIFY,
+            day=_오늘,
+            bucket=bucket,
+            cost_krw=cap - 1,
+            created_at="2026-08-17T09:00:00+09:00",
+        )
+        setup.commit()
+    finally:
+        setup.close()
+
+    barrier = Barrier(3)
+
+    def reserve(index: int) -> bool:
+        worker = sqlite3.connect(path, timeout=10)
+        try:
+            barrier.wait(timeout=5)
+            try:
+                spend_store.begin_inflight(
+                    worker,
+                    run_id=f"candidate-{index}",
+                    phase=SPEND_PHASE_PIPELINE,
+                    day=_오늘,
+                    bucket=bucket,
+                    started_at="2026-08-17T10:00:00+09:00",
+                    requested_cost_krw=100.0,
+                    cap_krw=cap,
+                )
+            except spend_store.BudgetCapExceeded:
+                worker.rollback()
+                return False
+            worker.commit()
+            return True
+        finally:
+            worker.close()
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        accepted = list(pool.map(reserve, range(3)))
+
+    check = sqlite3.connect(path, timeout=10)
+    try:
+        assert accepted == [False, False, False]
+        assert spend_store.load_day(check, _오늘).total_krw == cap - 1
+        assert spend_store.list_inflight_day(check, _오늘) == ()
+    finally:
+        check.close()
+
+
+def test_동시_예약합이_운영기준과_같을때까지만_허용한다(tmp_path: Path):
+    path = tmp_path / "exact-threshold.db"
+    bucket = "same-link"
+    setup = sqlite3.connect(path, timeout=10)
+    try:
+        spend_store.ensure_schema(setup)
+        spend_store.append_spend(
+            setup,
+            run_id="seed",
+            phase=SPEND_PHASE_IDENTIFY,
+            day=_오늘,
+            bucket=bucket,
+            cost_krw=2700.0,
+            created_at="2026-08-17T09:00:00+09:00",
+        )
+        setup.commit()
+    finally:
+        setup.close()
+
+    barrier = Barrier(4)
+
+    def reserve(index: int) -> bool:
+        worker = sqlite3.connect(path, timeout=10)
+        try:
+            barrier.wait(timeout=5)
+            try:
+                inserted = spend_store.begin_inflight(
+                    worker,
+                    run_id=f"candidate-{index}",
+                    phase=SPEND_PHASE_PIPELINE,
+                    day=_오늘,
+                    bucket=bucket,
+                    started_at="2026-08-17T10:00:00+09:00",
+                    requested_cost_krw=100.0,
+                    cap_krw=3000.0,
+                )
+            except spend_store.BudgetCapExceeded:
+                worker.rollback()
+                return False
+            worker.commit()
+            return inserted
+        finally:
+            worker.close()
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        accepted = list(pool.map(reserve, range(4)))
+
+    check = sqlite3.connect(path, timeout=10)
+    try:
+        rows = spend_store.list_inflight_day(check, _오늘)
+        assert accepted.count(True) == 3
+        assert accepted.count(False) == 1
+        assert sum(row.reserved_krw for row in rows) == 300.0
+        assert spend_store.load_day(check, _오늘).total_krw == 2700.0
+    finally:
+        check.close()
+
+
+def test_정상정산은_실제액만_남기고_예상예약을_반환한다(
+    conn: sqlite3.Connection,
+):
+    assert spend_store.begin_inflight(
+        conn,
+        run_id="refund",
+        phase=SPEND_PHASE_PIPELINE,
+        day=_오늘,
+        bucket="bucket",
+        started_at="2026-08-17T10:00:00+09:00",
+        requested_cost_krw=100.0,
+        cap_krw=3000.0,
+    )
+
+    assert spend_store.finish_inflight(
+        conn,
+        run_id="refund",
+        phase=SPEND_PHASE_PIPELINE,
+        day=_오늘,
+        bucket="bucket",
+        cost_krw=20.0,
+        created_at="2026-08-17T10:01:00+09:00",
+    )
+
+    assert spend_store.load_day(conn, _오늘).total_krw == 20.0
+    assert spend_store.list_inflight_day(conn, _오늘) == ()
+
+
+def test_usage_미확정은_확정액을_기록하고_나머지_예약을_보류한다(
+    conn: sqlite3.Connection,
+):
+    spend_store.begin_inflight(
+        conn,
+        run_id="uncertain",
+        phase=SPEND_PHASE_PIPELINE,
+        day=_오늘,
+        bucket="bucket",
+        started_at="2026-08-17T10:00:00+09:00",
+        requested_cost_krw=100.0,
+        cap_krw=3000.0,
+    )
+
+    assert spend_store.keep_inflight_with_known_spend(
+        conn,
+        run_id="uncertain",
+        phase=SPEND_PHASE_PIPELINE,
+        day=_오늘,
+        bucket="bucket",
+        cost_krw=20.0,
+        created_at="2026-08-17T10:01:00+09:00",
+    )
+
+    rows = spend_store.list_inflight_day(conn, _오늘)
+    assert spend_store.load_day(conn, _오늘).total_krw == 20.0
+    assert len(rows) == 1
+    assert rows[0].reserved_krw == 80.0
+
+
+def test_실제액이_예상액을_넘어도_전액과_overrun을_저장한다(
+    conn: sqlite3.Connection,
+):
+    spend_store.begin_inflight(
+        conn,
+        run_id="overrun",
+        phase=SPEND_PHASE_OCR,
+        day=_오늘,
+        bucket="bucket",
+        started_at="2026-08-17T10:00:00+09:00",
+        requested_cost_krw=100.0,
+        cap_krw=3000.0,
+    )
+
+    spend_store.finish_inflight(
+        conn,
+        run_id="overrun",
+        phase=SPEND_PHASE_OCR,
+        day=_오늘,
+        bucket="bucket",
+        cost_krw=125.5,
+        created_at="2026-08-17T10:01:00+09:00",
+    )
+
+    summary = spend_store.load_overrun_day(conn, _오늘)
+    assert spend_store.load_day(conn, _오늘).total_krw == 125.5
+    assert summary.count == 1
+    assert summary.excess_krw == 25.5
+
+
+def test_provider전_취소는_예상예약을_전액_반환한다(conn: sqlite3.Connection):
+    spend_store.begin_inflight(
+        conn,
+        run_id="cancel",
+        phase=SPEND_PHASE_OCR,
+        day=_오늘,
+        bucket="bucket",
+        started_at="2026-08-17T10:00:00+09:00",
+        requested_cost_krw=100.0,
+        cap_krw=100.0,
+    )
+    spend_store.cancel_inflight(
+        conn,
+        run_id="cancel",
+        phase=SPEND_PHASE_OCR,
+        day=_오늘,
+        bucket="bucket",
+    )
+
+    assert spend_store.begin_inflight(
+        conn,
+        run_id="replacement",
+        phase=SPEND_PHASE_OCR,
+        day=_오늘,
+        bucket="bucket",
+        started_at="2026-08-17T10:01:00+09:00",
+        requested_cost_krw=100.0,
+        cap_krw=100.0,
+    )
+
+
+def test_기존_inflight_schema는_재시작을_막는_0원예약으로_이관한다():
+    legacy = sqlite3.connect(":memory:")
+    try:
+        legacy.execute(
+            f"""
+            CREATE TABLE {spend_store.TABLE_SPEND_INFLIGHT} (
+                run_id TEXT NOT NULL,
+                phase TEXT NOT NULL,
+                day TEXT NOT NULL,
+                bucket_id TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                PRIMARY KEY (run_id, phase)
+            )
+            """
+        )
+        legacy.execute(
+            f"""
+            INSERT INTO {spend_store.TABLE_SPEND_INFLIGHT}
+                (run_id, phase, day, bucket_id, started_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy-inflight",
+                SPEND_PHASE_PIPELINE,
+                _오늘.isoformat(),
+                spend_store.bucket_id("bucket"),
+                "2026-08-17T10:00:00",
+            ),
+        )
+
+        spend_store.ensure_schema(legacy)
+
+        rows = spend_store.list_inflight_day(legacy, _오늘)
+        assert len(rows) == 1
+        assert rows[0].run_id == "legacy-inflight"
+        assert rows[0].reserved_krw == 0.0
+        assert spend_store.load_unresolved_day(legacy, _오늘) == frozenset(
+            {spend_store.bucket_id("bucket")}
+        )
+    finally:
+        legacy.close()
+
+
+def test_건당_예약상한은_같은_run의_여러_provider단계를_합산한다(
+    conn: sqlite3.Connection,
+) -> None:
+    assert spend_store.begin_inflight(
+        conn,
+        run_id="one-evaluation-run",
+        phase=SPEND_PHASE_IDENTIFY,
+        day=_오늘,
+        bucket="evaluation:loopback",
+        started_at="2026-08-17T10:00:00+09:00",
+        requested_cost_krw=100.0,
+        cap_krw=1000.0,
+        run_cap_krw=150.0,
+    )
+
+    with pytest.raises(spend_store.BudgetCapExceeded, match="건당 운영 기준"):
+        spend_store.begin_inflight(
+            conn,
+            run_id="one-evaluation-run",
+            phase=SPEND_PHASE_OCR,
+            day=_오늘,
+            bucket="evaluation:loopback",
+            started_at="2026-08-17T10:01:00+09:00",
+            requested_cost_krw=51.0,
+            cap_krw=1000.0,
+            run_cap_krw=150.0,
+        )
+
+
+def test_건당_예약상한은_서로_다른_run을_합치지_않는다(
+    conn: sqlite3.Connection,
+) -> None:
+    for run_id in ("evaluation-run-a", "evaluation-run-b"):
+        assert spend_store.begin_inflight(
+            conn,
+            run_id=run_id,
+            phase=SPEND_PHASE_IDENTIFY,
+            day=_오늘,
+            bucket="evaluation:loopback",
+            started_at="2026-08-17T10:00:00+09:00",
+            requested_cost_krw=100.0,
+            cap_krw=1000.0,
+            run_cap_krw=100.0,
+        )
+
+
+def test_평가모드_1200원_경계는_포함하고_초과예약은_차단한다(
+    conn: sqlite3.Connection,
+) -> None:
+    bucket = "evaluation:loopback"
+    at_limit_run = "evaluation-at-1200"
+    for phase, amount in (
+        (SPEND_PHASE_CANDIDATE, 49.0),
+        (SPEND_PHASE_IDENTIFY, 100.0),
+        (SPEND_PHASE_OCR, 100.0),
+    ):
+        assert _적기(
+            conn,
+            run_id=at_limit_run,
+            phase=phase,
+            bucket=bucket,
+            amount=amount,
+        )
+
+    assert spend_store.begin_inflight(
+        conn,
+        run_id=at_limit_run,
+        phase=SPEND_PHASE_PIPELINE,
+        day=_오늘,
+        bucket=bucket,
+        started_at="2026-08-17T10:03:00+09:00",
+        requested_cost_krw=951.0,
+        cap_krw=10_000.0,
+        run_cap_krw=1200.0,
+    )
+
+    over_limit_run = "evaluation-over-1200"
+    for phase, amount in (
+        (SPEND_PHASE_CANDIDATE, 49.0),
+        (SPEND_PHASE_IDENTIFY, 100.0),
+        (SPEND_PHASE_OCR, 100.0),
+    ):
+        assert _적기(
+            conn,
+            run_id=over_limit_run,
+            phase=phase,
+            bucket=bucket,
+            amount=amount,
+        )
+
+    with pytest.raises(spend_store.BudgetCapExceeded, match="건당 운영 기준"):
+        spend_store.begin_inflight(
+            conn,
+            run_id=over_limit_run,
+            phase=SPEND_PHASE_PIPELINE,
+            day=_오늘,
+            bucket=bucket,
+            started_at="2026-08-17T10:03:00+09:00",
+            requested_cost_krw=951.01,
+            cap_krw=10_000.0,
+            run_cap_krw=1200.0,
+        )

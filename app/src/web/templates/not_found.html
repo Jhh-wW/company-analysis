@@ -5,7 +5,18 @@
 <div class="card">
   <div class="stopped-icon">🔍</div>
 
-  {% if rejected %}
+  {% if not is_real %}
+    <h1>이 회사는 저장된 데모 목록에 없습니다</h1>
+    <p class="lede" style="margin-bottom:14px">
+      현재 화면은 <strong>미리 저장한 예시 보고서만 재생하는 오프라인 데모</strong>입니다.
+      JYP처럼 아래 목록에 없는 회사는 인터넷이나 DART에서 실시간으로 찾지 않습니다.
+    </p>
+  {% elif candidate_technical_retry %}
+    <h1>회사 후보 조회가 잠시 지연됐습니다</h1>
+    <p class="lede" style="margin-bottom:14px">
+      회사가 없다는 뜻이 아닙니다. <strong>잠시 후 같은 정보로 다시 시도해 주세요.</strong>
+    </p>
+  {% elif rejected %}
     <h1>다른 이름으로 넣어보세요</h1>
     <p class="lede" style="margin-bottom:14px">
       <strong>같은 이름을 다시 넣으면 같은 회사가 나옵니다.</strong>
@@ -19,13 +30,92 @@
     </p>
   {% endif %}
 
-  <div class="warn-line" style="background:var(--navy-soft);border-color:var(--navy-line);color:var(--ink-2)">
-    <span>ℹ️</span>
-    <span><b>「이 회사는 다룰 수 없다」는 뜻이 아닙니다.</b>
-    이름을 아직 못 맞춘 것뿐이에요.</span>
-  </div>
+  {% if is_real %}
+    <div class="warn-line" style="background:var(--navy-soft);border-color:var(--navy-line);color:var(--ink-2)">
+      <span>ℹ️</span>
+      <span><b>「이 회사는 다룰 수 없다」는 뜻이 아닙니다.</b>
+      이름을 아직 못 맞춘 것뿐이에요.</span>
+    </div>
+  {% endif %}
 
-  {% if exhausted %}
+  {% if not is_real %}
+    <div class="warn-line" style="margin-top:14px">
+      <span>🗂️</span>
+      <span><b>아래 ‘데모에서 되는 회사’를 선택해 주세요.</b>
+      임의 회사의 실시간 후보 검색과 보고서 생성은 별도의 실조사·성능시험 모드가 필요합니다.</span>
+    </div>
+  {% elif candidate_was_selected %}
+    <div class="warn-line" style="margin-top:14px">
+      <span>⚠️</span>
+      <span><b>선택한 후보를 DART에서 다시 찾지 못했습니다.</b>
+      검색 후보는 참고 정보일 뿐 전자공시 등록을 보장하지 않습니다.</span>
+    </div>
+  {% elif candidate_resolution and candidate_resolution.status.value == 'unconfigured' %}
+    <div class="warn-line" style="margin-top:14px">
+      <span>ℹ️</span>
+      <span><b>회사명·주소 후보 검색 공급자가 설정되지 않았습니다.</b>
+      현재는 정식 법인명을 직접 입력해 DART에서 확인합니다.</span>
+    </div>
+  {% elif candidate_resolution and candidate_resolution.status.value in ['rate_limited', 'timed_out', 'failed'] %}
+    <div class="warn-line" style="margin-top:14px">
+      <span>ℹ️</span>
+      {% if candidate_resolution.provider_name == 'DART' %}
+        <span><b>회사 후보 검색을 이번에는 사용하지 못했습니다.</b>
+        조회가 기술적으로 완료되지 않았습니다. 유료 회사 식별이나 외부 후보 검색으로 넘어가지 않았으며,
+        이번 시도로 보고서 생성 횟수는 차감되지 않았습니다.</span>
+      {% else %}
+        <span><b>회사 후보 검색을 이번에는 사용하지 못했습니다.</b>
+        검색 결과를 추측해 확정하지 않고, 이름을 직접 다시 받습니다.</span>
+      {% endif %}
+    </div>
+  {% elif candidate_resolution and candidate_resolution.status.value == 'no_matches' %}
+    <div class="warn-line" style="margin-top:14px">
+      <span>ℹ️</span>
+      {% if candidate_resolution.provider_name == 'Google Maps' %}
+        <span><b>Google Maps 장소 검색에서도 비교할 후보가 없었습니다.</b>
+        결과를 지어내지 않고 회사 이름을 직접 다시 받습니다.</span>
+      {% elif candidate_resolution.provider_name == 'DART' %}
+        <span><b>DART 법인목록의 약어·영문명 후보에서 비교할 회사를 찾지 못했습니다.</b>
+        {% if candidate_search_available %}
+          원하시면 아래에서 Google Maps 후보 검색을 별도로 시작할 수 있습니다.
+        {% else %}
+          추가 외부 후보 검색은 현재 사용할 수 없어 등록 법인명을 직접 다시 받습니다.
+        {% endif %}</span>
+      {% else %}
+        <span><b>설정된 회사 후보 검색에서 비교할 후보가 없었습니다.</b>
+        결과를 지어내지 않고 회사 이름을 직접 다시 받습니다.</span>
+      {% endif %}
+    </div>
+  {% elif is_real and not rejected and not candidate_search_available %}
+    <div class="warn-line" style="margin-top:14px">
+      <span>ℹ️</span>
+      <span><b>추가 회사 후보 검색을 현재 사용할 수 없습니다.</b>
+      전자공시에 등록된 법인명을 직접 다시 입력해 주세요.</span>
+    </div>
+  {% endif %}
+
+  {% if is_real and candidate_search_available and not candidate_was_selected %}
+    <div class="warn-line" style="margin-top:14px">
+      <span>💳</span>
+      <span><b>선택 사항: Google Maps에서 회사명과 주소를 함께 찾아볼 수 있습니다.</b>
+      회사명·입력 주소가 Google에 전송되며, 이 1회 검색의 보수적 예상비용은
+      약 {{ '%.0f'|format(candidate_search_cost_krw) }}원입니다. 후보는 자동 확정하지 않고
+      직접 고른 뒤 DART에서 다시 확인합니다.</span>
+    </div>
+    <form method="post" action="/confirm" style="margin-top:12px">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="company" value="{{ user_input.company }}">
+      <input type="hidden" name="region" value="{{ user_input.region }}">
+      <input type="hidden" name="retry" value="{{ retry }}">
+      <input type="hidden" name="candidate_search_requested" value="yes">
+      <input type="hidden" name="candidate_search_grant" value="{{ candidate_search_grant }}">
+      <input type="hidden" name="evaluation_consent_grant"
+             value="{{ evaluation_consent_grant }}">
+      <button type="submit" class="btn wide">Google Maps로 회사 후보 찾기</button>
+    </form>
+  {% endif %}
+
+  {% if exhausted and is_real %}
     {# 상한 초과 — 여기서도 「대상 아님」 단정이 아니라 가능성 안내다 #}
     <div class="warn-line" style="margin-top:14px">
       <span>⚠️</span>
@@ -34,36 +124,67 @@
     </div>
     <p class="muted" style="margin-top:14px">
       이름 다시 넣기를 <strong>{{ max_retry }}번</strong> 쓰셨습니다.
-      할당량은 <strong>차감되지 않았습니다.</strong>
+      <strong>보고서 생성 횟수</strong>는 차감되지 않았습니다.
+      다만 실패 전에 완료된 외부 조회 비용은 비용 원장에 기록될 수 있습니다.
     </p>
     <div class="btn-row">
       <a class="btn" href="/" style="line-height:1.6">처음부터 다시 하기</a>
     </div>
 
-  {% else %}
-    {# 아직 남았다 — 직무·지역·공고는 그대로 두고 회사 이름만 다시 받는다 #}
+  {% elif is_real %}
+    {# 아직 남았다 — 주소는 그대로 두고 회사 이름만 다시 받는다 #}
     <form method="post" action="/confirm" style="margin-top:16px">
-      <input type="hidden" name="job" value="{{ user_input.job }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="region" value="{{ user_input.region }}">
-      <input type="hidden" name="posting_text" value="{{ user_input.posting_text }}">
-      <input type="hidden" name="retry" value="{{ retry + 1 }}">
+      <input type="hidden" name="retry" value="{{ next_retry }}">
+      {% if evaluation_paid_providers and not candidate_technical_retry %}
+        <input type="hidden" name="evaluation_workflow_id"
+               value="{{ evaluation_workflow_id }}">
+        <label class="evaluation-consent" style="margin-bottom:14px">
+          <input type="checkbox" name="evaluation_paid_consent" value="yes" required>
+          <span><strong>바꾼 회사 이름으로 실시간 유료 조사를 다시 시도하는 데 동의합니다.</strong>
+          회사 이름이 바뀌면 이전 동의 서명은 재사용하지 않습니다.</span>
+        </label>
+      {% else %}
+        <input type="hidden" name="evaluation_consent_grant"
+               value="{{ evaluation_consent_grant }}">
+      {% endif %}
 
       <div class="field">
-        <label for="company">회사 이름 다시 넣기</label>
+        <label for="company">
+          {% if candidate_technical_retry %}회사 이름 확인{% else %}회사 이름 다시 넣기{% endif %}
+        </label>
         <div class="hint">
-          직무 · 지역 · 공고는 <strong>그대로 두었습니다.</strong> 회사 이름만 바꾸시면 됩니다.
+          {% if candidate_technical_retry %}
+            회사명과 주소를 <strong>그대로 두었습니다.</strong>
+          {% else %}
+            회사 주소는 <strong>그대로 두었습니다.</strong> 회사 이름만 바꾸시면 됩니다.
+          {% endif %}
         </div>
         <input type="text" id="company" name="company" required autocomplete="off"
+               maxlength="{{ company_max_chars }}"
                value="{{ user_input.company }}" autofocus>
       </div>
 
-      <button type="submit" class="btn wide">다시 찾기</button>
+      <button type="submit" class="btn wide">
+        {% if candidate_technical_retry %}같은 정보로 다시 시도{% else %}다시 찾기{% endif %}
+      </button>
     </form>
 
     <p class="muted" style="margin-top:14px">
-      {{ max_retry - retry - 1 }}번 더 시도할 수 있습니다.
-      할당량은 <strong>차감되지 않았습니다.</strong>
+      {% if candidate_technical_retry %}
+        이번 기술 실패로 <strong>이름 재입력 횟수와 보고서 생성 횟수는 차감되지 않았습니다.</strong>
+        유료 회사 식별과 외부 후보 검색도 시작하지 않았습니다.
+      {% else %}
+        {{ max_retry - retry - 1 }}번 더 시도할 수 있습니다.
+        <strong>보고서 생성 횟수</strong>는 차감되지 않았습니다.
+        다만 실패 전에 완료된 외부 조회 비용은 비용 원장에 기록될 수 있습니다.
+      {% endif %}
     </p>
+  {% else %}
+    <div class="btn-row" style="margin-top:16px">
+      <a class="btn ghost" href="/">처음 화면으로 돌아가기</a>
+    </div>
   {% endif %}
 </div>
 
@@ -72,21 +193,19 @@
   <div class="t">데모에서 되는 회사</div>
   <div class="chips">
     {% for c in demo_companies[:24] %}
-      <button type="button" class="chip {% if c.is_report %}report{% endif %}"
-              data-company="{{ c.company }}">{{ c.company }}</button>
+      <form method="post" action="/confirm" style="display:inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="company" value="{{ c.company }}">
+        <input type="hidden" name="region" value="{{ user_input.region }}">
+        <input type="hidden" name="retry" value="0">
+        <input type="hidden" name="evaluation_consent_grant"
+               value="{{ evaluation_consent_grant }}">
+        <button type="submit" class="chip {% if c.is_report %}report{% endif %}">
+          {{ c.company }}
+        </button>
+      </form>
     {% endfor %}
   </div>
 </div>
-<script>
-  // 칩을 누르면 위 입력칸에 회사 이름을 넣어준다.
-  document.querySelectorAll('.chip').forEach(function (chip) {
-    chip.addEventListener('click', function () {
-      var box = document.getElementById('company');
-      if (!box) { return; }
-      box.value = chip.dataset.company || '';
-      box.focus();
-    });
-  });
-</script>
 {% endif %}
 {% endblock %}

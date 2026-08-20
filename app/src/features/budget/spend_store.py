@@ -22,6 +22,7 @@ from src.features.budget.constants import SPEND_PHASES
 
 TABLE_SPEND_EVENTS = "budget_spend_events"
 TABLE_SPEND_INFLIGHT = "budget_spend_inflight"
+TABLE_SPEND_OVERRUNS = "budget_spend_overruns"
 
 CREATE_SQL = f"""
 CREATE TABLE IF NOT EXISTS {TABLE_SPEND_EVENTS} (
@@ -46,6 +47,7 @@ CREATE TABLE IF NOT EXISTS {TABLE_SPEND_INFLIGHT} (
     phase       TEXT NOT NULL,
     day         TEXT NOT NULL,
     bucket_id   TEXT NOT NULL,
+    reserved_krw REAL NOT NULL DEFAULT 0 CHECK(reserved_krw >= 0),
     started_at  TEXT NOT NULL,
     PRIMARY KEY (run_id, phase)
 )
@@ -54,6 +56,25 @@ CREATE TABLE IF NOT EXISTS {TABLE_SPEND_INFLIGHT} (
 CREATE_INFLIGHT_DAY_INDEX_SQL = f"""
 CREATE INDEX IF NOT EXISTS idx_budget_spend_inflight_day
     ON {TABLE_SPEND_INFLIGHT}(day)
+"""
+
+CREATE_OVERRUN_SQL = f"""
+CREATE TABLE IF NOT EXISTS {TABLE_SPEND_OVERRUNS} (
+    run_id        TEXT NOT NULL,
+    phase         TEXT NOT NULL,
+    day           TEXT NOT NULL,
+    bucket_id     TEXT NOT NULL,
+    estimated_krw REAL NOT NULL CHECK(estimated_krw >= 0),
+    actual_krw    REAL NOT NULL CHECK(actual_krw >= 0),
+    excess_krw    REAL NOT NULL CHECK(excess_krw > 0),
+    created_at    TEXT NOT NULL,
+    PRIMARY KEY (run_id, phase)
+)
+"""
+
+CREATE_OVERRUN_DAY_INDEX_SQL = f"""
+CREATE INDEX IF NOT EXISTS idx_budget_spend_overrun_day
+    ON {TABLE_SPEND_OVERRUNS}(day)
 """
 
 
@@ -92,6 +113,14 @@ class MonthlySpend:
 
 
 @dataclass(frozen=True)
+class SpendOverrunSummary:
+    """provider 실제 usage가 호출 전 예상액을 넘은 관측값."""
+
+    count: int = 0
+    excess_krw: float = 0.0
+
+
+@dataclass(frozen=True)
 class InflightSpend:
     """아직 마감하지 않은 유료 단계 한 행.
 
@@ -104,7 +133,12 @@ class InflightSpend:
     phase: str
     day: dt.date
     bucket_id: str
+    reserved_krw: float
     started_at: str
+
+
+class BudgetCapExceeded(RuntimeError):
+    """원자 예상예약을 더하면 해당 통장의 운영 중단 기준을 넘음."""
 
 
 def bucket_id(bucket: str) -> str:
@@ -118,7 +152,60 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_SQL)
     conn.execute(CREATE_DAY_INDEX_SQL)
     conn.execute(CREATE_INFLIGHT_SQL)
+    columns = {
+        str(row[1])
+        for row in conn.execute(f"PRAGMA table_info({TABLE_SPEND_INFLIGHT})")
+    }
+    if "reserved_krw" not in columns:
+        # 기존 inflight는 재시작 뒤 미확정 표식이다. 0원으로 이관해도 행 자체가
+        # 통장을 닫으므로 과금 여부를 거짓으로 확정하지 않는다.
+        conn.execute(
+            f"ALTER TABLE {TABLE_SPEND_INFLIGHT} "
+            "ADD COLUMN reserved_krw REAL NOT NULL DEFAULT 0 "
+            "CHECK(reserved_krw >= 0)"
+        )
     conn.execute(CREATE_INFLIGHT_DAY_INDEX_SQL)
+    conn.execute(CREATE_OVERRUN_SQL)
+    conn.execute(CREATE_OVERRUN_DAY_INDEX_SQL)
+
+
+def _record_overrun(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    phase: str,
+    day: dt.date,
+    stored_bucket: str,
+    estimated_krw: float,
+    actual_krw: float,
+    created_at: str,
+) -> None:
+    """예상 초과를 비밀 원문 없이 멱등 기록한다."""
+    if actual_krw <= estimated_krw:
+        return
+    conn.execute(
+        f"""
+        INSERT INTO {TABLE_SPEND_OVERRUNS}
+            (run_id, phase, day, bucket_id, estimated_krw, actual_krw,
+             excess_krw, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(run_id, phase) DO UPDATE SET
+            estimated_krw = excluded.estimated_krw,
+            actual_krw = excluded.actual_krw,
+            excess_krw = excluded.excess_krw,
+            created_at = excluded.created_at
+        """,
+        (
+            run_id,
+            phase,
+            day.isoformat(),
+            stored_bucket,
+            estimated_krw,
+            actual_krw,
+            actual_krw - estimated_krw,
+            created_at,
+        ),
+    )
 
 
 def _clean_run_id(run_id: str) -> str:
@@ -251,6 +338,9 @@ def begin_inflight(
     day: dt.date,
     bucket: str,
     started_at: str,
+    requested_cost_krw: float = 0.0,
+    cap_krw: float | None = None,
+    run_cap_krw: float | None = None,
 ) -> bool:
     """provider 호출 전에 진행 중 표식을 커밋할 행을 만든다.
 
@@ -259,7 +349,14 @@ def begin_inflight(
     """
     clean_run = _clean_run_id(run_id)
     _check_phase(phase)
+    requested = _clean_amount(requested_cost_krw)
+    cap = math.inf if cap_krw is None else _clean_amount(cap_krw)
+    run_cap = math.inf if run_cap_krw is None else _clean_amount(run_cap_krw)
     stored_bucket = bucket_id(bucket)
+    # 다른 프로세스도 같은 SQLite write lock을 거쳐야 한다. 검사와 INSERT 사이에
+    # 경쟁 창이 생기지 않도록 읽기 전에 RESERVED write transaction을 잡는다.
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     _require_same_run_bucket(conn, clean_run, stored_bucket)
 
     completed = conn.execute(
@@ -271,35 +368,92 @@ def begin_inflight(
 
     existing = conn.execute(
         f"""
-        SELECT day, bucket_id FROM {TABLE_SPEND_INFLIGHT}
+        SELECT day, bucket_id, reserved_krw FROM {TABLE_SPEND_INFLIGHT}
          WHERE run_id = ? AND phase = ?
         """,
         (clean_run, phase),
     ).fetchone()
     if existing is not None:
-        if str(existing[0]) != day.isoformat() or str(existing[1]) != stored_bucket:
+        if (
+            str(existing[0]) != day.isoformat()
+            or str(existing[1]) != stored_bucket
+            or float(existing[2]) != requested
+        ):
             raise ValueError("같은 요청·단계의 진행 중 표식 값이 기존 기록과 다릅니다")
         return False
+
+    spent_row = conn.execute(
+        f"""
+        SELECT COALESCE(SUM(cost_krw), 0)
+          FROM {TABLE_SPEND_EVENTS}
+         WHERE day = ? AND bucket_id = ?
+        """,
+        (day.isoformat(), stored_bucket),
+    ).fetchone()
+    reserved_row = conn.execute(
+        f"""
+        SELECT COALESCE(SUM(reserved_krw), 0)
+          FROM {TABLE_SPEND_INFLIGHT}
+         WHERE day = ? AND bucket_id = ?
+        """,
+        (day.isoformat(), stored_bucket),
+    ).fetchone()
+    spent = float(spent_row[0]) if spent_row is not None else 0.0
+    reserved = float(reserved_row[0]) if reserved_row is not None else 0.0
+    if not math.isfinite(spent) or not math.isfinite(reserved):
+        raise ValueError("비용 원장의 확정액 또는 예약액이 유한한 수가 아닙니다")
+    if spent + reserved + requested > cap:
+        raise BudgetCapExceeded(
+            "확정 비용과 진행 중 예상예약을 합치면 통장 운영 기준을 넘습니다"
+        )
+
+    run_spent_row = conn.execute(
+        f"SELECT COALESCE(SUM(cost_krw), 0) FROM {TABLE_SPEND_EVENTS} "
+        "WHERE run_id = ?",
+        (clean_run,),
+    ).fetchone()
+    run_reserved_row = conn.execute(
+        f"SELECT COALESCE(SUM(reserved_krw), 0) FROM {TABLE_SPEND_INFLIGHT} "
+        "WHERE run_id = ?",
+        (clean_run,),
+    ).fetchone()
+    run_spent = float(run_spent_row[0]) if run_spent_row is not None else 0.0
+    run_reserved = (
+        float(run_reserved_row[0]) if run_reserved_row is not None else 0.0
+    )
+    if not math.isfinite(run_spent) or not math.isfinite(run_reserved):
+        raise ValueError("요청별 확정액 또는 예약액이 유한한 수가 아닙니다")
+    if run_spent + run_reserved + requested > run_cap:
+        raise BudgetCapExceeded("이 요청의 예상예약을 합치면 건당 운영 기준을 넘습니다")
 
     cursor = conn.execute(
         f"""
         INSERT OR IGNORE INTO {TABLE_SPEND_INFLIGHT}
-            (run_id, phase, day, bucket_id, started_at)
-        VALUES (?, ?, ?, ?, ?)
+            (run_id, phase, day, bucket_id, reserved_krw, started_at)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (clean_run, phase, day.isoformat(), stored_bucket, started_at),
+        (
+            clean_run,
+            phase,
+            day.isoformat(),
+            stored_bucket,
+            requested,
+            started_at,
+        ),
     )
     if cursor.rowcount == 1:
         return True
     raced = conn.execute(
         f"""
-        SELECT day, bucket_id FROM {TABLE_SPEND_INFLIGHT}
+        SELECT day, bucket_id, reserved_krw FROM {TABLE_SPEND_INFLIGHT}
          WHERE run_id = ? AND phase = ?
         """,
         (clean_run, phase),
     ).fetchone()
     if raced is not None and (
-        str(raced[0]) == day.isoformat() and str(raced[1]) == stored_bucket
+        str(raced[0]) == day.isoformat()
+        and str(raced[1]) == stored_bucket
+        and float(raced[2]) == requested
     ):
         return False
     raise ValueError("같은 요청·단계의 진행 중 표식 값이 기존 기록과 다릅니다")
@@ -312,13 +466,13 @@ def _require_inflight(
     phase: str,
     day: dt.date,
     bucket: str,
-) -> tuple[str, str]:
+) -> tuple[str, str, float]:
     clean_run = _clean_run_id(run_id)
     _check_phase(phase)
     stored_bucket = bucket_id(bucket)
     row = conn.execute(
         f"""
-        SELECT day, bucket_id FROM {TABLE_SPEND_INFLIGHT}
+        SELECT day, bucket_id, reserved_krw FROM {TABLE_SPEND_INFLIGHT}
          WHERE run_id = ? AND phase = ?
         """,
         (clean_run, phase),
@@ -327,7 +481,8 @@ def _require_inflight(
         raise ValueError("마감할 진행 중 비용 표식이 없습니다")
     if str(row[0]) != day.isoformat() or str(row[1]) != stored_bucket:
         raise ValueError("진행 중 비용 표식의 날짜 또는 통장이 다릅니다")
-    return clean_run, stored_bucket
+    reserved = _clean_amount(float(row[2]))
+    return clean_run, stored_bucket, reserved
 
 
 def finish_inflight(
@@ -341,7 +496,7 @@ def finish_inflight(
     created_at: str,
 ) -> bool:
     """확정 비용 저장과 진행 중 표식 삭제를 같은 트랜잭션에서 한다."""
-    clean_run, _stored_bucket = _require_inflight(
+    clean_run, _stored_bucket, reserved = _require_inflight(
         conn, run_id=run_id, phase=phase, day=day, bucket=bucket
     )
     amount = _clean_amount(cost_krw)
@@ -352,6 +507,16 @@ def finish_inflight(
         day=day,
         bucket=bucket,
         cost_krw=amount,
+        created_at=created_at,
+    )
+    _record_overrun(
+        conn,
+        run_id=clean_run,
+        phase=phase,
+        day=day,
+        stored_bucket=_stored_bucket,
+        estimated_krw=reserved,
+        actual_krw=amount,
         created_at=created_at,
     )
     conn.execute(
@@ -372,18 +537,59 @@ def keep_inflight_with_known_spend(
     created_at: str,
 ) -> bool:
     """API 예외 때 확인된 앞 호출 비용만 적고 미확정 표식은 남긴다."""
-    clean_run, _stored_bucket = _require_inflight(
+    clean_run, _stored_bucket, reserved = _require_inflight(
         conn, run_id=run_id, phase=phase, day=day, bucket=bucket
     )
-    return append_spend(
+    amount = _clean_amount(cost_krw)
+    inserted = append_spend(
         conn,
         run_id=clean_run,
         phase=phase,
         day=day,
         bucket=bucket,
-        cost_krw=_clean_amount(cost_krw),
+        cost_krw=amount,
         created_at=created_at,
     )
+    _record_overrun(
+        conn,
+        run_id=clean_run,
+        phase=phase,
+        day=day,
+        stored_bucket=_stored_bucket,
+        estimated_krw=reserved,
+        actual_krw=amount,
+        created_at=created_at,
+    )
+    if inserted and amount > 0:
+        conn.execute(
+            f"""
+            UPDATE {TABLE_SPEND_INFLIGHT}
+               SET reserved_krw = MAX(0, reserved_krw - ?)
+             WHERE run_id = ? AND phase = ?
+            """,
+            (amount, clean_run, phase),
+        )
+    return inserted
+
+
+def load_overrun_day(
+    conn: sqlite3.Connection, day: dt.date
+) -> SpendOverrunSummary:
+    """관리 화면에 보여줄 오늘 예상 초과 횟수·차액."""
+    row = conn.execute(
+        f"""
+        SELECT COUNT(*), COALESCE(SUM(excess_krw), 0)
+          FROM {TABLE_SPEND_OVERRUNS}
+         WHERE day = ?
+        """,
+        (day.isoformat(),),
+    ).fetchone()
+    if row is None:
+        return SpendOverrunSummary()
+    count, excess = int(row[0]), float(row[1])
+    if count < 0 or not math.isfinite(excess) or excess < 0:
+        raise ValueError("예상 초과 비용 원장이 올바르지 않습니다")
+    return SpendOverrunSummary(count=count, excess_krw=excess)
 
 
 def cancel_inflight(
@@ -395,7 +601,7 @@ def cancel_inflight(
     bucket: str,
 ) -> None:
     """provider를 부르기 전임이 확실할 때만 진행 중 표식을 지운다."""
-    clean_run, _stored_bucket = _require_inflight(
+    clean_run, _stored_bucket, _reserved = _require_inflight(
         conn, run_id=run_id, phase=phase, day=day, bucket=bucket
     )
     completed = conn.execute(
@@ -457,7 +663,7 @@ def list_inflight_day(
     """
     rows = conn.execute(
         f"""
-        SELECT run_id, phase, day, bucket_id, started_at
+        SELECT run_id, phase, day, bucket_id, reserved_krw, started_at
           FROM {TABLE_SPEND_INFLIGHT}
          WHERE day = ?
          ORDER BY started_at, run_id, phase, bucket_id
@@ -470,7 +676,8 @@ def list_inflight_day(
             phase=str(row[1]),
             day=dt.date.fromisoformat(str(row[2])),
             bucket_id=str(row[3]),
-            started_at=str(row[4]),
+            reserved_krw=float(row[4]),
+            started_at=str(row[5]),
         )
         for row in rows
     )

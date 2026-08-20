@@ -75,7 +75,7 @@ PLAN_MAX_YEARS: Final[int] = 5
 TENURE_UNIT_HINTS: Final[tuple[str, ...]] = ("년", "개월", "月", "yr", "year")
 
 # ── 출처 재료 뽑기 (citations.py) ────────────────────────
-# 1판 엔진(prototype_v1/tools/run_pilot.py)이 수집 조각에 붙이는 "종류" 문자열.
+# 1판 엔진(analysis_engine/tools/run_pilot.py)이 수집 조각에 붙이는 "종류" 문자열.
 # ★ 여기서 새로 정의하지만 값 자체는 그쪽·`homepage/constants.py`의 FRAGMENT_KIND와
 #   같아야 한다 — 같은 전자공시·홈페이지 수집기의 산출물이기 때문이다.
 #   (feature 간 직접 import는 금지이므로 값만 맞춰 각자 갖고 있는다.)

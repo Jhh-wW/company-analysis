@@ -25,6 +25,9 @@ from src.features.sharelink.logic import (
     budget_left,
     can_start_new_run,
     is_valid_key,
+    is_share_link_expired,
+    link_max_age_days_from_env,
+    report_id_from_reference,
     rolled_over,
     spent_for,
     total_spent,
@@ -33,8 +36,8 @@ from src.features.sharelink.logic import (
 _오늘 = dt.date(2026, 8, 16)
 _내일 = dt.date(2026, 8, 17)
 _상한 = PER_LINK_DAILY_BUDGET_KRW
-_카카오 = "a1b2c3d4e5f60718"
-_네이버 = "0f1e2d3c4b5a6978"
+_카카오 = "a1b2c3d4e5f60718a1b2c3d4e5f60718"
+_네이버 = "0f1e2d3c4b5a69780f1e2d3c4b5a6978"
 
 
 # ══════════════════════════════════════════════════════════
@@ -150,7 +153,10 @@ def test_날이_바뀌면_전체_합계도_0이_된다():
 # ══════════════════════════════════════════════════════════
 
 
-@pytest.mark.parametrize("열쇠", [_카카오, "0123456789abcdef", "abcdef01"])
+@pytest.mark.parametrize(
+    "열쇠",
+    [_카카오, "a" * 32, "B" * 32],
+)
 def test_제대로_된_열쇠는_받는다(열쇠: str):
     assert is_valid_key(열쇠)
 
@@ -161,6 +167,7 @@ def test_제대로_된_열쇠는_받는다(열쇠: str):
         "",                       # 빈 값
         "  ",                     # 공백
         "abc",                    # 너무 짧다
+        "0123456789abcdef",       # 구형 64비트 열쇠
         "z" * 16,                 # 16진수가 아니다
         "a" * 65,                 # 너무 길다
         "abc-123-def-4567",       # 기호 섞임
@@ -179,3 +186,147 @@ def test_이상한_열쇠는_거절한다(열쇠: str):
 def test_대문자도_받아준다():
     """사람이 QR 대신 손으로 칠 수 있다 — 대소문자로 막으면 억울하다."""
     assert is_valid_key(_카카오.upper())
+
+
+@pytest.mark.parametrize(
+    "열쇠",
+    ["abcdef01", "a" * 16, "a" * 24, "a" * 31, "a" * 33, "a" * 48, "a" * 64],
+)
+def test_정확히_32자리_외의_길이는_받지않는다(열쇠: str):
+    assert not is_valid_key(열쇠)
+
+
+def test_회사분석_범위는_회사만_정규화하고_옛직무는_무시한다():
+    from src.features.sharelink.logic import scope_matches
+
+    assert scope_matches(
+        link_company="ＡＣＭＥ  Korea",
+        company="acme korea",
+        link_job="Sales Manager",
+        job="다른 옛 직무",
+    )
+    assert not scope_matches(
+        link_company="우리엔",
+        link_job="영업",
+        company="다른 회사",
+        job="영업",
+    )
+
+
+def test_옛_회사직무_결합정책은_명시함수에서만_쓸수있다():
+    from src.features.sharelink.logic import legacy_company_job_scope_matches
+
+    assert legacy_company_job_scope_matches(
+        link_company="ＡＣＭＥ  Korea",
+        link_job="Sales Manager",
+        company="acme korea",
+        job="sales   manager",
+    )
+    assert not legacy_company_job_scope_matches(
+        link_company="ACME Korea",
+        link_job="Sales Manager",
+        company="acme korea",
+        job="Developer",
+    )
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "a" * 32,
+        "A" * 32,
+        "/result/" + "a" * 32,
+        "http://127.0.0.1:8000/result/" + "a" * 32,
+        "https://demo.example/result/" + "a" * 32,
+    ],
+)
+def test_결과_ID나_정상_결과주소에서_보고서_ID를_꺼낸다(reference):
+    assert report_id_from_reference(reference) == "a" * 32
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "",
+        "a" * 31,
+        "g" * 32,
+        "/other/" + "a" * 32,
+        "/result/" + "a" * 32 + "/extra",
+        "javascript:/result/" + "a" * 32,
+        "https:///result/" + "a" * 32,
+        "https://user:pass@demo.example/result/" + "a" * 32,
+        "https://demo.example/result/" + "a" * 32 + "?next=1",
+        "https://demo.example/result/" + "a" * 32 + "#fragment",
+    ],
+)
+def test_이상한_결과참조는_보고서_ID로_받지않는다(reference):
+    assert report_id_from_reference(reference) == ""
+
+
+def test_링크는_발급후_60일째부터_자동으로_닫힌다():
+    assert not is_share_link_expired(
+        "2026-01-01T10:00:00", today=dt.date(2026, 3, 1), max_age_days=60
+    )
+    assert is_share_link_expired(
+        "2026-01-01T10:00:00", today=dt.date(2026, 3, 2), max_age_days=60
+    )
+
+
+def test_읽을수없는_발급시각은_무기한_열지_않고_닫는다():
+    assert is_share_link_expired("깨진 날짜", today=dt.date(2026, 1, 1))
+
+
+@pytest.mark.parametrize(
+    "created_at",
+    [
+        "",
+        None,
+        20260816,
+        "20260816T100000",
+        "2026-08-16",
+        "9999-12-31T23:59:59-12:00",
+    ],
+)
+def test_비정상_또는_극단_발급시각은_예외없이_닫는다(created_at):
+    assert is_share_link_expired(created_at, today=dt.date(2026, 8, 16))
+
+
+def test_미래_발급시각은_닫는다():
+    assert is_share_link_expired(
+        "2026-08-17T00:00:00", today=dt.date(2026, 8, 16)
+    )
+
+
+def test_시간대가_있는_발급시각은_UTC_날짜로_비교한다():
+    # 둘 다 적힌 지역 날짜와 UTC 날짜가 다르다. UTC로 보면 첫 링크는 60일째,
+    # 둘째 링크는 59일째다.
+    assert is_share_link_expired(
+        "2026-01-02T00:30:00+14:00",
+        today=dt.date(2026, 3, 2),
+        max_age_days=60,
+    )
+    assert not is_share_link_expired(
+        "2026-01-01T23:30:00-12:00",
+        today=dt.date(2026, 3, 2),
+        max_age_days=60,
+    )
+
+
+@pytest.mark.parametrize("max_age_days", [0, -1, True])
+def test_올바르지_않은_수명은_링크를_닫는다(max_age_days):
+    assert is_share_link_expired(
+        "2026-08-16T10:00:00",
+        today=dt.date(2026, 8, 16),
+        max_age_days=max_age_days,
+    )
+
+
+@pytest.mark.parametrize("value", ["", "0", "-1", "abc", "999999"])
+def test_링크수명_환경값이_이상하면_60일_기본값을_쓴다(monkeypatch, value):
+    monkeypatch.setenv("SHARE_LINK_MAX_AGE_DAYS", value)
+    assert link_max_age_days_from_env() == 60
+
+
+def test_링크수명은_환경변수로_바꿀수있다(monkeypatch):
+    monkeypatch.setenv("SHARE_LINK_MAX_AGE_DAYS", "30")
+    assert link_max_age_days_from_env() == 30

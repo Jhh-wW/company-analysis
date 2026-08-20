@@ -113,16 +113,16 @@ def test_환경변수가_비어있으면_빈목록을_쓴다(monkeypatch):
     assert logic.admin_emails_from_env() == constants.DEFAULT_ADMIN_EMAILS
 
 
-def test_관리자전용_시험공개는_정확히_1일때만_켜진다(monkeypatch):
+def test_관리자전용_시험공개는_정확히_0일때만_꺼진다(monkeypatch):
     monkeypatch.delenv(constants.ENV_BETA_ADMIN_ONLY, raising=False)
-    assert logic.beta_admin_only_from_env() is False
-
-    for value in ("", "0", "true", "yes"):
-        monkeypatch.setenv(constants.ENV_BETA_ADMIN_ONLY, value)
-        assert logic.beta_admin_only_from_env() is False
-
-    monkeypatch.setenv(constants.ENV_BETA_ADMIN_ONLY, " 1 ")
     assert logic.beta_admin_only_from_env() is True
+
+    for value in ("", "1", "true", "yes", "오타"):
+        monkeypatch.setenv(constants.ENV_BETA_ADMIN_ONLY, value)
+        assert logic.beta_admin_only_from_env() is True
+
+    monkeypatch.setenv(constants.ENV_BETA_ADMIN_ONLY, " 0 ")
+    assert logic.beta_admin_only_from_env() is False
 
 
 # ══════════════════════════════════════════════════════════
@@ -142,6 +142,33 @@ def test_state가_다르면_거부한다():
     assert logic.state_matches(logic.make_state(), logic.make_state()) is False
 
 
+def test_폼_csrf토큰은_같은_세션에서만_맞는다():
+    token = "session-secret"
+    csrf = logic.csrf_token_for_session(token)
+
+    assert csrf and csrf != token
+    assert logic.csrf_token_matches(token, csrf)
+    assert not logic.csrf_token_matches("another-session", csrf)
+    assert not logic.csrf_token_matches(token, "")
+
+
+@pytest.mark.parametrize(
+    "received",
+    [
+        "한글",
+        "é",
+        "g" * 64,
+        "A" * 64,
+        "0" * 63,
+        "0" * 65,
+        None,
+    ],
+)
+def test_폼_csrf토큰은_정확한_소문자_64자리_16진수만_받는다(received):
+    """공개 폼 값이 비ASCII여도 예외나 500이 아니라 안전한 불일치여야 한다."""
+    assert logic.csrf_token_matches("session-secret", received) is False
+
+
 @pytest.mark.parametrize("expected, received", [("", "abc"), ("abc", ""), ("", "")])
 def test_state가_비어있으면_무조건_거부한다(expected, received):
     assert logic.state_matches(expected, received) is False
@@ -154,6 +181,25 @@ def test_state가_비어있으면_무조건_거부한다(expected, received):
 def test_확인된_이메일은_꺼낼_수_있다():
     email = logic.extract_verified_email({"email": "Person@Example.com", "email_verified": True})
     assert email == "person@example.com"
+
+
+def test_확인된_계정은_이메일과_구글_sub를_함께_보존한다():
+    identity = logic.extract_verified_identity(
+        {
+            "email": "Alias@Example.com",
+            "email_verified": True,
+            "sub": "109876543210",
+        }
+    )
+    assert identity.email == "alias@example.com"
+    assert identity.subject == "google:109876543210"
+
+
+def test_구글_sub가_없으면_로그인_신원을_거부한다():
+    with pytest.raises(logic.UnverifiedIdentityError):
+        logic.extract_verified_identity(
+            {"email": "person@example.com", "email_verified": True}
+        )
 
 
 def test_email_verified가_문자열_true여도_통과한다():
@@ -181,8 +227,9 @@ def test_email_자체가_없으면_거부한다():
 # 세션
 # ══════════════════════════════════════════════════════════
 
-def test_세션을_만들면_바로_조회된다():
-    session = logic.create_session("a@b.com", is_admin=True)
+def test_세션을_만들면_바로_조회된다(monkeypatch):
+    monkeypatch.setenv(constants.ENV_ADMIN_EMAILS, "a@b.com")
+    session = logic.create_session("a@b.com", is_admin=False)
     found = logic.get_session(session.token)
     assert found is not None
     assert found.email == "a@b.com"
@@ -219,19 +266,98 @@ def test_로그아웃은_없는_토큰이어도_에러가_안_난다():
     logic.delete_session(None)
 
 
-def test_관리자_세션만_is_admin_session이_참이다():
-    admin_session = logic.create_session("admin@x.com", is_admin=True)
-    normal_session = logic.create_session("user@x.com", is_admin=False)
+def test_관리자_세션만_is_admin_session이_참이다(monkeypatch):
+    monkeypatch.setenv(constants.ENV_ADMIN_EMAILS, "admin@x.com")
+    # 저장 당시 플래그와 반대로 넣어도 현재 환경변수가 최종 권한을 정한다.
+    admin_session = logic.create_session("admin@x.com", is_admin=False)
+    normal_session = logic.create_session("user@x.com", is_admin=True)
     assert logic.is_admin_session(admin_session.token) is True
     assert logic.is_admin_session(normal_session.token) is False
     assert logic.is_admin_session("없는-토큰") is False
     assert logic.is_admin_session(None) is False
 
 
+def test_ADMIN_EMAILS를_바꾸면_기존_세션_권한도_즉시_바뀐다(monkeypatch):
+    session = logic.create_session("admin@x.com", is_admin=False)
+
+    monkeypatch.setenv(constants.ENV_ADMIN_EMAILS, "admin@x.com")
+    assert logic.get_session(session.token).is_admin is True
+
+    monkeypatch.setenv(constants.ENV_ADMIN_EMAILS, "new-admin@x.com")
+    assert logic.get_session(session.token).is_admin is False
+
+    monkeypatch.setenv(constants.ENV_ADMIN_EMAILS, "admin@x.com,new-admin@x.com")
+    assert logic.get_session(session.token).is_admin is True
+
+
 def test_current_email은_세션의_이메일을_돌려준다():
     session = logic.create_session("a@b.com", is_admin=False)
     assert logic.current_email(session.token) == "a@b.com"
     assert logic.current_email("없는-토큰") is None
+
+
+def test_같은_provider_sub는_이메일_별칭이_달라도_같은_person_id다():
+    first = logic.create_session(
+        "old-alias@example.com", False, subject="google:immutable-person-1"
+    )
+    second = logic.create_session(
+        "new-alias@example.com", False, subject="google:immutable-person-1"
+    )
+    assert logic.current_subject(first.token) == logic.current_subject(second.token)
+    assert logic.person_id_for_subject(first.subject) == logic.person_id_for_subject(
+        second.subject
+    )
+
+
+def test_이메일호환_세션은_PDF승인_신원으로_인정하지_않는다():
+    session = logic.create_session("legacy@example.com", False)
+    assert logic.is_approval_identity_subject(session.subject) is False
+
+
+def test_DB의_손상된_subject는_이메일로_대체하지_않고_세션을_폐기한다():
+    from src.features.storage import db  # noqa: PLC0415
+
+    session = logic.create_session(
+        "person@example.com", False, subject="google:immutable-person"
+    )
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE sessions SET subject=? WHERE token=?",
+            ("person@example.com", session.token),
+        )
+    assert logic.get_session(session.token) is None
+    assert logic.current_email(session.token) is None
+
+
+def test_PDF참여자설정은_작성생산자와_서로다른_3검수자를_요구한다(monkeypatch):
+    monkeypatch.setenv(
+        constants.ENV_PDF_RELEASE_PARTICIPANTS,
+        '{"author":"google:author","producer":"google:producer",'
+        '"fact":"google:fact","editorial":"google:editorial",'
+        '"visual":"google:visual"}',
+    )
+    participants = logic.pdf_release_participant_ids_from_env()
+    assert set(participants) == {"author", "producer", "fact", "editorial", "visual"}
+    assert len({participants[role] for role in ("fact", "editorial", "visual")}) == 3
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        "",
+        "{}",
+        '{"author":"author@example.com","producer":"google:p",'
+        '"fact":"google:f","editorial":"google:e","visual":"google:v"}',
+        '{"author":"google:same","producer":"google:p",'
+        '"fact":"google:same","editorial":"google:e","visual":"google:v"}',
+        '{"author":"google:a","producer":"google:p",'
+        '"fact":"google:f","editorial":"google:f","visual":"google:v"}',
+    ),
+)
+def test_PDF참여자설정이_누락되거나_역할분리가_깨지면_거부한다(monkeypatch, payload):
+    monkeypatch.setenv(constants.ENV_PDF_RELEASE_PARTICIPANTS, payload)
+    with pytest.raises(logic.UnverifiedIdentityError):
+        logic.pdf_release_participant_ids_from_env()
 
 
 # ══════════════════════════════════════════════════════════
@@ -308,7 +434,11 @@ def _fake_exchange_ok(code, redirect_uri, client_id, client_secret):
 
 def _fake_fetch_verified(access_token):
     del access_token
-    return {"email": "person@example.com", "email_verified": True}
+    return {
+        "email": "person@example.com",
+        "email_verified": True,
+        "sub": "person-subject-1",
+    }
 
 
 def test_정상_로그인은_세션을_만든다(credentials_env):
@@ -332,7 +462,11 @@ def test_관리자_이메일이면_is_admin이_참이다(credentials_env):
         state_received=state,
         state_expected=state,
         exchange=_fake_exchange_ok,
-        fetch=lambda token: {"email": "admin@example.com", "email_verified": True},
+        fetch=lambda token: {
+            "email": "admin@example.com",
+            "email_verified": True,
+            "sub": "admin-subject-1",
+        },
     )
     assert result.is_admin is True
 

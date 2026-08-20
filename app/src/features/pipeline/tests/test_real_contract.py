@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import ast
 import inspect
+import subprocess
+import sys
 
 import pytest
 
@@ -19,7 +21,7 @@ from src.features.pipeline import real
 from src.features.pipeline.demo import DemoPipeline
 from src.features.pipeline.port import Pipeline
 
-ENGINE_PATH = paths.PROJECT_ROOT / "prototype_v1" / "tools" / "run_pilot.py"
+ENGINE_PATH = paths.PROJECT_ROOT / "analysis_engine" / "tools" / "run_pilot.py"
 REAL_PATH = paths.APP_ROOT / "src" / "features" / "pipeline" / "real.py"
 
 
@@ -86,11 +88,29 @@ def test_데모와_진짜가_같은_약속을_지킨다(method):
 # ── 돈·안전 ─────────────────────────────────────────────
 
 def test_불러오기만_해서는_무거운_프로그램을_안_건드린다():
-    """엔진은 anthropic·presidio를 요구한다. 그게 없어도 데모 화면은 떠야 한다."""
-    import sys
+    """새 프로세스에서 adapter import만으로 무거운 엔진을 읽지 않는다.
 
-    assert "run_pilot" not in sys.modules
-    assert "anthropic" not in sys.modules
+    전체 suite에서는 앞선 테스트가 의도적으로 ``anthropic``을 불러올 수 있다.
+    그런 전역 ``sys.modules`` 상태에 기대면 실행 순서만으로 결과가 바뀌므로,
+    실제 계약인 '깨끗한 프로세스의 import'를 독립 interpreter에서 확인한다.
+    """
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "from src.features.pipeline import real; "
+                "assert 'run_pilot' not in sys.modules; "
+                "assert 'anthropic' not in sys.modules"
+            ),
+        ],
+        cwd=paths.APP_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
 
 
 def test_엔진을_부르는_길은_한_곳뿐이다():
@@ -105,8 +125,8 @@ def test_엔진을_부르는_길은_한_곳뿐이다():
 
 def test_진짜_알맹이는_아직_안_꽂혀_있다():
     """★ 이 시험이 깨지면 «돈이 나가기 시작했다»는 뜻이다. 의도한 것인지 확인할 것."""
-    from src.web import main
+    from src.web import runtime
 
-    assert isinstance(main._PIPELINE, DemoPipeline), (
+    assert isinstance(runtime._PIPELINE, DemoPipeline), (
         "진짜 파이프라인이 꽂혔습니다. AI 호출 = 비용이 발생합니다."
     )

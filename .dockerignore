@@ -9,16 +9,16 @@
 !app/tools/
 !app/tools/backup_sqlite.py
 
-!prototype_v1/
-!prototype_v1/src/
-!prototype_v1/src/**
-!prototype_v1/tools/
-!prototype_v1/tools/run_pilot.py
-!prototype_v1/tools/survey_audit_reports.py
-!prototype_v1/tools/build_goldenset_answer.py
-!prototype_v1/data/
-!prototype_v1/data/pilot/
-!prototype_v1/data/pilot/**
+!analysis_engine/
+!analysis_engine/src/
+!analysis_engine/src/**
+!analysis_engine/tools/
+!analysis_engine/tools/run_pilot.py
+!analysis_engine/tools/survey_audit_reports.py
+!analysis_engine/tools/build_goldenset_answer.py
+!analysis_engine/data/
+!analysis_engine/data/pilot/
+!analysis_engine/data/pilot/**
 
 # 허용한 폴더 안에 생긴 로컬 찌꺼기도 다시 제외한다.
 **/.env
@@ -36,6 +36,17 @@
 **/*.log
 **/*.bak
 **/*.backup
+**/*.doc
+**/*.docx
+**/*.xls
+**/*.xlsx
+**/*.ppt
+**/*.pptx
+**/*.pdf
+**/*.zip
+**/*.7z
 **/*.sha256
 **/logs/
 **/backups/
+**/raw/
+**/raw_filings/

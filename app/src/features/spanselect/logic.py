@@ -6,7 +6,7 @@
 15곳 중 14곳에서 안 나온다 (문제로그 P-43).
 
 자료가 없어서가 아니다. 뉴스에서 뽑힌 **후보 문장 106개가 AI 앞에 올라갔는데 인용은 0회**였다.
-1판 프롬프트(`prototype_v1/tools/run_pilot.py:436-439`)가 4축에 대해
+1판 프롬프트(`analysis_engine/tools/run_pilot.py:436-439`)가 4축에 대해
 「회사가 직접 말한 문장만, 추론 금지」라고 지시하고, 후보 줄에는 `(뉴스)` 종류 표시가
 붙어 있어(:422) 모델이 뉴스를 문면 그대로 배제한 것으로 보인다.
 
@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from src.core.constants import COMPANY_SOURCE_CELLS
 from src.features.spanselect.constants import (
     ARTICLE_HEADER_RE,
     AUDIT_OPINION_MARKERS,
@@ -50,6 +51,7 @@ from src.features.spanselect.constants import (
     NUMBER_UNIT_RE,
     PROMPT_BLOCK9_SOURCE,
     PROMPT_BLOCK_HEAD,
+    PROMPT_COMPANY_HEADER,
     PROMPT_EXCLUDE,
     PROMPT_FRAGMENT_HEAD,
     PROMPT_HEADER,
@@ -69,6 +71,7 @@ from src.features.spanselect.constants import (
     VERIFY_STEP,
     ZERO_WIDTH_CHARS,
 )
+from src.features.company_specificity.logic import source_kind_matches_sentence
 
 #: 문장 번호표 한 칸. (조각 번호, 문장 원문) — 요구역량은 조각 번호가 없어 None이다.
 SentenceMap = dict[str, tuple[Optional[int], str]]
@@ -265,7 +268,11 @@ def number_sentences(
             # 앞머리 껍데기는 «번호를 붙이기 전»에 뗀다 — 번호표에 들어간 글자가
             # 그대로 보고서에 실리므로, 여기서 안 떼면 뒤에서는 손댈 자리가 없다.
             cleaned = strip_leading_noise(NEWS_SOURCE_PREFIX_RE.sub("", sentence))
-            if is_audit_opinion(cleaned) or is_unusable_candidate(cleaned):
+            if (
+                is_audit_opinion(cleaned)
+                or is_unusable_candidate(cleaned)
+                or not source_kind_matches_sentence(kind, cleaned)
+            ):
                 excluded += 1
                 continue
             sid = f"{fid}-{si}"
@@ -291,7 +298,26 @@ def build_prompt(
     Returns:
         지시문 전문. 문구는 전부 `constants.py`에서 온다 (정본 근거 주석 포함).
     """
-    blocks = " ".join(BLOCK_CONDITIONS.values())
+    company_only = not job.strip() and not requirement_lines
+    blocks = " ".join(
+        text
+        for cell, text in BLOCK_CONDITIONS.items()
+        if not company_only or cell in COMPANY_SOURCE_CELLS
+    )
+    if company_only:
+        return "\n".join(
+            [
+                PROMPT_COMPANY_HEADER,
+                PROMPT_PICK,
+                f"{PROMPT_BLOCK_HEAD} {blocks}",
+                PROMPT_SITUATION_SOURCES,
+                PROMPT_NO_INFERENCE,
+                PROMPT_EXCLUDE,
+                "",
+                PROMPT_FRAGMENT_HEAD,
+                "\n".join(candidate_lines),
+            ]
+        )
     return "\n".join(
         [
             PROMPT_HEADER,
@@ -375,6 +401,7 @@ def select_spans(
         (유지된 항목, 삭제된 항목). 1판과 같다 — 항목은 엔진의 `DraftItem`이다.
         AI가 답을 못 주면 `([], [])`.
     """
+    company_only = not job.strip() and not requirements
     sent_map, lines, excluded = number_sentences(frags, engine.split_sentences)
     for ri, req in enumerate(requirements, start=1):
         sent_map[f"{REQUIREMENT_SID_PREFIX}{ri}"] = (None, req)
@@ -396,7 +423,13 @@ def select_spans(
         payload, usage = engine._ask(
             client,
             build_prompt(job, lines, req_lines),
-            _answer_schema(engine.BLOCK_ORDER),
+            _answer_schema(
+                tuple(
+                    cell
+                    for cell in engine.BLOCK_ORDER
+                    if not company_only or cell in COMPANY_SOURCE_CELLS
+                )
+            ),
             max_tokens=engine.GEN_MAX_TOKENS,
         )
     finally:

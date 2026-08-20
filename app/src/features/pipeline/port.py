@@ -1,10 +1,8 @@
 """★ 알맹이(파이프라인)를 «붙일 자리».
 
-화면은 이 파일에 적힌 모양으로만 알맹이와 이야기한다.
-지금은 `demo.py`가 저장된 파일럿 기록을 돌려주고,
-나중에 진짜 파이프라인을 만들면 같은 모양으로 답하는 파일을 하나 더 만들어 갈아끼운다.
-
-**화면 코드는 그때 한 줄도 안 바뀐다.** 그게 이 파일을 따로 두는 이유다.
+화면·실제 조사·데모·내보내기가 함께 쓰는 데이터 계약이다.
+canonical(v3) 보고서는 의미 기반 섹션 ID, 원자 사실 장부, 검증된 출처와 기간
+메타데이터를 이 모양으로 전달한다.
 """
 
 from __future__ import annotations
@@ -47,7 +45,8 @@ class Grade(str, Enum):
     """보고서를 얼마나 채웠는가.
 
     정본: 확정/06_검증/1_흐름/02_성립판정과부분보고서.md
-    셋 다 보고서는 나간다. 아무것도 못 주는 종료는 GATE_STOPPED뿐이다.
+    과거 저장본 호환을 위해 세 값을 유지한다. canonical(v3) 공개본은 출고 게이트를
+    통과한 ``COMPLETE``만 허용하고, 부족하면 GATE_STOPPED로 끝난다.
     """
 
     COMPLETE = "완성"
@@ -150,37 +149,72 @@ class ReportTable:
     #: 숫자면 오른쪽 정렬 + 줄바꿈 금지, 글자면 왼쪽 정렬 + 줄바꿈 허용.
     #: ★ 이걸 안 나누면 글자 표에도 「줄바꿈 금지」가 걸려 첫 열이 한 글자 폭으로 찌그러진다.
     numeric: bool = False
+    #: 공개 표에는 넣지 않는 검증용 원값 행. 있으면 ``rows``와 같은 크기여야 한다.
+    raw_rows: list[list[str]] = field(default_factory=list)
+    #: 원값을 공개 표시값으로 바꿀 때 나눈 수와 소수 자릿수.
+    scale_divisor: str = ""
+    scale_places: int = 0
+    #: 표 캡션에 명시할 공개 단위(예: ``억원``).
+    display_unit: str = ""
+    #: 수집기가 받은 실제 원문 payload. 공개 렌더링·보고서 직렬화에는 넣지 않고,
+    #: 조립 순간 각 공개 행의 FactRecord.state_evidence를 만드는 데만 쓴다.
+    #: 행마다 하나씩 있어야 하며 공개 ``rows``를 다시 이어 붙여 만든 문자열은
+    #: 원문 payload로 인정하지 않는다.
+    evidence_rows: list[str] = field(default_factory=list, repr=False, compare=False)
 
     @property
     def is_valid(self) -> bool:
         """열 개수가 안 맞는 표는 화면을 깨뜨리므로 내보내지 않는다."""
         width = len(self.headers)
-        return bool(self.rows) and width > 0 and all(len(r) == width for r in self.rows)
+        raw_valid = not self.raw_rows or (
+            len(self.raw_rows) == len(self.rows)
+            and all(len(row) == width for row in self.raw_rows)
+        )
+        evidence_valid = not self.evidence_rows or (
+            len(self.evidence_rows) == len(self.rows)
+            and all(str(value).strip() for value in self.evidence_rows)
+        )
+        return (
+            bool(self.rows)
+            and width > 0
+            and all(len(r) == width for r in self.rows)
+            and raw_valid
+            and evidence_valid
+        )
 
 
 @dataclass(frozen=True)
 class ReportSection:
     """보고서의 항목 하나 (블록 1개)."""
 
-    #: "1", "4-1", "9" 같은 칸 번호
+    #: canonical(v3)는 의미 ID, 과거 저장본은 "1", "4-1" 같은 칸 번호
     cell: str
     title: str
-    #: 채워진 근거 원문들. 각 항목은 (문장, 출처표기).
-    #: ★ `prose_lines`가 있으면 이것은 «원문 보기»로 들어간다 — 버리지 않는다.
+    #: 내부 감사용 근거 원문. 공개 렌더러는 이 목록을 반복 출력하지 않는다.
     lines: list[tuple[str, str]] = field(default_factory=list)
     #: 비었을 때 「왜 비었는지」. 프로그램이 붙인다 (AI 아님).
     empty_reason: str = ""
     #: 숫자 표. 문장 대신 이걸로 채울 수 있다 (D13).
     tables: list[ReportTable] = field(default_factory=list)
-    #: 작가 AI가 쓴 표시용 문장과 그 문장이 가리킨 «실제 출처 표기» (P-110·P-118).
-    #: ★ 검증을 통과한 문장만 들어온다. 문자열 하나로 합치면 문장별 근거가 사라지므로
-    #:   `(문장, 출처표기)`를 유지한다. 검사가 죽으면 비어 있고 `lines`를 그대로 낸다.
+    #: 작가와 독립 검토를 통과한 공개 문장 및 실제 출처 표기.
+    #: canonical 렌더러는 이것과 표만 표시하며 원문 ``lines``로 대체하지 않는다.
     prose_lines: list[tuple[str, str]] = field(default_factory=list)
+    #: 회사 사실과 분리해 보여 주는 프로그램 작성 안내·준비 질문.
+    #: 출처가 있는 사실이 아니므로 ``lines``/``prose_lines``에 섞지 않는다.
+    #: 옛 저장 payload에는 이 키가 없으며 빈 목록으로 읽는다.
+    guidance_lines: list[str] = field(default_factory=list)
+    #: canonical(v3)에서는 ``cell``이 숫자가 아니라 semantic section ID다.
+    #: 화면 번호와 내부 ID를 분리해야 레거시 5·6·7·8 정규화와 충돌하지 않는다.
+    display_number: str = ""
+    #: 시간 장에만 붙는 표시 태그. 예: ``#과거``·``#현재``·``#미래``.
+    tag: str = ""
+    #: 이 섹션이 표시하는 잠긴 사실 장부의 ID. canonical 출력의 근거 단위다.
+    fact_ids: list[str] = field(default_factory=list)
 
     @property
     def is_filled(self) -> bool:
         """근거 원문이나 표가 있으면 채워진 것이다 — 표시용 글은 등급에 안 센다."""
-        return bool(self.lines) or bool(self.tables)
+        return bool(self.lines) or bool(self.tables) or bool(self.fact_ids)
 
 
 @dataclass(frozen=True)
@@ -195,6 +229,120 @@ class SourceStatus:
     #: "ok" | "none" | "failed"
     state: str
     detail: str = ""
+
+
+@dataclass(frozen=True)
+class SummaryItem:
+    """0장 핵심 요약 한 항목.
+
+    요약은 새 사실을 소유하지 않으며 숫자 없는 결론과 관련 본문 장만 가리킨다.
+    """
+
+    text: str = ""
+    section_id: str = ""
+    #: 요약 결론을 직접 뒷받침하는 원자 사실. 장 번호만 연결하는 것은 금지한다.
+    fact_ids: list[str] = field(default_factory=list)
+    #: ``fact_ids``의 ``FactRecord.claim``을 정해진 형식으로 잠근 근거 묶음.
+    evidence_text: str = ""
+    #: 요약 전담 검증기의 판정. canonical 공개본은 ``independently_verified``만 허용한다.
+    verification_status: str = ""
+    #: 요약문·근거 묶음·검증 판정을 함께 잠그는 SHA-256 지문.
+    verification_binding: str = ""
+    #: 요약문과 근거 claim 양쪽에 실제로 나타나는 핵심 근거어.
+    support_terms: list[str] = field(default_factory=list)
+
+    @property
+    def related_section_id(self) -> str:
+        """문서 용어와 맞춘 읽기 전용 별칭."""
+
+        return self.section_id
+
+
+@dataclass(frozen=True)
+class FactRecord:
+    """canonical 보고서의 원자화된 사실 한 건.
+
+    문자열 기본값은 기존 생성자와 단계적 마이그레이션을 깨지 않기 위한 것이다.
+    출고 게이트는 필요한 필드가 빈 레코드를 근거로 인정하지 않는다.
+    """
+
+    fact_id: str = ""
+    legal_entity: str = ""
+    subject_scope: str = ""
+    relationship_or_action: str = ""
+    claim: str = ""
+    claim_type: str = ""
+    section_owner: str = ""
+    time_state: str = ""
+    as_of: str = ""
+    source_id: str = ""
+    source_type: str = ""
+    source_title: str = ""
+    source_publisher: str = ""
+    source_host: str = ""
+    source_url: str = ""
+    source_document_id: str = ""
+    location: str = ""
+    #: 검증 상태. ``verified``·``partial``·``insufficient`` 중 하나.
+    #: 확정 본문에는 verified만 들어갈 수 있다.
+    status: str = ""
+    #: 사실 자체의 상태. 검증 상태와 분리한다.
+    #: actual|provisional|planned|estimated|scope_undisclosed
+    fact_status: str = ""
+    #: 원문 대조 판정. canonical 공개본은 verified만 허용한다.
+    verification_status: str = ""
+    state_evidence: str = ""
+    #: 원문 발행·공시·확인일. 사실의 기준시점 ``as_of``와 섞지 않는다.
+    source_date: str = ""
+    #: claim과 원문 근거 양쪽에 나타나는 핵심 근거어. 최소 두 개가 필요하다.
+    evidence_support_terms: list[str] = field(default_factory=list)
+    #: claim·state_evidence·출처·시점·구조 필드를 함께 잠그는 SHA-256 지문.
+    evidence_binding: str = ""
+    raw_value: str = ""
+    calculation: str = ""
+    display_value: str = ""
+    rounding_rule: str = ""
+    #: ``원시값|나눗수|소수자리|표시값`` 형식의 결정론적 수치 검산식.
+    numeric_checks: list[str] = field(default_factory=list)
+    #: 4장의 완료 사업연도 실적에만 쓰는 연도. 그 밖의 사실은 0이다.
+    fiscal_year: int = 0
+    #: 완료 실행이 실제로 일어난 날짜 또는 원문에 적힌 연도(YYYY / YYYY-MM-DD).
+    #: 원문 발표일·수집일과 섞지 않는다.
+    event_date: str = ""
+    #: 2장의 고객·지역 우선순위를 구조적으로 보존한다.
+    market_priority: str = ""
+    #: 3장의 제품·서비스가 포트폴리오에서 맡는 역할.
+    product_role: str = ""
+    #: 원문에서 각각 확인된 현재 중점 추진 신호(출시·운영, 투자·증설 등).
+    priority_signals: list[str] = field(default_factory=list)
+    #: 4장의 변화 해석이 직접 참조하는 완료 실행·실적 fact_id.
+    basis_fact_ids: list[str] = field(default_factory=list)
+    #: 5장의 실제 대응이 연결되는 미해결 문제 fact_id.
+    response_to_fact_id: str = ""
+    #: canonical 이름. ``limitation``은 초기 v3 초안과의 저장 호환용이다.
+    limitations: str = ""
+    limitation: str = ""
+    #: 인과 동사를 쓸 수 있다고 원문이 직접 뒷받침했는가.
+    supports_causality: bool = False
+    #: 인과 주장을 허용할 때 필요한 구조화된 네 필드.
+    causal_subject: str = ""
+    causal_mechanism: str = ""
+    causal_outcome: str = ""
+    causal_evidence: str = ""
+    #: 9장 동일 조건 비교에 필요한 별도 축.
+    comparison_target: str = ""
+    comparison_metric: str = ""
+    comparison_definition: str = ""
+    comparison_basis: str = ""
+    comparison_period: str = ""
+    comparison_scope: str = ""
+    comparator_source_id: str = ""
+    #: 비교사 원문에서 직접 보존한 별도 근거 조각과 공통 근거어.
+    comparator_state_evidence: str = ""
+    comparator_evidence_support_terms: list[str] = field(default_factory=list)
+    #: 비교 조건을 양사별로 분리한 닫힌 구조. 고객·제품·시장과 양쪽의 기간·
+    #: 지표 정의·회계 범위가 모두 같음을 게이트가 직접 검산한다.
+    comparison_conditions: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -220,6 +368,24 @@ class Report:
     #: 왜 성립하지 못했는지 (부분·미완성일 때만)
     shortfall_reasons: list[str] = field(default_factory=list)
     generated_at: str = ""
+    #: 빈 문자열은 기존(v2 이하) payload다. canonical 보고서는 정본 버전을 명시한다.
+    schema_version: str = ""
+    #: 본문을 모두 확정한 뒤 쓰는 숫자 없는 핵심 요약 3~5개.
+    summary_items: list[SummaryItem] = field(default_factory=list)
+    #: 최종 문장·표·도식이 참조하는 잠긴 사실 장부.
+    fact_records: list[FactRecord] = field(default_factory=list)
+    #: 보고서 전체 사실을 판정한 기준일(ISO 날짜 권장).
+    as_of_date: str = ""
+    #: 과거 분석 범위. 예: ``2023~2025 완료 회계연도``.
+    analysis_period: str = ""
+    #: 가장 최신 실적의 기간·확정 상태. 예: ``2026년 2분기 잠정``.
+    latest_performance_period: str = ""
+
+    @property
+    def fact_ledger(self) -> list[FactRecord]:
+        """정본 문서의 용어와 맞춘 읽기 전용 별칭."""
+
+        return self.fact_records
 
     @property
     def filled_count(self) -> int:
@@ -229,6 +395,21 @@ class Report:
         9번을 담을 수 있다. 값 전체를 세면 보이지 않는 칸 때문에
         「6개 중 N개」 안내가 부풀어 오른다(P-119).
         """
+        if self.schema_version:
+            # report_standard는 port를 사용하므로 top-level import로 연결하면 순환한다.
+            # 속성을 실제로 읽을 때만 canonical 식별자를 가져온다.
+            from src.features.report_standard.constants import (  # noqa: PLC0415
+                CANONICAL_SCHEMA_VERSION,
+                CANONICAL_SECTION_IDS,
+            )
+
+            if self.schema_version == CANONICAL_SCHEMA_VERSION:
+                by_id = {section.cell: section for section in self.sections}
+                return sum(
+                    1
+                    for section_id in CANONICAL_SECTION_IDS
+                    if section_id in by_id and by_id[section_id].is_filled
+                )
         return sum(1 for cell in COUNTED_CELLS if self.cells.get(cell, False))
 
 

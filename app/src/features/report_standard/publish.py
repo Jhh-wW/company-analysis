@@ -1,0 +1,1937 @@
+"""canonical 보고서 출고 게이트와 공개본 정규화."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from dataclasses import dataclass, replace
+from datetime import date
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+from src.core.citations import citation_number
+from src.features.pipeline.port import FactRecord, Grade, Report, ReportSection
+from src.features.provenance.sources import (
+    Source,
+    evidence_text_hash,
+    is_canonical_official_with_registry,
+    official_domain_attestation_problem,
+)
+from src.features.report_standard.constants import (
+    CANONICAL_CLAIM_TYPES_BY_SECTION,
+    CANONICAL_SCHEMA_VERSION,
+    CANONICAL_SECTION_IDS,
+    REQUIRED_SECTION_IDS,
+    SECTION_BY_ID,
+    SECTION_SPECS,
+    SECTION_TIME_STATES,
+    SUMMARY_MAX_ITEMS,
+    SUMMARY_MIN_ITEMS,
+    TIME_SECTION_IDS,
+)
+from src.features.spanselect.canonical import PRIORITY_SIGNAL_PATTERNS
+
+
+_SUMMARY_NUMBER = re.compile(r"\d|[%％]")
+_FORBIDDEN_JOB_TOPIC = re.compile(
+    r"직무|KPI|핵심성과지표|자소서|자기소개서|면접",
+    re.IGNORECASE,
+)
+# 회사가 파는 '복지 플랫폼'은 사업 정보다. 지원자 개인의 처우를 뜻하는
+# 평균 보수·근속·복리후생만 문맥을 좁혀 차단한다.
+_FORBIDDEN_PREFERENCE_TOPIC = re.compile(
+    r"평균\s*(?:급여|보수|연봉)|(?:임직원|직원|근로자|지원자).{0,16}"
+    r"(?:급여|보수|연봉|근속(?:연수)?|복리후생|복지\s*(?:혜택|제도))|"
+    r"근속\s*연수|복리\s*후생|연봉\s*(?:수준|정보)",
+    re.IGNORECASE,
+)
+_FORBIDDEN_META = (
+    re.compile(r"(?:이|본)\s*보고서.{0,24}(?:AI|인공지능|작성|생성|검증)"),
+    re.compile(r"(?:AI|인공지능)\s*(?:가|로|를)?\s*(?:작성|생성|검증)"),
+    re.compile(r"(?:작성|생성|검증)\s*(?:방법|과정|기준|절차|에이전트|상태)"),
+    re.compile(r"(?:자료|문장|본문|내용).{0,16}(?:없어|부족|찾지 못|확인하지 못|보류)"),
+)
+_CAUSAL_PATTERN = re.compile(
+    r"개선(?:했|되|시켰|에\s*기여)|기여(?:했|한|한다)|영향(?:을|이)|좌우(?:했|한|한다)|"
+    r"견인(?:했|한|한다)|덕분|때문|(?:으)?로\s*인해|결과로|이에\s*따라|"
+    r"유발(?:했|한|한다)|초래(?:했|한|한다)|증가시켰|감소시켰|끌어올렸|낮췄|"
+    r"회복시켰|수익으로\s*전환|비용을\s*흡수|"
+    r"(?:편입|확대|도입|투자|인수|합병)(?:으)?로",
+    re.IGNORECASE,
+)
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_NUMBER_TOKEN = re.compile(r"(?<![A-Za-z])[-+]?\d[\d,]*(?:\.\d+)?(?![A-Za-z])")
+_NUMERIC_CHECK = re.compile(
+    r"^\s*(?P<raw>[-+]?\d[\d,]*(?:\.\d+)?)\s*\|\s*"
+    r"(?P<divisor>\d[\d,]*(?:\.\d+)?)\s*\|\s*"
+    r"(?P<places>\d+)\s*\|\s*"
+    r"(?P<display>[-+]?\d[\d,]*(?:\.\d+)?)\s*$"
+)
+_PUBLIC_NUMBER = re.compile(r"^[-+]?\d[\d,]*(?:\.\d+)?$")
+_PUBLIC_AMOUNT_WITH_UNIT = re.compile(
+    r"[-+]?\d[\d,]*(?:\.\d+)?\s*(?:억\s*)?원"
+)
+_SELF_PUBLISHED_SOURCE_TYPES = frozenset(
+    {
+        "공식 공시",
+        "공식 공시·재무 api",
+        "공식 계획",
+        "회사 공식 ir",
+        "공식 ir",
+        "회사 공식 웹",
+        "공식 웹",
+        "회사 공식 자료",
+    }
+)
+_STATUS_STAGE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("repeated_revenue", re.compile(r"반복\s*매출")),
+    # 일반 실적표의 `매출액`은 상태 전이 표현이 아니다. 고객 검증/납품 이후
+    # 상업화 단계로서 매출이 *발생·인식*했다는 문장만 별도 상태로 본다.
+    (
+        "revenue",
+        re.compile(
+            r"매출\s*(?:발생|인식|전환|개시)|"
+            r"(?:발생|인식|확인)(?:한|된)?\s*매출"
+        ),
+    ),
+    ("delivery", re.compile(r"납품")),
+    ("main_contract", re.compile(r"본계약|계약")),
+    ("mou", re.compile(r"(?<![A-Za-z])MOU(?![A-Za-z])|양해각서", re.IGNORECASE)),
+    ("customer_validation", re.compile(r"고객\s*검증|검증\s*(?:중|단계|완료)?")),
+    ("development_complete", re.compile(r"개발\s*완료")),
+    ("development_in_progress", re.compile(r"개발\s*(?:중|진행\s*중)")),
+)
+_CLAIM_NOISE = re.compile(r"[\W_]+", re.UNICODE)
+_COMPLETED_MARKER = re.compile(
+    r"완료|마쳤|종료|체결|편입|포함됐|포함\s*완료|인수했|설립했|"
+    r"구축했|도입했|출시했|가동했|납품했|발생했|인식했"
+)
+_UNFINISHED_MARKER = re.compile(
+    r"계획|예정|목표|향후|로드맵|추진\s*중|개발\s*중|준비\s*중|"
+    r"협의(?:\s*중|·시험\s*단계)|시험\s*단계"
+)
+_UNRESOLVED_MARKER = re.compile(
+    r"미해결|미확인|확인되지\s*않|해결되지\s*않|부족|위험|과제|문제|"
+    r"난항|의존|변동|협의·시험\s*단계|본계약.{0,12}(?:않|전)"
+)
+_RESOLVED_ISSUE_MARKER = re.compile(
+    r"(?:문제|과제|위험).{0,12}(?:해결|해소|종료)\s*(?:완료|했|됐)|"
+    r"(?:완전히|모두)\s*(?:해결|해소)|"
+    r"더\s*이상.{0,20}(?:문제|과제|위험|리스크).{0,12}(?:아니|없)|"
+    r"(?:문제|과제|위험|리스크).{0,20}더\s*이상.{0,12}(?:아니|없)|"
+    r"no\s+longer.{0,24}(?:problem|issue|risk)|"
+    r"(?:problem|issue|risk).{0,24}no\s+longer",
+    re.IGNORECASE,
+)
+_STARTED_RESPONSE_MARKER = re.compile(
+    r"착수|진행\s*중|추진\s*중|대응\s*중|협의\s*중|개선\s*중|"
+    r"준비\s*중|도입(?:했|됐|\s*완료|\s*착수|\s*중)|"
+    r"투자(?:했|\s*집행|\s*착수|\s*중)|"
+    r"체결(?:했|됐|\s*완료|\s*됨|[.!?]?$)|"
+    r"시험(?:을)?\s*마쳤|시험\s*완료|운영\s*중"
+)
+_PLAN_MARKER = re.compile(
+    r"계획|예정|목표|향후|로드맵|방침|추진(?:할|하려|하고자)|"
+    r"확대(?:할|한다는)|구축(?:할|한다는)|도입(?:할|한다는)|개발(?:할|한다는)"
+)
+_ALREADY_COMPLETED_PLAN_MARKER = re.compile(
+    r"이미.{0,20}(?:모두|전부)?.{0,12}(?:실현|달성|이행|완수|완료|가동|출시|도입)|"
+    r"(?:계획|목표|로드맵).{0,24}(?:이미|모두|전부).{0,16}"
+    r"(?:실현|달성|이행|완수|완료)|"
+    r"already.{0,24}(?:realized|realised|achieved|implemented|completed)",
+    re.IGNORECASE,
+)
+_COMPARISON_CONDITION_KEYS = frozenset(
+    {
+        "customer",
+        "product",
+        "market",
+        "self_period",
+        "comparator_period",
+        "self_definition",
+        "comparator_definition",
+        "self_accounting_scope",
+        "comparator_accounting_scope",
+    }
+)
+
+
+@dataclass(frozen=True)
+class PublishValidation:
+    """출고 가능 여부와 공개본에 남길 본문 장."""
+
+    publishable: bool
+    reasons: tuple[str, ...] = ()
+    included_section_ids: tuple[str, ...] = ()
+
+    def __bool__(self) -> bool:
+        return self.publishable
+
+    @property
+    def ok(self) -> bool:
+        return self.publishable
+
+
+class PublishBlockedError(ValueError):
+    """canonical 출고 조건을 만족하지 못한 보고서."""
+
+    def __init__(self, validation: PublishValidation):
+        self.validation = validation
+        super().__init__("; ".join(validation.reasons) or "canonical 출고가 차단되었습니다")
+
+
+def _normalized(value: str) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _compact(value: str) -> str:
+    return _CLAIM_NOISE.sub("", _normalized(value))
+
+
+def _corporate_name(value: str) -> str:
+    """(주)·주식회사처럼 표기만 다른 법인명을 같은 이름으로 본다."""
+
+    cleaned = re.sub(r"\(\s*주\s*\)|㈜|주식회사", "", str(value or ""), flags=re.IGNORECASE)
+    return _compact(cleaned)
+
+
+def _source_date(source: Source) -> str:
+    """원문 자체의 날짜를 반환한다. 수집일은 원문 날짜가 없을 때만 쓴다."""
+
+    return (source.published_at or source.disclosed_at or source.collected_at).strip()
+
+
+def _parse_iso_date(value: str) -> date | None:
+    try:
+        if not _ISO_DATE.fullmatch(str(value or "").strip()):
+            return None
+        return date.fromisoformat(str(value).strip())
+    except ValueError:
+        return None
+
+
+def _binding_digest(payload: object) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def fact_evidence_binding(fact: FactRecord) -> str:
+    """검증 뒤 claim이나 원문 근거가 바뀌면 무효가 되는 결정론적 지문."""
+
+    return _binding_digest(
+        {
+            "fact_id": fact.fact_id,
+            "legal_entity": fact.legal_entity,
+            "subject_scope": fact.subject_scope,
+            "relationship_or_action": fact.relationship_or_action,
+            "claim": fact.claim,
+            "claim_type": fact.claim_type,
+            "section_owner": fact.section_owner,
+            "time_state": fact.time_state,
+            "as_of": fact.as_of,
+            "source_id": fact.source_id,
+            "source_type": fact.source_type,
+            "source_title": fact.source_title,
+            "source_publisher": fact.source_publisher,
+            "source_host": fact.source_host,
+            "source_url": fact.source_url,
+            "source_document_id": fact.source_document_id,
+            "source_date": fact.source_date,
+            "location": fact.location,
+            "state_evidence": fact.state_evidence,
+            "fact_status": fact.fact_status,
+            "verification_status": fact.verification_status,
+            "evidence_support_terms": list(fact.evidence_support_terms),
+            "raw_value": fact.raw_value,
+            "calculation": fact.calculation,
+            "display_value": fact.display_value,
+            "rounding_rule": fact.rounding_rule,
+            "numeric_checks": list(fact.numeric_checks),
+            "fiscal_year": fact.fiscal_year,
+            "event_date": fact.event_date,
+            "market_priority": fact.market_priority,
+            "product_role": fact.product_role,
+            "priority_signals": list(fact.priority_signals),
+            "basis_fact_ids": list(fact.basis_fact_ids),
+            "response_to_fact_id": fact.response_to_fact_id,
+            "supports_causality": fact.supports_causality,
+            "causal_subject": fact.causal_subject,
+            "causal_mechanism": fact.causal_mechanism,
+            "causal_outcome": fact.causal_outcome,
+            "causal_evidence": fact.causal_evidence,
+            "comparison_target": fact.comparison_target,
+            "comparison_metric": fact.comparison_metric,
+            "comparison_definition": fact.comparison_definition,
+            "comparison_basis": fact.comparison_basis,
+            "comparison_period": fact.comparison_period,
+            "comparison_scope": fact.comparison_scope,
+            "comparator_source_id": fact.comparator_source_id,
+            "comparator_state_evidence": fact.comparator_state_evidence,
+            "comparator_evidence_support_terms": list(
+                fact.comparator_evidence_support_terms
+            ),
+            "comparison_conditions": dict(sorted(fact.comparison_conditions.items())),
+            "limitations": fact.limitations,
+            "limitation": fact.limitation,
+        }
+    )
+
+
+def summary_evidence_text(fact_ids: list[str], facts: dict[str, FactRecord]) -> str:
+    """요약 검증기가 보는 정본 근거 묶음."""
+
+    return "\n".join(f"{fact_id}: {facts[fact_id].claim}" for fact_id in fact_ids)
+
+
+def summary_verification_binding(
+    text: str,
+    section_id: str,
+    fact_ids: list[str],
+    evidence_text: str,
+    verification_status: str,
+    support_terms: list[str],
+) -> str:
+    """요약문과 독립 검증 결과의 사후 변조를 감지한다."""
+
+    return _binding_digest(
+        {
+            "text": text,
+            "section_id": section_id,
+            "fact_ids": list(fact_ids),
+            "evidence_text": evidence_text,
+            "verification_status": verification_status,
+            "support_terms": list(support_terms),
+        }
+    )
+
+
+def _forbidden_text_problem(text: str) -> str:
+    """지원자용 회사 사실이 아닌 직무 정보와 제작 메타문구를 찾는다."""
+
+    if match := _FORBIDDEN_JOB_TOPIC.search(str(text or "")):
+        return f"제외 대상 표현 '{match.group(0)}'이 있습니다"
+    if match := _FORBIDDEN_PREFERENCE_TOPIC.search(str(text or "")):
+        return f"제외 대상 표현 '{match.group(0)}'이 있습니다"
+    if any(pattern.search(str(text or "")) for pattern in _FORBIDDEN_META):
+        return "AI·작성·검증 관련 제작 메타문구가 있습니다"
+    return ""
+
+
+def _source_registry(report: Report) -> dict[str, Source]:
+    registry: dict[str, Source] = {}
+    for item in report.citations:
+        if not isinstance(item, Source):
+            continue
+        source_id = item.source_id.strip()
+        if source_id and item.is_canonical_valid:
+            registry[source_id] = item
+    return registry
+
+
+def _source_document_identity(source: Source) -> tuple[str, str, str, str]:
+    """같은 원문 조각을 새 source_id로 복제하지 못하게 하는 신원.
+
+    하나의 사업보고서를 서로 다른 절·원문 조각으로 나눈 Source는 허용하되,
+    URL·문서 ID·위치·원문 해시 묶음까지 같은 행의 ID만 바꾼 복제는 막는다.
+    """
+
+    raw_url = str(source.url or "").strip()
+    try:
+        parsed = urlsplit(raw_url)
+        host = (parsed.hostname or "").casefold()
+        port = f":{parsed.port}" if parsed.port is not None else ""
+        path = parsed.path.rstrip("/") or "/"
+        query = urlencode(sorted(parse_qsl(parsed.query, keep_blank_values=True)))
+        canonical_url = urlunsplit(
+            ((parsed.scheme or "https").casefold(), host + port, path, query, "")
+        )
+    except (TypeError, ValueError):
+        canonical_url = raw_url.casefold().rstrip("/")
+    return (
+        canonical_url,
+        _normalized(source.document_id),
+        _normalized(source.location),
+        "|".join(sorted(source.evidence_hashes)),
+    )
+
+
+def _fact_core_is_complete(fact: FactRecord) -> bool:
+    required = (
+        fact.fact_id,
+        fact.legal_entity,
+        fact.subject_scope,
+        fact.relationship_or_action,
+        fact.claim,
+        fact.claim_type,
+        fact.section_owner,
+        fact.time_state,
+        fact.as_of,
+        fact.source_id,
+        fact.source_type,
+        fact.source_title,
+        fact.source_publisher,
+        fact.source_host,
+        fact.source_url,
+        fact.source_document_id,
+        fact.location,
+        fact.fact_status,
+        fact.verification_status,
+        fact.state_evidence,
+    )
+    return all(str(value).strip() for value in required)
+
+
+def _atomic_key(fact: FactRecord) -> tuple[str, ...]:
+    """같은 사실을 다른 fact_id로 복제했는지 보는 안정적인 키."""
+
+    event = fact.relationship_or_action or fact.claim
+    value_or_status = fact.display_value or fact.raw_value or fact.fact_status
+    return tuple(
+        _normalized(value)
+        for value in (
+            fact.legal_entity,
+            fact.subject_scope,
+            event,
+            fact.as_of,
+            value_or_status,
+        )
+    )
+
+
+def _semantic_duplicate_key(fact: FactRecord) -> tuple[str, ...]:
+    """출처 ID를 복제해도 표현만 바꾼 같은 사실을 중복으로 잡는 키.
+
+    ``source_id``와 원문 hash는 수집·인용의 신원이지 사실의 의미가 아니다.
+    그것들을 키에 넣으면 같은 문서를 새 ID로 복제하는 것만으로 중복 검사를
+    피할 수 있으므로 의미 키에서는 의도적으로 제외한다.
+    """
+
+    terms = sorted(
+        {
+            token.casefold()
+            for token in re.findall(r"[가-힣A-Za-z]{2,}|[-+]?\d[\d,]*(?:\.\d+)?", fact.claim)
+            if token.casefold() not in {"회사는", "회사의", "기준", "공식", "해당"}
+        }
+    )
+    raw_values = sorted(
+        str(value.normalize())
+        for token in _NUMBER_TOKEN.findall(fact.raw_value)
+        if (value := _decimal(token)) is not None
+    )
+    return (
+        _corporate_name(fact.legal_entity),
+        _compact(fact.subject_scope),
+        _normalized(fact.claim_type),
+        _normalized(fact.time_state),
+        str(fact.fiscal_year or ""),
+        _normalized(fact.event_date or fact.as_of),
+        "|".join(raw_values),
+        "|".join(terms),
+    )
+
+
+def _comparison_official_text(evidence: str) -> str:
+    """비교 payload에서 공식 서술 원문만 꺼내고, 구형 원문은 그대로 쓴다."""
+
+    raw = str(evidence or "").strip()
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return raw
+    if not isinstance(payload, dict):
+        return ""
+    official_text = payload.get("official_text")
+    return str(official_text or "").strip()
+
+
+def _derived_comparison_context(fact: FactRecord) -> dict[str, str]:
+    """양사 공식 원문으로부터 고객·제품·시장 공통범위를 다시 계산한다."""
+
+    # company_comparison은 publish의 binding 함수를 사용하므로 모듈 import는
+    # 호출 시점으로 늦춰 순환 초기화를 피한다. 실제 비교 조립기와 동일한 추출기를
+    # 써야 조립 때의 조건과 출고 때 다시 계산한 조건이 어긋나지 않는다.
+    try:
+        from src.features.company_comparison.logic import (  # noqa: PLC0415
+            OfficialCompanyBundle,
+            _shared_context,
+        )
+
+        own = OfficialCompanyBundle(
+            corp_code="",
+            company_name=fact.legal_entity,
+            financials=None,
+            filing=None,
+            official_text=_comparison_official_text(fact.state_evidence),
+        )
+        comparator = OfficialCompanyBundle(
+            corp_code="",
+            company_name=fact.comparison_target,
+            financials=None,
+            filing=None,
+            official_text=_comparison_official_text(fact.comparator_state_evidence),
+        )
+        return _shared_context(own, comparator)
+    except (ImportError, TypeError, ValueError):
+        return {}
+
+
+def _comparison_period_is_bound(period: str, evidence: str) -> bool:
+    """비교 기간이 양사 payload의 실제 날짜·연도에 나타나는지 확인한다."""
+
+    expected_dates = {
+        "-".join(match)
+        for match in re.findall(r"(20\d{2})[-.](\d{2})[-.](\d{2})", period)
+    }
+    evidence_dates = {
+        "-".join(match)
+        for match in re.findall(r"(20\d{2})[-.](\d{2})[-.](\d{2})", evidence)
+    }
+    if expected_dates:
+        return expected_dates <= evidence_dates
+    expected_years = set(re.findall(r"20\d{2}", period))
+    evidence_years = set(re.findall(r"20\d{2}", evidence))
+    return bool(expected_years) and expected_years <= evidence_years
+
+
+def _comparison_definition_is_bound(definition: str, evidence: str) -> bool:
+    """지표 정의의 각 구조 필드가 실제 양사 payload에 있는지 확인한다."""
+
+    clean_definition = str(definition or "").strip()
+    normalized_evidence = _normalized(evidence)
+    if not clean_definition or not normalized_evidence:
+        return False
+    if "|" not in clean_definition:
+        return _normalized(clean_definition) in normalized_evidence
+    rows = [row.strip() for row in clean_definition.split(";") if row.strip()]
+    if not rows:
+        return False
+    for row in rows:
+        fields = [field.strip() for field in row.split("|")]
+        if len(fields) != 5 or any(not field for field in fields):
+            return False
+        if any(_normalized(field) not in normalized_evidence for field in fields):
+            return False
+    return True
+
+
+def _comparison_scope_is_bound(scope: str, evidence: str) -> bool:
+    """회계·사업 범위가 선언값이 아니라 원 payload에 직접 결속됐는지 확인한다."""
+
+    clean_scope = str(scope or "").strip()
+    normalized_evidence = _normalized(evidence)
+    if not clean_scope or not normalized_evidence:
+        return False
+    scope_code = re.search(r"\b(CFS|OFS)\b", clean_scope, re.IGNORECASE)
+    if scope_code is not None:
+        return _normalized(scope_code.group(1)) in normalized_evidence
+    return _normalized(clean_scope) in normalized_evidence
+
+
+def _canonical_comparison_period(value: object) -> str:
+    matches = re.findall(r"20\d{2}|\d{1,2}", str(value or ""))
+    if len(matches) < 6:
+        return ""
+    try:
+        start = date(int(matches[0]), int(matches[1]), int(matches[2]))
+        end = date(int(matches[3]), int(matches[4]), int(matches[5]))
+    except ValueError:
+        return ""
+    return f"{start.isoformat()}~{end.isoformat()}"
+
+
+def _structured_comparison_basis_is_bound(
+    *, period: str, definition: str, scope: str, evidence: str
+) -> bool:
+    """재무 비교는 기간·정의·범위가 같은 *한 행*들에 동시에 결속돼야 한다."""
+
+    try:
+        payload = json.loads(str(evidence or ""))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        payload = None
+    if not isinstance(payload, dict) or not isinstance(payload.get("financials"), dict):
+        # 정성 비교도 세 필드를 공식 원 payload에 직접 적어 둔 경우만 허용한다.
+        return (
+            _comparison_period_is_bound(period, evidence)
+            and _comparison_definition_is_bound(definition, evidence)
+            and _comparison_scope_is_bound(scope, evidence)
+        )
+
+    financials = payload["financials"]
+    if financials.get("status") != "000" or str(
+        financials.get("reprt_code") or ""
+    ).strip() != "11011":
+        return False
+    raw_rows = financials.get("list")
+    if not isinstance(raw_rows, list):
+        return False
+
+    canonical_period = _canonical_comparison_period(period)
+    scope_match = re.search(r"\b(CFS|OFS)\b", scope, re.IGNORECASE)
+    definitions = [row.strip() for row in str(definition or "").split(";") if row.strip()]
+    if not canonical_period or scope_match is None or not definitions:
+        return False
+    scope_code = scope_match.group(1).upper()
+
+    expected_rows: list[tuple[str, str, str, str, str]] = []
+    for raw_definition in definitions:
+        fields = tuple(field.strip() for field in raw_definition.split("|"))
+        if len(fields) != 5 or any(not field for field in fields):
+            return False
+        expected_rows.append(fields)  # type: ignore[arg-type]
+
+    for metric_id, account_name, statement_kind, report_code, currency in expected_rows:
+        matches = [
+            row
+            for row in raw_rows
+            if isinstance(row, dict)
+            and str(row.get("account_id") or "").strip() == metric_id
+            and _normalized(row.get("account_nm")) == _normalized(account_name)
+            and str(row.get("sj_div") or "").strip().upper()
+            == statement_kind.upper()
+            and str(row.get("reprt_code") or "").strip() == report_code
+            and str(row.get("currency") or "").strip().upper() == currency.upper()
+            and str(row.get("fs_div") or "").strip().upper() == scope_code
+            and _canonical_comparison_period(row.get("thstrm_dt")) == canonical_period
+        ]
+        if len(matches) != 1:
+            return False
+    return True
+
+
+def _temporal_lexical_problems(fact: FactRecord) -> list[str]:
+    """시간 상태를 모델 추측이 아니라 원문·claim의 닫힌 어휘로 확인한다."""
+
+    claim = " ".join(fact.claim.split())
+    evidence = " ".join(fact.state_evidence.split())
+    both = (claim, evidence)
+    problems: list[str] = []
+    if fact.time_state == "completed":
+        if fact.claim_type == "completed_execution" and not all(
+            _COMPLETED_MARKER.search(text) for text in both
+        ):
+            problems.append(
+                f"[state] {fact.fact_id}: 완료 실행 표지가 claim과 원문에 모두 없습니다"
+            )
+        if any(_UNFINISHED_MARKER.search(text) for text in both):
+            problems.append(
+                f"[state] {fact.fact_id}: 미완료 계획·진행 문장을 완료 사실로 쓸 수 없습니다"
+            )
+    elif fact.time_state == "current_issue":
+        if not all(_UNRESOLVED_MARKER.search(text) for text in both):
+            problems.append(
+                f"[state] {fact.fact_id}: 현재 과제에는 기준일 현재 미해결 표지가 필요합니다"
+            )
+        if any(_RESOLVED_ISSUE_MARKER.search(text) for text in both):
+            problems.append(
+                f"[state] {fact.fact_id}: 해결 완료된 문제를 현재 과제로 쓸 수 없습니다"
+            )
+    elif fact.time_state == "current_response":
+        if not all(_STARTED_RESPONSE_MARKER.search(text) for text in both):
+            problems.append(
+                f"[state] {fact.fact_id}: 현재 대응은 이미 착수했음을 claim과 원문이 보여야 합니다"
+            )
+        if all(_PLAN_MARKER.search(text) for text in both) and not any(
+            _STARTED_RESPONSE_MARKER.search(text) for text in both
+        ):
+            problems.append(
+                f"[state] {fact.fact_id}: 아직 착수하지 않은 계획은 현재 대응이 아닙니다"
+            )
+    elif fact.time_state == "future_plan":
+        if not all(_PLAN_MARKER.search(text) for text in both):
+            problems.append(
+                f"[state] {fact.fact_id}: 미래 전략에는 공식 미완료 계획 표지가 필요합니다"
+            )
+        if any(_COMPLETED_MARKER.search(text) for text in both):
+            problems.append(
+                f"[state] {fact.fact_id}: 완료된 실행을 미래 계획으로 쓸 수 없습니다"
+            )
+        if any(_ALREADY_COMPLETED_PLAN_MARKER.search(text) for text in both):
+            problems.append(
+                f"[state] {fact.fact_id}: 이미 실현·완료된 내용을 미래 계획으로 쓸 수 없습니다"
+            )
+    return problems
+
+
+def _status_stages(text: str) -> frozenset[str]:
+    """원문 상태 단계를 더 강하거나 약한 단계로 바꾸지 않았는지 비교한다."""
+
+    normalized = " ".join(str(text or "").split())
+    stages = {
+        name for name, pattern in _STATUS_STAGE_PATTERNS if pattern.search(normalized)
+    }
+    if "repeated_revenue" in stages:
+        stages.discard("revenue")
+    return frozenset(stages)
+
+
+def _location_is_bound(fact_location: str, source_location: str) -> bool:
+    fact_value = _normalized(fact_location)
+    source_value = _normalized(source_location)
+    if not fact_value or not source_value:
+        return False
+    if fact_value == source_value:
+        return True
+    return any(
+        fact_value.startswith(source_value + separator)
+        for separator in (" > ", " / ", " - ", ": ")
+    )
+
+
+def _evidence_support_problems(fact: FactRecord) -> list[str]:
+    problems: list[str] = []
+    terms = [_normalized(term) for term in fact.evidence_support_terms if _normalized(term)]
+    if len(set(terms)) < 2:
+        problems.append(
+            f"[evidence] {fact.fact_id}: claim과 원문을 잇는 서로 다른 근거어가 두 개 이상 필요합니다"
+        )
+    claim = _normalized(fact.claim)
+    evidence = _normalized(fact.state_evidence)
+    for term in terms:
+        if len(_compact(term)) < 2 or term not in claim or term not in evidence:
+            problems.append(
+                f"[evidence] {fact.fact_id}: 근거어 '{term}'가 claim과 원문 근거 양쪽에 없습니다"
+            )
+    if not fact.evidence_binding or fact.evidence_binding != fact_evidence_binding(fact):
+        problems.append(
+            f"[evidence] {fact.fact_id}: claim·원문·출처 결속 지문이 없거나 일치하지 않습니다"
+        )
+    return problems
+
+
+def _decimal(value: str) -> Decimal | None:
+    try:
+        return Decimal(value.replace(",", ""))
+    except (InvalidOperation, AttributeError):
+        return None
+
+
+def _numeric_problems(fact: FactRecord) -> list[str]:
+    """공개 수치를 원시값부터 ROUND_HALF_UP 표시값까지 재계산한다."""
+
+    problems: list[str] = []
+    claim_numbers = _NUMBER_TOKEN.findall(fact.claim)
+    has_numeric_payload = bool(
+        claim_numbers
+        or _NUMBER_TOKEN.search(fact.raw_value)
+        or _NUMBER_TOKEN.search(fact.display_value)
+    )
+    if not has_numeric_payload:
+        if fact.numeric_checks:
+            problems.append(f"[number] {fact.fact_id}: 수치가 없는데 numeric_checks가 있습니다")
+        return problems
+
+    if not all(
+        value.strip()
+        for value in (
+            fact.raw_value,
+            fact.calculation,
+            fact.display_value,
+            fact.rounding_rule,
+        )
+    ):
+        problems.append(
+            f"[number] {fact.fact_id}: 수치는 raw_value·calculation·display_value·rounding_rule이 모두 필요합니다"
+        )
+    if "ROUND_HALF_UP" not in fact.rounding_rule.upper():
+        problems.append(
+            f"[number] {fact.fact_id}: rounding_rule에 ROUND_HALF_UP 적용 여부가 명시되지 않았습니다"
+        )
+    if not fact.numeric_checks:
+        problems.append(
+            f"[number] {fact.fact_id}: 결정론적 numeric_checks가 없습니다"
+        )
+        return problems
+
+    checked_raw: list[Decimal] = []
+    checked_display: list[Decimal] = []
+    for index, check in enumerate(fact.numeric_checks, start=1):
+        match = _NUMERIC_CHECK.fullmatch(str(check))
+        if match is None:
+            problems.append(
+                f"[number] {fact.fact_id}: numeric_checks {index}번 형식이 잘못됐습니다"
+            )
+            continue
+        raw = _decimal(match.group("raw"))
+        divisor = _decimal(match.group("divisor"))
+        display = _decimal(match.group("display"))
+        places = int(match.group("places"))
+        if raw is None or divisor is None or display is None or divisor <= 0:
+            problems.append(
+                f"[number] {fact.fact_id}: numeric_checks {index}번 값을 계산할 수 없습니다"
+            )
+            continue
+        quantum = Decimal(1).scaleb(-places)
+        expected = (raw / divisor).quantize(quantum, rounding=ROUND_HALF_UP)
+        if expected != display:
+            problems.append(
+                f"[number] {fact.fact_id}: numeric_checks {index}번 표시값이 ROUND_HALF_UP 재계산과 다릅니다"
+            )
+        checked_raw.append(raw)
+        checked_display.append(display)
+
+    raw_numbers = [_decimal(value) for value in _NUMBER_TOKEN.findall(fact.raw_value)]
+    display_numbers = [
+        _decimal(value) for value in _NUMBER_TOKEN.findall(fact.display_value)
+    ]
+    if any(value is None or value not in checked_raw for value in raw_numbers):
+        problems.append(
+            f"[number] {fact.fact_id}: raw_value의 모든 수치가 numeric_checks에 없습니다"
+        )
+    if any(value is None or value not in checked_display for value in display_numbers):
+        problems.append(
+            f"[number] {fact.fact_id}: display_value의 모든 수치가 numeric_checks에 없습니다"
+        )
+
+    # raw_value는 내부 원장이라는 이름만 붙였다고 원값이 되지 않는다. 양사 비교는
+    # 양쪽 state_evidence를 합쳐 보고, 그 안에 실제 값이 있거나 아래 검산식의
+    # 피연산자로 재현되는 값만 허용한다.
+    evidence_numbers = {
+        value
+        for token in _NUMBER_TOKEN.findall(
+            fact.state_evidence + "\n" + fact.comparator_state_evidence
+        )
+        if (value := _decimal(token)) is not None
+    }
+    missing_raw_evidence = [
+        value
+        for value in raw_numbers
+        if value is not None and value not in evidence_numbers
+    ]
+    if missing_raw_evidence:
+        problems.append(
+            f"[number] {fact.fact_id}: raw_value 원값이 state_evidence에서 확인되지 않습니다"
+        )
+
+    # 본문 숫자는 표시값 또는 구조화된 기준기간에만 존재해야 한다.
+    allowed_claim_numbers = set(checked_raw) | set(checked_display)
+    as_of = _parse_iso_date(fact.as_of)
+    if as_of is not None:
+        allowed_claim_numbers.add(Decimal(as_of.year))
+    if fact.fiscal_year:
+        allowed_claim_numbers.add(Decimal(fact.fiscal_year))
+    uncovered = [
+        number
+        for token in claim_numbers
+        if (number := _decimal(token)) is not None and number not in allowed_claim_numbers
+    ]
+    if uncovered:
+        problems.append(
+            f"[number] {fact.fact_id}: claim의 수치가 수치 장부에 모두 결속되지 않았습니다"
+        )
+    return problems
+
+
+def _fact_problems(fact: FactRecord, sources: dict[str, Source]) -> list[str]:
+    problems: list[str] = []
+    if not _fact_core_is_complete(fact):
+        problems.append(
+            f"[fact] {fact.fact_id or '<빈 ID>'}: 원자 사실의 필수 필드가 비었습니다"
+        )
+    if fact.section_owner not in SECTION_BY_ID:
+        problems.append(f"[fact] {fact.fact_id}: 알 수 없는 소유 장입니다")
+    elif fact.claim_type not in CANONICAL_CLAIM_TYPES_BY_SECTION[fact.section_owner]:
+        problems.append(
+            f"[fact] {fact.fact_id}: {fact.section_owner}에서 허용되지 않는 claim_type입니다"
+        )
+    source = sources.get(fact.source_id)
+    if source is None:
+        problems.append(
+            f"[source] {fact.fact_id}: 검증된 원문 source_id와 연결되지 않았습니다"
+        )
+    else:
+        registered_sources = tuple(sources.values())
+        if not is_canonical_official_with_registry(source, registered_sources):
+            problems.append(
+                f"[source] {fact.fact_id}: 핵심 사실은 회사·공시·IR·공식 웹·"
+                "공식 파트너·규제기관 원문만 단독 근거로 쓸 수 있습니다"
+            )
+            attestation_problem = official_domain_attestation_problem(
+                source, registered_sources
+            )
+            if attestation_problem:
+                problems.append(f"[source] {fact.fact_id}: {attestation_problem}")
+        normalized_source_type = _normalized(source.source_type)
+        if fact.section_owner != "competitive_position":
+            if normalized_source_type.startswith("비교사 공식"):
+                problems.append(
+                    f"[source] {fact.fact_id}: 1~8장에 비교사 원문을 자사 핵심 근거로 쓸 수 없습니다"
+                )
+            elif (
+                normalized_source_type in _SELF_PUBLISHED_SOURCE_TYPES
+                and _corporate_name(source.publisher)
+                != _corporate_name(fact.legal_entity)
+            ):
+                problems.append(
+                    f"[source] {fact.fact_id}: 자사 공식 자료의 발행 법인이 사실 법인과 다릅니다"
+                )
+        source_title = source.title or source.label
+        if _normalized(fact.source_title) != _normalized(source_title):
+            problems.append(f"[source] {fact.fact_id}: 원문 제목이 등록부와 다릅니다")
+        if _normalized(fact.source_publisher) != _normalized(source.publisher):
+            problems.append(f"[source] {fact.fact_id}: 발행처가 등록부와 다릅니다")
+        if _normalized(fact.source_host) != _normalized(source.host):
+            problems.append(f"[source] {fact.fact_id}: 원문 host가 등록부와 다릅니다")
+        if fact.source_url.strip() != source.url.strip():
+            problems.append(f"[source] {fact.fact_id}: 원문 URL이 등록부와 다릅니다")
+        if fact.source_document_id.strip() != source.document_id.strip():
+            problems.append(f"[source] {fact.fact_id}: 원문 document_id가 등록부와 다릅니다")
+        if _normalized(fact.source_type) != _normalized(source.source_type):
+            problems.append(f"[source] {fact.fact_id}: 자료 유형이 등록부와 다릅니다")
+        source_status = _normalized(source.fact_status)
+        expected_markers = {
+            "actual": ("actual", "실제", "현재", "확정"),
+            "provisional": ("provisional", "잠정"),
+            "planned": ("planned", "계획", "예정", "미실행"),
+            "estimated": ("estimated", "추정"),
+            "scope_undisclosed": ("scope_undisclosed", "범위 미공개", "미공개"),
+        }
+        if fact.fact_status in expected_markers and not any(
+            marker in source_status for marker in expected_markers[fact.fact_status]
+        ):
+            problems.append(
+                f"[state] {fact.fact_id}: fact_status가 Source.fact_status와 맞지 않습니다"
+            )
+        if fact.section_owner not in source.used_in:
+            problems.append(
+                f"[source] {fact.fact_id}: 원문 used_in에 실제 소유 장이 없습니다"
+            )
+        if evidence_text_hash(fact.state_evidence) not in source.evidence_hashes:
+            problems.append(
+                f"[evidence] {fact.fact_id}: state_evidence가 Source 원문 해시 등록부에 없습니다"
+            )
+        if not _location_is_bound(fact.location, source.location):
+            problems.append(
+                f"[source] {fact.fact_id}: 사실 위치가 Source.location과 같거나 그 하위 위치가 아닙니다"
+            )
+        expected_source_date = _source_date(source)
+        if fact.source_date != expected_source_date:
+            problems.append(
+                f"[time] {fact.fact_id}: source_date가 원문 날짜와 다릅니다"
+            )
+        fact_date = _parse_iso_date(fact.as_of)
+        source_date = _parse_iso_date(expected_source_date)
+        if fact_date is None or source_date is None:
+            problems.append(
+                f"[time] {fact.fact_id}: 사실 기준일과 원문 날짜는 ISO 날짜여야 합니다"
+            )
+        elif fact_date > source_date:
+            problems.append(
+                f"[time] {fact.fact_id}: 사실 기준일이 원문 날짜보다 뒤입니다"
+            )
+    if fact.verification_status != "verified":
+        problems.append(
+            f"[verification] {fact.fact_id}: verified 사실만 확정 본문에 쓸 수 있습니다"
+        )
+    if fact.status and fact.status != fact.verification_status:
+        problems.append(
+            f"[verification] {fact.fact_id}: legacy status가 verification_status와 다릅니다"
+        )
+    allowed_fact_statuses = {
+        "actual",
+        "provisional",
+        "planned",
+        "estimated",
+        "scope_undisclosed",
+    }
+    if fact.fact_status not in allowed_fact_statuses:
+        problems.append(f"[state] {fact.fact_id}: 알 수 없는 fact_status입니다")
+    allowed_by_time = {
+        "standing": {"actual", "scope_undisclosed"},
+        "completed": {"actual", "provisional"},
+        "current_issue": {"actual", "provisional"},
+        "current_response": {"actual", "provisional"},
+        "future_plan": {"planned"},
+    }
+    if fact.fact_status not in allowed_by_time.get(fact.time_state, set()):
+        problems.append(
+            f"[state] {fact.fact_id}: fact_status가 시간 상태와 모순됩니다"
+        )
+    required_states = SECTION_TIME_STATES.get(fact.section_owner)
+    if required_states is not None and fact.time_state not in required_states:
+        problems.append(
+            f"[time] {fact.fact_id}: {fact.section_owner}의 시간 상태와 맞지 않습니다"
+        )
+    if fact.claim_type == "completed_execution":
+        event_value = str(fact.event_date or "").strip()
+        if not re.fullmatch(r"20\d{2}(?:-\d{2}-\d{2})?", event_value):
+            problems.append(
+                f"[time] {fact.fact_id}: 완료 실행에는 원문 사건 연도·날짜가 필요합니다"
+            )
+        else:
+            if event_value[:4] not in fact.state_evidence:
+                problems.append(
+                    f"[time] {fact.fact_id}: event_date 연도가 원문 근거에 없습니다"
+                )
+            event_date = (
+                _parse_iso_date(event_value)
+                if len(event_value) == 10
+                else date(int(event_value), 1, 1)
+            )
+            report_as_of = _parse_iso_date(fact.as_of)
+            if event_date is None or report_as_of is None:
+                problems.append(
+                    f"[time] {fact.fact_id}: 사건일 또는 사실 기준일을 계산할 수 없습니다"
+                )
+            else:
+                if event_date > report_as_of:
+                    problems.append(
+                        f"[time] {fact.fact_id}: 완료 실행 사건일이 원문 기준일보다 뒤입니다"
+                    )
+    elif fact.event_date:
+        problems.append(
+            f"[time] {fact.fact_id}: 완료 실행 외 사실에 event_date를 넣을 수 없습니다"
+        )
+    if fact.claim_type == "priority_product":
+        signals = [
+            signal.strip() for signal in fact.priority_signals if signal.strip()
+        ]
+        if len(set(signals)) < 2:
+            problems.append(
+                f"[section] {fact.fact_id}: 현재 중점 제품에는 서로 다른 추진 신호가 두 개 이상 필요합니다"
+            )
+        for signal in set(signals):
+            pattern = PRIORITY_SIGNAL_PATTERNS.get(signal)
+            if pattern is None or pattern.search(fact.state_evidence) is None:
+                problems.append(
+                    f"[section] {fact.fact_id}: 추진 신호 '{signal}'가 원문에서 확인되지 않습니다"
+                )
+    problems.extend(_evidence_support_problems(fact))
+    problems.extend(_temporal_lexical_problems(fact))
+    if _status_stages(fact.claim) != _status_stages(fact.state_evidence):
+        problems.append(
+            f"[state] {fact.fact_id}: 개발·검증·MOU·계약·납품·매출 상태를 원문과 다르게 바꿨습니다"
+        )
+    has_causal_claim = bool(_CAUSAL_PATTERN.search(fact.claim))
+    if has_causal_claim or fact.supports_causality:
+        causal_fields = (
+            fact.causal_subject,
+            fact.causal_mechanism,
+            fact.causal_outcome,
+            fact.causal_evidence,
+        )
+        if not fact.supports_causality or not all(value.strip() for value in causal_fields):
+            problems.append(
+                f"[causality] {fact.fact_id}: 직접 인과 근거와 주체·기제·결과가 모두 필요합니다"
+            )
+        elif _normalized(fact.causal_evidence) not in _normalized(fact.state_evidence):
+            problems.append(
+                f"[causality] {fact.fact_id}: causal_evidence가 결속된 원문 근거에 없습니다"
+            )
+    problems.extend(_numeric_problems(fact))
+    if fact.section_owner == "competitive_position":
+        comparison_fields = (
+            fact.comparison_target,
+            fact.comparison_definition,
+            fact.comparison_period,
+            fact.comparison_scope,
+            fact.comparator_source_id,
+        )
+        if not all(str(value).strip() for value in comparison_fields):
+            problems.append(
+                f"[comparison] {fact.fact_id}: 동일 조건 비교 필드가 부족합니다"
+            )
+        conditions = {
+            str(key).strip(): str(value).strip()
+            for key, value in fact.comparison_conditions.items()
+            if str(key).strip()
+        }
+        if set(conditions) != _COMPARISON_CONDITION_KEYS or any(
+            not value for value in conditions.values()
+        ):
+            problems.append(
+                f"[comparison] {fact.fact_id}: 고객·제품·시장·양사 기간·정의·회계범위 조건이 완전하지 않습니다"
+            )
+        else:
+            for left, right, top_level, label in (
+                (
+                    "self_period",
+                    "comparator_period",
+                    fact.comparison_period,
+                    "기간",
+                ),
+                (
+                    "self_definition",
+                    "comparator_definition",
+                    fact.comparison_definition,
+                    "지표 정의",
+                ),
+                (
+                    "self_accounting_scope",
+                    "comparator_accounting_scope",
+                    fact.comparison_scope,
+                    "회계 범위",
+                ),
+            ):
+                if _normalized(conditions[left]) != _normalized(conditions[right]):
+                    problems.append(
+                        f"[comparison] {fact.fact_id}: 양사 {label}가 같지 않습니다"
+                    )
+                if _normalized(conditions[left]) != _normalized(top_level):
+                    problems.append(
+                        f"[comparison] {fact.fact_id}: {label} 조건이 FactRecord 정본 필드와 다릅니다"
+                    )
+
+            if not all(
+                _comparison_period_is_bound(fact.comparison_period, evidence)
+                for evidence in (fact.state_evidence, fact.comparator_state_evidence)
+            ):
+                problems.append(
+                    f"[comparison] {fact.fact_id}: 비교 기간이 양사 공식 원 payload에 결속되지 않았습니다"
+                )
+            if not all(
+                _comparison_definition_is_bound(fact.comparison_definition, evidence)
+                for evidence in (fact.state_evidence, fact.comparator_state_evidence)
+            ):
+                problems.append(
+                    f"[comparison] {fact.fact_id}: 지표 정의가 양사 공식 원 payload에 결속되지 않았습니다"
+                )
+            if not all(
+                _comparison_scope_is_bound(fact.comparison_scope, evidence)
+                for evidence in (fact.state_evidence, fact.comparator_state_evidence)
+            ):
+                problems.append(
+                    f"[comparison] {fact.fact_id}: 회계·사업 범위가 양사 공식 원 payload에 결속되지 않았습니다"
+                )
+            if not all(
+                _structured_comparison_basis_is_bound(
+                    period=fact.comparison_period,
+                    definition=fact.comparison_definition,
+                    scope=fact.comparison_scope,
+                    evidence=evidence,
+                )
+                for evidence in (fact.state_evidence, fact.comparator_state_evidence)
+            ):
+                problems.append(
+                    f"[comparison] {fact.fact_id}: 기간·정의·회계범위가 같은 공식 원자료 행에 동시에 결속되지 않았습니다"
+                )
+
+            derived_context = _derived_comparison_context(fact)
+            for axis in ("customer", "product", "market"):
+                expected_axis = derived_context.get(axis, "")
+                if not expected_axis or _normalized(conditions[axis]) != _normalized(
+                    expected_axis
+                ):
+                    problems.append(
+                        f"[comparison] {fact.fact_id}: 동일 {axis} 범위가 양사 공식 원문에서 다시 계산한 값과 다릅니다"
+                    )
+        comparator_source = sources.get(fact.comparator_source_id)
+        if fact.comparator_source_id == fact.source_id:
+            problems.append(
+                f"[comparison] {fact.fact_id}: 자사 원문과 비교사 원문 source_id가 같습니다"
+            )
+        if comparator_source is None:
+            problems.append(
+                f"[comparison] {fact.fact_id}: 비교사 원문이 검증되지 않았습니다"
+            )
+        else:
+            if not is_canonical_official_with_registry(
+                comparator_source, tuple(sources.values())
+            ):
+                problems.append(
+                    f"[comparison] {fact.fact_id}: 비교사 원문이 공식 자료가 아닙니다"
+                )
+            if fact.section_owner not in comparator_source.used_in:
+                problems.append(
+                    f"[comparison] {fact.fact_id}: 비교사 원문 used_in에 실제 소유 장이 없습니다"
+                )
+            own_publisher = _corporate_name(fact.source_publisher)
+            comparator_publisher = _corporate_name(comparator_source.publisher)
+            legal_entity = _corporate_name(fact.legal_entity)
+            comparison_target = _corporate_name(fact.comparison_target)
+            if not comparator_publisher or comparator_publisher in {
+                own_publisher,
+                legal_entity,
+            }:
+                problems.append(
+                    f"[comparison] {fact.fact_id}: 비교사 발행 법인이 자사와 구분되지 않습니다"
+                )
+            if comparison_target != comparator_publisher:
+                problems.append(
+                    f"[comparison] {fact.fact_id}: comparison_target이 비교사 발행 법인과 다릅니다"
+                )
+            if not fact.comparator_state_evidence.strip() or evidence_text_hash(
+                fact.comparator_state_evidence
+            ) not in comparator_source.evidence_hashes:
+                problems.append(
+                    f"[comparison] {fact.fact_id}: 비교사 state_evidence가 비교사 원문 해시 등록부에 없습니다"
+                )
+            comparator_terms = [
+                _normalized(term)
+                for term in fact.comparator_evidence_support_terms
+                if _normalized(term)
+            ]
+            if len(set(comparator_terms)) < 2:
+                problems.append(
+                    f"[comparison] {fact.fact_id}: 비교사 원문 근거어가 두 개 이상 필요합니다"
+                )
+            claim = _normalized(fact.claim)
+            comparator_evidence = _normalized(fact.comparator_state_evidence)
+            for term in comparator_terms:
+                if (
+                    len(_compact(term)) < 2
+                    or term not in claim
+                    or term not in comparator_evidence
+                ):
+                    problems.append(
+                        f"[comparison] {fact.fact_id}: 비교사 근거어 '{term}'가 claim과 비교사 원문 양쪽에 없습니다"
+                    )
+    return problems
+
+
+def _section_content_problems(
+    section: ReportSection,
+    supported_fact_ids: list[str],
+    facts: dict[str, FactRecord],
+    sources: dict[str, Source],
+) -> list[str]:
+    """공개 문장·표 행과 원자 사실을 한 건씩 대응시킨다."""
+
+    problems: list[str] = []
+    if section.guidance_lines:
+        problems.append(f"[content] {section.cell}: guidance_lines를 공개 장에 둘 수 없습니다")
+    if section.empty_reason.strip():
+        problems.append(f"[content] {section.cell}: empty_reason을 공개 장에 둘 수 없습니다")
+    if section.lines and not section.prose_lines:
+        problems.append(
+            f"[content] {section.cell}: 원문 lines가 있으면 공개용 prose_lines가 필요합니다"
+        )
+    if section.cell in REQUIRED_SECTION_IDS and not section.prose_lines:
+        problems.append(
+            f"[content] {section.cell}: 필수 장에는 prose 문장이 최소 한 개 필요합니다"
+        )
+
+    unused = list(supported_fact_ids)
+
+    def take_exact_claim(texts: list[str], unit: str, cite: str) -> str | None:
+        normalized_texts = {_normalized(text) for text in texts if _normalized(text)}
+        matching = [
+            fact_id
+            for fact_id in unused
+            if _normalized(facts[fact_id].claim) in normalized_texts
+        ]
+        if len(matching) != 1:
+            problems.append(
+                f"[mapping] {section.cell}: {unit}가 FactRecord.claim 한 건과 정확히 대응하지 않습니다"
+            )
+            return None
+        fact_id = matching[0]
+        fact_source = sources.get(facts[fact_id].source_id)
+        shown_number = citation_number(cite)
+        if not shown_number:
+            problems.append(
+                f"[source] {section.cell}: {unit}의 공개 출처 번호가 없거나 잘못됐습니다"
+            )
+        elif fact_source is None or shown_number != str(fact_source.number):
+            problems.append(
+                f"[source] {section.cell}: {unit}의 공개 출처 번호가 사실 장부와 다릅니다"
+            )
+        unused.remove(fact_id)
+        return fact_id
+
+    for index, (text, cite) in enumerate(section.prose_lines, start=1):
+        take_exact_claim([text], f"prose {index}번 문장", cite)
+
+    for table_index, table in enumerate(section.tables, start=1):
+        if not table.is_valid:
+            problems.append(
+                f"[mapping] {section.cell}: 표 {table_index}의 열 수와 행 구성이 맞지 않습니다"
+            )
+        visible_cells = [str(cell).strip() for row in table.rows for cell in row]
+        if any(_PUBLIC_AMOUNT_WITH_UNIT.search(cell) for cell in visible_cells):
+            problems.append(
+                f"[numeric] {section.cell}: 공개 표 {table_index}의 셀에는 "
+                "원·억원 단위를 붙이지 말고 캡션에 단위를 한 번만 표시해야 합니다"
+            )
+        if table.display_unit == "억원":
+            if "단위: 억원" not in table.caption:
+                problems.append(
+                    f"[numeric] {section.cell}: 공개 표 {table_index}에 단위: 억원을 명시해야 합니다"
+                )
+            if not table.raw_rows or table.scale_divisor != "100000000":
+                problems.append(
+                    f"[numeric] {section.cell}: 공개 억원 표 {table_index}는 "
+                    "원 단위 원값과 100000000 환산 정보를 내부에 보존해야 합니다"
+                )
+            if any(
+                not _PUBLIC_NUMBER.fullmatch(str(cell).strip())
+                for row in table.rows
+                for cell in row[1:]
+            ):
+                problems.append(
+                    f"[numeric] {section.cell}: 공개 억원 표 {table_index}에는 "
+                    "억원 표시값만 숫자로 넣어야 합니다"
+                )
+        for row_index, row in enumerate(table.rows, start=1):
+            # 표 claim은 한 셀·행 결합 또는 조립기의 ``caption: cell | cell`` 정본과
+            # 정확히 같아야 한다. 부분 문자열 매칭은 다른 주장을 잘못 연결할 수 있어 금지한다.
+            fact_id = take_exact_claim(
+                [
+                    *row,
+                    " ".join(str(cell) for cell in row),
+                    " | ".join(str(cell) for cell in row),
+                    f"{table.caption}: " + " | ".join(str(cell) for cell in row),
+                ],
+                f"표 {table_index}의 {row_index}번 행",
+                table.cite,
+            )
+            if fact_id is None:
+                continue
+            fact = facts[fact_id]
+            raw_row = (
+                table.raw_rows[row_index - 1]
+                if len(table.raw_rows) >= row_index
+                else []
+            )
+            expected_raw, expected_display, expected_checks = _table_numeric_fields_for_gate(
+                list(row[1:]),
+                list(raw_row[1:]) if raw_row else None,
+                table.scale_divisor,
+                table.scale_places,
+            )
+            if (
+                fact.raw_value != expected_raw
+                or fact.display_value != expected_display
+                or fact.numeric_checks != expected_checks
+            ):
+                problems.append(
+                    f"[mapping] {section.cell}: 표 {table_index}의 {row_index}번 행과 "
+                    "FactRecord 원값·표시값·numeric_checks가 정확히 결속되지 않았습니다"
+                )
+            evidence = (
+                table.evidence_rows[row_index - 1]
+                if len(table.evidence_rows) >= row_index
+                else ""
+            )
+            # ``evidence_rows`` is an assembly-only conduit and is intentionally
+            # omitted from public/cache serialization.  When it is present it
+            # must match exactly; after deserialization the independently bound
+            # FactRecord → Source evidence hash remains the durable proof.
+            if evidence and fact.state_evidence != evidence:
+                problems.append(
+                    f"[evidence] {section.cell}: 표 {table_index}의 {row_index}번 행에 "
+                    "결속된 실제 수집 payload와 다른 근거가 들어 있습니다"
+                )
+
+    if unused:
+        problems.append(
+            f"[mapping] {section.cell}: 공개 문장·표 행에 대응하지 않은 fact_id가 있습니다: "
+            + ", ".join(unused)
+        )
+
+    visible_texts = [text for text, _cite in section.prose_lines]
+    visible_texts.extend(table.caption for table in section.tables)
+    visible_texts.extend(header for table in section.tables for header in table.headers)
+    visible_texts.extend(
+        str(cell)
+        for table in section.tables
+        for row in table.rows
+        for cell in row
+    )
+    for index, text in enumerate(visible_texts, start=1):
+        if problem := _forbidden_text_problem(text):
+            problems.append(f"[scope] {section.cell} 공개 내용 {index}: {problem}")
+    return problems
+
+
+def _table_numeric_fields_for_gate(
+    shown_values: list[str],
+    raw_values: list[str] | None,
+    divisor: str,
+    places: int,
+) -> tuple[str, str, list[str]]:
+    """조립기와 독립적으로 공개 표의 원값 변환 계약을 재구성한다."""
+
+    if raw_values and len(raw_values) == len(shown_values) and divisor:
+        return (
+            " | ".join(raw_values),
+            " | ".join(shown_values),
+            [
+                f"{raw}|{divisor}|{places}|{shown}"
+                for raw, shown in zip(raw_values, shown_values)
+            ],
+        )
+    direct_raw: list[str] = []
+    direct_display: list[str] = []
+    checks: list[str] = []
+    for value in shown_values:
+        for token in _NUMBER_TOKEN.findall(value):
+            places_in_token = len(token.rsplit(".", 1)[1]) if "." in token else 0
+            direct_raw.append(token)
+            direct_display.append(token)
+            checks.append(f"{token}|1|{places_in_token}|{token}")
+    return " | ".join(direct_raw), " | ".join(direct_display), checks
+
+
+def _section_fact_ids(
+    section: ReportSection,
+    facts: dict[str, FactRecord],
+    sources: dict[str, Source],
+) -> tuple[list[str], list[str]]:
+    supported: list[str] = []
+    problems: list[str] = []
+    seen: set[str] = set()
+    for fact_id in section.fact_ids:
+        clean_id = str(fact_id).strip()
+        if not clean_id or clean_id in seen:
+            if clean_id in seen:
+                problems.append(f"[duplicate] {section.cell}: fact_id {clean_id}가 반복됐습니다")
+            continue
+        seen.add(clean_id)
+        fact = facts.get(clean_id)
+        if fact is None:
+            problems.append(f"[fact] {section.cell}: fact_id {clean_id}를 장부에서 찾지 못했습니다")
+            continue
+        if fact.section_owner != section.cell:
+            problems.append(
+                f"[ownership] {clean_id}: {fact.section_owner} 소유 사실을 {section.cell}에서 참조했습니다"
+            )
+            continue
+        fact_problems = _fact_problems(fact, sources)
+        if fact_problems:
+            problems.extend(fact_problems)
+            continue
+        supported.append(clean_id)
+    return supported, problems
+
+
+def _completed_fiscal_years(
+    report: Report, performance: list[FactRecord]
+) -> tuple[int, int, int] | None:
+    """완료 상태로 입증된 연속 3개 FY를 반환한다.
+
+    12월 결산을 가정하지 않는다. 최신 FY는 보고서 기준연도 또는 직전연도만
+    허용하며, 실제 완료 상태인 원자 사실만 연도 집합에 포함한다.
+    """
+
+    report_date = _parse_iso_date(report.as_of_date)
+    if report_date is None:
+        return None
+    if any(
+        fact.fact_status != "actual" or fact.time_state != "completed"
+        for fact in performance
+    ):
+        return None
+    years = sorted({fact.fiscal_year for fact in performance if fact.fiscal_year})
+    if len(years) != 3 or years != list(range(years[0], years[0] + 3)):
+        return None
+    if years[-1] not in {report_date.year - 1, report_date.year}:
+        return None
+    return years[0], years[1], years[2]
+
+
+def _semantic_section_problems(
+    report: Report,
+    sections: dict[str, ReportSection],
+    supported_by_section: dict[str, list[str]],
+    facts: dict[str, FactRecord],
+) -> list[str]:
+    """제목만 채운 1~9장을 통과시키지 않는 장별 최소 내용 계약."""
+
+    problems: list[str] = []
+
+    business = [facts[fid] for fid in supported_by_section.get("business_model", [])]
+    business_types = {fact.claim_type for fact in business}
+    for required_type in ("revenue_model", "customer_market"):
+        if required_type not in business_types:
+            problems.append(
+                f"[section] business_model: {required_type} 원자 사실이 필요합니다"
+            )
+    customer_market = [fact for fact in business if fact.claim_type == "customer_market"]
+    if customer_market and any(not fact.market_priority.strip() for fact in customer_market):
+        problems.append(
+            "[section] business_model: 고객·지역 사실에는 market_priority가 필요합니다"
+        )
+
+    portfolio = [facts[fid] for fid in supported_by_section.get("portfolio", [])]
+    products = [fact for fact in portfolio if fact.claim_type == "priority_product"]
+    product_scopes = {_normalized(fact.subject_scope) for fact in products}
+    if not (1 <= len(products) <= 3) or len(product_scopes) != len(products):
+        problems.append(
+            "[section] portfolio: 확인된 서로 다른 핵심 제품·서비스를 1~3개만 담아야 합니다"
+        )
+    if any(not fact.product_role.strip() for fact in products):
+        problems.append(
+            "[section] portfolio: 각 핵심 제품·서비스의 product_role이 필요합니다"
+        )
+
+    past_ids = supported_by_section.get("past_changes", [])
+    past = [facts[fid] for fid in past_ids]
+    performance = [fact for fact in past if fact.claim_type == "historical_performance"]
+    expected_years = _completed_fiscal_years(report, performance)
+    if expected_years is None:
+        problems.append(
+            "[section] past_changes: 최신 연도가 기준연도 또는 직전연도인 "
+            "연속 3개 완료 사업연도 실적이 필요합니다 "
+            f"(선언 분석 기간: {report.analysis_period})"
+        )
+    compact_period = report.analysis_period.replace(" ", "")
+    has_exact_years = expected_years is not None and (
+        all(str(year) in compact_period for year in expected_years)
+        or f"{expected_years[0]}~{expected_years[-1]}" in compact_period
+        or f"{expected_years[0]}-{expected_years[-1]}" in compact_period
+    )
+    if expected_years is not None and not has_exact_years:
+        problems.append(
+            "[period] analysis_period에 완료 사업연도 세 개가 모두 표시되지 않았습니다"
+        )
+    if "완료" not in report.analysis_period:
+        problems.append("[period] analysis_period에 완료 회계연도임을 명시해야 합니다")
+    past_section = sections.get("past_changes")
+    performance_tables = [
+        table
+        for table in (past_section.tables if past_section is not None else [])
+        if table.display_unit == "억원"
+        and table.headers
+        and table.headers[0] == "사업연도"
+    ]
+    if expected_years is not None:
+        expected_desc = [str(year) for year in reversed(expected_years)]
+        matching_tables = [
+            table
+            for table in performance_tables
+            if len(table.rows) == 3
+            and [str(row[0]).strip() for row in table.rows if row] == expected_desc
+            and len(table.raw_rows) == 3
+            and len(table.evidence_rows) in {0, 3}
+        ]
+        if len(matching_tables) != 1:
+            problems.append(
+                "[section] past_changes: 연속 3개 완료 FY가 한 개의 공개 실적표·원값·실제 payload에 결속돼야 합니다"
+            )
+    executions = [fact for fact in past if fact.claim_type == "completed_execution"]
+    interpretations = [fact for fact in past if fact.claim_type == "change_interpretation"]
+    if not executions:
+        problems.append("[section] past_changes: 확인된 완료 실행 사실이 필요합니다")
+    report_date = _parse_iso_date(report.as_of_date)
+    if report_date is None:
+        problems.append("[period] as_of_date에서 최근 36개월을 계산할 수 없습니다")
+    else:
+        try:
+            execution_cutoff = report_date.replace(year=report_date.year - 3)
+        except ValueError:
+            execution_cutoff = report_date.replace(year=report_date.year - 3, day=28)
+        for fact in executions:
+            event_value = str(fact.event_date or "").strip()
+            event = (
+                _parse_iso_date(event_value)
+                if len(event_value) == 10
+                else date(int(event_value), 1, 1)
+                if re.fullmatch(r"20\d{2}", event_value)
+                else None
+            )
+            if event is None or not (execution_cutoff <= event <= report_date):
+                problems.append(
+                    f"[period] {fact.fact_id}: 완료 실행은 보고서 기준일 전 최근 36개월 안이어야 합니다"
+                )
+    if not interpretations:
+        problems.append("[section] past_changes: 변화·실행 해석 사실이 필요합니다")
+    for fact in interpretations:
+        if not fact.basis_fact_ids:
+            problems.append(
+                f"[section] {fact.fact_id}: 변화 해석의 basis_fact_ids가 비었습니다"
+            )
+            continue
+        for basis_id in fact.basis_fact_ids:
+            basis = facts.get(basis_id)
+            if basis is None or basis_id not in past_ids or basis.claim_type not in {
+                "completed_execution",
+                "historical_performance",
+            }:
+                problems.append(
+                    f"[section] {fact.fact_id}: 변화 해석 근거 {basis_id}가 완료 실행·실적 사실이 아닙니다"
+                )
+
+    current_ids = supported_by_section.get("current_challenges", [])
+    current = [facts[fid] for fid in current_ids]
+    issues = [fact for fact in current if fact.claim_type == "current_issue"]
+    responses = [fact for fact in current if fact.claim_type == "current_response"]
+    if not issues or not responses:
+        problems.append(
+            "[section] current_challenges: 미해결 문제와 실제 대응이 모두 필요합니다"
+        )
+    issue_ids = {fact.fact_id for fact in issues}
+    paired_issue_ids: set[str] = set()
+    for response in responses:
+        if response.response_to_fact_id not in issue_ids:
+            problems.append(
+                f"[section] {response.fact_id}: response_to_fact_id가 같은 장의 미해결 문제를 가리키지 않습니다"
+            )
+        else:
+            paired_issue_ids.add(response.response_to_fact_id)
+    unpaired = issue_ids - paired_issue_ids
+    if unpaired:
+        problems.append(
+            "[section] current_challenges: 실제 대응과 결속되지 않은 문제가 있습니다: "
+            + ", ".join(sorted(unpaired))
+        )
+
+    # 숫자표만으로 과거 장을 채우지 못하도록 공개 해석 문장을 별도로 요구한다.
+    if past_section is not None and interpretations:
+        shown = {_normalized(text) for text, _cite in past_section.prose_lines}
+        if not any(_normalized(fact.claim) in shown for fact in interpretations):
+            problems.append(
+                "[section] past_changes: 변화·실행 해석이 공개 prose에 나타나야 합니다"
+            )
+    return problems
+
+
+def _summary_problems(
+    item: object,
+    index: int,
+    included_set: set[str],
+    facts: dict[str, FactRecord],
+) -> list[str]:
+    problems: list[str] = []
+    text = str(getattr(item, "text", "")).strip()
+    section_id = str(getattr(item, "section_id", ""))
+    fact_ids = list(getattr(item, "fact_ids", []) or [])
+    evidence_text = str(getattr(item, "evidence_text", ""))
+    status = str(getattr(item, "verification_status", ""))
+    binding = str(getattr(item, "verification_binding", ""))
+    support_terms = list(getattr(item, "support_terms", []) or [])
+
+    if section_id not in included_set:
+        problems.append(
+            f"[summary] {index}번 요약이 공개본에 없는 장 {section_id}을 참조합니다"
+        )
+    if not fact_ids:
+        problems.append(f"[summary] {index}번 요약에 fact_id가 없습니다")
+        return problems
+    if len(fact_ids) != len(set(fact_ids)):
+        problems.append(f"[summary] {index}번 요약의 fact_id가 중복됐습니다")
+    bound_facts: dict[str, FactRecord] = {}
+    for fact_id in fact_ids:
+        fact = facts.get(fact_id)
+        if fact is None:
+            problems.append(f"[summary] {index}번 요약의 fact_id {fact_id}가 없습니다")
+        elif fact.section_owner != section_id:
+            problems.append(
+                f"[summary] {index}번 요약이 다른 장의 사실 {fact_id}를 참조합니다"
+            )
+        else:
+            bound_facts[fact_id] = fact
+    if len(bound_facts) != len(fact_ids):
+        return problems
+
+    expected_evidence = summary_evidence_text(fact_ids, facts)
+    if evidence_text != expected_evidence:
+        problems.append(
+            f"[summary] {index}번 요약의 evidence_text가 결속된 claim 묶음과 다릅니다"
+        )
+    if status != "independently_verified":
+        problems.append(
+            f"[summary] {index}번 요약은 독립 검증 완료 상태가 아닙니다"
+        )
+    normalized_terms = [_normalized(term) for term in support_terms if _normalized(term)]
+    if len(set(normalized_terms)) < 2:
+        problems.append(
+            f"[summary] {index}번 요약에는 서로 다른 support_terms가 두 개 이상 필요합니다"
+        )
+    joined_claims = _normalized(expected_evidence)
+    normalized_summary = _normalized(text)
+    for term in normalized_terms:
+        if len(_compact(term)) < 2 or term not in normalized_summary or term not in joined_claims:
+            problems.append(
+                f"[summary] {index}번 요약의 근거어 '{term}'가 요약과 claim 양쪽에 없습니다"
+            )
+    if _CAUSAL_PATTERN.search(text) and not any(
+        fact.supports_causality for fact in bound_facts.values()
+    ):
+        problems.append(
+            f"[summary] {index}번 요약이 결속 사실에 없는 인과를 추가했습니다"
+        )
+    expected_binding = summary_verification_binding(
+        text,
+        section_id,
+        fact_ids,
+        evidence_text,
+        status,
+        support_terms,
+    )
+    if not binding or binding != expected_binding:
+        problems.append(
+            f"[summary] {index}번 요약의 독립 검증 결속 지문이 일치하지 않습니다"
+        )
+    return problems
+
+
+def validate_publishable(report: Report) -> PublishValidation:
+    """정본상 출고 가능한지 전수 검사한다.
+
+    1~9장 전체, 숫자 없는 요약 3~5개, 원문 해시에 결속된 원자 사실과 장별
+    최소 내용 계약이 하나라도 성립하지 않으면 보고서 전체 출고를 차단한다.
+    """
+
+    reasons: list[str] = []
+    report_date = _parse_iso_date(report.as_of_date)
+    if report.schema_version != CANONICAL_SCHEMA_VERSION:
+        reasons.append(
+            f"[schema] {CANONICAL_SCHEMA_VERSION} 보고서만 canonical 출고할 수 있습니다"
+        )
+    for field_name, value in (
+        ("as_of_date", report.as_of_date),
+        ("analysis_period", report.analysis_period),
+        ("latest_performance_period", report.latest_performance_period),
+    ):
+        if not str(value).strip():
+            reasons.append(f"[period] {field_name}가 비었습니다")
+
+    source_id_counts: dict[str, int] = {}
+    source_number_counts: dict[int, int] = {}
+    source_document_owners: dict[tuple[str, str, str, str], str] = {}
+    for item in report.citations:
+        if not isinstance(item, Source):
+            continue
+        if not item.is_canonical_valid:
+            reasons.append(
+                f"[source] {item.source_id or item.number}: host·URL·document_id·날짜·원문 해시 신원이 불완전합니다"
+            )
+        if report_date is not None:
+            for label, value in (
+                ("published_at", item.published_at),
+                ("disclosed_at", item.disclosed_at),
+                ("collected_at", item.collected_at),
+            ):
+                if not str(value).strip():
+                    continue
+                parsed = _parse_iso_date(value)
+                if parsed is None or parsed > report_date:
+                    reasons.append(
+                        f"[time] {item.source_id or item.number}: {label}가 보고서 기준일 뒤이거나 ISO 날짜가 아닙니다"
+                    )
+        if item.source_id.strip():
+            source_id = item.source_id.strip()
+            source_id_counts[source_id] = source_id_counts.get(source_id, 0) + 1
+            document_identity = _source_document_identity(item)
+            previous_source = source_document_owners.get(document_identity)
+            if previous_source is not None and previous_source != source_id:
+                reasons.append(
+                    f"[duplicate] 같은 URL·document_id·위치·원문해시 조각이 {previous_source}와 "
+                    f"{source_id}로 복제 등록됐습니다"
+                )
+            else:
+                source_document_owners[document_identity] = source_id
+        if item.number <= 0:
+            reasons.append("[source] 출처 번호는 1 이상의 정수여야 합니다")
+        else:
+            source_number_counts[item.number] = source_number_counts.get(item.number, 0) + 1
+    for source_id, count in source_id_counts.items():
+        if count > 1:
+            reasons.append(f"[duplicate] source_id {source_id}가 두 번 등록됐습니다")
+    for source_number, count in source_number_counts.items():
+        if count > 1:
+            reasons.append(f"[duplicate] 출처 번호 [{source_number}]가 두 번 등록됐습니다")
+
+    sources = _source_registry(report)
+    if not sources:
+        reasons.append("[source] canonical 원문 등록부가 비었습니다")
+
+    facts: dict[str, FactRecord] = {}
+    atomic_owners: dict[tuple[str, ...], str] = {}
+    semantic_owners: dict[tuple[str, ...], str] = {}
+    claim_owners: dict[str, str] = {}
+    numeric_owners: dict[tuple[str, str], str] = {}
+    for fact in report.fact_records:
+        fact_id = fact.fact_id.strip()
+        if not fact_id:
+            reasons.append("[fact] 빈 fact_id가 있습니다")
+            continue
+        if fact_id in facts:
+            reasons.append(f"[duplicate] fact_id {fact_id}가 두 번 등록됐습니다")
+            continue
+        facts[fact_id] = fact
+        if not _corporate_name(report.company) or (
+            _corporate_name(fact.legal_entity) != _corporate_name(report.company)
+        ):
+            reasons.append(
+                f"[ownership] {fact_id}: FactRecord.legal_entity가 report.company와 다릅니다"
+            )
+        if report_date is not None:
+            for label, value in (("as_of", fact.as_of), ("source_date", fact.source_date)):
+                parsed = _parse_iso_date(value)
+                if parsed is None or parsed > report_date:
+                    reasons.append(
+                        f"[time] {fact_id}: {label}가 보고서 기준일 뒤이거나 ISO 날짜가 아닙니다"
+                    )
+            if fact.event_date:
+                event_value = str(fact.event_date).strip()
+                event = (
+                    _parse_iso_date(event_value)
+                    if len(event_value) == 10
+                    else date(int(event_value), 1, 1)
+                    if re.fullmatch(r"20\d{2}", event_value)
+                    else None
+                )
+                if event is None or event > report_date:
+                    reasons.append(
+                        f"[time] {fact_id}: event_date가 보고서 기준일 뒤이거나 올바르지 않습니다"
+                    )
+        atomic_key = _atomic_key(fact)
+        previous = atomic_owners.get(atomic_key)
+        if previous is not None:
+            reasons.append(
+                f"[duplicate] 같은 원자 사실이 {previous}와 {fact_id}로 중복 등록됐습니다"
+            )
+        else:
+            atomic_owners[atomic_key] = fact_id
+        semantic_key = _semantic_duplicate_key(fact)
+        previous_semantic = semantic_owners.get(semantic_key)
+        if previous_semantic is not None:
+            reasons.append(
+                f"[duplicate] 의미가 같은 사실이 {previous_semantic}와 {fact_id}로 중복 등록됐습니다"
+            )
+        else:
+            semantic_owners[semantic_key] = fact_id
+        claim_key = _compact(fact.claim)
+        previous_claim = claim_owners.get(claim_key)
+        if claim_key and previous_claim is not None:
+            reasons.append(
+                f"[duplicate] 같은 claim이 {previous_claim}와 {fact_id}로 중복 등록됐습니다"
+            )
+        elif claim_key:
+            claim_owners[claim_key] = fact_id
+        raw_numbers = tuple(
+            str(value)
+            for token in _NUMBER_TOKEN.findall(fact.raw_value)
+            if (value := _decimal(token)) is not None
+            and not (Decimal(1900) <= abs(value) <= Decimal(2100))
+        )
+        if raw_numbers:
+            numeric_key = (
+                _corporate_name(fact.legal_entity) + ":" + fact.source_id,
+                "|".join(raw_numbers),
+            )
+            previous_numeric = numeric_owners.get(numeric_key)
+            if previous_numeric is not None:
+                reasons.append(
+                    f"[duplicate] 같은 원시 수치 묶음이 {previous_numeric}와 {fact_id}에 반복됐습니다"
+                )
+            else:
+                numeric_owners[numeric_key] = fact_id
+
+    sections: dict[str, ReportSection] = {}
+    supported_by_section: dict[str, list[str]] = {}
+    for section in report.sections:
+        if section.cell not in SECTION_BY_ID:
+            continue
+        if section.cell in sections:
+            reasons.append(f"[section] {section.cell} 장이 두 번 등록됐습니다")
+            continue
+        sections[section.cell] = section
+        supported, problems = _section_fact_ids(section, facts, sources)
+        supported_by_section[section.cell] = supported
+        reasons.extend(problems)
+        reasons.extend(_section_content_problems(section, supported, facts, sources))
+
+    included = tuple(
+        section_id
+        for section_id in CANONICAL_SECTION_IDS
+        if supported_by_section.get(section_id)
+    )
+    included_set = set(included)
+    for section_id in sorted(REQUIRED_SECTION_IDS - included_set):
+        reasons.append(f"[section] 필수 장 {section_id}에 검증된 근거가 없습니다")
+    reasons.extend(
+        _semantic_section_problems(report, sections, supported_by_section, facts)
+    )
+
+    if not SUMMARY_MIN_ITEMS <= len(report.summary_items) <= SUMMARY_MAX_ITEMS:
+        reasons.append("[summary] 핵심 요약은 3~5개여야 합니다")
+    summary_texts: set[str] = set()
+    for index, item in enumerate(report.summary_items, start=1):
+        text = item.text.strip()
+        if not text:
+            reasons.append(f"[summary] {index}번 요약이 비었습니다")
+        elif _SUMMARY_NUMBER.search(text):
+            reasons.append(f"[summary] {index}번 요약에 숫자 또는 백분율이 있습니다")
+        normalized_text = _normalized(text)
+        if normalized_text in summary_texts:
+            reasons.append(f"[summary] {index}번 요약이 중복됐습니다")
+        summary_texts.add(normalized_text)
+        reasons.extend(_summary_problems(item, index, included_set, facts))
+        if problem := _forbidden_text_problem(text):
+            reasons.append(f"[scope] {index}번 요약: {problem}")
+
+    unique_reasons = tuple(dict.fromkeys(reasons))
+    return PublishValidation(not unique_reasons, unique_reasons, included)
+
+
+def build_published_report(report: Report) -> Report:
+    """검증된 1~9장을 정본 순서·메타데이터로 잠근 공개본을 만든다."""
+
+    validation = validate_publishable(report)
+    if not validation:
+        raise PublishBlockedError(validation)
+
+    by_id = {section.cell: section for section in report.sections}
+    facts = {fact.fact_id: fact for fact in report.fact_records}
+    sources = _source_registry(report)
+    published_sections: list[ReportSection] = []
+    used_fact_ids: set[str] = set()
+    for spec in SECTION_SPECS:
+        if spec.section_id not in validation.included_section_ids:
+            continue
+        section = by_id[spec.section_id]
+        supported, _problems = _section_fact_ids(section, facts, sources)
+        used_fact_ids.update(supported)
+        published_sections.append(
+            replace(
+                section,
+                cell=spec.section_id,
+                title=spec.title,
+                display_number=spec.display_number,
+                tag=spec.tag,
+                fact_ids=supported,
+                guidance_lines=[],
+                empty_reason="",
+            )
+        )
+
+    published_facts = [
+        fact for fact in report.fact_records if fact.fact_id in used_fact_ids
+    ]
+    used_source_ids = {fact.source_id for fact in published_facts}
+    used_source_ids.update(
+        fact.comparator_source_id
+        for fact in published_facts
+        if fact.comparator_source_id
+    )
+    source_usage: dict[str, set[str]] = {}
+    for fact in published_facts:
+        source_usage.setdefault(fact.source_id, set()).add(fact.section_owner)
+        if fact.comparator_source_id:
+            source_usage.setdefault(fact.comparator_source_id, set()).add(
+                fact.section_owner
+            )
+    published_citations = sorted([
+        replace(
+            item,
+            used_in=[
+                section_id
+                for section_id in CANONICAL_SECTION_IDS
+                if section_id in source_usage.get(item.source_id, set())
+            ],
+        )
+        for item in report.citations
+        if isinstance(item, Source) and item.source_id in used_source_ids
+    ], key=lambda item: item.number)
+
+    return replace(
+        report,
+        job="",
+        grade=Grade.COMPLETE,
+        sections=published_sections,
+        requirements=[],
+        sources=[],
+        citations=published_citations,
+        cells={section.cell: True for section in published_sections},
+        shortfall_reasons=[],
+        schema_version=CANONICAL_SCHEMA_VERSION,
+        fact_records=published_facts,
+    )

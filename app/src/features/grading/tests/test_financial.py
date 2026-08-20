@@ -79,6 +79,13 @@ def test_출처를_밝힌다():
     assert table.cite
 
 
+def test_저장_데모가_넘긴_조각번호를_표_출처로_보존한다():
+    table = parse_financial_table(로보스타_재무, cite="9")
+
+    assert table is not None
+    assert table.cite == "9"
+
+
 # ── ★ 없는 숫자를 만들지 않는다 ─────────────────────────
 
 def test_모양이_다른_조각이_하나라도_있으면_표로_만들지_않는다():

@@ -4,7 +4,7 @@
 **재료가 있는데 없다고 세면 멀쩡한 회사가 보고서를 못 받는다.**
 
 ★ 이 시험이 잡는 것 — 1판 엔진의 `CELL_SOURCES`에는 「홈페이지」가 **어느 칸에도
-  없다**(`prototype_v1/tools/run_pilot.py:124-132`). 홈페이지 수집을 붙여 놓고도
+  없다**(`analysis_engine/tools/run_pilot.py:124-132`). 홈페이지 수집을 붙여 놓고도
   게이트가 그 조각을 못 세서, 2번·4-2·4-3의 재료가 홈페이지뿐인 회사는
   「미달」로 멈췄다. 1판을 못 고치므로 앱 층이 게이트 계산에서만 넓힌다.
 """
@@ -22,7 +22,7 @@ def _engine_cell_sources() -> dict[str, tuple[str, ...]]:
     """1판 엔진의 칸↔조각종류 대응표. 엔진을 «실행하지 않고» 글자로 읽는다."""
     import ast
 
-    source = (real.paths.PROJECT_ROOT / "prototype_v1" / "tools" / "run_pilot.py").read_text(
+    source = (real.paths.PROJECT_ROOT / "analysis_engine" / "tools" / "run_pilot.py").read_text(
         encoding="utf-8"
     )
     tree = ast.parse(source)

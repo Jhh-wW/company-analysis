@@ -20,8 +20,8 @@ TEMPLATES_DIR: Path = WEB_DIR / "templates"
 STATIC_DIR: Path = WEB_DIR / "static"
 
 # ── 데모 데이터 (1단계 전용) ────────────────────────────
-# 시제품이 실제로 돌려 남긴 기록이다. 진짜 파이프라인을 붙이면 안 쓴다.
-PILOT_DIR: Path = PROJECT_ROOT / "prototype_v1" / "data" / "pilot"
+# 초기 조사 엔진이 실제로 돌려 남긴 기록이다. 진짜 파이프라인을 붙이면 안 쓴다.
+PILOT_DIR: Path = PROJECT_ROOT / "analysis_engine" / "data" / "pilot"
 PILOT_RUNS_FILE: Path = PILOT_DIR / "runs.jsonl"
 PILOT_REPORTS_DIR: Path = PILOT_DIR / "reports"
 

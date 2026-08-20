@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}조사 중… · 기업분석{% endblock %}
+{% block bodyclass %}progress-page{% endblock %}
 
 {% block content %}
 <h1>{{ job.card.legal_name }} 조사 중</h1>
@@ -9,12 +10,39 @@
 </p>
 
 <div class="card">
-  <ul class="steps" id="steps">
+  <ul class="steps" id="steps" aria-label="조사 진행 단계">
     {% for key, label in steps %}
-      <li data-key="{{ key }}"><span class="mark">{{ loop.index }}</span><span>{{ label }}</span></li>
+      <li data-key="{{ key }}"><span class="mark" aria-hidden="true">{{ loop.index }}</span><span>{{ label }}</span></li>
     {% endfor %}
   </ul>
+  <p id="progress-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true">
+    조사를 시작했습니다.
+  </p>
 </div>
+
+<section id="progress-check-problem" class="card"
+         aria-labelledby="progress-check-problem-title" hidden>
+  <h2 id="progress-check-problem-title">진행 상태를 잠시 확인할 수 없습니다</h2>
+  <p id="progress-check-problem-message" class="lede">
+    연결을 다시 확인하고 있습니다.
+  </p>
+  <p class="muted">조사를 새로 시작하지 마세요. 실행 중인 작업은 그대로일 수 있습니다.</p>
+  <div class="btn-row">
+    <button id="progress-manual-retry" class="btn" type="button">지금 다시 확인</button>
+  </div>
+</section>
+
+<section id="progress-interrupted" class="card"
+         aria-labelledby="progress-interrupted-title" hidden>
+  <h2 id="progress-interrupted-title" tabindex="-1">조사를 이어갈 수 없습니다</h2>
+  <p id="progress-interrupted-message" class="lede">
+    서버가 다시 시작되었거나 진행 정보가 정리되었습니다.
+  </p>
+  <p class="muted">입력하신 내용을 확인한 뒤 조사를 다시 시작해 주세요.</p>
+  <div class="btn-row">
+    <a id="progress-retry" class="btn" href="/">처음부터 다시 조사하기</a>
+  </div>
+</section>
 
 <p class="muted" style="margin-top:14px">
   공개된 자료가 너무 적은 회사는 보고서를 만들지 못하고 멈춥니다.
@@ -24,26 +52,109 @@
 <script>
   var JOB_ID = "{{ job.job_id }}";
   var items = document.querySelectorAll('#steps li');
+  var progressStatus = document.getElementById('progress-status');
+  var interrupted = document.getElementById('progress-interrupted');
+  var interruptedTitle = document.getElementById('progress-interrupted-title');
+  var interruptedMessage = document.getElementById('progress-interrupted-message');
+  var retryLink = document.getElementById('progress-retry');
+  var checkProblem = document.getElementById('progress-check-problem');
+  var checkProblemMessage = document.getElementById('progress-check-problem-message');
+  var manualRetry = document.getElementById('progress-manual-retry');
+  var lastAnnouncement = progressStatus.textContent.trim();
+  var consecutiveFailures = 0;
+  var terminalShown = false;
+  var MAX_AUTO_FAILURES = 3;
+
+  function showInterrupted(message, retryUrl) {
+    if (terminalShown) return;
+    terminalShown = true;
+    interruptedMessage.textContent = message || '진행 정보를 확인할 수 없습니다.';
+    retryLink.href = retryUrl === '/' ? retryUrl : '/';
+    checkProblem.hidden = true;
+    interrupted.hidden = false;
+    progressStatus.removeAttribute('role');
+    progressStatus.removeAttribute('aria-live');
+    progressStatus.removeAttribute('aria-atomic');
+    interruptedTitle.focus();
+  }
+
+  function retryDelay(response) {
+    var seconds = Number(response.headers.get('Retry-After'));
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+      seconds = Math.min(8, Math.pow(2, consecutiveFailures));
+    }
+    return Math.min(30000, Math.max(1000, seconds * 1000));
+  }
+
+  function showCheckProblem(message) {
+    checkProblemMessage.textContent = message || '연결 상태를 확인한 뒤 다시 시도해 주세요.';
+    checkProblem.hidden = false;
+    progressStatus.textContent = '진행 상태 확인이 일시 중단되었습니다. 수동으로 다시 확인할 수 있습니다.';
+  }
+
+  function handlePollFailure(message, delay) {
+    consecutiveFailures += 1;
+    if (consecutiveFailures >= MAX_AUTO_FAILURES) {
+      showCheckProblem(message);
+      return;
+    }
+    progressStatus.textContent = message || '진행 상태 연결을 다시 확인하고 있습니다.';
+    setTimeout(poll, delay || Math.min(8000, 1000 * Math.pow(2, consecutiveFailures)));
+  }
 
   function paint(done, current) {
+    var currentLabel = '';
     items.forEach(function (li) {
       var key = li.dataset.key;
       li.classList.remove('done', 'current');
+      li.removeAttribute('aria-current');
       if (done.indexOf(key) !== -1) {
         li.classList.add('done');
         li.querySelector('.mark').textContent = '✓';
       } else if (key === current) {
         li.classList.add('current');
+        li.setAttribute('aria-current', 'step');
         li.querySelector('.mark').textContent = '';
+        currentLabel = li.querySelector('span:last-child').textContent.trim();
       }
     });
+
+    var announcement = currentLabel
+      ? '현재 단계: ' + currentLabel + '. ' + done.length + '개 단계 완료.'
+      : done.length + '개 단계 완료.';
+    if (announcement !== lastAnnouncement) {
+      progressStatus.textContent = announcement;
+      lastAnnouncement = announcement;
+    }
   }
 
   function poll() {
     fetch('/api/progress/' + JOB_ID)
-      .then(function (r) { return r.json(); })
-      .then(function (d) {
-        if (d.error) { return; }
+      .then(function (response) {
+        var delay = retryDelay(response);
+        return response.json().then(function (data) {
+          return { response: response, data: data, delay: delay };
+        });
+      })
+      .then(function (payload) {
+        var response = payload.response;
+        var d = payload.data;
+        if (d.error) {
+          if (response.status === 410) {
+            showInterrupted(d.error, d.retry_url);
+          } else if (response.status === 503 || d.retryable) {
+            handlePollFailure(d.error, payload.delay);
+          } else {
+            showInterrupted(d.error, d.retry_url);
+          }
+          return;
+        }
+        if (!response.ok) {
+          handlePollFailure('진행 상태 응답을 확인하지 못했습니다.', payload.delay);
+          return;
+        }
+        consecutiveFailures = 0;
+        checkProblem.hidden = true;
         paint(d.done || [], d.current || '');
         if (d.finished && d.next_url) {
           window.location.href = d.next_url;
@@ -51,8 +162,17 @@
           setTimeout(poll, 400);
         }
       })
-      .catch(function () { setTimeout(poll, 1200); });
+      .catch(function () {
+        handlePollFailure('네트워크 연결 때문에 진행 상태를 확인하지 못했습니다.');
+      });
   }
+
+  manualRetry.addEventListener('click', function () {
+    consecutiveFailures = 0;
+    checkProblem.hidden = true;
+    progressStatus.textContent = '진행 상태를 다시 확인합니다.';
+    poll();
+  });
 
   poll();
 </script>

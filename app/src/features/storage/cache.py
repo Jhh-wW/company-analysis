@@ -58,6 +58,8 @@ from typing import Any, Iterable, Optional
 from src.features.pipeline.port import Report
 from src.features.provenance.freshness import is_stale
 from src.features.provenance.sources import Source, SourceKind
+from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
+from src.features.report_standard.publish import PublishBlockedError, validate_publishable
 from src.features.storage import reports as reports_store
 from src.features.storage.constants import (
     LAYER1_MAX_ENTRIES_PER_JOB,
@@ -72,6 +74,13 @@ _WHITESPACE = re.compile(r"\s+")
 #: 나오지 않는 제어문자라(ASCII Unit Separator) 문장이 우연히 겹쳐 지문이
 #: 같아지는 사고를 피한다.
 _FINGERPRINT_JOIN = "\x1f"
+
+# 회사분석 제품은 옛 ``회사×직무×공고지문`` 캐시와 같은 테이블을 읽지만,
+# 제품 namespace와 schema version을 모두 키에 넣어 빈 직무/빈 지문인 옛
+# 항목과 섞이지 않게 한다. 이 값들은 보고서 본문이나 사용자 화면에는 노출되지
+# 않는 저장소 내부 식별자다.
+_COMPANY_ANALYSIS_PRODUCT_KEY = "product:company-analysis"
+_COMPANY_ANALYSIS_SCHEMA_REQUIREMENTS = (f"schema:{CANONICAL_SCHEMA_VERSION}",)
 
 
 # ══════════════════════════════════════════════════════════
@@ -262,6 +271,60 @@ def save_layer1(
 
     _evict_layer1_overflow(conn, corp_id, job_key, current_fiscal_year=fiscal_year)
     return report_id
+
+
+def get_company_report_hit(
+    conn: sqlite3.Connection,
+    *,
+    corp_id: str,
+    current_fiscal_year: Optional[int] = None,
+    today: Optional[dt.date] = None,
+) -> Optional[Report]:
+    """회사분석 전용 1층 캐시를 조회한다.
+
+    옛 범용 API에 빈 ``job``/빈 공고 지문을 넘기지 않고 명시적인 제품·스키마
+    namespace를 사용하므로 과거 직무 보고서와 충돌하지 않는다.
+    """
+    report = get_layer1_hit(
+        conn,
+        corp_id=corp_id,
+        job=_COMPANY_ANALYSIS_PRODUCT_KEY,
+        requirements=list(_COMPANY_ANALYSIS_SCHEMA_REQUIREMENTS),
+        current_fiscal_year=current_fiscal_year,
+        today=today,
+    )
+    # 캐시 namespace가 잘못 붙었거나 과거 코드가 v2 payload를 v3 키 아래에
+    # 저장했더라도 canonical 보고서처럼 반환하지 않는다.
+    if (
+        report is None
+        or report.schema_version != CANONICAL_SCHEMA_VERSION
+        or not validate_publishable(report)
+    ):
+        return None
+    return report
+
+
+def save_company_report(
+    conn: sqlite3.Connection,
+    *,
+    corp_id: str,
+    report: Report,
+    fiscal_year: Optional[int] = None,
+    now: Optional[dt.datetime] = None,
+) -> str:
+    """회사분석 보고서를 제품·스키마 namespace로 격리해 저장한다."""
+    validation = validate_publishable(report)
+    if not validation:
+        raise PublishBlockedError(validation)
+    return save_layer1(
+        conn,
+        corp_id=corp_id,
+        job=_COMPANY_ANALYSIS_PRODUCT_KEY,
+        requirements=list(_COMPANY_ANALYSIS_SCHEMA_REQUIREMENTS),
+        report=report,
+        fiscal_year=fiscal_year,
+        now=now,
+    )
 
 
 def _evict_layer1_overflow(

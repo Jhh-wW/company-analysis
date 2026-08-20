@@ -17,34 +17,84 @@ from __future__ import annotations
 import re
 from typing import Final
 
+# ── 문서 프리셋 ──────────────────────────────────────────
+#: formal report에 맞는 Documents `standard_business_brief`를 기준으로 한다.
+#: 기본 Calibri에는 한글 글리프가 없어, 글꼴만 한국어용 맑은 고딕으로 바꾼다.
+DOCX_STYLE_PRESET: Final[str] = "standard_business_brief"
+
 # ── 글꼴 ─────────────────────────────────────────────────
-#: 한글이 깨지지 않는 윈도우 기본 서체. 로마자(ascii)·동아시아(eastAsia) 둘 다
-#: 이 이름으로 맞춘다 — 워드는 이 둘을 따로 관리해서 한쪽만 지정하면 한글이
-#: 문서 기본 서체로 남는다.
+#: 한국어 글꼴 예외. 로마자(ascii)·동아시아(eastAsia) 둘 다 이 이름으로 맞춘다.
+#: 워드는 둘을 따로 관리해서 한쪽만 지정하면 한글이 문서 기본 서체로 남는다.
 FONT_NAME: Final[str] = "맑은 고딕"
 
-FONT_SIZE_TITLE_PT: Final[int] = 20
-FONT_SIZE_HEADING_PT: Final[int] = 13
-FONT_SIZE_BODY_PT: Final[int] = 10
-FONT_SIZE_TABLE_PT: Final[int] = 9
-FONT_SIZE_MUTED_PT: Final[int] = 9
+FONT_SIZE_TITLE_PT: Final[float] = 30
+FONT_SIZE_SUBTITLE_PT: Final[float] = 10.5
+FONT_SIZE_HEADING_1_PT: Final[float] = 16
+FONT_SIZE_HEADING_PT: Final[float] = 13
+FONT_SIZE_HEADING_3_PT: Final[float] = 12
+FONT_SIZE_BODY_PT: Final[float] = 11
+#: 자료표가 본문보다 조밀해도 읽을 수 있게 유지하는 보고서 전용 예외.
+FONT_SIZE_TABLE_PT: Final[float] = 9.5
+FONT_SIZE_MUTED_PT: Final[float] = 9
+
+BODY_SPACE_AFTER_PT: Final[float] = 6
+BODY_LINE_SPACING: Final[float] = 1.10
+HEADING_1_SPACE_BEFORE_PT: Final[float] = 16
+HEADING_1_SPACE_AFTER_PT: Final[float] = 8
+HEADING_2_SPACE_BEFORE_PT: Final[float] = 12
+HEADING_2_SPACE_AFTER_PT: Final[float] = 6
+HEADING_3_SPACE_BEFORE_PT: Final[float] = 8
+HEADING_3_SPACE_AFTER_PT: Final[float] = 4
+BULLET_SPACE_AFTER_PT: Final[float] = 8
+BULLET_LINE_SPACING: Final[float] = 1.167
+BULLET_MARKER_DXA: Final[int] = 360
+BULLET_TEXT_DXA: Final[int] = 720
+BULLET_HANGING_DXA: Final[int] = 360
 
 # ── 색 ───────────────────────────────────────────────────
-#: 화면 CSS의 muted(회색 보조 문구) 계열과 맞춘 값.
-COLOR_MUTED_RGB: Final[tuple[int, int, int]] = (110, 110, 110)
+#: 사용자 화면과 같은 무채색만 쓴다. 정보 위계는 크기·굵기·간격으로 만든다.
+COLOR_INK_RGB: Final[tuple[int, int, int]] = (23, 23, 23)
+COLOR_MUTED_RGB: Final[tuple[int, int, int]] = (95, 95, 95)
+COLOR_ACCENT_RGB: Final[tuple[int, int, int]] = COLOR_INK_RGB
+COLOR_ACCENT_DARK_RGB: Final[tuple[int, int, int]] = (48, 48, 48)
+COLOR_ACCENT_HEX: Final[str] = "171717"
 #: 🟡 부분 완성 라벨 색.
-COLOR_PARTIAL_RGB: Final[tuple[int, int, int]] = (176, 122, 0)
+COLOR_PARTIAL_RGB: Final[tuple[int, int, int]] = (138, 106, 32)
+COLOR_PARTIAL_HEX: Final[str] = "8A6A20"
 #: 🔴 미완성 라벨 색.
-COLOR_INCOMPLETE_RGB: Final[tuple[int, int, int]] = (176, 40, 40)
+COLOR_INCOMPLETE_RGB: Final[tuple[int, int, int]] = (153, 65, 63)
+COLOR_INCOMPLETE_HEX: Final[str] = "99413F"
 #: 표 머리글 줄 배경(회색 음영). `w:shd/@w:fill`에 그대로 쓰는 6자리 헥스값.
-COLOR_TABLE_HEADER_HEX: Final[str] = "F0F0F0"
+COLOR_TABLE_HEADER_HEX: Final[str] = "F2F2F2"
+COLOR_TABLE_BORDER_HEX: Final[str] = "E5E5E5"
+COLOR_CALLOUT_FILL_HEX: Final[str] = "F4F6F9"
+COLOR_PARTIAL_FILL_HEX: Final[str] = "F7F3E9"
+COLOR_INCOMPLETE_FILL_HEX: Final[str] = "FFF2F3"
 
 # ── 여백 ─────────────────────────────────────────────────
-PAGE_MARGIN_CM: Final[float] = 2.0
+PAGE_WIDTH_IN: Final[float] = 8.5
+PAGE_HEIGHT_IN: Final[float] = 11.0
+PAGE_MARGIN_IN: Final[float] = 1.0
+HEADER_FOOTER_DISTANCE_IN: Final[float] = 0.492
 
 # ── 표 스타일 ────────────────────────────────────────────
 #: 워드 기본 템플릿에 내장된 표 스타일 이름. 테두리가 있어 표가 뭉개지지 않는다.
 TABLE_STYLE: Final[str] = "Table Grid"
+#: Letter 1인치 여백의 사용 가능 폭. Word 내부 단위(DXA)로 고정한다.
+TABLE_WIDTH_DXA: Final[int] = 9360
+TABLE_INDENT_DXA: Final[int] = 120
+TABLE_CELL_TOP_DXA: Final[int] = 80
+TABLE_CELL_BOTTOM_DXA: Final[int] = 80
+TABLE_CELL_START_DXA: Final[int] = 120
+TABLE_CELL_END_DXA: Final[int] = 120
+SOURCES_TABLE_WIDTHS_DXA: Final[tuple[int, int, int, int, int]] = (
+    560,
+    3180,
+    2220,
+    1700,
+    1700,
+)
+SUMMARY_TABLE_WIDTHS_DXA: Final[tuple[int, int, int]] = (720, 7440, 1200)
 #: 문장 목록에 쓰는 워드 기본 글머리 스타일.
 BULLET_STYLE: Final[str] = "List Bullet"
 
@@ -68,10 +118,8 @@ REQUIREMENTS_NOTE: Final[str] = (
 REQUIREMENTS_EMPTY_REASON: Final[str] = "올려주신 공고에서 요구 조건을 뽑지 못했습니다"
 
 # ── 출처 — result.html의 출처 안내문과 같은 문구 ───────────
-HEADING_SOURCES: Final[str] = "출처"
-CITATIONS_NOTE: Final[str] = (
-    "본문의 〔N〕이 아래 번호를 가리킵니다. 직접 확인하실 수 있게 날짜까지 적었습니다."
-)
+HEADING_SOURCES: Final[str] = "부록. 출처와 검증 상태"
+CITATIONS_NOTE: Final[str] = "본문의 번호가 아래 원문을 가리킵니다."
 
 # ── 수집 현황 — result.html의 소스별 표와 같은 문구 ─────────
 HEADING_COLLECTION: Final[str] = "어디서 가져왔나"

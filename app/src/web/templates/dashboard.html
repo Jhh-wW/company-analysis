@@ -16,8 +16,7 @@
        funnel(list[tuple[str,int,int]]), grades(dict[str,int]),
        cell_fill_rate(list[tuple[str,float]]), quality(dict[str, float|None]),
        recent(list[RunRecord])
-     cell_labels — 칸 번호→이름 사전. main.py의 _ctx()가 모든 화면에 이미 넣어준다
-       (core/constants.py CELL_LABELS). 이 화면이 새로 만들지 않는다 — 있는 것만 쓴다.
+     cell_labels — 오래된 숫자 칸 기록을 표시하기 위한 하위 호환 사전.
 
    ⚠️ None(못 잰 값)을 0%로 그리면 「측정했더니 0」과 구분이 안 돼 거짓말이 된다.
      그래서 quality의 값이 None이면 막대 대신 회색 「아직 못 잽니다」 상자를 그린다. #}
@@ -25,6 +24,27 @@
 {% block content %}
 
 {# ── 재사용 조각 ────────────────────────────────────────── #}
+
+{% set canonical_cell_labels = {
+  'identity': ('1', '기업 정체성'),
+  'business_model': ('2', '사업 구조와 수익 모델'),
+  'portfolio': ('3', '핵심 제품·서비스와 포트폴리오 역할'),
+  'past_changes': ('4', '3개년 주요 변화와 실행'),
+  'current_challenges': ('5', '당면 과제와 대응'),
+  'future_strategy': ('6', '성장 전략'),
+  'operations_partners': ('7', '사업 운영과 파트너 구조'),
+  'culture': ('8', '인재상과 일하는 방식'),
+  'competitive_position': ('9', '경쟁사 대비 핵심 경쟁력')
+} %}
+
+{% macro observed_cell_label(cell) -%}
+  {% if cell in canonical_cell_labels %}
+    {{ canonical_cell_labels[cell][0] }}. {{ canonical_cell_labels[cell][1] }}
+    <span class="muted">({{ cell }})</span>
+  {% else %}
+    {{ cell_labels.get(cell, cell) }} <span class="muted">({{ cell }}번·구형)</span>
+  {% endif %}
+{%- endmacro %}
 
 {% macro bar(pct) %}
   {% set w = ([pct, 0] | max) %}
@@ -69,12 +89,23 @@
 <p class="lede">
   지금 서비스가 괜찮은지 봅니다. <strong>관리자만 보는 화면</strong>이며,
   보고서 본문·요청자 정보는 담지 않습니다 (이력에 남기지 않는 항목 — S1·S2).
+  <br><span class="muted">비용·일일 통계 기준일: <strong>{{ business_day_label }}</strong></span>
 </p>
+
+{% if dashboard.cost_ledger_error %}
+<div class="warn-line" role="alert" style="margin-bottom:16px">
+  <span>⚠️</span>
+  <span><strong>비용 원장을 확인할 수 없습니다.</strong><br>실제 비용을 확인한 뒤 다시 시도해주세요.</span>
+</div>
+{% endif %}
 
 {# ── 한눈에 — 스크롤 없이 「지금 괜찮은가」에 먼저 답한다 (설계 원칙 1) ── #}
 <div class="card dash-hero">
-  <div class="hero-status {{ 'ok' if dashboard.errors == 0 else 'bad' }}">
-    {% if dashboard.errors == 0 %}
+  <div class="hero-status {{ 'ok' if dashboard.errors == 0 and not dashboard.cost_ledger_error else 'bad' }}">
+    {% if dashboard.cost_ledger_error %}
+      <span class="icon">⚠️</span>
+      <div><b>비용 원장 확인 불가</b><br><span class="muted">정상 상태로 판단하지 않습니다</span></div>
+    {% elif dashboard.errors == 0 %}
       <span class="icon">🟢</span>
       <div><b>정상</b><br><span class="muted">오류 0건</span></div>
     {% else %}
@@ -109,11 +140,15 @@
 {# ══════════════════════════════════════════════════════════
    ① 서비스 상태 — 고장·비용 초과를 사용자보다 먼저 아는가
    ══════════════════════════════════════════════════════════ #}
-<h2>① 서비스 상태</h2>
+<h2 id="service-status-title">① 서비스 상태</h2>
 <p class="lede" style="margin-top:-4px">고장·비용 초과를 사용자보다 먼저 아는지 봅니다.</p>
 
-<table>
-  <tr><th style="width:170px">항목</th><th style="width:170px">값</th><th>왜 보는가</th></tr>
+<div class="data-table-scroll" role="region" tabindex="0"
+     aria-labelledby="service-status-title">
+<table aria-labelledby="service-status-title">
+  <thead><tr><th scope="col" style="width:170px">항목</th>
+    <th scope="col" style="width:170px">값</th><th scope="col">왜 보는가</th></tr></thead>
+  <tbody>
   <tr>
     <td>정상 / 오류 건수</td>
     <td>{{ dashboard.total - dashboard.errors }}건 / {{ dashboard.errors }}건</td>
@@ -142,7 +177,9 @@
     <td>{{ dashboard.model }}</td>
     <td>코드를 안 바꿨는데 어느 날 판정이 달라지는 걸 잡습니다.</td>
   </tr>
+  </tbody>
 </table>
+</div>
 
 {# 정본이 요구하는 7개 항목 중 3개는 지금 받는 Dashboard 자료 모양에 필드가 아예 없다.
    0%나 빈칸으로 조용히 빼면 「원래 없는 항목」처럼 보여 정본 체크리스트와 어긋난다.
@@ -306,28 +343,27 @@
 
 <h3>칸별 채움률</h3>
 <p class="muted" style="margin-top:-2px">
-  {# 세는 칸 6개 — 02_지표산출.md COUNTED_CELLS 기준. 이 화면은 값을 만들지 않고 받은 목록을 그대로 그린다. #}
-  세는 칸 6개가 각각 몇 %에서 채워지는지 봅니다. 어느 칸이 만성적으로 비는지, 어느 칸을 고치면
+  canonical 필수 1~9장이 각각 몇 %에서 채워지는지 봅니다. 어느 장이 만성적으로 비는지, 어느 장을 고치면
   완성률이 오를지 여기서 찾습니다. (사용자 화면에는 넣지 않습니다 — 운영자 전용 지표)
 </p>
 {% if dashboard.cell_fill_rate %}
 <div class="fillbars">
   {% for cell, rate in dashboard.cell_fill_rate %}
   <div class="fillbar-row">
-    <span class="fillbar-label">{{ cell_labels.get(cell, cell) }}<span class="muted"> ({{ cell }}번)</span></span>
+    <span class="fillbar-label">{{ observed_cell_label(cell) }}</span>
     {{ bar(rate) }}
     <span class="fillbar-pct">{{ '%.0f'|format(rate) }}%</span>
   </div>
   {% endfor %}
 </div>
 {% else %}
-  <div class="empty"><span class="why">아직 기록이 없습니다</span></div>
+  <div class="empty"><span class="why">canonical 9장 완주 기록이 아직 없습니다</span></div>
 {% endif %}
 
 {# ══════════════════════════════════════════════════════════
    ⑥ 개별 요청 조회 — 어느 건이 왜 실패했나
    ══════════════════════════════════════════════════════════ #}
-<h2>⑥ 개별 요청 조회</h2>
+<h2 id="recent-requests-title">⑥ 개별 요청 조회</h2>
 <p class="lede" style="margin-top:-4px">
   평균값에는 원인이 없습니다. 원인은 개별 건에만 있습니다.
 </p>
@@ -341,13 +377,16 @@
   <input type="radio" name="corp-tab" id="tab-unlisted">
   <label for="tab-unlisted">비상장</label>
 
-  <div class="scroll">
-  <table class="recent-table">
+  <div class="scroll data-table-scroll" role="region" tabindex="0"
+       aria-labelledby="recent-requests-title">
+  <table class="recent-table" aria-labelledby="recent-requests-title">
     <thead>
       <tr>
-        <th>시각</th><th>회사 유형</th><th>직무</th><th>종료 단계</th>
-        <th>원문 일치율</th><th>수집 활용률</th><th>칸 채움</th>
-        <th>미충족 항목</th><th>누락 의심</th><th>판정</th>
+        <th scope="col">시각</th><th scope="col">회사 유형</th>
+        <th scope="col">분석 유형</th><th scope="col">종료 단계</th>
+        <th scope="col">원문 일치율</th><th scope="col">수집 활용률</th>
+        <th scope="col">칸 채움</th><th scope="col">미충족 항목</th>
+        <th scope="col">누락 의심</th><th scope="col">판정</th>
       </tr>
     </thead>
     <tbody>
@@ -360,15 +399,15 @@
         <td>{{ r.end_step }}</td>
         <td class="center">{% if r.sentences_made %}{{ '%.0f'|format(r.sentences_passed / r.sentences_made * 100) }}%{% else %}—{% endif %}</td>
         <td class="center">{% if r.fragments_collected %}{{ '%.0f'|format(r.fragments_cited / r.fragments_collected * 100) }}%{% else %}—{% endif %}</td>
-        <td class="center">{{ r.cells_filled }}/6</td>
+        <td class="center">{{ r.cells_filled }}/{{ r.cell_total }}</td>
         <td>
           {% if r.cells_missing %}
-            {% for c in r.cells_missing %}<span class="cell-chip">{{ cell_labels.get(c, c) }}</span>{% endfor %}
+            {% for c in r.cells_missing %}<span class="cell-chip">{{ observed_cell_label(c) }}</span>{% endfor %}
           {% else %}<span class="muted">없음</span>{% endif %}
         </td>
         <td>
           {% if r.cells_suspect %}
-            {% for c in r.cells_suspect %}<span class="cell-chip suspect">{{ cell_labels.get(c, c) }}</span>{% endfor %}
+            {% for c in r.cells_suspect %}<span class="cell-chip suspect">{{ observed_cell_label(c) }}</span>{% endfor %}
           {% else %}<span class="muted">없음</span>{% endif %}
         </td>
         <td>{{ r.grade }}</td>

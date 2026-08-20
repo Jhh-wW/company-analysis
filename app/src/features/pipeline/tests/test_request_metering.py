@@ -14,11 +14,19 @@ from src.core.constants import (
     MODEL_PRICES_USD_PER_MTOK,
     UNKNOWN_MODEL_PRICE_USD_PER_MTOK,
 )
+from src.features.budget import provider_budget
 from src.features.pipeline import real
 from src.features.pipeline.port import CompanyCard, Outcome, UserInput
 
 _HAIKU = "claude-haiku-4-5"
 _SONNET = "claude-sonnet-4-6"
+
+
+@pytest.fixture(autouse=True)
+def _paid_provider_budget_context():
+    """직접 engine 단위시험도 운영 경계와 같은 요청별 예약 문맥을 쓴다."""
+    with provider_budget.activate(100_000.0):
+        yield
 
 
 class FakeMessages:
@@ -121,10 +129,10 @@ def test_모듈함수가_client를_직접_불러도_식별과_알맹이_usage를
     # 1판 identify/substance_check처럼 wrapper._ask가 아니라 모듈 함수가 받은
     # client에서 messages.create를 직접 부르는 경로다.
     def identify(module_client):
-        module_client.messages.create(model="1판-전역값")
+        module_client.messages.create(model="1판-전역값", max_tokens=700)
 
     def substance_check(module_client):
-        module_client.messages.create(model="1판-전역값")
+        module_client.messages.create(model="1판-전역값", max_tokens=700)
 
     identify(client)
     substance_check(client)
@@ -145,9 +153,9 @@ def test_두_요청의_모델과_usage는_겹쳐불러도_각자에게만_쌓인
     first_client = _client(first)
     second_client = _client(second)
 
-    first_client.messages.create(model="1판-전역값")
-    second_client.messages.create(model="1판-전역값")
-    first_client.messages.create(model="1판-전역값")
+    first_client.messages.create(model="1판-전역값", max_tokens=700)
+    second_client.messages.create(model="1판-전역값", max_tokens=700)
+    first_client.messages.create(model="1판-전역값", max_tokens=700)
 
     assert messages.calls == [_SONNET, _HAIKU, _SONNET]
     assert raw.MODEL == _HAIKU, "한 요청의 모델 교체가 1판 모듈 전역을 바꾸면 안 된다"
@@ -206,14 +214,15 @@ def test_두_thread가_교차해도_8달러_가드는_각_요청에만_작동한
 
     def run_two(key, engine, client):
         try:
-            for turn in range(2):
-                try:
-                    engine._ask(client, f"{key}-{turn}", {})
-                    outcomes[key].append("ok")
-                except RuntimeError as exc:
-                    if "예산가드" not in str(exc):
-                        raise
-                    outcomes[key].append("blocked")
+            with provider_budget.activate(100_000.0):
+                for turn in range(2):
+                    try:
+                        engine._ask(client, f"{key}-{turn}", {})
+                        outcomes[key].append("ok")
+                    except RuntimeError as exc:
+                        if "예산가드" not in str(exc):
+                            raise
+                        outcomes[key].append("blocked")
         except BaseException as exc:  # thread 예외를 주 thread의 시험 실패로 되돌린다
             unexpected.append(exc)
 
@@ -281,12 +290,13 @@ def test_five_interleaved_requests_keep_budget_usage_and_model_isolated(
 
     def run_two(index, engine, client):
         try:
-            for turn in range(2):
-                try:
-                    engine._ask(client, f"request-{index}-{turn}", {})
-                    outcomes[index].append("ok")
-                except RuntimeError:
-                    outcomes[index].append("blocked")
+            with provider_budget.activate(100_000.0):
+                for turn in range(2):
+                    try:
+                        engine._ask(client, f"request-{index}-{turn}", {})
+                        outcomes[index].append("ok")
+                    except RuntimeError:
+                        outcomes[index].append("blocked")
         except BaseException as exc:
             unexpected.append(exc)
 
@@ -327,7 +337,7 @@ def test_five_interleaved_requests_keep_budget_usage_and_model_isolated(
 
 def test_1판_원본의_8달러_예산가드_계약은_바꾸지_않는다():
     engine_path = (
-        real.paths.PROJECT_ROOT / "prototype_v1" / "tools" / "run_pilot.py"
+        real.paths.PROJECT_ROOT / "analysis_engine" / "tools" / "run_pilot.py"
     )
     tree = ast.parse(engine_path.read_text(encoding="utf-8"))
 
@@ -364,7 +374,7 @@ def test_요청모델이_아니라_실제_응답모델_단가와_이름을_쓴�
     messages = FakeMessages(response_model=_SONNET)
     metered = real._MeteredEngine(FakeRawEngine(messages))
 
-    _client(metered).messages.create(model=_HAIKU)
+    _client(metered).messages.create(model=_HAIKU, max_tokens=700)
 
     price_in, price_out = MODEL_PRICES_USD_PER_MTOK[_SONNET]
     expected = (price_in + price_out * 0.1) * AI_COST_KRW_PER_USD
@@ -372,11 +382,35 @@ def test_요청모델이_아니라_실제_응답모델_단가와_이름을_쓴�
     assert real._request_model_label(metered) == _SONNET
 
 
+def test_dated_response_model_snapshot_uses_its_alias_price():
+    snapshot = f"{_HAIKU}-20251001"
+    messages = FakeMessages(response_model=snapshot)
+    metered = real._MeteredEngine(FakeRawEngine(messages))
+
+    _client(metered).messages.create(model=_HAIKU, max_tokens=700)
+
+    price_in, price_out = MODEL_PRICES_USD_PER_MTOK[_HAIKU]
+    expected = (price_in + price_out * 0.1) * AI_COST_KRW_PER_USD
+    assert real._request_spent_krw(metered) == pytest.approx(expected)
+    assert real._request_model_label(metered) == snapshot
+
+
+def test_near_prefix_response_model_keeps_conservative_unknown_price():
+    messages = FakeMessages(response_model=f"{_HAIKU}-20251001-extra")
+    metered = real._MeteredEngine(FakeRawEngine(messages))
+
+    _client(metered).messages.create(model=_HAIKU, max_tokens=700)
+
+    price_in, price_out = UNKNOWN_MODEL_PRICE_USD_PER_MTOK
+    expected = (price_in + price_out * 0.1) * AI_COST_KRW_PER_USD
+    assert real._request_spent_krw(metered) == pytest.approx(expected)
+
+
 def test_모르는_응답모델과_환율없는_엔진은_보수적_공통값을_쓴다():
     messages = FakeMessages(response_model="future-model")
     metered = real._MeteredEngine(FakeRawEngine(messages, with_exchange=False))
 
-    _client(metered).messages.create(model=_HAIKU)
+    _client(metered).messages.create(model=_HAIKU, max_tokens=700)
 
     price_in, price_out = UNKNOWN_MODEL_PRICE_USD_PER_MTOK
     expected = (price_in + price_out * 0.1) * AI_COST_KRW_PER_USD
@@ -386,7 +420,7 @@ def test_모르는_응답모델과_환율없는_엔진은_보수적_공통값을
 def test_응답은_왔지만_usage가_없으면_0원으로_확정하지_않는다():
     metered = real._MeteredEngine(FakeRawEngine(FakeMessages(omit_usage=True)))
 
-    _client(metered).messages.create(model=_HAIKU)
+    _client(metered).messages.create(model=_HAIKU, max_tokens=700)
 
     assert real._request_spent_krw(metered) == 0.0
     assert real._request_billing_uncertain(metered) is True
@@ -398,7 +432,7 @@ def test_응답뒤_후속코드가_터져도_그_요청비용으로_FAILED를_�
     monkeypatch.setattr(real, "_engine", lambda: raw)
 
     def broken(_self, _user_input, _card, _on_step, *, engine):
-        _client(engine).messages.create(model=_HAIKU)
+        _client(engine).messages.create(model=_HAIKU, max_tokens=700)
         raise RuntimeError("응답 뒤 후속 코드 실패")
 
     monkeypatch.setattr(real.RealPipeline, "_run_metered", broken)
@@ -424,8 +458,8 @@ def test_provider_예외는_앞선_확정비용을_남기고_과금불확실을_
 
     def timeout(_self, _user_input, _card, _on_step, *, engine):
         client = _client(engine)
-        client.messages.create(model=_HAIKU)
-        client.messages.create(model=_HAIKU)
+        client.messages.create(model=_HAIKU, max_tokens=700)
+        client.messages.create(model=_HAIKU, max_tokens=700)
 
     monkeypatch.setattr(real.RealPipeline, "_run_metered", timeout)
 
@@ -467,3 +501,73 @@ def test_DART_회사응답_실패는_회사없음이_아니라_기술실패다(m
     assert result.card is None
     assert result.failed is True
     assert result.model == "", "AI 응답이 없는데 기본 모델을 썼다고 적으면 안 된다"
+
+
+def test_작은_입력은_gateway를_거쳐_provider를_한번_부른다():
+    messages = FakeMessages()
+    metered = real._MeteredEngine(FakeRawEngine(messages))
+
+    with provider_budget.activate(10_000.0):
+        _client(metered).messages.create(
+            model=_HAIKU,
+            max_tokens=32,
+            messages=[{"role": "user", "content": "작은 입력"}],
+        )
+
+    assert messages.calls == [_HAIKU]
+    assert len(metered.usages) == 1
+
+
+def test_예상예약_잔액이_부족하면_provider는_0회다():
+    messages = FakeMessages()
+    metered = real._MeteredEngine(FakeRawEngine(messages))
+
+    with provider_budget.activate(0.01):
+        with pytest.raises(provider_budget.ProviderBudgetExceeded):
+            _client(metered).messages.create(
+                model=_HAIKU,
+                max_tokens=700,
+                messages=[{"role": "user", "content": "호출하면 안 됨"}],
+            )
+
+    assert messages.calls == []
+    assert metered.usages == []
+
+
+def test_예약문맥이_없으면_provider는_0회다():
+    messages = FakeMessages()
+    metered = real._MeteredEngine(FakeRawEngine(messages))
+    token = provider_budget._CURRENT.set(None)
+    try:
+        with pytest.raises(provider_budget.ProviderBudgetUnavailable):
+            _client(metered).messages.create(
+                model=_HAIKU,
+                max_tokens=700,
+                messages=[{"role": "user", "content": "호출하면 안 됨"}],
+            )
+    finally:
+        provider_budget._CURRENT.reset(token)
+
+    assert messages.calls == []
+
+
+def test_sdk_내부_retry를_provider경계에서_0으로_고정한다():
+    messages = FakeMessages()
+
+    class RetryAwareClient:
+        def __init__(self):
+            self.messages = messages
+            self.options = []
+
+        def with_options(self, **kwargs):
+            self.options.append(kwargs)
+            return self
+
+    raw = FakeRawEngine(messages)
+    metered = real._MeteredEngine(raw)
+    client = RetryAwareClient()
+
+    wrapped = real._metered_client(metered, client)
+
+    assert client.options == [{"max_retries": 0}]
+    assert wrapped.messages is not messages

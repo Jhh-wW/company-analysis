@@ -1,129 +1,151 @@
-# 기업분석 도구 — 화면 (1단계)
+# app — 운영 웹서비스
 
-지원할 회사 이름과 채용공고를 넣으면, 공시·뉴스에서 **지어내지 않은 사실만** 모아
-보고서로 정리해 주는 도구의 **화면**입니다.
+`app/`은 로그인, 접근 제한, 화면, 분석 실행, 보고서 저장과 내보내기를 담당하는
+FastAPI 서비스입니다. 실제 조사 엔진은 `../analysis_engine/`에 있으며
+`src/features/pipeline/real.py`가 연결합니다.
 
-> **기본은 데모입니다.** 저장된 결과 46건을 재생하므로 **비용이 들지 않습니다.**
-> 진짜 조사는 **환경변수로만** 켭니다 (아래 「진짜로 돌리는 법」).
+## 경계
 
----
-
-## 켜는 법
-
-```
-cd app
-pip install -r requirements.txt
-python -m uvicorn src.web.main:app --port 8000
-```
-
-브라우저에서 **http://localhost:8000** 을 엽니다.
-
-첫 화면의 **초록색 회사 이름**을 누르면 입력칸이 자동으로 채워집니다.
-지역만 직접 넣고 「회사 찾기」를 누르세요.
-
-## 시험 돌리는 법
-
-```
-cd app
-python -m pytest src -q
-```
-
----
-
-## 화면 흐름
-
-```
-입력  →  이 회사가 맞나요?  →  조사 중…  →  보고서
- │            │
- │            └─ [아닙니다] → 이름 다시 넣기 (요청당 3회까지)
- └─ 못 찾음  → 이름 다시 넣기 (직무·지역·공고는 그대로 둔다)
-```
-
-보고서가 안 나오는 길도 화면이 있습니다 — **왜 못 만들었는지와 어디까지 찾아봤는지**를 보여줍니다.
-
-| 끝난 이유 | 화면이 하는 말 |
-|---|---|
-| 이름을 못 맞춤 | 「다룰 수 없다」가 **아니라** 이름을 못 맞춘 것뿐이라고 알린다 |
-| 공시 기록 없음 | 최근 3년 감사보고서가 없어 근거를 모을 수 없다고 알린다 |
-| 공고로 안 보임 | 다시 캡처하거나 개인정보를 가리고 올려달라고 안내한다 |
-| 자료 부족으로 중단 | 「뭘 팔아 돈 버나」를 못 찾아 **만들기 전에** 멈췄다고 알린다 |
-
-**어느 경우든 할당량은 차감되지 않습니다.**
-
----
-
-## 폴더
-
-```
+```text
 app/
-├─ src/
-│  ├─ core/                  ← 어디서나 쓰는 값
-│  │  ├─ constants.py         · 기획서의 숫자·문구를 한곳에 모은 곳
-│  │  ├─ paths.py             · 파일이 어디 있는지
-│  │  └─ tests/               · 기획서 숫자 ↔ 코드 상수 대조
-│  ├─ features/
-│  │  ├─ auth/               ← 구글 로그인 · 관리자 판정
-│  │  ├─ blocks678/          ← 6·7·8번 (8번 = 4×5 교차표)
-│  │  ├─ grading/            ← 등급 판정 + 표 덩어리 가려내기 + 재무 표 복원
-│  │  ├─ homepage/           ← 회사 홈페이지 읽기
-│  │  ├─ provenance/         ← 출처 목록 · 附 · 날짜 경고
-│  │  └─ pipeline/           ← 조사를 실제로 돌리는 부분
-│  │     ├─ port.py           · ★ 화면과 알맹이 사이의 «약속»
-│  │     ├─ demo.py           · 저장된 기록 재생 (지금 꽂혀 있는 것)
-│  │     ├─ real.py           · 1판 엔진 연결 코드 ⚠️ 아직 안 꽂음
-│  │     └─ tests/
-│  └─ web/                   ← 화면
-│     ├─ main.py
-│     ├─ templates/
-│     └─ static/
-└─ requirements.txt
+├── src/
+│   ├── features/          # 기능별 로직·상수·전용 시험
+│   ├── core/              # 여러 기능이 실제로 공유하는 형식·경로
+│   └── web/               # HTTP·화면·라우팅·기능 조립
+├── tools/                 # SQLite 백업·복구
+├── docs/                  # 배포와 외부 서비스 설정
+├── Dockerfile
+└── requirements.txt
 ```
 
-### ★ 진짜로 돌리는 법
+신규 회사분석의 활성 기능은 다음 다섯 묶음으로 볼 수 있습니다.
 
+- 접근·비용·회사 입력: `auth`, `sharelink`, `budget`, `business_candidate`
+- 분석 총괄: `pipeline`
+- 자료 수집·정리: `homepage`, `filingclean`, `newspick`, `revenuemix`, `company_performance`, `company_specificity`
+- 보고서 작성·검증: `spanselect`, `writer`, `company_comparison`, `report_summary`, `grading`, `provenance`, `readable`, `report_standard`
+- 저장·운영·출력: `storage`, `observability`, `export_pdf`, `export_notion`
+
+`posting_image`, `blocks678`, `company_use`, `export_docx`와 채용 결합 필드는 구형
+호환 코드다. 신규 조사·캐시 적중·화면·PDF·Notion 내용을 구성할 수 없다.
+
+각 폴더의 입력·출력과 담당 범위는
+[기능별 책임 지도](../docs/architecture/feature-map.md)에 정리되어 있습니다.
+신규 보고서의 고정 목차와 출고 조건은
+[런타임 출고 계약](../docs/출력물%20기준/90_공통_규칙/런타임_출고_계약.md)이
+우선합니다.
+
+## PDF 출고 흐름
+
+`report_standard`를 통과한 보고서는 바로 내려받지 않는다. 먼저 PDF를 준비해 파일
+해시를 고정하고 `author·producer·fact·editorial·visual` 다섯 역할의 참여자 원장을
+결속한다. 그다음 `fact`, `editorial`, `visual` 세 검토자가 **같은 PDF 해시**에
+독립 승인해야 `finalize`할 수 있다. 세 검토자는 서로 달라야 하며 `author` 또는
+`producer`가 검토자를 겸할 수 없다.
+
+`finalize`된 PDF만 다운로드할 수 있고, Notion도 그 승인된 같은 정본만 받는다. PDF
+바이트가 바뀌면 해시와 기존 승인이 더는 맞지 않으므로 다시 준비하고 승인해야 한다.
+
+## 실행 모드
+
+| 설정 | 용도 | 외부 조사 비용 |
+|---|---|---|
+| `PIPELINE=demo` | 저장된 데모 자료 재생 | 없음 |
+| `PIPELINE=real` | DART·뉴스·홈페이지·생성 AI를 사용하는 실제 조사 | 발생 가능 |
+
+첫 Render 배포는 `PIPELINE=demo`, `BETA_ADMIN_ONLY=1`로 시작합니다. 실제 조사 모드는
+환경변수와 비용 안전장치를 확인하고 작은 입력 한 건으로 시험한 뒤 전환합니다.
+
+## 로컬 데모
+
+Python 3.13 가상환경과 의존성을 처음 한 번만 준비한 뒤, 전용 실행기를 사용합니다.
+
+```powershell
+py -3.13 -m venv .venv
+.\.venv\Scripts\python -m pip install -r requirements.txt
+.\로컬데모켜기.ps1
 ```
-PIPELINE=real python -m uvicorn src.web.main:app --port 8000
+
+다른 포트를 쓰려면 `.\로컬데모켜기.ps1 -Port 8010`처럼 실행합니다. 실행 창에
+`/auth/local-demo/start?token=...` 형태의 **이 실행 전용 관리자 로그인 주소**가
+표시됩니다. 그 주소를 같은 컴퓨터의 브라우저에서 열면 token이 없는 깨끗한 로컬
+주소로 즉시 바뀌고 관리자 화면까지 들어갈 수 있습니다. 로그아웃한 뒤에는 같은 실행
+창의 주소를 다시 열 수 있습니다. 일반 우측 상단 로그인에는 로컬 관리자 입구가
+표시되지 않습니다. 주소는 화면 공유·문서·메신저·로그에 남기지 마세요.
+
+이 실행기는 `PIPELINE=demo`와 loopback 접속을 강제하며 Google OAuth·유료 API·Notion
+설정을 서버에 전달하지 않습니다. 실행할 때마다 32바이트 임의 capability를 새로 만들고
+HTTP access log를 끄므로 로그인 URL이 서버 요청 로그에 남지 않습니다. 이 주소는 관리자
+권한과 같으므로 화면 공유·메신저·문서에 복사하지 말고, 서버를 끄면 폐기하세요.
+SQLite와 실행 이력, 도메인 캐시는 모두
+`app/.local_demo/` 아래에 새로 저장되어 기존 사용자 자료와 섞이지 않습니다.
+현재 터미널의 비밀값을 읽거나 바꾸지 않습니다. `.local_demo/`를 지우면 이 전용 데모
+기록만 초기화되며, 실행 중에는 파일을 지우지 마세요.
+
+## 로컬 실시간 성능시험
+
+저장된 샘플이 아닌 임의 회사로 실제 조사 흐름을 재려면 전용 실행기를 씁니다.
+기본 실행은 화면과 설정만 확인하는 **미리보기**이며 외부 호출은 0건입니다.
+
+```powershell
+.\실시간성능시험켜기.ps1 -Port 8020
 ```
 
-> ⚠️ **켜는 순간부터 돈이 나갑니다.** 1건당 AI 최대 13회 · **실측 약 40원**.
-> 화면 머리의 배지가 **「실조사」**(빨강)로 바뀌어 지금 상태를 알려줍니다.
-> 코드를 고쳐서 켜지 않게 만든 이유 — **켜 둔 걸 잊어버리면 계속 돈이 나갑니다.**
+실제 provider를 호출해 비용이 발생해도 된다고 사용자가 명시적으로 승인한 시험에서만,
+현재 PowerShell 프로세스에 아래 네 비밀 환경변수를 미리 설정한 뒤 스위치를 붙입니다.
+실행기는 `.env`를 자동으로 읽지 않으며 값은 출력하거나 파일에 저장하지 않습니다.
 
-`real.py`는 **1판 시제품 엔진을 고치지 않고 감싸기만** 합니다.
-1판이 실제로 53건을 돌려 알아낸 것을 버리지 않으려는 것입니다.
-엔진 함수 이름이 바뀌면 `test_real_contract.py`가 **실행 없이** 잡아냅니다.
+- `DART_API_KEY`
+- `ANTHROPIC_API_KEY`
+- `NAVER_CLIENT_ID`
+- `NAVER_CLIENT_SECRET`
 
-### 로그인
-
-```
-PowerShell에서:
-$env:GOOGLE_CLIENT_ID="..."      # 발급 절차 → docs/구글로그인_설정.md
-$env:GOOGLE_CLIENT_SECRET="..."
-$env:GOOGLE_REDIRECT_URI="http://localhost:8000/auth/callback"
-$env:AUTH_COOKIE_INSECURE="1"    # ★ 로컬 시험할 때만. 배포 전 반드시 빼기
+```powershell
+.\실시간성능시험켜기.ps1 -Port 8020 -EnablePaidProviders
 ```
 
-**구글이 「누구인가」를 보증하고, 우리 목록이 「관리자인가」를 판단합니다.**
-비밀번호는 구글이 받고 우리는 보지 않습니다.
+Google Places 주소 후보 검색은 결과 보관·표시 약관 검토가 끝날 때까지 이 실행기에서
+항상 잠겨 있습니다. 부모 PowerShell에 Google key나 동의 환경변수가 있어도 자식에
+전달하지 않습니다. 현재는 가짜 adapter E2E로만 후보→DART 재식별 계약을 검증합니다.
+브라우저에서도 외부 호출·비용 안내 체크박스를 다시 선택해야 첫 요청이 진행됩니다.
+기본 예상비용 운영 기준은 1건 1,200원, 한국시간 하루 2,200원이며
+`-PerRunExpectedCostCapKrw`, `-DailyExpectedCostCapKrw`로 더 낮게 조정할 수 있습니다.
+이는 provider 호출 전에 예상예약 합계를 차단하는 기준이지 청구액 hard cap은 아닙니다.
+실제 단가·토큰 사용량에 따라 최종 비용은 기준을 넘을 수 있습니다.
+하루 2,200원 기본값은 결과를 살피며 1건씩, 조건에 따라 최대 2건 정도 확인하는 안전
+시험용입니다. 20개 평가셋 같은 일괄 실행은 이 기본값에서 차단됩니다. 사용자가 비용을
+다시 승인해 일일 기준을 명시적으로 높이고, 각 분석의 브라우저 동의를 새로 하지 않으면
+실행할 수 없습니다.
 
----
+매 실행은 `app/.local_evaluation_runs/YYYYMMDD_HHMMSS_<임의값>/`에 DB·이력·도메인
+캐시를 새로 격리합니다. 이 폴더에는 회사 입력과 수집 원문이 남을 수 있으므로 결과를
+확인한 뒤 24시간 안에 해당 실행 폴더만 삭제하세요. 종료와 함께 지우려면
+`-DeleteDataOnExit`를 붙입니다. 실제 사용자 DB와 로컬 데모 폴더는 사용하지 않습니다.
 
-## 실측으로 확인된 것 (2026-08-15)
+안전 경계는 [OWASP Secrets Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html)의 최소 권한·비밀 로그 금지,
+[The Twelve-Factor App: Config](https://12factor.net/config)의 코드/설정 분리,
+[FastAPI 서버 워커 문서](https://fastapi.tiangolo.com/deployment/server-workers/)와
+[Uvicorn 설정 문서](https://www.uvicorn.org/settings/)의 명시적 host·workers 설정을
+따릅니다.
 
-| 무엇 | 결과 |
-|---|---|
-| **진짜 조사 3건** | 전 구간 작동 · **14~35초** · 1건 약 40원 |
-| **「완성」 보고서** | ⭕ 나옴 (파마리서치 — 7칸 중 6칸) |
-| 회사 홈페이지 접속 | **8곳 중 5곳** 성공 (실패는 인증서 설정 오류) |
-| 附(1인평균급여·근속) | ⭕ 실제 API에서 나옴. **성별로 행이 갈려 온다** |
+## 시험
 
-## 아직 안 만든 것
+```powershell
+$env:TLDEXTRACT_CACHE="$PWD\.cache\tldextract"
+.\.venv\Scripts\python -m pytest src tools/tests -q `
+  --basetemp=.pytest_tmp_app_readme
+```
 
-| 항목 | 왜 |
-|---|---|
-| **구글 로그인 열쇠 발급** | 사용자가 직접 → `docs/구글로그인_설정.md` |
-| 워드 내려받기 · 노션 보내기 | 다음 단계 |
-| 품질 대시보드 (08 관측) | 다음 단계 |
-| 어려운 말 풀이 | ⏸ 나중에 (결정 D14-6) |
+전체 조사 엔진 시험과 Docker 실행 검사는 루트의 GitHub Actions가 담당합니다.
+정본 변경은 `Report.schema_version=company-report-v3-canonical`, 고정 1~9장, 사실 원장과 단일
+소유, 4·5·6장 시간 상태, 경쟁사 양쪽 근거, 구형 섹션·직무 맞춤 차단과 PDF QA를
+함께 검증해야 합니다.
 
-발견한 문제는 `기획서.ver2/확정/90_운영기록/01_문제로그.md` **P-24~P-51**에 적어두었습니다.
+## 운영 문서
+
+- [Render 배포](docs/Render_배포.md)
+- [장기 휴면 백업·복구](docs/장기_휴면_백업.md)
+- [Google 로그인](docs/구글로그인_설정.md)
+- [Notion 전송](docs/노션_설정.md)
+
+비밀값과 실제 사용자 데이터는 이 폴더에 저장해 Git으로 관리하지 않습니다.

@@ -33,6 +33,12 @@ NOTION_VERSION: Final[str] = "2022-06-28"
 #: 노션 서버 호출 타임아웃(초). 응답이 없을 때 화면이 무한히 멈추지 않게 한다.
 HTTP_TIMEOUT_SEC: Final[int] = 15
 
+#: 명시적 429 + 유효한 Retry-After만 재시도한다. 타임아웃·5xx는 원격 적용
+#: 여부를 알 수 없으므로 절대 자동 재시도하지 않는다.
+MAX_429_RETRIES: Final[int] = 2
+MAX_RETRY_AFTER_SEC: Final[float] = 15.0
+MAX_TOTAL_RETRY_WAIT_SEC: Final[float] = 30.0
+
 # ══════════════════════════════════════════════════════════
 # 환경변수 이름
 # ══════════════════════════════════════════════════════════
@@ -57,19 +63,16 @@ MAX_RICH_TEXT_LENGTH: Final[int] = 2000
 # 등급 아이콘 — 화면의 🟡/🔴와 맞춘다 (result.html)
 # ══════════════════════════════════════════════════════════
 
-GRADE_ICON_PARTIAL: Final[str] = "🟡"
-GRADE_ICON_INCOMPLETE: Final[str] = "🔴"
+GRADE_ICON_PARTIAL: Final[str] = "▫️"
+GRADE_ICON_INCOMPLETE: Final[str] = "▫️"
 
 # ══════════════════════════════════════════════════════════
 # 화면(result.html)과 한 글자도 다르면 안 되는 문구 (P3 — 형태 간 불일치 0건)
 # ⚠️ result.html의 해당 문구가 바뀌면 여기도 같이 고친다.
 # ══════════════════════════════════════════════════════════
 
-SOURCES_HEADING: Final[str] = "출처"
-SOURCES_SUBTITLE: Final[str] = (
-    "본문의 〔N〕이 아래 번호를 가리킵니다. "
-    "직접 확인하실 수 있게 날짜까지 적었습니다."
-)
+SOURCES_HEADING: Final[str] = "부록. 출처와 검증 상태"
+SOURCES_SUBTITLE: Final[str] = "본문의 번호가 아래 원문을 가리킵니다."
 COLLECTION_HEADING: Final[str] = "어디서 가져왔나"
 
 #: 요구역량(5번 칸)은 공고 원문 목록이라 다른 칸과 다르게 다룬다 (result.html requirements_block()).

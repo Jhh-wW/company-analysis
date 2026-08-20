@@ -17,10 +17,19 @@
 
 from __future__ import annotations
 
-import urllib.error
+import ipaddress
+import urllib.parse
 import urllib.request
 from functools import lru_cache
 from typing import Final
+
+from src.features.homepage.safe_http import (
+    ALLOWED_PORTS,
+    HomepageResponseError,
+    UnsafeHomepageUrlError,
+    safe_urlopen,
+    validate_text_response,
+)
 
 #: 열어 보는 데 쓰는 시간 상한(초).
 #: ⚠️ 이 확인은 «회사 확인 화면»을 그리기 전에 돈다. 길면 사용자가 기다린다.
@@ -31,6 +40,92 @@ SCHEMES: Final[tuple[str, ...]] = ("https", "http")
 
 #: 서버가 사람인 척 하는 요청만 받는 경우가 있다.
 _HEADERS: Final[dict[str, str]] = {"User-Agent": "Mozilla/5.0"}
+
+
+def browser_url(raw: str) -> str:
+    """공시의 홈페이지 글자를 브라우저용 ``http(s)`` URL로 안전하게 만든다.
+
+    이 함수는 데모에서도 쓸 수 있도록 네트워크 요청이나 DNS 조회를 하지 않는다.
+    링크를 눌렀을 때 스크립트가 실행되는 ``javascript:``/``data:`` 주소, 계정 정보,
+    로컬 주소와 비정상 포트는 빈 문자열로 돌려 링크 자체를 만들지 않는다.
+    """
+    if not isinstance(raw, str):
+        return ""
+    candidate = raw.strip()
+    if (
+        not candidate
+        or "\\" in candidate
+        or any(ord(character) < 32 or ord(character) == 127 for character in candidate)
+    ):
+        return ""
+
+    if candidate.startswith("//"):
+        candidate = "https:" + candidate
+    elif "://" not in candidate:
+        candidate = "https://" + candidate
+
+    try:
+        parsed = urllib.parse.urlsplit(candidate)
+        scheme = parsed.scheme.lower()
+        hostname = parsed.hostname
+        port = parsed.port
+    except (TypeError, ValueError):
+        return ""
+
+    if (
+        scheme not in SCHEMES
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        # WHATWG URL 파서는 host의 %xx를 먼저 디코딩한 뒤 IPv4로 해석한다.
+        # Python urlsplit만 믿으면 %31%32%37.0.0.1이 브라우저에서는 127.0.0.1이
+        # 되는 우회가 생긴다. 회사 홈페이지 host에는 percent encoding이 필요 없으므로
+        # credential/host 구분을 포함한 netloc 전체에서 fail-closed 한다.
+        or "%" in parsed.netloc
+    ):
+        return ""
+    hostname = hostname.rstrip(".")
+    if not hostname or len(hostname) > 253 or any(char.isspace() for char in hostname):
+        return ""
+    try:
+        ascii_hostname = hostname.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return ""
+    if ascii_hostname == "localhost" or ascii_hostname.endswith(".localhost"):
+        return ""
+    try:
+        address = ipaddress.ip_address(ascii_hostname)
+    except ValueError:
+        address = None
+    if address is not None and not address.is_global:
+        return ""
+    if address is None:
+        # 브라우저가 2130706433, 0177.0.0.1, 0x7f000001 같은 옛 숫자 표기를
+        # 루프백 IPv4로 다시 해석할 수 있다. 공개 홈페이지 도메인 모양도 아닌
+        # 단일 label과 숫자-only hostname은 링크로 만들지 않는다.
+        labels = ascii_hostname.split(".")
+        if len(labels) < 2 or all(
+            label.isdigit()
+            or (
+                label.lower().startswith("0x")
+                and label[2:]
+                and all(
+                    character in "0123456789abcdef"
+                    for character in label[2:].lower()
+                )
+            )
+            for label in labels
+        ):
+            return ""
+    if port is not None and port not in ALLOWED_PORTS:
+        return ""
+
+    display_host = f"[{ascii_hostname}]" if ":" in ascii_hostname else ascii_hostname
+    netloc = f"{display_host}:{port}" if port is not None else display_host
+    path = urllib.parse.quote(parsed.path or "", safe="/%:@!$&'()*+,;=-._~")
+    query = urllib.parse.quote(parsed.query or "", safe="/%?:@!$&'()*+,;=-._~")
+    fragment = urllib.parse.quote(parsed.fragment or "", safe="/%?:@!$&'()*+,;=-._~")
+    return urllib.parse.urlunsplit((scheme, netloc, path, query, fragment))
 
 
 def bare_host(raw: str) -> str:
@@ -56,16 +151,35 @@ def workable_url(raw: str) -> str:
     ⚠️ 여기서 나는 예외를 밖으로 흘리지 않는다. 홈페이지 주소 하나 때문에
       «회사 확인 화면»이 통째로 안 뜨면 안 된다.
     """
-    host = bare_host(raw)
+    fallback = browser_url(raw)
+    if not fallback:
+        return ""
+    candidate = (raw or "").strip()
+    try:
+        supplied_scheme = urllib.parse.urlsplit(candidate).scheme.lower()
+    except ValueError:
+        return ""
+    host = bare_host(fallback)
     if not host:
         return ""
-    for scheme in SCHEMES:
+    preferred_schemes = (
+        (supplied_scheme,) + tuple(s for s in SCHEMES if s != supplied_scheme)
+        if supplied_scheme in SCHEMES
+        else SCHEMES
+    )
+    for scheme in preferred_schemes:
         url = f"{scheme}://{host}"
         try:
             request = urllib.request.Request(url, headers=_HEADERS)
-            with urllib.request.urlopen(request, timeout=PROBE_TIMEOUT_SEC) as response:
+            with safe_urlopen(request, timeout=PROBE_TIMEOUT_SEC) as response:
+                validate_text_response(response)
                 if 200 <= getattr(response, "status", 200) < 400:
-                    return url
+                    return response.geturl()
+        except (UnsafeHomepageUrlError, HomepageResponseError):
+            # A malformed/private destination is not a usable public homepage.
+            return ""
         except Exception:  # noqa: BLE001 — 인증서·시간초과·거부 전부 「이 방식은 안 됨」이다
             continue
-    return ""
+    # 외부 사이트의 일시 장애가 확인 카드의 링크 자체를 없애지는 않게 한다.
+    # 스킴·호스트·포트 안전성은 위 browser_url()에서 이미 검증했다.
+    return fallback

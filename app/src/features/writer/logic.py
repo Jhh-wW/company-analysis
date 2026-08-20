@@ -17,6 +17,7 @@ from src.features.writer.constants import (
     MAX_SENTENCES_PER_CELL,
     MIN_EVIDENCE_PER_CELL,
     PROMPT_CELL_HEAD,
+    PROMPT_COMPANY_HEADER,
     PROMPT_CONNECT,
     PROMPT_HEADER,
     PROMPT_RULES,
@@ -88,7 +89,12 @@ def build_prompt(
     limit: int = MAX_SENTENCES_PER_CELL,
 ) -> str:
     """작가에게 줄 지시문."""
-    부분 = [PROMPT_HEADER.format(company=company, job=job), PROMPT_RULES]
+    header = (
+        PROMPT_HEADER.format(company=company, job=job)
+        if job.strip()
+        else PROMPT_COMPANY_HEADER.format(company=company)
+    )
+    부분 = [header, PROMPT_RULES]
     부분.append(PROMPT_CONNECT.format(company=company))
     부분.append(PROMPT_CELL_HEAD)
     for cell, items in evidence.items():

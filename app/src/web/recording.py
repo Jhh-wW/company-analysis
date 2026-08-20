@@ -25,6 +25,7 @@ from src.features.observability.records import (
     now_iso,
 )
 from src.features.pipeline.port import Outcome, RunResult, UserInput
+from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
 from src.features.storage import db as storage_db
 
 logger = logging.getLogger(__name__)
@@ -76,11 +77,7 @@ def record_run(
     """
     try:
         report = result.report
-        cells_missing = (
-            [c for c in obs.COUNTED_CELLS if not report.cells.get(c)]
-            if report is not None
-            else []
-        )
+        cells_filled, cells_missing = _observed_cells(report)
         record = RunRecord(
             # 회사 식별·OCR·본조사를 한 요청으로 이어 적을 때는 같은 번호를 쓴다.
             # 비우면 예전 호출부와 똑같이 여기서 난수를 만든다.
@@ -97,7 +94,7 @@ def record_run(
             fragments_cited=result.fragments_cited,
             sentences_made=result.sentences_made,
             sentences_passed=result.sentences_passed,
-            cells_filled=report.filled_count if report is not None else 0,
+            cells_filled=cells_filled,
             cells_missing=cells_missing,
             # 「누락 의심」 자동 탐지는 아직 미구현 — 빈 목록이 정직한 값이다.
             cells_suspect=[],
@@ -128,8 +125,40 @@ def record_run(
         return False
 
 
+def _observed_cells(report: object | None) -> tuple[int, list[str]]:
+    """신규 canonical 9장과 구형 6칸을 섞지 않고 관측한다.
+
+    공개 canonical 보고서는 의미 ID 9개만 기록한다. 하위 호환용
+    비-canonical `Report`를 직접 넘긴 오래된 호출부는 과거 숫자 칸으로
+    남겨, 기존 JSONL과 같은 계약으로 읽힌다.
+    """
+    if report is None:
+        return 0, []
+
+    cells = getattr(report, "cells", {})
+    if not isinstance(cells, dict):
+        cells = {}
+    if getattr(report, "schema_version", "") == CANONICAL_SCHEMA_VERSION:
+        section_values = {
+            str(getattr(section, "cell", "")): bool(
+                getattr(section, "is_filled", False)
+            )
+            for section in getattr(report, "sections", [])
+        }
+        values = section_values or cells
+        missing = [cell for cell in obs.COUNTED_CELLS if not values.get(cell, False)]
+        return len(obs.COUNTED_CELLS) - len(missing), missing
+
+    missing = [
+        cell for cell in obs.LEGACY_COUNTED_CELLS if not cells.get(cell, False)
+    ]
+    return len(obs.LEGACY_COUNTED_CELLS) - len(missing), missing
+
+
 def safe_observation_job(job: str) -> str:
-    """자유 입력 직무가 개인정보 모양이면 원문 대신 비식별값을 남긴다."""
+    """옛 ``job`` 관측 열에 회사분석 유형 또는 안전한 옛 직무값을 남긴다."""
+    if not (job or "").strip():
+        return "회사분석"
     try:
         return lifecycle.safe_job(job)
     except lifecycle.LifecycleError:

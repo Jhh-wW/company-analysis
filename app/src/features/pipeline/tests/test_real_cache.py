@@ -22,8 +22,9 @@ from typing import Any, Optional
 
 import pytest
 
+from src.features.budget import provider_budget
 from src.features.pipeline import real
-from src.features.pipeline.port import CompanyCard, Outcome, UserInput
+from src.features.pipeline.port import CompanyCard, Outcome, ReportTable, UserInput
 #: 8·9 생성 지시문임을 알아보는 표시. 글자를 베끼지 않고 «상수를 그대로» 쓴다 —
 #: 지시문이 바뀌어도 이 시험이 조용히 어긋나지 않는다.
 from src.features.spanselect.constants import PROMPT_PICK
@@ -36,7 +37,7 @@ OTHER_POSTING = "신입 가능\n자바 경험 우대"
 #: 재무 API가 「이 연도 자료가 있다」고 답하는 값 — 신선도(O9) 비교 기준이 된다.
 FISCAL_YEARS = [2025, 2024]
 #: 최신 공시 이름에 찍히는 결산 연도 — 「사업보고서 (2025.12)」의 2025.
-#: (1판 실측 116건 전부 이 모양이었다 — `prototype_v1/data/pilot/runs*.jsonl`)
+#: (1판 실측 116건 전부 이 모양이었다 — `analysis_engine/data/pilot/runs*.jsonl`)
 FILING_YEAR = 2025
 
 
@@ -82,6 +83,19 @@ class _FakeMessages:
         )
 
 
+class _FakeClient:
+    """실제 SDK처럼 retry 옵션을 받되 provider 네트워크는 전혀 쓰지 않는다."""
+
+    def __init__(self) -> None:
+        self.messages = _FakeMessages()
+        self.retry_options: list[int] = []
+
+    def with_options(self, *, max_retries: int):
+        assert max_retries == 0
+        self.retry_options.append(max_retries)
+        return self
+
+
 class FakeEngine:
     """1판 엔진 흉내. `real.py`가 부르는 이름만 갖고 있다.
 
@@ -102,6 +116,7 @@ class FakeEngine:
     def __init__(self, fiscal_years: Optional[list[int]] = None) -> None:
         #: 5.5(공고 판별·요구역량 추출) AI 호출 수
         self.posting_ai_calls = 0
+        self.posting_ai_prompts: list[str] = []
         #: 8·9 생성 + 10 검증 AI 호출 수 — **캐시가 먹으면 0이어야 한다**
         self.generate_ai_calls = 0
         self.fiscal_years = list(FISCAL_YEARS if fiscal_years is None else fiscal_years)
@@ -109,7 +124,7 @@ class FakeEngine:
         self.filing_year: Optional[int] = FILING_YEAR
         #: True면 뉴스 수집이 «우리 쪽 실패»(⚠️)로 끝난 것처럼 군다.
         self.news_fails = False
-        self.client = SimpleNamespace(messages=_FakeMessages())
+        self.client = _FakeClient()
 
     # ── 준비 ─────────────────────────────────────────────
     def load_env(self) -> None:
@@ -122,6 +137,18 @@ class FakeEngine:
     def get_json(self, endpoint: str, params: dict[str, Any], counter: Any) -> dict[str, Any]:
         counter.count += 1
         if endpoint == "company.json":
+            if params.get("corp_code") == "00999999":
+                return {
+                    "status": "000",
+                    "corp_name": "베타전자",
+                    "adres": "서울특별시 영등포구 국제금융로 1",
+                    "ceo_nm": "김비교",
+                    "est_dt": "20010101",
+                    "hm_url": "",
+                    "corp_cls": "Y",
+                    "stock_code": "999999",
+                    "bizr_no": "9999999999",
+                }
             return {
                 "status": "000",
                 "corp_name": "가나다전자",
@@ -151,17 +178,249 @@ class FakeEngine:
 
     # ── 5.5 공고 판별 (AI) · 8·9 생성 (AI) ────────────────
     def _ask(
-        self, client: Any, prompt: str, schema: dict[str, Any], max_tokens: int = 0
+        self, client: Any, prompt: str, schema: dict[str, Any], max_tokens: int = 700
     ) -> tuple[dict[str, Any], dict[str, int]]:
         # 실제 1판 `_ask`와 같이 provider client 경계를 지난다. 이 한 줄이 없으면
         # 파이프라인은 돌아도 새 요청별 비용 계량기는 아무것도 시험하지 못한다.
-        response = client.messages.create(model=self.MODEL)
+        response = client.messages.create(
+            model=self.MODEL,
+            max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}],
+            output_config={"format": {"type": "json_schema", "schema": schema}},
+        )
         usage = {
             "in": response.usage.input_tokens,
             "out": response.usage.output_tokens,
         }
-        # ★ 8·9 생성은 이제 `spanselect`가 «같은 창구»(`_ask`)로 부른다 (P-43).
-        #   5.5와 «다른 통»에 세야 「캐시가 먹으면 생성이 0회」를 잴 수 있다.
+        self.posting_ai_prompts.append(prompt)
+        # canonical 사실 배치 — AI는 번호와 의미 섹션만 돌려준다.
+        if "공식 근거 기반 회사분석 보고서의 사실 배치 작업" in prompt:
+            self.generate_ai_calls += 1
+
+            def item(
+                section_id: str,
+                sid: str,
+                claim_type: str,
+                subject_label: str,
+                *,
+                market_priority: str = "",
+                product_role: str = "",
+                response_to_sid: str = "",
+                basis_sids: Optional[list[str]] = None,
+                priority_signals: Optional[list[str]] = None,
+                event_date: str = "",
+            ) -> dict[str, Any]:
+                """실제 canonical 응답 스키마의 필드를 하나도 생략하지 않는다."""
+
+                return {
+                    "section_id": section_id,
+                    "sid": sid,
+                    "claim_type": claim_type,
+                    "subject_label": subject_label,
+                    "market_priority": market_priority,
+                    "product_role": product_role,
+                    "response_to_sid": response_to_sid,
+                    "basis_sids": list(basis_sids or []),
+                    "priority_signals": list(priority_signals or []),
+                    "event_date": event_date,
+                }
+
+            return (
+                {
+                    "items": [
+                        item(
+                            "identity",
+                            "1-1",
+                            "official_identity",
+                            "가나다전자",
+                        ),
+                        item(
+                            "business_model",
+                            "2-1",
+                            "revenue_model",
+                            "SmartX 반도체 검사 장비",
+                        ),
+                        item(
+                            "business_model",
+                            "3-1",
+                            "customer_market",
+                            "국내외 반도체 제조사",
+                            market_priority="핵심",
+                        ),
+                        item(
+                            "portfolio",
+                            "4-1",
+                            "priority_product",
+                            "SmartX 반도체 검사 장비",
+                            product_role="주력",
+                            priority_signals=["출시·운영", "투자·증설"],
+                        ),
+                        item(
+                            "past_changes",
+                            "5-1",
+                            "completed_execution",
+                            "SmartX 생산 설비",
+                            event_date="2025",
+                        ),
+                        item(
+                            "past_changes",
+                            "6-1",
+                            "change_interpretation",
+                            "SmartX 생산 체계 변경",
+                            basis_sids=["5-1"],
+                        ),
+                        item(
+                            "current_challenges",
+                            "7-1",
+                            "current_issue",
+                            "SmartX 원가 부담",
+                        ),
+                        item(
+                            "current_challenges",
+                            "8-1",
+                            "current_response",
+                            "생산 공정 재설계",
+                            response_to_sid="7-1",
+                        ),
+                        item(
+                            "future_strategy",
+                            "9-1",
+                            "future_plan",
+                            "SmartX 수출 유통망",
+                        ),
+                        item(
+                            "operations_partners",
+                            "10-1",
+                            "operating_core",
+                            "TraceOne 데이터 시스템",
+                        ),
+                        item(
+                            "operations_partners",
+                            "11-1",
+                            "partner_role",
+                            "DeltaParts",
+                        ),
+                        item(
+                            "culture",
+                            "12-1",
+                            "official_value",
+                            "존중과 책임",
+                        ),
+                    ]
+                },
+                usage,
+            )
+        # 작가 — 원문 하나마다 같은 뜻의 한 문장과 그 근거 번호만 돌려준다.
+        if "공식 근거 기반 기업분석 보고서" in prompt and "■ 칸과 근거" in prompt:
+            self.generate_ai_calls += 1
+            texts = {
+                "identity": [
+                    (
+                        "가나다전자는 베타전자와 경쟁 관계인 반도체 검사 장비 전문기업이다.",
+                        "identity-1",
+                    ),
+                ],
+                "business_model": [
+                    (
+                        "가나다전자는 SmartX 반도체 검사 장비를 국내외 반도체 제조사에 판매해 장비 매출을 얻는다.",
+                        "business_model-1",
+                    ),
+                    (
+                        "가나다전자의 SmartX 반도체 검사 장비는 국내외 반도체 제조사를 핵심 고객 시장으로 삼아 판매된다.",
+                        "business_model-2",
+                    ),
+                ],
+                "portfolio": [
+                    (
+                        "가나다전자는 SmartX 반도체 검사 장비를 주력 제품으로 출시해 판매하고 생산 설비에 투자했다.",
+                        "portfolio-1",
+                    ),
+                ],
+                "past_changes": [
+                    (
+                        "가나다전자는 2025년 SmartX 생산 설비를 도입했다.",
+                        "past_changes-1",
+                    ),
+                    (
+                        "가나다전자의 SmartX 생산 체계 변경에는 2025년 설비 도입 실행이 포함됐다.",
+                        "past_changes-2",
+                    ),
+                ],
+                "current_challenges": [
+                    (
+                        "가나다전자는 2026년 SmartX 원가 부담을 현재 미해결 과제로 관리한다.",
+                        "current_challenges-1",
+                    ),
+                    (
+                        "가나다전자는 2026년 SmartX 원가 부담에 대응해 생산 공정 재설계를 추진 중이다.",
+                        "current_challenges-2",
+                    ),
+                ],
+                "future_strategy": [
+                    (
+                        "가나다전자는 2027년 SmartX 수출 유통망을 확대할 계획이다.",
+                        "future_strategy-1",
+                    ),
+                ],
+                "operations_partners": [
+                    (
+                        "가나다전자는 SmartX 검사 설비와 TraceOne 데이터 시스템을 생산 운영에 사용하며 부품 공급 계약을 관리한다.",
+                        "operations_partners-1",
+                    ),
+                    (
+                        "가나다전자는 DeltaParts와 SmartX 핵심 부품 공급 계약을 체결해 DeltaParts가 부품을 공급한다.",
+                        "operations_partners-2",
+                    ),
+                ],
+                "culture": [
+                    (
+                        "가나다전자는 존중과 책임을 핵심 가치로 두고 팀 간 협업을 일하는 방식으로 제시한다.",
+                        "culture-1",
+                    ),
+                ],
+            }
+            return {
+                "칸": [
+                    {
+                        "칸번호": cell,
+                        "문장들": [
+                            {"글": text, "근거": sid}
+                            for text, sid in sentences
+                        ],
+                    }
+                    for cell, sentences in texts.items()
+                ]
+            }, usage
+        # 핵심 요약은 본문 결론만 숫자 없이 돌려준다.
+        if "첫 장 핵심 요약" in prompt:
+            self.generate_ai_calls += 1
+            return {
+                "items": [
+                    {
+                        "section_id": "identity",
+                        "text": "반도체 검사 장비 전문기업으로 경쟁 관계가 확인된다",
+                    },
+                    {
+                        "section_id": "business_model",
+                        "text": "반도체 검사 장비 판매와 매출이 사업 구조의 핵심이다",
+                    },
+                    {
+                        "section_id": "culture",
+                        "text": "존중과 책임을 핵심 가치로 두고 협업하는 문화다",
+                    },
+                ]
+            }, usage
+        # 작가·요약의 독립 근거 대조는 모든 번호를 명시적으로 판정한다.
+        if "이 문장의 내용이 근거 원문 안에 있는가" in prompt:
+            self.generate_ai_calls += 1
+            numbers = [int(value) for value in re.findall(r"\[(\d+)\]", prompt)]
+            return {
+                "판정": [
+                    {"번호": number, "근거에있다": True}
+                    for number in dict.fromkeys(numbers)
+                ]
+            }, usage
+        # v2 호환 시험용 선택 경로.
         if PROMPT_PICK in prompt:
             self.generate_ai_calls += 1
             return (
@@ -203,23 +462,144 @@ class FakeEngine:
             "report_nm": name,
             "rcept_no": "20260315000123",
             "rcept_dt": "20260315",
+            "reprt_code": "11011",
         }
 
     def download_document(self, rcept_no: str, raw_dir: Any, counter: Any) -> str:
         return "(가짜 경로)"
 
     def read_filing_text(self, path: str) -> str:
-        return "회사는 반도체 검사 장비를 만들어 국내외 제조사에 판다."
+        return (
+            "국내외 반도체 제조 고객을 대상으로 SmartX 반도체 검사 장비 제품을 "
+            "반도체 검사 장비 시장에 공급한다. 연결재무제표의 매출액과 영업이익을 공시한다."
+        )
 
     def fetch_financials(
         self, corp_code: str, counter: Any
     ) -> tuple[dict[str, Any], list[int]]:
-        return {"list": []}, list(self.fiscal_years)
+        comparator = corp_code == "00999999"
+
+        def row(
+            account_id: str,
+            account_nm: str,
+            amounts: tuple[int, int, int],
+        ) -> dict[str, str]:
+            return {
+                "account_id": account_id,
+                "account_nm": account_nm,
+                "sj_div": "IS",
+                "fs_div": "CFS",
+                "currency": "KRW",
+                "bsns_year": "2025",
+                "reprt_code": "11011",
+                "thstrm_dt": "2025.01.01 ~ 2025.12.31",
+                "thstrm_amount": str(amounts[0]),
+                "frmtrm_dt": "2024.01.01 ~ 2024.12.31",
+                "frmtrm_amount": str(amounts[1]),
+                "bfefrmtrm_dt": "2023.01.01 ~ 2023.12.31",
+                "bfefrmtrm_amount": str(amounts[2]),
+            }
+
+        amounts = (
+            {
+                "revenue": (1_000_000_000, 900_000_000, 800_000_000),
+                "operating": (100_000_000, 90_000_000, 80_000_000),
+                "profit": (70_000_000, 60_000_000, 50_000_000),
+            }
+            if comparator
+            else {
+                "revenue": (2_000_000_000, 1_800_000_000, 1_600_000_000),
+                "operating": (300_000_000, 250_000_000, 200_000_000),
+                "profit": (240_000_000, 190_000_000, 150_000_000),
+            }
+        )
+        return {
+            "status": "000",
+            "reprt_code": "11011",
+            "list": [
+                row("ifrs-full_Revenue", "매출액", amounts["revenue"]),
+                row(
+                    "dart_OperatingIncomeLoss",
+                    "영업이익",
+                    amounts["operating"],
+                ),
+                row("ifrs-full_ProfitLoss", "당기순이익", amounts["profit"]),
+            ]
+        }, list(self.fiscal_years)
 
     def make_fragments(
         self, filing_text: str, financials: Optional[dict[str, Any]]
     ) -> dict[int, dict[str, str]]:
-        return {1: {"종류": "사업", "원문": filing_text, "출처": ""}}
+        return {
+            1: {
+                "종류": "사업내용",
+                "원문": "가나다전자는 베타전자와 경쟁 관계인 반도체 검사 장비 전문기업이다.",
+                "근거원문": [
+                    "사업보고서 회사 개요: 홈페이지 https://www.ganada.example"
+                ],
+            },
+            2: {
+                "종류": "사업내용",
+                "원문": "가나다전자는 SmartX 반도체 검사 장비를 국내외 반도체 제조사에 판매해 장비 매출을 얻는다.",
+            },
+            3: {
+                "종류": "사업내용",
+                "원문": "가나다전자의 SmartX 반도체 검사 장비는 국내외 반도체 제조사를 핵심 고객 시장으로 삼아 판매된다.",
+            },
+            4: {
+                "종류": "사업내용",
+                "원문": "가나다전자는 SmartX 반도체 검사 장비를 주력 제품으로 출시해 판매하고 생산 설비에 투자했다.",
+            },
+            5: {
+                "종류": "MD&A",
+                "원문": "가나다전자는 2025년 SmartX 생산 설비를 도입했다.",
+            },
+            6: {
+                "종류": "MD&A",
+                "원문": "가나다전자의 SmartX 생산 체계 변경에는 2025년 설비 도입 실행이 포함됐다.",
+            },
+            7: {
+                "종류": "MD&A",
+                "원문": "가나다전자는 2026년 SmartX 원가 부담을 현재 미해결 과제로 관리한다.",
+            },
+            8: {
+                "종류": "MD&A",
+                "원문": "가나다전자는 2026년 SmartX 원가 부담에 대응해 생산 공정 재설계를 추진 중이다.",
+                "사실상태": "현재 실제 대응",
+            },
+            9: {
+                "종류": "신규사업전망",
+                "원문": "가나다전자는 2027년 SmartX 수출 유통망을 확대할 계획이다.",
+                "사실상태": "공식 계획 미실행",
+            },
+            10: {
+                "종류": "사업내용",
+                "원문": "가나다전자는 SmartX 검사 설비와 TraceOne 데이터 시스템을 생산 운영에 사용하며 부품 공급 계약을 관리한다.",
+            },
+            11: {
+                "종류": "사업내용",
+                "원문": "가나다전자는 DeltaParts와 SmartX 핵심 부품 공급 계약을 체결해 DeltaParts가 부품을 공급한다.",
+            },
+            12: {
+                "종류": "홈페이지",
+                "원문": "가나다전자는 존중과 책임을 핵심 가치로 두고 팀 간 협업을 일하는 방식으로 제시한다.",
+                "출처": "https://www.ganada.example/culture",
+                "문서명": "가나다전자 인재상과 일하는 방식",
+                "원문위치": "/culture",
+                "발행처": "가나다전자",
+                "도메인근거SourceID": "source-1",
+                "도메인근거원문": (
+                    "사업보고서 회사 개요: 홈페이지 https://www.ganada.example"
+                ),
+            },
+            13: {
+                "종류": "재무",
+                "원문": (
+                    "주요계정(DART API): 매출액·영업이익·당기순이익의 "
+                    "2025년, 2024년, 2023년 연결 원값"
+                ),
+            },
+        }
 
     def search_news(
         self, query: str, display: int = 10, sort: str = "date"
@@ -276,7 +656,11 @@ class FakeEngine:
     def substance_check(
         self, client: Any, kept: list[_FakeDraftItem], steps: list[dict[str, Any]]
     ) -> dict[str, bool]:
-        client.messages.create(model=self.MODEL)
+        client.messages.create(
+            model=self.MODEL,
+            max_tokens=700,
+            messages=[{"role": "user", "content": "가짜 검증"}],
+        )
         self.generate_ai_calls += 1
         return {cell: True for cell in self.CELL_SOURCES}
 
@@ -294,7 +678,22 @@ def engine(monkeypatch: pytest.MonkeyPatch) -> FakeEngine:
     """진짜 엔진 대신 가짜를 끼운다 — 이 시험에서 돈이 나갈 길이 없다."""
     fake = FakeEngine()
     monkeypatch.setattr(real, "_engine", lambda: fake)
+    monkeypatch.setattr(
+        real,
+        "_company_catalog",
+        lambda: (
+            (CORP_ID, "가나다전자", "", "000001", "20260819"),
+            ("00999999", "베타전자", "", "999999", "20260819"),
+        ),
+    )
     return fake
+
+
+@pytest.fixture(autouse=True)
+def _paid_provider_budget_context():
+    """직접 RealPipeline 시험도 웹 worker와 같은 유료 문맥에서 실행한다."""
+    with provider_budget.activate(100_000.0):
+        yield
 
 
 def _card() -> CompanyCard:
@@ -358,6 +757,120 @@ def test_본조사_DART_공시목록오류는_감사보고서없음으로_거부
     assert result.cost_krw == 0
 
 
+def test_본조사_DART_013은_비상장_공시없음으로_명확히거부하고_추가호출하지않는다(
+    engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = engine.get_json
+    endpoints: list[str] = []
+
+    def no_disclosure(endpoint: str, params: dict[str, Any], counter: Any) -> dict[str, Any]:
+        endpoints.append(endpoint)
+        if endpoint == "company.json":
+            profile = dict(original(endpoint, params, counter))
+            profile["corp_cls"] = "E"
+            return profile
+        if endpoint == "list.json":
+            counter.count += 1
+            return {"status": "013", "message": "조회된 데이타가 없습니다."}
+        raise AssertionError(f"013 뒤 추가 provider 호출: {endpoint}")
+
+    monkeypatch.setattr(engine, "get_json", no_disclosure)
+    monkeypatch.setattr(
+        engine,
+        "decide",
+        lambda *_args, **_kwargs: SimpleNamespace(status="거부B", corp_type=None),
+    )
+
+    result = _run()
+
+    assert result.outcome is Outcome.REJECT_NO_DISCLOSURE
+    assert "감사보고서" in result.message
+    assert result.sources[0].state == "none"
+    assert endpoints == ["company.json", "list.json"]
+    assert engine.client.messages.calls == 0
+    assert result.cost_krw == 0
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"status": "000"},
+        {"status": "000", "list": {}},
+        {"status": "013", "list": [{"report_nm": "모순"}]},
+        {"status": "013 "},
+        {"status": 13},
+        {"status": "000 ", "list": []},
+        {"status": 0, "list": []},
+    ],
+)
+def test_본조사_DART_공시목록_모순응답은_공시없음이아니라_기술실패다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, Any],
+) -> None:
+    original = engine.get_json
+
+    def malformed(endpoint: str, params: dict[str, Any], counter: Any) -> dict[str, Any]:
+        if endpoint == "list.json":
+            counter.count += 1
+            return payload
+        return original(endpoint, params, counter)
+
+    monkeypatch.setattr(engine, "get_json", malformed)
+
+    result = _run()
+
+    assert result.outcome is Outcome.FAILED
+    assert result.outcome is not Outcome.REJECT_NO_DISCLOSURE
+    assert engine.client.messages.calls == 0
+    assert result.cost_krw == 0
+
+
+def test_본조사_DART_013이어도_상장사는_공시없음으로_오거부하지않는다(
+    engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = engine.get_json
+
+    def listed_no_audit(endpoint: str, params: dict[str, Any], counter: Any) -> dict[str, Any]:
+        if endpoint == "list.json":
+            counter.count += 1
+            return {"status": "013"}
+        return original(endpoint, params, counter)
+
+    monkeypatch.setattr(engine, "get_json", listed_no_audit)
+
+    result = _run()
+
+    assert result.outcome is Outcome.REPORT
+    assert result.outcome is not Outcome.REJECT_NO_DISCLOSURE
+
+
+def test_최신공시목록도_정확한_013만_자료없음으로_인정한다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actual_engine = real._engine()
+    payload: dict[str, Any] = {"status": "013"}
+    monkeypatch.setattr(
+        actual_engine,
+        "get_json",
+        lambda *_args, **_kwargs: payload,
+    )
+    counter = SimpleNamespace()
+
+    assert actual_engine.latest_report_rcept("00126380", "상장사", counter) is None
+
+    for malformed in (
+        {"status": "013 "},
+        {"status": 13},
+        {"status": "000 ", "list": []},
+        {"status": 0, "list": []},
+        {"status": "013", "list": [{"report_nm": "모순"}]},
+    ):
+        payload = malformed
+        with pytest.raises(RuntimeError):
+            actual_engine.latest_report_rcept("00126380", "상장사", counter)
+
+
 def test_같은_공고를_다시_조사하면_생성AI를_한_번도_안_부른다(engine: FakeEngine) -> None:
     """★ 이 시험이 캐시의 존재 이유다 — 두 번째 요청에서 «비싼 쪽»이 0이어야 한다."""
     first = _run()
@@ -398,15 +911,12 @@ def test_캐시_적중이면_저장된_결과라고_밝힌다(engine: FakeEngine
     assert first.report.generated_at in second.message, "언제 조사한 것인지 밝혀야 한다"
 
 
-def test_적중해도_5_5_글자추출_비용은_남는다(engine: FakeEngine) -> None:
-    """정본이 감수한 맞바꿈 — 지문은 5.5 뒤에야 나오므로 공고 판별 AI는 계속 나간다.
-
-    「캐시 히트 = 완전 0원」이라고 잘못 알리면 비용 예측이 어긋난다.
-    """
+def test_캐시_적중은_공고_AI를_추가로_부르지_않는다(engine: FakeEngine) -> None:
+    """회사분석 전용 경로는 직무·공고를 읽지 않고 회사 캐시만 본다."""
     _run()
     calls_after_first = engine.posting_ai_calls
     _run()
-    assert engine.posting_ai_calls > calls_after_first
+    assert engine.posting_ai_calls == calls_after_first
 
 
 # ══════════════════════════════════════════════════════════
@@ -414,19 +924,17 @@ def test_적중해도_5_5_글자추출_비용은_남는다(engine: FakeEngine) -
 # ══════════════════════════════════════════════════════════
 
 
-def test_공고가_다르면_남의_보고서를_돌려주지_않는다(engine: FakeEngine) -> None:
-    """★ 정본 §★ — 회사·직무가 같아도 공고가 다르면 반드시 다시 만든다."""
+def test_공고_입력값이_달라도_같은_회사분석_캐시를_쓴다(engine: FakeEngine) -> None:
+    """신규 제품에서는 공고가 보고서·캐시 정체성에 관여하지 않는다."""
     _run(posting=POSTING)
     calls_after_first = engine.generate_ai_calls
 
     other = _run(posting=OTHER_POSTING)
 
     assert other.outcome is Outcome.REPORT
-    assert engine.generate_ai_calls > calls_after_first, (
-        "다른 공고인데 캐시가 먹었습니다 — 남의 옛 공고 기반 보고서가 나갑니다."
-    )
-    assert other.charged is True
-    assert other.message == ""
+    assert engine.generate_ai_calls == calls_after_first
+    assert other.charged is False
+    assert "이미 조사해 둔" in other.message
 
 
 def test_회사가_다르면_캐시가_안_섞인다(engine: FakeEngine) -> None:
@@ -446,11 +954,11 @@ def test_회사가_다르면_캐시가_안_섞인다(engine: FakeEngine) -> None
     assert engine.generate_ai_calls > calls_after_first
 
 
-def test_직무가_다르면_다시_만든다(engine: FakeEngine) -> None:
+def test_직무_입력값이_달라도_같은_회사분석_캐시를_쓴다(engine: FakeEngine) -> None:
     _run(job="백엔드 개발자")
     calls_after_first = engine.generate_ai_calls
     _run(job="영업 관리")
-    assert engine.generate_ai_calls > calls_after_first
+    assert engine.generate_ai_calls == calls_after_first
 
 
 def test_직무_표기가_공백_대소문자만_달라도_같은_것으로_본다(engine: FakeEngine) -> None:
@@ -538,10 +1046,82 @@ def test_최신_사업연도는_추측하지_않고_전자공시가_답한_값�
     assert real._current_fiscal_year([], None) is None
 
 
+def test_3개년표만_있고_필수_정체성제품근거가_없으면_출고하지_않는다(
+    engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """숫자표가 있어도 필수 1~3장을 일반론으로 채워 보고서를 만들지 않는다."""
+
+    def row(account_id: str, account_nm: str, values: tuple[str, str, str]) -> dict[str, str]:
+        return {
+            "fs_div": "CFS",
+            "account_id": account_id,
+            "account_nm": account_nm,
+            "bsns_year": "2025",
+            "thstrm_dt": "2025.01.01 ~ 2025.12.31",
+            "thstrm_amount": values[0],
+            "frmtrm_dt": "2024.01.01 ~ 2024.12.31",
+            "frmtrm_amount": values[1],
+            "bfefrmtrm_dt": "2023.01.01 ~ 2023.12.31",
+            "bfefrmtrm_amount": values[2],
+        }
+
+    financials = {
+        "list": [
+            row("ifrs-full_Revenue", "매출액", ("821850000000", "601790000000", "566500000000")),
+            row("dart_OperatingIncomeLoss", "영업이익", ("155250000000", "128260000000", "169440000000")),
+        ]
+    }
+    monkeypatch.setattr(engine, "fetch_financials", lambda _corp, _counter: (financials, [2025]))
+    monkeypatch.setattr(
+        engine,
+        "make_fragments",
+        lambda _text, _financials: {
+            1: {"종류": "사업", "원문": "회사는 반도체 검사 장비를 만들어 제조사에 판다."},
+            7: {"종류": "사업", "원문": "이 조각은 본문에서 사용하지 않는다."},
+            9: {
+                "종류": "재무",
+                "원문": "주요계정(DART API): 매출액 821850000000(2025.12.31)",
+            },
+        },
+    )
+
+    result = _run()
+
+    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.report is None
+    assert result.charged is False
+
+
 def test_공시_사업연도는_접수일이_아니라_결산연도를_읽는다() -> None:
     """접수일(2026-03 제출)로 읽으면 「사업연도가 바뀌었다」를 못 가른다."""
     filing = {"report_nm": "감사보고서 (2025.12)", "rcept_dt": "20260315"}
     assert real._filing_fiscal_year(filing) == 2025
+
+
+def test_3개년표와_최신_반기공시의_기간을_서로_덮어쓰지_않는다() -> None:
+    table = ReportTable(
+        caption="3개년 연결 실적",
+        headers=["사업연도", "매출액"],
+        rows=[["2023", "1"], ["2024", "2"], ["2025", "3"]],
+    )
+    analysis, latest = real._performance_period_labels(
+        table,
+        {"report_nm": "반기보고서 (2026.06)"},
+    )
+    assert analysis == "2023~2025 완료 회계연도"
+    assert latest == "2026년 반기 공식 공시"
+
+
+@pytest.mark.parametrize(
+    "report_name,want",
+    [
+        ("분기보고서 (2026.03)", "2026년 1분기 공식 공시"),
+        ("분기보고서 (2026.09)", "2026년 3분기 공식 공시"),
+        ("사업보고서 (2025.12)", "2025년 연간 공식 공시"),
+    ],
+)
+def test_최신_실적_기간은_공시_종류까지_표시한다(report_name: str, want: str) -> None:
+    assert real._performance_period_labels(None, {"report_nm": report_name})[1] == want
 
 
 # ══════════════════════════════════════════════════════════
@@ -555,7 +1135,7 @@ def test_캐시_조회가_실패해도_조사는_끝까지_간다(
     def boom(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("저장소가 잠겼습니다")
 
-    monkeypatch.setattr(real.cache_store, "get_layer1_hit", boom)
+    monkeypatch.setattr(real.cache_store, "get_company_report_hit", boom)
     result = _run()
 
     assert result.outcome is Outcome.REPORT
@@ -568,7 +1148,7 @@ def test_캐시_저장이_실패해도_보고서는_나간다(
     def boom(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("디스크가 가득 찼습니다")
 
-    monkeypatch.setattr(real.cache_store, "save_layer1", boom)
+    monkeypatch.setattr(real.cache_store, "save_company_report", boom)
     result = _run()
 
     assert result.outcome is Outcome.REPORT
@@ -608,6 +1188,7 @@ def test_보고서를_만들면_1층_캐시에_한_줄이_남는다(engine: Fake
         ).fetchall()
     assert len(rows) == 1
     assert rows[0]["corp_id"] == CORP_ID
+    assert rows[0]["job_key"] == "product:company-analysis"
     assert rows[0]["fiscal_year"] == max(FISCAL_YEARS)
 
 
@@ -642,8 +1223,8 @@ def test_자료가_없는_것은_실패가_아니므로_캐시한다(engine: Fak
     assert engine.generate_ai_calls == calls_after_first
 
 
-def test_공고_원문은_저장소에_들어가지_않는다(engine: FakeEngine) -> None:
-    """S2 = 0건. 캐시에 남는 것은 요구역량 목록과 지문뿐이다."""
+def test_공고와_요구역량은_회사분석_저장소에_들어가지_않는다(engine: FakeEngine) -> None:
+    """신규 보고서 payload는 공고·직무·요구역량을 보관하지 않는다."""
     from src.features.storage import db as storage_db
 
     secret = "지원자 홍길동 010-1234-5678"
@@ -654,8 +1235,22 @@ def test_공고_원문은_저장소에_들어가지_않는다(engine: FakeEngine
             str(row[0])
             for row in conn.execute("SELECT payload_json FROM reports").fetchall()
         )
-    assert "3년 이상 경력" in dump, "보고서가 저장되지 않았다면 이 시험은 아무것도 안 본 것이다"
+    assert dump, "보고서가 저장되지 않았다면 이 시험은 아무것도 안 본 것이다"
+    assert '"job": ""' in dump
+    assert '"requirements": []' in dump
+    assert "3년 이상 경력" not in dump
     assert "010-1234-5678" not in dump
+
+
+def test_공고_개인정보는_AI에_아예_전달하지_않는다(engine: FakeEngine) -> None:
+    """회사분석 경로는 공고 입력을 읽거나 마스킹해 보내지도 않는다."""
+    secret = "010-1234-5678"
+
+    _run(posting=f"{POSTING}\n담당자 연락처 {secret}")
+
+    assert engine.posting_ai_prompts, "회사 분석 AI 경계를 실제로 지나지 않은 시험입니다"
+    assert all(secret not in prompt for prompt in engine.posting_ai_prompts)
+    assert all(_MASK not in prompt for prompt in engine.posting_ai_prompts)
 
 
 def test_캐시_없이는_매번_생성AI가_돈다(engine: FakeEngine, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -664,7 +1259,7 @@ def test_캐시_없이는_매번_생성AI가_돈다(engine: FakeEngine, monkeypa
     캐시 조회를 항상 미적중으로 만들면 두 번째 요청에서도 생성 AI가 돌아야 한다.
     안 돈다면 위 시험들은 캐시가 아니라 다른 이유로 통과한 것이다.
     """
-    monkeypatch.setattr(real.cache_store, "get_layer1_hit", lambda *a, **k: None)
+    monkeypatch.setattr(real.cache_store, "get_company_report_hit", lambda *a, **k: None)
     _run()
     calls_after_first = engine.generate_ai_calls
     _run()

@@ -15,22 +15,23 @@
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 from src.core.citations import citation_marker
-from src.core.constants import CELL_LABELS, RAW_SOURCE_LABEL, RAW_SOURCE_NOTE
+from src.core.constants import section_display_heading
 from src.features.export_notion import constants
 from src.features.pipeline.port import (
-    Grade,
     Report,
     ReportSection,
     ReportTable,
-    SourceStatus,
 )
-from src.features.provenance.sources import Source, render_sources
+from src.features.provenance.sources import Source
+from src.features.report_standard import SECTION_BY_ID, build_published_report
 
 #: 노션 블록 하나를 표현하는 dict. Notion API의 block object 형태를 그대로 따른다.
 NotionBlock = dict[str, Any]
+NotionRichText = list[dict[str, Any]]
+NotionCell = str | NotionRichText
 
 
 # ══════════════════════════════════════════════════════════
@@ -38,7 +39,7 @@ NotionBlock = dict[str, Any]
 # ══════════════════════════════════════════════════════════
 
 
-def _rich_text(text: str) -> list[dict[str, Any]]:
+def _rich_text(text: str, *, href: str = "") -> NotionRichText:
     """노션 rich_text 배열을 만든다.
 
     ★ 노션은 rich_text 항목 하나(content)에 2,000자 제한이 있다 — 넘으면
@@ -48,7 +49,14 @@ def _rich_text(text: str) -> list[dict[str, Any]]:
         return []
     limit = constants.MAX_RICH_TEXT_LENGTH
     chunks = [text[i : i + limit] for i in range(0, len(text), limit)]
-    return [{"type": "text", "text": {"content": chunk}} for chunk in chunks]
+    safe_href = href.strip() if href.strip().startswith(("https://", "http://")) else ""
+    items: NotionRichText = []
+    for chunk in chunks:
+        text_payload: dict[str, Any] = {"content": chunk}
+        if safe_href:
+            text_payload["link"] = {"url": safe_href}
+        items.append({"type": "text", "text": text_payload})
+    return items
 
 
 def _paragraph(text: str) -> NotionBlock:
@@ -75,34 +83,17 @@ def _heading_2(text: str) -> NotionBlock:
     }
 
 
-def _bulleted(text: str) -> NotionBlock:
+def _table_row(cells: list[NotionCell]) -> NotionBlock:
     return {
         "object": "block",
-        "type": "bulleted_list_item",
-        "bulleted_list_item": {"rich_text": _rich_text(text)},
-    }
-
-
-def _callout(text: str, icon_emoji: str) -> NotionBlock:
-    return {
-        "object": "block",
-        "type": "callout",
-        "callout": {
-            "rich_text": _rich_text(text),
-            "icon": {"type": "emoji", "emoji": icon_emoji},
+        "type": "table_row",
+        "table_row": {
+            "cells": [cell if isinstance(cell, list) else _rich_text(cell) for cell in cells]
         },
     }
 
 
-def _table_row(cells: list[str]) -> NotionBlock:
-    return {
-        "object": "block",
-        "type": "table_row",
-        "table_row": {"cells": [_rich_text(c) for c in cells]},
-    }
-
-
-def _table_block(headers: list[str], rows: list[list[str]]) -> NotionBlock:
+def _table_block(headers: list[str], rows: list[list[NotionCell]]) -> NotionBlock:
     """노션 표 블록 하나. 머리글 행 + 데이터 행을 한 번에 자식으로 담는다.
 
     ★ 노션 표는 행(table_row)을 표 블록 생성 시점에 «함께» 넣어야 한다 — 나중에
@@ -126,47 +117,17 @@ def _table_block(headers: list[str], rows: list[list[str]]) -> NotionBlock:
 
 
 def _lede_text(report: Report) -> str:
-    text = f"{report.job} · {report.corp_type}"
-    if report.generated_at:
-        text = f"{text} · {report.generated_at} 생성"
-    return text
-
-
-# ══════════════════════════════════════════════════════════
-# 상단 라벨 — 부분 보고서일 때만 (result.html .grade)
-# ══════════════════════════════════════════════════════════
-
-
-def _grade_blocks(report: Report, grade_note: str) -> list[NotionBlock]:
-    if report.grade is Grade.COMPLETE:
-        return []
-    icon = (
-        constants.GRADE_ICON_PARTIAL
-        if report.grade is Grade.PARTIAL
-        else constants.GRADE_ICON_INCOMPLETE
-    )
-    blocks: list[NotionBlock] = [_callout(grade_note, icon)]
-    blocks.extend(_bulleted(reason) for reason in report.shortfall_reasons)
-    return blocks
-
-
-# ══════════════════════════════════════════════════════════
-# 요구역량(5번 칸) — 공고 원문 목록이라 다른 칸과 다르게 다룬다
-# (result.html의 requirements_block() 매크로와 같은 모양)
-# ══════════════════════════════════════════════════════════
-
-
-def _requirements_blocks(requirements: list[str]) -> list[NotionBlock]:
-    title = f"{constants.REQUIREMENTS_CELL}. {CELL_LABELS[constants.REQUIREMENTS_CELL]}"
-    blocks: list[NotionBlock] = [
-        _heading_2(title),
-        _paragraph(constants.REQUIREMENTS_NOTE),
+    values = [
+        report.corp_type.strip(),
+        f"{report.as_of_date.strip()} 기준" if report.as_of_date.strip() else "",
+        report.analysis_period.strip(),
+        (
+            f"최신 실적 {report.latest_performance_period.strip()}"
+            if report.latest_performance_period.strip()
+            else ""
+        ),
     ]
-    if requirements:
-        blocks.extend(_bulleted(r) for r in requirements)
-    else:
-        blocks.append(_paragraph(constants.REQUIREMENTS_EMPTY_TEXT))
-    return blocks
+    return " · ".join(value for value in values if value)
 
 
 # ══════════════════════════════════════════════════════════
@@ -176,7 +137,8 @@ def _requirements_blocks(requirements: list[str]) -> list[NotionBlock]:
 
 def _table_blocks(table: ReportTable) -> list[NotionBlock]:
     """숫자·회계 표 하나. 문장으로 바꾸지 않고 «표 그대로» 낸다 (결정기록 D13)."""
-    caption = f"{table.caption} 〔{table.cite}〕" if table.cite else table.caption
+    marker = citation_marker(table.cite)
+    caption = f"{table.caption} {marker}" if marker else table.caption
     blocks: list[NotionBlock] = [_paragraph(caption)]
     if table.headers:
         blocks.append(_table_block(table.headers, table.rows))
@@ -184,10 +146,8 @@ def _table_blocks(table: ReportTable) -> list[NotionBlock]:
 
 
 def _section_blocks(section: ReportSection) -> list[NotionBlock]:
-    blocks: list[NotionBlock] = [_heading_2(f"{section.cell}. {section.title}")]
+    blocks: list[NotionBlock] = [_heading_2(_section_heading(section))]
     if not section.is_filled:
-        reason = section.empty_reason or constants.EMPTY_SECTION_FALLBACK
-        blocks.append(_paragraph(f"{constants.EMPTY_SECTION_PREFIX}{reason}"))
         return blocks
     if section.prose_lines:
         # ★ 작가 내부 sid가 아니라 그 번호가 가리킨 실제 출처를 문장마다 표시한다(P-118).
@@ -196,53 +156,100 @@ def _section_blocks(section: ReportSection) -> list[NotionBlock]:
             for text, cite in section.prose_lines
         )
         blocks.append(_paragraph(prose))
-        if section.lines:
-            blocks.append(
-                _paragraph(
-                    f"{RAW_SOURCE_LABEL} ({len(section.lines)}문장) — {RAW_SOURCE_NOTE}"
-                )
-            )
-            blocks.extend(
-                _bulleted(f"{text} {marker}" if (marker := citation_marker(cite)) else text)
-                for text, cite in section.lines
-            )
-    else:
-        for text, cite in section.lines:
-            marker = citation_marker(cite)
-            blocks.append(_bulleted(f"{text} {marker}" if marker else text))
     for table in section.tables:
         blocks.extend(_table_blocks(table))
     return blocks
 
 
+def _section_heading(section: ReportSection) -> str:
+    if section.display_number:
+        tag = f"  {section.tag}" if section.tag else ""
+        return f"{section.display_number}. {section.title}{tag}"
+    return section_display_heading(section.cell, section.title)
+
+
+def _summary_blocks(report: Report) -> list[NotionBlock]:
+    if not report.summary_items:
+        return []
+    rows: list[list[str]] = []
+    for index, item in enumerate(report.summary_items, start=1):
+        spec = SECTION_BY_ID.get(item.section_id)
+        rows.append(
+            [
+                f"{index:02d}",
+                item.text.strip(),
+                f"{spec.display_number}장" if spec is not None else "",
+            ]
+        )
+    return [_heading_2("핵심 요약"), _table_block(["#", "요약", "관련 장"], rows)]
+
+
 # ══════════════════════════════════════════════════════════
-# 출처 목록 — provenance.sources.render_sources()의 결과를 그대로 쓴다 (P3)
-# ★ 여기서 새로 포맷을 만들지 않는다 — 그러면 화면·노션이 따로 놀 수 있다.
+# 출처 목록 — 최종 보고서에 필요한 문서명·기준일·검증 상태만 표로 낸다.
 # ══════════════════════════════════════════════════════════
 
 
 def _source_list_blocks(citations: list[object]) -> list[NotionBlock]:
-    # Report.citations는 순환 참조를 피하려고 list[object]로 열어 뒀지만, 실제로는
-    # provenance.sources.Source 목록이다 (port.py 주석 참고).
-    sources = cast("list[Source]", citations)
-    rendered = render_sources(sources)
-    # 첫 줄(SOURCES_HEADER == "[출처]")은 위에서 heading_2로 이미 냈으므로 건너뛴다.
-    body_lines = rendered.splitlines()[1:]
-    return [_paragraph(line) for line in body_lines if line.strip()]
-
-
-# ══════════════════════════════════════════════════════════
-# 수집 현황 — 사용자 화면에는 «소스별»만 낸다 (result.html "어디서 가져왔나")
-# ══════════════════════════════════════════════════════════
-
-
-def _collection_table_block(sources: list[SourceStatus]) -> NotionBlock:
-    headers = list(constants.COLLECTION_TABLE_HEADERS)
-    rows = [
-        [s.name, constants.SOURCE_STATE_LABELS.get(s.state, s.state), s.detail]
-        for s in sources
+    sources: list[Source] = []
+    seen_numbers: set[int] = set()
+    for item in citations:
+        if not isinstance(item, Source) or item.number in seen_numbers:
+            continue
+        seen_numbers.add(item.number)
+        sources.append(item)
+    if not sources:
+        return []
+    rows: list[list[NotionCell]] = [
+        [
+            str(source.number),
+            _rich_text(_source_label(source), href=source.url),
+            _source_status(source),
+            source.location.strip() or "—",
+            _source_used_sections(source),
+        ]
+        for source in sources
     ]
-    return _table_block(headers, rows)
+    return [
+        _table_block(
+            ["#", "자료", "기준일·상태", "원문 위치", "본문 사용 장"],
+            rows,
+        )
+    ]
+
+
+def _source_label(source: Source) -> str:
+    label = (source.title or source.label).strip()
+    publisher = source.publisher.strip()
+    if publisher and publisher.casefold() not in label.casefold():
+        return f"{label} · {publisher}"
+    return label
+
+
+def _source_status(source: Source) -> str:
+    parts: list[str] = []
+    if source.published_at:
+        parts.append(f"{source.published_at} 보도")
+    elif source.disclosed_at:
+        parts.append(f"{source.disclosed_at} 공시")
+    elif source.collected_at:
+        parts.append(f"{source.collected_at} 확인")
+    else:
+        parts.append("기준일 미확인")
+    for value in (source.domain, source.source_type, source.fact_status):
+        cleaned = value.strip()
+        if cleaned and cleaned not in parts:
+            parts.append(cleaned)
+    return " · ".join(parts)
+
+
+def _source_used_sections(source: Source) -> str:
+    labels: list[str] = []
+    for section_id in source.used_in:
+        spec = SECTION_BY_ID.get(section_id)
+        label = f"{spec.display_number}장" if spec is not None else section_id.strip()
+        if label and label not in labels:
+            labels.append(label)
+    return " · ".join(labels) or "—"
 
 
 # ══════════════════════════════════════════════════════════
@@ -251,7 +258,7 @@ def _collection_table_block(sources: list[SourceStatus]) -> NotionBlock:
 
 
 def build_page_title(report: Report) -> str:
-    """노션 페이지 제목 — `회사명 · 직무 (YYYY-MM-DD)`.
+    """노션 페이지 제목 — `회사명 분석 보고서 (YYYY-MM-DD)`.
 
     정본: 확정/07_출력/2_규칙/01_배치와근거표기.md §파일명 규칙
 
@@ -260,49 +267,40 @@ def build_page_title(report: Report) -> str:
       (확정/07_출력/1_흐름/01_세형태.md §다시 내보내기).
     """
     date_part = f" ({report.generated_at})" if report.generated_at else ""
-    return f"{report.company} · {report.job}{date_part}"
+    return f"{report.company} 분석 보고서{date_part}"
 
 
 def build_blocks(report: Report, *, grade_note: str = "") -> list[NotionBlock]:
     """`Report` 하나를 노션 페이지에 넣을 블록 목록으로 바꾼다.
 
-    배치 순서는 화면과 같다 (확정/07_출력/2_규칙/01_배치와근거표기.md):
-        [회사명·부제] → [상단 라벨(부분 보고서만)] → [보고서 본문] → [출처] → [수집 현황]
+    배치 순서는 화면과 같다:
+        [회사명·보고서명] → [보고서 본문] → [출처와 검증 상태]
 
     Args:
         report: 화면에 낸 것과 같은 보고서 데이터.
-        grade_note: 상단 라벨에 쓸 문구. `report.grade`가 완성이 아닐 때만 쓰인다.
-            main.py가 화면(`grade_message()`)에 넘긴 것과 «같은 문자열»을 그대로
-            넘겨야 한다 — 여기서 다시 만들면 화면과 노션의 문구가 갈릴 수 있다 (P3).
+        grade_note: 이전 호출자와의 호환을 위해 남긴 인수. 완성도·작성 과정 문구는
+            최종 보고서에 넣지 않으므로 출력에는 사용하지 않는다.
 
     Returns:
         노션 API가 받는 block object 목록. 100개를 넘으면 부르는 쪽(`notion.py`)이
         나눠 보낸다 — 이 함수는 나누지 않는다(순수 변환만 한다).
     """
-    blocks: list[NotionBlock] = [
-        _heading_1(report.company),
-        _paragraph(_lede_text(report)),
-    ]
-    blocks.extend(_grade_blocks(report, grade_note))
+    # Notion도 화면·PDF와 같은 canonical 공개본만 표현한다.
+    report = build_published_report(report)
 
-    shown_requirements = False
+    blocks: list[NotionBlock] = [_heading_1(report.company), _heading_1("분석 보고서")]
+    lede = _lede_text(report)
+    if lede:
+        blocks.append(_paragraph(lede))
+    blocks.extend(_summary_blocks(report))
+
     for section in report.sections:
-        if section.cell == constants.REQUIREMENTS_CELL:
-            blocks.extend(_requirements_blocks(report.requirements))
-            shown_requirements = True
-            continue
         blocks.extend(_section_blocks(section))
-    if not shown_requirements:
-        # 기록에 5번 칸 자체가 없어도 요구역량은 빠뜨리지 않는다 (result.html과 동일).
-        blocks.extend(_requirements_blocks(report.requirements))
 
-    if report.citations:
+    source_blocks = _source_list_blocks(report.citations)
+    if source_blocks:
         blocks.append(_heading_2(constants.SOURCES_HEADING))
         blocks.append(_paragraph(constants.SOURCES_SUBTITLE))
-        blocks.extend(_source_list_blocks(report.citations))
-
-    if report.sources:
-        blocks.append(_heading_2(constants.COLLECTION_HEADING))
-        blocks.append(_collection_table_block(report.sources))
+        blocks.extend(source_blocks)
 
     return blocks

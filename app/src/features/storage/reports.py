@@ -19,19 +19,22 @@ from __future__ import annotations
 import datetime as dt
 import json
 import sqlite3
-from dataclasses import replace
+from dataclasses import fields, replace
 from typing import Any, Optional
 
 from src.core.constants import COUNTED_CELLS, HIDDEN_CELLS
 from src.features.grading.logic import grade_of
 from src.features.pipeline.port import (
+    FactRecord,
     Grade,
     Report,
     ReportSection,
     ReportTable,
     SourceStatus,
+    SummaryItem,
 )
 from src.features.provenance.sources import Source, SourceKind
+from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
 from src.features.storage.constants import TABLE_REPORTS
 
 # ══════════════════════════════════════════════════════════
@@ -46,6 +49,10 @@ def _table_to_dict(table: ReportTable) -> dict[str, Any]:
         "rows": [list(row) for row in table.rows],
         "cite": table.cite,
         "numeric": table.numeric,
+        "raw_rows": [list(row) for row in table.raw_rows],
+        "scale_divisor": table.scale_divisor,
+        "scale_places": table.scale_places,
+        "display_unit": table.display_unit,
     }
 
 
@@ -56,6 +63,10 @@ def _table_from_dict(data: dict[str, Any]) -> ReportTable:
         rows=[list(row) for row in data["rows"]],
         cite=data.get("cite", ""),
         numeric=bool(data.get("numeric", False)),
+        raw_rows=[list(row) for row in data.get("raw_rows", [])],
+        scale_divisor=str(data.get("scale_divisor", "")),
+        scale_places=int(data.get("scale_places", 0)),
+        display_unit=str(data.get("display_unit", "")),
     )
 
 
@@ -85,6 +96,11 @@ def _section_to_dict(section: ReportSection) -> dict[str, Any]:
         # ★ 검증된 표시용 글도 저장해야 서버 재시작·워드·노션에서 화면과 같다(P-117).
         #   문장별 출처를 잃지 않도록 문자열 하나가 아니라 2열 목록으로 저장한다.
         "prose_lines": [[text, cite] for text, cite in section.prose_lines],
+        # 회사 사실이 아닌 프로그램 제안 질문은 출처 문장과 별도 필드로 보존한다.
+        "guidance_lines": list(section.guidance_lines),
+        "display_number": section.display_number,
+        "tag": section.tag,
+        "fact_ids": list(section.fact_ids),
         "empty_reason": section.empty_reason,
         "tables": [_table_to_dict(t) for t in section.tables],
     }
@@ -97,6 +113,18 @@ def _section_from_dict(data: dict[str, Any]) -> ReportSection:
         lines=[(text, cite) for text, cite in data.get("lines", [])],
         # 옛 저장 보고서에는 키가 없다. 빈 목록으로 읽어 원문 보고서를 그대로 살린다.
         prose_lines=_prose_lines_from_dict(data),
+        guidance_lines=[
+            item.strip()
+            for item in data.get("guidance_lines", [])
+            if isinstance(item, str) and item.strip()
+        ],
+        display_number=str(data.get("display_number", "")),
+        tag=str(data.get("tag", "")),
+        fact_ids=[
+            item.strip()
+            for item in data.get("fact_ids", [])
+            if isinstance(item, str) and item.strip()
+        ],
         empty_reason=data.get("empty_reason", ""),
         tables=[_table_from_dict(t) for t in data.get("tables", [])],
     )
@@ -129,6 +157,20 @@ def _citation_to_dict(citation: object) -> dict[str, Any]:
         "collected_at": citation.collected_at,
         "published_at": citation.published_at,
         "domain": citation.domain,
+        "source_id": citation.source_id,
+        "title": citation.title,
+        "publisher": citation.publisher,
+        "host": citation.host,
+        "url": citation.url,
+        "document_id": citation.document_id,
+        "location": citation.location,
+        "source_type": citation.source_type,
+        "fact_status": citation.fact_status,
+        "used_in": list(citation.used_in),
+        "evidence_hashes": list(citation.evidence_hashes),
+        "domain_attestation_source_id": citation.domain_attestation_source_id,
+        "domain_attestation_evidence": citation.domain_attestation_evidence,
+        "provenance_seal": citation.provenance_seal,
     }
 
 
@@ -141,7 +183,76 @@ def _citation_from_dict(data: dict[str, Any]) -> Source:
         collected_at=data.get("collected_at", ""),
         published_at=data.get("published_at", ""),
         domain=data.get("domain", ""),
+        source_id=data.get("source_id", ""),
+        title=data.get("title", ""),
+        publisher=data.get("publisher", ""),
+        host=data.get("host", ""),
+        url=data.get("url", ""),
+        document_id=data.get("document_id", ""),
+        location=data.get("location", ""),
+        source_type=data.get("source_type", ""),
+        fact_status=data.get("fact_status", ""),
+        used_in=[
+            item.strip()
+            for item in data.get("used_in", [])
+            if isinstance(item, str) and item.strip()
+        ],
+        evidence_hashes=[
+            item.strip()
+            for item in data.get("evidence_hashes", [])
+            if isinstance(item, str) and item.strip()
+        ],
+        domain_attestation_source_id=str(
+            data.get("domain_attestation_source_id", "")
+        ).strip(),
+        domain_attestation_evidence=str(
+            data.get("domain_attestation_evidence", "")
+        ).strip(),
+        provenance_seal=str(data.get("provenance_seal", "")).strip(),
     )
+
+
+def _summary_to_dict(item: SummaryItem) -> dict[str, Any]:
+    return {
+        "text": item.text,
+        "section_id": item.section_id,
+        "fact_ids": list(item.fact_ids),
+        "evidence_text": item.evidence_text,
+        "verification_status": item.verification_status,
+        "verification_binding": item.verification_binding,
+        "support_terms": list(item.support_terms),
+    }
+
+
+def _summary_from_dict(data: dict[str, Any]) -> SummaryItem:
+    return SummaryItem(
+        text=str(data.get("text", "")),
+        section_id=str(data.get("section_id", "")),
+        fact_ids=[
+            item.strip()
+            for item in data.get("fact_ids", [])
+            if isinstance(item, str) and item.strip()
+        ],
+        evidence_text=str(data.get("evidence_text", "")),
+        verification_status=str(data.get("verification_status", "")),
+        verification_binding=str(data.get("verification_binding", "")),
+        support_terms=[
+            item.strip()
+            for item in data.get("support_terms", [])
+            if isinstance(item, str) and item.strip()
+        ],
+    )
+
+
+_FACT_FIELDS = tuple(item.name for item in fields(FactRecord))
+
+
+def _fact_to_dict(fact: FactRecord) -> dict[str, Any]:
+    return {name: getattr(fact, name) for name in _FACT_FIELDS}
+
+
+def _fact_from_dict(data: dict[str, Any]) -> FactRecord:
+    return FactRecord(**{name: data[name] for name in _FACT_FIELDS if name in data})
 
 
 def report_to_dict(report: Report) -> dict[str, Any]:
@@ -158,6 +269,12 @@ def report_to_dict(report: Report) -> dict[str, Any]:
         "cells": dict(report.cells),
         "shortfall_reasons": list(report.shortfall_reasons),
         "generated_at": report.generated_at,
+        "schema_version": report.schema_version,
+        "summary_items": [_summary_to_dict(item) for item in report.summary_items],
+        "fact_records": [_fact_to_dict(fact) for fact in report.fact_records],
+        "as_of_date": report.as_of_date,
+        "analysis_period": report.analysis_period,
+        "latest_performance_period": report.latest_performance_period,
     }
 
 
@@ -175,6 +292,20 @@ def report_from_dict(data: dict[str, Any]) -> Report:
         cells=dict(data.get("cells", {})),
         shortfall_reasons=list(data.get("shortfall_reasons", [])),
         generated_at=data.get("generated_at", ""),
+        schema_version=str(data.get("schema_version", "")),
+        summary_items=[
+            _summary_from_dict(item)
+            for item in data.get("summary_items", [])
+            if isinstance(item, dict)
+        ],
+        fact_records=[
+            _fact_from_dict(item)
+            for item in data.get("fact_records", [])
+            if isinstance(item, dict)
+        ],
+        as_of_date=str(data.get("as_of_date", "")),
+        analysis_period=str(data.get("analysis_period", "")),
+        latest_performance_period=str(data.get("latest_performance_period", "")),
     )
 
 
@@ -189,16 +320,21 @@ def report_from_json(text: str) -> Report:
 
 
 def _normalize_legacy_report(report: Report) -> Report:
-    """옛 저장 보고서를 현재 화면·등급 규칙으로 읽는다(P-119).
+    """옛 저장 보고서를 회사분석 전용 화면·등급 규칙으로 읽는다.
 
-    9번을 숨기기 전에 저장한 JSON에는 6·7·9·附 section과 그 칸의
-    판정값이 남아 있다. 그대로 읽으면 옛 9번이 화면·워드·노션에
-    다시 나오고, 화면에 없는 칸이 등급을 바꾸게 된다.
+    채용공고를 받던 시절의 JSON에는 5·6·7·8 section과 그 칸의 판정값이
+    남아 있다. 역직렬화 자체는 허용하되 현재 보고서에서는 직무 의존 칸을
+    제거한다. 회사 사실인 9·附는 보존한다.
 
     ★ DB의 JSON은 절대 덮어쓰지 않는다. `load()`가 돌려줄 메모리
     객체만 정규화하므로 원본을 다시 읽어 되돌릴 수 있다.
     새 규칙으로 저장된 보고서는 숨긴 칸이 없으므로 그대로 돌려준다.
     """
+    # v3의 내부 ID는 semantic ID이며, 숫자 5~8이 섞여 있더라도 레거시
+    # 채용 블록이라고 추정해 삭제하면 안 된다. schema가 명시된 자료는 원형 보존한다.
+    if report.schema_version == CANONICAL_SCHEMA_VERSION:
+        return report
+
     hidden = set(HIDDEN_CELLS)
     has_legacy_cells = any(section.cell in hidden for section in report.sections) or any(
         cell in hidden for cell in report.cells
@@ -275,6 +411,36 @@ def save(
         """,
         (report_id, corp_id, job, report_to_json(report), report.generated_at, stamp),
     )
+
+
+def insert_new(
+    conn: sqlite3.Connection,
+    report_id: str,
+    corp_id: str,
+    job: str,
+    report: Report,
+    *,
+    created_at: Optional[str] = None,
+) -> bool:
+    """새 공개 결과만 저장한다. 같은 ID의 기존 보고서는 절대 덮지 않는다."""
+    stamp = created_at or dt.datetime.now().isoformat(timespec="seconds")
+    cursor = conn.execute(
+        f"""
+        INSERT OR IGNORE INTO {TABLE_REPORTS}
+            (report_id, corp_id, job, payload_json, generated_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (report_id, corp_id, job, report_to_json(report), report.generated_at, stamp),
+    )
+    return cursor.rowcount == 1
+
+
+def exists(conn: sqlite3.Connection, report_id: str) -> bool:
+    """payload를 역직렬화하지 않고 보고서 ID의 존재 여부만 확인한다."""
+    row = conn.execute(
+        f"SELECT 1 FROM {TABLE_REPORTS} WHERE report_id = ?", (report_id,)
+    ).fetchone()
+    return row is not None
 
 
 def load(conn: sqlite3.Connection, report_id: str) -> Optional[Report]:

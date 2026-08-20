@@ -1,0 +1,898 @@
+"""화면 공통 값, 공유 권한, 요청 제한과 CSRF 검사."""
+
+from __future__ import annotations
+
+import datetime as dt
+import ipaddress
+import logging
+import os
+import sqlite3
+import time
+from typing import Optional
+from urllib.parse import urlsplit
+
+from fastapi import Request
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.templating import Jinja2Templates
+
+from src.core import clock, paths
+from src.core.citations import citation_number
+from src.core.constants import (
+    CELL_LABELS,
+    COMPANY_LOOKUP_FAILED_MESSAGE,
+    MAX_RETRY_INPUT,
+    RAW_SOURCE_LABEL,
+    RAW_SOURCE_NOTE,
+    section_display_parts,
+)
+from src.features.auth import constants as auth_constants
+from src.features.auth import google as auth_google
+from src.features.auth import logic as auth_logic
+from src.features.budget import logic as budget_logic
+from src.features.budget import spend_store
+from src.features.budget.constants import (
+    BUSY_MESSAGE,
+    RATE_LIMITED_MESSAGE,
+    RATE_MAX_RUNS,
+    RATE_WINDOW_SEC,
+)
+from src.features.business_candidate.logic import CandidateResolution
+from src.features.observability import admin_audit
+from src.features.pipeline.demo import DemoPipeline, available_companies
+from src.features.pipeline.port import CompanyLookupResult, Outcome, RunResult, UserInput
+from src.features.sharelink import allowlist as share_allow
+from src.features.sharelink import logic as share_logic
+from src.features.sharelink import store as share_store
+from src.features.sharelink import tracks as share_tracks
+from src.features.sharelink.constants import (
+    KEY_COOKIE_NAME,
+    LINK_BUDGET_EXHAUSTED_MESSAGE,
+    PUBLIC_NOT_ALLOWED_MESSAGE,
+)
+from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
+from src.features.storage import db as storage_db
+from src.web import evaluation_mode, paid_runtime, runtime
+from src.web.security import (
+    COMPANY_MAX_CHARS,
+    REGION_MAX_CHARS,
+)
+
+
+logger = logging.getLogger(__name__)
+templates = Jinja2Templates(directory=str(paths.TEMPLATES_DIR))
+
+
+def company_analysis_input(*, company: str, region: str) -> UserInput:
+    """회사 분석 전용 웹 요청을 기존 파이프라인 계약으로 옮긴다.
+
+    ``job``과 ``posting_text``는 저장 데이터·파이프라인의 하위 호환 필드라 구조는
+    유지하지만, 새 웹 요청에서는 사용자에게 받지도 않고 가짜 값으로 채우지도 않는다.
+    """
+    return UserInput(
+        company=company.strip(),
+        job="",
+        region=region.strip(),
+        posting_text="",
+    )
+
+
+def _sweep_jobs(now: float) -> None:
+    """순환 import 없이 작업 메모리 청소를 호출한다."""
+    from src.web import job_runtime  # noqa: PLC0415
+
+    job_runtime._sweep_jobs(now)
+
+def _ctx(request: Request, **kwargs) -> dict:
+    """모든 화면이 공통으로 쓰는 값.
+
+    ★ 로그인 상태를 «여기서» 싣는다. 화면마다 따로 넣으면 하나쯤 빠뜨리고,
+      그 화면만 「로그인 안 한 것처럼」 보이게 된다.
+    """
+    token = request.cookies.get(auth_constants.SESSION_COOKIE_NAME)
+    session = auth_logic.get_session(token)
+    csrf_secret = _request_csrf_secret(request)
+    evaluation = evaluation_mode.settings()
+    base = {
+        "cell_labels": CELL_LABELS,
+        "section_display_parts": section_display_parts,
+        "canonical_schema_version": CANONICAL_SCHEMA_VERSION,
+        # 내부 ``조각 N·종류``를 템플릿에서 직접 자르면 다른 출력과 다시 갈린다(P-127).
+        "citation_number": citation_number,
+        # 검증된 본문 아래의 근거 원문 문구 — 세 출력 형태가 core 값을 같이 쓴다(P-117).
+        "raw_source_label": RAW_SOURCE_LABEL,
+        "raw_source_note": RAW_SOURCE_NOTE,
+        "max_retry": MAX_RETRY_INPUT,
+        "company_max_chars": COMPANY_MAX_CHARS,
+        "region_max_chars": REGION_MAX_CHARS,
+        # 화면 머리의 배지가 «지금 진짜로 도는지»를 정직하게 말하게 한다.
+        "is_real": not isinstance(runtime._PIPELINE, DemoPipeline),
+        "evaluation_mode": evaluation.enabled,
+        "evaluation_paid_providers": evaluation.paid_providers_enabled,
+        "evaluation_per_run_cap_krw": evaluation.per_run_cap_krw,
+        "evaluation_daily_cap_krw": evaluation.daily_cap_krw,
+        "evaluation_business_day_label": evaluation.business_day_label,
+        # ⚠️ 이 값은 «보여주기»용이다. 진짜 차단은 require_admin()이 매 요청마다 한다.
+        "auth_email": session.email if session is not None else None,
+        "auth_is_admin": session.is_admin if session is not None else False,
+        "csrf_token": auth_logic.csrf_token_for_session(csrf_secret),
+        # 설정값 자체는 절대 싣지 않는다. 로그인 버튼이 지금 동작 가능한지만 알린다.
+        "auth_login_available": auth_google.credentials_configured(),
+    }
+    base.update(kwargs)
+    return base
+
+def _retry_screen(
+    request: Request,
+    user_input: UserInput,
+    retry: int,
+    rejected: bool,
+    candidate_resolution: CandidateResolution | None = None,
+    candidate_was_selected: bool = False,
+    candidate_search_available: bool = False,
+    candidate_search_grant: str = "",
+    candidate_search_cost_krw: float = 0.0,
+    evaluation_consent_grant: str = "",
+) -> HTMLResponse:
+    """회사명을 다시 받는 화면.
+
+    「못 찾음」과 「[아닙니다]」 둘 다 같은 화면으로 보낸다 — 사용자가 할 일이 같기 때문이다.
+    ★ 여기서 「대상 아님」이라고 단정하지 않는다. 이름을 아직 못 맞춘 것뿐이다.
+    """
+    candidate_technical_retry = bool(
+        candidate_resolution is not None
+        and candidate_resolution.provider_name == "DART"
+        and candidate_resolution.status.value
+        in {"unconfigured", "rate_limited", "timed_out", "failed"}
+    )
+    return templates.TemplateResponse(
+        request=request,
+        name="not_found.html",
+        context=_ctx(
+            request,
+            user_input=user_input,
+            retry=retry,
+            rejected=rejected,
+            # retry는 「지금까지 몇 번 찾아봤나」. 다음 시도가 상한을 넘으면 폼을 닫는다.
+            exhausted=(
+                not candidate_technical_retry and retry + 1 >= MAX_RETRY_INPUT
+            ),
+            candidate_technical_retry=candidate_technical_retry,
+            next_retry=(retry if candidate_technical_retry else retry + 1),
+            demo_companies=(
+                available_companies()
+                if isinstance(runtime._PIPELINE, DemoPipeline)
+                else []
+            ),
+            candidate_resolution=candidate_resolution,
+            candidate_was_selected=candidate_was_selected,
+            candidate_search_available=candidate_search_available,
+            candidate_search_grant=candidate_search_grant,
+            candidate_search_cost_krw=candidate_search_cost_krw,
+            evaluation_consent_grant=evaluation_consent_grant,
+            evaluation_workflow_id=evaluation_mode.issue_workflow_id(),
+        ),
+    )
+
+def _lookup_failed_screen(request: Request) -> HTMLResponse:
+    """기술 실패를 「회사를 못 찾음」으로 단정하지 않는 기존 중단 화면."""
+    return templates.TemplateResponse(
+        request=request,
+        name="stopped.html",
+        context=_ctx(
+            request,
+            result=RunResult(
+                outcome=Outcome.FAILED,
+                message=COMPANY_LOOKUP_FAILED_MESSAGE,
+            ),
+            show_quota_note=False,
+        ),
+    )
+
+def _load_active_share_link(
+    conn: sqlite3.Connection, key: str
+) -> Optional[share_store.ShareLink]:
+    """수동 삭제되지 않았고 자동 수명도 남은 링크만 권한으로 인정한다."""
+    link = share_store.load(conn, key)
+    if link is None or share_logic.is_share_link_expired(link.created_at):
+        return None
+    return link
+
+def _current_share_link(request: Request):
+    """이 손님이 «어느 회사 링크»로 들어왔는지 (P-94).
+
+    Args:
+        request: 들어온 요청.
+
+    Returns:
+        발급해 둔 링크 정보. 열쇠가 없거나 못 찾으면 None.
+
+    ★ 첫 화면이 그 회사를 «크게» 보여주기 위한 것이다 —
+      인사팀이 자기 회사 이름을 바로 보는 것이 이 방식의 핵심이다.
+    ★ 못 찾아도 **조용히 None**을 돌려준다. 링크가 닫혔다고 첫 화면까지
+      막으면, 인사팀에게는 그냥 「안 되는 사이트」가 된다.
+    """
+    key = (request.cookies.get(KEY_COOKIE_NAME) or "").strip().lower()
+    if not share_logic.is_valid_key(key):
+        return None
+    try:
+        with storage_db.connect() as conn:
+            return _load_active_share_link(conn, key)
+    except Exception:  # noqa: BLE001 — 링크를 못 읽어도 화면은 떠야 한다
+        logger.exception("열쇠 링크를 못 읽었습니다")
+        return None
+
+def _find_company_metered(user_input: UserInput) -> CompanyLookupResult:
+    """유료 알맹이는 계량 약속이 없으면 호출 자체를 하지 않는다."""
+    metered = getattr(runtime._PIPELINE, "find_company_metered", None)
+    if callable(metered):
+        result = metered(user_input)
+        if isinstance(result, CompanyLookupResult):
+            return result
+        raise TypeError("find_company_metered()가 약속한 결과 모양을 돌려주지 않았습니다")
+    if isinstance(runtime._PIPELINE, DemoPipeline):
+        return CompanyLookupResult(card=runtime._PIPELINE.find_company(user_input))
+    logger.error("유료 알맹이에 find_company_metered()가 없어 회사 식별을 막았습니다")
+    return CompanyLookupResult(card=None, failed=True)
+
+
+def _find_company_by_ref_metered(
+    user_input: UserInput, candidate_ref: str
+) -> CompanyLookupResult:
+    """서명 검증을 마친 DART-local 후보를 고유번호 그대로 다시 확인한다."""
+    metered = getattr(runtime._PIPELINE, "find_company_by_ref_metered", None)
+    if not callable(metered):
+        logger.error("유료 알맹이에 find_company_by_ref_metered()가 없어 후보 선택을 막았습니다")
+        return CompanyLookupResult(card=None, failed=True)
+    result = metered(user_input, candidate_ref)
+    if isinstance(result, CompanyLookupResult):
+        return result
+    raise TypeError("find_company_by_ref_metered()가 약속한 결과 모양을 돌려주지 않았습니다")
+
+def _raw_share_key(request: Request) -> str:
+    """쿠키 열쇠가 실제 발급돼 지금도 살아 있을 때만 돌려준다.
+
+    ★ 16진수 모양만 보면 공격자가 쿠키를 바꿀 때마다 새 3,000원 통장을 만들 수
+      있다. 발급 저장소에 없거나 이미 삭제된 키는 PUBLIC(0원)으로 되돌린다.
+    """
+    key = (request.cookies.get(KEY_COOKIE_NAME) or "").strip().lower()
+    if not share_logic.is_valid_key(key):
+        return ""
+    try:
+        with storage_db.connect() as conn:
+            return key if _load_active_share_link(conn, key) is not None else ""
+    except Exception:  # noqa: BLE001 — 링크 확인 실패는 권한을 주지 않는 쪽으로
+        logger.exception("열쇠 링크를 확인하지 못해 공개 손님으로 봅니다")
+        return ""
+
+def _track_of(request: Request) -> tuple[share_tracks.Track, str, float]:
+    """이 손님이 «어느 갈래»이고, «어느 통장»에서, «얼마»까지 쓸 수 있는가.
+
+    Args:
+        request: 들어온 요청.
+
+    Returns:
+        (갈래, 통장 이름, 하루 상한).
+
+    ★ **로그인만으로는 아무 권한도 안 준다** (P-95).
+      구글 로그인은 「누구인가」만 알려준다. 「써도 되는가」는 **초대 명단**이 정한다.
+      이걸 안 나누면 인터넷의 아무나 로그인해서 돈을 쓴다.
+    ★ 명단을 못 읽으면 «초대 안 된 사람»으로 본다 — 안전한 쪽으로 틀린다.
+    """
+    # 이 전용 통장은 실행기·환경 플래그만으로 열리지 않는다. 요청 URL, 실제 client와
+    # server socket이 모두 loopback이고 프록시 흔적도 없는 경우에만 쓴다.
+    if evaluation_mode.enabled() and _strict_loopback_http_request(request):
+        return (
+            share_tracks.Track.ADMIN,
+            evaluation_mode.LOCAL_BUCKET,
+            evaluation_mode.settings().daily_cap_krw,
+        )
+
+    token = request.cookies.get(auth_constants.SESSION_COOKIE_NAME)
+    email = auth_logic.current_email(token) or ""
+    is_admin = auth_logic.is_admin_session(token)
+
+    is_member = False
+    if email and not is_admin:
+        try:
+            with storage_db.connect() as conn:
+                is_member = share_allow.is_allowed(conn, email)
+        except Exception:  # noqa: BLE001 — 못 읽으면 «안 된 사람»으로 본다
+            logger.exception("초대 명단을 못 읽었습니다 — 초대 안 된 것으로 봅니다")
+
+    key = _raw_share_key(request)
+    track = share_tracks.decide_track(
+        email=email, is_admin=is_admin, is_member=is_member, share_key=key
+    )
+    bucket = share_tracks.bucket_of(track, email=email, share_key=key)
+    return track, bucket, share_tracks.budget_of(track)
+
+
+def require_share_scope(
+    request: Request,
+    *,
+    company: str,
+    job: str = "",
+    resolved_track: Optional[tuple[share_tracks.Track, str, float]] = None,
+) -> Optional[HTMLResponse]:
+    """회사별 링크 권한을 발급 당시 회사에 서버에서 묶는다.
+
+    관리자와 별도 초대 회원은 자기 고유 권한을 쓰므로 제한하지 않는다. 익명 또는
+    미초대 사용자가 ``LINK`` 권한을 쓰는 경우에만 쿠키가 가리키는 현재 DB row와
+    제출값을 비교한다. HTML의 readonly 속성은 안내일 뿐이며 이 검사가 인가 경계다.
+    """
+    track, bucket, _cap = resolved_track or _track_of(request)
+    if track is not share_tracks.Track.LINK:
+        return None
+    try:
+        with storage_db.connect() as conn:
+            link = _load_active_share_link(conn, bucket)
+    except Exception:  # noqa: BLE001 — 범위를 확인하지 못하면 링크 권한을 쓰지 못한다
+        logger.exception("회사별 링크 범위를 확인하지 못했습니다")
+        return templates.TemplateResponse(
+            request=request,
+            name="share_scope_error.html",
+            context=_ctx(
+                request,
+                scope_error=(
+                    "링크의 회사 범위를 지금 확인할 수 없습니다. "
+                    "잠시 후 같은 링크에서 다시 시도해 주세요."
+                ),
+            ),
+            status_code=503,
+        )
+    if link is None:
+        return templates.TemplateResponse(
+            request=request,
+            name="share_scope_error.html",
+            context=_ctx(
+                request,
+                scope_error="이 회사 링크는 더 이상 사용할 수 없습니다.",
+            ),
+            status_code=403,
+        )
+    # ``job``은 옛 링크·호출부를 깨지 않기 위한 인자일 뿐 새 권한 범위가 아니다.
+    # 회사 분석 전용 전환 뒤에는 직무 입력이 없으므로 회사명만 동일하면 된다.
+    if share_logic.scope_matches(link_company=link.company, company=company):
+        return None
+    return templates.TemplateResponse(
+        request=request,
+        name="share_scope_error.html",
+        context=_ctx(
+            request,
+            scope_error=(
+                f"이 링크는 {link.company} 분석에만 사용할 수 있습니다."
+            ),
+        ),
+        status_code=403,
+    )
+
+def _guard_run(
+    request: Request,
+    *,
+    count_start: bool = True,
+    owns_slot: bool = False,
+    resolved_track: Optional[tuple[share_tracks.Track, str, float]] = None,
+) -> Optional[HTMLResponse]:
+    """조사를 시작해도 되는지 보고, 안 되면 «막는 화면»을 돌려준다.
+
+    Args:
+        request: 들어온 요청.
+
+    Returns:
+        막아야 하면 보여줄 화면. 시작해도 되면 None.
+
+    ★ 통과할 때만 횟수를 적는다 — 거절당한 요청까지 세면
+      「돈도 안 썼는데 차단」이 된다 (budget/logic.py 참고).
+    """
+    now = time.monotonic()
+    _sweep_jobs(now)
+
+    # 미리보기는 화면만 확인하는 모드다. 후보 검색을 포함한 외부 provider 진입 전에
+    # 서버에서도 닫아 HTML의 disabled 속성을 우회해도 비용이 나가지 않게 한다.
+    if evaluation_mode.enabled() and not evaluation_mode.paid_providers_enabled():
+        return _throttled(
+            request,
+            evaluation_mode.PREVIEW_BLOCKED_MESSAGE,
+            "evaluation-preview",
+        )
+
+    # ★ 예산은 «링크마다» 센다 (P-94, 2026-08-16 사용자 결정).
+    #   전체 상한은 두지 않는다 — 대신 링크 하나가 하루에 쓸 수 있는 몫을 정했다.
+    #   ⚠️ 그러므로 **최악의 하루 지출 = 링크당 상한 × 살아 있는 링크 수**다.
+    #     링크를 몇 개 뿌렸는지가 곧 예산이다 (관리 화면에서 확인).
+    costs_money = not isinstance(runtime._PIPELINE, DemoPipeline)
+    track, bucket, cap = resolved_track or _track_of(request)
+    # 횟수 제한도 권한 통장의 지문을 쓴다. 프록시가 전달한 IP는 신뢰 경계가
+    # 아니므로 X-Forwarded-For를 바꿔도 새 횟수 통장을 만들 수 없다.
+    rate_key = spend_store.bucket_id(bucket)
+    stored_bucket = rate_key
+    with paid_runtime._SLOT_LOCK:
+        unresolved = (
+            clock.today_kst().isoformat(), stored_bucket
+        ) in paid_runtime._UNRESOLVED_BUCKETS
+    # 메모리 장부 모양을 바꾸기 전부터 있던 호출부·운영 중 갱신을 안전하게 잇는다.
+    # 새 원장 복원값은 지문 키만 쓰고, 원문 키가 실제로 있을 때만 옛 값을 읽는다.
+    if (
+        share_logic.spent_for(
+            paid_runtime._LINK_SPEND, stored_bucket, clock.today_kst()
+        ) <= 0
+        and share_logic.spent_for(
+            paid_runtime._LINK_SPEND, bucket, clock.today_kst()
+        ) > 0
+    ):
+        stored_bucket = bucket
+    budget_exhausted = costs_money and not share_logic.can_start_new_run(
+        paid_runtime._LINK_SPEND, stored_bucket, clock.today_kst(), cap
+    )
+    if count_start and not budget_logic.rate_ok(
+        paid_runtime._RATE_HISTORY,
+        rate_key,
+        now,
+        window_sec=RATE_WINDOW_SEC,
+        max_runs=RATE_MAX_RUNS,
+    ):
+        return _throttled(request, RATE_LIMITED_MESSAGE, "rate")
+    if paid_runtime._slot_is_full(track, bucket, owns_slot=owns_slot):
+        return _throttled(request, BUSY_MESSAGE, "busy")
+    if costs_money and not paid_runtime._BUDGET_STORE_HEALTHY:
+        # 원장이 고장 난 채 열어 두면 재시작 뒤 상한을 보장할 수 없다.
+        return _throttled(request, BUSY_MESSAGE, "budget-store")
+    if costs_money and unresolved:
+        # provider 응답 전에 서버가 죽었거나 API 예외로 과금 여부가 불명확하다.
+        # 다른 통장은 살리고 이 통장만 사람이 원장을 확인할 때까지 닫는다.
+        return _throttled(request, BUSY_MESSAGE, "budget-unresolved")
+    if budget_exhausted:
+        # ★ 예산이 다 돼도 **이미 만들어 둔 보고서는 계속 열린다** —
+        #   그건 파이프라인을 안 거치고 저장소에서 바로 꺼내므로 0원이다.
+        #   막는 것은 «새로 AI를 부르는 일»뿐이다 (2026-08-16 사용자 결정).
+        # ★ 모르는 손님(상한 0원)에게는 «다른 말»을 한다 — 「다 썼다」가 아니라
+        #   「이 기능은 초대받은 분만」이다. 사실이 다르면 안내도 달라야 한다.
+        message = (
+            PUBLIC_NOT_ALLOWED_MESSAGE
+            if track is share_tracks.Track.PUBLIC
+            else LINK_BUDGET_EXHAUSTED_MESSAGE
+        )
+        return _throttled(request, message, f"budget:{track.value}")
+
+    # ★ 통과할 때만 횟수를 적는다 — 거절당한 요청까지 세면
+    #   「돈도 안 썼는데 차단」이 된다 (budget/logic.py 참고).
+    if count_start:
+        budget_logic.record_start(paid_runtime._RATE_HISTORY, rate_key, now)
+    return None
+
+def _throttled(request: Request, message: str, kind: str) -> HTMLResponse:
+    """조사를 막았을 때 보여줄 화면.
+
+    Args:
+        request: 들어온 요청.
+        message: 사용자에게 보여줄 말.
+        kind: 왜 막았는지 (`rate` | `busy` | `budget`). 로그·화면 구분용.
+
+    ★ 429는 「지금은 안 된다」이지 「고장」이 아니다. 화면이 그걸 분명히 말한다.
+    """
+    logger.info("조사를 막았습니다: %s", kind)
+    return templates.TemplateResponse(
+        request=request,
+        name="throttled.html",
+        context=_ctx(request, throttle_message=message, throttle_kind=kind),
+        status_code=429,
+    )
+
+def _cookie_secure(request: Request) -> bool:
+    """요청별 쿠키의 ``Secure`` 여부를 fail-closed로 정한다.
+
+    ``AUTH_COOKIE_INSECURE=1``은 그 자체로 쿠키를 약하게 만들지 않는다. 실제 HTTP
+    요청의 URL·서버 소켓·클라이언트 소켓이 모두 loopback이고 프록시 전달 흔적이
+    없는 로컬 개발 요청에서만 예외를 허용한다. 요청 정보가 없거나 모호하면 언제나
+    ``Secure``를 유지한다.
+    """
+    client_host = request.client.host if request.client is not None else ""
+    server = request.scope.get("server")
+    server_host = (
+        str(server[0])
+        if isinstance(server, (tuple, list)) and len(server) >= 1
+        else ""
+    )
+    forwarded = any(
+        request.headers.get(name, "").strip()
+        for name in (
+            "forwarded",
+            "x-forwarded-for",
+            "x-forwarded-host",
+            "x-forwarded-proto",
+        )
+    )
+    allow_local_http = bool(
+        os.environ.get(auth_constants.ENV_COOKIE_INSECURE, "").strip() == "1"
+        and str(request.scope.get("scheme", "")).lower() == "http"
+        and _request_targets_loopback(request)
+        and _is_loopback_hostname(server_host)
+        and _is_loopback_hostname(client_host)
+        and not forwarded
+    )
+    return not allow_local_http
+
+
+def _strict_loopback_http_request(request: Request) -> bool:
+    """프록시 해석 없이 실제 로컬 HTTP 소켓이라고 확인되는 요청만 허용한다."""
+    client_host = request.client.host if request.client is not None else ""
+    server = request.scope.get("server")
+    server_host = (
+        str(server[0])
+        if isinstance(server, (tuple, list)) and len(server) >= 1
+        else ""
+    )
+    forwarded = any(
+        request.headers.get(name, "").strip()
+        for name in (
+            "forwarded",
+            "x-forwarded-for",
+            "x-forwarded-host",
+            "x-forwarded-proto",
+        )
+    )
+    return bool(
+        str(request.scope.get("scheme", "")).lower() == "http"
+        and _request_targets_loopback(request)
+        and _is_loopback_hostname(server_host)
+        and _is_loopback_hostname(client_host)
+        and not forwarded
+    )
+
+def _admin_audit_unavailable(request: Request) -> HTMLResponse:
+    """감사기록 자체를 만들 수 없으면 관리자 기능을 안전하게 닫는다."""
+    response = HTMLResponse(
+        '<div role="alert"><strong>관리자 요청을 기록할 수 없습니다.</strong> '
+        "잠시 후 다시 시도해주세요.</div>",
+        status_code=503,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Request-ID"] = admin_audit.request_id(request)
+    return response
+
+
+def _audit_admin_authorization(
+    request: Request, *, action: str, target: str, allowed: bool
+) -> Optional[HTMLResponse]:
+    try:
+        admin_audit.emit(
+            request,
+            action=action,
+            target=target,
+            outcome="allowed" if allowed else "denied",
+            reason="authorization_ok" if allowed else "authorization_denied",
+        )
+    except Exception:  # noqa: BLE001 — 감사 sink 실패는 관리자 기능을 열지 않는다
+        logger.error("관리자 권한 감사기록을 남기지 못했습니다")
+        return _admin_audit_unavailable(request)
+    return None
+
+
+def require_admin(
+    request: Request,
+    *,
+    action: str = "admin.authorize",
+    target: str = "",
+) -> Optional[Response]:
+    """관리자가 아니면 되돌릴 응답, 관리자면 None.
+
+    ★ **매 요청마다 서버에서 다시 판정한다.** 버튼을 숨기는 것은 권한이 아니다
+      (기획서 07_출력/4_근거 §4 · 성공기준 P4 「0건 고정」).
+    """
+    token = request.cookies.get(auth_constants.SESSION_COOKIE_NAME)
+    allowed = auth_logic.is_admin_session(token)
+    audit_target = target or admin_audit.target_id("route", request.url.path)
+    audit_blocked = _audit_admin_authorization(
+        request,
+        action=action,
+        target=audit_target,
+        allowed=allowed,
+    )
+    if audit_blocked is not None:
+        return audit_blocked
+    if not allowed:
+        response = RedirectResponse("/auth/not-admin", status_code=303)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Request-ID"] = admin_audit.request_id(request)
+        return response
+    return None
+
+def _request_csrf_secret(request: Request) -> str:
+    """검증된 권한 쿠키 중 CSRF 토큰의 비밀로 쓸 값을 하나 고른다.
+
+    로그인 세션을 먼저 고정한다. 로그인과 링크 쿠키가 함께 있을 때 화면과 검사가
+    서로 다른 비밀을 쓰면 정상 폼이 깨지고, 공격자가 더 약한 쪽을 고를 수도 있다.
+    쿠키 문자열만 그럴듯한 것은 비밀로 인정하지 않는다. 공격자가 자기가 정한 쿠키와
+    공개된 HMAC 식으로 토큰까지 계산해 유료 입구를 통과하는 우회를 막기 위해서다.
+    """
+    session_secret = request.cookies.get(auth_constants.SESSION_COOKIE_NAME) or ""
+    if session_secret:
+        try:
+            if auth_logic.get_session(session_secret) is not None:
+                return session_secret
+        except Exception:  # noqa: BLE001 — 검증 저장소 장애는 권한을 주지 않는 쪽으로
+            logger.exception("CSRF 세션을 확인하지 못했습니다")
+    if evaluation_mode.enabled() and _strict_loopback_http_request(request):
+        # 로그인 없는 로컬 평가도 same-origin만으로 끝내지 않고, 화면을 실제로 연
+        # 브라우저만 알 수 있는 프로세스 난수 파생 폼 토큰까지 요구한다.
+        return evaluation_mode.csrf_secret()
+    # 모양만 맞는 링크도 안 된다. 현재 DB에 있고 만료·삭제되지 않은 링크만 쓴다.
+    return _raw_share_key(request)
+
+def _effective_http_origin(
+    scheme: str, hostname: Optional[str], port: Optional[int]
+) -> tuple[str, str, int] | None:
+    """HTTP(S) 출처를 (scheme, host, effective port)로 정규화한다."""
+    normalized_scheme = scheme.lower()
+    if normalized_scheme not in {"http", "https"} or not hostname:
+        return None
+    effective_port = port
+    if effective_port is None:
+        effective_port = 443 if normalized_scheme == "https" else 80
+    return normalized_scheme, hostname.lower(), effective_port
+
+def _csrf_origin_matches(request: Request) -> bool:
+    """브라우저가 Origin을 보냈다면 요청의 전체 HTTP(S) 출처와 같아야 한다."""
+    origin = request.headers.get("origin", "").strip()
+    if not origin:
+        return True
+    try:
+        parsed = urlsplit(origin)
+        # Origin 헤더는 경로·인증정보·쿼리·fragment가 없는 직렬화된 출처여야 한다.
+        if (
+            parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+        ):
+            return False
+        supplied = _effective_http_origin(parsed.scheme, parsed.hostname, parsed.port)
+        current = _effective_http_origin(
+            request.url.scheme, request.url.hostname, request.url.port
+        )
+    except (TypeError, ValueError):
+        return False
+    return supplied is not None and supplied == current
+
+
+def _is_loopback_hostname(hostname: str) -> bool:
+    normalized = hostname.strip().lower().rstrip(".")
+    if normalized == "localhost" or normalized.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _request_targets_loopback(request: Request) -> bool:
+    """로컬 미리보기 주소인지 확인한다.
+
+    이 값은 익명 ``DemoPipeline``의 무료 화면 흐름에만 쓰인다. Render 같은 공개
+    호스트, 유효한 로그인 세션·초대 링크, 실제 조사에는 예외를 주지 않는다.
+    """
+    return _is_loopback_hostname(request.url.hostname or "")
+
+
+def _local_demo_origin_matches(request: Request) -> bool:
+    """로컬 데모에서 허용할 브라우저 Origin 차이만 좁게 판정한다."""
+    if not _request_targets_loopback(request):
+        return False
+
+    origin = request.headers.get("origin", "").strip()
+    if origin == "null":
+        return True
+    # Origin 표준에는 끝 슬래시가 없지만 일부 로컬 도구가 한 개를 붙인다.
+    if origin.endswith("/"):
+        origin = origin[:-1]
+    try:
+        parsed = urlsplit(origin)
+        if (
+            parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+        ):
+            return False
+        supplied = _effective_http_origin(parsed.scheme, parsed.hostname, parsed.port)
+        current = _effective_http_origin(
+            request.url.scheme, request.url.hostname, request.url.port
+        )
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        supplied is not None
+        and current is not None
+        and supplied[0] == current[0]
+        and supplied[2] == current[2]
+        and _is_loopback_hostname(supplied[1])
+    )
+
+def _csrf_rejected() -> HTMLResponse:
+    response = HTMLResponse(
+        "요청을 확인할 수 없습니다. 화면을 새로고침해 주세요.",
+        status_code=403,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+def require_csrf(request: Request, received: str) -> Optional[HTMLResponse]:
+    """현재 세션의 숨은 폼 토큰과 선택적 Origin을 함께 확인한다."""
+    session_token = request.cookies.get(auth_constants.SESSION_COOKIE_NAME)
+    try:
+        session_is_active = auth_logic.get_session(session_token) is not None
+    except Exception:  # noqa: BLE001 — 세션 저장소를 못 읽으면 변경 권한을 주지 않는다
+        logger.exception("CSRF 세션 유효성을 확인하지 못했습니다")
+        session_is_active = False
+    if (
+        not session_is_active
+        or not _csrf_origin_matches(request)
+        or not auth_logic.csrf_token_matches(session_token, received)
+    ):
+        return _csrf_rejected()
+    return None
+
+def require_analysis_action_csrf(
+    request: Request, received: str
+) -> Optional[HTMLResponse]:
+    """회사 확인·거절·조사 시작의 권한 쿠키를 CSRF로 묶는다.
+
+    세션이나 초대 링크 쿠키가 있으면 그 HttpOnly 비밀에서 파생한 토큰이 반드시
+    필요하다. 아무 권한 쿠키도 없는 데모 손님은 돈·권한을 쓸 수 없으므로 토큰 없이
+    허용하되, 브라우저가 보낸 Origin은 여전히 같은 출처여야 한다.
+    """
+    origin_matches = _csrf_origin_matches(request)
+    secret = _request_csrf_secret(request)
+    if evaluation_mode.enabled():
+        # 유료 로컬 평가는 exact same-origin Origin, 실제 loopback 소켓, 화면에서
+        # 발급한 프로세스 난수 파생 토큰을 모두 요구한다. Origin 누락/null 호환은
+        # 무료 DemoPipeline에만 남긴다.
+        origin = request.headers.get("origin", "").strip()
+        return (
+            None
+            if (
+                origin
+                and origin != "null"
+                and origin_matches
+                and _strict_loopback_http_request(request)
+                and auth_logic.csrf_token_matches(secret, received)
+            )
+            else _csrf_rejected()
+        )
+    if secret:
+        return (
+            None
+            if origin_matches and auth_logic.csrf_token_matches(secret, received)
+            else _csrf_rejected()
+        )
+    if isinstance(runtime._PIPELINE, DemoPipeline):
+        # 로컬 데모는 외부 호출·비용·권한 변경이 전혀 없다. 일부 브라우저가
+        # localhost/127.0.0.1을 섞거나 Origin:null을 보내도 미리보기만은 쓸 수
+        # 있게 한다. 배포 주소에서는 기존 same-origin 검사를 그대로 지킨다.
+        return (
+            None
+            if origin_matches or _local_demo_origin_matches(request)
+            else _csrf_rejected()
+        )
+    return _csrf_rejected()
+
+
+def require_evaluation_consent(
+    request: Request, received: str
+) -> Optional[HTMLResponse]:
+    """실시간 평가의 외부 호출을 서버가 검증한 화면 동의에 묶는다."""
+    if not evaluation_mode.enabled():
+        return None
+    if not evaluation_mode.paid_providers_enabled():
+        return _throttled(
+            request,
+            evaluation_mode.PREVIEW_BLOCKED_MESSAGE,
+            "evaluation-preview",
+        )
+    if evaluation_mode.consent_granted(received):
+        return None
+    return _evaluation_consent_required_response(request)
+
+
+def _evaluation_consent_required_response(request: Request) -> HTMLResponse:
+    """동의 누락을 provider를 부르지 않는 친화적 422 화면으로 돌려준다."""
+    response = templates.TemplateResponse(
+        request=request,
+        name="evaluation_consent_required.html",
+        context=_ctx(request),
+        status_code=422,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def evaluation_consent_roundtrip(
+    request: Request,
+    *,
+    user_input: UserInput,
+    bucket: str,
+    received: str,
+    grant: str,
+    workflow_id: str,
+    allow_issue: bool,
+) -> tuple[Optional[HTMLResponse], str]:
+    """첫 체크를 짧은 서버 서명으로 바꾸고 후속 폼은 그 서명만 검증한다."""
+    if not evaluation_mode.enabled():
+        return None, ""
+    if not evaluation_mode.paid_providers_enabled():
+        return (
+            _throttled(
+                request,
+                evaluation_mode.PREVIEW_BLOCKED_MESSAGE,
+                "evaluation-preview",
+            ),
+            "",
+        )
+    stored_bucket = spend_store.bucket_id(bucket)
+    fields = {
+        "company": user_input.company,
+        "job": user_input.job,
+        "region": user_input.region,
+        "posting_text": user_input.posting_text,
+        "bucket_id": stored_bucket,
+    }
+    if allow_issue:
+        if (
+            evaluation_mode.consent_granted(received)
+            and evaluation_mode.consume_workflow_id(workflow_id)
+        ):
+            return None, evaluation_mode.issue_consent_grant(
+                **fields,
+                workflow_id=workflow_id,
+                transition=evaluation_mode.CONSENT_TRANSITION_CONTINUE,
+            )
+        return _evaluation_consent_required_response(request), ""
+    if evaluation_mode.consent_grant_valid(
+        grant,
+        **fields,
+        expected_transition=evaluation_mode.CONSENT_TRANSITION_CONTINUE,
+    ):
+        return None, grant
+    return _evaluation_consent_required_response(request), ""
+
+def require_admin_action(
+    request: Request,
+    csrf_token: str,
+    *,
+    action: str = "admin.state_change",
+    target: str = "",
+) -> Optional[Response]:
+    """상태를 바꾸는 관리자 요청에 권한과 CSRF를 같은 입구에서 적용한다."""
+    audit_target = target or admin_audit.target_id("route", request.url.path)
+    blocked = require_admin(request, action=action, target=audit_target)
+    if blocked is not None:
+        return blocked
+    blocked = require_csrf(request, csrf_token)
+    if blocked is None:
+        try:
+            admin_audit.emit(
+                request,
+                action=action,
+                target=audit_target,
+                outcome="attempt",
+                reason="authorization_and_csrf_ok",
+            )
+        except Exception:  # noqa: BLE001 — 기록되지 않은 관리자 변경은 시작하지 않는다
+            logger.error("관리자 변경 시도 감사기록을 남기지 못했습니다")
+            return _admin_audit_unavailable(request)
+        return None
+    try:
+        admin_audit.emit(
+            request,
+            action=action,
+            target=audit_target,
+            outcome="denied",
+            reason="csrf_denied",
+        )
+    except Exception:  # noqa: BLE001 — 이미 거절된 요청은 계속 거절하되 원문은 남기지 않는다
+        logger.error("관리자 CSRF 거절 감사기록을 남기지 못했습니다")
+        return _admin_audit_unavailable(request)
+    blocked.headers["X-Request-ID"] = admin_audit.request_id(request)
+    return blocked

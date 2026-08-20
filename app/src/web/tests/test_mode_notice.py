@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from src.features.pipeline.demo import DemoPipeline
 from src.web import main
+from src.web import runtime
 from src.web.tests._visible_text import class_count
 
 
@@ -32,7 +33,7 @@ def _첫화면(client: TestClient) -> str:
 
 
 def test_데모_모드에서는_데모라고_말한다(client: TestClient, monkeypatch):
-    monkeypatch.setattr(main, "_PIPELINE", DemoPipeline())
+    monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
 
     html = _첫화면(client)
 
@@ -41,7 +42,7 @@ def test_데모_모드에서는_데모라고_말한다(client: TestClient, monke
 
 def test_진짜_조사_모드에서는_데모라고_말하지_않는다(client: TestClient, monkeypatch):
     """★ P-79 그 자체. 돈이 나가는데 「데모」라고 하면 안 된다."""
-    monkeypatch.setattr(main, "_PIPELINE", _가짜진짜알맹이())
+    monkeypatch.setattr(runtime, "_PIPELINE", _가짜진짜알맹이())
 
     html = _첫화면(client)
 

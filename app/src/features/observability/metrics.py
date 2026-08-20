@@ -31,7 +31,7 @@ from src.features.observability.constants import (
     RECENT_LIMIT,
 )
 from src.core.constants import REPLAY_MODEL_MARK
-from src.features.observability.records import RunRecord
+from src.features.observability.records import RunRecord, uses_legacy_cell_contract
 
 
 @dataclass(frozen=True)
@@ -98,7 +98,7 @@ def build_dashboard(
 
     ★ **비용만은 데모 기록을 빼고 센다** (문제로그 P-84).
       데모는 저장된 결과를 되돌려 줄 뿐 AI를 안 부른다 — **0원이다.**
-      옛 데모 기록에는 시제품이 «옛날에» 쓴 돈이 들어 있어, 그대로 합치면
+      옛 데모 기록에는 이전 조사 때 쓴 돈이 들어 있어, 그대로 합치면
       실측 **791건 34,222원** 대 **진짜 지출 약 750원**처럼 45배로 부풀었다.
       ⚠️ **건수(`total`·`today`)는 그대로 센다** — 데모도 «실행»은 실행이다.
       틀린 것은 「얼마 썼나」뿐이므로, 고치는 것도 그 한 줄뿐이다.
@@ -173,13 +173,19 @@ def _build_grades(records: list[RunRecord]) -> dict[str, int]:
 
 
 def _build_cell_fill_rate(records: list[RunRecord]) -> list[tuple[str, float]]:
-    """세는 칸 6개가 각각 몇 %에서 채워지는지 — 완주한 건에서만 의미가 있다.
+    """canonical 9장이 각각 몇 %에서 채워지는지 계산한다.
 
     ★ 완주하지 못한 요청은 칸 판정 자체가 없다(`cells_missing`이 그냥 빈 리스트인
       기본값일 뿐, 「다 채웠다」는 뜻이 아니다). 섞으면 채움률이 부풀어 오른다.
+      구형 6칸 완주 기록도 새 9장의 채움 여부를 알 수 없으므로 분모에서
+      뺀다. 옛 숫자 칸을 새 의미 ID로 추정하지 않는다.
       완주 건이 하나도 없으면 잴 수 없으므로 빈 목록을 돌려준다(0%로 지어내지 않는다).
     """
-    completed = [r for r in records if r.end_step == END_STEP_COMPLETE]
+    completed = [
+        r
+        for r in records
+        if r.end_step == END_STEP_COMPLETE and not uses_legacy_cell_contract(r)
+    ]
     if not completed:
         return []
     total = len(completed)
@@ -193,13 +199,15 @@ def _build_cell_fill_rate(records: list[RunRecord]) -> list[tuple[str, float]]:
 
 
 def _with_current_cells(record: RunRecord) -> RunRecord:
-    """집계에 직접 넘어온 옛 이력도 현재 6칸 규칙으로 재해석한다.
+    """집계에 직접 넘어온 기록을 해당 칸 계약으로 정규화한다.
 
     보통은 `read_records()`가 먼저 같은 일을 한다. 다만 집계 함수를
-    다른 코드가 직접 부르거나 시험에서 옛 모양을 넘겨도 9번이
-    대시보드에 되살아나지 않게 하는 두 번째 안전핀이다.
+    다른 코드가 직접 부르는 경우도 있다. 구형 6칸은 그대로 보존하고,
+    canonical 기록만 9개 의미 ID 순서로 정규화한다.
     """
     if not record.grade:
+        return record
+    if uses_legacy_cell_contract(record):
         return record
     missing_set = set(record.cells_missing)
     missing = [cell for cell in COUNTED_CELLS if cell in missing_set]

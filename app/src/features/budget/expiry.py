@@ -3,12 +3,9 @@
 ★ 여기에는 시계가 없다. **오늘 날짜를 인자로 받는** 순수 함수뿐이다 —
   그래야 「두 달 뒤」를 시험에서 실제로 돌려볼 수 있다.
 
-★ 판정을 못 하는 경우(날짜가 비었거나 깨졌을 때)는 **살아 있는 것으로 본다.**
-  이유 — 여기서 막으면 «멀쩡한 보고서가 안 열리는» 고장이 되고,
-  사용자는 그것을 「이 도구는 안 된다」로 읽는다.
-  날짜를 못 읽는 것은 우리 쪽 문제이지 사용자 잘못이 아니다.
-  ⚠️ 이건 «보안을 느슨하게» 하는 선택이다. 그래도 되는 이유는
-    내용이 공개된 공시·뉴스라 민감도가 낮기 때문이다 (sharing.py 참고).
+★ 판정을 못 하는 경우(날짜가 비었거나 깨졌거나 미래일 때)는 **닫힌 것으로 본다.**
+  공유 주소는 로그인 없이 열리므로, 저장값이 손상됐다는 이유로 만료가 무기한
+  풀려서는 안 된다. 저장값을 바로잡은 뒤 다시 열 수 있다.
 """
 
 from __future__ import annotations
@@ -27,14 +24,22 @@ def parse_generated_date(generated_at: str) -> Optional[dt.date]:
     Returns:
         읽어낸 날짜. 비었거나 못 읽으면 None.
 
-    ★ 앞 10글자만 본다 — 뒤에 시각·시간대가 붙어 있어도 날짜만 필요하다.
+    ★ 날짜만 있거나 완전한 ISO 시각이 붙은 두 형식을 받는다. 앞 10글자만 잘라
+      읽으면 ``2026-08-16-깨짐``도 정상 날짜가 되므로 전체 문자열을 검증한다.
     """
-    head = (generated_at or "").strip()[:10]
-    if not head:
+    if not isinstance(generated_at, str):
+        return None
+    raw = generated_at.strip()
+    if len(raw) < 10 or raw[4:5] != "-" or raw[7:8] != "-":
         return None
     try:
-        return dt.date.fromisoformat(head)
-    except ValueError:
+        if len(raw) == 10:
+            return dt.date.fromisoformat(raw)
+        if raw[10:11] not in {"T", " "}:
+            return None
+        normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        return dt.datetime.fromisoformat(normalized).date()
+    except (OverflowError, ValueError):
         return None
 
 
@@ -49,16 +54,22 @@ def is_expired(generated_at: str, today: dt.date, max_age_days: int) -> bool:
     Returns:
         기간이 지났으면 True.
 
-    ★ 날짜를 못 읽으면 **False**(살아 있음)를 돌려준다 — 위 모듈 설명 참고.
-    ★ 미래 날짜(시계가 틀린 컴퓨터 등)도 살아 있는 것으로 본다.
+    ★ 날짜를 못 읽거나 미래이면 **True**(닫힘)를 돌려준다 — 위 모듈 설명 참고.
+    ★ 발급일로부터 정확히 ``max_age_days``일째 되는 날부터 닫힌다.
     """
     made = parse_generated_date(generated_at)
-    if made is None:
-        return False
-    return (today - made).days > max_age_days
+    if (
+        made is None
+        or made > today
+        or not isinstance(max_age_days, int)
+        or isinstance(max_age_days, bool)
+        or max_age_days <= 0
+    ):
+        return True
+    return (today - made).days >= max_age_days
 
 
-def days_left(generated_at: str, today: dt.date, max_age_days: int) -> Optional[int]:
+def days_left(generated_at: str, today: dt.date, max_age_days: int) -> int:
     """며칠 더 열리는지. 못 세면 None.
 
     Args:
@@ -67,12 +78,18 @@ def days_left(generated_at: str, today: dt.date, max_age_days: int) -> Optional[
         max_age_days: 살려 둘 기간(일).
 
     Returns:
-        남은 날 수 (0 이상). 이미 지났으면 0. 날짜를 못 읽으면 None.
+        남은 날 수 (0 이상). 이미 지났거나 안전하게 닫힌 값이면 0.
 
     ★ 화면에 「며칠 남았습니다」를 적기 위한 값이다 —
       갑자기 안 열리는 것보다 미리 알려주는 편이 낫다.
     """
     made = parse_generated_date(generated_at)
-    if made is None:
-        return None
+    if (
+        made is None
+        or made > today
+        or not isinstance(max_age_days, int)
+        or isinstance(max_age_days, bool)
+        or max_age_days <= 0
+    ):
+        return 0
     return max(0, max_age_days - (today - made).days)

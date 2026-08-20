@@ -163,6 +163,37 @@ def test_최대_페이지_수를_넘지_않는다():
     assert len(result.fragments) <= MAX_PAGES
 
 
+def test_IR자료실의_두번째_링크까지_따라가_최신_실적을_일반_IR페이지보다_먼저_읽는다():
+    root = (
+        "<html><body><p>홈.</p>"
+        '<a href="/IR/Stock">주가</a>'
+        '<a href="/ko/board/ir-data">IR 자료실</a>'
+        "</body></html>"
+    )
+    board = (
+        "<html><body><p>IR 자료 목록입니다.</p>"
+        '<a href="/ko/board/ir-data/2026-q2">2026년 2분기 실적</a>'
+        "</body></html>"
+    )
+    detail = "<html><body><p>" + ("2026년 2분기 매출과 영업이익 공식 자료입니다. " * 8) + "</p></body></html>"
+    stock = "<html><body><p>" + ("주가 정보 페이지입니다. " * 8) + "</p></body></html>"
+    pages = {
+        ROOT: root,
+        f"{ROOT}/ko/board/ir-data": board,
+        f"{ROOT}/ko/board/ir-data/2026-q2": detail,
+        f"{ROOT}/IR/Stock": stock,
+    }
+    fetch, calls = _fake_fetch(pages)
+
+    result = collect_homepage_fragments(ROOT, fetch=fetch)
+
+    assert result.state == "ok"
+    detail_url = f"{ROOT}/ko/board/ir-data/2026-q2"
+    assert detail_url in calls
+    assert calls.index(detail_url) < calls.index(f"{ROOT}/IR/Stock")
+    assert any(fragment["출처"] == detail_url for fragment in result.fragments)
+
+
 def test_전체_글자수_상한을_넘지_않는다():
     """페이지마다 MAX_CHARS_PER_PAGE에 가깝게 채워 실제로 상한에 걸리는지 본다."""
 

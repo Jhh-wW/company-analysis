@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}로컬 데모 관리자 · 기업분석{% endblock %}
+
+{% block content %}
+<div class="card" data-local-demo-login="true">
+  <div class="stopped-icon">🧪</div>
+  <h1>로컬 데모 관리자로 보기</h1>
+  <p class="lede">
+    이 컴퓨터에서 실행한 무료 데모입니다. Google·유료 API·Notion에는 연결하지 않습니다.
+  </p>
+  <form method="post" action="/auth/local-demo" style="margin-top:16px">
+    <input type="hidden" name="state" value="{{ local_demo_state }}">
+    <button class="btn wide" type="submit">관리자 화면 열기</button>
+  </form>
+</div>
+{% endblock %}

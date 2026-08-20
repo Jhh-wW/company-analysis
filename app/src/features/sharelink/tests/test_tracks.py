@@ -21,7 +21,7 @@ from src.features.sharelink.constants import (
 )
 from src.features.sharelink.tracks import Track, bucket_of, budget_of, decide_track
 
-_열쇠 = "a1b2c3d4e5f60718"
+_열쇠 = "a1b2c3d4e5f60718a1b2c3d4e5f60718"
 _나 = "admin@example.com"
 _친구 = "friend@gmail.com"
 _모르는사람 = "stranger@gmail.com"
@@ -149,6 +149,15 @@ def test_모르는_손님은_한_통장으로_묶인다():
 def test_이상한_열쇠로는_링크_갈래가_안_된다(열쇠: str):
     """★ 아무 글자나 통하면 주소창에 타이핑해 3,000원짜리 통장을 무한히 만든다."""
     assert _갈래(share_key=열쇠) is Track.PUBLIC
+
+
+def test_DB에_남은_16자리_열쇠도_공개_0원_갈래다():
+    legacy_key = "a1b2c3d4e5f60718"
+
+    track = _갈래(share_key=legacy_key)
+
+    assert track is Track.PUBLIC
+    assert budget_of(track) == PUBLIC_DAILY_BUDGET_KRW == 0.0
 
 
 def test_로그인_안_했으면_이메일이_있어도_무시한다():

@@ -9,20 +9,24 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+import logging
 from typing import Any
 
 import pytest
 
-from src.core.constants import CELL_LABELS, RAW_SOURCE_LABEL, RAW_SOURCE_NOTE
+from src.core.constants import CELL_LABELS
 from src.features.export_notion import constants, logic, notion
+from src.features.pipeline.canonical_demo import build_demo_report
 from src.features.pipeline.port import (
     Grade,
     Report,
     ReportSection,
     ReportTable,
-    SourceStatus,
 )
-from src.features.provenance.sources import Source, SourceKind
+from src.features.report_standard.publish import PublishBlockedError
+
+_LEGACY_SECRET = "LEGACY-JOB-POSTING-SECRET"
 
 
 # ══════════════════════════════════════════════════════════
@@ -42,56 +46,28 @@ def _headings(blocks: list[dict[str, Any]]) -> list[str]:
 
 
 def _make_report(**overrides: Any) -> Report:
-    """기본값을 채운 시험용 보고서. overrides로 필드를 바꿔 쓴다."""
-    base = dict(
-        company="에스엠",
-        job="마케팅",
+    """실제 공개 게이트를 통과한 canonical 1~9 시험 보고서."""
+
+    return replace(build_demo_report(), **overrides)
+
+
+def _legacy_partial_report() -> Report:
+    """canonical 이전의 부분 보고서가 공개 경로에서 닫히는지 확인하는 표본."""
+
+    return Report(
+        company="레거시 주식회사",
+        job=_LEGACY_SECRET,
         corp_type="상장사",
         grade=Grade.PARTIAL,
         sections=[
             ReportSection(
                 cell="1",
                 title=CELL_LABELS["1"],
-                lines=[("반도체 장비로 매출 70%를 올린다", "1")],
-            ),
-            ReportSection(
-                cell="2",
-                title=CELL_LABELS["2"],
-                empty_reason="이 회사의 홈페이지에 접속하지 못해 확인하지 못했습니다",
-            ),
-            ReportSection(
-                cell="附",
-                title=CELL_LABELS["附"],
-                tables=[
-                    ReportTable(
-                        caption="전자공시 사업보고서 임원 및 직원 현황",
-                        headers=["구분", "1인평균급여액"],
-                        rows=[["남", "8천5백만원"], ["여", "7천만원"]],
-                        cite="전자공시 사업보고서",
-                    )
-                ],
-            ),
-        ],
-        requirements=["재무제표 작성 경험자", "엑셀 능숙자"],
-        sources=[
-            SourceStatus(name="DART", state="ok", detail="감사보고서 2024-03-15"),
-            SourceStatus(name="홈페이지", state="failed", detail="접속 실패"),
-        ],
-        citations=[
-            Source(
-                number=1,
-                kind=SourceKind.FILING,
-                label="감사보고서 제16장 수익인식 주석",
-                disclosed_at="2024-03-15",
-                collected_at="2026-08-13",
+                lines=[("근거 계약이 없는 옛 부분 보고서", "1")],
             )
         ],
-        cells={"1": True, "2": False, "附": True},
-        shortfall_reasons=["홈페이지 접속 실패로 2번 칸을 채우지 못했습니다"],
         generated_at="2026-08-15",
     )
-    base.update(overrides)
-    return Report(**base)
 
 
 # ══════════════════════════════════════════════════════════
@@ -100,49 +76,44 @@ def _make_report(**overrides: Any) -> Report:
 
 
 class TestBuildBlocks:
-    def test_회사명과_부제가_맨_앞에_온다(self):
+    def test_회사명과_보고서명이_각각_한_줄로_맨_앞에_온다(self):
         blocks = logic.build_blocks(_make_report(), grade_note="자료가 부족해 일부만 채웠습니다")
         assert blocks[0]["type"] == "heading_1"
-        assert _text_of(blocks[0]) == "에스엠"
-        assert _text_of(blocks[1]) == "마케팅 · 상장사 · 2026-08-15 생성"
-
-    def test_완성이면_상단_라벨을_안_낸다(self):
-        report = _make_report(grade=Grade.COMPLETE, shortfall_reasons=[])
-        blocks = logic.build_blocks(report, grade_note="안 쓰여야 하는 문구")
-        assert "안 쓰여야 하는 문구" not in [
-            _text_of(b) for b in blocks if b["type"] == "callout"
-        ]
-        assert not any(b["type"] == "callout" for b in blocks)
-
-    def test_부분_완성이면_노란색_아이콘과_사유_목록을_낸다(self):
-        report = _make_report(grade=Grade.PARTIAL)
-        blocks = logic.build_blocks(report, grade_note="자료가 부족해 일부만 채웠습니다")
-        callout = next(b for b in blocks if b["type"] == "callout")
-        assert callout["callout"]["icon"]["emoji"] == constants.GRADE_ICON_PARTIAL
-        assert _text_of(callout) == "자료가 부족해 일부만 채웠습니다"
-        bullets = [_text_of(b) for b in blocks if b["type"] == "bulleted_list_item"]
-        assert "홈페이지 접속 실패로 2번 칸을 채우지 못했습니다" in bullets
-
-    def test_미완성이면_빨간색_아이콘을_낸다(self):
-        report = _make_report(grade=Grade.INCOMPLETE)
-        blocks = logic.build_blocks(report, grade_note="자료가 많이 부족합니다")
-        callout = next(b for b in blocks if b["type"] == "callout")
-        assert callout["callout"]["icon"]["emoji"] == constants.GRADE_ICON_INCOMPLETE
-
-    def test_채워진_칸은_문장_뒤에_출처_괄호를_붙인다(self):
-        blocks = logic.build_blocks(_make_report())
-        bullets = [_text_of(b) for b in blocks if b["type"] == "bulleted_list_item"]
-        assert "반도체 장비로 매출 70%를 올린다 〔1〕" in bullets
-
-    def test_검증된_본문과_문장별_출처와_근거원문을_모두_낸다(self):
-        """P-117·P-118·P-127 — 노션도 실제 번호만 붙이고 내부 이름은 감춘다."""
-        section = ReportSection(
-            cell="1",
-            title=CELL_LABELS["1"],
-            lines=[("원문 사업 문장입니다.", "조각 1·사업보고서")],
-            prose_lines=[("검증된 표시용 사업 문장입니다.", "조각 1·사업보고서")],
+        assert _text_of(blocks[0]) == "(주)진영"
+        assert blocks[1]["type"] == "heading_1"
+        assert _text_of(blocks[1]) == "분석 보고서"
+        assert _text_of(blocks[2]) == (
+            "상장사 · 2026-08-19 기준 · 2023~2025 완료 회계연도 · "
+            "최신 실적 2026년 반기 공식 공시"
         )
-        blocks = logic.build_blocks(_make_report(sections=[section]))
+        assert "생성" not in _text_of(blocks[2])
+
+    def test_완성도와_내부_검증_문구를_최종_보고서에_내지_않는다(self):
+        report = _make_report()
+        blocks = logic.build_blocks(report, grade_note="안 쓰여야 하는 문구")
+        all_text = "\n".join(
+            _text_of(block) for block in blocks if "rich_text" in block[block["type"]]
+        )
+        assert "안 쓰여야 하는 문구" not in all_text
+        assert not any(block["type"] == "callout" for block in blocks)
+
+    def test_채워진_장은_문장_뒤에_출처_괄호를_붙인다(self):
+        report = _make_report()
+        blocks = logic.build_blocks(report)
+        paragraphs = [_text_of(b) for b in blocks if b["type"] == "paragraph"]
+        identity = next(section for section in report.sections if section.cell == "identity")
+        assert f"{identity.prose_lines[0][0]} 〔2〕" in paragraphs
+
+    def test_검증된_본문만_한번_내고_근거원문은_반복하지_않는다(self):
+        """표시용 본문이 있으면 같은 사실의 원문은 최종 출력에서 되풀이하지 않는다."""
+        section = ReportSection(
+            cell="identity",
+            title="기업 정체성",
+            lines=[("원문 사업 문장입니다.", "조각 1·사업보고서")],
+            prose_lines=[("검증된 표시용 사업 문장입니다.", "[1]")],
+            fact_ids=["layout-only-fact"],
+        )
+        blocks = logic._section_blocks(section)
         texts = [
             _text_of(block)
             for block in blocks
@@ -150,53 +121,58 @@ class TestBuildBlocks:
         ]
 
         assert "검증된 표시용 사업 문장입니다. 〔1〕" in texts
-        assert "원문 사업 문장입니다. 〔1〕" in texts
+        assert "원문 사업 문장입니다. 〔1〕" not in texts
         assert not any("조각 1·사업보고서" in text for text in texts)
-        assert f"{RAW_SOURCE_LABEL} (1문장) — {RAW_SOURCE_NOTE}" in texts
 
-    def test_빈칸_사유가_붙는다(self):
-        blocks = logic.build_blocks(_make_report())
-        paragraphs = [_text_of(b) for b in blocks if b["type"] == "paragraph"]
-        assert (
-            "비어 있습니다 — 이 회사의 홈페이지에 접속하지 못해 확인하지 못했습니다"
-            in paragraphs
+    def test_빈_섹션_도우미는_부분_보고서_문구를_만들지_않는다(self):
+        section = ReportSection(
+            cell="portfolio",
+            title="핵심 제품·서비스와 포트폴리오 역할",
+            empty_reason="근거가 부족합니다",
         )
+        blocks = logic._section_blocks(section)
+        assert [block["type"] for block in blocks] == ["heading_2"]
+        assert "근거가 부족합니다" not in str(blocks)
+        assert constants.EMPTY_SECTION_FALLBACK not in str(blocks)
 
-    def test_사유가_없는_빈칸은_기본_문구를_쓴다(self):
-        report = _make_report(
-            sections=[ReportSection(cell="3", title=CELL_LABELS["3"], empty_reason="")]
+    def test_옛_직무공고_필드는_노션에_들어가지_않는다(self):
+        blocks = logic.build_blocks(
+            _make_report(job=_LEGACY_SECRET, requirements=[_LEGACY_SECRET])
         )
-        blocks = logic.build_blocks(report)
-        paragraphs = [_text_of(b) for b in blocks if b["type"] == "paragraph"]
-        assert f"비어 있습니다 — {constants.EMPTY_SECTION_FALLBACK}" in paragraphs
+        all_text = "\n".join(_text_of(b) for b in blocks if "rich_text" in b[b["type"]])
+        assert _LEGACY_SECRET not in all_text
+        headings = _headings(blocks)
+        assert all(any(heading.startswith(f"{number}.") for heading in headings) for number in range(1, 10))
+        assert constants.SOURCES_HEADING in headings
 
-    def test_요구역량_목록이_5번_칸으로_들어간다(self):
-        blocks = logic.build_blocks(_make_report())
-        assert f"5. {CELL_LABELS['5']}" in _headings(blocks)
-        bullets = [_text_of(b) for b in blocks if b["type"] == "bulleted_list_item"]
-        assert "재무제표 작성 경험자" in bullets
-        assert "엑셀 능숙자" in bullets
-
-    def test_기록에_5번_칸이_있어도_중복으로_안_낸다(self):
-        report = _make_report(
-            sections=[
-                ReportSection(cell="5", title=CELL_LABELS["5"], lines=[]),
-            ],
-            requirements=["엑셀 능숙자"],
+    def test_회사_사실만_내고_프로그램의_작성_안내는_숨긴다(self):
+        section = ReportSection(
+            cell="identity",
+            title="기업 정체성",
+            lines=[("내부 감사용 원문", "[1]")],
+            prose_lines=[("검증된 회사 사실", "[1]")],
+            guidance_lines=["활용 질문 — 출력하면 안 되는 작성 안내"],
+            fact_ids=["layout-only-fact"],
         )
-        blocks = logic.build_blocks(report)
-        assert _headings(blocks).count(f"5. {CELL_LABELS['5']}") == 1
+        blocks = logic._section_blocks(section)
+        texts = [_text_of(b) for b in blocks if "rich_text" in b[b["type"]]]
+        assert "검증된 회사 사실 〔1〕" in texts
+        assert "내부 감사용 원문 〔1〕" not in texts
+        assert not any("활용 질문" in text for text in texts)
 
-    def test_요구역량이_없으면_빈칸_문구를_낸다(self):
+    def test_legacy_부분_보고서는_빈_노션이나_부분_노션으로_내보내지_않는다(self):
+        with pytest.raises(PublishBlockedError):
+            logic.build_blocks(_legacy_partial_report())
+
+    def test_요구역량이_없어도_공고_빈칸문구를_내지_않는다(self):
         report = _make_report(requirements=[])
         blocks = logic.build_blocks(report)
         paragraphs = [_text_of(b) for b in blocks if b["type"] == "paragraph"]
-        assert constants.REQUIREMENTS_EMPTY_TEXT in paragraphs
+        assert constants.REQUIREMENTS_EMPTY_TEXT not in paragraphs
 
     def test_숫자_표가_노션_표_블록으로_들어간다(self):
         blocks = logic.build_blocks(_make_report())
-        # 이 보고서에는 표가 둘 있다 — 附(참고 숫자) 표와 「어디서 가져왔나」 표.
-        # 열이 2개인 쪽이 附 표다 (「어디서 가져왔나」는 항상 3열).
+        # 2열 표는 사업 모델의 실제 공개 매출 비중 표다.
         tables = [
             b for b in blocks if b["type"] == "table" and b["table"]["table_width"] == 2
         ]
@@ -210,67 +186,73 @@ class TestBuildBlocks:
             return [rt["text"]["content"] for rt in row["table_row"]["cells"][0]]
 
         # 첫 행은 머리글, 그다음이 데이터 행이다.
-        assert _first_cell_text(rows[0]) == ["구분"]
-        assert _first_cell_text(rows[1]) == ["남"]
-        assert _first_cell_text(rows[2]) == ["여"]
-        # 표 위 설명(캡션)에는 근거(cite)가 괄호로 붙는다.
+        assert _first_cell_text(rows[0]) == ["사업"]
+        assert _first_cell_text(rows[1]) == ["가구용 시트·엣지"]
+        assert _first_cell_text(rows[2]) == ["산업용 시트"]
         paragraphs = [_text_of(b) for b in blocks if b["type"] == "paragraph"]
-        assert "전자공시 사업보고서 임원 및 직원 현황 〔전자공시 사업보고서〕" in paragraphs
+        assert "2026년 상반기 매출 구성 (단위: %) 〔1〕" in paragraphs
 
-    def test_출처_목록이_render_sources_결과_그대로다(self):
-        report = _make_report()
-        blocks = logic.build_blocks(report)
-        assert constants.SOURCES_HEADING in _headings(blocks)
-        paragraphs = [_text_of(b) for b in blocks if b["type"] == "paragraph"]
-        # render_sources()가 만드는 항목 줄과 날짜 줄이 그대로 문단으로 들어가야 한다 (P3).
-        assert " [1] 감사보고서 제16장 수익인식 주석" in paragraphs
-        assert "     2024-03-15 공시 · 수집 2026-08-13" in paragraphs
+    def test_출처_목록은_자료와_기준일을_한눈에_보이는_표로_낸다(self):
+        base_report = _make_report()
+        # 출처 표의 중복 제거는 공개 게이트와 분리된 순수 렌더러 단위로 본다.
+        blocks = logic._source_list_blocks(
+            [*base_report.citations, *base_report.citations]
+        )
+        assert len(blocks) == 1
+        source_table = blocks[0]["table"]
+
+        def _cell_text(row: dict, index: int) -> str:
+            return "".join(
+                rich["text"]["content"] for rich in row["table_row"]["cells"][index]
+            )
+
+        rows = source_table["children"]
+        assert len(rows) == len(base_report.citations) + 1
+        assert [_cell_text(rows[0], index) for index in range(5)] == [
+            "#",
+            "자료",
+            "기준일·상태",
+            "원문 위치",
+            "본문 사용 장",
+        ]
+        assert [_cell_text(rows[1], index) for index in range(5)] == [
+            "1",
+            "주식회사 진영 반기보고서 (2026.06)",
+            "2026-08-13 공시 · 공식 공시 · 실제·현재",
+            "II. 사업의 내용; III. 재무에 관한 사항",
+            "2장 · 3장 · 5장 · 7장",
+        ]
+        assert "수집" not in str(source_table)
 
     def test_출처가_없으면_출처_구획을_안_낸다(self):
-        report = _make_report(citations=[])
-        blocks = logic.build_blocks(report)
-        assert constants.SOURCES_HEADING not in _headings(blocks)
+        assert logic._source_list_blocks([]) == []
 
-    def test_수집_현황이_소스별_표로_들어간다(self):
+    def test_수집_과정_표는_최종_보고서에_들어가지_않는다(self):
         blocks = logic.build_blocks(_make_report())
-        assert constants.COLLECTION_HEADING in _headings(blocks)
-        tables = [b for b in blocks if b["type"] == "table"]
-        collection_table = tables[-1]["table"]
-        assert collection_table["table_width"] == 3
-        rows = collection_table["children"]
-        header_texts = [
-            "".join(rt["text"]["content"] for rt in cell)
-            for cell in rows[0]["table_row"]["cells"]
-        ]
-        assert header_texts == list(constants.COLLECTION_TABLE_HEADERS)
-        first_row_texts = [
-            "".join(rt["text"]["content"] for rt in cell)
-            for cell in rows[1]["table_row"]["cells"]
-        ]
-        assert first_row_texts == ["DART", "⭕ 찾음", "감사보고서 2024-03-15"]
-        third_row_texts = [
-            "".join(rt["text"]["content"] for rt in cell)
-            for cell in rows[2]["table_row"]["cells"]
-        ]
-        assert third_row_texts == ["홈페이지", "⚠️ 못 가져옴", "접속 실패"]
+        assert constants.COLLECTION_HEADING not in _headings(blocks)
+        tables = [block["table"] for block in blocks if block["type"] == "table"]
+        assert len(tables) == 5
+        for table in tables:
+            first_row = table["children"][0]["table_row"]["cells"]
+            headers = [
+                "".join(rich["text"]["content"] for rich in cell)
+                for cell in first_row
+            ]
+            assert headers != list(constants.COLLECTION_TABLE_HEADERS)
 
     def test_긴_글자는_2000자씩_나눠_담는다(self):
         long_text = "가" * 4500
-        # 다른 불릿(요구역량·부족 사유)이 안 섞이게 최소 구성으로 만든다.
-        report = _make_report(
-            grade=Grade.COMPLETE,
-            shortfall_reasons=[],
-            requirements=[],
-            sections=[
-                ReportSection(cell="1", title=CELL_LABELS["1"], lines=[(long_text, "")])
-            ],
-            sources=[],
-            citations=[],
+        section = ReportSection(
+            cell="identity",
+            title="기업 정체성",
+            lines=[(long_text, "")],
+            prose_lines=[(long_text, "")],
+            fact_ids=["layout-only-fact"],
         )
-        blocks = logic.build_blocks(report)
-        bulleted = [b for b in blocks if b["type"] == "bulleted_list_item"]
-        assert len(bulleted) == 1
-        rich_text = bulleted[0]["bulleted_list_item"]["rich_text"]
+        blocks = logic._section_blocks(section)
+        paragraphs = [block for block in blocks if block["type"] == "paragraph"]
+        assert len(paragraphs) == 1
+        rich_text = paragraphs[0]["paragraph"]["rich_text"]
         assert len(rich_text) == 3  # 4500 / 2000 → 2000 + 2000 + 500
         limit = constants.MAX_RICH_TEXT_LENGTH
         assert all(len(rt["text"]["content"]) <= limit for rt in rich_text)
@@ -280,11 +262,11 @@ class TestBuildBlocks:
 class TestBuildPageTitle:
     def test_생성일이_있으면_괄호로_붙인다(self):
         report = _make_report()
-        assert logic.build_page_title(report) == "에스엠 · 마케팅 (2026-08-15)"
+        assert logic.build_page_title(report) == "(주)진영 분석 보고서 (2026-08-19)"
 
     def test_생성일이_없으면_괄호를_안_붙인다(self):
         report = _make_report(generated_at="")
-        assert logic.build_page_title(report) == "에스엠 · 마케팅"
+        assert logic.build_page_title(report) == "(주)진영 분석 보고서"
 
 
 # ══════════════════════════════════════════════════════════
@@ -339,6 +321,17 @@ def notion_env(monkeypatch):
 
 
 class TestSendReportToNotion:
+    def test_설정여부는_비밀값을_꺼내지_않고_두값을_함께_확인한다(self, monkeypatch):
+        monkeypatch.delenv(constants.ENV_NOTION_TOKEN, raising=False)
+        monkeypatch.delenv(constants.ENV_NOTION_PARENT_PAGE_ID, raising=False)
+        assert notion.is_notion_configured() is False
+
+        monkeypatch.setenv(constants.ENV_NOTION_TOKEN, "secret-never-returned")
+        assert notion.is_notion_configured() is False
+
+        monkeypatch.setenv(constants.ENV_NOTION_PARENT_PAGE_ID, "parent-never-returned")
+        assert notion.is_notion_configured() is True
+
     def test_비밀키가_없으면_네트워크를_시도하지_않고_실패를_돌려준다(self, monkeypatch):
         monkeypatch.delenv(constants.ENV_NOTION_TOKEN, raising=False)
         monkeypatch.delenv(constants.ENV_NOTION_PARENT_PAGE_ID, raising=False)
@@ -377,16 +370,15 @@ class TestSendReportToNotion:
         assert path == constants.PAGES_PATH
         assert body["parent"] == {"type": "page_id", "page_id": "parent-page-xyz"}
         title_text = body["properties"]["title"]["title"][0]["text"]["content"]
-        assert title_text == "에스엠 · 마케팅 (2026-08-15)"
+        assert title_text == "(주)진영 분석 보고서 (2026-08-19)"
         assert "test-token-do-not-log" not in str(body)  # 토큰이 본문에 섞여 들어가면 안 된다
 
-    def test_블록이_100개_넘으면_나눠_보내고_조각_수를_돌려준다(self, notion_env):
-        many_sections = [
-            ReportSection(cell=f"x{i}", title=f"항목{i}", lines=[(f"내용{i}", "")])
-            for i in range(60)
-        ]
-        report = _make_report(sections=many_sections)
-        expected_blocks = logic.build_blocks(report)
+    def test_블록이_100개_넘으면_나눠_보내고_조각_수를_돌려준다(
+        self, notion_env, monkeypatch
+    ):
+        report = _make_report()
+        expected_blocks = [logic._paragraph(f"내용 {index}") for index in range(201)]
+        monkeypatch.setattr(logic, "build_blocks", lambda *_args, **_kwargs: expected_blocks)
         assert len(expected_blocks) > constants.MAX_BLOCKS_PER_REQUEST  # 전제 조건 확인
 
         spy = _RecordingSend()
@@ -409,12 +401,12 @@ class TestSendReportToNotion:
         assert result.page_id == ""
         assert result.error  # 사용자에게 보여줄 메시지가 있어야 한다
 
-    def test_두번째_조각부터_실패하면_반쯤_만들어졌다고_알린다(self, notion_env):
-        many_sections = [
-            ReportSection(cell=f"x{i}", title=f"항목{i}", lines=[(f"내용{i}", "")])
-            for i in range(60)
-        ]
-        report = _make_report(sections=many_sections)
+    def test_두번째_조각부터_실패하면_반쯤_만들어졌다고_알린다(
+        self, notion_env, monkeypatch
+    ):
+        report = _make_report()
+        expected_blocks = [logic._paragraph(f"내용 {index}") for index in range(101)]
+        monkeypatch.setattr(logic, "build_blocks", lambda *_args, **_kwargs: expected_blocks)
         spy = _RecordingSend(fail_at=2)  # 첫 조각(페이지 생성)은 성공, 두 번째부터 실패
 
         result = notion.send_report_to_notion(report, send=spy)
@@ -433,3 +425,131 @@ class TestSendReportToNotion:
         assert result.success is True
         _, _, body = spy.calls[0]
         assert body["parent"]["page_id"] == "직접-준-부모"
+
+    def test_예상밖_어댑터오류는_500이나_비밀노출없이_실패결과가_된다(
+        self, notion_env, caplog
+    ):
+        secret = "secret-token-and-report-original"
+
+        def broken_send(_method: str, _path: str, _body: dict) -> dict:
+            raise RuntimeError(secret)
+
+        with caplog.at_level(logging.WARNING):
+            result = notion.send_report_to_notion(_make_report(), send=broken_send)
+
+        assert result.success is False
+        assert result.partial is False
+        assert "예상하지 못한 오류" in result.error
+        assert secret not in result.error
+        assert secret not in caplog.text
+
+    def test_응답이_JSON객체가_아니어도_500대신_안전한_실패결과가_된다(
+        self, notion_env
+    ):
+        result = notion.send_report_to_notion(
+            _make_report(), send=lambda _method, _path, _body: []  # type: ignore[return-value]
+        )
+
+        assert result.success is False
+        assert result.partial is False
+        assert result.error == "노션 응답 형식이 올바르지 않습니다"
+
+    def test_urllib가_직접_timeout을_올려도_내부내용을_숨긴다(
+        self, monkeypatch, caplog
+    ):
+        secret = "secret-timeout-detail"
+
+        def timeout(*_args, **_kwargs):
+            raise TimeoutError(secret)
+
+        monkeypatch.setattr(notion.urllib.request, "urlopen", timeout)
+        send = notion._make_urllib_send("notion-secret-token")
+
+        with caplog.at_level(logging.WARNING), pytest.raises(notion.NotionAPIError) as exc:
+            send("POST", constants.PAGES_PATH, {"private": "report-original"})
+
+        assert str(exc.value) == "노션 서버와 통신하지 못했습니다"
+        assert secret not in caplog.text
+        assert "notion-secret-token" not in caplog.text
+        assert "report-original" not in caplog.text
+
+    def test_명시적_429만_Retry_After만큼_제한재시도한다(self, notion_env):
+        calls = 0
+        sleeps: list[float] = []
+
+        def rate_limited_then_ok(_method: str, _path: str, _body: dict) -> dict:
+            nonlocal calls
+            calls += 1
+            if calls <= 2:
+                raise notion.NotionAPIError(
+                    "rate limited",
+                    status_code=429,
+                    retry_after=1.5,
+                )
+            return {"id": "page-after-429", "url": "https://notion.so/after-429"}
+
+        result = notion.send_report_to_notion(
+            _make_report(), send=rate_limited_then_ok, sleep=sleeps.append
+        )
+
+        assert result.success is True
+        assert calls == 3
+        assert sleeps == [1.5, 1.5]
+
+    @pytest.mark.parametrize(
+        ("failure", "expected_uncertain"),
+        [
+            (
+                notion.NotionAPIError(
+                    "server error", status_code=503, uncertain=True
+                ),
+                True,
+            ),
+            (notion.NotionAPIError("timeout", uncertain=True), True),
+            (
+                notion.NotionAPIError(
+                    "rate limit without retry-after", status_code=429
+                ),
+                False,
+            ),
+        ],
+    )
+    def test_5xx_timeout_또는_Retry_After없는_429는_자동재시도하지_않는다(
+        self, notion_env, failure, expected_uncertain
+    ):
+        calls = 0
+        sleeps: list[float] = []
+
+        def fail_once(_method: str, _path: str, _body: dict) -> dict:
+            nonlocal calls
+            calls += 1
+            raise failure
+
+        result = notion.send_report_to_notion(
+            _make_report(), send=fail_once, sleep=sleeps.append
+        )
+
+        assert result.success is False
+        assert result.uncertain is expected_uncertain
+        assert calls == 1
+        assert sleeps == []
+
+    def test_429_재시도도_상한을_넘지_않는다(self, notion_env):
+        calls = 0
+
+        def always_rate_limited(_method: str, _path: str, _body: dict) -> dict:
+            nonlocal calls
+            calls += 1
+            raise notion.NotionAPIError(
+                "rate limited", status_code=429, retry_after=1
+            )
+
+        sleeps: list[float] = []
+        result = notion.send_report_to_notion(
+            _make_report(), send=always_rate_limited, sleep=sleeps.append
+        )
+
+        assert result.success is False
+        assert result.uncertain is False
+        assert calls == constants.MAX_429_RETRIES + 1
+        assert sleeps == [1.0] * constants.MAX_429_RETRIES
