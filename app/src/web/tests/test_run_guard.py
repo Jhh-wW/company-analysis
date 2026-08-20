@@ -12,17 +12,21 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+import time
+import uuid
 
 import pytest
 from fastapi.testclient import TestClient
 
 from src.features.auth import logic as auth_logic
 from src.features.budget import logic as budget_logic
+from src.features.budget import spend_store
 from src.features.budget.constants import (
     MAX_CONCURRENT_PER_LINK,
     MAX_CONCURRENT_RUNS,
     RATE_MAX_RUNS,
 )
+from src.features.pipeline.port import CompanyCard
 from src.features.sharelink import logic as share_logic
 from src.features.sharelink import store as share_store
 from src.features.sharelink import tracks as share_tracks
@@ -36,7 +40,7 @@ from src.features.storage import db as storage_db
 _열쇠 = "a1b2c3d4e5f60718a1b2c3d4e5f60718"
 from src.features.pipeline.demo import DemoPipeline
 from src.web import main
-from src.web import job_runtime, paid_runtime, runtime
+from src.web import job_runtime, paid_runtime, request_helpers, runtime
 
 
 @pytest.fixture
@@ -71,6 +75,33 @@ def _조사시작(
         )
         assert token is not None
         form["paid_attempt_token"] = token.group(1)
+    else:
+        token = uuid.uuid4().hex
+        share_key = link_key or PUBLIC_BUCKET
+        user_input = request_helpers.company_analysis_input(
+            company=form["company"],
+            region=form["region"],
+        )
+        job_runtime._PAID_ATTEMPTS[token] = job_runtime.PaidAttempt(
+            token=token,
+            run_id=f"run-guard-{token}",
+            user_input=user_input,
+            card=CompanyCard(
+                legal_name=user_input.company,
+                typed_name=user_input.company,
+                address="서울",
+                ceo="",
+                founded="",
+                ref="run-guard",
+            ),
+            share_key=share_key,
+            bucket_id=spend_store.bucket_id(share_key),
+            lookup_cost_krw=0.0,
+            models=(),
+            elapsed_sec=0.0,
+            created_at=time.monotonic(),
+        )
+        form["paid_attempt_token"] = token
     return client.post(
         "/run", data=form, headers=headers, follow_redirects=False
     )

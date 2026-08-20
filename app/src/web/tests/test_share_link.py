@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+import time
+import uuid
 from html.parser import HTMLParser
 
 import pytest
@@ -24,11 +26,12 @@ from fastapi.testclient import TestClient
 
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
+from src.features.budget import spend_store
 from src.features.pipeline.canonical_demo import (
     DEMO_COMPANY as CANONICAL_DEMO_COMPANY,
 )
 from src.features.pipeline.demo import DemoPipeline
-from src.features.pipeline.port import Outcome
+from src.features.pipeline.port import CompanyCard, Outcome
 from src.features.report_standard import CANONICAL_SECTION_IDS
 from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import logic as share_logic
@@ -90,7 +93,13 @@ def _링크발급(
         )
 
 
-def _post_run(client: TestClient, form: dict, **kwargs):
+def _post_run(
+    client: TestClient,
+    form: dict,
+    *,
+    paid_attempt_share_key: str = "",
+    **kwargs,
+):
     """브라우저가 화면에서 받은 권한 쿠키용 CSRF를 함께 보내는 요청."""
     data = dict(form)
     secret = (
@@ -109,6 +118,32 @@ def _post_run(client: TestClient, form: dict, **kwargs):
         )
         assert token is not None
         data["paid_attempt_token"] = token.group(1)
+    elif paid_attempt_share_key:
+        token = uuid.uuid4().hex
+        user_input = request_helpers.company_analysis_input(
+            company=data["company"],
+            region=data["region"],
+        )
+        job_runtime._PAID_ATTEMPTS[token] = job_runtime.PaidAttempt(
+            token=token,
+            run_id=f"share-link-guard-{token}",
+            user_input=user_input,
+            card=CompanyCard(
+                legal_name=user_input.company,
+                typed_name=user_input.company,
+                address="서울",
+                ceo="",
+                founded="",
+                ref="share-link-guard",
+            ),
+            share_key=paid_attempt_share_key,
+            bucket_id=spend_store.bucket_id(paid_attempt_share_key),
+            lookup_cost_krw=0.0,
+            models=(),
+            elapsed_sec=0.0,
+            created_at=time.monotonic(),
+        )
+        data["paid_attempt_token"] = token
     return client.post("/run", data=data, **kwargs)
 
 
@@ -527,7 +562,12 @@ def test_한_링크가_다_써도_다른_링크는_돈다(client: TestClient, mo
     }
 
     client.cookies.set(KEY_COOKIE_NAME, _카카오열쇠)
-    막힘 = _post_run(client, form, follow_redirects=False)
+    막힘 = _post_run(
+        client,
+        form,
+        paid_attempt_share_key=_카카오열쇠,
+        follow_redirects=False,
+    )
     client.cookies.set(KEY_COOKIE_NAME, _네이버열쇠)
     통과 = _post_run(client, form, follow_redirects=False)
 
@@ -585,7 +625,12 @@ def test_로그인만_하고_초대_안_됐으면_진짜_조사를_못_한다(
         "legal_name": "카카오", "ref": "재수집-p003", "address": "-",
     }
 
-    response = _post_run(client, form, follow_redirects=False)
+    response = _post_run(
+        client,
+        form,
+        paid_attempt_share_key=PUBLIC_BUCKET,
+        follow_redirects=False,
+    )
 
     assert response.status_code == 429
     assert "초대 링크로 들어오신 분만" in response.text
@@ -626,7 +671,12 @@ def test_링크로_들어와_로그인해도_링크_몫만_쓴다(client: TestCl
         "legal_name": "카카오", "ref": "재수집-p003", "address": "-",
     }
 
-    response = _post_run(client, form, follow_redirects=False)
+    response = _post_run(
+        client,
+        form,
+        paid_attempt_share_key=_카카오열쇠,
+        follow_redirects=False,
+    )
 
     assert response.status_code == 429, "로그인으로 «몫이 늘면» 안 된다"
 
@@ -643,7 +693,12 @@ def test_명단에서_빼면_바로_막힌다(client: TestClient, monkeypatch):
         "legal_name": "우리엔", "ref": "재수집-p003", "address": "-",
     }
 
-    assert _post_run(client, form, follow_redirects=False).status_code == 429
+    assert _post_run(
+        client,
+        form,
+        paid_attempt_share_key=PUBLIC_BUCKET,
+        follow_redirects=False,
+    ).status_code == 429
 
 
 def test_모르는_손님도_데모_화면은_그대로_본다(client: TestClient):

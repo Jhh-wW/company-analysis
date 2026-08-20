@@ -9,9 +9,10 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
+from src.features.budget.constants import RATE_MAX_RUNS
 from src.features.pipeline.canonical_demo import DEMO_COMPANY, DEMO_REF
 from src.features.pipeline.demo import DemoPipeline
-from src.web import job_runtime, main, runtime
+from src.web import job_runtime, main, paid_runtime, runtime
 
 
 def _token(html: str) -> str:
@@ -25,6 +26,20 @@ def _confirm(client: TestClient, company: str = "우리엔") -> tuple[str, dict[
     response = client.post("/confirm", data=form)
     assert response.status_code == 200
     return _token(response.text), form
+
+
+def _rate_start_count() -> int:
+    return sum(
+        len(starts) for starts in paid_runtime._RATE_HISTORY.starts.values()
+    )
+
+
+def _run(client: TestClient, form: dict[str, str], token: str = ""):
+    return client.post(
+        "/run",
+        data={**form, "paid_attempt_token": token},
+        follow_redirects=False,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -56,6 +71,46 @@ def test_confirm없이_run을_직접_부르면_조사를_시작하지_않는다(
     assert response.status_code == 303
     assert response.headers["location"] == "/"
     assert job_runtime._JOBS == {}
+
+
+@pytest.mark.parametrize("invalid_kind", ["missing", "expired", "mismatch", "replay"])
+def test_유효하지않은_run_5회는_rate를_소비하지않고_다음정상run을_막지않는다(
+    invalid_kind: str,
+):
+    with TestClient(main.app) as client:
+        baseline = 0
+        form = {"company": "우리엔", "region": "서울"}
+        token = ""
+        if invalid_kind != "missing":
+            token, form = _confirm(client)
+        if invalid_kind == "expired":
+            attempt = job_runtime._PAID_ATTEMPTS[token]
+            job_runtime._PAID_ATTEMPTS[token] = dataclasses.replace(
+                attempt,
+                created_at=time.monotonic() - job_runtime.JOB_KEEP_SEC - 1,
+            )
+        elif invalid_kind == "mismatch":
+            form = {**form, "company": "(주)진영"}
+        elif invalid_kind == "replay":
+            first = _run(client, form, token)
+            assert first.status_code == 303
+            assert first.headers["location"].startswith("/progress/")
+            baseline = 1
+
+        rejected = [
+            _run(client, form, token) for _ in range(RATE_MAX_RUNS)
+        ]
+
+        assert [response.status_code for response in rejected] == [303] * RATE_MAX_RUNS
+        assert all(response.headers["location"] == "/" for response in rejected)
+        assert _rate_start_count() == baseline
+
+        next_token, next_form = _confirm(client)
+        started = _run(client, next_form, next_token)
+
+    assert started.status_code == 303
+    assert started.headers["location"].startswith("/progress/")
+    assert _rate_start_count() == baseline + 1
 
 
 def test_원입력을_바꾸면_토큰을_소비하고_재사용도_거절한다():

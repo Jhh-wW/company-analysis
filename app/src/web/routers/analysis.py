@@ -1118,18 +1118,12 @@ async def start_run(
     )
     if consent_blocked is not None:
         return consent_blocked
-    blocked = request_helpers._guard_run(
-        request,
-        count_start=not is_paid,
-        resolved_track=resolved_track,
-    )
-    if blocked is not None:
-        return blocked
+    attempt_checked_at = time.monotonic()
     attempt = job_runtime._PAID_ATTEMPTS.get(paid_attempt_token)
     current_bucket = spend_store.bucket_id(share_key)
     if (
         attempt is None
-        or time.monotonic() - attempt.created_at > job_runtime.JOB_KEEP_SEC
+        or attempt_checked_at - attempt.created_at > job_runtime.JOB_KEEP_SEC
         or attempt.is_paid != is_paid
         or attempt.user_input != original_input
         or attempt.share_key != share_key
@@ -1137,7 +1131,16 @@ async def start_run(
     ):
         if attempt is not None:
             job_runtime._abandon_confirmation_attempt(paid_attempt_token)
+        # rate admission보다 앞에서 거절하되, 기존 작업·확인 만료 sweep은 유지한다.
+        job_runtime._sweep_jobs(attempt_checked_at)
         return RedirectResponse("/", status_code=303)
+    blocked = request_helpers._guard_run(
+        request,
+        count_start=not is_paid,
+        resolved_track=resolved_track,
+    )
+    if blocked is not None:
+        return blocked
 
     if is_paid:
         slot_bucket_id = (
