@@ -26,6 +26,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from src.features.budget import logic as budget_logic
 from src.features.business_candidate.constants import (
+    CANDIDATE_ATTEMPT_TTL_SEC,
     MAX_ADDRESS_CHARS,
     MAX_CANDIDATES,
     MAX_PROVIDER_TIMEOUT_SEC,
@@ -530,7 +531,7 @@ def valid_candidate_selection_token(
     provider_name: str,
     candidate_ref: str = "",
     now: int | None = None,
-    max_age_sec: int = 300,
+    max_age_sec: int = CANDIDATE_ATTEMPT_TTL_SEC,
 ) -> bool:
     """서명·binding·내용·짧은 수명을 모두 만족할 때만 후보 선택을 인정한다."""
     try:

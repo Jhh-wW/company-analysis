@@ -27,6 +27,7 @@ from src.features.budget.sharing import (
     REPORT_LINK_MAX_AGE_DAYS,
     SHARED_LINK_HEADERS,
 )
+from src.features.business_candidate.constants import CANDIDATE_ATTEMPT_TTL_SEC
 from src.features.observability import constants as obs
 from src.features.observability import lifecycle
 from src.features.pipeline.demo import available_companies
@@ -352,11 +353,11 @@ def _sweep_jobs(now: float) -> None:
     # Places/DART 후보의 일시 메모리는 5분만 둔다. 응답 원문·주소·홈페이지는 애초에
     # 저장하지 않고, 만료 시 같은 분석 ID 예약도 반환한다.
     for token, attempt in list(_CANDIDATE_ATTEMPTS.items()):
-        if now - attempt.created_at > 300:
+        if now - attempt.created_at > CANDIDATE_ATTEMPT_TTL_SEC:
             del _CANDIDATE_ATTEMPTS[token]
             public_ids.release(attempt.run_id)
     for token, grant in list(_CANDIDATE_SEARCH_GRANTS.items()):
-        if now - grant.created_at > 300:
+        if now - grant.created_at > CANDIDATE_ATTEMPT_TTL_SEC:
             del _CANDIDATE_SEARCH_GRANTS[token]
 
     # 메모리에 없는 재시작 전 대기표도 같은 벽시계 만료 기준으로 정리한다.

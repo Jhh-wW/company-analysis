@@ -27,6 +27,7 @@ from src.features.budget.constants import (
 )
 from src.features.business_candidate import logic as candidate_logic
 from src.features.business_candidate import providers as candidate_providers
+from src.features.business_candidate.constants import CANDIDATE_ATTEMPT_TTL_SEC
 from src.features.observability import constants as obs
 from src.features.observability import lifecycle
 from src.features.pipeline.demo import DemoPipeline, available_companies
@@ -514,7 +515,10 @@ async def confirm_page(
         canonical_candidate_ref = candidate_logic.canonical_candidate_ref(candidate_ref)
         if (
             candidate_attempt is None
-            or time.monotonic() - candidate_attempt.created_at > 300
+            or (
+                time.monotonic() - candidate_attempt.created_at
+                > CANDIDATE_ATTEMPT_TTL_SEC
+            )
             or candidate_attempt.user_input != user_input
             or candidate_attempt.bucket_id != current_bucket
             or candidate_attempt.posting_image_consent
@@ -667,7 +671,10 @@ async def confirm_page(
             current_bucket = spend_store.bucket_id(share_key)
             if (
                 grant is None
-                or time.monotonic() - grant.created_at > 300
+                or (
+                    time.monotonic() - grant.created_at
+                    > CANDIDATE_ATTEMPT_TTL_SEC
+                )
                 or grant.user_input != user_input
                 or grant.bucket_id != current_bucket
                 or grant.posting_image_consent

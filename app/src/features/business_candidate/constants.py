@@ -18,6 +18,10 @@ MAX_CANDIDATES: Final[int] = 3
 MAX_RAW_CANDIDATES: Final[int] = 15
 PROVIDER_CALLS_PER_RESOLUTION: Final[int] = 1
 PROVIDER_TIMEOUT_SEC: Final[float] = 8.0
+
+# 후보 선택 HMAC과 서버 메모리 attempt/grant가 공유하는 유효기간.
+CANDIDATE_ATTEMPT_TTL_SEC: Final[int] = 300
+
 # DART local 후보의 첫 요청은 1회성 corpCode 다운로드와 XML parse/index를
 # 포함할 수 있어 외부 검색의 8초 UX 상한과 분리한다. 관측된 cold 약 14초에
 # 여유를 둔 30초까지만 웹 요청이 기다린다. 기존 내부 HTTP timeout은 별도로

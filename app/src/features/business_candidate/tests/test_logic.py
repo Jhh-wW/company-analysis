@@ -5,6 +5,7 @@ import time
 from src.features.budget import logic as budget_logic
 from src.features.business_candidate import logic
 from src.features.business_candidate.constants import (
+    CANDIDATE_ATTEMPT_TTL_SEC,
     MAX_CANDIDATES,
     PROVIDER_TIMEOUT_SEC,
     RATE_MAX_SEARCHES,
@@ -39,6 +40,40 @@ def _jyp_row(**changes):
     }
     values.update(changes)
     return logic.RawBusinessCandidate(**values)
+
+
+def test_후보선택_서명은_공통_TTL_정확경계까지만_유효하다():
+    issued = 1_700_000_000
+    fields = {
+        "binding": "attempt:0:bucket",
+        "original_company": "JYP",
+        "job": "",
+        "address_hint": "서울 강동구",
+        "candidate_name": "JYP Entertainment",
+        "provider_name": "DART",
+        "candidate_ref": "00258689",
+    }
+    token = logic.candidate_selection_token(**fields, now=issued)
+
+    assert CANDIDATE_ATTEMPT_TTL_SEC == 300
+    assert logic.valid_candidate_selection_token(
+        token, **fields, now=issued + CANDIDATE_ATTEMPT_TTL_SEC
+    )
+    assert not logic.valid_candidate_selection_token(
+        token, **fields, now=issued + CANDIDATE_ATTEMPT_TTL_SEC + 1
+    )
+    assert logic.valid_candidate_selection_token(
+        token, **fields, now=issued - 30
+    )
+    assert not logic.valid_candidate_selection_token(
+        token, **fields, now=issued - 31
+    )
+    assert logic.valid_candidate_selection_token(
+        token, **fields, now=issued + 7, max_age_sec=7
+    )
+    assert not logic.valid_candidate_selection_token(
+        token, **fields, now=issued + 8, max_age_sec=7
+    )
 
 
 def test_jyp와_주소로_정식법인_후보를_점수화하지만_자동확정하지_않는다(monkeypatch):

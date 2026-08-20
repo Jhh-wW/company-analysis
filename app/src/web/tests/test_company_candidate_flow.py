@@ -17,6 +17,7 @@ from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
 from src.features.budget import logic as budget_logic
 from src.features.budget.constants import SPEND_PHASE_CANDIDATE, SPEND_PHASE_IDENTIFY
+from src.features.business_candidate.constants import CANDIDATE_ATTEMPT_TTL_SEC
 from src.features.business_candidate.logic import (
     ProviderRateLimited,
     ProviderTimedOut,
@@ -146,6 +147,65 @@ class PaidGoogleFixture:
         ]
 
 
+def test_후보_attempt와_검색grant는_공통_TTL_경계뒤에만_정리된다(monkeypatch):
+    created_at = 1_000.0
+    user_input = UserInput(company="JYP", job="", region="서울 강동구")
+    attempt_token = "candidate-attempt"
+    grant_token = "candidate-search-grant"
+    run_id = "candidate-run-id"
+    monkeypatch.setattr(job_runtime, "_JOBS", {})
+    monkeypatch.setattr(job_runtime, "_PAID_ATTEMPTS", {})
+    monkeypatch.setattr(
+        job_runtime,
+        "_CANDIDATE_ATTEMPTS",
+        {
+            attempt_token: job_runtime.CandidateAttempt(
+                token=attempt_token,
+                run_id=run_id,
+                user_input=user_input,
+                candidate_count=1,
+                share_key="public",
+                bucket_id="public",
+                candidate_cost_krw=0.0,
+                elapsed_sec=0.0,
+                posting_image_consent=False,
+                evaluation_paid_consent=False,
+                created_at=created_at,
+            )
+        },
+    )
+    monkeypatch.setattr(
+        job_runtime,
+        "_CANDIDATE_SEARCH_GRANTS",
+        {
+            grant_token: job_runtime.CandidateSearchGrant(
+                token=grant_token,
+                user_input=user_input,
+                share_key="public",
+                bucket_id="public",
+                posting_image_consent=False,
+                evaluation_paid_consent=False,
+                created_at=created_at,
+            )
+        },
+    )
+    monkeypatch.setattr(job_runtime, "_expire_observation_pending", lambda: None)
+    released: list[str] = []
+    monkeypatch.setattr(public_ids, "release", released.append)
+
+    job_runtime._sweep_jobs(created_at + CANDIDATE_ATTEMPT_TTL_SEC)
+
+    assert attempt_token in job_runtime._CANDIDATE_ATTEMPTS
+    assert grant_token in job_runtime._CANDIDATE_SEARCH_GRANTS
+    assert released == []
+
+    job_runtime._sweep_jobs(created_at + CANDIDATE_ATTEMPT_TTL_SEC + 0.001)
+
+    assert attempt_token not in job_runtime._CANDIDATE_ATTEMPTS
+    assert grant_token not in job_runtime._CANDIDATE_SEARCH_GRANTS
+    assert released == [run_id]
+
+
 def test_paid_candidate_worker_slot부족은_provider0회_phase취소_0원이다(monkeypatch):
     from src.features.business_candidate import logic as candidate_logic
     from src.web.routers import analysis as analysis_router
@@ -245,6 +305,130 @@ def _hidden(body: str, name: str) -> str:
     )
     assert found is not None, (name, body[:500])
     return found.group(1)
+
+
+class _AnalysisClock:
+    def __init__(self, now: float):
+        self.now = now
+
+    def monotonic(self) -> float:
+        return self.now
+
+    @staticmethod
+    def perf_counter() -> float:
+        return time.perf_counter()
+
+
+@pytest.mark.parametrize(
+    ("age_sec", "expected_status", "expected_lookups"),
+    (
+        (float(CANDIDATE_ATTEMPT_TTL_SEC), 200, 1),
+        (CANDIDATE_ATTEMPT_TTL_SEC + 0.001, 403, 0),
+    ),
+)
+def test_후보attempt는_TTL_정확경계까지만_선택에_재사용된다(
+    monkeypatch, age_sec: float, expected_status: int, expected_lookups: int
+):
+    from src.web.routers import analysis as analysis_router
+
+    clock = _AnalysisClock(time.monotonic())
+    monkeypatch.setattr(analysis_router, "time", clock)
+    pipeline = CandidateAwareFakeRealPipeline(local_candidates=True)
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    client, csrf = _admin_client()
+    try:
+        body = client.post("/confirm", data=_form(csrf)).text
+        attempt_token = _hidden(body, "candidate_attempt_token")
+        clock.now += age_sec
+
+        confirmed = client.post(
+            "/confirm",
+            data=_form(
+                csrf,
+                candidate_resolution_confirmed="yes",
+                candidate_attempt_token=attempt_token,
+                candidate_selection_token=_hidden(
+                    body, "candidate_selection_token"
+                ),
+                candidate_index=_hidden(body, "candidate_index"),
+                candidate_name=_hidden(body, "candidate_name"),
+                candidate_provider=_hidden(body, "candidate_provider"),
+                candidate_ref=_hidden(body, "candidate_ref"),
+            ),
+        )
+    finally:
+        client.close()
+
+    assert confirmed.status_code == expected_status
+    assert pipeline.lookup_calls == expected_lookups
+    assert attempt_token not in job_runtime._CANDIDATE_ATTEMPTS
+
+
+@pytest.mark.parametrize(
+    ("age_sec", "expected_status", "expected_calls"),
+    (
+        (float(CANDIDATE_ATTEMPT_TTL_SEC), 200, 1),
+        (CANDIDATE_ATTEMPT_TTL_SEC + 0.001, 403, 0),
+    ),
+)
+def test_후보검색_grant는_TTL_정확경계까지만_provider를_허용한다(
+    monkeypatch, age_sec: float, expected_status: int, expected_calls: int
+):
+    from src.features.business_candidate import providers
+    from src.web.routers import analysis as analysis_router
+
+    clock = _AnalysisClock(time.monotonic())
+    monkeypatch.setattr(analysis_router, "time", clock)
+    pipeline = CandidateAwareFakeRealPipeline(local_candidates=False)
+    google = PaidGoogleFixture()
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    monkeypatch.setenv(evaluation_mode.ENV_MODE, "1")
+    monkeypatch.setenv(evaluation_mode.ENV_PAID_PROVIDERS, "1")
+    monkeypatch.setattr(
+        request_helpers, "_strict_loopback_http_request", lambda _request: True
+    )
+    monkeypatch.setattr(
+        providers,
+        "configured_provider",
+        lambda _pipeline, **_kwargs: google,
+    )
+    client, csrf = _admin_client()
+    try:
+        workflow_id = _hidden(client.get("/").text, "evaluation_workflow_id")
+        missed = client.post(
+            "/confirm",
+            data=_form(
+                csrf,
+                evaluation_paid_consent="yes",
+                evaluation_workflow_id=workflow_id,
+            ),
+        )
+        search_grant = _hidden(missed.text, "candidate_search_grant")
+        consent_grant = _hidden(missed.text, "evaluation_consent_grant")
+        stored_grant = job_runtime._CANDIDATE_SEARCH_GRANTS[search_grant]
+        assert stored_grant.created_at == clock.now
+        assert stored_grant.posting_image_consent is False
+        assert stored_grant.evaluation_paid_consent is True
+        assert stored_grant.user_input == request_helpers.company_analysis_input(
+            company="JYP", region="서울 강동구"
+        )
+        clock.now += age_sec
+        assert clock.now - stored_grant.created_at == pytest.approx(age_sec)
+
+        searched = client.post(
+            "/confirm",
+            data=_form(
+                csrf,
+                candidate_search_requested="yes",
+                candidate_search_grant=search_grant,
+                evaluation_consent_grant=consent_grant,
+            ),
+        )
+    finally:
+        client.close()
+
+    assert searched.status_code == expected_status, searched.text
+    assert google.calls == expected_calls
 
 
 def test_DART_local_후보는_사람이_선택해야만_DART를_다시_부르고_원입력을_보존한다(
