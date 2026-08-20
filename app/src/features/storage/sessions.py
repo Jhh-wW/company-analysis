@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import sqlite3
 from dataclasses import dataclass
 from typing import Optional
@@ -33,18 +34,24 @@ class SessionRecord:
     expires_at: float  # time.time() 기준 초
 
 
+def _token_hash(raw_token: str) -> str:
+    """쿠키 원문을 DB 조회용 SHA-256 지문으로 바꾼다."""
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
 def save_session(conn: sqlite3.Connection, record: SessionRecord) -> None:
-    """세션을 저장한다(같은 토큰이면 덮어쓴다)."""
+    """세션을 저장한다(같은 토큰 지문이면 덮어쓴다)."""
     conn.execute(
         f"""
-        INSERT INTO {TABLE_SESSIONS} (token, email, subject, is_admin, expires_at)
+        INSERT INTO {TABLE_SESSIONS}
+            (token_hash, email, subject, is_admin, expires_at)
         VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(token) DO UPDATE SET
+        ON CONFLICT(token_hash) DO UPDATE SET
             email=excluded.email, subject=excluded.subject,
             is_admin=excluded.is_admin, expires_at=excluded.expires_at
         """,
         (
-            record.token,
+            _token_hash(record.token),
             record.email,
             record.subject,
             int(record.is_admin),
@@ -59,23 +66,29 @@ def load_session(
     """토큰으로 세션을 찾는다. 없거나 만료됐으면 `None`(만료분은 조회하는 김에 지운다)."""
     if not token:
         return None
+    token_hash = _token_hash(token)
     row = conn.execute(
-        f"SELECT token, email, subject, is_admin, expires_at FROM {TABLE_SESSIONS} WHERE token = ?",
-        (token,),
+        f"SELECT email, subject, is_admin, expires_at "
+        f"FROM {TABLE_SESSIONS} WHERE token_hash = ?",
+        (token_hash,),
     ).fetchone()
     if row is None:
         return None
     # 마이그레이션 전 세션은 이메일만 갖고 있어 동일 인물의 이메일 별칭을 구별할
     # 수 없다. 승인자 신원으로 승격하지 않고 폐기해 재로그인시킨다.
     if not isinstance(row["subject"], str) or not row["subject"].strip():
-        conn.execute(f"DELETE FROM {TABLE_SESSIONS} WHERE token = ?", (token,))
+        conn.execute(
+            f"DELETE FROM {TABLE_SESSIONS} WHERE token_hash = ?", (token_hash,)
+        )
         return None
     checked = now if now is not None else dt.datetime.now().timestamp()
     if row["expires_at"] < checked:
-        conn.execute(f"DELETE FROM {TABLE_SESSIONS} WHERE token = ?", (token,))
+        conn.execute(
+            f"DELETE FROM {TABLE_SESSIONS} WHERE token_hash = ?", (token_hash,)
+        )
         return None
     return SessionRecord(
-        token=row["token"],
+        token=token,
         email=row["email"],
         subject=row["subject"],
         is_admin=bool(row["is_admin"]),
@@ -86,4 +99,7 @@ def load_session(
 def delete_session(conn: sqlite3.Connection, token: Optional[str]) -> None:
     """로그아웃 — 세션을 지운다. 없는 토큰이어도 조용히 넘어간다."""
     if token:
-        conn.execute(f"DELETE FROM {TABLE_SESSIONS} WHERE token = ?", (token,))
+        conn.execute(
+            f"DELETE FROM {TABLE_SESSIONS} WHERE token_hash = ?",
+            (_token_hash(token),),
+        )

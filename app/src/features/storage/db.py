@@ -34,6 +34,18 @@ def default_db_path() -> Path:
     return paths.APP_ROOT / constants.DEFAULT_DB_RELATIVE_PATH
 
 
+_CREATE_SESSIONS_SQL: Final[str] = f"""
+CREATE TABLE IF NOT EXISTS {constants.TABLE_SESSIONS} (
+    token_hash TEXT PRIMARY KEY,
+    email      TEXT NOT NULL,
+    subject    TEXT NOT NULL,
+    is_admin   INTEGER NOT NULL,
+    expires_at REAL NOT NULL
+)
+"""
+_LEGACY_SESSIONS_TABLE: Final[str] = "sessions_legacy_raw_token"
+
+
 #: 표를 만드는 SQL. 전부 `IF NOT EXISTS`라 여러 번 불러도 안전하다(멱등).
 _SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
     f"""
@@ -80,16 +92,42 @@ _SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
         created_at TEXT NOT NULL
     )
     """,
-    f"""
-    CREATE TABLE IF NOT EXISTS {constants.TABLE_SESSIONS} (
-        token      TEXT PRIMARY KEY,
-        email      TEXT NOT NULL,
-        subject    TEXT NOT NULL,
-        is_admin   INTEGER NOT NULL,
-        expires_at REAL NOT NULL
-    )
-    """,
+    _CREATE_SESSIONS_SQL,
 )
+
+
+def _session_columns(conn: sqlite3.Connection) -> set[str]:
+    return {
+        str(row[1])
+        for row in conn.execute(
+            f"PRAGMA table_info({constants.TABLE_SESSIONS})"
+        ).fetchall()
+    }
+
+
+def _migrate_sessions_to_token_hash(conn: sqlite3.Connection) -> None:
+    """원문 토큰 세션만 한 번 폐기하고 해시 기본키 표로 전환한다."""
+    columns = _session_columns(conn)
+    if "token_hash" in columns and "token" not in columns:
+        return
+    if "token_hash" in columns or "token" not in columns:
+        raise RuntimeError("지원할 수 없는 sessions 스키마입니다")
+
+    reserved_name_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (_LEGACY_SESSIONS_TABLE,),
+    ).fetchone()
+    if reserved_name_exists is not None:
+        raise RuntimeError("세션 스키마 전환용 예약 표가 이미 존재합니다")
+
+    # 2026-08-20 결정 1-A: 기존 세션 행만 무효화한다. 같은 트랜잭션에서
+    # 옛 표를 바꾸고 빈 새 표를 만든 뒤 옛 표를 버려, 다른 DB 표는 건드리지 않는다.
+    conn.execute(
+        f"ALTER TABLE {constants.TABLE_SESSIONS} "
+        f"RENAME TO {_LEGACY_SESSIONS_TABLE}"
+    )
+    conn.execute(_CREATE_SESSIONS_SQL)
+    conn.execute(f"DROP TABLE {_LEGACY_SESSIONS_TABLE}")
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -110,15 +148,12 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     ):
         conn.execute(statement)
 
-    # OAuth ``sub``는 이메일과 달리 계정에서 바뀌지 않는 사람 식별자다. 예전
-    # DB에는 이 열이 없으므로 표를 지우지 않고 nullable 열로만 보탠다. 값이
-    # 없는 예전 세션은 sessions.load_session()이 폐기해 재로그인을 요구한다.
-    session_columns = {
-        str(row[1])
-        for row in conn.execute(
-            f"PRAGMA table_info({constants.TABLE_SESSIONS})"
-        ).fetchall()
-    }
+    _migrate_sessions_to_token_hash(conn)
+
+    # OAuth ``sub``는 이메일과 달리 계정에서 바뀌지 않는 사람 식별자다. 이미
+    # token_hash를 쓰지만 subject가 없는 구 버전은 nullable 열로만 보탠다.
+    # 값이 없는 예전 세션은 sessions.load_session()이 폐기해 재로그인을 요구한다.
+    session_columns = _session_columns(conn)
     if "subject" not in session_columns:
         conn.execute(
             f"ALTER TABLE {constants.TABLE_SESSIONS} ADD COLUMN subject TEXT"

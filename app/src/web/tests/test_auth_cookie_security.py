@@ -286,6 +286,42 @@ def test_local_demo_relogin_rotates_old_session(monkeypatch):
         assert new_client.get("/admin", follow_redirects=False).status_code == 200
 
 
+def test_local_demo_login_navigation_logout_rejects_reused_raw_cookie(
+    monkeypatch,
+):
+    _enable_local_demo(monkeypatch)
+
+    with TestClient(
+        app,
+        base_url="http://127.0.0.1:8000",
+        client=("127.0.0.1", 50000),
+    ) as client:
+        client.get(f"/auth/local-demo/start?token={LOCAL_DEMO_TOKEN}")
+        landing = client.get("/auth/local-demo")
+        logged_in = client.post(
+            "/auth/local-demo",
+            data={"state": _local_demo_state(landing.text)},
+            headers={"Origin": "http://127.0.0.1:8000"},
+            follow_redirects=False,
+        )
+        raw_token = logged_in.cookies[SESSION]
+        assert client.get("/admin", follow_redirects=False).status_code == 200
+
+        logged_out = client.post(
+            "/auth/logout",
+            data={"csrf_token": auth_logic.csrf_token_for_session(raw_token)},
+            follow_redirects=False,
+        )
+        assert logged_out.status_code == 303
+
+        client.cookies.set(SESSION, raw_token)
+        reused = client.get("/admin", follow_redirects=False)
+
+    assert auth_logic.get_session(raw_token) is None
+    assert reused.status_code == 303
+    assert reused.headers["location"] == "/auth/not-admin"
+
+
 def test_failed_oauth_callback_keeps_existing_session(monkeypatch):
     old = auth_logic.create_session("admin@example.com", is_admin=True)
 

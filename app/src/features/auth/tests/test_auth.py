@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import urllib.error
 
@@ -322,8 +323,11 @@ def test_DB의_손상된_subject는_이메일로_대체하지_않고_세션을_�
     )
     with db.connect() as conn:
         conn.execute(
-            "UPDATE sessions SET subject=? WHERE token=?",
-            ("person@example.com", session.token),
+            "UPDATE sessions SET subject=? WHERE token_hash=?",
+            (
+                "person@example.com",
+                hashlib.sha256(session.token.encode("utf-8")).hexdigest(),
+            ),
         )
     assert logic.get_session(session.token) is None
     assert logic.current_email(session.token) is None

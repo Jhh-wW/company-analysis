@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 import sqlite3
 from pathlib import Path
 
@@ -17,6 +19,29 @@ def test_save_then_load_roundtrip(tmp_path: Path) -> None:
         sessions.save_session(conn, record)
         loaded = sessions.load_session(conn, "tok-1", now=1_000_000_000.0)
     assert loaded == record
+
+
+def test_database_stores_only_lowercase_sha256_not_raw_cookie(tmp_path: Path) -> None:
+    raw_token = "browser-cookie-raw-token"
+    record = sessions.SessionRecord(
+        token=raw_token,
+        email="user@example.com",
+        subject="google:person-1",
+        is_admin=False,
+        expires_at=2_000_000_000.0,
+    )
+
+    with db.connect(tmp_path / "storage.db") as conn:
+        sessions.save_session(conn, record)
+        row = conn.execute("SELECT token_hash FROM sessions").fetchone()
+        dump = "\n".join(conn.iterdump())
+        loaded = sessions.load_session(conn, raw_token, now=1.0)
+
+    assert row is not None
+    assert row["token_hash"] == hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    assert re.fullmatch(r"[0-9a-f]{64}", row["token_hash"])
+    assert raw_token not in dump
+    assert loaded == record, "호출부에는 DB 지문이 아니라 쿠키 원문 계약을 돌려준다"
 
 
 def test_load_missing_token_returns_none(tmp_path: Path) -> None:
@@ -125,11 +150,14 @@ def test_legacy_email_only_session_is_migrated_then_rejected(tmp_path: Path) -> 
 
     with db.connect(target) as migrated:
         columns = {
-            row["name"] for row in migrated.execute("PRAGMA table_info(sessions)")
+            row["name"]: row["pk"]
+            for row in migrated.execute("PRAGMA table_info(sessions)")
         }
+        assert columns["token_hash"] == 1
+        assert "token" not in columns
         assert "subject" in columns
         assert sessions.load_session(migrated, "old-token", now=1.0) is None
         count = migrated.execute(
-            "SELECT COUNT(*) AS n FROM sessions WHERE token='old-token'"
+            "SELECT COUNT(*) AS n FROM sessions"
         ).fetchone()["n"]
     assert count == 0
