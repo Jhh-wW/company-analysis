@@ -44,6 +44,57 @@ CREATE TABLE IF NOT EXISTS {constants.TABLE_SESSIONS} (
 )
 """
 _LEGACY_SESSIONS_TABLE: Final[str] = "sessions_legacy_raw_token"
+_SESSION_MIGRATION_SAVEPOINT: Final[str] = "migrate_sessions_token_hash"
+
+_SchemaColumn = tuple[str, str, int, object, int, int]
+_SchemaSignature = tuple[_SchemaColumn, ...]
+
+# ``PRAGMA table_xinfo``의 (name, type, notnull, default, pk, hidden) 정본.
+# subject가 없는 최초판과 그 열을 뒤에 붙인 판까지는 실제 과거 스키마다.
+_RAW_SESSION_SCHEMAS: Final[tuple[_SchemaSignature, ...]] = (
+    (
+        ("token", "TEXT", 0, None, 1, 0),
+        ("email", "TEXT", 1, None, 0, 0),
+        ("subject", "TEXT", 1, None, 0, 0),
+        ("is_admin", "INTEGER", 1, None, 0, 0),
+        ("expires_at", "REAL", 1, None, 0, 0),
+    ),
+    (
+        ("token", "TEXT", 0, None, 1, 0),
+        ("email", "TEXT", 1, None, 0, 0),
+        ("is_admin", "INTEGER", 1, None, 0, 0),
+        ("expires_at", "REAL", 1, None, 0, 0),
+    ),
+    (
+        ("token", "TEXT", 0, None, 1, 0),
+        ("email", "TEXT", 1, None, 0, 0),
+        ("is_admin", "INTEGER", 1, None, 0, 0),
+        ("expires_at", "REAL", 1, None, 0, 0),
+        ("subject", "TEXT", 0, None, 0, 0),
+    ),
+)
+_HASHED_SESSION_SCHEMAS: Final[tuple[_SchemaSignature, ...]] = (
+    (
+        ("token_hash", "TEXT", 0, None, 1, 0),
+        ("email", "TEXT", 1, None, 0, 0),
+        ("subject", "TEXT", 1, None, 0, 0),
+        ("is_admin", "INTEGER", 1, None, 0, 0),
+        ("expires_at", "REAL", 1, None, 0, 0),
+    ),
+    (
+        ("token_hash", "TEXT", 0, None, 1, 0),
+        ("email", "TEXT", 1, None, 0, 0),
+        ("is_admin", "INTEGER", 1, None, 0, 0),
+        ("expires_at", "REAL", 1, None, 0, 0),
+    ),
+    (
+        ("token_hash", "TEXT", 0, None, 1, 0),
+        ("email", "TEXT", 1, None, 0, 0),
+        ("is_admin", "INTEGER", 1, None, 0, 0),
+        ("expires_at", "REAL", 1, None, 0, 0),
+        ("subject", "TEXT", 0, None, 0, 0),
+    ),
+)
 
 
 #: 표를 만드는 SQL. 전부 `IF NOT EXISTS`라 여러 번 불러도 안전하다(멱등).
@@ -92,42 +143,99 @@ _SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
         created_at TEXT NOT NULL
     )
     """,
-    _CREATE_SESSIONS_SQL,
 )
+
+
+def _schema_object_type(conn: sqlite3.Connection, name: str) -> Optional[str]:
+    row = conn.execute(
+        "SELECT type FROM sqlite_master WHERE name=?",
+        (name,),
+    ).fetchone()
+    return None if row is None else str(row[0])
+
+
+def _table_signature(conn: sqlite3.Connection, name: str) -> _SchemaSignature:
+    escaped = name.replace('"', '""')
+    return tuple(
+        (
+            str(row[1]),
+            str(row[2]).strip().upper(),
+            int(row[3]),
+            row[4],
+            int(row[5]),
+            int(row[6]),
+        )
+        for row in conn.execute(f'PRAGMA table_xinfo("{escaped}")').fetchall()
+    )
+
+
+def _session_table_state(conn: sqlite3.Connection, name: str) -> str:
+    object_type = _schema_object_type(conn, name)
+    if object_type is None:
+        return "missing"
+    if object_type != "table":
+        return "unexpected"
+    signature = _table_signature(conn, name)
+    if signature in _HASHED_SESSION_SCHEMAS:
+        return "hashed"
+    if signature in _RAW_SESSION_SCHEMAS:
+        return "raw"
+    return "unexpected"
 
 
 def _session_columns(conn: sqlite3.Connection) -> set[str]:
     return {
-        str(row[1])
-        for row in conn.execute(
-            f"PRAGMA table_info({constants.TABLE_SESSIONS})"
-        ).fetchall()
+        column[0]
+        for column in _table_signature(conn, constants.TABLE_SESSIONS)
     }
 
 
 def _migrate_sessions_to_token_hash(conn: sqlite3.Connection) -> None:
-    """원문 토큰 세션만 한 번 폐기하고 해시 기본키 표로 전환한다."""
-    columns = _session_columns(conn)
-    if "token_hash" in columns and "token" not in columns:
-        return
-    if "token_hash" in columns or "token" not in columns:
-        raise RuntimeError("지원할 수 없는 sessions 스키마입니다")
+    """원문 토큰 세션만 한 번 폐기하고 해시 기본키 표로 원자 전환한다."""
+    savepoint = _SESSION_MIGRATION_SAVEPOINT
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        current = _session_table_state(conn, constants.TABLE_SESSIONS)
+        reserved = _session_table_state(conn, _LEGACY_SESSIONS_TABLE)
 
-    reserved_name_exists = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-        (_LEGACY_SESSIONS_TABLE,),
-    ).fetchone()
-    if reserved_name_exists is not None:
-        raise RuntimeError("세션 스키마 전환용 예약 표가 이미 존재합니다")
+        if current == "raw" and reserved == "missing":
+            # 결정 1-A: 옛 세션 행만 무효화한다. SAVEPOINT 안에서 이름 변경,
+            # 빈 해시 표 생성, 원문 표 삭제를 모두 끝내야 중간 상태가 영속되지 않는다.
+            conn.execute(
+                f"ALTER TABLE {constants.TABLE_SESSIONS} "
+                f"RENAME TO {_LEGACY_SESSIONS_TABLE}"
+            )
+            conn.execute(_CREATE_SESSIONS_SQL)
+            conn.execute(f"DROP TABLE {_LEGACY_SESSIONS_TABLE}")
+        elif current == "hashed" and reserved == "raw":
+            # 원자화 전 코드가 ALTER/CREATE 뒤 중단된 상태를 복구한다. 새 해시
+            # 세션은 보존하고, 결정 1-A 대상인 원문 legacy 행만 제거한다.
+            conn.execute(f"DROP TABLE {_LEGACY_SESSIONS_TABLE}")
+        elif current == "missing" and reserved == "raw":
+            # ALTER 직후 중단된 DB를 직접 열어도 같은 결정으로 복구한다.
+            conn.execute(_CREATE_SESSIONS_SQL)
+            conn.execute(f"DROP TABLE {_LEGACY_SESSIONS_TABLE}")
+        elif current == "missing" and reserved == "missing":
+            conn.execute(_CREATE_SESSIONS_SQL)
+        elif current != "hashed" or reserved != "missing":
+            raise RuntimeError(
+                "지원할 수 없는 sessions 마이그레이션 상태입니다 "
+                f"(sessions={current}, legacy={reserved})"
+            )
 
-    # 2026-08-20 결정 1-A: 기존 세션 행만 무효화한다. 같은 트랜잭션에서
-    # 옛 표를 바꾸고 빈 새 표를 만든 뒤 옛 표를 버려, 다른 DB 표는 건드리지 않는다.
-    conn.execute(
-        f"ALTER TABLE {constants.TABLE_SESSIONS} "
-        f"RENAME TO {_LEGACY_SESSIONS_TABLE}"
-    )
-    conn.execute(_CREATE_SESSIONS_SQL)
-    conn.execute(f"DROP TABLE {_LEGACY_SESSIONS_TABLE}")
+        if (
+            _session_table_state(conn, constants.TABLE_SESSIONS) != "hashed"
+            or _session_table_state(conn, _LEGACY_SESSIONS_TABLE) != "missing"
+        ):
+            raise RuntimeError("sessions 해시 스키마 전환을 완결하지 못했습니다")
+    except BaseException:
+        try:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        finally:
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+    else:
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
