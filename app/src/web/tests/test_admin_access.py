@@ -427,6 +427,64 @@ def test_발급하면_바로_주소_화면으로_보낸다(admin: TestClient):
     assert response.headers["location"].startswith("/admin/link/")
 
 
+def test_관리자_링크와_초대_생성시각은_offset포함_KST다(
+    admin: TestClient,
+    monkeypatch,
+):
+    fixed = "2026-08-21T00:30:00+09:00"
+    monkeypatch.setattr(admin_router.clock, "iso_now_kst", lambda: fixed)
+
+    created = admin.post(
+        "/admin/link/new",
+        data={"company": "KST 회사", "note": "자정 뒤"},
+        follow_redirects=False,
+    )
+    invited = admin.post(
+        "/admin/invite",
+        data={"email": "kst@example.com", "note": "자정 뒤"},
+        follow_redirects=False,
+    )
+
+    key = created.headers["location"].rsplit("/", 1)[-1]
+    with storage_db.connect() as conn:
+        link = share_store.load(conn, key)
+        member = share_allow.load(conn, "kst@example.com")
+    assert created.status_code == invited.status_code == 303
+    assert link is not None and link.created_at == fixed
+    assert member is not None and member.invited_at == fixed
+
+
+def test_관리자_시각표시는_저장된_UTC를_KST로_바꾼다(admin: TestClient):
+    key = "d" * 32
+    with storage_db.connect() as conn:
+        share_store.save(
+            conn,
+            key=key,
+            company="UTC 저장 회사",
+            job="",
+            now_iso="2026-08-19T15:30:00Z",
+        )
+        assert share_store.mark_opened(
+            conn, key, "2026-08-19T15:31:00+00:00"
+        )
+        share_allow.invite(
+            conn,
+            email="utc@example.com",
+            note="UTC 저장",
+            now_iso="2026-08-19T15:32:00Z",
+        )
+
+    listing = admin.get("/admin/access")
+    detail = admin.get(f"/admin/link/{key}")
+
+    assert "발급 2026-08-20 00:30 (한국시간)" in listing.text
+    assert "최초 2026-08-20 00:31 (한국시간)" in listing.text
+    assert "최근 2026-08-20 00:31 (한국시간)" in listing.text
+    assert "2026-08-20 00:32 (한국시간)" in listing.text
+    assert "2026-08-20 00:30 (한국시간)" in detail.text
+    assert detail.text.count("2026-08-20 00:31 (한국시간)") == 2
+
+
 def _보고서를_만든다(admin: TestClient) -> str:
     form = {
         "company": CANONICAL_DEMO_COMPANY,

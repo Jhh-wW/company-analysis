@@ -11,10 +11,11 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import sqlite3
 from dataclasses import dataclass
 from typing import Optional
+
+from src.core import clock
 
 #: 발급한 링크를 담는 표.
 TABLE_SHARE_LINKS = "share_links"
@@ -202,4 +203,4 @@ def delete(conn: sqlite3.Connection, key: str) -> bool:
 
 def today_iso() -> str:
     """오늘 날짜 문자열. 시험에서 바꿔 끼울 수 있게 함수로 둔다."""
-    return dt.date.today().isoformat()
+    return clock.today_kst().isoformat()

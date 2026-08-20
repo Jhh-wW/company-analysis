@@ -43,6 +43,7 @@ from src.features.sharelink.constants import (
 from src.features.storage import db as storage_db
 from src.web import job_runtime, main
 from src.web import paid_runtime, request_helpers, runtime
+from src.web.routers import analysis as analysis_router
 
 _카카오열쇠 = "a1b2c3d4e5f60718a1b2c3d4e5f60718"
 _네이버열쇠 = "0f1e2d3c4b5a69780f1e2d3c4b5a6978"
@@ -186,9 +187,14 @@ def test_미연결_링크는_회사만_실제입력에_채우고_읽기전용으
 # ══════════════════════════════════════════════════════════
 
 
-def test_열어보면_기록이_남는다(client: TestClient):
+def test_열어보면_offset포함_KST_기록이_남는다(
+    client: TestClient,
+    monkeypatch,
+):
     """GET 요청 횟수와 시각을 관찰 지표로 남긴다."""
     _링크발급(_카카오열쇠, "카카오")
+    fixed = "2026-08-20T00:30:00+09:00"
+    monkeypatch.setattr(analysis_router.clock, "iso_now_kst", lambda: fixed)
 
     client.get(f"/k/{_카카오열쇠}")
     client.get(f"/k/{_카카오열쇠}")
@@ -196,8 +202,8 @@ def test_열어보면_기록이_남는다(client: TestClient):
     with storage_db.connect() as conn:
         link = share_store.load(conn, _카카오열쇠)
     assert link.opened_count == 2
-    assert link.first_opened_at
-    assert link.last_opened_at
+    assert link.first_opened_at == fixed
+    assert link.last_opened_at == fixed
 
 
 def test_처음_열어본_시각은_안_덮인다(client: TestClient):

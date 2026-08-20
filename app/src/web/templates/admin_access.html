@@ -120,13 +120,14 @@
       <td>
         <strong>{{ link.company }}</strong><br>
         {% if link.note %}<br><span class="muted">{{ link.note }}</span>{% endif %}
+        <br><span class="muted">발급 {{ link_created_at_labels.get(link.key, "—") }}</span>
         <br><a href="/admin/link/{{ link.key }}">주소·QR 보기</a>
         {% if link.key in expired_link_keys %}<br><strong>자동 만료됨</strong>{% endif %}
       </td>
       <td>
         {% if link.opened_count %}
           <strong>{{ link.opened_count }}회</strong><br>
-          <span class="muted">최초 {{ link.first_opened_at[:16] }}<br>최근 {{ link.last_opened_at[:16] }}</span>
+          <span class="muted">최초 {{ link_first_opened_at_labels.get(link.key, "—") }}<br>최근 {{ link_last_opened_at_labels.get(link.key, "—") }}</span>
         {% else %}
           <span class="muted">요청 없음</span>
         {% endif %}
@@ -192,7 +193,7 @@
     <tr>
       <td>{{ m.email }}</td>
       <td class="muted">{{ m.note }}</td>
-      <td class="muted">{{ m.invited_at[:10] }}</td>
+      <td class="muted">{{ member_invited_at_labels.get(m.email, "—") }}</td>
       <td>
         <form method="post" action="/admin/revoke" style="display:inline">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

@@ -27,7 +27,7 @@ from src.features.pipeline.canonical_demo import (
     DEMO_COMPANY as CANONICAL_DEMO_COMPANY,
 )
 from src.features.pipeline.demo import DemoPipeline
-from src.features.pipeline.port import Outcome
+from src.features.pipeline.port import Grade, Outcome, Report
 from src.features.report_standard import CANONICAL_SECTION_IDS
 from src.web import main
 from src.web import job_runtime, runtime
@@ -212,3 +212,30 @@ def test_기간_안이면_그대로_열린다(client: TestClient):
     job_id = _보고서를_만든다(client)
 
     assert client.get(f"/result/{job_id}").status_code == 200
+
+
+def test_job_runtime_보고서만료도_KST_59일유효_60일만료를_지킨다(
+    monkeypatch,
+):
+    def report_at(generated_at: str) -> Report:
+        return Report(
+            company="시험회사",
+            job="회사분석",
+            corp_type="상장사",
+            grade=Grade.INCOMPLETE,
+            sections=[],
+            generated_at=generated_at,
+        )
+
+    report = report_at("2026-01-01T15:30:00Z")  # KST 1월 2일 00:30
+    monkeypatch.setattr(
+        job_runtime.clock, "today_kst", lambda: dt.date(2026, 3, 2)
+    )
+    assert not job_runtime._link_expired(report)
+
+    monkeypatch.setattr(
+        job_runtime.clock, "today_kst", lambda: dt.date(2026, 3, 3)
+    )
+    assert job_runtime._link_expired(report)
+    assert job_runtime._link_expired(report_at("깨진 시각"))
+    assert job_runtime._link_expired(report_at("2026-03-03T15:00:00Z"))

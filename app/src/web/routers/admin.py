@@ -109,6 +109,22 @@ def _safe_audit_field(value: str, *, max_chars: int) -> str:
     return clean
 
 
+def _kst_timestamp_label(value: str) -> str:
+    """저장 시각을 관리자 화면용 KST 분 단위 라벨로 바꾼다."""
+    if not isinstance(value, str) or not value.strip():
+        return "—"
+    try:
+        raw = value.strip()
+        normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        parsed = dt.datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=clock.KST)
+        local = parsed.astimezone(clock.KST)
+    except (OverflowError, TypeError, ValueError):
+        return "확인 불가"
+    return f"{local:%Y-%m-%d %H:%M} (한국시간)"
+
+
 def _queue_committed_change(
     conn,
     request: Request,
@@ -324,6 +340,19 @@ def _access_context(request: Request, *, today: dt.date, **kwargs) -> dict:
         if share_logic.is_share_link_expired(link.created_at)
     }
     active_link_count = len(links) - len(expired_link_keys)
+    link_created_at_labels = {
+        link.key: _kst_timestamp_label(link.created_at) for link in links
+    }
+    link_first_opened_at_labels = {
+        link.key: _kst_timestamp_label(link.first_opened_at) for link in links
+    }
+    link_last_opened_at_labels = {
+        link.key: _kst_timestamp_label(link.last_opened_at) for link in links
+    }
+    member_invited_at_labels = {
+        member.email: _kst_timestamp_label(member.invited_at)
+        for member in members
+    }
     configured_stop_threshold = (
         active_link_count * share_tracks.budget_of(share_tracks.Track.LINK)
         + len(members) * share_tracks.budget_of(share_tracks.Track.MEMBER)
@@ -335,7 +364,11 @@ def _access_context(request: Request, *, today: dt.date, **kwargs) -> dict:
         active_link_count=active_link_count,
         expired_link_keys=expired_link_keys,
         report_states=report_states,
+        link_created_at_labels=link_created_at_labels,
+        link_first_opened_at_labels=link_first_opened_at_labels,
+        link_last_opened_at_labels=link_last_opened_at_labels,
         members=members,
+        member_invited_at_labels=member_invited_at_labels,
         spent_today=spend.total_krw,
         configured_stop_threshold_krw=configured_stop_threshold,
         actual_over_threshold_krw=max(
@@ -363,7 +396,11 @@ def _access_page(
             active_link_count=None,
             expired_link_keys=set(),
             report_states={},
+            link_created_at_labels={},
+            link_first_opened_at_labels={},
+            link_last_opened_at_labels={},
             members=[],
+            member_invited_at_labels={},
             spent_today=None,
             configured_stop_threshold_krw=None,
             actual_over_threshold_krw=None,
@@ -478,7 +515,7 @@ async def admin_link_new(
                 conn, report_reference, expected_company=company_clean
             )
             if not validation_error:
-                now_iso = dt.datetime.now().isoformat()
+                now_iso = clock.iso_now_kst()
                 for _attempt in range(_KEY_ISSUE_ATTEMPTS):
                     candidate = share_issue.new_key()
                     if not share_logic.is_valid_key(candidate):
@@ -599,6 +636,11 @@ def _link_detail_page(
             path=path,
             base_url=base,
             link_expired=share_logic.is_share_link_expired(link.created_at),
+            link_created_at_label=_kst_timestamp_label(link.created_at),
+            link_first_opened_at_label=_kst_timestamp_label(
+                link.first_opened_at
+            ),
+            link_last_opened_at_label=_kst_timestamp_label(link.last_opened_at),
             is_deployed=share_issue.looks_deployed(url),
             qr_svg=share_issue.qr_svg(url) if base else "",
             report_state=report_state,
@@ -802,7 +844,7 @@ async def admin_invite(
                 conn,
                 email=email_clean,
                 note=note,
-                now_iso=dt.datetime.now().isoformat(),
+                now_iso=clock.iso_now_kst(),
             )
             confirmed = share_allow.load(conn, email_clean) is not None
             if not changed or not confirmed:

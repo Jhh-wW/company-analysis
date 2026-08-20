@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import datetime as dt
 import logging
 import time
 import uuid
@@ -18,7 +17,7 @@ from fastapi.responses import (
     Response,
 )
 
-from src.core import paths
+from src.core import clock, paths
 from src.core.constants import MAX_RETRY_INPUT, PROGRESS_STEPS
 from src.features.budget import spend_store
 from src.features.budget.constants import (
@@ -195,7 +194,7 @@ async def open_share_link(request: Request, key: str):
                 else:
                     target = f"/result/{link.report_id}"
             if not share_store.mark_opened(
-                conn, clean, dt.datetime.now().isoformat()
+                conn, clean, clock.iso_now_kst()
             ):
                 raise RuntimeError("활성 링크 요청 기록 대상이 사라졌습니다")
     except Exception:  # noqa: BLE001 — 인가 저장소 장애에서는 이전 권한도 정리한다

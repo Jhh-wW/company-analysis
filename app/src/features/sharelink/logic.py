@@ -16,6 +16,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+from src.core import clock
 from src.features.budget.sharing import REPORT_ID_HEX_CHARS
 from src.features.sharelink import constants
 
@@ -140,7 +141,7 @@ def is_share_link_expired(
 ) -> bool:
     """발급 시각 기준 수명이 지났는지 본다.
 
-    시간대가 적힌 시각은 UTC 날짜로 통일한다. 읽을 수 없거나 미래인 시각, 올바르지
+    시간대가 적힌 시각은 KST 사업일로 통일한다. 읽을 수 없거나 미래인 시각, 올바르지
     않은 수명은 권한을 주지 않는 쪽으로 닫는다. 만료일을 발급일에 더하지 않고 날짜
     차이를 비교하므로 ``9999-12-31`` 같은 극단값도 overflow로 500을 만들지 않는다.
     """
@@ -150,15 +151,11 @@ def is_share_link_expired(
     if not _CREATED_AT_RE.match(raw):
         return True
     try:
-        normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
-        parsed = dt.datetime.fromisoformat(normalized)
-        if parsed.tzinfo is not None:
-            parsed = parsed.astimezone(dt.timezone.utc)
-        issued = parsed.date()
+        issued = clock.business_date_from_iso(raw)
     except (OverflowError, TypeError, ValueError):
         return True
 
-    current = today or dt.date.today()
+    current = today or clock.today_kst()
     lifetime = (
         link_max_age_days_from_env() if max_age_days is None else max_age_days
     )

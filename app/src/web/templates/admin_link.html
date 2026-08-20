@@ -91,10 +91,12 @@
         <td>{% if link.opened_count %}<strong>{{ link.opened_count }}회</strong>
             {% else %}<span class="muted">요청 없음</span>{% endif %}
             <br><span class="muted">메신저 미리보기·보안 봇·재시도도 포함될 수 있으며 사람을 식별하지 않습니다.</span></td></tr>
+    <tr><th scope="row">발급 시각</th>
+        <td>{{ link_created_at_label }}</td></tr>
     <tr><th scope="row">최초 요청 시각</th>
-        <td>{{ link.first_opened_at[:16] or "—" }}</td></tr>
+        <td>{{ link_first_opened_at_label }}</td></tr>
     <tr><th scope="row">최근 요청 시각</th>
-        <td>{{ link.last_opened_at[:16] or "—" }}</td></tr>
+        <td>{{ link_last_opened_at_label }}</td></tr>
     <tr><th scope="row">미리 구운 보고서</th>
         <td>
           {% if report_state == "active" %}

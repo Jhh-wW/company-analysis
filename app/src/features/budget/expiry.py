@@ -13,6 +13,8 @@ from __future__ import annotations
 import datetime as dt
 from typing import Optional
 
+from src.core import clock
+
 
 def parse_generated_date(generated_at: str) -> Optional[dt.date]:
     """보고서에 적힌 만든 날짜를 날짜로 바꾼다.
@@ -37,9 +39,8 @@ def parse_generated_date(generated_at: str) -> Optional[dt.date]:
             return dt.date.fromisoformat(raw)
         if raw[10:11] not in {"T", " "}:
             return None
-        normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
-        return dt.datetime.fromisoformat(normalized).date()
-    except (OverflowError, ValueError):
+        return clock.business_date_from_iso(raw)
+    except (OverflowError, TypeError, ValueError):
         return None
 
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import datetime as dt
 import logging
 import time
 from dataclasses import dataclass, field, replace
@@ -12,7 +11,7 @@ from typing import Callable, Optional, TypeVar
 from fastapi import File, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
-from src.core import paths
+from src.core import clock, paths
 from src.core.constants import PIPELINE_FAILED_MESSAGE, PROGRESS_STEPS
 from src.features.budget import expiry as link_expiry
 from src.features.budget import spend_store
@@ -600,7 +599,7 @@ def _link_expired(report: Optional[Report]) -> bool:
     if report is None:
         return False
     return link_expiry.is_expired(
-        report.generated_at, dt.date.today(), REPORT_LINK_MAX_AGE_DAYS
+        report.generated_at, clock.today_kst(), REPORT_LINK_MAX_AGE_DAYS
     )
 
 def _load_saved_report(report_id: str) -> Optional[Report]:

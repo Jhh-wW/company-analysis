@@ -15,6 +15,7 @@ import datetime as dt
 
 import pytest
 
+from src.features.sharelink import logic as share_logic
 from src.features.sharelink.constants import (
     PER_LINK_DAILY_BUDGET_KRW,
     PUBLIC_BUCKET,
@@ -297,18 +298,40 @@ def test_미래_발급시각은_닫는다():
     )
 
 
-def test_시간대가_있는_발급시각은_UTC_날짜로_비교한다():
-    # 둘 다 적힌 지역 날짜와 UTC 날짜가 다르다. UTC로 보면 첫 링크는 60일째,
-    # 둘째 링크는 59일째다.
+def test_UTC시각도_KST_0030_발급일로_바꿔_59일째까지_연다():
+    issued_at = "2026-01-01T15:30:00+00:00"  # KST 2026-01-02 00:30
+    assert not is_share_link_expired(
+        issued_at,
+        today=dt.date(2026, 3, 2),
+        max_age_days=60,
+    )
     assert is_share_link_expired(
-        "2026-01-02T00:30:00+14:00",
+        issued_at,
+        today=dt.date(2026, 3, 3),
+        max_age_days=60,
+    )
+
+
+def test_KST자정_직전과_직후는_서로_다른_발급일이다():
+    assert is_share_link_expired(
+        "2026-01-01T14:59:59Z",  # KST 1월 1일 23:59:59
         today=dt.date(2026, 3, 2),
         max_age_days=60,
     )
     assert not is_share_link_expired(
-        "2026-01-01T23:30:00-12:00",
+        "2026-01-01T15:00:00Z",  # KST 1월 2일 00:00:00
         today=dt.date(2026, 3, 2),
         max_age_days=60,
+    )
+
+
+def test_기본오늘은_host날짜가_아니라_KST시계를_쓴다(monkeypatch):
+    monkeypatch.setattr(
+        share_logic.clock, "today_kst", lambda: dt.date(2026, 3, 2)
+    )
+
+    assert not is_share_link_expired(
+        "2026-01-02T00:30:00+09:00", max_age_days=60
     )
 
 

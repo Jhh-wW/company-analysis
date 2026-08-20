@@ -92,6 +92,12 @@ def test_못_읽으면_None():
     assert parse_generated_date("어제") is None
 
 
+def test_UTC_보고서시각은_KST_발급일로_읽는다():
+    assert parse_generated_date("2026-08-16T15:30:00Z") == dt.date(
+        2026, 8, 17
+    )
+
+
 @pytest.mark.parametrize(
     "문자열", ["20260816", "2026-08-16-깨진뒤꼬리", "2026-08-16T09:30:00깨짐"]
 )
