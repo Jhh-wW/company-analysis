@@ -17,9 +17,6 @@ from typing import Final
 #: `db_path`를 안 넘겼을 때 쓰는 기본 위치 — `core/paths.APP_ROOT` 기준 상대 경로.
 #: `data/observability/`(이력 파일)와 같은 자리에 둔다 — 둘 다 "런타임에 생기는,
 #: 커밋 대상이 아닌 자료"이기 때문이다.
-#: ⚠️ 팀장 확인 필요 — `.gitignore`가 지금 `data/observability/`만 가리고
-#:   `data/storage.db`는 안 가린다. `.gitignore`는 storage/ 밖이라 여기서
-#:   고치지 않았다 (최종 보고 §위험 요소 참고).
 DEFAULT_DB_RELATIVE_PATH: Final[str] = "data/storage.db"
 
 #: 다른 연결이 쓰는 중일 때 몇 초까지 기다렸다 포기하나 ("database is locked" 방지).
