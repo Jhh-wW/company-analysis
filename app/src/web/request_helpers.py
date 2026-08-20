@@ -372,11 +372,13 @@ def _guard_run(
     count_start: bool = True,
     owns_slot: bool = False,
     resolved_track: Optional[tuple[share_tracks.Track, str, float]] = None,
+    now: Optional[float] = None,
 ) -> Optional[HTMLResponse]:
     """조사를 시작해도 되는지 보고, 안 되면 «막는 화면»을 돌려준다.
 
     Args:
         request: 들어온 요청.
+        now: 앞선 일회용 attempt 검증과 공유할 monotonic 시각. 일반 호출은 생략한다.
 
     Returns:
         막아야 하면 보여줄 화면. 시작해도 되면 None.
@@ -384,8 +386,8 @@ def _guard_run(
     ★ 통과할 때만 횟수를 적는다 — 거절당한 요청까지 세면
       「돈도 안 썼는데 차단」이 된다 (budget/logic.py 참고).
     """
-    now = time.monotonic()
-    _sweep_jobs(now)
+    admission_now = time.monotonic() if now is None else now
+    _sweep_jobs(admission_now)
 
     # 미리보기는 화면만 확인하는 모드다. 후보 검색을 포함한 외부 provider 진입 전에
     # 서버에서도 닫아 HTML의 disabled 속성을 우회해도 비용이 나가지 않게 한다.
@@ -427,7 +429,7 @@ def _guard_run(
     if count_start and not budget_logic.rate_ok(
         paid_runtime._RATE_HISTORY,
         rate_key,
-        now,
+        admission_now,
         window_sec=RATE_WINDOW_SEC,
         max_runs=RATE_MAX_RUNS,
     ):
@@ -457,7 +459,9 @@ def _guard_run(
     # ★ 통과할 때만 횟수를 적는다 — 거절당한 요청까지 세면
     #   「돈도 안 썼는데 차단」이 된다 (budget/logic.py 참고).
     if count_start:
-        budget_logic.record_start(paid_runtime._RATE_HISTORY, rate_key, now)
+        budget_logic.record_start(
+            paid_runtime._RATE_HISTORY, rate_key, admission_now
+        )
     return None
 
 def _throttled(request: Request, message: str, kind: str) -> HTMLResponse:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import re
 import time
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,7 +13,8 @@ from fastapi.testclient import TestClient
 from src.features.budget.constants import RATE_MAX_RUNS
 from src.features.pipeline.canonical_demo import DEMO_COMPANY, DEMO_REF
 from src.features.pipeline.demo import DemoPipeline
-from src.web import job_runtime, main, paid_runtime, runtime
+from src.web import job_runtime, main, paid_runtime, request_helpers, runtime
+from src.web.routers import analysis as analysis_router
 
 
 def _token(html: str) -> str:
@@ -111,6 +113,62 @@ def test_유효하지않은_run_5회는_rate를_소비하지않고_다음정상r
     assert started.status_code == 303
     assert started.headers["location"].startswith("/progress/")
     assert _rate_start_count() == baseline + 1
+
+
+def test_TTL_정확한_경계는_같은_시각으로_sweep하고_정상1회만_기록한다(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with TestClient(main.app) as client:
+        token, form = _confirm(client)
+        attempt = job_runtime._PAID_ATTEMPTS[token]
+        job_runtime._PAID_ATTEMPTS[token] = dataclasses.replace(
+            attempt,
+            created_at=100.0 - job_runtime.JOB_KEEP_SEC,
+        )
+        monkeypatch.setattr(
+            analysis_router,
+            "time",
+            SimpleNamespace(monotonic=lambda: 100.0),
+        )
+        # 검증 직후 1ms가 흘렀더라도 guard는 새 시각을 읽으면 안 된다.
+        monkeypatch.setattr(
+            request_helpers,
+            "time",
+            SimpleNamespace(monotonic=lambda: 100.001),
+        )
+
+        started = _run(client, form, token)
+
+    assert started.status_code == 303
+    assert started.headers["location"].startswith("/progress/")
+    assert token not in job_runtime._PAID_ATTEMPTS
+    assert len(job_runtime._JOBS) == 1
+    assert _rate_start_count() == 1
+
+
+def test_TTL을_1ms_넘긴_attempt는_rate없이_정리한다(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with TestClient(main.app) as client:
+        token, form = _confirm(client)
+        attempt = job_runtime._PAID_ATTEMPTS[token]
+        job_runtime._PAID_ATTEMPTS[token] = dataclasses.replace(
+            attempt,
+            created_at=100.0 - job_runtime.JOB_KEEP_SEC - 0.001,
+        )
+        monkeypatch.setattr(
+            analysis_router,
+            "time",
+            SimpleNamespace(monotonic=lambda: 100.0),
+        )
+
+        rejected = _run(client, form, token)
+
+    assert rejected.status_code == 303
+    assert rejected.headers["location"] == "/"
+    assert token not in job_runtime._PAID_ATTEMPTS
+    assert job_runtime._JOBS == {}
+    assert _rate_start_count() == 0
 
 
 def test_원입력을_바꾸면_토큰을_소비하고_재사용도_거절한다():

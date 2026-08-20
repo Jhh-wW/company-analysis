@@ -1138,6 +1138,7 @@ async def start_run(
         request,
         count_start=not is_paid,
         resolved_track=resolved_track,
+        now=attempt_checked_at,
     )
     if blocked is not None:
         return blocked
