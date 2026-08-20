@@ -1594,51 +1594,6 @@ def _current_fiscal_year(
     return max(candidates) if candidates else None
 
 
-def _cache_lookup(
-    *,
-    corp_id: str,
-    job: str,
-    requirements: list[str],
-    current_fiscal_year: Optional[int],
-) -> Optional[Report]:
-    """1층 캐시를 본다 (정본 §1 — 회사 고유번호 × 직무 × 공고 지문).
-
-    ★ 캐시가 깨졌거나·잠겼거나·아직 없어도 **조사 전체를 죽이지 않는다.**
-      캐시는 «빠른 길»일 뿐이므로, 실패하면 조용히 원래 길(재조사)로 간다.
-
-    Returns:
-        지문이 같고 O9 신선도를 통과한 보고서. 없으면 `None`(= 미적중).
-    """
-    if not corp_id or not requirements:
-        # 고유번호나 요구역량이 없으면 키를 만들 수 없다. 회사명으로 대신
-        # 찾지 않는다 — 이름이 같은 다른 법인의 보고서가 나갈 수 있다.
-        return None
-    try:
-        with storage_db.connect() as conn:
-            hit = cache_store.get_layer1_hit(
-                conn,
-                corp_id=corp_id,
-                job=job,
-                requirements=requirements,
-                current_fiscal_year=current_fiscal_year,
-            )
-    except Exception:  # noqa: BLE001 — 캐시 실패가 조사를 막으면 안 된다
-        logger.exception("1층 캐시 조회 실패 — 새로 조사합니다 (corp_id=%s)", corp_id)
-        return None
-
-    if hit is None:
-        logger.info(
-            "1층 캐시 미적중 — 새로 만듭니다 (corp_id=%s · 직무=%s · 최신사업연도=%s)",
-            corp_id, job, current_fiscal_year,
-        )
-    else:
-        logger.info(
-            "1층 캐시 적중 — 생성·검증 AI를 건너뜁니다 (corp_id=%s · 직무=%s · 조사일=%s)",
-            corp_id, job, hit.generated_at,
-        )
-    return hit
-
-
 def _company_cache_lookup(
     *,
     corp_id: str,
@@ -1672,37 +1627,6 @@ def _company_cache_lookup(
             hit.generated_at,
         )
     return hit
-
-
-def _cache_save(
-    *,
-    corp_id: str,
-    job: str,
-    requirements: list[str],
-    report: Report,
-    fiscal_year: Optional[int],
-) -> None:
-    """완성된 보고서를 1층 캐시에 넣는다 (파이프라인 14 저장).
-
-    ★ `requirements`는 **조회에 쓴 것과 같은 목록**이어야 한다. 여기서 다른
-      목록(예: 생성 결과에서 다시 뽑은 문장)을 쓰면 지문이 어긋나 다음 요청이
-      «영원히» 미적중이 된다 — 캐시가 있는데도 매번 돈이 나가는 상태가 된다.
-    ★ 저장이 실패해도 사용자의 보고서를 막지 않는다 (화면은 이미 만들어졌다).
-    """
-    if not corp_id or not requirements:
-        return
-    try:
-        with storage_db.connect() as conn:
-            cache_store.save_layer1(
-                conn,
-                corp_id=corp_id,
-                job=job,
-                requirements=requirements,
-                report=report,
-                fiscal_year=fiscal_year,
-            )
-    except Exception:  # noqa: BLE001 — 저장 실패가 사용자를 막으면 안 된다
-        logger.exception("1층 캐시 저장 실패 (보고서는 정상) — corp_id=%s", corp_id)
 
 
 def _company_cache_save(
