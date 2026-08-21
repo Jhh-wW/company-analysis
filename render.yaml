@@ -7,7 +7,7 @@ services:
     numInstances: 1
     dockerfilePath: ./app/Dockerfile
     dockerContext: .
-    healthCheckPath: /healthz
+    healthCheckPath: /readyz
     maxShutdownDelaySeconds: 300
     autoDeployTrigger: checksPass
 
@@ -37,6 +37,29 @@ services:
       - key: TLDEXTRACT_CACHE
         value: /var/data/cache/tldextract
 
+      # cron은 웹 디스크를 직접 읽지 않는다. 이 비밀로 웹의 백업 경로를 호출하면
+      # 웹 프로세스가 일관된 SQLite 스냅샷을 외부 S3 저장소에 올리고 재검증한다.
+      - key: BACKUP_TRIGGER_SECRET
+        generateValue: true
+      - key: BACKUP_S3_BUCKET
+        sync: false
+      - key: BACKUP_S3_PREFIX
+        value: company-analysis/
+      - key: BACKUP_S3_REGION
+        value: us-east-1
+      - key: BACKUP_S3_SERVER_SIDE_ENCRYPTION
+        value: AES256
+      - key: BACKUP_S3_ADDRESSING_STYLE
+        value: auto
+      - key: BACKUP_RETENTION_DAYS
+        value: "35"
+      - key: BACKUP_MAX_OBJECTS
+        value: "35"
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+
       # 실제 값은 저장소에 쓰지 않고 Blueprint 생성 화면에서 직접 입력한다.
       - key: ADMIN_EMAILS
         sync: false
@@ -46,10 +69,16 @@ services:
         sync: false
       - key: GOOGLE_REDIRECT_URI
         sync: false
+      # 구형 수동 승인 감사자료 해석용. 신규 자동출고 권한에는 사용하지 않는다.
       - key: PDF_RELEASE_PARTICIPANTS
         sync: false
+      # 품질 보존 증거와 별도 승인 전에는 두 최적화를 활성화하지 않는다.
+      - key: POPULAR_COMPANY_BATCH_ENABLED
+        value: "0"
+      - key: ADAPTIVE_VOTING_ENABLED
+        value: "0"
       - key: PROVENANCE_SEAL_SECRET
-        sync: false
+        generateValue: true
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: DART_API_KEY
@@ -62,3 +91,24 @@ services:
         sync: false
       - key: NOTION_PARENT_PAGE_ID
         sync: false
+
+  # 매일 18:15 UTC(한국 시각 다음 날 03:15)에 웹 서비스의 디스크에서 백업한다.
+  # S3 자격증명은 웹에만 두고 cron에는 백업 호출 권한만 준다.
+  - type: cron
+    name: company-analysis-backup
+    runtime: docker
+    plan: starter
+    region: singapore
+    schedule: "15 18 * * *"
+    dockerfilePath: ./app/Dockerfile
+    dockerContext: .
+    dockerCommand: python tools/trigger_backup.py
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: BACKUP_TRIGGER_URL
+        sync: false
+      - key: BACKUP_TRIGGER_SECRET
+        fromService:
+          type: web
+          name: company-analysis-beta
+          envVarKey: BACKUP_TRIGGER_SECRET

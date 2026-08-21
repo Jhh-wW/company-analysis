@@ -175,13 +175,13 @@ def test_보고서만_전용_문서_레이아웃을_쓴다(monkeypatch):
     assert "프로그램이 제안" not in response.text
     assert "어디서 가져왔나" not in response.text
 
-    # 승인 전 결과는 공개 보고서인 척하지 않고 내부 검수 preview로만 보인다.
-    assert "아직 공개·공유·내보내기 승인 전" in response.text
-    assert f'href="/review/pdf/{job_id}"' in response.text
-    assert f'href="/download/pdf/{job_id}"' not in response.text
+    # 자동출고된 같은 객체에는 수동 preview가 없고 활성 PDF 경로만 보인다.
+    assert "아직 공개·공유·내보내기 승인 전" not in response.text
+    assert f'href="/review/pdf/{job_id}"' not in response.text
+    assert f'href="/download/pdf/{job_id}"' in response.text
     assert "워드로 내려받기" not in response.text
     assert 'href="/">다른 회사 조사하기</a>' in response.text
-    assert f'action="/notion/{job_id}"' not in response.text
+    assert f'action="/notion/{job_id}"' in response.text
     if 'data-report-cell="附"' in response.text:
         assert "참고. 참고 지표" not in response.text
         assert '<span class="no">참고</span><span class="txt">지표</span>' in response.text

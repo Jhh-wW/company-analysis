@@ -94,6 +94,21 @@ def _assert_database_is_valid(path: Path) -> None:
                 raise BackupError("SQLite 무결성 검사를 통과하지 못했습니다.")
             if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
                 raise BackupError("SQLite 외래키 검사를 통과하지 못했습니다.")
+            share_table = conn.execute(
+                "SELECT type FROM sqlite_master WHERE name='share_links'"
+            ).fetchone()
+            if share_table is not None:
+                columns = {
+                    str(row[1])
+                    for row in conn.execute(
+                        'PRAGMA table_xinfo("share_links")'
+                    ).fetchall()
+                }
+                if "key" in columns or "key_hash" not in columns:
+                    raise BackupError(
+                        "공유 링크 원문 열쇠가 남은 구형 DB는 백업하지 않습니다. "
+                        "앱 마이그레이션을 먼저 실행하세요."
+                    )
     except sqlite3.Error as exc:
         raise BackupError("올바르고 읽을 수 있는 SQLite DB가 아닙니다.") from exc
 

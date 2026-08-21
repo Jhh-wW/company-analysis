@@ -60,6 +60,11 @@ jobs:
             --publish 127.0.0.1:18080:10000 \
             --env PIPELINE=demo \
             --env BETA_ADMIN_ONLY=1 \
+            --env ADMIN_EMAILS=ci-admin@example.invalid \
+            --env GOOGLE_CLIENT_ID=ci-client \
+            --env GOOGLE_CLIENT_SECRET=ci-secret \
+            --env GOOGLE_REDIRECT_URI=http://localhost:18080/auth/callback \
+            --env PROVENANCE_SEAL_SECRET=ci-provenance-seal-secret-32-bytes \
             --env APP_DATA_ROOT=/var/data \
             --env STORAGE_DB_PATH=/var/data/storage.db \
             --env OBSERVABILITY_RECORDS_PATH=/var/data/observability/runs.jsonl \
@@ -70,7 +75,7 @@ jobs:
           for attempt in {1..60}; do
             status="$(curl --silent --output /tmp/company-analysis-health.json \
               --write-out '%{http_code}' --max-time 2 \
-              http://127.0.0.1:18080/healthz || true)"
+              http://127.0.0.1:18080/readyz || true)"
             if [ "$status" = "200" ]; then
               cat /tmp/company-analysis-health.json
               exit 0
@@ -83,7 +88,7 @@ jobs:
             fi
             sleep 2
           done
-          echo "배포 컨테이너가 120초 안에 HTTP 200을 돌려주지 않았습니다."
+          echo "배포 컨테이너가 120초 안에 readiness HTTP 200을 돌려주지 않았습니다."
           exit 1
       - name: 실패 시 배포 로그 표시
         if: failure()

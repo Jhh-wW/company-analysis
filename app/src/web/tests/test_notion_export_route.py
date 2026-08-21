@@ -11,6 +11,7 @@ from starlette.requests import Request
 
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
+from src.features.export_pdf.release import PDFReleaseBlockedError
 from src.features.export_notion import store as notion_store
 from src.features.export_notion.notion import NotionExportResult
 from src.features.pipeline.demo import DemoPipeline, available_companies
@@ -79,7 +80,7 @@ def test_만료보고서는_410이고_adapter를_한번도_호출하지_않는�
     assert calls == []
 
 
-def test_PDF_출고승인전에는_Notion_adapter를_호출하지_않는다(
+def test_자동검사중단이면_Notion_adapter를_호출하지_않는다(
     notion_admin, monkeypatch
 ):
     client, _report, csrf = notion_admin
@@ -88,7 +89,9 @@ def test_PDF_출고승인전에는_Notion_adapter를_호출하지_않는다(
     monkeypatch.setattr(
         reports_router,
         "_release_state",
-        lambda **_kwargs: (object(), None),
+        lambda **_kwargs: (_ for _ in ()).throw(
+            PDFReleaseBlockedError("GATE_STOPPED: forced check failure")
+        ),
     )
 
     def forbidden(*_args, **_kwargs):
@@ -99,7 +102,7 @@ def test_PDF_출고승인전에는_Notion_adapter를_호출하지_않는다(
     response = client.post("/notion/unapproved-job", data={"csrf_token": csrf})
 
     assert response.status_code == 409
-    assert "최종 검수 중" in response.text
+    assert "자동검사가 중단" in response.text
     assert calls == []
 
 

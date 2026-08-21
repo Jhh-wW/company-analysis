@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import sqlite3
 import sys
@@ -75,6 +76,68 @@ def test_파일이_바뀌면_체크섬_검증이_막는다(tmp_path: Path) -> No
 
     with pytest.raises(backup_sqlite.BackupError, match="체크섬"):
         backup_sqlite.verify_backup(result.backup_path)
+
+
+def test_원문_공유열쇠가_있는_구형DB는_백업을_거부한다(tmp_path: Path) -> None:
+    source = tmp_path / "legacy.db"
+    raw_key = "ab" * 16
+    with sqlite3.connect(source) as conn:
+        conn.execute(
+            "CREATE TABLE share_links ("
+            "key TEXT PRIMARY KEY, company TEXT NOT NULL, job TEXT NOT NULL, "
+            "report_id TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', "
+            "created_at TEXT NOT NULL, opened_count INTEGER NOT NULL DEFAULT 0, "
+            "first_opened_at TEXT NOT NULL DEFAULT '', "
+            "last_opened_at TEXT NOT NULL DEFAULT '')"
+        )
+        conn.execute(
+            "INSERT INTO share_links (key, company, job, created_at) "
+            "VALUES (?, '회사', '직무', '2026-08-21T00:00:00+09:00')",
+            (raw_key,),
+        )
+
+    with pytest.raises(backup_sqlite.BackupError, match="원문 열쇠"):
+        backup_sqlite.create_backup(source, tmp_path / "external")
+
+
+def test_해시_공유열쇠_백업에는_URL원문이_없다(tmp_path: Path) -> None:
+    source = tmp_path / "hashed.db"
+    raw_key = "cd" * 16
+    key_hash = hashlib.sha256(raw_key.encode("ascii")).hexdigest()
+    with sqlite3.connect(source) as conn:
+        conn.execute(
+            "CREATE TABLE share_links ("
+            "key_hash TEXT PRIMARY KEY, company TEXT NOT NULL, job TEXT NOT NULL, "
+            "report_id TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', "
+            "created_at TEXT NOT NULL, opened_count INTEGER NOT NULL DEFAULT 0, "
+            "first_opened_at TEXT NOT NULL DEFAULT '', "
+            "last_opened_at TEXT NOT NULL DEFAULT '')"
+        )
+        conn.execute(
+            "INSERT INTO share_links (key_hash, company, job, created_at) "
+            "VALUES (?, '회사', '직무', '2026-08-21T00:00:00+09:00')",
+            (key_hash,),
+        )
+
+    result = backup_sqlite.create_backup(source, tmp_path / "external")
+
+    assert backup_sqlite.verify_backup(result.backup_path) == result.sha256
+    with sqlite3.connect(result.backup_path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(share_links)")}
+        stored = conn.execute("SELECT key_hash FROM share_links").fetchone()[0]
+    assert columns == {
+        "key_hash",
+        "company",
+        "job",
+        "report_id",
+        "note",
+        "created_at",
+        "opened_count",
+        "first_opened_at",
+        "last_opened_at",
+    }
+    assert stored == key_hash
+    assert raw_key.encode("ascii") not in result.backup_path.read_bytes()
 
 
 def test_복구는_기존_DB를_건드리지_않고_새_대상파일만_허용한다(tmp_path: Path) -> None:

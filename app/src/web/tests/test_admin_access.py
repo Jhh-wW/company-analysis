@@ -239,7 +239,7 @@ def test_접근목록이나_비용정본_장애는_0원과_빈목록으로_보�
     admin: TestClient, monkeypatch, failure: str
 ):
     with storage_db.connect() as conn:
-        share_store.save(
+        share_store.insert_new(
             conn,
             key="a" * 32,
             company="실제 저장 회사",
@@ -364,7 +364,7 @@ def test_발급열쇠가_충돌하면_기존링크를_덮지않고_새열쇠로_
     collision = "c" * 32
     replacement = "d" * 32
     with storage_db.connect() as conn:
-        share_store.save(
+        share_store.insert_new(
             conn,
             key=collision,
             company="기존회사",
@@ -394,7 +394,7 @@ def test_발급열쇠_충돌이_계속되면_기존링크를_보존하고_503으
 ):
     collision = "e" * 32
     with storage_db.connect() as conn:
-        share_store.save(
+        share_store.insert_new(
             conn,
             key=collision,
             company="기존회사",
@@ -457,7 +457,7 @@ def test_관리자_링크와_초대_생성시각은_offset포함_KST다(
 def test_관리자_시각표시는_저장된_UTC를_KST로_바꾼다(admin: TestClient):
     key = "d" * 32
     with storage_db.connect() as conn:
-        share_store.save(
+        share_store.insert_new(
             conn,
             key=key,
             company="UTC 저장 회사",
@@ -1251,7 +1251,7 @@ def test_없는_연결보고서는_목록과_상세에서_재연결필요로_보
 ):
     key = "f" * 32
     with storage_db.connect() as conn:
-        share_store.save(
+        share_store.insert_new(
             conn,
             key=key,
             company="카카오",

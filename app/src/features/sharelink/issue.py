@@ -80,25 +80,6 @@ def qr_svg(url: str) -> str:
     return buffer.getvalue().decode("utf-8")
 
 
-def base_url_of(request_url: str) -> str:
-    """일반 URL에서 origin을 분리하는 하위 호환 유틸리티.
-
-    Args:
-        request_url: 요청 주소 전체 (`http://localhost:8000/admin/access` 등).
-
-    Returns:
-        `http://localhost:8000` 부분.
-
-    ⚠️ 요청 URL은 ``Host`` 헤더의 영향을 받으므로 capability QR·외부 복사용 주소에
-      이 함수 결과를 직접 사용하면 안 된다. 그 용도는 ``canonical_public_base_url``
-      또는 엄격한 로컬 전용 ``safe_local_base_url``을 쓴다.
-    """
-    parts = urlsplit(request_url)
-    if not parts.scheme or not parts.netloc:
-        return ""
-    return f"{parts.scheme}://{parts.netloc}"
-
-
 #: 인터넷에 공개된 주소로 «안 보이는» 호스트들.
 #: ★ 여기 있는 주소로 링크를 발급하면 **인사팀에게는 안 열린다.**
 _LOCAL_HOSTS: tuple[str, ...] = ("localhost", "127.0.0.1", "0.0.0.0", "::1", "testserver")

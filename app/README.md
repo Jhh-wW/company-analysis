@@ -26,7 +26,7 @@ app/
 - 보고서 작성·검증: `spanselect`, `writer`, `company_comparison`, `report_summary`, `grading`, `provenance`, `readable`, `report_standard`
 - 저장·운영·출력: `storage`, `observability`, `export_pdf`, `export_notion`
 
-`posting_image`, `blocks678`, `company_use`, `export_docx`와 채용 결합 필드는 구형
+`posting_image`, `blocks678`, `company_use`와 채용 결합 필드는 구형
 호환 코드다. 신규 조사·캐시 적중·화면·PDF·Notion 내용을 구성할 수 없다.
 
 각 폴더의 입력·출력과 담당 범위는
@@ -37,14 +37,17 @@ app/
 
 ## PDF 출고 흐름
 
-`report_standard`를 통과한 보고서는 바로 내려받지 않는다. 먼저 PDF를 준비해 파일
-해시를 고정하고 `author·producer·fact·editorial·visual` 다섯 역할의 참여자 원장을
-결속한다. 그다음 `fact`, `editorial`, `visual` 세 검토자가 **같은 PDF 해시**에
-독립 승인해야 `finalize`할 수 있다. 세 검토자는 서로 달라야 하며 `author` 또는
-`producer`가 검토자를 겸할 수 없다.
+`report_standard`를 통과한 보고서는 사실·인용·수치·구조·금지 문구, PDF 전 페이지
+렌더, 웹·PDF·Notion 동등성 자동검사를 거친다. 같은 보고서·PDF·모든 페이지 PNG
+해시와 검사 버전에 결속된 전 항목이 통과해야 자동출고한다.
 
-`finalize`된 PDF만 다운로드할 수 있고, Notion도 그 승인된 같은 정본만 받는다. PDF
-바이트가 바뀌면 해시와 기존 승인이 더는 맞지 않으므로 다시 준비하고 승인해야 한다.
+검사 하나라도 실패하거나 검사 뒤 hash가 바뀌면 부분 화면 없이 전체를
+`GATE_STOPPED`한다. 수동 `/review/pdf/*` GET/POST는 410이며 구형 세 사람 승인 DB는
+감사자료로만 보존된다. 최초 25건 사용자 검토는 자동검사 보정용 파일럿이지 서비스
+건별 승인이 아니다.
+
+내부 AI 원가는 성공·실패와 무관하게 실제 사용량을 기록하고, 고객 청구는 자동출고 뒤
+별도 결정한다. 판매가는 아직 확정되지 않아 공개 UI나 결제 기능에 넣지 않는다.
 
 ## 실행 모드
 

@@ -25,7 +25,7 @@ from src.features.sharelink import constants
 #:   그러면 링크당 상한이 아무 의미가 없어진다.
 _KEY_RE = re.compile(rf"^[0-9a-f]{{{constants.KEY_HEX_CHARS}}}$")
 _REPORT_ID_RE = re.compile(rf"^[0-9a-f]{{{REPORT_ID_HEX_CHARS}}}$")
-# ``share_store.save()``가 기록하는 확장 ISO 8601 시각만 받는다. Python의
+# ``share_store.insert_new()``가 기록하는 확장 ISO 8601 시각만 받는다. Python의
 # ``fromisoformat``은 ``20260816`` 같은 축약형도 받아주므로, 저장 형식이 망가진
 # 값을 정상 발급 시각으로 오인하지 않게 앞부분 모양을 먼저 좁힌다.
 _CREATED_AT_RE = re.compile(
@@ -56,26 +56,13 @@ def normalize_scope_value(value: str) -> str:
     return " ".join(normalized.split()).casefold()
 
 
-def legacy_company_job_scope_matches(
-    *, link_company: str, link_job: str, company: str, job: str
-) -> bool:
-    """회사·직무를 함께 묶던 옛 정책을 읽기 전용 호환 검사로 남긴다."""
-    return bool(
-        normalize_scope_value(link_company)
-        and normalize_scope_value(link_job)
-        and normalize_scope_value(link_company) == normalize_scope_value(company)
-        and normalize_scope_value(link_job) == normalize_scope_value(job)
-    )
-
-
 def scope_matches(
     *, link_company: str, company: str, link_job: str = "", job: str = ""
 ) -> bool:
     """회사 분석 전용 링크의 제출 회사가 발급 회사와 같은지 본다.
 
     ``link_job``과 ``job``은 옛 호출부와 저장 행을 깨지 않기 위해 받지만 권한 범위에
-    사용하지 않는다. 옛 회사·직무 결합 정책이 필요하면
-    :func:`legacy_company_job_scope_matches`를 명시적으로 호출해야 한다.
+    사용하지 않는다.
     """
     return bool(
         normalize_scope_value(link_company)

@@ -114,7 +114,7 @@ def _열쇠로_들어온다(client: TestClient) -> None:
       「예산을 다 썼다」를 시험하려면 «몫이 있는 갈래»여야 한다.
     """
     with storage_db.connect() as conn:
-        share_store.save(
+        share_store.insert_new(
             conn, key=_열쇠, company="우리엔", job="영업",
             now_iso="2026-08-16T10:00:00",
         )

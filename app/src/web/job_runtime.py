@@ -28,6 +28,7 @@ from src.features.budget.sharing import (
     SHARED_LINK_HEADERS,
 )
 from src.features.business_candidate.constants import CANDIDATE_ATTEMPT_TTL_SEC
+from src.features.cost_tracking import store as cost_store
 from src.features.observability import constants as obs
 from src.features.observability import lifecycle
 from src.features.pipeline.demo import available_companies
@@ -55,6 +56,7 @@ from src.features.posting_image.logic import (
 from src.features.sharelink import tracks as share_tracks
 from src.features.sharelink.constants import PUBLIC_BUCKET
 from src.features.storage import db as storage_db
+from src.features.storage import job_interruptions
 from src.features.storage import reports as report_store
 from src.web import public_ids, request_helpers, runtime
 from src.web.paid_runtime import (
@@ -85,7 +87,7 @@ _IMAGE_CONSENT_ERROR = (
 )
 _UPLOAD_READ_CHUNK_BYTES = 64 * 1024
 _UPLOAD_CLOSE_TIMEOUT_SEC = 1.0
-_JOB_DRAIN_TIMEOUT_SEC = 10.0
+_JOB_DRAIN_TIMEOUT_SEC = 240.0
 _JOB_CANCEL_GRACE_SEC = 1.0
 _RETRY_AFTER_SEC = "3"
 _PERSISTENCE_WARNING = (
@@ -125,6 +127,8 @@ class Job:
     upfront_cost_krw: float = 0.0
     upfront_models: tuple[str, ...] = ()
     upfront_elapsed_sec: float = 0.0
+    #: 회사 식별처럼 본조사 전에 발생한 AI 호출의 단계별 실제 사용량.
+    upfront_cost_events: tuple[cost_store.AiCostEvent, ...] = ()
     #: 진짜 본조사라면 provider 호출 전 만든 표식. 데모는 None이다.
     paid_phase: Optional[PaidPhase] = None
     #: 예약한 동시 실행 자리. 작업과 종료 정리가 같은 자리를 두 번 풀지 않게 쓴다.
@@ -157,6 +161,7 @@ class PaidAttempt:
     elapsed_sec: float
     created_at: float
     is_paid: bool = True
+    cost_events: tuple[cost_store.AiCostEvent, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -502,11 +507,24 @@ async def _run_job(job: Job) -> None:
             # 식별·OCR·본조사를 이력 한 건의 실제 총비용으로 합친다. 앞단 값을
             # 브라우저에서 다시 받지 않고 서버 Job이 들고 온 값만 쓴다.
             models = _model_tuple(*job.upfront_models, job.result.model)
+            cost_events = (*job.upfront_cost_events, *job.result.ai_cost_events)
             job.result = replace(
                 job.result,
                 cost_krw=job.upfront_cost_krw + pipeline_cost,
                 model=_model_label(models),
+                ai_cost_events=cost_events,
             )
+            # 내부 AI 원가는 실패·GATE_STOPPED에도 그대로 보존한다. 고객 청구는
+            # 이 시점에는 항상 0이며, 해시 결속 자동출고 뒤 reports 경계에서만
+            # 별도의 eligibility/청구 결정을 붙인다.
+            with storage_db.connect() as conn:
+                cost_store.record_run_costs(
+                    conn,
+                    run_id=job.job_id,
+                    outcome=job.result.outcome,
+                    internal_ai_cost_krw=job.result.cost_krw,
+                    events=job.result.ai_cost_events,
+                )
             record_run(
                 job.user_input,
                 job.result,
@@ -551,6 +569,7 @@ def _save_report(job: Job) -> bool:
                 report=job.result.report,
             ):
                 raise RuntimeError("공개 보고서 ID가 이미 사용 중입니다")
+            job_interruptions.delete(conn, job.job_id)
         job.report_persisted = True
         job.persistence_warning = ""
         return True
@@ -784,6 +803,16 @@ def _force_shutdown_cleanup(job: Job) -> None:
     job.current_step = ""
     job.finished = True
     job.finished_at = job.finished_at or time.monotonic()
+    try:
+        with storage_db.connect() as conn:
+            job_interruptions.mark(
+                conn,
+                job_id=job.job_id,
+                interrupted_at=clock.iso_now_kst(),
+                reason="shutdown_timeout",
+            )
+    except BaseException:  # noqa: BLE001 — 종료 정리는 계속하되 원인은 로그에 남긴다
+        logger.exception("중단된 조사 상태를 저장하지 못했습니다 job_id=%s", job.job_id)
     if job.paid_phase is not None and not job.paid_phase_settled:
         job.paid_phase_settled = True
         try:
@@ -843,6 +872,24 @@ async def _drain_job_tasks(
         "종료 제한시간을 넘긴 조사 %d건을 취소하고 비용을 미확정 마감합니다",
         len(pending_set),
     )
+    # process가 취소 유예 중 강제 종료돼도 다음 기동에서 원인을 설명할 수 있게
+    # provider task를 취소하기 전에 중단 표식을 먼저 커밋한다.
+    for task in pending_set:
+        job = _TASK_JOBS.get(task)
+        if job is None:
+            continue
+        try:
+            with storage_db.connect() as conn:
+                job_interruptions.mark(
+                    conn,
+                    job_id=job.job_id,
+                    interrupted_at=clock.iso_now_kst(),
+                    reason="shutdown_timeout",
+                )
+        except BaseException:  # noqa: BLE001
+            logger.exception(
+                "종료 전 중단 상태를 저장하지 못했습니다 job_id=%s", job.job_id
+            )
     for task in pending_set:
         task.cancel()
 
@@ -875,6 +922,7 @@ async def _start_with_reserved_slot(
     upfront_models: tuple[str, ...],
     upfront_elapsed: float,
     slot_bucket_id: str,
+    upfront_cost_events: tuple[cost_store.AiCostEvent, ...] = (),
 ) -> Response:
     """이미 잡은 한 자리를 OCR부터 배경 본조사로 안전하게 넘긴다.
 
@@ -1106,6 +1154,7 @@ async def _start_with_reserved_slot(
             upfront_cost_krw=upfront_cost,
             upfront_models=upfront_models,
             upfront_elapsed_sec=upfront_elapsed,
+            upfront_cost_events=upfront_cost_events,
             paid_phase=pipeline_phase,
             slot_bucket_id=slot_bucket_id,
         )

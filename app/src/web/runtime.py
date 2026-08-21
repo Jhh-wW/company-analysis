@@ -5,12 +5,13 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 
 from fastapi import FastAPI
 
 from src.core.constants import PIPELINE_ENV, PIPELINE_REAL
 from src.features.pipeline.demo import DemoPipeline
+from src.features.provenance import sources as provenance_sources
 from src.features.storage import db as storage_db
 from src.web import evaluation_mode, paid_runtime
 
@@ -53,7 +54,7 @@ def _check_storage_write_ready() -> None:
     """시작할 때 SQLite 쓰기 가능성을 확인한다."""
     path = storage_db.default_db_path().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(str(path), timeout=1.0) as conn:
+    with closing(sqlite3.connect(str(path), timeout=1.0)) as conn:
         try:
             conn.execute("BEGIN IMMEDIATE")
         finally:
@@ -64,7 +65,7 @@ def _check_storage_write_ready() -> None:
 def _check_storage_read_ready() -> None:
     """상태 확인은 SQLite를 읽기 전용으로 연다."""
     uri = storage_db.default_db_path().resolve().as_uri() + "?mode=ro"
-    with sqlite3.connect(uri, uri=True, timeout=1.0) as conn:
+    with closing(sqlite3.connect(uri, uri=True, timeout=1.0)) as conn:
         conn.execute("PRAGMA query_only=ON")
         conn.execute("SELECT 1").fetchone()
 
@@ -75,6 +76,14 @@ async def _lifespan(_app: FastAPI):
     # 실행기를 거치지 않고 환경변수 일부만 흉내 내도 유료 호출이 열리지 않게 한다.
     # 이 검사는 저장소를 만들거나 provider에 접속하기 전에 실패한다.
     evaluation_mode.validate_startup_configuration()
+    if not provenance_sources.seal_key_is_persistent():
+        if os.environ.get(PIPELINE_ENV, "").strip().lower() == PIPELINE_REAL:
+            raise RuntimeError(
+                "PIPELINE=real에는 32바이트 이상의 PROVENANCE_SEAL_SECRET이 필요합니다"
+            )
+        logger.warning(
+            "PROVENANCE_SEAL_SECRET이 없어 이번 프로세스에서만 유효한 출처 도장을 씁니다"
+        )
     _check_storage_write_ready()
     paid_runtime._seed_ledger()
     paid_runtime._recover_observation_lifecycle()

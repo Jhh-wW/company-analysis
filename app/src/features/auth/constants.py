@@ -52,9 +52,23 @@ BETA_PUBLIC_PATHS: Final[frozenset[str]] = frozenset(
         "/auth/local-demo/start",
         "/auth/not-admin",
         "/healthz",
+        "/readyz",
+        "/internal/backup/run",
     }
 )
-BETA_PUBLIC_PATH_PREFIXES: Final[tuple[str, ...]] = ("/static/",)
+BETA_PUBLIC_PATH_PREFIXES: Final[tuple[str, ...]] = ("/static/", "/k/")
+
+# 살아 있는 공유 capability 쿠키로 열 수 있는 사용자 흐름만 명시한다. 관리자·검수·
+# 외부 내보내기 경로는 각 라우터의 자체 권한 검사와 별개로 beta gate에서도 닫는다.
+BETA_SHARE_PATHS: Final[frozenset[str]] = frozenset(
+    {"/", "/confirm", "/reject", "/run", "/robots.txt"}
+)
+BETA_SHARE_PATH_PREFIXES: Final[tuple[str, ...]] = (
+    "/progress/",
+    "/api/progress/",
+    "/result/",
+    "/download/pdf/",
+)
 
 # ── 권한 판단 (D15 — 구글 로그인은 「누구인가」, 이 목록은 「관리자인가」) ─
 #: 환경변수가 없으면 관리자는 0명이다. 배포에서 ENV_ADMIN_EMAILS를 반드시 넣는다.

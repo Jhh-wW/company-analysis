@@ -29,6 +29,7 @@ from src.features.auth import logic as auth_logic
 from src.features.budget import spend_store
 from src.features.pipeline.canonical_demo import (
     DEMO_COMPANY as CANONICAL_DEMO_COMPANY,
+    build_demo_report,
 )
 from src.features.pipeline.demo import DemoPipeline
 from src.features.pipeline.port import CompanyCard, Outcome
@@ -44,9 +45,13 @@ from src.features.sharelink.constants import (
     PUBLIC_DAILY_BUDGET_KRW,
 )
 from src.features.storage import db as storage_db
+from src.features.storage import reports as report_store
 from src.web import job_runtime, main
 from src.web import paid_runtime, request_helpers, runtime
 from src.web.routers import analysis as analysis_router
+from src.web.routers import reports as reports_router
+
+_REAL_RELEASE_STATE = reports_router._release_state
 
 _카카오열쇠 = "a1b2c3d4e5f60718a1b2c3d4e5f60718"
 _네이버열쇠 = "0f1e2d3c4b5a69780f1e2d3c4b5a6978"
@@ -87,10 +92,39 @@ def _링크발급(
     now_iso: str = "2026-08-16T10:00:00",
 ) -> None:
     with storage_db.connect() as conn:
-        share_store.save(
+        share_store.insert_new(
             conn, key=key, company=company, job="마케팅",
             report_id=report_id, now_iso=now_iso,
         )
+
+
+def test_시험공개에서도_살아있는_링크는_자동출고본문과PDF만열고_관리자는_잠근다(
+    client: TestClient, monkeypatch
+):
+    report_id = uuid.uuid4().hex
+    report = build_demo_report()
+    with storage_db.connect() as conn:
+        report_store.save(
+            conn, report_id, "demo-corp", report.job, report
+        )
+    _링크발급(_카카오열쇠, report.company, report_id=report_id)
+    monkeypatch.setenv(auth_constants.ENV_BETA_ADMIN_ONLY, "1")
+    monkeypatch.setattr(reports_router, "_release_state", _REAL_RELEASE_STATE)
+
+    opened = client.get(f"/k/{_카카오열쇠}", follow_redirects=False)
+    result = client.get(opened.headers["location"], follow_redirects=False)
+    pdf = client.get(f"/download/pdf/{report_id}", follow_redirects=False)
+    admin = client.get("/admin", follow_redirects=False)
+
+    assert opened.status_code == 303
+    assert opened.headers["location"] == f"/result/{report_id}"
+    assert result.status_code == 200
+    assert report.company in result.text
+    assert pdf.status_code == 200
+    assert pdf.headers["content-type"] == "application/pdf"
+    assert len(pdf.headers["x-pdf-release-record"]) == 64
+    assert admin.status_code == 303
+    assert admin.headers["location"] == "/auth/login"
 
 
 def _post_run(

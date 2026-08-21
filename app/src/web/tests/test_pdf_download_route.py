@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
 from src.features.export_pdf.logic import PDFGenerationError
+from src.features.export_pdf.automatic_release import AutomaticGateStopped
 from src.features.export_pdf.release import prepare_pdf_release
 from src.features.export_pdf import release_store as pdf_release_store
 from src.features.pipeline.demo import DemoPipeline, available_companies
@@ -33,6 +34,32 @@ def _fake_candidate():
     )
 
 
+def test_PDF후보캐시는_같은내용만_재사용하고_내용변경은_다시만든다(monkeypatch):
+    reports_router._PDF_CANDIDATE_CACHE.clear()
+    reports_router._PDF_CANDIDATE_CACHE_BYTES = 0
+    calls: list[str] = []
+
+    def digest(report):
+        return report.digest
+
+    def prepare(report):
+        calls.append(report.digest)
+        return SimpleNamespace(pdf_bytes=b"pdf", pages=())
+
+    monkeypatch.setattr(reports_router.notion_store, "report_digest", digest)
+    monkeypatch.setattr(reports_router, "prepare_pdf_release", prepare)
+    first = SimpleNamespace(digest="first")
+    changed = SimpleNamespace(digest="changed")
+
+    one = reports_router._candidate_for_report("report-1", first)
+    two = reports_router._candidate_for_report("report-1", first)
+    three = reports_router._candidate_for_report("report-1", changed)
+
+    assert one is two
+    assert three is not one
+    assert calls == ["first", "changed"]
+
+
 def _prepare_identity_approval_route(monkeypatch, *, job_id: str):
     report = object()
     candidate = _fake_candidate()
@@ -40,6 +67,11 @@ def _prepare_identity_approval_route(monkeypatch, *, job_id: str):
     monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
     monkeypatch.setattr(reports_router, "_report_for_output", lambda value: value)
     monkeypatch.setattr(reports_router, "prepare_pdf_release", lambda _report: candidate)
+    monkeypatch.setattr(
+        reports_router,
+        "_candidate_for_report",
+        lambda _job_id, _report: candidate,
+    )
     monkeypatch.setenv(
         auth_constants.ENV_ADMIN_EMAILS,
         "old-alias@example.com,new-alias@example.com,editor@example.com",
@@ -47,7 +79,7 @@ def _prepare_identity_approval_route(monkeypatch, *, job_id: str):
     return candidate
 
 
-def test_PDF승인은_immutable_subject와_명시된_역할이_없으면_차단한다(monkeypatch):
+def test_수동PDF승인_POST는_기존링크로도_영구종료되어_우회할수없다(monkeypatch):
     job_id = f"pdf-no-participants-{uuid.uuid4().hex}"
     candidate = _prepare_identity_approval_route(monkeypatch, job_id=job_id)
     monkeypatch.delenv(auth_constants.ENV_PDF_RELEASE_PARTICIPANTS, raising=False)
@@ -68,14 +100,14 @@ def test_PDF승인은_immutable_subject와_명시된_역할이_없으면_차단�
             },
             follow_redirects=False,
         )
-    assert response.status_code == 409
+    assert response.status_code == 410
     with storage_db.connect() as conn:
         assert pdf_release_store.load_participant_ledger(
             conn, report_id=job_id, pdf_sha256=candidate.pdf_sha256
         ) is None
 
 
-def test_같은_provider_subject의_이메일별칭은_두_PDF역할을_승인할수없다(monkeypatch):
+def test_옛수동승인요청은_어떤계정과역할로도_기록을만들지않는다(monkeypatch):
     job_id = f"pdf-alias-person-{uuid.uuid4().hex}"
     candidate = _prepare_identity_approval_route(monkeypatch, job_id=job_id)
     participants = {
@@ -137,14 +169,14 @@ def test_같은_provider_subject의_이메일별칭은_두_PDF역할을_승인�
             },
             follow_redirects=False,
         )
-    assert fact.status_code == 303
-    assert editorial.status_code == 409
-    assert assigned_editorial.status_code == 303
+    assert fact.status_code == 410
+    assert editorial.status_code == 410
+    assert assigned_editorial.status_code == 410
     with storage_db.connect() as conn:
         decisions = pdf_release_store.load_role_decisions(
             conn, report_id=job_id, pdf_sha256=candidate.pdf_sha256
         )
-    assert tuple(item.role for item in decisions) == ("fact", "editorial")
+    assert decisions == ()
 
 
 def test_옛_DOCX_다운로드는_내용을_내리지않고_PDF를_안내한다():
@@ -276,7 +308,7 @@ def test_PDF_generator_오류는_원문없는_generic_503이다(
     assert f"error_type={type(error).__name__}" in caplog.text
 
 
-def test_승인없는_PDF와_공개결과는_409로_fail_closed한다(monkeypatch):
+def test_필수자동검사를_통과하면_웹과PDF가_같이자동출고된다(monkeypatch):
     report = _demo_report()
     job_id = "pdf-release-unapproved"
     monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
@@ -287,13 +319,42 @@ def test_승인없는_PDF와_공개결과는_409로_fail_closed한다(monkeypatc
         download = client.get(f"/download/pdf/{job_id}", follow_redirects=False)
         public_result = client.get(f"/result/{job_id}", follow_redirects=False)
 
-    assert download.status_code == 409
-    assert public_result.status_code == 409
-    assert "최종 검수 중" in download.text
-    assert "content-disposition" not in download.headers
+    assert download.status_code == 200
+    assert public_result.status_code == 200
+    assert "수동" not in public_result.text
+    assert "내부 검수 미리보기" not in public_result.text
+    assert download.headers["content-type"] == "application/pdf"
+    assert len(download.headers["x-pdf-release-record"]) == 64
 
 
-def test_운영자가_같은_hash의_3종검수후_공개웹과_PDF를_연다(monkeypatch):
+def test_자동검사하나실패하면_웹PDFNotion을_모두차단한다(monkeypatch):
+    report = _demo_report()
+    job_id = f"auto-gate-stopped-{uuid.uuid4().hex}"
+    session = auth_logic.create_session("admin@example.com", True)
+
+    def stopped(**_kwargs):
+        raise AutomaticGateStopped(("forced mandatory check failure",))
+
+    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
+    monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
+    monkeypatch.setattr(reports_router, "_release_state", stopped)
+    cookies = {auth_constants.SESSION_COOKIE_NAME: session.token}
+    with TestClient(app) as client:
+        web = client.get(f"/result/{job_id}", cookies=cookies)
+        pdf = client.get(f"/download/pdf/{job_id}", cookies=cookies)
+        notion = client.post(
+            f"/notion/{job_id}",
+            cookies=cookies,
+            data={"csrf_token": auth_logic.csrf_token_for_session(session.token)},
+        )
+
+    assert web.status_code == pdf.status_code == notion.status_code == 409
+    for response in (web, pdf, notion):
+        assert "필수 검사 중 하나라도" in response.text
+        assert "현재 보고서 화면은 그대로" not in response.text
+
+
+def test_수동승인은410이고_자동검사객체만_웹과PDF를_연다(monkeypatch):
     report = _demo_report()
     job_id = f"pdf-release-approved-{uuid.uuid4().hex}"
     release_errors: list[str] = []
@@ -340,52 +401,46 @@ def test_운영자가_같은_hash의_3종검수후_공개웹과_PDF를_연다(mo
         role: {auth_constants.SESSION_COOKIE_NAME: session.token}
         for role, session in sessions.items()
     }
-    candidate = prepare_pdf_release(report)
-
     with TestClient(app) as client:
         review = client.get(f"/review/pdf/{job_id}", cookies=cookies["fact"])
-        assert review.status_code == 200
-        assert review.text.count("data:image/png;base64,") >= 1
-        pdf_hash = review.text.split('name="pdf_sha256" value="', 1)[1].split('"', 1)[0]
+        assert review.status_code == 410
 
         fact_approved = client.post(
             f"/review/pdf/{job_id}",
             cookies=cookies["fact"],
             data={
                 "csrf_token": auth_logic.csrf_token_for_session(sessions["fact"].token),
-                "pdf_sha256": pdf_hash,
+                "pdf_sha256": "a" * 64,
                 "review_role": "fact",
                 "confirm_role": "yes",
-                "reviewed_fact_ids": list(candidate.expected_fact_ids),
+                "reviewed_fact_ids": ["fact-1"],
                 "fact_failed_count": "0",
             },
             follow_redirects=False,
         )
-        assert fact_approved.status_code == 303, release_errors
-        assert fact_approved.headers["location"] == f"/review/pdf/{job_id}"
-        assert client.get(f"/result/{job_id}", follow_redirects=False).status_code == 409
+        assert fact_approved.status_code == 410
+        assert client.get(f"/result/{job_id}", follow_redirects=False).status_code == 200
 
         editorial_approved = client.post(
             f"/review/pdf/{job_id}",
             cookies=cookies["editor"],
             data={
                 "csrf_token": auth_logic.csrf_token_for_session(sessions["editor"].token),
-                "pdf_sha256": pdf_hash,
+                "pdf_sha256": "a" * 64,
                 "review_role": "editorial",
                 "confirm_role": "yes",
             },
             follow_redirects=False,
         )
-        assert editorial_approved.status_code == 303, release_errors
-        assert editorial_approved.headers["location"] == f"/review/pdf/{job_id}"
-        assert client.get(f"/result/{job_id}", follow_redirects=False).status_code == 409
+        assert editorial_approved.status_code == 410
+        assert client.get(f"/result/{job_id}", follow_redirects=False).status_code == 200
 
         approved = client.post(
             f"/review/pdf/{job_id}",
             cookies=cookies["visual"],
             data={
                 "csrf_token": auth_logic.csrf_token_for_session(sessions["visual"].token),
-                "pdf_sha256": pdf_hash,
+                "pdf_sha256": "a" * 64,
                 "review_role": "visual",
                 "confirm_role": "yes",
                 "visual_all_pages": "yes",
@@ -395,10 +450,10 @@ def test_운영자가_같은_hash의_3종검수후_공개웹과_PDF를_연다(mo
         public_result = client.get(f"/result/{job_id}", follow_redirects=False)
         download = client.get(f"/download/pdf/{job_id}", follow_redirects=False)
 
-    assert approved.status_code == 303, release_errors
+    assert approved.status_code == 410
     assert public_result.status_code == 200
     assert "내부 검수 미리보기" not in public_result.text
     assert download.status_code == 200
     assert download.headers["content-type"] == "application/pdf"
-    assert download.headers["x-pdf-sha256"] == pdf_hash
+    assert len(download.headers["x-pdf-sha256"]) == 64
     assert len(download.headers["x-pdf-release-record"]) == 64

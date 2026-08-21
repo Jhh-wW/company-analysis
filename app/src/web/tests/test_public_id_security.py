@@ -188,7 +188,7 @@ def test_paid_confirm도_같은_allocator로_memory_DB충돌을_건너뛴다(
     )
     monkeypatch.setattr(runtime, "_PIPELINE", _PaidPipeline())
     with storage_db.connect() as conn:
-        share_store.save(
+        share_store.insert_new(
             conn,
             key=_SHARE_KEY,
             company=_FORM["company"],

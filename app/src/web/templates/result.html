@@ -11,13 +11,6 @@
   </div>
 </section>
 {% else %}
-{% if internal_review_preview|default(false) %}
-<aside class="review-preview-banner ui-only" role="status">
-  <b>내부 검수 미리보기</b>
-  <span>이 보고서는 아직 공개·공유·내보내기 승인 전입니다.</span>
-  <a href="/review/pdf/{{ job.job_id }}">PDF 전체 페이지 검수 열기</a>
-</aside>
-{% endif %}
 {# 저장·캐시·완성도는 서비스 상태다. 최종 보고서 내용과 인쇄물에 섞지 않는다. #}
 {% if result is defined and result and result.cache_hit %}
   <p class="report-cache muted ui-only">{{ result.message }}</p>
@@ -206,11 +199,6 @@
 </article>
 
 <nav class="btn-row report-actions" aria-label="보고서 작업">
-  {% if internal_review_preview|default(false) %}
-  <a class="btn" href="/review/pdf/{{ job.job_id }}">
-    PDF 전체 페이지 검수
-  </a>
-  {% else %}
   <a class="btn" href="/download/pdf/{{ job.job_id }}">
     PDF 보고서 받기
   </a>
@@ -224,7 +212,6 @@
   {% elif auth_is_admin %}
     <button type="button" class="btn ghost" disabled
             aria-describedby="notion-setup-note">노션 설정 필요</button>
-  {% endif %}
   {% endif %}
   <a class="btn ghost" href="/">다른 회사 조사하기</a>
 </nav>

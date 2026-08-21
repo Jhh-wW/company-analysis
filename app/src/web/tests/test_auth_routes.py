@@ -29,7 +29,8 @@ from src.features.sharelink import store as web_share_store
 from src.features.sharelink.constants import KEY_COOKIE_NAME
 from src.features.storage import db as web_storage_db
 from src.web import main as web_main
-from src.web import request_helpers, runtime
+from src.web import paid_runtime, request_helpers, runtime
+from src.features.provenance import sources as provenance_sources
 from src.web.main import app, require_admin
 from src.web.routers import auth as auth_router
 
@@ -544,7 +545,7 @@ def test_세션과_링크가_함께_있으면_세션_CSRF가_우선한다(
     session = auth_logic.create_session("member@example.com", False)
     link_key = "a1b2c3d4e5f60718a1b2c3d4e5f60718"
     with web_storage_db.connect() as conn:
-        web_share_store.save(
+        web_share_store.insert_new(
             conn,
             key=link_key,
             company="우리엔",
@@ -571,7 +572,7 @@ def test_무효세션과_활성링크가_함께있으면_링크_CSRF를_쓴다(
     monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
     link_key = "a1b2c3d4e5f60718a1b2c3d4e5f60718"
     with web_storage_db.connect() as conn:
-        web_share_store.save(
+        web_share_store.insert_new(
             conn,
             key=link_key,
             company="우리엔",
@@ -715,7 +716,7 @@ def test_로컬_데모여도_유효권한쿠키는_다른_Origin이나_null에�
         secret = "a1b2c3d4e5f60718a1b2c3d4e5f60718"
         cookie_name = KEY_COOKIE_NAME
         with web_storage_db.connect() as conn:
-            web_share_store.save(
+            web_share_store.insert_new(
                 conn,
                 key=secret,
                 company="우리엔",
@@ -908,6 +909,12 @@ def test_시험공개_관리자_추가와_삭제는_기존세션에도_즉시_�
 
 def test_시험공개여도_로그인과_상태확인은_열려있다(client, monkeypatch):
     monkeypatch.setenv(auth_constants.ENV_BETA_ADMIN_ONLY, "1")
+    monkeypatch.setenv(auth_constants.ENV_ADMIN_EMAILS, "admin@example.com")
+    monkeypatch.setenv(auth_constants.ENV_CLIENT_ID, "client")
+    monkeypatch.setenv(auth_constants.ENV_CLIENT_SECRET, "secret")
+    monkeypatch.setenv(
+        auth_constants.ENV_REDIRECT_URI, "https://demo.example/auth/callback"
+    )
     read_checks: list[bool] = []
     monkeypatch.setattr(
         runtime, "_check_storage_read_ready", lambda: read_checks.append(True)
@@ -915,21 +922,75 @@ def test_시험공개여도_로그인과_상태확인은_열려있다(client, mo
 
     assert client.get("/auth/not-admin").status_code == 200
     health = client.get("/healthz")
+    ready = client.get("/readyz")
     assert health.status_code == 200
     assert health.json() == {"status": "ok"}
+    assert ready.status_code == 200
+    assert ready.json() == {"status": "ready"}
     assert read_checks == [True]
 
 
 def test_상태확인은_SQLite를_읽을수없으면_실패한다(client, monkeypatch):
+    monkeypatch.setenv(auth_constants.ENV_BETA_ADMIN_ONLY, "0")
     def reject_read():
         raise sqlite3.OperationalError("시험용 읽기 오류")
 
     monkeypatch.setattr(runtime, "_check_storage_read_ready", reject_read)
 
     health = client.get("/healthz")
+    ready = client.get("/readyz")
 
-    assert health.status_code == 503
-    assert health.json() == {"status": "unhealthy"}
+    assert health.status_code == 200
+    assert health.json() == {"status": "ok"}
+    assert ready.status_code == 503
+    assert ready.json() == {"status": "unready", "failed_checks": ["storage"]}
+
+
+def test_시험공개_readyz는_빠진_로그인설정의_이름만_알린다(client, monkeypatch):
+    monkeypatch.setenv(auth_constants.ENV_BETA_ADMIN_ONLY, "1")
+    monkeypatch.setenv(auth_constants.ENV_ADMIN_EMAILS, "admin@example.com")
+    monkeypatch.delenv(auth_constants.ENV_CLIENT_ID, raising=False)
+    monkeypatch.setenv(auth_constants.ENV_CLIENT_SECRET, "절대-응답하면-안되는-비밀")
+    monkeypatch.setenv(
+        auth_constants.ENV_REDIRECT_URI, "https://demo.example/auth/callback"
+    )
+    monkeypatch.setattr(runtime, "_check_storage_read_ready", lambda: None)
+
+    ready = client.get("/readyz")
+
+    assert ready.status_code == 503
+    assert ready.json() == {
+        "status": "unready",
+        "failed_checks": [auth_constants.ENV_CLIENT_ID],
+    }
+    assert "절대-응답하면-안되는-비밀" not in ready.text
+
+
+def test_real_비용원장잠김은_유료조사만_degraded로_드러낸다(client, monkeypatch):
+    monkeypatch.setenv(auth_constants.ENV_BETA_ADMIN_ONLY, "0")
+    monkeypatch.setenv(PIPELINE_ENV, "real")
+    monkeypatch.setattr(runtime, "_check_storage_read_ready", lambda: None)
+    monkeypatch.setattr(paid_runtime, "_BUDGET_STORE_HEALTHY", False)
+
+    ready = client.get("/readyz")
+
+    assert ready.status_code == 200
+    assert ready.json() == {
+        "status": "degraded",
+        "blocked_capabilities": ["paid_research:budget_store"],
+    }
+
+
+def test_demo는_비용원장상태를_readiness에_쓰지않는다(client, monkeypatch):
+    monkeypatch.setenv(auth_constants.ENV_BETA_ADMIN_ONLY, "0")
+    monkeypatch.setenv(PIPELINE_ENV, "demo")
+    monkeypatch.setattr(runtime, "_check_storage_read_ready", lambda: None)
+    monkeypatch.setattr(paid_runtime, "_BUDGET_STORE_HEALTHY", False)
+
+    ready = client.get("/readyz")
+
+    assert ready.status_code == 200
+    assert ready.json() == {"status": "ready"}
 
 
 def test_쓰기_가능성은_공개_health가_아니라_시작할때_한번_확인한다(monkeypatch):
@@ -940,6 +1001,63 @@ def test_쓰기_가능성은_공개_health가_아니라_시작할때_한번_확�
     with sqlite3.connect(path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         conn.rollback()
+
+
+def test_저장소상태확인용_SQLite연결은_항상_닫는다(tmp_path, monkeypatch):
+    connections = []
+
+    class FakeConnection:
+        closed = False
+        in_transaction = False
+
+        def execute(self, sql):
+            if sql == "BEGIN IMMEDIATE":
+                self.in_transaction = True
+            return self
+
+        def fetchone(self):
+            return (1,)
+
+        def rollback(self):
+            self.in_transaction = False
+
+        def close(self):
+            self.closed = True
+
+    def connect(*_args, **_kwargs):
+        conn = FakeConnection()
+        connections.append(conn)
+        return conn
+
+    monkeypatch.setattr(web_storage_db, "default_db_path", lambda: tmp_path / "db")
+    monkeypatch.setattr(runtime.sqlite3, "connect", connect)
+
+    runtime._check_storage_write_ready()
+    runtime._check_storage_read_ready()
+
+    assert len(connections) == 2
+    assert all(conn.closed for conn in connections)
+
+
+def test_real_pipeline은_영속_provenance_key가_없으면_시작전에_실패한다(
+    monkeypatch,
+):
+    monkeypatch.setenv(PIPELINE_ENV, "real")
+    monkeypatch.setattr(provenance_sources, "seal_key_is_persistent", lambda: False)
+
+    with pytest.raises(RuntimeError, match="PROVENANCE_SEAL_SECRET"):
+        with TestClient(app):
+            pass
+
+
+def test_demo_pipeline은_영속_provenance_key가_없어도_로컬실행을_허용한다(
+    monkeypatch,
+):
+    monkeypatch.setenv(PIPELINE_ENV, "demo")
+    monkeypatch.setattr(provenance_sources, "seal_key_is_persistent", lambda: False)
+
+    with TestClient(app) as demo_client:
+        assert demo_client.get("/healthz").status_code == 200
 
 
 # ── 도우미 ──────────────────────────────────────────────

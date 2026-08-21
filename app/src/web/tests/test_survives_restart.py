@@ -24,7 +24,8 @@ from src.features.pipeline.canonical_demo import (
 from src.features.pipeline.demo import DemoPipeline
 from src.features.pipeline.port import Outcome
 from src.features.report_standard import CANONICAL_SECTION_IDS, SECTION_BY_ID
-from src.features.storage import db, reports
+from src.features.storage import db, job_interruptions, reports
+from src.core import clock
 from src.web import main
 from src.web import job_runtime, runtime
 from src.web.routers import reports as reports_router
@@ -167,6 +168,28 @@ def test_재시작으로_미완료_진행정보가_사라지면_원인과_재시
     assert state.json()["code"] == "job_unavailable"
     assert state.json()["retry_url"] == "/"
     assert "서버가 다시 시작되었거나" in state.json()["error"]
+
+
+def test_종료시간을_넘긴_작업은_재시작뒤_명시적_중단상태로_복구한다():
+    job_id = "known-interrupted-job"
+    with db.connect() as conn:
+        job_interruptions.mark(
+            conn,
+            job_id=job_id,
+            interrupted_at=clock.iso_now_kst(),
+            reason="shutdown_timeout",
+        )
+    job_runtime._JOBS.clear()
+
+    with TestClient(main.app) as client:
+        page = client.get(f"/progress/{job_id}", follow_redirects=False)
+        state = client.get(f"/api/progress/{job_id}")
+
+    assert page.status_code == state.status_code == 409
+    assert "작업이 중단되었습니다" in page.text
+    assert "처음부터 다시 조사하기" in page.text
+    assert state.json()["code"] == "job_interrupted"
+    assert state.json()["retry_url"] == "/"
 
 
 def test_없는_진행번호의_410은_번호나_내부정보를_반사하지않는다():

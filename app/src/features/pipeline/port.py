@@ -9,7 +9,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Optional, Protocol
+from typing import TYPE_CHECKING, Callable, Optional, Protocol
+
+if TYPE_CHECKING:
+    from src.features.cost_tracking.store import AiCostEvent
 
 from src.core.constants import COUNTED_CELLS
 
@@ -127,6 +130,8 @@ class CompanyLookupResult:
     failed: bool = False
     #: API 예외 때문에 과금 여부를 확정할 수 없는가. True면 비용 표식을 닫으면 안 된다.
     billing_uncertain: bool = False
+    #: 원문 없이 stage/model/token/cache/batch/원가만 담은 내부 비용 이벤트.
+    ai_cost_events: tuple["AiCostEvent", ...] = ()
 
 
 @dataclass(frozen=True)
@@ -439,7 +444,8 @@ class RunResult:
     #: 생성한 문장 수 · 검사를 통과한 문장 수 → 「원문 일치율」
     sentences_made: int = 0
     sentences_passed: int = 0
-    #: 이 요청에 쓴 AI 비용(원)
+    #: 성공·실패와 무관하게 이 요청에서 실제 발생한 내부 AI 변동원가(원).
+    #: 고객 청구액이 아니며 서버 월 고정비도 포함하지 않는다.
     cost_krw: float = 0.0
     #: 쓴 AI 모델 이름. 코드를 안 바꿨는데 결과가 달라지는 «유일한 경로»다.
     model: str = ""
@@ -451,6 +457,8 @@ class RunResult:
     #:   화면 표시와 이력 기록이 둘 다 이 값을 읽는다 — 기능만 붙이고 화면을
     #:   안 고치면 사용자는 캐시가 도는지 모른다 (문제로그 P-63).
     cache_hit: str = ""
+    #: 원문·개인정보 없이 stage/model/token/cache/batch/실제 원가만 담는다.
+    ai_cost_events: tuple["AiCostEvent", ...] = ()
 
 
 class Pipeline(Protocol):

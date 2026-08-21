@@ -25,8 +25,8 @@
 - 구조: 핵심 요약, 1~9장, 출처·검증 부록의 고정 정본
 - 근거: 공식 자료 우선, 외부 자료는 교차검증, 사실 원장 단일 소유
 - 비교: 양사 공식 근거의 지표·기간·연결/별도 범위가 맞지 않으면 출고 차단
-- 출력: 승인된 같은 보고서를 웹·PDF·Notion에 동등 렌더
-- 파일 정본: 세 독립 승인 뒤 `finalize`된 PDF
+- 출력: 같은 자동출고 레코드의 보고서를 웹·PDF·Notion에 동등 렌더
+- 파일 정본: 필수 자동검사 전 항목과 최종 해시 결속을 통과한 PDF
 
 주소가 비어도 회사 식별부터 결과까지 진행되어야 한다. 화면이나 코드가 지역·주소를
 필수로 요구하면 정본을 바꾸지 말고 release blocker로 처리한다. 구형 DOCX/Word와
@@ -51,7 +51,7 @@ allowlist에서 빼면 `PIPELINE=real`이 깨진다.
 | 안전한 첫 실행 | `PIPELINE=demo`, `BETA_ADMIN_ONLY=1` |
 | 배포 인증 | `ADMIN_EMAILS`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI` |
 | 공유 링크 | `SHARE_PUBLIC_BASE_URL` |
-| PDF 승인 | `PDF_RELEASE_PARTICIPANTS`, `PROVENANCE_SEAL_SECRET` |
+| 근거·자동출고 | `PROVENANCE_SEAL_SECRET` (`PDF_RELEASE_PARTICIPANTS`는 구형 감사자료 해석용) |
 | 실제 조사 | `DART_API_KEY`, `ANTHROPIC_API_KEY`, `NAVER_CLIENT_ID`, `NAVER_CLIENT_SECRET` |
 | 선택 전송 | `NOTION_TOKEN`, `NOTION_PARENT_PAGE_ID` |
 
@@ -86,12 +86,14 @@ py -3.13 -m venv .venv
 
 현재 인수 기준 스냅샷은 다음과 같다.
 
-- app 전체 회귀: **2121 passed, 3 skipped, 24 warnings** (`73.80s`, exit `0`)
-- analysis_engine 회귀: **135 passed** (`12.78s`, exit `0`)
-- 두 묶음 합계: **2256 passed, 3 skipped**, 실패 `0`
-- 독립 감사: **A PASS, B PASS**
+- app 전체 회귀: **2,164 passed, 3 skipped, 27 warnings** (Python 3.13.15,
+  failures `0`, errors `0`)
+- analysis_engine 회귀: **135 passed**, 실패 `0`
+- 두 묶음 합계: **2,299 passed, 3 skipped**, 실패 `0`
+- 자동출고·원가·파일럿 표적 묶음: **43 passed** 후 넓은 회귀 **399 passed, 3 skipped**
+- 실제 provider 호출: **0**
 
-이 숫자는 코드와 문서 정리 시점의 스냅샷이다. 변경 뒤 아래 두 명령을 각각 실행하고
+이 숫자는 2026-08-21 자동출고 후속 작업의 dirty worktree 스냅샷이다. 변경 뒤 아래 두 명령을 각각 실행하고
 실패 원인을 해결한 다음, 합산 결과와 warning을 이 섹션에 갱신한다.
 
 ```powershell
@@ -110,20 +112,25 @@ CI와 같은 최종 확인은 GitHub Actions `quality-gate`에서 app·engine �
 이미지를 만들고 `/healthz`까지 통과했는지 본다. 독립 A/B 판정의 전제가 바뀌는
 내용·보안·PDF 변경이면 해당 검토도 다시 수행해 PASS 근거를 갱신한다.
 
-## 7. PDF 출고 승인
+## 7. 자동검사·자동출고
 
 ```text
 report_standard 통과
-  → PDF prepare와 SHA-256 고정
-  → author·producer·fact·editorial·visual 다섯 역할 결속
-  → fact·editorial·visual 세 독립 승인
-  → finalize
-  → PDF 다운로드 및 선택적 Notion 전송
+  → report SHA-256 고정
+  → PDF prepare·전 페이지 PNG 렌더와 SHA-256 고정
+  → 사실·인용·수치·구조·금지 문구·PDF 렌더·채널 동등성 자동검사
+  → 검사 전후 report/PDF/page hash 재대조
+  → 같은 자동출고 레코드로 웹·PDF·Notion 허용
 ```
 
-세 검토자는 서로 다른 불변 사용자 `sub`여야 하고 `author`·`producer`와 겹칠 수 없다.
-세 사람은 같은 PDF 해시에 승인해야 한다. 바이트 변경, 참여자 원장 불일치, provenance
-seal 실패가 있으면 기존 승인을 재사용하지 않고 fail-closed한다.
+필수 검사 하나라도 실패하거나 검사 뒤 hash가 바뀌면 부분 화면도 공개하지 않고 전체를
+`GATE_STOPPED`한다. 수동 승인 GET/POST는 `410 Gone`이며 구형 세 역할 승인 테이블은
+감사자료로만 보존한다. 최초 실제 회사 25건 사용자 검토는 자동검사 보정용 파일럿이고
+서비스 건별 출고 승인이 아니다.
+
+내부 AI 원가는 실패 호출을 포함해 stage·실제 model ID·일반/cache token·batch·원가로
+기록한다. 고객 청구는 자동출고 뒤에만 별도 결정하며 실패·`GATE_STOPPED`·출고 실패는
+0원이다. 공개 판매가는 아직 확정되지 않았고 서버 월 고정비는 AI 변동원가와 분리한다.
 
 ## 8. 배포·백업·복구
 
@@ -131,10 +138,10 @@ seal 실패가 있으면 기존 승인을 재사용하지 않고 fail-closed한�
 - Uvicorn worker `1`, Render instance `1`, 영속 디스크 `/var/data`
 - SQLite 백업과 `.sha256`을 함께 내려받아 검증
 - DB와 별도로 OAuth·provider·Notion 비밀, `SHARE_PUBLIC_BASE_URL`,
-  `PDF_RELEASE_PARTICIPANTS`, `PROVENANCE_SEAL_SECRET`을 비밀 관리자에 보관
+  `PROVENANCE_SEAL_SECRET`을 비밀 관리자에 보관
 
 `PROVENANCE_SEAL_SECRET`을 잃거나 바꾸면 기존 seal·캐시의 신뢰를 복구할 수 없어
-출고가 차단된다. 참여자 JSON을 잃거나 `sub`가 달라지면 새 PDF 승인을 받을 수 없다.
+출고가 차단된다. 구형 참여자 JSON은 과거 감사자료의 역할 해석에만 필요하다.
 상세 절차는 [Render 운영 배포](../app/docs/Render_배포.md)와
 [장기 휴면 백업](../app/docs/장기_휴면_백업.md)을 따른다.
 
@@ -156,7 +163,7 @@ seal 실패가 있으면 기존 승인을 재사용하지 않고 fail-closed한�
 - 외부 호출·유료 API·실제 계정 전송은 명시적 승인 없이 실행하지 않는다.
 - 실제 DB, `.env`, API/OAuth/Notion 비밀, 백업, 사용자 식별자를 커밋하지 않는다.
 - 조사 원문을 공개 저장소에 재배포하지 않고 정제 요약과 검증 해시만 남긴다.
-- 정본을 통과하지 않은 초안, 구형 캐시, 승인 전 PDF를 공개·다운로드·Notion 전송하지 않는다.
+- 정본과 자동검사를 통과하지 않은 초안·구형 캐시·PDF를 공개·다운로드·Notion 전송하지 않는다.
 - 기존 사용자 변경이 있는 dirty worktree에서 무관한 파일을 되돌리거나 삭제하지 않는다.
 
 ## 11. 검수 체크리스트
@@ -166,8 +173,10 @@ seal 실패가 있으면 기존 승인을 재사용하지 않고 fail-closed한�
 - [ ] `PIPELINE=demo` 로컬 실행과 관리자 URL 폐기 확인
 - [ ] app·analysis_engine 회귀 시험을 새로 실행하고 이 문서의 숫자를 갱신
 - [ ] GitHub Actions와 Docker `/healthz` 확인
-- [ ] 다섯 역할 `sub`와 세 검토자의 상호 배타성 확인
-- [ ] 동일 PDF 해시의 세 승인 → `finalize` → 다운로드·Notion 차단/허용 확인
+- [ ] 필수 자동검사 전 항목 통과 → 동일 hash 자동출고 → 웹·PDF·Notion 허용 확인
+- [ ] 검사 하나 실패·검사 후 hash 변경·수동 승인 URL에서 세 채널 우회 불가 확인
+- [ ] 실패 고객 청구 0원과 실패 호출 내부 AI 원가 보존 확인
+- [ ] G3.5 회사 목록·예상 최대비용을 별도 승인받기 전 provider 호출 0 확인
 - [ ] SQLite 백업 해시 검증과 비밀 복구 묶음 확인
 - [ ] 운영 한계와 미완료 staging 시험을 이슈·release 판단에 반영
 - [ ] 날짜별 리뷰를 현재 정본이나 최신 PASS 증거로 인용하지 않음

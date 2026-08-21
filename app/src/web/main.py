@@ -15,9 +15,10 @@ from fastapi.staticfiles import StaticFiles
 from src.core import paths
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
+from src.features.sharelink.constants import KEY_COOKIE_NAME
 from src.web import request_helpers, runtime
 from src.web.response_security import ResponseSecurityMiddleware
-from src.web.routers import admin, analysis, auth, health, reports
+from src.web.routers import admin, analysis, auth, backup, health, reports
 from src.web.security import RequestBodyLimitMiddleware
 
 
@@ -48,6 +49,18 @@ async def beta_admin_gate(request: Request, call_next):
 
     if session is not None and session.is_admin:
         return await call_next(request)
+    # capability URL을 한 번 통과해 서버가 발급한 쿠키가 있고, 그 열쇠가 DB에서
+    # 실제로 살아 있을 때만 결과·진행·PDF 경로를 연다. 관리자 경로는 capability로
+    # 절대 열지 않으며, 쿠키가 없는 일반 요청에는 추가 DB 조회 비용을 만들지 않는다.
+    if (
+        (
+            path in auth_constants.BETA_SHARE_PATHS
+            or path.startswith(auth_constants.BETA_SHARE_PATH_PREFIXES)
+        )
+        and request.cookies.get(KEY_COOKIE_NAME)
+        and request_helpers._raw_share_key(request)
+    ):
+        return await call_next(request)
     target = "/auth/not-admin" if session is not None else "/auth/login"
     return RedirectResponse(target, status_code=303)
 
@@ -56,6 +69,7 @@ async def beta_admin_gate(request: Request, call_next):
 app.add_middleware(ResponseSecurityMiddleware)
 
 app.include_router(health.router)
+app.include_router(backup.router)
 app.include_router(analysis.router)
 app.include_router(reports.router)
 app.include_router(auth.router)

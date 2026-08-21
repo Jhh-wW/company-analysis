@@ -245,17 +245,19 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
       여기서 다시 적으면 «같은 정의가 두 곳»이 되어 한쪽만 고쳐진다 (P-83과 같은 함정).
     """
     from src.features.sharelink.allowlist import CREATE_SQL as ALLOWED_SQL  # noqa: PLC0415
-    from src.features.sharelink.store import CREATE_SQL as SHARE_LINKS_SQL  # noqa: PLC0415
+    from src.features.sharelink import store as share_store  # noqa: PLC0415
+    from src.features.storage import job_interruptions  # noqa: PLC0415
     from src.features.export_notion.store import CREATE_SQL as NOTION_EXPORTS_SQL  # noqa: PLC0415
 
     for statement in (
         *_SCHEMA_STATEMENTS,
-        SHARE_LINKS_SQL,
         ALLOWED_SQL,
         NOTION_EXPORTS_SQL,
+        job_interruptions.CREATE_SQL,
     ):
         conn.execute(statement)
 
+    share_store.ensure_schema(conn)
     _migrate_sessions_to_token_hash(conn)
 
     # OAuth ``sub``는 이메일과 달리 계정에서 바뀌지 않는 사람 식별자다. 이미

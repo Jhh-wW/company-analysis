@@ -17,6 +17,12 @@ AI_COST_KRW_PER_USD: Final[float] = 1400.0
 
 _TOKENS_PER_MTOK = Decimal(1_000_000)
 _WON_CENT = Decimal("0.01")
+_CACHE_WRITE_MULTIPLIER: Final[dict[str, Decimal]] = {
+    "5m": Decimal("1.25"),
+    "1h": Decimal("2"),
+}
+_CACHE_READ_MULTIPLIER = Decimal("0.1")
+_BATCH_MULTIPLIER = Decimal("0.5")
 
 
 def model_price(model: object) -> tuple[float, float]:
@@ -42,19 +48,56 @@ def usage_cost_krw(
     서로 다른 돈을 말하지 않는다. 올림은 아주 작은 유료 호출을 0원으로 기록하지
     않게 하는 보수적 운영 규칙이다.
     """
-    input_tokens = Decimal(str(tokens_in))
-    output_tokens = Decimal(str(tokens_out))
-    if (
-        not input_tokens.is_finite()
-        or not output_tokens.is_finite()
-        or input_tokens < 0
-        or output_tokens < 0
-    ):
-        raise ValueError("provider token 수는 0 이상의 유한한 수여야 합니다")
+    return detailed_usage_cost_krw(
+        model,
+        input_tokens=tokens_in,
+        output_tokens=tokens_out,
+    )
 
+
+def detailed_usage_cost_krw(
+    model: object,
+    *,
+    input_tokens: int | float,
+    output_tokens: int | float,
+    cache_creation_tokens: int | float = 0,
+    cache_read_tokens: int | float = 0,
+    batch: bool = False,
+    cache_ttl: str = "5m",
+) -> float:
+    """Calculate normal, prompt-cache, and Batch usage from one price source.
+
+    Unknown model IDs keep the existing conservative fallback price.  Cache
+    creation/read and Batch modifiers are applied explicitly so stage logs do
+    not need to duplicate exchange rates or model prices.
+    """
+
+    values = tuple(
+        Decimal(str(value))
+        for value in (
+            input_tokens,
+            output_tokens,
+            cache_creation_tokens,
+            cache_read_tokens,
+        )
+    )
+    if any(not value.is_finite() or value < 0 for value in values):
+        raise ValueError("provider token 수는 0 이상의 유한한 수여야 합니다")
+    if type(batch) is not bool:
+        raise ValueError("batch 적용 여부는 bool이어야 합니다")
+    if cache_ttl not in _CACHE_WRITE_MULTIPLIER:
+        raise ValueError("cache TTL은 5m 또는 1h여야 합니다")
+
+    normal_in, output, cache_create, cache_read = values
     price_in, price_out = model_price(model)
+    input_price = Decimal(str(price_in))
     value = (
-        input_tokens * Decimal(str(price_in))
-        + output_tokens * Decimal(str(price_out))
-    ) * Decimal(str(AI_COST_KRW_PER_USD)) / _TOKENS_PER_MTOK
+        normal_in * input_price
+        + cache_create * input_price * _CACHE_WRITE_MULTIPLIER[cache_ttl]
+        + cache_read * input_price * _CACHE_READ_MULTIPLIER
+        + output * Decimal(str(price_out))
+    )
+    if batch:
+        value *= _BATCH_MULTIPLIER
+    value = value * Decimal(str(AI_COST_KRW_PER_USD)) / _TOKENS_PER_MTOK
     return float(value.quantize(_WON_CENT, rounding=ROUND_CEILING))

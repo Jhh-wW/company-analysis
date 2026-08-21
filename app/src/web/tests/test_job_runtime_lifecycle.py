@@ -11,10 +11,13 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from src.features.budget.constants import SPEND_PHASE_OCR, SPEND_PHASE_PIPELINE
+from src.features.cost_tracking import store as cost_store
 from src.features.pipeline.port import CompanyCard, Outcome, RunResult, UserInput
 from src.features.posting_image.logic import PostingImageResult
 from src.features.sharelink import tracks as share_tracks
 from src.features.sharelink.constants import PUBLIC_BUCKET
+from src.features.storage import db as storage_db
+from src.features.storage import job_interruptions
 from src.web import job_runtime, main, runtime
 
 
@@ -43,6 +46,58 @@ def _job(job_id: str) -> job_runtime.Job:
             ref="demo-ref",
         ),
     )
+
+
+def test_회사식별과_본조사_AI비용이_한_보고서의_단계별_원가로_합쳐진다(monkeypatch):
+    identify_event = cost_store.AiCostEvent(
+        stage="company_identification",
+        model_id="claude-identify",
+        input_tokens=100,
+        output_tokens=10,
+        cost_krw=2.0,
+    )
+    report_event = cost_store.AiCostEvent(
+        stage="report_generation",
+        model_id="claude-report",
+        input_tokens=200,
+        output_tokens=20,
+        cost_krw=3.0,
+    )
+
+    class _CostPipeline:
+        @staticmethod
+        def run(*_args, **_kwargs):
+            return RunResult(
+                outcome=Outcome.GATE_STOPPED,
+                cost_krw=3.0,
+                model="claude-report",
+                ai_cost_events=(report_event,),
+            )
+
+    job = _job("combined-cost-events")
+    job.upfront_cost_krw = 2.0
+    job.upfront_models = ("claude-identify",)
+    job.upfront_cost_events = (identify_event,)
+    monkeypatch.setattr(runtime, "_PIPELINE", _CostPipeline())
+    monkeypatch.setattr(job_runtime, "record_run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(job_runtime, "_save_report", lambda _job: True)
+    monkeypatch.setattr(job_runtime, "_release_run_slot", lambda _bucket: None)
+
+    asyncio.run(job_runtime._run_job(job))
+
+    assert job.result is not None
+    assert job.result.cost_krw == 5.0
+    assert job.result.ai_cost_events == (identify_event, report_event)
+    with storage_db.connect() as conn:
+        rows = conn.execute(
+            f"SELECT stage, cost_krw FROM {cost_store.AI_EVENT_TABLE} "
+            "WHERE run_id=? ORDER BY sequence",
+            (job.job_id,),
+        ).fetchall()
+    assert [(row["stage"], row["cost_krw"]) for row in rows] == [
+        ("company_identification", 2.0),
+        ("report_generation", 3.0),
+    ]
 
 
 def test_등록한_작업을_강하게_참조하고_종료시_완료까지_유예한다(monkeypatch):
@@ -268,6 +323,8 @@ def test_shutdown은_제한시간뒤_task를_취소하고_슬롯을_정리한다
         assert task.done()
         assert job.finished
         assert releases == ["shutdown-slot"]
+        with storage_db.connect() as conn:
+            assert job_interruptions.exists(conn, job.job_id)
         pipeline.release.set()
 
     try:

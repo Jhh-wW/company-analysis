@@ -6,6 +6,7 @@ import datetime as dt
 import logging
 import math
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, TypeVar
 
@@ -61,6 +62,72 @@ class PaidPhase:
     share_key: str
     bucket_id: str
     reserved_krw: float = 0.0
+
+
+@dataclass
+class PaidPhaseHandle:
+    """한 유료 단계가 취소·확정·미확정 중 정확히 한 번만 끝나게 한다."""
+
+    ticket: Optional[PaidPhase]
+    provider_started: bool = False
+    closed: bool = False
+
+    def mark_provider_started(self) -> None:
+        if self.ticket is None or self.closed:
+            raise RuntimeError("열리지 않은 비용 단계에서는 provider를 시작할 수 없습니다")
+        self.provider_started = True
+
+    def settle(self, *, amount_krw: float, billing_uncertain: bool) -> None:
+        if self.ticket is None or self.closed:
+            return
+        _settle_paid_phase(
+            self.ticket,
+            amount_krw=amount_krw,
+            billing_uncertain=billing_uncertain,
+        )
+        self.closed = True
+
+    def cancel(self) -> None:
+        if self.ticket is None or self.closed:
+            return
+        _cancel_paid_phase(self.ticket)
+        self.closed = True
+
+
+@contextmanager
+def paid_phase(
+    *,
+    run_id: str,
+    phase: str,
+    share_key: str,
+    cap_krw: float,
+    requested_cost_krw: float | None = None,
+):
+    """provider 경계의 모든 이탈에서 비용 표식을 정확히 한 번 닫는다."""
+
+    ticket = _begin_paid_phase(
+        run_id=run_id,
+        phase=phase,
+        share_key=share_key,
+        cap_krw=cap_krw,
+        requested_cost_krw=requested_cost_krw,
+    )
+    handle = PaidPhaseHandle(ticket=ticket, closed=ticket is None)
+    try:
+        yield handle
+    except BaseException:
+        if not handle.closed:
+            if handle.provider_started:
+                handle.settle(amount_krw=0.0, billing_uncertain=True)
+            else:
+                handle.cancel()
+        raise
+    finally:
+        if not handle.closed:
+            if handle.provider_started:
+                handle.settle(amount_krw=0.0, billing_uncertain=True)
+            else:
+                handle.cancel()
 
 def _bucket_concurrency_limit(track: share_tracks.Track) -> int:
     """한 비용 통장이 동시에 차지할 수 있는 조사 자리 수."""

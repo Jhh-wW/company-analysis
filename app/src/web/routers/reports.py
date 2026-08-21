@@ -1,16 +1,17 @@
 """완성 보고서 화면과 PDF·Notion 내보내기 경로."""
 
 import asyncio
-import base64
 import logging
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from src.core import clock
-from src.features.auth import logic as auth_logic
 from src.features.budget.sharing import SHARED_LINK_HEADERS
+from src.features.cost_tracking import store as cost_store
 from src.features.export_pdf.constants import CONTENT_TYPE_PDF
 from src.features.export_pdf.logic import (
     PDFGenerationError,
@@ -18,12 +19,15 @@ from src.features.export_pdf.logic import (
     build_download_filename as build_pdf_download_filename,
 )
 from src.features.export_pdf.release import (
-    ApprovalDecision,
     PDFReleaseBlockedError,
     PdfReleaseCandidate,
-    ReleasedPdf,
     prepare_pdf_release,
-    release_pdf,
+)
+from src.features.export_pdf.automatic_release import (
+    AutomaticallyReleasedPdf,
+    automatic_release_pdf,
+    report_sha256,
+    restore_automatic_release,
 )
 from src.features.export_pdf import release_store as pdf_release_store
 from src.features.export_notion import store as notion_store
@@ -258,20 +262,14 @@ async def result_page(request: Request, job_id: str):
         except PublishBlockedError:
             return _blocked_report_response(request)
         try:
-            _candidate, released = _release_state(
-                report_id=job_id,
-                report=output_report,
+            _candidate, released = await asyncio.to_thread(
+                _release_state, report_id=job_id, report=output_report
             )
         except PDFReleaseBlockedError as error:
             return _pdf_review_pending_response(request, error)
         except Exception as error:  # noqa: BLE001 — 공개 경계는 승인 저장소도 fail-closed
             return _pdf_unavailable_response(request, error)
         preview = released is None
-        if preview and not _is_admin_request(request):
-            return _pdf_review_pending_response(
-                request,
-                PDFReleaseBlockedError("PDF 출고 승인이 없습니다"),
-            )
         saved_job = job_runtime.Job(
             job_id=job_id,
             user_input=UserInput(company=saved.company, job=saved.job, region=""),
@@ -312,20 +310,14 @@ async def result_page(request: Request, job_id: str):
     except PublishBlockedError:
         return _blocked_report_response(request)
     try:
-        _candidate, released = _release_state(
-            report_id=job_id,
-            report=output_report,
+        _candidate, released = await asyncio.to_thread(
+            _release_state, report_id=job_id, report=output_report
         )
     except PDFReleaseBlockedError as error:
         return _pdf_review_pending_response(request, error)
     except Exception as error:  # noqa: BLE001 — 공개 경계는 승인 저장소도 fail-closed
         return _pdf_unavailable_response(request, error)
     preview = released is None
-    if preview and not _is_admin_request(request):
-        return _pdf_review_pending_response(
-            request,
-            PDFReleaseBlockedError("PDF 출고 승인이 없습니다"),
-        )
     return _render_result_page(
         request,
         job=job,
@@ -389,11 +381,11 @@ def _pdf_unavailable_response(
 
 
 def _pdf_review_pending_response(request: Request, error: Exception) -> Response:
-    """승인 없는 후보 PDF bytes를 내리지 않고 검수 대기 상태만 알린다."""
+    """필수 자동검사에서 멈춘 전체 결과를 부분 공개하지 않는다."""
 
     request_id = admin_audit.request_id(request)
     logger.info(
-        "PDF 보고서 출고 차단 error_type=%s request_id=%s",
+        "자동검사 출고 차단 error_type=%s request_id=%s",
         type(error).__name__,
         request_id,
     )
@@ -402,13 +394,15 @@ def _pdf_review_pending_response(request: Request, error: Exception) -> Response
         name="progress_unavailable.html",
         context=request_helpers._ctx(
             request,
-            interruption_title="PDF 보고서가 최종 검수 중입니다",
+            interruption_title="보고서 자동검사가 중단되었습니다",
             interruption_message=(
-                "모든 페이지의 사실·편집·시각 검수가 끝나기 전에는 파일을 제공하지 않습니다."
+                "필수 검사 중 하나라도 통과하지 못하면 웹·PDF·Notion 전체를 제공하지 않습니다."
             ),
-            interruption_hint="현재 보고서 화면은 그대로 사용할 수 있습니다.",
+            interruption_hint=(
+                "이 건은 고객에게 청구되지 않습니다. 관리자가 원인을 확인한 뒤 새로 생성해야 합니다."
+            ),
             retry_url="",
-            retry_label="PDF 상태 다시 확인",
+            retry_label="자동검사 상태 다시 확인",
         ),
         status_code=409,
     )
@@ -417,34 +411,94 @@ def _pdf_review_pending_response(request: Request, error: Exception) -> Response
     return response
 
 
+_PDF_CANDIDATE_CACHE_MAX = 4
+_PDF_CANDIDATE_CACHE_MAX_BYTES = 48 * 1024 * 1024
+_PDF_CANDIDATE_CACHE: OrderedDict[
+    tuple[str, str], PdfReleaseCandidate
+] = OrderedDict()
+_PDF_CANDIDATE_CACHE_BYTES = 0
+_PDF_CANDIDATE_CACHE_LOCK = threading.Lock()
+
+
+def _candidate_for_report(report_id: str, report: Report) -> PdfReleaseCandidate:
+    """보고서 내용 지문별 PDF 후보를 짧게 기억해 반복 렌더링을 피한다."""
+
+    global _PDF_CANDIDATE_CACHE_BYTES
+    digest = notion_store.report_digest(report)
+    key = (report_id, digest)
+    with _PDF_CANDIDATE_CACHE_LOCK:
+        cached = _PDF_CANDIDATE_CACHE.get(key)
+        if cached is not None:
+            _PDF_CANDIDATE_CACHE.move_to_end(key)
+            return cached
+
+    candidate = prepare_pdf_release(report)
+    candidate_bytes = len(candidate.pdf_bytes) + sum(
+        len(page.png_bytes) for page in candidate.pages
+    )
+    if candidate_bytes > _PDF_CANDIDATE_CACHE_MAX_BYTES:
+        return candidate
+    with _PDF_CANDIDATE_CACHE_LOCK:
+        existing = _PDF_CANDIDATE_CACHE.get(key)
+        if existing is not None:
+            _PDF_CANDIDATE_CACHE.move_to_end(key)
+            return existing
+        _PDF_CANDIDATE_CACHE[key] = candidate
+        _PDF_CANDIDATE_CACHE_BYTES += candidate_bytes
+        while (
+            len(_PDF_CANDIDATE_CACHE) > _PDF_CANDIDATE_CACHE_MAX
+            or _PDF_CANDIDATE_CACHE_BYTES > _PDF_CANDIDATE_CACHE_MAX_BYTES
+        ):
+            _old_key, old = _PDF_CANDIDATE_CACHE.popitem(last=False)
+            _PDF_CANDIDATE_CACHE_BYTES -= len(old.pdf_bytes) + sum(
+                len(page.png_bytes) for page in old.pages
+            )
+    return candidate
+
+
 def _release_state(
     *,
     report_id: str,
     report: Report,
-) -> tuple[PdfReleaseCandidate, ReleasedPdf | None]:
-    """현재 PDF 후보와 동일 hash에 묶인 영속 승인·출고 기록을 다시 검증한다."""
+) -> tuple[PdfReleaseCandidate, AutomaticallyReleasedPdf]:
+    """Run or restore the exact hash-bound automatic release decision."""
 
-    candidate = prepare_pdf_release(report)
+    candidate = _candidate_for_report(report_id, report)
+    digest = report_sha256(report)
     with storage_db.connect() as conn:
-        approval = pdf_release_store.load_approval(
+        stored_record = pdf_release_store.load_automatic_release_record(
             conn,
             report_id=report_id,
+            report_sha256=digest,
             pdf_sha256=candidate.pdf_sha256,
         )
-        stored_record = pdf_release_store.load_release_record(
-            conn,
-            report_id=report_id,
-            pdf_sha256=candidate.pdf_sha256,
-        )
-    if approval is None or stored_record is None:
-        return candidate, None
-    released = release_pdf(
+    if stored_record is not None:
+        released = restore_automatic_release(report, candidate, stored_record)
+        with storage_db.connect() as conn:
+            cost_store.mark_automatic_release(
+                conn,
+                run_id=report_id,
+                automatic_release_sha256=stored_record.record_sha256,
+            )
+        return candidate, released
+
+    released = automatic_release_pdf(
+        report,
         candidate,
-        approval,
-        released_at=stored_record.released_at,
+        released_at=clock.iso_now_kst(),
     )
-    if released.record != stored_record:
-        raise PDFReleaseBlockedError("PDF 출고 기록이 현재 후보와 일치하지 않습니다")
+    with storage_db.connect() as conn:
+        stored_record = pdf_release_store.save_automatic_release(
+            conn,
+            report_id=report_id,
+            released_pdf=released,
+        )
+        cost_store.mark_automatic_release(
+            conn,
+            run_id=report_id,
+            automatic_release_sha256=stored_record.record_sha256,
+        )
+    released = restore_automatic_release(report, candidate, stored_record)
     return candidate, released
 
 
@@ -485,63 +539,14 @@ def _render_result_page(
 
 @router.get("/review/pdf/{job_id}", response_class=HTMLResponse)
 async def review_pdf(request: Request, job_id: str):
-    """관리자에게만 동일 hash의 전 페이지 PNG와 3종 승인 폼을 보여 준다."""
+    """Retired manual approval URL; legacy records remain audit-only."""
 
-    blocked = request_helpers.require_admin(
-        request,
-        action="pdf.release.review.open",
-        target=admin_audit.target_id("report", job_id),
+    response = HTMLResponse(
+        "<h1>수동 PDF 승인이 종료되었습니다</h1>"
+        "<p>보고서는 필수 자동검사를 모두 통과한 경우에만 자동으로 출고됩니다.</p>",
+        status_code=410,
     )
-    if blocked is not None:
-        return blocked
-    loaded = _report_for_download(request, job_id)
-    if isinstance(loaded, Response):
-        return loaded
-    try:
-        report = _report_for_output(loaded)
-        candidate, released = _release_state(report_id=job_id, report=report)
-    except PublishBlockedError:
-        return _blocked_report_response(request)
-    except Exception as error:  # noqa: BLE001 — 검수 화면도 raw 오류를 내보내지 않는다
-        return _pdf_unavailable_response(request, error)
-
-    pages = [
-        {
-            "number": page.number,
-            "png_sha256": page.png_sha256,
-            "data_url": "data:image/png;base64,"
-            + base64.b64encode(page.png_bytes).decode("ascii"),
-        }
-        for page in candidate.pages
-    ]
-    with storage_db.connect() as conn:
-        decisions = pdf_release_store.load_role_decisions(
-            conn,
-            report_id=job_id,
-            pdf_sha256=candidate.pdf_sha256,
-        )
-    role_decisions = {
-        item.role: {
-            "reviewer": item.decision.reviewer,
-            "approved_at": item.decision.approved_at,
-        }
-        for item in decisions
-    }
-    response = request_helpers.templates.TemplateResponse(
-        request=request,
-        name="pdf_review.html",
-        context=request_helpers._ctx(
-            request,
-            report=report,
-            job_id=job_id,
-            pdf_sha256=candidate.pdf_sha256,
-            pages=pages,
-            expected_fact_ids=candidate.expected_fact_ids,
-            role_decisions=role_decisions,
-            already_released=released is not None,
-        ),
-    )
-    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 
@@ -549,131 +554,14 @@ async def review_pdf(request: Request, job_id: str):
 async def approve_pdf(
     request: Request,
     job_id: str,
-    csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
-    pdf_sha256: str = Form("", max_length=64),
-    review_role: str = Form("", max_length=16),
-    confirm_role: str = Form("", max_length=8),
-    reviewed_fact_ids: list[str] = Form([]),
-    fact_failed_count: str = Form("", max_length=10),
-    visual_all_pages: str = Form("", max_length=8),
 ):
-    """서로 다른 운영자가 동일 PDF의 한 검수 역할씩만 승인한다."""
+    """Retired POST endpoint; it can never authorize automatic release."""
 
-    blocked = request_helpers.require_admin_action(
-        request,
-        csrf_token,
-        action="pdf.release.approve",
-        target=admin_audit.target_id("report", job_id),
+    response = HTMLResponse(
+        "<h1>수동 PDF 승인이 종료되었습니다</h1>"
+        "<p>기존 승인 기록은 감사자료로만 보존되며 출고 권한이 없습니다.</p>",
+        status_code=410,
     )
-    if blocked is not None:
-        return blocked
-    if review_role not in pdf_release_store.APPROVAL_ROLES or confirm_role != "yes":
-        response = HTMLResponse(
-            "사실·편집·시각 중 본인이 맡은 한 역할을 확인해야 합니다.",
-            status_code=422,
-        )
-        response.headers["Cache-Control"] = "no-store"
-        return response
-
-    loaded = _report_for_download(request, job_id)
-    if isinstance(loaded, Response):
-        return loaded
-    try:
-        report = _report_for_output(loaded)
-        candidate = prepare_pdf_release(report)
-        if pdf_sha256 != candidate.pdf_sha256:
-            raise PDFReleaseBlockedError("검수 뒤 PDF 내용 또는 레이아웃이 변경되었습니다")
-        if review_role == "fact":
-            reviewed_ids = tuple(reviewed_fact_ids)
-            if fact_failed_count.strip() != "0":
-                raise PDFReleaseBlockedError("사실 검수 실패 건수는 0이어야 합니다")
-        else:
-            reviewed_ids = ()
-        if review_role == "visual" and visual_all_pages != "yes":
-            raise PDFReleaseBlockedError("모든 PDF 페이지를 직접 확인해야 합니다")
-        reviewed_at = clock.iso_now_kst()
-        actor = admin_audit.reviewer_id(request)
-        if not actor:
-            raise PDFReleaseBlockedError(
-                "공급자의 불변 계정 식별자로 다시 로그인해야 PDF를 승인할 수 있습니다"
-            )
-        decision = ApprovalDecision(True, actor, reviewed_at)
-        role_decision = pdf_release_store.PdfRoleDecision(
-            role=review_role,
-            pdf_sha256=candidate.pdf_sha256,
-            page_png_sha256s=tuple(page.png_sha256 for page in candidate.pages),
-            reviewed_pages=tuple(page.number for page in candidate.pages),
-            expected_fact_ids=candidate.expected_fact_ids,
-            reviewed_fact_ids=reviewed_ids,
-            fact_failed_count=0,
-            decision=decision,
-            visual_review_kind="human" if review_role == "visual" else "",
-        )
-        with storage_db.connect() as conn:
-            participants = pdf_release_store.load_participant_ledger(
-                conn,
-                report_id=job_id,
-                pdf_sha256=candidate.pdf_sha256,
-            )
-            if participants is None:
-                participants = auth_logic.pdf_release_participant_ids_from_env()
-                if participants.get(review_role) != actor:
-                    raise PDFReleaseBlockedError(
-                        "현재 계정은 이 PDF 검수 역할에 배정된 사람이 아닙니다"
-                    )
-                pdf_release_store.ensure_participant_ledger(
-                    conn,
-                    report_id=job_id,
-                    pdf_sha256=candidate.pdf_sha256,
-                    participants=participants,
-                    assigned_at=reviewed_at,
-                )
-            elif participants.get(review_role) != actor:
-                raise PDFReleaseBlockedError(
-                    "현재 계정은 이 PDF 검수 역할에 배정된 사람이 아닙니다"
-                )
-            pdf_release_store.save_role_decision(
-                conn,
-                report_id=job_id,
-                role_decision=role_decision,
-            )
-            approval = pdf_release_store.load_complete_approval(
-                conn, report_id=job_id, pdf_sha256=candidate.pdf_sha256
-            )
-            released = None
-            if approval is not None:
-                released = pdf_release_store.finalize_release(
-                    conn,
-                    report_id=job_id,
-                    candidate=candidate,
-                    approval=approval,
-                    created_at=reviewed_at,
-                    released_at=reviewed_at,
-                )
-        admin_audit.emit(
-            request,
-            action="pdf.release.approve",
-            target=admin_audit.target_id("report", job_id),
-            outcome="success",
-            reason=(
-                "three_independent_approvals_released"
-                if released is not None
-                else f"{review_role}_approval_recorded"
-            ),
-        )
-    except PublishBlockedError:
-        return _blocked_report_response(request)
-    except (
-        PDFReleaseBlockedError,
-        pdf_release_store.PdfReleaseStoreError,
-        auth_logic.UnverifiedIdentityError,
-    ) as error:
-        return _pdf_review_pending_response(request, error)
-    except Exception as error:  # noqa: BLE001 — 승인 원장 장애도 fail-closed
-        return _pdf_unavailable_response(request, error)
-
-    target = f"/result/{job_id}" if released is not None else f"/review/pdf/{job_id}"
-    response = RedirectResponse(target, status_code=303)
     response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -698,7 +586,9 @@ async def download_pdf(request: Request, job_id: str):
         return loaded
     report = loaded
     try:
-        _candidate, released = _release_state(report_id=job_id, report=report)
+        _candidate, released = await asyncio.to_thread(
+            _release_state, report_id=job_id, report=report
+        )
         if released is None:
             raise PDFReleaseBlockedError("PDF 출고 승인이 없습니다")
         content = released.content
@@ -756,7 +646,9 @@ async def send_to_notion(
     except PublishBlockedError:
         return _blocked_report_response(request)
     try:
-        _candidate, released = _release_state(report_id=job_id, report=report)
+        _candidate, released = await asyncio.to_thread(
+            _release_state, report_id=job_id, report=report
+        )
     except PDFReleaseBlockedError as error:
         return _pdf_review_pending_response(request, error)
     except Exception as error:  # noqa: BLE001 — 승인 원장을 확인 못 하면 Notion도 닫는다

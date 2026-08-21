@@ -37,7 +37,7 @@ render.yaml
   -> report_summary: 1~9장 fact_id 최소 부분집합 요약
   -> report_standard: 전체 fail-closed 출고 게이트
   -> storage: 보고서·FactRecord·Source·캐시 저장
-  -> web / PDF / Notion: 같은 승인 정본을 채널별로 렌더
+  -> web / PDF / Notion: 같은 해시 결속 자동출고 정본을 채널별로 렌더
 ```
 
 필수 장 하나라도 부족하거나 원문·법인·시점·상태·숫자·중복·비교 조건 중 하나라도
@@ -53,7 +53,7 @@ render.yaml
 | 생성 모델 | 문장 후보만 | 원문 범위, FactRecord 결속, 시간·인과·수치·중복 |
 | 캐시 | 성능 보조 | 현재 schema token과 현재 전체 출고 게이트 |
 | PDF 준비 | 렌더 후보만 | 실제 bytes hash, 전 페이지 재렌더, glyph 가시성 |
-| PDF 출고 | 동일 PDF hash의 승인 | 5역할 참여자 원장, 3인 독립 승인, DB release 무결성 |
+| 자동출고 | 동일 report/PDF/page hash의 필수 검사 | 사실·인용·수치·구조·금지 문구·PDF 렌더·채널 동등성, DB release 무결성 |
 
 `PROVENANCE_SEAL_SECRET`은 모든 운영 worker와 재시작에서 같은 32바이트 이상 값을
 사용한다. 값이 유실되면 과거 Source를 새로 신뢰하지 않고 출고를 차단한다. 보고서
@@ -63,13 +63,16 @@ render.yaml
 
 Render에서는 `/var/data` 하나를 영속 루트로 사용한다.
 
-- `storage.db`: 보고서, 세션, 공유, 예산, PDF 승인·출고 원장
+- `storage.db`: 보고서, 세션, 공유, 예산, 자동출고·내부 AI 원가·고객 청구 원장. 구형 PDF 수동 승인 원장은 감사자료로 보존
 - `observability/runs.jsonl`: 실행·비용·게이트 결과
 - `cache/`: 공식 API·도메인 분석의 재생성 가능한 캐시
 - `backups/`: SQLite online backup과 SHA-256
 
 DB 백업만으로는 배포를 복구할 수 없다. OAuth 비밀, `PROVENANCE_SEAL_SECRET`,
-`PDF_RELEASE_PARTICIPANTS`, 공개 origin 설정은 별도 비밀 저장소에 함께 보관한다.
+공개 origin 설정은 별도 비밀 저장소에 함께 보관한다. 구형
+`PDF_RELEASE_PARTICIPANTS`는 감사기록 해석용일 뿐 신규 출고 권한이 아니다.
+
+내부 AI 변동원가는 성공·실패와 무관하게 단계별 실제 model/token/cache/batch 사용량으로 기록한다. 고객 청구는 같은 자동출고 레코드가 생긴 완료 보고서에만 별도로 결정하며, 서버비는 월 고정비 표에 분리한다.
 
 ## 현재 구조상 주의점
 

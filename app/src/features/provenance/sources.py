@@ -50,6 +50,12 @@ _PROVENANCE_SEAL_KEY = (
 )
 
 
+def seal_key_is_persistent() -> bool:
+    """재시작 뒤에도 같은 출처 도장을 검증할 운영 키가 설정됐는가."""
+
+    return len(_configured_seal_key) >= 32
+
+
 def _host_key(value: str) -> str:
     return str(value or "").strip().casefold().rstrip(".")
 

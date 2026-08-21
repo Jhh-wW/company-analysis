@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 import sqlite3
 from dataclasses import dataclass
 from typing import Optional
@@ -23,7 +25,7 @@ TABLE_SHARE_LINKS = "share_links"
 #: 표 만들기. `db.py`가 서버 시작 때 부른다.
 CREATE_SQL = f"""
 CREATE TABLE IF NOT EXISTS {TABLE_SHARE_LINKS} (
-    key             TEXT PRIMARY KEY,
+    key_hash        TEXT PRIMARY KEY,
     company         TEXT NOT NULL,
     job             TEXT NOT NULL,
     -- ★ 미리 구워 둔 보고서 번호. 비어 있으면 「아직 안 구웠다」는 뜻이다.
@@ -36,13 +38,16 @@ CREATE TABLE IF NOT EXISTS {TABLE_SHARE_LINKS} (
     last_opened_at  TEXT NOT NULL DEFAULT ''
 )
 """
+_LEGACY_TABLE = "share_links_legacy_raw_key"
+_MIGRATION_SAVEPOINT = "migrate_share_links_key_hash"
+_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True)
 class ShareLink:
     """발급한 링크 하나."""
 
-    key: str
+    key_hash: str
     company: str
     job: str
     report_id: str
@@ -57,10 +62,16 @@ class ShareLink:
         """미리 구워 둔 보고서가 있는가. 있으면 인사팀이 0원으로 바로 본다."""
         return bool(self.report_id)
 
+    @property
+    def key(self) -> str:
+        """관리 화면에서 쓰는 비밀이 아닌 영속 식별자."""
+
+        return self.key_hash
+
 
 def _row_to_link(row: sqlite3.Row | tuple) -> ShareLink:
     return ShareLink(
-        key=row[0],
+        key_hash=row[0],
         company=row[1],
         job=row[2],
         report_id=row[3],
@@ -73,40 +84,108 @@ def _row_to_link(row: sqlite3.Row | tuple) -> ShareLink:
 
 
 _COLUMNS = (
-    "key, company, job, report_id, note, created_at, "
+    "key_hash, company, job, report_id, note, created_at, "
     "opened_count, first_opened_at, last_opened_at"
 )
 
 
-def save(
-    conn: sqlite3.Connection,
-    *,
-    key: str,
-    company: str,
-    job: str,
-    report_id: str = "",
-    note: str = "",
-    now_iso: str,
-) -> None:
-    """링크를 저장한다. 같은 열쇠가 있으면 회사·직무·보고서만 갱신한다.
+def key_hash_of(key: str) -> str:
+    """URL·쿠키 원문을 DB 조회용 SHA-256 지문으로 바꾼다."""
 
-    ★ 요청 기록(`opened_count` 등)은 **덮어쓰지 않는다** — 보고서를 다시 연결해도
-      기존 링크의 관찰 가능한 요청 이력을 유지한다. 신규 발급은 기존 row를 덮지 않는
-      ``insert_new``를 써야 한다.
-    """
-    conn.execute(
-        f"""
-        INSERT INTO {TABLE_SHARE_LINKS}
-            (key, company, job, report_id, note, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(key) DO UPDATE SET
-            company   = excluded.company,
-            job       = excluded.job,
-            report_id = excluded.report_id,
-            note      = excluded.note
-        """,
-        (key, company, job, report_id, note, now_iso),
+    normalized = str(key or "").strip().lower()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def is_key_hash(value: str) -> bool:
+    return bool(_HASH_RE.fullmatch(str(value or "").strip().lower()))
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> tuple[str, ...]:
+    escaped = table.replace('"', '""')
+    return tuple(
+        str(row[1]) for row in conn.execute(f'PRAGMA table_xinfo("{escaped}")')
     )
+
+
+def _table_state(conn: sqlite3.Connection, table: str) -> str:
+    row = conn.execute(
+        "SELECT type FROM sqlite_master WHERE name = ?", (table,)
+    ).fetchone()
+    if row is None:
+        return "missing"
+    if str(row[0]) != "table":
+        return "unexpected"
+    columns = _table_columns(conn, table)
+    if columns and columns[0] == "key_hash" and "key" not in columns:
+        return "hashed"
+    if columns and columns[0] == "key" and "key_hash" not in columns:
+        return "raw"
+    return "unexpected"
+
+
+def _copy_legacy_rows(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        f"""
+        SELECT key, company, job, report_id, note, created_at,
+               opened_count, first_opened_at, last_opened_at
+          FROM {_LEGACY_TABLE}
+        """
+    ).fetchall()
+    conn.executemany(
+        f"""
+        INSERT OR IGNORE INTO {TABLE_SHARE_LINKS}
+            (key_hash, company, job, report_id, note, created_at,
+             opened_count, first_opened_at, last_opened_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (key_hash_of(row[0]), *tuple(row[1:]))
+            for row in rows
+        ],
+    )
+
+
+def ensure_schema(conn: sqlite3.Connection) -> None:
+    """원문 열쇠 표를 지문 표로 원자 전환하고 삭제 페이지도 덮어쓴다."""
+
+    savepoint = _MIGRATION_SAVEPOINT
+    conn.execute("PRAGMA secure_delete=ON")
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        current = _table_state(conn, TABLE_SHARE_LINKS)
+        legacy = _table_state(conn, _LEGACY_TABLE)
+        if current == "raw" and legacy == "missing":
+            conn.execute(
+                f"ALTER TABLE {TABLE_SHARE_LINKS} RENAME TO {_LEGACY_TABLE}"
+            )
+            current, legacy = "missing", "raw"
+        if current == "missing" and legacy == "missing":
+            conn.execute(CREATE_SQL)
+        elif current == "missing" and legacy == "raw":
+            conn.execute(CREATE_SQL)
+            _copy_legacy_rows(conn)
+            conn.execute(f"DROP TABLE {_LEGACY_TABLE}")
+        elif current == "hashed" and legacy == "raw":
+            _copy_legacy_rows(conn)
+            conn.execute(f"DROP TABLE {_LEGACY_TABLE}")
+        elif current != "hashed" or legacy != "missing":
+            raise RuntimeError(
+                "지원할 수 없는 share_links 마이그레이션 상태입니다 "
+                f"(current={current}, legacy={legacy})"
+            )
+        if (
+            _table_state(conn, TABLE_SHARE_LINKS) != "hashed"
+            or _table_state(conn, _LEGACY_TABLE) != "missing"
+        ):
+            raise RuntimeError("share_links 해시 스키마 전환을 완결하지 못했습니다")
+    except BaseException:
+        try:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        finally:
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+    else:
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
 
 
 def insert_new(
@@ -127,11 +206,11 @@ def insert_new(
     cursor = conn.execute(
         f"""
         INSERT INTO {TABLE_SHARE_LINKS}
-            (key, company, job, report_id, note, created_at)
+            (key_hash, company, job, report_id, note, created_at)
         VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(key) DO NOTHING
+        ON CONFLICT(key_hash) DO NOTHING
         """,
-        (key, company, job, report_id, note, now_iso),
+        (key_hash_of(key), company, job, report_id, note, now_iso),
     )
     return cursor.rowcount > 0
 
@@ -139,7 +218,21 @@ def insert_new(
 def load(conn: sqlite3.Connection, key: str) -> Optional[ShareLink]:
     """열쇠로 링크를 찾는다. 없으면 None."""
     row = conn.execute(
-        f"SELECT {_COLUMNS} FROM {TABLE_SHARE_LINKS} WHERE key = ?", (key,)
+        f"SELECT {_COLUMNS} FROM {TABLE_SHARE_LINKS} WHERE key_hash = ?",
+        (key_hash_of(key),),
+    ).fetchone()
+    return _row_to_link(row) if row else None
+
+
+def load_by_hash(conn: sqlite3.Connection, key_hash: str) -> Optional[ShareLink]:
+    """관리 화면의 비밀 아닌 식별자로 링크를 찾는다."""
+
+    normalized = str(key_hash or "").strip().lower()
+    if not is_key_hash(normalized):
+        return None
+    row = conn.execute(
+        f"SELECT {_COLUMNS} FROM {TABLE_SHARE_LINKS} WHERE key_hash = ?",
+        (normalized,),
     ).fetchone()
     return _row_to_link(row) if row else None
 
@@ -157,9 +250,9 @@ def mark_opened(conn: sqlite3.Connection, key: str, now_iso: str) -> bool:
                first_opened_at = CASE WHEN first_opened_at = ''
                                       THEN ? ELSE first_opened_at END,
                last_opened_at  = ?
-         WHERE key = ?
+         WHERE key_hash = ?
         """,
-        (now_iso, now_iso, key),
+        (now_iso, now_iso, key_hash_of(key)),
     )
     return cursor.rowcount > 0
 
@@ -167,8 +260,21 @@ def mark_opened(conn: sqlite3.Connection, key: str, now_iso: str) -> bool:
 def set_report(conn: sqlite3.Connection, key: str, report_id: str) -> bool:
     """기존 회사 링크에 미리 만든 보고서를 연결하거나 빈 값으로 해제한다."""
     cursor = conn.execute(
-        f"UPDATE {TABLE_SHARE_LINKS} SET report_id = ? WHERE key = ?",
-        (report_id, key),
+        f"UPDATE {TABLE_SHARE_LINKS} SET report_id = ? WHERE key_hash = ?",
+        (report_id, key_hash_of(key)),
+    )
+    return cursor.rowcount > 0
+
+
+def set_report_by_hash(
+    conn: sqlite3.Connection, key_hash: str, report_id: str
+) -> bool:
+    normalized = str(key_hash or "").strip().lower()
+    if not is_key_hash(normalized):
+        return False
+    cursor = conn.execute(
+        f"UPDATE {TABLE_SHARE_LINKS} SET report_id = ? WHERE key_hash = ?",
+        (report_id, normalized),
     )
     return cursor.rowcount > 0
 
@@ -196,7 +302,17 @@ def delete(conn: sqlite3.Connection, key: str) -> bool:
       지원이 끝났으면 닫을 수 있어야 한다. 없으면 두 달을 기다려야 한다.
     """
     cursor = conn.execute(
-        f"DELETE FROM {TABLE_SHARE_LINKS} WHERE key = ?", (key,)
+        f"DELETE FROM {TABLE_SHARE_LINKS} WHERE key_hash = ?", (key_hash_of(key),)
+    )
+    return cursor.rowcount > 0
+
+
+def delete_by_hash(conn: sqlite3.Connection, key_hash: str) -> bool:
+    normalized = str(key_hash or "").strip().lower()
+    if not is_key_hash(normalized):
+        return False
+    cursor = conn.execute(
+        f"DELETE FROM {TABLE_SHARE_LINKS} WHERE key_hash = ?", (normalized,)
     )
     return cursor.rowcount > 0
 

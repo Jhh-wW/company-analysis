@@ -38,14 +38,20 @@ class FakeMessages:
         response_model: str = "",
         fail_on_call: int = 0,
         omit_usage: bool = False,
+        cache_creation_tokens: int = 0,
+        cache_read_tokens: int = 0,
     ):
         self.response_model = response_model
         self.fail_on_call = fail_on_call
         self.omit_usage = omit_usage
+        self.cache_creation_tokens = cache_creation_tokens
+        self.cache_read_tokens = cache_read_tokens
         self.calls: list[str] = []
+        self.requests: list[dict] = []
 
     def create(self, **kwargs):
         self.calls.append(kwargs["model"])
+        self.requests.append(kwargs)
         if self.fail_on_call == len(self.calls):
             raise TimeoutError("시험용 provider timeout")
         return SimpleNamespace(
@@ -53,7 +59,12 @@ class FakeMessages:
             usage=(
                 None
                 if self.omit_usage
-                else SimpleNamespace(input_tokens=1_000_000, output_tokens=100_000)
+                else SimpleNamespace(
+                    input_tokens=1_000_000,
+                    output_tokens=100_000,
+                    cache_creation_input_tokens=self.cache_creation_tokens,
+                    cache_read_input_tokens=self.cache_read_tokens,
+                )
             ),
         )
 
@@ -139,6 +150,66 @@ def test_모듈함수가_client를_직접_불러도_식별과_알맹이_usage를
         2 * one_call_usd * AI_COST_KRW_PER_USD
     )
     assert real._request_model_label(metered) == _HAIKU
+
+
+def test_Sonnet_선택3회용_prompt_cache와_단계별비용을_기록한다():
+    messages = FakeMessages(cache_creation_tokens=1000, cache_read_tokens=500)
+    metered = real._MeteredEngine(FakeRawEngine(messages))
+    metered.MODEL = _SONNET
+    client = _client(metered)
+
+    with metered.stage_context("span_selection", prompt_cache=True):
+        client.messages.create(
+            model="ignored",
+            max_tokens=700,
+            messages=[{"role": "user", "content": "same selection prompt"}],
+        )
+
+    content = messages.requests[0]["messages"][0]["content"]
+    assert content == [
+        {
+            "type": "text",
+            "text": "same selection prompt",
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    event = real._request_cost_events(metered)[0]
+    assert event.stage == "span_selection"
+    assert event.model_id == _SONNET
+    assert event.cache_creation_tokens == 1000
+    assert event.cache_read_tokens == 500
+    assert event.cache_hit is True
+
+
+def test_usage가_있는_실패호출도_실제원가이벤트로_보존한다():
+    class FailedWithUsage(RuntimeError):
+        def __init__(self):
+            super().__init__("provider rejected after usage")
+            self.model = _SONNET
+            self.usage = SimpleNamespace(
+                input_tokens=2000,
+                output_tokens=10,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+            )
+
+    class FailedMessages:
+        def create(self, **_kwargs):
+            raise FailedWithUsage()
+
+    metered = real._MeteredEngine(
+        FakeRawEngine(FailedMessages())
+    )
+    metered.MODEL = _SONNET
+
+    with pytest.raises(FailedWithUsage):
+        _client(metered).messages.create(model=_SONNET, max_tokens=100)
+
+    event = real._request_cost_events(metered)[0]
+    assert event.failed_call is True
+    assert event.input_tokens == 2000
+    assert event.cost_krw > 0
+    assert real._request_spent_krw(metered) == event.cost_krw
 
 
 def test_두_요청의_모델과_usage는_겹쳐불러도_각자에게만_쌓인다():

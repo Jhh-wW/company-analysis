@@ -10,6 +10,13 @@
 
 {% block content %}
 
+{% if paid_research_closed %}
+<div class="warn-line" role="alert" style="margin-bottom:16px">
+  <span>⚠️</span><span><strong>지금 유료 조사가 닫혀 있습니다.</strong><br>
+    {{ paid_research_closed_reason }}</span>
+</div>
+{% endif %}
+
 {% if access_error %}
 <div class="warn-line" role="alert" style="margin-bottom:16px">
   <span>⚠️</span><span><strong>{{ access_error_title or "링크를 만들지 못했습니다." }}</strong><br>{{ access_error }}</span>
@@ -121,7 +128,7 @@
         <strong>{{ link.company }}</strong><br>
         {% if link.note %}<br><span class="muted">{{ link.note }}</span>{% endif %}
         <br><span class="muted">발급 {{ link_created_at_labels.get(link.key, "—") }}</span>
-        <br><a href="/admin/link/{{ link.key }}">주소·QR 보기</a>
+        <br><a href="/admin/link/{{ link.key }}">상태·보고서 연결 관리</a>
         {% if link.key in expired_link_keys %}<br><strong>자동 만료됨</strong>{% endif %}
       </td>
       <td>

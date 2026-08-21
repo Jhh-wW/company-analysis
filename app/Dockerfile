@@ -22,6 +22,7 @@ RUN python -m pip install --requirement /tmp/requirements.txt \
 # 실행에 필요한 파일만 복사한다. analysis_engine/.env와 로컬 DB는 이미지에 넣지 않는다.
 COPY app/src/ /srv/app/src/
 COPY app/tools/backup_sqlite.py /srv/app/tools/backup_sqlite.py
+COPY app/tools/trigger_backup.py /srv/app/tools/trigger_backup.py
 COPY analysis_engine/src/ /srv/analysis_engine/src/
 COPY analysis_engine/tools/run_pilot.py /srv/analysis_engine/tools/run_pilot.py
 COPY analysis_engine/tools/survey_audit_reports.py /srv/analysis_engine/tools/survey_audit_reports.py

@@ -31,6 +31,7 @@ from src.features.auth import logic as auth_logic
 from src.features.budget import logic as budget_logic
 from src.features.budget import spend_store
 from src.features.budget.constants import (
+    BUDGET_STORE_BLOCKED_MESSAGE,
     BUSY_MESSAGE,
     RATE_LIMITED_MESSAGE,
     RATE_MAX_RUNS,
@@ -438,11 +439,15 @@ def _guard_run(
         return _throttled(request, BUSY_MESSAGE, "busy")
     if costs_money and not paid_runtime._BUDGET_STORE_HEALTHY:
         # 원장이 고장 난 채 열어 두면 재시작 뒤 상한을 보장할 수 없다.
-        return _throttled(request, BUSY_MESSAGE, "budget-store")
+        return _throttled(
+            request, BUDGET_STORE_BLOCKED_MESSAGE, "budget-store"
+        )
     if costs_money and unresolved:
         # provider 응답 전에 서버가 죽었거나 API 예외로 과금 여부가 불명확하다.
         # 다른 통장은 살리고 이 통장만 사람이 원장을 확인할 때까지 닫는다.
-        return _throttled(request, BUSY_MESSAGE, "budget-unresolved")
+        return _throttled(
+            request, BUDGET_STORE_BLOCKED_MESSAGE, "budget-unresolved"
+        )
     if budget_exhausted:
         # ★ 예산이 다 돼도 **이미 만들어 둔 보고서는 계속 열린다** —
         #   그건 파이프라인을 안 거치고 저장소에서 바로 꺼내므로 0원이다.

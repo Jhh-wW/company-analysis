@@ -110,7 +110,14 @@ def test_legacy_session_migration_preserves_other_data_and_is_idempotent(
             "INSERT INTO reports VALUES "
             "('report-keep', 'corp-keep', 'job-keep', '{}', 'generated', 'created')"
         )
-        legacy.execute(share_store.CREATE_SQL)
+        legacy.execute(
+            "CREATE TABLE share_links ("
+            "key TEXT PRIMARY KEY, company TEXT NOT NULL, job TEXT NOT NULL, "
+            "report_id TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', "
+            "created_at TEXT NOT NULL, opened_count INTEGER NOT NULL DEFAULT 0, "
+            "first_opened_at TEXT NOT NULL DEFAULT '', "
+            "last_opened_at TEXT NOT NULL DEFAULT '')"
+        )
         legacy.execute(
             "INSERT INTO share_links "
             "(key, company, job, report_id, note, created_at) "
@@ -152,8 +159,12 @@ def test_legacy_session_migration_preserves_other_data_and_is_idempotent(
             "SELECT payload_json FROM reports WHERE report_id='report-keep'"
         ).fetchone()[0] == "{}"
         assert migrated.execute(
-            "SELECT note FROM share_links WHERE key='link-keep'"
+            "SELECT note FROM share_links WHERE key_hash=?",
+            (share_store.key_hash_of("link-keep"),),
         ).fetchone()[0] == "보존"
+        assert "key" not in {
+            row[1] for row in migrated.execute("PRAGMA table_info(share_links)")
+        }
         assert migrated.execute(
             "SELECT cost_krw FROM budget_spend_events WHERE run_id='run-keep'"
         ).fetchone()[0] == 123

@@ -12,7 +12,6 @@ import pytest
 
 from src.features.sharelink.constants import KEY_HEX_CHARS
 from src.features.sharelink.issue import (
-    base_url_of,
     canonical_public_base_url,
     link_url,
     new_key,
@@ -67,28 +66,6 @@ def test_주소를_만든다():
 def test_끝에_슬래시가_있어도_안_깨진다():
     """★ 안 떼면 `//k/...`가 되어 주소가 깨진다."""
     assert link_url("https://example.com/", "abcd1234") == "https://example.com/k/abcd1234"
-
-
-@pytest.mark.parametrize(
-    "요청주소, 기대",
-    [
-        ("http://localhost:8000/admin/access", "http://localhost:8000"),
-        ("https://내도구.com/admin/access?x=1", "https://내도구.com"),
-        ("https://내도구.com", "https://내도구.com"),
-    ],
-)
-def test_지금_접속한_주소에서_서비스_주소를_뽑는다(요청주소: str, 기대: str):
-    """★ 상수로 박으면 **배포한 뒤 링크가 localhost를 가리킨다.**
-
-    지금 접속한 주소에서 뽑으면 배포하든 로컬이든 저절로 맞는다.
-    """
-    assert base_url_of(요청주소) == 기대
-
-
-@pytest.mark.parametrize("이상한주소", ["", "그냥글자", "/admin/access"])
-def test_주소를_못_뽑으면_빈_값(이상한주소: str):
-    """못 뽑았는데 아무 값이나 만들면 «틀린 링크»를 발급하게 된다."""
-    assert base_url_of(이상한주소) == ""
 
 
 @pytest.mark.parametrize(

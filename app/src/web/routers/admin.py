@@ -206,6 +206,26 @@ def _assert_budget_store_healthy() -> None:
             raise _AccessDataUnavailable("budget_health")
 
 
+def _paid_research_status() -> tuple[bool, str]:
+    """관리자가 유료 조사 차단 여부와 사람이 풀어야 하는 이유를 확인하게 한다."""
+
+    with paid_runtime._PAID_PHASE_LOCK:
+        if not paid_runtime._BUDGET_STORE_HEALTHY:
+            return (
+                True,
+                "비용 기록을 복원할 수 없어 모든 유료 조사를 닫았습니다. "
+                "관리자가 원장과 손상 기록을 확인해야 다시 열립니다.",
+            )
+    with paid_runtime._SLOT_LOCK:
+        if paid_runtime._UNRESOLVED_BUCKETS:
+            return (
+                True,
+                "provider 과금 여부를 확정하지 못한 통장의 유료 조사를 닫았습니다. "
+                "관리자가 미확정 비용을 대사해야 해당 통장이 다시 열립니다.",
+            )
+    return False, ""
+
+
 def _assert_access_write_ready(conn) -> None:
     """예산 노출을 바꾸기 전 목록·원장 정본을 모두 읽을 수 있어야 한다."""
     _assert_budget_store_healthy()
@@ -358,6 +378,7 @@ def _access_context(request: Request, *, today: dt.date, **kwargs) -> dict:
         + len(members) * share_tracks.budget_of(share_tracks.Track.MEMBER)
         + share_tracks.budget_of(share_tracks.Track.ADMIN)
     )
+    paid_research_closed, paid_research_closed_reason = _paid_research_status()
     return request_helpers._ctx(
         request,
         links=links,
@@ -378,6 +399,8 @@ def _access_context(request: Request, *, today: dt.date, **kwargs) -> dict:
         estimate_overrun_krw=overrun.excess_krw,
         business_day_label=clock.business_day_label(today),
         access_data_available=True,
+        paid_research_closed=paid_research_closed,
+        paid_research_closed_reason=paid_research_closed_reason,
         **kwargs,
     )
 
@@ -408,6 +431,11 @@ def _access_page(
             estimate_overrun_krw=None,
             business_day_label=clock.business_day_label(today),
             access_data_available=False,
+            paid_research_closed=True,
+            paid_research_closed_reason=(
+                "비용 기록을 확인할 수 없어 유료 조사를 닫았습니다. "
+                "관리자가 원장을 확인해야 다시 열립니다."
+            ),
             access_error_title=context.get(
                 "access_error_title", "관리 정보를 확인할 수 없습니다."
             ),
@@ -545,7 +573,7 @@ async def admin_link_new(
                     conn,
                     request,
                     action=action,
-                    target=admin_audit.target_id("link", key),
+                    target=admin_audit.target_id("link", inserted.key_hash),
                     reason="created",
                 )
                 _assert_budget_store_healthy()
@@ -588,7 +616,7 @@ async def admin_link_new(
     _mirror_committed_change(
         request,
         action=action,
-        target=admin_audit.target_id("link", key),
+        target=admin_audit.target_id("link", share_store.key_hash_of(key)),
         reason="created",
     )
     return _admin_response(
@@ -599,14 +627,20 @@ async def admin_link_new(
 def _link_detail_page(
     request: Request, key: str, *, link_error: str = "", status_code: int = 200
 ):
-    if not share_logic.is_valid_key(key):
+    raw_key = key.strip().lower() if share_logic.is_valid_key(key) else ""
+    key_hash = key.strip().lower() if share_store.is_key_hash(key) else ""
+    if not raw_key and not key_hash:
         return _admin_response(
             request, RedirectResponse("/admin/access", status_code=303)
         )
     report_state = "none"
     try:
         with storage_db.connect() as conn:
-            link = share_store.load(conn, key.lower())
+            link = (
+                share_store.load(conn, raw_key)
+                if raw_key
+                else share_store.load_by_hash(conn, key_hash)
+            )
             if link is not None:
                 report_state = _linked_report_state(conn, link)
     except Exception:  # noqa: BLE001
@@ -623,8 +657,8 @@ def _link_detail_page(
         )
 
     base = _share_base_url(request)
-    path = share_issue.link_url("", link.key)
-    url = share_issue.link_url(base, link.key) if base else path
+    path = share_issue.link_url("", raw_key) if raw_key else ""
+    url = share_issue.link_url(base, raw_key) if base and raw_key else path
     response = request_helpers.templates.TemplateResponse(
         request=request,
         name="admin_link.html",
@@ -635,14 +669,15 @@ def _link_detail_page(
             url=url,
             path=path,
             base_url=base,
+            secret_available=bool(raw_key),
             link_expired=share_logic.is_share_link_expired(link.created_at),
             link_created_at_label=_kst_timestamp_label(link.created_at),
             link_first_opened_at_label=_kst_timestamp_label(
                 link.first_opened_at
             ),
             link_last_opened_at_label=_kst_timestamp_label(link.last_opened_at),
-            is_deployed=share_issue.looks_deployed(url),
-            qr_svg=share_issue.qr_svg(url) if base else "",
+            is_deployed=share_issue.looks_deployed(url) if url else False,
+            qr_svg=share_issue.qr_svg(url) if base and raw_key else "",
             report_state=report_state,
         ),
         status_code=status_code,
@@ -675,7 +710,9 @@ async def admin_link_report(
     )
     if blocked is not None:
         return blocked
-    if not share_logic.is_valid_key(key_clean):
+    key_is_raw = share_logic.is_valid_key(key_clean)
+    key_is_hash = share_store.is_key_hash(key_clean)
+    if not key_is_raw and not key_is_hash:
         _audit_failed_change(
             request, action=action, target=target, reason="invalid_target"
         )
@@ -690,7 +727,11 @@ async def admin_link_report(
     try:
         with storage_db.connect() as conn:
             _assert_access_write_ready(conn)
-            link = share_store.load(conn, key_clean)
+            link = (
+                share_store.load(conn, key_clean)
+                if key_is_raw
+                else share_store.load_by_hash(conn, key_clean)
+            )
             if link is None:
                 raise _AdminStateUnchanged("link_missing")
             else:
@@ -698,8 +739,18 @@ async def admin_link_report(
                     conn, report_reference, expected_company=link.company
                 )
                 if not validation_error:
-                    changed = share_store.set_report(conn, key_clean, report_id)
-                    updated = share_store.load(conn, key_clean)
+                    changed = (
+                        share_store.set_report(conn, key_clean, report_id)
+                        if key_is_raw
+                        else share_store.set_report_by_hash(
+                            conn, key_clean, report_id
+                        )
+                    )
+                    updated = (
+                        share_store.load(conn, key_clean)
+                        if key_is_raw
+                        else share_store.load_by_hash(conn, key_clean)
+                    )
                     if (
                         not changed
                         or updated is None
@@ -771,6 +822,8 @@ async def admin_link_delete(
 ):
     """링크를 닫는다."""
     key_clean = key.strip().lower()
+    key_is_raw = share_logic.is_valid_key(key_clean)
+    key_is_hash = share_store.is_key_hash(key_clean)
     action = "admin.link.revoke"
     target = admin_audit.target_id("link", key_clean)
     blocked = request_helpers.require_admin_action(
@@ -781,8 +834,18 @@ async def admin_link_delete(
     try:
         with storage_db.connect() as conn:
             _assert_access_write_ready(conn)
-            deleted = share_store.delete(conn, key_clean)
-            delete_confirmed = share_store.load(conn, key_clean) is None
+            if not key_is_raw and not key_is_hash:
+                raise _AdminStateUnchanged("invalid_target")
+            deleted = (
+                share_store.delete(conn, key_clean)
+                if key_is_raw
+                else share_store.delete_by_hash(conn, key_clean)
+            )
+            delete_confirmed = (
+                share_store.load(conn, key_clean) is None
+                if key_is_raw
+                else share_store.load_by_hash(conn, key_clean) is None
+            )
             if not deleted or not delete_confirmed:
                 raise _AdminStateUnchanged("link_delete_unconfirmed")
             _queue_committed_change(

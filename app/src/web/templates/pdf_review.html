@@ -1,102 +1,11 @@
 {% extends "base.html" %}
-{% block title %}PDF 출고 검수 · {{ report.company }}{% endblock %}
-{% block bodyclass %}review-page{% endblock %}
-{% block wrapclass %}wide review-wrap{% endblock %}
-
+{% block title %}수동 PDF 승인 종료{% endblock %}
 {% block content %}
-<main class="pdf-review" aria-labelledby="pdf-review-title">
-  <header>
-    <p class="review-kicker">내부 운영자 검수</p>
-    <h1 id="pdf-review-title">{{ report.company }} PDF 출고 검수</h1>
-    <p>
-      아래 이미지는 최종 PDF의 모든 페이지입니다. PNG 생성 성공은 시각 승인이
-      아닙니다. 사실·편집·시각 검수는 서로 다른 세 명이 한 역할씩 맡아야 하며,
-      마지막 역할이 승인될 때만 이 PDF가 출고됩니다.
-    </p>
-    <dl class="review-hash">
-      <dt>PDF SHA-256</dt>
-      <dd><code>{{ pdf_sha256 }}</code></dd>
-      <dt>검수 페이지</dt>
-      <dd>{{ pages|length }}쪽</dd>
-    </dl>
-  </header>
-
-  <section class="review-status" aria-labelledby="review-status-title">
-    <h2 id="review-status-title">역할별 승인 상태</h2>
-    <ul>
-      {% for role, label in (("fact", "사실"), ("editorial", "편집"), ("visual", "시각")) %}
-      <li>
-        <strong>{{ label }}</strong>
-        {% if role_decisions.get(role) %}
-        <span>승인 · {{ role_decisions[role].reviewer }} · {{ role_decisions[role].approved_at }}</span>
-        {% else %}
-        <span>대기</span>
-        {% endif %}
-      </li>
-      {% endfor %}
-    </ul>
-  </section>
-
-  <section class="review-pages" aria-label="PDF 전체 페이지 이미지">
-    {% for page in pages %}
-    <figure>
-      <img src="{{ page.data_url }}" alt="PDF {{ page.number }}쪽 전체 렌더 이미지">
-      <figcaption>
-        {{ page.number }}쪽 · PNG SHA-256 <code>{{ page.png_sha256 }}</code>
-      </figcaption>
-    </figure>
-    {% endfor %}
-  </section>
-
-  {% if already_released %}
-  <p class="review-complete" role="status">이 PDF hash는 이미 3종 검수와 출고 기록을 마쳤습니다.</p>
-  <p><a class="btn" href="/result/{{ job_id }}">승인된 보고서 보기</a></p>
-  {% else %}
-  <p class="review-separation-note">
-    한 계정은 이 PDF에서 한 역할만 승인할 수 있습니다. 이미 승인한 검수자가 다른
-    역할을 다시 승인하면 서버가 차단합니다.
+<section class="panel" aria-labelledby="manual-review-retired-title">
+  <h1 id="manual-review-retired-title">수동 PDF 승인이 종료되었습니다</h1>
+  <p>
+    보고서는 필수 자동검사를 모두 통과한 경우에만 같은 해시로 자동출고됩니다.
+    기존 승인 기록은 감사자료로만 보존되며 출고 권한이 없습니다.
   </p>
-
-  {% if not role_decisions.get("fact") %}
-  <form method="post" action="/review/pdf/{{ job_id }}" class="review-approval">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <input type="hidden" name="pdf_sha256" value="{{ pdf_sha256 }}">
-    <input type="hidden" name="review_role" value="fact">
-    <h2>사실 검수</h2>
-    <p>아래 전체 fact_id의 원문·출처·수치를 각각 대조하세요.</p>
-    <div class="review-fact-list">
-      {% for fact_id in expected_fact_ids %}
-      <label><input type="checkbox" name="reviewed_fact_ids" value="{{ fact_id }}" required> <code>{{ fact_id }}</code></label>
-      {% endfor %}
-    </div>
-    <label>검수 실패 건수 <input type="number" name="fact_failed_count" value="0" min="0" step="1" required></label>
-    <label><input type="checkbox" name="confirm_role" value="yes" required> 전체 fact_id를 대조했고 실패 건수가 0임을 확인했습니다.</label>
-    <button type="submit" class="btn">사실 승인 기록</button>
-  </form>
-  {% endif %}
-
-  {% if not role_decisions.get("editorial") %}
-  <form method="post" action="/review/pdf/{{ job_id }}" class="review-approval">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <input type="hidden" name="pdf_sha256" value="{{ pdf_sha256 }}">
-    <input type="hidden" name="review_role" value="editorial">
-    <h2>편집 검수</h2>
-    <label><input type="checkbox" name="confirm_role" value="yes" required> 중복·금지 문구·목차·문장 품질을 확인했습니다.</label>
-    <button type="submit" class="btn">편집 승인 기록</button>
-  </form>
-  {% endif %}
-
-  {% if not role_decisions.get("visual") %}
-  <form method="post" action="/review/pdf/{{ job_id }}" class="review-approval">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <input type="hidden" name="pdf_sha256" value="{{ pdf_sha256 }}">
-    <input type="hidden" name="review_role" value="visual">
-    <h2>시각 검수</h2>
-    <label><input type="checkbox" name="visual_all_pages" value="yes" required> 위의 모든 페이지를 직접 보고 잘림·겹침·깨짐·빈 페이지·가독성을 확인했습니다.</label>
-    <label><input type="checkbox" name="confirm_role" value="yes" required> 전 페이지에 시각 결함이 없음을 확인했습니다.</label>
-    <button type="submit" class="btn">시각 승인 기록</button>
-  </form>
-  {% endif %}
-  {% endif %}
-</main>
+</section>
 {% endblock %}

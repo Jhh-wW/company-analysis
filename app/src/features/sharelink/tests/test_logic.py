@@ -214,23 +214,6 @@ def test_회사분석_범위는_회사만_정규화하고_옛직무는_무시한
     )
 
 
-def test_옛_회사직무_결합정책은_명시함수에서만_쓸수있다():
-    from src.features.sharelink.logic import legacy_company_job_scope_matches
-
-    assert legacy_company_job_scope_matches(
-        link_company="ＡＣＭＥ  Korea",
-        link_job="Sales Manager",
-        company="acme korea",
-        job="sales   manager",
-    )
-    assert not legacy_company_job_scope_matches(
-        link_company="ACME Korea",
-        link_job="Sales Manager",
-        company="acme korea",
-        job="Developer",
-    )
-
-
 @pytest.mark.parametrize(
     "reference",
     [

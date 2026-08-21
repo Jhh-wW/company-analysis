@@ -28,10 +28,20 @@ from src.features.export_pdf.release import (
     validate_approval,
     validate_release_record,
 )
+from src.features.export_pdf.automatic_release import (
+    AUTOMATIC_CHECKER_VERSION,
+    AutomaticGateStopped,
+    AutomaticCheckResult,
+    AutomaticReleaseRecord,
+    AutomaticallyReleasedPdf,
+    automatic_release_record_sha256,
+    validate_automatic_release_record,
+)
 
 TABLE_NAME: Final[str] = "pdf_release_records"
 DECISION_TABLE_NAME: Final[str] = "pdf_release_role_decisions"
 PARTICIPANT_TABLE_NAME: Final[str] = "pdf_release_participants"
+AUTOMATIC_TABLE_NAME: Final[str] = "pdf_automatic_release_records"
 APPROVAL_ROLES: Final[tuple[str, ...]] = ("fact", "editorial", "visual")
 PARTICIPANT_ROLES: Final[tuple[str, ...]] = (
     "author",
@@ -77,6 +87,18 @@ CREATE TABLE IF NOT EXISTS {PARTICIPANT_TABLE_NAME} (
     PRIMARY KEY (report_id, pdf_sha256, role)
 )
 """
+CREATE_AUTOMATIC_SQL: Final[str] = f"""
+CREATE TABLE IF NOT EXISTS {AUTOMATIC_TABLE_NAME} (
+    report_id       TEXT NOT NULL,
+    report_sha256   TEXT NOT NULL,
+    pdf_sha256      TEXT NOT NULL,
+    checker_version TEXT NOT NULL,
+    release_json    TEXT NOT NULL,
+    release_sha256  TEXT NOT NULL,
+    released_at     TEXT NOT NULL,
+    PRIMARY KEY (report_id, report_sha256, pdf_sha256, checker_version)
+)
+"""
 
 
 class PdfReleaseStoreError(RuntimeError):
@@ -111,6 +133,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_SQL)
     conn.execute(CREATE_DECISION_SQL)
     conn.execute(CREATE_PARTICIPANT_SQL)
+    # Compatibility migration: legacy human approval tables and their rows are
+    # deliberately retained as audit evidence.  Runtime authorization uses
+    # only this new automatic-release table.
+    conn.execute(CREATE_AUTOMATIC_SQL)
 
 
 def _time_value(value: str) -> dt.datetime | None:
@@ -962,3 +988,185 @@ def load_release_record(
     if approval is None or not _record_matches_approval(record, approval):
         raise PdfReleaseStoreError("PDF 출고 정본과 역할별 승인이 일치하지 않습니다")
     return record
+
+
+def _automatic_release_json(record: AutomaticReleaseRecord) -> str:
+    return json.dumps(
+        asdict(record),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _parse_automatic_release_record(raw: str) -> AutomaticReleaseRecord:
+    try:
+        payload = json.loads(raw)
+        if not isinstance(payload, dict) or set(payload) != set(
+            AutomaticReleaseRecord.__dataclass_fields__
+        ):
+            raise TypeError
+        for name in ("page_png_sha256s", "expected_fact_ids"):
+            values = payload[name]
+            if not isinstance(values, list) or any(
+                not isinstance(value, str) for value in values
+            ):
+                raise TypeError
+            payload[name] = tuple(values)
+        checks = payload["checks"]
+        if not isinstance(checks, list):
+            raise TypeError
+        payload["checks"] = tuple(
+            AutomaticCheckResult(**check)
+            for check in checks
+            if isinstance(check, dict)
+        )
+        if len(payload["checks"]) != len(checks):
+            raise TypeError
+        record = AutomaticReleaseRecord(**payload)
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise PdfReleaseStoreError(
+            "자동출고 기록을 안전하게 읽을 수 없습니다"
+        ) from exc
+    if validate_automatic_release_record(record):
+        raise PdfReleaseStoreError(
+            "자동출고 기록이 현재 무결성 계약을 통과하지 못했습니다"
+        )
+    return record
+
+
+def _reject_changed_automatic_subject(
+    conn: sqlite3.Connection,
+    *,
+    report_id: str,
+    report_sha256: str,
+    pdf_sha256: str,
+) -> None:
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT report_sha256, pdf_sha256
+          FROM {AUTOMATIC_TABLE_NAME}
+         WHERE report_id=?
+        """,
+        (report_id,),
+    ).fetchall()
+    if any(
+        str(row[0]) != report_sha256 or str(row[1]) != pdf_sha256
+        for row in rows
+    ):
+        raise AutomaticGateStopped(
+            ("자동검사 뒤 같은 작업의 보고서 또는 PDF 지문이 변경되었습니다",)
+        )
+
+
+def load_automatic_release_record(
+    conn: sqlite3.Connection,
+    *,
+    report_id: str,
+    report_sha256: str,
+    pdf_sha256: str,
+) -> AutomaticReleaseRecord | None:
+    """Load only the current checker version and exact immutable subject."""
+
+    clean_report_id = report_id.strip()
+    if (
+        not clean_report_id
+        or not is_valid_sha256(report_sha256)
+        or not is_valid_sha256(pdf_sha256)
+    ):
+        raise PdfReleaseStoreError("올바른 보고서·PDF 지문만 조회할 수 있습니다")
+    _ensure_schema(conn)
+    _reject_changed_automatic_subject(
+        conn,
+        report_id=clean_report_id,
+        report_sha256=report_sha256,
+        pdf_sha256=pdf_sha256,
+    )
+    row = conn.execute(
+        f"""
+        SELECT release_json, release_sha256, released_at
+          FROM {AUTOMATIC_TABLE_NAME}
+         WHERE report_id=? AND report_sha256=? AND pdf_sha256=?
+           AND checker_version=?
+        """,
+        (
+            clean_report_id,
+            report_sha256,
+            pdf_sha256,
+            AUTOMATIC_CHECKER_VERSION,
+        ),
+    ).fetchone()
+    if row is None:
+        return None
+    if any(type(value) is not str for value in row):
+        raise PdfReleaseStoreError("자동출고 DB 형식이 손상됐습니다")
+    raw_json, db_digest, db_released_at = row
+    record = _parse_automatic_release_record(raw_json)
+    if (
+        record.report_sha256 != report_sha256
+        or record.pdf_sha256 != pdf_sha256
+        or record.checker_version != AUTOMATIC_CHECKER_VERSION
+        or record.released_at != db_released_at
+        or record.record_sha256 != db_digest
+        or automatic_release_record_sha256(record) != db_digest
+        or _automatic_release_json(record) != raw_json
+    ):
+        raise PdfReleaseStoreError("자동출고 기록과 DB 지문이 일치하지 않습니다")
+    return record
+
+
+def save_automatic_release(
+    conn: sqlite3.Connection,
+    *,
+    report_id: str,
+    released_pdf: AutomaticallyReleasedPdf,
+) -> AutomaticReleaseRecord:
+    """Persist an automatic release without modifying legacy approval rows."""
+
+    clean_report_id = report_id.strip()
+    if not clean_report_id or not isinstance(released_pdf, AutomaticallyReleasedPdf):
+        raise PdfReleaseStoreError("올바른 자동출고 결과만 저장할 수 있습니다")
+    record = released_pdf.record
+    if (
+        hashlib.sha256(released_pdf.content).hexdigest() != record.pdf_sha256
+        or validate_automatic_release_record(record)
+    ):
+        raise PdfReleaseStoreError("자동출고 결과의 무결성을 확인할 수 없습니다")
+    _ensure_schema(conn)
+    _reject_changed_automatic_subject(
+        conn,
+        report_id=clean_report_id,
+        report_sha256=record.report_sha256,
+        pdf_sha256=record.pdf_sha256,
+    )
+    raw_json = _automatic_release_json(record)
+    conn.execute(
+        f"""
+        INSERT INTO {AUTOMATIC_TABLE_NAME} (
+            report_id, report_sha256, pdf_sha256, checker_version,
+            release_json, release_sha256, released_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(report_id, report_sha256, pdf_sha256, checker_version)
+        DO NOTHING
+        """,
+        (
+            clean_report_id,
+            record.report_sha256,
+            record.pdf_sha256,
+            record.checker_version,
+            raw_json,
+            record.record_sha256,
+            record.released_at,
+        ),
+    )
+    stored = load_automatic_release_record(
+        conn,
+        report_id=clean_report_id,
+        report_sha256=record.report_sha256,
+        pdf_sha256=record.pdf_sha256,
+    )
+    if stored != record:
+        raise PdfReleaseStoreError(
+            "같은 자동출고 대상에 다른 기록이 이미 존재합니다"
+        )
+    return stored

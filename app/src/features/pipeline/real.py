@@ -19,6 +19,7 @@ import re
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
@@ -50,7 +51,7 @@ from src.core.constants import (
     VOTE_MIN,
     VOTE_ROUNDS,
 )
-from src.core.pricing import usage_cost_krw
+from src.core.pricing import detailed_usage_cost_krw
 from src.core.citations import citation_number
 from src.features.grading.constants import ACCOUNTING_POLICY_REASON
 from src.features.budget import provider_budget
@@ -85,6 +86,7 @@ from src.features.writer import constants as writer
 from src.features.writer import logic as writer_logic
 from src.features.writer import verify as writer_verify
 from src.features.grading.logic import is_accounting_policy, is_table_dump
+from src.features.cost_tracking.store import AiCostEvent
 from src.features.pipeline.constants import DART_SUCCESS_STATUS
 from src.features.pipeline.port import (
     CompanyCard,
@@ -176,6 +178,8 @@ class _MeteredEngine:
         # 요청마다 자기 값을 들고 client 경계에서 덮어써야 Sonnet/Haiku가 섞이지 않는다.
         object.__setattr__(self, "_model", str(getattr(engine, "MODEL", "")))
         object.__setattr__(self, "_billing_uncertain", False)
+        object.__setattr__(self, "_stage", "unspecified")
+        object.__setattr__(self, "_prompt_cache", False)
 
     def __getattr__(self, name: str) -> Any:
         if name == "MODEL":
@@ -183,7 +187,14 @@ class _MeteredEngine:
         return getattr(self._engine, name)
 
     def __setattr__(self, name: str, value: Any) -> None:
-        if name in {"_engine", "_usages", "_model", "_billing_uncertain"}:
+        if name in {
+            "_engine",
+            "_usages",
+            "_model",
+            "_billing_uncertain",
+            "_stage",
+            "_prompt_cache",
+        }:
             object.__setattr__(self, name, value)
         elif name == "MODEL":
             object.__setattr__(self, "_model", str(value))
@@ -201,6 +212,80 @@ class _MeteredEngine:
     @property
     def billing_uncertain(self) -> bool:
         return bool(self._billing_uncertain)
+
+    @property
+    def current_stage(self) -> str:
+        return str(self._stage)
+
+    @property
+    def prompt_cache_enabled(self) -> bool:
+        return bool(self._prompt_cache)
+
+    def set_stage(self, stage: str) -> None:
+        clean = str(stage).strip()
+        object.__setattr__(self, "_stage", clean or "unspecified")
+
+    @contextmanager
+    def stage_context(self, stage: str, *, prompt_cache: bool = False):
+        previous_stage = self._stage
+        previous_cache = self._prompt_cache
+        self.set_stage(stage)
+        object.__setattr__(self, "_prompt_cache", bool(prompt_cache))
+        try:
+            yield
+        finally:
+            object.__setattr__(self, "_stage", previous_stage)
+            object.__setattr__(self, "_prompt_cache", previous_cache)
+
+
+def _prompt_cached_messages(messages: object) -> object:
+    """Mark exact user text as an ephemeral cache block without changing it."""
+
+    if not isinstance(messages, list) or not messages:
+        raise provider_budget.ProviderBudgetUnavailable(
+            "prompt caching 대상 messages 형식이 올바르지 않습니다"
+        )
+    copied: list[object] = []
+    marked = False
+    for message in messages:
+        if not isinstance(message, dict):
+            raise provider_budget.ProviderBudgetUnavailable(
+                "prompt caching 대상 message 형식이 올바르지 않습니다"
+            )
+        cloned = dict(message)
+        content = cloned.get("content")
+        if cloned.get("role") == "user" and isinstance(content, str):
+            cloned["content"] = [
+                {
+                    "type": "text",
+                    "text": content,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+            marked = True
+        copied.append(cloned)
+    if not marked:
+        raise provider_budget.ProviderBudgetUnavailable(
+            "prompt caching할 user text block이 없습니다"
+        )
+    return copied
+
+
+def _set_meter_stage(metered: _MeteredEngine, stage: str) -> None:
+    """Keep local metering names out of the legacy engine API contract AST."""
+
+    metered.set_stage(stage)
+
+
+@contextmanager
+def _meter_stage(
+    metered: _MeteredEngine,
+    stage: str,
+    *,
+    prompt_cache: bool = False,
+):
+    with metered.stage_context(stage, prompt_cache=prompt_cache):
+        yield
 
 
 class _MeteredMessages:
@@ -222,22 +307,88 @@ class _MeteredMessages:
         # provider에 나가는 마지막 경계에서 이 요청의 로컬 모델로 바로잡는다.
         if self._metered.MODEL:
             call_kwargs["model"] = self._metered.MODEL
+        if self._metered.prompt_cache_enabled:
+            call_kwargs["messages"] = _prompt_cached_messages(
+                call_kwargs.get("messages")
+            )
         model = str(call_kwargs.get("model", ""))
         max_tokens = call_kwargs.get("max_tokens")
         if not isinstance(max_tokens, int):
             raise provider_budget.ProviderBudgetUnavailable(
                 "provider 출력 token 상한이 명시되지 않았습니다"
             )
+        estimated_input = provider_budget.estimate_request_tokens(
+            {"args": args, "kwargs": call_kwargs}
+        )
+        if self._metered.prompt_cache_enabled:
+            # A five-minute cache write is 1.25x normal input pricing.
+            estimated_input = (estimated_input * 5 + 3) // 4
         call_reservation = provider_budget.current().reserve_call(
             model=model,
-            input_tokens_upper=provider_budget.estimate_request_tokens(
-                {"args": args, "kwargs": call_kwargs}
-            ),
+            input_tokens_upper=estimated_input,
             max_tokens=max_tokens,
         )
         try:
             response = self._messages.create(*args, **call_kwargs)
-        except Exception:
+        except Exception as error:
+            # Some provider failures still carry authoritative usage.  Preserve
+            # that real cost as a failed-call event instead of flattening it to
+            # zero.  If usage is absent, the existing billing-uncertain path
+            # remains fail-closed.
+            failure_usage = getattr(error, "usage", None)
+            if failure_usage is None:
+                failure_usage = getattr(
+                    getattr(error, "response", None), "usage", None
+                )
+            try:
+                failure_in = int(getattr(failure_usage, "input_tokens"))
+                failure_out = int(getattr(failure_usage, "output_tokens"))
+                failure_create = int(
+                    getattr(failure_usage, "cache_creation_input_tokens", 0) or 0
+                )
+                failure_read = int(
+                    getattr(failure_usage, "cache_read_input_tokens", 0) or 0
+                )
+                if min(
+                    failure_in, failure_out, failure_create, failure_read
+                ) < 0:
+                    raise ValueError
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                failure_usage = None
+            if failure_usage is not None:
+                failed_model = str(
+                    getattr(error, "model", "") or call_kwargs.get("model", "")
+                )
+                failed_cost = detailed_usage_cost_krw(
+                    failed_model,
+                    input_tokens=failure_in,
+                    output_tokens=failure_out,
+                    cache_creation_tokens=failure_create,
+                    cache_read_tokens=failure_read,
+                    batch=False,
+                )
+                self._usages.append(
+                    {
+                        "in": failure_in,
+                        "out": failure_out,
+                        "cache_creation": failure_create,
+                        "cache_read": failure_read,
+                        "batch": False,
+                        "stage": self._metered.current_stage,
+                        "cost_krw": failed_cost,
+                        "failed": True,
+                        "cache_hit": failure_read > 0,
+                        USAGE_MODEL_KEY: failed_model,
+                    }
+                )
+                try:
+                    provider_budget.current().settle_call(
+                        call_reservation,
+                        actual_krw=failed_cost,
+                    )
+                except provider_budget.ProviderCostInvariantError:
+                    self._metered._billing_uncertain = True
+                raise
             # timeout/API 예외는 서버가 요청을 처리했는지 알 수 없다. 응답이 없다고
             # 0원으로 마감하면 재시작 뒤 예산이 다시 열리므로 표식을 남길 신호를 보낸다.
             self._metered._billing_uncertain = True
@@ -265,19 +416,45 @@ class _MeteredMessages:
         used_model = str(
             getattr(response, "model", "") or call_kwargs.get("model", "")
         )
+        try:
+            cache_creation = int(
+                getattr(usage, "cache_creation_input_tokens", 0) or 0
+            )
+            cache_read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            self._metered._billing_uncertain = True
+            provider_budget.current().mark_unknown(call_reservation)
+            return response
+        if cache_creation < 0 or cache_read < 0:
+            self._metered._billing_uncertain = True
+            provider_budget.current().mark_unknown(call_reservation)
+            return response
+        actual_cost = detailed_usage_cost_krw(
+            used_model,
+            input_tokens=clean_in,
+            output_tokens=clean_out,
+            cache_creation_tokens=cache_creation,
+            cache_read_tokens=cache_read,
+            batch=False,
+        )
         self._usages.append(
             {
                 "in": clean_in,
                 "out": clean_out,
+                "cache_creation": cache_creation,
+                "cache_read": cache_read,
+                "batch": False,
+                "stage": self._metered.current_stage,
+                "cost_krw": actual_cost,
+                "failed": False,
+                "cache_hit": cache_read > 0,
                 USAGE_MODEL_KEY: used_model,
             }
         )
         try:
             provider_budget.current().settle_call(
                 call_reservation,
-                actual_krw=provider_budget.usage_cost_krw(
-                    used_model, clean_in, clean_out
-                ),
+                actual_krw=actual_cost,
             )
         except provider_budget.ProviderCostInvariantError:
             # usage는 먼저 보존했다. 이미 생긴 비용을 숨기지 않고 상위에서
@@ -655,7 +832,17 @@ def _step_usage_spent_krw(
         ):
             continue
         used_model = str(usage.get(USAGE_MODEL_KEY) or model)
-        spent_krw += usage_cost_krw(used_model, tokens_in, tokens_out)
+        if isinstance(usage.get("cost_krw"), (int, float)):
+            spent_krw += float(usage["cost_krw"])
+            continue
+        spent_krw += detailed_usage_cost_krw(
+            used_model,
+            input_tokens=tokens_in,
+            output_tokens=tokens_out,
+            cache_creation_tokens=usage.get("cache_creation", 0),
+            cache_read_tokens=usage.get("cache_read", 0),
+            batch=usage.get("batch", False) is True,
+        )
     return round(spent_krw, 2)
 
 
@@ -676,6 +863,31 @@ def _request_spent_krw(metered: _MeteredEngine) -> float:
         steps,
         model=str(getattr(metered, "MODEL", "")),
     )
+
+
+def _request_cost_events(metered: _MeteredEngine) -> tuple[AiCostEvent, ...]:
+    """Return only non-sensitive stage/model/token/cost usage metadata."""
+
+    events: list[AiCostEvent] = []
+    for usage in metered.usages:
+        model = str(usage.get(USAGE_MODEL_KEY, "")).strip()
+        if not model:
+            continue
+        events.append(
+            AiCostEvent(
+                stage=str(usage.get("stage") or "unspecified"),
+                model_id=model,
+                input_tokens=int(usage.get("in", 0)),
+                output_tokens=int(usage.get("out", 0)),
+                cache_creation_tokens=int(usage.get("cache_creation", 0)),
+                cache_read_tokens=int(usage.get("cache_read", 0)),
+                batch_applied=usage.get("batch") is True,
+                cost_krw=float(usage.get("cost_krw", 0.0)),
+                failed_call=usage.get("failed") is True,
+                cache_hit=usage.get("cache_hit") is True,
+            )
+        )
+    return tuple(events)
 
 
 def _request_model_label(metered: _MeteredEngine) -> str:
@@ -956,6 +1168,7 @@ class RealPipeline:
 
         try:
             region = user_input.region.strip() or "모름"
+            _set_meter_stage(engine, "company_identification")
             corp_code = engine.identify(
                 client, user_input.company, region, index, counter, steps
             )
@@ -1003,6 +1216,7 @@ class RealPipeline:
             model=_request_model_label(engine),
             failed=failed or _request_billing_uncertain(engine),
             billing_uncertain=_request_billing_uncertain(engine),
+            ai_cost_events=_request_cost_events(engine),
         )
 
     def run(
@@ -1028,6 +1242,7 @@ class RealPipeline:
             cost_krw=_request_spent_krw(engine),
             model=_request_model_label(engine),
             billing_uncertain=_request_billing_uncertain(engine),
+            ai_cost_events=_request_cost_events(engine),
         )
 
     def _run_metered(
@@ -1044,6 +1259,7 @@ class RealPipeline:
           다시 하면 AI 5회가 통째로 또 나간다.
         """
         def tell(key: str) -> None:
+            _set_meter_stage(engine, key)
             if on_step is not None:
                 on_step(key)
 
@@ -1206,13 +1422,14 @@ class RealPipeline:
             if str(value or "").strip()
         )
         for _round in range(VOTE_ROUNDS):
-            picked, rejected = select_canonical_spans(
-                client,
-                frags,
-                steps,
-                engine=engine, model=GENERATION_MODEL,
-                company=company_identity,
-            )
+            with _meter_stage(engine, "span_selection", prompt_cache=True):
+                picked, rejected = select_canonical_spans(
+                    client,
+                    frags,
+                    steps,
+                    engine=engine, model=GENERATION_MODEL,
+                    company=company_identity,
+                )
             selection_rounds.append(picked)
             sentences_made += len(picked) + len(rejected)
         kept = majority_picks(selection_rounds, minimum=VOTE_MIN)

@@ -1,4 +1,4 @@
-"""동일 canonical 보고서가 화면·DOCX·PDF·Notion에서 같은 내용을 내는지 검증한다.
+"""동일 canonical 보고서가 화면·PDF·Notion에서 같은 내용을 내는지 검증한다.
 
 출력기는 사실을 새로 만들지 않는다. canonical 출고 게이트가 확정한 회사 사실,
 요약, 의미 기반 장 순서와 출처만 각 매체의 표현 방식으로 바꾼다.
@@ -13,15 +13,12 @@ from dataclasses import replace
 from typing import Any
 
 import pytest
-from docx import Document
-from docx.opc.constants import RELATIONSHIP_TYPE
 from fastapi.testclient import TestClient
 from pypdf import PdfReader
 
 from src.core.citations import citation_number
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
-from src.features.export_docx.logic import build_docx
 from src.features.export_notion.logic import build_blocks
 from src.features.export_pdf.logic import PDFGenerationError, build_pdf
 from src.features.pipeline.canonical_demo import build_demo_report
@@ -204,15 +201,6 @@ def canonical_report() -> Report:
     return replace(report, sections=sections)
 
 
-def _docx_text(report: Report) -> str:
-    document = Document(io.BytesIO(build_docx(report)))
-    parts = [paragraph.text for paragraph in document.paragraphs]
-    for table in document.tables:
-        for row in table.rows:
-            parts.extend(cell.text for cell in row.cells)
-    return "\n".join(parts)
-
-
 def _pdf_text(report: Report) -> str:
     reader = PdfReader(io.BytesIO(build_pdf(report)))
     return "\n".join(page.extract_text() or "" for page in reader.pages)
@@ -267,13 +255,12 @@ def _all_outputs(
     html, screen = _screen_text(report, monkeypatch)
     return html, {
         "화면": screen,
-        "DOCX": _docx_text(report),
         "PDF": _pdf_text(report),
         "Notion": _notion_text(report),
     }
 
 
-def test_네_출력은_표지_요약_의미장_출처를_같이_낸다(
+def test_세_출력은_표지_요약_의미장_출처를_같이_낸다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     report = canonical_report()
@@ -328,8 +315,6 @@ def test_레거시_직무_완성도_AI수집_메타가_있는_부분본은_출�
 ) -> None:
     report = _legacy_incomplete_report()
 
-    with pytest.raises(PublishBlockedError):
-        build_docx(report)
     with pytest.raises(PDFGenerationError):
         build_pdf(report)
     with pytest.raises(PublishBlockedError):
@@ -364,7 +349,7 @@ def test_화면_출처번호는_목록으로_이동하는_링크다(
         assert html.count(f'id="src{number}"') == 1
 
 
-def test_네_출력의_출처명은_검증할_원문_URL을_보존한다(
+def test_세_출력의_출처명은_검증할_원문_URL을_보존한다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     report = canonical_report()
@@ -375,14 +360,6 @@ def test_네_출력의_출처명은_검증할_원문_URL을_보존한다(
         f'href="{url}"' in html and 'rel="noopener noreferrer"' in html
         for url in expected
     )
-
-    document = Document(io.BytesIO(build_docx(report)))
-    docx_urls = {
-        relationship.target_ref
-        for relationship in document.part.rels.values()
-        if relationship.reltype == RELATIONSHIP_TYPE.HYPERLINK
-    }
-    assert docx_urls == expected
 
     reader = PdfReader(io.BytesIO(build_pdf(report)))
     pdf_urls: set[str] = set()

@@ -22,12 +22,13 @@
   </div>
   {% endif %}
 
-  {% if qr_svg %}
+  {% if secret_available and qr_svg %}
   <div style="text-align:center;margin:20px 0;background:#fff;padding:16px;border-radius:8px">
     {{ qr_svg|safe }}
   </div>
   {% endif %}
 
+  {% if secret_available %}
   <p class="muted" style="margin-bottom:4px">
     {% if base_url %}포트폴리오에 넣을 주소{% else %}이 서비스 안에서 쓰는 상대 경로{% endif %}
   </p>
@@ -55,6 +56,14 @@
       지금 포트폴리오에 넣으면 인사팀에게는 <strong>안 열리는 링크</strong>가 됩니다.
       인터넷에 배포한 뒤 <strong>그 주소에서 다시 발급</strong>하세요.
     </span>
+  </div>
+  {% endif %}
+  {% else %}
+  <div class="warn-line" style="margin-top:16px">
+    <span aria-hidden="true">ℹ️</span>
+    <span><strong>비밀 주소는 발급 직후에만 표시합니다.</strong><br>
+      데이터베이스에는 SHA-256 지문만 남기므로 이 화면에서 주소나 QR을 다시 만들 수
+      없습니다. 주소를 잃었다면 기존 링크를 닫고 새 링크를 발급하세요.</span>
   </div>
   {% endif %}
 </div>

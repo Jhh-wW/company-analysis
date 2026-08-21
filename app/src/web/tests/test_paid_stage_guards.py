@@ -170,7 +170,7 @@ def _install_analysis_csrf(client: TestClient) -> None:
 
 def _발급(client: TestClient, key: str = _LINK_A) -> None:
     with storage_db.connect() as conn:
-        share_store.save(
+        share_store.insert_new(
             conn,
             key=key,
             company="가나다전자",
@@ -1270,7 +1270,7 @@ def test_confirm의_가드와_원장은_한번_읽은_같은통장을_쓴다(mon
     client = TestClient(main.app)
     _로그인(client, "track-test@example.com")
     with storage_db.connect() as conn:
-        share_store.save(
+        share_store.insert_new(
             conn,
             key=_LINK_A,
             company=_FORM["company"],

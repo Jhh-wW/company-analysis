@@ -14,6 +14,10 @@ import tempfile
 
 import pytest
 
+# provenance 모듈이 test collection 중 import되기 전에 재시작 가능한 시험 키를 둔다.
+# 운영 기본값을 완화하지 않으며, 누락 실패 시험은 모듈 상태를 명시적으로 바꾼다.
+os.environ.setdefault("PROVENANCE_SEAL_SECRET", "test-provenance-seal-secret-32-bytes")
+
 from src.features.observability import constants as obs_constants
 from src.features.storage import constants as storage_constants
 

@@ -21,6 +21,7 @@ from src.core import clock, paths
 from src.core.constants import MAX_RETRY_INPUT, PROGRESS_STEPS
 from src.features.budget import spend_store
 from src.features.budget.constants import (
+    BUDGET_STORE_BLOCKED_MESSAGE,
     BUSY_MESSAGE,
     SPEND_PHASE_CANDIDATE,
     SPEND_PHASE_IDENTIFY,
@@ -28,6 +29,7 @@ from src.features.budget.constants import (
 from src.features.business_candidate import logic as candidate_logic
 from src.features.business_candidate import providers as candidate_providers
 from src.features.business_candidate.constants import CANDIDATE_ATTEMPT_TTL_SEC
+from src.features.cost_tracking import store as cost_store
 from src.features.observability import constants as obs
 from src.features.observability import lifecycle
 from src.features.pipeline.demo import DemoPipeline, available_companies
@@ -48,6 +50,7 @@ from src.features.sharelink.constants import (
     PUBLIC_BUCKET,
 )
 from src.features.storage import db as storage_db
+from src.features.storage import job_interruptions
 from src.features.storage import reports as report_store
 from src.web import (
     evaluation_mode,
@@ -79,6 +82,15 @@ _PROGRESS_UNAVAILABLE_MESSAGE = (
     "오래된 작업의 진행 정보가 정리된 경우입니다. 결과가 저장되지 않아 "
     "이 조사는 이어서 실행할 수 없습니다."
 )
+_PROGRESS_INTERRUPTED_MESSAGE = (
+    "서버 종료 제한시간 안에 조사를 마치지 못해 작업이 중단되었습니다. "
+    "입력 오류가 아니며, 서버가 다시 열린 뒤 처음 화면에서 다시 시도해 주세요."
+)
+
+
+def _was_interrupted(job_id: str) -> bool:
+    with storage_db.connect() as conn:
+        return job_interruptions.exists(conn, job_id)
 _SHARE_NOTICE_BY_CODE = {
     "invalid": "회사 링크가 올바르지 않아 일반 첫 화면을 열었습니다.",
     "missing": "이 회사 링크는 닫혔거나 존재하지 않아 일반 첫 화면을 열었습니다.",
@@ -421,6 +433,72 @@ def _register_candidate_search_grant(
     return token
 
 
+async def _run_paid_company_lookup(
+    *,
+    run_id: str,
+    share_key: str,
+    cap_krw: float,
+    user_input: UserInput,
+    lookup_input: UserInput,
+    selected_candidate_ref: str,
+) -> CompanyLookupResult | None:
+    """회사 식별 provider와 비용 표식의 수명을 한 context로 묶는다."""
+
+    with paid_runtime.paid_phase(
+        run_id=run_id,
+        phase=SPEND_PHASE_IDENTIFY,
+        share_key=share_key,
+        cap_krw=cap_krw,
+    ) as phase:
+        if phase.ticket is None:
+            return None
+        provider = (
+            request_helpers._find_company_by_ref_metered
+            if selected_candidate_ref
+            else request_helpers._find_company_metered
+        )
+        provider_args = (
+            (user_input, selected_candidate_ref)
+            if selected_candidate_ref
+            else (lookup_input,)
+        )
+        phase.mark_provider_started()
+        worker = asyncio.create_task(
+            asyncio.to_thread(
+                paid_runtime._call_paid_provider,
+                phase.ticket,
+                provider,
+                *provider_args,
+            )
+        )
+        try:
+            result = await asyncio.shield(worker)
+            if not isinstance(result, CompanyLookupResult):
+                raise TypeError("회사 식별 결과 계약이 올바르지 않습니다")
+        except asyncio.CancelledError:
+            try:
+                result = await job_runtime._await_worker_after_cancel(worker)
+                if not isinstance(result, CompanyLookupResult):
+                    raise TypeError("회사 식별 결과 계약이 올바르지 않습니다")
+            except BaseException:
+                # context가 provider_started를 보고 미확정으로 정확히 한 번 닫는다.
+                raise
+            phase.settle(
+                amount_krw=result.cost_krw,
+                billing_uncertain=result.billing_uncertain,
+            )
+            raise
+        except Exception:  # noqa: BLE001 — context가 미확정 비용으로 닫는다
+            logger.exception("회사 식별 연결이 실패했습니다")
+            return CompanyLookupResult(card=None, failed=True, billing_uncertain=True)
+
+        phase.settle(
+            amount_krw=result.cost_krw,
+            billing_uncertain=result.billing_uncertain,
+        )
+        return result
+
+
 @router.post("/confirm", response_class=HTMLResponse)
 async def confirm_page(
     request: Request,
@@ -495,7 +573,6 @@ async def confirm_page(
     lookup_started = time.perf_counter()
     candidate_upfront_cost = 0.0
     candidate_upfront_elapsed = 0.0
-    identify_phase: Optional[paid_runtime.PaidPhase] = None
     slot_bucket_id = ""
     candidate_resolution: candidate_logic.CandidateResolution | None = None
     selected_candidate_ref = ""
@@ -815,12 +892,6 @@ async def confirm_page(
         try:
             if not run_id:
                 run_id = public_ids.reserve(job_runtime._JOBS)
-            identify_phase = paid_runtime._begin_paid_phase(
-                run_id=run_id,
-                phase=SPEND_PHASE_IDENTIFY,
-                share_key=share_key,
-                cap_krw=resolved_track[2],
-            )
         except public_ids.PublicIdUnavailable:
             paid_runtime._release_run_slot(slot_bucket_id)
             return job_runtime._storage_unavailable_response(request)
@@ -828,20 +899,25 @@ async def confirm_page(
             public_ids.release(run_id)
             paid_runtime._release_run_slot(slot_bucket_id)
             raise
-        if identify_phase is None:
-            public_ids.release(run_id)
-            paid_runtime._release_run_slot(slot_bucket_id)
-            return request_helpers._throttled(request, BUSY_MESSAGE, "budget-store")
 
-    lookup_task: Optional[
-        asyncio.Task[CompanyLookupResult]
-    ] = None
     try:
         try:
-            lookup_task = asyncio.create_task(
-                asyncio.to_thread(
-                    paid_runtime._call_paid_provider,
-                    identify_phase,
+            if is_paid:
+                lookup = await _run_paid_company_lookup(
+                    run_id=run_id,
+                    share_key=share_key,
+                    cap_krw=resolved_track[2],
+                    user_input=user_input,
+                    lookup_input=lookup_input,
+                    selected_candidate_ref=selected_candidate_ref,
+                )
+                if lookup is None:
+                    public_ids.release(run_id)
+                    return request_helpers._throttled(
+                        request, BUDGET_STORE_BLOCKED_MESSAGE, "budget-store"
+                    )
+            else:
+                lookup = await asyncio.to_thread(
                     (
                         request_helpers._find_company_by_ref_metered
                         if selected_candidate_ref
@@ -853,44 +929,9 @@ async def confirm_page(
                         else (lookup_input,)
                     ),
                 )
-                if identify_phase is not None
-                else asyncio.to_thread(
-                    (
-                        request_helpers._find_company_by_ref_metered
-                        if selected_candidate_ref
-                        else request_helpers._find_company_metered
-                    ),
-                    *(
-                        (user_input, selected_candidate_ref)
-                        if selected_candidate_ref
-                        else (lookup_input,)
-                    ),
-                )
-            )
-            lookup = await asyncio.shield(lookup_task)
             if not isinstance(lookup, CompanyLookupResult):
                 raise TypeError("회사 식별 결과 계약이 올바르지 않습니다")
         except asyncio.CancelledError:
-            try:
-                if lookup_task is None:
-                    raise RuntimeError("회사 식별 worker가 만들어지지 않았습니다")
-                lookup = await job_runtime._await_worker_after_cancel(lookup_task)
-                if not isinstance(lookup, CompanyLookupResult):
-                    raise TypeError("회사 식별 결과 계약이 올바르지 않습니다")
-            except BaseException:  # noqa: BLE001 — 결과를 끝내 모르면 통장만 닫는다
-                if identify_phase is not None:
-                    paid_runtime._settle_paid_phase(
-                        identify_phase,
-                        amount_krw=0.0,
-                        billing_uncertain=True,
-                    )
-            else:
-                if identify_phase is not None:
-                    paid_runtime._settle_paid_phase(
-                        identify_phase,
-                        amount_krw=lookup.cost_krw,
-                        billing_uncertain=lookup.billing_uncertain,
-                    )
             public_ids.release(run_id)
             raise
         except Exception:  # noqa: BLE001 — 계량 계약 오류도 회사 없음으로 바꾸지 않는다
@@ -905,12 +946,6 @@ async def confirm_page(
             time.perf_counter() - lookup_started + candidate_upfront_elapsed
         )
         total_lookup_cost = lookup.cost_krw + candidate_upfront_cost
-        if identify_phase is not None:
-            paid_runtime._settle_paid_phase(
-                identify_phase,
-                amount_krw=lookup.cost_krw,
-                billing_uncertain=lookup.billing_uncertain,
-            )
     finally:
         if is_paid:
             paid_runtime._release_run_slot(slot_bucket_id)
@@ -919,6 +954,14 @@ async def confirm_page(
     if lookup.failed or lookup.billing_uncertain:
         public_ids.release(run_id)
         if is_paid:
+            with storage_db.connect() as conn:
+                cost_store.record_run_costs(
+                    conn,
+                    run_id=run_id,
+                    outcome=Outcome.FAILED,
+                    internal_ai_cost_krw=total_lookup_cost,
+                    events=lookup.ai_cost_events,
+                )
             record_end(
                 run_id=run_id,
                 job=user_input.job,
@@ -931,6 +974,14 @@ async def confirm_page(
     if card is None:
         public_ids.release(run_id)
         if is_paid:
+            with storage_db.connect() as conn:
+                cost_store.record_run_costs(
+                    conn,
+                    run_id=run_id,
+                    outcome=Outcome.NOT_FOUND,
+                    internal_ai_cost_krw=total_lookup_cost,
+                    events=lookup.ai_cost_events,
+                )
             record_run(
                 user_input,
                 RunResult(
@@ -999,6 +1050,14 @@ async def confirm_page(
             model=paid_runtime._model_label(lookup_models),
         ):
             public_ids.release(run_id)
+            with storage_db.connect() as conn:
+                cost_store.record_run_costs(
+                    conn,
+                    run_id=run_id,
+                    outcome=Outcome.FAILED,
+                    internal_ai_cost_krw=total_lookup_cost,
+                    events=lookup.ai_cost_events,
+                )
             return request_helpers._throttled(
                 request, BUSY_MESSAGE, "observation-store"
             )
@@ -1015,6 +1074,7 @@ async def confirm_page(
         elapsed_sec=lookup_elapsed if is_paid else 0.0,
         created_at=time.monotonic(),
         is_paid=is_paid,
+        cost_events=lookup.ai_cost_events if is_paid else (),
     )
 
     return request_helpers.templates.TemplateResponse(
@@ -1169,6 +1229,7 @@ async def start_run(
         upfront_cost = attempt.lookup_cost_krw
         upfront_models = attempt.models
         upfront_elapsed = attempt.elapsed_sec
+        upfront_cost_events = attempt.cost_events
     else:
         slot_bucket_id = (
             paid_runtime._reserve_run_slot(resolved_track[0], share_key) or ""
@@ -1193,6 +1254,7 @@ async def start_run(
         upfront_cost = consumed_attempt.lookup_cost_krw
         upfront_models = consumed_attempt.models
         upfront_elapsed = consumed_attempt.elapsed_sec
+        upfront_cost_events = consumed_attempt.cost_events
 
     return await job_runtime._start_with_reserved_slot(
         request=request,
@@ -1207,6 +1269,7 @@ async def start_run(
         upfront_models=upfront_models,
         upfront_elapsed=upfront_elapsed,
         slot_bucket_id=slot_bucket_id,
+        upfront_cost_events=upfront_cost_events,
     )
 
 
@@ -1222,6 +1285,22 @@ async def progress_page(request: Request, job_id: str):
             return job_runtime._storage_unavailable_response(request)
         if saved is not None:
             return RedirectResponse(f"/result/{job_id}", status_code=303)
+        try:
+            interrupted = _was_interrupted(job_id)
+        except Exception:  # noqa: BLE001
+            return job_runtime._storage_unavailable_response(request)
+        if interrupted:
+            return request_helpers.templates.TemplateResponse(
+                request=request,
+                name="progress_unavailable.html",
+                context=request_helpers._ctx(
+                    request,
+                    interruption_message=_PROGRESS_INTERRUPTED_MESSAGE,
+                    retry_url="/",
+                    retry_label="처음부터 다시 조사하기",
+                ),
+                status_code=409,
+            )
         return request_helpers.templates.TemplateResponse(
             request=request,
             name="progress_unavailable.html",
@@ -1272,6 +1351,29 @@ async def progress_api(job_id: str):
                     "next_url": f"/result/{job_id}",
                     "recovered": True,
                 }
+            )
+        try:
+            interrupted = _was_interrupted(job_id)
+        except Exception:  # noqa: BLE001
+            return job_runtime._retryable_response(
+                JSONResponse(
+                    {
+                        "error": "중단 상태를 잠시 확인할 수 없습니다.",
+                        "code": "progress_store_unavailable",
+                        "retry_url": "",
+                        "retryable": True,
+                    },
+                    status_code=503,
+                )
+            )
+        if interrupted:
+            return JSONResponse(
+                {
+                    "error": _PROGRESS_INTERRUPTED_MESSAGE,
+                    "code": "job_interrupted",
+                    "retry_url": "/",
+                },
+                status_code=409,
             )
         return JSONResponse(
             {

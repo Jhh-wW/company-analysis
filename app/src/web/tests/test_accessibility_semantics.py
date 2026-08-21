@@ -155,7 +155,7 @@ def _render_admin_and_stopped_pages() -> tuple[str, dict[str, str]]:
         assert empty_access.status_code == 200
 
         with storage_db.connect() as conn:
-            share_store.save(
+            share_store.insert_new(
                 conn,
                 key=link_key,
                 company="카카오",
