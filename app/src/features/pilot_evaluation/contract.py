@@ -1,8 +1,10 @@
-"""Evaluation-only contract for the first 25 real-company reports.
+"""Evaluation-only contract for the authorized P01-P10 real-company reports.
 
-Human judgments collected here calibrate the automatic checks.  They never
-authorize an individual production report and are not read by runtime release
-code.  This module performs no provider calls.
+The immutable comparison manifest still contains 25 candidates, but the user
+authorized paid execution only for the first ten listed companies. Human
+judgments collected here calibrate the automatic checks. They never authorize
+an individual production report and are not read by runtime release code. This
+module performs no provider calls.
 """
 
 from __future__ import annotations
@@ -22,12 +24,12 @@ class PilotCategory(str, Enum):
 
 REQUIRED_CATEGORY_COUNTS: Final[dict[PilotCategory, int]] = {
     PilotCategory.LISTED: 10,
-    PilotCategory.UNLISTED_DISCLOSURE: 8,
-    PilotCategory.SPARSE_OR_AMBIGUOUS: 7,
+    PilotCategory.UNLISTED_DISCLOSURE: 0,
+    PilotCategory.SPARSE_OR_AMBIGUOUS: 0,
 }
-TOTAL_CASES: Final[int] = 25
-MIN_CORRECT_IDENTITIES: Final[int] = 23
-MIN_COMPLETE_REPORTS: Final[int] = 20
+TOTAL_CASES: Final[int] = 10
+MIN_CORRECT_IDENTITIES: Final[int] = 10
+MIN_COMPLETE_REPORTS: Final[int] = 8
 MIN_AUTO_USER_AGREEMENT: Final[float] = 0.90
 MAX_P90_ELAPSED_SEC: Final[float] = 30 * 60
 MAX_AVG_AI_COST_KRW: Final[float] = 300.0
@@ -90,20 +92,20 @@ def _validate_result(result: PilotResult) -> None:
 
 
 def evaluate_pilot(results: Iterable[PilotResult]) -> PilotSummary:
-    """Evaluate the thresholds fixed before viewing the 25 outcomes."""
+    """Evaluate the thresholds fixed before viewing the ten paid outcomes."""
 
     rows = tuple(results)
     for row in rows:
         _validate_result(row)
     reasons: list[str] = []
     if len(rows) != TOTAL_CASES:
-        reasons.append("25/25 실행 및 사용자 품질기록이 필요합니다")
+        reasons.append("P01~P10 10/10 실행 및 사용자 품질기록이 필요합니다")
     category_counts = {
         category: sum(row.case.category is category for row in rows)
         for category in PilotCategory
     }
     if category_counts != REQUIRED_CATEGORY_COUNTS:
-        reasons.append("표본 구성이 상장 10·비상장 공시 8·희소/동명이인 7과 다릅니다")
+        reasons.append("실제 유료 표본은 P01~P10 상장사 10건이어야 합니다")
     if len({row.case.case_id for row in rows}) != len(rows):
         reasons.append("파일럿 case ID가 중복됐습니다")
 
@@ -118,7 +120,7 @@ def evaluate_pilot(results: Iterable[PilotResult]) -> PilotSummary:
     p90_cost = _nearest_rank_p90(row.internal_ai_cost_krw for row in rows)
 
     if correct < MIN_CORRECT_IDENTITIES:
-        reasons.append("정확한 법인 식별이 23/25 미만입니다")
+        reasons.append("정확한 법인 식별이 10/10 미만입니다")
     if any(row.wrong_legal_entity_released for row in rows):
         reasons.append("잘못된 법인이 출고된 사례가 있습니다")
     if complete < MIN_COMPLETE_REPORTS:

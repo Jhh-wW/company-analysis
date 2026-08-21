@@ -48,14 +48,74 @@ def test_demo_claim_types_match_upstream_canonical_vocabulary() -> None:
     report = build_demo_report()
     by_id = {fact.fact_id: fact.claim_type for fact in report.fact_records}
 
-    assert by_id["identity-01"] == "official_identity"
-    assert by_id["operations-01"] == "partner_role"
-    assert by_id["operations-02"] == "operating_core"
-    assert by_id["ops-branch-01"] == "operating_core"
+    assert by_id["identity-01"] == "identity_summary"
+    assert "operations-01" not in by_id
+    assert "operations-02" not in by_id
+    assert by_id["operations-core-01"] == "operating_core"
     assert by_id["ops-branch-02"] == "operating_core"
-    assert by_id["ops-branch-03"] == "operating_core"
+    assert "ops-branch-03" not in by_id
     assert by_id["culture-01"] == "official_value"
     assert by_id["culture-02"] == "official_value"
+    assert by_id["competition-01"] == "competitive_comparison"
+    assert "competition-02" not in by_id
+
+    comparison = next(
+        fact for fact in report.fact_records if fact.fact_id == "competition-01"
+    )
+    assert comparison.comparison_judgment == "operating_characteristic"
+
+
+def test_demo_sales_regions_stay_an_observation_without_a_market_stage() -> None:
+    report = build_demo_report()
+    market = next(
+        fact for fact in report.fact_records if fact.fact_id == "biz-customer-01"
+    )
+
+    assert market.market_priority == ""
+    assert market.market_stage == ""
+    assert market.market_observation == "국내·중국·인도 매출"
+    assert market.market_observation in market.state_evidence
+
+
+def test_demo_sections_five_to_seven_keep_distinct_structured_roles() -> None:
+    report = build_demo_report()
+    by_id = {fact.fact_id: fact for fact in report.fact_records}
+
+    issue = by_id["current-01"]
+    responses = [by_id["current-02"], by_id["current-03"]]
+    assert issue.next_check_metric == "본계약"
+    assert all(response.response_to_fact_id == issue.fact_id for response in responses)
+    assert all(response.response_action in response.state_evidence for response in responses)
+    assert all(response.initial_signal == "" for response in responses)
+
+    plans = [
+        fact
+        for fact in report.fact_records
+        if fact.section_owner == "future_strategy"
+    ]
+    assert {fact.plan_status for fact in plans} == {"announced"}
+    assert all(fact.plan_timing in fact.state_evidence for fact in plans)
+    assert all(fact.plan_execution_signal in fact.state_evidence for fact in plans)
+
+    branches = [by_id["operations-core-01"], by_id["ops-branch-02"]]
+    assert all(
+        (fact.value_chain_stage, fact.relationship_type)
+        == ("production", "subsidiary")
+        for fact in branches
+    )
+    operations = next(
+        section for section in report.sections if section.cell == "operations_partners"
+    )
+    assert operations.tables[0].headers == [
+        "주체",
+        "가치사슬 단계",
+        "관계 유형",
+        "확인된 역할",
+        "현재 상태",
+    ]
+    assert operations.prose_lines == [
+        (by_id["operations-core-01"].claim, "[1]")
+    ]
 
 
 def test_demo_official_web_domains_are_bound_to_independent_filing_evidence() -> None:

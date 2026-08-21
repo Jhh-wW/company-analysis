@@ -43,6 +43,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen.canvas import Canvas
 from reportlab.platypus import (
     Flowable,
+    KeepTogether,
     PageBreak,
     Paragraph,
     SimpleDocTemplate,
@@ -57,7 +58,18 @@ from src.core.constants import section_display_heading
 from src.features.export_pdf import constants
 from src.features.pipeline.port import Report, ReportSection, ReportTable
 from src.features.provenance.sources import Source, SourceKind
-from src.features.report_standard import SECTION_BY_ID, build_published_report
+from src.features.report_standard import build_published_report
+from src.features.report_standard.constants import SECTION_BY_ID, TIME_SECTION_IDS
+from src.features.report_standard.section_content import (
+    SectionContentBlock,
+    section_content_blocks,
+    source_verification_label,
+    summary_topic,
+)
+from src.features.report_standard.visualization import (
+    TableVisualization,
+    table_visualization,
+)
 
 _FONT_LOCK = threading.Lock()
 _ISO_DATE_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}(?:$|T|\s)")
@@ -103,6 +115,280 @@ class _OutlineAnchor(Flowable):
         canvas = cast(Canvas, self.canv)
         canvas.bookmarkPage(self.key)
         canvas.addOutlineEntry(self.title, self.key, level=self.level, closed=False)
+
+
+class _HorizontalRule(Flowable):
+    """장 제목 아래에 두는 문서 폭의 얇은 검은 구분선."""
+
+    def __init__(self, width: float, *, thickness: float = 1.0) -> None:
+        super().__init__()
+        self.width = width
+        self.height = thickness
+        self.thickness = thickness
+        self.keepWithNext = True
+
+    def wrap(self, avail_width: float, avail_height: float) -> tuple[float, float]:
+        return (min(self.width, avail_width), self.height)
+
+    def draw(self) -> None:
+        canvas = cast(Canvas, self.canv)
+        canvas.setStrokeColor(colors.HexColor(constants.COLOR_INK))
+        canvas.setLineWidth(self.thickness)
+        canvas.line(0, self.height / 2, self.width, self.height / 2)
+
+
+class _CompositionGraphic(Flowable):
+    """최대 다섯 범주의 100% 누적 막대와 직접 라벨."""
+
+    def __init__(self, visual: TableVisualization, width: float) -> None:
+        super().__init__()
+        self.visual = visual
+        self.width = width
+        self.height = 31 * mm
+
+    def wrap(self, avail_width: float, avail_height: float) -> tuple[float, float]:
+        self.width = min(self.width, avail_width)
+        return (self.width, self.height)
+
+    def draw(self) -> None:
+        canvas = cast(Canvas, self.canv)
+        palette = (
+            constants.COLOR_CHART_DARK,
+            constants.COLOR_CHART_MID,
+            constants.COLOR_CHART_LIGHT,
+            constants.COLOR_CHART_PALE,
+            "#FFFFFF",
+        )
+        bar_y = self.height - (9 * mm)
+        bar_height = 7 * mm
+        x = 0.0
+        for index, item in enumerate(self.visual.items):
+            segment_width = self.width * max(0.0, item.ratio) / 100.0
+            canvas.setFillColor(colors.HexColor(palette[index]))
+            canvas.setStrokeColor(colors.HexColor(constants.COLOR_MUTED))
+            canvas.setLineWidth(0.5)
+            canvas.rect(
+                x,
+                bar_y,
+                segment_width,
+                bar_height,
+                fill=1,
+                stroke=1 if index == 4 else 0,
+            )
+            x += segment_width
+
+        columns = 2
+        column_width = self.width / columns
+        for index, item in enumerate(self.visual.items):
+            column = index % columns
+            row = index // columns
+            y = bar_y - (5.2 * mm) - (row * 5.2 * mm)
+            color = colors.HexColor(palette[index])
+            canvas.setFillColor(color)
+            canvas.setStrokeColor(colors.HexColor(constants.COLOR_MUTED))
+            canvas.rect(
+                column * column_width,
+                y + 1.2,
+                7,
+                7,
+                fill=1,
+                stroke=1 if index == 4 else 0,
+            )
+            canvas.setFillColor(colors.HexColor(constants.COLOR_MUTED))
+            canvas.setFont(constants.FONT_REGULAR, 7.5)
+            label = _single_line_pdf_text(f"{item.label}  {item.display}")
+            canvas.drawString((column * column_width) + 11, y, label)
+
+
+class _TrendGraphic(Flowable):
+    """계열별 독립 0축을 쓰는 3~6시점 막대 그래프."""
+
+    def __init__(self, visual: TableVisualization, width: float) -> None:
+        super().__init__()
+        self.visual = visual
+        self.width = width
+        self.height = 58 * mm
+
+    def wrap(self, avail_width: float, avail_height: float) -> tuple[float, float]:
+        self.width = min(self.width, avail_width)
+        return (self.width, self.height)
+
+    def draw(self) -> None:
+        canvas = cast(Canvas, self.canv)
+        gap = 8 * mm
+        count = max(1, len(self.visual.series))
+        panel_width = (self.width - (gap * (count - 1))) / count
+        panel_height = self.height - (2 * mm)
+        for series_index, series in enumerate(self.visual.series):
+            x0 = series_index * (panel_width + gap)
+            canvas.setFillColor(colors.HexColor(constants.COLOR_HEADER))
+            canvas.setStrokeColor(colors.HexColor(constants.COLOR_LINE))
+            canvas.setLineWidth(0.55)
+            canvas.roundRect(x0, 0, panel_width, panel_height, 4, fill=1, stroke=1)
+            canvas.setFillColor(colors.HexColor(constants.COLOR_INK))
+            canvas.setFont(constants.FONT_SEMIBOLD, 7.7)
+            title = series.label
+            if self.visual.unit:
+                title = f"{title} ({self.visual.unit})"
+            canvas.drawString(x0 + 8, panel_height - 12, _single_line_pdf_text(title))
+
+            labels_y = 6
+            positive_axis = 17
+            negative_axis = panel_height - 24
+            chart_height = max(24.0, panel_height - 48)
+            group_width = (panel_width - 22) / max(1, len(series.points))
+            bar_width = min(18.0, group_width * 0.48)
+            axis_y = negative_axis if series.risk else positive_axis
+            canvas.setStrokeColor(colors.HexColor(constants.COLOR_LINE))
+            canvas.setLineWidth(0.45)
+            canvas.line(x0 + 8, axis_y, x0 + panel_width - 8, axis_y)
+            for point_index, point in enumerate(series.points):
+                center_x = x0 + 11 + (group_width * point_index) + (group_width / 2)
+                bar_height = chart_height * max(0.0, point.ratio) / 100.0
+                bar_y = axis_y - bar_height if series.risk else axis_y
+                canvas.setFillColor(
+                    colors.HexColor(
+                        constants.COLOR_RISK if series.risk else constants.COLOR_CHART_DARK
+                    )
+                )
+                canvas.rect(
+                    center_x - (bar_width / 2),
+                    bar_y,
+                    bar_width,
+                    bar_height,
+                    fill=1,
+                    stroke=0,
+                )
+                canvas.setFont(constants.FONT_SEMIBOLD, 7.5)
+                value_y = bar_y - 9 if series.risk else bar_y + bar_height + 3
+                canvas.drawCentredString(center_x, value_y, _single_line_pdf_text(point.display))
+                canvas.setFillColor(colors.HexColor(constants.COLOR_MUTED))
+                canvas.setFont(constants.FONT_REGULAR, 7.5)
+                canvas.drawCentredString(center_x, labels_y, _single_line_pdf_text(point.label))
+
+
+class _FlowGraphic(Flowable):
+    """표의 각 행을 3~4단계 왼쪽→오른쪽 흐름으로 표시한다."""
+
+    def __init__(self, visual: TableVisualization, headers: Sequence[str], width: float) -> None:
+        super().__init__()
+        self.visual = visual
+        self.headers = tuple(headers)
+        self.width = width
+        self.row_height = 18 * mm
+        self.row_gap = 4 * mm
+        self.height = (len(visual.flows) * self.row_height) + (
+            max(0, len(visual.flows) - 1) * self.row_gap
+        )
+
+    def wrap(self, avail_width: float, avail_height: float) -> tuple[float, float]:
+        self.width = min(self.width, avail_width)
+        return (self.width, self.height)
+
+    def draw(self) -> None:
+        canvas = cast(Canvas, self.canv)
+        for row_index, flow in enumerate(self.visual.flows):
+            gap = 8 * mm
+            box_width = (self.width - (gap * (len(flow) - 1))) / len(flow)
+            y = self.height - ((row_index + 1) * self.row_height) - (row_index * self.row_gap)
+            for column, value in enumerate(flow):
+                x = column * (box_width + gap)
+                canvas.setFillColor(
+                    colors.HexColor(constants.COLOR_HEADER if column % 2 else "#FFFFFF")
+                )
+                canvas.setStrokeColor(colors.HexColor(constants.COLOR_LINE))
+                canvas.setLineWidth(0.55)
+                canvas.roundRect(x, y, box_width, self.row_height, 4, fill=1, stroke=1)
+                header_style = ParagraphStyle(
+                    f"FlowHead-{row_index}-{column}",
+                    fontName=constants.FONT_SEMIBOLD,
+                    fontSize=7.5,
+                    leading=9.5,
+                    alignment=TA_CENTER,
+                    textColor=colors.HexColor(constants.COLOR_MUTED),
+                    wordWrap="CJK",
+                )
+                value_style = ParagraphStyle(
+                    f"FlowValue-{row_index}-{column}",
+                    fontName=constants.FONT_REGULAR,
+                    fontSize=7.5,
+                    leading=9.7,
+                    alignment=TA_CENTER,
+                    textColor=colors.HexColor(constants.COLOR_INK),
+                    wordWrap="CJK",
+                )
+                header = Paragraph(_escape(self.headers[column]), header_style)
+                body = Paragraph(_escape(value), value_style)
+                _, header_height = header.wrap(box_width - 10, self.row_height)
+                _, body_height = body.wrap(box_width - 10, self.row_height)
+                total_height = header_height + body_height + 3
+                body_y = y + ((self.row_height - total_height) / 2)
+                body.drawOn(canvas, x + 5, body_y)
+                header.drawOn(canvas, x + 5, body_y + body_height + 3)
+                if column < len(flow) - 1:
+                    start = x + box_width + 3
+                    end = x + box_width + gap - 3
+                    arrow_y = y + (self.row_height / 2)
+                    canvas.setStrokeColor(colors.HexColor(constants.COLOR_INK))
+                    canvas.setLineWidth(0.8)
+                    canvas.line(start, arrow_y, end, arrow_y)
+                    canvas.line(end, arrow_y, end - 4, arrow_y + 3)
+                    canvas.line(end, arrow_y, end - 4, arrow_y - 3)
+
+
+class _CoverContent(Flowable):
+    """회사별 글 길이와 무관하게 표지 제목·요약을 정본 영역에 고정한다."""
+
+    def __init__(
+        self,
+        report: Report,
+        styles: dict[str, ParagraphStyle],
+        width: float,
+        height: float,
+    ) -> None:
+        super().__init__()
+        self.report = report
+        self.styles = styles
+        self.width = width
+        self.height = height
+
+    def wrap(self, avail_width: float, avail_height: float) -> tuple[float, float]:
+        self.width = min(self.width, avail_width)
+        return (self.width, min(self.height, avail_height))
+
+    def draw(self) -> None:
+        canvas = cast(Canvas, self.canv)
+        title = Paragraph(
+            f"{_escape(self.report.company)}<br/>분석 보고서",
+            self.styles["cover_title"],
+        )
+        _, title_height = title.wrap(self.width, 50 * mm)
+        title_top_page = A4[1] - (76 * mm)
+        title_y = title_top_page - constants.PAGE_BOTTOM_MARGIN_PT - title_height
+        title.drawOn(canvas, 0, title_y)
+
+        metadata = _cover_metadata(self.report)
+        if metadata:
+            meta = Paragraph(_escape(metadata), self.styles["cover_meta"])
+            _, meta_height = meta.wrap(self.width, 15 * mm)
+            meta.drawOn(canvas, 0, title_y - meta_height - 7)
+
+        summary = _summary_table(self.report, self.styles, self.width)
+        if summary is None:
+            return
+        summary_heading = Paragraph("핵심 요약", self.styles["heading"])
+        _, heading_height = summary_heading.wrap(self.width, 20 * mm)
+        # Paragraph glyph ascender가 선언 좌표보다 약 0.75mm 위에 찍히므로 1mm
+        # 안쪽에 두어 실제 보이는 글자도 정본의 190mm 경계 안에 들어오게 한다.
+        summary_top_page = A4[1] - (191 * mm)
+        heading_y = summary_top_page - constants.PAGE_BOTTOM_MARGIN_PT - heading_height
+        summary_heading.drawOn(canvas, 0, heading_y)
+        rule_y = heading_y - 5
+        canvas.setStrokeColor(colors.HexColor(constants.COLOR_INK))
+        canvas.setLineWidth(1.0)
+        canvas.line(0, rule_y, self.width, rule_y)
+        _, table_height = summary.wrap(self.width, 70 * mm)
+        summary.drawOn(canvas, 0, rule_y - 6 - table_height)
 
 
 def _register_fonts() -> None:
@@ -152,11 +438,11 @@ def _display_report_date(report: Report) -> str:
         return ""
     try:
         if len(raw) == 10:
-            return dt.date.fromisoformat(raw).isoformat()
+            return dt.date.fromisoformat(raw).strftime("%Y.%m.%d")
         parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
         if parsed.tzinfo is not None:
-            return parsed.astimezone(clock.KST).date().isoformat()
-        return parsed.date().isoformat()
+            return parsed.astimezone(clock.KST).date().strftime("%Y.%m.%d")
+        return parsed.date().strftime("%Y.%m.%d")
     except ValueError:
         return ""
 
@@ -255,7 +541,7 @@ def _styles() -> dict[str, ParagraphStyle]:
             parent=base["Title"],
             fontName=constants.FONT_SEMIBOLD,
             fontSize=constants.TITLE_FONT_SIZE_PT,
-            leading=36,
+            leading=35.5,
             alignment=TA_LEFT,
             textColor=ink,
             spaceAfter=8,
@@ -265,8 +551,8 @@ def _styles() -> dict[str, ParagraphStyle]:
             "CoverMeta",
             parent=base["Normal"],
             fontName=constants.FONT_REGULAR,
-            fontSize=10.5,
-            leading=15,
+            fontSize=7.7,
+            leading=10.8,
             alignment=TA_LEFT,
             textColor=muted,
             spaceAfter=2,
@@ -280,7 +566,7 @@ def _styles() -> dict[str, ParagraphStyle]:
             leading=21,
             textColor=ink,
             spaceBefore=18,
-            spaceAfter=9,
+            spaceAfter=7,
             keepWithNext=True,
             wordWrap="CJK",
         ),
@@ -305,12 +591,39 @@ def _styles() -> dict[str, ParagraphStyle]:
             spaceAfter=7,
             wordWrap="CJK",
         ),
+        "card_title": ParagraphStyle(
+            "ReportCardTitle",
+            parent=base["BodyText"],
+            fontName=constants.FONT_SEMIBOLD,
+            fontSize=constants.SUBHEADING_FONT_SIZE_PT,
+            leading=14.0,
+            textColor=ink,
+            wordWrap="CJK",
+        ),
+        "card_label": ParagraphStyle(
+            "ReportCardLabel",
+            parent=base["BodyText"],
+            fontName=constants.FONT_SEMIBOLD,
+            fontSize=constants.CARD_FONT_SIZE_PT,
+            leading=constants.CARD_LEADING_PT,
+            textColor=ink,
+            wordWrap="CJK",
+        ),
+        "card_body": ParagraphStyle(
+            "ReportCardBody",
+            parent=base["BodyText"],
+            fontName=constants.FONT_REGULAR,
+            fontSize=constants.CARD_FONT_SIZE_PT,
+            leading=constants.CARD_LEADING_PT,
+            textColor=ink,
+            wordWrap="CJK",
+        ),
         "small": ParagraphStyle(
             "ReportSmall",
             parent=base["BodyText"],
             fontName=constants.FONT_REGULAR,
             fontSize=constants.SMALL_FONT_SIZE_PT,
-            leading=13.5,
+            leading=10.0,
             textColor=muted,
             spaceAfter=5,
             wordWrap="CJK",
@@ -319,8 +632,8 @@ def _styles() -> dict[str, ParagraphStyle]:
             "ReportSmallBold",
             parent=base["BodyText"],
             fontName=constants.FONT_SEMIBOLD,
-            fontSize=constants.SMALL_FONT_SIZE_PT,
-            leading=13.5,
+            fontSize=constants.TABLE_FONT_SIZE_PT,
+            leading=10.0,
             textColor=ink,
             spaceAfter=4,
             keepWithNext=True,
@@ -331,7 +644,7 @@ def _styles() -> dict[str, ParagraphStyle]:
             parent=base["BodyText"],
             fontName=constants.FONT_REGULAR,
             fontSize=constants.TABLE_FONT_SIZE_PT,
-            leading=12.5,
+            leading=constants.TABLE_LEADING_PT,
             textColor=ink,
             wordWrap="CJK",
         ),
@@ -340,7 +653,7 @@ def _styles() -> dict[str, ParagraphStyle]:
             parent=base["BodyText"],
             fontName=constants.FONT_SEMIBOLD,
             fontSize=constants.TABLE_FONT_SIZE_PT,
-            leading=12.5,
+            leading=constants.TABLE_LEADING_PT,
             textColor=ink,
             wordWrap="CJK",
         ),
@@ -349,7 +662,7 @@ def _styles() -> dict[str, ParagraphStyle]:
             parent=base["BodyText"],
             fontName=constants.FONT_REGULAR,
             fontSize=constants.TABLE_FONT_SIZE_PT,
-            leading=12.5,
+            leading=constants.TABLE_LEADING_PT,
             textColor=ink,
             alignment=TA_RIGHT,
             wordWrap="CJK",
@@ -359,7 +672,7 @@ def _styles() -> dict[str, ParagraphStyle]:
             parent=base["BodyText"],
             fontName=constants.FONT_SEMIBOLD,
             fontSize=constants.TABLE_FONT_SIZE_PT,
-            leading=12.5,
+            leading=constants.TABLE_LEADING_PT,
             textColor=ink,
             alignment=TA_RIGHT,
             wordWrap="CJK",
@@ -369,7 +682,7 @@ def _styles() -> dict[str, ParagraphStyle]:
             parent=base["BodyText"],
             fontName=constants.FONT_SEMIBOLD,
             fontSize=constants.TABLE_FONT_SIZE_PT,
-            leading=13,
+            leading=10.0,
             textColor=colors.white,
             alignment=TA_CENTER,
             wordWrap="CJK",
@@ -379,7 +692,7 @@ def _styles() -> dict[str, ParagraphStyle]:
             parent=base["BodyText"],
             fontName=constants.FONT_REGULAR,
             fontSize=constants.SMALL_FONT_SIZE_PT,
-            leading=13,
+            leading=10.0,
             textColor=muted,
             alignment=TA_CENTER,
             wordWrap="CJK",
@@ -392,9 +705,88 @@ def _cited_text(text: str, cite: str) -> str:
     return f"{text} {marker}" if marker else text
 
 
+def _split_wide_table(table: ReportTable, *, max_columns: int = 5) -> list[ReportTable]:
+    """일반표를 첫 열을 반복하는 최대 5열 표들로 나눈다."""
+
+    width = len(table.headers)
+    if width <= max_columns:
+        return [table]
+    chunks: list[ReportTable] = []
+    value_columns = list(range(1, width))
+    groups = [
+        value_columns[start : start + (max_columns - 1)]
+        for start in range(0, len(value_columns), max_columns - 1)
+    ]
+    for index, group in enumerate(groups, start=1):
+        columns = [0, *group]
+        suffix = "" if index == 1 else f" (계속 {index}/{len(groups)})"
+        chunks.append(
+            ReportTable(
+                caption=f"{table.caption}{suffix}",
+                headers=[table.headers[column] for column in columns],
+                rows=[[row[column] for column in columns] for row in table.rows],
+                cite=table.cite,
+                numeric=table.numeric,
+                raw_rows=(
+                    [[row[column] for column in columns] for row in table.raw_rows]
+                    if table.raw_rows
+                    else []
+                ),
+                scale_divisor=table.scale_divisor,
+                scale_places=table.scale_places,
+                display_unit=table.display_unit,
+                presentation="table",
+                evidence_rows=list(table.evidence_rows),
+            )
+        )
+    return chunks
+
+
+def _add_report_visualization(
+    story: list[Flowable],
+    table: ReportTable,
+    styles: dict[str, ParagraphStyle],
+    width: float,
+) -> bool:
+    visual = table_visualization(table)
+    if visual is None:
+        return False
+    caption = _cited_text(table.caption, table.cite)
+    if visual.kind == "composition":
+        graphic: Flowable = _CompositionGraphic(visual, width)
+    elif visual.kind == "trend":
+        graphic = _TrendGraphic(visual, width)
+    elif visual.kind == "flow":
+        graphic = _FlowGraphic(visual, table.headers, width)
+    else:
+        return False
+    source_note = _cited_text("자료", table.cite)
+    note = f"{source_note} · {visual.note}" if visual.note else source_note
+    story.append(
+        KeepTogether(
+            [
+                Paragraph(_escape(caption), styles["small_bold"]),
+                Spacer(1, 3),
+                graphic,
+                Spacer(1, 5),
+                Paragraph(_escape(note), styles["small"]),
+                Spacer(1, 12),
+            ]
+        )
+    )
+    return True
+
+
 def _add_report_table(
     story: list[Flowable], table: ReportTable, styles: dict[str, ParagraphStyle], width: float
 ) -> None:
+    if _add_report_visualization(story, table, styles, width):
+        return
+    chunks = _split_wide_table(table)
+    if len(chunks) > 1:
+        for chunk in chunks:
+            _add_report_table(story, chunk, styles, width)
+        return
     caption = _cited_text(table.caption, table.cite)
     story.append(Paragraph(_escape(caption), styles["small_bold"]))
 
@@ -477,28 +869,127 @@ def _add_report_table(
 
 def _add_section(
     story: list[Flowable],
+    report: Report,
     section: ReportSection,
     styles: dict[str, ParagraphStyle],
     width: float,
     anchor: str,
 ) -> None:
     title = _section_heading(section)
-    story.extend([_OutlineAnchor(anchor, title, level=1), Paragraph(_escape(title), styles["heading"])])
+    heading_flowables: list[Flowable] = [
+        _OutlineAnchor(anchor, title, level=1),
+        Paragraph(_section_heading_markup(section), styles["heading"]),
+        _HorizontalRule(width),
+        Spacer(1, 10),
+    ]
     if not section.is_filled:
+        story.extend(heading_flowables)
         return
 
-    if section.prose_lines:
+    detail_blocks = section_content_blocks(report, section)
+    if detail_blocks:
+        first_content: list[Flowable] = []
+        _add_section_content_block(
+            first_content,
+            detail_blocks[0],
+            styles,
+            width,
+            wrap_card=False,
+        )
+        story.append(KeepTogether([*heading_flowables, *first_content]))
+        for block in detail_blocks[1:]:
+            _add_section_content_block(story, block, styles, width)
+    elif section.prose_lines:
         prose = " ".join(_cited_text(text, cite) for text, cite in section.prose_lines)
-        story.append(Paragraph(_escape(prose), styles["body"]))
-    for item in section.tables:
+        story.append(
+            KeepTogether(
+                [*heading_flowables, Paragraph(_escape(prose), styles["body"])]
+            )
+        )
+    elif section.tables:
+        first_content = []
+        _add_report_table(first_content, section.tables[0], styles, width)
+        story.append(KeepTogether([*heading_flowables, *first_content]))
+    else:
+        story.extend(heading_flowables)
+
+    table_start = 1 if not detail_blocks and not section.prose_lines else 0
+    for item in section.tables[table_start:]:
         _add_report_table(story, item, styles, width)
+
+
+def _add_section_content_block(
+    story: list[Flowable],
+    block: SectionContentBlock,
+    styles: dict[str, ParagraphStyle],
+    width: float,
+    *,
+    wrap_card: bool = True,
+) -> None:
+    """공통 장별 블록을 정본 크기·여백을 지키는 한 개의 PDF 카드로 낸다."""
+
+    markers = " ".join(f"[{number}]" for number in block.source_numbers)
+    caption = " ".join(
+        value for value in (block.title, markers) if str(value).strip()
+    )
+    if block.tone == "limitation":
+        caption = f"확인 범위 · {caption}"
+    data: list[list[Paragraph]] = [
+        [
+            Paragraph(_escape(caption), styles["card_title"]),
+            Paragraph("", styles["card_body"]),
+        ]
+    ]
+    data.extend(
+        [
+            Paragraph(_escape(field.label), styles["card_label"]),
+            Paragraph(_escape(field.value), styles["card_body"]),
+        ]
+        for field in block.fields
+    )
+    card = Table(
+        data,
+        colWidths=[width * 0.29, width * 0.71],
+        hAlign="LEFT",
+    )
+    card.setStyle(
+        TableStyle(
+            [
+                ("SPAN", (0, 0), (1, 0)),
+                ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor(constants.COLOR_LINE)),
+                ("LINEBELOW", (0, 0), (-1, 0), 0.6, colors.HexColor(constants.COLOR_LINE)),
+                ("LINEBELOW", (0, 1), (-1, -2), 0.45, colors.HexColor(constants.COLOR_LINE)),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 7),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ]
+        )
+    )
+    card_flowables: list[Flowable] = [card, Spacer(1, 14)]
+    if wrap_card:
+        story.append(KeepTogether(card_flowables))
+    else:
+        story.extend(card_flowables)
 
 
 def _section_heading(section: ReportSection) -> str:
     if section.display_number:
-        tag = f"  {section.tag}" if section.tag else ""
-        return f"{section.display_number}. {section.title}{tag}"
+        return f"{section.display_number}. {section.title}"
     return section_display_heading(section.cell, section.title)
+
+
+def _section_heading_markup(section: ReportSection) -> str:
+    title = _escape(_section_heading(section))
+    if section.cell not in TIME_SECTION_IDS or not section.tag.strip():
+        return title
+    tag = _escape(section.tag.strip())
+    return (
+        f'{title}&nbsp;&nbsp;<font name="{constants.FONT_REGULAR}" '
+        f'size="{constants.SMALL_FONT_SIZE_PT}" color="{constants.COLOR_MUTED}">'
+        f"{tag}</font>"
+    )
 
 
 def _add_citations(story: list[Flowable], report: Report, styles: dict[str, ParagraphStyle]) -> None:
@@ -520,7 +1011,8 @@ def _add_citations(story: list[Flowable], report: Report, styles: dict[str, Para
         [
             Paragraph("#", styles["table_head"]),
             Paragraph("자료", styles["table_head"]),
-            Paragraph("기준일·상태", styles["table_head"]),
+            Paragraph("기준일·자료 상태", styles["table_head"]),
+            Paragraph("사실 검증", styles["table_head"]),
             Paragraph("원문 위치", styles["table_head"]),
             Paragraph("본문 사용 장", styles["table_head"]),
         ]
@@ -531,6 +1023,10 @@ def _add_citations(story: list[Flowable], report: Report, styles: dict[str, Para
                 Paragraph(_escape(str(source.number)), styles["table"]),
                 Paragraph(_source_label_markup(source), styles["table"]),
                 Paragraph(_escape(_source_status(source)), styles["table"]),
+                Paragraph(
+                    _escape(source_verification_label(report, source.source_id)),
+                    styles["table"],
+                ),
                 Paragraph(_escape(source.location.strip() or "—"), styles["table"]),
                 Paragraph(_escape(_source_used_sections(source)), styles["table"]),
             ]
@@ -539,10 +1035,11 @@ def _add_citations(story: list[Flowable], report: Report, styles: dict[str, Para
         rows,
         colWidths=[
             width * 0.06,
-            width * 0.35,
-            width * 0.25,
-            width * 0.19,
+            width * 0.27,
+            width * 0.20,
             width * 0.15,
+            width * 0.18,
+            width * 0.14,
         ],
         repeatRows=1,
         hAlign="LEFT",
@@ -617,9 +1114,10 @@ def _source_used_sections(source: Source) -> str:
 
 
 def _cover_metadata(report: Report) -> str:
+    display_date = _display_report_date(report)
     values = [
+        f"기준일 {display_date}" if display_date else "",
         report.corp_type.strip(),
-        f"{report.as_of_date.strip()} 기준" if report.as_of_date.strip() else "",
         report.analysis_period.strip(),
         (
             f"최신 실적 {report.latest_performance_period.strip()}"
@@ -640,17 +1138,25 @@ def _summary_table(
     rows: list[list[Paragraph]] = []
     for index, item in enumerate(report.summary_items, start=1):
         spec = SECTION_BY_ID.get(item.section_id)
-        related = f"{spec.display_number}장" if spec is not None else ""
+        topic = summary_topic(item.section_id)
+        related = f"[{spec.display_number}장]" if spec is not None else ""
+        sentence = _escape(item.text.strip())
+        if related:
+            sentence += (
+                f'&nbsp;&nbsp;<font name="{constants.FONT_REGULAR}" '
+                f'size="{constants.SMALL_FONT_SIZE_PT}" '
+                f'color="{constants.COLOR_MUTED}">{related}</font>'
+            )
         rows.append(
             [
                 Paragraph(f"{index:02d}", styles["summary_number"]),
-                Paragraph(_escape(item.text.strip()), styles["table"]),
-                Paragraph(related, styles["summary_ref"]),
+                Paragraph(_escape(topic), styles["table_head"]),
+                Paragraph(sentence, styles["table"]),
             ]
         )
     table = Table(
         rows,
-        colWidths=[width * 0.08, width * 0.79, width * 0.13],
+        colWidths=[12 * mm, 30 * mm, width - (42 * mm)],
         hAlign="LEFT",
     )
     table.setStyle(
@@ -658,11 +1164,12 @@ def _summary_table(
             [
                 ("GRID", (0, 0), (-1, -1), 0.55, colors.HexColor(constants.COLOR_LINE)),
                 ("BACKGROUND", (0, 0), (0, -1), colors.HexColor(constants.COLOR_INK)),
+                ("ROWBACKGROUNDS", (1, 0), (-1, -1), [colors.white, colors.HexColor(constants.COLOR_HEADER)]),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 7),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 7),
-                ("TOPPADDING", (0, 0), (-1, -1), 8),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ("TOPPADDING", (0, 0), (-1, -1), 5.5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5.5),
             ]
         )
     )
@@ -676,31 +1183,20 @@ def _document_header(
 ) -> list[Flowable]:
     """표지의 제목과 0장 핵심 요약을 만들고 본문을 다음 페이지에서 시작한다."""
 
-    title = f"{_single_line_pdf_text(report.company)} 분석 보고서"
-    metadata = _cover_metadata(report)
     items: list[Flowable] = [
-        _OutlineAnchor("cover", title, level=0),
-        Spacer(1, 54 * mm),
-        Paragraph(f"{_escape(report.company)}<br/>분석 보고서", styles["cover_title"]),
-    ]
-    if metadata:
-        items.append(Paragraph(_escape(metadata), styles["cover_meta"]))
-    summary = _summary_table(report, styles, width)
-    if summary is not None:
-        items.extend(
-            [
-                Spacer(1, 30 * mm),
-                _OutlineAnchor("summary", "핵심 요약", level=0),
-                Paragraph("핵심 요약", styles["heading"]),
-                summary,
-            ]
-        )
-    items.extend(
-        [
+        _OutlineAnchor(
+            "cover", f"{_single_line_pdf_text(report.company)} 분석 보고서", level=0
+        ),
+        _OutlineAnchor("summary", "핵심 요약", level=0),
+        _CoverContent(
+            report,
+            styles,
+            width,
+            A4[1] - constants.PAGE_TOP_MARGIN_PT - constants.PAGE_BOTTOM_MARGIN_PT,
+        ),
         PageBreak(),
         _OutlineAnchor("report-body", "분석 본문", level=0),
-        ]
-    )
+    ]
     return items
 
 
@@ -708,27 +1204,41 @@ def _page_furniture(canvas: Canvas, doc: SimpleDocTemplate) -> None:
     title = cast(str, getattr(doc, "report_title", "분석 보고서"))
     company = cast(str, getattr(doc, "report_company", ""))
     report_date = cast(str, getattr(doc, "report_date", ""))
+    author = cast(str, getattr(doc, "report_author", constants.PDF_AUTHOR))
+    subject = cast(str, getattr(doc, "report_subject", title))
     canvas.saveState()
     canvas.setTitle(title)
-    canvas.setAuthor("")
-    canvas.setSubject("회사 중심 분석 보고서")
+    canvas.setAuthor(author)
+    canvas.setSubject(subject)
     if doc.page > 1:
-        canvas.setFont(constants.FONT_REGULAR, constants.SMALL_FONT_SIZE_PT)
+        canvas.setFont(constants.FONT_REGULAR, constants.META_FONT_SIZE_PT)
         canvas.setFillColor(colors.HexColor(constants.COLOR_MUTED))
         y = A4[1] - 34
         canvas.drawString(constants.PAGE_MARGIN_PT, y, title)
         if report_date:
-            canvas.drawRightString(A4[0] - constants.PAGE_MARGIN_PT, y, report_date)
+            canvas.drawRightString(
+                A4[0] - constants.PAGE_MARGIN_PT, y, f"기준일 {report_date}"
+            )
         canvas.setStrokeColor(colors.HexColor(constants.COLOR_LINE))
         canvas.setLineWidth(0.5)
         canvas.line(constants.PAGE_MARGIN_PT, y - 8, A4[0] - constants.PAGE_MARGIN_PT, y - 8)
-        canvas.setFont(constants.FONT_REGULAR, 8.5)
+        footer_line_y = 32
+        canvas.line(
+            constants.PAGE_MARGIN_PT,
+            footer_line_y,
+            A4[0] - constants.PAGE_MARGIN_PT,
+            footer_line_y,
+        )
+        canvas.setFont(constants.FONT_REGULAR, constants.META_FONT_SIZE_PT)
+        canvas.setFillColor(colors.HexColor(constants.COLOR_WEAK))
         canvas.drawString(constants.PAGE_MARGIN_PT, 24, company)
         canvas.drawRightString(A4[0] - constants.PAGE_MARGIN_PT, 24, str(doc.page))
     canvas.restoreState()
 
 
-def _add_accessibility_metadata(raw_pdf: bytes, title: str) -> bytes:
+def _add_accessibility_metadata(
+    raw_pdf: bytes, title: str, *, author: str, subject: str
+) -> bytes:
     """문서 제목·언어·제목 표시 설정을 추가한다(가짜 tagged 구조는 만들지 않는다)."""
 
     reader = PdfReader(io.BytesIO(raw_pdf), strict=True)
@@ -782,8 +1292,8 @@ def _add_accessibility_metadata(raw_pdf: bytes, title: str) -> bytes:
     writer.add_metadata(
         {
             "/Title": title,
-            "/Subject": "회사 중심 분석 보고서",
-            "/Author": "",
+            "/Subject": subject,
+            "/Author": author,
         }
     )
     root = writer._root_object
@@ -820,6 +1330,8 @@ def _build_pdf(report: Report) -> bytes:
     report = build_published_report(report)
     _register_fonts()
     title = f"{_single_line_pdf_text(report.company)} 분석 보고서"
+    author = f"{constants.PDF_AUTHOR} · {_single_line_pdf_text(report.company)} 분석"
+    subject = f"{_single_line_pdf_text(report.company)} 회사 분석 보고서"
     buffer = io.BytesIO()
     document = SimpleDocTemplate(
         buffer,
@@ -829,17 +1341,26 @@ def _build_pdf(report: Report) -> bytes:
         topMargin=constants.PAGE_TOP_MARGIN_PT,
         bottomMargin=constants.PAGE_BOTTOM_MARGIN_PT,
         title=title,
-        author="",
-        subject="회사 중심 분석 보고서",
+        author=author,
+        subject=subject,
         pageCompression=1,
     )
     setattr(document, "report_title", title)
     setattr(document, "report_company", _single_line_pdf_text(report.company))
     setattr(document, "report_date", _display_report_date(report))
+    setattr(document, "report_author", author)
+    setattr(document, "report_subject", subject)
     styles = _styles()
     story: list[Flowable] = _document_header(report, styles, document.width)
     for index, section in enumerate(report.sections):
-        _add_section(story, section, styles, document.width, f"section-{index}")
+        _add_section(
+            story,
+            report,
+            section,
+            styles,
+            document.width,
+            f"section-{index}",
+        )
 
     _add_citations(story, report, styles)
     document.build(
@@ -848,7 +1369,9 @@ def _build_pdf(report: Report) -> bytes:
         onLaterPages=_page_furniture,
         canvasmaker=_BrandedCanvas,
     )
-    return _add_accessibility_metadata(buffer.getvalue(), title)
+    return _add_accessibility_metadata(
+        buffer.getvalue(), title, author=author, subject=subject
+    )
 
 
 def build_pdf(report: Report) -> bytes:
@@ -873,10 +1396,28 @@ def _safe_filename_stem(value: str) -> str:
     return cleaned[: constants.FILENAME_MAX_STEM].rstrip(" ._-") or constants.FILENAME_FALLBACK
 
 
-def build_download_filename(report: Report) -> str:
-    """브라우저에 보낼 정확한 ``{회사명}_분석_보고서.pdf`` 이름을 만든다."""
+def _company_slug(value: str) -> str:
+    """임의 영문 음역 없이 회사명의 Unicode 글자·숫자를 안정적인 slug로 만든다."""
 
-    return constants.FILENAME_PATTERN.format(company=_safe_filename_stem(report.company))
+    normalized = unicodedata.normalize("NFKC", _normalize_pdf_text(value)).casefold()
+    parts: list[str] = []
+    pending_separator = False
+    for char in normalized:
+        if char.isalnum():
+            if pending_separator and parts:
+                parts.append("-")
+            parts.append(char)
+            pending_separator = False
+        else:
+            pending_separator = bool(parts)
+    slug = "".join(parts).strip("-")
+    return slug[: constants.FILENAME_MAX_STEM].rstrip("-") or constants.FILENAME_FALLBACK
+
+
+def build_download_filename(report: Report) -> str:
+    """브라우저에 보낼 ``<company-slug>-company-analysis.pdf`` 이름을 만든다."""
+
+    return constants.FILENAME_PATTERN.format(company_slug=_company_slug(report.company))
 
 
 def build_ascii_filename(filename: str) -> str:

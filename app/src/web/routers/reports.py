@@ -31,6 +31,9 @@ from src.features.export_pdf.automatic_release import (
 )
 from src.features.export_pdf import release_store as pdf_release_store
 from src.features.export_notion import store as notion_store
+from src.features.admin_dashboard import store as dashboard_store
+from src.features.auth import constants as auth_constants
+from src.features.auth import logic as auth_logic
 from src.features.export_notion.notion import (
     NotionExportResult,
     is_notion_configured,
@@ -40,7 +43,10 @@ from src.features.grading.logic import grade_message
 from src.features.observability import admin_audit
 from src.features.pipeline.port import CompanyCard, Outcome, Report, RunResult, UserInput
 from src.features.report_standard import PublishBlockedError, build_published_report
+from src.features.sharelink import store as share_store
+from src.features.sharelink import allowlist as share_allow
 from src.features.storage import db as storage_db
+from src.features.storage import reports as report_store
 from src.web import job_runtime, request_helpers
 from src.web.security import CSRF_TOKEN_MAX_CHARS
 
@@ -60,6 +66,23 @@ def _report_for_output(report: Report) -> Report:
     return build_published_report(report)
 
 
+def _approved_public_report(report_id: str, fallback: Report) -> Report | None:
+    """등록된 관리 상태가 있으면 메모리 결과 대신 승인 snapshot만 공개한다.
+
+    대시보드 도입 전의 legacy 보고서는 상태 projection이 없으므로 기존 저장본을
+    fallback으로 쓴다. 반면 상태가 있는데 승인 version 원본을 읽지 못하면
+    원본 보고서가 다시 공개되는 일을 막기 위해 None으로 fail-closed 한다.
+    """
+    with storage_db.connect() as conn:
+        state = dashboard_store.get_report_state(conn, report_id)
+        if not state.updated_at:
+            return fallback
+        payload_json = dashboard_store.approved_report_payload(conn, report_id=report_id)
+    if not payload_json:
+        return None
+    return report_store.report_from_json(payload_json)
+
+
 def _blocked_report_response(request: Request) -> Response:
     """구형·손상 보고서를 현재 결과처럼 노출하지 않는 영구 중단 화면."""
 
@@ -76,6 +99,30 @@ def _blocked_report_response(request: Request) -> Response:
     )
     response.headers.update(SHARED_LINK_HEADERS)
     return response
+
+
+def _mark_link_release_gate_stopped(report_id: str) -> None:
+    """출고 검사에 막힌 LINK 실행만 안정적인 중단 상태로 마감한다.
+
+    공개 차단 응답이 정본이므로 이력 저장 장애가 원래 ``PublishBlockedError`` 또는
+    ``PDFReleaseBlockedError``를 가려서는 안 된다. LINK에 결속되지 않은 보고서는
+    갱신 대상이 없어 그대로 끝난다.
+    """
+
+    try:
+        with storage_db.connect() as conn:
+            share_store.mark_release_stopped(
+                conn,
+                report_id=report_id,
+                stopped_at=clock.iso_now_kst(),
+                stop_step="automatic_release_gate",
+                stop_reason="automatic_release_gate_stopped",
+            )
+    except Exception:  # noqa: BLE001 — 원래 출고 차단을 절대 가리지 않는다
+        logger.exception(
+            "LINK 자동출고 중단 이력을 저장하지 못했습니다 report_id=%s",
+            report_id,
+        )
 
 
 @dataclass(frozen=True)
@@ -247,6 +294,22 @@ def _forget_notion_worker(task: asyncio.Task) -> None:
 @router.get("/result/{job_id}", response_class=HTMLResponse)
 async def result_page(request: Request, job_id: str):
     """보고서 또는 「왜 못 만들었는지」를 보여준다."""
+
+    return await _result_page_response(request, job_id, allow_expired=False)
+
+
+async def _result_page_response(
+    request: Request,
+    job_id: str,
+    *,
+    allow_expired: bool,
+) -> Response:
+    """일반 결과와 관리자 LINK 이력 조회가 공유하는 출고·렌더 경계."""
+
+    blocked = _dashboard_publication_block(request, job_id)
+    if blocked is not None:
+        return blocked
+
     job = job_runtime._JOBS.get(job_id)
     if job is None or job.result is None:
         try:
@@ -255,11 +318,12 @@ async def result_page(request: Request, job_id: str):
             return job_runtime._storage_unavailable_response(request)
         if saved is None:
             return RedirectResponse("/", status_code=303)
-        if job_runtime._link_expired(saved):
+        if not allow_expired and job_runtime._link_expired(saved):
             return job_runtime._expired_screen(request)
         try:
             output_report = _report_for_output(saved)
         except PublishBlockedError:
+            _mark_link_release_gate_stopped(job_id)
             return _blocked_report_response(request)
         try:
             _candidate, released = await asyncio.to_thread(
@@ -303,11 +367,19 @@ async def result_page(request: Request, job_id: str):
     # 첫 저장이 실패했으면 현재 사용자의 새로고침이 실제 재시도가 되게 한다.
     if job.report_persisted is False:
         job_runtime._save_report(job)
-    if job_runtime._link_expired(report):
+    try:
+        report = _approved_public_report(job_id, report)
+    except Exception:  # noqa: BLE001 - immutable 승인 원본을 못 읽으면 공개하지 않는다
+        logger.exception("승인 보고서 원본을 읽지 못했습니다. report_id=%s", job_id)
+        return _dashboard_blocked_response(request, unavailable=True)
+    if report is None:
+        return _dashboard_blocked_response(request, unavailable=False)
+    if not allow_expired and job_runtime._link_expired(report):
         return job_runtime._expired_screen(request)
     try:
         output_report = _report_for_output(report)
     except PublishBlockedError:
+        _mark_link_release_gate_stopped(job_id)
         return _blocked_report_response(request)
     try:
         _candidate, released = await asyncio.to_thread(
@@ -329,9 +401,16 @@ async def result_page(request: Request, job_id: str):
 
 def _report_for_download(request: Request, job_id: str) -> Report | Response:
     """두 다운로드 형식이 공유하는 조회·장애·만료 계약."""
+    blocked = _dashboard_publication_block(request, job_id)
+    if blocked is not None:
+        return blocked
     job = job_runtime._JOBS.get(job_id)
-    if job is not None and job.result is not None:
-        report = job.result.report
+    if job is not None and job.result is not None and job.result.report is not None:
+        try:
+            report = _approved_public_report(job_id, job.result.report)
+        except Exception:  # noqa: BLE001 - immutable 승인 원본을 못 읽으면 공개하지 않는다
+            logger.exception("승인 다운로드 원본을 읽지 못했습니다. report_id=%s", job_id)
+            return _dashboard_blocked_response(request, unavailable=True)
     else:
         try:
             report = job_runtime._load_saved_report(job_id)
@@ -342,6 +421,85 @@ def _report_for_download(request: Request, job_id: str) -> Report | Response:
     if job_runtime._link_expired(report):
         return job_runtime._expired_screen(request)
     return report
+
+
+def _dashboard_publication_block(request: Request, report_id: str) -> Response | None:
+    """MEMBER 신고 뒤에는 결과·PDF·공유가 같은 DB transaction으로 닫힌다.
+
+    운영 상태를 읽지 못한 경우도 공개 경계를 열지 않는다. 관리자 원본 검토는
+    별도 ``/reports/{id}`` 경로로만 제공한다.
+    """
+    session = auth_logic.get_session(
+        request.cookies.get(auth_constants.SESSION_COOKIE_NAME)
+    )
+    if session is not None and not session.is_admin:
+        try:
+            with storage_db.connect() as conn:
+                member_allowed = share_allow.is_allowed(conn, session.email)
+        except Exception:  # noqa: BLE001 - an unknown revocation state cannot reopen reports
+            logger.exception("MEMBER 철회 상태를 읽지 못했습니다")
+            return _revoked_member_response(request, unavailable=True)
+        if not member_allowed:
+            return _revoked_member_response(request, unavailable=False)
+    try:
+        with storage_db.connect() as conn:
+            is_blocked = dashboard_store.report_is_blocked(conn, report_id)
+            is_trashed = dashboard_store.report_is_trashed(conn, report_id)
+    except Exception:  # noqa: BLE001 - moderation state uncertainty must fail closed
+        logger.exception("관리 대시보드의 보고서 차단 상태를 읽지 못했습니다")
+        return _dashboard_blocked_response(request, unavailable=True)
+    if is_blocked or is_trashed:
+        return _dashboard_blocked_response(request, unavailable=False)
+    return None
+
+
+def _revoked_member_response(request: Request, *, unavailable: bool) -> Response:
+    message = (
+        "현재 MEMBER 권한이 없어 저장된 결과와 다운로드를 열 수 없습니다."
+        if not unavailable
+        else "MEMBER 권한 상태를 확인할 수 없어 결과와 다운로드를 잠시 열지 않습니다."
+    )
+    response = request_helpers.templates.TemplateResponse(
+        request=request,
+        name="progress_unavailable.html",
+        context=request_helpers._ctx(
+            request,
+            interruption_title="MEMBER 권한을 확인해 주세요",
+            interruption_message=message,
+            interruption_hint="관리자에게 초대 상태를 문의해 주세요.",
+            retry_url="",
+            retry_label="",
+        ),
+        status_code=503 if unavailable else 403,
+    )
+    response.headers.update(SHARED_LINK_HEADERS)
+    return response
+
+
+def _dashboard_blocked_response(request: Request, *, unavailable: bool) -> Response:
+    title = "보고서를 잠시 확인 중입니다" if not unavailable else "보고서 상태를 확인할 수 없습니다"
+    message = (
+        "오류 신고가 접수되어 결과·다운로드·공유를 잠시 멈췄습니다. "
+        "관리자가 원본과 출처를 확인한 뒤 직접 다시 공개합니다."
+        if not unavailable
+        else "결과 공개 상태를 안전하게 확인할 수 없어 잠시 열지 않습니다. 잠시 후 다시 시도해 주세요."
+    )
+    response = request_helpers.templates.TemplateResponse(
+        request=request,
+        name="progress_unavailable.html",
+        context=request_helpers._ctx(
+            request,
+            interruption_title=title,
+            interruption_message=message,
+            interruption_hint="새 조사를 다시 시작할 필요가 없습니다.",
+            retry_url="",
+            retry_label="상태 다시 확인",
+        ),
+        status_code=503 if unavailable else 409,
+    )
+    response.headers.update(SHARED_LINK_HEADERS)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def _pdf_unavailable_response(
@@ -463,43 +621,63 @@ def _release_state(
 ) -> tuple[PdfReleaseCandidate, AutomaticallyReleasedPdf]:
     """Run or restore the exact hash-bound automatic release decision."""
 
-    candidate = _candidate_for_report(report_id, report)
-    digest = report_sha256(report)
-    with storage_db.connect() as conn:
-        stored_record = pdf_release_store.load_automatic_release_record(
-            conn,
-            report_id=report_id,
-            report_sha256=digest,
-            pdf_sha256=candidate.pdf_sha256,
-        )
-    if stored_record is not None:
+    try:
+        candidate = _candidate_for_report(report_id, report)
+        digest = report_sha256(report)
+        with storage_db.connect() as conn:
+            stored_record = pdf_release_store.load_automatic_release_record(
+                conn,
+                report_id=report_id,
+                report_sha256=digest,
+                pdf_sha256=candidate.pdf_sha256,
+            )
+        if stored_record is None:
+            released = automatic_release_pdf(
+                report,
+                candidate,
+                released_at=clock.iso_now_kst(),
+            )
+            with storage_db.connect() as conn:
+                stored_record = pdf_release_store.save_automatic_release(
+                    conn,
+                    report_id=report_id,
+                    released_pdf=released,
+                )
         released = restore_automatic_release(report, candidate, stored_record)
         with storage_db.connect() as conn:
-            cost_store.mark_automatic_release(
+            # LINK의 public run ID와 저장된 report ID는 별개일 수 있다. 비용 원가
+            # 행을 새 report_id 이름으로 하나 더 만들지 말고 실제 생성 run에 붙인다.
+            link_run = share_store.load_run_by_report_id(conn, report_id)
+            charge = cost_store.mark_automatic_release(
                 conn,
-                run_id=report_id,
+                run_id=(link_run.run_id if link_run is not None else report_id),
                 automatic_release_sha256=stored_record.record_sha256,
             )
+            # run/public ID와 report ID는 저장 계약상 별개다. 우연히 문자열이
+            # 같은 정상 경로에 기대지 않고 정확한 report 결속으로만 완료시킨다.
+            if link_run is not None:
+                already_bound = (
+                    link_run.status == share_store.RUN_STATUS_COMPLETED
+                    and link_run.report_id == report_id
+                    and link_run.pdf_sha256 == stored_record.pdf_sha256
+                    and link_run.release_sha256 == stored_record.record_sha256
+                    and link_run.customer_charge_krw == charge.amount_krw
+                )
+                if not already_bound and not share_store.mark_released(
+                    conn,
+                    report_id=report_id,
+                    pdf_sha256=stored_record.pdf_sha256,
+                    release_sha256=stored_record.record_sha256,
+                    released_at=stored_record.released_at,
+                    customer_charge_krw=charge.amount_krw,
+                ):
+                    raise RuntimeError("LINK 자동출고 이력을 확정하지 못했습니다")
         return candidate, released
-
-    released = automatic_release_pdf(
-        report,
-        candidate,
-        released_at=clock.iso_now_kst(),
-    )
-    with storage_db.connect() as conn:
-        stored_record = pdf_release_store.save_automatic_release(
-            conn,
-            report_id=report_id,
-            released_pdf=released,
-        )
-        cost_store.mark_automatic_release(
-            conn,
-            run_id=report_id,
-            automatic_release_sha256=stored_record.record_sha256,
-        )
-    released = restore_automatic_release(report, candidate, stored_record)
-    return candidate, released
+    except PDFReleaseBlockedError:
+        # 자동검사 실패는 보고서 완료가 아니다. 같은 report가 이후 정본 검사와
+        # 해시 결속을 실제 통과하면 mark_released가 이 상태를 완료로 승격한다.
+        _mark_link_release_gate_stopped(report_id)
+        raise
 
 
 def _is_admin_request(request: Request) -> bool:
@@ -532,9 +710,24 @@ def _render_result_page(
                 grade_note=grade_message(report.grade, report.filled_count),
                 notion_configured=is_notion_configured(),
                 internal_review_preview=internal_review_preview,
+                member_feedback_allowed=_member_feedback_allowed(request),
             ),
         )
     )
+
+
+def _member_feedback_allowed(request: Request) -> bool:
+    """MEMBER 설문·오류 신고 입력은 초대 명단을 다시 읽어 표시한다."""
+    token = request.cookies.get(auth_constants.SESSION_COOKIE_NAME)
+    session = auth_logic.get_session(token)
+    if session is None or session.is_admin:
+        return False
+    try:
+        with storage_db.connect() as conn:
+            return share_allow.is_allowed(conn, session.email)
+    except Exception:
+        logger.exception("MEMBER 설문 권한을 읽지 못했습니다")
+        return False
 
 
 @router.get("/review/pdf/{job_id}", response_class=HTMLResponse)
@@ -626,6 +819,9 @@ async def send_to_notion(
     blocked = request_helpers.require_admin_action(request, csrf_token)
     if blocked is not None:
         return blocked
+    dashboard_blocked = _dashboard_publication_block(request, job_id)
+    if dashboard_blocked is not None:
+        return dashboard_blocked
     job = job_runtime._JOBS.get(job_id)
     if job is not None and job.result is not None:
         report = job.result.report
@@ -644,6 +840,7 @@ async def send_to_notion(
     try:
         report = _report_for_output(report)
     except PublishBlockedError:
+        _mark_link_release_gate_stopped(job_id)
         return _blocked_report_response(request)
     try:
         _candidate, released = await asyncio.to_thread(

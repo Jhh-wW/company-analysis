@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from dataclasses import replace
 
@@ -124,5 +125,50 @@ def test_같은_job의_보고서나_PDF_hash가_바뀌면_재자동출고하지�
                 report_sha256="e" * 64,
                 pdf_sha256=candidate.pdf_sha256,
             )
+    finally:
+        conn.close()
+
+
+def test_같은_report_hash여도_검수뒤_PDF_bytes가_바뀌면_기존자동출고를_덮어쓰지않는다():
+    report = _report()
+    candidate = prepare_pdf_release(report)
+    released = automatic_release_pdf(report, candidate, released_at=_AT)
+    changed_pdf_bytes = candidate.pdf_bytes + b"\n"
+    changed_candidate = replace(
+        candidate,
+        pdf_bytes=changed_pdf_bytes,
+        pdf_sha256=hashlib.sha256(changed_pdf_bytes).hexdigest(),
+    )
+    changed_release = automatic_release_pdf(
+        report,
+        changed_candidate,
+        released_at=_AT,
+    )
+    conn = _conn()
+    try:
+        stored = release_store.save_automatic_release(
+            conn,
+            report_id="immutable-pdf-job",
+            released_pdf=released,
+        )
+
+        assert changed_release.record.report_sha256 == stored.report_sha256
+        assert changed_release.record.pdf_sha256 != stored.pdf_sha256
+        with pytest.raises(AutomaticGateStopped, match="GATE_STOPPED.*지문이 변경"):
+            release_store.save_automatic_release(
+                conn,
+                report_id="immutable-pdf-job",
+                released_pdf=changed_release,
+            )
+
+        # 실패한 재출고가 기존 레코드를 갱신하거나 둘째 행을 만들지 않는다.
+        rows = conn.execute(
+            f"SELECT report_sha256, pdf_sha256 FROM {release_store.AUTOMATIC_TABLE_NAME} "
+            "WHERE report_id=?",
+            ("immutable-pdf-job",),
+        ).fetchall()
+        assert [(row["report_sha256"], row["pdf_sha256"]) for row in rows] == [
+            (stored.report_sha256, stored.pdf_sha256)
+        ]
     finally:
         conn.close()

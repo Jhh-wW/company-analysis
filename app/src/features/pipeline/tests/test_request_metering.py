@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import sys
 import threading
 from types import SimpleNamespace
@@ -17,6 +18,7 @@ from src.core.pricing import AI_COST_KRW_PER_USD
 from src.features.budget import provider_budget
 from src.features.pipeline import real
 from src.features.pipeline.port import CompanyCard, Outcome, UserInput
+from src.features.spanselect.canonical import answer_schema
 
 _HAIKU = "claude-haiku-4-5"
 _SONNET = "claude-sonnet-4-6"
@@ -179,6 +181,120 @@ def test_Sonnet_선택3회용_prompt_cache와_단계별비용을_기록한다():
     assert event.cache_creation_tokens == 1000
     assert event.cache_read_tokens == 500
     assert event.cache_hit is True
+
+
+def test_raw_structured_output_schema는_provider_전송전에_공식형식으로_바꾼다():
+    messages = FakeMessages()
+    metered = real._MeteredEngine(FakeRawEngine(messages))
+    client = _client(metered)
+    source_schema = {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {"type": "string"},
+                "uniqueItems": True,
+            }
+        },
+        "required": ["items"],
+        "additionalProperties": False,
+    }
+
+    client.messages.create(
+        model=_SONNET,
+        max_tokens=700,
+        messages=[{"role": "user", "content": "schema normalization"}],
+        output_config={
+            "format": {
+                "type": "json_schema",
+                "schema": source_schema,
+            }
+        },
+    )
+
+    sent_schema = messages.requests[0]["output_config"]["format"]["schema"]
+
+    def keys(value):
+        if isinstance(value, dict):
+            return set(value).union(*(keys(item) for item in value.values()))
+        if isinstance(value, list):
+            return set().union(*(keys(item) for item in value))
+        return set()
+
+    assert "uniqueItems" not in keys(sent_schema)
+    assert source_schema["properties"]["items"]["uniqueItems"] is True
+    assert "uniqueItems" in sent_schema["properties"]["items"]["description"]
+
+
+def test_structured_output_schema가_아니면_설정을_그대로_보낸다():
+    messages = FakeMessages()
+    metered = real._MeteredEngine(FakeRawEngine(messages))
+    client = _client(metered)
+    output_config = {"effort": "low"}
+
+    client.messages.create(
+        model=_SONNET,
+        max_tokens=700,
+        messages=[{"role": "user", "content": "plain output"}],
+        output_config=output_config,
+    )
+
+    assert messages.requests[0]["output_config"] is output_config
+
+
+def test_정본_문장선택_schema도_provider_호환형식으로_정규화된다():
+    source_schema = answer_schema()
+    original_schema = copy.deepcopy(source_schema)
+    normalized = real._provider_output_config(
+        {"format": {"type": "json_schema", "schema": source_schema}}
+    )
+    sent_schema = normalized["format"]["schema"]
+    official_schema = real.importlib.import_module("anthropic").transform_schema(
+        copy.deepcopy(source_schema)
+    )
+
+    def key_count(value, target):
+        if isinstance(value, dict):
+            return int(target in value) + sum(
+                key_count(item, target) for item in value.values()
+            )
+        if isinstance(value, list):
+            return sum(key_count(item, target) for item in value)
+        return 0
+
+    assert key_count(source_schema, "uniqueItems") == 2
+    assert key_count(sent_schema, "uniqueItems") == 0
+    assert source_schema == original_schema
+    assert sent_schema == official_schema
+
+
+def test_schema_정규화가_실패하면_예약과_provider호출은_모두_0회다(monkeypatch):
+    messages = FakeMessages()
+    metered = real._MeteredEngine(FakeRawEngine(messages))
+    client = _client(metered)
+
+    def unavailable(_name):
+        raise ImportError("시험용 anthropic SDK 없음")
+
+    monkeypatch.setattr(real.importlib, "import_module", unavailable)
+    with provider_budget.activate(10_000.0) as budget:
+        with pytest.raises(provider_budget.ProviderBudgetUnavailable):
+            client.messages.create(
+                model=_SONNET,
+                max_tokens=700,
+                messages=[{"role": "user", "content": "must stay local"}],
+                output_config={
+                    "format": {
+                        "type": "json_schema",
+                        "schema": answer_schema(),
+                    }
+                },
+            )
+
+        assert budget.accounted_krw == 0
+
+    assert messages.calls == []
+    assert metered.usages == []
 
 
 def test_usage가_있는_실패호출도_실제원가이벤트로_보존한다():
@@ -542,6 +658,28 @@ def test_provider_예외는_앞선_확정비용을_남기고_과금불확실을_
     assert result.outcome is Outcome.FAILED
     assert result.cost_krw > 0
     assert result.billing_uncertain is True
+
+
+def test_usage없는_provider_예외뒤에는_같은요청의_추가호출을_막는다():
+    messages = FakeMessages(fail_on_call=1)
+    metered = real._MeteredEngine(FakeRawEngine(messages))
+    client = _client(metered)
+
+    with pytest.raises(TimeoutError):
+        client.messages.create(
+            model=_HAIKU,
+            max_tokens=700,
+            messages=[{"role": "user", "content": "first unknown call"}],
+        )
+    with pytest.raises(provider_budget.ProviderBudgetUnavailable):
+        client.messages.create(
+            model=_HAIKU,
+            max_tokens=700,
+            messages=[{"role": "user", "content": "must stay local"}],
+        )
+
+    assert messages.calls == [_HAIKU]
+    assert metered.billing_uncertain is True
 
 
 def test_DART_회사응답_실패는_회사없음이_아니라_기술실패다(monkeypatch):

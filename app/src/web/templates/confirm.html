@@ -5,7 +5,9 @@
 {% block content %}
 <h1>이 회사가 맞나요?</h1>
 
-<div class="company-card">
+{# DART 고유번호는 확인 카드와 일회용 서버 token이 같은 법인을 가리키는지
+   파일럿 실행기만 대조할 수 있게 한다. 사용자 입력이나 비밀값은 싣지 않는다. #}
+<div class="company-card"{% if card.ref and card.ref|length == 8 %} data-dart-corp-code="{{ card.ref }}"{% endif %}>
   <div class="head">
     <div class="legal">{{ card.legal_name }}</div>
     {% if card.typed_name and card.typed_name != card.legal_name %}

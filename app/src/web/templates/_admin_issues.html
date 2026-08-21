@@ -1,0 +1,20 @@
+<section id="issues" class="frame-section" data-dashboard-refresh="issues">
+  <div class="frame-section-heading"><div><p class="frame-eyebrow">문제·보고서</p><h2>문제부터, 다음 행동까지</h2></div><button class="btn ghost" type="button" data-dashboard-refresh-button="issues">수동 새로고침</button></div>
+  {% if dashboard_incidents %}
+    {% for incident in dashboard_incidents %}
+      <article class="card frame-issue"><p class="frame-eyebrow">전체 점검 우선 · {{ incident.created_at }}</p><h3>{{ incident.kind }}</h3><dl class="frame-action-summary"><div><dt>무슨 일</dt><dd>{{ incident.summary }}</dd></div><div><dt>왜</dt><dd>중대한 전역 incident로 기록되었습니다.</dd></div><div><dt>다음 행동</dt><dd>원인·수정 내용과 재검사·전체 시험을 기록한 뒤 관리자만 재가동할 수 있습니다.</dd></div></dl>{% if incident.report_id %}<a class="btn" href="/admin/reports/{{ incident.report_id }}">연결 보고서 검토</a>{% endif %}</article>
+    {% endfor %}
+  {% endif %}
+  {% if dashboard_operation_issues %}
+    {% for issue in dashboard_operation_issues %}
+      <article class="card frame-issue"><p class="frame-eyebrow">정기 작업 실패 · {{ issue.created_at }}</p><h3>{{ issue.operation }}</h3><dl class="frame-action-summary"><div><dt>무슨 일</dt><dd>{{ issue.detail }}</dd></div><div><dt>왜</dt><dd>자동 재시도나 재가동으로 숨기지 않았습니다.</dd></div><div><dt>다음 행동</dt><dd>관리자가 설정의 변경 화면에서 원인을 확인한 뒤 다음 실행 기준일에 다시 기록합니다.</dd></div></dl><a class="btn" href="/admin/settings">설정 확인</a></article>
+    {% endfor %}
+  {% endif %}
+  {% if dashboard_errors %}
+    {% for issue in dashboard_errors %}
+      <article class="card frame-issue"><p class="frame-eyebrow">{{ dashboard_status_labels.get(issue.status, "확인 대기") }} · {{ issue.created_at }}</p><h3>{{ issue.area }}</h3><dl class="frame-action-summary"><div><dt>무슨 일</dt><dd>{{ issue.area }}</dd></div><div><dt>왜</dt><dd>{{ issue.reason }}</dd></div><div><dt>다음 행동</dt><dd>원본과 출처를 확인하고, 수정과 재검사 기록을 남긴 뒤 운영자가 직접 재공개 여부를 결정합니다.</dd></div></dl><a class="btn" href="/admin/reports/{{ issue.report_id }}">보고서 원본·상태 검토</a></article>
+    {% endfor %}
+  {% elif not dashboard_incidents and not dashboard_operation_issues %}
+    <article class="card frame-empty-state"><h3>아직 표시할 문제가 없습니다</h3><p>현재 확인 대기·수정 중·재검사 중인 신고가 없습니다.</p></article>
+  {% endif %}
+</section>

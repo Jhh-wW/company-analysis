@@ -864,6 +864,11 @@ def build_competitive_position(
                         ),
                         comparison_period=period,
                         comparison_scope=scope,
+                        comparison_judgment=(
+                            "competitive_advantage"
+                            if signed_difference > 0
+                            else "operating_characteristic"
+                        ),
                         comparator_source_id=comparator_source.source_id,
                         comparator_state_evidence=comparator_evidence,
                         comparator_evidence_support_terms=[
@@ -978,6 +983,7 @@ def build_competitive_position(
                 ),
                 comparison_period=self_row.period,
                 comparison_scope=scope,
+                comparison_judgment="operating_characteristic",
                 comparator_source_id=comparator_source.source_id,
                 comparator_state_evidence=comparator_evidence,
                 comparator_evidence_support_terms=[self_row.scope_code, "매출액"],

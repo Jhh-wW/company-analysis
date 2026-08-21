@@ -19,6 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.features.auth import logic as auth_logic
+from src.features.admin_dashboard import store as dashboard_store
 from src.features.budget import logic as budget_logic
 from src.features.budget import spend_store
 from src.features.budget.constants import (
@@ -36,6 +37,7 @@ from src.features.sharelink.constants import (
     PUBLIC_BUCKET,
 )
 from src.features.storage import db as storage_db
+from src.features.storage import constants as storage_constants
 
 _열쇠 = "a1b2c3d4e5f60718a1b2c3d4e5f60718"
 from src.features.pipeline.demo import DemoPipeline
@@ -129,6 +131,26 @@ def _예산을_다_쓴다(monkeypatch, 통장: str = _열쇠,
         share_logic.DailySpend(day=오늘), 통장, 오늘, 금액
     )
     monkeypatch.setattr(paid_runtime, "_LINK_SPEND", 다_쓴)
+
+
+def test_전역_점검_중에는_새_생성을_막는다(monkeypatch, tmp_path):
+    monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(tmp_path / "storage.db"))
+    monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
+    with storage_db.connect() as conn:
+        dashboard_store.set_service_state(
+            conn,
+            status=dashboard_store.SERVICE_MAINTENANCE,
+            cause="same root cause",
+            impact="new reports blocked",
+            next_action="manual restart only",
+            actor_email="admin@example.com",
+            now_iso="2026-08-22T10:00:00+09:00",
+        )
+    with TestClient(main.app) as isolated_client:
+        response = _조사시작(isolated_client)
+
+    assert response.status_code == 429
+    assert "점검 중" in response.text
 
 
 class _가짜진짜알맹이:

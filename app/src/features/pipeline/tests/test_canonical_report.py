@@ -11,8 +11,12 @@ from src.features.pipeline.canonical_report import (
     majority_picks,
     sections_from_picks,
 )
+from src.features.pipeline.port import ReportSection, ReportTable
 from src.features.provenance.sources import Source, SourceKind, evidence_text_hash
-from src.features.spanselect.canonical import CanonicalPick
+from src.features.spanselect.canonical import (
+    CanonicalPick,
+    historical_performance_basis_sid,
+)
 
 
 def _source(number: int, evidence: str = "공식 원문") -> Source:
@@ -44,6 +48,27 @@ def test_majority_vote_drops_cross_section_tie() -> None:
     ]
 
     assert majority_picks(rounds) == [same]
+
+
+def test_majority_vote_agrees_each_structured_field_without_exact_object_match() -> None:
+    base = CanonicalPick(
+        "future_strategy",
+        "가나다는 2027년 AlphaX 생산 설비 가동을 계획했다.",
+        1,
+        sid="1-1",
+        claim_type="future_plan",
+        subject_label="AlphaX 생산 설비",
+        plan_status="announced",
+        plan_timing="2027년",
+        plan_execution_signal="생산 설비 가동",
+    )
+    rounds = [
+        [base],
+        [replace(base, plan_timing="2027년 중")],
+        [replace(base, plan_execution_signal="AlphaX 생산 설비 가동")],
+    ]
+
+    assert majority_picks(rounds) == [base]
 
 
 def test_assemble_report_locks_visible_claims_to_sources() -> None:
@@ -112,7 +137,7 @@ def test_assemble_report_locks_visible_claims_to_sources() -> None:
 def test_assembly_never_self_registers_written_claim_as_source_evidence() -> None:
     evidence = "가나다는 산업용 소재 기업이다."
     pick = CanonicalPick(
-        "identity", evidence, 1, sid="identity-1", claim_type="official_identity"
+        "identity", evidence, 1, sid="identity-1", claim_type="identity_summary"
     )
     sections = sections_from_picks(
         [pick], {1: {"종류": "사업내용", "원문": evidence}}
@@ -124,7 +149,7 @@ def test_assembly_never_self_registers_written_claim_as_source_evidence() -> Non
         evidence,
         1,
         sid="identity-1",
-        claim_type="official_identity",
+        claim_type="identity_summary",
     )
     source = _source(1, "서로 다른 실제 원문")
 
@@ -145,6 +170,56 @@ def test_assembly_never_self_registers_written_claim_as_source_evidence() -> Non
     assert report.fact_records == []
     assert report.citations == []
     assert evidence_text_hash(evidence) not in source.evidence_hashes
+
+
+def test_customer_market_metadata_stays_bound_from_pick_to_fact() -> None:
+    evidence = "가나다는 중국에서 제품을 판매해 매출을 얻는다."
+    pick = CanonicalPick(
+        "business_model",
+        evidence,
+        1,
+        sid="business-1",
+        claim_type="customer_market",
+        subject_label="중국",
+        market_stage="",
+        market_observation="중국에서 제품을 판매",
+    )
+    sections = sections_from_picks(
+        [pick], {1: {"종류": "사업내용", "원문": evidence}}
+    )
+    claim = WrittenClaim(
+        "business_model",
+        evidence,
+        "조각 1·사업내용",
+        evidence,
+        1,
+        sid=pick.sid,
+        claim_type=pick.claim_type,
+        subject_label=pick.subject_label,
+        market_stage=pick.market_stage,
+        market_observation=pick.market_observation,
+    )
+
+    report = assemble_report(
+        company="가나다",
+        corp_type="상장사",
+        sections=sections,
+        written_claims=[claim],
+        sources=[_source(1, evidence)],
+        summary_ask=lambda *_args: ({"items": []}, {}),
+        steps=[],
+        as_of_date="2026-08-19",
+        analysis_period="2023~2025 완료 회계연도",
+        latest_performance_period="2025년 공식 공시",
+        publish=False,
+    )
+
+    assert len(report.fact_records) == 1
+    fact = report.fact_records[0]
+    assert fact.claim_type == "customer_market"
+    assert fact.market_stage == ""
+    assert fact.market_observation == "중국에서 제품을 판매"
+    assert fact.market_priority == ""
 
 
 def test_assemble_report_rejects_duplicate_source_numbers_before_mapping() -> None:
@@ -173,7 +248,7 @@ def test_complete_news_metadata_is_not_promoted_to_a_draft_fact() -> None:
         evidence,
         1,
         sid="1-1",
-        claim_type="official_identity",
+        claim_type="identity_summary",
     )
     sections = sections_from_picks([pick], fragments)
     claim = WrittenClaim(
@@ -183,7 +258,7 @@ def test_complete_news_metadata_is_not_promoted_to_a_draft_fact() -> None:
         evidence,
         1,
         sid="1-1",
-        claim_type="official_identity",
+        claim_type="identity_summary",
     )
     news = Source(
         number=1,
@@ -222,3 +297,116 @@ def test_complete_news_metadata_is_not_promoted_to_a_draft_fact() -> None:
     assert report.sections == []
     assert report.fact_records == []
     assert report.citations == []
+
+
+def test_assembly_resolves_public_performance_reference_to_verified_table_fact() -> None:
+    interpretation_evidence = (
+        "가나다는 2025년 SmartX 매출이 2024년보다 증가했다고 밝혔다."
+    )
+    financial_payload = '{"status":"000","source":"DART"}'
+    performance_table = ReportTable(
+        caption="전자공시 최근 세 사업연도 연결 주요 실적 (단위: 억원)",
+        headers=["사업연도", "매출액"],
+        rows=[["2025", "120"], ["2024", "100"], ["2023", "90"]],
+        cite="조각 2·재무",
+        numeric=True,
+        raw_rows=[
+            ["2025", "12000000000"],
+            ["2024", "10000000000"],
+            ["2023", "9000000000"],
+        ],
+        scale_divisor="100000000",
+        scale_places=0,
+        display_unit="억원",
+        evidence_rows=[financial_payload, financial_payload, financial_payload],
+    )
+    reference = historical_performance_basis_sid(2025)
+    section = ReportSection(
+        cell="past_changes",
+        title="3개년 주요 변화와 실행",
+        tables=[performance_table],
+    )
+    interpretation = WrittenClaim(
+        section_id="past_changes",
+        text=interpretation_evidence,
+        cite="조각 1·MD&A",
+        evidence=interpretation_evidence,
+        fragment_id=1,
+        sid="1-1",
+        claim_type="change_interpretation",
+        basis_sids=(reference,),
+    )
+
+    report = assemble_report(
+        company="가나다",
+        corp_type="상장사",
+        sections=[section],
+        written_claims=[interpretation],
+        sources=[_source(1, interpretation_evidence), _source(2, financial_payload)],
+        summary_ask=lambda *_args: ({"items": []}, {}),
+        steps=[],
+        as_of_date="2026-08-19",
+        analysis_period="2023~2025 완료 회계연도",
+        latest_performance_period="2025년 공식 공시",
+        publish=False,
+    )
+
+    interpretation_fact = next(
+        fact
+        for fact in report.fact_records
+        if fact.claim_type == "change_interpretation"
+    )
+    performance_fact = next(
+        fact
+        for fact in report.fact_records
+        if fact.claim_type == "historical_performance" and fact.fiscal_year == 2025
+    )
+    assert interpretation_fact.basis_fact_ids == [performance_fact.fact_id]
+    assert reference not in interpretation_fact.basis_fact_ids
+
+
+def test_assembly_drops_entire_basis_link_when_internal_or_unknown_reference_is_mixed() -> None:
+    evidence = "가나다는 2025년 SmartX 매출이 증가했다고 밝혔다."
+    reference = historical_performance_basis_sid(2025)
+    table = ReportTable(
+        caption="전자공시 최근 세 사업연도 연결 주요 실적 (단위: 억원)",
+        headers=["사업연도", "매출액"],
+        rows=[["2025", "120"]],
+        cite="조각 2·재무",
+        numeric=True,
+        raw_rows=[["2025", "12000000000"]],
+        scale_divisor="100000000",
+        scale_places=0,
+        display_unit="억원",
+        evidence_rows=["DART 원 payload"],
+    )
+    claim = WrittenClaim(
+        "past_changes",
+        evidence,
+        "조각 1·MD&A",
+        evidence,
+        1,
+        sid="1-1",
+        claim_type="change_interpretation",
+        basis_sids=(reference, "fact-internal-value"),
+    )
+    report = assemble_report(
+        company="가나다",
+        corp_type="상장사",
+        sections=[ReportSection("past_changes", "과거", tables=[table])],
+        written_claims=[claim],
+        sources=[_source(1, evidence), _source(2, "DART 원 payload")],
+        summary_ask=lambda *_args: ({"items": []}, {}),
+        steps=[],
+        as_of_date="2026-08-19",
+        analysis_period="2023~2025 완료 회계연도",
+        latest_performance_period="2025년 공식 공시",
+        publish=False,
+    )
+
+    interpretation_fact = next(
+        fact
+        for fact in report.fact_records
+        if fact.claim_type == "change_interpretation"
+    )
+    assert interpretation_fact.basis_fact_ids == []

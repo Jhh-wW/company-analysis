@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}보고서 검토 · 기업분석{% endblock %}
+{% block bodyclass %}admin-frame-page dashboard-mobile-restricted{% endblock %}
+{% block wrapclass %}wide admin-frame{% endblock %}
+{% block content %}
+<header class="frame-heading">
+  <p class="frame-kicker">관리자 전용 · 원본 및 출처</p>
+  <h1>{{ report.company }}</h1>
+  <p class="lede">보고서 ID {{ report_id }} · 현재 {{ dashboard_status_labels.get(report_state.status, "확인 대기") }}{% if report_state.blocked %} · 공개 차단됨{% endif %}</p>
+</header>
+{% set dashboard_nav = "issues" %}{% include "_admin_nav.html" %}
+
+<section class="frame-section">
+  <p class="frame-eyebrow">보고서 상태</p>
+  <div class="frame-grid frame-grid-two">
+    <article class="card">
+      <h2>{{ dashboard_status_labels.get(report_state.status, "확인 대기") }}</h2>
+      <p>공개 상태: <strong>{{ "차단" if report_state.blocked else "정상" }}</strong> · 버전 {{ report_state.version }}</p>
+      <p>회사 유형: {{ dashboard_company_labels.get(report_state.company_type, "판정 전 종료") }}</p>
+      <p class="muted">정상 재공개는 재검사 뒤에 운영자가 직접 선택할 때만 가능합니다.</p>
+    </article>
+    <article class="card">
+      <h2>상태 전이</h2>
+      <form method="post" action="/admin/reports/{{ report_id }}/state">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label>다음 상태<select name="status">{% for item in report_statuses %}<option value="{{ item }}">{{ dashboard_status_labels.get(item, item) }}</option>{% endfor %}</select></label>
+        <label>회사 유형<select name="company_type">{% for item in company_types %}<option value="{{ item }}" {% if item == report_state.company_type %}selected{% endif %}>{{ dashboard_company_labels.get(item, item) }}</option>{% endfor %}</select></label>
+        <label>변경 이유<textarea name="reason" maxlength="3000"></textarea></label>
+        <button class="btn" type="submit">수동 상태 변경</button>
+      </form>
+    </article>
+  </div>
+  {% if report_state.status == "rechecking" %}
+  <details class="card">
+    <summary>수정 보고서 원본 등록</summary>
+    <p class="muted">재검사 완료한 수정 JSON만 다음 공개 버전으로 동결합니다. 이 등록만으로는 공개되지 않으며, 별도 수동 정상 전환이 필요합니다.</p>
+    <form method="post" action="/admin/reports/{{ report_id }}/corrected-payload" enctype="multipart/form-data">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>검증된 수정 원본 JSON<textarea name="corrected_payload_json" maxlength="250000" required></textarea></label>
+      <button class="btn" type="submit">수정본 버전 등록</button>
+    </form>
+  </details>
+  {% endif %}
+  <details class="card">
+    <summary>휴지통</summary>
+    {% if report_trash and report_trash.status == "trashed" %}
+    <p>휴지통 이동 {{ report_trash.trashed_at }} · 통계와 공개 결과에서는 제외된 상태입니다.</p>
+    <form method="post" action="/admin/reports/{{ report_id }}/restore">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>복구 이유<textarea name="reason" maxlength="3000" required></textarea></label>
+      <button class="btn" type="submit">보고서 복구</button>
+    </form>
+    {% else %}
+    <p class="muted">휴지통으로 옮기면 즉시 통계와 외부 결과에서 제외됩니다. 30일 안에는 관리자만 복구할 수 있습니다.</p>
+    <form method="post" action="/admin/reports/{{ report_id }}/trash">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>휴지통 이동 이유<textarea name="reason" maxlength="3000" required></textarea></label>
+      <button class="btn danger" type="submit">휴지통으로 이동</button>
+    </form>
+    {% endif %}
+  </details>
+</section>
+
+<section class="frame-section">
+  <p class="frame-eyebrow">신고와 처리 이력</p>
+  {% if report_errors %}{% for item in report_errors %}
+  <article class="card frame-issue">
+    <h2>{{ item.area }}</h2>
+    <dl class="frame-action-summary">
+      <div><dt>무슨 일</dt><dd>{{ item.area }}</dd></div>
+      <div><dt>왜</dt><dd>{{ item.reason }}</dd></div>
+      <div><dt>다음 행동</dt><dd>원본과 출처를 대조하고 수정·재검사 기록을 남깁니다.</dd></div>
+    </dl>
+  </article>
+  {% endfor %}{% else %}
+  <article class="card"><p>현재 미해결 신고가 없습니다.</p></article>
+  {% endif %}
+  <details class="card"><summary>처리 사건 기록</summary><ul>{% for event in report_events %}<li>{{ event.created_at }} · {{ event.action }} · {{ event.from_status }} → {{ event.to_status }} · {{ event.reason }}</li>{% else %}<li>아직 기록이 없습니다.</li>{% endfor %}</ul></details>
+</section>
+
+<section class="frame-section">
+  <p class="frame-eyebrow">MEMBER 설문 · 관리자만 열람</p>
+  {% for survey in report_surveys %}
+  <article class="card">
+    <p><strong>{{ survey.rating }}점</strong> · {{ survey.actor_email }} · 수정 {{ survey.revision }}회</p>
+    <p>전체 소감: {{ survey.overall_feedback }}</p>
+    <p>사업상 구분점: {{ survey.business_distinction }}</p>
+    <p class="muted">추가 희망: {{ survey.add_information or "—" }} · 삭제 희망: {{ survey.delete_information or "—" }}</p>
+  </article>
+  {% else %}<article class="card"><p>아직 설문이 없습니다.</p></article>{% endfor %}
+</section>
+
+<section class="frame-section">
+  <p class="frame-eyebrow">원본·출처 · 관리자만</p>
+  <article class="card">
+    <h2>{{ report.company }}</h2>
+    {% if report.summary_items %}<ol>{% for item in report.summary_items %}<li>{{ item.text }}</li>{% endfor %}</ol>{% else %}<p>핵심 요약이 없는 저장 보고서입니다.</p>{% endif %}
+    <h3>출처 {{ report.citations|length }}건</h3>
+    <ul>{% for source in report.citations %}<li>{{ source.label }}{% if source.url %} · <a href="{{ source.url }}" rel="noreferrer">원문</a>{% endif %}</li>{% endfor %}</ul>
+  </article>
+</section>
+{% endblock %}

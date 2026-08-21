@@ -16,15 +16,27 @@ from fastapi.testclient import TestClient
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
 from src.features.budget import logic as budget_logic
+from src.features.budget import spend_store
 from src.features.budget.constants import SPEND_PHASE_CANDIDATE, SPEND_PHASE_IDENTIFY
 from src.features.business_candidate.constants import CANDIDATE_ATTEMPT_TTL_SEC
 from src.features.business_candidate.logic import (
+    CandidateResolution,
     ProviderRateLimited,
     ProviderTimedOut,
     RawBusinessCandidate,
+    ResolutionStatus,
 )
+from src.features.admin_dashboard import store as dashboard_store
 from src.features.pipeline.demo import DemoPipeline
-from src.features.pipeline.port import CompanyCard, CompanyLookupResult, UserInput
+from src.features.pipeline.port import (
+    CompanyCard,
+    CompanyLookupResult,
+    Outcome,
+    RunResult,
+    UserInput,
+)
+from src.features.sharelink import store as share_store
+from src.features.sharelink.constants import KEY_COOKIE_NAME
 from src.features.storage import db as storage_db
 from src.web import (
     evaluation_mode,
@@ -35,6 +47,7 @@ from src.web import (
     request_helpers,
     runtime,
 )
+from src.web.routers import analysis as analysis_router
 
 
 @pytest.fixture(autouse=True)
@@ -123,6 +136,84 @@ class CandidateAwareFakeRealPipeline:
             ),
             cost_krw=7.0,
             model="fake-dart",
+        )
+
+
+class LinkMultiCompanyFakeRealPipeline:
+    """실제 provider 없이 LINK의 후보 선택→생성 이력만 끝까지 재현한다."""
+
+    business_candidate_provider_costs_money = False
+
+    _COMPANIES = {
+        "네이버": ("NAVER", "00266961", "035420"),
+        "YG": ("와이지엔터테인먼트", "00613318", "122870"),
+    }
+
+    def __init__(self) -> None:
+        self.search_inputs: list[str] = []
+        self.exact_inputs: list[str] = []
+        self.lookup_refs: list[str] = []
+        self.run_inputs: list[tuple[str, str]] = []
+
+    def search_business_candidates(self, **kwargs):
+        input_name = kwargs["company"]
+        self.search_inputs.append(input_name)
+        # 이 통합 시험은 LINK 권한·이력만 본다. 로컬 후보는 정상 0건으로 두고
+        # 아래 무과금 exact fixture가 공인 DART ID를 가진 확인 카드를 돌려준다.
+        return []
+
+    def find_company_by_ref_metered(
+        self, user_input: UserInput, candidate_ref: str
+    ) -> CompanyLookupResult:
+        legal_name, expected_ref, _stock_code = next(
+            value
+            for value in self._COMPANIES.values()
+            if value[1] == candidate_ref
+        )
+        self.lookup_refs.append(candidate_ref)
+        assert candidate_ref == expected_ref
+        return CompanyLookupResult(
+            card=CompanyCard(
+                legal_name=legal_name,
+                typed_name=user_input.company,
+                address="공식 DART fixture 주소",
+                ceo="fixture",
+                founded="20000101",
+                ref=candidate_ref,
+            ),
+            model="free-local-dart-fixture",
+        )
+
+    def find_company_metered(self, user_input: UserInput) -> CompanyLookupResult:
+        """실제 provider 없이 공식 DART 식별값을 돌려주는 exact fixture."""
+
+        self.exact_inputs.append(user_input.company)
+        legal_name, corp_code, _stock_code = self._COMPANIES[user_input.company]
+        return CompanyLookupResult(
+            card=CompanyCard(
+                legal_name=legal_name,
+                typed_name=user_input.company,
+                address="공식 DART fixture 주소",
+                ceo="fixture",
+                founded="20000101",
+                ref=corp_code,
+            ),
+            model="free-local-dart-fixture",
+        )
+
+    def run(
+        self,
+        user_input: UserInput,
+        card: CompanyCard,
+        on_step=None,
+    ) -> RunResult:
+        del on_step
+        self.run_inputs.append((user_input.company, card.legal_name))
+        return RunResult(
+            outcome=Outcome.GATE_STOPPED,
+            message="외부호출 없는 LINK 비용 원장 fixture 종료",
+            cost_krw=13.0,
+            model="offline-link-cost-fixture",
         )
 
 
@@ -518,6 +609,109 @@ def test_DART_local_후보선택은_서명된_고유번호를_직접재조회하
         client.close()
 
 
+def test_YG는_실제_RealPipeline_DARTmatcher에서_선택전_후보카드로만_보인다(
+    monkeypatch,
+):
+    from src.features.business_candidate import providers
+    from src.features.pipeline import real
+
+    class YgDartFixtureEngine:
+        class UsageCounter:
+            pass
+
+        MODEL = ""
+
+        def __init__(self):
+            self.loaded = 0
+            self.profile_calls: list[str] = []
+
+        def load_env(self):
+            self.loaded += 1
+
+        def get_json(self, path, params, _counter):
+            assert path == "company.json"
+            corp_code = str(params["corp_code"])
+            self.profile_calls.append(corp_code)
+            assert corp_code == "00613318"
+            return {
+                "status": "000",
+                "corp_name": "와이지엔터테인먼트",
+                "adres": "",
+                "ceo_nm": "",
+                "est_dt": "",
+                "hm_url": "",
+            }
+
+    catalog = (
+        (
+            "00613318",
+            "와이지엔터테인먼트",
+            "YG Entertainment Inc.",
+            "122870",
+            "20240401",
+        ),
+    )
+    engine = YgDartFixtureEngine()
+    monkeypatch.setattr(real, "_company_catalog", lambda: catalog)
+    monkeypatch.setattr(real, "_engine", lambda: engine)
+    monkeypatch.setattr(runtime, "_PIPELINE", real.RealPipeline())
+    monkeypatch.setattr(
+        providers,
+        "configured_provider",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("YG DART 후보 뒤 외부 provider를 열면 안 됩니다")
+        ),
+    )
+
+    client, csrf = _admin_client()
+    try:
+        candidates = client.post(
+            "/confirm",
+            data=_form(csrf, company="YG", region=""),
+        )
+        assert candidates.status_code == 200
+        assert "주소와 함께 찾은 회사 후보입니다" in candidates.text
+        assert "와이지엔터테인먼트" in candidates.text
+        assert "YG Entertainment Inc." in candidates.text
+        assert "122870" in candidates.text
+        assert "2024-04-01" in candidates.text
+        assert _hidden(candidates.text, "company") == "YG"
+        # 이름 점수가 높아도 후보를 찾는 fixture 조회 한 번뿐이며 자동 확정하지 않는다.
+        assert engine.profile_calls == ["00613318"]
+        assert len(job_runtime._PAID_ATTEMPTS) == 0
+
+        confirmed = client.post(
+            "/confirm",
+            data=_form(
+                csrf,
+                company="YG",
+                region="",
+                candidate_resolution_confirmed="yes",
+                candidate_attempt_token=_hidden(
+                    candidates.text, "candidate_attempt_token"
+                ),
+                candidate_selection_token=_hidden(
+                    candidates.text, "candidate_selection_token"
+                ),
+                candidate_index=_hidden(candidates.text, "candidate_index"),
+                candidate_name=_hidden(candidates.text, "candidate_name"),
+                candidate_provider=_hidden(candidates.text, "candidate_provider"),
+                candidate_ref=_hidden(candidates.text, "candidate_ref"),
+            ),
+        )
+
+        assert confirmed.status_code == 200
+        assert "이 회사가 맞나요?" in confirmed.text
+        assert "와이지엔터테인먼트" in confirmed.text
+        assert engine.profile_calls == ["00613318", "00613318"]
+        confirmation_token = _hidden(confirmed.text, "paid_attempt_token")
+        attempt = job_runtime._PAID_ATTEMPTS[confirmation_token]
+        assert attempt.card.ref == "00613318"
+        assert attempt.card.typed_name == "YG"
+    finally:
+        client.close()
+
+
 @pytest.mark.parametrize("typed", ["JYP", "jyp", "Jyp", "ＪＹＰ", "JYP Entertainment"])
 def test_대소문자와_영문별칭은_유료AI나_Google전에_DART후보로_멈춘다(
     monkeypatch, typed
@@ -803,7 +997,10 @@ def test_후보선택_token은_직무주소공고_이미지동의_index를_bind�
         client.close()
 
 
-def test_오프라인데모는_외부후보를_부르지_않고_저장목록만_안내한다(monkeypatch):
+@pytest.mark.parametrize("company", ["JYP", "YG"])
+def test_오프라인데모는_외부후보를_부르지_않고_저장목록만_안내한다(
+    monkeypatch, company
+):
     monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
 
     def forbidden(_pipeline):
@@ -817,7 +1014,7 @@ def test_오프라인데모는_외부후보를_부르지_않고_저장목록만_
         response = client.post(
             "/confirm",
             data={
-                "company": "JYP",
+                "company": company,
                 "job": "매니지먼트",
                 "region": "서울 강동구",
                 "posting_text": "채용 공고",
@@ -1079,34 +1276,220 @@ def test_서명과_같은canonical값으로_줄어드는_raw후보변조도_DART
         client.close()
 
 
-def test_share_cookie범위에서는_별칭후보와_서명된후보선택도_닫힌다(monkeypatch):
-    pipeline = CandidateAwareFakeRealPipeline(local_candidates=True)
+def test_카카오_LINK로_네이버와_YG를_차례로_검색확정생성해도_같은통장과_시작보고서를_지킨다(
+    monkeypatch,
+):
+    raw_key = "a1b2c3d4e5f60718a1b2c3d4e5f60718"
+    initial_report_id = "1" * 32
+    pipeline = LinkMultiCompanyFakeRealPipeline()
     monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    with storage_db.connect() as conn:
+        assert share_store.insert_new(
+            conn,
+            key=raw_key,
+            company="카카오",
+            job="마케팅",
+            report_id=initial_report_id,
+            now_iso="2026-08-21T10:00:00+09:00",
+        )
+
+    client = TestClient(
+        main.app,
+        base_url="https://testserver",
+        headers={"Origin": "https://testserver"},
+    )
+    try:
+        opened = client.get(f"/k/{raw_key}", follow_redirects=False)
+        assert opened.status_code == 303
+        assert client.cookies.get(KEY_COOKIE_NAME) == raw_key
+        csrf = auth_logic.csrf_token_for_session(raw_key)
+
+        run_ids: list[str] = []
+        expected_refs = {"네이버": "00266961", "YG": "00613318"}
+        for input_name in ("네이버", "YG"):
+            form = _form(csrf, company=input_name)
+            confirmed = client.post("/confirm", data=form)
+            assert confirmed.status_code == 200
+            assert (
+                f'data-dart-corp-code="{expected_refs[input_name]}"'
+                in confirmed.text
+            )
+            paid_attempt_token = _hidden(confirmed.text, "paid_attempt_token")
+
+            started = client.post(
+                "/run",
+                data={
+                    "company": input_name,
+                    "region": "서울 강동구",
+                    "paid_attempt_token": paid_attempt_token,
+                    "csrf_token": csrf,
+                },
+                follow_redirects=False,
+            )
+            assert started.status_code == 303
+            run_id = started.headers["location"].rsplit("/", 1)[-1]
+            run_ids.append(run_id)
+            for _ in range(200):
+                if client.get(f"/api/progress/{run_id}").json()["finished"]:
+                    break
+                time.sleep(0.005)
+            else:
+                pytest.fail("무과금 LINK fixture 생성이 끝나지 않았습니다")
+            assert job_runtime._JOBS[run_id].result is not None
+            assert job_runtime._JOBS[run_id].result.outcome is Outcome.GATE_STOPPED
+
+        with storage_db.connect() as conn:
+            link = share_store.load(conn, raw_key)
+            runs = share_store.list_runs_by_hash(conn, link.key_hash)
+            spend_history = spend_store.load_run_history(conn, run_ids)
+
+        assert link.report_id == initial_report_id
+        assert link.company == "카카오"
+        assert {run.run_id for run in runs} == set(run_ids)
+        assert {run.input_company for run in runs} == {"네이버", "YG"}
+        assert {run.confirmed_company for run in runs} == {
+            "NAVER",
+            "와이지엔터테인먼트",
+        }
+        assert {run.status for run in runs} == {share_store.RUN_STATUS_STOPPED}
+        assert {run.link_key_hash for run in runs} == {link.key_hash}
+        assert {run.internal_ai_cost_krw for run in runs} == {13.0}
+        assert spend_history.run_ids == frozenset(run_ids)
+        assert set(spend_history.by_run.values()) == {13.0}
+        assert set(spend_history.bucket_by_run.values()) == {
+            spend_store.bucket_id(raw_key)
+        }
+        assert pipeline.search_inputs == ["네이버", "YG"]
+        assert pipeline.exact_inputs == ["네이버", "YG"]
+        assert pipeline.lookup_refs == []
+        assert pipeline.run_inputs == [
+            ("네이버", "NAVER"),
+            ("YG", "와이지엔터테인먼트"),
+        ]
+    finally:
+        client.close()
+
+
+def test_무료_DART_후보보강_응답오류는_외부상태만남기고_전역점검으로_번지지않는다(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("STORAGE_DB_PATH", str(tmp_path / "storage.db"))
+
+    analysis_router._observe_candidate_resolution(
+        CandidateResolution(
+            ResolutionStatus.FAILED,
+            provider_called=True,
+            provider_name="DART",
+            local_profile_enrichment_failed=True,
+        )
+    )
+
+    with storage_db.connect() as conn:
+        service = dashboard_store.get_service_state(conn)
+        incidents = dashboard_store.list_incidents(conn)
+        external = conn.execute(
+            "SELECT status, error_summary FROM dashboard_external_status_events "
+            "WHERE provider = ? ORDER BY id DESC LIMIT 1",
+            ("DART",),
+        ).fetchone()
+    assert service.status == dashboard_store.SERVICE_NORMAL
+    assert incidents == []
+    assert external is not None
+    assert tuple(external) == ("error", "응답을 안전하게 해석하지 못함")
+
+
+def test_표식없는_DART_실패는_기존처럼_전역점검으로_격상한다(monkeypatch, tmp_path):
+    monkeypatch.setenv("STORAGE_DB_PATH", str(tmp_path / "storage.db"))
+
+    analysis_router._observe_candidate_resolution(
+        CandidateResolution(
+            ResolutionStatus.FAILED,
+            provider_called=True,
+            provider_name="DART",
+        )
+    )
+
+    with storage_db.connect() as conn:
+        service = dashboard_store.get_service_state(conn)
+        incidents = dashboard_store.list_incidents(conn)
+    assert service.status == dashboard_store.SERVICE_MAINTENANCE
+    assert len(incidents) == 1
+    assert incidents[0]["kind"] == dashboard_store.INCIDENT_PROVIDER_RESPONSE
+
+
+def test_점검429는_실제_confirm에서_DART후보조회보다_먼저_막는다(monkeypatch, tmp_path):
+    monkeypatch.setenv("STORAGE_DB_PATH", str(tmp_path / "storage.db"))
+    monkeypatch.setenv(evaluation_mode.ENV_MODE, "1")
+    monkeypatch.setenv(evaluation_mode.ENV_PAID_PROVIDERS, "1")
+    monkeypatch.setattr(request_helpers, "_strict_loopback_http_request", lambda _r: True)
+    pipeline = CandidateAwareFakeRealPipeline()
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    with storage_db.connect() as conn:
+        dashboard_store.set_service_state(
+            conn,
+            status=dashboard_store.SERVICE_MAINTENANCE,
+            cause="후보 공급자 점검",
+            impact="새 분석을 멈췄습니다.",
+            next_action="수정 뒤 관리자 재가동",
+            actor_email="admin@example.com",
+            now_iso="2026-08-22T10:00:00+09:00",
+        )
+
     client, csrf = _admin_client()
     try:
+        workflow_id = _hidden(client.get("/").text, "evaluation_workflow_id")
+        response = client.post(
+            "/confirm",
+            data=_form(
+                csrf,
+                evaluation_paid_consent="yes",
+                evaluation_workflow_id=workflow_id,
+            ),
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 429
+    assert response.headers["X-Company-Analysis-Block"] == "service-maintenance"
+    assert pipeline.search_calls == 0
+    assert pipeline.lookup_calls == 0
+
+
+def test_살아있는_LINK에서는_별칭후보와_서명된후보선택을_허용한다(monkeypatch):
+    raw_key = "b1b2c3d4e5f60718b1b2c3d4e5f60718"
+    pipeline = CandidateAwareFakeRealPipeline(local_candidates=True)
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    with storage_db.connect() as conn:
+        assert share_store.insert_new(
+            conn,
+            key=raw_key,
+            company="카카오",
+            job="마케팅",
+            now_iso="2026-08-21T10:00:00+09:00",
+        )
+    client = TestClient(main.app, base_url="https://testserver")
+    try:
+        client.get(f"/k/{raw_key}")
+        csrf = auth_logic.csrf_token_for_session(raw_key)
         body = client.post("/confirm", data=_form(csrf)).text
-        attempt_token = _hidden(body, "candidate_attempt_token")
-        monkeypatch.setattr(request_helpers, "_raw_share_key", lambda _request: "a" * 32)
-        blocked = client.post(
+        selected = client.post(
             "/confirm",
             data=_form(
                 csrf,
                 candidate_resolution_confirmed="yes",
-                candidate_attempt_token=attempt_token,
+                candidate_attempt_token=_hidden(body, "candidate_attempt_token"),
                 candidate_selection_token=_hidden(body, "candidate_selection_token"),
                 candidate_index=_hidden(body, "candidate_index"),
                 candidate_name=_hidden(body, "candidate_name"),
                 candidate_provider=_hidden(body, "candidate_provider"),
+                candidate_ref=_hidden(body, "candidate_ref"),
             ),
         )
-        assert blocked.status_code == 403
-        assert pipeline.lookup_calls == 0
-
-        # 새 share 요청은 local alias 공급자도 건너뛰고 기존 exact DART 식별만 쓴다.
-        missed = client.post("/confirm", data=_form(csrf))
-        assert missed.status_code == 200
+        assert selected.status_code == 200
+        assert pipeline.lookup_calls == 1
         assert pipeline.search_calls == 1
         assert pipeline.lookup_inputs == ["JYP"]
+        assert pipeline.lookup_refs == ["00258689"]
     finally:
         client.close()
 

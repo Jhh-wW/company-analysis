@@ -237,7 +237,7 @@ def test_로그인_없이도_첫_화면이_열린다(client: TestClient):
     assert landing.headers["referrer-policy"] == "same-origin"
 
 
-def test_미연결_링크는_회사만_실제입력에_채우고_읽기전용으로_보인다(
+def test_LINK_지원회사는_맥락으로_채우되_회사입력은_편집할수있다(
     client: TestClient,
 ):
     _링크발급(_카카오열쇠, "카카오")
@@ -247,8 +247,11 @@ def test_미연결_링크는_회사만_실제입력에_채우고_읽기전용으
     assert 'id="company"' in response.text
     assert 'value="카카오"' in response.text
     assert 'name="job"' not in response.text
-    assert response.text.count("readonly") >= 1
-    assert "카카오 전용 링크" in response.text
+    company_input = re.search(r'<input[^>]+id="company"[^>]*>', response.text)
+    assert company_input is not None
+    assert "readonly" not in company_input.group(0)
+    assert "지원 맥락" in response.text
+    assert "다른 회사를 검색해도" in response.text
 
 
 # ══════════════════════════════════════════════════════════
@@ -270,9 +273,11 @@ def test_열어보면_offset포함_KST_기록이_남는다(
 
     with storage_db.connect() as conn:
         link = share_store.load(conn, _카카오열쇠)
+        events = share_store.list_open_events_by_hash(conn, link.key_hash)
     assert link.opened_count == 2
     assert link.first_opened_at == fixed
     assert link.last_opened_at == fixed
+    assert [event.opened_at for event in events] == [fixed, fixed]
 
 
 def test_처음_열어본_시각은_안_덮인다(client: TestClient):
@@ -381,7 +386,7 @@ def test_HEAD는_요청횟수를_늘리지않는다(client: TestClient):
         assert share_store.load(conn, _카카오열쇠).opened_count == 0
 
 
-def test_60일_지난_열쇠는_자동으로_닫히고_열람기록도_남기지_않는다(
+def test_60일_지난_알려진_LINK도_GET시각을_남기고_권한은_닫는다(
     client: TestClient,
 ):
     _링크발급(_카카오열쇠, "카카오", now_iso="2000-01-01T10:00:00")
@@ -392,7 +397,11 @@ def test_60일_지난_열쇠는_자동으로_닫히고_열람기록도_남기지
     assert response.headers["location"] == "/?share_status=expired"
     assert KEY_COOKIE_NAME not in response.cookies
     with storage_db.connect() as conn:
-        assert share_store.load(conn, _카카오열쇠).opened_count == 0
+        link = share_store.load(conn, _카카오열쇠)
+        events = share_store.list_open_events_by_hash(conn, link.key_hash)
+    assert link.opened_count == 1
+    assert len(events) == 1
+    assert events[0].opened_at == link.last_opened_at
 
 
 def test_이상한_열쇠는_공용_통장으로_묶인다():
@@ -400,7 +409,7 @@ def test_이상한_열쇠는_공용_통장으로_묶인다():
     assert not share_logic.is_valid_key("아무글자")
 
 
-def test_회사링크는_confirm에서_회사범위를_서버가_강제한다(client: TestClient):
+def test_LINK_지원회사와_달라도_confirm에서_검색을_허용한다(client: TestClient):
     _링크발급(_카카오열쇠, "카카오")
     client.get(f"/k/{_카카오열쇠}")
 
@@ -414,9 +423,9 @@ def test_회사링크는_confirm에서_회사범위를_서버가_강제한다(cl
         },
     )
 
-    assert response.status_code == 403
-    assert 'role="alert"' in response.text
-    assert "카카오 분석에만" in response.text
+    assert response.status_code == 200
+    assert "카카오 분석에만" not in response.text
+    assert _main_count(response.text) == 1
 
 
 def test_회사링크는_옛_직무변조를_권한범위로_쓰지않는다(client: TestClient):
@@ -436,7 +445,9 @@ def test_회사링크는_옛_직무변조를_권한범위로_쓰지않는다(cli
     assert response.status_code == 200
 
 
-def test_범위오류_화면은_main_landmark를_중첩하지_않는다(client: TestClient):
+def test_LINK_다른회사_confirm화면도_main_landmark를_중첩하지_않는다(
+    client: TestClient,
+):
     _링크발급(_카카오열쇠, "카카오")
     client.get(f"/k/{_카카오열쇠}")
 
@@ -450,13 +461,17 @@ def test_범위오류_화면은_main_landmark를_중첩하지_않는다(client: 
         },
     )
 
-    assert response.status_code == 403
+    assert response.status_code == 200
     assert _main_count(response.text) == 1
+    assert "카카오 분석에만" not in response.text
 
 
-def test_회사링크는_run에서도_숨은입력_변조를_막는다(client: TestClient):
+def test_살아있는_LINK의_run은_다른회사_범위오류로_거절되지않는다(
+    client: TestClient, monkeypatch
+):
     _링크발급(_카카오열쇠, "카카오")
     client.get(f"/k/{_카카오열쇠}")
+    monkeypatch.setattr(runtime, "_PIPELINE", object())
 
     response = _post_run(
         client,
@@ -469,11 +484,64 @@ def test_회사링크는_run에서도_숨은입력_변조를_막는다(client: T
             "ref": "재수집-p003",
             "address": "-",
         },
+        paid_attempt_share_key=_카카오열쇠,
         follow_redirects=False,
     )
 
-    assert response.status_code == 403
-    assert "카카오 분석에만" in response.text
+    assert response.status_code == 303
+    assert "카카오 분석에만" not in response.text
+
+
+@pytest.mark.parametrize("state", ["expired", "revoked"])
+def test_만료되거나_철회된_LINK는_GET을_기록하되_새생성권한은_주지않는다(
+    client: TestClient, monkeypatch, state: str
+):
+    now_iso = (
+        "2000-01-01T10:00:00"
+        if state == "expired"
+        else "2026-08-21T10:00:00+09:00"
+    )
+    _링크발급(_카카오열쇠, "카카오", now_iso=now_iso)
+    if state == "revoked":
+        with storage_db.connect() as conn:
+            assert share_store.delete(
+                conn,
+                _카카오열쇠,
+                revoked_at="2026-08-21T10:01:00+09:00",
+            )
+
+    opened = client.get(f"/k/{_카카오열쇠}", follow_redirects=False)
+    assert opened.status_code == 303
+    assert opened.headers["location"] == f"/?share_status={state}"
+    assert client.cookies.get(KEY_COOKIE_NAME) is None
+
+    # 공격자가 닫힌 raw cookie를 다시 심어도 LINK 통장으로 복원되면 안 된다.
+    client.cookies.set(KEY_COOKIE_NAME, _카카오열쇠)
+    monkeypatch.setattr(runtime, "_PIPELINE", object())
+    before_jobs = set(job_runtime._JOBS)
+    blocked = _post_run(
+        client,
+        {
+            "company": "네이버",
+            "region": "서울",
+            "legal_name": "네이버(주)",
+            "ref": "00266961",
+            "address": "경기도 성남시",
+        },
+        paid_attempt_share_key=_카카오열쇠,
+        follow_redirects=False,
+    )
+
+    assert blocked.status_code == 403
+    assert "요청을 확인할 수 없습니다" in blocked.text
+    assert set(job_runtime._JOBS) == before_jobs
+    with storage_db.connect() as conn:
+        link = share_store.load(conn, _카카오열쇠)
+        events = share_store.list_open_events_by_hash(conn, link.key_hash)
+        runs = share_store.list_runs_by_hash(conn, link.key_hash)
+    assert link.opened_count == 1
+    assert len(events) == 1
+    assert runs == []
 
 
 @pytest.mark.parametrize("kind", ["invalid", "missing", "expired"])
@@ -550,17 +618,18 @@ def test_연결보고서가_없어도_prefill과_안내로_간다(client: TestCl
     assert "기존 보고서를 찾을 수 없어" in page.text
 
 
-def test_연결보고서_회사가_링크와_다르면_결과를_열지않는다(client: TestClient):
+def test_시작보고서는_지원회사_꼬리표와_달라도_그대로_열린다(client: TestClient):
     report_id = _보고서를_만든다(client)  # canonical 진영 보고서
     _링크발급(_카카오열쇠, "다른회사", report_id=report_id)
 
     opened = client.get(f"/k/{_카카오열쇠}", follow_redirects=False)
 
     assert opened.status_code == 303
-    assert opened.headers["location"] == "/?share_status=report-mismatch"
-    page = client.get(opened.headers["location"])
-    assert 'value="다른회사"' in page.text
-    assert "보고서의 회사가 이 링크와 달라" in page.text
+    assert opened.headers["location"] == f"/result/{report_id}"
+    with storage_db.connect() as conn:
+        link = share_store.load(conn, _카카오열쇠)
+    assert link.report_id == report_id
+    assert link.company == "다른회사"
 
 
 def test_robots는_capability_경로를_경로단위로_제외한다(client: TestClient):
@@ -686,8 +755,9 @@ def test_초대한_친구는_진짜_조사를_할_수_있다(client: TestClient,
 def test_링크로_들어와_로그인해도_링크_몫만_쓴다(client: TestClient, monkeypatch):
     """★ 사용자가 물어본 바로 그 상황.
 
-    인사팀이 열쇠 링크로 들어와 호기심에 구글 로그인을 눌러도,
-    **그 회사에 배정된 몫**을 쓴다. 로그인했다고 통장이 하나 더 생기지 않는다.
+    방문자가 열쇠 링크로 들어와 호기심에 구글 로그인을 눌러도,
+    **같은 LINK에 배정된 여러 회사 조사 합계 몫**을 쓴다. 로그인했다고 통장이
+    하나 더 생기지 않는다.
     """
     _링크발급(_카카오열쇠, "카카오")
     오늘 = dt.date.today()

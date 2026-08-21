@@ -27,6 +27,9 @@ _DOTTED_LATIN_ACRONYM_RE = re.compile(
 _OFFICIAL_UPPER_ACRONYM_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9])(?:[A-Z](?:\.[A-Z]){1,4}\.?|[A-Z]{2,5})(?![A-Za-z0-9])"
 )
+_SHORT_QUERY_ALLOWED_PUNCTUATION = frozenset(
+    ".,&'\"’·()[]{}-_/+"
+)
 _CORPORATE_MARKERS = (
     "(주)",
     "(유)",
@@ -173,6 +176,43 @@ def exact_company_name_key(value: object) -> str:
     return "\x1f".join(_name_tokens(value, drop_english_suffixes=False))
 
 
+def exact_company_names_equivalent(left: object, right: object) -> bool:
+    """Compare two official-name spellings without fuzzy or alias inference.
+
+    DART and a confirmation card can place Korean legal wrappers differently
+    (for example ``삼성전자`` and ``삼성전자(주)``).  The existing exact key is
+    the narrow contract for that comparison: it removes Korean legal wrappers
+    and punctuation while preserving token boundaries and English words.
+
+    Tokenization must never silently discard an unsupported lookalike script.
+    Validate the complete NFKC text first so ``ΑG``, ``JҮP`` or
+    ``삼성전자Α`` cannot collapse to an unrelated supported-script key.
+    """
+
+    def supported(value: object) -> bool:
+        text = unicodedata.normalize("NFKC", str(value or "")).strip()
+        if not text:
+            return False
+        for character in text:
+            if (
+                ("A" <= character <= "Z")
+                or ("a" <= character <= "z")
+                or ("0" <= character <= "9")
+                or ("가" <= character <= "힣")
+                or character.isspace()
+                or character in _SHORT_QUERY_ALLOWED_PUNCTUATION
+            ):
+                continue
+            return False
+        return True
+
+    if not supported(left) or not supported(right):
+        return False
+    left_key = exact_company_name_key(left)
+    right_key = exact_company_name_key(right)
+    return bool(left_key and right_key and left_key == right_key)
+
+
 def derived_company_name_key(value: object) -> str:
     """A lower-evidence key that additionally removes English legal suffixes."""
     return "\x1f".join(_name_tokens(value, drop_english_suffixes=True))
@@ -194,6 +234,38 @@ def normalized_latin_acronym(value: object) -> str:
     if _DOTTED_LATIN_ACRONYM_RE.fullmatch(normalized):
         return normalized.replace(".", "").upper()
     return ""
+
+
+def _has_disallowed_short_latin_mix(value: object) -> bool:
+    """Reject short Latin fragments mixed with another lookalike script.
+
+    Name tokenization deliberately supports ASCII Latin and Korean. Without
+    this preflight, an input such as ``ҮG`` (Cyrillic U + Latin G) loses the
+    unsupported letter and becomes an exact search for the unrelated name
+    ``G``. Keep ordinary Korean/English names and common legal-name punctuation
+    valid, including NFKC-normalized full-width Latin text.
+    """
+    text = unicodedata.normalize("NFKC", str(value or "")).strip()
+    ascii_latin_count = sum(
+        ("A" <= character <= "Z") or ("a" <= character <= "z")
+        for character in text
+    )
+    if not 1 <= ascii_latin_count <= 5:
+        return False
+    for character in text:
+        if (
+            ("A" <= character <= "Z")
+            or ("a" <= character <= "z")
+            or ("0" <= character <= "9")
+            or ("가" <= character <= "힣")
+            or ("\u1100" <= character <= "\u11ff")
+            or ("\u3130" <= character <= "\u318f")
+            or character.isspace()
+            or character in _SHORT_QUERY_ALLOWED_PUNCTUATION
+        ):
+            continue
+        return True
+    return False
 
 
 def latin_acronym_korean(value: object) -> str:
@@ -437,6 +509,8 @@ def generate_dart_company_matches(
 ) -> tuple[DartCompanyMatch, ...]:
     """Union deterministic blocks and rank them; an empty result means abstain."""
     raw_query = unicodedata.normalize("NFKC", str(query or "")).strip()
+    if _has_disallowed_short_latin_mix(raw_query):
+        return ()
     normalized_query, query_tokens = _normalized_parts(raw_query)
     exact_query = exact_company_name_key(raw_query)
     derived_query = derived_company_name_key(raw_query)

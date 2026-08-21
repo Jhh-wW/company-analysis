@@ -182,6 +182,7 @@ def test_이상한_content_length도_실제_본문_계수로_우회하지_못한
 
 def test_run과_confirm은_같은_1MiB_상한을_쓴다():
     assert body_limit_for({"type": "http", "method": "POST", "path": "/confirm"}) == FORM_BODY_MAX_BYTES
+    assert body_limit_for({"type": "http", "method": "POST", "path": "/admin/reports/r1/corrected-payload"}) == FORM_BODY_MAX_BYTES
     multipart_scope = {
         "type": "http",
         "method": "POST",

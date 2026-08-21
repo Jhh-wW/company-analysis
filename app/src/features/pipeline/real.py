@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+import copy
+import importlib
 import importlib.util
 import itertools
 import logging
@@ -108,7 +110,10 @@ from src.features.pipeline.canonical_report import (
     sections_from_picks as canonical_sections_from_picks,
     write_and_verify_sections,
 )
-from src.features.spanselect.canonical import select_canonical_spans
+from src.features.spanselect.canonical import (
+    historical_performance_basis_options,
+    select_canonical_spans,
+)
 from src.features.storage import cache as cache_store
 from src.features.storage import db as storage_db
 
@@ -123,6 +128,12 @@ _COMPANY_CATALOG_RECORDS: tuple[DartCompanyRecord, ...] = ()
 _COMPANY_CANDIDATE_INDEX_SOURCE: object | None = None
 _COMPANY_CANDIDATE_INDEX = None
 _COMPANY_CANDIDATE_INDEX_LOCK = threading.Lock()
+
+# 후보 화면은 세 장으로 제한하지만, 로컬 이름 순위만 보고 같은 수의 DART
+# 기업개황을 잘라 버리면 주소·상장 여부를 점수에 반영하기 전에 정답이 탈락한다.
+# 표시 상한보다 두 건만 더 보강해 rank 4~5도 비교하되 요청 수와 deadline은
+# 계속 작게 묶는다. 이 값은 자동 확정 임계값이 아니라 후보 재정렬 탐색 폭이다.
+_DART_PROFILE_ENRICHMENT_LIMIT = 5
 
 
 #: 1판은 모듈 전역 `_spent_usd`에 비용을 더한다. 보통 `import run_pilot`은
@@ -277,6 +288,56 @@ def _set_meter_stage(metered: _MeteredEngine, stage: str) -> None:
     metered.set_stage(stage)
 
 
+def _provider_output_config(value: Any) -> Any:
+    """Normalize raw JSON schemas with the installed provider SDK before send.
+
+    ``messages.create`` accepts a raw ``output_config`` mapping but does not run
+    the SDK's schema transformer for that low-level form.  In particular,
+    constraints such as ``uniqueItems`` are valid JSON Schema yet outside the
+    provider's constrained-decoding subset.  Sending them unchanged produces a
+    deterministic 400 before any model response.  Keep the source schema
+    immutable and fail before reserving/calling the provider if normalization
+    itself is unavailable.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise provider_budget.ProviderBudgetUnavailable(
+            "provider structured-output 설정 형식이 올바르지 않습니다"
+        )
+    output_format = value.get("format")
+    if output_format is None:
+        return value
+    if not isinstance(output_format, dict):
+        raise provider_budget.ProviderBudgetUnavailable(
+            "provider structured-output format 형식이 올바르지 않습니다"
+        )
+    if output_format.get("type") != "json_schema":
+        return value
+    schema = output_format.get("schema")
+    if not isinstance(schema, dict):
+        raise provider_budget.ProviderBudgetUnavailable(
+            "provider structured-output schema 형식이 올바르지 않습니다"
+        )
+    try:
+        transformer = getattr(importlib.import_module("anthropic"), "transform_schema")
+        transformed = transformer(copy.deepcopy(schema))
+    except Exception as exc:  # noqa: BLE001 - provider 호출 전 fail-closed
+        raise provider_budget.ProviderBudgetUnavailable(
+            "provider structured-output schema를 정규화할 수 없습니다"
+        ) from exc
+    if not isinstance(transformed, dict):
+        raise provider_budget.ProviderBudgetUnavailable(
+            "provider structured-output schema 정규화 결과가 올바르지 않습니다"
+        )
+    normalized_format = dict(output_format)
+    normalized_format["schema"] = transformed
+    normalized = dict(value)
+    normalized["format"] = normalized_format
+    return normalized
+
+
 @contextmanager
 def _meter_stage(
     metered: _MeteredEngine,
@@ -302,11 +363,23 @@ class _MeteredMessages:
         self._metered = metered
 
     def create(self, *args: Any, **kwargs: Any) -> Any:
+        # Once a call has no authoritative usage, another call in the same paid
+        # phase would stack a second unknown charge on top of the first.  Stop
+        # locally before schema work, admission, or provider I/O; the outer
+        # phase keeps the first unresolved reservation fail-closed.
+        if self._metered.billing_uncertain:
+            raise provider_budget.ProviderBudgetUnavailable(
+                "미확정 provider 호출 뒤에는 같은 요청에서 다시 호출할 수 없습니다"
+            )
         call_kwargs = dict(kwargs)
         # 1판 `_ask`는 모듈 전역 MODEL을 읽지만 그 값은 다른 요청과 공유된다.
         # provider에 나가는 마지막 경계에서 이 요청의 로컬 모델로 바로잡는다.
         if self._metered.MODEL:
             call_kwargs["model"] = self._metered.MODEL
+        if "output_config" in call_kwargs:
+            call_kwargs["output_config"] = _provider_output_config(
+                call_kwargs["output_config"]
+            )
         if self._metered.prompt_cache_enabled:
             call_kwargs["messages"] = _prompt_cached_messages(
                 call_kwargs.get("messages")
@@ -993,6 +1066,12 @@ def _sources_from(steps: list[dict[str, Any]]) -> list[SourceStatus]:
     return sources
 
 
+class LocalDartProfileEnrichmentError(RuntimeError):
+    """로컬 DART 후보의 선택 전 profile 보강만 실패했음을 표시한다."""
+
+    local_profile_enrichment_failed = True
+
+
 class RealPipeline:
     """1판 엔진을 `port.Pipeline` 약속에 맞춰 감싼 것.
 
@@ -1016,28 +1095,23 @@ class RealPipeline:
             score_business_candidate,
         )
 
-        # company.json은 후보마다 외부 DART 요청 한 번이다. 전체 resolver timeout이
-        # 끝난 뒤 취소할 수 없는 thread가 15번 계속 호출하지 않게 3건으로 hard cap한다.
-        cap = max(1, min(int(limit), 3))
+        # company.json은 후보마다 외부 DART 요청 한 번이다. 화면 표시 수와 profile
+        # 보강 수를 분리한다. 로컬 rank 4~5까지 주소·상장 여부를 비교해야 짧은 공식
+        # 약어의 동명 후보가 앞에 몰려도 관련 법인을 후보 카드에 남길 수 있다.
+        # 전체 resolver timeout 뒤 취소할 수 없는 thread가 계속 호출하지 않도록
+        # 보강 폭은 다섯 건으로 고정하고, 매 호출 전에 deadline을 다시 확인한다.
+        display_cap = max(1, min(int(limit), 3))
+        profile_cap = max(display_cap, _DART_PROFILE_ENRICHMENT_LIMIT)
         deadline = time.monotonic() + max(0.1, float(timeout_sec))
         all_matches = list(
             generate_dart_company_matches(
-                _company_candidate_index(), company, limit=max(15, cap * 5)
+                _company_candidate_index(), company, limit=max(15, profile_cap * 3)
             )
         )
-        # Independent candidate blocks should not let one spelling consume the
-        # whole screen. Keep the first of each evidence kind, then fill by rank.
-        matched = []
-        seen_kinds: set[str] = set()
-        for match in all_matches:
-            if match.match_kind not in seen_kinds:
-                matched.append(match)
-                seen_kinds.add(match.match_kind)
-            if len(matched) >= cap:
-                break
-        if len(matched) < cap:
-            matched.extend(match for match in all_matches if match not in matched)
-        matched = matched[:cap]
+        # 이름 근거의 다양성만으로 낮은 local rank를 먼저 끌어올리면 더 관련성 높은
+        # 같은-kind 후보가 profile 조회 전에 잘릴 수 있다. matcher의 결정론적 순위를
+        # 그대로 보강한 뒤, 실제 profile 근거로 최종 표시 후보만 다시 정렬한다.
+        matched = all_matches[:profile_cap]
         if not matched:
             return []
 
@@ -1052,7 +1126,9 @@ class RealPipeline:
             corp_code = record.corp_code
             profile = engine.get_json("company.json", {"corp_code": corp_code}, counter)
             if not isinstance(profile, dict) or profile.get("status") != DART_SUCCESS_STATUS:
-                raise RuntimeError("DART 기업개황 후보 조회가 정상 상태가 아닙니다")
+                raise LocalDartProfileEnrichmentError(
+                    "DART 기업개황 후보 조회가 정상 상태가 아닙니다"
+                )
             candidate_name = str(profile.get("corp_name") or record.corp_name)
             address = str(profile.get("adres") or "")
             homepage = homepage_link.workable_url(profile.get("hm_url", ""))
@@ -1098,7 +1174,7 @@ class RealPipeline:
                 item[3],
             )
         )
-        return [item[4] for item in ranked_out]
+        return [item[4] for item in ranked_out[:display_cap]]
 
     def find_company(self, user_input: UserInput) -> Optional[CompanyCard]:
         """2 식별 → 3 확인 카드까지만 한다. 여기서 멈추고 사람에게 보여준다."""
@@ -1412,6 +1488,20 @@ class RealPipeline:
         tell("generate")
         selection_rounds = []
         sentences_made = 0
+        # 프로그램이 DART 원수치로 만든 완료 FY 행에는 내부 fact_id 대신
+        # 일회성 선택 참조를 붙인다. 모델은 이 참조만 basis_sids로 고르고,
+        # 조립기가 검증된 표 FactRecord의 실제 ID로 치환한다.
+        financial_cite = _first_fragment_cite(
+            frags, kind="재무", text_prefix="주요계정(DART API):"
+        )
+        performance_table = (
+            build_three_year_table(financials, cite=financial_cite)
+            if financial_cite
+            else None
+        )
+        performance_bases = historical_performance_basis_options(
+            [performance_table] if performance_table is not None else []
+        )
         company_identity = " ".join(
             str(value or "").strip()
             for value in (
@@ -1429,6 +1519,7 @@ class RealPipeline:
                     steps,
                     engine=engine, model=GENERATION_MODEL,
                     company=company_identity,
+                    historical_performance_bases=performance_bases,
                 )
             selection_rounds.append(picked)
             sentences_made += len(picked) + len(rejected)
@@ -1450,13 +1541,6 @@ class RealPipeline:
         if revenue_tables:
             tables_by_section["business_model"] = [ReportTable(**table) for table in revenue_tables]
 
-        financial_cite = _first_fragment_cite(
-            frags, kind="재무", text_prefix="주요계정(DART API):"
-        )
-        performance_table = (
-            build_three_year_table(financials, cite=financial_cite)
-            if financial_cite else None
-        )
         if performance_table is not None:
             tables_by_section["past_changes"] = [performance_table]
 

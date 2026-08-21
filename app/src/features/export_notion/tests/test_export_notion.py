@@ -24,6 +24,7 @@ from src.features.pipeline.port import (
     ReportSection,
     ReportTable,
 )
+from src.features.report_standard.section_content import section_content_blocks
 from src.features.report_standard.publish import PublishBlockedError
 
 _LEGACY_SECRET = "LEGACY-JOB-POSTING-SECRET"
@@ -43,6 +44,20 @@ def _text_of(block: dict[str, Any]) -> str:
 
 def _headings(blocks: list[dict[str, Any]]) -> list[str]:
     return [_text_of(b) for b in blocks if b["type"] in ("heading_1", "heading_2")]
+
+
+def _cell_text(row: dict[str, Any], index: int) -> str:
+    return "".join(
+        rich["text"]["content"] for rich in row["table_row"]["cells"][index]
+    )
+
+
+def _table_matrix(block: dict[str, Any]) -> list[list[str]]:
+    assert block["type"] == "table"
+    return [
+        [_cell_text(row, index) for index in range(block["table"]["table_width"])]
+        for row in block["table"]["children"]
+    ]
 
 
 def _make_report(**overrides: Any) -> Report:
@@ -83,7 +98,9 @@ class TestBuildBlocks:
         assert blocks[1]["type"] == "heading_1"
         assert _text_of(blocks[1]) == "분석 보고서"
         assert _text_of(blocks[2]) == (
-            "상장사 · 2026-08-19 기준 · 2023~2025 완료 회계연도 · "
+            "상장사 · 2026-08-19 기준 · "
+            "2023~2025 완료 사업연도(12월 결산·연결) / "
+            "사건: 2023-08-19~2026-08-19 · "
             "최신 실적 2026년 반기 공식 공시"
         )
         assert "생성" not in _text_of(blocks[2])
@@ -99,10 +116,24 @@ class TestBuildBlocks:
 
     def test_채워진_장은_문장_뒤에_출처_괄호를_붙인다(self):
         report = _make_report()
-        blocks = logic.build_blocks(report)
-        paragraphs = [_text_of(b) for b in blocks if b["type"] == "paragraph"]
         identity = next(section for section in report.sections if section.cell == "identity")
-        assert f"{identity.prose_lines[0][0]} 〔2〕" in paragraphs
+        identity_fact = next(
+            fact for fact in report.fact_records if fact.fact_id == "identity-01"
+        )
+        blocks = logic._section_blocks(report, identity)
+
+        assert [block["type"] for block in blocks] == [
+            "heading_2",
+            "heading_3",
+            "table",
+        ]
+        assert _text_of(blocks[1]) == "회사 한눈에 보기 [2]"
+        assert _table_matrix(blocks[2]) == [
+            ["항목", "확인 내용"],
+            ["정체성 요약", identity.prose_lines[0][0]],
+            ["근거 사업 범위", identity_fact.subject_scope],
+            ["산업 내 역할", identity_fact.relationship_or_action],
+        ]
 
     def test_검증된_본문만_한번_내고_근거원문은_반복하지_않는다(self):
         """표시용 본문이 있으면 같은 사실의 원문은 최종 출력에서 되풀이하지 않는다."""
@@ -113,7 +144,8 @@ class TestBuildBlocks:
             prose_lines=[("검증된 표시용 사업 문장입니다.", "[1]")],
             fact_ids=["layout-only-fact"],
         )
-        blocks = logic._section_blocks(section)
+        report = _make_report(sections=[section], fact_records=[])
+        blocks = logic._section_blocks(report, section)
         texts = [
             _text_of(block)
             for block in blocks
@@ -130,7 +162,8 @@ class TestBuildBlocks:
             title="핵심 제품·서비스와 포트폴리오 역할",
             empty_reason="근거가 부족합니다",
         )
-        blocks = logic._section_blocks(section)
+        report = _make_report(sections=[section], fact_records=[])
+        blocks = logic._section_blocks(report, section)
         assert [block["type"] for block in blocks] == ["heading_2"]
         assert "근거가 부족합니다" not in str(blocks)
         assert constants.EMPTY_SECTION_FALLBACK not in str(blocks)
@@ -154,7 +187,8 @@ class TestBuildBlocks:
             guidance_lines=["활용 질문 — 출력하면 안 되는 작성 안내"],
             fact_ids=["layout-only-fact"],
         )
-        blocks = logic._section_blocks(section)
+        report = _make_report(sections=[section], fact_records=[])
+        blocks = logic._section_blocks(report, section)
         texts = [_text_of(b) for b in blocks if "rich_text" in b[b["type"]]]
         assert "검증된 회사 사실 〔1〕" in texts
         assert "내부 감사용 원문 〔1〕" not in texts
@@ -171,10 +205,21 @@ class TestBuildBlocks:
         assert constants.REQUIREMENTS_EMPTY_TEXT not in paragraphs
 
     def test_숫자_표가_노션_표_블록으로_들어간다(self):
-        blocks = logic.build_blocks(_make_report())
-        # 2열 표는 사업 모델의 실제 공개 매출 비중 표다.
+        report = _make_report()
+        blocks = logic.build_blocks(report)
+        revenue_mix = next(
+            table
+            for section in report.sections
+            for table in section.tables
+            if table.caption == "2026년 상반기 매출 구성 (단위: %)"
+        )
+        assert revenue_mix.headers == ["사업", "매출 비중"]
+        # 구조 카드도 2열 표이므로 열 수가 아니라 원표의 머리글로 식별한다.
         tables = [
-            b for b in blocks if b["type"] == "table" and b["table"]["table_width"] == 2
+            block
+            for block in blocks
+            if block["type"] == "table"
+            and _table_matrix(block) == [revenue_mix.headers, *revenue_mix.rows]
         ]
         assert len(tables) == 1
         table = tables[0]["table"]
@@ -182,7 +227,7 @@ class TestBuildBlocks:
         assert table["has_column_header"] is True
         rows = table["children"]
 
-        def _first_cell_text(row: dict) -> list[str]:
+        def _first_cell_text(row: dict[str, Any]) -> list[str]:
             return [rt["text"]["content"] for rt in row["table_row"]["cells"][0]]
 
         # 첫 행은 머리글, 그다음이 데이터 행이다.
@@ -195,50 +240,59 @@ class TestBuildBlocks:
     def test_출처_목록은_자료와_기준일을_한눈에_보이는_표로_낸다(self):
         base_report = _make_report()
         # 출처 표의 중복 제거는 공개 게이트와 분리된 순수 렌더러 단위로 본다.
-        blocks = logic._source_list_blocks(
-            [*base_report.citations, *base_report.citations]
+        report = replace(
+            base_report,
+            citations=[*base_report.citations, *base_report.citations],
         )
+        blocks = logic._source_list_blocks(report)
         assert len(blocks) == 1
         source_table = blocks[0]["table"]
 
-        def _cell_text(row: dict, index: int) -> str:
-            return "".join(
-                rich["text"]["content"] for rich in row["table_row"]["cells"][index]
-            )
-
         rows = source_table["children"]
         assert len(rows) == len(base_report.citations) + 1
-        assert [_cell_text(rows[0], index) for index in range(5)] == [
+        assert [_cell_text(rows[0], index) for index in range(6)] == [
             "#",
             "자료",
-            "기준일·상태",
+            "기준일·자료 상태",
+            "사실 검증",
             "원문 위치",
             "본문 사용 장",
         ]
-        assert [_cell_text(rows[1], index) for index in range(5)] == [
+        assert [_cell_text(rows[1], index) for index in range(6)] == [
             "1",
             "주식회사 진영 반기보고서 (2026.06)",
             "2026-08-13 공시 · 공식 공시 · 실제·현재",
+            "사실 검증 완료",
             "II. 사업의 내용; III. 재무에 관한 사항",
             "2장 · 3장 · 5장 · 7장",
         ]
         assert "수집" not in str(source_table)
 
     def test_출처가_없으면_출처_구획을_안_낸다(self):
-        assert logic._source_list_blocks([]) == []
+        assert logic._source_list_blocks(_make_report(citations=[])) == []
 
     def test_수집_과정_표는_최종_보고서에_들어가지_않는다(self):
-        blocks = logic.build_blocks(_make_report())
+        report = _make_report()
+        blocks = logic.build_blocks(report)
         assert constants.COLLECTION_HEADING not in _headings(blocks)
-        tables = [block["table"] for block in blocks if block["type"] == "table"]
-        assert len(tables) == 5
-        for table in tables:
-            first_row = table["children"][0]["table_row"]["cells"]
-            headers = [
-                "".join(rich["text"]["content"] for rich in cell)
-                for cell in first_row
-            ]
-            assert headers != list(constants.COLLECTION_TABLE_HEADERS)
+        assert len(report.fact_records) == 26
+
+        tables = [block for block in blocks if block["type"] == "table"]
+        matrices = [_table_matrix(table) for table in tables]
+        expected_card_count = sum(
+            len(section_content_blocks(report, section))
+            for section in report.sections
+        )
+        assert sum(matrix[0] == ["항목", "확인 내용"] for matrix in matrices) == (
+            expected_card_count
+        )
+        assert all(
+            matrix[0] != list(constants.COLLECTION_TABLE_HEADERS)
+            for matrix in matrices
+        )
+        for section in report.sections:
+            for report_table in section.tables:
+                assert [report_table.headers, *report_table.rows] in matrices
 
     def test_긴_글자는_2000자씩_나눠_담는다(self):
         long_text = "가" * 4500
@@ -249,7 +303,8 @@ class TestBuildBlocks:
             prose_lines=[(long_text, "")],
             fact_ids=["layout-only-fact"],
         )
-        blocks = logic._section_blocks(section)
+        report = _make_report(sections=[section], fact_records=[])
+        blocks = logic._section_blocks(report, section)
         paragraphs = [block for block in blocks if block["type"] == "paragraph"]
         assert len(paragraphs) == 1
         rich_text = paragraphs[0]["paragraph"]["rich_text"]

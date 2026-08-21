@@ -43,7 +43,7 @@ from src.features.storage.constants import TABLE_REPORTS
 
 
 def _table_to_dict(table: ReportTable) -> dict[str, Any]:
-    return {
+    payload = {
         "caption": table.caption,
         "headers": list(table.headers),
         "rows": [list(row) for row in table.rows],
@@ -54,6 +54,11 @@ def _table_to_dict(table: ReportTable) -> dict[str, Any]:
         "scale_places": table.scale_places,
         "display_unit": table.display_unit,
     }
+    # 옛 payload의 암묵적 기본값은 그대로 직렬화해야 기존 보고서 hash·자동출고
+    # 승인이 이유 없이 바뀌지 않는다. 실제 시각화 힌트가 있을 때만 새 키를 저장한다.
+    if table.presentation != "table":
+        payload["presentation"] = table.presentation
+    return payload
 
 
 def _table_from_dict(data: dict[str, Any]) -> ReportTable:
@@ -67,6 +72,7 @@ def _table_from_dict(data: dict[str, Any]) -> ReportTable:
         scale_divisor=str(data.get("scale_divisor", "")),
         scale_places=int(data.get("scale_places", 0)),
         display_unit=str(data.get("display_unit", "")),
+        presentation=str(data.get("presentation", "table")),
     )
 
 

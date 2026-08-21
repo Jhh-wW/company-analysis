@@ -114,7 +114,7 @@ def test_pdf는_검색가능한_한글_본문과_모든_canonical_요소를_보�
     expected_fragments = [
         "(주)진영",
         "분석 보고서",
-        "상장사 · 2026-08-19 기준",
+        "기준일 2026.08.19",
         "핵심 요약",
         "1. 기업 정체성",
         "2. 사업 구조와 수익 모델",
@@ -161,12 +161,12 @@ def test_첫_페이지는_회사명과_보고서명을_줄바꿈해_표시한다
         second_page = document.pages[1].extract_text() or ""
 
     assert "(주)진영\n분석 보고서" in first_page
-    assert "상장사 · 2026-08-19 기준" in first_page
+    assert "기준일 2026.08.19" in first_page
     assert "핵심 요약" in first_page
     assert "1. 기업 정체성" not in first_page
     assert "1. 기업 정체성" in second_page
     company_word = next(word for word in first_page_words if word["text"] == "(주)진영")
-    meta_word = next(word for word in first_page_words if word["text"] == "상장사")
+    meta_word = next(word for word in first_page_words if word["text"] == "기준일")
     assert abs(company_word["x0"] - meta_word["x0"]) < 1
 
 
@@ -219,8 +219,11 @@ def test_부록은_본문과_분리된_새_페이지에서_전체_출처_맥락�
     with pdfplumber.open(io.BytesIO(build_pdf(_report()))) as document:
         pages = [page.extract_text() or "" for page in document.pages]
 
-    assert "9. 경쟁사 대비 핵심 경쟁력" in pages[-2]
-    assert "부록. 출처와 검증 상태" not in pages[-2]
+    ninth_page = next(
+        index for index, text in enumerate(pages) if "9. 경쟁사 대비 핵심 경쟁력" in text
+    )
+    assert ninth_page < len(pages) - 1
+    assert all("부록. 출처와 검증 상태" not in text for text in pages[:-1])
     assert "부록. 출처와 검증 상태" in pages[-1]
     assert "주식회사 진영 반기보고서 (2026.06)" in pages[-1]
     assert "주식회사 LX하우시스 사업보고서 (2025.12)" in pages[-1]
@@ -295,7 +298,7 @@ def test_생성일이_깨졌다면_그_문자열이나_로컬_오늘을_공개�
     text = _text(build_pdf(_report(generated_at="확정 날짜")))
     assert "확정 날짜" not in text
     assert "2031-02-03" not in text
-    assert "2026-08-19 기준" in text
+    assert "기준일 2026.08.19" in text
 
 
 @pytest.mark.parametrize(
@@ -320,7 +323,7 @@ def test_파일명과_Content_Disposition은_헤더주입과_경로문자를_막
     filename = build_download_filename(report)
     header = build_content_disposition(filename)
 
-    assert filename.endswith("_분석_보고서.pdf")
+    assert filename.endswith("-company-analysis.pdf")
     assert "매니지먼트" not in filename
     assert "\r" not in filename and "\n" not in filename
     assert "\u202e" not in filename and "\u200b" not in filename

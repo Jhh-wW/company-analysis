@@ -15,6 +15,7 @@ from src.core import clock, paths
 from src.core.constants import PIPELINE_FAILED_MESSAGE, PROGRESS_STEPS
 from src.features.budget import expiry as link_expiry
 from src.features.budget import spend_store
+from src.features.admin_dashboard import store as dashboard_store
 from src.features.budget.constants import (
     BUSY_MESSAGE,
     JOB_KEEP_SEC,
@@ -53,6 +54,8 @@ from src.features.posting_image.logic import (
     default_extract,
     extract_posting_text,
 )
+from src.features.sharelink import logic as share_logic
+from src.features.sharelink import store as share_store
 from src.features.sharelink import tracks as share_tracks
 from src.features.sharelink.constants import PUBLIC_BUCKET
 from src.features.storage import db as storage_db
@@ -123,6 +126,10 @@ class Job:
     #: 어느 «열쇠 링크»로 들어온 요청인가 (P-94).
     #: ★ 시작할 때 적어 둔다 — 끝난 뒤에는 요청 정보가 없어서 못 알아낸다.
     share_key: str = PUBLIC_BUCKET
+    #: MEMBER 성공 3건 예약을 소유한 계정. 빈 값이면 관리자·LINK·공개 요청이다.
+    member_email: str = ""
+    #: LINK 실행 이력을 찾는 안전한 SHA-256 식별자. 원문 열쇠는 영속화하지 않는다.
+    share_link_hash: str = ""
     #: 확인 카드·이미지 OCR에서 먼저 쓴 돈. 본조사 결과 비용과 마지막에 합친다.
     upfront_cost_krw: float = 0.0
     upfront_models: tuple[str, ...] = ()
@@ -525,6 +532,21 @@ async def _run_job(job: Job) -> None:
                     internal_ai_cost_krw=job.result.cost_krw,
                     events=job.result.ai_cost_events,
                 )
+            if any(
+                event.model_id.lower().startswith("claude")
+                for event in job.result.ai_cost_events
+            ):
+                try:
+                    with storage_db.connect() as conn:
+                        dashboard_store.record_external_status(
+                            conn,
+                            provider="Anthropic",
+                            status="normal",
+                            last_success_at=clock.iso_now_kst(),
+                            now_iso=clock.iso_now_kst(),
+                        )
+                except Exception:  # noqa: BLE001 — 관측 누락이 보고서 저장을 막지 않는다
+                    logger.exception("Anthropic 성공 관측을 저장하지 못했습니다")
             record_run(
                 job.user_input,
                 job.result,
@@ -534,10 +556,38 @@ async def _run_job(job: Job) -> None:
                     lifecycle.STATE_RUNNING if job.paid_phase is not None else None
                 ),
             )
-            _save_report(job)
+            report_saved = _save_report(job)
+            if job.member_email:
+                try:
+                    with storage_db.connect() as conn:
+                        dashboard_store.settle_member_run(
+                            conn,
+                            run_id=job.job_id,
+                            succeeded=(job.result.outcome is Outcome.REPORT and report_saved),
+                            report_id=(job.job_id if job.result.outcome is Outcome.REPORT and report_saved else ""),
+                            now_iso=clock.iso_now_kst(),
+                            outcome=job.result.outcome.value,
+                            company_type=(
+                                dashboard_store.company_type_from_report(job.result.report.corp_type)
+                                if job.result.report is not None
+                                else dashboard_store.COMPANY_UNDECIDED
+                            ),
+                            cost_krw=job.result.cost_krw,
+                            cost_uncertain=job.result.billing_uncertain,
+                        )
+                except Exception:  # noqa: BLE001 — unconfirmed reservation must not reopen itself
+                    logger.exception("MEMBER 성공 보고서 사용량을 마감하지 못했습니다")
+            if job.share_link_hash and not report_saved:
+                _finish_link_job(
+                    job,
+                    status=share_store.RUN_STATUS_STOPPED,
+                    stop_step=_link_stop_step(job.result.outcome),
+                    stop_reason=_link_stop_reason(job.result.outcome),
+                )
         finally:
             # 비용 마감과 이력 정리를 시도한 뒤에만 자리를 돌려준다. 중간에 어떤
             # 예외가 나도 이 최외곽 finally는 실행되어 자리가 영구히 새지 않는다.
+            _ensure_link_job_closed(job)
             _release_job_slot(job)
 
 
@@ -549,6 +599,96 @@ def _release_job_slot(job: Job) -> None:
     _release_run_slot(
         job.slot_bucket_id or spend_store.bucket_id(job.share_key)
     )
+
+
+def _link_stop_step(outcome: Outcome) -> str:
+    """파이프라인 종료값을 관리자 LINK 이력의 중단 단계에 맞춘다."""
+
+    return {
+        Outcome.NOT_FOUND: obs.END_STEP_IDENTIFY,
+        Outcome.REJECT_PUBLIC: obs.END_STEP_JUDGE,
+        Outcome.REJECT_NO_DISCLOSURE: obs.END_STEP_JUDGE,
+        Outcome.POSTING_DISCARDED: obs.END_STEP_POSTING,
+        Outcome.GATE_STOPPED: obs.END_STEP_GATE,
+        Outcome.FAILED: obs.END_STEP_GENERATE,
+    }.get(outcome, obs.END_STEP_GENERATE)
+
+
+def _link_stop_reason(outcome: Outcome) -> str:
+    """보고서 원문·예외문을 저장하지 않는 안정적인 LINK 종료 사유."""
+
+    return {
+        Outcome.NOT_FOUND: "company_not_found",
+        Outcome.REJECT_PUBLIC: "unsupported_public_entity",
+        Outcome.REJECT_NO_DISCLOSURE: "disclosure_not_available",
+        Outcome.POSTING_DISCARDED: "posting_discarded",
+        Outcome.GATE_STOPPED: "evidence_gate_stopped",
+        Outcome.FAILED: "generation_failed",
+    }.get(outcome, "generation_failed")
+
+
+def _finish_link_job(
+    job: Job,
+    *,
+    status: str,
+    stop_step: str,
+    stop_reason: str,
+) -> bool:
+    """LINK 실행을 종결한다. 원문 열쇠·입력 원문은 로그에 남기지 않는다."""
+
+    if not job.share_link_hash:
+        return False
+    try:
+        with storage_db.connect() as conn:
+            return share_store.finish_run(
+                conn,
+                run_id=job.job_id,
+                status=status,
+                finished_at=clock.iso_now_kst(),
+                stop_step=stop_step,
+                stop_reason=stop_reason,
+                internal_ai_cost_krw=(
+                    job.result.cost_krw
+                    if isinstance(job.result, RunResult)
+                    else job.upfront_cost_krw
+                ),
+            )
+    except Exception:  # noqa: BLE001 — 다른 종료 정리와 슬롯 반환은 계속한다
+        logger.exception("LINK 생성 종료 이력을 저장하지 못했습니다 job_id=%s", job.job_id)
+        return False
+
+
+def _ensure_link_job_closed(job: Job) -> None:
+    """예상 밖의 마감 예외에도 LINK 이력을 ``running``으로 방치하지 않는다."""
+
+    if not job.share_link_hash:
+        return
+    try:
+        with storage_db.connect() as conn:
+            row = share_store.load_run(conn, job.job_id)
+            if row is None or row.status != share_store.RUN_STATUS_RUNNING:
+                return
+            outcome = (
+                job.result.outcome
+                if isinstance(job.result, RunResult)
+                else Outcome.FAILED
+            )
+            if not share_store.finish_run(
+                conn,
+                run_id=job.job_id,
+                status=share_store.RUN_STATUS_STOPPED,
+                finished_at=clock.iso_now_kst(),
+                stop_step=_link_stop_step(outcome),
+                stop_reason=_link_stop_reason(outcome),
+                internal_ai_cost_krw=(
+                    job.result.cost_krw
+                    if isinstance(job.result, RunResult)
+                    else job.upfront_cost_krw
+                ),
+            ):
+                raise RuntimeError("LINK 생성 이력을 종결하지 못했습니다")
+    except Exception:  # noqa: BLE001 — 슬롯 반환은 반드시 이어간다
+        logger.exception("LINK 생성 이력을 확인하지 못했습니다 job_id=%s", job.job_id)
 
 
 def _save_report(job: Job) -> bool:
@@ -569,7 +709,23 @@ def _save_report(job: Job) -> bool:
                 report=job.result.report,
             ):
                 raise RuntimeError("공개 보고서 ID가 이미 사용 중입니다")
+            dashboard_store.register_report(
+                conn,
+                report_id=job.job_id,
+                corp_type=job.result.report.corp_type,
+                now_iso=clock.iso_now_kst(),
+                payload_json=report_store.report_to_json(job.result.report),
+            )
             job_interruptions.delete(conn, job.job_id)
+            if job.share_link_hash and not share_store.finish_run(
+                conn,
+                run_id=job.job_id,
+                status=share_store.RUN_STATUS_AWAITING_RELEASE,
+                finished_at=clock.iso_now_kst(),
+                report_id=job.job_id,
+                internal_ai_cost_krw=job.result.cost_krw,
+            ):
+                raise RuntimeError("LINK 보고서 생성 이력을 연결하지 못했습니다")
         job.report_persisted = True
         job.persistence_warning = ""
         return True
@@ -626,6 +782,16 @@ def _load_saved_report(report_id: str) -> Optional[Report]:
     """서버를 껐다 켠 뒤에도 옛 보고서를 다시 볼 수 있게 한다."""
     try:
         with storage_db.connect() as conn:
+            if dashboard_store.report_is_trashed(conn, report_id):
+                return None
+            state = dashboard_store.get_report_state(conn, report_id)
+            if state.updated_at:
+                approved_payload = dashboard_store.approved_report_payload(
+                    conn, report_id=report_id
+                )
+                if not approved_payload:
+                    return None
+                return report_store.report_from_json(approved_payload)
             return report_store.load(conn, report_id)
     except Exception as exc:  # noqa: BLE001
         logger.exception("보고서 불러오기 실패")
@@ -800,6 +966,10 @@ def _force_shutdown_cleanup(job: Job) -> None:
             message=PIPELINE_FAILED_MESSAGE,
             billing_uncertain=job.paid_phase is not None,
         )
+    if job.result.cost_krw == 0 and job.upfront_cost_krw > 0:
+        # 강제 종료로 본조사 usage를 모르는 경우에도 이미 확정된 식별/OCR 원가는
+        # LINK 이력에서 0원으로 사라지지 않게 한다. 미확정 본조사는 별도 원장이 닫는다.
+        job.result = replace(job.result, cost_krw=job.upfront_cost_krw)
     job.current_step = ""
     job.finished = True
     job.finished_at = job.finished_at or time.monotonic()
@@ -830,6 +1000,13 @@ def _force_shutdown_cleanup(job: Job) -> None:
             elapsed_sec=job.upfront_elapsed_sec,
             model=_model_label(job.upfront_models),
             expected_state=lifecycle.STATE_RUNNING,
+        )
+    if job.share_link_hash:
+        _finish_link_job(
+            job,
+            status=share_store.RUN_STATUS_INTERRUPTED,
+            stop_step=obs.END_STEP_GENERATE,
+            stop_reason="shutdown_timeout",
         )
     try:
         _release_job_slot(job)
@@ -916,7 +1093,7 @@ async def _start_with_reserved_slot(
     posting_images: list[UploadFile],
     posting_image_consent: bool,
     is_paid: bool,
-    resolved_track: tuple[share_tracks.Track, str, float],
+    resolved_track: tuple[share_tracks.Track, str, float | None],
     run_id: str,
     upfront_cost: float,
     upfront_models: tuple[str, ...],
@@ -933,6 +1110,13 @@ async def _start_with_reserved_slot(
     share_key = resolved_track[1]
     pipeline_phase: Optional[PaidPhase] = None
     admission_recorded = False
+    link_history_started = False
+    link_history_hash = ""
+    member_usage_reserved = False
+    member_email = ""
+    early_stop_status = share_store.RUN_STATUS_STOPPED
+    early_stop_step = obs.END_STEP_GENERATE
+    early_stop_reason = "generation_not_started"
 
     def admission_rejection() -> HTMLResponse:
         """종료 경합을 503으로 닫고 유료 관측을 정확히 한 번 마감한다."""
@@ -953,6 +1137,41 @@ async def _start_with_reserved_slot(
     try:
         if not _reserved_work_admitted(slot_bucket_id):
             return admission_rejection()
+        if resolved_track[0] is share_tracks.Track.LINK:
+            # LINK 꼬리표의 회사·직무는 비교하지 않는다. 다만 capability 자체의
+            # 존재·만료·철회는 provider 호출보다 먼저 같은 실행 경계에서 재검사한다.
+            link_blocked = request_helpers.require_active_share_link(
+                request,
+                resolved_track=resolved_track,
+            )
+            if link_blocked is not None:
+                return link_blocked
+            try:
+                with storage_db.connect() as conn:
+                    link = share_store.load(conn, share_key)
+                    active = (
+                        link is not None
+                        and not link.is_revoked
+                        and not share_logic.is_share_link_expired(link.created_at)
+                    )
+                    inserted = active and share_store.start_run(
+                        conn,
+                        key=share_key,
+                        run_id=run_id,
+                        started_at=clock.iso_now_kst(),
+                        input_company=original_input.company,
+                        confirmed_company=card.legal_name,
+                        company_id=card.ref or card.legal_name,
+                    )
+                    if not inserted or link is None:
+                        raise RuntimeError("LINK 생성 시작 이력을 저장하지 못했습니다")
+                    link_history_hash = link.key_hash
+                    link_history_started = True
+            except Exception:  # noqa: BLE001 — 이력 없는 유료 호출은 시작하지 않는다
+                logger.exception(
+                    "LINK 생성 시작 이력을 저장하지 못했습니다 job_id=%s", run_id
+                )
+                return _storage_unavailable_response(request)
         # 사진으로 올린 공고는 «여기서 처음» 서버에 들어온다 (기획서 D2 — 판정 통과 후).
         # ★ 원본 바이트를 파일·로그·결과 어디에도 남기지 않는다 (S2).
         posting_body = original_input.posting_text
@@ -965,6 +1184,8 @@ async def _start_with_reserved_slot(
                 image_bytes = []
                 image_error = _IMAGE_CONSENT_ERROR
                 image_failure_kind = "input"
+                early_stop_step = obs.END_STEP_IMAGE_INPUT
+                early_stop_reason = "posting_image_consent_required"
             else:
                 image_bytes, upload_failure = await _read_posting_images_bounded(
                     posting_images, close_files=False
@@ -977,10 +1198,18 @@ async def _start_with_reserved_slot(
                 if upload_failure is not None:
                     image_error = upload_failure.error
                     image_failure_kind = upload_failure.failure_kind
+                    early_stop_step = (
+                        obs.END_STEP_IMAGE_ERROR
+                        if upload_failure.failure_kind == "technical"
+                        else obs.END_STEP_IMAGE_INPUT
+                    )
+                    early_stop_reason = "posting_image_read_failed"
             if image_bytes and not is_paid:
                 del image_bytes          # ★ 안 쓸 거면 «바로» 버린다 (S2)
                 image_error = _DEMO_IMAGE_NOTICE
                 image_failure_kind = "input"
+                early_stop_step = obs.END_STEP_IMAGE_INPUT
+                early_stop_reason = "posting_image_demo_unsupported"
             elif image_bytes:
                 # 유료 phase를 DB에 만들기 직전 admission과 슬롯 소유를 함께 재검사한다.
                 if not _reserved_work_admitted(slot_bucket_id):
@@ -1003,6 +1232,7 @@ async def _start_with_reserved_slot(
                         model=_model_label(upfront_models),
                         expected_state=lifecycle.STATE_RUNNING,
                     )
+                    early_stop_reason = "daily_budget_unavailable"
                     return request_helpers._throttled(
                         request, BUSY_MESSAGE, "budget-store"
                     )
@@ -1067,6 +1297,12 @@ async def _start_with_reserved_slot(
                 else:
                     image_error = outcome.error
                     image_failure_kind = outcome.failure_kind
+                    early_stop_step = (
+                        obs.END_STEP_IMAGE_ERROR
+                        if image_failure_kind == "technical"
+                        else obs.END_STEP_IMAGE_INPUT
+                    )
+                    early_stop_reason = "posting_image_extraction_failed"
 
                 if not image_error:
                     # OCR 비용이 남은 몫을 다 썼다면 본조사 AI는 시작하지 않는다.
@@ -1077,6 +1313,7 @@ async def _start_with_reserved_slot(
                         resolved_track=resolved_track,
                     )
                     if blocked is not None:
+                        early_stop_reason = "daily_budget_exhausted"
                         record_end(
                             run_id=run_id,
                             job=original_input.job,
@@ -1118,6 +1355,35 @@ async def _start_with_reserved_slot(
                 ),
             )
 
+        member_email = ""
+        try:
+            with storage_db.connect() as conn:
+                if dashboard_store.get_service_state(conn).status == dashboard_store.SERVICE_MAINTENANCE:
+                    return request_helpers._throttled(
+                        request,
+                        "현재 점검 중입니다. 원인 확인과 재검사가 끝난 뒤 운영자가 직접 재시작합니다.",
+                        "service-maintenance",
+                    )
+                if resolved_track[0] is share_tracks.Track.MEMBER:
+                    member_email = share_key.removeprefix("user:")
+                    member_usage_reserved = dashboard_store.reserve_member_run(
+                        conn,
+                        run_id=run_id,
+                        actor_email=member_email,
+                        day=clock.today_kst().isoformat(),
+                        now_iso=clock.iso_now_kst(),
+                    )
+        except Exception:  # noqa: BLE001 — 상태·사용량을 모르면 새 provider를 열지 않는다
+            logger.exception("전역 상태 또는 MEMBER 성공 보고서 예약을 저장하지 못했습니다")
+            return _storage_unavailable_response(request)
+        if resolved_track[0] is share_tracks.Track.MEMBER:
+            if not member_usage_reserved:
+                return request_helpers._throttled(
+                    request,
+                    "오늘 성공한 보고서 3건을 모두 사용했습니다. 내일 다시 시도해 주세요.",
+                    "member-success-limit",
+                )
+
         if is_paid:
             # route가 죽어도 첫 provider 호출 전 표식은 이미 커밋돼 있어야 한다.
             if not _reserved_work_admitted(slot_bucket_id):
@@ -1138,6 +1404,7 @@ async def _start_with_reserved_slot(
                     model=_model_label(upfront_models),
                     expected_state=lifecycle.STATE_RUNNING,
                 )
+                early_stop_reason = "daily_budget_unavailable"
                 return request_helpers._throttled(
                     request, BUSY_MESSAGE, "budget-store"
                 )
@@ -1151,6 +1418,8 @@ async def _start_with_reserved_slot(
             user_input=user_input,
             card=card,
             share_key=share_key,
+            member_email=member_email,
+            share_link_hash=link_history_hash,
             upfront_cost_krw=upfront_cost,
             upfront_models=upfront_models,
             upfront_elapsed_sec=upfront_elapsed,
@@ -1172,6 +1441,8 @@ async def _start_with_reserved_slot(
                     model=_model_label(upfront_models),
                     expected_state=lifecycle.STATE_RUNNING,
                 )
+            early_stop_step = obs.END_STEP_GENERATE
+            early_stop_reason = "job_registration_failed"
             return _storage_unavailable_response(request)
         try:
             _schedule_job(new_job)
@@ -1180,6 +1451,8 @@ async def _start_with_reserved_slot(
                 _JOBS.pop(run_id, None)
             if pipeline_phase is not None:
                 _cancel_paid_phase(pipeline_phase)
+            early_stop_status = share_store.RUN_STATUS_INTERRUPTED
+            early_stop_reason = "server_shutdown"
             return admission_rejection()
         except BaseException:
             if _JOBS.get(run_id) is new_job:
@@ -1191,6 +1464,7 @@ async def _start_with_reserved_slot(
         handed_off = True
         return RedirectResponse(f"/progress/{run_id}", status_code=303)
     except BaseException:
+        early_stop_reason = "generation_start_failed"
         if is_paid:
             record_end(
                 run_id=run_id,
@@ -1207,7 +1481,36 @@ async def _start_with_reserved_slot(
         # 최외곽 경계가 먼저 정확히 한 번 실행된다. hand-off 뒤 슬롯은 Job이 소유한다.
         try:
             if not handed_off:
+                if link_history_started:
+                    try:
+                        with storage_db.connect() as conn:
+                            share_store.finish_run(
+                                conn,
+                                run_id=run_id,
+                                status=early_stop_status,
+                                finished_at=clock.iso_now_kst(),
+                                stop_step=early_stop_step,
+                                stop_reason=early_stop_reason,
+                                internal_ai_cost_krw=upfront_cost,
+                            )
+                    except Exception:  # noqa: BLE001 — 슬롯 반환을 막지 않는다
+                        logger.exception(
+                            "LINK 생성 조기 종료 이력을 저장하지 못했습니다 job_id=%s",
+                            run_id,
+                        )
                 _release_run_slot(slot_bucket_id)
+                if member_usage_reserved:
+                    try:
+                        with storage_db.connect() as conn:
+                            dashboard_store.settle_member_run(
+                                conn,
+                                run_id=run_id,
+                                succeeded=False,
+                                report_id="",
+                                now_iso=clock.iso_now_kst(),
+                            )
+                    except Exception:  # noqa: BLE001 — unknown reservation stays closed safely
+                        logger.exception("MEMBER 시작 실패 예약을 반환하지 못했습니다")
         finally:
             try:
                 if not handed_off:

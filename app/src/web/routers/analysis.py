@@ -19,6 +19,7 @@ from fastapi.responses import (
 
 from src.core import clock, paths
 from src.core.constants import MAX_RETRY_INPUT, PROGRESS_STEPS
+from src.features.admin_dashboard import store as dashboard_store
 from src.features.budget import spend_store
 from src.features.budget.constants import (
     BUDGET_STORE_BLOCKED_MESSAGE,
@@ -88,27 +89,83 @@ _PROGRESS_INTERRUPTED_MESSAGE = (
 )
 
 
+def _observe_candidate_resolution(
+    resolution: candidate_logic.CandidateResolution, *, incurred_cost_krw: float = 0.0
+) -> None:
+    """후보 공급자의 이미 끝난 관측만 운영 상태로 옮기며 재호출하지 않는다."""
+    provider = resolution.provider_name or "DART"
+    if provider == "Google Maps":
+        provider = "Places"
+    status = resolution.status
+    if status not in {
+        candidate_logic.ResolutionStatus.OK,
+        candidate_logic.ResolutionStatus.NO_MATCHES,
+        candidate_logic.ResolutionStatus.RATE_LIMITED,
+        candidate_logic.ResolutionStatus.TIMED_OUT,
+        candidate_logic.ResolutionStatus.FAILED,
+    }:
+        return
+    try:
+        now_iso = clock.iso_now_kst()
+        with storage_db.connect() as conn:
+            if status in {candidate_logic.ResolutionStatus.OK, candidate_logic.ResolutionStatus.NO_MATCHES}:
+                if resolution.provider_called:
+                    dashboard_store.record_external_status(
+                        conn, provider=provider, status="normal", last_success_at=now_iso, now_iso=now_iso
+                    )
+                return
+            if status is candidate_logic.ResolutionStatus.RATE_LIMITED:
+                summary = f"{provider} 후보 공급자 rate limit"
+                dashboard_store.record_external_status(
+                    conn, provider=provider, status="error", error_at=now_iso,
+                    error_summary="rate limit", now_iso=now_iso,
+                )
+                dashboard_store.record_incident(
+                    conn, kind=dashboard_store.INCIDENT_RATE_LIMIT, summary=summary,
+                    stage="candidate_resolution", incurred_cost_krw=incurred_cost_krw, now_iso=now_iso,
+                )
+                return
+            summary = f"{provider} 외부 서비스 응답 변경 의심"
+            dashboard_store.record_external_status(
+                conn, provider=provider, status="error", error_at=now_iso,
+                error_summary="응답을 안전하게 해석하지 못함", now_iso=now_iso,
+            )
+            # 로컬 DART 후보의 profile 보강만 실패한 경우는 확인 카드 이전의 무료
+            # 보조 단계다. 이 표식은 pipeline adapter가 명시적으로 붙인 경우에만
+            # 허용한다. 일반 DART 장애·timeout·rate limit의 점검 경계는 유지한다.
+            if (
+                status is candidate_logic.ResolutionStatus.FAILED
+                and resolution.local_profile_enrichment_failed
+            ):
+                return
+            if resolution.provider_called:
+                dashboard_store.record_incident(
+                    conn, kind=dashboard_store.INCIDENT_PROVIDER_RESPONSE, summary=summary,
+                    stage="candidate_resolution", incurred_cost_krw=incurred_cost_krw, now_iso=now_iso,
+                )
+    except Exception:  # noqa: BLE001 — 관측 기록이 원래의 실패 경로를 막지 않는다
+        logger.exception("후보 공급자 관측을 저장하지 못했습니다")
+
+
 def _was_interrupted(job_id: str) -> bool:
     with storage_db.connect() as conn:
         return job_interruptions.exists(conn, job_id)
 _SHARE_NOTICE_BY_CODE = {
-    "invalid": "회사 링크가 올바르지 않아 일반 첫 화면을 열었습니다.",
-    "missing": "이 회사 링크는 닫혔거나 존재하지 않아 일반 첫 화면을 열었습니다.",
-    "expired": "이 회사 링크의 사용 기간이 지나 일반 첫 화면을 열었습니다.",
+    "invalid": "LINK가 올바르지 않아 일반 첫 화면을 열었습니다.",
+    "missing": "이 LINK는 닫혔거나 존재하지 않아 일반 첫 화면을 열었습니다.",
+    "expired": "이 LINK의 사용 기간이 지나 일반 첫 화면을 열었습니다.",
+    "revoked": "이 LINK가 철회되어 일반 첫 화면을 열었습니다.",
     "report-missing": (
-        "연결된 기존 보고서를 찾을 수 없어 배정된 회사 입력 화면을 열었습니다."
+        "연결된 기존 보고서를 찾을 수 없어 지원 맥락이 표시된 입력 화면을 열었습니다."
     ),
     "report-expired": (
-        "연결된 기존 보고서의 공유 기간이 지나 배정된 회사 입력 화면을 열었습니다."
-    ),
-    "report-mismatch": (
-        "연결된 보고서의 회사가 이 링크와 달라 배정된 회사 입력 화면을 열었습니다."
+        "연결된 기존 보고서의 공유 기간이 지나 지원 맥락이 표시된 입력 화면을 열었습니다."
     ),
 }
 
 
 def _clear_share_cookie(response, request: Request) -> None:
-    """이전 회사 capability가 있을 때만 같은 범위의 만료 쿠키로 지운다."""
+    """이전 LINK capability가 있을 때만 같은 범위의 만료 쿠키로 지운다."""
     if KEY_COOKIE_NAME not in request.cookies:
         return
     response.delete_cookie(
@@ -153,7 +210,7 @@ async def input_page(request: Request):
     if share_link is not None:
         prefill = UserInput(
             company=share_link.company,
-            job="",
+            job=share_link.job,
             region="",
             posting_text="",
         )
@@ -177,7 +234,7 @@ async def input_page(request: Request):
 
 @router.get(KEY_PATH_PREFIX + "/{key}")
 async def open_share_link(request: Request, key: str):
-    """회사별 열쇠 링크를 열고 필요하면 미리 만든 보고서로 보낸다."""
+    """LINK 요청을 기록하고 유효하면 시작 보고서 또는 입력 화면으로 보낸다."""
     clean = (key or "").strip().lower()
     if not share_logic.is_valid_key(clean):
         return _invalid_share_key_response(request)
@@ -189,29 +246,27 @@ async def open_share_link(request: Request, key: str):
             stored = share_store.load(conn, clean)
             if stored is None:
                 return _share_redirect_without_cookie(request, "missing")
+            if not share_store.mark_opened(conn, clean, clock.iso_now_kst()):
+                raise RuntimeError("링크 요청 기록 대상이 사라졌습니다")
+            if stored.is_revoked:
+                return _share_redirect_without_cookie(request, "revoked")
             if share_logic.is_share_link_expired(stored.created_at):
                 return _share_redirect_without_cookie(request, "expired")
             link = stored
 
             if link.report_id:
-                report = report_store.load(conn, link.report_id)
-                if report is None:
+                if dashboard_store.report_is_trashed(conn, link.report_id):
                     target = "/?share_status=report-missing"
-                elif job_runtime._link_expired(report):
-                    target = "/?share_status=report-expired"
-                elif not share_logic.scope_matches(
-                    link_company=link.company,
-                    company=report.company,
-                ):
-                    target = "/?share_status=report-mismatch"
                 else:
-                    target = f"/result/{link.report_id}"
-            if not share_store.mark_opened(
-                conn, clean, clock.iso_now_kst()
-            ):
-                raise RuntimeError("활성 링크 요청 기록 대상이 사라졌습니다")
+                    report = report_store.load(conn, link.report_id)
+                    if report is None:
+                        target = "/?share_status=report-missing"
+                    elif job_runtime._link_expired(report):
+                        target = "/?share_status=report-expired"
+                    else:
+                        target = f"/result/{link.report_id}"
     except Exception:  # noqa: BLE001 — 인가 저장소 장애에서는 이전 권한도 정리한다
-        logger.exception("회사 링크를 확인하거나 요청 기록을 저장하지 못했습니다")
+        logger.exception("LINK를 확인하거나 요청 기록을 저장하지 못했습니다")
         return _share_store_unavailable(request)
 
     if link is None:
@@ -246,7 +301,7 @@ async def _resolve_business_candidates(
     *,
     provider: object,
     user_input: UserInput,
-    resolved_track: tuple[share_tracks.Track, str, float],
+    resolved_track: tuple[share_tracks.Track, str, float | None],
     allow_paid_provider: bool,
     analysis_run_id: str,
 ) -> tuple[candidate_logic.CandidateResolution, float] | Response:
@@ -437,7 +492,7 @@ async def _run_paid_company_lookup(
     *,
     run_id: str,
     share_key: str,
-    cap_krw: float,
+    cap_krw: float | None,
     user_input: UserInput,
     lookup_input: UserInput,
     selected_candidate_ref: str,
@@ -532,13 +587,12 @@ async def confirm_page(
         return job_runtime._admission_unavailable_response(request)
 
     resolved_track = request_helpers._track_of(request)
-    scope_blocked = request_helpers.require_share_scope(
+    link_blocked = request_helpers.require_active_share_link(
         request,
-        company=user_input.company,
         resolved_track=resolved_track,
     )
-    if scope_blocked is not None:
-        return scope_blocked
+    if link_blocked is not None:
+        return link_blocked
     consent_blocked, evaluation_consent_grant_value = (
         request_helpers.evaluation_consent_roundtrip(
             request,
@@ -618,9 +672,6 @@ async def confirm_page(
                 canonical_candidate_provider != "DART"
                 and canonical_candidate_ref
             )
-            # share link에는 corp_id allowlist가 아직 없으므로 별칭 후보를 허용하면
-            # 같은 원 입력 문자열로 다른 법인의 보고서를 만들 수 있다.
-            or bool(request_helpers._raw_share_key(request))
             or not candidate_logic.valid_candidate_selection_token(
                 candidate_selection_token,
                 binding=(
@@ -660,9 +711,7 @@ async def confirm_page(
 
         # 1단계: 돈이 들지 않는 DART corpCode 로컬 색인의 좁은 별칭 후보를 먼저 쓴다.
         # 정확한 이름은 기존 식별 경로가 처리하고, fuzzy 후보는 항상 사람이 고른다.
-        candidate_assistance_allowed = not bool(
-            request_helpers._raw_share_key(request)
-        )
+        candidate_assistance_allowed = True
         if (
             candidate_assistance_allowed
             and candidate_attempt is None
@@ -688,6 +737,7 @@ async def confirm_page(
                     return local_outcome
                 candidate_resolution, _ = local_outcome
                 candidate_elapsed = time.perf_counter() - candidate_started
+                _observe_candidate_resolution(candidate_resolution)
                 # 회사명·주소는 남기지 않는다. cold-start와 공급자 장애를 운영에서
                 # 구분할 수 있는 최소 비식별 경계만 기록한다.
                 logger.info(
@@ -786,7 +836,6 @@ async def confirm_page(
                 )
             google_allowed = bool(
                 candidate_assistance_allowed
-                and not request_helpers._raw_share_key(request)
                 and evaluation_mode.paid_providers_enabled()
                 and evaluation_consent_ok
                 and request_helpers._strict_loopback_http_request(request)
@@ -836,6 +885,9 @@ async def confirm_page(
                 public_ids.release(candidate_run_id)
                 return external_outcome
             candidate_resolution, candidate_search_cost_krw = external_outcome
+            _observe_candidate_resolution(
+                candidate_resolution, incurred_cost_krw=candidate_search_cost_krw
+            )
             if candidate_resolution.candidates:
                 try:
                     attempt_token, candidate_options = _register_candidate_attempt(
@@ -995,7 +1047,6 @@ async def confirm_page(
         google_allowed = bool(
             is_paid
             and candidate_attempt is None
-            and not request_helpers._raw_share_key(request)
             and evaluation_mode.paid_providers_enabled()
             and evaluation_consent_ok
             and request_helpers._strict_loopback_http_request(request)
@@ -1164,13 +1215,12 @@ async def start_run(
     slot_bucket_id = ""
 
     resolved_track = request_helpers._track_of(request)
-    scope_blocked = request_helpers.require_share_scope(
+    link_blocked = request_helpers.require_active_share_link(
         request,
-        company=original_input.company,
         resolved_track=resolved_track,
     )
-    if scope_blocked is not None:
-        return scope_blocked
+    if link_blocked is not None:
+        return link_blocked
     share_key = resolved_track[1]
     consent_blocked, _evaluation_consent_grant_value = (
         request_helpers.evaluation_consent_roundtrip(

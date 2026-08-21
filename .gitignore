@@ -32,6 +32,8 @@
 !/app/tools/
 /app/tools/*
 !/app/tools/backup_sqlite.py
+!/app/tools/trigger_backup.py
+!/app/tools/run_canonical_pilot25.py
 !/app/tools/tests/
 
 # 현재 서비스에서 사용하지 않는 옛 기능

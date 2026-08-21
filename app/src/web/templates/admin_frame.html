@@ -1,0 +1,201 @@
+{% extends "base.html" %}
+{% block title %}운영 대시보드 프레임 · 기업분석{% endblock %}
+{% block bodyclass %}admin-frame-page{% endblock %}
+{% block wrapclass %}wide admin-frame{% endblock %}
+
+{% block content %}
+<header class="frame-heading">
+  <p class="frame-kicker">관리자 전용 · 임시 검수 프레임</p>
+  <h1>운영 대시보드</h1>
+  <p class="lede">승인 전 화면 검수용 예시 데이터입니다. 이 화면은 운영 데이터, 보고서, 설정을 저장하거나 변경하지 않습니다.</p>
+</header>
+
+<nav class="frame-menu" aria-label="운영 대시보드 메뉴">
+  <a href="#today" aria-current="page">오늘</a>
+  <a href="#issues">문제·보고서</a>
+  <a class="frame-desktop-link" href="#friends">친구</a>
+  <a class="frame-desktop-link" href="#links">지원 LINK</a>
+  <a class="frame-desktop-link" href="#settings"><span aria-hidden="true">⚙</span> 설정</a>
+</nav>
+
+<section class="frame-service-alert" aria-labelledby="service-alert-title">
+  <div>
+    <p class="frame-eyebrow">서비스 상태</p>
+    <h2 id="service-alert-title">점검 중</h2>
+  </div>
+  <dl class="frame-four">
+    <div><dt>원인</dt><dd>같은 출처 형식 변경 문제가 반복되어 새 보고서 생성을 멈춘 예시입니다.</dd></div>
+    <div><dt>발생 시각</dt><dd>예시 · 2026-08-21 22:40 KST</dd></div>
+    <div><dt>영향</dt><dd>새 보고서 생성이 멈춰 있습니다. 기존 원본은 보존합니다.</dd></div>
+    <div><dt>다음 행동</dt><dd>원인을 기록하고 관련 보고서를 다시 확인한 뒤, 운영자가 직접 재가동합니다.</dd></div>
+  </dl>
+</section>
+
+<section id="today" class="frame-section" data-refresh-target="today" data-refresh-interval-seconds="60" data-refresh-pause-when-hidden="true" data-refresh-on-visible="true">
+  <div class="frame-section-heading">
+    <div>
+      <p class="frame-eyebrow">오늘</p>
+      <h2>먼저 확인할 일</h2>
+    </div>
+    <div class="frame-refresh">
+      <span id="frame-last-refreshed" aria-live="polite">프레임 마지막 갱신: 예시 화면을 연 직후</span>
+      <button class="btn ghost" type="button" data-refresh-button="today">수동 새로고침</button>
+    </div>
+  </div>
+  <div class="frame-grid frame-grid-two">
+    <article class="card frame-priority">
+      <p class="frame-eyebrow">미해결 문제 · 우선</p>
+      <h3>보고서 출처 형식 확인</h3>
+      <p><strong>확인 대기</strong> · 같은 원인이 두 번 반복된 예시입니다.</p>
+      <a class="btn" href="#issues">문제 자세히 보기</a>
+    </article>
+    <article class="card">
+      <p class="frame-eyebrow">서비스</p>
+      <h3>현재 상태</h3>
+      <p><strong>점검 중</strong></p>
+      <p class="muted">정상일 때는 <strong>운영 중</strong>으로 표시합니다.</p>
+      <p><strong>확인 불가</strong></p>
+      <p class="muted">가져오지 못한 값은 0이나 정상으로 바꾸지 않습니다.</p>
+      <a class="btn ghost" href="#issues">원인·다음 행동 보기</a>
+    </article>
+  </div>
+
+  <div class="frame-grid frame-grid-two frame-desktop-only">
+    <article class="card">
+      <p class="frame-eyebrow">친구 이용 · MEMBER만</p>
+      <h3>이용 기준</h3>
+      <p><strong>하루 성공 3건</strong></p>
+      <p class="muted">실패·취소·외부 오류는 반환하고, 저장된 보고서를 재사용해 성공한 경우는 셉니다.</p>
+    </article>
+    <article class="card">
+      <p class="frame-eyebrow">만족도 · MEMBER만</p>
+      <h3>도움됨 비율</h3>
+      <p><strong>자료 모으는 중</strong></p>
+      <p class="muted">응답이 5건 미만이면 비율로 단정하지 않습니다.</p>
+    </article>
+  </div>
+  <article class="card frame-recently-resolved frame-desktop-only">
+    <p class="frame-eyebrow">최근 해결한 문제</p>
+    <h3>저장 보고서의 안내 문구 보완</h3>
+    <p><strong>정상</strong> · 해결 이유와 새 버전의 확인 기록을 남긴 예시입니다.</p>
+    <a class="btn ghost" href="#issues">해결 기록 보기</a>
+  </article>
+</section>
+
+<section id="issues" class="frame-section" data-refresh-target="issues" data-refresh-interval-seconds="60" data-refresh-pause-when-hidden="true" data-refresh-on-visible="true">
+  <div class="frame-section-heading">
+    <div>
+      <p class="frame-eyebrow">문제·보고서</p>
+      <h2>문제부터, 다음 행동까지</h2>
+    </div>
+    <button class="btn ghost" type="button" data-refresh-button="issues">수동 새로고침</button>
+  </div>
+  <article class="card frame-issue">
+    <p class="frame-eyebrow">반복 문제 · 오래된 항목 우선</p>
+    <dl class="frame-action-summary">
+      <div><dt>무슨 일</dt><dd>예시 보고서의 출처 형식을 다시 확인해야 합니다.</dd></div>
+      <div><dt>왜</dt><dd>같은 외부 출처 형식 변경이 두 건에서 발견됐습니다.</dd></div>
+      <div><dt>다음 행동</dt><dd>원본과 출처를 확인하고, 수정 내용과 재검사 결과를 남긴 뒤 수동으로 공개 여부를 결정합니다.</dd></div>
+    </dl>
+    <details>
+      <summary>기술정보 보기</summary>
+      <p>예시 실행 ID, 단계, 출처, 비용, 원문 오류는 실제 통합 단계에서 권한 있는 관리자에게만 연결합니다.</p>
+    </details>
+  </article>
+  <div class="frame-grid frame-grid-two frame-desktop-only">
+    <article class="card">
+      <h3>보고서 안내</h3>
+      <p>중요한 판단 전에는 원출처를 확인하도록 안내하고, 문제를 발견하면 아래 신고 항목으로 연결합니다.</p>
+      <p class="muted">신고가 들어온 보고서는 결과·다운로드·공유를 함께 막고 관리자만 원본과 출처를 봅니다.</p>
+    </article>
+    <article class="card">
+      <h3>오류 신고 예시</h3>
+      <p>어느 부분이 이상한가요?</p>
+      <p>왜 이상하다고 생각하나요?</p>
+      <p class="muted">한 보고서에 여러 신고를 정확한 당시 스냅샷과 묶습니다.</p>
+    </article>
+  </div>
+  <article class="card frame-empty-state">
+    <h3>아직 표시할 문제가 없습니다</h3>
+    <p>필터 조건에 맞는 문제를 아직 가져오지 못한 예시입니다.</p>
+    <button class="btn ghost" type="button" data-refresh-button="issues">문제 목록 새로고침</button>
+  </article>
+</section>
+
+<section id="friends" class="frame-section frame-desktop-only">
+  <p class="frame-eyebrow">친구</p>
+  <h2>회사 유형·이용·피드백</h2>
+  <div class="frame-grid frame-grid-three">
+    <article class="card"><h3>상장사</h3><p>생성·성공·실패를 구분해 봅니다.</p></article>
+    <article class="card"><h3>비상장 외감</h3><p>생성·성공·실패를 구분해 봅니다.</p></article>
+    <article class="card"><h3>판정 전 종료</h3><p>회사 유형 통계와 별도 결과입니다.</p></article>
+  </div>
+  <article class="card frame-feedback">
+    <p class="frame-eyebrow">설문 입력 구조 · 예시</p>
+    <p><strong>이 보고서가 이 회사를 파악하는 데 얼마나 도움이 되었나요?</strong></p>
+    <p>1~5점 · 필수: 별점, 전체 이용 소감, 회사의 구체적인 사업상 구분점이 잘 드러났는지에 대한 답변</p>
+    <p class="muted">선택: 더 있었으면 하는 정보, 없어도 된다고 생각한 정보. 친구 이름·이메일은 후속 대화용 관리자 정보입니다.</p>
+  </article>
+</section>
+
+<section id="links" class="frame-section frame-desktop-only">
+  <p class="frame-eyebrow">지원 LINK</p>
+  <h2>포트폴리오 확인 요청</h2>
+  <article class="card">
+    <p><strong>새 접속</strong> · 상세를 열면 이 표시는 해제되는 예시입니다.</p>
+    <p>예시 항목은 요청 시각, 기존 보고서 열람 또는 새 회사 생성, 회사, 실행 상태, 중단 이유, 비용, 저장된 보고서입니다.</p>
+    <p>최초 연결 보고서와 후속 여러 실행을 함께 보존합니다. 접속자를 추가로 추적하거나 개인 정보·식별값을 요청하거나 표시하지 않습니다.</p>
+  </article>
+</section>
+
+<section id="settings" class="frame-section frame-desktop-only">
+  <p class="frame-eyebrow">⚙ 설정</p>
+  <h2>읽기 전용 운영 상태</h2>
+  <div class="frame-grid frame-grid-two">
+    <article class="card">
+      <h3>정기 작업</h3>
+      <ul class="frame-list">
+        <li>매일 04:00 KST 백업 · 최근 35일 보관</li>
+        <li>매주 월요일 04:10 KST 주간 파일 · 한눈에 보기 / 친구 이용 / 피드백·문제</li>
+        <li>매일 04:20 KST 정리 · AI 호출 없음</li>
+      </ul>
+      <p class="muted">저장소와 실행 방식은 아직 결정하지 않았습니다.</p>
+    </article>
+    <article class="card">
+      <h3>외부 연결</h3>
+      <p>정상 / 오류 / 아직 사용 안 함과 기존 기록의 마지막 성공·오류 시각만 표시합니다.</p>
+      <p class="muted">비밀값을 보이거나 외부 연결을 시험 호출하지 않습니다.</p>
+      <button class="btn ghost" type="button" disabled aria-disabled="true">변경하기 · 프레임에서는 동작하지 않음</button>
+    </article>
+  </div>
+</section>
+
+<aside class="frame-mobile-notice" aria-label="모바일 검수 범위">
+  <strong>모바일 검수 범위</strong>
+  <span>서비스 상태, 문제 목록, 긴급 중단만 확인합니다. 수정·설정 변경·재가동은 제공하지 않습니다.</span>
+</aside>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(() => {
+  const output = document.getElementById("frame-last-refreshed");
+  const refresh = () => {
+    if (output) output.textContent = "프레임 마지막 갱신: " + new Date().toLocaleTimeString("ko-KR");
+  };
+  document.querySelectorAll("[data-refresh-button]").forEach((button) => button.addEventListener("click", refresh));
+  let timer = null;
+  const start = () => {
+    if (!timer && !document.hidden) timer = window.setInterval(refresh, 60000);
+  };
+  const stop = () => {
+    if (timer) { window.clearInterval(timer); timer = null; }
+  };
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) stop();
+    else { refresh(); start(); }
+  });
+  start();
+})();
+</script>
+{% endblock %}

@@ -16,13 +16,15 @@ from src.core import paths
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
 from src.features.sharelink.constants import KEY_COOKIE_NAME
+from src.features.sharelink.access_log import install_uvicorn_access_log_filter
 from src.web import request_helpers, runtime
 from src.web.response_security import ResponseSecurityMiddleware
-from src.web.routers import admin, analysis, auth, backup, health, reports
+from src.web.routers import admin, analysis, auth, backup, dashboard, health, reports
 from src.web.security import RequestBodyLimitMiddleware
 
 
 logger = logging.getLogger(__name__)
+install_uvicorn_access_log_filter()
 app = FastAPI(title="기업분석 도구", lifespan=runtime._lifespan)
 app.add_middleware(RequestBodyLimitMiddleware)
 app.mount("/static", StaticFiles(directory=str(paths.STATIC_DIR)), name="static")
@@ -73,6 +75,7 @@ app.include_router(backup.router)
 app.include_router(analysis.router)
 app.include_router(reports.router)
 app.include_router(auth.router)
+app.include_router(dashboard.router)
 app.include_router(admin.router)
 
 # 기존 외부 import 한 곳에서 쓰는 명시적인 권한 의존성만 유지한다.

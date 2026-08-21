@@ -1,0 +1,5 @@
+{% extends "base.html" %}
+{% block title %}문제·보고서 · 기업분석{% endblock %}
+{% block bodyclass %}admin-frame-page{% endblock %}
+{% block wrapclass %}wide admin-frame{% endblock %}
+{% block content %}<header class="frame-heading"><p class="frame-kicker">관리자 전용</p><h1>문제·보고서</h1><p class="lede">신고가 들어오면 공개 결과·다운로드·공유를 즉시 멈추고, 원본 검토와 상태 전이를 이곳에 남깁니다.</p></header>{% set dashboard_nav = "issues" %}{% include "_admin_nav.html" %}{% include "_admin_issues.html" %}<aside class="frame-mobile-notice"><strong>모바일 운영 범위</strong><span>문제 목록과 서비스 상태만 확인합니다.</span></aside>{% endblock %}{% block scripts %}{% include "_admin_refresh_script.html" %}{% endblock %}

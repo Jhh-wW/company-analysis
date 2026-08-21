@@ -1,0 +1,10 @@
+<script>
+(() => {
+  const targets = {today: "/admin/refresh/today", issues: "/admin/refresh/issues"};
+  const replace = async (target) => { const response = await fetch(targets[target], {credentials: "same-origin", headers: {"X-Requested-With": "dashboard"}}); if (!response.ok) return; const current = document.querySelector(`[data-dashboard-refresh="${target}"]`); if (current) current.outerHTML = await response.text(); };
+  document.addEventListener("click", (event) => { const button = event.target.closest("[data-dashboard-refresh-button]"); if (button) { event.preventDefault(); replace(button.dataset.dashboardRefreshButton); } });
+  let timer = null; const tick = () => { if (document.querySelector('[data-dashboard-refresh="today"]')) replace("today"); if (document.querySelector('[data-dashboard-refresh="issues"]')) replace("issues"); };
+  const start = () => { if (!timer && !document.hidden) timer = window.setInterval(tick, 60000); }; const stop = () => { if (timer) { clearInterval(timer); timer = null; } };
+  document.addEventListener("visibilitychange", () => { if (document.hidden) stop(); else { tick(); start(); } }); start();
+})();
+</script>

@@ -8,8 +8,8 @@ from typing import Final
 
 CONTENT_TYPE_PDF: Final[str] = "application/pdf"
 PDF_SUFFIX: Final[str] = ".pdf"
-FILENAME_PATTERN: Final[str] = "{company}_분석_보고서" + PDF_SUFFIX
-FILENAME_FALLBACK: Final[str] = "보고서"
+FILENAME_PATTERN: Final[str] = "{company_slug}-company-analysis" + PDF_SUFFIX
+FILENAME_FALLBACK: Final[str] = "company"
 # Windows 금지 문자뿐 아니라 HTTP 헤더 주입/모호성을 만드는 제어문자와 %도 뺀다.
 FILENAME_FORBIDDEN_CHARS: Final[re.Pattern[str]] = re.compile(
     r'[\x00-\x1f\x7f\\/:*?"<>|%]+'
@@ -29,10 +29,16 @@ FONT_SEMIBOLD: Final[str] = "FreesentationPDF-SemiBold"
 
 # 웹의 흑백 중심 토큰을 문서에서도 그대로 사용한다.
 COLOR_INK: Final[str] = "#171717"
-COLOR_MUTED: Final[str] = "#5F6770"
-COLOR_LINE: Final[str] = "#D8DCE1"
-COLOR_SURFACE: Final[str] = "#F4F5F6"
-COLOR_HEADER: Final[str] = "#ECEFF1"
+COLOR_MUTED: Final[str] = "#5F5F5F"
+COLOR_WEAK: Final[str] = "#8A8A8A"
+COLOR_LINE: Final[str] = "#E5E5E5"
+COLOR_SURFACE: Final[str] = "#F5F5F5"
+COLOR_HEADER: Final[str] = "#FAFAFA"
+COLOR_CHART_DARK: Final[str] = "#0A0A0A"
+COLOR_CHART_MID: Final[str] = "#5F5F5F"
+COLOR_CHART_LIGHT: Final[str] = "#A3A3A3"
+COLOR_CHART_PALE: Final[str] = "#D4D4D4"
+COLOR_RISK: Final[str] = "#E7000B"
 COLOR_PARTIAL: Final[str] = "#737373"
 COLOR_PARTIAL_FILL: Final[str] = "#F5F5F5"
 COLOR_INCOMPLETE: Final[str] = "#5F5F5F"
@@ -41,12 +47,18 @@ COLOR_INCOMPLETE_FILL: Final[str] = "#F5F5F5"
 PAGE_MARGIN_PT: Final[float] = 17 * 72 / 25.4
 PAGE_TOP_MARGIN_PT: Final[float] = 18 * 72 / 25.4
 PAGE_BOTTOM_MARGIN_PT: Final[float] = 16 * 72 / 25.4
-BODY_FONT_SIZE_PT: Final[float] = 10.4
-SMALL_FONT_SIZE_PT: Final[float] = 8.8
-TITLE_FONT_SIZE_PT: Final[float] = 30.5
-HEADING_FONT_SIZE_PT: Final[float] = 15.5
-TABLE_FONT_SIZE_PT: Final[float] = 8.8
-BODY_LEADING_PT: Final[float] = 16.0
+BODY_FONT_SIZE_PT: Final[float] = 9.4
+SUBHEADING_FONT_SIZE_PT: Final[float] = 11.0
+CARD_FONT_SIZE_PT: Final[float] = 8.4
+SMALL_FONT_SIZE_PT: Final[float] = 7.2
+TITLE_FONT_SIZE_PT: Final[float] = 31.0
+HEADING_FONT_SIZE_PT: Final[float] = 17.0
+TABLE_FONT_SIZE_PT: Final[float] = 7.7
+BODY_LEADING_PT: Final[float] = 14.1
+CARD_LEADING_PT: Final[float] = 11.8
+TABLE_LEADING_PT: Final[float] = 10.0
+META_FONT_SIZE_PT: Final[float] = 6.8
+PDF_AUTHOR: Final[str] = "기업분석2"
 
 REQUIREMENTS_CELL: Final[str] = "5"
 REQUIREMENTS_NOTE: Final[str] = (

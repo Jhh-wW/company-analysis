@@ -9,6 +9,7 @@ import pytest
 from src.features.business_candidate.dart_identity import (
     DartCompanyRecord,
     build_dart_company_index,
+    exact_company_names_equivalent,
     generate_dart_company_matches,
     parse_dart_company_records,
 )
@@ -55,8 +56,52 @@ def test_official_corpcode_parser_keeps_all_five_raw_fields_and_frozen_identity(
         records[0].corp_code = "00535454"  # type: ignore[misc]
 
 
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        ("삼성전자", "삼성전자(주)"),
+        ("삼성전자", "(주) 삼성전자"),
+        ("삼성전자", "주식회사 삼성전자"),
+        ("삼성전자", "삼성전자 주식회사"),
+        ("삼성전자", "삼성전자㈜"),
+        ("테스트", "테스트 유한회사"),
+        ("JYP Ent.", "JYP Ent. (주)"),
+    ],
+)
+def test_exact_official_name_equivalence_ignores_only_legal_wrappers(left, right):
+    assert exact_company_names_equivalent(left, right)
+    assert exact_company_names_equivalent(right, left)
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        ("삼성전자", "삼성전기(주)"),
+        ("삼성전자", "(주)삼성전자서비스"),
+        ("JYP Ent.", "JYP Entertainment (주)"),
+        ("SM", "ЅМ"),  # Cyrillic lookalikes
+        ("JYP", "JҮP"),
+        ("AG", "ΑG"),
+        ("삼성전자", "삼성전자Α"),
+        ("삼성전자", "삼성전자ᄀ"),
+        ("삼성전자", "삼성전자ㄱ"),
+        ("삼성전자", "삼성전자ㅏ"),
+        ("", "(주)"),
+    ],
+)
+def test_exact_official_name_equivalence_rejects_aliases_and_confusables(left, right):
+    assert not exact_company_names_equivalent(left, right)
+
+
 def test_exact_derived_acronym_and_typo_blocks_preserve_intent_and_abstain():
     index = build_dart_company_index(_records())
+
+    for typed in ("YG", "yg", "Yg", "ｙＧ"):
+        yg = generate_dart_company_matches(index, typed, limit=3)
+        assert [item.record.corp_code for item in yg] == ["00613318"]
+        assert yg[0].record.corp_name == "와이지엔터테인먼트"
+        assert yg[0].match_kind == "acronym_token"
+        assert yg[0].matched_field == "corp_eng_name"
 
     jyp = generate_dart_company_matches(index, "JYP", limit=3)
     assert [item.record.corp_code for item in jyp[:2]] == ["00258689", "00535454"]
@@ -79,8 +124,53 @@ def test_exact_derived_acronym_and_typo_blocks_preserve_intent_and_abstain():
     assert typo[0].record.corp_code == "00258689"
     assert typo[0].match_kind == "trigram"
 
-    for rejected in ("JY P", "JYP1", "JҮP"):
+    for rejected in ("Y G", "YG1", "ҮG", "JY P", "JYP1", "JҮP"):
         assert generate_dart_company_matches(index, rejected, limit=3) == ()
+
+
+def test_available_local_full_catalog_keeps_YG_target_inside_profile_lookahead():
+    app_root = Path(__file__).resolve().parents[4]
+    cached_xml = tuple(
+        (app_root / ".local_evaluation_runs").glob(
+            "*/analysis_engine/corpcode/CORPCODE.xml"
+        )
+    )
+    if not cached_xml:
+        pytest.skip("무과금 로컬 DART 전체 목록 cache가 없는 환경")
+
+    newest_xml = max(cached_xml, key=lambda item: item.stat().st_mtime_ns)
+    records = parse_dart_company_records(newest_xml)
+    index = build_dart_company_index(records)
+    matches = generate_dart_company_matches(index, "YG", limit=15)
+    codes = [item.record.corp_code for item in matches]
+
+    assert len(records) >= 100_000
+    assert "00613318" in codes[:5]
+    target = matches[codes.index("00613318")]
+    assert target.record.corp_name == "와이지엔터테인먼트"
+    assert target.record.stock_code == "122870"
+    assert target.match_kind == "acronym_token"
+
+    for rejected in ("ҮG", "JҮP", "ΑG"):
+        assert generate_dart_company_matches(index, rejected, limit=15) == ()
+
+
+def test_full_catalog_slice_rejects_dropped_script_confusables_but_keeps_punctuation():
+    fixture_path = Path(__file__).parent / "fixtures" / "dart_yg_full_catalog_slice.json"
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    index = build_dart_company_index(
+        DartCompanyRecord(**row) for row in payload["records"]
+    )
+
+    for rejected in ("ҮG", "JҮP", "ΑG"):
+        assert generate_dart_company_matches(index, rejected, limit=15) == ()
+
+    assert generate_dart_company_matches(index, "ｙＧ", limit=15)[3].record.corp_code == (
+        "00613318"
+    )
+    assert generate_dart_company_matches(index, "와이지-원", limit=5)[
+        0
+    ].record.corp_code == "00139719"
 
 
 @pytest.mark.parametrize("reverse", [False, True])

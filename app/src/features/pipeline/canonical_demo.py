@@ -74,17 +74,6 @@ _LX_COMPARISON_PRODUCTS = _demo_comparison_payload(
     detail="PVC·PET 소재군과 미국·중국 생산거점.",
     definition="각사 사업보고서에 열거된 소재와 생산거점",
 )
-_JY_COMPARISON_LIMITATION = _demo_comparison_payload(
-    company="진영",
-    detail="주문맞춤 생산 공통 정의 비교 지표 미공개.",
-    definition="동일 정의의 생산 지표",
-)
-_LX_COMPARISON_LIMITATION = _demo_comparison_payload(
-    company="LX하우시스",
-    detail="주문맞춤 생산 공통 정의 비교 지표 미공개.",
-    definition="동일 정의의 생산 지표",
-)
-
 # 데모의 수집 단계에서 이미 보존돼 있었다고 간주하는 닫힌 원문 payload 장부다.
 # 아래 FactRecord를 만든 뒤 역으로 해시를 합치는 방식은 사실이 스스로 근거를
 # 등록하게 하므로 금지한다. 표 행도 이 목록의 실제 원문만 참조한다.
@@ -123,7 +112,6 @@ _DEMO_EVIDENCE_BY_SOURCE: dict[str, tuple[str, ...]] = {
             ("2025", "32423000000", "-2656000000"),
         )),
         _JY_COMPARISON_PRODUCTS,
-        _JY_COMPARISON_LIMITATION,
     ),
     "JY-S3": (
         "기업가치 제고 계획: 열분해 설비 14기, 2026년 하반기 가동 계획",
@@ -136,10 +124,7 @@ _DEMO_EVIDENCE_BY_SOURCE: dict[str, tuple[str, ...]] = {
     "JY-S5": (
         "공식 홈페이지 Business Ethics: 공정성·주인의식·책임감·열정·안전·투명성과 신뢰",
     ),
-    "JY-S6": (
-        _LX_COMPARISON_PRODUCTS,
-        _LX_COMPARISON_LIMITATION,
-    ),
+    "JY-S6": (_LX_COMPARISON_PRODUCTS,),
 }
 
 
@@ -400,7 +385,7 @@ def build_demo_report() -> Report:
             source=s2,
             scope="전사 사업 범위",
             action="시트·필름 제조와 자원순환 사업 운영",
-            claim_type="official_identity",
+            claim_type="identity_summary",
             time_state="standing",
             as_of="2025-12-31",
             state_evidence="2025 사업보고서의 사업 내용과 연결대상 종속회사",
@@ -423,6 +408,7 @@ def build_demo_report() -> Report:
             as_of="2026-06-30",
             state_evidence="반기보고서의 주문생산 납품과 열분해유 매출",
             evidence_support_terms=["납품", "열분해유"],
+            limitations="구체적인 단가·결제조건·반복계약 주기는 공시되지 않음",
         ),
         _fact(
             "biz-customer-01",
@@ -436,7 +422,9 @@ def build_demo_report() -> Report:
             as_of="2026-06-30",
             state_evidence="반기보고서의 가구 고객과 국내·중국·인도 매출",
             evidence_support_terms=["가구", "국내"],
-            market_priority="국내 핵심·중국·인도 확장",
+            market_stage="",
+            market_observation="국내·중국·인도 매출",
+            limitations="구매자·사용자·수혜자 역할은 공식 자료에서 별도 구분되지 않음",
         ),
     ]
     mix_rows = [
@@ -494,6 +482,7 @@ def build_demo_report() -> Report:
                     ],
                     scale_divisor="1",
                     scale_places=1,
+                    presentation="composition",
                     evidence_rows=[
                         f"반기보고서 주요 제품 매출 비중: {name} {raw}"
                         for _fact_id, name, _shown, raw, _action in mix_rows
@@ -505,22 +494,6 @@ def build_demo_report() -> Report:
     )
 
     portfolio_facts = [
-        _fact(
-            "portfolio-01",
-            claim="회사는 중국 시장 진출을 위해 프리미엄 아크릴 시트를 출시했다.",
-            owner="portfolio",
-            source=s1,
-            scope="프리미엄 아크릴 시트",
-            action="중국 시장 출시",
-            claim_type="priority_product",
-            time_state="standing",
-            as_of="2026-06-30",
-            state_evidence="반기보고서 제품 현황: 중국 시장 진출을 위한 프리미엄 아크릴 시트 출시",
-            evidence_support_terms=["중국", "아크릴 시트"],
-            product_role="중국 프리미엄 시장 진입 제품",
-            priority_signals=["출시·운영", "유통·지역확대"],
-            limitations="제품별 수주·매출 규모는 공시되지 않음",
-        ),
         _fact(
             "portfolio-02",
             claim="리얼 알루미늄 합지 필름은 생산량을 늘려 국내 고객사에 공급 중이다.",
@@ -534,7 +507,8 @@ def build_demo_report() -> Report:
             state_evidence="반기보고서 제품 현황: 리얼 알루미늄 합지 필름 생산량 증가와 국내 고객사 공급",
             evidence_support_terms=["알루미늄", "공급"],
             product_role="가전 표면재 납품 제품",
-            priority_signals=["출시·운영", "매출·이용증가"],
+            revenue_model_fact_id="biz-model-01",
+            priority_signals=["출시·운영", "생산확대"],
         ),
         _fact(
             "portfolio-03",
@@ -549,6 +523,7 @@ def build_demo_report() -> Report:
             state_evidence="반기보고서 종속회사 사업 현황: 한국에코에너지 열분해 설비 투자와 폐플라스틱 열분해유 생산",
             evidence_support_terms=["한국에코에너지", "열분해유"],
             product_role="자원순환 사업의 판매 제품",
+            revenue_model_fact_id="biz-model-01",
             priority_signals=["출시·운영", "투자·증설"],
         ),
     ]
@@ -640,6 +615,29 @@ def build_demo_report() -> Report:
                 fiscal_year=int(year),
             )
         )
+    past_facts.append(
+        _fact(
+            "past-change-finance-01",
+            claim=(
+                "완료 사업연도 실적은 매출의 등락과 영업손익 적자가 "
+                "이어졌음을 보여준다."
+            ),
+            owner="past_changes",
+            source=s2,
+            scope="완료 사업연도 연결 실적 변화",
+            action="매출 등락과 영업손익 적자 지속",
+            claim_type="change_interpretation",
+            time_state="completed",
+            as_of="2025-12-31",
+            state_evidence=(
+                "사업보고서 요약 연결재무정보: 2025 매출 원값 "
+                "32423000000 영업손익 원값 -2656000000"
+            ),
+            evidence_support_terms=["매출", "영업손익"],
+            basis_fact_ids=["past-fin-2023", "past-fin-2024", "past-fin-2025"],
+            limitations="완료 사업연도 세 시점의 관찰이며 원인·지속성은 확인되지 않음",
+        )
+    )
     facts.extend(past_facts)
     sections.append(
         _section(
@@ -665,6 +663,7 @@ def build_demo_report() -> Report:
                     scale_divisor="100000000",
                     scale_places=1,
                     display_unit="억원",
+                    presentation="trend",
                     evidence_rows=[
                         (
                             f"사업보고서 요약 연결재무정보: {year} 매출 원값 "
@@ -675,7 +674,11 @@ def build_demo_report() -> Report:
                     ],
                 )
             ],
-            prose_fact_ids=["past-execution-01", "past-change-01"],
+            prose_fact_ids=[
+                "past-execution-01",
+                "past-change-01",
+                "past-change-finance-01",
+            ],
         )
     )
 
@@ -692,6 +695,7 @@ def build_demo_report() -> Report:
             as_of="2026-06-30",
             state_evidence="반기보고서 해외 영업 현황: 협의·시험 단계, 본계약과 매출 미확인",
             evidence_support_terms=["본계약", "매출"],
+            next_check_metric="본계약",
             limitations="계약·매출 성립 전 단계",
         ),
         _fact(
@@ -712,6 +716,8 @@ def build_demo_report() -> Report:
             rounding_rule="ROUND_HALF_UP 미적용(원문 정수 그대로)",
             numeric_checks=["8|1|0|8"],
             response_to_fact_id="current-01",
+            response_action="중국 대리점 8곳 MOU 체결",
+            initial_signal="",
             limitations="MOU 단계이며 본계약으로 해석하지 않음",
         ),
         _fact(
@@ -727,6 +733,8 @@ def build_demo_report() -> Report:
             state_evidence="반기보고서 해외 영업 현황: 러시아·폴란드 제품 품질시험 완료",
             evidence_support_terms=["러시아", "품질시험"],
             response_to_fact_id="current-01",
+            response_action="러시아·폴란드 제품 품질시험 완료",
+            initial_signal="",
             limitations="품질시험 완료가 본계약을 뜻하지 않음",
         ),
     ]
@@ -739,7 +747,7 @@ def build_demo_report() -> Report:
             claim="회사는 열분해 설비 14기를 2026년 하반기에 가동하는 계획을 밝혔다.",
             owner="future_strategy",
             source=s3,
-            scope="열분해유 생산설비",
+            scope="열분해 설비",
             action="열분해 설비 가동 계획",
             claim_type="future_plan",
             time_state="future_plan",
@@ -751,6 +759,9 @@ def build_demo_report() -> Report:
             display_value="14기; 2026년 하반기",
             rounding_rule="ROUND_HALF_UP 미적용(원문 정수와 기간 그대로)",
             numeric_checks=["14|1|0|14", "2026|1|0|2026"],
+            plan_status="announced",
+            plan_timing="2026년 하반기",
+            plan_execution_signal="가동",
             limitations="가동 전 공식 계획",
         ),
         _fact(
@@ -758,7 +769,7 @@ def build_demo_report() -> Report:
             claim="회사는 2026~2028년 미국·호주·러시아·유럽 납품과 차량 외장재·방염·난연 필름 확대를 계획했다.",
             owner="future_strategy",
             source=s3,
-            scope="해외시장과 특수 필름",
+            scope="해외 납품과 특수 필름",
             action="해외 납품과 제품군 확대 계획",
             claim_type="future_plan",
             time_state="future_plan",
@@ -770,6 +781,9 @@ def build_demo_report() -> Report:
             display_value="2026~2028년",
             rounding_rule="ROUND_HALF_UP 미적용(원문 기간 그대로)",
             numeric_checks=["2026|1|0|2026", "2028|1|0|2028"],
+            plan_status="announced",
+            plan_timing="2026~2028년",
+            plan_execution_signal="해외 납품",
             limitations="납품 실적이 아닌 계획",
         ),
         _fact(
@@ -777,7 +791,7 @@ def build_demo_report() -> Report:
             claim="회사는 2026~2028년 개인 업무 자동화와 전사 프로세스 지능화를 위한 자체 AX 솔루션 구축을 계획했다.",
             owner="future_strategy",
             source=s3,
-            scope="업무 자동화와 전사 프로세스",
+            scope="업무 자동화와 AX 솔루션",
             action="자체 AX 솔루션 구축 계획",
             claim_type="future_plan",
             time_state="future_plan",
@@ -789,59 +803,41 @@ def build_demo_report() -> Report:
             display_value="2026~2028년",
             rounding_rule="ROUND_HALF_UP 미적용(원문 기간 그대로)",
             numeric_checks=["2026|1|0|2026", "2028|1|0|2028"],
+            plan_status="announced",
+            plan_timing="2026~2028년",
+            plan_execution_signal="AX 솔루션 구축",
             limitations="구축 전 공식 계획",
         ),
     ]
     facts.extend(future_facts)
     sections.append(_section("future_strategy", future_facts, source_numbers))
 
-    operations_facts = [
-        _fact(
-            "operations-01",
-            claim="진영은 LG화학과 ASA 원료 조달 및 공동 연구개발 관계를 운영한다.",
-            owner="operations_partners",
-            source=s1,
-            scope="LG화학 원료·개발 파트너",
-            action="ASA 원료 조달과 공동 연구개발",
-            claim_type="partner_role",
-            time_state="standing",
-            as_of="2026-06-30",
-            state_evidence="반기보고서 원재료·연구개발: LG화학 ASA 원료 조달과 공동 연구개발",
-            evidence_support_terms=["LG화학", "공동 연구개발"],
-        ),
-        _fact(
-            "operations-02",
-            claim="주문 사양 생산품은 가구 제조·유통 고객사에 납품된다.",
-            owner="operations_partners",
-            source=s1,
-            scope="가구 제조·유통 고객 채널",
-            action="주문 사양 생산품 납품",
-            claim_type="operating_core",
-            time_state="standing",
-            as_of="2026-06-30",
-            state_evidence="반기보고서 판매경로: 주문 사양 생산품의 가구 제조·유통 고객사 납품",
-            evidence_support_terms=["주문 사양", "납품"],
-        ),
-    ]
+    operations_facts = []
     branch_rows = [
-        ("ops-branch-01", "한국에코에너지", "폐플라스틱 열분해유 생산", "운영 중"),
+        ("operations-core-01", "한국에코에너지", "폐플라스틱 열분해유 생산", "운영 중"),
         ("ops-branch-02", "네체로", "폐산·폐알칼리 지정폐기물 처리", "운영 중"),
-        ("ops-branch-03", "진영에코에너지", "논산 열분해 설비 구축", "가동 준비"),
     ]
     for fact_id, company, role, state in branch_rows:
         operations_facts.append(
             _fact(
                 fact_id,
-                claim=f"자원순환 운영 구조: {company} | {role} | {state}",
+                claim=(
+                    f"{company}는 {role} 사업을 {state}이다."
+                    if fact_id == "operations-core-01"
+                    else f"자원순환 운영 구조: {company} | 생산·운영 | "
+                    f"종속회사 | {role} | {state}"
+                ),
                 owner="operations_partners",
                 source=s1,
                 scope=company,
-                action=role,
+                action=f"{role} {state}",
                 claim_type="operating_core",
                 time_state="standing",
                 as_of="2026-06-30",
                 state_evidence=f"반기보고서 종속회사 사업 현황: {company} {role} {state}",
                 evidence_support_terms=[company, role.split(" ")[0]],
+                value_chain_stage="production",
+                relationship_type="subsidiary",
                 limitations=("상업 가동 전" if company == "진영에코에너지" else ""),
             )
         )
@@ -854,16 +850,27 @@ def build_demo_report() -> Report:
             tables=[
                 ReportTable(
                     caption="자원순환 운영 구조",
-                    headers=["주체", "확인된 역할", "현재 상태"],
-                    rows=[[company, role, state] for _fid, company, role, state in branch_rows],
+                    headers=[
+                        "주체",
+                        "가치사슬 단계",
+                        "관계 유형",
+                        "확인된 역할",
+                        "현재 상태",
+                    ],
+                    rows=[
+                        [company, "생산·운영", "종속회사", role, state]
+                        for _fid, company, role, state in branch_rows
+                        if _fid != "operations-core-01"
+                    ],
                     cite="[1]",
                     evidence_rows=[
                         f"반기보고서 종속회사 사업 현황: {company} {role} {state}"
                         for _fid, company, role, state in branch_rows
+                        if _fid != "operations-core-01"
                     ],
                 )
             ],
-            prose_fact_ids=["operations-01", "operations-02"],
+            prose_fact_ids=["operations-core-01"],
         )
     )
 
@@ -922,6 +929,7 @@ def build_demo_report() -> Report:
             comparison_basis="2025 사업보고서 공식 공시",
             comparison_period="2025 회계연도",
             comparison_scope="연결 사업 범위",
+            comparison_judgment="operating_characteristic",
             comparator_source_id=s6.source_id,
             comparator_state_evidence=_LX_COMPARISON_PRODUCTS,
             comparator_evidence_support_terms=["LX하우시스", "PVC"],
@@ -933,40 +941,6 @@ def build_demo_report() -> Report:
                 "comparator_period": "2025 회계연도",
                 "self_definition": "각사 사업보고서에 열거된 소재와 생산거점",
                 "comparator_definition": "각사 사업보고서에 열거된 소재와 생산거점",
-                "self_accounting_scope": "연결 사업 범위",
-                "comparator_accounting_scope": "연결 사업 범위",
-            },
-        ),
-        _fact(
-            "competition-02",
-            claim="양사가 같은 정의로 공개한 주문맞춤 생산 지표가 없어 이 차이를 경쟁우위로 판정할 수 없다.",
-            owner="competitive_position",
-            source=s2,
-            scope="주문맞춤 생산 비교 가능성",
-            action="동일 정의 지표 유무 비교",
-            claim_type="comparison_limitation",
-            time_state="standing",
-            as_of="2025-12-31",
-            state_evidence=_JY_COMPARISON_LIMITATION,
-            evidence_support_terms=["주문맞춤", "지표"],
-            limitations="동일 지표 부재",
-            comparison_target="주식회사 LX하우시스",
-            comparison_metric="주문맞춤 생산 지표",
-            comparison_definition="동일 정의의 생산 지표",
-            comparison_basis="2025 사업보고서 공식 공시",
-            comparison_period="2025 회계연도",
-            comparison_scope="연결 사업 범위",
-            comparator_source_id=s6.source_id,
-            comparator_state_evidence=_LX_COMPARISON_LIMITATION,
-            comparator_evidence_support_terms=["주문맞춤", "지표"],
-            comparison_conditions={
-                "customer": "가구·건축",
-                "product": "제품군·표면소재",
-                "market": "인테리어·표면재",
-                "self_period": "2025 회계연도",
-                "comparator_period": "2025 회계연도",
-                "self_definition": "동일 정의의 생산 지표",
-                "comparator_definition": "동일 정의의 생산 지표",
                 "self_accounting_scope": "연결 사업 범위",
                 "comparator_accounting_scope": "연결 사업 범위",
             },
@@ -1020,10 +994,10 @@ def build_demo_report() -> Report:
                 ["매출", "가구"],
             ),
             summary_item(
-                "아크릴 시트와 열분해유가 포트폴리오의 서로 다른 역할을 맡는다.",
+                "알루미늄 합지 필름과 열분해유가 포트폴리오의 서로 다른 역할을 맡는다.",
                 "portfolio",
-                ["portfolio-01", "portfolio-03"],
-                ["아크릴 시트", "열분해유"],
+                ["portfolio-02", "portfolio-03"],
+                ["알루미늄 합지 필름", "열분해유"],
             ),
             summary_item(
                 "종속회사 편입 뒤 자원순환 사업 범위가 넓어졌다.",
@@ -1046,7 +1020,10 @@ def build_demo_report() -> Report:
         ],
         fact_records=facts,
         as_of_date="2026-08-19",
-        analysis_period="2023~2025 완료 회계연도",
+        analysis_period=(
+            "2023~2025 완료 사업연도(12월 결산·연결) / "
+            "사건: 2023-08-19~2026-08-19"
+        ),
         latest_performance_period="2026년 반기 공식 공시",
     )
     return build_published_report(draft)

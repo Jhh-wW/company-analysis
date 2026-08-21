@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}친구 이용 · 기업분석{% endblock %}
+{% block bodyclass %}admin-frame-page{% endblock %}
+{% block wrapclass %}wide admin-frame{% endblock %}
+{% block content %}
+<header class="frame-heading"><p class="frame-kicker">관리자 전용</p><h1>친구</h1><p class="lede">MEMBER는 KST 하루 기준 성공한 보고서 3건을 이용합니다. 실패·취소·외부 오류는 사용 횟수로 확정하지 않습니다.</p></header>
+{% set dashboard_nav = "members" %}{% include "_admin_nav.html" %}
+<section class="frame-section frame-desktop-only"><p class="frame-eyebrow">이용 기간</p><p><a class="btn {% if dashboard_member_period == 'all' %}ghost{% endif %}" href="/admin/members?period=all">전체</a> <a class="btn {% if dashboard_member_period == '7d' %}ghost{% endif %}" href="/admin/members?period=7d">최근 7일</a> <a class="btn {% if dashboard_member_period == '30d' %}ghost{% endif %}" href="/admin/members?period=30d">최근 30일</a></p><div class="frame-grid frame-grid-three">{% for company_type in ['listed', 'audited', 'undecided'] %}<article class="card"><h2>{{ dashboard_company_labels[company_type] }}</h2><p>성공 {{ dashboard_member_statistics.by_company[company_type].success }}건 · 실패 {{ dashboard_member_statistics.by_company[company_type].failed }}건</p></article>{% endfor %}</div></section>
+<section class="frame-section frame-desktop-only"><p class="frame-eyebrow">예약·정산과 비용</p><article class="card"><h2>실행 정산</h2><p>성공 확정 {{ dashboard_member_statistics.settled.used }}건 · 반환 {{ dashboard_member_statistics.settled.returned }}건 · 진행 예약 {{ dashboard_member_statistics.settled.reserved }}건</p><p>확정 내부 AI 비용 {{ '%.0f'|format(dashboard_member_statistics.confirmed_cost_krw) }}원 · 미확정 비용 실행 {{ dashboard_member_statistics.uncertain_cost_events }}건</p>{% if dashboard_member_statistics.recorded_runs == 0 %}<p class="muted">이 기간의 상세 실행 요약은 확인 불가입니다. 새 운영 이력부터 유형·결과·비용을 함께 보존합니다.</p>{% endif %}</article></section>
+<section class="frame-section frame-desktop-only"><p class="frame-eyebrow">초대 MEMBER</p>{% for member in dashboard_members %}<article class="card"><h2>{{ member.email }}</h2><p>{{ member.note or "메모 없음" }} · 초대 {{ member.invited_at }}</p><p><strong>오늘 성공 {{ dashboard_member_usage[member.email][0] }} / 3건</strong> · 진행 예약 {{ dashboard_member_usage[member.email][1] }}건</p></article>{% else %}<article class="card"><p>아직 초대한 MEMBER가 없습니다.</p></article>{% endfor %}</section>
+<section class="frame-section frame-desktop-only"><p class="frame-eyebrow">피드백</p><article class="card"><h2>{{ dashboard_satisfaction }}</h2><p>별점 4~5점 / 목표 80% / 응답 {{ dashboard_survey_total }}건</p><p class="muted">5건 미만이면 비율 대신 자료 모으는 중으로 표시합니다. 개인 접속 정보는 보고서 검토 화면에서 관리자만 봅니다.</p></article></section>
+<aside class="frame-mobile-notice"><strong>모바일 운영 범위</strong><span>친구 이용과 수정 작업은 PC에서만 확인합니다.</span></aside>
+{% endblock %}

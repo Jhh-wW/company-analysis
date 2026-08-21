@@ -27,6 +27,11 @@ from src.features.pipeline.port import (
 )
 from src.features.provenance.sources import Source
 from src.features.report_standard import SECTION_BY_ID, build_published_report
+from src.features.report_standard.section_content import (
+    section_content_blocks,
+    source_verification_label,
+    summary_topic,
+)
 
 #: 노션 블록 하나를 표현하는 dict. Notion API의 block object 형태를 그대로 따른다.
 NotionBlock = dict[str, Any]
@@ -80,6 +85,14 @@ def _heading_2(text: str) -> NotionBlock:
         "object": "block",
         "type": "heading_2",
         "heading_2": {"rich_text": _rich_text(text)},
+    }
+
+
+def _heading_3(text: str) -> NotionBlock:
+    return {
+        "object": "block",
+        "type": "heading_3",
+        "heading_3": {"rich_text": _rich_text(text)},
     }
 
 
@@ -145,11 +158,25 @@ def _table_blocks(table: ReportTable) -> list[NotionBlock]:
     return blocks
 
 
-def _section_blocks(section: ReportSection) -> list[NotionBlock]:
+def _section_blocks(report: Report, section: ReportSection) -> list[NotionBlock]:
     blocks: list[NotionBlock] = [_heading_2(_section_heading(section))]
     if not section.is_filled:
         return blocks
-    if section.prose_lines:
+    detail_blocks = section_content_blocks(report, section)
+    if detail_blocks:
+        for detail in detail_blocks:
+            markers = " ".join(f"[{number}]" for number in detail.source_numbers)
+            title = " ".join(value for value in (detail.title, markers) if value)
+            if detail.tone == "limitation":
+                title = f"확인 범위 · {title}"
+            blocks.append(_heading_3(title))
+            blocks.append(
+                _table_block(
+                    ["항목", "확인 내용"],
+                    [[field.label, field.value] for field in detail.fields],
+                )
+            )
+    elif section.prose_lines:
         # ★ 작가 내부 sid가 아니라 그 번호가 가리킨 실제 출처를 문장마다 표시한다(P-118).
         prose = " ".join(
             f"{text} {marker}" if (marker := citation_marker(cite)) else text
@@ -177,11 +204,15 @@ def _summary_blocks(report: Report) -> list[NotionBlock]:
         rows.append(
             [
                 f"{index:02d}",
+                summary_topic(item.section_id),
                 item.text.strip(),
                 f"{spec.display_number}장" if spec is not None else "",
             ]
         )
-    return [_heading_2("핵심 요약"), _table_block(["#", "요약", "관련 장"], rows)]
+    return [
+        _heading_2("핵심 요약"),
+        _table_block(["#", "짧은 제목", "요약", "관련 장"], rows),
+    ]
 
 
 # ══════════════════════════════════════════════════════════
@@ -189,10 +220,10 @@ def _summary_blocks(report: Report) -> list[NotionBlock]:
 # ══════════════════════════════════════════════════════════
 
 
-def _source_list_blocks(citations: list[object]) -> list[NotionBlock]:
+def _source_list_blocks(report: Report) -> list[NotionBlock]:
     sources: list[Source] = []
     seen_numbers: set[int] = set()
-    for item in citations:
+    for item in report.citations:
         if not isinstance(item, Source) or item.number in seen_numbers:
             continue
         seen_numbers.add(item.number)
@@ -204,6 +235,7 @@ def _source_list_blocks(citations: list[object]) -> list[NotionBlock]:
             str(source.number),
             _rich_text(_source_label(source), href=source.url),
             _source_status(source),
+            source_verification_label(report, source.source_id),
             source.location.strip() or "—",
             _source_used_sections(source),
         ]
@@ -211,7 +243,7 @@ def _source_list_blocks(citations: list[object]) -> list[NotionBlock]:
     ]
     return [
         _table_block(
-            ["#", "자료", "기준일·상태", "원문 위치", "본문 사용 장"],
+            ["#", "자료", "기준일·자료 상태", "사실 검증", "원문 위치", "본문 사용 장"],
             rows,
         )
     ]
@@ -295,9 +327,9 @@ def build_blocks(report: Report, *, grade_note: str = "") -> list[NotionBlock]:
     blocks.extend(_summary_blocks(report))
 
     for section in report.sections:
-        blocks.extend(_section_blocks(section))
+        blocks.extend(_section_blocks(report, section))
 
-    source_blocks = _source_list_blocks(report.citations)
+    source_blocks = _source_list_blocks(report)
     if source_blocks:
         blocks.append(_heading_2(constants.SOURCES_HEADING))
         blocks.append(_paragraph(constants.SOURCES_SUBTITLE))

@@ -100,7 +100,7 @@ def paid_phase(
     run_id: str,
     phase: str,
     share_key: str,
-    cap_krw: float,
+    cap_krw: float | None,
     requested_cost_krw: float | None = None,
 ):
     """provider 경계의 모든 이탈에서 비용 표식을 정확히 한 번 닫는다."""
@@ -324,7 +324,7 @@ def _begin_paid_phase(
     run_id: str,
     phase: str,
     share_key: str,
-    cap_krw: float,
+    cap_krw: float | None,
     requested_cost_krw: float | None = None,
 ) -> Optional[PaidPhase]:
     """DB 표식과 active 메모리를 요청 스레드 사이에서도 한 전이로 시작한다."""
@@ -342,7 +342,7 @@ def _begin_paid_phase_locked(
     run_id: str,
     phase: str,
     share_key: str,
-    cap_krw: float,
+    cap_krw: float | None,
     requested_cost_krw: float | None,
 ) -> Optional[PaidPhase]:
     """유료 provider 호출 전에 표식을 커밋한다. 실패하면 호출 권한을 주지 않는다."""

@@ -1,17 +1,17 @@
 {% extends "base.html" %}
-{% block title %}회사 링크 범위 확인 · 기업분석{% endblock %}
+{% block title %}LINK 사용 상태 확인 · 기업분석{% endblock %}
 
 {% block content %}
-<section class="card" aria-labelledby="scope-error-title">
+<section class="card" aria-labelledby="link-error-title">
   <div class="warn-line" role="alert">
     <span aria-hidden="true">⚠️</span>
     <div>
-      <h1 id="scope-error-title" style="font-size:19px;margin-bottom:6px">회사 링크 범위를 확인해 주세요</h1>
+      <h1 id="link-error-title" style="font-size:19px;margin-bottom:6px">LINK 사용 상태를 확인해 주세요</h1>
       <p>{{ scope_error }}</p>
     </div>
   </div>
   <div class="btn-row">
-    <a class="btn" href="/">배정된 회사 입력으로 돌아가기</a>
+    <a class="btn" href="/">첫 화면으로 돌아가기</a>
   </div>
 </section>
 {% endblock %}

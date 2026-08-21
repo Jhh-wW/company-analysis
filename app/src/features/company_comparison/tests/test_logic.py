@@ -212,14 +212,42 @@ def test_정상_양사공식원문은_동일조건_비교사실을_만든다() -
         assert "경쟁우위" in fact.limitations
         if fact.comparison_metric == "영업이익률":
             assert fact.display_value == "자사 10.0%; 비교사 5.0%; 차이 5.0%p"
+            assert fact.comparison_judgment == "competitive_advantage"
         else:
             assert fact.display_value == "2.0배"
+            assert fact.comparison_judgment == "operating_characteristic"
             assert "경쟁우위 판정이 아니다" in fact.claim
         fact_errors = _fact_problems(
             fact,
             {source.source_id: source for source in result.sources},
         )
         assert fact_errors == [], fact_errors
+
+
+def test_성과지표가_비교사보다_낮으면_경쟁우위로_표시하지_않는다() -> None:
+    result = build_competitive_position(
+        _report(),
+        self_bundle=_bundle(
+            "00000001",
+            "주식회사 알파",
+            scale=1,
+            operating_amount=50,
+        ),
+        catalog=CATALOG,
+        fetch_comparator=lambda record: (
+            _bundle("00000002", "주식회사 베타", scale=2)
+            if record.corp_code == "00000002"
+            else None
+        ),
+        collected_on="2026-08-19",
+    )
+
+    profitability = next(
+        fact for fact in result.facts if fact.comparison_metric == "영업이익률"
+    )
+
+    assert "낮았다" in profitability.claim
+    assert profitability.comparison_judgment == "operating_characteristic"
 
 
 def test_규모만_같은_조건이어도_수익성_차이가_없으면_9장을_차단한다() -> None:

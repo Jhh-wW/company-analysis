@@ -248,6 +248,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     from src.features.sharelink import store as share_store  # noqa: PLC0415
     from src.features.storage import job_interruptions  # noqa: PLC0415
     from src.features.export_notion.store import CREATE_SQL as NOTION_EXPORTS_SQL  # noqa: PLC0415
+    from src.features.admin_dashboard import store as dashboard_store  # noqa: PLC0415
 
     for statement in (
         *_SCHEMA_STATEMENTS,
@@ -258,6 +259,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
     share_store.ensure_schema(conn)
+    dashboard_store.ensure_schema(conn)
     _migrate_sessions_to_token_hash(conn)
 
     # OAuth ``sub``는 이메일과 달리 계정에서 바뀌지 않는 사람 식별자다. 이미

@@ -56,12 +56,14 @@
   {% endif %}
 
   {% if share_link %}
-  <div class="warn-line" id="share-scope-note" role="status" style="margin-bottom:16px">
+  <div class="warn-line" id="share-context-note" role="status" style="margin-bottom:16px">
     <span aria-hidden="true">🔗</span>
     <span>
-      <strong>{{ share_link.company }} 전용 링크</strong><br>
-      이 링크의 조사 권한은 배정된 회사에만 적용됩니다. 다른 회사는
-      관리자가 별도 링크를 발급해야 합니다.
+      <strong>지원 맥락: {{ share_link.company }}{% if share_link.job %} · {{ share_link.job }}{% endif %}</strong><br>
+      위 회사·직무는 이 링크를 전달한 목적을 설명하는 꼬리표입니다.
+      아래 회사 이름은 자유롭게 바꿀 수 있습니다. 다른 회사를 검색해도 분석할 수 있으며,
+      비용과 권한은
+      계속 이 LINK에 기록됩니다.
     </span>
   </div>
   {% endif %}
@@ -126,7 +128,7 @@
     <input type="text" id="company" name="company" required autocomplete="off"
            maxlength="{{ company_max_chars }}"
            placeholder="예) 카카오페이" value="{{ prefill.company if prefill else '' }}"
-           {% if share_link %}readonly aria-describedby="share-scope-note"{% endif %}>
+           {% if share_link %}aria-describedby="share-context-note"{% endif %}>
   </div>
 
   <div class="field">

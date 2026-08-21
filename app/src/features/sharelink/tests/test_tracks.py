@@ -5,7 +5,7 @@
   사용자가 직접 지적해 잡힌 구멍이다 (2026-08-16).
 
 ★ 갈래별 상한
-  관리자 5,000 / 초대된 친구 1,000 / 열쇠 링크 3,000 / 모르는 손님 **0**
+  관리자 5,000 / 초대된 친구 성공 3건 / 열쇠 링크 3,000 / 모르는 손님 **0**
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ def _갈래(**바꿀것) -> Track:
 
 
 def test_로그인만_했고_초대_명단에_없으면_모르는_손님이다():
-    """★ P-95 그 자체. 이게 없으면 인터넷의 아무나 하루 1,000원씩 쓴다."""
+    """★ P-95 그 자체. 이게 없으면 인터넷의 아무나 MEMBER 성공 보고서를 쓴다."""
     assert _갈래(email=_모르는사람, is_member=False) is Track.PUBLIC
 
 
@@ -50,7 +50,7 @@ def test_모르는_손님은_상한이_0원이다():
 
 def test_초대_명단에_있어야_친구다():
     assert _갈래(email=_친구, is_member=True) is Track.MEMBER
-    assert budget_of(Track.MEMBER) == PER_USER_DAILY_BUDGET_KRW
+    assert budget_of(Track.MEMBER) is PER_USER_DAILY_BUDGET_KRW is None
 
 
 def test_명단에서_빼면_바로_모르는_손님이_된다():
@@ -67,7 +67,8 @@ def test_링크로_들어와_로그인해도_링크_몫만_쓴다():
     """★ 사용자가 지적한 바로 그 상황 (2026-08-16).
 
     인사팀이 열쇠 링크로 들어와 «호기심에» 구글 로그인을 눌러도,
-    그 회사에 배정된 몫 안에서만 쓴다. 로그인했다고 통장이 하나 더 생기지 않는다.
+    같은 LINK의 여러 회사 조사 합계 몫 안에서만 쓴다. 로그인했다고 통장이 하나 더
+    생기지 않는다.
     """
     갈래 = _갈래(email=_모르는사람, is_member=False, share_key=_열쇠)
 

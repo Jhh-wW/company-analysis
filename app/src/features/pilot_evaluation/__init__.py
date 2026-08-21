@@ -7,6 +7,12 @@ from src.features.pilot_evaluation.contract import (
     PilotSummary,
     evaluate_pilot,
 )
+from src.features.pilot_evaluation.manifest import (
+    CANONICAL_PILOT_CASES,
+    CanonicalPilotCase,
+    manifest_sha256,
+    validate_manifest,
+)
 
 __all__ = [
     "PilotCategory",
@@ -14,4 +20,8 @@ __all__ = [
     "PilotResult",
     "PilotSummary",
     "evaluate_pilot",
+    "CANONICAL_PILOT_CASES",
+    "CanonicalPilotCase",
+    "manifest_sha256",
+    "validate_manifest",
 ]

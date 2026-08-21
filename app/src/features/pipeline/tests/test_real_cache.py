@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
 import re
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -202,12 +204,26 @@ class FakeEngine:
                 claim_type: str,
                 subject_label: str,
                 *,
-                market_priority: str = "",
+                market_stage: str = "",
+                market_observation: str = "",
                 product_role: str = "",
+                portfolio_stage: str = "",
+                revenue_model_sid: str = "",
                 response_to_sid: str = "",
                 basis_sids: Optional[list[str]] = None,
                 priority_signals: Optional[list[str]] = None,
                 event_date: str = "",
+                response_action: str = "",
+                initial_signal: str = "",
+                next_check_metric: str = "",
+                plan_status: str = "",
+                plan_timing: str = "",
+                plan_condition: str = "",
+                plan_expected_effect: str = "",
+                plan_execution_signal: str = "",
+                operation_role: str = "",
+                value_chain_stage: str = "",
+                relationship_type: str = "",
             ) -> dict[str, Any]:
                 """실제 canonical 응답 스키마의 필드를 하나도 생략하지 않는다."""
 
@@ -216,12 +232,26 @@ class FakeEngine:
                     "sid": sid,
                     "claim_type": claim_type,
                     "subject_label": subject_label,
-                    "market_priority": market_priority,
+                    "market_stage": market_stage,
+                    "market_observation": market_observation,
                     "product_role": product_role,
+                    "portfolio_stage": portfolio_stage,
+                    "revenue_model_sid": revenue_model_sid,
                     "response_to_sid": response_to_sid,
                     "basis_sids": list(basis_sids or []),
                     "priority_signals": list(priority_signals or []),
                     "event_date": event_date,
+                    "response_action": response_action,
+                    "initial_signal": initial_signal,
+                    "next_check_metric": next_check_metric,
+                    "plan_status": plan_status,
+                    "plan_timing": plan_timing,
+                    "plan_condition": plan_condition,
+                    "plan_expected_effect": plan_expected_effect,
+                    "plan_execution_signal": plan_execution_signal,
+                    "operation_role": operation_role,
+                    "value_chain_stage": value_chain_stage,
+                    "relationship_type": relationship_type,
                 }
 
             return (
@@ -230,7 +260,7 @@ class FakeEngine:
                         item(
                             "identity",
                             "1-1",
-                            "official_identity",
+                            "identity_summary",
                             "가나다전자",
                         ),
                         item(
@@ -244,14 +274,17 @@ class FakeEngine:
                             "3-1",
                             "customer_market",
                             "국내외 반도체 제조사",
-                            market_priority="핵심",
+                            market_stage="핵심",
+                            market_observation="핵심 고객 시장",
                         ),
                         item(
                             "portfolio",
                             "4-1",
                             "priority_product",
                             "SmartX 반도체 검사 장비",
-                            product_role="주력",
+                            product_role="반도체 제조사 판매 장비",
+                            portfolio_stage="주력",
+                            revenue_model_sid="2-1",
                             priority_signals=["출시·운영", "투자·증설"],
                         ),
                         item(
@@ -272,7 +305,8 @@ class FakeEngine:
                             "current_challenges",
                             "7-1",
                             "current_issue",
-                            "SmartX 원가 부담",
+                            "SmartX 원가율 부담",
+                            next_check_metric="원가율",
                         ),
                         item(
                             "current_challenges",
@@ -280,24 +314,34 @@ class FakeEngine:
                             "current_response",
                             "생산 공정 재설계",
                             response_to_sid="7-1",
+                            response_action="생산 공정 재설계를 추진 중",
                         ),
                         item(
                             "future_strategy",
                             "9-1",
                             "future_plan",
                             "SmartX 수출 유통망",
+                            plan_status="announced",
+                            plan_timing="2027년",
+                            plan_execution_signal="SmartX 수출 유통망을 확대",
                         ),
                         item(
                             "operations_partners",
                             "10-1",
                             "operating_core",
                             "TraceOne 데이터 시스템",
+                            operation_role="TraceOne 데이터 시스템을 생산 운영에 사용",
+                            value_chain_stage="production",
+                            relationship_type="internal_operation",
                         ),
                         item(
                             "operations_partners",
                             "11-1",
                             "partner_role",
                             "DeltaParts",
+                            operation_role="DeltaParts가 부품을 공급한다",
+                            value_chain_stage="procurement",
+                            relationship_type="supplier",
                         ),
                         item(
                             "culture",
@@ -347,7 +391,7 @@ class FakeEngine:
                 ],
                 "current_challenges": [
                     (
-                        "가나다전자는 2026년 SmartX 원가 부담을 현재 미해결 과제로 관리한다.",
+                        "가나다전자는 2026년 SmartX 원가율 부담을 현재 미해결 과제로 관리한다.",
                         "current_challenges-1",
                     ),
                     (
@@ -559,7 +603,7 @@ class FakeEngine:
             },
             7: {
                 "종류": "MD&A",
-                "원문": "가나다전자는 2026년 SmartX 원가 부담을 현재 미해결 과제로 관리한다.",
+                "원문": "가나다전자는 2026년 SmartX 원가율 부담을 현재 미해결 과제로 관리한다.",
             },
             8: {
                 "종류": "MD&A",
@@ -709,6 +753,265 @@ def _card() -> CompanyCard:
 def _run(posting: str = POSTING, job: str = JOB, card: Optional[CompanyCard] = None):
     user_input = UserInput(company="가나다전자", job=job, region="서울 강남구", posting_text=posting)
     return real.RealPipeline().run(user_input, card or _card())
+
+
+def test_삼성전자_저장원문은_가짜AI로_생성이후까지_무과금재현한다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P01에서 저장된 DART 원문을 읽되 provider 대신 완전한 가짜 응답을 쓴다.
+
+    원문은 파일럿 실행의 로컬 증거라 저장소에 추가하지 않는다. 증거가 없는 일반
+    개발 환경에서는 건너뛰고, 있으면 해시를 먼저 맞춘 뒤 실제 파서·보정기·원문
+    대조기를 거쳐 writer와 실제 경쟁사 비교 게이트까지 도달하는지 검사한다.
+    """
+
+    expected_raw_sha256 = (
+        "107f3645e46dcd5af1ba7613d5480304c1ceaa98a89ac3a70fd113d23365d163"
+    )
+    raw_root = Path(real.paths.APP_ROOT) / ".local_evaluation_runs"
+    raw_path: Path | None = None
+    raw_candidates = raw_root.glob(
+        "*/analysis_engine/pilot/raw_filings/20260310002820.xml"
+    )
+    for candidate in sorted(raw_candidates):
+        try:
+            with candidate.open("rb") as handle:
+                digest = hashlib.file_digest(handle, "sha256").hexdigest()
+        except OSError:
+            continue
+        if digest == expected_raw_sha256:
+            raw_path = candidate
+            break
+    if raw_path is None:
+        pytest.skip("검증된 삼성전자 P01 DART 원문이 로컬에 없습니다")
+
+    actual = real._engine()
+
+    class SamsungRawFakeEngine(FakeEngine):
+        """수집·대조는 실제 로컬 코드, AI와 외부 I/O는 가짜인 혼합 엔진."""
+
+        RAW_DIR = raw_path.parent
+        CELL_SOURCES = actual.CELL_SOURCES
+        BLOCK_ORDER = actual.BLOCK_ORDER
+        GEN_MAX_TOKENS = actual.GEN_MAX_TOKENS
+        DraftItem = actual.DraftItem
+        SECTION_HEADS = actual.SECTION_HEADS
+        FRAG_CHARS = actual.FRAG_CHARS
+
+        def get_json(
+            self, endpoint: str, params: dict[str, Any], counter: Any
+        ) -> dict[str, Any]:
+            counter.count += 1
+            if endpoint == "company.json":
+                return {
+                    "status": "000",
+                    "corp_name": "삼성전자",
+                    "corp_eng_name": "SAMSUNG ELECTRONICS CO., LTD.",
+                    "adres": "경기도 수원시 영통구 삼성로 129",
+                    "ceo_nm": "한종희",
+                    "est_dt": "19690113",
+                    "hm_url": "",
+                    "corp_cls": "Y",
+                    "stock_code": "005930",
+                    "bizr_no": "1248100998",
+                }
+            if endpoint == "list.json":
+                return {"status": "000", "list": [{"report_nm": "감사보고서"}]}
+            if endpoint == "empSttus.json":
+                return {"status": "013"}
+            return {"status": "000"}
+
+        def latest_report_rcept(
+            self, corp_code: str, corp_type: str, counter: Any
+        ) -> dict[str, Any]:
+            assert corp_code == CORP_ID
+            return {
+                "report_nm": "사업보고서 (2025.12)",
+                "rcept_no": "20260310002820",
+                "rcept_dt": "20260310",
+                "reprt_code": "11011",
+            }
+
+        def download_document(self, rcept_no: str, raw_dir: Any, counter: Any) -> str:
+            assert rcept_no == "20260310002820"
+            return str(raw_path)
+
+        def read_filing_text(self, path: str) -> str:
+            return actual.read_filing_text(Path(path))
+
+        def make_fragments(
+            self, filing_text: str, financials: Optional[dict[str, Any]]
+        ) -> dict[int, dict[str, str]]:
+            return actual.make_fragments(filing_text, financials)
+
+        def split_sentences(self, text: str) -> list[str]:
+            return actual.split_sentences(text)
+
+        def check_draft(
+            self,
+            items: list[Any],
+            fragments: dict[int, str],
+            requirement_lines: list[str],
+        ) -> Any:
+            return actual.check_draft(items, fragments, requirement_lines)
+
+        def _ask(
+            self, client: Any, prompt: str, schema: dict[str, Any], max_tokens: int = 700
+        ) -> tuple[dict[str, Any], dict[str, int]]:
+            if "공식 근거 기반 회사분석 보고서의 사실 배치 작업" not in prompt:
+                return super()._ask(client, prompt, schema, max_tokens=max_tokens)
+
+            response = client.messages.create(
+                model=self.MODEL,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+                output_config={"format": {"type": "json_schema", "schema": schema}},
+            )
+            self.posting_ai_prompts.append(prompt)
+            self.generate_ai_calls += 1
+
+            def item(
+                section_id: str,
+                sid: str,
+                claim_type: str,
+                subject_label: str = "",
+                *,
+                event_date: str = "",
+                response_action: str = "",
+                initial_signal: str = "",
+                next_check_metric: str = "",
+                plan_status: str = "",
+                plan_timing: str = "",
+                plan_condition: str = "",
+                plan_expected_effect: str = "",
+                plan_execution_signal: str = "",
+                operation_role: str = "",
+                value_chain_stage: str = "",
+                relationship_type: str = "",
+            ) -> dict[str, Any]:
+                return {
+                    "section_id": section_id,
+                    "sid": sid,
+                    "claim_type": claim_type,
+                    "subject_label": subject_label,
+                    "market_stage": "",
+                    "market_observation": "",
+                    "product_role": "",
+                    "portfolio_stage": "",
+                    "revenue_model_sid": "",
+                    "response_to_sid": "",
+                    "basis_sids": [],
+                    "priority_signals": [],
+                    "event_date": event_date,
+                    "response_action": response_action,
+                    "initial_signal": initial_signal,
+                    "next_check_metric": next_check_metric,
+                    "plan_status": plan_status,
+                    "plan_timing": plan_timing,
+                    "plan_condition": plan_condition,
+                    "plan_expected_effect": plan_expected_effect,
+                    "plan_execution_signal": plan_execution_signal,
+                    "operation_role": operation_role,
+                    "value_chain_stage": value_chain_stage,
+                    "relationship_type": relationship_type,
+                }
+
+            return (
+                {
+                    "items": [
+                        item("business_model", "2-1", "revenue_model", "재화의 판매"),
+                        item(
+                            "past_changes",
+                            "4-2",
+                            "completed_execution",
+                            event_date="2025",
+                        ),
+                        item(
+                            "current_challenges",
+                            "11-5",
+                            "current_issue",
+                            "환율변동위험",
+                            next_check_metric="환율",
+                        ),
+                        item(
+                            "operations_partners",
+                            "8-5",
+                            "partner_role",
+                            "Qualcomm",
+                        ),
+                    ]
+                },
+                {
+                    "in": response.usage.input_tokens,
+                    "out": response.usage.output_tokens,
+                },
+            )
+
+    fake = SamsungRawFakeEngine()
+    monkeypatch.setattr(real, "_engine", lambda: fake)
+    monkeypatch.setattr(
+        real,
+        "_company_catalog",
+        lambda: (
+            (
+                CORP_ID,
+                "삼성전자",
+                "SAMSUNG ELECTRONICS CO., LTD.",
+                "005930",
+                "20260821",
+            ),
+        ),
+    )
+
+    calls = {"writer": 0, "comparison": 0, "finalize": 0}
+    original_writer = real.write_and_verify_sections
+    original_comparison = real._attach_competitive_position
+    original_finalize = real.finalize_report
+
+    def counted_writer(*args: Any, **kwargs: Any):
+        calls["writer"] += 1
+        return original_writer(*args, **kwargs)
+
+    def counted_finalize(*args: Any, **kwargs: Any):
+        calls["finalize"] += 1
+        return original_finalize(*args, **kwargs)
+
+    def counted_comparison(*args: Any, **kwargs: Any):
+        calls["comparison"] += 1
+        return original_comparison(*args, **kwargs)
+
+    monkeypatch.setattr(real, "write_and_verify_sections", counted_writer)
+    monkeypatch.setattr(real, "_attach_competitive_position", counted_comparison)
+    monkeypatch.setattr(real, "finalize_report", counted_finalize)
+
+    progress: list[str] = []
+    result = real.RealPipeline().run(
+        UserInput(company="삼성전자", job="", region="", posting_text=""),
+        CompanyCard(
+            legal_name="삼성전자",
+            typed_name="삼성전자",
+            address="경기도 수원시 영통구 삼성로 129",
+            ceo="한종희",
+            founded="19690113",
+            ref=CORP_ID,
+        ),
+        progress.append,
+    )
+
+    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.outcome is not Outcome.FAILED
+    assert result.report is None
+    assert result.billing_uncertain is False
+    # 이 P01 원문은 법인명을 붙인 직접 경쟁 근거가 없어 실제 9장 게이트에서
+    # 멈추는 것이 정답이다. 경쟁사를 추측해 finalize까지 우회하지 않는다.
+    assert "양사 공식 원문" in result.message
+    assert calls == {"writer": 1, "comparison": 1, "finalize": 0}
+    assert progress[:6] == [
+        "identify", "judge", "collect", "gate", "generate", "verify"
+    ]
+    assert fake.client.messages.calls == 5
+    assert len(result.ai_cost_events) == 5
+    assert all(event.failed_call is False for event in result.ai_cost_events)
 
 
 # ══════════════════════════════════════════════════════════
@@ -883,6 +1186,70 @@ def test_같은_공고를_다시_조사하면_생성AI를_한_번도_안_부른�
     assert engine.generate_ai_calls == calls_after_first, (
         "두 번째 조사에서 생성·검증 AI가 또 나갔습니다 — 캐시가 안 먹었습니다."
     )
+
+
+def test_가짜엔진도_9장_양사공식원문과_동일비교조건을_정직하게_채운다(
+    engine: FakeEngine,
+) -> None:
+    """캐시 fixture도 production 비교 게이트를 우회하지 않고 같은 계약을 지킨다."""
+
+    result = _run()
+
+    assert result.outcome is Outcome.REPORT
+    assert result.report is not None
+    report = result.report
+    comparison_facts = [
+        fact
+        for fact in report.fact_records
+        if fact.section_owner == "competitive_position"
+    ]
+    assert {fact.comparison_metric for fact in comparison_facts} == {
+        "영업이익률",
+        "매출 규모",
+    }
+    assert {
+        fact.comparison_metric: fact.comparison_judgment
+        for fact in comparison_facts
+    } == {
+        "영업이익률": "competitive_advantage",
+        "매출 규모": "operating_characteristic",
+    }
+
+    sources = {source.source_id: source for source in report.citations}
+    expected_condition_keys = {
+        "customer",
+        "product",
+        "market",
+        "self_period",
+        "comparator_period",
+        "self_definition",
+        "comparator_definition",
+        "self_accounting_scope",
+        "comparator_accounting_scope",
+    }
+    for fact in comparison_facts:
+        conditions = fact.comparison_conditions
+        assert fact.comparison_target == "베타전자"
+        assert fact.comparison_period == "2025-01-01~2025-12-31"
+        assert fact.comparison_scope == "연결재무제표(CFS)"
+        assert set(conditions) == expected_condition_keys
+        assert all(str(value).strip() for value in conditions.values())
+        assert conditions["self_period"] == conditions["comparator_period"]
+        assert conditions["self_period"] == fact.comparison_period
+        assert conditions["self_definition"] == conditions["comparator_definition"]
+        assert conditions["self_definition"] == fact.comparison_definition
+        assert (
+            conditions["self_accounting_scope"]
+            == conditions["comparator_accounting_scope"]
+            == fact.comparison_scope
+        )
+        assert fact.source_id != fact.comparator_source_id
+        assert sources[fact.source_id].publisher == "가나다전자"
+        assert sources[fact.comparator_source_id].publisher == "베타전자"
+        assert '"official_text"' in fact.state_evidence
+        assert '"financials"' in fact.state_evidence
+        assert '"official_text"' in fact.comparator_state_evidence
+        assert '"financials"' in fact.comparator_state_evidence
 
 
 def test_캐시로_돌려준_보고서가_처음_만든_것과_같다(engine: FakeEngine) -> None:

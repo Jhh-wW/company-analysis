@@ -65,6 +65,7 @@
         {% for item in report.summary_items %}
         <li>
           <span class="summary-number">{{ "%02d"|format(loop.index) }}</span>
+          <span class="summary-topic">{{ summary_topic(item.section_id) }}</span>
           <span class="summary-text">{{ item.text }}</span>
           <span class="summary-section">
             {% for section in report.sections %}{% if section.cell == item.section_id %}{{ section.display_number }}장{% endif %}{% endfor %}
@@ -87,6 +88,11 @@
   {# 내부 이름은 title에도 넣지 않는다. 화면에는 아래 출처 목록을 가리키는 번호만 필요하다(P-127). #}
   {%- if n -%}<a class="ref" href="#src{{ n }}" title="출처 {{ n }}번">{{ n }}</a>{%- endif -%}
 {% endmacro %}
+{% macro refs(numbers) %}
+  {%- for n in numbers -%}
+    <a class="ref" href="#src{{ n }}" title="출처 {{ n }}번">{{ n }}</a>
+  {%- endfor -%}
+{% endmacro %}
 
 <div class="report">
   {% set output_sections = report.sections|sort(attribute='display_number') %}
@@ -103,9 +109,21 @@
       {% endif %}
       <h2><span class="no">{{ heading_number }}</span><span class="txt">{{ heading_title }}</span>{% if s.tag %}<span class="section-tag">{{ s.tag }}</span>{% endif %}</h2>
       {% if s.is_filled %}
-        {# 표시용 문장이 있으면 그것만 낸다. 같은 사실의 근거 원문은 내부 검증용이며
-           최종 보고서에서 다시 출력하지 않는다. 표시용 문장이 없을 때만 원문을 복귀시킨다. #}
-        {% if s.prose_lines %}
+        {% set detail_blocks = section_content_blocks(report, s) %}
+        {% if detail_blocks %}
+          <div class="section-content-grid">
+          {% for block in detail_blocks %}
+            <article class="section-content-card{% if block.tone %} {{ block.tone }}{% endif %}" data-fact-ids="{{ block.fact_ids|join(',') }}">
+              <h3>{{ block.title }}{{ refs(block.source_numbers) }}</h3>
+              <dl>
+                {% for field in block.fields %}
+                <div><dt>{{ field.label }}</dt><dd>{{ field.value }}</dd></div>
+                {% endfor %}
+              </dl>
+            </article>
+          {% endfor %}
+          </div>
+        {% elif s.prose_lines %}
           {# ★ 문자열 하나를 찍지 않는다. 검증을 통과한 문장마다 실제 출처 번호를
              붙여야 어느 문장이 어느 원문에 기대는지 사용자가 대조할 수 있다(P-118). #}
           <p class="prose">
@@ -117,6 +135,65 @@
         {# 숫자는 문장으로 바꾸지 않고 표 그대로 낸다 (결정기록 D13) #}
         {% for t in s.tables %}
           {% set table_id = 'report-table-' ~ section_index ~ '-' ~ loop.index %}
+          {% set visual = table_visualization(t) %}
+          {% if visual and visual.kind == 'composition' %}
+          <figure class="report-visual composition-chart" aria-labelledby="{{ table_id }}-caption">
+            <figcaption class="cap" id="{{ table_id }}-caption">
+              {{ t.caption }}{{ ref(t.cite) }}
+            </figcaption>
+            <div class="composition-track" role="img" aria-label="{{ t.caption }}">
+              {% for item in visual.items %}
+              <span class="composition-segment tone-{{ loop.index0 % 5 }}"
+                    style="width: {{ '%.4f'|format(item.ratio) }}%"
+                    title="{{ item.label }} {{ item.display }}"></span>
+              {% endfor %}
+            </div>
+            <ul class="chart-legend" aria-label="구성 항목">
+              {% for item in visual.items %}
+              <li><span class="legend-swatch tone-{{ loop.index0 % 5 }}" aria-hidden="true"></span><span>{{ item.label }}</span><strong>{{ item.display }}</strong></li>
+              {% endfor %}
+            </ul>
+            <p class="chart-note">자료{{ ref(t.cite) }} · {{ visual.note }}</p>
+          </figure>
+          {% elif visual and visual.kind == 'trend' %}
+          <figure class="report-visual trend-chart" aria-labelledby="{{ table_id }}-caption">
+            <figcaption class="cap" id="{{ table_id }}-caption">
+              {{ t.caption }}{{ ref(t.cite) }}
+            </figcaption>
+            <div class="trend-panels">
+              {% for series in visual.series %}
+              <section class="trend-panel{% if series.risk %} risk{% endif %}" aria-label="{{ series.label }}">
+                <h3>{{ series.label }}{% if visual.unit %} <span>({{ visual.unit }})</span>{% endif %}</h3>
+                <div class="trend-points">
+                  {% for point in series.points %}
+                  <div class="trend-point">
+                    <span class="trend-value">{{ point.display }}</span>
+                    <span class="trend-bar-wrap" aria-hidden="true"><span class="trend-bar" style="height: {{ '%.4f'|format(point.ratio) }}%"></span></span>
+                    <span class="trend-label">{{ point.label }}</span>
+                  </div>
+                  {% endfor %}
+                </div>
+              </section>
+              {% endfor %}
+            </div>
+            <p class="chart-note">자료{{ ref(t.cite) }} · {{ visual.note }}</p>
+          </figure>
+          {% elif visual and visual.kind == 'flow' %}
+          <figure class="report-visual flow-chart" aria-labelledby="{{ table_id }}-caption">
+            <figcaption class="cap" id="{{ table_id }}-caption">
+              {{ t.caption }}{{ ref(t.cite) }}
+            </figcaption>
+            <div class="flow-rows">
+              {% for flow in visual.flows %}
+              <ol class="flow-row">
+                {% for value in flow %}
+                <li><small>{{ t.headers[loop.index0] }}</small><span>{{ value }}</span></li>
+                {% endfor %}
+              </ol>
+              {% endfor %}
+            </div>
+          </figure>
+          {% else %}
           <div class="numtable">
             <div class="cap" id="{{ table_id }}-caption">
               {{ t.caption }}{{ ref(t.cite) }}
@@ -136,6 +213,7 @@
               </table>
             </div>
           </div>
+          {% endif %}
         {% endfor %}
       {% endif %}
       </section>
@@ -151,7 +229,7 @@
     </p>
     <div class="scroll report-scroll" tabindex="0" role="region" aria-labelledby="report-citations-title">
       <table class="texts" aria-labelledby="report-citations-title">
-        <thead><tr><th scope="col" style="width:56px">#</th><th scope="col">자료</th><th scope="col">기준일·상태</th><th scope="col">원문 위치</th><th scope="col">본문 사용 장</th></tr></thead>
+        <thead><tr><th scope="col" style="width:56px">#</th><th scope="col">자료</th><th scope="col">기준일·자료 상태</th><th scope="col">사실 검증</th><th scope="col">원문 위치</th><th scope="col">본문 사용 장</th></tr></thead>
         <tbody>
           {% set source_numbers = namespace(seen=[]) %}
           {% for c in report.citations %}
@@ -176,6 +254,7 @@
               {%- if c.source_type %} · {{ c.source_type }}{% endif %}
               {%- if c.fact_status %} · {{ c.fact_status }}{% endif %}
             </td>
+            <td>{{ source_verification_label(report, c.source_id) }}</td>
             <td>{{ c.location or '—' }}</td>
             <td>
               {%- set usage = namespace(first=true) -%}
@@ -198,6 +277,33 @@
 {% endif %}
 </article>
 
+<aside class="report-support ui-only" aria-label="보고서 이용 안내와 의견 보내기">
+  <p class="frame-eyebrow">이용 안내</p>
+  <p>중요한 판단 전에는 각 항목의 원출처를 함께 확인해 주세요. 이상한 부분을 발견하면 아래에서 알려주실 수 있습니다.</p>
+  {% if member_feedback_allowed %}
+  <div class="frame-grid frame-grid-two">
+    <form class="card" method="post" action="/reports/{{ job.job_id }}/survey">
+      <h3>이 보고서가 이 회사를 파악하는 데 얼마나 도움이 되었나요?</h3>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>별점 <select name="rating" required><option value="">선택</option>{% for score in range(1, 6) %}<option value="{{ score }}">{{ score }}점</option>{% endfor %}</select></label>
+      <label>전체 이용 소감 <textarea name="overall_feedback" maxlength="3000" required></textarea></label>
+      <label>회사의 구체적인 사업상 구분점이 잘 드러났나요? <textarea name="business_distinction" maxlength="3000" required></textarea></label>
+      <label>더 있었으면 하는 정보 <textarea name="add_information" maxlength="3000"></textarea></label>
+      <label>없어도 된다고 생각한 정보 <textarea name="delete_information" maxlength="3000"></textarea></label>
+      <button class="btn ghost" type="submit">설문 저장</button>
+    </form>
+    <form class="card" method="post" action="/reports/{{ job.job_id }}/errors">
+      <h3>오류 신고</h3><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>어느 부분이 이상한가요? <textarea name="area" maxlength="1000" required></textarea></label>
+      <label>왜 이상하다고 생각하나요? <textarea name="reason" maxlength="3000" required></textarea></label>
+      <label>서비스 전체에 즉시 영향을 줄 수 있나요? <select name="incident_kind"><option value="">개별 보고서 문제</option><option value="source_global">출처의 중대한 전역 문제</option><option value="security">보안 문제</option><option value="cost">비용 급증 문제</option></select></label>
+      <p class="muted">신고가 접수되면 이 보고서의 결과·다운로드·공유가 함께 멈추고 관리자가 원본과 출처를 확인합니다.</p>
+      <button class="btn danger" type="submit">오류 신고</button>
+    </form>
+  </div>
+  {% endif %}
+</aside>
+
 <nav class="btn-row report-actions" aria-label="보고서 작업">
   <a class="btn" href="/download/pdf/{{ job.job_id }}">
     PDF 보고서 받기
@@ -213,7 +319,7 @@
     <button type="button" class="btn ghost" disabled
             aria-describedby="notion-setup-note">노션 설정 필요</button>
   {% endif %}
-  <a class="btn ghost" href="/">다른 회사 조사하기</a>
+  <a class="btn ghost" href="/">다른 회사 분석하기</a>
 </nav>
 
 {% if auth_is_admin and not notion_configured %}

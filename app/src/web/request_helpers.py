@@ -28,6 +28,7 @@ from src.core.constants import (
 from src.features.auth import constants as auth_constants
 from src.features.auth import google as auth_google
 from src.features.auth import logic as auth_logic
+from src.features.admin_dashboard import store as dashboard_store
 from src.features.budget import logic as budget_logic
 from src.features.budget import spend_store
 from src.features.budget.constants import (
@@ -51,6 +52,12 @@ from src.features.sharelink.constants import (
     PUBLIC_NOT_ALLOWED_MESSAGE,
 )
 from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
+from src.features.report_standard.visualization import table_visualization
+from src.features.report_standard.section_content import (
+    section_content_blocks,
+    source_verification_label,
+    summary_topic,
+)
 from src.features.storage import db as storage_db
 from src.web import evaluation_mode, paid_runtime, runtime
 from src.web.security import (
@@ -99,6 +106,11 @@ def _ctx(request: Request, **kwargs) -> dict:
         "canonical_schema_version": CANONICAL_SCHEMA_VERSION,
         # 내부 ``조각 N·종류``를 템플릿에서 직접 자르면 다른 출력과 다시 갈린다(P-127).
         "citation_number": citation_number,
+        # 표의 사실을 반복하지 않고 구성비·추세·흐름 표현으로 바꾸는 순수 함수다.
+        "table_visualization": table_visualization,
+        "section_content_blocks": section_content_blocks,
+        "source_verification_label": source_verification_label,
+        "summary_topic": summary_topic,
         # 검증된 본문 아래의 근거 원문 문구 — 세 출력 형태가 core 값을 같이 쓴다(P-117).
         "raw_source_label": RAW_SOURCE_LABEL,
         "raw_source_note": RAW_SOURCE_NOTE,
@@ -192,14 +204,18 @@ def _lookup_failed_screen(request: Request) -> HTMLResponse:
 def _load_active_share_link(
     conn: sqlite3.Connection, key: str
 ) -> Optional[share_store.ShareLink]:
-    """수동 삭제되지 않았고 자동 수명도 남은 링크만 권한으로 인정한다."""
+    """철회되지 않았고 자동 수명도 남은 링크만 권한으로 인정한다."""
     link = share_store.load(conn, key)
-    if link is None or share_logic.is_share_link_expired(link.created_at):
+    if (
+        link is None
+        or link.is_revoked
+        or share_logic.is_share_link_expired(link.created_at)
+    ):
         return None
     return link
 
 def _current_share_link(request: Request):
-    """이 손님이 «어느 회사 링크»로 들어왔는지 (P-94).
+    """이 손님이 «어느 지원 맥락 LINK»로 들어왔는지 (P-94).
 
     Args:
         request: 들어온 요청.
@@ -207,8 +223,7 @@ def _current_share_link(request: Request):
     Returns:
         발급해 둔 링크 정보. 열쇠가 없거나 못 찾으면 None.
 
-    ★ 첫 화면이 그 회사를 «크게» 보여주기 위한 것이다 —
-      인사팀이 자기 회사 이름을 바로 보는 것이 이 방식의 핵심이다.
+    ★ 첫 화면에서 지원 회사·직무 꼬리표와 편집 가능한 기본값을 보여주기 위한 것이다.
     ★ 못 찾아도 **조용히 None**을 돌려준다. 링크가 닫혔다고 첫 화면까지
       막으면, 인사팀에게는 그냥 「안 되는 사이트」가 된다.
     """
@@ -265,7 +280,7 @@ def _raw_share_key(request: Request) -> str:
         logger.exception("열쇠 링크를 확인하지 못해 공개 손님으로 봅니다")
         return ""
 
-def _track_of(request: Request) -> tuple[share_tracks.Track, str, float]:
+def _track_of(request: Request) -> tuple[share_tracks.Track, str, float | None]:
     """이 손님이 «어느 갈래»이고, «어느 통장»에서, «얼마»까지 쓸 수 있는가.
 
     Args:
@@ -308,18 +323,16 @@ def _track_of(request: Request) -> tuple[share_tracks.Track, str, float]:
     return track, bucket, share_tracks.budget_of(track)
 
 
-def require_share_scope(
+def require_active_share_link(
     request: Request,
     *,
-    company: str,
-    job: str = "",
-    resolved_track: Optional[tuple[share_tracks.Track, str, float]] = None,
+    resolved_track: Optional[tuple[share_tracks.Track, str, float | None]] = None,
 ) -> Optional[HTMLResponse]:
-    """회사별 링크 권한을 발급 당시 회사에 서버에서 묶는다.
+    """LINK 자체가 아직 유효한지만 실행 경계에서 다시 확인한다.
 
-    관리자와 별도 초대 회원은 자기 고유 권한을 쓰므로 제한하지 않는다. 익명 또는
-    미초대 사용자가 ``LINK`` 권한을 쓰는 경우에만 쿠키가 가리키는 현재 DB row와
-    제출값을 비교한다. HTML의 readonly 속성은 안내일 뿐이며 이 검사가 인가 경계다.
+    링크에 저장된 지원 회사와 직무는 전달 맥락을 설명하는 꼬리표이지 권한 범위가
+    아니므로 이 함수는 제출 회사나 직무를 받지도, 비교하지도 않는다. 관리자·회원·
+    공개 경로의 기존 판정은 그대로 둔다.
     """
     track, bucket, _cap = resolved_track or _track_of(request)
     if track is not share_tracks.Track.LINK:
@@ -328,14 +341,14 @@ def require_share_scope(
         with storage_db.connect() as conn:
             link = _load_active_share_link(conn, bucket)
     except Exception:  # noqa: BLE001 — 범위를 확인하지 못하면 링크 권한을 쓰지 못한다
-        logger.exception("회사별 링크 범위를 확인하지 못했습니다")
+        logger.exception("LINK 권한 상태를 확인하지 못했습니다")
         return templates.TemplateResponse(
             request=request,
             name="share_scope_error.html",
             context=_ctx(
                 request,
                 scope_error=(
-                    "링크의 회사 범위를 지금 확인할 수 없습니다. "
+                    "LINK 권한 상태를 지금 확인할 수 없습니다. "
                     "잠시 후 같은 링크에서 다시 시도해 주세요."
                 ),
             ),
@@ -347,32 +360,34 @@ def require_share_scope(
             name="share_scope_error.html",
             context=_ctx(
                 request,
-                scope_error="이 회사 링크는 더 이상 사용할 수 없습니다.",
+                scope_error="이 LINK는 만료됐거나 철회되어 더 이상 사용할 수 없습니다.",
             ),
             status_code=403,
         )
-    # ``job``은 옛 링크·호출부를 깨지 않기 위한 인자일 뿐 새 권한 범위가 아니다.
-    # 회사 분석 전용 전환 뒤에는 직무 입력이 없으므로 회사명만 동일하면 된다.
-    if share_logic.scope_matches(link_company=link.company, company=company):
-        return None
-    return templates.TemplateResponse(
-        request=request,
-        name="share_scope_error.html",
-        context=_ctx(
-            request,
-            scope_error=(
-                f"이 링크는 {link.company} 분석에만 사용할 수 있습니다."
-            ),
-        ),
-        status_code=403,
-    )
+    return None
+
+
+def require_share_scope(
+    request: Request,
+    *,
+    company: str,
+    job: str = "",
+    resolved_track: Optional[tuple[share_tracks.Track, str, float | None]] = None,
+) -> Optional[HTMLResponse]:
+    """이전 내부 호출과 확장 코드의 호환을 위한 별칭이다.
+
+    회사·직무는 LINK 권한 범위가 아니며 일부러 버린다. 새 코드는 의미가 분명한
+    :func:`require_active_share_link`를 사용해야 한다.
+    """
+    del company, job
+    return require_active_share_link(request, resolved_track=resolved_track)
 
 def _guard_run(
     request: Request,
     *,
     count_start: bool = True,
     owns_slot: bool = False,
-    resolved_track: Optional[tuple[share_tracks.Track, str, float]] = None,
+    resolved_track: Optional[tuple[share_tracks.Track, str, float | None]] = None,
     now: Optional[float] = None,
 ) -> Optional[HTMLResponse]:
     """조사를 시작해도 되는지 보고, 안 되면 «막는 화면»을 돌려준다.
@@ -389,6 +404,25 @@ def _guard_run(
     """
     admission_now = time.monotonic() if now is None else now
     _sweep_jobs(admission_now)
+
+    # 전역 점검은 새 생성을 막되, 이미 저장된 결과의 열람은 reports 경로에서
+    # 계속 별도로 판정한다. 상태를 읽지 못할 때도 새 외부 호출을 열지 않는다.
+    try:
+        with storage_db.connect() as conn:
+            service_state = dashboard_store.get_service_state(conn)
+    except Exception:
+        logger.exception("전역 운영 상태를 읽지 못했습니다")
+        return _throttled(
+            request,
+            "현재 운영 상태를 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.",
+            "service-state-store",
+        )
+    if service_state.status == dashboard_store.SERVICE_MAINTENANCE:
+        return _throttled(
+            request,
+            "현재 점검 중입니다. 원인 확인과 재검사가 끝난 뒤 운영자가 직접 재시작합니다.",
+            "service-maintenance",
+        )
 
     # 미리보기는 화면만 확인하는 모드다. 후보 검색을 포함한 외부 provider 진입 전에
     # 서버에서도 닫아 HTML의 disabled 속성을 우회해도 비용이 나가지 않게 한다.
@@ -424,9 +458,32 @@ def _guard_run(
         ) > 0
     ):
         stored_bucket = bucket
-    budget_exhausted = costs_money and not share_logic.can_start_new_run(
-        paid_runtime._LINK_SPEND, stored_bucket, clock.today_kst(), cap
+    budget_exhausted = (
+        costs_money
+        and cap is not None
+        and not share_logic.can_start_new_run(
+            paid_runtime._LINK_SPEND, stored_bucket, clock.today_kst(), cap
+        )
     )
+    if track is share_tracks.Track.MEMBER:
+        # MEMBER의 사용자 제한은 비용이 아니라 KST 성공 보고서 3건이다. 여기서는
+        # 빠른 사전 확인만 하고, Job 등록 직전 SQLite reservation이 동시 경쟁을 닫는다.
+        try:
+            with storage_db.connect() as conn:
+                member_available = dashboard_store.member_can_start(
+                    conn,
+                    actor_email=bucket.removeprefix("user:"),
+                    day=clock.today_kst().isoformat(),
+                )
+        except Exception:
+            logger.exception("MEMBER 성공 보고서 사용량을 읽지 못했습니다")
+            return _throttled(request, BUDGET_STORE_BLOCKED_MESSAGE, "member-usage-store")
+        if not member_available:
+            return _throttled(
+                request,
+                "오늘 성공한 보고서 3건을 모두 사용했습니다. 내일 다시 시도해 주세요.",
+                "member-success-limit",
+            )
     if count_start and not budget_logic.rate_ok(
         paid_runtime._RATE_HISTORY,
         rate_key,
@@ -480,12 +537,16 @@ def _throttled(request: Request, message: str, kind: str) -> HTMLResponse:
     ★ 429는 「지금은 안 된다」이지 「고장」이 아니다. 화면이 그걸 분명히 말한다.
     """
     logger.info("조사를 막았습니다: %s", kind)
-    return templates.TemplateResponse(
+    response = templates.TemplateResponse(
         request=request,
         name="throttled.html",
         context=_ctx(request, throttle_message=message, throttle_kind=kind),
         status_code=429,
     )
+    # 유료 파일럿 실행기만 429의 안전한 재시도 가능 여부를 증명할 수 있게 한다.
+    # 금액·잔여 한도·공급자 원문은 노출하지 않는다.
+    response.headers["X-Company-Analysis-Block"] = kind
+    return response
 
 def _cookie_secure(request: Request) -> bool:
     """요청별 쿠키의 ``Secure`` 여부를 fail-closed로 정한다.

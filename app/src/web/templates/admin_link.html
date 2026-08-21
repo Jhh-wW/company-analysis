@@ -1,8 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ link.company }} 링크 · 기업분석{% endblock %}
 
-{# 링크 하나의 «주소와 QR» (문제로그 P-96).
-   ★ QR은 SVG라 인쇄해도 안 깨진다 — 포트폴리오는 인쇄되기도 한다. #}
+{# raw capability는 이 화면에 절대 넣지 않는다. 상세·수정·철회는 key_hash만 쓴다. #}
 
 {% block content %}
 {% if link_error %}
@@ -11,8 +10,21 @@
 </div>
 {% endif %}
 <div class="card">
-  <p class="muted" style="margin-bottom:4px">회사별 링크</p>
+  <p class="muted" style="margin-bottom:4px">LINK 전달 맥락</p>
   <h1 style="font-size:19px;margin-bottom:4px">{{ link.company }}</h1>
+  <p style="margin-bottom:4px">
+    <strong>지원 직무</strong> · {{ link.job or "미입력" }}
+  </p>
+  {% if link.note %}<p class="muted">메모 · {{ link.note }}</p>{% endif %}
+
+  <div class="warn-line" style="margin-top:16px">
+    <span aria-hidden="true">ℹ️</span>
+    <span>
+      회사와 직무는 이 링크를 어느 지원 맥락에서 전달했는지 설명하는
+      <strong>꼬리표</strong>입니다. 방문자는 로그인 없이 다른 회사도 자유롭게
+      분석하며, 그 생성과 비용은 계속 이 LINK 이력에 기록됩니다.
+    </span>
+  </div>
 
   {% if link_expired %}
   <div class="warn-line">
@@ -21,55 +33,23 @@
       주소를 가진 사람도 더는 이 링크 권한으로 들어올 수 없습니다.</span>
   </div>
   {% endif %}
-
-  {% if secret_available and qr_svg %}
-  <div style="text-align:center;margin:20px 0;background:#fff;padding:16px;border-radius:8px">
-    {{ qr_svg|safe }}
+  {% if link_revoked %}
+  <div class="warn-line">
+    <span>ℹ️</span>
+    <span><strong>이 LINK는 {{ link_revoked_at_label }}에 철회됐습니다.</strong><br>
+      새 분석 권한은 닫혔지만 아래 접속·생성 이력은 삭제되지 않습니다.</span>
   </div>
   {% endif %}
-
-  {% if secret_available %}
-  <p class="muted" style="margin-bottom:4px">
-    {% if base_url %}포트폴리오에 넣을 주소{% else %}이 서비스 안에서 쓰는 상대 경로{% endif %}
-  </p>
-  <p style="word-break:break-all;font-family:monospace;background:var(--navy-soft);
-            padding:10px;border-radius:6px">{{ url }}</p>
-
-  {% if not base_url %}
-  <div class="warn-line" style="margin-top:12px">
-    <span>⚠️</span>
-    <span>
-      <strong>검증된 공개 서비스 주소가 없어 외부 복사용 절대 주소와 QR을 만들지 않았습니다.</strong>
-      배포 환경에 <code>SHARE_PUBLIC_BASE_URL=https://…</code>을 설정하세요. 요청의
-      Host 헤더는 보안상 공개 주소로 사용하지 않습니다.
-    </span>
-  </div>
-  {% endif %}
-
-  {# ★ 「배포된 주소로 보이는가」로 판단한다 — `localhost` 글자만 보면
-     `127.0.0.1`이나 다른 내부 주소를 놓친다 (P-96). #}
-  {% if base_url and not is_deployed %}
-  <div class="warn-line" style="margin-top:12px">
-    <span>⚠️</span>
-    <span>
-      <b>이 주소는 내 컴퓨터에서만 열립니다.</b>
-      지금 포트폴리오에 넣으면 인사팀에게는 <strong>안 열리는 링크</strong>가 됩니다.
-      인터넷에 배포한 뒤 <strong>그 주소에서 다시 발급</strong>하세요.
-    </span>
-  </div>
-  {% endif %}
-  {% else %}
   <div class="warn-line" style="margin-top:16px">
     <span aria-hidden="true">ℹ️</span>
-    <span><strong>비밀 주소는 발급 직후에만 표시합니다.</strong><br>
-      데이터베이스에는 SHA-256 지문만 남기므로 이 화면에서 주소나 QR을 다시 만들 수
-      없습니다. 주소를 잃었다면 기존 링크를 닫고 새 링크를 발급하세요.</span>
+    <span><strong>비밀 LINK 주소는 발급 응답의 1회성 다운로드로만 전달됩니다.</strong><br>
+      데이터베이스와 이 HTML에는 SHA-256 식별값만 남습니다. 주소를 잃었다면
+      기존 LINK를 철회하고 새 LINK를 발급하세요.</span>
   </div>
-  {% endif %}
 </div>
 
 <div class="card">
-  <h2>링크를 누르면 바로 열 보고서</h2>
+  <h2>연결된 시작 보고서</h2>
   <p class="muted" style="margin-top:6px">
     결과 화면의 주소 또는 32자리 ID를 붙여 넣으세요. 저장된 보고서인지 확인한 뒤에만
     연결합니다. 입력을 비우고 저장하면 연결을 해제합니다.
@@ -81,6 +61,7 @@
     <div class="field">
       <label for="report_reference">결과 화면 주소 또는 ID</label>
       <input id="report_reference" name="report_reference"
+             maxlength="{{ reference_max_chars }}"
              value="{{ link.report_id }}" placeholder="http://localhost:8000/result/…">
     </div>
     <button type="submit" class="btn">
@@ -102,18 +83,24 @@
             <br><span class="muted">메신저 미리보기·보안 봇·재시도도 포함될 수 있으며 사람을 식별하지 않습니다.</span></td></tr>
     <tr><th scope="row">발급 시각</th>
         <td>{{ link_created_at_label }}</td></tr>
+    <tr><th scope="row">만료일</th>
+        <td>{{ link_expiry_date_label }}</td></tr>
+    <tr><th scope="row">상태</th>
+        <td>{% if link_revoked %}<strong>철회</strong>
+            {% elif link_expired %}<strong>만료</strong>
+            {% else %}<strong>사용 가능</strong>{% endif %}</td></tr>
     <tr><th scope="row">최초 요청 시각</th>
         <td>{{ link_first_opened_at_label }}</td></tr>
     <tr><th scope="row">최근 요청 시각</th>
         <td>{{ link_last_opened_at_label }}</td></tr>
-    <tr><th scope="row">미리 구운 보고서</th>
+    <tr><th scope="row">연결된 시작 보고서</th>
         <td>
           {% if report_state == "active" %}
-            ⭕ <a href="/result/{{ link.report_id }}">보기</a>
-            <br><span class="muted">인사팀이 링크를 누르면 이 보고서가 바로 열립니다 (0원)</span>
+            ⭕ <a href="/admin/link/report/{{ link.report_id }}">관리자 검수로 보기</a>
+            <br><span class="muted">방문자가 LINK를 처음 열 때 이 보고서가 바로 열립니다 (0원).</span>
           {% elif report_state == "expired" %}
             <strong>공유 기간 만료 · 재연결 필요</strong>
-            <br><span class="muted">받은 사람은 만료 결과로 보내지 않고, 회사가 채워진 첫 화면과 안내를 봅니다.</span>
+            <br><a href="/admin/link/report/{{ link.report_id }}">관리자 검수로 보기</a>
           {% elif report_state == "missing" %}
             <strong>저장소에서 찾을 수 없음 · 재연결 필요</strong>
             <br><span class="muted">받은 사람은 회사가 채워진 첫 화면과 안내를 봅니다.</span>
@@ -129,10 +116,92 @@
   </div>
 </div>
 
+<div class="card">
+  <h2 id="link-open-events-title">모든 LINK 접속 기록</h2>
+  <p class="muted" style="margin-top:6px">
+    LINK URL에 들어온 요청 시각만 기록합니다. 메신저 미리보기·보안 봇·실제 사람을
+    구별하지 않으며 IP 주소, User-Agent, 기기 정보는 수집하지 않습니다.
+  </p>
+  {% if historical_open_count_gap %}
+  <p class="muted">
+    이력 기능 도입 전에 집계된 {{ historical_open_count_gap }}회는 개별 시각이 없어
+    기존 최초·최근 시각과 총횟수만 보존했습니다.
+  </p>
+  {% endif %}
+  {% if open_events %}
+  <ol aria-labelledby="link-open-events-title" style="line-height:1.8">
+    {% for event in open_events %}
+      <li>{{ open_event_labels[loop.index0] }}</li>
+    {% endfor %}
+  </ol>
+  {% else %}
+  <p class="muted">
+    {% if link.opened_count %}새 이력 구조에 저장된 개별 접속 시각은 아직 없습니다.
+    {% else %}아직 접속 요청이 없습니다.{% endif %}
+  </p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2 id="link-generated-runs-title">이 LINK로 생성한 모든 보고서</h2>
+  <p class="muted" style="margin-top:6px">
+    위 시작 보고서와 별도 이력입니다. 새 회사를 분석해도 시작 보고서를 덮어쓰지 않습니다.
+  </p>
+  {% if generated_runs %}
+  <div class="data-table-scroll" role="region" tabindex="0"
+       aria-labelledby="link-generated-runs-title">
+  <table aria-labelledby="link-generated-runs-title">
+    <thead><tr>
+      <th scope="col">회사</th><th scope="col">시작·완료</th>
+      <th scope="col">상태·중단 이유</th><th scope="col">비용</th>
+      <th scope="col">보고서</th>
+    </tr></thead>
+    <tbody>
+    {% for run in generated_runs %}
+    <tr>
+      <td>
+        <strong>{{ run.confirmed_company or run.input_company }}</strong><br>
+        <span class="muted">입력 {{ run.input_company }}<br>회사 ID {{ run.company_id or "—" }}</span>
+      </td>
+      <td>
+        시작 {{ run_started_at_labels.get(run.run_id, "—") }}<br>
+        <span class="muted">완료 {{ run_finished_at_labels.get(run.run_id, "—") }}</span>
+      </td>
+      <td>
+        <strong>{{ run_status_labels.get(run.status, run.status) }}</strong>
+        {% if run.stop_step %}<br><span class="muted">중단 단계 {{ run.stop_step }}</span>{% endif %}
+        {% if run.stop_reason %}<br><span class="muted">{{ run_stop_reason_labels.get(run.stop_reason, run.stop_reason) }}</span>{% endif %}
+      </td>
+      <td>
+        AI 원가 {{ "{:,.0f}".format(run.internal_ai_cost_krw) }}원<br>
+        <span class="muted">고객 청구 {{ "{:,.0f}".format(run.customer_charge_krw) }}원</span>
+      </td>
+      <td>
+        <span class="muted">run/public ID<br>{{ run.run_id }}</span>
+        {% if run.report_id and run_report_states.get(run.run_id) == "available" %}
+          <br><a href="/admin/link/report/{{ run.report_id }}">관리자 검수로 열기</a>
+        {% elif run.report_id %}
+          <br><strong>저장 보고서 없음</strong>
+        {% endif %}
+        {% if run.release_sha256 %}
+          <br><span class="muted">release {{ run.release_sha256 }}</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="muted">이 LINK로 시작한 보고서 생성이 아직 없습니다.</p>
+  {% endif %}
+</div>
+
 <div class="warn-line" style="margin-bottom:16px">
   <span aria-hidden="true">ℹ️</span>
   <span>
-    이 회사 링크를 닫으면 <code>/k/…</code> 주소와 링크별 조사 권한은 즉시 막힙니다.
+    이 LINK를 철회하면 <code>/k/…</code> 주소와 링크별 조사 권한은 즉시 막힙니다.
+    접속 시각과 생성 이력은 관리자 검수를 위해 보존됩니다.
     이미 상대가 저장한 <code>/result/…</code> 보고서 주소는 별도 공개 주소이므로
     보고서 생성 후 60일까지 열릴 수 있습니다.
   </span>

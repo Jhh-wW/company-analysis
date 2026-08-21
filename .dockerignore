@@ -8,6 +8,7 @@
 !app/src/**
 !app/tools/
 !app/tools/backup_sqlite.py
+!app/tools/trigger_backup.py
 
 !analysis_engine/
 !analysis_engine/src/

@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import Counter, defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields as dataclass_fields, replace
 from itertools import combinations
 from typing import Any, Callable, Iterable
 
@@ -37,7 +37,10 @@ from src.features.report_standard.publish import (
     summary_verification_binding,
 )
 from src.features.report_summary.logic import build_summary_with_ai
-from src.features.spanselect.canonical import CanonicalPick
+from src.features.spanselect.canonical import (
+    CanonicalPick,
+    historical_performance_basis_sid,
+)
 from src.features.writer import constants as writer_constants
 from src.features.writer import logic as writer_logic
 from src.features.writer import verify as writer_verify
@@ -96,37 +99,92 @@ class WrittenClaim:
     sid: str = ""
     claim_type: str = ""
     subject_label: str = ""
-    market_priority: str = ""
+    market_stage: str = ""
+    market_observation: str = ""
     product_role: str = ""
+    portfolio_stage: str = ""
+    revenue_model_sid: str = ""
     response_to_sid: str = ""
     basis_sids: tuple[str, ...] = ()
     priority_signals: tuple[str, ...] = ()
     event_date: str = ""
+    response_action: str = ""
+    initial_signal: str = ""
+    next_check_metric: str = ""
+    plan_status: str = ""
+    plan_timing: str = ""
+    plan_condition: str = ""
+    plan_expected_effect: str = ""
+    plan_execution_signal: str = ""
+    operation_role: str = ""
+    value_chain_stage: str = ""
+    relationship_type: str = ""
 
 
 def majority_picks(rounds: Iterable[Iterable[CanonicalPick]], *, minimum: int = 2) -> list[CanonicalPick]:
-    """세 독립 선택 중 같은 원문·같은 섹션이 반복된 사실만 남긴다.
+    """세 독립 선택에서 소유권과 각 구조 필드가 각각 반복된 사실만 남긴다.
 
     같은 원문이 서로 다른 섹션에서 동률이면 소유권을 추측하지 않고 버린다.
+    자유형 구조 발췌는 전체 객체가 우연히 완전히 같을 것을 요구하지 않고 필드별
+    2표를 확인한다. 어느 필드든 2표 합의가 없으면 그 사실 전체를 버린다.
     출력 순서는 원문 조각 번호와 원문 안 등장 순서가 안정적으로 결정한다.
     """
 
-    counts: Counter[CanonicalPick] = Counter()
+    by_sentence: dict[tuple[str, int], list[CanonicalPick]] = defaultdict(list)
     for round_items in rounds:
-        counts.update(set(round_items))
-
-    by_sentence: dict[tuple[str, int], list[tuple[CanonicalPick, int]]] = defaultdict(list)
-    for item, count in counts.items():
-        if count >= minimum:
-            by_sentence[(item.sentence, item.fragment_id)].append((item, count))
+        for item in set(round_items):
+            by_sentence[(item.sentence, item.fragment_id)].append(item)
 
     kept: list[CanonicalPick] = []
+    identity_fields = {"section_id", "sentence", "fragment_id", "sid", "claim_type"}
     for _sentence_key, candidates in by_sentence.items():
-        best = max(count for _item, count in candidates)
-        winners = [item for item, count in candidates if count == best]
-        if len(winners) != 1:
+        ownership_counts = Counter(
+            (item.section_id, item.sid, item.claim_type) for item in candidates
+        )
+        if not ownership_counts:
             continue
-        kept.append(winners[0])
+        best = max(ownership_counts.values())
+        ownership_winners = [
+            value
+            for value, count in ownership_counts.items()
+            if count == best and count >= minimum
+        ]
+        if len(ownership_winners) != 1:
+            continue
+        section_id, sid, claim_type = ownership_winners[0]
+        owned = [
+            item
+            for item in candidates
+            if (item.section_id, item.sid, item.claim_type)
+            == (section_id, sid, claim_type)
+        ]
+        changes: dict[str, object] = {}
+        fields_agree = True
+        for info in dataclass_fields(CanonicalPick):
+            if info.name in identity_fields:
+                continue
+            value_counts = Counter(getattr(item, info.name) for item in owned)
+            field_best = max(value_counts.values())
+            field_winners = [
+                value
+                for value, count in value_counts.items()
+                if count == field_best and count >= minimum
+            ]
+            if len(field_winners) != 1:
+                fields_agree = False
+                break
+            changes[info.name] = field_winners[0]
+        if not fields_agree:
+            continue
+        kept.append(
+            replace(
+                owned[0],
+                section_id=section_id,
+                sid=sid,
+                claim_type=claim_type,
+                **changes,
+            )
+        )
     return sorted(kept, key=lambda item: (item.fragment_id, item.section_id, item.sentence))
 
 
@@ -296,12 +354,26 @@ def write_and_verify_sections(
                     sid=pick.sid,
                     claim_type=pick.claim_type,
                     subject_label=pick.subject_label,
-                    market_priority=pick.market_priority,
+                    market_stage=pick.market_stage,
+                    market_observation=pick.market_observation,
                     product_role=pick.product_role,
+                    portfolio_stage=pick.portfolio_stage,
+                    revenue_model_sid=pick.revenue_model_sid,
                     response_to_sid=pick.response_to_sid,
                     basis_sids=pick.basis_sids,
                     priority_signals=pick.priority_signals,
                     event_date=pick.event_date,
+                    response_action=pick.response_action,
+                    initial_signal=pick.initial_signal,
+                    next_check_metric=pick.next_check_metric,
+                    plan_status=pick.plan_status,
+                    plan_timing=pick.plan_timing,
+                    plan_condition=pick.plan_condition,
+                    plan_expected_effect=pick.plan_expected_effect,
+                    plan_execution_signal=pick.plan_execution_signal,
+                    operation_role=pick.operation_role,
+                    value_chain_stage=pick.value_chain_stage,
+                    relationship_type=pick.relationship_type,
                 )
             )
 
@@ -450,18 +522,35 @@ def _fact_from_claim(
     claim: WrittenClaim,
     source: Source,
     sid_fact_ids: dict[str, str],
+    historical_basis_fact_ids: dict[str, str] | None = None,
 ) -> FactRecord:
     numbers = _numeric_value(claim.text)
     time_state = _time_state(claim.section_id, claim.text, claim.claim_type)
     causal = _direct_causal_fields(
         claim.text, claim.evidence, subject_label=claim.subject_label
     )
+    basis_resolver = {**sid_fact_ids, **(historical_basis_fact_ids or {})}
+    raw_basis_sids = [str(value or "").strip() for value in claim.basis_sids]
+    basis_links_are_valid = (
+        claim.claim_type == "change_interpretation"
+        and bool(raw_basis_sids)
+        and all(raw_basis_sids)
+        and len(raw_basis_sids) == len(set(raw_basis_sids))
+        and not any(value.startswith("fact-") for value in raw_basis_sids)
+        and all(value in basis_resolver for value in raw_basis_sids)
+    )
     fact = FactRecord(
         fact_id=_written_fact_id(company, claim),
         legal_entity=company,
         # 검증된 이름이 없으면 원문 한 문장 전체를 범위로 써서 일반화를 막는다.
         subject_scope=claim.subject_label or claim.evidence,
-        relationship_or_action=claim.claim_type or claim.section_id,
+        relationship_or_action=(
+            claim.response_action
+            if claim.claim_type == "current_response"
+            else claim.operation_role
+            if claim.claim_type in {"operating_core", "partner_role"}
+            else claim.claim_type or claim.section_id
+        ),
         claim=claim.text,
         claim_type=claim.claim_type,
         section_owner=claim.section_id,
@@ -487,13 +576,30 @@ def _fact_from_claim(
         rounding_rule="ROUND_HALF_UP 미적용(원문 표시값 그대로)" if numbers else "",
         numeric_checks=_exact_numeric_checks(numbers),
         event_date=claim.event_date,
-        market_priority=claim.market_priority,
+        market_stage=claim.market_stage,
+        market_observation=claim.market_observation,
         product_role=claim.product_role,
+        portfolio_stage=claim.portfolio_stage,
+        revenue_model_fact_id=sid_fact_ids.get(claim.revenue_model_sid, ""),
         priority_signals=list(claim.priority_signals),
-        basis_fact_ids=[
-            sid_fact_ids[sid] for sid in claim.basis_sids if sid in sid_fact_ids
-        ],
+        # 하나라도 없거나 중복·내부 ID가 섞이면 일부만 연결하지 않는다. 빈 값은
+        # 출고 게이트가 근거 없는 변화 해석으로 차단한다.
+        basis_fact_ids=(
+            [basis_resolver[sid] for sid in raw_basis_sids]
+            if basis_links_are_valid
+            else []
+        ),
         response_to_fact_id=sid_fact_ids.get(claim.response_to_sid, ""),
+        response_action=claim.response_action,
+        initial_signal=claim.initial_signal,
+        next_check_metric=claim.next_check_metric,
+        plan_status=claim.plan_status,
+        plan_timing=claim.plan_timing,
+        plan_condition=claim.plan_condition,
+        plan_expected_effect=claim.plan_expected_effect,
+        plan_execution_signal=claim.plan_execution_signal,
+        value_chain_stage=claim.value_chain_stage,
+        relationship_type=claim.relationship_type,
         supports_causality=causal is not None,
         causal_subject=causal[0] if causal else "",
         causal_mechanism=causal[1] if causal else "",
@@ -501,6 +607,23 @@ def _fact_from_claim(
         causal_evidence=causal[3] if causal else "",
     )
     return replace(fact, evidence_binding=fact_evidence_binding(fact))
+
+
+def _historical_basis_fact_ids(facts: Iterable[FactRecord]) -> dict[str, str]:
+    """유일한 FY 실적 사실을 선택기의 공개 참조와 내부 fact_id로 잇는다."""
+
+    candidates: dict[str, list[str]] = defaultdict(list)
+    for fact in facts:
+        if fact.claim_type != "historical_performance":
+            continue
+        reference = historical_performance_basis_sid(fact.fiscal_year)
+        if reference:
+            candidates[reference].append(fact.fact_id)
+    return {
+        reference: fact_ids[0]
+        for reference, fact_ids in candidates.items()
+        if len(fact_ids) == 1
+    }
 
 
 def _table_facts(
@@ -667,6 +790,14 @@ def assemble_report(
     for section in sections:
         section_facts: list[FactRecord] = []
         visible_prose: list[tuple[str, str]] = []
+        visible_tables, table_facts = _table_facts(company, section, sources_by_number)
+        historical_basis_fact_ids = _historical_basis_fact_ids(table_facts)
+        # 문장 sid와 프로그램 생성 실적 참조가 충돌하면 후자를 사용하지 않는다.
+        historical_basis_fact_ids = {
+            reference: fact_id
+            for reference, fact_id in historical_basis_fact_ids.items()
+            if reference not in sid_fact_ids
+        }
         for claim in claim_by_section.get(section.cell, []):
             source = sources_by_number.get(claim.fragment_id)
             if (
@@ -675,10 +806,15 @@ def assemble_report(
             ):
                 continue
             section_facts.append(
-                _fact_from_claim(company, claim, source, sid_fact_ids)
+                _fact_from_claim(
+                    company,
+                    claim,
+                    source,
+                    sid_fact_ids,
+                    historical_basis_fact_ids,
+                )
             )
             visible_prose.append((claim.text, claim.cite))
-        visible_tables, table_facts = _table_facts(company, section, sources_by_number)
         section_facts.extend(table_facts)
         # 원문은 내부 감사용으로 보존하되, 공개 렌더러는 prose_lines와 표만 사용한다.
         if not section_facts:

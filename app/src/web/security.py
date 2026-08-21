@@ -55,7 +55,7 @@ def body_limit_for(scope: dict[str, Any]) -> int | None:
     path = str(scope.get("path", ""))
     if path == "/run":
         return RUN_BODY_MAX_BYTES
-    if path in {"/confirm", "/reject"}:
+    if path in {"/confirm", "/reject"} or path.endswith("/corrected-payload"):
         return FORM_BODY_MAX_BYTES
     return DEFAULT_MUTATION_BODY_MAX_BYTES
 

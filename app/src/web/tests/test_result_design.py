@@ -166,7 +166,8 @@ def test_보고서만_전용_문서_레이아웃을_쓴다(monkeypatch):
     assert 'class="scroll report-scroll"' in response.text
     assert 'id="report-citations-title"><span class="no">부록</span><span class="txt">출처와 검증 상태</span>' in response.text
     assert '<th scope="col">자료</th>' in response.text
-    assert '<th scope="col">기준일·상태</th>' in response.text
+    assert '<th scope="col">기준일·자료 상태</th>' in response.text
+    assert '<th scope="col">사실 검증</th>' in response.text
     assert '<th scope="col">원문 위치</th>' in response.text
     assert '<th scope="col">본문 사용 장</th>' in response.text
     assert " · 수집 " not in response.text
@@ -180,7 +181,7 @@ def test_보고서만_전용_문서_레이아웃을_쓴다(monkeypatch):
     assert f'href="/review/pdf/{job_id}"' not in response.text
     assert f'href="/download/pdf/{job_id}"' in response.text
     assert "워드로 내려받기" not in response.text
-    assert 'href="/">다른 회사 조사하기</a>' in response.text
+    assert 'href="/">다른 회사 분석하기</a>' in response.text
     assert f'action="/notion/{job_id}"' in response.text
     if 'data-report-cell="附"' in response.text:
         assert "참고. 참고 지표" not in response.text
@@ -287,18 +288,33 @@ def test_보고서_표는_제목행과_가로스크롤_경계를_가진다(monke
     document_ids = set(re.findall(r'\bid="([^"]+)"', html))
     assert all(label in document_ids for label in scroll_labels)
 
-    # 한 보고서에 표가 여러 개 있어도 캡션 ID가 겹치지 않고, 각 표가 자기
-    # 캡션만 가리켜야 한다.
-    caption_ids = re.findall(
+    # 표가 도표로 바뀌어도 보고서 원본 표 하나당 캡션은 정확히 하나여야 한다.
+    # 모든 캡션 ID는 유일하고, 표와 figure가 같은 원표를 중복 출력하면 안 된다.
+    table_caption_ids = re.findall(
         r'<div class="cap" id="(report-table-[^"]+-caption)">', html
     )
-    assert len(caption_ids) >= 2
+    figure_caption_ids = re.findall(
+        r'<figcaption class="cap" id="(report-table-[^"]+-caption)">', html
+    )
+    caption_ids = [*table_caption_ids, *figure_caption_ids]
+    expected_caption_count = sum(
+        len(section.tables) for section in report.sections
+    )
+    assert len(caption_ids) == expected_caption_count
     assert len(caption_ids) == len(set(caption_ids))
     labelled_tables = re.findall(
         r'<table class="(?:nums|texts)" aria-labelledby="(report-table-[^"]+-caption)">',
         html,
     )
-    assert labelled_tables == caption_ids
+    labelled_figures = re.findall(
+        r'<figure class="[^"]*\breport-visual\b[^"]*" '
+        r'aria-labelledby="(report-table-[^"]+-caption)">',
+        html,
+    )
+    assert labelled_tables == table_caption_ids
+    assert labelled_figures == figure_caption_ids
+    assert set(labelled_tables).isdisjoint(labelled_figures)
+    assert set(labelled_tables) | set(labelled_figures) == set(caption_ids)
 
 
 def test_보고서_CSS는_모바일과_인쇄를_따로_보호한다():

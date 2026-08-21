@@ -12,21 +12,17 @@ from src.features.pilot_evaluation.contract import (
 
 def _passing_rows() -> list[PilotResult]:
     rows: list[PilotResult] = []
-    categories = (
-        [PilotCategory.LISTED] * 10
-        + [PilotCategory.UNLISTED_DISCLOSURE] * 8
-        + [PilotCategory.SPARSE_OR_AMBIGUOUS] * 7
-    )
+    categories = [PilotCategory.LISTED] * 10
     for index, category in enumerate(categories, start=1):
         rows.append(
             PilotResult(
                 case=PilotCase(f"P{index:02d}", category, f"회사 {index}"),
-                legal_entity_correct=index <= 23,
-                completed=index <= 20,
-                stopped=index > 20,
-                error_type="" if index <= 20 else "GATE_STOPPED",
-                automatic_judgment="release" if index <= 20 else "stop",
-                user_judgment="release" if index <= 20 else "stop",
+                legal_entity_correct=True,
+                completed=index <= 8,
+                stopped=index > 8,
+                error_type="" if index <= 8 else "GATE_STOPPED",
+                automatic_judgment="release" if index <= 8 else "stop",
+                user_judgment="release" if index <= 8 else "stop",
                 judgments_agree=True,
                 elapsed_sec=1200,
                 internal_ai_cost_krw=250,
@@ -35,11 +31,11 @@ def _passing_rows() -> list[PilotResult]:
     return rows
 
 
-def test_25건_합격선을_결과보기전에_고정해평가한다():
+def test_10건_합격선을_결과보기전에_고정해평가한다():
     summary = evaluate_pilot(_passing_rows())
     assert summary.passed is True
-    assert summary.correct_identities == 23
-    assert summary.complete_reports == 20
+    assert summary.correct_identities == 10
+    assert summary.complete_reports == 8
     assert summary.average_ai_cost_krw == 250
 
 
@@ -50,5 +46,22 @@ def test_원가목표실패가_품질합격선을_낮추지않는다():
     summary = evaluate_pilot(rows)
     assert summary.passed is False
     assert any("원가" in reason for reason in summary.reasons)
-    assert summary.correct_identities == 23
-    assert summary.complete_reports == 20
+    assert summary.correct_identities == 10
+    assert summary.complete_reports == 8
+
+
+def test_25건_manifest_후보를_실제10건_평가에_섞지않는다():
+    rows = _passing_rows() + [
+        replace(
+            _passing_rows()[0],
+            case=PilotCase(
+                "P11", PilotCategory.UNLISTED_DISCLOSURE, "승인 밖 회사"
+            ),
+        )
+    ]
+
+    summary = evaluate_pilot(rows)
+
+    assert summary.passed is False
+    assert any("P01~P10 10/10" in reason for reason in summary.reasons)
+    assert any("상장사 10건" in reason for reason in summary.reasons)

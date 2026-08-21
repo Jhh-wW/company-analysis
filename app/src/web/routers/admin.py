@@ -4,16 +4,12 @@ import datetime as dt
 import logging
 import os
 import string
-import time
 
 from fastapi import APIRouter, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from src.core import clock
-from src.features.observability import lifecycle
 from src.features.observability import admin_audit
-from src.features.observability.metrics import build_dashboard
-from src.features.observability.records import read_records
 from src.features.budget import spend_store
 from src.features.pipeline.demo import DemoPipeline
 from src.features.sharelink import allowlist as share_allow
@@ -25,11 +21,11 @@ from src.features.sharelink import tracks as share_tracks
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
 from src.web import job_runtime, paid_runtime, request_helpers, runtime
-from src.web.recording import records_path
 from src.web.security import (
     COMPANY_MAX_CHARS,
     CSRF_TOKEN_MAX_CHARS,
     EMAIL_MAX_CHARS,
+    JOB_MAX_CHARS,
     NOTE_MAX_CHARS,
     REFERENCE_MAX_CHARS,
 )
@@ -123,6 +119,19 @@ def _kst_timestamp_label(value: str) -> str:
     except (OverflowError, TypeError, ValueError):
         return "확인 불가"
     return f"{local:%Y-%m-%d %H:%M} (한국시간)"
+
+
+def _link_expiry_date_label(created_at: str) -> str:
+    """발급 KST 날짜와 현재 LINK 수명 정책으로 만료 날짜를 표시한다."""
+
+    try:
+        issued = clock.business_date_from_iso(created_at)
+        expires = issued + dt.timedelta(
+            days=share_logic.link_max_age_days_from_env()
+        )
+    except (OverflowError, TypeError, ValueError):
+        return "확인 불가"
+    return f"{expires:%Y-%m-%d} (한국시간 00:00부터 닫힘)"
 
 
 def _queue_committed_change(
@@ -258,76 +267,29 @@ def _share_base_url(request: Request) -> str:
 @router.get("/admin", response_class=HTMLResponse)
 async def admin_home(request: Request):
     """관리자 첫 화면. 권한은 서버가 매번 다시 판정한다."""
-    blocked = request_helpers.require_admin(request)
-    if blocked is not None:
-        return blocked
-    return request_helpers.templates.TemplateResponse(
-        request=request, name="admin_home.html", context=request_helpers._ctx(request)
-    )
+    # ``/admin``은 승인된 운영 대시보드의 정식 진입점이다. 기존 초대·LINK 관리
+    # 기능은 `/members`, `/links`에서 같은 저장소를 계속 사용한다.
+    from src.web.routers import dashboard  # noqa: PLC0415
+
+    return await dashboard.render_admin_home(request)
 
 
 @router.get("/admin/dashboard", response_class=HTMLResponse)
 async def admin_dashboard(request: Request):
-    """운영자 품질 대시보드."""
+    """이전 품질 대시보드 주소의 안전한 호환 리다이렉트."""
     blocked = request_helpers.require_admin(request)
     if blocked is not None:
         return blocked
-    today = clock.today_kst()
-    job_runtime._sweep_jobs(time.monotonic())
-    read = read_records(records_path())
-    final_records = []
-    try:
-        with storage_db.connect() as conn:
-            lifecycle.ensure_schema(conn)
-            final_records = lifecycle.list_final(conn)
-    except Exception:  # noqa: BLE001 — JSONL 옛 이력은 계속 보여 주되 손상을 알린다
-        logger.exception("SQLite 최종 관측값을 읽지 못했습니다")
+    return _admin_response(request, RedirectResponse("/admin", status_code=303))
 
-    month_spend = None
-    try:
-        with paid_runtime._PAID_PHASE_LOCK:
-            _assert_budget_store_healthy()
-            with paid_runtime._SLOT_LOCK:
-                known_active = frozenset(paid_runtime._ACTIVE_PAID_PHASES)
-            with storage_db.connect() as conn:
-                spend_store.ensure_schema(conn)
-                month_spend = spend_store.load_month(
-                    conn,
-                    today,
-                    known_active=known_active,
-                )
-            _assert_budget_store_healthy()
-    except Exception:  # noqa: BLE001 — 0원으로 꾸미지 않고 화면에 확인 불가로 표시한다
-        month_spend = None
-        logger.exception("월 비용 원장을 읽지 못했습니다")
 
-    dashboard = build_dashboard(
-        [*read.records, *final_records],
-        today=today,
-        model=runtime._current_model(),
-        cost_month_krw_override=(
-            month_spend.total_krw if month_spend is not None else None
-        ),
-        cost_ledger_error=month_spend is None,
-        unresolved_cost_runs=(
-            month_spend.unresolved_runs if month_spend is not None else 0
-        ),
-        cost_ledger_since=(
-            month_spend.ledger_since if month_spend is not None else ""
-        ),
-    )
-    response = request_helpers.templates.TemplateResponse(
-        request=request,
-        name="dashboard.html",
-        context=request_helpers._ctx(
-            request,
-            dashboard=dashboard,
-            skipped=read.skipped,
-            business_day_label=clock.business_day_label(today),
-        ),
-        status_code=503 if month_spend is None else 200,
-    )
-    return _admin_response(request, response)
+@router.get("/admin/frame", response_class=HTMLResponse)
+async def admin_frame(request: Request):
+    """승인 전 프레임 주소의 호환 리다이렉트."""
+    blocked = request_helpers.require_admin(request)
+    if blocked is not None:
+        return blocked
+    return _admin_response(request, RedirectResponse("/admin", status_code=303))
 
 
 def _access_context(request: Request, *, today: dt.date, **kwargs) -> dict:
@@ -359,7 +321,8 @@ def _access_context(request: Request, *, today: dt.date, **kwargs) -> dict:
         for link in links
         if share_logic.is_share_link_expired(link.created_at)
     }
-    active_link_count = len(links) - len(expired_link_keys)
+    revoked_link_keys = {link.key for link in links if link.is_revoked}
+    active_link_count = len(links) - len(expired_link_keys | revoked_link_keys)
     link_created_at_labels = {
         link.key: _kst_timestamp_label(link.created_at) for link in links
     }
@@ -369,14 +332,18 @@ def _access_context(request: Request, *, today: dt.date, **kwargs) -> dict:
     link_last_opened_at_labels = {
         link.key: _kst_timestamp_label(link.last_opened_at) for link in links
     }
+    link_expiry_date_labels = {
+        link.key: _link_expiry_date_label(link.created_at) for link in links
+    }
     member_invited_at_labels = {
         member.email: _kst_timestamp_label(member.invited_at)
         for member in members
     }
+    # MEMBER는 금액 통장이 아니라 KST 성공 보고서 3건으로 제한한다. 여기에 임의
+    # 금액을 넣으면 폐기한 1,000원 정책이 다시 운영 수치로 살아난다.
     configured_stop_threshold = (
-        active_link_count * share_tracks.budget_of(share_tracks.Track.LINK)
-        + len(members) * share_tracks.budget_of(share_tracks.Track.MEMBER)
-        + share_tracks.budget_of(share_tracks.Track.ADMIN)
+        active_link_count * (share_tracks.budget_of(share_tracks.Track.LINK) or 0.0)
+        + (share_tracks.budget_of(share_tracks.Track.ADMIN) or 0.0)
     )
     paid_research_closed, paid_research_closed_reason = _paid_research_status()
     return request_helpers._ctx(
@@ -384,10 +351,12 @@ def _access_context(request: Request, *, today: dt.date, **kwargs) -> dict:
         links=links,
         active_link_count=active_link_count,
         expired_link_keys=expired_link_keys,
+        revoked_link_keys=revoked_link_keys,
         report_states=report_states,
         link_created_at_labels=link_created_at_labels,
         link_first_opened_at_labels=link_first_opened_at_labels,
         link_last_opened_at_labels=link_last_opened_at_labels,
+        link_expiry_date_labels=link_expiry_date_labels,
         members=members,
         member_invited_at_labels=member_invited_at_labels,
         spent_today=spend.total_krw,
@@ -401,6 +370,9 @@ def _access_context(request: Request, *, today: dt.date, **kwargs) -> dict:
         access_data_available=True,
         paid_research_closed=paid_research_closed,
         paid_research_closed_reason=paid_research_closed_reason,
+        job_max_chars=JOB_MAX_CHARS,
+        note_max_chars=NOTE_MAX_CHARS,
+        reference_max_chars=REFERENCE_MAX_CHARS,
         **kwargs,
     )
 
@@ -418,10 +390,12 @@ def _access_page(
             links=[],
             active_link_count=None,
             expired_link_keys=set(),
+            revoked_link_keys=set(),
             report_states={},
             link_created_at_labels={},
             link_first_opened_at_labels={},
             link_last_opened_at_labels={},
+            link_expiry_date_labels={},
             members=[],
             member_invited_at_labels={},
             spent_today=None,
@@ -436,6 +410,9 @@ def _access_page(
                 "비용 기록을 확인할 수 없어 유료 조사를 닫았습니다. "
                 "관리자가 원장을 확인해야 다시 열립니다."
             ),
+            job_max_chars=JOB_MAX_CHARS,
+            note_max_chars=NOTE_MAX_CHARS,
+            reference_max_chars=REFERENCE_MAX_CHARS,
             access_error_title=context.get(
                 "access_error_title", "관리 정보를 확인할 수 없습니다."
             ),
@@ -457,6 +434,7 @@ def _validated_report_id(
     conn, reference: str, *, expected_company: str = ""
 ) -> tuple[str, str]:
     """공개 폼의 결과 참조가 실제로 저장돼 아직 열리는 보고서인지 확인한다."""
+    del expected_company
     if not reference.strip():
         return "", ""
     report_id = share_logic.report_id_from_reference(reference)
@@ -467,17 +445,12 @@ def _validated_report_id(
         return "", "이 데모 저장소에서 해당 보고서를 찾을 수 없습니다."
     if job_runtime._link_expired(report):
         return "", "공유 기간이 지난 보고서입니다. 새 보고서를 만든 뒤 연결해주세요."
-    if expected_company and not share_logic.scope_matches(
-        link_company=expected_company,
-        company=report.company,
-    ):
-        return "", "링크 회사와 보고서 회사가 다릅니다. 같은 회사의 보고서만 연결해주세요."
     return report_id, ""
 
 
 @router.get("/admin/access", response_class=HTMLResponse)
 async def admin_access(request: Request):
-    """초대한 친구와 회사별 링크를 관리하는 화면."""
+    """초대한 친구와 지원 맥락 LINK를 관리하는 화면."""
     blocked = request_helpers.require_admin(request)
     if blocked is not None:
         return blocked
@@ -488,14 +461,15 @@ async def admin_access(request: Request):
 async def admin_link_new(
     request: Request,
     company: str = Form(..., max_length=COMPANY_MAX_CHARS),
+    job: str = Form("", max_length=JOB_MAX_CHARS),
     note: str = Form("", max_length=NOTE_MAX_CHARS),
     report_reference: str = Form("", max_length=REFERENCE_MAX_CHARS),
     csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
 ):
-    """회사별 링크를 새로 발급한다."""
+    """지원 회사·직무 꼬리표가 붙은 LINK를 새로 발급한다."""
     company_clean = company.strip()
-    # DB 열은 옛 링크 호환을 위해 유지하되, 회사 분석 전용 링크에는 빈 값만 저장한다.
-    job_clean = ""
+    # 회사·직무는 지원 맥락 꼬리표일 뿐 검색·생성 권한 범위가 아니다.
+    job_clean = job.strip()
     action = "admin.link.create"
     authorization_target = admin_audit.target_id("company", company_clean)
     blocked = request_helpers.require_admin_action(
@@ -508,6 +482,7 @@ async def admin_link_new(
         return blocked
     form_values = {
         "company": company_clean,
+        "job": job_clean,
         "note": note.strip(),
         "report_reference": report_reference.strip(),
     }
@@ -560,7 +535,7 @@ async def admin_link_new(
                         key = candidate
                         break
                 if not key:
-                    raise RuntimeError("고유한 회사 링크 열쇠를 발급하지 못했습니다")
+                    raise RuntimeError("고유한 LINK 열쇠를 발급하지 못했습니다")
                 inserted = share_store.load(conn, key)
                 if (
                     inserted is None
@@ -619,9 +594,19 @@ async def admin_link_new(
         target=admin_audit.target_id("link", share_store.key_hash_of(key)),
         reason="created",
     )
-    return _admin_response(
-        request, RedirectResponse(f"/admin/link/{key}", status_code=303)
+    base = _share_base_url(request)
+    issued_url = share_issue.link_url(base, key) if base else share_issue.link_url("", key)
+    response = Response(
+        content=f"{issued_url}\n",
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="company-analysis-link.txt"',
+            "X-Link-Identifier": share_store.key_hash_of(key),
+            "Referrer-Policy": "no-referrer",
+        },
     )
+    # 원문 capability는 이 일회성 다운로드에만 실리고 DB·HTML·로그·관리 URL에는 없다.
+    return _admin_response(request, response)
 
 
 def _link_detail_page(
@@ -634,21 +619,44 @@ def _link_detail_page(
             request, RedirectResponse("/admin/access", status_code=303)
         )
     report_state = "none"
+    open_events: list[share_store.ShareLinkOpenEvent] = []
+    generated_runs: list[share_store.ShareLinkRun] = []
+    run_report_states: dict[str, str] = {}
     try:
         with storage_db.connect() as conn:
-            link = (
-                share_store.load(conn, raw_key)
-                if raw_key
-                else share_store.load_by_hash(conn, key_hash)
-            )
+            if raw_key:
+                legacy_target = share_store.load(conn, raw_key)
+                if legacy_target is None:
+                    return _admin_response(
+                        request,
+                        RedirectResponse("/admin/access", status_code=303),
+                    )
+                # 과거 raw 관리 URL을 HTML로 렌더하지 않고 안전한 지문 URL로 정규화한다.
+                return _admin_response(
+                    request,
+                    RedirectResponse(
+                        f"/admin/link/{legacy_target.key_hash}", status_code=303
+                    ),
+                )
+            link = share_store.load_by_hash(conn, key_hash)
             if link is not None:
                 report_state = _linked_report_state(conn, link)
+                open_events = share_store.list_open_events_by_hash(conn, link.key_hash)
+                generated_runs = share_store.list_runs_by_hash(conn, link.key_hash)
+                for run in generated_runs:
+                    if not run.report_id:
+                        run_report_states[run.run_id] = "none"
+                    else:
+                        report = report_store.load(conn, run.report_id)
+                        run_report_states[run.run_id] = (
+                            "missing" if report is None else "available"
+                        )
     except Exception:  # noqa: BLE001
         logger.error("링크를 읽지 못했습니다")
         return _access_page(
             request,
             status_code=503,
-            access_error_title="회사 링크를 불러오지 못했습니다.",
+            access_error_title="LINK를 불러오지 못했습니다.",
             access_error="잠시 후 다시 시도해주세요.",
         )
     if link is None:
@@ -656,9 +664,15 @@ def _link_detail_page(
             request, RedirectResponse("/admin/access", status_code=303)
         )
 
-    base = _share_base_url(request)
-    path = share_issue.link_url("", raw_key) if raw_key else ""
-    url = share_issue.link_url(base, raw_key) if base and raw_key else path
+    open_event_labels = [
+        _kst_timestamp_label(event.opened_at) for event in open_events
+    ]
+    run_started_at_labels = {
+        run.run_id: _kst_timestamp_label(run.started_at) for run in generated_runs
+    }
+    run_finished_at_labels = {
+        run.run_id: _kst_timestamp_label(run.finished_at) for run in generated_runs
+    }
     response = request_helpers.templates.TemplateResponse(
         request=request,
         name="admin_link.html",
@@ -666,18 +680,59 @@ def _link_detail_page(
             request,
             link=link,
             link_error=link_error,
-            url=url,
-            path=path,
-            base_url=base,
-            secret_available=bool(raw_key),
+            url="",
+            path="",
+            base_url="",
+            secret_available=False,
             link_expired=share_logic.is_share_link_expired(link.created_at),
+            link_revoked=link.is_revoked,
+            link_revoked_at_label=_kst_timestamp_label(link.revoked_at),
             link_created_at_label=_kst_timestamp_label(link.created_at),
+            link_expiry_date_label=_link_expiry_date_label(link.created_at),
             link_first_opened_at_label=_kst_timestamp_label(
                 link.first_opened_at
             ),
             link_last_opened_at_label=_kst_timestamp_label(link.last_opened_at),
-            is_deployed=share_issue.looks_deployed(url) if url else False,
-            qr_svg=share_issue.qr_svg(url) if base and raw_key else "",
+            open_events=open_events,
+            open_event_labels=open_event_labels,
+            historical_open_count_gap=max(
+                0, link.opened_count - len(open_events)
+            ),
+            generated_runs=generated_runs,
+            run_started_at_labels=run_started_at_labels,
+            run_finished_at_labels=run_finished_at_labels,
+            run_report_states=run_report_states,
+            run_status_labels={
+                share_store.RUN_STATUS_RUNNING: "생성 중",
+                share_store.RUN_STATUS_AWAITING_RELEASE: "자동출고 검사 대기",
+                share_store.RUN_STATUS_COMPLETED: "완료",
+                share_store.RUN_STATUS_STOPPED: "중단",
+                share_store.RUN_STATUS_INTERRUPTED: "서버 종료로 중단",
+            },
+            run_stop_reason_labels={
+                "company_not_found": "회사를 확정하지 못함",
+                "unsupported_public_entity": "분석 대상이 아닌 공공기관",
+                "disclosure_not_available": "공시 자료를 확인할 수 없음",
+                "posting_discarded": "채용공고로 확인되지 않음",
+                "evidence_gate_stopped": "보고서 근거가 부족함",
+                "generation_failed": "생성 중 기술 오류",
+                "posting_image_consent_required": "이미지 전송 동의가 필요함",
+                "posting_image_read_failed": "공고 이미지를 읽지 못함",
+                "posting_image_demo_unsupported": "데모에서 이미지 입력을 지원하지 않음",
+                "posting_image_extraction_failed": "이미지 글자 추출에 실패함",
+                "daily_budget_unavailable": "LINK 일일 비용 한도를 사용할 수 없음",
+                "daily_budget_exhausted": "LINK 일일 비용 한도에 도달함",
+                "job_registration_failed": "생성 작업을 저장하지 못함",
+                "server_shutdown": "서버 종료로 시작하지 못함",
+                "shutdown_timeout": "서버 종료 제한시간을 넘김",
+                "server_restart": "서버 재시작으로 작업을 이어갈 수 없음",
+                "generation_start_failed": "생성 시작 중 기술 오류",
+                "generation_not_started": "생성을 시작하지 못함",
+                "automatic_release_gate_stopped": "자동출고 검사를 통과하지 못함",
+            },
+            reference_max_chars=REFERENCE_MAX_CHARS,
+            is_deployed=False,
+            qr_svg="",
             report_state=report_state,
         ),
         status_code=status_code,
@@ -687,11 +742,43 @@ def _link_detail_page(
 
 @router.get("/admin/link/{key}", response_class=HTMLResponse)
 async def admin_link_detail(request: Request, key: str):
-    """링크 하나의 주소와 QR을 보여준다."""
+    """안전한 링크 지문으로 꼬리표·방문·생성 이력을 보여준다."""
     blocked = request_helpers.require_admin(request)
     if blocked is not None:
         return blocked
     return _link_detail_page(request, key)
+
+
+@router.get("/admin/link/report/{report_id}", response_class=HTMLResponse)
+async def admin_link_generated_report(request: Request, report_id: str):
+    """만료·철회 뒤에도 관리자가 LINK에 결속된 과거 보고서를 검수한다."""
+
+    blocked = request_helpers.require_admin(request)
+    if blocked is not None:
+        return blocked
+    clean_report_id = share_logic.report_id_from_reference(report_id)
+    if not clean_report_id:
+        return _admin_response(
+            request, RedirectResponse("/admin/access", status_code=303)
+        )
+    try:
+        with storage_db.connect() as conn:
+            linked = share_store.is_linked_report(conn, clean_report_id)
+    except Exception:  # noqa: BLE001 — 결속을 확인하지 못하면 만료 우회를 열지 않는다
+        return _access_page(
+            request,
+            status_code=503,
+            access_error="LINK 보고서 결속을 확인하지 못했습니다.",
+        )
+    if not linked:
+        return _admin_response(
+            request, RedirectResponse("/admin/access", status_code=303)
+        )
+    from src.web.routers import reports as report_routes  # noqa: PLC0415
+
+    return await report_routes._result_page_response(
+        request, clean_report_id, allow_expired=True
+    )
 
 
 @router.post("/admin/link/report")
@@ -712,6 +799,7 @@ async def admin_link_report(
         return blocked
     key_is_raw = share_logic.is_valid_key(key_clean)
     key_is_hash = share_store.is_key_hash(key_clean)
+    detail_key_hash = key_clean if key_is_hash else ""
     if not key_is_raw and not key_is_hash:
         _audit_failed_change(
             request, action=action, target=target, reason="invalid_target"
@@ -719,8 +807,8 @@ async def admin_link_report(
         return _access_page(
             request,
             status_code=400,
-            access_error_title="회사 링크를 확인해주세요.",
-            access_error="올바른 회사 링크 식별자가 아닙니다.",
+            access_error_title="LINK를 확인해주세요.",
+            access_error="올바른 LINK 식별자가 아닙니다.",
         )
 
     validation_error = ""
@@ -735,6 +823,7 @@ async def admin_link_report(
             if link is None:
                 raise _AdminStateUnchanged("link_missing")
             else:
+                detail_key_hash = link.key_hash
                 report_id, validation_error = _validated_report_id(
                     conn, report_reference, expected_company=link.company
                 )
@@ -799,7 +888,7 @@ async def admin_link_report(
             )
         return _link_detail_page(
             request,
-            key_clean,
+            detail_key_hash,
             link_error=validation_error,
             status_code=400,
         )
@@ -810,7 +899,8 @@ async def admin_link_report(
         reason="report_updated",
     )
     return _admin_response(
-        request, RedirectResponse(f"/admin/link/{key_clean}", status_code=303)
+        request,
+        RedirectResponse(f"/admin/link/{detail_key_hash}", status_code=303),
     )
 
 
@@ -831,6 +921,7 @@ async def admin_link_delete(
     )
     if blocked is not None:
         return blocked
+    detail_key_hash = key_clean if key_is_hash else ""
     try:
         with storage_db.connect() as conn:
             _assert_access_write_ready(conn)
@@ -841,13 +932,14 @@ async def admin_link_delete(
                 if key_is_raw
                 else share_store.delete_by_hash(conn, key_clean)
             )
-            delete_confirmed = (
-                share_store.load(conn, key_clean) is None
+            revoked = (
+                share_store.load(conn, key_clean)
                 if key_is_raw
-                else share_store.load_by_hash(conn, key_clean) is None
+                else share_store.load_by_hash(conn, key_clean)
             )
-            if not deleted or not delete_confirmed:
+            if not deleted or revoked is None or not revoked.is_revoked:
                 raise _AdminStateUnchanged("link_delete_unconfirmed")
+            detail_key_hash = revoked.key_hash
             _queue_committed_change(
                 conn,
                 request,
@@ -867,7 +959,7 @@ async def admin_link_delete(
         return _access_page(
             request,
             status_code=503,
-            access_error_title="회사 링크를 닫지 못했습니다.",
+            access_error_title="LINK를 철회하지 못했습니다.",
             access_error=(
                 "저장소에서 철회 여부를 확인하지 못했습니다. 기존 링크가 아직 살아 "
                 "있을 수 있으니 성공으로 보지 말고 잠시 후 다시 시도해주세요."
@@ -880,7 +972,8 @@ async def admin_link_delete(
         reason="revoked",
     )
     return _admin_response(
-        request, RedirectResponse("/admin/access", status_code=303)
+        request,
+        RedirectResponse(f"/admin/link/{detail_key_hash}", status_code=303),
     )
 
 

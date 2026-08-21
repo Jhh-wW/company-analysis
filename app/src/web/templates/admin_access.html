@@ -23,8 +23,8 @@
 </div>
 {% endif %}
 
-<h1>초대·회사 링크 관리</h1>
-<p class="lede">실제 조사 권한과 회사별 포트폴리오 링크를 한곳에서 관리합니다.</p>
+<h1>초대·LINK 관리</h1>
+<p class="lede">실제 조사 권한과 지원 맥락 LINK를 한곳에서 관리합니다.</p>
 
 {% if access_data_available %}
 <div class="card">
@@ -61,8 +61,9 @@
     <span>
       <b>전체 상한이 없습니다.</b>
       지금 구성의 <strong>호출 전 예상비용 차단 기준 합계는 {{ "{:,.0f}".format(configured_stop_threshold_krw) }}원</strong>입니다
-      — 살아 있는 링크 {{ active_link_count }}개 × 3,000원 + 친구 {{ members|length }}명 × 1,000원 + 관리자 5,000원.
-      유료 호출 전에 예상비용을 예약하고, 각 링크·친구·관리자 기준에 닿으면 새 호출을 차단합니다.
+      — 살아 있는 링크 {{ active_link_count }}개 × 3,000원 + 관리자 5,000원입니다.
+      유료 호출 전에 예상비용을 예약하고 LINK·관리자 기준에 닿으면 새 호출을 차단합니다.
+      MEMBER는 비용 금액이 아니라 한국시간 기준 성공 보고서 3건으로 별도 제한합니다.
       다만 이 값은 실제 청구의 최댓값이 아닙니다. 실제 provider 토큰 집계와 가격·환율 차이로
       확정 청구액이 예상 예약액이나 이 합계를 넘을 수 있습니다.
       <br>줄이려면 <strong>안 쓰는 링크를 닫으세요.</strong>
@@ -71,37 +72,47 @@
 </div>
 
 {# ══════════════════════════════════════════════════════════
-   회사별 열쇠 링크
+   LINK capability
    ══════════════════════════════════════════════════════════ #}
 <div class="card">
-  <h2 id="company-links-title">회사별 링크 발급</h2>
+  <h2 id="company-links-title">LINK 발급</h2>
   <p class="muted" style="margin-top:6px">
-    포트폴리오에 넣을 링크입니다. 인사팀이 <strong>로그인 없이</strong> 눌러볼 수 있고,
-    발급할 때 지정한 <strong>회사에만</strong> 조사 권한이 적용됩니다.
-    링크 GET 요청 횟수와 최초·최근 요청 시각을 기록하지만, 메신저 미리보기·보안 봇·
-    재시도도 포함될 수 있어 사람이나 개인을 식별하는 기록은 아닙니다.
+    받은 사람은 <strong>로그인 없이</strong> 어느 회사든 분석할 수 있습니다.
+    지원 회사·직무는 전달 맥락을 나타내는 꼬리표이며 권한 제한이 아닙니다.
+    알려진 LINK 요청은 모든 접속 시각을 기록하지만 메신저 미리보기·보안 봇·실제 사람을
+    구별하지 않고 IP·User-Agent·기기 정보도 저장하지 않습니다.
+    비밀 주소는 생성 응답에서 <strong>텍스트 파일로 한 번만 다운로드</strong>됩니다.
   </p>
 
   <form method="post" action="/admin/link/new" style="margin-top:14px">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div class="field">
-      <label for="link_company">회사 이름<span class="req">*</span></label>
+      <label for="link_company">지원 회사<span class="req">*</span></label>
       <input id="link_company" name="company" required placeholder="예: 카카오"
+             maxlength="{{ company_max_chars }}"
              value="{{ link_form.company if link_form else '' }}">
+    </div>
+    <div class="field">
+      <label for="link_job">지원 직무 <span class="muted">(선택)</span></label>
+      <input id="link_job" name="job" placeholder="예: 데이터 분석"
+             maxlength="{{ job_max_chars }}"
+             value="{{ link_form.job if link_form else '' }}">
     </div>
     <div class="field">
       <label for="link_note">메모</label>
       <input id="link_note" name="note" placeholder="예: 하반기 공채, 3/5 지원"
+             maxlength="{{ note_max_chars }}"
              value="{{ link_form.note if link_form else '' }}">
     </div>
     <div class="field">
       <label for="link_report">미리 만든 보고서 <span class="muted">(선택)</span></label>
       <input id="link_report" name="report_reference"
+             maxlength="{{ reference_max_chars }}"
              placeholder="결과 화면 주소 또는 32자리 ID"
              value="{{ link_form.report_reference if link_form else '' }}">
       <p class="muted" style="margin-top:5px">
         연결하면 받은 사람이 링크를 눌렀을 때 조사 대기 없이 그 보고서가 바로 열립니다.
-        비워두면 회사가 채워진 첫 화면으로 갑니다.
+        비워두면 지원 회사가 미리 채워진 편집 가능한 첫 화면으로 갑니다.
         <strong>동명 회사는 보고서를 연결하기 전에 법인명과 주소를 다시 확인하세요.</strong>
       </p>
     </div>
@@ -110,7 +121,7 @@
 
   {% if links %}
   <p class="muted" id="company-link-close-note" style="margin-top:16px">
-    <strong>회사 링크 닫기</strong>는 해당 <code>/k/…</code> 주소와 링크별 조사 권한을
+    <strong>LINK 철회</strong>는 해당 <code>/k/…</code> 주소와 링크별 조사 권한을
     즉시 막습니다. 이미 열어 본 사람이 별도로 저장한 <code>/result/…</code> 보고서
     주소는 기존 공개 정책에 따라 보고서 생성 후 60일까지 열릴 수 있습니다.
   </p>
@@ -118,18 +129,22 @@
        aria-labelledby="company-links-title">
   <table aria-labelledby="company-links-title">
     <thead><tr>
-      <th scope="col">회사</th><th scope="col">링크 요청</th>
-      <th scope="col">연결 보고서</th><th scope="col" aria-label="관리"></th>
+      <th scope="col">지원 맥락·상태</th><th scope="col">LINK 접속 기록</th>
+      <th scope="col">시작 보고서</th><th scope="col" aria-label="관리"></th>
     </tr></thead>
     <tbody>
     {% for link in links %}
     <tr>
       <td>
-        <strong>{{ link.company }}</strong><br>
+        <strong>{{ link.company }}</strong>
+        {% if link.job %}<br>{{ link.job }}{% endif %}
         {% if link.note %}<br><span class="muted">{{ link.note }}</span>{% endif %}
         <br><span class="muted">발급 {{ link_created_at_labels.get(link.key, "—") }}</span>
-        <br><a href="/admin/link/{{ link.key }}">상태·보고서 연결 관리</a>
-        {% if link.key in expired_link_keys %}<br><strong>자동 만료됨</strong>{% endif %}
+        <br><span class="muted">만료 {{ link_expiry_date_labels.get(link.key, "—") }}</span>
+        <br><a href="/admin/link/{{ link.key }}">접속·생성·보고서 이력</a>
+        {% if link.key in revoked_link_keys %}<br><strong>철회됨</strong>
+        {% elif link.key in expired_link_keys %}<br><strong>자동 만료됨</strong>
+        {% else %}<br><strong>사용 가능</strong>{% endif %}
       </td>
       <td>
         {% if link.opened_count %}
@@ -151,7 +166,9 @@
         <form method="post" action="/admin/link/delete" style="display:inline">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="key" value="{{ link.key }}">
-          <button type="submit" class="btn ghost" aria-describedby="company-link-close-note">회사 링크 닫기</button>
+          {% if link.key not in revoked_link_keys %}
+          <button type="submit" class="btn ghost" aria-describedby="company-link-close-note">LINK 철회</button>
+          {% else %}<span class="muted">이력 보존 중</span>{% endif %}
         </form>
       </td>
     </tr>
@@ -171,7 +188,7 @@
   <h2 id="invited-members-title">친구 초대</h2>
   <p class="muted" style="margin-top:6px">
     <strong>여기 있는 사람만</strong> 구글 로그인 후 실제 조사를 할 수 있습니다
-    (하루 1,000원 = 새 회사 약 8곳).
+    (한국시간 기준 성공 보고서 3건).
     <br>명단에 없으면 로그인해도 <strong>데모만</strong> 보입니다.
   </p>
 

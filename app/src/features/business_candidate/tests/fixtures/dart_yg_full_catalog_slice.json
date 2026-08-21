@@ -1,0 +1,31 @@
+{
+  "source": "DART CORPCODE.xml local official cache snapshot, inspected 2026-08-21",
+  "query": "YG",
+  "expected_corp_code": "00613318",
+  "expected_local_rank": 4,
+  "records": [
+    {"corp_code":"01841468","corp_name":"와이지도시개발","corp_eng_name":"YG","stock_code":"","modify_date":"20240510"},
+    {"corp_code":"00249247","corp_name":"YG PLUS","corp_eng_name":"YG PLUS, INC.","stock_code":"037270","modify_date":"20260810"},
+    {"corp_code":"00139719","corp_name":"와이지-원","corp_eng_name":"YG-1 CO.,LTD","stock_code":"019210","modify_date":"20260306"},
+    {"corp_code":"00613318","corp_name":"와이지엔터테인먼트","corp_eng_name":"YG Entertainment Inc.","stock_code":"122870","modify_date":"20240401"},
+    {"corp_code":"01931239","corp_name":"와이지테크","corp_eng_name":"YG TECH","stock_code":"","modify_date":"20250514"},
+    {"corp_code":"01727706","corp_name":"와이지개발","corp_eng_name":"YG Development CO.,lTD.","stock_code":"","modify_date":"20230511"},
+    {"corp_code":"01727715","corp_name":"와이지인터내셔널","corp_eng_name":"YG International Co.,Ltd.","stock_code":"","modify_date":"20230511"},
+    {"corp_code":"01242001","corp_name":"와이지인베스트먼트","corp_eng_name":"YG Investment Co.,Ltd.","stock_code":"","modify_date":"20230220"},
+    {"corp_code":"01030196","corp_name":"와이지텍","corp_eng_name":"YG TECH CO.,LTD","stock_code":"","modify_date":"20230214"},
+    {"corp_code":"01679108","corp_name":"와이지개발","corp_eng_name":"YG deyelopment","stock_code":"","modify_date":"20221007"},
+    {"corp_code":"01146895","corp_name":"와이지산업","corp_eng_name":"YG INDUSTRIAL CO.,LTD","stock_code":"","modify_date":"20220516"},
+    {"corp_code":"01659469","corp_name":"와이지건설","corp_eng_name":"YG ENGINEERING & CONSTRUCTION CO.,LTD","stock_code":"","modify_date":"20220512"},
+    {"corp_code":"01635177","corp_name":"와이지건설산업","corp_eng_name":"YG CON.LTD","stock_code":"","modify_date":"20220420"},
+    {"corp_code":"01540046","corp_name":"와이지트윈스","corp_eng_name":"YG twins Co.Ltd","stock_code":"","modify_date":"20220223"},
+    {"corp_code":"00617086","corp_name":"와이지씨","corp_eng_name":"YG Corporation","stock_code":"","modify_date":"20170630"},
+    {"corp_code":"01627831","corp_name":"공평","corp_eng_name":"g(~)","stock_code":"","modify_date":"20230220"},
+    {"corp_code":"01635168","corp_name":"글로벌메탈","corp_eng_name":"g","stock_code":"","modify_date":"20220419"},
+    {"corp_code":"01403781","corp_name":"G건설","corp_eng_name":"G","stock_code":"","modify_date":"20190905"},
+    {"corp_code":"01863752","corp_name":"지앤코","corp_eng_name":"G & Co Co., Ltd.","stock_code":"","modify_date":"20240904"},
+    {"corp_code":"00981583","corp_name":"지앤","corp_eng_name":"G& Co.,Ltd","stock_code":"","modify_date":"20240116"},
+    {"corp_code":"01546369","corp_name":"제이앤피","corp_eng_name":"J&P CO., LTD","stock_code":"","modify_date":"20230222"},
+    {"corp_code":"01368114","corp_name":"제이앤피","corp_eng_name":"co., ltd J&P","stock_code":"","modify_date":"20190514"},
+    {"corp_code":"00816687","corp_name":"제이엔피","corp_eng_name":"J&P Co.,Ltd","stock_code":"","modify_date":"20170630"}
+  ]
+}

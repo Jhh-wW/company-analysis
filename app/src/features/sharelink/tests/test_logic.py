@@ -197,7 +197,7 @@ def test_정확히_32자리_외의_길이는_받지않는다(열쇠: str):
     assert not is_valid_key(열쇠)
 
 
-def test_회사분석_범위는_회사만_정규화하고_옛직무는_무시한다():
+def test_옛표시비교는_회사만_정규화하고_권한판정에는_쓰지않는다():
     from src.features.sharelink.logic import scope_matches
 
     assert scope_matches(

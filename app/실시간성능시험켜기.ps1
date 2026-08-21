@@ -11,6 +11,8 @@ param(
 
     [switch]$EnablePaidProviders,
 
+    [string]$ProviderEnvFile = "",
+
     [switch]$DeleteDataOnExit
 )
 
@@ -227,6 +229,48 @@ $startInfo.UseShellExecute = $false
 $startInfo.Arguments = "-m uvicorn src.web.main:app --host 127.0.0.1 --port $Port --workers 1 --no-access-log"
 
 $childEnvironment = Get-CompatibleChildEnvironment -StartInfo $startInfo
+
+if ($ProviderEnvFile) {
+    if (-not $EnablePaidProviders) {
+        throw "-ProviderEnvFile은 -EnablePaidProviders와 함께 사용해야 합니다."
+    }
+    $resolvedProviderEnvFile = (Resolve-Path -LiteralPath $ProviderEnvFile -ErrorAction Stop).Path
+    if (-not (Test-Path -LiteralPath $resolvedProviderEnvFile -PathType Leaf)) {
+        throw "provider 환경 파일을 찾을 수 없습니다."
+    }
+    $providerFileValues = @{}
+    foreach ($line in [System.IO.File]::ReadAllLines(
+        $resolvedProviderEnvFile,
+        [System.Text.Encoding]::UTF8
+    )) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed -or $trimmed.StartsWith("#")) { continue }
+        $separator = $trimmed.IndexOf("=")
+        if ($separator -le 0) { continue }
+        $name = $trimmed.Substring(0, $separator).Trim().TrimStart([char]0xFEFF)
+        if ($paidProviderEnvironmentNames -notcontains $name) { continue }
+        if ($providerFileValues.ContainsKey($name)) {
+            throw "provider 환경 파일에 같은 키 이름이 중복되어 있습니다: $name"
+        }
+        $value = $trimmed.Substring($separator + 1).Trim()
+        if (
+            $value.Length -ge 2 -and
+            (($value.StartsWith('"') -and $value.EndsWith('"')) -or
+             ($value.StartsWith("'") -and $value.EndsWith("'")))
+        ) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            $providerFileValues[$name] = $value
+        }
+    }
+    foreach ($name in $paidProviderEnvironmentNames) {
+        if ($providerFileValues.ContainsKey($name)) {
+            $childEnvironment[$name] = $providerFileValues[$name]
+        }
+    }
+}
+
 $parentEnvironmentValues = @{}
 foreach ($existingName in @($childEnvironment.Keys)) {
     $parentEnvironmentValues[[string]$existingName] = [string]$childEnvironment[$existingName]
@@ -305,6 +349,18 @@ $childEnvironment["REALTIME_EVALUATION_PER_RUN_CAP_KRW"] = `
     $PerRunExpectedCostCapKrw.ToString($invariant)
 $childEnvironment["REALTIME_EVALUATION_DAILY_CAP_KRW"] = `
     $DailyExpectedCostCapKrw.ToString($invariant)
+# 실시간 보고서의 출처 원문·해시를 잠그는 이 실행 전용 비밀이다. provider 키와
+# 달리 사용자가 발급할 값이 아니므로 매 실행 새로 만들고 파일·부모 환경에는 남기지 않는다.
+$sealBytes = New-Object byte[] 32
+$sealRng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+try {
+    $sealRng.GetBytes($sealBytes)
+}
+finally {
+    $sealRng.Dispose()
+}
+$childEnvironment["PROVENANCE_SEAL_SECRET"] = `
+    [System.BitConverter]::ToString($sealBytes).Replace("-", "").ToLowerInvariant()
 $childEnvironment["ANALYSIS_ENGINE_DISABLE_DOTENV"] = "1"
 # Google Places 결과는 별도 약관 검토와 명시 opt-in이 끝날 때까지 실제 실행기에서
 # 항상 닫는다. 부모에 key/ACK가 있어도 자식으로 전달하지 않는다. 후보 흐름 자체는
@@ -319,6 +375,7 @@ $allowedChildEnvironmentNames = $allowedParentNames + @(
     "STORAGE_DB_PATH", "OBSERVABILITY_RECORDS_PATH", "TLDEXTRACT_CACHE",
     "REALTIME_EVALUATION_MODE", "REALTIME_EVALUATION_PAID_PROVIDERS",
     "REALTIME_EVALUATION_PER_RUN_CAP_KRW", "REALTIME_EVALUATION_DAILY_CAP_KRW",
+    "PROVENANCE_SEAL_SECRET",
     "ANALYSIS_ENGINE_DISABLE_DOTENV", "GOOGLE_PLACES_BILLING_ACK",
     "GOOGLE_PLACES_TERMS_ACK", "BUSINESS_CANDIDATE_PROVIDER"
 )

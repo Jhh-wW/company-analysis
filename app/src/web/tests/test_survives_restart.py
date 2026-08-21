@@ -286,7 +286,7 @@ def test_재시작_뒤에도_PDF로_내려받을_수_있다(
         'attachment; filename="'
     )
     assert "filename*=UTF-8''" in response.headers["content-disposition"]
-    expected_name = urllib.parse.quote(f"{COMPANY}_분석_보고서.pdf")
+    expected_name = urllib.parse.quote("주-진영-company-analysis.pdf")
     assert f"filename*=UTF-8''{expected_name}" in response.headers[
         "content-disposition"
     ]

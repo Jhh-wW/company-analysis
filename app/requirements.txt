@@ -3,6 +3,7 @@ fastapi==0.141.1
 uvicorn[standard]==0.52.3
 Jinja2==3.1.6
 python-multipart==0.0.32
+openpyxl==3.1.5
 
 # S3 호환 외부 SQLite 백업
 boto3==1.43.77

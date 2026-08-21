@@ -1,0 +1,28 @@
+<section id="today" class="frame-section" data-dashboard-refresh="today">
+  <div class="frame-section-heading">
+    <div><p class="frame-eyebrow">오늘</p><h2>먼저 확인할 일</h2></div>
+    <div class="frame-refresh"><span data-dashboard-last-updated aria-live="polite">마지막 갱신: {{ dashboard_last_updated }}</span><button class="btn ghost" type="button" data-dashboard-refresh-button="today">수동 새로고침</button></div>
+  </div>
+  <div class="frame-grid frame-grid-two">
+    <article class="card frame-priority">
+      <p class="frame-eyebrow">미해결 문제 · 오래된 항목 우선</p>
+      {% if dashboard_errors %}
+        <h3>{{ dashboard_errors[0].area }}</h3><p><strong>{{ dashboard_status_labels.get(dashboard_errors[0].status, "확인 대기") }}</strong> · 신고 {{ dashboard_errors|length }}건</p>
+        <a class="btn" href="/admin/issues">문제 자세히 보기</a>
+      {% else %}
+        <h3>미해결 문제가 없습니다</h3><p>새 신고 또는 재검사 대기 항목이 없습니다.</p><a class="btn ghost" href="/admin/issues">문제 목록 보기</a>
+      {% endif %}
+    </article>
+    <article class="card">
+      <p class="frame-eyebrow">서비스</p>
+      <h3>현재 상태</h3>
+      <p><strong>{{ "점검 중" if dashboard_service.status == "maintenance" else "운영 중" }}</strong></p>
+      {% if dashboard_service.status == "maintenance" %}<p class="muted">{{ dashboard_service.impact }}</p><a class="btn ghost" href="/admin/settings">원인·다음 행동 보기</a>{% else %}<p class="muted">문제가 생기면 원인·영향·다음 행동을 기록한 뒤 수동으로 점검을 시작합니다.</p>{% endif %}
+    </article>
+  </div>
+  <div class="frame-grid frame-grid-two frame-desktop-only">
+    <article class="card"><p class="frame-eyebrow">친구 이용 · MEMBER만</p><h3>하루 성공 3건</h3><p class="muted">실패·취소·외부 오류는 반환하고, 저장된 보고서 재사용 성공은 사용으로 셉니다.</p><a class="btn ghost" href="/admin/members">친구 이용 보기</a></article>
+    <article class="card"><p class="frame-eyebrow">만족도 · MEMBER만</p><h3>{{ dashboard_satisfaction }}</h3><p class="muted">응답 {{ dashboard_survey_total }}건 · 4~5점 도움됨, 목표 80%</p><a class="btn ghost" href="/admin/members">피드백 보기</a></article>
+  </div>
+  <article class="card frame-recently-resolved frame-desktop-only"><p class="frame-eyebrow">최근 보고서</p>{% if dashboard_reports %}<h3>{{ dashboard_reports[0].corp_id }}</h3><p>{{ dashboard_status_labels.get(dashboard_reports[0].status, "정상") }} · 버전 {{ dashboard_reports[0].version }}</p><a class="btn ghost" href="/admin/reports/{{ dashboard_reports[0].report_id }}">관리자 검토</a>{% else %}<h3>아직 저장된 보고서가 없습니다</h3><p>생성된 보고서가 저장되면 이곳에서 운영 상태를 확인합니다.</p>{% endif %}</article>
+</section>

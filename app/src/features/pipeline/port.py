@@ -166,6 +166,12 @@ class ReportTable:
     #: 행마다 하나씩 있어야 하며 공개 ``rows``를 다시 이어 붙여 만든 문자열은
     #: 원문 payload로 인정하지 않는다.
     evidence_rows: list[str] = field(default_factory=list, repr=False, compare=False)
+    #: 공개 채널의 권장 표현. 사실 원장과 행은 그대로 두고 렌더러만 바꾼다.
+    #: ``table``(기본)·``composition``(100% 구성비)·``trend``(시계열)·
+    #: ``flow``(행마다 왼쪽→오른쪽 흐름)를 지원한다. 렌더러가 안전하게 해석하지
+    #: 못하는 값이나 데이터는 표로 되돌아가며, 그래프와 표를 동시에 반복하지 않는다.
+    #: 기존 positional 생성자의 ``evidence_rows`` 위치를 바꾸지 않도록 맨 뒤에 둔다.
+    presentation: str = "table"
 
     @property
     def is_valid(self) -> bool:
@@ -314,16 +320,47 @@ class FactRecord:
     #: 완료 실행이 실제로 일어난 날짜 또는 원문에 적힌 연도(YYYY / YYYY-MM-DD).
     #: 원문 발표일·수집일과 섞지 않는다.
     event_date: str = ""
-    #: 2장의 고객·지역 우선순위를 구조적으로 보존한다.
+    #: 초기 v3 저장본의 고객·지역 우선순위. 새 보고서는 쓰지 않으며
+    #: ``market_stage``와 ``market_observation``으로 의미를 분리한다.
     market_priority: str = ""
-    #: 3장의 제품·서비스가 포트폴리오에서 맡는 역할.
+    #: 핵심·성장·진입 중 공식 전략과 실행 근거가 함께 있을 때만 붙이는 단계.
+    market_stage: str = ""
+    #: 원문에서 직접 확인한 고객·지역·산업·용도·채널 상태. 단순 매출 발생은
+    #: 여기까지만 보존하고 시장 단계로 승격하지 않는다.
+    market_observation: str = ""
+    #: 3장의 제품·서비스가 사업에서 맡는 근거 기반 기능적 역할.
     product_role: str = ""
+    #: 신규·성장·주력·안정 중 근거가 충분할 때만 붙이는 보고서 선택 단계.
+    portfolio_stage: str = ""
+    #: 3장 제품이 참조하는 2장 ``revenue_model`` 원자 사실 ID.
+    revenue_model_fact_id: str = ""
     #: 원문에서 각각 확인된 현재 중점 추진 신호(출시·운영, 투자·증설 등).
     priority_signals: list[str] = field(default_factory=list)
     #: 4장의 변화 해석이 직접 참조하는 완료 실행·실적 fact_id.
     basis_fact_ids: list[str] = field(default_factory=list)
     #: 5장의 실제 대응이 연결되는 미해결 문제 fact_id.
     response_to_fact_id: str = ""
+    #: 5장에서 원문에 직접 적힌 대응 행동 발췌. 초기 진척·효과와 분리한다.
+    response_action: str = ""
+    #: 5장 대응 착수 뒤 원문에서 별도로 확인된 초기 진척·결과. 대응 행동 자체를
+    #: 같은 문구로 반복하지 않으며, 없으면 효과 미확인으로 남긴다.
+    initial_signal: str = ""
+    #: 5장 문제의 해결 여부를 다음 공식 자료에서 확인할 객관적 지표명.
+    next_check_metric: str = ""
+    #: 6장 미실행 계획의 공개 상태. announced|approved|conditional
+    plan_status: str = ""
+    #: 원문에 직접 적힌 예정 시점. 없으면 일정 미공개로 표시한다.
+    plan_timing: str = ""
+    #: 원문에 직접 적힌 인허·수요·자금·파트너 등 선행 조건.
+    plan_condition: str = ""
+    #: 회사가 원문에서 직접 제시한 예상 효과. 작성자 추정은 넣지 않는다.
+    plan_expected_effect: str = ""
+    #: 향후 실제 실행 여부를 확인할 원문 기반 사건·행동 신호.
+    plan_execution_signal: str = ""
+    #: 7장의 기획·개발·조달·생산·유통·판매·사후서비스 단계 코드.
+    value_chain_stage: str = ""
+    #: 7장의 내부운영·종속회사·공급·유통·라이선스·공동사업 등 관계 코드.
+    relationship_type: str = ""
     #: canonical 이름. ``limitation``은 초기 v3 초안과의 저장 호환용이다.
     limitations: str = ""
     limitation: str = ""
@@ -341,6 +378,9 @@ class FactRecord:
     comparison_basis: str = ""
     comparison_period: str = ""
     comparison_scope: str = ""
+    #: 동일 조건 원수치로 비교 조립기가 확정한 공개 판정.
+    #: competitive_advantage|operating_characteristic
+    comparison_judgment: str = ""
     comparator_source_id: str = ""
     #: 비교사 원문에서 직접 보존한 별도 근거 조각과 공통 근거어.
     comparator_state_evidence: str = ""

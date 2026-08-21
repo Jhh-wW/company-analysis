@@ -113,6 +113,34 @@ def test_불러오기만_해서는_무거운_프로그램을_안_건드린다():
     )
 
 
+def test_demo는_anthropic이_없어도_새_프로세스에서_부팅된다():
+    """데모 선택은 선택 의존성인 provider SDK를 전혀 요구하지 않는다."""
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import builtins, os, sys; "
+                "real_import = builtins.__import__; "
+                "builtins.__import__ = lambda name, *args, **kwargs: "
+                "(_ for _ in ()).throw(ImportError('anthropic blocked')) "
+                "if name == 'anthropic' or name.startswith('anthropic.') "
+                "else real_import(name, *args, **kwargs); "
+                "os.environ['PIPELINE'] = 'demo'; "
+                "from src.web import runtime; "
+                "from src.features.pipeline.demo import DemoPipeline; "
+                "assert isinstance(runtime._PIPELINE, DemoPipeline); "
+                "assert 'anthropic' not in sys.modules"
+            ),
+        ],
+        cwd=paths.APP_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+
 def test_엔진을_부르는_길은_한_곳뿐이다():
     """여러 곳에서 엔진을 불러오면 «어디서 돈이 나가는지» 추적할 수 없다."""
     calls = sum(

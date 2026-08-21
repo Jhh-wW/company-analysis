@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from lxml import html as lxml_html
 from pypdf import PdfReader
 
 from src.core.citations import citation_number
@@ -34,6 +35,7 @@ from src.features.pipeline.port import (
 from src.features.provenance.sources import Source, SourceKind
 from src.features.report_standard import CANONICAL_SCHEMA_VERSION, SECTION_BY_ID
 from src.features.report_standard.publish import PublishBlockedError
+from src.features.report_standard.section_content import section_content_blocks
 from src.web import job_runtime
 from src.web import main as web_main
 
@@ -260,10 +262,53 @@ def _all_outputs(
     }
 
 
+def _visualization_tables(report: Report) -> list[ReportTable]:
+    return [
+        table
+        for section in report.sections
+        for table in section.tables
+        if table.presentation in {"composition", "trend"}
+    ]
+
+
+def _visual_labels_and_values(table: ReportTable) -> tuple[list[str], list[str]]:
+    """원표에서 그래프가 표현해야 할 의미 label과 value를 꾼낸다."""
+
+    row_labels = [row[0] for row in table.rows]
+    series_labels = table.headers[1:] if table.presentation == "trend" else []
+    values = [cell for row in table.rows for cell in row[1:]]
+    return [*series_labels, *row_labels], values
+
+
+def _table_unit(table: ReportTable) -> str:
+    if table.display_unit:
+        return table.display_unit
+    matched = re.search(r"\(\s*단위\s*:\s*([^)]+)\)", table.caption)
+    assert matched is not None, f"단위를 찾지 못함: {table.caption}"
+    return matched.group(1).strip()
+
+
+def _notion_cell_text(cell: list[dict[str, Any]]) -> str:
+    return "".join(item["text"]["content"] for item in cell)
+
+
+def _notion_table_matrix(block: dict[str, Any]) -> list[list[str]]:
+    return [
+        [_notion_cell_text(cell) for cell in row["table_row"]["cells"]]
+        for row in block["table"]["children"]
+    ]
+
+
+def _notion_paragraph_text(block: dict[str, Any]) -> str:
+    assert block["type"] == "paragraph"
+    return _notion_cell_text(block["paragraph"]["rich_text"])
+
+
 def test_세_출력은_표지_요약_의미장_출처를_같이_낸다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     report = canonical_report()
+    assert len(report.fact_records) == 26
     _html, outputs = _all_outputs(report, monkeypatch)
 
     expected = [
@@ -281,14 +326,95 @@ def test_세_출력은_표지_요약_의미장_출처를_같이_낸다(
         "원문 위치",
         "본문 사용 장",
         "완료 사업연도 연결 실적 (단위: 억원)",
-        "프리미엄 아크릴 시트",
+        "리얼 알루미늄 합지 필름",
+        "폐플라스틱 열분해유",
     ]
     for medium, rendered in outputs.items():
         for text in expected:
             assert normalize(text) in normalize(rendered), f"{medium}에 누락: {text}"
 
 
-def test_네_출력은_canonical_순서와_prose우선_계약을_지킨다(
+def test_시각화_원표의_label_value_unit_cite는_세_출력에서_같다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = canonical_report()
+    html, outputs = _all_outputs(report, monkeypatch)
+    web_document = lxml_html.fromstring(html)
+    notion_blocks = build_blocks(report)
+    visual_tables = _visualization_tables(report)
+
+    assert [table.presentation for table in visual_tables] == ["composition", "trend"]
+    for table in visual_tables:
+        labels, values = _visual_labels_and_values(table)
+        unit = _table_unit(table)
+        source_number = citation_number(table.cite)
+        assert source_number is not None
+        source_number_text = str(source_number)
+        marker = f"〔{source_number_text}〕"
+
+        figures = [
+            figure
+            for figure in web_document.xpath(
+                "//figure[contains(concat(' ', normalize-space(@class), ' '), "
+                "' report-visual ')]"
+            )
+            if normalize(table.caption) in normalize(figure.text_content())
+        ]
+        assert len(figures) == 1, f"웹 figure 수 불일치: {table.caption}"
+        figure = figures[0]
+        figure_text = figure.text_content()
+        for expected in [table.caption, *labels, *values, unit]:
+            assert normalize(expected) in normalize(figure_text), (
+                f"웹 figure에 누락: {table.caption} / {expected}"
+            )
+        source_links = figure.xpath(
+            ".//a[contains(concat(' ', normalize-space(@class), ' '), ' ref ') "
+            f"and @href='#src{source_number_text}']"
+        )
+        assert source_links
+        assert all(link.text_content().strip() == source_number_text for link in source_links)
+
+        # 그래프가 있는 장에 같은 원표를 다시 내보내지 않는다.
+        owner_sections = figure.xpath("ancestor::section[@data-report-cell][1]")
+        assert len(owner_sections) == 1
+        assert owner_sections[0].xpath(".//table") == []
+
+        pdf_text = outputs["PDF"]
+        for expected in [table.caption, *labels, *values, unit, marker]:
+            assert normalize(expected) in normalize(pdf_text), (
+                f"PDF에 누락: {table.caption} / {expected}"
+            )
+        assert normalize(pdf_text).count(normalize(table.caption)) == 1
+        # 현재 두 canonical 원표의 표시값은 서로 고유하다. 값이 두 번
+        # 나오면 그래프 아래에 원표도 반복 출력된 것이다.
+        assert len(values) == len(set(values))
+        for value in values:
+            assert pdf_text.count(value) == 1, f"PDF 중복 표시값: {value}"
+
+        expected_matrix = [table.headers, *table.rows]
+        notion_matches = [
+            (index, block)
+            for index, block in enumerate(notion_blocks)
+            if block["type"] == "table"
+            and _notion_table_matrix(block) == expected_matrix
+        ]
+        assert len(notion_matches) == 1, f"Notion 원표 수 불일치: {table.caption}"
+        notion_index, notion_table = notion_matches[0]
+        assert _notion_table_matrix(notion_table) == expected_matrix
+        assert notion_index > 0
+        notion_caption = _notion_paragraph_text(notion_blocks[notion_index - 1])
+        assert table.caption in notion_caption
+        assert unit in notion_caption
+        assert marker in notion_caption
+
+        notion_text = outputs["Notion"]
+        for expected in [table.caption, *labels, *values, unit, marker]:
+            assert normalize(expected) in normalize(notion_text), (
+                f"Notion에 누락: {table.caption} / {expected}"
+            )
+
+
+def test_네_출력은_canonical_순서와_장별_구조블록_계약을_지킨다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     report = canonical_report()
@@ -306,8 +432,17 @@ def test_네_출력은_canonical_순서와_prose우선_계약을_지킨다(
         for raw in raw_lines:
             assert normalize(raw) not in normalized, f"{medium}가 근거 원문을 반복함: {raw}"
         for section in report.sections:
-            for prose, _cite in section.prose_lines:
-                assert normalize(prose) in normalized, f"{medium}에 prose 누락: {prose}"
+            for block in section_content_blocks(report, section):
+                assert normalize(block.title) in normalized, (
+                    f"{medium}에 구조 블록 제목 누락: {block.title}"
+                )
+                for field in block.fields:
+                    assert normalize(field.label) in normalized, (
+                        f"{medium}에 구조 필드명 누락: {field.label}"
+                    )
+                    assert normalize(field.value) in normalized, (
+                        f"{medium}에 구조 필드값 누락: {field.value}"
+                    )
 
 
 def test_레거시_직무_완성도_AI수집_메타가_있는_부분본은_출력하지_않는다(

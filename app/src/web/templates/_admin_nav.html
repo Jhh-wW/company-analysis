@@ -1,0 +1,13 @@
+<nav class="frame-menu" aria-label="운영 대시보드 메뉴">
+  <a href="/admin" {% if dashboard_nav == "today" %}aria-current="page"{% endif %}>오늘</a>
+  <a href="/admin/issues" {% if dashboard_nav == "issues" %}aria-current="page"{% endif %}>문제·보고서</a>
+  <a class="frame-desktop-link" href="/admin/members" {% if dashboard_nav == "members" %}aria-current="page"{% endif %}>친구</a>
+  <a class="frame-desktop-link" href="/admin/links" {% if dashboard_nav == "links" %}aria-current="page"{% endif %}>지원 LINK</a>
+  <a class="frame-desktop-link" href="/admin/settings" {% if dashboard_nav == "settings" %}aria-current="page"{% endif %}><span aria-hidden="true">⚙</span> 설정</a>
+</nav>
+{% if dashboard_service is defined and dashboard_service.status == "maintenance" %}
+<aside class="frame-service-alert" role="status" aria-label="전역 점검 상태">
+  <div><p class="frame-eyebrow">전역 서비스 상태</p><h2>점검 중</h2></div>
+  <dl class="frame-four"><div><dt>원인</dt><dd>{{ dashboard_service.cause }}</dd></div><div><dt>영향</dt><dd>{{ dashboard_service.impact }}</dd></div><div><dt>다음 행동</dt><dd>{{ dashboard_service.next_action }}</dd></div><div><dt>재시작</dt><dd>운영자가 직접 기록할 때만 가능합니다.</dd></div></dl>
+</aside>
+{% endif %}

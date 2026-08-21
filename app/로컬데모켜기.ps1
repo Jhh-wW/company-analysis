@@ -174,8 +174,21 @@ function Wait-ForLoopbackListener {
 }
 
 $appRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
-$python = Join-Path $appRoot ".venv\Scripts\python.exe"
-if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $appRoot ".."))
+$python = $null
+$pythonCandidates = @(
+    (Join-Path $appRoot ".venv\Scripts\python.exe"),
+    (Join-Path $repoRoot ".venv\Scripts\python.exe"),
+    # 현재 검수 작업환경이 쓰는 Python 3.13 공용 가상환경도 마지막 후보로 인정한다.
+    (Join-Path $repoRoot ".venv313-backup-review\Scripts\python.exe")
+)
+foreach ($candidate in $pythonCandidates) {
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+        $python = $candidate
+        break
+    }
+}
+if ($null -eq $python) {
     $pythonCommand = Get-Command "python" -CommandType Application -ErrorAction SilentlyContinue
     if ($null -eq $pythonCommand) {
         throw "Python을 찾지 못했습니다. app 폴더에서 Python 3.13 가상환경과 의존성을 먼저 준비해 주세요."

@@ -208,7 +208,7 @@ def test_관리표는_이름_머리글_scope_키보드_scroll영역을_가진다
     expected_table_counts = {
         "admin-access": 2,
         "admin-link": 1,
-        "admin-dashboard": 2,
+            "admin-dashboard": 0,
         "stopped": 1,
     }
     for page_name, expected_count in expected_table_counts.items():
@@ -240,10 +240,10 @@ def test_관리표는_이름_머리글_scope_키보드_scroll영역을_가진다
 def test_관리화면은_페이지목적_h1_하나와_연속_heading계층을_가진다():
     _empty_access, pages = _render_admin_and_stopped_pages()
     expected_h1 = {
-        "admin-home": "관리자 화면",
-        "admin-access": "초대·회사 링크 관리",
+            "admin-home": "운영 대시보드",
+        "admin-access": "초대·LINK 관리",
         "admin-link": "카카오",
-        "admin-dashboard": "품질 대시보드",
+            "admin-dashboard": "운영 대시보드",
     }
 
     for page_name, page_h1 in expected_h1.items():

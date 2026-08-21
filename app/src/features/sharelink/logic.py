@@ -49,7 +49,10 @@ def is_valid_key(key: str) -> bool:
 
 
 def normalize_scope_value(value: str) -> str:
-    """회사·직무 범위 비교용으로 유니코드·대소문자·연속 공백을 정규화한다."""
+    """옛 표시 비교 호환용으로 유니코드·대소문자·연속 공백을 정규화한다.
+
+    함수 이름의 ``scope``는 과거 명칭일 뿐 LINK 권한 범위를 뜻하지 않는다.
+    """
     if not isinstance(value, str):
         return ""
     normalized = unicodedata.normalize("NFKC", value)
@@ -59,10 +62,10 @@ def normalize_scope_value(value: str) -> str:
 def scope_matches(
     *, link_company: str, company: str, link_job: str = "", job: str = ""
 ) -> bool:
-    """회사 분석 전용 링크의 제출 회사가 발급 회사와 같은지 본다.
+    """지원 맥락 꼬리표와 입력 회사가 같은지 표시 목적으로만 비교한다.
 
-    ``link_job``과 ``job``은 옛 호출부와 저장 행을 깨지 않기 위해 받지만 권한 범위에
-    사용하지 않는다.
+    이 함수 결과는 권한 판정에 쓰지 않는다. ``link_job``과 ``job``은 옛 호출부와
+    저장 행을 깨지 않기 위해 받지만 비교에도 사용하지 않는다.
     """
     return bool(
         normalize_scope_value(link_company)

@@ -115,7 +115,7 @@ def test_네_비용경로가_공통_원화환산을_사용한다():
 
 def test_운영한도와_paid_phase_호출계약은_숨은_3000원을_두지_않는다():
     assert PER_LINK_DAILY_BUDGET_KRW == 3000.0
-    assert PER_USER_DAILY_BUDGET_KRW == 1000.0
+    assert PER_USER_DAILY_BUDGET_KRW is None
     assert ADMIN_DAILY_BUDGET_KRW == 5000.0
 
     definitions: dict[str, list[Path]] = {

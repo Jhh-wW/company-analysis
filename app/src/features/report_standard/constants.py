@@ -63,11 +63,27 @@ SECTION_TIME_STATES: Final[dict[str, frozenset[str]]] = {
     "competitive_position": frozenset({"standing"}),
 }
 
+COMPARISON_JUDGMENTS: Final[frozenset[str]] = frozenset(
+    {"competitive_advantage", "operating_characteristic"}
+)
+COMPARISON_JUDGMENT_LABELS: Final[dict[str, str]] = {
+    "competitive_advantage": "경쟁우위",
+    "operating_characteristic": "운영 특성",
+}
+
+# 비교 조건을 충족하지 못한 축은 조사 실패 사유로만 남긴다. 공개 사실의
+# 닫힌 claim_type 목록과 섞지 않아 빈 9장·근거 부족 카드를 출고하지 않는다.
+INTERNAL_ONLY_CLAIM_TYPES_BY_SECTION: Final[dict[str, frozenset[str]]] = {
+    "competitive_position": frozenset({"comparison_limitation"}),
+}
+
 # 장마다 의미가 다른 임의 문자열을 조용히 받아들이면 demo·실서비스·문서가 서로
 # 다른 이름을 쓰게 된다. AI가 고르는 유형과 프로그램이 만드는 표·비교 유형을 모두
 # 포함한 canonical 닫힌 목록이다.
 CANONICAL_CLAIM_TYPES_BY_SECTION: Final[dict[str, frozenset[str]]] = {
-    "identity": frozenset({"official_identity", "operating_scope"}),
+    "identity": frozenset(
+        {"identity_summary", "official_self_definition", "operating_scope"}
+    ),
     "business_model": frozenset({"revenue_model", "customer_market", "revenue_mix"}),
     "portfolio": frozenset({"priority_product"}),
     "past_changes": frozenset(
@@ -77,9 +93,7 @@ CANONICAL_CLAIM_TYPES_BY_SECTION: Final[dict[str, frozenset[str]]] = {
     "future_strategy": frozenset({"future_plan"}),
     "operations_partners": frozenset({"operating_core", "partner_role"}),
     "culture": frozenset({"official_value", "work_example"}),
-    "competitive_position": frozenset(
-        {"competitive_comparison", "comparison_limitation"}
-    ),
+    "competitive_position": frozenset({"competitive_comparison"}),
 }
 SUMMARY_MIN_ITEMS: Final[int] = 3
 SUMMARY_MAX_ITEMS: Final[int] = 5

@@ -165,6 +165,9 @@ class CandidateResolution:
     provider_called: bool = False
     #: 후보가 없을 때 화면이 실제로 조회한 공급자를 정확히 설명하기 위한 표시명.
     provider_name: str = ""
+    #: DART 로컬 후보의 profile 보강만 실패한 좁은 관측 표식. 일반 공급자 장애·
+    #: timeout·rate limit에는 절대 쓰지 않으며 운영 점검 심각도를 낮추지 않는다.
+    local_profile_enrichment_failed: bool = False
 
 
 class BusinessCandidateProvider(Protocol):
@@ -672,11 +675,14 @@ def resolve_candidates(
             provider_called=True,
             provider_name=provider_name,
         )
-    except Exception:  # noqa: BLE001 — 공급자 원문/예외 본문은 로그에 남기지 않는다
+    except Exception as error:  # noqa: BLE001 — 공급자 원문/예외 본문은 로그에 남기지 않는다
         return CandidateResolution(
             ResolutionStatus.FAILED,
             provider_called=True,
             provider_name=provider_name,
+            local_profile_enrichment_failed=bool(
+                getattr(error, "local_profile_enrichment_failed", False)
+            ),
         )
 
     ranked: list[BusinessCandidate] = []

@@ -401,6 +401,7 @@ def build_three_year_table(
         scale_divisor="100000000",
         scale_places=0,
         display_unit="억원",
+        presentation="trend",
         # 세 공개 행은 같은 실제 API 응답에서 구조화됐다. 공개 행을 이어 붙인
         # 문장을 원문이라고 자가 등록하지 않고 원 응답 자체를 보존한다.
         evidence_rows=[collected_payload, collected_payload, collected_payload],

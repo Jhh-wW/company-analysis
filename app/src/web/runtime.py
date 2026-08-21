@@ -10,8 +10,12 @@ from contextlib import asynccontextmanager, closing
 from fastapi import FastAPI
 
 from src.core.constants import PIPELINE_ENV, PIPELINE_REAL
+from src.core import clock
+from src.features.budget import spend_store
+from src.features.observability import constants as obs
 from src.features.pipeline.demo import DemoPipeline
 from src.features.provenance import sources as provenance_sources
+from src.features.sharelink import store as share_store
 from src.features.storage import db as storage_db
 from src.web import evaluation_mode, paid_runtime
 
@@ -70,6 +74,33 @@ def _check_storage_read_ready() -> None:
         conn.execute("SELECT 1").fetchone()
 
 
+def _recover_link_run_history() -> None:
+    """hard restart로 이어갈 수 없는 LINK 실행을 완료된 비용과 함께 마감한다."""
+
+    with storage_db.connect() as conn:
+        # 비용 조회와 상태 전이를 같은 SQLite write transaction에 둔다. 시작 시점에는
+        # 이전 프로세스의 작업을 이어갈 수 없으므로 running만 복구 대상이다.
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        running = share_store.list_running_runs(conn)
+        spend_store.ensure_schema(conn)
+        known_costs = spend_store.load_run_history(
+            conn, (run.run_id for run in running)
+        ).by_run
+        recovered = share_store.interrupt_running_runs(
+            conn,
+            interrupted_at=clock.iso_now_kst(),
+            stop_step=obs.END_STEP_GENERATE,
+            stop_reason="server_restart",
+            known_internal_cost_krw_by_run=known_costs,
+        )
+    if recovered:
+        logger.warning(
+            "서버 재시작으로 이어갈 수 없는 LINK 생성 이력 %d건을 중단 처리했습니다",
+            recovered,
+        )
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     """시작 상태를 복구하고 종료 시 실행 중 조사를 안전하게 마감한다."""
@@ -87,6 +118,7 @@ async def _lifespan(_app: FastAPI):
     _check_storage_write_ready()
     paid_runtime._seed_ledger()
     paid_runtime._recover_observation_lifecycle()
+    _recover_link_run_history()
     # 순환 import를 피하려고 앱 조립이 끝나 실제 lifespan이 열릴 때 가져온다.
     from src.web import job_runtime  # noqa: PLC0415
 

@@ -6,8 +6,8 @@
 | 갈래 | 누구 | 하루 상한 | 통장 이름 |
 |---|---|---:|---|
 | `ADMIN`  | 나 (관리자 명단) | 5,000원 | `user:<이메일>` |
-| `MEMBER` | 초대한 친구      | 1,000원 | `user:<이메일>` |
-| `LINK`   | 인사팀 (열쇠 링크) | 3,000원 | `<열쇠>` |
+| `MEMBER` | 초대한 친구      | 성공 3건 | `user:<이메일>` |
+| `LINK`   | 열쇠 링크 방문자 | 3,000원 | `<열쇠>` |
 | `PUBLIC` | 그냥 들어온 사람  | **0원** | `(열쇠 없음)` |
 
 ★ **로그인은 「누구인가」일 뿐 「써도 되는가」가 아니다** (P-95).
@@ -24,7 +24,6 @@ from enum import Enum
 from src.features.sharelink.constants import (
     ADMIN_DAILY_BUDGET_KRW,
     PER_LINK_DAILY_BUDGET_KRW,
-    PER_USER_DAILY_BUDGET_KRW,
     PUBLIC_BUCKET,
     PUBLIC_DAILY_BUDGET_KRW,
     USER_BUCKET_PREFIX,
@@ -37,14 +36,14 @@ class Track(str, Enum):
 
     ADMIN = "admin"      #: 관리자 (나)
     MEMBER = "member"    #: 초대한 친구
-    LINK = "link"        #: 열쇠 링크로 들어온 인사팀
+    LINK = "link"        #: 열쇠 LINK로 들어온 방문자
     PUBLIC = "public"    #: 로그인도 열쇠도 없는 손님
 
 
-#: 갈래별 하루 상한(원).
-BUDGET_BY_TRACK: dict[Track, float] = {
+#: 갈래별 비용 하루 상한. MEMBER는 성공 보고서 수로 제한하므로 비용 상한이 없다.
+BUDGET_BY_TRACK: dict[Track, float | None] = {
     Track.ADMIN: ADMIN_DAILY_BUDGET_KRW,
-    Track.MEMBER: PER_USER_DAILY_BUDGET_KRW,
+    Track.MEMBER: None,
     Track.LINK: PER_LINK_DAILY_BUDGET_KRW,
     Track.PUBLIC: PUBLIC_DAILY_BUDGET_KRW,
 }
@@ -67,8 +66,8 @@ def decide_track(
     ★ 순서에 뜻이 있다 — **관리자 → 초대된 친구 → 열쇠 링크 → 나머지**.
       · 관리자가 열쇠 링크로 들어와도 «관리자 몫»을 쓴다 (내 링크를 내가 눌러볼 때).
       · **로그인했지만 초대 명단에 없으면 열쇠 링크 몫**을 쓴다 —
-        인사팀이 링크로 들어와 «호기심에» 구글 로그인을 눌러도
-        그 회사에 배정된 몫 안에서만 쓰게 된다. 로그인했다고 몫이 늘지 않는다.
+        방문자가 링크로 들어와 «호기심에» 구글 로그인을 눌러도
+        같은 LINK의 여러 회사 조사 합계 안에서만 쓴다. 로그인했다고 몫이 늘지 않는다.
       · 그것도 없으면 `PUBLIC`(0원)이다.
     """
     if email and is_admin:
@@ -101,6 +100,6 @@ def bucket_of(track: Track, *, email: str, share_key: str) -> str:
     return PUBLIC_BUCKET
 
 
-def budget_of(track: Track) -> float:
-    """이 갈래의 하루 상한(원)."""
+def budget_of(track: Track) -> float | None:
+    """이 갈래의 비용 하루 상한. MEMBER는 성공 3건 정책이라 ``None``이다."""
     return BUDGET_BY_TRACK[track]

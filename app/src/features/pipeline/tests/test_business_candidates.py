@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
+
+import pytest
 
 from src.features.pipeline import real
 from src.features.pipeline.port import UserInput
@@ -48,7 +51,7 @@ def _catalog(size: int = 10):
     )
 
 
-def test_DART_local후보는_요청당_company_profile을_최대3건만_부른다(monkeypatch):
+def test_DART_local후보는_화면3개와_분리해_profile을_최대5건만_보강한다(monkeypatch):
     engine = _CandidateEngine()
     monkeypatch.setattr(real, "_engine", lambda: engine)
     monkeypatch.setattr(real, "_company_catalog", _catalog)
@@ -58,7 +61,13 @@ def test_DART_local후보는_요청당_company_profile을_최대3건만_부른�
     )
 
     assert len(rows) == 3
-    assert engine.calls == ["00000010", "00000009", "00000008"]
+    assert engine.calls == [
+        "00000010",
+        "00000009",
+        "00000008",
+        "00000007",
+        "00000006",
+    ]
 
 
 def test_DART_local후보는_deadline뒤_남은_profile을_계속_부르지_않는다(monkeypatch):
@@ -71,6 +80,23 @@ def test_DART_local후보는_deadline뒤_남은_profile을_계속_부르지_않�
     )
 
     assert len(rows) == 1
+    assert engine.calls == ["00000010"]
+
+
+def test_DART_local_profile_형식오류는_후보보강전용_표식으로_구분한다(monkeypatch):
+    class InvalidProfileEngine(_CandidateEngine):
+        def get_json(self, _path, params, _counter):
+            self.calls.append(str(params["corp_code"]))
+            return {"status": "013"}
+
+    engine = InvalidProfileEngine()
+    monkeypatch.setattr(real, "_engine", lambda: engine)
+    monkeypatch.setattr(real, "_company_catalog", _catalog)
+
+    with pytest.raises(real.LocalDartProfileEnrichmentError):
+        real.RealPipeline().search_business_candidates(
+            company="JYP", address_hint="서울 강동구", limit=3, timeout_sec=8.0
+        )
     assert engine.calls == ["00000010"]
 
 
@@ -151,6 +177,149 @@ def test_JYP_강동구는_XML순서와무관하게_현재상장사를_첫후보�
         timeout_sec=8.0,
     )
     assert exact_old[0]["candidate_ref"] == "00535454"
+
+
+def test_YG는_공식영문명_약어로_무료_DART후보만_내고_유사문자는_거부한다(
+    monkeypatch,
+):
+    class YgCandidateEngine(_CandidateEngine):
+        def get_json(self, _path, params, _counter):
+            code = str(params["corp_code"])
+            self.calls.append(code)
+            assert code == "00613318"
+            return {
+                "status": "000",
+                "corp_name": "와이지엔터테인먼트",
+                "adres": "",
+                "hm_url": "",
+            }
+
+    catalog = (
+        (
+            "00613318",
+            "와이지엔터테인먼트",
+            "YG Entertainment Inc.",
+            "122870",
+            "20240401",
+        ),
+        (
+            "00258689",
+            "JYP Ent.",
+            "JYP Entertainment Corporation",
+            "035900",
+            "20221206",
+        ),
+        (
+            "00136689",
+            "(주)에스엠엔터테인먼트",
+            "SM Entertainment Co., Ltd.",
+            "041510",
+            "20240329",
+        ),
+    )
+    monkeypatch.setattr(real, "_company_catalog", lambda: catalog)
+
+    for typed in ("YG", "yg", "Yg", "ｙＧ"):
+        engine = YgCandidateEngine()
+        monkeypatch.setattr(real, "_engine", lambda: engine)
+
+        rows = real.RealPipeline().search_business_candidates(
+            company=typed,
+            address_hint="",
+            limit=3,
+            timeout_sec=8.0,
+        )
+
+        assert [row["candidate_ref"] for row in rows] == ["00613318"]
+        assert rows[0]["candidate_name"] == "와이지엔터테인먼트"
+        assert rows[0]["english_name"] == "YG Entertainment Inc."
+        assert rows[0]["stock_code"] == "122870"
+        assert rows[0]["modify_date"] == "20240401"
+        assert rows[0]["name_match_kind"] == "acronym_token"
+        assert engine.calls == ["00613318"]
+
+    for rejected in ("Y G", "YG1", "ҮG"):
+        engine = YgCandidateEngine()
+        monkeypatch.setattr(real, "_engine", lambda: engine)
+
+        assert real.RealPipeline().search_business_candidates(
+            company=rejected,
+            address_hint="",
+            limit=3,
+            timeout_sec=8.0,
+        ) == []
+        assert engine.calls == []
+
+
+def test_YG_전체목록형_동명후보에서도_rank4_상장법인을_최종3개에_남긴다(
+    monkeypatch,
+):
+    fixture_path = (
+        Path(__file__).parents[2]
+        / "business_candidate"
+        / "tests"
+        / "fixtures"
+        / "dart_yg_full_catalog_slice.json"
+    )
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    catalog = tuple(
+        (
+            row["corp_code"],
+            row["corp_name"],
+            row["corp_eng_name"],
+            row["stock_code"],
+            row["modify_date"],
+        )
+        for row in payload["records"]
+    )
+    names = {row["corp_code"]: row["corp_name"] for row in payload["records"]}
+
+    class FullCatalogSliceEngine(_CandidateEngine):
+        def get_json(self, _path, params, _counter):
+            code = str(params["corp_code"])
+            self.calls.append(code)
+            return {
+                "status": "000",
+                "corp_name": names[code],
+                "adres": "",
+                "hm_url": "",
+            }
+
+    monkeypatch.setattr(real, "_company_catalog", lambda: catalog)
+    engine = FullCatalogSliceEngine()
+    monkeypatch.setattr(real, "_engine", lambda: engine)
+
+    rows = real.RealPipeline().search_business_candidates(
+        company="YG", address_hint="", limit=3, timeout_sec=8.0
+    )
+
+    # 공식 전체 목록에서는 목표 법인이 이름-only 순위 4위다. profile 보강은
+    # 다섯 건에서 멈추고, 상장 여부까지 비교한 최종 화면 세 장에는 포함한다.
+    assert payload["expected_local_rank"] == 4
+    assert engine.calls == [
+        "01841468",
+        "00249247",
+        "00139719",
+        "00613318",
+        "01931239",
+    ]
+    assert len(rows) == 3
+    assert "00613318" in [str(row["candidate_ref"]) for row in rows]
+    target = next(row for row in rows if row["candidate_ref"] == "00613318")
+    assert target["candidate_name"] == "와이지엔터테인먼트"
+    assert target["stock_code"] == "122870"
+    assert target["name_match_kind"] == "acronym_token"
+
+    for rejected in ("ҮG", "JҮP", "ΑG"):
+        rejected_engine = FullCatalogSliceEngine()
+        monkeypatch.setattr(real, "_engine", lambda: rejected_engine)
+        assert real.RealPipeline().search_business_candidates(
+            company=rejected,
+            address_hint="",
+            limit=3,
+            timeout_sec=8.0,
+        ) == []
+        assert rejected_engine.calls == []
 
 
 def test_사람이선택한_DART고유번호는_이름식별없이_그번호만_다시조회한다(monkeypatch):

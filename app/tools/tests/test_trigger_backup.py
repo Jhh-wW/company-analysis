@@ -5,7 +5,10 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from email.message import Message
+from io import BytesIO
 from pathlib import Path
+from urllib.request import BaseHandler
 
 import pytest
 
@@ -34,24 +37,76 @@ class FakeResponse:
         return self.content
 
 
-def test_POST_Bearer로_검증완료_응답을_받는다(monkeypatch) -> None:
-    captured = {}
+class RedirectResponse(BytesIO):
+    def __init__(self, *, status: int, url: str, location: str) -> None:
+        super().__init__(b"")
+        self.status = status
+        self.code = status
+        self.url = url
+        self.msg = "redirect"
+        self.headers = Message()
+        self.headers["Location"] = location
 
-    def fake_urlopen(request, timeout):
-        captured["method"] = request.get_method()
-        captured["authorization"] = request.get_header("Authorization")
-        captured["timeout"] = timeout
+    def info(self):
+        return self.headers
+
+    def getcode(self) -> int:
+        return self.status
+
+    def geturl(self) -> str:
+        return self.url
+
+
+class RedirectingHttpsAdapter(BaseHandler):
+    handler_order = 100
+
+    def __init__(self, *, status: int, location: str) -> None:
+        self.status = status
+        self.location = location
+        self.requests: list[tuple[str, str | None]] = []
+
+    def https_open(self, request):
+        self.requests.append(
+            (request.full_url, request.get_header("Authorization"))
+        )
+        if len(self.requests) == 1:
+            return RedirectResponse(
+                status=self.status,
+                url=request.full_url,
+                location=self.location,
+            )
         return FakeResponse(
             {
                 "status": "ok",
-                "object_key": "company-analysis/a.sqlite3",
-                "checksum_key": "company-analysis/a.sqlite3.sha256",
-                "sha256": "b" * 64,
-                "deleted_objects": 0,
+                "sha256": "c" * 64,
             }
         )
 
-    monkeypatch.setattr(trigger_backup, "urlopen", fake_urlopen)
+
+def test_POST_Bearer로_검증완료_응답을_받는다(monkeypatch) -> None:
+    captured = {}
+
+    class FakeOpener:
+        def open(self, request, timeout):
+            captured["method"] = request.get_method()
+            captured["authorization"] = request.get_header("Authorization")
+            captured["timeout"] = timeout
+            return FakeResponse(
+                {
+                    "status": "ok",
+                    "object_key": "company-analysis/a.sqlite3",
+                    "checksum_key": "company-analysis/a.sqlite3.sha256",
+                    "sha256": "b" * 64,
+                    "deleted_objects": 0,
+                }
+            )
+
+    def fake_build_opener(*handlers):
+        assert len(handlers) == 1
+        assert isinstance(handlers[0], trigger_backup._FailClosedRedirectHandler)
+        return FakeOpener()
+
+    monkeypatch.setattr(trigger_backup, "build_opener", fake_build_opener)
 
     payload = trigger_backup.trigger_once(
         "https://service.example/internal/backup/run", "x" * 32
@@ -63,6 +118,38 @@ def test_POST_Bearer로_검증완료_응답을_받는다(monkeypatch) -> None:
         "authorization": "Bearer " + "x" * 32,
         "timeout": trigger_backup.TIMEOUT_SEC,
     }
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+@pytest.mark.parametrize("redirect_host", ["service.example", "other.example"])
+def test_리디렉션은_Bearer를_재전송하지_않고_실패한다(
+    monkeypatch, status: int, redirect_host: str
+) -> None:
+    secret = "do-not-forward-this-backup-secret"
+    source_url = "https://service.example/internal/backup/run"
+    redirect_query = "redirect-secret-must-not-leak"
+    redirect_url = (
+        f"https://{redirect_host}/internal/backup/run?token=" + redirect_query
+    )
+    adapter = RedirectingHttpsAdapter(status=status, location=redirect_url)
+    real_build_opener = trigger_backup.build_opener
+
+    def build_opener_with_adapter(*handlers):
+        return real_build_opener(*handlers, adapter)
+
+    monkeypatch.setattr(
+        trigger_backup,
+        "build_opener",
+        build_opener_with_adapter,
+    )
+
+    with pytest.raises(trigger_backup.TriggerError) as raised:
+        trigger_backup.trigger_once(source_url, secret)
+
+    assert str(raised.value) == f"백업 서버가 HTTP {status}을 반환했습니다"
+    assert secret not in str(raised.value)
+    assert redirect_query not in str(raised.value)
+    assert adapter.requests == [(source_url, "Bearer " + secret)]
 
 
 @pytest.mark.parametrize(

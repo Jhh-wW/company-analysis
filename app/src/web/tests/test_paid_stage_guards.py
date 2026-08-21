@@ -453,7 +453,9 @@ def test_OCR_직전_예산검사에_걸리면_extractor를_안_부른다(monkeyp
     assert pipeline.run_calls == 0
 
 
-def test_위조한_원입력은_막고_레거시_숨은회사값은_무시한다(monkeypatch):
+def test_확인뒤_회사입력을_바꾸면_토큰을_폐기하고_레거시_숨은값은_무시한다(
+    monkeypatch,
+):
     pipeline = FakePaidPipeline()
     monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
     client = TestClient(main.app)
@@ -465,6 +467,14 @@ def test_위조한_원입력은_막고_레거시_숨은회사값은_무시한다
         data=_run_form(token, ref, company="다른회사"),
         follow_redirects=False,
     )
+
+    # LINK 지원회사와 다른 회사를 고르는 것은 허용한다. 다만 확인 화면에서 확정한
+    # 입력을 /run POST에서 몰래 바꾼 요청은 일회용 확인표와 결속되지 않으므로 버린다.
+    assert wrong_input.status_code == 303
+    assert wrong_input.headers["location"] == "/"
+    assert pipeline.run_calls == 0
+
+    token, ref = _확인값(_confirm(client).text)
     forged_hidden_values = client.post(
         "/run",
         data=_run_form(
@@ -478,8 +488,7 @@ def test_위조한_원입력은_막고_레거시_숨은회사값은_무시한다
     )
     job_id = _기다린다(client, forged_hidden_values)
 
-    # 회사 링크 범위는 토큰 검사보다 앞선 인가 경계이고, 회사 식별값은 서버 기록만 쓴다.
-    assert wrong_input.status_code == 403
+    # 브라우저가 보내는 옛 hidden 회사 식별값은 신뢰하지 않고 서버 확인값만 쓴다.
     assert forged_hidden_values.status_code == 303
     assert job_runtime._JOBS[job_id].card.ref == "corp-001"
     assert pipeline.run_calls == 1
@@ -1690,7 +1699,6 @@ def test_링크_사용자_관리자_통장을_재시작뒤_각각_복원하고_�
     ("bucket", "cap"),
     [
         (_LINK_A, PER_LINK_DAILY_BUDGET_KRW),
-        ("user:member@example.com", PER_USER_DAILY_BUDGET_KRW),
         ("user:admin@example.com", ADMIN_DAILY_BUDGET_KRW),
     ],
 )
