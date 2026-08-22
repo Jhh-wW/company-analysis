@@ -17,6 +17,7 @@ from src.features.pilot_evaluation.quality_store import (
     PilotQualityStore,
     QUALITY_CASE_IDS,
     QUALITY_FILENAME,
+    SCHEMA_VERSION as QUALITY_SCHEMA_VERSION,
     QualityStoreError,
     quality_path_for_checkpoint,
 )
@@ -33,6 +34,11 @@ from src.shared.automatic_release_record import (
     AutomaticReleaseRecord,
     automatic_release_json,
     automatic_release_record_sha256,
+)
+from src.shared.final_gate_diagnostics import (
+    FINAL_GATE_DIAGNOSTIC_SCHEMA_VERSION,
+    FINAL_GATE_DIAGNOSTIC_TABLE,
+    FINAL_GATE_REASON_COMPARISON_BLOCKED,
 )
 from tools.manage_pilot_quality import main as quality_cli_main
 
@@ -119,6 +125,9 @@ def _write_checkpoint(
                 "paid_boundary_at": AT,
                 "result_http_status": 200,
                 "error_code": "",
+                "final_gate_reason": (
+                    FINAL_GATE_REASON_COMPARISON_BLOCKED if is_stopped else ""
+                ),
                 "updated_at": AT,
             }
         else:
@@ -135,6 +144,7 @@ def _write_checkpoint(
                 "paid_boundary_at": "",
                 "result_http_status": None,
                 "error_code": "",
+                "final_gate_reason": "",
                 "updated_at": AT,
             }
     snapshot: dict[str, object] = {
@@ -216,6 +226,12 @@ def _create_storage(
                 released_at TEXT NOT NULL,
                 PRIMARY KEY (report_id, report_sha256, pdf_sha256, checker_version)
             );
+            CREATE TABLE {FINAL_GATE_DIAGNOSTIC_TABLE} (
+                run_id TEXT PRIMARY KEY,
+                schema_version INTEGER NOT NULL,
+                reason_code TEXT NOT NULL,
+                recorded_at TEXT NOT NULL
+            );
             """
         )
         conn.execute(
@@ -242,6 +258,7 @@ def _create_storage(
             final_record = json.dumps(
                 {
                     "run_id": run_id,
+                    "at": AT,
                     "cost_krw": 250.0,
                     "elapsed_sec": 1200.0,
                     "end_step": "05_생성",
@@ -282,6 +299,16 @@ def _create_storage(
                 "INSERT INTO report_cost_summaries VALUES (?, ?, 250.0, ?)",
                 (run_id, outcome, release_sha256),
             )
+            if case.case_id in stopped:
+                conn.execute(
+                    f"INSERT INTO {FINAL_GATE_DIAGNOSTIC_TABLE} VALUES (?, ?, ?, ?)",
+                    (
+                        run_id,
+                        FINAL_GATE_DIAGNOSTIC_SCHEMA_VERSION,
+                        FINAL_GATE_REASON_COMPARISON_BLOCKED,
+                        AT,
+                    ),
+                )
             if case.case_id not in stopped:
                 conn.execute(
                     "INSERT INTO reports VALUES (?, ?, ?)",
@@ -964,3 +991,102 @@ def test_CLI는_storage결속을_요구하고_자동필드_override를_받지않
 
     with pytest.raises(SystemExit):
         quality_cli_main([*base, "--internal-ai-cost-krw", "0"])
+
+
+def test_GATE_STOPPED_행이_없으면_품질증거를_만들지않는다(tmp_path: Path) -> None:
+    checkpoint, storage_db = _evidence(tmp_path, stopped=frozenset({"P01"}))
+    with sqlite3.connect(storage_db) as conn:
+        conn.execute(
+            f"DELETE FROM {FINAL_GATE_DIAGNOSTIC_TABLE} WHERE run_id=?",
+            (f"{1:032x}",),
+        )
+
+    with pytest.raises(QualityStoreError, match="최종 게이트 진단"):
+        _record(PilotQualityStore(checkpoint, storage_db), "P01", user_judgment="stop")
+
+
+def test_비게이트_종료에_게이트행이_있으면_품질증거를_만들지않는다(
+    tmp_path: Path,
+) -> None:
+    checkpoint, storage_db = _evidence(tmp_path)
+    with sqlite3.connect(storage_db) as conn:
+        conn.execute(
+            f"INSERT INTO {FINAL_GATE_DIAGNOSTIC_TABLE} VALUES (?, ?, ?, ?)",
+            (
+                f"{1:032x}",
+                FINAL_GATE_DIAGNOSTIC_SCHEMA_VERSION,
+                FINAL_GATE_REASON_COMPARISON_BLOCKED,
+                AT,
+            ),
+        )
+
+    with pytest.raises(QualityStoreError, match="최종 게이트 진단"):
+        _record(PilotQualityStore(checkpoint, storage_db), "P01")
+
+
+def test_게이트시각과_lifecycle시각이_다르면_품질증거를_거부한다(
+    tmp_path: Path,
+) -> None:
+    checkpoint, storage_db = _evidence(tmp_path, stopped=frozenset({"P01"}))
+    with sqlite3.connect(storage_db) as conn:
+        conn.execute(
+            f"UPDATE {FINAL_GATE_DIAGNOSTIC_TABLE} SET recorded_at=? WHERE run_id=?",
+            ("2026-08-22T00:00:01+00:00", f"{1:032x}"),
+        )
+
+    with pytest.raises(QualityStoreError, match="최종 게이트 진단"):
+        _record(PilotQualityStore(checkpoint, storage_db), "P01", user_judgment="stop")
+
+
+def test_checkpoint_게이트사유가_SQLite와_다르면_봉인해도_거부한다(
+    tmp_path: Path,
+) -> None:
+    checkpoint, storage_db = _evidence(tmp_path, stopped=frozenset({"P01"}))
+    snapshot = json.loads(checkpoint.read_text(encoding="utf-8"))
+    snapshot["cases"]["P01"]["final_gate_reason"] = "publish_blocked"
+    checkpoint.write_text(
+        json.dumps(snapshot, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    _reseal(checkpoint, storage_db)
+
+    with pytest.raises(QualityStoreError, match="checkpoint 최종 게이트 사유"):
+        _record(PilotQualityStore(checkpoint, storage_db), "P01", user_judgment="stop")
+
+
+def test_품질자동증거에_봉인된_게이트사유를_기록한다(tmp_path: Path) -> None:
+    checkpoint, storage_db = _evidence(tmp_path, stopped=frozenset({"P01"}))
+    row = PilotQualityStore(checkpoint, storage_db).record(
+        case_id="P01",
+        user_judgment="stop",
+        wrong_legal_entity_released=False,
+        partial_report_released=False,
+        major_fact_citation_numeric_error_auto_passed=False,
+        now=AT,
+    )
+    assert row["final_gate_reason"] == FINAL_GATE_REASON_COMPARISON_BLOCKED
+
+
+def test_v3_checkpoint는_게이트사유를_추정마이그레이션하지않는다(
+    tmp_path: Path,
+) -> None:
+    checkpoint, _storage_db = _evidence(tmp_path)
+    snapshot = json.loads(checkpoint.read_text(encoding="utf-8"))
+    snapshot["schema_version"] = 3
+    checkpoint.write_text(json.dumps(snapshot), encoding="utf-8")
+    with pytest.raises(QualityStoreError, match="v4 새 격리 배치"):
+        quality_path_for_checkpoint(checkpoint)
+
+
+def test_v3_품질JSON은_게이트사유를_추정마이그레이션하지않는다(
+    tmp_path: Path,
+) -> None:
+    checkpoint, storage_db = _evidence(tmp_path)
+    store = PilotQualityStore(checkpoint, storage_db)
+    _record(store, "P01")
+    snapshot = json.loads(store.path.read_text(encoding="utf-8"))
+    assert snapshot["schema_version"] == QUALITY_SCHEMA_VERSION == 4
+    snapshot["schema_version"] = 3
+    store.path.write_text(json.dumps(snapshot), encoding="utf-8")
+    with pytest.raises(QualityStoreError, match="v3.*v4 새 격리 배치"):
+        store.aggregate()

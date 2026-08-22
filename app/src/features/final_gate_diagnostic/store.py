@@ -8,14 +8,17 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Final
 
-from src.shared.final_gate_diagnostics import SAFE_FINAL_GATE_REASONS
-
-
-TABLE_FINAL_GATE_DIAGNOSTICS: Final[str] = "pipeline_final_gate_diagnostics"
-SCHEMA_VERSION: Final[int] = 1
-_TABLE_COLUMNS: Final[frozenset[str]] = frozenset(
-    {"run_id", "schema_version", "reason_code", "recorded_at"}
+from src.shared.final_gate_diagnostics import (
+    FINAL_GATE_DIAGNOSTIC_COLUMNS,
+    FINAL_GATE_DIAGNOSTIC_SCHEMA_VERSION,
+    FINAL_GATE_DIAGNOSTIC_TABLE,
+    SAFE_FINAL_GATE_REASONS,
 )
+
+
+TABLE_FINAL_GATE_DIAGNOSTICS: Final[str] = FINAL_GATE_DIAGNOSTIC_TABLE
+SCHEMA_VERSION: Final[int] = FINAL_GATE_DIAGNOSTIC_SCHEMA_VERSION
+_TABLE_COLUMNS: Final[frozenset[str]] = FINAL_GATE_DIAGNOSTIC_COLUMNS
 
 
 class FinalGateDiagnosticStoreError(RuntimeError):
@@ -151,7 +154,10 @@ def _validate_diagnostic(diagnostic: PersistedFinalGateDiagnostic) -> None:
         or re.fullmatch(r"[A-Za-z0-9._:-]+", diagnostic.run_id) is None
     ):
         raise FinalGateDiagnosticStoreError("실행 번호가 올바르지 않습니다")
-    if type(diagnostic.schema_version) is not int or diagnostic.schema_version != 1:
+    if (
+        type(diagnostic.schema_version) is not int
+        or diagnostic.schema_version != SCHEMA_VERSION
+    ):
         raise FinalGateDiagnosticStoreError("지원하지 않는 최종 게이트 진단 형식입니다")
     if diagnostic.reason_code not in SAFE_FINAL_GATE_REASONS:
         raise FinalGateDiagnosticStoreError("허용되지 않은 최종 게이트 사유입니다")

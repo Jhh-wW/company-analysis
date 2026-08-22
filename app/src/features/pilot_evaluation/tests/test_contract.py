@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from src.features.pilot_evaluation.contract import (
     PilotCase,
     PilotCategory,
@@ -65,3 +67,17 @@ def test_25건_manifest_후보를_실제10건_평가에_섞지않는다():
     assert summary.passed is False
     assert any("P01~P10 10/10" in reason for reason in summary.reasons)
     assert any("상장사 10건" in reason for reason in summary.reasons)
+
+
+def test_완성보고서에는_최종게이트사유를_허용하지않는다():
+    rows = _passing_rows()
+    rows[0] = replace(rows[0], final_gate_reason="comparison_blocked")
+    with pytest.raises(ValueError, match="완성 보고서"):
+        evaluate_pilot(rows)
+
+
+def test_최종게이트사유는_닫힌코드만_허용한다():
+    rows = _passing_rows()
+    rows[-1] = replace(rows[-1], final_gate_reason="raw provider message")
+    with pytest.raises(ValueError, match="닫힌 코드"):
+        evaluate_pilot(rows)

@@ -41,6 +41,11 @@ from src.features.pilot_evaluation.runner import (
 )
 from src.features.pipeline.port import Outcome
 from src.features.storage import db as storage_db
+from src.shared.final_gate_diagnostics import (
+    FINAL_GATE_DIAGNOSTIC_SCHEMA_VERSION,
+    FINAL_GATE_DIAGNOSTIC_TABLE,
+    FINAL_GATE_REASON_COMPARISON_BLOCKED,
+)
 
 
 ORIGIN = "http://127.0.0.1:8020"
@@ -48,10 +53,11 @@ RUN_ID = "1" * 32
 CSRF = "c" * 64
 NEW_CSRF = "d" * 64
 WORKFLOW = "a" * 32
+RUN_AT = "2026-08-22T00:00:00+00:00"
 
 
 def _final_lifecycle_record(cost_krw: float) -> str:
-    return json.dumps({"run_id": RUN_ID, "cost_krw": cost_krw})
+    return json.dumps({"run_id": RUN_ID, "at": RUN_AT, "cost_krw": cost_krw})
 
 
 def _storage(path: Path, *, include_cost_summary: bool = True) -> None:
@@ -291,6 +297,183 @@ def _runner(
         db,
         checkpoint,
     )
+
+
+def _seed_running_gate_result(
+    runner: CanonicalPilotRunner,
+    db: Path,
+    checkpoint: CheckpointStore,
+    *,
+    include_diagnostic: bool,
+) -> object:
+    case = CANONICAL_PILOT_CASES[0]
+    runner.operate(execute=False)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO observability_run_lifecycle VALUES (?, 'final', ?)",
+            (RUN_ID, _final_lifecycle_record(40.0)),
+        )
+        conn.execute(
+            "INSERT INTO budget_spend_events VALUES (?, ?)",
+            (RUN_ID, 40.0),
+        )
+        conn.execute(
+            "INSERT INTO report_cost_summaries VALUES (?, ?, ?, '')",
+            (RUN_ID, Outcome.GATE_STOPPED.value, 40.0),
+        )
+        if include_diagnostic:
+            conn.execute(
+                f"CREATE TABLE {FINAL_GATE_DIAGNOSTIC_TABLE} ("
+                "run_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, "
+                "reason_code TEXT NOT NULL, recorded_at TEXT NOT NULL)"
+            )
+            conn.execute(
+                f"INSERT INTO {FINAL_GATE_DIAGNOSTIC_TABLE} VALUES (?, ?, ?, ?)",
+                (
+                    RUN_ID,
+                    FINAL_GATE_DIAGNOSTIC_SCHEMA_VERSION,
+                    FINAL_GATE_REASON_COMPARISON_BLOCKED,
+                    RUN_AT,
+                ),
+            )
+    snapshot = checkpoint._load()
+    with checkpoint.exclusive():
+        runner._update_case(
+            snapshot,
+            case.case_id,
+            state="running",
+            run_id=RUN_ID,
+            selected_corp_code=case.corp_code,
+            legal_name=case.expected_legal_name,
+            billing_uncertain=False,
+        )
+    return case
+
+
+def test_GATE_STOPPED_사유를_checkpoint_journal_SHA에_함께_봉인한다(tmp_path):
+    runner, client, db, checkpoint = _runner(tmp_path, _terminal_resume_handler)
+    try:
+        case = _seed_running_gate_result(
+            runner, db, checkpoint, include_diagnostic=True
+        )
+        summary = runner.operate(execute=True, case_ids=(case.case_id,))
+    finally:
+        client.close()
+
+    row = checkpoint._load()["cases"][case.case_id]
+    assert summary.completed_case_ids == (case.case_id,)
+    assert row["state"] == "completed"
+    assert row["outcome"] == Outcome.GATE_STOPPED.value
+    assert row["final_gate_reason"] == FINAL_GATE_REASON_COMPARISON_BLOCKED
+    events = [
+        json.loads(line)
+        for line in checkpoint.events_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert events[-1]["final_gate_reason"] == FINAL_GATE_REASON_COMPARISON_BLOCKED
+    with sqlite3.connect(db) as conn:
+        sealed = conn.execute(
+            f"SELECT checkpoint_content_sha256 FROM {PILOT_BINDING_TABLE}"
+        ).fetchone()
+    assert sealed is not None
+    assert sealed[0] == hashlib.sha256(checkpoint.path.read_bytes()).hexdigest()
+
+
+def test_GATE_STOPPED_진단행이_없으면_다음_유료호출을_차단한다(tmp_path):
+    runner, client, db, checkpoint = _runner(tmp_path, _terminal_resume_handler)
+    try:
+        case = _seed_running_gate_result(
+            runner, db, checkpoint, include_diagnostic=False
+        )
+        with pytest.raises(PilotBatchBlocked, match="최종 게이트 진단"):
+            runner.operate(execute=True, case_ids=(case.case_id,))
+    finally:
+        client.close()
+
+    row = checkpoint._load()["cases"][case.case_id]
+    assert row["state"] == "billing_uncertain"
+    assert row["billing_uncertain"] is True
+    assert row["error_code"] == "final_gate_evidence_invalid"
+    assert row["final_gate_reason"] == ""
+
+
+def test_비게이트_종료에_게이트행이_있으면_다음_유료호출을_차단한다(tmp_path):
+    runner, client, db, checkpoint = _runner(tmp_path, _terminal_resume_handler)
+    case = CANONICAL_PILOT_CASES[0]
+    try:
+        runner.operate(execute=False)
+        with sqlite3.connect(db) as conn:
+            conn.execute(
+                "INSERT INTO observability_run_lifecycle VALUES (?, 'final', ?)",
+                (RUN_ID, _final_lifecycle_record(40.0)),
+            )
+            conn.execute(
+                "INSERT INTO budget_spend_events VALUES (?, ?)", (RUN_ID, 40.0)
+            )
+            conn.execute(
+                "INSERT INTO report_cost_summaries VALUES (?, ?, ?, ?)",
+                (RUN_ID, Outcome.REPORT.value, 40.0, "f" * 64),
+            )
+            conn.execute("INSERT INTO reports VALUES (?, ?)", (RUN_ID, case.corp_code))
+            conn.execute(
+                f"CREATE TABLE {FINAL_GATE_DIAGNOSTIC_TABLE} ("
+                "run_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, "
+                "reason_code TEXT NOT NULL, recorded_at TEXT NOT NULL)"
+            )
+            conn.execute(
+                f"INSERT INTO {FINAL_GATE_DIAGNOSTIC_TABLE} VALUES (?, ?, ?, ?)",
+                (
+                    RUN_ID,
+                    FINAL_GATE_DIAGNOSTIC_SCHEMA_VERSION,
+                    FINAL_GATE_REASON_COMPARISON_BLOCKED,
+                    RUN_AT,
+                ),
+            )
+        snapshot = checkpoint._load()
+        with checkpoint.exclusive():
+            runner._update_case(
+                snapshot,
+                case.case_id,
+                state="running",
+                run_id=RUN_ID,
+                selected_corp_code=case.corp_code,
+                legal_name=case.expected_legal_name,
+                billing_uncertain=False,
+            )
+        with pytest.raises(PilotBatchBlocked, match="최종 게이트 진단"):
+            runner.operate(execute=True, case_ids=(case.case_id,))
+    finally:
+        client.close()
+
+    row = checkpoint._load()["cases"][case.case_id]
+    assert row["state"] == "billing_uncertain"
+    assert row["error_code"] == "final_gate_evidence_invalid"
+
+
+def test_checkpoint는_v3을_추정마이그레이션하지않는다(tmp_path):
+    checkpoint = CheckpointStore(tmp_path / "canonical-pilot25-checkpoint.json")
+    checkpoint.path.write_text(
+        json.dumps({"schema_version": 3, "cases": {}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(CheckpointError, match="v4 새 격리 배치"):
+        checkpoint._load()
+
+
+def test_checkpoint는_원문성_게이트사유를_거부한다(tmp_path):
+    runner, client, _db, checkpoint = _runner(tmp_path, _terminal_resume_handler)
+    try:
+        runner.operate(execute=False)
+        snapshot = checkpoint._load()
+        with checkpoint.exclusive(), pytest.raises(CheckpointError, match="닫힌 코드"):
+            checkpoint.update_case(
+                snapshot,
+                "P01",
+                state="completed",
+                final_gate_reason="provider 원문 오류",
+            )
+    finally:
+        client.close()
 
 
 RECOVERY_NOW = datetime(2026, 8, 21, 1, 0, tzinfo=timezone.utc)

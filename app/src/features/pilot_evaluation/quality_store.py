@@ -26,6 +26,10 @@ from src.features.pilot_evaluation.contract import (
     PilotSummary,
     evaluate_pilot,
 )
+from src.features.pilot_evaluation.final_gate_evidence import (
+    FinalGateEvidenceError,
+    read_bound_reason,
+)
 from src.features.pilot_evaluation.manifest import (
     APPROVED_PAID_CASE_IDS,
     CANONICAL_PILOT_CASES,
@@ -43,11 +47,14 @@ from src.shared.automatic_release_record import (
 from src.shared.company_identity import verified_official_company_names_equivalent
 
 
-SCHEMA_VERSION: Final[int] = 3
+# v3에는 최종 게이트 부속 원장 결속이 없다. 자동 마이그레이션은 과거
+# GATE_STOPPED의 사유를 추정하게 되므로 v4 새 격리 배치에서만 기록한다.
+SCHEMA_VERSION: Final[int] = 4
 QUALITY_FILENAME: Final[str] = "canonical-pilot25-quality.json"
 MAX_EVIDENCE_BYTES: Final[int] = 4 * 1024 * 1024
 _AUTOMATIC_RELEASE_TABLE: Final[str] = "pdf_automatic_release_records"
 _REPORT_OUTCOME: Final[str] = "보고서"
+_GATE_STOPPED_OUTCOME: Final[str] = "자료부족_중단"
 _OUTCOME_CODES: Final[Mapping[str, str]] = {
     "보고서": "report",
     "회사_못찾음": "not_found",
@@ -99,6 +106,7 @@ _CHECKPOINT_ROW_FIELDS: Final[frozenset[str]] = frozenset(
         "paid_boundary_at",
         "result_http_status",
         "error_code",
+        "final_gate_reason",
         "updated_at",
     }
 )
@@ -112,6 +120,7 @@ _ROW_FIELDS: Final[frozenset[str]] = frozenset(
         "completed",
         "stopped",
         "error_type",
+        "final_gate_reason",
         "automatic_judgment",
         "automatic_release_observed",
         "automatic_release_record_sha256",
@@ -168,6 +177,7 @@ class AutomaticCaseEvidence:
     completed: bool
     stopped: bool
     error_type: str
+    final_gate_reason: str
     automatic_judgment: str
     automatic_release_observed: bool
     automatic_release_record_sha256: str
@@ -255,7 +265,10 @@ def _load_checkpoint(path: Path) -> tuple[dict[str, object], str]:
     if not isinstance(snapshot, dict) or set(snapshot) != _CHECKPOINT_TOP_FIELDS:
         raise QualityStoreError("checkpoint 최상위 모양이 정본과 다릅니다")
     if snapshot.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
-        raise QualityStoreError("지원하지 않는 checkpoint 형식입니다")
+        raise QualityStoreError(
+            "지원하지 않는 checkpoint 형식입니다. 최종 게이트를 봉인하는 "
+            "v4 새 격리 배치가 필요합니다"
+        )
     if snapshot.get("manifest_sha256") != manifest_sha256(CANONICAL_PILOT_CASES):
         raise QualityStoreError("checkpoint manifest가 현재 정본과 다릅니다")
     binding_id = snapshot.get("binding_id")
@@ -468,6 +481,7 @@ def _derive_no_run_case(
         or row.get("result_http_status") is not None
         or str(row.get("selected_corp_code", ""))
         or str(row.get("legal_name", ""))
+        or str(row.get("final_gate_reason", ""))
         or error_type not in allowed_error_types
     ):
         raise QualityStoreError(f"{case_id} 실행 전 terminal 증거 모양이 다릅니다")
@@ -482,6 +496,7 @@ def _derive_no_run_case(
         completed=False,
         stopped=True,
         error_type=error_type,
+        final_gate_reason="",
         automatic_judgment="stop",
         automatic_release_observed=False,
         automatic_release_record_sha256="",
@@ -564,6 +579,22 @@ def _derive_one_case(
     )
     state = str(row.get("state", ""))
     outcome = str(row.get("outcome", ""))
+    try:
+        final_gate_reason = read_bound_reason(
+            conn,
+            run_id=run_id,
+            outcome=outcome,
+            gate_stopped_outcome=_GATE_STOPPED_OUTCOME,
+            lifecycle_record=final_record,
+        )
+    except (FinalGateEvidenceError, sqlite3.Error) as exc:
+        raise QualityStoreError(
+            f"{case_id} 최종 게이트 진단이 lifecycle·종료값과 다릅니다"
+        ) from exc
+    if str(row.get("final_gate_reason", "")) != final_gate_reason:
+        raise QualityStoreError(
+            f"{case_id} checkpoint 최종 게이트 사유가 SQLite 원장과 다릅니다"
+        )
     release_sha256 = ""
     if summary is not None:
         try:
@@ -748,6 +779,7 @@ def _derive_one_case(
         completed=completed,
         stopped=not completed,
         error_type=error_type,
+        final_gate_reason=final_gate_reason,
         automatic_judgment="release" if completed else "stop",
         automatic_release_observed=release_observed,
         automatic_release_record_sha256=automatic_release_record_sha256,
@@ -958,6 +990,7 @@ class PilotQualityStore:
                 "completed": automatic.completed,
                 "stopped": automatic.stopped,
                 "error_type": automatic.error_type,
+                "final_gate_reason": automatic.final_gate_reason,
                 "automatic_judgment": automatic.automatic_judgment,
                 "automatic_release_observed": automatic.automatic_release_observed,
                 "automatic_release_record_sha256": (
@@ -1027,6 +1060,7 @@ class PilotQualityStore:
                     completed=bool(row["completed"]),
                     stopped=bool(row["stopped"]),
                     error_type=str(row["error_type"]),
+                    final_gate_reason=str(row["final_gate_reason"]),
                     automatic_judgment=str(row["automatic_judgment"]),
                     user_judgment=str(row["user_judgment"]),
                     judgments_agree=bool(row["judgments_agree"]),
@@ -1075,7 +1109,10 @@ class PilotQualityStore:
         if not isinstance(snapshot, dict) or set(snapshot) != _TOP_LEVEL_FIELDS:
             raise QualityStoreError("품질판정 JSON 최상위 필드가 허용 계약과 다릅니다")
         if snapshot.get("schema_version") != SCHEMA_VERSION:
-            raise QualityStoreError("지원하지 않는 품질판정 JSON 형식입니다")
+            raise QualityStoreError(
+                "지원하지 않는 품질판정 JSON 형식입니다. v3은 최종 게이트를 "
+                "봉인하지 않으므로 v4 새 격리 배치가 필요합니다"
+            )
         if snapshot.get("manifest_sha256") != manifest_sha256(CANONICAL_PILOT_CASES):
             raise QualityStoreError("품질판정 JSON의 manifest가 현재 정본과 다릅니다")
         if snapshot.get("approved_case_ids") != list(QUALITY_CASE_IDS):
@@ -1113,6 +1150,7 @@ class PilotQualityStore:
                 "completed": automatic.completed,
                 "stopped": automatic.stopped,
                 "error_type": automatic.error_type,
+                "final_gate_reason": automatic.final_gate_reason,
                 "automatic_judgment": automatic.automatic_judgment,
                 "automatic_release_observed": automatic.automatic_release_observed,
                 "automatic_release_record_sha256": (

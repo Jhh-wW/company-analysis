@@ -43,6 +43,11 @@ from src.features.pilot_evaluation.checkpoint import (
     CheckpointError,
     CheckpointStore,
 )
+from src.features.pilot_evaluation.final_gate_evidence import (
+    FinalGateEvidenceError,
+    read_bound_reason,
+    validate_table_if_present as validate_final_gate_table_if_present,
+)
 from src.features.pilot_evaluation.manifest import (
     APPROVED_PAID_CASE_IDS,
     CANONICAL_PILOT_CASES,
@@ -79,7 +84,7 @@ SERVICE_MAINTENANCE_BLOCKED_ERROR: Final[str] = (
 )
 PILOT_BINDING_TABLE: Final[str] = "canonical_pilot25_bindings"
 PILOT_BINDING_KEY: Final[str] = "g3.5-canonical-pilot25"
-PILOT_BINDING_SCHEMA_VERSION: Final[int] = 2
+PILOT_BINDING_SCHEMA_VERSION: Final[int] = 4
 _CREATE_PILOT_BINDING_SQL: Final[str] = f"""
 CREATE TABLE IF NOT EXISTS {PILOT_BINDING_TABLE} (
     pilot_key                 TEXT PRIMARY KEY,
@@ -151,6 +156,7 @@ class LedgerResult:
     report_id: str
     corp_id: str
     automatic_release_sha256: str
+    final_gate_reason: str
 
 
 @dataclass(frozen=True)
@@ -896,6 +902,7 @@ class CanonicalPilotRunner:
             paid_boundary_at=paid_at,
             result_http_status=None,
             error_code="identity_response_pending",
+            final_gate_reason="",
         )
         initial_data = {
             "csrf_token": workflow.csrf_token,
@@ -1686,6 +1693,7 @@ class CanonicalPilotRunner:
                 billing_uncertain=True,
                 result_http_status=result_status,
                 error_code="ledger_inflight_remains",
+                final_gate_reason=ledger.final_gate_reason,
             )
             raise PilotBatchBlocked("미확정 비용 표식이 남아 다음 유료 호출을 차단했습니다")
         if ledger.outcome == Outcome.REPORT.value:
@@ -1699,6 +1707,7 @@ class CanonicalPilotRunner:
                     billing_uncertain=False,
                     result_http_status=result_status,
                     error_code="stored_report_identity_mismatch",
+                    final_gate_reason=ledger.final_gate_reason,
                 )
                 return
             if result_status != 200 or not _SHA256_RE.fullmatch(
@@ -1721,6 +1730,7 @@ class CanonicalPilotRunner:
             billing_uncertain=False,
             result_http_status=result_status,
             error_code=error_code,
+            final_gate_reason=ledger.final_gate_reason,
         )
 
     def _update_case(
@@ -1951,6 +1961,10 @@ class CanonicalPilotRunner:
                 str(row[1])
                 for row in conn.execute("PRAGMA table_info(reports)").fetchall()
             }
+            try:
+                validate_final_gate_table_if_present(conn)
+            except FinalGateEvidenceError as exc:
+                raise PilotRunnerError(str(exc)) from exc
         missing = required - present
         if missing:
             raise PilotRunnerError(
@@ -2476,6 +2490,21 @@ class CanonicalPilotRunner:
                 "ledger_outcome_report_mismatch",
                 "종료값과 저장 보고서 존재 여부가 달라 다음 호출을 차단했습니다",
             )
+        try:
+            with self._connect_storage() as conn:
+                conn.execute("BEGIN")
+                final_gate_reason = read_bound_reason(
+                    conn,
+                    run_id=run_id,
+                    outcome=outcome,
+                    gate_stopped_outcome=Outcome.GATE_STOPPED.value,
+                    lifecycle_record=lifecycle_record,
+                )
+        except (FinalGateEvidenceError, sqlite3.Error) as exc:
+            raise _LedgerConsistencyError(
+                "final_gate_evidence_invalid",
+                "최종 게이트 진단이 lifecycle·종료값과 달라 다음 호출을 차단했습니다",
+            ) from exc
         return LedgerResult(
             outcome=outcome,
             cost_krw=cost,
@@ -2483,6 +2512,7 @@ class CanonicalPilotRunner:
             report_id=str(report[0]) if report is not None else "",
             corp_id=str(report[1]) if report is not None else "",
             automatic_release_sha256=str(row[2] or ""),
+            final_gate_reason=final_gate_reason,
         )
 
     def _wait_for_ledger(self, run_id: str) -> LedgerResult | None:

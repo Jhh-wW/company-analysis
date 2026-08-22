@@ -11,9 +11,12 @@ from pathlib import Path
 from typing import Final, Iterator, Mapping
 
 from src.features.pilot_evaluation.manifest import CanonicalPilotCase
+from src.shared.final_gate_diagnostics import SAFE_FINAL_GATE_REASONS
 
 
-SCHEMA_VERSION: Final[int] = 2
+# v2·v3에는 최종 게이트 사유가 없어 유료 배치의 종료 근거를 봉인할 수 없다.
+# 기존 파일은 추정 마이그레이션하지 않고 새 격리 v4 배치를 요구한다.
+SCHEMA_VERSION: Final[int] = 4
 PENDING_STATE: Final[str] = "pending"
 RESUMABLE_STATE: Final[str] = "running"
 PRIOR_DAY_BILLING_UNCERTAIN_STATE: Final[str] = (
@@ -150,6 +153,7 @@ class CheckpointStore:
                     "paid_boundary_at": "",
                     "result_http_status": None,
                     "error_code": "",
+                    "final_gate_reason": "",
                     "updated_at": timestamp,
                 }
                 for case in cases
@@ -185,6 +189,7 @@ class CheckpointStore:
             "paid_boundary_at",
             "result_http_status",
             "error_code",
+            "final_gate_reason",
         }
         unexpected = set(changes) - allowed
         if unexpected:
@@ -192,6 +197,12 @@ class CheckpointStore:
                 "체크포인트에 허용되지 않은 필드를 쓰려 했습니다: "
                 + ", ".join(sorted(unexpected))
             )
+        if "final_gate_reason" in changes:
+            final_gate_reason = changes["final_gate_reason"]
+            if not isinstance(final_gate_reason, str) or (
+                final_gate_reason and final_gate_reason not in SAFE_FINAL_GATE_REASONS
+            ):
+                raise CheckpointError("최종 게이트 사유가 허용된 닫힌 코드가 아닙니다")
         timestamp = now or utc_now_iso()
         row.update(changes)
         row["state"] = state
@@ -208,6 +219,7 @@ class CheckpointStore:
             cost_krw=row.get("internal_ai_cost_krw"),
             billing_uncertain=bool(row.get("billing_uncertain", False)),
             error_code=str(row.get("error_code", "")),
+            final_gate_reason=str(row.get("final_gate_reason", "")),
         )
         return row
 
@@ -218,7 +230,10 @@ class CheckpointStore:
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise CheckpointError("체크포인트를 안전하게 읽지 못했습니다") from exc
         if not isinstance(snapshot, dict) or snapshot.get("schema_version") != SCHEMA_VERSION:
-            raise CheckpointError("지원하지 않는 체크포인트 형식입니다")
+            raise CheckpointError(
+                "지원하지 않는 체크포인트 형식입니다. 최종 게이트를 봉인하는 "
+                "v4 새 격리 배치가 필요합니다"
+            )
         return snapshot
 
     def _write(self, snapshot: Mapping[str, object]) -> None:

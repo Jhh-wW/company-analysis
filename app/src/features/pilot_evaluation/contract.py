@@ -15,6 +15,8 @@ from enum import Enum
 from statistics import mean
 from typing import Final, Iterable
 
+from src.shared.final_gate_diagnostics import SAFE_FINAL_GATE_REASONS
+
 
 class PilotCategory(str, Enum):
     LISTED = "listed"
@@ -58,6 +60,7 @@ class PilotResult:
     wrong_legal_entity_released: bool = False
     partial_report_released: bool = False
     major_fact_citation_numeric_error_auto_passed: bool = False
+    final_gate_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -89,6 +92,10 @@ def _validate_result(result: PilotResult) -> None:
         raise ValueError("자동판정과 사용자 품질판정을 모두 기록해야 합니다")
     if result.elapsed_sec < 0 or result.internal_ai_cost_krw < 0:
         raise ValueError("처리시간과 내부 AI 원가는 0 이상이어야 합니다")
+    if result.final_gate_reason and result.final_gate_reason not in SAFE_FINAL_GATE_REASONS:
+        raise ValueError("파일럿 최종 게이트 사유가 허용된 닫힌 코드가 아닙니다")
+    if result.completed and result.final_gate_reason:
+        raise ValueError("완성 보고서에는 최종 게이트 사유가 있을 수 없습니다")
 
 
 def evaluate_pilot(results: Iterable[PilotResult]) -> PilotSummary:
