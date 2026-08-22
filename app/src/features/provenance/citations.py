@@ -33,6 +33,7 @@ from src.features.provenance.constants import (
     DART_ACCOUNT_FRAGMENT_PREFIX,
     FRAGMENT_KIND_HOMEPAGE,
     FRAGMENT_KIND_NEWS,
+    FRAGMENT_KIND_OFFICIAL_IR,
     HOMEPAGE_FALLBACK_LABEL,
     NEWS_UNKNOWN_DOMAIN,
 )
@@ -40,7 +41,12 @@ from src.features.provenance.sources import (
     Source,
     SourceKind,
     evidence_text_hash,
+    exact_evidence_text_hash,
+    official_web_currentness_is_usable,
+    official_web_url_requires_document_date,
     seal_collected_source,
+    source_type_is_official_ir,
+    source_type_is_official_web,
 )
 
 #: 뉴스 조각 원문 맨 앞 — `"(2025-03-12 보도 · mk.co.kr) 제목. 설명"`.
@@ -91,8 +97,18 @@ def build_citations(
         text = frag.get("원문", "")
         if kind == FRAGMENT_KIND_NEWS:
             source = _news_source(number, frag)
-        elif kind == FRAGMENT_KIND_HOMEPAGE:
-            source = _homepage_source(number, frag, collected_at, company_publisher)
+        elif kind in {FRAGMENT_KIND_HOMEPAGE, FRAGMENT_KIND_OFFICIAL_IR}:
+            source = _homepage_source(
+                number,
+                frag,
+                collected_at,
+                company_publisher,
+                source_type=(
+                    "회사 공식 IR"
+                    if kind == FRAGMENT_KIND_OFFICIAL_IR
+                    else "회사 공식 웹"
+                ),
+            )
         else:
             source = _filing_source(
                 number,
@@ -114,6 +130,10 @@ def build_citations(
                         frag,
                         requested.get(number, []),
                     ),
+                    exact_evidence_hashes=_fragment_exact_evidence_hashes(
+                        frag,
+                        requested.get(number, []),
+                    ),
                 )
             )
         )
@@ -131,6 +151,34 @@ def _fragment_evidence_hashes(
     만들어 출고되는 경로가 없다.
     """
 
+    payloads, _exact_payloads = _fragment_evidence_payloads(
+        fragment, selected_payloads
+    )
+    return sorted(
+        digest for payload in payloads if (digest := evidence_text_hash(payload))
+    )
+
+
+def _fragment_exact_evidence_hashes(
+    fragment: dict[str, Any], selected_payloads: list[str]
+) -> list[str]:
+    """실제 원문과 byte-exact인 명시 근거만 대소문자 보존 해시로 등록한다."""
+
+    _payloads, exact_payloads = _fragment_evidence_payloads(
+        fragment, selected_payloads
+    )
+    return sorted(
+        digest
+        for payload in exact_payloads
+        if (digest := exact_evidence_text_hash(payload))
+    )
+
+
+def _fragment_evidence_payloads(
+    fragment: dict[str, Any], selected_payloads: list[str]
+) -> tuple[set[str], set[str]]:
+    """정규화 식별용 payload와 byte-exact로 입증된 payload를 함께 고른다."""
+
     raw_text = str(fragment.get("원문") or "").strip()
     structured_raw = fragment.get("근거원문") or []
     if isinstance(structured_raw, str):
@@ -142,6 +190,10 @@ def _fragment_evidence_hashes(
     } if isinstance(structured_raw, (list, tuple)) else set()
 
     payloads = {raw_text, *structured} - {""}
+    # ``근거원문``은 수집기가 독립 항목으로 보존한 exact 문자열이다. 전체 원문은
+    # legacy normalized hash만 유지하고, 명시적으로 선택된 실제 span일 때만 exact
+    # 목록에 넣어 기존 citation의 JSON/HMAC이 불필요하게 바뀌지 않게 한다.
+    exact_payloads = set(structured)
     normalized_raw = " ".join(raw_text.split())
     for selected in selected_payloads:
         clean = str(selected or "").strip()
@@ -150,9 +202,9 @@ def _fragment_evidence_hashes(
         normalized = " ".join(clean.split())
         if clean in structured or (normalized_raw and normalized in normalized_raw):
             payloads.add(clean)
-    return sorted(
-        digest for payload in payloads if (digest := evidence_text_hash(payload))
-    )
+        if clean in structured or (raw_text and clean in raw_text):
+            exact_payloads.add(clean)
+    return payloads, exact_payloads
 
 
 def _news_source(number: int, frag: dict[str, Any]) -> Source:
@@ -199,6 +251,7 @@ def _homepage_source(
     frag: dict[str, Any],
     collected_at: str,
     company_publisher: str = "",
+    source_type: str = "회사 공식 웹",
 ) -> Source:
     """홈페이지 조각 — 실제 읽은 URL을 라벨로 삼는다. URL이 없으면 지어내지 않는다.
 
@@ -206,19 +259,24 @@ def _homepage_source(
       언제 본 것인지 없으면 사용자가 확인하러 갔을 때 다른 내용을 보게 된다.
     """
     url = frag.get("출처", "").strip()
-    host = urllib.parse.urlparse(url).netloc.lower()
-    path = urllib.parse.urlparse(url).path or "/"
+    parsed_url = urllib.parse.urlparse(url)
+    host = (parsed_url.hostname or "").lower()
+    path = parsed_url.path or "/"
     document_id = str(frag.get("문서ID") or "").strip()
+    published_at = str(
+        frag.get("문서일") or frag.get("published_at") or ""
+    ).strip()
     if not document_id and url:
         # URL 자체가 변하는 웹 문서의 실제 식별자다. 임의 제목을 만들지 않는다.
         document_id = urllib.parse.urlunparse(
-            ("", "", path, "", urllib.parse.urlparse(url).query, "")
+            ("", "", path, "", parsed_url.query, "")
         ) or "/"
     return Source(
         number=number,
         kind=SourceKind.OTHER,
         label=url or HOMEPAGE_FALLBACK_LABEL,
         collected_at=collected_at,
+        published_at=published_at,
         source_id=f"source-{number}",
         title=frag.get("문서명", "").strip() or url or HOMEPAGE_FALLBACK_LABEL,
         publisher=frag.get("발행처", "").strip() or company_publisher.strip() or host,
@@ -226,8 +284,24 @@ def _homepage_source(
         url=url,
         document_id=document_id,
         location=frag.get("원문위치", "").strip() or path,
-        source_type="회사 공식 웹",
-        fact_status="기준일 현재 확인",
+        source_type=source_type,
+        fact_status=(
+            "문서일 미검증 수집 참고"
+            if source_type_is_official_ir(source_type) or (
+                source_type_is_official_web(source_type)
+                and official_web_url_requires_document_date(url)
+                and not published_at
+            )
+            else "과거·현재성 미확정 문서 수집 참고"
+            if source_type_is_official_web(source_type)
+            and not official_web_currentness_is_usable(
+                source_type=source_type,
+                url=url,
+                published_at=published_at,
+                collected_at=collected_at,
+            )
+            else "기준일 현재 확인"
+        ),
         domain_attestation_source_id=str(
             frag.get("도메인근거SourceID")
             or frag.get("domain_attestation_source_id")

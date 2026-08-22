@@ -13,12 +13,12 @@ from __future__ import annotations
 
 import html
 import re
-import socket
 import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import date
 from html.parser import HTMLParser
 from typing import Callable, Optional
 from urllib import robotparser
@@ -26,8 +26,8 @@ from urllib import robotparser
 from src.features.homepage.constants import (
     EXCLUDED_EXTENSIONS,
     FRAGMENT_KIND,
+    HOMEPAGE_COLLECTION_TIMEOUT_SEC,
     HOSTNAME_MISMATCH_MARKER,
-    HTTPS_DEFAULT_PORT,
     MAX_CHARS_PER_PAGE,
     MAX_PAGES,
     MAX_TOTAL_CHARS,
@@ -42,16 +42,62 @@ from src.features.homepage.safe_http import (
     HomepageResponseError,
     UnsafeHomepageUrlError,
     read_limited_text,
-    resolve_safe_target,
+    request_deadline_scope,
     safe_urlopen,
 )
 
 #: <script>·<style>·<noscript> 안의 글자는 사람이 읽는 본문이 아니므로 뺀다.
 _SKIP_TAGS = frozenset({"script", "style", "noscript"})
+_BLOCK_TAGS = frozenset(
+    {
+        "address",
+        "article",
+        "aside",
+        "blockquote",
+        "br",
+        "dd",
+        "div",
+        "dl",
+        "dt",
+        "figcaption",
+        "figure",
+        "footer",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "header",
+        "li",
+        "main",
+        "nav",
+        "ol",
+        "p",
+        "section",
+        "table",
+        "td",
+        "th",
+        "tr",
+        "ul",
+    }
+)
 
 
 class HomepageFetchError(Exception):
     """홈페이지 접속 실패 — 시간초과·연결거부·HTTP 오류를 이 하나로 통일해서 던진다."""
+
+
+class HomepageRobotsUnavailable(HomepageFetchError):
+    """robots.txt가 HTTP 4xx로 명시적으로 존재하지 않거나 이용 불가하다."""
+
+
+class HomepageRobotsUnreachable(HomepageFetchError):
+    """robots.txt가 서버·네트워크 오류로 확인 불가하여 전체 금지로 봐야 한다."""
+
+
+class HomepageSecurityPolicyError(HomepageFetchError):
+    """SSRF·리다이렉트·응답 검증 정책 위반이라 HTTP downgrade하면 안 된다."""
 
 
 class HomepageCertNameMismatchError(HomepageFetchError):
@@ -73,9 +119,17 @@ class HomepageCertNameMismatchError(HomepageFetchError):
         self.host = host
 
 
-#: 주소 하나를 받아 HTML 원문을 돌려주는 함수. 접속에 실패하면 예외로 던진다
-#: (조용히 빈 문자열을 돌려주면 「내용이 없다」와 구분이 안 된다).
-Fetcher = Callable[[str], str]
+@dataclass(frozen=True)
+class FetchedPage:
+    """본문과 안전 클라이언트가 실제로 도착한 최종 URL."""
+
+    html: str
+    effective_url: str
+
+
+#: 시험 대역의 기존 문자열 반환도 일반 수집에는 허용한다. 다만 실제 최종 URL을
+#: 증명하지 못하므로 그런 페이지는 경쟁 후보 공식 원문으로 승격되지 않는다.
+Fetcher = Callable[[str], str | FetchedPage]
 
 #: 인증서 이름 불일치가 났을 때, 그 서버 인증서에 적힌 유효 이름(SAN·CN) 목록을
 #: 돌려주는 함수. ★ 인증서를 «들여다보는» 용도로만 쓴다 — 본문은 절대 읽지 않는다.
@@ -100,9 +154,17 @@ class HomepageCollectResult:
     #: 우회해 원래 주소가 아닌 다른 주소로 접속했다면 그 사실이 여기 남는다
     #: (C안 — 어디로 갔는지 사용자가 알 수 있어야 한다).
     detail: str = ""
+    #: 경쟁 후보를 찾는 데 허용된 HTTPS 원문 범위를 끝까지 확인했는가.
+    #: 페이지 실패·robots 차단·페이지/글자 상한·HTTP/대체 host가 하나라도 있으면
+    #: ``False``다. 이 값이 거짓인 결과를 "경쟁사 언급 없음"으로 확정하면 안 된다.
+    candidate_scope_complete: bool = True
 
 
-def default_fetch(url: str) -> str:
+def default_fetch(
+    url: str,
+    *,
+    url_allowed: Callable[[str], bool] | None = None,
+) -> FetchedPage:
     """실제로 접속하는 기본 구현. urllib만 쓴다 (`naver_client.py`와 같은 방식).
 
     Args:
@@ -118,71 +180,65 @@ def default_fetch(url: str) -> str:
     """
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
-        with safe_urlopen(req, timeout=TIMEOUT_SEC) as res:
-            return read_limited_text(res, timeout=TIMEOUT_SEC)
-    except (UnsafeHomepageUrlError, HomepageResponseError) as exc:
+        with safe_urlopen(
+            req,
+            timeout=TIMEOUT_SEC,
+            url_allowed=url_allowed,
+        ) as res:
+            effective_url = str(getattr(res, "geturl", lambda: url)() or "").strip()
+            if not effective_url:
+                raise HomepageResponseError("홈페이지 최종 URL을 확인하지 못했습니다")
+            if not _same_origin(url, effective_url):
+                raise HomepageResponseError(
+                    "홈페이지 리다이렉트가 최초 origin을 벗어났습니다"
+                )
+            return FetchedPage(
+                html=read_limited_text(res, timeout=TIMEOUT_SEC),
+                effective_url=effective_url,
+            )
+    except urllib.error.HTTPError as exc:
+        if _is_robots_url(url):
+            if 400 <= int(exc.code) <= 499:
+                raise HomepageRobotsUnavailable(f"HTTP {exc.code}") from exc
+            raise HomepageRobotsUnreachable(f"HTTP {exc.code}") from exc
         raise HomepageFetchError(f"{type(exc).__name__}: {exc}") from exc
+    except (UnsafeHomepageUrlError, HomepageResponseError) as exc:
+        if _is_robots_url(url):
+            raise HomepageRobotsUnreachable(
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        raise HomepageSecurityPolicyError(
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
     except urllib.error.URLError as exc:
         if _is_hostname_mismatch(exc):
             host = urllib.parse.urlparse(url).hostname or ""
             raise HomepageCertNameMismatchError(
                 f"인증서 이름 불일치: {exc.reason}", host=host
             ) from exc
+        if _is_robots_url(url):
+            raise HomepageRobotsUnreachable(
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
         raise HomepageFetchError(f"{type(exc).__name__}: {exc}") from exc
     except (TimeoutError, OSError) as exc:
+        if _is_robots_url(url):
+            raise HomepageRobotsUnreachable(
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
         raise HomepageFetchError(f"{type(exc).__name__}: {exc}") from exc
 
 
 def default_lookup_cert_names(url: str) -> list[str]:
-    """실제 서버에 접속해 인증서에 적힌 SAN·CN 이름 목록을 읽어온다.
+    """인증서 대체-host 자동 탐색은 공식 후보 수집에서 사용하지 않는다.
 
-    ★ 이름만 «들여다보는» 용도다. HTTP 요청은 하지 않으므로 본문은 절대
-      읽지 않는다 (지시 1번 — 본문을 읽을 때는 반드시 완전 검증해야 하므로,
-      이 함수는 그 「완전 검증」 접속과는 별개의, 이름 확인 전용 접속이다).
-
-    호스트 이름 검증(`check_hostname`)만 끄고 인증서 체인·만료 검증
-    (`verify_mode=CERT_REQUIRED`, 기본값)은 그대로 켠 채로 접속한다 — 아무
-    인증서나 믿는 게 아니라 「신뢰할 수 있는 CA가 발급했고 만료도 안 됐지만
-    이름만 다른」 경우만 통과시킨다.
-
-    Args:
-        url: 인증서 이름 불일치가 났던 원래 주소.
-
-    Returns:
-        인증서의 SAN(DNS 항목)·CN 이름 목록(소문자). 조회 자체가 실패하면
-        예외를 던지지 않고 빈 리스트를 돌려준다 — 못 알아내면 그냥 포기다.
+    hostname 검증을 끈 별도 TLS probe는 DNS·연결·handshake 마감을 다시 만들고
+    대체 host의 법인 결속도 약하다. 기본 운영 경로는 빈 목록으로 fail-closed하며,
+    명시적으로 주입한 시험/관리자 정책만 기존 fallback 흐름을 검증할 수 있다.
     """
-    try:
-        target = resolve_safe_target(url)
-    except UnsafeHomepageUrlError:
-        return []
-    if target.scheme != "https":
-        return []  # http 주소는 애초에 인증서가 없다
-    host = target.hostname
-    port = target.port or HTTPS_DEFAULT_PORT
 
-    context = ssl.create_default_context()
-    context.check_hostname = False  # 이름 비교는 우리가 직접 한다 (아래 판정 로직)
-    try:
-        # 검증한 공인 IP로 직접 연결한다. Host/SNI는 원래 이름을 유지하므로
-        # 인증서 검증은 평소와 같고 DNS 재바인딩만 막힌다.
-        with socket.create_connection((target.ip, port), timeout=TIMEOUT_SEC) as sock:
-            with context.wrap_socket(sock, server_hostname=host) as tls_sock:
-                cert = tls_sock.getpeercert()
-    except (OSError, ssl.SSLError, ValueError):
-        return []  # 접속·핸드셰이크 실패 — 이름을 못 읽었으니 재시도도 포기한다
-
-    if not cert:
-        return []
-    names: list[str] = []
-    for entry_type, value in cert.get("subjectAltName", ()):
-        if entry_type == "DNS":
-            names.append(value.lower())
-    for rdn in cert.get("subject", ()):
-        for key, value in rdn:
-            if key == "commonName":
-                names.append(value.lower())
-    return names
+    del url
+    return []
 
 
 def strip_html(raw_html: str) -> str:
@@ -197,10 +253,38 @@ def strip_html(raw_html: str) -> str:
     parser = _TextExtractor()
     parser.feed(raw_html)
     text = html.unescape(parser.get_text())
-    return re.sub(r"\s+", " ", text).strip()
+    lines = [
+        re.sub(r"[^\S\r\n]+", " ", line).strip()
+        for line in text.splitlines()
+    ]
+    return "\n".join(line for line in lines if line)
 
 
 def collect_homepage_fragments(
+    homepage_url: str,
+    fetch: Fetcher = default_fetch,
+    lookup_cert_names: CertNameLookup = default_lookup_cert_names,
+) -> HomepageCollectResult:
+    """홈페이지 수집 전체를 하나의 절대시간·DNS cache 경계에서 실행한다."""
+
+    try:
+        with request_deadline_scope(HOMEPAGE_COLLECTION_TIMEOUT_SEC) as deadline:
+            result = _collect_homepage_fragments_impl(
+                homepage_url,
+                fetch=fetch,
+                lookup_cert_names=lookup_cert_names,
+            )
+            deadline.remaining()
+            return result
+    except HomepageResponseError as exc:
+        return HomepageCollectResult(
+            state="failed",
+            detail=f"홈페이지 수집 전체시간 초과: {exc}",
+            candidate_scope_complete=False,
+        )
+
+
+def _collect_homepage_fragments_impl(
     homepage_url: str,
     fetch: Fetcher = default_fetch,
     lookup_cert_names: CertNameLookup = default_lookup_cert_names,
@@ -234,49 +318,86 @@ def collect_homepage_fragments(
         return HomepageCollectResult(state="none", detail="홈페이지 주소 없음")
 
     origin_note = ""
+    candidate_scope_complete = True
     try:
-        root_html = fetch(url)
-        final_url = url
+        root_html, final_url, root_url_verified, robots = _load_origin_root(
+            url,
+            fetch,
+        )
     except HomepageCertNameMismatchError as exc:
         fallback = _attempt_cert_fallback(url, exc, fetch, lookup_cert_names)
         if fallback is None:
             return HomepageCollectResult(
                 state="failed",
                 detail=f"홈페이지 접속 실패(인증서 이름 불일치, 재시도 대상 없음): {exc}",
+                candidate_scope_complete=False,
             )
-        final_url, root_html = fallback
+        final_url, root_html, root_url_verified, robots = fallback
         origin_note = f"원래 주소({url})의 인증서 이름이 달라 {final_url} 로 재시도해 접속함"
+        candidate_scope_complete = False
+    except HomepageRobotsUnreachable as exc:
+        return HomepageCollectResult(
+            state="failed",
+            detail=f"홈페이지 robots.txt 확인 실패: {exc}",
+            candidate_scope_complete=False,
+        )
+    except HomepageSecurityPolicyError as exc:
+        return HomepageCollectResult(
+            state="failed",
+            detail=f"홈페이지 안전 정책 위반: {exc}",
+            candidate_scope_complete=False,
+        )
     except HomepageFetchError as exc:
         # https가 아예 안 되는 사이트가 있다 (국내 중소기업 홈페이지에 흔하다).
         # ★ 암호화 없이 읽게 되므로 «그 사실을 반드시 남긴다». 조용히 내려가지 않는다.
         plain = _http_variant(url)
         if not plain:
             return HomepageCollectResult(
-                state="failed", detail=f"홈페이지 접속 실패: {exc}"
+                state="failed",
+                detail=f"홈페이지 접속 실패: {exc}",
+                candidate_scope_complete=False,
             )
         try:
-            root_html = fetch(plain)
+            root_html, final_url, root_url_verified, robots = _load_origin_root(
+                plain,
+                fetch,
+            )
         except HomepageFetchError as plain_exc:
             return HomepageCollectResult(
-                state="failed", detail=f"홈페이지 접속 실패: {plain_exc}"
+                state="failed",
+                detail=f"홈페이지 접속 실패: {plain_exc}",
+                candidate_scope_complete=False,
             )
-        final_url = plain
         origin_note = (
             f"{url} 는 접속되지 않아 {plain} (암호화되지 않은 연결)로 읽었습니다"
         )
+        candidate_scope_complete = False
 
     parsed_root = urllib.parse.urlparse(final_url)
-    # 한 번만 가져와 재사용 — 경로마다 robots.txt를 다시 접속하지 않는다.
-    # ★ 인증서 우회로 도메인이 바뀌었으면 실제로 읽는 도메인(final_url) 기준으로 조회한다.
-    robots = _load_robots(final_url, fetch)
+    # 본문보다 먼저 확인한 같은 origin의 규칙을 경로마다 재접속하지 않고 재사용한다.
     fragments: list[dict[str, str]] = []
     seen_text: set[str] = set()
     seen_urls: set[str] = {final_url}
     total_chars = 0
     pages_fetched = 1  # 루트 페이지도 1페이지로 센다
 
+    if not root_url_verified:
+        candidate_scope_complete = False
     if robots.can_fetch(USER_AGENT, final_url):
-        total_chars = _collect_page(final_url, root_html, fragments, seen_text, total_chars)
+        candidate_scope_complete = (
+            candidate_scope_complete
+            and _page_candidate_scope_is_complete(root_html, total_chars)
+        )
+        total_chars = _collect_page(
+            final_url,
+            root_html,
+            fragments,
+            seen_text,
+            total_chars,
+            final_url_verified=root_url_verified,
+        )
+    else:
+        candidate_scope_complete = False
 
     # 우선순위 큐를 쓰는 bounded depth 탐색. 예전에는 루트 링크만 한 번 읽어서
     # ``홈 → IR 자료실 → 최신 분기 상세``의 두 번째 링크를 영원히 못 봤다.
@@ -288,6 +409,7 @@ def collect_homepage_fragments(
     queued_urls = set(candidates)
     while candidates:
         if pages_fetched >= MAX_PAGES or total_chars >= MAX_TOTAL_CHARS:
+            candidate_scope_complete = False
             break  # 상한 도달 — 더 읽지 않는다 (무한 크롤링 금지)
         link = candidates.pop(0)
         queued_urls.discard(link)
@@ -295,14 +417,35 @@ def collect_homepage_fragments(
             continue
         seen_urls.add(link)
         if not robots.can_fetch(USER_AGENT, link):
+            candidate_scope_complete = False
             continue
         pages_fetched += 1  # 실패해도 시도 자체는 상한에 넣는다
         try:
-            page_html = fetch(link)
+            page_html, effective_link, link_verified = _fetch_page(
+                fetch,
+                link,
+                url_allowed=lambda candidate, source=link: (
+                    _same_origin(source, candidate)
+                    and robots.can_fetch(USER_AGENT, candidate)
+                ),
+            )
         except HomepageFetchError:
+            candidate_scope_complete = False
             continue  # 낱장 페이지 실패는 건너뛴다 — 루트는 이미 접속됐으니 전체 실패가 아니다
-        total_chars = _collect_page(link, page_html, fragments, seen_text, total_chars)
-        for discovered in _extract_links(page_html, link, parsed_root.netloc):
+        candidate_scope_complete = (
+            candidate_scope_complete
+            and link_verified
+            and _page_candidate_scope_is_complete(page_html, total_chars)
+        )
+        total_chars = _collect_page(
+            effective_link,
+            page_html,
+            fragments,
+            seen_text,
+            total_chars,
+            final_url_verified=link_verified,
+        )
+        for discovered in _extract_links(page_html, effective_link, parsed_root.netloc):
             if discovered in seen_urls or discovered in queued_urls:
                 continue
             candidates.append(discovered)
@@ -313,8 +456,17 @@ def collect_homepage_fragments(
         detail = "홈페이지에서 쓸 만한 글자를 찾지 못함"
         if origin_note:
             detail = f"{origin_note}; {detail}"
-        return HomepageCollectResult(state="none", detail=detail)
-    return HomepageCollectResult(state="ok", fragments=fragments, detail=origin_note)
+        return HomepageCollectResult(
+            state="none",
+            detail=detail,
+            candidate_scope_complete=candidate_scope_complete,
+        )
+    return HomepageCollectResult(
+        state="ok",
+        fragments=fragments,
+        detail=origin_note,
+        candidate_scope_complete=candidate_scope_complete,
+    )
 
 
 # ══════════════════════════════════════════════════════════
@@ -333,17 +485,23 @@ class _TextExtractor(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
         if tag in _SKIP_TAGS:
             self._skip_depth += 1
+        elif self._skip_depth == 0 and tag in _BLOCK_TAGS:
+            self._chunks.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
         if tag in _SKIP_TAGS and self._skip_depth > 0:
             self._skip_depth -= 1
+        elif self._skip_depth == 0 and tag in _BLOCK_TAGS:
+            self._chunks.append("\n")
 
     def handle_data(self, data: str) -> None:
         if self._skip_depth == 0 and data.strip():
             self._chunks.append(data.strip())
 
     def get_text(self) -> str:
-        return " ".join(self._chunks)
+        return "".join(
+            chunk if chunk == "\n" else f"{chunk} " for chunk in self._chunks
+        )
 
 
 class _LinkExtractor(HTMLParser):
@@ -359,6 +517,67 @@ class _LinkExtractor(HTMLParser):
         href = dict(attrs).get("href")
         if href:
             self.hrefs.append(href)
+
+
+_PUBLISHED_DATE_META_KEYS = frozenset(
+    {
+        "article:published_time",
+        "datepublished",
+        "date_published",
+        "publishdate",
+        "publish_date",
+        "published",
+    }
+)
+_ISO_DATE_PREFIX = re.compile(r"^\s*(20\d{2}-\d{2}-\d{2})(?:[Tt ]|$)")
+
+
+class _PublishedDateExtractor(HTMLParser):
+    """명시적 machine-readable 발행일만 모은다."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.values: list[str] = []
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, Optional[str]]],
+    ) -> None:
+        values = {str(key).casefold(): str(value or "") for key, value in attrs}
+        markers = {
+            values.get(key, "").strip().casefold()
+            for key in ("property", "name", "itemprop")
+            if values.get(key, "").strip()
+        }
+        raw = ""
+        if tag.casefold() == "meta" and markers.intersection(
+            _PUBLISHED_DATE_META_KEYS
+        ):
+            raw = values.get("content", "")
+        elif (
+            tag.casefold() == "time"
+            and "datepublished" in markers
+        ):
+            raw = values.get("datetime", "")
+        match = _ISO_DATE_PREFIX.match(raw)
+        if match is None:
+            return
+        candidate = match.group(1)
+        try:
+            date.fromisoformat(candidate)
+        except ValueError:
+            return
+        self.values.append(candidate)
+
+
+def _published_date_from_html(raw_html: str) -> str:
+    """서로 충돌하지 않는 단일 ISO 발행일만 반환한다."""
+
+    parser = _PublishedDateExtractor()
+    parser.feed(raw_html)
+    unique = tuple(dict.fromkeys(parser.values))
+    return unique[0] if len(unique) == 1 else ""
 
 
 def _normalize_url(raw: str) -> str:
@@ -462,7 +681,7 @@ def _attempt_cert_fallback(
     exc: HomepageCertNameMismatchError,
     fetch: Fetcher,
     lookup_cert_names: CertNameLookup,
-) -> Optional[tuple[str, str]]:
+) -> Optional[tuple[str, str, bool, robotparser.RobotFileParser]]:
     """인증서 이름 불일치를 「같은 회사의 다른 도메인」으로 판단되면 1번만 재시도한다 (C안).
 
     ★ 재시도는 정확히 1번뿐이다 — 후보 중 첫 번째로 «같은 회사」로 판정된
@@ -488,30 +707,64 @@ def _attempt_cert_fallback(
 
     retry_url = _swap_host(original_url, matched_host)
     try:
-        html_text = fetch(retry_url)  # ★ 재시도도 완전 검증(fetch 그대로) — 이름만 바꿨다
+        html_text, effective_url, verified, robots = _load_origin_root(
+            retry_url,
+            fetch,
+        )  # ★ 새 origin도 robots를 먼저 확인한 뒤 완전 검증한다.
     except HomepageFetchError:
         return None
-    return retry_url, html_text
+    return effective_url, html_text, verified, robots
 
 
 def _load_robots(base_url: str, fetch: Fetcher) -> robotparser.RobotFileParser:
-    """robots.txt를 한 번만 가져와 파서로 만든다. 경로마다 다시 접속하지 않는다.
+    """RFC 9309 실패 의미론으로 robots.txt를 한 번 확인한다.
 
-    ★ robots.txt 자체를 못 가져오면 «허용»으로 본다 — 못 가져온 것을 금지로
-      해석하면 robots.txt가 없는 대부분의 사이트가 통째로 막힌다.
+    HTTP 4xx는 robots가 이용 불가한 것으로 보아 빈 규칙으로 진행한다. 서버 오류,
+    DNS·timeout·응답 검증 실패는 규칙을 확인할 수 없는 상태이므로 전면 허용으로
+    바꾸지 않고 호출자까지 실패를 전달한다.
     """
     parser = robotparser.RobotFileParser()
     robots_url = urllib.parse.urljoin(base_url, "/robots.txt")
     try:
-        text = fetch(robots_url)
-    except HomepageFetchError:
+        text, effective_url, _verified = _fetch_page(fetch, robots_url)
+        if not _same_origin(robots_url, effective_url):
+            raise HomepageRobotsUnreachable(
+                "robots.txt가 다른 origin으로 이동했습니다"
+            )
+    except HomepageCertNameMismatchError:
+        raise
+    except HomepageRobotsUnavailable:
         # ★ 주의: `RobotFileParser`는 `.parse()`를 한 번도 안 부르면 «미확인» 상태로
         #   보고 `can_fetch()`가 오히려 «전부 금지»를 돌려준다 (표준 라이브러리 함정 —
-        #   read()로 확인하기 전 false positive를 막으려는 설계). 그래서 빈 규칙으로
-        #   명시적으로 «확인 끝, 규칙 없음»을 만들어야 전부 허용이 된다.
+        #   HTTP 4xx로 부재가 확인된 경우에만 빈 규칙으로 «확인 끝»을 표시한다.
         text = ""
+    except HomepageRobotsUnreachable:
+        raise
+    except HomepageFetchError as exc:
+        raise HomepageRobotsUnreachable(str(exc)) from exc
     parser.parse(text.splitlines())  # 네트워크 접속 없이 주어진 글자만 해석한다
     return parser
+
+
+def _load_origin_root(
+    url: str,
+    fetch: Fetcher,
+) -> tuple[str, str, bool, robotparser.RobotFileParser]:
+    """한 origin의 robots를 본문보다 먼저 확인하고 허용된 루트만 읽는다."""
+
+    robots = _load_robots(url, fetch)
+    if not robots.can_fetch(USER_AGENT, url):
+        raise HomepageRobotsUnreachable("robots.txt가 홈페이지 루트를 차단했습니다")
+    policy = lambda candidate: (
+        _same_origin(url, candidate)
+        and robots.can_fetch(USER_AGENT, candidate)
+    )
+    html_text, effective_url, verified = _fetch_page(
+        fetch,
+        url,
+        url_allowed=policy,
+    )
+    return html_text, effective_url, verified, robots
 
 
 def _extract_links(raw_html: str, base_url: str, same_netloc: str) -> list[str]:
@@ -543,12 +796,25 @@ def _link_priority(url: str) -> int:
     return len(PRIORITY_PATH_KEYWORDS)
 
 
+def _page_candidate_scope_is_complete(raw_html: str, total_chars: int) -> bool:
+    """현재 페이지를 후보 원문 상한 때문에 잘라내지 않는지 판정한다."""
+
+    text = strip_html(raw_html)
+    if len(text) > MAX_CHARS_PER_PAGE:
+        return False
+    if len(text) < MIN_FRAGMENT_CHARS:
+        return True
+    return total_chars + len(text) <= MAX_TOTAL_CHARS
+
+
 def _collect_page(
     page_url: str,
     raw_html: str,
     fragments: list[dict[str, str]],
     seen_text: set[str],
     total_chars: int,
+    *,
+    final_url_verified: bool = False,
 ) -> int:
     """페이지 하나를 조각으로 만들어 `fragments`에 더한다.
 
@@ -563,5 +829,71 @@ def _collect_page(
     if remaining < MIN_FRAGMENT_CHARS:
         return total_chars  # 전체 상한에 다 찼다
     kept = text[:remaining]
-    fragments.append({"종류": FRAGMENT_KIND, "원문": kept, "출처": page_url})
+    fragment = {"종류": FRAGMENT_KIND, "원문": kept, "출처": page_url}
+    published_at = _published_date_from_html(raw_html)
+    if published_at:
+        fragment["문서일"] = published_at
+    if final_url_verified and urllib.parse.urlsplit(page_url).scheme.casefold() == "https":
+        fragment["후보출처검증"] = "https_exact_dart_host"
+    fragments.append(fragment)
     return total_chars + len(kept)
+
+
+def _fetch_page(
+    fetch: Fetcher,
+    url: str,
+    *,
+    url_allowed: Callable[[str], bool] | None = None,
+) -> tuple[str, str, bool]:
+    """구형 시험 fetch와 최종 URL을 보존하는 실제 fetch를 함께 다룬다."""
+
+    if fetch is default_fetch:
+        result = default_fetch(url, url_allowed=url_allowed)
+    else:
+        result = fetch(url)
+    if isinstance(result, FetchedPage):
+        effective = str(result.effective_url or "").strip()
+        if not effective:
+            raise HomepageFetchError("홈페이지 최종 URL을 확인하지 못했습니다")
+        if not _same_origin(url, effective):
+            raise HomepageSecurityPolicyError(
+                "홈페이지 리다이렉트가 최초 origin을 벗어났습니다"
+            )
+        if url_allowed is not None and url_allowed(effective) is not True:
+            raise HomepageSecurityPolicyError(
+                "홈페이지 리다이렉트 경로를 robots.txt가 차단했습니다"
+            )
+        return result.html, effective, True
+    if not isinstance(result, str):
+        raise HomepageFetchError("홈페이지 응답 형식이 올바르지 않습니다")
+    return result, url, False
+
+
+def _same_origin(left: str, right: str) -> bool:
+    """스킴·정규화 host·유효 포트가 모두 같은 origin인지 판정한다."""
+
+    try:
+        left_parts = urllib.parse.urlsplit(left)
+        right_parts = urllib.parse.urlsplit(right)
+        left_scheme = left_parts.scheme.casefold()
+        right_scheme = right_parts.scheme.casefold()
+        left_host = (left_parts.hostname or "").rstrip(".").encode("idna").decode()
+        right_host = (right_parts.hostname or "").rstrip(".").encode("idna").decode()
+        default_port = {"http": 80, "https": 443}
+        left_port = left_parts.port or default_port.get(left_scheme)
+        right_port = right_parts.port or default_port.get(right_scheme)
+    except (TypeError, ValueError, UnicodeError):
+        return False
+    return (
+        left_scheme in default_port
+        and left_scheme == right_scheme
+        and left_host.casefold() == right_host.casefold()
+        and left_port == right_port
+    )
+
+
+def _is_robots_url(url: str) -> bool:
+    try:
+        return urllib.parse.urlsplit(url).path.rstrip("/").casefold() == "/robots.txt"
+    except (TypeError, ValueError):
+        return False

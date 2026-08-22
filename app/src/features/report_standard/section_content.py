@@ -21,7 +21,7 @@ from src.features.pipeline.section567_contract import (
 )
 from src.features.provenance.sources import Source
 from src.features.report_standard.constants import COMPARISON_JUDGMENT_LABELS
-from src.shared.comparison_candidate_basis import parse_comparison_basis_v1
+from src.shared.comparison_candidate_basis import parse_comparison_basis
 
 
 @dataclass(frozen=True)
@@ -97,7 +97,7 @@ def _numbers(
 ) -> tuple[int, ...]:
     out: list[int] = []
     for fact in facts:
-        basis = parse_comparison_basis_v1(fact.comparison_basis)
+        basis = parse_comparison_basis(fact.comparison_basis)
         candidate_source_id = str((basis or {}).get("candidate_source_id") or "")
         for source_id in (
             fact.source_id,
@@ -588,12 +588,17 @@ def section_content_blocks(
 def source_verification_label(report: Report, source_id: str) -> str:
     """부록에서 자료 상태와 별도로 사실 검증 상태를 표시한다."""
 
-    facts = [
-        fact
-        for fact in report.fact_records
-        if source_id in {fact.source_id, fact.comparator_source_id}
-    ]
+    facts = []
+    is_candidate_evidence = False
+    for fact in report.fact_records:
+        if source_id in {fact.source_id, fact.comparator_source_id}:
+            facts.append(fact)
+        basis = parse_comparison_basis(fact.comparison_basis)
+        if str((basis or {}).get("candidate_source_id") or "") == source_id:
+            is_candidate_evidence = True
     if not facts:
+        if is_candidate_evidence:
+            return "후보 선정 근거"
         return "본문 사실 없음"
     if all(
         fact.status == "verified" and fact.verification_status == "verified"

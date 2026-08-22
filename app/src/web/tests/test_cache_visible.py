@@ -114,3 +114,15 @@ def test_결과화면_템플릿이_캐시일_때만_안내를_그린다():
         "결과 화면이 캐시 여부를 안 읽습니다 — 캐시가 돌아도 사용자가 모릅니다 (P-63)"
     )
     assert "result.message" in template
+
+
+def test_결과화면_출처표는_공통_공개citation_목록만_순회한다() -> None:
+    from src.core import paths
+
+    template = (
+        paths.APP_ROOT / "src" / "web" / "templates" / "result.html"
+    ).read_text(encoding="utf-8")
+
+    assert "{% if public_citations %}" in template
+    assert "{% for c in public_citations %}" in template
+    assert "{% for c in report.citations %}" not in template

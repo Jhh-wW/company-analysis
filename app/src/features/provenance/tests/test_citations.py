@@ -13,6 +13,7 @@ from src.features.provenance.sources import (
     Source,
     SourceKind,
     evidence_text_hash,
+    exact_evidence_text_hash,
     parse_sources,
     render_sources,
 )
@@ -173,6 +174,36 @@ def test_홈페이지_조각에_출처가_없으면_지어내지_않고_일반_�
     assert source.label == "회사 홈페이지"
 
 
+def test_공식_IR_PDF_조각은_DART_공시가_아닌_회사_IR로_보존한다():
+    frags = {
+        8: {
+            "종류": "공식 IR",
+            "원문": "당사의 주요 경쟁사는 주식회사 베타입니다.",
+            "출처": "https://www.company.co.kr/ir/results.pdf",
+            "문서ID": "a" * 64,
+            "문서명": "2026년 상반기 실적발표",
+            "원문위치": "PDF p.2 3문단 · pypdf 6.16.1",
+        }
+    }
+
+    [source] = build_citations(
+        frags,
+        filing=실제_filing,
+        collected_on=수집일,
+        company_publisher="주식회사 가나다",
+    )
+
+    assert source.kind is SourceKind.OTHER
+    assert source.source_type == "회사 공식 IR"
+    assert source.publisher == "주식회사 가나다"
+    assert source.host == "www.company.co.kr"
+    assert source.document_id == "a" * 64
+    assert source.location == "PDF p.2 3문단 · pypdf 6.16.1"
+    assert source.url == "https://www.company.co.kr/ir/results.pdf"
+    assert source.disclosed_at == ""
+    assert source.fact_status == "문서일 미검증 수집 참고"
+
+
 # ══════════════════════════════════════════════════════════
 # 조각 번호 보존 + 정렬
 # ══════════════════════════════════════════════════════════
@@ -240,3 +271,41 @@ def test_selected_evidence_hashes_only_actual_collected_fragment_spans() -> None
     assert evidence_text_hash(raw) in source.evidence_hashes
     assert evidence_text_hash("실제로 수집된 둘째 문장이다.") in source.evidence_hashes
     assert evidence_text_hash("원문에 없는 지어낸 문장") not in source.evidence_hashes
+    assert exact_evidence_text_hash(raw) not in source.exact_evidence_hashes
+    assert (
+        exact_evidence_text_hash("실제로 수집된 둘째 문장이다.")
+        in source.exact_evidence_hashes
+    )
+    assert (
+        exact_evidence_text_hash("원문에 없는 지어낸 문장")
+        not in source.exact_evidence_hashes
+    )
+
+
+def test_명시_근거원문은_US와_us를_구분하는_exact_hash로_등록된다() -> None:
+    upper = "US is our competitor."
+    lower = "us is a market abbreviation."
+    padded_upper = f" \t{upper}\n"
+    [source] = build_citations(
+        {
+            7: {
+                "종류": "홈페이지",
+                "원문": f"{upper} {lower}",
+                "근거원문": [padded_upper, lower],
+                "출처": "https://www.company.co.kr/ir/competition",
+            }
+        },
+        filing=None,
+        collected_on=수집일,
+        company_publisher="주식회사 가나다",
+    )
+
+    assert source.exact_evidence_hashes == sorted(
+        [exact_evidence_text_hash(upper), exact_evidence_text_hash(lower)]
+    )
+    assert exact_evidence_text_hash(upper) != exact_evidence_text_hash(
+        upper.casefold()
+    )
+    # 후보 문장 추출기도 선후행 공백을 strip한다. Source exact 등록도 같은
+    # 문자열을 봉인하되 문장 내부의 바이트는 바꾸지 않는다.
+    assert exact_evidence_text_hash(padded_upper) not in source.exact_evidence_hashes

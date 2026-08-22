@@ -68,6 +68,13 @@ from src.features.company_comparison import (
 )
 from src.features.company_comparison.logic import (
     comparison_candidate_preflight_possible,
+    discover_official_source_candidates,
+)
+from src.features.company_comparison.official_sources import (
+    OfficialCandidateSentence,
+    bind_dart_profile_attestation,
+    candidate_sentences_from_fragments,
+    register_candidate_sentence_evidence,
 )
 from src.features.business_candidate.dart_identity import (
     DartCompanyRecord,
@@ -79,7 +86,15 @@ from src.features.grading.financial import parse_financial_table
 from src.features.homepage import link as homepage_link
 from src.features.homepage.constants import FRAGMENT_KIND as HOMEPAGE_FRAGMENT_KIND
 from src.features.homepage.logic import collect_homepage_fragments
+from src.features.homepage.ir_pdf import (
+    OFFICIAL_IR_FRAGMENT_KIND,
+    collect_official_ir_fragments,
+)
 from src.features.provenance.citations import build_citations
+from src.features.provenance.sources import (
+    Source,
+    official_web_currentness_is_usable,
+)
 from src.features.spanselect.constants import (
     NEWS_FRAGMENT_KIND,
     USAGE_MODEL_KEY,
@@ -1079,7 +1094,44 @@ def _sources_from(steps: list[dict[str, Any]]) -> list[SourceStatus]:
         )
     else:
         sources.append(SourceStatus("회사 홈페이지", "none", str(home.get("없음", "자료 없음"))))
+
+    ir = step("6_수집_공식IR")
+    if ir is None:
+        sources.append(SourceStatus("회사 공식 IR", "none", "여기까지 오지 못함"))
+    elif ir.get("오류"):
+        sources.append(SourceStatus("회사 공식 IR", "failed", str(ir["오류"])))
+    elif ir.get("조각수"):
+        detail = f"PDF 조각 {ir['조각수']}개"
+        if ir.get("문서시도") is not None:
+            detail += f" · 문서 {ir['문서시도']}개 시도"
+        if ir.get("상세"):
+            detail += f" · {ir['상세']}"
+        sources.append(SourceStatus("회사 공식 IR", "ok", detail))
+    else:
+        sources.append(
+            SourceStatus("회사 공식 IR", "none", str(ir.get("없음", "자료 없음")))
+        )
     return sources
+
+
+def _comparison_candidate_scope_complete(
+    steps: list[dict[str, Any]],
+    *,
+    filing: Optional[dict[str, Any]],
+) -> bool:
+    """공식 후보 부재를 확정할 만큼 모든 허용 수집 경계가 완전한가."""
+
+    if filing and any(step.get("step") == "6_수집_원문" for step in steps):
+        return False
+    for name in ("6_수집_홈페이지", "6_수집_공식IR"):
+        step = next((item for item in steps if item.get("step") == name), None)
+        if (
+            step is None
+            or step.get("오류")
+            or step.get("후보범위완전") is not True
+        ):
+            return False
+    return True
 
 
 class LocalDartProfileEnrichmentError(RuntimeError):
@@ -1504,23 +1556,97 @@ class RealPipeline:
                 final_gate_reason=FINAL_GATE_REASON_OTHER_GATE,
             )
 
-        # 뉴스만 제외한 전체 공시와 공식 가능 자사 원문 fragment 상위집합에
-        # 경쟁 표지와 고유 DART 법인 별칭이 같은 문장으로 한 건도 없으면,
-        # 1~8장 선택 결과에서도 적법 후보가 생길 수 없다. 이 경우에만 유료
-        # span 선택 전에 comparison_blocked로 닫는다. 카탈로그/원문 기술
-        # 실패는 경쟁 관계 부재가 아니므로 unknown으로 계속 진행한다.
+        # 유료 span 선택 전에 후보 원문도 정식 provenance 경계에서 한 번 봉인한다.
+        # DART 전체 원문과 exact-attested HTTPS 웹·IR만 사전검사에 넣으며, 수집
+        # 실패·robots 차단·상한 잘림이 있으면 "후보 없음"으로 확정하지 않는다.
         try:
-            comparison_preflight = comparison_candidate_preflight_possible(
-                [
-                    filing_text,
-                    *(
-                        str(fragment.get("원문") or "")
-                        for fragment in frags.values()
-                        if str(fragment.get("종류") or "") != NEWS_FRAGMENT_KIND
-                    ),
-                ],
-                _records_from_candidate_catalog(_company_catalog()),
+            preflight_fragments = register_candidate_sentence_evidence(frags)
+            preflight_attestation = bind_dart_profile_attestation(
+                preflight_fragments,
+                profile=profile,
+                corp_code=corp_code,
+                company_name=company_name,
+                collected_on=business_date.isoformat(),
+            )
+            preflight_fragments = preflight_attestation.fragments
+            preflight_sources = build_citations(
+                preflight_fragments,
+                filing=filing,
+                collected_on=business_date,
+                company_publisher=company_name,
+            )
+            if preflight_attestation.attester is not None:
+                preflight_sources.append(preflight_attestation.attester)
+            preflight_sentences = candidate_sentences_from_fragments(
+                preflight_fragments,
+                preflight_sources,
+            )
+            candidate_catalog = _records_from_candidate_catalog(_company_catalog())
+            sealed_candidates = discover_official_source_candidates(
+                preflight_sentences,
+                preflight_sources,
+                candidate_catalog,
                 self_corp_code=corp_code,
+                self_company=company_name,
+                as_of_date=business_date.isoformat(),
+            )
+            eligible_preflight_texts = [
+                filing_text,
+                *(
+                    str(fragment.get("원문") or "")
+                    for fragment in preflight_fragments.values()
+                    if str(fragment.get("종류") or "") == HOMEPAGE_FRAGMENT_KIND
+                    and str(fragment.get("도메인근거SourceID") or "").strip()
+                    and official_web_currentness_is_usable(
+                        source_type="회사 공식 웹",
+                        url=str(fragment.get("출처") or ""),
+                        published_at=str(
+                            fragment.get("문서일")
+                            or fragment.get("published_at")
+                            or ""
+                        ),
+                        collected_at=business_date.isoformat(),
+                    )
+                ),
+            ]
+            raw_preflight = comparison_candidate_preflight_possible(
+                eligible_preflight_texts,
+                candidate_catalog,
+                self_corp_code=corp_code,
+                self_company=company_name,
+            )
+            scope_complete = _comparison_candidate_scope_complete(
+                steps,
+                filing=filing,
+            )
+            if (
+                scope_complete
+                and raw_preflight is None
+                and not any(text.strip() for text in eligible_preflight_texts)
+            ):
+                # 수집일뿐인 IR PDF는 현재 경쟁관계의 기준일이 아니다. 다른 적격
+                # 공식 원문이 전혀 없고 수집 범위가 완결됐으면 유료 호출 전에 닫는다.
+                raw_preflight = False
+            comparison_preflight = (
+                True
+                if sealed_candidates
+                else False
+                if scope_complete and raw_preflight is False
+                else None
+            )
+            steps.append(
+                {
+                    "step": "7_경쟁사후보_사전검사",
+                    "결과": (
+                        "possible"
+                        if comparison_preflight is True
+                        else "none"
+                        if comparison_preflight is False
+                        else "unknown"
+                    ),
+                    "봉인후보수": len(sealed_candidates),
+                    "후보범위완전": scope_complete,
+                }
             )
         except Exception as exc:  # noqa: BLE001 - 기술 실패는 fail-open(unknown)
             comparison_preflight = None
@@ -1558,6 +1684,24 @@ class RealPipeline:
 
         # ── 8 사실 배치 + 9 원문 대조 — 3회 독립 선택 후 다수결 ──
         tell("generate")
+        generation_frags = {
+            number: fragment
+            for number, fragment in frags.items()
+            if str(fragment.get("종류") or "") != OFFICIAL_IR_FRAGMENT_KIND
+            and (
+                str(fragment.get("종류") or "") != HOMEPAGE_FRAGMENT_KIND
+                or official_web_currentness_is_usable(
+                    source_type="회사 공식 웹",
+                    url=str(fragment.get("출처") or ""),
+                    published_at=str(
+                        fragment.get("문서일")
+                        or fragment.get("published_at")
+                        or ""
+                    ),
+                    collected_at=business_date.isoformat(),
+                )
+            )
+        }
         selection_rounds = []
         selection_diagnostics: list[SpanSelectionRoundDiagnostic] = []
         sentences_made = 0
@@ -1580,6 +1724,7 @@ class RealPipeline:
             for value in (
                 company_name,
                 profile.get("corp_name"),
+                profile.get("corp_name_eng"),
                 profile.get("corp_eng_name"),
             )
             if str(value or "").strip()
@@ -1589,7 +1734,7 @@ class RealPipeline:
             with _meter_stage(engine, "span_selection", prompt_cache=True):
                 picked, rejected = select_canonical_spans(
                     client,
-                    frags,
+                    generation_frags,
                     steps,
                     engine=engine, model=GENERATION_MODEL,
                     company=company_identity,
@@ -1638,7 +1783,7 @@ class RealPipeline:
 
         sections = canonical_sections_from_picks(
             kept,
-            frags,
+            generation_frags,
             tables_by_section=tables_by_section,
         )
         sections, written_claims = write_and_verify_sections(
@@ -1646,7 +1791,7 @@ class RealPipeline:
             client=client,
             company=company_name,
             sections=sections,
-            fragments=frags,
+            fragments=generation_frags,
             picks=kept,
             steps=steps,
             model=model,
@@ -1654,6 +1799,17 @@ class RealPipeline:
         provenance_fragments = {
             number: dict(fragment) for number, fragment in frags.items()
         }
+        provenance_fragments = register_candidate_sentence_evidence(
+            provenance_fragments
+        )
+        profile_attestation = bind_dart_profile_attestation(
+            provenance_fragments,
+            profile=profile,
+            corp_code=corp_code,
+            company_name=company_name,
+            collected_on=business_date.isoformat(),
+        )
+        provenance_fragments = profile_attestation.fragments
         # 실적표의 숨은 근거는 공개 행을 다시 이어 붙인 문자열이 아니라 위에서
         # build_three_year_table이 실제 DART API 응답으로 만든 payload다.
         # provenance 생성 단계에만 전달하고 공개 fragment 원문은 바꾸지 않는다.
@@ -1674,6 +1830,12 @@ class RealPipeline:
             collected_on=business_date,
             company_publisher=company_name,
             selected_evidence_by_fragment=selected_evidence,
+        )
+        if profile_attestation.attester is not None:
+            all_citations.append(profile_attestation.attester)
+        official_candidate_sentences = candidate_sentences_from_fragments(
+            provenance_fragments,
+            all_citations,
         )
 
         def summary_ask(prompt: str, schema: dict[str, Any], max_tokens: int):
@@ -1719,6 +1881,8 @@ class RealPipeline:
                 self_official_text=filing_text,
                 steps=steps,
                 collected_on=business_date.isoformat(),
+                official_candidate_sentences=official_candidate_sentences,
+                candidate_source_registry=tuple(all_citations),
             )
             # 요약은 9장까지 모두 잠긴 뒤 기존 fact_id의 최소 부분집합만으로
             # 생성한다. finalize_report가 최종 출고 게이트와 공개본 생성을
@@ -1787,9 +1951,14 @@ class RealPipeline:
         # 회사분석 전용 버전 키로 저장해 옛 직무·공고 보고서와 섞이지 않는다.
         # ★ 우리 쪽 수집 실패(⚠️)가 낀 결과는 «저장하지 않는다» —
         #   그날만 죽은 소스 때문에 그 회사가 「자료 없는 회사」로 굳는다.
-        if _has_failed_source(sources):
+        candidate_collection_incomplete = not _comparison_candidate_scope_complete(
+            steps,
+            filing=filing,
+        )
+        if _has_failed_source(sources) or candidate_collection_incomplete:
             logger.info(
-                "수집 실패(⚠️)가 껴 1층 캐시에 저장하지 않습니다 — corp_id=%s", corp_code
+                "수집 실패·후보범위 불완전이 껴 1층 캐시에 저장하지 않습니다 — corp_id=%s",
+                corp_code,
             )
         else:
             _company_cache_save(
@@ -1913,6 +2082,8 @@ def _attach_competitive_position(
     self_official_text: str,
     steps: list[dict[str, Any]],
     collected_on: str,
+    official_candidate_sentences: tuple[OfficialCandidateSentence, ...] = (),
+    candidate_source_registry: tuple[Source, ...] = (),
 ) -> Report:
     """잠긴 1~8장 초안에 공식 양사 비교 9장을 붙여 내부 초안을 돌려준다."""
 
@@ -1932,6 +2103,8 @@ def _attach_competitive_position(
             engine, counter, record
         ),
         collected_on=collected_on,
+        official_candidate_sentences=official_candidate_sentences,
+        candidate_source_registry=candidate_source_registry,
     )
     steps.append(
         {
@@ -2326,17 +2499,98 @@ def _collect(
     homepage = collect_homepage_fragments(profile.get("hm_url", ""))
     if homepage.state == "ok":
         for frag in homepage.fragments:
-            frags[max(frags, default=0) + 1] = {
-                "종류": frag["종류"],
-                "원문": frag["원문"],
-                # ★ 실제로 읽은 주소를 버리지 않는다 — 출처 목록이 이걸 쓴다 (P-24)
-                "출처": frag.get("출처", ""),
+            # 최종 URL 검증 표식·문서 위치 등 수집기가 만든 provenance 메타데이터를
+            # 버리지 않는다. build_citations가 닫힌 Source 필드만 골라 쓴다.
+            frags[max(frags, default=0) + 1] = dict(frag)
+        steps.append(
+            {
+                "step": "6_수집_홈페이지",
+                "조각수": len(homepage.fragments),
+                "후보범위완전": homepage.candidate_scope_complete,
             }
-        steps.append({"step": "6_수집_홈페이지", "조각수": len(homepage.fragments)})
+        )
     elif homepage.state == "failed":
-        steps.append({"step": "6_수집_홈페이지", "오류": homepage.detail})
+        steps.append(
+            {
+                "step": "6_수집_홈페이지",
+                "오류": homepage.detail,
+                "후보범위완전": False,
+            }
+        )
     else:
-        steps.append({"step": "6_수집_홈페이지", "없음": homepage.detail})
+        steps.append(
+            {
+                "step": "6_수집_홈페이지",
+                "없음": homepage.detail,
+                "후보범위완전": homepage.candidate_scope_complete,
+            }
+        )
+
+    # DART 기업개황의 홈페이지와 정확히 같은 HTTPS host 안에서만 공식 IR
+    # PDF를 찾는다. PDF 파싱은 별도 프로세스·바이트/페이지/글자 상한 안에서
+    # 수행하며, 실패·상한 잘림은 "경쟁사 언급 없음"과 분리한다.
+    company_aliases = tuple(
+        dict.fromkeys(
+            value
+            for value in (
+                str(profile.get("corp_name_eng") or "").strip(),
+                str(profile.get("corp_eng_name") or "").strip(),
+                str(profile.get("stock_name") or "").strip(),
+            )
+            if value
+        )
+    )
+    try:
+        official_ir = collect_official_ir_fragments(
+            str(profile.get("hm_url") or ""),
+            company_name=str(profile.get("corp_name") or "").strip(),
+            company_aliases=company_aliases,
+        )
+    except Exception as exc:  # noqa: BLE001 - 수집기 결함도 자료 부재로 오인하지 않는다
+        steps.append(
+            {
+                "step": "6_수집_공식IR",
+                "오류": f"{type(exc).__name__}: {str(exc)[:120]}",
+                "후보범위완전": False,
+            }
+        )
+    else:
+        ir_scope_complete = bool(
+            getattr(official_ir, "candidate_scope_complete", False)
+        )
+        if official_ir.state == "ok":
+            for fragment in official_ir.fragments:
+                frags[max(frags, default=0) + 1] = dict(fragment)
+            steps.append(
+                {
+                    "step": "6_수집_공식IR",
+                    "조각수": len(official_ir.fragments),
+                    "문서시도": official_ir.attempted_documents,
+                    "PDF바이트": official_ir.downloaded_pdf_bytes,
+                    "상세": official_ir.detail,
+                    "후보범위완전": ir_scope_complete,
+                }
+            )
+        elif official_ir.state == "failed":
+            steps.append(
+                {
+                    "step": "6_수집_공식IR",
+                    "오류": official_ir.detail,
+                    "문서시도": official_ir.attempted_documents,
+                    "PDF바이트": official_ir.downloaded_pdf_bytes,
+                    "후보범위완전": False,
+                }
+            )
+        else:
+            steps.append(
+                {
+                    "step": "6_수집_공식IR",
+                    "없음": official_ir.detail,
+                    "문서시도": official_ir.attempted_documents,
+                    "PDF바이트": official_ir.downloaded_pdf_bytes,
+                    "후보범위완전": ir_scope_complete,
+                }
+            )
 
     # ★ 매출 구성 비중 표 (P-112) — 사용자가 리포트 11건에서 고른 항목 ①.
     #   **11건이 «전부» 실은 유일한 만장일치 항목**이다.

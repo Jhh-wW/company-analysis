@@ -14,6 +14,12 @@ from typing import Final
 #: 뉴스 API(`naver_client.py` 15초)보다 조금 더 여유를 둔다.
 TIMEOUT_SEC: Final[int] = 10
 
+#: robots·DNS·리다이렉트·모든 HTML 본문을 합친 홈페이지 수집 전체 상한.
+HOMEPAGE_COLLECTION_TIMEOUT_SEC: Final[int] = 25
+
+#: IR 탐색 HTML·PDF 다운로드·격리 파싱을 합친 공식 IR 수집 전체 상한.
+IR_COLLECTION_TIMEOUT_SEC: Final[int] = 35
+
 #: 접속할 때 보내는 User-Agent. 봇임을 숨기지 않는다 — robots.txt가
 #: 우리를 식별할 수 있어야 규칙이 의미가 있다.
 USER_AGENT: Final[str] = "GiupBunseokBot/1.0 (+jobseeker-report-tool)"
@@ -34,6 +40,85 @@ MAX_TOTAL_CHARS: Final[int] = 12_000
 #: 이보다 짧게 뽑히면 「빈 페이지」로 보고 조각을 만들지 않는다.
 #: 메뉴 몇 글자만 있는 페이지가 조각으로 잡히는 것을 막는다.
 MIN_FRAGMENT_CHARS: Final[int] = 80
+
+# ── 공식 IR PDF 상한 ─────────────────────────────────────
+
+#: PDF 링크를 찾으려고 읽는 HTML 최대 쪽 수(루트 포함).
+MAX_IR_DISCOVERY_PAGES: Final[int] = 5
+
+#: 한 홈페이지에서 내려받기를 시도하는 공식 IR PDF 최대 수.
+MAX_IR_DOCUMENTS: Final[int] = 2
+
+#: 발견 큐가 비정상적으로 커지는 것을 막는 HTML·PDF 링크 합계 상한.
+MAX_IR_DISCOVERY_LINKS: Final[int] = 60
+
+#: 공식 IR PDF 한 파일의 최대 바이트 수(12 MiB).
+MAX_IR_PDF_BYTES: Final[int] = 12 * 1024 * 1024
+
+#: 홈페이지 하나에서 내려받을 수 있는 모든 공식 IR PDF의 합계(20 MiB).
+MAX_IR_TOTAL_PDF_BYTES: Final[int] = 20 * 1024 * 1024
+
+#: PDF 한 파일에서 허용하는 최대 페이지 수.
+MAX_IR_PDF_PAGES: Final[int] = 80
+
+#: 손상 PDF의 루트 객체 복구 탐색 상한.
+MAX_IR_ROOT_RECOVERY_OBJECTS: Final[int] = 1_000
+
+#: PDF 압축 스트림 하나가 파서 안에서 풀릴 수 있는 최대 바이트 수.
+MAX_IR_DECOMPRESSED_STREAM_BYTES: Final[int] = 12 * 1024 * 1024
+
+#: PDF 파싱·글자 추출 자식 프로세스의 전체 실행시간 상한(초).
+IR_PDF_PARSE_TIMEOUT_SEC: Final[int] = 10
+
+#: PDF 워커 하나가 매핑할 수 있는 전체 가상 주소 공간의 OS hard limit(256 MiB).
+#: 12 MiB 입력·스트림 상한보다 충분한 파서 여유를 주되, 여러 압축 스트림이
+#: 동시에 살아남아 Render 부모 서비스까지 OOM시키는 것은 프로세스 경계에서 막는다.
+MAX_IR_WORKER_ADDRESS_SPACE_BYTES: Final[int] = 256 * 1024 * 1024
+
+#: PDF 워커가 쓸 수 있는 CPU 시간의 OS 상한. 부모의 10초 wall timeout보다 먼저
+#: 커널이 비정상 파서를 끝낼 수 있도록 짧게 둔다.
+MAX_IR_WORKER_CPU_SECONDS: Final[int] = 8
+
+#: 한 앱 프로세스가 동시에 띄울 PDF 파서 수. per-worker OS limit 합계가 부모
+#: 서비스 메모리까지 잠식하지 않도록 단일 워커로 직렬화한다.
+MAX_CONCURRENT_IR_PDF_WORKERS: Final[int] = 1
+
+#: 이미 PDF 워커가 실행 중일 때 슬롯을 기다리는 최대 시간. 유료 분석 요청을
+#: 무기한 붙잡지 않고 기술 실패로 닫는다.
+IR_PDF_WORKER_SLOT_TIMEOUT_SEC: Final[int] = 1
+
+#: 원문 위치와 자식 프로세스 계약에 함께 봉인할 PDF 추출기 버전.
+IR_PDF_EXTRACTOR_VERSION: Final[str] = "pypdf 6.16.1"
+
+#: 자식 프로세스가 부모에게 돌려줄 수 있는 페이지별 원시 글자 상한.
+MAX_IR_RAW_CHARS_PER_PAGE: Final[int] = 12_000
+
+#: 자식 PDF 파서가 돌려주는 JSON 표준출력 최대 바이트 수.
+MAX_IR_WORKER_OUTPUT_BYTES: Final[int] = 4 * 1024 * 1024
+
+#: 대상 법인명·별칭이 실제로 나타나는지 확인할 PDF 앞쪽 페이지 수.
+IR_IDENTITY_CHECK_PAGES: Final[int] = 2
+
+#: PDF 한 파일에서 근거 조각으로 보존하는 최대 글자 수.
+MAX_IR_CHARS_PER_DOCUMENT: Final[int] = 12_000
+
+#: 홈페이지 하나의 모든 IR PDF에서 AI 입력으로 보존하는 최대 글자 수.
+MAX_IR_TOTAL_CHARS: Final[int] = 12_000
+
+#: PDF 페이지 하나에서 AI 입력으로 보존하는 최대 글자 수.
+MAX_IR_CHARS_PER_PAGE: Final[int] = 6_000
+
+#: 페이지 안 문단 하나가 지나치게 길 때 보존하는 최대 글자 수.
+MAX_IR_CHARS_PER_FRAGMENT: Final[int] = 3_000
+
+#: 메뉴 조각처럼 너무 짧은 PDF 글자를 근거에서 빼는 최소 길이.
+MIN_IR_FRAGMENT_CHARS: Final[int] = 20
+
+#: 한 문서에서 보존할 수 있는 페이지·문단 조각 수 상한.
+MAX_IR_FRAGMENTS_PER_DOCUMENT: Final[int] = 160
+
+#: PDF 문서명 한 줄의 최대 글자 수.
+MAX_IR_DOCUMENT_TITLE_CHARS: Final[int] = 200
 
 # ── 조각 모양 ────────────────────────────────────────────
 

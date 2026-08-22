@@ -635,6 +635,7 @@ def test_YG는_실제_RealPipeline_DARTmatcher에서_선택전_후보카드로�
             assert corp_code == "00613318"
             return {
                 "status": "000",
+                "corp_code": corp_code,
                 "corp_name": "와이지엔터테인먼트",
                 "adres": "",
                 "ceo_nm": "",

@@ -155,7 +155,7 @@ def _citation_to_dict(citation: object) -> dict[str, Any]:
     """
     if not isinstance(citation, Source):
         raise TypeError(f"알 수 없는 출처 타입입니다: {type(citation)!r}")
-    return {
+    payload = {
         "number": citation.number,
         "kind": citation.kind.value,
         "label": citation.label,
@@ -178,6 +178,15 @@ def _citation_to_dict(citation: object) -> dict[str, Any]:
         "domain_attestation_evidence": citation.domain_attestation_evidence,
         "provenance_seal": citation.provenance_seal,
     }
+    # 기본 citation은 기존 저장 JSON·release ledger digest와 byte 호환을
+    # 유지한다. 새 내부 attester만 역할 필드를 명시해 재시작 뒤에도 숨김 정책과
+    # provenance seal을 잃지 않는다.
+    if citation.provenance_role != "citation":
+        payload["provenance_role"] = citation.provenance_role
+    # 빈 목록은 이 필드가 없던 저장 JSON과 release digest를 그대로 유지한다.
+    if citation.exact_evidence_hashes:
+        payload["exact_evidence_hashes"] = list(citation.exact_evidence_hashes)
+    return payload
 
 
 def _citation_from_dict(data: dict[str, Any]) -> Source:
@@ -208,6 +217,11 @@ def _citation_from_dict(data: dict[str, Any]) -> Source:
             for item in data.get("evidence_hashes", [])
             if isinstance(item, str) and item.strip()
         ],
+        exact_evidence_hashes=[
+            item.strip()
+            for item in data.get("exact_evidence_hashes", [])
+            if isinstance(item, str) and item.strip()
+        ],
         domain_attestation_source_id=str(
             data.get("domain_attestation_source_id", "")
         ).strip(),
@@ -215,6 +229,7 @@ def _citation_from_dict(data: dict[str, Any]) -> Source:
             data.get("domain_attestation_evidence", "")
         ).strip(),
         provenance_seal=str(data.get("provenance_seal", "")).strip(),
+        provenance_role=str(data.get("provenance_role", "citation")).strip(),
     )
 
 

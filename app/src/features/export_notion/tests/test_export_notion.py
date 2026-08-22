@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 import logging
 from typing import Any
 
@@ -28,6 +29,27 @@ from src.features.report_standard.section_content import section_content_blocks
 from src.features.report_standard.publish import PublishBlockedError
 
 _LEGACY_SECRET = "LEGACY-JOB-POSTING-SECRET"
+
+
+def test_노션_출처표는_attestation_only를_공개하지_않는다() -> None:
+    report = build_demo_report()
+    attester = replace(
+        report.citations[0],
+        number=999,
+        source_id="dart-company-profile-internal",
+        label="내부 OpenDART 기업개황",
+        title="내부 OpenDART 기업개황",
+        url="https://opendart.fss.or.kr/api/company.json?corp_code=00000001",
+        provenance_role="attestation_only",
+    )
+
+    blocks = logic._source_list_blocks(
+        replace(report, citations=[*report.citations, attester])
+    )
+    rendered = json.dumps(blocks, ensure_ascii=False)
+
+    assert "내부 OpenDART 기업개황" not in rendered
+    assert "company.json" not in rendered
 
 
 # ══════════════════════════════════════════════════════════
@@ -264,7 +286,7 @@ class TestBuildBlocks:
             "2026-08-13 공시 · 공식 공시 · 실제·현재",
             "사실 검증 완료",
             "II. 사업의 내용; III. 재무에 관한 사항",
-            "2장 · 3장 · 5장 · 7장",
+            "2장 · 3장 · 5장 · 7장 · 8장",
         ]
         assert "수집" not in str(source_table)
 

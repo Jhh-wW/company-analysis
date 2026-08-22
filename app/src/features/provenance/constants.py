@@ -81,6 +81,7 @@ TENURE_UNIT_HINTS: Final[tuple[str, ...]] = ("년", "개월", "月", "yr", "year
 #   (feature 간 직접 import는 금지이므로 값만 맞춰 각자 갖고 있는다.)
 FRAGMENT_KIND_NEWS: Final[str] = "뉴스"
 FRAGMENT_KIND_HOMEPAGE: Final[str] = "홈페이지"
+FRAGMENT_KIND_OFFICIAL_IR: Final[str] = "공식 IR"
 
 #: 원 기사 도메인을 못 뽑았을 때 1판 엔진이 넣는 자리표시자 (run_pilot.collect_news).
 #: 실제 도메인이 아니므로 출처로 그대로 옮기면 지어낸 값이 된다 — 만나면 비운다.

@@ -288,6 +288,21 @@ def test_표지_소스_요약은_수집현황이_아니라_실제_citations만_�
     assert source_summary(no_citations) == "저장된 출처 없음"
 
 
+def test_PDF_출처요약은_attestation_only를_사용자자료로_세지_않는다() -> None:
+    report = _report()
+    attester = replace(
+        report.citations[0],
+        number=999,
+        source_id="dart-company-profile-internal",
+        label="내부 OpenDART 기업개황",
+        provenance_role="attestation_only",
+    )
+
+    assert source_summary(
+        replace(report, citations=[*report.citations, attester])
+    ) == source_summary(report)
+
+
 def test_생성일이_깨졌다면_그_문자열이나_로컬_오늘을_공개하지_않는다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

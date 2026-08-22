@@ -25,7 +25,7 @@ from src.features.pipeline.port import (
     ReportSection,
     ReportTable,
 )
-from src.features.provenance.sources import Source
+from src.features.provenance.sources import Source, visible_citations
 from src.features.report_standard import SECTION_BY_ID, build_published_report
 from src.features.report_standard.section_content import (
     section_content_blocks,
@@ -223,8 +223,8 @@ def _summary_blocks(report: Report) -> list[NotionBlock]:
 def _source_list_blocks(report: Report) -> list[NotionBlock]:
     sources: list[Source] = []
     seen_numbers: set[int] = set()
-    for item in report.citations:
-        if not isinstance(item, Source) or item.number in seen_numbers:
+    for item in visible_citations(report.citations):
+        if item.number in seen_numbers:
             continue
         seen_numbers.add(item.number)
         sources.append(item)

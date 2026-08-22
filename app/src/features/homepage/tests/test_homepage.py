@@ -7,14 +7,18 @@ from __future__ import annotations
 
 import pytest
 
+from src.features.homepage import safe_http
 from src.features.homepage.constants import (
     MAX_CHARS_PER_PAGE,
     MAX_PAGES,
     MAX_TOTAL_CHARS,
 )
 from src.features.homepage.logic import (
+    FetchedPage,
     HomepageCertNameMismatchError,
     HomepageFetchError,
+    HomepageRobotsUnavailable,
+    HomepageRobotsUnreachable,
     collect_homepage_fragments,
     strip_html,
 )
@@ -36,6 +40,8 @@ def _fake_fetch(pages: dict[str, str], fail: frozenset[str] = frozenset()) -> tu
 
     def fetch(url: str) -> str:
         calls.append(url)
+        if url.endswith("/robots.txt") and url not in pages:
+            raise HomepageRobotsUnavailable(f"가짜 robots.txt 없음: {url}")
         if url in fail or url not in pages:
             raise HomepageFetchError(f"가짜 접속 실패: {url}")
         return pages[url]
@@ -64,6 +70,93 @@ def test_정상_수집이면_ok와_조각을_돌려준다():
         assert frag["종류"] == "홈페이지"
         assert frag["원문"]
         assert frag["출처"].startswith(ROOT)
+
+
+def test_검증된_HTTPS_소형_사이트를_끝까지_읽으면_후보범위가_완전하다():
+    root = "https://example.com"
+    pages = {
+        root: "<html><body><p>" + ("회사 소개 문단입니다. " * 10) + "</p></body></html>",
+        f"{root}/robots.txt": "User-agent: *\nAllow: /\n",
+    }
+
+    def fetch(url: str) -> FetchedPage:
+        if url not in pages:
+            raise HomepageFetchError(f"가짜 접속 실패: {url}")
+        return FetchedPage(html=pages[url], effective_url=url)
+
+    result = collect_homepage_fragments(root, fetch=fetch)
+
+    assert result.state == "ok"
+    assert result.candidate_scope_complete is True
+
+
+def test_machine_readable_단일_발행일을_홈페이지조각에_보존한다():
+    root = "https://example.com/newsroom/competition"
+    pages = {
+        root: (
+            '<meta property="article:published_time" '
+            'content="2026-08-01T09:00:00+09:00">'
+            "<p>" + ("당사의 경쟁사는 베타입니다. " * 8) + "</p>"
+        ),
+        "https://example.com/robots.txt": "User-agent: *\nAllow: /\n",
+    }
+
+    def fetch(url: str) -> FetchedPage:
+        if url not in pages:
+            raise HomepageFetchError(f"가짜 접속 실패: {url}")
+        return FetchedPage(html=pages[url], effective_url=url)
+
+    result = collect_homepage_fragments(root, fetch=fetch)
+
+    assert result.state == "ok"
+    assert result.fragments[0]["문서일"] == "2026-08-01"
+
+
+def test_서로충돌하는_발행일은_홈페이지조각에_쓰지않는다():
+    raw = (
+        '<meta property="article:published_time" content="2026-08-01">'
+        '<meta itemprop="datePublished" content="2026-08-02">'
+        "<p>" + ("회사 공식 소개 문장입니다. " * 8) + "</p>"
+    )
+    fragments: list[dict[str, str]] = []
+
+    from src.features.homepage import logic as homepage_logic
+
+    homepage_logic._collect_page(
+        "https://example.com/newsroom/conflict",
+        raw,
+        fragments,
+        set(),
+        0,
+        final_url_verified=True,
+    )
+
+    assert fragments and "문서일" not in fragments[0]
+
+
+def test_홈페이지_모든_fetch는_수집전체_deadline과_DNS_cache를_공유한다():
+    root = "https://example.com"
+    pages = {
+        root: (
+            "<html><body><p>" + ("회사 소개 문단입니다. " * 10) + "</p>"
+            '<a href="/about">회사소개</a></body></html>'
+        ),
+        f"{root}/about": "<p>" + ("기술 소개 문단입니다. " * 10) + "</p>",
+        f"{root}/robots.txt": "User-agent: *\nAllow: /\n",
+    }
+    budget_ids: list[int] = []
+
+    def fetch(url: str) -> FetchedPage:
+        budget = safe_http._ACTIVE_DEADLINE.get()
+        assert budget is not None
+        budget_ids.append(id(budget))
+        return FetchedPage(html=pages[url], effective_url=url)
+
+    result = collect_homepage_fragments(root, fetch=fetch)
+
+    assert result.state == "ok"
+    assert len(budget_ids) >= 3
+    assert len(set(budget_ids)) == 1
 
 
 def test_스킴이_없는_주소도_받는다():
@@ -95,6 +188,7 @@ def test_루트_접속_실패는_failed로_돌아온다():
     assert result.state == "failed"
     assert result.fragments == []
     assert "접속 실패" in result.detail
+    assert result.candidate_scope_complete is False
 
 
 def test_낱장_페이지_실패는_전체_실패로_보지_않는다():
@@ -109,6 +203,7 @@ def test_낱장_페이지_실패는_전체_실패로_보지_않는다():
 
     assert result.state == "ok"
     assert len(result.fragments) == 1
+    assert result.candidate_scope_complete is False
 
 
 # ── robots.txt 금지 ──────────────────────────────────────
@@ -132,8 +227,8 @@ def test_robots_금지_경로는_건너뛴다():
     assert f"{ROOT}/about" not in calls  # 금지된 페이지는 아예 요청하지 않는다
 
 
-def test_robots_txt를_못_가져오면_허용으로_본다():
-    """robots.txt가 없는 사이트가 대부분이므로, 못 가져온 것을 금지로 해석하지 않는다."""
+def test_robots_4xx로_명시적_부재면_빈_규칙으로_계속한다():
+    """HTTP 4xx로 robots 부재가 확인된 경우에만 빈 규칙으로 진행한다."""
     pages = {
         ROOT: "<html><body><p>" + ("루트 소개 문단입니다. " * 10) + "</p></body></html>",
     }
@@ -142,6 +237,107 @@ def test_robots_txt를_못_가져오면_허용으로_본다():
     result = collect_homepage_fragments(ROOT, fetch=fetch)
 
     assert result.state == "ok"
+
+
+def test_robots를_본문보다_먼저_확인한다():
+    pages = {
+        ROOT: "<html><body><p>" + ("회사 소개 문단입니다. " * 10) + "</p></body></html>",
+        f"{ROOT}/robots.txt": "User-agent: *\nAllow: /\n",
+    }
+    fetch, calls = _fake_fetch(pages)
+
+    result = collect_homepage_fragments(ROOT, fetch=fetch)
+
+    assert result.state == "ok"
+    assert calls[:2] == [f"{ROOT}/robots.txt", ROOT]
+
+
+def test_robots_서버나_네트워크_장애면_본문을_요청하지_않는다():
+    calls: list[str] = []
+
+    def fetch(url: str) -> str:
+        calls.append(url)
+        if url.endswith("/robots.txt"):
+            raise HomepageRobotsUnreachable("HTTP 503")
+        raise AssertionError("robots 확인 실패 뒤 본문을 요청하면 안 됩니다")
+
+    result = collect_homepage_fragments(ROOT, fetch=fetch)
+
+    assert result.state == "failed"
+    assert result.candidate_scope_complete is False
+    assert calls == [f"{ROOT}/robots.txt"]
+
+
+def test_robots가_루트를_막으면_본문을_요청하지_않는다():
+    pages = {
+        f"{ROOT}/robots.txt": "User-agent: *\nDisallow: /\n",
+        ROOT: "<html><body>읽으면 안 되는 본문</body></html>",
+    }
+    fetch, calls = _fake_fetch(pages)
+
+    result = collect_homepage_fragments(ROOT, fetch=fetch)
+
+    assert result.state == "failed"
+    assert result.candidate_scope_complete is False
+    assert calls == [f"{ROOT}/robots.txt"]
+
+
+def test_robots가_리다이렉트_도착_경로를_막으면_본문으로_승격하지_않는다():
+    root = "https://example.com"
+    calls: list[str] = []
+
+    def fetch(url: str) -> str | FetchedPage:
+        calls.append(url)
+        if url.endswith("/robots.txt"):
+            return "User-agent: *\nDisallow: /private\n"
+        if url == root:
+            return FetchedPage(
+                html="<html><body>차단 경로 본문</body></html>",
+                effective_url=f"{root}/private",
+            )
+        raise AssertionError(f"예상하지 않은 주소: {url}")
+
+    result = collect_homepage_fragments(root, fetch=fetch)
+
+    assert result.state == "failed"
+    assert result.fragments == []
+    assert result.candidate_scope_complete is False
+
+
+def test_하위링크도_허용경로에서_금지경로로_이동하면_본문을_버린다():
+    root = "https://example.com"
+    about = f"{root}/about"
+    pages = {
+        f"{root}/robots.txt": "User-agent: *\nDisallow: /private\n",
+        root: FetchedPage(
+            html=(
+                "<html><body><p>"
+                + ("공식 루트 소개 문단입니다. " * 10)
+                + '</p><a href="/about">회사 소개</a></body></html>'
+            ),
+            effective_url=root,
+        ),
+        about: FetchedPage(
+            html="<html><body>금지된 도착 경로의 본문</body></html>",
+            effective_url=f"{root}/private",
+        ),
+    }
+    calls: list[str] = []
+
+    def fetch(url: str) -> str | FetchedPage:
+        calls.append(url)
+        value = pages.get(url)
+        if value is None:
+            raise AssertionError(f"예상하지 않은 주소: {url}")
+        return value
+
+    result = collect_homepage_fragments(root, fetch=fetch)
+
+    assert result.state == "ok"
+    assert len(result.fragments) == 1
+    assert all("private" not in item["출처"] for item in result.fragments)
+    assert result.candidate_scope_complete is False
+    assert calls == [f"{root}/robots.txt", root, about]
 
 
 # ── 상한 ─────────────────────────────────────────────────
@@ -161,6 +357,7 @@ def test_최대_페이지_수를_넘지_않는다():
     page_calls = [c for c in calls if not c.endswith("robots.txt")]
     assert len(page_calls) <= MAX_PAGES
     assert len(result.fragments) <= MAX_PAGES
+    assert result.candidate_scope_complete is False
 
 
 def test_IR자료실의_두번째_링크까지_따라가_최신_실적을_일반_IR페이지보다_먼저_읽는다():
@@ -212,6 +409,7 @@ def test_전체_글자수_상한을_넘지_않는다():
     assert total <= MAX_TOTAL_CHARS
     # 상한 «근처»까지는 채웠는지 — 그냥 우연히 안 넘긴 게 아니라 실제로 잘랐는지 확인
     assert total > MAX_TOTAL_CHARS - MAX_CHARS_PER_PAGE
+    assert result.candidate_scope_complete is False
 
 
 # ── 빈 페이지 ─────────────────────────────────────────────
@@ -323,6 +521,8 @@ def test_인증서_이름이_같은_회사면_그_이름으로_재시도해_성�
     }
 
     def fetch(url: str) -> str:
+        if url.endswith("/robots.txt"):
+            return ""
         if url == original:
             raise HomepageCertNameMismatchError(
                 "인증서 이름 불일치: robostar.co.kr", host="robostar.co.kr"
@@ -352,6 +552,8 @@ def test_인증서_이름이_다른_회사면_재시도하지_않고_실패로_�
     original = "http://hiveoil.co.kr"
 
     def fetch(url: str) -> str:
+        if url.endswith("/robots.txt"):
+            return ""
         if url == original:
             raise HomepageCertNameMismatchError(
                 "인증서 이름 불일치: hiveoil.co.kr", host="hiveoil.co.kr"
@@ -375,6 +577,8 @@ def test_이름_불일치가_아닌_인증서_오류는_재시도하지_않는�
     lookup_calls: list[str] = []
 
     def fetch(_url: str) -> str:
+        if _url.endswith("/robots.txt"):
+            raise HomepageRobotsUnavailable("HTTP 404")
         raise HomepageFetchError("인증서가 만료됨(이름 불일치 아님)")
 
     def lookup_cert_names(url: str) -> list[str]:
@@ -393,6 +597,8 @@ def test_재시도도_실패하면_failed로_남는다():
     original = "http://robostar.co.kr"
 
     def fetch(url: str) -> str:
+        if url.endswith("/robots.txt"):
+            return ""
         if url == original:
             raise HomepageCertNameMismatchError(
                 "인증서 이름 불일치", host="robostar.co.kr"
@@ -417,6 +623,8 @@ def test_재시도는_한_번만_일어난다():
 
     def fetch(url: str) -> str:
         calls.append(url)
+        if url.endswith("/robots.txt"):
+            return ""
         if url == original:
             raise HomepageCertNameMismatchError(
                 "인증서 이름 불일치", host="robostar.co.kr"
@@ -440,6 +648,8 @@ def test_www_접두사_차이만_있어도_같은_회사로_본다():
     }
 
     def fetch(url: str) -> str:
+        if url.endswith("/robots.txt"):
+            return ""
         if url == original:
             raise HomepageCertNameMismatchError(
                 "인증서 이름 불일치", host="www.example.co.kr"

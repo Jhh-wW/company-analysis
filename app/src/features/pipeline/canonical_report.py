@@ -24,7 +24,13 @@ from src.features.pipeline.port import (
     ReportTable,
     SummaryItem,
 )
-from src.features.provenance.sources import Source, evidence_text_hash
+from src.features.provenance.sources import (
+    Source,
+    evidence_text_hash,
+    is_canonical_official_with_registry,
+    official_web_currentness_is_usable,
+    source_type_is_official_ir,
+)
 from src.features.report_standard import (
     CANONICAL_SCHEMA_VERSION,
     PublishBlockedError,
@@ -415,6 +421,17 @@ def write_and_verify_sections(
 
 
 def _source_date(source: Source) -> str:
+    if source_type_is_official_ir(source.source_type):
+        # 현재 IR PDF 수집 계약에는 신뢰 가능한 문서 발표일·기준일이 없다.
+        return ""
+    if not official_web_currentness_is_usable(
+        source_type=source.source_type,
+        url=source.url,
+        published_at=source.published_at,
+        disclosed_at=source.disclosed_at,
+        collected_at=source.collected_at,
+    ):
+        return ""
     return source.published_at or source.disclosed_at or source.collected_at
 
 
@@ -791,8 +808,20 @@ def assemble_report(
     # 원문만 허용한다. canonical 메타데이터가 완전한 뉴스라도 검증 보조일
     # 뿐이며, 현재 자료 모델에는 보조 근거 역할을 보존할 필드가 없으므로
     # 공개 사실로 승격하지 않고 fail-closed 한다.
+    source_registry = tuple(sources)
     valid_sources = [
-        source for source in sources if source.is_canonical_official
+        source
+        for source in source_registry
+        if is_canonical_official_with_registry(source, source_registry)
+        and not source_type_is_official_ir(source.source_type)
+        and official_web_currentness_is_usable(
+            source_type=source.source_type,
+            url=source.url,
+            published_at=source.published_at,
+            disclosed_at=source.disclosed_at,
+            collected_at=source.collected_at,
+            reference_date=as_of_date,
+        )
     ]
     source_numbers = [source.number for source in valid_sources]
     source_ids = [source.source_id for source in valid_sources]
@@ -862,6 +891,22 @@ def assemble_report(
     used_by_source: dict[str, set[str]] = defaultdict(set)
     for fact in facts:
         used_by_source[fact.source_id].add(fact.section_owner)
+    # 공식 웹·IR Fact가 직접 참조한 Source뿐 아니라 그 도메인을 증명한 DART
+    # attester도 같은 장의 transitive provenance로 보존한다.
+    source_by_id = {source.source_id: source for source in valid_sources}
+    pending = list(used_by_source)
+    while pending:
+        source_id = pending.pop(0)
+        source = source_by_id.get(source_id)
+        if source is None:
+            continue
+        dependency_id = source.domain_attestation_source_id.strip()
+        if not dependency_id or dependency_id not in source_by_id:
+            continue
+        before = set(used_by_source.get(dependency_id, set()))
+        used_by_source[dependency_id].update(used_by_source[source_id])
+        if used_by_source[dependency_id] != before:
+            pending.append(dependency_id)
     registered_sources = [
         replace(source, used_in=sorted(used_by_source[source.source_id]))
         for source in sources_by_number.values()

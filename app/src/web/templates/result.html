@@ -221,7 +221,7 @@
 </div>
 
 {# ── 출처 목록 — 본문 문장 뒤 번호가 여기를 가리킨다 (P-24 · D14-1) #}
-{% if report.citations %}
+{% if public_citations %}
   <section class="report-support" aria-labelledby="report-citations-title">
     <h2 id="report-citations-title"><span class="no">부록</span><span class="txt">출처와 검증 상태</span></h2>
     <p class="muted section-note">
@@ -232,7 +232,7 @@
         <thead><tr><th scope="col" style="width:56px">#</th><th scope="col">자료</th><th scope="col">기준일·자료 상태</th><th scope="col">사실 검증</th><th scope="col">원문 위치</th><th scope="col">본문 사용 장</th></tr></thead>
         <tbody>
           {% set source_numbers = namespace(seen=[]) %}
-          {% for c in report.citations %}
+          {% for c in public_citations %}
           {% if c.number not in source_numbers.seen %}
           <tr id="src{{ c.number }}">
             <td>[{{ c.number }}]</td>

@@ -16,11 +16,14 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
 import secrets
+import unicodedata
 import urllib.parse
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from datetime import date
 from enum import Enum
@@ -33,6 +36,13 @@ def evidence_text_hash(text: str) -> str:
 
     normalized = " ".join(str(text or "").split()).casefold()
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest() if normalized else ""
+
+
+def exact_evidence_text_hash(text: str) -> str:
+    """원문 문자열을 바꾸지 않고 UTF-8 바이트 그대로 계산한 SHA-256."""
+
+    raw = str(text or "")
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest() if raw else ""
 
 
 _KNOWN_FILING_HOSTS = frozenset(
@@ -69,6 +79,51 @@ def _publisher_key(value: str) -> str:
 _URL_IN_EVIDENCE = re.compile(
     r"(?i)(?:https?://|www\.)[^\s<>\"'()\[\]{}]+"
 )
+_DART_PROFILE_ATTESTATION_KEYS = frozenset({"corp_code", "corp_name", "hm_url"})
+
+
+def _safe_profile_homepage_host(value: object) -> str:
+    """DART ``hm_url`` 값에서 공개 HTTPS로 승격 가능한 host만 읽는다."""
+
+    if not isinstance(value, str):
+        return ""
+    raw = value.strip()
+    if (
+        not raw
+        or len(raw) > 2_048
+        or "\\" in raw
+        or any(ord(char) < 32 for char in raw)
+    ):
+        return ""
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+        hostname = (parsed.hostname or "").rstrip(".").encode("idna").decode("ascii")
+        port = parsed.port
+    except (UnicodeError, TypeError, ValueError):
+        return ""
+    normalized_host = hostname.casefold()
+    if (
+        parsed.scheme.casefold() not in {"http", "https"}
+        or not normalized_host
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+        or parsed.fragment
+        or "%" in parsed.netloc
+        or normalized_host == "localhost"
+        or normalized_host.endswith(".localhost")
+        or "." not in normalized_host
+    ):
+        return ""
+    try:
+        address = ipaddress.ip_address(normalized_host)
+    except ValueError:
+        address = None
+    if address is not None and not address.is_global:
+        return ""
+    return normalized_host
 
 
 def _hosts_in_domain_attestation_evidence(evidence: str) -> set[str]:
@@ -79,8 +134,27 @@ def _hosts_in_domain_attestation_evidence(evidence: str) -> set[str]:
     않는다.
     """
 
+    raw_evidence = str(evidence or "").strip()
+    try:
+        profile = json.loads(raw_evidence)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        profile = None
+    else:
+        # OpenDART 기업개황은 hm_url에 scheme을 생략하거나 legacy http를 돌려줄
+        # 수 있다. 닫힌 최소 subset 전체가 정확할 때만 그 필드를 별도 해석한다.
+        if (
+            not isinstance(profile, dict)
+            or set(profile) != _DART_PROFILE_ATTESTATION_KEYS
+            or not all(isinstance(profile.get(key), str) for key in profile)
+            or re.fullmatch(r"\d{8}", profile["corp_code"].strip()) is None
+            or not profile["corp_name"].strip()
+        ):
+            return set()
+        profile_host = _safe_profile_homepage_host(profile["hm_url"])
+        return {profile_host} if profile_host else set()
+
     hosts: set[str] = set()
-    for token in _URL_IN_EVIDENCE.findall(str(evidence or "")):
+    for token in _URL_IN_EVIDENCE.findall(raw_evidence):
         candidate = token.rstrip(".,;:!?。，、")
         if candidate.casefold().startswith("www."):
             candidate = f"https://{candidate}"
@@ -173,6 +247,163 @@ _OFFICIAL_SOURCE_TYPES_BY_KIND: dict[SourceKind, frozenset[str]] = {
     ),
     SourceKind.NEWS: frozenset(),
 }
+_PROVENANCE_ROLES = frozenset({"citation", "attestation_only"})
+OFFICIAL_WEB_CURRENT_MAX_AGE_DAYS = 400
+_HISTORICAL_WEB_MARKER = re.compile(
+    r"^(?:news|newsroom|press|media|notice|release|archive|blog|search|results?|find)",
+    re.IGNORECASE,
+)
+_DOCUMENT_WEB_KEY = re.compile(
+    r"^(?:id|idx|seq|no|article|post|board|bbs|view|q|s|query|"
+    r"keywords?|search|term)$",
+    re.IGNORECASE,
+)
+_DOCUMENT_WEB_SEGMENT = re.compile(
+    r"^(?:article|post|board|bbs|view)(?:[-_].*)?$",
+    re.IGNORECASE,
+)
+_SEARCH_WEB_MARKER = re.compile(r"^(?:search|results?|find)", re.IGNORECASE)
+_SEARCH_WEB_QUERY_KEY = re.compile(
+    r"^(?:q|s|query|keywords?|search|term)$",
+    re.IGNORECASE,
+)
+_WEB_YEAR_MARKER = re.compile(r"(?<!\d)20\d{2}(?!\d)")
+_OFFICIAL_IR_SOURCE_TYPES = frozenset({"회사 공식 ir", "공식 ir"})
+_OFFICIAL_WEB_SOURCE_TYPES = frozenset(
+    {"회사 공식 웹", "공식 웹", "회사 공식 자료"}
+)
+
+
+def source_type_is_official_ir(source_type: str) -> bool:
+    """표시 변형을 포함한 닫힌 공식 IR source_type 판정."""
+
+    return " ".join(str(source_type or "").split()).casefold() in (
+        _OFFICIAL_IR_SOURCE_TYPES
+    )
+
+
+def source_type_is_official_web(source_type: str) -> bool:
+    """현재성 계약을 적용하는 공식 HTML source_type 판정."""
+
+    return " ".join(str(source_type or "").split()).casefold() in (
+        _OFFICIAL_WEB_SOURCE_TYPES
+    )
+
+
+def _decoded_web_component(value: str) -> str:
+    decoded = str(value or "")
+    for _ in range(3):
+        candidate = urllib.parse.unquote(decoded)
+        if candidate == decoded:
+            break
+        decoded = candidate
+    return unicodedata.normalize("NFKC", decoded).casefold()
+
+
+def _historical_web_token(value: str) -> bool:
+    normalized = _decoded_web_component(value)
+    tokens = tuple(
+        token
+        for token in re.split(r"[^0-9a-z가-힣_-]+", normalized)
+        if token
+    )
+    return any(
+        _HISTORICAL_WEB_MARKER.match(token)
+        or _DOCUMENT_WEB_SEGMENT.fullmatch(token)
+        or _WEB_YEAR_MARKER.search(token)
+        for token in tokens
+    )
+
+
+def official_web_url_requires_document_date(url: str) -> bool:
+    """보도·문서형 공식 웹 URL인지 host/path/query를 반복 decode해 판정한다."""
+
+    try:
+        parsed = urllib.parse.urlsplit(str(url or "").strip())
+    except ValueError:
+        return True
+    host_labels = tuple(
+        label for label in _decoded_web_component(parsed.hostname or "").split(".")
+        if label
+    )
+    path = _decoded_web_component(parsed.path).replace("\\", "/")
+    if any(_historical_web_token(label) for label in host_labels):
+        return True
+    if _historical_web_token(path):
+        return True
+    query = _decoded_web_component(parsed.query)
+    query_pairs = urllib.parse.parse_qsl(query, keep_blank_values=True)
+    if any(
+        _DOCUMENT_WEB_KEY.fullmatch(_decoded_web_component(key))
+        or _historical_web_token(key)
+        or _historical_web_token(value)
+        for key, value in query_pairs
+    ):
+        return True
+    return bool(
+        query
+        and not query_pairs
+        and _historical_web_token(query)
+    )
+
+
+def official_web_url_is_search_result(url: str) -> bool:
+    """검색 결과·snippet URL은 문서일 유무와 무관하게 공개 사실에서 뺀다."""
+
+    try:
+        parsed = urllib.parse.urlsplit(str(url or "").strip())
+    except ValueError:
+        return True
+    host_path_tokens = tuple(
+        token
+        for token in re.split(
+            r"[^0-9a-z가-힣_-]+",
+            _decoded_web_component(
+                f"{parsed.hostname or ''}/{parsed.path}"
+            ),
+        )
+        if token
+    )
+    if any(_SEARCH_WEB_MARKER.match(token) for token in host_path_tokens):
+        return True
+    query = _decoded_web_component(parsed.query)
+    return any(
+        _SEARCH_WEB_QUERY_KEY.fullmatch(_decoded_web_component(key))
+        for key, _value in urllib.parse.parse_qsl(query, keep_blank_values=True)
+    )
+
+
+def official_web_currentness_is_usable(
+    *,
+    source_type: str,
+    url: str,
+    published_at: str = "",
+    disclosed_at: str = "",
+    collected_at: str = "",
+    reference_date: str = "",
+) -> bool:
+    """안정 페이지는 수집일, 역사 문서 경로는 검증 문서일로 현재성을 닫는다."""
+
+    if not source_type_is_official_web(source_type):
+        return True
+    if official_web_url_is_search_result(url):
+        return False
+    requires_document_date = official_web_url_requires_document_date(url)
+    document_date = str(published_at or disclosed_at or "").strip()
+    collected_date = str(collected_at or "").strip()
+    if not document_date:
+        if requires_document_date:
+            return False
+        document_date = collected_date
+    try:
+        published = date.fromisoformat(document_date)
+        reference = date.fromisoformat(
+            str(reference_date or collected_date).strip()
+        )
+    except ValueError:
+        return False
+    age_days = (reference - published).days
+    return 0 <= age_days <= OFFICIAL_WEB_CURRENT_MAX_AGE_DAYS
 
 
 @dataclass(frozen=True)
@@ -217,6 +448,9 @@ class Source:
     #: 수집 단계에서 보존한 원문 조각·표 행의 정규화 SHA-256 목록.
     #: canonical FactRecord.state_evidence는 반드시 이 목록 중 하나와 일치해야 한다.
     evidence_hashes: list[str] = field(default_factory=list)
+    #: 대소문자·공백까지 같은 원문을 요구하는 계약용 UTF-8 SHA-256 목록.
+    #: 비어 있으면 legacy Source이고, 값이 있을 때만 저장 JSON과 HMAC에 포함한다.
+    exact_evidence_hashes: list[str] = field(default_factory=list)
     #: 회사 공식 웹·IR처럼 ``OTHER``인 원문의 도메인을 확인해 준 독립 공시
     #: Source ID. 자기 자신이나 또 다른 자기선언 웹 자료는 쓸 수 없다.
     domain_attestation_source_id: str = ""
@@ -226,6 +460,9 @@ class Source:
     #: 수집 경계가 Source 신원·원문 해시를 함께 잠근 서버 HMAC. 공개 보고서가
     #: evidence_hashes를 스스로 고쳐 쓰는 것을 막으며 렌더러에는 표시하지 않는다.
     provenance_seal: str = ""
+    #: ``attestation_only``는 다른 공식 Source의 신원·도메인을 증명하는 내부
+    #: provenance 의존성이다. 검증·저장에는 남지만 사용자 출처 부록에는 표시하지 않는다.
+    provenance_role: str = "citation"
 
     @property
     def is_valid(self) -> bool:
@@ -263,8 +500,15 @@ class Source:
                 bool(self.source_type.strip()),
                 bool(self.fact_status.strip()),
                 bool(self.evidence_hashes),
+                self.provenance_role in _PROVENANCE_ROLES,
                 all(re.fullmatch(r"[0-9a-f]{64}", item) for item in self.evidence_hashes),
                 len(self.evidence_hashes) == len(set(self.evidence_hashes)),
+                all(
+                    re.fullmatch(r"[0-9a-f]{64}", item)
+                    for item in self.exact_evidence_hashes
+                ),
+                len(self.exact_evidence_hashes)
+                == len(set(self.exact_evidence_hashes)),
             )
         )
 
@@ -321,6 +565,14 @@ def _source_provenance_payload(source: Source) -> bytes:
         "domain_attestation_source_id": source.domain_attestation_source_id,
         "domain_attestation_evidence": source.domain_attestation_evidence,
     }
+    # 빈 exact 목록은 이 필드가 생기기 전 Source의 HMAC payload와 완전히 같다.
+    # 새 exact provenance를 실제로 가진 Source만 선택적으로 seal 범위를 넓힌다.
+    if source.exact_evidence_hashes:
+        payload["exact_evidence_hashes"] = sorted(source.exact_evidence_hashes)
+    # 기존 저장 Source의 HMAC payload에는 role 필드가 없었다. 기본 citation은
+    # byte-for-byte 호환을 유지하고, 새 내부 attester 역할일 때만 seal에 포함한다.
+    if source.provenance_role != "citation":
+        payload["provenance_role"] = source.provenance_role
     return json.dumps(
         payload,
         ensure_ascii=False,
@@ -438,7 +690,7 @@ def render_sources(sources: list[Source]) -> str:
         `[출처]` 머리말부터 시작하는 마크다운 블록.
     """
     lines = [SOURCES_HEADER]
-    for source in sources:
+    for source in visible_citations(sources):
         if source.kind is SourceKind.OTHER and source.collected_at:
             # ★ 홈페이지 같은 「기타」 자료는 «확인»으로 적는다.
             #   공시의 「수집 …」과 글자가 같으면 다시 읽을 때 공시로 잘못 분류된다.
@@ -456,6 +708,21 @@ def render_sources(sources: list[Source]) -> str:
         if meta:
             lines.append(f"     {meta}")
     return "\n".join(lines)
+
+
+def visible_citations(sources: Iterable[object]) -> list[Source]:
+    """사용자 공개 채널에 내보낼 일반 citation만 고른다.
+
+    ``attestation_only``는 출고 검증·감사 JSON·저장 재로딩에는 남기되,
+    인증키 없는 내부 OpenDART endpoint를 사용자 출처처럼 표시하지 않는다.
+    PDF·Notion·웹·마크다운이 모두 이 한 정책을 공유한다.
+    """
+
+    return [
+        source
+        for source in sources
+        if isinstance(source, Source) and source.provenance_role == "citation"
+    ]
 
 
 # ══════════════════════════════════════════════════════════

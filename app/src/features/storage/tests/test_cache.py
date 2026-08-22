@@ -380,6 +380,36 @@ def test_layer1_fresh_when_news_citation_within_3_years(tmp_path: Path) -> None:
     assert hit is not None
 
 
+@pytest.mark.parametrize(
+    ("collected_at", "expected"),
+    [("2022-08-15", False), ("2026-08-01", True)],
+)
+def test_layer1_공식웹은_현재조회일_기준_400일안에서만_재사용한다(
+    collected_at: str,
+    expected: bool,
+) -> None:
+    report = replace(
+        _report(),
+        citations=[
+            Source(
+                number=1,
+                kind=SourceKind.OTHER,
+                label="회사 소개",
+                collected_at=collected_at,
+                source_type="회사 공식 웹",
+                url="https://company.example/about",
+            )
+        ],
+    )
+
+    assert cache._is_layer1_fresh(
+        report,
+        cached_fiscal_year=2025,
+        current_fiscal_year=2025,
+        today=dt.date(2026, 8, 15),
+    ) is expected
+
+
 # ══════════════════════════════════════════════════════════
 # 1층 — 보관 상한 (5개, 축출 우선순위)
 # ══════════════════════════════════════════════════════════

@@ -57,7 +57,7 @@ from src.core.citations import citation_marker
 from src.core.constants import section_display_heading
 from src.features.export_pdf import constants
 from src.features.pipeline.port import Report, ReportSection, ReportTable
-from src.features.provenance.sources import Source, SourceKind
+from src.features.provenance.sources import Source, SourceKind, visible_citations
 from src.features.report_standard import build_published_report
 from src.features.report_standard.constants import SECTION_BY_ID, TIME_SECTION_IDS
 from src.features.report_standard.section_content import (
@@ -452,8 +452,8 @@ def _citations(report: Report) -> list[Source]:
 
     unique: list[Source] = []
     seen_numbers: set[int] = set()
-    for item in report.citations:
-        if not isinstance(item, Source) or item.number in seen_numbers:
+    for item in visible_citations(report.citations):
+        if item.number in seen_numbers:
             continue
         seen_numbers.add(item.number)
         unique.append(item)

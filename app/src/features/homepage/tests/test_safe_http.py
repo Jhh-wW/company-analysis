@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import socket
+import urllib.error
 import urllib.request
 from email.message import Message
 
@@ -235,6 +236,25 @@ def test_redirect_handler_has_a_small_hard_limit() -> None:
     assert safe_http.MAX_REDIRECTS == 4
 
 
+def test_redirect는_연결전에_호출자_robots_정책을_적용한다(monkeypatch) -> None:
+    def should_not_resolve(_url: str):
+        raise AssertionError("차단 경로는 DNS 확인이나 연결 단계로 넘어가면 안 됩니다")
+
+    monkeypatch.setattr(safe_http, "resolve_safe_target", should_not_resolve)
+    handler = safe_http._SafeRedirectHandler(url_allowed=lambda _url: False)
+    original = urllib.request.Request("https://company.example/about")
+
+    with pytest.raises(safe_http.UnsafeHomepageUrlError):
+        handler.redirect_request(
+            original,
+            None,
+            302,
+            "Found",
+            {},
+            "https://company.example/private",
+        )
+
+
 def test_https_socket_is_pinned_but_sni_keeps_original_hostname(monkeypatch) -> None:
     connections: list[tuple[str, int]] = []
     server_names: list[str] = []
@@ -402,8 +422,9 @@ def test_default_fetch_uses_same_timeout_for_open_and_body(monkeypatch) -> None:
         def __exit__(self, exc_type, exc, traceback):
             return False
 
-    def fake_open(request, *, timeout):
+    def fake_open(request, *, timeout, url_allowed=None):
         del request
+        assert url_allowed is None
         captured["open"] = timeout
         return _Opened()
 
@@ -415,8 +436,140 @@ def test_default_fetch_uses_same_timeout_for_open_and_body(monkeypatch) -> None:
     monkeypatch.setattr(homepage_logic, "safe_urlopen", fake_open)
     monkeypatch.setattr(homepage_logic, "read_limited_text", fake_read)
 
-    assert default_fetch("https://company.example/") == "<p>회사 소개</p>"
+    fetched = default_fetch("https://company.example/")
+    assert fetched.html == "<p>회사 소개</p>"
+    assert fetched.effective_url == "https://company.example/"
     assert captured == {
         "open": homepage_logic.TIMEOUT_SEC,
         "body": homepage_logic.TIMEOUT_SEC,
     }
+
+
+@pytest.mark.parametrize(
+    ("status", "error_type"),
+    [
+        (404, homepage_logic.HomepageRobotsUnavailable),
+        (503, homepage_logic.HomepageRobotsUnreachable),
+    ],
+)
+def test_default_fetch는_robots_4xx와_5xx를_구분한다(
+    monkeypatch,
+    status: int,
+    error_type: type[Exception],
+) -> None:
+    robots_url = "https://company.example/robots.txt"
+
+    def fail(*_args, **_kwargs):
+        raise urllib.error.HTTPError(robots_url, status, "가짜 오류", {}, None)
+
+    monkeypatch.setattr(homepage_logic, "safe_urlopen", fail)
+
+    with pytest.raises(error_type):
+        default_fetch(robots_url)
+
+
+def test_open에서_쓴_시간과_body시간은_같은_절대마감을_공유한다() -> None:
+    clock = _FakeClock()
+    budget = safe_http._DeadlineBudget.after(1.0, clock=clock)
+
+    class _SharedDeadlineResponse(_FakeResponse):
+        def read1(self, size: int) -> bytes:
+            clock.advance(0.4)
+            return super().read1(size)
+
+    response = _SharedDeadlineResponse(
+        b"x" * 10,
+        {"Content-Type": "text/plain; charset=utf-8"},
+    )
+    setattr(response, safe_http._RESPONSE_DEADLINE_ATTR, budget)
+    clock.advance(0.7)  # DNS·redirect·연결/헤더에서 이미 소비한 시간
+
+    with pytest.raises(HomepageResponseError, match="시간이 초과"):
+        read_limited_text(response, timeout=10.0, clock=clock)
+    assert response.offset == 10
+
+
+def test_DNS는_작업마감_이내_별도상한과_cache를_공유한다(monkeypatch) -> None:
+    clock = _FakeClock()
+    budget = safe_http._DeadlineBudget.after(5.0, clock=clock)
+    calls: list[float] = []
+
+    def fake_dns(hostname: str, port: int, *, timeout: float):
+        assert (hostname, port) == ("company.example", 443)
+        calls.append(timeout)
+        clock.advance(2.0)
+        return tuple(_dns_answer("93.184.216.34"))
+
+    monkeypatch.setattr(safe_http, "_system_dns_answers", fake_dns)
+    monkeypatch.setattr(socket, "getaddrinfo", safe_http._SYSTEM_GETADDRINFO)
+
+    first = resolve_safe_target(
+        "https://company.example/first",
+        deadline=budget,
+    )
+    second = resolve_safe_target(
+        "https://company.example/second",
+        deadline=budget,
+    )
+
+    assert first == second
+    assert calls == [float(safe_http.DNS_TIMEOUT_SEC)]
+    assert budget.remaining() == pytest.approx(3.0)
+
+
+def test_DNS_subprocess가_마감되면_강제종료하고_fail_closed한다(
+    monkeypatch,
+) -> None:
+    class _ParentConnection:
+        def poll(self, _timeout: float) -> bool:
+            return False
+
+        def close(self) -> None:
+            return None
+
+    class _ChildConnection:
+        def close(self) -> None:
+            return None
+
+    class _Process:
+        def __init__(self) -> None:
+            self.started = False
+            self.alive = False
+            self.terminated = False
+
+        def start(self) -> None:
+            self.started = True
+            self.alive = True
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.alive = False
+
+        def join(self, timeout: float) -> None:
+            del timeout
+
+    process = _Process()
+
+    class _Context:
+        def Pipe(self, *, duplex: bool):
+            assert duplex is False
+            return _ParentConnection(), _ChildConnection()
+
+        def Process(self, **kwargs):
+            assert kwargs["target"] is safe_http._dns_worker
+            assert kwargs["daemon"] is True
+            return process
+
+    monkeypatch.setattr(
+        safe_http.multiprocessing,
+        "get_context",
+        lambda mode: _Context() if mode == "spawn" else None,
+    )
+
+    with pytest.raises(UnsafeHomepageUrlError, match="시간이 초과"):
+        safe_http._system_dns_answers("slow.example", 443, timeout=0.01)
+    assert process.started
+    assert process.terminated

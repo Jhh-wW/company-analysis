@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import date
 
 import pytest
 
@@ -12,7 +13,19 @@ from src.features.pipeline.canonical_report import (
     sections_from_picks,
 )
 from src.features.pipeline.port import ReportSection, ReportTable
-from src.features.provenance.sources import Source, SourceKind, evidence_text_hash
+from src.features.company_comparison.official_sources import (
+    VERIFIED_FINAL_URL_FIELD,
+    VERIFIED_FINAL_URL_VALUE,
+    bind_dart_profile_attestation,
+    register_candidate_sentence_evidence,
+)
+from src.features.provenance.citations import build_citations
+from src.features.provenance.sources import (
+    Source,
+    SourceKind,
+    evidence_text_hash,
+    seal_collected_source,
+)
 from src.features.spanselect.canonical import (
     CanonicalPick,
     historical_performance_basis_sid,
@@ -21,21 +34,23 @@ from src.features.spanselect.canonical import (
 
 def _source(number: int, evidence: str = "공식 원문") -> Source:
     document_id = f"202608130000{number:02d}"
-    return Source(
-        number=number,
-        kind=SourceKind.FILING,
-        label=f"공식 자료 {number}",
-        disclosed_at="2026-08-13",
-        source_id=f"source-{number}",
-        title=f"공식 자료 {number}",
-        publisher="가나다 주식회사",
-        host="dart.fss.or.kr",
-        url=f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={document_id}",
-        document_id=document_id,
-        location=f"본문 {number}",
-        source_type="공식 공시",
-        fact_status="실제",
-        evidence_hashes=[evidence_text_hash(evidence)],
+    return seal_collected_source(
+        Source(
+            number=number,
+            kind=SourceKind.FILING,
+            label=f"공식 자료 {number}",
+            disclosed_at="2026-08-13",
+            source_id=f"source-{number}",
+            title=f"공식 자료 {number}",
+            publisher="가나다 주식회사",
+            host="dart.fss.or.kr",
+            url=f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={document_id}",
+            document_id=document_id,
+            location=f"본문 {number}",
+            source_type="공식 공시",
+            fact_status="실제",
+            evidence_hashes=[evidence_text_hash(evidence)],
+        )
     )
 
 
@@ -332,6 +347,156 @@ def test_complete_news_metadata_is_not_promoted_to_a_draft_fact() -> None:
         summary_ask=lambda *_args: ({"items": []}, {}),
         steps=[],
         as_of_date="2026-08-19",
+        analysis_period="2023~2025 완료 회계연도",
+        latest_performance_period="2025년 공식 공시",
+        publish=False,
+    )
+
+    assert report.sections == []
+    assert report.fact_records == []
+    assert report.citations == []
+
+
+def test_문서일_미결속_공식IR은_registry가_유효해도_canonical_fact가_아니다() -> None:
+    evidence = "당사는 2015년부터 베타와 경쟁합니다."
+    fragments = register_candidate_sentence_evidence(
+        {
+            1: {
+                "종류": "공식 IR",
+                "원문": evidence,
+                "출처": "https://alpha.example/ir/archive-2015.pdf",
+                "문서ID": "a" * 64,
+                "문서명": "2015 Investor Presentation",
+                "원문위치": "PDF p.2 1문단 · pypdf 6.16.1",
+                VERIFIED_FINAL_URL_FIELD: VERIFIED_FINAL_URL_VALUE,
+            }
+        }
+    )
+    bound = bind_dart_profile_attestation(
+        fragments,
+        profile={
+            "status": "000",
+            "corp_code": "00000001",
+            "corp_name": "주식회사 알파",
+            "hm_url": "alpha.example",
+        },
+        corp_code="00000001",
+        company_name="주식회사 알파",
+        collected_on="2026-08-23",
+    )
+    sources = build_citations(
+        bound.fragments,
+        filing=None,
+        collected_on=date(2026, 8, 23),
+        company_publisher="주식회사 알파",
+    )
+    assert bound.attester is not None
+    sources.append(bound.attester)
+    ir_source = next(source for source in sources if source.source_type == "회사 공식 IR")
+    assert ir_source.is_canonical_valid
+
+    pick = CanonicalPick(
+        "identity",
+        evidence,
+        1,
+        sid="1-1",
+        claim_type="identity_summary",
+    )
+    section = sections_from_picks([pick], bound.fragments)[0]
+    claim = WrittenClaim(
+        "identity",
+        evidence,
+        "조각 1·공식 IR",
+        evidence,
+        1,
+        sid="1-1",
+        claim_type="identity_summary",
+    )
+
+    report = assemble_report(
+        company="주식회사 알파",
+        corp_type="상장사",
+        sections=[section],
+        written_claims=[claim],
+        sources=sources,
+        summary_ask=lambda *_args: ({"items": []}, {}),
+        steps=[],
+        as_of_date="2026-08-23",
+        analysis_period="2023~2025 완료 회계연도",
+        latest_performance_period="2025년 공식 공시",
+        publish=False,
+    )
+
+    assert report.sections == []
+    assert report.fact_records == []
+    assert report.citations == []
+
+
+def test_오래된_newsroom_공식웹은_registry가_유효해도_canonical_fact가_아니다() -> None:
+    evidence = "당사의 경쟁사는 베타입니다."
+    fragments = register_candidate_sentence_evidence(
+        {
+            1: {
+                "종류": "홈페이지",
+                "원문": evidence,
+                "출처": "https://alpha.example/newsroom/2015-competition",
+                "문서일": "2015-06-01",
+                "문서명": "2015 경쟁 환경",
+                "원문위치": "/newsroom/2015-competition",
+                VERIFIED_FINAL_URL_FIELD: VERIFIED_FINAL_URL_VALUE,
+            }
+        }
+    )
+    bound = bind_dart_profile_attestation(
+        fragments,
+        profile={
+            "status": "000",
+            "corp_code": "00000001",
+            "corp_name": "주식회사 알파",
+            "hm_url": "alpha.example",
+        },
+        corp_code="00000001",
+        company_name="주식회사 알파",
+        collected_on="2026-08-23",
+    )
+    sources = build_citations(
+        bound.fragments,
+        filing=None,
+        collected_on=date(2026, 8, 23),
+        company_publisher="주식회사 알파",
+    )
+    assert bound.attester is not None
+    sources.append(bound.attester)
+    web_source = next(source for source in sources if source.source_type == "회사 공식 웹")
+    assert web_source.is_canonical_valid
+    assert web_source.fact_status == "과거·현재성 미확정 문서 수집 참고"
+
+    pick = CanonicalPick(
+        "identity",
+        evidence,
+        1,
+        sid="1-1",
+        claim_type="identity_summary",
+    )
+    report = assemble_report(
+        company="주식회사 알파",
+        corp_type="상장사",
+        sections=sections_from_picks([pick], bound.fragments),
+        written_claims=[
+            WrittenClaim(
+                "identity",
+                evidence,
+                "조각 1·홈페이지",
+                evidence,
+                1,
+                sid="1-1",
+                claim_type="identity_summary",
+            )
+        ],
+        sources=sources,
+        summary_ask=lambda *_args: ({"items": []}, {}),
+        steps=[],
+        as_of_date="2026-08-23",
         analysis_period="2023~2025 완료 회계연도",
         latest_performance_period="2025년 공식 공시",
         publish=False,

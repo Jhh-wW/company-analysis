@@ -6,6 +6,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
+import hmac
+import json
+
+from src.features.provenance import sources as sources_module
 
 import pytest
 
@@ -14,13 +19,96 @@ from src.features.provenance.sources import (
     SourceKind,
     count_missing_dates,
     evidence_text_hash,
+    exact_evidence_text_hash,
     has_valid_provenance_seal,
     is_canonical_official_with_registry,
     official_domain_attestation_problem,
+    official_web_currentness_is_usable,
+    official_web_url_is_search_result,
+    official_web_url_requires_document_date,
     parse_sources,
     render_sources,
     seal_collected_source,
+    visible_citations,
 )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://company.example/newsdetail/1",
+        "https://NEWS.company.example/about",
+        "https://company.example/%256eewsroom/article",
+        "https://company.example/?section=newsroom",
+        "https://company.example/view?path=%252Fpress%252Frelease",
+        "https://company.example/about?id=1",
+        "https://company.example/company/2015/strategy",
+        "https://company.example/search?q=competition",
+        "https://company.example/results?keyword=competition",
+        "https://company.example/find?query=competition",
+    ],
+)
+def test_역사문서형_공식웹_URL은_host_path_query우회를_닫는다(url: str) -> None:
+    assert official_web_url_requires_document_date(url)
+
+
+def test_안정페이지와_language_query는_수집일현재확인을_유지한다() -> None:
+    url = "https://company.example/company/about?lang=ko"
+
+    assert not official_web_url_requires_document_date(url)
+    assert official_web_currentness_is_usable(
+        source_type="회사 공식 웹",
+        url=url,
+        collected_at="2026-08-23",
+    )
+    assert not official_web_currentness_is_usable(
+        source_type="회사 공식 웹",
+        url=url,
+        published_at="2015-01-01",
+        collected_at="2026-08-23",
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://search.company.example/about",
+        "https://company.example/search/results",
+        "https://company.example/?q=beta",
+        "https://company.example/?%2571=beta",
+    ],
+)
+def test_검색결과_URL은_최근문서일이_있어도_공개사실로_쓰지않는다(url: str) -> None:
+    assert official_web_url_is_search_result(url)
+    assert not official_web_currentness_is_usable(
+        source_type="회사 공식 웹",
+        url=url,
+        published_at="2026-08-01",
+        collected_at="2026-08-23",
+        reference_date="2026-08-23",
+    )
+
+
+@pytest.mark.parametrize(
+    ("published_at", "expected"),
+    [
+        ("", False),
+        ("not-a-date", False),
+        ("2027-01-01", False),
+        ("2015-01-01", False),
+        ("2026-08-01", True),
+    ],
+)
+def test_역사문서형_공식웹은_검증된_최근문서일만_현재로_쓴다(
+    published_at: str,
+    expected: bool,
+) -> None:
+    assert official_web_currentness_is_usable(
+        source_type="회사 공식 웹",
+        url="https://company.example/newsroom/item",
+        published_at=published_at,
+        collected_at="2026-08-23",
+    ) is expected
 
 # 기획서 예시 그대로 — 줄이면 시험의 뜻이 없어진다.
 공시_출처 = Source(
@@ -100,6 +188,13 @@ def test_canonical_source_requires_identity_location_status_and_direct_url():
     )
 
     assert source.is_canonical_valid is True
+    exact = exact_evidence_text_hash("가나다는 소재 기업이다")
+    assert replace(source, exact_evidence_hashes=[exact]).is_canonical_valid is True
+    assert (
+        replace(source, exact_evidence_hashes=[exact, exact]).is_canonical_valid
+        is False
+    )
+    assert replace(source, exact_evidence_hashes=["A" * 64]).is_canonical_valid is False
     source = seal_collected_source(source)
     assert source.is_canonical_official is True
     assert replace(source, publisher="").is_canonical_valid is False
@@ -239,6 +334,82 @@ def test_official_other_domain_requires_independent_filing_evidence_binding():
     assert website.is_canonical_official is True
     assert official_domain_attestation_problem(website, [filing, website]) == ""
     assert is_canonical_official_with_registry(website, [filing, website]) is True
+
+
+@pytest.mark.parametrize(
+    ("hm_url", "website_host", "extra_field", "expected"),
+    [
+        ("jype.com", "jype.com", False, True),
+        ("http://jype.com", "jype.com", False, True),
+        ("https://jype.com", "jype.com", False, True),
+        ("https://user@jype.com", "jype.com", False, False),
+        ("https://jype.com:8443", "jype.com", False, False),
+        ("http://127.0.0.1", "127.0.0.1", False, False),
+        ("jype.com", "jype.com", True, False),
+    ],
+)
+def test_DART_profile_JSON만_scheme없는_공식host를_안전하게_증명한다(
+    hm_url: str,
+    website_host: str,
+    extra_field: bool,
+    expected: bool,
+) -> None:
+    profile = {
+        "corp_code": "00000001",
+        "corp_name": "주식회사 알파",
+        "hm_url": hm_url,
+    }
+    if extra_field:
+        profile["stock_code"] = "000001"
+    evidence = json.dumps(
+        profile,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    attester = seal_collected_source(
+        Source(
+            number=30,
+            kind=SourceKind.FILING,
+            label="주식회사 알파 OpenDART 기업개황",
+            collected_at="2026-08-23",
+            source_id="dart-company-profile-00000001",
+            title="OpenDART 기업개황",
+            publisher="주식회사 알파",
+            host="opendart.fss.or.kr",
+            url=(
+                "https://opendart.fss.or.kr/api/company.json?"
+                "corp_code=00000001"
+            ),
+            document_id="00000001",
+            location="기업개황 API · corp_code/corp_name/hm_url",
+            source_type="규제기관 공식 자료",
+            fact_status="기준일 현재 확인",
+            evidence_hashes=[evidence_text_hash(evidence)],
+        )
+    )
+    website = seal_collected_source(
+        Source(
+            number=2,
+            kind=SourceKind.OTHER,
+            label="주식회사 알파 공식 웹",
+            collected_at="2026-08-23",
+            source_id="source-alpha-web",
+            title="회사 소개",
+            publisher="주식회사 알파",
+            host=website_host,
+            url=f"https://{website_host}/about",
+            document_id="about",
+            location="/about",
+            source_type="회사 공식 웹",
+            fact_status="기준일 현재 확인",
+            evidence_hashes=[evidence_text_hash("당사는 장비를 공급한다.")],
+            domain_attestation_source_id=attester.source_id,
+            domain_attestation_evidence=evidence,
+        )
+    )
+
+    assert is_canonical_official_with_registry(website, [website, attester]) is expected
 
 
 def test_declared_official_other_cannot_self_promote_or_swap_to_fake_domain():
@@ -381,6 +552,129 @@ def test_provenance_seal_rejects_coordinated_source_and_attestation_tampering():
             forged_website, [forged_filing, forged_website]
         )
         is False
+    )
+
+
+def test_기본_citation_HMAC은_legacy_payload와_byte_호환이다() -> None:
+    source = Source(
+        number=8,
+        kind=SourceKind.FILING,
+        label="사업보고서",
+        disclosed_at="2026-03-15",
+        collected_at="2026-08-23",
+        source_id="legacy-source-8",
+        title="사업보고서",
+        publisher="주식회사 알파",
+        host="dart.fss.or.kr",
+        url="https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260315000001",
+        document_id="20260315000001",
+        location="사업의 내용",
+        source_type="공식 공시",
+        fact_status="공시 실제값",
+        evidence_hashes=[evidence_text_hash("원문")],
+    )
+    legacy_payload = {
+        "number": source.number,
+        "kind": source.kind.value,
+        "label": source.label,
+        "disclosed_at": source.disclosed_at,
+        "collected_at": source.collected_at,
+        "published_at": source.published_at,
+        "domain": source.domain,
+        "source_id": source.source_id,
+        "title": source.title,
+        "publisher": source.publisher,
+        "host": source.host,
+        "url": source.url,
+        "document_id": source.document_id,
+        "location": source.location,
+        "source_type": source.source_type,
+        "fact_status": source.fact_status,
+        "evidence_hashes": sorted(source.evidence_hashes),
+        "domain_attestation_source_id": source.domain_attestation_source_id,
+        "domain_attestation_evidence": source.domain_attestation_evidence,
+    }
+    encoded = json.dumps(
+        legacy_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    legacy_seal = hmac.new(
+        sources_module._PROVENANCE_SEAL_KEY,
+        encoded,
+        hashlib.sha256,
+    ).hexdigest()
+
+    assert seal_collected_source(source).provenance_seal == legacy_seal
+    assert has_valid_provenance_seal(
+        replace(source, provenance_seal=legacy_seal)
+    )
+
+
+def test_exact_원문해시는_대소문자를_보존하고_HMAC에_결속된다() -> None:
+    upper = exact_evidence_text_hash("US is our competitor.")
+    lower = exact_evidence_text_hash("us is our competitor.")
+
+    assert upper != lower
+    assert evidence_text_hash("US is our competitor.") == evidence_text_hash(
+        "us is our competitor."
+    )
+
+    source = seal_collected_source(
+        Source(
+            number=9,
+            kind=SourceKind.FILING,
+            label="경쟁 현황",
+            evidence_hashes=[evidence_text_hash("US is our competitor.")],
+            exact_evidence_hashes=[upper],
+            provenance_role="attestation_only",
+        )
+    )
+
+    assert has_valid_provenance_seal(source)
+    assert not has_valid_provenance_seal(
+        replace(source, exact_evidence_hashes=[lower])
+    )
+    assert not has_valid_provenance_seal(
+        replace(source, provenance_role="citation")
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw", "normalized"),
+    [
+        ("K supplier", "k supplier"),
+        ("ſ market", "s market"),
+        ("ﬁ product", "fi product"),
+        ("Alpha  Beta", "Alpha Beta"),
+    ],
+)
+def test_exact_원문해시는_casefold_유니코드와_내부공백_충돌을_구분한다(
+    raw: str,
+    normalized: str,
+) -> None:
+    assert evidence_text_hash(raw) == evidence_text_hash(normalized)
+    assert exact_evidence_text_hash(raw) != exact_evidence_text_hash(normalized)
+
+
+def test_attestation_only_역할은_seal에_결속되고_모든_공개목록에서_숨는다() -> None:
+    citation = Source(number=1, kind=SourceKind.FILING, label="공개 사업보고서")
+    attester = seal_collected_source(
+        Source(
+            number=2,
+            kind=SourceKind.FILING,
+            label="내부 OpenDART 기업개황",
+            provenance_role="attestation_only",
+        )
+    )
+
+    assert visible_citations([citation, attester, object()]) == [citation]
+    assert "공개 사업보고서" in render_sources([citation, attester])
+    assert "내부 OpenDART 기업개황" not in render_sources([citation, attester])
+    assert has_valid_provenance_seal(attester)
+    assert not has_valid_provenance_seal(
+        replace(attester, provenance_role="citation")
     )
 
 

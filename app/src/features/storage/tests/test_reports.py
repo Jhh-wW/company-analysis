@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -14,7 +16,15 @@ from src.features.pipeline.port import (
     SourceStatus,
     SummaryItem,
 )
-from src.features.provenance.sources import Source, SourceKind, evidence_text_hash
+from src.features.export_pdf.automatic_release import report_sha256
+from src.features.provenance.sources import (
+    Source,
+    SourceKind,
+    evidence_text_hash,
+    exact_evidence_text_hash,
+    has_valid_provenance_seal,
+    seal_collected_source,
+)
 from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
 from src.features.storage import db, reports
 from src.shared.comparison_candidate_basis import (
@@ -117,6 +127,85 @@ def test_경쟁사후보_v1은_report_dict_json_왕복에서_그대로_보존된
     assert parse_comparison_basis_v1(
         json_restored.fact_records[0].comparison_basis
     ) == parse_comparison_basis_v1(basis)
+
+
+def test_기본_citation_JSON과_report_digest는_legacy_키집합을_유지한다() -> None:
+    report = _full_report()
+    payload = reports.report_to_dict(report)
+
+    assert all(
+        "provenance_role" not in citation for citation in payload["citations"]
+    )
+    assert all(
+        "exact_evidence_hashes" not in citation
+        for citation in payload["citations"]
+    )
+    expected = hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    assert report_sha256(report) == expected
+
+
+def test_attestation_only는_DB_재로드뒤_역할과_HMAC을_보존한다(
+    tmp_path: Path,
+) -> None:
+    attester = seal_collected_source(
+        Source(
+            number=3,
+            kind=SourceKind.FILING,
+            label="OpenDART 기업개황",
+            collected_at="2026-08-23",
+            source_id="dart-company-profile-00000001",
+            title="OpenDART 기업개황",
+            publisher="주식회사 알파",
+            host="opendart.fss.or.kr",
+            url="https://opendart.fss.or.kr/api/company.json?corp_code=00000001",
+            document_id="00000001",
+            location="corp_code/corp_name/hm_url",
+            source_type="규제기관 공식 자료",
+            fact_status="기준일 현재 확인",
+            evidence_hashes=[evidence_text_hash("봉인된 기업개황")],
+            exact_evidence_hashes=[
+                exact_evidence_text_hash("봉인된 기업개황")
+            ],
+            domain_attestation_evidence="봉인된 기업개황",
+            provenance_role="attestation_only",
+        )
+    )
+    original = replace(
+        _full_report(),
+        schema_version=CANONICAL_SCHEMA_VERSION,
+        citations=[*_full_report().citations, attester],
+    )
+    payload = reports.report_to_dict(original)
+
+    assert "provenance_role" not in payload["citations"][0]
+    assert payload["citations"][-1]["provenance_role"] == "attestation_only"
+    assert payload["citations"][-1]["exact_evidence_hashes"] == (
+        attester.exact_evidence_hashes
+    )
+    target = tmp_path / "attestation-role.db"
+    with db.connect(target) as conn:
+        reports.save(
+            conn,
+            "report-attestation-role",
+            "00000001",
+            "",
+            original,
+            created_at="2026-08-23T01:00:00+09:00",
+        )
+        restored = reports.load(conn, "report-attestation-role")
+
+    assert restored is not None
+    restored_attester = restored.citations[-1]
+    assert restored_attester.provenance_role == "attestation_only"
+    assert restored_attester.exact_evidence_hashes == attester.exact_evidence_hashes
+    assert has_valid_provenance_seal(restored_attester)
 
 
 def test_roundtrip_via_json_keeps_every_field() -> None:

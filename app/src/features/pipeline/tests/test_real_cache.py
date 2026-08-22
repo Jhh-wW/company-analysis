@@ -147,6 +147,7 @@ class FakeEngine:
             if params.get("corp_code") == "00999999":
                 return {
                     "status": "000",
+                    "corp_code": "00999999",
                     "corp_name": "베타전자",
                     "adres": "서울특별시 영등포구 국제금융로 1",
                     "ceo_nm": "김비교",
@@ -158,6 +159,7 @@ class FakeEngine:
                 }
             return {
                 "status": "000",
+                "corp_code": CORP_ID,
                 "corp_name": "가나다전자",
                 "adres": "서울특별시 강남구 테헤란로 1",
                 "ceo_nm": "홍길동",
@@ -815,8 +817,9 @@ def test_로컬통합_삼성전자_저장원문은_가짜AI로_생성이후까�
             if endpoint == "company.json":
                 return {
                     "status": "000",
+                    "corp_code": CORP_ID,
                     "corp_name": "삼성전자",
-                    "corp_eng_name": "SAMSUNG ELECTRONICS CO., LTD.",
+                    "corp_name_eng": "SAMSUNG ELECTRONICS CO., LTD.",
                     "adres": "경기도 수원시 영통구 삼성로 129",
                     "ceo_nm": "한종희",
                     "est_dt": "19690113",
@@ -1300,6 +1303,470 @@ def test_원문조각이_없으면_기타게이트_코드로_멈춘다(
 
     assert result.outcome is Outcome.GATE_STOPPED
     assert result.final_gate_reason == "other_gate"
+
+
+def test_공식IR_ok_수집은_조각과_단계기록을_그대로_보존한다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """IR 수집기의 provenance 메타데이터를 파이프라인이 다시 만들지 않는다."""
+
+    ir_fragment = {
+        "종류": real.OFFICIAL_IR_FRAGMENT_KIND,
+        "원문": "가나다전자는 베타전자와 경쟁 관계인 반도체 검사 장비 전문기업이다.",
+        "출처": "https://www.ganada.example/ir/2025-results.pdf",
+        "후보출처검증": "https_exact_dart_host",
+        "문서명": "2025년 연간 실적 설명자료",
+        "문서ID": "sha256:official-ir-pdf",
+        "원문위치": "PDF 3쪽 · 문단 2",
+    }
+    monkeypatch.setattr(real, "_collect_news", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        real,
+        "collect_homepage_fragments",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            state="none",
+            fragments=[],
+            detail="분석에 쓸 본문 없음",
+            candidate_scope_complete=True,
+        ),
+    )
+    ir_call: dict[str, Any] = {}
+
+    def collect_ir(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+        ir_call.update(kwargs)
+        return SimpleNamespace(
+            state="ok",
+            fragments=[dict(ir_fragment)],
+            detail="검증 완료",
+            attempted_documents=1,
+            downloaded_pdf_bytes=4096,
+            candidate_scope_complete=True,
+        )
+
+    monkeypatch.setattr(
+        real,
+        "collect_official_ir_fragments",
+        collect_ir,
+    )
+    counter = engine.UsageCounter()
+    financials, years = engine.fetch_financials(CORP_ID, counter)
+    steps: list[dict[str, Any]] = []
+
+    fragments, _tables, _filing_text = real._collect(
+        engine,
+        engine._client(),
+        {
+            "status": "000",
+            "corp_code": CORP_ID,
+            "corp_name": "가나다전자",
+            "corp_name_eng": "GANADA ELECTRONICS CO., LTD.",
+            "hm_url": "https://www.ganada.example",
+        },
+        UserInput(
+            company="가나다전자",
+            job=JOB,
+            region="서울 강남구",
+            posting_text=POSTING,
+        ),
+        counter,
+        steps,
+        financials=financials,
+        fin_years=years,
+        filing=None,
+    )
+
+    collected_ir = [
+        fragment
+        for fragment in fragments.values()
+        if fragment.get("종류") == real.OFFICIAL_IR_FRAGMENT_KIND
+    ]
+    assert collected_ir == [ir_fragment]
+    assert ir_call["company_aliases"] == ("GANADA ELECTRONICS CO., LTD.",)
+    assert next(step for step in steps if step.get("step") == "6_수집_공식IR") == {
+        "step": "6_수집_공식IR",
+        "조각수": 1,
+        "문서시도": 1,
+        "PDF바이트": 4096,
+        "상세": "검증 완료",
+        "후보범위완전": True,
+    }
+    ir_status = next(
+        source for source in real._sources_from(steps) if source.name == "회사 공식 IR"
+    )
+    assert ir_status.state == "ok"
+    assert "PDF 조각 1개" in ir_status.detail
+    assert "문서 1개 시도" in ir_status.detail
+
+
+@pytest.mark.parametrize(
+    ("ir_step", "expected_state"),
+    [
+        ({"오류": "PDF 파서 실패", "후보범위완전": False}, "failed"),
+        ({"없음": "IR PDF 링크 없음", "후보범위완전": True}, "none"),
+        (
+            {
+                "조각수": 2,
+                "문서시도": 1,
+                "상세": "검증 완료",
+                "후보범위완전": True,
+            },
+            "ok",
+        ),
+    ],
+)
+def test_공식IR_SourceStatus는_실패_없음_성공을_섞지_않는다(
+    ir_step: dict[str, Any],
+    expected_state: str,
+) -> None:
+    steps = [{"step": "6_수집_공식IR", **ir_step}]
+
+    source = next(
+        item for item in real._sources_from(steps) if item.name == "회사 공식 IR"
+    )
+
+    assert source.state == expected_state
+
+
+@pytest.mark.parametrize(
+    "ir_result",
+    [
+        SimpleNamespace(
+            state="failed",
+            fragments=[],
+            detail="PDF 다운로드·검증 실패",
+            attempted_documents=1,
+            downloaded_pdf_bytes=2048,
+            candidate_scope_complete=False,
+        ),
+        SimpleNamespace(
+            state="ok",
+            fragments=[
+                {
+                    "종류": real.OFFICIAL_IR_FRAGMENT_KIND,
+                    "원문": "가나다전자의 2025년 연간 실적 설명자료다.",
+                    "출처": "https://www.ganada.example/ir/truncated.pdf",
+                    "후보출처검증": "https_exact_dart_host",
+                    "문서명": "2025년 연간 실적 설명자료",
+                    "문서ID": "sha256:truncated-ir-pdf",
+                    "원문위치": "PDF 1쪽 · 문단 1",
+                }
+            ],
+            detail="페이지·글자 상한 잘림 1개",
+            attempted_documents=1,
+            downloaded_pdf_bytes=4096,
+            candidate_scope_complete=False,
+        ),
+    ],
+    ids=("failed", "truncated"),
+)
+def test_공식IR_실패나_잘림은_후보없음으로_거짓확정하지않는다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    ir_result: SimpleNamespace,
+) -> None:
+    original_get_json = engine.get_json
+    original_make_fragments = engine.make_fragments
+
+    def profile_with_homepage(
+        endpoint: str, params: dict[str, Any], counter: Any
+    ) -> dict[str, Any]:
+        payload = original_get_json(endpoint, params, counter)
+        if endpoint == "company.json" and params.get("corp_code") == CORP_ID:
+            return {**payload, "corp_code": CORP_ID, "hm_url": "https://www.ganada.example"}
+        return payload
+
+    def fragments_without_candidate(*args: Any, **kwargs: Any):
+        fragments = original_make_fragments(*args, **kwargs)
+        fragments[1] = {
+            **fragments[1],
+            "원문": "가나다전자는 반도체 검사 장비 전문기업이다.",
+        }
+        return fragments
+
+    monkeypatch.setattr(engine, "get_json", profile_with_homepage)
+    monkeypatch.setattr(
+        engine,
+        "read_filing_text",
+        lambda _path: "가나다전자는 반도체 검사 장비를 국내외 고객에게 공급한다.",
+    )
+    monkeypatch.setattr(engine, "make_fragments", fragments_without_candidate)
+    monkeypatch.setattr(
+        real,
+        "collect_homepage_fragments",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            state="none",
+            fragments=[],
+            detail="후보 문장 없음",
+            candidate_scope_complete=True,
+        ),
+    )
+    monkeypatch.setattr(
+        real,
+        "collect_official_ir_fragments",
+        lambda *_args, **_kwargs: ir_result,
+    )
+    span_calls = 0
+
+    def empty_span(*_args: Any, **_kwargs: Any):
+        nonlocal span_calls
+        span_calls += 1
+        return [], []
+
+    monkeypatch.setattr(real, "select_canonical_spans", empty_span)
+
+    result = _run()
+
+    assert span_calls == real.VOTE_ROUNDS
+    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.final_gate_reason == "other_gate"
+    assert result.final_gate_reason != "comparison_blocked"
+    ir_status = next(source for source in result.sources if source.name == "회사 공식 IR")
+    assert ir_status.state == ("failed" if ir_result.state == "failed" else "ok")
+
+
+def test_공식IR까지_완전한_후보부재는_span전에_차단한다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_get_json = engine.get_json
+    original_make_fragments = engine.make_fragments
+
+    def profile_with_homepage(
+        endpoint: str, params: dict[str, Any], counter: Any
+    ) -> dict[str, Any]:
+        payload = original_get_json(endpoint, params, counter)
+        if endpoint == "company.json" and params.get("corp_code") == CORP_ID:
+            return {**payload, "corp_code": CORP_ID, "hm_url": "https://www.ganada.example"}
+        return payload
+
+    def fragments_without_candidate(*args: Any, **kwargs: Any):
+        fragments = original_make_fragments(*args, **kwargs)
+        fragments[1] = {
+            **fragments[1],
+            "원문": "가나다전자는 반도체 검사 장비 전문기업이다.",
+        }
+        return fragments
+
+    monkeypatch.setattr(engine, "get_json", profile_with_homepage)
+    monkeypatch.setattr(
+        engine,
+        "read_filing_text",
+        lambda _path: "가나다전자는 반도체 검사 장비를 국내외 고객에게 공급한다.",
+    )
+    monkeypatch.setattr(engine, "make_fragments", fragments_without_candidate)
+    monkeypatch.setattr(
+        real,
+        "collect_homepage_fragments",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            state="none",
+            fragments=[],
+            detail="후보 문장 없음",
+            candidate_scope_complete=True,
+        ),
+    )
+    monkeypatch.setattr(
+        real,
+        "collect_official_ir_fragments",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            state="none",
+            fragments=[],
+            detail="같은 HTTPS 호스트에서 공식 IR PDF 링크를 찾지 못함",
+            attempted_documents=0,
+            downloaded_pdf_bytes=0,
+            candidate_scope_complete=True,
+        ),
+    )
+    span_called = False
+
+    def record_span(*_args: Any, **_kwargs: Any):
+        nonlocal span_called
+        span_called = True
+        return [], []
+
+    monkeypatch.setattr(real, "select_canonical_spans", record_span)
+
+    result = _run()
+
+    assert span_called is False
+    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.final_gate_reason == "comparison_blocked"
+    assert engine.generate_ai_calls == 0
+    ir_status = next(source for source in result.sources if source.name == "회사 공식 IR")
+    assert ir_status.state == "none"
+
+
+def test_오래된_newsroom_경쟁문장만_있으면_span전에_차단한다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_get_json = engine.get_json
+    original_make_fragments = engine.make_fragments
+
+    def profile_with_homepage(
+        endpoint: str, params: dict[str, Any], counter: Any
+    ) -> dict[str, Any]:
+        payload = original_get_json(endpoint, params, counter)
+        if endpoint == "company.json" and params.get("corp_code") == CORP_ID:
+            return {
+                **payload,
+                "corp_code": CORP_ID,
+                "hm_url": "https://www.ganada.example",
+            }
+        return payload
+
+    def fragments_without_candidate(*args: Any, **kwargs: Any):
+        fragments = original_make_fragments(*args, **kwargs)
+        fragments[1] = {
+            **fragments[1],
+            "원문": "가나다전자는 반도체 검사 장비 전문기업이다.",
+        }
+        return fragments
+
+    monkeypatch.setattr(engine, "get_json", profile_with_homepage)
+    monkeypatch.setattr(
+        engine,
+        "read_filing_text",
+        lambda _path: "가나다전자는 반도체 검사 장비를 공급한다.",
+    )
+    monkeypatch.setattr(engine, "make_fragments", fragments_without_candidate)
+    monkeypatch.setattr(
+        real,
+        "collect_homepage_fragments",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            state="ok",
+            fragments=[
+                {
+                    "종류": real.HOMEPAGE_FRAGMENT_KIND,
+                    "원문": "가나다전자는 베타전자와 경쟁 관계인 기업이다.",
+                    "출처": "https://www.ganada.example/newsroom/2015-competition",
+                    "문서일": "2015-06-01",
+                    "후보출처검증": "https_exact_dart_host",
+                }
+            ],
+            detail="",
+            candidate_scope_complete=True,
+        ),
+    )
+    monkeypatch.setattr(
+        real,
+        "collect_official_ir_fragments",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            state="none",
+            fragments=[],
+            detail="공식 IR PDF 없음",
+            attempted_documents=0,
+            downloaded_pdf_bytes=0,
+            candidate_scope_complete=True,
+        ),
+    )
+
+    def forbidden_span(*_args: Any, **_kwargs: Any):
+        raise AssertionError("과거 newsroom 문장으로 유료 span을 호출하면 안 됩니다")
+
+    monkeypatch.setattr(real, "select_canonical_spans", forbidden_span)
+
+    result = _run()
+
+    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.final_gate_reason == "comparison_blocked"
+    assert result.sentences_made == 0
+    assert engine.generate_ai_calls == 0
+
+
+def test_공식IR_Source와_attester는_참고로_보존되지만_v2후보가_아니다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_get_json = engine.get_json
+    original_discover = real.discover_official_source_candidates
+    captured: dict[str, Any] = {}
+
+    def profile_with_homepage(
+        endpoint: str, params: dict[str, Any], counter: Any
+    ) -> dict[str, Any]:
+        payload = original_get_json(endpoint, params, counter)
+        if endpoint == "company.json" and params.get("corp_code") == CORP_ID:
+            return {**payload, "corp_code": CORP_ID, "hm_url": "https://www.ganada.example"}
+        return payload
+
+    ir_fragment = {
+        "종류": real.OFFICIAL_IR_FRAGMENT_KIND,
+        "원문": "가나다전자는 베타전자와 경쟁 관계인 반도체 검사 장비 전문기업이다.",
+        "출처": "https://www.ganada.example/ir/2025-results.pdf",
+        "후보출처검증": "https_exact_dart_host",
+        "문서명": "2025년 연간 실적 설명자료",
+        "문서ID": "sha256:official-ir-pdf",
+        "원문위치": "PDF 3쪽 · 문단 2",
+    }
+    monkeypatch.setattr(engine, "get_json", profile_with_homepage)
+    monkeypatch.setattr(
+        real,
+        "collect_homepage_fragments",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            state="none",
+            fragments=[],
+            detail="후보 문장 없음",
+            candidate_scope_complete=True,
+        ),
+    )
+    monkeypatch.setattr(
+        real,
+        "collect_official_ir_fragments",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            state="ok",
+            fragments=[dict(ir_fragment)],
+            detail="검증 완료",
+            attempted_documents=1,
+            downloaded_pdf_bytes=4096,
+            candidate_scope_complete=True,
+        ),
+    )
+
+    def recording_discover(evidence_rows: Any, sources: Any, catalog: Any, **kwargs: Any):
+        rows = tuple(evidence_rows)
+        source_registry = tuple(sources)
+        ir_rows = tuple(
+            row for row in rows if row.source.source_type == "회사 공식 IR"
+        )
+        if ir_rows:
+            captured["ir_candidates"] = original_discover(
+                ir_rows,
+                source_registry,
+                catalog,
+                **kwargs,
+            )
+        return original_discover(rows, source_registry, catalog, **kwargs)
+
+    def capture_comparison_input(report: Any, **kwargs: Any):
+        captured["final_rows"] = tuple(kwargs["official_candidate_sentences"])
+        captured["final_registry"] = tuple(kwargs["candidate_source_registry"])
+        return report
+
+    monkeypatch.setattr(real, "discover_official_source_candidates", recording_discover)
+    monkeypatch.setattr(real, "_attach_competitive_position", capture_comparison_input)
+
+    _run()
+
+    ir_candidates = captured.get("ir_candidates")
+    assert ir_candidates == ()
+
+    final_ir_rows = [
+        row
+        for row in captured["final_rows"]
+        if row.source.source_type == "회사 공식 IR"
+    ]
+    assert len(final_ir_rows) == 1
+    ir_source = final_ir_rows[0].source
+    assert ir_source.domain_attestation_source_id == f"dart-company-profile-{CORP_ID}"
+    assert ir_source.url == ir_fragment["출처"]
+    attesters = [
+        source
+        for source in captured["final_registry"]
+        if source.provenance_role == "attestation_only"
+    ]
+    assert len(attesters) == 1
+    assert attesters[0].source_id == ir_source.domain_attestation_source_id
 
 
 def test_전체공시원문에_후보가_없으면_fragment를_믿지_않고_span전에_멈춘다(

@@ -57,7 +57,11 @@ from typing import Any, Iterable, Optional
 
 from src.features.pipeline.port import Report
 from src.features.provenance.freshness import is_stale
-from src.features.provenance.sources import Source, SourceKind
+from src.features.provenance.sources import (
+    Source,
+    SourceKind,
+    official_web_currentness_is_usable,
+)
 from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
 from src.features.report_standard.publish import PublishBlockedError, validate_publishable
 from src.features.storage import reports as reports_store
@@ -139,12 +143,22 @@ def _is_layer1_fresh(
     if cached_fiscal_year != current_fiscal_year:
         return False
 
+    reference_date = today or dt.date.today()
     for citation in report.citations:
         if not isinstance(citation, Source) or citation.kind is SourceKind.FILING:
             # 공시(DART)는 위에서 이미 사업연도로 비교했다 — 날짜 뺄셈을 또
             # 적용하면 "12월 결산 회사를 2월에 보면 만료"처럼 정본이 피하려던
             # 오탐이 그대로 재현된다 (§왜 DART는 개월 수로 안 재나).
             continue
+        if not official_web_currentness_is_usable(
+            source_type=citation.source_type,
+            url=citation.url,
+            published_at=citation.published_at,
+            disclosed_at=citation.disclosed_at,
+            collected_at=citation.collected_at,
+            reference_date=reference_date.isoformat(),
+        ):
+            return False
         date_str = citation.published_at or citation.collected_at
         if not date_str:
             continue

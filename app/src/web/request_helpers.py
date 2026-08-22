@@ -42,6 +42,7 @@ from src.features.business_candidate.logic import CandidateResolution
 from src.features.observability import admin_audit
 from src.features.pipeline.demo import DemoPipeline, available_companies
 from src.features.pipeline.port import CompanyLookupResult, Outcome, RunResult, UserInput
+from src.features.provenance.sources import visible_citations
 from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import logic as share_logic
 from src.features.sharelink import store as share_store
@@ -96,6 +97,11 @@ def _ctx(request: Request, **kwargs) -> dict:
     ★ 로그인 상태를 «여기서» 싣는다. 화면마다 따로 넣으면 하나쯤 빠뜨리고,
       그 화면만 「로그인 안 한 것처럼」 보이게 된다.
     """
+    report = kwargs.get("report")
+    if report is not None:
+        kwargs["public_citations"] = visible_citations(
+            getattr(report, "citations", ())
+        )
     token = request.cookies.get(auth_constants.SESSION_COOKIE_NAME)
     session = auth_logic.get_session(token)
     csrf_secret = _request_csrf_secret(request)

@@ -42,9 +42,13 @@ from src.features.pipeline.section567_contract import (
 )
 from src.features.provenance.sources import (
     Source,
+    SourceKind,
     evidence_text_hash,
+    exact_evidence_text_hash,
     is_canonical_official_with_registry,
     official_domain_attestation_problem,
+    official_web_currentness_is_usable,
+    source_type_is_official_ir,
 )
 from src.features.report_standard.constants import (
     CANONICAL_CLAIM_TYPES_BY_SECTION,
@@ -66,10 +70,18 @@ from src.features.spanselect.canonical import (
     PRIORITY_SIGNAL_PATTERNS,
 )
 from src.shared.comparison_candidate_basis import (
+    COMPARISON_SOURCE_BASIS_VERSION,
     comparison_candidate_sentence_matches,
     comparison_comparator_source_id,
+    comparison_dart_profile_attestation_is_valid,
     comparison_overlap_dimension,
+    comparison_source_basis_is_allowed,
+    comparison_source_overlap_dimension,
+    comparison_source_sentence_has_self_subject,
+    comparison_source_sentence_has_marker,
+    parse_comparison_basis,
     parse_comparison_basis_v1,
+    parse_comparison_source_basis_v2,
 )
 
 
@@ -293,6 +305,16 @@ def _corporate_name(value: str) -> str:
 def _source_date(source: Source) -> str:
     """원문 자체의 날짜를 반환한다. 수집일은 원문 날짜가 없을 때만 쓴다."""
 
+    if source_type_is_official_ir(source.source_type):
+        return ""
+    if not official_web_currentness_is_usable(
+        source_type=source.source_type,
+        url=source.url,
+        published_at=source.published_at,
+        disclosed_at=source.disclosed_at,
+        collected_at=source.collected_at,
+    ):
+        return ""
     return (source.published_at or source.disclosed_at or source.collected_at).strip()
 
 
@@ -560,10 +582,17 @@ def _comparison_official_text(evidence: str) -> str:
 
 
 def _comparison_candidate_source_id(value: object) -> str:
-    """v1 근거의 후보 출처 ID. legacy/demo 문자열은 빈 값이다."""
+    """v1/v2 근거의 후보 출처 ID. legacy/demo 문자열은 빈 값이다."""
 
-    payload = parse_comparison_basis_v1(value)
+    payload = parse_comparison_basis(value)
     return str((payload or {}).get("candidate_source_id") or "")
+
+
+def _comparison_candidate_attester_source_id(value: object) -> str:
+    """v2 후보의 자사 DART 신원 attester ID. v1에는 없다."""
+
+    payload = parse_comparison_source_basis_v2(value)
+    return str((payload or {}).get("self_attestation_source_id") or "")
 
 
 def _comparison_candidate_basis_problems(
@@ -571,10 +600,13 @@ def _comparison_candidate_basis_problems(
     sources: dict[str, Source],
     facts: dict[str, FactRecord] | None = None,
     confirmed_candidate_fact_ids: set[str] | None = None,
+    report_as_of: str = "",
 ) -> list[str]:
-    """실서비스 v1 근거를 확정된 1~8장 Fact·Source에서 역참조한다."""
+    """v1 1~8장 사실 또는 v2 봉인 공식 문장을 Source에서 역참조한다."""
 
-    payload = parse_comparison_basis_v1(fact.comparison_basis)
+    v1_payload = parse_comparison_basis_v1(fact.comparison_basis)
+    v2_payload = parse_comparison_source_basis_v2(fact.comparison_basis)
+    payload = v1_payload or v2_payload
     real_comparison = fact.fact_id.startswith("fact-compare-") and fact.source_id.startswith(
         "comparison-self-"
     )
@@ -582,13 +614,27 @@ def _comparison_candidate_basis_problems(
         return (
             [
                 f"[comparison] {fact.fact_id}: 실서비스 비교 후보 근거가 "
-                "company-comparison-basis-v1에 결속되지 않았습니다"
+                "허용된 company-comparison 후보 근거에 결속되지 않았습니다"
             ]
             if real_comparison
             else []
         )
 
     problems: list[str] = []
+    known_comparison_companies = tuple(
+        dict.fromkeys(
+            [
+                fact.legal_entity,
+                fact.comparison_target,
+                payload["candidate_name"],
+                *(
+                    candidate.comparison_target
+                    for candidate in (facts or {}).values()
+                    if candidate.comparison_target
+                ),
+            ]
+        )
+    )
     expected_comparator_source_id = comparison_comparator_source_id(
         corp_code=payload["candidate_corp_code"],
         comparison_period=fact.comparison_period,
@@ -609,11 +655,21 @@ def _comparison_candidate_basis_problems(
             f"[comparison] {fact.fact_id}: 비교 후보 원문 source_id가 등록부에 없습니다"
         )
         return problems
-    if candidate_source.document_id.strip() != payload["filing_document_id"]:
+    expected_document_id = (
+        payload["filing_document_id"]
+        if v1_payload is not None
+        else payload["source_document_id"]
+    )
+    if candidate_source.document_id.strip() != expected_document_id:
         problems.append(
-            f"[comparison] {fact.fact_id}: 비교 후보 Source 문서 ID가 v1 근거와 다릅니다"
+            f"[comparison] {fact.fact_id}: 비교 후보 Source 문서 ID가 근거와 다릅니다"
         )
-    if _corporate_name(candidate_source.publisher) != _corporate_name(fact.legal_entity):
+    if (
+        _normalized(candidate_source.publisher) != _normalized(fact.legal_entity)
+        if v2_payload is not None
+        else _corporate_name(candidate_source.publisher)
+        != _corporate_name(fact.legal_entity)
+    ):
         problems.append(
             f"[comparison] {fact.fact_id}: 비교 후보 원문의 발행 법인이 자사가 아닙니다"
         )
@@ -623,10 +679,135 @@ def _comparison_candidate_basis_problems(
         problems.append(
             f"[comparison] {fact.fact_id}: 비교 후보 원문이 검증된 공식 자료가 아닙니다"
         )
+    if not official_web_currentness_is_usable(
+        source_type=candidate_source.source_type,
+        url=candidate_source.url,
+        published_at=candidate_source.published_at,
+        disclosed_at=candidate_source.disclosed_at,
+        collected_at=candidate_source.collected_at,
+        reference_date=report_as_of,
+    ):
+        problems.append(
+            f"[comparison] {fact.fact_id}: 비교 후보 공식 웹 원문이 보고서 "
+            "기준일 현재성 상한을 넘었습니다"
+        )
     if payload["evidence_sha256"] not in candidate_source.evidence_hashes:
         problems.append(
             f"[comparison] {fact.fact_id}: 비교 후보 문장 해시가 Source 원문 등록부에 없습니다"
         )
+    if v2_payload is not None:
+        if (
+            payload["evidence_exact_sha256"]
+            not in candidate_source.exact_evidence_hashes
+            or exact_evidence_text_hash(payload["evidence_text"])
+            != payload["evidence_exact_sha256"]
+        ):
+            problems.append(
+                f"[comparison] {fact.fact_id}: v2 후보 원문의 byte-exact 해시가 "
+                "봉인 Source와 다릅니다"
+            )
+        expected_metadata = {
+            "source_kind": candidate_source.kind.value,
+            "source_type": candidate_source.source_type,
+            "source_publisher": candidate_source.publisher,
+            "source_host": candidate_source.host,
+            "source_url": candidate_source.url,
+            "source_document_id": candidate_source.document_id,
+            "source_location": candidate_source.location,
+            "source_date": _source_date(candidate_source),
+        }
+        for key, expected in expected_metadata.items():
+            if payload[key] != expected:
+                problems.append(
+                    f"[comparison] {fact.fact_id}: v2 후보 {key}가 봉인 Source와 다릅니다"
+                )
+        if not comparison_source_basis_is_allowed(payload):
+            problems.append(
+                f"[comparison] {fact.fact_id}: v2 후보가 허용된 DART·공식 HTML IR·웹 출처가 아닙니다"
+            )
+        if not comparison_candidate_sentence_matches(
+            payload,
+            comparison_target=fact.comparison_target,
+            evidence_text=payload["evidence_text"],
+            self_company=fact.legal_entity,
+            known_company_aliases=known_comparison_companies,
+        ):
+            problems.append(
+                f"[comparison] {fact.fact_id}: v2 후보 법인명·경쟁 표지·문장 해시가 "
+                "봉인된 공식 원문 한 문장에 함께 결속되지 않았습니다"
+            )
+        if not comparison_source_sentence_has_marker(payload["evidence_text"]):
+            problems.append(
+                f"[comparison] {fact.fact_id}: v2 후보 문장에 명시적 경쟁 관계 표지가 없습니다"
+            )
+        if not comparison_source_sentence_has_self_subject(
+            payload["evidence_text"], fact.legal_entity
+        ):
+            problems.append(
+                f"[comparison] {fact.fact_id}: v2 후보 문장에 자사 주어가 함께 결속되지 않았습니다"
+            )
+        if comparison_source_overlap_dimension(payload["evidence_text"]) != payload[
+            "overlap_dimension"
+        ]:
+            problems.append(
+                f"[comparison] {fact.fact_id}: v2 후보 겹침 축이 공식 원문 문장과 다릅니다"
+            )
+        attester_id = payload["self_attestation_source_id"]
+        attester = sources.get(attester_id)
+        if (
+            attester is None
+            or attester.provenance_role != "attestation_only"
+            or attester.document_id.strip() != payload["self_corp_code"]
+            or _normalized(attester.publisher) != _normalized(fact.legal_entity)
+            or not is_canonical_official_with_registry(
+                attester, tuple(sources.values())
+            )
+            or attester.domain_attestation_evidence
+            != payload["self_attestation_evidence"]
+            or evidence_text_hash(payload["self_attestation_evidence"])
+            not in attester.evidence_hashes
+        ):
+            problems.append(
+                f"[comparison] {fact.fact_id}: v2 DART 자사 고유번호·법인명 attester 결속이 다릅니다"
+            )
+        if attester is not None and not comparison_dart_profile_attestation_is_valid(
+            source_kind=attester.kind.value,
+            source_type=attester.source_type,
+            source_publisher=attester.publisher,
+            source_host=attester.host,
+            source_url=attester.url,
+            source_document_id=attester.document_id,
+            evidence=payload["self_attestation_evidence"],
+            self_corp_code=payload["self_corp_code"],
+            self_company=fact.legal_entity,
+        ):
+            problems.append(
+                f"[comparison] {fact.fact_id}: v2 attester가 닫힌 OpenDART 기업개황 계약과 다릅니다"
+            )
+        if (
+            candidate_source.kind is SourceKind.OTHER
+            and candidate_source.domain_attestation_source_id.strip() != attester_id
+        ):
+            problems.append(
+                f"[comparison] {fact.fact_id}: v2 공식 웹의 도메인 attester가 자사 신원 attester와 다릅니다"
+            )
+        try:
+            attestation = json.loads(payload["self_attestation_evidence"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            attestation = None
+        if (
+            not isinstance(attestation, dict)
+            or set(attestation) != {"corp_code", "corp_name", "hm_url"}
+            or str(attestation.get("corp_code") or "").strip()
+            != payload["self_corp_code"]
+            or _normalized(str(attestation.get("corp_name") or ""))
+            != _normalized(fact.legal_entity)
+        ):
+            problems.append(
+                f"[comparison] {fact.fact_id}: v2 봉인 기업개황 payload가 자사와 다릅니다"
+            )
+        return problems
+
     if facts is None:
         problems.append(
             f"[comparison] {fact.fact_id}: 비교 후보 fact_id를 역참조할 사실 등록부가 없습니다"
@@ -664,6 +845,8 @@ def _comparison_candidate_basis_problems(
         payload,
         comparison_target=fact.comparison_target,
         evidence_text=candidate_fact.state_evidence,
+        self_company=fact.legal_entity,
+        known_company_aliases=known_comparison_companies,
     ):
         problems.append(
             f"[comparison] {fact.fact_id}: 비교 후보 법인명·경쟁 표지·"
@@ -1095,6 +1278,7 @@ def _fact_problems(
     sources: dict[str, Source],
     facts: dict[str, FactRecord] | None = None,
     confirmed_candidate_fact_ids: set[str] | None = None,
+    report_as_of: str = "",
 ) -> list[str]:
     problems: list[str] = []
     if not _fact_core_is_complete(fact):
@@ -1419,6 +1603,11 @@ def _fact_problems(
         )
     else:
         registered_sources = tuple(sources.values())
+        if source.provenance_role != "citation":
+            problems.append(
+                f"[source] {fact.fact_id}: attestation_only Source는 사실의 직접 "
+                "근거로 연결할 수 없습니다"
+            )
         if not is_canonical_official_with_registry(source, registered_sources):
             problems.append(
                 f"[source] {fact.fact_id}: 핵심 사실은 회사·공시·IR·공식 웹·"
@@ -1430,6 +1619,23 @@ def _fact_problems(
             if attestation_problem:
                 problems.append(f"[source] {fact.fact_id}: {attestation_problem}")
         normalized_source_type = _normalized(source.source_type)
+        if source_type_is_official_ir(source.source_type):
+            problems.append(
+                f"[time] {fact.fact_id}: 문서일 미결속 IR PDF는 공개 사실의 "
+                "직접 근거로 쓸 수 없습니다"
+            )
+        if not official_web_currentness_is_usable(
+            source_type=source.source_type,
+            url=source.url,
+            published_at=source.published_at,
+            disclosed_at=source.disclosed_at,
+            collected_at=source.collected_at,
+            reference_date=report_as_of,
+        ):
+            problems.append(
+                f"[time] {fact.fact_id}: 보도·공지·archive형 공식 웹은 검증된 "
+                "최근 문서일 없이는 현재 사실의 직접 근거로 쓸 수 없습니다"
+            )
         if fact.section_owner != "competitive_position":
             if normalized_source_type.startswith("비교사 공식"):
                 problems.append(
@@ -1710,6 +1916,11 @@ def _fact_problems(
                 f"[comparison] {fact.fact_id}: 비교사 원문이 검증되지 않았습니다"
             )
         else:
+            if comparator_source.provenance_role != "citation":
+                problems.append(
+                    f"[comparison] {fact.fact_id}: attestation_only Source는 비교사의 "
+                    "직접 근거로 연결할 수 없습니다"
+                )
             if not is_canonical_official_with_registry(
                 comparator_source, tuple(sources.values())
             ):
@@ -1767,6 +1978,7 @@ def _fact_problems(
                 sources,
                 facts,
                 confirmed_candidate_fact_ids,
+                report_as_of,
             )
         )
     return problems
@@ -1961,6 +2173,7 @@ def _section_fact_ids(
     facts: dict[str, FactRecord],
     sources: dict[str, Source],
     confirmed_candidate_fact_ids: set[str] | None = None,
+    report_as_of: str = "",
 ) -> tuple[list[str], list[str]]:
     supported: list[str] = []
     problems: list[str] = []
@@ -1986,6 +2199,7 @@ def _section_fact_ids(
             sources,
             facts,
             confirmed_candidate_fact_ids,
+            report_as_of,
         )
         if fact_problems:
             problems.extend(fact_problems)
@@ -2651,6 +2865,7 @@ def validate_publishable(report: Report) -> PublishValidation:
             facts,
             sources,
             confirmed_candidate_fact_ids,
+            report.as_of_date,
         )
         supported_by_section[section.cell] = supported
         reasons.extend(problems)
@@ -2714,6 +2929,7 @@ def build_published_report(report: Report) -> Report:
             facts,
             sources,
             confirmed_candidate_fact_ids,
+            report.as_of_date,
         )
         used_fact_ids.update(supported)
         published_sections.append(
@@ -2739,6 +2955,15 @@ def build_published_report(report: Report) -> Report:
         if fact.comparator_source_id
     )
     used_source_ids.update(
+        attester_source_id
+        for fact in published_facts
+        if (
+            attester_source_id := _comparison_candidate_attester_source_id(
+                fact.comparison_basis
+            )
+        )
+    )
+    used_source_ids.update(
         candidate_source_id
         for fact in published_facts
         if (
@@ -2760,6 +2985,36 @@ def build_published_report(report: Report) -> Report:
             source_usage.setdefault(candidate_source_id, set()).add(
                 fact.section_owner
             )
+        if attester_source_id := _comparison_candidate_attester_source_id(
+            fact.comparison_basis
+        ):
+            source_usage.setdefault(attester_source_id, set()).add(
+                fact.section_owner
+            )
+    # 직접 Fact가 없는 공식 웹 도메인 attester도 공개 객체의 provenance 등록부에
+    # 남긴다. 렌더러는 Fact가 직접 인용한 번호만 본문에 표시한다.
+    report_sources = {
+        item.source_id: item
+        for item in report.citations
+        if isinstance(item, Source) and item.source_id
+    }
+    pending_source_ids = list(used_source_ids)
+    while pending_source_ids:
+        source_id = pending_source_ids.pop(0)
+        source = report_sources.get(source_id)
+        if source is None:
+            continue
+        dependency_id = source.domain_attestation_source_id.strip()
+        if not dependency_id or dependency_id not in report_sources:
+            continue
+        before = set(source_usage.get(dependency_id, set()))
+        source_usage.setdefault(dependency_id, set()).update(
+            source_usage.get(source_id, set())
+        )
+        if dependency_id not in used_source_ids:
+            used_source_ids.add(dependency_id)
+        if source_usage[dependency_id] != before:
+            pending_source_ids.append(dependency_id)
     published_citations = sorted([
         replace(
             item,

@@ -13,6 +13,12 @@ from src.features.report_standard.section_content import (
     source_verification_label,
     summary_topic,
 )
+from src.shared.comparison_candidate_basis import (
+    COMPARISON_SOURCE_BASIS_VERSION,
+    comparison_evidence_exact_sha256,
+    comparison_evidence_sha256,
+    encode_comparison_source_basis_v2,
+)
 
 
 def _section_blocks():
@@ -430,4 +436,52 @@ def test_요약_짧은제목과_부록_사실검증_표시는_정해진_형식�
     assert all(
         source_verification_label(report, source.source_id) == "사실 검증 완료"
         for source in report.citations
+    )
+
+
+def test_v2_비교후보_출처는_본문사실없음이_아닌_후보근거로_표시한다() -> None:
+    report = build_demo_report()
+    evidence = "베타전자는 우리의 현재 경쟁사다."
+    candidate_source = replace(
+        report.citations[0],
+        number=max(source.number for source in report.citations) + 1,
+        source_id="source-candidate-only",
+    )
+    basis = encode_comparison_source_basis_v2(
+        {
+            "version": COMPARISON_SOURCE_BASIS_VERSION,
+            "candidate_source_id": candidate_source.source_id,
+            "self_corp_code": "00000001",
+            "self_attestation_source_id": report.citations[0].source_id,
+            "self_attestation_evidence": "DART 기업개황 exact host 결속",
+            "candidate_corp_code": "00000002",
+            "candidate_name": "베타전자",
+            "source_kind": "기타",
+            "source_type": "회사 공식 웹",
+            "source_publisher": report.company,
+            "source_host": "company.example",
+            "source_url": "https://company.example/ir/competition",
+            "source_document_id": "/ir/competition",
+            "source_location": "/ir/competition",
+            "source_date": "2026-08-22",
+            "evidence_text": evidence,
+            "evidence_sha256": comparison_evidence_sha256(evidence),
+            "evidence_exact_sha256": comparison_evidence_exact_sha256(evidence),
+            "overlap_dimension": "경쟁 관계 명시",
+        }
+    )
+    assert basis
+    facts = [
+        replace(report.fact_records[0], comparison_basis=basis),
+        *report.fact_records[1:],
+    ]
+    candidate_report = replace(
+        report,
+        citations=[*report.citations, candidate_source],
+        fact_records=facts,
+    )
+
+    assert (
+        source_verification_label(candidate_report, candidate_source.source_id)
+        == "후보 선정 근거"
     )

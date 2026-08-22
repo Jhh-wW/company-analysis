@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
+from datetime import date
 
 import pytest
 
@@ -9,13 +11,22 @@ from src.features.company_comparison.logic import (
     OfficialCompanyBundle,
     build_competitive_position,
 )
+from src.features.company_comparison.official_sources import (
+    VERIFIED_FINAL_URL_FIELD,
+    VERIFIED_FINAL_URL_VALUE,
+    bind_dart_profile_attestation,
+    candidate_sentences_from_fragments,
+    register_candidate_sentence_evidence,
+)
 from src.features.export_pdf.automatic_release import report_sha256
 from src.features.pipeline.canonical_demo import build_demo_report
 from src.features.pipeline.port import FactRecord, Report, ReportSection
+from src.features.provenance.citations import build_citations
 from src.features.provenance.sources import (
     Source,
     SourceKind,
     evidence_text_hash,
+    render_sources,
     seal_collected_source,
 )
 from src.features.report_standard.constants import (
@@ -36,6 +47,10 @@ from src.features.report_standard.publish import (
 from src.features.report_standard.section_content import (
     ContentField,
     section_content_blocks,
+)
+from src.features.storage.reports import report_from_json, report_to_json
+from src.shared.comparison_candidate_basis import (
+    parse_comparison_source_basis_v2,
 )
 
 
@@ -552,6 +567,49 @@ def test_official_web_cannot_swap_to_a_self_declared_news_domain() -> None:
 
     assert not validation
     assert any("정확한 host URL" in reason for reason in validation.reasons)
+
+
+def test_오래된_newsroom_공식웹은_재봉인해도_현재fact로_출고되지않는다() -> None:
+    report = _valid_report()
+    target = next(fact for fact in report.fact_records if fact.fact_id == "culture-01")
+    source = next(
+        item
+        for item in report.citations
+        if isinstance(item, Source) and item.source_id == target.source_id
+    )
+    historic = seal_collected_source(
+        replace(
+            source,
+            url=f"https://{source.host}/newsroom/2015-culture",
+            document_id="/newsroom/2015-culture",
+            location="/newsroom/2015-culture",
+            published_at="2015-06-01",
+            collected_at="2026-08-19",
+            fact_status="과거·현재성 미확정 문서 수집 참고",
+        )
+    )
+    changed = replace(
+        target,
+        as_of="2015-06-01",
+        source_url=historic.url,
+        source_document_id=historic.document_id,
+        location=historic.location,
+        source_date="2015-06-01",
+    )
+    changed = replace(changed, evidence_binding=fact_evidence_binding(changed))
+    validation = validate_publishable(
+        replace(
+            report,
+            citations=[historic if item is source else item for item in report.citations],
+            fact_records=[
+                changed if fact.fact_id == target.fact_id else fact
+                for fact in report.fact_records
+            ],
+        )
+    )
+
+    assert validation.publishable is False
+    assert any("최근 문서일" in reason for reason in validation.reasons)
 
 
 def test_official_web_and_attester_cannot_be_rewritten_together() -> None:
@@ -1183,12 +1241,35 @@ def test_comparator_must_be_a_different_official_legal_entity() -> None:
     assert any("자사와 구분" in reason for reason in validation.reasons)
 
 
+@pytest.mark.parametrize("source_role", ["self", "comparator"])
+def test_attestation_only는_자사나_비교사_fact의_직접근거가_될수없다(
+    source_role: str,
+) -> None:
+    report = _valid_report()
+    fact = next(
+        item for item in report.fact_records if item.fact_id == "competition-01"
+    )
+    source_id = (
+        fact.source_id if source_role == "self" else fact.comparator_source_id
+    )
+    citations = [
+        seal_collected_source(replace(source, provenance_role="attestation_only"))
+        if isinstance(source, Source) and source.source_id == source_id
+        else source
+        for source in report.citations
+    ]
+
+    validation = validate_publishable(replace(report, citations=citations))
+
+    assert validation.publishable is False
+    assert any(
+        "attestation_only Source" in reason for reason in validation.reasons
+    )
+
+
 def test_실서비스_9장은_후보선정_source를_공개하고_used_in을_보존한다() -> None:
     report = _valid_report()
-    candidate_evidence = (
-        f"{report.company}는 주식회사 베타와 반도체 검사장비 시장에서 "
-        "경쟁 관계에 있다."
-    )
+    candidate_evidence = "주식회사 베타는 당사의 경쟁사입니다."
     candidate_source = seal_collected_source(
         Source(
             number=max(source.number for source in report.citations) + 1,
@@ -1216,7 +1297,7 @@ def test_실서비스_9장은_후보선정_source를_공개하고_used_in을_보
         fact_id="candidate-origin-fact",
         legal_entity=report.company,
         subject_scope="반도체 검사장비 시장",
-        relationship_or_action="주식회사 베타와 경쟁 관계",
+        relationship_or_action="주식회사 베타는 당사의 경쟁사",
         claim=candidate_evidence,
         claim_type="identity_summary",
         section_owner="identity",
@@ -1235,7 +1316,7 @@ def test_실서비스_9장은_후보선정_source를_공개하고_used_in을_보
         verification_status="verified",
         state_evidence=candidate_evidence,
         source_date="2026-03-15",
-        evidence_support_terms=["주식회사 베타", "경쟁 관계"],
+        evidence_support_terms=["주식회사 베타", "경쟁사"],
     )
     candidate_fact = replace(
         candidate_fact,
@@ -1313,6 +1394,152 @@ def test_실서비스_9장은_후보선정_source를_공개하고_used_in을_보
     assert all(candidate_source.number in block.source_numbers for block in blocks)
     assert "competitive_position" in published_candidate_source.used_in
     assert "identity" in published_candidate_source.used_in
+
+
+def test_공식웹_v2_순수경쟁후보는_JSON_재출고에도_attester를_보존하되_숨긴다() -> None:
+    report = _valid_report()
+    candidate_evidence = "당사는 주식회사 베타와 경쟁 관계에 있다."
+    fragments = register_candidate_sentence_evidence(
+        {
+            21: {
+                "종류": "홈페이지",
+                "원문": candidate_evidence,
+                "출처": "https://www.jinyoung.example/company/competition",
+                VERIFIED_FINAL_URL_FIELD: VERIFIED_FINAL_URL_VALUE,
+                "문서명": "경쟁 환경",
+                "원문위치": "/company/competition",
+            }
+        }
+    )
+    bound = bind_dart_profile_attestation(
+        fragments,
+        profile={
+            "status": "000",
+            "corp_code": "00000001",
+            "corp_name": report.company,
+            "hm_url": "https://www.jinyoung.example",
+        },
+        corp_code="00000001",
+        company_name=report.company,
+        collected_on="2026-08-19",
+    )
+    assert bound.attester is not None
+
+    candidate_sources = build_citations(
+        bound.fragments,
+        filing=None,
+        collected_on=date(2026, 8, 19),
+        company_publisher=report.company,
+    )
+    candidate_sources.append(bound.attester)
+    candidate_rows = candidate_sentences_from_fragments(
+        bound.fragments,
+        candidate_sources,
+    )
+    candidate_source = next(
+        source for source in candidate_sources if source.number == 21
+    )
+    attester = bound.attester
+    comparison = build_competitive_position(
+        report,
+        self_bundle=_comparison_bundle(
+            "00000001",
+            report.company,
+            revenue=2_000,
+            operating_income=300,
+        ),
+        catalog=(
+            DartCompanyRecord("00000001", report.company),
+            DartCompanyRecord("00000002", "주식회사 베타"),
+        ),
+        fetch_comparator=lambda _record: _comparison_bundle(
+            "00000002",
+            "주식회사 베타",
+            revenue=1_000,
+            operating_income=50,
+        ),
+        collected_on="2026-08-19",
+        official_candidate_sentences=candidate_rows,
+        candidate_source_registry=candidate_sources,
+    )
+    basis = parse_comparison_source_basis_v2(
+        comparison.facts[0].comparison_basis
+    )
+    assert basis is not None
+    assert basis["candidate_source_id"] == candidate_source.source_id
+    assert basis["self_attestation_source_id"] == attester.source_id
+    assert basis["evidence_text"] == candidate_evidence
+
+    draft = replace(
+        report,
+        sections=[
+            section
+            for section in report.sections
+            if section.cell != "competitive_position"
+        ]
+        + [comparison.section],
+        citations=[*report.citations, *comparison.sources],
+        fact_records=[
+            fact
+            for fact in report.fact_records
+            if fact.section_owner != "competitive_position"
+        ]
+        + list(comparison.facts),
+    )
+
+    published = build_published_report(draft)
+    restored = report_from_json(report_to_json(published))
+    assert validate_publishable(restored).publishable is True
+    republished = build_published_report(restored)
+    published_sources = {
+        source.source_id: source for source in republished.citations
+    }
+    published_candidate = published_sources[candidate_source.source_id]
+    published_attester = published_sources[attester.source_id]
+
+    assert published_candidate.domain_attestation_source_id == attester.source_id
+    assert "competitive_position" in published_candidate.used_in
+    assert published_attester.provenance_role == "attestation_only"
+    assert "competitive_position" in published_attester.used_in
+    rendered = render_sources(republished.citations)
+    assert published_candidate.label in rendered
+    assert published_attester.label not in rendered
+
+    old_candidate_source = seal_collected_source(
+        replace(
+            candidate_source,
+            published_at="2022-06-01",
+            collected_at="2022-06-20",
+            fact_status="과거·현재성 미확정 문서 수집 참고",
+        )
+    )
+    old_basis = dict(basis)
+    old_basis["source_date"] = "2022-06-01"
+    old_fact = replace(
+        comparison.facts[0],
+        comparison_basis=json.dumps(
+            old_basis,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+    old_sources = {
+        source.source_id: (
+            old_candidate_source
+            if source.source_id == candidate_source.source_id
+            else source
+        )
+        for source in comparison.sources
+    }
+    old_problems = publish_module._comparison_candidate_basis_problems(
+        old_fact,
+        old_sources,
+        {old_fact.fact_id: old_fact},
+        set(),
+        report_as_of="2026-08-19",
+    )
+    assert any("현재성 상한" in problem for problem in old_problems)
 
 
 @pytest.mark.parametrize("judgment", ["", "comparison_unknown"])

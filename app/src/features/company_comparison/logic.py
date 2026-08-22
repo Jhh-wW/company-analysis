@@ -15,10 +15,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 import unicodedata
 from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from functools import lru_cache
 from typing import Callable, Iterable, Mapping, Sequence
 
 from src.features.business_candidate.dart_identity import DartCompanyRecord
@@ -27,31 +29,48 @@ from src.features.provenance.sources import (
     Source,
     SourceKind,
     evidence_text_hash,
+    exact_evidence_text_hash,
     is_canonical_official_with_registry,
+    official_web_currentness_is_usable,
     seal_collected_source,
+    source_type_is_official_ir,
 )
+from src.features.company_comparison.official_sources import OfficialCandidateSentence
 from src.features.report_standard.constants import SECTION_BY_ID
 from src.features.report_standard.publish import fact_evidence_binding
 from src.shared.comparison_candidate_basis import (
     COMPARISON_BASIS_VERSION,
-    comparison_alias_is_in_sentence as _alias_is_in_sentence,
+    COMPARISON_SOURCE_BASIS_VERSION,
+    comparison_alias_is_competition_target,
+    comparison_alias_is_in_sentence,
     comparison_candidate_aliases as _name_aliases,
+    comparison_dart_profile_attestation_is_valid,
     comparison_corporate_core as _corporate_core,
     comparison_evidence_sentences as _evidence_sentences,
     comparison_overlap_dimension as _overlap_dimension,
+    comparison_source_basis_is_allowed,
+    comparison_source_overlap_dimension,
+    comparison_source_sentence_has_self_subject,
+    comparison_source_sentence_has_marker,
     comparison_sentence_has_marker as _has_competition_marker,
     encode_comparison_basis_v1,
+    encode_comparison_source_basis_v2,
 )
 
 
 COMPETITIVE_SECTION_ID = "competitive_position"
 MAX_COMPARATORS = 3
 MAX_COMPARISON_FACTS = 3
+MAX_CANDIDATE_ALIAS_CHARS = 200
+MAX_CANDIDATE_CATALOG_RECORDS = 200_000
+MAX_CANDIDATE_ALIASES = 400_000
+MAX_IR_CANDIDATE_AGE_DAYS = 400
 _CANDIDATE_SECTION_IDS = frozenset(SECTION_BY_ID) - {COMPETITIVE_SECTION_ID}
 _PERIOD_NUMBER = re.compile(r"20\d{2}|\d{1,2}")
 _INTEGER = re.compile(r"^-?[\d,]+$")
 _ANNUAL_REPORT_CODE = "11011"
 _WON_CURRENCIES = frozenset({"KRW", "WON", "원"})
+_CANDIDATE_ALIAS_INDEX_LOCK = threading.Lock()
 
 # account_id가 같아야만 같은 지표로 본다. 이름이 비슷하다는 이유로 임의 합치지 않는다.
 _SUPPORTED_METRICS: Mapping[str, str] = {
@@ -84,6 +103,12 @@ class CandidateEvidence:
     candidate_name: str
     filing_document_id: str
     evidence_sha256: str
+    evidence_exact_sha256: str = ""
+    source: Source | None = None
+    source_date: str = ""
+    self_corp_code: str = ""
+    self_attestation_source_id: str = ""
+    self_attestation_evidence: str = ""
 
 
 @dataclass(frozen=True)
@@ -131,6 +156,17 @@ class _Observation:
             self.report_code,
             self.currency,
         )
+
+
+@dataclass(frozen=True)
+class _CandidateAliasIndex:
+    """한 번 만든 DART 별칭 prefix/길이 색인과 법인 소유권."""
+
+    # 값이 빈 문자열이면 둘 이상 법인이 가진 모호한 별칭이다.
+    owners: Mapping[str, str]
+    records_by_code: Mapping[str, DartCompanyRecord]
+    lengths_by_prefix: Mapping[str, tuple[int, ...]]
+    complete: bool = True
 
 
 def _normalized(value: object) -> str:
@@ -266,45 +302,219 @@ def comparison_basis_v1(candidate: CandidateEvidence) -> str:
     )
 
 
+def comparison_basis(candidate: CandidateEvidence) -> str:
+    """1~8장 사실은 v1, 독립 공식 원문 문장은 v2로 서로 위장 없이 잠근다."""
+
+    if candidate.evidence_fact_id:
+        return comparison_basis_v1(candidate)
+    source = candidate.source
+    if source is None:
+        return ""
+    encoded = encode_comparison_source_basis_v2(
+        {
+            "version": COMPARISON_SOURCE_BASIS_VERSION,
+            "candidate_source_id": source.source_id,
+            "self_corp_code": candidate.self_corp_code,
+            "self_attestation_source_id": candidate.self_attestation_source_id,
+            "self_attestation_evidence": candidate.self_attestation_evidence,
+            "candidate_corp_code": candidate.candidate_corp_code,
+            "candidate_name": candidate.candidate_name,
+            "source_kind": source.kind.value,
+            "source_type": source.source_type,
+            "source_publisher": source.publisher,
+            "source_host": source.host,
+            "source_url": source.url,
+            "source_document_id": source.document_id,
+            "source_location": source.location,
+            "source_date": candidate.source_date,
+            "evidence_text": candidate.evidence_text,
+            "evidence_sha256": candidate.evidence_sha256,
+            "evidence_exact_sha256": candidate.evidence_exact_sha256,
+            "overlap_dimension": candidate.overlap_dimension,
+        }
+    )
+    return encoded if comparison_source_basis_is_allowed(
+        json.loads(encoded) if encoded else {}
+    ) else ""
+
+
+def _exact_legal_name(value: object) -> str:
+    return " ".join(
+        unicodedata.normalize("NFKC", str(value or "")).casefold().split()
+    )
+
+
+def _source_date_value(source: Source, *, reference_date: str = "") -> str:
+    document_date = str(source.published_at or source.disclosed_at or "").strip()
+    if not official_web_currentness_is_usable(
+        source_type=source.source_type,
+        url=source.url,
+        published_at=source.published_at,
+        disclosed_at=source.disclosed_at,
+        collected_at=source.collected_at,
+        reference_date=reference_date,
+    ):
+        return ""
+    if source_type_is_official_ir(source.source_type):
+        # PDF 접근일은 문서 발표일·기준일이 아니다. 수집기는 아직 신뢰 가능한
+        # PDF 문서일을 결속하지 않으므로 현재 경쟁 후보에는 쓰지 않는다.
+        try:
+            published = date.fromisoformat(document_date)
+            collected = date.fromisoformat(str(source.collected_at or "").strip())
+        except ValueError:
+            return ""
+        age_days = (collected - published).days
+        return (
+            document_date
+            if 0 <= age_days <= MAX_IR_CANDIDATE_AGE_DAYS
+            else ""
+        )
+    return document_date or str(source.collected_at or "").strip()
+
+
+def _candidate_source_allowed(
+    source: Source,
+    sources: Sequence[Source],
+    *,
+    reference_date: str = "",
+) -> bool:
+    """DART 공시 또는 exact-attested 공식 HTML IR·웹만 후보로 허용한다."""
+
+    if (
+        source.provenance_role != "citation"
+        or not is_canonical_official_with_registry(source, tuple(sources))
+    ):
+        return False
+    return bool(
+        _source_date_value(source, reference_date=reference_date)
+        and comparison_source_basis_is_allowed(
+            {
+                "version": COMPARISON_SOURCE_BASIS_VERSION,
+                "source_kind": source.kind.value,
+                "source_type": source.source_type,
+                "source_host": source.host,
+                "source_url": source.url,
+            }
+        )
+    )
+
+
 def _candidate_alias_index(
     records: Sequence[DartCompanyRecord],
-) -> tuple[dict[str, set[str]], dict[str, DartCompanyRecord]]:
-    """DART 별칭의 소유 법인과 고유번호별 대표 레코드를 만든다."""
+) -> _CandidateAliasIndex:
+    """DART 별칭 소유권과 문장 길이 비례 검색 색인을 한 번 만든다."""
 
-    alias_owners: dict[str, set[str]] = {}
+    with _CANDIDATE_ALIAS_INDEX_LOCK:
+        return _cached_candidate_alias_index(
+            tuple(records),
+            MAX_CANDIDATE_CATALOG_RECORDS,
+            MAX_CANDIDATE_ALIASES,
+            MAX_CANDIDATE_ALIAS_CHARS,
+        )
+
+
+@lru_cache(maxsize=2)
+def _cached_candidate_alias_index(
+    records: tuple[DartCompanyRecord, ...],
+    max_records: int,
+    max_aliases: int,
+    max_alias_chars: int,
+) -> _CandidateAliasIndex:
+    """동일 DART snapshot은 동시 실행끼리 불변 색인 하나만 공유한다."""
+
+    if len(records) > max_records:
+        return _CandidateAliasIndex({}, {}, {}, complete=False)
+    alias_owners: dict[str, str] = {}
     by_code: dict[str, DartCompanyRecord] = {}
     for record in records:
         corp_code = str(record.corp_code or "").strip()
         if not corp_code:
             continue
         by_code.setdefault(corp_code, record)
-        for alias in _name_aliases(record.corp_name):
-            if len(_corporate_core(alias)) >= 2:
-                alias_owners.setdefault(alias, set()).add(corp_code)
-    return alias_owners, by_code
+        for official_name in (record.corp_name, record.corp_eng_name):
+            for alias in _name_aliases(official_name):
+                if (
+                    len(_corporate_core(alias)) < 2
+                    or len(alias) > max_alias_chars
+                ):
+                    continue
+                if alias not in alias_owners:
+                    if len(alias_owners) >= max_aliases:
+                        return _CandidateAliasIndex({}, {}, {}, complete=False)
+                    alias_owners[alias] = corp_code
+                elif alias_owners[alias] != corp_code:
+                    alias_owners[alias] = ""
+
+    raw_lengths: dict[str, set[int]] = {}
+    for alias in alias_owners:
+        raw_lengths.setdefault(alias[:2], set()).add(len(alias))
+
+    return _CandidateAliasIndex(
+        owners=alias_owners,
+        records_by_code=by_code,
+        lengths_by_prefix={
+            prefix: tuple(sorted(lengths, reverse=True))
+            for prefix, lengths in raw_lengths.items()
+        },
+    )
+
+
+def _aliases_in_sentence(
+    sentence: str,
+    alias_index: _CandidateAliasIndex,
+) -> tuple[str, ...]:
+    """전체 catalog를 다시 훑지 않고 문장에 실제 나온 별칭만 반환한다."""
+
+    normalized = _normalized(sentence)
+    found: set[str] = set()
+    for start in range(max(0, len(normalized) - 1)):
+        lengths = alias_index.lengths_by_prefix.get(normalized[start : start + 2], ())
+        for length in lengths:
+            if start + length > len(normalized):
+                continue
+            candidate = normalized[start : start + length]
+            if candidate in alias_index.owners:
+                found.add(candidate)
+    return tuple(
+        sorted(
+            (
+                alias
+                for alias in found
+                if comparison_alias_is_in_sentence(alias, sentence)
+            ),
+            key=lambda value: (-len(value), value),
+        )
+    )
 
 
 def _candidate_matches_for_sentence(
     sentence: str,
     *,
-    alias_owners: Mapping[str, set[str]],
-    records_by_code: Mapping[str, DartCompanyRecord],
+    alias_index: _CandidateAliasIndex,
     self_corp_code: str,
+    self_company: str,
 ) -> tuple[tuple[DartCompanyRecord, tuple[str, ...]], ...]:
-    """고유 별칭으로 결정되는 모든 비자사 DART 법인을 반환한다."""
+    """자사 경쟁 술어의 target인 고유 비자사 DART 법인만 반환한다."""
 
-    normalized_sentence = _normalized(sentence)
+    if not alias_index.complete:
+        return ()
+    present_aliases = _aliases_in_sentence(sentence, alias_index)
     matched: dict[str, list[str]] = {}
-    for alias, owners in alias_owners.items():
-        if len(owners) != 1 or alias not in normalized_sentence:
+    for alias in present_aliases:
+        corp_code = alias_index.owners[alias]
+        if not corp_code:
             continue
-        corp_code = next(iter(owners))
-        if corp_code == self_corp_code or not _alias_is_in_sentence(alias, sentence):
+        if corp_code == self_corp_code or not comparison_alias_is_competition_target(
+            alias,
+            sentence,
+            self_company=self_company,
+            known_company_aliases=present_aliases,
+        ):
             continue
         matched.setdefault(corp_code, []).append(alias)
     found: list[tuple[DartCompanyRecord, tuple[str, ...]]] = []
     for corp_code, aliases in matched.items():
-        record = records_by_code.get(corp_code)
+        record = alias_index.records_by_code.get(corp_code)
         if record is not None:
             found.append(
                 (
@@ -328,6 +538,7 @@ def comparison_candidate_preflight_possible(
     catalog: Iterable[DartCompanyRecord],
     *,
     self_corp_code: str,
+    self_company: str = "",
 ) -> bool | None:
     """자사 공식 가능 원문 상위집합으로 후보 불가능성만 조기에 증명한다.
 
@@ -350,13 +561,29 @@ def comparison_candidate_preflight_possible(
     records = tuple(catalog)
     if not texts or not records:
         return None
-    alias_owners, records_by_code = _candidate_alias_index(records)
-    if not alias_owners or not records_by_code:
+    alias_index = _candidate_alias_index(records)
+    if (
+        not alias_index.complete
+        or not alias_index.owners
+        or not alias_index.records_by_code
+    ):
         return None
     self_code = str(self_corp_code or "").strip()
+    self_record = alias_index.records_by_code.get(self_code)
+    if self_record is None:
+        return None
+    resolved_self_company = str(self_company or "").strip()
+    if not resolved_self_company:
+        resolved_self_company = str(self_record.corp_name or "").strip()
+    elif _exact_legal_name(resolved_self_company) != _exact_legal_name(
+        self_record.corp_name
+    ):
+        return None
+    if not resolved_self_company:
+        return None
     if not any(
-        len(owners) == 1 and next(iter(owners)) != self_code
-        for owners in alias_owners.values()
+        owner and owner != self_code
+        for owner in alias_index.owners.values()
     ):
         # 자사 한 곳뿐인 fixture/부분 카탈로그를 "경쟁사 없음"으로 확정하지 않는다.
         return None
@@ -364,14 +591,20 @@ def comparison_candidate_preflight_possible(
         sentence
         for text in texts
         for sentence in _evidence_sentences(text)
-        if _has_competition_marker(sentence)
+        if comparison_source_sentence_has_marker(sentence)
+        and (
+            not str(self_company or "").strip()
+            or comparison_source_sentence_has_self_subject(
+                sentence, self_company
+            )
+        )
     )
     return any(
         _candidate_matches_for_sentence(
             sentence,
-            alias_owners=alias_owners,
-            records_by_code=records_by_code,
+            alias_index=alias_index,
             self_corp_code=self_code,
+            self_company=resolved_self_company,
         )
         for sentence in marker_sentences
     )
@@ -387,6 +620,16 @@ def discover_candidates(
     """확정 1~8장 공식 사실의 단일 원문 문장에서만 비교 후보를 고른다."""
 
     records = tuple(catalog)
+    self_code = str(self_corp_code or "").strip()
+    self_records = [
+        record for record in records if str(record.corp_code or "").strip() == self_code
+    ]
+    if (
+        len(self_records) != 1
+        or _exact_legal_name(self_records[0].corp_name)
+        != _exact_legal_name(report.company)
+    ):
+        return ()
     source_items = tuple(
         source for source in report.citations if isinstance(source, Source)
     )
@@ -446,19 +689,24 @@ def discover_candidates(
     if not evidence_rows:
         return ()
 
-    alias_owners, records_by_code = _candidate_alias_index(records)
+    alias_index = _candidate_alias_index(records)
+    if not alias_index.complete:
+        return ()
 
-    matches: list[tuple[int, int, str, CandidateEvidence]] = []
-    self_code = str(self_corp_code).strip()
-    for row_index, fact, source, sentence in evidence_rows:
+    found: list[CandidateEvidence] = []
+    seen_codes: set[str] = set()
+    cap = max(1, min(int(limit), MAX_COMPARATORS))
+    for _row_index, fact, source, sentence in evidence_rows:
         matched = _candidate_matches_for_sentence(
             sentence,
-            alias_owners=alias_owners,
-            records_by_code=records_by_code,
+            alias_index=alias_index,
             self_corp_code=self_code,
+            self_company=report.company,
         )
-        for record, matching_aliases in matched:
+        for record, _matching_aliases in matched:
             corp_code = str(record.corp_code or "").strip()
+            if corp_code in seen_codes:
+                continue
             evidence_hash = evidence_text_hash(sentence)
             evidence = CandidateEvidence(
                 record=record,
@@ -471,25 +719,130 @@ def discover_candidates(
                 filing_document_id=source.document_id,
                 evidence_sha256=evidence_hash,
             )
-            matches.append(
-                (
-                    row_index,
-                    -max(len(alias) for alias in matching_aliases),
-                    corp_code,
-                    evidence,
-                )
-            )
+            seen_codes.add(corp_code)
+            found.append(evidence)
+            if len(found) >= cap:
+                return tuple(found)
+    return tuple(found)
 
+
+def discover_official_source_candidates(
+    evidence_rows: Iterable[OfficialCandidateSentence],
+    sources: Sequence[Source],
+    catalog: Iterable[DartCompanyRecord],
+    *,
+    self_corp_code: str,
+    self_company: str,
+    limit: int = MAX_COMPARATORS,
+    as_of_date: str = "",
+) -> tuple[CandidateEvidence, ...]:
+    """봉인된 공식 Source의 순수 경쟁 문장을 1~8장과 독립해 후보로 고른다."""
+
+    records = tuple(catalog)
+    self_code = str(self_corp_code or "").strip()
+    self_records = [
+        record for record in records if str(record.corp_code or "").strip() == self_code
+    ]
+    if (
+        len(self_records) != 1
+        or _exact_legal_name(self_records[0].corp_name)
+        != _exact_legal_name(self_company)
+    ):
+        return ()
+    source_registry = tuple(sources)
+    identity_attesters = [
+        source
+        for source in source_registry
+        if source.provenance_role == "attestation_only"
+        and is_canonical_official_with_registry(source, source_registry)
+        and comparison_dart_profile_attestation_is_valid(
+            source_kind=source.kind.value,
+            source_type=source.source_type,
+            source_publisher=source.publisher,
+            source_host=source.host,
+            source_url=source.url,
+            source_document_id=source.document_id,
+            evidence=source.domain_attestation_evidence,
+            self_corp_code=self_code,
+            self_company=self_company,
+        )
+    ]
+    if len(identity_attesters) != 1:
+        return ()
+    identity_attester = identity_attesters[0]
+    source_counts: dict[str, int] = {}
+    for source in source_registry:
+        source_id = source.source_id.strip()
+        if source_id:
+            source_counts[source_id] = source_counts.get(source_id, 0) + 1
+    alias_index = _candidate_alias_index(records)
+    if not alias_index.complete:
+        return ()
     found: list[CandidateEvidence] = []
     seen_codes: set[str] = set()
     cap = max(1, min(int(limit), MAX_COMPARATORS))
-    for _row_index, _alias_length, corp_code, evidence in sorted(matches):
-        if corp_code in seen_codes:
+    for _row_index, item in enumerate(evidence_rows):
+        source = item.source
+        sentences = _evidence_sentences(item.evidence_text)
+        if (
+            source_counts.get(source.source_id.strip()) != 1
+            or not _candidate_source_allowed(
+                source,
+                source_registry,
+                reference_date=as_of_date,
+            )
+            or _exact_legal_name(source.publisher) != _exact_legal_name(self_company)
+            or len(sentences) != 1
+            or not comparison_source_sentence_has_marker(sentences[0])
+            or evidence_text_hash(sentences[0]) not in source.evidence_hashes
+            or exact_evidence_text_hash(sentences[0])
+            not in source.exact_evidence_hashes
+            or (
+                source.kind is SourceKind.OTHER
+                and source.domain_attestation_source_id.strip()
+                != identity_attester.source_id.strip()
+            )
+        ):
             continue
-        seen_codes.add(corp_code)
-        found.append(evidence)
-        if len(found) >= cap:
-            break
+        sentence = sentences[0]
+        if not comparison_source_sentence_has_self_subject(
+            sentence, self_records[0].corp_name
+        ):
+            continue
+        matched = _candidate_matches_for_sentence(
+            sentence,
+            alias_index=alias_index,
+            self_corp_code=self_code,
+            self_company=self_company,
+        )
+        for record, _matching_aliases in matched:
+            corp_code = str(record.corp_code or "").strip()
+            if corp_code in seen_codes:
+                continue
+            evidence = CandidateEvidence(
+                record=record,
+                overlap_dimension=comparison_source_overlap_dimension(sentence),
+                evidence_fact_id="",
+                evidence_source_id=source.source_id,
+                evidence_text=sentence,
+                candidate_corp_code=corp_code,
+                candidate_name=str(record.corp_name or "").strip(),
+                filing_document_id=source.document_id,
+                evidence_sha256=evidence_text_hash(sentence),
+                evidence_exact_sha256=exact_evidence_text_hash(sentence),
+                source=source,
+                source_date=_source_date_value(
+                    source,
+                    reference_date=as_of_date,
+                ),
+                self_corp_code=self_code,
+                self_attestation_source_id=identity_attester.source_id,
+                self_attestation_evidence=identity_attester.domain_attestation_evidence,
+            )
+            seen_codes.add(corp_code)
+            found.append(evidence)
+            if len(found) >= cap:
+                return tuple(found)
     return tuple(found)
 
 
@@ -756,6 +1109,8 @@ def build_competitive_position(
     fetch_comparator: Callable[[DartCompanyRecord], OfficialCompanyBundle | None],
     collected_on: str,
     max_comparators: int = MAX_COMPARATORS,
+    official_candidate_sentences: Iterable[OfficialCandidateSentence] = (),
+    candidate_source_registry: Sequence[Source] = (),
 ) -> ComparisonBuildResult:
     """확정된 1~8장 뒤, 양사 공식 원문이 맞는 비교만 9장으로 만든다."""
 
@@ -777,19 +1132,48 @@ def build_competitive_position(
             "자사 공식 원문이 완료 사업연도·접수번호·보고서 코드에 결속되지 않았습니다"
         )
 
-    candidates = discover_candidates(
+    section_candidates = discover_candidates(
         report,
         catalog,
         self_corp_code=self_bundle.corp_code,
         limit=max_comparators,
     )
+    source_candidates = discover_official_source_candidates(
+        official_candidate_sentences,
+        candidate_source_registry,
+        catalog,
+        self_corp_code=self_bundle.corp_code,
+        self_company=report.company,
+        limit=max_comparators,
+        as_of_date=collected_on,
+    )
+    candidates_list: list[CandidateEvidence] = []
+    seen_candidate_codes: set[str] = set()
+    for candidate in (*section_candidates, *source_candidates):
+        if candidate.candidate_corp_code in seen_candidate_codes:
+            continue
+        seen_candidate_codes.add(candidate.candidate_corp_code)
+        candidates_list.append(candidate)
+        if len(candidates_list) >= max(1, min(max_comparators, MAX_COMPARATORS)):
+            break
+    candidates = tuple(candidates_list)
     if not candidates:
         raise ComparisonBlockedError(
-            "확정된 1~8장 공식 사실에서 경쟁 관계와 DART 법인을 함께 확인하지 못했습니다"
+            "확정된 1~8장 또는 봉인된 자사 공식 원문에서 경쟁 관계와 "
+            "DART 법인을 함께 확인하지 못했습니다"
         )
 
+    candidate_registry_by_id = {
+        source.source_id: source for source in candidate_source_registry
+    }
     next_number = max(
-        (source.number for source in report.citations if isinstance(source, Source)),
+        (
+            source.number
+            for source in (
+                *(item for item in report.citations if isinstance(item, Source)),
+                *candidate_source_registry,
+            )
+        ),
         default=0,
     ) + 1
     facts: list[FactRecord] = []
@@ -797,6 +1181,34 @@ def build_competitive_position(
     sources_by_id: dict[str, Source] = {}
     failure_reasons: list[str] = []
     used_axes: set[str] = set()
+
+    report_source_ids = {
+        source.source_id
+        for source in report.citations
+        if isinstance(source, Source)
+    }
+    pending_source_ids = [
+        source_id
+        for candidate in candidates
+        if not candidate.evidence_fact_id
+        for source_id in (
+            candidate.evidence_source_id,
+            candidate.self_attestation_source_id,
+        )
+        if source_id
+    ]
+    while pending_source_ids:
+        source_id = pending_source_ids.pop(0)
+        source = candidate_registry_by_id.get(source_id)
+        if source is None or source_id in sources_by_id or source_id in report_source_ids:
+            continue
+        sources_by_id[source_id] = replace(
+            source,
+            used_in=sorted({*source.used_in, COMPETITIVE_SECTION_ID}),
+        )
+        attester_id = source.domain_attestation_source_id.strip()
+        if attester_id:
+            pending_source_ids.append(attester_id)
 
     def register_source(
         bundle: OfficialCompanyBundle,
@@ -1004,7 +1416,7 @@ def build_competitive_position(
                         comparison_target=comparator.company_name,
                         comparison_metric="영업이익률",
                         comparison_definition=definition,
-                        comparison_basis=comparison_basis_v1(candidate),
+                        comparison_basis=comparison_basis(candidate),
                         comparison_period=period,
                         comparison_scope=scope,
                         comparison_judgment=(
@@ -1120,7 +1532,7 @@ def build_competitive_position(
                 comparison_target=comparator.company_name,
                 comparison_metric="매출 규모",
                 comparison_definition=definition,
-                comparison_basis=comparison_basis_v1(candidate),
+                comparison_basis=comparison_basis(candidate),
                 comparison_period=self_row.period,
                 comparison_scope=scope,
                 comparison_judgment="operating_characteristic",

@@ -13,14 +13,17 @@ import functools
 import http.client
 import ipaddress
 import math
+import multiprocessing
 import socket
 import ssl
 import time
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from email.message import Message
-from typing import Callable, Final
+from typing import Callable, Final, Iterator
 
 ALLOWED_SCHEMES: Final[frozenset[str]] = frozenset({"http", "https"})
 # 일반 웹 포트와 흔한 대체 웹 포트만 허용한다. 임의 포트를 받으면 이 기능이 내부
@@ -34,6 +37,10 @@ MAX_RESPONSE_BYTES: Final[int] = 2 * 1024 * 1024
 # ``HTTPResponse.read1``은 실제 소켓 읽기 한 번 안에서 돌아온다. 작은 조각마다 전체
 # 경과시간을 다시 봐서, 상대가 소켓 제한 직전에 한 바이트씩 흘리는 공격도 끝낸다.
 READ_CHUNK_BYTES: Final[int] = 64 * 1024
+DNS_TIMEOUT_SEC: Final[int] = 3
+MAX_DNS_ANSWERS: Final[int] = 64
+_RESPONSE_DEADLINE_ATTR: Final[str] = "_safe_http_deadline_budget"
+_SYSTEM_GETADDRINFO = socket.getaddrinfo
 
 
 class UnsafeHomepageUrlError(ValueError):
@@ -54,7 +61,196 @@ class SafeTarget:
     ip: str
 
 
-def resolve_safe_target(url: str) -> SafeTarget:
+@dataclass
+class _DeadlineBudget:
+    """DNS·redirect·연결·본문이 함께 소비하는 monotonic 절대 마감."""
+
+    expires_at: float
+    clock: Callable[[], float] = time.monotonic
+    dns_cache: dict[tuple[str, int], tuple[tuple, ...]] = field(default_factory=dict)
+
+    @classmethod
+    def after(
+        cls,
+        timeout: float,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> _DeadlineBudget:
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout은 유한한 양수여야 합니다")
+        return cls(expires_at=clock() + timeout, clock=clock)
+
+    def remaining(self) -> float:
+        remaining = self.expires_at - self.clock()
+        if remaining <= 0:
+            raise HomepageResponseError("홈페이지 요청 전체 시간이 초과됐습니다")
+        return remaining
+
+
+_ACTIVE_DEADLINE: ContextVar[_DeadlineBudget | None] = ContextVar(
+    "homepage_active_deadline",
+    default=None,
+)
+
+
+@contextmanager
+def request_deadline_scope(
+    timeout: float,
+    *,
+    clock: Callable[[], float] = time.monotonic,
+) -> Iterator[_DeadlineBudget]:
+    """한 수집 작업의 모든 네트워크 단계가 같은 절대 마감을 쓰게 한다."""
+
+    parent = _ACTIVE_DEADLINE.get()
+    candidate = _DeadlineBudget.after(timeout, clock=clock)
+    budget = (
+        parent
+        if parent is not None and parent.expires_at <= candidate.expires_at
+        else candidate
+    )
+    token = _ACTIVE_DEADLINE.set(budget)
+    try:
+        yield budget
+    finally:
+        _ACTIVE_DEADLINE.reset(token)
+
+
+def response_deadline(
+    response: object,
+    *,
+    timeout: float,
+    clock: Callable[[], float] = time.monotonic,
+) -> tuple[float, Callable[[], float]]:
+    """실제 응답은 open 단계의 마감, 시험 대역은 새 본문 마감을 돌려준다."""
+
+    budget = getattr(response, _RESPONSE_DEADLINE_ATTR, None)
+    if isinstance(budget, _DeadlineBudget):
+        budget.remaining()
+        return budget.expires_at, budget.clock
+    fallback = _DeadlineBudget.after(timeout, clock=clock)
+    return fallback.expires_at, fallback.clock
+
+
+def _dns_worker(connection: object, hostname: str, port: int) -> None:
+    """부모가 deadline에 강제 종료할 수 있는 DNS 전용 자식 프로세스."""
+
+    try:
+        answers = _SYSTEM_GETADDRINFO(
+            hostname,
+            port,
+            type=socket.SOCK_STREAM,
+            proto=socket.IPPROTO_TCP,
+        )
+        safe_answers = tuple(answers[:MAX_DNS_ANSWERS])
+        connection.send(("ok", safe_answers))  # type: ignore[attr-defined]
+    except BaseException as exc:  # noqa: BLE001 - 자식 오류는 문자열만 부모에 전달
+        try:
+            connection.send(("error", type(exc).__name__))  # type: ignore[attr-defined]
+        except BaseException:
+            pass
+    finally:
+        connection.close()  # type: ignore[attr-defined]
+
+
+def _terminate_process(process: multiprocessing.Process) -> None:
+    if not process.is_alive():
+        process.join(timeout=0.1)
+        return
+    process.terminate()
+    process.join(timeout=0.2)
+    if process.is_alive() and hasattr(process, "kill"):
+        process.kill()
+        process.join(timeout=0.2)
+
+
+def _system_dns_answers(
+    hostname: str,
+    port: int,
+    *,
+    timeout: float,
+) -> tuple[tuple, ...]:
+    """중단 불가능한 OS resolver를 kill 가능한 spawn 자식에서 실행한다."""
+
+    context = multiprocessing.get_context("spawn")
+    parent_connection, child_connection = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_dns_worker,
+        args=(child_connection, hostname, port),
+        daemon=True,
+    )
+    started = False
+    try:
+        process.start()
+        started = True
+        child_connection.close()
+        if not parent_connection.poll(timeout):
+            raise UnsafeHomepageUrlError("호스트 이름 확인 시간이 초과됐습니다")
+        status, payload = parent_connection.recv()
+        if status != "ok" or not isinstance(payload, tuple):
+            raise UnsafeHomepageUrlError("호스트 이름을 찾지 못했습니다")
+        process.join(timeout=0.1)
+        return payload
+    except (EOFError, OSError) as exc:
+        raise UnsafeHomepageUrlError("호스트 이름을 찾지 못했습니다") from exc
+    finally:
+        parent_connection.close()
+        child_connection.close()
+        if started:
+            _terminate_process(process)
+
+
+def _dns_answers(
+    hostname: str,
+    port: int,
+    *,
+    budget: _DeadlineBudget,
+) -> tuple[tuple, ...]:
+    cache_key = (hostname, port)
+    cached = budget.dns_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        literal = ipaddress.ip_address(hostname.split("%", 1)[0])
+    except ValueError:
+        literal = None
+    if literal is not None:
+        family = socket.AF_INET6 if literal.version == 6 else socket.AF_INET
+        sockaddr: tuple = (
+            (str(literal), port, 0, 0)
+            if literal.version == 6
+            else (str(literal), port)
+        )
+        answers = ((family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", sockaddr),)
+    elif socket.getaddrinfo is not _SYSTEM_GETADDRINFO:
+        # 주입된 resolver는 단위시험 전용이다. 운영 resolver는 항상 자식 프로세스다.
+        try:
+            answers = tuple(
+                socket.getaddrinfo(
+                    hostname,
+                    port,
+                    type=socket.SOCK_STREAM,
+                    proto=socket.IPPROTO_TCP,
+                )[:MAX_DNS_ANSWERS]
+            )
+        except (OSError, UnicodeError) as exc:
+            raise UnsafeHomepageUrlError("호스트 이름을 찾지 못했습니다") from exc
+    else:
+        answers = _system_dns_answers(
+            hostname,
+            port,
+            timeout=min(budget.remaining(), float(DNS_TIMEOUT_SEC)),
+        )
+    budget.remaining()
+    budget.dns_cache[cache_key] = answers
+    return answers
+
+
+def resolve_safe_target(
+    url: str,
+    *,
+    deadline: _DeadlineBudget | None = None,
+) -> SafeTarget:
     """URL과 모든 DNS 응답을 검사하고 공인 IP 하나에 고정한다."""
 
     if not isinstance(url, str) or not url or _has_control_character(url):
@@ -95,15 +291,10 @@ def resolve_safe_target(url: str) -> SafeTarget:
     if destination_port not in ALLOWED_PORTS:
         raise UnsafeHomepageUrlError("웹이 아닌 대상 포트는 허용하지 않습니다")
 
-    try:
-        answers = socket.getaddrinfo(
-            ascii_hostname,
-            destination_port,
-            type=socket.SOCK_STREAM,
-            proto=socket.IPPROTO_TCP,
-        )
-    except (OSError, UnicodeError) as exc:
-        raise UnsafeHomepageUrlError("호스트 이름을 찾지 못했습니다") from exc
+    budget = deadline or _ACTIVE_DEADLINE.get() or _DeadlineBudget.after(
+        DNS_TIMEOUT_SEC
+    )
+    answers = _dns_answers(ascii_hostname, destination_port, budget=budget)
 
     public_ips: list[str] = []
     saw_forbidden_address = False
@@ -138,21 +329,85 @@ def safe_urlopen(
     request: urllib.request.Request,
     *,
     timeout: float,
+    url_allowed: Callable[[str], bool] | None = None,
 ):
-    """리다이렉트 재검사와 DNS 고정을 적용해 HTTP(S) 요청을 연다."""
+    """리다이렉트 재검사·호출자 경로 정책·DNS 고정을 적용해 요청을 연다."""
 
     if any(name.lower() == "host" for name, _value in request.header_items()):
         # Host는 반드시 검증한 URL에서 만들어야 한다.
         raise UnsafeHomepageUrlError("사용자 지정 Host 헤더는 허용하지 않습니다")
-    target = resolve_safe_target(request.full_url)
+    budget = _ACTIVE_DEADLINE.get() or _DeadlineBudget.after(timeout)
+    budget.remaining()
+    target = resolve_safe_target(request.full_url, deadline=budget)
     request = _ascii_hostname_request(request, target)
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({}),
-        _SafeHTTPHandler(),
-        _SafeHTTPSHandler(context=ssl.create_default_context()),
-        _SafeRedirectHandler(),
+        _SafeHTTPHandler(deadline=budget),
+        _SafeHTTPSHandler(context=ssl.create_default_context(), deadline=budget),
+        _SafeRedirectHandler(url_allowed=url_allowed, deadline=budget),
     )
-    return opener.open(request, timeout=timeout)
+    response = opener.open(request, timeout=budget.remaining())
+    try:
+        setattr(response, _RESPONSE_DEADLINE_ATTR, budget)
+    except (AttributeError, TypeError):
+        pass
+    try:
+        budget.remaining()
+    except HomepageResponseError:
+        close = getattr(response, "close", None)
+        if callable(close):
+            close()
+        raise
+    return response
+
+
+def safe_urlopen_exact_https_host(
+    request: urllib.request.Request,
+    *,
+    timeout: float,
+    expected_hostname: str,
+    url_allowed: Callable[[str], bool] | None = None,
+):
+    """처음부터 끝까지 같은 정확한 HTTPS 호스트인 요청만 연다.
+
+    회사 홈페이지가 가리킨 IR 문서는 외부 CDN이나 검색 결과로 조용히 넘어가면
+    회사 공식 원문이라는 경계가 사라진다. 그래서 최초 URL뿐 아니라 매
+    리다이렉트의 스킴과 호스트를 실제 연결 전에 다시 검사한다. DNS 공인망 검사와
+    IP 고정은 :func:`safe_urlopen`과 똑같이 적용한다.
+    """
+
+    if any(name.lower() == "host" for name, _value in request.header_items()):
+        raise UnsafeHomepageUrlError("사용자 지정 Host 헤더는 허용하지 않습니다")
+    normalized_hostname = _normalize_exact_hostname(expected_hostname)
+    _require_exact_https_hostname(request.full_url, normalized_hostname)
+    _require_url_allowed(request.full_url, url_allowed)
+    budget = _ACTIVE_DEADLINE.get() or _DeadlineBudget.after(timeout)
+    budget.remaining()
+    target = resolve_safe_target(request.full_url, deadline=budget)
+    request = _ascii_hostname_request(request, target)
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _SafeHTTPHandler(deadline=budget),
+        _SafeHTTPSHandler(context=ssl.create_default_context(), deadline=budget),
+        _ExactHttpsHostRedirectHandler(
+            normalized_hostname,
+            url_allowed=url_allowed,
+            deadline=budget,
+        ),
+    )
+    response = opener.open(request, timeout=budget.remaining())
+    try:
+        setattr(response, _RESPONSE_DEADLINE_ATTR, budget)
+    except (AttributeError, TypeError):
+        pass
+    try:
+        budget.remaining()
+    except HomepageResponseError:
+        close = getattr(response, "close", None)
+        if callable(close):
+            close()
+        raise
+    return response
 
 
 def _ascii_hostname_request(
@@ -213,12 +468,17 @@ def read_limited_text(
     ``read1``로 작게 읽고 실제 읽기마다 하나의 절대 마감을 다시 확인한다.
     """
 
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError("timeout은 유한한 양수여야 합니다")
-
-    deadline = clock() + timeout
+    deadline, effective_clock = response_deadline(
+        response,
+        timeout=timeout,
+        clock=clock,
+    )
     validate_text_response(response)
-    raw = _read_limited_body(response, deadline=deadline, clock=clock)
+    raw = _read_limited_body(
+        response,
+        deadline=deadline,
+        clock=effective_clock,
+    )
 
     charset = _content_charset(getattr(response, "headers", None))
     if charset:
@@ -319,6 +579,53 @@ def _has_control_character(value: str) -> bool:
     return any(ord(character) < 32 or ord(character) == 127 for character in value)
 
 
+def _normalize_exact_hostname(hostname: str) -> str:
+    """정확 비교에 쓸 호스트 이름을 IDNA 소문자로 맞춘다."""
+
+    if not isinstance(hostname, str) or not hostname or _has_control_character(hostname):
+        raise UnsafeHomepageUrlError("비교할 호스트 이름이 올바르지 않습니다")
+    candidate = hostname.rstrip(".")
+    if not candidate or "/" in candidate or "\\" in candidate:
+        raise UnsafeHomepageUrlError("비교할 호스트 이름이 올바르지 않습니다")
+    try:
+        return candidate.encode("idna").decode("ascii").casefold()
+    except UnicodeError as exc:
+        raise UnsafeHomepageUrlError("비교할 호스트 이름이 올바르지 않습니다") from exc
+
+
+def _require_exact_https_hostname(url: str, expected_hostname: str) -> None:
+    """DNS 조회 전에 URL의 HTTPS 스킴과 정확한 호스트부터 비교한다."""
+
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        hostname = (parsed.hostname or "").rstrip(".").encode("idna").decode("ascii")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise UnsafeHomepageUrlError("공식 IR 주소 형식이 올바르지 않습니다") from exc
+    if (
+        parsed.scheme.casefold() != "https"
+        or hostname.casefold() != expected_hostname
+    ):
+        raise UnsafeHomepageUrlError(
+            "공식 IR 주소는 같은 정확한 HTTPS 호스트여야 합니다"
+        )
+
+
+def _require_url_allowed(
+    url: str,
+    url_allowed: Callable[[str], bool] | None,
+) -> None:
+    """robots 같은 호출자 정책을 DNS·연결 전에 닫힌 실패로 적용한다."""
+
+    if url_allowed is None:
+        return
+    try:
+        allowed = url_allowed(url)
+    except Exception as exc:
+        raise UnsafeHomepageUrlError("공식 IR URL 허용 규칙 확인에 실패했습니다") from exc
+    if allowed is not True:
+        raise UnsafeHomepageUrlError("공식 IR URL 허용 규칙이 이 경로를 차단했습니다")
+
+
 def _header_value(headers: object, name: str) -> str | None:
     if headers is None:
         return None
@@ -384,15 +691,40 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
 
 
 class _SafeHTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, *, deadline: _DeadlineBudget | None = None) -> None:
+        super().__init__()
+        self._deadline = deadline
+
     def http_open(self, request: urllib.request.Request):
-        target = resolve_safe_target(request.full_url)
+        target = (
+            resolve_safe_target(request.full_url, deadline=self._deadline)
+            if self._deadline is not None
+            else resolve_safe_target(request.full_url)
+        )
+        if self._deadline is not None:
+            request.timeout = self._deadline.remaining()
         connection = functools.partial(_PinnedHTTPConnection, pinned_ip=target.ip)
         return self.do_open(connection, request)
 
 
 class _SafeHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(
+        self,
+        *,
+        context: ssl.SSLContext | None = None,
+        deadline: _DeadlineBudget | None = None,
+    ) -> None:
+        super().__init__(context=context)
+        self._deadline = deadline
+
     def https_open(self, request: urllib.request.Request):
-        target = resolve_safe_target(request.full_url)
+        target = (
+            resolve_safe_target(request.full_url, deadline=self._deadline)
+            if self._deadline is not None
+            else resolve_safe_target(request.full_url)
+        )
+        if self._deadline is not None:
+            request.timeout = self._deadline.remaining()
         connection = functools.partial(_PinnedHTTPSConnection, pinned_ip=target.ip)
         return self.do_open(connection, request, context=self._context)
 
@@ -401,11 +733,28 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
     max_redirections = MAX_REDIRECTS
     max_repeats = MAX_REDIRECTS
 
+    def __init__(
+        self,
+        *,
+        url_allowed: Callable[[str], bool] | None = None,
+        deadline: _DeadlineBudget | None = None,
+    ) -> None:
+        super().__init__()
+        self._url_allowed = url_allowed
+        self._deadline = deadline
+
     def redirect_request(self, request, fp, code, msg, headers, newurl):
         # 다음 요청을 만들기 전에 모든 Location을 검사한다. 실제 연결 순간 프로토콜
         # 처리기가 한 번 더 검사·고정해 DNS 재바인딩의 시간차 틈을 닫는다.
-        resolve_safe_target(newurl)
-        return super().redirect_request(request, fp, code, msg, headers, newurl)
+        _require_url_allowed(newurl, self._url_allowed)
+        if self._deadline is not None:
+            resolve_safe_target(newurl, deadline=self._deadline)
+        else:
+            resolve_safe_target(newurl)
+        redirected = super().redirect_request(request, fp, code, msg, headers, newurl)
+        if redirected is not None and self._deadline is not None:
+            redirected.timeout = self._deadline.remaining()
+        return redirected
 
     def http_error_302(self, request, fp, code, msg, headers):
         # 표준 처리기는 Location을 따라가기 전 제한 없는 ``fp.read()``로 리다이렉트
@@ -417,6 +766,35 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
             fp.close()
 
     http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
+
+
+class _ExactHttpsHostRedirectHandler(_SafeRedirectHandler):
+    """리다이렉트가 HTTPS와 최초의 정확한 호스트를 벗어나지 못하게 한다."""
+
+    def __init__(
+        self,
+        expected_hostname: str,
+        *,
+        url_allowed: Callable[[str], bool] | None = None,
+        deadline: _DeadlineBudget | None = None,
+    ) -> None:
+        super().__init__(url_allowed=url_allowed, deadline=deadline)
+        self._expected_hostname = _normalize_exact_hostname(expected_hostname)
+        self._url_allowed = url_allowed
+
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        _require_exact_https_hostname(newurl, self._expected_hostname)
+        _require_url_allowed(newurl, self._url_allowed)
+        if self._deadline is not None:
+            resolve_safe_target(newurl, deadline=self._deadline)
+        else:
+            resolve_safe_target(newurl)
+        redirected = urllib.request.HTTPRedirectHandler.redirect_request(
+            self, request, fp, code, msg, headers, newurl
+        )
+        if redirected is not None and self._deadline is not None:
+            redirected.timeout = self._deadline.remaining()
+        return redirected
 
 
 class _UndrainedRedirectBody:
