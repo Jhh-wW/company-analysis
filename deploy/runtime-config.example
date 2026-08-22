@@ -4,6 +4,7 @@ BETA_ADMIN_ONLY=1
 LOG_LEVEL=info
 DEPLOYMENT_EXPOSURE=local
 DEPLOYMENT_PLATFORM=local
+DEPLOYMENT_RUNTIME_CONTRACT=local-web-v1
 FORWARDED_ALLOW_IPS=127.0.0.1
 
 # 공개 배포 입력 예시다. Render Docker는 검증 가능한 ingress peer CIDR이 없어

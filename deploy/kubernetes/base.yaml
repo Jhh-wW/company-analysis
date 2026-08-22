@@ -77,6 +77,11 @@ spec:
                 name: company-analysis-config
             - secretRef:
                 name: company-analysis-runtime
+          # envFrom보다 직접 env가 우선한다. service link와 service-account token이
+          # 모두 꺼져 marker가 없어도 entrypoint가 public Kubernetes web을 강제한다.
+          env:
+            - name: DEPLOYMENT_RUNTIME_CONTRACT
+              value: kubernetes-public-web-v1
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

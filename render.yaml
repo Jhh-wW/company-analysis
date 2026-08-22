@@ -35,6 +35,8 @@ services:
         value: public
       - key: DEPLOYMENT_PLATFORM
         value: render
+      - key: DEPLOYMENT_RUNTIME_CONTRACT
+        value: render-public-web-v1
       - key: PUBLIC_ORIGIN
         sync: false
       - key: FORWARDED_ALLOW_IPS

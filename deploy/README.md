@@ -18,10 +18,11 @@ Compose와 Kubernetes에서 같은 비-root 계정, 상태 확인 경로, 영속
 
 ## 공개 reverse proxy gate
 
-로컬 Compose는 `DEPLOYMENT_EXPOSURE=local`, `DEPLOYMENT_PLATFORM=local`과 loopback
-forwarded 신뢰만 허용한다. 공개 배포는 `public`을 명시해야 하며 다음 증거가 없으면
-entrypoint가 웹 시작을 차단한다. 환경의 SHA-256은 canary artifact 식별자일 뿐 신뢰
-증명이 아니다. 서명 artifact 원문과 고정 policy를 검증할 운영 adapter가 아직 없으므로
+로컬 Compose는 `DEPLOYMENT_EXPOSURE=local`, `DEPLOYMENT_PLATFORM=local`,
+`DEPLOYMENT_RUNTIME_CONTRACT=local-web-v1`과 loopback forwarded 신뢰만 허용한다.
+공개 배포는 `public`을 명시해야 하며 다음 증거가 없으면 entrypoint가 웹 시작을 차단한다.
+환경의 SHA-256은 canary artifact 식별자일 뿐 신뢰 증명이 아니다. 서명 artifact 원문과
+고정 policy를 검증할 운영 adapter가 아직 없으므로
 `PRODUCTION_FORWARDED_EVIDENCE_VERIFIER_AVAILABLE=False`이고 현재 모든 public 설정은
 값을 전부 채워도 BLOCKED다.
 
@@ -47,16 +48,37 @@ Docker/All runtimes 범위와 [Uvicorn proxy 설정](https://www.uvicorn.org/set
 기본 loopback·명시 IP/IP Network 신뢰 계약을 따른다. Python native 전용 기본값이나
 outbound 주소를 Docker 컨테이너가 실제로 보는 ingress peer 주소로 추정하지 않는다.
 
-`RENDER=true`, `RENDER_SERVICE_TYPE=web`, `RENDER_EXTERNAL_URL` 또는 Render hostname
-marker가 하나라도 보이면 `DEPLOYMENT_PLATFORM=render`와 `DEPLOYMENT_EXPOSURE=public`을
-강제한다. `KUBERNETES_SERVICE_HOST`/`PORT`, `KUBERNETES_PORT` 또는 projected
+`RENDER_SERVICE_TYPE=web`, `RENDER_EXTERNAL_URL` 또는 Render hostname marker가 보이면
+`DEPLOYMENT_PLATFORM=render`와 `DEPLOYMENT_EXPOSURE=public`을 강제한다. 모든 Render
+runtime에 공통인 `RENDER=true` 단독은 web 충분조건이 아니며 cron/background worker를
+web으로 승격하지 않는다. 그 상태의 검증되지 않은 generic command는 그대로 BLOCKED하고,
+알려진 trigger module만 trigger 전용 검증을 유지한다. `KUBERNETES_SERVICE_HOST`/`PORT`,
+`KUBERNETES_PORT` 또는 projected
 service-account marker가 보이면 같은 방식으로 `kubernetes`/`public`을 강제한다. 따라서
 플랫폼 안에서 `local`이라고 자기선언해 public gate를 우회할 수 없다. 다만 marker는
-플랫폼이 이름을 바꾸거나 주입을 생략하면 완전하지 않으며, 공개성의 충분한 증명은 아니다.
+플랫폼이 이름을 바꾸거나 주입을 생략하면 완전하지 않으며, 공개성의 충분한 증명이나 승인
+근거가 아닌 방어심층 신호일 뿐이다.
+
+entrypoint는 사용자 CMD의 문자열보다 manifest가 직접 고정한 runtime contract와 플랫폼
+marker를 먼저 판정한다. Compose는 `local-web-v1`, Render web Blueprint는
+`render-public-web-v1`, Kubernetes Deployment는 `kubernetes-public-web-v1`을 사용한다.
+따라서 CMD가 `src.web.main:app`을 포함하지 않거나 trigger처럼 꾸며져도 Render web 또는
+Kubernetes contract가 있으면 반드시 web forwarded 검증을 거친다. 알 수 없는 contract와
+contract 없는 generic command는 exit 78로 닫힌다. runtime contract는 배포 종류를
+fail-closed로 분류할 뿐 공개 승인 증거가 아니므로 public contract도 독립 canary verifier
+부재 상태에서는 계속 BLOCKED다.
+
+Kubernetes base는 `enableServiceLinks=false`와
+`automountServiceAccountToken=false`이므로 서비스 환경변수와 service-account 파일 marker가
+정상적으로 전혀 없을 수 있다. 이 때문에 Deployment container의 직접 `env`가
+`kubernetes-public-web-v1`을 고정하며, 이 값은 ConfigMap/Secret의 `envFrom`보다 우선한다.
+이 직접 contract를 제거하고 marker까지 비우면 generic readiness는 unsupported/BLOCKED다.
+반대로 marker가 보이는 것만으로 공개 승인을 만들지는 않는다.
 
 Compose는 `127.0.0.1:${HOST_PORT}:10000` loopback bind만 release 계약으로 고정한다.
 일반 `docker run -p 0.0.0.0:...` 또는 다른 orchestrator의 공개 port는 marker로 확실히
-감지할 수 없고 public readiness를 얻지 못한다. 별도 공개 플랫폼 계약 없이는 BLOCKED다.
+감지할 수 없고, 이미지 자체에는 위 runtime contract의 공개 승인 기본값도 없다. 별도 공개
+플랫폼 contract 없이는 public readiness를 얻지 못하며 BLOCKED다.
 
 PDF는 고정된 `reportlab`, `pypdf`, `pdfplumber`, `pypdfium2` 패키지와 이미지에 포함된
 Freesentation 글꼴을 쓴다. LibreOffice나 브라우저 런타임은 필요하지 않다. PDF 렌더의

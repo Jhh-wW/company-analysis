@@ -13,13 +13,12 @@ if [ "$#" -eq 0 ]; then
   exit 64
 fi
 
-scope="generic"
-case " $* " in
-  *"src.web.main:app"*) scope="web" ;;
-  *"tools.trigger_backup"*) scope="backup-trigger" ;;
-  *"tools.trigger_maintenance"*) scope="maintenance-trigger" ;;
-esac
-
-python /srv/deploy/validate_environment.py --scope "$scope"
-echo "배포 환경 검증 통과: ${scope}" >&2
+# command 문자열 부분 일치로 scope를 고르면 이름을 바꾼 web wrapper가 generic으로
+# 우회할 수 있다. Python resolver가 manifest contract·플랫폼 marker를 command보다
+# 먼저 적용하고, generic command 자체도 readiness 불가로 닫는다.
+python /srv/deploy/validate_environment.py \
+  --from-command \
+  --runtime-contract "${DEPLOYMENT_RUNTIME_CONTRACT:-}" \
+  -- "$@"
+echo "배포 환경·실행 범위 검증 통과" >&2
 exec "$@"

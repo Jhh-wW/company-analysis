@@ -7,10 +7,10 @@ import ipaddress
 import os
 import posixpath
 import re
+import shlex
 import sys
 from collections.abc import Mapping, Sequence
-from pathlib import PurePosixPath
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
 
@@ -67,13 +67,6 @@ RENDER_FORWARDED_TRUST_BLOCKER = (
     "RENDER_FORWARDED_TRUST: 고정 ingress peer CIDR 계약이 없어 사용자 입력이나 "
     "outbound IP로 forwarded trust를 열 수 없습니다"
 )
-RENDER_MARKER_VARIABLES = (
-    "RENDER",
-    "RENDER_SERVICE_TYPE",
-    "RENDER_EXTERNAL_URL",
-    "RENDER_EXTERNAL_HOSTNAME",
-    "RENDER_HOSTNAME",
-)
 KUBERNETES_MARKER_VARIABLES = (
     "KUBERNETES_SERVICE_HOST",
     "KUBERNETES_SERVICE_PORT",
@@ -84,6 +77,29 @@ KUBERNETES_SERVICE_ACCOUNT_MARKERS = (
     Path("/var/run/secrets/kubernetes.io/serviceaccount/token"),
     Path("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"),
 )
+RUNTIME_CONTRACT_LOCAL_WEB = "local-web-v1"
+RUNTIME_CONTRACT_RENDER_WEB = "render-public-web-v1"
+RUNTIME_CONTRACT_KUBERNETES_WEB = "kubernetes-public-web-v1"
+RUNTIME_CONTRACTS = frozenset(
+    {
+        RUNTIME_CONTRACT_LOCAL_WEB,
+        RUNTIME_CONTRACT_RENDER_WEB,
+        RUNTIME_CONTRACT_KUBERNETES_WEB,
+    }
+)
+RUNTIME_CONTRACT_REQUIRED_BLOCKER = (
+    "DEPLOYMENT_RUNTIME_CONTRACT: web readiness에는 manifest/Compose/Render가 직접 "
+    "고정한 runtime contract가 필요합니다"
+)
+GENERIC_COMMAND_BLOCKER = (
+    "DEPLOYMENT_SCOPE: 검증되지 않은 generic command는 배포 readiness를 얻을 수 없습니다"
+)
+TRIGGER_COMMAND_SCOPES = {
+    ("python", "-m", "tools.trigger_backup"): "backup-trigger",
+    ("python", "-m", "tools.trigger_maintenance"): "maintenance-trigger",
+    ("python", "-m", "tools.trigger_maintenance", "weekly"): "maintenance-trigger",
+    ("python", "-m", "tools.trigger_maintenance", "cleanup"): "maintenance-trigger",
+}
 FORBIDDEN_PROXY_NETWORKS = tuple(
     ipaddress.ip_network(value)
     for value in (
@@ -271,17 +287,15 @@ def _default_kubernetes_service_account_marker() -> bool:
     return False
 
 
-def _render_public_marker(environment: Mapping[str, str]) -> bool:
-    return (
-        environment.get("RENDER", "").strip().lower() in BOOLEAN_TRUE
-        or environment.get("RENDER_SERVICE_TYPE", "").strip().lower() == "web"
-        or any(
-            environment.get(name, "").strip()
-            for name in (
-                "RENDER_EXTERNAL_URL",
-                "RENDER_EXTERNAL_HOSTNAME",
-                "RENDER_HOSTNAME",
-            )
+def _render_web_marker(environment: Mapping[str, str]) -> bool:
+    """모든 runtime 공통 RENDER=true가 아니라 공개 web 전용 신호만 본다."""
+
+    return environment.get("RENDER_SERVICE_TYPE", "").strip().lower() == "web" or any(
+        environment.get(name, "").strip()
+        for name in (
+            "RENDER_EXTERNAL_URL",
+            "RENDER_EXTERNAL_HOSTNAME",
+            "RENDER_HOSTNAME",
         )
     )
 
@@ -294,14 +308,105 @@ def _kubernetes_cluster_marker(
     )
 
 
+def _runtime_contract(environment: Mapping[str, str], explicit: str | None) -> str:
+    # manifest가 직접 주입한 환경 계약이 호출자 인자보다 우선한다. 빈 CLI 인자로
+    # Kubernetes direct env를 shadow해 scope를 낮출 수 없어야 한다.
+    environment_raw = environment.get("DEPLOYMENT_RUNTIME_CONTRACT", "").strip()
+    raw = environment_raw or ("" if explicit is None else explicit)
+    return raw.strip().lower()
+
+
+def _normalized_command_words(command: Sequence[str]) -> tuple[str, ...]:
+    """Render가 shell form CMD로 넘겨도 허용한 trigger 한 문장만 해석한다."""
+
+    tokens = tuple(str(value) for value in command)
+    if (
+        len(tokens) == 3
+        and PurePosixPath(tokens[0]).name in {"sh", "bash"}
+        and tokens[1] == "-c"
+    ):
+        try:
+            words = tuple(shlex.split(tokens[2], posix=True))
+        except ValueError:
+            return tokens
+        if words[:1] == ("exec",):
+            words = words[1:]
+        return words
+    return tokens
+
+
+def resolve_scope(
+    environment: Mapping[str, str],
+    command: Sequence[str],
+    *,
+    runtime_contract: str | None = None,
+    kubernetes_service_account_marker: bool | None = None,
+) -> str:
+    """사용자 command 문자열보다 배포 contract·플랫폼 marker를 먼저 신뢰한다."""
+
+    contract = _runtime_contract(environment, runtime_contract)
+    if contract:
+        # 알 수 없는 contract도 web으로 보내 검증 단계에서 fail-closed한다.
+        return "web"
+
+    if _render_web_marker(environment):
+        return "web"
+
+    service_account_marker = (
+        _default_kubernetes_service_account_marker()
+        if kubernetes_service_account_marker is None
+        else kubernetes_service_account_marker
+    )
+    if _kubernetes_cluster_marker(
+        environment, service_account_marker=service_account_marker
+    ):
+        return "web"
+
+    tokens = tuple(str(value) for value in command)
+    if any("src.web.main:app" in token for token in tokens):
+        return "web"
+    trigger_scope = TRIGGER_COMMAND_SCOPES.get(_normalized_command_words(command))
+    if trigger_scope:
+        return trigger_scope
+    return "generic"
+
+
+def _requires_web_validation(
+    environment: Mapping[str, str],
+    *,
+    runtime_contract: str | None,
+    kubernetes_service_account_marker: bool | None,
+) -> bool:
+    """호출자가 낮은 scope를 넘겨도 배포 web 불변식을 우선한다."""
+
+    if _runtime_contract(environment, runtime_contract):
+        return True
+    if _render_web_marker(environment):
+        return True
+    service_account_marker = (
+        _default_kubernetes_service_account_marker()
+        if kubernetes_service_account_marker is None
+        else kubernetes_service_account_marker
+    )
+    return _kubernetes_cluster_marker(
+        environment, service_account_marker=service_account_marker
+    )
+
+
 def _validate_forwarded_proxy_configuration(
     environment: Mapping[str, str],
     *,
+    runtime_contract: str | None = None,
     kubernetes_service_account_marker: bool | None = None,
 ) -> list[str]:
     errors: list[str] = []
     declared_exposure = environment.get("DEPLOYMENT_EXPOSURE", "").strip().lower()
     declared_platform = environment.get("DEPLOYMENT_PLATFORM", "").strip().lower()
+    contract = _runtime_contract(environment, runtime_contract)
+    if not contract:
+        errors.append(RUNTIME_CONTRACT_REQUIRED_BLOCKER)
+    elif contract not in RUNTIME_CONTRACTS:
+        errors.append("DEPLOYMENT_RUNTIME_CONTRACT: 지원하지 않는 contract입니다")
     if declared_exposure not in DEPLOYMENT_EXPOSURES:
         errors.append("DEPLOYMENT_EXPOSURE: local 또는 public을 명시해야 합니다")
     if declared_platform not in DEPLOYMENT_PLATFORMS:
@@ -312,13 +417,23 @@ def _validate_forwarded_proxy_configuration(
         if kubernetes_service_account_marker is None
         else kubernetes_service_account_marker
     )
-    render_detected = _render_public_marker(environment)
-    kubernetes_detected = _kubernetes_cluster_marker(
-        environment, service_account_marker=service_account_marker
+    render_detected = (
+        contract == RUNTIME_CONTRACT_RENDER_WEB or _render_web_marker(environment)
+    )
+    kubernetes_detected = (
+        contract == RUNTIME_CONTRACT_KUBERNETES_WEB
+        or _kubernetes_cluster_marker(
+            environment, service_account_marker=service_account_marker
+        )
     )
     if render_detected and kubernetes_detected:
         errors.append("PLATFORM_MARKERS: Render와 Kubernetes marker가 동시에 감지됐습니다")
     if render_detected:
+        if contract and contract != RUNTIME_CONTRACT_RENDER_WEB:
+            errors.append(
+                "DEPLOYMENT_RUNTIME_CONTRACT: Render web은 "
+                f"{RUNTIME_CONTRACT_RENDER_WEB}을 강제합니다"
+            )
         if declared_exposure != "public":
             errors.append("DEPLOYMENT_EXPOSURE: Render web marker는 public을 강제합니다")
         if declared_platform != "render":
@@ -326,12 +441,24 @@ def _validate_forwarded_proxy_configuration(
         exposure = "public"
         platform = "render"
     elif kubernetes_detected:
+        if contract and contract != RUNTIME_CONTRACT_KUBERNETES_WEB:
+            errors.append(
+                "DEPLOYMENT_RUNTIME_CONTRACT: Kubernetes web은 "
+                f"{RUNTIME_CONTRACT_KUBERNETES_WEB}을 강제합니다"
+            )
         if declared_exposure != "public":
             errors.append("DEPLOYMENT_EXPOSURE: Kubernetes marker는 public을 강제합니다")
         if declared_platform != "kubernetes":
             errors.append("DEPLOYMENT_PLATFORM: Kubernetes marker는 kubernetes를 강제합니다")
         exposure = "public"
         platform = "kubernetes"
+    elif contract == RUNTIME_CONTRACT_LOCAL_WEB:
+        if declared_exposure != "local":
+            errors.append("DEPLOYMENT_EXPOSURE: local web contract는 local을 강제합니다")
+        if declared_platform != "local":
+            errors.append("DEPLOYMENT_PLATFORM: local web contract는 local을 강제합니다")
+        exposure = "local"
+        platform = "local"
     else:
         exposure = declared_exposure
         platform = declared_platform
@@ -380,10 +507,18 @@ def validate(
     environment: Mapping[str, str],
     scope: str = "web",
     *,
+    runtime_contract: str | None = None,
     kubernetes_service_account_marker: bool | None = None,
 ) -> list[str]:
     """환경 오류만 반환한다. 반환값에는 설정값 자체가 절대 들어가지 않는다."""
     errors: list[str] = []
+    effective_scope = scope
+    if scope in SCOPES and scope != "web" and _requires_web_validation(
+        environment,
+        runtime_contract=runtime_contract,
+        kubernetes_service_account_marker=kubernetes_service_account_marker,
+    ):
+        effective_scope = "web"
     pipeline = environment.get("PIPELINE", "").strip().lower()
     if pipeline not in {"demo", "real"}:
         errors.append("PIPELINE: demo 또는 real만 허용합니다")
@@ -405,10 +540,11 @@ def validate(
     if log_level not in LOG_LEVELS:
         errors.append("LOG_LEVEL: 지원하는 로그 수준이 아닙니다")
 
-    if scope == "web":
+    if effective_scope == "web":
         errors.extend(
             _validate_forwarded_proxy_configuration(
                 environment,
+                runtime_contract=runtime_contract,
                 kubernetes_service_account_marker=kubernetes_service_account_marker,
             )
         )
@@ -426,23 +562,66 @@ def validate(
             elif len(seal.encode("utf-8")) < 32:
                 errors.append("PROVENANCE_SEAL_SECRET: 최소 길이를 충족하지 않습니다")
         errors.extend(_validate_backup_manifest_configuration(environment))
-    elif scope == "backup-trigger":
+    elif effective_scope == "backup-trigger":
         errors.extend(_required(environment, ("BACKUP_TRIGGER_URL", "BACKUP_TRIGGER_SECRET")))
-    elif scope == "maintenance-trigger":
+    elif effective_scope == "maintenance-trigger":
         errors.extend(
             _required(environment, ("MAINTENANCE_TRIGGER_URL", "MAINTENANCE_TRIGGER_SECRET"))
         )
-    elif scope != "generic":
+    elif effective_scope == "generic":
+        errors.append(GENERIC_COMMAND_BLOCKER)
+    else:
         errors.append("검증 범위가 올바르지 않습니다")
 
     return errors
 
 
+def validate_command(
+    environment: Mapping[str, str],
+    command: Sequence[str],
+    *,
+    runtime_contract: str | None = None,
+    kubernetes_service_account_marker: bool | None = None,
+) -> tuple[str, list[str]]:
+    """entrypoint command의 scope를 결정하고 한 번에 환경 계약을 검증한다."""
+
+    scope = resolve_scope(
+        environment,
+        command,
+        runtime_contract=runtime_contract,
+        kubernetes_service_account_marker=kubernetes_service_account_marker,
+    )
+    if scope == "generic":
+        return scope, [GENERIC_COMMAND_BLOCKER]
+    return scope, validate(
+        environment,
+        scope,
+        runtime_contract=runtime_contract,
+        kubernetes_service_account_marker=kubernetes_service_account_marker,
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scope", choices=SCOPES, default="web")
+    parser.add_argument("--from-command", action="store_true")
+    parser.add_argument("--runtime-contract")
+    parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
-    errors = validate(os.environ, args.scope)
+    if args.from_command:
+        command = args.command[1:] if args.command[:1] == ["--"] else args.command
+        scope, errors = validate_command(
+            os.environ,
+            command,
+            runtime_contract=args.runtime_contract,
+        )
+    else:
+        scope = args.scope
+        errors = validate(
+            os.environ,
+            scope,
+            runtime_contract=args.runtime_contract,
+        )
     if errors:
         print("배포 환경 검증 실패:", file=sys.stderr)
         for error in errors:

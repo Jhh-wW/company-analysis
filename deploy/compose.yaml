@@ -25,6 +25,7 @@ services:
       PORT: "10000"
       DEPLOYMENT_EXPOSURE: local
       DEPLOYMENT_PLATFORM: local
+      DEPLOYMENT_RUNTIME_CONTRACT: local-web-v1
       FORWARDED_ALLOW_IPS: 127.0.0.1
       APP_DATA_ROOT: /var/data
       STORAGE_DB_PATH: /var/data/storage.db

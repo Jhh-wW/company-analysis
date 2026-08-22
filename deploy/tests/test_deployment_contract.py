@@ -38,6 +38,7 @@ def _base_environment() -> dict[str, str]:
         "GRACEFUL_SHUTDOWN_SECONDS": "300",
         "DEPLOYMENT_EXPOSURE": "local",
         "DEPLOYMENT_PLATFORM": "local",
+        "DEPLOYMENT_RUNTIME_CONTRACT": validator.RUNTIME_CONTRACT_LOCAL_WEB,
         "FORWARDED_ALLOW_IPS": "127.0.0.1",
         "APP_DATA_ROOT": "/var/data",
         "STORAGE_DB_PATH": "/var/data/storage.db",
@@ -225,6 +226,7 @@ def test_admin_login_and_persistence_paths_fail_closed() -> None:
 
 def test_trigger_scopes_require_only_their_own_credentials() -> None:
     environment = _base_environment()
+    environment.pop("DEPLOYMENT_RUNTIME_CONTRACT")
 
     backup_errors = "\n".join(validator.validate(environment, "backup-trigger"))
     maintenance_errors = "\n".join(
@@ -272,6 +274,9 @@ def test_compose_has_read_only_non_root_volume_and_log_rotation() -> None:
     assert "app-data:/var/data" in web["volumes"]
     assert web["logging"]["options"] == {"max-size": "10m", "max-file": "5"}
     assert web["environment"]["DEPLOYMENT_EXPOSURE"] == "local"
+    assert web["environment"]["DEPLOYMENT_RUNTIME_CONTRACT"] == (
+        validator.RUNTIME_CONTRACT_LOCAL_WEB
+    )
     assert web["environment"]["FORWARDED_ALLOW_IPS"] == "127.0.0.1"
 
 
@@ -286,6 +291,7 @@ def test_kubernetes_has_liveness_readiness_and_persistent_single_writer() -> Non
     pod_spec = deployment["spec"]["template"]["spec"]
     assert pod_spec["terminationGracePeriodSeconds"] == 330
     assert pod_spec["automountServiceAccountToken"] is False
+    assert pod_spec["enableServiceLinks"] is False
     assert pod_spec["securityContext"]["runAsNonRoot"] is True
     assert pod_spec["securityContext"]["runAsUser"] == 1000
     container = pod_spec["containers"][0]
@@ -294,6 +300,12 @@ def test_kubernetes_has_liveness_readiness_and_persistent_single_writer() -> Non
     assert container["securityContext"]["readOnlyRootFilesystem"] is True
     assert container["securityContext"]["capabilities"]["drop"] == ["ALL"]
     assert any("secretRef" in item for item in container["envFrom"])
+    assert "command" not in container
+    assert "args" not in container
+    direct_environment = {item["name"]: item["value"] for item in container["env"]}
+    assert direct_environment["DEPLOYMENT_RUNTIME_CONTRACT"] == (
+        validator.RUNTIME_CONTRACT_KUBERNETES_WEB
+    )
     assert by_kind["PersistentVolumeClaim"]["spec"]["accessModes"] == [
         "ReadWriteOnce"
     ]
@@ -322,6 +334,7 @@ def test_local_scripts_do_not_push_or_deploy_and_smoke_disables_network() -> Non
     assert "--network none" in smoke_script
     assert "PIPELINE=demo" in smoke_script
     assert "BETA_ADMIN_ONLY=0" in smoke_script
+    assert "DEPLOYMENT_RUNTIME_CONTRACT=local-web-v1" in smoke_script
     assert "verify_image.py" in smoke_script
     assert "--provenance=false" not in build_script
     assert "--provenance=mode=max" in build_script

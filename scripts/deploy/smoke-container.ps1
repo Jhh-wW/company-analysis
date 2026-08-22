@@ -31,6 +31,7 @@ function Start-SmokeContainer {
         --security-opt no-new-privileges `
         --env PIPELINE=demo `
         --env BETA_ADMIN_ONLY=0 `
+        --env DEPLOYMENT_RUNTIME_CONTRACT=local-web-v1 `
         --env PORT=10000 `
         --env APP_DATA_ROOT=/var/data `
         --env STORAGE_DB_PATH=/var/data/storage.db `
