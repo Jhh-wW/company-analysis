@@ -626,6 +626,77 @@ def test_저장된_approval_JSON이나_role_row가_변조되면_조회가_차단
         load_approval(conn, report_id="report-1", pdf_sha256=_PDF_HASH)
 
 
+def test_복구용_전수검증은_정상_역할원장과_승인정본을_읽는다():
+    conn = _connection()
+    _save_complete_approval(conn)
+
+    release_store.validate_persisted_release_records(conn)
+
+
+def test_복구용_전수검증은_JSON문법만_맞는_승인정본을_거부한다():
+    conn = _connection()
+    release_store.ensure_schema(conn)
+    conn.execute(
+        f"""
+        INSERT INTO {TABLE_NAME} (
+            report_id, pdf_sha256, approval_json, approval_created_at
+        ) VALUES ('report-1', ?, '{{}}', ?)
+        """,
+        (_PDF_HASH, _AT),
+    )
+
+    with pytest.raises(PdfReleaseStoreError):
+        release_store.validate_persisted_release_records(conn)
+
+
+@pytest.mark.parametrize("shadow_kind", ("participant", "decision", "approval"))
+def test_복구용_전수검증은_공백_report_id_shadow행을_정상행으로_대신읽지_않는다(
+    shadow_kind: str,
+):
+    conn = _connection()
+    _save_complete_approval(conn)
+    if shadow_kind == "participant":
+        conn.execute(
+            f"""
+            INSERT INTO {release_store.PARTICIPANT_TABLE_NAME} (
+                report_id, pdf_sha256, role, person_id, assigned_at
+            )
+            SELECT ' report-1 ', pdf_sha256, role, person_id, assigned_at
+            FROM {release_store.PARTICIPANT_TABLE_NAME}
+            WHERE report_id='report-1'
+            """
+        )
+    elif shadow_kind == "decision":
+        conn.execute(
+            f"""
+            INSERT INTO {DECISION_TABLE_NAME} (
+                report_id, pdf_sha256, role, page_hashes_json,
+                reviewed_pages_json, expected_fact_ids_json,
+                reviewed_fact_ids_json, fact_failed_count,
+                reviewer, approved_at, visual_review_kind
+            )
+            SELECT ' report-1 ', pdf_sha256, role, page_hashes_json,
+                   reviewed_pages_json, expected_fact_ids_json,
+                   reviewed_fact_ids_json, fact_failed_count,
+                   reviewer, approved_at, visual_review_kind
+            FROM {DECISION_TABLE_NAME}
+            WHERE report_id='report-1'
+            """
+        )
+    else:
+        conn.execute(
+            f"""
+            INSERT INTO {TABLE_NAME} (
+                report_id, pdf_sha256, approval_json, approval_created_at
+            ) VALUES (' report-1 ', ?, '{{}}', ?)
+            """,
+            (_PDF_HASH, _AT),
+        )
+
+    with pytest.raises(PdfReleaseStoreError, match="DB key"):
+        release_store.validate_persisted_release_records(conn)
+
+
 @pytest.mark.parametrize("tampered_count", (0.75, -0.5))
 def test_DB_fact_failed_count를_정수로_강제변환해_0으로_숨기지_않는다(
     tampered_count,

@@ -209,6 +209,8 @@ class RuntimePayloadConsumers:
     dashboard: object
     lifecycle: object
     publish: object
+    pdf_release: object
+    admin_audit: object
 
 
 def sha256_file(path: Path) -> str:
@@ -305,6 +307,8 @@ def _read_sidecar(path: Path, *, database_name: str) -> str:
 
 
 def _readonly_connection(path: Path) -> sqlite3.Connection:
+    """고정 백업/clone main bytes만 여는 엄격한 읽기 전용 연결."""
+
     _assert_no_sqlite_companions(path, label="검증 DB")
     uri_path = quote(path.resolve().as_posix(), safe="/:")
     connection = sqlite3.connect(
@@ -317,6 +321,33 @@ def _readonly_connection(path: Path) -> sqlite3.Connection:
     connection.execute("PRAGMA foreign_keys = ON")
     try:
         _assert_no_sqlite_companions(path, label="검증 DB")
+    except BaseException:
+        connection.close()
+        raise
+    return connection
+
+
+def _live_readonly_connection(path: Path) -> sqlite3.Connection:
+    """정상 WAL sidecar를 포함한 운영 DB snapshot을 읽기 전용으로 연다.
+
+    백업과 격리 clone은 manifest에 결속된 main bytes만 허용해야 하므로
+    ``_readonly_connection``의 sidecar 거부와 immutable 모드를 그대로 쓴다.
+    반면 실행 중인 운영 DB의 ``-wal``/``-shm``은 정상 상태일 수 있다. 여기서는
+    SQLite가 WAL까지 포함한 일관된 snapshot을 만들도록 일반 ``mode=ro`` 연결과
+    명시적 읽기 transaction을 사용한다.
+    """
+
+    uri_path = quote(path.resolve().as_posix(), safe="/:")
+    connection = sqlite3.connect(
+        f"file:{uri_path}?mode=ro",
+        uri=True,
+        timeout=SQLITE_TIMEOUT_SEC,
+    )
+    try:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only = ON")
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("BEGIN")
     except BaseException:
         connection.close()
         raise
@@ -819,6 +850,20 @@ def _load_runtime_payload_consumers() -> RuntimePayloadConsumers:
             "src.features.report_standard.publish",
             app_root / "src" / "features" / "report_standard" / "publish.py",
             ("validate_publishable",),
+        ),
+        "pdf_release": (
+            "src.features.export_pdf.release_store",
+            app_root / "src" / "features" / "export_pdf" / "release_store.py",
+            ("validate_persisted_release_records",),
+        ),
+        "admin_audit": (
+            "src.features.observability.admin_audit_store",
+            app_root
+            / "src"
+            / "features"
+            / "observability"
+            / "admin_audit_store.py",
+            ("validate_persisted_events",),
         ),
     }
     loaded: dict[str, object] = {}
@@ -1385,6 +1430,44 @@ def _assert_lifecycle_payloads(
                 ) from exc
 
 
+def _assert_pdf_release_payloads(
+    connection: sqlite3.Connection,
+    *,
+    consumers: RuntimePayloadConsumers,
+    budget: PayloadValidationBudget,
+) -> None:
+    try:
+        getattr(consumers.pdf_release, "validate_persisted_release_records")(
+            connection,
+            deadline_check=budget.check_deadline,
+        )
+    except ReadinessError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — 승인/식별자 내용을 노출하지 않는다
+        raise ReadinessError(
+            "PDF 승인·역할·출고 기록을 현재 export_pdf 소비 계약으로 읽지 못했습니다."
+        ) from exc
+
+
+def _assert_admin_audit_payloads(
+    connection: sqlite3.Connection,
+    *,
+    consumers: RuntimePayloadConsumers,
+    budget: PayloadValidationBudget,
+) -> None:
+    try:
+        getattr(consumers.admin_audit, "validate_persisted_events")(
+            connection,
+            deadline_check=budget.check_deadline,
+        )
+    except ReadinessError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — 관리자 감사 내용을 노출하지 않는다
+        raise ReadinessError(
+            "관리자 감사 원장을 현재 observability 소비 계약으로 읽지 못했습니다."
+        ) from exc
+
+
 def _assert_runtime_payload_contracts(
     connection: sqlite3.Connection,
     *,
@@ -1414,6 +1497,16 @@ def _assert_runtime_payload_contracts(
                 type_hints_cache=type_hints_cache,
             )
             _assert_lifecycle_payloads(connection, consumers=consumers, budget=budget)
+            _assert_pdf_release_payloads(
+                connection,
+                consumers=consumers,
+                budget=budget,
+            )
+            _assert_admin_audit_payloads(
+                connection,
+                consumers=consumers,
+                budget=budget,
+            )
     except ReadinessError:
         raise
     except sqlite3.Error as exc:
@@ -1938,7 +2031,7 @@ def preflight(
     warnings: list[str] = []
     counts: dict[str, int] = {}
     try:
-        with closing(_readonly_connection(database)) as connection:
+        with closing(_live_readonly_connection(database)) as connection:
             _assert_database(connection)
             for label, sql in ACTIVE_QUERIES:
                 counts[label] = _single_count(connection, sql)

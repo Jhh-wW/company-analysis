@@ -369,6 +369,41 @@ def test_quiet_maintenance_preflight_is_read_only(tmp_path: Path) -> None:
     assert not database.with_name(database.name + "-shm").exists()
 
 
+def test_live_preflight_reads_normal_wal_snapshot_without_rejecting_sidecars(
+    tmp_path: Path,
+) -> None:
+    database = _create_database(tmp_path / "app.sqlite3")
+    writer = sqlite3.connect(database)
+    try:
+        assert writer.execute("PRAGMA journal_mode = WAL").fetchone()[0] == "wal"
+        writer.execute("PRAGMA wal_autocheckpoint = 0")
+        writer.execute("INSERT INTO job_interruptions VALUES ('recoverable-job')")
+        writer.commit()
+        wal_path = database.with_name(database.name + "-wal")
+        shm_path = database.with_name(database.name + "-shm")
+        assert wal_path.is_file()
+        assert shm_path.is_file()
+        wal_before = wal_path.read_bytes()
+
+        result = readiness.preflight(
+            database,
+            tmp_path,
+            require_maintenance=True,
+            min_free_bytes=0,
+            max_disk_used_percent=100,
+            max_database_bytes=10**9,
+            max_wal_bytes=10**9,
+            max_link_open_events=10,
+        )
+
+        assert result["status"] == "통과"
+        assert result["counts"]["작업 중단 표식"] == 1
+        assert result["disk"]["wal_bytes"] == len(wal_before)
+        assert wal_path.read_bytes() == wal_before
+    finally:
+        writer.close()
+
+
 def test_preflight_blocks_active_work_normal_mode_and_open_event_growth(
     tmp_path: Path,
 ) -> None:

@@ -690,6 +690,178 @@ def test_other_canonical_json_text_column_is_scanned(tmp_path: Path) -> None:
     _reject_without_mutation(database, temp_parent)
 
 
+@pytest.mark.parametrize(
+    "record_kind",
+    ("approval", "role", "automatic"),
+)
+def test_pdf_release_valid_json_with_invalid_domain_meaning_is_rejected(
+    tmp_path: Path,
+    record_kind: str,
+) -> None:
+    database = _create_runtime_database(
+        tmp_path / record_kind / "source" / "storage.sqlite3"
+    )
+    with sqlite3.connect(database) as connection:
+        if record_kind == "approval":
+            connection.execute(
+                "INSERT INTO pdf_release_records "
+                "(report_id, pdf_sha256, approval_json, approval_created_at) "
+                "VALUES ('report-1', ?, '{}', '2026-08-23T00:00:00+00:00')",
+                ("a" * 64,),
+            )
+        elif record_kind == "role":
+            connection.execute(
+                """
+                INSERT INTO pdf_release_role_decisions (
+                    report_id, pdf_sha256, role, page_hashes_json,
+                    reviewed_pages_json, expected_fact_ids_json,
+                    reviewed_fact_ids_json, fact_failed_count,
+                    reviewer, approved_at, visual_review_kind
+                ) VALUES (
+                    'report-1', ?, 'fact', '[]', '[]', '[]', '[]', 0,
+                    ?, '2026-08-23T00:00:00+00:00', ''
+                )
+                """,
+                ("a" * 64, "user:" + "1" * 20),
+            )
+        else:
+            connection.execute(
+                """
+                INSERT INTO pdf_automatic_release_records (
+                    report_id, report_sha256, pdf_sha256, checker_version,
+                    release_json, release_sha256, released_at
+                ) VALUES (
+                    'report-1', ?, ?, 'automatic-release-v1', '{}', ?,
+                    '2026-08-23T00:00:00+00:00'
+                )
+                """,
+                ("a" * 64, "b" * 64, "c" * 64),
+            )
+    temp_parent = tmp_path / record_kind / "restore-temp"
+    temp_parent.mkdir(parents=True)
+
+    _reject_without_mutation(database, temp_parent)
+
+
+def test_pdf_release_shadow_report_id_is_rejected_by_restore_gate(
+    tmp_path: Path,
+) -> None:
+    from src.features.export_pdf.release import (  # noqa: PLC0415
+        ApprovalDecision,
+        PdfReleaseApproval,
+    )
+    from src.features.export_pdf.release_store import (  # noqa: PLC0415
+        PdfRoleDecision,
+        ensure_participant_ledger,
+        save_approval,
+        save_role_decision,
+    )
+
+    database = _create_runtime_database(tmp_path / "source" / "storage.sqlite3")
+    pdf_sha256 = "a" * 64
+    page_hashes = ("b" * 64,)
+    fact_ids = ("fact-1",)
+    approved_at = "2026-08-23T00:00:00+00:00"
+    reviewers = {
+        "fact": "user:" + "1" * 20,
+        "editorial": "user:" + "2" * 20,
+        "visual": "user:" + "3" * 20,
+    }
+    with _storage_db_module().connect(database) as connection:
+        ensure_participant_ledger(
+            connection,
+            report_id="report-1",
+            pdf_sha256=pdf_sha256,
+            participants={
+                "author": "user:" + "4" * 20,
+                "producer": "user:" + "5" * 20,
+                **reviewers,
+            },
+            assigned_at=approved_at,
+        )
+        decisions: dict[str, ApprovalDecision] = {}
+        for role, reviewer in reviewers.items():
+            decision = ApprovalDecision(True, reviewer, approved_at)
+            decisions[role] = decision
+            save_role_decision(
+                connection,
+                report_id="report-1",
+                role_decision=PdfRoleDecision(
+                    role=role,
+                    pdf_sha256=pdf_sha256,
+                    page_png_sha256s=page_hashes,
+                    reviewed_pages=(1,),
+                    expected_fact_ids=fact_ids,
+                    reviewed_fact_ids=fact_ids if role == "fact" else (),
+                    fact_failed_count=0,
+                    decision=decision,
+                    visual_review_kind="human" if role == "visual" else "",
+                ),
+            )
+        save_approval(
+            connection,
+            report_id="report-1",
+            approval=PdfReleaseApproval(
+                pdf_sha256=pdf_sha256,
+                page_png_sha256s=page_hashes,
+                reviewed_pages=(1,),
+                reviewed_fact_ids=fact_ids,
+                fact_failed_count=0,
+                fact=decisions["fact"],
+                editorial=decisions["editorial"],
+                visual=decisions["visual"],
+                visual_review_kind="human",
+            ),
+            created_at=approved_at,
+        )
+        connection.execute(
+            "INSERT INTO pdf_release_records "
+            "(report_id, pdf_sha256, approval_json, approval_created_at) "
+            "VALUES (' report-1 ', ?, '{}', ?)",
+            (pdf_sha256, approved_at),
+        )
+    temp_parent = tmp_path / "restore-temp"
+    temp_parent.mkdir()
+
+    _reject_without_mutation(database, temp_parent)
+
+
+@pytest.mark.parametrize(
+    ("actor_id", "outcome"),
+    (
+        ("private@example.invalid", "success"),
+        ("anonymous", "forged"),
+    ),
+)
+def test_admin_audit_rows_bypassing_checks_are_rejected_by_restore_gate(
+    tmp_path: Path,
+    actor_id: str,
+    outcome: str,
+) -> None:
+    database = _create_runtime_database(
+        tmp_path / outcome / actor_id.replace("@", "-") / "source" / "storage.sqlite3"
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(
+            """
+            INSERT INTO admin_audit_events (
+                event_time, request_id, actor_id, action,
+                target_id, outcome, reason_code
+            ) VALUES (
+                '2026-08-23T10:00:00+09:00', 'request-1', ?,
+                'admin.member.invite', 'member:fixed-target', ?, 'invited'
+            )
+            """,
+            (actor_id, outcome),
+        )
+        connection.execute("PRAGMA ignore_check_constraints = OFF")
+    temp_parent = tmp_path / outcome / actor_id.replace("@", "-") / "restore-temp"
+    temp_parent.mkdir(parents=True)
+
+    _reject_without_mutation(database, temp_parent)
+
+
 def test_json_scan_reaches_invalid_row_after_first_fetchmany_batch(
     tmp_path: Path,
 ) -> None:

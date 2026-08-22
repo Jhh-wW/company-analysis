@@ -12,7 +12,7 @@ import hashlib
 import json
 import sqlite3
 from dataclasses import asdict, dataclass
-from typing import Final
+from typing import Callable, Final
 
 from src.core.persisted_json import validate_persisted_json_text
 from src.features.export_pdf.release import (
@@ -1116,3 +1116,146 @@ def save_automatic_release(
             "같은 자동출고 대상에 다른 기록이 이미 존재합니다"
         )
     return stored
+
+
+def validate_persisted_release_records(
+    conn: sqlite3.Connection,
+    *,
+    deadline_check: Callable[[], None] | None = None,
+) -> None:
+    """PDF 출고 feature의 모든 영속 행을 실제 읽기 계약으로 전수 검사한다.
+
+    단순 JSON 문법 검사를 넘어서 참여자 원장, 역할별 승인, 최종 승인·출고
+    정본, 자동출고 정본이 DB 열과 서로 같은 대상·SHA-256에 결속됐는지
+    확인한다. 복구 gate가 이 공개 feature 경계를 호출하면 새 소비 계약과 맞지
+    않는 과거/변조 행을 fail-closed할 수 있다.
+    """
+
+    def check_deadline() -> None:
+        if deadline_check is not None:
+            deadline_check()
+
+    def require_subject_keys(
+        report_id: object,
+        pdf_sha256: object,
+    ) -> tuple[str, str]:
+        if (
+            type(report_id) is not str
+            or not report_id
+            or report_id != report_id.strip()
+            or type(pdf_sha256) is not str
+            or not is_valid_sha256(pdf_sha256)
+        ):
+            raise PdfReleaseStoreError("PDF 출고 대상 DB key 형식이 올바르지 않습니다")
+        return report_id, pdf_sha256
+
+    participant_cursor = conn.execute(
+        f"""
+        SELECT report_id, pdf_sha256, COUNT(*)
+        FROM {PARTICIPANT_TABLE_NAME}
+        GROUP BY report_id, pdf_sha256
+        ORDER BY report_id, pdf_sha256
+        """
+    )
+    while rows := participant_cursor.fetchmany(128):
+        for row in rows:
+            check_deadline()
+            report_id, pdf_sha256 = require_subject_keys(row[0], row[1])
+            if type(row[2]) is not int or row[2] != len(PARTICIPANT_ROLES):
+                raise PdfReleaseStoreError("PDF 참여자 원장이 부분 기록이거나 손상됐습니다")
+            ledger = load_participant_ledger(
+                conn,
+                report_id=report_id,
+                pdf_sha256=pdf_sha256,
+            )
+            if ledger is None:
+                raise PdfReleaseStoreError("PDF 참여자 원장을 읽을 수 없습니다")
+
+    decision_cursor = conn.execute(
+        f"""
+        SELECT report_id, pdf_sha256, COUNT(*)
+        FROM {DECISION_TABLE_NAME}
+        GROUP BY report_id, pdf_sha256
+        ORDER BY report_id, pdf_sha256
+        """
+    )
+    while rows := decision_cursor.fetchmany(128):
+        for row in rows:
+            check_deadline()
+            report_id, pdf_sha256 = require_subject_keys(row[0], row[1])
+            if type(row[2]) is not int or not 1 <= row[2] <= len(APPROVAL_ROLES):
+                raise PdfReleaseStoreError("역할별 PDF 승인 행 수가 올바르지 않습니다")
+            decisions = load_role_decisions(
+                conn,
+                report_id=report_id,
+                pdf_sha256=pdf_sha256,
+            )
+            if not decisions:
+                raise PdfReleaseStoreError("역할별 PDF 승인 기록을 읽을 수 없습니다")
+
+    release_cursor = conn.execute(
+        f"""
+        SELECT report_id, pdf_sha256, release_json, release_sha256, released_at
+        FROM {TABLE_NAME}
+        ORDER BY report_id, pdf_sha256
+        """
+    )
+    while rows := release_cursor.fetchmany(128):
+        for row in rows:
+            check_deadline()
+            report_id, pdf_sha256 = require_subject_keys(row[0], row[1])
+            approval = load_approval(
+                conn,
+                report_id=report_id,
+                pdf_sha256=pdf_sha256,
+            )
+            if approval is None:
+                raise PdfReleaseStoreError("PDF 승인 정본을 읽을 수 없습니다")
+            released = load_release_record(
+                conn,
+                report_id=report_id,
+                pdf_sha256=pdf_sha256,
+            )
+            release_columns = row[2:]
+            if any(value is not None for value in release_columns) and released is None:
+                raise PdfReleaseStoreError("PDF 출고 정본을 읽을 수 없습니다")
+
+    automatic_cursor = conn.execute(
+        f"""
+        SELECT report_id, report_sha256, pdf_sha256, checker_version,
+               release_json, release_sha256, released_at
+        FROM {AUTOMATIC_TABLE_NAME}
+        ORDER BY report_id, report_sha256, pdf_sha256, checker_version
+        """
+    )
+    while rows := automatic_cursor.fetchmany(128):
+        for row in rows:
+            check_deadline()
+            if any(type(value) is not str for value in row):
+                raise PdfReleaseStoreError("자동출고 DB 형식이 손상됐습니다")
+            report_id, report_sha256, pdf_sha256, checker_version = row[:4]
+            if not report_id or report_id != report_id.strip():
+                raise PdfReleaseStoreError("자동출고 보고서 식별자가 올바르지 않습니다")
+            try:
+                record = validate_persisted_automatic_release(
+                    report_sha256=report_sha256,
+                    pdf_sha256=pdf_sha256,
+                    checker_version=checker_version,
+                    release_json=row[4],
+                    release_sha256=row[5],
+                    released_at=row[6],
+                )
+            except ValueError as exc:
+                raise PdfReleaseStoreError(
+                    "자동출고 기록과 DB 지문이 일치하지 않습니다"
+                ) from exc
+            consumed = load_automatic_release_record(
+                conn,
+                report_id=report_id,
+                report_sha256=report_sha256,
+                pdf_sha256=pdf_sha256,
+            )
+            if consumed != record:
+                raise PdfReleaseStoreError(
+                    "자동출고 기록을 현재 소비 계약으로 읽지 못했습니다"
+                )

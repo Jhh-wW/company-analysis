@@ -130,6 +130,23 @@ def test_같은_job의_보고서나_PDF_hash가_바뀌면_재자동출고하지�
         conn.close()
 
 
+def test_복구용_전수검증은_정상_자동출고_정본을_읽는다():
+    report = _report()
+    candidate = prepare_pdf_release(report)
+    released = automatic_release_pdf(report, candidate, released_at=_AT)
+    conn = _conn()
+    try:
+        release_store.save_automatic_release(
+            conn,
+            report_id="automatic-restore-validation",
+            released_pdf=released,
+        )
+
+        release_store.validate_persisted_release_records(conn)
+    finally:
+        conn.close()
+
+
 def test_같은_report_hash여도_검수뒤_PDF_bytes가_바뀌면_기존자동출고를_덮어쓰지않는다():
     report = _report()
     candidate = prepare_pdf_release(report)
