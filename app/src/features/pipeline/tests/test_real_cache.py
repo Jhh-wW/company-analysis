@@ -24,7 +24,12 @@ from typing import Any, Optional
 
 import pytest
 
+from src.core.constants import GENERATION_MODEL
 from src.features.budget import provider_budget
+from src.features.budget.constants import (
+    PAID_PHASE_PROVIDER_BUDGET_KRW,
+    SPEND_PHASE_PIPELINE,
+)
 from src.features.pipeline import real
 from src.features.pipeline.port import CompanyCard, Outcome, ReportTable, UserInput
 #: 8·9 생성 지시문임을 알아보는 표시. 글자를 베끼지 않고 «상수를 그대로» 쓴다 —
@@ -1256,6 +1261,55 @@ def test_가짜엔진도_9장_양사공식원문과_동일비교조건을_정직
         assert '"financials"' in fact.state_evidence
         assert '"official_text"' in fact.comparator_state_evidence
         assert '"financials"' in fact.comparator_state_evidence
+
+
+def test_세_선택라운드의_안전한_집계가_최종결과에_남는다(
+    engine: FakeEngine,
+) -> None:
+    result = _run()
+
+    assert result.outcome is Outcome.REPORT
+    assert result.span_selection_result_reason == "majority_kept"
+    assert len(result.span_selection_diagnostics) == real.VOTE_ROUNDS
+    assert [item.round_number for item in result.span_selection_diagnostics] == [
+        1,
+        2,
+        3,
+    ]
+    requested_limits = {
+        item.requested_max_tokens for item in result.span_selection_diagnostics
+    }
+    assert len(requested_limits) == 1
+    assert all(limit > 0 for limit in requested_limits)
+    assert all(
+        item.provider_selected > 0 for item in result.span_selection_diagnostics
+    )
+    assert all(
+        item.validation_kept > 0 for item in result.span_selection_diagnostics
+    )
+
+
+def test_선택_3회_출력상한은_실측최대입력에서도_건별예산안이다(
+    engine: FakeEngine,
+) -> None:
+    # 최신 P03·P05~P10 원장에서 span-selection 실측 입력 최댓값은 16,033이다.
+    # cache 혜택을 0으로 두고 세 호출 모두 같은 최대 입력·최대 출력을 쓴다고 본다.
+    pilot_max_observed_input_tokens = 16_033
+    result = _run()
+    requested_limits = {
+        item.requested_max_tokens for item in result.span_selection_diagnostics
+    }
+    assert len(requested_limits) == 1
+    requested_max_tokens = requested_limits.pop()
+    three_round_cost = provider_budget.usage_cost_krw(
+        GENERATION_MODEL,
+        pilot_max_observed_input_tokens * real.VOTE_ROUNDS,
+        requested_max_tokens * real.VOTE_ROUNDS,
+    )
+
+    # 본조사 phase 900원은 평가 건별 1,200원보다 더 좁은 경계다.
+    assert three_round_cost == pytest.approx(580.02)
+    assert three_round_cost <= PAID_PHASE_PROVIDER_BUDGET_KRW[SPEND_PHASE_PIPELINE]
 
 
 def test_캐시로_돌려준_보고서가_처음_만든_것과_같다(engine: FakeEngine) -> None:

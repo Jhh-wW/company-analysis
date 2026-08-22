@@ -9,12 +9,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Callable, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol
 
 if TYPE_CHECKING:
     from src.features.cost_tracking.store import AiCostEvent
+else:
+    # 런타임에는 feature 경계를 넘는 import를 만들지 않되 introspection은 닫힌다.
+    AiCostEvent = Any
 
 from src.core.constants import COUNTED_CELLS
+from src.shared.span_selection_diagnostics import SpanSelectionRoundDiagnostic
 
 #: 진행 상황을 알리는 함수. 단계 키 하나를 받아 「이 단계를 시작했다」를 뜻한다.
 #: 키 목록은 `core/constants.py`의 PROGRESS_STEPS가 정본이다.
@@ -499,6 +503,10 @@ class RunResult:
     cache_hit: str = ""
     #: 원문·개인정보 없이 stage/model/token/cache/batch/실제 원가만 담는다.
     ai_cost_events: tuple["AiCostEvent", ...] = ()
+    #: 원문·프롬프트 없이 각 span-selection 호출의 token/종료/집계만 담는다.
+    span_selection_diagnostics: tuple["SpanSelectionRoundDiagnostic", ...] = ()
+    #: 다수결 결과가 비었거나 통과한 이유를 나타내는 닫힌 기계 코드.
+    span_selection_result_reason: str = ""
 
 
 class Pipeline(Protocol):

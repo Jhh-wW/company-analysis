@@ -22,6 +22,7 @@ from src.features.pipeline.section567_contract import (
     plan_timing_has_passed,
 )
 from src.features.pipeline.port import ReportTable
+from src.features.spanselect.constants import CANONICAL_SELECTION_MAX_TOKENS
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,52 @@ class _Engine:
     @staticmethod
     def _ask(client, prompt, schema, max_tokens):
         return client(prompt, schema), {"in": 1, "out": 1}
+
+
+def test_provider_출력상한_파싱실패를_선택단계에_원문없이_남긴다() -> None:
+    class 절단엔진(_Engine):
+        @staticmethod
+        def _ask(client, prompt, schema, max_tokens):
+            return None, {
+                "in": 2,
+                "out": CANONICAL_SELECTION_MAX_TOKENS,
+                "requested_max_tokens": CANONICAL_SELECTION_MAX_TOKENS,
+                "stop_reason": "max_tokens",
+                "output_limit_reached": True,
+                "parse_failed": True,
+                "error": "파싱실패",
+            }
+
+    steps: list[dict] = []
+    kept, rejected = select_canonical_spans(
+        None,
+        {1: {"종류": "사업", "원문": "가나다전자는 기업 고객에게 검사 장비를 판매하고 있다."}},
+        steps,
+        engine=절단엔진(),
+        company="가나다전자",
+    )
+
+    assert (kept, rejected) == ([], [])
+    diagnostic = steps[0]["span_selection_diagnostic"]
+    assert diagnostic["output_tokens"] == CANONICAL_SELECTION_MAX_TOKENS
+    assert diagnostic["requested_max_tokens"] == CANONICAL_SELECTION_MAX_TOKENS
+    assert diagnostic["output_limit_reached"] is True
+    assert diagnostic["parse_failed"] is True
+    assert diagnostic["provider_selected"] == 0
+    assert diagnostic["validation_kept"] == 0
+    assert diagnostic["validation_rejected"] == 0
+    assert diagnostic["empty_reason"] == "output_limit_empty"
+    assert set(diagnostic) == {
+        "requested_max_tokens",
+        "output_tokens",
+        "provider_stop_reason",
+        "output_limit_reached",
+        "parse_failed",
+        "provider_selected",
+        "validation_kept",
+        "validation_rejected",
+        "empty_reason",
+    }
 
 
 def test_정본_프롬프트는_의미_ID와_시간상태_분리를_강제한다():

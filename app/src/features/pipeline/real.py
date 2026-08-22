@@ -77,7 +77,10 @@ from src.features.homepage import link as homepage_link
 from src.features.homepage.constants import FRAGMENT_KIND as HOMEPAGE_FRAGMENT_KIND
 from src.features.homepage.logic import collect_homepage_fragments
 from src.features.provenance.citations import build_citations
-from src.features.spanselect.constants import NEWS_FRAGMENT_KIND, USAGE_MODEL_KEY
+from src.features.spanselect.constants import (
+    NEWS_FRAGMENT_KIND,
+    USAGE_MODEL_KEY,
+)
 from src.features.filingclean import extra as filing_extra
 from src.features.filingclean import logic as filing_clean
 from src.features.filingclean import relationships as filing_relationships
@@ -113,6 +116,11 @@ from src.features.pipeline.canonical_report import (
 from src.features.spanselect.canonical import (
     historical_performance_basis_options,
     select_canonical_spans,
+)
+from src.shared.span_selection_diagnostics import (
+    SpanSelectionRoundDiagnostic,
+    majority_result_reason,
+    round_diagnostic_from_steps,
 )
 from src.features.storage import cache as cache_store
 from src.features.storage import db as storage_db
@@ -1490,6 +1498,7 @@ class RealPipeline:
         # ── 8 사실 배치 + 9 원문 대조 — 3회 독립 선택 후 다수결 ──
         tell("generate")
         selection_rounds = []
+        selection_diagnostics: list[SpanSelectionRoundDiagnostic] = []
         sentences_made = 0
         # 프로그램이 DART 원수치로 만든 완료 FY 행에는 내부 fact_id 대신
         # 일회성 선택 참조를 붙인다. 모델은 이 참조만 basis_sids로 고르고,
@@ -1514,7 +1523,8 @@ class RealPipeline:
             )
             if str(value or "").strip()
         )
-        for _round in range(VOTE_ROUNDS):
+        for round_index in range(VOTE_ROUNDS):
+            round_step_start = len(steps)
             with _meter_stage(engine, "span_selection", prompt_cache=True):
                 picked, rejected = select_canonical_spans(
                     client,
@@ -1526,7 +1536,17 @@ class RealPipeline:
                 )
             selection_rounds.append(picked)
             sentences_made += len(picked) + len(rejected)
+            selection_diagnostics.append(
+                round_diagnostic_from_steps(
+                    steps[round_step_start:],
+                    round_number=round_index + 1,
+                )
+            )
         kept = majority_picks(selection_rounds, minimum=VOTE_MIN)
+        selection_result_reason = majority_result_reason(
+            selection_diagnostics,
+            majority_kept=len(kept),
+        )
         if not kept:
             return RunResult(
                 outcome=Outcome.GATE_STOPPED,
@@ -1538,8 +1558,11 @@ class RealPipeline:
                 sources=sources,
                 corp_type=judgment.corp_type,
                 fragments_collected=len(frags),
+                sentences_made=sentences_made,
                 cost_krw=_request_spent_krw(engine),
                 model=model,
+                span_selection_diagnostics=tuple(selection_diagnostics),
+                span_selection_result_reason=selection_result_reason,
             )
 
         tell("verify")
@@ -1664,6 +1687,8 @@ class RealPipeline:
                 sentences_passed=len(written_claims),
                 cost_krw=_request_spent_krw(engine),
                 model=model,
+                span_selection_diagnostics=tuple(selection_diagnostics),
+                span_selection_result_reason=selection_result_reason,
             )
         except PublishBlockedError as exc:
             logger.info("canonical 출고 차단: %s", list(exc.validation.reasons))
@@ -1687,6 +1712,8 @@ class RealPipeline:
                 sentences_passed=len(written_claims),
                 cost_krw=_request_spent_krw(engine),
                 model=model,
+                span_selection_diagnostics=tuple(selection_diagnostics),
+                span_selection_result_reason=selection_result_reason,
             )
 
         # ── 13 출력 ──────────────────────────────────────
@@ -1719,6 +1746,8 @@ class RealPipeline:
             sentences_passed=len(written_claims),
             cost_krw=_request_spent_krw(engine),
             model=model,
+            span_selection_diagnostics=tuple(selection_diagnostics),
+            span_selection_result_reason=selection_result_reason,
         )
 
 

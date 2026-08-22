@@ -26,6 +26,7 @@ from src.features.observability.records import (
 )
 from src.features.pipeline.port import Outcome, RunResult, UserInput
 from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
+from src.features.spanselect import diagnostic_store as span_diagnostic_store
 from src.features.storage import db as storage_db
 
 logger = logging.getLogger(__name__)
@@ -108,12 +109,27 @@ def record_run(
         # SQLite current 행이 요청당 최종값 하나를 보장한다. JSONL은 기존 분석
         # 도구와 원본 감사 호환을 위한 append-only 사본이다.
         with storage_db.connect() as conn:
+            # lifecycle.finalize_once()는 독립 호출도 지원하려고 savepoint를 쓴다.
+            # 여기서는 부속 span 진단과 crash-gap 없이 함께 남겨야 하므로 명시적
+            # 바깥 transaction을 먼저 연다.
+            if not conn.in_transaction:
+                conn.execute("BEGIN IMMEDIATE")
             lifecycle.ensure_schema(conn)
             inserted = lifecycle.finalize_once(
                 conn,
                 record,
                 expected_state=expected_state,
             )
+            if result.span_selection_diagnostics:
+                # inserted=False인 멱등 재호출에도 같은 값만 허용한다. 이는 진단
+                # 표 도입 전 final 행을 안전하게 backfill하는 유일한 경로다.
+                span_diagnostic_store.record_once(
+                    conn,
+                    run_id=record.run_id,
+                    result_reason=result.span_selection_result_reason,
+                    rounds=result.span_selection_diagnostics,
+                    recorded_at=record.at,
+                )
         if inserted:
             try:
                 append_record(record, records_path())

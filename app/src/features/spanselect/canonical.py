@@ -41,6 +41,8 @@ from src.features.pipeline.section567_contract import (
     response_is_bound_to_issue,
 )
 from src.features.spanselect.logic import number_sentences
+from src.features.spanselect.constants import CANONICAL_SELECTION_MAX_TOKENS
+from src.shared.span_selection_diagnostics import attach_round_result
 
 
 CANONICAL_SOURCE_SECTION_IDS: tuple[str, ...] = (
@@ -431,7 +433,7 @@ def select_canonical_spans(
             client,
             build_prompt(candidate_lines, performance_bases),
             answer_schema(),
-            max_tokens=engine.GEN_MAX_TOKENS,
+            max_tokens=CANONICAL_SELECTION_MAX_TOKENS,
         )
     finally:
         if model:
@@ -440,17 +442,23 @@ def select_canonical_spans(
     if isinstance(usage, dict):
         usage["model"] = used_model
     selected = list((payload or {}).get("items") or [])
-    steps.append(
-        {
-            "step": "8_정본_사실배치",
-            "usage": usage,
-            "문장후보수": len(sent_map),
-            "제외후보수": excluded,
-            "선택수": len(selected),
-        }
-    )
+    selection_step = {
+        "step": "8_정본_사실배치",
+        "usage": usage,
+        "문장후보수": len(sent_map),
+        "제외후보수": excluded,
+        "선택수": len(selected),
+    }
+    steps.append(selection_step)
 
     if not payload:
+        attach_round_result(
+            selection_step,
+            requested_max_tokens=CANONICAL_SELECTION_MAX_TOKENS,
+            provider_selected=len(selected),
+            validation_kept=0,
+            validation_rejected=0,
+        )
         return [], []
 
     draft_items: list[Any] = []
@@ -903,4 +911,11 @@ def select_canonical_spans(
             continue
         if selected_pick is not None:
             kept.append(selected_pick)
+    attach_round_result(
+        selection_step,
+        requested_max_tokens=CANONICAL_SELECTION_MAX_TOKENS,
+        provider_selected=len(selected),
+        validation_kept=len(kept),
+        validation_rejected=len(rejected),
+    )
     return kept, rejected

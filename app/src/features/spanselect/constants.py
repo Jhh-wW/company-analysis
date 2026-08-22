@@ -319,6 +319,11 @@ HANGUL_RE: Final[re.Pattern[str]] = re.compile(r"[가-힣]")
 #:   바로잡으려면 토큰 수만으로는 부족하고 «모델 이름»이 있어야 한다.
 USAGE_MODEL_KEY: Final[str] = "model"
 
+#: canonical 선택은 항목마다 닫힌 의미 필드를 함께 반환한다. 2026-08-21 파일럿에서
+#: 전역 3,000 token 상한을 21/21회 모두 소진했으므로 이 호출에만 두 배 상한을 둔다.
+#: 전역 ``GEN_MAX_TOKENS``는 다른 저비용 호출의 계약이라 바꾸지 않는다.
+CANONICAL_SELECTION_MAX_TOKENS: Final[int] = 6_000
+
 #: 요구역량 번호 앞머리. 1판과 같다 (run_pilot.py:424-425) — 이 모양이 W4 대조의 기준이다.
 REQUIREMENT_SID_PREFIX: Final[str] = "R-"
 

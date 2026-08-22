@@ -24,8 +24,9 @@
 | 그대로 | 문장 번호 매기기 · 요구역량 복원 · **W1~W4 원문 대조 검사(`check_draft`)** |
 | 그대로 | AI 호출 **1회** · 단계 기록 이름 · 반환 모양 |
 
-★ 1판 코드는 한 줄도 고치지 않는다. 부품(`_ask`·`split_sentences`·`check_draft`·
-  `DraftItem`·`BLOCK_ORDER`·`GEN_MAX_TOKENS`)을 **빌려 쓰기만** 한다.
+★ 1판 선택·대조 동작은 바꾸지 않는다. `_ask`에는 원문 없는 종료·절단 진단만
+  추가하고, 나머지 부품(`split_sentences`·`check_draft`·`DraftItem`·
+  `BLOCK_ORDER`·`GEN_MAX_TOKENS`)은 **빌려 쓰기만** 한다.
 ★ 원문 대조 검사를 새로 구현하지 않는다 — 지어내기를 막는 마지막 안전장치이고,
   1판이 53건을 돌려 검증한 코드다.
 """
