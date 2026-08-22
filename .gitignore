@@ -15,6 +15,14 @@
 !/docs/
 !/docs/**
 !/render.yaml
+!/deploy/
+!/deploy/**
+!/scripts/
+/scripts/*
+!/scripts/deploy/
+!/scripts/deploy/**
+!/ops/
+!/ops/**
 !/app/
 !/analysis_engine/
 

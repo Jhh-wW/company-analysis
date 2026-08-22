@@ -14,6 +14,12 @@
 !app/tools/trigger_maintenance.py
 !app/tools/container_entrypoint.sh
 
+!deploy/
+!deploy/container_entrypoint.sh
+!deploy/container_healthcheck.py
+!deploy/validate_environment.py
+!deploy/verify_image.py
+
 !analysis_engine/
 !analysis_engine/src/
 !analysis_engine/src/**
@@ -28,11 +34,18 @@
 # 허용한 폴더 안에 생긴 로컬 찌꺼기도 다시 제외한다.
 **/.env
 **/.env.*
+**/.secure_prompt
+**/.secure_prompt.*
 **/client_secret*.json
 **/credentials*.json
 **/token*.json
 **/oauth*.json
 **/service-account*.json
+**/*secret*.json
+**/*secrets*.yaml
+**/*secrets*.yml
+**/runtime-config
+**/runtime-config.*
 **/*.pem
 **/*.key
 **/*.p12

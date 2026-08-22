@@ -32,6 +32,10 @@ def test_dockerfile_copies_every_cron_module() -> None:
         "app/tools/trigger_backup.py",
         "app/tools/trigger_maintenance.py",
         "app/tools/container_entrypoint.sh",
+        "deploy/container_entrypoint.sh",
+        "deploy/container_healthcheck.py",
+        "deploy/validate_environment.py",
+        "deploy/verify_image.py",
     ):
         assert f"COPY {relative_path} " in dockerfile
 
@@ -71,11 +75,17 @@ def test_dockerignore_is_allowlist_and_rejects_private_artifacts() -> None:
         "!app/tools/backup_sqlite.py",
         "!app/tools/trigger_backup.py",
         "!app/tools/trigger_maintenance.py",
+        "!deploy/container_entrypoint.sh",
+        "!deploy/container_healthcheck.py",
+        "!deploy/validate_environment.py",
+        "!deploy/verify_image.py",
     ):
         assert required in rules
     for forbidden in (
         "**/.env",
         "**/.env.*",
+        "**/.secure_prompt",
+        "**/.secure_prompt.*",
         "**/client_secret*.json",
         "**/credentials*.json",
         "**/token*.json",
@@ -85,6 +95,8 @@ def test_dockerignore_is_allowlist_and_rejects_private_artifacts() -> None:
         "**/*.key",
         "**/*.p12",
         "**/*.pfx",
+        "**/runtime-config",
+        "**/runtime-config.*",
         "**/tests/",
         "**/*.db",
         "**/*.sqlite",
@@ -157,15 +169,19 @@ def test_render_does_not_overwrite_real_backup_bucket_region() -> None:
     assert "value:" not in region_block
 
 
-def test_render_command_override_still_passes_through_non_root_entrypoint() -> None:
+def test_command_override_still_passes_through_validating_non_root_entrypoint() -> None:
     dockerfile = (APP_ROOT / "Dockerfile").read_text(encoding="utf-8")
-    entrypoint = (APP_ROOT / "tools" / "container_entrypoint.sh").read_text(
-        encoding="utf-8"
-    )
+    entrypoint = (
+        REPOSITORY_ROOT / "deploy" / "container_entrypoint.sh"
+    ).read_text(encoding="utf-8")
 
     assert 'ENTRYPOINT ["company-analysis-entrypoint"]' in dockerfile
-    assert "install -m 0755 /srv/app/tools/container_entrypoint.sh" in dockerfile
-    assert "exec gosu appuser" in entrypoint
+    assert "install -m 0755 /srv/deploy/container_entrypoint.sh" in dockerfile
+    assert "USER appuser" in dockerfile
+    assert "USER root" not in dockerfile
+    assert 'if [ "$(id -u)" -eq 0 ]' in entrypoint
+    assert "validate_environment.py" in entrypoint
+    assert 'exec "$@"' in entrypoint
     assert 'CMD ["sh", "-c"' in dockerfile
 
 
