@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 
 from src.core import paths
+from src.features.final_gate_diagnostic import store as final_gate_diagnostic_store
 from src.features.observability import constants as obs
 from src.features.observability import lifecycle
 from src.features.observability.records import (
@@ -77,6 +78,8 @@ def record_run(
       **사용자의 보고서를 못 보게 만들면 안 된다** — 기록은 부차적이다.
     """
     try:
+        if result.final_gate_reason and result.outcome is not Outcome.GATE_STOPPED:
+            raise ValueError("최종 게이트 사유는 자료부족 중단 결과에만 기록할 수 있습니다")
         report = result.report
         cells_filled, cells_missing = _observed_cells(report)
         record = RunRecord(
@@ -128,6 +131,13 @@ def record_run(
                     run_id=record.run_id,
                     result_reason=result.span_selection_result_reason,
                     rounds=result.span_selection_diagnostics,
+                    recorded_at=record.at,
+                )
+            if result.final_gate_reason:
+                final_gate_diagnostic_store.record_once(
+                    conn,
+                    run_id=record.run_id,
+                    reason_code=result.final_gate_reason,
                     recorded_at=record.at,
                 )
         if inserted:

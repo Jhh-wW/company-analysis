@@ -1289,6 +1289,56 @@ def test_세_선택라운드의_안전한_집계가_최종결과에_남는다(
     )
 
 
+def test_원문조각이_없으면_기타게이트_코드로_멈춘다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(engine, "make_fragments", lambda *_args: {})
+
+    result = _run()
+
+    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.final_gate_reason == "other_gate"
+
+
+def test_경쟁사비교_차단은_원문사유대신_닫힌코드만_반환한다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    internal_reason = "외부에 저장하면 안 되는 경쟁사 비교 상세"
+
+    def block_comparison(*_args: Any, **_kwargs: Any):
+        raise real.ComparisonBlockedError((internal_reason,))
+
+    monkeypatch.setattr(real, "_attach_competitive_position", block_comparison)
+
+    result = _run()
+
+    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.final_gate_reason == "comparison_blocked"
+    assert internal_reason not in result.message
+
+
+def test_정본출고_차단은_원문사유대신_닫힌코드만_반환한다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    internal_reason = "외부에 저장하면 안 되는 정본 검증 상세"
+
+    def block_publish(*_args: Any, **_kwargs: Any):
+        raise real.PublishBlockedError(
+            SimpleNamespace(reasons=(internal_reason,))
+        )
+
+    monkeypatch.setattr(real, "finalize_report", block_publish)
+
+    result = _run()
+
+    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.final_gate_reason == "publish_blocked"
+    assert internal_reason not in result.message
+
+
 def test_선택_3회_출력상한은_실측최대입력에서도_건별예산안이다(
     engine: FakeEngine,
 ) -> None:

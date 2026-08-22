@@ -117,6 +117,11 @@ from src.features.spanselect.canonical import (
     historical_performance_basis_options,
     select_canonical_spans,
 )
+from src.shared.final_gate_diagnostics import (
+    FINAL_GATE_REASON_COMPARISON_BLOCKED,
+    FINAL_GATE_REASON_OTHER_GATE,
+    FINAL_GATE_REASON_PUBLISH_BLOCKED,
+)
 from src.shared.span_selection_diagnostics import (
     SpanSelectionRoundDiagnostic,
     majority_result_reason,
@@ -1493,6 +1498,7 @@ class RealPipeline:
                 fragments_collected=len(frags),
                 cost_krw=_request_spent_krw(engine),
                 model=model,
+                final_gate_reason=FINAL_GATE_REASON_OTHER_GATE,
             )
 
         # ── 8 사실 배치 + 9 원문 대조 — 3회 독립 선택 후 다수결 ──
@@ -1563,6 +1569,7 @@ class RealPipeline:
                 model=model,
                 span_selection_diagnostics=tuple(selection_diagnostics),
                 span_selection_result_reason=selection_result_reason,
+                final_gate_reason=FINAL_GATE_REASON_OTHER_GATE,
             )
 
         tell("verify")
@@ -1689,6 +1696,7 @@ class RealPipeline:
                 model=model,
                 span_selection_diagnostics=tuple(selection_diagnostics),
                 span_selection_result_reason=selection_result_reason,
+                final_gate_reason=FINAL_GATE_REASON_COMPARISON_BLOCKED,
             )
         except PublishBlockedError as exc:
             logger.info("canonical 출고 차단: %s", list(exc.validation.reasons))
@@ -1714,6 +1722,7 @@ class RealPipeline:
                 model=model,
                 span_selection_diagnostics=tuple(selection_diagnostics),
                 span_selection_result_reason=selection_result_reason,
+                final_gate_reason=FINAL_GATE_REASON_PUBLISH_BLOCKED,
             )
 
         # ── 13 출력 ──────────────────────────────────────

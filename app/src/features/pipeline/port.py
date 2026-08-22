@@ -507,6 +507,9 @@ class RunResult:
     span_selection_diagnostics: tuple["SpanSelectionRoundDiagnostic", ...] = ()
     #: 다수결 결과가 비었거나 통과한 이유를 나타내는 닫힌 기계 코드.
     span_selection_result_reason: str = ""
+    #: GATE_STOPPED의 후단 원인을 원문 없이 구분하는 닫힌 기계 코드.
+    #: 고정 RunRecord 13종에는 넣지 않고 별도 SQLite 부속 원장으로만 보낸다.
+    final_gate_reason: str = ""
 
 
 class Pipeline(Protocol):
