@@ -20,7 +20,8 @@ $arguments = @(
     "build",
     "--file", (Join-Path $repositoryRoot "app\Dockerfile"),
     "--tag", $Image,
-    "--provenance=false"
+    "--provenance=mode=max",
+    "--sbom=true"
 )
 if ($NoCache) {
     $arguments += "--no-cache"
@@ -45,4 +46,5 @@ if (($history -join "`n") -match "(?i)(API[_-]?KEY|SECRET|TOKEN|PASSWORD)\s*=") 
     throw "이미지 빌드 이력에서 비밀값 주입 형태를 발견했습니다."
 }
 
-Write-Host "로컬 이미지 빌드·기본 사용자·이력 검증 완료: $Image"
+Write-Host "로컬 단일 플랫폼 이미지 빌드·기본 사용자·이력 검증 완료: $Image"
+Write-Warning "이 성공은 공개 배포 승인이 아닙니다. final multi-arch digest의 scan·SBOM·provenance·서명 증거 gate를 별도로 통과해야 합니다."
