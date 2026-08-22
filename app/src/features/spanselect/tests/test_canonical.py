@@ -131,6 +131,13 @@ def test_정본_프롬프트는_의미_ID와_시간상태_분리를_강제한다
     assert "연속해서" in prompt
     assert "짧은 문자열" in prompt
     assert "당사를 그대로" in prompt
+    assert "자기 claim_type에 쓰는 구조 필드만" in prompt
+    assert "current_issue에는\n    next_check_metric" in prompt
+    assert "current_response에는 response_action" in prompt
+    assert "completed_execution에는 event_date" in prompt
+    assert "9장 후보를 만들 목적으로 1~8장" in prompt
+    assert "독립적으로 고객·시장 사실 계약도" in prompt
+    assert "경쟁사 이름이 아니라" in prompt
     assert "competitive_position" not in prompt
 
 
@@ -555,6 +562,65 @@ def _section567_item(
     }
     item.update(changes)
     return item
+
+
+def test_고객시장_계약도_충족하는_경쟁문장은_실제_시장범위를_보존한다() -> None:
+    sentence = (
+        "가나다전자는 SmartX 제품을 판매하며 SmartX 시장에서 "
+        "주식회사 베타와 경쟁 관계에 있다."
+    )
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {
+            "items": [
+                _section567_item(
+                    "business_model",
+                    "1-1",
+                    "customer_market",
+                    "SmartX 시장",
+                    market_observation="SmartX 시장에서 주식회사 베타와 경쟁 관계",
+                )
+            ]
+        },
+        {1: {"종류": "사업보고서", "원문": sentence}},
+        [],
+        engine=_Engine(),
+        company="가나다전자",
+    )
+
+    assert rejected == []
+    assert len(kept) == 1
+    assert kept[0].section_id == "business_model"
+    assert kept[0].claim_type == "customer_market"
+    assert kept[0].subject_label == "SmartX 시장"
+    assert (
+        kept[0].market_observation
+        == "SmartX 시장에서 주식회사 베타와 경쟁 관계"
+    )
+
+
+def test_순수_경쟁사_문장을_고객시장_사실로_위장하지_않는다() -> None:
+    sentence = "주요 경쟁사는 주식회사 베타와 주식회사 감마이다."
+
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {
+            "items": [
+                _section567_item(
+                    "business_model",
+                    "1-1",
+                    "customer_market",
+                    "주식회사 베타",
+                    market_observation="경쟁사는 주식회사 베타",
+                )
+            ]
+        },
+        {1: {"종류": "사업보고서", "원문": sentence}},
+        [],
+        engine=_Engine(),
+        company="가나다전자",
+    )
+
+    assert kept == []
+    assert rejected
 
 
 def test_거절사유는_원문없이_닫힌_코드별_개수로_남는다() -> None:
@@ -1020,16 +1086,20 @@ def test_과거_결과를_미래_계획의_예상효과로_승격하지_않는�
         plan_execution_signal="AlphaX 설비 가동",
     )
 
+    steps: list[dict] = []
     kept, rejected = select_canonical_spans(
         lambda _prompt, _schema: {"items": [item]},
         {1: {"종류": "전략", "원문": sentence}},
-        [],
+        steps,
         engine=_Engine(),
         company="가나다전자",
     )
 
     assert kept == []
     assert any(item["reason"] == "회사 제시 효과의 직접 근거 없음" for item in rejected)
+    assert steps[0]["span_selection_diagnostic"][
+        "validation_rejection_reason_counts"
+    ] == (("future_plan_contract_failure", 1),)
 
 
 def test_취소된_계획은_현재_미래전략으로_선택하지_않는다() -> None:

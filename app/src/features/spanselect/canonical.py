@@ -103,7 +103,11 @@ def _validation_rejection_reason_code(item: Mapping[str, str]) -> str:
         "7장 외 운영 구조 필드 입력",
     }:
         return "operations_partner_contract_failure"
-    if "계획" in reason or reason == "6장 외 미래 계획 구조 필드 입력":
+    if (
+        "계획" in reason
+        or reason == "6장 외 미래 계획 구조 필드 입력"
+        or reason == "회사 제시 효과의 직접 근거 없음"
+    ):
         return "future_plan_contract_failure"
     if "제품 포트폴리오" in reason or "중점 제품" in reason or "중점 추진" in reason:
         return "portfolio_contract_failure"
@@ -229,6 +233,16 @@ _PROMPT = """공식 근거 기반 회사분석 보고서의 사실 배치 작업
     가리키면 12-3이다. subject_label과 모든 원문 발췌 필드는 해당 후보 문장에
     연속해서 그대로 있는 짧은 문자열만 쓰고, 없으면 비운다. 당사라고 적혔으면
     회사명으로 바꾸지 말고 당사를 그대로 쓴다.
+16. 각 item은 자기 claim_type에 쓰는 구조 필드만 채운다. 다른 claim_type 전용
+    필드는 문자열이면 "", 목록이면 []로 둔다. 예를 들어 current_issue에는
+    next_check_metric을, current_response에는 response_action을,
+    completed_execution에는 event_date를 넣고, customer_market 외 항목에는
+    market_observation을 넣지 않는다.
+17. 경쟁사·동종업체·경합·시장점유율 문장을 9장 후보를 만들 목적으로 1~8장
+    claim_type에 억지로 넣지 않는다. 그 문장이 독립적으로 고객·시장 사실 계약도
+    충족할 때만 customer_market으로 고르고, subject_label에는 경쟁사 이름이 아니라
+    실제 고객·시장 범위를 넣는다. 단순 고객·공급사·파트너 언급이나 업종이 같다는
+    이유만으로 경쟁 관계를 만들지 않는다.
 
 완료 실적 근거 참조
 {historical_performance_lines}
