@@ -94,6 +94,35 @@ def _assert_no_sqlite_companions(path: Path) -> None:
         raise BackupError("백업 산출물에 독립 manifest가 결속하지 않은 SQLite sidecar가 있습니다.")
 
 
+def _remove_backup_artifacts(
+    database_path: Path,
+    checksum_path: Path | None = None,
+) -> None:
+    """실패한 백업의 정확한 산출물 경로만 지운다.
+
+    glob이나 디렉터리 재귀 삭제를 쓰지 않는다. SQLite가 main DB 옆에 만들 수 있는
+    정해진 companion과, 호출자가 명시한 체크섬 파일만 각각 unlink한다.
+    한 파일 정리에 실패해도 나머지 경로의 정리는 계속 시도한다.
+    """
+
+    artifacts = [
+        database_path,
+        *(Path(str(database_path) + suffix) for suffix in SQLITE_COMPANION_SUFFIXES),
+    ]
+    if checksum_path is not None:
+        artifacts.append(checksum_path)
+
+    first_error: OSError | None = None
+    for artifact in artifacts:
+        try:
+            artifact.unlink(missing_ok=True)
+        except OSError as exc:
+            if first_error is None:
+                first_error = exc
+    if first_error is not None:
+        raise BackupError("실패한 백업 산출물을 완전히 정리하지 못했습니다.") from first_error
+
+
 def _standalone_readonly_connection(path: Path) -> sqlite3.Connection:
     """완료된 main DB 한 파일만 읽고 sidecar는 절대 적용하지 않는다."""
 
@@ -259,13 +288,12 @@ def create_backup(
                 raise BackupError("체크섬 게시 뒤 백업 main DB 지문이 변경됐습니다.")
             _assert_no_sqlite_companions(destination)
         except Exception:
-            destination.unlink(missing_ok=True)
-            checksum.unlink(missing_ok=True)
+            _remove_backup_artifacts(destination, checksum)
             raise
     except sqlite3.Error as exc:
         raise BackupError("SQLite Backup API로 백업하지 못했습니다.") from exc
     finally:
-        temp_path.unlink(missing_ok=True)
+        _remove_backup_artifacts(temp_path)
 
     return BackupResult(destination, checksum, digest)
 

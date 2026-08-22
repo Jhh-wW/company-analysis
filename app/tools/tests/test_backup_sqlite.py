@@ -277,3 +277,34 @@ def test_checksum게시중_sidecar가_생기면_backup성공과산출물게시�
 
     assert not list(output.glob("*.sqlite3"))
     assert not list(output.glob("*.sha256"))
+    assert not list(output.glob("*.sqlite3-wal"))
+    assert not list(output.glob("*.sqlite3-shm"))
+    assert not list(output.glob("*.sqlite3-journal"))
+
+
+def test_실패산출물정리는_정확한_DB가족만_지운다(tmp_path: Path) -> None:
+    database = tmp_path / "backup.sqlite3"
+    checksum = backup_sqlite.checksum_path_for(database)
+    exact_artifacts = [
+        database,
+        checksum,
+        *(
+            Path(str(database) + suffix)
+            for suffix in backup_sqlite.SQLITE_COMPANION_SUFFIXES
+        ),
+    ]
+    for artifact in exact_artifacts:
+        artifact.write_bytes(b"artifact")
+
+    similarly_named = [
+        tmp_path / "backup.sqlite3-wal.old",
+        tmp_path / "backup.sqlite3-other",
+        tmp_path / "backup.sqlite3.sha256.old",
+    ]
+    for artifact in similarly_named:
+        artifact.write_bytes(b"keep")
+
+    backup_sqlite._remove_backup_artifacts(database, checksum)
+
+    assert all(not artifact.exists() for artifact in exact_artifacts)
+    assert all(artifact.read_bytes() == b"keep" for artifact in similarly_named)
