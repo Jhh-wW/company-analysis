@@ -22,6 +22,20 @@ REAL_PIPELINE_VARIABLES = (
     "NAVER_CLIENT_ID",
     "NAVER_CLIENT_SECRET",
 )
+BACKUP_RUNTIME_VARIABLES = (
+    "BACKUP_TRIGGER_SECRET",
+    "BACKUP_S3_BUCKET",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "BACKUP_DATA_BOUNDARY_ID",
+    "BACKUP_DATA_AUTHORITY_ID",
+    "BACKUP_MANIFEST_MIN_RETENTION_DAYS",
+)
+PRODUCTION_BACKUP_MANIFEST_APPENDER_AVAILABLE = False
+PRODUCTION_BACKUP_MANIFEST_BLOCKER = (
+    "BACKUP_MANIFEST_APPENDER: production-ready 구현과 시작 시 주입이 없어 "
+    "외부 백업 배포가 차단됩니다"
+)
 BOOLEAN_TRUE = frozenset({"1", "true", "yes", "on"})
 BOOLEAN_FALSE = frozenset({"0", "false", "no", "off"})
 LOG_LEVELS = frozenset({"trace", "debug", "info", "warning", "error", "critical"})
@@ -68,6 +82,43 @@ def _validate_persistence_paths(environment: Mapping[str, str]) -> list[str]:
     return errors
 
 
+def _validate_backup_manifest_configuration(
+    environment: Mapping[str, str],
+) -> list[str]:
+    """외부 백업을 구성한 경우 독립 manifest 계약 없이는 닫힌다."""
+
+    if not environment.get("BACKUP_S3_BUCKET", "").strip():
+        return []
+
+    errors = _required(environment, BACKUP_RUNTIME_VARIABLES)
+    trigger_secret = environment.get("BACKUP_TRIGGER_SECRET", "")
+    if trigger_secret.strip() and len(trigger_secret.encode("utf-8")) < 32:
+        errors.append("BACKUP_TRIGGER_SECRET: 최소 길이를 충족하지 않습니다")
+
+    manifest_raw = environment.get("BACKUP_MANIFEST_MIN_RETENTION_DAYS", "").strip()
+    backup_raw = environment.get("BACKUP_RETENTION_DAYS", "").strip() or "35"
+    manifest_error = None
+    if manifest_raw:
+        manifest_error = _integer_error(
+            "BACKUP_MANIFEST_MIN_RETENTION_DAYS", manifest_raw, 1, 3650
+        )
+        if manifest_error:
+            errors.append(manifest_error)
+    backup_error = _integer_error("BACKUP_RETENTION_DAYS", backup_raw, 1, 3650)
+    if backup_error:
+        errors.append(backup_error)
+    if not manifest_error and not backup_error and manifest_raw:
+        if int(manifest_raw) < int(backup_raw):
+            errors.append(
+                "BACKUP_MANIFEST_MIN_RETENTION_DAYS: DB 백업 보존 기간보다 "
+                "짧을 수 없습니다"
+            )
+
+    if not PRODUCTION_BACKUP_MANIFEST_APPENDER_AVAILABLE:
+        errors.append(PRODUCTION_BACKUP_MANIFEST_BLOCKER)
+    return errors
+
+
 def validate(environment: Mapping[str, str], scope: str = "web") -> list[str]:
     """환경 오류만 반환한다. 반환값에는 설정값 자체가 절대 들어가지 않는다."""
     errors: list[str] = []
@@ -106,6 +157,7 @@ def validate(environment: Mapping[str, str], scope: str = "web") -> list[str]:
                 errors.append("PROVENANCE_SEAL_SECRET: 값이 필요합니다")
             elif len(seal.encode("utf-8")) < 32:
                 errors.append("PROVENANCE_SEAL_SECRET: 최소 길이를 충족하지 않습니다")
+        errors.extend(_validate_backup_manifest_configuration(environment))
     elif scope == "backup-trigger":
         errors.extend(_required(environment, ("BACKUP_TRIGGER_URL", "BACKUP_TRIGGER_SECRET")))
     elif scope == "maintenance-trigger":

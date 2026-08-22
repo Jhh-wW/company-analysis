@@ -23,6 +23,19 @@ from pathlib import Path
 from typing import Final, Iterable
 from urllib.parse import quote
 
+if __package__:
+    from .backup_manifest import (
+        IndependentManifestGate,
+        ManifestError,
+        ManifestExpectation,
+    )
+else:  # 직접 스크립트 실행 호환
+    from backup_manifest import (  # type: ignore[no-redef]
+        IndependentManifestGate,
+        ManifestError,
+        ManifestExpectation,
+    )
+
 
 HASH_CHUNK_BYTES: Final[int] = 1024 * 1024
 CHECKSUM_MAX_BYTES: Final[int] = 4096
@@ -188,19 +201,41 @@ def _assert_database(connection: sqlite3.Connection) -> set[str]:
 
 
 def verify_backup(
-    database_path: Path, checksum_path: Path, expected_sha256: str
+    database_path: Path,
+    checksum_path: Path,
+    expected_sha256: str,
+    *,
+    manifest_gate: IndependentManifestGate | None = None,
+    manifest_expectation: ManifestExpectation | None = None,
+    manifest_data_root: Path | None = None,
 ) -> dict[str, object]:
-    """동일 저장소 sidecar와 독립 보관 해시를 모두 대조한다."""
+    """sidecar·호환 해시와 별도 권한 경계의 서명 manifest를 모두 대조한다."""
+    if manifest_gate is None or manifest_expectation is None:
+        raise ReadinessError(
+            "독립 서명 manifest gate와 신뢰 checkpoint가 없어 검증을 중단합니다."
+        )
     database = _regular_file(database_path, label="백업 DB")
-    sidecar_digest = _read_sidecar(checksum_path, database_name=database.name)
-    independent_digest = _valid_sha256(
-        expected_sha256, label="독립 보관 체크섬"
-    )
+    checksum_file = _regular_file(checksum_path, label="체크섬 파일")
+    sidecar_digest = _read_sidecar(checksum_file, database_name=database.name)
+    checksum_object_digest = sha256_file(checksum_file)
+    compatibility_digest = _valid_sha256(expected_sha256, label="호환 체크섬")
     actual_digest = sha256_file(database)
     if not hmac.compare_digest(actual_digest, sidecar_digest):
         raise ReadinessError("백업 DB와 같은 위치의 체크섬이 맞지 않습니다.")
-    if not hmac.compare_digest(actual_digest, independent_digest):
-        raise ReadinessError("백업 DB가 독립 보관 체크섬과 맞지 않습니다.")
+    if not hmac.compare_digest(actual_digest, compatibility_digest):
+        raise ReadinessError("백업 DB가 호출자 호환 체크섬과 맞지 않습니다.")
+    database_size = database.stat().st_size
+    try:
+        manifest_record = manifest_gate.verify(
+            expectation=manifest_expectation,
+            database_name=database.name,
+            database_sha256=actual_digest,
+            database_size_bytes=database_size,
+            checksum_sha256=checksum_object_digest,
+            data_root=manifest_data_root or database.parent,
+        )
+    except ManifestError as exc:
+        raise ReadinessError(f"독립 manifest gate가 거부했습니다: {exc}") from exc
     try:
         with closing(_readonly_connection(database)) as connection:
             tables = _assert_database(connection)
@@ -209,8 +244,11 @@ def verify_backup(
     return {
         "status": "통과",
         "sha256": actual_digest,
-        "size_bytes": database.stat().st_size,
+        "size_bytes": database_size,
         "table_count": len(tables),
+        "manifest_backup_id": manifest_record.backup_id,
+        "manifest_sequence": manifest_record.sequence,
+        "manifest_key_id": manifest_record.key_id,
     }
 
 
@@ -236,9 +274,19 @@ def restore_dry_run(
     expected_sha256: str,
     *,
     temp_parent: Path | None = None,
+    manifest_gate: IndependentManifestGate | None = None,
+    manifest_expectation: ManifestExpectation | None = None,
+    manifest_data_root: Path | None = None,
 ) -> dict[str, object]:
     """임시 복사본으로만 SQLite 복구 가능성과 완전성을 확인한다."""
-    verified = verify_backup(database_path, checksum_path, expected_sha256)
+    verified = verify_backup(
+        database_path,
+        checksum_path,
+        expected_sha256,
+        manifest_gate=manifest_gate,
+        manifest_expectation=manifest_expectation,
+        manifest_data_root=manifest_data_root,
+    )
     source = _regular_file(database_path, label="백업 DB")
     parent: str | None = None
     if temp_parent is not None:
@@ -398,6 +446,18 @@ def build_parser() -> argparse.ArgumentParser:
         child.add_argument("--database", type=Path, required=True)
         child.add_argument("--checksum", type=Path, required=True)
         child.add_argument("--expected-sha256", required=True)
+        # sink와 signer 자체는 외부 자격증명 조회 없이 main() 호출자가 주입한다.
+        child.add_argument("--manifest-backup-id")
+        child.add_argument("--manifest-scope", default="storage-db")
+        child.add_argument("--manifest-storage-provider", default="s3")
+        child.add_argument("--manifest-storage-bucket")
+        child.add_argument("--manifest-object-key")
+        child.add_argument("--manifest-checksum-key")
+        child.add_argument("--data-boundary-id")
+        child.add_argument("--data-authority-id")
+        child.add_argument("--manifest-min-sequence", type=_positive_int)
+        child.add_argument("--manifest-max-age-seconds", type=_positive_int)
+        child.add_argument("--manifest-data-root", type=Path)
         if name == "restore-dry-run":
             child.add_argument("--temp-parent", type=Path)
 
@@ -413,19 +473,60 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Iterable[str] | None = None) -> int:
+def _manifest_expectation_from_args(arguments: argparse.Namespace) -> ManifestExpectation:
+    required = {
+        "manifest-backup-id": arguments.manifest_backup_id,
+        "manifest-storage-bucket": arguments.manifest_storage_bucket,
+        "manifest-object-key": arguments.manifest_object_key,
+        "manifest-checksum-key": arguments.manifest_checksum_key,
+        "data-boundary-id": arguments.data_boundary_id,
+        "data-authority-id": arguments.data_authority_id,
+        "manifest-min-sequence": arguments.manifest_min_sequence,
+    }
+    missing = [name for name, value in required.items() if value in (None, "")]
+    if missing:
+        raise ReadinessError("manifest gate 입력이 없습니다: " + ", ".join(missing))
+    return ManifestExpectation(
+        backup_id=arguments.manifest_backup_id,
+        scope=arguments.manifest_scope,
+        storage_provider=arguments.manifest_storage_provider,
+        storage_bucket=arguments.manifest_storage_bucket,
+        object_key=arguments.manifest_object_key,
+        checksum_key=arguments.manifest_checksum_key,
+        data_boundary_id=arguments.data_boundary_id,
+        data_authority_id=arguments.data_authority_id,
+        minimum_sequence=arguments.manifest_min_sequence,
+        max_age_seconds=arguments.manifest_max_age_seconds,
+    )
+
+
+def main(
+    argv: Iterable[str] | None = None,
+    *,
+    manifest_gate: IndependentManifestGate | None = None,
+) -> int:
     arguments = build_parser().parse_args(list(argv) if argv is not None else None)
     try:
         if arguments.command == "verify-backup":
+            expectation = _manifest_expectation_from_args(arguments)
             result = verify_backup(
-                arguments.database, arguments.checksum, arguments.expected_sha256
+                arguments.database,
+                arguments.checksum,
+                arguments.expected_sha256,
+                manifest_gate=manifest_gate,
+                manifest_expectation=expectation,
+                manifest_data_root=arguments.manifest_data_root,
             )
         elif arguments.command == "restore-dry-run":
+            expectation = _manifest_expectation_from_args(arguments)
             result = restore_dry_run(
                 arguments.database,
                 arguments.checksum,
                 arguments.expected_sha256,
                 temp_parent=arguments.temp_parent,
+                manifest_gate=manifest_gate,
+                manifest_expectation=expectation,
+                manifest_data_root=arguments.manifest_data_root,
             )
         else:
             result = preflight(

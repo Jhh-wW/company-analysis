@@ -46,6 +46,14 @@ services:
         generateValue: true
       - key: BACKUP_S3_BUCKET
         sync: false
+      # 이 세 값만으로 백업이 활성화되지는 않는다. 별도 권한·보존 경계의
+      # production BackupManifestAppender 구현과 시작 시 provider 주입이 선행돼야 한다.
+      - key: BACKUP_DATA_BOUNDARY_ID
+        sync: false
+      - key: BACKUP_DATA_AUTHORITY_ID
+        sync: false
+      - key: BACKUP_MANIFEST_MIN_RETENTION_DAYS
+        value: "35"
       - key: BACKUP_S3_PREFIX
         value: company-analysis/
       - key: BACKUP_S3_REGION
@@ -96,7 +104,8 @@ services:
       - key: NOTION_PARENT_PAGE_ID
         sync: false
 
-  # 매일 19:00 UTC(한국 시각 다음 날 04:00)에 웹 서비스의 디스크에서 백업한다.
+  # production manifest appender가 설치된 뒤에만 매일 19:00 UTC에 백업한다.
+  # 현재 저장소 상태에서는 웹의 백업 경로가 fail-closed하므로 cron 성공을 기대하지 않는다.
   # S3 자격증명은 웹에만 두고 cron에는 백업 호출 권한만 준다.
   - type: cron
     name: company-analysis-backup

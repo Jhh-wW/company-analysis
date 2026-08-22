@@ -18,3 +18,14 @@ NAVER_CLIENT_SECRET=
 
 NOTION_TOKEN=
 NOTION_PARENT_PAGE_ID=
+
+# 외부 백업을 활성화할 때만 채운다. 실제 값은 저장소에 기록하지 않는다.
+# 현재 저장소에는 production-ready manifest appender가 없으므로
+# BACKUP_S3_BUCKET을 설정하면 환경 검증이 의도적으로 배포를 차단한다.
+BACKUP_TRIGGER_SECRET=
+BACKUP_S3_BUCKET=
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+BACKUP_DATA_BOUNDARY_ID=
+BACKUP_DATA_AUTHORITY_ID=
+BACKUP_MANIFEST_MIN_RETENTION_DAYS=

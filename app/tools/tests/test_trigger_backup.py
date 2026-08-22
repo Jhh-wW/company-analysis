@@ -89,6 +89,9 @@ def test_POST_Bearer로_검증완료_응답을_받는다() -> None:
                     "checksum_key": "company-analysis/a.sqlite3.sha256",
                     "sha256": "b" * 64,
                     "deleted_objects": 0,
+                    "manifest_backup_id": "c" * 64,
+                    "manifest_sequence": 7,
+                    "manifest_record_sha256": "d" * 64,
                 }
             )
 
@@ -106,6 +109,7 @@ def test_POST_Bearer로_검증완료_응답을_받는다() -> None:
     )
 
     assert payload["sha256"] == "b" * 64
+    assert payload["manifest_sequence"] == 7
     assert captured == {
         "method": "POST",
         "authorization": "Bearer " + "x" * 32,

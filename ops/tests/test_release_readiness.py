@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from ops import release_readiness as readiness
+from ops import backup_manifest as manifest
 
 
 SCHEMA = """
@@ -47,6 +50,9 @@ CREATE TABLE notion_export_operations (
 );
 """
 
+NOW = datetime(2026, 8, 23, 2, 0, tzinfo=timezone.utc)
+TEST_SIGNING_KEY = b"local-test-manifest-signing-key-32-bytes"
+
 
 def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -62,6 +68,7 @@ def _write_sidecar(database: Path, digest: str | None = None, *, name: str | Non
 
 
 def _create_database(path: Path, *, service_state: str = "maintenance") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(path) as connection:
         connection.executescript(SCHEMA)
         connection.execute(
@@ -71,34 +78,152 @@ def _create_database(path: Path, *, service_state: str = "maintenance") -> Path:
     return path
 
 
+def _manifest_bundle(
+    tmp_path: Path,
+    database: Path,
+    checksum: Path,
+    *,
+    backup_id: str = "backup-current",
+):
+    control = tmp_path / "independent-control"
+    control.mkdir(exist_ok=True)
+    boundary = manifest.ManifestBoundary(
+        boundary_id="manifest-boundary",
+        authority_id="manifest-security-owner",
+        retention_days=35,
+        append_only=True,
+        signed=True,
+        conditional_append=True,
+        production_ready=False,
+    )
+    signer = manifest.HMACManifestSigner(
+        key_id="test-key-v1",
+        key=TEST_SIGNING_KEY,
+    )
+    sink = manifest.LocalAppendOnlyManifestSink(
+        control / "backup-manifest.jsonl",
+        boundary=boundary,
+    )
+    ledger = manifest.ManifestLedger(
+        sink=sink,
+        signer=signer,
+        minimum_retention_days=35,
+        allow_test_sink=True,
+    )
+    record = ledger.append_backup(
+        scope="storage-db",
+        backup_id=backup_id,
+        storage_provider="s3",
+        storage_bucket="private-backups",
+        object_key=f"company-analysis/{database.name}",
+        checksum_key=f"company-analysis/{database.name}.sha256",
+        database_name=database.name,
+        database_sha256=_digest(database),
+        database_size_bytes=database.stat().st_size,
+        checksum_sha256=_digest(checksum),
+        created_at=NOW,
+        data_boundary_id="backup-data-boundary",
+        data_authority_id="backup-data-writer",
+    )
+    gate = manifest.IndependentManifestGate(
+        sink=sink,
+        signer=signer,
+        minimum_retention_days=35,
+        allow_test_sink=True,
+    )
+    expectation = manifest.ManifestExpectation(
+        backup_id=backup_id,
+        scope="storage-db",
+        storage_provider="s3",
+        storage_bucket="private-backups",
+        object_key=f"company-analysis/{database.name}",
+        checksum_key=f"company-analysis/{database.name}.sha256",
+        data_boundary_id="backup-data-boundary",
+        data_authority_id="backup-data-writer",
+        minimum_sequence=record.sequence,
+        now=NOW + timedelta(minutes=1),
+    )
+    return sink, gate, expectation
+
+
 def test_verify_backup_requires_matching_independent_digest(tmp_path: Path) -> None:
-    database = _create_database(tmp_path / "backup.sqlite3")
+    database = _create_database(tmp_path / "data" / "backup.sqlite3")
     expected = _digest(database)
     checksum = _write_sidecar(database)
+    _sink, gate, expectation = _manifest_bundle(tmp_path, database, checksum)
 
-    result = readiness.verify_backup(database, checksum, expected)
+    result = readiness.verify_backup(
+        database,
+        checksum,
+        expected,
+        manifest_gate=gate,
+        manifest_expectation=expectation,
+        manifest_data_root=database.parent,
+    )
 
     assert result["status"] == "통과"
     assert result["sha256"] == expected
+    assert result["manifest_sequence"] == 1
+
+
+def test_manifest_missing_is_fail_closed(tmp_path: Path) -> None:
+    database = _create_database(tmp_path / "data" / "backup.sqlite3")
+    checksum = _write_sidecar(database)
+
+    with pytest.raises(readiness.ReadinessError, match="독립 서명 manifest"):
+        readiness.verify_backup(database, checksum, _digest(database))
 
 
 def test_recomputed_sidecar_cannot_replace_independent_digest(tmp_path: Path) -> None:
-    database = _create_database(tmp_path / "backup.sqlite3")
-    original_digest = _digest(database)
+    database = _create_database(tmp_path / "data" / "backup.sqlite3")
+    checksum = _write_sidecar(database)
+    _sink, gate, expectation = _manifest_bundle(tmp_path, database, checksum)
 
     # 공격자가 DB와 같은 저장소의 sidecar를 함께 바꾼 상황을 재현한다.
     with sqlite3.connect(database) as connection:
         connection.execute("INSERT INTO reports VALUES ('changed')")
     checksum = _write_sidecar(database)
 
-    with pytest.raises(readiness.ReadinessError, match="독립 보관"):
-        readiness.verify_backup(database, checksum, original_digest)
+    with pytest.raises(readiness.ReadinessError, match="manifest"):
+        readiness.verify_backup(
+            database,
+            checksum,
+            _digest(database),
+            manifest_gate=gate,
+            manifest_expectation=expectation,
+            manifest_data_root=database.parent,
+        )
+
+
+def test_signed_manifest_tampering_is_rejected(tmp_path: Path) -> None:
+    database = _create_database(tmp_path / "data" / "backup.sqlite3")
+    checksum = _write_sidecar(database)
+    sink, gate, expectation = _manifest_bundle(tmp_path, database, checksum)
+    manifest_path = sink.local_storage_path()
+    assert manifest_path is not None
+    payload = json.loads(manifest_path.read_text(encoding="ascii"))
+    payload["database_size_bytes"] += 1
+    manifest_path.write_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="ascii",
+    )
+
+    with pytest.raises(readiness.ReadinessError, match="서명"):
+        readiness.verify_backup(
+            database,
+            checksum,
+            _digest(database),
+            manifest_gate=gate,
+            manifest_expectation=expectation,
+            manifest_data_root=database.parent,
+        )
 
 
 def test_restore_dry_run_uses_and_cleans_temporary_copy(tmp_path: Path) -> None:
-    database = _create_database(tmp_path / "backup.sqlite3")
+    database = _create_database(tmp_path / "data" / "backup.sqlite3")
     source_digest = _digest(database)
     checksum = _write_sidecar(database)
+    _sink, gate, expectation = _manifest_bundle(tmp_path, database, checksum)
     temp_parent = tmp_path / "restore-only"
     temp_parent.mkdir()
 
@@ -107,6 +232,9 @@ def test_restore_dry_run_uses_and_cleans_temporary_copy(tmp_path: Path) -> None:
         checksum,
         source_digest,
         temp_parent=temp_parent,
+        manifest_gate=gate,
+        manifest_expectation=expectation,
+        manifest_data_root=database.parent,
     )
 
     assert result["status"] == "임시 복구 통과"
@@ -181,11 +309,20 @@ def test_preflight_blocks_active_work_normal_mode_and_open_event_growth(
 
 
 def test_sidecar_must_bind_exact_database_filename(tmp_path: Path) -> None:
-    database = _create_database(tmp_path / "backup.sqlite3")
+    database = _create_database(tmp_path / "data" / "backup.sqlite3")
+    valid_checksum = _write_sidecar(database)
+    _sink, gate, expectation = _manifest_bundle(tmp_path, database, valid_checksum)
     checksum = _write_sidecar(database, name="another.sqlite3")
 
     with pytest.raises(readiness.ReadinessError, match="파일명"):
-        readiness.verify_backup(database, checksum, _digest(database))
+        readiness.verify_backup(
+            database,
+            checksum,
+            _digest(database),
+            manifest_gate=gate,
+            manifest_expectation=expectation,
+            manifest_data_root=database.parent,
+        )
 
 
 def test_preflight_cli_returns_blocking_exit_code(tmp_path: Path, capsys) -> None:

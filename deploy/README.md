@@ -46,6 +46,15 @@ docker compose -f deploy/compose.yaml up --build
 `DART_API_KEY`, `NAVER_CLIENT_ID`, `NAVER_CLIENT_SECRET`을 요구한다. 검증 오류에는 변수명만
 나오고 값은 출력되지 않는다.
 
+`BACKUP_S3_BUCKET`을 설정하면 외부 백업 구성으로 간주한다. 이 경우
+`BACKUP_TRIGGER_SECRET`, S3 전용 자격증명, `BACKUP_DATA_BOUNDARY_ID`,
+`BACKUP_DATA_AUTHORITY_ID`, `BACKUP_MANIFEST_MIN_RETENTION_DAYS`가 모두 필요하다.
+현재 저장소에는 production-ready `BackupManifestAppender` 구현과 앱 시작 시 provider
+설치 호출이 없으므로 환경 검증은 구성된 외부 백업 배포를 의도적으로 차단한다. DB bucket과
+다른 권한·보존 경계의 append-only sink, signer, 최신 checkpoint 통제 경로를 구현하고
+`install_manifest_appender_provider(...)`로 주입한 코드가 포함되기 전에는 이 차단을
+환경 표식만으로 해제하지 않는다.
+
 ## Kubernetes
 
 `kubernetes/base.yaml`에는 비밀값이 없다. 배포 전에 다음 두 항목을 플랫폼 안에서

@@ -13,6 +13,8 @@ from tempfile import TemporaryDirectory
 from typing import Any, Final
 from urllib.parse import urlsplit
 
+from src.features.backup import manifest as backup_manifest
+
 ENV_TRIGGER_SECRET: Final[str] = "BACKUP_TRIGGER_SECRET"
 ENV_BUCKET: Final[str] = "BACKUP_S3_BUCKET"
 ENV_PREFIX: Final[str] = "BACKUP_S3_PREFIX"
@@ -26,6 +28,9 @@ ENV_MAX_OBJECTS: Final[str] = "BACKUP_MAX_OBJECTS"
 ENV_ACCESS_KEY_ID: Final[str] = "AWS_ACCESS_KEY_ID"
 ENV_SECRET_ACCESS_KEY: Final[str] = "AWS_SECRET_ACCESS_KEY"
 ENV_SESSION_TOKEN: Final[str] = "AWS_SESSION_TOKEN"
+ENV_DATA_BOUNDARY_ID: Final[str] = "BACKUP_DATA_BOUNDARY_ID"
+ENV_DATA_AUTHORITY_ID: Final[str] = "BACKUP_DATA_AUTHORITY_ID"
+ENV_MANIFEST_MIN_RETENTION_DAYS: Final[str] = "BACKUP_MANIFEST_MIN_RETENTION_DAYS"
 
 DEFAULT_PREFIX: Final[str] = "company-analysis/"
 DEFAULT_REGION: Final[str] = "us-east-1"
@@ -73,6 +78,9 @@ class S3BackupConfig:
     access_key_id: str = field(repr=False)
     secret_access_key: str = field(repr=False)
     session_token: str = field(repr=False)
+    data_boundary_id: str = ""
+    data_authority_id: str = ""
+    manifest_minimum_retention_days: int = DEFAULT_RETENTION_DAYS
 
 
 @dataclass(frozen=True)
@@ -81,6 +89,9 @@ class ExternalBackupResult:
     checksum_key: str
     sha256: str
     deleted_objects: int
+    manifest_backup_id: str = ""
+    manifest_sequence: int = 0
+    manifest_record_sha256: str = ""
 
 
 def _required(name: str) -> str:
@@ -166,6 +177,11 @@ def config_from_env() -> S3BackupConfig:
         access_key_id=_required(ENV_ACCESS_KEY_ID),
         secret_access_key=_required(ENV_SECRET_ACCESS_KEY),
         session_token=os.environ.get(ENV_SESSION_TOKEN, "").strip(),
+        data_boundary_id=_required(ENV_DATA_BOUNDARY_ID),
+        data_authority_id=_required(ENV_DATA_AUTHORITY_ID),
+        manifest_minimum_retention_days=_bounded_int(
+            ENV_MANIFEST_MIN_RETENTION_DAYS, DEFAULT_RETENTION_DAYS
+        ),
     )
 
 
@@ -356,16 +372,47 @@ def run_backup(
     config: S3BackupConfig | None = None,
     source_path: Path | None = None,
     now: datetime | None = None,
+    manifest_appender: backup_manifest.BackupManifestAppender | None = None,
 ) -> ExternalBackupResult:
-    """SQLite 스냅샷을 외부에 올리고 원격 사본 검증과 보관 정리를 완결한다."""
+    """원격 사본과 독립 manifest append 검증을 모두 마쳐야 성공한다."""
 
     if not _RUN_LOCK.acquire(blocking=False):
         raise BackupAlreadyRunning("외부 백업 한 건이 이미 실행 중입니다")
     try:
         backup_tool = _backup_tool()
         resolved_config = config or config_from_env()
+        if (
+            not resolved_config.data_boundary_id
+            or not resolved_config.data_authority_id
+            or resolved_config.manifest_minimum_retention_days
+            < resolved_config.retention_days
+        ):
+            raise BackupConfigurationError(
+                "백업 데이터 경계와 manifest 보존 계약이 필요합니다"
+            )
+        try:
+            resolved_appender = backup_manifest.require_manifest_appender(
+                manifest_appender
+            )
+            resolved_appender.boundary.validate(
+                minimum_retention_days=resolved_config.manifest_minimum_retention_days
+            )
+            if (
+                resolved_appender.boundary.boundary_id
+                == resolved_config.data_boundary_id
+                or resolved_appender.boundary.authority_id
+                == resolved_config.data_authority_id
+            ):
+                raise backup_manifest.ManifestConfigurationError(
+                    "manifest 경계가 백업 데이터 경계와 독립적이지 않습니다"
+                )
+        except backup_manifest.ManifestConfigurationError as exc:
+            raise BackupConfigurationError(
+                "독립 manifest appender 운영 설정이 올바르지 않습니다"
+            ) from exc
         source = source_path or backup_tool.default_db_path()
         client = _new_s3_client(resolved_config)
+        effective_now = now or datetime.now(timezone.utc)
         with TemporaryDirectory(prefix="company-analysis-backup-") as temp:
             directory = Path(temp)
             local = backup_tool.create_backup(source, directory)
@@ -407,17 +454,55 @@ def run_backup(
                     except Exception:  # noqa: BLE001 — 원래 실패를 보존한다
                         pass
                 raise
+            manifest_request = backup_manifest.BackupManifestRequest(
+                scope="storage-db",
+                storage_provider="s3",
+                storage_bucket=resolved_config.bucket,
+                object_key=object_key,
+                checksum_key=checksum_key,
+                database_name=local.backup_path.name,
+                database_sha256=local.sha256,
+                database_size_bytes=local.backup_path.stat().st_size,
+                checksum_sha256=checksum_sha256,
+                created_at=effective_now,
+                data_boundary_id=resolved_config.data_boundary_id,
+                data_authority_id=resolved_config.data_authority_id,
+                minimum_retention_days=(
+                    resolved_config.manifest_minimum_retention_days
+                ),
+            )
+            try:
+                manifest_receipt = resolved_appender.append_and_verify(
+                    manifest_request
+                )
+                manifest_record = backup_manifest.validate_append_receipt(
+                    request=manifest_request,
+                    appender=resolved_appender,
+                    receipt=manifest_receipt,
+                )
+            except (
+                backup_manifest.ManifestAppendError,
+                backup_manifest.ManifestConfigurationError,
+            ) as exc:
+                # append 성공·read-back 실패를 구분할 수 없으므로 원격 객체는 보존한다.
+                # success는 반환하지 않고 운영자가 독립 원장과 함께 정리한다.
+                raise ExternalBackupError(
+                    "독립 manifest append 또는 재검증을 완료하지 못했습니다"
+                ) from exc
             deleted = _prune_backups(
                 client,
                 resolved_config,
                 current_key=object_key,
-                now=now or datetime.now(timezone.utc),
+                now=effective_now,
             )
             return ExternalBackupResult(
                 object_key=object_key,
                 checksum_key=checksum_key,
                 sha256=local.sha256,
                 deleted_objects=deleted,
+                manifest_backup_id=manifest_record.backup_id,
+                manifest_sequence=manifest_record.sequence,
+                manifest_record_sha256=manifest_receipt.record_sha256,
             )
     except (BackupAlreadyRunning, BackupConfigurationError, ExternalBackupError):
         raise

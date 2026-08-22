@@ -5,12 +5,13 @@ from __future__ import annotations
 import hashlib
 import io
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from src.features.backup import s3
+from src.features.backup import manifest as backup_manifest
 
 
 NOW = datetime(2026, 8, 21, 18, 15, tzinfo=timezone.utc)
@@ -60,6 +61,68 @@ class FakeS3:
         self.objects.pop(Key, None)
 
 
+class FakeManifestAppender(backup_manifest.BackupManifestAppender):
+    def __init__(self) -> None:
+        self.requests: list[backup_manifest.BackupManifestRequest] = []
+        self.fail = False
+        self.tamper_object = False
+        self._boundary = backup_manifest.ManifestBoundary(
+            boundary_id="manifest-control-plane",
+            authority_id="manifest-security-owner",
+            retention_days=35,
+            append_only=True,
+            signed=True,
+            conditional_append=True,
+            production_ready=True,
+        )
+
+    @property
+    def boundary(self) -> backup_manifest.ManifestBoundary:
+        return self._boundary
+
+    def append_and_verify(
+        self, request: backup_manifest.BackupManifestRequest
+    ) -> backup_manifest.ManifestAppendReceipt:
+        self.requests.append(request)
+        if self.fail:
+            raise backup_manifest.ManifestAppendError("시험용 append 실패")
+        sequence = len(self.requests)
+        record = backup_manifest.SignedBackupManifestRecord(
+            version=backup_manifest.MANIFEST_VERSION,
+            sequence=sequence,
+            scope=request.scope,
+            backup_id=request.backup_id,
+            storage_provider=request.storage_provider,
+            storage_bucket=request.storage_bucket,
+            object_key=("wrong/object.sqlite3" if self.tamper_object else request.object_key),
+            checksum_key=request.checksum_key,
+            database_name=request.database_name,
+            database_sha256=request.database_sha256,
+            database_size_bytes=request.database_size_bytes,
+            checksum_sha256=request.checksum_sha256,
+            created_at=request.created_at.astimezone(timezone.utc).replace(
+                microsecond=0
+            ).isoformat().replace("+00:00", "Z"),
+            retention_until=(
+                request.created_at.astimezone(timezone.utc).replace(microsecond=0)
+                + timedelta(days=self.boundary.retention_days)
+            ).isoformat().replace("+00:00", "Z"),
+            data_boundary_id=request.data_boundary_id,
+            data_authority_id=request.data_authority_id,
+            manifest_boundary_id=self.boundary.boundary_id,
+            manifest_authority_id=self.boundary.authority_id,
+            previous_record_sha256="",
+            key_id="fake-key-v1",
+            signature="f" * 64,
+        )
+        return backup_manifest.ManifestAppendReceipt(
+            record=record,
+            record_sha256=record.record_sha256(),
+            verified_head_sequence=sequence,
+            readback_verified=True,
+        )
+
+
 def _config(**changes) -> s3.S3BackupConfig:
     values = {
         "bucket": "private-backups",
@@ -74,6 +137,9 @@ def _config(**changes) -> s3.S3BackupConfig:
         "access_key_id": "access",
         "secret_access_key": "secret",
         "session_token": "",
+        "data_boundary_id": "backup-data-bucket",
+        "data_authority_id": "backup-data-writer",
+        "manifest_minimum_retention_days": 35,
     }
     values.update(changes)
     return s3.S3BackupConfig(**values)
@@ -107,7 +173,13 @@ def test_업로드한_두_파일을_다시_받아_검증하고_원문열쇠를_�
     client = FakeS3()
     monkeypatch.setattr(s3, "_new_s3_client", lambda _config: client)
 
-    result = s3.run_backup(config=_config(), source_path=source, now=NOW)
+    appender = FakeManifestAppender()
+    result = s3.run_backup(
+        config=_config(),
+        source_path=source,
+        now=NOW,
+        manifest_appender=appender,
+    )
 
     assert set(client.objects) == {result.object_key, result.checksum_key}
     assert result.sha256 == hashlib.sha256(
@@ -118,6 +190,10 @@ def test_업로드한_두_파일을_다시_받아_검증하고_원문열쇠를_�
         item["ServerSideEncryption"] == "AES256"
         for item in client.objects.values()
     )
+    assert result.manifest_sequence == 1
+    assert result.manifest_backup_id == appender.requests[0].backup_id
+    assert appender.requests[0].object_key == result.object_key
+    assert appender.requests[0].checksum_key == result.checksum_key
 
 
 def test_보관기간이나_개수상한을_넘은_관리대상_한쌍만_지운다(
@@ -145,7 +221,10 @@ def test_보관기간이나_개수상한을_넘은_관리대상_한쌍만_지운
     monkeypatch.setattr(s3, "_new_s3_client", lambda _config: client)
 
     result = s3.run_backup(
-        config=_config(max_backups=1), source_path=source, now=NOW
+        config=_config(max_backups=1),
+        source_path=source,
+        now=NOW,
+        manifest_appender=FakeManifestAppender(),
     )
 
     assert result.deleted_objects == 2
@@ -166,7 +245,12 @@ def test_검증이_실패하면_이번에_올린_불완전객체를_지운다(
     monkeypatch.setattr(s3, "_new_s3_client", lambda _config: client)
 
     with pytest.raises(s3.ExternalBackupError):
-        s3.run_backup(config=_config(), source_path=source, now=NOW)
+        s3.run_backup(
+            config=_config(),
+            source_path=source,
+            now=NOW,
+            manifest_appender=FakeManifestAppender(),
+        )
 
     assert not [key for key in client.objects if key.endswith((".sqlite3", ".sha256"))]
 
@@ -191,7 +275,12 @@ def test_같은_프로세스의_백업_중복실행을_즉시_거부한다(tmp_p
     assert s3._RUN_LOCK.acquire(blocking=False)
     try:
         with pytest.raises(s3.BackupAlreadyRunning, match="이미 실행 중"):
-            s3.run_backup(config=_config(), source_path=source, now=NOW)
+            s3.run_backup(
+                config=_config(),
+                source_path=source,
+                now=NOW,
+                manifest_appender=FakeManifestAppender(),
+            )
     finally:
         s3._RUN_LOCK.release()
 
@@ -207,10 +296,86 @@ def test_실패한_백업은_잠금을_풀어_다음_실행을_허용한다(
     clients = iter((first_client, second_client))
     monkeypatch.setattr(s3, "_new_s3_client", lambda _config: next(clients))
 
+    appender = FakeManifestAppender()
     with pytest.raises(s3.ExternalBackupError):
-        s3.run_backup(config=_config(), source_path=source, now=NOW)
+        s3.run_backup(
+            config=_config(),
+            source_path=source,
+            now=NOW,
+            manifest_appender=appender,
+        )
 
-    result = s3.run_backup(config=_config(), source_path=source, now=NOW)
+    result = s3.run_backup(
+        config=_config(),
+        source_path=source,
+        now=NOW,
+        manifest_appender=appender,
+    )
 
     assert result.object_key in second_client.objects
     assert result.checksum_key in second_client.objects
+
+
+def test_manifest_appender_누락은_S3_client_생성전에_fail_closed한다(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "storage.db"
+    _database(source)
+    client_created = False
+
+    def forbidden_client(_config):
+        nonlocal client_created
+        client_created = True
+        raise AssertionError("manifest 설정 전에 S3를 호출하면 안 됩니다")
+
+    monkeypatch.setattr(s3, "_new_s3_client", forbidden_client)
+
+    with pytest.raises(s3.BackupConfigurationError, match="manifest"):
+        s3.run_backup(config=_config(), source_path=source, now=NOW)
+
+    assert client_created is False
+
+
+def test_manifest_append_실패는_성공을_반환하지_않고_원격쌍을_보존한다(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "storage.db"
+    _database(source)
+    client = FakeS3()
+    appender = FakeManifestAppender()
+    appender.fail = True
+    monkeypatch.setattr(s3, "_new_s3_client", lambda _config: client)
+
+    with pytest.raises(s3.ExternalBackupError, match="manifest"):
+        s3.run_backup(
+            config=_config(),
+            source_path=source,
+            now=NOW,
+            manifest_appender=appender,
+        )
+
+    # append 결과가 미확정일 수 있어 manifest가 가리킬 객체를 지우지 않는다.
+    assert len(client.objects) == 2
+    assert any(key.endswith(".sqlite3") for key in client.objects)
+    assert any(key.endswith(".sqlite3.sha256") for key in client.objects)
+
+
+def test_manifest_receipt가_다른_object를_결속하면_성공을_거부한다(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "storage.db"
+    _database(source)
+    client = FakeS3()
+    appender = FakeManifestAppender()
+    appender.tamper_object = True
+    monkeypatch.setattr(s3, "_new_s3_client", lambda _config: client)
+
+    with pytest.raises(s3.ExternalBackupError, match="manifest"):
+        s3.run_backup(
+            config=_config(),
+            source_path=source,
+            now=NOW,
+            manifest_appender=appender,
+        )
+
+    assert len(client.objects) == 2

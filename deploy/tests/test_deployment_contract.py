@@ -115,6 +115,78 @@ def test_demo_environment_passes_without_paid_provider_values() -> None:
     assert validator.validate(_base_environment(), "web") == []
 
 
+def test_configured_backup_fails_closed_until_manifest_adapter_is_installed() -> None:
+    environment = _base_environment()
+    environment["BACKUP_S3_BUCKET"] = "example-private-bucket"
+
+    joined = "\n".join(validator.validate(environment, "web"))
+
+    for name in (
+        "BACKUP_TRIGGER_SECRET",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "BACKUP_DATA_BOUNDARY_ID",
+        "BACKUP_DATA_AUTHORITY_ID",
+        "BACKUP_MANIFEST_MIN_RETENTION_DAYS",
+        "BACKUP_MANIFEST_APPENDER",
+    ):
+        assert name in joined
+
+    environment.update(
+        {
+            "BACKUP_TRIGGER_SECRET": "x" * 32,
+            "AWS_ACCESS_KEY_ID": "test-access-id",
+            "AWS_SECRET_ACCESS_KEY": "test-secret",
+            "BACKUP_DATA_BOUNDARY_ID": "backup-data-boundary",
+            "BACKUP_DATA_AUTHORITY_ID": "backup-data-writer",
+            "BACKUP_RETENTION_DAYS": "35",
+            "BACKUP_MANIFEST_MIN_RETENTION_DAYS": "34",
+        }
+    )
+    retention_errors = "\n".join(validator.validate(environment, "web"))
+    assert "DB 백업 보존 기간보다 짧을 수 없습니다" in retention_errors
+    assert validator.PRODUCTION_BACKUP_MANIFEST_BLOCKER in retention_errors
+
+    environment["BACKUP_MANIFEST_MIN_RETENTION_DAYS"] = "35"
+    assert validator.validate(environment, "web") == [
+        validator.PRODUCTION_BACKUP_MANIFEST_BLOCKER
+    ]
+
+
+def test_backup_examples_expose_required_names_without_a_readiness_bypass() -> None:
+    variable_names = (
+        "BACKUP_DATA_BOUNDARY_ID",
+        "BACKUP_DATA_AUTHORITY_ID",
+        "BACKUP_MANIFEST_MIN_RETENTION_DAYS",
+    )
+    runtime_example = (DEPLOY_ROOT / "runtime-config.example").read_text(
+        encoding="utf-8"
+    )
+    app_example = (REPOSITORY_ROOT / "app" / ".env.example").read_text(
+        encoding="utf-8"
+    )
+    blueprint = yaml.safe_load(
+        (REPOSITORY_ROOT / "render.yaml").read_text(encoding="utf-8")
+    )
+    web_service = next(
+        service for service in blueprint["services"] if service["type"] == "web"
+    )
+    render_names = {item["key"] for item in web_service["envVars"]}
+
+    for name in variable_names:
+        assert f"{name}=" in runtime_example
+        assert f"{name}=" in app_example
+        assert name in render_names
+    assert "BACKUP_MANIFEST_APPENDER_READY" not in runtime_example
+    assert validator.PRODUCTION_BACKUP_MANIFEST_APPENDER_AVAILABLE is False
+
+    render_guide = (
+        REPOSITORY_ROOT / "app" / "docs" / "Render_배포.md"
+    ).read_text(encoding="utf-8")
+    assert "현재 외부 백업 배포는 BLOCKED" in render_guide
+    assert "install_manifest_appender_provider(...)" in render_guide
+
+
 def test_real_environment_fails_closed_without_leaking_values() -> None:
     environment = _base_environment()
     environment["PIPELINE"] = "real"
