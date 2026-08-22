@@ -65,6 +65,12 @@ from src.features.spanselect.canonical import (
     PORTFOLIO_STAGES,
     PRIORITY_SIGNAL_PATTERNS,
 )
+from src.shared.comparison_candidate_basis import (
+    comparison_candidate_sentence_matches,
+    comparison_comparator_source_id,
+    comparison_overlap_dimension,
+    parse_comparison_basis_v1,
+)
 
 
 _SUMMARY_NUMBER = re.compile(r"\d|[%％]")
@@ -553,6 +559,150 @@ def _comparison_official_text(evidence: str) -> str:
     return str(official_text or "").strip()
 
 
+def _comparison_candidate_source_id(value: object) -> str:
+    """v1 근거의 후보 출처 ID. legacy/demo 문자열은 빈 값이다."""
+
+    payload = parse_comparison_basis_v1(value)
+    return str((payload or {}).get("candidate_source_id") or "")
+
+
+def _comparison_candidate_basis_problems(
+    fact: FactRecord,
+    sources: dict[str, Source],
+    facts: dict[str, FactRecord] | None = None,
+    confirmed_candidate_fact_ids: set[str] | None = None,
+) -> list[str]:
+    """실서비스 v1 근거를 확정된 1~8장 Fact·Source에서 역참조한다."""
+
+    payload = parse_comparison_basis_v1(fact.comparison_basis)
+    real_comparison = fact.fact_id.startswith("fact-compare-") and fact.source_id.startswith(
+        "comparison-self-"
+    )
+    if payload is None:
+        return (
+            [
+                f"[comparison] {fact.fact_id}: 실서비스 비교 후보 근거가 "
+                "company-comparison-basis-v1에 결속되지 않았습니다"
+            ]
+            if real_comparison
+            else []
+        )
+
+    problems: list[str] = []
+    expected_comparator_source_id = comparison_comparator_source_id(
+        corp_code=payload["candidate_corp_code"],
+        comparison_period=fact.comparison_period,
+        comparison_scope=fact.comparison_scope,
+    )
+    if (
+        not expected_comparator_source_id
+        or fact.comparator_source_id != expected_comparator_source_id
+    ):
+        problems.append(
+            f"[comparison] {fact.fact_id}: 후보 DART 고유번호가 실제 비교사 "
+            "재무 Source ID와 결속되지 않았습니다"
+        )
+
+    candidate_source = sources.get(payload["candidate_source_id"])
+    if candidate_source is None:
+        problems.append(
+            f"[comparison] {fact.fact_id}: 비교 후보 원문 source_id가 등록부에 없습니다"
+        )
+        return problems
+    if candidate_source.document_id.strip() != payload["filing_document_id"]:
+        problems.append(
+            f"[comparison] {fact.fact_id}: 비교 후보 Source 문서 ID가 v1 근거와 다릅니다"
+        )
+    if _corporate_name(candidate_source.publisher) != _corporate_name(fact.legal_entity):
+        problems.append(
+            f"[comparison] {fact.fact_id}: 비교 후보 원문의 발행 법인이 자사가 아닙니다"
+        )
+    if not is_canonical_official_with_registry(
+        candidate_source, tuple(sources.values())
+    ):
+        problems.append(
+            f"[comparison] {fact.fact_id}: 비교 후보 원문이 검증된 공식 자료가 아닙니다"
+        )
+    if payload["evidence_sha256"] not in candidate_source.evidence_hashes:
+        problems.append(
+            f"[comparison] {fact.fact_id}: 비교 후보 문장 해시가 Source 원문 등록부에 없습니다"
+        )
+    if facts is None:
+        problems.append(
+            f"[comparison] {fact.fact_id}: 비교 후보 fact_id를 역참조할 사실 등록부가 없습니다"
+        )
+        return problems
+
+    candidate_fact = facts.get(payload["candidate_fact_id"])
+    if candidate_fact is None:
+        problems.append(
+            f"[comparison] {fact.fact_id}: 비교 후보 fact_id가 보고서 사실 등록부에 없습니다"
+        )
+        return problems
+    if (
+        confirmed_candidate_fact_ids is None
+        or candidate_fact.fact_id not in confirmed_candidate_fact_ids
+    ):
+        problems.append(
+            f"[comparison] {fact.fact_id}: 비교 후보 fact_id가 실제 1~8장 fact_ids에 없습니다"
+        )
+    if candidate_fact.section_owner == "competitive_position" or (
+        candidate_fact.section_owner not in SECTION_BY_ID
+    ):
+        problems.append(
+            f"[comparison] {fact.fact_id}: 비교 후보 fact_id는 확정된 1~8장 사실이어야 합니다"
+        )
+    if candidate_fact.source_id != payload["candidate_source_id"]:
+        problems.append(
+            f"[comparison] {fact.fact_id}: 비교 후보 fact_id와 source_id 결속이 다릅니다"
+        )
+    if candidate_fact.source_document_id.strip() != payload["filing_document_id"]:
+        problems.append(
+            f"[comparison] {fact.fact_id}: 비교 후보 사실의 문서 ID가 v1 근거와 다릅니다"
+        )
+    if not comparison_candidate_sentence_matches(
+        payload,
+        comparison_target=fact.comparison_target,
+        evidence_text=candidate_fact.state_evidence,
+    ):
+        problems.append(
+            f"[comparison] {fact.fact_id}: 비교 후보 법인명·경쟁 표지·"
+            "문장 해시가 확정된 1~8장 근거 한 문장에 함께 결속되지 않았습니다"
+        )
+    if comparison_overlap_dimension(candidate_fact.state_evidence) != payload[
+        "overlap_dimension"
+    ]:
+        problems.append(
+            f"[comparison] {fact.fact_id}: 후보 겹침 축이 확정 근거 문장과 다릅니다"
+        )
+    if (
+        candidate_fact.status != "verified"
+        or candidate_fact.verification_status != "verified"
+        or not candidate_fact.evidence_binding
+        or candidate_fact.evidence_binding != fact_evidence_binding(candidate_fact)
+    ):
+        problems.append(
+            f"[comparison] {fact.fact_id}: 비교 후보 fact_id가 verified 결속 사실이 아닙니다"
+        )
+    if _corporate_name(candidate_fact.legal_entity) != _corporate_name(
+        fact.legal_entity
+    ):
+        problems.append(
+            f"[comparison] {fact.fact_id}: 비교 후보 사실의 법인이 자사가 아닙니다"
+        )
+    if _corporate_name(candidate_fact.source_publisher) != _corporate_name(
+        candidate_source.publisher
+    ):
+        problems.append(
+            f"[comparison] {fact.fact_id}: 비교 후보 사실의 발행 법인이 Source와 다릅니다"
+        )
+    if candidate_fact.section_owner not in candidate_source.used_in:
+        problems.append(
+            f"[comparison] {fact.fact_id}: 비교 후보 Source가 1~8장 사실 소유 장에 등록되지 않았습니다"
+        )
+    return problems
+
+
 def _derived_comparison_context(fact: FactRecord) -> dict[str, str]:
     """양사 공식 원문으로부터 고객·제품·시장 공통범위를 다시 계산한다."""
 
@@ -940,7 +1090,12 @@ def _numeric_problems(fact: FactRecord) -> list[str]:
     return problems
 
 
-def _fact_problems(fact: FactRecord, sources: dict[str, Source]) -> list[str]:
+def _fact_problems(
+    fact: FactRecord,
+    sources: dict[str, Source],
+    facts: dict[str, FactRecord] | None = None,
+    confirmed_candidate_fact_ids: set[str] | None = None,
+) -> list[str]:
     problems: list[str] = []
     if not _fact_core_is_complete(fact):
         problems.append(
@@ -1606,6 +1761,14 @@ def _fact_problems(fact: FactRecord, sources: dict[str, Source]) -> list[str]:
                     problems.append(
                         f"[comparison] {fact.fact_id}: 비교사 근거어 '{term}'가 claim과 비교사 원문 양쪽에 없습니다"
                     )
+        problems.extend(
+            _comparison_candidate_basis_problems(
+                fact,
+                sources,
+                facts,
+                confirmed_candidate_fact_ids,
+            )
+        )
     return problems
 
 
@@ -1797,6 +1960,7 @@ def _section_fact_ids(
     section: ReportSection,
     facts: dict[str, FactRecord],
     sources: dict[str, Source],
+    confirmed_candidate_fact_ids: set[str] | None = None,
 ) -> tuple[list[str], list[str]]:
     supported: list[str] = []
     problems: list[str] = []
@@ -1817,12 +1981,34 @@ def _section_fact_ids(
                 f"[ownership] {clean_id}: {fact.section_owner} 소유 사실을 {section.cell}에서 참조했습니다"
             )
             continue
-        fact_problems = _fact_problems(fact, sources)
+        fact_problems = _fact_problems(
+            fact,
+            sources,
+            facts,
+            confirmed_candidate_fact_ids,
+        )
         if fact_problems:
             problems.extend(fact_problems)
             continue
         supported.append(clean_id)
     return supported, problems
+
+
+def _declared_candidate_fact_ids(report: Report) -> set[str]:
+    """중복되지 않은 실제 1~8장 ``fact_ids``만 후보 역참조 대상으로 삼는다."""
+
+    counts: dict[str, int] = {}
+    for section in report.sections:
+        if section.cell in SECTION_BY_ID and section.cell != "competitive_position":
+            counts[section.cell] = counts.get(section.cell, 0) + 1
+    return {
+        str(fact_id or "").strip()
+        for section in report.sections
+        if section.cell != "competitive_position"
+        and counts.get(section.cell) == 1
+        for fact_id in section.fact_ids
+        if str(fact_id or "").strip()
+    }
 
 
 def _section_projection_problems(
@@ -1915,6 +2101,9 @@ def _section_projection_problems(
                     for source_id in (
                         source_fact.source_id,
                         source_fact.comparator_source_id,
+                        _comparison_candidate_source_id(
+                            source_fact.comparison_basis
+                        ),
                     ):
                         source = sources.get(source_id)
                         if source is not None:
@@ -2449,6 +2638,7 @@ def validate_publishable(report: Report) -> PublishValidation:
 
     sections: dict[str, ReportSection] = {}
     supported_by_section: dict[str, list[str]] = {}
+    confirmed_candidate_fact_ids = _declared_candidate_fact_ids(report)
     for section in report.sections:
         if section.cell not in SECTION_BY_ID:
             continue
@@ -2456,7 +2646,12 @@ def validate_publishable(report: Report) -> PublishValidation:
             reasons.append(f"[section] {section.cell} 장이 두 번 등록됐습니다")
             continue
         sections[section.cell] = section
-        supported, problems = _section_fact_ids(section, facts, sources)
+        supported, problems = _section_fact_ids(
+            section,
+            facts,
+            sources,
+            confirmed_candidate_fact_ids,
+        )
         supported_by_section[section.cell] = supported
         reasons.extend(problems)
         reasons.extend(_section_content_problems(section, supported, facts, sources))
@@ -2507,13 +2702,19 @@ def build_published_report(report: Report) -> Report:
     by_id = {section.cell: section for section in report.sections}
     facts = {fact.fact_id: fact for fact in report.fact_records}
     sources = _source_registry(report)
+    confirmed_candidate_fact_ids = _declared_candidate_fact_ids(report)
     published_sections: list[ReportSection] = []
     used_fact_ids: set[str] = set()
     for spec in SECTION_SPECS:
         if spec.section_id not in validation.included_section_ids:
             continue
         section = by_id[spec.section_id]
-        supported, _problems = _section_fact_ids(section, facts, sources)
+        supported, _problems = _section_fact_ids(
+            section,
+            facts,
+            sources,
+            confirmed_candidate_fact_ids,
+        )
         used_fact_ids.update(supported)
         published_sections.append(
             replace(
@@ -2537,11 +2738,26 @@ def build_published_report(report: Report) -> Report:
         for fact in published_facts
         if fact.comparator_source_id
     )
+    used_source_ids.update(
+        candidate_source_id
+        for fact in published_facts
+        if (
+            candidate_source_id := _comparison_candidate_source_id(
+                fact.comparison_basis
+            )
+        )
+    )
     source_usage: dict[str, set[str]] = {}
     for fact in published_facts:
         source_usage.setdefault(fact.source_id, set()).add(fact.section_owner)
         if fact.comparator_source_id:
             source_usage.setdefault(fact.comparator_source_id, set()).add(
+                fact.section_owner
+            )
+        if candidate_source_id := _comparison_candidate_source_id(
+            fact.comparison_basis
+        ):
+            source_usage.setdefault(candidate_source_id, set()).add(
                 fact.section_owner
             )
     published_citations = sorted([

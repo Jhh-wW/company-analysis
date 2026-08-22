@@ -519,6 +519,7 @@ class FakeEngine:
 
     def read_filing_text(self, path: str) -> str:
         return (
+            "가나다전자는 베타전자와 경쟁 관계인 반도체 검사 장비 전문기업이다. "
             "국내외 반도체 제조 고객을 대상으로 SmartX 반도체 검사 장비 제품을 "
             "반도체 검사 장비 시장에 공급한다. 연결재무제표의 매출액과 영업이익을 공시한다."
         )
@@ -1299,6 +1300,46 @@ def test_원문조각이_없으면_기타게이트_코드로_멈춘다(
 
     assert result.outcome is Outcome.GATE_STOPPED
     assert result.final_gate_reason == "other_gate"
+
+
+def test_전체공시원문에_후보가_없으면_fragment를_믿지_않고_span전에_멈춘다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 뉴스에만 경쟁 문장이 남아 있어도 후보로 승격하지 않는다. 공식 홈페이지·
+    # IR일 수 있는 비뉴스 fragment는 거짓 차단을 막기 위한 상위집합으로 본다.
+    monkeypatch.setattr(
+        engine,
+        "read_filing_text",
+        lambda _path: "회사는 반도체 검사 장비를 국내외 고객에게 공급한다.",
+    )
+    original_make_fragments = engine.make_fragments
+
+    def fragments_with_news_only_candidate(*args: Any, **kwargs: Any):
+        fragments = original_make_fragments(*args, **kwargs)
+        fragments[1] = {**fragments[1], "종류": real.NEWS_FRAGMENT_KIND}
+        return fragments
+
+    monkeypatch.setattr(engine, "make_fragments", fragments_with_news_only_candidate)
+
+    def forbidden_span(*_args: Any, **_kwargs: Any):
+        raise AssertionError("comparison preflight False 뒤 span 호출 금지")
+
+    monkeypatch.setattr(real, "select_canonical_spans", forbidden_span)
+    monkeypatch.setattr(real, "_attach_competitive_position", forbidden_span)
+    monkeypatch.setattr(real, "_load_official_comparator_bundle", forbidden_span)
+    monkeypatch.setattr(real, "finalize_report", forbidden_span)
+
+    result = _run()
+
+    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.final_gate_reason == "comparison_blocked"
+    assert result.sentences_made == 0
+    assert result.sentences_passed == 0
+    assert result.span_selection_diagnostics == ()
+    assert result.span_selection_result_reason == ""
+    assert engine.generate_ai_calls == 0
+    assert "비교 후보" in result.message
 
 
 def test_경쟁사비교_차단은_원문사유대신_닫힌코드만_반환한다(

@@ -4,6 +4,11 @@ from dataclasses import replace
 
 import pytest
 
+from src.features.business_candidate.dart_identity import DartCompanyRecord
+from src.features.company_comparison.logic import (
+    OfficialCompanyBundle,
+    build_competitive_position,
+)
 from src.features.export_pdf.automatic_release import report_sha256
 from src.features.pipeline.canonical_demo import build_demo_report
 from src.features.pipeline.port import FactRecord, Report, ReportSection
@@ -36,6 +41,56 @@ from src.features.report_standard.section_content import (
 
 def _valid_report() -> Report:
     return build_demo_report()
+
+
+def _comparison_bundle(
+    corp_code: str,
+    company_name: str,
+    *,
+    revenue: int,
+    operating_income: int,
+) -> OfficialCompanyBundle:
+    def row(account_id: str, account_nm: str, amount: int) -> dict[str, str]:
+        return {
+            "account_id": account_id,
+            "account_nm": account_nm,
+            "sj_div": "IS",
+            "fs_div": "CFS",
+            "thstrm_dt": "2025.01.01 ~ 2025.12.31",
+            "thstrm_amount": str(amount),
+            "bsns_year": "2025",
+            "reprt_code": "11011",
+            "currency": "KRW",
+        }
+
+    receipt_number = f"20260315{corp_code}"
+    return OfficialCompanyBundle(
+        corp_code=corp_code,
+        company_name=company_name,
+        filing={
+            "report_nm": "사업보고서 (2025.12)",
+            "rcept_no": receipt_number,
+            "rcept_dt": "20260315",
+            "reprt_code": "11011",
+        },
+        financials={
+            "status": "000",
+            "reprt_code": "11011",
+            "list": [
+                row("ifrs-full_Revenue", "매출액", revenue),
+                row(
+                    "dart_OperatingIncomeLoss",
+                    "영업이익",
+                    operating_income,
+                ),
+            ],
+        },
+        official_text=(
+            "전자 제조 고객 대상 반도체 검사장비 제품을 "
+            "반도체 검사장비 시장에 공급한다. "
+            "연결재무제표의 매출액과 영업이익을 공시한다."
+        ),
+    )
 
 
 def _replace_fact(report: Report, fact_id: str, **changes: object) -> Report:
@@ -1126,6 +1181,138 @@ def test_comparator_must_be_a_different_official_legal_entity() -> None:
     assert validation.publishable is False
     assert any("source_id가 같습니다" in reason for reason in validation.reasons)
     assert any("자사와 구분" in reason for reason in validation.reasons)
+
+
+def test_실서비스_9장은_후보선정_source를_공개하고_used_in을_보존한다() -> None:
+    report = _valid_report()
+    candidate_evidence = (
+        f"{report.company}는 주식회사 베타와 반도체 검사장비 시장에서 "
+        "경쟁 관계에 있다."
+    )
+    candidate_source = seal_collected_source(
+        Source(
+            number=max(source.number for source in report.citations) + 1,
+            kind=SourceKind.FILING,
+            label=f"{report.company} 2025 사업보고서 경쟁 현황",
+            disclosed_at="2026-03-15",
+            collected_at="2026-08-19",
+            source_id="candidate-origin-source",
+            title="2025 사업보고서",
+            publisher=report.company,
+            host="dart.fss.or.kr",
+            url=(
+                "https://dart.fss.or.kr/dsaf001/main.do?"
+                "rcpNo=20260315000001"
+            ),
+            document_id="20260315000001",
+            location="사업의 내용 · 경쟁 현황",
+            source_type="공식 공시",
+            fact_status="공시 실제값",
+            used_in=["identity"],
+            evidence_hashes=[evidence_text_hash(candidate_evidence)],
+        )
+    )
+    candidate_fact = FactRecord(
+        fact_id="candidate-origin-fact",
+        legal_entity=report.company,
+        subject_scope="반도체 검사장비 시장",
+        relationship_or_action="주식회사 베타와 경쟁 관계",
+        claim=candidate_evidence,
+        claim_type="identity_summary",
+        section_owner="identity",
+        time_state="standing",
+        as_of="2026-03-15",
+        source_id=candidate_source.source_id,
+        source_type=candidate_source.source_type,
+        source_title=candidate_source.title,
+        source_publisher=candidate_source.publisher,
+        source_host=candidate_source.host,
+        source_url=candidate_source.url,
+        source_document_id=candidate_source.document_id,
+        location=candidate_source.location,
+        status="verified",
+        fact_status="actual",
+        verification_status="verified",
+        state_evidence=candidate_evidence,
+        source_date="2026-03-15",
+        evidence_support_terms=["주식회사 베타", "경쟁 관계"],
+    )
+    candidate_fact = replace(
+        candidate_fact,
+        evidence_binding=fact_evidence_binding(candidate_fact),
+    )
+    identity = next(section for section in report.sections if section.cell == "identity")
+    draft = replace(
+        report,
+        sections=[
+            replace(
+                section,
+                prose_lines=[
+                    *section.prose_lines,
+                    (candidate_fact.claim, f"[{candidate_source.number}]"),
+                ],
+                fact_ids=[*section.fact_ids, candidate_fact.fact_id],
+            )
+            if section.cell == identity.cell
+            else section
+            for section in report.sections
+        ],
+        citations=[*report.citations, candidate_source],
+        fact_records=[*report.fact_records, candidate_fact],
+    )
+    comparison = build_competitive_position(
+        draft,
+        self_bundle=_comparison_bundle(
+            "00000001",
+            report.company,
+            revenue=2_000,
+            operating_income=300,
+        ),
+        catalog=(
+            DartCompanyRecord("00000001", report.company),
+            DartCompanyRecord("00000002", "주식회사 베타"),
+        ),
+        fetch_comparator=lambda _record: _comparison_bundle(
+            "00000002",
+            "주식회사 베타",
+            revenue=1_000,
+            operating_income=50,
+        ),
+        collected_on="2026-08-19",
+    )
+    draft = replace(
+        draft,
+        sections=[
+            section
+            for section in draft.sections
+            if section.cell != "competitive_position"
+        ]
+        + [comparison.section],
+        citations=[*draft.citations, *comparison.sources],
+        fact_records=[
+            fact
+            for fact in draft.fact_records
+            if fact.section_owner != "competitive_position"
+        ]
+        + list(comparison.facts),
+    )
+
+    published = build_published_report(draft)
+    competitive = next(
+        section
+        for section in published.sections
+        if section.cell == "competitive_position"
+    )
+    blocks = section_content_blocks(published, competitive)
+    published_candidate_source = next(
+        source
+        for source in published.citations
+        if source.source_id == candidate_source.source_id
+    )
+
+    assert all(candidate_source.number in block.source_numbers for block in blocks)
+    assert "competitive_position" in published_candidate_source.used_in
+    assert "identity" in published_candidate_source.used_in
 
 
 @pytest.mark.parametrize("judgment", ["", "comparison_unknown"])

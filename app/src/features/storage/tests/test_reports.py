@@ -17,6 +17,11 @@ from src.features.pipeline.port import (
 from src.features.provenance.sources import Source, SourceKind, evidence_text_hash
 from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
 from src.features.storage import db, reports
+from src.shared.comparison_candidate_basis import (
+    COMPARISON_BASIS_VERSION,
+    encode_comparison_basis_v1,
+    parse_comparison_basis_v1,
+)
 
 
 def _full_report() -> Report:
@@ -75,6 +80,43 @@ def _full_report() -> Report:
         shortfall_reasons=["채워진 항목이 3개입니다 (4개 이상 필요)"],
         generated_at="2026-08-15",
     )
+
+
+def test_경쟁사후보_v1은_report_dict_json_왕복에서_그대로_보존된다() -> None:
+    basis = encode_comparison_basis_v1(
+        {
+            "version": COMPARISON_BASIS_VERSION,
+            "candidate_fact_id": "fact-origin-01",
+            "candidate_source_id": "source-origin-01",
+            "candidate_corp_code": "00000002",
+            "candidate_name": "주식회사 베타",
+            "filing_document_id": "20260315000001",
+            "evidence_sha256": "a" * 64,
+            "overlap_dimension": "시장 겹침",
+        }
+    )
+    original = Report(
+        company="주식회사 알파",
+        job="",
+        corp_type="상장사",
+        grade=Grade.COMPLETE,
+        sections=[],
+        fact_records=[
+            FactRecord(
+                fact_id="fact-compare-01",
+                comparison_basis=basis,
+            )
+        ],
+    )
+
+    dict_restored = reports.report_from_dict(reports.report_to_dict(original))
+    json_restored = reports.report_from_json(reports.report_to_json(original))
+
+    assert dict_restored == original
+    assert json_restored == original
+    assert parse_comparison_basis_v1(
+        json_restored.fact_records[0].comparison_basis
+    ) == parse_comparison_basis_v1(basis)
 
 
 def test_roundtrip_via_json_keeps_every_field() -> None:

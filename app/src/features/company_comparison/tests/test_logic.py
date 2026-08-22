@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 
 import pytest
@@ -9,20 +10,32 @@ from src.features.company_comparison.logic import (
     ComparisonBlockedError,
     OfficialCompanyBundle,
     build_competitive_position,
+    comparison_candidate_preflight_possible,
     discover_candidates,
 )
 from src.features.pipeline.port import FactRecord, Grade, Report, ReportSection
-from src.features.provenance.sources import Source, SourceKind, evidence_text_hash
+from src.features.provenance.sources import (
+    Source,
+    SourceKind,
+    evidence_text_hash,
+    seal_collected_source,
+)
 from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
-from src.features.report_standard.publish import _fact_problems
+from src.features.report_standard.publish import _fact_problems, fact_evidence_binding
+from src.shared.comparison_candidate_basis import (
+    COMPARISON_BASIS_VERSION,
+    parse_comparison_basis_v1,
+)
 
 
-def _official_source() -> Source:
-    evidence = (
-        "알파는 베타와 전자 제조 고객 대상 반도체 검사장비 제품을 "
-        "반도체 검사장비 시장에서 두고 경쟁 관계에 있다."
-    )
-    return Source(
+COMPETITION_EVIDENCE = (
+    "알파는 베타와 전자 제조 고객 대상 반도체 검사장비 제품을 "
+    "반도체 검사장비 시장에서 두고 경쟁 관계에 있다."
+)
+
+
+def _official_source(evidence: str = COMPETITION_EVIDENCE) -> Source:
+    return seal_collected_source(Source(
         number=1,
         kind=SourceKind.FILING,
         label="알파 2025 사업보고서",
@@ -39,14 +52,11 @@ def _official_source() -> Source:
         fact_status="공시 실제값",
         used_in=["identity"],
         evidence_hashes=[evidence_text_hash(evidence)],
-    )
+    ))
 
 
-def _report(evidence: str = (
-    "알파는 베타와 전자 제조 고객 대상 반도체 검사장비 제품을 "
-    "반도체 검사장비 시장에서 두고 경쟁 관계에 있다."
-)) -> Report:
-    source = _official_source()
+def _report(evidence: str = COMPETITION_EVIDENCE) -> Report:
+    source = _official_source(evidence)
     fact = FactRecord(
         fact_id="fact-alpha-market",
         legal_entity="주식회사 알파",
@@ -66,9 +76,12 @@ def _report(evidence: str = (
         source_document_id=source.document_id,
         location=source.location,
         status="verified",
+        fact_status="actual",
+        verification_status="verified",
         state_evidence=evidence,
         supports_causality=True,
     )
+    fact = replace(fact, evidence_binding=fact_evidence_binding(fact))
     return Report(
         company="주식회사 알파",
         job="",
@@ -219,7 +232,15 @@ def test_정상_양사공식원문은_동일조건_비교사실을_만든다() -
             assert "경쟁우위 판정이 아니다" in fact.claim
         fact_errors = _fact_problems(
             fact,
-            {source.source_id: source for source in result.sources},
+            {
+                source.source_id: source
+                for source in [*report.citations, *result.sources]
+            },
+            {
+                item.fact_id: item
+                for item in [*report.fact_records, *result.facts]
+            },
+            {item.fact_id for item in report.fact_records},
         )
         assert fact_errors == [], fact_errors
 
@@ -277,6 +298,170 @@ def test_경쟁관계_근거가_없으면_후보를_임의로_고르지_않는�
             fetch_comparator=lambda _record: _bundle("00000002", "주식회사 베타"),
             collected_on="2026-08-19",
         )
+
+
+def test_한_문장이_서로_다른_고유_법인_여럿을_지목하면_각각_후보다() -> None:
+    evidence = "알파의 주요 경쟁사는 베타, 감마와 같은 반도체 장비 회사다."
+
+    candidates = discover_candidates(
+        _report(evidence),
+        CATALOG,
+        self_corp_code="00000001",
+    )
+
+    assert [item.candidate_corp_code for item in candidates] == [
+        "00000002",
+        "00000003",
+    ]
+
+
+def test_별칭_소유가_모호하거나_부분문자열이면_후보가_아니다() -> None:
+    ambiguous = (
+        DartCompanyRecord("00000001", "주식회사 알파"),
+        DartCompanyRecord("00000002", "주식회사 베타"),
+        DartCompanyRecord("00000003", "베타"),
+    )
+    substring = (
+        DartCompanyRecord("00000001", "주식회사 알파"),
+        DartCompanyRecord("00000004", "대상"),
+    )
+
+    assert discover_candidates(
+        _report("알파는 베타와 경쟁 관계에 있다."),
+        ambiguous,
+        self_corp_code="00000001",
+    ) == ()
+    assert discover_candidates(
+        _report("알파는 고객을 대상으로 시장에서 경쟁 관계를 관리한다."),
+        substring,
+        self_corp_code="00000001",
+    ) == ()
+
+
+def test_후보는_verified_단일문장_binding과_실제_장_참조가_모두_필요하다() -> None:
+    report = _report()
+    fact = report.fact_records[0]
+
+    mutations = (
+        replace(report, fact_records=[replace(fact, status="")]),
+        replace(report, fact_records=[replace(fact, verification_status="")]),
+        replace(report, fact_records=[replace(fact, evidence_binding="")]),
+        replace(
+            report,
+            sections=[replace(report.sections[0], fact_ids=[])],
+        ),
+        _report(COMPETITION_EVIDENCE + " 두 번째 문장이다."),
+    )
+
+    for mutated in mutations:
+        assert discover_candidates(
+            mutated,
+            CATALOG,
+            self_corp_code="00000001",
+        ) == ()
+
+
+def test_전체공시_preflight는_false만_결정하고_같은문장만_인정한다() -> None:
+    assert comparison_candidate_preflight_possible(
+        "알파의 경쟁사는 베타, 감마와 같은 장비 회사다.",
+        CATALOG,
+        self_corp_code="00000001",
+    ) is True
+    assert comparison_candidate_preflight_possible(
+        "베타를 언급한다. 반도체 장비 시장에는 경쟁 관계가 있다.",
+        CATALOG,
+        self_corp_code="00000001",
+    ) is False
+    assert comparison_candidate_preflight_possible(
+        "반도체 장비를 공급한다.",
+        CATALOG,
+        self_corp_code="00000001",
+    ) is False
+    assert comparison_candidate_preflight_possible(
+        "알파는 시장에서 경쟁 관계에 있다.",
+        (),
+        self_corp_code="00000001",
+    ) is None
+
+
+def test_v1은_원문을_복제하지_않고_실제_후보_fact와_source를_가리킨다() -> None:
+    report = _report()
+    result = build_competitive_position(
+        report,
+        self_bundle=_bundle("00000001", "주식회사 알파", scale=2),
+        catalog=CATALOG,
+        fetch_comparator=lambda _record: _bundle(
+            "00000002", "주식회사 베타", operating_amount=50
+        ),
+        collected_on="2026-08-19",
+    )
+
+    payload = parse_comparison_basis_v1(result.facts[0].comparison_basis)
+
+    assert payload is not None
+    assert payload["version"] == COMPARISON_BASIS_VERSION
+    assert payload["candidate_fact_id"] == report.fact_records[0].fact_id
+    assert payload["candidate_source_id"] == report.citations[0].source_id
+    assert payload["evidence_sha256"] == evidence_text_hash(COMPETITION_EVIDENCE)
+    assert "evidence_text" not in json.loads(result.facts[0].comparison_basis)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("candidate_fact_id", "fact-missing"),
+        ("candidate_source_id", "source-missing"),
+        ("candidate_corp_code", "00000003"),
+        ("candidate_name", "주식회사 감마"),
+        ("filing_document_id", "20990101000000"),
+        ("evidence_sha256", "0" * 64),
+        ("overlap_dimension", "시장 겹침"),
+    ],
+)
+def test_publish_재검산은_v1_식별자_해시_축_변조를_닫는다(
+    field: str,
+    value: str,
+) -> None:
+    report = _report()
+    result = build_competitive_position(
+        report,
+        self_bundle=_bundle("00000001", "주식회사 알파", scale=2),
+        catalog=CATALOG,
+        fetch_comparator=lambda _record: _bundle(
+            "00000002", "주식회사 베타", operating_amount=50
+        ),
+        collected_on="2026-08-19",
+    )
+    target = result.facts[0]
+    payload = json.loads(target.comparison_basis)
+    payload[field] = value
+    changed = replace(
+        target,
+        comparison_basis=json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+    changed = replace(changed, evidence_binding=fact_evidence_binding(changed))
+    sources = {
+        source.source_id: source
+        for source in [*report.citations, *result.sources]
+    }
+    facts = {
+        fact.fact_id: fact
+        for fact in [*report.fact_records, changed, *result.facts[1:]]
+    }
+
+    errors = _fact_problems(
+        changed,
+        sources,
+        facts,
+        {report.fact_records[0].fact_id},
+    )
+
+    assert any("[comparison]" in error for error in errors)
 
 
 def test_뉴스나_외부분석의_경쟁사_언급은_후보근거로_쓰지_않는다() -> None:

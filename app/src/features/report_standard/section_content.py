@@ -21,6 +21,7 @@ from src.features.pipeline.section567_contract import (
 )
 from src.features.provenance.sources import Source
 from src.features.report_standard.constants import COMPARISON_JUDGMENT_LABELS
+from src.shared.comparison_candidate_basis import parse_comparison_basis_v1
 
 
 @dataclass(frozen=True)
@@ -96,7 +97,13 @@ def _numbers(
 ) -> tuple[int, ...]:
     out: list[int] = []
     for fact in facts:
-        for source_id in (fact.source_id, fact.comparator_source_id):
+        basis = parse_comparison_basis_v1(fact.comparison_basis)
+        candidate_source_id = str((basis or {}).get("candidate_source_id") or "")
+        for source_id in (
+            fact.source_id,
+            fact.comparator_source_id,
+            candidate_source_id,
+        ):
             number = source_numbers.get(source_id)
             if number is not None and number not in out:
                 out.append(number)

@@ -66,6 +66,9 @@ from src.features.company_comparison import (
     OfficialCompanyBundle,
     build_competitive_position,
 )
+from src.features.company_comparison.logic import (
+    comparison_candidate_preflight_possible,
+)
 from src.features.business_candidate.dart_identity import (
     DartCompanyRecord,
     build_dart_company_index,
@@ -1499,6 +1502,58 @@ class RealPipeline:
                 cost_krw=_request_spent_krw(engine),
                 model=model,
                 final_gate_reason=FINAL_GATE_REASON_OTHER_GATE,
+            )
+
+        # 뉴스만 제외한 전체 공시와 공식 가능 자사 원문 fragment 상위집합에
+        # 경쟁 표지와 고유 DART 법인 별칭이 같은 문장으로 한 건도 없으면,
+        # 1~8장 선택 결과에서도 적법 후보가 생길 수 없다. 이 경우에만 유료
+        # span 선택 전에 comparison_blocked로 닫는다. 카탈로그/원문 기술
+        # 실패는 경쟁 관계 부재가 아니므로 unknown으로 계속 진행한다.
+        try:
+            comparison_preflight = comparison_candidate_preflight_possible(
+                [
+                    filing_text,
+                    *(
+                        str(fragment.get("원문") or "")
+                        for fragment in frags.values()
+                        if str(fragment.get("종류") or "") != NEWS_FRAGMENT_KIND
+                    ),
+                ],
+                _records_from_candidate_catalog(_company_catalog()),
+                self_corp_code=corp_code,
+            )
+        except Exception as exc:  # noqa: BLE001 - 기술 실패는 fail-open(unknown)
+            comparison_preflight = None
+            steps.append(
+                {
+                    "step": "7_경쟁사후보_사전검사",
+                    "결과": "unknown",
+                    "오류": type(exc).__name__,
+                }
+            )
+        if comparison_preflight is False:
+            steps.append(
+                {
+                    "step": "7_경쟁사후보_사전차단",
+                    "사유": (
+                        "자사 공식 가능 원문에 경쟁 표지와 고유 DART 법인명이 "
+                        "같은 문장으로 확인되지 않았습니다"
+                    ),
+                }
+            )
+            return RunResult(
+                outcome=Outcome.GATE_STOPPED,
+                message=(
+                    "자사 공식 원문에서 직접 지목된 비교 후보를 확인할 수 "
+                    "없어 보고서를 내보내지 않았습니다. 경쟁우위가 없다는 뜻이 "
+                    "아니라, 현재 공개 근거로는 비교사를 확정할 수 없다는 뜻입니다."
+                ),
+                sources=sources,
+                corp_type=judgment.corp_type,
+                fragments_collected=len(frags),
+                cost_krw=_request_spent_krw(engine),
+                model=model,
+                final_gate_reason=FINAL_GATE_REASON_COMPARISON_BLOCKED,
             )
 
         # ── 8 사실 배치 + 9 원문 대조 — 3회 독립 선택 후 다수결 ──

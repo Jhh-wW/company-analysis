@@ -27,32 +27,27 @@ from src.features.provenance.sources import (
     Source,
     SourceKind,
     evidence_text_hash,
+    is_canonical_official_with_registry,
     seal_collected_source,
 )
 from src.features.report_standard.constants import SECTION_BY_ID
 from src.features.report_standard.publish import fact_evidence_binding
+from src.shared.comparison_candidate_basis import (
+    COMPARISON_BASIS_VERSION,
+    comparison_alias_is_in_sentence as _alias_is_in_sentence,
+    comparison_candidate_aliases as _name_aliases,
+    comparison_corporate_core as _corporate_core,
+    comparison_evidence_sentences as _evidence_sentences,
+    comparison_overlap_dimension as _overlap_dimension,
+    comparison_sentence_has_marker as _has_competition_marker,
+    encode_comparison_basis_v1,
+)
 
 
 COMPETITIVE_SECTION_ID = "competitive_position"
 MAX_COMPARATORS = 3
 MAX_COMPARISON_FACTS = 3
-
-# 단순히 고객이나 파트너로 한 번 언급된 회사를 경쟁사로 바꾸지 않는다. 공식 원문이
-# 경쟁 관계를 직접 표현한 경우에만 후보가 된다.
-_COMPETITION_MARKERS = (
-    "경쟁사",
-    "경쟁업체",
-    "경쟁 관계",
-    "경쟁관계",
-    "동종업체",
-    "동종 업체",
-    "경합",
-    "시장점유율",
-    "시장 점유율",
-)
-_PRODUCT_MARKERS = ("제품", "서비스", "품목", "브랜드", "기술")
-_CUSTOMER_MARKERS = ("고객", "수요처", "납품처", "발주처")
-_LEGAL_MARKERS = ("주식회사", "유한회사", "(주)", "㈜", "corp.", "co.,ltd.", "co., ltd.")
+_CANDIDATE_SECTION_IDS = frozenset(SECTION_BY_ID) - {COMPETITIVE_SECTION_ID}
 _PERIOD_NUMBER = re.compile(r"20\d{2}|\d{1,2}")
 _INTEGER = re.compile(r"^-?[\d,]+$")
 _ANNUAL_REPORT_CODE = "11011"
@@ -78,13 +73,17 @@ class ComparisonBlockedError(ValueError):
 
 @dataclass(frozen=True)
 class CandidateEvidence:
-    """확정된 자사 사실이 공식적으로 지목한 비교 후보."""
+    """확정된 1~8장 사실이 직접 지목한 비교 후보와 근거 결속."""
 
     record: DartCompanyRecord
     overlap_dimension: str
     evidence_fact_id: str
     evidence_source_id: str
     evidence_text: str
+    candidate_corp_code: str
+    candidate_name: str
+    filing_document_id: str
+    evidence_sha256: str
 
 
 @dataclass(frozen=True)
@@ -250,35 +249,132 @@ def _bundle_evidence(bundle: OfficialCompanyBundle) -> str:
         return ""
 
 
-def _name_aliases(name: str) -> tuple[str, ...]:
-    raw = _normalized(name)
-    stripped = raw
-    for marker in _LEGAL_MARKERS:
-        stripped = stripped.replace(_normalized(marker), " ")
-    stripped = " ".join(stripped.split()).strip(" ,.-")
-    aliases = [raw, stripped]
-    # 경쟁 관계 표현이 같은 확정 문장에 있어야 하므로 한화·효성처럼 두 글자인
-    # 실제 상호도 허용한다. 한 글자 별칭만 버려 보통명사 오탐을 막는다.
-    return tuple(dict.fromkeys(alias for alias in aliases if alias and (alias == raw or len(alias) >= 2)))
+def comparison_basis_v1(candidate: CandidateEvidence) -> str:
+    """확정된 1~8장 후보 사실을 기계 재검증 가능한 v1 JSON으로 잇는다."""
+
+    return encode_comparison_basis_v1(
+        {
+            "version": COMPARISON_BASIS_VERSION,
+            "candidate_fact_id": candidate.evidence_fact_id,
+            "candidate_source_id": candidate.evidence_source_id,
+            "candidate_corp_code": candidate.candidate_corp_code,
+            "candidate_name": candidate.candidate_name,
+            "filing_document_id": candidate.filing_document_id,
+            "evidence_sha256": candidate.evidence_sha256,
+            "overlap_dimension": candidate.overlap_dimension,
+        }
+    )
 
 
-def _official_source(source: Source | None) -> bool:
-    return bool(source is not None and source.is_canonical_official)
+def _candidate_alias_index(
+    records: Sequence[DartCompanyRecord],
+) -> tuple[dict[str, set[str]], dict[str, DartCompanyRecord]]:
+    """DART 별칭의 소유 법인과 고유번호별 대표 레코드를 만든다."""
+
+    alias_owners: dict[str, set[str]] = {}
+    by_code: dict[str, DartCompanyRecord] = {}
+    for record in records:
+        corp_code = str(record.corp_code or "").strip()
+        if not corp_code:
+            continue
+        by_code.setdefault(corp_code, record)
+        for alias in _name_aliases(record.corp_name):
+            if len(_corporate_core(alias)) >= 2:
+                alias_owners.setdefault(alias, set()).add(corp_code)
+    return alias_owners, by_code
 
 
-def _corporate_core(value: str) -> str:
-    core = _normalized(value)
-    for marker in _LEGAL_MARKERS:
-        core = core.replace(_normalized(marker), " ")
-    return re.sub(r"[^0-9a-z가-힣]", "", core)
+def _candidate_matches_for_sentence(
+    sentence: str,
+    *,
+    alias_owners: Mapping[str, set[str]],
+    records_by_code: Mapping[str, DartCompanyRecord],
+    self_corp_code: str,
+) -> tuple[tuple[DartCompanyRecord, tuple[str, ...]], ...]:
+    """고유 별칭으로 결정되는 모든 비자사 DART 법인을 반환한다."""
+
+    normalized_sentence = _normalized(sentence)
+    matched: dict[str, list[str]] = {}
+    for alias, owners in alias_owners.items():
+        if len(owners) != 1 or alias not in normalized_sentence:
+            continue
+        corp_code = next(iter(owners))
+        if corp_code == self_corp_code or not _alias_is_in_sentence(alias, sentence):
+            continue
+        matched.setdefault(corp_code, []).append(alias)
+    found: list[tuple[DartCompanyRecord, tuple[str, ...]]] = []
+    for corp_code, aliases in matched.items():
+        record = records_by_code.get(corp_code)
+        if record is not None:
+            found.append(
+                (
+                    record,
+                    tuple(sorted(set(aliases), key=lambda value: (-len(value), value))),
+                )
+            )
+    return tuple(
+        sorted(
+            found,
+            key=lambda item: (
+                -max(len(alias) for alias in item[1]),
+                str(item[0].corp_code or "").strip(),
+            ),
+        )
+    )
 
 
-def _overlap_dimension(text: str) -> str:
-    if any(marker in text for marker in _CUSTOMER_MARKERS):
-        return "고객 겹침"
-    if any(marker in text for marker in _PRODUCT_MARKERS):
-        return "제품·서비스 겹침"
-    return "시장 겹침"
+def comparison_candidate_preflight_possible(
+    official_texts: str | Iterable[str],
+    catalog: Iterable[DartCompanyRecord],
+    *,
+    self_corp_code: str,
+) -> bool | None:
+    """자사 공식 가능 원문 상위집합으로 후보 불가능성만 조기에 증명한다.
+
+    ``False``만 결정적이다. 빈 원문·빈/사용 불가 카탈로그는 수집 기술 상태를
+    경쟁 관계 부재로 오인하지 않도록 ``None``(unknown)으로 계속 진행시킨다.
+    ``True`` 역시 후보 확정이 아니며, 최종 후보는 ``discover_candidates``의
+    검증된 1~8장 사실 계약을 별도로 통과해야 한다.
+    """
+
+    raw_texts = (
+        (official_texts,)
+        if isinstance(official_texts, str)
+        else tuple(official_texts)
+    )
+    texts = tuple(
+        str(text or "").strip()
+        for text in raw_texts
+        if str(text or "").strip()
+    )
+    records = tuple(catalog)
+    if not texts or not records:
+        return None
+    alias_owners, records_by_code = _candidate_alias_index(records)
+    if not alias_owners or not records_by_code:
+        return None
+    self_code = str(self_corp_code or "").strip()
+    if not any(
+        len(owners) == 1 and next(iter(owners)) != self_code
+        for owners in alias_owners.values()
+    ):
+        # 자사 한 곳뿐인 fixture/부분 카탈로그를 "경쟁사 없음"으로 확정하지 않는다.
+        return None
+    marker_sentences = tuple(
+        sentence
+        for text in texts
+        for sentence in _evidence_sentences(text)
+        if _has_competition_marker(sentence)
+    )
+    return any(
+        _candidate_matches_for_sentence(
+            sentence,
+            alias_owners=alias_owners,
+            records_by_code=records_by_code,
+            self_corp_code=self_code,
+        )
+        for sentence in marker_sentences
+    )
 
 
 def discover_candidates(
@@ -288,65 +384,106 @@ def discover_candidates(
     self_corp_code: str,
     limit: int = MAX_COMPARATORS,
 ) -> tuple[CandidateEvidence, ...]:
-    """확정 1~8장 공식 사실에서 직접 언급된 DART 법인만 비교 후보로 고른다."""
+    """확정 1~8장 공식 사실의 단일 원문 문장에서만 비교 후보를 고른다."""
 
+    records = tuple(catalog)
+    source_items = tuple(
+        source for source in report.citations if isinstance(source, Source)
+    )
+    source_id_counts: dict[str, int] = {}
+    for source in source_items:
+        source_id = source.source_id.strip()
+        if source_id:
+            source_id_counts[source_id] = source_id_counts.get(source_id, 0) + 1
     sources = {
         source.source_id: source
-        for source in report.citations
-        if isinstance(source, Source)
-        and _official_source(source)
+        for source in source_items
+        if source_id_counts.get(source.source_id.strip()) == 1
+        and is_canonical_official_with_registry(source, source_items)
         and _corporate_core(source.publisher) == _corporate_core(report.company)
     }
-    evidence_rows: list[tuple[str, str, str]] = []
+    fact_id_counts: dict[str, int] = {}
     for fact in report.fact_records:
-        if fact.section_owner == COMPETITIVE_SECTION_ID or fact.source_id not in sources:
+        fact_id = fact.fact_id.strip()
+        if fact_id:
+            fact_id_counts[fact_id] = fact_id_counts.get(fact_id, 0) + 1
+    section_counts: dict[str, int] = {}
+    referenced_by_section: dict[str, set[str]] = {}
+    for section in report.sections:
+        if section.cell not in _CANDIDATE_SECTION_IDS:
             continue
-        text = " ".join(part for part in (fact.claim, fact.state_evidence) if str(part).strip())
-        normalized = _normalized(text)
-        if not any(_normalized(marker) in normalized for marker in _COMPETITION_MARKERS):
+        section_counts[section.cell] = section_counts.get(section.cell, 0) + 1
+        referenced_by_section.setdefault(section.cell, set()).update(
+            str(fact_id or "").strip() for fact_id in section.fact_ids
+        )
+    evidence_rows: list[tuple[int, FactRecord, Source, str]] = []
+    for fact in report.fact_records:
+        source = sources.get(fact.source_id)
+        sentences = _evidence_sentences(fact.state_evidence)
+        if (
+            source is None
+            or fact_id_counts.get(fact.fact_id.strip()) != 1
+            or fact.section_owner not in _CANDIDATE_SECTION_IDS
+            or section_counts.get(fact.section_owner) != 1
+            or fact.fact_id.strip()
+            not in referenced_by_section.get(fact.section_owner, set())
+            or fact.status != "verified"
+            or fact.verification_status != "verified"
+            or not fact.evidence_binding
+            or fact.evidence_binding != fact_evidence_binding(fact)
+            or _corporate_core(fact.legal_entity) != _corporate_core(report.company)
+            or _corporate_core(fact.source_publisher) != _corporate_core(source.publisher)
+            or fact.source_document_id.strip() != source.document_id.strip()
+            or fact.source_type.strip().casefold() != source.source_type.strip().casefold()
+            or fact.section_owner not in source.used_in
+            or len(sentences) != 1
+            or evidence_text_hash(fact.state_evidence) not in source.evidence_hashes
+            or not _has_competition_marker(sentences[0])
+        ):
             continue
-        evidence_rows.append((fact.fact_id, fact.source_id, text))
+        evidence_rows.append((len(evidence_rows), fact, source, sentences[0]))
 
     if not evidence_rows:
         return ()
 
+    alias_owners, records_by_code = _candidate_alias_index(records)
+
     matches: list[tuple[int, int, str, CandidateEvidence]] = []
     self_code = str(self_corp_code).strip()
-    for record in catalog:
-        corp_code = str(record.corp_code or "").strip()
-        if not corp_code or corp_code == self_code:
-            continue
-        aliases = _name_aliases(record.corp_name)
-        if not aliases:
-            continue
-        for evidence_index, (fact_id, source_id, text) in enumerate(evidence_rows):
-            normalized_text = _normalized(text)
-            matching_aliases = [alias for alias in aliases if alias in normalized_text]
-            if not matching_aliases:
-                continue
+    for row_index, fact, source, sentence in evidence_rows:
+        matched = _candidate_matches_for_sentence(
+            sentence,
+            alias_owners=alias_owners,
+            records_by_code=records_by_code,
+            self_corp_code=self_code,
+        )
+        for record, matching_aliases in matched:
+            corp_code = str(record.corp_code or "").strip()
+            evidence_hash = evidence_text_hash(sentence)
             evidence = CandidateEvidence(
-                    record=record,
-                    overlap_dimension=_overlap_dimension(text),
-                    evidence_fact_id=fact_id,
-                    evidence_source_id=source_id,
-                    evidence_text=text,
-                )
-            # 같은 문장에 짧은 계열명과 정확한 법인명이 함께 맞으면 더 긴 공식
-            # 이름을 우선한다. DART XML의 저장 순서가 후보 순위를 결정하지 않는다.
+                record=record,
+                overlap_dimension=_overlap_dimension(sentence),
+                evidence_fact_id=fact.fact_id,
+                evidence_source_id=source.source_id,
+                evidence_text=sentence,
+                candidate_corp_code=corp_code,
+                candidate_name=str(record.corp_name or "").strip(),
+                filing_document_id=source.document_id,
+                evidence_sha256=evidence_hash,
+            )
             matches.append(
                 (
-                    evidence_index,
+                    row_index,
                     -max(len(alias) for alias in matching_aliases),
                     corp_code,
                     evidence,
                 )
             )
-            break
 
     found: list[CandidateEvidence] = []
     seen_codes: set[str] = set()
     cap = max(1, min(int(limit), MAX_COMPARATORS))
-    for _evidence_index, _alias_length, corp_code, evidence in sorted(matches):
+    for _row_index, _alias_length, corp_code, evidence in sorted(matches):
         if corp_code in seen_codes:
             continue
         seen_codes.add(corp_code)
@@ -623,12 +760,22 @@ def build_competitive_position(
     """확정된 1~8장 뒤, 양사 공식 원문이 맞는 비교만 9장으로 만든다."""
 
     self_payload = _bundle_evidence(self_bundle)
+    self_observations = _observations(self_bundle.financials)
     if (
         not self_bundle.official_text.strip()
-        or not _observations(self_bundle.financials)
+        or not self_observations
         or not self_payload
     ):
         raise ComparisonBlockedError("자사 공식 원문과 비교 가능한 주요계정이 모두 필요합니다")
+    if not any(
+        _filing_is_annual_for_period(self_bundle, row.period)
+        for row in self_observations.values()
+    ):
+        # 비교사 DART 요청 전에 자사 공식 문서·완료 사업연도·
+        # 접수번호 결속을 먼저 닫아 불필요한 유료 수집을 막는다.
+        raise ComparisonBlockedError(
+            "자사 공식 원문이 완료 사업연도·접수번호·보고서 코드에 결속되지 않았습니다"
+        )
 
     candidates = discover_candidates(
         report,
@@ -712,7 +859,6 @@ def build_competitive_position(
                 f"{candidate.record.corp_name}: 지표 정의·기간·연결범위가 같은 양사 공식 수치가 없습니다"
             )
             continue
-
         pair_by_metric = {self_row.metric_id: (self_row, other_row) for self_row, other_row in pairs}
         revenue_pair = pair_by_metric.get("ifrs-full_Revenue")
         operating_pair = next(
@@ -858,10 +1004,7 @@ def build_competitive_position(
                         comparison_target=comparator.company_name,
                         comparison_metric="영업이익률",
                         comparison_definition=definition,
-                        comparison_basis=(
-                            f"{candidate.overlap_dimension}: {candidate.evidence_fact_id}/"
-                            f"{candidate.evidence_source_id}; 양사 DART 연간 연결 주요계정"
-                        ),
+                        comparison_basis=comparison_basis_v1(candidate),
                         comparison_period=period,
                         comparison_scope=scope,
                         comparison_judgment=(
@@ -977,10 +1120,7 @@ def build_competitive_position(
                 comparison_target=comparator.company_name,
                 comparison_metric="매출 규모",
                 comparison_definition=definition,
-                comparison_basis=(
-                    f"{candidate.overlap_dimension}: {candidate.evidence_fact_id}/"
-                    f"{candidate.evidence_source_id}; 양사 DART 연간 주요계정"
-                ),
+                comparison_basis=comparison_basis_v1(candidate),
                 comparison_period=self_row.period,
                 comparison_scope=scope,
                 comparison_judgment="operating_characteristic",
