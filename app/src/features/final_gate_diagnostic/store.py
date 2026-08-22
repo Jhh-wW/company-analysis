@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 import sqlite3
 from dataclasses import dataclass
 from typing import Final
@@ -144,7 +145,11 @@ def _validate_table_columns(conn: sqlite3.Connection) -> None:
 
 
 def _validate_diagnostic(diagnostic: PersistedFinalGateDiagnostic) -> None:
-    if not diagnostic.run_id or len(diagnostic.run_id) > 128:
+    if (
+        not diagnostic.run_id
+        or len(diagnostic.run_id) > 128
+        or re.fullmatch(r"[A-Za-z0-9._:-]+", diagnostic.run_id) is None
+    ):
         raise FinalGateDiagnosticStoreError("실행 번호가 올바르지 않습니다")
     if type(diagnostic.schema_version) is not int or diagnostic.schema_version != 1:
         raise FinalGateDiagnosticStoreError("지원하지 않는 최종 게이트 진단 형식입니다")

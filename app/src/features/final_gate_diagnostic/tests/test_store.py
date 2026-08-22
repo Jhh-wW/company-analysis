@@ -59,6 +59,18 @@ def test_임의_사유와_시간대없는_시각은_저장하지않는다() -> N
             )
 
 
+def test_실행번호에_회사명이나_이메일을_넣을수없다() -> None:
+    with sqlite3.connect(":memory:") as conn:
+        for unsafe_run_id in ("삼성전자", "person@example.com", "run id"):
+            with pytest.raises(store.FinalGateDiagnosticStoreError):
+                store.record_once(
+                    conn,
+                    run_id=unsafe_run_id,
+                    reason_code="other_gate",
+                    recorded_at=RECORDED_AT,
+                )
+
+
 def test_같은값은_멱등이고_다른사유는_덮어쓰지않는다() -> None:
     with sqlite3.connect(":memory:") as conn:
         assert store.record_once(
