@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from dataclasses import replace
 
@@ -170,5 +171,65 @@ def test_같은_report_hash여도_검수뒤_PDF_bytes가_바뀌면_기존자동�
         assert [(row["report_sha256"], row["pdf_sha256"]) for row in rows] == [
             (stored.report_sha256, stored.pdf_sha256)
         ]
+    finally:
+        conn.close()
+
+
+def test_손상된_자동출고_JSON_scalar는_저장소_도메인오류로_fail_closed한다():
+    report = _report()
+    candidate = prepare_pdf_release(report)
+    released = automatic_release_pdf(report, candidate, released_at=_AT)
+    conn = _conn()
+    try:
+        release_store.save_automatic_release(
+            conn,
+            report_id="damaged-release-json",
+            released_pdf=released,
+        )
+        original_raw = conn.execute(
+            f"SELECT release_json FROM {release_store.AUTOMATIC_TABLE_NAME} "
+            "WHERE report_id=?",
+            ("damaged-release-json",),
+        ).fetchone()[0]
+        mutations = (
+            ("page_count", True),
+            ("checker_version", 1),
+            ("check_name", False),
+            ("check_passed", 1),
+            ("check_evidence", None),
+        )
+
+        for field, value in mutations:
+            payload = json.loads(original_raw)
+            if field == "check_name":
+                payload["checks"][0]["name"] = value
+            elif field == "check_passed":
+                payload["checks"][0]["passed"] = value
+            elif field == "check_evidence":
+                payload["checks"][0]["evidence_sha256"] = value
+            else:
+                payload[field] = value
+            damaged_raw = json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            conn.execute(
+                f"UPDATE {release_store.AUTOMATIC_TABLE_NAME} "
+                "SET release_json=? WHERE report_id=?",
+                (damaged_raw, "damaged-release-json"),
+            )
+
+            with pytest.raises(
+                release_store.PdfReleaseStoreError,
+                match="자동출고 기록과 DB 지문이 일치하지 않습니다",
+            ):
+                release_store.load_automatic_release_record(
+                    conn,
+                    report_id="damaged-release-json",
+                    report_sha256=released.record.report_sha256,
+                    pdf_sha256=released.record.pdf_sha256,
+                )
     finally:
         conn.close()

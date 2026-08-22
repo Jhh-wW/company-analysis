@@ -29,13 +29,16 @@ from src.features.export_pdf.release import (
     validate_release_record,
 )
 from src.features.export_pdf.automatic_release import (
-    AUTOMATIC_CHECKER_VERSION,
     AutomaticGateStopped,
-    AutomaticCheckResult,
-    AutomaticReleaseRecord,
     AutomaticallyReleasedPdf,
-    automatic_release_record_sha256,
+)
+from src.shared.automatic_release_record import (
+    AUTOMATIC_CHECKER_VERSION,
+    AutomaticReleaseRecord,
+    automatic_release_json,
+    parse_automatic_release_json,
     validate_automatic_release_record,
+    validate_persisted_automatic_release,
 )
 
 TABLE_NAME: Final[str] = "pdf_release_records"
@@ -991,48 +994,16 @@ def load_release_record(
 
 
 def _automatic_release_json(record: AutomaticReleaseRecord) -> str:
-    return json.dumps(
-        asdict(record),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    return automatic_release_json(record)
 
 
 def _parse_automatic_release_record(raw: str) -> AutomaticReleaseRecord:
     try:
-        payload = json.loads(raw)
-        if not isinstance(payload, dict) or set(payload) != set(
-            AutomaticReleaseRecord.__dataclass_fields__
-        ):
-            raise TypeError
-        for name in ("page_png_sha256s", "expected_fact_ids"):
-            values = payload[name]
-            if not isinstance(values, list) or any(
-                not isinstance(value, str) for value in values
-            ):
-                raise TypeError
-            payload[name] = tuple(values)
-        checks = payload["checks"]
-        if not isinstance(checks, list):
-            raise TypeError
-        payload["checks"] = tuple(
-            AutomaticCheckResult(**check)
-            for check in checks
-            if isinstance(check, dict)
-        )
-        if len(payload["checks"]) != len(checks):
-            raise TypeError
-        record = AutomaticReleaseRecord(**payload)
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return parse_automatic_release_json(raw)
+    except ValueError as exc:
         raise PdfReleaseStoreError(
             "자동출고 기록을 안전하게 읽을 수 없습니다"
         ) from exc
-    if validate_automatic_release_record(record):
-        raise PdfReleaseStoreError(
-            "자동출고 기록이 현재 무결성 계약을 통과하지 못했습니다"
-        )
-    return record
 
 
 def _reject_changed_automatic_subject(
@@ -1101,16 +1072,18 @@ def load_automatic_release_record(
     if any(type(value) is not str for value in row):
         raise PdfReleaseStoreError("자동출고 DB 형식이 손상됐습니다")
     raw_json, db_digest, db_released_at = row
-    record = _parse_automatic_release_record(raw_json)
-    if (
-        record.report_sha256 != report_sha256
-        or record.pdf_sha256 != pdf_sha256
-        or record.checker_version != AUTOMATIC_CHECKER_VERSION
-        or record.released_at != db_released_at
-        or record.record_sha256 != db_digest
-        or automatic_release_record_sha256(record) != db_digest
-        or _automatic_release_json(record) != raw_json
-    ):
+    try:
+        record = validate_persisted_automatic_release(
+            report_sha256=report_sha256,
+            pdf_sha256=pdf_sha256,
+            checker_version=AUTOMATIC_CHECKER_VERSION,
+            release_json=raw_json,
+            release_sha256=db_digest,
+            released_at=db_released_at,
+        )
+    except ValueError as exc:
+        raise PdfReleaseStoreError("자동출고 기록과 DB 지문이 일치하지 않습니다")
+    if _automatic_release_json(record) != raw_json:
         raise PdfReleaseStoreError("자동출고 기록과 DB 지문이 일치하지 않습니다")
     return record
 

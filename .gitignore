@@ -39,6 +39,7 @@
 !/app/tools/trigger_maintenance.py
 !/app/tools/container_entrypoint.sh
 !/app/tools/run_canonical_pilot25.py
+!/app/tools/manage_pilot_quality.py
 !/app/tools/tests/
 
 # 현재 서비스에서 사용하지 않는 옛 기능

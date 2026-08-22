@@ -8,50 +8,27 @@ report, PDF bytes, and every rendered page image.
 
 from __future__ import annotations
 
-import datetime as dt
 import hashlib
 import json
-from dataclasses import asdict, dataclass
-from typing import Final
+from dataclasses import dataclass
 
 from src.features.export_pdf.release import (
     PDFReleaseBlockedError,
     PdfReleaseCandidate,
     _candidate_integrity_problems,
-    is_valid_sha256,
+)
+from src.shared.automatic_release_record import (
+    AUTOMATIC_CHECKER_VERSION,
+    REQUIRED_AUTOMATIC_CHECKS,
+    AutomaticCheckResult,
+    AutomaticReleaseRecord,
+    automatic_release_record_sha256,
+    valid_automatic_release_timestamp as _valid_timestamp,
+    validate_automatic_release_record,
 )
 from src.features.pipeline.port import Report
 from src.features.report_standard import build_published_report, validate_publishable
 from src.features.storage.reports import report_to_dict
-
-
-AUTOMATIC_CHECKER_VERSION: Final[str] = "automatic-release-v1"
-REQUIRED_AUTOMATIC_CHECKS: Final[tuple[str, ...]] = (
-    "canonical_fact_citation_numeric_structure_forbidden",
-    "pdf_all_pages_rendered",
-    "web_pdf_notion_channel_equivalence",
-    "final_hash_binding",
-)
-
-
-@dataclass(frozen=True)
-class AutomaticCheckResult:
-    name: str
-    passed: bool
-    evidence_sha256: str
-
-
-@dataclass(frozen=True)
-class AutomaticReleaseRecord:
-    checker_version: str
-    report_sha256: str
-    pdf_sha256: str
-    page_count: int
-    page_png_sha256s: tuple[str, ...]
-    expected_fact_ids: tuple[str, ...]
-    checks: tuple[AutomaticCheckResult, ...]
-    released_at: str
-    record_sha256: str
 
 
 @dataclass(frozen=True)
@@ -89,58 +66,6 @@ def report_sha256(report: Report) -> str:
 
 def _evidence_sha256(name: str, *values: object) -> str:
     return _sha256(_canonical_json({"check": name, "values": values}))
-
-
-def _valid_timestamp(value: str) -> bool:
-    if not isinstance(value, str) or value != value.strip():
-        return False
-    try:
-        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    return parsed.tzinfo is not None
-
-
-def automatic_release_record_sha256(record: AutomaticReleaseRecord) -> str:
-    payload = asdict(record)
-    payload.pop("record_sha256", None)
-    return _sha256(_canonical_json(payload))
-
-
-def validate_automatic_release_record(
-    record: AutomaticReleaseRecord,
-) -> tuple[str, ...]:
-    problems: list[str] = []
-    if record.checker_version != AUTOMATIC_CHECKER_VERSION:
-        problems.append("자동검사 버전이 현재 출고 계약과 다릅니다")
-    if not is_valid_sha256(record.report_sha256):
-        problems.append("보고서 SHA-256이 올바르지 않습니다")
-    if not is_valid_sha256(record.pdf_sha256):
-        problems.append("PDF SHA-256이 올바르지 않습니다")
-    if record.page_count <= 0 or record.page_count != len(record.page_png_sha256s):
-        problems.append("PDF 페이지 수와 페이지 지문 수가 다릅니다")
-    if not record.page_png_sha256s or any(
-        not is_valid_sha256(value) for value in record.page_png_sha256s
-    ):
-        problems.append("전 페이지 PNG SHA-256이 올바르지 않습니다")
-    if not record.expected_fact_ids or len(record.expected_fact_ids) != len(
-        set(record.expected_fact_ids)
-    ):
-        problems.append("자동검사 사실 장부가 비었거나 중복됐습니다")
-    if tuple(check.name for check in record.checks) != REQUIRED_AUTOMATIC_CHECKS:
-        problems.append("필수 자동검사 목록이 완전하지 않습니다")
-    if any(
-        check.passed is not True or not is_valid_sha256(check.evidence_sha256)
-        for check in record.checks
-    ):
-        problems.append("통과하지 못했거나 증거 지문이 없는 자동검사가 있습니다")
-    if not _valid_timestamp(record.released_at):
-        problems.append("자동출고 시각에 시간대가 없습니다")
-    if not is_valid_sha256(record.record_sha256):
-        problems.append("자동출고 레코드 SHA-256이 올바르지 않습니다")
-    elif automatic_release_record_sha256(record) != record.record_sha256:
-        problems.append("자동출고 레코드 지문이 내용과 일치하지 않습니다")
-    return tuple(problems)
 
 
 def run_automatic_checks(
