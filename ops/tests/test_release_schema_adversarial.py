@@ -50,8 +50,12 @@ def _digest(path: Path) -> str:
 
 def _create_runtime_database(path: Path) -> Path:
     storage_db = _storage_db_module()
-    with storage_db.connect(path):
-        pass
+    feature_bootstraps = readiness._load_feature_schema_bootstraps()  # noqa: SLF001
+    with storage_db.connect(path) as connection:
+        readiness._apply_feature_schema_bootstraps(  # noqa: SLF001
+            connection,
+            feature_bootstraps,
+        )
     return path
 
 
@@ -180,6 +184,34 @@ def _add_extra_index(database: Path, variant: str) -> None:
         connection.execute(statements[variant])
 
 
+def _rewrite_reports_with_hidden_semantics(database: Path, variant: str) -> None:
+    job_column = (
+        "job TEXT COLLATE NOCASE NOT NULL"
+        if variant == "collate"
+        else "job TEXT NOT NULL"
+    )
+    trailing_contract = {
+        "check": ", CHECK (0)",
+        "foreign-key": (
+            ", FOREIGN KEY (corp_id) REFERENCES layer2_cache(corp_id)"
+        ),
+        "collate": "",
+    }[variant]
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("DROP TABLE reports")
+        connection.execute(
+            "CREATE TABLE reports ("
+            "report_id TEXT PRIMARY KEY, "
+            "corp_id TEXT NOT NULL, "
+            f"{job_column}, "
+            "payload_json TEXT NOT NULL, "
+            "generated_at TEXT NOT NULL, "
+            "created_at TEXT NOT NULL"
+            f"{trailing_contract})"
+        )
+
+
 def test_required_table_names_and_two_hash_columns_are_not_app_schema(
     tmp_path: Path,
 ) -> None:
@@ -219,6 +251,49 @@ def test_same_named_poisoned_schema_object_is_rejected(
     poison(database)
     temp_parent = tmp_path / "restore-temp"
     temp_parent.mkdir()
+
+    _reject_without_mutation(database, temp_parent)
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ("check", "foreign-key", "collate"),
+    ids=("check-constraint", "additional-foreign-key", "collate-nocase"),
+)
+def test_same_xinfo_reports_semantic_contract_mutation_is_rejected_immutably(
+    tmp_path: Path,
+    variant: str,
+) -> None:
+    database = _create_runtime_database(
+        tmp_path / variant / "source" / "reports-semantic.sqlite3"
+    )
+    _rewrite_reports_with_hidden_semantics(database, variant)
+    temp_parent = tmp_path / variant / "restore-temp"
+    temp_parent.mkdir(parents=True)
+
+    _reject_without_mutation(database, temp_parent)
+
+
+@pytest.mark.parametrize(
+    "table",
+    (
+        "budget_spend_events",
+        "budget_spend_inflight",
+        "observability_run_lifecycle",
+    ),
+)
+def test_missing_feature_owned_required_table_is_rejected_immutably(
+    tmp_path: Path,
+    table: str,
+) -> None:
+    database = _create_runtime_database(
+        tmp_path / table / "source" / "missing-required.sqlite3"
+    )
+    escaped = table.replace('"', '""')
+    with sqlite3.connect(database) as connection:
+        connection.execute(f'DROP TABLE "{escaped}"')
+    temp_parent = tmp_path / table / "restore-temp"
+    temp_parent.mkdir(parents=True)
 
     _reject_without_mutation(database, temp_parent)
 

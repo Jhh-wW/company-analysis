@@ -21,7 +21,7 @@ import tempfile
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Iterable
+from typing import Callable, Final, Iterable
 from urllib.parse import quote
 
 if __package__:
@@ -111,6 +111,22 @@ class AppSchemaInventory:
     table_count: int
     index_count: int
     trigger_count: int
+
+
+@dataclass(frozen=True)
+class TableSemanticContract:
+    normalized_create_sql: str
+    foreign_keys: tuple[tuple[object, ...], ...]
+    without_rowid: int
+    strict: int
+
+
+@dataclass(frozen=True)
+class SessionVersionedTableContract:
+    version: str
+    state: str
+    table_xinfo: tuple[tuple[object, ...], ...]
+    semantics: TableSemanticContract
 
 
 def sha256_file(path: Path) -> str:
@@ -213,7 +229,147 @@ def _assert_database(connection: sqlite3.Connection) -> set[str]:
 
 
 def _normalized_schema_sql(value: object) -> str:
-    return " ".join(str(value or "").split())
+    """문자열 literal 내부는 보존하고 SQL의 비의미 공백만 정규화한다."""
+
+    source = str(value or "")
+    normalized: list[str] = []
+    pending_space = False
+    quote_end = ""
+    index = 0
+    while index < len(source):
+        character = source[index]
+        if quote_end:
+            normalized.append(character)
+            if character == quote_end:
+                if (
+                    quote_end in {"'", '"', "`"}
+                    and index + 1 < len(source)
+                    and source[index + 1] == quote_end
+                ):
+                    normalized.append(source[index + 1])
+                    index += 1
+                else:
+                    quote_end = ""
+            index += 1
+            continue
+        if source.startswith("--", index):
+            line_end = index + 2
+            while line_end < len(source) and source[line_end] not in "\r\n":
+                line_end += 1
+            index = line_end
+            pending_space = True
+            continue
+        if source.startswith("/*", index):
+            block_end = source.find("*/", index + 2)
+            if block_end < 0:
+                raise ReadinessError("CREATE TABLE SQL 주석이 완결되지 않았습니다.")
+            index = block_end + 2
+            pending_space = True
+            continue
+        if character.isspace():
+            pending_space = True
+            index += 1
+            continue
+        if character in {"'", '"', "`"}:
+            if pending_space and normalized and normalized[-1] not in "(,":
+                normalized.append(" ")
+            normalized.append(character)
+            quote_end = character
+            pending_space = False
+            index += 1
+            continue
+        if character == "[":
+            if pending_space and normalized and normalized[-1] not in "(,":
+                normalized.append(" ")
+            normalized.append(character)
+            quote_end = "]"
+            pending_space = False
+            index += 1
+            continue
+        if character in "(),":
+            while normalized and normalized[-1] == " ":
+                normalized.pop()
+            normalized.append(character)
+            pending_space = False
+            index += 1
+            continue
+        if pending_space and normalized and normalized[-1] not in "(,":
+            normalized.append(" ")
+        normalized.append(character)
+        pending_space = False
+        index += 1
+    return "".join(normalized).strip()
+
+
+_CREATE_TABLE_PREFIX_RE: Final[re.Pattern[str]] = re.compile(
+    r"^CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+"
+    r'(?:"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]+\]|[^\s(]+)',
+    re.IGNORECASE,
+)
+
+
+def _normalized_create_table_sql(value: object) -> str:
+    normalized = _normalized_schema_sql(value)
+    if not _CREATE_TABLE_PREFIX_RE.match(normalized):
+        raise ReadinessError("CREATE TABLE SQL 계약을 정규화할 수 없습니다.")
+    return _CREATE_TABLE_PREFIX_RE.sub("CREATE TABLE <TABLE>", normalized, count=1)
+
+
+def _foreign_key_contract(
+    connection: sqlite3.Connection,
+    table: str,
+) -> tuple[tuple[object, ...], ...]:
+    escaped = table.replace('"', '""')
+    return tuple(
+        sorted(
+            (
+                int(row[0]),
+                int(row[1]),
+                str(row[2]),
+                str(row[3]),
+                "" if row[4] is None else str(row[4]),
+                str(row[5]),
+                str(row[6]),
+                str(row[7]),
+            )
+            for row in connection.execute(f'PRAGMA foreign_key_list("{escaped}")')
+        )
+    )
+
+
+def _table_storage_flags(
+    connection: sqlite3.Connection,
+    table: str,
+) -> tuple[int, int]:
+    matches = [
+        row
+        for row in connection.execute("PRAGMA table_list")
+        if str(row[0]) == "main"
+        and str(row[1]) == table
+        and str(row[2]) == "table"
+    ]
+    if len(matches) != 1 or len(matches[0]) < 6:
+        raise ReadinessError(f"SQLite table_list 계약을 읽지 못했습니다: {table}")
+    return int(matches[0][4]), int(matches[0][5])
+
+
+def _table_semantic_contract(
+    connection: sqlite3.Connection,
+    table: str,
+) -> TableSemanticContract:
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    if row is None or row[0] is None:
+        raise ReadinessError(f"CREATE TABLE SQL 계약이 없습니다: {table}")
+    without_rowid, strict = _table_storage_flags(connection, table)
+    return TableSemanticContract(
+        normalized_create_sql=_normalized_create_table_sql(row[0]),
+        foreign_keys=_foreign_key_contract(connection, table),
+        without_rowid=without_rowid,
+        strict=strict,
+    )
 
 
 def _table_xinfo(
@@ -275,6 +431,84 @@ def _trigger_contract(connection: sqlite3.Connection) -> dict[str, tuple[str, st
     }
 
 
+def _session_create_sql_from_signature(
+    signature: tuple[tuple[object, ...], ...],
+) -> str:
+    columns: list[str] = []
+    for column in signature:
+        if len(column) != 6:
+            raise ReadinessError("sessions version signature 열 계약이 올바르지 않습니다.")
+        name, data_type, not_null, default, primary_key, hidden = column
+        if int(hidden) != 0:
+            raise ReadinessError("sessions version은 hidden/generated 열을 허용하지 않습니다.")
+        definition = [str(name), str(data_type).strip().upper()]
+        if int(not_null):
+            definition.append("NOT NULL")
+        if default is not None:
+            definition.append("DEFAULT " + str(default))
+        if int(primary_key):
+            definition.append("PRIMARY KEY")
+        columns.append(" ".join(definition))
+    return _normalized_create_table_sql(
+        "CREATE TABLE sessions (" + ", ".join(columns) + ")"
+    )
+
+
+def _session_versioned_contracts(
+    storage_db: object,
+    *,
+    state: str,
+) -> tuple[SessionVersionedTableContract, ...]:
+    attribute = {
+        "raw": "_RAW_SESSION_SCHEMAS",
+        "hashed": "_HASHED_SESSION_SCHEMAS",
+    }.get(state)
+    if attribute is None:
+        raise ReadinessError("지원하지 않는 sessions version 상태입니다.")
+    signatures = tuple(getattr(storage_db, attribute, ()))
+    if not signatures:
+        raise ReadinessError("현재 storage 런타임의 sessions version 계약이 없습니다.")
+    contracts: list[SessionVersionedTableContract] = []
+    for index, signature in enumerate(signatures, start=1):
+        normalized_signature = tuple(tuple(column) for column in signature)
+        contracts.append(
+            SessionVersionedTableContract(
+                version=f"{state}-v{index}",
+                state=state,
+                table_xinfo=normalized_signature,
+                semantics=TableSemanticContract(
+                    normalized_create_sql=_session_create_sql_from_signature(
+                        normalized_signature
+                    ),
+                    foreign_keys=(),
+                    without_rowid=0,
+                    strict=0,
+                ),
+            )
+        )
+    return tuple(contracts)
+
+
+def _assert_session_table_version(
+    connection: sqlite3.Connection,
+    *,
+    table: str,
+    state: str,
+    storage_db: object,
+) -> None:
+    actual_xinfo = _table_xinfo(connection, table)
+    actual_semantics = _table_semantic_contract(connection, table)
+    supported = _session_versioned_contracts(storage_db, state=state)
+    if not any(
+        actual_xinfo == version.table_xinfo
+        and actual_semantics == version.semantics
+        for version in supported
+    ):
+        raise ReadinessError(
+            f"sessions {state} versioned table 계약이 맞지 않습니다: {table}"
+        )
+
+
 def _allowed_prebootstrap_missing_tables(
     connection: sqlite3.Connection,
     *,
@@ -288,14 +522,45 @@ def _allowed_prebootstrap_missing_tables(
         getattr(storage_db, "_LEGACY_SESSIONS_TABLE", "sessions_legacy_raw_token")
     )
     session_state = getattr(storage_db, "_session_table_state", None)
-    if missing_tables != {sessions_table} or not callable(session_state):
-        return set()
+    if not callable(session_state):
+        raise ReadinessError("현재 storage 런타임의 sessions 상태 계약이 없습니다.")
     try:
         current_state = session_state(connection, sessions_table)
         legacy_state = session_state(connection, legacy_table)
-    except (RuntimeError, sqlite3.Error):
-        return set()
-    if current_state == "missing" and legacy_state == "raw":
+    except (RuntimeError, sqlite3.Error) as exc:
+        raise ReadinessError("bootstrap 전 sessions 상태를 판정하지 못했습니다.") from exc
+
+    allowed_states = {
+        ("raw", "missing"),
+        ("hashed", "missing"),
+        ("hashed", "raw"),
+        ("missing", "raw"),
+    }
+    if (current_state, legacy_state) not in allowed_states:
+        raise ReadinessError(
+            "bootstrap 전 지원하지 않는 sessions 마이그레이션 상태입니다 "
+            f"(sessions={current_state}, legacy={legacy_state})"
+        )
+    if current_state in {"raw", "hashed"}:
+        _assert_session_table_version(
+            connection,
+            table=sessions_table,
+            state=current_state,
+            storage_db=storage_db,
+        )
+    if legacy_state == "raw":
+        _assert_session_table_version(
+            connection,
+            table=legacy_table,
+            state="raw",
+            storage_db=storage_db,
+        )
+
+    if (
+        missing_tables == {sessions_table}
+        and current_state == "missing"
+        and legacy_state == "raw"
+    ):
         return {sessions_table}
     return set()
 
@@ -325,6 +590,57 @@ def _load_storage_db_module():
     return module
 
 
+def _load_feature_schema_bootstraps() -> tuple[
+    tuple[str, Callable[[sqlite3.Connection], None]], ...
+]:
+    """필수 운영 표의 feature-owned bootstrap만 고정 저장소 경계에서 읽는다."""
+
+    app_root = Path(__file__).resolve().parents[1] / "app"
+    specifications = (
+        (
+            "비용 원장",
+            "src.features.budget.spend_store",
+            app_root / "src" / "features" / "budget" / "spend_store.py",
+        ),
+        (
+            "관측 수명주기",
+            "src.features.observability.lifecycle",
+            app_root / "src" / "features" / "observability" / "lifecycle.py",
+        ),
+    )
+    bootstraps: list[tuple[str, Callable[[sqlite3.Connection], None]]] = []
+    for label, module_name, expected_module in specifications:
+        try:
+            module = importlib.import_module(module_name)
+        except Exception as exc:  # noqa: BLE001 — 필수 feature bootstrap 부재를 닫는다
+            raise ReadinessError(
+                f"{label} feature schema bootstrap을 불러오지 못했습니다."
+            ) from exc
+        loaded_path = Path(str(getattr(module, "__file__", ""))).resolve()
+        if loaded_path != expected_module.resolve():
+            raise ReadinessError(
+                f"{label} feature schema 모듈이 저장소의 고정 경계와 다릅니다."
+            )
+        ensure_schema = getattr(module, "ensure_schema", None)
+        if not callable(ensure_schema):
+            raise ReadinessError(f"{label} feature ensure_schema 계약이 없습니다.")
+        bootstraps.append((label, ensure_schema))
+    return tuple(bootstraps)
+
+
+def _apply_feature_schema_bootstraps(
+    connection: sqlite3.Connection,
+    bootstraps: tuple[tuple[str, Callable[[sqlite3.Connection], None]], ...],
+) -> None:
+    for label, ensure_schema in bootstraps:
+        try:
+            ensure_schema(connection)
+        except Exception as exc:  # noqa: BLE001 — feature migration 실패를 한 경계로 닫는다
+            raise ReadinessError(
+                f"{label} feature schema bootstrap/migration에 실패했습니다."
+            ) from exc
+
+
 def _copy_database(source: Path, target: Path) -> None:
     try:
         with closing(_readonly_connection(source)) as source_connection:
@@ -345,12 +661,16 @@ def _assert_bootstrapped_schema(
     canonical_parent: Path,
 ) -> AppSchemaInventory:
     storage_db = _load_storage_db_module()
+    feature_bootstraps = _load_feature_schema_bootstraps()
     canonical = canonical_parent / "canonical-storage.sqlite3"
     if canonical.exists():
         raise ReadinessError("canonical schema 경로가 비어 있지 않습니다.")
     try:
-        with storage_db.connect(canonical):
-            pass
+        with storage_db.connect(canonical) as canonical_connection:
+            _apply_feature_schema_bootstraps(
+                canonical_connection,
+                feature_bootstraps,
+            )
     except Exception as exc:  # noqa: BLE001 — feature별 migration 실패를 닫는다
         raise ReadinessError(
             "현재 앱의 canonical storage schema를 만들지 못했습니다."
@@ -359,8 +679,18 @@ def _assert_bootstrapped_schema(
     try:
         with closing(_readonly_connection(canonical)) as canonical_connection:
             required_tables = _assert_sqlite_integrity(canonical_connection)
+            missing_canonical_tables = sorted(REQUIRED_TABLES - required_tables)
+            if missing_canonical_tables:
+                raise ReadinessError(
+                    "현재 앱 canonical bootstrap에 필수 운영 테이블이 없습니다: "
+                    + ", ".join(missing_canonical_tables)
+                )
             required_table_xinfo = {
                 table: _table_xinfo(canonical_connection, table)
+                for table in required_tables
+            }
+            required_table_semantics = {
+                table: _table_semantic_contract(canonical_connection, table)
                 for table in required_tables
             }
             required_indexes = {
@@ -387,8 +717,11 @@ def _assert_bootstrapped_schema(
         )
 
     try:
-        with storage_db.connect(candidate):
-            pass
+        with storage_db.connect(candidate) as candidate_connection:
+            _apply_feature_schema_bootstraps(
+                candidate_connection,
+                feature_bootstraps,
+            )
     except Exception as exc:  # noqa: BLE001 — feature별 migration 실패를 닫는다
         raise ReadinessError(
             "격리 복사본이 앱 storage bootstrap/migration을 통과하지 못했습니다."
@@ -399,6 +732,10 @@ def _assert_bootstrapped_schema(
             actual_tables = _assert_sqlite_integrity(actual_connection)
             actual_table_xinfo = {
                 table: _table_xinfo(actual_connection, table)
+                for table in actual_tables
+            }
+            actual_table_semantics = {
+                table: _table_semantic_contract(actual_connection, table)
                 for table in actual_tables
             }
             actual_indexes = {
@@ -414,18 +751,43 @@ def _assert_bootstrapped_schema(
         raise ReadinessError(
             "앱 storage canonical 필수 테이블이 없습니다: " + ", ".join(missing_tables)
         )
-
-    supported_session_signatures = tuple(
-        getattr(storage_db, "_HASHED_SESSION_SCHEMAS", ())
+    supported_session_contracts = _session_versioned_contracts(
+        storage_db,
+        state="hashed",
     )
+    canonical_session_supported = any(
+        required_table_xinfo["sessions"] == version.table_xinfo
+        and required_table_semantics["sessions"] == version.semantics
+        for version in supported_session_contracts
+    )
+    if not canonical_session_supported:
+        raise ReadinessError(
+            "현재 앱 canonical sessions가 명시된 hashed version 계약에 없습니다."
+        )
+
     for table in sorted(required_tables):
         actual_signature = actual_table_xinfo[table]
         required_signature = required_table_xinfo[table]
-        if table == "sessions" and actual_signature in supported_session_signatures:
-            pass
+        actual_semantics = actual_table_semantics[table]
+        required_semantics = required_table_semantics[table]
+        if table == "sessions":
+            supported_session = any(
+                actual_signature == version.table_xinfo
+                and actual_semantics == version.semantics
+                for version in supported_session_contracts
+            )
+            if not supported_session:
+                raise ReadinessError(
+                    "앱 storage sessions versioned table 계약이 맞지 않습니다."
+                )
         elif actual_signature != required_signature:
             raise ReadinessError(
                 f"앱 storage table_xinfo 계약이 맞지 않습니다: {table}"
+            )
+        elif actual_semantics != required_semantics:
+            raise ReadinessError(
+                "앱 storage CREATE TABLE/foreign key/WR/STRICT 계약이 "
+                f"canonical과 다릅니다: {table}"
             )
 
         actual_index_names = set(actual_indexes[table])

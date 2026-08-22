@@ -79,6 +79,16 @@ def _create_database(path: Path, *, service_state: str = "maintenance") -> Path:
     return path
 
 
+def _ensure_feature_schemas(connection: sqlite3.Connection) -> None:
+    """운영 기동이 사용하는 feature-owned 필수 schema를 fixture에도 적용한다."""
+
+    from src.features.budget import spend_store  # noqa: PLC0415
+    from src.features.observability import lifecycle  # noqa: PLC0415
+
+    spend_store.ensure_schema(connection)
+    lifecycle.ensure_schema(connection)
+
+
 def _create_storage_backup(tmp_path: Path) -> tuple[Path, Path]:
     """실제 앱 storage bootstrap으로 원본을 만들고 Backup API 사본을 만든다."""
 
@@ -87,6 +97,7 @@ def _create_storage_backup(tmp_path: Path) -> tuple[Path, Path]:
 
     source = tmp_path / "runtime-source" / "storage.db"
     with storage_db.connect(source) as connection:
+        _ensure_feature_schemas(connection)
         connection.execute(
             "INSERT INTO alias_cache (alias_key, corp_id, created_at) "
             "VALUES ('ops-ready', 'corp-ready', '2026-08-23T00:00:00+00:00')"
@@ -299,8 +310,8 @@ def test_supported_session_migration_runs_only_on_clone(tmp_path: Path) -> None:
     from tools import backup_sqlite  # noqa: PLC0415
 
     source = tmp_path / "legacy-source" / "storage.db"
-    with storage_db.connect(source):
-        pass
+    with storage_db.connect(source) as connection:
+        _ensure_feature_schemas(connection)
     with sqlite3.connect(source) as connection:
         connection.execute("DROP TABLE sessions")
         connection.execute(
