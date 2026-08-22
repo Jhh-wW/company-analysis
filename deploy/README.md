@@ -16,6 +16,37 @@ Compose와 Kubernetes에서 같은 비-root 계정, 상태 확인 경로, 영속
 - SQLite 단일 writer 계약 때문에 replica와 worker는 각각 1개다. Kubernetes 갱신 전략은
   `Recreate`다.
 
+## 공개 reverse proxy gate
+
+로컬 Compose는 `DEPLOYMENT_EXPOSURE=local`, `DEPLOYMENT_PLATFORM=local`과 loopback
+forwarded 신뢰만 허용한다. 공개 배포는 `public`을 명시해야 하며 다음 증거가 없으면
+entrypoint가 웹 시작을 차단한다. 환경의 SHA-256은 canary artifact 식별자일 뿐 신뢰
+증명이 아니다. 서명 artifact 원문과 고정 policy를 검증할 운영 adapter가 아직 없으므로
+`PRODUCTION_FORWARDED_EVIDENCE_VERIFIER_AVAILABLE=False`이고 현재 모든 public 설정은
+값을 전부 채워도 BLOCKED다.
+
+- 공통: 실제 공개 HTTPS origin에서 CSRF 보호 POST 성공·타 origin 거부 canary와,
+  서로 다른 외부 주소가 앱에서 서로 다른 client IP로 관측되는 canary
+- Render: 직접 origin 접근 차단과 edge가 외부 X-Forwarded-For를 제거·재작성한 증거.
+  다만 현재 공식 고정 ingress peer CIDR 계약이 없으므로 Render public forwarded trust는
+  명시적으로 unsupported/BLOCKED다. outbound IP를 inbound proxy peer로 간주해서는 안 된다.
+- Kubernetes: Uvicorn 신뢰 CIDR과 정확히 같은 ingress CIDR, 그 CIDR/포트만 허용하는
+  NetworkPolicy의 적용 증거
+
+Kubernetes는 향후 signed canary verifier가 설치되면 후보가 될 수 있지만 지금은 역시
+BLOCKED다. `FORWARDED_ALLOW_IPS=*`, loopback·예약 주소, IPv4 `/24`보다 넓거나 IPv6 `/64`보다
+넓은 범위는 공개 모드에서 거부한다. `kubernetes/base.yaml`의 TEST-NET 값과 빈 증거는
+의도적인 fail-closed placeholder이므로 실제 ingress 값과 증거로 교체해야 한다.
+
+공유 링크의 requester 한도는 링크별 IP에 대해 12회/분이다. forwarded 신뢰가 빠지면
+모든 사용자가 edge proxy IP 하나로 합쳐져 정상 사용자도 함께 429가 될 수 있고, 반대로
+신뢰 범위가 넓거나 XFF가 정화되지 않으면 공격자가 IP 통장을 바꿔 한도를 우회할 수 있다.
+
+이 Render 판정은 [Render 환경변수 문서](https://render.com/docs/environment-variables)의
+Docker/All runtimes 범위와 [Uvicorn proxy 설정](https://www.uvicorn.org/settings/)의
+기본 loopback·명시 IP/IP Network 신뢰 계약을 따른다. Python native 전용 기본값이나
+outbound 주소를 Docker 컨테이너가 실제로 보는 ingress peer 주소로 추정하지 않는다.
+
 PDF는 고정된 `reportlab`, `pypdf`, `pdfplumber`, `pypdfium2` 패키지와 이미지에 포함된
 Freesentation 글꼴을 쓴다. LibreOffice나 브라우저 런타임은 필요하지 않다. PDF 렌더의
 일시 파일을 위해 `/tmp` 256MiB 이상, 실제 서비스에는 메모리 2GiB 상한을 권장한다.
@@ -39,6 +70,41 @@ Copy-Item deploy/runtime-config.example deploy/runtime-config
 docker compose -f deploy/compose.yaml config
 docker compose -f deploy/compose.yaml up --build
 ```
+
+## 이미지 공급망 release gate
+
+`build-image.ps1`은 로컬 smoke용 단일 플랫폼 이미지만 만들며 공개 배포 승인을 만들지
+않는다. 공개 릴리스는 최종 multi-arch OCI index digest를 대상으로 아래 증거를 별도
+JSON 묶음으로 보관하고 `validate-release-evidence.ps1`을 통과해야 한다.
+
+- linux/amd64와 linux/arm64 child digest를 포함한 final index digest
+- Trivy, Docker Scout 또는 Grype의 final index 대상 raw/검증 보고서. reachable
+  high/critical은 0이어야 하며, 남은 finding은 고정 policy의 승인자와 `not_affected`
+  VEX artifact가 정확히 대응해야 한다.
+- 같은 index digest에 결속된 SPDX/CycloneDX SBOM과 `mode=max` provenance
+- policy에 고정된 builder와 Ed25519 공개 키 SPKI SHA-256으로 검증한 서명 bundle
+
+CLI 호출자가 policy 경로·hash를 같이 골라 self-pin할 수 없도록 validator는 오직 보호된
+repository의 `deploy/release-policy.json`과 `deploy/release-policy.sha256`만 읽는다. 현재는
+실제 policy JSON이 없고 pin 파일도 `BLOCKED`이며, raw scanner/SBOM/provenance/서명 형식을
+검증하는 concrete `ReleaseArtifactVerifier`도 없다. 따라서 fixture의 구조 helper가
+통과해도 공개 main은 항상 exit 78이다. 실제 policy와 pin은 보호 branch의 코드 리뷰로
+동시에 설치하고, 운영 verifier를 시작 조립부에서 주입해야 한다.
+
+main은 evidence JSON만 신뢰하지 않는다. scan report, SBOM, provenance, signature bundle과
+필요 시 VEX의 실제 파일 bytes SHA-256을 재계산하고, 독립 verifier가 파싱한 final digest,
+finding 목록, builder/source revision, canonical unsigned payload hash, 공개 키 fingerprint를
+evidence/policy와 다시 대조한다. artifact나 parser가 없거나 결과가 다르면 BLOCKED다.
+
+```powershell
+./scripts/deploy/validate-release-evidence.ps1 `
+  -Evidence <검증결과.json> -ScanReport <scanner_raw.json> -Sbom <sbom.json> `
+  -Provenance <provenance.json> -SignatureBundle <signature.bundle> [-Vex <vex.json>]
+```
+
+현재 저장소에는 실제 policy·verifier·scanner·SBOM·provenance·서명 검증 결과가 없으므로
+공개 이미지 판정은 정직하게 BLOCKED다. validator와 fixture 시험은 Docker나 외부 registry를
+호출하지 않는다.
 
 기본 `BETA_ADMIN_ONLY=1`이면 `ADMIN_EMAILS`, `GOOGLE_CLIENT_ID`,
 `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`가 모두 있어야 시작한다. `PIPELINE=real`은

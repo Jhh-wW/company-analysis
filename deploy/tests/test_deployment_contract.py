@@ -36,6 +36,9 @@ def _base_environment() -> dict[str, str]:
         "PORT": "10000",
         "LOG_LEVEL": "info",
         "GRACEFUL_SHUTDOWN_SECONDS": "300",
+        "DEPLOYMENT_EXPOSURE": "local",
+        "DEPLOYMENT_PLATFORM": "local",
+        "FORWARDED_ALLOW_IPS": "127.0.0.1",
         "APP_DATA_ROOT": "/var/data",
         "STORAGE_DB_PATH": "/var/data/storage.db",
         "OBSERVABILITY_RECORDS_PATH": "/var/data/observability/runs.jsonl",
@@ -268,6 +271,8 @@ def test_compose_has_read_only_non_root_volume_and_log_rotation() -> None:
     assert web["stop_grace_period"] == "330s"
     assert "app-data:/var/data" in web["volumes"]
     assert web["logging"]["options"] == {"max-size": "10m", "max-file": "5"}
+    assert web["environment"]["DEPLOYMENT_EXPOSURE"] == "local"
+    assert web["environment"]["FORWARDED_ALLOW_IPS"] == "127.0.0.1"
 
 
 def test_kubernetes_has_liveness_readiness_and_persistent_single_writer() -> None:
@@ -292,6 +297,15 @@ def test_kubernetes_has_liveness_readiness_and_persistent_single_writer() -> Non
     assert by_kind["PersistentVolumeClaim"]["spec"]["accessModes"] == [
         "ReadWriteOnce"
     ]
+    config = by_kind["ConfigMap"]["data"]
+    assert config["DEPLOYMENT_EXPOSURE"] == "public"
+    assert config["DEPLOYMENT_PLATFORM"] == "kubernetes"
+    assert config["FORWARDED_ALLOW_IPS"] != "127.0.0.1"
+    policy = by_kind["NetworkPolicy"]["spec"]
+    assert policy["policyTypes"] == ["Ingress"]
+    assert policy["ingress"][0]["from"][0]["ipBlock"]["cidr"] == config[
+        "K8S_INGRESS_PROXY_CIDRS"
+    ]
 
 
 def test_local_scripts_do_not_push_or_deploy_and_smoke_disables_network() -> None:
@@ -309,3 +323,19 @@ def test_local_scripts_do_not_push_or_deploy_and_smoke_disables_network() -> Non
     assert "PIPELINE=demo" in smoke_script
     assert "BETA_ADMIN_ONLY=0" in smoke_script
     assert "verify_image.py" in smoke_script
+    assert "--provenance=false" not in build_script
+    assert "--provenance=mode=max" in build_script
+    assert "--sbom=true" in build_script
+    release_script = (
+        REPOSITORY_ROOT / "scripts" / "deploy" / "validate-release-evidence.ps1"
+    ).read_text(encoding="utf-8")
+    assert "validate_release_evidence.py" in release_script
+    assert "docker push" not in release_script.lower()
+    for argument in ("--scan-report", "--sbom", "--provenance", "--signature-bundle"):
+        assert argument in release_script
+    assert "--policy" not in release_script
+    assert validator.PRODUCTION_FORWARDED_EVIDENCE_VERIFIER_AVAILABLE is False
+    assert not (DEPLOY_ROOT / "release-policy.json").exists()
+    assert (DEPLOY_ROOT / "release-policy.sha256").read_text(
+        encoding="ascii"
+    ).strip() == "BLOCKED"

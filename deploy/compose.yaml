@@ -22,6 +22,9 @@ services:
         required: true
     environment:
       PORT: "10000"
+      DEPLOYMENT_EXPOSURE: local
+      DEPLOYMENT_PLATFORM: local
+      FORWARDED_ALLOW_IPS: 127.0.0.1
       APP_DATA_ROOT: /var/data
       STORAGE_DB_PATH: /var/data/storage.db
       OBSERVABILITY_RECORDS_PATH: /var/data/observability/runs.jsonl

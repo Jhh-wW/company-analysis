@@ -7,7 +7,16 @@ data:
   PIPELINE: demo
   BETA_ADMIN_ONLY: "1"
   LOG_LEVEL: info
-  FORWARDED_ALLOW_IPS: "127.0.0.1"
+  DEPLOYMENT_EXPOSURE: public
+  DEPLOYMENT_PLATFORM: kubernetes
+  # 문서용 TEST-NET placeholder다. 실제 ingress의 좁은 CIDR로 두 값을 함께
+  # 교체하고 canary/NetworkPolicy 증거 SHA-256을 채우기 전에는 시작이 차단된다.
+  PUBLIC_ORIGIN: https://replace.invalid
+  FORWARDED_ALLOW_IPS: "192.0.2.1/32"
+  K8S_INGRESS_PROXY_CIDRS: "192.0.2.1/32"
+  HTTPS_ORIGIN_CSRF_CANARY_EVIDENCE_SHA256: ""
+  CLIENT_IP_CANARY_EVIDENCE_SHA256: ""
+  K8S_NETWORK_POLICY_EVIDENCE_SHA256: ""
   APP_DATA_ROOT: /var/data
   STORAGE_DB_PATH: /var/data/storage.db
   OBSERVABILITY_RECORDS_PATH: /var/data/observability/runs.jsonl
@@ -125,3 +134,23 @@ spec:
     - name: http
       port: 80
       targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: company-analysis-ingress-only
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: company-analysis
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # 안전하게 닫힌 문서용 placeholder. 실제 ingress proxy의 좁은 CIDR로
+        # ConfigMap 두 값과 동시에 바꿔야 한다.
+        - ipBlock:
+            cidr: 192.0.2.1/32
+      ports:
+        - protocol: TCP
+          port: 10000
