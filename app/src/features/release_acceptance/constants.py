@@ -96,3 +96,16 @@ DEFAULT_WORKFLOW_TIMEOUT_SEC: Final[float] = 150.0
 HTTP_TIMEOUT_SEC: Final[float] = 45.0
 PORT_CLOSE_TIMEOUT_SEC: Final[float] = 8.0
 POLL_INTERVAL_SEC: Final[float] = 0.2
+MAX_REDIRECT_HOPS: Final[int] = 5
+REDIRECT_STATUS_CODES: Final[frozenset[int]] = frozenset({301, 302, 303, 307, 308})
+EGRESS_AUDIT_ENV_NAME: Final[str] = "RELEASE_ACCEPTANCE_EGRESS_AUDIT_PATH"
+EGRESS_AUDIT_SCHEMA_VERSION: Final[str] = "release-acceptance-egress-v1"
+MAX_EGRESS_AUDIT_BYTES: Final[int] = 4096
+EGRESS_AUDIT_COUNTER_KEYS: Final[tuple[str, ...]] = (
+    "self_test_dns_denied",
+    "self_test_ip_denied",
+    "self_test_socket_denied",
+    "runtime_dns_denied",
+    "runtime_ip_denied",
+    "runtime_socket_denied",
+)

@@ -32,11 +32,17 @@ from src.features.release_acceptance.constants import (
     DEMO_COMPANY,
     DEMO_REGION,
     DEPENDENCY_IMPORTS,
+    EGRESS_AUDIT_COUNTER_KEYS,
+    EGRESS_AUDIT_ENV_NAME,
+    EGRESS_AUDIT_SCHEMA_VERSION,
     EXTERNAL_PROVIDER_ENV_NAMES,
     HTTP_TIMEOUT_SEC,
     LOOPBACK_HOST,
+    MAX_EGRESS_AUDIT_BYTES,
+    MAX_REDIRECT_HOPS,
     POLL_INTERVAL_SEC,
     PORT_CLOSE_TIMEOUT_SEC,
+    REDIRECT_STATUS_CODES,
     REQUIRED_LEDGER_TABLES,
     SAFE_PARENT_ENV_NAMES,
     SCHEMA_VERSION,
@@ -173,7 +179,7 @@ def overall_status(checks: tuple[CheckResult, ...]) -> CheckStatus:
 def render_korean_summary(report: AcceptanceReport) -> str:
     lines = [
         f"릴리스 수락시험: {report.overall_status.value}",
-        "외부 provider 호출: 비활성(무료 로컬 demo 전용)",
+        "외부 provider 호출 정책: 금지(OS 격리 증거는 provider 항목 참조)",
     ]
     for item in report.checks:
         lines.append(f"- {item.status.value} · {item.title}: {item.evidence}")
@@ -257,8 +263,52 @@ class HttpSession:
     """외부 URL을 만들 수 없는 loopback 전용 표준 라이브러리 세션."""
 
     def __init__(self, port: int):
+        self.port = port
         self.base_url = f"http://{LOOPBACK_HOST}:{port}"
         self.cookies = http.cookiejar.CookieJar()
+
+    def _redirect_target(self, current_url: str, location: str) -> str:
+        raw_location = location.strip()
+        if (
+            not raw_location
+            or raw_location != location
+            or raw_location.startswith("//")
+            or "#" in raw_location
+            or any(ord(character) < 32 or ord(character) == 127 for character in raw_location)
+        ):
+            raise AcceptanceFailure("redirect Location이 안전한 loopback URL이 아닙니다")
+        try:
+            target = urllib.parse.urljoin(current_url, raw_location)
+            parsed = urllib.parse.urlsplit(target)
+            target_port = parsed.port
+        except ValueError as error:
+            raise AcceptanceFailure("redirect Location을 해석할 수 없습니다") from error
+        expected_netloc = f"{LOOPBACK_HOST}:{self.port}"
+        if (
+            parsed.scheme != "http"
+            or parsed.netloc != expected_netloc
+            or parsed.hostname != LOOPBACK_HOST
+            or target_port != self.port
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            raise AcceptanceFailure("redirect가 최초 loopback origin을 벗어났습니다")
+        return urllib.parse.urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path or "/", parsed.query, "")
+        )
+
+    @staticmethod
+    def _redirect_method(
+        status: int,
+        method: str,
+        body: bytes | None,
+    ) -> tuple[str, bytes | None]:
+        if status == 303 and method != "HEAD":
+            return "GET", None
+        if status in {301, 302} and method == "POST":
+            return "GET", None
+        return method, body
 
     def request(
         self,
@@ -272,7 +322,7 @@ class HttpSession:
     ) -> HttpResponse:
         if not path.startswith("/"):
             raise ValueError("loopback 상대 경로만 허용합니다")
-        body = None
+        body: bytes | None = None
         request_headers = {
             "User-Agent": "release-acceptance-local/1",
             **(dict(headers) if headers else {}),
@@ -280,12 +330,6 @@ class HttpSession:
         if data is not None:
             body = urllib.parse.urlencode(data).encode("utf-8")
             request_headers["Content-Type"] = "application/x-www-form-urlencoded"
-        request = urllib.request.Request(
-            self.base_url + path,
-            data=body,
-            headers=request_headers,
-            method=method.upper(),
-        )
         # 수락시험 HTTP는 격리 loopback만 향한다. 기본 ProxyHandler는 부모의
         # HTTP(S)_PROXY/ALL_PROXY를 읽어 로컬 실패나 응답을 프록시가 위조하게 만들 수
         # 있으므로, 빈 명시 설정으로 환경 프록시 상속을 완전히 끊는다.
@@ -293,24 +337,54 @@ class HttpSession:
             urllib.request.ProxyHandler({}),
             urllib.request.HTTPCookieProcessor(self.cookies),
         ]
-        if not follow_redirects:
-            handlers.append(_NoRedirectHandler())
+        # 자동 redirect는 한 hop이라도 검증 전에 socket을 열 수 있으므로 항상 끈다.
+        handlers.append(_NoRedirectHandler())
         opener = urllib.request.build_opener(*handlers)
-        try:
-            response = opener.open(request, timeout=timeout)
-        except urllib.error.HTTPError as error:
-            response = error
-        with response:
-            payload = response.read()
-            response_headers = {
-                key.lower(): value for key, value in response.headers.items()
-            }
-            return HttpResponse(
-                status=int(response.status),
-                headers=response_headers,
-                body=payload,
-                url=response.geturl(),
+        current_url = self.base_url + path
+        current_method = method.upper()
+        current_body = body
+        visited = {current_url}
+        for redirect_count in range(MAX_REDIRECT_HOPS + 1):
+            hop_headers = dict(request_headers)
+            if current_body is None:
+                hop_headers.pop("Content-Type", None)
+            request = urllib.request.Request(
+                current_url,
+                data=current_body,
+                headers=hop_headers,
+                method=current_method,
             )
+            try:
+                response = opener.open(request, timeout=timeout)
+            except urllib.error.HTTPError as error:
+                response = error
+            with response:
+                payload = response.read()
+                response_headers = {
+                    key.lower(): value for key, value in response.headers.items()
+                }
+                result = HttpResponse(
+                    status=int(response.status),
+                    headers=response_headers,
+                    body=payload,
+                    url=response.geturl(),
+                )
+            if not follow_redirects or result.status not in REDIRECT_STATUS_CODES:
+                return result
+            location = result.headers.get("location", "")
+            target = self._redirect_target(current_url, location)
+            if target in visited:
+                raise AcceptanceFailure("loopback redirect 순환을 거부했습니다")
+            if redirect_count >= MAX_REDIRECT_HOPS:
+                raise AcceptanceFailure("loopback redirect hop 상한을 넘었습니다")
+            visited.add(target)
+            current_url = target
+            current_method, current_body = self._redirect_method(
+                result.status,
+                current_method,
+                current_body,
+            )
+        raise AcceptanceFailure("loopback redirect 상태가 완결되지 않았습니다")
 
 
 @dataclass
@@ -415,17 +489,7 @@ class ManagedServer:
             [
                 self.python_executable,
                 "-m",
-                "uvicorn",
-                "src.web.main:app",
-                "--host",
-                LOOPBACK_HOST,
-                "--port",
-                str(self.port),
-                "--workers",
-                "1",
-                "--no-access-log",
-                "--log-level",
-                "warning",
+                "src.features.release_acceptance.child_server",
             ],
             cwd=str(self.app_root),
             env=self.environment,
@@ -500,6 +564,7 @@ def _runtime_environment(
     port: int,
     auth_capability: str,
     provenance_seal: str,
+    egress_audit_path: Path,
 ) -> dict[str, str]:
     closed_proxy = "http://127.0.0.1:9"
     explicit = {
@@ -513,6 +578,7 @@ def _runtime_environment(
         "AUTH_COOKIE_INSECURE": "1",
         "ADMIN_EMAILS": "release-acceptance-admin@example.invalid",
         "PORT": str(port),
+        EGRESS_AUDIT_ENV_NAME: str(egress_audit_path),
         "APP_DATA_ROOT": str(paths.root),
         "STORAGE_DB_PATH": str(paths.database),
         "OBSERVABILITY_RECORDS_PATH": str(paths.records),
@@ -1085,15 +1151,79 @@ def _restart_action(
     return "같은 SQLite로 재기동해 결과·PDF를 열었고 payload·PDF·출고·비용 snapshot이 유지됐습니다"
 
 
-def _provider_isolation_action(environment: Mapping[str, str]) -> str:
-    leaked_names = sorted(EXTERNAL_PROVIDER_ENV_NAMES & set(environment))
-    if leaked_names:
-        raise AcceptanceFailure("자식 환경에 외부 provider 자격 증명 이름이 포함됐습니다")
-    if environment.get("PIPELINE") != "demo":
-        raise AcceptanceFailure("자식 서버가 PIPELINE=demo로 고정되지 않았습니다")
-    if environment.get("HTTP_PROXY") != "http://127.0.0.1:9":
-        raise AcceptanceFailure("외부 HTTP fail-closed proxy가 설정되지 않았습니다")
-    return "PIPELINE=demo, provider 자격 증명 0개, 외부 proxy는 닫힌 loopback으로 고정했습니다"
+def _read_egress_audit(path: Path) -> dict[str, object]:
+    expected_keys = {
+        "schema_version",
+        "installed",
+        "loopback_probe_allowed",
+        *EGRESS_AUDIT_COUNTER_KEYS,
+    }
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise AcceptanceFailure("자식 egress 감사 파일이 안전한 일반 파일이 아닙니다")
+        raw = path.read_bytes()
+    except OSError as error:
+        raise AcceptanceFailure("자식 egress 감사 파일을 읽지 못했습니다") from error
+    if not raw or len(raw) > MAX_EGRESS_AUDIT_BYTES:
+        raise AcceptanceFailure("자식 egress 감사 파일 크기가 올바르지 않습니다")
+    try:
+        payload = json.loads(raw.decode("ascii"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise AcceptanceFailure("자식 egress 감사 JSON이 올바르지 않습니다") from error
+    if not isinstance(payload, dict) or set(payload) != expected_keys:
+        raise AcceptanceFailure("자식 egress 감사 필드가 정확하지 않습니다")
+    if (
+        payload["schema_version"] != EGRESS_AUDIT_SCHEMA_VERSION
+        or payload["installed"] is not True
+        or payload["loopback_probe_allowed"] is not True
+    ):
+        raise AcceptanceFailure("자식 egress guard 설치·loopback 자체검증 증거가 없습니다")
+    for key in EGRESS_AUDIT_COUNTER_KEYS:
+        value = payload[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise AcceptanceFailure("자식 egress 감사 횟수가 올바르지 않습니다")
+    if (
+        payload["self_test_dns_denied"] != 1
+        or payload["self_test_ip_denied"] != 1
+        or payload["self_test_socket_denied"] != 0
+    ):
+        raise AcceptanceFailure("자식 egress DNS·IP 차단 자체검증이 정확하지 않습니다")
+    if any(payload[key] != 0 for key in EGRESS_AUDIT_COUNTER_KEYS if key.startswith("runtime_")):
+        raise AcceptanceFailure("자식 앱이 실행 중 외부 DNS·IP·socket 접근을 시도했습니다")
+    return payload
+
+
+def _provider_isolation_action(
+    environments: tuple[Mapping[str, str], ...],
+    *,
+    audit_paths: tuple[Path, ...] = (),
+) -> str:
+    if not environments:
+        raise AcceptanceFailure("검증할 자식 환경이 없습니다")
+    for environment in environments:
+        leaked_names = sorted(EXTERNAL_PROVIDER_ENV_NAMES & set(environment))
+        if leaked_names:
+            raise AcceptanceFailure("자식 환경에 외부 provider 자격 증명 이름이 포함됐습니다")
+        if environment.get("PIPELINE") != "demo":
+            raise AcceptanceFailure("자식 서버가 PIPELINE=demo로 고정되지 않았습니다")
+        if environment.get("HTTP_PROXY") != "http://127.0.0.1:9":
+            raise AcceptanceFailure("외부 HTTP fail-closed proxy가 설정되지 않았습니다")
+    if not audit_paths:
+        return "PIPELINE=demo, provider 자격 증명 0개, 자식 egress guard 경로를 고정했습니다"
+    if len(environments) != len(audit_paths):
+        raise AcceptanceFailure("자식 서버별 egress 감사 증거 수가 다릅니다")
+    for environment, audit_path in zip(environments, audit_paths, strict=True):
+        configured = environment.get(EGRESS_AUDIT_ENV_NAME, "")
+        if not configured or Path(configured).resolve() != audit_path.resolve():
+            raise AcceptanceFailure("자식 egress 감사 경로 결속이 다릅니다")
+        _read_egress_audit(audit_path)
+    probes = len(audit_paths) * 2
+    raise AcceptanceBlocked(
+        f"Python detector는 자식 {len(audit_paths)}개에서 외부 DNS·IP probe "
+        f"{probes}건을 거부하고 앱 관측 시도 0건을 기록했지만, uvloop/libuv·native "
+        "extension·ctypes·subprocess까지 닫는 Linux network namespace/firewall "
+        "attestation이 없어 OS egress 격리는 검증하지 못했습니다"
+    )
 
 
 def _sensitive_action(
@@ -1258,11 +1388,14 @@ def run_acceptance(config: RunConfig) -> AcceptanceReport:
                 "내부 출처 seal": provenance_seal,
             }
         )
+        first_egress_audit = paths.root / "egress-first.json"
+        second_egress_audit = paths.root / "egress-second.json"
         first_environment = _runtime_environment(
             paths,
             port=port,
             auth_capability=first_capability,
             provenance_seal=provenance_seal,
+            egress_audit_path=first_egress_audit,
         )
 
         _run_check(
@@ -1273,9 +1406,15 @@ def run_acceptance(config: RunConfig) -> AcceptanceReport:
         _run_check(
             results,
             "provider_isolation",
-            lambda: _provider_isolation_action(first_environment),
+            lambda: _provider_isolation_action((first_environment,)),
         )
         if results["runtime_dependencies"].status is not CheckStatus.PASS:
+            _set_result(
+                results,
+                "provider_isolation",
+                CheckStatus.BLOCKED,
+                "자식 서버를 시작하지 않아 실제 socket/DNS egress 차단을 검증하지 못했습니다",
+            )
             _block_missing(results, "로컬 실행 의존성이 준비되지 않아 서버 기반 항목을 검증하지 못했습니다")
             return _final_report(results, started_at=started_at, tracker=tracker)
 
@@ -1319,6 +1458,14 @@ def run_acceptance(config: RunConfig) -> AcceptanceReport:
                 "sensitive_nonexposure",
                 CheckStatus.BLOCKED,
                 "전체 HTTP·LINK 흐름이 시작되지 않아 비노출 범위를 검증하지 못했습니다",
+            )
+            _run_check(
+                results,
+                "provider_isolation",
+                lambda: _provider_isolation_action(
+                    (first_environment,),
+                    audit_paths=(first_egress_audit,),
+                ),
             )
             _block_missing(results, "첫 서버가 준비되지 않아 실제 HTTP 항목을 검증하지 못했습니다")
             return _final_report(results, started_at=started_at, tracker=tracker)
@@ -1413,6 +1560,7 @@ def run_acceptance(config: RunConfig) -> AcceptanceReport:
 
         second_started = False
         second_cleanup = False
+        second_environment: dict[str, str] | None = None
         if first_cleanup:
             second_capability = secrets.token_hex(32)
             tracker.add_marker("재시작 관리자 capability", second_capability)
@@ -1421,6 +1569,7 @@ def run_acceptance(config: RunConfig) -> AcceptanceReport:
                 port=port,
                 auth_capability=second_capability,
                 provenance_seal=provenance_seal,
+                egress_audit_path=second_egress_audit,
             )
             second_server = ManagedServer(
                 app_root=app_root,
@@ -1480,6 +1629,21 @@ def run_acceptance(config: RunConfig) -> AcceptanceReport:
                 CheckStatus.BLOCKED,
                 "첫 서버 포트가 회수되지 않아 같은 포트 재시작을 시도하지 않았습니다",
             )
+
+        provider_environments = (first_environment,) + (
+            (second_environment,) if second_environment is not None else ()
+        )
+        provider_audits = (first_egress_audit,) + (
+            (second_egress_audit,) if second_environment is not None else ()
+        )
+        _run_check(
+            results,
+            "provider_isolation",
+            lambda: _provider_isolation_action(
+                provider_environments,
+                audit_paths=provider_audits,
+            ),
+        )
 
         if "server_lifecycle" not in results:
             if first_cleanup and second_started and second_cleanup:
