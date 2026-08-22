@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import importlib
 import json
 import os
 import re
@@ -105,6 +106,13 @@ class DatabaseInventory:
     row_counts: dict[str, int]
 
 
+@dataclass(frozen=True)
+class AppSchemaInventory:
+    table_count: int
+    index_count: int
+    trigger_count: int
+
+
 def sha256_file(path: Path) -> str:
     """파일 내용을 출력하지 않고 SHA-256만 계산한다."""
     digest = hashlib.sha256()
@@ -179,14 +187,18 @@ def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
     return {str(row[1]) for row in connection.execute(f'PRAGMA table_info("{escaped}")')}
 
 
-def _assert_database(connection: sqlite3.Connection) -> set[str]:
+def _assert_sqlite_integrity(connection: sqlite3.Connection) -> set[str]:
     integrity = [str(row[0]) for row in connection.execute("PRAGMA integrity_check")]
     if integrity != ["ok"]:
         raise ReadinessError("SQLite 무결성 검사에 실패했습니다.")
     if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
         raise ReadinessError("SQLite 외래 키 검사에 실패했습니다.")
+    return _table_names(connection)
 
-    tables = _table_names(connection)
+
+def _assert_database(connection: sqlite3.Connection) -> set[str]:
+    tables = _assert_sqlite_integrity(connection)
+
     missing = sorted(REQUIRED_TABLES - tables)
     if missing:
         raise ReadinessError("필수 운영 테이블이 없습니다: " + ", ".join(missing))
@@ -198,6 +210,225 @@ def _assert_database(connection: sqlite3.Connection) -> set[str]:
     if "token_hash" not in session_columns or "token" in session_columns:
         raise ReadinessError("세션 토큰이 해시 전용 스키마가 아닙니다.")
     return tables
+
+
+def _normalized_schema_sql(value: object) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _table_xinfo(
+    connection: sqlite3.Connection, table: str
+) -> tuple[tuple[object, ...], ...]:
+    escaped = table.replace('"', '""')
+    return tuple(
+        (
+            str(row[1]),
+            str(row[2]).strip().upper(),
+            int(row[3]),
+            row[4],
+            int(row[5]),
+            int(row[6]),
+        )
+        for row in connection.execute(f'PRAGMA table_xinfo("{escaped}")')
+    )
+
+
+def _index_contract(
+    connection: sqlite3.Connection, table: str
+) -> dict[str, tuple[object, ...]]:
+    escaped = table.replace('"', '""')
+    contract: dict[str, tuple[object, ...]] = {}
+    for row in connection.execute(f'PRAGMA index_list("{escaped}")'):
+        name = str(row[1])
+        escaped_name = name.replace('"', '""')
+        key_columns = tuple(
+            (
+                int(item[1]),
+                "" if item[2] is None else str(item[2]),
+                int(item[3]),
+                str(item[4] or ""),
+            )
+            for item in connection.execute(f'PRAGMA index_xinfo("{escaped_name}")')
+            if int(item[5]) == 1
+        )
+        sql_row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+            (name,),
+        ).fetchone()
+        contract[name] = (
+            int(row[2]),
+            str(row[3]),
+            int(row[4]),
+            key_columns,
+            _normalized_schema_sql(None if sql_row is None else sql_row[0]),
+        )
+    return contract
+
+
+def _trigger_contract(connection: sqlite3.Connection) -> dict[str, tuple[str, str]]:
+    return {
+        str(row[0]): (str(row[1]), _normalized_schema_sql(row[2]))
+        for row in connection.execute(
+            "SELECT name, tbl_name, sql FROM sqlite_master "
+            "WHERE type='trigger' ORDER BY name"
+        )
+    }
+
+
+def _load_storage_db_module():
+    app_root = Path(__file__).resolve().parents[1] / "app"
+    expected_module = app_root / "src" / "features" / "storage" / "db.py"
+    if not expected_module.is_file():
+        raise ReadinessError("앱 storage schema 모듈을 저장소의 고정 경로에서 찾지 못했습니다.")
+    app_root_text = str(app_root)
+    while app_root_text in sys.path:
+        sys.path.remove(app_root_text)
+    sys.path.insert(0, app_root_text)
+    importlib.invalidate_caches()
+    try:
+        module = importlib.import_module("src.features.storage.db")
+    except Exception as exc:  # noqa: BLE001 — 앱 bootstrap 실패를 한 경계로 닫는다
+        raise ReadinessError(
+            "앱 storage schema bootstrap을 불러오지 못했습니다. "
+            "저장소의 고정 app 경계와 앱 런타임 의존성을 확인하세요."
+        ) from exc
+    if not callable(getattr(module, "connect", None)):
+        raise ReadinessError("앱 storage schema bootstrap 계약이 없습니다.")
+    loaded_path = Path(str(getattr(module, "__file__", ""))).resolve()
+    if loaded_path != expected_module.resolve():
+        raise ReadinessError("앱 storage schema 모듈이 저장소의 고정 경계와 다릅니다.")
+    return module
+
+
+def _copy_database(source: Path, target: Path) -> None:
+    try:
+        with closing(_readonly_connection(source)) as source_connection:
+            with closing(
+                sqlite3.connect(str(target), timeout=SQLITE_TIMEOUT_SEC)
+            ) as target_connection:
+                source_connection.backup(target_connection)
+        with target.open("rb+") as stream:
+            stream.flush()
+            os.fsync(stream.fileno())
+    except (OSError, sqlite3.Error) as exc:
+        raise ReadinessError("격리 SQLite 복사본을 만들지 못했습니다.") from exc
+
+
+def _assert_bootstrapped_schema(
+    candidate: Path,
+    *,
+    canonical_parent: Path,
+) -> AppSchemaInventory:
+    storage_db = _load_storage_db_module()
+    canonical = canonical_parent / "canonical-storage.sqlite3"
+    if canonical.exists():
+        raise ReadinessError("canonical schema 경로가 비어 있지 않습니다.")
+    try:
+        with storage_db.connect(candidate):
+            pass
+        with storage_db.connect(canonical):
+            pass
+    except Exception as exc:  # noqa: BLE001 — feature별 migration 실패를 닫는다
+        raise ReadinessError(
+            "격리 복사본이 앱 storage bootstrap/migration을 통과하지 못했습니다."
+        ) from exc
+
+    try:
+        with closing(_readonly_connection(candidate)) as actual_connection:
+            actual_tables = _assert_sqlite_integrity(actual_connection)
+            actual_table_xinfo = {
+                table: _table_xinfo(actual_connection, table)
+                for table in actual_tables
+            }
+            actual_indexes = {
+                table: _index_contract(actual_connection, table)
+                for table in actual_tables
+            }
+            actual_triggers = _trigger_contract(actual_connection)
+        with closing(_readonly_connection(canonical)) as canonical_connection:
+            required_tables = _assert_sqlite_integrity(canonical_connection)
+            required_table_xinfo = {
+                table: _table_xinfo(canonical_connection, table)
+                for table in required_tables
+            }
+            required_indexes = {
+                table: _index_contract(canonical_connection, table)
+                for table in required_tables
+            }
+            required_triggers = _trigger_contract(canonical_connection)
+    except sqlite3.Error as exc:
+        raise ReadinessError("앱 storage schema 계약을 읽지 못했습니다.") from exc
+
+    missing_tables = sorted(required_tables - actual_tables)
+    if missing_tables:
+        raise ReadinessError(
+            "앱 storage canonical 필수 테이블이 없습니다: " + ", ".join(missing_tables)
+        )
+
+    supported_session_signatures = tuple(
+        getattr(storage_db, "_HASHED_SESSION_SCHEMAS", ())
+    )
+    for table in sorted(required_tables):
+        actual_signature = actual_table_xinfo[table]
+        required_signature = required_table_xinfo[table]
+        if table == "sessions" and actual_signature in supported_session_signatures:
+            pass
+        elif actual_signature != required_signature:
+            raise ReadinessError(
+                f"앱 storage table_xinfo 계약이 맞지 않습니다: {table}"
+            )
+
+        for name, required_index in required_indexes[table].items():
+            if actual_indexes[table].get(name) != required_index:
+                raise ReadinessError(
+                    f"앱 storage 필수 index 계약이 맞지 않습니다: {name}"
+                )
+
+    for name, required_trigger in required_triggers.items():
+        if actual_triggers.get(name) != required_trigger:
+            raise ReadinessError(
+                f"앱 storage 필수 trigger 계약이 맞지 않습니다: {name}"
+            )
+
+    return AppSchemaInventory(
+        table_count=len(required_tables),
+        index_count=sum(len(value) for value in required_indexes.values()),
+        trigger_count=len(required_triggers),
+    )
+
+
+def _assert_app_schema_compatible(
+    source: Path,
+    *,
+    temp_parent: Path | None = None,
+    expected_source_sha256: str | None = None,
+) -> AppSchemaInventory:
+    """원본이 아닌 격리 clone에서 현재 앱 bootstrap과 canonical 계약을 검증한다."""
+
+    source_digest = sha256_file(source)
+    if expected_source_sha256 is not None and not hmac.compare_digest(
+        source_digest, expected_source_sha256
+    ):
+        raise ReadinessError("앱 schema 검증 전에 원본 백업 지문이 변경됐습니다.")
+    parent = None if temp_parent is None else str(temp_parent.resolve(strict=True))
+    temporary_path: Path | None = None
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="release-schema-bootstrap-", dir=parent
+        ) as directory:
+            temporary_path = Path(directory)
+            candidate = temporary_path / "restored.sqlite3"
+            _copy_database(source, candidate)
+            inventory = _assert_bootstrapped_schema(
+                candidate,
+                canonical_parent=temporary_path,
+            )
+    finally:
+        if sha256_file(source) != source_digest:
+            raise ReadinessError("앱 schema 검증 중 원본 백업이 변경됐습니다.")
+        if temporary_path is not None and temporary_path.exists():
+            raise ReadinessError("앱 schema 검증 임시 디렉터리를 제거하지 못했습니다.")
+    return inventory
 
 
 def verify_backup(
@@ -238,14 +469,20 @@ def verify_backup(
         raise ReadinessError(f"독립 manifest gate가 거부했습니다: {exc}") from exc
     try:
         with closing(_readonly_connection(database)) as connection:
-            tables = _assert_database(connection)
+            _assert_sqlite_integrity(connection)
     except sqlite3.Error as exc:
         raise ReadinessError("백업 DB를 읽기 전용으로 검증하지 못했습니다.") from exc
+    app_schema = _assert_app_schema_compatible(
+        database,
+        expected_source_sha256=actual_digest,
+    )
     return {
         "status": "통과",
         "sha256": actual_digest,
         "size_bytes": database_size,
-        "table_count": len(tables),
+        "table_count": app_schema.table_count,
+        "index_count": app_schema.index_count,
+        "trigger_count": app_schema.trigger_count,
         "manifest_backup_id": manifest_record.backup_id,
         "manifest_sequence": manifest_record.sequence,
         "manifest_key_id": manifest_record.key_id,
@@ -255,7 +492,7 @@ def verify_backup(
 def _inventory(path: Path) -> DatabaseInventory:
     try:
         with closing(_readonly_connection(path)) as connection:
-            tables = _assert_database(connection)
+            tables = _assert_sqlite_integrity(connection)
             counts: dict[str, int] = {}
             for table in sorted(tables):
                 escaped = table.replace('"', '""')
@@ -296,6 +533,9 @@ def restore_dry_run(
         parent = str(resolved_parent)
 
     source_inventory = _inventory(source)
+    source_digest = sha256_file(source)
+    if not hmac.compare_digest(source_digest, str(verified["sha256"])):
+        raise ReadinessError("임시 복구 전에 원본 백업 지문이 변경됐습니다.")
     temporary_path: Path | None = None
     try:
         with tempfile.TemporaryDirectory(
@@ -319,13 +559,22 @@ def restore_dry_run(
             if source_inventory != restored_inventory:
                 raise ReadinessError("임시 복사본의 스키마 또는 레코드 수가 다릅니다.")
             restored_digest = sha256_file(restored)
+            app_schema = _assert_bootstrapped_schema(
+                restored,
+                canonical_parent=temporary_path,
+            )
             result = {
                 **verified,
                 "status": "임시 복구 통과",
                 "restored_sha256": restored_digest,
                 "row_count": sum(restored_inventory.row_counts.values()),
+                "restored_app_table_count": app_schema.table_count,
+                "restored_app_index_count": app_schema.index_count,
+                "restored_app_trigger_count": app_schema.trigger_count,
             }
     finally:
+        if sha256_file(source) != source_digest:
+            raise ReadinessError("임시 복구 검증 중 원본 백업이 변경됐습니다.")
         if temporary_path is not None and temporary_path.exists():
             raise ReadinessError("임시 복구 디렉터리를 제거하지 못했습니다.")
     return result

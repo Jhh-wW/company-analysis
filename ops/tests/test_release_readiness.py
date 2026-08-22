@@ -68,6 +68,8 @@ def _write_sidecar(database: Path, digest: str | None = None, *, name: str | Non
 
 
 def _create_database(path: Path, *, service_state: str = "maintenance") -> Path:
+    """preflight와 거부 회귀에 쓰는 과거 최소 모양 fixture."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(path) as connection:
         connection.executescript(SCHEMA)
@@ -76,6 +78,22 @@ def _create_database(path: Path, *, service_state: str = "maintenance") -> Path:
             (service_state,),
         )
     return path
+
+
+def _create_storage_backup(tmp_path: Path) -> tuple[Path, Path]:
+    """실제 앱 storage bootstrap으로 원본을 만들고 Backup API 사본을 만든다."""
+
+    storage_db = readiness._load_storage_db_module()  # noqa: SLF001
+    from tools import backup_sqlite  # noqa: PLC0415
+
+    source = tmp_path / "runtime-source" / "storage.db"
+    with storage_db.connect(source) as connection:
+        connection.execute(
+            "INSERT INTO alias_cache (alias_key, corp_id, created_at) "
+            "VALUES ('ops-ready', 'corp-ready', '2026-08-23T00:00:00+00:00')"
+        )
+    backup = backup_sqlite.create_backup(source, tmp_path / "data")
+    return backup.backup_path, backup.checksum_path
 
 
 def _manifest_bundle(
@@ -146,10 +164,9 @@ def _manifest_bundle(
     return sink, gate, expectation
 
 
-def test_verify_backup_requires_matching_independent_digest(tmp_path: Path) -> None:
-    database = _create_database(tmp_path / "data" / "backup.sqlite3")
+def test_actual_storage_bootstrap_backup_passes_manifest_gate(tmp_path: Path) -> None:
+    database, checksum = _create_storage_backup(tmp_path)
     expected = _digest(database)
-    checksum = _write_sidecar(database)
     _sink, gate, expectation = _manifest_bundle(tmp_path, database, checksum)
 
     result = readiness.verify_backup(
@@ -164,6 +181,29 @@ def test_verify_backup_requires_matching_independent_digest(tmp_path: Path) -> N
     assert result["status"] == "통과"
     assert result["sha256"] == expected
     assert result["manifest_sequence"] == 1
+    assert int(result["table_count"]) > 10
+    assert int(result["index_count"]) > 0
+    assert int(result["trigger_count"]) > 0
+    assert _digest(database) == expected
+
+
+def test_minimal_named_tables_fail_actual_storage_bootstrap(tmp_path: Path) -> None:
+    database = _create_database(tmp_path / "data" / "minimal.sqlite3")
+    checksum = _write_sidecar(database)
+    original_digest = _digest(database)
+    _sink, gate, expectation = _manifest_bundle(tmp_path, database, checksum)
+
+    with pytest.raises(readiness.ReadinessError, match="storage bootstrap"):
+        readiness.verify_backup(
+            database,
+            checksum,
+            original_digest,
+            manifest_gate=gate,
+            manifest_expectation=expectation,
+            manifest_data_root=database.parent,
+        )
+
+    assert _digest(database) == original_digest
 
 
 def test_manifest_missing_is_fail_closed(tmp_path: Path) -> None:
@@ -220,9 +260,8 @@ def test_signed_manifest_tampering_is_rejected(tmp_path: Path) -> None:
 
 
 def test_restore_dry_run_uses_and_cleans_temporary_copy(tmp_path: Path) -> None:
-    database = _create_database(tmp_path / "data" / "backup.sqlite3")
+    database, checksum = _create_storage_backup(tmp_path)
     source_digest = _digest(database)
-    checksum = _write_sidecar(database)
     _sink, gate, expectation = _manifest_bundle(tmp_path, database, checksum)
     temp_parent = tmp_path / "restore-only"
     temp_parent.mkdir()
@@ -238,9 +277,53 @@ def test_restore_dry_run_uses_and_cleans_temporary_copy(tmp_path: Path) -> None:
     )
 
     assert result["status"] == "임시 복구 통과"
-    assert result["row_count"] == 1
+    assert int(result["row_count"]) >= 1
+    assert result["restored_app_table_count"] == result["table_count"]
+    assert int(result["restored_app_index_count"]) > 0
+    assert int(result["restored_app_trigger_count"]) > 0
     assert list(temp_parent.iterdir()) == []
     assert _digest(database) == source_digest
+
+
+def test_supported_session_migration_runs_only_on_clone(tmp_path: Path) -> None:
+    storage_db = readiness._load_storage_db_module()  # noqa: SLF001
+    from tools import backup_sqlite  # noqa: PLC0415
+
+    source = tmp_path / "legacy-source" / "storage.db"
+    with storage_db.connect(source):
+        pass
+    with sqlite3.connect(source) as connection:
+        connection.execute("DROP TABLE sessions")
+        connection.execute(
+            "CREATE TABLE sessions ("
+            "token TEXT PRIMARY KEY, email TEXT NOT NULL, subject TEXT NOT NULL, "
+            "is_admin INTEGER NOT NULL, expires_at REAL NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO sessions VALUES "
+            "('legacy-cookie', 'admin@example.com', 'google:1', 1, 2000000000.0)"
+        )
+    backup = backup_sqlite.create_backup(source, tmp_path / "data")
+    database = backup.backup_path
+    checksum = backup.checksum_path
+    original_digest = _digest(database)
+    _sink, gate, expectation = _manifest_bundle(tmp_path, database, checksum)
+
+    result = readiness.verify_backup(
+        database,
+        checksum,
+        original_digest,
+        manifest_gate=gate,
+        manifest_expectation=expectation,
+        manifest_data_root=database.parent,
+    )
+
+    assert result["status"] == "통과"
+    assert _digest(database) == original_digest
+    with sqlite3.connect(database) as original:
+        columns = {row[1] for row in original.execute("PRAGMA table_info(sessions)")}
+        assert "token" in columns
+        assert "token_hash" not in columns
 
 
 def test_quiet_maintenance_preflight_is_read_only(tmp_path: Path) -> None:
