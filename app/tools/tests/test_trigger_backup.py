@@ -2,23 +2,14 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
 from email.message import Message
 from io import BytesIO
-from pathlib import Path
 from urllib.request import BaseHandler
 
 import pytest
 
-
-TOOL_PATH = Path(__file__).resolve().parents[1] / "trigger_backup.py"
-SPEC = importlib.util.spec_from_file_location("trigger_backup", TOOL_PATH)
-assert SPEC is not None and SPEC.loader is not None
-trigger_backup = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = trigger_backup
-SPEC.loader.exec_module(trigger_backup)
+from tools import trigger_backup
 
 
 class FakeResponse:
@@ -83,7 +74,7 @@ class RedirectingHttpsAdapter(BaseHandler):
         )
 
 
-def test_POST_Bearer로_검증완료_응답을_받는다(monkeypatch) -> None:
+def test_POST_Bearer로_검증완료_응답을_받는다() -> None:
     captured = {}
 
     class FakeOpener:
@@ -103,27 +94,29 @@ def test_POST_Bearer로_검증완료_응답을_받는다(monkeypatch) -> None:
 
     def fake_build_opener(*handlers):
         assert len(handlers) == 1
-        assert isinstance(handlers[0], trigger_backup._FailClosedRedirectHandler)
+        assert isinstance(
+            handlers[0], trigger_backup.internal_trigger.FailClosedRedirectHandler
+        )
         return FakeOpener()
 
-    monkeypatch.setattr(trigger_backup, "build_opener", fake_build_opener)
-
     payload = trigger_backup.trigger_once(
-        "https://service.example/internal/backup/run", "x" * 32
+        "https://service.example/internal/backup/run",
+        "x" * 32,
+        opener_factory=fake_build_opener,
     )
 
     assert payload["sha256"] == "b" * 64
     assert captured == {
         "method": "POST",
         "authorization": "Bearer " + "x" * 32,
-        "timeout": trigger_backup.TIMEOUT_SEC,
+        "timeout": trigger_backup.internal_trigger.TIMEOUT_SEC,
     }
 
 
 @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
 @pytest.mark.parametrize("redirect_host", ["service.example", "other.example"])
 def test_리디렉션은_Bearer를_재전송하지_않고_실패한다(
-    monkeypatch, status: int, redirect_host: str
+    status: int, redirect_host: str
 ) -> None:
     secret = "do-not-forward-this-backup-secret"
     source_url = "https://service.example/internal/backup/run"
@@ -132,19 +125,17 @@ def test_리디렉션은_Bearer를_재전송하지_않고_실패한다(
         f"https://{redirect_host}/internal/backup/run?token=" + redirect_query
     )
     adapter = RedirectingHttpsAdapter(status=status, location=redirect_url)
-    real_build_opener = trigger_backup.build_opener
+    real_build_opener = trigger_backup.internal_trigger.build_opener
 
     def build_opener_with_adapter(*handlers):
         return real_build_opener(*handlers, adapter)
 
-    monkeypatch.setattr(
-        trigger_backup,
-        "build_opener",
-        build_opener_with_adapter,
-    )
-
     with pytest.raises(trigger_backup.TriggerError) as raised:
-        trigger_backup.trigger_once(source_url, secret)
+        trigger_backup.trigger_once(
+            source_url,
+            secret,
+            opener_factory=build_opener_with_adapter,
+        )
 
     assert str(raised.value) == f"백업 서버가 HTTP {status}을 반환했습니다"
     assert secret not in str(raised.value)

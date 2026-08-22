@@ -54,6 +54,7 @@ BETA_PUBLIC_PATHS: Final[frozenset[str]] = frozenset(
         "/healthz",
         "/readyz",
         "/internal/backup/run",
+        "/internal/maintenance/run",
     }
 )
 BETA_PUBLIC_PATH_PREFIXES: Final[tuple[str, ...]] = ("/static/", "/k/")

@@ -2,97 +2,40 @@
 
 from __future__ import annotations
 
-import json
-import os
 import sys
 from typing import Final, Sequence
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+from tools import internal_trigger
 
 
 ENV_TRIGGER_URL: Final[str] = "BACKUP_TRIGGER_URL"
 ENV_TRIGGER_SECRET: Final[str] = "BACKUP_TRIGGER_SECRET"
 ENDPOINT_PATH: Final[str] = "/internal/backup/run"
-MIN_SECRET_BYTES: Final[int] = 32
-TIMEOUT_SEC: Final[int] = 300
-MAX_RESPONSE_BYTES: Final[int] = 64 * 1024
-
-
-class TriggerError(RuntimeError):
-    """백업 요청이 성공·검증 응답까지 끝나지 않았다."""
-
-
-class _FailClosedRedirectHandler(HTTPRedirectHandler):
-    """Bearer 자격 증명이 후속 URL로 전달되지 않도록 리디렉션을 거부한다."""
-
-    def redirect_request(
-        self,
-        request,
-        fp,
-        code,
-        msg,
-        headers,
-        newurl,
-    ):
-        return None
+TriggerError = internal_trigger.TriggerError
 
 
 def _config_from_env() -> tuple[str, str]:
-    url = os.environ.get(ENV_TRIGGER_URL, "").strip()
-    secret = os.environ.get(ENV_TRIGGER_SECRET, "").strip()
-    try:
-        parsed = urlsplit(url)
-    except ValueError as exc:
-        raise TriggerError("BACKUP_TRIGGER_URL 형식이 올바르지 않습니다") from exc
-    if (
-        parsed.scheme != "https"
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-        or parsed.path != ENDPOINT_PATH
-    ):
-        raise TriggerError(
-            "BACKUP_TRIGGER_URL은 /internal/backup/run으로 끝나는 HTTPS 주소여야 합니다"
-        )
-    if len(secret.encode("utf-8")) < MIN_SECRET_BYTES:
-        raise TriggerError(
-            f"BACKUP_TRIGGER_SECRET은 {MIN_SECRET_BYTES}바이트 이상이어야 합니다"
-        )
-    return url, secret
-
-
-def trigger_once(url: str, secret: str) -> dict:
-    request = Request(
-        url,
-        data=b"",
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {secret}",
-            "Accept": "application/json",
-            "User-Agent": "company-analysis-backup-cron/1",
-        },
+    return internal_trigger.load_exact_https_config(
+        url_env=ENV_TRIGGER_URL,
+        secret_env=ENV_TRIGGER_SECRET,
+        endpoint_path=ENDPOINT_PATH,
     )
-    try:
-        opener = build_opener(_FailClosedRedirectHandler())
-        with opener.open(request, timeout=TIMEOUT_SEC) as response:  # noqa: S310
-            status = int(getattr(response, "status", 0))
-            payload_bytes = response.read(MAX_RESPONSE_BYTES + 1)
-    except HTTPError as exc:
-        raise TriggerError(f"백업 서버가 HTTP {exc.code}을 반환했습니다") from exc
-    except (OSError, URLError) as exc:
-        raise TriggerError("백업 서버에 안전하게 연결하지 못했습니다") from exc
-    if status != 200:
-        raise TriggerError(f"백업 서버가 HTTP {status}을 반환했습니다")
-    if len(payload_bytes) > MAX_RESPONSE_BYTES:
-        raise TriggerError("백업 서버 응답이 허용 크기를 넘었습니다")
-    try:
-        payload = json.loads(payload_bytes.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise TriggerError("백업 서버 응답을 확인할 수 없습니다") from exc
-    if not isinstance(payload, dict) or payload.get("status") != "ok":
+
+
+def trigger_once(
+    url: str,
+    secret: str,
+    *,
+    opener_factory: internal_trigger.OpenerFactory = internal_trigger.build_opener,
+) -> dict:
+    payload = internal_trigger.post_json(
+        url=url,
+        secret=secret,
+        service_name="백업",
+        user_agent="company-analysis-backup-cron/1",
+        opener_factory=opener_factory,
+    )
+    if payload.get("status") != "ok":
         raise TriggerError("백업 서버가 완료 상태를 반환하지 않았습니다")
     digest = str(payload.get("sha256", ""))
     if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):

@@ -19,7 +19,16 @@ from src.features.sharelink.constants import KEY_COOKIE_NAME
 from src.features.sharelink.access_log import install_uvicorn_access_log_filter
 from src.web import request_helpers, runtime
 from src.web.response_security import ResponseSecurityMiddleware
-from src.web.routers import admin, analysis, auth, backup, dashboard, health, reports
+from src.web.routers import (
+    admin,
+    analysis,
+    auth,
+    backup,
+    dashboard,
+    health,
+    maintenance,
+    reports,
+)
 from src.web.security import RequestBodyLimitMiddleware
 
 
@@ -72,6 +81,7 @@ app.add_middleware(ResponseSecurityMiddleware)
 
 app.include_router(health.router)
 app.include_router(backup.router)
+app.include_router(maintenance.router)
 app.include_router(analysis.router)
 app.include_router(reports.router)
 app.include_router(auth.router)

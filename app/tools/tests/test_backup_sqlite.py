@@ -78,6 +78,19 @@ def test_파일이_바뀌면_체크섬_검증이_막는다(tmp_path: Path) -> No
         backup_sqlite.verify_backup(result.backup_path)
 
 
+def test_손상파일에_맞춘_체크섬도_SQLite_무결성검사가_막는다(tmp_path: Path) -> None:
+    damaged = tmp_path / "damaged.sqlite3"
+    damaged.write_bytes(b"not-a-sqlite-database")
+    digest = backup_sqlite.sha256_file(damaged)
+    backup_sqlite.checksum_path_for(damaged).write_text(
+        f"{digest}  {damaged.name}\n",
+        encoding="ascii",
+    )
+
+    with pytest.raises(backup_sqlite.BackupError, match="SQLite DB"):
+        backup_sqlite.verify_backup(damaged)
+
+
 def test_원문_공유열쇠가_있는_구형DB는_백업을_거부한다(tmp_path: Path) -> None:
     source = tmp_path / "legacy.db"
     raw_key = "ab" * 16
@@ -212,3 +225,40 @@ def test_완성된_DB를_빈_중간상태_없이_한번에_게시한다(
 
     with sqlite3.connect(target) as conn:
         assert conn.execute("SELECT value FROM records").fetchone()[0] == "완전한 기록"
+
+
+def test_임시_WAL_DB의_백업_SHA256_복구후_전체데이터가_일치한다(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.db"
+    with sqlite3.connect(source) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            "CREATE TABLE records ("
+            "id INTEGER PRIMARY KEY, value TEXT NOT NULL, payload BLOB NOT NULL)"
+        )
+        conn.executemany(
+            "INSERT INTO records (value, payload) VALUES (?, ?)",
+            [
+                ("첫 기록", b"\x00\x01"),
+                ("한글·특수문자 !@#", bytes(range(32))),
+                ("최신 WAL 기록", b"latest"),
+            ],
+        )
+        conn.commit()
+        expected = conn.execute(
+            "SELECT id, value, payload FROM records ORDER BY id"
+        ).fetchall()
+
+        backup = backup_sqlite.create_backup(source, tmp_path / "backups")
+
+    assert backup_sqlite.verify_backup(backup.backup_path) == backup.sha256
+    assert backup.sha256 == hashlib.sha256(backup.backup_path.read_bytes()).hexdigest()
+
+    restored = tmp_path / "restored.db"
+    backup_sqlite.restore_backup(backup.backup_path, restored)
+    with sqlite3.connect(restored) as conn:
+        actual = conn.execute(
+            "SELECT id, value, payload FROM records ORDER BY id"
+        ).fetchall()
+    assert actual == expected

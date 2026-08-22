@@ -516,28 +516,107 @@ def operation_key(operation: str, period_key: str) -> str:
 
 
 def claim_operation(
-    conn: sqlite3.Connection, *, operation: str, period_key: str, actor_email: str, now_iso: str
+    conn: sqlite3.Connection,
+    *,
+    operation: str,
+    period_key: str,
+    actor_email: str,
+    now_iso: str,
+    reclaim_before_iso: str = "",
 ) -> str | None:
-    """동일 주간 파일·정리 요청은 한 번만 시작하도록 SQLite claim을 남긴다."""
+    """성공 작업만 닫고, 실패·오래 멈춘 작업은 원자적으로 재점유한다."""
     key = operation_key(operation, period_key)
+    clean_operation = _clean(operation, maximum=40)
+    clean_period = _clean(period_key, maximum=40)
+    clean_now = _clean(now_iso, maximum=40)
+    clean_reclaim_before = _clean(reclaim_before_iso, maximum=40)
+    try:
+        parsed_now = datetime.fromisoformat(clean_now)
+        parsed_reclaim_before = (
+            datetime.fromisoformat(clean_reclaim_before)
+            if clean_reclaim_before
+            else None
+        )
+    except ValueError as exc:
+        raise ValueError("정기 작업 점유 시각이 올바르지 않습니다") from exc
+    if parsed_now.tzinfo is None or (
+        parsed_reclaim_before is not None and parsed_reclaim_before.tzinfo is None
+    ):
+        raise ValueError("정기 작업 점유 시각에는 시간대가 필요합니다")
+    if parsed_reclaim_before is not None and parsed_reclaim_before > parsed_now:
+        raise ValueError("정기 작업 재점유 기준은 실행 시각보다 늦을 수 없습니다")
     actor = actor_digest(actor_email)
     if not conn.in_transaction:
         conn.execute("BEGIN IMMEDIATE")
-    cursor = conn.execute(
-        f"""INSERT OR IGNORE INTO {TABLE_OPERATION_CLAIMS}
-        (operation_key, operation, period_key, status, started_at, actor)
-        VALUES (?, ?, ?, 'running', ?, ?)""",
-        (key, _clean(operation, maximum=40), _clean(period_key, maximum=40), now_iso, actor),
-    )
-    if cursor.rowcount != 1:
+    row = conn.execute(
+        f"""SELECT status, started_at FROM {TABLE_OPERATION_CLAIMS}
+        WHERE operation_key = ?""",
+        (key,),
+    ).fetchone()
+    detail = ""
+    if row is None:
+        cursor = conn.execute(
+            f"""INSERT OR IGNORE INTO {TABLE_OPERATION_CLAIMS}
+            (operation_key, operation, period_key, status, started_at, actor)
+            VALUES (?, ?, ?, 'running', ?, ?)""",
+            (key, clean_operation, clean_period, clean_now, actor),
+        )
+        if cursor.rowcount != 1:
+            return None
+    elif str(row["status"]) == "succeeded":
         return None
+    elif str(row["status"]) == "failed":
+        cursor = conn.execute(
+            f"""UPDATE {TABLE_OPERATION_CLAIMS}
+            SET status = 'running', started_at = ?, finished_at = '', actor = ?
+            WHERE operation_key = ? AND status = 'failed'""",
+            (clean_now, actor, key),
+        )
+        if cursor.rowcount != 1:
+            return None
+        detail = "failed_retry"
+    else:
+        if parsed_reclaim_before is None:
+            return None
+        try:
+            started_at = datetime.fromisoformat(str(row["started_at"]))
+        except ValueError:
+            return None
+        if started_at.tzinfo is None or started_at >= parsed_reclaim_before:
+            return None
+        cursor = conn.execute(
+            f"""UPDATE {TABLE_OPERATION_CLAIMS}
+            SET started_at = ?, finished_at = '', actor = ?
+            WHERE operation_key = ? AND status = 'running' AND started_at = ?""",
+            (clean_now, actor, key, str(row["started_at"])),
+        )
+        if cursor.rowcount != 1:
+            return None
+        conn.execute(
+            f"""INSERT INTO {TABLE_OPERATION_EVENTS}
+            (operation_key, operation, status, detail, actor, created_at)
+            VALUES (?, ?, 'failed', 'stale_running_reclaimed', ?, ?)""",
+            (key, clean_operation, actor, clean_now),
+        )
+        detail = "stale_retry"
     conn.execute(
         f"""INSERT INTO {TABLE_OPERATION_EVENTS}
         (operation_key, operation, status, detail, actor, created_at)
-        VALUES (?, ?, 'running', '', ?, ?)""",
-        (key, _clean(operation, maximum=40), actor, now_iso),
+        VALUES (?, ?, 'running', ?, ?, ?)""",
+        (key, clean_operation, detail, actor, clean_now),
     )
     return key
+
+
+def operation_claim_status(
+    conn: sqlite3.Connection, *, operation: str, period_key: str
+) -> str:
+    """현재 claim projection 상태를 반환한다. 기록이 없으면 빈 문자열이다."""
+    row = conn.execute(
+        f"SELECT status FROM {TABLE_OPERATION_CLAIMS} WHERE operation_key = ?",
+        (operation_key(operation, period_key),),
+    ).fetchone()
+    return "" if row is None else str(row["status"])
 
 
 def complete_operation(

@@ -183,3 +183,34 @@ def test_환경설정은_HTTP_endpoint와_짧은_호출비밀을_거부한다(mo
     monkeypatch.setenv(s3.ENV_TRIGGER_SECRET, "short")
     with pytest.raises(s3.BackupConfigurationError, match="32바이트"):
         s3.trigger_secret_from_env()
+
+
+def test_같은_프로세스의_백업_중복실행을_즉시_거부한다(tmp_path: Path) -> None:
+    source = tmp_path / "storage.db"
+    _database(source)
+    assert s3._RUN_LOCK.acquire(blocking=False)
+    try:
+        with pytest.raises(s3.BackupAlreadyRunning, match="이미 실행 중"):
+            s3.run_backup(config=_config(), source_path=source, now=NOW)
+    finally:
+        s3._RUN_LOCK.release()
+
+
+def test_실패한_백업은_잠금을_풀어_다음_실행을_허용한다(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "storage.db"
+    _database(source)
+    first_client = FakeS3()
+    first_client.bad_head = True
+    second_client = FakeS3()
+    clients = iter((first_client, second_client))
+    monkeypatch.setattr(s3, "_new_s3_client", lambda _config: next(clients))
+
+    with pytest.raises(s3.ExternalBackupError):
+        s3.run_backup(config=_config(), source_path=source, now=NOW)
+
+    result = s3.run_backup(config=_config(), source_path=source, now=NOW)
+
+    assert result.object_key in second_client.objects
+    assert result.checksum_key in second_client.objects

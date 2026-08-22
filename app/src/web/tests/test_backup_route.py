@@ -6,8 +6,11 @@ from fastapi.testclient import TestClient
 
 from src.features.auth import constants as auth_constants
 from src.features.backup import s3
+from src.features.backup import status as backup_status
 from src.web import main
 from src.web.routers import backup as backup_router
+from src.features.storage import constants as storage_constants
+from src.features.storage import db as storage_db
 
 
 SECRET = "backup-trigger-secret-that-is-at-least-32-bytes"
@@ -32,17 +35,26 @@ def test_관리자로그인벽_안에서도_Bearer_없이는_백업을_실행하
             headers={"Authorization": "Bearer wrong-secret"},
             follow_redirects=False,
         )
+        non_ascii = client.post(
+            "/internal/backup/run",
+            headers=[(b"authorization", b"Bearer \xe9")],
+            follow_redirects=False,
+        )
 
     assert missing.status_code == 401
     assert wrong.status_code == 401
+    assert non_ascii.status_code == 401
     assert missing.headers["www-authenticate"] == "Bearer"
     assert "location" not in missing.headers
     assert not called
 
 
-def test_올바른_호출비밀이면_원격검증_결과만_돌려준다(monkeypatch) -> None:
+def test_올바른_호출비밀이면_원격검증_결과와_성공상태를_남긴다(
+    monkeypatch, tmp_path
+) -> None:
     monkeypatch.setenv(auth_constants.ENV_BETA_ADMIN_ONLY, "1")
     monkeypatch.setenv(s3.ENV_TRIGGER_SECRET, SECRET)
+    monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(tmp_path / "storage.db"))
     monkeypatch.setattr(
         backup_router.backup_service,
         "run_backup",
@@ -69,12 +81,18 @@ def test_올바른_호출비밀이면_원격검증_결과만_돌려준다(monkey
         "deleted_objects": 2,
     }
     assert response.headers["cache-control"] == "private, no-store"
+    with storage_db.connect() as conn:
+        state = backup_status.load(conn)
+    assert state is not None
+    assert state.latest_outcome == backup_status.OUTCOME_SUCCEEDED
+    assert state.last_success_at
 
 
 def test_설정이나_외부저장소_오류의_내부내용은_응답에_노출하지_않는다(
-    monkeypatch,
+    monkeypatch, tmp_path
 ) -> None:
     monkeypatch.setenv(s3.ENV_TRIGGER_SECRET, SECRET)
+    monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(tmp_path / "storage.db"))
 
     def fail():
         raise s3.ExternalBackupError("bucket-and-private-detail")
@@ -89,6 +107,12 @@ def test_설정이나_외부저장소_오류의_내부내용은_응답에_노출
     assert response.status_code == 503
     assert response.json() == {"status": "failed"}
     assert "bucket-and-private-detail" not in response.text
+    with storage_db.connect() as conn:
+        state = backup_status.load(conn)
+    assert state is not None
+    assert state.latest_outcome == backup_status.OUTCOME_FAILED
+    assert state.last_failure_summary == backup_status.FAILURE_EXECUTION
+    assert "bucket-and-private-detail" not in state.last_failure_summary
 
 
 def test_백업이_이미_돌고_있으면_재시도_시간을_알린다(monkeypatch) -> None:
