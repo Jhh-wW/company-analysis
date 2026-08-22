@@ -379,6 +379,34 @@ def test_GATE_STOPPED_사유를_checkpoint_journal_SHA에_함께_봉인한다(tm
     assert sealed[0] == hashlib.sha256(checkpoint.path.read_bytes()).hexdigest()
 
 
+def test_원장과_최종게이트는_한연결의_명시적_snapshot에서_읽는다(
+    tmp_path, monkeypatch
+):
+    runner, client, db, checkpoint = _runner(tmp_path, _terminal_resume_handler)
+    try:
+        _seed_running_gate_result(runner, db, checkpoint, include_diagnostic=True)
+        original_connect = runner._connect_storage
+        statements: list[str] = []
+        connection_count = 0
+
+        def counted_connect():
+            nonlocal connection_count
+            connection_count += 1
+            conn = original_connect()
+            conn.set_trace_callback(statements.append)
+            return conn
+
+        monkeypatch.setattr(runner, "_connect_storage", counted_connect)
+        ledger = runner._read_ledger(RUN_ID)
+    finally:
+        client.close()
+
+    assert ledger is not None
+    assert ledger.final_gate_reason == FINAL_GATE_REASON_COMPARISON_BLOCKED
+    assert connection_count == 1
+    assert statements[0].upper() == "BEGIN"
+
+
 def test_GATE_STOPPED_진단행이_없으면_다음_유료호출을_차단한다(tmp_path):
     runner, client, db, checkpoint = _runner(tmp_path, _terminal_resume_handler)
     try:

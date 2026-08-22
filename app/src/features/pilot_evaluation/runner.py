@@ -2384,6 +2384,10 @@ class CanonicalPilotRunner:
 
     def _read_ledger(self, run_id: str) -> LedgerResult | None:
         with self._connect_storage() as conn:
+            # Python sqlite3는 SELECT만으로 읽기 transaction을 자동 시작하지
+            # 않는다. lifecycle·비용·보고서·최종 게이트가 한 WAL snapshot을
+            # 가리키도록 첫 SELECT 전에 명시적으로 연다.
+            conn.execute("BEGIN")
             # A brand-new launcher DB has not recorded a run yet, so the
             # feature-owned cost table legitimately does not exist at dry-run
             # time.  Once a run finishes, absence is still not evidence: keep
@@ -2419,80 +2423,78 @@ class CanonicalPilotRunner:
                 "SELECT report_id, corp_id FROM reports WHERE report_id=?",
                 (run_id,),
             ).fetchone()
-        if row is None:
-            return None
-        if lifecycle_row is None:
-            return None
-        lifecycle_state = str(lifecycle_row[0])
-        if lifecycle_state in {"pending", "running"}:
-            return None
-        if lifecycle_state != "final":
-            raise _LedgerConsistencyError(
-                "ledger_lifecycle_invalid",
-                "실행 lifecycle 상태가 비용 원장 마감과 일치하지 않아 다음 호출을 차단했습니다",
-            )
-        try:
-            lifecycle_record = json.loads(str(lifecycle_row[1]))
-            lifecycle_run_id = str(lifecycle_record.get("run_id", ""))
-            lifecycle_cost = float(lifecycle_record.get("cost_krw"))
-        except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise _LedgerConsistencyError(
-                "ledger_lifecycle_record_invalid",
-                "실행 lifecycle 최종 기록이 올바르지 않아 다음 호출을 차단했습니다",
-            ) from exc
-        if (
-            lifecycle_run_id != run_id
-            or not math.isfinite(lifecycle_cost)
-            or lifecycle_cost < 0
-        ):
-            raise _LedgerConsistencyError(
-                "ledger_lifecycle_record_invalid",
-                "실행 lifecycle 최종 기록이 올바르지 않아 다음 호출을 차단했습니다",
-            )
-        outcome = str(row[0])
-        try:
-            cost = float(row[1])
-            spend_cost = float(spend_row[1]) if spend_row is not None else 0.0
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise _LedgerConsistencyError(
-                "ledger_cost_invalid",
-                "비용 원장의 내부 AI 원가가 올바르지 않아 다음 호출을 차단했습니다",
-            ) from exc
-        if outcome not in _KNOWN_OUTCOMES:
-            raise _LedgerConsistencyError(
-                "ledger_outcome_invalid",
-                "비용 원장의 종료값이 올바르지 않아 다음 호출을 차단했습니다",
-            )
-        if (
-            not math.isfinite(cost)
-            or cost < 0
-            or not math.isfinite(spend_cost)
-            or spend_cost < 0
-        ):
-            raise _LedgerConsistencyError(
-                "ledger_cost_invalid",
-                "비용 원장의 내부 AI 원가가 올바르지 않아 다음 호출을 차단했습니다",
-            )
-        if not math.isclose(cost, spend_cost, rel_tol=1e-9, abs_tol=1e-6):
-            raise _LedgerConsistencyError(
-                "ledger_cost_mismatch",
-                "요청별 비용 합계와 내부 AI 원가가 달라 다음 호출을 차단했습니다",
-            )
-        if not math.isclose(cost, lifecycle_cost, rel_tol=1e-9, abs_tol=1e-6):
-            raise _LedgerConsistencyError(
-                "ledger_lifecycle_cost_mismatch",
-                "실행 lifecycle 원가와 내부 AI 원가가 달라 다음 호출을 차단했습니다",
-            )
-        if outcome == Outcome.REPORT.value and report is None:
-            return None
-        if outcome != Outcome.REPORT.value and report is not None:
-            raise _LedgerConsistencyError(
-                "ledger_outcome_report_mismatch",
-                "종료값과 저장 보고서 존재 여부가 달라 다음 호출을 차단했습니다",
-            )
-        try:
-            with self._connect_storage() as conn:
-                conn.execute("BEGIN")
+            if row is None:
+                return None
+            if lifecycle_row is None:
+                return None
+            lifecycle_state = str(lifecycle_row[0])
+            if lifecycle_state in {"pending", "running"}:
+                return None
+            if lifecycle_state != "final":
+                raise _LedgerConsistencyError(
+                    "ledger_lifecycle_invalid",
+                    "실행 lifecycle 상태가 비용 원장 마감과 일치하지 않아 다음 호출을 차단했습니다",
+                )
+            try:
+                lifecycle_record = json.loads(str(lifecycle_row[1]))
+                lifecycle_run_id = str(lifecycle_record.get("run_id", ""))
+                lifecycle_cost = float(lifecycle_record.get("cost_krw"))
+            except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise _LedgerConsistencyError(
+                    "ledger_lifecycle_record_invalid",
+                    "실행 lifecycle 최종 기록이 올바르지 않아 다음 호출을 차단했습니다",
+                ) from exc
+            if (
+                lifecycle_run_id != run_id
+                or not math.isfinite(lifecycle_cost)
+                or lifecycle_cost < 0
+            ):
+                raise _LedgerConsistencyError(
+                    "ledger_lifecycle_record_invalid",
+                    "실행 lifecycle 최종 기록이 올바르지 않아 다음 호출을 차단했습니다",
+                )
+            outcome = str(row[0])
+            try:
+                cost = float(row[1])
+                spend_cost = float(spend_row[1]) if spend_row is not None else 0.0
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise _LedgerConsistencyError(
+                    "ledger_cost_invalid",
+                    "비용 원장의 내부 AI 원가가 올바르지 않아 다음 호출을 차단했습니다",
+                ) from exc
+            if outcome not in _KNOWN_OUTCOMES:
+                raise _LedgerConsistencyError(
+                    "ledger_outcome_invalid",
+                    "비용 원장의 종료값이 올바르지 않아 다음 호출을 차단했습니다",
+                )
+            if (
+                not math.isfinite(cost)
+                or cost < 0
+                or not math.isfinite(spend_cost)
+                or spend_cost < 0
+            ):
+                raise _LedgerConsistencyError(
+                    "ledger_cost_invalid",
+                    "비용 원장의 내부 AI 원가가 올바르지 않아 다음 호출을 차단했습니다",
+                )
+            if not math.isclose(cost, spend_cost, rel_tol=1e-9, abs_tol=1e-6):
+                raise _LedgerConsistencyError(
+                    "ledger_cost_mismatch",
+                    "요청별 비용 합계와 내부 AI 원가가 달라 다음 호출을 차단했습니다",
+                )
+            if not math.isclose(cost, lifecycle_cost, rel_tol=1e-9, abs_tol=1e-6):
+                raise _LedgerConsistencyError(
+                    "ledger_lifecycle_cost_mismatch",
+                    "실행 lifecycle 원가와 내부 AI 원가가 달라 다음 호출을 차단했습니다",
+                )
+            if outcome == Outcome.REPORT.value and report is None:
+                return None
+            if outcome != Outcome.REPORT.value and report is not None:
+                raise _LedgerConsistencyError(
+                    "ledger_outcome_report_mismatch",
+                    "종료값과 저장 보고서 존재 여부가 달라 다음 호출을 차단했습니다",
+                )
+            try:
                 final_gate_reason = read_bound_reason(
                     conn,
                     run_id=run_id,
@@ -2500,20 +2502,20 @@ class CanonicalPilotRunner:
                     gate_stopped_outcome=Outcome.GATE_STOPPED.value,
                     lifecycle_record=lifecycle_record,
                 )
-        except (FinalGateEvidenceError, sqlite3.Error) as exc:
-            raise _LedgerConsistencyError(
-                "final_gate_evidence_invalid",
-                "최종 게이트 진단이 lifecycle·종료값과 달라 다음 호출을 차단했습니다",
-            ) from exc
-        return LedgerResult(
-            outcome=outcome,
-            cost_krw=cost,
-            billing_uncertain=inflight > 0,
-            report_id=str(report[0]) if report is not None else "",
-            corp_id=str(report[1]) if report is not None else "",
-            automatic_release_sha256=str(row[2] or ""),
-            final_gate_reason=final_gate_reason,
-        )
+            except (FinalGateEvidenceError, sqlite3.Error) as exc:
+                raise _LedgerConsistencyError(
+                    "final_gate_evidence_invalid",
+                    "최종 게이트 진단이 lifecycle·종료값과 달라 다음 호출을 차단했습니다",
+                ) from exc
+            return LedgerResult(
+                outcome=outcome,
+                cost_krw=cost,
+                billing_uncertain=inflight > 0,
+                report_id=str(report[0]) if report is not None else "",
+                corp_id=str(report[1]) if report is not None else "",
+                automatic_release_sha256=str(row[2] or ""),
+                final_gate_reason=final_gate_reason,
+            )
 
     def _wait_for_ledger(self, run_id: str) -> LedgerResult | None:
         deadline = time.monotonic() + self.ledger_settle_timeout_sec
