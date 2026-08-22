@@ -3,6 +3,7 @@
 /*
 !/.gitignore
 !/.dockerignore
+!/pytest.ini
 !/.github/
 !/.github/dependabot.yml
 !/.github/requirements-ci.txt
@@ -31,8 +32,12 @@
 !/app/src/
 !/app/tools/
 /app/tools/*
+!/app/tools/__init__.py
 !/app/tools/backup_sqlite.py
+!/app/tools/internal_trigger.py
 !/app/tools/trigger_backup.py
+!/app/tools/trigger_maintenance.py
+!/app/tools/container_entrypoint.sh
 !/app/tools/run_canonical_pilot25.py
 !/app/tools/tests/
 
@@ -89,6 +94,7 @@ __pycache__/
 .pytest_cache/
 *.py[cod]
 **/.pytest_tmp_*/
+/.local-artifacts/
 /app/.local_demo/
 .playwright-mcp/
 .coverage

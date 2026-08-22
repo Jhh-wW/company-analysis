@@ -128,7 +128,8 @@ def test_exact_derived_acronym_and_typo_blocks_preserve_intent_and_abstain():
         assert generate_dart_company_matches(index, rejected, limit=3) == ()
 
 
-def test_available_local_full_catalog_keeps_YG_target_inside_profile_lookahead():
+@pytest.mark.local_integration
+def test_로컬통합_full_catalog_keeps_YG_target_inside_profile_lookahead():
     app_root = Path(__file__).resolve().parents[4]
     cached_xml = tuple(
         (app_root / ".local_evaluation_runs").glob(
@@ -136,7 +137,9 @@ def test_available_local_full_catalog_keeps_YG_target_inside_profile_lookahead()
         )
     )
     if not cached_xml:
-        pytest.skip("무과금 로컬 DART 전체 목록 cache가 없는 환경")
+        pytest.fail(
+            "로컬 통합 시험을 선택했지만 DART CORPCODE.xml cache를 찾지 못했습니다"
+        )
 
     newest_xml = max(cached_xml, key=lambda item: item.stat().st_mtime_ns)
     records = parse_dart_company_records(newest_xml)

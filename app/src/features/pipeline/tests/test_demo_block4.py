@@ -9,8 +9,6 @@ AI를 부르지 않으므로 돈이 들지 않는다.
 
 from __future__ import annotations
 
-from functools import lru_cache
-
 import pytest
 
 from src.core.constants import CELL_LABELS, SITUATION_CELLS
@@ -19,14 +17,13 @@ from src.features.pipeline.demo import (
     _PROBLEM_CELL,
     _REDRAWN_NOTICE,
     _SITUATION_MAX_LINES,
-    _load_report,
     _news_sentences,
     _pick_situation_lines,
     _redraw_situation,
-    available_companies,
-    _find_record,
 )
-from src.features.pipeline.port import Outcome, ReportSection
+from src.features.pipeline.canonical_demo import build_demo_report
+from src.features.pipeline.port import ReportSection
+from src.features.report_standard.constants import CANONICAL_SECTION_IDS
 from src.features.spanselect.constants import NEWS_FRAGMENT_KIND
 
 #: 저장된 보고서에 남아 있던 «거짓 사유». 기사를 6건이나 채택한 회사에도 붙어 있었다.
@@ -325,90 +322,55 @@ def test_잘리거나_짧은_토막은_문장으로_안_센다(원문, 남는수
 
 
 # ══════════════════════════════════════════════════════════
-# ★ 실측 회귀 — 데모 15곳을 실제로 돌려 못 박는다
+# ★ 저장소 안의 개인정보 없는 작은 fixture 회귀
 # ══════════════════════════════════════════════════════════
-# 이 숫자가 바뀌면 «화면에 실제로 보이는 것»이 바뀐 것이다. 고치기 전에 눈으로 확인할 것.
-
-#: 4번(4-1·4-2·4-3)에 문장이 한 줄이라도 들어가는 회사 수. 재도출 전에는 2곳이었다.
-_EXPECTED_SITUATION_FILLED = 9
 
 
-@lru_cache(maxsize=1)
-def _demo_reports() -> tuple[tuple[str, object], ...]:
-    """데모에서 보고서가 나오는 회사를 전부 한 번씩 만들어 둔다 (시험 여러 개가 나눠 쓴다)."""
-    made = []
-    for item in available_companies():
-        if item["outcome"] != Outcome.REPORT.value:
-            continue
-        record = _find_record(item["company"])
-        report = _load_report(record) if record else None
-        if report is not None:
-            made.append((item["company"], report))
-    return tuple(made)
+def test_작은fixture의_쓸수있는_기사는_4번에_채워진다(monkeypatch):
+    sentence = "시험회사가 자동화 설비를 출시하고 해외 고객사 공급을 확대했다."
+    sections, _redrawn = _run_redraw(
+        monkeypatch,
+        [_news(1, "시험회사 공급 확대", sentence)],
+    )
+
+    assert sentence in _lines_of(sections)
+    assert any(section.lines for section in sections)
 
 
-def _cells_of(report) -> dict[str, ReportSection]:
-    return {s.cell: s for s in report.sections}
+def test_작은fixture의_canonical_데모는_현재_9개_정본장만_가진다():
+    report = build_demo_report()
+
+    assert tuple(section.cell for section in report.sections) == CANONICAL_SECTION_IDS
+    assert all(section.lines for section in report.sections)
 
 
-def test_실측_4번이_채워지는_회사_수():
-    reports = _demo_reports()
-    if not reports:
-        pytest.skip("데모 데이터 없음")
+def test_작은fixture의_재도출_안내는_회사사실로_재사용되지_않는다(monkeypatch):
+    sections, _redrawn = _run_redraw(
+        monkeypatch,
+        [_news(1, "시험회사 신제품", "시험회사가 산업용 센서를 출시했다.")],
+    )
 
-    filled = [
-        company
-        for company, report in reports
-        if any(_cells_of(report).get(c) and _cells_of(report)[c].lines for c in SITUATION_CELLS)
-    ]
-    assert len(filled) == _EXPECTED_SITUATION_FILLED, f"4번이 채워진 곳: {filled}"
+    assert _REDRAWN_NOTICE not in _lines_of(sections)
 
 
-def test_실측_보고서는_8번_교차표_대신_일반_활용칸을_가진다():
-    reports = _demo_reports()
-    if not reports:
-        pytest.skip("데모 데이터 없음")
+def test_작은fixture의_감사의견과_시세는_4번에서_제외된다(monkeypatch):
+    sections, _redrawn = _run_redraw(
+        monkeypatch,
+        [
+            _news(1, "시험회사 감사", "시험회사는 계속기업 존속능력에 유의적 의문이 있다."),
+            _news(2, "시험회사 주가", "시험회사의 주가는 장중 10퍼센트 급등했다."),
+        ],
+    )
 
-    for company, report in reports:
-        cells = _cells_of(report)
-        assert not ({"5", "6", "7", "8"} & set(cells)), company
-        assert "활용" in cells, company
-
-
-def test_실측_재도출_안내줄은_활용칸의_회사사실로_재사용되지_않는다():
-    """안내는 회사 사실이 아니므로 활용 칸의 인용 문장으로 섞이면 안 된다."""
-    for company, report in _demo_reports():
-        use = _cells_of(report)["활용"]
-        assert all(sentence != _REDRAWN_NOTICE for sentence, _cite in use.lines), company
+    assert _lines_of(sections) == []
 
 
-def test_실측_재도출한_4번에_감사의견_시세_문장이_하나도_없다():
-    """★ 완료 기준 3 — 하나라도 있으면 실패다."""
-    from src.features.spanselect.logic import is_audit_opinion
+def test_작은fixture에_기사가_있으면_기사없음_사유를_그대로_두지않는다(monkeypatch):
+    sections, _redrawn = _run_redraw(
+        monkeypatch,
+        [_news(1, "시험회사 공장", "시험회사가 국내 생산 설비를 증설했다.")],
+    )
 
-    for company, report in _demo_reports():
-        cells = _cells_of(report)
-        for cell in SITUATION_CELLS:
-            section = cells.get(cell)
-            if section is None:
-                continue
-            for text, cite in section.lines:
-                if not cite.endswith(NEWS_FRAGMENT_KIND):
-                    continue  # 재도출한 뉴스 문장만 본다 (공시 문장은 1판이 고른 것)
-                assert not is_audit_opinion(text), f"{company} {cell}에 감사의견 문구"
-
-
-def test_실측_기사가_있는_회사에_기사_없음_사유가_남지_않는다():
-    """★ 완료 기준 4 — 빈칸 사유가 사실과 어긋나지 않는다."""
-    for company, report in _demo_reports():
-        record = _find_record(company)
-        if not demo._news_fragment_count(str(record.get("id", ""))):
-            continue
-        cells = _cells_of(report)
-        for cell in SITUATION_CELLS:
-            section = cells.get(cell)
-            if section is None or section.lines:
-                continue
-            assert _STALE_NO_NEWS_REASON not in section.empty_reason, (
-                f"{company} {cell}: 기사가 있는데 「기사 없음」이라고 말한다"
-            )
+    for section in sections:
+        if not section.lines:
+            assert _STALE_NO_NEWS_REASON not in section.empty_reason

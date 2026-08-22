@@ -21,8 +21,12 @@ RUN python -m pip install --requirement /tmp/requirements.txt \
 
 # 실행에 필요한 파일만 복사한다. analysis_engine/.env와 로컬 DB는 이미지에 넣지 않는다.
 COPY app/src/ /srv/app/src/
+COPY app/tools/__init__.py /srv/app/tools/__init__.py
+COPY app/tools/internal_trigger.py /srv/app/tools/internal_trigger.py
 COPY app/tools/backup_sqlite.py /srv/app/tools/backup_sqlite.py
 COPY app/tools/trigger_backup.py /srv/app/tools/trigger_backup.py
+COPY app/tools/trigger_maintenance.py /srv/app/tools/trigger_maintenance.py
+COPY app/tools/container_entrypoint.sh /srv/app/tools/container_entrypoint.sh
 COPY analysis_engine/src/ /srv/analysis_engine/src/
 COPY analysis_engine/tools/run_pilot.py /srv/analysis_engine/tools/run_pilot.py
 COPY analysis_engine/tools/survey_audit_reports.py /srv/analysis_engine/tools/survey_audit_reports.py
@@ -36,13 +40,16 @@ RUN useradd --create-home --uid 1000 --user-group --shell /bin/sh appuser \
     && unset root_password root_hash \
     && install -d -m 0700 -o root -g root /root/.ssh \
     && install -d -m 0700 -o appuser -g appuser /home/appuser/.ssh \
-    && install -d -m 0755 -o appuser -g appuser /var/data
+    && install -d -m 0755 -o appuser -g appuser /var/data \
+    && install -m 0755 /srv/app/tools/container_entrypoint.sh /usr/local/bin/company-analysis-entrypoint
 
-ENV HOME=/root
+ENV HOME=/home/appuser
 USER root
 
 EXPOSE 10000
 
-# 새로 마운트된 디스크도 appuser가 쓰게 만든 뒤 서버 권한을 즉시 낮춘다.
+# Render의 dockerCommand가 CMD를 바꿔도 ENTRYPOINT가 웹·cron 권한을 낮춘다.
+ENTRYPOINT ["company-analysis-entrypoint"]
+
 # SQLite와 메모리 작업 상태를 한 프로세스만 다루도록 worker는 반드시 1개다.
-CMD ["sh", "-c", "chown -R appuser:appuser /var/data && exec gosu appuser env HOME=/home/appuser python -m uvicorn src.web.main:app --host 0.0.0.0 --port \"${PORT:-10000}\" --workers 1 --forwarded-allow-ips='*' --limit-concurrency 20 --backlog 32 --no-access-log"]
+CMD ["sh", "-c", "exec python -m uvicorn src.web.main:app --host 0.0.0.0 --port \"${PORT:-10000}\" --workers 1 --forwarded-allow-ips='*' --limit-concurrency 20 --backlog 32 --no-access-log"]

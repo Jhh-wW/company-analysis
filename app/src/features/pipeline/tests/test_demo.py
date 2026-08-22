@@ -199,19 +199,27 @@ def test_구형_성공기록이_있어도_목록에는_canonical_데모만_노�
 
 def test_데모_목록은_보고서_나오는_회사를_앞에_둔다():
     items = available_companies()
-    if not items:
-        pytest.skip("데모 데이터 없음")
+    assert items, "저장소의 개인정보 없는 canonical 데모가 사라졌습니다"
     flags = [bool(c["is_report"]) for c in items]
     assert flags == sorted(flags, reverse=True)
 
 
-def test_확인_카드까지_못_간_기록은_회사를_못_찾은_것으로_본다():
+def test_확인_카드까지_못_간_작은fixture는_회사를_못_찾은_것으로_본다(monkeypatch):
     """식별에서 끝난 기록에 억지로 카드를 만들지 않는다."""
+    monkeypatch.setattr(
+        demo_module,
+        "_load_runs",
+        lambda: (
+            {
+                "id": "fixture-not-found-001",
+                "input": {"company": "시험식별중단회사", "job": ""},
+                "outcome": "중단_식별실패",
+                "steps": [{"step": "1_입력확인"}],
+            },
+        ),
+    )
     pipe = DemoPipeline()
-    targets = [c for c in available_companies() if c["outcome"] == Outcome.NOT_FOUND.value]
-    if not targets:
-        pytest.skip("못 찾음 기록 없음")
-    ui = UserInput(company=targets[0]["company"], job="", region="", posting_text="")
+    ui = UserInput(company="시험식별중단회사", job="", region="", posting_text="")
     assert pipe.find_company(ui) is None
 
 
@@ -224,8 +232,7 @@ def test_없는_회사는_카드가_안_나온다():
 def test_보고서가_나오는_회사는_끝까지_돈다():
     pipe = DemoPipeline()
     targets = [c for c in available_companies() if c["is_report"]]
-    if not targets:
-        pytest.skip("데모 데이터 없음")
+    assert targets, "저장소의 개인정보 없는 canonical 데모가 사라졌습니다"
     target = targets[0]
     ui = UserInput(company=target["company"], job=target["job"], region="", posting_text="")
     card = pipe.find_company(ui)
@@ -256,8 +263,7 @@ def test_목록의_모든_데모가_표시한_종료까지_끝까지_돈다():
     """홈의 모든 선택지가 확인 뒤 다른 결과로 바뀌거나 깨지지 않는다."""
     pipe = DemoPipeline()
     items = available_companies()
-    if not items:
-        pytest.skip("데모 데이터 없음")
+    assert items, "저장소의 개인정보 없는 canonical 데모가 사라졌습니다"
 
     for item in items:
         user_input = UserInput(

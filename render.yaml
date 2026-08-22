@@ -17,7 +17,7 @@ services:
       sizeGB: 1
 
     envVars:
-      # 첫 배포는 AI API 비용 없는 데모다. Render 사용료는 별도이며 관리자만 들어올 수 있다.
+      # 배포 전 기본값은 AI API 비용 없는 데모다. Render 사용료는 별도이며 관리자만 들어올 수 있다.
       - key: PIPELINE
         value: demo
       - key: BETA_ADMIN_ONLY
@@ -41,12 +41,15 @@ services:
       # 웹 프로세스가 일관된 SQLite 스냅샷을 외부 S3 저장소에 올리고 재검증한다.
       - key: BACKUP_TRIGGER_SECRET
         generateValue: true
+      - key: MAINTENANCE_TRIGGER_SECRET
+        generateValue: true
       - key: BACKUP_S3_BUCKET
         sync: false
       - key: BACKUP_S3_PREFIX
         value: company-analysis/
       - key: BACKUP_S3_REGION
-        value: us-east-1
+        # 실제 버킷 region을 Blueprint 입력에서 지정하고 이후 재배포 때 덮어쓰지 않는다.
+        sync: false
       - key: BACKUP_S3_SERVER_SIDE_ENCRYPTION
         value: AES256
       - key: BACKUP_S3_ADDRESSING_STYLE
@@ -92,17 +95,17 @@ services:
       - key: NOTION_PARENT_PAGE_ID
         sync: false
 
-  # 매일 18:15 UTC(한국 시각 다음 날 03:15)에 웹 서비스의 디스크에서 백업한다.
+  # 매일 19:00 UTC(한국 시각 다음 날 04:00)에 웹 서비스의 디스크에서 백업한다.
   # S3 자격증명은 웹에만 두고 cron에는 백업 호출 권한만 준다.
   - type: cron
     name: company-analysis-backup
     runtime: docker
     plan: starter
     region: singapore
-    schedule: "15 18 * * *"
+    schedule: "0 19 * * *"
     dockerfilePath: ./app/Dockerfile
     dockerContext: .
-    dockerCommand: python tools/trigger_backup.py
+    dockerCommand: python -m tools.trigger_backup
     autoDeployTrigger: checksPass
     envVars:
       - key: BACKUP_TRIGGER_URL
@@ -112,3 +115,45 @@ services:
           type: web
           name: company-analysis-beta
           envVarKey: BACKUP_TRIGGER_SECRET
+
+  # 매주 일요일 19:10 UTC(한국 시각 월요일 04:10)에 직전 월~일 XLSX를 만든다.
+  # cron은 영속 디스크를 읽지 않고 웹의 인증 경로만 호출한다.
+  - type: cron
+    name: company-analysis-weekly-xlsx
+    runtime: docker
+    plan: starter
+    region: singapore
+    schedule: "10 19 * * 0"
+    dockerfilePath: ./app/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m tools.trigger_maintenance weekly
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: MAINTENANCE_TRIGGER_URL
+        sync: false
+      - key: MAINTENANCE_TRIGGER_SECRET
+        fromService:
+          type: web
+          name: company-analysis-beta
+          envVarKey: MAINTENANCE_TRIGGER_SECRET
+
+  # 매일 19:20 UTC(한국 시각 다음 날 04:20)에 휴지통·멈춘 작업을 정리한다.
+  # 이 작업은 기존 SQLite 자료만 다루며 유료 AI API를 호출하지 않는다.
+  - type: cron
+    name: company-analysis-daily-cleanup
+    runtime: docker
+    plan: starter
+    region: singapore
+    schedule: "20 19 * * *"
+    dockerfilePath: ./app/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m tools.trigger_maintenance cleanup
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: MAINTENANCE_TRIGGER_URL
+        sync: false
+      - key: MAINTENANCE_TRIGGER_SECRET
+        fromService:
+          type: web
+          name: company-analysis-beta
+          envVarKey: MAINTENANCE_TRIGGER_SECRET

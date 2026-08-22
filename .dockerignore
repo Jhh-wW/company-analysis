@@ -7,8 +7,12 @@
 !app/src/
 !app/src/**
 !app/tools/
+!app/tools/__init__.py
 !app/tools/backup_sqlite.py
+!app/tools/internal_trigger.py
 !app/tools/trigger_backup.py
+!app/tools/trigger_maintenance.py
+!app/tools/container_entrypoint.sh
 
 !analysis_engine/
 !analysis_engine/src/
@@ -24,6 +28,15 @@
 # 허용한 폴더 안에 생긴 로컬 찌꺼기도 다시 제외한다.
 **/.env
 **/.env.*
+**/client_secret*.json
+**/credentials*.json
+**/token*.json
+**/oauth*.json
+**/service-account*.json
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
 **/__pycache__/
 **/.pytest_cache/
 **/tests/

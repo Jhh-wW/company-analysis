@@ -36,7 +36,7 @@ jobs:
       - name: 의존성 충돌 확인
         run: python -m pip check
       - name: 웹 앱 전체 시험
-        run: python -m pytest app/src app/tools/tests -q --basetemp .pytest_tmp_ci_app
+        run: python -m pytest app/src app/tools/tests -q -m "not local_integration" --basetemp .pytest_tmp_ci_app
       - name: 조사 엔진 전체 시험
         run: python -m pytest analysis_engine/src -q --basetemp .pytest_tmp_ci_engine
 
@@ -53,6 +53,15 @@ jobs:
           persist-credentials: false
       - name: 배포 컨테이너 빌드
         run: docker build --file app/Dockerfile --tag company-analysis-smoke:ci .
+      - name: 컨테이너 cron·비밀 파일 계약 확인
+        run: |
+          docker run --rm --interactive --entrypoint python \
+            company-analysis-smoke:ci - --root /srv \
+            < .github/scripts/verify_container_contract.py
+      - name: Docker CMD 덮어쓰기에도 비-root 실행 확인
+        run: |
+          docker run --rm company-analysis-smoke:ci \
+            python -c 'import os; assert os.geteuid() != 0, "cron 명령이 root로 실행됐습니다"'
       - name: 배포 컨테이너 시작
         run: |
           docker run --detach \
