@@ -35,7 +35,8 @@
    비관리자 차단을 확인한다.
 6. `PIPELINE=demo`에서 회사명만 입력한 경우와 주소 힌트를 함께 입력한 경우를 각각 시험한다.
 7. PDF 준비 → 필수 자동검사 → hash 결속 자동출고 → 다운로드·Notion 흐름과 수동 승인 410을 시험한다.
-8. 첫 SQLite 백업을 내려받아 해시 검증하고, 비밀값 복구 묶음을 별도로 확인한다.
+8. 독립 manifest gate를 거친 첫 SQLite 임시 복구가 통과하는지 확인하고, 비밀값 복구
+   묶음을 별도로 확인한다.
 
 ## 필수·조건부 환경변수
 
@@ -52,6 +53,9 @@
 | `DART_API_KEY` | `PIPELINE=real`에서 전자공시를 조회할 때만 |
 | `NAVER_CLIENT_ID` / `NAVER_CLIENT_SECRET` | `PIPELINE=real`에서 뉴스 검색을 사용할 때만 |
 | `NOTION_TOKEN` / `NOTION_PARENT_PAGE_ID` | 자동출고 완료 보고서를 Notion으로 보낼 때만 |
+| `BACKUP_DATA_BOUNDARY_ID` | DB/sidecar 저장소의 불변 경계 식별자. 실제 값은 환경에만 주입 |
+| `BACKUP_DATA_AUTHORITY_ID` | DB/sidecar 쓰기 주체의 불변 식별자. 실제 값은 환경에만 주입 |
+| `BACKUP_MANIFEST_MIN_RETENTION_DAYS` | 독립 manifest 최소 보존일. DB 백업 보존일 이상으로 명시 |
 
 `AUTH_COOKIE_INSECURE`와 로컬 관리자 capability는 로컬 전용이다. Render에는 설정하지 않는다.
 실제 값과 JSON 예시는 `app/.env.example`의 설명을 따르되 실제 사람의 `sub`나 비밀값을
@@ -135,34 +139,53 @@ Render cron
   → 웹 프로세스가 자기 디스크의 SQLite Backup API 스냅샷 생성
   → 비공개 S3 호환 bucket에 DB와 .sha256 업로드
   → 두 파일을 다시 내려받아 SHA-256·SQLite integrity·외래키 검사
-  → 35일 또는 35개를 넘은 과거 백업 삭제
+  → 다른 권한·보존 경계의 서명 append-only manifest에 원격 객체·지문 append
+  → manifest chain/head·서명·정확한 객체 결속 read-back 재검증
+  → 위 단계가 모두 끝난 뒤에만 성공 반환 및 과거 백업 정리
 ```
 
 `render.yaml`의 백업 cron은 매일 `19:00 UTC`, 한국 시각 다음 날 `04:00`에 실행된다. 백업
 파일은 `company-analysis/storage-backup-<UTC시각>.sqlite3`와 같은 이름의
-`.sha256` 한 쌍이다. 성공 응답은 원격 파일을 다시 검증한 뒤에만 반환되므로 업로드만 된
-손상 파일을 성공으로 기록하지 않는다.
+`.sha256` 한 쌍이다. 성공 응답은 원격 파일 재검증과 독립 manifest append/read-back을
+모두 마친 뒤에만 반환되며 manifest backup ID·sequence·record hash를 포함한다.
 
-### 최초 한 번 설정
+**현재 외부 백업 배포는 BLOCKED다.** 저장소에는 production-ready
+`BackupManifestAppender` 구현, signer, 독립 sink, 앱 시작 시 provider 설치 호출, 최신
+checkpoint 공급 경로가 없다. S3 변수 세트만 채우면 되는 상태가 아니며, appender 누락 시
+백업 경로와 cron은 성공을 반환하지 않는다. `deploy/validate_environment.py`도
+`BACKUP_S3_BUCKET`이 설정된 배포를 현 상태에서 fail-closed한다. 웹 demo만 운영하려면
+외부 백업 bucket을 활성화하지 않고 이 차단을 배포 예외로 오인하지 않는다.
 
-1. S3 또는 S3 호환 공급자에 **비공개 bucket**을 만들고 공개 접근을 차단한다.
-2. `company-analysis/` prefix에 `PutObject`, `GetObject`, `DeleteObject`, `ListBucket`만
+### 외부 adapter 구현 후 최초 한 번 설정
+
+1. DB bucket 관리 주체와 다른 권한·보존 경계에 WORM/object-lock 또는 동등한
+   append-only manifest sink를 구성하고 최소 35일 보존과 조건부 append(CAS)를 검증한다.
+2. 서명 키는 조직 비밀 관리자에서 signer에 주입하고 key ID·회전·과거 서명 검증 정책을
+   정한다. 실제 키 값이나 adapter 전용 변수명은 저장소 문서에 기록하지 않는다.
+3. `BackupManifestAppender` 운영 구현을 만들고 앱 bootstrap에서
+   `install_manifest_appender_provider(...)`를 한 번 호출한다. append 뒤 전체 chain/head를
+   다시 읽어 검증하는 공격·재시작·동시 append 시험이 통과해야 한다.
+4. S3 또는 S3 호환 공급자에 **비공개 bucket**을 만들고 공개 접근을 차단한다.
+5. `company-analysis/` prefix에 `PutObject`, `GetObject`, `DeleteObject`, `ListBucket`만
    가능한 백업 전용 자격증명을 만든다. 다른 bucket 권한은 주지 않는다.
-3. 웹 서비스 Environment에 아래 값을 넣는다.
+6. 웹 서비스 Environment에 아래 값을 실제 값 없이 등록한 뒤 비밀 관리자/플랫폼에서
+   주입한다.
    - `BACKUP_S3_BUCKET`, `BACKUP_S3_REGION`
    - AWS S3가 아니면 공급자의 HTTPS `BACKUP_S3_ENDPOINT_URL`
    - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
+   - `BACKUP_DATA_BOUNDARY_ID`, `BACKUP_DATA_AUTHORITY_ID`
+   - `BACKUP_MANIFEST_MIN_RETENTION_DAYS`(DB 보존 기간 이상)
    - 기본 암호화는 `AES256`; KMS를 쓰면 `BACKUP_S3_SERVER_SIDE_ENCRYPTION=aws:kms`와
      `BACKUP_S3_KMS_KEY_ID`
-4. cron의 `BACKUP_TRIGGER_URL`을 실제 공개 웹 주소의
+7. cron의 `BACKUP_TRIGGER_URL`을 실제 공개 웹 주소의
    `https://<주소>/internal/backup/run`으로 넣는다. `BACKUP_TRIGGER_SECRET`은 Blueprint가
    웹에 자동 생성하고 cron이 같은 값을 참조하므로 사람이 복사하지 않는다.
-5. 기존 Blueprint에 서비스를 추가하는 경우 새 `sync: false` 값은 자동 반영되지 않을 수
+8. 기존 Blueprint에 서비스를 추가하는 경우 새 `sync: false` 값은 자동 반영되지 않을 수
    있다. 웹의 bucket·자격증명과 cron URL이 실제 대시보드에 있는지 직접 확인한다.
-6. Render 알림에서 `company-analysis-backup`의 실패 알림을 운영 수신처로 켠다. 별도로
-   외부 저장소 또는 감시 도구에서 `company-analysis/`의 최신 DB 객체가 24시간 넘게
-   생성되지 않으면 알리도록 설정한다. 이 감시는 Render 장애로 cron 자체가 실행되지 않는
-   경우까지 잡기 위해 Render 밖에 둔다.
+9. Render 알림에서 `company-analysis-backup`의 실패 알림을 운영 수신처로 켠다. 별도로
+   외부 저장소 또는 감시 도구에서 최신 DB 객체와 독립 manifest checkpoint가 24시간 넘게
+   함께 생성되지 않으면 알리도록 설정한다. 이 감시는 Render 장애로 cron 자체가 실행되지
+   않는 경우까지 잡기 위해 Render 밖에 둔다.
 
 ### 주간 XLSX와 일일 정리
 
@@ -194,16 +217,25 @@ S3 호환 공급자가 path-style 주소만 지원하면 `BACKUP_S3_ADDRESSING_S
 
 ### 첫 실행과 다음 날 확인
 
-Render 대시보드에서 cron을 한 번 수동 실행하고 로그의 `외부 백업 완료`를 확인한다. 외부
-bucket에서 같은 이름의 `.sqlite3`와 `.sha256`을 내려받아 다음처럼 검증한다.
+위 BLOCKED 항목을 모두 닫은 뒤에만 Render 대시보드에서 cron을 한 번 수동 실행한다. 로그의
+`외부 백업 완료`와 manifest backup ID·sequence·record hash가 함께 있는지 확인한다. 외부
+bucket에서 같은 이름의 `.sqlite3`와 `.sha256`을 내려받아 아래 전송 검사를 수행할 수 있다.
 
 ```console
 python tools/backup_sqlite.py verify <내려받은.sqlite3> --checksum <내려받은.sqlite3.sha256>
 ```
 
-그 다음 날 새 날짜의 한 쌍이 생겼는지 다시 확인하고 같은 `verify`를 통과시킨다. 한 파일만
-있거나 검증이 실패하면 성공으로 보지 않는다. 복구 상세 절차는
-[장기 휴면 백업](장기_휴면_백업.md)을 따른다.
+이 명령은 DB와 같은 위치의 sidecar만 확인하므로 복구 진본성 증거로는 충분하지 않다.
+S3와 다른 통제 경로에서 최신 sequence checkpoint를 가져와 승인된 adapter wrapper가
+`ops/release_readiness.py`의 manifest gate와 임시 복구를 실행해야 한다. 직접 ops CLI는
+sink/signer가 없으면 실패하는 것이 정상이다. 정확한 인자와 검증 절차는
+[배포 운영 런북](../../ops/배포_운영_런북.md)의 `백업 무결성과 독립 서명 manifest`를
+따른다. 다음 날에도 새 DB/sidecar와 checkpoint가 함께 생겼는지 확인하고 같은 gate를
+통과시킨다. 하나라도 없거나 검증이 실패하면 성공으로 보지 않는다.
+
+`python tools/backup_sqlite.py restore`와 공개 `restore_backup()`은 sidecar-only 운영 복구
+우회를 막기 위해 현재 항상 실패하고 대상 DB를 만들지 않는다. 실제 새 DB 게시와
+`STORAGE_DB_PATH` 전환은 승인된 manifest adapter wrapper가 구현된 뒤에만 한다.
 
 외부 저장소가 아직 준비되지 않은 비상 상황에서만 Render Shell에서 아래 명령으로 일관성
 있는 임시 백업을 만들 수 있다. 같은 디스크에만 남겨 두면 디스크 장애를 견디지 못한다.
@@ -244,7 +276,8 @@ DB 백업에는 환경 비밀이 들어 있지 않으므로 다음 **복구 묶�
 - [ ] 수동 승인 GET/POST가 410이고 구형 기록으로 우회 불가
 - [ ] 실패 고객 청구 0원과 실패 provider 내부 AI 원가 보존
 - [ ] SQLite 백업과 SHA-256 검증 완료
-- [ ] S3 호환 외부 백업을 수동 실행하고 재다운로드 `verify` 통과
+- [ ] production manifest appender·독립 sink/signer·최신 checkpoint 경로 구성 증거 확보
+- [ ] S3 외부 백업을 수동 실행하고 exact object 결속 manifest gate·임시 복구 통과
 - [ ] 35일·35개 보관 정책과 24시간 미생성 외부 알림 수신처 확인
 - [ ] 비밀 복구 묶음의 소유자와 복구 시험일 확인
 - [ ] worker `1`, instance `1`, 디스크 `/var/data` 유지

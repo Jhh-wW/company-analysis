@@ -46,6 +46,31 @@ KEY_COOKIE_NAME: Final[str] = "share_key"
 KEY_COOKIE_MAX_AGE_SEC: Final[int] = 60 * 60 * 24 * 60      # 60일
 
 # ══════════════════════════════════════════════════════════
+# capability GET 쓰기·요청 제한
+# ══════════════════════════════════════════════════════════
+
+#: 같은 capability·요청자와 capability 전체를 묶는 짧은 요청 구간.
+ACCESS_WINDOW_SECONDS: Final[int] = 60
+
+#: 한 요청자 식별자가 같은 capability를 한 구간에 열 수 있는 횟수.
+ACCESS_PER_REQUESTER_LIMIT: Final[int] = 12
+
+#: IP를 바꿔도 넘을 수 없는 capability 전체 구간 상한. DB 집계 cap과 같다.
+ACCESS_PER_CAPABILITY_LIMIT: Final[int] = 60
+
+#: 프로세스 limiter가 보유할 비가역 식별 통장 수. 넘으면 LRU부터 버린다.
+ACCESS_LIMITER_MAX_ENTRIES: Final[int] = 8192
+
+#: SQLite가 한 링크·시간구간 행에 합칠 최대 GET 수.
+OPEN_WINDOW_MAX_COUNT: Final[int] = ACCESS_PER_CAPABILITY_LIMIT
+
+#: 링크 하나가 DB에 보유할 최근 시간구간 행 수. 과거 개별 이력은 봉인 보존한다.
+OPEN_WINDOW_ROWS_PER_LINK: Final[int] = 64
+
+#: 구형 개별 이벤트가 이미 많아도 관리 화면 읽기가 다시 증폭되지 않는 상한.
+LEGACY_OPEN_EVENTS_DISPLAY_LIMIT: Final[int] = 512
+
+# ══════════════════════════════════════════════════════════
 # 링크마다 따로 세는 예산
 # ══════════════════════════════════════════════════════════
 

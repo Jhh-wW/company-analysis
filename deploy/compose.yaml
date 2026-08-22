@@ -1,0 +1,50 @@
+name: company-analysis-release
+
+services:
+  web:
+    image: ${COMPANY_ANALYSIS_IMAGE:-company-analysis:release-readiness}
+    build:
+      context: ..
+      dockerfile: app/Dockerfile
+    init: true
+    user: "1000:1000"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_grace_period: 330s
+    ports:
+      # Compose의 local readiness 계약은 loopback bind뿐이다.
+      - "127.0.0.1:${HOST_PORT:-10000}:10000"
+    env_file:
+      - path: ${DEPLOY_ENV_FILE:-./runtime-config}
+        required: true
+    environment:
+      PORT: "10000"
+      DEPLOYMENT_EXPOSURE: local
+      DEPLOYMENT_PLATFORM: local
+      DEPLOYMENT_RUNTIME_CONTRACT: local-web-v1
+      FORWARDED_ALLOW_IPS: 127.0.0.1
+      APP_DATA_ROOT: /var/data
+      STORAGE_DB_PATH: /var/data/storage.db
+      OBSERVABILITY_RECORDS_PATH: /var/data/observability/runs.jsonl
+      TLDEXTRACT_CACHE: /var/data/cache/tldextract
+      XDG_CACHE_HOME: /var/data/cache
+      TMPDIR: /tmp
+      GRACEFUL_SHUTDOWN_SECONDS: "300"
+      HEALTHCHECK_PATH: /readyz
+    volumes:
+      - app-data:/var/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=268435456,uid=1000,gid=1000,mode=1770
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+volumes:
+  app-data:
+    name: company-analysis-data

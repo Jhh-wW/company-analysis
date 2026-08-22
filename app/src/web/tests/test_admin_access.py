@@ -710,8 +710,10 @@ def test_링크를_닫을_수_있다(admin: TestClient):
     )
     key, key_hash = _issued_link(created)
     with storage_db.connect() as conn:
+        issued = share_store.load(conn, key)
+        assert issued is not None
         assert share_store.mark_opened(
-            conn, key, "2026-08-21T14:00:00+09:00"
+            conn, key, issued.created_at
         )
         assert share_store.start_run(
             conn,

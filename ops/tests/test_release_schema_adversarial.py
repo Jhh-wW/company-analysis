@@ -1,0 +1,585 @@
+"""복구 dry-run이 실제 앱 스키마 기동을 증명하는지 독립 공격 검수한다."""
+
+from __future__ import annotations
+
+import hashlib
+import sqlite3
+import sys
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from ops import release_readiness as readiness
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+APP_ROOT = PROJECT_ROOT / "app"
+
+
+class _AcceptingManifestGate:
+    """이 시험에서는 manifest 이후의 앱 schema 경계만 고립해 공격한다."""
+
+    def verify(self, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            backup_id="schema-adversarial",
+            sequence=1,
+            manifest_key_identity="spki-sha256:" + "a" * 64,
+        )
+
+
+def _storage_db_module():
+    app_root = str(APP_ROOT)
+    inserted = app_root not in sys.path
+    if inserted:
+        sys.path.insert(0, app_root)
+    try:
+        from src.features.storage import db as storage_db  # noqa: PLC0415
+
+        return storage_db
+    finally:
+        if inserted:
+            sys.path.remove(app_root)
+
+
+def _digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _create_runtime_database(path: Path) -> Path:
+    storage_db = _storage_db_module()
+    feature_bootstraps = readiness._load_feature_schema_bootstraps()  # noqa: SLF001
+    with storage_db.connect(path) as connection:
+        readiness._apply_feature_schema_bootstraps(  # noqa: SLF001
+            connection,
+            feature_bootstraps,
+        )
+    return path
+
+
+def _write_sidecar(database: Path) -> Path:
+    checksum = database.with_name(database.name + ".sha256")
+    checksum.write_text(
+        f"{_digest(database)}  {database.name}\n",
+        encoding="ascii",
+    )
+    return checksum
+
+
+def _directory_bytes(path: Path) -> dict[str, bytes]:
+    return {
+        item.name: item.read_bytes()
+        for item in sorted(path.iterdir())
+        if item.is_file()
+    }
+
+
+def _restore(
+    database: Path,
+    temp_parent: Path,
+) -> dict[str, object]:
+    checksum = _write_sidecar(database)
+    return readiness.restore_dry_run(
+        database,
+        checksum,
+        _digest(database),
+        temp_parent=temp_parent,
+        manifest_gate=_AcceptingManifestGate(),
+        manifest_expectation=object(),  # fake gate가 schema 경계만 고립한다.
+        manifest_data_root=database.parent,
+    )
+
+
+def _assert_source_and_temp_unchanged(
+    database: Path,
+    before: dict[str, bytes],
+    temp_parent: Path,
+) -> None:
+    assert _directory_bytes(database.parent) == before
+    assert list(temp_parent.iterdir()) == []
+
+
+def _reject_without_mutation(
+    database: Path,
+    temp_parent: Path,
+) -> None:
+    _write_sidecar(database)
+    before = _directory_bytes(database.parent)
+
+    with pytest.raises(readiness.ReadinessError):
+        _restore(database, temp_parent)
+
+    _assert_source_and_temp_unchanged(database, before, temp_parent)
+
+
+def _create_required_names_only_database(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as connection:
+        for table in sorted(readiness.REQUIRED_TABLES):
+            if table == "sessions":
+                connection.execute(
+                    "CREATE TABLE sessions (token_hash TEXT PRIMARY KEY)"
+                )
+            elif table == "share_links":
+                connection.execute(
+                    "CREATE TABLE share_links (key_hash TEXT PRIMARY KEY)"
+                )
+            else:
+                escaped = table.replace('"', '""')
+                connection.execute(
+                    f'CREATE TABLE "{escaped}" (id INTEGER PRIMARY KEY)'
+                )
+    return path
+
+
+def _poison_index(database: Path) -> None:
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP INDEX idx_share_link_open_events_link_time")
+        connection.execute(
+            "CREATE INDEX idx_share_link_open_events_link_time "
+            "ON share_link_open_events(opened_at)"
+        )
+
+
+def _poison_trigger(database: Path) -> None:
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER share_link_open_events_no_insert")
+        connection.execute(
+            "CREATE TRIGGER share_link_open_events_no_insert "
+            "BEFORE INSERT ON share_link_open_events BEGIN SELECT 1; END"
+        )
+
+
+def _add_extra_trigger(database: Path, operation: str) -> None:
+    normalized = operation.upper()
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE attacker_trigger_log (event TEXT NOT NULL)"
+        )
+        connection.execute(
+            f"CREATE TRIGGER attacker_reports_{operation.lower()} "
+            f"AFTER {normalized} ON reports BEGIN "
+            f"INSERT INTO attacker_trigger_log VALUES ('{operation.lower()}'); END"
+        )
+
+
+def _add_extra_index(database: Path, variant: str) -> None:
+    statements = {
+        "partial": (
+            "CREATE INDEX attacker_reports_partial ON reports(report_id) "
+            "WHERE corp_id <> ''"
+        ),
+        "unique": (
+            "CREATE UNIQUE INDEX attacker_reports_unique "
+            "ON reports(corp_id, job)"
+        ),
+        "expression": (
+            "CREATE INDEX attacker_reports_expression "
+            "ON reports(lower(report_id))"
+        ),
+    }
+    with sqlite3.connect(database) as connection:
+        connection.execute(statements[variant])
+
+
+def _rewrite_reports_with_hidden_semantics(database: Path, variant: str) -> None:
+    job_column = (
+        "job TEXT COLLATE NOCASE NOT NULL"
+        if variant == "collate"
+        else "job TEXT NOT NULL"
+    )
+    trailing_contract = {
+        "check": ", CHECK (0)",
+        "foreign-key": (
+            ", FOREIGN KEY (corp_id) REFERENCES layer2_cache(corp_id)"
+        ),
+        "collate": "",
+    }[variant]
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("DROP TABLE reports")
+        connection.execute(
+            "CREATE TABLE reports ("
+            "report_id TEXT PRIMARY KEY, "
+            "corp_id TEXT NOT NULL, "
+            f"{job_column}, "
+            "payload_json TEXT NOT NULL, "
+            "generated_at TEXT NOT NULL, "
+            "created_at TEXT NOT NULL"
+            f"{trailing_contract})"
+        )
+
+
+def test_required_table_names_and_two_hash_columns_are_not_app_schema(
+    tmp_path: Path,
+) -> None:
+    database = _create_required_names_only_database(
+        tmp_path / "source" / "minimal.sqlite3"
+    )
+    temp_parent = tmp_path / "restore-temp"
+    temp_parent.mkdir()
+
+    _reject_without_mutation(database, temp_parent)
+
+
+def test_reports_primary_key_only_is_rejected_by_canonical_table_xinfo(
+    tmp_path: Path,
+) -> None:
+    database = _create_runtime_database(tmp_path / "source" / "reports.sqlite3")
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("DROP TABLE reports")
+        connection.execute("CREATE TABLE reports (report_id TEXT PRIMARY KEY)")
+    temp_parent = tmp_path / "restore-temp"
+    temp_parent.mkdir()
+
+    _reject_without_mutation(database, temp_parent)
+
+
+@pytest.mark.parametrize(
+    "poison",
+    (_poison_index, _poison_trigger),
+    ids=("same-name-index", "same-name-trigger"),
+)
+def test_same_named_poisoned_schema_object_is_rejected(
+    tmp_path: Path,
+    poison: Callable[[Path], None],
+) -> None:
+    database = _create_runtime_database(tmp_path / "source" / "poison.sqlite3")
+    poison(database)
+    temp_parent = tmp_path / "restore-temp"
+    temp_parent.mkdir()
+
+    _reject_without_mutation(database, temp_parent)
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ("check", "foreign-key", "collate"),
+    ids=("check-constraint", "additional-foreign-key", "collate-nocase"),
+)
+def test_same_xinfo_reports_semantic_contract_mutation_is_rejected_immutably(
+    tmp_path: Path,
+    variant: str,
+) -> None:
+    database = _create_runtime_database(
+        tmp_path / variant / "source" / "reports-semantic.sqlite3"
+    )
+    _rewrite_reports_with_hidden_semantics(database, variant)
+    temp_parent = tmp_path / variant / "restore-temp"
+    temp_parent.mkdir(parents=True)
+
+    _reject_without_mutation(database, temp_parent)
+
+
+@pytest.mark.parametrize(
+    "table",
+    (
+        "budget_spend_events",
+        "budget_spend_inflight",
+        "observability_run_lifecycle",
+    ),
+)
+def test_missing_feature_owned_required_table_is_rejected_immutably(
+    tmp_path: Path,
+    table: str,
+) -> None:
+    database = _create_runtime_database(
+        tmp_path / table / "source" / "missing-required.sqlite3"
+    )
+    escaped = table.replace('"', '""')
+    with sqlite3.connect(database) as connection:
+        connection.execute(f'DROP TABLE "{escaped}"')
+    temp_parent = tmp_path / table / "restore-temp"
+    temp_parent.mkdir(parents=True)
+
+    _reject_without_mutation(database, temp_parent)
+
+
+@pytest.mark.parametrize(
+    ("object_type", "object_name"),
+    (
+        ("table", "admin_audit_events"),
+        ("trigger", "admin_audit_events_no_update"),
+        ("trigger", "admin_audit_events_no_delete"),
+    ),
+)
+def test_missing_admin_audit_schema_object_is_rejected_immutably(
+    tmp_path: Path,
+    object_type: str,
+    object_name: str,
+) -> None:
+    database = _create_runtime_database(
+        tmp_path / object_name / "source" / "missing-admin-audit.sqlite3"
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute(f'DROP {object_type.upper()} "{object_name}"')
+    temp_parent = tmp_path / object_name / "restore-temp"
+    temp_parent.mkdir(parents=True)
+
+    _reject_without_mutation(database, temp_parent)
+
+
+def test_missing_required_index_is_rejected_before_bootstrap(tmp_path: Path) -> None:
+    database = _create_runtime_database(
+        tmp_path / "source" / "missing-required-index.sqlite3"
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP INDEX idx_share_link_open_events_link_time")
+    temp_parent = tmp_path / "restore-temp"
+    temp_parent.mkdir()
+
+    _reject_without_mutation(database, temp_parent)
+
+
+def test_missing_required_column_is_rejected_before_bootstrap(tmp_path: Path) -> None:
+    database = _create_runtime_database(
+        tmp_path / "source" / "missing-required-column.sqlite3"
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "ALTER TABLE budget_spend_inflight DROP COLUMN reserved_krw"
+        )
+    temp_parent = tmp_path / "restore-temp"
+    temp_parent.mkdir()
+
+    _reject_without_mutation(database, temp_parent)
+
+
+def test_changed_admin_audit_trigger_is_rejected_before_bootstrap(tmp_path: Path) -> None:
+    database = _create_runtime_database(
+        tmp_path / "source" / "changed-admin-trigger.sqlite3"
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER admin_audit_events_no_update")
+        connection.execute(
+            "CREATE TRIGGER admin_audit_events_no_update "
+            "BEFORE UPDATE ON admin_audit_events BEGIN SELECT 1; END"
+        )
+    temp_parent = tmp_path / "restore-temp"
+    temp_parent.mkdir()
+
+    _reject_without_mutation(database, temp_parent)
+
+
+def test_actual_admin_queue_database_is_canonical_and_restorable(tmp_path: Path) -> None:
+    database = _create_runtime_database(tmp_path / "source" / "admin-runtime.sqlite3")
+    app_root = str(APP_ROOT)
+    inserted = app_root not in sys.path
+    if inserted:
+        sys.path.insert(0, app_root)
+    try:
+        from starlette.requests import Request  # noqa: PLC0415
+        from src.web.routers import admin as admin_router  # noqa: PLC0415
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/admin/invite",
+                "headers": [],
+                "query_string": b"",
+                "client": ("127.0.0.1", 1),
+                "server": ("127.0.0.1", 80),
+                "scheme": "http",
+            }
+        )
+        with _storage_db_module().connect(database) as connection:
+            admin_router._queue_committed_change(  # noqa: SLF001
+                connection,
+                request,
+                action="admin.member.invite",
+                target="member:fixed-target",
+                reason="invited",
+            )
+    finally:
+        if inserted:
+            sys.path.remove(app_root)
+
+    temp_parent = tmp_path / "restore-temp"
+    temp_parent.mkdir()
+    _write_sidecar(database)
+    before = _directory_bytes(database.parent)
+
+    assert _restore(database, temp_parent)["status"] == "임시 복구 통과"
+    _assert_source_and_temp_unchanged(database, before, temp_parent)
+
+
+@pytest.mark.parametrize("operation", ("insert", "update", "delete"))
+def test_extra_data_mutation_trigger_is_rejected_as_noncanonical(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    database = _create_runtime_database(
+        tmp_path / operation / "source" / "extra-trigger.sqlite3"
+    )
+    _add_extra_trigger(database, operation)
+    temp_parent = tmp_path / operation / "restore-temp"
+    temp_parent.mkdir(parents=True)
+
+    _reject_without_mutation(database, temp_parent)
+
+
+@pytest.mark.parametrize("variant", ("partial", "unique", "expression"))
+def test_extra_semantic_index_is_rejected_as_noncanonical(
+    tmp_path: Path,
+    variant: str,
+) -> None:
+    database = _create_runtime_database(
+        tmp_path / variant / "source" / "extra-index.sqlite3"
+    )
+    _add_extra_index(database, variant)
+    temp_parent = tmp_path / variant / "restore-temp"
+    temp_parent.mkdir(parents=True)
+
+    _reject_without_mutation(database, temp_parent)
+
+
+def test_each_dropped_canonical_table_is_rejected_before_bootstrap(
+    tmp_path: Path,
+) -> None:
+    reference = _create_runtime_database(tmp_path / "reference" / "storage.sqlite3")
+    with sqlite3.connect(reference) as connection:
+        required_tables = sorted(readiness._table_names(connection))  # noqa: SLF001
+    assert required_tables
+
+    for index, table in enumerate(required_tables):
+        database = _create_runtime_database(
+            tmp_path / f"drop-{index:02d}" / "source" / "storage.sqlite3"
+        )
+        escaped = table.replace('"', '""')
+        with sqlite3.connect(database) as connection:
+            connection.execute("PRAGMA foreign_keys=OFF")
+            connection.execute(f'DROP TABLE "{escaped}"')
+        temp_parent = tmp_path / f"drop-{index:02d}" / "restore-temp"
+        temp_parent.mkdir(parents=True)
+
+        _reject_without_mutation(database, temp_parent)
+
+
+def test_unsupported_reserved_migration_state_is_rejected_without_source_write(
+    tmp_path: Path,
+) -> None:
+    database = _create_runtime_database(tmp_path / "source" / "migration.sqlite3")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE sessions_legacy_raw_token (
+                token_hash TEXT PRIMARY KEY,
+                email      TEXT NOT NULL,
+                subject    TEXT NOT NULL,
+                is_admin   INTEGER NOT NULL,
+                expires_at REAL NOT NULL
+            )
+            """
+        )
+    temp_parent = tmp_path / "restore-temp"
+    temp_parent.mkdir()
+
+    _reject_without_mutation(database, temp_parent)
+
+
+def test_supported_legacy_migration_runs_on_clone_only_and_passes(
+    tmp_path: Path,
+) -> None:
+    database = _create_runtime_database(tmp_path / "source" / "legacy.sqlite3")
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE sessions")
+        connection.execute(
+            """
+            CREATE TABLE sessions (
+                token      TEXT PRIMARY KEY,
+                email      TEXT NOT NULL,
+                subject    TEXT NOT NULL,
+                is_admin   INTEGER NOT NULL,
+                expires_at REAL NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO sessions VALUES (?, ?, ?, ?, ?)",
+            ("synthetic-legacy-token", "legacy@example.invalid", "sub", 0, 1.0),
+        )
+    temp_parent = tmp_path / "restore-temp"
+    temp_parent.mkdir()
+    _write_sidecar(database)
+    before = _directory_bytes(database.parent)
+
+    result = _restore(database, temp_parent)
+
+    assert result["status"] == "임시 복구 통과"
+    _assert_source_and_temp_unchanged(database, before, temp_parent)
+    with sqlite3.connect(database) as connection:
+        columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_xinfo(sessions)")
+        }
+    assert "token" in columns and "token_hash" not in columns
+
+
+def test_supported_interrupted_raw_session_migration_is_explicitly_allowed(
+    tmp_path: Path,
+) -> None:
+    database = _create_runtime_database(
+        tmp_path / "source" / "interrupted-legacy.sqlite3"
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE sessions")
+        connection.execute(
+            """
+            CREATE TABLE sessions (
+                token      TEXT PRIMARY KEY,
+                email      TEXT NOT NULL,
+                subject    TEXT NOT NULL,
+                is_admin   INTEGER NOT NULL,
+                expires_at REAL NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "ALTER TABLE sessions RENAME TO sessions_legacy_raw_token"
+        )
+    temp_parent = tmp_path / "restore-temp"
+    temp_parent.mkdir()
+    _write_sidecar(database)
+    before = _directory_bytes(database.parent)
+
+    result = _restore(database, temp_parent)
+
+    assert result["status"] == "임시 복구 통과"
+    _assert_source_and_temp_unchanged(database, before, temp_parent)
+    with sqlite3.connect(database) as connection:
+        tables = readiness._table_names(connection)  # noqa: SLF001
+    assert "sessions" not in tables
+    assert "sessions_legacy_raw_token" in tables
+
+
+def test_runtime_database_bootstraps_only_temporary_clones_and_passes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = _create_runtime_database(tmp_path / "source" / "runtime.sqlite3")
+    temp_parent = tmp_path / "restore-temp"
+    temp_parent.mkdir()
+    _write_sidecar(database)
+    before = _directory_bytes(database.parent)
+    storage_db = _storage_db_module()
+    real_connect = storage_db.connect
+    opened_paths: list[Path] = []
+
+    @contextmanager
+    def observed_connect(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
+        assert db_path is not None
+        opened_paths.append(Path(db_path).resolve())
+        with real_connect(db_path) as connection:
+            yield connection
+
+    monkeypatch.setattr(storage_db, "connect", observed_connect)
+
+    result = _restore(database, temp_parent)
+
+    assert result["status"] == "임시 복구 통과"
+    assert opened_paths, "실제 storage.db.connect bootstrap이 호출돼야 합니다"
+    assert all(path != database.resolve() for path in opened_paths)
+    _assert_source_and_temp_unchanged(database, before, temp_parent)

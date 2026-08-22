@@ -5,15 +5,30 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
-    TLDEXTRACT_CACHE=/var/data/cache/tldextract
+    HOME=/home/appuser \
+    XDG_CACHE_HOME=/var/data/cache \
+    TMPDIR=/tmp \
+    APP_DATA_ROOT=/var/data \
+    STORAGE_DB_PATH=/var/data/storage.db \
+    OBSERVABILITY_RECORDS_PATH=/var/data/observability/runs.jsonl \
+    TLDEXTRACT_CACHE=/var/data/cache/tldextract \
+    PORT=10000 \
+    PIPELINE=demo \
+    BETA_ADMIN_ONLY=1 \
+    DEPLOYMENT_EXPOSURE=local \
+    DEPLOYMENT_PLATFORM=local \
+    FORWARDED_ALLOW_IPS=127.0.0.1 \
+    LOG_LEVEL=info \
+    GRACEFUL_SHUTDOWN_SECONDS=300 \
+    HEALTHCHECK_PATH=/readyz
 
 WORKDIR /srv/app
 
-# Render가 새 디스크를 붙이면 시작할 때 소유권을 정리해야 하므로 gosu를 사용한다.
-# SSH용 root 암호는 이미지 빌드 때 새 난수로 만들고 평문을 남기지 않는다.
-RUN apt-get update \
-    && apt-get install --yes --no-install-recommends gosu openssl \
-    && rm -rf /var/lib/apt/lists/*
+# 런타임 계정과 영속 경로를 먼저 만든다. 이미지는 root 암호나 SSH 자격증명을
+# 만들지 않으며, 컨테이너 기본 사용자도 이 계정으로 고정한다.
+RUN useradd --create-home --uid 1000 --user-group --shell /bin/sh appuser \
+    && install -d -m 0770 -o appuser -g appuser \
+        /var/data /var/data/cache /var/data/observability
 
 COPY app/requirements.txt /tmp/requirements.txt
 RUN python -m pip install --requirement /tmp/requirements.txt \
@@ -27,29 +42,30 @@ COPY app/tools/backup_sqlite.py /srv/app/tools/backup_sqlite.py
 COPY app/tools/trigger_backup.py /srv/app/tools/trigger_backup.py
 COPY app/tools/trigger_maintenance.py /srv/app/tools/trigger_maintenance.py
 COPY app/tools/container_entrypoint.sh /srv/app/tools/container_entrypoint.sh
+COPY deploy/container_entrypoint.sh /srv/deploy/container_entrypoint.sh
+COPY deploy/container_healthcheck.py /srv/deploy/container_healthcheck.py
+COPY deploy/validate_environment.py /srv/deploy/validate_environment.py
+COPY deploy/verify_image.py /srv/deploy/verify_image.py
 COPY analysis_engine/src/ /srv/analysis_engine/src/
 COPY analysis_engine/tools/run_pilot.py /srv/analysis_engine/tools/run_pilot.py
 COPY analysis_engine/tools/survey_audit_reports.py /srv/analysis_engine/tools/survey_audit_reports.py
 COPY analysis_engine/tools/build_goldenset_answer.py /srv/analysis_engine/tools/build_goldenset_answer.py
 COPY analysis_engine/data/pilot/ /srv/analysis_engine/data/pilot/
 
-RUN useradd --create-home --uid 1000 --user-group --shell /bin/sh appuser \
-    && root_password="$(openssl rand -base64 48)" \
-    && root_hash="$(printf '%s' "$root_password" | openssl passwd -6 -stdin)" \
-    && usermod --password "$root_hash" --shell /bin/sh root \
-    && unset root_password root_hash \
-    && install -d -m 0700 -o root -g root /root/.ssh \
-    && install -d -m 0700 -o appuser -g appuser /home/appuser/.ssh \
-    && install -d -m 0755 -o appuser -g appuser /var/data \
-    && install -m 0755 /srv/app/tools/container_entrypoint.sh /usr/local/bin/company-analysis-entrypoint
+RUN install -m 0755 /srv/deploy/container_entrypoint.sh /usr/local/bin/company-analysis-entrypoint
 
-ENV HOME=/home/appuser
-USER root
+VOLUME ["/var/data"]
+USER appuser
 
 EXPOSE 10000
 
-# Render의 dockerCommand가 CMD를 바꿔도 ENTRYPOINT가 웹·cron 권한을 낮춘다.
+STOPSIGNAL SIGTERM
+
+HEALTHCHECK --interval=15s --timeout=4s --start-period=45s --retries=4 \
+    CMD ["python", "/srv/deploy/container_healthcheck.py"]
+
+# 플랫폼이 CMD를 웹·cron 명령으로 바꿔도 ENTRYPOINT 환경 검증은 항상 거친다.
 ENTRYPOINT ["company-analysis-entrypoint"]
 
 # SQLite와 메모리 작업 상태를 한 프로세스만 다루도록 worker는 반드시 1개다.
-CMD ["sh", "-c", "exec python -m uvicorn src.web.main:app --host 0.0.0.0 --port \"${PORT:-10000}\" --workers 1 --forwarded-allow-ips='*' --limit-concurrency 20 --backlog 32 --no-access-log"]
+CMD ["sh", "-c", "exec python -m uvicorn src.web.main:app --host 0.0.0.0 --port \"${PORT:-10000}\" --workers 1 --proxy-headers --forwarded-allow-ips \"${FORWARDED_ALLOW_IPS:-127.0.0.1}\" --limit-concurrency 20 --backlog 32 --timeout-keep-alive 5 --timeout-graceful-shutdown \"${GRACEFUL_SHUTDOWN_SECONDS:-300}\" --log-level \"${LOG_LEVEL:-info}\""]

@@ -1,8 +1,12 @@
-"""실행 중인 SQLite를 안전하게 백업하고 검증·복구하는 명령줄 도구.
+"""실행 중인 SQLite를 안전하게 백업하고 전송 무결성을 검증하는 명령줄 도구.
 
 DB 파일을 일반 파일 복사로 가져가면 WAL에 아직 합쳐지지 않은 최신 기록을 놓칠 수
 있다. 이 도구는 파이썬 표준 라이브러리의 ``sqlite3.Connection.backup`` API로
 일관된 스냅샷을 만들고, 무결성 검사와 SHA-256 체크섬을 함께 남긴다.
+
+DB와 같은 저장 경계의 체크섬만으로 운영 복구를 승인할 수는 없다. 공개 ``restore``
+명령과 API는 독립 서명 manifest gate가 연결된 승인 wrapper가 마련될 때까지 항상
+fail-closed하며 새 DB 파일을 게시하지 않는다.
 
 백업에는 이메일·보고서·로그인 세션 등 개인정보가 있을 수 있다. 내용을 출력하지
 않으며, 생성 파일을 공개 Git 저장소에 올려서는 안 된다.
@@ -33,6 +37,7 @@ HASH_CHUNK_BYTES: Final[int] = 1024 * 1024
 SQLITE_TIMEOUT_SEC: Final[float] = 10.0
 PRIVATE_FILE_MODE: Final[int] = 0o600
 PRIVATE_DIR_MODE: Final[int] = 0o700
+SQLITE_COMPANION_SUFFIXES: Final[tuple[str, ...]] = ("-wal", "-shm", "-journal")
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 
@@ -46,11 +51,6 @@ class BackupResult:
     backup_path: Path
     checksum_path: Path
     sha256: str
-
-
-@dataclass(frozen=True)
-class RestoreResult:
-    target_path: Path
 
 
 def default_db_path() -> Path:
@@ -76,9 +76,36 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _readonly_connection(path: Path) -> sqlite3.Connection:
+def _live_readonly_connection(path: Path) -> sqlite3.Connection:
+    """실행 중 source의 WAL까지 SQLite Backup API가 일관되게 읽는다."""
+
     uri = path.resolve().as_uri() + "?mode=ro"
     return sqlite3.connect(uri, uri=True, timeout=SQLITE_TIMEOUT_SEC)
+
+
+def _assert_no_sqlite_companions(path: Path) -> None:
+    for suffix in SQLITE_COMPANION_SUFFIXES:
+        try:
+            os.lstat(Path(str(path) + suffix))
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise BackupError("백업 산출물 SQLite sidecar 상태를 확인하지 못했습니다.") from exc
+        raise BackupError("백업 산출물에 독립 manifest가 결속하지 않은 SQLite sidecar가 있습니다.")
+
+
+def _standalone_readonly_connection(path: Path) -> sqlite3.Connection:
+    """완료된 main DB 한 파일만 읽고 sidecar는 절대 적용하지 않는다."""
+
+    _assert_no_sqlite_companions(path)
+    uri = path.resolve().as_uri() + "?mode=ro&immutable=1"
+    connection = sqlite3.connect(uri, uri=True, timeout=SQLITE_TIMEOUT_SEC)
+    try:
+        _assert_no_sqlite_companions(path)
+    except BaseException:
+        connection.close()
+        raise
+    return connection
 
 
 def _assert_database_is_valid(path: Path) -> None:
@@ -88,7 +115,7 @@ def _assert_database_is_valid(path: Path) -> None:
     try:
         # sqlite3.Connection의 ``with``는 트랜잭션만 끝내고 연결은 닫지 않는다.
         # Windows에서도 곧바로 파일을 옮길 수 있도록 closing을 함께 쓴다.
-        with closing(_readonly_connection(path)) as conn:
+        with closing(_standalone_readonly_connection(path)) as conn:
             integrity_rows = conn.execute("PRAGMA integrity_check").fetchall()
             if integrity_rows != [("ok",)]:
                 raise BackupError("SQLite 무결성 검사를 통과하지 못했습니다.")
@@ -111,6 +138,7 @@ def _assert_database_is_valid(path: Path) -> None:
                     )
     except sqlite3.Error as exc:
         raise BackupError("올바르고 읽을 수 있는 SQLite DB가 아닙니다.") from exc
+    _assert_no_sqlite_companions(path)
 
 
 def _private_chmod(path: Path) -> None:
@@ -170,10 +198,13 @@ def verify_backup(
     expected = _read_expected_checksum(resolved_checksum)
     if not resolved_backup.is_file():
         raise BackupError("백업 DB 파일이 없습니다.")
+    _assert_no_sqlite_companions(resolved_backup)
     actual = sha256_file(resolved_backup)
+    _assert_no_sqlite_companions(resolved_backup)
     if not hmac.compare_digest(actual, expected):
         raise BackupError("체크섬이 맞지 않습니다. 손상되었거나 다른 백업 파일입니다.")
     _assert_database_is_valid(resolved_backup)
+    _assert_no_sqlite_companions(resolved_backup)
     return actual
 
 
@@ -205,19 +236,31 @@ def create_backup(
         raise BackupError("같은 이름의 백업이 이미 있습니다.")
 
     try:
-        with closing(_readonly_connection(source)) as source_conn:
+        with closing(_live_readonly_connection(source)) as source_conn:
             with closing(
                 sqlite3.connect(str(temp_path), timeout=SQLITE_TIMEOUT_SEC)
             ) as target_conn:
                 source_conn.backup(target_conn)
+        _assert_no_sqlite_companions(temp_path)
         _private_chmod(temp_path)
         _assert_database_is_valid(temp_path)
+        _assert_no_sqlite_companions(temp_path)
         digest = sha256_file(temp_path)
+        _assert_no_sqlite_companions(temp_path)
         os.replace(temp_path, destination)
         try:
+            _assert_no_sqlite_companions(destination)
+            if not hmac.compare_digest(sha256_file(destination), digest):
+                raise BackupError("게시된 백업 main DB 지문이 검증된 산출물과 다릅니다.")
+            _assert_no_sqlite_companions(destination)
             _write_checksum(checksum, digest, destination.name)
+            _assert_no_sqlite_companions(destination)
+            if not hmac.compare_digest(sha256_file(destination), digest):
+                raise BackupError("체크섬 게시 뒤 백업 main DB 지문이 변경됐습니다.")
+            _assert_no_sqlite_companions(destination)
         except Exception:
             destination.unlink(missing_ok=True)
+            checksum.unlink(missing_ok=True)
             raise
     except sqlite3.Error as exc:
         raise BackupError("SQLite Backup API로 백업하지 못했습니다.") from exc
@@ -231,58 +274,25 @@ def restore_backup(
     backup_path: Path,
     target_path: Path,
     checksum_path: Path | None = None,
-) -> RestoreResult:
-    """검증된 백업을 반드시 새 DB 파일에만 복구한다.
+) -> None:
+    """sidecar만으로 새 DB를 게시하는 과거 공개 복구 경로를 차단한다.
 
-    열린 SQLite 연결은 유휴 상태일 때 운영체제 잠금이 없을 수 있다. 따라서 도구가
-    서버 중지를 완벽히 증명한 뒤 기존 파일을 덮는 방식은 안전하지 않다. 대상 이름이
-    이미 있으면 무조건 거부하고, 새 파일을 만든 뒤 환경변수로 전환하게 한다.
+    인자는 CLI 호환을 위해 유지하지만 어떤 파일도 읽거나 만들기 전에 닫힌다. 운영 복구는
+    독립 sink의 서명 chain/head와 최신 checkpoint를 검증한 승인 manifest adapter
+    wrapper 안에서만 구현해야 한다. expected hash, 로컬 receipt 파일, CLI flag는 공격자가
+    DB와 함께 다시 만들 수 있으므로 이 함수의 승인 수단으로 받지 않는다.
     """
-    backup = backup_path.expanduser()
-    target = target_path.expanduser()
-    verify_backup(backup, checksum_path)
-    target.parent.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIR_MODE)
-    if target.exists():
-        raise BackupError(
-            "기존 DB는 덮어쓰지 않습니다. 새 --target 파일명을 사용하세요."
-        )
-    if any(Path(str(target) + suffix).exists() for suffix in ("-wal", "-shm")):
-        raise BackupError("대상 이름의 WAL 파일이 남아 있습니다. 다른 새 파일명을 쓰세요.")
 
-    temp_path = target.parent / f".{target.name}.{uuid.uuid4().hex}.restore.tmp"
-    try:
-        with closing(_readonly_connection(backup)) as source_conn:
-            with closing(
-                sqlite3.connect(str(temp_path), timeout=SQLITE_TIMEOUT_SEC)
-            ) as target_conn:
-                source_conn.backup(target_conn)
-        _private_chmod(temp_path)
-        _assert_database_is_valid(temp_path)
-        try:
-            # 완성된 inode의 새 이름을 한 번에 게시한다. O_EXCL 빈 파일을 먼저
-            # 만들면 그 사이 강제 종료 때 0바이트 DB가 남으므로 hard-link를 쓴다.
-            # temp와 target은 같은 폴더라 같은 파일시스템이라는 조건도 보장된다.
-            os.link(temp_path, target)
-        except FileExistsError as exc:
-            raise BackupError(
-                "복구 중 대상 DB가 생겼습니다. 다른 새 파일명을 사용하세요."
-            ) from exc
-        except OSError as exc:
-            raise BackupError(
-                "파일시스템이 기존 파일을 보호하는 안전한 복구 방식을 지원하지 않습니다."
-            ) from exc
-        _assert_database_is_valid(target)
-    except sqlite3.Error as exc:
-        raise BackupError("SQLite Backup API로 복구하지 못했습니다.") from exc
-    finally:
-        temp_path.unlink(missing_ok=True)
-
-    return RestoreResult(target)
+    del backup_path, target_path, checksum_path
+    raise BackupError(
+        "독립 서명 manifest gate가 없는 직접 복구는 차단됩니다. "
+        "승인된 manifest adapter wrapper의 복구 절차를 사용하세요."
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="SQLite 개인정보 DB를 안전하게 백업·검증·복구합니다."
+        description="SQLite 개인정보 DB를 백업하고 전송 무결성을 검증합니다."
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -304,7 +314,10 @@ def _parser() -> argparse.ArgumentParser:
     verify_parser.add_argument("backup", type=Path, help="검사할 .sqlite3 파일")
     verify_parser.add_argument("--checksum", type=Path, default=None, help=".sha256 파일")
 
-    restore_parser = commands.add_parser("restore", help="검증된 백업을 중지된 앱에 복구")
+    restore_parser = commands.add_parser(
+        "restore",
+        help="독립 manifest wrapper가 없어 항상 차단되는 과거 호환 명령",
+    )
     restore_parser.add_argument("backup", type=Path, help="복구할 .sqlite3 파일")
     restore_parser.add_argument("--checksum", type=Path, default=None, help=".sha256 파일")
     restore_parser.add_argument(
@@ -330,13 +343,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             verify_backup(args.backup, args.checksum)
             print("검증 통과: 체크섬과 SQLite 무결성이 정상입니다.")
         elif args.command == "restore":
-            result = restore_backup(
+            restore_backup(
                 args.backup,
                 args.target,
                 args.checksum,
             )
-            print("복구 완료: DB 무결성을 다시 확인했습니다.")
-            print("기존 DB는 건드리지 않았습니다. STORAGE_DB_PATH를 새 파일로 바꾸세요.")
         return 0
     except (BackupError, OSError) as exc:
         print(f"실패: {exc}", file=sys.stderr)

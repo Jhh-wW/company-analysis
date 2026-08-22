@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import concurrent.futures
+import datetime as dt
 import sqlite3
 from collections.abc import Iterator
 
 import pytest
 
+from src.features.sharelink import access_control
+from src.features.sharelink import constants
 from src.features.sharelink import store as share_store
 
 
@@ -27,6 +31,7 @@ def _insert_link(
     company: str = "카카오",
     job: str = "백엔드 개발",
     report_id: str = "",
+    now_iso: str = "2026-08-21T09:00:00+09:00",
 ) -> None:
     assert share_store.insert_new(
         conn,
@@ -35,7 +40,7 @@ def _insert_link(
         job=job,
         report_id=report_id,
         note="지원 링크",
-        now_iso="2026-08-21T09:00:00+09:00",
+        now_iso=now_iso,
     )
 
 
@@ -103,6 +108,8 @@ def test_hashed_schema_migration_adds_history_without_losing_initial_report() ->
         }
         assert "revoked_at" in link_columns
         assert share_store.TABLE_OPEN_EVENTS in tables
+        assert share_store.TABLE_OPEN_WINDOWS in tables
+        assert share_store.TABLE_ACCESS_SUBJECTS in tables
         assert share_store.TABLE_RUN_HISTORY in tables
         assert migrated.execute(
             f"SELECT COUNT(*) FROM {share_store.TABLE_OPEN_EVENTS}"
@@ -119,11 +126,15 @@ def test_raw_key_never_enters_database_or_new_history(
     conn: sqlite3.Connection,
 ) -> None:
     raw_key = "RAW-Link-Secret-Never-Persist"
+    raw_ip = "203.0.113.77"
     key_hash = share_store.key_hash_of(raw_key)
     _insert_link(conn, key=raw_key)
 
     assert share_store.mark_opened(
-        conn, raw_key, "2026-08-21T09:01:00+09:00"
+        conn,
+        raw_key,
+        "2026-08-21T09:01:00+09:00",
+        requester_hash=access_control.requester_hash_of(raw_key, raw_ip),
     )
     assert share_store.start_run(
         conn,
@@ -143,25 +154,28 @@ def test_raw_key_never_enters_database_or_new_history(
     dump = "\n".join(conn.iterdump())
     assert raw_key not in dump
     assert raw_key.lower() not in dump.lower()
+    assert raw_ip not in dump
     assert key_hash in dump
     for table in (
         share_store.TABLE_SHARE_LINKS,
         share_store.TABLE_OPEN_EVENTS,
+        share_store.TABLE_OPEN_WINDOWS,
+        share_store.TABLE_ACCESS_SUBJECTS,
         share_store.TABLE_RUN_HISTORY,
     ):
         columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
         assert "key" not in columns
 
 
-def test_each_known_open_is_preserved_with_consistent_summary(
+def test_known_opens_are_bounded_by_window_with_consistent_summary(
     conn: sqlite3.Connection,
 ) -> None:
     raw_key = "open-events-link"
     key_hash = share_store.key_hash_of(raw_key)
     _insert_link(conn, key=raw_key)
     opened_at = (
-        "2026-08-21T10:00:00+09:00",
-        "2026-08-21T10:02:00+09:00",
+        "2026-08-21T10:00:10+09:00",
+        "2026-08-21T10:00:50+09:00",
         "2026-08-21T10:05:00+09:00",
     )
 
@@ -172,7 +186,8 @@ def test_each_known_open_is_preserved_with_consistent_summary(
     )
 
     events = share_store.list_open_events_by_hash(conn, key_hash)
-    assert [event.opened_at for event in events] == list(opened_at)
+    assert [event.opened_at for event in events] == [opened_at[1], opened_at[2]]
+    assert [event.opened_count for event in events] == [2, 1]
     assert [event.id for event in events] == sorted(event.id for event in events)
     assert all(event.link_key_hash == key_hash for event in events)
 
@@ -181,6 +196,215 @@ def test_each_known_open_is_preserved_with_consistent_summary(
     assert link.opened_count == len(opened_at)
     assert link.first_opened_at == opened_at[0]
     assert link.last_opened_at == opened_at[-1]
+
+
+def test_legacy_per_get_event_table_is_sealed_against_new_inserts(
+    conn: sqlite3.Connection,
+) -> None:
+    raw_key = "sealed-legacy-open-events-link"
+    _insert_link(conn, key=raw_key)
+
+    with pytest.raises(sqlite3.IntegrityError, match="구형 이력은 봉인"):
+        conn.execute(
+            f"INSERT INTO {share_store.TABLE_OPEN_EVENTS} "
+            "(link_key_hash, opened_at) VALUES (?, ?)",
+            (
+                share_store.key_hash_of(raw_key),
+                "2026-08-21T10:00:00+09:00",
+            ),
+        )
+
+    assert conn.execute(
+        f"SELECT COUNT(*) FROM {share_store.TABLE_OPEN_EVENTS}"
+    ).fetchone()[0] == 0
+
+
+def test_persistent_requester_and_capability_caps_survive_restart(tmp_path) -> None:
+    database = tmp_path / "share-access.db"
+    raw_key = "persistent-capability-link"
+    now_iso = "2026-08-21T10:00:30+09:00"
+    requester = access_control.requester_hash_of(raw_key, "203.0.113.8")
+
+    first = sqlite3.connect(database)
+    try:
+        share_store.ensure_schema(first)
+        _insert_link(first, key=raw_key)
+        first.commit()
+        assert all(
+            share_store.mark_opened(
+                first,
+                raw_key,
+                now_iso,
+                requester_hash=requester,
+            )
+            for _ in range(constants.ACCESS_PER_REQUESTER_LIMIT)
+        )
+        first.commit()
+    finally:
+        first.close()
+
+    restarted = sqlite3.connect(database)
+    try:
+        share_store.ensure_schema(restarted)
+        assert not share_store.mark_opened(
+            restarted,
+            raw_key,
+            now_iso,
+            requester_hash=requester,
+        )
+        link = share_store.load(restarted, raw_key)
+        assert link is not None
+        assert link.opened_count == constants.ACCESS_PER_REQUESTER_LIMIT
+        assert restarted.execute(
+            f"SELECT COUNT(*) FROM {share_store.TABLE_OPEN_WINDOWS}"
+        ).fetchone()[0] == 1
+        assert restarted.execute(
+            f"SELECT COUNT(*) FROM {share_store.TABLE_ACCESS_SUBJECTS}"
+        ).fetchone()[0] == 1
+    finally:
+        restarted.close()
+
+
+def test_requester_churn_cannot_evict_persistent_capability_cap(
+    conn: sqlite3.Connection,
+) -> None:
+    raw_key = "capability-churn-link"
+    now_iso = "2026-08-21T10:10:30+09:00"
+    _insert_link(conn, key=raw_key)
+
+    for index in range(constants.ACCESS_PER_CAPABILITY_LIMIT):
+        requester = access_control.requester_hash_of(
+            raw_key,
+            f"2001:db8::{index + 1}",
+        )
+        assert share_store.mark_opened(
+            conn,
+            raw_key,
+            now_iso,
+            requester_hash=requester,
+        )
+    assert not share_store.mark_opened(
+        conn,
+        raw_key,
+        now_iso,
+        requester_hash=access_control.requester_hash_of(raw_key, "2001:db8::ffff"),
+    )
+    assert conn.execute(
+        f"SELECT opened_count FROM {share_store.TABLE_OPEN_WINDOWS}"
+    ).fetchone()[0] == constants.ACCESS_PER_CAPABILITY_LIMIT
+    assert conn.execute(
+        f"SELECT COUNT(*) FROM {share_store.TABLE_ACCESS_SUBJECTS}"
+    ).fetchone()[0] == constants.ACCESS_PER_CAPABILITY_LIMIT
+
+
+def test_window_and_subject_rows_stay_bounded_with_foreign_keys_off(
+    conn: sqlite3.Connection,
+) -> None:
+    raw_key = "bounded-retention-link"
+    _insert_link(conn, key=raw_key)
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 0
+    start = dt.datetime.fromisoformat("2026-08-21T00:00:00+09:00")
+    requester = access_control.requester_hash_of(raw_key, "198.51.100.10")
+
+    for offset in range(constants.OPEN_WINDOW_ROWS_PER_LINK + 6):
+        opened_at = (start + dt.timedelta(minutes=offset)).isoformat()
+        assert share_store.mark_opened(
+            conn,
+            raw_key,
+            opened_at,
+            requester_hash=requester,
+        )
+
+    assert conn.execute(
+        f"SELECT COUNT(*) FROM {share_store.TABLE_OPEN_WINDOWS}"
+    ).fetchone()[0] == constants.OPEN_WINDOW_ROWS_PER_LINK
+    assert conn.execute(
+        f"SELECT COUNT(*) FROM {share_store.TABLE_ACCESS_SUBJECTS}"
+    ).fetchone()[0] == constants.OPEN_WINDOW_ROWS_PER_LINK
+    link = share_store.load(conn, raw_key)
+    assert link is not None
+    assert link.opened_count == constants.OPEN_WINDOW_ROWS_PER_LINK + 6
+
+
+def test_revoked_and_expired_links_cannot_mutate_open_history(
+    conn: sqlite3.Connection,
+) -> None:
+    revoked = "revoked-no-open-link"
+    expired = "expired-no-open-link"
+    _insert_link(conn, key=revoked)
+    _insert_link(conn, key=expired, now_iso="2000-01-01T09:00:00+09:00")
+    assert share_store.delete(
+        conn,
+        revoked,
+        revoked_at="2026-08-21T09:30:00+09:00",
+    )
+
+    for raw_key in (revoked, expired):
+        assert not share_store.mark_opened(
+            conn,
+            raw_key,
+            "2026-08-21T10:00:00+09:00",
+            requester_hash=access_control.requester_hash_of(
+                raw_key,
+                "203.0.113.90",
+            ),
+        )
+        link = share_store.load(conn, raw_key)
+        assert link is not None and link.opened_count == 0
+
+    assert conn.execute(
+        f"SELECT COUNT(*) FROM {share_store.TABLE_OPEN_WINDOWS}"
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        f"SELECT COUNT(*) FROM {share_store.TABLE_ACCESS_SUBJECTS}"
+    ).fetchone()[0] == 0
+
+
+def test_concurrent_gets_cannot_exceed_persistent_requester_cap(tmp_path) -> None:
+    database = tmp_path / "concurrent-share-access.db"
+    raw_key = "concurrent-capability-link"
+    now_iso = "2026-08-21T11:00:30+09:00"
+    requester = access_control.requester_hash_of(raw_key, "198.51.100.44")
+    initial = sqlite3.connect(database)
+    try:
+        share_store.ensure_schema(initial)
+        _insert_link(initial, key=raw_key)
+        initial.commit()
+    finally:
+        initial.close()
+
+    def open_once() -> bool:
+        worker = sqlite3.connect(database, timeout=15)
+        try:
+            result = share_store.mark_opened(
+                worker,
+                raw_key,
+                now_iso,
+                requester_hash=requester,
+            )
+            worker.commit()
+            return result
+        finally:
+            worker.close()
+
+    attempts = constants.ACCESS_PER_REQUESTER_LIMIT * 2
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(lambda _index: open_once(), range(attempts)))
+
+    assert sum(results) == constants.ACCESS_PER_REQUESTER_LIMIT
+    verified = sqlite3.connect(database)
+    try:
+        assert verified.execute(
+            f"SELECT opened_count FROM {share_store.TABLE_OPEN_WINDOWS}"
+        ).fetchone()[0] == constants.ACCESS_PER_REQUESTER_LIMIT
+        assert verified.execute(
+            f"SELECT opened_count FROM {share_store.TABLE_ACCESS_SUBJECTS}"
+        ).fetchone()[0] == constants.ACCESS_PER_REQUESTER_LIMIT
+        assert share_store.load(verified, raw_key).opened_count == (
+            constants.ACCESS_PER_REQUESTER_LIMIT
+        )
+    finally:
+        verified.close()
 
 
 def test_soft_revoke_preserves_link_events_and_runs_but_blocks_new_run(

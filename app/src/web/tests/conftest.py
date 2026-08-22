@@ -33,6 +33,19 @@ def _fresh_job_admission_state():
 
 
 @pytest.fixture(autouse=True)
+def _fresh_share_link_access_limiter():
+    """프로세스 보조 limiter가 독립 웹 시험 사이에서 상태를 공유하지 않는다."""
+
+    from src.features.sharelink import access_control  # noqa: PLC0415
+
+    access_control.reset_for_tests()
+    try:
+        yield
+    finally:
+        access_control.reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _approved_pdf_release_for_unrelated_web_contracts(monkeypatch):
     """기존 웹 시험은 각 기능만 본다. 실제 승인 경계는 전용 route 시험이 소유한다."""
 

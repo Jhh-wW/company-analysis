@@ -117,26 +117,30 @@
 </div>
 
 <div class="card">
-  <h2 id="link-open-events-title">모든 LINK 접속 기록</h2>
+  <h2 id="link-open-events-title">최근 LINK 접속 집계</h2>
   <p class="muted" style="margin-top:6px">
-    LINK URL에 들어온 요청 시각만 기록합니다. 메신저 미리보기·보안 봇·실제 사람을
-    구별하지 않으며 IP 주소, User-Agent, 기기 정보는 수집하지 않습니다.
+    새 요청은 짧은 시간 구간과 횟수로 합쳐 최근
+    {{ open_window_rows_per_link }}개 구간만 보존합니다.
+    전환 전에 남은 봉인 이력은 함께 표시될 수 있습니다.
+    메신저 미리보기·보안 봇·실제 사람을 구별하지 않으며 IP 주소, User-Agent,
+    기기 정보나 원문 LINK는 저장하지 않습니다.
   </p>
   {% if historical_open_count_gap %}
   <p class="muted">
-    이력 기능 도입 전에 집계된 {{ historical_open_count_gap }}회는 개별 시각이 없어
-    기존 최초·최근 시각과 총횟수만 보존했습니다.
+    최근 보존 범위 밖이거나 이력 기능 도입 전에 집계된
+    {{ historical_open_count_gap }}회는 표시할 구간·시각이 없어 기존 최초·최근
+    시각과 총횟수만 보존했습니다.
   </p>
   {% endif %}
   {% if open_events %}
   <ol aria-labelledby="link-open-events-title" style="line-height:1.8">
     {% for event in open_events %}
-      <li>{{ open_event_labels[loop.index0] }}</li>
+      <li>{{ open_event_labels[loop.index0] }}{% if event.opened_count > 1 %} · {{ event.opened_count }}회{% endif %}</li>
     {% endfor %}
   </ol>
   {% else %}
   <p class="muted">
-    {% if link.opened_count %}새 이력 구조에 저장된 개별 접속 시각은 아직 없습니다.
+    {% if link.opened_count %}최근 집계 구간으로 남은 접속은 아직 없습니다.
     {% else %}아직 접속 요청이 없습니다.{% endif %}
   </p>
   {% endif %}

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Final, Iterator, Optional
 
 from src.core import paths
+from src.core.persistent_schema import ensure_persistent_schema
 from src.features.storage import constants
 
 
@@ -297,6 +298,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
     share_store.ensure_schema(conn)
     dashboard_store.ensure_schema(conn)
+    ensure_persistent_schema(conn)
     _migrate_sessions_to_token_hash(conn)
 
     # OAuth ``sub``는 이메일과 달리 계정에서 바뀌지 않는 사람 식별자다. 이미

@@ -63,6 +63,9 @@ def test_올바른_호출비밀이면_원격검증_결과와_성공상태를_남
             checksum_key="company-analysis/storage-backup.sqlite3.sha256",
             sha256="a" * 64,
             deleted_objects=2,
+            manifest_backup_id="b" * 64,
+            manifest_sequence=3,
+            manifest_record_sha256="c" * 64,
         ),
     )
 
@@ -79,6 +82,9 @@ def test_올바른_호출비밀이면_원격검증_결과와_성공상태를_남
         "checksum_key": "company-analysis/storage-backup.sqlite3.sha256",
         "sha256": "a" * 64,
         "deleted_objects": 2,
+        "manifest_backup_id": "b" * 64,
+        "manifest_sequence": 3,
+        "manifest_record_sha256": "c" * 64,
     }
     assert response.headers["cache-control"] == "private, no-store"
     with storage_db.connect() as conn:

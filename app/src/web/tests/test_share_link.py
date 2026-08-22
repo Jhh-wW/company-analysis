@@ -39,6 +39,7 @@ from src.features.sharelink import logic as share_logic
 from src.features.sharelink import store as share_store
 from src.features.sharelink import tracks as share_tracks
 from src.features.sharelink.constants import (
+    ACCESS_PER_REQUESTER_LIMIT,
     KEY_COOKIE_NAME,
     PER_LINK_DAILY_BUDGET_KRW,
     PUBLIC_BUCKET,
@@ -277,7 +278,44 @@ def test_열어보면_offset포함_KST_기록이_남는다(
     assert link.opened_count == 2
     assert link.first_opened_at == fixed
     assert link.last_opened_at == fixed
-    assert [event.opened_at for event in events] == [fixed, fixed]
+    assert [event.opened_at for event in events] == [fixed]
+    assert [event.opened_count for event in events] == [2]
+
+
+def test_반복_GET은_DB와_응답에서_요청자_상한을_지킨다(
+    client: TestClient,
+    monkeypatch,
+):
+    _링크발급(_카카오열쇠, "카카오")
+    fixed = "2026-08-20T00:30:00+09:00"
+    monkeypatch.setattr(analysis_router.clock, "iso_now_kst", lambda: fixed)
+
+    responses = [
+        client.get(f"/k/{_카카오열쇠}", follow_redirects=False)
+        for _ in range(ACCESS_PER_REQUESTER_LIMIT + 1)
+    ]
+
+    assert all(response.status_code == 303 for response in responses[:-1])
+    assert responses[-1].status_code == 429
+    assert responses[-1].headers["retry-after"] == "60"
+    assert "no-store" in responses[-1].headers["cache-control"]
+    with storage_db.connect() as conn:
+        link = share_store.load(conn, _카카오열쇠)
+        windows = conn.execute(
+            f"SELECT opened_count FROM {share_store.TABLE_OPEN_WINDOWS}"
+        ).fetchall()
+        subjects = conn.execute(
+            f"SELECT requester_hash, opened_count "
+            f"FROM {share_store.TABLE_ACCESS_SUBJECTS}"
+        ).fetchall()
+        dump = "\n".join(conn.iterdump())
+    assert link is not None and link.opened_count == ACCESS_PER_REQUESTER_LIMIT
+    assert [int(row[0]) for row in windows] == [ACCESS_PER_REQUESTER_LIMIT]
+    assert len(subjects) == 1
+    assert len(str(subjects[0][0])) == 64
+    assert int(subjects[0][1]) == ACCESS_PER_REQUESTER_LIMIT
+    assert _카카오열쇠 not in dump
+    assert "testclient" not in dump
 
 
 def test_처음_열어본_시각은_안_덮인다(client: TestClient):
@@ -386,7 +424,7 @@ def test_HEAD는_요청횟수를_늘리지않는다(client: TestClient):
         assert share_store.load(conn, _카카오열쇠).opened_count == 0
 
 
-def test_60일_지난_알려진_LINK도_GET시각을_남기고_권한은_닫는다(
+def test_60일_지난_알려진_LINK는_기록없이_권한을_닫는다(
     client: TestClient,
 ):
     _링크발급(_카카오열쇠, "카카오", now_iso="2000-01-01T10:00:00")
@@ -399,9 +437,8 @@ def test_60일_지난_알려진_LINK도_GET시각을_남기고_권한은_닫는�
     with storage_db.connect() as conn:
         link = share_store.load(conn, _카카오열쇠)
         events = share_store.list_open_events_by_hash(conn, link.key_hash)
-    assert link.opened_count == 1
-    assert len(events) == 1
-    assert events[0].opened_at == link.last_opened_at
+    assert link.opened_count == 0
+    assert events == []
 
 
 def test_이상한_열쇠는_공용_통장으로_묶인다():
@@ -493,7 +530,7 @@ def test_살아있는_LINK의_run은_다른회사_범위오류로_거절되지�
 
 
 @pytest.mark.parametrize("state", ["expired", "revoked"])
-def test_만료되거나_철회된_LINK는_GET을_기록하되_새생성권한은_주지않는다(
+def test_만료되거나_철회된_LINK는_GET을_기록하지않고_새생성권한도_주지않는다(
     client: TestClient, monkeypatch, state: str
 ):
     now_iso = (
@@ -539,8 +576,8 @@ def test_만료되거나_철회된_LINK는_GET을_기록하되_새생성권한�
         link = share_store.load(conn, _카카오열쇠)
         events = share_store.list_open_events_by_hash(conn, link.key_hash)
         runs = share_store.list_runs_by_hash(conn, link.key_hash)
-    assert link.opened_count == 1
-    assert len(events) == 1
+    assert link.opened_count == 0
+    assert events == []
     assert runs == []
 
 

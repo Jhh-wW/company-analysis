@@ -57,6 +57,12 @@ def test_열린_WAL_DB도_backup_API로_최신값을_담는다(tmp_path: Path) -
         result = backup_sqlite.create_backup(source, tmp_path / "private")
 
         assert backup_sqlite.verify_backup(result.backup_path) == result.sha256
+        assert all(
+            not Path(str(result.backup_path) + suffix).exists()
+            for suffix in backup_sqlite.SQLITE_COMPANION_SUFFIXES
+        )
+        with backup_sqlite._standalone_readonly_connection(result.backup_path) as immutable:
+            assert immutable.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 2
         with sqlite3.connect(result.backup_path) as backup_conn:
             assert backup_conn.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 2
     finally:
@@ -153,7 +159,9 @@ def test_해시_공유열쇠_백업에는_URL원문이_없다(tmp_path: Path) ->
     assert raw_key.encode("ascii") not in result.backup_path.read_bytes()
 
 
-def test_복구는_기존_DB를_건드리지_않고_새_대상파일만_허용한다(tmp_path: Path) -> None:
+def test_공개복구API는_manifest_gate없이_대상파일을_전혀_만들지않는다(
+    tmp_path: Path,
+) -> None:
     source = tmp_path / "source.db"
     target = tmp_path / "target.db"
     source_conn = _make_database(source, "복구할 기록")
@@ -161,73 +169,34 @@ def test_복구는_기존_DB를_건드리지_않고_새_대상파일만_허용�
         backup = backup_sqlite.create_backup(source, tmp_path / "external")
     finally:
         source_conn.close()
-    target_conn = _make_database(target, "현재 기록")
-    try:
-        original_bytes = target.read_bytes()
-        with pytest.raises(backup_sqlite.BackupError, match="덮어쓰지 않습니다"):
-            backup_sqlite.restore_backup(backup.backup_path, target)
-        assert target.read_bytes() == original_bytes
+    target.write_bytes(b"existing database bytes")
+    original_bytes = target.read_bytes()
+    with pytest.raises(backup_sqlite.BackupError, match="독립 서명 manifest gate"):
+        backup_sqlite.restore_backup(backup.backup_path, target)
+    assert target.read_bytes() == original_bytes
 
-        # 기존 DB 연결이 유휴 상태로 열려 있어도 새 파일 복구에는 영향을 주지 않는다.
-        restored = tmp_path / "restored.db"
-        result = backup_sqlite.restore_backup(backup.backup_path, restored)
-        target_conn.execute("INSERT INTO records (value) VALUES ('계속된 기존 작업')")
-        target_conn.commit()
-
-        assert result.target_path == restored
-        with sqlite3.connect(restored) as conn:
-            assert conn.execute("SELECT value FROM records").fetchone()[0] == "복구할 기록"
-        assert target_conn.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 2
-    finally:
-        target_conn.close()
+    absent_target = tmp_path / "absent-parent" / "restored.db"
+    with pytest.raises(backup_sqlite.BackupError, match="독립 서명 manifest gate"):
+        backup_sqlite.restore_backup(backup.backup_path, absent_target)
+    assert not absent_target.parent.exists()
 
 
-def test_손상된_기존_DB를_건드리지_않고_새_파일로_복구한다(tmp_path: Path) -> None:
-    source = tmp_path / "source.db"
-    source_conn = _make_database(source, "정상 백업")
-    try:
-        backup = backup_sqlite.create_backup(source, tmp_path / "external")
-    finally:
-        source_conn.close()
-
-    damaged = tmp_path / "storage.db"
-    damaged.write_bytes(b"damaged database")
-    restored = tmp_path / "storage-restored.db"
-
-    backup_sqlite.restore_backup(backup.backup_path, restored)
-
-    assert damaged.read_bytes() == b"damaged database"
-    with sqlite3.connect(restored) as conn:
-        assert conn.execute("SELECT value FROM records").fetchone()[0] == "정상 백업"
-
-
-def test_완성된_DB를_빈_중간상태_없이_한번에_게시한다(
-    tmp_path: Path, monkeypatch
+def test_restore_CLI도_manifest_wrapper없이_fail_closed한다(
+    tmp_path: Path, capsys
 ) -> None:
-    source = tmp_path / "source.db"
-    source_conn = _make_database(source, "완전한 기록")
-    try:
-        backup = backup_sqlite.create_backup(source, tmp_path / "external")
-    finally:
-        source_conn.close()
+    target = tmp_path / "must-not-exist.db"
+    result = backup_sqlite.main(
+        ["restore", str(tmp_path / "attacker.sqlite3"), "--target", str(target)]
+    )
 
-    target = tmp_path / "restored.db"
-    real_link = backup_sqlite.os.link
-
-    def checked_link(temp_path: Path, target_path: Path) -> None:
-        assert not Path(target_path).exists()
-        backup_sqlite._assert_database_is_valid(Path(temp_path))
-        real_link(temp_path, target_path)
-
-    monkeypatch.setattr(backup_sqlite.os, "link", checked_link)
-
-    backup_sqlite.restore_backup(backup.backup_path, target)
-
-    with sqlite3.connect(target) as conn:
-        assert conn.execute("SELECT value FROM records").fetchone()[0] == "완전한 기록"
+    assert result == 1
+    assert not target.exists()
+    captured = capsys.readouterr()
+    assert "독립 서명 manifest gate" in captured.err
+    assert "attacker.sqlite3" not in captured.err
 
 
-def test_임시_WAL_DB의_백업_SHA256_복구후_전체데이터가_일치한다(
+def test_임시_WAL_DB의_백업_SHA256과_전체데이터가_일치한다(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "source.db"
@@ -255,10 +224,56 @@ def test_임시_WAL_DB의_백업_SHA256_복구후_전체데이터가_일치한�
     assert backup_sqlite.verify_backup(backup.backup_path) == backup.sha256
     assert backup.sha256 == hashlib.sha256(backup.backup_path.read_bytes()).hexdigest()
 
-    restored = tmp_path / "restored.db"
-    backup_sqlite.restore_backup(backup.backup_path, restored)
-    with sqlite3.connect(restored) as conn:
+    with sqlite3.connect(
+        backup.backup_path.resolve().as_uri() + "?mode=ro", uri=True
+    ) as conn:
         actual = conn.execute(
             "SELECT id, value, payload FROM records ORDER BY id"
         ).fetchall()
     assert actual == expected
+
+
+def test_verify_validation중_sidecar가_생겨도_성공하지않는다(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.db"
+    source_conn = _make_database(source, "검증 경합")
+    try:
+        backup = backup_sqlite.create_backup(source, tmp_path / "backups")
+    finally:
+        source_conn.close()
+    original = backup_sqlite._assert_database_is_valid
+
+    def inject_sidecar(path: Path) -> None:
+        original(path)
+        Path(str(path) + "-wal").touch()
+
+    monkeypatch.setattr(backup_sqlite, "_assert_database_is_valid", inject_sidecar)
+    with pytest.raises(backup_sqlite.BackupError, match="sidecar"):
+        backup_sqlite.verify_backup(backup.backup_path)
+
+
+def test_checksum게시중_sidecar가_생기면_backup성공과산출물게시를취소한다(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.db"
+    source_conn = _make_database(source, "게시 경합")
+    output = tmp_path / "backups"
+    original = backup_sqlite._write_checksum
+
+    def inject_sidecar(path: Path, digest: str, database_name: str) -> None:
+        original(path, digest, database_name)
+        database = path.with_name(database_name)
+        Path(str(database) + "-wal").touch()
+
+    monkeypatch.setattr(backup_sqlite, "_write_checksum", inject_sidecar)
+    try:
+        with pytest.raises(backup_sqlite.BackupError, match="sidecar"):
+            backup_sqlite.create_backup(source, output)
+    finally:
+        source_conn.close()
+
+    assert not list(output.glob("*.sqlite3"))
+    assert not list(output.glob("*.sha256"))

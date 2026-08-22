@@ -40,6 +40,19 @@ def trigger_once(
     digest = str(payload.get("sha256", ""))
     if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
         raise TriggerError("백업 서버의 SHA-256 응답이 올바르지 않습니다")
+    backup_id = str(payload.get("manifest_backup_id", ""))
+    record_digest = str(payload.get("manifest_record_sha256", ""))
+    sequence = payload.get("manifest_sequence")
+    if len(backup_id) != 64 or any(
+        char not in "0123456789abcdef" for char in backup_id
+    ):
+        raise TriggerError("백업 서버의 manifest backup_id가 올바르지 않습니다")
+    if len(record_digest) != 64 or any(
+        char not in "0123456789abcdef" for char in record_digest
+    ):
+        raise TriggerError("백업 서버의 manifest 레코드 지문이 올바르지 않습니다")
+    if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1:
+        raise TriggerError("백업 서버의 manifest sequence가 올바르지 않습니다")
     return payload
 
 
@@ -59,6 +72,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "외부 백업 완료: "
         f"object={payload.get('object_key', '')} "
         f"sha256={payload['sha256']} "
+        f"manifest_backup_id={payload['manifest_backup_id']} "
+        f"manifest_sequence={payload['manifest_sequence']} "
+        f"manifest_record_sha256={payload['manifest_record_sha256']} "
         f"deleted={int(payload.get('deleted_objects', 0))}"
     )
     return 0

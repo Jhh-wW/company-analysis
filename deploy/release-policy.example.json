@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "required_platforms": ["linux/amd64", "linux/arm64"],
+  "allowed_scanners": ["trivy", "docker-scout", "grype"],
+  "trusted_builder_id": "REPLACE_WITH_PINNED_BUILDER_ID",
+  "provenance_predicate_type": "https://slsa.dev/provenance/v1",
+  "signature_algorithm": "ed25519",
+  "release_public_key_spki_sha256": "REPLACE_WITH_PINNED_PUBLIC_KEY_SPKI_SHA256",
+  "release_public_key_pem": "REPLACE_WITH_PINNED_ED25519_PUBLIC_KEY_PEM",
+  "vex_approvers": ["security-release"]
+}

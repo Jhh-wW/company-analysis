@@ -8,6 +8,7 @@ import sqlite3
 from dataclasses import asdict, dataclass, fields
 from typing import Final, Iterable
 
+from src.core.persisted_json import validate_persisted_json_text
 from src.shared.span_selection_diagnostics import (
     MAJORITY_REASON_ALL_REJECTED,
     MAJORITY_REASON_KEPT,
@@ -213,6 +214,7 @@ def record_once(
         separators=(",", ":"),
         allow_nan=False,
     )
+    validate_persisted_json_text(rounds_json)
     values = (
         clean_run_id,
         SCHEMA_VERSION,

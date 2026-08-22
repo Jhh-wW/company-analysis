@@ -28,6 +28,28 @@ services:
       - key: SHARE_PUBLIC_BASE_URL
         sync: false
 
+      # Render Docker에는 검증·고정 가능한 ingress peer CIDR 계약이 없으므로
+      # 현재 공개 시작은 항상 BLOCKED다. 아래 값은 진단 입력일 뿐 어떤 값을
+      # 넣어도 승격되지 않으며 outbound IP를 proxy peer로 쓰면 안 된다.
+      - key: DEPLOYMENT_EXPOSURE
+        value: public
+      - key: DEPLOYMENT_PLATFORM
+        value: render
+      - key: DEPLOYMENT_RUNTIME_CONTRACT
+        value: render-public-web-v1
+      - key: PUBLIC_ORIGIN
+        sync: false
+      - key: FORWARDED_ALLOW_IPS
+        sync: false
+      - key: HTTPS_ORIGIN_CSRF_CANARY_EVIDENCE_SHA256
+        sync: false
+      - key: CLIENT_IP_CANARY_EVIDENCE_SHA256
+        sync: false
+      - key: RENDER_DIRECT_ORIGIN_BLOCK_EVIDENCE_SHA256
+        sync: false
+      - key: RENDER_EDGE_XFF_SANITIZE_EVIDENCE_SHA256
+        sync: false
+
       # 재배포·재시작 뒤에도 남아야 하는 모든 기록은 영속 디스크에 둔다.
       - key: APP_DATA_ROOT
         value: /var/data
@@ -46,6 +68,14 @@ services:
         generateValue: true
       - key: BACKUP_S3_BUCKET
         sync: false
+      # 이 세 값만으로 백업이 활성화되지는 않는다. 별도 권한·보존 경계의
+      # production BackupManifestAppender 구현과 시작 시 provider 주입이 선행돼야 한다.
+      - key: BACKUP_DATA_BOUNDARY_ID
+        sync: false
+      - key: BACKUP_DATA_AUTHORITY_ID
+        sync: false
+      - key: BACKUP_MANIFEST_MIN_RETENTION_DAYS
+        value: "35"
       - key: BACKUP_S3_PREFIX
         value: company-analysis/
       - key: BACKUP_S3_REGION
@@ -96,7 +126,8 @@ services:
       - key: NOTION_PARENT_PAGE_ID
         sync: false
 
-  # 매일 19:00 UTC(한국 시각 다음 날 04:00)에 웹 서비스의 디스크에서 백업한다.
+  # production manifest appender가 설치된 뒤에만 매일 19:00 UTC에 백업한다.
+  # 현재 저장소 상태에서는 웹의 백업 경로가 fail-closed하므로 cron 성공을 기대하지 않는다.
   # S3 자격증명은 웹에만 두고 cron에는 백업 호출 권한만 준다.
   - type: cron
     name: company-analysis-backup

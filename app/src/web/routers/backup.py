@@ -73,5 +73,8 @@ async def run_external_backup(request: Request):
             "checksum_key": result.checksum_key,
             "sha256": result.sha256,
             "deleted_objects": result.deleted_objects,
+            "manifest_backup_id": result.manifest_backup_id,
+            "manifest_sequence": result.manifest_sequence,
+            "manifest_record_sha256": result.manifest_record_sha256,
         }
     )

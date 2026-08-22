@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from src.core import persisted_json
 from src.features.pipeline.port import Grade, Report
 from src.features.pipeline.canonical_demo import build_demo_report
 from src.features.provenance.sources import Source, SourceKind
@@ -546,6 +547,22 @@ def test_layer2_save_twice_replaces_not_duplicates(tmp_path: Path) -> None:
     assert count == 1
     assert loaded is not None
     assert loaded.fragments[1]["원문"] == "new"
+
+
+def test_layer2_writer_enforces_shared_container_boundary(tmp_path: Path) -> None:
+    accepted = {
+        index: {} for index in range(persisted_json.MAX_CONTAINER_ITEMS)
+    }
+    rejected = {
+        index: {} for index in range(persisted_json.MAX_CONTAINER_ITEMS + 1)
+    }
+    with db.connect(tmp_path / "storage.db") as conn:
+        cache.save_layer2(conn, corp_id="BOUNDARY-OK", fragments=accepted)
+        with pytest.raises(persisted_json.PersistedJsonContractError):
+            cache.save_layer2(conn, corp_id="BOUNDARY-BLOCKED", fragments=rejected)
+        blocked = cache.get_layer2(conn, "BOUNDARY-BLOCKED")
+
+    assert blocked is None
 
 
 # ══════════════════════════════════════════════════════════

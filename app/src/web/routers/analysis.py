@@ -41,10 +41,12 @@ from src.features.pipeline.port import (
     RunResult,
     UserInput,
 )
+from src.features.sharelink import access_control as share_access
 from src.features.sharelink import logic as share_logic
 from src.features.sharelink import store as share_store
 from src.features.sharelink import tracks as share_tracks
 from src.features.sharelink.constants import (
+    ACCESS_WINDOW_SECONDS,
     KEY_COOKIE_MAX_AGE_SEC,
     KEY_COOKIE_NAME,
     KEY_PATH_PREFIX,
@@ -208,6 +210,20 @@ def _share_store_unavailable(request: Request):
     return response
 
 
+def _share_rate_limited() -> Response:
+    """capability 존재 정보나 원문을 로그·응답에 덧붙이지 않는 429 응답."""
+
+    return PlainTextResponse(
+        "요청이 너무 잦습니다. 잠시 후 다시 시도해 주세요.",
+        status_code=429,
+        headers={
+            "Cache-Control": "no-store",
+            "Referrer-Policy": "no-referrer",
+            "Retry-After": str(ACCESS_WINDOW_SECONDS),
+        },
+    )
+
+
 @router.get("/", response_class=HTMLResponse)
 async def input_page(request: Request):
     """회사명·직무·주소·공고를 받는 첫 화면."""
@@ -258,12 +274,33 @@ async def open_share_link(request: Request, key: str):
             stored = share_store.load(conn, clean)
             if stored is None:
                 return _share_redirect_without_cookie(request, "missing")
-            if not share_store.mark_opened(conn, clean, clock.iso_now_kst()):
-                raise RuntimeError("링크 요청 기록 대상이 사라졌습니다")
             if stored.is_revoked:
                 return _share_redirect_without_cookie(request, "revoked")
             if share_logic.is_share_link_expired(stored.created_at):
                 return _share_redirect_without_cookie(request, "expired")
+
+            now_iso = clock.iso_now_kst()
+            client_host = request.client.host if request.client is not None else ""
+            if not share_access.allow_request(clean, client_host, now_iso):
+                return _share_rate_limited()
+            requester_hash = share_access.requester_hash_of(clean, client_host)
+            if not share_store.mark_opened(
+                conn,
+                clean,
+                now_iso,
+                requester_hash=requester_hash,
+            ):
+                # DB writer lock 안에서 폐기·만료가 다시 확인된다. 사전 load 뒤
+                # 상태가 바뀐 경우에는 권한 상태를, 그대로 active면 영속 cap을
+                # 의미하므로 429를 돌려준다.
+                latest = share_store.load(conn, clean)
+                if latest is None:
+                    return _share_redirect_without_cookie(request, "missing")
+                if latest.is_revoked:
+                    return _share_redirect_without_cookie(request, "revoked")
+                if share_logic.is_share_link_expired(latest.created_at):
+                    return _share_redirect_without_cookie(request, "expired")
+                return _share_rate_limited()
             link = stored
 
             if link.report_id:
