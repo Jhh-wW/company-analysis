@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Final, Iterable
+from typing import Any, Final, Iterable, Mapping
 
 
 SAFE_PROVIDER_STOP_REASONS: Final[frozenset[str]] = frozenset(
@@ -28,6 +28,30 @@ ROUND_REASON_OUTPUT_LIMIT: Final[str] = "output_limit_empty"
 ROUND_REASON_PARSE_FAILURE: Final[str] = "provider_parse_failure"
 ROUND_REASON_PROVIDER_EMPTY: Final[str] = "provider_empty_items"
 ROUND_REASON_ALL_REJECTED: Final[str] = "all_candidates_rejected"
+VALIDATION_REJECTION_REASON_DIAGNOSTIC_MISMATCH: Final[str] = (
+    "diagnostic_accounting_mismatch"
+)
+SAFE_VALIDATION_REJECTION_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "invalid_reference_or_section",
+        "duplicate_assignment",
+        "claim_type_section_mismatch",
+        "subject_label_not_in_source",
+        "market_contract_failure",
+        "current_issue_contract_failure",
+        "current_response_contract_failure",
+        "future_plan_contract_failure",
+        "operations_partner_contract_failure",
+        "portfolio_contract_failure",
+        "completed_execution_contract_failure",
+        "change_basis_contract_failure",
+        "cross_reference_contract_failure",
+        "source_verification_failure",
+        "company_specificity_failure",
+        "other_validation_failure",
+        VALIDATION_REJECTION_REASON_DIAGNOSTIC_MISMATCH,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -44,6 +68,7 @@ class SpanSelectionRoundDiagnostic:
     validation_kept: int
     validation_rejected: int
     empty_reason: str
+    validation_rejection_reason_counts: tuple[tuple[str, int], ...] = ()
 
 
 def _nonnegative_int(value: object) -> int:
@@ -62,6 +87,49 @@ def _safe_stop_reason(value: object) -> str:
     )
 
 
+def _safe_validation_rejection_reason_counts(
+    value: Mapping[str, int] | Iterable[tuple[str, int]] | object,
+    *,
+    expected_total: int,
+) -> tuple[tuple[str, int], ...]:
+    """임의 문자열을 저장하지 않고 닫힌 사유와 합계만 정규화한다."""
+
+    if expected_total <= 0:
+        return ()
+    if isinstance(value, Mapping):
+        raw_items: object = value.items()
+    else:
+        raw_items = value
+    try:
+        items = tuple(raw_items or ())  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        items = ()
+
+    totals: dict[str, int] = {}
+    malformed = False
+    for item in items:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            malformed = True
+            continue
+        raw_reason, raw_count = item
+        if type(raw_count) is not int or raw_count <= 0:
+            malformed = True
+            continue
+        reason = str(raw_reason or "").strip()
+        if reason not in SAFE_VALIDATION_REJECTION_REASONS:
+            reason = "other_validation_failure"
+        totals[reason] = totals.get(reason, 0) + raw_count
+
+    if malformed or sum(totals.values()) != expected_total:
+        return (
+            (
+                VALIDATION_REJECTION_REASON_DIAGNOSTIC_MISMATCH,
+                expected_total,
+            ),
+        )
+    return tuple(sorted(totals.items()))
+
+
 def attach_round_result(
     step: dict[str, Any],
     *,
@@ -69,6 +137,9 @@ def attach_round_result(
     provider_selected: int,
     validation_kept: int,
     validation_rejected: int,
+    validation_rejection_reason_counts: (
+        Mapping[str, int] | Iterable[tuple[str, int]] | object
+    ) = (),
 ) -> None:
     """단계 행에 원문 없는 라운드 진단을 붙인다."""
 
@@ -91,6 +162,10 @@ def attach_round_result(
     selected = _nonnegative_int(provider_selected)
     kept = _nonnegative_int(validation_kept)
     rejected = _nonnegative_int(validation_rejected)
+    rejection_reason_counts = _safe_validation_rejection_reason_counts(
+        validation_rejection_reason_counts,
+        expected_total=rejected,
+    )
     if kept > 0:
         empty_reason = ROUND_REASON_KEPT
     elif output_limit_reached:
@@ -111,6 +186,7 @@ def attach_round_result(
         "validation_kept": kept,
         "validation_rejected": rejected,
         "empty_reason": empty_reason,
+        "validation_rejection_reason_counts": rejection_reason_counts,
     }
 
 
@@ -125,6 +201,7 @@ def round_diagnostic_from_steps(
         if isinstance(candidate, dict):
             raw = candidate
             break
+    validation_rejected = _nonnegative_int(raw.get("validation_rejected"))
     return SpanSelectionRoundDiagnostic(
         round_number=max(1, int(round_number)),
         requested_max_tokens=_nonnegative_int(raw.get("requested_max_tokens")),
@@ -134,8 +211,14 @@ def round_diagnostic_from_steps(
         parse_failed=raw.get("parse_failed") is True,
         provider_selected=_nonnegative_int(raw.get("provider_selected")),
         validation_kept=_nonnegative_int(raw.get("validation_kept")),
-        validation_rejected=_nonnegative_int(raw.get("validation_rejected")),
+        validation_rejected=validation_rejected,
         empty_reason=str(raw.get("empty_reason") or ROUND_REASON_PROVIDER_EMPTY),
+        validation_rejection_reason_counts=(
+            _safe_validation_rejection_reason_counts(
+                raw.get("validation_rejection_reason_counts"),
+                expected_total=validation_rejected,
+            )
+        ),
     )
 
 

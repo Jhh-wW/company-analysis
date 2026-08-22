@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 
+from src.features.spanselect import canonical as canonical_module
 from src.features.spanselect.canonical import (
     CANONICAL_SOURCE_SECTION_IDS,
     answer_schema,
@@ -36,6 +37,13 @@ class _DraftItem:
 class _Checked:
     kept: list[_DraftItem]
     deleted: list[tuple[_DraftItem, str]]
+
+
+@dataclass(frozen=True)
+class _GateDecision:
+    passed: bool
+    score: int
+    reason: str = ""
 
 
 class _Engine:
@@ -97,6 +105,7 @@ def test_provider_출력상한_파싱실패를_선택단계에_원문없이_남�
     assert diagnostic["provider_selected"] == 0
     assert diagnostic["validation_kept"] == 0
     assert diagnostic["validation_rejected"] == 0
+    assert diagnostic["validation_rejection_reason_counts"] == ()
     assert diagnostic["empty_reason"] == "output_limit_empty"
     assert set(diagnostic) == {
         "requested_max_tokens",
@@ -107,6 +116,7 @@ def test_provider_출력상한_파싱실패를_선택단계에_원문없이_남�
         "provider_selected",
         "validation_kept",
         "validation_rejected",
+        "validation_rejection_reason_counts",
         "empty_reason",
     }
 
@@ -117,6 +127,10 @@ def test_정본_프롬프트는_의미_ID와_시간상태_분리를_강제한다
     assert all(section_id in prompt for section_id in CANONICAL_SOURCE_SECTION_IDS)
     assert "개발완료·검증·MOU·계약·납품·매출·반복매출" in prompt
     assert "직무별 KPI" in prompt
+    assert "가리키면 12-3" in prompt
+    assert "연속해서" in prompt
+    assert "짧은 문자열" in prompt
+    assert "당사를 그대로" in prompt
     assert "competitive_position" not in prompt
 
 
@@ -134,6 +148,14 @@ def test_선택기_응답은_정체성과_시장_의미를_분리한_닫힌_스�
         "진입",
     }
     assert {"market_stage", "market_observation"} <= required
+    assert "pattern" not in item_schema["properties"]["sid"]
+    assert "양의 정수-양의 정수" in item_schema["properties"]["sid"]["description"]
+    assert "빈 문자열" in item_schema["properties"]["revenue_model_sid"][
+        "description"
+    ]
+    assert "완료 실적 참조" in item_schema["properties"]["basis_sids"]["items"][
+        "description"
+    ]
     assert "market_priority" not in item_schema["properties"]
     assert {
         "response_action",
@@ -148,6 +170,130 @@ def test_선택기_응답은_정체성과_시장_의미를_분리한_닫힌_스�
         "value_chain_stage",
         "relationship_type",
     } <= required
+
+
+def test_후보표시에_끌려_sid에_대괄호를_넣어도_같은_문장을_찾는다() -> None:
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {
+            "items": [
+                {
+                    "section_id": "identity",
+                    "sid": "[1-1]",
+                    "claim_type": "identity_summary",
+                    "subject_label": "",
+                    "market_stage": "",
+                    "market_observation": "",
+                    "product_role": "",
+                    "portfolio_stage": "",
+                    "revenue_model_sid": "",
+                    "response_to_sid": "",
+                    "basis_sids": [],
+                    "priority_signals": [],
+                    "event_date": "",
+                    "response_action": "",
+                    "initial_signal": "",
+                    "next_check_metric": "",
+                    "plan_status": "",
+                    "plan_timing": "",
+                    "plan_condition": "",
+                    "plan_expected_effect": "",
+                    "plan_execution_signal": "",
+                    "operation_role": "",
+                    "value_chain_stage": "",
+                    "relationship_type": "",
+                }
+            ]
+        },
+        {1: {"종류": "홈페이지", "원문": "진영은 친환경 소재 전문기업이다."}},
+        [],
+        engine=_Engine(),
+        company="진영",
+    )
+
+    assert [item.sid for item in kept] == ["1-1"]
+    assert rejected == []
+
+
+def test_sid_대괄호_정규화는_중복을_우회하지_못한다() -> None:
+    common = {
+        "section_id": "identity",
+        "claim_type": "identity_summary",
+        "subject_label": "",
+        "market_stage": "",
+        "market_observation": "",
+        "product_role": "",
+        "portfolio_stage": "",
+        "revenue_model_sid": "",
+        "response_to_sid": "",
+        "basis_sids": [],
+        "priority_signals": [],
+        "event_date": "",
+        "response_action": "",
+        "initial_signal": "",
+        "next_check_metric": "",
+        "plan_status": "",
+        "plan_timing": "",
+        "plan_condition": "",
+        "plan_expected_effect": "",
+        "plan_execution_signal": "",
+        "operation_role": "",
+        "value_chain_stage": "",
+        "relationship_type": "",
+    }
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {
+            "items": [{**common, "sid": "1-1"}, {**common, "sid": "[1-1]"}]
+        },
+        {1: {"종류": "홈페이지", "원문": "진영은 친환경 소재 전문기업이다."}},
+        [],
+        engine=_Engine(),
+        company="진영",
+    )
+
+    assert [item.sid for item in kept] == ["1-1"]
+    assert [item["reason"] for item in rejected] == ["같은 사실 중복 배치"]
+
+
+def test_sid_이중_또는_편측_대괄호는_정규화하지_않는다() -> None:
+    invalid_sids = ("[[1-1]]", "[1-1", "1-1]", "[0-1]", "[1-0]")
+    common = {
+        "section_id": "identity",
+        "claim_type": "identity_summary",
+        "subject_label": "",
+        "market_stage": "",
+        "market_observation": "",
+        "product_role": "",
+        "portfolio_stage": "",
+        "revenue_model_sid": "",
+        "response_to_sid": "",
+        "basis_sids": [],
+        "priority_signals": [],
+        "event_date": "",
+        "response_action": "",
+        "initial_signal": "",
+        "next_check_metric": "",
+        "plan_status": "",
+        "plan_timing": "",
+        "plan_condition": "",
+        "plan_expected_effect": "",
+        "plan_execution_signal": "",
+        "operation_role": "",
+        "value_chain_stage": "",
+        "relationship_type": "",
+    }
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {
+            "items": [{**common, "sid": sid} for sid in invalid_sids]
+        },
+        {1: {"종류": "홈페이지", "원문": "진영은 친환경 소재 전문기업이다."}},
+        [],
+        engine=_Engine(),
+        company="진영",
+    )
+
+    assert kept == []
+    assert len(rejected) == len(invalid_sids)
+    assert {item["reason"] for item in rejected} == {"없는 번호 또는 섹션"}
 
 
 def test_AI는_번호와_배치만_고르고_원문과_섹션게이트가_최종결정한다():
@@ -205,7 +351,7 @@ def test_AI는_번호와_배치만_고르고_원문과_섹션게이트가_최종
                     "market_observation": "",
                     "product_role": "기업 고객 판매 제품",
                     "portfolio_stage": "성장",
-                    "revenue_model_sid": "4-1",
+                    "revenue_model_sid": "[4-1]",
                     "response_to_sid": "",
                     "basis_sids": [],
                     "priority_signals": ["출시·운영", "유통·지역확대"],
@@ -274,6 +420,7 @@ def test_AI는_번호와_배치만_고르고_원문과_섹션게이트가_최종
     assert any(item["reason"] == "없는 번호 또는 섹션" for item in rejected)
     assert kept[0].sentence == "진영은 친환경 소재 전문기업이다."
     assert kept[2].claim_type == "priority_product"
+    assert kept[2].revenue_model_sid == "4-1"
     assert kept[2].product_role == "기업 고객 판매 제품"
     assert kept[2].portfolio_stage == "성장"
     assert kept[2].revenue_model_sid == "4-1"
@@ -410,6 +557,335 @@ def _section567_item(
     return item
 
 
+def test_거절사유는_원문없이_닫힌_코드별_개수로_남는다() -> None:
+    steps: list[dict] = []
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {
+            "items": [
+                _section567_item(
+                    "identity",
+                    "1-1",
+                    "identity_summary",
+                    "원문에 없는 회사명",
+                )
+            ]
+        },
+        {1: {"종류": "홈페이지", "원문": "당사는 친환경 소재 전문기업이다."}},
+        steps,
+        engine=_Engine(),
+        company="가나다전자",
+    )
+
+    assert kept == []
+    assert [item["reason"] for item in rejected] == ["대상 이름이 원문에 없음"]
+    diagnostic = steps[0]["span_selection_diagnostic"]
+    assert diagnostic["validation_rejected"] == 1
+    assert diagnostic["validation_rejection_reason_counts"] == (
+        ("subject_label_not_in_source", 1),
+    )
+
+
+def test_subject_label은_원문의_줄바꿈만_공백으로_정규화해_대조한다(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        canonical_module,
+        "assess_claim",
+        lambda *_args, **_kwargs: _GateDecision(True, 1, ""),
+    )
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {
+            "items": [
+                _section567_item(
+                    "identity",
+                    "1-1",
+                    "identity_summary",
+                    "SmartX 제품",
+                )
+            ]
+        },
+        {1: {"종류": "홈페이지", "원문": "당사는 SmartX\n제품 전문기업이다."}},
+        [],
+        engine=_Engine(),
+        company="가나다전자",
+    )
+
+    assert [item.subject_label for item in kept] == ["SmartX 제품"]
+    assert rejected == []
+
+
+def test_후단에서_탈락한_대상을_참조하는_항목도_최종_제외된다(
+    monkeypatch,
+) -> None:
+    items = [
+        _section567_item(
+            "current_challenges",
+            "1-1",
+            "current_issue",
+            "SmartX",
+            next_check_metric="원가율",
+        ),
+        _section567_item(
+            "current_challenges",
+            "2-1",
+            "current_response",
+            "SmartX",
+            response_to_sid="[1-1]",
+            response_action="SmartX 생산비 절감을 추진 중",
+        ),
+    ]
+    monkeypatch.setattr(
+        canonical_module,
+        "assess_claim",
+        lambda _section, sentence, **_kwargs: _GateDecision(
+            passed="원가율 부담" not in sentence,
+            score=0,
+            reason="회사 고유 위험·변화 근거가 없음",
+        ),
+    )
+    steps: list[dict] = []
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {"items": items},
+        {
+            1: {
+                "종류": "MD&A",
+                "원문": "가나다전자는 SmartX 원가율 부담을 현재 미해결 과제로 관리한다.",
+            },
+            2: {
+                "종류": "MD&A",
+                "원문": "가나다전자는 SmartX 원가 부담에 대응해 SmartX 생산비 절감을 추진 중이다.",
+            },
+        },
+        steps,
+        engine=_Engine(),
+        company="가나다전자",
+    )
+
+    assert kept == []
+    assert len(rejected) == 2
+    assert any("미해결 문제와 대응" in item["reason"] for item in rejected)
+    assert steps[-1]["유지"] == 0
+    assert steps[-1]["삭제"] == 2
+    assert steps[0]["span_selection_diagnostic"][
+        "validation_rejection_reason_counts"
+    ] == (
+        ("company_specificity_failure", 1),
+        ("cross_reference_contract_failure", 1),
+    )
+
+
+def test_후단에서_수익모델이_탈락하면_중점제품도_최종_제외된다(
+    monkeypatch,
+) -> None:
+    revenue = _section567_item(
+        "business_model",
+        "1-1",
+        "revenue_model",
+        "SmartX",
+    )
+    priority = _section567_item(
+        "portfolio",
+        "2-1",
+        "priority_product",
+        "SmartX",
+        product_role="기업 고객용 제품",
+        revenue_model_sid="[1-1]",
+        priority_signals=["출시·운영", "유통·지역확대"],
+    )
+    monkeypatch.setattr(
+        canonical_module,
+        "assess_claim",
+        lambda section, _sentence, **_kwargs: _GateDecision(
+            passed=section != "business_model",
+            score=0,
+            reason="사업·수익 방식이 없음",
+        ),
+    )
+
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {"items": [revenue, priority]},
+        {
+            1: {
+                "종류": "사업내용",
+                "원문": "가나다전자는 SmartX를 기업 고객에게 판매해 제품 매출을 만든다.",
+            },
+            2: {
+                "종류": "사업내용",
+                "원문": "가나다전자는 SmartX를 출시하고 해외 판매망을 확대했다.",
+            },
+        },
+        [],
+        engine=_Engine(),
+        company="가나다전자",
+    )
+
+    assert kept == []
+    assert any("2장 수익 분류" in item["reason"] for item in rejected)
+
+
+def test_후단에서_완료실행이_탈락하면_변화해석도_최종_제외된다(
+    monkeypatch,
+) -> None:
+    completed = _past_item("1-1", "completed_execution", event_date="2025")
+    change = _past_item(
+        "2-1",
+        "change_interpretation",
+        basis_sids=["[1-1]"],
+    )
+    monkeypatch.setattr(
+        canonical_module,
+        "assess_claim",
+        lambda _section, sentence, **_kwargs: _GateDecision(
+            passed="설비를 도입" not in sentence,
+            score=0,
+            reason="최근 실행과 고유 단서가 함께 있지 않음",
+        ),
+    )
+
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {"items": [completed, change]},
+        {
+            1: {"종류": "MD&A", "원문": "가나다는 2025년 SmartX 설비를 도입했다."},
+            2: {
+                "종류": "MD&A",
+                "원문": "가나다는 2025년 SmartX 매출이 증가했다고 밝혔다.",
+            },
+        },
+        [],
+        engine=_Engine(),
+        company="가나다",
+    )
+
+    assert kept == []
+    assert any("완료 실행·제공된 완료 실적" in item["reason"] for item in rejected)
+
+
+def test_원문대조와_회사특이성_탈락은_삭제수에_한번씩만_센다(
+    monkeypatch,
+) -> None:
+    class 한건원문삭제엔진(_Engine):
+        @staticmethod
+        def check_draft(items, originals, requirements):
+            return _Checked(
+                kept=[items[0]],
+                deleted=[(items[1], "원문 불일치")],
+            )
+
+    monkeypatch.setattr(
+        canonical_module,
+        "assess_claim",
+        lambda *_args, **_kwargs: _GateDecision(
+            False, 0, "사업·수익 방식이 없음"
+        ),
+    )
+    items = [
+        _section567_item("identity", "1-1", "identity_summary", ""),
+        _section567_item("identity", "2-1", "identity_summary", ""),
+    ]
+    steps: list[dict] = []
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {"items": items},
+        {
+            1: {"종류": "홈페이지", "원문": "가나다전자는 소재 기업이다."},
+            2: {"종류": "홈페이지", "원문": "가나다전자는 장비 기업이다."},
+        },
+        steps,
+        engine=한건원문삭제엔진(),
+        company="가나다전자",
+    )
+
+    assert kept == []
+    assert len(rejected) == 2
+    assert steps[-1]["삭제"] == 2
+    diagnostic = steps[0]["span_selection_diagnostic"]
+    assert diagnostic["validation_rejected"] == 2
+    assert diagnostic["validation_rejection_reason_counts"] == (
+        ("company_specificity_failure", 1),
+        ("source_verification_failure", 1),
+    )
+
+
+def test_원문대조기가_항목을_누락하면_라운드_전체를_닫힌_사유로_거부한다() -> None:
+    class 한건누락엔진(_Engine):
+        @staticmethod
+        def check_draft(items, originals, requirements):
+            return _Checked(kept=[items[0]], deleted=[])
+
+    items = [
+        _section567_item("identity", "1-1", "identity_summary", ""),
+        _section567_item("identity", "2-1", "identity_summary", ""),
+    ]
+    steps: list[dict] = []
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {"items": items},
+        {
+            1: {"종류": "홈페이지", "원문": "가나다전자는 소재 기업이다."},
+            2: {"종류": "홈페이지", "원문": "가나다전자는 장비 기업이다."},
+        },
+        steps,
+        engine=한건누락엔진(),
+        company="가나다전자",
+    )
+
+    assert kept == []
+    assert len(rejected) == 2
+    diagnostic = steps[0]["span_selection_diagnostic"]
+    assert diagnostic["provider_selected"] == 2
+    assert diagnostic["validation_rejected"] == 2
+    assert diagnostic["validation_rejection_reason_counts"] == (
+        ("source_verification_failure", 2),
+    )
+
+
+def test_원문대조기가_같은값의_새객체를_반환해도_라운드_전체를_거부한다() -> None:
+    class 복제반환엔진(_Engine):
+        @staticmethod
+        def check_draft(items, originals, requirements):
+            cloned = [
+                _DraftItem(item.sentence, item.fragment_id, item.block)
+                for item in items
+            ]
+            return _Checked(kept=cloned, deleted=[])
+
+    item = _section567_item("identity", "1-1", "identity_summary", "")
+    steps: list[dict] = []
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {"items": [item]},
+        {1: {"종류": "홈페이지", "원문": "가나다전자는 소재 기업이다."}},
+        steps,
+        engine=복제반환엔진(),
+        company="가나다전자",
+    )
+
+    assert kept == []
+    assert [item["reason"] for item in rejected] == ["원문 대조 결과 회계 불일치"]
+    assert steps[0]["span_selection_diagnostic"][
+        "validation_rejection_reason_counts"
+    ] == (("source_verification_failure", 1),)
+
+
+def test_같은_조각에_반복된_동일문장은_서로_다른_sid여도_한번만_남긴다() -> None:
+    sentence = "가나다전자는 친환경 소재 전문기업이다."
+    common = _section567_item("identity", "1-1", "identity_summary", "")
+    steps: list[dict] = []
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {
+            "items": [common, {**common, "sid": "1-2"}]
+        },
+        {1: {"종류": "홈페이지", "원문": f"{sentence} {sentence}"}},
+        steps,
+        engine=_Engine(),
+        company="가나다전자",
+    )
+
+    assert [item.sid for item in kept] == ["1-1"]
+    assert [item["reason"] for item in rejected] == ["같은 사실 중복 배치"]
+    diagnostic = steps[0]["span_selection_diagnostic"]
+    assert diagnostic["provider_selected"] == 2
+    assert diagnostic["validation_kept"] == 1
+    assert diagnostic["validation_rejected"] == 1
+
+
 def test_현재_문제와_대응은_다음_지표와_초기_신호를_분리한다() -> None:
     frags = {
         1: {
@@ -434,7 +910,7 @@ def test_현재_문제와_대응은_다음_지표와_초기_신호를_분리한�
             "2-1",
             "current_response",
             "생산 공정 재설계",
-            response_to_sid="1-1",
+            response_to_sid="[1-1]",
             response_action="생산 공정 재설계를 추진 중",
         ),
     ]
@@ -449,6 +925,7 @@ def test_현재_문제와_대응은_다음_지표와_초기_신호를_분리한�
 
     assert rejected == []
     assert [item.next_check_metric for item in kept] == ["원가율", ""]
+    assert kept[1].response_to_sid == "1-1"
     assert kept[1].initial_signal == ""
 
 
@@ -1207,7 +1684,7 @@ def test_기존_완료_실행_sid_근거_연결은_그대로_유지한다():
                 _past_item(
                     "2-1",
                     "change_interpretation",
-                    basis_sids=["1-1"],
+                    basis_sids=["[1-1]"],
                 ),
             ]
         },

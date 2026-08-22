@@ -8,6 +8,7 @@ AI의 역할은 이미 수집된 문장의 번호와 배치할 섹션을 고르�
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 import re
 from typing import Any, Iterable, Mapping
@@ -58,6 +59,64 @@ CANONICAL_SOURCE_SECTION_IDS: tuple[str, ...] = (
 _SELF_PUBLISHED_FRAGMENT_KINDS = frozenset(
     {"사업", "사업내용", "MD&A", "전략", "신규사업전망", "홈페이지"}
 )
+
+
+def _validation_rejection_reason_code(item: Mapping[str, str]) -> str:
+    """사용자용 문구를 원문 없는 닫힌 진단 범주로만 축약한다."""
+
+    explicit = str(item.get("reason_code") or "")
+    if explicit:
+        return explicit
+    reason = str(item.get("reason") or "")
+    if reason in {"없는 번호 또는 섹션", "원문 조각 없음"}:
+        return "invalid_reference_or_section"
+    if reason == "같은 사실 중복 배치":
+        return "duplicate_assignment"
+    if reason == "섹션과 claim_type 불일치":
+        return "claim_type_section_mismatch"
+    if reason == "대상 이름이 원문에 없음":
+        return "subject_label_not_in_source"
+    if "고객·시장" in reason or "시장 " in reason or "시장 단계" in reason:
+        return "market_contract_failure"
+    if reason.startswith("현재 문제") or reason in {
+        "다음 확인 지표가 원문에 없음",
+        "객관적 다음 확인 지표가 아님",
+    }:
+        return "current_issue_contract_failure"
+    if reason.startswith("현재 대응") or reason in {
+        "대응 사실에 다음 확인 지표 입력",
+        "초기 신호가 대응 원문에 없음",
+        "대응 행동을 초기 신호로 중복",
+        "관찰된 초기 진척·결과가 아님",
+        "5장 외 현재 과제 구조 필드 입력",
+    }:
+        return "current_response_contract_failure"
+    if reason in {
+        "가치사슬 단계의 직접 근거 없음",
+        "관계 유형의 직접 근거 없음",
+        "고객사를 운영 파트너로 분류",
+        "미실행 계획을 현재 운영으로 분류",
+        "현재 반복 운영 역할의 직접 근거 없음",
+        "분석 법인의 직접 운영 근거 없음",
+        "분석 법인의 소유·지분 근거 없음",
+        "공급·조달 방향의 직접 근거 없음",
+        "7장 외 운영 구조 필드 입력",
+    }:
+        return "operations_partner_contract_failure"
+    if "계획" in reason or reason == "6장 외 미래 계획 구조 필드 입력":
+        return "future_plan_contract_failure"
+    if "제품 포트폴리오" in reason or "중점 제품" in reason or "중점 추진" in reason:
+        return "portfolio_contract_failure"
+    if "사건" in reason or reason == "완료 실행 외 항목에 사건일 입력":
+        return "completed_execution_contract_failure"
+    if "연결되지 않음" in reason or "결속되지 않음" in reason or reason in {
+        "대응 외 문제 연결 입력",
+        "변화 해석 외 근거 연결 입력",
+    }:
+        return "cross_reference_contract_failure"
+    if "변화 해석" in reason:
+        return "change_basis_contract_failure"
+    return "other_validation_failure"
 
 
 SECTION_GUIDES: dict[str, str] = {
@@ -165,6 +224,11 @@ _PROMPT = """공식 근거 기반 회사분석 보고서의 사실 배치 작업
     완료 실적 참조만 basis_sids로 연결한다. 내부 fact_id나 목록에 없는 참조는 만들지 않는다.
 14. completed_execution은 원문에 직접 적힌 사건 연도 또는 날짜를 event_date로 낸다.
     공시 발표일을 사건일로 대신 쓰지 않는다.
+15. sid·revenue_model_sid·response_to_sid와 숫자형 basis_sids에는 후보 문장 앞
+    대괄호 안의 번호만 쓰되, 대괄호 자체는 넣지 않는다. 예: [12-3] 문장을
+    가리키면 12-3이다. subject_label과 모든 원문 발췌 필드는 해당 후보 문장에
+    연속해서 그대로 있는 짧은 문자열만 쓰고, 없으면 비운다. 당사라고 적혔으면
+    회사명으로 바꾸지 말고 당사를 그대로 쓴다.
 
 완료 실적 근거 참조
 {historical_performance_lines}
@@ -207,6 +271,16 @@ class CanonicalPick:
     operation_role: str = ""
     value_chain_stage: str = ""
     relationship_type: str = ""
+
+
+def _normalize_candidate_sid(value: object) -> str:
+    """숫자 후보 SID에 정확히 한 쌍 붙은 표시용 대괄호만 제거한다."""
+
+    raw_sid = str(value or "").strip()
+    bracketed_sid = re.fullmatch(
+        r"\[([1-9][0-9]*-[1-9][0-9]*)\]", raw_sid
+    )
+    return bracketed_sid.group(1) if bracketed_sid else raw_sid
 
 
 def historical_performance_basis_sid(fiscal_year: object) -> str:
@@ -304,7 +378,13 @@ def answer_schema() -> dict[str, Any]:
                             "type": "string",
                             "enum": list(CANONICAL_SOURCE_SECTION_IDS),
                         },
-                        "sid": {"type": "string"},
+                        "sid": {
+                            "type": "string",
+                            "description": (
+                                "후보 문장 앞 대괄호 안의 양의 정수-양의 정수 번호. "
+                                "대괄호는 제외한다."
+                            ),
+                        },
                         "claim_type": {
                             "type": "string",
                             "enum": sorted(
@@ -315,7 +395,14 @@ def answer_schema() -> dict[str, Any]:
                                 }
                             ),
                         },
-                        "subject_label": {"type": "string"},
+                        "subject_label": {
+                            "type": "string",
+                            "description": (
+                                "후보 문장에 연속해서 그대로 있는 짧은 대상 문자열. "
+                                "없으면 빈 문자열이며 당사 같은 자기지칭을 회사명으로 "
+                                "바꾸지 않는다."
+                            ),
+                        },
                         "market_stage": {
                             "type": "string",
                             "enum": ["", *sorted(MARKET_STAGES)],
@@ -328,11 +415,29 @@ def answer_schema() -> dict[str, Any]:
                             "type": "string",
                             "enum": ["", *PORTFOLIO_STAGES],
                         },
-                        "revenue_model_sid": {"type": "string"},
-                        "response_to_sid": {"type": "string"},
+                        "revenue_model_sid": {
+                            "type": "string",
+                            "description": (
+                                "빈 문자열 또는 같은 답의 revenue_model 후보 번호. "
+                                "대괄호는 제외한다."
+                            ),
+                        },
+                        "response_to_sid": {
+                            "type": "string",
+                            "description": (
+                                "빈 문자열 또는 같은 답의 current_issue 후보 번호. "
+                                "대괄호는 제외한다."
+                            ),
+                        },
                         "basis_sids": {
                             "type": "array",
-                            "items": {"type": "string"},
+                            "items": {
+                                "type": "string",
+                                "description": (
+                                    "같은 답의 completed_execution 후보 번호 또는 "
+                                    "제공된 완료 실적 참조. 후보 번호의 대괄호는 제외한다."
+                                ),
+                            },
                             "uniqueItems": True,
                         },
                         "priority_signals": {
@@ -467,7 +572,7 @@ def select_canonical_spans(
     picks_by_sid: dict[str, CanonicalPick] = {}
     for item in selected:
         section_id = str(item.get("section_id") or "")
-        sid = str(item.get("sid") or "")
+        sid = _normalize_candidate_sid(item.get("sid"))
         claim_type = str(item.get("claim_type") or "")
         found = sent_map.get(sid)
         if section_id not in CANONICAL_SOURCE_SECTION_IDS or found is None:
@@ -485,8 +590,9 @@ def select_canonical_spans(
             rejected.append({"sid": sid, "reason": "섹션과 claim_type 불일치"})
             continue
 
+        normalized_sentence = " ".join(sentence.split()).casefold()
         subject_label = " ".join(str(item.get("subject_label") or "").split())
-        if subject_label and subject_label.casefold() not in sentence.casefold():
+        if subject_label and subject_label.casefold() not in normalized_sentence:
             rejected.append({"sid": sid, "reason": "대상 이름이 원문에 없음"})
             continue
         market_stage = " ".join(str(item.get("market_stage") or "").split())
@@ -495,15 +601,15 @@ def select_canonical_spans(
         )
         product_role = str(item.get("product_role") or "")
         portfolio_stage = str(item.get("portfolio_stage") or "")
-        revenue_model_sid = str(item.get("revenue_model_sid") or "").strip()
-        response_to_sid = str(item.get("response_to_sid") or "")
+        revenue_model_sid = _normalize_candidate_sid(item.get("revenue_model_sid"))
+        response_to_sid = _normalize_candidate_sid(item.get("response_to_sid"))
         raw_basis_values = item.get("basis_sids") or []
         if not isinstance(raw_basis_values, list) or any(
             not str(value).strip() for value in raw_basis_values
         ):
             rejected.append({"sid": sid, "reason": "변화 해석 근거 참조 형식 오류"})
             continue
-        raw_basis_sids = [str(value).strip() for value in raw_basis_values]
+        raw_basis_sids = [_normalize_candidate_sid(value) for value in raw_basis_values]
         if len(raw_basis_sids) != len(set(raw_basis_sids)):
             rejected.append({"sid": sid, "reason": "변화 해석 근거 참조 중복"})
             continue
@@ -535,7 +641,6 @@ def select_canonical_spans(
         operation_role = " ".join(str(item.get("operation_role") or "").split())
         value_chain_stage = str(item.get("value_chain_stage") or "").strip()
         relationship_type = str(item.get("relationship_type") or "").strip()
-        normalized_sentence = " ".join(sentence.split()).casefold()
         if claim_type == "customer_market":
             if not subject_label or not market_observation:
                 rejected.append({"sid": sid, "reason": "고객·시장 관찰 근거 없음"})
@@ -850,38 +955,60 @@ def select_canonical_spans(
                 )
                 invalid_links.add(sid)
 
-    pick_by_draft_key: dict[tuple[int, str, str], CanonicalPick] = {}
+    pick_by_draft_identity: dict[int, CanonicalPick] = {}
+    draft_keys: set[tuple[int, str, str]] = set()
     for sid, pick in picks_by_sid.items():
         if sid in invalid_links:
             continue
-        draft_items.append(
-            engine.DraftItem(
-                sentence=pick.sentence,
-                fragment_id=pick.fragment_id,
-                block=pick.section_id,
+        draft_key = (pick.fragment_id, pick.sentence, pick.section_id)
+        if draft_key in draft_keys:
+            rejected.append(
+                {
+                    "sid": pick.sid,
+                    "reason": "같은 사실 중복 배치",
+                    "reason_code": "duplicate_assignment",
+                }
             )
+            continue
+        draft_keys.add(draft_key)
+        draft_item = engine.DraftItem(
+            sentence=pick.sentence,
+            fragment_id=pick.fragment_id,
+            block=pick.section_id,
         )
-        pick_by_draft_key[(pick.fragment_id, pick.sentence, pick.section_id)] = pick
+        draft_items.append(draft_item)
+        pick_by_draft_identity[id(draft_item)] = pick
 
     checked = engine.check_draft(
         draft_items,
         {number: str(frag.get("원문") or "") for number, frag in frags.items()},
         [],
     )
-    rejected.extend(
-        {"sid": "", "reason": reason}
-        for _item, reason in checked.deleted
-    )
-    steps.append(
-        {
-            "step": "10_정본_원문대조",
-            "유지": len(checked.kept),
-            "삭제": len(checked.deleted) + len(rejected),
-            "삭제사유": [item["reason"] for item in rejected[:10]],
-        }
-    )
-    kept: list[CanonicalPick] = []
-    for item in checked.kept:
+    checked_items = [*checked.kept, *(item for item, _reason in checked.deleted)]
+    if {id(item) for item in checked_items} != {id(item) for item in draft_items} or len(
+        checked_items
+    ) != len(draft_items):
+        checked_kept: list[Any] = []
+        rejected.extend(
+            {
+                "sid": pick_by_draft_identity[id(item)].sid,
+                "reason": "원문 대조 결과 회계 불일치",
+                "reason_code": "source_verification_failure",
+            }
+            for item in draft_items
+        )
+    else:
+        checked_kept = list(checked.kept)
+        rejected.extend(
+            {
+                "sid": pick_by_draft_identity[id(item)].sid,
+                "reason": reason,
+                "reason_code": "source_verification_failure",
+            }
+            for item, reason in checked.deleted
+        )
+    policy_kept: list[CanonicalPick] = []
+    for item in checked_kept:
         if item.fragment_id is None:
             continue
         fragment = frags.get(int(item.fragment_id), {})
@@ -891,9 +1018,7 @@ def select_canonical_spans(
             source_kind=str(fragment.get("종류") or ""),
             company=company,
         )
-        selected_pick = pick_by_draft_key.get(
-            (int(item.fragment_id), str(item.sentence), str(item.block))
-        )
+        selected_pick = pick_by_draft_identity.get(id(item))
         # 기존 company-specificity 9장은 실명 파트너를 전제로 한다. 7장 정본은
         # 파트너가 없어도 위에서 법인 주어·현재 운영·단계·관계를 모두 결속한
         # operating_core를 허용하므로 그 닫힌 경우만 별도로 통과시킨다.
@@ -906,16 +1031,69 @@ def select_canonical_spans(
                 {
                     "sid": "",
                     "reason": decision.reason or "섹션별 사실 기준 미달",
+                    "reason_code": "company_specificity_failure",
                 }
             )
             continue
         if selected_pick is not None:
-            kept.append(selected_pick)
+            policy_kept.append(selected_pick)
+
+    # 참조 대상도 최종 원문·회사특이성 게이트를 통과한 경우에만 의존 항목을
+    # 남긴다. 구조 검증 때 존재했던 대상이 후단에서 탈락한 경우의 고아 링크를
+    # 허용하지 않는다.
+    final_picks_by_sid = {item.sid: item for item in policy_kept}
+    kept: list[CanonicalPick] = []
+    for pick in policy_kept:
+        link_failure_reason = ""
+        if pick.claim_type == "priority_product":
+            target = final_picks_by_sid.get(pick.revenue_model_sid)
+            if target is None or target.claim_type != "revenue_model":
+                link_failure_reason = "같은 답의 2장 수익 분류와 연결되지 않음"
+        elif pick.claim_type == "current_response":
+            target = final_picks_by_sid.get(pick.response_to_sid)
+            if target is None or target.claim_type != "current_issue":
+                link_failure_reason = "같은 답의 미해결 문제와 대응이 연결되지 않음"
+        elif pick.claim_type == "change_interpretation":
+            linked_sids = tuple(
+                value for value in pick.basis_sids if value not in performance_bases
+            )
+            if any(
+                (target := final_picks_by_sid.get(value)) is None
+                or target.claim_type != "completed_execution"
+                for value in linked_sids
+            ):
+                link_failure_reason = (
+                    "같은 답의 완료 실행·제공된 완료 실적과 변화 해석이 연결되지 않음"
+                )
+        if link_failure_reason:
+            rejected.append(
+                {
+                    "sid": pick.sid,
+                    "reason": link_failure_reason,
+                    "reason_code": "cross_reference_contract_failure",
+                }
+            )
+            continue
+        kept.append(pick)
+
+    steps.append(
+        {
+            "step": "10_정본_원문대조",
+            "유지": len(kept),
+            "삭제": len(rejected),
+            "삭제사유": [item["reason"] for item in rejected[:10]],
+        }
+    )
+    if len(kept) + len(rejected) != len(selected):
+        raise RuntimeError("span-selection 검증 집계가 provider 선택 수와 다릅니다")
     attach_round_result(
         selection_step,
         requested_max_tokens=CANONICAL_SELECTION_MAX_TOKENS,
         provider_selected=len(selected),
         validation_kept=len(kept),
         validation_rejected=len(rejected),
+        validation_rejection_reason_counts=Counter(
+            _validation_rejection_reason_code(item) for item in rejected
+        ),
     )
     return kept, rejected

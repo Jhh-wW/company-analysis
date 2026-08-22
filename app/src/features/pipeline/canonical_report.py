@@ -185,7 +185,35 @@ def majority_picks(rounds: Iterable[Iterable[CanonicalPick]], *, minimum: int = 
                 **changes,
             )
         )
-    return sorted(kept, key=lambda item: (item.fragment_id, item.section_id, item.sentence))
+    kept_by_sid = {item.sid: item for item in kept}
+    bound: list[CanonicalPick] = []
+    for item in kept:
+        target: CanonicalPick | None = None
+        if item.claim_type == "priority_product":
+            target = kept_by_sid.get(item.revenue_model_sid)
+            if target is None or target.claim_type != "revenue_model":
+                continue
+        elif item.claim_type == "current_response":
+            target = kept_by_sid.get(item.response_to_sid)
+            if target is None or target.claim_type != "current_issue":
+                continue
+        elif item.claim_type == "change_interpretation":
+            internal_bases = tuple(
+                value
+                for value in item.basis_sids
+                if re.fullmatch(r"historical-performance:20\d{2}", value) is None
+            )
+            if any(
+                (target := kept_by_sid.get(value)) is None
+                or target.claim_type != "completed_execution"
+                for value in internal_bases
+            ):
+                continue
+        bound.append(item)
+    return sorted(
+        bound,
+        key=lambda item: (item.fragment_id, item.section_id, item.sentence),
+    )
 
 
 def sections_from_picks(

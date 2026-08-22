@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from src.shared.span_selection_diagnostics import (
+    SAFE_VALIDATION_REJECTION_REASONS,
     attach_round_result,
     majority_result_reason,
     round_diagnostic_from_steps,
@@ -37,6 +38,7 @@ def test_3000토큰_파싱실패는_원문없이_절단의심으로_남긴다() 
     assert diagnostic.output_limit_reached is True
     assert diagnostic.parse_failed is True
     assert diagnostic.empty_reason == "output_limit_empty"
+    assert diagnostic.validation_rejection_reason_counts == ()
     assert "response" not in step["span_selection_diagnostic"]
     assert "prompt" not in step["span_selection_diagnostic"]
 
@@ -81,3 +83,52 @@ def test_임의_provider_종료문구는_unknown으로_줄인다() -> None:
 
     diagnostic = round_diagnostic_from_steps([step], round_number=1)
     assert diagnostic.provider_stop_reason == "unknown"
+
+
+def test_거절사유는_닫힌코드별_합계만_남긴다() -> None:
+    step = {"usage": {"out": 100, "stop_reason": "end_turn"}}
+    attach_round_result(
+        step,
+        requested_max_tokens=6000,
+        provider_selected=4,
+        validation_kept=0,
+        validation_rejected=4,
+        validation_rejection_reason_counts={
+            "subject_label_not_in_source": 3,
+            "저장하면 안 되는 회사 원문": 1,
+        },
+    )
+
+    diagnostic = round_diagnostic_from_steps([step], round_number=1)
+
+    assert diagnostic.validation_rejection_reason_counts == (
+        ("other_validation_failure", 1),
+        ("subject_label_not_in_source", 3),
+    )
+    assert all(
+        reason in SAFE_VALIDATION_REJECTION_REASONS
+        for reason, _count in diagnostic.validation_rejection_reason_counts
+    )
+    assert "저장하면 안 되는 회사 원문" not in repr(
+        step["span_selection_diagnostic"]
+    )
+
+
+def test_거절사유_합계가_다르면_진단집계불일치로_닫는다() -> None:
+    step = {"usage": {"out": 100, "stop_reason": "end_turn"}}
+    attach_round_result(
+        step,
+        requested_max_tokens=6000,
+        provider_selected=3,
+        validation_kept=0,
+        validation_rejected=3,
+        validation_rejection_reason_counts={
+            "subject_label_not_in_source": 2,
+        },
+    )
+
+    diagnostic = round_diagnostic_from_steps([step], round_number=1)
+
+    assert diagnostic.validation_rejection_reason_counts == (
+        ("diagnostic_accounting_mismatch", 3),
+    )

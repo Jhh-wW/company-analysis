@@ -71,6 +71,49 @@ def test_majority_vote_agrees_each_structured_field_without_exact_object_match()
     assert majority_picks(rounds) == [base]
 
 
+def test_majority_vote_drops_reference_when_its_target_loses_field_consensus() -> None:
+    revenue = CanonicalPick(
+        "business_model",
+        "가나다는 SmartX를 기업 고객에게 판매한다.",
+        1,
+        sid="1-1",
+        claim_type="revenue_model",
+        subject_label="SmartX",
+    )
+    priority = CanonicalPick(
+        "portfolio",
+        "가나다는 SmartX 출시와 해외 판매망 확대를 추진한다.",
+        2,
+        sid="2-1",
+        claim_type="priority_product",
+        subject_label="SmartX",
+        product_role="기업 고객용 제품",
+        revenue_model_sid="1-1",
+        priority_signals=("출시·운영", "유통·지역확대"),
+    )
+    rounds = [
+        [revenue, priority],
+        [replace(revenue, subject_label="SmartX 제품"), priority],
+        [],
+    ]
+
+    assert majority_picks(rounds) == []
+
+
+def test_majority_vote_keeps_change_bound_only_to_historical_performance() -> None:
+    reference = historical_performance_basis_sid(2025)
+    change = CanonicalPick(
+        "past_changes",
+        "가나다는 2025년 SmartX 매출이 증가했다고 밝혔다.",
+        1,
+        sid="1-1",
+        claim_type="change_interpretation",
+        basis_sids=(reference,),
+    )
+
+    assert majority_picks([[change], [change], []]) == [change]
+
+
 def test_assemble_report_locks_visible_claims_to_sources() -> None:
     fragments = {
         1: {"종류": "사업내용", "원문": "가나다는 산업용 소재 기업이다."},
