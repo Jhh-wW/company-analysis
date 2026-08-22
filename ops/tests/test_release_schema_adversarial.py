@@ -148,6 +148,38 @@ def _poison_trigger(database: Path) -> None:
         )
 
 
+def _add_extra_trigger(database: Path, operation: str) -> None:
+    normalized = operation.upper()
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE attacker_trigger_log (event TEXT NOT NULL)"
+        )
+        connection.execute(
+            f"CREATE TRIGGER attacker_reports_{operation.lower()} "
+            f"AFTER {normalized} ON reports BEGIN "
+            f"INSERT INTO attacker_trigger_log VALUES ('{operation.lower()}'); END"
+        )
+
+
+def _add_extra_index(database: Path, variant: str) -> None:
+    statements = {
+        "partial": (
+            "CREATE INDEX attacker_reports_partial ON reports(report_id) "
+            "WHERE corp_id <> ''"
+        ),
+        "unique": (
+            "CREATE UNIQUE INDEX attacker_reports_unique "
+            "ON reports(corp_id, job)"
+        ),
+        "expression": (
+            "CREATE INDEX attacker_reports_expression "
+            "ON reports(lower(report_id))"
+        ),
+    }
+    with sqlite3.connect(database) as connection:
+        connection.execute(statements[variant])
+
+
 def test_required_table_names_and_two_hash_columns_are_not_app_schema(
     tmp_path: Path,
 ) -> None:
@@ -189,6 +221,58 @@ def test_same_named_poisoned_schema_object_is_rejected(
     temp_parent.mkdir()
 
     _reject_without_mutation(database, temp_parent)
+
+
+@pytest.mark.parametrize("operation", ("insert", "update", "delete"))
+def test_extra_data_mutation_trigger_is_rejected_as_noncanonical(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    database = _create_runtime_database(
+        tmp_path / operation / "source" / "extra-trigger.sqlite3"
+    )
+    _add_extra_trigger(database, operation)
+    temp_parent = tmp_path / operation / "restore-temp"
+    temp_parent.mkdir(parents=True)
+
+    _reject_without_mutation(database, temp_parent)
+
+
+@pytest.mark.parametrize("variant", ("partial", "unique", "expression"))
+def test_extra_semantic_index_is_rejected_as_noncanonical(
+    tmp_path: Path,
+    variant: str,
+) -> None:
+    database = _create_runtime_database(
+        tmp_path / variant / "source" / "extra-index.sqlite3"
+    )
+    _add_extra_index(database, variant)
+    temp_parent = tmp_path / variant / "restore-temp"
+    temp_parent.mkdir(parents=True)
+
+    _reject_without_mutation(database, temp_parent)
+
+
+def test_each_dropped_canonical_table_is_rejected_before_bootstrap(
+    tmp_path: Path,
+) -> None:
+    reference = _create_runtime_database(tmp_path / "reference" / "storage.sqlite3")
+    with sqlite3.connect(reference) as connection:
+        required_tables = sorted(readiness._table_names(connection))  # noqa: SLF001
+    assert required_tables
+
+    for index, table in enumerate(required_tables):
+        database = _create_runtime_database(
+            tmp_path / f"drop-{index:02d}" / "source" / "storage.sqlite3"
+        )
+        escaped = table.replace('"', '""')
+        with sqlite3.connect(database) as connection:
+            connection.execute("PRAGMA foreign_keys=OFF")
+            connection.execute(f'DROP TABLE "{escaped}"')
+        temp_parent = tmp_path / f"drop-{index:02d}" / "restore-temp"
+        temp_parent.mkdir(parents=True)
+
+        _reject_without_mutation(database, temp_parent)
 
 
 def test_unsupported_reserved_migration_state_is_rejected_without_source_write(
@@ -248,6 +332,43 @@ def test_supported_legacy_migration_runs_on_clone_only_and_passes(
             str(row[1]) for row in connection.execute("PRAGMA table_xinfo(sessions)")
         }
     assert "token" in columns and "token_hash" not in columns
+
+
+def test_supported_interrupted_raw_session_migration_is_explicitly_allowed(
+    tmp_path: Path,
+) -> None:
+    database = _create_runtime_database(
+        tmp_path / "source" / "interrupted-legacy.sqlite3"
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE sessions")
+        connection.execute(
+            """
+            CREATE TABLE sessions (
+                token      TEXT PRIMARY KEY,
+                email      TEXT NOT NULL,
+                subject    TEXT NOT NULL,
+                is_admin   INTEGER NOT NULL,
+                expires_at REAL NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "ALTER TABLE sessions RENAME TO sessions_legacy_raw_token"
+        )
+    temp_parent = tmp_path / "restore-temp"
+    temp_parent.mkdir()
+    _write_sidecar(database)
+    before = _directory_bytes(database.parent)
+
+    result = _restore(database, temp_parent)
+
+    assert result["status"] == "임시 복구 통과"
+    _assert_source_and_temp_unchanged(database, before, temp_parent)
+    with sqlite3.connect(database) as connection:
+        tables = readiness._table_names(connection)  # noqa: SLF001
+    assert "sessions" not in tables
+    assert "sessions_legacy_raw_token" in tables
 
 
 def test_runtime_database_bootstraps_only_temporary_clones_and_passes(

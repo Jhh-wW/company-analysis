@@ -275,6 +275,31 @@ def _trigger_contract(connection: sqlite3.Connection) -> dict[str, tuple[str, st
     }
 
 
+def _allowed_prebootstrap_missing_tables(
+    connection: sqlite3.Connection,
+    *,
+    storage_db: object,
+    missing_tables: set[str],
+) -> set[str]:
+    """실제 storage 런타임이 명시적으로 복구하는 중단 상태만 허용한다."""
+
+    sessions_table = "sessions"
+    legacy_table = str(
+        getattr(storage_db, "_LEGACY_SESSIONS_TABLE", "sessions_legacy_raw_token")
+    )
+    session_state = getattr(storage_db, "_session_table_state", None)
+    if missing_tables != {sessions_table} or not callable(session_state):
+        return set()
+    try:
+        current_state = session_state(connection, sessions_table)
+        legacy_state = session_state(connection, legacy_table)
+    except (RuntimeError, sqlite3.Error):
+        return set()
+    if current_state == "missing" and legacy_state == "raw":
+        return {sessions_table}
+    return set()
+
+
 def _load_storage_db_module():
     app_root = Path(__file__).resolve().parents[1] / "app"
     expected_module = app_root / "src" / "features" / "storage" / "db.py"
@@ -324,9 +349,45 @@ def _assert_bootstrapped_schema(
     if canonical.exists():
         raise ReadinessError("canonical schema 경로가 비어 있지 않습니다.")
     try:
-        with storage_db.connect(candidate):
-            pass
         with storage_db.connect(canonical):
+            pass
+    except Exception as exc:  # noqa: BLE001 — feature별 migration 실패를 닫는다
+        raise ReadinessError(
+            "현재 앱의 canonical storage schema를 만들지 못했습니다."
+        ) from exc
+
+    try:
+        with closing(_readonly_connection(canonical)) as canonical_connection:
+            required_tables = _assert_sqlite_integrity(canonical_connection)
+            required_table_xinfo = {
+                table: _table_xinfo(canonical_connection, table)
+                for table in required_tables
+            }
+            required_indexes = {
+                table: _index_contract(canonical_connection, table)
+                for table in required_tables
+            }
+            required_triggers = _trigger_contract(canonical_connection)
+        with closing(_readonly_connection(candidate)) as prebootstrap_connection:
+            prebootstrap_tables = _assert_sqlite_integrity(prebootstrap_connection)
+            missing_before_bootstrap = required_tables - prebootstrap_tables
+            allowed_missing = _allowed_prebootstrap_missing_tables(
+                prebootstrap_connection,
+                storage_db=storage_db,
+                missing_tables=missing_before_bootstrap,
+            )
+    except sqlite3.Error as exc:
+        raise ReadinessError("앱 storage schema 계약을 읽지 못했습니다.") from exc
+
+    unapproved_missing = sorted(missing_before_bootstrap - allowed_missing)
+    if unapproved_missing:
+        raise ReadinessError(
+            "bootstrap 전 백업에 canonical 필수 테이블이 없습니다: "
+            + ", ".join(unapproved_missing)
+        )
+
+    try:
+        with storage_db.connect(candidate):
             pass
     except Exception as exc:  # noqa: BLE001 — feature별 migration 실패를 닫는다
         raise ReadinessError(
@@ -345,19 +406,8 @@ def _assert_bootstrapped_schema(
                 for table in actual_tables
             }
             actual_triggers = _trigger_contract(actual_connection)
-        with closing(_readonly_connection(canonical)) as canonical_connection:
-            required_tables = _assert_sqlite_integrity(canonical_connection)
-            required_table_xinfo = {
-                table: _table_xinfo(canonical_connection, table)
-                for table in required_tables
-            }
-            required_indexes = {
-                table: _index_contract(canonical_connection, table)
-                for table in required_tables
-            }
-            required_triggers = _trigger_contract(canonical_connection)
     except sqlite3.Error as exc:
-        raise ReadinessError("앱 storage schema 계약을 읽지 못했습니다.") from exc
+        raise ReadinessError("bootstrap 뒤 앱 storage schema 계약을 읽지 못했습니다.") from exc
 
     missing_tables = sorted(required_tables - actual_tables)
     if missing_tables:
@@ -378,17 +428,46 @@ def _assert_bootstrapped_schema(
                 f"앱 storage table_xinfo 계약이 맞지 않습니다: {table}"
             )
 
+        actual_index_names = set(actual_indexes[table])
+        required_index_names = set(required_indexes[table])
+        if actual_index_names != required_index_names:
+            unexpected = sorted(actual_index_names - required_index_names)
+            missing = sorted(required_index_names - actual_index_names)
+            details = []
+            if missing:
+                details.append("누락=" + ",".join(missing))
+            if unexpected:
+                details.append("추가=" + ",".join(unexpected))
+            raise ReadinessError(
+                f"앱 storage index 집합이 canonical과 다릅니다: {table} "
+                + " ".join(details)
+            )
         for name, required_index in required_indexes[table].items():
             if actual_indexes[table].get(name) != required_index:
                 raise ReadinessError(
                     f"앱 storage 필수 index 계약이 맞지 않습니다: {name}"
                 )
 
-    for name, required_trigger in required_triggers.items():
-        if actual_triggers.get(name) != required_trigger:
-            raise ReadinessError(
-                f"앱 storage 필수 trigger 계약이 맞지 않습니다: {name}"
-            )
+    if actual_triggers != required_triggers:
+        actual_names = set(actual_triggers)
+        required_names = set(required_triggers)
+        changed = sorted(
+            name
+            for name in actual_names & required_names
+            if actual_triggers[name] != required_triggers[name]
+        )
+        details = []
+        missing = sorted(required_names - actual_names)
+        unexpected = sorted(actual_names - required_names)
+        if missing:
+            details.append("누락=" + ",".join(missing))
+        if unexpected:
+            details.append("추가=" + ",".join(unexpected))
+        if changed:
+            details.append("변조=" + ",".join(changed))
+        raise ReadinessError(
+            "앱 storage trigger 집합이 canonical과 다릅니다: " + " ".join(details)
+        )
 
     return AppSchemaInventory(
         table_count=len(required_tables),

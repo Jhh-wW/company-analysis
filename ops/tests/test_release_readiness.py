@@ -193,7 +193,7 @@ def test_minimal_named_tables_fail_actual_storage_bootstrap(tmp_path: Path) -> N
     original_digest = _digest(database)
     _sink, gate, expectation = _manifest_bundle(tmp_path, database, checksum)
 
-    with pytest.raises(readiness.ReadinessError, match="storage bootstrap"):
+    with pytest.raises(readiness.ReadinessError, match="bootstrap"):
         readiness.verify_backup(
             database,
             checksum,
