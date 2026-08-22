@@ -287,7 +287,7 @@
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label>별점 <select name="rating" required><option value="">선택</option>{% for score in range(1, 6) %}<option value="{{ score }}">{{ score }}점</option>{% endfor %}</select></label>
       <label>전체 이용 소감 <textarea name="overall_feedback" maxlength="3000" required></textarea></label>
-      <label>회사의 구체적인 사업상 구분점이 잘 드러났나요? <textarea name="business_distinction" maxlength="3000" required></textarea></label>
+      <label>결과를 보고 설명할 수 있는 회사의 구체적인 사업상 구분점과 그 근거는 무엇인가요? <textarea name="business_distinction" maxlength="3000" required></textarea></label>
       <label>더 있었으면 하는 정보 <textarea name="add_information" maxlength="3000"></textarea></label>
       <label>없어도 된다고 생각한 정보 <textarea name="delete_information" maxlength="3000"></textarea></label>
       <button class="btn ghost" type="submit">설문 저장</button>

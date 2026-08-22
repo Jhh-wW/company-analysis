@@ -39,3 +39,22 @@ def test_approved_dashboard_keeps_the_mobile_scope_in_existing_styles():
     assert ".admin-frame .frame-menu .frame-desktop-link" in css
     assert ".admin-frame form { display: none; }" in css
     assert "@media (max-width: 700px)" in css
+
+
+def test_pc_dashboard_navigation_reaches_invites_and_link_issuance():
+    runtime._PIPELINE = DemoPipeline()
+    with TestClient(main.app) as client:
+        session = auth_logic.create_session("admin@example.com", True)
+        client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
+        response = client.get("/admin")
+        destination = client.get("/admin/access")
+
+    assert response.status_code == 200
+    assert (
+        '<a class="frame-desktop-link" href="/admin/access">'
+        "친구 초대·LINK 발급</a>"
+    ) in response.text
+    assert destination.status_code == 200
+    assert "초대·LINK 관리" in destination.text
+    assert "LINK 발급" in destination.text
+    assert "친구 초대" in destination.text

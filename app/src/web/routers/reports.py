@@ -31,6 +31,7 @@ from src.features.export_pdf.automatic_release import (
 )
 from src.features.export_pdf import release_store as pdf_release_store
 from src.features.export_notion import store as notion_store
+from src.features.admin_dashboard import kpi as dashboard_kpi
 from src.features.admin_dashboard import store as dashboard_store
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
@@ -58,6 +59,13 @@ logger = logging.getLogger(__name__)
 # lets the sync worker finish and persist the remote outcome instead of leaving
 # an ambiguous operation that a later click could duplicate.
 _NOTION_EXPORT_WORKERS: set[asyncio.Task] = set()
+_REPORT_UNAVAILABLE_HOME = "/?report_status=unavailable"
+
+
+def _report_unavailable_redirect() -> RedirectResponse:
+    """보고서 존재 여부를 밝히지 않고 같은 일반 안내로 첫 화면에 보낸다."""
+
+    return RedirectResponse(_REPORT_UNAVAILABLE_HOME, status_code=303)
 
 
 def _report_for_output(report: Report) -> Report:
@@ -317,7 +325,7 @@ async def _result_page_response(
         except job_runtime.ReportStoreUnavailable:
             return job_runtime._storage_unavailable_response(request)
         if saved is None:
-            return RedirectResponse("/", status_code=303)
+            return _report_unavailable_redirect()
         if not allow_expired and job_runtime._link_expired(saved):
             return job_runtime._expired_screen(request)
         try:
@@ -417,7 +425,7 @@ def _report_for_download(request: Request, job_id: str) -> Report | Response:
         except job_runtime.ReportStoreUnavailable:
             return job_runtime._storage_unavailable_response(request)
     if report is None:
-        return RedirectResponse("/", status_code=303)
+        return _report_unavailable_redirect()
     if job_runtime._link_expired(report):
         return job_runtime._expired_screen(request)
     return report
@@ -698,6 +706,12 @@ def _render_result_page(
     report: Report,
     internal_review_preview: bool,
 ) -> Response:
+    member_email = _member_feedback_email(request)
+    if member_email:
+        _record_member_result_view(
+            report_id=job.job_id,
+            actor_email=member_email,
+        )
     return job_runtime._shared(
         request_helpers.templates.TemplateResponse(
             request=request,
@@ -710,7 +724,7 @@ def _render_result_page(
                 grade_note=grade_message(report.grade, report.filled_count),
                 notion_configured=is_notion_configured(),
                 internal_review_preview=internal_review_preview,
-                member_feedback_allowed=_member_feedback_allowed(request),
+                member_feedback_allowed=bool(member_email),
             ),
         )
     )
@@ -718,16 +732,37 @@ def _render_result_page(
 
 def _member_feedback_allowed(request: Request) -> bool:
     """MEMBER 설문·오류 신고 입력은 초대 명단을 다시 읽어 표시한다."""
+    return bool(_member_feedback_email(request))
+
+
+def _member_feedback_email(request: Request) -> str:
+    """현재 초대 MEMBER의 정규화 이메일만 돌려준다."""
     token = request.cookies.get(auth_constants.SESSION_COOKIE_NAME)
     session = auth_logic.get_session(token)
     if session is None or session.is_admin:
-        return False
+        return ""
     try:
         with storage_db.connect() as conn:
-            return share_allow.is_allowed(conn, session.email)
+            return session.email if share_allow.is_allowed(conn, session.email) else ""
     except Exception:
         logger.exception("MEMBER 설문 권한을 읽지 못했습니다")
-        return False
+        return ""
+
+
+def _record_member_result_view(*, report_id: str, actor_email: str) -> None:
+    """KPI 저장 실패가 승인된 보고서 열람을 막지 않게 별도 기록한다."""
+    try:
+        with storage_db.connect() as conn:
+            version = dashboard_store.get_report_state(conn, report_id).version
+            dashboard_kpi.record_first_view(
+                conn,
+                report_id=report_id,
+                report_version=version,
+                actor_email=actor_email,
+                now_iso=clock.iso_now_kst(),
+            )
+    except Exception:
+        logger.exception("보고서 첫 열람 KPI를 기록하지 못했습니다")
 
 
 @router.get("/review/pdf/{job_id}", response_class=HTMLResponse)
@@ -831,7 +866,7 @@ async def send_to_notion(
         except job_runtime.ReportStoreUnavailable:
             return job_runtime._storage_unavailable_response(request)
     if report is None:
-        return RedirectResponse("/", status_code=303)
+        return _report_unavailable_redirect()
     # 권한/CSRF 다음, adapter나 멱등성 row보다 먼저 만료를 판정한다. 기간이
     # 지난 보고서는 명시적 410이며 Notion adapter 호출 수가 항상 0이다.
     if job_runtime._link_expired(report):

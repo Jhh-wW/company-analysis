@@ -323,9 +323,25 @@ def test_없는_번호는_첫_화면으로_돌려보낸다():
         for path in ("/result/없는번호zzz", "/download/pdf/없는번호zzz"):
             response = client.get(path, follow_redirects=False)
             assert response.status_code == 303, f"{path} 가 열렸습니다"
+            assert response.headers["location"] == "/?report_status=unavailable"
+            notice = client.get(response.headers["location"])
+            assert notice.status_code == 200
+            assert "요청한 보고서를 열 수 없어 일반 첫 화면을 열었습니다" in notice.text
+            assert "없는번호zzz" not in notice.text
+            assert "보고서가 존재하지" not in notice.text
+            assert "보고서를 찾을 수 없" not in notice.text
         retired = client.get("/download/없는번호zzz", follow_redirects=False)
         assert retired.status_code == 410
         assert "no-store" in retired.headers["cache-control"]
+
+
+def test_공유링크와_보고서_안내가_동시에_있어도_둘다_표시한다():
+    with TestClient(main.app) as client:
+        response = client.get("/?share_status=missing&report_status=unavailable")
+
+    assert response.status_code == 200
+    assert "이 LINK는 닫혔거나 존재하지 않아" in response.text
+    assert "요청한 보고서를 열 수 없어" in response.text
 
 
 def test_저장된_보고서에_공고_원문이_없다(finished_job):

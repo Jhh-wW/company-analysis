@@ -8,16 +8,19 @@ from __future__ import annotations
 
 from dataclasses import asdict, replace
 from datetime import timedelta
+import logging
 import os
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from src.core import clock
+from src.features.admin_dashboard import kpi as dashboard_kpi
+from src.features.admin_dashboard import maintenance as dashboard_maintenance
 from src.features.admin_dashboard import store as dashboard_store
-from src.features.admin_dashboard import weekly as dashboard_weekly
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
+from src.features.backup import status as backup_status
 from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import store as share_store
 from src.features.storage import constants as storage_constants
@@ -29,6 +32,7 @@ from src.web.security import CSRF_TOKEN_MAX_CHARS, REFERENCE_MAX_CHARS
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 _FEEDBACK_MAX_CHARS = 3000
 _CORRECTED_PAYLOAD_MAX_CHARS = 250_000
 _XLSX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -178,21 +182,13 @@ def _member_period(request: Request) -> tuple[str, str]:
     return "all", ""
 
 
-def _last_completed_week_start() -> str:
-    """수동 실행도 정본과 같은 직전 월요일~일요일만 대상으로 삼는다."""
-    today = clock.today_kst()
-    this_monday = today - timedelta(days=today.weekday())
-    return (this_monday - timedelta(days=7)).isoformat()
-
-
 def _settings_context(request: Request, *, edit: bool) -> dict:
     providers = (
-        ("Google", bool(os.environ.get("GOOGLE_API_KEY", "").strip())),
+        ("Google", bool(os.environ.get("GOOGLE_CLIENT_ID", "").strip())),
         ("DART", bool(os.environ.get("DART_API_KEY", "").strip())),
         ("Naver", bool(os.environ.get("NAVER_CLIENT_ID", "").strip())),
         ("Anthropic", bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())),
         ("Places", bool(os.environ.get("GOOGLE_PLACES_API_KEY", "").strip())),
-        ("백업 저장소", False),
     )
     try:
         with storage_db.connect() as conn:
@@ -220,8 +216,18 @@ def _settings_context(request: Request, *, edit: bool) -> dict:
             weekly_reports = [asdict(item) for item in dashboard_store.list_weekly_reports(conn)]
             trash_reports = [asdict(item) for item in dashboard_store.list_trashed_reports(conn)]
             operation_claims = dashboard_store.list_operation_claims(conn)
+            current_backup_status = asdict(
+                backup_status.status_view(conn, now_iso=clock.iso_now_kst())
+            )
     except Exception:
         weekly_reports, trash_reports, operation_claims = [], [], []
+        current_backup_status = {
+            "status": "unavailable",
+            "last_attempt_at": "",
+            "last_success_at": "",
+            "last_failure_at": "",
+            "last_failure_summary": "",
+        }
     return request_helpers._ctx(
         request,
         dashboard_service=service,
@@ -230,7 +236,10 @@ def _settings_context(request: Request, *, edit: bool) -> dict:
         dashboard_weekly_reports=weekly_reports,
         dashboard_trash_reports=trash_reports,
         dashboard_operation_claims=operation_claims,
-        dashboard_default_week_start=_last_completed_week_start(),
+        dashboard_backup_status=current_backup_status,
+        dashboard_default_week_start=dashboard_maintenance.last_completed_week_start(
+            clock.today_kst()
+        ),
     )
 
 
@@ -242,6 +251,7 @@ def _dashboard_context(request: Request) -> dict:
         incidents = dashboard_store.list_incidents(conn, limit=25)
         operation_issues = dashboard_store.list_failed_operation_issues(conn, limit=25)
         surveys_total, helpful = dashboard_store.survey_summary(conn)
+        kpi_summary = dashboard_kpi.summary(conn)
         members = share_allow.list_all(conn)
         links, link_unseen = _link_rows_for_dashboard(conn)
         reports = _report_rows(conn, limit=12)
@@ -257,6 +267,14 @@ def _dashboard_context(request: Request) -> dict:
         if surveys_total < 5
         else f"{round(helpful * 100 / surveys_total)}% ({helpful}/{surveys_total})"
     )
+    three_minute_response = (
+        "자료 모으는 중"
+        if kpi_summary.measured_responses < 5
+        else (
+            f"{round(kpi_summary.within_target * 100 / kpi_summary.measured_responses)}% "
+            f"({kpi_summary.within_target}/{kpi_summary.measured_responses})"
+        )
+    )
     return request_helpers._ctx(
         request,
         dashboard_service=asdict(service),
@@ -271,6 +289,8 @@ def _dashboard_context(request: Request) -> dict:
         dashboard_company_counts=member_company_counts,
         dashboard_satisfaction=satisfaction,
         dashboard_survey_total=surveys_total,
+        dashboard_three_minute_response=three_minute_response,
+        dashboard_kpi_measured=kpi_summary.measured_responses,
         dashboard_last_updated=clock.iso_now_kst(),
         dashboard_status_labels=_status_labels(),
         dashboard_company_labels=_company_labels(),
@@ -529,13 +549,26 @@ async def submit_survey(
         with storage_db.connect() as conn:
             if not report_store.exists(conn, report_id):
                 return HTMLResponse("존재하지 않는 보고서입니다.", status_code=404)
-            dashboard_store.save_survey(
+            report_version = dashboard_store.get_report_state(conn, report_id).version
+            now_iso = clock.iso_now_kst()
+            revision = dashboard_store.save_survey(
                 conn, report_id=report_id, actor_email=email, rating=rating,
                 overall_feedback=overall_feedback, business_distinction=business_distinction,
                 add_information=add_information, delete_information=delete_information,
-                now_iso=clock.iso_now_kst(),
-                report_version=dashboard_store.get_report_state(conn, report_id).version,
+                now_iso=now_iso,
+                report_version=report_version,
             )
+            if revision == 1:
+                try:
+                    dashboard_kpi.record_first_survey(
+                        conn,
+                        report_id=report_id,
+                        report_version=report_version,
+                        actor_email=email,
+                        now_iso=now_iso,
+                    )
+                except Exception:
+                    logger.exception("첫 설문 KPI를 기록하지 못했습니다")
     except ValueError as error:
         return HTMLResponse(str(error), status_code=400)
     except Exception:
@@ -730,46 +763,13 @@ async def create_weekly_report(
     )
     if blocked is not None:
         return blocked
-    week_start = _last_completed_week_start()
-    now_iso = clock.iso_now_kst()
     try:
-        with storage_db.connect() as conn:
-            claim = dashboard_store.claim_operation(
-                conn,
-                operation=dashboard_store.OPERATION_WEEKLY_XLSX,
-                period_key=week_start,
-                actor_email=_admin_email(request),
-                now_iso=now_iso,
-            )
-    except Exception:
-        return HTMLResponse("주간 파일 작업을 시작하지 못했습니다.", status_code=503)
-    if claim is None:
-        return _admin_response(request, RedirectResponse("/admin/settings", status_code=303))
-    try:
-        with storage_db.connect() as conn:
-            workbook = dashboard_weekly.build_weekly_workbook(conn, week_start=week_start)
-        with storage_db.connect() as conn:
-            saved = dashboard_store.save_weekly_report(
-                conn,
-                week_start=week_start,
-                workbook_blob=workbook,
-                actor_email=_admin_email(request),
-                now_iso=clock.iso_now_kst(),
-            )
-            if not saved:
-                raise RuntimeError("동일 주간 파일이 이미 저장되어 있습니다")
-            if not dashboard_store.complete_operation(
-                conn, key=claim, status="succeeded", detail="관리자 전용 XLSX 생성 완료", now_iso=clock.iso_now_kst()
-            ):
-                raise RuntimeError("주간 파일 작업 상태를 마감하지 못했습니다")
-    except Exception:
-        try:
-            with storage_db.connect() as conn:
-                dashboard_store.complete_operation(
-                    conn, key=claim, status="failed", detail="주간 XLSX 생성에 실패했습니다.", now_iso=clock.iso_now_kst()
-                )
-        except Exception:
-            pass
+        dashboard_maintenance.run_current_operation(
+            storage_db.connect,
+            operation=dashboard_maintenance.OPERATION_WEEKLY,
+            actor_email=_admin_email(request),
+        )
+    except dashboard_maintenance.MaintenanceRunError:
         return HTMLResponse("주간 파일 생성에 실패했습니다. 문제 목록에서 기록을 확인해 주세요.", status_code=503)
     return _admin_response(request, RedirectResponse("/admin/settings", status_code=303))
 
@@ -784,44 +784,13 @@ async def run_trash_cleanup(
     )
     if blocked is not None:
         return blocked
-    now_iso = clock.iso_now_kst()
-    day = clock.today_kst().isoformat()
-    day_start_iso = f"{day}T00:00:00+09:00"
     try:
-        with storage_db.connect() as conn:
-            claim = dashboard_store.claim_operation(
-                conn,
-                operation=dashboard_store.OPERATION_TRASH_CLEANUP,
-                period_key=day,
-                actor_email=_admin_email(request),
-                now_iso=now_iso,
-            )
-    except Exception:
-        return HTMLResponse("휴지통 정리 작업을 시작하지 못했습니다.", status_code=503)
-    if claim is None:
-        return _admin_response(request, RedirectResponse("/admin/settings", status_code=303))
-    try:
-        with storage_db.connect() as conn:
-            stopped = dashboard_store.fail_stalled_operations(
-                conn, before_iso=day_start_iso, now_iso=clock.iso_now_kst()
-            )
-            purged = dashboard_store.purge_expired_trash(conn, now_iso=clock.iso_now_kst())
-            if not dashboard_store.complete_operation(
-                conn,
-                key=claim,
-                status="succeeded",
-                detail=f"30일 경과 휴지통 {purged}건 정리 완료, 이전 날짜 멈춘 작업 {stopped}건 실패 처리",
-                now_iso=clock.iso_now_kst(),
-            ):
-                raise RuntimeError("휴지통 정리 작업 상태를 마감하지 못했습니다")
-    except Exception:
-        try:
-            with storage_db.connect() as conn:
-                dashboard_store.complete_operation(
-                    conn, key=claim, status="failed", detail="휴지통 30일 정리에 실패했습니다.", now_iso=clock.iso_now_kst()
-                )
-        except Exception:
-            pass
+        dashboard_maintenance.run_current_operation(
+            storage_db.connect,
+            operation=dashboard_maintenance.OPERATION_CLEANUP,
+            actor_email=_admin_email(request),
+        )
+    except dashboard_maintenance.MaintenanceRunError:
         return HTMLResponse("휴지통 정리에 실패했습니다. 문제 목록에서 기록을 확인해 주세요.", status_code=503)
     return _admin_response(request, RedirectResponse("/admin/settings", status_code=303))
 

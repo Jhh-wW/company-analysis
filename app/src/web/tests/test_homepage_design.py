@@ -51,7 +51,9 @@ def test_첫화면에만_새_디자인_범위가_붙는다(monkeypatch):
         '<h1 id="home-title" class="brand-mark brand-mark-hero">기업 분석'
         '<span class="brand-mark-dot" aria-hidden="true"></span></h1>'
     ) in home.text
-    assert "취업준비생을 위한 5분 기업 파악 도구" in home.text
+    assert "동종업계 속 회사의 우위와 근거를 이해하는 도구" in home.text
+    assert "5분 기업 파악" not in home.text
+    assert "3분" not in home.text
     assert "지원할 회사, 분석하세요" not in home.text
     assert "지원 준비를 위한 기업·공고 분석" not in home.text
     assert "공시·뉴스·회사 홈페이지를 근거로" not in home.text

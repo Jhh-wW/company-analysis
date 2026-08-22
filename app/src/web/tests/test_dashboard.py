@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime
 from io import BytesIO
 
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
+from src.features.admin_dashboard import kpi as dashboard_kpi
+from src.features.admin_dashboard import maintenance as dashboard_maintenance
 from src.features.admin_dashboard import store as dashboard_store
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
+from src.features.backup import status as backup_status
 from src.features.pipeline.canonical_demo import build_demo_report
 from src.features.pipeline.demo import DemoPipeline
 from src.features.sharelink import allowlist
@@ -20,6 +23,7 @@ from src.features.storage import constants as storage_constants
 from src.features.storage import db, reports
 from src.web import main, runtime
 from src.web.routers import dashboard as dashboard_router
+from src.web.routers import maintenance as maintenance_router
 from src.web.routers import reports as reports_router
 
 
@@ -84,6 +88,7 @@ def test_survey_is_member_only_and_revision_is_visible_to_admin(monkeypatch, tmp
         allowlist.invite(conn, email="member@example.com", note="친구", now_iso="2026-08-22T10:00:00+09:00")
     with TestClient(main.app) as member:
         csrf = _session(member, email="member@example.com", is_admin=False)
+        viewed = member.get(f"/result/{report_id}")
         saved = member.post(
             f"/reports/{report_id}/survey", follow_redirects=False,
             data={"rating": "5", "overall_feedback": "유용합니다", "business_distinction": "구분점이 잘 보입니다", "csrf_token": csrf},
@@ -93,9 +98,30 @@ def test_survey_is_member_only_and_revision_is_visible_to_admin(monkeypatch, tmp
         detail = admin.get(f"/admin/reports/{report_id}")
 
     assert saved.status_code == 303
+    assert viewed.status_code == 200
     assert detail.status_code == 200
     assert "member@example.com" in detail.text
     assert "5점" in detail.text
+    with db.connect() as conn:
+        assert dashboard_kpi.summary(conn) == dashboard_kpi.KpiSummary(
+            measured_responses=1,
+            within_target=1,
+        )
+
+
+def test_admin_dashboard_labels_three_minute_metric_as_response_not_accuracy(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(tmp_path / "storage.db"))
+    runtime._PIPELINE = DemoPipeline()
+
+    with TestClient(main.app) as client:
+        _session(client, email="admin@example.com", is_admin=True)
+        response = client.get("/admin/members")
+
+    assert response.status_code == 200
+    assert "3분 내 구분점 응답" in response.text
+    assert "근거 정확성은 관리자 검토" in response.text
 
 
 def test_member_revocation_blocks_existing_session_result_and_pdf(monkeypatch, tmp_path):
@@ -171,6 +197,8 @@ def test_member_page_has_period_controls_and_does_not_fake_legacy_summary(monkey
 
 def test_settings_default_is_read_only_and_component_states_are_not_faked(monkeypatch, tmp_path):
     monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(tmp_path / "storage.db"))
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "fixture-client-id")
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     runtime._PIPELINE = DemoPipeline()
     with TestClient(main.app) as client:
         _session(client, email="admin@example.com", is_admin=True)
@@ -181,13 +209,47 @@ def test_settings_default_is_read_only_and_component_states_are_not_faked(monkey
     assert "변경하기" in readonly.text
     assert 'action="/admin/settings/service"' not in readonly.text
     assert "아직 사용 안 함" in readonly.text
+    assert '<h2>Google</h2><p><strong>확인 불가</strong>' in readonly.text
+    assert "이미 완료됐거나 다른 실행이 진행 중이면" in change.text
+    assert "오늘 정리가 이미 완료됐거나 진행 중이면" in change.text
     assert change.status_code == 200
     assert 'action="/admin/settings/service"' in change.text
 
 
+def test_settings_shows_persisted_backup_failure_instead_of_configuration_guess(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(tmp_path / "storage.db"))
+    monkeypatch.setattr(
+        dashboard_router.clock,
+        "iso_now_kst",
+        lambda: "2026-08-22T12:00:00+09:00",
+    )
+    runtime._PIPELINE = DemoPipeline()
+    with db.connect() as conn:
+        backup_status.record_failure(
+            conn,
+            now_iso="2026-08-22T04:00:00+09:00",
+            failure_summary=backup_status.FAILURE_EXECUTION,
+        )
+    with TestClient(main.app) as client:
+        _session(client, email="admin@example.com", is_admin=True)
+        response = client.get("/admin/settings")
+
+    assert response.status_code == 200
+    assert "최근 실행 실패" in response.text
+    assert "마지막 시도 2026-08-22T04:00:00+09:00" in response.text
+    assert backup_status.FAILURE_EXECUTION in response.text
+    assert "환경변수 설정 여부가 아니라 실제 백업" in response.text
+
+
 def test_admin_can_make_and_download_last_completed_weekly_xlsx(monkeypatch, tmp_path):
     monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(tmp_path / "storage.db"))
-    monkeypatch.setattr(dashboard_router.clock, "today_kst", lambda: date(2026, 8, 24))
+    monkeypatch.setattr(
+        dashboard_maintenance.clock,
+        "now_kst",
+        lambda: datetime.fromisoformat("2026-08-24T04:10:00+09:00"),
+    )
     runtime._PIPELINE = DemoPipeline()
     with TestClient(main.app) as client:
         csrf = _session(client, email="admin@example.com", is_admin=True)
@@ -206,6 +268,68 @@ def test_admin_can_make_and_download_last_completed_weekly_xlsx(monkeypatch, tmp
     assert load_workbook(BytesIO(downloaded.content)).sheetnames == [
         "한눈에 보기", "친구 이용", "피드백·문제"
     ]
+
+
+def test_admin_button_and_internal_cron_use_the_same_maintenance_service(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(tmp_path / "storage.db"))
+    calls = []
+
+    def shared_service(
+        connect,
+        *,
+        operation,
+        actor_email=dashboard_maintenance.SYSTEM_ACTOR_EMAIL,
+    ):
+        calls.append((connect, operation, actor_email))
+        return dashboard_maintenance.MaintenanceResult(
+            operation=operation,
+            period_key=(
+                "2026-08-17"
+                if operation == dashboard_maintenance.OPERATION_WEEKLY
+                else "2026-08-24"
+            ),
+            status="already_done",
+        )
+
+    monkeypatch.setattr(
+        dashboard_maintenance,
+        "run_current_operation",
+        shared_service,
+    )
+    runtime._PIPELINE = DemoPipeline()
+    with TestClient(main.app) as client:
+        csrf = _session(client, email="admin@example.com", is_admin=True)
+        manual_weekly = client.post(
+            "/admin/settings/weekly-reports/run",
+            data={"csrf_token": csrf},
+            follow_redirects=False,
+        )
+        manual_cleanup = client.post(
+            "/admin/settings/trash-cleanup/run",
+            data={"csrf_token": csrf},
+            follow_redirects=False,
+        )
+    cron_weekly = maintenance_router._run(dashboard_maintenance.OPERATION_WEEKLY)
+    cron_cleanup = maintenance_router._run(dashboard_maintenance.OPERATION_CLEANUP)
+
+    assert manual_weekly.status_code == 303
+    assert manual_cleanup.status_code == 303
+    assert cron_weekly.status == "already_done"
+    assert cron_cleanup.status == "already_done"
+    assert [call[1] for call in calls] == [
+        dashboard_maintenance.OPERATION_WEEKLY,
+        dashboard_maintenance.OPERATION_CLEANUP,
+        dashboard_maintenance.OPERATION_WEEKLY,
+        dashboard_maintenance.OPERATION_CLEANUP,
+    ]
+    assert calls[0][2] == "admin@example.com"
+    assert calls[1][2] == "admin@example.com"
+    assert calls[2][2] == dashboard_maintenance.SYSTEM_ACTOR_EMAIL
+    assert calls[3][2] == dashboard_maintenance.SYSTEM_ACTOR_EMAIL
+    assert cron_weekly.period_key == "2026-08-17"
+    assert cron_cleanup.period_key == "2026-08-24"
 
 
 def test_admin_trash_blocks_public_result_until_restore(monkeypatch, tmp_path):

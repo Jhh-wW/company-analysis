@@ -162,6 +162,12 @@ _SHARE_NOTICE_BY_CODE = {
         "연결된 기존 보고서의 공유 기간이 지나 지원 맥락이 표시된 입력 화면을 열었습니다."
     ),
 }
+_REPORT_NOTICE_BY_CODE = {
+    "unavailable": (
+        "요청한 보고서를 열 수 없어 일반 첫 화면을 열었습니다. "
+        "주소가 오래됐거나 현재 볼 수 없는 상태일 수 있습니다."
+    ),
+}
 
 
 def _clear_share_cookie(response, request: Request) -> None:
@@ -217,6 +223,12 @@ async def input_page(request: Request):
     share_notice = _SHARE_NOTICE_BY_CODE.get(
         request.query_params.get("share_status", ""), ""
     )
+    report_notice = _REPORT_NOTICE_BY_CODE.get(
+        request.query_params.get("report_status", ""), ""
+    )
+    notices = " ".join(
+        notice for notice in (share_notice, report_notice) if notice
+    )
     return request_helpers.templates.TemplateResponse(
         request=request,
         name="input.html",
@@ -226,7 +238,7 @@ async def input_page(request: Request):
             demo_available=paths.demo_data_available(),
             share_link=share_link,
             prefill=prefill,
-            share_notice=share_notice,
+            share_notice=notices,
             evaluation_workflow_id=evaluation_mode.issue_workflow_id(),
         ),
     )

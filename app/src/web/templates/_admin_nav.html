@@ -3,6 +3,7 @@
   <a href="/admin/issues" {% if dashboard_nav == "issues" %}aria-current="page"{% endif %}>문제·보고서</a>
   <a class="frame-desktop-link" href="/admin/members" {% if dashboard_nav == "members" %}aria-current="page"{% endif %}>친구</a>
   <a class="frame-desktop-link" href="/admin/links" {% if dashboard_nav == "links" %}aria-current="page"{% endif %}>지원 LINK</a>
+  <a class="frame-desktop-link" href="/admin/access">친구 초대·LINK 발급</a>
   <a class="frame-desktop-link" href="/admin/settings" {% if dashboard_nav == "settings" %}aria-current="page"{% endif %}><span aria-hidden="true">⚙</span> 설정</a>
 </nav>
 {% if dashboard_service is defined and dashboard_service.status == "maintenance" %}
