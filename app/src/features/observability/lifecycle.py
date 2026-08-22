@@ -29,6 +29,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from typing import Final, Iterator
 
+from src.core.persisted_json import validate_persisted_json_text
 from src.features.observability.records import RunRecord, normalize_persisted_cells
 
 
@@ -333,6 +334,7 @@ def finalize_once(
 
     clean_record = _clean_record(record)
     record_json = _encode_record(clean_record)
+    validate_persisted_json_text(record_json)
     event_time = _clean_iso(event_at or clean_record.at, "event_at")
     record_hash = hashlib.sha256(record_json.encode("utf-8")).hexdigest()
     allowed_states = (

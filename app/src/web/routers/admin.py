@@ -9,7 +9,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from src.core import clock
-from src.features.observability import admin_audit
+from src.features.observability import admin_audit, admin_audit_store
 from src.features.budget import spend_store
 from src.features.pipeline.demo import DemoPipeline
 from src.features.sharelink import allowlist as share_allow
@@ -34,30 +34,8 @@ from src.web.security import (
 router = APIRouter()
 logger = logging.getLogger(__name__)
 _KEY_ISSUE_ATTEMPTS = 5
-_ADMIN_AUDIT_TABLE = "admin_audit_events"
+_ADMIN_AUDIT_TABLE = admin_audit_store.TABLE_ADMIN_AUDIT_EVENTS
 _AUDIT_SAFE_CHARS = frozenset(string.ascii_letters + string.digits + "_.:-")
-_CREATE_ADMIN_AUDIT_SQL = f"""
-CREATE TABLE IF NOT EXISTS {_ADMIN_AUDIT_TABLE} (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_time  TEXT NOT NULL,
-    request_id  TEXT NOT NULL,
-    actor_id    TEXT NOT NULL,
-    action      TEXT NOT NULL,
-    target_id   TEXT NOT NULL,
-    outcome     TEXT NOT NULL,
-    reason_code TEXT NOT NULL
-)
-"""
-_CREATE_ADMIN_AUDIT_NO_UPDATE_SQL = f"""
-CREATE TRIGGER IF NOT EXISTS {_ADMIN_AUDIT_TABLE}_no_update
-BEFORE UPDATE ON {_ADMIN_AUDIT_TABLE}
-BEGIN SELECT RAISE(ABORT, 'admin audit events are append-only'); END
-"""
-_CREATE_ADMIN_AUDIT_NO_DELETE_SQL = f"""
-CREATE TRIGGER IF NOT EXISTS {_ADMIN_AUDIT_TABLE}_no_delete
-BEFORE DELETE ON {_ADMIN_AUDIT_TABLE}
-BEGIN SELECT RAISE(ABORT, 'admin audit events are append-only'); END
-"""
 
 
 class _AccessDataUnavailable(RuntimeError):
@@ -147,23 +125,14 @@ def _queue_committed_change(
     외부 logger는 transaction과 원자화할 수 없다. 따라서 이 행이 성공 감사의
     정본이며, commit 뒤 logger로 보내는 것은 best-effort mirror일 뿐이다.
     """
-    conn.execute(_CREATE_ADMIN_AUDIT_SQL)
-    conn.execute(_CREATE_ADMIN_AUDIT_NO_UPDATE_SQL)
-    conn.execute(_CREATE_ADMIN_AUDIT_NO_DELETE_SQL)
-    conn.execute(
-        f"""
-        INSERT INTO {_ADMIN_AUDIT_TABLE}
-            (event_time, request_id, actor_id, action, target_id, outcome, reason_code)
-        VALUES (?, ?, ?, ?, ?, 'success', ?)
-        """,
-        (
-            clock.iso_now_kst(),
-            _safe_audit_field(admin_audit.request_id(request), max_chars=64),
-            _safe_audit_field(admin_audit.actor_id(request), max_chars=80),
-            _safe_audit_field(action, max_chars=64),
-            _safe_audit_field(target, max_chars=80),
-            _safe_audit_field(reason, max_chars=48),
-        ),
+    admin_audit_store.append_success(
+        conn,
+        event_time=clock.iso_now_kst(),
+        request_id=_safe_audit_field(admin_audit.request_id(request), max_chars=64),
+        actor_id=_safe_audit_field(admin_audit.actor_id(request), max_chars=80),
+        action=_safe_audit_field(action, max_chars=64),
+        target_id=_safe_audit_field(target, max_chars=80),
+        reason_code=_safe_audit_field(reason, max_chars=48),
     )
 
 

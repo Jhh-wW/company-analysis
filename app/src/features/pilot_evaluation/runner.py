@@ -55,6 +55,11 @@ from src.features.pilot_evaluation.manifest import (
     manifest_sha256,
     validate_manifest,
 )
+from src.features.pilot_evaluation.schema import (
+    CREATE_PILOT_BINDING_SQL as _CREATE_PILOT_BINDING_SQL,
+    PILOT_BINDING_SCHEMA_VERSION,
+    PILOT_BINDING_TABLE,
+)
 from src.features.pipeline.port import Outcome
 
 
@@ -82,23 +87,7 @@ SERVICE_MAINTENANCE_BLOCKED_STATE: Final[str] = (
 SERVICE_MAINTENANCE_BLOCKED_ERROR: Final[str] = (
     "identity_service_maintenance_pre_provider_429"
 )
-PILOT_BINDING_TABLE: Final[str] = "canonical_pilot25_bindings"
 PILOT_BINDING_KEY: Final[str] = "g3.5-canonical-pilot25"
-PILOT_BINDING_SCHEMA_VERSION: Final[int] = 4
-_CREATE_PILOT_BINDING_SQL: Final[str] = f"""
-CREATE TABLE IF NOT EXISTS {PILOT_BINDING_TABLE} (
-    pilot_key                 TEXT PRIMARY KEY,
-    schema_version            INTEGER NOT NULL,
-    binding_id                TEXT NOT NULL,
-    manifest_sha256           TEXT NOT NULL,
-    origin                    TEXT NOT NULL,
-    server_instance_sha256    TEXT NOT NULL,
-    data_path_sha256          TEXT NOT NULL,
-    checkpoint_path_sha256    TEXT NOT NULL,
-    checkpoint_content_sha256 TEXT NOT NULL,
-    created_at                TEXT NOT NULL
-)
-"""
 _RUN_LOCATION_RE: Final[re.Pattern[str]] = re.compile(
     r"^/progress/([0-9a-f]{32})$"
 )

@@ -57,6 +57,12 @@ def test_열린_WAL_DB도_backup_API로_최신값을_담는다(tmp_path: Path) -
         result = backup_sqlite.create_backup(source, tmp_path / "private")
 
         assert backup_sqlite.verify_backup(result.backup_path) == result.sha256
+        assert all(
+            not Path(str(result.backup_path) + suffix).exists()
+            for suffix in backup_sqlite.SQLITE_COMPANION_SUFFIXES
+        )
+        with backup_sqlite._standalone_readonly_connection(result.backup_path) as immutable:
+            assert immutable.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 2
         with sqlite3.connect(result.backup_path) as backup_conn:
             assert backup_conn.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 2
     finally:
@@ -225,3 +231,49 @@ def test_임시_WAL_DB의_백업_SHA256과_전체데이터가_일치한다(
             "SELECT id, value, payload FROM records ORDER BY id"
         ).fetchall()
     assert actual == expected
+
+
+def test_verify_validation중_sidecar가_생겨도_성공하지않는다(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.db"
+    source_conn = _make_database(source, "검증 경합")
+    try:
+        backup = backup_sqlite.create_backup(source, tmp_path / "backups")
+    finally:
+        source_conn.close()
+    original = backup_sqlite._assert_database_is_valid
+
+    def inject_sidecar(path: Path) -> None:
+        original(path)
+        Path(str(path) + "-wal").touch()
+
+    monkeypatch.setattr(backup_sqlite, "_assert_database_is_valid", inject_sidecar)
+    with pytest.raises(backup_sqlite.BackupError, match="sidecar"):
+        backup_sqlite.verify_backup(backup.backup_path)
+
+
+def test_checksum게시중_sidecar가_생기면_backup성공과산출물게시를취소한다(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.db"
+    source_conn = _make_database(source, "게시 경합")
+    output = tmp_path / "backups"
+    original = backup_sqlite._write_checksum
+
+    def inject_sidecar(path: Path, digest: str, database_name: str) -> None:
+        original(path, digest, database_name)
+        database = path.with_name(database_name)
+        Path(str(database) + "-wal").touch()
+
+    monkeypatch.setattr(backup_sqlite, "_write_checksum", inject_sidecar)
+    try:
+        with pytest.raises(backup_sqlite.BackupError, match="sidecar"):
+            backup_sqlite.create_backup(source, output)
+    finally:
+        source_conn.close()
+
+    assert not list(output.glob("*.sqlite3"))
+    assert not list(output.glob("*.sha256"))

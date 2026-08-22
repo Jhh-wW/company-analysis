@@ -14,6 +14,7 @@ import sqlite3
 from dataclasses import asdict, dataclass
 from typing import Final
 
+from src.core.persisted_json import validate_persisted_json_text
 from src.features.export_pdf.release import (
     ALLOWED_VISUAL_REVIEW_KINDS,
     ApprovalDecision,
@@ -40,68 +41,30 @@ from src.shared.automatic_release_record import (
     validate_automatic_release_record,
     validate_persisted_automatic_release,
 )
+from src.features.export_pdf.schema import (
+    AUTOMATIC_TABLE_NAME,
+    CREATE_AUTOMATIC_SQL,
+    CREATE_DECISION_SQL,
+    CREATE_PARTICIPANT_SQL,
+    CREATE_SQL,
+    DECISION_TABLE_NAME,
+    PARTICIPANT_TABLE_NAME,
+    TABLE_NAME,
+    ensure_schema,
+)
 
-TABLE_NAME: Final[str] = "pdf_release_records"
-DECISION_TABLE_NAME: Final[str] = "pdf_release_role_decisions"
-PARTICIPANT_TABLE_NAME: Final[str] = "pdf_release_participants"
-AUTOMATIC_TABLE_NAME: Final[str] = "pdf_automatic_release_records"
+
+def _validated_json(payload: str) -> str:
+    validate_persisted_json_text(payload)
+    return payload
+
+
 APPROVAL_ROLES: Final[tuple[str, ...]] = ("fact", "editorial", "visual")
 PARTICIPANT_ROLES: Final[tuple[str, ...]] = (
     "author",
     "producer",
     *APPROVAL_ROLES,
 )
-CREATE_SQL: Final[str] = f"""
-CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
-    report_id          TEXT NOT NULL,
-    pdf_sha256         TEXT NOT NULL,
-    approval_json      TEXT NOT NULL,
-    approval_created_at TEXT NOT NULL,
-    release_json       TEXT,
-    release_sha256     TEXT,
-    released_at        TEXT,
-    PRIMARY KEY (report_id, pdf_sha256)
-)
-"""
-CREATE_DECISION_SQL: Final[str] = f"""
-CREATE TABLE IF NOT EXISTS {DECISION_TABLE_NAME} (
-    report_id              TEXT NOT NULL,
-    pdf_sha256             TEXT NOT NULL,
-    role                   TEXT NOT NULL,
-    page_hashes_json       TEXT NOT NULL,
-    reviewed_pages_json    TEXT NOT NULL,
-    expected_fact_ids_json TEXT NOT NULL,
-    reviewed_fact_ids_json TEXT NOT NULL,
-    fact_failed_count      INTEGER NOT NULL,
-    reviewer               TEXT NOT NULL,
-    approved_at            TEXT NOT NULL,
-    visual_review_kind     TEXT NOT NULL,
-    PRIMARY KEY (report_id, pdf_sha256, role),
-    UNIQUE (report_id, pdf_sha256, reviewer)
-)
-"""
-CREATE_PARTICIPANT_SQL: Final[str] = f"""
-CREATE TABLE IF NOT EXISTS {PARTICIPANT_TABLE_NAME} (
-    report_id      TEXT NOT NULL,
-    pdf_sha256     TEXT NOT NULL,
-    role           TEXT NOT NULL,
-    person_id      TEXT NOT NULL,
-    assigned_at    TEXT NOT NULL,
-    PRIMARY KEY (report_id, pdf_sha256, role)
-)
-"""
-CREATE_AUTOMATIC_SQL: Final[str] = f"""
-CREATE TABLE IF NOT EXISTS {AUTOMATIC_TABLE_NAME} (
-    report_id       TEXT NOT NULL,
-    report_sha256   TEXT NOT NULL,
-    pdf_sha256      TEXT NOT NULL,
-    checker_version TEXT NOT NULL,
-    release_json    TEXT NOT NULL,
-    release_sha256  TEXT NOT NULL,
-    released_at     TEXT NOT NULL,
-    PRIMARY KEY (report_id, report_sha256, pdf_sha256, checker_version)
-)
-"""
 
 
 class PdfReleaseStoreError(RuntimeError):
@@ -132,14 +95,8 @@ class PdfReleaseParticipant:
     assigned_at: str
 
 
-def _ensure_schema(conn: sqlite3.Connection) -> None:
-    conn.execute(CREATE_SQL)
-    conn.execute(CREATE_DECISION_SQL)
-    conn.execute(CREATE_PARTICIPANT_SQL)
-    # Compatibility migration: legacy human approval tables and their rows are
-    # deliberately retained as audit evidence.  Runtime authorization uses
-    # only this new automatic-release table.
-    conn.execute(CREATE_AUTOMATIC_SQL)
+# 기존 feature 내부 호출 호환. 새 bootstrap registry는 공개 계약만 사용한다.
+_ensure_schema = ensure_schema
 
 
 def _time_value(value: str) -> dt.datetime | None:
@@ -399,10 +356,22 @@ def save_role_decision(
         clean_report_id,
         role_decision.pdf_sha256,
         role_decision.role,
-        json.dumps(role_decision.page_png_sha256s, separators=(",", ":")),
-        json.dumps(role_decision.reviewed_pages, separators=(",", ":")),
-        json.dumps(role_decision.expected_fact_ids, ensure_ascii=False, separators=(",", ":")),
-        json.dumps(role_decision.reviewed_fact_ids, ensure_ascii=False, separators=(",", ":")),
+        _validated_json(json.dumps(role_decision.page_png_sha256s, separators=(",", ":"))),
+        _validated_json(json.dumps(role_decision.reviewed_pages, separators=(",", ":"))),
+        _validated_json(
+            json.dumps(
+                role_decision.expected_fact_ids,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        ),
+        _validated_json(
+            json.dumps(
+                role_decision.reviewed_fact_ids,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        ),
         role_decision.fact_failed_count,
         role_decision.decision.reviewer,
         role_decision.decision.approved_at,
@@ -579,11 +548,13 @@ def load_complete_approval(
 
 
 def _approval_json(approval: PdfReleaseApproval) -> str:
-    return json.dumps(
-        asdict(approval),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
+    return _validated_json(
+        json.dumps(
+            asdict(approval),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
     )
 
 
@@ -893,11 +864,13 @@ def finalize_release(
 
 
 def _release_json(record: PdfReleaseRecord) -> str:
-    return json.dumps(
-        asdict(record),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
+    return _validated_json(
+        json.dumps(
+            asdict(record),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
     )
 
 
@@ -994,7 +967,7 @@ def load_release_record(
 
 
 def _automatic_release_json(record: AutomaticReleaseRecord) -> str:
-    return automatic_release_json(record)
+    return _validated_json(automatic_release_json(record))
 
 
 def _parse_automatic_release_record(raw: str) -> AutomaticReleaseRecord:

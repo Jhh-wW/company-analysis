@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Final
 
+from src.core.persisted_json import validate_persisted_json_text
 from src.features.storage import constants as storage_constants
 
 
@@ -962,6 +963,7 @@ def capture_report_snapshot(
     clean_actor = _clean(actor, maximum=80) or "system"
     if not clean_id or int(version) < 1 or not payload:
         raise ValueError("보고서 버전 원본을 저장할 수 없습니다.")
+    validate_persisted_json_text(payload)
     payload_sha256 = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     duplicate = conn.execute(
         f"""SELECT version FROM {TABLE_REPORT_VERSIONS}

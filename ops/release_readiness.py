@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import hmac
 import importlib
+import importlib.util
 import json
 import os
 import re
@@ -18,10 +19,24 @@ import shutil
 import sqlite3
 import sys
 import tempfile
-from contextlib import closing
-from dataclasses import dataclass
+import time
+import types
+from contextlib import closing, contextmanager
+from dataclasses import dataclass, fields, is_dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Callable, Final, Iterable
+from typing import (
+    Any,
+    Callable,
+    Final,
+    Iterable,
+    Iterator,
+    Literal,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 from urllib.parse import quote
 
 if __package__:
@@ -38,6 +53,19 @@ else:  # 직접 스크립트 실행 호환
     )
 
 
+_PERSISTED_JSON_CONTRACT_PATH = (
+    Path(__file__).resolve().parents[1] / "app" / "src" / "core" / "persisted_json.py"
+)
+_persisted_json_spec = importlib.util.spec_from_file_location(
+    "_release_persisted_json_contract",
+    _PERSISTED_JSON_CONTRACT_PATH,
+)
+if _persisted_json_spec is None or _persisted_json_spec.loader is None:
+    raise RuntimeError("저장 JSON 공통 계약을 고정 app 경계에서 읽지 못했습니다")
+_PERSISTED_JSON_CONTRACT = importlib.util.module_from_spec(_persisted_json_spec)
+_persisted_json_spec.loader.exec_module(_PERSISTED_JSON_CONTRACT)
+
+
 HASH_CHUNK_BYTES: Final[int] = 1024 * 1024
 CHECKSUM_MAX_BYTES: Final[int] = 4096
 SQLITE_TIMEOUT_SEC: Final[float] = 10.0
@@ -46,6 +74,23 @@ DEFAULT_MAX_DISK_USED_PERCENT: Final[float] = 85.0
 DEFAULT_MAX_DATABASE_BYTES: Final[int] = 768 * 1024 * 1024
 DEFAULT_MAX_WAL_BYTES: Final[int] = 128 * 1024 * 1024
 DEFAULT_MAX_LINK_OPEN_EVENTS: Final[int] = 100_000
+MAX_JSON_FIELD_BYTES: Final[int] = _PERSISTED_JSON_CONTRACT.MAX_FIELD_BYTES
+MAX_JSON_TOTAL_BYTES: Final[int] = 256 * 1024 * 1024
+MAX_JSON_TOTAL_ROWS: Final[int] = 100_000
+JSON_FETCH_BATCH_ROWS: Final[int] = 128
+JSON_PAYLOAD_FETCH_ROWS: Final[int] = 1
+MAX_JSON_DOCUMENT_NODES: Final[int] = _PERSISTED_JSON_CONTRACT.MAX_DOCUMENT_NODES
+MAX_JSON_DOCUMENT_CONTAINER_ITEMS: Final[int] = (
+    _PERSISTED_JSON_CONTRACT.MAX_DOCUMENT_CONTAINER_ITEMS
+)
+MAX_JSON_CONTAINER_ITEMS: Final[int] = _PERSISTED_JSON_CONTRACT.MAX_CONTAINER_ITEMS
+MAX_JSON_DOCUMENT_DEPTH: Final[int] = _PERSISTED_JSON_CONTRACT.MAX_DOCUMENT_DEPTH
+JSON_STRUCTURE_CHECK_INTERVAL: Final[int] = _PERSISTED_JSON_CONTRACT.CHECK_INTERVAL
+PAYLOAD_VALIDATION_DEADLINE_SEC: Final[float] = 30.0
+MAX_REPORT_RUNTIME_TYPE_DEPTH: Final[int] = 64
+SQLITE_PROGRESS_OPCODES: Final[int] = 1_000
+MIN_CLONE_FREE_HEADROOM_BYTES: Final[int] = 64 * 1024 * 1024
+SQLITE_COMPANION_SUFFIXES: Final[tuple[str, ...]] = ("-wal", "-shm", "-journal")
 SHA256_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{64}$")
 SIDECAR_RE: Final[re.Pattern[str]] = re.compile(
     r"^([0-9A-Fa-f]{64})  ([^/\\\r\n]+)$"
@@ -100,6 +145,10 @@ class ReadinessError(RuntimeError):
     """안전 검증을 계속할 수 없을 때 발생한다."""
 
 
+class _RuntimeTypeContractError(TypeError):
+    """payload 값 자체를 노출하지 않는 내부 runtime 타입 불일치."""
+
+
 @dataclass(frozen=True)
 class DatabaseInventory:
     tables: tuple[str, ...]
@@ -129,6 +178,39 @@ class SessionVersionedTableContract:
     semantics: TableSemanticContract
 
 
+@dataclass
+class PayloadValidationBudget:
+    deadline: float
+    rows: int = 0
+    bytes: int = 0
+
+    @classmethod
+    def start(cls) -> "PayloadValidationBudget":
+        return cls(time.monotonic() + PAYLOAD_VALIDATION_DEADLINE_SEC)
+
+    def check_deadline(self) -> None:
+        if time.monotonic() >= self.deadline:
+            raise ReadinessError("payload 전수 검증 제한시간을 넘었습니다.")
+
+    def add(self, *, rows: int, bytes_count: int) -> None:
+        self.rows += rows
+        self.bytes += bytes_count
+        if self.rows > MAX_JSON_TOTAL_ROWS:
+            raise ReadinessError("JSON 전수 검증 행 상한을 넘었습니다.")
+        if self.bytes > MAX_JSON_TOTAL_BYTES:
+            raise ReadinessError("JSON 전수 검증 총 바이트 상한을 넘었습니다.")
+        self.check_deadline()
+
+
+@dataclass(frozen=True)
+class RuntimePayloadConsumers:
+    reports: object
+    cache: object
+    dashboard: object
+    lifecycle: object
+    publish: object
+
+
 def sha256_file(path: Path) -> str:
     """파일 내용을 출력하지 않고 SHA-256만 계산한다."""
     digest = hashlib.sha256()
@@ -139,6 +221,50 @@ def sha256_file(path: Path) -> str:
     except OSError as exc:
         raise ReadinessError("파일 해시를 계산하지 못했습니다.") from exc
     return digest.hexdigest()
+
+
+def _assert_no_sqlite_companions(path: Path, *, label: str) -> None:
+    """manifest에 결속되지 않은 SQLite sidecar가 하나라도 있으면 닫는다."""
+
+    for suffix in SQLITE_COMPANION_SUFFIXES:
+        companion = Path(str(path) + suffix)
+        try:
+            os.lstat(companion)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ReadinessError(f"{label} SQLite sidecar 상태를 확인하지 못했습니다.") from exc
+        raise ReadinessError(
+            f"{label} 옆에 manifest가 결속하지 않은 SQLite {suffix} sidecar가 있습니다."
+        )
+
+
+def _stable_database_digest(path: Path, *, label: str) -> str:
+    _assert_no_sqlite_companions(path, label=label)
+    digest = sha256_file(path)
+    _assert_no_sqlite_companions(path, label=label)
+    return digest
+
+
+def _assert_database_size(path: Path) -> int:
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise ReadinessError("백업 DB 크기를 읽지 못했습니다.") from exc
+    if size > DEFAULT_MAX_DATABASE_BYTES:
+        raise ReadinessError("백업 DB가 복구 검증 허용 크기를 넘었습니다.")
+    return size
+
+
+def _assert_clone_space(parent: Path, *, source_size: int, copies: int) -> None:
+    try:
+        resolved = parent.expanduser().resolve(strict=True)
+        free = shutil.disk_usage(resolved).free
+    except OSError as exc:
+        raise ReadinessError("격리 복사본 여유 공간을 확인하지 못했습니다.") from exc
+    required = source_size * copies + MIN_CLONE_FREE_HEADROOM_BYTES
+    if free < required:
+        raise ReadinessError("격리 복사본과 canonical DB를 만들 여유 공간이 부족합니다.")
 
 
 def _regular_file(path: Path, *, label: str) -> Path:
@@ -179,13 +305,45 @@ def _read_sidecar(path: Path, *, database_name: str) -> str:
 
 
 def _readonly_connection(path: Path) -> sqlite3.Connection:
+    _assert_no_sqlite_companions(path, label="검증 DB")
     uri_path = quote(path.resolve().as_posix(), safe="/:")
     connection = sqlite3.connect(
-        f"file:{uri_path}?mode=ro", uri=True, timeout=SQLITE_TIMEOUT_SEC
+        f"file:{uri_path}?mode=ro&immutable=1",
+        uri=True,
+        timeout=SQLITE_TIMEOUT_SEC,
     )
+    connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA query_only = ON")
     connection.execute("PRAGMA foreign_keys = ON")
+    try:
+        _assert_no_sqlite_companions(path, label="검증 DB")
+    except BaseException:
+        connection.close()
+        raise
     return connection
+
+
+@contextmanager
+def _bounded_sqlite(
+    connection: sqlite3.Connection,
+    budget: PayloadValidationBudget,
+) -> Iterator[None]:
+    """SQLite VM과 Python 소비자 검증이 같은 wall-clock deadline을 쓴다."""
+
+    def interrupted() -> int:
+        return int(time.monotonic() >= budget.deadline)
+
+    connection.set_progress_handler(interrupted, SQLITE_PROGRESS_OPCODES)
+    try:
+        budget.check_deadline()
+        yield
+        budget.check_deadline()
+    except sqlite3.OperationalError as exc:
+        if time.monotonic() >= budget.deadline or "interrupt" in str(exc).lower():
+            raise ReadinessError("payload SQLite 검증 제한시간을 넘었습니다.") from exc
+        raise
+    finally:
+        connection.set_progress_handler(None, 0)
 
 
 def _table_names(connection: sqlite3.Connection) -> set[str]:
@@ -515,7 +673,11 @@ def _allowed_prebootstrap_missing_tables(
     storage_db: object,
     missing_tables: set[str],
 ) -> set[str]:
-    """실제 storage 런타임이 명시적으로 복구하는 중단 상태만 허용한다."""
+    """실제 storage 런타임이 명시적으로 복구하는 sessions 중단만 허용한다.
+
+    관리자 감사 표를 비롯한 새 필수 표가 없는 구백업은 삭제 공격과 구분할
+    서명된 schema generation이 없으므로 영구 migration 예외 없이 차단한다.
+    """
 
     sessions_table = "sessions"
     legacy_table = str(
@@ -593,39 +755,26 @@ def _load_storage_db_module():
 def _load_feature_schema_bootstraps() -> tuple[
     tuple[str, Callable[[sqlite3.Connection], None]], ...
 ]:
-    """필수 운영 표의 feature-owned bootstrap만 고정 저장소 경계에서 읽는다."""
+    """앱 runtime과 같은 단일 영속 schema registry를 고정 경계에서 읽는다."""
 
     app_root = Path(__file__).resolve().parents[1] / "app"
-    specifications = (
-        (
-            "비용 원장",
-            "src.features.budget.spend_store",
-            app_root / "src" / "features" / "budget" / "spend_store.py",
-        ),
-        (
-            "관측 수명주기",
-            "src.features.observability.lifecycle",
-            app_root / "src" / "features" / "observability" / "lifecycle.py",
-        ),
-    )
-    bootstraps: list[tuple[str, Callable[[sqlite3.Connection], None]]] = []
-    for label, module_name, expected_module in specifications:
-        try:
-            module = importlib.import_module(module_name)
-        except Exception as exc:  # noqa: BLE001 — 필수 feature bootstrap 부재를 닫는다
-            raise ReadinessError(
-                f"{label} feature schema bootstrap을 불러오지 못했습니다."
-            ) from exc
-        loaded_path = Path(str(getattr(module, "__file__", ""))).resolve()
-        if loaded_path != expected_module.resolve():
-            raise ReadinessError(
-                f"{label} feature schema 모듈이 저장소의 고정 경계와 다릅니다."
-            )
-        ensure_schema = getattr(module, "ensure_schema", None)
-        if not callable(ensure_schema):
-            raise ReadinessError(f"{label} feature ensure_schema 계약이 없습니다.")
-        bootstraps.append((label, ensure_schema))
-    return tuple(bootstraps)
+    expected_module = app_root / "src" / "core" / "persistent_schema.py"
+    try:
+        module = importlib.import_module("src.core.persistent_schema")
+    except Exception as exc:  # noqa: BLE001 — registry 부재를 한 경계로 닫는다
+        raise ReadinessError("앱 영속 schema registry를 불러오지 못했습니다.") from exc
+    if Path(str(getattr(module, "__file__", ""))).resolve() != expected_module.resolve():
+        raise ReadinessError("앱 영속 schema registry가 저장소의 고정 경계와 다릅니다.")
+    loader = getattr(module, "load_persistent_schema_bootstraps", None)
+    if not callable(loader):
+        raise ReadinessError("앱 영속 schema registry loader 계약이 없습니다.")
+    try:
+        bootstraps = tuple(loader())
+    except Exception as exc:  # noqa: BLE001 — 항목 path/callable 검증 실패를 닫는다
+        raise ReadinessError("앱 영속 schema registry 항목 검증에 실패했습니다.") from exc
+    if not bootstraps:
+        raise ReadinessError("앱 영속 schema registry가 비어 있습니다.")
+    return bootstraps
 
 
 def _apply_feature_schema_bootstraps(
@@ -641,18 +790,661 @@ def _apply_feature_schema_bootstraps(
             ) from exc
 
 
-def _copy_database(source: Path, target: Path) -> None:
+def _load_runtime_payload_consumers() -> RuntimePayloadConsumers:
+    """payload를 실제 읽는 공개 API만 저장소의 고정 app 경계에서 읽는다."""
+
+    app_root = Path(__file__).resolve().parents[1] / "app"
+    specifications = {
+        "reports": (
+            "src.features.storage.reports",
+            app_root / "src" / "features" / "storage" / "reports.py",
+            ("load", "report_from_json", "report_to_dict"),
+        ),
+        "cache": (
+            "src.features.storage.cache",
+            app_root / "src" / "features" / "storage" / "cache.py",
+            ("get_layer2",),
+        ),
+        "dashboard": (
+            "src.features.admin_dashboard.store",
+            app_root / "src" / "features" / "admin_dashboard" / "store.py",
+            ("approved_report_payload",),
+        ),
+        "lifecycle": (
+            "src.features.observability.lifecycle",
+            app_root / "src" / "features" / "observability" / "lifecycle.py",
+            ("read_final",),
+        ),
+        "publish": (
+            "src.features.report_standard.publish",
+            app_root / "src" / "features" / "report_standard" / "publish.py",
+            ("validate_publishable",),
+        ),
+    }
+    loaded: dict[str, object] = {}
+    for key, (module_name, expected_path, callables) in specifications.items():
+        try:
+            module = importlib.import_module(module_name)
+        except Exception as exc:  # noqa: BLE001 — 소비자 부재를 fail-closed한다
+            raise ReadinessError(f"{key} payload 소비자를 불러오지 못했습니다.") from exc
+        if Path(str(getattr(module, "__file__", ""))).resolve() != expected_path.resolve():
+            raise ReadinessError(f"{key} payload 소비자가 고정 app 경계와 다릅니다.")
+        if any(not callable(getattr(module, name, None)) for name in callables):
+            raise ReadinessError(f"{key} payload 소비자 계약이 없습니다.")
+        loaded[key] = module
+    return RuntimePayloadConsumers(**loaded)
+
+
+def _quoted_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _json_text_columns(
+    table_xinfo: dict[str, tuple[tuple[object, ...], ...]],
+) -> tuple[tuple[str, str], ...]:
+    columns: list[tuple[str, str]] = []
+    for table, signature in sorted(table_xinfo.items()):
+        for column in signature:
+            name = str(column[0])
+            data_type = str(column[1]).strip().upper()
+            if data_type == "TEXT" and (
+                name == "payload_json" or name.endswith("_json")
+            ):
+                columns.append((table, name))
+    return tuple(columns)
+
+
+def _assert_generic_json_columns(
+    connection: sqlite3.Connection,
+    *,
+    columns: tuple[tuple[str, str], ...],
+    budget: PayloadValidationBudget,
+) -> None:
+    """canonical의 모든 JSON TEXT 열을 표본 추출 없이 SQLite로 전수 검사한다."""
+
+    for table, column in columns:
+        budget.check_deadline()
+        table_sql = _quoted_identifier(table)
+        column_sql = _quoted_identifier(column)
+        cursor = connection.execute(
+            f"SELECT typeof({column_sql}), length(CAST({column_sql} AS BLOB)) "
+            f"FROM {table_sql} "
+            f"WHERE {column_sql} IS NOT NULL"
+        )
+        while rows := cursor.fetchmany(JSON_FETCH_BATCH_ROWS):
+            for row in rows:
+                value_type, byte_count = str(row[0]), int(row[1])
+                if value_type != "text":
+                    raise ReadinessError(
+                        f"JSON TEXT 형식이 올바르지 않습니다: {table}.{column}"
+                    )
+                if byte_count > MAX_JSON_FIELD_BYTES:
+                    raise ReadinessError(
+                        f"JSON 필드가 개별 바이트 상한을 넘었습니다: {table}.{column}"
+                    )
+                budget.add(rows=1, bytes_count=byte_count)
+        valid_cursor = connection.execute(
+            f"SELECT json_valid({column_sql}) FROM {table_sql} "
+            f"WHERE {column_sql} IS NOT NULL"
+        )
+        while rows := valid_cursor.fetchmany(JSON_FETCH_BATCH_ROWS):
+            for row in rows:
+                budget.check_deadline()
+                if int(row[0]) != 1:
+                    raise ReadinessError(
+                        f"JSON TEXT 형식이 올바르지 않습니다: {table}.{column}"
+                    )
+        payload_cursor = connection.execute(
+            f"SELECT {column_sql} FROM {table_sql} "
+            f"WHERE {column_sql} IS NOT NULL"
+        )
+        while rows := payload_cursor.fetchmany(JSON_PAYLOAD_FETCH_ROWS):
+            budget.check_deadline()
+            _assert_json_document_structure(str(rows[0][0]), budget=budget)
+
+
+def _assert_json_document_structure(
+    payload: str,
+    *,
+    budget: PayloadValidationBudget,
+) -> object:
+    """소비자보다 먼저 한 JSON 문서의 깊이·노드·항목 수를 제한한다."""
+
     try:
-        with closing(_readonly_connection(source)) as source_connection:
-            with closing(
-                sqlite3.connect(str(target), timeout=SQLITE_TIMEOUT_SEC)
-            ) as target_connection:
-                source_connection.backup(target_connection)
-        with target.open("rb+") as stream:
-            stream.flush()
-            os.fsync(stream.fileno())
-    except (OSError, sqlite3.Error) as exc:
+        return _PERSISTED_JSON_CONTRACT.validate_persisted_json_text(
+            payload,
+            deadline_check=budget.check_deadline,
+        )
+    except (ValueError, RecursionError, MemoryError) as exc:
+        raise ReadinessError("JSON 문서를 제한 안에서 해석하지 못했습니다.") from exc
+
+
+def _assert_runtime_type(
+    value: object,
+    annotation: object,
+    *,
+    active_ids: set[int],
+    depth: int,
+    budget: PayloadValidationBudget,
+    type_hints_cache: dict[type, dict[str, object]],
+) -> None:
+    """dataclass 주석을 실제 값에 재귀 적용하며 모르는 타입은 거부한다."""
+
+    budget.check_deadline()
+    if depth > MAX_REPORT_RUNTIME_TYPE_DEPTH:
+        raise _RuntimeTypeContractError("runtime 타입 재귀 상한 초과")
+
+    origin = get_origin(annotation)
+    arguments = get_args(annotation)
+
+    if annotation is Any:
+        raise _RuntimeTypeContractError("Any 주석은 복구 신뢰 근거로 쓸 수 없음")
+    if annotation is object:
+        if isinstance(value, type) or not is_dataclass(value):
+            raise _RuntimeTypeContractError("object 값은 구체 dataclass여야 함")
+        _assert_runtime_type(
+            value,
+            type(value),
+            active_ids=active_ids,
+            depth=depth + 1,
+            budget=budget,
+            type_hints_cache=type_hints_cache,
+        )
+        return
+    if origin in (Union, types.UnionType):
+        for candidate in arguments:
+            try:
+                _assert_runtime_type(
+                    value,
+                    candidate,
+                    active_ids=active_ids,
+                    depth=depth + 1,
+                    budget=budget,
+                    type_hints_cache=type_hints_cache,
+                )
+            except _RuntimeTypeContractError:
+                continue
+            return
+        raise _RuntimeTypeContractError("Union의 어떤 타입과도 일치하지 않음")
+    if origin is Literal:
+        if not any(type(value) is type(item) and value == item for item in arguments):
+            raise _RuntimeTypeContractError("Literal과 일치하지 않음")
+        return
+
+    if origin in (list, dict, tuple):
+        if type(value) is not origin:
+            raise _RuntimeTypeContractError("container 타입 불일치")
+        value_id = id(value)
+        if value_id in active_ids:
+            raise _RuntimeTypeContractError("순환 container는 허용하지 않음")
+        active_ids.add(value_id)
+        try:
+            if origin is list:
+                if len(arguments) != 1:
+                    raise _RuntimeTypeContractError("list 원소 주석 누락")
+                for item in value:  # type: ignore[union-attr]
+                    _assert_runtime_type(
+                        item,
+                        arguments[0],
+                        active_ids=active_ids,
+                        depth=depth + 1,
+                        budget=budget,
+                        type_hints_cache=type_hints_cache,
+                    )
+            elif origin is dict:
+                if len(arguments) != 2:
+                    raise _RuntimeTypeContractError("dict 원소 주석 누락")
+                for key, item in value.items():  # type: ignore[union-attr]
+                    _assert_runtime_type(
+                        key,
+                        arguments[0],
+                        active_ids=active_ids,
+                        depth=depth + 1,
+                        budget=budget,
+                        type_hints_cache=type_hints_cache,
+                    )
+                    _assert_runtime_type(
+                        item,
+                        arguments[1],
+                        active_ids=active_ids,
+                        depth=depth + 1,
+                        budget=budget,
+                        type_hints_cache=type_hints_cache,
+                    )
+            elif len(arguments) == 2 and arguments[1] is Ellipsis:
+                for item in value:  # type: ignore[union-attr]
+                    _assert_runtime_type(
+                        item,
+                        arguments[0],
+                        active_ids=active_ids,
+                        depth=depth + 1,
+                        budget=budget,
+                        type_hints_cache=type_hints_cache,
+                    )
+            else:
+                if len(value) != len(arguments):  # type: ignore[arg-type]
+                    raise _RuntimeTypeContractError("고정 tuple 길이 불일치")
+                for item, item_type in zip(value, arguments, strict=True):  # type: ignore[arg-type]
+                    _assert_runtime_type(
+                        item,
+                        item_type,
+                        active_ids=active_ids,
+                        depth=depth + 1,
+                        budget=budget,
+                        type_hints_cache=type_hints_cache,
+                    )
+        finally:
+            active_ids.remove(value_id)
+        return
+
+    if isinstance(annotation, type) and issubclass(annotation, Enum):
+        if type(value) is not annotation:
+            raise _RuntimeTypeContractError("Enum 타입 불일치")
+        return
+    if annotation in (str, int, float, bool, bytes, type(None)):
+        if type(value) is not annotation:
+            raise _RuntimeTypeContractError("primitive 타입 불일치")
+        return
+    if isinstance(annotation, type) and is_dataclass(annotation):
+        if type(value) is not annotation:
+            raise _RuntimeTypeContractError("dataclass 타입 불일치")
+        value_id = id(value)
+        if value_id in active_ids:
+            raise _RuntimeTypeContractError("순환 dataclass는 허용하지 않음")
+        if annotation not in type_hints_cache:
+            try:
+                type_hints_cache[annotation] = get_type_hints(annotation)
+            except Exception as exc:  # noqa: BLE001 — 미해결 주석도 fail-closed
+                raise _RuntimeTypeContractError(
+                    "dataclass 주석을 해석할 수 없음"
+                ) from exc
+        type_hints = type_hints_cache[annotation]
+        active_ids.add(value_id)
+        try:
+            for item in fields(annotation):
+                field_type = type_hints.get(item.name)
+                if field_type is None:
+                    raise _RuntimeTypeContractError("dataclass 필드 주석 누락")
+                _assert_runtime_type(
+                    getattr(value, item.name),
+                    field_type,
+                    active_ids=active_ids,
+                    depth=depth + 1,
+                    budget=budget,
+                    type_hints_cache=type_hints_cache,
+                )
+        finally:
+            active_ids.remove(value_id)
+        return
+
+    raise _RuntimeTypeContractError("지원하지 않는 runtime 타입 주석")
+
+
+def _assert_report_object(
+    report: object,
+    *,
+    consumers: RuntimePayloadConsumers,
+    raw_payload: str,
+    budget: PayloadValidationBudget,
+    type_hints_cache: dict[type, dict[str, object]],
+    require_publishable: bool = False,
+) -> None:
+    budget.check_deadline()
+    report_type = getattr(consumers.reports, "Report", None)
+    source_type = getattr(consumers.reports, "Source", None)
+    try:
+        if not isinstance(report_type, type) or not is_dataclass(report_type):
+            raise _RuntimeTypeContractError("고정 Report dataclass 계약 부재")
+        if not isinstance(source_type, type) or not is_dataclass(source_type):
+            raise _RuntimeTypeContractError("고정 Source dataclass 계약 부재")
+        citations = getattr(report, "citations", None)
+        if type(citations) is not list or any(
+            type(item) is not source_type for item in citations
+        ):
+            raise _RuntimeTypeContractError("citation은 고정 Source dataclass여야 함")
+        _assert_runtime_type(
+            report,
+            report_type,
+            active_ids=set(),
+            depth=0,
+            budget=budget,
+            type_hints_cache=type_hints_cache,
+        )
+    except _RuntimeTypeContractError as exc:
+        raise ReadinessError(
+            "보고서 payload runtime 타입이 현재 Report 계약과 다릅니다."
+        ) from exc
+    if not str(getattr(report, "company", "")).strip():
+        raise ReadinessError("보고서 payload의 회사명이 비었습니다.")
+
+    current_version = str(
+        getattr(consumers.reports, "CANONICAL_SCHEMA_VERSION", "")
+    )
+    schema_version = str(getattr(report, "schema_version", ""))
+    if schema_version == current_version:
+        raw_data = json.loads(raw_payload)
+        encoded_data = getattr(consumers.reports, "report_to_dict")(report)
+        if not _json_type_sensitive_equal(raw_data, encoded_data):
+            raise ReadinessError("canonical 보고서 payload 왕복 schema 계약이 다릅니다.")
+    if require_publishable:
+        validate = getattr(consumers.publish, "validate_publishable")
+        if schema_version != current_version or not bool(validate(report)):
+            raise ReadinessError("canonical 보고서 payload가 현재 출고 계약과 다릅니다.")
+
+
+def _json_type_sensitive_equal(left: object, right: object) -> bool:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return set(left) == set(right) and all(  # type: ignore[arg-type]
+            _json_type_sensitive_equal(left[key], right[key])  # type: ignore[index]
+            for key in left
+        )
+    if isinstance(left, list):
+        return len(left) == len(right) and all(  # type: ignore[arg-type]
+            _json_type_sensitive_equal(a, b)
+            for a, b in zip(left, right, strict=True)  # type: ignore[arg-type]
+        )
+    return left == right
+
+
+def _assert_reports_payloads(
+    connection: sqlite3.Connection,
+    *,
+    consumers: RuntimePayloadConsumers,
+    budget: PayloadValidationBudget,
+    type_hints_cache: dict[type, dict[str, object]],
+) -> None:
+    cursor = connection.execute(
+        "SELECT report_id, job, payload_json, generated_at FROM reports ORDER BY report_id"
+    )
+    while rows := cursor.fetchmany(JSON_PAYLOAD_FETCH_ROWS):
+        for row in rows:
+            budget.check_deadline()
+            try:
+                loaded_report = getattr(consumers.reports, "load")(connection, str(row[0]))
+                if loaded_report is None:
+                    raise ValueError("missing report")
+                raw_report = getattr(consumers.reports, "report_from_json")(str(row[2]))
+                _assert_report_object(
+                    raw_report,
+                    consumers=consumers,
+                    raw_payload=str(row[2]),
+                    budget=budget,
+                    type_hints_cache=type_hints_cache,
+                )
+                _assert_report_object(
+                    loaded_report,
+                    consumers=consumers,
+                    raw_payload=str(row[2]),
+                    budget=budget,
+                    type_hints_cache=type_hints_cache,
+                )
+                product_key = str(
+                    getattr(consumers.cache, "_COMPANY_ANALYSIS_PRODUCT_KEY", "")
+                )
+                if str(row[1]) not in {str(raw_report.job), product_key}:
+                    raise ValueError("job binding")
+                if str(row[3]) != str(raw_report.generated_at):
+                    raise ValueError("generated_at binding")
+            except ReadinessError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — payload/ID를 노출하지 않는다
+                raise ReadinessError(
+                    "reports.payload_json을 현재 storage.reports.load 계약으로 읽지 못했습니다."
+                ) from exc
+
+
+def _assert_layer2_payloads(
+    connection: sqlite3.Connection,
+    *,
+    consumers: RuntimePayloadConsumers,
+    budget: PayloadValidationBudget,
+) -> None:
+    cursor = connection.execute(
+        "SELECT corp_id, fragments_json, filing_json, cell_judgments_json "
+        "FROM layer2_cache ORDER BY corp_id"
+    )
+    while rows := cursor.fetchmany(JSON_PAYLOAD_FETCH_ROWS):
+        for row in rows:
+            budget.check_deadline()
+            try:
+                cached = getattr(consumers.cache, "get_layer2")(connection, str(row[0]))
+                if cached is None:
+                    raise ValueError("missing layer2")
+                fragments_data = json.loads(str(row[1]))
+                if not isinstance(fragments_data, list):
+                    raise TypeError("fragments root")
+                fragment_ids: set[int] = set()
+                for item in fragments_data:
+                    if not isinstance(item, list) or len(item) != 2:
+                        raise TypeError("fragment pair")
+                    fragment_id, value = item
+                    if type(fragment_id) is not int or fragment_id in fragment_ids:
+                        raise TypeError("fragment id")
+                    fragment_ids.add(fragment_id)
+                    if not isinstance(value, dict) or any(
+                        not isinstance(key, str) or not isinstance(text, str)
+                        for key, text in value.items()
+                    ):
+                        raise TypeError("fragment value")
+                if not isinstance(cached.fragments, dict):
+                    raise TypeError("fragments consumer")
+                if row[2] is not None:
+                    filing = json.loads(str(row[2]))
+                    if not isinstance(filing, dict) or not isinstance(cached.filing, dict):
+                        raise TypeError("filing")
+                if row[3] is not None:
+                    judgments = json.loads(str(row[3]))
+                    if not isinstance(judgments, dict) or any(
+                        not isinstance(key, str) or type(value) is not bool
+                        for key, value in judgments.items()
+                    ):
+                        raise TypeError("cell judgments")
+                    if not isinstance(cached.cell_judgments, dict):
+                        raise TypeError("cell judgments consumer")
+            except Exception as exc:  # noqa: BLE001 — payload/회사 ID를 노출하지 않는다
+                raise ReadinessError(
+                    "layer2_cache JSON을 현재 storage.cache.get_layer2 계약으로 읽지 못했습니다."
+                ) from exc
+
+
+def _assert_dashboard_payloads(
+    connection: sqlite3.Connection,
+    *,
+    consumers: RuntimePayloadConsumers,
+    budget: PayloadValidationBudget,
+    type_hints_cache: dict[type, dict[str, object]],
+) -> None:
+    cursor = connection.execute(
+        "SELECT report_id, version, payload_json, payload_sha256 "
+        "FROM dashboard_report_versions ORDER BY report_id, version"
+    )
+    while rows := cursor.fetchmany(JSON_PAYLOAD_FETCH_ROWS):
+        for row in rows:
+            budget.check_deadline()
+            payload = str(row[2])
+            expected = str(row[3])
+            actual = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+            if SHA256_RE.fullmatch(expected) is None or not hmac.compare_digest(
+                actual, expected
+            ):
+                raise ReadinessError(
+                    "dashboard 보고서 payload와 저장 SHA-256이 맞지 않습니다."
+                )
+            try:
+                report = getattr(consumers.reports, "report_from_json")(payload)
+                _assert_report_object(
+                    report,
+                    consumers=consumers,
+                    raw_payload=payload,
+                    budget=budget,
+                    type_hints_cache=type_hints_cache,
+                )
+            except ReadinessError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — snapshot 내용을 노출하지 않는다
+                raise ReadinessError(
+                    "dashboard 보고서 snapshot을 현재 Report 계약으로 읽지 못했습니다."
+                ) from exc
+
+    current_cursor = connection.execute(
+        "SELECT s.report_id, v.payload_json FROM dashboard_report_states AS s "
+        "LEFT JOIN dashboard_report_versions AS v "
+        "ON v.report_id = s.report_id AND v.version = s.version "
+        "WHERE s.status = 'normal' AND s.blocked = 0 "
+        "ORDER BY s.report_id"
+    )
+    while rows := current_cursor.fetchmany(JSON_PAYLOAD_FETCH_ROWS):
+        for row in rows:
+            budget.check_deadline()
+            if row[1] is None:
+                raise ReadinessError("dashboard 현재 승인 version snapshot이 없습니다.")
+            try:
+                approved = getattr(consumers.dashboard, "approved_report_payload")(
+                    connection, report_id=str(row[0])
+                )
+            except Exception as exc:  # noqa: BLE001 — 보고서 ID를 노출하지 않는다
+                raise ReadinessError(
+                    "dashboard 승인 payload를 현재 공개 소비자로 읽지 못했습니다."
+                ) from exc
+            if not hmac.compare_digest(
+                str(approved).encode("utf-8"), str(row[1]).encode("utf-8")
+            ):
+                raise ReadinessError("dashboard 승인 payload read-back이 snapshot과 다릅니다.")
+            try:
+                current_report = getattr(consumers.reports, "report_from_json")(str(row[1]))
+                _assert_report_object(
+                    current_report,
+                    consumers=consumers,
+                    raw_payload=str(row[1]),
+                    budget=budget,
+                    type_hints_cache=type_hints_cache,
+                    require_publishable=True,
+                )
+            except ReadinessError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — 승인 snapshot 내용을 노출하지 않는다
+                raise ReadinessError(
+                    "dashboard 현재 승인 payload가 현재 출고 계약과 다릅니다."
+                ) from exc
+
+
+def _assert_lifecycle_payloads(
+    connection: sqlite3.Connection,
+    *,
+    consumers: RuntimePayloadConsumers,
+    budget: PayloadValidationBudget,
+) -> None:
+    cursor = connection.execute(
+        "SELECT run_id, state, job, confirmed_cost_krw, elapsed_sec, "
+        "final_record_json FROM observability_run_lifecycle ORDER BY run_id"
+    )
+    while rows := cursor.fetchmany(JSON_PAYLOAD_FETCH_ROWS):
+        for row in rows:
+            budget.check_deadline()
+            try:
+                record = getattr(consumers.lifecycle, "read_final")(
+                    connection, str(row[0])
+                )
+                if str(row[1]) != "final":
+                    if record is not None:
+                        raise ValueError("non-final record")
+                    continue
+                if record is None or row[5] is None:
+                    raise ValueError("missing final record")
+                if (
+                    record.run_id != str(row[0])
+                    or record.job != str(row[2])
+                    or float(record.cost_krw) < float(row[3])
+                    or float(record.elapsed_sec) < float(row[4])
+                ):
+                    raise ValueError("record binding")
+                audit_count_row = connection.execute(
+                    "SELECT COUNT(*) FROM observability_run_lifecycle_audit "
+                    "WHERE run_id = ? AND to_state = 'final'",
+                    (str(row[0]),),
+                ).fetchone()
+                audit_row = connection.execute(
+                    "SELECT record_sha256 FROM observability_run_lifecycle_audit "
+                    "WHERE run_id = ? AND to_state = 'final' ORDER BY event_id LIMIT 1",
+                    (str(row[0]),),
+                ).fetchone()
+                expected = hashlib.sha256(str(row[5]).encode("utf-8")).hexdigest()
+                if (
+                    audit_count_row is None
+                    or int(audit_count_row[0]) != 1
+                    or audit_row is None
+                    or SHA256_RE.fullmatch(str(audit_row[0] or "")) is None
+                    or not hmac.compare_digest(expected, str(audit_row[0]))
+                ):
+                    raise ValueError("audit binding")
+            except Exception as exc:  # noqa: BLE001 — run/payload를 노출하지 않는다
+                raise ReadinessError(
+                    "관측 final JSON을 lifecycle.read_final 및 감사 해시 계약으로 읽지 못했습니다."
+                ) from exc
+
+
+def _assert_runtime_payload_contracts(
+    connection: sqlite3.Connection,
+    *,
+    canonical_table_xinfo: dict[str, tuple[tuple[object, ...], ...]],
+) -> None:
+    consumers = _load_runtime_payload_consumers()
+    budget = PayloadValidationBudget.start()
+    type_hints_cache: dict[type, dict[str, object]] = {}
+    try:
+        with _bounded_sqlite(connection, budget):
+            _assert_generic_json_columns(
+                connection,
+                columns=_json_text_columns(canonical_table_xinfo),
+                budget=budget,
+            )
+            _assert_reports_payloads(
+                connection,
+                consumers=consumers,
+                budget=budget,
+                type_hints_cache=type_hints_cache,
+            )
+            _assert_layer2_payloads(connection, consumers=consumers, budget=budget)
+            _assert_dashboard_payloads(
+                connection,
+                consumers=consumers,
+                budget=budget,
+                type_hints_cache=type_hints_cache,
+            )
+            _assert_lifecycle_payloads(connection, consumers=consumers, budget=budget)
+    except ReadinessError:
+        raise
+    except sqlite3.Error as exc:
+        raise ReadinessError("격리 clone의 payload 전수 SQL 검증에 실패했습니다.") from exc
+
+
+def _copy_database(source: Path, target: Path, *, expected_sha256: str) -> None:
+    """sidecar가 없는 manifest 결속 main bytes만 O_EXCL로 복사한다."""
+
+    expected = _valid_sha256(expected_sha256, label="복사 원본 SHA-256")
+    if not hmac.compare_digest(
+        _stable_database_digest(source, label="복사 원본 DB"), expected
+    ):
+        raise ReadinessError("격리 복사 직전 원본 DB 지문이 변경됐습니다.")
+    if target.exists() or os.path.lexists(target):
+        raise ReadinessError("격리 SQLite 복사 대상이 비어 있지 않습니다.")
+    try:
+        with source.open("rb") as source_stream, target.open("xb") as target_stream:
+            shutil.copyfileobj(source_stream, target_stream, HASH_CHUNK_BYTES)
+            target_stream.flush()
+            os.fsync(target_stream.fileno())
+    except OSError as exc:
         raise ReadinessError("격리 SQLite 복사본을 만들지 못했습니다.") from exc
+    source_after = _stable_database_digest(source, label="복사 원본 DB")
+    target_digest = _stable_database_digest(target, label="격리 복사 DB")
+    if not hmac.compare_digest(source_after, expected) or not hmac.compare_digest(
+        target_digest, expected
+    ):
+        raise ReadinessError("격리 SQLite 복사본이 결속된 원본 bytes와 다릅니다.")
+    if target.stat().st_size != source.stat().st_size:
+        raise ReadinessError("격리 SQLite 복사본 크기가 원본과 다릅니다.")
 
 
 def _assert_bootstrapped_schema(
@@ -660,17 +1452,18 @@ def _assert_bootstrapped_schema(
     *,
     canonical_parent: Path,
 ) -> AppSchemaInventory:
+    _assert_database_size(candidate)
+    _assert_no_sqlite_companions(candidate, label="격리 schema clone")
     storage_db = _load_storage_db_module()
-    feature_bootstraps = _load_feature_schema_bootstraps()
+    # storage.db.connect가 이 동일 registry를 실행한다. 여기서는 path/callable
+    # identity만 다시 검증하고 중복 bootstrap은 하지 않는다.
+    _load_feature_schema_bootstraps()
     canonical = canonical_parent / "canonical-storage.sqlite3"
     if canonical.exists():
         raise ReadinessError("canonical schema 경로가 비어 있지 않습니다.")
     try:
         with storage_db.connect(canonical) as canonical_connection:
-            _apply_feature_schema_bootstraps(
-                canonical_connection,
-                feature_bootstraps,
-            )
+            canonical_connection.execute("SELECT 1")
     except Exception as exc:  # noqa: BLE001 — feature별 migration 실패를 닫는다
         raise ReadinessError(
             "현재 앱의 canonical storage schema를 만들지 못했습니다."
@@ -706,6 +1499,32 @@ def _assert_bootstrapped_schema(
                 storage_db=storage_db,
                 missing_tables=missing_before_bootstrap,
             )
+            prebootstrap_indexes = {
+                table: _index_contract(prebootstrap_connection, table)
+                for table in required_tables & prebootstrap_tables
+            }
+            prebootstrap_table_xinfo = {
+                table: _table_xinfo(prebootstrap_connection, table)
+                for table in required_tables & prebootstrap_tables
+            }
+            prebootstrap_table_semantics = {
+                table: _table_semantic_contract(prebootstrap_connection, table)
+                for table in required_tables & prebootstrap_tables
+            }
+            prebootstrap_triggers = _trigger_contract(prebootstrap_connection)
+            prebootstrap_versioned_session = False
+            if "sessions" in prebootstrap_tables:
+                session_xinfo = prebootstrap_table_xinfo["sessions"]
+                session_semantics = prebootstrap_table_semantics["sessions"]
+                session_versions = (
+                    *_session_versioned_contracts(storage_db, state="raw"),
+                    *_session_versioned_contracts(storage_db, state="hashed"),
+                )
+                prebootstrap_versioned_session = any(
+                    session_xinfo == version.table_xinfo
+                    and session_semantics == version.semantics
+                    for version in session_versions
+                )
     except sqlite3.Error as exc:
         raise ReadinessError("앱 storage schema 계약을 읽지 못했습니다.") from exc
 
@@ -716,12 +1535,52 @@ def _assert_bootstrapped_schema(
             + ", ".join(unapproved_missing)
         )
 
+    for table in sorted(required_tables & prebootstrap_tables):
+        if table == "sessions":
+            if not prebootstrap_versioned_session:
+                raise ReadinessError(
+                    "bootstrap 전 sessions가 명시된 version 계약과 다릅니다."
+                )
+        elif (
+            prebootstrap_table_xinfo[table] != required_table_xinfo[table]
+            or prebootstrap_table_semantics[table] != required_table_semantics[table]
+        ):
+            raise ReadinessError(
+                "bootstrap 전 백업의 table/CREATE 의미 계약이 canonical과 다릅니다: "
+                + table
+            )
+        if prebootstrap_indexes[table] != required_indexes[table]:
+            if table == "sessions" and prebootstrap_versioned_session:
+                continue
+            raise ReadinessError(
+                "bootstrap 전 백업의 필수 index 계약이 canonical과 다릅니다: "
+                + table
+            )
+    if prebootstrap_triggers != required_triggers:
+        actual_names = set(prebootstrap_triggers)
+        required_names = set(required_triggers)
+        changed = sorted(
+            name
+            for name in actual_names & required_names
+            if prebootstrap_triggers[name] != required_triggers[name]
+        )
+        details = []
+        missing = sorted(required_names - actual_names)
+        unexpected = sorted(actual_names - required_names)
+        if missing:
+            details.append("누락=" + ",".join(missing))
+        if unexpected:
+            details.append("추가=" + ",".join(unexpected))
+        if changed:
+            details.append("변조=" + ",".join(changed))
+        raise ReadinessError(
+            "bootstrap 전 백업의 trigger 계약이 canonical과 다릅니다: "
+            + " ".join(details)
+        )
+
     try:
         with storage_db.connect(candidate) as candidate_connection:
-            _apply_feature_schema_bootstraps(
-                candidate_connection,
-                feature_bootstraps,
-            )
+            candidate_connection.execute("SELECT 1")
     except Exception as exc:  # noqa: BLE001 — feature별 migration 실패를 닫는다
         raise ReadinessError(
             "격리 복사본이 앱 storage bootstrap/migration을 통과하지 못했습니다."
@@ -750,6 +1609,12 @@ def _assert_bootstrapped_schema(
     if missing_tables:
         raise ReadinessError(
             "앱 storage canonical 필수 테이블이 없습니다: " + ", ".join(missing_tables)
+        )
+    unexpected_tables = sorted(actual_tables - required_tables)
+    if unexpected_tables:
+        raise ReadinessError(
+            "앱 registry에 없는 추가 영속 테이블이 있습니다: "
+            + ", ".join(unexpected_tables)
         )
     supported_session_contracts = _session_versioned_contracts(
         storage_db,
@@ -831,6 +1696,13 @@ def _assert_bootstrapped_schema(
             "앱 storage trigger 집합이 canonical과 다릅니다: " + " ".join(details)
         )
 
+    with closing(_readonly_connection(candidate)) as payload_connection:
+        _assert_runtime_payload_contracts(
+            payload_connection,
+            canonical_table_xinfo=required_table_xinfo,
+        )
+    _assert_no_sqlite_companions(candidate, label="격리 schema clone")
+
     return AppSchemaInventory(
         table_count=len(required_tables),
         index_count=sum(len(value) for value in required_indexes.values()),
@@ -846,12 +1718,19 @@ def _assert_app_schema_compatible(
 ) -> AppSchemaInventory:
     """원본이 아닌 격리 clone에서 현재 앱 bootstrap과 canonical 계약을 검증한다."""
 
-    source_digest = sha256_file(source)
+    source_size = _assert_database_size(source)
+    source_digest = _stable_database_digest(source, label="schema 검증 원본 DB")
     if expected_source_sha256 is not None and not hmac.compare_digest(
         source_digest, expected_source_sha256
     ):
         raise ReadinessError("앱 schema 검증 전에 원본 백업 지문이 변경됐습니다.")
-    parent = None if temp_parent is None else str(temp_parent.resolve(strict=True))
+    temp_root = (
+        Path(tempfile.gettempdir()).resolve(strict=True)
+        if temp_parent is None
+        else temp_parent.resolve(strict=True)
+    )
+    _assert_clone_space(temp_root, source_size=source_size, copies=2)
+    parent = None if temp_parent is None else str(temp_root)
     temporary_path: Path | None = None
     try:
         with tempfile.TemporaryDirectory(
@@ -859,13 +1738,13 @@ def _assert_app_schema_compatible(
         ) as directory:
             temporary_path = Path(directory)
             candidate = temporary_path / "restored.sqlite3"
-            _copy_database(source, candidate)
+            _copy_database(source, candidate, expected_sha256=source_digest)
             inventory = _assert_bootstrapped_schema(
                 candidate,
                 canonical_parent=temporary_path,
             )
     finally:
-        if sha256_file(source) != source_digest:
+        if _stable_database_digest(source, label="schema 검증 원본 DB") != source_digest:
             raise ReadinessError("앱 schema 검증 중 원본 백업이 변경됐습니다.")
         if temporary_path is not None and temporary_path.exists():
             raise ReadinessError("앱 schema 검증 임시 디렉터리를 제거하지 못했습니다.")
@@ -887,16 +1766,17 @@ def verify_backup(
             "독립 서명 manifest gate와 신뢰 checkpoint가 없어 검증을 중단합니다."
         )
     database = _regular_file(database_path, label="백업 DB")
+    _assert_no_sqlite_companions(database, label="백업 DB")
+    database_size = _assert_database_size(database)
     checksum_file = _regular_file(checksum_path, label="체크섬 파일")
     sidecar_digest = _read_sidecar(checksum_file, database_name=database.name)
     checksum_object_digest = sha256_file(checksum_file)
     compatibility_digest = _valid_sha256(expected_sha256, label="호환 체크섬")
-    actual_digest = sha256_file(database)
+    actual_digest = _stable_database_digest(database, label="백업 DB")
     if not hmac.compare_digest(actual_digest, sidecar_digest):
         raise ReadinessError("백업 DB와 같은 위치의 체크섬이 맞지 않습니다.")
     if not hmac.compare_digest(actual_digest, compatibility_digest):
         raise ReadinessError("백업 DB가 호출자 호환 체크섬과 맞지 않습니다.")
-    database_size = database.stat().st_size
     try:
         manifest_record = manifest_gate.verify(
             expectation=manifest_expectation,
@@ -910,13 +1790,15 @@ def verify_backup(
         raise ReadinessError(f"독립 manifest gate가 거부했습니다: {exc}") from exc
     try:
         with closing(_readonly_connection(database)) as connection:
-            _assert_sqlite_integrity(connection)
+            with _bounded_sqlite(connection, PayloadValidationBudget.start()):
+                _assert_sqlite_integrity(connection)
     except sqlite3.Error as exc:
         raise ReadinessError("백업 DB를 읽기 전용으로 검증하지 못했습니다.") from exc
     app_schema = _assert_app_schema_compatible(
         database,
         expected_source_sha256=actual_digest,
     )
+    _assert_no_sqlite_companions(database, label="검증 완료 백업 DB")
     return {
         "status": "통과",
         "sha256": actual_digest,
@@ -933,16 +1815,18 @@ def verify_backup(
 def _inventory(path: Path) -> DatabaseInventory:
     try:
         with closing(_readonly_connection(path)) as connection:
-            tables = _assert_sqlite_integrity(connection)
-            counts: dict[str, int] = {}
-            for table in sorted(tables):
-                escaped = table.replace('"', '""')
-                row = connection.execute(
-                    f'SELECT COUNT(*) FROM "{escaped}"'
-                ).fetchone()
-                counts[table] = int(row[0]) if row is not None else 0
+            with _bounded_sqlite(connection, PayloadValidationBudget.start()):
+                tables = _assert_sqlite_integrity(connection)
+                counts: dict[str, int] = {}
+                for table in sorted(tables):
+                    escaped = table.replace('"', '""')
+                    row = connection.execute(
+                        f'SELECT COUNT(*) FROM "{escaped}"'
+                    ).fetchone()
+                    counts[table] = int(row[0]) if row is not None else 0
     except sqlite3.Error as exc:
         raise ReadinessError("DB 레코드 수를 검증하지 못했습니다.") from exc
+    _assert_no_sqlite_companions(path, label="inventory DB")
     return DatabaseInventory(tuple(sorted(tables)), counts)
 
 
@@ -966,6 +1850,8 @@ def restore_dry_run(
         manifest_data_root=manifest_data_root,
     )
     source = _regular_file(database_path, label="백업 DB")
+    _assert_no_sqlite_companions(source, label="복구 원본 DB")
+    source_size = _assert_database_size(source)
     parent: str | None = None
     if temp_parent is not None:
         resolved_parent = temp_parent.expanduser().resolve(strict=True)
@@ -974,9 +1860,11 @@ def restore_dry_run(
         parent = str(resolved_parent)
 
     source_inventory = _inventory(source)
-    source_digest = sha256_file(source)
+    source_digest = _stable_database_digest(source, label="복구 원본 DB")
     if not hmac.compare_digest(source_digest, str(verified["sha256"])):
         raise ReadinessError("임시 복구 전에 원본 백업 지문이 변경됐습니다.")
+    temp_root = Path(tempfile.gettempdir()).resolve(strict=True) if parent is None else Path(parent)
+    _assert_clone_space(temp_root, source_size=source_size, copies=2)
     temporary_path: Path | None = None
     try:
         with tempfile.TemporaryDirectory(
@@ -984,17 +1872,11 @@ def restore_dry_run(
         ) as directory:
             temporary_path = Path(directory)
             restored = temporary_path / "restored.sqlite3"
-            try:
-                with closing(_readonly_connection(source)) as source_connection:
-                    with closing(
-                        sqlite3.connect(str(restored), timeout=SQLITE_TIMEOUT_SEC)
-                    ) as target_connection:
-                        source_connection.backup(target_connection)
-                with restored.open("rb+") as stream:
-                    stream.flush()
-                    os.fsync(stream.fileno())
-            except (OSError, sqlite3.Error) as exc:
-                raise ReadinessError("임시 복사본 복구에 실패했습니다.") from exc
+            _copy_database(source, restored, expected_sha256=source_digest)
+            if not hmac.compare_digest(
+                _stable_database_digest(restored, label="복구 clone DB"), source_digest
+            ):
+                raise ReadinessError("임시 복사본 bytes가 manifest 결속 원본과 다릅니다.")
 
             restored_inventory = _inventory(restored)
             if source_inventory != restored_inventory:
@@ -1013,11 +1895,13 @@ def restore_dry_run(
                 "restored_app_index_count": app_schema.index_count,
                 "restored_app_trigger_count": app_schema.trigger_count,
             }
+            _assert_no_sqlite_companions(restored, label="복구 검증 완료 clone DB")
     finally:
-        if sha256_file(source) != source_digest:
+        if _stable_database_digest(source, label="복구 원본 DB") != source_digest:
             raise ReadinessError("임시 복구 검증 중 원본 백업이 변경됐습니다.")
         if temporary_path is not None and temporary_path.exists():
             raise ReadinessError("임시 복구 디렉터리를 제거하지 못했습니다.")
+    _assert_no_sqlite_companions(source, label="복구 검증 완료 원본 DB")
     return result
 
 

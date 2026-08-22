@@ -55,6 +55,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
+from src.core.persisted_json import validate_persisted_json_text
 from src.features.pipeline.port import Report
 from src.features.provenance.freshness import is_stale
 from src.features.provenance.sources import Source, SourceKind
@@ -394,7 +395,12 @@ def _fragments_to_json(fragments: dict[int, dict[str, str]]) -> str:
       `json.dumps`하면 다시 읽을 때 키가 문자열로 바뀐다(정수 조각 번호가
       깨진다). `[id, value]` 쌍의 배열로 감싸 정수 키를 그대로 지킨다.
     """
-    return json.dumps([[fid, val] for fid, val in fragments.items()], ensure_ascii=False)
+    payload = json.dumps(
+        [[fid, val] for fid, val in fragments.items()],
+        ensure_ascii=False,
+    )
+    validate_persisted_json_text(payload)
+    return payload
 
 
 def _fragments_from_json(text: str) -> dict[int, dict[str, str]]:
@@ -418,6 +424,16 @@ def save_layer2(
       받기)은 1차 범위 밖이라 이 함수도 "전체를 한 번에" 저장·교체한다.
     """
     stamp = (now or dt.datetime.now()).isoformat(timespec="seconds")
+    fragments_json = _fragments_to_json(fragments)
+    filing_json = json.dumps(filing, ensure_ascii=False) if filing is not None else None
+    judgments_json = (
+        json.dumps(cell_judgments, ensure_ascii=False)
+        if cell_judgments is not None
+        else None
+    )
+    for payload in (filing_json, judgments_json):
+        if payload is not None:
+            validate_persisted_json_text(payload)
     conn.execute(
         f"""
         INSERT INTO {TABLE_LAYER2_CACHE}
@@ -433,11 +449,9 @@ def save_layer2(
         """,
         (
             corp_id,
-            _fragments_to_json(fragments),
-            json.dumps(filing, ensure_ascii=False) if filing is not None else None,
-            json.dumps(cell_judgments, ensure_ascii=False)
-            if cell_judgments is not None
-            else None,
+            fragments_json,
+            filing_json,
+            judgments_json,
             fiscal_year,
             stamp,
             stamp,

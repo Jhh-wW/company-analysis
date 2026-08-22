@@ -297,6 +297,7 @@ def test_restore_dry_run_uses_and_cleans_temporary_copy(tmp_path: Path) -> None:
     )
 
     assert result["status"] == "임시 복구 통과"
+    assert result["restored_sha256"] == source_digest
     assert int(result["row_count"]) >= 1
     assert result["restored_app_table_count"] == result["table_count"]
     assert int(result["restored_app_index_count"]) > 0

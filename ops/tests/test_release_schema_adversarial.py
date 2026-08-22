@@ -298,6 +298,115 @@ def test_missing_feature_owned_required_table_is_rejected_immutably(
     _reject_without_mutation(database, temp_parent)
 
 
+@pytest.mark.parametrize(
+    ("object_type", "object_name"),
+    (
+        ("table", "admin_audit_events"),
+        ("trigger", "admin_audit_events_no_update"),
+        ("trigger", "admin_audit_events_no_delete"),
+    ),
+)
+def test_missing_admin_audit_schema_object_is_rejected_immutably(
+    tmp_path: Path,
+    object_type: str,
+    object_name: str,
+) -> None:
+    database = _create_runtime_database(
+        tmp_path / object_name / "source" / "missing-admin-audit.sqlite3"
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute(f'DROP {object_type.upper()} "{object_name}"')
+    temp_parent = tmp_path / object_name / "restore-temp"
+    temp_parent.mkdir(parents=True)
+
+    _reject_without_mutation(database, temp_parent)
+
+
+def test_missing_required_index_is_rejected_before_bootstrap(tmp_path: Path) -> None:
+    database = _create_runtime_database(
+        tmp_path / "source" / "missing-required-index.sqlite3"
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP INDEX idx_share_link_open_events_link_time")
+    temp_parent = tmp_path / "restore-temp"
+    temp_parent.mkdir()
+
+    _reject_without_mutation(database, temp_parent)
+
+
+def test_missing_required_column_is_rejected_before_bootstrap(tmp_path: Path) -> None:
+    database = _create_runtime_database(
+        tmp_path / "source" / "missing-required-column.sqlite3"
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "ALTER TABLE budget_spend_inflight DROP COLUMN reserved_krw"
+        )
+    temp_parent = tmp_path / "restore-temp"
+    temp_parent.mkdir()
+
+    _reject_without_mutation(database, temp_parent)
+
+
+def test_changed_admin_audit_trigger_is_rejected_before_bootstrap(tmp_path: Path) -> None:
+    database = _create_runtime_database(
+        tmp_path / "source" / "changed-admin-trigger.sqlite3"
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER admin_audit_events_no_update")
+        connection.execute(
+            "CREATE TRIGGER admin_audit_events_no_update "
+            "BEFORE UPDATE ON admin_audit_events BEGIN SELECT 1; END"
+        )
+    temp_parent = tmp_path / "restore-temp"
+    temp_parent.mkdir()
+
+    _reject_without_mutation(database, temp_parent)
+
+
+def test_actual_admin_queue_database_is_canonical_and_restorable(tmp_path: Path) -> None:
+    database = _create_runtime_database(tmp_path / "source" / "admin-runtime.sqlite3")
+    app_root = str(APP_ROOT)
+    inserted = app_root not in sys.path
+    if inserted:
+        sys.path.insert(0, app_root)
+    try:
+        from starlette.requests import Request  # noqa: PLC0415
+        from src.web.routers import admin as admin_router  # noqa: PLC0415
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/admin/invite",
+                "headers": [],
+                "query_string": b"",
+                "client": ("127.0.0.1", 1),
+                "server": ("127.0.0.1", 80),
+                "scheme": "http",
+            }
+        )
+        with _storage_db_module().connect(database) as connection:
+            admin_router._queue_committed_change(  # noqa: SLF001
+                connection,
+                request,
+                action="admin.member.invite",
+                target="member:fixed-target",
+                reason="invited",
+            )
+    finally:
+        if inserted:
+            sys.path.remove(app_root)
+
+    temp_parent = tmp_path / "restore-temp"
+    temp_parent.mkdir()
+    _write_sidecar(database)
+    before = _directory_bytes(database.parent)
+
+    assert _restore(database, temp_parent)["status"] == "임시 복구 통과"
+    _assert_source_and_temp_unchanged(database, before, temp_parent)
+
+
 @pytest.mark.parametrize("operation", ("insert", "update", "delete"))
 def test_extra_data_mutation_trigger_is_rejected_as_noncanonical(
     tmp_path: Path,

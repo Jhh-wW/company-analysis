@@ -37,6 +37,7 @@ HASH_CHUNK_BYTES: Final[int] = 1024 * 1024
 SQLITE_TIMEOUT_SEC: Final[float] = 10.0
 PRIVATE_FILE_MODE: Final[int] = 0o600
 PRIVATE_DIR_MODE: Final[int] = 0o700
+SQLITE_COMPANION_SUFFIXES: Final[tuple[str, ...]] = ("-wal", "-shm", "-journal")
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 
@@ -75,9 +76,36 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _readonly_connection(path: Path) -> sqlite3.Connection:
+def _live_readonly_connection(path: Path) -> sqlite3.Connection:
+    """실행 중 source의 WAL까지 SQLite Backup API가 일관되게 읽는다."""
+
     uri = path.resolve().as_uri() + "?mode=ro"
     return sqlite3.connect(uri, uri=True, timeout=SQLITE_TIMEOUT_SEC)
+
+
+def _assert_no_sqlite_companions(path: Path) -> None:
+    for suffix in SQLITE_COMPANION_SUFFIXES:
+        try:
+            os.lstat(Path(str(path) + suffix))
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise BackupError("백업 산출물 SQLite sidecar 상태를 확인하지 못했습니다.") from exc
+        raise BackupError("백업 산출물에 독립 manifest가 결속하지 않은 SQLite sidecar가 있습니다.")
+
+
+def _standalone_readonly_connection(path: Path) -> sqlite3.Connection:
+    """완료된 main DB 한 파일만 읽고 sidecar는 절대 적용하지 않는다."""
+
+    _assert_no_sqlite_companions(path)
+    uri = path.resolve().as_uri() + "?mode=ro&immutable=1"
+    connection = sqlite3.connect(uri, uri=True, timeout=SQLITE_TIMEOUT_SEC)
+    try:
+        _assert_no_sqlite_companions(path)
+    except BaseException:
+        connection.close()
+        raise
+    return connection
 
 
 def _assert_database_is_valid(path: Path) -> None:
@@ -87,7 +115,7 @@ def _assert_database_is_valid(path: Path) -> None:
     try:
         # sqlite3.Connection의 ``with``는 트랜잭션만 끝내고 연결은 닫지 않는다.
         # Windows에서도 곧바로 파일을 옮길 수 있도록 closing을 함께 쓴다.
-        with closing(_readonly_connection(path)) as conn:
+        with closing(_standalone_readonly_connection(path)) as conn:
             integrity_rows = conn.execute("PRAGMA integrity_check").fetchall()
             if integrity_rows != [("ok",)]:
                 raise BackupError("SQLite 무결성 검사를 통과하지 못했습니다.")
@@ -110,6 +138,7 @@ def _assert_database_is_valid(path: Path) -> None:
                     )
     except sqlite3.Error as exc:
         raise BackupError("올바르고 읽을 수 있는 SQLite DB가 아닙니다.") from exc
+    _assert_no_sqlite_companions(path)
 
 
 def _private_chmod(path: Path) -> None:
@@ -169,10 +198,13 @@ def verify_backup(
     expected = _read_expected_checksum(resolved_checksum)
     if not resolved_backup.is_file():
         raise BackupError("백업 DB 파일이 없습니다.")
+    _assert_no_sqlite_companions(resolved_backup)
     actual = sha256_file(resolved_backup)
+    _assert_no_sqlite_companions(resolved_backup)
     if not hmac.compare_digest(actual, expected):
         raise BackupError("체크섬이 맞지 않습니다. 손상되었거나 다른 백업 파일입니다.")
     _assert_database_is_valid(resolved_backup)
+    _assert_no_sqlite_companions(resolved_backup)
     return actual
 
 
@@ -204,19 +236,31 @@ def create_backup(
         raise BackupError("같은 이름의 백업이 이미 있습니다.")
 
     try:
-        with closing(_readonly_connection(source)) as source_conn:
+        with closing(_live_readonly_connection(source)) as source_conn:
             with closing(
                 sqlite3.connect(str(temp_path), timeout=SQLITE_TIMEOUT_SEC)
             ) as target_conn:
                 source_conn.backup(target_conn)
+        _assert_no_sqlite_companions(temp_path)
         _private_chmod(temp_path)
         _assert_database_is_valid(temp_path)
+        _assert_no_sqlite_companions(temp_path)
         digest = sha256_file(temp_path)
+        _assert_no_sqlite_companions(temp_path)
         os.replace(temp_path, destination)
         try:
+            _assert_no_sqlite_companions(destination)
+            if not hmac.compare_digest(sha256_file(destination), digest):
+                raise BackupError("게시된 백업 main DB 지문이 검증된 산출물과 다릅니다.")
+            _assert_no_sqlite_companions(destination)
             _write_checksum(checksum, digest, destination.name)
+            _assert_no_sqlite_companions(destination)
+            if not hmac.compare_digest(sha256_file(destination), digest):
+                raise BackupError("체크섬 게시 뒤 백업 main DB 지문이 변경됐습니다.")
+            _assert_no_sqlite_companions(destination)
         except Exception:
             destination.unlink(missing_ok=True)
+            checksum.unlink(missing_ok=True)
             raise
     except sqlite3.Error as exc:
         raise BackupError("SQLite Backup API로 백업하지 못했습니다.") from exc

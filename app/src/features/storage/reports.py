@@ -23,6 +23,7 @@ from dataclasses import fields, replace
 from typing import Any, Optional
 
 from src.core.constants import COUNTED_CELLS, HIDDEN_CELLS
+from src.core.persisted_json import validate_persisted_json_text
 from src.features.grading.logic import grade_of
 from src.features.pipeline.port import (
     FactRecord,
@@ -317,7 +318,9 @@ def report_from_dict(data: dict[str, Any]) -> Report:
 
 def report_to_json(report: Report) -> str:
     """`Report` → JSON 문자열."""
-    return json.dumps(report_to_dict(report), ensure_ascii=False)
+    payload = json.dumps(report_to_dict(report), ensure_ascii=False)
+    validate_persisted_json_text(payload)
+    return payload
 
 
 def report_from_json(text: str) -> Report:

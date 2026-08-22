@@ -791,12 +791,12 @@ def test_dry_run은_GET만_쓰고_token을_checkpoint나_event에_남기지않�
     assert "candidate-secret" not in durable_text
 
 
-def test_새_launcher_DB는_비용표가_아직_없어도_dry_run하고_전용binding만_남긴다(
+def test_새_launcher_DB는_빈비용표를미리만들고_dry_run하고_전용binding만_남긴다(
     tmp_path,
 ):
     db = tmp_path / "storage.db"
-    # Match the schemas initialized by the real launcher/web startup.  The
-    # cost-tracking feature owns its table and creates it only when a run ends.
+    # 실제 launcher/web 시작과 동일하게 중앙 registry가 빈 비용 원장을
+    # 먼저 만들고, 실행이 끝나기 전에는 어떤 비용 행도 기록하지 않는다.
     with storage_db.connect(db) as conn:
         spend_store.ensure_schema(conn)
         lifecycle.ensure_schema(conn)
@@ -843,8 +843,12 @@ def test_새_launcher_DB는_비용표가_아직_없어도_dry_run하고_전용bi
         binding = conn.execute(
             f"SELECT binding_id FROM {PILOT_BINDING_TABLE}"
         ).fetchone()
+        cost_rows = int(
+            conn.execute("SELECT COUNT(*) FROM report_cost_summaries").fetchone()[0]
+        )
     snapshot = json.loads(checkpoint.path.read_text(encoding="utf-8"))
-    assert "report_cost_summaries" not in tables
+    assert "report_cost_summaries" in tables
+    assert cost_rows == 0
     assert binding is not None
     assert binding[0] == snapshot["binding_id"]
 
@@ -1207,7 +1211,11 @@ def test_P02_점검429가_provider_전임을_증명하면_재시도준비로만_
     paid_at = datetime(2026, 8, 21, 3, 16, 21, tzinfo=timezone.utc)
     try:
         runner.operate(execute=False)
-        with storage_db.connect(db) as conn:
+        # 이 테스트의 skeletal pilot fixture에는 운영 storage 전체 migration을
+        # 적용하지 않고, 점검 상태 소비자가 소유한 schema만 초기화한다.
+        with sqlite3.connect(db) as conn:
+            conn.row_factory = sqlite3.Row
+            dashboard_store.ensure_schema(conn)
             dashboard_store.set_service_state(
                 conn,
                 status=dashboard_store.SERVICE_MAINTENANCE,
@@ -1234,7 +1242,9 @@ def test_P02_점검429가_provider_전임을_증명하면_재시도준비로만_
                 result_http_status=429,
                 error_code=SERVICE_MAINTENANCE_BLOCKED_ERROR,
             )
-        with storage_db.connect(db) as conn:
+        with sqlite3.connect(db) as conn:
+            conn.row_factory = sqlite3.Row
+            dashboard_store.ensure_schema(conn)
             dashboard_store.set_service_state(
                 conn,
                 status=dashboard_store.SERVICE_NORMAL,
