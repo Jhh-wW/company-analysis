@@ -13,6 +13,7 @@
    [기능별 책임 지도](architecture/feature-map.md)
 5. [웹서비스 실행 안내](../app/README.md)와
    [분석 엔진 안내](../analysis_engine/README.md)
+6. [공식 자료 20개 정합성 검토](reviews/기업분석2_공식자료20개_정합성_검토_2026-08-22.md)
 
 `docs/출력물 기준/`의 20개 문서가 내용·목차·PDF 품질의 정본이다. 날짜가 붙은
 `research/`와 `reviews/` 문서는 과거 스냅샷이며 현재 계약이나 시험 수를 덮어쓰지 않는다.
@@ -37,7 +38,7 @@
 - `app/`: FastAPI 화면, 인증, 비용·공유 제어, pipeline 조립, 저장, PDF·Notion
 - `analysis_engine/`: 실제 회사 식별·자료 수집·판정 엔진
 - `docs/출력물 기준/`: 사람이 읽는 내용·출고 정본
-- `render.yaml`: 관리자 전용 첫 배포와 단일 SQLite 인스턴스 설정
+- `render.yaml`: 관리자 전용 웹 1개와 인증된 정기 작업 3개의 배포 전 Blueprint
 - `.github/workflows/quality-gate.yml`: app·engine 회귀 시험과 Docker health 확인
 
 `analysis_engine`은 독립 설치 패키지가 아니다. `app/src/features/pipeline/real.py`가
@@ -52,6 +53,8 @@ allowlist에서 빼면 `PIPELINE=real`이 깨진다.
 | 배포 인증 | `ADMIN_EMAILS`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI` |
 | 공유 링크 | `SHARE_PUBLIC_BASE_URL` |
 | 근거·자동출고 | `PROVENANCE_SEAL_SECRET` (`PDF_RELEASE_PARTICIPANTS`는 구형 감사자료 해석용) |
+| 내부 정기 작업 | `BACKUP_TRIGGER_SECRET`, `MAINTENANCE_TRIGGER_SECRET`, 각 HTTPS trigger URL |
+| 외부 백업 | `BACKUP_S3_*`, 최소 권한 `AWS_*` 자격증명 |
 | 실제 조사 | `DART_API_KEY`, `ANTHROPIC_API_KEY`, `NAVER_CLIENT_ID`, `NAVER_CLIENT_SECRET` |
 | 선택 전송 | `NOTION_TOKEN`, `NOTION_PARENT_PAGE_ID` |
 
@@ -66,7 +69,7 @@ Python 3.13을 사용한다.
 ```powershell
 cd app
 py -3.13 -m venv .venv
-.\.venv\Scripts\python -m pip install -r requirements.txt
+.\.venv\Scripts\python -m pip install -r requirements.txt -r ..\.github\requirements-ci.txt
 .\로컬데모켜기.ps1
 ```
 
@@ -84,28 +87,32 @@ py -3.13 -m venv .venv
 
 ## 6. 검증 기준과 갱신 명령
 
-현재 인수 기준 스냅샷은 다음과 같다.
-
-- app 전체 회귀: **2,164 passed, 3 skipped, 27 warnings** (Python 3.13.15,
-  failures `0`, errors `0`)
-- analysis_engine 회귀: **135 passed**, 실패 `0`
-- 두 묶음 합계: **2,299 passed, 3 skipped**, 실패 `0`
-- 자동출고·원가·파일럿 표적 묶음: **43 passed** 후 넓은 회귀 **399 passed, 3 skipped**
-- 실제 provider 호출: **0**
-
-이 숫자는 2026-08-21 자동출고 후속 작업의 dirty worktree 스냅샷이다. 변경 뒤 아래 두 명령을 각각 실행하고
-실패 원인을 해결한 다음, 합산 결과와 warning을 이 섹션에 갱신한다.
+고정된 통과 개수는 코드가 추가될 때마다 낡으므로 인수 기준으로 사용하지 않는다.
+아래 명령을 같은 작업트리에서 실행해 실패·오류 0을 확인하고, 실제 통과·warning·
+deselected 수는 최종 통합 회귀 뒤 작성하는 리뷰 반영결과 문서에 기록한다. 대용량 DART
+목록·과거 데모 15건·검증된 공시 원문은 `local_integration`으로 분리되어 기본 CI에서
+명시적으로 제외되며, 해당 marker를 선택했는데 로컬 자료가 없으면 시험은 실패한다.
 
 ```powershell
 # app 폴더
 $env:TLDEXTRACT_CACHE="$PWD\.cache\tldextract"
 .\.venv\Scripts\python -m pytest src tools/tests -q `
+  -m "not local_integration" `
   --basetemp=.pytest_tmp_handoff_app
 
 # 저장소 루트
 cd ..
 .\app\.venv\Scripts\python -m pytest analysis_engine/src -q `
   --basetemp=app/.pytest_tmp_handoff_engine
+```
+
+대용량 로컬 자료까지 준비된 경우에만 app 폴더에서 아래 명령을 별도로 실행한다. 자료가
+없는데 marker를 선택하면 실패하는 것이 정상이며, 기본 회귀의 녹색으로 숨기지 않는다.
+
+```powershell
+.\.venv\Scripts\python -m pytest src/features/pipeline/tests `
+  src/features/business_candidate/tests -q -m local_integration `
+  --basetemp=.pytest_tmp_local_integration
 ```
 
 CI와 같은 최종 확인은 GitHub Actions `quality-gate`에서 app·engine 시험 뒤 Docker
@@ -125,20 +132,29 @@ report_standard 통과
 
 필수 검사 하나라도 실패하거나 검사 뒤 hash가 바뀌면 부분 화면도 공개하지 않고 전체를
 `GATE_STOPPED`한다. 수동 승인 GET/POST는 `410 Gone`이며 구형 세 역할 승인 테이블은
-감사자료로만 보존한다. 최초 실제 회사 25건 사용자 검토는 자동검사 보정용 파일럿이고
-서비스 건별 출고 승인이 아니다.
+감사자료로만 보존한다. 파일럿 후보군은 P01~P25로 보존하되 실제 유료 실행·사용자
+전수 검토 범위는 P01~P10으로 제한한다. P11~P25는 별도 승인 전 provider 호출이
+금지된다. 이 파일럿은 자동검사 보정용이며 서비스 건별 출고 승인이 아니다.
 
 내부 AI 원가는 실패 호출을 포함해 stage·실제 model ID·일반/cache token·batch·원가로
 기록한다. 고객 청구는 자동출고 뒤에만 별도 결정하며 실패·`GATE_STOPPED`·출고 실패는
 0원이다. 공개 판매가는 아직 확정되지 않았고 서버 월 고정비는 AI 변동원가와 분리한다.
 
-## 8. 배포·백업·복구
+## 8. 배포·정기 작업·복구
 
-- 첫 Render 배포: `PIPELINE=demo`, `BETA_ADMIN_ONLY=1`
+- 배포 전 안전값: `PIPELINE=demo`, `BETA_ADMIN_ONLY=1`
 - Uvicorn worker `1`, Render instance `1`, 영속 디스크 `/var/data`
-- SQLite 백업과 `.sha256`을 함께 내려받아 검증
+- 매일 04:00 KST 외부 SQLite 백업, 월요일 04:10 주간 관리자 XLSX,
+  매일 04:20 휴지통·멈춘 작업 정리가 Blueprint에 선언되어 있다.
+- cron은 영속 디스크를 직접 읽지 않고, 서로 분리된 32바이트 이상 Bearer 비밀과 정확한
+  HTTPS 내부 경로로 웹에 요청한다. redirect는 거부하고 작업은 기간별 claim으로 멱등화한다.
+- SQLite 백업과 `.sha256`을 함께 내려받아 검증한다.
 - DB와 별도로 OAuth·provider·Notion 비밀, `SHARE_PUBLIC_BASE_URL`,
   `PROVENANCE_SEAL_SECRET`을 비밀 관리자에 보관
+
+위 정기 작업은 코드·로컬 회귀까지만 완료했다. 실제 Render 서비스, trigger URL,
+S3 bucket·권한·실패 알림은 아직 만들거나 실행하지 않았으며 사용자 지시에 따라 배포
+직전에 멈춘 상태다.
 
 `PROVENANCE_SEAL_SECRET`을 잃거나 바꾸면 기존 seal·캐시의 신뢰를 복구할 수 없어
 출고가 차단된다. 구형 참여자 JSON은 과거 감사자료의 역할 해석에만 필요하다.
@@ -151,6 +167,7 @@ report_standard 통과
 - Google Places 후보 검색은 결과 보관·표시 약관 검토가 끝날 때까지 잠겨 있다.
 - 실제 OAuth, provider, Notion 계정과의 staging smoke test는 배포 환경에서 별도로
   수행해야 하며 로컬 mock PASS로 대체하지 않는다.
+- Docker build, 원격 CI, Render, 외부 S3 백업·복구훈련은 이번 로컬 스냅샷의 PASS 범위가 아니다.
 - 비용 원장은 예상비용 기반 운영 차단이며 provider 청구액의 절대 hard cap이 아니다.
 - PDF 자동 구조·시각 검사가 실제 screen reader, 인쇄 장치, 모든 PDF/UA 조건을 완전히
   대신하지 않는다.
@@ -176,7 +193,8 @@ report_standard 통과
 - [ ] 필수 자동검사 전 항목 통과 → 동일 hash 자동출고 → 웹·PDF·Notion 허용 확인
 - [ ] 검사 하나 실패·검사 후 hash 변경·수동 승인 URL에서 세 채널 우회 불가 확인
 - [ ] 실패 고객 청구 0원과 실패 호출 내부 AI 원가 보존 확인
-- [ ] G3.5 회사 목록·예상 최대비용을 별도 승인받기 전 provider 호출 0 확인
+- [ ] G3.5는 P01~P10만 실행·전수 검토하고 P11~P25 provider 호출 0 확인
+- [ ] 내부 trigger의 exact HTTPS URL·비밀 분리·redirect 거부·기간별 멱등성 확인
 - [ ] SQLite 백업 해시 검증과 비밀 복구 묶음 확인
 - [ ] 운영 한계와 미완료 staging 시험을 이슈·release 판단에 반영
 - [ ] 날짜별 리뷰를 현재 정본이나 최신 PASS 증거로 인용하지 않음

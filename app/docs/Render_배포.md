@@ -138,7 +138,7 @@ Render cron
   → 35일 또는 35개를 넘은 과거 백업 삭제
 ```
 
-`render.yaml`의 cron은 매일 `18:15 UTC`, 한국 시각 다음 날 `03:15`에 실행된다. 백업
+`render.yaml`의 백업 cron은 매일 `19:00 UTC`, 한국 시각 다음 날 `04:00`에 실행된다. 백업
 파일은 `company-analysis/storage-backup-<UTC시각>.sqlite3`와 같은 이름의
 `.sha256` 한 쌍이다. 성공 응답은 원격 파일을 다시 검증한 뒤에만 반환되므로 업로드만 된
 손상 파일을 성공으로 기록하지 않는다.
@@ -163,6 +163,30 @@ Render cron
    외부 저장소 또는 감시 도구에서 `company-analysis/`의 최신 DB 객체가 24시간 넘게
    생성되지 않으면 알리도록 설정한다. 이 감시는 Render 장애로 cron 자체가 실행되지 않는
    경우까지 잡기 위해 Render 밖에 둔다.
+
+### 주간 XLSX와 일일 정리
+
+Render cron은 웹 서비스의 영속 디스크를 직접 읽지 않는다. 백업과 같은 호출 구조로
+`POST https://<웹 주소>/internal/maintenance/run`을 요청하며, 작업 종류는 고정 헤더로
+전달한다. 웹 서비스만 SQLite를 열고 기존 claim과 append-only 성공·실패 사건을 남긴다.
+
+- `company-analysis-weekly-xlsx`: 매주 일요일 `19:10 UTC`, 한국 시각 월요일 `04:10`.
+  직전 완료 월~일의 관리자 전용 XLSX를 만들며 이메일·AI 호출은 없다.
+- `company-analysis-daily-cleanup`: 매일 `19:20 UTC`, 한국 시각 다음 날 `04:20`.
+  30일 경과 휴지통 보고서와 이전 KST 날짜에 멈춘 정기 작업만 정리하며 AI 호출은 없다.
+
+두 cron의 `MAINTENANCE_TRIGGER_URL`을 실제 공개 웹 주소의
+`https://<주소>/internal/maintenance/run`으로 설정한다. `MAINTENANCE_TRIGGER_SECRET`은
+Blueprint가 웹에 자동 생성하고 두 cron이 같은 값을 참조하므로 사람이 복사하지 않는다.
+동일 주·동일 날짜가 다시 호출되면 SQLite claim 때문에 새 작업을 만들지 않는다. 내부
+실패 내용은 HTTP 응답에 노출하지 않고 대시보드 작업 사건에 실패로 남는다.
+
+Blueprint 반영 전에는 세 cron 모두 실행되지 않는다. 실제 배포 직전에는 다음을 확인한다.
+
+1. `BACKUP_TRIGGER_URL`과 두 cron의 `MAINTENANCE_TRIGGER_URL`이 정확한 HTTPS 내부 경로인지 확인한다.
+2. 세 cron 실패 알림의 운영 수신처를 설정한다.
+3. 각 cron을 한 번 수동 실행해 백업 재검증, XLSX 다운로드, 정리 작업 성공 사건을 확인한다.
+4. 다음 예정 시각에 중복 파일·중복 정리 없이 한 번만 실행됐는지 확인한다.
 
 S3 호환 공급자가 path-style 주소만 지원하면 `BACKUP_S3_ADDRESSING_STYLE=path`로 바꾼다.
 기본 `auto`와 AWS 기본 endpoint에는 `BACKUP_S3_ENDPOINT_URL`을 넣지 않는다. URL에 접근키를

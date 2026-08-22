@@ -5,8 +5,9 @@
 사실을 설명하는 분석 보고서를 만드는 FastAPI 웹서비스입니다. 지원 직무·채용공고·지원자 경험은 받지
 않으며 자기소개서·면접 답안이나 일반 준비 질문을 만들지 않습니다.
 
-기본 배포 설정은 **관리자 전용 데모**입니다. 보고서 품질을 확인한 뒤에만 실제
-조사 모드와 허용 사용자를 단계적으로 엽니다.
+기본 배포 설정은 **관리자 전용 데모**입니다. 현재 코드는 로컬 검증까지만 끝났고 실제
+배포는 보류 중입니다. 보고서 품질을 확인한 뒤에만 실제 조사 모드와 허용 사용자를
+단계적으로 엽니다.
 
 ## 작동 흐름
 
@@ -25,7 +26,7 @@ DART·회사 공식 웹 수집 + 외부 자료 내부 교차검증
 ## 기본 안전 설정
 
 - `BETA_ADMIN_ONLY=1`: 관리자 이메일로 로그인한 사람만 접속
-- `PIPELINE=demo`: 첫 배포에서는 외부 AI 조사 비용 차단
+- `PIPELINE=demo`: 배포 전 기본값에서 외부 AI 조사 비용 차단
 - GitHub Actions의 시험과 Docker 상태 확인이 통과된 커밋만 Render가 배포
 - Render 인스턴스와 SQLite 쓰기 프로세스를 각각 1개로 고정
 - API 키·로그인 비밀값은 파일이 아닌 Render 환경변수로만 설정
@@ -43,7 +44,7 @@ company-analysis-beta/
 │   │   ├── features/        # 기능별 로직·상수·시험
 │   │   ├── core/            # 여러 기능이 함께 쓰는 얇은 기반
 │   │   └── web/             # FastAPI 조립점·화면·통합 시험
-│   ├── tools/               # SQLite 백업·복구 도구
+│   ├── tools/               # 인증된 백업·정기 작업 호출과 복구 도구
 │   ├── docs/                # 로그인·배포·운영 안내
 │   ├── Dockerfile
 │   └── requirements.txt
@@ -65,6 +66,10 @@ company-analysis-beta/
 `analysis_engine`은 현재 실제 조사 모드가 사용하는 필수 엔진입니다. 구조를 정리할
 때도 삭제하거나 데모 자료로 대체하지 않습니다.
 
+배포 설정에는 매일 외부 SQLite 백업, 주간 관리자 XLSX, 매일 휴지통·멈춘 작업 정리가
+각각 독립 cron으로 선언되어 있습니다. 코드는 로컬 시험을 통과했지만 실제 Render·S3
+연결과 원격 실행은 아직 하지 않았습니다.
+
 ### 이 작업 폴더에만 있는 로컬 검수 자료
 
 아래 폴더는 제품 소스가 아니라 조사·브라우저 검수의 로컬 증거다. 코드를 읽을 때는
@@ -74,6 +79,8 @@ company-analysis-beta/
 - `research/`: 50개 참고 보고서 원문 코퍼스
 - `tmp/`: 이번 canonical 표본을 대조한 공시·IR·회사 웹 원문 스냅샷
 - `.playwright-mcp/`: 과거 브라우저·접근성 검수 기록
+- `.local-artifacts/`: 재생성 가능한 시험 결과·캐시·검수용 가상환경을 모은 숨김 폴더
+- `**/.pytest_tmp_*`: 과거 pytest가 만든 비추적 임시 폴더. 제품 소스가 아님
 - `app/.local_*`: 로컬 데모·평가 실행 기록과 DB
 
 이들은 Git 비추적 자료이며 자동으로 삭제하지 않는다. `analysis_engine/.env`는 실제
@@ -101,7 +108,7 @@ Python 3.13을 사용합니다. 처음 한 번만 환경을 준비한 뒤 로컬
 ```powershell
 cd app
 py -3.13 -m venv .venv
-.\.venv\Scripts\python -m pip install -r requirements.txt
+.\.venv\Scripts\python -m pip install -r requirements.txt -r ..\.github\requirements-ci.txt
 .\로컬데모켜기.ps1
 ```
 
@@ -119,6 +126,7 @@ py -3.13 -m venv .venv
 # app 폴더에서 웹서비스와 백업 도구 시험
 $env:TLDEXTRACT_CACHE="$PWD\.cache\tldextract"
 .\.venv\Scripts\python -m pytest src tools/tests -q `
+  -m "not local_integration" `
   --basetemp=.pytest_tmp_readme_app
 
 # 저장소 루트에서 조사 엔진 시험

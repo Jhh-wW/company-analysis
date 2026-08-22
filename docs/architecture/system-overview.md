@@ -43,6 +43,22 @@ render.yaml
 필수 장 하나라도 부족하거나 원문·법인·시점·상태·숫자·중복·비교 조건 중 하나라도
 맞지 않으면 부분 결과를 공개하지 않고 `GATE_STOPPED`한다.
 
+## 내부 정기 작업 경계
+
+```text
+Render cron
+  -> python -m tools.trigger_backup 또는 tools.trigger_maintenance
+  -> 정확한 HTTPS URL + 작업별 Bearer 비밀, redirect 거부
+  -> /internal/backup/run 또는 /internal/maintenance/run
+  -> 웹 프로세스가 가진 SQLite 연결로 백업·주간 XLSX·휴지통 정리 실행
+  -> 기간별 claim과 완료·실패 사건 저장
+```
+
+cron 컨테이너는 웹 영속 디스크와 S3 자격증명을 직접 읽지 않는다. 백업 호출 비밀과
+관리 정기작업 비밀은 분리하며, 주간 XLSX와 정리 작업은 AI·DART·Naver·Anthropic을
+호출하지 않는다. 이 경계는 로컬 코드·회귀 시험까지만 검증됐고 실제 Render·S3 연결은
+배포 전 보류 상태다.
+
 ## 신뢰 경계
 
 | 경계 | 신뢰하는 것 | 반드시 다시 검사하는 것 |
@@ -68,6 +84,11 @@ Render에서는 `/var/data` 하나를 영속 루트로 사용한다.
 - `cache/`: 공식 API·도메인 분석의 재생성 가능한 캐시
 - `backups/`: SQLite online backup과 SHA-256
 
+SQLite는 런타임 버전을 확인해 WAL-reset 결함 수정판(3.51.3 이상 또는 공식
+3.44.6·3.50.7 역이식 계열)에서만 WAL을 쓴다. 영향을 받는 버전에서는 데이터 안전을
+우선해 `DELETE` rollback journal로 자동 하향한다. 패치판으로 전환한 뒤에는 WAL 복귀와
+동시 요청 부하를 다시 검증한다.
+
 DB 백업만으로는 배포를 복구할 수 없다. OAuth 비밀, `PROVENANCE_SEAL_SECRET`,
 공개 origin 설정은 별도 비밀 저장소에 함께 보관한다. 구형
 `PDF_RELEASE_PARTICIPANTS`는 감사기록 해석용일 뿐 신규 출고 권한이 아니다.
@@ -85,6 +106,8 @@ DB 백업만으로는 배포를 복구할 수 없다. OAuth 비밀, `PROVENANCE_
   사용하지 않는다. import와 fixture를 분리하기 전 폴더만 삭제하지 않는다.
 - 루트 `.dockerignore`는 allowlist 방식이다. 새 런타임 파일을 추가하면 Docker 이미지에
   실제 포함되는지 CI smoke test로 확인한다.
+- 내부 cron 도구와 라우트는 exact HTTPS·분리된 비밀·redirect 거부를 유지해야 한다.
+  작업 추가 시 기간별 claim과 실패 사건을 같은 기능 폴더에서 시험한다.
 
 세부 기능 소유권은 [기능별 책임 지도](./feature-map.md), 실행·시험·출고 인계는
 [검수 안내](../REVIEW_GUIDE.md)에서 확인한다.

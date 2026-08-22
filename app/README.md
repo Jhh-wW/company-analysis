@@ -12,7 +12,7 @@ app/
 │   ├── features/          # 기능별 로직·상수·전용 시험
 │   ├── core/              # 여러 기능이 실제로 공유하는 형식·경로
 │   └── web/               # HTTP·화면·라우팅·기능 조립
-├── tools/                 # SQLite 백업·복구
+├── tools/                 # 인증된 백업·정기 작업 호출과 복구
 ├── docs/                  # 배포와 외부 서비스 설정
 ├── Dockerfile
 └── requirements.txt
@@ -24,7 +24,7 @@ app/
 - 분석 총괄: `pipeline`
 - 자료 수집·정리: `homepage`, `filingclean`, `newspick`, `revenuemix`, `company_performance`, `company_specificity`
 - 보고서 작성·검증: `spanselect`, `writer`, `company_comparison`, `report_summary`, `grading`, `provenance`, `readable`, `report_standard`
-- 저장·운영·출력: `storage`, `observability`, `export_pdf`, `export_notion`
+- 저장·운영·출력: `storage`, `backup`, `admin_dashboard`, `observability`, `cost_tracking`, `pilot_evaluation`, `export_pdf`, `export_notion`
 
 `posting_image`, `blocks678`, `company_use`와 채용 결합 필드는 구형
 호환 코드다. 신규 조사·캐시 적중·화면·PDF·Notion 내용을 구성할 수 없다.
@@ -43,7 +43,8 @@ app/
 
 검사 하나라도 실패하거나 검사 뒤 hash가 바뀌면 부분 화면 없이 전체를
 `GATE_STOPPED`한다. 수동 `/review/pdf/*` GET/POST는 410이며 구형 세 사람 승인 DB는
-감사자료로만 보존된다. 최초 25건 사용자 검토는 자동검사 보정용 파일럿이지 서비스
+감사자료로만 보존된다. 후보군 P01~P25 중 실제 유료 실행·사용자 전수 검토 범위는
+P01~P10으로 제한한다. P11~P25는 별도 승인 전 호출하지 않으며, 이 파일럿은 서비스
 건별 승인이 아니다.
 
 내부 AI 원가는 성공·실패와 무관하게 실제 사용량을 기록하고, 고객 청구는 자동출고 뒤
@@ -56,8 +57,9 @@ app/
 | `PIPELINE=demo` | 저장된 데모 자료 재생 | 없음 |
 | `PIPELINE=real` | DART·뉴스·홈페이지·생성 AI를 사용하는 실제 조사 | 발생 가능 |
 
-첫 Render 배포는 `PIPELINE=demo`, `BETA_ADMIN_ONLY=1`로 시작합니다. 실제 조사 모드는
-환경변수와 비용 안전장치를 확인하고 작은 입력 한 건으로 시험한 뒤 전환합니다.
+배포 전 안전값은 `PIPELINE=demo`, `BETA_ADMIN_ONLY=1`입니다. 현재 실제 배포는 보류
+중입니다. 실제 조사 모드는 환경변수와 비용 안전장치를 확인하고 작은 입력 한 건으로
+시험한 뒤 전환합니다.
 
 ## 로컬 데모
 
@@ -65,7 +67,7 @@ Python 3.13 가상환경과 의존성을 처음 한 번만 준비한 뒤, 전용
 
 ```powershell
 py -3.13 -m venv .venv
-.\.venv\Scripts\python -m pip install -r requirements.txt
+.\.venv\Scripts\python -m pip install -r requirements.txt -r ..\.github\requirements-ci.txt
 .\로컬데모켜기.ps1
 ```
 
@@ -136,6 +138,7 @@ Google Places 주소 후보 검색은 결과 보관·표시 약관 검토가 끝
 ```powershell
 $env:TLDEXTRACT_CACHE="$PWD\.cache\tldextract"
 .\.venv\Scripts\python -m pytest src tools/tests -q `
+  -m "not local_integration" `
   --basetemp=.pytest_tmp_app_readme
 ```
 

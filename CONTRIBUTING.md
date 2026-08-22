@@ -18,7 +18,7 @@ Python 3.13을 사용한다. `app/`과 `analysis_engine/`의 형제 폴더 관�
 ```powershell
 cd app
 py -3.13 -m venv .venv
-.\.venv\Scripts\python -m pip install -r requirements.txt
+.\.venv\Scripts\python -m pip install -r requirements.txt -r ..\.github\requirements-ci.txt
 .\로컬데모켜기.ps1
 ```
 
@@ -43,18 +43,24 @@ py -3.13 -m venv .venv
 
 ```powershell
 cd app
-python -m pytest -q src/features/report_standard/tests src/features/provenance/tests `
+.\.venv\Scripts\python -m pytest -q src/features/report_standard/tests src/features/provenance/tests `
   src/features/company_performance/tests src/features/company_comparison/tests `
   src/features/pipeline/tests src/features/storage/tests `
+  -m "not local_integration" `
   --basetemp=.pytest_tmp_core_review
 
-python -m pytest -q --basetemp=.pytest_tmp_full_review
+.\.venv\Scripts\python -m pytest -q -m "not local_integration" `
+  --basetemp=.pytest_tmp_full_review
 cd ..
 $env:TLDEXTRACT_CACHE="$PWD\app\.cache\tldextract"
-python -m pytest -q analysis_engine/src `
+.\app\.venv\Scripts\python -m pytest -q analysis_engine/src `
   --basetemp=app/.pytest_tmp_engine_review
 git diff --check
 ```
+
+저장소 밖의 과거 데모 15건·DART 전체 목록·검증된 공시 원문까지 준비한 환경에서만
+`python -m pytest -m local_integration`을 별도로 실행한다. 이 marker를 명시적으로
+선택했는데 자료가 없으면 통합 시험은 실패한다.
 
 PDF 변경은 실제 canonical 보고서를 생성하고 모든 페이지 PNG를 직접 확인한다. PDF
 승인·다운로드 변경은 rollback, race, DB tamper, 실제 PDF/PNG 재해시 회귀도 실행한다.
