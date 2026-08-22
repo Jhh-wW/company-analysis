@@ -42,8 +42,10 @@ from src.features.business_candidate.constants import (
 )
 from src.features.business_candidate.dart_identity import (
     MATCH_KIND_PRIORITY,
-    latin_acronym_korean,
     normalize_company_name,
+)
+from src.shared.company_identity import (
+    latin_acronym_korean,
     normalized_latin_acronym,
 )
 

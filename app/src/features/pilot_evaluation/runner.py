@@ -27,8 +27,9 @@ from src.features.budget.constants import (
     PAID_PHASE_PROVIDER_BUDGET_KRW,
     SPEND_PHASE_PIPELINE,
 )
-from src.features.business_candidate.dart_identity import (
+from src.shared.company_identity import (
     exact_company_names_equivalent,
+    verified_official_company_names_equivalent,
 )
 from src.features.observability.constants import END_STEP_CONFIRM, END_STEP_GENERATE
 from src.features.pilot_evaluation.checkpoint import (
@@ -341,12 +342,11 @@ class CanonicalPilotRunner:
             )
 
     def recover_legal_name_mismatch(self, case_id: str) -> PilotRunSummary:
-        """Prepare one proven legal-wrapper false positive for a later retry.
+        """식별번호에 결속된 공식명 오탐 한 건을 재시도 준비 상태로 바꾼다.
 
-        Recovery is deliberately separate from ``--execute``: this call makes
-        only the ordinary preflight GETs, verifies the sealed checkpoint and
-        SQLite evidence, and changes one case to a narrow recovery-ready state.
-        A later explicit execution command is still required before any POST.
+        이 복구는 의도적으로 ``--execute``와 분리된다. 일반 사전 점검 GET만
+        수행하고 봉인된 체크포인트와 SQLite 증거를 확인한 뒤 한 건만 제한된
+        복구 준비 상태로 바꾼다. 실제 POST에는 별도의 명시적 실행이 필요하다.
         """
 
         with self.checkpoint.exclusive():
@@ -949,6 +949,27 @@ class CanonicalPilotRunner:
                 "/confirm", dict(selected.fields), case.case_id
             )
             page = self._expect_html(response, 200, "confirm_candidate")
+            if page.confirmed_dart_refs != (selected_ref,):
+                run_id = self._single_new_lifecycle_id(
+                    lifecycle_before, required=True
+                )
+                cleanup_ok = self._reject_if_possible(page)
+                cost = self._known_spend_cost(run_id)
+                self._update_case(
+                    snapshot,
+                    case.case_id,
+                    state=("identity_mismatch" if cleanup_ok else "identified"),
+                    run_id=run_id,
+                    selected_corp_code=selected_ref,
+                    internal_ai_cost_krw=cost,
+                    billing_uncertain=not cleanup_ok,
+                    error_code="confirmed_corp_code_not_observed",
+                )
+                if not cleanup_ok:
+                    raise PilotBatchBlocked(
+                        "최종 확인 카드의 DART 번호와 token 정리를 확정하지 못했습니다"
+                    )
+                return
         elif page.confirmed_dart_refs:
             # 로컬 후보 화면이 일시적으로 비어도, 서버가 실제 확인 카드에 DART
             # 고유번호를 명시했다면 이름 추측 없이 그 번호만 manifest와 대조한다.
@@ -992,8 +1013,11 @@ class CanonicalPilotRunner:
 
         legal_name = page.legal_names[0]
         run_id = self._single_new_lifecycle_id(lifecycle_before, required=True)
-        if not exact_company_names_equivalent(
-            legal_name, case.expected_legal_name
+        if not verified_official_company_names_equivalent(
+            legal_name,
+            case.expected_legal_name,
+            observed_corp_code=selected_ref,
+            expected_corp_code=case.corp_code,
         ):
             cleanup_ok = self._reject_if_possible(page)
             cost = self._known_spend_cost(run_id)
@@ -1085,12 +1109,15 @@ class CanonicalPilotRunner:
         if (
             not legal_name
             or legal_name == case.expected_legal_name
-            or not exact_company_names_equivalent(
-                legal_name, case.expected_legal_name
+            or not verified_official_company_names_equivalent(
+                legal_name,
+                case.expected_legal_name,
+                observed_corp_code=str(row.get("selected_corp_code", "")),
+                expected_corp_code=case.corp_code,
             )
         ):
             raise PilotRunnerError(
-                "법인명 차이가 공식 법인 표기만의 exact-equivalence가 아닙니다"
+                "법인명 차이가 식별번호로 결속된 공식 표기 등가가 아닙니다"
             )
         run_id = str(row.get("run_id", ""))
         if not _HEX_32_RE.fullmatch(run_id):

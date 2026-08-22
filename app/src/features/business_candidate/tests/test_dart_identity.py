@@ -9,7 +9,6 @@ import pytest
 from src.features.business_candidate.dart_identity import (
     DartCompanyRecord,
     build_dart_company_index,
-    exact_company_names_equivalent,
     generate_dart_company_matches,
     parse_dart_company_records,
 )
@@ -54,43 +53,6 @@ def test_official_corpcode_parser_keeps_all_five_raw_fields_and_frozen_identity(
     )
     with pytest.raises(FrozenInstanceError):
         records[0].corp_code = "00535454"  # type: ignore[misc]
-
-
-@pytest.mark.parametrize(
-    ("left", "right"),
-    [
-        ("삼성전자", "삼성전자(주)"),
-        ("삼성전자", "(주) 삼성전자"),
-        ("삼성전자", "주식회사 삼성전자"),
-        ("삼성전자", "삼성전자 주식회사"),
-        ("삼성전자", "삼성전자㈜"),
-        ("테스트", "테스트 유한회사"),
-        ("JYP Ent.", "JYP Ent. (주)"),
-    ],
-)
-def test_exact_official_name_equivalence_ignores_only_legal_wrappers(left, right):
-    assert exact_company_names_equivalent(left, right)
-    assert exact_company_names_equivalent(right, left)
-
-
-@pytest.mark.parametrize(
-    ("left", "right"),
-    [
-        ("삼성전자", "삼성전기(주)"),
-        ("삼성전자", "(주)삼성전자서비스"),
-        ("JYP Ent.", "JYP Entertainment (주)"),
-        ("SM", "ЅМ"),  # Cyrillic lookalikes
-        ("JYP", "JҮP"),
-        ("AG", "ΑG"),
-        ("삼성전자", "삼성전자Α"),
-        ("삼성전자", "삼성전자ᄀ"),
-        ("삼성전자", "삼성전자ㄱ"),
-        ("삼성전자", "삼성전자ㅏ"),
-        ("", "(주)"),
-    ],
-)
-def test_exact_official_name_equivalence_rejects_aliases_and_confusables(left, right):
-    assert not exact_company_names_equivalent(left, right)
 
 
 def test_exact_derived_acronym_and_typo_blocks_preserve_intent_and_abstain():

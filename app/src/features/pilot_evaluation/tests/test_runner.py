@@ -191,7 +191,11 @@ class SuccessfulFlow:
                         (RUN_ID, 123.0),
                     )
                 return _html(
-                    _confirm_page(self.case, legal_name=self.legal_name)
+                    _confirm_page(
+                        self.case,
+                        legal_name=self.legal_name,
+                        confirmed_dart_ref=self.case.corp_code,
+                    )
                 )
             if path == "/run":
                 with sqlite3.connect(self.db) as conn:
@@ -305,8 +309,10 @@ def _seed_legacy_legal_name_false_positive(
     tmp_path: Path,
     *,
     paid_at: datetime | None = None,
+    case_id: str = "P01",
+    legal_name: str = "삼성전자(주)",
 ):
-    case = CANONICAL_PILOT_CASES[0]
+    case = next(item for item in CANONICAL_PILOT_CASES if item.case_id == case_id)
     db = tmp_path / "storage.db"
     _recovery_storage(db)
     methods: list[str] = []
@@ -368,7 +374,7 @@ def _seed_legacy_legal_name_false_positive(
             state="identity_mismatch",
             run_id=RUN_ID,
             selected_corp_code=case.corp_code,
-            legal_name="삼성전자(주)",
+            legal_name=legal_name,
             internal_ai_cost_krw=0.0,
             billing_uncertain=False,
             paid_boundary_at=(
@@ -911,6 +917,66 @@ def test_직접확인카드의_관측된_DART번호가_manifest와같으면_후�
     assert row["selected_corp_code"] == case.corp_code
 
 
+@pytest.mark.parametrize("confirmed_ref", ["", "99999999"])
+def test_후보선택뒤_최종확인카드가_같은_DART번호를_보이지않으면_run을_차단한다(
+    tmp_path, confirmed_ref
+):
+    case = CANONICAL_PILOT_CASES[1]
+    posts: list[str] = []
+    db = tmp_path / "storage.db"
+    _storage(db)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and path == "/healthz":
+            return httpx.Response(200, json={"status": "ok"})
+        if request.method == "GET" and path == "/readyz":
+            return httpx.Response(200, json={"status": "ready"})
+        if request.method == "GET" and path == "/":
+            return _html(_input_page())
+        posts.append(path)
+        if path == "/confirm":
+            fields = {
+                key: values[-1]
+                for key, values in parse_qs(
+                    request.content.decode("utf-8")
+                ).items()
+            }
+            if fields.get("candidate_resolution_confirmed") != "yes":
+                return _html(_candidate_page(case))
+            with sqlite3.connect(db) as conn:
+                conn.execute(
+                    "INSERT INTO observability_run_lifecycle"
+                    "(run_id, state, final_record_json) "
+                    "VALUES (?, 'pending', NULL)",
+                    (RUN_ID,),
+                )
+                conn.execute(
+                    "INSERT INTO budget_spend_events(run_id, cost_krw) "
+                    "VALUES (?, 0)",
+                    (RUN_ID,),
+                )
+            return _html(
+                _confirm_page(case, confirmed_dart_ref=confirmed_ref)
+            )
+        if path == "/reject":
+            return _html("<h1>중단</h1>")
+        raise AssertionError(path)
+
+    runner, client, _db, checkpoint = _runner(tmp_path, handler)
+    try:
+        runner.operate(execute=True, case_ids=(case.case_id,))
+    finally:
+        client.close()
+
+    row = checkpoint._load()["cases"][case.case_id]
+    assert posts == ["/confirm", "/confirm", "/reject"]
+    assert row["state"] == "identity_mismatch"
+    assert row["selected_corp_code"] == case.corp_code
+    assert row["error_code"] == "confirmed_corp_code_not_observed"
+    assert row["billing_uncertain"] is False
+
+
 def test_P02_점검429가_provider_전임을_증명하면_재시도준비로만_복구한다(tmp_path):
     case = CANONICAL_PILOT_CASES[1]
     current_csrf = [CSRF]
@@ -1367,6 +1433,50 @@ def test_정확한_DART_corp_code뒤_주식회사_표기차이는_run을_막지�
     assert flow.posts == ["/confirm", "/confirm", "/run"]
 
 
+def test_정확한_DART_corp_code뒤_SK와_에스케이_공식표기차이는_run을_막지않는다(
+    tmp_path,
+):
+    case = CANONICAL_PILOT_CASES[3]
+    flow = SuccessfulFlow(
+        tmp_path / "storage.db",
+        case,
+        legal_name="에스케이하이닉스(주)",
+    )
+    runner, client, _db, checkpoint = _runner(tmp_path, flow)
+    try:
+        summary = runner.operate(execute=True, case_ids=(case.case_id,))
+    finally:
+        client.close()
+
+    row = checkpoint._load()["cases"][case.case_id]
+    assert summary.completed_case_ids == (case.case_id,)
+    assert row["state"] == "completed"
+    assert row["selected_corp_code"] == "00164779"
+    assert row["legal_name"] == "에스케이하이닉스(주)"
+    assert flow.posts == ["/confirm", "/confirm", "/run"]
+
+
+def test_봉인된_P04_0원_SK_공식표기오탐은_GET만으로_재시도준비한다(tmp_path):
+    runner, client, _db, checkpoint, methods, case = (
+        _seed_legacy_legal_name_false_positive(
+            tmp_path,
+            case_id="P04",
+            legal_name="에스케이하이닉스(주)",
+        )
+    )
+    try:
+        summary = runner.recover_legal_name_mismatch(case.case_id)
+    finally:
+        client.close()
+
+    row = checkpoint._load()["cases"][case.case_id]
+    assert summary.reason == LEGAL_NAME_RECOVERY_READY_STATE
+    assert row["state"] == LEGAL_NAME_RECOVERY_READY_STATE
+    assert row["selected_corp_code"] == "00164779"
+    assert row["legal_name"] == "에스케이하이닉스(주)"
+    assert methods and set(methods) == {"GET"}
+
+
 def test_봉인된_0원_회사확인오탐만_GET으로_복구준비하고_다른terminal은_보존한다(
     tmp_path,
 ):
@@ -1424,12 +1534,12 @@ def test_봉인된_0원_회사확인오탐만_GET으로_복구준비하고_다�
         (
             "identity_mismatch",
             {"legal_name": "삼성전기(주)"},
-            "exact-equivalence",
+            "공식 표기 등가",
         ),
         (
             "identity_mismatch",
             {"legal_name": "삼성전자Α(주)"},
-            "exact-equivalence",
+            "공식 표기 등가",
         ),
         (
             "identity_mismatch",

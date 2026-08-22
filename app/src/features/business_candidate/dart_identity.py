@@ -15,36 +15,22 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Iterable, Mapping
 
+from src.shared.company_identity import (
+    DART_CORP_CODE_RE as _CORP_CODE_RE,
+    KOREAN_CORPORATE_MARKERS as _CORPORATE_MARKERS,
+    KOREAN_CORPORATE_TOKENS as _KOREAN_CORPORATE_TOKENS,
+    STOCK_CODE_RE as _STOCK_CODE_RE,
+    SUPPORTED_NAME_PUNCTUATION as _SHORT_QUERY_ALLOWED_PUNCTUATION,
+    exact_company_name_key as _exact_company_name_key,
+    latin_acronym_korean as _latin_acronym_korean,
+    normalized_latin_acronym as _normalized_latin_acronym,
+)
+
 
 _TOKEN_RE = re.compile(r"[0-9a-zA-Z가-힣]+")
-_CORP_CODE_RE = re.compile(r"[0-9]{8}")
-_STOCK_CODE_RE = re.compile(r"[0-9]{6}")
 _MODIFY_DATE_RE = re.compile(r"[0-9]{8}")
-_LATIN_ACRONYM_RE = re.compile(r"[A-Za-z]{2,5}")
-_DOTTED_LATIN_ACRONYM_RE = re.compile(
-    r"[A-Za-z](?:\.[A-Za-z]){1,4}\.?"
-)
 _OFFICIAL_UPPER_ACRONYM_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9])(?:[A-Z](?:\.[A-Z]){1,4}\.?|[A-Z]{2,5})(?![A-Za-z0-9])"
-)
-_SHORT_QUERY_ALLOWED_PUNCTUATION = frozenset(
-    ".,&'\"’·()[]{}-_/+"
-)
-_CORPORATE_MARKERS = (
-    "(주)",
-    "(유)",
-    "(사)",
-    "(재)",
-    "㈜",
-)
-_KOREAN_CORPORATE_TOKENS = frozenset(
-    {
-        "주식회사",
-        "유한회사",
-        "유한책임회사",
-        "합자회사",
-        "합명회사",
-    }
 )
 _ENGLISH_CORPORATE_TOKENS = frozenset(
     {
@@ -59,34 +45,6 @@ _ENGLISH_CORPORATE_TOKENS = frozenset(
         "llc",
     }
 )
-_LATIN_LETTER_NAMES = {
-    "A": "에이",
-    "B": "비",
-    "C": "씨",
-    "D": "디",
-    "E": "이",
-    "F": "에프",
-    "G": "지",
-    "H": "에이치",
-    "I": "아이",
-    "J": "제이",
-    "K": "케이",
-    "L": "엘",
-    "M": "엠",
-    "N": "엔",
-    "O": "오",
-    "P": "피",
-    "Q": "큐",
-    "R": "알",
-    "S": "에스",
-    "T": "티",
-    "U": "유",
-    "V": "브이",
-    "W": "더블유",
-    "X": "엑스",
-    "Y": "와이",
-    "Z": "지",
-}
 
 # Trigram is an abstaining typo block, not a general fuzzy-name fallback.
 TRIGRAM_MIN_CHARS = 6
@@ -171,48 +129,6 @@ def _normalized_parts(value: object) -> tuple[str, tuple[str, ...]]:
     return "".join(tokens), tokens
 
 
-def exact_company_name_key(value: object) -> str:
-    """Preserve word boundaries while ignoring only legal wrappers/punctuation."""
-    return "\x1f".join(_name_tokens(value, drop_english_suffixes=False))
-
-
-def exact_company_names_equivalent(left: object, right: object) -> bool:
-    """Compare two official-name spellings without fuzzy or alias inference.
-
-    DART and a confirmation card can place Korean legal wrappers differently
-    (for example ``삼성전자`` and ``삼성전자(주)``).  The existing exact key is
-    the narrow contract for that comparison: it removes Korean legal wrappers
-    and punctuation while preserving token boundaries and English words.
-
-    Tokenization must never silently discard an unsupported lookalike script.
-    Validate the complete NFKC text first so ``ΑG``, ``JҮP`` or
-    ``삼성전자Α`` cannot collapse to an unrelated supported-script key.
-    """
-
-    def supported(value: object) -> bool:
-        text = unicodedata.normalize("NFKC", str(value or "")).strip()
-        if not text:
-            return False
-        for character in text:
-            if (
-                ("A" <= character <= "Z")
-                or ("a" <= character <= "z")
-                or ("0" <= character <= "9")
-                or ("가" <= character <= "힣")
-                or character.isspace()
-                or character in _SHORT_QUERY_ALLOWED_PUNCTUATION
-            ):
-                continue
-            return False
-        return True
-
-    if not supported(left) or not supported(right):
-        return False
-    left_key = exact_company_name_key(left)
-    right_key = exact_company_name_key(right)
-    return bool(left_key and right_key and left_key == right_key)
-
-
 def derived_company_name_key(value: object) -> str:
     """A lower-evidence key that additionally removes English legal suffixes."""
     return "\x1f".join(_name_tokens(value, drop_english_suffixes=True))
@@ -225,15 +141,6 @@ def normalize_company_name(value: object) -> str:
 
 def company_name_tokens(value: object) -> tuple[str, ...]:
     return _normalized_parts(value)[1]
-
-
-def normalized_latin_acronym(value: object) -> str:
-    normalized = unicodedata.normalize("NFKC", str(value or "")).strip()
-    if _LATIN_ACRONYM_RE.fullmatch(normalized):
-        return normalized.upper()
-    if _DOTTED_LATIN_ACRONYM_RE.fullmatch(normalized):
-        return normalized.replace(".", "").upper()
-    return ""
 
 
 def _has_disallowed_short_latin_mix(value: object) -> bool:
@@ -268,13 +175,6 @@ def _has_disallowed_short_latin_mix(value: object) -> bool:
     return False
 
 
-def latin_acronym_korean(value: object) -> str:
-    acronym = normalized_latin_acronym(value)
-    if not acronym:
-        return ""
-    return "".join(_LATIN_LETTER_NAMES[letter] for letter in acronym)
-
-
 def _official_uppercase_acronyms(value: object) -> tuple[str, ...]:
     """Return only acronym tokens literally present in an official raw name.
 
@@ -285,7 +185,7 @@ def _official_uppercase_acronyms(value: object) -> tuple[str, ...]:
     text = unicodedata.normalize("NFKC", str(value or ""))
     found: list[str] = []
     for match in _OFFICIAL_UPPER_ACRONYM_TOKEN_RE.finditer(text):
-        acronym = normalized_latin_acronym(match.group(0))
+        acronym = _normalized_latin_acronym(match.group(0))
         if (
             acronym
             and acronym.casefold() not in _ENGLISH_CORPORATE_TOKENS
@@ -375,7 +275,7 @@ def build_dart_company_index(records: Iterable[DartCompanyRecord]) -> DartCompan
             ("corp_eng_name", record.corp_eng_name),
         ):
             normalized, tokens = _normalized_parts(raw)
-            exact_key = exact_company_name_key(raw)
+            exact_key = _exact_company_name_key(raw)
             derived_exact_key = derived_company_name_key(raw)
             if not normalized or (field, exact_key) in seen_aliases:
                 continue
@@ -404,7 +304,7 @@ def build_dart_company_index(records: Iterable[DartCompanyRecord]) -> DartCompan
                     record.corp_code
                 )
                 acronym_reading_postings.setdefault(
-                    normalize_company_name(latin_acronym_korean(acronym)), []
+                    normalize_company_name(_latin_acronym_korean(acronym)), []
                 ).append(record.corp_code)
             for gram in grams:
                 trigram_postings.setdefault(gram, []).append(record.corp_code)
@@ -512,7 +412,7 @@ def generate_dart_company_matches(
     if _has_disallowed_short_latin_mix(raw_query):
         return ()
     normalized_query, query_tokens = _normalized_parts(raw_query)
-    exact_query = exact_company_name_key(raw_query)
+    exact_query = _exact_company_name_key(raw_query)
     derived_query = derived_company_name_key(raw_query)
     if not normalized_query:
         return ()
@@ -555,7 +455,7 @@ def generate_dart_company_matches(
         alias_predicate=lambda alias: alias.derived_exact_key == derived_query,
     )
 
-    acronym = normalized_latin_acronym(raw_query)
+    acronym = _normalized_latin_acronym(raw_query)
     if acronym:
         acronym_token = acronym.casefold()
         token_codes = index.by_token.get(acronym_token, ())
@@ -567,7 +467,7 @@ def generate_dart_company_matches(
             similarity=1.0,
             alias_predicate=lambda alias: acronym_token in alias.tokens,
         )
-        expanded = exact_company_name_key(latin_acronym_korean(acronym))
+        expanded = _exact_company_name_key(_latin_acronym_korean(acronym))
         reading_codes = index.by_exact_name.get(expanded, ())
         _add_codes(
             matches,
@@ -585,7 +485,9 @@ def generate_dart_company_matches(
     query_has_korean = any(re.search(r"[가-힣]", token) for token in query_tokens)
     if not acronym:
         for token in dict.fromkeys(query_tokens):
-            token_acronym = normalized_latin_acronym(token) if query_has_korean else ""
+            token_acronym = (
+                _normalized_latin_acronym(token) if query_has_korean else ""
+            )
             if token_acronym:
                 acronym_key = token_acronym.casefold()
                 _add_codes(
@@ -607,7 +509,7 @@ def generate_dart_company_matches(
                     kind="acronym_cross_script",
                     similarity=1.0,
                     alias_predicate=lambda alias, key=reading_key: any(
-                        normalize_company_name(latin_acronym_korean(item)) == key
+                        normalize_company_name(_latin_acronym_korean(item)) == key
                         for item in _official_uppercase_acronyms(alias.raw)
                     ),
                 )
