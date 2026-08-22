@@ -42,6 +42,11 @@ _BACKUP_NAME_RE = re.compile(
     r"^storage-backup-\d{8}T\d{12}Z\.sqlite3(?:\.sha256)?$"
 )
 _RUN_LOCK = threading.Lock()
+_TEST_ONLY_MECHANICS_TOKEN = object()
+PRODUCTION_TRUST_BLOCKER_MESSAGE: Final[str] = (
+    "운영 manifest의 고정 공개키 commit 검증과 독립 checkpoint adapter가 "
+    "구현되지 않아 외부 백업을 차단합니다"
+)
 
 
 def _backup_tool():
@@ -374,8 +379,28 @@ def run_backup(
     now: datetime | None = None,
     manifest_appender: backup_manifest.BackupManifestAppender | None = None,
 ) -> ExternalBackupResult:
+    """검증된 production trust bundle이 구현될 때까지 모든 외부 백업을 차단한다.
+
+    명시적 appender 주입도 신뢰 승격 근거가 아니다. 이 함수는 S3 client 생성,
+    로컬 snapshot, upload, prune보다 먼저 항상 실패한다.
+    """
+
+    _ = (config, source_path, now, manifest_appender)
+    raise BackupConfigurationError(PRODUCTION_TRUST_BLOCKER_MESSAGE)
+
+
+def _run_backup_mechanics_test_only(
+    *,
+    _test_only_token: object,
+    config: S3BackupConfig | None = None,
+    source_path: Path | None = None,
+    now: datetime | None = None,
+    manifest_appender: backup_manifest.BackupManifestAppender | None = None,
+) -> ExternalBackupResult:
     """원격 사본과 독립 manifest append 검증을 모두 마쳐야 성공한다."""
 
+    if _test_only_token is not _TEST_ONLY_MECHANICS_TOKEN:
+        raise BackupConfigurationError("시험 전용 backup mechanics capability가 필요합니다")
     if not _RUN_LOCK.acquire(blocking=False):
         raise BackupAlreadyRunning("외부 백업 한 건이 이미 실행 중입니다")
     try:

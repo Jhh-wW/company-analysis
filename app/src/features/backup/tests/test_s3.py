@@ -148,6 +148,15 @@ class FakeManifestAppender(backup_manifest.BackupManifestAppender):
         )
 
 
+def _run_backup_mechanics(**kwargs) -> s3.ExternalBackupResult:
+    """고정 차단된 public 경로와 분리해 업로드 mechanics만 회귀 시험한다."""
+
+    return s3._run_backup_mechanics_test_only(  # noqa: SLF001
+        _test_only_token=s3._TEST_ONLY_MECHANICS_TOKEN,  # noqa: SLF001
+        **kwargs,
+    )
+
+
 def _config(**changes) -> s3.S3BackupConfig:
     values = {
         "bucket": "private-backups",
@@ -199,7 +208,7 @@ def test_업로드한_두_파일을_다시_받아_검증하고_원문열쇠를_�
     monkeypatch.setattr(s3, "_new_s3_client", lambda _config: client)
 
     appender = FakeManifestAppender()
-    result = s3.run_backup(
+    result = _run_backup_mechanics(
         config=_config(),
         source_path=source,
         now=NOW,
@@ -245,7 +254,7 @@ def test_보관기간이나_개수상한을_넘은_관리대상_한쌍만_지운
     }
     monkeypatch.setattr(s3, "_new_s3_client", lambda _config: client)
 
-    result = s3.run_backup(
+    result = _run_backup_mechanics(
         config=_config(max_backups=1),
         source_path=source,
         now=NOW,
@@ -270,7 +279,7 @@ def test_검증이_실패하면_이번에_올린_불완전객체를_지운다(
     monkeypatch.setattr(s3, "_new_s3_client", lambda _config: client)
 
     with pytest.raises(s3.ExternalBackupError):
-        s3.run_backup(
+        _run_backup_mechanics(
             config=_config(),
             source_path=source,
             now=NOW,
@@ -300,7 +309,7 @@ def test_같은_프로세스의_백업_중복실행을_즉시_거부한다(tmp_p
     assert s3._RUN_LOCK.acquire(blocking=False)
     try:
         with pytest.raises(s3.BackupAlreadyRunning, match="이미 실행 중"):
-            s3.run_backup(
+            _run_backup_mechanics(
                 config=_config(),
                 source_path=source,
                 now=NOW,
@@ -323,14 +332,14 @@ def test_실패한_백업은_잠금을_풀어_다음_실행을_허용한다(
 
     appender = FakeManifestAppender()
     with pytest.raises(s3.ExternalBackupError):
-        s3.run_backup(
+        _run_backup_mechanics(
             config=_config(),
             source_path=source,
             now=NOW,
             manifest_appender=appender,
         )
 
-    result = s3.run_backup(
+    result = _run_backup_mechanics(
         config=_config(),
         source_path=source,
         now=NOW,
@@ -341,7 +350,96 @@ def test_실패한_백업은_잠금을_풀어_다음_실행을_허용한다(
     assert result.checksum_key in second_client.objects
 
 
-def test_manifest_appender_누락은_S3_client_생성전에_fail_closed한다(
+@pytest.mark.parametrize(
+    "explicit_forged_appender",
+    (False, True),
+    ids=("default-no-trust-adapter", "explicit-forged-hex-signature"),
+)
+def test_public_run_backup은_신뢰adapter가_완결될때까지_pre_s3_fail_closed한다(
+    tmp_path: Path,
+    monkeypatch,
+    explicit_forged_appender: bool,
+) -> None:
+    source = tmp_path / "storage.db"
+    _database(source)
+    source_before = source.read_bytes()
+    client_created = False
+    prune_called = False
+
+    def forbidden_client(_config):
+        nonlocal client_created
+        client_created = True
+        raise AssertionError("production trust blocker 뒤에 S3를 호출하면 안 됩니다")
+
+    def forbidden_prune(*_args, **_kwargs):
+        nonlocal prune_called
+        prune_called = True
+        raise AssertionError("production trust blocker 뒤에 prune하면 안 됩니다")
+
+    monkeypatch.setattr(s3, "_new_s3_client", forbidden_client)
+    monkeypatch.setattr(s3, "_prune_backups", forbidden_prune)
+    appender = FakeManifestAppender() if explicit_forged_appender else None
+
+    with pytest.raises(
+        s3.BackupConfigurationError,
+        match="고정 공개키 commit 검증.*checkpoint adapter",
+    ):
+        s3.run_backup(
+            config=_config(),
+            source_path=source,
+            now=NOW,
+            manifest_appender=appender,
+        )
+
+    assert client_created is False
+    assert prune_called is False
+    assert source.read_bytes() == source_before
+    if appender is not None:
+        # Fake appender는 임의 ``f * 128`` 서명을 만들지만 호출 자체가 차단된다.
+        assert appender.requests == []
+
+
+def test_test_only_mechanics는_내부capability_없이는_pre_s3_fail_closed한다(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "storage.db"
+    _database(source)
+    client_created = False
+
+    def forbidden_client(_config):
+        nonlocal client_created
+        client_created = True
+        raise AssertionError("시험 capability 검증 전에 S3를 호출하면 안 됩니다")
+
+    monkeypatch.setattr(s3, "_new_s3_client", forbidden_client)
+
+    with pytest.raises(s3.BackupConfigurationError, match="시험 전용"):
+        s3._run_backup_mechanics_test_only(  # noqa: SLF001
+            _test_only_token=object(),
+            config=_config(),
+            source_path=source,
+            now=NOW,
+            manifest_appender=FakeManifestAppender(),
+        )
+
+    assert client_created is False
+
+
+def test_test_only_mechanics는_production_caller에서_참조하지_않는다() -> None:
+    app_src = Path(s3.__file__).resolve().parents[2]
+    forbidden_name = "_run_backup_mechanics_test_only"
+    references: list[str] = []
+    for path in app_src.rglob("*.py"):
+        if path.resolve() == Path(s3.__file__).resolve() or "tests" in path.parts:
+            continue
+        if forbidden_name in path.read_text(encoding="utf-8"):
+            references.append(str(path.relative_to(app_src)))
+
+    assert references == []
+
+
+def test_test_only_mechanics_manifest_appender_누락은_S3전에_fail_closed한다(
     tmp_path: Path, monkeypatch
 ) -> None:
     source = tmp_path / "storage.db"
@@ -356,7 +454,7 @@ def test_manifest_appender_누락은_S3_client_생성전에_fail_closed한다(
     monkeypatch.setattr(s3, "_new_s3_client", forbidden_client)
 
     with pytest.raises(s3.BackupConfigurationError, match="manifest"):
-        s3.run_backup(config=_config(), source_path=source, now=NOW)
+        _run_backup_mechanics(config=_config(), source_path=source, now=NOW)
 
     assert client_created is False
 
@@ -372,7 +470,7 @@ def test_manifest_append_실패는_성공을_반환하지_않고_원격쌍을_�
     monkeypatch.setattr(s3, "_new_s3_client", lambda _config: client)
 
     with pytest.raises(s3.ExternalBackupError, match="manifest"):
-        s3.run_backup(
+        _run_backup_mechanics(
             config=_config(),
             source_path=source,
             now=NOW,
@@ -396,7 +494,7 @@ def test_manifest_receipt가_다른_object를_결속하면_성공을_거부한�
     monkeypatch.setattr(s3, "_new_s3_client", lambda _config: client)
 
     with pytest.raises(s3.ExternalBackupError, match="manifest"):
-        s3.run_backup(
+        _run_backup_mechanics(
             config=_config(),
             source_path=source,
             now=NOW,
