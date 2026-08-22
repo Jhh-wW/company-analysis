@@ -34,6 +34,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--max-stream-bytes", type=int, required=True)
     parser.add_argument("--max-address-space-bytes", type=int, required=True)
     parser.add_argument("--max-cpu-seconds", type=int, required=True)
+    parser.add_argument("--max-output-bytes", type=int, required=True)
     parser.add_argument(
         "--resource-policy",
         choices=(RESOURCE_POLICY_STRICT, RESOURCE_POLICY_LOCAL_WINDOWS),
@@ -43,15 +44,51 @@ def _arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _emit(payload: dict[str, object]) -> None:
-    sys.stdout.write(
-        json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+class _WorkerOutputLimitError(RuntimeError):
+    """구조화 응답이 부모가 허용한 stdout 상한을 넘었다."""
+
+
+def _encode_payload_bounded(
+    payload: dict[str, object],
+    *,
+    max_output_bytes: int,
+) -> bytes:
+    """JSON 조각을 순차 인코딩해 상한을 넘는 전체 문자열을 만들지 않는다."""
+
+    if max_output_bytes < 1:
+        raise _WorkerOutputLimitError("PDF 워커 출력 상한이 올바르지 않습니다")
+    encoded = bytearray()
+    encoder = json.JSONEncoder(
+        ensure_ascii=False,
+        separators=(",", ":"),
     )
-    sys.stdout.flush()
+    for part in encoder.iterencode(payload):
+        chunk = part.encode("utf-8")
+        if len(encoded) + len(chunk) > max_output_bytes:
+            raise _WorkerOutputLimitError("PDF 워커 출력 바이트 상한 초과")
+        encoded.extend(chunk)
+    return bytes(encoded)
 
 
-def _emit_failure(detail: str, *, failure_kind: str = "parse_failed") -> None:
-    _emit({"state": "failed", "failure_kind": failure_kind, "detail": detail})
+def _emit(payload: dict[str, object], *, max_output_bytes: int) -> None:
+    encoded = _encode_payload_bounded(
+        payload,
+        max_output_bytes=max_output_bytes,
+    )
+    sys.stdout.buffer.write(encoded)
+    sys.stdout.buffer.flush()
+
+
+def _emit_failure(
+    detail: str,
+    *,
+    max_output_bytes: int,
+    failure_kind: str = "parse_failed",
+) -> None:
+    _emit(
+        {"state": "failed", "failure_kind": failure_kind, "detail": detail},
+        max_output_bytes=max_output_bytes,
+    )
 
 
 def _apply_posix_limit(
@@ -182,10 +219,14 @@ def _configure_windows_job_limits(
     )
     information.BasicLimitInformation.LimitFlags = (
         0x00000002  # JOB_OBJECT_LIMIT_PROCESS_TIME
+        | 0x00000008  # JOB_OBJECT_LIMIT_ACTIVE_PROCESS
         | 0x00000100  # JOB_OBJECT_LIMIT_PROCESS_MEMORY
         | 0x00000200  # JOB_OBJECT_LIMIT_JOB_MEMORY
         | 0x00002000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
     )
+    # 현재 워커 하나만 허용해 파서 취약점이 별도 자식으로 권한 경계를 넓히지
+    # 못하게 한다. 파일·네트워크 권한 sandbox 자체를 뜻하지는 않는다.
+    information.BasicLimitInformation.ActiveProcessLimit = 1
     information.ProcessMemoryLimit = max_address_space_bytes
     information.JobMemoryLimit = max_address_space_bytes
     if not kernel32.SetInformationJobObject(
@@ -285,6 +326,17 @@ def _configure_filter_caps(
 
 def main() -> int:
     args = _arguments()
+
+    def emit(payload: dict[str, object]) -> None:
+        _emit(payload, max_output_bytes=args.max_output_bytes)
+
+    def emit_failure(detail: str, *, failure_kind: str = "parse_failed") -> None:
+        _emit_failure(
+            detail,
+            max_output_bytes=args.max_output_bytes,
+            failure_kind=failure_kind,
+        )
+
     try:
         resource_limits = _configure_os_resource_limits(
             args.max_address_space_bytes,
@@ -292,7 +344,7 @@ def main() -> int:
             resource_policy=args.resource_policy,
         )
     except (OSError, RuntimeError, ValueError):
-        _emit_failure(
+        emit_failure(
             "PDF 워커 OS 자원 상한 설정 실패",
             failure_kind=FAILURE_RESOURCE_SETUP,
         )
@@ -301,17 +353,17 @@ def main() -> int:
     try:
         pypdf, filters_module, pdf_reader = _load_pdf_runtime()
     except MemoryError:
-        _emit_failure(
+        emit_failure(
             "PDF 워커 OS 메모리 상한 초과",
             failure_kind=FAILURE_RESOURCE_EXCEEDED,
         )
         return 0
     except Exception:
-        _emit_failure("고정된 PDF 파서 실행 환경을 불러오지 못했습니다")
+        emit_failure("고정된 PDF 파서 실행 환경을 불러오지 못했습니다")
         return 0
 
     if getattr(pypdf, "__version__", "") != args.expected_version:
-        _emit({"state": "failed", "detail": "고정된 pypdf 버전이 아닙니다"})
+        emit({"state": "failed", "detail": "고정된 pypdf 버전이 아닙니다"})
         return 0
 
     try:
@@ -320,12 +372,12 @@ def main() -> int:
             filters_module=filters_module,
         )
     except RuntimeError:
-        _emit({"state": "failed", "detail": "고정 pypdf 스트림 상한 계약 실패"})
+        emit({"state": "failed", "detail": "고정 pypdf 스트림 상한 계약 실패"})
         return 0
 
     content = sys.stdin.buffer.read(args.max_bytes + 1)
     if not content.startswith(b"%PDF-") or len(content) > args.max_bytes:
-        _emit({"state": "failed", "detail": "PDF 입력 형식 또는 바이트 상한 위반"})
+        emit({"state": "failed", "detail": "PDF 입력 형식 또는 바이트 상한 위반"})
         return 0
 
     try:
@@ -335,11 +387,11 @@ def main() -> int:
             root_object_recovery_limit=args.max_root_recovery,
         )
         if reader.is_encrypted:
-            _emit({"state": "failed", "detail": "암호화된 PDF"})
+            emit({"state": "failed", "detail": "암호화된 PDF"})
             return 0
         page_count = len(reader.pages)
         if page_count < 1 or page_count > args.max_pages:
-            _emit({"state": "failed", "detail": "PDF 페이지 상한 위반"})
+            emit({"state": "failed", "detail": "PDF 페이지 상한 위반"})
             return 0
 
         pages: list[str] = []
@@ -353,24 +405,26 @@ def main() -> int:
                 truncated_pages.append(page_number)
             pages.append(text)
     except MemoryError:
-        _emit_failure(
+        emit_failure(
             "PDF 워커 OS 메모리 상한 초과",
             failure_kind=FAILURE_RESOURCE_EXCEEDED,
         )
         return 0
     except Exception:
-        _emit({"state": "failed", "detail": "PDF 파싱 또는 글자 추출 실패"})
+        emit({"state": "failed", "detail": "PDF 파싱 또는 글자 추출 실패"})
         return 0
 
-    _emit(
-        {
-            "state": "ok",
-            "pages": pages,
-            "extractor": f"pypdf {getattr(pypdf, '__version__', '')}",
-            "truncated_pages": truncated_pages,
-            "resource_limits": resource_limits,
-        }
-    )
+    payload = {
+        "state": "ok",
+        "pages": pages,
+        "extractor": f"pypdf {getattr(pypdf, '__version__', '')}",
+        "truncated_pages": truncated_pages,
+        "resource_limits": resource_limits,
+    }
+    try:
+        emit(payload)
+    except _WorkerOutputLimitError:
+        emit_failure("PDF 워커 출력 바이트 상한 초과")
     return 0
 
 

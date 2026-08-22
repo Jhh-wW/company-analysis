@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import signal
 import socket
 import subprocess
@@ -616,6 +617,28 @@ def test_두번째페이지_파서실패시_첫페이지_일부결과도_버린�
     assert result.fragments == []
 
 
+@pytest.mark.parametrize(
+    "error_type",
+    [RuntimeError, AttributeError, TypeError, ValueError],
+)
+def test_pdf문서별경계는_예상하지못한_수집기결함을_숨기지않는다(error_type):
+    pdf_url = "https://company.example/ir/runtime-bug.pdf"
+    site = _FakeSite(
+        html={ROOT: '<a href="/ir/runtime-bug.pdf">IR results</a>'}
+    )
+
+    def broken_fetch(*_args: object, **_kwargs: object) -> FetchedIrPdf:
+        raise error_type("가짜 수집기 결함")
+
+    with pytest.raises(error_type, match="가짜 수집기 결함"):
+        collect_official_ir_fragments(
+            ROOT,
+            company_name="Example Company",
+            html_fetch=site.fetch_html,
+            pdf_fetch=broken_fetch,
+        )
+
+
 def test_추출글자상한을_넘어도_문단경계를_섞지않고_상한에서_멈춘다(monkeypatch):
     first = "Company " + "A" * (MAX_IR_CHARS_PER_DOCUMENT + 1_000)
     second = "SECOND PARAGRAPH MUST NOT BE MERGED"
@@ -867,10 +890,186 @@ def test_격리pdf파서는_10초_초과시_강제실패한다(monkeypatch):
     def time_out(*args, **kwargs):
         raise subprocess.TimeoutExpired(cmd="pdf-worker", timeout=10)
 
-    monkeypatch.setattr(ir_pdf.subprocess, "run", time_out)
+    monkeypatch.setattr(ir_pdf, "_run_pdf_worker_bounded", time_out)
 
     with pytest.raises(OfficialIrFetchError, match="10초 상한 초과"):
         ir_pdf._parse_pdf_with_timeout(b"%PDF-timeout")
+
+
+class _FakeBoundedWorkerProcess:
+    def __init__(self, output: bytes, *, running: bool) -> None:
+        self.stdout = io.BytesIO(output)
+        self.returncode: int | None = None if running else 0
+        self.kill_calls = 0
+        self.wait_calls: list[float | None] = []
+        self._done = threading.Event()
+        if not running:
+            self._done.set()
+
+    def poll(self) -> int | None:
+        return self.returncode if self._done.is_set() else None
+
+    def kill(self) -> None:
+        self.kill_calls += 1
+        self.returncode = -9
+        self._done.set()
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.wait_calls.append(timeout)
+        if not self._done.wait(timeout):
+            raise subprocess.TimeoutExpired(cmd="가짜 PDF 워커", timeout=timeout)
+        assert self.returncode is not None
+        return self.returncode
+
+
+def test_부모worker_runner는_reader시작실패에도_worker를_kill하고_reap한다(
+    monkeypatch,
+):
+    process = _FakeBoundedWorkerProcess(b"", running=True)
+
+    class _StartFailingThread:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("가짜 reader 시작 실패")
+
+        def is_alive(self) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        ir_pdf.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: process,
+    )
+    monkeypatch.setattr(ir_pdf.threading, "Thread", _StartFailingThread)
+
+    with pytest.raises(OSError, match="reader를 시작하지 못했습니다"):
+        ir_pdf._run_pdf_worker_bounded(
+            ["python", "worker.py"],
+            b"%PDF-reader-start-failure",
+            timeout=0.5,
+            max_output_bytes=8,
+            creation_flags=0,
+        )
+
+    assert process.kill_calls == 1
+    assert process.wait_calls == [ir_pdf.IR_PDF_WORKER_REAP_TIMEOUT_SEC]
+    assert process.poll() == -9
+
+
+def test_부모worker_runner는_stdout상한한바이트에서_즉시kill하고_reap한다(
+    monkeypatch,
+):
+    process = _FakeBoundedWorkerProcess(b"x" * 9, running=True)
+    captured: dict[str, object] = {}
+
+    def fake_popen(command: list[str], **kwargs: object):
+        captured["command"] = command
+        captured.update(kwargs)
+        input_file = kwargs["stdin"]
+        assert hasattr(input_file, "read")
+        assert input_file.read() == b"%PDF-bounded"
+        input_file.seek(0)
+        captured["cwd_exists"] = os.path.isdir(str(kwargs["cwd"]))
+        return process
+
+    monkeypatch.setattr(ir_pdf.subprocess, "Popen", fake_popen)
+
+    completed = ir_pdf._run_pdf_worker_bounded(
+        ["python", "worker.py"],
+        b"%PDF-bounded",
+        timeout=0.5,
+        max_output_bytes=8,
+        creation_flags=0,
+    )
+
+    assert completed.stdout == b"x" * 9
+    assert completed.returncode == -9
+    assert process.kill_calls == 1
+    assert process.wait_calls == [0.5]
+    assert captured["cwd_exists"] is True
+    assert captured["close_fds"] is True
+    assert captured["stdout"] is subprocess.PIPE
+    environment = captured["env"]
+    assert isinstance(environment, dict)
+    assert environment["TEMP"] == captured["cwd"]
+    assert environment["TMP"] == captured["cwd"]
+    assert "ANTHROPIC_API_KEY" not in environment
+
+
+def test_부모worker_runner는_timeout도_kill_wait_join후_예외를_낸다(monkeypatch):
+    process = _FakeBoundedWorkerProcess(b"", running=True)
+    monkeypatch.setattr(
+        ir_pdf.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: process,
+    )
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        ir_pdf._run_pdf_worker_bounded(
+            ["python", "worker.py"],
+            b"%PDF-timeout",
+            timeout=0.01,
+            max_output_bytes=8,
+            creation_flags=0,
+        )
+
+    assert process.kill_calls == 1
+    assert process.wait_calls == [
+        0.01,
+        ir_pdf.IR_PDF_WORKER_REAP_TIMEOUT_SEC,
+    ]
+    assert process.poll() == -9
+
+
+def test_부모worker_runner는_kill실패를_무기한wait로_숨기지않는다(monkeypatch):
+    class _KillFailingProcess(_FakeBoundedWorkerProcess):
+        def kill(self) -> None:
+            self.kill_calls += 1
+            raise PermissionError("가짜 TerminateProcess 실패")
+
+    process = _KillFailingProcess(b"", running=True)
+    read_fd, write_fd = os.pipe()
+    blocking_stdout = os.fdopen(read_fd, "rb")
+    process.stdout = blocking_stdout
+    monkeypatch.setattr(
+        ir_pdf.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: process,
+    )
+
+    errors: list[BaseException] = []
+    finished = threading.Event()
+
+    def run_worker() -> None:
+        try:
+            ir_pdf._run_pdf_worker_bounded(
+                ["python", "worker.py"],
+                b"%PDF-kill-failure",
+                timeout=0.01,
+                max_output_bytes=8,
+                creation_flags=0,
+            )
+        except BaseException as exc:  # noqa: BLE001 - 교착 회귀의 결과를 부모에서 검증
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    caller = threading.Thread(target=run_worker, daemon=True)
+    caller.start()
+    completed_within_bound = finished.wait(timeout=0.25)
+    os.close(write_fd)
+    caller.join(timeout=1.0)
+    time.sleep(0.02)
+    blocking_stdout.close()
+
+    assert completed_within_bound is True
+    assert len(errors) == 1
+    assert isinstance(errors[0], OSError)
+    assert "강제 종료하지 못했습니다" in str(errors[0])
+    assert process.kill_calls >= 1
+    assert process.wait_calls == [0.01]
 
 
 class _FakeResource:
@@ -912,6 +1111,7 @@ def test_worker_main은_OS상한을_적용한뒤에만_pypdf를_import한다(mon
         lambda: SimpleNamespace(
             max_address_space_bytes=256 * 1024 * 1024,
             max_cpu_seconds=8,
+            max_output_bytes=4 * 1024 * 1024,
             resource_policy="strict",
             expected_version="expected",
         ),
@@ -930,10 +1130,29 @@ def test_worker_main은_OS상한을_적용한뒤에만_pypdf를_import한다(mon
             object(),
         ),
     )
-    monkeypatch.setattr(ir_pdf_worker, "_emit", lambda _payload: None)
+    monkeypatch.setattr(
+        ir_pdf_worker,
+        "_emit",
+        lambda _payload, **_kwargs: None,
+    )
 
     assert ir_pdf_worker.main() == 0
     assert events == ["limits", "pypdf"]
+
+
+def test_worker_JSON직렬화는_UTF8_byte상한을_넘기기전에_중단한다():
+    payload = {"state": "ok", "pages": ["가" * 8]}
+    encoded = ir_pdf_worker._encode_payload_bounded(
+        payload,
+        max_output_bytes=128,
+    )
+
+    assert json.loads(encoded.decode("utf-8")) == payload
+    with pytest.raises(ir_pdf_worker._WorkerOutputLimitError):
+        ir_pdf_worker._encode_payload_bounded(
+            payload,
+            max_output_bytes=len(encoded) - 1,
+        )
 
 
 def test_Windows_job설정실패는_strict에서차단하고_명시적local에서만_fallback한다(
@@ -1001,8 +1220,8 @@ def test_worker_자원상한_설정실패와_초과를_부모가_구분한다(
         {"state": "failed", "failure_kind": failure_kind, "detail": "닫힌 실패"}
     ).encode("utf-8")
     monkeypatch.setattr(
-        ir_pdf.subprocess,
-        "run",
+        ir_pdf,
+        "_run_pdf_worker_bounded",
         lambda *_args, **_kwargs: subprocess.CompletedProcess(
             args=[], returncode=0, stdout=payload
         ),
@@ -1023,6 +1242,30 @@ def _successful_worker_process() -> subprocess.CompletedProcess[bytes]:
         }
     ).encode("utf-8")
     return subprocess.CompletedProcess(args=[], returncode=0, stdout=payload)
+
+
+def test_pdf_worker명령은_isolated_no_bytecode와_출력상한을_고정한다(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def successful(command: list[str], content: bytes, **kwargs: object):
+        captured["command"] = command
+        captured["content"] = content
+        captured.update(kwargs)
+        return _successful_worker_process()
+
+    monkeypatch.setattr(ir_pdf, "_run_pdf_worker_bounded", successful)
+
+    parsed = ir_pdf._parse_pdf_with_timeout(b"%PDF-command")
+
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[1:3] == ["-I", "-B"]
+    assert command[command.index("--max-output-bytes") + 1] == str(
+        ir_pdf.MAX_IR_WORKER_OUTPUT_BYTES
+    )
+    assert captured["max_output_bytes"] == ir_pdf.MAX_IR_WORKER_OUTPUT_BYTES
+    assert captured["content"] == b"%PDF-command"
+    assert parsed.pages == ("Company investor relations",)
 
 
 def test_pdf_worker동시호출은_프로세스당_하나만_실행한다(monkeypatch):
@@ -1047,7 +1290,7 @@ def test_pdf_worker동시호출은_프로세스당_하나만_실행한다(monkey
             active -= 1
         return _successful_worker_process()
 
-    monkeypatch.setattr(ir_pdf.subprocess, "run", controlled_run)
+    monkeypatch.setattr(ir_pdf, "_run_pdf_worker_bounded", controlled_run)
     results: list[object] = []
 
     def parse() -> None:
@@ -1084,8 +1327,8 @@ def test_pdf_worker슬롯_대기timeout은_자식프로세스를_시작하지않
 
     monkeypatch.setattr(ir_pdf, "_PDF_WORKER_SLOTS", NoSlot())
     monkeypatch.setattr(
-        ir_pdf.subprocess,
-        "run",
+        ir_pdf,
+        "_run_pdf_worker_bounded",
         lambda *_args, **_kwargs: pytest.fail("슬롯 없이 worker를 시작했습니다"),
     )
 
@@ -1105,7 +1348,7 @@ def test_pdf_worker시작실패뒤에도_permit을_반환한다(monkeypatch):
         return _successful_worker_process()
 
     monkeypatch.setattr(ir_pdf, "_PDF_WORKER_SLOTS", semaphore)
-    monkeypatch.setattr(ir_pdf.subprocess, "run", fail_then_succeed)
+    monkeypatch.setattr(ir_pdf, "_run_pdf_worker_bounded", fail_then_succeed)
 
     with pytest.raises(OfficialIrFetchError, match="시작하지 못했습니다"):
         ir_pdf._parse_pdf_with_timeout(b"%PDF-first")

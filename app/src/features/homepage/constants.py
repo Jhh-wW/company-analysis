@@ -87,6 +87,10 @@ MAX_CONCURRENT_IR_PDF_WORKERS: Final[int] = 1
 #: 무기한 붙잡지 않고 기술 실패로 닫는다.
 IR_PDF_WORKER_SLOT_TIMEOUT_SEC: Final[int] = 1
 
+#: 강제 종료한 PDF 워커가 실제로 끝났는지 기다리는 최대 시간. ``kill`` 실패나
+#: 비정상 OS 상태가 부모 요청을 무기한 붙잡지 못하게 한다.
+IR_PDF_WORKER_REAP_TIMEOUT_SEC: Final[int] = 1
+
 #: 원문 위치와 자식 프로세스 계약에 함께 봉인할 PDF 추출기 버전.
 IR_PDF_EXTRACTOR_VERSION: Final[str] = "pypdf 6.16.1"
 

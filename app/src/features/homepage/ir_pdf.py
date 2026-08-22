@@ -17,6 +17,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unicodedata
@@ -34,6 +35,7 @@ from src.features.homepage.constants import (
     IR_COLLECTION_TIMEOUT_SEC,
     IR_PDF_EXTRACTOR_VERSION,
     IR_PDF_PARSE_TIMEOUT_SEC,
+    IR_PDF_WORKER_REAP_TIMEOUT_SEC,
     IR_PDF_WORKER_SLOT_TIMEOUT_SEC,
     MAX_IR_CHARS_PER_DOCUMENT,
     MAX_IR_CHARS_PER_FRAGMENT,
@@ -524,7 +526,15 @@ def _collect_official_ir_fragments_impl(
                 remaining_total_chars=MAX_IR_TOTAL_CHARS - total_chars,
                 identity_terms=identity_terms,
             )
-        except Exception:
+        except (
+            OfficialIrFetchError,
+            HomepageResponseError,
+            UnsafeHomepageUrlError,
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+            http.client.HTTPException,
+        ):
             failed_documents += 1
             continue
         valid_documents += 1
@@ -940,6 +950,136 @@ def _extract_pdf_fragments(
     return _ExtractedDocument(fragments=fragments, truncated=truncated)
 
 
+def _kill_worker_process(process: subprocess.Popen[bytes]) -> None:
+    """아직 실행 중인 워커만 강제 종료한다."""
+
+    if process.poll() is not None:
+        return
+    try:
+        process.kill()
+    except OSError as exc:
+        # 종료와 kill 사이의 경쟁만 정상이다. 여전히 살아 있으면 실패를 숨기지 않는다.
+        if process.poll() is None:
+            raise OSError("PDF 워커를 강제 종료하지 못했습니다") from exc
+
+
+def _reap_worker_process(process: subprocess.Popen[bytes]) -> None:
+    """강제 종료한 워커를 짧은 상한 안에서 회수한다."""
+
+    try:
+        process.wait(timeout=IR_PDF_WORKER_REAP_TIMEOUT_SEC)
+    except subprocess.TimeoutExpired as exc:
+        raise OSError("PDF 워커를 제한 시간 안에 회수하지 못했습니다") from exc
+
+
+def _run_pdf_worker_bounded(
+    command: list[str],
+    content: bytes,
+    *,
+    timeout: float,
+    max_output_bytes: int,
+    creation_flags: int,
+) -> subprocess.CompletedProcess[bytes]:
+    """stdin 파일과 제한 reader로 워커 stdout을 상한 안에서만 받는다.
+
+    ``communicate``와 ``subprocess.run(..., stdout=PIPE)``는 자식이 끝날 때까지
+    stdout 전체를 메모리에 모은다. 입력은 임시 파일로 넘겨 pipe 교착을 없애고,
+    reader는 상한보다 딱 한 바이트만 더 읽은 즉시 실행 중인 워커를 죽인다.
+    """
+
+    if max_output_bytes < 1:
+        raise ValueError("PDF 워커 출력 상한은 양수여야 합니다")
+
+    with tempfile.TemporaryDirectory(prefix="official-ir-worker-") as worker_dir:
+        with tempfile.TemporaryFile(mode="w+b", dir=worker_dir) as input_file:
+            input_file.write(content)
+            input_file.flush()
+            input_file.seek(0)
+            process = subprocess.Popen(
+                command,
+                stdin=input_file,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                cwd=worker_dir,
+                creationflags=creation_flags,
+                env=_pdf_worker_environment(worker_dir),
+                close_fds=True,
+            )
+            stdout_pipe = process.stdout
+            if stdout_pipe is None:
+                _kill_worker_process(process)
+                _reap_worker_process(process)
+                raise OSError("PDF 워커 stdout pipe를 만들지 못했습니다")
+
+            output: list[bytes] = []
+            reader_errors: list[Exception] = []
+
+            def read_stdout() -> None:
+                try:
+                    value = stdout_pipe.read(max_output_bytes + 1)
+                    if not isinstance(value, bytes):
+                        raise TypeError("PDF 워커 stdout이 bytes가 아닙니다")
+                    output.append(value)
+                    if len(value) > max_output_bytes:
+                        _kill_worker_process(process)
+                except Exception as exc:  # noqa: BLE001 - thread 오류를 부모로 전달
+                    reader_errors.append(exc)
+                    _kill_worker_process(process)
+
+            reader: threading.Thread | None = None
+            try:
+                reader = threading.Thread(
+                    target=read_stdout,
+                    name="official-ir-worker-stdout",
+                    daemon=True,
+                )
+                try:
+                    reader.start()
+                except RuntimeError as exc:
+                    raise OSError("PDF 워커 stdout reader를 시작하지 못했습니다") from exc
+                timeout_error: subprocess.TimeoutExpired | None = None
+                try:
+                    process.wait(timeout=timeout)
+                except subprocess.TimeoutExpired as exc:
+                    timeout_error = exc
+                    _kill_worker_process(process)
+                    _reap_worker_process(process)
+
+                # kill+wait 뒤에는 pipe writer가 닫혀 reader도 반드시 끝나야 한다.
+                reader.join(timeout=IR_PDF_WORKER_REAP_TIMEOUT_SEC)
+                if reader.is_alive():
+                    raise OSError("PDF 워커 stdout reader를 회수하지 못했습니다")
+                if timeout_error is not None:
+                    raise timeout_error
+                if reader_errors:
+                    raise OSError("PDF 워커 stdout을 읽지 못했습니다") from reader_errors[0]
+                return subprocess.CompletedProcess(
+                    args=command,
+                    returncode=int(process.returncode or 0),
+                    stdout=output[0] if output else b"",
+                    stderr=None,
+                )
+            finally:
+                cleanup_error: OSError | None = None
+                if process.poll() is None:
+                    try:
+                        _kill_worker_process(process)
+                        _reap_worker_process(process)
+                    except OSError as exc:
+                        cleanup_error = exc
+                # 살아 있는 자식이 pipe writer를 잡은 상태에서는 다른 스레드의
+                # BufferedReader.close도 내부 락에서 멈출 수 있다. OS 상한이 자식을
+                # 끝내면 daemon reader가 EOF로 빠져나오므로 여기서는 동기 close/join을
+                # 하지 않고 부모 요청의 시간 상한을 지킨다.
+                if process.poll() is not None and (
+                    reader is None or not reader.is_alive()
+                ):
+                    if not stdout_pipe.closed:
+                        stdout_pipe.close()
+                if cleanup_error is not None:
+                    raise cleanup_error
+
+
 def _parse_pdf_with_timeout(content: bytes) -> _ParsedPdf:
     """PDF 파싱을 별도 프로세스에서 실행하고 10초 뒤 강제로 끝낸다."""
 
@@ -948,6 +1088,8 @@ def _parse_pdf_with_timeout(content: bytes) -> _ParsedPdf:
     resource_policy = _pdf_worker_resource_policy()
     command = [
         sys.executable,
+        "-I",
+        "-B",
         str(worker),
         "--max-bytes",
         str(MAX_IR_PDF_BYTES),
@@ -963,6 +1105,8 @@ def _parse_pdf_with_timeout(content: bytes) -> _ParsedPdf:
         str(MAX_IR_WORKER_ADDRESS_SPACE_BYTES),
         "--max-cpu-seconds",
         str(MAX_IR_WORKER_CPU_SECONDS),
+        "--max-output-bytes",
+        str(MAX_IR_WORKER_OUTPUT_BYTES),
         "--resource-policy",
         resource_policy,
         "--expected-version",
@@ -975,15 +1119,12 @@ def _parse_pdf_with_timeout(content: bytes) -> _ParsedPdf:
         raise OfficialIrFetchError("공식 IR PDF 격리 파서 동시 실행 상한 대기 초과")
     try:
         try:
-            completed = subprocess.run(
+            completed = _run_pdf_worker_bounded(
                 command,
-                input=content,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                content,
                 timeout=IR_PDF_PARSE_TIMEOUT_SEC,
-                check=False,
-                creationflags=creation_flags,
-                env=_pdf_worker_environment(),
+                max_output_bytes=MAX_IR_WORKER_OUTPUT_BYTES,
+                creation_flags=creation_flags,
             )
         except subprocess.TimeoutExpired as exc:
             raise OfficialIrFetchError("공식 IR PDF 파싱·추출 10초 상한 초과") from exc
@@ -992,9 +1133,12 @@ def _parse_pdf_with_timeout(content: bytes) -> _ParsedPdf:
     finally:
         _PDF_WORKER_SLOTS.release()
 
+    # 출력 초과 때문에 부모가 kill한 경우를 OS 메모리 초과로 잘못 분류하지 않는다.
+    if len(completed.stdout) > MAX_IR_WORKER_OUTPUT_BYTES:
+        raise OfficialIrFetchError("공식 IR PDF 격리 파서 실행 실패")
     if _worker_exit_was_resource_limit(completed.returncode):
         raise OfficialIrFetchError("공식 IR PDF 워커 OS 자원 상한 초과")
-    if completed.returncode != 0 or len(completed.stdout) > MAX_IR_WORKER_OUTPUT_BYTES:
+    if completed.returncode != 0:
         raise OfficialIrFetchError("공식 IR PDF 격리 파서 실행 실패")
     try:
         payload = json.loads(completed.stdout.decode("utf-8"))
@@ -1088,14 +1232,16 @@ def _worker_exit_was_resource_limit(
     return False
 
 
-def _pdf_worker_environment() -> dict[str, str]:
+def _pdf_worker_environment(worker_dir: str) -> dict[str, str]:
     """격리 파서에 API 키를 넘기지 않는 최소 환경을 만든다."""
 
     environment = {
         "PYTHONHASHSEED": "0",
         "PYTHONIOENCODING": "utf-8",
+        "TEMP": worker_dir,
+        "TMP": worker_dir,
     }
-    for name in ("PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP"):
+    for name in ("PATH", "SYSTEMROOT", "WINDIR"):
         value = os.environ.get(name)
         if value:
             environment[name] = value
