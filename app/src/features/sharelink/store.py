@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import math
 import re
@@ -20,12 +21,17 @@ from dataclasses import dataclass
 from typing import Final, Optional
 
 from src.core import clock
+from src.features.sharelink import constants, logic
 
 #: 발급한 링크를 담는 표.
 TABLE_SHARE_LINKS = "share_links"
 TABLE_OPEN_EVENTS = "share_link_open_events"
+TABLE_OPEN_WINDOWS = "share_link_open_windows"
+TABLE_ACCESS_SUBJECTS = "share_link_access_subjects"
 TABLE_RUN_HISTORY = "share_link_run_history"
 INDEX_RUN_REPORT_ID = f"idx_{TABLE_RUN_HISTORY}_report_id_unique"
+INDEX_OPEN_WINDOWS_LINK_WINDOW = f"idx_{TABLE_OPEN_WINDOWS}_link_window_unique"
+INDEX_ACCESS_SUBJECT_WINDOW = f"idx_{TABLE_ACCESS_SUBJECTS}_window_subject_unique"
 
 RUN_STATUS_RUNNING: Final[str] = "running"
 RUN_STATUS_AWAITING_RELEASE: Final[str] = "awaiting_release"
@@ -77,6 +83,43 @@ CREATE_OPEN_EVENTS_NO_DELETE_SQL = f"""
 CREATE TRIGGER IF NOT EXISTS {TABLE_OPEN_EVENTS}_no_delete
 BEFORE DELETE ON {TABLE_OPEN_EVENTS}
 BEGIN SELECT RAISE(ABORT, 'share link open events are append-only'); END
+"""
+CREATE_OPEN_EVENTS_NO_INSERT_SQL = f"""
+CREATE TRIGGER IF NOT EXISTS {TABLE_OPEN_EVENTS}_no_insert
+BEFORE INSERT ON {TABLE_OPEN_EVENTS}
+BEGIN SELECT RAISE(ABORT, 'LINK 접속 구형 이력은 봉인되었습니다'); END
+"""
+CREATE_OPEN_WINDOWS_SQL = f"""
+CREATE TABLE IF NOT EXISTS {TABLE_OPEN_WINDOWS} (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    link_key_hash     TEXT NOT NULL,
+    window_started_at TEXT NOT NULL,
+    opened_count      INTEGER NOT NULL,
+    first_opened_at   TEXT NOT NULL,
+    last_opened_at    TEXT NOT NULL,
+    FOREIGN KEY (link_key_hash) REFERENCES {TABLE_SHARE_LINKS}(key_hash),
+    CHECK (opened_count BETWEEN 1 AND {constants.OPEN_WINDOW_MAX_COUNT})
+)
+"""
+CREATE_OPEN_WINDOWS_UNIQUE_INDEX_SQL = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS {INDEX_OPEN_WINDOWS_LINK_WINDOW}
+ON {TABLE_OPEN_WINDOWS}(link_key_hash, window_started_at)
+"""
+CREATE_ACCESS_SUBJECTS_SQL = f"""
+CREATE TABLE IF NOT EXISTS {TABLE_ACCESS_SUBJECTS} (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    window_id      INTEGER NOT NULL,
+    requester_hash TEXT NOT NULL,
+    opened_count   INTEGER NOT NULL,
+    FOREIGN KEY (window_id) REFERENCES {TABLE_OPEN_WINDOWS}(id) ON DELETE CASCADE,
+    CHECK (length(requester_hash) = 64),
+    CHECK (requester_hash NOT GLOB '*[^0-9a-f]*'),
+    CHECK (opened_count BETWEEN 1 AND {constants.ACCESS_PER_REQUESTER_LIMIT})
+)
+"""
+CREATE_ACCESS_SUBJECTS_UNIQUE_INDEX_SQL = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS {INDEX_ACCESS_SUBJECT_WINDOW}
+ON {TABLE_ACCESS_SUBJECTS}(window_id, requester_hash)
 """
 CREATE_RUN_HISTORY_SQL = f"""
 CREATE TABLE IF NOT EXISTS {TABLE_RUN_HISTORY} (
@@ -155,6 +198,8 @@ class ShareLinkOpenEvent:
     id: int
     link_key_hash: str
     opened_at: str
+    opened_count: int = 1
+    window_started_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -304,6 +349,41 @@ def _verify_run_report_id_index(conn: sqlite3.Connection) -> None:
         raise RuntimeError("share_link_run_history report_id 1:1 index가 올바르지 않습니다")
 
 
+def _verify_unique_index(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    index: str,
+    expected_columns: tuple[str, ...],
+) -> None:
+    """bounded 집계의 이름·소유 표·전체 UNIQUE 계약을 함께 확인한다."""
+
+    schema_row = conn.execute(
+        "SELECT type, tbl_name, sql FROM sqlite_master WHERE name = ?",
+        (index,),
+    ).fetchone()
+    escaped_table = table.replace('"', '""')
+    index_rows = conn.execute(f'PRAGMA index_list("{escaped_table}")').fetchall()
+    index_row = next((row for row in index_rows if str(row[1]) == index), None)
+    escaped_index = index.replace('"', '""')
+    key_columns = tuple(
+        str(row[2])
+        for row in conn.execute(f'PRAGMA index_xinfo("{escaped_index}")')
+        if int(row[5]) == 1
+    )
+    if (
+        schema_row is None
+        or str(schema_row[0]) != "index"
+        or str(schema_row[1]) != table
+        or not str(schema_row[2] or "").strip()
+        or index_row is None
+        or int(index_row[2]) != 1
+        or int(index_row[4]) != 0
+        or key_columns != expected_columns
+    ):
+        raise RuntimeError(f"{table} unique index가 올바르지 않습니다")
+
+
 def _copy_legacy_rows(conn: sqlite3.Connection) -> None:
     rows = conn.execute(
         f"""
@@ -379,6 +459,23 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute(CREATE_OPEN_EVENTS_SQL)
         conn.execute(CREATE_OPEN_EVENTS_NO_UPDATE_SQL)
         conn.execute(CREATE_OPEN_EVENTS_NO_DELETE_SQL)
+        conn.execute(CREATE_OPEN_EVENTS_NO_INSERT_SQL)
+        conn.execute(CREATE_OPEN_WINDOWS_SQL)
+        conn.execute(CREATE_OPEN_WINDOWS_UNIQUE_INDEX_SQL)
+        conn.execute(CREATE_ACCESS_SUBJECTS_SQL)
+        conn.execute(CREATE_ACCESS_SUBJECTS_UNIQUE_INDEX_SQL)
+        _verify_unique_index(
+            conn,
+            table=TABLE_OPEN_WINDOWS,
+            index=INDEX_OPEN_WINDOWS_LINK_WINDOW,
+            expected_columns=("link_key_hash", "window_started_at"),
+        )
+        _verify_unique_index(
+            conn,
+            table=TABLE_ACCESS_SUBJECTS,
+            index=INDEX_ACCESS_SUBJECT_WINDOW,
+            expected_columns=("window_id", "requester_hash"),
+        )
         conn.execute(CREATE_RUN_HISTORY_SQL)
         conn.execute(CREATE_RUN_HISTORY_NO_DELETE_SQL)
         conn.execute(
@@ -407,6 +504,19 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             _table_columns(conn, TABLE_OPEN_EVENTS)
         ):
             raise RuntimeError("share_link_open_events 스키마가 올바르지 않습니다")
+        if not {
+            "id",
+            "link_key_hash",
+            "window_started_at",
+            "opened_count",
+            "first_opened_at",
+            "last_opened_at",
+        }.issubset(_table_columns(conn, TABLE_OPEN_WINDOWS)):
+            raise RuntimeError("share_link_open_windows 스키마가 올바르지 않습니다")
+        if not {"id", "window_id", "requester_hash", "opened_count"}.issubset(
+            _table_columns(conn, TABLE_ACCESS_SUBJECTS)
+        ):
+            raise RuntimeError("share_link_access_subjects 스키마가 올바르지 않습니다")
         if not {
             "run_id",
             "link_key_hash",
@@ -478,63 +588,227 @@ def load_by_hash(conn: sqlite3.Connection, key_hash: str) -> Optional[ShareLink]
     return _row_to_link(row) if row else None
 
 
-def mark_opened(conn: sqlite3.Connection, key: str, now_iso: str) -> bool:
-    """링크 GET 요청 시각을 개별 행과 요약값에 함께 남긴다.
+def _open_window_start(now_iso: str) -> str:
+    parsed = dt.datetime.fromisoformat(str(now_iso or "").strip())
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=clock.KST)
+    epoch = int(parsed.timestamp())
+    start_epoch = epoch - (epoch % constants.ACCESS_WINDOW_SECONDS)
+    return dt.datetime.fromtimestamp(start_epoch, dt.timezone.utc).isoformat(
+        timespec="seconds"
+    )
 
-    ★ 최초 요청 시각은 «한 번만» 적는다. 나중 GET은 최근 요청 시각만 갱신한다.
-      이 값은 사람 식별이나 보안 감사 증거가 아니라 요청 관찰 지표다.
+
+def _rollback_open_savepoint(conn: sqlite3.Connection, savepoint: str) -> None:
+    try:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+    finally:
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+
+
+def mark_opened(
+    conn: sqlite3.Connection,
+    key: str,
+    now_iso: str,
+    *,
+    requester_hash: str = "",
+) -> bool:
+    """active 링크 GET을 원자적 bounded 구간 집계에 남긴다.
+
+    폐기·만료 상태를 writer lock 안에서 다시 확인하고, 같은 분 구간은 한 행만
+    UPSERT한다. capability 전체와 비가역 요청자 통장을 모두 영속 cap으로 제한하며
+    최근 구간만 보존한다. ``False``는 없음·비활성·cap 소진 중 하나다.
     """
-    key_hash = key_hash_of(key)
-    inserted = conn.execute(
-        f"""
-        INSERT INTO {TABLE_OPEN_EVENTS} (link_key_hash, opened_at)
-        SELECT key_hash, ?
-          FROM {TABLE_SHARE_LINKS}
-         WHERE key_hash = ?
-        """,
-        (now_iso, key_hash),
-    )
-    if inserted.rowcount <= 0:
+
+    normalized_requester = str(requester_hash or "").strip().lower()
+    if normalized_requester and not is_key_hash(normalized_requester):
         return False
-    cursor = conn.execute(
-        f"""
-        UPDATE {TABLE_SHARE_LINKS}
-           SET opened_count    = opened_count + 1,
-               first_opened_at = CASE WHEN first_opened_at = ''
-                                      THEN ? ELSE first_opened_at END,
-               last_opened_at  = ?
-         WHERE key_hash = ?
-        """,
-        (now_iso, now_iso, key_hash),
-    )
-    if cursor.rowcount <= 0:
-        raise RuntimeError("링크 요청 요약을 갱신하지 못했습니다")
-    return True
+    try:
+        today = clock.business_date_from_iso(now_iso)
+        window_started_at = _open_window_start(now_iso)
+    except (OverflowError, TypeError, ValueError):
+        return False
+
+    key_hash = key_hash_of(key)
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    savepoint = "share_link_mark_open"
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        state = conn.execute(
+            f"SELECT created_at, revoked_at FROM {TABLE_SHARE_LINKS} "
+            "WHERE key_hash = ?",
+            (key_hash,),
+        ).fetchone()
+        if (
+            state is None
+            or str(state[1] or "")
+            or logic.is_share_link_expired(str(state[0]), today=today)
+        ):
+            _rollback_open_savepoint(conn, savepoint)
+            return False
+
+        recorded = conn.execute(
+            f"""
+            INSERT INTO {TABLE_OPEN_WINDOWS}
+                (link_key_hash, window_started_at, opened_count,
+                 first_opened_at, last_opened_at)
+            SELECT key_hash, ?, 1, ?, ?
+              FROM {TABLE_SHARE_LINKS}
+             WHERE key_hash = ? AND revoked_at = ''
+            ON CONFLICT(link_key_hash, window_started_at) DO UPDATE SET
+                opened_count = opened_count + 1,
+                last_opened_at = excluded.last_opened_at
+            WHERE opened_count < ?
+            RETURNING id, opened_count
+            """,
+            (
+                window_started_at,
+                now_iso,
+                now_iso,
+                key_hash,
+                constants.OPEN_WINDOW_MAX_COUNT,
+            ),
+        ).fetchone()
+        if recorded is None:
+            _rollback_open_savepoint(conn, savepoint)
+            return False
+
+        if normalized_requester:
+            subject = conn.execute(
+                f"""
+                INSERT INTO {TABLE_ACCESS_SUBJECTS}
+                    (window_id, requester_hash, opened_count)
+                VALUES (?, ?, 1)
+                ON CONFLICT(window_id, requester_hash) DO UPDATE SET
+                    opened_count = opened_count + 1
+                WHERE opened_count < ?
+                RETURNING opened_count
+                """,
+                (
+                    int(recorded[0]),
+                    normalized_requester,
+                    constants.ACCESS_PER_REQUESTER_LIMIT,
+                ),
+            ).fetchone()
+            if subject is None:
+                _rollback_open_savepoint(conn, savepoint)
+                return False
+
+        cursor = conn.execute(
+            f"""
+            UPDATE {TABLE_SHARE_LINKS}
+               SET opened_count    = opened_count + 1,
+                   first_opened_at = CASE WHEN first_opened_at = ''
+                                          THEN ? ELSE first_opened_at END,
+                   last_opened_at  = ?
+             WHERE key_hash = ? AND revoked_at = ''
+            """,
+            (now_iso, now_iso, key_hash),
+        )
+        if cursor.rowcount <= 0:
+            raise RuntimeError("링크 요청 요약을 갱신하지 못했습니다")
+
+        if int(recorded[1]) == 1:
+            # SQLite connection의 foreign_keys 설정과 무관하게 요청자 통장도
+            # 같은 bounded 보존 범위로 명시 정리한다.
+            conn.execute(
+                f"""
+                DELETE FROM {TABLE_ACCESS_SUBJECTS}
+                 WHERE window_id IN (
+                       SELECT id FROM {TABLE_OPEN_WINDOWS}
+                        WHERE link_key_hash = ?
+                          AND id NOT IN (
+                              SELECT id FROM {TABLE_OPEN_WINDOWS}
+                               WHERE link_key_hash = ?
+                               ORDER BY window_started_at DESC, id DESC
+                               LIMIT ?
+                          )
+                 )
+                """,
+                (
+                    key_hash,
+                    key_hash,
+                    constants.OPEN_WINDOW_ROWS_PER_LINK,
+                ),
+            )
+            conn.execute(
+                f"""
+                DELETE FROM {TABLE_OPEN_WINDOWS}
+                 WHERE link_key_hash = ?
+                   AND id NOT IN (
+                       SELECT id FROM {TABLE_OPEN_WINDOWS}
+                        WHERE link_key_hash = ?
+                        ORDER BY window_started_at DESC, id DESC
+                        LIMIT ?
+                   )
+                """,
+                (
+                    key_hash,
+                    key_hash,
+                    constants.OPEN_WINDOW_ROWS_PER_LINK,
+                ),
+            )
+    except BaseException:
+        _rollback_open_savepoint(conn, savepoint)
+        raise
+    else:
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        return True
 
 
 def list_open_events_by_hash(
     conn: sqlite3.Connection, key_hash: str
 ) -> list[ShareLinkOpenEvent]:
-    """관리 화면용 전체 요청 시각. 비밀 원문이나 요청자 정보는 담지 않는다."""
+    """구형 개별 시각과 최근 bounded 집계 구간을 비식별 projection으로 돌려준다."""
 
     normalized = str(key_hash or "").strip().lower()
     if not is_key_hash(normalized):
         return []
-    rows = conn.execute(
+    legacy_rows = conn.execute(
         f"""
         SELECT id, link_key_hash, opened_at
           FROM {TABLE_OPEN_EVENTS}
+         WHERE link_key_hash = ?
+         ORDER BY id DESC
+         LIMIT ?
+        """,
+        (normalized, constants.LEGACY_OPEN_EVENTS_DISPLAY_LIMIT),
+    ).fetchall()
+    legacy_events = [
+        ShareLinkOpenEvent(
+            id=int(row[0]), link_key_hash=row[1], opened_at=row[2]
+        )
+        for row in reversed(legacy_rows)
+    ]
+    legacy_max_row = conn.execute(
+        f"SELECT COALESCE(MAX(id), 0) FROM {TABLE_OPEN_EVENTS}"
+    ).fetchone()
+    legacy_max_id = int(legacy_max_row[0])
+    window_rows = conn.execute(
+        f"""
+        SELECT id, link_key_hash, window_started_at, opened_count, last_opened_at
+          FROM {TABLE_OPEN_WINDOWS}
          WHERE link_key_hash = ?
          ORDER BY id ASC
         """,
         (normalized,),
     ).fetchall()
-    return [
+    window_events = [
         ShareLinkOpenEvent(
-            id=int(row[0]), link_key_hash=row[1], opened_at=row[2]
+            id=(
+                legacy_max_id
+                + int(row[0]) * (constants.OPEN_WINDOW_MAX_COUNT + 1)
+                + int(row[3])
+            ),
+            link_key_hash=str(row[1]),
+            opened_at=str(row[4]),
+            opened_count=int(row[3]),
+            window_started_at=str(row[2]),
         )
-        for row in rows
+        for row in window_rows
     ]
+    return [*legacy_events, *window_events]
 
 
 def set_report(conn: sqlite3.Connection, key: str, report_id: str) -> bool:

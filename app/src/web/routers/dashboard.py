@@ -167,10 +167,36 @@ def _link_rows_for_dashboard(conn):
     for link in links:
         last_seen = dashboard_store.link_open_seen_id(conn, key_hash=link.key_hash)
         unseen[link.key_hash] = sum(
-            event.id > last_seen
+            _unseen_open_count(event, last_seen)
             for event in share_store.list_open_events_by_hash(conn, link.key_hash)
         )
     return links, unseen
+
+
+def _unseen_open_count(
+    event: share_store.ShareLinkOpenEvent,
+    last_seen: int,
+) -> int:
+    """집계 구간을 확인한 뒤 같은 구간에 늘어난 횟수만 새 요청으로 센다."""
+
+    if event.id <= last_seen:
+        return 0
+    if not event.window_started_at:
+        return event.opened_count
+    event_base_id = event.id - event.opened_count
+    already_seen = max(0, min(event.opened_count, last_seen - event_base_id))
+    return event.opened_count - already_seen
+
+
+def _unseen_open_events(
+    events: list[share_store.ShareLinkOpenEvent],
+    last_seen: int,
+) -> list[share_store.ShareLinkOpenEvent]:
+    return [
+        replace(event, opened_count=count)
+        for event in events
+        if (count := _unseen_open_count(event, last_seen)) > 0
+    ]
 
 
 def _member_period(request: Request) -> tuple[str, str]:
@@ -648,7 +674,7 @@ async def link_detail(request: Request, key_hash: str):
             open_events = share_store.list_open_events_by_hash(conn, key_hash)
             runs = share_store.list_runs_by_hash(conn, key_hash)
             seen_open_id = dashboard_store.link_open_seen_id(conn, key_hash=key_hash)
-            new_open_events = [event for event in open_events if event.id > seen_open_id]
+            new_open_events = _unseen_open_events(open_events, seen_open_id)
         if link is None:
             return _admin_response(request, RedirectResponse("/admin/links", status_code=303))
         response = request_helpers.templates.TemplateResponse(

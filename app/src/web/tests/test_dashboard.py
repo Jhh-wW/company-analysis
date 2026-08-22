@@ -183,6 +183,47 @@ def test_link_list_sorts_by_recent_open_and_marks_unseen(monkeypatch, tmp_path):
     assert "새 접속 1건" in response.text
 
 
+def test_same_window_aggregate_reports_only_new_count_after_confirmation(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(tmp_path / "storage.db"))
+    runtime._PIPELINE = DemoPipeline()
+    raw_key = "aggregated-link-open-secret"
+    opened_at = "2026-08-23T10:00:30+09:00"
+    with db.connect() as conn:
+        assert share_store.insert_new(
+            conn,
+            key=raw_key,
+            company="AGGREGATE",
+            job="",
+            now_iso="2026-08-23T09:00:00+09:00",
+        )
+        assert share_store.mark_opened(conn, raw_key, opened_at)
+        assert share_store.mark_opened(conn, raw_key, opened_at)
+    key_hash = share_store.key_hash_of(raw_key)
+
+    with TestClient(main.app) as client:
+        csrf = _session(client, email="admin@example.com", is_admin=True)
+        first_list = client.get("/admin/links")
+        first_detail = client.get(f"/admin/links/{key_hash}")
+        confirmed = client.post(
+            f"/admin/links/{key_hash}/opens/confirm",
+            data={"csrf_token": csrf},
+            follow_redirects=False,
+        )
+        with db.connect() as conn:
+            assert share_store.mark_opened(conn, raw_key, opened_at)
+        second_list = client.get("/admin/links")
+        second_detail = client.get(f"/admin/links/{key_hash}")
+
+    assert "새 접속 2건" in first_list.text
+    assert f"{opened_at} · 2회" in first_detail.text
+    assert confirmed.status_code == 303
+    assert "새 접속 1건" in second_list.text
+    assert f"{opened_at} · 1회" in second_detail.text
+
+
 def test_member_page_has_period_controls_and_does_not_fake_legacy_summary(monkeypatch, tmp_path):
     monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(tmp_path / "storage.db"))
     runtime._PIPELINE = DemoPipeline()

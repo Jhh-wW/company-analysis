@@ -695,8 +695,11 @@ def _link_detail_page(
             link_last_opened_at_label=_kst_timestamp_label(link.last_opened_at),
             open_events=open_events,
             open_event_labels=open_event_labels,
+            open_window_rows_per_link=share_constants.OPEN_WINDOW_ROWS_PER_LINK,
             historical_open_count_gap=max(
-                0, link.opened_count - len(open_events)
+                0,
+                link.opened_count
+                - sum(event.opened_count for event in open_events),
             ),
             generated_runs=generated_runs,
             run_started_at_labels=run_started_at_labels,
