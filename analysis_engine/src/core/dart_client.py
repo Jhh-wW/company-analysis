@@ -11,6 +11,7 @@ import io
 import json
 import os
 import re
+import struct
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -25,6 +26,7 @@ DAILY_LIMIT = 20_000          # 공식 한도 (오류 020)
 WARN_RATIO = 0.8              # 경보 문턱 — 80% 소진 시 경고
 BASE_URL = "https://opendart.fss.or.kr/api"
 TIMEOUT_LIGHT_SEC = 10        # 회사·목록 조회 (03_수집/01_흐름 §5)
+JSON_RESPONSE_MAX_BYTES = 4 * 1024 * 1024
 COUNTER_FILENAME = "dart_usage.json"
 # 예전 코드가 가져다 쓸 수 있도록 남겨 둔 로컬 기본값이다.
 COUNTER_PATH = LOCAL_LOG_DIR / COUNTER_FILENAME
@@ -60,11 +62,22 @@ _STATUS_PATTERNS = (
 )
 
 
-def _read_url(url: str, *, timeout: float) -> bytes:
+def _read_url(
+    url: str,
+    *,
+    timeout: float,
+    max_bytes: int,
+    response_label: str,
+) -> bytes:
     """URL·키·원문을 예외에 싣지 않고 응답 바이트를 읽는다."""
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
-            return response.read()
+            data = response.read(max_bytes + 1)
+            if len(data) > max_bytes:
+                raise DartResponseError(
+                    f"{response_label} 응답이 허용 크기를 초과했습니다"
+                )
+            return data
     except urllib.error.HTTPError as error:
         if error.code == 429:
             raise DartLimitReached("DART HTTP 429 — 사용량 한도 도달") from None
@@ -148,7 +161,12 @@ def get_json(endpoint: str, params: dict[str, Any],
     key = api_key()
     query = urllib.parse.urlencode({"crtfc_key": key, **params})
     (counter or UsageCounter()).tick()
-    data = _read_url(f"{BASE_URL}/{endpoint}?{query}", timeout=TIMEOUT_LIGHT_SEC)
+    data = _read_url(
+        f"{BASE_URL}/{endpoint}?{query}",
+        timeout=TIMEOUT_LIGHT_SEC,
+        max_bytes=JSON_RESPONSE_MAX_BYTES,
+        response_label="DART JSON",
+    )
     try:
         payload = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -167,6 +185,155 @@ def get_json(endpoint: str, params: dict[str, Any],
 
 TIMEOUT_CORPCODE_SEC = 60     # corpCode.zip 약 1~2MB
 TIMEOUT_DOCUMENT_SEC = 60     # 공시서류 원본 zip — 감사보고서는 보통 수백 KB
+CORPCODE_ZIP_RESPONSE_MAX_BYTES = 16 * 1024 * 1024
+CORPCODE_XML_MAX_BYTES = 64 * 1024 * 1024
+CORPCODE_ZIP_TOTAL_UNCOMPRESSED_MAX_BYTES = 64 * 1024 * 1024
+CORPCODE_ZIP_MAX_MEMBERS = 8
+CORPCODE_ZIP_CENTRAL_DIRECTORY_MAX_BYTES = 256 * 1024
+DOCUMENT_ZIP_RESPONSE_MAX_BYTES = 32 * 1024 * 1024
+DOCUMENT_MEMBER_MAX_BYTES = 64 * 1024 * 1024
+DOCUMENT_ZIP_TOTAL_UNCOMPRESSED_MAX_BYTES = 128 * 1024 * 1024
+DOCUMENT_ZIP_MAX_MEMBERS = 512
+DOCUMENT_ZIP_CENTRAL_DIRECTORY_MAX_BYTES = 4 * 1024 * 1024
+ZIP_MEMBER_MAX_COMPRESSION_RATIO = 200
+_ZIP_END_SIGNATURE = b"PK\x05\x06"
+_ZIP_END_RECORD = struct.Struct("<4s4H2LH")
+_ZIP_END_MIN_BYTES = _ZIP_END_RECORD.size
+_ZIP_MAX_COMMENT_BYTES = (1 << 16) - 1
+
+
+def _validate_zip_container(
+    data: bytes,
+    *,
+    member_max_count: int,
+    central_directory_max_bytes: int,
+    archive_label: str,
+) -> None:
+    """ZipFile 객체 생성 전 중앙 디렉터리의 항목 수·크기를 제한한다."""
+    search_start = max(0, len(data) - _ZIP_END_MIN_BYTES - _ZIP_MAX_COMMENT_BYTES)
+    search_end = len(data) - _ZIP_END_MIN_BYTES
+    end_record: tuple[bytes, int, int, int, int, int, int, int] | None = None
+    end_offset = -1
+    while search_end >= search_start:
+        candidate = data.rfind(
+            _ZIP_END_SIGNATURE,
+            search_start,
+            search_end + len(_ZIP_END_SIGNATURE),
+        )
+        if candidate < 0:
+            break
+        values = _ZIP_END_RECORD.unpack_from(data, candidate)
+        comment_size = int(values[-1])
+        if candidate + _ZIP_END_MIN_BYTES + comment_size == len(data):
+            end_record = values
+            end_offset = candidate
+            break
+        search_end = candidate - 1
+    if end_record is None:
+        raise zipfile.BadZipFile("ZIP 종료 레코드를 찾지 못했습니다")
+
+    (
+        _signature,
+        disk_number,
+        central_directory_disk,
+        disk_member_count,
+        total_member_count,
+        central_directory_size,
+        central_directory_offset,
+        _comment_size,
+    ) = end_record
+    if (
+        disk_number != 0
+        or central_directory_disk != 0
+        or disk_member_count != total_member_count
+    ):
+        raise DartResponseError(f"{archive_label}의 분할 ZIP 형식은 허용되지 않습니다")
+    if (
+        total_member_count == 0xFFFF
+        or central_directory_size == 0xFFFFFFFF
+        or central_directory_offset == 0xFFFFFFFF
+    ):
+        raise DartResponseError(f"{archive_label}의 ZIP64 형식은 허용되지 않습니다")
+    if total_member_count > member_max_count:
+        raise DartResponseError(f"{archive_label} 항목 수가 허용 범위를 초과했습니다")
+    if central_directory_size > central_directory_max_bytes:
+        raise DartResponseError(
+            f"{archive_label}의 중앙 디렉터리 크기가 허용 범위를 초과했습니다"
+        )
+    if central_directory_offset + central_directory_size > end_offset:
+        raise zipfile.BadZipFile("ZIP 중앙 디렉터리 위치가 올바르지 않습니다")
+
+
+def _validate_zip_archive(
+    infos: list[zipfile.ZipInfo],
+    *,
+    member_max_bytes: int,
+    total_max_bytes: int,
+    member_max_count: int,
+    archive_label: str,
+) -> list[zipfile.ZipInfo]:
+    """ZIP 중앙 디렉터리의 선언값을 먼저 검증해 과다 해제를 막는다."""
+    if not infos:
+        raise DartResponseError(f"{archive_label}이 비어 있습니다")
+    if len(infos) > member_max_count:
+        raise DartResponseError(f"{archive_label} 항목 수가 허용 범위를 초과했습니다")
+
+    files: list[zipfile.ZipInfo] = []
+    total_size = 0
+    for info in infos:
+        if info.is_dir():
+            continue
+        if info.flag_bits & 0x1:
+            raise DartResponseError(f"{archive_label}에 암호화된 항목이 있습니다")
+        if info.file_size > member_max_bytes:
+            raise DartResponseError(
+                f"{archive_label} 항목의 선언 크기가 허용 범위를 초과했습니다"
+            )
+        total_size += info.file_size
+        if total_size > total_max_bytes:
+            raise DartResponseError(
+                f"{archive_label}의 전체 선언 크기가 허용 범위를 초과했습니다"
+            )
+        if info.file_size:
+            if info.compress_size <= 0:
+                raise DartResponseError(f"{archive_label}의 압축 정보가 올바르지 않습니다")
+            ratio = info.file_size / info.compress_size
+            if ratio > ZIP_MEMBER_MAX_COMPRESSION_RATIO:
+                raise DartResponseError(
+                    f"{archive_label} 항목의 압축비가 허용 범위를 초과했습니다"
+                )
+        files.append(info)
+
+    if not files:
+        raise DartResponseError(f"{archive_label}에 파일이 없습니다")
+    return files
+
+
+def _read_zip_member(
+    archive: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    *,
+    max_bytes: int,
+    archive_label: str,
+) -> bytes:
+    """선언값을 신뢰하지 않고 실제 해제 바이트도 상한까지만 읽는다."""
+    try:
+        with archive.open(info) as source:
+            data = source.read(max_bytes + 1)
+    except (
+        EOFError,
+        NotImplementedError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        zipfile.BadZipFile,
+    ):
+        raise DartResponseError(f"{archive_label} 항목을 안전하게 읽지 못했습니다") from None
+    if len(data) > max_bytes:
+        raise DartResponseError(
+            f"{archive_label} 항목의 실제 크기가 허용 범위를 초과했습니다"
+        )
+    return data
 
 
 def download_document(rcept_no: str, dest_dir: Path,
@@ -183,23 +350,42 @@ def download_document(rcept_no: str, dest_dir: Path,
     query = urllib.parse.urlencode({"crtfc_key": key, "rcept_no": rcept_no})
     (counter or UsageCounter()).tick()
     data = _read_url(
-        f"{BASE_URL}/document.xml?{query}", timeout=TIMEOUT_DOCUMENT_SEC
+        f"{BASE_URL}/document.xml?{query}",
+        timeout=TIMEOUT_DOCUMENT_SEC,
+        max_bytes=DOCUMENT_ZIP_RESPONSE_MAX_BYTES,
+        response_label="공시서류 ZIP",
     )
     try:
+        _validate_zip_container(
+            data,
+            member_max_count=DOCUMENT_ZIP_MAX_MEMBERS,
+            central_directory_max_bytes=DOCUMENT_ZIP_CENTRAL_DIRECTORY_MAX_BYTES,
+            archive_label="공시서류 ZIP",
+        )
         archive = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile as exc:
         try:
             _raise_download_response_error(f"공시서류 {rcept_no}", data)
         except DartClientError as error:
             raise error from exc
-    infos = archive.infolist()
-    if not infos:
-        raise RuntimeError(f"공시서류 {rcept_no} — zip이 비어 있음")
-    # 사업보고서 zip은 본문+첨부 여러 파일 — 가장 큰 파일이 본문이다 (첨부만 잡히면 절 표제가 빈다)
-    main = max(infos, key=lambda i: i.file_size)
+    with archive:
+        files = _validate_zip_archive(
+            archive.infolist(),
+            member_max_bytes=DOCUMENT_MEMBER_MAX_BYTES,
+            total_max_bytes=DOCUMENT_ZIP_TOTAL_UNCOMPRESSED_MAX_BYTES,
+            member_max_count=DOCUMENT_ZIP_MAX_MEMBERS,
+            archive_label="공시서류 ZIP",
+        )
+        # 사업보고서 zip은 본문+첨부 여러 파일 — 가장 큰 파일이 본문이다.
+        main = max(files, key=lambda info: info.file_size)
+        document = _read_zip_member(
+            archive,
+            main,
+            max_bytes=DOCUMENT_MEMBER_MAX_BYTES,
+            archive_label="공시서류 ZIP",
+        )
     dest_dir.mkdir(parents=True, exist_ok=True)
-    with archive.open(main) as f:
-        out_path.write_bytes(f.read())
+    out_path.write_bytes(document)
     return out_path
 
 
@@ -214,15 +400,42 @@ def download_corpcode(dest_dir: Path, counter: UsageCounter | None = None) -> Pa
     key = api_key()
     query = urllib.parse.urlencode({"crtfc_key": key})
     (counter or UsageCounter()).tick()
-    data = _read_url(f"{BASE_URL}/corpCode.xml?{query}", timeout=TIMEOUT_CORPCODE_SEC)
+    data = _read_url(
+        f"{BASE_URL}/corpCode.xml?{query}",
+        timeout=TIMEOUT_CORPCODE_SEC,
+        max_bytes=CORPCODE_ZIP_RESPONSE_MAX_BYTES,
+        response_label="corpCode ZIP",
+    )
     try:
+        _validate_zip_container(
+            data,
+            member_max_count=CORPCODE_ZIP_MAX_MEMBERS,
+            central_directory_max_bytes=CORPCODE_ZIP_CENTRAL_DIRECTORY_MAX_BYTES,
+            archive_label="corpCode ZIP",
+        )
         archive = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile as exc:
         try:
             _raise_download_response_error("corpCode", data)
         except DartClientError as error:
             raise error from exc
+    with archive:
+        files = _validate_zip_archive(
+            archive.infolist(),
+            member_max_bytes=CORPCODE_XML_MAX_BYTES,
+            total_max_bytes=CORPCODE_ZIP_TOTAL_UNCOMPRESSED_MAX_BYTES,
+            member_max_count=CORPCODE_ZIP_MAX_MEMBERS,
+            archive_label="corpCode ZIP",
+        )
+        corpcode_infos = [info for info in files if info.filename == "CORPCODE.xml"]
+        if len(corpcode_infos) != 1:
+            raise DartResponseError("corpCode ZIP의 필수 항목 구성이 올바르지 않습니다")
+        corpcode_xml = _read_zip_member(
+            archive,
+            corpcode_infos[0],
+            max_bytes=CORPCODE_XML_MAX_BYTES,
+            archive_label="corpCode ZIP",
+        )
     dest_dir.mkdir(parents=True, exist_ok=True)
-    with archive.open("CORPCODE.xml") as f:
-        xml_path.write_bytes(f.read())
+    xml_path.write_bytes(corpcode_xml)
     return xml_path

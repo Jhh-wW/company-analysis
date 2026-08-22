@@ -18,6 +18,7 @@ from core import naver_client
 class _Response:
     def __init__(self, data: bytes):
         self.data = data
+        self.read_sizes: list[int] = []
 
     def __enter__(self):
         return self
@@ -25,8 +26,9 @@ class _Response:
     def __exit__(self, *_args):
         return False
 
-    def read(self):
-        return self.data
+    def read(self, size: int = -1):
+        self.read_sizes.append(size)
+        return self.data if size < 0 else self.data[:size]
 
 
 def test_로컬_기본_경로는_예전과_같다(monkeypatch):
@@ -164,3 +166,29 @@ def test_필드_형식이_틀려도_전체_호출이_터지지_않는다(
     assert items[0].title == ""
     assert items[0].link == ""
     assert items[0].pub_date is None
+
+
+def test_뉴스_JSON은_상한보다_한_바이트만_더_읽고_원문없이_거부한다(
+    tmp_path, monkeypatch
+):
+    secret = b"oversized-news-secret"
+    response = _Response(secret)
+    monkeypatch.setattr(naver_client, "JSON_RESPONSE_MAX_BYTES", 8)
+    monkeypatch.setenv("NAVER_CLIENT_ID", "fake-id")
+    monkeypatch.setenv("NAVER_CLIENT_SECRET", "fake-secret")
+    monkeypatch.setattr(
+        naver_client,
+        "default_counter_path",
+        lambda: tmp_path / "usage.json",
+    )
+    monkeypatch.setattr(
+        naver_client.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: response,
+    )
+
+    with pytest.raises(naver_client.NaverResponseError) as caught:
+        naver_client.search_news("회사")
+
+    assert response.read_sizes == [9]
+    assert secret.decode() not in str(caught.value)

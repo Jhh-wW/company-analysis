@@ -24,6 +24,7 @@ from core import usage_store
 
 BASE_URL = "https://naverapihub.apigw.ntruss.com/search/v1/news"
 TIMEOUT_SEC = 15
+JSON_RESPONSE_MAX_BYTES = 2 * 1024 * 1024
 DAILY_SOFT_LIMIT = 2_000          # 보수 상한 — 공식 무료 한도 미확인이라 낮게 잡는다
 COUNTER_FILENAME = "naver_usage.json"
 # 예전 코드가 가져다 쓸 수 있도록 남겨 둔 로컬 기본값이다.
@@ -62,7 +63,11 @@ class NaverResponseError(NaverClientError):
 def _read_json(request: urllib.request.Request) -> dict:
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT_SEC) as response:
-            data = response.read()
+            data = response.read(JSON_RESPONSE_MAX_BYTES + 1)
+            if len(data) > JSON_RESPONSE_MAX_BYTES:
+                raise NaverResponseError(
+                    "Naver 뉴스 JSON 응답이 허용 크기를 초과했습니다"
+                )
     except urllib.error.HTTPError as error:
         if error.code == 429:
             raise NaverLimitReached("Naver 뉴스 HTTP 429 — 사용량 한도 도달") from None
