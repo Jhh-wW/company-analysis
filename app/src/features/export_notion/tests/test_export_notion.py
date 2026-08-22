@@ -608,3 +608,45 @@ class TestSendReportToNotion:
         assert result.uncertain is False
         assert calls == constants.MAX_429_RETRIES + 1
         assert sleeps == [1.0] * constants.MAX_429_RETRIES
+
+    def test_후속블록_timeout은_부분성공과_원격결과미확정을_함께_남긴다(
+        self, notion_env, monkeypatch
+    ):
+        monkeypatch.setattr(
+            notion.logic,
+            "build_blocks",
+            lambda *_args, **_kwargs: [
+                {"object": "block", "type": "paragraph"}
+                for _ in range(constants.MAX_BLOCKS_PER_REQUEST + 1)
+            ],
+        )
+        calls = 0
+
+        def create_then_timeout(_method: str, _path: str, _body: dict) -> dict:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return {"id": "page-id", "url": "https://notion.so/page-id"}
+            raise notion.NotionAPIError("timeout", uncertain=True)
+
+        result = notion.send_report_to_notion(
+            _make_report(), send=create_then_timeout
+        )
+
+        assert result.success is False
+        assert result.partial is True
+        assert result.uncertain is True
+        assert result.page_id == "page-id"
+        assert calls == 2
+
+    def test_페이지_ID가_문자열이_아니면_malformed응답으로_막는다(
+        self, notion_env
+    ):
+        result = notion.send_report_to_notion(
+            _make_report(),
+            send=lambda *_args: {"id": {"unexpected": "object"}},
+        )
+
+        assert result.success is False
+        assert result.uncertain is True
+        assert result.error == "노션이 페이지 ID를 돌려주지 않았습니다"

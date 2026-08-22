@@ -350,8 +350,10 @@ def send_report_to_notion(
             uncertain=exc.uncertain,
         )
 
-    page_id = created.get("id", "")
-    page_url = created.get("url", "")
+    page_id_value = created.get("id", "")
+    page_url_value = created.get("url", "")
+    page_id = page_id_value.strip() if isinstance(page_id_value, str) else ""
+    page_url = page_url_value.strip() if isinstance(page_url_value, str) else ""
     if not page_id:
         return NotionExportResult(
             success=False,
@@ -377,6 +379,7 @@ def send_report_to_notion(
                 page_url=page_url,
                 chunk_count=total,
                 partial=True,
+                uncertain=exc.uncertain,
                 error=(
                     f"노션에 페이지는 만들어졌지만 일부 내용만 들어갔을 수 있습니다 "
                     f"({sent}/{total} 조각까지 보낸 뒤 실패) — {exc}"
