@@ -129,3 +129,6 @@ DEFAULT_EXTRACT_MODEL: Final[str] = "claude-haiku-4-5"
 
 #: 기본 추출기 호출의 응답 토큰 상한. 공고 1건 전문을 담기에 충분한 여유치.
 DEFAULT_EXTRACT_MAX_TOKENS: Final[int] = 8000
+
+#: OCR provider 단일 호출이 worker를 무한정 점유하지 못하게 하는 초 단위 상한.
+ANTHROPIC_TIMEOUT_SEC: Final[float] = 180.0

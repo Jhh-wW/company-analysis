@@ -92,8 +92,9 @@ class _FakeClient:
         self.messages = _FakeMessages()
         self.retry_options: list[int] = []
 
-    def with_options(self, *, max_retries: int):
+    def with_options(self, *, max_retries: int, timeout: float):
         assert max_retries == 0
+        assert timeout == real.ANTHROPIC_TIMEOUT_SEC
         self.retry_options.append(max_retries)
         return self
 
@@ -755,7 +756,8 @@ def _run(posting: str = POSTING, job: str = JOB, card: Optional[CompanyCard] = N
     return real.RealPipeline().run(user_input, card or _card())
 
 
-def test_삼성전자_저장원문은_가짜AI로_생성이후까지_무과금재현한다(
+@pytest.mark.local_integration
+def test_로컬통합_삼성전자_저장원문은_가짜AI로_생성이후까지_무과금재현한다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """P01에서 저장된 DART 원문을 읽되 provider 대신 완전한 가짜 응답을 쓴다.
@@ -783,7 +785,9 @@ def test_삼성전자_저장원문은_가짜AI로_생성이후까지_무과금�
             raw_path = candidate
             break
     if raw_path is None:
-        pytest.skip("검증된 삼성전자 P01 DART 원문이 로컬에 없습니다")
+        pytest.fail(
+            "로컬 통합 시험을 선택했지만 해시가 검증된 삼성전자 P01 DART 원문이 없습니다"
+        )
 
     actual = real._engine()
 
@@ -1005,6 +1009,8 @@ def test_삼성전자_저장원문은_가짜AI로_생성이후까지_무과금�
     # 이 P01 원문은 법인명을 붙인 직접 경쟁 근거가 없어 실제 9장 게이트에서
     # 멈추는 것이 정답이다. 경쟁사를 추측해 finalize까지 우회하지 않는다.
     assert "양사 공식 원문" in result.message
+    assert "경쟁우위가 없다는 뜻이 아니라" in result.message
+    assert "현재 공개 근거로는 확인할 수 없" in result.message
     assert calls == {"writer": 1, "comparison": 1, "finalize": 0}
     assert progress[:6] == [
         "identify", "judge", "collect", "gate", "generate", "verify"
@@ -1456,6 +1462,7 @@ def test_3개년표만_있고_필수_정체성제품근거가_없으면_출고�
     assert result.outcome is Outcome.GATE_STOPPED
     assert result.report is None
     assert result.charged is False
+    assert "확인되지 않은 내용을 보고서처럼 보여주지 않" in result.message
 
 
 def test_공시_사업연도는_접수일이_아니라_결산연도를_읽는다() -> None:

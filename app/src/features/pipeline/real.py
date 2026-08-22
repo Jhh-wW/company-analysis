@@ -89,7 +89,7 @@ from src.features.writer import logic as writer_logic
 from src.features.writer import verify as writer_verify
 from src.features.grading.logic import is_accounting_policy, is_table_dump
 from src.features.cost_tracking.store import AiCostEvent
-from src.features.pipeline.constants import DART_SUCCESS_STATUS
+from src.features.pipeline.constants import ANTHROPIC_TIMEOUT_SEC, DART_SUCCESS_STATUS
 from src.features.pipeline.port import (
     CompanyCard,
     CompanyLookupResult,
@@ -925,7 +925,7 @@ def _metered_client(metered: _MeteredEngine, client: Any) -> Any:
     # 없다. 자동 retry를 끄고 명시적인 재호출만 매번 새 예약을 받게 한다.
     with_options = getattr(client, "with_options", None)
     if callable(with_options):
-        client = with_options(max_retries=0)
+        client = with_options(max_retries=0, timeout=ANTHROPIC_TIMEOUT_SEC)
     return metered.meter_client(client)
 
 
@@ -1476,7 +1476,10 @@ class RealPipeline:
         if not frags:
             return RunResult(
                 outcome=Outcome.GATE_STOPPED,
-                message=_message(Outcome.GATE_STOPPED),
+                message=(
+                    "이번 조사에서는 공식 자료에서 분석에 쓸 회사 사실을 찾지 못했습니다. "
+                    "확인되지 않은 내용을 채우지 않고 여기서 멈췄습니다."
+                ),
                 sources=sources,
                 corp_type=judgment.corp_type,
                 fragments_collected=len(frags),
@@ -1527,7 +1530,11 @@ class RealPipeline:
         if not kept:
             return RunResult(
                 outcome=Outcome.GATE_STOPPED,
-                message=_message(Outcome.GATE_STOPPED),
+                message=(
+                    "이번에 수집한 공식 자료에서 원문 대조를 통과한 회사 사실을 "
+                    "확보하지 못했습니다. 확인되지 않은 내용을 보고서처럼 "
+                    "보여주지 않고 여기서 멈췄습니다."
+                ),
                 sources=sources,
                 corp_type=judgment.corp_type,
                 fragments_collected=len(frags),
@@ -1645,7 +1652,11 @@ class RealPipeline:
             )
             return RunResult(
                 outcome=Outcome.GATE_STOPPED,
-                message="양사 공식 원문을 같은 지표·기간·연결범위로 비교할 수 없어 보고서를 내보내지 않았습니다.",
+                message=(
+                    "양사 공식 원문을 같은 지표·기간·연결범위로 비교할 수 없어 "
+                    "보고서를 내보내지 않았습니다. 경쟁우위가 없다는 뜻이 아니라, "
+                    "현재 공개 근거로는 확인할 수 없다는 뜻입니다."
+                ),
                 sources=sources,
                 corp_type=judgment.corp_type,
                 fragments_collected=len(frags),
@@ -1664,7 +1675,11 @@ class RealPipeline:
             )
             return RunResult(
                 outcome=Outcome.GATE_STOPPED,
-                message="필수 회사 사실과 검증 근거가 충분하지 않아 보고서를 내보내지 않았습니다.",
+                message=(
+                    "필수 회사 사실과 검증 근거가 충분하지 않아 보고서를 "
+                    "내보내지 않았습니다. 확인되지 않은 내용을 정상 보고서처럼 "
+                    "보여주지 않습니다."
+                ),
                 sources=sources,
                 corp_type=judgment.corp_type,
                 fragments_collected=len(frags),
@@ -2089,6 +2104,11 @@ def _collect_news(
         except Exception as exc:  # noqa: BLE001 — 한도·인증·네트워크. 나머지 검색은 계속한다
             첫오류 = 첫오류 or f"{type(exc).__name__}: {str(exc)[:60]}"
             검색별[검색어] = 0
+            # 인증 거부·한도 소진·응답 계약 파손은 검색어를 바꿔도
+            # 회복되지 않는다. 같은 요청에서 다시 불러 계수기와
+            # provider 사용량만 늘리지 않도록 어댑터의 종료 신호를 따른다.
+            if getattr(exc, "stop_further_requests", False) is True:
+                break
             continue
         groups.append(found)
         검색별[검색어] = len(found)

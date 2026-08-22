@@ -10,6 +10,8 @@ import datetime as dt
 import io
 import json
 import os
+import re
+import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
@@ -31,8 +33,66 @@ ERR_NO_DATA = "013"           # 원래 없다 — 즉시 포기
 ERR_LIMIT = "020"             # 한도 소진 — 즉시 중단
 
 
-class DartLimitReached(RuntimeError):
+class DartClientError(RuntimeError):
+    """비밀값·원문을 노출하지 않는 DART 어댑터 오류."""
+
+
+class DartLimitReached(DartClientError):
     """일일 한도 도달 — 오늘은 더 부르지 않는다."""
+
+
+class DartAuthenticationError(DartClientError):
+    """API 키·접근 권한이 거부되었다."""
+
+
+class DartTransportError(DartClientError):
+    """타임아웃·네트워크 오류로 응답을 확정할 수 없다."""
+
+
+class DartResponseError(DartClientError):
+    """DART가 예상한 계약과 다른 응답을 돌려줬다."""
+
+
+_AUTH_STATUSES = frozenset({"010", "011", "012"})
+_STATUS_PATTERNS = (
+    re.compile(rb"<status>\s*([0-9]{3})\s*</status>", re.IGNORECASE),
+    re.compile(rb'"status"\s*:\s*"([0-9]{3})"', re.IGNORECASE),
+)
+
+
+def _read_url(url: str, *, timeout: float) -> bytes:
+    """URL·키·원문을 예외에 싣지 않고 응답 바이트를 읽는다."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return response.read()
+    except urllib.error.HTTPError as error:
+        if error.code == 429:
+            raise DartLimitReached("DART HTTP 429 — 사용량 한도 도달") from None
+        if error.code in {401, 403}:
+            raise DartAuthenticationError("DART API 인증이 거부되었습니다") from None
+        raise DartResponseError(
+            f"DART API가 HTTP {error.code} 오류를 돌려줬습니다"
+        ) from None
+    except (urllib.error.URLError, TimeoutError, OSError):
+        raise DartTransportError("DART API와 통신하지 못했습니다") from None
+
+
+def _status_from_error_body(data: bytes) -> str:
+    """오류 원문을 반사하지 않고 3자리 상태 코드만 읽는다."""
+    for pattern in _STATUS_PATTERNS:
+        matched = pattern.search(data[:4096])
+        if matched is not None:
+            return matched.group(1).decode("ascii")
+    return ""
+
+
+def _raise_download_response_error(label: str, data: bytes) -> None:
+    status = _status_from_error_body(data)
+    if status == ERR_LIMIT:
+        raise DartLimitReached(f"{label} 응답 020 — 서버 기준 한도 소진")
+    if status in _AUTH_STATUSES:
+        raise DartAuthenticationError(f"{label} DART API 인증이 거부되었습니다")
+    raise DartResponseError(f"{label} 다운로드 응답 형식이 올바르지 않습니다")
 
 
 class UsageCounter:
@@ -85,12 +145,23 @@ def api_key() -> str:
 def get_json(endpoint: str, params: dict[str, Any],
              counter: UsageCounter | None = None) -> dict[str, Any]:
     """가벼운 JSON API 호출 (company.json · list.json). 호출 전 계수기 tick."""
+    key = api_key()
+    query = urllib.parse.urlencode({"crtfc_key": key, **params})
     (counter or UsageCounter()).tick()
-    query = urllib.parse.urlencode({"crtfc_key": api_key(), **params})
-    with urllib.request.urlopen(f"{BASE_URL}/{endpoint}?{query}", timeout=TIMEOUT_LIGHT_SEC) as res:
-        payload = json.loads(res.read().decode("utf-8"))
-    if payload.get("status") == ERR_LIMIT:
+    data = _read_url(f"{BASE_URL}/{endpoint}?{query}", timeout=TIMEOUT_LIGHT_SEC)
+    try:
+        payload = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise DartResponseError("DART JSON 응답을 해석하지 못했습니다") from None
+    if not isinstance(payload, dict):
+        raise DartResponseError("DART JSON 응답 형식이 올바르지 않습니다")
+    status = payload.get("status")
+    if not isinstance(status, str) or not status:
+        raise DartResponseError("DART JSON 응답에 상태 코드가 없습니다")
+    if status == ERR_LIMIT:
         raise DartLimitReached("DART 응답 020 — 서버 기준 한도 소진")
+    if status in _AUTH_STATUSES:
+        raise DartAuthenticationError("DART API 인증이 거부되었습니다")
     return payload
 
 
@@ -108,17 +179,19 @@ def download_document(rcept_no: str, dest_dir: Path,
     out_path = dest_dir / f"{rcept_no}.xml"
     if out_path.exists():
         return out_path
+    key = api_key()
+    query = urllib.parse.urlencode({"crtfc_key": key, "rcept_no": rcept_no})
     (counter or UsageCounter()).tick()
-    query = urllib.parse.urlencode({"crtfc_key": api_key(), "rcept_no": rcept_no})
-    with urllib.request.urlopen(f"{BASE_URL}/document.xml?{query}",
-                                timeout=TIMEOUT_DOCUMENT_SEC) as res:
-        data = res.read()
+    data = _read_url(
+        f"{BASE_URL}/document.xml?{query}", timeout=TIMEOUT_DOCUMENT_SEC
+    )
     try:
         archive = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile as exc:
-        head = data[:300].decode("utf-8", errors="replace")
-        status = "020" if ERR_LIMIT in head else ("응답 머리: " + head.split("message")[0][:80])
-        raise RuntimeError(f"공시서류 {rcept_no} 다운로드 실패 — zip이 아닌 응답 ({status})") from exc
+        try:
+            _raise_download_response_error(f"공시서류 {rcept_no}", data)
+        except DartClientError as error:
+            raise error from exc
     infos = archive.infolist()
     if not infos:
         raise RuntimeError(f"공시서류 {rcept_no} — zip이 비어 있음")
@@ -138,17 +211,17 @@ def download_corpcode(dest_dir: Path, counter: UsageCounter | None = None) -> Pa
     xml_path = dest_dir / "CORPCODE.xml"
     if xml_path.exists():
         return xml_path
+    key = api_key()
+    query = urllib.parse.urlencode({"crtfc_key": key})
     (counter or UsageCounter()).tick()
-    query = urllib.parse.urlencode({"crtfc_key": api_key()})
-    with urllib.request.urlopen(f"{BASE_URL}/corpCode.xml?{query}",
-                                timeout=TIMEOUT_CORPCODE_SEC) as res:
-        data = res.read()
+    data = _read_url(f"{BASE_URL}/corpCode.xml?{query}", timeout=TIMEOUT_CORPCODE_SEC)
     try:
         archive = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile as exc:
-        head = data[:300].decode("utf-8", errors="replace")
-        status = "020" if ERR_LIMIT in head else ("응답 머리: " + head.split("message")[0][:80])
-        raise RuntimeError(f"corpCode 다운로드 실패 — zip이 아닌 응답 ({status})") from exc
+        try:
+            _raise_download_response_error("corpCode", data)
+        except DartClientError as error:
+            raise error from exc
     dest_dir.mkdir(parents=True, exist_ok=True)
     with archive.open("CORPCODE.xml") as f:
         xml_path.write_bytes(f.read())

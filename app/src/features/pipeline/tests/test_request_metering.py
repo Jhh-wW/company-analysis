@@ -539,6 +539,18 @@ def test_1판_원본의_8달러_예산가드_계약은_바꾸지_않는다():
         for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name == "_ask"
     )
+    client_factory = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_client"
+    )
+    client_return = next(
+        node for node in ast.walk(client_factory) if isinstance(node, ast.Return)
+    )
+    assert isinstance(client_return.value, ast.Call)
+    client_options = {
+        keyword.arg: keyword.value for keyword in client_return.value.keywords
+    }
     positional = [arg.arg for arg in ask.args.args]
     globals_in_ask = {
         name
@@ -552,6 +564,10 @@ def test_1판_원본의_8달러_예산가드_계약은_바꾸지_않는다():
     assert positional == ["client", "prompt", "schema", "max_tokens"]
     assert ast.literal_eval(ask.args.defaults[-1]) == 700
     assert "_spent_usd" in globals_in_ask
+    assert ast.literal_eval(client_options["max_retries"]) == 0
+    assert isinstance(client_options["timeout"], ast.Name)
+    assert client_options["timeout"].id == "ANTHROPIC_TIMEOUT_SEC"
+    assert assigned("ANTHROPIC_TIMEOUT_SEC") == 180.0
 
 
 def test_요청모델이_아니라_실제_응답모델_단가와_이름을_쓴다():
@@ -775,5 +791,38 @@ def test_sdk_내부_retry를_provider경계에서_0으로_고정한다():
 
     wrapped = real._metered_client(metered, client)
 
-    assert client.options == [{"max_retries": 0}]
+    assert client.options == [
+        {"max_retries": 0, "timeout": real.ANTHROPIC_TIMEOUT_SEC}
+    ]
     assert wrapped.messages is not messages
+
+
+def test_Naver_인증·한도오류는_같은요청에서_반복호출하지_않는다(
+    monkeypatch,
+):
+    calls: list[str] = []
+
+    class PermanentProviderFailure(RuntimeError):
+        stop_further_requests = True
+
+    class Engine:
+        def search_news(self, query, **_kwargs):
+            calls.append(query)
+            raise PermanentProviderFailure("인증 거부")
+
+    monkeypatch.setattr(
+        real.newspick_logic,
+        "search_terms",
+        lambda *_args, **_kwargs: [
+            ("첫 검색", "date", 10),
+            ("둘째 검색", "date", 10),
+            ("셋째 검색", "sim", 10),
+        ],
+    )
+    steps: list[dict] = []
+
+    result = real._collect_news(Engine(), None, "회사", {}, steps)
+
+    assert result == []
+    assert calls == ["첫 검색"]
+    assert steps[0]["검색별"] == {"첫 검색": 0}

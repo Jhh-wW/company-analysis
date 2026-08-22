@@ -31,8 +31,55 @@ COUNTER_PATH = LOCAL_LOG_DIR / COUNTER_FILENAME
 _TAG_RE = re.compile(r"</?b>|&quot;|&amp;|&lt;|&gt;")
 
 
-class NaverLimitReached(RuntimeError):
+class NaverClientError(RuntimeError):
+    """비밀값·원문을 노출하지 않는 Naver 어댑터 오류."""
+
+    stop_further_requests = False
+
+
+class NaverLimitReached(NaverClientError):
     """일 소프트 상한 도달 — 오늘은 더 부르지 않는다."""
+
+    stop_further_requests = True
+
+
+class NaverAuthenticationError(NaverClientError):
+    """API 키·접근 권한이 거부되었다."""
+
+    stop_further_requests = True
+
+
+class NaverTransportError(NaverClientError):
+    """타임아웃·네트워크 오류로 응답을 확정할 수 없다."""
+
+
+class NaverResponseError(NaverClientError):
+    """Naver가 예상한 계약과 다른 응답을 돌려줬다."""
+
+    stop_further_requests = True
+
+
+def _read_json(request: urllib.request.Request) -> dict:
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT_SEC) as response:
+            data = response.read()
+    except urllib.error.HTTPError as error:
+        if error.code == 429:
+            raise NaverLimitReached("Naver 뉴스 HTTP 429 — 사용량 한도 도달") from None
+        if error.code in {401, 403}:
+            raise NaverAuthenticationError("Naver 뉴스 API 인증이 거부되었습니다") from None
+        raise NaverResponseError(
+            f"Naver 뉴스 API가 HTTP {error.code} 오류를 돌려줬습니다"
+        ) from None
+    except (urllib.error.URLError, TimeoutError, OSError):
+        raise NaverTransportError("Naver 뉴스 API와 통신하지 못했습니다") from None
+    try:
+        payload = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise NaverResponseError("Naver 뉴스 JSON 응답을 해석하지 못했습니다") from None
+    if not isinstance(payload, dict):
+        raise NaverResponseError("Naver 뉴스 JSON 응답 형식이 올바르지 않습니다")
+    return payload
 
 
 @dataclass(frozen=True)
@@ -76,26 +123,34 @@ def _clean(text: str) -> str:
     return _TAG_RE.sub("", text)
 
 
-def _parse_date(raw: str) -> Optional[dt.date]:
+def _parse_date(raw: object) -> Optional[dt.date]:
     # 예: "Fri, 15 Aug 2026 09:00:00 +0900"
     try:
+        if not isinstance(raw, str):
+            return None
         return dt.datetime.strptime(raw[:16].strip(), "%a, %d %b %Y").date()
     except ValueError:
         return None
 
 
+def _text(value: object) -> str:
+    return value if isinstance(value, str) else ""
+
+
 def search_news(query: str, display: int = 10, sort: str = "date") -> list[NewsItem]:
-    """뉴스 검색 1회. 429·401은 그대로 예외로 올린다 (호출자가 사유를 기록)."""
-    _tick()
+    """뉴스 검색 1회. 429·인증·통신 실패를 비밀값 없는 예외로 올린다."""
     cid, sec = _keys()
     params = urllib.parse.urlencode({"query": query, "display": display, "sort": sort})
     req = urllib.request.Request(f"{BASE_URL}?{params}",
                                  headers={"X-NCP-APIGW-API-KEY-ID": cid,
                                           "X-NCP-APIGW-API-KEY": sec})
-    with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as res:
-        payload = json.loads(res.read().decode("utf-8"))
-    return [NewsItem(title=_clean(i.get("title", "")), link=i.get("link", ""),
-                     originallink=i.get("originallink", ""),
-                     description=_clean(i.get("description", "")),
+    _tick()
+    payload = _read_json(req)
+    items = payload.get("items")
+    if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+        raise NaverResponseError("Naver 뉴스 응답의 items 형식이 올바르지 않습니다")
+    return [NewsItem(title=_clean(_text(i.get("title"))), link=_text(i.get("link")),
+                     originallink=_text(i.get("originallink")),
+                     description=_clean(_text(i.get("description"))),
                      pub_date=_parse_date(i.get("pubDate", "")))
-            for i in payload.get("items", [])]
+            for i in items]

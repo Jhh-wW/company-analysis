@@ -82,6 +82,7 @@ RUN_ID = "파일럿_야간50"
 MODEL = "claude-haiku-4-5"          # 확정 운영 모델 (3단 조합·비용 목표 정합)
 BUDGET_STOP_USD = 8.0
 AI_NAME_RETRY_MAX = 5               # 층2 재시도 상한 (OWASP LLM06 가드레일)
+ANTHROPIC_TIMEOUT_SEC = 180.0        # 단일 provider 호출 worker 점유 상한
 AUDIT_WINDOW_YEARS = 3              # 조건 2 창 (P-07 잠정 3년)
 FRAG_CHARS = 1200                   # 조각 길이 상한
 MAX_FRAGS = 14                      # 생성 입력 조각 수 상한 (비용·맥락 관리)
@@ -150,7 +151,9 @@ _spent_usd = 0.0
 
 
 def _client() -> anthropic.Anthropic:
-    return anthropic.Anthropic()
+    # SDK 내부 retry는 호출별 예상비용·계수 경계를 다시 거치지
+    # 않는다. 자동 retry를 끄고 단일 호출 대기 상한을 명시한다.
+    return anthropic.Anthropic(max_retries=0, timeout=ANTHROPIC_TIMEOUT_SEC)
 
 
 def _ask(client: anthropic.Anthropic, prompt: str, schema: dict[str, Any],

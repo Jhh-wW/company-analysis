@@ -109,7 +109,9 @@ def test_응답_JSON_파싱실패여도_usage_비용을_보존한다(monkeypatch
         usage.input_tokens,
         usage.output_tokens,
     )
-    assert usage.constructor_calls == [{"max_retries": 0}]
+    assert usage.constructor_calls == [
+        {"max_retries": 0, "timeout": constants.ANTHROPIC_TIMEOUT_SEC}
+    ]
 
 
 def test_응답_JSON이_객체가_아니어도_usage_비용을_보존한다(monkeypatch):
@@ -208,3 +210,61 @@ def test_OCR_예상예약이_부족하면_client도_만들지_않고_provider_0�
             logic.default_extract([_png()])
 
     assert usage.constructor_calls == []
+
+
+def test_usage가_있는_provider_실패도_알려진_비용으로_보존한다(monkeypatch):
+    class FailedWithUsage(RuntimeError):
+        def __init__(self):
+            super().__init__("provider 원문은 노출하지 않음")
+            self.model = constants.DEFAULT_EXTRACT_MODEL
+            self.usage = types.SimpleNamespace(input_tokens=2000, output_tokens=10)
+
+    module = types.ModuleType("anthropic")
+    module.Anthropic = lambda **_kwargs: types.SimpleNamespace(
+        messages=types.SimpleNamespace(
+            create=lambda **_call: (_ for _ in ()).throw(FailedWithUsage())
+        )
+    )
+    monkeypatch.setitem(sys.modules, "anthropic", module)
+    monkeypatch.setenv(constants.ENV_ANTHROPIC_API_KEY, "시험용-가짜키")
+
+    result = logic.extract_posting_text([_png()], extract=logic.default_extract)
+
+    expected = usage_cost_krw(constants.DEFAULT_EXTRACT_MODEL, 2000, 10)
+    assert result.ok is False
+    assert result.cost_krw == expected
+    assert result.billing_uncertain is False
+    assert result.failure_kind == "technical"
+
+
+def test_malformed_provider_content도_비용을_버리지_않고_기술실패로_돌린다(
+    monkeypatch,
+):
+    usage = _fake_anthropic(monkeypatch, content=None)
+
+    result = logic.extract_posting_text([_png()], extract=logic.default_extract)
+
+    assert result.ok is False
+    assert result.cost_krw == usage_cost_krw(
+        constants.DEFAULT_EXTRACT_MODEL,
+        usage.input_tokens,
+        usage.output_tokens,
+    )
+    assert result.billing_uncertain is False
+    assert result.failure_kind == "technical"
+
+
+def test_주입_extractor의_잘못된_text형식이_500으로_터지지_않는다():
+    result = logic.extract_posting_text(
+        [_png()],
+        extract=lambda _images: logic.ExtractResult(  # type: ignore[arg-type]
+            text=123,
+            cost_krw=12.5,
+            model="fake-model",
+        ),
+    )
+
+    assert result.ok is False
+    assert result.cost_krw == 12.5
+    assert result.billing_uncertain is False
+    assert result.failure_kind == "technical"

@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import warnings
 from dataclasses import dataclass
 from io import BytesIO
@@ -59,6 +60,8 @@ class ExtractResult:
     model: str = ""
     #: API 예외로 응답을 못 받아 실제 과금 여부를 확정할 수 없는가.
     billing_uncertain: bool = False
+    #: provider 응답은 받았지만 계약과 달라 글자를 사용할 수 없는가.
+    technical_failure: bool = False
 
 
 #: 이미지 바이트 목록(한 공고를 나눠 찍은 여러 장)을 글자로 바꾸는 함수의 모양.
@@ -250,24 +253,62 @@ def extract_posting_text(
             failure_kind="technical",
         )
 
-    text = (result.text or "").strip()
+    if not isinstance(result, ExtractResult):
+        logger.warning("공고 이미지 글자 추출 응답 형식 오류")
+        return PostingImageResult(
+            ok=False,
+            error=constants.ERROR_EXTRACT_FAILED,
+            billing_uncertain=True,
+            failure_kind="technical",
+        )
+    try:
+        if isinstance(result.cost_krw, bool):
+            raise ValueError
+        cost_krw = float(result.cost_krw)
+        if not math.isfinite(cost_krw) or cost_krw < 0:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        logger.warning("공고 이미지 글자 추출 비용 형식 오류")
+        return PostingImageResult(
+            ok=False,
+            error=constants.ERROR_EXTRACT_FAILED,
+            billing_uncertain=True,
+            failure_kind="technical",
+        )
+    model = result.model if isinstance(result.model, str) else ""
+    billing_uncertain = result.billing_uncertain is True
+    if not isinstance(result.text, str):
+        logger.warning("공고 이미지 글자 추출 text 형식 오류")
+        return PostingImageResult(
+            ok=False,
+            error=constants.ERROR_EXTRACT_FAILED,
+            cost_krw=cost_krw,
+            model=model,
+            billing_uncertain=billing_uncertain,
+            failure_kind="technical",
+        )
+    text = result.text.strip()
     if not text:
         return PostingImageResult(
             ok=False,
             error=constants.ERROR_EXTRACT_FAILED,
-            cost_krw=max(0.0, result.cost_krw),
-            model=result.model,
-            billing_uncertain=result.billing_uncertain,
+            cost_krw=cost_krw,
+            model=model,
+            billing_uncertain=billing_uncertain,
             # 정상 응답 안에서 글자를 얻지 못한 것은 흐린 이미지·빈 응답일 수 있다.
             # 과금 여부조차 불명확할 때만 기술 오류로 올린다.
-            failure_kind="technical" if result.billing_uncertain else "input",
+            failure_kind=(
+                "technical"
+                if billing_uncertain or result.technical_failure is True
+                else "input"
+            ),
         )
     return PostingImageResult(
         ok=True,
         text=text,
-        cost_krw=max(0.0, result.cost_krw),
-        model=result.model,
-        billing_uncertain=result.billing_uncertain,
+        cost_krw=cost_krw,
+        model=model,
+        billing_uncertain=billing_uncertain,
     )
 
 
@@ -360,7 +401,10 @@ def default_extract(images: list[bytes]) -> ExtractResult:
         ),
         max_tokens=constants.DEFAULT_EXTRACT_MAX_TOKENS,
     )
-    client = anthropic.Anthropic(max_retries=0)
+    client = anthropic.Anthropic(
+        max_retries=0,
+        timeout=constants.ANTHROPIC_TIMEOUT_SEC,
+    )
     try:
         response = client.messages.create(
             model=constants.DEFAULT_EXTRACT_MODEL,
@@ -368,9 +412,36 @@ def default_extract(images: list[bytes]) -> ExtractResult:
             messages=[{"role": "user", "content": content}],
             output_config={"format": {"type": "json_schema", "schema": schema}},
         )
-    except Exception:
-        provider_budget.current().mark_unknown(call_reservation)
-        raise
+    except Exception as exc:
+        failure_usage = getattr(exc, "usage", None)
+        if failure_usage is None:
+            failure_usage = getattr(getattr(exc, "response", None), "usage", None)
+        try:
+            failure_in = int(getattr(failure_usage, "input_tokens"))
+            failure_out = int(getattr(failure_usage, "output_tokens"))
+            if failure_in < 0 or failure_out < 0:
+                raise ValueError
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            provider_budget.current().mark_unknown(call_reservation)
+            raise
+        failure_model = str(
+            getattr(exc, "model", "") or constants.DEFAULT_EXTRACT_MODEL
+        )
+        failure_cost = usage_cost_krw(failure_model, failure_in, failure_out)
+        provider_budget.current().settle_call(
+            call_reservation,
+            actual_krw=failure_cost,
+        )
+        logger.warning(
+            "OCR provider가 usage를 포함한 실패를 돌려줬습니다 type=%s",
+            type(exc).__name__,
+        )
+        return ExtractResult(
+            text="",
+            cost_krw=failure_cost,
+            model=failure_model,
+            technical_failure=True,
+        )
     model = str(getattr(response, "model", "") or constants.DEFAULT_EXTRACT_MODEL)
     usage = getattr(response, "usage", None)
     tokens_in = getattr(usage, "input_tokens", None) if usage is not None else None
@@ -405,22 +476,47 @@ def default_extract(images: list[bytes]) -> ExtractResult:
         raise
     if getattr(response, "stop_reason", "") == "refusal":
         return ExtractResult(text="", cost_krw=cost_krw, model=model)
-    text_block = next((b for b in response.content if b.type == "text"), None)
+    content_blocks = getattr(response, "content", None)
+    if not isinstance(content_blocks, (list, tuple)):
+        return ExtractResult(
+            text="", cost_krw=cost_krw, model=model, technical_failure=True
+        )
+    text_block = next(
+        (block for block in content_blocks if getattr(block, "type", "") == "text"),
+        None,
+    )
     if text_block is None:
-        return ExtractResult(text="", cost_krw=cost_krw, model=model)
+        return ExtractResult(
+            text="", cost_krw=cost_krw, model=model, technical_failure=True
+        )
+    raw_text = getattr(text_block, "text", None)
+    if not isinstance(raw_text, str):
+        return ExtractResult(
+            text="", cost_krw=cost_krw, model=model, technical_failure=True
+        )
     try:
-        parsed = json.loads(text_block.text)
+        parsed = json.loads(raw_text)
     except (TypeError, ValueError):
         # ★ 응답 파싱이 실패해도 호출 비용은 이미 발생했다. 빈 결과와 함께 돌려줘야
         # 원장이 그 돈을 빠뜨리지 않는다.
-        return ExtractResult(text="", cost_krw=cost_krw, model=model)
+        return ExtractResult(
+            text="", cost_krw=cost_krw, model=model, technical_failure=True
+        )
     if not isinstance(parsed, dict):
         # JSON 자체는 맞아도 목록·문자열이면 약속한 응답 모양이 아니다. 이때도
         # 응답 usage는 이미 받았으므로 비용까지 버리면 안 된다.
-        return ExtractResult(text="", cost_krw=cost_krw, model=model)
+        return ExtractResult(
+            text="", cost_krw=cost_krw, model=model, technical_failure=True
+        )
+    full_text = parsed.get("full_text")
+    if not isinstance(full_text, str):
+        return ExtractResult(
+            text="", cost_krw=cost_krw, model=model, technical_failure=True
+        )
+    posting_flag = parsed.get("is_job_posting")
     return ExtractResult(
-        text=parsed.get("full_text", ""),
-        looks_like_posting=parsed.get("is_job_posting"),
+        text=full_text,
+        looks_like_posting=posting_flag if isinstance(posting_flag, bool) else None,
         cost_krw=cost_krw,
         model=model,
     )
