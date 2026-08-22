@@ -16,6 +16,7 @@ services:
     restart: unless-stopped
     stop_grace_period: 330s
     ports:
+      # Compose의 local readiness 계약은 loopback bind뿐이다.
       - "127.0.0.1:${HOST_PORT:-10000}:10000"
     env_file:
       - path: ${DEPLOY_ENV_FILE:-./runtime-config}

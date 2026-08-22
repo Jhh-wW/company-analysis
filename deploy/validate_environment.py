@@ -10,6 +10,7 @@ import re
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import PurePosixPath
+from pathlib import Path
 from urllib.parse import urlsplit
 
 
@@ -65,6 +66,23 @@ PRODUCTION_FORWARDED_EVIDENCE_BLOCKER = (
 RENDER_FORWARDED_TRUST_BLOCKER = (
     "RENDER_FORWARDED_TRUST: 고정 ingress peer CIDR 계약이 없어 사용자 입력이나 "
     "outbound IP로 forwarded trust를 열 수 없습니다"
+)
+RENDER_MARKER_VARIABLES = (
+    "RENDER",
+    "RENDER_SERVICE_TYPE",
+    "RENDER_EXTERNAL_URL",
+    "RENDER_EXTERNAL_HOSTNAME",
+    "RENDER_HOSTNAME",
+)
+KUBERNETES_MARKER_VARIABLES = (
+    "KUBERNETES_SERVICE_HOST",
+    "KUBERNETES_SERVICE_PORT",
+    "KUBERNETES_PORT",
+)
+KUBERNETES_SERVICE_ACCOUNT_MARKERS = (
+    Path("/var/run/secrets/kubernetes.io/serviceaccount/namespace"),
+    Path("/var/run/secrets/kubernetes.io/serviceaccount/token"),
+    Path("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"),
 )
 FORBIDDEN_PROXY_NETWORKS = tuple(
     ipaddress.ip_network(value)
@@ -241,16 +259,85 @@ def _public_origin_error(raw: str) -> str | None:
     return None
 
 
+def _default_kubernetes_service_account_marker() -> bool:
+    """내용을 읽지 않고 Kubernetes projected marker 존재만 확인한다."""
+
+    for path in KUBERNETES_SERVICE_ACCOUNT_MARKERS:
+        try:
+            if path.exists():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _render_public_marker(environment: Mapping[str, str]) -> bool:
+    return (
+        environment.get("RENDER", "").strip().lower() in BOOLEAN_TRUE
+        or environment.get("RENDER_SERVICE_TYPE", "").strip().lower() == "web"
+        or any(
+            environment.get(name, "").strip()
+            for name in (
+                "RENDER_EXTERNAL_URL",
+                "RENDER_EXTERNAL_HOSTNAME",
+                "RENDER_HOSTNAME",
+            )
+        )
+    )
+
+
+def _kubernetes_cluster_marker(
+    environment: Mapping[str, str], *, service_account_marker: bool
+) -> bool:
+    return service_account_marker or any(
+        environment.get(name, "").strip() for name in KUBERNETES_MARKER_VARIABLES
+    )
+
+
 def _validate_forwarded_proxy_configuration(
     environment: Mapping[str, str],
+    *,
+    kubernetes_service_account_marker: bool | None = None,
 ) -> list[str]:
     errors: list[str] = []
-    exposure = environment.get("DEPLOYMENT_EXPOSURE", "").strip().lower()
-    platform = environment.get("DEPLOYMENT_PLATFORM", "").strip().lower()
-    if exposure not in DEPLOYMENT_EXPOSURES:
-        return ["DEPLOYMENT_EXPOSURE: local 또는 public을 명시해야 합니다"]
-    if platform not in DEPLOYMENT_PLATFORMS:
-        return ["DEPLOYMENT_PLATFORM: 지원하는 배포 플랫폼이 아닙니다"]
+    declared_exposure = environment.get("DEPLOYMENT_EXPOSURE", "").strip().lower()
+    declared_platform = environment.get("DEPLOYMENT_PLATFORM", "").strip().lower()
+    if declared_exposure not in DEPLOYMENT_EXPOSURES:
+        errors.append("DEPLOYMENT_EXPOSURE: local 또는 public을 명시해야 합니다")
+    if declared_platform not in DEPLOYMENT_PLATFORMS:
+        errors.append("DEPLOYMENT_PLATFORM: 지원하는 배포 플랫폼이 아닙니다")
+
+    service_account_marker = (
+        _default_kubernetes_service_account_marker()
+        if kubernetes_service_account_marker is None
+        else kubernetes_service_account_marker
+    )
+    render_detected = _render_public_marker(environment)
+    kubernetes_detected = _kubernetes_cluster_marker(
+        environment, service_account_marker=service_account_marker
+    )
+    if render_detected and kubernetes_detected:
+        errors.append("PLATFORM_MARKERS: Render와 Kubernetes marker가 동시에 감지됐습니다")
+    if render_detected:
+        if declared_exposure != "public":
+            errors.append("DEPLOYMENT_EXPOSURE: Render web marker는 public을 강제합니다")
+        if declared_platform != "render":
+            errors.append("DEPLOYMENT_PLATFORM: Render marker는 render를 강제합니다")
+        exposure = "public"
+        platform = "render"
+    elif kubernetes_detected:
+        if declared_exposure != "public":
+            errors.append("DEPLOYMENT_EXPOSURE: Kubernetes marker는 public을 강제합니다")
+        if declared_platform != "kubernetes":
+            errors.append("DEPLOYMENT_PLATFORM: Kubernetes marker는 kubernetes를 강제합니다")
+        exposure = "public"
+        platform = "kubernetes"
+    else:
+        exposure = declared_exposure
+        platform = declared_platform
+
+    if exposure not in DEPLOYMENT_EXPOSURES or platform not in DEPLOYMENT_PLATFORMS:
+        return errors
 
     forwarded_raw = environment.get("FORWARDED_ALLOW_IPS", "").strip()
     if exposure == "local":
@@ -289,7 +376,12 @@ def _validate_forwarded_proxy_configuration(
     return errors
 
 
-def validate(environment: Mapping[str, str], scope: str = "web") -> list[str]:
+def validate(
+    environment: Mapping[str, str],
+    scope: str = "web",
+    *,
+    kubernetes_service_account_marker: bool | None = None,
+) -> list[str]:
     """환경 오류만 반환한다. 반환값에는 설정값 자체가 절대 들어가지 않는다."""
     errors: list[str] = []
     pipeline = environment.get("PIPELINE", "").strip().lower()
@@ -314,7 +406,12 @@ def validate(environment: Mapping[str, str], scope: str = "web") -> list[str]:
         errors.append("LOG_LEVEL: 지원하는 로그 수준이 아닙니다")
 
     if scope == "web":
-        errors.extend(_validate_forwarded_proxy_configuration(environment))
+        errors.extend(
+            _validate_forwarded_proxy_configuration(
+                environment,
+                kubernetes_service_account_marker=kubernetes_service_account_marker,
+            )
+        )
         beta_raw = environment.get("BETA_ADMIN_ONLY", "").strip().lower()
         if beta_raw not in BOOLEAN_TRUE | BOOLEAN_FALSE:
             errors.append("BETA_ADMIN_ONLY: 명시적인 불리언 값이 필요합니다")

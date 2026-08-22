@@ -140,3 +140,78 @@ def test_render_blueprint는_public진단입력을_받아도_항상_BLOCKED다()
     assert values["FORWARDED_ALLOW_IPS"] == {"key": "FORWARDED_ALLOW_IPS", "sync": False}
     for name in validator.COMMON_PUBLIC_EVIDENCE + validator.RENDER_PUBLIC_EVIDENCE:
         assert values[name] == {"key": name, "sync": False}
+
+
+@pytest.mark.parametrize(
+    "markers",
+    (
+        {"RENDER": "true"},
+        {"RENDER_SERVICE_TYPE": "web"},
+        {"RENDER_EXTERNAL_URL": "https://company.example"},
+        {"RENDER_EXTERNAL_HOSTNAME": "company.example"},
+        {"RENDER_HOSTNAME": "company.example"},
+        {
+            "RENDER": "true",
+            "RENDER_SERVICE_TYPE": "web",
+            "RENDER_EXTERNAL_URL": "https://company.example",
+        },
+    ),
+)
+def test_Render_불변marker는_local자기선언을_public_render로_강제한다(
+    markers: dict[str, str],
+) -> None:
+    environment = _base()
+    environment.update(markers)
+    joined = "\n".join(validator.validate(environment, "web"))
+    assert "Render web marker는 public을 강제" in joined
+    assert "Render marker는 render를 강제" in joined
+    assert validator.RENDER_FORWARDED_TRUST_BLOCKER in joined
+
+
+@pytest.mark.parametrize(
+    "markers",
+    (
+        {"KUBERNETES_SERVICE_HOST": "10.96.0.1"},
+        {"KUBERNETES_SERVICE_PORT": "443"},
+        {"KUBERNETES_PORT": "tcp://10.96.0.1:443"},
+        {
+            "KUBERNETES_SERVICE_HOST": "10.96.0.1",
+            "KUBERNETES_SERVICE_PORT": "443",
+        },
+    ),
+)
+def test_Kubernetes_marker는_local자기선언을_public_kubernetes로_강제한다(
+    markers: dict[str, str],
+) -> None:
+    environment = _base()
+    environment.update(markers)
+    joined = "\n".join(
+        validator.validate(
+            environment, "web", kubernetes_service_account_marker=False
+        )
+    )
+    assert "Kubernetes marker는 public을 강제" in joined
+    assert "Kubernetes marker는 kubernetes를 강제" in joined
+    assert validator.PRODUCTION_FORWARDED_EVIDENCE_BLOCKER in joined
+
+
+def test_Kubernetes_service_account_marker도_local우회를_거부한다() -> None:
+    joined = "\n".join(
+        validator.validate(
+            _base(), "web", kubernetes_service_account_marker=True
+        )
+    )
+    assert "Kubernetes marker는 public을 강제" in joined
+    assert "Kubernetes marker는 kubernetes를 강제" in joined
+
+
+def test_marker없는_정상_local과_Compose_loopback_bind만_통과한다() -> None:
+    assert validator.validate(
+        _base(), "web", kubernetes_service_account_marker=False
+    ) == []
+    compose = yaml.safe_load(
+        (REPOSITORY_ROOT / "deploy" / "compose.yaml").read_text("utf-8")
+    )
+    assert compose["services"]["web"]["ports"] == [
+        "127.0.0.1:${HOST_PORT:-10000}:10000"
+    ]

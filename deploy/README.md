@@ -47,6 +47,17 @@ Docker/All runtimes 범위와 [Uvicorn proxy 설정](https://www.uvicorn.org/set
 기본 loopback·명시 IP/IP Network 신뢰 계약을 따른다. Python native 전용 기본값이나
 outbound 주소를 Docker 컨테이너가 실제로 보는 ingress peer 주소로 추정하지 않는다.
 
+`RENDER=true`, `RENDER_SERVICE_TYPE=web`, `RENDER_EXTERNAL_URL` 또는 Render hostname
+marker가 하나라도 보이면 `DEPLOYMENT_PLATFORM=render`와 `DEPLOYMENT_EXPOSURE=public`을
+강제한다. `KUBERNETES_SERVICE_HOST`/`PORT`, `KUBERNETES_PORT` 또는 projected
+service-account marker가 보이면 같은 방식으로 `kubernetes`/`public`을 강제한다. 따라서
+플랫폼 안에서 `local`이라고 자기선언해 public gate를 우회할 수 없다. 다만 marker는
+플랫폼이 이름을 바꾸거나 주입을 생략하면 완전하지 않으며, 공개성의 충분한 증명은 아니다.
+
+Compose는 `127.0.0.1:${HOST_PORT}:10000` loopback bind만 release 계약으로 고정한다.
+일반 `docker run -p 0.0.0.0:...` 또는 다른 orchestrator의 공개 port는 marker로 확실히
+감지할 수 없고 public readiness를 얻지 못한다. 별도 공개 플랫폼 계약 없이는 BLOCKED다.
+
 PDF는 고정된 `reportlab`, `pypdf`, `pdfplumber`, `pypdfium2` 패키지와 이미지에 포함된
 Freesentation 글꼴을 쓴다. LibreOffice나 브라우저 런타임은 필요하지 않다. PDF 렌더의
 일시 파일을 위해 `/tmp` 256MiB 이상, 실제 서비스에는 메모리 2GiB 상한을 권장한다.
@@ -120,6 +131,11 @@ evidence/policy와 다시 대조한다. artifact나 parser가 없거나 결과�
 다른 권한·보존 경계의 append-only sink, signer, 최신 checkpoint 통제 경로를 구현하고
 `install_manifest_appender_provider(...)`로 주입한 코드가 포함되기 전에는 이 차단을
 환경 표식만으로 해제하지 않는다.
+
+기존 manifest v1/HMAC 원장은 운영 v2로 자동 승격하지 않는다. 운영 전환 시 v2 레코드를
+새 attested COMPLIANCE WORM sink에서 다시 발급하고, 별도 권한의 signed latest checkpoint에
+결속해야 한다. 현재 production sink/signer/checkpoint adapter가 모두 없으므로 외부 백업과
+복구 운영 판정은 BLOCKED다.
 
 ## Kubernetes
 
