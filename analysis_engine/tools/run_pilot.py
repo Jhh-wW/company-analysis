@@ -61,6 +61,7 @@ from features.public_org.logic import load_public_org_registry, match_public_org
 from features.posting_gate.logic import layer2  # noqa: E402
 from features.privacy_filter.logic import erase  # noqa: E402
 from features.fingerprint.logic import posting_fingerprint  # noqa: E402
+from features.provider_diagnostics.logic import build_usage_diagnostic  # noqa: E402
 from features.cell_check.logic import (  # noqa: E402
     count_amounts, establishment, has_corp_name, news_ok)
 from features.draft_check.logic import DraftItem, check_draft  # noqa: E402
@@ -176,15 +177,33 @@ def _ask(client: anthropic.Anthropic, prompt: str, schema: dict[str, Any],
     )
     cost = cost_krw / ai_pricing.AI_COST_KRW_PER_USD
     _spent_usd += cost
-    usage = {"in": resp.usage.input_tokens, "out": resp.usage.output_tokens,
-             "usd": round(cost, 6), "krw": cost_krw,
-             "elapsed": round(time.perf_counter() - t0, 1)}
+    usage = {
+        "in": resp.usage.input_tokens,
+        "out": resp.usage.output_tokens,
+        "usd": round(cost, 6),
+        "krw": cost_krw,
+        "elapsed": round(time.perf_counter() - t0, 1),
+        **build_usage_diagnostic(
+            stop_reason=getattr(resp, "stop_reason", None),
+            output_tokens=resp.usage.output_tokens,
+            requested_max_tokens=max_tokens,
+        ),
+    }
     if resp.stop_reason == "refusal":
-        return None, {**usage, "refusal": True}
+        return None, {**usage, "refusal": True, "error": "refusal"}
     try:
         return json.loads(resp.content[0].text), usage
     except (ValueError, IndexError):
-        return None, {**usage, "error": "파싱실패"}
+        return None, {
+            **usage,
+            **build_usage_diagnostic(
+                stop_reason=getattr(resp, "stop_reason", None),
+                output_tokens=resp.usage.output_tokens,
+                requested_max_tokens=max_tokens,
+                parse_failed=True,
+            ),
+            "error": "파싱실패",
+        }
 
 
 # ── 2번 식별 ──────────────────────────────────────────────────────────────
