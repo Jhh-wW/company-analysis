@@ -417,7 +417,12 @@ try {
         $PerRunExpectedCostCapKrw, $DailyExpectedCostCapKrw
     )
     Write-Host "청구액 hard cap이 아니라 호출 전 예상예약 차단 기준이며, 실제 단가·사용량에 따라 초과할 수 있습니다."
-    Write-Host "키 값은 출력·파일 저장하지 않았고 .env도 읽지 않았습니다."
+    if ($ProviderEnvFile) {
+        Write-Host "키 값은 출력·파일 저장하지 않았습니다. 지정한 provider 환경 파일만 읽었으며 자식의 환경 파일 자동 읽기는 차단했습니다."
+    }
+    else {
+        Write-Host "키 값은 출력·파일 저장하지 않았고 환경 파일도 읽지 않았습니다."
+    }
     Write-Host "시험 기록은 app\.local_evaluation_runs의 이번 실행 폴더에만 저장됩니다."
     Write-Host "끄려면 이 창에서 Ctrl+C를 누르세요."
     Write-Host ""

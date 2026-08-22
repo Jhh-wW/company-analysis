@@ -61,6 +61,13 @@ def test_launcher_has_fail_closed_real_evaluation_contract() -> None:
     assert "0.0.0.0" not in SCRIPT
 
 
+def test_launcher_reports_provider_environment_file_read_accurately() -> None:
+    assert "키 값은 출력·파일 저장하지 않았고 .env도 읽지 않았습니다." not in SCRIPT
+    assert 'if ($ProviderEnvFile) {' in SCRIPT
+    assert "지정한 provider 환경 파일만 읽었으며" in SCRIPT
+    assert "환경 파일도 읽지 않았습니다." in SCRIPT
+
+
 def _available_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
@@ -183,11 +190,14 @@ def _run_fake(
     environment: dict[str, str],
     *,
     paid: bool,
+    provider_env_file: Path | None = None,
     delete_data_on_exit: bool = False,
 ) -> tuple[subprocess.CompletedProcess[bytes], list[Path]]:
     assert WINDOWS_POWERSHELL is not None
     launcher = app_copy / LAUNCHER.name
     switch = " -EnablePaidProviders" if paid else ""
+    if provider_env_file is not None:
+        switch += f" -ProviderEnvFile {_ps_literal(provider_env_file)}"
     if delete_data_on_exit:
         switch += " -DeleteDataOnExit"
     command = (
@@ -266,6 +276,44 @@ def test_paid_switch_with_missing_key_fails_before_child_creation(tmp_path: Path
     assert "ANTHROPIC_API_KEY" in console
     assert "secret-sentinel" not in console
     assert not (app_copy / ".local_evaluation_runs").exists()
+
+
+@pytest.mark.skipif(
+    WINDOWS_POWERSHELL is None,
+    reason="Windows PowerShell 5.1 실제 자식 환경 시험",
+)
+def test_provider_environment_file_message_matches_actual_read(tmp_path: Path) -> None:
+    app_copy = _copy_fake_app(tmp_path)
+    environment = _environment(tmp_path)
+    provider_values = {
+        name: f"file-only-secret-{index}"
+        for index, name in enumerate(PAID_PROVIDER_NAMES)
+    }
+    for name in PAID_PROVIDER_NAMES:
+        environment.pop(name)
+    provider_env_file = tmp_path / "provider inputs.env"
+    provider_env_file.write_text(
+        "\n".join(f'{name}="{value}"' for name, value in provider_values.items()),
+        encoding="utf-8",
+    )
+
+    result, records = _run_fake(
+        app_copy,
+        environment,
+        paid=True,
+        provider_env_file=provider_env_file,
+    )
+
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert len(records) == 1
+    payload = json.loads(records[0].read_text(encoding="utf-8"))
+    assert payload["provider_presence"] == {
+        **{name: True for name in PAID_PROVIDER_NAMES},
+        "GOOGLE_PLACES_API_KEY": False,
+    }
+    console = result.stdout + result.stderr
+    assert b".env" not in console
+    assert not any(value.encode() in console for value in provider_values.values())
 
 
 @pytest.mark.skipif(
