@@ -22,6 +22,19 @@ DEFAULT_DB_RELATIVE_PATH: Final[str] = "data/storage.db"
 #: 다른 연결이 쓰는 중일 때 몇 초까지 기다렸다 포기하나 ("database is locked" 방지).
 DB_BUSY_TIMEOUT_SEC: Final[float] = 5.0
 
+# SQLite 공식 문서의 WAL-reset 결함 수정 경계.
+# 3.7.0~3.51.2 기본 계열은 영향을 받으며, 3.44.6·3.50.7에는 수정이
+# 별도로 역이식되었다. 패치되지 않은 런타임은 rollback journal을 쓴다.
+SQLITE_WAL_FIXED_VERSION: Final[tuple[int, int, int]] = (3, 51, 3)
+SQLITE_WAL_FIXED_BACKPORT_RANGES: Final[
+    tuple[tuple[tuple[int, int, int], tuple[int, int, int]], ...]
+] = (
+    ((3, 44, 6), (3, 45, 0)),
+    ((3, 50, 7), (3, 51, 0)),
+)
+SQLITE_JOURNAL_MODE_WAL: Final[str] = "WAL"
+SQLITE_JOURNAL_MODE_FALLBACK: Final[str] = "DELETE"
+
 # ── 표 이름 ──────────────────────────────────────────────
 TABLE_REPORTS: Final[str] = "reports"
 TABLE_LAYER1_CACHE: Final[str] = "layer1_cache"

@@ -16,6 +16,37 @@ from src.features.storage import constants, db
 from src.features.storage import sessions
 
 
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    (
+        ((3, 44, 5), False),
+        ((3, 44, 6), True),
+        ((3, 45, 0), False),
+        ((3, 50, 6), False),
+        ((3, 50, 7), True),
+        ((3, 51, 0), False),
+        ((3, 51, 2), False),
+        ((3, 51, 3), True),
+        ((3, 52, 0), True),
+    ),
+)
+def test_sqlite_wal_reset_fix_boundaries(
+    version: tuple[int, int, int], expected: bool
+) -> None:
+    """공식 수정판과 역이식판에서만 WAL을 허용한다."""
+
+    assert db.sqlite_wal_reset_fixed(version) is expected
+
+
+def test_connect_uses_journal_mode_safe_for_runtime(tmp_path: Path) -> None:
+    """실제 런타임이 결함 범위면 rollback journal로 안전하게 내린다."""
+
+    with db.connect(tmp_path / "journal-mode.db") as conn:
+        actual = str(conn.execute("PRAGMA journal_mode").fetchone()[0]).upper()
+
+    assert actual == db.preferred_journal_mode()
+
+
 def test_connect_creates_missing_parent_dir_and_file(tmp_path: Path) -> None:
     """DB 파일이 없어도, 폴더가 없어도 처음 연결하면 만들어진다."""
     target = tmp_path / "nested" / "storage.db"

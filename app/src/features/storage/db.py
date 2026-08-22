@@ -49,6 +49,43 @@ _SESSION_MIGRATION_SAVEPOINT: Final[str] = "migrate_sessions_token_hash"
 _SchemaColumn = tuple[str, str, int, object, int, int]
 _SchemaSignature = tuple[_SchemaColumn, ...]
 
+
+def sqlite_wal_reset_fixed(
+    version: tuple[int, int, int] = sqlite3.sqlite_version_info,
+) -> bool:
+    """현재 SQLite가 공식 WAL-reset 결함 수정판인지 판정한다."""
+
+    if version >= constants.SQLITE_WAL_FIXED_VERSION:
+        return True
+    return any(
+        lower <= version < upper
+        for lower, upper in constants.SQLITE_WAL_FIXED_BACKPORT_RANGES
+    )
+
+
+def preferred_journal_mode(
+    version: tuple[int, int, int] = sqlite3.sqlite_version_info,
+) -> str:
+    """패치된 SQLite만 WAL을 쓰고 그 외에는 rollback journal을 고른다."""
+
+    if sqlite_wal_reset_fixed(version):
+        return constants.SQLITE_JOURNAL_MODE_WAL
+    return constants.SQLITE_JOURNAL_MODE_FALLBACK
+
+
+def _configure_journal_mode(conn: sqlite3.Connection) -> str:
+    """안전한 저널 모드를 적용하고 전환 실패는 조용히 넘기지 않는다."""
+
+    requested = preferred_journal_mode()
+    row = conn.execute(f"PRAGMA journal_mode={requested}").fetchone()
+    actual = "" if row is None else str(row[0]).upper()
+    if actual != requested:
+        raise RuntimeError(
+            "SQLite 안전 저널 모드 전환에 실패했습니다 "
+            f"(요청={requested}, 실제={actual or '응답 없음'})"
+        )
+    return actual
+
 # ``PRAGMA table_xinfo``의 (name, type, notnull, default, pk, hidden) 정본.
 # subject가 없는 최초판과 그 열을 뒤에 붙인 판까지는 실제 과거 스키마다.
 _RAW_SESSION_SCHEMAS: Final[tuple[_SchemaSignature, ...]] = (
@@ -292,8 +329,9 @@ def connect(db_path: Optional[Path] = None) -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(str(resolved), timeout=constants.DB_BUSY_TIMEOUT_SEC)
     conn.row_factory = sqlite3.Row
     try:
-        # WAL — 읽기 여러 개가 쓰기 하나를 막지 않는다(동시 접속 완화).
-        conn.execute("PRAGMA journal_mode=WAL")
+        # 패치된 SQLite는 WAL을 쓰고, WAL-reset 결함 범위에서는 데이터
+        # 손상 가능성을 없애기 위해 rollback journal(DELETE)로 내린다.
+        _configure_journal_mode(conn)
         conn.execute("PRAGMA foreign_keys=ON")
         _ensure_schema(conn)
         yield conn
