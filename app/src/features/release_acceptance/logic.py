@@ -286,7 +286,13 @@ class HttpSession:
             headers=request_headers,
             method=method.upper(),
         )
-        handlers: list[object] = [urllib.request.HTTPCookieProcessor(self.cookies)]
+        # 수락시험 HTTP는 격리 loopback만 향한다. 기본 ProxyHandler는 부모의
+        # HTTP(S)_PROXY/ALL_PROXY를 읽어 로컬 실패나 응답을 프록시가 위조하게 만들 수
+        # 있으므로, 빈 명시 설정으로 환경 프록시 상속을 완전히 끊는다.
+        handlers: list[object] = [
+            urllib.request.ProxyHandler({}),
+            urllib.request.HTTPCookieProcessor(self.cookies),
+        ]
         if not follow_redirects:
             handlers.append(_NoRedirectHandler())
         opener = urllib.request.build_opener(*handlers)

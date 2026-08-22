@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import http.server
 import json
+import socket
 import sqlite3
+import threading
+import urllib.error
+import urllib.request
+from contextlib import contextmanager
+from typing import Iterator
+
+import pytest
 
 from src.features.release_acceptance.logic import (
     AcceptanceReport,
     CheckResult,
     CheckStatus,
+    HttpSession,
     HttpResponse,
     LeakTracker,
     build_child_environment,
@@ -16,6 +26,66 @@ from src.features.release_acceptance.logic import (
     render_korean_summary,
     storage_snapshot,
 )
+
+
+class _LocalHttpServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, body: bytes):
+        super().__init__(("127.0.0.1", 0), _FixedResponseHandler)
+        self.body = body
+        self.request_paths: list[str] = []
+
+
+class _FixedResponseHandler(http.server.BaseHTTPRequestHandler):
+    server: _LocalHttpServer
+
+    def do_GET(self) -> None:  # noqa: N802 - 표준 라이브러리 handler 계약
+        self.server.request_paths.append(self.path)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(self.server.body)))
+        self.end_headers()
+        self.wfile.write(self.server.body)
+
+    def log_message(self, format: str, *args: object) -> None:
+        del format, args
+
+
+@contextmanager
+def _serve_local(body: bytes) -> Iterator[_LocalHttpServer]:
+    server = _LocalHttpServer(body)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def _closed_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
+def _install_malicious_parent_proxy(monkeypatch, proxy_port: int) -> None:
+    proxy_url = f"http://127.0.0.1:{proxy_port}"
+    for name in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ):
+        monkeypatch.setenv(name, proxy_url)
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
+    # 플랫폼별 localhost 자동 우회를 제거해 부모 프록시 상속 공격을 재현한다.
+    monkeypatch.setattr(urllib.request, "proxy_bypass", lambda _host: False)
 
 
 def _check(status: CheckStatus, evidence: str = "근거") -> CheckResult:
@@ -169,3 +239,29 @@ def test_의도된_capability_요청url은_제외해도_응답표면은_계속_�
         ignored_header_names=frozenset({"set-cookie"}),
     )
     assert tracker.leaks == ["share-open:headers:share"]
+
+
+def test_NO_PROXY가_비어도_닫힌_loopback실패를_부모proxy가_위조하지못한다(
+    monkeypatch,
+) -> None:
+    with _serve_local(b"forged-proxy-success") as proxy:
+        _install_malicious_parent_proxy(monkeypatch, proxy.server_port)
+        closed_port = _closed_loopback_port()
+
+        with pytest.raises((OSError, urllib.error.URLError)):
+            HttpSession(closed_port).request("GET", "/healthz", timeout=0.5)
+
+        assert proxy.request_paths == []
+
+
+def test_실제_acceptance응답을_부모proxy가_대체하지못한다(monkeypatch) -> None:
+    with _serve_local(b"real-acceptance-response") as target:
+        with _serve_local(b"forged-proxy-response") as proxy:
+            _install_malicious_parent_proxy(monkeypatch, proxy.server_port)
+
+            response = HttpSession(target.server_port).request("GET", "/healthz")
+
+            assert response.status == 200
+            assert response.body == b"real-acceptance-response"
+            assert target.request_paths == ["/healthz"]
+            assert proxy.request_paths == []
