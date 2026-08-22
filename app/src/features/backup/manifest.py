@@ -1,8 +1,9 @@
-"""외부 SQLite 백업을 독립 서명 manifest에 기록하는 운영 주입 계약.
+"""외부 SQLite 백업을 독립 manifest에 기록하는 운영 appender 계약.
 
-이 feature는 특정 secret manager나 원격 저장소에 접속하지 않는다. 운영 조립부가
-DB/sidecar와 다른 권한·보존 경계의 :class:`BackupManifestAppender`를 주입해야 하며,
-누락되거나 append/read-back 검증이 실패하면 백업 성공을 반환할 수 없다.
+앱은 secret manager나 원격 WORM 저장소에 접속하지 않는다. 운영 조립부는 외부
+서명 evidence verifier가 만든 :class:`VerifiedOperationalManifestContract`와
+appender를 함께 주입해야 한다. 자유 ``production_ready`` 불리언이나 임의
+authority 문자열만으로 운영 성공을 반환할 수 없다.
 """
 
 from __future__ import annotations
@@ -19,17 +20,25 @@ from datetime import datetime, timedelta, timezone
 from typing import Final
 
 
-MANIFEST_VERSION: Final[int] = 1
+MANIFEST_VERSION: Final[int] = 2
+ED25519_ALGORITHM: Final[str] = "ed25519"
+KMS_ASYMMETRIC_ALGORITHM: Final[str] = "kms-asymmetric"
+MAX_ATTESTATION_BYTES: Final[int] = 64 * 1024
 SHA256_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{64}$")
+HEX_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]+$")
 IDENTIFIER_RE: Final[re.Pattern[str]] = re.compile(
-    r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+    r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,191}$"
+)
+ARN_RE: Final[re.Pattern[str]] = re.compile(
+    r"^arn:(?:aws|aws-us-gov|aws-cn):[a-z0-9-]+:[a-z0-9-]*:[0-9]{0,12}:[A-Za-z0-9+=,.@_:/-]+$"
 )
 _PROVIDER_LOCK = threading.Lock()
 _PROVIDER: Callable[[], "BackupManifestAppender"] | None = None
+_VERIFIED_CONTRACT_TOKEN = object()
 
 
 class ManifestConfigurationError(RuntimeError):
-    """독립 manifest 운영 주입이 없거나 경계가 안전하지 않다."""
+    """독립 manifest 운영 주입이 없거나 검증된 경계가 안전하지 않다."""
 
 
 class ManifestAppendError(RuntimeError):
@@ -49,6 +58,29 @@ def _sha256(value: object, *, label: str, allow_empty: bool = False) -> str:
         return ""
     if not SHA256_RE.fullmatch(normalized):
         raise ManifestAppendError(f"{label} SHA-256이 올바르지 않습니다")
+    return normalized
+
+
+def _signature(value: object, *, algorithm: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if not HEX_RE.fullmatch(normalized) or len(normalized) % 2:
+        raise ManifestAppendError("manifest 서명은 짝수 길이의 소문자 hex여야 합니다")
+    if algorithm == ED25519_ALGORITHM and len(normalized) != 128:
+        raise ManifestAppendError("Ed25519 manifest 서명 길이가 올바르지 않습니다")
+    if algorithm == KMS_ASYMMETRIC_ALGORITHM and not 128 <= len(normalized) <= 4096:
+        raise ManifestAppendError("KMS/HSM manifest 서명 길이가 올바르지 않습니다")
+    if algorithm not in {ED25519_ALGORITHM, KMS_ASYMMETRIC_ALGORITHM}:
+        raise ManifestAppendError("운영 manifest는 비대칭 서명만 허용합니다")
+    return normalized
+
+
+def _derived_identity(value: object, *, prefix: str, label: str) -> str:
+    normalized = _identifier(value, label=label)
+    suffix = normalized.removeprefix(prefix)
+    if not normalized.startswith(prefix) or not SHA256_RE.fullmatch(suffix):
+        raise ManifestConfigurationError(
+            f"{label} 정체성은 {prefix}<lowercase-64-hex> 형식이어야 합니다"
+        )
     return normalized
 
 
@@ -98,29 +130,123 @@ def _canonical_json(payload: Mapping[str, object]) -> bytes:
 
 
 @dataclass(frozen=True)
-class ManifestBoundary:
-    boundary_id: str
-    authority_id: str
-    retention_days: int
-    append_only: bool
-    signed: bool
-    conditional_append: bool
-    production_ready: bool
+class OperationalManifestContractClaims:
+    """외부 verifier가 서명 evidence에서 검증한 운영 appender claims."""
 
-    def validate(self, *, minimum_retention_days: int) -> None:
-        _identifier(self.boundary_id, label="manifest 경계")
-        _identifier(self.authority_id, label="manifest 권한")
-        if (
-            isinstance(self.retention_days, bool)
-            or self.retention_days < minimum_retention_days
+    sink_identity: str
+    writer_principal_arn: str
+    reader_principal_arn: str
+    retention_days: int
+    object_lock_mode: str
+    conditional_append_protocol: str
+    manifest_key_identity: str
+    signature_algorithm: str
+    checkpoint_provider_identity: str
+    checkpoint_key_identity: str
+    issued_at: str
+    expires_at: str
+
+    def validate(self, *, minimum_retention_days: int, now: datetime) -> None:
+        _derived_identity(
+            self.sink_identity,
+            prefix="sink-attestation-sha256:",
+            label="manifest sink",
+        )
+        for label, value in (
+            ("manifest writer principal", self.writer_principal_arn),
+            ("manifest reader principal", self.reader_principal_arn),
         ):
-            raise ManifestConfigurationError("manifest 보존 기간이 운영 최소값보다 짧습니다")
-        if not self.append_only or not self.signed or not self.conditional_append:
-            raise ManifestConfigurationError(
-                "manifest는 서명·append-only·원자적 조건부 append여야 합니다"
+            if not ARN_RE.fullmatch(str(value or "")):
+                raise ManifestConfigurationError(f"검증된 {label} ARN이 필요합니다")
+        if self.writer_principal_arn == self.reader_principal_arn:
+            raise ManifestConfigurationError("manifest writer와 reader principal은 분리돼야 합니다")
+        if isinstance(self.retention_days, bool) or self.retention_days < minimum_retention_days:
+            raise ManifestConfigurationError("manifest WORM 보존 기간이 최소값보다 짧습니다")
+        if self.object_lock_mode != "COMPLIANCE":
+            raise ManifestConfigurationError("Object Lock COMPLIANCE/WORM 증명이 필요합니다")
+        if self.conditional_append_protocol != "if-none-match-and-head-cas":
+            raise ManifestConfigurationError("원자적 conditional append 증명이 필요합니다")
+        if self.manifest_key_identity.startswith("spki-sha256:"):
+            _derived_identity(
+                self.manifest_key_identity,
+                prefix="spki-sha256:",
+                label="manifest 키",
             )
-        if not self.production_ready:
-            raise ManifestConfigurationError("시험용 manifest sink는 운영 백업에 쓸 수 없습니다")
+        elif self.manifest_key_identity.startswith("kms-key-metadata-sha256:"):
+            _derived_identity(
+                self.manifest_key_identity,
+                prefix="kms-key-metadata-sha256:",
+                label="manifest 키",
+            )
+        else:
+            raise ManifestConfigurationError("manifest 키 정체성은 SPKI/KMS metadata에서 파생돼야 합니다")
+        if self.signature_algorithm not in {
+            ED25519_ALGORITHM,
+            KMS_ASYMMETRIC_ALGORITHM,
+        }:
+            raise ManifestConfigurationError("운영 manifest는 비대칭 서명만 허용합니다")
+        _derived_identity(
+            self.checkpoint_provider_identity,
+            prefix="checkpoint-provider-attestation-sha256:",
+            label="checkpoint provider",
+        )
+        _derived_identity(
+            self.checkpoint_key_identity,
+            prefix="spki-sha256:",
+            label="checkpoint 키",
+        )
+        if self.checkpoint_key_identity == self.manifest_key_identity:
+            raise ManifestConfigurationError("manifest와 checkpoint 서명 키는 분리돼야 합니다")
+        issued = _utc_datetime(self.issued_at, label="manifest 계약 발급")
+        expires = _utc_datetime(self.expires_at, label="manifest 계약 만료")
+        if expires <= issued or not (issued <= now <= expires):
+            raise ManifestConfigurationError("manifest 운영 계약 attestation이 유효하지 않습니다")
+
+
+@dataclass(frozen=True)
+class VerifiedOperationalManifestContract:
+    claims: OperationalManifestContractClaims
+    evidence_sha256: str
+    _token: object = field(repr=False, compare=False)
+
+    def validate(self, *, minimum_retention_days: int, now: datetime) -> None:
+        if self._token is not _VERIFIED_CONTRACT_TOKEN:
+            raise ManifestConfigurationError("외부 verifier가 검증한 manifest 계약이 아닙니다")
+        self.claims.validate(
+            minimum_retention_days=minimum_retention_days,
+            now=now.astimezone(timezone.utc),
+        )
+        _sha256(self.evidence_sha256, label="manifest attestation evidence")
+
+
+class OperationalManifestContractVerifier(ABC):
+    """외부 신뢰 루트가 운영 appender evidence를 검증하는 추상 계약."""
+
+    def verify(
+        self,
+        evidence: bytes,
+        *,
+        minimum_retention_days: int,
+        now: datetime | None = None,
+    ) -> VerifiedOperationalManifestContract:
+        if not isinstance(evidence, bytes) or not 1 <= len(evidence) <= MAX_ATTESTATION_BYTES:
+            raise ManifestConfigurationError("manifest attestation evidence 크기가 올바르지 않습니다")
+        claims = self._verify_and_decode(evidence)
+        effective_now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        claims.validate(
+            minimum_retention_days=minimum_retention_days,
+            now=effective_now,
+        )
+        return VerifiedOperationalManifestContract(
+            claims=claims,
+            evidence_sha256=hashlib.sha256(evidence).hexdigest(),
+            _token=_VERIFIED_CONTRACT_TOKEN,
+        )
+
+    @abstractmethod
+    def _verify_and_decode(self, evidence: bytes) -> OperationalManifestContractClaims:
+        """evidence의 발급자·서명·claims 결속을 외부 trust root로 검증한다."""
+        raise NotImplementedError
 
 
 @dataclass(frozen=True)
@@ -179,7 +305,7 @@ class BackupManifestRequest:
 
 @dataclass(frozen=True)
 class SignedBackupManifestRecord:
-    """ops 검증기와 공유하는 버전 1 레코드 wire schema."""
+    """ops verifier와 공유하는 버전 2 wire schema."""
 
     version: int
     sequence: int
@@ -198,9 +324,10 @@ class SignedBackupManifestRecord:
     data_boundary_id: str
     data_authority_id: str
     manifest_boundary_id: str
-    manifest_authority_id: str
+    manifest_writer_principal: str
     previous_record_sha256: str
-    key_id: str
+    manifest_key_identity: str
+    signature_algorithm: str
     signature: str = field(repr=False)
 
     def serialized_bytes(self) -> bytes:
@@ -213,31 +340,30 @@ class SignedBackupManifestRecord:
 @dataclass(frozen=True)
 class ManifestAppendReceipt:
     record: SignedBackupManifestRecord
-    record_sha256: str
-    verified_head_sequence: int
-    readback_verified: bool
+    readback_record_sha256: str
+    readback_head_sequence: int
 
 
 class BackupManifestAppender(ABC):
-    """운영 조립부가 구현·주입하는 독립 manifest append 계약."""
+    """검증된 운영 계약을 보유한 독립 manifest append 추상 계약."""
 
     @property
     @abstractmethod
-    def boundary(self) -> ManifestBoundary:
+    def contract(self) -> VerifiedOperationalManifestContract:
         raise NotImplementedError
 
     @abstractmethod
-    def append_and_verify(
-        self, request: BackupManifestRequest
+    def append_and_readback(
+        self,
+        request: BackupManifestRequest,
     ) -> ManifestAppendReceipt:
-        """서명 후 원자 append하고 전체 chain/head를 다시 검증한 receipt를 돌려준다."""
+        """CAS append 후 동일 record bytes/head read-back receipt를 반환한다."""
         raise NotImplementedError
 
 
 def install_manifest_appender_provider(
     provider: Callable[[], BackupManifestAppender],
 ) -> None:
-    """시작 시 한 번만 외부 manifest 어댑터 provider를 주입한다."""
     if not callable(provider):
         raise ManifestConfigurationError("manifest appender provider가 필요합니다")
     global _PROVIDER
@@ -257,11 +383,13 @@ def require_manifest_appender(
             provider = _PROVIDER
         if provider is None:
             raise ManifestConfigurationError(
-                "독립 manifest appender가 주입되지 않아 백업을 중단합니다"
+                "검증된 독립 manifest appender가 주입되지 않아 백업을 중단합니다"
             )
         appender = provider()
     if not isinstance(appender, BackupManifestAppender):
         raise ManifestConfigurationError("닫힌 BackupManifestAppender 구현이 필요합니다")
+    if not isinstance(appender.contract, VerifiedOperationalManifestContract):
+        raise ManifestConfigurationError("검증된 운영 manifest 계약이 필요합니다")
     return appender
 
 
@@ -270,27 +398,29 @@ def validate_append_receipt(
     request: BackupManifestRequest,
     appender: BackupManifestAppender,
     receipt: ManifestAppendReceipt,
+    now: datetime | None = None,
 ) -> SignedBackupManifestRecord:
-    """성공 반환 전에 object binding과 독립 경계·read-back receipt를 재검사한다."""
+    """성공 반환 전에 object binding과 attested contract/read-back을 재검사한다."""
+
     request.validate()
-    boundary = appender.boundary
-    boundary.validate(minimum_retention_days=request.minimum_retention_days)
-    if (
-        boundary.boundary_id == request.data_boundary_id
-        or boundary.authority_id == request.data_authority_id
-    ):
-        raise ManifestConfigurationError(
-            "manifest와 DB/sidecar의 권한·보존 경계가 독립적이지 않습니다"
-        )
-    if not isinstance(receipt, ManifestAppendReceipt) or not receipt.readback_verified:
-        raise ManifestAppendError("manifest append read-back 검증 증거가 없습니다")
+    contract = appender.contract
+    effective_now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    contract.validate(
+        minimum_retention_days=request.minimum_retention_days,
+        now=effective_now,
+    )
+    claims = contract.claims
+    if claims.sink_identity == request.data_boundary_id or claims.writer_principal_arn == request.data_authority_id:
+        raise ManifestConfigurationError("manifest와 DB/sidecar의 쓰기·보존 경계가 독립적이지 않습니다")
+    if not isinstance(receipt, ManifestAppendReceipt):
+        raise ManifestAppendError("manifest append read-back receipt가 없습니다")
     record = receipt.record
     if record.version != MANIFEST_VERSION:
         raise ManifestAppendError("지원하지 않는 manifest 버전입니다")
     if (
         isinstance(record.sequence, bool)
         or record.sequence < 1
-        or receipt.verified_head_sequence != record.sequence
+        or receipt.readback_head_sequence != record.sequence
     ):
         raise ManifestAppendError("manifest head sequence 검증이 맞지 않습니다")
     expected_values = {
@@ -307,21 +437,25 @@ def validate_append_receipt(
         "created_at": _utc_text(request.created_at, label="백업 생성"),
         "data_boundary_id": request.data_boundary_id,
         "data_authority_id": request.data_authority_id,
-        "manifest_boundary_id": boundary.boundary_id,
-        "manifest_authority_id": boundary.authority_id,
+        "manifest_boundary_id": claims.sink_identity,
+        "manifest_writer_principal": claims.writer_principal_arn,
+        "manifest_key_identity": claims.manifest_key_identity,
+        "signature_algorithm": claims.signature_algorithm,
     }
     for name, expected in expected_values.items():
         if getattr(record, name) != expected:
             raise ManifestAppendError(f"manifest 레코드의 {name} 결속이 다릅니다")
     created = _utc_datetime(record.created_at, label="백업 생성")
     retained = _utc_datetime(record.retention_until, label="백업 보존")
-    if retained - created < timedelta(days=boundary.retention_days):
+    if retained - created < timedelta(days=claims.retention_days):
         raise ManifestAppendError("manifest 레코드 보존 기한이 sink 계약보다 짧습니다")
     _sha256(record.previous_record_sha256, label="이전 레코드", allow_empty=True)
-    _identifier(record.key_id, label="manifest 서명 키")
-    _sha256(record.signature, label="manifest 서명")
+    _signature(record.signature, algorithm=record.signature_algorithm)
     actual_record_hash = record.record_sha256()
-    expected_record_hash = _sha256(receipt.record_sha256, label="manifest 레코드")
+    expected_record_hash = _sha256(
+        receipt.readback_record_sha256,
+        label="manifest read-back 레코드",
+    )
     if not hmac.compare_digest(actual_record_hash, expected_record_hash):
         raise ManifestAppendError("manifest read-back 레코드 지문이 맞지 않습니다")
     return record
@@ -330,11 +464,16 @@ def validate_append_receipt(
 __all__ = [
     "BackupManifestAppender",
     "BackupManifestRequest",
+    "ED25519_ALGORITHM",
+    "KMS_ASYMMETRIC_ALGORITHM",
+    "MANIFEST_VERSION",
     "ManifestAppendError",
     "ManifestAppendReceipt",
-    "ManifestBoundary",
     "ManifestConfigurationError",
+    "OperationalManifestContractClaims",
+    "OperationalManifestContractVerifier",
     "SignedBackupManifestRecord",
+    "VerifiedOperationalManifestContract",
     "install_manifest_appender_provider",
     "require_manifest_appender",
     "validate_append_receipt",

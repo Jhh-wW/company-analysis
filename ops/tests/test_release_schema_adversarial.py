@@ -26,7 +26,7 @@ class _AcceptingManifestGate:
         return SimpleNamespace(
             backup_id="schema-adversarial",
             sequence=1,
-            key_id="test-schema-key",
+            manifest_key_identity="spki-sha256:" + "a" * 64,
         )
 
 

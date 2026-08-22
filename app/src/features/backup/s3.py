@@ -381,6 +381,7 @@ def run_backup(
     try:
         backup_tool = _backup_tool()
         resolved_config = config or config_from_env()
+        effective_now = now or datetime.now(timezone.utc)
         if (
             not resolved_config.data_boundary_id
             or not resolved_config.data_authority_id
@@ -394,13 +395,14 @@ def run_backup(
             resolved_appender = backup_manifest.require_manifest_appender(
                 manifest_appender
             )
-            resolved_appender.boundary.validate(
-                minimum_retention_days=resolved_config.manifest_minimum_retention_days
+            resolved_appender.contract.validate(
+                minimum_retention_days=resolved_config.manifest_minimum_retention_days,
+                now=effective_now,
             )
+            manifest_claims = resolved_appender.contract.claims
             if (
-                resolved_appender.boundary.boundary_id
-                == resolved_config.data_boundary_id
-                or resolved_appender.boundary.authority_id
+                manifest_claims.sink_identity == resolved_config.data_boundary_id
+                or manifest_claims.writer_principal_arn
                 == resolved_config.data_authority_id
             ):
                 raise backup_manifest.ManifestConfigurationError(
@@ -412,7 +414,6 @@ def run_backup(
             ) from exc
         source = source_path or backup_tool.default_db_path()
         client = _new_s3_client(resolved_config)
-        effective_now = now or datetime.now(timezone.utc)
         with TemporaryDirectory(prefix="company-analysis-backup-") as temp:
             directory = Path(temp)
             local = backup_tool.create_backup(source, directory)
@@ -472,13 +473,14 @@ def run_backup(
                 ),
             )
             try:
-                manifest_receipt = resolved_appender.append_and_verify(
+                manifest_receipt = resolved_appender.append_and_readback(
                     manifest_request
                 )
                 manifest_record = backup_manifest.validate_append_receipt(
                     request=manifest_request,
                     appender=resolved_appender,
                     receipt=manifest_receipt,
+                    now=effective_now,
                 )
             except (
                 backup_manifest.ManifestAppendError,
@@ -502,7 +504,7 @@ def run_backup(
                 deleted_objects=deleted,
                 manifest_backup_id=manifest_record.backup_id,
                 manifest_sequence=manifest_record.sequence,
-                manifest_record_sha256=manifest_receipt.record_sha256,
+                manifest_record_sha256=manifest_receipt.readback_record_sha256,
             )
     except (BackupAlreadyRunning, BackupConfigurationError, ExternalBackupError):
         raise

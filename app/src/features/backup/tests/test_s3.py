@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -61,26 +62,50 @@ class FakeS3:
         self.objects.pop(Key, None)
 
 
+class FakeContractVerifier(backup_manifest.OperationalManifestContractVerifier):
+    def _verify_and_decode(self, _evidence: bytes):
+        return backup_manifest.OperationalManifestContractClaims(
+            sink_identity="sink-attestation-sha256:" + "a" * 64,
+            writer_principal_arn=(
+                "arn:aws:iam::123456789012:role/manifest-writer"
+            ),
+            reader_principal_arn=(
+                "arn:aws:iam::123456789012:role/manifest-reader"
+            ),
+            retention_days=35,
+            object_lock_mode="COMPLIANCE",
+            conditional_append_protocol="if-none-match-and-head-cas",
+            manifest_key_identity="spki-sha256:" + "b" * 64,
+            signature_algorithm=backup_manifest.ED25519_ALGORITHM,
+            checkpoint_provider_identity=(
+                "checkpoint-provider-attestation-sha256:" + "c" * 64
+            ),
+            checkpoint_key_identity="spki-sha256:" + "d" * 64,
+            issued_at=(NOW - timedelta(minutes=1)).isoformat().replace(
+                "+00:00", "Z"
+            ),
+            expires_at=(NOW + timedelta(days=1)).isoformat().replace(
+                "+00:00", "Z"
+            ),
+        )
+
+
 class FakeManifestAppender(backup_manifest.BackupManifestAppender):
     def __init__(self) -> None:
         self.requests: list[backup_manifest.BackupManifestRequest] = []
         self.fail = False
         self.tamper_object = False
-        self._boundary = backup_manifest.ManifestBoundary(
-            boundary_id="manifest-control-plane",
-            authority_id="manifest-security-owner",
-            retention_days=35,
-            append_only=True,
-            signed=True,
-            conditional_append=True,
-            production_ready=True,
+        self._contract = FakeContractVerifier().verify(
+            b"test-only-external-attestation",
+            minimum_retention_days=35,
+            now=NOW,
         )
 
     @property
-    def boundary(self) -> backup_manifest.ManifestBoundary:
-        return self._boundary
+    def contract(self) -> backup_manifest.VerifiedOperationalManifestContract:
+        return self._contract
 
-    def append_and_verify(
+    def append_and_readback(
         self, request: backup_manifest.BackupManifestRequest
     ) -> backup_manifest.ManifestAppendReceipt:
         self.requests.append(request)
@@ -105,21 +130,21 @@ class FakeManifestAppender(backup_manifest.BackupManifestAppender):
             ).isoformat().replace("+00:00", "Z"),
             retention_until=(
                 request.created_at.astimezone(timezone.utc).replace(microsecond=0)
-                + timedelta(days=self.boundary.retention_days)
+                + timedelta(days=self.contract.claims.retention_days)
             ).isoformat().replace("+00:00", "Z"),
             data_boundary_id=request.data_boundary_id,
             data_authority_id=request.data_authority_id,
-            manifest_boundary_id=self.boundary.boundary_id,
-            manifest_authority_id=self.boundary.authority_id,
+            manifest_boundary_id=self.contract.claims.sink_identity,
+            manifest_writer_principal=self.contract.claims.writer_principal_arn,
             previous_record_sha256="",
-            key_id="fake-key-v1",
-            signature="f" * 64,
+            manifest_key_identity=self.contract.claims.manifest_key_identity,
+            signature_algorithm=self.contract.claims.signature_algorithm,
+            signature="f" * 128,
         )
         return backup_manifest.ManifestAppendReceipt(
             record=record,
-            record_sha256=record.record_sha256(),
-            verified_head_sequence=sequence,
-            readback_verified=True,
+            readback_record_sha256=record.record_sha256(),
+            readback_head_sequence=sequence,
         )
 
 
@@ -379,3 +404,42 @@ def test_manifest_receipt가_다른_object를_결속하면_성공을_거부한�
         )
 
     assert len(client.objects) == 2
+
+
+@pytest.mark.parametrize(
+    ("field_name", "forged_value"),
+    (
+        ("sink_identity", "sink-attestation-sha256:not-hex"),
+        ("manifest_key_identity", "spki-sha256:" + "A" * 64),
+        (
+            "checkpoint_provider_identity",
+            "checkpoint-provider-attestation-sha256:" + "g" * 64,
+        ),
+        ("checkpoint_key_identity", "spki-sha256:" + "0" * 63),
+    ),
+)
+def test_manifest_attestation_파생identity는_정확한_lowercase_sha256만_허용한다(
+    field_name: str,
+    forged_value: str,
+) -> None:
+    claims = FakeContractVerifier()._verify_and_decode(b"test")  # noqa: SLF001
+
+    with pytest.raises(backup_manifest.ManifestConfigurationError, match="형식"):
+        replace(claims, **{field_name: forged_value}).validate(
+            minimum_retention_days=35,
+            now=NOW,
+        )
+
+
+def test_manifest_contract는_외부verifier_token없이_직접_위조할수없다() -> None:
+    claims = FakeContractVerifier()._verify_and_decode(b"test")  # noqa: SLF001
+    forged = backup_manifest.VerifiedOperationalManifestContract(
+        claims=claims,
+        evidence_sha256="f" * 64,
+        _token=object(),
+    )
+
+    with pytest.raises(backup_manifest.ManifestConfigurationError, match="외부 verifier"):
+        forged.validate(minimum_retention_days=35, now=NOW)
+    assert hasattr(backup_manifest.BackupManifestAppender, "append_and_readback")
+    assert not hasattr(backup_manifest.BackupManifestAppender, "append_and_verify")

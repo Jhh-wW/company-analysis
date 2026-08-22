@@ -10,7 +10,7 @@ from ops import backup_manifest as ops_manifest
 
 def test_app_writer_record_is_exactly_parseable_by_ops_gate() -> None:
     app_record = app_manifest.SignedBackupManifestRecord(
-        version=1,
+        version=app_manifest.MANIFEST_VERSION,
         sequence=1,
         scope="storage-db",
         backup_id="a" * 64,
@@ -26,11 +26,12 @@ def test_app_writer_record_is_exactly_parseable_by_ops_gate() -> None:
         retention_until="2026-09-27T01:00:00Z",
         data_boundary_id="backup-data-boundary",
         data_authority_id="backup-data-writer",
-        manifest_boundary_id="manifest-control-plane",
-        manifest_authority_id="manifest-security-owner",
+        manifest_boundary_id="sink-attestation-sha256:" + "d" * 64,
+        manifest_writer_principal="arn:aws:iam::123456789012:role/manifest-writer",
         previous_record_sha256="",
-        key_id="manifest-key-v1",
-        signature="d" * 64,
+        manifest_key_identity="spki-sha256:" + "e" * 64,
+        signature_algorithm="ed25519",
+        signature="f" * 128,
     )
 
     parsed = ops_manifest.BackupManifestRecord.from_mapping(asdict(app_record))

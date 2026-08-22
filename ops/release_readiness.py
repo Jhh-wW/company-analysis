@@ -564,7 +564,7 @@ def verify_backup(
         "trigger_count": app_schema.trigger_count,
         "manifest_backup_id": manifest_record.backup_id,
         "manifest_sequence": manifest_record.sequence,
-        "manifest_key_id": manifest_record.key_id,
+        "manifest_key_identity": manifest_record.manifest_key_identity,
     }
 
 
@@ -783,7 +783,6 @@ def build_parser() -> argparse.ArgumentParser:
         child.add_argument("--manifest-checksum-key")
         child.add_argument("--data-boundary-id")
         child.add_argument("--data-authority-id")
-        child.add_argument("--manifest-min-sequence", type=_positive_int)
         child.add_argument("--manifest-max-age-seconds", type=_positive_int)
         child.add_argument("--manifest-data-root", type=Path)
         if name == "restore-dry-run":
@@ -809,7 +808,6 @@ def _manifest_expectation_from_args(arguments: argparse.Namespace) -> ManifestEx
         "manifest-checksum-key": arguments.manifest_checksum_key,
         "data-boundary-id": arguments.data_boundary_id,
         "data-authority-id": arguments.data_authority_id,
-        "manifest-min-sequence": arguments.manifest_min_sequence,
     }
     missing = [name for name, value in required.items() if value in (None, "")]
     if missing:
@@ -823,7 +821,6 @@ def _manifest_expectation_from_args(arguments: argparse.Namespace) -> ManifestEx
         checksum_key=arguments.manifest_checksum_key,
         data_boundary_id=arguments.data_boundary_id,
         data_authority_id=arguments.data_authority_id,
-        minimum_sequence=arguments.manifest_min_sequence,
         max_age_seconds=arguments.manifest_max_age_seconds,
     )
 

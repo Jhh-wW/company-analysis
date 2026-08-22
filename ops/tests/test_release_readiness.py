@@ -51,7 +51,6 @@ CREATE TABLE notion_export_operations (
 """
 
 NOW = datetime(2026, 8, 23, 2, 0, tzinfo=timezone.utc)
-TEST_SIGNING_KEY = b"local-test-manifest-signing-key-32-bytes"
 
 
 def _digest(path: Path) -> str:
@@ -105,20 +104,14 @@ def _manifest_bundle(
 ):
     control = tmp_path / "independent-control"
     control.mkdir(exist_ok=True)
-    boundary = manifest.ManifestBoundary(
-        boundary_id="manifest-boundary",
-        authority_id="manifest-security-owner",
+    boundary = manifest.LocalTestManifestBoundary(
+        boundary_label="manifest-boundary",
+        writer_label="manifest-security-owner",
         retention_days=35,
-        append_only=True,
-        signed=True,
-        conditional_append=True,
-        production_ready=False,
     )
-    signer = manifest.HMACManifestSigner(
-        key_id="test-key-v1",
-        key=TEST_SIGNING_KEY,
-    )
-    sink = manifest.LocalAppendOnlyManifestSink(
+    signer = manifest.LocalTestEd25519ManifestSigner.generate()
+    verifier = manifest.PinnedEd25519ManifestVerifier(signer.public_key_spki)
+    sink = manifest.LocalTestAppendOnlyManifestSink(
         control / "backup-manifest.jsonl",
         boundary=boundary,
     )
@@ -126,7 +119,6 @@ def _manifest_bundle(
         sink=sink,
         signer=signer,
         minimum_retention_days=35,
-        allow_test_sink=True,
     )
     record = ledger.append_backup(
         scope="storage-db",
@@ -143,11 +135,29 @@ def _manifest_bundle(
         data_boundary_id="backup-data-boundary",
         data_authority_id="backup-data-writer",
     )
-    gate = manifest.IndependentManifestGate(
+    checkpoint_signer = manifest.LocalTestEd25519CheckpointSigner.generate()
+    checkpoint_verifier = manifest.PinnedEd25519CheckpointVerifier(
+        checkpoint_signer.public_key_spki
+    )
+    checkpoint_provider = manifest.LocalTestTrustedCheckpointProvider()
+    checkpoint_provider.publish(
+        manifest.sign_manifest_checkpoint(
+            signer=checkpoint_signer,
+            scope=record.scope,
+            sink_identity=sink.sink_identity,
+            checkpoint_provider_identity=checkpoint_provider.provider_identity,
+            manifest_key_identity=verifier.key_identity,
+            sequence=record.sequence,
+            head_record_sha256=record.record_sha256(),
+            issued_at=NOW + timedelta(seconds=1),
+        )
+    )
+    gate = manifest.LocalTestIndependentManifestGate(
         sink=sink,
-        signer=signer,
+        manifest_verifier=verifier,
+        checkpoint_provider=checkpoint_provider,
+        checkpoint_verifier=checkpoint_verifier,
         minimum_retention_days=35,
-        allow_test_sink=True,
     )
     expectation = manifest.ManifestExpectation(
         backup_id=backup_id,
@@ -158,7 +168,6 @@ def _manifest_bundle(
         checksum_key=f"company-analysis/{database.name}.sha256",
         data_boundary_id="backup-data-boundary",
         data_authority_id="backup-data-writer",
-        minimum_sequence=record.sequence,
         now=NOW + timedelta(minutes=1),
     )
     return sink, gate, expectation
