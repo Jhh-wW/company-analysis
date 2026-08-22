@@ -9,7 +9,8 @@ services:
     dockerContext: .
     healthCheckPath: /readyz
     maxShutdownDelaySeconds: 300
-    autoDeployTrigger: checksPass
+    # G3.4 로컬 정본화가 외부 배포를 암묵적으로 일으키지 않게 수동 배포만 허용한다.
+    autoDeployTrigger: off
 
     disk:
       name: app-data
@@ -106,7 +107,7 @@ services:
     dockerfilePath: ./app/Dockerfile
     dockerContext: .
     dockerCommand: python -m tools.trigger_backup
-    autoDeployTrigger: checksPass
+    autoDeployTrigger: off
     envVars:
       - key: BACKUP_TRIGGER_URL
         sync: false
@@ -127,7 +128,7 @@ services:
     dockerfilePath: ./app/Dockerfile
     dockerContext: .
     dockerCommand: python -m tools.trigger_maintenance weekly
-    autoDeployTrigger: checksPass
+    autoDeployTrigger: off
     envVars:
       - key: MAINTENANCE_TRIGGER_URL
         sync: false
@@ -148,7 +149,7 @@ services:
     dockerfilePath: ./app/Dockerfile
     dockerContext: .
     dockerCommand: python -m tools.trigger_maintenance cleanup
-    autoDeployTrigger: checksPass
+    autoDeployTrigger: off
     envVars:
       - key: MAINTENANCE_TRIGGER_URL
         sync: false

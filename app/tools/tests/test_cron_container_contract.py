@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 APP_ROOT = Path(__file__).resolve().parents[2]
@@ -111,6 +112,39 @@ def test_render_uses_package_module_entrypoints() -> None:
     assert blueprint.count(
         "dockerCommand: python -m tools.trigger_maintenance"
     ) == 2
+
+
+def test_all_git_based_render_services_disable_automatic_deploys() -> None:
+    blueprint = yaml.load(
+        (REPOSITORY_ROOT / "render.yaml").read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
+    )
+    services = blueprint["services"]
+    git_based_services = [
+        service
+        for service in services
+        if "dockerfilePath" in service or "buildCommand" in service
+    ]
+
+    assert {service["name"] for service in git_based_services} == {
+        "company-analysis-beta",
+        "company-analysis-backup",
+        "company-analysis-weekly-xlsx",
+        "company-analysis-daily-cleanup",
+    }
+    assert {
+        service["name"]
+        for service in git_based_services
+        if service["type"] == "cron"
+    } == {
+        "company-analysis-backup",
+        "company-analysis-weekly-xlsx",
+        "company-analysis-daily-cleanup",
+    }
+    assert all(
+        service.get("autoDeployTrigger") == "off"
+        for service in git_based_services
+    )
 
 
 def test_render_does_not_overwrite_real_backup_bucket_region() -> None:

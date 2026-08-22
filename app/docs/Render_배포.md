@@ -12,7 +12,7 @@
 - Uvicorn worker와 Render instance는 각각 `1`로 유지한다.
 - SQLite와 실행 이력은 `/var/data` 영속 디스크 하나에 둔다.
 - 비밀값과 사용자 식별자는 Git, 채팅, 티켓, 화면 캡처에 남기지 않는다.
-- 현재 `render.yaml`의 `autoDeployTrigger: checksPass`는 연결된 저장소의 통과 커밋을 실제 배포할 수 있다. 이번 로컬 작업에서는 Render 연결·배포를 하지 않으며, 첫 push 전 대시보드에서 자동배포 비활성 여부를 별도 확인한다.
+- 현재 `render.yaml`의 모든 서비스는 `autoDeployTrigger: off`라 커밋이나 CI 통과만으로 배포되지 않는다. 이번 로컬 작업에서는 Render 연결·배포를 하지 않으며, 첫 push 전 대시보드와 Blueprint의 Auto Sync도 비활성인지 별도 확인한다.
 
 ## 활성 제품 계약
 
