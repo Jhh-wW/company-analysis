@@ -79,11 +79,13 @@ KUBERNETES_SERVICE_ACCOUNT_MARKERS = (
 )
 RUNTIME_CONTRACT_LOCAL_WEB = "local-web-v1"
 RUNTIME_CONTRACT_RENDER_WEB = "render-public-web-v1"
+RUNTIME_CONTRACT_RENDER_ADMIN_DEMO = "render-admin-demo-no-forwarded-v1"
 RUNTIME_CONTRACT_KUBERNETES_WEB = "kubernetes-public-web-v1"
 RUNTIME_CONTRACTS = frozenset(
     {
         RUNTIME_CONTRACT_LOCAL_WEB,
         RUNTIME_CONTRACT_RENDER_WEB,
+        RUNTIME_CONTRACT_RENDER_ADMIN_DEMO,
         RUNTIME_CONTRACT_KUBERNETES_WEB,
     }
 )
@@ -275,6 +277,92 @@ def _public_origin_error(raw: str) -> str | None:
     return None
 
 
+def _normalized_public_origin(raw: str) -> str | None:
+    """검증된 공개 origin을 비교용 문자열로 정규화한다."""
+
+    if _public_origin_error(raw):
+        return None
+    parsed = urlsplit(raw.strip())
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    port = f":{parsed.port}" if parsed.port is not None else ""
+    return f"https://{hostname}{port}"
+
+
+def _render_admin_demo_errors(environment: Mapping[str, str]) -> list[str]:
+    """forwarded header를 전혀 믿지 않는 Render 관리자 데모만 좁게 허용한다."""
+
+    errors: list[str] = []
+    if environment.get("PIPELINE", "").strip().lower() != "demo":
+        errors.append("PIPELINE: Render 관리자 데모는 demo만 허용합니다")
+    if environment.get("BETA_ADMIN_ONLY", "").strip().lower() not in BOOLEAN_TRUE:
+        errors.append("BETA_ADMIN_ONLY: Render 관리자 데모는 관리자 전용이어야 합니다")
+    if environment.get("FORWARDED_ALLOW_IPS", "").strip():
+        errors.append(
+            "FORWARDED_ALLOW_IPS: Render 관리자 데모는 forwarded header를 "
+            "신뢰하지 않아야 합니다"
+        )
+
+    public_origin_raw = environment.get("PUBLIC_ORIGIN", "")
+    origin_error = _public_origin_error(public_origin_raw)
+    if origin_error:
+        errors.append(origin_error)
+        public_origin = None
+    else:
+        public_origin = _normalized_public_origin(public_origin_raw)
+
+    render_origin_raw = environment.get("RENDER_EXTERNAL_URL", "").strip()
+    if render_origin_raw and public_origin:
+        render_origin = _normalized_public_origin(render_origin_raw)
+        if render_origin is None or render_origin != public_origin:
+            errors.append(
+                "PUBLIC_ORIGIN: Render 기본 외부 URL과 정확히 같아야 합니다"
+            )
+
+    redirect_raw = environment.get("GOOGLE_REDIRECT_URI", "").strip()
+    if redirect_raw and public_origin:
+        if redirect_raw != f"{public_origin}/auth/callback":
+            errors.append(
+                "GOOGLE_REDIRECT_URI: PUBLIC_ORIGIN의 /auth/callback과 "
+                "정확히 같아야 합니다"
+            )
+    return errors
+
+
+def _render_admin_demo_command_errors(command: Sequence[str]) -> list[str]:
+    """배포 명령 덮어쓰기로 proxy header 신뢰를 다시 켜지 못하게 한다."""
+
+    words = _normalized_command_words(command)
+    expected = (
+        "python",
+        "-m",
+        "uvicorn",
+        "src.web.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "${PORT:-10000}",
+        "--workers",
+        "1",
+        "--no-proxy-headers",
+        "--limit-concurrency",
+        "20",
+        "--backlog",
+        "32",
+        "--timeout-keep-alive",
+        "5",
+        "--timeout-graceful-shutdown",
+        "${GRACEFUL_SHUTDOWN_SECONDS:-300}",
+        "--log-level",
+        "${LOG_LEVEL:-info}",
+    )
+    if words != expected:
+        return [
+            "DEPLOYMENT_COMMAND: Render 관리자 데모는 proxy 비신뢰가 고정된 "
+            "기본 web 실행 명령만 허용합니다"
+        ]
+    return []
+
+
 def _default_kubernetes_service_account_marker() -> bool:
     """내용을 읽지 않고 Kubernetes projected marker 존재만 확인한다."""
 
@@ -417,9 +505,11 @@ def _validate_forwarded_proxy_configuration(
         if kubernetes_service_account_marker is None
         else kubernetes_service_account_marker
     )
-    render_detected = (
-        contract == RUNTIME_CONTRACT_RENDER_WEB or _render_web_marker(environment)
-    )
+    render_contracts = {
+        RUNTIME_CONTRACT_RENDER_WEB,
+        RUNTIME_CONTRACT_RENDER_ADMIN_DEMO,
+    }
+    render_detected = contract in render_contracts or _render_web_marker(environment)
     kubernetes_detected = (
         contract == RUNTIME_CONTRACT_KUBERNETES_WEB
         or _kubernetes_cluster_marker(
@@ -429,10 +519,10 @@ def _validate_forwarded_proxy_configuration(
     if render_detected and kubernetes_detected:
         errors.append("PLATFORM_MARKERS: Render와 Kubernetes marker가 동시에 감지됐습니다")
     if render_detected:
-        if contract and contract != RUNTIME_CONTRACT_RENDER_WEB:
+        if contract and contract not in render_contracts:
             errors.append(
                 "DEPLOYMENT_RUNTIME_CONTRACT: Render web은 "
-                f"{RUNTIME_CONTRACT_RENDER_WEB}을 강제합니다"
+                "지원하는 Render contract를 강제합니다"
             )
         if declared_exposure != "public":
             errors.append("DEPLOYMENT_EXPOSURE: Render web marker는 public을 강제합니다")
@@ -475,6 +565,11 @@ def _validate_forwarded_proxy_configuration(
 
     if platform not in {"render", "kubernetes"}:
         errors.append("DEPLOYMENT_PLATFORM: 공개 배포는 render 또는 kubernetes여야 합니다")
+
+    if contract == RUNTIME_CONTRACT_RENDER_ADMIN_DEMO:
+        errors.extend(_render_admin_demo_errors(environment))
+        return errors
+
     forwarded_networks, network_errors = _proxy_networks(
         forwarded_raw, label="FORWARDED_ALLOW_IPS"
     )
@@ -593,12 +688,18 @@ def validate_command(
     )
     if scope == "generic":
         return scope, [GENERIC_COMMAND_BLOCKER]
-    return scope, validate(
+    errors = validate(
         environment,
         scope,
         runtime_contract=runtime_contract,
         kubernetes_service_account_marker=kubernetes_service_account_marker,
     )
+    if (
+        _runtime_contract(environment, runtime_contract)
+        == RUNTIME_CONTRACT_RENDER_ADMIN_DEMO
+    ):
+        errors.extend(_render_admin_demo_command_errors(command))
+    return scope, errors
 
 
 def main(argv: Sequence[str] | None = None) -> int:

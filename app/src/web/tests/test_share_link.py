@@ -47,7 +47,7 @@ from src.features.sharelink.constants import (
 )
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
-from src.web import job_runtime, main
+from src.web import deployment_mode, job_runtime, main
 from src.web import paid_runtime, request_helpers, runtime
 from src.web.routers import analysis as analysis_router
 from src.web.routers import reports as reports_router
@@ -126,6 +126,42 @@ def test_시험공개에서도_살아있는_링크는_자동출고본문과PDF�
     assert len(pdf.headers["x-pdf-release-record"]) == 64
     assert admin.status_code == 303
     assert admin.headers["location"] == "/auth/login"
+
+
+def test_좁은Render관리자데모는_살아있는_공유capability도_열지않는다(
+    client: TestClient, monkeypatch
+):
+    report_id = uuid.uuid4().hex
+    report = build_demo_report()
+    with storage_db.connect() as conn:
+        report_store.save(conn, report_id, "demo-corp", report.job, report)
+    _링크발급(_카카오열쇠, report.company, report_id=report_id)
+    monkeypatch.setenv(auth_constants.ENV_BETA_ADMIN_ONLY, "1")
+    monkeypatch.setenv(
+        deployment_mode.ENV_DEPLOYMENT_RUNTIME_CONTRACT,
+        deployment_mode.RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT,
+    )
+    monkeypatch.setenv(deployment_mode.ENV_PUBLIC_ORIGIN, "https://demo.example")
+    capability_headers = {
+        "Host": "demo.example",
+        "Cookie": f"{KEY_COOKIE_NAME}={_카카오열쇠}",
+    }
+
+    opened = client.get(
+        f"/k/{_카카오열쇠}", headers=capability_headers, follow_redirects=False
+    )
+    result = client.get(
+        f"/result/{report_id}", headers=capability_headers, follow_redirects=False
+    )
+    pdf = client.get(
+        f"/download/pdf/{report_id}",
+        headers=capability_headers,
+        follow_redirects=False,
+    )
+
+    for response in (opened, result, pdf):
+        assert response.status_code == 303
+        assert response.headers["location"] == "/auth/login"
 
 
 def _post_run(

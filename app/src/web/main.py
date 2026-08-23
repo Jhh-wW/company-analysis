@@ -17,7 +17,7 @@ from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
 from src.features.sharelink.constants import KEY_COOKIE_NAME
 from src.features.sharelink.access_log import install_uvicorn_access_log_filter
-from src.web import request_helpers, runtime
+from src.web import deployment_mode, request_helpers, runtime
 from src.web.response_security import ResponseSecurityMiddleware
 from src.web.routers import (
     admin,
@@ -42,13 +42,17 @@ app.mount("/static", StaticFiles(directory=str(paths.STATIC_DIR)), name="static"
 @app.middleware("http")
 async def beta_admin_gate(request: Request, call_next):
     """시험 배포에서는 로그인한 관리자만 사이트 본문에 들어오게 한다."""
-    if not auth_logic.beta_admin_only_from_env():
+    narrow_admin_demo = deployment_mode.render_admin_demo_no_forwarded()
+    if not auth_logic.beta_admin_only_from_env() and not narrow_admin_demo:
         return await call_next(request)
 
     path = request.url.path
-    if path in auth_constants.BETA_PUBLIC_PATHS or path.startswith(
-        auth_constants.BETA_PUBLIC_PATH_PREFIXES
+    public_prefix = path.startswith(auth_constants.BETA_PUBLIC_PATH_PREFIXES)
+    if narrow_admin_demo and path.startswith(
+        auth_constants.BETA_SHARE_ENTRY_PATH_PREFIXES
     ):
+        public_prefix = False
+    if path in auth_constants.BETA_PUBLIC_PATHS or public_prefix:
         return await call_next(request)
 
     token = request.cookies.get(auth_constants.SESSION_COOKIE_NAME)
@@ -64,7 +68,8 @@ async def beta_admin_gate(request: Request, call_next):
     # 실제로 살아 있을 때만 결과·진행·PDF 경로를 연다. 관리자 경로는 capability로
     # 절대 열지 않으며, 쿠키가 없는 일반 요청에는 추가 DB 조회 비용을 만들지 않는다.
     if (
-        (
+        not narrow_admin_demo
+        and (
             path in auth_constants.BETA_SHARE_PATHS
             or path.startswith(auth_constants.BETA_SHARE_PATH_PREFIXES)
         )

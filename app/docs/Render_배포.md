@@ -12,7 +12,23 @@
 - Uvicorn worker와 Render instance는 각각 `1`로 유지한다.
 - SQLite와 실행 이력은 `/var/data` 영속 디스크 하나에 둔다.
 - 비밀값과 사용자 식별자는 Git, 채팅, 티켓, 화면 캡처에 남기지 않는다.
-- 현재 `render.yaml`의 모든 서비스는 `autoDeployTrigger: off`라 커밋이나 CI 통과만으로 배포되지 않는다. 이번 로컬 작업에서는 Render 연결·배포를 하지 않으며, 첫 push 전 대시보드와 Blueprint의 Auto Sync도 비활성인지 별도 확인한다.
+- 현재 `render.yaml`은 web service 1개만 만들고 `autoDeployTrigger: off`로 둔다. 커밋이나 CI
+  통과만으로 배포되지 않으며 첫 push 전 대시보드와 Blueprint의 Auto Sync도 비활성인지
+  확인한다.
+
+## 첫 배포 범위
+
+첫 배포의 runtime contract는 `render-admin-demo-no-forwarded-v1`이다. 이것은 관리자만
+접근하는 demo 확인용이며 정식 공개 운영 승인이 아니다.
+
+- `PIPELINE=demo`, `BETA_ADMIN_ONLY=1`, instance와 worker 각각 1개
+- 경로·쿼리 없는 고정 HTTPS `PUBLIC_ORIGIN`
+- `GOOGLE_REDIRECT_URI`는 정확히 `<PUBLIC_ORIGIN>/auth/callback`
+- `FORWARDED_ALLOW_IPS`는 빈 값이며 Uvicorn proxy headers를 신뢰하지 않음
+- 공유 링크, real provider, Notion, S3 외부 백업, backup/maintenance cron은 보류
+
+기존 일반 공개 배포의 forwarded evidence gate, release policy·공급망 verifier, 외부 백업
+adapter HOLD는 그대로다. 이 첫 배포를 그 승인 증거로 재사용하지 않는다.
 
 ## 활성 제품 계약
 
@@ -29,14 +45,15 @@
 
 1. GitHub Actions `quality-gate`가 초록색인지 확인한다.
 2. Render에서 저장소 루트의 `render.yaml`로 Blueprint를 만든다.
-3. 아래 환경변수를 Render 대시보드에 직접 입력한다.
-4. Render가 발급한 HTTPS 주소를 Google OAuth와 공유 링크 기준 주소에 반영한다.
+3. `ADMIN_EMAILS`, Google OAuth client ID·secret·redirect URI만 Render 화면에 직접 입력한다.
+4. Blueprint가 Render의 HTTPS 주소를 `PUBLIC_ORIGIN`으로 자동 고정한 뒤, 같은 주소의
+   `/auth/callback`을 Google OAuth 승인 URI와 `GOOGLE_REDIRECT_URI`에 반영한다.
 5. `/healthz`(프로세스 생존)와 `/readyz`(SQLite·로그인 설정 준비), 관리자 로그인,
    비관리자 차단을 확인한다.
 6. `PIPELINE=demo`에서 회사명만 입력한 경우와 주소 힌트를 함께 입력한 경우를 각각 시험한다.
-7. PDF 준비 → 필수 자동검사 → hash 결속 자동출고 → 다운로드·Notion 흐름과 수동 승인 410을 시험한다.
-8. 독립 manifest gate를 거친 첫 SQLite 임시 복구가 통과하는지 확인하고, 비밀값 복구
-   묶음을 별도로 확인한다.
+7. PDF 준비 → 필수 자동검사 → hash 결속 자동출고 → 다운로드와 수동 승인 410을 시험한다.
+
+Notion, 공유 링크, real provider, 외부 백업과 cron 시험은 첫 배포 완료 뒤의 별도 작업이다.
 
 ## 필수·조건부 환경변수
 
@@ -45,8 +62,9 @@
 | `ADMIN_EMAILS` | 관리자 Google 이메일. 여러 명이면 쉼표로 구분 |
 | `GOOGLE_CLIENT_ID` | 배포용 Google OAuth 클라이언트 ID |
 | `GOOGLE_CLIENT_SECRET` | 비밀 관리자에 보관하는 OAuth 비밀 |
-| `GOOGLE_REDIRECT_URI` | `https://<service-host>/auth/callback` |
-| `SHARE_PUBLIC_BASE_URL` | 검증된 공개 HTTPS origin. 경로·쿼리 없이 `https://<service-host>` 형식 |
+| `PUBLIC_ORIGIN` | Blueprint가 `RENDER_EXTERNAL_URL`을 self-reference해 고정하는 첫 배포 HTTPS origin |
+| `GOOGLE_REDIRECT_URI` | 정확히 `<PUBLIC_ORIGIN>/auth/callback` |
+| `FORWARDED_ALLOW_IPS` | 첫 배포에서는 빈 값. proxy headers를 신뢰하지 않음 |
 | `PDF_RELEASE_PARTICIPANTS` | 구형 수동 승인 감사자료를 해석해야 할 때만 복구하는 과거 역할 JSON. 신규 출고 권한 아님 |
 | `PROVENANCE_SEAL_SECRET` | 모든 재배포·worker·복구에서 동일하게 유지할 32바이트 이상의 무작위 비밀 |
 | `ANTHROPIC_API_KEY` | `PIPELINE=real`에서 생성 모델을 사용할 때만 |
@@ -58,35 +76,28 @@
 | `BACKUP_MANIFEST_MIN_RETENTION_DAYS` | 독립 manifest 최소 보존일. DB 백업 보존일 이상으로 명시 |
 
 `AUTH_COOKIE_INSECURE`와 로컬 관리자 capability는 로컬 전용이다. Render에는 설정하지 않는다.
-실제 값과 JSON 예시는 `app/.env.example`의 설명을 따르되 실제 사람의 `sub`나 비밀값을
-파일에 복사하지 않는다.
+실제 값의 형식은 `app/.env.example`의 설명을 따르되 실제 사람의 `sub`나 비밀값을 파일에
+복사하지 않는다. 첫 배포에서 보류한 변수는 미리 넣지 않는다.
 
 ### provenance 비밀 준비
 
-1. 비공개 로컬 터미널에서 다음처럼 32바이트보다 큰 무작위 값을 만든다.
-
-   ```powershell
-   python -c "import secrets; print(secrets.token_urlsafe(48))"
-   ```
-
-2. 출력값을 즉시 조직 비밀 관리자에 `PROVENANCE_SEAL_SECRET`으로 저장하고 Render에
-   같은 값을 넣는다. 터미널 기록, 채팅, 문서, 저장소에는 복사하지 않는다.
-3. 비밀값의 소유자·마지막 검증일·복구 담당자를 비밀 관리자의 같은
-   복구 항목에 기록한다.
+첫 관리자 demo에서는 Blueprint가 `PROVENANCE_SEAL_SECRET`을 자동 생성한다. 정식 운영으로
+올리기 전에는 Render 비밀 관리 화면에서 같은 값을 승인된 비밀 관리자에 보관하고,
+소유자·마지막 검증일·복구 담당자를 기록한다. 채팅·문서·저장소에는 복사하지 않는다.
 
 ## 주소와 Google OAuth 연결
 
-1. Render의 `https://...onrender.com` 주소 또는 검증된 사용자 도메인을 확정한다.
+1. 첫 관리자 demo에서는 Render가 발급한 고정 `https://...onrender.com` 주소를 확정한다.
 2. Google Cloud의 승인된 리디렉션 URI에
    `https://<service-host>/auth/callback`을 등록한다.
-3. Render의 `GOOGLE_REDIRECT_URI`와 `SHARE_PUBLIC_BASE_URL`을 같은 host 기준으로
-   갱신하고 재배포한다.
+3. 자동 고정된 `PUBLIC_ORIGIN`을 확인하고 `GOOGLE_REDIRECT_URI`만 같은 host 기준으로
+   입력한 뒤 재배포한다.
 4. OAuth 동의 화면이 Testing 상태라면 운영 관리자를 테스트 사용자에 넣는다.
 5. `/healthz`와 `/readyz` 응답, HTTPS, 로그인 callback, 관리자 허용·비관리자 거절을
    확인한다.
 
-서비스 이름이나 사용자 도메인이 바뀌면 세 값과 Google 등록 URI를 함께 바꾼다. 예전
-공유 링크를 새 host로 자동 추정하지 않는다.
+서비스 이름이 바뀌면 self-reference가 만든 주소를 확인하고 `GOOGLE_REDIRECT_URI`와 Google
+등록 URI를 함께 바꾼다. 사용자 도메인은 첫 배포 뒤 정식 공개 운영 계약에서 별도로 연다.
 
 ## 데모에서 먼저 확인할 것
 
@@ -95,9 +106,9 @@ API 비용이 발생하지 않는다. 다음을 확인한다.
 
 - 회사명만 입력해 후보 확인부터 결과까지 완료
 - 선택 주소 힌트를 넣었을 때 동일 회사로 식별
-- 비관리자 접근 차단과 공유 링크 만료·철회
+- 비관리자 접근 차단과 공유 링크 발급 불가
 - 정본 화면과 PDF 내용 일치
-- 자동검사 실패 시 웹·PDF·Notion 전체 차단, 수동 승인 GET/POST 410
+- 자동검사 실패 시 웹·PDF 출고 차단, 수동 승인 GET/POST 410
 
 `BETA_ADMIN_ONLY=0`은 운영 승인과 공개 전 체크리스트를 마친 뒤에만 사용한다.
 
@@ -130,6 +141,10 @@ report_standard 통과
 
 ## 데이터 백업과 비밀 복구
 
+이 절은 첫 관리자 demo 배포 뒤 정식 운영을 준비할 때의 후속 설계다. 현재
+`render.yaml`에는 S3 외부 백업이나 backup/maintenance cron이 없으며 첫 배포에서는 관련
+환경변수를 설정하지 않는다.
+
 현재 `storage.db`는 웹 서비스에 붙은 영속 디스크에 있다. Render cron job은 다른 서비스의
 영속 디스크를 읽을 수 없으므로 다음 구조로 매일 외부 백업한다.
 
@@ -144,7 +159,7 @@ Render cron
   → 위 단계가 모두 끝난 뒤에만 성공 반환 및 과거 백업 정리
 ```
 
-`render.yaml`의 백업 cron은 매일 `19:00 UTC`, 한국 시각 다음 날 `04:00`에 실행된다. 백업
+향후 추가할 백업 cron의 기준 시각은 매일 `19:00 UTC`, 한국 시각 다음 날 `04:00`이다. 백업
 파일은 `company-analysis/storage-backup-<UTC시각>.sqlite3`와 같은 이름의
 `.sha256` 한 쌍이다. 성공 응답은 원격 파일 재검증과 독립 manifest append/read-back을
 모두 마친 뒤에만 반환되며 manifest backup ID·sequence·record hash를 포함한다.
@@ -187,7 +202,7 @@ checkpoint 공급 경로가 없다. S3 변수 세트만 채우면 되는 상태�
    함께 생성되지 않으면 알리도록 설정한다. 이 감시는 Render 장애로 cron 자체가 실행되지
    않는 경우까지 잡기 위해 Render 밖에 둔다.
 
-### 주간 XLSX와 일일 정리
+### 주간 XLSX와 일일 정리(후속 운영)
 
 Render cron은 웹 서비스의 영속 디스크를 직접 읽지 않는다. 백업과 같은 호출 구조로
 `POST https://<웹 주소>/internal/maintenance/run`을 요청하며, 작업 종류는 고정 헤더로
@@ -204,7 +219,7 @@ Blueprint가 웹에 자동 생성하고 두 cron이 같은 값을 참조하므�
 동일 주·동일 날짜가 다시 호출되면 SQLite claim 때문에 새 작업을 만들지 않는다. 내부
 실패 내용은 HTTP 응답에 노출하지 않고 대시보드 작업 사건에 실패로 남는다.
 
-Blueprint 반영 전에는 세 cron 모두 실행되지 않는다. 실제 배포 직전에는 다음을 확인한다.
+후속 Blueprint에 세 cron을 반영한 뒤 실제 운영 전에는 다음을 확인한다.
 
 1. `BACKUP_TRIGGER_URL`과 두 cron의 `MAINTENANCE_TRIGGER_URL`이 정확한 HTTPS 내부 경로인지 확인한다.
 2. 세 cron 실패 알림의 운영 수신처를 설정한다.
@@ -265,7 +280,10 @@ DB 백업에는 환경 비밀이 들어 있지 않으므로 다음 **복구 묶�
 - OAuth, provider, Notion 비밀이 유출되었거나 복구 여부가 불명확하면 먼저 회전하고
   callback·권한·전송을 다시 시험한다.
 
-## 공개 전 체크리스트
+## 정식 공개 운영 전 체크리스트
+
+아래 항목은 관리자 demo 첫 배포를 끝내기 위한 조건이 아니라, 보류 기능과 현재 HOLD를
+해결한 뒤 정식 공개 운영으로 전환하기 위한 조건이다.
 
 - [ ] GitHub Actions `quality-gate`와 Docker `/readyz` 통과
 - [ ] `PIPELINE=demo`, `BETA_ADMIN_ONLY=1`에서 첫 검증

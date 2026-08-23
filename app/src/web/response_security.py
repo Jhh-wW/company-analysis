@@ -5,7 +5,10 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from starlette.datastructures import MutableHeaders
+from starlette.datastructures import Headers, MutableHeaders
+from starlette.responses import PlainTextResponse
+
+from src.web import deployment_mode
 
 ASGIApp = Callable[
     [
@@ -15,6 +18,7 @@ ASGIApp = Callable[
     ],
     Awaitable[None],
 ]
+HOST_INDEPENDENT_HEALTH_PATHS = frozenset({"/healthz", "/readyz"})
 
 CSP_POLICY = (
     "default-src 'self'; "
@@ -63,7 +67,10 @@ class ResponseSecurityMiddleware:
                 headers["Permissions-Policy"] = (
                     "camera=(), microphone=(), geolocation=()"
                 )
-                if scope.get("scheme") == "https":
+                if (
+                    scope.get("scheme") == "https"
+                    or deployment_mode.fixed_public_https_origin()
+                ):
                     headers["Strict-Transport-Security"] = "max-age=31536000"
 
                 if not path.startswith("/static/"):
@@ -78,5 +85,17 @@ class ResponseSecurityMiddleware:
                         vary.append("Cookie")
                     headers["Vary"] = ", ".join(vary)
             await send(message)
+
+        if (
+            deployment_mode.render_admin_demo_no_forwarded()
+            and str(scope.get("path", "")) not in HOST_INDEPENDENT_HEALTH_PATHS
+        ):
+            host_values = Headers(scope=scope).getlist("host")
+            if len(host_values) != 1 or not deployment_mode.configured_public_host_matches(
+                host_values[0]
+            ):
+                response = PlainTextResponse("잘못된 요청입니다.", status_code=400)
+                await response(scope, receive, send_with_security_headers)
+                return
 
         await self.app(scope, receive, send_with_security_headers)

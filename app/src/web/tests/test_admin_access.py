@@ -34,7 +34,7 @@ from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import store as share_store
 from src.features.sharelink.constants import KEY_HEX_CHARS
 from src.features.storage import db as storage_db
-from src.web import main
+from src.web import deployment_mode, main
 from src.web import job_runtime, runtime
 from src.web.routers import admin as admin_router
 from src.web.routers import reports as reports_router
@@ -354,6 +354,31 @@ def test_노션전송은_CSRF누락과_다른출처를_export전에_막는다(
 # ══════════════════════════════════════════════════════════
 # ② 발급·삭제가 실제로 반영된다
 # ══════════════════════════════════════════════════════════
+
+
+def test_좁은Render관리자데모는_링크를_발급하지않는다(
+    admin: TestClient, monkeypatch
+):
+    monkeypatch.setenv(
+        deployment_mode.ENV_DEPLOYMENT_RUNTIME_CONTRACT,
+        deployment_mode.RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT,
+    )
+    monkeypatch.setenv(deployment_mode.ENV_PUBLIC_ORIGIN, "https://demo.example")
+    with storage_db.connect() as conn:
+        before = len(share_store.list_all(conn))
+
+    response = admin.post(
+        "/admin/link/new",
+        data={"company": "카카오", "job": "마케팅"},
+        headers={"Host": "demo.example"},
+        follow_redirects=False,
+    )
+
+    with storage_db.connect() as conn:
+        after = len(share_store.list_all(conn))
+    assert response.status_code == 404
+    assert response.text == "찾을 수 없습니다."
+    assert after == before
 
 
 def test_링크를_발급하면_저장된다(admin: TestClient):

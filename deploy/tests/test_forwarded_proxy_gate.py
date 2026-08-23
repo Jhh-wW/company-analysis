@@ -57,6 +57,28 @@ def _render_public() -> dict[str, str]:
     return environment
 
 
+def _render_admin_demo() -> dict[str, str]:
+    environment = _base()
+    environment.update(
+        {
+            "BETA_ADMIN_ONLY": "1",
+            "DEPLOYMENT_EXPOSURE": "public",
+            "DEPLOYMENT_PLATFORM": "render",
+            "DEPLOYMENT_RUNTIME_CONTRACT": (
+                validator.RUNTIME_CONTRACT_RENDER_ADMIN_DEMO
+            ),
+            "PUBLIC_ORIGIN": "https://company.example",
+            "RENDER_EXTERNAL_URL": "https://company.example",
+            "FORWARDED_ALLOW_IPS": "",
+            "ADMIN_EMAILS": "admin@example.com",
+            "GOOGLE_CLIENT_ID": "google-client-id",
+            "GOOGLE_CLIENT_SECRET": "google-client-secret",
+            "GOOGLE_REDIRECT_URI": "https://company.example/auth/callback",
+        }
+    )
+    return environment
+
+
 def _kubernetes_public() -> dict[str, str]:
     environment = _base()
     environment.update(
@@ -126,6 +148,77 @@ def test_render는_outbound로_추정한_범위를_넣어도_unblock되지_않�
     assert validator.PRODUCTION_FORWARDED_EVIDENCE_BLOCKER in joined
 
 
+def test_Render_관리자_demo는_forwarded를_비신뢰할_때만_통과한다() -> None:
+    environment = _render_admin_demo()
+
+    assert validator.validate(environment, "web") == []
+    scope, errors = validator.validate_command(
+        environment,
+        [
+            "sh",
+            "-c",
+            "exec python -m uvicorn src.web.main:app --host 0.0.0.0 "
+            "--port \"${PORT:-10000}\" --workers 1 --no-proxy-headers "
+            "--limit-concurrency 20 --backlog 32 --timeout-keep-alive 5 "
+            "--timeout-graceful-shutdown "
+            "\"${GRACEFUL_SHUTDOWN_SECONDS:-300}\" --log-level "
+            "\"${LOG_LEVEL:-info}\"",
+        ],
+    )
+
+    assert scope == "web"
+    assert errors == []
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "expected"),
+    (
+        ("PIPELINE", "real", "PIPELINE"),
+        ("BETA_ADMIN_ONLY", "0", "BETA_ADMIN_ONLY"),
+        ("FORWARDED_ALLOW_IPS", "1.1.1.1/32", "FORWARDED_ALLOW_IPS"),
+        ("PUBLIC_ORIGIN", "http://company.example", "PUBLIC_ORIGIN"),
+        (
+            "GOOGLE_REDIRECT_URI",
+            "https://company.example/wrong",
+            "GOOGLE_REDIRECT_URI",
+        ),
+    ),
+)
+def test_Render_관리자_demo의_범위를_넓히는_설정은_거부한다(
+    name: str, value: str, expected: str
+) -> None:
+    environment = _render_admin_demo()
+    environment[name] = value
+
+    assert expected in "\n".join(validator.validate(environment, "web"))
+
+
+def test_Render_관리자_demo는_Render기본URL과_다른_origin을_거부한다() -> None:
+    environment = _render_admin_demo()
+    environment["PUBLIC_ORIGIN"] = "https://other.example"
+    environment["GOOGLE_REDIRECT_URI"] = "https://other.example/auth/callback"
+
+    assert "Render 기본 외부 URL" in "\n".join(
+        validator.validate(environment, "web")
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        ["python", "-m", "uvicorn", "src.web.main:app", "--proxy-headers"],
+        ["python", "-m", "uvicorn", "src.web.main:app"],
+        ["python", "-m", "custom.web"],
+    ),
+)
+def test_Render_관리자_demo는_실행명령으로_proxy신뢰를_우회할수없다(
+    command: list[str],
+) -> None:
+    _, errors = validator.validate_command(_render_admin_demo(), command)
+
+    assert any(error.startswith("DEPLOYMENT_COMMAND:") for error in errors)
+
+
 def test_public은_경로없는_HTTPS_origin과_canary를_요구한다() -> None:
     environment = _render_public()
     environment["PUBLIC_ORIGIN"] = "http://company.example/admin"
@@ -135,19 +228,34 @@ def test_public은_경로없는_HTTPS_origin과_canary를_요구한다() -> None
     assert "CLIENT_IP_CANARY_EVIDENCE_SHA256" in joined
 
 
-def test_render_blueprint는_public진단입력을_받아도_항상_BLOCKED다() -> None:
+def test_render_blueprint는_관리자_demo_한서비스만_좁게_허용한다() -> None:
     blueprint = yaml.safe_load((REPOSITORY_ROOT / "render.yaml").read_text("utf-8"))
+    assert len(blueprint["services"]) == 1
     web = next(service for service in blueprint["services"] if service["type"] == "web")
     values = {item["key"]: item for item in web["envVars"]}
 
     assert values["DEPLOYMENT_EXPOSURE"]["value"] == "public"
     assert values["DEPLOYMENT_PLATFORM"]["value"] == "render"
     assert values["DEPLOYMENT_RUNTIME_CONTRACT"]["value"] == (
-        validator.RUNTIME_CONTRACT_RENDER_WEB
+        validator.RUNTIME_CONTRACT_RENDER_ADMIN_DEMO
     )
-    assert values["FORWARDED_ALLOW_IPS"] == {"key": "FORWARDED_ALLOW_IPS", "sync": False}
+    assert values["PIPELINE"]["value"] == "demo"
+    assert values["BETA_ADMIN_ONLY"]["value"] == "1"
+    assert values["PUBLIC_ORIGIN"] == {
+        "key": "PUBLIC_ORIGIN",
+        "fromService": {
+            "type": "web",
+            "name": "company-analysis-beta",
+            "envVarKey": "RENDER_EXTERNAL_URL",
+        },
+    }
+    assert values["FORWARDED_ALLOW_IPS"] == {
+        "key": "FORWARDED_ALLOW_IPS",
+        "value": "",
+    }
     for name in validator.COMMON_PUBLIC_EVIDENCE + validator.RENDER_PUBLIC_EVIDENCE:
-        assert values[name] == {"key": name, "sync": False}
+        assert name not in values
+    assert not any(service["type"] == "cron" for service in blueprint["services"])
 
 
 @pytest.mark.parametrize(

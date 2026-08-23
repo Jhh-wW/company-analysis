@@ -67,6 +67,9 @@ def test_image_is_non_root_and_has_runtime_health_shutdown_contract() -> None:
     assert "HEALTHCHECK --interval=15s" in dockerfile
     assert "container_healthcheck.py" in dockerfile
     assert "--timeout-graceful-shutdown" in dockerfile
+    assert "--no-proxy-headers" in dockerfile
+    assert "--proxy-headers" not in dockerfile
+    assert "--forwarded-allow-ips" not in dockerfile
     assert "--no-access-log" not in dockerfile
 
 
@@ -180,7 +183,10 @@ def test_backup_examples_expose_required_names_without_a_readiness_bypass() -> N
     for name in variable_names:
         assert f"{name}=" in runtime_example
         assert f"{name}=" in app_example
-        assert name in render_names
+        assert name not in render_names
+    assert not any(
+        service["type"] == "cron" for service in blueprint["services"]
+    )
     assert "BACKUP_MANIFEST_APPENDER_READY" not in runtime_example
     assert validator.PRODUCTION_BACKUP_MANIFEST_APPENDER_AVAILABLE is False
 

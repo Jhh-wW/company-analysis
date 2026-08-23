@@ -1,12 +1,11 @@
 from starlette.applications import Starlette
-from starlette.responses import HTMLResponse, PlainTextResponse
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from src.features.auth import constants as auth_constants
 from src.features.pipeline.demo import DemoPipeline
-from src.web import main
-from src.web import runtime
+from src.web import deployment_mode, main, runtime
 from src.web.response_security import CSP_POLICY, ResponseSecurityMiddleware
 
 
@@ -18,12 +17,22 @@ async def _form_page(_request):
     return HTMLResponse('<form method="post" action="/submit"></form>')
 
 
+async def _health(_request):
+    return JSONResponse({"status": "ok"})
+
+
+async def _readiness(_request):
+    return JSONResponse({"status": "ready"})
+
+
 def _client(*, base_url: str = "http://testserver") -> TestClient:
     app = Starlette(
         routes=[
             Route("/", _page),
             Route("/form", _form_page),
             Route("/static/a.css", _page),
+            Route("/healthz", _health),
+            Route("/readyz", _readiness),
         ]
     )
     app.add_middleware(ResponseSecurityMiddleware)
@@ -62,6 +71,95 @@ def test_https에서만_hsts를_붙인다():
 
     assert "strict-transport-security" not in http_response.headers
     assert https_response.headers["strict-transport-security"] == "max-age=31536000"
+
+
+def test_좁은Render계약은_내부HTTP에서도_고정HTTPS출처의_HSTS를_붙인다(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        deployment_mode.ENV_DEPLOYMENT_RUNTIME_CONTRACT,
+        deployment_mode.RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT,
+    )
+    monkeypatch.setenv(deployment_mode.ENV_PUBLIC_ORIGIN, "https://demo.example")
+
+    with _client(base_url="http://render-internal:10000") as client:
+        response = client.get("/", headers={"Host": "demo.example"})
+
+    assert response.status_code == 200
+    assert response.headers["strict-transport-security"] == "max-age=31536000"
+
+
+def test_좁은Render계약은_Host를_PUBLIC_ORIGIN에_고정하고_forwarded는_무시한다(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        deployment_mode.ENV_DEPLOYMENT_RUNTIME_CONTRACT,
+        deployment_mode.RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT,
+    )
+    monkeypatch.setenv(deployment_mode.ENV_PUBLIC_ORIGIN, "https://demo.example")
+
+    with _client(base_url="http://render-internal:10000") as client:
+        accepted = client.get(
+            "/",
+            headers={
+                "Host": "demo.example",
+                "X-Forwarded-Host": "attacker.example",
+                "X-Forwarded-Proto": "http",
+            },
+        )
+        rejected = client.get(
+            "/",
+            headers={
+                "Host": "attacker.example",
+                "X-Forwarded-Host": "demo.example",
+                "X-Forwarded-Proto": "https",
+            },
+        )
+        duplicate = client.get(
+            "/",
+            headers=[
+                ("Host", "demo.example"),
+                ("Host", "attacker.example"),
+            ],
+        )
+
+    assert accepted.status_code == 200
+    assert rejected.status_code == 400
+    assert duplicate.status_code == 400
+
+
+def test_좁은Render계약의_loopback_상태확인은_Host고정과_충돌하지않는다(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        deployment_mode.ENV_DEPLOYMENT_RUNTIME_CONTRACT,
+        deployment_mode.RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT,
+    )
+    monkeypatch.setenv(deployment_mode.ENV_PUBLIC_ORIGIN, "https://demo.example")
+
+    with _client(base_url="http://127.0.0.1:10000") as client:
+        health = client.get("/healthz")
+        readiness = client.get("/readyz")
+
+    assert health.status_code == 200
+    assert health.json() == {"status": "ok"}
+    assert readiness.status_code == 200
+    assert readiness.json() == {"status": "ready"}
+
+
+def test_기존모드는_PUBLIC_ORIGIN만으로_내부HTTP_HSTS나_Host고정을_켜지않는다(
+    monkeypatch,
+):
+    monkeypatch.setenv(deployment_mode.ENV_PUBLIC_ORIGIN, "https://demo.example")
+    monkeypatch.delenv(
+        deployment_mode.ENV_DEPLOYMENT_RUNTIME_CONTRACT, raising=False
+    )
+
+    with _client(base_url="http://render-internal:10000") as client:
+        response = client.get("/", headers={"Host": "attacker.example"})
+
+    assert response.status_code == 200
+    assert "strict-transport-security" not in response.headers
 
 
 def test_정적파일의_캐시정책은_덮어쓰지_않는다():

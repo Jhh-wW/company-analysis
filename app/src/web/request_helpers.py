@@ -60,7 +60,7 @@ from src.features.report_standard.section_content import (
     summary_topic,
 )
 from src.features.storage import db as storage_db
-from src.web import evaluation_mode, paid_runtime, runtime
+from src.web import deployment_mode, evaluation_mode, paid_runtime, runtime
 from src.web.security import (
     COMPANY_MAX_CHARS,
     REGION_MAX_CHARS,
@@ -709,6 +709,19 @@ def _effective_http_origin(
 
 def _csrf_origin_matches(request: Request) -> bool:
     """브라우저가 Origin을 보냈다면 요청의 전체 HTTP(S) 출처와 같아야 한다."""
+    if (
+        deployment_mode.render_admin_demo_no_forwarded()
+        and request.method.upper() == "POST"
+    ):
+        # Render edge가 붙인 X-Forwarded-*는 읽지 않는다. 외부 HTTPS 출처는
+        # 보호된 배포 설정 하나만 신뢰하고, 중복·누락 Origin도 fail-closed한다.
+        origin_values = request.headers.getlist("origin")
+        if len(origin_values) != 1:
+            return False
+        supplied = deployment_mode.http_origin(origin_values[0])
+        expected = deployment_mode.configured_public_origin()
+        return supplied is not None and expected is not None and supplied == expected
+
     origin = request.headers.get("origin", "").strip()
     if not origin:
         return True

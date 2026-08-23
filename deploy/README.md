@@ -16,6 +16,22 @@ Compose와 Kubernetes에서 같은 비-root 계정, 상태 확인 경로, 영속
 - SQLite 단일 writer 계약 때문에 replica와 worker는 각각 1개다. Kubernetes 갱신 전략은
   `Recreate`다.
 
+## 관리자 전용 Render 첫 배포
+
+첫 배포는 `render-admin-demo-no-forwarded-v1` 계약으로 한정한다. 이 계약은 정식 공개
+운영 승인이 아니라, 관리자만 로그인할 수 있는 demo 확인용 예외 경로다.
+
+- Render web service 1개만 실행하고 `PIPELINE=demo`, `BETA_ADMIN_ONLY=1`을 유지한다.
+- `PUBLIC_ORIGIN`은 Blueprint가 현재 web service의 `RENDER_EXTERNAL_URL`을
+  self-reference해 고정한다. 경로·쿼리 없는 Render 기본 HTTPS origin이어야 한다.
+  `GOOGLE_REDIRECT_URI`는 그 origin의 정확한 `/auth/callback`이어야 한다.
+- `FORWARDED_ALLOW_IPS`는 비워 두며 Uvicorn proxy headers를 신뢰하지 않는다.
+- 공유 링크, `PIPELINE=real` provider, Notion, S3 외부 백업과 cron은 활성화하지 않는다.
+
+이 좁은 계약은 forwarded client IP를 사용하지 않으며 공유 기능도 닫기 때문에 아래 일반
+공개 reverse proxy gate의 승인 증거를 요구하지 않는다. 조건 하나라도 달라지면 예외가
+아니며 fail-closed한다.
+
 ## 공개 reverse proxy gate
 
 로컬 Compose는 `DEPLOYMENT_EXPOSURE=local`, `DEPLOYMENT_PLATFORM=local`,
@@ -23,8 +39,8 @@ Compose와 Kubernetes에서 같은 비-root 계정, 상태 확인 경로, 영속
 공개 배포는 `public`을 명시해야 하며 다음 증거가 없으면 entrypoint가 웹 시작을 차단한다.
 환경의 SHA-256은 canary artifact 식별자일 뿐 신뢰 증명이 아니다. 서명 artifact 원문과
 고정 policy를 검증할 운영 adapter가 아직 없으므로
-`PRODUCTION_FORWARDED_EVIDENCE_VERIFIER_AVAILABLE=False`이고 현재 모든 public 설정은
-값을 전부 채워도 BLOCKED다.
+`PRODUCTION_FORWARDED_EVIDENCE_VERIFIER_AVAILABLE=False`이고 관리자 전용 첫 배포 계약을
+제외한 일반 public 설정은 값을 전부 채워도 BLOCKED다.
 
 - 공통: 실제 공개 HTTPS origin에서 CSRF 보호 POST 성공·타 origin 거부 canary와,
   서로 다른 외부 주소가 앱에서 서로 다른 client IP로 관측되는 canary
@@ -60,13 +76,13 @@ service-account marker가 보이면 같은 방식으로 `kubernetes`/`public`을
 근거가 아닌 방어심층 신호일 뿐이다.
 
 entrypoint는 사용자 CMD의 문자열보다 manifest가 직접 고정한 runtime contract와 플랫폼
-marker를 먼저 판정한다. Compose는 `local-web-v1`, Render web Blueprint는
-`render-public-web-v1`, Kubernetes Deployment는 `kubernetes-public-web-v1`을 사용한다.
-따라서 CMD가 `src.web.main:app`을 포함하지 않거나 trigger처럼 꾸며져도 Render web 또는
-Kubernetes contract가 있으면 반드시 web forwarded 검증을 거친다. 알 수 없는 contract와
-contract 없는 generic command는 exit 78로 닫힌다. runtime contract는 배포 종류를
-fail-closed로 분류할 뿐 공개 승인 증거가 아니므로 public contract도 독립 canary verifier
-부재 상태에서는 계속 BLOCKED다.
+marker를 먼저 판정한다. Compose는 `local-web-v1`, 관리자 전용 Render 첫 배포는
+`render-admin-demo-no-forwarded-v1`, 일반 Render web은 `render-public-web-v1`,
+Kubernetes Deployment는 `kubernetes-public-web-v1`을 사용한다.
+따라서 CMD가 `src.web.main:app`을 포함하지 않거나 trigger처럼 꾸며져도 contract에 맞는
+검증을 거친다. 알 수 없는 contract와 contract 없는 generic command는 exit 78로 닫힌다.
+관리자 demo 예외가 아닌 public contract는 독립 canary verifier 부재 상태에서 계속
+BLOCKED다.
 
 Kubernetes base는 `enableServiceLinks=false`와
 `automountServiceAccountToken=false`이므로 서비스 환경변수와 service-account 파일 marker가
@@ -136,8 +152,9 @@ evidence/policy와 다시 대조한다. artifact나 parser가 없거나 결과�
 ```
 
 현재 저장소에는 실제 policy·verifier·scanner·SBOM·provenance·서명 검증 결과가 없으므로
-공개 이미지 판정은 정직하게 BLOCKED다. validator와 fixture 시험은 Docker나 외부 registry를
-호출하지 않는다.
+정식 공개 release 판정은 정직하게 BLOCKED다. 관리자 전용 demo 예외는 정식 공개 release
+승인으로 해석하지 않는다. validator와 fixture 시험은 Docker나 외부 registry를 호출하지
+않는다.
 
 기본 `BETA_ADMIN_ONLY=1`이면 `ADMIN_EMAILS`, `GOOGLE_CLIENT_ID`,
 `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`가 모두 있어야 시작한다. `PIPELINE=real`은

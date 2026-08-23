@@ -9,7 +9,7 @@ services:
     dockerContext: .
     healthCheckPath: /readyz
     maxShutdownDelaySeconds: 300
-    # G3.4 로컬 정본화가 외부 배포를 암묵적으로 일으키지 않게 수동 배포만 허용한다.
+    # 첫 관리자 베타는 비용과 외부 변경을 통제하도록 수동 배포만 허용한다.
     autoDeployTrigger: off
 
     disk:
@@ -18,39 +18,29 @@ services:
       sizeGB: 1
 
     envVars:
-      # 배포 전 기본값은 AI API 비용 없는 데모다. Render 사용료는 별도이며 관리자만 들어올 수 있다.
+      # 첫 배포는 관리자 한 명이 확인하는 무과금 API 데모로 범위를 고정한다.
       - key: PIPELINE
         value: demo
       - key: BETA_ADMIN_ONLY
         value: "1"
-      - key: SHARE_LINK_MAX_AGE_DAYS
-        value: "60"
-      - key: SHARE_PUBLIC_BASE_URL
-        sync: false
 
-      # Render Docker에는 검증·고정 가능한 ingress peer CIDR 계약이 없으므로
-      # 현재 공개 시작은 항상 BLOCKED다. 아래 값은 진단 입력일 뿐 어떤 값을
-      # 넣어도 승격되지 않으며 outbound IP를 proxy peer로 쓰면 안 된다.
+      # Render edge가 붙인 forwarded header는 전혀 신뢰하지 않는다. 앱은 고정된
+      # 공개 HTTPS origin만 Host·CSRF·HSTS 판단에 사용한다.
       - key: DEPLOYMENT_EXPOSURE
         value: public
       - key: DEPLOYMENT_PLATFORM
         value: render
       - key: DEPLOYMENT_RUNTIME_CONTRACT
-        value: render-public-web-v1
+        value: render-admin-demo-no-forwarded-v1
       - key: PUBLIC_ORIGIN
-        sync: false
+        fromService:
+          type: web
+          name: company-analysis-beta
+          envVarKey: RENDER_EXTERNAL_URL
       - key: FORWARDED_ALLOW_IPS
-        sync: false
-      - key: HTTPS_ORIGIN_CSRF_CANARY_EVIDENCE_SHA256
-        sync: false
-      - key: CLIENT_IP_CANARY_EVIDENCE_SHA256
-        sync: false
-      - key: RENDER_DIRECT_ORIGIN_BLOCK_EVIDENCE_SHA256
-        sync: false
-      - key: RENDER_EDGE_XFF_SANITIZE_EVIDENCE_SHA256
-        sync: false
+        value: ""
 
-      # 재배포·재시작 뒤에도 남아야 하는 모든 기록은 영속 디스크에 둔다.
+      # 재배포·재시작 뒤에도 남아야 하는 기록은 모두 한 영속 디스크에 둔다.
       - key: APP_DATA_ROOT
         value: /var/data
       - key: STORAGE_DB_PATH
@@ -60,41 +50,7 @@ services:
       - key: TLDEXTRACT_CACHE
         value: /var/data/cache/tldextract
 
-      # cron은 웹 디스크를 직접 읽지 않는다. 이 비밀로 웹의 백업 경로를 호출하면
-      # 웹 프로세스가 일관된 SQLite 스냅샷을 외부 S3 저장소에 올리고 재검증한다.
-      - key: BACKUP_TRIGGER_SECRET
-        generateValue: true
-      - key: MAINTENANCE_TRIGGER_SECRET
-        generateValue: true
-      - key: BACKUP_S3_BUCKET
-        sync: false
-      # 이 세 값만으로 백업이 활성화되지는 않는다. 별도 권한·보존 경계의
-      # production BackupManifestAppender 구현과 시작 시 provider 주입이 선행돼야 한다.
-      - key: BACKUP_DATA_BOUNDARY_ID
-        sync: false
-      - key: BACKUP_DATA_AUTHORITY_ID
-        sync: false
-      - key: BACKUP_MANIFEST_MIN_RETENTION_DAYS
-        value: "35"
-      - key: BACKUP_S3_PREFIX
-        value: company-analysis/
-      - key: BACKUP_S3_REGION
-        # 실제 버킷 region을 Blueprint 입력에서 지정하고 이후 재배포 때 덮어쓰지 않는다.
-        sync: false
-      - key: BACKUP_S3_SERVER_SIDE_ENCRYPTION
-        value: AES256
-      - key: BACKUP_S3_ADDRESSING_STYLE
-        value: auto
-      - key: BACKUP_RETENTION_DAYS
-        value: "35"
-      - key: BACKUP_MAX_OBJECTS
-        value: "35"
-      - key: AWS_ACCESS_KEY_ID
-        sync: false
-      - key: AWS_SECRET_ACCESS_KEY
-        sync: false
-
-      # 실제 값은 저장소에 쓰지 않고 Blueprint 생성 화면에서 직접 입력한다.
+      # 비밀값은 저장소가 아니라 Blueprint 생성 화면에서 사용자가 직접 입력한다.
       - key: ADMIN_EMAILS
         sync: false
       - key: GOOGLE_CLIENT_ID
@@ -103,89 +59,7 @@ services:
         sync: false
       - key: GOOGLE_REDIRECT_URI
         sync: false
-      # 구형 수동 승인 감사자료 해석용. 신규 자동출고 권한에는 사용하지 않는다.
-      - key: PDF_RELEASE_PARTICIPANTS
-        sync: false
-      # 품질 보존 증거와 별도 승인 전에는 두 최적화를 활성화하지 않는다.
-      - key: POPULAR_COMPANY_BATCH_ENABLED
-        value: "0"
-      - key: ADAPTIVE_VOTING_ENABLED
-        value: "0"
+
+      # demo 실행 기록도 재시작 뒤 검증할 수 있도록 Render가 고정 비밀을 만든다.
       - key: PROVENANCE_SEAL_SECRET
         generateValue: true
-      - key: ANTHROPIC_API_KEY
-        sync: false
-      - key: DART_API_KEY
-        sync: false
-      - key: NAVER_CLIENT_ID
-        sync: false
-      - key: NAVER_CLIENT_SECRET
-        sync: false
-      - key: NOTION_TOKEN
-        sync: false
-      - key: NOTION_PARENT_PAGE_ID
-        sync: false
-
-  # production manifest appender가 설치된 뒤에만 매일 19:00 UTC에 백업한다.
-  # 현재 저장소 상태에서는 웹의 백업 경로가 fail-closed하므로 cron 성공을 기대하지 않는다.
-  # S3 자격증명은 웹에만 두고 cron에는 백업 호출 권한만 준다.
-  - type: cron
-    name: company-analysis-backup
-    runtime: docker
-    plan: starter
-    region: singapore
-    schedule: "0 19 * * *"
-    dockerfilePath: ./app/Dockerfile
-    dockerContext: .
-    dockerCommand: python -m tools.trigger_backup
-    autoDeployTrigger: off
-    envVars:
-      - key: BACKUP_TRIGGER_URL
-        sync: false
-      - key: BACKUP_TRIGGER_SECRET
-        fromService:
-          type: web
-          name: company-analysis-beta
-          envVarKey: BACKUP_TRIGGER_SECRET
-
-  # 매주 일요일 19:10 UTC(한국 시각 월요일 04:10)에 직전 월~일 XLSX를 만든다.
-  # cron은 영속 디스크를 읽지 않고 웹의 인증 경로만 호출한다.
-  - type: cron
-    name: company-analysis-weekly-xlsx
-    runtime: docker
-    plan: starter
-    region: singapore
-    schedule: "10 19 * * 0"
-    dockerfilePath: ./app/Dockerfile
-    dockerContext: .
-    dockerCommand: python -m tools.trigger_maintenance weekly
-    autoDeployTrigger: off
-    envVars:
-      - key: MAINTENANCE_TRIGGER_URL
-        sync: false
-      - key: MAINTENANCE_TRIGGER_SECRET
-        fromService:
-          type: web
-          name: company-analysis-beta
-          envVarKey: MAINTENANCE_TRIGGER_SECRET
-
-  # 매일 19:20 UTC(한국 시각 다음 날 04:20)에 휴지통·멈춘 작업을 정리한다.
-  # 이 작업은 기존 SQLite 자료만 다루며 유료 AI API를 호출하지 않는다.
-  - type: cron
-    name: company-analysis-daily-cleanup
-    runtime: docker
-    plan: starter
-    region: singapore
-    schedule: "20 19 * * *"
-    dockerfilePath: ./app/Dockerfile
-    dockerContext: .
-    dockerCommand: python -m tools.trigger_maintenance cleanup
-    autoDeployTrigger: off
-    envVars:
-      - key: MAINTENANCE_TRIGGER_URL
-        sync: false
-      - key: MAINTENANCE_TRIGGER_SECRET
-        fromService:
-          type: web
-          name: company-analysis-beta
-          envVarKey: MAINTENANCE_TRIGGER_SECRET

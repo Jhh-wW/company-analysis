@@ -28,7 +28,7 @@ from src.features.pipeline.demo import DemoPipeline
 from src.features.sharelink import store as web_share_store
 from src.features.sharelink.constants import KEY_COOKIE_NAME
 from src.features.storage import db as web_storage_db
-from src.web import main as web_main
+from src.web import deployment_mode, main as web_main
 from src.web import paid_runtime, request_helpers, runtime
 from src.features.provenance import sources as provenance_sources
 from src.web.main import app, require_admin
@@ -533,6 +533,103 @@ def test_CSRF_Origin은_scheme_host_effective_port가_모두_같아야_한다(
             "csrf_token": auth_logic.csrf_token_for_session(session.token),
         },
         headers={"Origin": origin},
+    )
+
+    assert response.status_code == 403
+
+
+def _enable_narrow_render_admin_demo(monkeypatch) -> None:
+    monkeypatch.setenv(
+        deployment_mode.ENV_DEPLOYMENT_RUNTIME_CONTRACT,
+        deployment_mode.RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT,
+    )
+    monkeypatch.setenv(deployment_mode.ENV_PUBLIC_ORIGIN, "https://demo.example")
+
+
+def test_좁은Render계약은_내부HTTP가_아닌_PUBLIC_ORIGIN으로_POST를_검사한다(
+    client, monkeypatch
+):
+    _enable_narrow_render_admin_demo(monkeypatch)
+    monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
+    session = auth_logic.create_session("admin@example.com", True)
+    client.cookies.set(SESSION, session.token)
+
+    response = client.post(
+        "/confirm",
+        data={
+            **ANALYSIS_FORM,
+            "csrf_token": auth_logic.csrf_token_for_session(session.token),
+        },
+        headers={
+            "Host": "demo.example",
+            "Origin": "https://demo.example",
+            "X-Forwarded-For": "203.0.113.99",
+            "X-Forwarded-Host": "attacker.example",
+            "X-Forwarded-Proto": "http",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "origin",
+    (
+        None,
+        "null",
+        "http://demo.example",
+        "https://demo.example:444",
+        "https://demo.example/path",
+        "https://attacker.example",
+    ),
+)
+def test_좁은Render계약은_Origin누락과_불일치를_거부한다(
+    client, monkeypatch, origin
+):
+    _enable_narrow_render_admin_demo(monkeypatch)
+    monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
+    session = auth_logic.create_session("admin@example.com", True)
+    client.cookies.set(SESSION, session.token)
+    headers = {
+        "Host": "demo.example",
+        "X-Forwarded-Host": "demo.example",
+        "X-Forwarded-Proto": "https",
+    }
+    if origin is not None:
+        headers["Origin"] = origin
+
+    response = client.post(
+        "/confirm",
+        data={
+            **ANALYSIS_FORM,
+            "csrf_token": auth_logic.csrf_token_for_session(session.token),
+        },
+        headers=headers,
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 403
+
+
+def test_좁은Render계약은_중복Origin을_거부한다(client, monkeypatch):
+    _enable_narrow_render_admin_demo(monkeypatch)
+    monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
+    session = auth_logic.create_session("admin@example.com", True)
+    client.cookies.set(SESSION, session.token)
+
+    response = client.post(
+        "/confirm",
+        data={
+            **ANALYSIS_FORM,
+            "csrf_token": auth_logic.csrf_token_for_session(session.token),
+        },
+        headers=[
+            ("Host", "demo.example"),
+            ("Origin", "https://demo.example"),
+            ("Origin", "https://attacker.example"),
+        ],
+        follow_redirects=False,
     )
 
     assert response.status_code == 403

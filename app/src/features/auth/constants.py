@@ -57,7 +57,12 @@ BETA_PUBLIC_PATHS: Final[frozenset[str]] = frozenset(
         "/internal/maintenance/run",
     }
 )
-BETA_PUBLIC_PATH_PREFIXES: Final[tuple[str, ...]] = ("/static/", "/k/")
+# 공유 capability 진입점은 좁은 Render 관리자 데모에서 공개 예외가 아니다.
+BETA_SHARE_ENTRY_PATH_PREFIXES: Final[tuple[str, ...]] = ("/k/",)
+BETA_PUBLIC_PATH_PREFIXES: Final[tuple[str, ...]] = (
+    "/static/",
+    *BETA_SHARE_ENTRY_PATH_PREFIXES,
+)
 
 # 살아 있는 공유 capability 쿠키로 열 수 있는 사용자 흐름만 명시한다. 관리자·검수·
 # 외부 내보내기 경로는 각 라우터의 자체 권한 검사와 별개로 beta gate에서도 닫는다.

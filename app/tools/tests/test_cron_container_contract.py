@@ -117,13 +117,15 @@ def test_container_entrypoint_is_not_hidden_by_repository_allowlist() -> None:
     assert rules.index("!/app/tools/container_entrypoint.sh") > rules.index("/app/tools/*")
 
 
-def test_render_uses_package_module_entrypoints() -> None:
-    blueprint = (REPOSITORY_ROOT / "render.yaml").read_text(encoding="utf-8")
+def test_first_render_beta_defers_cron_entrypoints() -> None:
+    blueprint = yaml.safe_load(
+        (REPOSITORY_ROOT / "render.yaml").read_text(encoding="utf-8")
+    )
 
-    assert "dockerCommand: python -m tools.trigger_backup" in blueprint
-    assert blueprint.count(
-        "dockerCommand: python -m tools.trigger_maintenance"
-    ) == 2
+    assert [service["name"] for service in blueprint["services"]] == [
+        "company-analysis-beta"
+    ]
+    assert all(service["type"] == "web" for service in blueprint["services"])
 
 
 def test_all_git_based_render_services_disable_automatic_deploys() -> None:
@@ -140,33 +142,34 @@ def test_all_git_based_render_services_disable_automatic_deploys() -> None:
 
     assert {service["name"] for service in git_based_services} == {
         "company-analysis-beta",
-        "company-analysis-backup",
-        "company-analysis-weekly-xlsx",
-        "company-analysis-daily-cleanup",
     }
-    assert {
-        service["name"]
-        for service in git_based_services
-        if service["type"] == "cron"
-    } == {
-        "company-analysis-backup",
-        "company-analysis-weekly-xlsx",
-        "company-analysis-daily-cleanup",
-    }
+    assert not any(service["type"] == "cron" for service in git_based_services)
     assert all(
         service.get("autoDeployTrigger") == "off"
         for service in git_based_services
     )
 
 
-def test_render_does_not_overwrite_real_backup_bucket_region() -> None:
-    blueprint = (REPOSITORY_ROOT / "render.yaml").read_text(encoding="utf-8")
-    region_block = blueprint.split("- key: BACKUP_S3_REGION", 1)[1].split(
-        "- key:", 1
-    )[0]
+def test_first_render_beta_does_not_request_backup_or_provider_secrets() -> None:
+    blueprint = yaml.safe_load(
+        (REPOSITORY_ROOT / "render.yaml").read_text(encoding="utf-8")
+    )
+    web = blueprint["services"][0]
+    names = {item["key"] for item in web["envVars"]}
 
-    assert "sync: false" in region_block
-    assert "value:" not in region_block
+    assert not names.intersection(
+        {
+            "BACKUP_S3_BUCKET",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "ANTHROPIC_API_KEY",
+            "DART_API_KEY",
+            "NAVER_CLIENT_ID",
+            "NAVER_CLIENT_SECRET",
+            "NOTION_TOKEN",
+            "NOTION_PARENT_PAGE_ID",
+        }
+    )
 
 
 def test_command_override_still_passes_through_validating_non_root_entrypoint() -> None:

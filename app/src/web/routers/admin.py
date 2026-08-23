@@ -20,7 +20,7 @@ from src.features.sharelink import store as share_store
 from src.features.sharelink import tracks as share_tracks
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
-from src.web import job_runtime, paid_runtime, request_helpers, runtime
+from src.web import deployment_mode, job_runtime, paid_runtime, request_helpers, runtime
 from src.web.security import (
     COMPANY_MAX_CHARS,
     CSRF_TOKEN_MAX_CHARS,
@@ -436,6 +436,11 @@ async def admin_link_new(
     csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
 ):
     """지원 회사·직무 꼬리표가 붙은 LINK를 새로 발급한다."""
+    if deployment_mode.render_admin_demo_no_forwarded():
+        return _admin_response(
+            request,
+            HTMLResponse("찾을 수 없습니다.", status_code=404),
+        )
     company_clean = company.strip()
     # 회사·직무는 지원 맥락 꼬리표일 뿐 검색·생성 권한 범위가 아니다.
     job_clean = job.strip()
