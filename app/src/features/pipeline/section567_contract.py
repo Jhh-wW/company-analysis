@@ -62,7 +62,12 @@ def expected_plan_status(evidence: str) -> str:
 
 PLAN_TIMING_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"20\d{2}(?:\s*[~\-]\s*20\d{2})?년(?:\s*(?:상|하)반기|\s*\d{1,2}월)?|"
-    r"(?:상|하)반기|[1-4]분기|연내|향후\s*\d+\s*년"
+    r"(?:상|하)반기|[1-4]분기|연내|향후\s*\d+\s*년|"
+    r"(?<!\d)20\d{2}(?!\d)|"
+    r"(?<![A-Z0-9])(?:H[12]|[12]H|Q[1-4]|[1-4]Q)"
+    r"(?:\s*['’]?\d{2,4})?(?![A-Z0-9])|"
+    r"\b(?:first|second)\s+half\b",
+    re.I,
 )
 PLAN_CONDITION_PATTERN: Final[re.Pattern[str]] = _PLAN_CONDITIONAL
 PLAN_EXPECTED_EFFECT_PATTERN: Final[re.Pattern[str]] = re.compile(
@@ -74,11 +79,22 @@ PLAN_EFFECT_BINDING_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"기대|예상|전망|목표|위해|도모|목적|효과"
 )
 INACTIVE_PLAN_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"취소|철회|중단|백지화|폐기"
+    r"취소|철회|중단|백지화|폐기|"
+    r"\b(?:cancel(?:led|ed|s)?|withdrawn?|discontinu(?:e|ed|ation)|"
+    r"suspend(?:ed|s)?|abandon(?:ed|s)?)\b",
+    re.I,
 )
 PLAN_EXECUTION_SIGNAL_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"출시|가동|양산|상용화|승인|허가|고객\s*확보|납품|판매\s*개시|"
-    r"구축|도입|확대|수주|계약\s*체결|입점|공연|착공|준공"
+    r"구축|도입|확대|극대화|추가|수주|계약\s*체결|입점|공연|투어|팝업|발매|"
+    r"개최|협업|착공|준공|"
+    r"\b(?:releas(?:e|es|ed|ing)|launch(?:es|ed|ing)?|"
+    r"tour(?:s|ed|ing)?|concerts?|shows?|debut(?:s|ed|ing)?|"
+    r"pop[- ]?ups?|festivals?|open(?:s|ed|ing)?|"
+    r"expand(?:s|ed|ing|ansion)?|add(?:s|ed|ing)?|"
+    r"collaborat(?:e|es|ed|ing|ion)|licens(?:e|es|ed|ing)|"
+    r"maximiz(?:e|es|ed|ing|ation))\b",
+    re.I,
 )
 
 
@@ -116,18 +132,26 @@ def plan_timing_has_passed(plan_timing: str, report_date: date) -> bool:
 
     value = " ".join(str(plan_timing or "").split())
     years = [int(year) for year in re.findall(r"20\d{2}", value)]
+    years.extend(
+        2000 + int(year)
+        for year in re.findall(
+            r"(?:H[12]|[12]H|Q[1-4]|[1-4]Q)\s*['’]?(\d{2})(?!\d)",
+            value,
+            re.I,
+        )
+    )
     if not years:
         return False
     end_year = max(years)
     if end_year != report_date.year:
         return end_year < report_date.year
-    if re.search(r"하반기|[34]분기", value):
+    if re.search(r"하반기|H2|2H|Q[34]|[34]Q|[34]분기", value, re.I):
         return False
-    if "상반기" in value:
+    if re.search(r"상반기|H1|1H|first\s+half", value, re.I):
         return report_date > date(end_year, 6, 30)
-    quarter = re.search(r"([1-4])분기", value)
+    quarter = re.search(r"(?:([1-4])분기|Q([1-4])|([1-4])Q)", value, re.I)
     if quarter:
-        end_month = int(quarter.group(1)) * 3
+        end_month = int(next(group for group in quarter.groups() if group)) * 3
         end_day = 31 if end_month in {3, 12} else 30
         return report_date > date(end_year, end_month, end_day)
     month = re.search(r"20\d{2}년\s*(\d{1,2})월", value)
@@ -182,7 +206,11 @@ NEXT_CHECK_METRIC_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"임상\s*이벤트|재계약|환율|현금흐름|재구매|조치\s*이행|"
     r"심사\s*진행|사용\s*기관|수가\s*적용|IP별\s*기여|"
     r"비활동기\s*매출|반복\s*활동|"
-    r"[A-Za-z가-힣0-9·\s]{1,24}(?:율|률|액|량|건수|일수|여부|비중|기간|단가|잔고|결과))"
+    r"[A-Za-z가-힣0-9·\s]{1,24}(?:율|률|액|량|건수|일수|여부|비중|기간|단가|잔고|결과)|"
+    r"(?:revenue|sales|operating\s+profit|net\s+profit|OP|OPM|"
+    r"physical(?:\s+sales)?|streaming(?:\s+sales)?|MD(?:\s+sales)?|"
+    r"concerts?|appearances?|album\s+sales|SG&A|commissions?))",
+    re.I,
 )
 _GENERIC_NEXT_CHECK_METRIC: Final[re.Pattern[str]] = re.compile(
     r"(?:문제|과제|부담|해결|개선)\s*여부"

@@ -13,6 +13,8 @@ from src.features.spanselect.canonical import (
     select_canonical_spans,
 )
 from src.features.pipeline.section567_contract import (
+    PLAN_EXECUTION_SIGNAL_PATTERN,
+    PLAN_TIMING_PATTERN,
     expected_plan_status,
     has_current_operating_role,
     has_executed_current_distribution_partnership,
@@ -25,6 +27,14 @@ from src.features.pipeline.section567_contract import (
 )
 from src.features.pipeline.port import ReportTable
 from src.features.spanselect.constants import CANONICAL_SELECTION_MAX_TOKENS
+from src.features.spanselect.logic import number_sentences
+from src.shared.official_ir import (
+    IR_ATTACHMENT_URL_FIELD,
+    IR_COLLECTED_ON_FIELD,
+    IR_METADATA_VERIFICATION_FIELD,
+    IR_METADATA_VERIFICATION_VALUE,
+    IR_REPORTING_PERIOD_FIELD,
+)
 
 
 @dataclass(frozen=True)
@@ -409,7 +419,7 @@ def test_AI는_번호와_배치만_고르고_원문과_섹션게이트가_최종
                     "subject_label": "AlphaX",
                     "market_stage": "",
                     "market_observation": "",
-                    "product_role": "기업 고객 판매 제품",
+                    "product_role": "기업 고객에게 판매",
                     "portfolio_stage": "성장",
                     "revenue_model_sid": "[4-1]",
                     "response_to_sid": "",
@@ -481,8 +491,8 @@ def test_AI는_번호와_배치만_고르고_원문과_섹션게이트가_최종
     assert kept[0].sentence == "진영은 친환경 소재 전문기업이다."
     assert kept[2].claim_type == "priority_product"
     assert kept[2].revenue_model_sid == "4-1"
-    assert kept[2].product_role == "기업 고객 판매 제품"
-    assert kept[2].portfolio_stage == "성장"
+    assert kept[2].product_role == "기업 고객에게 판매"
+    assert kept[2].portfolio_stage == ""
     assert kept[2].revenue_model_sid == "4-1"
 
 
@@ -825,6 +835,295 @@ def test_필수_대상라벨은_원문에_없으면_종전처럼_거절한다() 
     ] == (("subject_label_not_in_source", 1),)
 
 
+def _jyp_verified_ir_fragment(text: str) -> dict[str, str]:
+    corp_code = "00258689"
+    corp_name = "(주)제이와이피엔터테인먼트"
+    profile = (
+        '{"corp_code":"00258689","corp_name":'
+        '"(주)제이와이피엔터테인먼트","hm_url":"https://www.jype.com"}'
+    )
+    return {
+        "종류": "공식 IR",
+        "원문": text,
+        "출처": "https://www.jype.com/ko/board/ir-data/22sgoywh",
+        "발행처": corp_name,
+        "문서일": "2026-08-12",
+        "후보출처검증": "https_exact_dart_host",
+        "도메인근거SourceID": f"dart-company-profile-{corp_code}",
+        "도메인근거원문": profile,
+        IR_METADATA_VERIFICATION_FIELD: IR_METADATA_VERIFICATION_VALUE,
+        IR_REPORTING_PERIOD_FIELD: "2026-Q2",
+        IR_ATTACHMENT_URL_FIELD: "https://cdn.jype.com/ir/26Q2_Result_EN.pdf",
+        IR_COLLECTED_ON_FIELD: "2026-08-24",
+    }
+
+
+_JYP_COMPANY_IDENTITY = (
+    "(주)제이와이피엔터테인먼트 JYP Ent. JYP Entertainment Corporation"
+)
+
+
+def _production_style_split_sentences(text: str) -> list[str]:
+    """운영 splitter처럼 종결 표지가 없는 마지막 꼬리를 버린다."""
+    pieces = [text.strip()] if len(text.strip()) >= 20 else []
+    if pieces and not pieces[-1].rstrip().endswith(
+        (".", "!", "?", "다", "음", "됨", ")")
+    ):
+        pieces = pieces[:-1]
+    return pieces[:12]
+
+
+def test_검증된_JYP_영문IR은_splitter가_버린_무마침표_원문도_후보로_보존한다() -> None:
+    original = "Stray Kids IP Leverage Impact Maximization in 2026 H2 & 2027"
+
+    sent_map, lines, _excluded = number_sentences(
+        {1: _jyp_verified_ir_fragment(original)},
+        _production_style_split_sentences,
+    )
+
+    assert sent_map == {"1-1": (1, original)}
+    assert lines == [f"[1-1] (공식 IR) {original}"]
+
+
+def test_일반출처의_무마침표_영문꼬리는_후보로_복구하지_않는다() -> None:
+    original = "Stray Kids IP Leverage Impact Maximization in 2026 H2 & 2027"
+
+    for kind in ("홈페이지", "뉴스"):
+        sent_map, lines, _excluded = number_sentences(
+            {1: {"종류": kind, "원문": original}},
+            _production_style_split_sentences,
+        )
+
+        assert sent_map == {}
+        assert lines == []
+
+
+def _jyp_future_plan_item() -> dict[str, object]:
+    return _section567_item(
+        "future_strategy",
+        "1-1",
+        "future_plan",
+        "Stray Kids",
+        plan_status="announced",
+        plan_timing="2026 H2 & 2027",
+        plan_execution_signal="IP Leverage Impact Maximization",
+    )
+
+
+def test_DART결속_JYP_영문IR은_미래계획_후보와_H2를_보존한다() -> None:
+    sentence = "Stray Kids IP Leverage Impact Maximization in 2026 H2 & 2027."
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {"items": [_jyp_future_plan_item()]},
+        {1: _jyp_verified_ir_fragment(sentence)},
+        [],
+        engine=_Engine(),
+        company=_JYP_COMPANY_IDENTITY,
+    )
+
+    assert rejected == []
+    assert [(pick.claim_type, pick.subject_label) for pick in kept] == [
+        ("future_plan", "Stray Kids")
+    ]
+    assert kept[0].plan_timing == "2026 H2 & 2027"
+
+
+def test_JYP_영문_IR의_현재공연실적은_제품축과_우선신호를_보존한다() -> None:
+    revenue_sentence = (
+        "제이와이피엔터테인먼트는 공연 티켓과 MD를 판매해 매출을 얻는다."
+    )
+    portfolio_sentence = (
+        "2026 Q2 2025 Q2 YoY(%) Change Expansion of domestic & overseas "
+        "streaming sales; continuous global sales of Stray Kids catalogues. "
+        "Physical 37.0 BN, +36.7% YoY. Steady growth in Stray Kids catalogues "
+        "and increased new releases."
+    )
+    items = [
+        _section567_item(
+            "business_model",
+            "1-1",
+            "revenue_model",
+            "",
+        ),
+        _section567_item(
+            "portfolio",
+            "2-1",
+            "priority_product",
+            "Stray Kids",
+            product_role="Stray Kids catalogues",
+            portfolio_stage="",
+            revenue_model_sid="1-1",
+            priority_signals=["매출·이용증가", "유통·지역확대"],
+        ),
+    ]
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {"items": items},
+        {
+            1: {"종류": "사업내용", "원문": revenue_sentence},
+            2: _jyp_verified_ir_fragment(portfolio_sentence),
+        },
+        [],
+        engine=_Engine(),
+        company=_JYP_COMPANY_IDENTITY,
+    )
+
+    assert rejected == []
+    assert [pick.claim_type for pick in kept] == [
+        "revenue_model",
+        "priority_product",
+    ]
+    assert kept[1].priority_signals == ("매출·이용증가", "유통·지역확대")
+
+
+def test_JYP_영문IR의_현재문제는_객관지표와_미해결표현이_함께_있을때만_보존한다() -> None:
+    sentence = (
+        "Decline in operating profit and OPM due to limited leverage and "
+        "increased SG&A commission fee."
+    )
+    item = _section567_item(
+        "current_challenges",
+        "1-1",
+        "current_issue",
+        "operating profit and OPM",
+        next_check_metric="OPM",
+    )
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {"items": [item]},
+        {1: _jyp_verified_ir_fragment(sentence)},
+        [],
+        engine=_Engine(),
+        company=_JYP_COMPANY_IDENTITY,
+    )
+
+    assert rejected == []
+    assert [(pick.claim_type, pick.next_check_metric) for pick in kept] == [
+        ("current_issue", "OPM")
+    ]
+
+    unverified = _jyp_verified_ir_fragment(sentence)
+    unverified["도메인근거SourceID"] = ""
+    blocked, blocked_reasons = select_canonical_spans(
+        lambda _prompt, _schema: {"items": [item]},
+        {1: unverified},
+        [],
+        engine=_Engine(),
+        company=_JYP_COMPANY_IDENTITY,
+    )
+    assert blocked == []
+    assert blocked_reasons
+
+
+def test_JYP_영문IR이어도_원문에_없는_제품역할은_만들지_않는다() -> None:
+    revenue_sentence = (
+        "제이와이피엔터테인먼트는 공연 티켓과 MD를 판매해 매출을 얻는다."
+    )
+    portfolio_sentence = (
+        "2026 Q2 2025 Q2 YoY(%) Change Expansion of domestic & overseas "
+        "streaming sales; continuous global sales of Stray Kids catalogues. "
+        "Physical 37.0 BN, +36.7% YoY. Steady growth in Stray Kids catalogues "
+        "and increased new releases."
+    )
+    items = [
+        _section567_item(
+            "business_model",
+            "1-1",
+            "revenue_model",
+            "",
+        ),
+        _section567_item(
+            "portfolio",
+            "2-1",
+            "priority_product",
+            "Stray Kids",
+            product_role="global revenue leader",
+            revenue_model_sid="1-1",
+            priority_signals=["출시·운영", "매출·이용증가"],
+        ),
+    ]
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {"items": items},
+        {
+            1: {"종류": "사업내용", "원문": revenue_sentence},
+            2: _jyp_verified_ir_fragment(portfolio_sentence),
+        },
+        [],
+        engine=_Engine(),
+        company=_JYP_COMPANY_IDENTITY,
+    )
+
+    assert [pick.claim_type for pick in kept] == ["revenue_model"]
+    assert any(item["reason"] == "제품 포트폴리오 역할 없음" for item in rejected)
+
+
+def test_IR영문_회사특이성예외는_뉴스_홈페이지_미검증IR_다른회사에_열리지_않는다() -> None:
+    sentence = (
+        "Decline in operating profit and OPM due to limited leverage and "
+        "increased SG&A commission fee."
+    )
+    item = _section567_item(
+        "current_challenges",
+        "1-1",
+        "current_issue",
+        "operating profit and OPM",
+        next_check_metric="OPM",
+    )
+    valid = _jyp_verified_ir_fragment(sentence)
+    news = {**valid, "종류": "뉴스"}
+    homepage = {**valid, "종류": "홈페이지"}
+    unverified = {**valid, "도메인근거SourceID": ""}
+    wrong_company = {
+        **valid,
+        "발행처": "(주)에스엠엔터테인먼트",
+        "도메인근거SourceID": "dart-company-profile-00136377",
+        "도메인근거원문": (
+            '{"corp_code":"00136377","corp_name":"(주)에스엠엔터테인먼트",'
+            '"hm_url":"https://www.jype.com"}'
+        ),
+    }
+
+    for fragment in (news, homepage, unverified, wrong_company):
+        kept, rejected = select_canonical_spans(
+            lambda _prompt, _schema: {"items": [item]},
+            {1: fragment},
+            [],
+            engine=_Engine(),
+            company=_JYP_COMPANY_IDENTITY,
+        )
+
+        assert kept == []
+        assert rejected
+
+
+def test_DART결속_영문IR도_취소된_계획은_살리지_않는다() -> None:
+    sentence = (
+        "Stray Kids IP Leverage Impact Maximization in 2026 H2 & 2027 was cancelled."
+    )
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {"items": [_jyp_future_plan_item()]},
+        {1: _jyp_verified_ir_fragment(sentence)},
+        [],
+        engine=_Engine(),
+        company=_JYP_COMPANY_IDENTITY,
+    )
+
+    assert kept == []
+    assert any(item["reason"] == "취소·철회·중단된 계획" for item in rejected)
+
+
+def test_다른_분석회사에는_JYP_영문IR_미래계획_예외가_열리지_않는다() -> None:
+    sentence = "Stray Kids IP Leverage Impact Maximization in 2026 H2 & 2027."
+
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {"items": [_jyp_future_plan_item()]},
+        {1: _jyp_verified_ir_fragment(sentence)},
+        [],
+        engine=_Engine(),
+        company="(주)에스엠엔터테인먼트",
+    )
+
+    assert kept == []
+    assert rejected
+
+
 def test_대상라벨의_따옴표와_붙임표_오류는_원문_표기로만_복구한다(
     monkeypatch,
 ) -> None:
@@ -1086,7 +1385,7 @@ def test_후단에서_수익모델이_탈락하면_중점제품도_최종_제외
         "2-1",
         "priority_product",
         "SmartX",
-        product_role="기업 고객용 제품",
+        product_role="해외 판매망",
         revenue_model_sid="[1-1]",
         priority_signals=["출시·운영", "유통·지역확대"],
     )
@@ -1676,6 +1975,21 @@ def test_지난_계획시점은_보고서_기준일로_계산한다() -> None:
     assert plan_timing_has_passed("2026년 상반기", report_date)
     assert not plan_timing_has_passed("2026년 하반기", report_date)
     assert not plan_timing_has_passed("2026~2028년", report_date)
+    assert plan_timing_has_passed("H1 2026", report_date)
+    assert plan_timing_has_passed("2026 Q2", report_date)
+    assert not plan_timing_has_passed("H2 2026", report_date)
+    assert not plan_timing_has_passed("Q4 2026", report_date)
+    assert plan_timing_has_passed("H1 '26", report_date)
+    assert not plan_timing_has_passed("H2 '26", report_date)
+
+
+def test_검증된_영문IR의_계획시점과_실행신호를_닫힌패턴으로_읽는다() -> None:
+    assert PLAN_TIMING_PATTERN.search("H2 2026 & 2027")
+    assert PLAN_TIMING_PATTERN.search("Q1 2027")
+    assert PLAN_EXECUTION_SIGNAL_PATTERN.search("world tour RUN IT")
+    assert PLAN_EXECUTION_SIGNAL_PATTERN.search("new album release")
+    assert PLAN_EXECUTION_SIGNAL_PATTERN.search("city pop-ups in Japan")
+    assert PLAN_EXECUTION_SIGNAL_PATTERN.search("IP Leverage Impact Maximization")
 
 
 def test_고객판매가_함께_적혀도_내부_판매망_자체는_고객사가_아니다() -> None:
@@ -1757,6 +2071,11 @@ def test_업종별_객관지표는_받고_문제반복_여부는_거부한다() 
         "IP별 기여",
         "비활동기 매출",
         "반복 활동",
+        "Revenue",
+        "Operating Profit",
+        "OPM",
+        "MD sales",
+        "Concerts",
     )
     assert all(is_objective_next_check_metric(value) for value in metrics)
     assert not any(

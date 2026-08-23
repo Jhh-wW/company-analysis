@@ -89,6 +89,8 @@ _SUBJECT_LABEL_REQUIRED_CLAIM_TYPES = frozenset(
         "priority_product",
     }
 )
+_DART_VERIFIED_FINAL_URL_FIELD = "후보출처검증"
+_DART_VERIFIED_FINAL_URL_VALUE = "https_exact_dart_host"
 _STRUCTURED_COMPANY_BINDING_FAILURE_REASONS: dict[str, frozenset[str]] = {
     "current_response": frozenset({"회사 고유 위험·변화 근거가 없음"}),
     "future_plan": frozenset(
@@ -254,22 +256,80 @@ _VALIDATION_REJECTION_CODES = frozenset(
 )
 
 PORTFOLIO_STAGES: tuple[str, ...] = ("주력", "성장", "안정", "신규")
+PORTFOLIO_STAGE_PATTERNS: dict[str, re.Pattern[str]] = {
+    "주력": re.compile(r"주력|대표\s*(?:제품|서비스|사업)|\bflagship\b", re.I),
+    "성장": re.compile(r"성장\s*(?:제품|서비스|사업|축)|\bgrowth[- ]stage\b", re.I),
+    "안정": re.compile(r"안정\s*(?:제품|서비스|사업|축)|\bmature\b", re.I),
+    "신규": re.compile(
+        r"신규\s*(?:제품|서비스|사업)|\bnew\s+(?:product|service|business)\b",
+        re.I,
+    ),
+}
 HISTORICAL_PERFORMANCE_BASIS_PREFIX = "historical-performance:"
 PRIORITY_SIGNAL_PATTERNS: dict[str, re.Pattern[str]] = {
-    "출시·운영": re.compile(r"출시|공개|도입|가동|운영|판매|생산|공급|서비스"),
+    "출시·운영": re.compile(
+        r"출시|공개|도입|가동|운영|판매|생산|공급|서비스|"
+        r"\b(?:release(?:d|s)?|launch(?:ed|es)?|operat(?:e|es|ed|ing)|"
+        r"host(?:s|ed|ing)?|concerts?|tours?|perform(?:s|ed|ing|ance)?)\b",
+        re.I,
+    ),
     "매출·이용증가": re.compile(
         r"(?:매출|판매량|출하량|이용자|가입자).{0,16}(?:증가|성장)|"
-        r"(?:증가|성장).{0,16}(?:매출|판매량|출하량|이용자|가입자)"
+        r"(?:증가|성장).{0,16}(?:매출|판매량|출하량|이용자|가입자)|"
+        r"\b(?:revenue|sales|shipments?|users?|subscribers?|audiences?).{0,48}"
+        r"(?:increase|increased|expanded?|expansion|growth|grew|"
+        r"record[- ]high|largest[- ]ever|yoy\s*\+)|"
+        r"\b(?:increase|increased|expanded?|expansion|growth|grew|"
+        r"record[- ]high|largest[- ]ever).{0,48}"
+        r"(?:revenue|sales|shipments?|users?|subscribers?|audiences?)\b",
+        re.I,
     ),
     "생산확대": re.compile(
         r"(?:생산량|생산능력|생산s*규모).{0,16}(?:증가|확대|늘)|"
-        r"(?:증가|확대|늘).{0,16}(?:생산량|생산능력|생산s*규모)"
+        r"(?:증가|확대|늘).{0,16}(?:생산량|생산능력|생산s*규모)|"
+        r"\b(?:production|capacity).{0,20}(?:increase|expand|growth)|"
+        r"\b(?:increase|expand|growth).{0,20}(?:production|capacity)\b",
+        re.I,
     ),
-    "투자·증설": re.compile(r"투자|증설|설비|공장|라인|인수|연구개발"),
-    "유통·지역확대": re.compile(r"유통|판매망|채널|진출|수출|해외|지역|국가"),
-    "공식우선과제": re.compile(r"전략|핵심|중점|우선|주력|집중"),
-    "파트너확대": re.compile(r"파트너|제휴|협력|공동|계약"),
+    "투자·증설": re.compile(
+        r"투자|증설|설비|공장|라인|인수|연구개발|"
+        r"\b(?:investment|facility|facilities|factory|acquisition|R&D)\b",
+        re.I,
+    ),
+    "유통·지역확대": re.compile(
+        r"유통|판매망|채널|진출|수출|해외|지역|국가|"
+        r"\b(?:distribution|channel|global|overseas|LATAM|Japan|NA|EU|"
+        r"North America|Europe|world tour)\b",
+        re.I,
+    ),
+    "공식우선과제": re.compile(
+        r"전략|핵심|중점|우선|주력|집중|"
+        r"\b(?:strategy|strategic|key|core|major|priority|focus|strengthen)\b",
+        re.I,
+    ),
+    "파트너확대": re.compile(
+        r"파트너|제휴|협력|공동|계약|"
+        r"\b(?:partner(?:s|ship)?|collaboration|alliance|agreement)\b",
+        re.I,
+    ),
 }
+
+_ENGLISH_IR_PORTFOLIO_BUSINESS_PATTERN = re.compile(
+    r"\b(?:revenue|sales|album|music|streaming|concert|tour|merchandise|MD|"
+    r"platform|membership|licensing|artist)\b",
+    re.I,
+)
+_ENGLISH_IR_PORTFOLIO_CURRENT_PATTERN = re.compile(
+    r"\b(?:record[- ]high|largest[- ]ever|completed|released|launched|hosting|"
+    r"held|operating|continuous|expanded|expansion|increased|growth|yoy)\b",
+    re.I,
+)
+_ENGLISH_IR_CURRENT_ISSUE_PATTERN = re.compile(
+    r"\b(?:continued?\s+impact|declin(?:e|es|ed)|decreas(?:e|es|ed)|down|"
+    r"loss(?:es)?|burden|risk|challenge|volatility|limited|slowed?|"
+    r"deteriorat(?:e|es|ed)|yoy\s*-)\b",
+    re.I,
+)
 
 
 _PROMPT = """공식 근거 기반 회사분석 보고서의 사실 배치 작업이다.
@@ -293,6 +353,7 @@ _PROMPT = """공식 근거 기반 회사분석 보고서의 사실 배치 작업
    portfolio_stage(주력·성장·안정·신규), 같은 답의 2장 revenue_model sid,
    원문에서 직접 확인되는 서로 다른 priority_signals 두 개 이상을 함께 낸다.
 10. current_issue에는 원문에서 확인되는 다음 판단 지표명을 next_check_metric으로 낸다.
+    subject_label이 그 지표명과 같다면 중복해서 넣지 말고 비운다.
     current_response는 같은 답 안의 current_issue sid를 response_to_sid로 연결하고,
     원문의 대응 행동을 response_action으로 낸다. 그 행동과 다른 절에 별도 초기 진척이
     있을 때만 initial_signal을 낸다.
@@ -432,6 +493,60 @@ def _subject_label_from_source(sentence: str, proposed: object) -> str:
     start = source_offsets[compact_index]
     end = source_offsets[compact_index + len(proposed_compact) - 1] + 1
     return " ".join(sentence[start:end].split())
+
+
+def verified_official_ir_is_bound_to_company(
+    fragment: Mapping[str, Any], company: str
+) -> bool:
+    """검증된 공식 IR 발행 법인이 현재 분석 법인인지 최소 대조한다."""
+
+    publisher, _publisher_offsets = _surface_compact_with_offsets(
+        str(fragment.get("발행처") or "")
+    )
+    company_identity, _company_offsets = _surface_compact_with_offsets(company)
+    return bool(
+        str(fragment.get(_DART_VERIFIED_FINAL_URL_FIELD) or "").strip()
+        == _DART_VERIFIED_FINAL_URL_VALUE
+        and publisher
+        and publisher in company_identity
+        and verified_official_ir_fragment_is_usable(
+            fragment,
+            reference_date=str(fragment.get(IR_COLLECTED_ON_FIELD) or ""),
+        )
+    )
+
+
+def _verified_ir_allows_specificity_failure(
+    pick: CanonicalPick | None,
+    fragment: Mapping[str, Any],
+    *,
+    company: str,
+    reason: str,
+) -> bool:
+    """영문 공식 IR의 닫힌 현재 사실을 한국어 휴리스틱 때문에만 잃지 않는다."""
+
+    if (
+        pick is None
+        or not verified_official_ir_is_bound_to_company(fragment, company)
+    ):
+        return False
+    if pick.claim_type == "priority_product":
+        return bool(
+            reason == "현재 실행 근거가 있는 제품·서비스가 아님"
+            and _subject_label_from_source(pick.sentence, pick.subject_label)
+            and _subject_label_from_source(pick.sentence, pick.product_role)
+            and _ENGLISH_IR_PORTFOLIO_BUSINESS_PATTERN.search(pick.sentence)
+            and _ENGLISH_IR_PORTFOLIO_CURRENT_PATTERN.search(pick.sentence)
+        )
+    if pick.claim_type == "current_issue":
+        return bool(
+            reason == "회사 고유 위험·변화 근거가 없음"
+            and _subject_label_from_source(
+                pick.sentence, pick.next_check_metric
+            )
+            and _ENGLISH_IR_CURRENT_ISSUE_PATTERN.search(pick.sentence)
+        )
+    return False
 
 
 def historical_performance_basis_sid(fiscal_year: object) -> str:
@@ -843,6 +958,13 @@ def select_canonical_spans(
         )
         product_role = str(item.get("product_role") or "")
         portfolio_stage = str(item.get("portfolio_stage") or "")
+        if (
+            portfolio_stage in PORTFOLIO_STAGE_PATTERNS
+            and PORTFOLIO_STAGE_PATTERNS[portfolio_stage].search(sentence) is None
+        ):
+            # 판매 증가만 보고 `주력·성장` 단계를 추론하지 못하게 한다.
+            # 원문 표지가 없으면 선택 단계만 비우고 검증된 제품 사실은 보존한다.
+            portfolio_stage = ""
         revenue_model_sid = _normalize_candidate_sid(item.get("revenue_model_sid"))
         response_to_sid = _normalize_candidate_sid(item.get("response_to_sid"))
         raw_basis_values = item.get("basis_sids") or []
@@ -1088,6 +1210,7 @@ def select_canonical_spans(
             if (
                 not subject_label
                 or not product_role.strip()
+                or not _subject_label_from_source(sentence, product_role)
                 or product_role in PORTFOLIO_STAGES
                 or portfolio_stage not in ("", *PORTFOLIO_STAGES)
                 or not revenue_model_sid
@@ -1269,6 +1392,19 @@ def select_canonical_spans(
         if item.fragment_id is None:
             continue
         fragment = frags.get(int(item.fragment_id), {})
+        selected_pick = pick_by_draft_identity.get(id(item))
+        if (
+            str(fragment.get("종류") or "").strip() == "공식 IR"
+            and not verified_official_ir_is_bound_to_company(fragment, company)
+        ):
+            rejected.append(
+                {
+                    "sid": selected_pick.sid if selected_pick is not None else "",
+                    "reason": "공식 IR 발행 법인이 분석 회사와 다름",
+                    "reason_code": "company_specificity_failure",
+                }
+            )
+            continue
         decision = assess_claim(
             str(item.block),
             str(item.sentence),
@@ -1276,7 +1412,6 @@ def select_canonical_spans(
             company=company,
             verified_names=verified_names,
         )
-        selected_pick = pick_by_draft_identity.get(id(item))
         # 5~7장 정본 구조 계약이 원문 발췌·상태·관계·내부 참조를 이미 모두
         # 결속한 경우에는 이전 세대의 넓은 휴리스틱이 같은 사실을 다시 지우지
         # 않게 한다. 이 예외는 위의 닫힌 구조 검증을 통과한 claim_type에만 적용한다.
@@ -1286,8 +1421,20 @@ def select_canonical_spans(
                 selected_pick.claim_type,
                 decision.reason,
             )
+            and (
+                str(fragment.get("종류") or "").strip() != "공식 IR"
+                or verified_official_ir_is_bound_to_company(fragment, company)
+            )
         )
-        if not decision.passed and not structured_company_binding:
+        verified_ir_document_binding = _verified_ir_allows_specificity_failure(
+            selected_pick,
+            fragment,
+            company=company,
+            reason=decision.reason,
+        )
+        if not decision.passed and not (
+            structured_company_binding or verified_ir_document_binding
+        ):
             rejected.append(
                 {
                     "sid": "",

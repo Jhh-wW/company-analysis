@@ -1636,6 +1636,98 @@ def test_completed_approval_procedure_keeps_the_plan_approved_and_unexecuted() -
     assert validate_publishable(report).publishable is True
 
 
+def test_검증된_영문IR의_현재감소와_미래계획_시간상태를_읽는다() -> None:
+    report = _valid_report()
+    issue = next(
+        fact for fact in report.fact_records if fact.claim_type == "current_issue"
+    )
+    future = next(
+        fact for fact in report.fact_records if fact.claim_type == "future_plan"
+    )
+
+    issue = replace(
+        issue,
+        claim="JYP의 최근 분기 매출이 전년 동기보다 감소했다.",
+        state_evidence="Quarterly Revenue decreased 15.1% YoY.",
+    )
+    future = replace(
+        future,
+        claim="Stray Kids는 2026년 하반기와 2027년에 IP 활용을 극대화할 계획이다.",
+        state_evidence=(
+            "Stray Kids IP Leverage Impact Maximization in 2026 H2 & 2027."
+        ),
+    )
+
+    assert publish_module._temporal_lexical_problems(issue) == []
+    assert publish_module._temporal_lexical_problems(future) == []
+
+
+def test_영문IR의_완료된_release를_미래계획으로_바꾸지_않는다() -> None:
+    future = next(
+        fact
+        for fact in _valid_report().fact_records
+        if fact.claim_type == "future_plan"
+    )
+    future = replace(
+        future,
+        claim="Stray Kids는 2026년 하반기에 새 앨범을 발매할 계획이다.",
+        state_evidence="Stray Kids released a new album in H2 2026.",
+    )
+
+    assert any(
+        "완료된 실행" in problem
+        for problem in publish_module._temporal_lexical_problems(future)
+    )
+
+
+def test_영문IR_Q2와_한국어_2분기는_같은_분기숫자로_검산한다() -> None:
+    issue = next(
+        fact
+        for fact in _valid_report().fact_records
+        if fact.claim_type == "current_issue"
+    )
+    issue = replace(
+        issue,
+        claim="JYP의 2026년 2분기 매출은 전년 동기보다 15.1% 감소했다.",
+        state_evidence="2026 Q2 Quarterly Revenue decreased 15.1% YoY.",
+        raw_value="2026 | 2 | 15.1",
+        calculation="원문 표시값을 1로 나누어 직접 대조",
+        display_value="2026 | 2 | 15.1",
+        rounding_rule="ROUND_HALF_UP 미적용(원문 표시값 그대로)",
+        numeric_checks=[
+            "2026|1|0|2026",
+            "2|1|0|2",
+            "15.1|1|1|15.1",
+        ],
+    )
+
+    assert publish_module._numeric_problems(issue) == []
+
+
+def test_영문IR_Q5와_한국어_5분기는_유효한_분기숫자로_인정하지_않는다() -> None:
+    issue = next(
+        fact
+        for fact in _valid_report().fact_records
+        if fact.claim_type == "current_issue"
+    )
+    issue = replace(
+        issue,
+        claim="JYP의 2026년 5분기 매출은 전년 동기보다 15.1% 감소했다.",
+        state_evidence="2026 Q5 Quarterly Revenue decreased 15.1% YoY.",
+        raw_value="2026 | 5 | 15.1",
+        calculation="원문 표시값을 1로 나누어 직접 대조",
+        display_value="2026 | 5 | 15.1",
+        rounding_rule="ROUND_HALF_UP 미적용(원문 표시값 그대로)",
+        numeric_checks=[
+            "2026|1|0|2026",
+            "5|1|0|5",
+            "15.1|1|1|15.1",
+        ],
+    )
+
+    assert publish_module._numeric_problems(issue)
+
+
 def test_past_result_cannot_be_published_as_a_plan_expected_effect() -> None:
     evidence = (
         "기업가치 제고 계획: 2025년 매출 증가를 확인했고 "

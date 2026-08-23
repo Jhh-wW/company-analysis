@@ -302,7 +302,7 @@ class FakeEngine:
                             "4-1",
                             "priority_product",
                             "SmartX 반도체 검사 장비",
-                            product_role="반도체 제조사 판매 장비",
+                            product_role="출시해 판매",
                             portfolio_stage="주력",
                             revenue_model_sid="2-1",
                             priority_signals=["출시·운영", "투자·증설"],
@@ -1372,13 +1372,18 @@ def test_두_선택의_검증통과_근거가_서로_보완되면_누적해_보�
         received_focus.append(dict(kwargs))
         picked, rejected = original(*args, **kwargs)
         if calls == 1:
-            # 첫 회에는 미래 계획만 빠져 단독으로는 기본 보고서가 성립하지 않는다.
+            # 첫 회에는 현재 문제와 미래 계획이 빠진다. 현재 문제는 전역 출고
+            # 필수 장은 아니지만, 이미 실행하는 2회차의 보충 초점에는 포함한다.
             return [
-                item for item in picked if item.claim_type != "future_plan"
+                item
+                for item in picked
+                if item.claim_type not in {"current_issue", "future_plan"}
             ], rejected
-        # 두 번째 회도 미래 계획 한 건뿐이라 단독으로는 성립하지 않는다.
+        # 두 번째 회도 보충 대상 두 건뿐이라 단독으로는 성립하지 않는다.
         return [
-            item for item in picked if item.claim_type == "future_plan"
+            item
+            for item in picked
+            if item.claim_type in {"current_issue", "future_plan"}
         ], rejected
 
     monkeypatch.setattr(real, "select_canonical_spans", complementary_rounds)
@@ -1389,6 +1394,7 @@ def test_두_선택의_검증통과_근거가_서로_보완되면_누적해_보�
     assert calls == 2
     assert [item.round_number for item in result.span_selection_diagnostics] == [1, 2]
     assert received_focus[0]["focus_missing_claim_roles"] == ()
+    assert "current_issue" in received_focus[1]["focus_missing_claim_roles"]
     assert "future_plan" in received_focus[1]["focus_missing_claim_roles"]
     assert received_focus[1]["focus_verified_sids"]
     # 선택 2 + Writer 1 + 독립 Reviewer 1. 동일 전체 선택을 세 번째로 반복하지 않는다.

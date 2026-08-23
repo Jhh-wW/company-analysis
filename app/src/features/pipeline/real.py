@@ -214,6 +214,7 @@ def _missing_basic_selection_roles(picks: list[Any]) -> tuple[str, ...]:
         "identity_summary",
         "revenue_model",
         "customer_market",
+        "current_issue",
         "completed_execution",
         "change_interpretation",
         "future_plan",

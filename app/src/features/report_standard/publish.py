@@ -170,7 +170,9 @@ _STATUS_STAGE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 _CLAIM_NOISE = re.compile(r"[\W_]+", re.UNICODE)
 _COMPLETED_MARKER = re.compile(
     r"완료|마쳤|종료|체결|편입|포함됐|포함\s*완료|인수했|설립했|"
-    r"구축했|도입했|출시했|가동했|납품했|발생했|인식했"
+    r"구축했|도입했|출시했|가동했|납품했|발생했|인식했|"
+    r"\b(?:released|launched|held|opened|completed)\b",
+    re.IGNORECASE,
 )
 _CONDITIONAL_COMPLETION_MARKER = re.compile(
     r"(?:인허가|허가|승인).{0,16}(?:완료|취득).{0,12}(?:조건|전제|후|시|전)"
@@ -186,7 +188,13 @@ _UNFINISHED_MARKER = re.compile(
 )
 _UNRESOLVED_MARKER = re.compile(
     r"미해결|미확인|확인되지\s*않|해결되지\s*않|부족|위험|과제|문제|"
-    r"난항|의존|변동|협의·시험\s*단계|본계약.{0,12}(?:않|전)"
+    r"난항|의존|변동|감소|하락|둔화|부진|협의·시험\s*단계|"
+    r"본계약.{0,12}(?:않|전)|"
+    r"\b(?:currently|ongoing|remains?|continued?|still|"
+    r"declin(?:e|es|ed)|decreas(?:e|es|ed)|down|slowed?|"
+    r"deteriorat(?:e|es|ed)|limited\s+operating\s+leverage|"
+    r"burden|risk|challenge|volatility)\b",
+    re.IGNORECASE,
 )
 _RESOLVED_ISSUE_MARKER = re.compile(
     r"(?:문제|과제|위험).{0,12}(?:해결|해소|종료)\s*(?:완료|했|됐)|"
@@ -206,7 +214,11 @@ _STARTED_RESPONSE_MARKER = re.compile(
 )
 _PLAN_MARKER = re.compile(
     r"계획|예정|목표|향후|로드맵|방침|추진(?:할|하려|하고자)|"
-    r"확대(?:할|한다는)|구축(?:할|한다는)|도입(?:할|한다는)|개발(?:할|한다는)"
+    r"확대(?:할|한다는)|구축(?:할|한다는)|도입(?:할|한다는)|개발(?:할|한다는)|"
+    r"\b(?:will|plans?\s+to|scheduled\s+to|upcoming|"
+    r"to\s+be\s+(?:released|launched|held|opened)|"
+    r"(?:H2\s*20\d{2}|20\d{2}\s*H2))\b",
+    re.IGNORECASE,
 )
 _ALREADY_COMPLETED_PLAN_MARKER = re.compile(
     r"이미.{0,20}(?:모두|전부)?.{0,12}(?:실현|달성|이행|완수|완료|가동|출시|도입)|"
@@ -1285,13 +1297,20 @@ def _numeric_problems(fact: FactRecord) -> list[str]:
     # raw_value는 내부 원장이라는 이름만 붙였다고 원값이 되지 않는다. 양사 비교는
     # 양쪽 state_evidence를 합쳐 보고, 그 안에 실제 값이 있거나 아래 검산식의
     # 피연산자로 재현되는 값만 허용한다.
+    numeric_evidence_text = (
+        fact.state_evidence + "\n" + fact.comparator_state_evidence
+    )
     evidence_numbers = {
         value
-        for token in _NUMBER_TOKEN.findall(
-            fact.state_evidence + "\n" + fact.comparator_state_evidence
-        )
+        for token in _NUMBER_TOKEN.findall(numeric_evidence_text)
         if (value := _decimal(token)) is not None
     }
+    # IR의 Q1~Q4는 한국어 공개문에서 1~4분기로 옮겨도 같은 기간이다.
+    # 일반 숫자나 존재하지 않는 Q5까지 넓히지 않고 닫힌 분기 표기만 더한다.
+    evidence_numbers.update(
+        Decimal(quarter)
+        for quarter in re.findall(r"(?<![A-Za-z0-9])Q([1-4])(?![A-Za-z0-9])", numeric_evidence_text, re.I)
+    )
     missing_raw_evidence = [
         value
         for value in raw_numbers

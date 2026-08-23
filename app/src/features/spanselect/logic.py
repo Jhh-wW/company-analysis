@@ -73,6 +73,10 @@ from src.features.spanselect.constants import (
     ZERO_WIDTH_CHARS,
 )
 from src.features.company_specificity.logic import source_kind_matches_sentence
+from src.shared.official_ir import (
+    IR_COLLECTED_ON_FIELD,
+    verified_official_ir_fragment_is_usable,
+)
 
 #: 문장 번호표 한 칸. (조각 번호, 문장 원문) — 요구역량은 조각 번호가 없어 None이다.
 SentenceMap = dict[str, tuple[Optional[int], str]]
@@ -210,7 +214,9 @@ def strip_leading_noise(sentence: str) -> str:
     return f"{head}{cleaned}"
 
 
-def is_unusable_candidate(sentence: str) -> bool:
+def is_unusable_candidate(
+    sentence: str, *, allow_verified_official_ir_english: bool = False
+) -> bool:
     """이 문장을 «AI에게 보여주지도 말아야» 하는가 (문제로그 P-81).
 
     ★ 큰 모델은 준 것 중에서 고른다 — 쓰레기를 주면 쓰레기를 고른다.
@@ -233,7 +239,11 @@ def is_unusable_candidate(sentence: str) -> bool:
     """
     if TRUNCATED_TAIL_RE.search(sentence):
         return True                      # 잘린 토막 — 자소서에 그대로 못 쓴다
-    return not HANGUL_RE.search(sentence)  # 한글이 하나도 없음 — 메뉴·버튼 글자
+    # 영어뿐인 홈페이지 메뉴·버튼은 계속 버린다. 다만 날짜·보고기간·첨부·DART
+    # host 결속이 모두 검증된 공식 IR PDF는 영문 본문 자체가 원문이므로 보존한다.
+    return not (
+        HANGUL_RE.search(sentence) or allow_verified_official_ir_english
+    )
 
 
 def number_sentences(
@@ -261,7 +271,29 @@ def number_sentences(
     for fid, frag in frags.items():
         kind = frag.get("종류", "")
         text = frag.get("원문", "")
+        allow_verified_official_ir_english = (
+            kind == "공식 IR"
+            and str(frag.get("후보출처검증") or "").strip()
+            == "https_exact_dart_host"
+            and verified_official_ir_fragment_is_usable(
+                frag,
+                reference_date=str(frag.get(IR_COLLECTED_ON_FIELD) or ""),
+            )
+        )
         sentences = split_sentences(text)
+        # 1판 splitter는 마침표 없는 마지막 조각을 잘린 꼬리로 버린다. PDF의
+        # 표 행·슬라이드 제목은 정상 문단이어도 마침표가 없는 경우가 있으므로,
+        # DART 법인·공식 도메인·문서 날짜까지 검증된 영문 IR에 한해서만 원문
+        # 문단 자체를 후보로 복구한다. 일반 웹·뉴스의 잘린 꼬리는 계속 버린다.
+        source_paragraph = str(text or "").strip()
+        if (
+            not sentences
+            and allow_verified_official_ir_english
+            and len(source_paragraph) >= MIN_CLEANED_SENTENCE_CHARS
+            and HANGUL_RE.search(source_paragraph) is None
+            and TRUNCATED_TAIL_RE.search(source_paragraph) is None
+        ):
+            sentences = [source_paragraph]
         if is_market_price_news(kind, text):
             excluded += len(sentences)
             continue
@@ -271,7 +303,12 @@ def number_sentences(
             cleaned = strip_leading_noise(NEWS_SOURCE_PREFIX_RE.sub("", sentence))
             if (
                 is_audit_opinion(cleaned)
-                or is_unusable_candidate(cleaned)
+                or is_unusable_candidate(
+                    cleaned,
+                    allow_verified_official_ir_english=(
+                        allow_verified_official_ir_english
+                    ),
+                )
                 or not source_kind_matches_sentence(kind, cleaned)
             ):
                 excluded += 1

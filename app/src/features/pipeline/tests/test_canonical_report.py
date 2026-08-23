@@ -8,6 +8,7 @@ import pytest
 from src.features.pipeline.canonical_report import (
     PublishBlockedError,
     WrittenClaim,
+    _common_support_terms,
     _drop_stale_completed_executions,
     _prune_unbound_optional_claims,
     _structured_company_binding_is_visible,
@@ -41,6 +42,8 @@ from src.features.spanselect.canonical import (
 )
 from src.features.writer.logic import Sentence
 from src.shared.official_ir import (
+    IR_ATTACHMENT_URL_FIELD,
+    IR_COLLECTED_ON_FIELD,
     IR_METADATA_VERIFICATION_FIELD,
     IR_METADATA_VERIFICATION_VALUE,
     IR_REPORTING_PERIOD_FIELD,
@@ -807,6 +810,188 @@ def test_Writer_후_구조예외는_구체대상과_행동이_문장에_남아�
         response,
         "회사는 비용 문제에 대응하고 있다.",
     )
+
+
+def test_Writer가_영문IR_계획행동을_한국어로_옮겨도_대상과_시점을_보존한다() -> None:
+    future = CanonicalPick(
+        "future_strategy",
+        "Stray Kids world tour RUN IT in H2 2026 & 2027.",
+        42,
+        "42-1",
+        "future_plan",
+        subject_label="Stray Kids",
+        plan_timing="H2 2026 & 2027",
+        plan_execution_signal="world tour RUN IT",
+    )
+
+    assert _structured_company_binding_is_visible(
+        future,
+        "Stray Kids는 2026년 하반기와 2027년에 RUN IT 월드투어를 진행할 계획이다.",
+    )
+    assert not _structured_company_binding_is_visible(
+        future,
+        "Stray Kids는 향후 월드투어를 진행할 계획이다.",
+    )
+
+    maximization = replace(
+        future,
+        sentence="Stray Kids IP Leverage Impact Maximization in H2 2026 & 2027.",
+        plan_execution_signal="IP Leverage Impact Maximization",
+    )
+    assert _structured_company_binding_is_visible(
+        maximization,
+        "Stray Kids는 2026년 하반기와 2027년에 IP 활용을 극대화할 계획이다.",
+    )
+    assert not _structured_company_binding_is_visible(
+        maximization,
+        "Stray Kids는 2026년 하반기와 2027년에 IP Impact 앨범을 발매할 계획이다.",
+    )
+
+
+def _jyp_verified_ir_fragment_for_writer(text: str) -> dict[str, str]:
+    return {
+        "종류": "공식 IR",
+        "원문": text,
+        "출처": "https://www.jype.com/ko/board/ir-data/22sgoywh",
+        "발행처": "(주)제이와이피엔터테인먼트",
+        "문서일": "2026-08-12",
+        "후보출처검증": "https_exact_dart_host",
+        "도메인근거SourceID": "dart-company-profile-00258689",
+        "도메인근거원문": (
+            '{"corp_code":"00258689","corp_name":'
+            '"(주)제이와이피엔터테인먼트","hm_url":"https://www.jype.com"}'
+        ),
+        IR_METADATA_VERIFICATION_FIELD: IR_METADATA_VERIFICATION_VALUE,
+        IR_REPORTING_PERIOD_FIELD: "2026-Q2",
+        IR_ATTACHMENT_URL_FIELD: "https://cdn.jype.com/ir/26Q2_Result_EN.pdf",
+        IR_COLLECTED_ON_FIELD: "2026-08-24",
+    }
+
+
+def test_Writer가_JYP_영문IR_우선제품을_한국어로_옮겨도_보존한다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revenue_evidence = (
+        "제이와이피엔터테인먼트는 음반·음원과 공연 상품을 판매해 매출을 얻는다."
+    )
+    priority_evidence = (
+        "2026 Q2 2025 Q2 YoY(%) Change Expansion of domestic & overseas "
+        "streaming sales; continuous global sales of Stray Kids catalogues. "
+        "Physical 37.0 BN, +36.7% YoY. Steady growth in Stray Kids "
+        "catalogues and increased new releases."
+    )
+    writer_sentence = (
+        "Stray Kids 카탈로그의 글로벌 판매가 이어졌고, Physical 판매는 "
+        "전년 동기 대비 36.7% 증가했다."
+    )
+    fragments = {
+        1: {"종류": "사업내용", "원문": revenue_evidence},
+        2: _jyp_verified_ir_fragment_for_writer(priority_evidence),
+    }
+    picks = [
+        CanonicalPick(
+            "business_model",
+            revenue_evidence,
+            1,
+            sid="revenue-1",
+            claim_type="revenue_model",
+        ),
+        CanonicalPick(
+            "portfolio",
+            priority_evidence,
+            2,
+            sid="priority-1",
+            claim_type="priority_product",
+            subject_label="Stray Kids",
+            product_role="Stray Kids catalogues",
+            revenue_model_sid="revenue-1",
+            priority_signals=("매출·이용증가", "유통·지역확대"),
+        ),
+    ]
+    written = {
+        "business_model": [Sentence(revenue_evidence, "business_model-1")],
+        "portfolio": [Sentence(writer_sentence, "portfolio-1")],
+    }
+    monkeypatch.setattr(
+        "src.features.pipeline.canonical_report.writer_logic.write_with_ai",
+        lambda *_args, **_kwargs: (written, {"쓴문장": 2}),
+    )
+    monkeypatch.setattr(
+        "src.features.pipeline.canonical_report.writer_revision.review_with_single_rewrite",
+        lambda *_args, **_kwargs: (written, []),
+    )
+
+    _made_sections, claims = write_and_verify_sections(
+        engine=object(),
+        client=object(),
+        company="(주)제이와이피엔터테인먼트",
+        sections=sections_from_picks(picks, fragments),
+        fragments=fragments,
+        picks=picks,
+        steps=[],
+        model="",
+    )
+
+    priority_claim = next(
+        item for item in claims if item.claim_type == "priority_product"
+    )
+    assert priority_claim.text == writer_sentence
+    assert priority_claim.evidence == priority_evidence
+    assert priority_claim.priority_signals == ("매출·이용증가", "유통·지역확대")
+
+
+def test_Writer가_JYP_영문IR_OPM원인을_한국어로_옮겨도_공통근거어를_보존한다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = (
+        "Decline in operating profit and OPM due to limited leverage and "
+        "increased SG&A commission fee."
+    )
+    writer_sentence = (
+        "제한적인 레버리지와 늘어난 SG&A 수수료 때문에 영업이익과 OPM이 하락했다."
+    )
+    fragments = {1: _jyp_verified_ir_fragment_for_writer(evidence)}
+    picks = [
+        CanonicalPick(
+            "current_challenges",
+            evidence,
+            1,
+            sid="issue-1",
+            claim_type="current_issue",
+            subject_label="operating profit and OPM",
+            next_check_metric="OPM",
+        )
+    ]
+    written = {
+        "current_challenges": [
+            Sentence(writer_sentence, "current_challenges-1")
+        ]
+    }
+    monkeypatch.setattr(
+        "src.features.pipeline.canonical_report.writer_logic.write_with_ai",
+        lambda *_args, **_kwargs: (written, {"쓴문장": 1}),
+    )
+    monkeypatch.setattr(
+        "src.features.pipeline.canonical_report.writer_revision.review_with_single_rewrite",
+        lambda *_args, **_kwargs: (written, []),
+    )
+
+    _made_sections, claims = write_and_verify_sections(
+        engine=object(),
+        client=object(),
+        company="(주)제이와이피엔터테인먼트",
+        sections=sections_from_picks(picks, fragments),
+        fragments=fragments,
+        picks=picks,
+        steps=[],
+        model="",
+    )
+
+    assert [item.claim_type for item in claims] == ["current_issue"]
+    assert claims[0].text == writer_sentence
+    support_terms = _common_support_terms(claims[0].text, claims[0].evidence)
+    assert {"opm", "sg"} <= set(support_terms)
+    assert len(support_terms) >= 2
 
 
 @pytest.mark.parametrize(

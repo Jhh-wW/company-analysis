@@ -53,8 +53,10 @@ from src.features.report_summary.logic import (
 )
 from src.features.spanselect.canonical import (
     CanonicalPick,
+    PRIORITY_SIGNAL_PATTERNS,
     historical_performance_basis_sid,
     structured_company_binding_allows_specificity_failure,
+    verified_official_ir_is_bound_to_company,
 )
 from src.features.writer import constants as writer_constants
 from src.features.writer import logic as writer_logic
@@ -70,11 +72,32 @@ _DIRECT_CAUSAL_RE = re.compile(
     r"(?P<outcome>[^.!?]{2,160})",
     re.IGNORECASE,
 )
+_ENGLISH_DUE_TO_RE = re.compile(
+    r"(?P<outcome>[^.!?]{2,160}?)\s+due\s+to\s+"
+    r"(?P<cause>[^.!?]{2,160})",
+    re.IGNORECASE,
+)
 _RESPONSE_TERMS = ("대응", "추진 중", "협의 중", "개선 중", "준비 중", "도입", "투자", "개편")
-_TERM_RE = re.compile(r"[가-힣A-Za-z]{2,}|[-+]?\d[\d,]*(?:\.\d+)?")
+_TERM_RE = re.compile(r"[A-Za-z]{2,}|[가-힣]{2,}|[-+]?\d[\d,]*(?:\.\d+)?")
 _TERM_STOP = frozenset(
     {"회사는", "회사의", "해당", "현재", "관련", "대한", "통해", "기준", "공식"}
 )
+_TRANSLATED_PLAN_ACTION_PATTERNS: tuple[
+    tuple[re.Pattern[str], re.Pattern[str]], ...
+] = (
+    (re.compile(r"\bmaximiz", re.I), re.compile(r"극대화|\bmaximiz", re.I)),
+    (re.compile(r"\bexpand|\bexpansion", re.I), re.compile(r"확대|확장|\bexpand", re.I)),
+    (re.compile(r"\breleas", re.I), re.compile(r"발매|출시|\breleas", re.I)),
+    (re.compile(r"\btour", re.I), re.compile(r"투어|\btour", re.I)),
+    (re.compile(r"\bpop[- ]?up", re.I), re.compile(r"팝업|\bpop[- ]?up", re.I)),
+    (re.compile(r"\badd", re.I), re.compile(r"추가|\badd", re.I)),
+    (re.compile(r"\bcollaborat", re.I), re.compile(r"협업|협력|\bcollaborat", re.I)),
+    (re.compile(r"\blicens", re.I), re.compile(r"라이선스|\blicens", re.I)),
+)
+_VERIFIED_IR_WRITER_FAILURE_REASONS: dict[str, str] = {
+    "priority_product": "현재 실행 근거가 있는 제품·서비스가 아님",
+    "current_issue": "회사 고유 위험·변화 근거가 없음",
+}
 
 # 결과물이 다시 원문 덤프가 되지 않도록 공개 prose의 장별 상한을 고정한다.
 # 표 행은 별도 사실 단위이며 이 수에 포함하지 않는다.
@@ -827,6 +850,21 @@ def _direct_causal_fields(
                 outcome,
                 causal_evidence,
             )
+    # 영문 공식 자료의 ``outcome due to cause``를 작가가 자연스럽게
+    # ``cause로 인해 outcome``으로 옮겨도 같은 직접 인과다. 두 문장에 실제
+    # 인과 연결자가 각각 있을 때만 순서를 뒤집어 구조화한다.
+    english_match = _ENGLISH_DUE_TO_RE.search(evidence)
+    if english_match is not None:
+        cause = " ".join(english_match.group("cause").split()).strip(" ,")
+        outcome = " ".join(english_match.group("outcome").split()).strip(" ,")
+        causal_evidence = " ".join(english_match.group(0).split()).strip()
+        if cause and outcome and causal_evidence:
+            return (
+                subject_label or outcome,
+                f"due to {cause}",
+                outcome,
+                causal_evidence,
+            )
     return None
 
 
@@ -866,11 +904,43 @@ def _structured_company_binding_is_visible(
             terms.append(term)
         return sum(term in normalized_text for term in terms) >= 2
 
+    def translated_plan_action_is_visible(value: str) -> bool:
+        source = " ".join(str(value or "").split())
+        matched_family = False
+        for source_pattern, target_pattern in _TRANSLATED_PLAN_ACTION_PATTERNS:
+            if source_pattern.search(source) is None:
+                continue
+            matched_family = True
+            if target_pattern.search(normalized_text) is not None:
+                return True
+        return not matched_family and contains_distinct_terms(value)
+
     if pick.claim_type == "current_response":
         return contains_distinct_terms(pick.response_action)
+    if pick.claim_type == "priority_product":
+        supported_signals = sum(
+            PRIORITY_SIGNAL_PATTERNS[signal].search(normalized_text) is not None
+            for signal in pick.priority_signals
+            if signal in PRIORITY_SIGNAL_PATTERNS
+        )
+        return contains_surface(pick.subject_label) and supported_signals >= 2
+    if pick.claim_type == "current_issue":
+        return bool(
+            contains_surface(pick.next_check_metric)
+            and re.search(r"감소|하락|둔화|부진|위험|부담|과제", normalized_text)
+        )
     if pick.claim_type == "future_plan":
-        return contains_surface(pick.subject_label) and contains_distinct_terms(
+        timing_years = set(re.findall(r"20\d{2}", pick.plan_timing))
+        timing_is_visible = not timing_years or all(
+            year in normalized_text for year in timing_years
+        )
+        action_is_visible = translated_plan_action_is_visible(
             pick.plan_execution_signal
+        )
+        return (
+            contains_surface(pick.subject_label)
+            and timing_is_visible
+            and action_is_visible
         )
     if pick.claim_type in {"operating_core", "partner_role"}:
         return contains_surface(pick.subject_label) and contains_distinct_terms(
@@ -957,7 +1027,8 @@ def write_and_verify_sections(
             if not number:
                 continue
             fragment_id = int(number)
-            fragment_kind = str(fragments.get(fragment_id, {}).get("종류") or "")
+            fragment = fragments.get(fragment_id, {})
+            fragment_kind = str(fragment.get("종류") or "")
             clean = " ".join(sentence.text.split())
             pick = pick_by_exact.get((section_id, fragment_id, source.text))
             if pick is None:
@@ -974,12 +1045,25 @@ def write_and_verify_sections(
                 company=company,
                 verified_names=specificity_verified_names,
             )
-            if not decision.passed and not (
+            structured_writer_binding = bool(
                 structured_company_binding_allows_specificity_failure(
                     pick.claim_type,
                     decision.reason,
                 )
                 and _structured_company_binding_is_visible(pick, clean)
+                and (
+                    fragment_kind != "공식 IR"
+                    or verified_official_ir_is_bound_to_company(fragment, company)
+                )
+            )
+            verified_ir_writer_binding = bool(
+                _VERIFIED_IR_WRITER_FAILURE_REASONS.get(pick.claim_type)
+                == decision.reason
+                and verified_official_ir_is_bound_to_company(fragment, company)
+                and _structured_company_binding_is_visible(pick, clean)
+            )
+            if not decision.passed and not (
+                structured_writer_binding or verified_ir_writer_binding
             ):
                 continue
             if _DIRECT_CAUSAL_RE.search(clean) and _direct_causal_fields(
