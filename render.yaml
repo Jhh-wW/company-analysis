@@ -8,7 +8,6 @@ services:
     dockerfilePath: ./app/Dockerfile
     dockerContext: .
     healthCheckPath: /readyz
-    maxShutdownDelaySeconds: 300
     # 첫 관리자 베타는 비용과 외부 변경을 통제하도록 수동 배포만 허용한다.
     autoDeployTrigger: off
 

@@ -206,8 +206,10 @@ def test_ci_imports_cron_modules_and_scans_built_image() -> None:
     assert "컨테이너 cron·비밀 파일 계약 확인" in workflow
     assert "verify_container_contract.py" in workflow
     assert "--root /srv" in workflow
-    assert "Docker CMD 덮어쓰기에도 비-root 실행 확인" in workflow
-    assert "os.geteuid() != 0" in workflow
+    assert "Docker 기본 사용자와 실제 UID 확인" in workflow
+    assert "docker image inspect --format '{{.Config.User}}'" in workflow
+    assert "--entrypoint python" in workflow
+    assert "os.geteuid() == 1000" in workflow
 
 
 def _make_fake_image_root(root: Path) -> None:

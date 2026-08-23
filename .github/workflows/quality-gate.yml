@@ -58,10 +58,11 @@ jobs:
           docker run --rm --interactive --entrypoint python \
             company-analysis-smoke:ci - --root /srv \
             < .github/scripts/verify_container_contract.py
-      - name: Docker CMD 덮어쓰기에도 비-root 실행 확인
+      - name: Docker 기본 사용자와 실제 UID 확인
         run: |
-          docker run --rm company-analysis-smoke:ci \
-            python -c 'import os; assert os.geteuid() != 0, "cron 명령이 root로 실행됐습니다"'
+          test "$(docker image inspect --format '{{.Config.User}}' company-analysis-smoke:ci)" = "appuser"
+          docker run --rm --entrypoint python company-analysis-smoke:ci \
+            -c 'import os; assert os.geteuid() == 1000, "기본 사용자의 UID가 1000이 아닙니다"'
       - name: 배포 컨테이너 시작
         run: |
           docker run --detach \
