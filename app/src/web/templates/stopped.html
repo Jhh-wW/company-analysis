@@ -39,9 +39,15 @@
     </section>
   {% endif %}
 
-  {% if show_quota_note is not sameas false %}
+  {% if auth_is_admin and result.cost_krw > 0 %}
     <p class="muted">
-      할당량은 <strong>차감되지 않았습니다.</strong>
+      성공 보고서 횟수는 차감되지 않았습니다.
+      여기까지 사용된 AI 비용 <strong>약 {{ "%.0f"|format(result.cost_krw) }}원</strong>은
+      오늘 비용 원장에 기록됐습니다.
+    </p>
+  {% elif show_quota_note is not sameas false %}
+    <p class="muted">
+      성공 보고서 횟수는 <strong>차감되지 않았습니다.</strong>
     </p>
   {% endif %}
 

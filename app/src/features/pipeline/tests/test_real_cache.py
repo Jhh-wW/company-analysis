@@ -1386,6 +1386,85 @@ def test_두_선택의_검증통과_근거가_서로_보완되면_누적해_보�
     assert engine.client.messages.calls == 4
 
 
+def test_JYP처럼_전체역할은_부족해도_정체성_수익구조_삼개년표로_부분출고한다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """검증 통과 사실을 8개 미만이라는 이유만으로 전부 폐기하지 않는다."""
+
+    original = real.select_canonical_spans
+    calls = 0
+
+    def minimum_verified_rounds(*args: Any, **kwargs: Any):
+        nonlocal calls
+        calls += 1
+        picked, rejected = original(*args, **kwargs)
+        return [
+            item
+            for item in picked
+            if item.claim_type in {"identity_summary", "revenue_model"}
+        ], rejected
+
+    monkeypatch.setattr(real, "select_canonical_spans", minimum_verified_rounds)
+
+    result = _run()
+    calls_after_first = engine.generate_ai_calls
+    second = _run()
+
+    assert calls == real.VOTE_ROUNDS * 2
+    assert result.outcome is Outcome.REPORT
+    assert result.report is not None
+    assert result.report.grade is Grade.PARTIAL
+    sections = {section.cell: section for section in result.report.sections}
+    assert {"identity", "business_model", "past_changes"} <= set(sections)
+    assert sections["past_changes"].tables
+    assert any("3장" in reason for reason in result.report.shortfall_reasons)
+    assert any("6장" in reason for reason in result.report.shortfall_reasons)
+    # 선택 2 + Writer 1 + 독립 Reviewer 1. 요약은 검수된 사실 재사용이다.
+    assert calls_after_first == 4
+    assert second.outcome is Outcome.REPORT
+    assert engine.generate_ai_calls > calls_after_first
+    assert not second.cache_hit
+
+
+def test_뒤_선택에서_최소사실_SID가_충돌하면_앞_부분집합을_되살리지_않는다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = real.select_canonical_spans
+    calls = 0
+
+    def conflicting_minimum_rounds(*args: Any, **kwargs: Any):
+        nonlocal calls
+        calls += 1
+        picked, rejected = original(*args, **kwargs)
+        minimum = [
+            item
+            for item in picked
+            if item.claim_type in {"identity_summary", "revenue_model"}
+        ]
+        if calls == 1:
+            return minimum, rejected
+        return [
+            replace(
+                item,
+                sentence=f"충돌한 {item.sentence}",
+                fragment_id=item.fragment_id + 100,
+            )
+            for item in minimum
+        ], rejected
+
+    monkeypatch.setattr(real, "select_canonical_spans", conflicting_minimum_rounds)
+
+    result = _run()
+
+    assert calls == real.VOTE_ROUNDS
+    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.report is None
+    # 선택 두 번 뒤 충돌을 코드로 중단하므로 Writer·Reviewer는 부르지 않는다.
+    assert engine.client.messages.calls == 2
+
+
 def test_삼개년표가_없으면_선택AI를_부르기전에_멈춘다(
     engine: FakeEngine,
     monkeypatch: pytest.MonkeyPatch,
@@ -2397,6 +2476,36 @@ def test_조건부_기본장_누락_부분본은_고정하지_않고_다음번�
         )
 
     monkeypatch.setattr(real, "finalize_report", finalize_without_optional)
+
+    first = _run()
+    calls_after_first = engine.generate_ai_calls
+    with storage_db.connect() as conn:
+        count = conn.execute("SELECT COUNT(*) AS n FROM layer1_cache").fetchone()["n"]
+    second = _run()
+
+    assert first.outcome is Outcome.REPORT
+    assert second.outcome is Outcome.REPORT
+    assert count == 0
+    assert engine.generate_ai_calls > calls_after_first
+
+
+def test_핵심내용_결손_부분본도_고정하지_않고_다음번에_다시_조사한다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.features.storage import db as storage_db
+
+    original_finalize = real.finalize_report
+
+    def finalize_with_content_shortfall(*args: Any, **kwargs: Any):
+        report = original_finalize(*args, **kwargs)
+        return replace(
+            report,
+            grade=Grade.PARTIAL,
+            shortfall_reasons=[real.CUSTOMER_MARKET_SHORTFALL_REASON],
+        )
+
+    monkeypatch.setattr(real, "finalize_report", finalize_with_content_shortfall)
 
     first = _run()
     calls_after_first = engine.generate_ai_calls

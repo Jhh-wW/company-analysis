@@ -381,6 +381,30 @@ def test_partial_legacy_보고서는_PDF를_만들지_않고_fail_closed한다()
         build_pdf(invalid)
 
 
+def test_canonical_부분보고서는_PDF에도_등급과_미제공사유를_표시한다() -> None:
+    report = _report()
+    missing = "culture"
+    removed_fact_ids = {
+        fact.fact_id for fact in report.fact_records if fact.section_owner == missing
+    }
+    partial_draft = replace(
+        report,
+        sections=[section for section in report.sections if section.cell != missing],
+        fact_records=[
+            fact for fact in report.fact_records if fact.fact_id not in removed_fact_ids
+        ],
+        summary_items=[
+            item for item in report.summary_items if item.section_id != missing
+        ],
+    )
+
+    text = _text(build_pdf(partial_draft))
+
+    assert "검증된 부분 보고서(부분 완성)" in text
+    assert "공식 근거로 확인된 항목만" in text
+    assert "8장 인재상과 일하는 방식" in text
+
+
 def test_폰트_라이선스_원문을_배포물과_함께_둔다() -> None:
     license_text = (constants.FONT_DIR / "OFL.txt").read_text(encoding="utf-8")
     readme = (constants.FONT_DIR / "README.md").read_text(encoding="utf-8")

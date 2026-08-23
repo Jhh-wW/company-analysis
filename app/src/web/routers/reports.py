@@ -42,7 +42,14 @@ from src.features.export_notion.notion import (
 )
 from src.features.grading.logic import grade_message
 from src.features.observability import admin_audit
-from src.features.pipeline.port import CompanyCard, Outcome, Report, RunResult, UserInput
+from src.features.pipeline.port import (
+    CompanyCard,
+    Grade,
+    Outcome,
+    Report,
+    RunResult,
+    UserInput,
+)
 from src.features.report_standard import PublishBlockedError, build_published_report
 from src.features.sharelink import store as share_store
 from src.features.sharelink import allowlist as share_allow
@@ -73,6 +80,11 @@ def _report_grade_note(report: Report) -> str:
         )
 
         if report.schema_version == CANONICAL_SCHEMA_VERSION:
+            if report.grade is Grade.PARTIAL:
+                return (
+                    "검증된 부분 보고서(부분 완성) — "
+                    "공식 근거로 확인된 항목만 담았습니다."
+                )
             return grade_message(
                 report.grade,
                 report.filled_count,

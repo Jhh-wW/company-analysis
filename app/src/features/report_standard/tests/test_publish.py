@@ -33,9 +33,13 @@ from src.features.report_standard.constants import (
     CANONICAL_CLAIM_TYPES_BY_SECTION,
     CANONICAL_SECTION_IDS,
     COMPARISON_SHORTFALL_REASON,
+    CUSTOMER_MARKET_SHORTFALL_REASON,
     CULTURE_SHORTFALL_REASON,
     CURRENT_CHALLENGES_SHORTFALL_REASON,
-    REQUIRED_SECTION_IDS,
+    IDENTITY_SUMMARY_SHORTFALL_REASON,
+    MINIMUM_CORE_SECTION_IDS,
+    PARTIAL_SECTION_SHORTFALL_REASONS,
+    PAST_NARRATIVE_SHORTFALL_REASON,
     SECTION_BY_ID,
     SECTION_SPECS,
 )
@@ -78,6 +82,77 @@ def _without_sections(report: Report, *section_ids: str) -> Report:
         ],
         summary_items=[
             item for item in report.summary_items if item.section_id not in missing
+        ],
+    )
+
+
+def _summary_for_fact(report: Report, fact_id: str):
+    """검증 fact 문장을 그대로 재사용하는 테스트용 요약을 만든다."""
+
+    facts = {fact.fact_id: fact for fact in report.fact_records}
+    fact = facts[fact_id]
+    fact_ids = [fact_id]
+    evidence_text = summary_evidence_text(fact_ids, facts)
+    support_terms = list(dict.fromkeys(fact.evidence_support_terms))[:2]
+    status = report.summary_items[0].verification_status
+    return replace(
+        report.summary_items[0],
+        text=fact.claim,
+        section_id=fact.section_owner,
+        fact_ids=fact_ids,
+        evidence_text=evidence_text,
+        verification_status=status,
+        verification_binding=summary_verification_binding(
+            fact.claim,
+            fact.section_owner,
+            fact_ids,
+            evidence_text,
+            status,
+            support_terms,
+        ),
+        support_terms=support_terms,
+    )
+
+
+def _with_table_only_past(report: Report) -> Report:
+    """4장을 공식 3개년 실적표만 남긴 부분 보고서 후보로 바꾼다."""
+
+    performance_ids = {
+        fact.fact_id
+        for fact in report.fact_records
+        if fact.section_owner == "past_changes"
+        and fact.claim_type == "historical_performance"
+    }
+    report = replace(
+        report,
+        sections=[
+            replace(
+                section,
+                fact_ids=[
+                    fact_id
+                    for fact_id in section.fact_ids
+                    if fact_id in performance_ids
+                ],
+                prose_lines=[],
+                lines=[],
+            )
+            if section.cell == "past_changes"
+            else section
+            for section in report.sections
+        ],
+        fact_records=[
+            fact
+            for fact in report.fact_records
+            if fact.section_owner != "past_changes"
+            or fact.fact_id in performance_ids
+        ],
+    )
+    replacement_summary = _summary_for_fact(report, "past-fin-2025")
+    return replace(
+        report,
+        summary_items=[
+            replacement_summary if item.section_id == "past_changes" else item
+            for item in report.summary_items
         ],
     )
 
@@ -437,7 +512,7 @@ def test_claim_type_is_a_closed_enum_per_section() -> None:
     assert any("허용되지 않는 claim_type" in reason for reason in validation.reasons)
 
 
-def test_identity_requires_an_author_summary_even_with_an_official_definition() -> None:
+def test_identity_without_author_summary_is_published_only_as_partial() -> None:
     report = _replace_fact(
         _valid_report(),
         "identity-01",
@@ -445,9 +520,36 @@ def test_identity_requires_an_author_summary_even_with_an_official_definition() 
     )
 
     validation = validate_publishable(report)
+    published = build_published_report(report)
 
-    assert validation.publishable is False
-    assert any("identity_summary" in reason for reason in validation.reasons)
+    assert validation.publishable is True
+    assert published.grade is Grade.PARTIAL
+    assert IDENTITY_SUMMARY_SHORTFALL_REASON in published.shortfall_reasons
+
+
+@pytest.mark.parametrize(
+    "claim_type",
+    ["official_self_definition", "operating_scope"],
+)
+def test_partial_identity_accepts_existing_verified_identity_types(
+    claim_type: str,
+) -> None:
+    report = _without_sections(
+        _valid_report(),
+        "portfolio",
+        "competitive_position",
+    )
+    report = _replace_fact(
+        report,
+        "identity-01",
+        claim_type=claim_type,
+    )
+
+    validation = validate_publishable(report)
+    published = build_published_report(report)
+
+    assert validation.publishable is True
+    assert published.grade is Grade.PARTIAL
 
 
 def test_upstream_claim_type_enum_is_a_subset_of_the_publish_contract() -> None:
@@ -455,13 +557,9 @@ def test_upstream_claim_type_enum_is_a_subset_of_the_publish_contract() -> None:
         assert upstream_types <= CANONICAL_CLAIM_TYPES_BY_SECTION[section_id]
 
 
-@pytest.mark.parametrize("missing", sorted(REQUIRED_SECTION_IDS))
-def test_every_basic_section_is_required(missing: str) -> None:
-    report = _valid_report()
-    report = replace(
-        report,
-        sections=[section for section in report.sections if section.cell != missing],
-    )
+@pytest.mark.parametrize("missing", sorted(MINIMUM_CORE_SECTION_IDS))
+def test_every_minimum_core_section_is_required(missing: str) -> None:
+    report = _without_sections(_valid_report(), missing)
 
     validation = validate_publishable(report)
 
@@ -473,12 +571,9 @@ def test_every_basic_section_is_required(missing: str) -> None:
 
 @pytest.mark.parametrize(
     ("missing", "expected_reason"),
-    [
-        ("current_challenges", CURRENT_CHALLENGES_SHORTFALL_REASON),
-        ("culture", CULTURE_SHORTFALL_REASON),
-    ],
+    sorted(PARTIAL_SECTION_SHORTFALL_REASONS.items()),
 )
-def test_missing_official_optional_section_publishes_partial_without_fabrication(
+def test_missing_partial_section_publishes_with_its_standard_shortfall_reason(
     missing: str,
     expected_reason: str,
 ) -> None:
@@ -493,6 +588,130 @@ def test_missing_official_optional_section_publishes_partial_without_fabrication
     assert missing not in {section.cell for section in published.sections}
     assert all(fact.section_owner != missing for fact in published.fact_records)
     assert published.shortfall_reasons == [expected_reason]
+
+
+def test_report_requires_verified_three_year_past_section_even_with_future() -> None:
+    report = _without_sections(
+        _valid_report(),
+        "past_changes",
+        "current_challenges",
+        "portfolio",
+        "operations_partners",
+        "culture",
+        "competitive_position",
+    )
+    report = replace(
+        report,
+        summary_items=[_summary_for_fact(report, "identity-01"), *report.summary_items],
+    )
+
+    validation = validate_publishable(report)
+
+    assert validation.publishable is False
+    assert any("past_changes 장이 필요" in reason for reason in validation.reasons)
+    with pytest.raises(PublishBlockedError):
+        build_published_report(report)
+
+
+def test_minimum_three_section_report_with_table_only_past_publishes_partial() -> None:
+    report = _with_table_only_past(_valid_report())
+    report = _without_sections(
+        report,
+        "portfolio",
+        "current_challenges",
+        "future_strategy",
+        "operations_partners",
+        "culture",
+        "competitive_position",
+    )
+    report = replace(
+        report,
+        summary_items=[_summary_for_fact(report, "identity-01"), *report.summary_items],
+    )
+
+    validation = validate_publishable(report)
+    published = build_published_report(report)
+
+    assert validation.publishable is True
+    assert validation.included_section_ids == (
+        "identity",
+        "business_model",
+        "past_changes",
+    )
+    assert published.grade is Grade.PARTIAL
+    assert [section.cell for section in published.sections] == [
+        "identity",
+        "business_model",
+        "past_changes",
+    ]
+    assert published.shortfall_reasons == [
+        PARTIAL_SECTION_SHORTFALL_REASONS[section_id]
+        for section_id in (
+            "portfolio",
+            "current_challenges",
+            "future_strategy",
+            "operations_partners",
+            "culture",
+            "competitive_position",
+        )
+    ] + [PAST_NARRATIVE_SHORTFALL_REASON]
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_customer_market_is_optional_only_for_a_partial_report(partial: bool) -> None:
+    report = (
+        _without_sections(_valid_report(), "portfolio")
+        if partial
+        else _valid_report()
+    )
+    customer = next(
+        fact
+        for fact in report.fact_records
+        if fact.section_owner == "business_model"
+        and fact.claim_type == "customer_market"
+    )
+    report = replace(
+        report,
+        sections=[
+            replace(
+                section,
+                fact_ids=[
+                    fact_id for fact_id in section.fact_ids if fact_id != customer.fact_id
+                ],
+                prose_lines=[
+                    line for line in section.prose_lines if line[0] != customer.claim
+                ],
+                lines=[line for line in section.lines if line[0] != customer.claim],
+            )
+            if section.cell == "business_model"
+            else section
+            for section in report.sections
+        ],
+        fact_records=[
+            fact for fact in report.fact_records if fact.fact_id != customer.fact_id
+        ],
+    )
+
+    validation = validate_publishable(report)
+    published = build_published_report(report)
+
+    assert validation.publishable is True
+    assert published.grade is Grade.PARTIAL
+    assert CUSTOMER_MARKET_SHORTFALL_REASON in published.shortfall_reasons
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_past_table_only_is_valid_only_for_a_partial_report(partial: bool) -> None:
+    report = _with_table_only_past(_valid_report())
+    if partial:
+        report = _without_sections(report, "portfolio")
+
+    validation = validate_publishable(report)
+    published = build_published_report(report)
+
+    assert validation.publishable is True
+    assert published.grade is Grade.PARTIAL
+    assert PAST_NARRATIVE_SHORTFALL_REASON in published.shortfall_reasons
 
 
 def test_each_missing_optional_section_gets_its_own_standard_shortfall_reason() -> None:

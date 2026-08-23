@@ -6,6 +6,8 @@ import uuid
 
 from fastapi.testclient import TestClient
 
+from src.features.auth import constants as auth_constants
+from src.features.auth import logic as auth_logic
 from src.features.pipeline.port import (
     CompanyCard,
     Outcome,
@@ -95,3 +97,29 @@ def test_회사를_못찾은_중단을_기술오류라고_부르지_않는다() 
     assert response.status_code == 200
     assert "회사를 정확히 확인하지 못했습니다" in response.text
     assert "오류가 났습니다" not in response.text
+
+
+def test_관리자에게는_중단까지_사용된_AI비용을_숨기지_않는다() -> None:
+    job_id, job = _stopped_job()
+    assert job.result is not None
+    job.result = RunResult(
+        outcome=job.result.outcome,
+        message=job.result.message,
+        sources=job.result.sources,
+        cost_krw=209.67,
+    )
+    session = auth_logic.create_session("admin@example.com", True)
+    job_runtime._JOBS[job_id] = job
+    try:
+        with TestClient(main.app) as client:
+            client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
+            response = client.get(f"/result/{job_id}")
+    finally:
+        job_runtime._JOBS.pop(job_id, None)
+        auth_logic.delete_session(session.token)
+
+    assert response.status_code == 200
+    assert "성공 보고서 횟수는 차감되지 않았습니다" in response.text
+    assert "AI 비용" in response.text
+    assert "약 210원" in response.text
+    assert "오늘 비용 원장에 기록됐습니다" in response.text

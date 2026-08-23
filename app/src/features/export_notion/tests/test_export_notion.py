@@ -136,6 +136,40 @@ class TestBuildBlocks:
         assert "안 쓰여야 하는 문구" not in all_text
         assert not any(block["type"] == "callout" for block in blocks)
 
+    def test_canonical_부분보고서는_등급과_미제공사유를_표시한다(self):
+        report = _make_report()
+        missing = "culture"
+        removed_fact_ids = {
+            fact.fact_id
+            for fact in report.fact_records
+            if fact.section_owner == missing
+        }
+        partial_draft = replace(
+            report,
+            sections=[
+                section for section in report.sections if section.cell != missing
+            ],
+            fact_records=[
+                fact
+                for fact in report.fact_records
+                if fact.fact_id not in removed_fact_ids
+            ],
+            summary_items=[
+                item for item in report.summary_items if item.section_id != missing
+            ],
+        )
+
+        blocks = logic.build_blocks(partial_draft)
+        all_text = "\n".join(
+            _text_of(block)
+            for block in blocks
+            if "rich_text" in block[block["type"]]
+        )
+
+        assert "검증된 부분 보고서(부분 완성)" in all_text
+        assert "공식 근거로 확인된 항목만" in all_text
+        assert "8장 인재상과 일하는 방식" in all_text
+
     def test_채워진_장은_문장_뒤에_출처_괄호를_붙인다(self):
         report = _make_report()
         identity = next(section for section in report.sections if section.cell == "identity")

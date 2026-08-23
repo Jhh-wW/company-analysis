@@ -1,8 +1,9 @@
 """검증된 ``Report`` 하나를 검색 가능한 한국어 PDF로 내보낸다.
 
 화면·DOCX·Notion과 별도의 사실을 만들지 않는다. canonical 출고 게이트가
-확정한 표지, 핵심 요약, 본문, 표와 출처만 읽으며 직무·수집 과정·완성도·AI 제작
-메타문구는 최종 PDF에 넣지 않는다.
+확정한 표지, 핵심 요약, 본문, 표와 출처만 읽으며 직무·수집 과정·AI 제작 같은
+내부 메타문구는 넣지 않는다. 다만 부분 보고서는 완성본으로 오해되지 않도록
+공개 등급과 표준 미제공 사유를 PDF에도 명시한다.
 
 ReportLab 오픈소스판은 tagged PDF를 지원하지 않는다. 따라서 존재하지 않는
 구조 트리를 흉내 내지 않고, 논리적인 그리기/텍스트 순서, 문서 제목, ``ko-KR``
@@ -56,7 +57,7 @@ from src.core import clock
 from src.core.citations import citation_marker
 from src.core.constants import section_display_heading
 from src.features.export_pdf import constants
-from src.features.pipeline.port import Report, ReportSection, ReportTable
+from src.features.pipeline.port import Grade, Report, ReportSection, ReportTable
 from src.features.provenance.sources import Source, SourceKind, visible_citations
 from src.features.report_standard import build_published_report
 from src.features.report_standard.constants import SECTION_BY_ID, TIME_SECTION_IDS
@@ -367,11 +368,22 @@ class _CoverContent(Flowable):
         title_y = title_top_page - constants.PAGE_BOTTOM_MARGIN_PT - title_height
         title.drawOn(canvas, 0, title_y)
 
+        metadata_bottom = title_y
         metadata = _cover_metadata(self.report)
         if metadata:
             meta = Paragraph(_escape(metadata), self.styles["cover_meta"])
             _, meta_height = meta.wrap(self.width, 15 * mm)
             meta.drawOn(canvas, 0, title_y - meta_height - 7)
+            metadata_bottom = title_y - meta_height - 7
+
+        if self.report.grade is Grade.PARTIAL:
+            status = Paragraph(
+                "<b>검증된 부분 보고서(부분 완성)</b><br/>"
+                "공식 근거로 확인된 항목만 수록했습니다.",
+                self.styles["cover_meta"],
+            )
+            _, status_height = status.wrap(self.width, 18 * mm)
+            status.drawOn(canvas, 0, metadata_bottom - status_height - 12)
 
         summary = _summary_table(self.report, self.styles, self.width)
         if summary is None:
@@ -1197,6 +1209,23 @@ def _document_header(
         PageBreak(),
         _OutlineAnchor("report-body", "분석 본문", level=0),
     ]
+    if report.grade is Grade.PARTIAL:
+        items.extend(
+            [
+                _OutlineAnchor("partial-notice", "부분 보고서 안내", level=1),
+                Paragraph("검증된 부분 보고서(부분 완성)", styles["heading"]),
+                Paragraph(
+                    "공식 근거로 확인된 항목만 제공합니다. 아래 미제공 사유는 "
+                    "해당 사실이 없다는 판정이 아닙니다.",
+                    styles["body"],
+                ),
+                *[
+                    Paragraph(f"- {_escape(reason)}", styles["body"])
+                    for reason in report.shortfall_reasons
+                ],
+                Spacer(1, 14),
+            ]
+        )
     return items
 
 

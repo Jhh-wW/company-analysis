@@ -57,9 +57,16 @@ from src.features.report_standard.constants import (
     CANONICAL_SCHEMA_VERSION,
     CANONICAL_SECTION_IDS,
     COMPARISON_JUDGMENTS,
-    CONDITIONAL_SECTION_IDS,
-    CONDITIONAL_SECTION_SHORTFALL_REASONS,
     INTERNAL_ONLY_CLAIM_TYPES_BY_SECTION,
+    IDENTITY_SUMMARY_SHORTFALL_REASON,
+    CUSTOMER_MARKET_SHORTFALL_REASON,
+    MINIMUM_CORE_SECTION_IDS,
+    MINIMUM_IDENTITY_CLAIM_TYPES,
+    MINIMUM_PUBLISHABLE_SECTION_COUNT,
+    MINIMUM_SITUATION_SECTION_IDS,
+    PARTIAL_ELIGIBLE_SECTION_IDS,
+    PARTIAL_SECTION_SHORTFALL_REASONS,
+    PAST_NARRATIVE_SHORTFALL_REASON,
     REQUIRED_SECTION_IDS,
     SECTION_BY_ID,
     SUMMARY_VERIFICATION_STATUS,
@@ -2039,7 +2046,20 @@ def _section_content_problems(
         problems.append(
             f"[content] {section.cell}: 원문 lines가 있으면 공개용 prose_lines가 필요합니다"
         )
-    if section.cell in REQUIRED_SECTION_IDS and not section.prose_lines:
+    past_narrative_entered = section.cell == "past_changes" and any(
+        facts[fact_id].claim_type in {"completed_execution", "change_interpretation"}
+        for fact_id in supported_fact_ids
+    )
+    table_only_past = (
+        section.cell == "past_changes"
+        and bool(section.tables)
+        and not past_narrative_entered
+    )
+    if (
+        section.cell in REQUIRED_SECTION_IDS
+        and not section.prose_lines
+        and not table_only_past
+    ):
         problems.append(
             f"[content] {section.cell}: 필수 장에는 prose 문장이 최소 한 개 필요합니다"
         )
@@ -2283,7 +2303,16 @@ def _section_projection_problems(
     ]
     ownership = {fact_id: 0 for fact_id in expected}
     blocks = section_content_blocks(report, section)
-    if section.cell in REQUIRED_SECTION_IDS and not blocks:
+    past_narrative_entered = section.cell == "past_changes" and any(
+        facts[fact_id].claim_type in {"completed_execution", "change_interpretation"}
+        for fact_id in supported_fact_ids
+    )
+    table_only_past = (
+        section.cell == "past_changes"
+        and bool(section.tables)
+        and not past_narrative_entered
+    )
+    if section.cell in REQUIRED_SECTION_IDS and not blocks and not table_only_past:
         problems.append(
             f"[presentation] {section.cell}: 장별 필수 질문을 보여 주는 공개 구조 블록이 없습니다"
         )
@@ -2400,6 +2429,26 @@ def _completed_fiscal_years(
     return years[0], years[1], years[2]
 
 
+def _minimum_section_problems(included_section_ids: set[str]) -> list[str]:
+    """사실성 검증을 통과한 장만으로 동적 최소 보고서를 판정한다."""
+
+    problems = [
+        f"[section] 필수 장 {section_id}에 검증된 근거가 없습니다"
+        for section_id in sorted(MINIMUM_CORE_SECTION_IDS - included_section_ids)
+    ]
+    if not (MINIMUM_SITUATION_SECTION_IDS & included_section_ids):
+        problems.append(
+            "[section] 연속 3개 완료 사업연도 실적표가 결속된 "
+            "past_changes 장이 필요합니다"
+        )
+    if len(included_section_ids) < MINIMUM_PUBLISHABLE_SECTION_COUNT:
+        problems.append(
+            "[section] 공개 가능한 보고서는 검증된 본문 장이 "
+            f"최소 {MINIMUM_PUBLISHABLE_SECTION_COUNT}개 필요합니다"
+        )
+    return problems
+
+
 def _semantic_section_problems(
     report: Report,
     sections: dict[str, ReportSection],
@@ -2410,24 +2459,32 @@ def _semantic_section_problems(
 
     problems: list[str] = []
 
+    included_section_ids = {
+        section_id
+        for section_id, fact_ids in supported_by_section.items()
+        if fact_ids
+    }
     identity = [facts[fid] for fid in supported_by_section.get("identity", [])]
-    if not any(fact.claim_type == "identity_summary" for fact in identity):
+    identity_types = {fact.claim_type for fact in identity}
+    if not (MINIMUM_IDENTITY_CLAIM_TYPES & identity_types):
         problems.append(
-            "[section] identity: 공식 사업 근거를 쉬운 말로 합성한 "
-            "identity_summary가 필요합니다"
+            "[section] identity: 부분 보고서에는 identity_summary·"
+            "official_self_definition·operating_scope 중 검증된 사실이 "
+            "최소 하나 필요합니다"
         )
 
     business = [facts[fid] for fid in supported_by_section.get("business_model", [])]
     business_types = {fact.claim_type for fact in business}
-    for required_type in ("revenue_model", "customer_market"):
-        if required_type not in business_types:
-            problems.append(
-                f"[section] business_model: {required_type} 원자 사실이 필요합니다"
-            )
+    if "revenue_model" not in business_types:
+        problems.append(
+            "[section] business_model: revenue_model 원자 사실이 필요합니다"
+        )
     portfolio = [facts[fid] for fid in supported_by_section.get("portfolio", [])]
     products = [fact for fact in portfolio if fact.claim_type == "priority_product"]
     product_scopes = {_normalized(fact.subject_scope) for fact in products}
-    if not (1 <= len(products) <= 3) or len(product_scopes) != len(products):
+    if "portfolio" in sections and (
+        not (1 <= len(products) <= 3) or len(product_scopes) != len(products)
+    ):
         problems.append(
             "[section] portfolio: 확인된 서로 다른 핵심 제품·서비스를 1~3개만 담아야 합니다"
         )
@@ -2463,7 +2520,8 @@ def _semantic_section_problems(
     past = [facts[fid] for fid in past_ids]
     performance = [fact for fact in past if fact.claim_type == "historical_performance"]
     expected_years = _completed_fiscal_years(report, performance)
-    if expected_years is None:
+    past_section = sections.get("past_changes")
+    if past_section is not None and expected_years is None:
         problems.append(
             "[section] past_changes: 최신 연도가 기준연도 또는 직전연도인 "
             "연속 3개 완료 사업연도 실적이 필요합니다 "
@@ -2479,9 +2537,8 @@ def _semantic_section_problems(
         problems.append(
             "[period] analysis_period에 완료 사업연도 세 개가 모두 표시되지 않았습니다"
         )
-    if "완료" not in report.analysis_period:
+    if past_section is not None and "완료" not in report.analysis_period:
         problems.append("[period] analysis_period에 완료 회계연도임을 명시해야 합니다")
-    past_section = sections.get("past_changes")
     performance_tables = [
         table
         for table in (past_section.tables if past_section is not None else [])
@@ -2505,12 +2562,13 @@ def _semantic_section_problems(
             )
     executions = [fact for fact in past if fact.claim_type == "completed_execution"]
     interpretations = [fact for fact in past if fact.claim_type == "change_interpretation"]
-    if not executions:
+    narrative_entered = bool(executions or interpretations)
+    if narrative_entered and not executions:
         problems.append("[section] past_changes: 확인된 완료 실행 사실이 필요합니다")
     report_date = _parse_iso_date(report.as_of_date)
-    if report_date is None:
+    if narrative_entered and report_date is None:
         problems.append("[period] as_of_date에서 최근 36개월을 계산할 수 없습니다")
-    else:
+    elif narrative_entered and report_date is not None:
         try:
             execution_cutoff = report_date.replace(year=report_date.year - 3)
         except ValueError:
@@ -2528,7 +2586,7 @@ def _semantic_section_problems(
                 problems.append(
                     f"[period] {fact.fact_id}: 완료 실행은 보고서 기준일 전 최근 36개월 안이어야 합니다"
                 )
-    if not interpretations:
+    if narrative_entered and not interpretations:
         problems.append("[section] past_changes: 변화·실행 해석 사실이 필요합니다")
     for fact in interpretations:
         if not fact.basis_fact_ids:
@@ -2551,7 +2609,7 @@ def _semantic_section_problems(
     # 5장은 공식 근거가 한 건도 없으면 조건부 생략한다. 다만 한 건이라도
     # 출고 후보로 들어왔으면 종전 계약(문제+대응, 내부 결속, 최대 3개)을 그대로
     # 적용한다. 불완전한 5장을 단순 누락으로 위장해 통과시키지 않는다.
-    if current:
+    if "current_challenges" in sections:
         issues = [fact for fact in current if fact.claim_type == "current_issue"]
         responses = [fact for fact in current if fact.claim_type == "current_response"]
         if not issues or not responses:
@@ -2592,7 +2650,7 @@ def _semantic_section_problems(
 
     future = [facts[fid] for fid in supported_by_section.get("future_strategy", [])]
     plans = [fact for fact in future if fact.claim_type == "future_plan"]
-    if not (1 <= len(plans) <= 3):
+    if "future_strategy" in sections and not (1 <= len(plans) <= 3):
         problems.append(
             "[section] future_strategy: 근거가 확인된 미실행 계획을 1~3개만 "
             "담아야 합니다"
@@ -2610,7 +2668,7 @@ def _semantic_section_problems(
     operations = [
         facts[fid] for fid in supported_by_section.get("operations_partners", [])
     ]
-    if not any(
+    if "operations_partners" in sections and not any(
         fact.claim_type in {"operating_core", "partner_role"}
         for fact in operations
     ):
@@ -2640,7 +2698,8 @@ def _semantic_section_problems(
                     "최근 36개월 자료로 확인해야 합니다"
                 )
 
-    # 숫자표만으로 과거 장을 채우지 못하도록 공개 해석 문장을 별도로 요구한다.
+    # 실행·해석 서술을 넣었다면 해석 문장도 공개 화면에 보여야 한다.
+    # 서술을 넣지 않은 3개년 검증 실적표만의 과거 장에는 적용하지 않는다.
     if past_section is not None and interpretations:
         shown = {_normalized(text) for text, _cite in past_section.prose_lines}
         if not any(_normalized(fact.claim) in shown for fact in interpretations):
@@ -2743,8 +2802,9 @@ def _summary_problems(
 def validate_publishable(report: Report) -> PublishValidation:
     """정본상 출고 가능한지 전수 검사한다.
 
-    1~8장 기본 보고서, 조건이 맞을 때의 9장, 검증 본문 재사용 요약 3~5개, 원문
-    해시에 결속된 원자 사실과 장별 최소 내용 계약을 전수 검사한다.
+    1·2장과 과거·현재·미래 중 한 장을 포함한 동적 최소 보고서부터 9장
+    완전본까지, 검증 본문 재사용 요약 3~5개와 원문 해시에 결속된 원자
+    사실·장별 의미 계약을 모두 검사한다.
     """
 
     reasons: list[str] = []
@@ -2933,8 +2993,12 @@ def validate_publishable(report: Report) -> PublishValidation:
         if supported_by_section.get(section_id)
     )
     included_set = set(included)
-    for section_id in sorted(REQUIRED_SECTION_IDS - included_set):
-        reasons.append(f"[section] 필수 장 {section_id}에 검증된 근거가 없습니다")
+    for section_id in sorted((set(sections) & PARTIAL_ELIGIBLE_SECTION_IDS) - included_set):
+        reasons.append(
+            f"[section] 출고 후보 장 {section_id}가 들어왔지만 "
+            "검증된 근거가 없습니다"
+        )
+    reasons.extend(_minimum_section_problems(included_set))
     reasons.extend(
         _semantic_section_problems(report, sections, supported_by_section, facts)
     )
@@ -2966,7 +3030,7 @@ def validate_publishable(report: Report) -> PublishValidation:
 
 
 def build_published_report(report: Report) -> Report:
-    """검증된 핵심 장과 근거가 있는 조건부 5·8·9장을 정본 순서로 잠근다."""
+    """동적 최소 계약과 장별 전수 검증을 통과한 장만 정본 순서로 잠근다."""
 
     validation = validate_publishable(report)
     if not validation:
@@ -3087,16 +3151,30 @@ def build_published_report(report: Report) -> Report:
     ], key=lambda item: item.number)
 
     included_set = set(validation.included_section_ids)
-    missing_conditional = [
+    missing_partial_sections = [
         spec.section_id
         for spec in SECTION_SPECS
-        if spec.section_id in CONDITIONAL_SECTION_IDS
+        if spec.section_id in PARTIAL_ELIGIBLE_SECTION_IDS
         and spec.section_id not in included_set
     ]
     shortfall_reasons = [
-        CONDITIONAL_SECTION_SHORTFALL_REASONS[section_id]
-        for section_id in missing_conditional
+        PARTIAL_SECTION_SHORTFALL_REASONS[section_id]
+        for section_id in missing_partial_sections
     ]
+    published_types = {
+        (fact.section_owner, fact.claim_type) for fact in published_facts
+    }
+    if ("identity", "identity_summary") not in published_types:
+        shortfall_reasons.insert(0, IDENTITY_SUMMARY_SHORTFALL_REASON)
+    if ("business_model", "customer_market") not in published_types:
+        shortfall_reasons.append(CUSTOMER_MARKET_SHORTFALL_REASON)
+    past_types = {
+        claim_type
+        for section_id, claim_type in published_types
+        if section_id == "past_changes"
+    }
+    if not {"completed_execution", "change_interpretation"} <= past_types:
+        shortfall_reasons.append(PAST_NARRATIVE_SHORTFALL_REASON)
     is_partial_report = bool(shortfall_reasons)
     return replace(
         report,

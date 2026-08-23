@@ -164,6 +164,89 @@ class WrittenClaim:
     relationship_type: str = ""
 
 
+def _prune_unbound_optional_claims(
+    claims: Iterable[WrittenClaim],
+) -> list[WrittenClaim]:
+    """Writer·Reviewer 뒤 끊어진 선택형 묶음을 원자적으로 생략한다.
+
+    선택 단계에서 완결됐던 제품→수익, 문제→대응, 실행→해석 관계도 Writer나
+    Reviewer가 한쪽 문장을 삭제하면 다시 불완전해질 수 있다. 끊어진 한쪽만
+    공개하거나 그 때문에 검증된 최소 보고서 전체를 막지 않고, 해당 선택 묶음만
+    모두 제외한다. 정체성·수익 구조 같은 최소 핵심 사실은 이 함수가 지우지 않는다.
+    """
+
+    items = list(claims)
+    # 제품은 실제 공개되는 수익 구조만 참조할 수 있다.
+    revenue_sids = {
+        item.sid for item in items if item.claim_type == "revenue_model" and item.sid
+    }
+
+    # 현재 문제·대응은 양쪽이 같은 SID 관계로 남을 때만 함께 공개한다.
+    issues = {
+        item.sid: item
+        for item in items
+        if item.claim_type == "current_issue" and item.sid
+    }
+    valid_response_sids = {
+        item.sid
+        for item in items
+        if item.claim_type == "current_response"
+        and item.sid
+        and item.response_to_sid in issues
+    }
+    paired_issue_sids = {
+        item.response_to_sid
+        for item in items
+        if item.sid in valid_response_sids
+    }
+
+    # 변화 해석은 남아 있는 완료 실행이나 프로그램 생성 3개년 사실만 참조한다.
+    execution_sid_order = [
+        item.sid
+        for item in items
+        if item.claim_type == "completed_execution" and item.sid
+    ]
+    execution_sids = set(execution_sid_order)
+    valid_interpretation_sids: set[str] = set()
+    referenced_execution_sids: set[str] = set()
+    for item in items:
+        if item.claim_type != "change_interpretation" or not item.sid:
+            continue
+        bases = tuple(str(value or "").strip() for value in item.basis_sids)
+        if not bases or not all(bases):
+            continue
+        internal = {
+            value
+            for value in bases
+            if re.fullmatch(r"historical-performance:20\d{2}", value) is None
+        }
+        if not execution_sid_order or not internal <= execution_sids:
+            continue
+        valid_interpretation_sids.add(item.sid)
+        referenced_execution_sids.update(internal or {execution_sid_order[0]})
+
+    out: list[WrittenClaim] = []
+    for item in items:
+        if item.claim_type == "priority_product" and (
+            not item.revenue_model_sid or item.revenue_model_sid not in revenue_sids
+        ):
+            continue
+        if item.claim_type == "current_issue" and item.sid not in paired_issue_sids:
+            continue
+        if item.claim_type == "current_response" and item.sid not in valid_response_sids:
+            continue
+        if item.claim_type == "completed_execution" and (
+            item.sid not in referenced_execution_sids
+        ):
+            continue
+        if item.claim_type == "change_interpretation" and (
+            item.sid not in valid_interpretation_sids
+        ):
+            continue
+        out.append(item)
+    return out
+
+
 def majority_picks(rounds: Iterable[Iterable[CanonicalPick]], *, minimum: int = 2) -> list[CanonicalPick]:
     """선택 결과에서 소유권과 각 구조 필드가 ``minimum``회 나온 사실을 남긴다.
 
@@ -340,14 +423,13 @@ def basic_report_selection_subset(
     *,
     historical_performance_bases: Iterable[str],
 ) -> list[CanonicalPick]:
-    """Writer에 실제 넘길 참조 완결·장별 상한 이내 부분집합을 만든다.
+    """Writer에 실제 넘길 최소 안전·참조 완결 부분집합을 만든다.
 
-    전체 후보에 필수 사실이 있다는 것만 확인하면 Writer가 장별 앞 N개를 남길 때
-    뒤쪽의 필수 사실이나 연결 대상이 잘릴 수 있다. 그래서 먼저 제품→수익 구조,
-    대응→문제, 변화 해석→완료 실행을 함께 고른 뒤, 장별 공개 상한 안에서만 보완
-    사실을 채운다. 5장 현재 과제와 8장 문화는 공식 근거가 없을 수 있으므로
-    완결된 허용 사실이 있을 때만 싣는다. 나머지 핵심 장을 안전하게 만들 수
-    없으면 빈 목록을 반환한다.
+    최소 성립 조건은 검증된 공식 정체성 사실, 수익 구조, 프로그램이 별도 표로
+    제공하는 연속 3개년 완료 실적이다. 제품→수익 구조, 고객·시장, 완료 실행+변화 해석,
+    현재 과제+대응, 미래 계획, 운영 구조, 문화는 검증된 완결 묶음이 있을 때만
+    장별 공개 상한 안에서 보탠다. 구조 validator를 완화하지 않으며, 선택 항목이
+    많은 기존 완전 보고서는 같은 원문 순서와 상한을 유지한다.
     """
 
     items = list(picks)
@@ -369,15 +451,25 @@ def basic_report_selection_subset(
 
     chosen: set[int] = set()
 
-    # 1장: 공식 정체성 요약을 반드시 포함하고, 있으면 공식 자기정의 한 건을 더 둔다.
+    # 1장: 부분 보고서는 검증된 공식 정체성 사실 한 건으로 성립한다. 쉬운 말
+    # 정체성 요약을 우선하되, 없으면 공식 자기정의·사업범위를 그대로 사용한다.
+    # FULL 판정은 아래 별도 함수에서 계속 identity_summary를 요구한다.
     identity = by_section.get("identity", [])
     identity_summary = next(
         (pair for pair in identity if pair[1].claim_type == "identity_summary"),
         None,
     )
-    if identity_summary is None:
+    identity_anchor = identity_summary or next(
+        (
+            pair
+            for pair in identity
+            if pair[1].claim_type in {"official_self_definition", "operating_scope"}
+        ),
+        None,
+    )
+    if identity_anchor is None:
         return []
-    chosen.add(identity_summary[0])
+    chosen.add(identity_anchor[0])
     for index, item in identity:
         if len(chosen.intersection(i for i, _ in identity)) >= _PROSE_LIMITS["identity"]:
             break
@@ -388,7 +480,7 @@ def basic_report_selection_subset(
         }:
             chosen.add(index)
 
-    # 2·3장: 제품을 고를 때 그 제품이 실제로 참조하는 수익 구조도 함께 보존한다.
+    # 2·3장: 수익 구조는 필수다. 제품은 실제 참조 수익 구조와 완결될 때만 싣는다.
     customer = next(
         (
             pair
@@ -397,8 +489,6 @@ def basic_report_selection_subset(
         ),
         None,
     )
-    if customer is None:
-        return []
     selected_products: list[tuple[int, CanonicalPick]] = []
     selected_revenues: set[int] = set()
     product_subjects: set[str] = set()
@@ -417,18 +507,30 @@ def basic_report_selection_subset(
         ):
             continue
         prospective_revenues = selected_revenues | {revenue_pair[0]}
-        # 고객·시장 한 건을 남겨야 하므로 수익 구조는 최대 세 건이다.
-        if len(prospective_revenues) + 1 > _PROSE_LIMITS["business_model"]:
+        # 고객·시장 근거가 있으면 기존처럼 그 한 칸을 먼저 예약한다.
+        reserved_customer_slots = int(customer is not None)
+        if (
+            len(prospective_revenues) + reserved_customer_slots
+            > _PROSE_LIMITS["business_model"]
+        ):
             continue
         selected_products.append((index, product))
         selected_revenues = prospective_revenues
         product_subjects.add(subject)
         if len(selected_products) >= _PROSE_LIMITS["portfolio"]:
             break
-    if not selected_products:
+    revenue_models = [
+        pair
+        for pair in by_section.get("business_model", [])
+        if pair[1].claim_type == "revenue_model"
+    ]
+    if not revenue_models:
         return []
+    if not selected_revenues:
+        selected_revenues.add(revenue_models[0][0])
     chosen.update(selected_revenues)
-    chosen.add(customer[0])
+    if customer is not None:
+        chosen.add(customer[0])
     chosen.update(index for index, _item in selected_products)
     business_count = sum(
         index in chosen for index, _item in by_section.get("business_model", [])
@@ -447,8 +549,6 @@ def basic_report_selection_subset(
         for index, item in past
         if item.claim_type == "completed_execution"
     }
-    if not executions:
-        return []
 
     def interpretation_dependencies(
         interpretation: CanonicalPick,
@@ -466,36 +566,41 @@ def basic_report_selection_subset(
         return dependencies
 
     past_selected: set[int] = set()
-    for index, interpretation in past:
-        if interpretation.claim_type != "change_interpretation":
-            continue
-        dependencies = interpretation_dependencies(interpretation)
-        if dependencies is None:
-            continue
-        if not dependencies:
-            dependencies = {next(iter(executions.values()))[0]}
-        if len(dependencies) + 1 <= _PROSE_LIMITS["past_changes"]:
-            past_selected.update(dependencies)
-            past_selected.add(index)
-            break
-    if not past_selected:
-        return []
-    for index, item in past:
-        if len(past_selected) >= _PROSE_LIMITS["past_changes"]:
-            break
-        if index in past_selected:
-            continue
-        if item.claim_type == "completed_execution":
-            past_selected.add(index)
-            continue
-        if item.claim_type == "change_interpretation":
-            dependencies = interpretation_dependencies(item)
+    if executions:
+        for index, interpretation in past:
+            if interpretation.claim_type != "change_interpretation":
+                continue
+            dependencies = interpretation_dependencies(interpretation)
             if dependencies is None:
                 continue
-            missing = dependencies - past_selected
-            if len(past_selected) + len(missing) + 1 <= _PROSE_LIMITS["past_changes"]:
-                past_selected.update(missing)
+            if not dependencies:
+                dependencies = {next(iter(executions.values()))[0]}
+            if len(dependencies) + 1 <= _PROSE_LIMITS["past_changes"]:
+                past_selected.update(dependencies)
                 past_selected.add(index)
+                break
+        # 완료 실행만 단독 공개하지 않는다. 변화 해석과 안전한 첫 묶음이 생긴
+        # 경우에만 기존 순서·상한대로 추가 완료 실행과 해석을 보탠다.
+        if past_selected:
+            for index, item in past:
+                if len(past_selected) >= _PROSE_LIMITS["past_changes"]:
+                    break
+                if index in past_selected:
+                    continue
+                if item.claim_type == "completed_execution":
+                    past_selected.add(index)
+                    continue
+                if item.claim_type == "change_interpretation":
+                    dependencies = interpretation_dependencies(item)
+                    if dependencies is None:
+                        continue
+                    missing = dependencies - past_selected
+                    if (
+                        len(past_selected) + len(missing) + 1
+                        <= _PROSE_LIMITS["past_changes"]
+                    ):
+                        past_selected.update(missing)
+                        past_selected.add(index)
     chosen.update(past_selected)
 
     # 5장: 독립 문제·대응 쌍만 최대 세 묶음 보존한다.
@@ -519,7 +624,7 @@ def basic_report_selection_subset(
             break
     chosen.update(current_selected)
 
-    # 6~7장은 허용된 사실을 원문 순서대로 공개 상한까지만 둔다.
+    # 6~7장은 근거가 있을 때 허용 사실을 원문 순서대로 공개 상한까지만 둔다.
     for section_id, allowed_types in (
         ("future_strategy", {"future_plan"}),
         ("operations_partners", {"operating_core", "partner_role"}),
@@ -529,8 +634,6 @@ def basic_report_selection_subset(
             for index, item in by_section.get(section_id, [])
             if item.claim_type in allowed_types
         ][:_PROSE_LIMITS[section_id]]
-        if not selected:
-            return []
         chosen.update(selected)
 
     # 8장: 공식 채용·문화 근거가 있을 때만 허용 유형을 싣고, 없으면 생략한다.
@@ -544,18 +647,51 @@ def basic_report_selection_subset(
     return [item for index, item in enumerate(items) if index in chosen]
 
 
-def basic_report_selection_is_complete(
+def basic_report_selection_is_minimum_usable(
     picks: Iterable[CanonicalPick],
     *,
     historical_performance_bases: Iterable[str],
 ) -> bool:
-    """호환용 완결 판정. 실제 Writer 입력은 안전한 부분집합을 사용한다."""
+    """검증된 부분 보고서의 최소 안전 부분집합이 성립하는지 판정한다."""
 
     return bool(
         basic_report_selection_subset(
             picks,
             historical_performance_bases=historical_performance_bases,
         )
+    )
+
+
+def basic_report_selection_is_complete(
+    picks: Iterable[CanonicalPick],
+    *,
+    historical_performance_bases: Iterable[str],
+) -> bool:
+    """기존 FULL 기본 보고서의 핵심 장과 참조가 모두 완결됐는지 판정한다.
+
+    부분 보고서 가능 여부와 의도적으로 구분한다. 정체성·고객·수익 결속 제품,
+    완료 실행과 변화 해석, 미래 계획, 운영 구조가 모두 안전 부분집합에 남아야
+    하며 연속 3개년 완료 실적도 있어야 한다.
+    """
+
+    subset = basic_report_selection_subset(
+        picks,
+        historical_performance_bases=historical_performance_bases,
+    )
+    if not subset:
+        return False
+    claim_types = {item.claim_type for item in subset}
+    required_claim_types = {
+        "identity_summary",
+        "customer_market",
+        "revenue_model",
+        "priority_product",
+        "completed_execution",
+        "change_interpretation",
+        "future_plan",
+    }
+    return required_claim_types.issubset(claim_types) and bool(
+        {"operating_core", "partner_role"}.intersection(claim_types)
     )
 
 
@@ -810,9 +946,30 @@ def write_and_verify_sections(
                 )
             )
 
+    before_prune = len(claims)
+    claims = _prune_unbound_optional_claims(claims)
+    if len(claims) != before_prune:
+        steps.append(
+            {
+                "step": "작가_선택묶음_후검증",
+                "생략": before_prune - len(claims),
+                "사유": "Writer·Reviewer 뒤 참조 관계 불완결",
+            }
+        )
+
+    prose_by_section = defaultdict(list)
+    raw_by_section: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for claim in claims:
+        prose_by_section[claim.section_id].append((claim.text, claim.cite))
+        raw_by_section[claim.section_id].append((claim.evidence, claim.cite))
+
     return (
         [
-            replace(section, prose_lines=prose_by_section.get(section.cell, []))
+            replace(
+                section,
+                lines=raw_by_section.get(section.cell, []),
+                prose_lines=prose_by_section.get(section.cell, []),
+            )
             for section in sections
         ],
         claims,

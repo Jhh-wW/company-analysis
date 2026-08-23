@@ -40,11 +40,10 @@ SECTION_BY_ID: Final[dict[str, SectionSpec]] = {
 }
 CANONICAL_SECTION_IDS: Final[tuple[str, ...]] = tuple(SECTION_BY_ID)
 
-# 1·2·3·4·6·7장은 회사 자체를 설명하는 기본 보고서의 필수 장이다. 5장은 회사가
-# 미해결 문제와 실제 대응을 공식 자료에 함께 밝힌 경우, 8장은 공식 채용·문화
-# 자료가 있는 경우에만 붙인다. 9장도 양사의 공식 자료를 같은 조건으로 맞출 수
-# 있을 때만 붙인다. 조건부 장의 근거가 없다고 검증된 핵심 장을 함께 폐기하거나,
-# 반대로 빈 장을 일반론으로 채우면 각각 사용자 효용과 사실성을 해친다.
+# 기존 완전본의 장별 내용 검증 범위다. 여기 포함된 장이 출고 후보에
+# 들어오면 종전 prose·구조 블록·의미 검증을 그대로 적용한다. 다만 이 집합
+# 자체를 "한 장이라도 빠지면 전체 차단"으로 쓰지 않고, 아래 동적 최소
+# 계약으로 부분 보고서 출고 가능성을 별도 판정한다.
 OPTIONAL_BASIC_SECTION_IDS: Final[frozenset[str]] = frozenset(
     {"current_challenges", "culture"}
 )
@@ -55,6 +54,26 @@ REQUIRED_SECTION_IDS: Final[frozenset[str]] = frozenset(
     section_id
     for section_id in CANONICAL_SECTION_IDS
     if section_id not in CONDITIONAL_SECTION_IDS
+)
+
+# 공개 가능한 부분 보고서의 동적 최소 계약. 1장 공식 정체성, 2장 수익 구조,
+# 4장 연속 3개 완료 사업연도 실적표가 모두 있어야 한다. 미래 계획이나 현재
+# 문제만으로 공식 실적 확인을 대신하지 않는다. 나머지 장은 근거가 있을 때만
+# 포함하고 빈 문장으로 채우지 않는다.
+MINIMUM_CORE_SECTION_IDS: Final[frozenset[str]] = frozenset(
+    {"identity", "business_model"}
+)
+MINIMUM_IDENTITY_CLAIM_TYPES: Final[frozenset[str]] = frozenset(
+    {"identity_summary", "official_self_definition", "operating_scope"}
+)
+MINIMUM_SITUATION_SECTION_IDS: Final[frozenset[str]] = frozenset(
+    {"past_changes"}
+)
+MINIMUM_PUBLISHABLE_SECTION_COUNT: Final[int] = 3
+PARTIAL_ELIGIBLE_SECTION_IDS: Final[frozenset[str]] = frozenset(
+    set(CANONICAL_SECTION_IDS)
+    - set(MINIMUM_CORE_SECTION_IDS)
+    - set(MINIMUM_SITUATION_SECTION_IDS)
 )
 
 COMPARISON_SHORTFALL_REASON: Final[str] = (
@@ -74,10 +93,62 @@ CULTURE_SHORTFALL_REASON: Final[str] = (
     "뜻은 아닙니다."
 )
 
+PORTFOLIO_SHORTFALL_REASON: Final[str] = (
+    "공식 자료에서 핵심 제품·서비스와 사업 내 역할을 함께 확인하지 "
+    "못해 3장 핵심 제품·서비스와 포트폴리오 역할은 제공하지 않았습니다. "
+    "제품·서비스가 없다는 뜻은 아닙니다."
+)
+
+PAST_CHANGES_SHORTFALL_REASON: Final[str] = (
+    "연속 3개 완료 사업연도의 검증 실적표를 공식 자료와 결속하지 못해 "
+    "4장 3개년 주요 변화와 실행은 제공하지 않았습니다. 과거 변화가 없다는 "
+    "뜻은 아닙니다."
+)
+
+FUTURE_STRATEGY_SHORTFALL_REASON: Final[str] = (
+    "공식 자료에서 기준일 후의 미실행 계획을 확인하지 못해 6장 성장 전략은 "
+    "제공하지 않았습니다. 성장 전략이 없다는 뜻은 아닙니다."
+)
+
+OPERATIONS_PARTNERS_SHORTFALL_REASON: Final[str] = (
+    "최근 공식 자료에서 현재 운영 구조 또는 파트너 역할을 확인하지 못해 7장 "
+    "사업 운영과 파트너 구조는 제공하지 않았습니다. 운영 구조나 파트너가 "
+    "없다는 뜻은 아닙니다."
+)
+
+IDENTITY_SUMMARY_SHORTFALL_REASON: Final[str] = (
+    "공식 정체성 사실은 확인했지만 이를 쉬운 말로 정리한 검증 문장을 확보하지 "
+    "못해 1장은 공식 원문 중심으로 제공합니다. 회사 정체성이 불분명하다는 뜻은 "
+    "아닙니다."
+)
+
+CUSTOMER_MARKET_SHORTFALL_REASON: Final[str] = (
+    "공식 자료에서 고객·시장 범위를 검증하지 못해 2장은 확인된 수익 구조만 "
+    "제공합니다. 고객이나 시장이 없다는 뜻은 아닙니다."
+)
+
+PAST_NARRATIVE_SHORTFALL_REASON: Final[str] = (
+    "연속 3개 완료 사업연도 공식 실적은 확인했지만 최근 완료 실행과 변화 해석을 "
+    "함께 검증하지 못해 4장은 공식 실적표만 제공합니다. 변화가 없다는 뜻은 "
+    "아닙니다."
+)
+
 # 조건부 장은 서로 다른 결손 사유다. 한 문장으로 합치면 5·8·9장 중 무엇이
 # 부족했는지 사용자와 운영자가 구분할 수 없으므로 장별 표준 문구를 따로 둔다.
 CONDITIONAL_SECTION_SHORTFALL_REASONS: Final[dict[str, str]] = {
     "current_challenges": CURRENT_CHALLENGES_SHORTFALL_REASON,
+    "culture": CULTURE_SHORTFALL_REASON,
+    "competitive_position": COMPARISON_SHORTFALL_REASON,
+}
+
+# 부분 보고서에서 빠진 장은 모두 서로 다른 표준 결손 사유를 남긴다.
+# 기존 5·8·9장 문구는 그대로 재사용해 기존 Grade.PARTIAL의 의미를
+# 바꾸지 않고, 새로 허용한 동적 결손만 명시적으로 추가한다.
+PARTIAL_SECTION_SHORTFALL_REASONS: Final[dict[str, str]] = {
+    "portfolio": PORTFOLIO_SHORTFALL_REASON,
+    "current_challenges": CURRENT_CHALLENGES_SHORTFALL_REASON,
+    "future_strategy": FUTURE_STRATEGY_SHORTFALL_REASON,
+    "operations_partners": OPERATIONS_PARTNERS_SHORTFALL_REASON,
     "culture": CULTURE_SHORTFALL_REASON,
     "competitive_position": COMPARISON_SHORTFALL_REASON,
 }

@@ -127,11 +127,16 @@ from src.features.pipeline.port import (
 )
 from src.features.report_standard.constants import (
     COMPARISON_SHORTFALL_REASON,
+    CUSTOMER_MARKET_SHORTFALL_REASON,
+    IDENTITY_SUMMARY_SHORTFALL_REASON,
     OPTIONAL_BASIC_SECTION_IDS,
+    PAST_NARRATIVE_SHORTFALL_REASON,
+    REQUIRED_SECTION_IDS,
 )
 from src.features.pipeline.canonical_report import (
     PublishBlockedError,
     assemble_report_draft,
+    basic_report_selection_is_complete,
     basic_report_selection_subset,
     combine_validated_picks,
     finalize_report,
@@ -1753,6 +1758,7 @@ class RealPipeline:
         selection_diagnostics: list[SpanSelectionRoundDiagnostic] = []
         validated_selection_rounds: list[list[Any]] = []
         kept = []
+        minimum_subset = []
         sentences_made = 0
         focus_missing_claim_roles: tuple[str, ...] = ()
         focus_rejection_codes: tuple[str, ...] = ()
@@ -1867,8 +1873,16 @@ class RealPipeline:
                 if validated_selection_rounds
                 else []
             )
-            if round_subset:
-                # Writer와 이후 출고 게이트가 실제로 보는 항목도 같은 부분집합이다.
+            # 마지막 유효 누적 결과를 그대로 따른다. 뒤 회차에서 같은 SID가
+            # 다른 원문과 충돌해 제거됐다면, 앞 회차의 오래된 부분집합을 되살려
+            # 출고해서는 안 된다.
+            minimum_subset = round_subset
+            if round_subset and basic_report_selection_is_complete(
+                cumulative_kept,
+                historical_performance_bases=performance_bases,
+            ):
+                # 전체 계약이 성립하면 추가 선택 비용을 쓰지 않는다. Writer와
+                # 이후 출고 게이트가 실제로 보는 항목도 같은 안전 부분집합이다.
                 kept = round_subset
                 steps.append(
                     {
@@ -1896,6 +1910,18 @@ class RealPipeline:
                         if str(getattr(item, "sid", "") or "")
                     }
                 )
+            )
+        if not kept and minimum_subset:
+            # 두 번의 선택 결과를 합쳐도 전체 장이 성립하지 않으면, 확인된 사실을
+            # 폐기하지 않고 최소 계약의 부분 보고서로 넘긴다. 여기서 선택되지 않은
+            # 장은 출고 단계가 표준 미확보 사유와 함께 명시적으로 생략한다.
+            kept = minimum_subset
+            steps.append(
+                {
+                    "step": "8_사실선택_부분완결",
+                    "선택호출": len(selection_diagnostics),
+                    "사유": "전체 계약 미충족·검증된 최소 계약 출고",
+                }
             )
         selection_result_reason_code = selection_result_reason(
             selection_diagnostics,
@@ -2131,16 +2157,25 @@ class RealPipeline:
         optional_basic_sections_missing = (
             OPTIONAL_BASIC_SECTION_IDS - included_section_ids
         )
+        required_basic_sections_missing = REQUIRED_SECTION_IDS - included_section_ids
+        content_shortfall_reasons = {
+            IDENTITY_SUMMARY_SHORTFALL_REASON,
+            CUSTOMER_MARKET_SHORTFALL_REASON,
+            PAST_NARRATIVE_SHORTFALL_REASON,
+        }.intersection(report.shortfall_reasons)
         if (
             _has_failed_source(sources)
             or candidate_collection_incomplete
             or optional_basic_sections_missing
+            or required_basic_sections_missing
+            or content_shortfall_reasons
         ):
             logger.info(
-                "수집 실패·후보범위 불완전·조건부 기본 장 누락이 껴 1층 캐시에 "
-                "저장하지 않습니다 — corp_id=%s · 누락=%s",
+                "수집 실패·후보범위 불완전·기본 장/내용 결손이 껴 1층 캐시에 "
+                "저장하지 않습니다 — corp_id=%s · 장누락=%s · 내용결손=%s",
                 corp_code,
-                sorted(optional_basic_sections_missing),
+                sorted(optional_basic_sections_missing | required_basic_sections_missing),
+                sorted(content_shortfall_reasons),
             )
         else:
             _company_cache_save(

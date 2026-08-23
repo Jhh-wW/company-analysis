@@ -8,9 +8,11 @@ import pytest
 from src.features.pipeline.canonical_report import (
     PublishBlockedError,
     WrittenClaim,
+    _prune_unbound_optional_claims,
     _structured_company_binding_is_visible,
     assemble_report,
     basic_report_selection_is_complete,
+    basic_report_selection_is_minimum_usable,
     basic_report_selection_subset,
     combine_validated_picks,
     historical_performance_bases_are_complete,
@@ -68,6 +70,73 @@ def test_majority_vote_drops_cross_section_tie() -> None:
     ]
 
     assert majority_picks(rounds) == [same]
+
+
+def test_Writer뒤_끊어진_선택형_관계는_묶음전체를_생략한다() -> None:
+    revenue = WrittenClaim(
+        "business_model", "수익 구조", "조각 1·사업", "수익 구조", 1,
+        sid="revenue-1", claim_type="revenue_model",
+    )
+    product = WrittenClaim(
+        "portfolio", "핵심 제품", "조각 2·사업", "핵심 제품", 2,
+        sid="product-1", claim_type="priority_product",
+        revenue_model_sid="없는-수익",
+    )
+    issue = WrittenClaim(
+        "current_challenges", "현재 문제", "조각 3·사업", "현재 문제", 3,
+        sid="issue-1", claim_type="current_issue",
+    )
+    response = WrittenClaim(
+        "current_challenges", "현재 대응", "조각 4·사업", "현재 대응", 4,
+        sid="response-1", claim_type="current_response",
+        response_to_sid="없는-문제",
+    )
+    execution = WrittenClaim(
+        "past_changes", "완료 실행", "조각 5·사업", "완료 실행", 5,
+        sid="execution-1", claim_type="completed_execution",
+    )
+    interpretation = WrittenClaim(
+        "past_changes", "변화 해석", "조각 6·사업", "변화 해석", 6,
+        sid="interpretation-1", claim_type="change_interpretation",
+        basis_sids=("없는-실행",),
+    )
+
+    assert _prune_unbound_optional_claims(
+        [revenue, product, issue, response, execution, interpretation]
+    ) == [revenue]
+
+
+def test_Writer뒤_완결된_선택형_관계는_함께_유지한다() -> None:
+    revenue = WrittenClaim(
+        "business_model", "수익 구조", "조각 1·사업", "수익 구조", 1,
+        sid="revenue-1", claim_type="revenue_model",
+    )
+    product = WrittenClaim(
+        "portfolio", "핵심 제품", "조각 2·사업", "핵심 제품", 2,
+        sid="product-1", claim_type="priority_product",
+        revenue_model_sid="revenue-1",
+    )
+    issue = WrittenClaim(
+        "current_challenges", "현재 문제", "조각 3·사업", "현재 문제", 3,
+        sid="issue-1", claim_type="current_issue",
+    )
+    response = WrittenClaim(
+        "current_challenges", "현재 대응", "조각 4·사업", "현재 대응", 4,
+        sid="response-1", claim_type="current_response", response_to_sid="issue-1",
+    )
+    execution = WrittenClaim(
+        "past_changes", "완료 실행", "조각 5·사업", "완료 실행", 5,
+        sid="execution-1", claim_type="completed_execution",
+    )
+    interpretation = WrittenClaim(
+        "past_changes", "변화 해석", "조각 6·사업", "변화 해석", 6,
+        sid="interpretation-1", claim_type="change_interpretation",
+        basis_sids=("execution-1", "historical-performance:2025"),
+    )
+
+    assert _prune_unbound_optional_claims(
+        [revenue, product, issue, response, execution, interpretation]
+    ) == [revenue, product, issue, response, execution, interpretation]
 
 
 def test_majority_vote_agrees_each_structured_field_without_exact_object_match() -> None:
@@ -306,15 +375,20 @@ def _complete_basic_picks() -> list[CanonicalPick]:
 def test_A형_서로_다른_회차의_검증사실을_합쳐_핵심보고서를_완성한다() -> None:
     picks = _complete_basic_picks()
     combined = combine_validated_picks([picks[::2], picks[1::2]])
+    bases = {
+        "historical-performance:2023",
+        "historical-performance:2024",
+        "historical-performance:2025",
+    }
 
     assert set(combined) == set(picks)
+    assert basic_report_selection_is_minimum_usable(
+        combined,
+        historical_performance_bases=bases,
+    )
     assert basic_report_selection_is_complete(
         combined,
-        historical_performance_bases={
-            "historical-performance:2023",
-            "historical-performance:2024",
-            "historical-performance:2025",
-        },
+        historical_performance_bases=bases,
     )
 
 
@@ -340,8 +414,118 @@ def test_F형_공식_현재과제와_문화가_없어도_핵심보고서는_완�
     )
 
 
-def test_기본보고서_선택이_완결되면_한번으로_충분하다() -> None:
+def test_완전한_기본보고서_선택은_기존_순서와_항목을_그대로_유지한다() -> None:
+    picks = _complete_basic_picks()
+    bases = {
+        "historical-performance:2023",
+        "historical-performance:2024",
+        "historical-performance:2025",
+    }
+
+    assert basic_report_selection_subset(
+        picks,
+        historical_performance_bases=bases,
+    ) == picks
+    assert basic_report_selection_is_minimum_usable(
+        picks,
+        historical_performance_bases=bases,
+    )
     assert basic_report_selection_is_complete(
+        picks,
+        historical_performance_bases=bases,
+    )
+
+
+def test_최소_부분보고서는_정체성_수익구조_삼개년표만으로_성립한다() -> None:
+    picks = [
+        item
+        for item in _complete_basic_picks()
+        if item.claim_type in {"identity_summary", "revenue_model"}
+    ]
+    bases = {
+        "historical-performance:2023",
+        "historical-performance:2024",
+        "historical-performance:2025",
+    }
+
+    subset = basic_report_selection_subset(
+        picks,
+        historical_performance_bases=bases,
+    )
+
+    assert subset == picks
+    assert basic_report_selection_is_minimum_usable(
+        picks,
+        historical_performance_bases=bases,
+    )
+    assert not basic_report_selection_is_complete(
+        picks,
+        historical_performance_bases=bases,
+    )
+
+
+def test_정체성요약이_없어도_공식자기정의로_부분보고서만_성립한다() -> None:
+    revenue = next(
+        item
+        for item in _complete_basic_picks()
+        if item.claim_type == "revenue_model"
+    )
+    picks = [
+        CanonicalPick(
+            "identity",
+            "공식 자기정의",
+            12,
+            "12-1",
+            "official_self_definition",
+        ),
+        revenue,
+    ]
+    bases = {
+        "historical-performance:2023",
+        "historical-performance:2024",
+        "historical-performance:2025",
+    }
+
+    subset = basic_report_selection_subset(
+        picks,
+        historical_performance_bases=bases,
+    )
+
+    assert subset == picks
+    assert basic_report_selection_is_minimum_usable(
+        picks,
+        historical_performance_bases=bases,
+    )
+    assert not basic_report_selection_is_complete(
+        picks,
+        historical_performance_bases=bases,
+    )
+
+
+def test_불완전한_선택형_과거묶음은_빼고_삼개년표_부분보고서를_유지한다() -> None:
+    bases = {
+        "historical-performance:2023",
+        "historical-performance:2024",
+        "historical-performance:2025",
+    }
+
+    for missing_claim_type in ("completed_execution", "change_interpretation"):
+        picks = [
+            item
+            for item in _complete_basic_picks()
+            if item.claim_type != missing_claim_type
+        ]
+        subset = basic_report_selection_subset(
+            picks,
+            historical_performance_bases=bases,
+        )
+
+        assert subset
+        assert not any(item.section_id == "past_changes" for item in subset)
+
+
+def test_최소_부분보고서_선택이_성립하면_한번으로_충분하다() -> None:
+    assert basic_report_selection_is_minimum_usable(
         _complete_basic_picks(),
         historical_performance_bases={
             "historical-performance:2023",
@@ -475,7 +659,31 @@ def test_Writer_후_구조예외는_구체대상과_행동이_문장에_남아�
     [
         "identity_summary",
         "revenue_model",
+    ],
+)
+def test_최소_부분보고서_필수사실이_하나라도_빠지면_재선택한다(
+    missing_claim_type: str,
+) -> None:
+    picks = [
+        item for item in _complete_basic_picks() if item.claim_type != missing_claim_type
+    ]
+
+    assert not basic_report_selection_is_minimum_usable(
+        picks,
+        historical_performance_bases={
+            "historical-performance:2023",
+            "historical-performance:2024",
+            "historical-performance:2025",
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "missing_claim_type",
+    [
+        "identity_summary",
         "customer_market",
+        "revenue_model",
         "priority_product",
         "completed_execution",
         "change_interpretation",
@@ -483,7 +691,7 @@ def test_Writer_후_구조예외는_구체대상과_행동이_문장에_남아�
         "operating_core",
     ],
 )
-def test_기본보고서_필수사실이_하나라도_빠지면_재선택한다(
+def test_FULL_기본보고서_필수사실이_하나라도_빠지면_완결이_아니다(
     missing_claim_type: str,
 ) -> None:
     picks = [
@@ -500,7 +708,7 @@ def test_기본보고서_필수사실이_하나라도_빠지면_재선택한다(
     )
 
 
-def test_기본보고서_내부참조나_삼개년표가_깨지면_완결로_보지_않는다() -> None:
+def test_참조가_깨진_선택형_제품은_빼고_최소_부분보고서를_유지한다() -> None:
     broken_reference = [
         replace(item, revenue_model_sid="없는-SID")
         if item.claim_type == "priority_product"
@@ -508,7 +716,18 @@ def test_기본보고서_내부참조나_삼개년표가_깨지면_완결로_보
         for item in _complete_basic_picks()
     ]
 
-    assert not basic_report_selection_is_complete(
+    subset = basic_report_selection_subset(
+        broken_reference,
+        historical_performance_bases={
+            "historical-performance:2023",
+            "historical-performance:2024",
+            "historical-performance:2025",
+        },
+    )
+
+    assert subset
+    assert not any(item.claim_type == "priority_product" for item in subset)
+    assert basic_report_selection_is_minimum_usable(
         broken_reference,
         historical_performance_bases={
             "historical-performance:2023",
@@ -517,13 +736,24 @@ def test_기본보고서_내부참조나_삼개년표가_깨지면_완결로_보
         },
     )
     assert not basic_report_selection_is_complete(
+        broken_reference,
+        historical_performance_bases={
+            "historical-performance:2023",
+            "historical-performance:2024",
+            "historical-performance:2025",
+        },
+    )
+
+
+def test_최소_부분보고서는_삼개년표가_깨지면_성립하지_않는다() -> None:
+    assert not basic_report_selection_is_minimum_usable(
         _complete_basic_picks(),
         historical_performance_bases={
             "historical-performance:2024",
             "historical-performance:2025",
         },
     )
-    assert not basic_report_selection_is_complete(
+    assert not basic_report_selection_is_minimum_usable(
         _complete_basic_picks(),
         historical_performance_bases={
             "historical-performance:2022",

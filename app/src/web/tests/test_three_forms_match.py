@@ -33,7 +33,11 @@ from src.features.pipeline.port import (
     SummaryItem,
 )
 from src.features.provenance.sources import Source, SourceKind
-from src.features.report_standard import CANONICAL_SCHEMA_VERSION, SECTION_BY_ID
+from src.features.report_standard import (
+    CANONICAL_SCHEMA_VERSION,
+    SECTION_BY_ID,
+    build_published_report,
+)
 from src.features.report_standard.publish import PublishBlockedError
 from src.features.report_standard.section_content import section_content_blocks
 from src.web import job_runtime
@@ -204,7 +208,7 @@ def canonical_report() -> Report:
     return replace(report, sections=sections)
 
 
-def test_canonical_부분본_완성도는_레거시_6칸_분모를_쓰지_않는다() -> None:
+def test_canonical_부분본_완성도는_장_개수로_오해시키지_않는다() -> None:
     report = canonical_report()
     partial = replace(
         report,
@@ -214,8 +218,52 @@ def test_canonical_부분본_완성도는_레거시_6칸_분모를_쓰지_않는
 
     note = _report_grade_note(partial)
 
-    assert "9개 중 7개" in note
-    assert "6개 중" not in note
+    assert "검증된 부분 보고서(부분 완성)" in note
+    assert "공식 근거로 확인된 항목만" in note
+    assert "개 중" not in note
+
+
+def test_9개_장이_모두_있는_의미_결손_부분본도_모순된_개수를_표시하지_않는다() -> None:
+    report = build_demo_report()
+    customer = next(
+        fact
+        for fact in report.fact_records
+        if fact.section_owner == "business_model"
+        and fact.claim_type == "customer_market"
+    )
+    draft = replace(
+        report,
+        sections=[
+            replace(
+                section,
+                fact_ids=[
+                    fact_id
+                    for fact_id in section.fact_ids
+                    if fact_id != customer.fact_id
+                ],
+                prose_lines=[
+                    line for line in section.prose_lines if line[0] != customer.claim
+                ],
+                lines=[line for line in section.lines if line[0] != customer.claim],
+            )
+            if section.cell == "business_model"
+            else section
+            for section in report.sections
+        ],
+        fact_records=[
+            fact for fact in report.fact_records if fact.fact_id != customer.fact_id
+        ],
+    )
+    partial = build_published_report(draft)
+
+    assert partial.grade is Grade.PARTIAL
+    assert partial.filled_count == 9
+
+    note = _report_grade_note(partial)
+
+    assert "검증된 부분 보고서(부분 완성)" in note
+    assert "9개 중 9개" not in note
+    assert "비어 있는 항목" not in note
 
 
 def _pdf_text(report: Report) -> str:

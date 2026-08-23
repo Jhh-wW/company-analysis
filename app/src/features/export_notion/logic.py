@@ -21,6 +21,7 @@ from src.core.citations import citation_marker
 from src.core.constants import section_display_heading
 from src.features.export_notion import constants
 from src.features.pipeline.port import (
+    Grade,
     Report,
     ReportSection,
     ReportTable,
@@ -321,6 +322,17 @@ def build_blocks(report: Report, *, grade_note: str = "") -> list[NotionBlock]:
     report = build_published_report(report)
 
     blocks: list[NotionBlock] = [_heading_1(report.company), _heading_1("분석 보고서")]
+    if report.grade is Grade.PARTIAL:
+        blocks.extend(
+            [
+                _heading_2("검증된 부분 보고서(부분 완성)"),
+                _paragraph(
+                    "공식 근거로 확인된 항목만 담았습니다. "
+                    "확인되지 않은 내용은 추측해 채우지 않았습니다."
+                ),
+                *(_paragraph(reason) for reason in report.shortfall_reasons),
+            ]
+        )
     lede = _lede_text(report)
     if lede:
         blocks.append(_paragraph(lede))
