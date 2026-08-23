@@ -19,6 +19,8 @@ from src.shared.final_gate_diagnostics import (
 TABLE_FINAL_GATE_DIAGNOSTICS: Final[str] = FINAL_GATE_DIAGNOSTIC_TABLE
 SCHEMA_VERSION: Final[int] = FINAL_GATE_DIAGNOSTIC_SCHEMA_VERSION
 _TABLE_COLUMNS: Final[frozenset[str]] = FINAL_GATE_DIAGNOSTIC_COLUMNS
+_MIGRATION_TABLE: Final[str] = "pipeline_final_gate_diagnostics_old_reasons"
+_MIGRATION_SAVEPOINT: Final[str] = "final_gate_reason_expansion"
 
 
 class FinalGateDiagnosticStoreError(RuntimeError):
@@ -36,10 +38,27 @@ class PersistedFinalGateDiagnostic:
 def ensure_schema(conn: sqlite3.Connection) -> None:
     """쓰기 연결 안에서 신규 부속 원장을 준비한다."""
 
+    if not _table_exists(conn):
+        _create_table(conn)
+        return
+    _validate_table_columns(conn)
+    definition = str(
+        conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            (TABLE_FINAL_GATE_DIAGNOSTICS,),
+        ).fetchone()[0]
+        or ""
+    )
+    if all(f"'{reason}'" in definition for reason in SAFE_FINAL_GATE_REASONS):
+        return
+    _migrate_reason_constraint(conn)
+
+
+def _create_table(conn: sqlite3.Connection) -> None:
     allowed = ", ".join(f"'{value}'" for value in sorted(SAFE_FINAL_GATE_REASONS))
     conn.execute(
         f"""
-        CREATE TABLE IF NOT EXISTS {TABLE_FINAL_GATE_DIAGNOSTICS} (
+        CREATE TABLE {TABLE_FINAL_GATE_DIAGNOSTICS} (
             run_id TEXT PRIMARY KEY,
             schema_version INTEGER NOT NULL CHECK (schema_version = {SCHEMA_VERSION}),
             reason_code TEXT NOT NULL CHECK (reason_code IN ({allowed})),
@@ -48,6 +67,47 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """
     )
     _validate_table_columns(conn)
+
+
+def _migrate_reason_constraint(conn: sqlite3.Connection) -> None:
+    """기존 행을 보존하면서 새 닫힌 사유만 CHECK 목록에 보탠다."""
+
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (_MIGRATION_TABLE,),
+    ).fetchone():
+        raise FinalGateDiagnosticStoreError("최종 게이트 진단 임시 표가 이미 있습니다")
+    stored_reasons = {
+        str(row[0])
+        for row in conn.execute(
+            f"SELECT DISTINCT reason_code FROM {TABLE_FINAL_GATE_DIAGNOSTICS}"
+        )
+    }
+    if not stored_reasons <= SAFE_FINAL_GATE_REASONS:
+        raise FinalGateDiagnosticStoreError("지원하지 않는 기존 최종 게이트 사유가 있습니다")
+
+    conn.execute(f"SAVEPOINT {_MIGRATION_SAVEPOINT}")
+    try:
+        conn.execute(
+            f"ALTER TABLE {TABLE_FINAL_GATE_DIAGNOSTICS} RENAME TO {_MIGRATION_TABLE}"
+        )
+        _create_table(conn)
+        conn.execute(
+            f"""
+            INSERT INTO {TABLE_FINAL_GATE_DIAGNOSTICS}
+                (run_id, schema_version, reason_code, recorded_at)
+            SELECT run_id, schema_version, reason_code, recorded_at
+              FROM {_MIGRATION_TABLE}
+            """
+        )
+        conn.execute(f"DROP TABLE {_MIGRATION_TABLE}")
+        conn.execute(f"RELEASE SAVEPOINT {_MIGRATION_SAVEPOINT}")
+    except (sqlite3.Error, FinalGateDiagnosticStoreError) as exc:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {_MIGRATION_SAVEPOINT}")
+        conn.execute(f"RELEASE SAVEPOINT {_MIGRATION_SAVEPOINT}")
+        raise FinalGateDiagnosticStoreError(
+            "최종 게이트 진단 사유 제약을 확장하지 못했습니다"
+        ) from exc
 
 
 def record_once(

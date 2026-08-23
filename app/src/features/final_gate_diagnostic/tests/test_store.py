@@ -93,3 +93,38 @@ def test_같은값은_멱등이고_다른사유는_덮어쓰지않는다() -> No
                 reason_code="publish_blocked",
                 recorded_at=RECORDED_AT,
             )
+
+
+def test_기존사유표를_보존하며_핵심역할결손_닫힌코드를_추가한다() -> None:
+    old_allowed = "'comparison_blocked', 'publish_blocked', 'other_gate'"
+    with sqlite3.connect(":memory:") as conn:
+        conn.execute(
+            f"""
+            CREATE TABLE {store.TABLE_FINAL_GATE_DIAGNOSTICS} (
+                run_id TEXT PRIMARY KEY,
+                schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+                reason_code TEXT NOT NULL CHECK (reason_code IN ({old_allowed})),
+                recorded_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            f"INSERT INTO {store.TABLE_FINAL_GATE_DIAGNOSTICS} VALUES (?, 1, ?, ?)",
+            ("old-run", "publish_blocked", RECORDED_AT),
+        )
+
+        assert store.record_once(
+            conn,
+            run_id=RUN_ID,
+            reason_code="publish_missing_revenue",
+            recorded_at=RECORDED_AT,
+        )
+        rows = conn.execute(
+            f"SELECT run_id, reason_code FROM {store.TABLE_FINAL_GATE_DIAGNOSTICS} "
+            "ORDER BY run_id"
+        ).fetchall()
+
+    assert rows == [
+        ("0123456789abcdef0123456789abcdef", "publish_missing_revenue"),
+        ("old-run", "publish_blocked"),
+    ]

@@ -1427,6 +1427,83 @@ def test_JYP처럼_전체역할은_부족해도_정체성_수익구조_삼개년
     assert not second.cache_hit
 
 
+@pytest.mark.parametrize(
+    ("missing_section", "expected_claim_type"),
+    (("identity", "identity_summary"), ("business_model", "revenue_model")),
+)
+def test_Writer가_최소핵심을_한번빠뜨리면_검증된_span만_한번보충한다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    missing_section: str,
+    expected_claim_type: str,
+) -> None:
+    original_ask = engine._ask
+    writer_calls = 0
+
+    def omit_minimum_once(client, prompt, schema, max_tokens=700):
+        nonlocal writer_calls
+        payload, usage = original_ask(client, prompt, schema, max_tokens=max_tokens)
+        if "공식 근거 기반 기업분석 보고서" in prompt and "■ 칸과 근거" in prompt:
+            writer_calls += 1
+            if writer_calls == 1:
+                payload = {
+                    **payload,
+                    "칸": [
+                        item
+                        for item in payload["칸"]
+                        if item["칸번호"] != missing_section
+                    ],
+                }
+        return payload, usage
+
+    monkeypatch.setattr(engine, "_ask", omit_minimum_once)
+
+    result = _run()
+
+    assert result.outcome is Outcome.REPORT
+    assert result.report is not None
+    assert writer_calls == 2
+    assert len(result.span_selection_diagnostics) == 1
+    assert any(
+        fact.claim_type == expected_claim_type for fact in result.report.fact_records
+    )
+    # 선택은 다시 하지 않고 Writer+독립 Reviewer만 한 묶음 추가된다.
+    assert engine.client.messages.calls == 5
+
+
+def test_Writer가_수익구조를_보충에도_빠뜨리면_닫힌사유로_멈춘다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_ask = engine._ask
+    writer_calls = 0
+
+    def always_omit_revenue(client, prompt, schema, max_tokens=700):
+        nonlocal writer_calls
+        payload, usage = original_ask(client, prompt, schema, max_tokens=max_tokens)
+        if "공식 근거 기반 기업분석 보고서" in prompt and "■ 칸과 근거" in prompt:
+            writer_calls += 1
+            payload = {
+                **payload,
+                "칸": [
+                    item
+                    for item in payload["칸"]
+                    if item["칸번호"] != "business_model"
+                ],
+            }
+        return payload, usage
+
+    monkeypatch.setattr(engine, "_ask", always_omit_revenue)
+
+    result = _run()
+
+    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.report is None
+    assert result.final_gate_reason == "publish_missing_revenue"
+    assert writer_calls == 2
+    assert len(result.span_selection_diagnostics) == 1
+
+
 def test_뒤_선택에서_최소사실_SID가_충돌하면_앞_부분집합을_되살리지_않는다(
     engine: FakeEngine,
     monkeypatch: pytest.MonkeyPatch,

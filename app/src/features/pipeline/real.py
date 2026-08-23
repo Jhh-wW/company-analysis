@@ -27,7 +27,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from src.core import paths
 from src.core.clock import today_kst
@@ -134,6 +134,8 @@ from src.features.report_standard.constants import (
     REQUIRED_SECTION_IDS,
 )
 from src.features.pipeline.canonical_report import (
+    MINIMUM_WRITTEN_ROLE_IDENTITY,
+    MINIMUM_WRITTEN_ROLE_REVENUE,
     PublishBlockedError,
     assemble_report_draft,
     basic_report_selection_is_complete,
@@ -142,6 +144,7 @@ from src.features.pipeline.canonical_report import (
     finalize_report,
     historical_performance_bases_are_complete,
     sections_from_picks as canonical_sections_from_picks,
+    supplement_missing_minimum_claims_once,
     write_and_verify_sections,
 )
 from src.features.spanselect.canonical import (
@@ -150,6 +153,9 @@ from src.features.spanselect.canonical import (
 )
 from src.shared.final_gate_diagnostics import (
     FINAL_GATE_REASON_COMPARISON_BLOCKED,
+    FINAL_GATE_REASON_MISSING_IDENTITY,
+    FINAL_GATE_REASON_MISSING_IDENTITY_REVENUE,
+    FINAL_GATE_REASON_MISSING_REVENUE,
     FINAL_GATE_REASON_OTHER_GATE,
     FINAL_GATE_REASON_PUBLISH_BLOCKED,
 )
@@ -164,6 +170,23 @@ from src.features.storage import cache as cache_store
 from src.features.storage import db as storage_db
 
 logger = logging.getLogger(__name__)
+
+
+def _publish_gate_reason_for_missing_minimum_roles(
+    missing_roles: Iterable[str],
+) -> str:
+    """원문 없이 저장 가능한 최소 역할 결손 코드 하나로 접는다."""
+
+    missing = frozenset(str(value or "").strip() for value in missing_roles)
+    identity = MINIMUM_WRITTEN_ROLE_IDENTITY in missing
+    revenue = MINIMUM_WRITTEN_ROLE_REVENUE in missing
+    if identity and revenue:
+        return FINAL_GATE_REASON_MISSING_IDENTITY_REVENUE
+    if identity:
+        return FINAL_GATE_REASON_MISSING_IDENTITY
+    if revenue:
+        return FINAL_GATE_REASON_MISSING_REVENUE
+    return FINAL_GATE_REASON_PUBLISH_BLOCKED
 
 
 def _missing_basic_selection_roles(picks: list[Any]) -> tuple[str, ...]:
@@ -1971,6 +1994,22 @@ class RealPipeline:
             steps=steps,
             model=model,
         )
+        # 선택·원문 검증을 이미 통과한 정체성/수익 span만 대상으로 Writer와
+        # 독립 Reviewer를 한 번 더 호출한다. 새 수집·재선택·미검수 원문 복사는
+        # 하지 않으며, 이 한 번에도 남은 결손은 닫힌 코드로 최종 기록한다.
+        sections, written_claims, missing_minimum_roles_after_verify = (
+            supplement_missing_minimum_claims_once(
+                engine=engine,
+                client=client,
+                company=company_name,
+                sections=sections,
+                fragments=generation_frags,
+                picks=kept,
+                written_claims=written_claims,
+                steps=steps,
+                model=model,
+            )
+        )
         provenance_fragments = {
             number: dict(fragment) for number, fragment in frags.items()
         }
@@ -2139,7 +2178,9 @@ class RealPipeline:
                 model=model,
                 span_selection_diagnostics=tuple(selection_diagnostics),
                 span_selection_result_reason=selection_result_reason_code,
-                final_gate_reason=FINAL_GATE_REASON_PUBLISH_BLOCKED,
+                final_gate_reason=_publish_gate_reason_for_missing_minimum_roles(
+                    missing_minimum_roles_after_verify
+                ),
             )
 
         # ── 13 출력 ──────────────────────────────────────

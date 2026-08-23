@@ -75,14 +75,22 @@
     <th scope="col" style="width:110px">결과</th><th scope="col">내용</th></tr></thead>
   <tbody>
   {% for s in result.sources %}
+  {% set news_policy_unused = s.name == '뉴스' and ('사용하지 않습니다' in s.detail or '정책상 미사용' in s.detail) %}
+  {% set ir_scope_truncated = s.name == '회사 공식 IR' and '탐색 상한 잘림' in s.detail %}
   <tr>
     <td>{{ s.name }}</td>
     <td class="center">
-      {% if s.state == 'ok' %}<span class="state-ok">⭕ 찾음</span>
+      {% if news_policy_unused %}<span class="muted">— 정책상 미사용</span>
+      {% elif ir_scope_truncated %}<span class="state-failed">△ 일부 탐색</span>
+      {% elif s.state == 'ok' %}<span class="state-ok">⭕ 찾음</span>
       {% elif s.state == 'none' %}<span class="state-none">❌ 없음</span>
       {% else %}<span class="state-failed">⚠️ 못 가져옴</span>{% endif %}
     </td>
-    <td>{{ s.detail }}</td>
+    <td>
+      {% if news_policy_unused %}공식 근거 보고서 정책에 따라 뉴스는 조사 대상에서 제외했습니다.
+      {% elif ir_scope_truncated %}IR 일부만 탐색함 · 보고서 중단의 직접 원인은 아님{% if s.detail %} ({{ s.detail }}){% endif %}
+      {% else %}{{ s.detail }}{% endif %}
+    </td>
   </tr>
   {% endfor %}
   </tbody>

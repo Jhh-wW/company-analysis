@@ -66,6 +66,34 @@ def test_근거부족은_정상보고서가_아니라_의미와_다음행동을_
     assert "어디까지 찾아봤나" in response.text
 
 
+def test_정책상_쓰지_않은_뉴스와_일부만_탐색한_IR을_자료없음으로_오해시키지_않는다() -> None:
+    job_id, job = _stopped_job()
+    assert job.result is not None
+    job.result = RunResult(
+        outcome=job.result.outcome,
+        message=job.result.message,
+        sources=[
+            SourceStatus(
+                "뉴스", "none", "공식 근거 보고서에서는 뉴스를 사용하지 않습니다"
+            ),
+            SourceStatus("회사 공식 IR", "failed", "탐색 상한 잘림"),
+        ],
+    )
+    job_runtime._JOBS[job_id] = job
+    try:
+        with TestClient(main.app) as client:
+            response = client.get(f"/result/{job_id}")
+    finally:
+        job_runtime._JOBS.pop(job_id, None)
+
+    assert response.status_code == 200
+    assert "정책상 미사용" in response.text
+    assert "공식 근거 보고서 정책에 따라 뉴스는 조사 대상에서 제외했습니다" in response.text
+    assert "IR 일부만 탐색함" in response.text
+    assert "보고서 중단의 직접 원인은 아님" in response.text
+    assert "❌ 없음" not in response.text
+
+
 def test_확인한_자료가_없으면_존재하지_않는_자료표_링크를_만들지_않는다() -> None:
     job_id, job = _stopped_job(sources=False)
     job_runtime._JOBS[job_id] = job

@@ -164,6 +164,27 @@ class WrittenClaim:
     relationship_type: str = ""
 
 
+MINIMUM_WRITTEN_ROLE_IDENTITY = "identity"
+MINIMUM_WRITTEN_ROLE_REVENUE = "revenue"
+_MINIMUM_WRITTEN_IDENTITY_TYPES = frozenset(
+    {"identity_summary", "official_self_definition", "operating_scope"}
+)
+
+
+def missing_minimum_written_roles(
+    claims: Iterable[WrittenClaim],
+) -> tuple[str, ...]:
+    """Writer·Reviewer 뒤 부분 보고서의 두 핵심 역할만 닫힌 값으로 센다."""
+
+    claim_types = {item.claim_type for item in claims}
+    missing: list[str] = []
+    if not (_MINIMUM_WRITTEN_IDENTITY_TYPES & claim_types):
+        missing.append(MINIMUM_WRITTEN_ROLE_IDENTITY)
+    if "revenue_model" not in claim_types:
+        missing.append(MINIMUM_WRITTEN_ROLE_REVENUE)
+    return tuple(missing)
+
+
 def _prune_unbound_optional_claims(
     claims: Iterable[WrittenClaim],
 ) -> list[WrittenClaim]:
@@ -976,6 +997,111 @@ def write_and_verify_sections(
     )
 
 
+def supplement_missing_minimum_claims_once(
+    *,
+    engine: Any,
+    client: Any,
+    company: str,
+    sections: list[ReportSection],
+    fragments: dict[int, dict[str, str]],
+    picks: Iterable[CanonicalPick],
+    written_claims: Iterable[WrittenClaim],
+    steps: list[dict[str, Any]],
+    model: str,
+) -> tuple[list[ReportSection], list[WrittenClaim], tuple[str, ...]]:
+    """이미 검증된 span에서 빠진 최소 역할만 Writer·Reviewer로 한 번 보충한다.
+
+    새 수집이나 span 재선택은 하지 않는다. 정체성·수익 구조별로 기존 검증 pick
+    한 건만 다시 쓰고 독립 검수를 그대로 통과한 문장만 기존 결과에 합친다.
+    """
+
+    original_claims = list(written_claims)
+    missing_before = missing_minimum_written_roles(original_claims)
+    if not missing_before:
+        return sections, original_claims, ()
+
+    pick_list = list(picks)
+    supplement_picks: list[CanonicalPick] = []
+    if MINIMUM_WRITTEN_ROLE_IDENTITY in missing_before:
+        for claim_type in (
+            "identity_summary",
+            "official_self_definition",
+            "operating_scope",
+        ):
+            candidate = next(
+                (item for item in pick_list if item.claim_type == claim_type),
+                None,
+            )
+            if candidate is not None:
+                supplement_picks.append(candidate)
+                break
+    if MINIMUM_WRITTEN_ROLE_REVENUE in missing_before:
+        candidate = next(
+            (item for item in pick_list if item.claim_type == "revenue_model"),
+            None,
+        )
+        if candidate is not None:
+            supplement_picks.append(candidate)
+
+    if not supplement_picks:
+        steps.append(
+            {
+                "step": "작가_핵심사실_1회보충",
+                "보충전누락": list(missing_before),
+                "공식후보": 0,
+                "보충후누락": list(missing_before),
+            }
+        )
+        return sections, original_claims, missing_before
+
+    supplement_sections = sections_from_picks(supplement_picks, fragments)
+    _written_sections, supplement_claims = write_and_verify_sections(
+        engine=engine,
+        client=client,
+        company=company,
+        sections=supplement_sections,
+        fragments=fragments,
+        picks=supplement_picks,
+        steps=steps,
+        model=model,
+    )
+
+    combined: list[WrittenClaim] = []
+    seen: set[tuple[str, str, str]] = set()
+    for claim in [*original_claims, *supplement_claims]:
+        key = (claim.section_id, claim.sid, claim.claim_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        combined.append(claim)
+    combined = _prune_unbound_optional_claims(combined)
+
+    raw_by_section: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    prose_by_section: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for claim in combined:
+        raw_by_section[claim.section_id].append((claim.evidence, claim.cite))
+        prose_by_section[claim.section_id].append((claim.text, claim.cite))
+    merged_sections = [
+        replace(
+            section,
+            lines=raw_by_section.get(section.cell, []),
+            prose_lines=prose_by_section.get(section.cell, []),
+        )
+        for section in sections
+    ]
+    missing_after = missing_minimum_written_roles(combined)
+    steps.append(
+        {
+            "step": "작가_핵심사실_1회보충",
+            "보충전누락": list(missing_before),
+            "공식후보": len(supplement_picks),
+            "검수통과": len(supplement_claims),
+            "보충후누락": list(missing_after),
+        }
+    )
+    return merged_sections, combined, missing_after
+
+
 def _source_date(source: Source) -> str:
     if source_type_is_official_ir(source.source_type):
         # 현재 IR PDF 수집 계약에는 신뢰 가능한 문서 발표일·기준일이 없다.
@@ -1647,5 +1773,7 @@ __all__ = [
     "finalize_report",
     "majority_picks",
     "sections_from_picks",
+    "supplement_missing_minimum_claims_once",
+    "missing_minimum_written_roles",
     "write_and_verify_sections",
 ]
