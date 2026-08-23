@@ -2155,7 +2155,9 @@ class RealPipeline:
                 final_gate_reason=FINAL_GATE_REASON_COMPARISON_BLOCKED,
             )
         except PublishBlockedError as exc:
-            logger.info("canonical 출고 차단: %s", list(exc.validation.reasons))
+            # 출고 차단은 사용자 화면에서는 닫힌 문구로만 보이지만, 운영자가 같은
+            # 유료 실행을 추측으로 반복하지 않도록 원문·비밀값 없는 검증 사유는 남긴다.
+            logger.warning("canonical 출고 차단: %s", list(exc.validation.reasons))
             steps.append(
                 {
                     "step": "13_정본_출고차단",
