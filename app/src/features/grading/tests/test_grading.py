@@ -131,6 +131,12 @@ def test_부분_완성_문구에_채운_개수가_들어간다():
     assert "3" in msg and str(len(COUNTED_CELLS)) in msg
 
 
+def test_새_보고서_안내는_레거시_6칸이_아닌_전달한_전체수를_쓴다():
+    msg = grade_message(Grade.PARTIAL, 7, total=9)
+    assert "9개 중 7개" in msg
+    assert "6개 중" not in msg
+
+
 def test_미완성_문구는_직접_확인하라고_안내한다():
     msg = grade_message(Grade.INCOMPLETE, 1)
     assert "면접" in msg or "홈페이지" in msg

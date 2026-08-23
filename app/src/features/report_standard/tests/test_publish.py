@@ -32,6 +32,9 @@ from src.features.provenance.sources import (
 from src.features.report_standard.constants import (
     CANONICAL_CLAIM_TYPES_BY_SECTION,
     CANONICAL_SECTION_IDS,
+    COMPARISON_SHORTFALL_REASON,
+    CULTURE_SHORTFALL_REASON,
+    CURRENT_CHALLENGES_SHORTFALL_REASON,
     REQUIRED_SECTION_IDS,
     SECTION_BY_ID,
     SECTION_SPECS,
@@ -59,6 +62,24 @@ from src.shared.comparison_candidate_basis import (
 
 def _valid_report() -> Report:
     return build_demo_report()
+
+
+def _without_sections(report: Report, *section_ids: str) -> Report:
+    """장과 그 장이 소유한 사실·요약을 함께 제거해 실제 미수집 상태를 만든다."""
+
+    missing = set(section_ids)
+    return replace(
+        report,
+        sections=[
+            section for section in report.sections if section.cell not in missing
+        ],
+        fact_records=[
+            fact for fact in report.fact_records if fact.section_owner not in missing
+        ],
+        summary_items=[
+            item for item in report.summary_items if item.section_id not in missing
+        ],
+    )
 
 
 def _comparison_bundle(
@@ -448,6 +469,102 @@ def test_every_basic_section_is_required(missing: str) -> None:
     assert any(missing in reason for reason in validation.reasons)
     with pytest.raises(PublishBlockedError):
         build_published_report(report)
+
+
+@pytest.mark.parametrize(
+    ("missing", "expected_reason"),
+    [
+        ("current_challenges", CURRENT_CHALLENGES_SHORTFALL_REASON),
+        ("culture", CULTURE_SHORTFALL_REASON),
+    ],
+)
+def test_missing_official_optional_section_publishes_partial_without_fabrication(
+    missing: str,
+    expected_reason: str,
+) -> None:
+    report = _without_sections(_valid_report(), missing)
+
+    validation = validate_publishable(report)
+    published = build_published_report(report)
+
+    assert validation.publishable is True
+    assert missing not in validation.included_section_ids
+    assert published.grade is Grade.PARTIAL
+    assert missing not in {section.cell for section in published.sections}
+    assert all(fact.section_owner != missing for fact in published.fact_records)
+    assert published.shortfall_reasons == [expected_reason]
+
+
+def test_each_missing_optional_section_gets_its_own_standard_shortfall_reason() -> None:
+    report = _without_sections(
+        _valid_report(),
+        "current_challenges",
+        "culture",
+        "competitive_position",
+    )
+
+    validation = validate_publishable(report)
+    published = build_published_report(report)
+
+    assert validation.publishable is True
+    assert published.grade is Grade.PARTIAL
+    assert published.shortfall_reasons == [
+        CURRENT_CHALLENGES_SHORTFALL_REASON,
+        CULTURE_SHORTFALL_REASON,
+        COMPARISON_SHORTFALL_REASON,
+    ]
+    assert not any(
+        "5장" in reason and "9장" in reason
+        for reason in published.shortfall_reasons
+    )
+    assert not any(
+        "8장" in reason and "9장" in reason
+        for reason in published.shortfall_reasons
+    )
+
+
+def test_partial_current_challenges_still_requires_a_bound_issue_and_response() -> None:
+    report = _valid_report()
+    issue = next(
+        fact
+        for fact in report.fact_records
+        if fact.section_owner == "current_challenges"
+        and fact.claim_type == "current_issue"
+    )
+    current = next(
+        section for section in report.sections if section.cell == "current_challenges"
+    )
+    issue_lines = [
+        line for line in current.prose_lines if line[0] == issue.claim
+    ]
+    report = replace(
+        report,
+        sections=[
+            replace(
+                section,
+                fact_ids=[issue.fact_id],
+                prose_lines=issue_lines,
+                lines=list(issue_lines),
+            )
+            if section.cell == "current_challenges"
+            else section
+            for section in report.sections
+        ],
+        fact_records=[
+            fact
+            for fact in report.fact_records
+            if fact.section_owner != "current_challenges"
+            or fact.fact_id == issue.fact_id
+        ],
+    )
+
+    validation = validate_publishable(report)
+
+    assert validation.publishable is False
+    assert any(
+        "미해결 문제와 실제 대응이 모두 필요" in reason
+        for reason in validation.reasons
+    )
 
 
 def test_summary_requires_fact_binding_exact_evidence_and_reuse_status() -> None:
@@ -1229,6 +1346,72 @@ def test_mou_only_relationship_is_not_a_current_operating_partner() -> None:
         value_chain_stage="distribution",
         relationship_type="joint_business",
         evidence_support_terms=["AlphaWorks", "MOU"],
+    )
+
+    validation = validate_publishable(report)
+
+    assert validation.publishable is False
+    assert any("현재 반복 운영 역할" in reason for reason in validation.reasons)
+
+
+def test_jyp_체결완료와_현재유통처확대가_결속된_공식원문은_독립출고검사도_통과한다() -> None:
+    evidence = (
+        "당사는 Sony Music, TME (Tencent Music Entertainment), Republic Records 등 "
+        "글로벌 유수의 음반/음원 유통 전문 회사들과 파트너십을 체결하여 당사가 "
+        "제작한 음악 컨텐츠에 대한 글로벌 유통처를 확대해 가고 있습니다."
+    )
+    operation_role = (
+        "당사가 제작한 음악 컨텐츠에 대한 글로벌 유통처를 확대해 가고 있습니다"
+    )
+    report = _replace_visible_fact_evidence(
+        _valid_report(),
+        "operations-core-01",
+        evidence=evidence,
+        claim=(
+            "회사는 Sony Music 등 유통 전문 회사들과 체결한 파트너십으로 "
+            "글로벌 유통처를 확대하고 있다."
+        ),
+        claim_type="partner_role",
+        subject_scope="Sony Music",
+        relationship_or_action=operation_role,
+        value_chain_stage="distribution",
+        relationship_type="distribution",
+        evidence_support_terms=["Sony Music", "파트너십", "글로벌 유통처"],
+    )
+
+    validation = validate_publishable(report)
+
+    assert validation.publishable is True, validation.reasons
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        (
+            "가나다전자는 AlphaWorks를 소개했다. 가나다전자는 BetaWorks와 유통 "
+            "파트너십을 체결하여 글로벌 유통처를 확대해 가고 있습니다."
+        ),
+        (
+            "가나다전자는 AlphaWorks, 신규 파트너 후보를 소개한 뒤 BetaWorks, "
+            "GammaWorks 등 글로벌 유통 전문 회사들과 파트너십을 체결하여 "
+            "글로벌 유통처를 확대해 가고 있습니다."
+        ),
+    ],
+)
+def test_다른법인_계약과_가까운_이름은_현재유통파트너로_오결속하지_않는다(
+    evidence: str,
+) -> None:
+    report = _replace_visible_fact_evidence(
+        _valid_report(),
+        "operations-core-01",
+        evidence=evidence,
+        claim="회사는 AlphaWorks와 체결한 파트너십으로 유통처를 확대하고 있다.",
+        claim_type="partner_role",
+        subject_scope="AlphaWorks",
+        relationship_or_action="글로벌 유통처를 확대해 가고 있습니다",
+        value_chain_stage="distribution",
+        relationship_type="distribution",
+        evidence_support_terms=["AlphaWorks", "유통처"],
     )
 
     validation = validate_publishable(report)

@@ -2,9 +2,10 @@
 
 회사 확인 뒤 공식 공시·홈페이지와 검증용 외부 자료를 수집하고, 최대 두 번의
 조건부 사실 선택, 작가·검토 분리, 원자 사실 장부, 출고 게이트를 거친다. 직무·
-채용공고·급여·복지 정보는 회사분석 생성 경로에 넣지 않는다. 1~8장 기본 계약을
-통과하지 못하면 ``GATE_STOPPED``로 끝내고, 9장만 근거가 부족하면 표준 사유를
-붙인 ``PARTIAL`` 기본 보고서를 출고한다.
+채용공고·급여·복지 정보는 회사분석 생성 경로에 넣지 않는다. 회사 정체성·사업·
+제품·3개년 변화·성장 전략·운영 구조의 핵심 계약을 통과하지 못하면
+``GATE_STOPPED``로 끝낸다. 당면 과제·문화·동종업계 비교처럼 공식 근거가 있을
+때만 성립하는 장은 표준 사유를 붙인 ``PARTIAL`` 기본 보고서에서 생략한다.
 
 실제 실행은 유료 API를 사용할 수 있다. ``PIPELINE=real``로만 켜며 필요한 키와
 의존성은 ``analysis_engine/.env`` 및 앱 운영 문서를 따른다. 캐시는
@@ -51,7 +52,6 @@ from src.core.constants import (
     REVENUE_CITE,
     SUBSTANCE_FAILED_REASON,
     TABLE_DUMP_REASON,
-    VOTE_MIN,
     VOTE_ROUNDS,
 )
 from src.core.pricing import detailed_usage_cost_krw
@@ -125,14 +125,17 @@ from src.features.pipeline.port import (
     StepReporter,
     UserInput,
 )
-from src.features.report_standard.constants import COMPARISON_SHORTFALL_REASON
+from src.features.report_standard.constants import (
+    COMPARISON_SHORTFALL_REASON,
+    OPTIONAL_BASIC_SECTION_IDS,
+)
 from src.features.pipeline.canonical_report import (
     PublishBlockedError,
     assemble_report_draft,
     basic_report_selection_subset,
+    combine_validated_picks,
     finalize_report,
     historical_performance_bases_are_complete,
-    majority_picks,
     sections_from_picks as canonical_sections_from_picks,
     write_and_verify_sections,
 )
@@ -156,6 +159,54 @@ from src.features.storage import cache as cache_store
 from src.features.storage import db as storage_db
 
 logger = logging.getLogger(__name__)
+
+
+def _missing_basic_selection_roles(picks: list[Any]) -> tuple[str, ...]:
+    """다음 선택 호출이 보완할 기본 보고서 역할만 닫힌 이름으로 돌려준다.
+
+    원문이나 모델 출력 문구는 되먹이지 않는다. 이미 로컬 검증을 통과한
+    ``claim_type``과 참조 관계만 보고 빠진 역할을 계산해, 두 번째 호출이 첫
+    호출과 똑같은 전체 작업을 반복하지 않게 한다.
+    """
+
+    by_type: dict[str, list[Any]] = {}
+    by_sid = {
+        str(getattr(item, "sid", "") or ""): item
+        for item in picks
+        if str(getattr(item, "sid", "") or "")
+    }
+    for item in picks:
+        by_type.setdefault(str(getattr(item, "claim_type", "") or ""), []).append(
+            item
+        )
+
+    missing: list[str] = []
+    for claim_type in (
+        "identity_summary",
+        "revenue_model",
+        "customer_market",
+        "completed_execution",
+        "change_interpretation",
+        "future_plan",
+    ):
+        if not by_type.get(claim_type):
+            missing.append(claim_type)
+
+    products = by_type.get("priority_product", [])
+    if not any(
+        getattr(
+            by_sid.get(str(getattr(item, "revenue_model_sid", "") or "")),
+            "claim_type",
+            "",
+        )
+        == "revenue_model"
+        for item in products
+    ):
+        missing.append("priority_product")
+
+    if not (by_type.get("operating_core") or by_type.get("partner_role")):
+        missing.extend(("operating_core", "partner_role"))
+    return tuple(dict.fromkeys(missing))
 
 # ``_company_catalog``의 공개 모양(고유번호, 이름)은 기존 식별 엔진과 시험이 함께
 # 쓴다. stock_code·modify_date는 그 계약을 깨지 않고 고유번호별 보조 메타데이터로
@@ -1700,8 +1751,12 @@ class RealPipeline:
             )
         }
         selection_diagnostics: list[SpanSelectionRoundDiagnostic] = []
+        validated_selection_rounds: list[list[Any]] = []
         kept = []
         sentences_made = 0
+        focus_missing_claim_roles: tuple[str, ...] = ()
+        focus_rejection_codes: tuple[str, ...] = ()
+        focus_verified_sids: tuple[str, ...] = ()
         # 프로그램이 DART 원수치로 만든 완료 FY 행에는 내부 fact_id 대신
         # 일회성 선택 참조를 붙인다. 모델은 이 참조만 basis_sids로 고르고,
         # 조립기가 검증된 표 FactRecord의 실제 ID로 치환한다.
@@ -1779,7 +1834,11 @@ class RealPipeline:
             )
         for round_index in range(VOTE_ROUNDS):
             round_step_start = len(steps)
-            with _meter_stage(engine, "span_selection", prompt_cache=True):
+            # 1회차는 뒤에 같은 프롬프트를 다시 쓸 보장이 없고, 2회차는 첫 회의
+            # 누락 역할·거절 코드·검증 SID가 들어가 정확한 user text가 달라진다.
+            # 전체 user text 한 블록에 cache_control을 붙이면 두 호출 모두 cache
+            # write만 생기므로 이 단계는 일반 입력 요금으로 호출한다.
+            with _meter_stage(engine, "span_selection"):
                 picked, rejected = select_canonical_spans(
                     client,
                     generation_frags,
@@ -1787,6 +1846,9 @@ class RealPipeline:
                     engine=engine, model=GENERATION_MODEL,
                     company=company_identity,
                     historical_performance_bases=performance_bases,
+                    focus_missing_claim_roles=focus_missing_claim_roles,
+                    focus_rejection_codes=focus_rejection_codes,
+                    focus_verified_sids=focus_verified_sids,
                 )
             sentences_made += len(picked) + len(rejected)
             diagnostic = round_diagnostic_from_steps(
@@ -1794,14 +1856,15 @@ class RealPipeline:
                 round_number=round_index + 1,
             )
             selection_diagnostics.append(diagnostic)
-            round_kept = majority_picks([picked], minimum=VOTE_MIN)
+            if not diagnostic.output_limit_reached and not diagnostic.parse_failed:
+                validated_selection_rounds.append(picked)
+            cumulative_kept = combine_validated_picks(validated_selection_rounds)
             round_subset = (
                 basic_report_selection_subset(
-                    round_kept,
+                    cumulative_kept,
                     historical_performance_bases=performance_bases,
                 )
-                if not diagnostic.output_limit_reached
-                and not diagnostic.parse_failed
+                if validated_selection_rounds
                 else []
             )
             if round_subset:
@@ -1815,6 +1878,25 @@ class RealPipeline:
                     }
                 )
                 break
+            # 첫 호출의 검증 통과 사실은 보존하고, 다음 호출에는 원문·자유형
+            # 실패 문구 대신 닫힌 누락 역할과 거절 코드만 전달한다. 두 번째
+            # 결과도 동일한 원문·구조·회사특이성 검사를 다시 통과해야 누적된다.
+            focus_missing_claim_roles = _missing_basic_selection_roles(
+                cumulative_kept
+            )
+            focus_rejection_codes = tuple(
+                reason
+                for reason, _count in diagnostic.validation_rejection_reason_counts
+            )
+            focus_verified_sids = tuple(
+                sorted(
+                    {
+                        str(getattr(item, "sid", "") or "")
+                        for item in cumulative_kept
+                        if str(getattr(item, "sid", "") or "")
+                    }
+                )
+            )
         selection_result_reason_code = selection_result_reason(
             selection_diagnostics,
             selection_kept=len(kept),
@@ -1823,9 +1905,10 @@ class RealPipeline:
             return RunResult(
                 outcome=Outcome.GATE_STOPPED,
                 message=(
-                    "이번에 수집한 공식 자료에서 1~8장 기본 보고서에 필요한 "
-                    "회사 사실과 연결관계를 모두 확보하지 못했습니다. 확인되지 "
-                    "않은 내용을 보고서처럼 보여주지 않고 여기서 멈췄습니다."
+                    "이번에 수집한 공식 자료에서 핵심 기본 보고서(기업 정체성·"
+                    "사업·제품·3개년 변화·성장 전략·운영 구조)에 필요한 회사 "
+                    "사실과 연결관계를 모두 확보하지 못했습니다. 확인되지 않은 "
+                    "내용을 보고서처럼 보여주지 않고 여기서 멈췄습니다."
                 ),
                 sources=sources,
                 corp_type=judgment.corp_type,
@@ -2044,10 +2127,20 @@ class RealPipeline:
             steps,
             filing=filing,
         )
-        if _has_failed_source(sources) or candidate_collection_incomplete:
+        included_section_ids = {section.cell for section in report.sections}
+        optional_basic_sections_missing = (
+            OPTIONAL_BASIC_SECTION_IDS - included_section_ids
+        )
+        if (
+            _has_failed_source(sources)
+            or candidate_collection_incomplete
+            or optional_basic_sections_missing
+        ):
             logger.info(
-                "수집 실패·후보범위 불완전이 껴 1층 캐시에 저장하지 않습니다 — corp_id=%s",
+                "수집 실패·후보범위 불완전·조건부 기본 장 누락이 껴 1층 캐시에 "
+                "저장하지 않습니다 — corp_id=%s · 누락=%s",
                 corp_code,
+                sorted(optional_basic_sections_missing),
             )
         else:
             _company_cache_save(
@@ -2060,7 +2153,7 @@ class RealPipeline:
             outcome=Outcome.REPORT,
             report=report,
             message=(
-                COMPARISON_SHORTFALL_REASON
+                " ".join(report.shortfall_reasons)
                 if report.grade is Grade.PARTIAL
                 else ""
             ),

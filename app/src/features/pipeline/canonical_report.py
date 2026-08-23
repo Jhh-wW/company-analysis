@@ -259,6 +259,60 @@ def majority_picks(rounds: Iterable[Iterable[CanonicalPick]], *, minimum: int = 
     )
 
 
+def combine_validated_picks(
+    rounds: Iterable[Iterable[CanonicalPick]],
+) -> list[CanonicalPick]:
+    """각 회차에서 이미 검증된 사실을 충돌 없이 누적한다.
+
+    재선택 회차는 서로 다른 필수 역할을 보완할 수 있으므로 한 회차에 한 번만
+    나온 사실도 보존한다. 다만 같은 SID가 서로 다른 원문을 가리키거나 같은
+    원문 조각의 소유 장·SID·사실 유형이 갈리면 어느 쪽도 추측하지 않고 버린다.
+    마지막 결합은 ``majority_picks(minimum=1)``에 맡겨 구조 필드 합의와
+    제품→수익 구조, 대응→문제, 변화 해석→완료 실행 연결 검사도 그대로 거친다.
+    """
+
+    materialized = [tuple(round_items) for round_items in rounds]
+    sid_bindings: dict[str, set[tuple[str, str, int, str]]] = defaultdict(set)
+    evidence_owners: dict[
+        tuple[str, int], set[tuple[str, str, str]]
+    ] = defaultdict(set)
+    for round_items in materialized:
+        for item in round_items:
+            if not item.sid:
+                continue
+            sid_bindings[item.sid].add(
+                (
+                    item.section_id,
+                    item.sentence,
+                    item.fragment_id,
+                    item.claim_type,
+                )
+            )
+            evidence_owners[(item.sentence, item.fragment_id)].add(
+                (item.section_id, item.sid, item.claim_type)
+            )
+
+    conflicting_sids = {
+        sid for sid, bindings in sid_bindings.items() if len(bindings) != 1
+    }
+    conflicting_evidence = {
+        evidence
+        for evidence, owners in evidence_owners.items()
+        if len(owners) != 1
+    }
+    safe_rounds = [
+        [
+            item
+            for item in round_items
+            if item.sid
+            and item.sid not in conflicting_sids
+            and (item.sentence, item.fragment_id) not in conflicting_evidence
+        ]
+        for round_items in materialized
+    ]
+    return majority_picks(safe_rounds, minimum=1)
+
+
 def historical_performance_bases_are_complete(
     historical_performance_bases: Iterable[str],
 ) -> bool:
@@ -291,7 +345,9 @@ def basic_report_selection_subset(
     전체 후보에 필수 사실이 있다는 것만 확인하면 Writer가 장별 앞 N개를 남길 때
     뒤쪽의 필수 사실이나 연결 대상이 잘릴 수 있다. 그래서 먼저 제품→수익 구조,
     대응→문제, 변화 해석→완료 실행을 함께 고른 뒤, 장별 공개 상한 안에서만 보완
-    사실을 채운다. 어느 기본 장도 안전하게 만들 수 없으면 빈 목록을 반환한다.
+    사실을 채운다. 5장 현재 과제와 8장 문화는 공식 근거가 없을 수 있으므로
+    완결된 허용 사실이 있을 때만 싣는다. 나머지 핵심 장을 안전하게 만들 수
+    없으면 빈 목록을 반환한다.
     """
 
     items = list(picks)
@@ -461,15 +517,12 @@ def basic_report_selection_subset(
         selected_issue_sids.add(response.response_to_sid)
         if len(current_selected) >= _PROSE_LIMITS["current_challenges"]:
             break
-    if not current_selected:
-        return []
     chosen.update(current_selected)
 
-    # 6~8장은 허용된 사실을 원문 순서대로 공개 상한까지만 둔다.
+    # 6~7장은 허용된 사실을 원문 순서대로 공개 상한까지만 둔다.
     for section_id, allowed_types in (
         ("future_strategy", {"future_plan"}),
         ("operations_partners", {"operating_core", "partner_role"}),
-        ("culture", {"official_value", "work_example"}),
     ):
         selected = [
             index
@@ -479,6 +532,14 @@ def basic_report_selection_subset(
         if not selected:
             return []
         chosen.update(selected)
+
+    # 8장: 공식 채용·문화 근거가 있을 때만 허용 유형을 싣고, 없으면 생략한다.
+    culture_selected = [
+        index
+        for index, item in by_section.get("culture", [])
+        if item.claim_type in {"official_value", "work_example"}
+    ][:_PROSE_LIMITS["culture"]]
+    chosen.update(culture_selected)
 
     return [item for index, item in enumerate(items) if index in chosen]
 
@@ -1425,6 +1486,7 @@ __all__ = [
     "WrittenClaim",
     "assemble_report",
     "assemble_report_draft",
+    "combine_validated_picks",
     "finalize_report",
     "majority_picks",
     "sections_from_picks",

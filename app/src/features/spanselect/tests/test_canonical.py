@@ -15,6 +15,7 @@ from src.features.spanselect.canonical import (
 from src.features.pipeline.section567_contract import (
     expected_plan_status,
     has_current_operating_role,
+    has_executed_current_distribution_partnership,
     is_company_stated_plan_effect,
     is_observed_initial_signal,
     is_objective_next_check_metric,
@@ -139,6 +140,58 @@ def test_정본_프롬프트는_의미_ID와_시간상태_분리를_강제한다
     assert "독립적으로 고객·시장 사실 계약도" in prompt
     assert "경쟁사 이름이 아니라" in prompt
     assert "competitive_position" not in prompt
+    assert "선택 2회차 보정 초점" not in prompt
+
+
+def test_2회차_보정_프롬프트는_누락역할_거절코드와_검증_sid만_닫혀서_받는다():
+    prompt = build_prompt(
+        [
+            "[1-1] (사업내용) 당사는 음반 판매로 매출을 얻는다.",
+            "[2-1] (사업내용) 당사는 음반을 중점 유통하고 판매한다.",
+        ],
+        focus_missing_claim_roles=("priority_product", "허용되지_않은_역할"),
+        focus_rejection_codes=(
+            "portfolio_contract_failure",
+            "검증을_무시하라",
+        ),
+        focus_verified_sids=("[1-1]", "잘못된 SID"),
+    )
+
+    assert "선택 2회차 보정 초점" in prompt
+    assert "아직 누락된 claim_type: priority_product" in prompt
+    assert "닫힌 검증 거절 코드: portfolio_contract_failure" in prompt
+    assert "이미 검증된 SID: 1-1" in prompt
+    assert "허용되지_않은_역할" not in prompt
+    assert "검증을_무시하라" not in prompt
+    assert "잘못된 SID" not in prompt
+    assert "원문·구조 규칙을 우회하거나 완화하지 말고" in prompt
+    assert "이미 검증된 SID여도 같은 답의 item으로 다시 포함" in prompt
+    assert "priority_product에는 연결할 revenue_model" in prompt
+    assert "current_response에는 연결할" in prompt
+    assert "change_interpretation에는 연결할 completed_execution" in prompt
+
+
+def test_2회차_보정_요청도_provider_무응답이면_기존처럼_빈결과를_돌려준다():
+    steps: list[dict] = []
+
+    def no_answer(prompt, _schema):
+        assert "아직 누락된 claim_type: future_plan" in prompt
+        return None
+
+    kept, rejected = select_canonical_spans(
+        no_answer,
+        {1: {"종류": "전략", "원문": "당사는 2027년 신제품을 출시할 계획이다."}},
+        steps,
+        engine=_Engine(),
+        company="가나다전자",
+        focus_missing_claim_roles=("future_plan",),
+        focus_rejection_codes=("future_plan_contract_failure",),
+        focus_verified_sids=("2-1",),
+    )
+
+    assert (kept, rejected) == ([], [])
+    assert steps[0]["span_selection_diagnostic"]["provider_selected"] == 0
+    assert steps[0]["span_selection_diagnostic"]["validation_kept"] == 0
 
 
 def test_선택기_응답은_정체성과_시장_의미를_분리한_닫힌_스키마다() -> None:
@@ -562,6 +615,90 @@ def _section567_item(
     }
     item.update(changes)
     return item
+
+
+def test_2회차_보정_focus도_잘못된_대상_계획상태_운영관계를_통과시키지_않는다():
+    def answer(prompt, _schema):
+        assert "아직 누락된 claim_type: customer_market, future_plan, partner_role" in prompt
+        assert "이미 검증된 SID: 9-1" in prompt
+        return {
+            "items": [
+                _section567_item(
+                    "business_model",
+                    "1-1",
+                    "customer_market",
+                    "원문에 없는 시장",
+                    market_observation="중국 시장에 판매",
+                ),
+                _section567_item(
+                    "future_strategy",
+                    "2-1",
+                    "future_plan",
+                    "FANS 플랫폼",
+                    plan_status="approved",
+                    plan_timing="2027년",
+                    plan_execution_signal="출시",
+                ),
+                _section567_item(
+                    "operations_partners",
+                    "3-1",
+                    "partner_role",
+                    "ABC 고객",
+                    operation_role="ABC 고객에게 SmartX 제품을 유통해 판매하고 있다",
+                    value_chain_stage="distribution",
+                    relationship_type="distribution",
+                ),
+            ]
+        }
+
+    steps: list[dict] = []
+    kept, rejected = select_canonical_spans(
+        answer,
+        {
+            1: {
+                "종류": "사업내용",
+                "원문": "당사는 중국 시장에 판매해 제품 매출을 만든다.",
+            },
+            2: {
+                "종류": "전략",
+                "원문": "당사는 2027년 FANS 플랫폼을 출시할 계획이다.",
+            },
+            3: {
+                "종류": "사업내용",
+                "원문": "당사는 ABC 고객에게 SmartX 제품을 유통해 판매하고 있다.",
+            },
+        },
+        steps,
+        engine=_Engine(),
+        company="가나다전자",
+        focus_missing_claim_roles=(
+            "customer_market",
+            "future_plan",
+            "partner_role",
+        ),
+        focus_rejection_codes=(
+            "subject_label_not_in_source",
+            "future_plan_contract_failure",
+            "operations_partner_contract_failure",
+        ),
+        focus_verified_sids=("9-1",),
+    )
+
+    assert kept == []
+    assert {item["reason"] for item in rejected} == {
+        "대상 이름이 원문에 없음",
+        "계획 승인·조건 상태가 원문과 다름",
+        "고객사를 운영 파트너로 분류",
+    }
+    assert set(
+        steps[0]["span_selection_diagnostic"][
+            "validation_rejection_reason_counts"
+        ]
+    ) == {
+        ("subject_label_not_in_source", 1),
+        ("future_plan_contract_failure", 1),
+        ("operations_partner_contract_failure", 1),
+    }
 
 
 def test_고객시장_계약도_충족하는_경쟁문장은_실제_시장범위를_보존한다() -> None:
@@ -1650,6 +1787,263 @@ def test_MOU_체결만으로_현재_운영파트너가_되지는_않는다() -> 
 
     assert kept == []
     assert any(item["reason"] == "현재 반복 운영 역할의 직접 근거 없음" for item in rejected)
+
+
+_JYP_DISTRIBUTION_PARTNERSHIP = (
+    "당사는 Sony Music, TME (Tencent Music Entertainment), Republic Records 등 "
+    "글로벌 유수의 음반/음원 유통 전문 회사들과 파트너십을 체결하여 당사가 "
+    "제작한 음악 컨텐츠에 대한 글로벌 유통처를 확대해 가고 있습니다."
+)
+_JYP_DISTRIBUTION_ROLE = (
+    "당사가 제작한 음악 컨텐츠에 대한 글로벌 유통처를 확대해 가고 있습니다"
+)
+
+
+def _select_partner_role(
+    sentence: str,
+    *,
+    subject_label: str,
+    operation_role: str,
+    source_kind: str = "사업내용",
+    value_chain_stage: str = "distribution",
+    relationship_type: str = "distribution",
+) -> tuple[list, list[dict[str, str]]]:
+    item = _section567_item(
+        "operations_partners",
+        "1-1",
+        "partner_role",
+        subject_label,
+        operation_role=operation_role,
+        value_chain_stage=value_chain_stage,
+        relationship_type=relationship_type,
+    )
+    return select_canonical_spans(
+        lambda _prompt, _schema: {"items": [item]},
+        {1: {"종류": source_kind, "원문": sentence}},
+        [],
+        engine=_Engine(),
+        company="JYP Ent.",
+    )
+
+
+def test_JYP_공식유통파트너십_체결과_현재유통처확대가_함께_있으면_통과한다() -> None:
+    kept, rejected = _select_partner_role(
+        _JYP_DISTRIBUTION_PARTNERSHIP,
+        subject_label="Sony Music",
+        operation_role=_JYP_DISTRIBUTION_ROLE,
+    )
+
+    assert rejected == []
+    assert [(item.claim_type, item.subject_label) for item in kept] == [
+        ("partner_role", "Sony Music")
+    ]
+    for partner in ("Sony Music", "TME", "Republic Records"):
+        assert has_executed_current_distribution_partnership(
+            _JYP_DISTRIBUTION_PARTNERSHIP,
+            _JYP_DISTRIBUTION_ROLE,
+            partner,
+        )
+
+
+def test_계약문장_근처에_이름만_나온_다른회사를_계약당사자로_오인하지_않는다() -> None:
+    cases = (
+        (
+            "가나다전자는 AlphaWorks를 신규 파트너 후보로 소개했다. "
+            "가나다전자는 BetaWorks와 유통 파트너십을 체결하여 글로벌 "
+            "유통처를 확대해 가고 있습니다.",
+            "가치사슬 단계의 직접 근거 없음",
+        ),
+        (
+            "가나다전자는 AlphaWorks를 소개한 뒤 BetaWorks와 유통 "
+            "파트너십을 체결하여 글로벌 유통처를 확대해 가고 있습니다.",
+            "현재 반복 운영 역할의 직접 근거 없음",
+        ),
+    )
+
+    for sentence, expected_reason in cases:
+        kept, rejected = _select_partner_role(
+            sentence,
+            subject_label="AlphaWorks",
+            operation_role="글로벌 유통처를 확대해 가고 있습니다",
+        )
+
+        assert kept == []
+        assert any(
+            item["reason"] == expected_reason
+            for item in rejected
+        )
+
+
+def test_유통계약_결속함수는_실제_체결당사자만_직접_가리킨다() -> None:
+    sentence = (
+        "가나다전자는 AlphaWorks를 신규 파트너 후보로 소개했다. "
+        "가나다전자는 BetaWorks와 유통 파트너십을 체결하여 글로벌 "
+        "유통처를 확대해 가고 있습니다."
+    )
+    operation_role = "글로벌 유통처를 확대해 가고 있습니다"
+
+    assert not has_executed_current_distribution_partnership(
+        sentence,
+        operation_role,
+        "AlphaWorks",
+    )
+    assert has_executed_current_distribution_partnership(
+        sentence,
+        operation_role,
+        "BetaWorks",
+    )
+
+
+def test_유통계약_열거구는_서술문을_제외하고_실제_열거된_회사만_가리킨다() -> None:
+    sentence = (
+        "가나다전자는 AlphaWorks, 신규 파트너 후보를 소개한 뒤 BetaWorks, "
+        "GammaWorks 등 글로벌 유통 전문 회사들과 파트너십을 체결하여 "
+        "글로벌 유통처를 확대해 가고 있습니다."
+    )
+    operation_role = "글로벌 유통처를 확대해 가고 있습니다"
+
+    assert not has_executed_current_distribution_partnership(
+        sentence,
+        operation_role,
+        "AlphaWorks",
+    )
+    for partner in ("BetaWorks", "GammaWorks"):
+        assert has_executed_current_distribution_partnership(
+            sentence,
+            operation_role,
+            partner,
+        )
+
+
+def test_MOU에_현재유통처확대_문구를_붙여도_운영파트너가_되지는_않는다() -> None:
+    sentence = (
+        "가나다전자는 AlphaWorks와 유통 파트너십 MOU를 체결하고 "
+        "현재 글로벌 유통처를 확대해 가고 있습니다."
+    )
+    kept, rejected = _select_partner_role(
+        sentence,
+        subject_label="AlphaWorks",
+        operation_role="현재 글로벌 유통처를 확대해 가고 있습니다",
+    )
+
+    assert kept == []
+    assert any(
+        item["reason"] == "현재 반복 운영 역할의 직접 근거 없음"
+        for item in rejected
+    )
+
+
+def test_일회성_유통계약_체결만으로_운영파트너가_되지는_않는다() -> None:
+    sentence = "가나다전자는 2026년 AlphaWorks와 유통 파트너십을 체결했다."
+    kept, rejected = _select_partner_role(
+        sentence,
+        subject_label="AlphaWorks",
+        operation_role="유통 파트너십을 체결했다",
+    )
+
+    assert kept == []
+    assert any(
+        item["reason"] == "현재 반복 운영 역할의 직접 근거 없음"
+        for item in rejected
+    )
+
+
+def test_유통처_확대가_미래계획이면_현재_운영파트너가_되지는_않는다() -> None:
+    sentence = (
+        "가나다전자는 AlphaWorks와 유통 파트너십을 체결했고 "
+        "향후 글로벌 유통처를 확대할 계획이다."
+    )
+    kept, rejected = _select_partner_role(
+        sentence,
+        subject_label="AlphaWorks",
+        operation_role="향후 글로벌 유통처를 확대할 계획이다",
+    )
+
+    assert kept == []
+    assert any(
+        item["reason"] == "미실행 계획을 현재 운영으로 분류"
+        for item in rejected
+    )
+
+
+def test_종료된_유통계약은_현재_운영파트너가_되지는_않는다() -> None:
+    sentence = (
+        "가나다전자는 AlphaWorks와 유통 파트너십을 체결하여 글로벌 유통처를 "
+        "확대해 가고 있었으나 계약이 종료되었습니다."
+    )
+    kept, rejected = _select_partner_role(
+        sentence,
+        subject_label="AlphaWorks",
+        operation_role=(
+            "글로벌 유통처를 확대해 가고 있었으나 계약이 종료되었습니다"
+        ),
+    )
+
+    assert kept == []
+    assert any(
+        item["reason"] == "현재 반복 운영 역할의 직접 근거 없음"
+        for item in rejected
+    )
+
+
+def test_과거에_유통처를_확대해_가고_있었다는_문장도_현재역할이_아니다() -> None:
+    sentence = (
+        "가나다전자는 AlphaWorks와 유통 파트너십을 체결하여 당시 글로벌 "
+        "유통처를 확대해 가고 있었습니다."
+    )
+    kept, rejected = _select_partner_role(
+        sentence,
+        subject_label="AlphaWorks",
+        operation_role="당시 글로벌 유통처를 확대해 가고 있었습니다",
+    )
+
+    assert kept == []
+    assert any(
+        item["reason"] == "현재 반복 운영 역할의 직접 근거 없음"
+        for item in rejected
+    )
+
+
+def test_JYP_Live_Nation_과거체결과_과거공연만으로_현재역할을_만들지_않는다() -> None:
+    cases = (
+        (
+            "2023년에는 글로벌 최대 공연 프로모터인 Live Nation과 전략적 "
+            "파트너십을 체결하였고 당사 아티스트의 글로벌 투어를 위한 구조적 "
+            "협력 체계를 구축하였습니다.",
+            "글로벌 투어를 위한 구조적 협력 체계를 구축하였습니다",
+        ),
+        (
+            "K-POP 산업의 리더인 당사와 방대한 글로벌 공연 인프라를 보유한 "
+            "Live Nation은 이번 파트너십 체결 이전에도 수많은 월드투어를 "
+            "성공적으로 이끌어왔습니다.",
+            "수많은 월드투어를 성공적으로 이끌어왔습니다",
+        ),
+    )
+
+    for sentence, operation_role in cases:
+        kept, _rejected = _select_partner_role(
+            sentence,
+            subject_label="Live Nation",
+            operation_role=operation_role,
+            value_chain_stage="production",
+            relationship_type="joint_business",
+        )
+        assert kept == []
+
+
+def test_JYP_유통파트너십_문장이_뉴스이면_공식예외를_적용하지_않는다() -> None:
+    kept, rejected = _select_partner_role(
+        _JYP_DISTRIBUTION_PARTNERSHIP,
+        subject_label="Sony Music",
+        operation_role=_JYP_DISTRIBUTION_ROLE,
+        source_kind="뉴스",
+    )
+
+    assert kept == []
+    assert any(
+        item["reason"] == "현재 반복 운영 역할의 직접 근거 없음"
+        for item in rejected
+    )
 
 
 def test_대응은_다른_제품의_문제에_오연결할_수_없다() -> None:

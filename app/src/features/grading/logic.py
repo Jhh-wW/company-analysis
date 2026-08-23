@@ -150,12 +150,12 @@ def grade_of(cells: dict[str, bool]) -> tuple[Grade, list[str]]:
     return Grade.INCOMPLETE, reasons
 
 
-def grade_message(grade: Grade, filled: int) -> str:
+def grade_message(grade: Grade, filled: int, *, total: int | None = None) -> str:
     """등급에 맞는 안내 문구.
 
     사용자에게 보여줄 말이라 내부 표기(O0 등)를 쓰지 않는다.
     """
-    total = len(COUNTED_CELLS)
+    total = len(COUNTED_CELLS) if total is None else max(0, int(total))
     if grade is Grade.COMPLETE:
         return ""
     if grade is Grade.PARTIAL:

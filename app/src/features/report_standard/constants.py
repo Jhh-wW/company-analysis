@@ -40,12 +40,16 @@ SECTION_BY_ID: Final[dict[str, SectionSpec]] = {
 }
 CANONICAL_SECTION_IDS: Final[tuple[str, ...]] = tuple(SECTION_BY_ID)
 
-# 1~8장은 회사 자체를 설명하는 기본 보고서의 필수 장이다. 9장은 양사의 공식
-# 자료를 같은 조건으로 맞출 수 있을 때만 붙이는 조건부 장이다. 비교 근거가 없다고
-# 검증된 1~8장을 함께 폐기하면 사용자는 이미 발생한 조사비를 내고 아무 결과도
-# 받지 못한다. 반대로 빈 9장을 일반론으로 채우면 경쟁우위를 지어내게 된다.
+# 1·2·3·4·6·7장은 회사 자체를 설명하는 기본 보고서의 필수 장이다. 5장은 회사가
+# 미해결 문제와 실제 대응을 공식 자료에 함께 밝힌 경우, 8장은 공식 채용·문화
+# 자료가 있는 경우에만 붙인다. 9장도 양사의 공식 자료를 같은 조건으로 맞출 수
+# 있을 때만 붙인다. 조건부 장의 근거가 없다고 검증된 핵심 장을 함께 폐기하거나,
+# 반대로 빈 장을 일반론으로 채우면 각각 사용자 효용과 사실성을 해친다.
+OPTIONAL_BASIC_SECTION_IDS: Final[frozenset[str]] = frozenset(
+    {"current_challenges", "culture"}
+)
 CONDITIONAL_SECTION_IDS: Final[frozenset[str]] = frozenset(
-    {"competitive_position"}
+    {*OPTIONAL_BASIC_SECTION_IDS, "competitive_position"}
 )
 REQUIRED_SECTION_IDS: Final[frozenset[str]] = frozenset(
     section_id
@@ -57,6 +61,26 @@ COMPARISON_SHORTFALL_REASON: Final[str] = (
     "양사 공식자료를 같은 지표·기간·범위로 맞추지 못해 9장 동종업계 비교는 "
     "제공하지 않았습니다. 경쟁우위가 없다는 뜻은 아닙니다."
 )
+
+CURRENT_CHALLENGES_SHORTFALL_REASON: Final[str] = (
+    "공식 자료에서 기준일 현재 미해결 문제와 회사가 이미 시작한 대응을 함께 "
+    "확인하지 못해 5장 당면 과제와 대응은 제공하지 않았습니다. 문제가 없다는 "
+    "뜻은 아닙니다."
+)
+
+CULTURE_SHORTFALL_REASON: Final[str] = (
+    "공식 채용·문화 자료에서 전사 가치 또는 확인 가능한 업무 사례를 확보하지 "
+    "못해 8장 인재상과 일하는 방식은 제공하지 않았습니다. 조직문화가 없다는 "
+    "뜻은 아닙니다."
+)
+
+# 조건부 장은 서로 다른 결손 사유다. 한 문장으로 합치면 5·8·9장 중 무엇이
+# 부족했는지 사용자와 운영자가 구분할 수 없으므로 장별 표준 문구를 따로 둔다.
+CONDITIONAL_SECTION_SHORTFALL_REASONS: Final[dict[str, str]] = {
+    "current_challenges": CURRENT_CHALLENGES_SHORTFALL_REASON,
+    "culture": CULTURE_SHORTFALL_REASON,
+    "competitive_position": COMPARISON_SHORTFALL_REASON,
+}
 
 # 요약은 새 문장을 검수한 결과가 아니라 이미 검증된 FactRecord.claim을 글자 그대로
 # 재사용한다. 새 독립 요약 검수가 실행된 것처럼 오해되는 명칭은 쓰지 않는다.

@@ -63,6 +63,24 @@ _NOTION_EXPORT_WORKERS: set[asyncio.Task] = set()
 _REPORT_UNAVAILABLE_HOME = "/?report_status=unavailable"
 
 
+def _report_grade_note(report: Report) -> str:
+    """레거시 6칸과 canonical 장 수를 섞지 않은 완성도 안내를 돌려준다."""
+
+    if report.schema_version:
+        from src.features.report_standard.constants import (  # noqa: PLC0415
+            CANONICAL_SCHEMA_VERSION,
+            CANONICAL_SECTION_IDS,
+        )
+
+        if report.schema_version == CANONICAL_SCHEMA_VERSION:
+            return grade_message(
+                report.grade,
+                report.filled_count,
+                total=len(CANONICAL_SECTION_IDS),
+            )
+    return grade_message(report.grade, report.filled_count)
+
+
 def _report_unavailable_redirect() -> RedirectResponse:
     """보고서 존재 여부를 밝히지 않고 같은 일반 안내로 첫 화면에 보낸다."""
 
@@ -165,7 +183,7 @@ def _run_and_persist_notion_export(
     """Run urllib in a worker thread and persist its outcome in that thread."""
     try:
         result = send_report_to_notion(
-            report, grade_note=grade_message(report.grade, report.filled_count)
+            report, grade_note=_report_grade_note(report)
         )
     except Exception as exc:  # noqa: BLE001 - injected adapters must not strand state
         logger.warning("노션 작업자 예외 type=%s", type(exc).__name__)
@@ -783,7 +801,7 @@ def _render_result_page(
                 job=job,
                 result=result,
                 report=report,
-                grade_note=grade_message(report.grade, report.filled_count),
+                grade_note=_report_grade_note(report),
                 notion_configured=is_notion_configured(),
                 internal_review_preview=internal_review_preview,
                 member_feedback_allowed=bool(member_email),

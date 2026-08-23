@@ -28,6 +28,7 @@ from src.features.pipeline.section567_contract import (
     excerpts_are_in_distinct_clauses,
     excerpts_overlap,
     expected_plan_status,
+    has_executed_current_distribution_partnership,
     has_plan_condition,
     has_current_operating_role,
     internal_operation_is_company_controlled,
@@ -49,14 +50,15 @@ from src.features.provenance.sources import (
     official_domain_attestation_problem,
     official_web_currentness_is_usable,
     source_type_is_official_ir,
+    source_type_is_official_web,
 )
 from src.features.report_standard.constants import (
     CANONICAL_CLAIM_TYPES_BY_SECTION,
     CANONICAL_SCHEMA_VERSION,
     CANONICAL_SECTION_IDS,
-    COMPARISON_SHORTFALL_REASON,
     COMPARISON_JUDGMENTS,
     CONDITIONAL_SECTION_IDS,
+    CONDITIONAL_SECTION_SHORTFALL_REASONS,
     INTERNAL_ONLY_CLAIM_TYPES_BY_SECTION,
     REQUIRED_SECTION_IDS,
     SECTION_BY_ID,
@@ -291,6 +293,25 @@ class PublishBlockedError(ValueError):
 
 def _normalized(value: str) -> str:
     return " ".join(str(value or "").split()).casefold()
+
+
+def _is_self_published_company_source(
+    source: Source | None,
+    *,
+    legal_entity: str,
+    registered_sources: tuple[Source, ...],
+) -> bool:
+    """분석 법인이 책임지는 공시·공식 웹 원문인지 닫힌 조건으로 확인한다."""
+
+    if source is None or _corporate_name(source.publisher) != _corporate_name(
+        legal_entity
+    ):
+        return False
+    if not is_canonical_official_with_registry(source, registered_sources):
+        return False
+    return source.kind is SourceKind.FILING or source_type_is_official_web(
+        source.source_type
+    )
 
 
 def _compact(value: str) -> str:
@@ -1515,9 +1536,24 @@ def _fact_problems(
                 f"[operations] {fact.fact_id}: value_chain_stage가 원문 역할에 "
                 "결속되지 않았습니다"
             )
-        if not has_current_operating_role(
+        operation_source = sources.get(fact.source_id)
+        current_role_is_bound = has_current_operating_role(
             fact.state_evidence, fact.relationship_or_action
-        ):
+        ) or (
+            fact.claim_type == "partner_role"
+            and relationship_type == "distribution"
+            and _is_self_published_company_source(
+                operation_source,
+                legal_entity=fact.legal_entity,
+                registered_sources=tuple(sources.values()),
+            )
+            and has_executed_current_distribution_partnership(
+                fact.state_evidence,
+                fact.relationship_or_action,
+                fact.subject_scope,
+            )
+        )
+        if not current_role_is_bound:
             problems.append(
                 f"[operations] {fact.fact_id}: MOU·일회성 체결이 아닌 현재 "
                 "반복 운영 역할 근거가 없습니다"
@@ -2512,42 +2548,47 @@ def _semantic_section_problems(
 
     current_ids = supported_by_section.get("current_challenges", [])
     current = [facts[fid] for fid in current_ids]
-    issues = [fact for fact in current if fact.claim_type == "current_issue"]
-    responses = [fact for fact in current if fact.claim_type == "current_response"]
-    if not issues or not responses:
-        problems.append(
-            "[section] current_challenges: 미해결 문제와 실제 대응이 모두 필요합니다"
-        )
-    if len(issues) > 3:
-        problems.append(
-            "[section] current_challenges: 근거가 확인된 핵심 과제는 최대 3개입니다"
-        )
-    issue_ids = {fact.fact_id for fact in issues}
-    paired_issue_ids: set[str] = set()
-    for response in responses:
-        if response.response_to_fact_id not in issue_ids:
+    # 5장은 공식 근거가 한 건도 없으면 조건부 생략한다. 다만 한 건이라도
+    # 출고 후보로 들어왔으면 종전 계약(문제+대응, 내부 결속, 최대 3개)을 그대로
+    # 적용한다. 불완전한 5장을 단순 누락으로 위장해 통과시키지 않는다.
+    if current:
+        issues = [fact for fact in current if fact.claim_type == "current_issue"]
+        responses = [fact for fact in current if fact.claim_type == "current_response"]
+        if not issues or not responses:
             problems.append(
-                f"[section] {response.fact_id}: response_to_fact_id가 같은 장의 미해결 문제를 가리키지 않습니다"
+                "[section] current_challenges: 미해결 문제와 실제 대응이 모두 필요합니다"
             )
-        else:
-            paired_issue_ids.add(response.response_to_fact_id)
-            issue = facts[response.response_to_fact_id]
-            if not response_is_bound_to_issue(
-                issue.subject_scope,
-                issue.state_evidence,
-                response.state_evidence,
-                issue.legal_entity,
-            ):
+        if len(issues) > 3:
+            problems.append(
+                "[section] current_challenges: 근거가 확인된 핵심 과제는 최대 3개입니다"
+            )
+        issue_ids = {fact.fact_id for fact in issues}
+        paired_issue_ids: set[str] = set()
+        for response in responses:
+            if response.response_to_fact_id not in issue_ids:
                 problems.append(
-                    f"[section] {response.fact_id}: 대응 원문이 연결된 문제의 "
-                    "대상·범위와 결속되지 않았습니다"
+                    f"[section] {response.fact_id}: response_to_fact_id가 같은 "
+                    "장의 미해결 문제를 가리키지 않습니다"
                 )
-    unpaired = issue_ids - paired_issue_ids
-    if unpaired:
-        problems.append(
-            "[section] current_challenges: 실제 대응과 결속되지 않은 문제가 있습니다: "
-            + ", ".join(sorted(unpaired))
-        )
+            else:
+                paired_issue_ids.add(response.response_to_fact_id)
+                issue = facts[response.response_to_fact_id]
+                if not response_is_bound_to_issue(
+                    issue.subject_scope,
+                    issue.state_evidence,
+                    response.state_evidence,
+                    issue.legal_entity,
+                ):
+                    problems.append(
+                        f"[section] {response.fact_id}: 대응 원문이 연결된 문제의 "
+                        "대상·범위와 결속되지 않았습니다"
+                    )
+        unpaired = issue_ids - paired_issue_ids
+        if unpaired:
+            problems.append(
+                "[section] current_challenges: 실제 대응과 결속되지 않은 문제가 있습니다: "
+                + ", ".join(sorted(unpaired))
+            )
 
     future = [facts[fid] for fid in supported_by_section.get("future_strategy", [])]
     plans = [fact for fact in future if fact.claim_type == "future_plan"]
@@ -2925,7 +2966,7 @@ def validate_publishable(report: Report) -> PublishValidation:
 
 
 def build_published_report(report: Report) -> Report:
-    """검증된 1~8장과 조건부 9장을 정본 순서로 잠근 공개본을 만든다."""
+    """검증된 핵심 장과 근거가 있는 조건부 5·8·9장을 정본 순서로 잠근다."""
 
     validation = validate_publishable(report)
     if not validation:
@@ -3045,22 +3086,28 @@ def build_published_report(report: Report) -> Report:
         if isinstance(item, Source) and item.source_id in used_source_ids
     ], key=lambda item: item.number)
 
-    missing_conditional = CONDITIONAL_SECTION_IDS - set(
-        validation.included_section_ids
-    )
-    is_basic_report = bool(missing_conditional)
+    included_set = set(validation.included_section_ids)
+    missing_conditional = [
+        spec.section_id
+        for spec in SECTION_SPECS
+        if spec.section_id in CONDITIONAL_SECTION_IDS
+        and spec.section_id not in included_set
+    ]
+    shortfall_reasons = [
+        CONDITIONAL_SECTION_SHORTFALL_REASONS[section_id]
+        for section_id in missing_conditional
+    ]
+    is_partial_report = bool(shortfall_reasons)
     return replace(
         report,
         job="",
-        grade=Grade.PARTIAL if is_basic_report else Grade.COMPLETE,
+        grade=Grade.PARTIAL if is_partial_report else Grade.COMPLETE,
         sections=published_sections,
         requirements=[],
         sources=[],
         citations=published_citations,
         cells={section.cell: True for section in published_sections},
-        shortfall_reasons=(
-            [COMPARISON_SHORTFALL_REASON] if is_basic_report else []
-        ),
+        shortfall_reasons=shortfall_reasons,
         schema_version=CANONICAL_SCHEMA_VERSION,
         fact_records=published_facts,
     )

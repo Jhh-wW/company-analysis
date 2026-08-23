@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from pathlib import Path
 import re
 from types import SimpleNamespace
@@ -81,9 +82,11 @@ class _FakeMessages:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.requests: list[dict[str, Any]] = []
 
     def create(self, **kwargs: Any) -> SimpleNamespace:
         self.calls += 1
+        self.requests.append(kwargs)
         return SimpleNamespace(
             model=kwargs.get("model", "가짜모델"),
             usage=SimpleNamespace(input_tokens=10, output_tokens=5),
@@ -1016,7 +1019,7 @@ def test_로컬통합_삼성전자_저장원문은_가짜AI로_생성이후까�
     assert result.outcome is not Outcome.FAILED
     assert result.report is None
     assert result.billing_uncertain is False
-    assert "1~8장 기본 보고서" in result.message
+    assert "핵심 기본 보고서" in result.message
     assert calls == {"writer": 0, "comparison": 0, "finalize": 0}
     assert progress[:5] == ["identify", "judge", "collect", "gate", "generate"]
     assert fake.client.messages.calls == real.VOTE_ROUNDS
@@ -1316,6 +1319,70 @@ def test_첫_선택이_불완전해도_두번째_단독완결이면_보고서를
     assert calls == 2
     assert [item.round_number for item in result.span_selection_diagnostics] == [1, 2]
     # 선택 2 + Writer 1 + 독립 Reviewer 1. 요약과 뉴스 선별은 0회다.
+    assert engine.client.messages.calls == 4
+    selection_requests: list[tuple[object, str]] = []
+    for request in engine.client.messages.requests:
+        content = request["messages"][0]["content"]
+        if isinstance(content, str):
+            prompt = content
+        else:
+            prompt = "".join(
+                str(block.get("text") or "")
+                for block in content
+                if isinstance(block, dict)
+            )
+        if "공식 근거 기반 회사분석 보고서의 사실 배치 작업" in prompt:
+            selection_requests.append((content, prompt))
+
+    assert len(selection_requests) == 2
+    # 1회차와 focus가 붙은 2회차는 정확한 user text가 다르므로, 전체 text 한
+    # 블록을 ephemeral cache로 쓰지 않는다. 두 호출 모두 보통 입력으로 보낸다.
+    assert all(isinstance(content, str) for content, _prompt in selection_requests)
+    assert selection_requests[0][1] != selection_requests[1][1]
+    assert "선택 2회차 보정 초점" not in selection_requests[0][1]
+    assert "선택 2회차 보정 초점" in selection_requests[1][1]
+    selection_costs = [
+        event for event in result.ai_cost_events if event.stage == "span_selection"
+    ]
+    assert len(selection_costs) == 2
+    assert all(event.cache_creation_tokens == 0 for event in selection_costs)
+    assert all(event.cache_read_tokens == 0 for event in selection_costs)
+
+
+def test_두_선택의_검증통과_근거가_서로_보완되면_누적해_보고서를_만든다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = real.select_canonical_spans
+    calls = 0
+    received_focus: list[dict[str, Any]] = []
+
+    def complementary_rounds(*args: Any, **kwargs: Any):
+        nonlocal calls
+        calls += 1
+        received_focus.append(dict(kwargs))
+        picked, rejected = original(*args, **kwargs)
+        if calls == 1:
+            # 첫 회에는 미래 계획만 빠져 단독으로는 기본 보고서가 성립하지 않는다.
+            return [
+                item for item in picked if item.claim_type != "future_plan"
+            ], rejected
+        # 두 번째 회도 미래 계획 한 건뿐이라 단독으로는 성립하지 않는다.
+        return [
+            item for item in picked if item.claim_type == "future_plan"
+        ], rejected
+
+    monkeypatch.setattr(real, "select_canonical_spans", complementary_rounds)
+
+    result = _run()
+
+    assert result.outcome is Outcome.REPORT
+    assert calls == 2
+    assert [item.round_number for item in result.span_selection_diagnostics] == [1, 2]
+    assert received_focus[0]["focus_missing_claim_roles"] == ()
+    assert "future_plan" in received_focus[1]["focus_missing_claim_roles"]
+    assert received_focus[1]["focus_verified_sids"]
+    # 선택 2 + Writer 1 + 독립 Reviewer 1. 동일 전체 선택을 세 번째로 반복하지 않는다.
     assert engine.client.messages.calls == 4
 
 
@@ -2305,6 +2372,68 @@ def test_수집_실패가_끼면_캐시에_저장하지_않는다(
     assert count == 0, "우리 쪽 실패가 낀 결과를 캐시에 저장했습니다"
     assert engine.generate_ai_calls > calls_after_first  # 다시 시도하면 새로 만든다
     assert second.message == ""
+
+
+def test_조건부_기본장_누락_부분본은_고정하지_않고_다음번에_다시_조사한다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """5·8장 누락은 선택 변동일 수 있어 다음 회계연도까지 고정하지 않는다."""
+
+    from src.features.storage import db as storage_db
+
+    original_finalize = real.finalize_report
+
+    def finalize_without_optional(*args: Any, **kwargs: Any):
+        report = original_finalize(*args, **kwargs)
+        return replace(
+            report,
+            grade=Grade.PARTIAL,
+            sections=[
+                section
+                for section in report.sections
+                if section.cell not in {"current_challenges", "culture"}
+            ],
+        )
+
+    monkeypatch.setattr(real, "finalize_report", finalize_without_optional)
+
+    first = _run()
+    calls_after_first = engine.generate_ai_calls
+    with storage_db.connect() as conn:
+        count = conn.execute("SELECT COUNT(*) AS n FROM layer1_cache").fetchone()["n"]
+    second = _run()
+
+    assert first.outcome is Outcome.REPORT
+    assert second.outcome is Outcome.REPORT
+    assert count == 0
+    assert engine.generate_ai_calls > calls_after_first
+
+
+def test_비교장만_누락된_부분본은_기본보고서로_캐시한다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """9장은 후단 비교 조건이므로 5·8장이 있으면 기본 보고서를 재사용한다."""
+
+    monkeypatch.setattr(
+        real,
+        "_attach_competitive_position",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            real.ComparisonBlockedError(("동일 조건 비교 불가",))
+        ),
+    )
+
+    first = _run()
+    calls_after_first = engine.generate_ai_calls
+    second = _run()
+
+    assert first.outcome is Outcome.REPORT
+    assert first.report is not None
+    assert first.report.grade is Grade.PARTIAL
+    assert second.outcome is Outcome.REPORT
+    assert engine.generate_ai_calls == calls_after_first
+    assert "이미 조사해 둔" in second.message
 
 
 def test_자료가_없는_것은_실패가_아니므로_캐시한다(engine: FakeEngine) -> None:

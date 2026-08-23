@@ -38,6 +38,7 @@ from src.features.report_standard.publish import PublishBlockedError
 from src.features.report_standard.section_content import section_content_blocks
 from src.web import job_runtime
 from src.web import main as web_main
+from src.web.routers.reports import _report_grade_note
 
 app = web_main.app
 
@@ -201,6 +202,20 @@ def canonical_report() -> Report:
         for section in report.sections
     ]
     return replace(report, sections=sections)
+
+
+def test_canonical_부분본_완성도는_레거시_6칸_분모를_쓰지_않는다() -> None:
+    report = canonical_report()
+    partial = replace(
+        report,
+        grade=Grade.PARTIAL,
+        sections=report.sections[:7],
+    )
+
+    note = _report_grade_note(partial)
+
+    assert "9개 중 7개" in note
+    assert "6개 중" not in note
 
 
 def _pdf_text(report: Report) -> str:

@@ -381,6 +381,51 @@ CURRENT_OPERATING_ROLE_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"판매(?:한다|\s*중|하고|하며)|"
     r"납품\s*(?:대행|중)|유지\s*보수|계약\s*(?:유효|이행|중)|거래\s*중"
 )
+_EXECUTED_PARTNERSHIP_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?:파트너십|계약|제휴).{0,16}"
+    r"체결(?:했|하였|하여|하고(?!자)|함|됐|되었|됨)"
+)
+_ONGOING_DISTRIBUTION_EXPANSION_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?:유통처|유통망|판매망|유통\s*채널|판매\s*채널).{0,32}?"
+    r"(?:"
+    r"(?:확대|확장)(?:(?:해|하여)?\s*(?:나)?가고\s*있(?!었)|"
+    r"하고\s*있(?!었)|\s*중)"
+    r"|넓혀\s*(?:나)?가고\s*있(?!었)"
+    r")"
+)
+_NON_BINDING_PARTNERSHIP_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?<![A-Za-z0-9])MOU(?![A-Za-z0-9])|양해\s*각서|업무\s*협약",
+    re.IGNORECASE,
+)
+_TERMINATED_PARTNERSHIP_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"종료|해지|만료|중단|철회|종결"
+)
+_CONTRACT_CLAUSE_BOUNDARY_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"[.!?;\r\n]"
+)
+_DIRECT_DISTRIBUTION_PARTNER_SUFFIX_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"\s*(?:와|과)\s*"
+    r"(?:(?:전략적|글로벌|음반\s*/\s*음원|유통|배급|판매)\s*)*"
+)
+_ENUMERATED_PARTNER_NAME: Final[str] = (
+    r"[A-Za-z0-9][A-Za-z0-9&+.'’\-]*"
+    r"(?:\s+[A-Za-z0-9][A-Za-z0-9&+.'’\-]*)*"
+)
+_ENUMERATED_PARTNER_ENTRY: Final[str] = (
+    rf"{_ENUMERATED_PARTNER_NAME}(?:\s*\([^()\r\n]{{1,80}}\))?"
+)
+_ENUMERATED_PARTNER_LIST_PATTERN: Final[re.Pattern[str]] = re.compile(
+    rf"(?<![A-Za-z0-9])(?P<entries>{_ENUMERATED_PARTNER_ENTRY}"
+    rf"(?:\s*,\s*{_ENUMERATED_PARTNER_ENTRY})+)\s*"
+    r"등[^.!?;\r\n]{0,80}(?:회사|업체|파트너)(?:들)?(?:와|과)\s*$"
+)
+_ENUMERATED_PARTNER_ENTRY_PATTERN: Final[re.Pattern[str]] = re.compile(
+    rf"(?:^|,\s*)(?P<label>{_ENUMERATED_PARTNER_NAME})"
+    r"(?:\s*\([^()\r\n]{1,80}\))?(?=\s*(?:,|$))"
+)
+_PARTNER_PARENTHETICAL_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^\s*\([^()\r\n]{1,80}\)"
+)
 
 
 def has_current_operating_role(evidence: str, role_excerpt: str) -> bool:
@@ -392,6 +437,66 @@ def has_current_operating_role(evidence: str, role_excerpt: str) -> bool:
         and role in str(evidence or "")
         and re.search(r"종료|해지|만료|중단|유효\s*여부|검토", role) is None
         and CURRENT_OPERATING_ROLE_PATTERN.search(role)
+    )
+
+
+def _partner_is_bound_to_executed_contract(text: str, partner: str) -> bool:
+    """실명 파트너가 체결 상대 한 명 또는 체결 상대 열거 안에 있는가."""
+
+    for contract_match in _EXECUTED_PARTNERSHIP_PATTERN.finditer(text):
+        clause_boundaries = list(
+            _CONTRACT_CLAUSE_BOUNDARY_PATTERN.finditer(
+                text, 0, contract_match.start()
+            )
+        )
+        clause_start = clause_boundaries[-1].end() if clause_boundaries else 0
+        contract_prefix = text[clause_start : contract_match.start()]
+        partner_pattern = re.compile(
+            rf"(?<![A-Za-z0-9]){re.escape(partner)}(?![A-Za-z0-9])"
+        )
+        for partner_match in partner_pattern.finditer(contract_prefix):
+            suffix = contract_prefix[partner_match.end() :]
+            parenthetical = _PARTNER_PARENTHETICAL_PATTERN.match(suffix)
+            if parenthetical is not None:
+                suffix = suffix[parenthetical.end() :]
+            if _DIRECT_DISTRIBUTION_PARTNER_SUFFIX_PATTERN.fullmatch(suffix):
+                return True
+        enumerated = _ENUMERATED_PARTNER_LIST_PATTERN.search(contract_prefix)
+        if enumerated is not None and any(
+            " ".join(match.group("label").split()).casefold()
+            == partner.casefold()
+            for match in _ENUMERATED_PARTNER_ENTRY_PATTERN.finditer(
+                enumerated.group("entries")
+            )
+        ):
+            return True
+    return False
+
+
+def has_executed_current_distribution_partnership(
+    evidence: str,
+    role_excerpt: str,
+    partner_label: str,
+) -> bool:
+    """체결 완료와 현재 유통망 확대가 함께 적힌 공식 파트너 역할인가.
+
+    일반 현재 운영 패턴을 넓히지 않고, 실명 파트너 뒤에 체결 완료가 있으며
+    별도 원문 발췌에 현재 진행형 유통망 확대가 있는 경우만 받는다. MOU·업무협약,
+    종료 관계, 단순 과거 체결과 미래 계획은 이 예외로 통과할 수 없다. 공식
+    자기책임 출처 여부와 ``distribution`` 관계 여부는 호출자가 별도로 확인한다.
+    """
+
+    text = str(evidence or "")
+    role = str(role_excerpt or "")
+    partner = " ".join(str(partner_label or "").split())
+    if not text or not role or not partner or role not in text:
+        return False
+    return bool(
+        _NON_BINDING_PARTNERSHIP_PATTERN.search(text) is None
+        and _TERMINATED_PARTNERSHIP_PATTERN.search(text) is None
+        and _TERMINATED_PARTNERSHIP_PATTERN.search(role) is None
+        and _partner_is_bound_to_executed_contract(text, partner)
+        and _ONGOING_DISTRIBUTION_EXPANSION_PATTERN.search(role)
     )
 
 

@@ -34,6 +34,7 @@ from src.features.pipeline.section567_contract import (
     excerpts_are_in_distinct_clauses,
     excerpts_overlap,
     expected_plan_status,
+    has_executed_current_distribution_partnership,
     has_plan_condition,
     has_current_operating_role,
     internal_operation_is_company_controlled,
@@ -210,6 +211,31 @@ CLAIM_TYPES_BY_SECTION: dict[str, frozenset[str]] = {
     "operations_partners": frozenset({"operating_core", "partner_role"}),
     "culture": frozenset({"official_value", "work_example"}),
 }
+_CANONICAL_CLAIM_TYPES = frozenset(
+    claim_type
+    for claim_types in CLAIM_TYPES_BY_SECTION.values()
+    for claim_type in claim_types
+)
+_VALIDATION_REJECTION_CODES = frozenset(
+    {
+        "invalid_reference_or_section",
+        "duplicate_assignment",
+        "claim_type_section_mismatch",
+        "subject_label_not_in_source",
+        "market_contract_failure",
+        "current_issue_contract_failure",
+        "current_response_contract_failure",
+        "operations_partner_contract_failure",
+        "future_plan_contract_failure",
+        "portfolio_contract_failure",
+        "completed_execution_contract_failure",
+        "cross_reference_contract_failure",
+        "change_basis_contract_failure",
+        "source_verification_failure",
+        "company_specificity_failure",
+        "other_validation_failure",
+    }
+)
 
 PORTFOLIO_STAGES: tuple[str, ...] = ("주력", "성장", "안정", "신규")
 HISTORICAL_PERFORMANCE_BASIS_PREFIX = "historical-performance:"
@@ -280,6 +306,8 @@ _PROMPT = """공식 근거 기반 회사분석 보고서의 사실 배치 작업
     실제 고객·시장 범위를 넣는다. 단순 고객·공급사·파트너 언급이나 업종이 같다는
     이유만으로 경쟁 관계를 만들지 않는다.
 
+{selection_focus_block}
+
 완료 실적 근거 참조
 {historical_performance_lines}
 
@@ -289,6 +317,21 @@ _PROMPT = """공식 근거 기반 회사분석 보고서의 사실 배치 작업
 후보 문장
 {candidate_lines}
 """
+
+_SELECTION_FOCUS_PROMPT = """선택 2회차 보정 초점
+- 첫 회 검증 뒤 아직 누락된 claim_type: {missing_claim_roles}
+- 첫 회의 닫힌 검증 거절 코드: {rejection_codes}
+- 첫 회에 이미 검증된 SID: {verified_sids}
+- 누락 claim_type을 우선 보정하되, 거절 코드는 다시 확인할 계약을 알려 주는
+  진단일 뿐이다. 위의 원문·구조 규칙을 우회하거나 완화하지 말고, 맞는 원문이
+  없으면 해당 역할은 비운다.
+- 이미 검증된 SID는 보통 다시 고르지 않는다. 단, 연결 의존 항목을 새로 고르면
+  그 연결 대상이 이미 검증된 SID여도 같은 답의 item으로 다시 포함해야 한다.
+  priority_product에는 연결할 revenue_model을, current_response에는 연결할
+  current_issue를, change_interpretation에는 연결할 completed_execution을 같은 답에
+  함께 넣는다. change_interpretation은 제공된 완료 실적 참조로 대신 연결할 수 있다.
+- 이미 검증된 SID를 재포함할 때도 해당 item의 모든 구조 필드를 원문대로 다시
+  채우며, 연결 필드에는 그 SID를 정확히 적는다."""
 
 
 @dataclass(frozen=True)
@@ -435,9 +478,78 @@ def _normalized_historical_performance_bases(
     return out
 
 
+def _normalized_focus_values(
+    values: Iterable[str] | str | None,
+    *,
+    allowed: frozenset[str] | None = None,
+    candidate_sid: bool = False,
+) -> tuple[str, ...]:
+    """2회차 보정 힌트를 닫힌 값으로만 정규화한다.
+
+    보정 힌트는 프롬프트 지시를 바꿀 수 있으므로 claim_type·거절 코드는 허용된
+    목록만, SID는 후보 번호 형식만 남긴다. 순서는 진단에서 받은 우선순위를
+    보존하고 중복만 제거한다.
+    """
+
+    raw_values: Iterable[str]
+    if values is None:
+        raw_values = ()
+    elif isinstance(values, str):
+        raw_values = (values,)
+    else:
+        raw_values = values
+
+    normalized: list[str] = []
+    for raw_value in raw_values:
+        value = (
+            _normalize_candidate_sid(raw_value)
+            if candidate_sid
+            else str(raw_value or "").strip()
+        )
+        if not value or value in normalized:
+            continue
+        if allowed is not None and value not in allowed:
+            continue
+        if candidate_sid and re.fullmatch(r"[1-9][0-9]*-[1-9][0-9]*", value) is None:
+            continue
+        normalized.append(value)
+    return tuple(normalized)
+
+
+def _selection_focus_block(
+    *,
+    focus_missing_claim_roles: Iterable[str] | str | None,
+    focus_rejection_codes: Iterable[str] | str | None,
+    focus_verified_sids: Iterable[str] | str | None,
+) -> str:
+    missing_claim_roles = _normalized_focus_values(
+        focus_missing_claim_roles,
+        allowed=_CANONICAL_CLAIM_TYPES,
+    )
+    rejection_codes = _normalized_focus_values(
+        focus_rejection_codes,
+        allowed=_VALIDATION_REJECTION_CODES,
+    )
+    verified_sids = _normalized_focus_values(
+        focus_verified_sids,
+        candidate_sid=True,
+    )
+    if not (missing_claim_roles or rejection_codes or verified_sids):
+        return ""
+    return _SELECTION_FOCUS_PROMPT.format(
+        missing_claim_roles=", ".join(missing_claim_roles) or "없음",
+        rejection_codes=", ".join(rejection_codes) or "없음",
+        verified_sids=", ".join(verified_sids) or "없음",
+    )
+
+
 def build_prompt(
     candidate_lines: list[str],
     historical_performance_bases: Mapping[str, str] | None = None,
+    *,
+    focus_missing_claim_roles: Iterable[str] | str | None = None,
+    focus_rejection_codes: Iterable[str] | str | None = None,
+    focus_verified_sids: Iterable[str] | str | None = None,
 ) -> str:
     guides = "\n".join(
         f"- {section_id}: {SECTION_GUIDES[section_id]}"
@@ -453,6 +565,11 @@ def build_prompt(
     return _PROMPT.format(
         section_guides=guides,
         historical_performance_lines=performance_lines,
+        selection_focus_block=_selection_focus_block(
+            focus_missing_claim_roles=focus_missing_claim_roles,
+            focus_rejection_codes=focus_rejection_codes,
+            focus_verified_sids=focus_verified_sids,
+        ),
         candidate_lines="\n".join(candidate_lines),
     )
 
@@ -606,6 +723,9 @@ def select_canonical_spans(
     company: str,
     model: str = "",
     historical_performance_bases: Mapping[str, str] | None = None,
+    focus_missing_claim_roles: Iterable[str] | str | None = None,
+    focus_rejection_codes: Iterable[str] | str | None = None,
+    focus_verified_sids: Iterable[str] | str | None = None,
 ) -> tuple[list[CanonicalPick], list[dict[str, str]]]:
     """번호 선택→원문 복사→W1~W3 대조를 거쳐 canonical 사실을 돌려준다."""
 
@@ -628,7 +748,13 @@ def select_canonical_spans(
     try:
         payload, usage = engine._ask(
             client,
-            build_prompt(candidate_lines, performance_bases),
+            build_prompt(
+                candidate_lines,
+                performance_bases,
+                focus_missing_claim_roles=focus_missing_claim_roles,
+                focus_rejection_codes=focus_rejection_codes,
+                focus_verified_sids=focus_verified_sids,
+            ),
             answer_schema(),
             max_tokens=CANONICAL_SELECTION_MAX_TOKENS,
         )
@@ -892,7 +1018,19 @@ def select_canonical_spans(
             if FUTURE_OPERATION_PATTERN.search(sentence):
                 rejected.append({"sid": sid, "reason": "미실행 계획을 현재 운영으로 분류"})
                 continue
-            if not has_current_operating_role(sentence, operation_role):
+            current_role_is_bound = has_current_operating_role(
+                sentence, operation_role
+            ) or (
+                claim_type == "partner_role"
+                and relationship_type == "distribution"
+                and fragment_kind in _SELF_PUBLISHED_FRAGMENT_KINDS
+                and has_executed_current_distribution_partnership(
+                    sentence,
+                    operation_role,
+                    subject_label,
+                )
+            )
+            if not current_role_is_bound:
                 rejected.append({"sid": sid, "reason": "현재 반복 운영 역할의 직접 근거 없음"})
                 continue
             if (

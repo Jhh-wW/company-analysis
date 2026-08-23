@@ -12,6 +12,7 @@ from src.features.pipeline.canonical_report import (
     assemble_report,
     basic_report_selection_is_complete,
     basic_report_selection_subset,
+    combine_validated_picks,
     historical_performance_bases_are_complete,
     majority_picks,
     sections_from_picks,
@@ -133,6 +134,121 @@ def test_majority_vote_keeps_change_bound_only_to_historical_performance() -> No
     assert majority_picks([[change], [change], []]) == [change]
 
 
+def test_B형_회차간_SID와_원문소유권_충돌은_모두_버린다() -> None:
+    safe = CanonicalPick(
+        "identity",
+        "충돌 없는 정체성 원문",
+        1,
+        sid="1-1",
+        claim_type="identity_summary",
+    )
+    same_sid_first = CanonicalPick(
+        "business_model",
+        "첫 번째 수익 원문",
+        2,
+        sid="2-1",
+        claim_type="revenue_model",
+    )
+    same_sid_second = CanonicalPick(
+        "business_model",
+        "두 번째 수익 원문",
+        3,
+        sid="2-1",
+        claim_type="revenue_model",
+    )
+    same_evidence_first = CanonicalPick(
+        "business_model",
+        "소유권이 갈린 공통 원문",
+        4,
+        sid="4-1",
+        claim_type="customer_market",
+    )
+    same_evidence_second = CanonicalPick(
+        "portfolio",
+        "소유권이 갈린 공통 원문",
+        4,
+        sid="4-2",
+        claim_type="priority_product",
+    )
+
+    combined = combine_validated_picks(
+        [
+            [safe, same_sid_first, same_evidence_first],
+            [same_sid_second, same_evidence_second],
+        ]
+    )
+
+    assert combined == [safe]
+
+
+def test_C형_충돌로_대상이_사라진_수익대응해석_연결도_버린다() -> None:
+    safe = CanonicalPick(
+        "identity",
+        "충돌 없는 정체성 원문",
+        1,
+        sid="1-1",
+        claim_type="identity_summary",
+    )
+    revenue = CanonicalPick(
+        "business_model",
+        "수익 구조 원문",
+        2,
+        sid="2-1",
+        claim_type="revenue_model",
+    )
+    product = CanonicalPick(
+        "portfolio",
+        "제품 원문",
+        3,
+        sid="3-1",
+        claim_type="priority_product",
+        revenue_model_sid="2-1",
+    )
+    issue = CanonicalPick(
+        "current_challenges",
+        "현재 문제 원문",
+        4,
+        sid="4-1",
+        claim_type="current_issue",
+    )
+    response = CanonicalPick(
+        "current_challenges",
+        "현재 대응 원문",
+        5,
+        sid="5-1",
+        claim_type="current_response",
+        response_to_sid="4-1",
+    )
+    execution = CanonicalPick(
+        "past_changes",
+        "완료 실행 원문",
+        6,
+        sid="6-1",
+        claim_type="completed_execution",
+    )
+    interpretation = CanonicalPick(
+        "past_changes",
+        "변화 해석 원문",
+        7,
+        sid="7-1",
+        claim_type="change_interpretation",
+        basis_sids=("6-1",),
+    )
+
+    combined = combine_validated_picks(
+        [
+            [safe, revenue, product, issue, response, execution, interpretation],
+            [
+                replace(revenue, sentence="충돌한 수익 구조", fragment_id=12),
+                replace(issue, sentence="충돌한 현재 문제", fragment_id=14),
+                replace(execution, sentence="충돌한 완료 실행", fragment_id=16),
+            ],
+        ]
+    )
+
+    assert combined == [safe]
+
+
 def _complete_basic_picks() -> list[CanonicalPick]:
     return [
         CanonicalPick("identity", "회사 정체성", 1, "1-1", "identity_summary"),
@@ -185,6 +301,43 @@ def _complete_basic_picks() -> list[CanonicalPick]:
         ),
         CanonicalPick("culture", "공식 가치", 11, "11-1", "official_value"),
     ]
+
+
+def test_A형_서로_다른_회차의_검증사실을_합쳐_핵심보고서를_완성한다() -> None:
+    picks = _complete_basic_picks()
+    combined = combine_validated_picks([picks[::2], picks[1::2]])
+
+    assert set(combined) == set(picks)
+    assert basic_report_selection_is_complete(
+        combined,
+        historical_performance_bases={
+            "historical-performance:2023",
+            "historical-performance:2024",
+            "historical-performance:2025",
+        },
+    )
+
+
+def test_F형_공식_현재과제와_문화가_없어도_핵심보고서는_완성한다() -> None:
+    picks = [
+        item
+        for item in _complete_basic_picks()
+        if item.section_id not in {"current_challenges", "culture"}
+    ]
+
+    subset = basic_report_selection_subset(
+        picks,
+        historical_performance_bases={
+            "historical-performance:2023",
+            "historical-performance:2024",
+            "historical-performance:2025",
+        },
+    )
+
+    assert subset
+    assert not any(
+        item.section_id in {"current_challenges", "culture"} for item in subset
+    )
 
 
 def test_기본보고서_선택이_완결되면_한번으로_충분하다() -> None:
@@ -326,11 +479,8 @@ def test_Writer_후_구조예외는_구체대상과_행동이_문장에_남아�
         "priority_product",
         "completed_execution",
         "change_interpretation",
-        "current_issue",
-        "current_response",
         "future_plan",
         "operating_core",
-        "official_value",
     ],
 )
 def test_기본보고서_필수사실이_하나라도_빠지면_재선택한다(
@@ -352,8 +502,8 @@ def test_기본보고서_필수사실이_하나라도_빠지면_재선택한다(
 
 def test_기본보고서_내부참조나_삼개년표가_깨지면_완결로_보지_않는다() -> None:
     broken_reference = [
-        replace(item, response_to_sid="없는-SID")
-        if item.claim_type == "current_response"
+        replace(item, revenue_model_sid="없는-SID")
+        if item.claim_type == "priority_product"
         else item
         for item in _complete_basic_picks()
     ]
@@ -381,6 +531,27 @@ def test_기본보고서_내부참조나_삼개년표가_깨지면_완결로_보
             "historical-performance:2025",
         },
     )
+
+
+def test_현재과제는_완결된_문제대응쌍만_선택하고_불완전하면_생략한다() -> None:
+    broken_current = [
+        replace(item, response_to_sid="없는-SID")
+        if item.claim_type == "current_response"
+        else item
+        for item in _complete_basic_picks()
+    ]
+
+    subset = basic_report_selection_subset(
+        broken_current,
+        historical_performance_bases={
+            "historical-performance:2023",
+            "historical-performance:2024",
+            "historical-performance:2025",
+        },
+    )
+
+    assert subset
+    assert not any(item.section_id == "current_challenges" for item in subset)
 
 
 def test_assemble_report_locks_visible_claims_to_sources() -> None:
