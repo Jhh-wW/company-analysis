@@ -49,6 +49,10 @@ from src.features.pipeline.section567_contract import (
 from src.features.spanselect.logic import number_sentences
 from src.features.spanselect.constants import CANONICAL_SELECTION_MAX_TOKENS
 from src.shared.span_selection_diagnostics import attach_round_result
+from src.shared.official_ir import (
+    IR_COLLECTED_ON_FIELD,
+    verified_official_ir_fragment_is_usable,
+)
 
 
 CANONICAL_SOURCE_SECTION_IDS: tuple[str, ...] = (
@@ -64,6 +68,18 @@ CANONICAL_SOURCE_SECTION_IDS: tuple[str, ...] = (
 _SELF_PUBLISHED_FRAGMENT_KINDS = frozenset(
     {"사업", "사업내용", "MD&A", "전략", "신규사업전망", "홈페이지"}
 )
+
+
+def _fragment_is_self_published(fragment: Mapping[str, Any]) -> bool:
+    """DART 공시·공식 웹과 메타·법인 결속된 IR만 자사 원문으로 본다."""
+
+    kind = str(fragment.get("종류") or "")
+    if kind in _SELF_PUBLISHED_FRAGMENT_KINDS:
+        return True
+    return kind == "공식 IR" and verified_official_ir_fragment_is_usable(
+        fragment,
+        reference_date=str(fragment.get(IR_COLLECTED_ON_FIELD) or ""),
+    )
 _SUBJECT_LABEL_REQUIRED_CLAIM_TYPES = frozenset(
     {
         "customer_market",
@@ -803,7 +819,8 @@ def select_canonical_spans(
         if fragment_id is None:
             rejected.append({"sid": sid, "reason": "원문 조각 없음"})
             continue
-        fragment_kind = str(frags.get(fragment_id, {}).get("종류") or "")
+        fragment = frags.get(fragment_id, {})
+        fragment_kind = str(fragment.get("종류") or "")
         if claim_type not in CLAIM_TYPES_BY_SECTION.get(section_id, frozenset()):
             rejected.append({"sid": sid, "reason": "섹션과 claim_type 불일치"})
             continue
@@ -1023,7 +1040,7 @@ def select_canonical_spans(
             ) or (
                 claim_type == "partner_role"
                 and relationship_type == "distribution"
-                and fragment_kind in _SELF_PUBLISHED_FRAGMENT_KINDS
+                and _fragment_is_self_published(fragment)
                 and has_executed_current_distribution_partnership(
                     sentence,
                     operation_role,
@@ -1039,7 +1056,7 @@ def select_canonical_spans(
                     sentence,
                     company,
                     allow_self_reference=(
-                        fragment_kind in _SELF_PUBLISHED_FRAGMENT_KINDS
+                        _fragment_is_self_published(fragment)
                     ),
                 )
             ):
@@ -1051,7 +1068,7 @@ def select_canonical_spans(
                     sentence,
                     company,
                     allow_self_reference=(
-                        fragment_kind in _SELF_PUBLISHED_FRAGMENT_KINDS
+                        _fragment_is_self_published(fragment)
                     ),
                 )
             ):

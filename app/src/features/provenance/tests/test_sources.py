@@ -14,6 +14,8 @@ from src.features.provenance import sources as sources_module
 
 import pytest
 
+from src.shared.official_ir import IR_DART_WWW_REDIRECT_VALUE
+
 from src.features.provenance.sources import (
     Source,
     SourceKind,
@@ -337,21 +339,25 @@ def test_official_other_domain_requires_independent_filing_evidence_binding():
 
 
 @pytest.mark.parametrize(
-    ("hm_url", "website_host", "extra_field", "expected"),
+    ("hm_url", "website_host", "extra_field", "redirect_marker", "expected"),
     [
-        ("jype.com", "jype.com", False, True),
-        ("http://jype.com", "jype.com", False, True),
-        ("https://jype.com", "jype.com", False, True),
-        ("https://user@jype.com", "jype.com", False, False),
-        ("https://jype.com:8443", "jype.com", False, False),
-        ("http://127.0.0.1", "127.0.0.1", False, False),
-        ("jype.com", "jype.com", True, False),
+        ("jype.com", "jype.com", False, False, True),
+        ("http://jype.com", "jype.com", False, False, True),
+        ("https://jype.com", "jype.com", False, False, True),
+        ("https://jype.com", "www.jype.com", False, False, False),
+        ("https://jype.com", "www.jype.com", False, True, True),
+        ("https://jype.com", "ir.jype.com", False, True, False),
+        ("https://user@jype.com", "jype.com", False, False, False),
+        ("https://jype.com:8443", "jype.com", False, False, False),
+        ("http://127.0.0.1", "127.0.0.1", False, False, False),
+        ("jype.com", "jype.com", True, False, False),
     ],
 )
 def test_DART_profile_JSON만_scheme없는_공식host를_안전하게_증명한다(
     hm_url: str,
     website_host: str,
     extra_field: bool,
+    redirect_marker: bool,
     expected: bool,
 ) -> None:
     profile = {
@@ -401,11 +407,16 @@ def test_DART_profile_JSON만_scheme없는_공식host를_안전하게_증명한�
             url=f"https://{website_host}/about",
             document_id="about",
             location="/about",
-            source_type="회사 공식 웹",
+            source_type="회사 공식 IR" if redirect_marker else "회사 공식 웹",
             fact_status="기준일 현재 확인",
             evidence_hashes=[evidence_text_hash("당사는 장비를 공급한다.")],
             domain_attestation_source_id=attester.source_id,
             domain_attestation_evidence=evidence,
+            domain_redirect_verification=(
+                IR_DART_WWW_REDIRECT_VALUE if redirect_marker else ""
+            ),
+            domain_redirect_from_host="jype.com" if redirect_marker else "",
+            domain_redirect_to_host=website_host if redirect_marker else "",
         )
     )
 
@@ -641,6 +652,22 @@ def test_exact_원문해시는_대소문자를_보존하고_HMAC에_결속된다
     )
 
 
+def test_공식IR_실제첨부URL은_HMAC에_결속된다() -> None:
+    source = seal_collected_source(
+        Source(
+            number=9,
+            kind=SourceKind.OTHER,
+            label="26년 2분기 IR자료",
+            attachment_url="https://cdn.example/alpha-q2.pdf",
+        )
+    )
+
+    assert has_valid_provenance_seal(source)
+    assert not has_valid_provenance_seal(
+        replace(source, attachment_url="https://cdn.example/changed.pdf")
+    )
+
+
 @pytest.mark.parametrize(
     ("raw", "normalized"),
     [
@@ -699,6 +726,27 @@ def test_수집일만_있으면_수집일만_적는다():
         number=1, kind=SourceKind.FILING, label="사업보고서", collected_at="2026-08-13"
     )
     assert render_sources([source]) == "[출처]\n [1] 사업보고서\n     수집 2026-08-13"
+
+
+def test_검증된_공식IR은_발행일_기준기간_확인일을_왕복한다():
+    source = Source(
+        number=1,
+        kind=SourceKind.OTHER,
+        label="26년 2분기 IR자료",
+        collected_at="2026-08-24",
+        published_at="2026-08-12",
+        source_type="회사 공식 IR",
+        reporting_period="2026-Q2",
+    )
+
+    rendered = render_sources([source])
+
+    assert rendered == (
+        "[출처]\n"
+        " [1] 26년 2분기 IR자료\n"
+        "     발행 2026-08-12 · 기준 2026-Q2 · 확인 2026-08-24"
+    )
+    assert parse_sources(rendered) == [source]
 
 
 def test_날짜가_전혀_없으면_둘째_줄이_없다():

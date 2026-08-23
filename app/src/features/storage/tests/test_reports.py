@@ -330,6 +330,46 @@ def test_load_missing_report_returns_none(tmp_path: Path) -> None:
         assert reports.load(conn, "없는-아이디") is None
 
 
+def test_공식IR_실제첨부URL은_JSON왕복에서_보존된다() -> None:
+    source = seal_collected_source(
+        Source(
+            number=1,
+            kind=SourceKind.OTHER,
+            label="26년 2분기 IR자료",
+            published_at="2026-08-12",
+            collected_at="2026-08-24",
+            reporting_period="2026-Q2",
+            attachment_url="https://cdn.example/alpha-q2.pdf",
+            domain_redirect_verification="https_apex_to_www_redirect",
+            domain_redirect_from_host="alpha.example",
+            domain_redirect_to_host="www.alpha.example",
+        )
+    )
+    original = Report(
+        company="가나다전자",
+        job="",
+        corp_type="상장사",
+        grade=Grade.PARTIAL,
+        sections=[],
+        citations=[source],
+    )
+
+    restored = reports.report_from_json(reports.report_to_json(original))
+
+    assert restored.citations == [source]
+    restored_source = restored.citations[0]
+    assert has_valid_provenance_seal(restored_source)
+    assert not has_valid_provenance_seal(
+        replace(restored_source, reporting_period="2026-Q1")
+    )
+    assert not has_valid_provenance_seal(
+        replace(restored_source, attachment_url="https://cdn.example/changed.pdf")
+    )
+    assert not has_valid_provenance_seal(
+        replace(restored_source, domain_redirect_verification="검증되지_않음")
+    )
+
+
 def test_v3_roundtrip_preserves_semantic_metadata_fact_ledger_and_sources() -> None:
     source = Source(
         number=1,

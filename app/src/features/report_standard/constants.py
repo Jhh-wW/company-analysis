@@ -87,6 +87,12 @@ CURRENT_CHALLENGES_SHORTFALL_REASON: Final[str] = (
     "뜻은 아닙니다."
 )
 
+CURRENT_RESPONSE_SHORTFALL_REASON: Final[str] = (
+    "공식 자료에서 기준일 현재 미해결 과제는 확인했지만 회사가 이미 시작한 대응을 "
+    "같은 과제에 연결하지 못해 5장은 확인된 과제만 제공합니다. 회사가 대응하지 "
+    "않는다는 뜻은 아닙니다."
+)
+
 CULTURE_SHORTFALL_REASON: Final[str] = (
     "공식 채용·문화 자료에서 전사 가치 또는 확인 가능한 업무 사례를 확보하지 "
     "못해 8장 인재상과 일하는 방식은 제공하지 않았습니다. 조직문화가 없다는 "

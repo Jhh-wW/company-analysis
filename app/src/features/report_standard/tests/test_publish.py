@@ -36,6 +36,7 @@ from src.features.report_standard.constants import (
     CUSTOMER_MARKET_SHORTFALL_REASON,
     CULTURE_SHORTFALL_REASON,
     CURRENT_CHALLENGES_SHORTFALL_REASON,
+    CURRENT_RESPONSE_SHORTFALL_REASON,
     IDENTITY_SUMMARY_SHORTFALL_REASON,
     MINIMUM_CORE_SECTION_IDS,
     PARTIAL_SECTION_SHORTFALL_REASONS,
@@ -148,6 +149,52 @@ def _with_table_only_past(report: Report) -> Report:
         ],
     )
     replacement_summary = _summary_for_fact(report, "past-fin-2025")
+    return replace(
+        report,
+        summary_items=[
+            replacement_summary if item.section_id == "past_changes" else item
+            for item in report.summary_items
+        ],
+    )
+
+
+def _with_execution_only_past(report: Report) -> Report:
+    """4장의 검증 완료 실행과 3개년 표만 남기고 해석 문장은 제거한다."""
+
+    kept_ids = {
+        fact.fact_id
+        for fact in report.fact_records
+        if fact.section_owner == "past_changes"
+        and fact.claim_type in {"completed_execution", "historical_performance"}
+    }
+    execution = next(
+        fact
+        for fact in report.fact_records
+        if fact.section_owner == "past_changes"
+        and fact.claim_type == "completed_execution"
+    )
+    report = replace(
+        report,
+        sections=[
+            replace(
+                section,
+                fact_ids=[fact_id for fact_id in section.fact_ids if fact_id in kept_ids],
+                prose_lines=[
+                    line for line in section.prose_lines if line[0] == execution.claim
+                ],
+                lines=[line for line in section.lines if line[0] == execution.claim],
+            )
+            if section.cell == "past_changes"
+            else section
+            for section in report.sections
+        ],
+        fact_records=[
+            fact
+            for fact in report.fact_records
+            if fact.section_owner != "past_changes" or fact.fact_id in kept_ids
+        ],
+    )
+    replacement_summary = _summary_for_fact(report, execution.fact_id)
     return replace(
         report,
         summary_items=[
@@ -742,7 +789,7 @@ def test_each_missing_optional_section_gets_its_own_standard_shortfall_reason() 
     )
 
 
-def test_partial_current_challenges_still_requires_a_bound_issue_and_response() -> None:
+def test_partial_current_challenges_can_publish_a_verified_issue_without_response() -> None:
     report = _valid_report()
     issue = next(
         fact
@@ -778,12 +825,68 @@ def test_partial_current_challenges_still_requires_a_bound_issue_and_response() 
     )
 
     validation = validate_publishable(report)
+    published = build_published_report(report)
+
+    assert validation.publishable is True, validation.reasons
+    assert published.grade is Grade.PARTIAL
+    assert CURRENT_RESPONSE_SHORTFALL_REASON in published.shortfall_reasons
+    published_current = next(
+        section
+        for section in published.sections
+        if section.cell == "current_challenges"
+    )
+    fields = {
+        field.label: field.value
+        for block in section_content_blocks(published, published_current)
+        for field in block.fields
+    }
+    assert fields["진행 중 대응"] == "공식 근거에서 착수한 대응을 확인하지 못함"
+
+
+def test_current_response_without_its_issue_is_still_blocked() -> None:
+    report = _valid_report()
+    response = next(
+        fact
+        for fact in report.fact_records
+        if fact.section_owner == "current_challenges"
+        and fact.claim_type == "current_response"
+    )
+    current = next(
+        section for section in report.sections if section.cell == "current_challenges"
+    )
+    response_lines = [
+        line for line in current.prose_lines if line[0] == response.claim
+    ]
+    report = replace(
+        report,
+        sections=[
+            replace(
+                section,
+                fact_ids=[response.fact_id],
+                prose_lines=response_lines,
+                lines=list(response_lines),
+            )
+            if section.cell == "current_challenges"
+            else section
+            for section in report.sections
+        ],
+        fact_records=[
+            fact
+            for fact in report.fact_records
+            if fact.section_owner != "current_challenges"
+            or fact.fact_id == response.fact_id
+        ],
+        summary_items=[
+            item
+            for item in report.summary_items
+            if item.section_id != "current_challenges"
+        ],
+    )
+
+    validation = validate_publishable(report)
 
     assert validation.publishable is False
-    assert any(
-        "미해결 문제와 실제 대응이 모두 필요" in reason
-        for reason in validation.reasons
-    )
+    assert any("실제 대응은 같은 장의 미해결 문제" in reason for reason in validation.reasons)
 
 
 def test_summary_requires_fact_binding_exact_evidence_and_reuse_status() -> None:
@@ -1171,23 +1274,76 @@ def test_past_requires_exact_three_recent_completed_fiscal_years() -> None:
     assert any("2023~2025" in reason for reason in validation.reasons)
 
 
-def test_past_requires_completed_execution_and_visible_interpretation() -> None:
-    report = _replace_fact(
-        _replace_fact(
-            _valid_report(),
-            "past-change-finance-01",
-            claim_type="completed_execution",
-            basis_fact_ids=[],
-        ),
-        "past-change-01",
-        claim_type="completed_execution",
-        basis_fact_ids=[],
+def test_past_completed_execution_without_interpretation_publishes_partial() -> None:
+    report = _with_execution_only_past(_valid_report())
+
+    validation = validate_publishable(report)
+    published = build_published_report(report)
+
+    assert validation.publishable is True, validation.reasons
+    assert published.grade is Grade.PARTIAL
+    assert PAST_NARRATIVE_SHORTFALL_REASON in published.shortfall_reasons
+    published_past = next(
+        section for section in published.sections if section.cell == "past_changes"
+    )
+    fields = {
+        field.label: field.value
+        for block in section_content_blocks(published, published_past)
+        for field in block.fields
+    }
+    assert fields["확인된 결과·의미"] == "공식 근거에서 결과를 별도로 확인하지 못함"
+
+
+def test_past_interpretation_without_completed_execution_is_still_blocked() -> None:
+    report = _valid_report()
+    execution_ids = {
+        fact.fact_id
+        for fact in report.fact_records
+        if fact.section_owner == "past_changes"
+        and fact.claim_type == "completed_execution"
+    }
+    report = replace(
+        report,
+        sections=[
+            replace(
+                section,
+                fact_ids=[
+                    fact_id
+                    for fact_id in section.fact_ids
+                    if fact_id not in execution_ids
+                ],
+                prose_lines=[
+                    line
+                    for line in section.prose_lines
+                    if all(
+                        line[0] != fact.claim
+                        for fact in report.fact_records
+                        if fact.fact_id in execution_ids
+                    )
+                ],
+                lines=[
+                    line
+                    for line in section.lines
+                    if all(
+                        line[0] != fact.claim
+                        for fact in report.fact_records
+                        if fact.fact_id in execution_ids
+                    )
+                ],
+            )
+            if section.cell == "past_changes"
+            else section
+            for section in report.sections
+        ],
+        fact_records=[
+            fact for fact in report.fact_records if fact.fact_id not in execution_ids
+        ],
     )
 
     validation = validate_publishable(report)
 
     assert validation.publishable is False
-    assert any("변화·실행 해석" in reason for reason in validation.reasons)
+    assert any("확인된 완료 실행 사실이 필요" in reason for reason in validation.reasons)
 
 
 def test_past_interpretation_with_multiple_execution_bases_is_publishable_once(

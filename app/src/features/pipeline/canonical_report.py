@@ -29,6 +29,7 @@ from src.features.provenance.sources import (
     Source,
     evidence_text_hash,
     is_canonical_official_with_registry,
+    official_ir_source_is_usable,
     official_web_currentness_is_usable,
     source_type_is_official_ir,
 )
@@ -189,12 +190,12 @@ def missing_minimum_written_roles(
 def _prune_unbound_optional_claims(
     claims: Iterable[WrittenClaim],
 ) -> list[WrittenClaim]:
-    """Writer·Reviewer 뒤 끊어진 선택형 묶음을 원자적으로 생략한다.
+    """Writer·Reviewer 뒤 끊어진 관계 중 독립 검증할 수 없는 쪽만 생략한다.
 
     선택 단계에서 완결됐던 제품→수익, 문제→대응, 실행→해석 관계도 Writer나
-    Reviewer가 한쪽 문장을 삭제하면 다시 불완전해질 수 있다. 끊어진 한쪽만
-    공개하거나 그 때문에 검증된 최소 보고서 전체를 막지 않고, 해당 선택 묶음만
-    모두 제외한다. 정체성·수익 구조 같은 최소 핵심 사실은 이 함수가 지우지 않는다.
+    Reviewer가 한쪽 문장을 삭제하면 다시 불완전해질 수 있다. 제품의 수익 연결,
+    대응의 문제 연결, 해석의 실행 근거는 계속 필수로 두되, 원문만으로 완결되는
+    미해결 문제와 완료 실행은 단독으로 보존한다.
     """
 
     items = list(claims)
@@ -203,7 +204,8 @@ def _prune_unbound_optional_claims(
         item.sid for item in items if item.claim_type == "revenue_model" and item.sid
     }
 
-    # 현재 문제·대응은 양쪽이 같은 SID 관계로 남을 때만 함께 공개한다.
+    # 대응은 같은 답에 남은 문제를 가리켜야 한다. 문제 자체는 원문·미해결 상태·
+    # 다음 확인 지표를 독립 검증했으므로 대응이 탈락해도 보존한다.
     issues = {
         item.sid: item
         for item in items
@@ -216,21 +218,14 @@ def _prune_unbound_optional_claims(
         and item.sid
         and item.response_to_sid in issues
     }
-    paired_issue_sids = {
-        item.response_to_sid
-        for item in items
-        if item.sid in valid_response_sids
-    }
-
     # 변화 해석은 남아 있는 완료 실행이나 프로그램 생성 3개년 사실만 참조한다.
-    execution_sid_order = [
+    # 완료 실행 자체는 원문·완료 상태·사건일 검증을 통과했으므로 단독 보존한다.
+    execution_sids = {
         item.sid
         for item in items
         if item.claim_type == "completed_execution" and item.sid
-    ]
-    execution_sids = set(execution_sid_order)
+    }
     valid_interpretation_sids: set[str] = set()
-    referenced_execution_sids: set[str] = set()
     for item in items:
         if item.claim_type != "change_interpretation" or not item.sid:
             continue
@@ -242,10 +237,9 @@ def _prune_unbound_optional_claims(
             for value in bases
             if re.fullmatch(r"historical-performance:20\d{2}", value) is None
         }
-        if not execution_sid_order or not internal <= execution_sids:
+        if not execution_sids or not internal <= execution_sids:
             continue
         valid_interpretation_sids.add(item.sid)
-        referenced_execution_sids.update(internal or {execution_sid_order[0]})
 
     out: list[WrittenClaim] = []
     for item in items:
@@ -253,13 +247,7 @@ def _prune_unbound_optional_claims(
             not item.revenue_model_sid or item.revenue_model_sid not in revenue_sids
         ):
             continue
-        if item.claim_type == "current_issue" and item.sid not in paired_issue_sids:
-            continue
         if item.claim_type == "current_response" and item.sid not in valid_response_sids:
-            continue
-        if item.claim_type == "completed_execution" and (
-            item.sid not in referenced_execution_sids
-        ):
             continue
         if item.claim_type == "change_interpretation" and (
             item.sid not in valid_interpretation_sids
@@ -564,7 +552,8 @@ def basic_report_selection_subset(
             chosen.add(index)
             business_count += 1
 
-    # 4장: 변화 해석과 그 내부 완료 실행 근거를 한 묶음으로 고른다.
+    # 4장: 변화 해석과 그 내부 완료 실행 근거를 먼저 묶고, 남는 검증 완료
+    # 실행은 해석을 만들지 않은 채 장별 상한까지 보존한다.
     past = by_section.get("past_changes", [])
     executions = {
         item.sid: (index, item)
@@ -601,8 +590,7 @@ def basic_report_selection_subset(
                 past_selected.update(dependencies)
                 past_selected.add(index)
                 break
-        # 완료 실행만 단독 공개하지 않는다. 변화 해석과 안전한 첫 묶음이 생긴
-        # 경우에만 기존 순서·상한대로 추가 완료 실행과 해석을 보탠다.
+        # 완결된 첫 묶음이 있으면 기존 순서·상한대로 추가 실행과 해석을 보탠다.
         if past_selected:
             for index, item in past:
                 if len(past_selected) >= _PROSE_LIMITS["past_changes"]:
@@ -623,9 +611,15 @@ def basic_report_selection_subset(
                     ):
                         past_selected.update(missing)
                         past_selected.add(index)
+        for index, item in past:
+            if len(past_selected) >= _PROSE_LIMITS["past_changes"]:
+                break
+            if item.claim_type == "completed_execution":
+                past_selected.add(index)
     chosen.update(past_selected)
 
-    # 5장: 독립 문제·대응 쌍만 최대 세 묶음 보존한다.
+    # 5장: 결속된 문제·대응 쌍을 우선하고, 남는 검증 문제는 대응을 지어내지
+    # 않은 채 최대 세 과제까지 보존한다.
     current = by_section.get("current_challenges", [])
     issues = {
         item.sid: (index, item)
@@ -644,6 +638,12 @@ def basic_report_selection_subset(
         selected_issue_sids.add(response.response_to_sid)
         if len(current_selected) >= _PROSE_LIMITS["current_challenges"]:
             break
+    maximum_issues = _PROSE_LIMITS["current_challenges"] // 2
+    for issue_sid, (index, _issue) in issues.items():
+        if len(selected_issue_sids) >= maximum_issues:
+            break
+        current_selected.add(index)
+        selected_issue_sids.add(issue_sid)
     chosen.update(current_selected)
 
     # 6~7장은 근거가 있을 때 허용 사실을 원문 순서대로 공개 상한까지만 둔다.
@@ -1121,8 +1121,14 @@ def supplement_missing_minimum_claims_once(
 
 def _source_date(source: Source) -> str:
     if source_type_is_official_ir(source.source_type):
-        # 현재 IR PDF 수집 계약에는 신뢰 가능한 문서 발표일·기준일이 없다.
-        return ""
+        return (
+            source.published_at
+            if official_ir_source_is_usable(
+                source,
+                reference_date=source.collected_at or source.published_at,
+            )
+            else ""
+        )
     if not official_web_currentness_is_usable(
         source_type=source.source_type,
         url=source.url,
@@ -1512,14 +1518,17 @@ def assemble_report(
         source
         for source in source_registry
         if is_canonical_official_with_registry(source, source_registry)
-        and not source_type_is_official_ir(source.source_type)
-        and official_web_currentness_is_usable(
-            source_type=source.source_type,
-            url=source.url,
-            published_at=source.published_at,
-            disclosed_at=source.disclosed_at,
-            collected_at=source.collected_at,
-            reference_date=as_of_date,
+        and (
+            official_ir_source_is_usable(source, reference_date=as_of_date)
+            if source_type_is_official_ir(source.source_type)
+            else official_web_currentness_is_usable(
+                source_type=source.source_type,
+                url=source.url,
+                published_at=source.published_at,
+                disclosed_at=source.disclosed_at,
+                collected_at=source.collected_at,
+                reference_date=as_of_date,
+            )
         )
     ]
     source_numbers = [source.number for source in valid_sources]

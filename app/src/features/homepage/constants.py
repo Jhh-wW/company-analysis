@@ -101,7 +101,7 @@ MAX_IR_RAW_CHARS_PER_PAGE: Final[int] = 12_000
 MAX_IR_WORKER_OUTPUT_BYTES: Final[int] = 4 * 1024 * 1024
 
 #: 대상 법인명·별칭이 실제로 나타나는지 확인할 PDF 앞쪽 페이지 수.
-IR_IDENTITY_CHECK_PAGES: Final[int] = 2
+IR_IDENTITY_CHECK_PAGES: Final[int] = 4
 
 #: PDF 한 파일에서 근거 조각으로 보존하는 최대 글자 수.
 MAX_IR_CHARS_PER_DOCUMENT: Final[int] = 12_000
@@ -136,23 +136,29 @@ FRAGMENT_KIND: Final[str] = "홈페이지"
 #: 먼저 읽는다. 앞에 있는 것일수록 더 먼저다.
 #: 정본: 확정/05_생성/2_규칙/02_유형별소스.md — 2·4-2·4-3 칸은 홈페이지의
 #: 회사소개·R&D·제품 소개가 재료다.
-#: ★ 「비전·IR·보도자료」를 앞에 둔다 (문제로그 P-106).
-#:   실제 합격 자소서 3건이 전부 **「전략 선언·슬로건 변경」**을 근거로 썼다
-#:   (「가전의 지배자에서 '스마트 라이프 솔루션'을 선포하며…」 — 2026-08-16 조사).
-#:   그런 문장은 `vision`·`ir`·`press` 페이지에 있는데, 이 목록에 없어서
-#:   **최대 6쪽 상한에 밀려 사실상 한 번도 안 읽혔다.**
+#: 일반 홈페이지 HTML은 회사소개·사업과 P-106에서 필요성이 확인된
+#: 비전·보도자료를 먼저 읽는다. IR 자료실과 PDF는 별도 공식 IR 수집기가
+#: 담당하므로, IR·주가·실적 목록이 6쪽 예산을 먼저 소진해 핵심 페이지를
+#: 놓치게 하면 안 된다.
 PRIORITY_PATH_KEYWORDS: Final[tuple[str, ...]] = (
-    "ir-data",
-    "irdata",
-    "earnings",
-    "result",
-    "실적",
+    "about",
+    "business",
     "vision",
-    "ir",
     "press",
+    "strategy",
     "news",
-    "esg",
-    "sustainability",
+    "companyintro",
+    "introduce",
+    "greeting",
+    "company",
+    "product",
+    "products",
+    "service",
+    "tech",
+    "technology",
+    "rnd",
+    "r&d",
+    "research",
     "career",
     "careers",
     "recruit",
@@ -163,20 +169,60 @@ PRIORITY_PATH_KEYWORDS: Final[tuple[str, ...]] = (
     "채용",
     "인재",
     "문화",
-    "about",
-    "company",
-    "companyintro",
-    "introduce",
-    "greeting",
-    "tech",
-    "technology",
-    "rnd",
-    "r&d",
-    "research",
-    "product",
-    "products",
-    "business",
-    "service",
+    "esg",
+    "sustainability",
+    "ir-data",
+    "irdata",
+    "earnings",
+    "result",
+    "실적",
+    "financial",
+    "finance",
+    "stock",
+    "shareholder",
+    "ir",
+)
+
+#: 회사명이 일반적인 ``about`` 경로가 아닌 브랜드 경로에 들어간 사이트를 위한
+#: 최소 길이. ``/ko``·``/en`` 같은 언어 경로는 길이 단계에서 먼저 제외된다.
+BRAND_PATH_MIN_TOKEN_CHARS: Final[int] = 3
+
+#: 등록 도메인 핵심 이름과 브랜드 경로가 prefix 관계일 때 허용하는 최대 차이.
+#: 예: ``jype.com`` ↔ ``/JYP``는 1글자 차이라 허용한다. 짧은 우연 일치가
+#: 전혀 다른 경로를 회사소개로 올리는 것은 막는다.
+BRAND_PATH_MAX_PREFIX_GAP: Final[int] = 2
+
+#: 등록 도메인과 경로에 우연히 같은 일반 단어가 있어도 브랜드 소개로 보지
+#: 않는다. 언어코드는 최소 길이보다 짧지만 정책을 눈에 보이게 함께 적는다.
+BRAND_PATH_EXCLUDED_TOKENS: Final[frozenset[str]] = frozenset(
+    {
+        "ko",
+        "en",
+        "ja",
+        "jp",
+        "zh",
+        "cn",
+        "es",
+        "fr",
+        "de",
+        "company",
+        "corporate",
+        "corporation",
+        "business",
+        "enterprise",
+        "enterprises",
+        "group",
+        "global",
+        "holdings",
+        "official",
+        "home",
+        "main",
+        "about",
+        "ir",
+        "esg",
+        "news",
+        "press",
+    }
 )
 
 #: 이 확장자로 끝나는 링크는 따라가지 않는다. 문서·이미지·미디어 파일은

@@ -39,6 +39,11 @@ from src.features.spanselect.canonical import (
     historical_performance_basis_sid,
 )
 from src.features.writer.logic import Sentence
+from src.shared.official_ir import (
+    IR_METADATA_VERIFICATION_FIELD,
+    IR_METADATA_VERIFICATION_VALUE,
+    IR_REPORTING_PERIOD_FIELD,
+)
 
 
 def _source(number: int, evidence: str = "공식 원문") -> Source:
@@ -74,7 +79,7 @@ def test_majority_vote_drops_cross_section_tie() -> None:
     assert majority_picks(rounds) == [same]
 
 
-def test_Writer뒤_끊어진_선택형_관계는_묶음전체를_생략한다() -> None:
+def test_Writer뒤_끊어진_관계는_독립검증할수없는_쪽만_생략한다() -> None:
     revenue = WrittenClaim(
         "business_model", "수익 구조", "조각 1·사업", "수익 구조", 1,
         sid="revenue-1", claim_type="revenue_model",
@@ -105,7 +110,7 @@ def test_Writer뒤_끊어진_선택형_관계는_묶음전체를_생략한다() 
 
     assert _prune_unbound_optional_claims(
         [revenue, product, issue, response, execution, interpretation]
-    ) == [revenue]
+    ) == [revenue, issue, execution]
 
 
 def test_Writer뒤_완결된_선택형_관계는_함께_유지한다() -> None:
@@ -570,26 +575,44 @@ def test_정체성요약이_없어도_공식자기정의로_부분보고서만_�
     )
 
 
-def test_불완전한_선택형_과거묶음은_빼고_삼개년표_부분보고서를_유지한다() -> None:
+def test_완료실행은_해석이_없어도_부분보고서에_보존한다() -> None:
     bases = {
         "historical-performance:2023",
         "historical-performance:2024",
         "historical-performance:2025",
     }
 
-    for missing_claim_type in ("completed_execution", "change_interpretation"):
-        picks = [
-            item
-            for item in _complete_basic_picks()
-            if item.claim_type != missing_claim_type
-        ]
-        subset = basic_report_selection_subset(
-            picks,
-            historical_performance_bases=bases,
-        )
+    picks = [
+        item
+        for item in _complete_basic_picks()
+        if item.claim_type != "change_interpretation"
+    ]
+    subset = basic_report_selection_subset(
+        picks,
+        historical_performance_bases=bases,
+    )
 
-        assert subset
-        assert not any(item.section_id == "past_changes" for item in subset)
+    assert any(item.claim_type == "completed_execution" for item in subset)
+
+
+def test_근거실행이_없는_변화해석은_부분보고서에서_생략한다() -> None:
+    picks = [
+        item
+        for item in _complete_basic_picks()
+        if item.claim_type != "completed_execution"
+    ]
+
+    subset = basic_report_selection_subset(
+        picks,
+        historical_performance_bases={
+            "historical-performance:2023",
+            "historical-performance:2024",
+            "historical-performance:2025",
+        },
+    )
+
+    assert subset
+    assert not any(item.section_id == "past_changes" for item in subset)
 
 
 def test_최소_부분보고서_선택이_성립하면_한번으로_충분하다() -> None:
@@ -831,7 +854,7 @@ def test_최소_부분보고서는_삼개년표가_깨지면_성립하지_않는
     )
 
 
-def test_현재과제는_완결된_문제대응쌍만_선택하고_불완전하면_생략한다() -> None:
+def test_현재문제는_대응연결이_깨져도_문제사실만_보존한다() -> None:
     broken_current = [
         replace(item, response_to_sid="없는-SID")
         if item.claim_type == "current_response"
@@ -849,7 +872,10 @@ def test_현재과제는_완결된_문제대응쌍만_선택하고_불완전하�
     )
 
     assert subset
-    assert not any(item.section_id == "current_challenges" for item in subset)
+    current = [
+        item for item in subset if item.section_id == "current_challenges"
+    ]
+    assert [item.claim_type for item in current] == ["current_issue"]
 
 
 def test_assemble_report_locks_visible_claims_to_sources() -> None:
@@ -1153,6 +1179,80 @@ def test_문서일_미결속_공식IR은_registry가_유효해도_canonical_fact
     assert report.sections == []
     assert report.fact_records == []
     assert report.citations == []
+
+
+def test_발행일_기준기간_DART법인이_모두_결속된_공식IR만_canonical_fact가_된다() -> None:
+    evidence = "주식회사 알파는 반도체 검사 장비 기업입니다."
+    fragments = {
+        1: {
+            "종류": "공식 IR",
+            "원문": evidence,
+            "출처": "https://alpha.example/ir/2026-q2",
+            "첨부URL": "https://cdn.example/alpha-2q26.pdf",
+            "문서일": "2026-08-12",
+            IR_REPORTING_PERIOD_FIELD: "2026-Q2",
+            IR_METADATA_VERIFICATION_FIELD: IR_METADATA_VERIFICATION_VALUE,
+            "문서ID": "b" * 64,
+            "문서명": "26년 2분기 IR자료",
+            "원문위치": "PDF p.2 1문단 · pypdf 6.16.1",
+            VERIFIED_FINAL_URL_FIELD: VERIFIED_FINAL_URL_VALUE,
+        }
+    }
+    bound = bind_dart_profile_attestation(
+        fragments,
+        profile={
+            "status": "000",
+            "corp_code": "00000001",
+            "corp_name": "주식회사 알파",
+            "hm_url": "alpha.example",
+        },
+        corp_code="00000001",
+        company_name="주식회사 알파",
+        collected_on="2026-08-23",
+    )
+    sources = build_citations(
+        bound.fragments,
+        filing=None,
+        collected_on=date(2026, 8, 23),
+        company_publisher="주식회사 알파",
+    )
+    assert bound.attester is not None
+    sources.append(bound.attester)
+    ir_source = next(item for item in sources if item.source_type == "회사 공식 IR")
+    assert ir_source.published_at == "2026-08-12"
+    assert ir_source.reporting_period == "2026-Q2"
+
+    pick = CanonicalPick(
+        "identity", evidence, 1, sid="1-1", claim_type="identity_summary"
+    )
+    report = assemble_report(
+        company="주식회사 알파",
+        corp_type="상장사",
+        sections=sections_from_picks([pick], bound.fragments),
+        written_claims=[
+            WrittenClaim(
+                "identity",
+                evidence,
+                "조각 1·공식 IR",
+                evidence,
+                1,
+                sid="1-1",
+                claim_type="identity_summary",
+            )
+        ],
+        sources=sources,
+        summary_ask=lambda *_args: ({"items": []}, {}),
+        steps=[],
+        as_of_date="2026-08-23",
+        analysis_period="2023~2025 완료 회계연도",
+        latest_performance_period="2026년 2분기",
+        publish=False,
+    )
+
+    assert len(report.sections) == 1
+    assert len(report.fact_records) == 1
+    assert report.fact_records[0].source_date == "2026-08-12"
+    assert any(item.source_type == "회사 공식 IR" for item in report.citations)
 
 
 def test_오래된_newsroom_공식웹은_registry가_유효해도_canonical_fact가_아니다() -> None:

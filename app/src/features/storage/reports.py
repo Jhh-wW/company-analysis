@@ -187,6 +187,16 @@ def _citation_to_dict(citation: object) -> dict[str, Any]:
     # 빈 목록은 이 필드가 없던 저장 JSON과 release digest를 그대로 유지한다.
     if citation.exact_evidence_hashes:
         payload["exact_evidence_hashes"] = list(citation.exact_evidence_hashes)
+    if citation.reporting_period:
+        payload["reporting_period"] = citation.reporting_period
+    if citation.attachment_url:
+        payload["attachment_url"] = citation.attachment_url
+    if citation.domain_redirect_verification:
+        payload["domain_redirect_verification"] = citation.domain_redirect_verification
+    if citation.domain_redirect_from_host:
+        payload["domain_redirect_from_host"] = citation.domain_redirect_from_host
+    if citation.domain_redirect_to_host:
+        payload["domain_redirect_to_host"] = citation.domain_redirect_to_host
     return payload
 
 
@@ -198,6 +208,11 @@ def _citation_from_dict(data: dict[str, Any]) -> Source:
         disclosed_at=data.get("disclosed_at", ""),
         collected_at=data.get("collected_at", ""),
         published_at=data.get("published_at", ""),
+        reporting_period=data.get("reporting_period", ""),
+        attachment_url=data.get("attachment_url", ""),
+        domain_redirect_verification=data.get("domain_redirect_verification", ""),
+        domain_redirect_from_host=data.get("domain_redirect_from_host", ""),
+        domain_redirect_to_host=data.get("domain_redirect_to_host", ""),
         domain=data.get("domain", ""),
         source_id=data.get("source_id", ""),
         title=data.get("title", ""),

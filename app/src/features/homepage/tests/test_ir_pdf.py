@@ -38,10 +38,74 @@ from src.features.homepage.ir_pdf import (
     collect_official_ir_fragments,
 )
 from src.features.homepage.safe_http import UnsafeHomepageUrlError
+from src.shared.official_ir import (
+    IR_ATTACHMENT_URL_FIELD,
+    IR_DART_WWW_REDIRECT_FIELD,
+    IR_DART_WWW_REDIRECT_FROM_FIELD,
+    IR_DART_WWW_REDIRECT_TO_FIELD,
+    IR_DART_WWW_REDIRECT_VALUE,
+    IR_METADATA_VERIFICATION_FIELD,
+    IR_METADATA_VERIFICATION_VALUE,
+    IR_REPORTING_PERIOD_FIELD,
+    extract_official_ir_anchor_metadata,
+    official_ir_time_is_usable,
+)
 
 
 ROOT = "https://company.example/"
 ROBOTS = "https://company.example/robots.txt"
+
+
+def test_JYP형_anchor의_exact_ISO날짜와_분기만_문서메타로_바꾼다():
+    assert extract_official_ir_anchor_metadata(
+        "26년 2분기 IR자료 2026-08-12"
+    ) == ("2026-08-12", "2026-Q2")
+    assert extract_official_ir_anchor_metadata(
+        "25년 4분기 IR자료 2026-03-10"
+    ) == ("2026-03-10", "2025-Q4")
+    # 다른 날짜가 두 개면 최신일을 임의로 고르지 않는다.
+    assert extract_official_ir_anchor_metadata(
+        "26년 2분기 2026-08-12 수정 2026-08-13"
+    ) == ("", "2026-Q2")
+
+
+def test_FY26_Q2_영문라벨은_연간이_아니라_2분기로_읽는다():
+    assert extract_official_ir_anchor_metadata(
+        "DATA & MATERIALS FY26 Q2 Earnings Result 2026-08-12"
+    ) == ("2026-08-12", "2026-Q2")
+
+
+def test_IR자료실은_주가페이지보다_탐색우선순위가_높다():
+    links = [
+        ir_pdf._DiscoveredLink("https://company.example/IR/Stock", "주가", ROOT),
+        ir_pdf._DiscoveredLink(
+            "https://company.example/ko/board/ir-data", "IR 자료", ROOT
+        ),
+    ]
+    assert sorted(links, key=ir_pdf._link_priority)[0].url.endswith("/ir-data")
+
+
+def test_IR기간종료_발행일_수집일_순서와_발행시차를_검증한다():
+    assert official_ir_time_is_usable(
+        published_at="2026-08-12",
+        reporting_period="2026-Q2",
+        reference_date="2026-08-24",
+    )
+    assert not official_ir_time_is_usable(
+        published_at="2026-08-12",
+        reporting_period="2099-Q4",
+        reference_date="2026-08-24",
+    )
+    assert not official_ir_time_is_usable(
+        published_at="2026-08-12",
+        reporting_period="2000-Q1",
+        reference_date="2026-08-24",
+    )
+    assert not official_ir_time_is_usable(
+        published_at="2026-06-15",
+        reporting_period="2026-Q2",
+        reference_date="2026-08-24",
+    )
 
 
 def _pdf_bytes(*pages: str) -> bytes:
@@ -225,6 +289,198 @@ def test_같은_https호스트_ir_pdf를_페이지문단별_공식조각으로_�
     assert "Gamma" not in alpha["원문"]
     assert "Alpha" not in gamma["원문"]
     assert site.html_policy_calls[:2] == [(ROBOTS, False), (ROOT, True)]
+
+
+def test_DART결속_IR상세페이지가_직접_건_CDN_PDF만_날짜기간과_함께_봉인한다():
+    detail_url = "https://company.example/ko/board/ir-data/view/123"
+    attachment_url = "https://d1meds70430yck.cloudfront.net/jyp/2q26.pdf"
+    content = _pdf_bytes(
+        "JYP Ent. investor relations. The company operates artist management services."
+    )
+    site = _FakeSite(
+        html={
+            ROOT: (
+                '<a href="/ko/board/ir-data/view/123">'
+                "26년 2분기 IR자료 2026-08-12</a>"
+            ),
+            detail_url: f'<a href="{attachment_url}">PDF download</a>',
+        }
+    )
+
+    def fetch_pdf(
+        url: str,
+        expected_hostname: str,
+        max_bytes: int,
+        url_allowed: ir_pdf.UrlAllowPredicate,
+    ) -> FetchedIrPdf:
+        assert url == attachment_url
+        assert expected_hostname == "d1meds70430yck.cloudfront.net"
+        assert 0 < max_bytes <= MAX_IR_PDF_BYTES
+        assert url_allowed(url)
+        return FetchedIrPdf(content, attachment_url, "application/pdf")
+
+    result = collect_official_ir_fragments(
+        ROOT,
+        company_name="JYP Ent.",
+        html_fetch=site.fetch_html,
+        pdf_fetch=fetch_pdf,
+    )
+
+    assert result.state == "ok"
+    assert result.fragments
+    assert {item["출처"] for item in result.fragments} == {detail_url}
+    assert {item[IR_ATTACHMENT_URL_FIELD] for item in result.fragments} == {
+        attachment_url
+    }
+    assert {item["문서일"] for item in result.fragments} == {"2026-08-12"}
+    assert {item[IR_REPORTING_PERIOD_FIELD] for item in result.fragments} == {
+        "2026-Q2"
+    }
+    assert {item[IR_METADATA_VERIFICATION_FIELD] for item in result.fragments} == {
+        IR_METADATA_VERIFICATION_VALUE
+    }
+
+
+def test_DART_apex가_실패하면_제한된_www_exact_host에서_IR을_한번_더_확인한다():
+    apex_root = "https://company.example/"
+    alias_root = "https://www.company.example/"
+    alias_robots = "https://www.company.example/robots.txt"
+    pdf_url = "https://www.company.example/ir/2q26.pdf"
+    content = _pdf_bytes(
+        "Example Company investor relations. The company supplies semiconductor equipment."
+    )
+    html_calls: list[tuple[str, str]] = []
+
+    def fetch_html(
+        url: str,
+        expected_hostname: str,
+        url_allowed: ir_pdf.UrlAllowPredicate | None,
+    ) -> FetchedIrHtml:
+        html_calls.append((url, expected_hostname))
+        if expected_hostname == "company.example":
+            raise OfficialIrFetchError("apex는 www로만 서비스됨")
+        assert expected_hostname == "www.company.example"
+        if url == alias_robots:
+            return FetchedIrHtml("", alias_robots)
+        assert url == alias_root
+        assert url_allowed is not None and url_allowed(url)
+        return FetchedIrHtml(
+            '<a href="/ir/2q26.pdf">26년 2분기 IR자료 2026-08-12</a>',
+            alias_root,
+        )
+
+    def fetch_pdf(
+        url: str,
+        expected_hostname: str,
+        max_bytes: int,
+        url_allowed: ir_pdf.UrlAllowPredicate,
+    ) -> FetchedIrPdf:
+        assert url == pdf_url
+        assert expected_hostname == "www.company.example"
+        assert 0 < max_bytes <= MAX_IR_PDF_BYTES
+        assert url_allowed(url)
+        return FetchedIrPdf(content, pdf_url, "application/pdf")
+
+    result = collect_official_ir_fragments(
+        apex_root,
+        company_name="Example Company",
+        html_fetch=fetch_html,
+        pdf_fetch=fetch_pdf,
+        allow_dart_www_alias=True,
+        www_redirect_probe=lambda _apex, alias: alias,
+    )
+
+    assert result.state == "ok"
+    assert "제한된 www 별칭" in result.detail
+    assert ("https://company.example/robots.txt", "company.example") in html_calls
+    assert (alias_robots, "www.company.example") in html_calls
+    assert {fragment["출처"] for fragment in result.fragments} == {pdf_url}
+    assert {fragment[IR_ATTACHMENT_URL_FIELD] for fragment in result.fragments} == {
+        pdf_url
+    }
+    assert {
+        (
+            fragment[IR_DART_WWW_REDIRECT_FIELD],
+            fragment[IR_DART_WWW_REDIRECT_FROM_FIELD],
+            fragment[IR_DART_WWW_REDIRECT_TO_FIELD],
+        )
+        for fragment in result.fragments
+    } == {
+        (
+            IR_DART_WWW_REDIRECT_VALUE,
+            "company.example",
+            "www.company.example",
+        )
+    }
+
+
+@pytest.mark.parametrize(
+    ("effective_url", "expected"),
+    [
+        ("https://www.company.example/", "https://www.company.example/"),
+        ("https://company.example/", ""),
+        ("https://ir.company.example/", ""),
+    ],
+)
+def test_apex_probe는_실제_www_최종host만_승인한다(
+    monkeypatch: pytest.MonkeyPatch,
+    effective_url: str,
+    expected: str,
+) -> None:
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def geturl(self) -> str:
+            return effective_url
+
+    def fake_safe_urlopen(
+        request: urllib.request.Request,
+        *,
+        timeout: float,
+        url_allowed: ir_pdf.UrlAllowPredicate,
+    ) -> _Response:
+        assert request.full_url == "https://company.example/"
+        assert timeout > 0
+        assert url_allowed("https://company.example/")
+        assert url_allowed("https://www.company.example/")
+        assert not url_allowed("https://ir.company.example/")
+        return _Response()
+
+    monkeypatch.setattr(ir_pdf, "safe_urlopen", fake_safe_urlopen)
+
+    assert ir_pdf.default_dart_www_redirect_probe(
+        "https://company.example/",
+        "https://www.company.example/",
+    ) == expected
+
+
+def test_apex_redirect_probe가_없으면_www가_직접열려도_수집하지않는다():
+    html_calls: list[tuple[str, str]] = []
+
+    def fetch_html(
+        url: str,
+        expected_hostname: str,
+        _url_allowed: ir_pdf.UrlAllowPredicate | None,
+    ) -> FetchedIrHtml:
+        html_calls.append((url, expected_hostname))
+        if expected_hostname == "company.example":
+            raise OfficialIrFetchError("apex 실패")
+        return FetchedIrHtml("<p>www 직접 성공</p>", url)
+
+    result = collect_official_ir_fragments(
+        "https://company.example/",
+        company_name="Example Company",
+        html_fetch=fetch_html,
+        allow_dart_www_alias=True,
+        www_redirect_probe=lambda _apex, _alias: "",
+    )
+
+    assert result.state == "failed"
+    assert all(host == "company.example" for _url, host in html_calls)
 
 
 def test_ir자료실_한단계를_거쳐_pdf링크를_찾는다():
@@ -693,12 +949,14 @@ def test_query_download_endpoint도_pdf표지와_최종mime으로_수집한다()
     assert site.pdf_calls == [pdf_url]
 
 
-def test_앞두페이지에_법인명이나_별칭이_없으면_공식ir로_승격하지않는다():
+def test_앞네페이지에_법인명이나_별칭이_없으면_공식ir로_승격하지않는다():
     pdf_url = "https://company.example/ir/unbound.pdf"
     content = _pdf_bytes(
         "Unrelated investor presentation.",
         "Beta is a principal competitor.",
-        "Company appears too late on page three.",
+        "Still unrelated on page three.",
+        "Still unrelated on page four.",
+        "Company appears too late on page five.",
     )
     site = _FakeSite(
         html={ROOT: '<a href="/ir/unbound.pdf">IR PDF</a>'},
@@ -716,7 +974,7 @@ def test_앞두페이지에_법인명이나_별칭이_없으면_공식ir로_승�
     assert result.fragments == []
 
 
-def test_앞두페이지의_법인별칭도_대상회사_결속으로_인정한다():
+def test_앞네페이지의_법인별칭도_대상회사_결속으로_인정한다():
     pdf_url = "https://company.example/ir/alias.pdf"
     content = _pdf_bytes(
         "ACME investor relations. Beta is a principal competitor."
@@ -735,6 +993,70 @@ def test_앞두페이지의_법인별칭도_대상회사_결속으로_인정한�
     )
 
     assert result.state == "ok"
+
+
+def test_JYP처럼_네번째페이지에_처음_법인명이_나와도_결속한다(monkeypatch):
+    monkeypatch.setattr(
+        ir_pdf,
+        "_parse_pdf_with_timeout",
+        lambda _content: ir_pdf._ParsedPdf(
+            pages=(
+                "Investor Relations",
+                "Disclaimer and preliminary financial information.",
+                "2026 Q2 Financial Results",
+                "2026 Q2 Results JYP Investor Relations official company performance.",
+            ),
+            extractor="pypdf 6.16.1",
+            truncated_pages=frozenset(),
+        ),
+    )
+    terms = ir_pdf._company_identity_terms(
+        "JYP Ent.",
+        ("JYP Entertainment Corporation",),
+        homepage_hostname="www.jype.com",
+    )
+
+    extracted = ir_pdf._extract_pdf_fragments(
+        FetchedIrPdf(
+            b"%PDF-jyp-layout",
+            "https://www.jype.com/ir/jyp-layout.pdf",
+            "application/pdf",
+        ),
+        source_url="https://www.jype.com/ir/jyp-layout.pdf",
+        document_title="26Q2 IR PDF",
+        remaining_total_chars=12_000,
+        identity_terms=terms,
+    )
+
+    assert extracted.fragments
+
+
+def test_짧은_JYP_약자는_DART공식도메인과_맞을때만_법인으로_결속한다():
+    matched = ir_pdf._company_identity_terms(
+        "JYP Ent.",
+        ("JYP Entertainment Corporation",),
+        homepage_hostname="www.jype.com",
+    )
+    unrelated = ir_pdf._company_identity_terms(
+        "SK Innovation Co., Ltd.",
+        ("SK",),
+        homepage_hostname="www.skinnovation.com",
+    )
+    ordinary_word = ir_pdf._company_identity_terms(
+        "The Example Co.",
+        (),
+        homepage_hostname="www.theco.com",
+    )
+    tld_only = ir_pdf._company_identity_terms(
+        "XYZ Inc.",
+        (),
+        homepage_hostname="brand.xyz",
+    )
+
+    assert ir_pdf._identity_matches(("JYP Investor Relations",), matched)
+    assert not ir_pdf._identity_matches(("SK Investor Relations",), unrelated)
+    assert not ir_pdf._identity_matches(("The unrelated market report",), ordinary_word)
+    assert not ir_pdf._identity_matches(("XYZ Investor Relations",), tld_only)
 
 
 def test_OCR없이_추출글자0인_pdf는_failed_incomplete로_닫는다():

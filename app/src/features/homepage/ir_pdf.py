@@ -24,7 +24,7 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Callable, Final
@@ -57,6 +57,7 @@ from src.features.homepage.constants import (
     MAX_IR_WORKER_OUTPUT_BYTES,
     MAX_CONCURRENT_IR_PDF_WORKERS,
     MIN_IR_FRAGMENT_CHARS,
+    MULTI_LABEL_PUBLIC_SUFFIXES,
     TIMEOUT_SEC,
     USER_AGENT,
 )
@@ -67,7 +68,21 @@ from src.features.homepage.safe_http import (
     read_limited_text,
     request_deadline_scope,
     response_deadline,
+    safe_urlopen,
     safe_urlopen_exact_https_host,
+)
+from src.shared.official_ir import (
+    IR_ATTACHMENT_URL_FIELD,
+    IR_DART_WWW_REDIRECT_FIELD,
+    IR_DART_WWW_REDIRECT_FROM_FIELD,
+    IR_DART_WWW_REDIRECT_TO_FIELD,
+    IR_DART_WWW_REDIRECT_VALUE,
+    IR_METADATA_VERIFICATION_FIELD,
+    IR_METADATA_VERIFICATION_VALUE,
+    IR_REPORTING_PERIOD_FIELD,
+    dart_homepage_www_alias_url,
+    extract_official_ir_anchor_metadata,
+    safe_https_attachment_url,
 )
 
 
@@ -192,6 +207,7 @@ class FetchedIrPdf:
 UrlAllowPredicate = Callable[[str], bool]
 IrHtmlFetcher = Callable[[str, str, UrlAllowPredicate | None], FetchedIrHtml]
 IrPdfFetcher = Callable[[str, str, int, UrlAllowPredicate], FetchedIrPdf]
+DartWwwRedirectProbe = Callable[[str, str], str]
 
 
 @dataclass(frozen=True)
@@ -211,6 +227,8 @@ class _DiscoveredLink:
     url: str
     label: str
     context_url: str
+    published_at: str = ""
+    reporting_period: str = ""
 
 
 @dataclass(frozen=True)
@@ -340,8 +358,15 @@ def collect_official_ir_fragments(
     company_aliases: tuple[str, ...] = (),
     html_fetch: IrHtmlFetcher = default_ir_html_fetch,
     pdf_fetch: IrPdfFetcher = default_ir_pdf_fetch,
+    allow_dart_www_alias: bool = False,
+    www_redirect_probe: DartWwwRedirectProbe | None = None,
 ) -> OfficialIrCollectResult:
-    """공식 IR 수집 전체를 하나의 절대시간·DNS cache 경계에서 실행한다."""
+    """공식 IR 수집 전체를 하나의 절대시간·DNS cache 경계에서 실행한다.
+
+    ``allow_dart_www_alias``는 서비스 파이프라인만 켠다. DART가 apex를 적었지만
+    공개 홈페이지가 ``www``에서만 열리는 경우, apex 수집이 성공하지 못했을 때
+    동일 경로의 ``www`` 정확한 HTTPS host를 딱 한 번 더 확인한다.
+    """
 
     try:
         with request_deadline_scope(IR_COLLECTION_TIMEOUT_SEC) as deadline:
@@ -352,6 +377,49 @@ def collect_official_ir_fragments(
                 html_fetch=html_fetch,
                 pdf_fetch=pdf_fetch,
             )
+            alias_url = (
+                dart_homepage_www_alias_url(homepage_url)
+                if allow_dart_www_alias and result.state != "ok"
+                else ""
+            )
+            probe = www_redirect_probe or default_dart_www_redirect_probe
+            verified_alias_url = probe(homepage_url, alias_url) if alias_url else ""
+            if alias_url and verified_alias_url == alias_url:
+                alias_result = _collect_official_ir_fragments_impl(
+                    verified_alias_url,
+                    company_name=company_name,
+                    company_aliases=company_aliases,
+                    html_fetch=html_fetch,
+                    pdf_fetch=pdf_fetch,
+                )
+                if alias_result.state == "ok" or (
+                    result.state == "failed" and alias_result.state != "failed"
+                ):
+                    alias_note = "DART apex의 제한된 www 별칭에서 확인"
+                    apex_host = (
+                        urllib.parse.urlsplit(_normalize_root_url(homepage_url)[0]).hostname
+                        or ""
+                    ).casefold().rstrip(".")
+                    alias_host = (
+                        urllib.parse.urlsplit(verified_alias_url).hostname or ""
+                    ).casefold().rstrip(".")
+                    result = replace(
+                        alias_result,
+                        fragments=[
+                            {
+                                **fragment,
+                                IR_DART_WWW_REDIRECT_FIELD: IR_DART_WWW_REDIRECT_VALUE,
+                                IR_DART_WWW_REDIRECT_FROM_FIELD: apex_host,
+                                IR_DART_WWW_REDIRECT_TO_FIELD: alias_host,
+                            }
+                            for fragment in alias_result.fragments
+                        ],
+                        detail=(
+                            f"{alias_note}; {alias_result.detail}"
+                            if alias_result.detail
+                            else alias_note
+                        ),
+                    )
             deadline.remaining()
             return result
     except HomepageResponseError as exc:
@@ -360,6 +428,62 @@ def collect_official_ir_fragments(
             detail=f"공식 IR 수집 전체시간 초과: {exc}",
             candidate_scope_complete=False,
         )
+
+
+def default_dart_www_redirect_probe(apex_url: str, alias_url: str) -> str:
+    """공인 HTTPS apex가 정확한 ``www`` 별칭으로 리다이렉트하는지 1회 확인한다."""
+
+    apex_root, apex_host = _normalize_root_url(apex_url)
+    alias_root, alias_host = _normalize_root_url(alias_url)
+    if (
+        not apex_root
+        or not alias_root
+        or not apex_host
+        or alias_host != f"www.{apex_host}"
+    ):
+        return ""
+
+    allowed_hosts = frozenset({apex_host, alias_host})
+
+    def url_allowed(value: str) -> bool:
+        normalized = safe_https_attachment_url(value)
+        if not normalized:
+            return False
+        try:
+            host = (urllib.parse.urlsplit(normalized).hostname or "").casefold().rstrip(".")
+        except ValueError:
+            return False
+        return host in allowed_hosts
+
+    request = urllib.request.Request(apex_root, headers={"User-Agent": USER_AGENT})
+    try:
+        with safe_urlopen(
+            request,
+            timeout=TIMEOUT_SEC,
+            url_allowed=url_allowed,
+        ) as response:
+            effective = str(
+                getattr(response, "geturl", lambda: "")() or ""
+            ).strip()
+    except (
+        UnsafeHomepageUrlError,
+        HomepageResponseError,
+        urllib.error.URLError,
+        TimeoutError,
+        OSError,
+        http.client.HTTPException,
+    ):
+        return ""
+    normalized_effective = safe_https_attachment_url(effective)
+    if not normalized_effective or not url_allowed(normalized_effective):
+        return ""
+    try:
+        final_host = (
+            urllib.parse.urlsplit(normalized_effective).hostname or ""
+        ).casefold().rstrip(".")
+    except ValueError:
+        return ""
+    return alias_root if final_host == alias_host else ""
 
 
 def _collect_official_ir_fragments_impl(
@@ -378,15 +502,19 @@ def _collect_official_ir_fragments_impl(
             detail="DART 기업개황에 공식 홈페이지 주소 없음",
             candidate_scope_complete=True,
         )
-    identity_terms = _company_identity_terms(company_name, company_aliases)
-    if not identity_terms.principal:
-        return OfficialIrCollectResult(
-            state="none", detail="공식 IR PDF와 대조할 DART 법인명 없음"
-        )
     root_url, exact_hostname = _normalize_root_url(homepage_url)
     if not root_url or not exact_hostname:
         return OfficialIrCollectResult(
             state="none", detail="공식 IR 탐색에 쓸 HTTPS 홈페이지 주소 없음"
+        )
+    identity_terms = _company_identity_terms(
+        company_name,
+        company_aliases,
+        homepage_hostname=exact_hostname,
+    )
+    if not identity_terms.principal:
+        return OfficialIrCollectResult(
+            state="none", detail="공식 IR PDF와 대조할 DART 법인명 없음"
         )
 
     try:
@@ -406,6 +534,7 @@ def _collect_official_ir_fragments_impl(
 
     html_queue = [root_url]
     queued_html = {root_url}
+    inherited_document_metadata: dict[str, tuple[str, str]] = {}
     visited_html: set[str] = set()
     pdf_candidates: list[_DiscoveredLink] = []
     queued_pdf: set[str] = set()
@@ -440,7 +569,15 @@ def _collect_official_ir_fragments_impl(
                 root_failed = True
             continue
 
-        links = _extract_links(page.html, effective_url, exact_hostname)
+        inherited_date, inherited_period = inherited_document_metadata.get(
+            page_url, ("", "")
+        )
+        links = _extract_links(
+            page.html,
+            effective_url,
+            exact_hostname,
+            allow_external_pdf=effective_url != root_url,
+        )
         links.sort(key=_link_priority)
         for link in links:
             if len(queued_html) + len(visited_html) + len(queued_pdf) >= MAX_IR_DISCOVERY_LINKS:
@@ -449,8 +586,19 @@ def _collect_official_ir_fragments_impl(
             if _is_pdf_candidate_link(link):
                 if link.url in queued_pdf or not _looks_like_ir_link(link):
                     continue
+                if not (link.published_at and link.reporting_period) and (
+                    inherited_date and inherited_period
+                ):
+                    link = replace(
+                        link,
+                        published_at=inherited_date,
+                        reporting_period=inherited_period,
+                    )
                 queued_pdf.add(link.url)
-                if robots.can_fetch(USER_AGENT, link.url):
+                link_host = (
+                    urllib.parse.urlsplit(link.url).hostname or ""
+                ).casefold().rstrip(".")
+                if link_host != exact_hostname or robots.can_fetch(USER_AGENT, link.url):
                     pdf_candidates.append(link)
                 else:
                     robots_blocked_paths += 1
@@ -463,6 +611,11 @@ def _collect_official_ir_fragments_impl(
             ):
                 html_queue.append(link.url)
                 queued_html.add(link.url)
+                if link.published_at and link.reporting_period:
+                    inherited_document_metadata[link.url] = (
+                        link.published_at,
+                        link.reporting_period,
+                    )
         html_queue.sort(key=lambda value: _text_ir_priority(value))
 
     if html_queue:
@@ -494,11 +647,19 @@ def _collect_official_ir_fragments_impl(
         remaining_pdf_bytes = MAX_IR_TOTAL_PDF_BYTES - downloaded_pdf_bytes
         allowed_pdf_bytes = min(MAX_IR_PDF_BYTES, remaining_pdf_bytes)
         try:
+            attachment_hostname = (
+                urllib.parse.urlsplit(candidate.url).hostname or ""
+            ).casefold().rstrip(".")
+            attachment_allowed = (
+                url_allowed
+                if attachment_hostname == exact_hostname
+                else lambda value, expected=candidate.url: value == expected
+            )
             fetched = pdf_fetch(
                 candidate.url,
-                exact_hostname,
+                attachment_hostname,
                 allowed_pdf_bytes,
-                url_allowed,
+                attachment_allowed,
             )
             if not isinstance(fetched.content, bytes):
                 raise OfficialIrFetchError("공식 IR PDF 응답 바이트 검증 실패")
@@ -506,11 +667,11 @@ def _collect_official_ir_fragments_impl(
             if len(fetched.content) > allowed_pdf_bytes:
                 raise OfficialIrFetchError("공식 IR PDF 합계 바이트 상한 위반")
             effective_url = _validated_effective_url(
-                fetched.effective_url, exact_hostname
+                fetched.effective_url, attachment_hostname
             )
             if not effective_url:
                 raise OfficialIrFetchError("공식 IR PDF 최종 URL 검증 실패")
-            if not url_allowed(effective_url):
+            if not attachment_allowed(effective_url):
                 raise OfficialIrFetchError(
                     "공식 IR PDF 리다이렉트가 robots.txt 차단 경로에 도착했습니다"
                 )
@@ -521,8 +682,15 @@ def _collect_official_ir_fragments_impl(
             seen_document_hashes.add(document_hash)
             extracted = _extract_pdf_fragments(
                 fetched,
-                source_url=effective_url,
+                source_url=(
+                    candidate.context_url
+                    if attachment_hostname != exact_hostname
+                    else effective_url
+                ),
+                attachment_url=effective_url,
                 document_title=_document_title(candidate),
+                published_at=candidate.published_at,
+                reporting_period=candidate.reporting_period,
                 remaining_total_chars=MAX_IR_TOTAL_CHARS - total_chars,
                 identity_terms=identity_terms,
             )
@@ -754,6 +922,8 @@ def _extract_links(
     raw_html: str,
     base_url: str,
     exact_hostname: str,
+    *,
+    allow_external_pdf: bool = False,
 ) -> list[_DiscoveredLink]:
     """같은 정확한 HTTPS 호스트의 링크만 정규화해 뽑는다."""
 
@@ -767,11 +937,27 @@ def _extract_links(
     for href, label in parser.links:
         absolute = urllib.parse.urljoin(base_url, href).split("#", 1)[0]
         normalized = _validated_effective_url(absolute, exact_hostname)
+        if not normalized and allow_external_pdf:
+            external = safe_https_attachment_url(absolute)
+            provisional = _DiscoveredLink(
+                url=external,
+                label=label,
+                context_url=base_url,
+            )
+            if external and _is_pdf_candidate_link(provisional):
+                normalized = external
         if not normalized or normalized in seen:
             continue
         seen.add(normalized)
+        published_at, reporting_period = extract_official_ir_anchor_metadata(label)
         links.append(
-            _DiscoveredLink(url=normalized, label=label, context_url=base_url)
+            _DiscoveredLink(
+                url=normalized,
+                label=label,
+                context_url=base_url,
+                published_at=published_at,
+                reporting_period=reporting_period,
+            )
         )
     return links
 
@@ -829,10 +1015,34 @@ def _looks_like_ir_link(link: _DiscoveredLink) -> bool:
 
 def _text_ir_priority(value: str) -> int:
     lowered = value.casefold()
+    # IR 자료·실적 목록과 주가·재무 일반 페이지가 모두 `/IR/`을
+    # 포함하는 사이트에서 URL 정렬순이 5쪽 탐색 상한을 먼저 먹지 않게
+    # 자료실·발표·실적 표지를 닫힌 우선순위로 올린다.
+    if any(
+        marker in lowered
+        for marker in (
+            "ir-data",
+            "ir_data",
+            "irdata",
+            "ir 자료",
+            "ir자료",
+            "earnings",
+            "results",
+            "presentation",
+            "실적발표",
+            "기업설명",
+        )
+    ):
+        return 0
+    if any(
+        marker in lowered
+        for marker in ("/stock", "stock-price", "share-price", "주가정보")
+    ):
+        return 100
     if re.search(r"\bir\b", lowered) or re.search(
         r"(?:^|[/_.?=&\-])ir(?:$|[/_.?=&\-])", lowered
     ):
-        return 0
+        return 20
     for index, marker in enumerate(_IR_MARKERS, start=1):
         if marker in lowered:
             return index
@@ -856,7 +1066,10 @@ def _extract_pdf_fragments(
     fetched: FetchedIrPdf,
     *,
     source_url: str,
+    attachment_url: str = "",
     document_title: str,
+    published_at: str = "",
+    reporting_period: str = "",
     remaining_total_chars: int,
     identity_terms: _CompanyIdentityTerms | frozenset[str],
 ) -> _ExtractedDocument:
@@ -921,8 +1134,7 @@ def _extract_pdf_fragments(
                 if len(parts) > 1:
                     location = f"{location} {part_number}부분"
                 location = f"{location} · {parsed.extractor}"
-                fragments.append(
-                    {
+                fragment = {
                         "종류": OFFICIAL_IR_FRAGMENT_KIND,
                         "원문": kept,
                         "출처": source_url,
@@ -931,7 +1143,19 @@ def _extract_pdf_fragments(
                         "원문위치": location,
                         "후보출처검증": VERIFIED_FINAL_URL_VALUE,
                     }
-                )
+                if attachment_url:
+                    fragment[IR_ATTACHMENT_URL_FIELD] = attachment_url
+                if published_at and reporting_period:
+                    fragment.update(
+                        {
+                            "문서일": published_at,
+                            IR_REPORTING_PERIOD_FIELD: reporting_period,
+                            IR_METADATA_VERIFICATION_FIELD: (
+                                IR_METADATA_VERIFICATION_VALUE
+                            ),
+                        }
+                    )
+                fragments.append(fragment)
                 kept_chars = len(kept)
                 extracted_chars += kept_chars
                 page_chars += kept_chars
@@ -1251,12 +1475,18 @@ def _pdf_worker_environment(worker_dir: str) -> dict[str, str]:
 def _company_identity_terms(
     company_name: str,
     aliases: tuple[str, ...],
+    *,
+    homepage_hostname: str = "",
 ) -> _CompanyIdentityTerms:
     """DART 공식명과 충분히 식별적인 registry 별칭만 분리한다."""
 
-    normalized_name = unicodedata.normalize(
+    original_normalized_name = unicodedata.normalize(
         "NFKC", str(company_name or "")
-    ).casefold()
+    )
+    normalized_name = original_normalized_name.casefold()
+    original_name_words = re.findall(
+        r"[^\W_]+", original_normalized_name, flags=re.UNICODE
+    )
     name_words = re.findall(r"[^\W_]+", normalized_name, flags=re.UNICODE)
     official_token = _identity_token(company_name)
     principal: set[str] = set()
@@ -1275,6 +1505,36 @@ def _company_identity_terms(
     # 충분할 때만 보조 principal로 인정한다.
     if len(legal_core) >= 4 and legal_core not in _GENERIC_IDENTITY_ALIASES:
         principal.add(legal_core)
+
+    # JYP의 실제 IR PDF는 공식명이 ``JYP Ent.``여도 앞쪽 표지에는 ``JYP``만
+    # 글자로 추출된다. 짧은 영문 약자를 무조건 허용하면 SK·AI 같은 일반 글자와
+    # 충돌하므로, DART가 확인한 공식 홈페이지 도메인의 브랜드 라벨과 0~2글자
+    # 차이로 맞는 첫 단어일 때만 보조 principal로 인정한다.
+    hostname_labels = [
+        label
+        for label in str(homepage_hostname or "").casefold().rstrip(".").split(".")
+        if label
+    ]
+    public_suffix = ".".join(hostname_labels[-2:])
+    brand_label_index = -3 if public_suffix in MULTI_LABEL_PUBLIC_SUFFIXES else -2
+    brand_label = (
+        hostname_labels[brand_label_index]
+        if len(hostname_labels) >= abs(brand_label_index)
+        else ""
+    )
+    original_leading_word = original_name_words[0] if original_name_words else ""
+    leading_word = _identity_token(name_words[0]) if name_words else ""
+    if (
+        re.fullmatch(r"[A-Z]{3,5}", original_leading_word) is not None
+        and leading_word.isascii()
+        and leading_word not in _GENERIC_IDENTITY_ALIASES
+        and (
+            brand_label.startswith(leading_word)
+            or leading_word.startswith(brand_label)
+        )
+        and abs(len(brand_label) - len(leading_word)) <= 2
+    ):
+        principal.add(leading_word)
     principal.discard("")
 
     distinctive_aliases: set[str] = set()

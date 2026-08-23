@@ -47,6 +47,7 @@ from src.features.provenance.sources import (
     evidence_text_hash,
     exact_evidence_text_hash,
     is_canonical_official_with_registry,
+    official_ir_source_is_usable,
     official_domain_attestation_problem,
     official_web_currentness_is_usable,
     source_type_is_official_ir,
@@ -57,6 +58,7 @@ from src.features.report_standard.constants import (
     CANONICAL_SCHEMA_VERSION,
     CANONICAL_SECTION_IDS,
     COMPARISON_JUDGMENTS,
+    CURRENT_RESPONSE_SHORTFALL_REASON,
     INTERNAL_ONLY_CLAIM_TYPES_BY_SECTION,
     IDENTITY_SUMMARY_SHORTFALL_REASON,
     CUSTOMER_MARKET_SHORTFALL_REASON,
@@ -318,6 +320,12 @@ def _is_self_published_company_source(
         return False
     return source.kind is SourceKind.FILING or source_type_is_official_web(
         source.source_type
+    ) or (
+        source_type_is_official_ir(source.source_type)
+        and official_ir_source_is_usable(
+            source,
+            reference_date=source.collected_at or source.published_at,
+        )
     )
 
 
@@ -336,7 +344,14 @@ def _source_date(source: Source) -> str:
     """원문 자체의 날짜를 반환한다. 수집일은 원문 날짜가 없을 때만 쓴다."""
 
     if source_type_is_official_ir(source.source_type):
-        return ""
+        return (
+            source.published_at
+            if official_ir_source_is_usable(
+                source,
+                reference_date=source.collected_at or source.published_at,
+            )
+            else ""
+        )
     if not official_web_currentness_is_usable(
         source_type=source.source_type,
         url=source.url,
@@ -1716,9 +1731,11 @@ def _fact_problems(
             if attestation_problem:
                 problems.append(f"[source] {fact.fact_id}: {attestation_problem}")
         normalized_source_type = _normalized(source.source_type)
-        if source_type_is_official_ir(source.source_type):
+        if source_type_is_official_ir(source.source_type) and not (
+            official_ir_source_is_usable(source, reference_date=report_as_of)
+        ):
             problems.append(
-                f"[time] {fact.fact_id}: 문서일 미결속 IR PDF는 공개 사실의 "
+                f"[time] {fact.fact_id}: 발행일·보고기간 미결속 IR PDF는 공개 사실의 "
                 "직접 근거로 쓸 수 없습니다"
             )
         if not official_web_currentness_is_usable(
@@ -2638,8 +2655,6 @@ def _semantic_section_problems(
                 problems.append(
                     f"[period] {fact.fact_id}: 완료 실행은 보고서 기준일 전 최근 36개월 안이어야 합니다"
                 )
-    if narrative_entered and not interpretations:
-        problems.append("[section] past_changes: 변화·실행 해석 사실이 필요합니다")
     for fact in interpretations:
         if not fact.basis_fact_ids:
             problems.append(
@@ -2658,22 +2673,22 @@ def _semantic_section_problems(
 
     current_ids = supported_by_section.get("current_challenges", [])
     current = [facts[fid] for fid in current_ids]
-    # 5장은 공식 근거가 한 건도 없으면 조건부 생략한다. 다만 한 건이라도
-    # 출고 후보로 들어왔으면 종전 계약(문제+대응, 내부 결속, 최대 3개)을 그대로
-    # 적용한다. 불완전한 5장을 단순 누락으로 위장해 통과시키지 않는다.
+    # 5장은 공식 근거가 한 건도 없으면 조건부 생략한다. 검증된 미해결 문제는
+    # 대응이 탈락해도 사실 그대로 공개할 수 있지만, 대응은 반드시 같은 장의
+    # 문제와 결속돼야 한다. 확인하지 못한 대응은 공개 구조에서 명시적으로 밝힌다.
     if "current_challenges" in sections:
         issues = [fact for fact in current if fact.claim_type == "current_issue"]
         responses = [fact for fact in current if fact.claim_type == "current_response"]
-        if not issues or not responses:
+        if responses and not issues:
             problems.append(
-                "[section] current_challenges: 미해결 문제와 실제 대응이 모두 필요합니다"
+                "[section] current_challenges: 실제 대응은 같은 장의 미해결 문제와 "
+                "함께 있어야 합니다"
             )
         if len(issues) > 3:
             problems.append(
                 "[section] current_challenges: 근거가 확인된 핵심 과제는 최대 3개입니다"
             )
         issue_ids = {fact.fact_id for fact in issues}
-        paired_issue_ids: set[str] = set()
         for response in responses:
             if response.response_to_fact_id not in issue_ids:
                 problems.append(
@@ -2681,7 +2696,6 @@ def _semantic_section_problems(
                     "장의 미해결 문제를 가리키지 않습니다"
                 )
             else:
-                paired_issue_ids.add(response.response_to_fact_id)
                 issue = facts[response.response_to_fact_id]
                 if not response_is_bound_to_issue(
                     issue.subject_scope,
@@ -2693,13 +2707,6 @@ def _semantic_section_problems(
                         f"[section] {response.fact_id}: 대응 원문이 연결된 문제의 "
                         "대상·범위와 결속되지 않았습니다"
                     )
-        unpaired = issue_ids - paired_issue_ids
-        if unpaired:
-            problems.append(
-                "[section] current_challenges: 실제 대응과 결속되지 않은 문제가 있습니다: "
-                + ", ".join(sorted(unpaired))
-            )
-
     future = [facts[fid] for fid in supported_by_section.get("future_strategy", [])]
     plans = [fact for fact in future if fact.claim_type == "future_plan"]
     if "future_strategy" in sections and not (1 <= len(plans) <= 3):
@@ -3220,6 +3227,13 @@ def build_published_report(report: Report) -> Report:
         shortfall_reasons.insert(0, IDENTITY_SUMMARY_SHORTFALL_REASON)
     if ("business_model", "customer_market") not in published_types:
         shortfall_reasons.append(CUSTOMER_MARKET_SHORTFALL_REASON)
+    current_types = {
+        claim_type
+        for section_id, claim_type in published_types
+        if section_id == "current_challenges"
+    }
+    if current_types and "current_response" not in current_types:
+        shortfall_reasons.append(CURRENT_RESPONSE_SHORTFALL_REASON)
     past_types = {
         claim_type
         for section_id, claim_type in published_types

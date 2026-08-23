@@ -29,6 +29,11 @@ from datetime import date
 from enum import Enum
 
 from src.features.provenance.constants import OTHER_DATE_PREFIX, SOURCES_HEADER
+from src.shared.official_ir import (
+    dart_www_redirect_is_valid,
+    official_ir_time_is_usable,
+    safe_https_attachment_url,
+)
 
 
 def evidence_text_hash(text: str) -> str:
@@ -463,6 +468,16 @@ class Source:
     #: ``attestation_only``는 다른 공식 Source의 신원·도메인을 증명하는 내부
     #: provenance 의존성이다. 검증·저장에는 남지만 사용자 출처 부록에는 표시하지 않는다.
     provenance_role: str = "citation"
+    #: 공식 IR에 표시된 닫힌 보고기간(YYYY-Qn/Hn/FY 또는 ISO 범위).
+    #: 끝에 둔다. 이전 코드의 positional Source 생성자 순서를 바꾸지 않는다.
+    reporting_period: str = ""
+    #: 공식 상세페이지가 직접 건 PDF를 실제 다운로드한 최종 HTTPS URL.
+    #: 끝에 둬 이전 positional Source 생성자 순서를 보존한다.
+    attachment_url: str = ""
+    #: DART apex에서 실제 ``www`` 최종 URL까지 제한 probe가 확인한 결속.
+    domain_redirect_verification: str = ""
+    domain_redirect_from_host: str = ""
+    domain_redirect_to_host: str = ""
 
     @property
     def is_valid(self) -> bool:
@@ -569,6 +584,18 @@ def _source_provenance_payload(source: Source) -> bytes:
     # 새 exact provenance를 실제로 가진 Source만 선택적으로 seal 범위를 넓힌다.
     if source.exact_evidence_hashes:
         payload["exact_evidence_hashes"] = sorted(source.exact_evidence_hashes)
+    # 기간 필드 도입 전에 저장된 Source의 HMAC payload는 그대로 유지한다.
+    if source.reporting_period:
+        payload["reporting_period"] = source.reporting_period
+    # 공식 IR PDF의 실제 바이트 출처도 상세페이지 URL과 함께 seal에 결속한다.
+    if source.attachment_url:
+        payload["attachment_url"] = source.attachment_url
+    if source.domain_redirect_verification:
+        payload["domain_redirect_verification"] = source.domain_redirect_verification
+    if source.domain_redirect_from_host:
+        payload["domain_redirect_from_host"] = source.domain_redirect_from_host
+    if source.domain_redirect_to_host:
+        payload["domain_redirect_to_host"] = source.domain_redirect_to_host
     # 기존 저장 Source의 HMAC payload에는 role 필드가 없었다. 기본 citation은
     # byte-for-byte 호환을 유지하고, 새 내부 attester 역할일 때만 seal에 포함한다.
     if source.provenance_role != "citation":
@@ -641,8 +668,21 @@ def official_domain_attestation_problem(
     evidence = source.domain_attestation_evidence.strip()
     if evidence_text_hash(evidence) not in attester.evidence_hashes:
         return "도메인 근거 원문 조각의 해시가 공시 Source에 보존되지 않았습니다"
-    if _host_key(source.host) not in _hosts_in_domain_attestation_evidence(evidence):
-        return "공시 원문 조각에 회사 웹 원문의 정확한 host URL이 없습니다"
+    evidence_hosts = _hosts_in_domain_attestation_evidence(evidence)
+    source_host = _host_key(source.host)
+    if source_host not in evidence_hosts:
+        dart_host = next(iter(evidence_hosts)) if len(evidence_hosts) == 1 else ""
+        if not (
+            source_type_is_official_ir(source.source_type)
+            and dart_www_redirect_is_valid(
+                verification=source.domain_redirect_verification,
+                from_host=source.domain_redirect_from_host,
+                to_host=source.domain_redirect_to_host,
+                dart_host=dart_host,
+                source_host=source_host,
+            )
+        ):
+            return "공시 원문 조각에 회사 웹 원문의 정확한 host URL이 없습니다"
     return ""
 
 
@@ -655,6 +695,39 @@ def is_canonical_official_with_registry(
         source.is_canonical_official
         and has_valid_provenance_seal(source)
         and not official_domain_attestation_problem(source, sources)
+    )
+
+
+def official_ir_source_is_usable(source: Source, *, reference_date: str) -> bool:
+    """IR 원문의 발행일·보고기간·DART 법인 결속을 함께 요구한다."""
+
+    if not source_type_is_official_ir(source.source_type):
+        return True
+    evidence_hosts = _hosts_in_domain_attestation_evidence(
+        source.domain_attestation_evidence
+    )
+    source_host = _host_key(source.host)
+    if source_host not in evidence_hosts:
+        dart_host = next(iter(evidence_hosts)) if len(evidence_hosts) == 1 else ""
+        if not dart_www_redirect_is_valid(
+            verification=source.domain_redirect_verification,
+            from_host=source.domain_redirect_from_host,
+            to_host=source.domain_redirect_to_host,
+            dart_host=dart_host,
+            source_host=source_host,
+        ):
+            return False
+    return bool(
+        source.domain_attestation_source_id.strip()
+        and source.domain_attestation_evidence.strip()
+        and safe_https_attachment_url(source.attachment_url)
+        == source.attachment_url.strip()
+        and official_ir_time_is_usable(
+            published_at=source.published_at,
+            reporting_period=source.reporting_period,
+            reference_date=reference_date,
+            max_age_days=OFFICIAL_WEB_CURRENT_MAX_AGE_DAYS,
+        )
     )
 
 
@@ -696,7 +769,18 @@ def render_sources(sources: list[Source]) -> str:
             #   공시의 「수집 …」과 글자가 같으면 다시 읽을 때 공시로 잘못 분류된다.
             #   그리고 홈페이지는 언제든 바뀌므로 «언제 본 것인지»가 특히 중요하다.
             lines.append(f" [{source.number}] {source.label}")
-            lines.append(f"     {OTHER_DATE_PREFIX}{source.collected_at}")
+            if (
+                source_type_is_official_ir(source.source_type)
+                and source.published_at
+                and source.reporting_period
+            ):
+                lines.append(
+                    "     "
+                    f"발행 {source.published_at} · 기준 {source.reporting_period} "
+                    f"· {OTHER_DATE_PREFIX}{source.collected_at}"
+                )
+            else:
+                lines.append(f"     {OTHER_DATE_PREFIX}{source.collected_at}")
             continue
         if source.kind is SourceKind.NEWS:
             date = f" {source.published_at}" if source.published_at else ""
@@ -746,6 +830,12 @@ _FILING_COLLECTED_ONLY = re.compile(r"^\s*수집\s*(?P<collected>\d{4}-\d{2}-\d{
 _OTHER_CONFIRMED = re.compile(
     r"^\s*" + OTHER_DATE_PREFIX.strip() + r"\s*(?P<collected>\d{4}-\d{2}-\d{2})\s*$"
 )
+_OTHER_IR_META = re.compile(
+    r"^\s*발행\s*(?P<published>\d{4}-\d{2}-\d{2})\s*·\s*"
+    r"기준\s*(?P<period>\S+)\s*·\s*"
+    + OTHER_DATE_PREFIX.strip()
+    + r"\s*(?P<collected>\d{4}-\d{2}-\d{2})\s*$"
+)
 
 
 def parse_sources(text: str) -> list[Source]:
@@ -788,7 +878,7 @@ def parse_sources(text: str) -> list[Source]:
             idx += 1
             continue
 
-        disclosed_at = collected_at = ""
+        disclosed_at = collected_at = published_at = reporting_period = source_type = ""
         kind = SourceKind.OTHER
         if idx + 1 < total:
             nxt = lines[idx + 1]
@@ -809,8 +899,15 @@ def parse_sources(text: str) -> list[Source]:
                 kind = SourceKind.FILING
                 idx += 1
             else:
+                ir_meta = _OTHER_IR_META.match(nxt)
                 confirmed = _OTHER_CONFIRMED.match(nxt)
-                if confirmed is not None:
+                if ir_meta is not None:
+                    published_at = ir_meta.group("published")
+                    reporting_period = ir_meta.group("period")
+                    collected_at = ir_meta.group("collected")
+                    source_type = "회사 공식 IR"
+                    idx += 1
+                elif confirmed is not None:
                     # 「확인 날짜」 = 기타(홈페이지 등). 종류를 공시로 바꾸지 않는다.
                     collected_at = confirmed.group("collected")
                     idx += 1
@@ -822,6 +919,9 @@ def parse_sources(text: str) -> list[Source]:
                 label=rest,
                 disclosed_at=disclosed_at,
                 collected_at=collected_at,
+                published_at=published_at,
+                reporting_period=reporting_period,
+                source_type=source_type,
             )
         )
         idx += 1

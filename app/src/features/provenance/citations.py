@@ -48,6 +48,15 @@ from src.features.provenance.sources import (
     source_type_is_official_ir,
     source_type_is_official_web,
 )
+from src.shared.official_ir import (
+    IR_ATTACHMENT_URL_FIELD,
+    IR_DART_WWW_REDIRECT_FIELD,
+    IR_DART_WWW_REDIRECT_FROM_FIELD,
+    IR_DART_WWW_REDIRECT_TO_FIELD,
+    IR_METADATA_VERIFICATION_FIELD,
+    IR_METADATA_VERIFICATION_VALUE,
+    IR_REPORTING_PERIOD_FIELD,
+)
 
 #: 뉴스 조각 원문 맨 앞 — `"(2025-03-12 보도 · mk.co.kr) 제목. 설명"`.
 #: 정본은 `run_pilot.collect_news()`의 f-string이다. 여기를 고치면 그쪽도 맞춰야 한다.
@@ -271,6 +280,13 @@ def _homepage_source(
     published_at = str(
         frag.get("문서일") or frag.get("published_at") or ""
     ).strip()
+    reporting_period = str(frag.get(IR_REPORTING_PERIOD_FIELD) or "").strip()
+    if source_type_is_official_ir(source_type) and (
+        str(frag.get(IR_METADATA_VERIFICATION_FIELD) or "").strip()
+        != IR_METADATA_VERIFICATION_VALUE
+    ):
+        published_at = ""
+        reporting_period = ""
     if not document_id and url:
         # URL 자체가 변하는 웹 문서의 실제 식별자다. 임의 제목을 만들지 않는다.
         document_id = urllib.parse.urlunparse(
@@ -282,6 +298,17 @@ def _homepage_source(
         label=url or HOMEPAGE_FALLBACK_LABEL,
         collected_at=collected_at,
         published_at=published_at,
+        reporting_period=reporting_period,
+        attachment_url=str(frag.get(IR_ATTACHMENT_URL_FIELD) or "").strip(),
+        domain_redirect_verification=str(
+            frag.get(IR_DART_WWW_REDIRECT_FIELD) or ""
+        ).strip(),
+        domain_redirect_from_host=str(
+            frag.get(IR_DART_WWW_REDIRECT_FROM_FIELD) or ""
+        ).strip(),
+        domain_redirect_to_host=str(
+            frag.get(IR_DART_WWW_REDIRECT_TO_FIELD) or ""
+        ).strip(),
         source_id=f"source-{number}",
         title=frag.get("문서명", "").strip() or url or HOMEPAGE_FALLBACK_LABEL,
         publisher=frag.get("발행처", "").strip() or company_publisher.strip() or host,
@@ -292,7 +319,10 @@ def _homepage_source(
         source_type=source_type,
         fact_status=(
             "문서일 미검증 수집 참고"
-            if source_type_is_official_ir(source_type) or (
+            if (
+                source_type_is_official_ir(source_type)
+                and not (published_at and reporting_period)
+            ) or (
                 source_type_is_official_web(source_type)
                 and official_web_url_requires_document_date(url)
                 and not published_at
@@ -305,6 +335,8 @@ def _homepage_source(
                 published_at=published_at,
                 collected_at=collected_at,
             )
+            else "공식 발행일·보고기간 확정"
+            if source_type_is_official_ir(source_type)
             else "기준일 현재 확인"
         ),
         domain_attestation_source_id=str(

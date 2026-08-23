@@ -36,6 +36,15 @@ from src.features.pipeline.port import CompanyCard, Grade, Outcome, ReportTable,
 #: 8·9 생성 지시문임을 알아보는 표시. 글자를 베끼지 않고 «상수를 그대로» 쓴다 —
 #: 지시문이 바뀌어도 이 시험이 조용히 어긋나지 않는다.
 from src.features.spanselect.constants import PROMPT_PICK
+from src.shared.official_ir import (
+    IR_DART_WWW_REDIRECT_FIELD,
+    IR_DART_WWW_REDIRECT_FROM_FIELD,
+    IR_DART_WWW_REDIRECT_TO_FIELD,
+    IR_DART_WWW_REDIRECT_VALUE,
+    IR_METADATA_VERIFICATION_FIELD,
+    IR_METADATA_VERIFICATION_VALUE,
+    IR_REPORTING_PERIOD_FIELD,
+)
 
 # ── 가짜 엔진이 쓰는 고정값 ───────────────────────────────
 CORP_ID = "00126380"
@@ -1871,6 +1880,88 @@ def test_공식IR까지_비교후보가_없어도_기본분석은_계속한다(
     assert ir_status.state == "none"
 
 
+def test_실제_run은_메타검증_IR을_DART법인에_먼저_결속한_뒤_Writer후보로_넘긴다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_get_json = engine.get_json
+    captured: list[dict[int, dict[str, Any]]] = []
+
+    def profile_with_homepage(
+        endpoint: str, params: dict[str, Any], counter: Any
+    ) -> dict[str, Any]:
+        payload = original_get_json(endpoint, params, counter)
+        if endpoint == "company.json" and params.get("corp_code") == CORP_ID:
+            return {
+                **payload,
+                "corp_code": CORP_ID,
+                "corp_name": "가나다전자",
+                "hm_url": "https://ganada.example",
+            }
+        return payload
+
+    ir_fragment = {
+        "종류": real.OFFICIAL_IR_FRAGMENT_KIND,
+        "원문": "가나다전자는 반도체 검사 장비 기업이다.",
+        "출처": "https://www.ganada.example/ir/2026-q2",
+        "첨부URL": "https://cdn.example/ganada-q2.pdf",
+        IR_DART_WWW_REDIRECT_FIELD: IR_DART_WWW_REDIRECT_VALUE,
+        IR_DART_WWW_REDIRECT_FROM_FIELD: "ganada.example",
+        IR_DART_WWW_REDIRECT_TO_FIELD: "www.ganada.example",
+        "문서일": "2026-08-12",
+        IR_REPORTING_PERIOD_FIELD: "2026-Q2",
+        IR_METADATA_VERIFICATION_FIELD: IR_METADATA_VERIFICATION_VALUE,
+        "후보출처검증": "https_exact_dart_host",
+        "문서명": "26년 2분기 IR자료",
+        "문서ID": "c" * 64,
+        "원문위치": "PDF p.2 1문단 · pypdf 6.16.1",
+    }
+    monkeypatch.setattr(engine, "get_json", profile_with_homepage)
+    monkeypatch.setattr(
+        real,
+        "collect_homepage_fragments",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            state="none",
+            fragments=[],
+            detail="후보 문장 없음",
+            candidate_scope_complete=True,
+        ),
+    )
+    monkeypatch.setattr(
+        real,
+        "collect_official_ir_fragments",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            state="ok",
+            fragments=[dict(ir_fragment)],
+            detail="검증 완료",
+            attempted_documents=1,
+            downloaded_pdf_bytes=4096,
+            candidate_scope_complete=True,
+        ),
+    )
+
+    def capture_span(_client: Any, fragments: dict[int, dict[str, Any]], *_args: Any, **_kwargs: Any):
+        captured.append(fragments)
+        return [], []
+
+    monkeypatch.setattr(real, "select_canonical_spans", capture_span)
+
+    result = _run()
+
+    assert result.outcome is Outcome.GATE_STOPPED
+    assert captured
+    generated_ir = [
+        fragment
+        for fragments in captured
+        for fragment in fragments.values()
+        if fragment.get("종류") == real.OFFICIAL_IR_FRAGMENT_KIND
+    ]
+    assert generated_ir
+    assert {item["발행처"] for item in generated_ir} == {"가나다전자"}
+    assert all(item.get("도메인근거SourceID") for item in generated_ir)
+    assert all(item.get("IR수집기준일") for item in generated_ir)
+
+
 def test_오래된_newsroom_경쟁문장은_비교에서_빼고_기본분석은_계속한다(
     engine: FakeEngine,
     monkeypatch: pytest.MonkeyPatch,
@@ -2494,7 +2585,7 @@ def test_수집_실패가_끼면_캐시에_저장하지_않는다(
 
     homepage_calls = 0
 
-    def first_failure_then_none(_url: str) -> SimpleNamespace:
+    def first_failure_then_none(_url: str, **_kwargs: Any) -> SimpleNamespace:
         nonlocal homepage_calls
         homepage_calls += 1
         if homepage_calls == 1:

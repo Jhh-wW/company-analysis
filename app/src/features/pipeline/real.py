@@ -100,6 +100,7 @@ from src.features.spanselect.constants import (
     NEWS_FRAGMENT_KIND,
     USAGE_MODEL_KEY,
 )
+from src.shared.official_ir import verified_official_ir_fragment_is_usable
 from src.features.filingclean import extra as filing_extra
 from src.features.filingclean import logic as filing_clean
 from src.features.filingclean import relationships as filing_relationships
@@ -1760,14 +1761,32 @@ class RealPipeline:
 
         # ── 8 사실 배치 + 9 원문 대조 — 1회 완결이면 종료, 부족할 때만 1회 재선택 ──
         tell("generate")
+        generation_attestation = bind_dart_profile_attestation(
+            frags,
+            profile=profile,
+            corp_code=corp_code,
+            company_name=company_name,
+            collected_on=business_date.isoformat(),
+        )
         generation_frags = {
             number: fragment
-            for number, fragment in frags.items()
-            if str(fragment.get("종류") or "") != OFFICIAL_IR_FRAGMENT_KIND
-            and str(fragment.get("원문") or "").strip()
+            for number, fragment in generation_attestation.fragments.items()
+            if str(fragment.get("원문") or "").strip()
             and (
-                str(fragment.get("종류") or "") != HOMEPAGE_FRAGMENT_KIND
-                or official_web_currentness_is_usable(
+                (
+                    str(fragment.get("종류") or "")
+                    == OFFICIAL_IR_FRAGMENT_KIND
+                    and verified_official_ir_fragment_is_usable(
+                        fragment,
+                        reference_date=business_date.isoformat(),
+                    )
+                )
+                or str(fragment.get("종류") or "")
+                not in {HOMEPAGE_FRAGMENT_KIND, OFFICIAL_IR_FRAGMENT_KIND}
+                or (
+                    str(fragment.get("종류") or "")
+                    == HOMEPAGE_FRAGMENT_KIND
+                    and official_web_currentness_is_usable(
                     source_type="회사 공식 웹",
                     url=str(fragment.get("출처") or ""),
                     published_at=str(
@@ -1775,7 +1794,8 @@ class RealPipeline:
                         or fragment.get("published_at")
                         or ""
                     ),
-                    collected_at=business_date.isoformat(),
+                        collected_at=business_date.isoformat(),
+                    )
                 )
             )
         }
@@ -2767,7 +2787,10 @@ def _collect(
 
     # 회사 홈페이지 — 2번(뭘 잘하나)이 만성적으로 비는 원인이었다 (문제로그 P-35 · D14-7).
     # ★ 실패를 「없음」과 반드시 구분한다. 섞으면 「이 회사는 자료가 없다」로 잘못 읽힌다.
-    homepage = collect_homepage_fragments(profile.get("hm_url", ""))
+    homepage = collect_homepage_fragments(
+        profile.get("hm_url", ""),
+        allow_dart_www_alias=True,
+    )
     if homepage.state == "ok":
         for frag in homepage.fragments:
             # 최종 URL 검증 표식·문서 위치 등 수집기가 만든 provenance 메타데이터를
@@ -2816,6 +2839,7 @@ def _collect(
             str(profile.get("hm_url") or ""),
             company_name=str(profile.get("corp_name") or "").strip(),
             company_aliases=company_aliases,
+            allow_dart_www_alias=True,
         )
     except Exception as exc:  # noqa: BLE001 - 수집기 결함도 자료 부재로 오인하지 않는다
         steps.append(

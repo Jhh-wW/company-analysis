@@ -17,13 +17,16 @@ import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from html.parser import HTMLParser
 from typing import Callable, Optional
 from urllib import robotparser
 
 from src.features.homepage.constants import (
+    BRAND_PATH_EXCLUDED_TOKENS,
+    BRAND_PATH_MAX_PREFIX_GAP,
+    BRAND_PATH_MIN_TOKEN_CHARS,
     EXCLUDED_EXTENSIONS,
     FRAGMENT_KIND,
     HOMEPAGE_COLLECTION_TIMEOUT_SEC,
@@ -44,6 +47,14 @@ from src.features.homepage.safe_http import (
     read_limited_text,
     request_deadline_scope,
     safe_urlopen,
+)
+from src.shared.official_ir import (
+    IR_DART_WWW_REDIRECT_FIELD,
+    IR_DART_WWW_REDIRECT_FROM_FIELD,
+    IR_DART_WWW_REDIRECT_TO_FIELD,
+    IR_DART_WWW_REDIRECT_VALUE,
+    dart_homepage_exact_host,
+    dart_homepage_www_alias_url,
 )
 
 #: <script>·<style>·<noscript> 안의 글자는 사람이 읽는 본문이 아니므로 뺀다.
@@ -136,6 +147,7 @@ Fetcher = Callable[[str], str | FetchedPage]
 #: 조회에 실패해도 예외를 던지지 않고 빈 리스트를 돌려준다는 약속이다
 #: (실패 = 「못 알아냄」 = 재시도 포기, `default_lookup_cert_names` 참조).
 CertNameLookup = Callable[[str], list[str]]
+DartWwwRedirectProbe = Callable[[str, str], str]
 
 
 @dataclass(frozen=True)
@@ -264,8 +276,16 @@ def collect_homepage_fragments(
     homepage_url: str,
     fetch: Fetcher = default_fetch,
     lookup_cert_names: CertNameLookup = default_lookup_cert_names,
+    *,
+    allow_dart_www_alias: bool = False,
+    www_redirect_probe: DartWwwRedirectProbe | None = None,
 ) -> HomepageCollectResult:
-    """홈페이지 수집 전체를 하나의 절대시간·DNS cache 경계에서 실행한다."""
+    """홈페이지 수집 전체를 하나의 절대시간·DNS cache 경계에서 실행한다.
+
+    ``allow_dart_www_alias``는 DART 기업개황을 그대로 받은 운영 파이프라인만
+    켠다. apex 수집이 성공하지 못했고 실제 HTTPS apex→정확한 ``www`` 이동을
+    IR 수집기와 같은 probe가 증명한 경우에만 ``www``에서 딱 한 번 재수집한다.
+    """
 
     try:
         with request_deadline_scope(HOMEPAGE_COLLECTION_TIMEOUT_SEC) as deadline:
@@ -274,6 +294,56 @@ def collect_homepage_fragments(
                 fetch=fetch,
                 lookup_cert_names=lookup_cert_names,
             )
+            alias_url = (
+                dart_homepage_www_alias_url(homepage_url)
+                if allow_dart_www_alias and result.state != "ok"
+                else ""
+            )
+            verified_alias_url = ""
+            if alias_url:
+                probe = www_redirect_probe
+                if probe is None:
+                    # IR 수집기와 같은 네트워크 probe 계약을 재사용한다. 지연 import로
+                    # 일반 홈페이지 모듈을 불러올 때 PDF 수집기까지 초기화하지 않는다.
+                    from src.features.homepage.ir_pdf import (
+                        default_dart_www_redirect_probe,
+                    )
+
+                    probe = default_dart_www_redirect_probe
+                verified_alias_url = probe(homepage_url, alias_url)
+            if alias_url and verified_alias_url == alias_url:
+                alias_result = _collect_homepage_fragments_impl(
+                    verified_alias_url,
+                    fetch=fetch,
+                    lookup_cert_names=lookup_cert_names,
+                )
+                if alias_result.state == "ok" or (
+                    result.state == "failed" and alias_result.state != "failed"
+                ):
+                    apex_host = dart_homepage_exact_host(homepage_url)
+                    alias_host = (
+                        urllib.parse.urlsplit(verified_alias_url).hostname or ""
+                    ).casefold().rstrip(".")
+                    alias_note = "DART apex의 검증된 www 별칭에서 홈페이지 확인"
+                    result = replace(
+                        alias_result,
+                        fragments=[
+                            {
+                                **fragment,
+                                IR_DART_WWW_REDIRECT_FIELD: (
+                                    IR_DART_WWW_REDIRECT_VALUE
+                                ),
+                                IR_DART_WWW_REDIRECT_FROM_FIELD: apex_host,
+                                IR_DART_WWW_REDIRECT_TO_FIELD: alias_host,
+                            }
+                            for fragment in alias_result.fragments
+                        ],
+                        detail=(
+                            f"{alias_note}; {alias_result.detail}"
+                            if alias_result.detail
+                            else alias_note
+                        ),
+                    )
             deadline.remaining()
             return result
     except HomepageResponseError as exc:
@@ -788,12 +858,60 @@ def _extract_links(raw_html: str, base_url: str, same_netloc: str) -> list[str]:
 
 
 def _link_priority(url: str) -> int:
-    """회사·기술 소개 페이지가 앞에 오게 하는 순위. 낮을수록 먼저 읽는다."""
-    lowered = url.lower()
+    """핵심 소개·사업·채용 HTML이 IR 목록보다 앞에 오게 한다.
+
+    공식 IR 문서 수집은 별도 기능이 맡는다. 이 일반 HTML 수집기의 6쪽 예산은
+    사용자가 회사를 이해하는 데 필요한 소개·사업·비전 페이지부터 배정한다.
+    호스트 이름은 평가하지 않는다. 예를 들어 ``company.example`` 때문에 모든
+    하위 링크가 ``company`` 페이지처럼 취급되면 실제 경로 우선순위가 사라진다.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if _is_brand_landing_path(parsed):
+        return 0
+    path_and_query = parsed.path
+    if parsed.query:
+        path_and_query = f"{path_and_query}?{parsed.query}"
+    lowered = urllib.parse.unquote(path_and_query).lower()
     for rank, keyword in enumerate(PRIORITY_PATH_KEYWORDS):
         if keyword in lowered:
             return rank
     return len(PRIORITY_PATH_KEYWORDS)
+
+
+def _is_brand_landing_path(parsed: urllib.parse.ParseResult) -> bool:
+    """브랜드명이 경로 끝에 있는 회사소개 landing page인지 판정한다.
+
+    JYP처럼 회사소개가 ``/ko/JYP``인 사이트를 위한 작은 보완이다. 등록
+    도메인의 핵심 라벨과 마지막 경로 조각만 비교하므로 ``company.example``
+    호스트의 모든 링크가 ``company`` 우선순위를 받던 문제는 되살리지 않는다.
+    또한 ``/ko/JYP/History`` 같은 하위 namespace 전체를 올리지 않아 5쪽 예산을
+    같은 회사소개 메뉴가 독점하지 않는다.
+    """
+    core = re.sub(
+        r"[^a-z0-9]",
+        "",
+        _registrable_core_name(parsed.hostname or ""),
+    )
+    segments = [
+        re.sub(r"[^a-z0-9]", "", segment.lower())
+        for segment in urllib.parse.unquote(parsed.path).split("/")
+        if segment
+    ]
+    if not segments:
+        return False
+    brand = segments[-1]
+    if (
+        len(core) < BRAND_PATH_MIN_TOKEN_CHARS
+        or len(brand) < BRAND_PATH_MIN_TOKEN_CHARS
+        or core in BRAND_PATH_EXCLUDED_TOKENS
+        or brand in BRAND_PATH_EXCLUDED_TOKENS
+    ):
+        return False
+    shorter, longer = sorted((core, brand), key=len)
+    return (
+        longer.startswith(shorter)
+        and len(longer) - len(shorter) <= BRAND_PATH_MAX_PREFIX_GAP
+    )
 
 
 def _page_candidate_scope_is_complete(raw_html: str, total_chars: int) -> bool:

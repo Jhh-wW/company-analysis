@@ -27,6 +27,13 @@ from src.shared.comparison_candidate_basis import (
     comparison_evidence_sentences,
     comparison_source_sentence_has_marker,
 )
+from src.shared.official_ir import (
+    IR_COLLECTED_ON_FIELD,
+    IR_DART_WWW_REDIRECT_FIELD,
+    IR_DART_WWW_REDIRECT_FROM_FIELD,
+    IR_DART_WWW_REDIRECT_TO_FIELD,
+    dart_www_redirect_is_valid,
+)
 
 
 DART_SUCCESS_STATUS = "000"
@@ -140,11 +147,19 @@ def bind_dart_profile_attestation(
         if str(fragment.get("종류") or "") not in OFFICIAL_WEB_FRAGMENT_KINDS:
             continue
         source_url = _official_https_url(fragment.get("출처"))
+        source_host = _host(source_url)
+        verified_www_redirect = dart_www_redirect_is_valid(
+            verification=str(fragment.get(IR_DART_WWW_REDIRECT_FIELD) or ""),
+            from_host=str(fragment.get(IR_DART_WWW_REDIRECT_FROM_FIELD) or ""),
+            to_host=str(fragment.get(IR_DART_WWW_REDIRECT_TO_FIELD) or ""),
+            dart_host=official_host,
+            source_host=source_host,
+        )
         if (
             official_host
             and fragment.get(VERIFIED_FINAL_URL_FIELD) == VERIFIED_FINAL_URL_VALUE
             and source_url
-            and _host(source_url) == official_host
+            and (source_host == official_host or verified_www_redirect)
         ):
             eligible_numbers.append(number)
 
@@ -193,6 +208,11 @@ def bind_dart_profile_attestation(
                 "발행처": profile_name,
                 "도메인근거SourceID": source_id,
                 "도메인근거원문": evidence,
+                **(
+                    {IR_COLLECTED_ON_FIELD: collected_on}
+                    if str(copied[number].get("종류") or "") == "공식 IR"
+                    else {}
+                ),
             }
         )
     return ProfileAttestationResult(copied, attester)

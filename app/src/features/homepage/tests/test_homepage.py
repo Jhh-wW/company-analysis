@@ -19,6 +19,7 @@ from src.features.homepage.logic import (
     HomepageFetchError,
     HomepageRobotsUnavailable,
     HomepageRobotsUnreachable,
+    HomepageSecurityPolicyError,
     collect_homepage_fragments,
     strip_html,
 )
@@ -189,6 +190,107 @@ def test_루트_접속_실패는_failed로_돌아온다():
     assert result.fragments == []
     assert "접속 실패" in result.detail
     assert result.candidate_scope_complete is False
+
+
+def test_DART_apex의_실제_www이동만_재수집하고_조각에_검증표식을_붙인다():
+    apex = "https://jype.com"
+    alias = "https://www.jype.com/"
+    pages = {
+        f"{alias}robots.txt": FetchedPage(
+            html="User-agent: *\nAllow: /\n",
+            effective_url=f"{alias}robots.txt",
+        ),
+        alias: FetchedPage(
+            html=(
+                "<html><body><p>"
+                + ("JYP 공식 회사소개입니다. " * 10)
+                + "</p></body></html>"
+            ),
+            effective_url=alias,
+        ),
+    }
+    calls: list[str] = []
+    probe_calls: list[tuple[str, str]] = []
+
+    def fetch(url: str) -> str | FetchedPage:
+        calls.append(url)
+        if url == f"{apex}/robots.txt":
+            raise HomepageRobotsUnavailable("apex robots 없음")
+        if url == apex:
+            raise HomepageSecurityPolicyError("apex 본문은 www로 이동")
+        if url in pages:
+            return pages[url]
+        raise AssertionError(f"예상하지 않은 주소: {url}")
+
+    def probe(apex_url: str, alias_url: str) -> str:
+        probe_calls.append((apex_url, alias_url))
+        return alias_url
+
+    result = collect_homepage_fragments(
+        "jype.com",
+        fetch=fetch,
+        allow_dart_www_alias=True,
+        www_redirect_probe=probe,
+    )
+
+    assert result.state == "ok"
+    assert probe_calls == [("jype.com", alias)]
+    assert calls.count(alias) == 1
+    assert "검증된 www 별칭" in result.detail
+    assert result.fragments[0]["후보출처검증"] == "https_exact_dart_host"
+    assert result.fragments[0]["DARTwww리다이렉트검증"] == "https_apex_to_www_redirect"
+    assert result.fragments[0]["DARTwww원본host"] == "jype.com"
+    assert result.fragments[0]["DARTwww최종host"] == "www.jype.com"
+
+    from src.features.company_comparison.official_sources import (
+        bind_dart_profile_attestation,
+    )
+
+    bound = bind_dart_profile_attestation(
+        {1: result.fragments[0]},
+        profile={
+            "status": "000",
+            "corp_code": "00258689",
+            "corp_name": "JYP Ent.",
+            "hm_url": "jype.com",
+        },
+        corp_code="00258689",
+        company_name="JYP Ent.",
+        collected_on="2026-08-24",
+    )
+    assert bound.fragments[1]["도메인근거SourceID"] == (
+        "dart-company-profile-00258689"
+    )
+
+
+@pytest.mark.parametrize(
+    "probe_result",
+    ("", "https://ir.jype.com/", "https://www.attacker.example/"),
+)
+def test_검증표식이_없거나_임의_subdomain이면_www를_재수집하지_않는다(
+    probe_result: str,
+):
+    apex = "https://jype.com"
+    calls: list[str] = []
+
+    def fetch(url: str) -> str:
+        calls.append(url)
+        if url == f"{apex}/robots.txt":
+            raise HomepageRobotsUnavailable("apex robots 없음")
+        if url == apex:
+            raise HomepageSecurityPolicyError("apex 본문 실패")
+        raise AssertionError(f"검증되지 않은 별칭을 요청하면 안 됩니다: {url}")
+
+    result = collect_homepage_fragments(
+        "jype.com",
+        fetch=fetch,
+        allow_dart_www_alias=True,
+        www_redirect_probe=lambda _apex, _alias: probe_result,
+    )
+
+    assert result.state == "failed"
+    assert all("www.jype.com" not in url for url in calls)
+    assert result.fragments == []
 
 
 def test_낱장_페이지_실패는_전체_실패로_보지_않는다():
@@ -389,6 +491,93 @@ def test_IR자료실의_두번째_링크까지_따라가_최신_실적을_일반
     assert detail_url in calls
     assert calls.index(detail_url) < calls.index(f"{ROOT}/IR/Stock")
     assert any(fragment["출처"] == detail_url for fragment in result.fragments)
+
+
+def test_company_호스트와_링크_10개에서도_핵심_4쪽을_6쪽_안에_읽는다():
+    """호스트의 company 글자와 IR 링크가 핵심 경로 순위를 오염하지 않는다."""
+    root = "http://company.example"
+    paths = (
+        "aaa-random-1",
+        "aaa-random-2",
+        "IR/Stock",
+        "IR/Financial",
+        "products",
+        "technology",
+        "about",
+        "business",
+        "vision",
+        "view?section=press",
+    )
+    links = "".join(f'<a href="/{path}">{path}</a>' for path in paths)
+    pages = {root: f"<html><body><p>JYP 홈.</p>{links}</body></html>"}
+    for path in paths:
+        pages[f"{root}/{path}"] = (
+            "<html><body><p>" + (f"{path} 공식 내용입니다. " * 10) + "</p></body></html>"
+        )
+    fetch, calls = _fake_fetch(pages)
+
+    result = collect_homepage_fragments(root, fetch=fetch)
+
+    page_calls = [call for call in calls if not call.endswith("robots.txt")]
+    assert len(page_calls) == MAX_PAGES
+    essential_urls = (
+        f"{root}/about",
+        f"{root}/business",
+        f"{root}/vision",
+        f"{root}/view?section=press",
+    )
+    assert all(url in page_calls for url in essential_urls)
+    assert f"{root}/aaa-random-1" not in page_calls
+    assert all(
+        any(fragment["출처"] == url for fragment in result.fragments)
+        for url in essential_urls
+    )
+
+
+def test_JYP_실제_메뉴에서는_회사소개와_IR핵심이_6쪽_안에_남는다():
+    """브랜드 landing만 올리고 JYP 하위 메뉴가 예산을 독점하지 않는다."""
+    root = "https://www.jype.com"
+    paths = (
+        "ko/JYP",
+        "ko/JYP/History",
+        "ko/JYP/Notice",
+        "ko/JYP/Contact",
+        "ko/Artist",
+        "ko/Artist/Album",
+        "ko/Artist/Video",
+        "ko/Sustainability/ESGStrategy",
+        "ko/Sustainability/ESGFactBook",
+        "ko/Sustainability/ESGReporting",
+        "ko/IR/Stock",
+        "ko/IR/DividendStatus",
+        "ko/IR/ShareholdersMeeting",
+        "ko/IR/Financial",
+        "ko/IR/Disclosure",
+        "ko/board/ir-data",
+        "ko/board/ir-news",
+        "ko/IR/IRInquiry",
+    )
+    links = "".join(f'<a href="/{path}">{path}</a>' for path in paths)
+    pages = {root: f"<html><body><p>JYP 홈.</p>{links}</body></html>"}
+    for path in paths:
+        pages[f"{root}/{path}"] = (
+            "<html><body><p>" + (f"{path} 공식 내용입니다. " * 10) + "</p></body></html>"
+        )
+    fetch, calls = _fake_fetch(pages)
+
+    result = collect_homepage_fragments(root, fetch=fetch)
+
+    page_calls = [call for call in calls if not call.endswith("robots.txt")]
+    assert len(page_calls) == MAX_PAGES
+    assert f"{root}/ko/JYP" in page_calls
+    assert f"{root}/ko/JYP/History" not in page_calls
+    assert {
+        f"{root}/ko/board/ir-data",
+        f"{root}/ko/board/ir-news",
+    } & set(page_calls)
+    assert any(
+        fragment["출처"] == f"{root}/ko/JYP" for fragment in result.fragments
+    )
 
 
 def test_전체_글자수_상한을_넘지_않는다():
