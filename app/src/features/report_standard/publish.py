@@ -1162,7 +1162,10 @@ def _location_is_bound(fact_location: str, source_location: str) -> bool:
 def _evidence_support_problems(fact: FactRecord) -> list[str]:
     problems: list[str] = []
     terms = [_normalized(term) for term in fact.evidence_support_terms if _normalized(term)]
-    if len(set(terms)) < 2:
+    if (
+        len(set(terms)) < 2
+        and not _historical_performance_numeric_evidence_is_bound(fact)
+    ):
         problems.append(
             f"[evidence] {fact.fact_id}: claim과 원문을 잇는 서로 다른 근거어가 두 개 이상 필요합니다"
         )
@@ -1301,6 +1304,55 @@ def _numeric_problems(fact: FactRecord) -> list[str]:
             f"[number] {fact.fact_id}: claim의 수치가 수치 장부에 모두 결속되지 않았습니다"
         )
     return problems
+
+
+def _historical_performance_numeric_evidence_is_bound(fact: FactRecord) -> bool:
+    """원 단위 공시값과 억원 표시값의 결정론적 결속을 근거어 대신 확인한다.
+
+    공시 payload의 원 단위 숫자는 공개 표의 억원 반올림 숫자와 문자열이 같지
+    않다. 이 경우에만 회계연도·모든 원값·ROUND_HALF_UP 검산이 원문에 정확히
+    결속됐을 때 일반 문장용 '공통 근거어 두 개' 규칙을 대체한다.
+    """
+
+    if (
+        fact.claim_type != "historical_performance"
+        or not str(fact.fiscal_year or "").strip()
+        or not fact.numeric_checks
+    ):
+        return False
+
+    evidence_numbers = {
+        value
+        for token in _NUMBER_TOKEN.findall(fact.state_evidence)
+        if (value := _decimal(token)) is not None
+    }
+    evidence_years = set(
+        re.findall(r"(?<!\d)20\d{2}(?!\d)", fact.state_evidence)
+    )
+    raw_numbers = [
+        value
+        for token in _NUMBER_TOKEN.findall(fact.raw_value)
+        if (value := _decimal(token)) is not None
+    ]
+    if (
+        str(fact.fiscal_year).strip() not in evidence_years
+        or not raw_numbers
+        or any(value not in evidence_numbers for value in raw_numbers)
+    ):
+        return False
+
+    checked_raw: list[Decimal] = []
+    for check in fact.numeric_checks:
+        match = _NUMERIC_CHECK.fullmatch(str(check))
+        if match is None:
+            return False
+        raw = _decimal(match.group("raw"))
+        if raw is None or raw not in evidence_numbers:
+            return False
+        checked_raw.append(raw)
+    if any(value not in checked_raw for value in raw_numbers):
+        return False
+    return not _numeric_problems(fact)
 
 
 def _fact_problems(
