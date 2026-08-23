@@ -10,7 +10,8 @@
 - 비공개 저장소의 기본 브랜치와 통과한 GitHub Actions `quality-gate`에서만 배포한다.
 - 첫 배포는 `PIPELINE=demo`, `BETA_ADMIN_ONLY=1`로 시작한다.
 - Uvicorn worker와 Render instance는 각각 `1`로 유지한다.
-- SQLite와 실행 이력은 `/var/data` 영속 디스크 하나에 둔다.
+- 첫 무료 배포의 SQLite와 실행 이력은 임시 `/var/data`에 둔다. 잠듦·재시작·재배포 때
+  초기화될 수 있음을 받아들이고, 실제 베타 운영 전에는 Starter와 영속 디스크로 전환한다.
 - 비밀값과 사용자 식별자는 Git, 채팅, 티켓, 화면 캡처에 남기지 않는다.
 - 현재 `render.yaml`은 web service 1개만 만들고 `autoDeployTrigger: off`로 둔다. 커밋이나 CI
   통과만으로 배포되지 않으며 첫 push 전 대시보드와 Blueprint의 Auto Sync도 비활성인지
@@ -21,7 +22,7 @@
 첫 배포의 runtime contract는 `render-admin-demo-no-forwarded-v1`이다. 이것은 관리자만
 접근하는 demo 확인용이며 정식 공개 운영 승인이 아니다.
 
-- `PIPELINE=demo`, `BETA_ADMIN_ONLY=1`, instance와 worker 각각 1개
+- Free instance, `PIPELINE=demo`, `BETA_ADMIN_ONLY=1`, instance와 worker 각각 1개
 - 경로·쿼리 없는 고정 HTTPS `PUBLIC_ORIGIN`
 - `GOOGLE_REDIRECT_URI`는 정확히 `<PUBLIC_ORIGIN>/auth/callback`
 - `FORWARDED_ALLOW_IPS`는 빈 값이며 Uvicorn proxy headers를 신뢰하지 않음
@@ -145,8 +146,9 @@ report_standard 통과
 `render.yaml`에는 S3 외부 백업이나 backup/maintenance cron이 없으며 첫 배포에서는 관련
 환경변수를 설정하지 않는다.
 
-현재 `storage.db`는 웹 서비스에 붙은 영속 디스크에 있다. Render cron job은 다른 서비스의
-영속 디스크를 읽을 수 없으므로 다음 구조로 매일 외부 백업한다.
+현재 첫 무료 배포의 `storage.db`는 임시 파일이라 백업·복구 정본으로 사용하지 않는다.
+아래 구조는 Starter와 영속 디스크로 전환한 뒤의 후속 운영 설계다. Render cron job은 다른
+서비스의 영속 디스크를 읽을 수 없으므로 웹 프로세스가 다음 구조로 매일 외부 백업한다.
 
 ```text
 Render cron
@@ -298,10 +300,11 @@ DB 백업에는 환경 비밀이 들어 있지 않으므로 다음 **복구 묶�
 - [ ] S3 외부 백업을 수동 실행하고 exact object 결속 manifest gate·임시 복구 통과
 - [ ] 35일·35개 보관 정책과 24시간 미생성 외부 알림 수신처 확인
 - [ ] 비밀 복구 묶음의 소유자와 복구 시험일 확인
-- [ ] worker `1`, instance `1`, 디스크 `/var/data` 유지
+- [ ] 정식 베타 전환 시 worker `1`, instance `1`, 영속 디스크 `/var/data` 유지
 - [ ] real 전환 시 provider 비용과 예산 한도 별도 승인
 
 공식 참고: [Render Blueprint](https://render.com/docs/blueprint-spec),
+[Render 무료 웹서비스](https://render.com/docs/free),
 [Render 영속 디스크](https://render.com/docs/disks),
 [Render cron job](https://render.com/docs/cronjobs),
 [Render SSH](https://render.com/docs/ssh),

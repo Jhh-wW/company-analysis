@@ -210,6 +210,10 @@ def test_ci_imports_cron_modules_and_scans_built_image() -> None:
     assert "docker image inspect --format '{{.Config.User}}'" in workflow
     assert "--entrypoint python" in workflow
     assert "os.geteuid() == 1000" in workflow
+    assert "--env DEPLOYMENT_RUNTIME_CONTRACT=local-web-v1" in workflow
+    assert "--env DEPLOYMENT_EXPOSURE=local" in workflow
+    assert "--env DEPLOYMENT_PLATFORM=local" in workflow
+    assert "--env FORWARDED_ALLOW_IPS=127.0.0.1" in workflow
 
 
 def _make_fake_image_root(root: Path) -> None:

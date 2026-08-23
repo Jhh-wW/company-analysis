@@ -2,7 +2,7 @@ services:
   - type: web
     name: company-analysis-beta
     runtime: docker
-    plan: starter
+    plan: free
     region: singapore
     numInstances: 1
     dockerfilePath: ./app/Dockerfile
@@ -10,11 +10,6 @@ services:
     healthCheckPath: /readyz
     # 첫 관리자 베타는 비용과 외부 변경을 통제하도록 수동 배포만 허용한다.
     autoDeployTrigger: off
-
-    disk:
-      name: app-data
-      mountPath: /var/data
-      sizeGB: 1
 
     envVars:
       # 첫 배포는 관리자 한 명이 확인하는 무과금 API 데모로 범위를 고정한다.
@@ -39,7 +34,8 @@ services:
       - key: FORWARDED_ALLOW_IPS
         value: ""
 
-      # 재배포·재시작 뒤에도 남아야 하는 기록은 모두 한 영속 디스크에 둔다.
+      # 첫 무료 배포에서는 /var/data도 임시 저장소다. 잠듦·재시작·재배포 시
+      # 세션·보고서·실행 기록이 초기화될 수 있으며, 작동 확인 뒤 유료 디스크로 전환한다.
       - key: APP_DATA_ROOT
         value: /var/data
       - key: STORAGE_DB_PATH

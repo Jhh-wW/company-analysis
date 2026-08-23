@@ -70,6 +70,10 @@ jobs:
             --publish 127.0.0.1:18080:10000 \
             --env PIPELINE=demo \
             --env BETA_ADMIN_ONLY=1 \
+            --env DEPLOYMENT_RUNTIME_CONTRACT=local-web-v1 \
+            --env DEPLOYMENT_EXPOSURE=local \
+            --env DEPLOYMENT_PLATFORM=local \
+            --env FORWARDED_ALLOW_IPS=127.0.0.1 \
             --env ADMIN_EMAILS=ci-admin@example.invalid \
             --env GOOGLE_CLIENT_ID=ci-client \
             --env GOOGLE_CLIENT_SECRET=ci-secret \

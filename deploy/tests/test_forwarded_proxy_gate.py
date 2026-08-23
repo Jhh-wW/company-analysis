@@ -234,6 +234,8 @@ def test_render_blueprint는_관리자_demo_한서비스만_좁게_허용한다(
     web = next(service for service in blueprint["services"] if service["type"] == "web")
     values = {item["key"]: item for item in web["envVars"]}
 
+    assert web["plan"] == "free"
+    assert "disk" not in web
     assert values["DEPLOYMENT_EXPOSURE"]["value"] == "public"
     assert values["DEPLOYMENT_PLATFORM"]["value"] == "render"
     assert values["DEPLOYMENT_RUNTIME_CONTRACT"]["value"] == (

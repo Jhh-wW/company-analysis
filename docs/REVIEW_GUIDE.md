@@ -143,7 +143,8 @@ report_standard 통과
 ## 8. 배포·정기 작업·복구
 
 - 배포 전 안전값: `PIPELINE=demo`, `BETA_ADMIN_ONLY=1`
-- Uvicorn worker `1`, Render instance `1`, 영속 디스크 `/var/data`
+- 첫 무료 배포는 Uvicorn worker `1`, Render instance `1`, 임시 `/var/data`이며 잠듦·재시작 시
+  세션·보고서·실행 기록 초기화를 허용한다. 정식 베타 전에는 Starter와 영속 디스크로 전환한다.
 - 매일 04:00 KST 외부 SQLite 백업, 월요일 04:10 주간 관리자 XLSX,
   매일 04:20 휴지통·멈춘 작업 정리가 Blueprint에 선언되어 있다.
 - cron은 영속 디스크를 직접 읽지 않고, 서로 분리된 32바이트 이상 Bearer 비밀과 정확한
