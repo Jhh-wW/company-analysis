@@ -41,14 +41,14 @@ app.mount("/static", StaticFiles(directory=str(paths.STATIC_DIR)), name="static"
 
 @app.middleware("http")
 async def beta_admin_gate(request: Request, call_next):
-    """시험 배포에서는 로그인한 관리자만 사이트 본문에 들어오게 한다."""
-    narrow_admin_demo = deployment_mode.render_admin_demo_no_forwarded()
-    if not auth_logic.beta_admin_only_from_env() and not narrow_admin_demo:
+    """관리자 전용 배포에서는 로그인한 관리자만 사이트 본문에 들어오게 한다."""
+    narrow_admin_no_forwarded = deployment_mode.render_admin_no_forwarded()
+    if not auth_logic.beta_admin_only_from_env() and not narrow_admin_no_forwarded:
         return await call_next(request)
 
     path = request.url.path
     public_prefix = path.startswith(auth_constants.BETA_PUBLIC_PATH_PREFIXES)
-    if narrow_admin_demo and path.startswith(
+    if narrow_admin_no_forwarded and path.startswith(
         auth_constants.BETA_SHARE_ENTRY_PATH_PREFIXES
     ):
         public_prefix = False
@@ -68,7 +68,7 @@ async def beta_admin_gate(request: Request, call_next):
     # 실제로 살아 있을 때만 결과·진행·PDF 경로를 연다. 관리자 경로는 capability로
     # 절대 열지 않으며, 쿠키가 없는 일반 요청에는 추가 DB 조회 비용을 만들지 않는다.
     if (
-        not narrow_admin_demo
+        not narrow_admin_no_forwarded
         and (
             path in auth_constants.BETA_SHARE_PATHS
             or path.startswith(auth_constants.BETA_SHARE_PATH_PREFIXES)

@@ -150,22 +150,29 @@ def test_all_git_based_render_services_disable_automatic_deploys() -> None:
     )
 
 
-def test_first_render_beta_does_not_request_backup_or_provider_secrets() -> None:
+def test_render_admin_real_requests_provider_secrets_but_defers_backup_and_notion() -> None:
     blueprint = yaml.safe_load(
         (REPOSITORY_ROOT / "render.yaml").read_text(encoding="utf-8")
     )
     web = blueprint["services"][0]
-    names = {item["key"] for item in web["envVars"]}
+    values = {item["key"]: item for item in web["envVars"]}
+    names = set(values)
+
+    provider_names = {
+        "ANTHROPIC_API_KEY",
+        "DART_API_KEY",
+        "NAVER_CLIENT_ID",
+        "NAVER_CLIENT_SECRET",
+    }
+    assert provider_names <= names
+    for name in provider_names:
+        assert values[name] == {"key": name, "sync": False}
 
     assert not names.intersection(
         {
             "BACKUP_S3_BUCKET",
             "AWS_ACCESS_KEY_ID",
             "AWS_SECRET_ACCESS_KEY",
-            "ANTHROPIC_API_KEY",
-            "DART_API_KEY",
-            "NAVER_CLIENT_ID",
-            "NAVER_CLIENT_SECRET",
             "NOTION_TOKEN",
             "NOTION_PARENT_PAGE_ID",
         }

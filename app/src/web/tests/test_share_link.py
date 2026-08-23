@@ -161,8 +161,15 @@ def test_LINK결과는_조회사건연결을_다시확인하지못하면_열지�
         ) == []
 
 
-def test_좁은Render관리자데모는_살아있는_공유capability도_열지않는다(
-    client: TestClient, monkeypatch
+@pytest.mark.parametrize(
+    "contract",
+    (
+        deployment_mode.RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT,
+        deployment_mode.RENDER_ADMIN_REAL_NO_FORWARDED_CONTRACT,
+    ),
+)
+def test_좁은Render관리자운영판은_살아있는_공유capability도_열지않는다(
+    client: TestClient, monkeypatch, contract
 ):
     report_id = uuid.uuid4().hex
     report = build_demo_report()
@@ -172,7 +179,7 @@ def test_좁은Render관리자데모는_살아있는_공유capability도_열지�
     monkeypatch.setenv(auth_constants.ENV_BETA_ADMIN_ONLY, "1")
     monkeypatch.setenv(
         deployment_mode.ENV_DEPLOYMENT_RUNTIME_CONTRACT,
-        deployment_mode.RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT,
+        contract,
     )
     monkeypatch.setenv(deployment_mode.ENV_PUBLIC_ORIGIN, "https://demo.example")
     capability_headers = {

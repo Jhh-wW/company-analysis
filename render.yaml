@@ -2,7 +2,8 @@ services:
   - type: web
     name: company-analysis-beta
     runtime: docker
-    plan: free
+    # 실제 조사와 PDF 생성을 안정적으로 처리하도록 권장 상한인 2GiB를 쓴다.
+    plan: standard
     region: singapore
     numInstances: 1
     dockerfilePath: ./app/Dockerfile
@@ -11,10 +12,16 @@ services:
     # 첫 관리자 베타는 비용과 외부 변경을 통제하도록 수동 배포만 허용한다.
     autoDeployTrigger: off
 
+    # SQLite·보고서·감사 기록을 재배포와 재시작 뒤에도 보존한다.
+    disk:
+      name: company-analysis-data
+      mountPath: /var/data
+      sizeGB: 1
+
     envVars:
-      # 첫 배포는 관리자 한 명이 확인하는 무과금 API 데모로 범위를 고정한다.
+      # 실제 provider를 쓰되, 품질 검증이 끝날 때까지 관리자 한 명으로 범위를 고정한다.
       - key: PIPELINE
-        value: demo
+        value: real
       - key: BETA_ADMIN_ONLY
         value: "1"
 
@@ -25,7 +32,7 @@ services:
       - key: DEPLOYMENT_PLATFORM
         value: render
       - key: DEPLOYMENT_RUNTIME_CONTRACT
-        value: render-admin-demo-no-forwarded-v1
+        value: render-admin-real-no-forwarded-v1
       - key: PUBLIC_ORIGIN
         fromService:
           type: web
@@ -34,8 +41,7 @@ services:
       - key: FORWARDED_ALLOW_IPS
         value: ""
 
-      # 첫 무료 배포에서는 /var/data도 임시 저장소다. 잠듦·재시작·재배포 시
-      # 세션·보고서·실행 기록이 초기화될 수 있으며, 작동 확인 뒤 유료 디스크로 전환한다.
+      # 위 영속 디스크 안에 운영 데이터와 캐시를 모은다.
       - key: APP_DATA_ROOT
         value: /var/data
       - key: STORAGE_DB_PATH
@@ -55,6 +61,16 @@ services:
       - key: GOOGLE_REDIRECT_URI
         sync: false
 
-      # demo 실행 기록도 재시작 뒤 검증할 수 있도록 Render가 고정 비밀을 만든다.
+      # 실제 분석 provider 값은 저장소에 넣지 않고 Render 비밀 환경변수로만 주입한다.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: DART_API_KEY
+        sync: false
+      - key: NAVER_CLIENT_ID
+        sync: false
+      - key: NAVER_CLIENT_SECRET
+        sync: false
+
+      # 실행 기록을 재시작 뒤에도 검증할 수 있도록 Render가 고정 비밀을 만든다.
       - key: PROVENANCE_SEAL_SECRET
         generateValue: true

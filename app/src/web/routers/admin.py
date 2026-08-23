@@ -455,7 +455,7 @@ async def admin_link_new(
     csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
 ):
     """지원 회사·직무 꼬리표가 붙은 LINK를 새로 발급한다."""
-    if deployment_mode.render_admin_demo_no_forwarded():
+    if deployment_mode.render_admin_no_forwarded():
         return _admin_response(
             request,
             HTMLResponse("찾을 수 없습니다.", status_code=404),
@@ -959,10 +959,10 @@ async def admin_invite(
     csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
 ):
     """친구를 초대 명단에 넣는다."""
-    if deployment_mode.render_admin_demo_no_forwarded():
+    if deployment_mode.render_admin_no_forwarded():
         return _admin_response(
             request,
-            HTMLResponse("첫 배포에서는 친구 MEMBER 초대를 보류했습니다.", status_code=409),
+            HTMLResponse("관리자 전용 운영판에서는 친구 MEMBER 초대를 보류했습니다.", status_code=409),
         )
     email_clean = share_allow.normalize(email)
     action = "admin.member.invite"

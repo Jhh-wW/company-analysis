@@ -13,6 +13,15 @@ ENV_PUBLIC_ORIGIN: Final[str] = "PUBLIC_ORIGIN"
 RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT: Final[str] = (
     "render-admin-demo-no-forwarded-v1"
 )
+RENDER_ADMIN_REAL_NO_FORWARDED_CONTRACT: Final[str] = (
+    "render-admin-real-no-forwarded-v1"
+)
+RENDER_ADMIN_NO_FORWARDED_CONTRACTS: Final[frozenset[str]] = frozenset(
+    {
+        RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT,
+        RENDER_ADMIN_REAL_NO_FORWARDED_CONTRACT,
+    }
+)
 
 HttpOrigin = tuple[str, str, int]
 
@@ -21,16 +30,37 @@ def _environment(environment: Mapping[str, str] | None) -> Mapping[str, str]:
     return os.environ if environment is None else environment
 
 
+def _runtime_contract(environment: Mapping[str, str]) -> str:
+    """시작 검증기와 같은 방식으로 runtime contract를 정규화한다."""
+
+    return environment.get(ENV_DEPLOYMENT_RUNTIME_CONTRACT, "").strip().lower()
+
+
 def render_admin_demo_no_forwarded(
     environment: Mapping[str, str] | None = None,
 ) -> bool:
     """고정 공개 출처만 믿는 Render 관리자 데모 계약인지 반환한다."""
 
     values = _environment(environment)
-    return (
-        values.get(ENV_DEPLOYMENT_RUNTIME_CONTRACT, "").strip()
-        == RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT
-    )
+    return _runtime_contract(values) == RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT
+
+
+def render_admin_real_no_forwarded(
+    environment: Mapping[str, str] | None = None,
+) -> bool:
+    """실제 조사를 쓰되 고정 공개 출처만 믿는 Render 관리자 계약인지 반환한다."""
+
+    values = _environment(environment)
+    return _runtime_contract(values) == RENDER_ADMIN_REAL_NO_FORWARDED_CONTRACT
+
+
+def render_admin_no_forwarded(
+    environment: Mapping[str, str] | None = None,
+) -> bool:
+    """forwarded 헤더를 믿지 않는 Render 관리자 전용 계약인지 반환한다."""
+
+    values = _environment(environment)
+    return _runtime_contract(values) in RENDER_ADMIN_NO_FORWARDED_CONTRACTS
 
 
 def http_origin(
@@ -71,7 +101,7 @@ def configured_public_origin(
     """좁은 계약의 고정 HTTPS ``PUBLIC_ORIGIN``을 반환하며 fallback하지 않는다."""
 
     values = _environment(environment)
-    if not render_admin_demo_no_forwarded(values):
+    if not render_admin_no_forwarded(values):
         return None
     return http_origin(
         values.get(ENV_PUBLIC_ORIGIN, ""),

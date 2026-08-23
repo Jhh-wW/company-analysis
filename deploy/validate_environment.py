@@ -80,12 +80,14 @@ KUBERNETES_SERVICE_ACCOUNT_MARKERS = (
 RUNTIME_CONTRACT_LOCAL_WEB = "local-web-v1"
 RUNTIME_CONTRACT_RENDER_WEB = "render-public-web-v1"
 RUNTIME_CONTRACT_RENDER_ADMIN_DEMO = "render-admin-demo-no-forwarded-v1"
+RUNTIME_CONTRACT_RENDER_ADMIN_REAL = "render-admin-real-no-forwarded-v1"
 RUNTIME_CONTRACT_KUBERNETES_WEB = "kubernetes-public-web-v1"
 RUNTIME_CONTRACTS = frozenset(
     {
         RUNTIME_CONTRACT_LOCAL_WEB,
         RUNTIME_CONTRACT_RENDER_WEB,
         RUNTIME_CONTRACT_RENDER_ADMIN_DEMO,
+        RUNTIME_CONTRACT_RENDER_ADMIN_REAL,
         RUNTIME_CONTRACT_KUBERNETES_WEB,
     }
 )
@@ -328,8 +330,50 @@ def _render_admin_demo_errors(environment: Mapping[str, str]) -> list[str]:
     return errors
 
 
-def _render_admin_demo_command_errors(command: Sequence[str]) -> list[str]:
-    """배포 명령 덮어쓰기로 proxy header 신뢰를 다시 켜지 못하게 한다."""
+def _render_admin_real_errors(environment: Mapping[str, str]) -> list[str]:
+    """forwarded header를 믿지 않는 Render 관리자 실제 분석판만 허용한다."""
+
+    errors: list[str] = []
+    if environment.get("PIPELINE", "").strip().lower() != "real":
+        errors.append("PIPELINE: Render 관리자 실제 분석판은 real만 허용합니다")
+    if environment.get("BETA_ADMIN_ONLY", "").strip().lower() not in BOOLEAN_TRUE:
+        errors.append(
+            "BETA_ADMIN_ONLY: Render 관리자 실제 분석판은 관리자 전용이어야 합니다"
+        )
+    if environment.get("FORWARDED_ALLOW_IPS", "").strip():
+        errors.append(
+            "FORWARDED_ALLOW_IPS: Render 관리자 실제 분석판은 forwarded header를 "
+            "신뢰하지 않아야 합니다"
+        )
+
+    public_origin_raw = environment.get("PUBLIC_ORIGIN", "")
+    origin_error = _public_origin_error(public_origin_raw)
+    if origin_error:
+        errors.append(origin_error)
+        public_origin = None
+    else:
+        public_origin = _normalized_public_origin(public_origin_raw)
+
+    render_origin_raw = environment.get("RENDER_EXTERNAL_URL", "").strip()
+    if render_origin_raw and public_origin:
+        render_origin = _normalized_public_origin(render_origin_raw)
+        if render_origin is None or render_origin != public_origin:
+            errors.append(
+                "PUBLIC_ORIGIN: Render 기본 외부 URL과 정확히 같아야 합니다"
+            )
+
+    redirect_raw = environment.get("GOOGLE_REDIRECT_URI", "").strip()
+    if redirect_raw and public_origin:
+        if redirect_raw != f"{public_origin}/auth/callback":
+            errors.append(
+                "GOOGLE_REDIRECT_URI: PUBLIC_ORIGIN의 /auth/callback과 "
+                "정확히 같아야 합니다"
+            )
+    return errors
+
+
+def _render_admin_no_forwarded_command_errors(command: Sequence[str]) -> list[str]:
+    """관리자 no-forwarded 계약의 실행 명령 우회를 차단한다."""
 
     words = _normalized_command_words(command)
     expected = (
@@ -357,7 +401,7 @@ def _render_admin_demo_command_errors(command: Sequence[str]) -> list[str]:
     )
     if words != expected:
         return [
-            "DEPLOYMENT_COMMAND: Render 관리자 데모는 proxy 비신뢰가 고정된 "
+            "DEPLOYMENT_COMMAND: Render 관리자 no-forwarded 계약은 proxy 비신뢰가 고정된 "
             "기본 web 실행 명령만 허용합니다"
         ]
     return []
@@ -508,6 +552,7 @@ def _validate_forwarded_proxy_configuration(
     render_contracts = {
         RUNTIME_CONTRACT_RENDER_WEB,
         RUNTIME_CONTRACT_RENDER_ADMIN_DEMO,
+        RUNTIME_CONTRACT_RENDER_ADMIN_REAL,
     }
     render_contract_detected = contract in render_contracts
     render_marker_detected = _render_web_marker(environment)
@@ -581,6 +626,9 @@ def _validate_forwarded_proxy_configuration(
 
     if contract == RUNTIME_CONTRACT_RENDER_ADMIN_DEMO:
         errors.extend(_render_admin_demo_errors(environment))
+        return errors
+    if contract == RUNTIME_CONTRACT_RENDER_ADMIN_REAL:
+        errors.extend(_render_admin_real_errors(environment))
         return errors
 
     forwarded_networks, network_errors = _proxy_networks(
@@ -707,11 +755,11 @@ def validate_command(
         runtime_contract=runtime_contract,
         kubernetes_service_account_marker=kubernetes_service_account_marker,
     )
-    if (
-        _runtime_contract(environment, runtime_contract)
-        == RUNTIME_CONTRACT_RENDER_ADMIN_DEMO
-    ):
-        errors.extend(_render_admin_demo_command_errors(command))
+    if _runtime_contract(environment, runtime_contract) in {
+        RUNTIME_CONTRACT_RENDER_ADMIN_DEMO,
+        RUNTIME_CONTRACT_RENDER_ADMIN_REAL,
+    }:
+        errors.extend(_render_admin_no_forwarded_command_errors(command))
     return scope, errors
 
 

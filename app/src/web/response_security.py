@@ -87,7 +87,7 @@ class ResponseSecurityMiddleware:
             await send(message)
 
         if (
-            deployment_mode.render_admin_demo_no_forwarded()
+            deployment_mode.render_admin_no_forwarded()
             and str(scope.get("path", "")) not in HOST_INDEPENDENT_HEALTH_PATHS
         ):
             host_values = Headers(scope=scope).getlist("host")

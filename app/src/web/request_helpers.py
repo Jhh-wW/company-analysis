@@ -137,6 +137,8 @@ def _ctx(request: Request, **kwargs) -> dict:
         # 설정값 자체는 절대 싣지 않는다. 로그인 버튼이 지금 동작 가능한지만 알린다.
         "auth_login_available": auth_google.credentials_configured(),
         "narrow_admin_demo": deployment_mode.render_admin_demo_no_forwarded(),
+        "narrow_admin_real": deployment_mode.render_admin_real_no_forwarded(),
+        "narrow_admin_no_forwarded": deployment_mode.render_admin_no_forwarded(),
         "beta_admin_only": auth_logic.beta_admin_only_from_env(),
     }
     base.update(kwargs)
@@ -712,7 +714,7 @@ def _effective_http_origin(
 def _csrf_origin_matches(request: Request) -> bool:
     """브라우저가 Origin을 보냈다면 요청의 전체 HTTP(S) 출처와 같아야 한다."""
     if (
-        deployment_mode.render_admin_demo_no_forwarded()
+        deployment_mode.render_admin_no_forwarded()
         and request.method.upper() == "POST"
     ):
         # Render edge가 붙인 X-Forwarded-*는 읽지 않는다. 외부 HTTPS 출처는

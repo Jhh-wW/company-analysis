@@ -538,18 +538,25 @@ def test_CSRF_Origin은_scheme_host_effective_port가_모두_같아야_한다(
     assert response.status_code == 403
 
 
-def _enable_narrow_render_admin_demo(monkeypatch) -> None:
+def _enable_narrow_render_admin(monkeypatch, contract: str) -> None:
     monkeypatch.setenv(
         deployment_mode.ENV_DEPLOYMENT_RUNTIME_CONTRACT,
-        deployment_mode.RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT,
+        contract,
     )
     monkeypatch.setenv(deployment_mode.ENV_PUBLIC_ORIGIN, "https://demo.example")
 
 
+@pytest.mark.parametrize(
+    "contract",
+    (
+        deployment_mode.RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT,
+        deployment_mode.RENDER_ADMIN_REAL_NO_FORWARDED_CONTRACT,
+    ),
+)
 def test_좁은Render계약은_내부HTTP가_아닌_PUBLIC_ORIGIN으로_POST를_검사한다(
-    client, monkeypatch
+    client, monkeypatch, contract
 ):
-    _enable_narrow_render_admin_demo(monkeypatch)
+    _enable_narrow_render_admin(monkeypatch, contract)
     monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
     session = auth_logic.create_session("admin@example.com", True)
     client.cookies.set(SESSION, session.token)
@@ -584,10 +591,17 @@ def test_좁은Render계약은_내부HTTP가_아닌_PUBLIC_ORIGIN으로_POST를_
         "https://attacker.example",
     ),
 )
+@pytest.mark.parametrize(
+    "contract",
+    (
+        deployment_mode.RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT,
+        deployment_mode.RENDER_ADMIN_REAL_NO_FORWARDED_CONTRACT,
+    ),
+)
 def test_좁은Render계약은_Origin누락과_불일치를_거부한다(
-    client, monkeypatch, origin
+    client, monkeypatch, origin, contract
 ):
-    _enable_narrow_render_admin_demo(monkeypatch)
+    _enable_narrow_render_admin(monkeypatch, contract)
     monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
     session = auth_logic.create_session("admin@example.com", True)
     client.cookies.set(SESSION, session.token)
@@ -612,8 +626,17 @@ def test_좁은Render계약은_Origin누락과_불일치를_거부한다(
     assert response.status_code == 403
 
 
-def test_좁은Render계약은_중복Origin을_거부한다(client, monkeypatch):
-    _enable_narrow_render_admin_demo(monkeypatch)
+@pytest.mark.parametrize(
+    "contract",
+    (
+        deployment_mode.RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT,
+        deployment_mode.RENDER_ADMIN_REAL_NO_FORWARDED_CONTRACT,
+    ),
+)
+def test_좁은Render계약은_중복Origin을_거부한다(
+    client, monkeypatch, contract
+):
+    _enable_narrow_render_admin(monkeypatch, contract)
     monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
     session = auth_logic.create_session("admin@example.com", True)
     client.cookies.set(SESSION, session.token)

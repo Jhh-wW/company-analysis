@@ -79,6 +79,24 @@ def _render_admin_demo() -> dict[str, str]:
     return environment
 
 
+def _render_admin_real() -> dict[str, str]:
+    environment = _render_admin_demo()
+    environment.update(
+        {
+            "PIPELINE": "real",
+            "DEPLOYMENT_RUNTIME_CONTRACT": (
+                validator.RUNTIME_CONTRACT_RENDER_ADMIN_REAL
+            ),
+            "ANTHROPIC_API_KEY": "test-anthropic-key",
+            "DART_API_KEY": "test-dart-key",
+            "NAVER_CLIENT_ID": "test-naver-client-id",
+            "NAVER_CLIENT_SECRET": "test-naver-client-secret",
+            "PROVENANCE_SEAL_SECRET": "x" * 32,
+        }
+    )
+    return environment
+
+
 @pytest.mark.parametrize(
     ("kubernetes_environment", "service_account_marker"),
     (
@@ -237,6 +255,28 @@ def test_Render_관리자_demo는_forwarded를_비신뢰할_때만_통과한다(
     assert errors == []
 
 
+def test_Render_관리자_실분석은_필수비밀과_forwarded비신뢰일_때_통과한다() -> None:
+    environment = _render_admin_real()
+
+    assert validator.validate(environment, "web") == []
+    scope, errors = validator.validate_command(
+        environment,
+        [
+            "sh",
+            "-c",
+            "exec python -m uvicorn src.web.main:app --host 0.0.0.0 "
+            "--port \"${PORT:-10000}\" --workers 1 --no-proxy-headers "
+            "--limit-concurrency 20 --backlog 32 --timeout-keep-alive 5 "
+            "--timeout-graceful-shutdown "
+            "\"${GRACEFUL_SHUTDOWN_SECONDS:-300}\" --log-level "
+            "\"${LOG_LEVEL:-info}\"",
+        ],
+    )
+
+    assert scope == "web"
+    assert errors == []
+
+
 @pytest.mark.parametrize(
     ("name", "value", "expected"),
     (
@@ -260,8 +300,46 @@ def test_Render_관리자_demo의_범위를_넓히는_설정은_거부한다(
     assert expected in "\n".join(validator.validate(environment, "web"))
 
 
+@pytest.mark.parametrize(
+    ("name", "value", "expected"),
+    (
+        ("PIPELINE", "demo", "PIPELINE"),
+        ("BETA_ADMIN_ONLY", "0", "BETA_ADMIN_ONLY"),
+        ("FORWARDED_ALLOW_IPS", "1.1.1.1/32", "FORWARDED_ALLOW_IPS"),
+        ("PUBLIC_ORIGIN", "http://company.example", "PUBLIC_ORIGIN"),
+        (
+            "GOOGLE_REDIRECT_URI",
+            "https://company.example/wrong",
+            "GOOGLE_REDIRECT_URI",
+        ),
+        ("ANTHROPIC_API_KEY", "", "ANTHROPIC_API_KEY"),
+        ("DART_API_KEY", "", "DART_API_KEY"),
+        ("NAVER_CLIENT_ID", "", "NAVER_CLIENT_ID"),
+        ("NAVER_CLIENT_SECRET", "", "NAVER_CLIENT_SECRET"),
+        ("PROVENANCE_SEAL_SECRET", "short", "PROVENANCE_SEAL_SECRET"),
+    ),
+)
+def test_Render_관리자_실분석의_안전범위와_필수비밀_위반을_거부한다(
+    name: str, value: str, expected: str
+) -> None:
+    environment = _render_admin_real()
+    environment[name] = value
+
+    assert expected in "\n".join(validator.validate(environment, "web"))
+
+
 def test_Render_관리자_demo는_Render기본URL과_다른_origin을_거부한다() -> None:
     environment = _render_admin_demo()
+    environment["PUBLIC_ORIGIN"] = "https://other.example"
+    environment["GOOGLE_REDIRECT_URI"] = "https://other.example/auth/callback"
+
+    assert "Render 기본 외부 URL" in "\n".join(
+        validator.validate(environment, "web")
+    )
+
+
+def test_Render_관리자_실분석도_Render기본URL과_다른_origin을_거부한다() -> None:
+    environment = _render_admin_real()
     environment["PUBLIC_ORIGIN"] = "https://other.example"
     environment["GOOGLE_REDIRECT_URI"] = "https://other.example/auth/callback"
 
@@ -286,6 +364,22 @@ def test_Render_관리자_demo는_실행명령으로_proxy신뢰를_우회할수
     assert any(error.startswith("DEPLOYMENT_COMMAND:") for error in errors)
 
 
+@pytest.mark.parametrize(
+    "command",
+    (
+        ["python", "-m", "uvicorn", "src.web.main:app", "--proxy-headers"],
+        ["python", "-m", "uvicorn", "src.web.main:app"],
+        ["python", "-m", "custom.web"],
+    ),
+)
+def test_Render_관리자_실분석도_실행명령으로_proxy신뢰를_우회할수없다(
+    command: list[str],
+) -> None:
+    _, errors = validator.validate_command(_render_admin_real(), command)
+
+    assert any(error.startswith("DEPLOYMENT_COMMAND:") for error in errors)
+
+
 def test_public은_경로없는_HTTPS_origin과_canary를_요구한다() -> None:
     environment = _render_public()
     environment["PUBLIC_ORIGIN"] = "http://company.example/admin"
@@ -295,20 +389,26 @@ def test_public은_경로없는_HTTPS_origin과_canary를_요구한다() -> None
     assert "CLIENT_IP_CANARY_EVIDENCE_SHA256" in joined
 
 
-def test_render_blueprint는_관리자_demo_한서비스만_좁게_허용한다() -> None:
+def test_render_blueprint는_유료_관리자_실분석_한서비스만_좁게_허용한다() -> None:
     blueprint = yaml.safe_load((REPOSITORY_ROOT / "render.yaml").read_text("utf-8"))
     assert len(blueprint["services"]) == 1
     web = next(service for service in blueprint["services"] if service["type"] == "web")
     values = {item["key"]: item for item in web["envVars"]}
 
-    assert web["plan"] == "free"
-    assert "disk" not in web
+    assert web["plan"] == "standard"
+    assert web["numInstances"] == 1
+    assert web["autoDeployTrigger"] is False
+    assert web["disk"] == {
+        "name": "company-analysis-data",
+        "mountPath": "/var/data",
+        "sizeGB": 1,
+    }
     assert values["DEPLOYMENT_EXPOSURE"]["value"] == "public"
     assert values["DEPLOYMENT_PLATFORM"]["value"] == "render"
     assert values["DEPLOYMENT_RUNTIME_CONTRACT"]["value"] == (
-        validator.RUNTIME_CONTRACT_RENDER_ADMIN_DEMO
+        validator.RUNTIME_CONTRACT_RENDER_ADMIN_REAL
     )
-    assert values["PIPELINE"]["value"] == "demo"
+    assert values["PIPELINE"]["value"] == "real"
     assert values["BETA_ADMIN_ONLY"]["value"] == "1"
     assert values["PUBLIC_ORIGIN"] == {
         "key": "PUBLIC_ORIGIN",
@@ -321,6 +421,21 @@ def test_render_blueprint는_관리자_demo_한서비스만_좁게_허용한다(
     assert values["FORWARDED_ALLOW_IPS"] == {
         "key": "FORWARDED_ALLOW_IPS",
         "value": "",
+    }
+    for name in (
+        "ADMIN_EMAILS",
+        "GOOGLE_CLIENT_ID",
+        "GOOGLE_CLIENT_SECRET",
+        "GOOGLE_REDIRECT_URI",
+        "ANTHROPIC_API_KEY",
+        "DART_API_KEY",
+        "NAVER_CLIENT_ID",
+        "NAVER_CLIENT_SECRET",
+    ):
+        assert values[name] == {"key": name, "sync": False}
+    assert values["PROVENANCE_SEAL_SECRET"] == {
+        "key": "PROVENANCE_SEAL_SECRET",
+        "generateValue": True,
     }
     for name in validator.COMMON_PUBLIC_EVIDENCE + validator.RENDER_PUBLIC_EVIDENCE:
         assert name not in values

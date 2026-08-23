@@ -362,29 +362,46 @@ def test_노션전송은_CSRF누락과_다른출처를_export전에_막는다(
 # ══════════════════════════════════════════════════════════
 
 
-def test_좁은Render관리자데모는_링크를_발급하지않는다(
-    admin: TestClient, monkeypatch
+@pytest.mark.parametrize(
+    "contract",
+    (
+        deployment_mode.RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT,
+        deployment_mode.RENDER_ADMIN_REAL_NO_FORWARDED_CONTRACT,
+    ),
+)
+def test_좁은Render관리자운영판은_링크와_MEMBER를_발급하지않는다(
+    admin: TestClient, monkeypatch, contract
 ):
     monkeypatch.setenv(
         deployment_mode.ENV_DEPLOYMENT_RUNTIME_CONTRACT,
-        deployment_mode.RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT,
+        contract,
     )
     monkeypatch.setenv(deployment_mode.ENV_PUBLIC_ORIGIN, "https://demo.example")
     with storage_db.connect() as conn:
         before = len(share_store.list_all(conn))
 
-    response = admin.post(
+    link_response = admin.post(
         "/admin/link/new",
         data={"company": "카카오", "job": "마케팅"},
+        headers={"Host": "demo.example"},
+        follow_redirects=False,
+    )
+    member_response = admin.post(
+        "/admin/invite",
+        data={"email": "member@example.com"},
         headers={"Host": "demo.example"},
         follow_redirects=False,
     )
 
     with storage_db.connect() as conn:
         after = len(share_store.list_all(conn))
-    assert response.status_code == 404
-    assert response.text == "찾을 수 없습니다."
+        member = share_allow.load(conn, "member@example.com")
+    assert link_response.status_code == 404
+    assert link_response.text == "찾을 수 없습니다."
+    assert member_response.status_code == 409
+    assert "친구 MEMBER 초대를 보류" in member_response.text
     assert after == before
+    assert member is None
 
 
 def test_링크를_발급하면_저장된다(admin: TestClient):

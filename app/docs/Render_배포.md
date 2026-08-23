@@ -8,19 +8,21 @@
 ## 배포 원칙
 
 - 비공개 저장소의 기본 브랜치와 통과한 GitHub Actions `quality-gate`에서만 배포한다.
-- 첫 배포는 `PIPELINE=demo`, `BETA_ADMIN_ONLY=1`로 시작한다.
+- 기존 무료 확인판은 `PIPELINE=demo`, `BETA_ADMIN_ONLY=1`로 시작했다. 현재 Blueprint는 실제
+  회사 결과를 비교하기 위한 관리자 전용 실분석 운영판을 준비한다.
 - Uvicorn worker와 Render instance는 각각 `1`로 유지한다.
-- 첫 무료 배포의 SQLite와 실행 이력은 임시 `/var/data`에 둔다. 잠듦·재시작·재배포 때
-  초기화될 수 있음을 받아들이고, 실제 베타 운영 전에는 Starter와 영속 디스크로 전환한다.
+- 관리자 실분석 운영판은 `standard` web plan과 `/var/data` 1GB 영속 디스크를 사용한다.
+  플랜·디스크 비용은 바뀔 수 있으므로 배포 직전 [Render 요금 페이지](https://render.com/pricing)와
+  Dashboard의 예상 청구액을 확인한다.
 - 비밀값과 사용자 식별자는 Git, 채팅, 티켓, 화면 캡처에 남기지 않는다.
 - 현재 `render.yaml`은 web service 1개만 만들고 `autoDeployTrigger: off`로 둔다. 커밋이나 CI
-  통과만으로 배포되지 않으며 첫 push 전 대시보드와 Blueprint의 Auto Sync도 비활성인지
-  확인한다.
+  통과만으로 배포되지 않는다. 비용·환경변수·비밀값을 확인한 뒤 Dashboard에서 수동
+  배포하고, Blueprint의 Auto Sync도 비활성인지 확인한다.
 
-## 첫 배포 범위
+## 기존 무료 demo 범위
 
-첫 배포의 runtime contract는 `render-admin-demo-no-forwarded-v1`이다. 이것은 관리자만
-접근하는 demo 확인용이며 정식 공개 운영 승인이 아니다.
+기존 무료 배포의 runtime contract는 `render-admin-demo-no-forwarded-v1`이다. 이것은
+관리자만 접근하는 demo 확인용이며 정식 공개 운영 승인이 아니다.
 
 - Free instance, `PIPELINE=demo`, `BETA_ADMIN_ONLY=1`, instance와 worker 각각 1개
 - 경로·쿼리 없는 고정 HTTPS `PUBLIC_ORIGIN`
@@ -29,7 +31,25 @@
 - 공유 링크, real provider, Notion, S3 외부 백업, backup/maintenance cron은 보류
 
 기존 일반 공개 배포의 forwarded evidence gate, release policy·공급망 verifier, 외부 백업
-adapter HOLD는 그대로다. 이 첫 배포를 그 승인 증거로 재사용하지 않는다.
+adapter HOLD는 그대로다. 이 demo를 그 승인 증거로 재사용하지 않는다.
+
+## 관리자 실분석 운영판 범위
+
+현재 `render.yaml`의 runtime contract는 `render-admin-real-no-forwarded-v1`이다. 외부 조사
+provider를 실제로 호출하고 영속 디스크에 결과를 보존하지만, 품질 개선을 위한 관리자 전용
+운영 파일럿이다.
+
+- `PIPELINE=real`, `BETA_ADMIN_ONLY=1`, instance/worker 각각 1개
+- Render `standard` web plan과 `/var/data` 1GB 영속 디스크
+- 경로·쿼리 없는 고정 HTTPS `PUBLIC_ORIGIN`
+- `GOOGLE_REDIRECT_URI`는 정확히 `<PUBLIC_ORIGIN>/auth/callback`
+- 빈 `FORWARDED_ALLOW_IPS`; Render edge의 forwarded headers를 신뢰하지 않음
+- 관리자 본인의 로그인과 실제 분석만 허용; MEMBER 초대와 LINK 공유는 차단
+- `autoDeployTrigger: off`; 환경 확인 뒤 Dashboard에서 수동 배포
+
+이 운영판을 "일반 공개 완료"로 부르지 않는다. 외부 사용자의 로그인·공유를 여는 일반 공개
+계약은 trusted ingress/canary verifier가 없어 BLOCKED이며, 독립 외부 백업도 adapter가 없어
+BLOCKED다. 영속 디스크는 재시작·재배포의 데이터 보존 수단이지 독립 백업이 아니다.
 
 ## 활성 제품 계약
 
@@ -42,7 +62,7 @@ adapter HOLD는 그대로다. 이 첫 배포를 그 승인 증거로 재사용�
 페이지 PNG hash의 필수 자동검사를 전부 통과한 자동출고 레코드를 웹·PDF·Notion이
 공유한다. 하나라도 실패하면 세 채널 전체를 `GATE_STOPPED`한다.
 
-## 처음 배포하는 순서
+## 무료 demo를 처음 배포한 순서
 
 1. GitHub Actions `quality-gate`가 초록색인지 확인한다.
 2. Render에서 저장소 루트의 `render.yaml`로 Blueprint를 만든다.
@@ -54,23 +74,53 @@ adapter HOLD는 그대로다. 이 첫 배포를 그 승인 증거로 재사용�
 6. `PIPELINE=demo`에서 회사명만 입력한 경우와 주소 힌트를 함께 입력한 경우를 각각 시험한다.
 7. PDF 준비 → 필수 자동검사 → hash 결속 자동출고 → 다운로드와 수동 승인 410을 시험한다.
 
-Notion, 공유 링크, real provider, 외부 백업과 cron 시험은 첫 배포 완료 뒤의 별도 작업이다.
+Notion, 공유 링크, real provider, 외부 백업과 cron 시험은 무료 demo 완료 뒤의 별도
+작업이었다.
+
+## 관리자 실분석 운영판 배포 순서
+
+1. GitHub Actions `quality-gate`와 관리자 실분석 계약의 환경 검증 시험이 모두 통과했는지
+   확인한다.
+2. [Render 요금 페이지](https://render.com/pricing)와 Dashboard에서 `standard` web plan,
+   1GB 영속 디스크의 현재 청구 조건을 확인하고 비용을 승인한다.
+3. 기존 Blueprint에 `render.yaml` 변경을 반영하되 바로 자동 배포하지 않는다.
+4. 기존 OAuth 4개 값(`ADMIN_EMAILS`, Google client ID·secret·redirect URI)을 유지하고,
+   `ANTHROPIC_API_KEY`, `DART_API_KEY`, `NAVER_CLIENT_ID`, `NAVER_CLIENT_SECRET`을 Render의
+   비밀 환경변수로 직접 입력한다. 값을 저장소·문서·채팅에 붙이지 않는다.
+5. `PROVENANCE_SEAL_SECRET`이 32바이트 이상이며 기존 실행 기록을 유지해야 할 때 같은 값으로
+   보존되는지 확인한다. Blueprint가 새 값을 다시 만들도록 기존 값을 삭제하지 않는다.
+6. `PIPELINE=real`, `BETA_ADMIN_ONLY=1`,
+   `DEPLOYMENT_RUNTIME_CONTRACT=render-admin-real-no-forwarded-v1`, 빈
+   `FORWARDED_ALLOW_IPS`, `/var/data` 1GB disk mount를 확인한다.
+7. `PUBLIC_ORIGIN`과 Google OAuth 승인 URI, `GOOGLE_REDIRECT_URI`가 모두 정확히 같은
+   `<HTTPS origin>/auth/callback`을 가리키는지 확인한다.
+8. Render Dashboard에서 수동 배포한다. `/healthz`, `/readyz`, 관리자 로그인, 비관리자 차단,
+   MEMBER/LINK 생성 차단을 먼저 확인한다.
+9. 작은 회사 1건을 실제 조사해 DART·뉴스·홈페이지 수집, 화면/PDF 정본 게이트, 비용 기록,
+   재시작 뒤 결과 보존을 확인한 다음 회사 수를 늘린다.
+
+외부 사용자, LINK 공유, MEMBER 초대, Notion, S3 외부 백업과 cron은 이 순서에 포함하지
+않는다. 특히 `BACKUP_S3_BUCKET`을 미리 넣으면 준비되지 않은 adapter 때문에 시작 검증이
+의도적으로 실패한다.
 
 ## 필수·조건부 환경변수
 
 | 이름 | 배포 값과 보관 원칙 |
 |---|---|
+| `PIPELINE` | 관리자 실분석 운영판은 `real` |
+| `BETA_ADMIN_ONLY` | `1`. 일반 사용자·MEMBER·LINK를 열지 않음 |
+| `DEPLOYMENT_RUNTIME_CONTRACT` | `render-admin-real-no-forwarded-v1` |
 | `ADMIN_EMAILS` | 관리자 Google 이메일. 여러 명이면 쉼표로 구분 |
 | `GOOGLE_CLIENT_ID` | 배포용 Google OAuth 클라이언트 ID |
 | `GOOGLE_CLIENT_SECRET` | 비밀 관리자에 보관하는 OAuth 비밀 |
-| `PUBLIC_ORIGIN` | Blueprint가 `RENDER_EXTERNAL_URL`을 self-reference해 고정하는 첫 배포 HTTPS origin |
+| `PUBLIC_ORIGIN` | Blueprint가 `RENDER_EXTERNAL_URL`을 self-reference해 고정하는 HTTPS origin |
 | `GOOGLE_REDIRECT_URI` | 정확히 `<PUBLIC_ORIGIN>/auth/callback` |
-| `FORWARDED_ALLOW_IPS` | 첫 배포에서는 빈 값. proxy headers를 신뢰하지 않음 |
+| `FORWARDED_ALLOW_IPS` | 빈 값. 관리자 no-forwarded 계약에서는 proxy headers를 신뢰하지 않음 |
 | `PDF_RELEASE_PARTICIPANTS` | 구형 수동 승인 감사자료를 해석해야 할 때만 복구하는 과거 역할 JSON. 신규 출고 권한 아님 |
 | `PROVENANCE_SEAL_SECRET` | 모든 재배포·worker·복구에서 동일하게 유지할 32바이트 이상의 무작위 비밀 |
-| `ANTHROPIC_API_KEY` | `PIPELINE=real`에서 생성 모델을 사용할 때만 |
-| `DART_API_KEY` | `PIPELINE=real`에서 전자공시를 조회할 때만 |
-| `NAVER_CLIENT_ID` / `NAVER_CLIENT_SECRET` | `PIPELINE=real`에서 뉴스 검색을 사용할 때만 |
+| `ANTHROPIC_API_KEY` | `PIPELINE=real` 필수. 생성 모델 provider 비밀 |
+| `DART_API_KEY` | `PIPELINE=real` 필수. 전자공시 provider 비밀 |
+| `NAVER_CLIENT_ID` / `NAVER_CLIENT_SECRET` | `PIPELINE=real` 필수. 뉴스 검색 provider 비밀 |
 | `NOTION_TOKEN` / `NOTION_PARENT_PAGE_ID` | 자동출고 완료 보고서를 Notion으로 보낼 때만 |
 | `BACKUP_DATA_BOUNDARY_ID` | DB/sidecar 저장소의 불변 경계 식별자. 실제 값은 환경에만 주입 |
 | `BACKUP_DATA_AUTHORITY_ID` | DB/sidecar 쓰기 주체의 불변 식별자. 실제 값은 환경에만 주입 |
@@ -78,13 +128,14 @@ Notion, 공유 링크, real provider, 외부 백업과 cron 시험은 첫 배포
 
 `AUTH_COOKIE_INSECURE`와 로컬 관리자 capability는 로컬 전용이다. Render에는 설정하지 않는다.
 실제 값의 형식은 `app/.env.example`의 설명을 따르되 실제 사람의 `sub`나 비밀값을 파일에
-복사하지 않는다. 첫 배포에서 보류한 변수는 미리 넣지 않는다.
+복사하지 않는다. Notion·외부 백업처럼 보류한 변수는 미리 넣지 않는다.
 
 ### provenance 비밀 준비
 
-첫 관리자 demo에서는 Blueprint가 `PROVENANCE_SEAL_SECRET`을 자동 생성한다. 정식 운영으로
-올리기 전에는 Render 비밀 관리 화면에서 같은 값을 승인된 비밀 관리자에 보관하고,
-소유자·마지막 검증일·복구 담당자를 기록한다. 채팅·문서·저장소에는 복사하지 않는다.
+첫 관리자 demo에서 Blueprint가 `PROVENANCE_SEAL_SECRET`을 자동 생성했다. 실분석 운영판으로
+올릴 때 기존 실행 기록을 유지해야 하면 같은 값을 보존한다. Render 비밀 관리 화면에서
+값의 존재를 확인하고 승인된 비밀 관리자에는 소유자·마지막 검증일·복구 담당자를 기록한다.
+채팅·문서·저장소에는 값을 복사하지 않는다.
 
 ## 주소와 Google OAuth 연결
 
@@ -132,23 +183,26 @@ report_standard 통과
 
 ## 실제 조사로 전환
 
-사용자가 외부 호출과 예상 비용을 승인하고 provider 비밀과 예산 한도를 확인한 뒤에만
-`PIPELINE=real`로 바꾼다. 작은 회사 입력 한 건으로 DART·뉴스·홈페이지 수집, 정본
-게이트, 자동출고 흐름을 끝까지 시험한 뒤 범위를 늘린다.
+현재 `render.yaml`은 관리자 실분석 운영판을 위해 `PIPELINE=real`로 준비되어 있다. 실제
+배포 버튼을 누르기 전 사용자가 Render 플랜·디스크 비용과 외부 provider 호출 비용을
+승인하고, 네 provider 비밀과 애플리케이션 예산 한도를 확인해야 한다. 작은 회사 입력 한
+건으로 DART·뉴스·홈페이지 수집, 정본 게이트, 자동출고 흐름을 끝까지 시험한 뒤 범위를
+늘린다.
 
 실제 조사도 입력 계약은 회사명과 선택 주소뿐이다. 개인정보나 채용공고 원문을 넣지
 않는다. Google Places 후보 검색은 결과 보관·표시 약관 검토가 완료될 때까지 활성화하지
-않는다.
+않는다. 이 단계에서는 `BETA_ADMIN_ONLY=1`을 풀거나 MEMBER/LINK를 열지 않는다.
 
 ## 데이터 백업과 비밀 복구
 
-이 절은 첫 관리자 demo 배포 뒤 정식 운영을 준비할 때의 후속 설계다. 현재
-`render.yaml`에는 S3 외부 백업이나 backup/maintenance cron이 없으며 첫 배포에서는 관련
-환경변수를 설정하지 않는다.
+현재 `render.yaml`은 `/var/data` 1GB 영속 디스크를 붙여 SQLite·보고서·감사 기록을
+재시작과 재배포 뒤에도 보존한다. 다만 S3 외부 백업이나 backup/maintenance cron은 아직
+없으며 관련 환경변수를 설정하지 않는다.
 
-현재 첫 무료 배포의 `storage.db`는 임시 파일이라 백업·복구 정본으로 사용하지 않는다.
-아래 구조는 Starter와 영속 디스크로 전환한 뒤의 후속 운영 설계다. Render cron job은 다른
-서비스의 영속 디스크를 읽을 수 없으므로 웹 프로세스가 다음 구조로 매일 외부 백업한다.
+Render 영속 디스크와 플랫폼 snapshot은 같은 플랫폼 경계 안의 보존 수단이며 독립 외부
+백업 완료를 뜻하지 않는다. 아래 구조는 운영 adapter를 구현한 뒤의 후속 설계다. Render
+cron job은 다른 서비스의 영속 디스크를 읽을 수 없으므로 웹 프로세스가 다음 구조로 매일
+외부 백업한다.
 
 ```text
 Render cron
@@ -282,10 +336,29 @@ DB 백업에는 환경 비밀이 들어 있지 않으므로 다음 **복구 묶�
 - OAuth, provider, Notion 비밀이 유출되었거나 복구 여부가 불명확하면 먼저 회전하고
   callback·권한·전송을 다시 시험한다.
 
-## 정식 공개 운영 전 체크리스트
+## 관리자 실분석 운영판 체크리스트
+
+- [ ] GitHub Actions `quality-gate`와 관리자 실분석 환경 검증 통과
+- [ ] `standard` web plan과 1GB 영속 디스크의 현재 Dashboard 청구 조건 승인
+- [ ] `PIPELINE=real`, `BETA_ADMIN_ONLY=1`, instance/worker 각각 1개
+- [ ] `render-admin-real-no-forwarded-v1`, 고정 `PUBLIC_ORIGIN`, 빈 `FORWARDED_ALLOW_IPS`
+- [ ] 관리자·Google OAuth 4개 값과 실제 분석 provider 4개 비밀 등록
+- [ ] `PROVENANCE_SEAL_SECRET` 32바이트 이상이며 재배포·복구용 동일 값 보존
+- [ ] `autoDeployTrigger: off`와 Blueprint Auto Sync 비활성 확인 뒤 수동 배포
+- [ ] `/healthz`, `/readyz`, 관리자 로그인·비관리자 차단 확인
+- [ ] MEMBER 초대와 LINK 공유 생성 차단 확인
+- [ ] 작은 회사 1건의 실제 조사·정본 게이트·PDF·비용 기록 통과
+- [ ] 재시작 뒤 SQLite·보고서·감사 기록이 `/var/data`에서 유지됨을 확인
+- [ ] S3/cron 변수 미설정 및 독립 외부 백업 BLOCKED 상태를 운영자에게 고지
+
+이 체크리스트를 완료하면 관리자가 여러 회사의 실제 결과를 비교할 수 있다. 일반
+사용자에게 공개하거나 독립 재해복구를 완료했다는 뜻은 아니다.
+
+## 정식 일반 공개 운영 전 체크리스트
 
 아래 항목은 관리자 demo 첫 배포를 끝내기 위한 조건이 아니라, 보류 기능과 현재 HOLD를
-해결한 뒤 정식 공개 운영으로 전환하기 위한 조건이다.
+해결한 뒤 일반 사용자에게 공개하기 위한 조건이다. 현재 forwarded evidence verifier와
+독립 외부 백업 adapter가 없으므로 이 단계는 BLOCKED다.
 
 - [ ] GitHub Actions `quality-gate`와 Docker `/readyz` 통과
 - [ ] `PIPELINE=demo`, `BETA_ADMIN_ONLY=1`에서 첫 검증
@@ -304,6 +377,7 @@ DB 백업에는 환경 비밀이 들어 있지 않으므로 다음 **복구 묶�
 - [ ] real 전환 시 provider 비용과 예산 한도 별도 승인
 
 공식 참고: [Render Blueprint](https://render.com/docs/blueprint-spec),
+[Render 요금](https://render.com/pricing),
 [Render 무료 웹서비스](https://render.com/docs/free),
 [Render 영속 디스크](https://render.com/docs/disks),
 [Render cron job](https://render.com/docs/cronjobs),

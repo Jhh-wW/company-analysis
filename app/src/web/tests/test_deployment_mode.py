@@ -6,6 +6,7 @@ from src.web import deployment_mode
 
 
 CONTRACT = deployment_mode.RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT
+REAL_CONTRACT = deployment_mode.RENDER_ADMIN_REAL_NO_FORWARDED_CONTRACT
 
 
 def _environment(**overrides: str) -> dict[str, str]:
@@ -21,6 +22,7 @@ def test_좁은계약은_PUBLIC_ORIGIN만_고정출처로_쓴다() -> None:
     environment = _environment(RENDER_EXTERNAL_URL="https://fallback.example")
 
     assert deployment_mode.render_admin_demo_no_forwarded(environment)
+    assert deployment_mode.render_admin_no_forwarded(environment)
     assert deployment_mode.configured_public_origin(environment) == (
         "https",
         "demo.example",
@@ -29,6 +31,43 @@ def test_좁은계약은_PUBLIC_ORIGIN만_고정출처로_쓴다() -> None:
 
     environment.pop(deployment_mode.ENV_PUBLIC_ORIGIN)
     assert deployment_mode.configured_public_origin(environment) is None
+
+
+def test_실제분석관리자계약도_같은_고정출처경계를_쓴다() -> None:
+    environment = _environment(
+        DEPLOYMENT_RUNTIME_CONTRACT=REAL_CONTRACT,
+        RENDER_EXTERNAL_URL="https://fallback.example",
+    )
+
+    assert deployment_mode.render_admin_real_no_forwarded(environment)
+    assert not deployment_mode.render_admin_demo_no_forwarded(environment)
+    assert deployment_mode.render_admin_no_forwarded(environment)
+    assert deployment_mode.configured_public_origin(environment) == (
+        "https",
+        "demo.example",
+        443,
+    )
+    assert deployment_mode.configured_public_host_matches(
+        "demo.example", environment
+    )
+    assert not deployment_mode.configured_public_host_matches(
+        "attacker.example", environment
+    )
+    assert deployment_mode.fixed_public_https_origin(environment)
+
+
+def test_runtime계약_대소문자가_달라도_시작검증과_같은_관리자잠금을_쓴다() -> None:
+    environment = _environment(
+        DEPLOYMENT_RUNTIME_CONTRACT=" RENDER-ADMIN-REAL-NO-FORWARDED-V1 "
+    )
+
+    assert deployment_mode.render_admin_real_no_forwarded(environment)
+    assert deployment_mode.render_admin_no_forwarded(environment)
+    assert deployment_mode.configured_public_origin(environment) == (
+        "https",
+        "demo.example",
+        443,
+    )
 
 
 @pytest.mark.parametrize(
@@ -97,5 +136,7 @@ def test_기존계약에서는_고정공개출처모드를_켜지않는다() -> 
     )
 
     assert not deployment_mode.render_admin_demo_no_forwarded(environment)
+    assert not deployment_mode.render_admin_real_no_forwarded(environment)
+    assert not deployment_mode.render_admin_no_forwarded(environment)
     assert deployment_mode.configured_public_origin(environment) is None
     assert not deployment_mode.fixed_public_https_origin(environment)

@@ -1,3 +1,5 @@
+import pytest
+
 from starlette.applications import Starlette
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from starlette.routing import Route
@@ -73,12 +75,19 @@ def test_https에서만_hsts를_붙인다():
     assert https_response.headers["strict-transport-security"] == "max-age=31536000"
 
 
+@pytest.mark.parametrize(
+    "contract",
+    (
+        deployment_mode.RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT,
+        deployment_mode.RENDER_ADMIN_REAL_NO_FORWARDED_CONTRACT,
+    ),
+)
 def test_좁은Render계약은_내부HTTP에서도_고정HTTPS출처의_HSTS를_붙인다(
-    monkeypatch,
+    monkeypatch, contract,
 ):
     monkeypatch.setenv(
         deployment_mode.ENV_DEPLOYMENT_RUNTIME_CONTRACT,
-        deployment_mode.RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT,
+        contract,
     )
     monkeypatch.setenv(deployment_mode.ENV_PUBLIC_ORIGIN, "https://demo.example")
 
@@ -89,12 +98,19 @@ def test_좁은Render계약은_내부HTTP에서도_고정HTTPS출처의_HSTS를_
     assert response.headers["strict-transport-security"] == "max-age=31536000"
 
 
+@pytest.mark.parametrize(
+    "contract",
+    (
+        deployment_mode.RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT,
+        deployment_mode.RENDER_ADMIN_REAL_NO_FORWARDED_CONTRACT,
+    ),
+)
 def test_좁은Render계약은_Host를_PUBLIC_ORIGIN에_고정하고_forwarded는_무시한다(
-    monkeypatch,
+    monkeypatch, contract,
 ):
     monkeypatch.setenv(
         deployment_mode.ENV_DEPLOYMENT_RUNTIME_CONTRACT,
-        deployment_mode.RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT,
+        contract,
     )
     monkeypatch.setenv(deployment_mode.ENV_PUBLIC_ORIGIN, "https://demo.example")
 
@@ -128,12 +144,19 @@ def test_좁은Render계약은_Host를_PUBLIC_ORIGIN에_고정하고_forwarded�
     assert duplicate.status_code == 400
 
 
+@pytest.mark.parametrize(
+    "contract",
+    (
+        deployment_mode.RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT,
+        deployment_mode.RENDER_ADMIN_REAL_NO_FORWARDED_CONTRACT,
+    ),
+)
 def test_좁은Render계약의_loopback_상태확인은_Host고정과_충돌하지않는다(
-    monkeypatch,
+    monkeypatch, contract,
 ):
     monkeypatch.setenv(
         deployment_mode.ENV_DEPLOYMENT_RUNTIME_CONTRACT,
-        deployment_mode.RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT,
+        contract,
     )
     monkeypatch.setenv(deployment_mode.ENV_PUBLIC_ORIGIN, "https://demo.example")
 
