@@ -5,7 +5,7 @@
 {% block content %}
 <div class="card">
   <div class="stopped-icon" aria-hidden="true">🔎</div>
-  <h1>주소와 함께 찾은 회사 후보입니다</h1>
+  <h1>확인할 회사 후보입니다</h1>
   <p class="lede">
     검색 결과만으로 회사를 자동 확정하지 않습니다. 회사명·주소·홈페이지 근거를
     비교한 뒤 맞는 후보를 직접 선택해 주세요. 선택하면 전자공시(DART)에서 다시 확인합니다.
@@ -88,7 +88,7 @@
             <input type="hidden" name="candidate_ref" value="{{ candidate.candidate_ref }}">
             <input type="hidden" name="evaluation_consent_grant"
                    value="{{ evaluation_consent_grant }}">
-            <button type="submit" class="btn wide">이 후보로 다시 찾기</button>
+            <button type="submit" class="btn wide">이 법인으로 확인하기</button>
           </form>
         </div>
       </section>

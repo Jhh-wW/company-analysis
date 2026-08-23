@@ -153,13 +153,13 @@
   document.querySelectorAll('.sample-select').forEach(function (chip) {
     chip.addEventListener('click', function () {
       document.getElementById('company').value = chip.dataset.company || '';
-      // 지역은 자동으로 안 채운다. 직접 넣으셔야 같은 이름 회사를 가릅니다.
+      // 주소는 선택값이다. 샘플은 회사명만 채우고 바로 확인할 수 있게 한다.
       var status = document.getElementById('sampleSelectionStatus');
       if (status) {
-        status.textContent = chip.dataset.company + '의 회사명을 채웠습니다. 회사 주소를 구/군까지 입력해 주세요.';
+        status.textContent = chip.dataset.company + '의 회사명을 채웠습니다. 주소는 같은 이름의 회사를 구분할 때만 입력하세요.';
         status.hidden = false;
       }
-      document.getElementById('region').focus();
+      document.getElementById('confirmSubmitButton').focus();
     });
   });
 </script>

@@ -282,25 +282,62 @@
   <p>중요한 판단 전에는 각 항목의 원출처를 함께 확인해 주세요. 이상한 부분을 발견하면 아래에서 알려주실 수 있습니다.</p>
   {% if member_feedback_allowed %}
   <div class="frame-grid frame-grid-two">
-    <form class="card" method="post" action="/reports/{{ job.job_id }}/survey">
+    <form class="card" id="member-survey-form" method="post" action="/reports/{{ job.job_id }}/survey"
+          data-draft-key="member-survey:{{ job.job_id }}:{{ member_feedback_draft_key }}"
+          data-has-saved-survey="{{ 'yes' if member_survey else 'no' }}">
       <h3>이 보고서가 이 회사를 파악하는 데 얼마나 도움이 되었나요?</h3>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <label>별점 <select name="rating" required><option value="">선택</option>{% for score in range(1, 6) %}<option value="{{ score }}">{{ score }}점</option>{% endfor %}</select></label>
-      <label>전체 이용 소감 <textarea name="overall_feedback" maxlength="3000" required></textarea></label>
-      <label>결과를 보고 설명할 수 있는 회사의 구체적인 사업상 구분점과 그 근거는 무엇인가요? <textarea name="business_distinction" maxlength="3000" required></textarea></label>
-      <label>더 있었으면 하는 정보 <textarea name="add_information" maxlength="3000"></textarea></label>
-      <label>없어도 된다고 생각한 정보 <textarea name="delete_information" maxlength="3000"></textarea></label>
-      <button class="btn ghost" type="submit">설문 저장</button>
+      <label>별점 <select name="rating" required><option value="">선택</option>{% for score in range(1, 6) %}<option value="{{ score }}" {% if member_survey and member_survey.rating == score %}selected{% endif %}>{{ score }}점</option>{% endfor %}</select></label>
+      <label>전체 이용 소감 <textarea name="overall_feedback" maxlength="3000" required>{{ member_survey.overall_feedback if member_survey else '' }}</textarea></label>
+      <label>결과를 보고 설명할 수 있는 회사의 구체적인 사업상 구분점과 그 근거는 무엇인가요? <textarea name="business_distinction" maxlength="3000" required>{{ member_survey.business_distinction if member_survey else '' }}</textarea></label>
+      <label>더 있었으면 하는 정보 <textarea name="add_information" maxlength="3000">{{ member_survey.add_information if member_survey else '' }}</textarea></label>
+      <label>없어도 된다고 생각한 정보 <textarea name="delete_information" maxlength="3000">{{ member_survey.delete_information if member_survey else '' }}</textarea></label>
+      <p class="muted">작성 중인 답변은 이 브라우저 탭에 임시 보관합니다. 로그인이 만료돼도 다시 로그인하면 이어 쓸 수 있습니다.</p>
+      <button class="btn ghost" type="submit">{{ '설문 수정 저장' if member_survey else '설문 저장' }}</button>
     </form>
     <form class="card" method="post" action="/reports/{{ job.job_id }}/errors">
       <h3>오류 신고</h3><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label>어느 부분이 이상한가요? <textarea name="area" maxlength="1000" required></textarea></label>
       <label>왜 이상하다고 생각하나요? <textarea name="reason" maxlength="3000" required></textarea></label>
-      <label>서비스 전체에 즉시 영향을 줄 수 있나요? <select name="incident_kind"><option value="">개별 보고서 문제</option><option value="source_global">출처의 중대한 전역 문제</option><option value="security">보안 문제</option><option value="cost">비용 급증 문제</option></select></label>
       <p class="muted">신고가 접수되면 이 보고서의 결과·다운로드·공유가 함께 멈추고 관리자가 원본과 출처를 확인합니다.</p>
       <button class="btn danger" type="submit">오류 신고</button>
     </form>
   </div>
+  <script>
+    (function () {
+      var form = document.getElementById('member-survey-form');
+      if (!form || !window.sessionStorage) return;
+      var key = form.dataset.draftKey;
+      var names = ['rating', 'overall_feedback', 'business_distinction', 'add_information', 'delete_information'];
+      function values() {
+        var draft = {};
+        names.forEach(function (name) { draft[name] = form.elements[name].value; });
+        return draft;
+      }
+      try {
+        var saved = values();
+        var raw = sessionStorage.getItem(key);
+        if (raw) {
+          var draft = JSON.parse(raw);
+          if (form.dataset.hasSavedSurvey === 'yes' && JSON.stringify(draft) === JSON.stringify(saved)) {
+            sessionStorage.removeItem(key);
+          } else {
+            names.forEach(function (name) {
+              if (typeof draft[name] === 'string') form.elements[name].value = draft[name];
+            });
+          }
+        }
+        form.addEventListener('input', function () {
+          sessionStorage.setItem(key, JSON.stringify(values()));
+        });
+        form.addEventListener('change', function () {
+          sessionStorage.setItem(key, JSON.stringify(values()));
+        });
+      } catch (_error) {
+        // 저장 공간을 쓸 수 없는 브라우저에서도 설문 입력 자체는 계속 동작한다.
+      }
+    }());
+  </script>
   {% endif %}
 </aside>
 

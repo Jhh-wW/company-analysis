@@ -20,6 +20,7 @@ from src.features.sharelink import store as share_store
 from src.features.sharelink import tracks as share_tracks
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
+from src.features.storage import sessions as session_store
 from src.web import deployment_mode, job_runtime, paid_runtime, request_helpers, runtime
 from src.web.security import (
     COMPANY_MAX_CHARS,
@@ -958,10 +959,16 @@ async def admin_link_delete(
 async def admin_invite(
     request: Request,
     email: str = Form(..., max_length=EMAIL_MAX_CHARS),
+    display_name: str = Form("", max_length=NOTE_MAX_CHARS),
     note: str = Form("", max_length=NOTE_MAX_CHARS),
     csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
 ):
     """친구를 초대 명단에 넣는다."""
+    if deployment_mode.render_admin_demo_no_forwarded():
+        return _admin_response(
+            request,
+            HTMLResponse("첫 배포에서는 친구 MEMBER 초대를 보류했습니다.", status_code=409),
+        )
     email_clean = share_allow.normalize(email)
     action = "admin.member.invite"
     target = admin_audit.target_id("member", email_clean)
@@ -976,6 +983,7 @@ async def admin_invite(
             changed = share_allow.invite(
                 conn,
                 email=email_clean,
+                display_name=display_name,
                 note=note,
                 now_iso=clock.iso_now_kst(),
             )
@@ -1036,7 +1044,10 @@ async def admin_revoke(
     try:
         with storage_db.connect() as conn:
             _assert_access_write_ready(conn)
-            changed = share_allow.revoke(conn, email_clean)
+            changed = share_allow.revoke(
+                conn, email_clean, now_iso=clock.iso_now_kst()
+            )
+            session_store.delete_member_sessions_by_email(conn, email_clean)
             confirmed = share_allow.load(conn, email_clean) is None
             if not changed or not confirmed:
                 raise _AdminStateUnchanged("revoke_unconfirmed")

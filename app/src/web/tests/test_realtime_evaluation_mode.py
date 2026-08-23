@@ -678,7 +678,7 @@ def test_jyp_fake_adapters_complete_signed_flow_but_legacy_report_is_gate_stoppe
             headers=origin,
         )
         assert candidates.status_code == 200
-        assert "주소와 함께 찾은 회사 후보입니다" in candidates.text
+        assert "확인할 회사 후보입니다" in candidates.text
         assert "(주)제이와이피엔터테인먼트" in candidates.text
         assert transport_calls == 1
 

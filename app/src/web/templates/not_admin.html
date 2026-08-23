@@ -37,7 +37,7 @@
         {% if auth_login_available %}구글 계정으로 로그인{% else %}로그인 설정 상태 보기{% endif %}
       </a>
     {% endif %}
-    <a class="btn" href="/">처음으로</a>
+    {% if not beta_admin_only %}<a class="btn" href="/">처음으로</a>{% endif %}
   </div>
 </div>
 {% endblock %}

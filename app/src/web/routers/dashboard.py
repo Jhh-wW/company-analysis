@@ -237,63 +237,178 @@ def _settings_context(request: Request, *, edit: bool) -> dict:
             }
             for provider, _configured in providers
         ]
-    try:
-        with storage_db.connect() as conn:
-            weekly_reports = [asdict(item) for item in dashboard_store.list_weekly_reports(conn)]
-            trash_reports = [asdict(item) for item in dashboard_store.list_trashed_reports(conn)]
-            operation_claims = dashboard_store.list_operation_claims(conn)
-            current_backup_status = asdict(
-                backup_status.status_view(conn, now_iso=clock.iso_now_kst())
-            )
-    except Exception:
-        weekly_reports, trash_reports, operation_claims = [], [], []
-        current_backup_status = {
-            "status": "unavailable",
-            "last_attempt_at": "",
-            "last_success_at": "",
-            "last_failure_at": "",
-            "last_failure_summary": "",
-        }
+    weekly_reports, weekly_available = _dashboard_read(
+        "주간 파일",
+        [],
+        lambda conn: [asdict(item) for item in dashboard_store.list_weekly_reports(conn)],
+    )
+    trash_reports, trash_available = _dashboard_read(
+        "휴지통",
+        [],
+        lambda conn: [asdict(item) for item in dashboard_store.list_trashed_reports(conn)],
+    )
+    operation_claims, operations_available = _dashboard_read(
+        "정기 작업 이력", [], dashboard_store.list_operation_claims
+    )
+    current_backup_status, backup_available = _dashboard_read(
+        "백업 상태",
+        {
+            "status": "unavailable", "last_attempt_at": "", "last_success_at": "",
+            "last_failure_at": "", "last_failure_summary": "",
+        },
+        lambda conn: asdict(backup_status.status_view(conn, now_iso=clock.iso_now_kst())),
+    )
     return request_helpers._ctx(
         request,
         dashboard_service=service,
         dashboard_external_statuses=external_statuses,
         dashboard_settings_edit=edit,
         dashboard_weekly_reports=weekly_reports,
+        dashboard_weekly_available=weekly_available,
         dashboard_trash_reports=trash_reports,
+        dashboard_trash_available=trash_available,
         dashboard_operation_claims=operation_claims,
+        dashboard_operations_available=operations_available,
         dashboard_backup_status=current_backup_status,
+        dashboard_backup_available=backup_available,
         dashboard_default_week_start=dashboard_maintenance.last_completed_week_start(
             clock.today_kst()
         ),
     )
 
 
+def _dashboard_read(label: str, fallback, reader):
+    """한 대시보드 조각의 실패가 다른 조각까지 503으로 번지지 않게 읽는다."""
+    try:
+        with storage_db.connect() as conn:
+            return reader(conn), True
+    except Exception:
+        logger.exception("대시보드 %s 데이터를 읽지 못했습니다", label)
+        return fallback, False
+
+
 def _dashboard_context(request: Request) -> dict:
     """오늘 화면과 조각 새로고침이 같은 정본을 사용한다."""
-    with storage_db.connect() as conn:
-        service = dashboard_store.get_service_state(conn)
-        errors = dashboard_store.list_open_errors(conn, limit=25)
-        incidents = dashboard_store.list_incidents(conn, limit=25)
-        operation_issues = dashboard_store.list_failed_operation_issues(conn, limit=25)
-        surveys_total, helpful = dashboard_store.survey_summary(conn)
-        kpi_summary = dashboard_kpi.summary(conn)
-        members = share_allow.list_all(conn)
-        links, link_unseen = _link_rows_for_dashboard(conn)
-        reports = _report_rows(conn, limit=12)
-        member_company_counts = _member_company_counts(conn)
-        member_usage = {
+    service, service_available = _dashboard_read(
+        "서비스 상태",
+        None,
+        dashboard_store.get_service_state,
+    )
+    errors, errors_available = _dashboard_read(
+        "보고서 문제", [], lambda conn: dashboard_store.list_open_errors(conn, limit=25)
+    )
+    incidents, incidents_available = _dashboard_read(
+        "운영 사고", [], lambda conn: dashboard_store.list_active_incidents(conn, limit=25)
+    )
+    operation_issues, operation_issues_available = _dashboard_read(
+        "정기 작업 문제",
+        [],
+        lambda conn: dashboard_store.list_failed_operation_issues(conn, limit=25),
+    )
+    survey_summary, survey_available = _dashboard_read(
+        "만족도", (0, 0), dashboard_store.survey_summary
+    )
+    surveys_total, helpful = survey_summary
+    kpi_summary, kpi_available = _dashboard_read(
+        "응답 시간",
+        dashboard_kpi.KpiSummary(measured_responses=0, within_target=0),
+        dashboard_kpi.summary,
+    )
+    members, members_available = _dashboard_read(
+        "친구 명단", [], share_allow.list_all
+    )
+    link_data, links_available = _dashboard_read(
+        "지원 LINK", ([], {}), _link_rows_for_dashboard
+    )
+    links, link_unseen = link_data
+    reports, reports_available = _dashboard_read(
+        "보고서 목록", [], lambda conn: _report_rows(conn, limit=12)
+    )
+    resolved_issues, resolved_available = _dashboard_read(
+        "최근 해결 문제",
+        [],
+        lambda conn: dashboard_store.list_recent_resolved_issues(conn, limit=5),
+    )
+    member_company_counts, member_company_counts_available = _dashboard_read(
+        "친구 회사 유형", {company_type: 0 for company_type in dashboard_store.COMPANY_TYPES},
+        _member_company_counts,
+    )
+    member_usage, member_usage_available = _dashboard_read(
+        "친구 오늘 이용",
+        {},
+        lambda conn: {
             member.email: dashboard_store.member_usage_today(
                 conn, actor_email=member.email, day=clock.today_kst().isoformat()
             )
             for member in members
+        },
+    )
+    incidents = sorted(incidents, key=lambda item: (str(item["created_at"]), int(item["id"])))
+    operation_issues = sorted(
+        operation_issues, key=lambda item: (str(item["created_at"]), str(item["operation_key"]))
+    )
+    service_dict = (
+        asdict(service)
+        if service is not None
+        else {
+            "status": "unavailable", "cause": "", "impact": "",
+            "next_action": "", "updated_at": "",
+        }
+    )
+    if not service_available:
+        primary_issue = {
+            "kind": "unavailable", "title": "미해결 문제 상태를 확인할 수 없습니다",
+            "status": "확인 불가", "detail": "서비스 상태 저장소를 다시 확인해 주세요.",
+            "href": "/admin/issues", "action": "문제 화면 보기",
+        }
+    elif service_dict["status"] == dashboard_store.SERVICE_MAINTENANCE:
+        primary_issue = {
+            "kind": "service", "title": service_dict["cause"] or "전역 점검 중",
+            "status": "전체 점검 우선", "detail": service_dict["impact"],
+            "href": "/admin/settings", "action": "원인·다음 행동 보기",
+        }
+    elif errors:
+        issue = errors[0]
+        primary_issue = {
+            "kind": "report", "title": issue.area,
+            "status": _status_labels().get(issue.status, "확인 대기"),
+            "detail": issue.reason,
+            "href": f"/admin/reports/{issue.report_id}", "action": "문제 자세히 보기",
+        }
+    elif operation_issues:
+        issue = operation_issues[0]
+        primary_issue = {
+            "kind": "operation", "title": str(issue["operation"]),
+            "status": "정기 작업 실패", "detail": str(issue["detail"]),
+            "href": "/admin/settings", "action": "설정 확인",
+        }
+    elif incidents:
+        issue = incidents[0]
+        primary_issue = {
+            "kind": "incident", "title": str(issue["summary"]),
+            "status": "지연·비용 주의", "detail": str(issue["kind"]),
+            "href": "/admin/issues", "action": "운영 기록 보기",
+        }
+    elif all((errors_available, incidents_available, operation_issues_available)):
+        primary_issue = None
+    else:
+        primary_issue = {
+            "kind": "unavailable", "title": "일부 문제 목록을 확인할 수 없습니다",
+            "status": "확인 불가", "detail": "읽지 못한 항목만 다시 확인해 주세요.",
+            "href": "/admin/issues", "action": "문제 화면 보기",
         }
     satisfaction = (
+        "확인 불가"
+        if not survey_available
+        else
         "자료 모으는 중"
         if surveys_total < 5
         else f"{round(helpful * 100 / surveys_total)}% ({helpful}/{surveys_total})"
     )
     three_minute_response = (
+        "확인 불가"
+        if not kpi_available
+        else
         "자료 모으는 중"
         if kpi_summary.measured_responses < 5
         else (
@@ -303,20 +418,34 @@ def _dashboard_context(request: Request) -> dict:
     )
     return request_helpers._ctx(
         request,
-        dashboard_service=asdict(service),
+        dashboard_service=service_dict,
+        dashboard_service_available=service_available,
         dashboard_errors=[asdict(item) for item in errors],
+        dashboard_errors_available=errors_available,
         dashboard_incidents=incidents,
+        dashboard_incidents_available=incidents_available,
         dashboard_operation_issues=operation_issues,
+        dashboard_operation_issues_available=operation_issues_available,
+        dashboard_primary_issue=primary_issue,
         dashboard_reports=reports,
+        dashboard_reports_available=reports_available,
+        dashboard_resolved_issues=[asdict(item) for item in resolved_issues],
+        dashboard_resolved_available=resolved_available,
         dashboard_members=members,
+        dashboard_members_available=members_available,
         dashboard_links=links,
+        dashboard_links_available=links_available,
         dashboard_link_unseen=link_unseen,
         dashboard_member_usage=member_usage,
+        dashboard_member_usage_available=member_usage_available,
         dashboard_company_counts=member_company_counts,
+        dashboard_company_counts_available=member_company_counts_available,
         dashboard_satisfaction=satisfaction,
         dashboard_survey_total=surveys_total,
+        dashboard_survey_available=survey_available,
         dashboard_three_minute_response=three_minute_response,
         dashboard_kpi_measured=kpi_summary.measured_responses,
+        dashboard_kpi_available=kpi_available,
         dashboard_last_updated=clock.iso_now_kst(),
         dashboard_status_labels=_status_labels(),
         dashboard_company_labels=_company_labels(),
@@ -392,9 +521,27 @@ async def admin_report_detail(request: Request, report_id: str):
         with storage_db.connect() as conn:
             report = report_store.load(conn, report_id)
             state = _report_state_for_dashboard(conn, report_id, report=report)
+            snapshot_row = conn.execute(
+                f"""SELECT payload_json FROM {dashboard_store.TABLE_REPORT_VERSIONS}
+                WHERE report_id = ? AND version = ?""",
+                (report_id, state.version),
+            ).fetchone()
+            if report is not None and snapshot_row is not None:
+                try:
+                    report = report_store.report_from_json(
+                        str(snapshot_row["payload_json"])
+                    )
+                except (KeyError, TypeError, ValueError):
+                    # 옛 운영 자료에 불완전한 스냅샷이 있어도 원본 상세는 계속 연다.
+                    pass
             trashed = dashboard_store.trash_record(conn, report_id)
             service = dashboard_store.get_service_state(conn)
-            errors = [asdict(error) for error in dashboard_store.list_open_errors(conn, limit=500) if error.report_id == report_id]
+            errors = [
+                asdict(error)
+                for error in dashboard_store.list_report_error_history(
+                    conn, report_id=report_id
+                )
+            ]
             events = conn.execute(
                 f"""SELECT action, from_status, to_status, blocked, reason, created_at
                 FROM {dashboard_store.TABLE_REPORT_EVENTS} WHERE report_id = ?
@@ -606,7 +753,6 @@ async def submit_survey(
 async def submit_error(
     request: Request, report_id: str,
     area: str = Form(..., max_length=1000), reason: str = Form(..., max_length=_FEEDBACK_MAX_CHARS),
-    incident_kind: str = Form("", max_length=40),
     csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
 ):
     denied, email = _member_action(request, csrf_token)
@@ -618,7 +764,7 @@ async def submit_error(
                 return HTMLResponse("존재하지 않는 보고서입니다.", status_code=404)
             dashboard_store.record_error(
                 conn, report_id=report_id, actor_email=email, area=area, reason=reason,
-                now_iso=clock.iso_now_kst(), incident_kind=incident_kind,
+                now_iso=clock.iso_now_kst(),
             )
     except ValueError as error:
         return HTMLResponse(str(error), status_code=400)
@@ -637,9 +783,41 @@ async def members_page(request: Request):
         period, start_day = _member_period(request)
         with storage_db.connect() as conn:
             member_statistics = dashboard_store.member_run_statistics(conn, start_day=start_day)
+            member_feedback = dashboard_store.list_member_feedback(
+                conn, start_day=start_day
+            )
+            period_survey_total, period_helpful = dashboard_store.survey_summary(
+                conn, start_day=start_day
+            )
+            period_kpi = dashboard_kpi.summary(conn, start_day=start_day)
+            member_profiles = share_allow.list_profiles(conn)
+        member_names = {
+            member.email: (member.display_name.strip() or "이름 미등록")
+            for member in member_profiles
+        }
+        feedback_rows = []
+        for item in member_feedback:
+            row = asdict(item)
+            row["display_name"] = member_names.get(item.actor_email, "이름 미등록")
+            feedback_rows.append(row)
         context.update(
             dashboard_member_period=period,
             dashboard_member_statistics=member_statistics,
+            dashboard_member_feedback=feedback_rows,
+            dashboard_survey_total=period_survey_total,
+            dashboard_satisfaction=(
+                "자료 모으는 중"
+                if period_survey_total < 5
+                else f"{round(period_helpful * 100 / period_survey_total)}% "
+                f"({period_helpful}/{period_survey_total})"
+            ),
+            dashboard_kpi_measured=period_kpi.measured_responses,
+            dashboard_three_minute_response=(
+                "자료 모으는 중"
+                if period_kpi.measured_responses < 5
+                else f"{round(period_kpi.within_target * 100 / period_kpi.measured_responses)}% "
+                f"({period_kpi.within_target}/{period_kpi.measured_responses})"
+            ),
         )
         response = request_helpers.templates.TemplateResponse(request=request, name="admin_members.html", context=context)
     except Exception:
@@ -683,8 +861,36 @@ async def link_detail(request: Request, key_hash: str):
                 request,
                 dashboard_link=link,
                 dashboard_service=asdict(service),
+                dashboard_open_events=open_events,
                 dashboard_new_open_events=new_open_events,
+                dashboard_new_open_counts={
+                    event.id: event.opened_count for event in new_open_events
+                },
                 dashboard_runs=runs,
+                dashboard_run_status_labels={
+                    share_store.RUN_STATUS_RUNNING: "생성 중",
+                    share_store.RUN_STATUS_AWAITING_RELEASE: "자동출고 검사 대기",
+                    share_store.RUN_STATUS_COMPLETED: "완료",
+                    share_store.RUN_STATUS_STOPPED: "중단",
+                    share_store.RUN_STATUS_INTERRUPTED: "서버 종료로 중단",
+                },
+                dashboard_run_stop_reason_labels={
+                    "company_not_found": "회사를 확정하지 못함",
+                    "unsupported_public_entity": "분석 대상이 아닌 공공기관",
+                    "disclosure_not_available": "공시 자료를 확인할 수 없음",
+                    "posting_discarded": "채용공고로 확인되지 않음",
+                    "evidence_gate_stopped": "보고서 근거가 부족함",
+                    "generation_failed": "생성 중 기술 오류",
+                    "daily_budget_unavailable": "LINK 일일 비용 한도를 사용할 수 없음",
+                    "daily_budget_exhausted": "LINK 일일 비용 한도에 도달함",
+                    "job_registration_failed": "생성 작업을 저장하지 못함",
+                    "server_shutdown": "서버 종료로 시작하지 못함",
+                    "shutdown_timeout": "서버 종료 제한시간을 넘김",
+                    "server_restart": "서버 재시작으로 작업을 이어갈 수 없음",
+                    "generation_start_failed": "생성 시작 중 기술 오류",
+                    "generation_not_started": "생성을 시작하지 못함",
+                    "automatic_release_gate_stopped": "자동출고 검사를 통과하지 못함",
+                },
             ),
         )
     except Exception:

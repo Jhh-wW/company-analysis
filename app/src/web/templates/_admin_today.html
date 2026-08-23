@@ -6,9 +6,9 @@
   <div class="frame-grid frame-grid-two">
     <article class="card frame-priority">
       <p class="frame-eyebrow">미해결 문제 · 오래된 항목 우선</p>
-      {% if dashboard_errors %}
-        <h3>{{ dashboard_errors[0].area }}</h3><p><strong>{{ dashboard_status_labels.get(dashboard_errors[0].status, "확인 대기") }}</strong> · 신고 {{ dashboard_errors|length }}건</p>
-        <a class="btn" href="/admin/issues">문제 자세히 보기</a>
+      {% if dashboard_primary_issue %}
+        <h3>{{ dashboard_primary_issue.title }}</h3><p><strong>{{ dashboard_primary_issue.status }}</strong></p><p class="muted">{{ dashboard_primary_issue.detail }}</p>
+        <a class="btn" href="{{ dashboard_primary_issue.href }}">{{ dashboard_primary_issue.action }}</a>
       {% else %}
         <h3>미해결 문제가 없습니다</h3><p>새 신고 또는 재검사 대기 항목이 없습니다.</p><a class="btn ghost" href="/admin/issues">문제 목록 보기</a>
       {% endif %}
@@ -16,13 +16,29 @@
     <article class="card">
       <p class="frame-eyebrow">서비스</p>
       <h3>현재 상태</h3>
-      <p><strong>{{ "점검 중" if dashboard_service.status == "maintenance" else "운영 중" }}</strong></p>
-      {% if dashboard_service.status == "maintenance" %}<p class="muted">{{ dashboard_service.impact }}</p><a class="btn ghost" href="/admin/settings">원인·다음 행동 보기</a>{% else %}<p class="muted">문제가 생기면 원인·영향·다음 행동을 기록한 뒤 수동으로 점검을 시작합니다.</p>{% endif %}
+      <p><strong>{% if dashboard_service.status == "maintenance" %}점검 중{% elif dashboard_service.status == "normal" %}운영 중{% else %}확인 불가{% endif %}</strong></p>
+      {% if dashboard_service.status == "maintenance" %}<p class="muted">{{ dashboard_service.impact }}</p><a class="btn ghost" href="/admin/settings">원인·다음 행동 보기</a>{% elif dashboard_service.status == "normal" %}<p class="muted">문제가 생기면 원인·영향·다음 행동을 기록한 뒤 수동으로 점검을 시작합니다.</p>{% else %}<p class="muted">서비스 상태를 읽지 못했습니다. 정상으로 추정하지 않습니다.</p><a class="btn ghost" href="/admin/settings">설정 상태 보기</a>{% endif %}
     </article>
   </div>
   <div class="frame-grid frame-grid-two frame-desktop-only">
-    <article class="card"><p class="frame-eyebrow">친구 이용 · MEMBER만</p><h3>하루 성공 3건</h3><p class="muted">실패·취소·외부 오류는 반환하고, 저장된 보고서 재사용 성공은 사용으로 셉니다.</p><a class="btn ghost" href="/admin/members">친구 이용 보기</a></article>
-    <article class="card"><p class="frame-eyebrow">만족도 · MEMBER만</p><h3>{{ dashboard_satisfaction }}</h3><p class="muted">응답 {{ dashboard_survey_total }}건 · 4~5점 도움됨, 목표 80%</p><p><strong>3분 내 구분점 응답 {{ dashboard_three_minute_response }}</strong></p><p class="muted">첫 결과 열람부터 첫 설문 제출까지 측정한 {{ dashboard_kpi_measured }}건입니다. 이해 정확성은 답변 내용을 별도로 검토합니다.</p><a class="btn ghost" href="/admin/members">피드백 보기</a></article>
+    <article class="card"><p class="frame-eyebrow">친구 이용 · MEMBER만</p><h3>{% if dashboard_members_available and dashboard_member_usage_available %}하루 성공 3건{% else %}확인 불가{% endif %}</h3><p class="muted">실패·취소·외부 오류는 반환하고, 저장된 보고서 재사용 성공은 사용으로 셉니다.</p><a class="btn ghost" href="/admin/members">친구 이용 보기</a></article>
+    <article class="card"><p class="frame-eyebrow">만족도 · MEMBER만</p><h3>{{ dashboard_satisfaction }}</h3><p class="muted">응답 {% if dashboard_survey_available %}{{ dashboard_survey_total }}건{% else %}확인 불가{% endif %} · 4~5점 도움됨, 목표 80%</p><p><strong>3분 내 구분점 응답 {{ dashboard_three_minute_response }}</strong></p><p class="muted">첫 결과 열람부터 첫 설문 제출까지 측정한 {% if dashboard_kpi_available %}{{ dashboard_kpi_measured }}건{% else %}확인 불가{% endif %}입니다. 이해 정확성은 답변 내용을 별도로 검토합니다.</p><a class="btn ghost" href="/admin/members">피드백 보기</a></article>
   </div>
-  <article class="card frame-recently-resolved frame-desktop-only"><p class="frame-eyebrow">최근 보고서</p>{% if dashboard_reports %}<h3>{{ dashboard_reports[0].corp_id }}</h3><p>{{ dashboard_status_labels.get(dashboard_reports[0].status, "정상") }} · 버전 {{ dashboard_reports[0].version }}</p><a class="btn ghost" href="/admin/reports/{{ dashboard_reports[0].report_id }}">관리자 검토</a>{% else %}<h3>아직 저장된 보고서가 없습니다</h3><p>생성된 보고서가 저장되면 이곳에서 운영 상태를 확인합니다.</p>{% endif %}</article>
+  <article class="card frame-recently-resolved frame-desktop-only">
+    <p class="frame-eyebrow">최근 해결한 문제</p>
+    {% if not dashboard_resolved_available %}
+      <h3>해결 기록을 확인할 수 없습니다</h3>
+      <p>다른 운영 정보는 그대로 표시합니다. 문제 화면에서 저장소 상태를 확인해 주세요.</p>
+      <a class="btn ghost" href="/admin/issues">문제 화면 보기</a>
+    {% elif dashboard_resolved_issues %}
+      <h3>{{ dashboard_resolved_issues[0].company }}</h3>
+      <p><strong>정상</strong> · 버전 {{ dashboard_resolved_issues[0].version }} · {{ dashboard_resolved_issues[0].resolved_at }}</p>
+      <p class="muted">{{ dashboard_resolved_issues[0].reason }}</p>
+      <a class="btn ghost" href="/admin/reports/{{ dashboard_resolved_issues[0].report_id }}">해결 기록 보기</a>
+    {% else %}
+      <h3>최근 해결한 문제가 없습니다</h3>
+      <p>재검사 뒤 정상으로 다시 연 문제가 생기면 해결 이유와 함께 표시합니다.</p>
+      <a class="btn ghost" href="/admin/issues">문제 목록 보기</a>
+    {% endif %}
+  </article>
 </section>

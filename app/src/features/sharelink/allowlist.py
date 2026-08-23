@@ -26,8 +26,11 @@ TABLE_ALLOWED_USERS = "allowed_users"
 CREATE_SQL = f"""
 CREATE TABLE IF NOT EXISTS {TABLE_ALLOWED_USERS} (
     email      TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL DEFAULT '',
     note       TEXT NOT NULL DEFAULT '',
-    invited_at TEXT NOT NULL
+    invited_at TEXT NOT NULL,
+    is_active  INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+    revoked_at TEXT NOT NULL DEFAULT ''
 )
 """
 
@@ -37,8 +40,32 @@ class AllowedUser:
     """초대한 사람 한 명."""
 
     email: str
+    display_name: str
     note: str
     invited_at: str
+
+
+def ensure_schema(conn: sqlite3.Connection) -> None:
+    """신규·기존 초대 명단에 친구 이름 열을 멱등으로 준비한다."""
+    conn.execute(CREATE_SQL)
+    columns = {
+        str(row[1]) for row in conn.execute(f"PRAGMA table_info({TABLE_ALLOWED_USERS})")
+    }
+    if "display_name" not in columns:
+        conn.execute(
+            f"ALTER TABLE {TABLE_ALLOWED_USERS} "
+            "ADD COLUMN display_name TEXT NOT NULL DEFAULT ''"
+        )
+    if "is_active" not in columns:
+        conn.execute(
+            f"ALTER TABLE {TABLE_ALLOWED_USERS} "
+            "ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1"
+        )
+    if "revoked_at" not in columns:
+        conn.execute(
+            f"ALTER TABLE {TABLE_ALLOWED_USERS} "
+            "ADD COLUMN revoked_at TEXT NOT NULL DEFAULT ''"
+        )
 
 
 def normalize(email: str) -> str:
@@ -57,7 +84,8 @@ def normalize(email: str) -> str:
 
 
 def invite(
-    conn: sqlite3.Connection, *, email: str, note: str, now_iso: str
+    conn: sqlite3.Connection, *, email: str, note: str, now_iso: str,
+    display_name: str = "",
 ) -> bool:
     """사람을 명단에 넣는다.
 
@@ -70,15 +98,29 @@ def invite(
     clean = normalize(email)
     if not clean or "@" not in clean:
         return False
-    cursor = conn.execute(
-        f"INSERT OR IGNORE INTO {TABLE_ALLOWED_USERS} (email, note, invited_at) "
-        "VALUES (?, ?, ?)",
-        (clean, note.strip(), now_iso),
-    )
+    existing = conn.execute(
+        f"SELECT is_active FROM {TABLE_ALLOWED_USERS} WHERE email = ?", (clean,)
+    ).fetchone()
+    if existing is not None and bool(existing[0]):
+        return False
+    if existing is not None:
+        cursor = conn.execute(
+            f"""UPDATE {TABLE_ALLOWED_USERS}
+            SET display_name = ?, note = ?, invited_at = ?, is_active = 1, revoked_at = ''
+            WHERE email = ? AND is_active = 0""",
+            (display_name.strip(), note.strip(), now_iso, clean),
+        )
+    else:
+        cursor = conn.execute(
+            f"INSERT INTO {TABLE_ALLOWED_USERS} "
+            "(email, display_name, note, invited_at, is_active, revoked_at) "
+            "VALUES (?, ?, ?, ?, 1, '')",
+            (clean, display_name.strip(), note.strip(), now_iso),
+        )
     return cursor.rowcount > 0
 
 
-def revoke(conn: sqlite3.Connection, email: str) -> bool:
+def revoke(conn: sqlite3.Connection, email: str, *, now_iso: str = "") -> bool:
     """명단에서 뺀다.
 
     Returns:
@@ -88,7 +130,9 @@ def revoke(conn: sqlite3.Connection, email: str) -> bool:
       계정이 남에게 넘어갔을 때 되돌릴 방법이 없으면 안 된다.
     """
     cursor = conn.execute(
-        f"DELETE FROM {TABLE_ALLOWED_USERS} WHERE email = ?", (normalize(email),)
+        f"""UPDATE {TABLE_ALLOWED_USERS}
+        SET is_active = 0, revoked_at = ? WHERE email = ? AND is_active = 1""",
+        (str(now_iso or "").strip(), normalize(email)),
     )
     return cursor.rowcount > 0
 
@@ -110,7 +154,7 @@ def is_allowed(conn: sqlite3.Connection, email: str) -> bool:
     if not clean:
         return False
     row = conn.execute(
-        f"SELECT 1 FROM {TABLE_ALLOWED_USERS} WHERE email = ?", (clean,)
+        f"SELECT 1 FROM {TABLE_ALLOWED_USERS} WHERE email = ? AND is_active = 1", (clean,)
     ).fetchone()
     return row is not None
 
@@ -118,10 +162,14 @@ def is_allowed(conn: sqlite3.Connection, email: str) -> bool:
 def load(conn: sqlite3.Connection, email: str) -> Optional[AllowedUser]:
     """명단에서 한 명을 찾는다."""
     row = conn.execute(
-        f"SELECT email, note, invited_at FROM {TABLE_ALLOWED_USERS} WHERE email = ?",
+        f"SELECT email, display_name, note, invited_at "
+        f"FROM {TABLE_ALLOWED_USERS} WHERE email = ? AND is_active = 1",
         (normalize(email),),
     ).fetchone()
-    return AllowedUser(email=row[0], note=row[1], invited_at=row[2]) if row else None
+    return (
+        AllowedUser(email=row[0], display_name=row[1], note=row[2], invited_at=row[3])
+        if row else None
+    )
 
 
 def list_all(conn: sqlite3.Connection) -> list[AllowedUser]:
@@ -131,7 +179,23 @@ def list_all(conn: sqlite3.Connection) -> list[AllowedUser]:
       최악의 하루 지출 = 1인 상한 × 명단 인원이므로, 이 숫자가 곧 예산이다.
     """
     rows = conn.execute(
-        f"SELECT email, note, invited_at FROM {TABLE_ALLOWED_USERS} "
+        f"SELECT email, display_name, note, invited_at FROM {TABLE_ALLOWED_USERS} "
+        "WHERE is_active = 1 "
         "ORDER BY invited_at DESC"
     ).fetchall()
-    return [AllowedUser(email=r[0], note=r[1], invited_at=r[2]) for r in rows]
+    return [
+        AllowedUser(email=r[0], display_name=r[1], note=r[2], invited_at=r[3])
+        for r in rows
+    ]
+
+
+def list_profiles(conn: sqlite3.Connection) -> list[AllowedUser]:
+    """철회 뒤에도 과거 피드백의 이름·이메일 연결을 보존해 읽는다."""
+    rows = conn.execute(
+        f"SELECT email, display_name, note, invited_at FROM {TABLE_ALLOWED_USERS} "
+        "ORDER BY invited_at DESC"
+    ).fetchall()
+    return [
+        AllowedUser(email=r[0], display_name=r[1], note=r[2], invited_at=r[3])
+        for r in rows
+    ]

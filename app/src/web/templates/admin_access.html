@@ -84,6 +84,10 @@
     비밀 주소는 생성 응답에서 <strong>텍스트 파일로 한 번만 다운로드</strong>됩니다.
   </p>
 
+  {% if narrow_admin_demo %}
+  <div class="warn-line" role="note" style="margin-top:14px"><span>ℹ️</span><span><strong>첫 배포에서는 LINK 발급을 보류했습니다.</strong><br>정식 저장소와 실제 조사 범위를 연결한 뒤 활성화합니다.</span></div>
+  <button class="btn" type="button" disabled>LINK 발급 보류</button>
+  {% else %}
   <form method="post" action="/admin/link/new" style="margin-top:14px">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div class="field">
@@ -118,6 +122,7 @@
     </div>
     <button type="submit" class="btn">링크 만들기</button>
   </form>
+  {% endif %}
 
   {% if links %}
   <p class="muted" id="company-link-close-note" style="margin-top:16px">
@@ -192,6 +197,10 @@
     <br>명단에 없으면 로그인해도 <strong>데모만</strong> 보입니다.
   </p>
 
+  {% if narrow_admin_demo %}
+  <div class="warn-line" role="note" style="margin-top:14px"><span>ℹ️</span><span><strong>첫 배포에서는 친구 MEMBER 이용을 보류했습니다.</strong><br>현재 초대해도 실제 조사를 쓸 수 없으므로 정식 저장소 전환 뒤 활성화합니다.</span></div>
+  <button class="btn" type="button" disabled>친구 초대 보류</button>
+  {% else %}
   <form method="post" action="/admin/invite" style="margin-top:14px">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div class="field">
@@ -200,23 +209,30 @@
              placeholder="friend@gmail.com">
     </div>
     <div class="field">
+      <label for="invite_display_name">친구 이름 <span class="muted">(권장)</span></label>
+      <input id="invite_display_name" name="display_name" placeholder="예: 김민지">
+      <p class="muted" style="margin-top:5px">친구 화면에서 이메일과 함께 보여 후속 대화를 찾기 쉽게 합니다.</p>
+    </div>
+    <div class="field">
       <label for="invite_note">메모</label>
       <input id="invite_note" name="note" placeholder="예: 같은 스터디">
     </div>
     <button type="submit" class="btn">초대하기</button>
   </form>
+  {% endif %}
 
   {% if members %}
   <div class="data-table-scroll" role="region" tabindex="0"
        aria-labelledby="invited-members-title">
   <table aria-labelledby="invited-members-title">
-    <thead><tr><th scope="col">이메일</th><th scope="col">메모</th>
+    <thead><tr><th scope="col">이메일</th><th scope="col">친구 이름</th><th scope="col">메모</th>
       <th scope="col">초대일</th><th scope="col" aria-label="관리"></th></tr></thead>
     <tbody>
     {% for m in members %}
     <tr>
       <td>{{ m.email }}</td>
-      <td class="muted">{{ m.note }}</td>
+      <td class="muted">{{ m.display_name or "이름 미등록" }}</td>
+      <td class="muted">{{ m.note or "—" }}</td>
       <td class="muted">{{ member_invited_at_labels.get(m.email, "—") }}</td>
       <td>
         <form method="post" action="/admin/revoke" style="display:inline">

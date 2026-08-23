@@ -42,6 +42,9 @@
 
 <section class="frame-section">
   <p class="frame-eyebrow">주간 파일 · 관리자 전용</p>
+  {% if not dashboard_weekly_available %}
+  <article class="card"><h2>확인 불가</h2><p>주간 파일 목록만 읽지 못했습니다. 다른 설정 상태는 그대로 표시합니다.</p></article>
+  {% else %}
   {% for report in dashboard_weekly_reports %}
   <article class="card">
     <h2>{{ report.week_start }} ~ {{ report.week_end }}</h2>
@@ -51,6 +54,7 @@
   {% else %}
   <article class="card"><p>아직 생성된 주간 파일이 없습니다.</p></article>
   {% endfor %}
+  {% endif %}
   {% if dashboard_settings_edit %}
   <article class="card">
     <h2>수동 생성</h2>
@@ -66,6 +70,9 @@
 
 <section class="frame-section">
   <p class="frame-eyebrow">휴지통</p>
+  {% if not dashboard_trash_available %}
+  <article class="card"><h2>확인 불가</h2><p>휴지통 목록만 읽지 못했습니다. 0건으로 추정하지 않습니다.</p></article>
+  {% else %}
   {% for item in dashboard_trash_reports %}
   <article class="card">
     <h2>보고서 {{ item.report_id }}</h2>
@@ -81,6 +88,7 @@
   {% else %}
   <article class="card"><p>현재 휴지통에 있는 보고서가 없습니다.</p></article>
   {% endfor %}
+  {% endif %}
   {% if dashboard_settings_edit %}
   <article class="card">
     <h2>30일 정리</h2>
@@ -96,11 +104,19 @@
 
 <section class="frame-section">
   <p class="frame-eyebrow">최근 정기 작업</p>
+  {% if not dashboard_operations_available %}
+  <article class="card"><h2>확인 불가</h2><p>정기 작업 이력만 읽지 못했습니다. 실행 기록이 없다고 표시하지 않습니다.</p></article>
+  {% else %}
   {% for item in dashboard_operation_claims %}
   <article class="card"><p><strong>{{ item.operation }}</strong> · {{ item.period_key }} · {% if item.status == 'succeeded' %}완료{% elif item.status == 'failed' %}실패{% else %}진행 기록 확인 필요{% endif %}</p><p class="muted">시작 {{ item.started_at }} · 마감 {{ item.finished_at or '—' }}</p></article>
   {% else %}
   <article class="card"><p>아직 수동 실행 기록이 없습니다.</p></article>
   {% endfor %}
+  {% endif %}
+</section>
+
+<section class="frame-section frame-desktop-only">
+  <article class="card"><h2>비용·초대·LINK 발급</h2><p>현재 비용 보호 기준과 초대한 친구, 지원 LINK 발급·철회는 별도 관리 화면에서 확인합니다.</p><a class="btn ghost" href="/admin/access">비용·접근 관리 보기</a></article>
 </section>
 
 <section class="frame-section">

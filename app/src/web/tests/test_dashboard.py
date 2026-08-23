@@ -22,6 +22,7 @@ from src.features.sharelink import store as share_store
 from src.features.storage import constants as storage_constants
 from src.features.storage import db, reports
 from src.web import main, runtime
+from src.web import deployment_mode
 from src.web.routers import dashboard as dashboard_router
 from src.web.routers import maintenance as maintenance_router
 from src.web.routers import reports as reports_router
@@ -80,6 +81,35 @@ def test_member_error_closes_result_and_pdf_until_manual_republish(monkeypatch, 
     assert "오류 신고가 접수되어" in result.text
 
 
+def test_member_cannot_escalate_own_report_to_a_global_incident(monkeypatch, tmp_path):
+    monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(tmp_path / "storage.db"))
+    runtime._PIPELINE = DemoPipeline()
+    report_id = _seed_report()
+    with db.connect() as conn:
+        allowlist.invite(
+            conn, email="member@example.com", note="", now_iso="2026-08-22T10:00:00+09:00"
+        )
+    with TestClient(main.app) as member:
+        csrf = _session(member, email="member@example.com", is_admin=False)
+        response = member.post(
+            f"/reports/{report_id}/errors",
+            data={
+                "area": "표",
+                "reason": "수치가 다릅니다",
+                "incident_kind": "security",
+                "csrf_token": csrf,
+            },
+            follow_redirects=False,
+        )
+    with db.connect() as conn:
+        service = dashboard_store.get_service_state(conn)
+        incidents = dashboard_store.list_incidents(conn)
+
+    assert response.status_code == 303
+    assert service.status == dashboard_store.SERVICE_NORMAL
+    assert incidents == []
+
+
 def test_survey_is_member_only_and_revision_is_visible_to_admin(monkeypatch, tmp_path):
     monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(tmp_path / "storage.db"))
     runtime._PIPELINE = DemoPipeline()
@@ -107,6 +137,150 @@ def test_survey_is_member_only_and_revision_is_visible_to_admin(monkeypatch, tmp
             measured_responses=1,
             within_target=1,
         )
+
+
+def test_member_survey_prefills_saved_answer_and_keeps_browser_draft(monkeypatch, tmp_path):
+    monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(tmp_path / "storage.db"))
+    runtime._PIPELINE = DemoPipeline()
+    report_id = _seed_report()
+    with db.connect() as conn:
+        allowlist.invite(
+            conn, email="member@example.com", display_name="김민지", note="스터디",
+            now_iso="2026-08-22T10:00:00+09:00",
+        )
+        dashboard_store.save_survey(
+            conn, report_id=report_id, actor_email="member@example.com", rating=4,
+            overall_feedback="기존 소감", business_distinction="기존 구분점",
+            add_information="추가 정보", delete_information="중복 정보",
+            now_iso="2026-08-22T10:01:00+09:00",
+        )
+    with TestClient(main.app) as member:
+        _session(member, email="member@example.com", is_admin=False)
+        result = member.get(f"/result/{report_id}")
+    with TestClient(main.app) as admin:
+        _session(admin, email="admin@example.com", is_admin=True)
+        members = admin.get("/admin/members")
+
+    assert result.status_code == 200
+    assert '<option value="4" selected>4점</option>' in result.text
+    assert ">기존 소감</textarea>" in result.text
+    assert "window.sessionStorage" in result.text
+    assert "설문 수정 저장" in result.text
+    assert "김민지 · member@example.com" in members.text
+    assert "기존 소감" in members.text and "기존 구분점" in members.text
+    assert f'href="/admin/reports/{report_id}"' in members.text
+
+
+def test_dashboard_keeps_working_when_only_survey_summary_is_unavailable(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(tmp_path / "storage.db"))
+    runtime._PIPELINE = DemoPipeline()
+
+    def fail_summary(_conn, **_kwargs):
+        raise RuntimeError("survey unavailable")
+
+    monkeypatch.setattr(dashboard_router.dashboard_store, "survey_summary", fail_summary)
+    with TestClient(main.app) as client:
+        _session(client, email="admin@example.com", is_admin=True)
+        response = client.get("/admin")
+
+    assert response.status_code == 200
+    assert "운영 중" in response.text
+    assert "확인 불가" in response.text
+
+
+def test_issue_priority_and_partial_read_failure_remain_visible(monkeypatch, tmp_path):
+    monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(tmp_path / "storage.db"))
+    runtime._PIPELINE = DemoPipeline()
+    report_id = _seed_report()
+    with db.connect() as conn:
+        report = reports.load(conn, report_id)
+        assert report is not None
+        dashboard_store.register_report(
+            conn,
+            report_id=report_id,
+            corp_type=report.corp_type,
+            payload_json=reports.report_to_json(report),
+            now_iso="2026-08-22T10:00:00+09:00",
+        )
+        dashboard_store.record_error(
+            conn,
+            report_id=report_id,
+            actor_email="member@example.com",
+            area="개별 신고 문제",
+            reason="원출처와 다릅니다",
+            now_iso="2026-08-22T10:01:00+09:00",
+        )
+
+    warning = {
+        "id": 1,
+        "kind": "rate_limit",
+        "summary": "지연 비용 주의",
+        "created_at": "2026-08-22T10:03:00+09:00",
+        "report_id": "",
+    }
+    operation = {
+        "operation_key": "weekly:2026-08-17",
+        "operation": "weekly_xlsx",
+        "detail": "정기 작업 문제",
+        "created_at": "2026-08-22T10:02:00+09:00",
+    }
+    monkeypatch.setattr(
+        dashboard_router.dashboard_store,
+        "list_active_incidents",
+        lambda _conn, **_kwargs: [warning],
+    )
+    monkeypatch.setattr(
+        dashboard_router.dashboard_store,
+        "list_failed_operation_issues",
+        lambda _conn, **_kwargs: [operation],
+    )
+
+    with TestClient(main.app) as client:
+        _session(client, email="admin@example.com", is_admin=True)
+        ordered = client.get("/admin/issues")
+
+        def fail_incidents(_conn, **_kwargs):
+            raise RuntimeError("incidents unavailable")
+
+        monkeypatch.setattr(
+            dashboard_router.dashboard_store,
+            "list_active_incidents",
+            fail_incidents,
+        )
+        partial = client.get("/admin/issues")
+
+    assert ordered.status_code == 200
+    assert ordered.text.index("개별 신고 문제") < ordered.text.index("정기 작업 문제")
+    assert ordered.text.index("정기 작업 문제") < ordered.text.index("지연 비용 주의")
+    assert partial.status_code == 200
+    assert "일부 문제 목록을 확인할 수 없습니다" in partial.text
+    assert "개별 신고 문제" in partial.text
+
+
+def test_narrow_free_admin_demo_explains_and_disables_deferred_actions(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(tmp_path / "storage.db"))
+    monkeypatch.setenv(
+        deployment_mode.ENV_DEPLOYMENT_RUNTIME_CONTRACT,
+        deployment_mode.RENDER_ADMIN_DEMO_NO_FORWARDED_CONTRACT,
+    )
+    monkeypatch.setenv(deployment_mode.ENV_PUBLIC_ORIGIN, "https://demo.example")
+    monkeypatch.setenv(auth_constants.ENV_BETA_ADMIN_ONLY, "1")
+    runtime._PIPELINE = DemoPipeline()
+    with TestClient(main.app, base_url="https://demo.example") as client:
+        _session(client, email="admin@example.com", is_admin=True)
+        dashboard = client.get("/admin")
+        access = client.get("/admin/access")
+
+    assert dashboard.status_code == 200 and access.status_code == 200
+    assert "무료 관리자 데모" in dashboard.text
+    assert "재배포 때 운영 데이터가 초기화" in dashboard.text
+    assert "LINK 발급 보류" in access.text and "친구 초대 보류" in access.text
+    assert 'action="/admin/link/new"' not in access.text
+    assert 'action="/admin/invite"' not in access.text
 
 
 def test_admin_dashboard_labels_three_minute_metric_as_response_not_accuracy(
@@ -141,7 +315,7 @@ def test_member_revocation_blocks_existing_session_result_and_pdf(monkeypatch, t
     assert pdf.status_code == 403
 
 
-def test_link_open_confirmation_is_csrf_post_and_get_is_read_only(monkeypatch, tmp_path):
+def test_link_detail_preserves_history_and_offers_csrf_auto_confirmation(monkeypatch, tmp_path):
     monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(tmp_path / "storage.db"))
     runtime._PIPELINE = DemoPipeline()
     raw_key = "a1b2c3d4e5f60718a1b2c3d4e5f60718"
@@ -162,8 +336,11 @@ def test_link_open_confirmation_is_csrf_post_and_get_is_read_only(monkeypatch, t
 
     assert "새 접속 확인" in first.text
     assert "새 접속 확인" in second.text
+    assert 'id="link-open-confirm-form"' in first.text
+    assert ".requestSubmit()" in first.text
     assert confirmed.status_code == 303
     assert "새로 확인할 접속이 없습니다" in cleared.text
+    assert f"2026-08-22T10:01:00+09:00 · 누적 1회" in cleared.text
 
 
 def test_link_list_sorts_by_recent_open_and_marks_unseen(monkeypatch, tmp_path):
@@ -218,10 +395,11 @@ def test_same_window_aggregate_reports_only_new_count_after_confirmation(
         second_detail = client.get(f"/admin/links/{key_hash}")
 
     assert "새 접속 2건" in first_list.text
-    assert f"{opened_at} · 2회" in first_detail.text
+    assert f"{opened_at} · 누적 2회" in first_detail.text
     assert confirmed.status_code == 303
     assert "새 접속 1건" in second_list.text
-    assert f"{opened_at} · 1회" in second_detail.text
+    assert f"{opened_at} · 누적 3회" in second_detail.text
+    assert "새 접속 1회" in second_detail.text
 
 
 def test_member_page_has_period_controls_and_does_not_fake_legacy_summary(monkeypatch, tmp_path):
@@ -460,10 +638,14 @@ def test_corrected_snapshot_is_required_before_republish_and_overrides_live_memo
             },
             follow_redirects=False,
         )
+        detail = client.get(f"/admin/reports/{report_id}")
 
     assert early_publish.status_code == 400
     assert registered.status_code == 303
     assert published.status_code == 303
+    assert detail.status_code == 200
+    assert "생성 기준 2026-08-20" in detail.text
+    assert "현재 신고는 모두 처리되었습니다" in detail.text
     approved = reports_router._approved_public_report(report_id, original)
     assert approved is not None
     assert approved.generated_at == "2026-08-20"

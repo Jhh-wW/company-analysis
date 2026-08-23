@@ -707,11 +707,25 @@ def _render_result_page(
     internal_review_preview: bool,
 ) -> Response:
     member_email = _member_feedback_email(request)
+    member_survey = None
     if member_email:
         _record_member_result_view(
             report_id=job.job_id,
             actor_email=member_email,
         )
+        try:
+            with storage_db.connect() as conn:
+                row = conn.execute(
+                    f"""SELECT rating, overall_feedback, business_distinction,
+                        add_information, delete_information, revision
+                    FROM {dashboard_store.TABLE_SURVEYS}
+                    WHERE report_id = ? AND actor_email = ?""",
+                    (job.job_id, member_email),
+                ).fetchone()
+            if row is not None:
+                member_survey = dict(row)
+        except Exception:
+            logger.exception("기존 MEMBER 설문을 읽지 못했습니다")
     return job_runtime._shared(
         request_helpers.templates.TemplateResponse(
             request=request,
@@ -725,6 +739,10 @@ def _render_result_page(
                 notion_configured=is_notion_configured(),
                 internal_review_preview=internal_review_preview,
                 member_feedback_allowed=bool(member_email),
+                member_survey=member_survey,
+                member_feedback_draft_key=(
+                    dashboard_store.actor_digest(member_email) if member_email else ""
+                ),
             ),
         )
     )

@@ -837,13 +837,18 @@ def test_회사링크를_닫아도_이미전달된_독립결과주소는_60일�
 
 
 def test_친구를_초대하고_뺄_수_있다(admin: TestClient):
+    member_session = auth_logic.create_session("friend@gmail.com", False)
     invited = admin.post(
-        "/admin/invite", data={"email": "Friend@Gmail.com", "note": "스터디"},
+        "/admin/invite", data={
+            "email": "Friend@Gmail.com", "display_name": "김민지", "note": "스터디"
+        },
         follow_redirects=False,
     )
     assert invited.status_code == 303
     with storage_db.connect() as conn:
         assert share_allow.is_allowed(conn, "friend@gmail.com"), "대소문자를 맞춰야 한다"
+        member = share_allow.load(conn, "friend@gmail.com")
+        assert member is not None and member.display_name == "김민지"
 
     revoked = admin.post(
         "/admin/revoke",
@@ -854,6 +859,19 @@ def test_친구를_초대하고_뺄_수_있다(admin: TestClient):
 
     with storage_db.connect() as conn:
         assert not share_allow.is_allowed(conn, "friend@gmail.com")
+        profiles = share_allow.list_profiles(conn)
+        assert profiles[0].display_name == "김민지"
+    assert auth_logic.get_session(member_session.token) is None
+
+    reinvited = admin.post(
+        "/admin/invite",
+        data={"email": "friend@gmail.com", "display_name": "김민지", "note": "재초대"},
+        follow_redirects=False,
+    )
+    assert reinvited.status_code == 303
+    with storage_db.connect() as conn:
+        member = share_allow.load(conn, "friend@gmail.com")
+        assert member is not None and member.note == "재초대"
 
 
 def test_이상한_이메일은_안_들어간다(admin: TestClient):

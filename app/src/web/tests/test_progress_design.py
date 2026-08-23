@@ -40,6 +40,9 @@ def test_진행_화면은_현재_단계를_보조기술에_알린다():
     assert "handlePollFailure" in html
     assert "manualRetry.addEventListener('click'" in html
     assert "조사를 새로 시작하지 마세요" in html
+    assert "보통 1~3분" not in html and "최대 5분" not in html
+    assert "상태에 따라 걸리는 시간이 달라질 수 있습니다" in html
+    assert "비용이 들지 않습니다" not in html
 
 
 def test_진행_실패는_상태별_주_알림_경로를_하나만_쓴다():

@@ -136,6 +136,8 @@ def _ctx(request: Request, **kwargs) -> dict:
         "csrf_token": auth_logic.csrf_token_for_session(csrf_secret),
         # 설정값 자체는 절대 싣지 않는다. 로그인 버튼이 지금 동작 가능한지만 알린다.
         "auth_login_available": auth_google.credentials_configured(),
+        "narrow_admin_demo": deployment_mode.render_admin_demo_no_forwarded(),
+        "beta_admin_only": auth_logic.beta_admin_only_from_env(),
     }
     base.update(kwargs)
     return base

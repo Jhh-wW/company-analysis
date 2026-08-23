@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -436,6 +437,20 @@ def _clean(value: str, *, maximum: int = 3000) -> str:
     return str(value or "").strip()[:maximum]
 
 
+def _report_company(payload_json: str, *, fallback: str) -> str:
+    """저장 보고서의 표시용 회사명을 읽고, 옛 자료면 내부 ID로 안전하게 대체한다."""
+    try:
+        payload = json.loads(str(payload_json or ""))
+    except (TypeError, ValueError):
+        payload = {}
+    company = (
+        _clean(payload.get("company", ""), maximum=300)
+        if isinstance(payload, dict)
+        else ""
+    )
+    return company or _clean(fallback, maximum=300)
+
+
 def _actor(email: str) -> str:
     """비어 있거나 비정상인 actor가 사건을 익명으로 만들지 않게 정규화한다."""
     clean = _clean(email, maximum=320).lower()
@@ -468,6 +483,53 @@ class ReportError:
     reason: str
     status: str
     created_at: str
+
+
+@dataclass(frozen=True)
+class ReportErrorHistory:
+    """신고자와 신고 당시 immutable 보고서 원본을 묶은 감사 조회."""
+
+    id: int
+    report_id: str
+    actor_email: str
+    area: str
+    reason: str
+    reported_status: str
+    created_at: str
+    report_version: int
+    report_payload_sha256: str
+    payload_json: str
+
+
+@dataclass(frozen=True)
+class ResolvedIssue:
+    """관리자가 재검사 뒤 정상으로 다시 연 최근 문제."""
+
+    report_id: str
+    corp_id: str
+    company: str
+    reason: str
+    resolved_at: str
+    version: int
+
+
+@dataclass(frozen=True)
+class MemberFeedback:
+    """친구 화면에서 읽는 MEMBER 최신 설문 원문."""
+
+    report_id: str
+    corp_id: str
+    company: str
+    job: str
+    actor_email: str
+    rating: int
+    overall_feedback: str
+    business_distinction: str
+    add_information: str
+    delete_information: str
+    revision: int
+    created_at: str
+    updated_at: str
 
 
 @dataclass(frozen=True)
@@ -702,7 +764,11 @@ def list_failed_operation_issues(conn: sqlite3.Connection, *, limit: int = 20) -
         FROM {TABLE_OPERATION_EVENTS} AS e
         JOIN {TABLE_OPERATION_CLAIMS} AS c ON c.operation_key = e.operation_key
         WHERE e.status = 'failed' AND c.status = 'failed'
-        ORDER BY e.id DESC LIMIT ?""",
+          AND c.started_at = (
+            SELECT MAX(c2.started_at) FROM {TABLE_OPERATION_CLAIMS} AS c2
+            WHERE c2.operation = c.operation
+          )
+        ORDER BY e.created_at ASC, e.id ASC LIMIT ?""",
         (max(1, min(int(limit), 100)),),
     ).fetchall()
     return [dict(row) for row in rows]
@@ -1388,6 +1454,26 @@ def list_incidents(conn: sqlite3.Connection, *, limit: int = 25) -> list[dict[st
     return [dict(row) for row in rows]
 
 
+def list_active_incidents(
+    conn: sqlite3.Connection, *, limit: int = 25
+) -> list[dict[str, object]]:
+    """마지막 수동 정상 복귀 뒤에 생긴 운영 사고만 오래된 순으로 읽는다."""
+    boundary = conn.execute(
+        f"""SELECT created_at FROM {TABLE_SERVICE_EVENTS}
+        WHERE status = ? ORDER BY id DESC LIMIT 1""",
+        (SERVICE_NORMAL,),
+    ).fetchone()
+    params: list[object] = []
+    query = f"""SELECT id, error_id, report_id, kind, stage,
+        incurred_cost_krw, summary, created_at FROM {TABLE_INCIDENTS}"""
+    if boundary is not None:
+        query += " WHERE created_at > ?"
+        params.append(str(boundary["created_at"]))
+    query += " ORDER BY created_at ASC, id ASC LIMIT ?"
+    params.append(max(1, min(int(limit), 500)))
+    return [dict(row) for row in conn.execute(query, tuple(params)).fetchall()]
+
+
 def set_service_state(
     conn: sqlite3.Connection, *, status: str, cause: str, impact: str,
     next_action: str, actor_email: str, now_iso: str,
@@ -1442,16 +1528,141 @@ def list_open_errors(conn: sqlite3.Connection, *, limit: int = 100) -> list[Repo
     ]
 
 
-def survey_summary(conn: sqlite3.Connection) -> tuple[int, int]:
-    row = conn.execute(
-        f"""SELECT COUNT(*) AS total,
+def list_report_error_history(
+    conn: sqlite3.Connection, *, report_id: str
+) -> list[ReportErrorHistory]:
+    """해결 뒤에도 신고자·당시 버전·원본을 지우지 않고 모두 읽는다."""
+    clean_id = _clean(report_id, maximum=128)
+    rows = conn.execute(
+        f"""SELECT e.id, e.report_id, e.actor_email, e.area, e.reason,
+            e.status AS reported_status, e.created_at,
+            COALESCE(s.report_version, 1) AS report_version,
+            COALESCE(v.payload_sha256, '') AS report_payload_sha256,
+            COALESCE(v.payload_json, '') AS payload_json
+        FROM {TABLE_ERRORS} AS e
+        LEFT JOIN {TABLE_ERROR_SNAPSHOTS} AS s ON s.error_id = e.id
+        LEFT JOIN {TABLE_REPORT_VERSIONS} AS v
+          ON v.report_id = s.report_id AND v.version = s.report_version
+        WHERE e.report_id = ?
+        ORDER BY e.created_at DESC, e.id DESC""",
+        (clean_id,),
+    ).fetchall()
+    return [
+        ReportErrorHistory(
+            id=int(row["id"]),
+            report_id=str(row["report_id"]),
+            actor_email=str(row["actor_email"]),
+            area=str(row["area"]),
+            reason=str(row["reason"]),
+            reported_status=str(row["reported_status"]),
+            created_at=str(row["created_at"]),
+            report_version=int(row["report_version"]),
+            report_payload_sha256=str(row["report_payload_sha256"]),
+            payload_json=str(row["payload_json"]),
+        )
+        for row in rows
+    ]
+
+
+def survey_summary(
+    conn: sqlite3.Connection, *, start_day: str = ""
+) -> tuple[int, int]:
+    clean_start = _clean(start_day, maximum=10)
+    query = f"""SELECT COUNT(*) AS total,
                    COALESCE(SUM(CASE WHEN s.rating >= 4 THEN 1 ELSE 0 END), 0) AS helpful
             FROM {TABLE_SURVEYS} AS s
             LEFT JOIN {TABLE_REPORT_TRASH} AS t ON t.report_id = s.report_id
-            WHERE t.status IS NULL OR t.status = ?""",
-        (TRASH_ACTIVE,),
-    ).fetchone()
+            WHERE (t.status IS NULL OR t.status = ?)"""
+    params: list[object] = [TRASH_ACTIVE]
+    if clean_start:
+        query += " AND substr(s.updated_at, 1, 10) >= ?"
+        params.append(clean_start)
+    row = conn.execute(query, tuple(params)).fetchone()
     return int(row["total"]), int(row["helpful"])
+
+
+def list_recent_resolved_issues(
+    conn: sqlite3.Connection, *, limit: int = 5
+) -> list[ResolvedIssue]:
+    """지금도 정상 공개 중인 보고서의 최근 수동 해결 기록을 돌려준다.
+
+    최초 생성 때의 ``normal`` 등록은 해결이 아니므로 제외한다. 해결 뒤 다시 신고된
+    보고서도 현재는 미해결이므로 제외해 오늘 화면이 과거 상태를 현재처럼 말하지 않게
+    한다.
+    """
+    rows = conn.execute(
+        f"""SELECT e.report_id, r.corp_id, r.payload_json, e.reason, e.created_at, s.version
+        FROM {TABLE_REPORT_EVENTS} AS e
+        JOIN {TABLE_REPORT_STATES} AS s ON s.report_id = e.report_id
+        JOIN {storage_constants.TABLE_REPORTS} AS r ON r.report_id = e.report_id
+        LEFT JOIN {TABLE_REPORT_TRASH} AS t ON t.report_id = e.report_id
+        WHERE e.action = 'manual_status_change'
+          AND e.to_status = ?
+          AND s.status = ?
+          AND s.blocked = 0
+          AND (t.status IS NULL OR t.status = ?)
+        ORDER BY e.created_at DESC, e.id DESC LIMIT ?""",
+        (
+            REPORT_STATUS_NORMAL,
+            REPORT_STATUS_NORMAL,
+            TRASH_ACTIVE,
+            max(1, min(int(limit), 100)),
+        ),
+    ).fetchall()
+    return [
+        ResolvedIssue(
+            report_id=str(row["report_id"]),
+            corp_id=str(row["corp_id"]),
+            company=_report_company(
+                row["payload_json"], fallback=str(row["corp_id"])
+            ),
+            reason=str(row["reason"]),
+            resolved_at=str(row["created_at"]),
+            version=int(row["version"]),
+        )
+        for row in rows
+    ]
+
+
+def list_member_feedback(
+    conn: sqlite3.Connection, *, start_day: str = "", limit: int = 200
+) -> list[MemberFeedback]:
+    """선택 기간의 MEMBER 최신 설문을 회사·보고서와 함께 돌려준다."""
+    clean_start = _clean(start_day, maximum=10)
+    query = f"""SELECT s.report_id, r.corp_id, r.payload_json, r.job, s.actor_email, s.rating,
+            s.overall_feedback, s.business_distinction, s.add_information,
+            s.delete_information, s.revision, s.created_at, s.updated_at
+        FROM {TABLE_SURVEYS} AS s
+        JOIN {storage_constants.TABLE_REPORTS} AS r ON r.report_id = s.report_id
+        LEFT JOIN {TABLE_REPORT_TRASH} AS t ON t.report_id = s.report_id
+        WHERE (t.status IS NULL OR t.status = ?)"""
+    params: list[object] = [TRASH_ACTIVE]
+    if clean_start:
+        query += " AND substr(s.updated_at, 1, 10) >= ?"
+        params.append(clean_start)
+    query += " ORDER BY s.updated_at DESC, s.report_id ASC LIMIT ?"
+    params.append(max(1, min(int(limit), 500)))
+    rows = conn.execute(query, tuple(params)).fetchall()
+    return [
+        MemberFeedback(
+            report_id=str(row["report_id"]),
+            corp_id=str(row["corp_id"]),
+            company=_report_company(
+                row["payload_json"], fallback=str(row["corp_id"])
+            ),
+            job=str(row["job"]),
+            actor_email=str(row["actor_email"]),
+            rating=int(row["rating"]),
+            overall_feedback=str(row["overall_feedback"]),
+            business_distinction=str(row["business_distinction"]),
+            add_information=str(row["add_information"]),
+            delete_information=str(row["delete_information"]),
+            revision=int(row["revision"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
+        for row in rows
+    ]
 
 
 def member_usage_today(conn: sqlite3.Connection, *, actor_email: str, day: str) -> tuple[int, int]:

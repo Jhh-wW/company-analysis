@@ -6,9 +6,28 @@
 <header class="frame-heading">
   <p class="frame-kicker">관리자 전용 · 원본 및 출처</p>
   <h1>{{ report.company }}</h1>
-  <p class="lede">보고서 ID {{ report_id }} · 현재 {{ dashboard_status_labels.get(report_state.status, "확인 대기") }}{% if report_state.blocked %} · 공개 차단됨{% endif %}</p>
+  <p class="lede">현재 {{ dashboard_status_labels.get(report_state.status, "확인 대기") }}{% if report_state.blocked %} · 공개 차단됨{% endif %}</p>
 </header>
 {% set dashboard_nav = "issues" %}{% include "_admin_nav.html" %}
+
+<section class="frame-section">
+  <p class="frame-eyebrow">먼저 확인할 내용</p>
+  <article class="card frame-issue">
+    {% if report_errors and report_state.status != "normal" %}
+    <h2>{{ report_errors[0].area }}</h2>
+    <dl class="frame-action-summary">
+      <div><dt>무슨 일</dt><dd>{{ report_errors[0].area }}</dd></div>
+      <div><dt>왜</dt><dd>{{ report_errors[0].reason }}</dd></div>
+      <div><dt>다음 행동</dt><dd>신고 당시 버전과 원출처를 대조하고 수정·재검사 기록을 남긴 뒤 운영자가 직접 재공개 여부를 결정합니다.</dd></div>
+    </dl>
+    {% elif report_errors %}
+    <h2>현재 신고는 모두 처리되었습니다</h2>
+    <p>아래에는 감사용 과거 이력을 그대로 보존합니다. 지금 다시 수정할 항목은 없습니다.</p>
+    {% else %}
+    <h2>현재 기록된 신고가 없습니다</h2><p>상태 변경이나 원본 확인이 필요하면 아래 운영 기록을 확인합니다.</p>
+    {% endif %}
+  </article>
+</section>
 
 <section class="frame-section">
   <p class="frame-eyebrow">보고서 상태</p>
@@ -18,6 +37,7 @@
       <p>공개 상태: <strong>{{ "차단" if report_state.blocked else "정상" }}</strong> · 버전 {{ report_state.version }}</p>
       <p>회사 유형: {{ dashboard_company_labels.get(report_state.company_type, "판정 전 종료") }}</p>
       <p class="muted">정상 재공개는 재검사 뒤에 운영자가 직접 선택할 때만 가능합니다.</p>
+      <details><summary>기술정보 보기</summary><p>보고서 ID {{ report_id }} · 현재 버전 {{ report_state.version }} · 갱신 {{ report_state.updated_at or "확인 불가" }}</p></details>
     </article>
     <article class="card">
       <h2>상태 전이</h2>
@@ -69,11 +89,13 @@
     <dl class="frame-action-summary">
       <div><dt>무슨 일</dt><dd>{{ item.area }}</dd></div>
       <div><dt>왜</dt><dd>{{ item.reason }}</dd></div>
-      <div><dt>다음 행동</dt><dd>원본과 출처를 대조하고 수정·재검사 기록을 남깁니다.</dd></div>
+      <div><dt>당시 조치 원칙</dt><dd>신고 당시 원본과 출처를 대조하고 수정·재검사 기록을 남깁니다.</dd></div>
     </dl>
+    <p><strong>신고자</strong> {{ item.actor_email }} · 신고 {{ item.created_at }} · 당시 버전 {{ item.report_version }}</p>
+    <details><summary>신고 당시 정확한 보고서 원본 보기</summary><p>SHA-256 {{ item.report_payload_sha256 or "확인 불가" }}</p>{% if item.payload_json %}<pre>{{ item.payload_json }}</pre>{% else %}<p>이전 저장 형식이라 당시 원본을 연결할 수 없습니다.</p>{% endif %}</details>
   </article>
   {% endfor %}{% else %}
-  <article class="card"><p>현재 미해결 신고가 없습니다.</p></article>
+  <article class="card"><p>현재와 과거에 기록된 신고가 없습니다.</p></article>
   {% endif %}
   <details class="card"><summary>처리 사건 기록</summary><ul>{% for event in report_events %}<li>{{ event.created_at }} · {{ event.action }} · {{ event.from_status }} → {{ event.to_status }} · {{ event.reason }}</li>{% else %}<li>아직 기록이 없습니다.</li>{% endfor %}</ul></details>
 </section>
@@ -92,11 +114,13 @@
 
 <section class="frame-section">
   <p class="frame-eyebrow">원본·출처 · 관리자만</p>
-  <article class="card">
+  <details class="card">
+    <summary>현재 보고서 원본과 출처 보기</summary>
     <h2>{{ report.company }}</h2>
+    <p class="muted">생성 기준 {{ report.generated_at or "확인 불가" }} · 공개 버전 {{ report_state.version }}</p>
     {% if report.summary_items %}<ol>{% for item in report.summary_items %}<li>{{ item.text }}</li>{% endfor %}</ol>{% else %}<p>핵심 요약이 없는 저장 보고서입니다.</p>{% endif %}
     <h3>출처 {{ report.citations|length }}건</h3>
     <ul>{% for source in report.citations %}<li>{{ source.label }}{% if source.url %} · <a href="{{ source.url }}" rel="noreferrer">원문</a>{% endif %}</li>{% endfor %}</ul>
-  </article>
+  </details>
 </section>
 {% endblock %}

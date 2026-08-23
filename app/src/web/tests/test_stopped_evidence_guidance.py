@@ -77,3 +77,21 @@ def test_확인한_자료가_없으면_존재하지_않는_자료표_링크를_�
     assert "다음에 할 수 있는 일" in response.text
     assert 'href="#stopped-sources-title"' not in response.text
     assert "어디까지 찾아봤나" not in response.text
+
+
+def test_회사를_못찾은_중단을_기술오류라고_부르지_않는다() -> None:
+    job_id, job = _stopped_job(sources=False)
+    job.result = RunResult(
+        outcome=Outcome.NOT_FOUND,
+        message="회사명과 주소로 법인을 확정하지 못했습니다.",
+    )
+    job_runtime._JOBS[job_id] = job
+    try:
+        with TestClient(main.app) as client:
+            response = client.get(f"/result/{job_id}")
+    finally:
+        job_runtime._JOBS.pop(job_id, None)
+
+    assert response.status_code == 200
+    assert "회사를 정확히 확인하지 못했습니다" in response.text
+    assert "오류가 났습니다" not in response.text

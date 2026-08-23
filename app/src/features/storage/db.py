@@ -282,7 +282,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     ★ 열쇠 링크 표는 그 feature가 자기 모양을 갖고 있다 (`sharelink/store.py`).
       여기서 다시 적으면 «같은 정의가 두 곳»이 되어 한쪽만 고쳐진다 (P-83과 같은 함정).
     """
-    from src.features.sharelink.allowlist import CREATE_SQL as ALLOWED_SQL  # noqa: PLC0415
+    from src.features.sharelink import allowlist as share_allow  # noqa: PLC0415
     from src.features.sharelink import store as share_store  # noqa: PLC0415
     from src.features.storage import job_interruptions  # noqa: PLC0415
     from src.features.export_notion.store import CREATE_SQL as NOTION_EXPORTS_SQL  # noqa: PLC0415
@@ -290,12 +290,12 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
     for statement in (
         *_SCHEMA_STATEMENTS,
-        ALLOWED_SQL,
         NOTION_EXPORTS_SQL,
         job_interruptions.CREATE_SQL,
     ):
         conn.execute(statement)
 
+    share_allow.ensure_schema(conn)
     share_store.ensure_schema(conn)
     dashboard_store.ensure_schema(conn)
     ensure_persistent_schema(conn)

@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 from src.features.admin_dashboard import store
+from src.features.storage import constants as storage_constants
 from src.features.storage import db
 
 
@@ -146,6 +147,108 @@ def test_member_statistics_keeps_latest_result_type_and_cost_state(tmp_path):
     assert stats["settled"] == {"used": 1, "returned": 1, "reserved": 0}
     assert stats["confirmed_cost_krw"] == 120.5
     assert stats["uncertain_cost_events"] == 1
+
+
+def test_recent_resolved_issue_and_error_snapshot_use_actual_resolution_event(tmp_path):
+    target = tmp_path / "dashboard.db"
+    with db.connect(target) as conn:
+        conn.execute(
+            f"INSERT INTO {storage_constants.TABLE_REPORTS} VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "report-resolved", "CORP-RESOLVED", "분석",
+                '{"company":"해결전자"}', "2026-08-22", "2026-08-22",
+            ),
+        )
+        store.register_report(
+            conn, report_id="report-resolved", corp_type="상장사",
+            payload_json='{"version": 1}', now_iso="2026-08-22T09:00:00+09:00",
+        )
+        store.record_error(
+            conn, report_id="report-resolved", actor_email="member@example.com",
+            area="출처", reason="원문 수치와 다름", now_iso="2026-08-22T10:00:00+09:00",
+        )
+        for status in (store.REPORT_STATUS_FIXING, store.REPORT_STATUS_RECHECKING):
+            store.change_report_state(
+                conn, report_id="report-resolved", next_status=status,
+                actor_email="admin@example.com", reason="수동 검토",
+                now_iso="2026-08-22T10:10:00+09:00",
+            )
+        store.capture_report_snapshot(
+            conn, report_id="report-resolved", version=2,
+            payload_json='{"version": 2}', actor="admin@example.com",
+            now_iso="2026-08-22T10:20:00+09:00",
+        )
+        store.change_report_state(
+            conn, report_id="report-resolved", next_status=store.REPORT_STATUS_NORMAL,
+            actor_email="admin@example.com", reason="출처를 대조해 수정 완료",
+            now_iso="2026-08-22T10:30:00+09:00",
+        )
+
+        resolved = store.list_recent_resolved_issues(conn)
+        history = store.list_report_error_history(conn, report_id="report-resolved")
+
+    assert resolved[0].corp_id == "CORP-RESOLVED"
+    assert resolved[0].company == "해결전자"
+    assert resolved[0].reason == "출처를 대조해 수정 완료"
+    assert resolved[0].version == 2
+    assert history[0].actor_email == "member@example.com"
+    assert history[0].report_version == 1
+    assert history[0].payload_json == '{"version": 1}'
+
+
+def test_member_feedback_and_summary_apply_the_same_period(tmp_path):
+    target = tmp_path / "dashboard.db"
+    with db.connect(target) as conn:
+        for report_id, corp_id, company in (
+            ("old-report", "OLD", "옛회사"),
+            ("new-report", "NEW", "새회사"),
+        ):
+            conn.execute(
+                f"INSERT INTO {storage_constants.TABLE_REPORTS} VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    report_id, corp_id, "직무", f'{{"company":"{company}"}}',
+                    "2026-08-01", "2026-08-01",
+                ),
+            )
+        store.save_survey(
+            conn, report_id="old-report", actor_email="old@example.com", rating=2,
+            overall_feedback="오래된 의견", business_distinction="오래된 구분점",
+            add_information="", delete_information="", now_iso="2026-08-01T10:00:00+09:00",
+        )
+        store.save_survey(
+            conn, report_id="new-report", actor_email="new@example.com", rating=5,
+            overall_feedback="최근 의견", business_distinction="최근 구분점",
+            add_information="시장", delete_information="중복",
+            now_iso="2026-08-22T10:00:00+09:00",
+        )
+
+        feedback = store.list_member_feedback(conn, start_day="2026-08-16")
+        summary = store.survey_summary(conn, start_day="2026-08-16")
+
+    assert [item.corp_id for item in feedback] == ["NEW"]
+    assert [item.company for item in feedback] == ["새회사"]
+    assert feedback[0].add_information == "시장"
+    assert summary == (1, 1)
+
+
+def test_active_incidents_start_after_last_manual_normal_boundary(tmp_path):
+    target = tmp_path / "dashboard.db"
+    with db.connect(target) as conn:
+        store.record_incident(
+            conn, kind=store.INCIDENT_RATE_LIMIT, summary="old",
+            now_iso="2026-08-22T09:00:00+09:00",
+        )
+        store.set_service_state(
+            conn, status=store.SERVICE_NORMAL, cause="", impact="", next_action="",
+            actor_email="admin@example.com", now_iso="2026-08-22T10:00:00+09:00",
+        )
+        store.record_incident(
+            conn, kind=store.INCIDENT_RATE_LIMIT, summary="new",
+            now_iso="2026-08-22T11:00:00+09:00",
+        )
+        active = store.list_active_incidents(conn)
+
+    assert [item["summary"] for item in active] == ["new"]
 
 
 def test_report_registration_preserves_original_company_type_and_event(tmp_path):

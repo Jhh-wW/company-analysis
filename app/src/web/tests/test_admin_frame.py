@@ -39,22 +39,44 @@ def test_approved_dashboard_keeps_the_mobile_scope_in_existing_styles():
     assert ".admin-frame .frame-menu .frame-desktop-link" in css
     assert ".admin-frame form { display: none; }" in css
     assert "@media (max-width: 700px)" in css
+    assert ".frame-mobile-emergency" in css
+    assert ".frame-emergency-stop { display: block; }" in css
 
 
-def test_pc_dashboard_navigation_reaches_invites_and_link_issuance():
+def test_mobile_emergency_stop_is_present_but_other_mobile_forms_stay_hidden():
+    runtime._PIPELINE = DemoPipeline()
+    with TestClient(main.app) as client:
+        session = auth_logic.create_session("admin@example.com", True)
+        client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
+        response = client.get("/admin")
+
+    assert response.status_code == 200
+    assert 'class="frame-emergency-stop"' in response.text
+    assert 'name="status" value="maintenance"' in response.text
+    assert "새 생성 긴급 중단" in response.text
+
+
+def test_pc_dashboard_has_exactly_five_menus_and_contextual_access_actions():
     runtime._PIPELINE = DemoPipeline()
     with TestClient(main.app) as client:
         session = auth_logic.create_session("admin@example.com", True)
         client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
         response = client.get("/admin")
         destination = client.get("/admin/access")
+        members = client.get("/admin/members")
+        links = client.get("/admin/links")
+        settings = client.get("/admin/settings")
 
     assert response.status_code == 200
-    assert (
-        '<a class="frame-desktop-link" href="/admin/access">'
-        "친구 초대·LINK 발급</a>"
-    ) in response.text
+    menu = response.text.split('<nav class="frame-menu"', 1)[1].split("</nav>", 1)[0]
+    assert menu.count("<a ") == 5
+    assert ">오늘</a>" in menu and ">문제·보고서</a>" in menu
+    assert ">친구</a>" in menu and ">지원 LINK</a>" in menu and "⚙" in menu
+    assert 'href="/admin/access"' not in menu
     assert destination.status_code == 200
     assert "초대·LINK 관리" in destination.text
     assert "LINK 발급" in destination.text
     assert "친구 초대" in destination.text
+    assert 'href="/admin/access#invited-members-title"' in members.text
+    assert 'href="/admin/access#company-links-title"' in links.text
+    assert 'href="/admin/access"' in settings.text

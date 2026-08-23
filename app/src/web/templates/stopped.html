@@ -9,6 +9,7 @@
   <h1>
     {% if result.outcome.value == '거부_공공기관' %}이 도구가 다루지 않는 기관입니다
     {% elif result.outcome.value == '거부_공시없음' %}분석할 근거를 모을 수 없습니다
+    {% elif result.outcome.value == '회사_못찾음' %}회사를 정확히 확인하지 못했습니다
     {% elif result.outcome.value == '공고_폐기' %}회사 분석을 계속할 수 없습니다
     {% elif result.outcome.value == '자료부족_중단' %}공식 근거가 부족해 보고서를 내보내지 않았습니다
     {% else %}오류가 났습니다{% endif %}

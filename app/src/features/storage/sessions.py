@@ -103,3 +103,15 @@ def delete_session(conn: sqlite3.Connection, token: Optional[str]) -> None:
             f"DELETE FROM {TABLE_SESSIONS} WHERE token_hash = ?",
             (_token_hash(token),),
         )
+
+
+def delete_member_sessions_by_email(conn: sqlite3.Connection, email: str) -> int:
+    """초대 철회 시 해당 MEMBER의 기존 로그인 세션을 모두 끝낸다."""
+    clean = str(email or "").strip().lower()
+    if not clean:
+        return 0
+    cursor = conn.execute(
+        f"DELETE FROM {TABLE_SESSIONS} WHERE lower(email) = ? AND is_admin = 0",
+        (clean,),
+    )
+    return int(cursor.rowcount)

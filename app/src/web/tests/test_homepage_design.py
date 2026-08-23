@@ -207,3 +207,6 @@ def test_회사주소_도움말은_입력칸_description으로_연결된다():
     assert 'name="job"' not in home.text
     assert 'name="posting_text"' not in home.text
     assert 'name="posting_image_consent"' not in home.text
+    assert "주소는 같은 이름의 회사를 구분할 때만 입력하세요" in home.text
+    assert "document.getElementById('confirmSubmitButton').focus()" in home.text
+    assert "회사 주소를 구/군까지 입력해 주세요" not in home.text

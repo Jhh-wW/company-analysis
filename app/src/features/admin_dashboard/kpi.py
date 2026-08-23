@@ -168,19 +168,22 @@ def record_first_survey(
     return KpiMeasurement(elapsed, within_target)
 
 
-def summary(conn: sqlite3.Connection) -> KpiSummary:
+def summary(conn: sqlite3.Connection, *, start_day: str = "") -> KpiSummary:
     """휴지통이 아닌 보고서의 측정 가능한 첫 설문만 집계한다."""
     ensure_schema(conn)
-    row = conn.execute(
-        f"""SELECT COUNT(*) AS measured,
+    clean_start = str(start_day or "").strip()[:10]
+    query = f"""SELECT COUNT(*) AS measured,
                COALESCE(SUM(CASE WHEN k.within_target = 1 THEN 1 ELSE 0 END), 0)
                  AS within_target
         FROM {TABLE_ATTEMPTS} AS k
         LEFT JOIN {store.TABLE_REPORT_TRASH} AS t ON t.report_id = k.report_id
         WHERE k.first_survey_at <> ''
-          AND (t.status IS NULL OR t.status = ?)""",
-        (store.TRASH_ACTIVE,),
-    ).fetchone()
+          AND (t.status IS NULL OR t.status = ?)"""
+    params: list[object] = [store.TRASH_ACTIVE]
+    if clean_start:
+        query += " AND substr(k.first_survey_at, 1, 10) >= ?"
+        params.append(clean_start)
+    row = conn.execute(query, tuple(params)).fetchone()
     return KpiSummary(int(row["measured"]), int(row["within_target"]))
 
 
