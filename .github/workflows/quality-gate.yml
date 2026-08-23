@@ -39,6 +39,8 @@ jobs:
         run: python -m pytest app/src app/tools/tests -q -m "not local_integration" --basetemp .pytest_tmp_ci_app
       - name: 조사 엔진 전체 시험
         run: python -m pytest analysis_engine/src -q --basetemp .pytest_tmp_ci_engine
+      - name: 배포 계약 전체 시험
+        run: python -m pytest deploy/tests -q --basetemp .pytest_tmp_ci_deploy
 
   container-smoke:
     needs: tests

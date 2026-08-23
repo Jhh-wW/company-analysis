@@ -75,6 +75,12 @@ service-account marker가 보이면 같은 방식으로 `kubernetes`/`public`을
 플랫폼이 이름을 바꾸거나 주입을 생략하면 완전하지 않으며, 공개성의 충분한 증명이나 승인
 근거가 아닌 방어심층 신호일 뿐이다.
 
+Render의 명시적 runtime contract, `RENDER=true`, 실제 web marker,
+`render`/`public` 선언이 모두 일치하는데 Kubernetes marker도 보이는 경우에만 그 흔적을
+Render 내부 substrate로 취급한다. 하나라도 빠지거나 Kubernetes contract와 충돌하면 기존처럼
+fail-closed한다. 이 예외는 플랫폼 판정에만 적용되며 관리자 demo의 고정 HTTPS origin,
+기본 실행 명령, forwarded header 비신뢰 검증을 생략하지 않는다.
+
 entrypoint는 사용자 CMD의 문자열보다 manifest가 직접 고정한 runtime contract와 플랫폼
 marker를 먼저 판정한다. Compose는 `local-web-v1`, 관리자 전용 Render 첫 배포는
 `render-admin-demo-no-forwarded-v1`, 일반 Render web은 `render-public-web-v1`,

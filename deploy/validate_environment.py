@@ -509,14 +509,27 @@ def _validate_forwarded_proxy_configuration(
         RUNTIME_CONTRACT_RENDER_WEB,
         RUNTIME_CONTRACT_RENDER_ADMIN_DEMO,
     }
-    render_detected = contract in render_contracts or _render_web_marker(environment)
+    render_contract_detected = contract in render_contracts
+    render_marker_detected = _render_web_marker(environment)
+    render_detected = render_contract_detected or render_marker_detected
     kubernetes_detected = (
         contract == RUNTIME_CONTRACT_KUBERNETES_WEB
         or _kubernetes_cluster_marker(
             environment, service_account_marker=service_account_marker
         )
     )
-    if render_detected and kubernetes_detected:
+    # Render가 공식 주입하는 runtime·web marker와 manifest 계약이 모두 일치하면,
+    # 컨테이너 안의 Kubernetes 흔적은 별도 배포 플랫폼이 아니라 Render의 내부
+    # substrate일 수 있다. 이 좁은 경우에만 교차 marker 충돌을 억제하고,
+    # 관리자 demo의 origin·명령·proxy 비신뢰 검증은 아래에서 그대로 수행한다.
+    render_hosted_substrate = (
+        render_contract_detected
+        and render_marker_detected
+        and environment.get("RENDER", "").strip().lower() == "true"
+        and declared_platform == "render"
+        and declared_exposure == "public"
+    )
+    if render_detected and kubernetes_detected and not render_hosted_substrate:
         errors.append("PLATFORM_MARKERS: Render와 Kubernetes marker가 동시에 감지됐습니다")
     if render_detected:
         if contract and contract not in render_contracts:

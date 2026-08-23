@@ -79,6 +79,73 @@ def _render_admin_demo() -> dict[str, str]:
     return environment
 
 
+@pytest.mark.parametrize(
+    ("kubernetes_environment", "service_account_marker"),
+    (
+        ({"KUBERNETES_SERVICE_HOST": "10.96.0.1"}, False),
+        ({}, True),
+    ),
+)
+def test_Render_web의_내부_Kubernetes_substrate는_교차플랫폼으로_오판하지_않는다(
+    kubernetes_environment: dict[str, str], service_account_marker: bool
+) -> None:
+    environment = _render_admin_demo()
+    environment.update(
+        {
+            "RENDER": "true",
+            "RENDER_SERVICE_TYPE": "web",
+            **kubernetes_environment,
+        }
+    )
+
+    assert validator.validate(
+        environment,
+        "web",
+        kubernetes_service_account_marker=service_account_marker,
+    ) == []
+
+
+def test_공식_Render_runtime_marker가_없으면_교차플랫폼_모호성을_계속_거부한다() -> None:
+    environment = _render_admin_demo()
+    environment.update(
+        {
+            "RENDER_SERVICE_TYPE": "web",
+            "KUBERNETES_SERVICE_HOST": "10.96.0.1",
+        }
+    )
+
+    joined = "\n".join(
+        validator.validate(
+            environment,
+            "web",
+            kubernetes_service_account_marker=False,
+        )
+    )
+
+    assert "PLATFORM_MARKERS: Render와 Kubernetes marker가 동시에 감지됐습니다" in joined
+
+
+def test_Kubernetes_contract와_Render_marker가_충돌하면_계속_거부한다() -> None:
+    environment = _kubernetes_public()
+    environment.update(
+        {
+            "RENDER": "true",
+            "RENDER_SERVICE_TYPE": "web",
+            "RENDER_EXTERNAL_URL": "https://company.example",
+        }
+    )
+
+    joined = "\n".join(
+        validator.validate(
+            environment,
+            "web",
+            kubernetes_service_account_marker=True,
+        )
+    )
+
+    assert "PLATFORM_MARKERS: Render와 Kubernetes marker가 동시에 감지됐습니다" in joined
+
+
 def _kubernetes_public() -> dict[str, str]:
     environment = _base()
     environment.update(
