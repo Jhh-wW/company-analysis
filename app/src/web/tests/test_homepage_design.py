@@ -58,6 +58,13 @@ def test_첫화면에만_새_디자인_범위가_붙는다(monkeypatch):
     assert "지원할 회사, 분석하세요" not in home.text
     assert "지원 준비를 위한 기업·공고 분석" not in home.text
     assert "공시·뉴스·회사 홈페이지를 근거로" not in home.text
+    assert "실제 공시·뉴스를 조사합니다" not in home.text
+    base_template = (TEMPLATES / "base.html").read_text(encoding="utf-8")
+    assert "실제 공시·IR·회사 공식 자료를 조사합니다" in base_template
+    assert "실제 공시·뉴스를 조사합니다" not in base_template
+    admin_template = (TEMPLATES / "admin_home.html").read_text(encoding="utf-8")
+    assert "공시·IR·회사 공식 자료를 모아" in admin_template
+    assert "공시·뉴스에서 자료를 모아" not in admin_template
     assert "보고서 제공 범위" not in home.text
     assert "샘플 보고서로 먼저 둘러보기" in home.text
     assert "분석할 회사 확인하기" in home.text
