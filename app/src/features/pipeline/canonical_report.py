@@ -895,6 +895,8 @@ def write_and_verify_sections(
 
     claims: list[WrittenClaim] = []
     prose_by_section: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    seen_pick_roles: set[tuple[str, str, str]] = set()
+    duplicate_pick_sentences = 0
     for section_id, sentences in passed.items():
         evidence_by_sid = {item.sid: item for item in evidence.get(section_id, [])}
         for sentence in sentences[: _PROSE_LIMITS.get(section_id, 3)]:
@@ -934,6 +936,12 @@ def write_and_verify_sections(
                 clean, source.text, subject_label=pick.subject_label
             ) is None:
                 continue
+            pick_role = (section_id, pick.sid, pick.claim_type)
+            if pick.sid and pick_role in seen_pick_roles:
+                duplicate_pick_sentences += 1
+                continue
+            if pick.sid:
+                seen_pick_roles.add(pick_role)
             prose_by_section[section_id].append((clean, source.cite))
             claims.append(
                 WrittenClaim(
@@ -967,6 +975,14 @@ def write_and_verify_sections(
                     relationship_type=pick.relationship_type,
                 )
             )
+
+    if duplicate_pick_sentences:
+        steps.append(
+            {
+                "step": "11_작성_동일선택중복제거",
+                "생략": duplicate_pick_sentences,
+            }
+        )
 
     before_prune = len(claims)
     claims = _prune_unbound_optional_claims(claims)

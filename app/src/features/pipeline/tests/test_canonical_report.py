@@ -18,6 +18,7 @@ from src.features.pipeline.canonical_report import (
     historical_performance_bases_are_complete,
     majority_picks,
     sections_from_picks,
+    write_and_verify_sections,
 )
 from src.features.pipeline.port import ReportSection, ReportTable
 from src.features.company_comparison.official_sources import (
@@ -37,6 +38,7 @@ from src.features.spanselect.canonical import (
     CanonicalPick,
     historical_performance_basis_sid,
 )
+from src.features.writer.logic import Sentence
 
 
 def _source(number: int, evidence: str = "공식 원문") -> Source:
@@ -137,6 +139,72 @@ def test_Writer뒤_완결된_선택형_관계는_함께_유지한다() -> None:
     assert _prune_unbound_optional_claims(
         [revenue, product, issue, response, execution, interpretation]
     ) == [revenue, product, issue, response, execution, interpretation]
+
+
+def test_Writer가_같은_선택근거를_두번_쓰면_첫_검증문장만_남긴다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_evidence = "가나다는 음반 판매와 공연으로 매출을 얻는다."
+    second_evidence = "가나다는 광고와 라이선스로 매출을 얻는다."
+    fragments = {
+        1: {"종류": "사업내용", "원문": first_evidence},
+        2: {"종류": "사업내용", "원문": second_evidence},
+    }
+    picks = [
+        CanonicalPick(
+            "business_model",
+            first_evidence,
+            1,
+            sid="revenue-1",
+            claim_type="revenue_model",
+        ),
+        CanonicalPick(
+            "business_model",
+            second_evidence,
+            2,
+            sid="revenue-2",
+            claim_type="revenue_model",
+        ),
+    ]
+    sections = sections_from_picks(picks, fragments)
+    written = {
+        "business_model": [
+            Sentence(first_evidence, "business_model-1"),
+            Sentence(
+                "가나다는 음반 판매 및 공연에서 매출을 얻는다.",
+                "business_model-1",
+            ),
+            Sentence(second_evidence, "business_model-2"),
+        ]
+    }
+    monkeypatch.setattr(
+        "src.features.pipeline.canonical_report.writer_logic.write_with_ai",
+        lambda *_args, **_kwargs: (written, {"쓴문장": 3}),
+    )
+    monkeypatch.setattr(
+        "src.features.pipeline.canonical_report.writer_revision.review_with_single_rewrite",
+        lambda *_args, **_kwargs: (written, []),
+    )
+    steps: list[dict[str, object]] = []
+
+    made_sections, claims = write_and_verify_sections(
+        engine=object(),
+        client=object(),
+        company="가나다",
+        sections=sections,
+        fragments=fragments,
+        picks=picks,
+        steps=steps,
+        model="",
+    )
+
+    assert [claim.sid for claim in claims] == ["revenue-1", "revenue-2"]
+    assert [claim.text for claim in claims] == [first_evidence, second_evidence]
+    assert made_sections[0].prose_lines == [
+        (first_evidence, "조각 1·사업내용"),
+        (second_evidence, "조각 2·사업내용"),
+    ]
+    assert steps[-1] == {"step": "11_작성_동일선택중복제거", "생략": 1}
 
 
 def test_majority_vote_agrees_each_structured_field_without_exact_object_match() -> None:

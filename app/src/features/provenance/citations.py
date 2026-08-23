@@ -71,6 +71,7 @@ def build_citations(
     filing: Optional[dict[str, Any]],
     collected_on: dt.date,
     company_publisher: str = "",
+    confirmed_corp_code: str = "",
     selected_evidence_by_fragment: Optional[dict[int, list[str]]] = None,
 ) -> list[Source]:
     """수집 조각 목록 + 수집 정보 → 출처 목록.
@@ -84,6 +85,9 @@ def build_citations(
             그때는 공시 계열 조각의 보고서 이름·공시일을 비워 둔다.
         collected_on: 오늘(수집일). 공시 계열 조각의 「수집 …」 줄에 쓴다 —
             이건 우리 쪽이 언제 수집했는지이므로 `filing` 유무와 무관하게 안다.
+        confirmed_corp_code: 사용자가 확정한 8자리 DART 법인코드. 공시 행의
+            법인코드와 정확히 같을 때만 ``company_publisher``를 그 공시의 정식
+            발행 법인명으로 사용한다.
 
     Returns:
         `Source` 목록(조각 번호 오름차순). 재료가 모자란 항목은 지어내지 않고
@@ -117,6 +121,7 @@ def build_citations(
                 filing,
                 collected_at,
                 company_publisher,
+                confirmed_corp_code,
                 declared_fact_status=str(
                     frag.get("사실상태") or frag.get("fact_status") or ""
                 ),
@@ -322,6 +327,7 @@ def _filing_source(
     filing: Optional[dict[str, Any]],
     collected_at: str,
     company_publisher: str = "",
+    confirmed_corp_code: str = "",
     declared_fact_status: str = "",
     fragment_document_id: str = "",
 ) -> Source:
@@ -374,8 +380,24 @@ def _filing_source(
         else "공시 실제값"
     )
 
-    publisher = str((filing or {}).get("corp_name") or "").strip()
-    publisher = publisher or company_publisher.strip()
+    filing_publisher = str((filing or {}).get("corp_name") or "").strip()
+    filing_corp_code = str((filing or {}).get("corp_code") or "").strip()
+    confirmed_code = confirmed_corp_code.strip()
+    same_confirmed_company = bool(
+        filing is not None
+        and re.fullmatch(r"\d{8}", confirmed_code)
+        and filing_corp_code == confirmed_code
+    )
+    # company.json의 정식명과 list.json의 약칭이 달라도 같은 corp_code이면
+    # 같은 법인이다. 코드 결속 없이 이름만 덮어쓰면 다른 회사를 같은 회사로
+    # 오인할 수 있으므로 정확히 확인된 경우에만 정식명을 우선한다.
+    publisher = (
+        company_publisher.strip()
+        if same_confirmed_company
+        else filing_publisher
+        if filing_publisher
+        else company_publisher.strip()
+    )
     return Source(
         number=number,
         kind=SourceKind.FILING,

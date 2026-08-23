@@ -1663,6 +1663,7 @@ class RealPipeline:
                 filing=filing,
                 collected_on=business_date,
                 company_publisher=company_name,
+                confirmed_corp_code=corp_code,
             )
             if preflight_attestation.attester is not None:
                 preflight_sources.append(preflight_attestation.attester)
@@ -2043,6 +2044,7 @@ class RealPipeline:
             filing=filing,
             collected_on=business_date,
             company_publisher=company_name,
+            confirmed_corp_code=corp_code,
             selected_evidence_by_fragment=selected_evidence,
         )
         if profile_attestation.attester is not None:

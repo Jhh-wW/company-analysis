@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import datetime as dt
 
+import pytest
+
 from src.features.provenance.citations import build_citations
 from src.features.provenance.sources import (
     Source,
@@ -83,6 +85,43 @@ def test_공시_조각의_보고서_이름과_공시일이_맞는다():
     assert source.collected_at == "2026-08-15"
     assert source.publisher == "에스엠"  # DART가 아니라 공시에 책임지는 제출 회사
     assert source.host == "dart.fss.or.kr"
+
+
+def test_같은_DART_법인코드이면_기업개황_정식명을_공시_발행법인으로_쓴다():
+    filing = {
+        **실제_filing,
+        "corp_code": "00258689",
+        "corp_name": "JYP Ent.",
+    }
+    [source] = build_citations(
+        {1: {"종류": "사업내용", "원문": "공식 사업 내용"}},
+        filing=filing,
+        collected_on=수집일,
+        company_publisher="(주)제이와이피엔터테인먼트",
+        confirmed_corp_code="00258689",
+    )
+
+    assert source.publisher == "(주)제이와이피엔터테인먼트"
+
+
+@pytest.mark.parametrize("confirmed_corp_code", ["", "99999999"])
+def test_법인코드가_없거나_다르면_공시_발행법인을_덮어쓰지_않는다(
+    confirmed_corp_code: str,
+):
+    filing = {
+        **실제_filing,
+        "corp_code": "00258689",
+        "corp_name": "JYP Ent.",
+    }
+    [source] = build_citations(
+        {1: {"종류": "사업내용", "원문": "공식 사업 내용"}},
+        filing=filing,
+        collected_on=수집일,
+        company_publisher="다른 회사",
+        confirmed_corp_code=confirmed_corp_code,
+    )
+
+    assert source.publisher == "JYP Ent."
 
 
 def test_공식_계획_문장이_있는_공시는_무조건_실제값으로_고정하지_않는다():
