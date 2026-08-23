@@ -1,13 +1,14 @@
-"""실제 조사 엔진을 canonical(v3) 회사분석 파이프라인에 연결한다.
+"""실제 조사 엔진을 canonical(v4) 회사분석 파이프라인에 연결한다.
 
-회사 확인 뒤 공식 공시·홈페이지와 검증용 외부 자료를 수집하고, 세 번의 독립
-사실 배치, 작가·검토 분리, 원자 사실 장부, 출고 게이트를 거친다. 직무·채용공고·
-급여·복지 정보는 회사분석 생성 경로에 넣지 않는다. 근거가 부족하거나 정본 계약을
-통과하지 못하면 부분 보고서를 내보내지 않고 ``GATE_STOPPED``로 끝낸다.
+회사 확인 뒤 공식 공시·홈페이지와 검증용 외부 자료를 수집하고, 최대 두 번의
+조건부 사실 선택, 작가·검토 분리, 원자 사실 장부, 출고 게이트를 거친다. 직무·
+채용공고·급여·복지 정보는 회사분석 생성 경로에 넣지 않는다. 1~8장 기본 계약을
+통과하지 못하면 ``GATE_STOPPED``로 끝내고, 9장만 근거가 부족하면 표준 사유를
+붙인 ``PARTIAL`` 기본 보고서를 출고한다.
 
 실제 실행은 유료 API를 사용할 수 있다. ``PIPELINE=real``로만 켜며 필요한 키와
 의존성은 ``analysis_engine/.env`` 및 앱 운영 문서를 따른다. 캐시는
-``company-report-v3-canonical`` 보고서만 반환·저장한다.
+``company-report-v4-canonical`` 보고서만 반환·저장한다.
 """
 
 from __future__ import annotations
@@ -114,6 +115,7 @@ from src.features.pipeline.constants import ANTHROPIC_TIMEOUT_SEC, DART_SUCCESS_
 from src.features.pipeline.port import (
     CompanyCard,
     CompanyLookupResult,
+    Grade,
     Outcome,
     Report,
     ReportSection,
@@ -123,10 +125,13 @@ from src.features.pipeline.port import (
     StepReporter,
     UserInput,
 )
+from src.features.report_standard.constants import COMPARISON_SHORTFALL_REASON
 from src.features.pipeline.canonical_report import (
     PublishBlockedError,
     assemble_report_draft,
+    basic_report_selection_subset,
     finalize_report,
+    historical_performance_bases_are_complete,
     majority_picks,
     sections_from_picks as canonical_sections_from_picks,
     write_and_verify_sections,
@@ -141,9 +146,11 @@ from src.shared.final_gate_diagnostics import (
     FINAL_GATE_REASON_PUBLISH_BLOCKED,
 )
 from src.shared.span_selection_diagnostics import (
+    SELECTION_REASON_PREFLIGHT_CANDIDATES,
+    SELECTION_REASON_PREFLIGHT_PERFORMANCE,
     SpanSelectionRoundDiagnostic,
-    majority_result_reason,
     round_diagnostic_from_steps,
+    selection_result_reason,
 )
 from src.features.storage import cache as cache_store
 from src.features.storage import db as storage_db
@@ -1072,6 +1079,8 @@ def _sources_from(steps: list[dict[str, Any]]) -> list[SourceStatus]:
     news = step("6_수집_뉴스")
     if news is None:
         sources.append(SourceStatus("뉴스", "none", "여기까지 오지 못함"))
+    elif news.get("생략"):
+        sources.append(SourceStatus("뉴스", "none", str(news["생략"])))
     elif news.get("오류"):
         sources.append(SourceStatus("뉴스", "failed", "뉴스 검색에 실패했습니다"))
     else:
@@ -1559,6 +1568,7 @@ class RealPipeline:
         # 유료 span 선택 전에 후보 원문도 정식 provenance 경계에서 한 번 봉인한다.
         # DART 전체 원문과 exact-attested HTTPS 웹·IR만 사전검사에 넣으며, 수집
         # 실패·robots 차단·상한 잘림이 있으면 "후보 없음"으로 확정하지 않는다.
+        comparison_preflight: bool | None = None
         try:
             preflight_fragments = register_candidate_sentence_evidence(frags)
             preflight_attestation = bind_dart_profile_attestation(
@@ -1660,34 +1670,21 @@ class RealPipeline:
         if comparison_preflight is False:
             steps.append(
                 {
-                    "step": "7_경쟁사후보_사전차단",
+                    "step": "7_경쟁사후보_후속생략",
                     "사유": (
                         "자사 공식 가능 원문에 경쟁 표지와 고유 DART 법인명이 "
                         "같은 문장으로 확인되지 않았습니다"
                     ),
                 }
             )
-            return RunResult(
-                outcome=Outcome.GATE_STOPPED,
-                message=(
-                    "자사 공식 원문에서 직접 지목된 비교 후보를 확인할 수 "
-                    "없어 보고서를 내보내지 않았습니다. 경쟁우위가 없다는 뜻이 "
-                    "아니라, 현재 공개 근거로는 비교사를 확정할 수 없다는 뜻입니다."
-                ),
-                sources=sources,
-                corp_type=judgment.corp_type,
-                fragments_collected=len(frags),
-                cost_krw=_request_spent_krw(engine),
-                model=model,
-                final_gate_reason=FINAL_GATE_REASON_COMPARISON_BLOCKED,
-            )
 
-        # ── 8 사실 배치 + 9 원문 대조 — 3회 독립 선택 후 다수결 ──
+        # ── 8 사실 배치 + 9 원문 대조 — 1회 완결이면 종료, 부족할 때만 1회 재선택 ──
         tell("generate")
         generation_frags = {
             number: fragment
             for number, fragment in frags.items()
             if str(fragment.get("종류") or "") != OFFICIAL_IR_FRAGMENT_KIND
+            and str(fragment.get("원문") or "").strip()
             and (
                 str(fragment.get("종류") or "") != HOMEPAGE_FRAGMENT_KIND
                 or official_web_currentness_is_usable(
@@ -1702,8 +1699,8 @@ class RealPipeline:
                 )
             )
         }
-        selection_rounds = []
         selection_diagnostics: list[SpanSelectionRoundDiagnostic] = []
+        kept = []
         sentences_made = 0
         # 프로그램이 DART 원수치로 만든 완료 FY 행에는 내부 fact_id 대신
         # 일회성 선택 참조를 붙인다. 모델은 이 참조만 basis_sids로 고르고,
@@ -1729,6 +1726,57 @@ class RealPipeline:
             )
             if str(value or "").strip()
         )
+        if not historical_performance_bases_are_complete(performance_bases):
+            steps.append(
+                {
+                    "step": "8_사실선택_사전중단",
+                    "사유": "연속 3개 완료 사업연도 실적표 없음",
+                    "AI호출": 0,
+                }
+            )
+            return RunResult(
+                outcome=Outcome.GATE_STOPPED,
+                message=(
+                    "연속 3개 완료 사업연도의 공식 실적표를 확보하지 못해 "
+                    "기본 보고서를 안전하게 만들 수 없습니다. AI를 반복 호출해도 "
+                    "고칠 수 없는 조건이라 비용을 쓰기 전에 멈췄습니다."
+                ),
+                sources=sources,
+                corp_type=judgment.corp_type,
+                fragments_collected=len(frags),
+                sentences_made=0,
+                cost_krw=_request_spent_krw(engine),
+                model=model,
+                span_selection_diagnostics=(),
+                span_selection_result_reason=(
+                    SELECTION_REASON_PREFLIGHT_PERFORMANCE
+                ),
+                final_gate_reason=FINAL_GATE_REASON_OTHER_GATE,
+            )
+        if not generation_frags:
+            steps.append(
+                {
+                    "step": "8_사실선택_사전중단",
+                    "사유": "선택 가능한 공식 원문 후보 없음",
+                    "AI호출": 0,
+                }
+            )
+            return RunResult(
+                outcome=Outcome.GATE_STOPPED,
+                message=(
+                    "선택할 수 있는 공식 원문 후보가 없어 기본 보고서를 안전하게 "
+                    "만들 수 없습니다. 빈 입력으로 AI를 부르지 않고 멈췄습니다."
+                ),
+                sources=sources,
+                corp_type=judgment.corp_type,
+                fragments_collected=len(frags),
+                sentences_made=0,
+                cost_krw=_request_spent_krw(engine),
+                model=model,
+                span_selection_diagnostics=(),
+                span_selection_result_reason=SELECTION_REASON_PREFLIGHT_CANDIDATES,
+                final_gate_reason=FINAL_GATE_REASON_OTHER_GATE,
+            )
         for round_index in range(VOTE_ROUNDS):
             round_step_start = len(steps)
             with _meter_stage(engine, "span_selection", prompt_cache=True):
@@ -1740,26 +1788,44 @@ class RealPipeline:
                     company=company_identity,
                     historical_performance_bases=performance_bases,
                 )
-            selection_rounds.append(picked)
             sentences_made += len(picked) + len(rejected)
-            selection_diagnostics.append(
-                round_diagnostic_from_steps(
-                    steps[round_step_start:],
-                    round_number=round_index + 1,
-                )
+            diagnostic = round_diagnostic_from_steps(
+                steps[round_step_start:],
+                round_number=round_index + 1,
             )
-        kept = majority_picks(selection_rounds, minimum=VOTE_MIN)
-        selection_result_reason = majority_result_reason(
+            selection_diagnostics.append(diagnostic)
+            round_kept = majority_picks([picked], minimum=VOTE_MIN)
+            round_subset = (
+                basic_report_selection_subset(
+                    round_kept,
+                    historical_performance_bases=performance_bases,
+                )
+                if not diagnostic.output_limit_reached
+                and not diagnostic.parse_failed
+                else []
+            )
+            if round_subset:
+                # Writer와 이후 출고 게이트가 실제로 보는 항목도 같은 부분집합이다.
+                kept = round_subset
+                steps.append(
+                    {
+                        "step": "8_사실선택_완결",
+                        "선택호출": round_index + 1,
+                        "추가호출생략": round_index + 1 < VOTE_ROUNDS,
+                    }
+                )
+                break
+        selection_result_reason_code = selection_result_reason(
             selection_diagnostics,
-            majority_kept=len(kept),
+            selection_kept=len(kept),
         )
         if not kept:
             return RunResult(
                 outcome=Outcome.GATE_STOPPED,
                 message=(
-                    "이번에 수집한 공식 자료에서 원문 대조를 통과한 회사 사실을 "
-                    "확보하지 못했습니다. 확인되지 않은 내용을 보고서처럼 "
-                    "보여주지 않고 여기서 멈췄습니다."
+                    "이번에 수집한 공식 자료에서 1~8장 기본 보고서에 필요한 "
+                    "회사 사실과 연결관계를 모두 확보하지 못했습니다. 확인되지 "
+                    "않은 내용을 보고서처럼 보여주지 않고 여기서 멈췄습니다."
                 ),
                 sources=sources,
                 corp_type=judgment.corp_type,
@@ -1768,7 +1834,7 @@ class RealPipeline:
                 cost_krw=_request_spent_krw(engine),
                 model=model,
                 span_selection_diagnostics=tuple(selection_diagnostics),
-                span_selection_result_reason=selection_result_reason,
+                span_selection_result_reason=selection_result_reason_code,
                 final_gate_reason=FINAL_GATE_REASON_OTHER_GATE,
             )
 
@@ -1870,23 +1936,46 @@ class RealPipeline:
             # 1~8장이 사실 장부로 잠긴 뒤에만 비교사를 고른다. 자사 공시 문장에
             # 경쟁 관계가 직접 적힌 DART 법인 1~3곳의 공식 원문을 별도로 받고,
             # 동일 지표·기간·연결범위인 수치가 있을 때만 9장을 붙인다.
-            report = _attach_competitive_position(
-                report,
-                engine=engine,
-                counter=counter,
-                self_corp_code=corp_code,
-                self_company=company_name,
-                self_financials=financials,
-                self_filing=filing,
-                self_official_text=filing_text,
-                steps=steps,
-                collected_on=business_date.isoformat(),
-                official_candidate_sentences=official_candidate_sentences,
-                candidate_source_registry=tuple(all_citations),
-            )
-            # 요약은 9장까지 모두 잠긴 뒤 기존 fact_id의 최소 부분집합만으로
-            # 생성한다. finalize_report가 최종 출고 게이트와 공개본 생성을
-            # 정확히 한 번 수행한다.
+            comparison_reasons: tuple[str, ...] = ()
+            if comparison_preflight is False:
+                comparison_reasons = (
+                    "사전검사에서 검증 가능한 동종업계 비교 후보를 찾지 못했습니다",
+                )
+            else:
+                try:
+                    report = _attach_competitive_position(
+                        report,
+                        engine=engine,
+                        counter=counter,
+                        self_corp_code=corp_code,
+                        self_company=company_name,
+                        self_financials=financials,
+                        self_filing=filing,
+                        self_official_text=filing_text,
+                        steps=steps,
+                        collected_on=business_date.isoformat(),
+                        official_candidate_sentences=official_candidate_sentences,
+                        candidate_source_registry=tuple(all_citations),
+                    )
+                except ComparisonBlockedError as exc:
+                    comparison_reasons = tuple(exc.reasons)
+            if comparison_reasons:
+                # 비교 실패는 경쟁우위가 없다는 판정이 아니다. 검증된 1~8장은
+                # 기본 보고서로 유지하고, 빈 9장이나 추정 비교 문장은 만들지 않는다.
+                steps.append(
+                    {
+                        "step": "12_경쟁사비교_조건부생략",
+                        "사유": list(comparison_reasons),
+                    }
+                )
+                report = replace(
+                    report,
+                    grade=Grade.PARTIAL,
+                    shortfall_reasons=[COMPARISON_SHORTFALL_REASON],
+                )
+            # 요약은 필수 1~8장과, 성립한 경우의 9장이 잠긴 뒤 기존 fact_id의
+            # 최소 부분집합만으로 생성한다. finalize_report가 최종 출고 게이트와
+            # 공개본 생성을 정확히 한 번 수행한다.
             report = finalize_report(
                 report,
                 summary_ask=summary_ask,
@@ -1914,7 +2003,7 @@ class RealPipeline:
                 cost_krw=_request_spent_krw(engine),
                 model=model,
                 span_selection_diagnostics=tuple(selection_diagnostics),
-                span_selection_result_reason=selection_result_reason,
+                span_selection_result_reason=selection_result_reason_code,
                 final_gate_reason=FINAL_GATE_REASON_COMPARISON_BLOCKED,
             )
         except PublishBlockedError as exc:
@@ -1940,7 +2029,7 @@ class RealPipeline:
                 cost_krw=_request_spent_krw(engine),
                 model=model,
                 span_selection_diagnostics=tuple(selection_diagnostics),
-                span_selection_result_reason=selection_result_reason,
+                span_selection_result_reason=selection_result_reason_code,
                 final_gate_reason=FINAL_GATE_REASON_PUBLISH_BLOCKED,
             )
 
@@ -1970,6 +2059,11 @@ class RealPipeline:
         return RunResult(
             outcome=Outcome.REPORT,
             report=report,
+            message=(
+                COMPARISON_SHORTFALL_REASON
+                if report.grade is Grade.PARTIAL
+                else ""
+            ),
             sources=sources,
             charged=True,  # 보고서가 나가면 1 차감 (3분법 · D5 — 부분 보고서도 1)
             corp_type=judgment.corp_type,
@@ -1980,7 +2074,7 @@ class RealPipeline:
             cost_krw=_request_spent_krw(engine),
             model=model,
             span_selection_diagnostics=tuple(selection_diagnostics),
-            span_selection_result_reason=selection_result_reason,
+            span_selection_result_reason=selection_result_reason_code,
         )
 
 
@@ -2427,7 +2521,7 @@ def _collect(
     fin_years: list[int],
     filing: Optional[dict[str, Any]],
 ) -> tuple[dict[int, dict[str, str]], list[dict], str]:
-    """6 수집 — 공시 원문 + 재무 API + 뉴스 + 홈페이지를 조각으로 만든다. AI 0회.
+    """6 수집 — 공시 원문 + 재무 API + 홈페이지를 조각으로 만든다. AI 0회.
 
     Args:
         financials: 재무 API 응답. ★ 여기서 다시 부르지 않는다 — 캐시 신선도를
@@ -2482,17 +2576,21 @@ def _collect(
             {"step": "6_수집_파트너관계", "더한조각": relationship_added}
         )
 
-    # 뉴스·홈페이지를 붙이기 전 개수다. 출처 현황에서 이 값을 쓰지 않으면
-    # "전자공시 조각 21개"에 뉴스·홈페이지까지 섞여 소스별 상태가 틀린다.
+    # 홈페이지를 붙이기 전 개수다. 출처 현황에서 이 값을 쓰지 않으면
+    # "전자공시 조각 21개"에 홈페이지까지 섞여 소스별 상태가 틀린다.
     dart_fragment_count = len(frags)
 
-    # ★ 뉴스는 «AI가 번호로» 고른다 (P-108). 1판은 «제목에 회사 이름이 글자 그대로»
-    #   있어야 채택해서, 유명한 회사일수록 0건이었다 (하이브 20건 중 0건 실측).
-    #   기사가 브랜드·아티스트·제품 이름으로 나가기 때문이다.
-    #   ⚠️ 글자 맞추기를 그냥 넓히면 엉뚱한 기사가 딸려 온다 (P-98 실측) —
-    #      그래서 «판단»은 AI가 하고, **원문 복사는 프로그램이 한다** (정본 방식).
-    for news_frag in _collect_news(engine, client, user_input.company, profile, steps):
-        frags[max(frags, default=0) + 1] = news_frag
+    # canonical 공개 사실은 뉴스 조각을 항상 폐기했고 별도 모순 검사도 없었다.
+    # 효과 없이 Haiku 1회와 Writer 입력 토큰만 늘리므로 공식 경로에서는 검색부터
+    # 생략한다. `_collect_news`는 과거 실행 재현과 단위시험 호환용으로만 남긴다.
+    steps.append(
+        {
+            "step": "6_수집_뉴스",
+            "검색결과": 0,
+            "채택": 0,
+            "생략": "공식 근거 보고서에서는 뉴스를 사용하지 않습니다",
+        }
+    )
 
     # 회사 홈페이지 — 2번(뭘 잘하나)이 만성적으로 비는 원인이었다 (문제로그 P-35 · D14-7).
     # ★ 실패를 「없음」과 반드시 구분한다. 섞으면 「이 회사는 자료가 없다」로 잘못 읽힌다.

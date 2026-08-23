@@ -58,7 +58,7 @@ WRITTEN_CELLS: Final[tuple[str, ...]] = (
 
 #: 한 칸에 쓸 수 있는 최대 문장 수.
 #: ★ 길게 쓸수록 근거에서 멀어진다. 근거 문장 수를 넘지 못하게도 막는다.
-MAX_SENTENCES_PER_CELL: Final[int] = 5
+MAX_SENTENCES_PER_CELL: Final[int] = 6
 
 #: 근거가 이만큼도 없으면 «작가에게 안 맡긴다» — 한 문장으로 글을 만들 수 없다.
 MIN_EVIDENCE_PER_CELL: Final[int] = 1
@@ -71,7 +71,7 @@ EVIDENCE_CHARS: Final[int] = 400
 # ② 모델·비용
 # ══════════════════════════════════════════════════════════
 
-#: 답 길이 상한. 다섯 칸 × 다섯 문장이라 넉넉해야 한다.
+#: 답 길이 상한. 5장 문제·대응 세 쌍을 포함해도 넉넉해야 한다.
 WRITE_MAX_TOKENS: Final[int] = 2500
 
 #: 단계 기록 이름.

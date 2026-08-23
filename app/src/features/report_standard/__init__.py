@@ -1,8 +1,9 @@
-"""기업분석 canonical(v3) 데이터 계약과 출고 게이트."""
+"""기업분석 canonical(v4) 데이터 계약과 출고 게이트."""
 
 from src.features.report_standard.constants import (
     CANONICAL_CLAIM_TYPES_BY_SECTION,
     CANONICAL_SCHEMA_VERSION,
+    SUMMARY_VERIFICATION_STATUS,
     CANONICAL_SECTION_IDS,
     CANONICAL_TIME_STATES,
     SECTION_BY_ID,
@@ -22,6 +23,7 @@ from src.features.report_standard.publish import (
 __all__ = [
     "CANONICAL_CLAIM_TYPES_BY_SECTION",
     "CANONICAL_SCHEMA_VERSION",
+    "SUMMARY_VERIFICATION_STATUS",
     "CANONICAL_SECTION_IDS",
     "CANONICAL_TIME_STATES",
     "SECTION_BY_ID",

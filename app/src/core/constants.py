@@ -169,10 +169,11 @@ PARTIAL_MIN_CELLS: Final[int] = 3
 AUDIT_WINDOW_YEARS: Final[int] = 3
 #: 직원 현황(附)을 물을 때 쓰는 보고서 구분 — 11011 = 사업보고서.
 EMP_REPORT_CODE: Final[str] = "11011"
-#: 같은 자료로 판정을 몇 번 반복하나. 절대 문턱(4칸) 근처에서 결과가 흔들리던 문제 대응 (P-23)
-VOTE_ROUNDS: Final[int] = 3
-#: 그중 몇 번 이상 채워져야 인정하나 (다수결)
-VOTE_MIN: Final[int] = 2
+#: canonical 사실 선택 최대 호출 수. 첫 호출이 기본 1~8장 계약을 채우면 즉시 멈춘다.
+VOTE_ROUNDS: Final[int] = 2
+#: 각 라운드는 서로 합치지 않고 단독 평가하므로 한 번 검증되면 후보로 유지한다.
+#: ``majority_picks`` 이름은 저장·시험 호환용이며 현재 최소 표는 1이다.
+VOTE_MIN: Final[int] = 1
 
 # ── 표 덩어리 판정 (문제로그 P-29) ─────────────────────
 # 공시 원문의 표가 줄바꿈을 잃고 한 줄로 들어오는 일이 있다.

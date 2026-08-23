@@ -126,7 +126,7 @@ def test_pdf는_검색가능한_한글_본문과_모든_canonical_요소를_보�
         "완료 사업연도 연결 실적 (단위: 억원)",
         "5. 당면 과제와 대응",
         "6. 성장 전략",
-        "9. 경쟁사 대비 핵심 경쟁력",
+        "9. 동종업계 비교 결과",
         "부록. 출처와 검증 상태",
         "주식회사 진영 사업보고서 (2025.12)",
         "주식회사 LX하우시스 사업보고서 (2025.12)",
@@ -220,7 +220,7 @@ def test_부록은_본문과_분리된_새_페이지에서_전체_출처_맥락�
         pages = [page.extract_text() or "" for page in document.pages]
 
     ninth_page = next(
-        index for index, text in enumerate(pages) if "9. 경쟁사 대비 핵심 경쟁력" in text
+        index for index, text in enumerate(pages) if "9. 동종업계 비교 결과" in text
     )
     assert ninth_page < len(pages) - 1
     assert all("부록. 출처와 검증 상태" not in text for text in pages[:-1])

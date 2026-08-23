@@ -95,6 +95,6 @@ def test_보고서_알맹이는_그대로다():
     result = _데모결과("(주)진영")
 
     assert result.report is not None
-    assert result.report.schema_version == "company-report-v3-canonical"
+    assert result.report.schema_version == "company-report-v4-canonical"
     assert result.fragments_collected > 0
     assert result.sentences_passed > 0

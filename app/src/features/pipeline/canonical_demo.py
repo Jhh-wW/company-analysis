@@ -1,4 +1,4 @@
-"""무료 데모가 재생하는 canonical(v3) 기준 보고서.
+"""무료 데모가 재생하는 canonical(v4) 기준 보고서.
 
 구형 파일럿 결과는 현재 목차·사실 원장·출고 게이트를 거치지 않았다. 기본
 실행 경로에서 그 결과를 다시 보여 주면 서비스가 새 원칙을 지킨다는 보장이
@@ -26,7 +26,10 @@ from src.features.provenance.sources import (
     evidence_text_hash,
     seal_collected_source,
 )
-from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
+from src.features.report_standard.constants import (
+    CANONICAL_SCHEMA_VERSION,
+    SUMMARY_VERIFICATION_STATUS,
+)
 from src.features.report_standard.publish import (
     build_published_report,
     fact_evidence_binding,
@@ -952,13 +955,15 @@ def build_demo_report() -> Report:
     facts_by_id = {fact.fact_id: fact for fact in facts}
 
     def summary_item(
-        text: str,
-        section_id: str,
-        fact_ids: list[str],
+        fact_id: str,
         support_terms: list[str],
     ) -> SummaryItem:
+        fact = facts_by_id[fact_id]
+        text = fact.claim
+        section_id = fact.section_owner
+        fact_ids = [fact_id]
         evidence_text = summary_evidence_text(fact_ids, facts_by_id)
-        status = "independently_verified"
+        status = SUMMARY_VERIFICATION_STATUS
         return SummaryItem(
             text=text,
             section_id=section_id,
@@ -988,34 +993,24 @@ def build_demo_report() -> Report:
         schema_version=CANONICAL_SCHEMA_VERSION,
         summary_items=[
             summary_item(
-                "주문 사양 제품 매출과 가구 고객 중심의 수익 구조다.",
-                "business_model",
-                ["biz-model-01", "biz-customer-01"],
-                ["매출", "가구"],
+                "biz-model-01",
+                ["납품", "열분해유"],
             ),
             summary_item(
-                "알루미늄 합지 필름과 열분해유가 포트폴리오의 서로 다른 역할을 맡는다.",
-                "portfolio",
-                ["portfolio-02", "portfolio-03"],
-                ["알루미늄 합지 필름", "열분해유"],
+                "portfolio-02",
+                ["알루미늄", "공급"],
             ),
             summary_item(
-                "종속회사 편입 뒤 자원순환 사업 범위가 넓어졌다.",
-                "past_changes",
-                ["past-execution-01", "past-change-01"],
-                ["종속회사", "사업 범위"],
+                "past-change-01",
+                ["종속회사", "열분해유"],
             ),
             summary_item(
-                "해외 신규 유통은 본계약 전이며 품질시험으로 대응 중이다.",
-                "current_challenges",
-                ["current-01", "current-03"],
-                ["본계약", "품질시험"],
+                "current-01",
+                ["본계약", "매출"],
             ),
             summary_item(
-                "열분해 설비와 업무 자동화가 공식 성장 계획에 포함된다.",
-                "future_strategy",
-                ["future-01", "future-03"],
-                ["열분해", "업무 자동화"],
+                "future-03",
+                ["업무 자동화", "AX"],
             ),
         ],
         fact_records=facts,

@@ -1,7 +1,7 @@
 """★ 알맹이(파이프라인)를 «붙일 자리».
 
 화면·실제 조사·데모·내보내기가 함께 쓰는 데이터 계약이다.
-canonical(v3) 보고서는 의미 기반 섹션 ID, 원자 사실 장부, 검증된 출처와 기간
+canonical(v4) 보고서는 의미 기반 섹션 ID, 원자 사실 장부, 검증된 출처와 기간
 메타데이터를 이 모양으로 전달한다.
 """
 
@@ -52,8 +52,8 @@ class Grade(str, Enum):
     """보고서를 얼마나 채웠는가.
 
     정본: 확정/06_검증/1_흐름/02_성립판정과부분보고서.md
-    과거 저장본 호환을 위해 세 값을 유지한다. canonical(v3) 공개본은 출고 게이트를
-    통과한 ``COMPLETE``만 허용하고, 부족하면 GATE_STOPPED로 끝난다.
+    과거 저장본 호환을 위해 세 값을 유지한다. canonical(v4)는 검증된 1~8장과
+    조건부 9장까지 있으면 ``COMPLETE``, 9장만 빠지면 ``PARTIAL``로 출고한다.
     """
 
     COMPLETE = "완성"
@@ -202,7 +202,7 @@ class ReportTable:
 class ReportSection:
     """보고서의 항목 하나 (블록 1개)."""
 
-    #: canonical(v3)는 의미 ID, 과거 저장본은 "1", "4-1" 같은 칸 번호
+    #: canonical(v4)는 의미 ID, 과거 저장본은 "1", "4-1" 같은 칸 번호
     cell: str
     title: str
     #: 내부 감사용 근거 원문. 공개 렌더러는 이 목록을 반복 출력하지 않는다.
@@ -218,7 +218,7 @@ class ReportSection:
     #: 출처가 있는 사실이 아니므로 ``lines``/``prose_lines``에 섞지 않는다.
     #: 옛 저장 payload에는 이 키가 없으며 빈 목록으로 읽는다.
     guidance_lines: list[str] = field(default_factory=list)
-    #: canonical(v3)에서는 ``cell``이 숫자가 아니라 semantic section ID다.
+    #: canonical(v4)에서는 ``cell``이 숫자가 아니라 semantic section ID다.
     #: 화면 번호와 내부 ID를 분리해야 레거시 5·6·7·8 정규화와 충돌하지 않는다.
     display_number: str = ""
     #: 시간 장에만 붙는 표시 태그. 예: ``#과거``·``#현재``·``#미래``.
@@ -250,7 +250,7 @@ class SourceStatus:
 class SummaryItem:
     """0장 핵심 요약 한 항목.
 
-    요약은 새 사실을 소유하지 않으며 숫자 없는 결론과 관련 본문 장만 가리킨다.
+    요약은 새 사실을 소유하지 않으며 검증 완료 본문 문장과 관련 장만 가리킨다.
     """
 
     text: str = ""
@@ -259,7 +259,8 @@ class SummaryItem:
     fact_ids: list[str] = field(default_factory=list)
     #: ``fact_ids``의 ``FactRecord.claim``을 정해진 형식으로 잠근 근거 묶음.
     evidence_text: str = ""
-    #: 요약 전담 검증기의 판정. canonical 공개본은 ``independently_verified``만 허용한다.
+    #: 독립 검수 완료 본문을 글자 그대로 재사용했음을 나타내는 상태. Reviewer 통과
+    #: 또는 원문 완전일치 코드 검증을 상속한 canonical 공개본만 허용한다.
     verification_status: str = ""
     #: 요약문·근거 묶음·검증 판정을 함께 잠그는 SHA-256 지문.
     verification_binding: str = ""
@@ -419,7 +420,7 @@ class Report:
     generated_at: str = ""
     #: 빈 문자열은 기존(v2 이하) payload다. canonical 보고서는 정본 버전을 명시한다.
     schema_version: str = ""
-    #: 본문을 모두 확정한 뒤 쓰는 숫자 없는 핵심 요약 3~5개.
+    #: 본문을 모두 확정한 뒤 글자 변경 없이 재사용하는 핵심 요약 3~5개.
     summary_items: list[SummaryItem] = field(default_factory=list)
     #: 최종 문장·표·도식이 참조하는 잠긴 사실 장부.
     fact_records: list[FactRecord] = field(default_factory=list)
@@ -505,7 +506,7 @@ class RunResult:
     ai_cost_events: tuple["AiCostEvent", ...] = ()
     #: 원문·프롬프트 없이 각 span-selection 호출의 token/종료/집계만 담는다.
     span_selection_diagnostics: tuple["SpanSelectionRoundDiagnostic", ...] = ()
-    #: 다수결 결과가 비었거나 통과한 이유를 나타내는 닫힌 기계 코드.
+    #: 사실 선택이 비었거나 통과한 이유를 나타내는 닫힌 기계 코드.
     span_selection_result_reason: str = ""
     #: GATE_STOPPED의 후단 원인을 원문 없이 구분하는 닫힌 기계 코드.
     #: 고정 RunRecord 13종에는 넣지 않고 별도 SQLite 부속 원장으로만 보낸다.

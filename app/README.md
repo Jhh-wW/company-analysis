@@ -22,7 +22,7 @@ app/
 
 - 접근·비용·회사 입력: `auth`, `sharelink`, `budget`, `business_candidate`
 - 분석 총괄: `pipeline`
-- 자료 수집·정리: `homepage`, `filingclean`, `newspick`, `revenuemix`, `company_performance`, `company_specificity`
+- 자료 수집·정리: `homepage`, `filingclean`, `revenuemix`, `company_performance`, `company_specificity` (`newspick`은 구형 호출 호환용이며 canonical 런타임에서는 생략)
 - 보고서 작성·검증: `spanselect`, `writer`, `company_comparison`, `report_summary`, `grading`, `provenance`, `readable`, `report_standard`
 - 저장·운영·출력: `storage`, `backup`, `admin_dashboard`, `observability`, `cost_tracking`, `pilot_evaluation`, `export_pdf`, `export_notion`
 
@@ -70,7 +70,7 @@ checkpoint와 같은 run·사유·시각의 최종 게이트 행이 정확히 �
 | 설정 | 용도 | 외부 조사 비용 |
 |---|---|---|
 | `PIPELINE=demo` | 저장된 데모 자료 재생 | 없음 |
-| `PIPELINE=real` | DART·뉴스·홈페이지·생성 AI를 사용하는 실제 조사 | 발생 가능 |
+| `PIPELINE=real` | DART·공식 IR·회사 홈페이지·생성 AI를 사용하는 실제 조사. 공개 사실/교차검증에 쓰이지 않는 뉴스 검색·AI 선별은 생략 | 발생 가능 |
 
 배포 전 안전값은 `PIPELINE=demo`, `BETA_ADMIN_ONLY=1`입니다. 현재 실제 배포는 보류
 중입니다. 실제 조사 모드는 환경변수와 비용 안전장치를 확인하고 작은 입력 한 건으로
@@ -158,9 +158,9 @@ $env:TLDEXTRACT_CACHE="$PWD\.cache\tldextract"
 ```
 
 전체 조사 엔진 시험과 Docker 실행 검사는 루트의 GitHub Actions가 담당합니다.
-정본 변경은 `Report.schema_version=company-report-v3-canonical`, 고정 1~9장, 사실 원장과 단일
-소유, 4·5·6장 시간 상태, 경쟁사 양쪽 근거, 구형 섹션·직무 맞춤 차단과 PDF QA를
-함께 검증해야 합니다.
+정본 변경은 `Report.schema_version=company-report-v4-canonical`, 필수 1~8장·조건부 9장,
+사실 원장과 단일 소유, 4·5·6장 시간 상태, 공개 9장의 양사 근거, 구형 섹션·직무 맞춤
+차단과 PDF QA를 함께 검증해야 합니다.
 
 ## 운영 문서
 

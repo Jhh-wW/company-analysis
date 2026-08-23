@@ -23,6 +23,16 @@ MAJORITY_REASON_PARSE_FAILURE: Final[str] = "provider_parse_failure"
 MAJORITY_REASON_PROVIDER_EMPTY: Final[str] = "all_provider_rounds_empty"
 MAJORITY_REASON_ALL_REJECTED: Final[str] = "all_candidates_rejected"
 MAJORITY_REASON_NO_CONSENSUS: Final[str] = "no_majority_consensus"
+SELECTION_REASON_PREFLIGHT_PERFORMANCE: Final[str] = (
+    "preflight_missing_three_year_performance"
+)
+SELECTION_REASON_PREFLIGHT_CANDIDATES: Final[str] = (
+    "preflight_no_official_candidates"
+)
+SELECTION_REASON_KEPT: Final[str] = "validated_basic_coverage"
+SELECTION_REASON_INSUFFICIENT_COVERAGE: Final[str] = (
+    "insufficient_basic_coverage"
+)
 ROUND_REASON_KEPT: Final[str] = "validated_items_kept"
 ROUND_REASON_OUTPUT_LIMIT: Final[str] = "output_limit_empty"
 ROUND_REASON_PARSE_FAILURE: Final[str] = "provider_parse_failure"
@@ -225,17 +235,38 @@ def round_diagnostic_from_steps(
 def majority_result_reason(
     rounds: Iterable[SpanSelectionRoundDiagnostic], *, majority_kept: int
 ) -> str:
-    """라운드 집계만으로 다수결 결과가 빈 이유를 닫힌 코드로 분류한다."""
+    """선택 라운드 집계만으로 결과가 빈 이유를 닫힌 코드로 분류한다."""
 
     if _nonnegative_int(majority_kept) > 0:
         return MAJORITY_REASON_KEPT
     values = tuple(rounds)
+    # 일부 항목을 파싱했더라도 provider가 출력 상한에서 끊겼다면 그 라운드는
+    # 완결 여부를 판단할 수 없다. 부분 성공보다 절단 신호를 먼저 기록한다.
+    if any(item.output_limit_reached for item in values):
+        return MAJORITY_REASON_OUTPUT_LIMIT
+    if any(item.parse_failed for item in values):
+        return MAJORITY_REASON_PARSE_FAILURE
     if values and all(item.validation_kept == 0 for item in values):
-        if any(item.output_limit_reached for item in values):
-            return MAJORITY_REASON_OUTPUT_LIMIT
-        if any(item.parse_failed for item in values):
-            return MAJORITY_REASON_PARSE_FAILURE
         if all(item.provider_selected == 0 for item in values):
             return MAJORITY_REASON_PROVIDER_EMPTY
         return MAJORITY_REASON_ALL_REJECTED
     return MAJORITY_REASON_NO_CONSENSUS
+
+
+def selection_result_reason(
+    rounds: Iterable[SpanSelectionRoundDiagnostic], *, selection_kept: int
+) -> str:
+    """현재 회차별 단독 채택 알고리즘의 결과를 정확한 닫힌 코드로 분류한다."""
+
+    if _nonnegative_int(selection_kept) > 0:
+        return SELECTION_REASON_KEPT
+    values = tuple(rounds)
+    if any(item.output_limit_reached for item in values):
+        return MAJORITY_REASON_OUTPUT_LIMIT
+    if any(item.parse_failed for item in values):
+        return MAJORITY_REASON_PARSE_FAILURE
+    if values and all(item.validation_kept == 0 for item in values):
+        if all(item.provider_selected == 0 for item in values):
+            return MAJORITY_REASON_PROVIDER_EMPTY
+        return MAJORITY_REASON_ALL_REJECTED
+    return SELECTION_REASON_INSUFFICIENT_COVERAGE

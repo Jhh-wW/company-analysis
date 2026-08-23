@@ -401,7 +401,7 @@ def test_v3_roundtrip_preserves_semantic_metadata_fact_ledger_and_sources() -> N
                 "identity",
                 fact_ids=[fact.fact_id],
                 evidence_text=f"{fact.fact_id}: {fact.claim}",
-                verification_status="independently_verified",
+                verification_status="verified_fact_reuse",
                 verification_binding="b" * 64,
                 support_terms=["회사", "정체성"],
             )

@@ -5,6 +5,7 @@ from src.shared.span_selection_diagnostics import (
     attach_round_result,
     majority_result_reason,
     round_diagnostic_from_steps,
+    selection_result_reason,
 )
 
 
@@ -69,6 +70,52 @@ def test_각_라운드에_통과항목이_있어도_겹치지_않으면_합의�
         rounds.append(round_diagnostic_from_steps([step], round_number=number))
 
     assert majority_result_reason(rounds, majority_kept=0) == "no_majority_consensus"
+
+
+def test_일부항목이_통과했어도_출력상한에서_끊기면_절단원인으로_남긴다() -> None:
+    step = {
+        "usage": {
+            "out": 3000,
+            "requested_max_tokens": 3000,
+            "stop_reason": "max_tokens",
+        }
+    }
+    attach_round_result(
+        step,
+        requested_max_tokens=3000,
+        provider_selected=3,
+        validation_kept=2,
+        validation_rejected=1,
+    )
+    diagnostic = round_diagnostic_from_steps([step], round_number=1)
+
+    assert diagnostic.validation_kept == 2
+    assert diagnostic.output_limit_reached is True
+    assert (
+        majority_result_reason([diagnostic], majority_kept=0)
+        == "output_limit_suspected"
+    )
+
+
+def test_현재_단독채택_알고리즘은_합의가_아니라_기본장_충족도를_기록한다() -> None:
+    step = {"usage": {"out": 200, "stop_reason": "end_turn"}}
+    attach_round_result(
+        step,
+        requested_max_tokens=3000,
+        provider_selected=3,
+        validation_kept=2,
+        validation_rejected=1,
+    )
+    diagnostic = round_diagnostic_from_steps([step], round_number=1)
+
+    assert (
+        selection_result_reason([diagnostic], selection_kept=0)
+        == "insufficient_basic_coverage"
+    )
+    assert (
+        selection_result_reason([diagnostic], selection_kept=2)
+        == "validated_basic_coverage"
+    )
 
 
 def test_임의_provider_종료문구는_unknown으로_줄인다() -> None:

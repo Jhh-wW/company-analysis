@@ -31,17 +31,18 @@ render.yaml
   -> business_candidate: 후보 제시, 사람이 법인 확정
   -> pipeline
        |-- demo: 코드 내장 canonical 표본
-       `-- real: analysis_engine + 공식 자료 수집 + 생성 모델
+       `-- real: analysis_engine + 공식 공시·IR·홈페이지 수집 + 생성 모델(뉴스 검색·AI 선별 생략)
   -> canonical_report: 1~8장 비공개 초안
-  -> company_comparison: 양사 공식 원문이 맞는 9장
-  -> report_summary: 1~9장 fact_id 최소 부분집합 요약
+  -> company_comparison: 양사 공식 원문이 맞을 때만 조건부 9장
+  -> report_summary: Writer 검수 완료 FactRecord에서 3~5개 문장을 글자 변경 없이 선택(요약 AI·Reviewer 0회, 상태 verified_fact_reuse)
   -> report_standard: 전체 fail-closed 출고 게이트
   -> storage: 보고서·FactRecord·Source·캐시 저장
   -> web / PDF / Notion: 같은 해시 결속 자동출고 정본을 채널별로 렌더
 ```
 
-필수 장 하나라도 부족하거나 원문·법인·시점·상태·숫자·중복·비교 조건 중 하나라도
-맞지 않으면 부분 결과를 공개하지 않고 `GATE_STOPPED`한다.
+필수 1~8장이나 원문·법인·시점·상태·숫자·중복 조건이 하나라도 맞지 않으면 결과를
+공개하지 않고 `GATE_STOPPED`한다. 동일 조건 비교가 성립하지 않으면 9장을 생략하고
+표준 부족 사유를 가진 `Grade.PARTIAL` 기본 보고서를 같은 출고 게이트로 검사한다.
 
 ## 내부 정기 작업 경계
 

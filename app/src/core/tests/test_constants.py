@@ -9,7 +9,7 @@ def test_비용과판정_안전상수가_승인된값이다():
     assert C.MAX_RETRY_INPUT == 3
     assert C.MAX_AI_CALLS_PER_REQUEST == 15
     assert C.MIN_FILLED_CELLS == 4
-    assert C.VOTE_ROUNDS == 3
+    assert C.VOTE_ROUNDS == 2
     assert C.AUDIT_WINDOW_YEARS == 3
 
 
@@ -29,8 +29,9 @@ def test_캐시_표시값이_이력_허용값과_같다():
     assert C.CACHE_HIT_LAYER1 in obs.CACHE_HIT_VALUES
 
 
-def test_다수결은_반드시_과반이다():
-    assert C.VOTE_MIN > C.VOTE_ROUNDS / 2
+def test_사실선택은_최대두번이고_닫힌검증_통과한_한표를_유지한다():
+    assert C.VOTE_ROUNDS == 2
+    assert C.VOTE_MIN == 1
 
 
 def test_부분_완성_문턱은_성립_문턱보다_낮다():

@@ -28,8 +28,8 @@ py -3.13 -m venv .venv
 
 ## 변경 원칙
 
-- 신규 보고서는 `company-report-v3-canonical` 1~9장 전체만 공개한다.
-- 근거가 부족하면 문장·빈 장·부분 보고서로 대체하지 않고 `GATE_STOPPED`한다.
+- 신규 보고서는 `company-report-v4-canonical` 필수 1~8장과 조건이 맞을 때의 9장만 공개한다.
+- 필수 1~8장 근거가 부족하면 문장·빈 장으로 대체하지 않고 `GATE_STOPPED`한다. 9장 비교만 성립하지 않으면 표준 부족 사유를 가진 `Grade.PARTIAL` 기본 보고서로 출고한다.
 - 수집, 작성, 캐시, 웹, PDF, Notion 중 어느 경로도 공통 출고 게이트를 우회하지 않는다.
 - `FactRecord` 또는 `Source` 필드를 바꾸면 저장 왕복과 모든 공개 렌더러 시험을 함께
   갱신한다.

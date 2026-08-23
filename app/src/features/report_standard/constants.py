@@ -1,4 +1,4 @@
-"""기업분석 canonical(v3) 출력 계약의 안정적인 식별자.
+"""기업분석 canonical(v4) 출력 계약의 안정적인 식별자.
 
 내부 저장 키는 의미 기반 ID를 쓰고, 화면 번호·제목·태그는 이 파일에서만
 관리한다. 숫자 키를 저장 키로 재사용하면 레거시 채용 블록 5~8과 충돌한다.
@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Final
 
 
-CANONICAL_SCHEMA_VERSION: Final[str] = "company-report-v3-canonical"
+CANONICAL_SCHEMA_VERSION: Final[str] = "company-report-v4-canonical"
 
 
 @dataclass(frozen=True)
@@ -32,7 +32,7 @@ SECTION_SPECS: Final[tuple[SectionSpec, ...]] = (
     SectionSpec("future_strategy", "6", "성장 전략", "#미래"),
     SectionSpec("operations_partners", "7", "사업 운영과 파트너 구조"),
     SectionSpec("culture", "8", "인재상과 일하는 방식"),
-    SectionSpec("competitive_position", "9", "경쟁사 대비 핵심 경쟁력"),
+    SectionSpec("competitive_position", "9", "동종업계 비교 결과"),
 )
 
 SECTION_BY_ID: Final[dict[str, SectionSpec]] = {
@@ -40,9 +40,27 @@ SECTION_BY_ID: Final[dict[str, SectionSpec]] = {
 }
 CANONICAL_SECTION_IDS: Final[tuple[str, ...]] = tuple(SECTION_BY_ID)
 
-# 공개 보고서는 목차 일부를 골라 내보내는 문서가 아니다. 1~9장 중 하나라도
-# 검증 근거가 없으면 보고서 전체를 만들지 않는다.
-REQUIRED_SECTION_IDS: Final[frozenset[str]] = frozenset(CANONICAL_SECTION_IDS)
+# 1~8장은 회사 자체를 설명하는 기본 보고서의 필수 장이다. 9장은 양사의 공식
+# 자료를 같은 조건으로 맞출 수 있을 때만 붙이는 조건부 장이다. 비교 근거가 없다고
+# 검증된 1~8장을 함께 폐기하면 사용자는 이미 발생한 조사비를 내고 아무 결과도
+# 받지 못한다. 반대로 빈 9장을 일반론으로 채우면 경쟁우위를 지어내게 된다.
+CONDITIONAL_SECTION_IDS: Final[frozenset[str]] = frozenset(
+    {"competitive_position"}
+)
+REQUIRED_SECTION_IDS: Final[frozenset[str]] = frozenset(
+    section_id
+    for section_id in CANONICAL_SECTION_IDS
+    if section_id not in CONDITIONAL_SECTION_IDS
+)
+
+COMPARISON_SHORTFALL_REASON: Final[str] = (
+    "양사 공식자료를 같은 지표·기간·범위로 맞추지 못해 9장 동종업계 비교는 "
+    "제공하지 않았습니다. 경쟁우위가 없다는 뜻은 아닙니다."
+)
+
+# 요약은 새 문장을 검수한 결과가 아니라 이미 검증된 FactRecord.claim을 글자 그대로
+# 재사용한다. 새 독립 요약 검수가 실행된 것처럼 오해되는 명칭은 쓰지 않는다.
+SUMMARY_VERIFICATION_STATUS: Final[str] = "verified_fact_reuse"
 TIME_SECTION_IDS: Final[tuple[str, ...]] = (
     "past_changes",
     "current_challenges",

@@ -11,9 +11,13 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 import re
+import unicodedata
 from typing import Any, Iterable, Mapping
 
-from src.features.company_specificity.logic import assess_claim
+from src.features.company_specificity.logic import (
+    assess_claim,
+    verified_latin_names,
+)
 from src.features.pipeline.market_contract import (
     MARKET_STAGE_EVIDENCE_PATTERNS,
     MARKET_STAGES,
@@ -59,6 +63,38 @@ CANONICAL_SOURCE_SECTION_IDS: tuple[str, ...] = (
 _SELF_PUBLISHED_FRAGMENT_KINDS = frozenset(
     {"사업", "사업내용", "MD&A", "전략", "신규사업전망", "홈페이지"}
 )
+_SUBJECT_LABEL_REQUIRED_CLAIM_TYPES = frozenset(
+    {
+        "customer_market",
+        "future_plan",
+        "operating_core",
+        "partner_role",
+        "priority_product",
+    }
+)
+_STRUCTURED_COMPANY_BINDING_FAILURE_REASONS: dict[str, frozenset[str]] = {
+    "current_response": frozenset({"회사 고유 위험·변화 근거가 없음"}),
+    "future_plan": frozenset(
+        {"공식 방향·실행수단·고유 단서가 함께 있지 않음"}
+    ),
+    "operating_core": frozenset({"실명 파트너와 관계가 함께 있지 않음"}),
+    "partner_role": frozenset({"실명 파트너와 관계가 함께 있지 않음"}),
+}
+
+
+def structured_company_binding_allows_specificity_failure(
+    claim_type: str, reason: str
+) -> bool:
+    """닫힌 구조 검증이 대체한 구형 회사특이성 실패인지 확인한다.
+
+    다른 실패 사유는 절대 완화하지 않는다. Selector와 Writer 후 최종 조립이 같은
+    예외 목록을 공유해, 앞에서 살린 사실을 뒤의 낡은 휴리스틱이 다시 지우지 않게
+    한다.
+    """
+
+    return reason in _STRUCTURED_COMPANY_BINDING_FAILURE_REASONS.get(
+        claim_type, frozenset()
+    )
 
 
 def _validation_rejection_reason_code(item: Mapping[str, str]) -> str:
@@ -295,6 +331,48 @@ def _normalize_candidate_sid(value: object) -> str:
         r"\[([1-9][0-9]*-[1-9][0-9]*)\]", raw_sid
     )
     return bracketed_sid.group(1) if bracketed_sid else raw_sid
+
+
+def _surface_compact_with_offsets(value: str) -> tuple[str, tuple[int, ...]]:
+    """공백·문장부호·호환문자 차이를 없애되 원문 위치를 함께 보존한다.
+
+    모델이 따옴표를 덧붙이거나 줄바꿈·붙임표 표기를 바꾼 경우만 복구한다.
+    문자와 숫자는 버리지 않으므로 서로 다른 이름을 같은 이름으로 추측하지 않는다.
+    """
+
+    compact: list[str] = []
+    offsets: list[int] = []
+    for index, char in enumerate(str(value or "")):
+        for normalized in unicodedata.normalize("NFKC", char).casefold():
+            if normalized.isspace() or unicodedata.category(normalized).startswith(
+                "P"
+            ):
+                continue
+            compact.append(normalized)
+            offsets.append(index)
+    return "".join(compact), tuple(offsets)
+
+
+def _subject_label_from_source(sentence: str, proposed: object) -> str:
+    """모델 표기를 원문에 실제로 존재하는 동일 표면 문자열로만 복구한다.
+
+    의미 유사도나 회사 별칭은 사용하지 않는다. 따라서 복구 결과는 언제나 원문
+    부분문자열이고, 원문에 없는 대상명을 새로 통과시키지 않는다.
+    """
+
+    raw = " ".join(str(proposed or "").split())
+    if not raw:
+        return ""
+    source_compact, source_offsets = _surface_compact_with_offsets(sentence)
+    proposed_compact, _ = _surface_compact_with_offsets(raw)
+    if not proposed_compact:
+        return ""
+    compact_index = source_compact.find(proposed_compact)
+    if compact_index < 0:
+        return ""
+    start = source_offsets[compact_index]
+    end = source_offsets[compact_index + len(proposed_compact) - 1] + 1
+    return " ".join(sentence[start:end].split())
 
 
 def historical_performance_basis_sid(fiscal_year: object) -> str:
@@ -605,10 +683,17 @@ def select_canonical_spans(
             continue
 
         normalized_sentence = " ".join(sentence.split()).casefold()
-        subject_label = " ".join(str(item.get("subject_label") or "").split())
-        if subject_label and subject_label.casefold() not in normalized_sentence:
-            rejected.append({"sid": sid, "reason": "대상 이름이 원문에 없음"})
-            continue
+        proposed_subject_label = " ".join(
+            str(item.get("subject_label") or "").split()
+        )
+        subject_label = _subject_label_from_source(sentence, proposed_subject_label)
+        if proposed_subject_label and not subject_label:
+            # 대상명이 계약 필드가 아닌 항목은 잘못 생성된 보조 라벨만 버리고,
+            # 원문 문장 자체는 후단 원문대조·회사특이성 검사를 계속 받게 한다.
+            # 대상명이 필수인 항목은 종전처럼 닫힌 실패로 남긴다.
+            if claim_type in _SUBJECT_LABEL_REQUIRED_CLAIM_TYPES:
+                rejected.append({"sid": sid, "reason": "대상 이름이 원문에 없음"})
+                continue
         market_stage = " ".join(str(item.get("market_stage") or "").split())
         market_observation = " ".join(
             str(item.get("market_observation") or "").split()
@@ -1021,6 +1106,9 @@ def select_canonical_spans(
             }
             for item, reason in checked.deleted
         )
+    verified_names = verified_latin_names(
+        str(fragment.get("원문") or "") for fragment in frags.values()
+    )
     policy_kept: list[CanonicalPick] = []
     for item in checked_kept:
         if item.fragment_id is None:
@@ -1031,16 +1119,20 @@ def select_canonical_spans(
             str(item.sentence),
             source_kind=str(fragment.get("종류") or ""),
             company=company,
+            verified_names=verified_names,
         )
         selected_pick = pick_by_draft_identity.get(id(item))
-        # 기존 company-specificity 9장은 실명 파트너를 전제로 한다. 7장 정본은
-        # 파트너가 없어도 위에서 법인 주어·현재 운영·단계·관계를 모두 결속한
-        # operating_core를 허용하므로 그 닫힌 경우만 별도로 통과시킨다.
-        internal_core_is_bound = bool(
+        # 5~7장 정본 구조 계약이 원문 발췌·상태·관계·내부 참조를 이미 모두
+        # 결속한 경우에는 이전 세대의 넓은 휴리스틱이 같은 사실을 다시 지우지
+        # 않게 한다. 이 예외는 위의 닫힌 구조 검증을 통과한 claim_type에만 적용한다.
+        structured_company_binding = bool(
             selected_pick is not None
-            and selected_pick.claim_type == "operating_core"
+            and structured_company_binding_allows_specificity_failure(
+                selected_pick.claim_type,
+                decision.reason,
+            )
         )
-        if not decision.passed and not internal_core_is_bound:
+        if not decision.passed and not structured_company_binding:
             rejected.append(
                 {
                     "sid": "",

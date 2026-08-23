@@ -15,9 +15,10 @@ from src.features.pipeline.real import _write_prose
 class _Engine:
     MODEL = "시험모델"
 
-    def __init__(self, verdict: bool = True) -> None:
+    def __init__(self, verdict: bool = True, writer_text: str = "") -> None:
         self.calls = 0
         self.verdict = verdict
+        self.writer_text = writer_text
 
     def _ask(
         self,
@@ -36,7 +37,8 @@ class _Engine:
                         "칸번호": "1",
                         "문장들": [
                             {
-                                "글": "하이브는 2025년 위버스 디지털 멤버십 구독 서비스를 출시해 수익을 창출했다.",
+                                "글": self.writer_text
+                                or "하이브는 2025년 위버스 디지털 멤버십 구독 서비스를 출시해 수익을 창출했다.",
                                 "근거": "1-1",
                             }
                         ],
@@ -83,7 +85,10 @@ def test_통과한_작가문장에_실제출처를_붙이고_원문도_보존한
 def test_근거대조가_거짓이면_표시용글_없이_원문으로_돌아간다() -> None:
     original = _section()
     sections, written_cells = _write_prose(
-        _Engine(verdict=False),
+        _Engine(
+            verdict=False,
+            writer_text="하이브는 위버스 서비스로 새로운 수익을 만들었다.",
+        ),
         object(),
         UserInput(company="하이브", job="기획", region="서울"),
         [original],

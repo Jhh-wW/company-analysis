@@ -623,7 +623,14 @@ def test_순수_경쟁사_문장을_고객시장_사실로_위장하지_않는�
     assert rejected
 
 
-def test_거절사유는_원문없이_닫힌_코드별_개수로_남는다() -> None:
+def test_선택사항인_대상라벨이_원문에_없으면_라벨만_버리고_원문을_검증한다(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        canonical_module,
+        "assess_claim",
+        lambda *_args, **_kwargs: _GateDecision(True, 1, ""),
+    )
     steps: list[dict] = []
     kept, rejected = select_canonical_spans(
         lambda _prompt, _schema: {
@@ -642,13 +649,106 @@ def test_거절사유는_원문없이_닫힌_코드별_개수로_남는다() -> 
         company="가나다전자",
     )
 
+    assert [item.subject_label for item in kept] == [""]
+    assert rejected == []
+    diagnostic = steps[0]["span_selection_diagnostic"]
+    assert diagnostic["validation_kept"] == 1
+    assert diagnostic["validation_rejected"] == 0
+
+
+def test_필수_대상라벨은_원문에_없으면_종전처럼_거절한다() -> None:
+    steps: list[dict] = []
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {
+            "items": [
+                _section567_item(
+                    "business_model",
+                    "1-1",
+                    "customer_market",
+                    "원문에 없는 시장",
+                    market_observation="중국 시장에 판매",
+                )
+            ]
+        },
+        {
+            1: {
+                "종류": "사업내용",
+                "원문": "가나다전자는 중국 시장에 판매해 제품 매출을 만든다.",
+            }
+        },
+        steps,
+        engine=_Engine(),
+        company="가나다전자",
+    )
+
     assert kept == []
     assert [item["reason"] for item in rejected] == ["대상 이름이 원문에 없음"]
-    diagnostic = steps[0]["span_selection_diagnostic"]
-    assert diagnostic["validation_rejected"] == 1
-    assert diagnostic["validation_rejection_reason_counts"] == (
-        ("subject_label_not_in_source", 1),
+    assert steps[0]["span_selection_diagnostic"][
+        "validation_rejection_reason_counts"
+    ] == (("subject_label_not_in_source", 1),)
+
+
+def test_대상라벨의_따옴표와_붙임표_오류는_원문_표기로만_복구한다(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        canonical_module,
+        "assess_claim",
+        lambda *_args, **_kwargs: _GateDecision(True, 1, ""),
     )
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {
+            "items": [
+                _section567_item(
+                    "business_model",
+                    "1-1",
+                    "customer_market",
+                    "‘Blue-Garage’",
+                    market_observation="Blue Garage 시장에 판매",
+                )
+            ]
+        },
+        {
+            1: {
+                "종류": "사업내용",
+                "원문": "가나다전자는 Blue Garage 시장에 판매해 제품 매출을 만든다.",
+            }
+        },
+        [],
+        engine=_Engine(),
+        company="가나다전자",
+    )
+
+    assert rejected == []
+    assert [item.subject_label for item in kept] == ["Blue Garage"]
+
+
+def test_대상라벨은_유사한_다른_이름으로_의미복구하지_않는다() -> None:
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {
+            "items": [
+                _section567_item(
+                    "business_model",
+                    "1-1",
+                    "customer_market",
+                    "Blue Garden",
+                    market_observation="Blue Garage 시장에 판매",
+                )
+            ]
+        },
+        {
+            1: {
+                "종류": "사업내용",
+                "원문": "가나다전자는 Blue Garage 시장에 판매해 제품 매출을 만든다.",
+            }
+        },
+        [],
+        engine=_Engine(),
+        company="가나다전자",
+    )
+
+    assert kept == []
+    assert [item["reason"] for item in rejected] == ["대상 이름이 원문에 없음"]
 
 
 def test_subject_label은_원문의_줄바꿈만_공백으로_정규화해_대조한다(
@@ -678,6 +778,101 @@ def test_subject_label은_원문의_줄바꿈만_공백으로_정규화해_대�
 
     assert [item.subject_label for item in kept] == ["SmartX 제품"]
     assert rejected == []
+
+
+def test_여러_원문에서_검증된_혼합대소문자_실명을_회사특이성에_사용한다() -> None:
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {
+            "items": [
+                _section567_item(
+                    "current_challenges",
+                    "1-1",
+                    "current_issue",
+                    "Blue Garage",
+                    next_check_metric="재계약 여부",
+                )
+            ]
+        },
+        {
+            1: {
+                "종류": "MD&A",
+                "원문": (
+                    "가나다전자는 Blue Garage 매출 의존을 현재 과제로 관리하며 "
+                    "재계약 여부를 확인한다."
+                ),
+            },
+            2: {
+                "종류": "사업내용",
+                "원문": "Blue Garage 계약은 북미 음원 유통 범위를 포함한다.",
+            },
+        },
+        [],
+        engine=_Engine(),
+        company="가나다전자",
+    )
+
+    assert rejected == []
+    assert [item.subject_label for item in kept] == ["Blue Garage"]
+
+
+def test_원문결속된_미래계획은_구형_실명_휴리스틱만으로_다시_삭제하지_않는다() -> None:
+    sentence = (
+        "가나다전자는 2027년 북미 음원 플랫폼을 구축할 계획이며 "
+        "출시를 실행 확인 신호로 제시했다."
+    )
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {
+            "items": [
+                _section567_item(
+                    "future_strategy",
+                    "1-1",
+                    "future_plan",
+                    "북미 음원 플랫폼",
+                    plan_status="announced",
+                    plan_timing="2027년",
+                    plan_execution_signal="출시",
+                )
+            ]
+        },
+        {1: {"종류": "전략", "원문": sentence}},
+        [],
+        engine=_Engine(),
+        company="가나다전자",
+    )
+
+    assert rejected == []
+    assert [item.claim_type for item in kept] == ["future_plan"]
+
+
+def test_원문결속이_되어도_오래된_계획은_회사특이성_예외로_살리지_않는다() -> None:
+    sentence = (
+        "가나다전자는 2020년 북미 음원 플랫폼을 구축할 계획이며 "
+        "출시를 실행 확인 신호로 제시했다."
+    )
+    kept, rejected = select_canonical_spans(
+        lambda _prompt, _schema: {
+            "items": [
+                _section567_item(
+                    "future_strategy",
+                    "1-1",
+                    "future_plan",
+                    "북미 음원 플랫폼",
+                    plan_status="announced",
+                    plan_timing="2020년",
+                    plan_execution_signal="출시",
+                )
+            ]
+        },
+        {1: {"종류": "전략", "원문": sentence}},
+        [],
+        engine=_Engine(),
+        company="가나다전자",
+    )
+
+    assert kept == []
+    assert [item["reason"] for item in rejected] == [
+        "최근 3년보다 오래된 계획 근거"
+    ]
 
 
 def test_후단에서_탈락한_대상을_참조하는_항목도_최종_제외된다(

@@ -8,7 +8,11 @@ import pytest
 from src.features.pipeline.canonical_report import (
     PublishBlockedError,
     WrittenClaim,
+    _structured_company_binding_is_visible,
     assemble_report,
+    basic_report_selection_is_complete,
+    basic_report_selection_subset,
+    historical_performance_bases_are_complete,
     majority_picks,
     sections_from_picks,
 )
@@ -129,6 +133,256 @@ def test_majority_vote_keeps_change_bound_only_to_historical_performance() -> No
     assert majority_picks([[change], [change], []]) == [change]
 
 
+def _complete_basic_picks() -> list[CanonicalPick]:
+    return [
+        CanonicalPick("identity", "회사 정체성", 1, "1-1", "identity_summary"),
+        CanonicalPick("business_model", "수익 구조", 2, "2-1", "revenue_model"),
+        CanonicalPick("business_model", "고객 시장", 3, "3-1", "customer_market"),
+        CanonicalPick(
+            "portfolio",
+            "핵심 제품",
+            4,
+            "4-1",
+            "priority_product",
+            subject_label="SmartX",
+            product_role="기업 고객용 검사 장비",
+            revenue_model_sid="2-1",
+        ),
+        CanonicalPick(
+            "past_changes",
+            "완료 실행",
+            5,
+            "5-1",
+            "completed_execution",
+            event_date="2025",
+        ),
+        CanonicalPick(
+            "past_changes",
+            "변화 해석",
+            6,
+            "6-1",
+            "change_interpretation",
+            basis_sids=("5-1",),
+        ),
+        CanonicalPick(
+            "current_challenges",
+            "현재 문제",
+            7,
+            "7-1",
+            "current_issue",
+        ),
+        CanonicalPick(
+            "current_challenges",
+            "현재 대응",
+            8,
+            "8-1",
+            "current_response",
+            response_to_sid="7-1",
+        ),
+        CanonicalPick("future_strategy", "미래 계획", 9, "9-1", "future_plan"),
+        CanonicalPick(
+            "operations_partners", "운영 체계", 10, "10-1", "operating_core"
+        ),
+        CanonicalPick("culture", "공식 가치", 11, "11-1", "official_value"),
+    ]
+
+
+def test_기본보고서_선택이_완결되면_한번으로_충분하다() -> None:
+    assert basic_report_selection_is_complete(
+        _complete_basic_picks(),
+        historical_performance_bases={
+            "historical-performance:2023",
+            "historical-performance:2024",
+            "historical-performance:2025",
+        },
+    )
+
+
+def test_필수사실이_장별상한_뒤에_있어도_Writer_부분집합에는_남는다() -> None:
+    base = _complete_basic_picks()
+    identity = [item for item in base if item.section_id == "identity"]
+    other = [
+        item
+        for item in base
+        if item.section_id not in {"identity", "business_model"}
+    ]
+    early_customers = [
+        CanonicalPick(
+            "business_model",
+            f"고객 시장 추가 {number}",
+            20 + number,
+            f"{20 + number}-1",
+            "customer_market",
+        )
+        for number in range(4)
+    ]
+    business = [item for item in base if item.section_id == "business_model"]
+    over_limit = [*identity, *early_customers, *business, *other]
+
+    subset = basic_report_selection_subset(
+        over_limit,
+        historical_performance_bases={
+            "historical-performance:2023",
+            "historical-performance:2024",
+            "historical-performance:2025",
+        },
+    )
+
+    selected_business = [
+        item for item in subset if item.section_id == "business_model"
+    ]
+    assert len(selected_business) <= 4
+    assert any(item.sid == "2-1" for item in selected_business)
+    assert any(item.claim_type == "customer_market" for item in selected_business)
+    assert any(
+        item.claim_type == "priority_product"
+        and item.revenue_model_sid == "2-1"
+        for item in subset
+    )
+
+
+def test_복구불가능한_삼개년실적참조를_AI전에_판별한다() -> None:
+    assert historical_performance_bases_are_complete(
+        {
+            "historical-performance:2023",
+            "historical-performance:2024",
+            "historical-performance:2025",
+        }
+    )
+    assert not historical_performance_bases_are_complete(
+        {
+            "historical-performance:2023",
+            "historical-performance:2025",
+            "historical-performance:2026",
+        }
+    )
+
+
+def test_완결부분집합은_연결되지_않은_여분항목을_공개하지_않는다() -> None:
+    extra = CanonicalPick(
+        "current_challenges",
+        "연결되지 않은 대응",
+        30,
+        "30-1",
+        "current_response",
+        response_to_sid="없는-SID",
+    )
+    subset = basic_report_selection_subset(
+        [*_complete_basic_picks(), extra],
+        historical_performance_bases={
+            "historical-performance:2023",
+            "historical-performance:2024",
+            "historical-performance:2025",
+        },
+    )
+
+    assert subset
+    assert extra not in subset
+
+
+def test_Writer_후_구조예외는_구체대상과_행동이_문장에_남아야_한다() -> None:
+    future = CanonicalPick(
+        "future_strategy",
+        "JYP는 2027년 미국 공연 유통망을 확대할 계획이다.",
+        40,
+        "40-1",
+        "future_plan",
+        subject_label="미국 공연 유통망",
+        plan_execution_signal="미국 공연 유통망을 확대",
+    )
+    response = CanonicalPick(
+        "current_challenges",
+        "JYP는 공연 원가 부담에 대응해 투어 동선을 재설계하고 있다.",
+        41,
+        "41-1",
+        "current_response",
+        response_action="투어 동선을 재설계하고 있다",
+    )
+
+    assert _structured_company_binding_is_visible(
+        future,
+        "JYP는 2027년 미국 공연 유통망을 확대할 계획이다.",
+    )
+    assert not _structured_company_binding_is_visible(
+        future,
+        "회사는 앞으로 사업을 확대할 계획이다.",
+    )
+    assert _structured_company_binding_is_visible(
+        response,
+        "JYP는 투어 동선을 재설계하고 있다.",
+    )
+    assert not _structured_company_binding_is_visible(
+        response,
+        "회사는 비용 문제에 대응하고 있다.",
+    )
+
+
+@pytest.mark.parametrize(
+    "missing_claim_type",
+    [
+        "identity_summary",
+        "revenue_model",
+        "customer_market",
+        "priority_product",
+        "completed_execution",
+        "change_interpretation",
+        "current_issue",
+        "current_response",
+        "future_plan",
+        "operating_core",
+        "official_value",
+    ],
+)
+def test_기본보고서_필수사실이_하나라도_빠지면_재선택한다(
+    missing_claim_type: str,
+) -> None:
+    picks = [
+        item for item in _complete_basic_picks() if item.claim_type != missing_claim_type
+    ]
+
+    assert not basic_report_selection_is_complete(
+        picks,
+        historical_performance_bases={
+            "historical-performance:2023",
+            "historical-performance:2024",
+            "historical-performance:2025",
+        },
+    )
+
+
+def test_기본보고서_내부참조나_삼개년표가_깨지면_완결로_보지_않는다() -> None:
+    broken_reference = [
+        replace(item, response_to_sid="없는-SID")
+        if item.claim_type == "current_response"
+        else item
+        for item in _complete_basic_picks()
+    ]
+
+    assert not basic_report_selection_is_complete(
+        broken_reference,
+        historical_performance_bases={
+            "historical-performance:2023",
+            "historical-performance:2024",
+            "historical-performance:2025",
+        },
+    )
+    assert not basic_report_selection_is_complete(
+        _complete_basic_picks(),
+        historical_performance_bases={
+            "historical-performance:2024",
+            "historical-performance:2025",
+        },
+    )
+    assert not basic_report_selection_is_complete(
+        _complete_basic_picks(),
+        historical_performance_bases={
+            "historical-performance:2022",
+            "historical-performance:2024",
+            "historical-performance:2025",
+        },
+    )
+
+
 def test_assemble_report_locks_visible_claims_to_sources() -> None:
     fragments = {
         1: {"종류": "사업내용", "원문": "가나다는 산업용 소재 기업이다."},
@@ -176,7 +430,7 @@ def test_assemble_report_locks_visible_claims_to_sources() -> None:
         publish=False,
     )
 
-    assert report.schema_version == "company-report-v3-canonical"
+    assert report.schema_version == "company-report-v4-canonical"
     assert [section.cell for section in report.sections] == [
         "identity",
         "business_model",

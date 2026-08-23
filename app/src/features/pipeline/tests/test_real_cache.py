@@ -31,7 +31,7 @@ from src.features.budget.constants import (
     SPEND_PHASE_PIPELINE,
 )
 from src.features.pipeline import real
-from src.features.pipeline.port import CompanyCard, Outcome, ReportTable, UserInput
+from src.features.pipeline.port import CompanyCard, Grade, Outcome, ReportTable, UserInput
 #: 8·9 생성 지시문임을 알아보는 표시. 글자를 베끼지 않고 «상수를 그대로» 쓴다 —
 #: 지시문이 바뀌어도 이 시험이 조용히 어긋나지 않는다.
 from src.features.spanselect.constants import PROMPT_PICK
@@ -772,7 +772,8 @@ def test_로컬통합_삼성전자_저장원문은_가짜AI로_생성이후까�
 
     원문은 파일럿 실행의 로컬 증거라 저장소에 추가하지 않는다. 증거가 없는 일반
     개발 환경에서는 건너뛰고, 있으면 해시를 먼저 맞춘 뒤 실제 파서·보정기·원문
-    대조기를 거쳐 writer와 실제 경쟁사 비교 게이트까지 도달하는지 검사한다.
+    대조기를 거친다. 가짜 선택이 1~8장 계약을 채우지 못하면 Writer가 빈칸을
+    지어내기 전에 멈추는지도 함께 검사한다.
     """
 
     expected_raw_sha256 = (
@@ -1015,17 +1016,11 @@ def test_로컬통합_삼성전자_저장원문은_가짜AI로_생성이후까�
     assert result.outcome is not Outcome.FAILED
     assert result.report is None
     assert result.billing_uncertain is False
-    # 이 P01 원문은 법인명을 붙인 직접 경쟁 근거가 없어 실제 9장 게이트에서
-    # 멈추는 것이 정답이다. 경쟁사를 추측해 finalize까지 우회하지 않는다.
-    assert "양사 공식 원문" in result.message
-    assert "경쟁우위가 없다는 뜻이 아니라" in result.message
-    assert "현재 공개 근거로는 확인할 수 없" in result.message
-    assert calls == {"writer": 1, "comparison": 1, "finalize": 0}
-    assert progress[:6] == [
-        "identify", "judge", "collect", "gate", "generate", "verify"
-    ]
-    assert fake.client.messages.calls == 5
-    assert len(result.ai_cost_events) == 5
+    assert "1~8장 기본 보고서" in result.message
+    assert calls == {"writer": 0, "comparison": 0, "finalize": 0}
+    assert progress[:5] == ["identify", "judge", "collect", "gate", "generate"]
+    assert fake.client.messages.calls == real.VOTE_ROUNDS
+    assert len(result.ai_cost_events) == real.VOTE_ROUNDS
     assert all(event.failed_call is False for event in result.ai_cost_events)
 
 
@@ -1267,19 +1262,15 @@ def test_가짜엔진도_9장_양사공식원문과_동일비교조건을_정직
         assert '"financials"' in fact.comparator_state_evidence
 
 
-def test_세_선택라운드의_안전한_집계가_최종결과에_남는다(
+def test_첫_선택라운드가_완결되면_추가호출을_생략하고_진단이_남는다(
     engine: FakeEngine,
 ) -> None:
     result = _run()
 
     assert result.outcome is Outcome.REPORT
-    assert result.span_selection_result_reason == "majority_kept"
-    assert len(result.span_selection_diagnostics) == real.VOTE_ROUNDS
-    assert [item.round_number for item in result.span_selection_diagnostics] == [
-        1,
-        2,
-        3,
-    ]
+    assert result.span_selection_result_reason == "validated_basic_coverage"
+    assert len(result.span_selection_diagnostics) == 1
+    assert [item.round_number for item in result.span_selection_diagnostics] == [1]
     requested_limits = {
         item.requested_max_tokens for item in result.span_selection_diagnostics
     }
@@ -1288,8 +1279,69 @@ def test_세_선택라운드의_안전한_집계가_최종결과에_남는다(
     assert all(
         item.provider_selected > 0 for item in result.span_selection_diagnostics
     )
+    # 선택 1 + Writer 1 + 독립 Reviewer 1. 요약은 검수된 본문을 재사용해 0회다.
+    assert engine.client.messages.calls == 3
+    assert len(result.ai_cost_events) == 3
     assert all(
         item.validation_kept > 0 for item in result.span_selection_diagnostics
+    )
+
+
+def test_첫_선택이_불완전해도_두번째_단독완결이면_보고서를_만든다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = real.select_canonical_spans
+    calls = 0
+
+    def first_incomplete_then_complete(*args: Any, **kwargs: Any):
+        nonlocal calls
+        calls += 1
+        picked, rejected = original(*args, **kwargs)
+        if calls == 1:
+            picked = [
+                item for item in picked if item.claim_type != "future_plan"
+            ]
+        return picked, rejected
+
+    monkeypatch.setattr(
+        real,
+        "select_canonical_spans",
+        first_incomplete_then_complete,
+    )
+
+    result = _run()
+
+    assert result.outcome is Outcome.REPORT
+    assert calls == 2
+    assert [item.round_number for item in result.span_selection_diagnostics] == [1, 2]
+    # 선택 2 + Writer 1 + 독립 Reviewer 1. 요약과 뉴스 선별은 0회다.
+    assert engine.client.messages.calls == 4
+
+
+def test_삼개년표가_없으면_선택AI를_부르기전에_멈춘다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(real, "build_three_year_table", lambda *_args, **_kwargs: None)
+    selection_calls = 0
+
+    def forbidden_selection(*_args: Any, **_kwargs: Any):
+        nonlocal selection_calls
+        selection_calls += 1
+        raise AssertionError("정적 실패 조건에서 선택 AI를 호출했습니다")
+
+    monkeypatch.setattr(real, "select_canonical_spans", forbidden_selection)
+
+    result = _run()
+
+    assert result.outcome is Outcome.GATE_STOPPED
+    assert selection_calls == 0
+    assert engine.client.messages.calls == 0
+    assert result.span_selection_diagnostics == ()
+    assert (
+        result.span_selection_result_reason
+        == "preflight_missing_three_year_performance"
     )
 
 
@@ -1525,7 +1577,7 @@ def test_공식IR_실패나_잘림은_후보없음으로_거짓확정하지않�
     assert ir_status.state == ("failed" if ir_result.state == "failed" else "ok")
 
 
-def test_공식IR까지_완전한_후보부재는_span전에_차단한다(
+def test_공식IR까지_비교후보가_없어도_기본분석은_계속한다(
     engine: FakeEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1588,15 +1640,15 @@ def test_공식IR까지_완전한_후보부재는_span전에_차단한다(
 
     result = _run()
 
-    assert span_called is False
+    assert span_called is True
     assert result.outcome is Outcome.GATE_STOPPED
-    assert result.final_gate_reason == "comparison_blocked"
+    assert result.final_gate_reason == "other_gate"
     assert engine.generate_ai_calls == 0
     ir_status = next(source for source in result.sources if source.name == "회사 공식 IR")
     assert ir_status.state == "none"
 
 
-def test_오래된_newsroom_경쟁문장만_있으면_span전에_차단한다(
+def test_오래된_newsroom_경쟁문장은_비교에서_빼고_기본분석은_계속한다(
     engine: FakeEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1661,15 +1713,27 @@ def test_오래된_newsroom_경쟁문장만_있으면_span전에_차단한다(
         ),
     )
 
-    def forbidden_span(*_args: Any, **_kwargs: Any):
-        raise AssertionError("과거 newsroom 문장으로 유료 span을 호출하면 안 됩니다")
+    span_calls = 0
 
-    monkeypatch.setattr(real, "select_canonical_spans", forbidden_span)
+    def empty_span(*_args: Any, **_kwargs: Any):
+        nonlocal span_calls
+        span_calls += 1
+        return [], []
+
+    monkeypatch.setattr(real, "select_canonical_spans", empty_span)
+    monkeypatch.setattr(
+        real,
+        "_attach_competitive_position",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("비교 후보가 없으면 후단 비교 수집을 호출하면 안 됩니다")
+        ),
+    )
 
     result = _run()
 
+    assert span_calls == real.VOTE_ROUNDS
     assert result.outcome is Outcome.GATE_STOPPED
-    assert result.final_gate_reason == "comparison_blocked"
+    assert result.final_gate_reason == "other_gate"
     assert result.sentences_made == 0
     assert engine.generate_ai_calls == 0
 
@@ -1769,7 +1833,7 @@ def test_공식IR_Source와_attester는_참고로_보존되지만_v2후보가_�
     assert attesters[0].source_id == ir_source.domain_attestation_source_id
 
 
-def test_전체공시원문에_후보가_없으면_fragment를_믿지_않고_span전에_멈춘다(
+def test_전체공시원문에_비교후보가_없어도_기본사실_span은_계속한다(
     engine: FakeEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1789,27 +1853,36 @@ def test_전체공시원문에_후보가_없으면_fragment를_믿지_않고_spa
 
     monkeypatch.setattr(engine, "make_fragments", fragments_with_news_only_candidate)
 
-    def forbidden_span(*_args: Any, **_kwargs: Any):
-        raise AssertionError("comparison preflight False 뒤 span 호출 금지")
+    span_calls = 0
 
-    monkeypatch.setattr(real, "select_canonical_spans", forbidden_span)
-    monkeypatch.setattr(real, "_attach_competitive_position", forbidden_span)
-    monkeypatch.setattr(real, "_load_official_comparator_bundle", forbidden_span)
-    monkeypatch.setattr(real, "finalize_report", forbidden_span)
+    def empty_span(*_args: Any, **_kwargs: Any):
+        nonlocal span_calls
+        span_calls += 1
+        return [], []
+
+    monkeypatch.setattr(real, "select_canonical_spans", empty_span)
+    monkeypatch.setattr(
+        real,
+        "_attach_competitive_position",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("비교 후보가 없으면 후단 비교 수집을 호출하면 안 됩니다")
+        ),
+    )
 
     result = _run()
 
     assert result.outcome is Outcome.GATE_STOPPED
-    assert result.final_gate_reason == "comparison_blocked"
+    assert result.final_gate_reason == "other_gate"
+    assert span_calls == real.VOTE_ROUNDS
     assert result.sentences_made == 0
     assert result.sentences_passed == 0
-    assert result.span_selection_diagnostics == ()
-    assert result.span_selection_result_reason == ""
+    assert len(result.span_selection_diagnostics) == real.VOTE_ROUNDS
+    assert result.span_selection_result_reason == "all_provider_rounds_empty"
     assert engine.generate_ai_calls == 0
-    assert "비교 후보" in result.message
+    assert "회사 사실" in result.message
 
 
-def test_경쟁사비교_차단은_원문사유대신_닫힌코드만_반환한다(
+def test_경쟁사비교_실패는_원문사유를_숨기고_기본보고서를_반환한다(
     engine: FakeEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1822,9 +1895,12 @@ def test_경쟁사비교_차단은_원문사유대신_닫힌코드만_반환한�
 
     result = _run()
 
-    assert result.outcome is Outcome.GATE_STOPPED
-    assert result.final_gate_reason == "comparison_blocked"
+    assert result.outcome is Outcome.REPORT
+    assert result.report is not None
+    assert result.report.grade is Grade.PARTIAL
+    assert result.final_gate_reason == ""
     assert internal_reason not in result.message
+    assert "9장 동종업계 비교" in result.message
 
 
 def test_정본출고_차단은_원문사유대신_닫힌코드만_반환한다(
@@ -1847,11 +1923,11 @@ def test_정본출고_차단은_원문사유대신_닫힌코드만_반환한다(
     assert internal_reason not in result.message
 
 
-def test_선택_3회_출력상한은_실측최대입력에서도_건별예산안이다(
+def test_선택_최대2회_출력상한은_실측최대입력에서도_건별예산안이다(
     engine: FakeEngine,
 ) -> None:
     # 최신 P03·P05~P10 원장에서 span-selection 실측 입력 최댓값은 16,033이다.
-    # cache 혜택을 0으로 두고 세 호출 모두 같은 최대 입력·최대 출력을 쓴다고 본다.
+    # cache 혜택을 0으로 두고 두 호출 모두 같은 최대 입력·최대 출력을 쓴다고 본다.
     pilot_max_observed_input_tokens = 16_033
     result = _run()
     requested_limits = {
@@ -1859,15 +1935,15 @@ def test_선택_3회_출력상한은_실측최대입력에서도_건별예산안
     }
     assert len(requested_limits) == 1
     requested_max_tokens = requested_limits.pop()
-    three_round_cost = provider_budget.usage_cost_krw(
+    max_selection_cost = provider_budget.usage_cost_krw(
         GENERATION_MODEL,
         pilot_max_observed_input_tokens * real.VOTE_ROUNDS,
         requested_max_tokens * real.VOTE_ROUNDS,
     )
 
     # 본조사 phase 900원은 평가 건별 1,200원보다 더 좁은 경계다.
-    assert three_round_cost == pytest.approx(580.02)
-    assert three_round_cost <= PAID_PHASE_PROVIDER_BUDGET_KRW[SPEND_PHASE_PIPELINE]
+    assert max_selection_cost == pytest.approx(386.68)
+    assert max_selection_cost <= PAID_PHASE_PROVIDER_BUDGET_KRW[SPEND_PHASE_PIPELINE]
 
 
 def test_캐시로_돌려준_보고서가_처음_만든_것과_같다(engine: FakeEngine) -> None:
@@ -2038,6 +2114,9 @@ def test_3개년표만_있고_필수_정체성제품근거가_없으면_출고�
     def row(account_id: str, account_nm: str, values: tuple[str, str, str]) -> dict[str, str]:
         return {
             "fs_div": "CFS",
+            "sj_div": "IS",
+            "currency": "KRW",
+            "reprt_code": "11011",
             "account_id": account_id,
             "account_nm": account_nm,
             "bsns_year": "2025",
@@ -2050,9 +2129,12 @@ def test_3개년표만_있고_필수_정체성제품근거가_없으면_출고�
         }
 
     financials = {
+        "status": "000",
+        "reprt_code": "11011",
         "list": [
             row("ifrs-full_Revenue", "매출액", ("821850000000", "601790000000", "566500000000")),
             row("dart_OperatingIncomeLoss", "영업이익", ("155250000000", "128260000000", "169440000000")),
+            row("ifrs-full_ProfitLoss", "당기순이익", ("101000000000", "90000000000", "80000000000")),
         ]
     }
     monkeypatch.setattr(engine, "fetch_financials", lambda _corp, _counter: (financials, [2025]))
@@ -2177,14 +2259,40 @@ def test_보고서를_만들면_1층_캐시에_한_줄이_남는다(engine: Fake
     assert rows[0]["fiscal_year"] == max(FISCAL_YEARS)
 
 
-def test_수집_실패가_끼면_캐시에_저장하지_않는다(engine: FakeEngine) -> None:
+def test_수집_실패가_끼면_캐시에_저장하지_않는다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """★ 정본 03_수집/1_흐름/02_실패처리.md — 「⚠️ 못 가져옴 → ❌ 저장 안 함」.
 
     그날만 죽은 소스 때문에 그 회사가 「자료 없는 회사」로 굳어버리면 안 된다.
     """
     from src.features.storage import db as storage_db
 
-    engine.news_fails = True
+    homepage_calls = 0
+
+    def first_failure_then_none(_url: str) -> SimpleNamespace:
+        nonlocal homepage_calls
+        homepage_calls += 1
+        if homepage_calls == 1:
+            return SimpleNamespace(
+                state="failed",
+                fragments=[],
+                detail="홈페이지 수집 시간 초과",
+                candidate_scope_complete=False,
+            )
+        return SimpleNamespace(
+            state="none",
+            fragments=[],
+            detail="공식 홈페이지 주소 없음",
+            candidate_scope_complete=True,
+        )
+
+    monkeypatch.setattr(
+        real,
+        "collect_homepage_fragments",
+        first_failure_then_none,
+    )
     first = _run()
     calls_after_first = engine.generate_ai_calls
 
@@ -2201,11 +2309,27 @@ def test_수집_실패가_끼면_캐시에_저장하지_않는다(engine: FakeEn
 
 def test_자료가_없는_것은_실패가_아니므로_캐시한다(engine: FakeEngine) -> None:
     """❌ 없음(회사의 사실)과 ⚠️ 못 가져옴(우리 실패)을 섞으면 캐시가 영영 안 찬다."""
-    engine.news_fails = False       # 뉴스 0건 = ❌ 없음
     _run()
     calls_after_first = engine.generate_ai_calls
     _run()
     assert engine.generate_ai_calls == calls_after_first
+
+
+def test_사용하지_않는_뉴스검색장애는_공식보고서와_캐시에_영향주지_않는다(
+    engine: FakeEngine,
+) -> None:
+    engine.news_fails = True
+
+    first = _run()
+    calls_after_first = engine.generate_ai_calls
+    second = _run()
+
+    assert first.outcome is Outcome.REPORT
+    assert second.outcome is Outcome.REPORT
+    assert engine.generate_ai_calls == calls_after_first
+    news = next(source for source in first.sources if source.name == "뉴스")
+    assert news.state == "none"
+    assert "사용하지 않습니다" in news.detail
 
 
 def test_공고와_요구역량은_회사분석_저장소에_들어가지_않는다(engine: FakeEngine) -> None:

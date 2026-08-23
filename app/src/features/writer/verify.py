@@ -123,10 +123,15 @@ def answer_schema(pairs: list[Pair]) -> dict[str, Any]:
         "properties": {
             "판정": {
                 "type": "array",
+                "minItems": len(pairs),
+                "maxItems": len(pairs),
                 "items": {
                     "type": "object",
                     "properties": {
-                        "번호": {"type": "integer"},
+                        "번호": {
+                            "type": "integer",
+                            "enum": [pair.number for pair in pairs],
+                        },
                         "근거에있다": {"type": "boolean"},
                     },
                     "required": ["번호", "근거에있다"],
@@ -160,6 +165,22 @@ def apply_verdicts(
       검사가 없는 것과 같고, 그때 나가는 것은 «검증됐다고 표시된 거짓말»이다.
     ★ 판정에 안 실린 번호도 버린다 — 같은 이유다.
     """
+    남은, 버린, _ = apply_verdicts_detailed(pairs, payload)
+    return 남은, 버린
+
+
+def apply_verdicts_detailed(
+    pairs: list[Pair], payload: object
+) -> tuple[dict[str, list[Sentence]], list[Pair], list[Pair]]:
+    """판정을 적용하고 «명시적으로 거짓 판정된 문장»을 따로 돌려준다.
+
+    세 번째 값은 검수 AI가 정상적인 boolean ``False``로 답한
+    문장만 담는다. 답이 없거나 깨진 문장은 안전을 위해 버리지만,
+    장애를 «고쳐 쓸 문장»으로 오인해 비싼 추가 AI 호출을 하지 않는다.
+
+    Returns:
+        (검수 AI 통과, 전체 버림, 1회 재작성 가능 대상).
+    """
     # ★ 깨진 전체 답도 예외를 내지 않고 «모두 거짓»으로 닫는다. 검증 예외를
     #   바깥에서 잡아 원문으로 복귀하더라도, 이 순수 함수 자체가 같은 약속을 지킨다.
     판정목록 = payload.get("판정") if isinstance(payload, dict) else []
@@ -167,6 +188,7 @@ def apply_verdicts(
         판정목록 = []
     판정표: dict[int, bool] = {}
     중복번호: set[int] = set()
+    명시거짓: set[int] = set()
     for item in 판정목록:
         if not isinstance(item, dict):
             continue
@@ -179,16 +201,98 @@ def apply_verdicts(
             중복번호.add(번호)
         # `"false"`·1처럼 그럴듯한 값은 불리언이 아니다. 실제 True만 통과한다.
         판정표[번호] = 판정 is True
+        if 판정 is False:
+            명시거짓.add(번호)
     for 번호 in 중복번호:
         판정표[번호] = DEFAULT_VERDICT
+        명시거짓.discard(번호)
     남은: dict[str, list[Sentence]] = {}
     버린: list[Pair] = []
+    재작성가능: list[Pair] = []
     for p in pairs:
         if 판정표.get(p.number, DEFAULT_VERDICT):
             남은.setdefault(p.cell, []).append(p.sentence)
         else:
             버린.append(p)
-    return 남은, 버린
+            # 정상적인 False와 판정 누락·중복·형식 파손을 구분한다.
+            # 후자는 검수 AI 장애이므로 재작성해도 품질이 나아진다고 볼 수 없다.
+            if p.number in 명시거짓:
+                재작성가능.append(p)
+    return 남은, 버린, 재작성가능
+
+
+def verify_pairs_with_ai(
+    ask: Callable[[str, dict[str, Any]], tuple[Optional[dict[str, Any]], dict[str, Any]]],
+    *,
+    pairs: list[Pair],
+) -> tuple[dict[str, list[Sentence]], list[Pair], list[Pair], dict[str, Any]]:
+    """이미 만든 대조 쌍을 별도·무문맥 검수 AI 호출로 판정한다.
+
+    재작성 흐름은 초기 대조의 ``Pair.number``를 유지해야 하므로
+    ``verify_with_ai``와 같은 안전 규칙을 쌍 단위로 재사용한다.
+    """
+    if not pairs:
+        return {}, [], [], {
+            "대조": 0,
+            "통과": 0,
+            "비고": "대조할 문장 없음 — AI 호출 안 함",
+        }
+
+    # ★ 작가 문장이 원문과 strip 후 글자까지 같으면 의미 판정이
+    # 필요 없다. 코드가 확정적으로 증명할 수 있는 경우만 통과시켜
+    # 비용을 줄인다. 공백 정규화·부분 일치·의미 유사성은 금지한다.
+    완전일치 = [
+        pair
+        for pair in pairs
+        if pair.sentence.text.strip()
+        and pair.sentence.text.strip() == pair.evidence.text.strip()
+    ]
+    완전일치번호 = {pair.number for pair in 완전일치}
+    AI대조쌍 = [pair for pair in pairs if pair.number not in 완전일치번호]
+    AI대조번호 = {pair.number for pair in AI대조쌍}
+
+    if not AI대조쌍:
+        남은: dict[str, list[Sentence]] = {}
+        for pair in pairs:
+            남은.setdefault(pair.cell, []).append(pair.sentence)
+        return 남은, [], [], {
+            "대조": len(pairs),
+            "AI대조": 0,
+            "완전일치통과": len(완전일치),
+            "통과": len(완전일치),
+            "버림": 0,
+            "재작성대상": 0,
+            "버린문장": [],
+            "비고": "모든 문장이 근거 원문과 완전일치 — AI 호출 안 함",
+        }
+
+    payload, usage = ask(build_prompt(AI대조쌍), answer_schema(AI대조쌍))
+    _, 버린, 재작성가능 = apply_verdicts_detailed(AI대조쌍, payload)
+    버린번호 = {pair.number for pair in 버린}
+    남은 = {}
+    for pair in pairs:
+        if pair.number in 완전일치번호 or (
+            pair.number not in 버린번호 and pair.number in AI대조번호
+        ):
+            남은.setdefault(pair.cell, []).append(pair.sentence)
+    기록: dict[str, Any] = {
+        "대조": len(pairs),
+        "AI대조": len(AI대조쌍),
+        "완전일치통과": len(완전일치),
+        "통과": sum(len(v) for v in 남은.values()),
+        "버림": len(버린),
+        "재작성대상": len(재작성가능),
+        # ★ 무엇이 왜 버려졌는지 남긴다 — 안 남기면 「조용한 누락」이 된다.
+        "버린문장": [p.sentence.text[:60] for p in 버린][:10],
+        "usage": usage,
+    }
+    if payload is None:
+        기록["오류"] = usage.get("error", "AI 답 없음")
+        기록["비고"] = (
+            "AI 대조가 죽어 AI 대조분을 «전부» 버렸다 — "
+            "완전일치분만 코드로 보존했다"
+        )
+    return 남은, 버린, 재작성가능, 기록
 
 
 def verify_with_ai(
@@ -202,19 +306,5 @@ def verify_with_ai(
     ★ 대조할 것이 없으면 **AI를 안 부른다.**
     """
     pairs = make_pairs(written, evidence)
-    if not pairs:
-        return {}, {"대조": 0, "통과": 0, "비고": "대조할 문장 없음 — AI 호출 안 함"}
-    payload, usage = ask(build_prompt(pairs), answer_schema(pairs))
-    남은, 버린 = apply_verdicts(pairs, payload)
-    기록: dict[str, Any] = {
-        "대조": len(pairs),
-        "통과": sum(len(v) for v in 남은.values()),
-        "버림": len(버린),
-        # ★ 무엇이 왜 버려졌는지 남긴다 — 안 남기면 「조용한 누락」이 된다.
-        "버린문장": [p.sentence.text[:60] for p in 버린][:10],
-        "usage": usage,
-    }
-    if payload is None:
-        기록["오류"] = usage.get("error", "AI 답 없음")
-        기록["비고"] = "대조가 죽어 «전부» 버렸다 — 검사 없이 내보내지 않는다"
+    남은, _, _, 기록 = verify_pairs_with_ai(ask, pairs=pairs)
     return 남은, 기록

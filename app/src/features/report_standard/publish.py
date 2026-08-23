@@ -54,10 +54,13 @@ from src.features.report_standard.constants import (
     CANONICAL_CLAIM_TYPES_BY_SECTION,
     CANONICAL_SCHEMA_VERSION,
     CANONICAL_SECTION_IDS,
+    COMPARISON_SHORTFALL_REASON,
     COMPARISON_JUDGMENTS,
+    CONDITIONAL_SECTION_IDS,
     INTERNAL_ONLY_CLAIM_TYPES_BY_SECTION,
     REQUIRED_SECTION_IDS,
     SECTION_BY_ID,
+    SUMMARY_VERIFICATION_STATUS,
     SECTION_SPECS,
     SECTION_TIME_STATES,
     SUMMARY_MAX_ITEMS,
@@ -85,7 +88,6 @@ from src.shared.comparison_candidate_basis import (
 )
 
 
-_SUMMARY_NUMBER = re.compile(r"\d|[%％]")
 _FORBIDDEN_JOB_TOPIC = re.compile(
     r"직무|KPI|핵심성과지표|자소서|자기소개서|면접",
     re.IGNORECASE,
@@ -428,7 +430,7 @@ def summary_verification_binding(
     verification_status: str,
     support_terms: list[str],
 ) -> str:
-    """요약문과 독립 검증 결과의 사후 변조를 감지한다."""
+    """검증된 본문 재사용 요약과 그 근거의 사후 변조를 감지한다."""
 
     return _binding_digest(
         {
@@ -2629,6 +2631,10 @@ def _summary_problems(
     if not fact_ids:
         problems.append(f"[summary] {index}번 요약에 fact_id가 없습니다")
         return problems
+    if len(fact_ids) != 1:
+        problems.append(
+            f"[summary] {index}번 요약은 검증 본문 fact_id 정확히 한 개만 참조해야 합니다"
+        )
     if len(fact_ids) != len(set(fact_ids)):
         problems.append(f"[summary] {index}번 요약의 fact_id가 중복됐습니다")
     bound_facts: dict[str, FactRecord] = {}
@@ -2644,15 +2650,21 @@ def _summary_problems(
             bound_facts[fact_id] = fact
     if len(bound_facts) != len(fact_ids):
         return problems
+    if len(fact_ids) == 1:
+        bound_claim = str(bound_facts[fact_ids[0]].claim).strip()
+        if text != bound_claim:
+            problems.append(
+                f"[summary] {index}번 요약은 결속된 검증 본문 문장을 글자 그대로 재사용해야 합니다"
+            )
 
     expected_evidence = summary_evidence_text(fact_ids, facts)
     if evidence_text != expected_evidence:
         problems.append(
             f"[summary] {index}번 요약의 evidence_text가 결속된 claim 묶음과 다릅니다"
         )
-    if status != "independently_verified":
+    if status != SUMMARY_VERIFICATION_STATUS:
         problems.append(
-            f"[summary] {index}번 요약은 독립 검증 완료 상태가 아닙니다"
+            f"[summary] {index}번 요약은 검증된 본문 재사용 상태가 아닙니다"
         )
     normalized_terms = [_normalized(term) for term in support_terms if _normalized(term)]
     if len(set(normalized_terms)) < 2:
@@ -2682,7 +2694,7 @@ def _summary_problems(
     )
     if not binding or binding != expected_binding:
         problems.append(
-            f"[summary] {index}번 요약의 독립 검증 결속 지문이 일치하지 않습니다"
+            f"[summary] {index}번 요약의 검증 본문 재사용 결속 지문이 일치하지 않습니다"
         )
     return problems
 
@@ -2690,8 +2702,8 @@ def _summary_problems(
 def validate_publishable(report: Report) -> PublishValidation:
     """정본상 출고 가능한지 전수 검사한다.
 
-    1~9장 전체, 숫자 없는 요약 3~5개, 원문 해시에 결속된 원자 사실과 장별
-    최소 내용 계약이 하나라도 성립하지 않으면 보고서 전체 출고를 차단한다.
+    1~8장 기본 보고서, 조건이 맞을 때의 9장, 검증 본문 재사용 요약 3~5개, 원문
+    해시에 결속된 원자 사실과 장별 최소 내용 계약을 전수 검사한다.
     """
 
     reasons: list[str] = []
@@ -2889,16 +2901,21 @@ def validate_publishable(report: Report) -> PublishValidation:
     if not SUMMARY_MIN_ITEMS <= len(report.summary_items) <= SUMMARY_MAX_ITEMS:
         reasons.append("[summary] 핵심 요약은 3~5개여야 합니다")
     summary_texts: set[str] = set()
+    summary_sections: set[str] = set()
     for index, item in enumerate(report.summary_items, start=1):
         text = item.text.strip()
         if not text:
             reasons.append(f"[summary] {index}번 요약이 비었습니다")
-        elif _SUMMARY_NUMBER.search(text):
-            reasons.append(f"[summary] {index}번 요약에 숫자 또는 백분율이 있습니다")
         normalized_text = _normalized(text)
         if normalized_text in summary_texts:
             reasons.append(f"[summary] {index}번 요약이 중복됐습니다")
         summary_texts.add(normalized_text)
+        section_id = str(item.section_id or "").strip()
+        if section_id in summary_sections:
+            reasons.append(
+                f"[summary] {index}번 요약이 같은 장 {section_id}을 중복 참조합니다"
+            )
+        summary_sections.add(section_id)
         reasons.extend(_summary_problems(item, index, included_set, facts))
         if problem := _forbidden_text_problem(text):
             reasons.append(f"[scope] {index}번 요약: {problem}")
@@ -2908,7 +2925,7 @@ def validate_publishable(report: Report) -> PublishValidation:
 
 
 def build_published_report(report: Report) -> Report:
-    """검증된 1~9장을 정본 순서·메타데이터로 잠근 공개본을 만든다."""
+    """검증된 1~8장과 조건부 9장을 정본 순서로 잠근 공개본을 만든다."""
 
     validation = validate_publishable(report)
     if not validation:
@@ -3028,16 +3045,22 @@ def build_published_report(report: Report) -> Report:
         if isinstance(item, Source) and item.source_id in used_source_ids
     ], key=lambda item: item.number)
 
+    missing_conditional = CONDITIONAL_SECTION_IDS - set(
+        validation.included_section_ids
+    )
+    is_basic_report = bool(missing_conditional)
     return replace(
         report,
         job="",
-        grade=Grade.COMPLETE,
+        grade=Grade.PARTIAL if is_basic_report else Grade.COMPLETE,
         sections=published_sections,
         requirements=[],
         sources=[],
         citations=published_citations,
         cells={section.cell: True for section in published_sections},
-        shortfall_reasons=[],
+        shortfall_reasons=(
+            [COMPARISON_SHORTFALL_REASON] if is_basic_report else []
+        ),
         schema_version=CANONICAL_SCHEMA_VERSION,
         fact_records=published_facts,
     )

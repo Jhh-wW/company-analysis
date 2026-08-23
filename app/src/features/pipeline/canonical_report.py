@@ -1,8 +1,9 @@
-"""수집된 원문을 canonical(v3) 보고서로 잠그는 마지막 조립 단계.
+"""수집된 원문을 canonical(v4) 보고서로 잠그는 마지막 조립 단계.
 
-AI는 원문 번호 선택, 가독성 편집, 숫자 없는 요약에만 관여한다. 공개되는
-문장과 표는 모두 하나의 ``FactRecord``와 하나 이상의 검증된 ``Source``에
-연결되며, 출고 게이트를 통과하지 못하면 보고서 객체를 만들지 않는다.
+AI는 원문 번호 선택과 가독성 편집에만 관여한다. 핵심 요약은 Reviewer 또는 원문
+완전일치 코드 검증을 통과한 본문 문장을 그대로 재사용한다. 공개되는 문장과 표는
+모두 하나의 ``FactRecord``와 하나 이상의 검증된 ``Source``에 연결되며, 출고
+게이트를 통과하지 못하면 보고서 객체를 만들지 않는다.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from itertools import combinations
 from typing import Any, Callable, Iterable
 
 from src.core.citations import citation_number
-from src.features.company_specificity.logic import assess_claim
+from src.features.company_specificity.logic import assess_claim, verified_latin_names
 from src.features.pipeline.port import (
     FactRecord,
     Grade,
@@ -35,6 +36,7 @@ from src.features.report_standard import (
     CANONICAL_SCHEMA_VERSION,
     PublishBlockedError,
     PublishValidation,
+    SUMMARY_VERIFICATION_STATUS,
     build_published_report,
 )
 from src.features.report_standard.publish import (
@@ -42,13 +44,18 @@ from src.features.report_standard.publish import (
     summary_evidence_text,
     summary_verification_binding,
 )
-from src.features.report_summary.logic import build_summary_with_ai
+from src.features.report_summary.logic import (
+    VerifiedSummarySource,
+    build_summary_from_verified_claims,
+)
 from src.features.spanselect.canonical import (
     CanonicalPick,
     historical_performance_basis_sid,
+    structured_company_binding_allows_specificity_failure,
 )
 from src.features.writer import constants as writer_constants
 from src.features.writer import logic as writer_logic
+from src.features.writer import revision as writer_revision
 from src.features.writer import verify as writer_verify
 
 
@@ -92,6 +99,36 @@ _TIME_STATE: dict[str, str] = {
     "competitive_position": "standing",
 }
 
+_SUMMARY_SECTION_PRIORITY: tuple[str, ...] = (
+    "identity",
+    "business_model",
+    "portfolio",
+    "current_challenges",
+    "future_strategy",
+    "operations_partners",
+    "culture",
+    "past_changes",
+    "competitive_position",
+)
+
+_SUMMARY_CLAIM_PRIORITY: dict[str, int] = {
+    "identity_summary": 0,
+    "revenue_model": 0,
+    "customer_market": 1,
+    "priority_product": 0,
+    "current_response": 0,
+    "current_issue": 1,
+    "future_plan": 0,
+    "operating_core": 0,
+    "partner_role": 1,
+    "official_value": 0,
+    "work_example": 1,
+    "change_interpretation": 0,
+    "completed_execution": 1,
+    "historical_performance": 2,
+    "competitive_comparison": 0,
+}
+
 
 @dataclass(frozen=True)
 class WrittenClaim:
@@ -128,11 +165,11 @@ class WrittenClaim:
 
 
 def majority_picks(rounds: Iterable[Iterable[CanonicalPick]], *, minimum: int = 2) -> list[CanonicalPick]:
-    """세 독립 선택에서 소유권과 각 구조 필드가 각각 반복된 사실만 남긴다.
+    """선택 결과에서 소유권과 각 구조 필드가 ``minimum``회 나온 사실을 남긴다.
 
     같은 원문이 서로 다른 섹션에서 동률이면 소유권을 추측하지 않고 버린다.
     자유형 구조 발췌는 전체 객체가 우연히 완전히 같을 것을 요구하지 않고 필드별
-    2표를 확인한다. 어느 필드든 2표 합의가 없으면 그 사실 전체를 버린다.
+    합의를 확인한다. 어느 필드든 필요한 표 수가 없으면 그 사실 전체를 버린다.
     출력 순서는 원문 조각 번호와 원문 안 등장 순서가 안정적으로 결정한다.
     """
 
@@ -222,6 +259,245 @@ def majority_picks(rounds: Iterable[Iterable[CanonicalPick]], *, minimum: int = 
     )
 
 
+def historical_performance_bases_are_complete(
+    historical_performance_bases: Iterable[str],
+) -> bool:
+    """완료 사업연도 실적 참조가 정확히 연속 3개인지 코드로 확인한다."""
+
+    values = {
+        str(value or "").strip()
+        for value in historical_performance_bases
+        if str(value or "").strip()
+    }
+    years = sorted(
+        int(match.group(1))
+        for value in values
+        if (match := re.fullmatch(r"historical-performance:(20\d{2})", value))
+    )
+    return (
+        len(values) == 3
+        and len(years) == 3
+        and years == list(range(years[0], years[0] + 3))
+    )
+
+
+def basic_report_selection_subset(
+    picks: Iterable[CanonicalPick],
+    *,
+    historical_performance_bases: Iterable[str],
+) -> list[CanonicalPick]:
+    """Writer에 실제 넘길 참조 완결·장별 상한 이내 부분집합을 만든다.
+
+    전체 후보에 필수 사실이 있다는 것만 확인하면 Writer가 장별 앞 N개를 남길 때
+    뒤쪽의 필수 사실이나 연결 대상이 잘릴 수 있다. 그래서 먼저 제품→수익 구조,
+    대응→문제, 변화 해석→완료 실행을 함께 고른 뒤, 장별 공개 상한 안에서만 보완
+    사실을 채운다. 어느 기본 장도 안전하게 만들 수 없으면 빈 목록을 반환한다.
+    """
+
+    items = list(picks)
+    performance_bases = {
+        str(value or "").strip()
+        for value in historical_performance_bases
+        if str(value or "").strip()
+    }
+    if not items or not historical_performance_bases_are_complete(performance_bases):
+        return []
+
+    by_section: dict[str, list[tuple[int, CanonicalPick]]] = defaultdict(list)
+    by_sid: dict[str, tuple[int, CanonicalPick]] = {}
+    for index, item in enumerate(items):
+        if not item.sid or item.sid in by_sid:
+            return []
+        by_section[item.section_id].append((index, item))
+        by_sid[item.sid] = (index, item)
+
+    chosen: set[int] = set()
+
+    # 1장: 공식 정체성 요약을 반드시 포함하고, 있으면 공식 자기정의 한 건을 더 둔다.
+    identity = by_section.get("identity", [])
+    identity_summary = next(
+        (pair for pair in identity if pair[1].claim_type == "identity_summary"),
+        None,
+    )
+    if identity_summary is None:
+        return []
+    chosen.add(identity_summary[0])
+    for index, item in identity:
+        if len(chosen.intersection(i for i, _ in identity)) >= _PROSE_LIMITS["identity"]:
+            break
+        if item.claim_type in {
+            "identity_summary",
+            "official_self_definition",
+            "operating_scope",
+        }:
+            chosen.add(index)
+
+    # 2·3장: 제품을 고를 때 그 제품이 실제로 참조하는 수익 구조도 함께 보존한다.
+    customer = next(
+        (
+            pair
+            for pair in by_section.get("business_model", [])
+            if pair[1].claim_type == "customer_market"
+        ),
+        None,
+    )
+    if customer is None:
+        return []
+    selected_products: list[tuple[int, CanonicalPick]] = []
+    selected_revenues: set[int] = set()
+    product_subjects: set[str] = set()
+    for index, product in by_section.get("portfolio", []):
+        if product.claim_type != "priority_product":
+            continue
+        subject = " ".join(product.subject_label.split()).casefold()
+        revenue_pair = by_sid.get(product.revenue_model_sid)
+        if (
+            not subject
+            or subject in product_subjects
+            or not product.product_role.strip()
+            or revenue_pair is None
+            or revenue_pair[1].section_id != "business_model"
+            or revenue_pair[1].claim_type != "revenue_model"
+        ):
+            continue
+        prospective_revenues = selected_revenues | {revenue_pair[0]}
+        # 고객·시장 한 건을 남겨야 하므로 수익 구조는 최대 세 건이다.
+        if len(prospective_revenues) + 1 > _PROSE_LIMITS["business_model"]:
+            continue
+        selected_products.append((index, product))
+        selected_revenues = prospective_revenues
+        product_subjects.add(subject)
+        if len(selected_products) >= _PROSE_LIMITS["portfolio"]:
+            break
+    if not selected_products:
+        return []
+    chosen.update(selected_revenues)
+    chosen.add(customer[0])
+    chosen.update(index for index, _item in selected_products)
+    business_count = sum(
+        index in chosen for index, _item in by_section.get("business_model", [])
+    )
+    for index, item in by_section.get("business_model", []):
+        if business_count >= _PROSE_LIMITS["business_model"]:
+            break
+        if index not in chosen and item.claim_type in {"revenue_model", "customer_market"}:
+            chosen.add(index)
+            business_count += 1
+
+    # 4장: 변화 해석과 그 내부 완료 실행 근거를 한 묶음으로 고른다.
+    past = by_section.get("past_changes", [])
+    executions = {
+        item.sid: (index, item)
+        for index, item in past
+        if item.claim_type == "completed_execution"
+    }
+    if not executions:
+        return []
+
+    def interpretation_dependencies(
+        interpretation: CanonicalPick,
+    ) -> set[int] | None:
+        if not interpretation.basis_sids:
+            return None
+        dependencies: set[int] = set()
+        for basis_sid in interpretation.basis_sids:
+            if basis_sid in performance_bases:
+                continue
+            target = executions.get(basis_sid)
+            if target is None:
+                return None
+            dependencies.add(target[0])
+        return dependencies
+
+    past_selected: set[int] = set()
+    for index, interpretation in past:
+        if interpretation.claim_type != "change_interpretation":
+            continue
+        dependencies = interpretation_dependencies(interpretation)
+        if dependencies is None:
+            continue
+        if not dependencies:
+            dependencies = {next(iter(executions.values()))[0]}
+        if len(dependencies) + 1 <= _PROSE_LIMITS["past_changes"]:
+            past_selected.update(dependencies)
+            past_selected.add(index)
+            break
+    if not past_selected:
+        return []
+    for index, item in past:
+        if len(past_selected) >= _PROSE_LIMITS["past_changes"]:
+            break
+        if index in past_selected:
+            continue
+        if item.claim_type == "completed_execution":
+            past_selected.add(index)
+            continue
+        if item.claim_type == "change_interpretation":
+            dependencies = interpretation_dependencies(item)
+            if dependencies is None:
+                continue
+            missing = dependencies - past_selected
+            if len(past_selected) + len(missing) + 1 <= _PROSE_LIMITS["past_changes"]:
+                past_selected.update(missing)
+                past_selected.add(index)
+    chosen.update(past_selected)
+
+    # 5장: 독립 문제·대응 쌍만 최대 세 묶음 보존한다.
+    current = by_section.get("current_challenges", [])
+    issues = {
+        item.sid: (index, item)
+        for index, item in current
+        if item.claim_type == "current_issue"
+    }
+    current_selected: set[int] = set()
+    selected_issue_sids: set[str] = set()
+    for index, response in current:
+        if response.claim_type != "current_response":
+            continue
+        issue = issues.get(response.response_to_sid)
+        if issue is None or response.response_to_sid in selected_issue_sids:
+            continue
+        current_selected.update({issue[0], index})
+        selected_issue_sids.add(response.response_to_sid)
+        if len(current_selected) >= _PROSE_LIMITS["current_challenges"]:
+            break
+    if not current_selected:
+        return []
+    chosen.update(current_selected)
+
+    # 6~8장은 허용된 사실을 원문 순서대로 공개 상한까지만 둔다.
+    for section_id, allowed_types in (
+        ("future_strategy", {"future_plan"}),
+        ("operations_partners", {"operating_core", "partner_role"}),
+        ("culture", {"official_value", "work_example"}),
+    ):
+        selected = [
+            index
+            for index, item in by_section.get(section_id, [])
+            if item.claim_type in allowed_types
+        ][:_PROSE_LIMITS[section_id]]
+        if not selected:
+            return []
+        chosen.update(selected)
+
+    return [item for index, item in enumerate(items) if index in chosen]
+
+
+def basic_report_selection_is_complete(
+    picks: Iterable[CanonicalPick],
+    *,
+    historical_performance_bases: Iterable[str],
+) -> bool:
+    """호환용 완결 판정. 실제 Writer 입력은 안전한 부분집합을 사용한다."""
+
+    return bool(
+        basic_report_selection_subset(
+            picks,
+            historical_performance_bases=historical_performance_bases,
+        )
+    )
+
+
 def sections_from_picks(
     picks: Iterable[CanonicalPick],
     fragments: dict[int, dict[str, str]],
@@ -285,6 +561,55 @@ def _direct_causal_fields(
     return None
 
 
+def _structured_company_binding_is_visible(
+    pick: CanonicalPick, text: str
+) -> bool:
+    """Selector의 구조 예외를 쓸 때 최종 Writer 문장에도 고유 결속을 요구한다.
+
+    Reviewer가 사실성만 통과시켜도 구체 제품·행동·파트너가 빠진 일반론은 공식
+    보고서 품질 계약을 만족하지 않는다. 대상명은 표면 문자열로, 행동·역할은
+    원문 구조 발췌의 핵심 단어 두 개 이상으로 최종 문장에 남아 있어야 한다.
+    """
+
+    normalized_text = " ".join(str(text or "").split()).casefold()
+    compact_text = re.sub(r"[^0-9a-z가-힣]", "", normalized_text)
+
+    def contains_surface(value: str) -> bool:
+        compact_value = re.sub(
+            r"[^0-9a-z가-힣]",
+            "",
+            " ".join(str(value or "").split()).casefold(),
+        )
+        return bool(compact_value) and compact_value in compact_text
+
+    def contains_distinct_terms(value: str) -> bool:
+        terms: list[str] = []
+        for match in _TERM_RE.finditer(str(value or "")):
+            term = match.group(0).casefold()
+            compact = re.sub(r"\W", "", term)
+            if (
+                len(compact) < 2
+                or term in _TERM_STOP
+                or term in {"사업", "계획", "추진", "대응", "운영", "현재"}
+                or term in terms
+            ):
+                continue
+            terms.append(term)
+        return sum(term in normalized_text for term in terms) >= 2
+
+    if pick.claim_type == "current_response":
+        return contains_distinct_terms(pick.response_action)
+    if pick.claim_type == "future_plan":
+        return contains_surface(pick.subject_label) and contains_distinct_terms(
+            pick.plan_execution_signal
+        )
+    if pick.claim_type in {"operating_core", "partner_role"}:
+        return contains_surface(pick.subject_label) and contains_distinct_terms(
+            pick.operation_role
+        )
+    return False
+
+
 def write_and_verify_sections(
     *,
     engine: Any,
@@ -327,12 +652,15 @@ def write_and_verify_sections(
     if not written:
         return sections, []
 
-    passed, verify_step = writer_verify.verify_with_ai(
+    passed, review_steps = writer_revision.review_with_single_rewrite(
+        lambda prompt, schema: ask(prompt, schema, writer_verify.VERIFY_MAX_TOKENS),
+        lambda prompt, schema: ask(prompt, schema, writer_revision.REWRITE_MAX_TOKENS),
+        # 첫 검수 AI와 대화를 이어 붙이지 않는 새 단발 호출이다.
         lambda prompt, schema: ask(prompt, schema, writer_verify.VERIFY_MAX_TOKENS),
         written=written,
         evidence=evidence,
     )
-    steps.append({"step": writer_verify.VERIFY_STEP, **verify_step})
+    steps.extend(review_steps)
 
     pick_list = list(picks)
     pick_by_exact = {
@@ -342,6 +670,9 @@ def write_and_verify_sections(
     picks_by_fragment: dict[tuple[str, int], list[CanonicalPick]] = defaultdict(list)
     for pick in pick_list:
         picks_by_fragment[(pick.section_id, pick.fragment_id)].append(pick)
+    specificity_verified_names = verified_latin_names(
+        str(fragment.get("원문") or "") for fragment in fragments.values()
+    )
 
     claims: list[WrittenClaim] = []
     prose_by_section: dict[str, list[tuple[str, str]]] = defaultdict(list)
@@ -356,14 +687,6 @@ def write_and_verify_sections(
                 continue
             fragment_id = int(number)
             fragment_kind = str(fragments.get(fragment_id, {}).get("종류") or "")
-            decision = assess_claim(
-                section_id,
-                sentence.text,
-                source_kind=fragment_kind,
-                company=company,
-            )
-            if not decision.passed:
-                continue
             clean = " ".join(sentence.text.split())
             pick = pick_by_exact.get((section_id, fragment_id, source.text))
             if pick is None:
@@ -372,6 +695,21 @@ def write_and_verify_sections(
                     pick = candidates[0]
             # 선택 metadata가 작가 단계에서 사라지면 의미 계약을 검증할 수 없다.
             if pick is None:
+                continue
+            decision = assess_claim(
+                section_id,
+                clean,
+                source_kind=fragment_kind,
+                company=company,
+                verified_names=specificity_verified_names,
+            )
+            if not decision.passed and not (
+                structured_company_binding_allows_specificity_failure(
+                    pick.claim_type,
+                    decision.reason,
+                )
+                and _structured_company_binding_is_visible(pick, clean)
+            ):
                 continue
             if _DIRECT_CAUSAL_RE.search(clean) and _direct_causal_fields(
                 clean, source.text, subject_label=pick.subject_label
@@ -967,38 +1305,56 @@ def finalize_report(
     summary_ask: Callable[[str, dict[str, Any], int], tuple[dict[str, Any] | None, dict[str, Any]]],
     steps: list[dict[str, Any]],
 ) -> Report:
-    """1~9장이 붙은 내부 초안에서 요약을 새로 만들고 최종 출고한다."""
+    """검증된 1~8장과 조건부 9장에서 요약을 잠그고 최종 출고한다.
 
-    summary_input = {
-        section.cell: [text for text, _cite in section.prose_lines]
-        for section in draft.sections
-        if section.prose_lines
+    ``summary_ask``는 과거 호출자 호환용이다. 요약은 Reviewer 또는 원문 완전일치
+    코드 검증을 통과한 FactRecord 문장을 바꾸지 않고 재사용하므로 추가 AI를
+    호출하지 않는다.
+    """
+
+    _ = summary_ask
+    section_rank = {
+        section_id: index
+        for index, section_id in enumerate(_SUMMARY_SECTION_PRIORITY)
     }
-    summary, summary_steps = build_summary_with_ai(
-        summary_ask,
-        company=draft.company,
-        sections=summary_input,
+    ordered_facts = [
+        fact
+        for _original_index, fact in sorted(
+            enumerate(draft.fact_records),
+            key=lambda item: (
+                section_rank.get(item[1].section_owner, len(section_rank)),
+                _SUMMARY_CLAIM_PRIORITY.get(item[1].claim_type, 99),
+                item[0],
+            ),
+        )
+    ]
+    summary, summary_steps = build_summary_from_verified_claims(
+        [
+            VerifiedSummarySource(
+                section_id=fact.section_owner,
+                text=fact.claim,
+                fact_id=fact.fact_id,
+                support_terms=tuple(fact.evidence_support_terms),
+            )
+            for fact in ordered_facts
+            if fact.status == "verified"
+            and fact.verification_status == "verified"
+            and fact.claim.strip()
+        ]
     )
     steps.extend(summary_steps)
 
     facts_by_id = {fact.fact_id: fact for fact in draft.fact_records}
-    fact_ids_by_section: dict[str, list[str]] = defaultdict(list)
-    for fact in draft.fact_records:
-        fact_ids_by_section[fact.section_owner].append(fact.fact_id)
     locked_summaries: list[SummaryItem] = []
     for item in summary:
-        fact_ids = _minimal_summary_fact_ids(
-            item.text,
-            fact_ids_by_section.get(item.section_id, []),
-            facts_by_id,
-        )
+        fact_ids = list(item.fact_ids)
         if not fact_ids:
             continue
         evidence_text = summary_evidence_text(fact_ids, facts_by_id)
         support_terms = _common_support_terms(item.text, evidence_text)
         if len(set(support_terms)) < 2:
             continue
-        status = "independently_verified"
+        status = SUMMARY_VERIFICATION_STATUS
         binding = summary_verification_binding(
             item.text,
             item.section_id,

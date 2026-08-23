@@ -20,7 +20,7 @@ from src.features.company_comparison.official_sources import (
 )
 from src.features.export_pdf.automatic_release import report_sha256
 from src.features.pipeline.canonical_demo import build_demo_report
-from src.features.pipeline.port import FactRecord, Report, ReportSection
+from src.features.pipeline.port import FactRecord, Grade, Report, ReportSection
 from src.features.provenance.citations import build_citations
 from src.features.provenance.sources import (
     Source,
@@ -32,6 +32,7 @@ from src.features.provenance.sources import (
 from src.features.report_standard.constants import (
     CANONICAL_CLAIM_TYPES_BY_SECTION,
     CANONICAL_SECTION_IDS,
+    REQUIRED_SECTION_IDS,
     SECTION_BY_ID,
     SECTION_SPECS,
 )
@@ -42,6 +43,8 @@ from src.features.report_standard.publish import (
     _forbidden_text_problem,
     build_published_report,
     fact_evidence_binding,
+    summary_evidence_text,
+    summary_verification_binding,
     validate_publishable,
 )
 from src.features.report_standard.section_content import (
@@ -431,8 +434,8 @@ def test_upstream_claim_type_enum_is_a_subset_of_the_publish_contract() -> None:
         assert upstream_types <= CANONICAL_CLAIM_TYPES_BY_SECTION[section_id]
 
 
-@pytest.mark.parametrize("missing", CANONICAL_SECTION_IDS)
-def test_every_section_is_required(missing: str) -> None:
+@pytest.mark.parametrize("missing", sorted(REQUIRED_SECTION_IDS))
+def test_every_basic_section_is_required(missing: str) -> None:
     report = _valid_report()
     report = replace(
         report,
@@ -447,7 +450,7 @@ def test_every_section_is_required(missing: str) -> None:
         build_published_report(report)
 
 
-def test_summary_requires_fact_binding_exact_evidence_and_independent_status() -> None:
+def test_summary_requires_fact_binding_exact_evidence_and_reuse_status() -> None:
     report = _valid_report()
     first = report.summary_items[0]
     broken = replace(
@@ -465,7 +468,7 @@ def test_summary_requires_fact_binding_exact_evidence_and_independent_status() -
     assert any("fact_id가 없습니다" in reason for reason in validation.reasons)
 
 
-def test_summary_text_cannot_change_after_independent_verification() -> None:
+def test_summary_text_cannot_change_after_verification() -> None:
     report = _valid_report()
     first = replace(report.summary_items[0], text="검증 뒤 바꾼 요약문")
 
@@ -475,6 +478,78 @@ def test_summary_text_cannot_change_after_independent_verification() -> None:
 
     assert validation.publishable is False
     assert any("결속 지문" in reason for reason in validation.reasons)
+
+
+def test_summary_cannot_rebind_a_changed_sentence_as_verified_reuse() -> None:
+    report = _valid_report()
+    first = report.summary_items[0]
+    changed_text = f"{first.text} 그리고 업계 최고다"
+    changed = replace(
+        first,
+        text=changed_text,
+        verification_binding=summary_verification_binding(
+            changed_text,
+            first.section_id,
+            first.fact_ids,
+            first.evidence_text,
+            first.verification_status,
+            first.support_terms,
+        ),
+    )
+
+    validation = validate_publishable(
+        replace(report, summary_items=[changed, *report.summary_items[1:]])
+    )
+
+    assert validation.publishable is False
+    assert any("글자 그대로 재사용" in reason for reason in validation.reasons)
+
+
+def test_summary_must_bind_exactly_one_verified_fact() -> None:
+    report = _valid_report()
+    first = report.summary_items[0]
+    other = next(
+        fact
+        for fact in report.fact_records
+        if fact.section_owner == first.section_id
+        and fact.fact_id not in first.fact_ids
+    )
+    facts = {fact.fact_id: fact for fact in report.fact_records}
+    fact_ids = [*first.fact_ids, other.fact_id]
+    evidence_text = summary_evidence_text(fact_ids, facts)
+    changed = replace(
+        first,
+        fact_ids=fact_ids,
+        evidence_text=evidence_text,
+        verification_binding=summary_verification_binding(
+            first.text,
+            first.section_id,
+            fact_ids,
+            evidence_text,
+            first.verification_status,
+            first.support_terms,
+        ),
+    )
+
+    validation = validate_publishable(
+        replace(report, summary_items=[changed, *report.summary_items[1:]])
+    )
+
+    assert validation.publishable is False
+    assert any("정확히 한 개" in reason for reason in validation.reasons)
+
+
+def test_summary_can_reference_each_section_at_most_once() -> None:
+    report = _valid_report()
+    first, second, *rest = report.summary_items
+    changed = replace(second, section_id=first.section_id)
+
+    validation = validate_publishable(
+        replace(report, summary_items=[first, changed, *rest])
+    )
+
+    assert validation.publishable is False
+    assert any("같은 장" in reason and "중복" in reason for reason in validation.reasons)
 
 
 def test_state_evidence_must_exist_in_source_hash_registry() -> None:
@@ -1574,13 +1649,41 @@ def test_comparison_limitation_is_internal_only_and_zero_valid_axes_stop_release
     assert validation.publishable is False
     assert "competitive_position" not in validation.included_section_ids
     assert any("내부 탈락 상태" in reason for reason in validation.reasons)
-    assert any(
+    assert not any(
         "필수 장 competitive_position" in reason
         for reason in validation.reasons
     )
     assert section_content_blocks(report, section) == ()
     with pytest.raises(PublishBlockedError):
         build_published_report(report)
+
+
+def test_verified_sections_one_to_eight_publish_as_basic_report_without_comparison() -> None:
+    report = _valid_report()
+    report = replace(
+        report,
+        grade=Grade.PARTIAL,
+        sections=[
+            section
+            for section in report.sections
+            if section.cell != "competitive_position"
+        ],
+        fact_records=[
+            fact
+            for fact in report.fact_records
+            if fact.section_owner != "competitive_position"
+        ],
+    )
+
+    validation = validate_publishable(report)
+    published = build_published_report(report)
+
+    assert validation.publishable is True
+    assert "competitive_position" not in validation.included_section_ids
+    assert published.grade is Grade.PARTIAL
+    assert len(published.sections) == 8
+    assert published.shortfall_reasons
+    assert "9장 동종업계 비교" in published.shortfall_reasons[0]
 
 
 def test_comparison_axes_must_equal_the_context_recomputed_from_both_sources() -> None:

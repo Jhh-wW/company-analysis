@@ -227,3 +227,62 @@ def test_AI가_죽으면_사유가_남는다():
     assert 남은 == {}
     assert 기록["오류"] == "APIError"
     assert "전부" in 기록["비고"]
+
+
+# ══════════════════════════════════════════════════════
+# ④ 코드로 증명할 수 있는 완전일치는 AI 비용을 쓰지 않는다
+# ══════════════════════════════════════════════════════
+
+
+def test_모든_문장이_근거와_strip_완전일치면_AI를_안_부른다():
+    """글자 비교가 이미 증명한 사실을 AI에게 다시 묻지 않는다."""
+    calls: list[int] = []
+    exact = {
+        "4-3": [
+            Sentence(f"  {근거['4-3'][0].text}  ", "4-3-1"),
+            Sentence(근거["4-3"][1].text, "4-3-2"),
+        ]
+    }
+
+    def forbidden(prompt, schema):
+        calls.append(1)
+        raise AssertionError("완전일치 문장은 AI 검수를 부르면 안 된다")
+
+    남은, 기록 = verify_with_ai(forbidden, written=exact, evidence=근거)
+
+    assert 남은 == exact
+    assert calls == []
+    assert 기록["AI대조"] == 0
+    assert 기록["완전일치통과"] == 2
+
+
+def test_완전일치와_다른_문장이_섞이면_다른_문장만_AI가_본다():
+    """의미 유사성은 코드로 추정하지 않고 기존 검수 AI에게 보낸다."""
+    mixed = {
+        "4-3": [
+            Sentence(근거["4-3"][0].text, "4-3-1"),
+            Sentence("위버스에 AI를 넣는 작업이 진행 중이다.", "4-3-2"),
+        ]
+    }
+    prompts: list[str] = []
+
+    def ask(prompt, schema):
+        prompts.append(prompt)
+        assert 근거["4-3"][0].text not in prompt
+        assert mixed["4-3"][0].text not in prompt
+        assert mixed["4-3"][1].text in prompt
+        verdicts = schema["properties"]["판정"]
+        number_schema = verdicts["items"]["properties"]["번호"]
+        assert number_schema["type"] == "integer"
+        assert number_schema["enum"] == [2]
+        assert verdicts["minItems"] == verdicts["maxItems"] == 1
+        # 완전일치 1번을 빼도 원래 번호를 유지한다.
+        return {"판정": [{"번호": 2, "근거에있다": True}]}, {"in": 30, "out": 5}
+
+    남은, 기록 = verify_with_ai(ask, written=mixed, evidence=근거)
+
+    assert 남은 == mixed
+    assert len(prompts) == 1
+    assert 기록["대조"] == 2
+    assert 기록["AI대조"] == 1
+    assert 기록["완전일치통과"] == 1
