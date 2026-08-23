@@ -8,6 +8,7 @@ import pytest
 from src.features.pipeline.canonical_report import (
     PublishBlockedError,
     WrittenClaim,
+    _drop_stale_completed_executions,
     _prune_unbound_optional_claims,
     _structured_company_binding_is_visible,
     assemble_report,
@@ -20,7 +21,7 @@ from src.features.pipeline.canonical_report import (
     sections_from_picks,
     write_and_verify_sections,
 )
-from src.features.pipeline.port import ReportSection, ReportTable
+from src.features.pipeline.port import Grade, ReportSection, ReportTable
 from src.features.company_comparison.official_sources import (
     VERIFIED_FINAL_URL_FIELD,
     VERIFIED_FINAL_URL_VALUE,
@@ -144,6 +145,69 @@ def test_Writer뒤_완결된_선택형_관계는_함께_유지한다() -> None:
     assert _prune_unbound_optional_claims(
         [revenue, product, issue, response, execution, interpretation]
     ) == [revenue, product, issue, response, execution, interpretation]
+
+
+def test_36개월밖_완료실행과_그것만_참조한_해석은_부분보고서에서_생략한다() -> None:
+    stale = WrittenClaim(
+        "past_changes",
+        "오래된 완료 실행",
+        "조각 1·사업",
+        "오래된 완료 실행",
+        1,
+        sid="execution-old",
+        claim_type="completed_execution",
+        event_date="2022-12-31",
+    )
+    interpretation = WrittenClaim(
+        "past_changes",
+        "오래된 실행에 대한 변화 해석",
+        "조각 2·사업",
+        "오래된 실행에 대한 변화 해석",
+        2,
+        sid="interpretation-old",
+        claim_type="change_interpretation",
+        basis_sids=("execution-old",),
+    )
+    revenue = WrittenClaim(
+        "business_model",
+        "검증된 수익 구조",
+        "조각 3·사업",
+        "검증된 수익 구조",
+        3,
+        sid="revenue-1",
+        claim_type="revenue_model",
+    )
+
+    kept, dropped = _drop_stale_completed_executions(
+        [stale, interpretation, revenue],
+        as_of_date="2026-08-24",
+    )
+
+    assert dropped == 1
+    assert kept == [revenue]
+
+
+def test_미래이거나_날짜없는_완료실행은_생략하지않고_출고게이트에_맡긴다() -> None:
+    future = WrittenClaim(
+        "past_changes",
+        "미래 완료 실행",
+        "조각 1·사업",
+        "미래 완료 실행",
+        1,
+        sid="execution-future",
+        claim_type="completed_execution",
+        event_date="2027-01-01",
+    )
+    undated = replace(future, sid="execution-undated", event_date="")
+    malformed = replace(future, sid="execution-week-date", event_date="2022-W52-7")
+
+    kept, dropped = _drop_stale_completed_executions(
+        [future, undated, malformed],
+        as_of_date="2026-08-24",
+    )
+
+    assert dropped == 0
+    assert kept == [future, undated, malformed]
 
 
 def test_Writer가_같은_선택근거를_두번_쓰면_첫_검증문장만_남긴다(
@@ -939,6 +1003,197 @@ def test_assemble_report_locks_visible_claims_to_sources() -> None:
     assert all(source.evidence_hashes for source in report.citations)
     assert report.job == ""
     assert report.requirements == []
+
+
+def test_assemble_report는_오래된_완료실행만_버리고_다른_검증사실을_유지한다() -> None:
+    identity_evidence = "가나다는 산업용 소재 기업으로 제품을 생산한다."
+    stale_evidence = "2022년 기존 생산 설비의 전환을 완료했다."
+    interpretation_evidence = "기존 설비 전환으로 생산 체계가 바뀌었다."
+    picks = [
+        CanonicalPick(
+            "identity",
+            identity_evidence,
+            1,
+            sid="identity-1",
+            claim_type="identity_summary",
+        ),
+        CanonicalPick(
+            "past_changes",
+            stale_evidence,
+            2,
+            sid="execution-old",
+            claim_type="completed_execution",
+            event_date="2022-12-31",
+        ),
+        CanonicalPick(
+            "past_changes",
+            interpretation_evidence,
+            3,
+            sid="interpretation-old",
+            claim_type="change_interpretation",
+            basis_sids=("execution-old",),
+        ),
+    ]
+    fragments = {
+        index: {"종류": "사업내용", "원문": pick.sentence}
+        for index, pick in enumerate(picks, start=1)
+    }
+    sections = sections_from_picks(picks, fragments)
+    claims = [
+        WrittenClaim(
+            pick.section_id,
+            pick.sentence,
+            f"조각 {pick.fragment_id}·사업내용",
+            pick.sentence,
+            pick.fragment_id,
+            sid=pick.sid,
+            claim_type=pick.claim_type,
+            basis_sids=pick.basis_sids,
+            event_date=pick.event_date,
+        )
+        for pick in picks
+    ]
+    steps: list[dict[str, object]] = []
+
+    report = assemble_report(
+        company="가나다",
+        corp_type="상장사",
+        sections=sections,
+        written_claims=claims,
+        sources=[
+            _source(index, pick.sentence)
+            for index, pick in enumerate(picks, start=1)
+        ],
+        summary_ask=lambda *_args: ({"items": []}, {}),
+        steps=steps,
+        as_of_date="2026-08-24",
+        analysis_period="2023~2025 완료 회계연도",
+        latest_performance_period="2025년 공식 공시",
+        publish=False,
+    )
+
+    assert [fact.claim_type for fact in report.fact_records] == ["identity_summary"]
+    assert [section.cell for section in report.sections] == ["identity"]
+    assert steps[-1] == {
+        "step": "완료실행_기간후검증",
+        "생략": 1,
+        "사유": "보고서 기준일 전 최근 36개월 밖의 완료 실행",
+    }
+
+
+def test_삼개년표가있는_보고서는_오래된실행_raw도_지우고_PARTIAL로_출고한다() -> None:
+    identity = "가나다는 산업용 소재를 생산하고 판매하는 기업이다."
+    revenue = "가나다는 산업용 소재를 고객에게 판매해 매출을 얻는다."
+    stale = "2022년 기존 생산 설비의 전환을 완료했다."
+    interpretation = "기존 설비 전환으로 생산 체계가 바뀌었다."
+    financial_payloads = [
+        '{"bsns_year":"2025","account_nm":"매출액","thstrm_amount":"12000000000"}',
+        '{"bsns_year":"2024","account_nm":"매출액","thstrm_amount":"10000000000"}',
+        '{"bsns_year":"2023","account_nm":"매출액","thstrm_amount":"9000000000"}',
+    ]
+    picks = [
+        CanonicalPick(
+            "identity", identity, 1, sid="identity-1", claim_type="identity_summary"
+        ),
+        CanonicalPick(
+            "business_model",
+            revenue,
+            2,
+            sid="revenue-1",
+            claim_type="revenue_model",
+        ),
+        CanonicalPick(
+            "past_changes",
+            stale,
+            3,
+            sid="execution-old",
+            claim_type="completed_execution",
+            event_date="2022-12-31",
+        ),
+        CanonicalPick(
+            "past_changes",
+            interpretation,
+            4,
+            sid="interpretation-old",
+            claim_type="change_interpretation",
+            basis_sids=("execution-old",),
+        ),
+    ]
+    fragments = {
+        pick.fragment_id: {"종류": "사업내용", "원문": pick.sentence}
+        for pick in picks
+    }
+    performance_table = ReportTable(
+        caption="전자공시 최근 세 사업연도 연결 주요 실적 (단위: 억원)",
+        headers=["사업연도", "매출액"],
+        rows=[["2025", "120"], ["2024", "100"], ["2023", "90"]],
+        cite="조각 5·재무",
+        numeric=True,
+        raw_rows=[
+            ["2025", "12000000000"],
+            ["2024", "10000000000"],
+            ["2023", "9000000000"],
+        ],
+        scale_divisor="100000000",
+        scale_places=0,
+        display_unit="억원",
+        evidence_rows=financial_payloads,
+    )
+    sections = [
+        replace(section, tables=[performance_table])
+        if section.cell == "past_changes"
+        else section
+        for section in sections_from_picks(picks, fragments)
+    ]
+    claims = [
+        WrittenClaim(
+            pick.section_id,
+            pick.sentence,
+            f"조각 {pick.fragment_id}·사업내용",
+            pick.sentence,
+            pick.fragment_id,
+            sid=pick.sid,
+            claim_type=pick.claim_type,
+            basis_sids=pick.basis_sids,
+            event_date=pick.event_date,
+        )
+        for pick in picks
+    ]
+
+    table_source = seal_collected_source(
+        replace(
+            _source(5, financial_payloads[0]),
+            evidence_hashes=[
+                evidence_text_hash(payload) for payload in financial_payloads
+            ],
+        )
+    )
+    report = assemble_report(
+        company="가나다",
+        corp_type="상장사",
+        sections=sections,
+        written_claims=claims,
+        sources=[
+            _source(1, identity),
+            _source(2, revenue),
+            _source(3, stale),
+            _source(4, interpretation),
+            table_source,
+        ],
+        summary_ask=lambda *_args: ({"items": []}, {}),
+        steps=[],
+        as_of_date="2026-08-24",
+        analysis_period="2023~2025 완료 회계연도",
+        latest_performance_period="2025년 공식 공시",
+    )
+
+    past = next(section for section in report.sections if section.cell == "past_changes")
+    assert past.lines == []
+    assert past.prose_lines == []
+    assert len(past.tables) == 1
+    assert not any(fact.claim_type == "completed_execution" for fact in report.fact_records)
+    assert report.grade is Grade.PARTIAL
+    assert any("완료 실행" in reason for reason in report.shortfall_reasons)
 
 
 def test_assembly_never_self_registers_written_claim_as_source_evidence() -> None:

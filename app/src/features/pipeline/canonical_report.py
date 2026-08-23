@@ -12,6 +12,7 @@ import hashlib
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, fields as dataclass_fields, replace
+from datetime import date
 from itertools import combinations
 from typing import Any, Callable, Iterable
 
@@ -255,6 +256,55 @@ def _prune_unbound_optional_claims(
             continue
         out.append(item)
     return out
+
+
+def _drop_stale_completed_executions(
+    claims: Iterable[WrittenClaim],
+    *,
+    as_of_date: str,
+) -> tuple[list[WrittenClaim], int]:
+    """36개월 밖의 완료 실행만 생략하고 연결이 끊긴 해석도 함께 정리한다.
+
+    잘못된 날짜나 기준일 뒤 날짜는 여기서 조용히 버리지 않는다. 그대로 남겨
+    canonical 출고 게이트가 차단하게 하여 미래 사실이나 무근거 사실이 부분
+    보고서라는 이름으로 통과하지 못하게 한다.
+    """
+
+    items = list(claims)
+    try:
+        report_date = date.fromisoformat(str(as_of_date or "").strip())
+    except ValueError:
+        return items, 0
+    try:
+        cutoff = report_date.replace(year=report_date.year - 3)
+    except ValueError:
+        cutoff = report_date.replace(year=report_date.year - 3, day=28)
+
+    kept: list[WrittenClaim] = []
+    stale_count = 0
+    for item in items:
+        if item.claim_type != "completed_execution":
+            kept.append(item)
+            continue
+        event_value = str(item.event_date or "").strip()
+        try:
+            event = (
+                date.fromisoformat(event_value)
+                if re.fullmatch(r"20\d{2}-\d{2}-\d{2}", event_value)
+                else date(int(event_value), 1, 1)
+                if re.fullmatch(r"20\d{2}", event_value)
+                else None
+            )
+        except ValueError:
+            event = None
+        if event is not None and event < cutoff:
+            stale_count += 1
+            continue
+        kept.append(item)
+
+    if not stale_count:
+        return items, 0
+    return _prune_unbound_optional_claims(kept), stale_count
 
 
 def majority_picks(rounds: Iterable[Iterable[CanonicalPick]], *, minimum: int = 2) -> list[CanonicalPick]:
@@ -1541,6 +1591,18 @@ def assemble_report(
     if source_reasons:
         raise PublishBlockedError(PublishValidation(False, tuple(source_reasons), ()))
     sources_by_number = {source.number: source for source in valid_sources}
+    written_claims, stale_execution_count = _drop_stale_completed_executions(
+        written_claims,
+        as_of_date=as_of_date,
+    )
+    if stale_execution_count:
+        steps.append(
+            {
+                "step": "완료실행_기간후검증",
+                "생략": stale_execution_count,
+                "사유": "보고서 기준일 전 최근 36개월 밖의 완료 실행",
+            }
+        )
     claim_by_section: dict[str, list[WrittenClaim]] = defaultdict(list)
     for claim in written_claims:
         claim_by_section[claim.section_id].append(claim)
@@ -1554,6 +1616,7 @@ def assemble_report(
     locked_sections: list[ReportSection] = []
     for section in sections:
         section_facts: list[FactRecord] = []
+        visible_raw: list[tuple[str, str]] = []
         visible_prose: list[tuple[str, str]] = []
         visible_tables, table_facts = _table_facts(company, section, sources_by_number)
         historical_basis_fact_ids = _historical_basis_fact_ids(table_facts)
@@ -1579,6 +1642,7 @@ def assemble_report(
                     historical_basis_fact_ids,
                 )
             )
+            visible_raw.append((claim.evidence, claim.cite))
             visible_prose.append((claim.text, claim.cite))
         section_facts.extend(table_facts)
         # 원문은 내부 감사용으로 보존하되, 공개 렌더러는 prose_lines와 표만 사용한다.
@@ -1587,6 +1651,7 @@ def assemble_report(
         locked_sections.append(
             replace(
                 section,
+                lines=visible_raw,
                 prose_lines=visible_prose,
                 tables=visible_tables,
                 fact_ids=[fact.fact_id for fact in section_facts],
