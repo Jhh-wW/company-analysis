@@ -11,9 +11,10 @@
 - 기존 무료 확인판은 `PIPELINE=demo`, `BETA_ADMIN_ONLY=1`로 시작했다. 현재 Blueprint는 실제
   회사 결과를 비교하기 위한 관리자 전용 실분석 운영판을 준비한다.
 - Uvicorn worker와 Render instance는 각각 `1`로 유지한다.
-- 관리자 실분석 운영판은 `standard` web plan과 `/var/data` 1GB 영속 디스크를 사용한다.
+- 관리자 실분석 운영판은 `starter` web plan과 `/var/data` 1GB 영속 디스크를 사용한다.
   플랜·디스크 비용은 바뀔 수 있으므로 배포 직전 [Render 요금 페이지](https://render.com/pricing)와
-  Dashboard의 예상 청구액을 확인한다.
+  Dashboard의 예상 청구액을 확인한다. Starter의 512MB 메모리로 실제 분석·PDF 생성 중
+  OOM이 확인될 때만 `standard`로 올린다.
 - 비밀값과 사용자 식별자는 Git, 채팅, 티켓, 화면 캡처에 남기지 않는다.
 - 현재 `render.yaml`은 web service 1개만 만들고 `autoDeployTrigger: off`로 둔다. 커밋이나 CI
   통과만으로 배포되지 않는다. 비용·환경변수·비밀값을 확인한 뒤 Dashboard에서 수동
@@ -40,7 +41,7 @@ provider를 실제로 호출하고 영속 디스크에 결과를 보존하지만
 운영 파일럿이다.
 
 - `PIPELINE=real`, `BETA_ADMIN_ONLY=1`, instance/worker 각각 1개
-- Render `standard` web plan과 `/var/data` 1GB 영속 디스크
+- Render `starter` web plan과 `/var/data` 1GB 영속 디스크
 - 경로·쿼리 없는 고정 HTTPS `PUBLIC_ORIGIN`
 - `GOOGLE_REDIRECT_URI`는 정확히 `<PUBLIC_ORIGIN>/auth/callback`
 - 빈 `FORWARDED_ALLOW_IPS`; Render edge의 forwarded headers를 신뢰하지 않음
@@ -81,7 +82,7 @@ Notion, 공유 링크, real provider, 외부 백업과 cron 시험은 무료 dem
 
 1. GitHub Actions `quality-gate`와 관리자 실분석 계약의 환경 검증 시험이 모두 통과했는지
    확인한다.
-2. [Render 요금 페이지](https://render.com/pricing)와 Dashboard에서 `standard` web plan,
+2. [Render 요금 페이지](https://render.com/pricing)와 Dashboard에서 `starter` web plan,
    1GB 영속 디스크의 현재 청구 조건을 확인하고 비용을 승인한다.
 3. 기존 Blueprint에 `render.yaml` 변경을 반영하되 바로 자동 배포하지 않는다.
 4. 기존 OAuth 4개 값(`ADMIN_EMAILS`, Google client ID·secret·redirect URI)을 유지하고,
@@ -339,7 +340,7 @@ DB 백업에는 환경 비밀이 들어 있지 않으므로 다음 **복구 묶�
 ## 관리자 실분석 운영판 체크리스트
 
 - [ ] GitHub Actions `quality-gate`와 관리자 실분석 환경 검증 통과
-- [ ] `standard` web plan과 1GB 영속 디스크의 현재 Dashboard 청구 조건 승인
+- [ ] `starter` web plan과 1GB 영속 디스크의 현재 Dashboard 청구 조건 승인
 - [ ] `PIPELINE=real`, `BETA_ADMIN_ONLY=1`, instance/worker 각각 1개
 - [ ] `render-admin-real-no-forwarded-v1`, 고정 `PUBLIC_ORIGIN`, 빈 `FORWARDED_ALLOW_IPS`
 - [ ] 관리자·Google OAuth 4개 값과 실제 분석 provider 4개 비밀 등록

@@ -37,9 +37,10 @@ Render에는 forwarded client IP를 신뢰하지 않는 관리자 전용 계약�
 현재 `render.yaml`은 `render-admin-real-no-forwarded-v1` 계약을 준비한다. 여러 회사의 실제
 분석 결과를 관리자가 비교하기 위한 유료 운영 파일럿이며, demo가 아니다.
 
-- Render `standard` web plan과 `/var/data`에 붙는 1GB 영속 디스크를 사용한다. 적용 직전
+- Render `starter` web plan과 `/var/data`에 붙는 1GB 영속 디스크를 사용한다. 적용 직전
   [Render 요금 페이지](https://render.com/pricing)와 Dashboard의 예상 청구액을 다시
-  확인한다. 플랜·요금 숫자는 이 문서에 고정하지 않는다.
+  확인한다. Starter의 512MB 메모리로 실제 분석·PDF 생성 중 OOM이 확인될 때만
+  `standard`로 올린다. 플랜·요금 숫자는 이 문서에 고정하지 않는다.
 - `PIPELINE=real`, `BETA_ADMIN_ONLY=1`, instance/worker 각각 1개를 유지한다. SQLite 단일
   writer 계약 때문에 scale-out하지 않는다.
 - `ADMIN_EMAILS`, Google OAuth 3개 값과 함께 `ANTHROPIC_API_KEY`, `DART_API_KEY`,

@@ -2,8 +2,9 @@ services:
   - type: web
     name: company-analysis-beta
     runtime: docker
-    # 실제 조사와 PDF 생성을 안정적으로 처리하도록 권장 상한인 2GiB를 쓴다.
-    plan: standard
+    # 영속 디스크를 쓸 수 있는 가장 저렴한 Starter(512MiB)로 시작한다.
+    # 실제 분석·PDF 생성 중 OOM이 확인될 때만 Standard로 올린다.
+    plan: starter
     region: singapore
     numInstances: 1
     dockerfilePath: ./app/Dockerfile

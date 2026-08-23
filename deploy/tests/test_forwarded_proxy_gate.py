@@ -395,7 +395,7 @@ def test_render_blueprint는_유료_관리자_실분석_한서비스만_좁게_�
     web = next(service for service in blueprint["services"] if service["type"] == "web")
     values = {item["key"]: item for item in web["envVars"]}
 
-    assert web["plan"] == "standard"
+    assert web["plan"] == "starter"
     assert web["numInstances"] == 1
     assert web["autoDeployTrigger"] is False
     assert web["disk"] == {
