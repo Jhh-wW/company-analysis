@@ -75,23 +75,23 @@ def _jyp_financial_payload() -> dict[str, object]:
             _financial_row(
                 "ifrs-full_Revenue",
                 "매출액",
-                "821854634614",
-                "601787883332",
-                "566500542871",
+                "821,854,634,614",
+                "601,787,883,332",
+                "566,500,542,871",
             ),
             _financial_row(
                 "dart_OperatingIncomeLoss",
                 "영업이익",
-                "155246094076",
-                "128262269240",
-                "169443909949",
+                "155,246,094,076",
+                "128,262,269,240",
+                "169,443,909,949",
             ),
             _financial_row(
                 "ifrs-full_ProfitLoss",
                 "당기순이익",
-                "160563476080",
-                "97714913917",
-                "105016740741",
+                "160,563,476,080",
+                "97,714,913,917",
+                "105,016,740,741",
             ),
         ],
     }
@@ -246,6 +246,17 @@ def test_JYP_실제원문과_3개년_DART값은_기존출고검증을_거쳐_보
         for fact in report.fact_records
         if fact.claim_type == "historical_performance"
     ) == [2023, 2024, 2025]
+    historical_facts = [
+        fact
+        for fact in report.fact_records
+        if fact.claim_type == "historical_performance"
+    ]
+    assert all(len(set(fact.evidence_support_terms)) == 1 for fact in historical_facts)
+    assert [item.section_id for item in report.summary_items] == [
+        "identity",
+        "business_model",
+        "past_changes",
+    ]
 
 
 def test_JYP_실제출처에_없는_허위문장_하나는_최소보고서도_출고하지_못한다() -> None:

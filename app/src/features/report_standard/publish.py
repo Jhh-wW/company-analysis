@@ -1164,7 +1164,7 @@ def _evidence_support_problems(fact: FactRecord) -> list[str]:
     terms = [_normalized(term) for term in fact.evidence_support_terms if _normalized(term)]
     if (
         len(set(terms)) < 2
-        and not _historical_performance_numeric_evidence_is_bound(fact)
+        and not historical_performance_numeric_evidence_is_bound(fact)
     ):
         problems.append(
             f"[evidence] {fact.fact_id}: claim과 원문을 잇는 서로 다른 근거어가 두 개 이상 필요합니다"
@@ -1306,7 +1306,7 @@ def _numeric_problems(fact: FactRecord) -> list[str]:
     return problems
 
 
-def _historical_performance_numeric_evidence_is_bound(fact: FactRecord) -> bool:
+def historical_performance_numeric_evidence_is_bound(fact: FactRecord) -> bool:
     """원 단위 공시값과 억원 표시값의 결정론적 결속을 근거어 대신 확인한다.
 
     공시 payload의 원 단위 숫자는 공개 표의 억원 반올림 숫자와 문자열이 같지

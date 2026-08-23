@@ -41,6 +41,7 @@ from src.features.report_standard import (
 )
 from src.features.report_standard.publish import (
     fact_evidence_binding,
+    historical_performance_numeric_evidence_is_bound,
     summary_evidence_text,
     summary_verification_binding,
 )
@@ -1672,20 +1673,32 @@ def finalize_report(
             ),
         )
     ]
-    summary, summary_steps = build_summary_from_verified_claims(
-        [
+    summary_candidates: list[VerifiedSummarySource] = []
+    for fact in ordered_facts:
+        if (
+            fact.status != "verified"
+            or fact.verification_status != "verified"
+            or not fact.claim.strip()
+        ):
+            continue
+        support_terms = list(fact.evidence_support_terms)
+        if (
+            len(set(support_terms)) < 2
+            and historical_performance_numeric_evidence_is_bound(fact)
+        ):
+            # 실적표는 원 단위 원문과 억원 표시값이 달라 일반 문자열 근거어가
+            # 회계연도 하나만 남을 수 있다. Fact→Source 숫자체인을 통과한 경우에만
+            # Summary→Fact 결속용 근거어를 검증 완료 claim에서 결정론적으로 만든다.
+            support_terms = _common_support_terms(fact.claim, fact.claim)
+        summary_candidates.append(
             VerifiedSummarySource(
                 section_id=fact.section_owner,
                 text=fact.claim,
                 fact_id=fact.fact_id,
-                support_terms=tuple(fact.evidence_support_terms),
+                support_terms=tuple(support_terms),
             )
-            for fact in ordered_facts
-            if fact.status == "verified"
-            and fact.verification_status == "verified"
-            and fact.claim.strip()
-        ]
-    )
+        )
+    summary, summary_steps = build_summary_from_verified_claims(summary_candidates)
     steps.extend(summary_steps)
 
     facts_by_id = {fact.fact_id: fact for fact in draft.fact_records}
