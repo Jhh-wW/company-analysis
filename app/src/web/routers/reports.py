@@ -46,6 +46,7 @@ from src.features.pipeline.port import CompanyCard, Outcome, Report, RunResult, 
 from src.features.report_standard import PublishBlockedError, build_published_report
 from src.features.sharelink import store as share_store
 from src.features.sharelink import allowlist as share_allow
+from src.features.sharelink import tracks as share_tracks
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
 from src.web import job_runtime, request_helpers
@@ -698,6 +699,30 @@ def _is_admin_request(request: Request) -> bool:
     return auth_logic.is_admin_session(token)
 
 
+def _link_view_event_unavailable_response(request: Request) -> Response:
+    """정상 조회 사건을 확정하지 못하면 LINK 보고서를 fail-closed한다."""
+
+    response = request_helpers.templates.TemplateResponse(
+        request=request,
+        name="progress_unavailable.html",
+        context=request_helpers._ctx(
+            request,
+            interruption_title="LINK 보고서를 확인할 수 없습니다",
+            interruption_message=(
+                "이 LINK와 보고서의 연결 상태를 안전하게 확인하지 못해 "
+                "현재는 결과를 열지 않습니다."
+            ),
+            interruption_hint="잠시 후 같은 LINK로 다시 시도해 주세요.",
+            retry_url="",
+            retry_label="",
+        ),
+        status_code=503,
+    )
+    response.headers.update(SHARED_LINK_HEADERS)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 def _render_result_page(
     request: Request,
     *,
@@ -706,8 +731,30 @@ def _render_result_page(
     report: Report,
     internal_review_preview: bool,
 ) -> Response:
+    resolved_track = request_helpers._track_of(request)
+    if resolved_track[0] is share_tracks.Track.LINK:
+        current_link = request_helpers._current_share_link(request)
+        if current_link is None:
+            return _link_view_event_unavailable_response(request)
+        # LINK에서 새로 생성한 보고서는 run history만 생성 사건으로
+        # 남긴다. 최초 연결 보고서를 연 경우에만 별도 조회 사건이다.
+        if current_link.report_id == job.job_id:
+            try:
+                with storage_db.connect() as conn:
+                    recorded = share_store.record_report_view_by_hash(
+                        conn,
+                        key_hash=current_link.key_hash,
+                        report_id=job.job_id,
+                        viewed_at=clock.iso_now_kst(),
+                    )
+                if not recorded:
+                    return _link_view_event_unavailable_response(request)
+            except Exception:
+                logger.exception("LINK 보고서 조회 사건을 확정하지 못했습니다")
+                return _link_view_event_unavailable_response(request)
     member_email = _member_feedback_email(request)
     member_survey = None
+    member_feedback_report_version = 0
     if member_email:
         _record_member_result_view(
             report_id=job.job_id,
@@ -715,17 +762,18 @@ def _render_result_page(
         )
         try:
             with storage_db.connect() as conn:
-                row = conn.execute(
-                    f"""SELECT rating, overall_feedback, business_distinction,
-                        add_information, delete_information, revision
-                    FROM {dashboard_store.TABLE_SURVEYS}
-                    WHERE report_id = ? AND actor_email = ?""",
-                    (job.job_id, member_email),
-                ).fetchone()
-            if row is not None:
-                member_survey = dict(row)
+                report_version = dashboard_store.get_report_state(
+                    conn, job.job_id
+                ).version
+                member_feedback_report_version = report_version
+                member_survey = dashboard_store.get_survey_snapshot(
+                    conn,
+                    report_id=job.job_id,
+                    report_version=report_version,
+                    actor_email=member_email,
+                )
         except Exception:
-            logger.exception("기존 MEMBER 설문을 읽지 못했습니다")
+            logger.exception("현재 보고서 버전의 기존 MEMBER 설문을 읽지 못했습니다")
     return job_runtime._shared(
         request_helpers.templates.TemplateResponse(
             request=request,
@@ -740,6 +788,7 @@ def _render_result_page(
                 internal_review_preview=internal_review_preview,
                 member_feedback_allowed=bool(member_email),
                 member_survey=member_survey,
+                member_feedback_report_version=member_feedback_report_version,
                 member_feedback_draft_key=(
                     dashboard_store.actor_digest(member_email) if member_email else ""
                 ),

@@ -46,14 +46,15 @@ def test_첫화면에만_새_디자인_범위가_붙는다(monkeypatch):
         'aria-hidden="true"></span></a>'
     ) in home.text
     assert "처음으로" not in home.text
-    assert "COMPANY INTELLIGENCE REPORT" in home.text
+    assert "COMPANY INTELLIGENCE REPORT" not in home.text
     assert (
         '<h1 id="home-title" class="brand-mark brand-mark-hero">기업 분석'
         '<span class="brand-mark-dot" aria-hidden="true"></span></h1>'
     ) in home.text
-    assert "동종업계 속 회사의 우위와 근거를 이해하는 도구" in home.text
+    assert "취업 준비생을 위한 3분 기업 분석" in home.text
+    assert "동종업계 속 회사의 우위와 근거를 이해하는 도구" not in home.text
     assert "5분 기업 파악" not in home.text
-    assert "3분" not in home.text
+    assert "3분" in home.text
     assert "지원할 회사, 분석하세요" not in home.text
     assert "지원 준비를 위한 기업·공고 분석" not in home.text
     assert "공시·뉴스·회사 홈페이지를 근거로" not in home.text
@@ -202,7 +203,9 @@ def test_회사주소_도움말은_입력칸_description으로_연결된다():
     assert home.status_code == 200
     assert 'id="region-hint"' in home.text
     assert 'aria-describedby="region-hint"' in home.text
-    assert '회사 주소 구/군까지 <span class="optional">(선택)</span>' in home.text
+    assert '<label for="region">회사 주소 구/군까지</label>' in home.text
+    assert '회사 주소 구/군까지 <span class="optional">(선택)</span>' not in home.text
+    assert "본사 주소와 달라도 확인 화면에서 선택할 수 있습니다" not in home.text
     assert 'name="region" required' not in home.text
     assert 'name="job"' not in home.text
     assert 'name="posting_text"' not in home.text

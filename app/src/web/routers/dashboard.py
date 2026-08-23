@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import asdict, replace
 from datetime import timedelta
 import logging
@@ -22,12 +23,13 @@ from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
 from src.features.backup import status as backup_status
 from src.features.sharelink import allowlist as share_allow
+from src.features.sharelink import logic as share_logic
 from src.features.sharelink import store as share_store
 from src.features.storage import constants as storage_constants
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
 from src.features.report_standard import PublishBlockedError, build_published_report
-from src.web import request_helpers
+from src.web import job_runtime, request_helpers
 from src.web.security import CSRF_TOKEN_MAX_CHARS, REFERENCE_MAX_CHARS
 
 
@@ -54,6 +56,39 @@ def _company_labels() -> dict[str, str]:
         dashboard_store.COMPANY_AUDITED: "비상장 외감",
         dashboard_store.COMPANY_UNDECIDED: "판정 전 종료",
     }
+
+
+def _link_timestamp_label(value: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return "—"
+    try:
+        raw = value.strip()
+        normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        parsed = dt.datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=clock.KST)
+        local = parsed.astimezone(clock.KST)
+    except (OverflowError, TypeError, ValueError):
+        return "확인 불가"
+    return f"{local:%Y-%m-%d %H:%M} (한국시간)"
+
+
+def _link_expiry_label(created_at: str) -> str:
+    try:
+        issued = clock.business_date_from_iso(created_at)
+        expires = issued + dt.timedelta(days=share_logic.link_max_age_days_from_env())
+    except (OverflowError, TypeError, ValueError):
+        return "확인 불가"
+    return f"{expires:%Y-%m-%d} (한국시간 00:00부터 닫힘)"
+
+
+def _dashboard_link_report_state(conn, link: share_store.ShareLink) -> str:
+    if not link.report_id:
+        return "none"
+    report = report_store.load(conn, link.report_id)
+    if report is None:
+        return "missing"
+    return "expired" if job_runtime._link_expired(report) else "active"
 
 
 def _admin_response(request: Request, response: Response) -> Response:
@@ -577,6 +612,63 @@ async def admin_report_detail(request: Request, report_id: str):
     return _admin_response(request, response)
 
 
+@router.get(
+    "/admin/reports/{report_id}/versions/{version}",
+    response_class=HTMLResponse,
+)
+async def admin_report_snapshot(
+    request: Request, report_id: str, version: int
+):
+    """MEMBER 설문에 결속된 과거 보고서 버전을 읽기 전용으로 보여준다."""
+
+    blocked = request_helpers.require_admin(request)
+    if blocked is not None:
+        return blocked
+    if version < 1:
+        return _admin_response(
+            request,
+            HTMLResponse("올바른 보고서 버전이 아닙니다.", status_code=404),
+        )
+    try:
+        with storage_db.connect() as conn:
+            snapshot = dashboard_store.get_report_snapshot(
+                conn, report_id=report_id, version=version
+            )
+        if snapshot is None:
+            response = HTMLResponse(
+                "설문 당시 보고서 스냅샷을 찾을 수 없습니다.", status_code=404
+            )
+        else:
+            report = report_store.report_from_json(snapshot.payload_json)
+            response = request_helpers.templates.TemplateResponse(
+                request=request,
+                name="admin_report_snapshot.html",
+                context=request_helpers._ctx(
+                    request,
+                    report=report,
+                    report_snapshot=asdict(snapshot),
+                ),
+            )
+    except dashboard_store.ReportSnapshotIntegrityError:
+        logger.error("보고서 스냅샷 SHA-256 무결성 확인에 실패했습니다")
+        response = HTMLResponse(
+            "설문 당시 보고서 스냅샷의 무결성을 확인할 수 없습니다.",
+            status_code=503,
+        )
+    except (KeyError, TypeError, ValueError):
+        response = HTMLResponse(
+            "설문 당시 보고서 스냅샷을 안전하게 해석할 수 없습니다.",
+            status_code=503,
+        )
+    except Exception:
+        logger.error("보고서 스냅샷을 안전하게 읽지 못했습니다")
+        response = HTMLResponse(
+            "설문 당시 보고서 스냅샷을 안전하게 읽지 못했습니다.",
+            status_code=503,
+        )
+    return _admin_response(request, response)
+
+
 @router.post("/admin/reports/{report_id}/state")
 async def change_report_state(
     request: Request, report_id: str,
@@ -720,9 +812,26 @@ async def submit_survey(
         return denied
     try:
         with storage_db.connect() as conn:
-            if not report_store.exists(conn, report_id):
+            report = report_store.load(conn, report_id)
+            if report is None:
                 return HTMLResponse("존재하지 않는 보고서입니다.", status_code=404)
-            report_version = dashboard_store.get_report_state(conn, report_id).version
+            report_state = dashboard_store.get_report_state(conn, report_id)
+            if not report_state.updated_at:
+                report_state = dashboard_store.register_report(
+                    conn,
+                    report_id=report_id,
+                    corp_type=report.corp_type,
+                    payload_json=report_store.report_to_json(report),
+                    now_iso=clock.iso_now_kst(),
+                )
+            report_version = report_state.version
+            if dashboard_store.get_report_snapshot(
+                conn, report_id=report_id, version=report_version
+            ) is None:
+                return HTMLResponse(
+                    "설문 당시 보고서 원본을 안전하게 연결할 수 없습니다.",
+                    status_code=503,
+                )
             now_iso = clock.iso_now_kst()
             revision = dashboard_store.save_survey(
                 conn, report_id=report_id, actor_email=email, rating=rating,
@@ -850,7 +959,25 @@ async def link_detail(request: Request, key_hash: str):
             link = share_store.load_by_hash(conn, key_hash)
             service = dashboard_store.get_service_state(conn)
             open_events = share_store.list_open_events_by_hash(conn, key_hash)
+            report_view_events = share_store.list_report_view_events_by_hash(
+                conn, key_hash
+            )
             runs = share_store.list_runs_by_hash(conn, key_hash)
+            report_state = (
+                "none" if link is None else _dashboard_link_report_state(conn, link)
+            )
+            run_report_states = {
+                run.run_id: (
+                    "none"
+                    if not run.report_id
+                    else (
+                        "available"
+                        if report_store.load(conn, run.report_id) is not None
+                        else "missing"
+                    )
+                )
+                for run in runs
+            }
             seen_open_id = dashboard_store.link_open_seen_id(conn, key_hash=key_hash)
             new_open_events = _unseen_open_events(open_events, seen_open_id)
         if link is None:
@@ -866,7 +993,31 @@ async def link_detail(request: Request, key_hash: str):
                 dashboard_new_open_counts={
                     event.id: event.opened_count for event in new_open_events
                 },
+                dashboard_report_view_events=report_view_events,
                 dashboard_runs=runs,
+                dashboard_link_report_state=report_state,
+                dashboard_run_report_states=run_report_states,
+                dashboard_link_expired=share_logic.is_share_link_expired(
+                    link.created_at
+                ),
+                dashboard_result_share_days=share_logic.link_max_age_days_from_env(),
+                dashboard_link_created_at_label=_link_timestamp_label(
+                    link.created_at
+                ),
+                dashboard_link_expiry_label=_link_expiry_label(link.created_at),
+                dashboard_link_first_opened_at_label=_link_timestamp_label(
+                    link.first_opened_at
+                ),
+                dashboard_link_last_opened_at_label=_link_timestamp_label(
+                    link.last_opened_at
+                ),
+                dashboard_link_revoked_at_label=_link_timestamp_label(
+                    link.revoked_at
+                ),
+                dashboard_open_event_labels={
+                    event.id: _link_timestamp_label(event.opened_at)
+                    for event in open_events
+                },
                 dashboard_run_status_labels={
                     share_store.RUN_STATUS_RUNNING: "생성 중",
                     share_store.RUN_STATUS_AWAITING_RELEASE: "자동출고 검사 대기",

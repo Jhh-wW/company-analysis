@@ -111,6 +111,7 @@ def test_hashed_schema_migration_adds_history_without_losing_initial_report() ->
         assert share_store.TABLE_OPEN_WINDOWS in tables
         assert share_store.TABLE_ACCESS_SUBJECTS in tables
         assert share_store.TABLE_RUN_HISTORY in tables
+        assert share_store.TABLE_REPORT_VIEW_EVENTS in tables
         assert migrated.execute(
             f"SELECT COUNT(*) FROM {share_store.TABLE_OPEN_EVENTS}"
         ).fetchone()[0] == 0
@@ -162,9 +163,134 @@ def test_raw_key_never_enters_database_or_new_history(
         share_store.TABLE_OPEN_WINDOWS,
         share_store.TABLE_ACCESS_SUBJECTS,
         share_store.TABLE_RUN_HISTORY,
+        share_store.TABLE_REPORT_VIEW_EVENTS,
     ):
         columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
         assert "key" not in columns
+
+
+def test_existing_report_view_is_first_success_only_and_append_only(
+    conn: sqlite3.Connection,
+) -> None:
+    raw_key = "existing-report-view-link"
+    key_hash = share_store.key_hash_of(raw_key)
+    _insert_link(conn, key=raw_key, report_id="initial-report")
+
+    assert share_store.record_report_view(
+        conn,
+        key=raw_key,
+        report_id="initial-report",
+        viewed_at="2026-08-21T09:01:00+09:00",
+    )
+    assert share_store.record_report_view(
+        conn,
+        key=raw_key,
+        report_id="initial-report",
+        viewed_at="2026-08-21T09:02:00+09:00",
+    )
+    assert not share_store.record_report_view(
+        conn,
+        key=raw_key,
+        report_id="another-report",
+        viewed_at="2026-08-21T09:03:00+09:00",
+    )
+
+    events = share_store.list_report_view_events_by_hash(conn, key_hash)
+    assert [event.report_id for event in events] == ["initial-report"]
+    assert [event.viewed_at for event in events] == [
+        "2026-08-21T09:01:00+09:00",
+    ]
+    assert all(event.link_key_hash == key_hash for event in events)
+
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute(
+            f"UPDATE {share_store.TABLE_REPORT_VIEW_EVENTS} SET report_id = 'changed'"
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute(f"DELETE FROM {share_store.TABLE_REPORT_VIEW_EVENTS}")
+
+    dump = "\n".join(conn.iterdump())
+    assert raw_key not in dump
+
+
+def test_generated_report_stays_only_in_run_history_not_existing_view_events(
+    conn: sqlite3.Connection,
+) -> None:
+    raw_key = "generated-report-event-separation"
+    key_hash = share_store.key_hash_of(raw_key)
+    _insert_link(conn, key=raw_key, report_id="initial-report")
+    assert share_store.start_run(
+        conn,
+        key=raw_key,
+        run_id="generated-run",
+        started_at="2026-08-21T09:10:00+09:00",
+        input_company="네이버",
+        confirmed_company="네이버(주)",
+        company_id="corp-naver",
+    )
+    assert share_store.finish_run(
+        conn,
+        run_id="generated-run",
+        status=share_store.RUN_STATUS_AWAITING_RELEASE,
+        finished_at="2026-08-21T09:11:00+09:00",
+        report_id="generated-report",
+    )
+    assert share_store.mark_released(
+        conn,
+        report_id="generated-report",
+        pdf_sha256="a" * 64,
+        release_sha256="b" * 64,
+        released_at="2026-08-21T09:12:00+09:00",
+    )
+
+    assert not share_store.record_report_view_by_hash(
+        conn,
+        key_hash=key_hash,
+        report_id="generated-report",
+        viewed_at="2026-08-21T09:13:00+09:00",
+    )
+    assert share_store.list_report_view_events_by_hash(conn, key_hash) == []
+    run = share_store.load_run(conn, "generated-run")
+    assert run is not None and run.status == share_store.RUN_STATUS_COMPLETED
+
+
+def test_invalid_existing_report_view_trigger_fails_schema_verification() -> None:
+    connection = sqlite3.connect(":memory:")
+    try:
+        share_store.ensure_schema(connection)
+        connection.execute(
+            f"DROP TRIGGER {share_store.TABLE_REPORT_VIEW_EVENTS}_no_update"
+        )
+        connection.execute(
+            f"""CREATE TRIGGER {share_store.TABLE_REPORT_VIEW_EVENTS}_no_update
+            BEFORE UPDATE ON {share_store.TABLE_REPORT_VIEW_EVENTS}
+            BEGIN SELECT 1; END"""
+        )
+
+        with pytest.raises(RuntimeError, match="append-only trigger"):
+            share_store.ensure_schema(connection)
+    finally:
+        connection.close()
+
+
+def test_weak_existing_report_view_table_fails_schema_verification() -> None:
+    connection = sqlite3.connect(":memory:")
+    try:
+        share_store.ensure_schema(connection)
+        connection.execute(f"DROP TABLE {share_store.TABLE_REPORT_VIEW_EVENTS}")
+        connection.execute(
+            f"""CREATE TABLE {share_store.TABLE_REPORT_VIEW_EVENTS} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                link_key_hash TEXT,
+                report_id TEXT,
+                viewed_at TEXT
+            )"""
+        )
+
+        with pytest.raises(RuntimeError, match="표 계약"):
+            share_store.ensure_schema(connection)
+    finally:
+        connection.close()
 
 
 def test_known_opens_are_bounded_by_window_with_consistent_summary(

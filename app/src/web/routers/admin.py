@@ -355,6 +355,20 @@ def _access_page(
         page_context = _access_context(request, today=today, **context)
     except _AccessDataUnavailable:
         status_code = 503
+        revocation_links = []
+        revocation_members = []
+        revocation_data_available = False
+        try:
+            # 비용 수치가 불명이어도 권한을 줄이는 비상 철회 목록은 별도로 읽는다.
+            # 둘 중 하나라도 불명확하면 잘못된 목록을 정상처럼 보이지 않는다.
+            with storage_db.connect() as conn:
+                revocation_links = [
+                    link for link in share_store.list_all(conn) if not link.is_revoked
+                ]
+                revocation_members = share_allow.list_all(conn)
+            revocation_data_available = True
+        except Exception:  # noqa: BLE001 — 축소 화면도 추정값을 표시하지 않는다
+            logger.error("비상 철회 목록을 확인하지 못했습니다")
         page_context = request_helpers._ctx(
             request,
             links=[],
@@ -375,6 +389,9 @@ def _access_page(
             estimate_overrun_krw=None,
             business_day_label=clock.business_day_label(today),
             access_data_available=False,
+            revocation_data_available=revocation_data_available,
+            revocation_links=revocation_links,
+            revocation_members=revocation_members,
             paid_research_closed=True,
             paid_research_closed_reason=(
                 "비용 기록을 확인할 수 없어 유료 조사를 닫았습니다. "
@@ -427,7 +444,8 @@ async def admin_access(request: Request):
     return _access_page(request)
 
 
-@router.post("/admin/link/new")
+@router.post("/admin/link/new", include_in_schema=False)
+@router.post("/admin/links/new")
 async def admin_link_new(
     request: Request,
     company: str = Form(..., max_length=COMPANY_MAX_CHARS),
@@ -587,11 +605,10 @@ async def admin_link_new(
 def _link_detail_page(
     request: Request, key: str, *, link_error: str = "", status_code: int = 200
 ):
-    raw_key = key.strip().lower() if share_logic.is_valid_key(key) else ""
     key_hash = key.strip().lower() if share_store.is_key_hash(key) else ""
-    if not raw_key and not key_hash:
+    if not key_hash:
         return _admin_response(
-            request, RedirectResponse("/admin/access", status_code=303)
+            request, HTMLResponse("올바르지 않은 LINK 식별자입니다.", status_code=404)
         )
     report_state = "none"
     open_events: list[share_store.ShareLinkOpenEvent] = []
@@ -599,20 +616,6 @@ def _link_detail_page(
     run_report_states: dict[str, str] = {}
     try:
         with storage_db.connect() as conn:
-            if raw_key:
-                legacy_target = share_store.load(conn, raw_key)
-                if legacy_target is None:
-                    return _admin_response(
-                        request,
-                        RedirectResponse("/admin/access", status_code=303),
-                    )
-                # 과거 raw 관리 URL을 HTML로 렌더하지 않고 안전한 지문 URL로 정규화한다.
-                return _admin_response(
-                    request,
-                    RedirectResponse(
-                        f"/admin/link/{legacy_target.key_hash}", status_code=303
-                    ),
-                )
             link = share_store.load_by_hash(conn, key_hash)
             if link is not None:
                 report_state = _linked_report_state(conn, link)
@@ -720,11 +723,18 @@ def _link_detail_page(
 
 @router.get("/admin/link/{key}", response_class=HTMLResponse)
 async def admin_link_detail(request: Request, key: str):
-    """안전한 링크 지문으로 꼬리표·방문·생성 이력을 보여준다."""
+    """구형 singular 주소에서 해시만 신형 상세로 정규화한다."""
     blocked = request_helpers.require_admin(request)
     if blocked is not None:
         return blocked
-    return _link_detail_page(request, key)
+    key_hash = key.strip().lower()
+    if not share_store.is_key_hash(key_hash):
+        return _admin_response(
+            request, HTMLResponse("올바르지 않은 LINK 식별자입니다.", status_code=404)
+        )
+    return _admin_response(
+        request, RedirectResponse(f"/admin/links/{key_hash}", status_code=303)
+    )
 
 
 @router.get("/admin/link/report/{report_id}", response_class=HTMLResponse)
@@ -752,14 +762,14 @@ async def admin_link_generated_report(request: Request, report_id: str):
         return _admin_response(
             request, RedirectResponse("/admin/access", status_code=303)
         )
-    from src.web.routers import reports as report_routes  # noqa: PLC0415
-
-    return await report_routes._result_page_response(
-        request, clean_report_id, allow_expired=True
+    return _admin_response(
+        request,
+        RedirectResponse(f"/admin/reports/{clean_report_id}", status_code=303),
     )
 
 
-@router.post("/admin/link/report")
+@router.post("/admin/link/report", include_in_schema=False)
+@router.post("/admin/links/report")
 async def admin_link_report(
     request: Request,
     key: str = Form(..., max_length=REFERENCE_MAX_CHARS),
@@ -775,10 +785,9 @@ async def admin_link_report(
     )
     if blocked is not None:
         return blocked
-    key_is_raw = share_logic.is_valid_key(key_clean)
     key_is_hash = share_store.is_key_hash(key_clean)
     detail_key_hash = key_clean if key_is_hash else ""
-    if not key_is_raw and not key_is_hash:
+    if not key_is_hash:
         _audit_failed_change(
             request, action=action, target=target, reason="invalid_target"
         )
@@ -793,11 +802,7 @@ async def admin_link_report(
     try:
         with storage_db.connect() as conn:
             _assert_access_write_ready(conn)
-            link = (
-                share_store.load(conn, key_clean)
-                if key_is_raw
-                else share_store.load_by_hash(conn, key_clean)
-            )
+            link = share_store.load_by_hash(conn, key_clean)
             if link is None:
                 raise _AdminStateUnchanged("link_missing")
             else:
@@ -806,18 +811,10 @@ async def admin_link_report(
                     conn, report_reference, expected_company=link.company
                 )
                 if not validation_error:
-                    changed = (
-                        share_store.set_report(conn, key_clean, report_id)
-                        if key_is_raw
-                        else share_store.set_report_by_hash(
-                            conn, key_clean, report_id
-                        )
+                    changed = share_store.set_report_by_hash(
+                        conn, key_clean, report_id
                     )
-                    updated = (
-                        share_store.load(conn, key_clean)
-                        if key_is_raw
-                        else share_store.load_by_hash(conn, key_clean)
-                    )
+                    updated = share_store.load_by_hash(conn, key_clean)
                     if (
                         not changed
                         or updated is None
@@ -878,11 +875,12 @@ async def admin_link_report(
     )
     return _admin_response(
         request,
-        RedirectResponse(f"/admin/link/{detail_key_hash}", status_code=303),
+        RedirectResponse(f"/admin/links/{detail_key_hash}", status_code=303),
     )
 
 
-@router.post("/admin/link/delete")
+@router.post("/admin/link/delete", include_in_schema=False)
+@router.post("/admin/links/revoke")
 async def admin_link_delete(
     request: Request,
     key: str = Form(..., max_length=REFERENCE_MAX_CHARS),
@@ -890,7 +888,6 @@ async def admin_link_delete(
 ):
     """링크를 닫는다."""
     key_clean = key.strip().lower()
-    key_is_raw = share_logic.is_valid_key(key_clean)
     key_is_hash = share_store.is_key_hash(key_clean)
     action = "admin.link.revoke"
     target = admin_audit.target_id("link", key_clean)
@@ -899,22 +896,21 @@ async def admin_link_delete(
     )
     if blocked is not None:
         return blocked
+    if not key_is_hash:
+        _audit_failed_change(
+            request, action=action, target=target, reason="invalid_target"
+        )
+        return _admin_response(
+            request,
+            HTMLResponse("올바르지 않은 LINK 식별자입니다.", status_code=400),
+        )
     detail_key_hash = key_clean if key_is_hash else ""
     try:
         with storage_db.connect() as conn:
-            _assert_access_write_ready(conn)
-            if not key_is_raw and not key_is_hash:
-                raise _AdminStateUnchanged("invalid_target")
-            deleted = (
-                share_store.delete(conn, key_clean)
-                if key_is_raw
-                else share_store.delete_by_hash(conn, key_clean)
-            )
-            revoked = (
-                share_store.load(conn, key_clean)
-                if key_is_raw
-                else share_store.load_by_hash(conn, key_clean)
-            )
+            # 철회는 비용 노출을 늘리지 않는 비상 안전 동작이다. 비용 원장이
+            # 닫혀 있어도 LINK 정본·감사 정본을 쓸 수 있으면 즉시 닫아야 한다.
+            deleted = share_store.delete_by_hash(conn, key_clean)
+            revoked = share_store.load_by_hash(conn, key_clean)
             if not deleted or revoked is None or not revoked.is_revoked:
                 raise _AdminStateUnchanged("link_delete_unconfirmed")
             detail_key_hash = revoked.key_hash
@@ -925,7 +921,6 @@ async def admin_link_delete(
                 target=target,
                 reason="revoked",
             )
-            _assert_budget_store_healthy()
     except Exception:  # noqa: BLE001
         logger.error("링크 철회 또는 변경 확인에 실패했습니다")
         _audit_failed_change(
@@ -951,7 +946,7 @@ async def admin_link_delete(
     )
     return _admin_response(
         request,
-        RedirectResponse(f"/admin/link/{detail_key_hash}", status_code=303),
+        RedirectResponse(f"/admin/links/{detail_key_hash}", status_code=303),
     )
 
 
@@ -1043,7 +1038,8 @@ async def admin_revoke(
         return blocked
     try:
         with storage_db.connect() as conn:
-            _assert_access_write_ready(conn)
+            # MEMBER 철회도 비용 원장과 무관한 비상 안전 동작이다. 권한 변경,
+            # 기존 세션 폐기와 성공 감사행은 아래 한 transaction에 계속 묶는다.
             changed = share_allow.revoke(
                 conn, email_clean, now_iso=clock.iso_now_kst()
             )
@@ -1058,7 +1054,6 @@ async def admin_revoke(
                 target=target,
                 reason="revoked",
             )
-            _assert_budget_store_healthy()
     except Exception:  # noqa: BLE001
         logger.error("초대 철회 또는 변경 확인에 실패했습니다")
         _audit_failed_change(

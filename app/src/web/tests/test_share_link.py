@@ -113,19 +113,52 @@ def test_시험공개에서도_살아있는_링크는_자동출고본문과PDF�
     monkeypatch.setattr(reports_router, "_release_state", _REAL_RELEASE_STATE)
 
     opened = client.get(f"/k/{_카카오열쇠}", follow_redirects=False)
+    with storage_db.connect() as conn:
+        assert share_store.list_report_view_events_by_hash(
+            conn, share_store.key_hash_of(_카카오열쇠)
+        ) == []
     result = client.get(opened.headers["location"], follow_redirects=False)
+    refreshed = client.get(opened.headers["location"], follow_redirects=False)
     pdf = client.get(f"/download/pdf/{report_id}", follow_redirects=False)
     admin = client.get("/admin", follow_redirects=False)
 
     assert opened.status_code == 303
     assert opened.headers["location"] == f"/result/{report_id}"
     assert result.status_code == 200
+    assert refreshed.status_code == 200
     assert report.company in result.text
     assert pdf.status_code == 200
     assert pdf.headers["content-type"] == "application/pdf"
     assert len(pdf.headers["x-pdf-release-record"]) == 64
     assert admin.status_code == 303
     assert admin.headers["location"] == "/auth/login"
+    with storage_db.connect() as conn:
+        views = share_store.list_report_view_events_by_hash(
+            conn, share_store.key_hash_of(_카카오열쇠)
+        )
+    assert [view.report_id for view in views] == [report_id]
+
+
+def test_LINK결과는_조회사건연결을_다시확인하지못하면_열지않는다(
+    client: TestClient, monkeypatch
+):
+    report_id = uuid.uuid4().hex
+    report = build_demo_report()
+    with storage_db.connect() as conn:
+        report_store.save(conn, report_id, "demo-corp", report.job, report)
+    _링크발급(_카카오열쇠, report.company, report_id=report_id)
+    monkeypatch.setattr(reports_router, "_release_state", _REAL_RELEASE_STATE)
+
+    opened = client.get(f"/k/{_카카오열쇠}", follow_redirects=False)
+    monkeypatch.setattr(request_helpers, "_current_share_link", lambda _request: None)
+    result = client.get(opened.headers["location"], follow_redirects=False)
+
+    assert result.status_code == 503
+    assert "LINK 보고서를 확인할 수 없습니다" in result.text
+    with storage_db.connect() as conn:
+        assert share_store.list_report_view_events_by_hash(
+            conn, share_store.key_hash_of(_카카오열쇠)
+        ) == []
 
 
 def test_좁은Render관리자데모는_살아있는_공유capability도_열지않는다(

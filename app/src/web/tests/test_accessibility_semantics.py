@@ -185,7 +185,9 @@ def _render_admin_and_stopped_pages() -> tuple[str, dict[str, str]]:
         responses = {
             "admin-home": client.get("/admin"),
             "admin-access": client.get("/admin/access"),
-            "admin-link": client.get(f"/admin/link/{link_key}"),
+            "admin-link": client.get(
+                f"/admin/links/{share_store.key_hash_of(link_key)}"
+            ),
             "admin-dashboard": client.get("/admin/dashboard"),
             "stopped": client.get(f"/result/{stopped_id}"),
         }
@@ -207,8 +209,8 @@ def test_관리표는_이름_머리글_scope_키보드_scroll영역을_가진다
 
     expected_table_counts = {
         "admin-access": 2,
-        "admin-link": 1,
-            "admin-dashboard": 0,
+        "admin-link": 0,
+        "admin-dashboard": 0,
         "stopped": 1,
     }
     for page_name, expected_count in expected_table_counts.items():

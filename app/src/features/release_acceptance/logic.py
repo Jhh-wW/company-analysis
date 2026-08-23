@@ -849,7 +849,7 @@ def _authorization_action(
     _require_status(access, 200, "로그인 관리자 권한")
     rejected = admin.request(
         "POST",
-        "/admin/link/new",
+        "/admin/links/new",
         data={
             "company": DEMO_COMPANY,
             "job": "",
@@ -993,7 +993,7 @@ def _output_identity_action(
         raise AcceptanceFailure("LINK 관리 화면의 CSRF 토큰을 찾지 못했습니다")
     issued = admin.request(
         "POST",
-        "/admin/link/new",
+        "/admin/links/new",
         data={
             "company": DEMO_COMPANY,
             "job": "",

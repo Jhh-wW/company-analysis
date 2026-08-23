@@ -17,14 +17,14 @@
   {% for feedback in dashboard_member_feedback %}
   <article class="card frame-feedback">
     <h2>{{ feedback.display_name }} · {{ feedback.actor_email }}</h2>
-    <p><strong>{{ feedback.company }}</strong>{% if feedback.job %} · {{ feedback.job }}{% endif %} · 별점 {{ feedback.rating }}점 · {{ feedback.updated_at }}{% if feedback.revision > 1 %} · {{ feedback.revision }}번째 수정{% endif %}</p>
+    <p><strong>{{ feedback.company }}</strong>{% if feedback.job %} · {{ feedback.job }}{% endif %} · 보고서 버전 {{ feedback.report_version }} · 별점 {{ feedback.rating }}점 · {{ feedback.updated_at }}{% if feedback.revision > 1 %} · 이 버전에서 {{ feedback.revision }}번째 수정{% endif %}</p>
     <dl class="frame-action-summary">
       <div><dt>전체 이용 소감</dt><dd>{{ feedback.overall_feedback }}</dd></div>
       <div><dt>구체적인 사업상 구분점</dt><dd>{{ feedback.business_distinction }}</dd></div>
       <div><dt>더 있었으면 하는 정보</dt><dd>{{ feedback.add_information or "없음" }}</dd></div>
       <div><dt>없어도 된다고 생각한 정보</dt><dd>{{ feedback.delete_information or "없음" }}</dd></div>
     </dl>
-    <a class="btn ghost" href="/admin/reports/{{ feedback.report_id }}">보고서와 스냅샷 보기</a>
+    {% if feedback.snapshot_available %}<a class="btn ghost" href="/admin/reports/{{ feedback.report_id }}/versions/{{ feedback.report_version }}">설문 당시 보고서 보기</a>{% else %}<p class="muted"><strong>당시 보고서 확인 불가</strong> · 이전 저장 형식이거나 SHA-256 결속을 확인할 수 없어 현재 보고서로 대신 보여주지 않습니다.</p>{% endif %}
   </article>
   {% else %}
   <article class="card frame-empty-state"><h2>이 기간에 받은 자세한 의견이 없습니다</h2><p>친구가 결과 화면에서 설문을 보내면 회사와 정확한 보고서에 연결해 표시합니다.</p><a class="btn ghost" href="/admin/access#invited-members-title">친구 초대 관리</a></article>

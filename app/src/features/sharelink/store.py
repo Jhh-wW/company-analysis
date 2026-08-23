@@ -29,9 +29,16 @@ TABLE_OPEN_EVENTS = "share_link_open_events"
 TABLE_OPEN_WINDOWS = "share_link_open_windows"
 TABLE_ACCESS_SUBJECTS = "share_link_access_subjects"
 TABLE_RUN_HISTORY = "share_link_run_history"
+TABLE_REPORT_VIEW_EVENTS = "share_link_report_view_events"
 INDEX_RUN_REPORT_ID = f"idx_{TABLE_RUN_HISTORY}_report_id_unique"
 INDEX_OPEN_WINDOWS_LINK_WINDOW = f"idx_{TABLE_OPEN_WINDOWS}_link_window_unique"
 INDEX_ACCESS_SUBJECT_WINDOW = f"idx_{TABLE_ACCESS_SUBJECTS}_window_subject_unique"
+INDEX_REPORT_VIEW_EVENTS_LINK_TIME = (
+    f"idx_{TABLE_REPORT_VIEW_EVENTS}_link_time"
+)
+INDEX_REPORT_VIEW_EVENTS_LINK_REPORT = (
+    f"idx_{TABLE_REPORT_VIEW_EVENTS}_link_report_unique"
+)
 
 RUN_STATUS_RUNNING: Final[str] = "running"
 RUN_STATUS_AWAITING_RELEASE: Final[str] = "awaiting_release"
@@ -155,6 +162,33 @@ CREATE_RUN_REPORT_ID_UNIQUE_INDEX_SQL = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS {INDEX_RUN_REPORT_ID}
 ON {TABLE_RUN_HISTORY}(report_id) WHERE report_id <> ''
 """
+CREATE_REPORT_VIEW_EVENTS_SQL = f"""
+CREATE TABLE IF NOT EXISTS {TABLE_REPORT_VIEW_EVENTS} (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    link_key_hash TEXT NOT NULL,
+    report_id     TEXT NOT NULL,
+    viewed_at     TEXT NOT NULL,
+    FOREIGN KEY (link_key_hash) REFERENCES {TABLE_SHARE_LINKS}(key_hash)
+)
+"""
+CREATE_REPORT_VIEW_EVENTS_NO_UPDATE_SQL = f"""
+CREATE TRIGGER IF NOT EXISTS {TABLE_REPORT_VIEW_EVENTS}_no_update
+BEFORE UPDATE ON {TABLE_REPORT_VIEW_EVENTS}
+BEGIN SELECT RAISE(ABORT, 'share link report view events are append-only'); END
+"""
+CREATE_REPORT_VIEW_EVENTS_NO_DELETE_SQL = f"""
+CREATE TRIGGER IF NOT EXISTS {TABLE_REPORT_VIEW_EVENTS}_no_delete
+BEFORE DELETE ON {TABLE_REPORT_VIEW_EVENTS}
+BEGIN SELECT RAISE(ABORT, 'share link report view events are append-only'); END
+"""
+CREATE_REPORT_VIEW_EVENTS_INDEX_SQL = f"""
+CREATE INDEX IF NOT EXISTS {INDEX_REPORT_VIEW_EVENTS_LINK_TIME}
+ON {TABLE_REPORT_VIEW_EVENTS}(link_key_hash, viewed_at DESC, id DESC)
+"""
+CREATE_REPORT_VIEW_EVENTS_UNIQUE_INDEX_SQL = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS {INDEX_REPORT_VIEW_EVENTS_LINK_REPORT}
+ON {TABLE_REPORT_VIEW_EVENTS}(link_key_hash, report_id)
+"""
 _LEGACY_TABLE = "share_links_legacy_raw_key"
 _MIGRATION_SAVEPOINT = "migrate_share_links_key_hash"
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -219,6 +253,16 @@ class ShareLinkRun:
     finished_at: str
     internal_ai_cost_krw: float
     customer_charge_krw: float
+
+
+@dataclass(frozen=True)
+class ShareLinkReportViewEvent:
+    """LINK로 기존 연결 보고서를 연 비식별 append-only 사건."""
+
+    id: int
+    link_key_hash: str
+    report_id: str
+    viewed_at: str
 
 
 def _row_to_link(row: sqlite3.Row | tuple) -> ShareLink:
@@ -384,6 +428,61 @@ def _verify_unique_index(
         raise RuntimeError(f"{table} unique index가 올바르지 않습니다")
 
 
+def _normalized_schema_sql(value: object) -> str:
+    normalized = re.sub(r"\s+", " ", str(value or "").strip()).lower()
+    return normalized.replace("create trigger if not exists", "create trigger")
+
+
+def _verify_report_view_event_schema(conn: sqlite3.Connection) -> None:
+    """조회 사건 표·외래키·append-only trigger를 정확히 확인한다."""
+
+    escaped_table = TABLE_REPORT_VIEW_EVENTS.replace('"', '""')
+    columns = tuple(
+        (str(row[1]), str(row[2]).upper(), int(row[3]), row[4], int(row[5]), int(row[6]))
+        for row in conn.execute(f'PRAGMA table_xinfo("{escaped_table}")')
+    )
+    expected_columns = (
+        ("id", "INTEGER", 0, None, 1, 0),
+        ("link_key_hash", "TEXT", 1, None, 0, 0),
+        ("report_id", "TEXT", 1, None, 0, 0),
+        ("viewed_at", "TEXT", 1, None, 0, 0),
+    )
+    foreign_keys = tuple(
+        (str(row[2]), str(row[3]), str(row[4]))
+        for row in conn.execute(f'PRAGMA foreign_key_list("{escaped_table}")')
+    )
+    if columns != expected_columns or foreign_keys != (
+        (TABLE_SHARE_LINKS, "link_key_hash", "key_hash"),
+    ):
+        raise RuntimeError("share_link_report_view_events 표 계약이 올바르지 않습니다")
+
+    trigger_contracts = (
+        (
+            f"{TABLE_REPORT_VIEW_EVENTS}_no_update",
+            CREATE_REPORT_VIEW_EVENTS_NO_UPDATE_SQL,
+        ),
+        (
+            f"{TABLE_REPORT_VIEW_EVENTS}_no_delete",
+            CREATE_REPORT_VIEW_EVENTS_NO_DELETE_SQL,
+        ),
+    )
+    for trigger_name, expected_sql in trigger_contracts:
+        row = conn.execute(
+            "SELECT type, tbl_name, sql FROM sqlite_master WHERE name = ?",
+            (trigger_name,),
+        ).fetchone()
+        if (
+            row is None
+            or str(row[0]) != "trigger"
+            or str(row[1]) != TABLE_REPORT_VIEW_EVENTS
+            or _normalized_schema_sql(row[2])
+            != _normalized_schema_sql(expected_sql)
+        ):
+            raise RuntimeError(
+                "share_link_report_view_events append-only trigger가 올바르지 않습니다"
+            )
+
+
 def _copy_legacy_rows(conn: sqlite3.Connection) -> None:
     rows = conn.execute(
         f"""
@@ -478,6 +577,18 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         )
         conn.execute(CREATE_RUN_HISTORY_SQL)
         conn.execute(CREATE_RUN_HISTORY_NO_DELETE_SQL)
+        conn.execute(CREATE_REPORT_VIEW_EVENTS_SQL)
+        conn.execute(CREATE_REPORT_VIEW_EVENTS_NO_UPDATE_SQL)
+        conn.execute(CREATE_REPORT_VIEW_EVENTS_NO_DELETE_SQL)
+        conn.execute(CREATE_REPORT_VIEW_EVENTS_INDEX_SQL)
+        conn.execute(CREATE_REPORT_VIEW_EVENTS_UNIQUE_INDEX_SQL)
+        _verify_report_view_event_schema(conn)
+        _verify_unique_index(
+            conn,
+            table=TABLE_REPORT_VIEW_EVENTS,
+            index=INDEX_REPORT_VIEW_EVENTS_LINK_REPORT,
+            expected_columns=("link_key_hash", "report_id"),
+        )
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_{TABLE_OPEN_EVENTS}_link_time "
             f"ON {TABLE_OPEN_EVENTS}(link_key_hash, opened_at, id)"
@@ -529,6 +640,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             "release_sha256",
         }.issubset(_table_columns(conn, TABLE_RUN_HISTORY)):
             raise RuntimeError("share_link_run_history 스키마가 올바르지 않습니다")
+        if not {"id", "link_key_hash", "report_id", "viewed_at"}.issubset(
+            _table_columns(conn, TABLE_REPORT_VIEW_EVENTS)
+        ):
+            raise RuntimeError("share_link_report_view_events 스키마가 올바르지 않습니다")
     except BaseException:
         try:
             conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
@@ -809,6 +924,118 @@ def list_open_events_by_hash(
         for row in window_rows
     ]
     return [*legacy_events, *window_events]
+
+
+def record_report_view(
+    conn: sqlite3.Connection,
+    *,
+    key: str,
+    report_id: str,
+    viewed_at: str,
+) -> bool:
+    """raw capability를 해시한 뒤 최초 정상 조회를 멱등 기록한다."""
+
+    return record_report_view_by_hash(
+        conn,
+        key_hash=key_hash_of(key),
+        report_id=report_id,
+        viewed_at=viewed_at,
+    )
+
+
+def record_report_view_by_hash(
+    conn: sqlite3.Connection,
+    *,
+    key_hash: str,
+    report_id: str,
+    viewed_at: str,
+) -> bool:
+    """active LINK의 최초 연결 보고서 첫 200 조회만 남긴다.
+
+    같은 LINK로 새로 생성한 보고서는 run history가 정본이므로 이 표에
+    중복 기록하지 않는다. 새로고침은 기존 사건의 최초 시각을 바꾸지
+    않고 성공으로 본다. 원문 capability·IP·UA는 저장하지 않는다.
+    """
+
+    normalized_hash = str(key_hash or "").strip().lower()
+    clean_report_id = str(report_id or "").strip()[:128]
+    clean_viewed_at = str(viewed_at or "").strip()
+    if not is_key_hash(normalized_hash):
+        return False
+    if not clean_report_id or not clean_viewed_at:
+        raise ValueError("LINK 보고서 조회에는 보고서 ID와 시각이 필요합니다")
+    try:
+        dt.datetime.fromisoformat(clean_viewed_at)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("LINK 보고서 조회 시각 형식이 올바르지 않습니다") from exc
+    cursor = conn.execute(
+        f"""
+        INSERT INTO {TABLE_REPORT_VIEW_EVENTS}
+            (link_key_hash, report_id, viewed_at)
+        SELECT link.key_hash, ?, ?
+          FROM {TABLE_SHARE_LINKS} AS link
+         WHERE link.key_hash = ?
+           AND link.revoked_at = ''
+           AND link.report_id = ?
+        ON CONFLICT(link_key_hash, report_id) DO NOTHING
+        """,
+        (
+            clean_report_id,
+            clean_viewed_at,
+            normalized_hash,
+            clean_report_id,
+        ),
+    )
+    if cursor.rowcount > 0:
+        return True
+    authorized = conn.execute(
+        f"""
+        SELECT 1
+          FROM {TABLE_SHARE_LINKS} AS link
+          JOIN {TABLE_REPORT_VIEW_EVENTS} AS event
+            ON event.link_key_hash = link.key_hash
+           AND event.report_id = ?
+         WHERE link.key_hash = ?
+           AND link.revoked_at = ''
+           AND link.report_id = ?
+         LIMIT 1
+        """,
+        (
+            clean_report_id,
+            normalized_hash,
+            clean_report_id,
+        ),
+    ).fetchone()
+    return authorized is not None
+
+
+def list_report_view_events_by_hash(
+    conn: sqlite3.Connection, key_hash: str
+) -> list[ShareLinkReportViewEvent]:
+    """관리 화면용 최근 기존 보고서 조회 사건을 새 시각부터 돌려준다."""
+
+    normalized = str(key_hash or "").strip().lower()
+    if not is_key_hash(normalized):
+        return []
+    rows = conn.execute(
+        f"""
+        SELECT id, link_key_hash, report_id, viewed_at
+          FROM {TABLE_REPORT_VIEW_EVENTS}
+         WHERE link_key_hash = ?
+         ORDER BY viewed_at DESC, id DESC
+         LIMIT ?
+        """,
+        (normalized, constants.REPORT_VIEW_EVENTS_DISPLAY_LIMIT),
+    ).fetchall()
+    return [
+        ShareLinkReportViewEvent(
+            id=int(row[0]),
+            link_key_hash=str(row[1]),
+            report_id=str(row[2]),
+            viewed_at=str(row[3]),
+        )
+        for row in rows
+    ]
 
 
 def set_report(conn: sqlite3.Connection, key: str, report_id: str) -> bool:

@@ -133,6 +133,10 @@ def test_survey_is_member_only_and_revision_is_visible_to_admin(monkeypatch, tmp
     assert "member@example.com" in detail.text
     assert "5점" in detail.text
     with db.connect() as conn:
+        snapshot = dashboard_store.get_report_snapshot(
+            conn, report_id=report_id, version=1
+        )
+        assert snapshot is not None and len(snapshot.payload_sha256) == 64
         assert dashboard_kpi.summary(conn) == dashboard_kpi.KpiSummary(
             measured_responses=1,
             within_target=1,
@@ -144,6 +148,15 @@ def test_member_survey_prefills_saved_answer_and_keeps_browser_draft(monkeypatch
     runtime._PIPELINE = DemoPipeline()
     report_id = _seed_report()
     with db.connect() as conn:
+        report = reports.load(conn, report_id)
+        assert report is not None
+        dashboard_store.register_report(
+            conn,
+            report_id=report_id,
+            corp_type=report.corp_type,
+            payload_json=reports.report_to_json(report),
+            now_iso="2026-08-22T09:59:00+09:00",
+        )
         allowlist.invite(
             conn, email="member@example.com", display_name="김민지", note="스터디",
             now_iso="2026-08-22T10:00:00+09:00",
@@ -168,7 +181,174 @@ def test_member_survey_prefills_saved_answer_and_keeps_browser_draft(monkeypatch
     assert "설문 수정 저장" in result.text
     assert "김민지 · member@example.com" in members.text
     assert "기존 소감" in members.text and "기존 구분점" in members.text
-    assert f'href="/admin/reports/{report_id}"' in members.text
+    assert f'href="/admin/reports/{report_id}/versions/1"' in members.text
+
+
+def test_member_survey_prefill_and_admin_snapshot_are_scoped_to_report_version(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(tmp_path / "storage.db"))
+    runtime._PIPELINE = DemoPipeline()
+    report_id = _seed_report()
+    version_one = build_demo_report()
+    version_two = replace(
+        version_one,
+        generated_at="2026-08-23",
+    )
+    with db.connect() as conn:
+        dashboard_store.register_report(
+            conn,
+            report_id=report_id,
+            corp_type=version_one.corp_type,
+            payload_json=reports.report_to_json(version_one),
+            now_iso="2026-08-22T09:00:00+09:00",
+        )
+        allowlist.invite(
+            conn,
+            email="member@example.com",
+            display_name="김민지",
+            note="스터디",
+            now_iso="2026-08-22T09:01:00+09:00",
+        )
+        assert dashboard_store.save_survey(
+            conn,
+            report_id=report_id,
+            report_version=1,
+            actor_email="member@example.com",
+            rating=5,
+            overall_feedback="버전1에서 남긴 소감",
+            business_distinction="버전1 구분점",
+            add_information="",
+            delete_information="",
+            now_iso="2026-08-22T10:00:00+09:00",
+        ) == 1
+        dashboard_store.record_error(
+            conn,
+            report_id=report_id,
+            actor_email="member@example.com",
+            area="출처",
+            reason="버전2 수정 필요",
+            now_iso="2026-08-22T10:01:00+09:00",
+        )
+        for status in (
+            dashboard_store.REPORT_STATUS_FIXING,
+            dashboard_store.REPORT_STATUS_RECHECKING,
+        ):
+            dashboard_store.change_report_state(
+                conn,
+                report_id=report_id,
+                next_status=status,
+                actor_email="admin@example.com",
+                reason="수정본 재검사",
+                now_iso="2026-08-22T10:02:00+09:00",
+            )
+        assert dashboard_store.capture_report_snapshot(
+            conn,
+            report_id=report_id,
+            version=2,
+            payload_json=reports.report_to_json(version_two),
+            actor="admin@example.com",
+            now_iso="2026-08-22T10:03:00+09:00",
+        )
+        dashboard_store.change_report_state(
+            conn,
+            report_id=report_id,
+            next_status=dashboard_store.REPORT_STATUS_NORMAL,
+            actor_email="admin@example.com",
+            reason="수정본 재검사 완료",
+            now_iso="2026-08-22T10:04:00+09:00",
+        )
+
+    with TestClient(main.app) as member:
+        csrf = _session(member, email="member@example.com", is_admin=False)
+        current_before = member.get(f"/result/{report_id}")
+        saved_version_two = member.post(
+            f"/reports/{report_id}/survey",
+            data={
+                "rating": "3",
+                "overall_feedback": "버전2에서 남긴 소감",
+                "business_distinction": "버전2 구분점",
+                "csrf_token": csrf,
+            },
+            follow_redirects=False,
+        )
+        denied_snapshot = member.get(
+            f"/admin/reports/{report_id}/versions/1", follow_redirects=False
+        )
+    with TestClient(main.app) as admin:
+        _session(admin, email="admin@example.com", is_admin=True)
+        members = admin.get("/admin/members")
+        snapshot_one = admin.get(f"/admin/reports/{report_id}/versions/1")
+        snapshot_two = admin.get(f"/admin/reports/{report_id}/versions/2")
+
+    assert current_before.status_code == 200
+    assert "버전1에서 남긴 소감" not in current_before.text
+    assert "설문 저장" in current_before.text
+    assert f'data-draft-key="member-survey:{report_id}:v2:' in current_before.text
+    assert saved_version_two.status_code == 303
+    assert denied_snapshot.status_code in (302, 303, 307)
+    assert members.status_code == 200
+    assert f'/admin/reports/{report_id}/versions/1' in members.text
+    assert f'/admin/reports/{report_id}/versions/2' in members.text
+    assert snapshot_one.status_code == 200
+    assert "버전1에서 남긴 소감" not in snapshot_one.text
+    assert "2026-08-23" not in snapshot_one.text
+    assert "과거 스냅샷 · 읽기 전용" in snapshot_one.text
+    assert f'action="/admin/reports/{report_id}' not in snapshot_one.text
+    assert "수동 상태 변경" not in snapshot_one.text
+    assert snapshot_two.status_code == 200
+    assert "2026-08-23" in snapshot_two.text
+
+
+def test_admin_never_falls_back_to_current_report_when_survey_snapshot_sha_is_wrong(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(tmp_path / "storage.db"))
+    runtime._PIPELINE = DemoPipeline()
+    report_id = _seed_report()
+    with db.connect() as conn:
+        report = reports.load(conn, report_id)
+        assert report is not None
+        dashboard_store.register_report(
+            conn,
+            report_id=report_id,
+            corp_type=report.corp_type,
+            payload_json=reports.report_to_json(report),
+            now_iso="2026-08-22T09:00:00+09:00",
+        )
+        dashboard_store.save_survey(
+            conn,
+            report_id=report_id,
+            report_version=1,
+            actor_email="member@example.com",
+            rating=4,
+            overall_feedback="검증할 소감",
+            business_distinction="검증할 구분점",
+            add_information="",
+            delete_information="",
+            now_iso="2026-08-22T10:00:00+09:00",
+        )
+        conn.execute(
+            f"DROP TRIGGER {dashboard_store.TABLE_REPORT_VERSIONS}_no_update"
+        )
+        conn.execute(
+            f"UPDATE {dashboard_store.TABLE_REPORT_VERSIONS} "
+            "SET payload_json = ? WHERE report_id = ? AND version = 1",
+            ('{"company":"손상된 현재 대체본"}', report_id),
+        )
+
+    with TestClient(main.app) as admin:
+        _session(admin, email="admin@example.com", is_admin=True)
+        members = admin.get("/admin/members")
+        snapshot = admin.get(f"/admin/reports/{report_id}/versions/1")
+
+    assert members.status_code == 200
+    assert "당시 보고서 확인 불가" in members.text
+    assert f'/admin/reports/{report_id}/versions/1' not in members.text
+    assert "손상된 현재 대체본" not in members.text
+    assert snapshot.status_code == 503
+    assert "무결성을 확인할 수 없습니다" in snapshot.text
+    assert "손상된 현재 대체본" not in snapshot.text
 
 
 def test_dashboard_keeps_working_when_only_survey_summary_is_unavailable(
@@ -340,7 +520,7 @@ def test_link_detail_preserves_history_and_offers_csrf_auto_confirmation(monkeyp
     assert ".requestSubmit()" in first.text
     assert confirmed.status_code == 303
     assert "새로 확인할 접속이 없습니다" in cleared.text
-    assert f"2026-08-22T10:01:00+09:00 · 누적 1회" in cleared.text
+    assert "2026-08-22 10:01 (한국시간) · 누적 1회" in cleared.text
 
 
 def test_link_list_sorts_by_recent_open_and_marks_unseen(monkeypatch, tmp_path):
@@ -395,10 +575,10 @@ def test_same_window_aggregate_reports_only_new_count_after_confirmation(
         second_detail = client.get(f"/admin/links/{key_hash}")
 
     assert "새 접속 2건" in first_list.text
-    assert f"{opened_at} · 누적 2회" in first_detail.text
+    assert "2026-08-23 10:00 (한국시간) · 누적 2회" in first_detail.text
     assert confirmed.status_code == 303
     assert "새 접속 1건" in second_list.text
-    assert f"{opened_at} · 누적 3회" in second_detail.text
+    assert "2026-08-23 10:00 (한국시간) · 누적 3회" in second_detail.text
     assert "새 접속 1회" in second_detail.text
 
 

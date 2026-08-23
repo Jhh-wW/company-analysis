@@ -283,7 +283,7 @@
   {% if member_feedback_allowed %}
   <div class="frame-grid frame-grid-two">
     <form class="card" id="member-survey-form" method="post" action="/reports/{{ job.job_id }}/survey"
-          data-draft-key="member-survey:{{ job.job_id }}:{{ member_feedback_draft_key }}"
+          data-draft-key="member-survey:{{ job.job_id }}:v{{ member_feedback_report_version }}:{{ member_feedback_draft_key }}"
           data-has-saved-survey="{{ 'yes' if member_survey else 'no' }}">
       <h3>이 보고서가 이 회사를 파악하는 데 얼마나 도움이 되었나요?</h3>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

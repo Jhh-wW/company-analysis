@@ -88,7 +88,7 @@
   <div class="warn-line" role="note" style="margin-top:14px"><span>ℹ️</span><span><strong>첫 배포에서는 LINK 발급을 보류했습니다.</strong><br>정식 저장소와 실제 조사 범위를 연결한 뒤 활성화합니다.</span></div>
   <button class="btn" type="button" disabled>LINK 발급 보류</button>
   {% else %}
-  <form method="post" action="/admin/link/new" style="margin-top:14px">
+  <form method="post" action="/admin/links/new" style="margin-top:14px">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div class="field">
       <label for="link_company">지원 회사<span class="req">*</span></label>
@@ -144,23 +144,23 @@
         <strong>{{ link.company }}</strong>
         {% if link.job %}<br>{{ link.job }}{% endif %}
         {% if link.note %}<br><span class="muted">{{ link.note }}</span>{% endif %}
-        <br><span class="muted">발급 {{ link_created_at_labels.get(link.key, "—") }}</span>
-        <br><span class="muted">만료 {{ link_expiry_date_labels.get(link.key, "—") }}</span>
-        <br><a href="/admin/link/{{ link.key }}">접속·생성·보고서 이력</a>
-        {% if link.key in revoked_link_keys %}<br><strong>철회됨</strong>
-        {% elif link.key in expired_link_keys %}<br><strong>자동 만료됨</strong>
+        <br><span class="muted">발급 {{ link_created_at_labels.get(link.key_hash, "—") }}</span>
+        <br><span class="muted">만료 {{ link_expiry_date_labels.get(link.key_hash, "—") }}</span>
+        <br><a href="/admin/links/{{ link.key_hash }}">접속·생성·보고서 이력</a>
+        {% if link.key_hash in revoked_link_keys %}<br><strong>철회됨</strong>
+        {% elif link.key_hash in expired_link_keys %}<br><strong>자동 만료됨</strong>
         {% else %}<br><strong>사용 가능</strong>{% endif %}
       </td>
       <td>
         {% if link.opened_count %}
           <strong>{{ link.opened_count }}회</strong><br>
-          <span class="muted">최초 {{ link_first_opened_at_labels.get(link.key, "—") }}<br>최근 {{ link_last_opened_at_labels.get(link.key, "—") }}</span>
+          <span class="muted">최초 {{ link_first_opened_at_labels.get(link.key_hash, "—") }}<br>최근 {{ link_last_opened_at_labels.get(link.key_hash, "—") }}</span>
         {% else %}
           <span class="muted">요청 없음</span>
         {% endif %}
       </td>
       <td>
-        {% set report_state = report_states.get(link.key, "unavailable") %}
+        {% set report_state = report_states.get(link.key_hash, "unavailable") %}
         {% if report_state == "active" %}⭕ 열림
         {% elif report_state == "expired" %}<strong>만료됨</strong><br><span class="muted">재연결 필요</span>
         {% elif report_state == "missing" %}<strong>찾을 수 없음</strong><br><span class="muted">재연결 필요</span>
@@ -168,10 +168,10 @@
         {% else %}<span class="muted">아직 없음</span>{% endif %}
       </td>
       <td>
-        <form method="post" action="/admin/link/delete" style="display:inline">
+        <form method="post" action="/admin/links/revoke" style="display:inline">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="key" value="{{ link.key }}">
-          {% if link.key not in revoked_link_keys %}
+          <input type="hidden" name="key" value="{{ link.key_hash }}">
+          {% if link.key_hash not in revoked_link_keys %}
           <button type="submit" class="btn ghost" aria-describedby="company-link-close-note">LINK 철회</button>
           {% else %}<span class="muted">이력 보존 중</span>{% endif %}
         </form>
@@ -255,10 +255,49 @@
   <h2>현재 상태</h2>
   <p class="lede"><strong>확인 불가</strong></p>
   <p class="muted">
-    저장된 링크·초대 명단과 비용 원장을 함께 확인할 수 없어 수치와 변경 양식을
-    표시하지 않았습니다. 저장소 상태를 확인한 뒤 이 화면을 다시 열어주세요.
+    {% if revocation_data_available %}
+    비용 원장을 확인할 수 없어 금액과 권한을 늘리는 변경 양식을 표시하지 않았습니다.
+    {% else %}
+    저장된 LINK·MEMBER 목록 또는 비용 원장을 확인할 수 없어 수치와 변경 양식을
+    표시하지 않았습니다.
+    {% endif %}
+    저장소 상태를 확인한 뒤 이 화면을 다시 열어주세요.
   </p>
 </div>
+{% if revocation_data_available %}
+<div class="card" aria-labelledby="emergency-revocation-title">
+  <h2 id="emergency-revocation-title">비상 철회만 가능</h2>
+  <p class="muted">
+    비용 원장 장애와 무관하게 이미 준 LINK·MEMBER 권한은 즉시 줄일 수 있습니다.
+    새 링크 발급과 친구 초대는 원장이 정상일 때만 다시 열립니다.
+  </p>
+  {% if revocation_links %}
+  <h3 style="margin-top:18px">살아 있는 LINK</h3>
+  {% for link in revocation_links %}
+  <form method="post" action="/admin/links/revoke" class="btn-row">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="key" value="{{ link.key_hash }}">
+    <span>{{ link.company }} · {{ link.job or "직무 미지정" }}</span>
+    <button type="submit" class="btn ghost">LINK 철회</button>
+  </form>
+  {% endfor %}
+  {% endif %}
+  {% if revocation_members %}
+  <h3 style="margin-top:18px">초대한 MEMBER</h3>
+  {% for member in revocation_members %}
+  <form method="post" action="/admin/revoke" class="btn-row">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="email" value="{{ member.email }}">
+    <span>{{ member.display_name or member.email }}</span>
+    <button type="submit" class="btn ghost">MEMBER 철회</button>
+  </form>
+  {% endfor %}
+  {% endif %}
+  {% if not revocation_links and not revocation_members %}
+  <p class="muted" style="margin-top:16px">지금 철회할 LINK나 MEMBER가 없습니다.</p>
+  {% endif %}
+</div>
+{% endif %}
 {% endif %}
 
 <div class="btn-row">

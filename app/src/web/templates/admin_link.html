@@ -55,9 +55,9 @@
     연결합니다. 입력을 비우고 저장하면 연결을 해제합니다.
     <strong>동명 회사는 연결 전에 법인명과 주소를 다시 확인하세요.</strong>
   </p>
-  <form method="post" action="/admin/link/report" style="margin-top:14px">
+  <form method="post" action="/admin/links/report" style="margin-top:14px">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <input type="hidden" name="key" value="{{ link.key }}">
+    <input type="hidden" name="key" value="{{ link.key_hash }}">
     <div class="field">
       <label for="report_reference">결과 화면 주소 또는 ID</label>
       <input id="report_reference" name="report_reference"
@@ -96,11 +96,11 @@
     <tr><th scope="row">연결된 시작 보고서</th>
         <td>
           {% if report_state == "active" %}
-            ⭕ <a href="/admin/link/report/{{ link.report_id }}">관리자 검수로 보기</a>
+            ⭕ <a href="/admin/reports/{{ link.report_id }}">관리자 검수로 보기</a>
             <br><span class="muted">방문자가 LINK를 처음 열 때 이 보고서가 바로 열립니다 (0원).</span>
           {% elif report_state == "expired" %}
             <strong>공유 기간 만료 · 재연결 필요</strong>
-            <br><a href="/admin/link/report/{{ link.report_id }}">관리자 검수로 보기</a>
+            <br><a href="/admin/reports/{{ link.report_id }}">관리자 검수로 보기</a>
           {% elif report_state == "missing" %}
             <strong>저장소에서 찾을 수 없음 · 재연결 필요</strong>
             <br><span class="muted">받은 사람은 회사가 채워진 첫 화면과 안내를 봅니다.</span>
@@ -183,7 +183,7 @@
       <td>
         <span class="muted">run/public ID<br>{{ run.run_id }}</span>
         {% if run.report_id and run_report_states.get(run.run_id) == "available" %}
-          <br><a href="/admin/link/report/{{ run.report_id }}">관리자 검수로 열기</a>
+          <br><a href="/admin/reports/{{ run.report_id }}">관리자 검수로 열기</a>
         {% elif run.report_id %}
           <br><strong>저장 보고서 없음</strong>
         {% endif %}

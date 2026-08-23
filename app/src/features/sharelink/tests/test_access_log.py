@@ -41,3 +41,14 @@ def test_안전한_관리자_해시와_일반_보고서_ID는_로그에서_유�
 
     assert report_id in report_record.getMessage()
     assert key_hash in admin_record.getMessage()
+
+
+def test_구형과_신형_관리자_주소의_raw_LINK를_모두_가린다():
+    raw_key = "0f1e2d3c4b5a69780f1e2d3c4b5a6978"
+    filter_ = CapabilityAccessLogFilter()
+
+    for path in (f"/admin/link/{raw_key}", f"/admin/links/{raw_key}"):
+        record = _uvicorn_record(path)
+        filter_.filter(record)
+        assert raw_key not in record.getMessage()
+        assert "[LINK_REDACTED]" in record.getMessage()

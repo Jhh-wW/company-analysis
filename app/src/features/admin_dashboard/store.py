@@ -501,6 +501,39 @@ class ReportErrorHistory:
     payload_json: str
 
 
+class ReportSnapshotIntegrityError(RuntimeError):
+    """저장된 버전 원본과 함께 보존한 SHA-256이 일치하지 않음."""
+
+
+@dataclass(frozen=True)
+class ReportSnapshot:
+    """관리자가 읽는 immutable 보고서 버전 원본."""
+
+    report_id: str
+    version: int
+    payload_json: str
+    payload_sha256: str
+    actor: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class SurveySnapshot:
+    """한 MEMBER·한 보고서 버전에 결속된 최신 설문 답변."""
+
+    report_id: str
+    report_version: int
+    actor_email: str
+    rating: int
+    overall_feedback: str
+    business_distinction: str
+    add_information: str
+    delete_information: str
+    revision: int
+    created_at: str
+    updated_at: str
+
+
 @dataclass(frozen=True)
 class ResolvedIssue:
     """관리자가 재검사 뒤 정상으로 다시 연 최근 문제."""
@@ -515,7 +548,7 @@ class ResolvedIssue:
 
 @dataclass(frozen=True)
 class MemberFeedback:
-    """친구 화면에서 읽는 MEMBER 최신 설문 원문."""
+    """친구 화면에서 읽는 MEMBER·보고서 버전별 최신 설문 원문."""
 
     report_id: str
     corp_id: str
@@ -530,6 +563,9 @@ class MemberFeedback:
     revision: int
     created_at: str
     updated_at: str
+    report_version: int
+    report_payload_sha256: str
+    snapshot_available: bool
 
 
 @dataclass(frozen=True)
@@ -1066,17 +1102,54 @@ def report_snapshot_exists(
     return row is not None
 
 
+def get_report_snapshot(
+    conn: sqlite3.Connection, *, report_id: str, version: int
+) -> ReportSnapshot | None:
+    """요청 버전의 원본을 읽고 저장 당시 SHA-256과 다시 대조한다.
+
+    누락은 ``None``으로 구분하지만, 원본과 지문이 다르면 현재 보고서로 대신하지
+    못하도록 별도 무결성 오류를 낸다.
+    """
+
+    clean_id = _clean(report_id, maximum=128)
+    clean_version = int(version)
+    if not clean_id or clean_version < 1:
+        raise ValueError("올바른 보고서 버전이 필요합니다.")
+    row = conn.execute(
+        f"""SELECT report_id, version, payload_json, payload_sha256, actor, created_at
+        FROM {TABLE_REPORT_VERSIONS} WHERE report_id = ? AND version = ?""",
+        (clean_id, clean_version),
+    ).fetchone()
+    if row is None:
+        return None
+    payload_json = str(row["payload_json"])
+    payload_sha256 = str(row["payload_sha256"])
+    actual_sha256 = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+    if not payload_sha256 or actual_sha256 != payload_sha256:
+        raise ReportSnapshotIntegrityError(
+            "보고서 스냅샷 원본과 SHA-256이 일치하지 않습니다."
+        )
+    return ReportSnapshot(
+        report_id=str(row["report_id"]),
+        version=int(row["version"]),
+        payload_json=payload_json,
+        payload_sha256=payload_sha256,
+        actor=str(row["actor"]),
+        created_at=str(row["created_at"]),
+    )
+
+
 def approved_report_payload(conn: sqlite3.Connection, *, report_id: str) -> str:
     """정상 공개로 승인된 버전의 immutable payload만 돌려준다."""
     state = get_report_state(conn, report_id)
     if state.status != REPORT_STATUS_NORMAL or state.blocked:
         return ""
-    row = conn.execute(
-        f"""SELECT payload_json FROM {TABLE_REPORT_VERSIONS}
-        WHERE report_id = ? AND version = ?""",
-        (_clean(report_id, maximum=128), state.version),
-    ).fetchone()
-    return "" if row is None else str(row["payload_json"])
+    snapshot = get_report_snapshot(
+        conn,
+        report_id=report_id,
+        version=state.version,
+    )
+    return "" if snapshot is None else snapshot.payload_json
 
 
 def report_is_blocked(conn: sqlite3.Connection, report_id: str) -> bool:
@@ -1148,21 +1221,23 @@ def record_error(
 def _enter_maintenance_for_repeated_error(
     conn: sqlite3.Connection, *, area: str, reason: str, now_iso: str
 ) -> None:
-    """동일한 신고 원인이 서로 다른 보고서에서 두 번 확인되면 점검으로 전환한다.
+    """서로 다른 두 MEMBER·보고서에서 같은 신고가 확인되면 점검으로 전환한다.
 
     자유 서술을 추정하거나 외부 호출로 심각도를 판정하지 않는다. 정확히 같은
-    대상과 원인이 두 보고서에 기록된 경우에만 보수적으로 전환하며, 정상 복귀는
-    관리자 POST로만 가능하다.
+    대상과 원인이 서로 다른 인증 MEMBER와 서로 다른 보고서에 기록된 경우에만
+    보수적으로 전환한다. 한 MEMBER의 반복 신고는 각 보고서만 차단하며 전역 점검을
+    만들지 않는다. 정상 복귀는 관리자 POST로만 가능하다.
     """
     current = get_service_state(conn)
     if current.status == SERVICE_MAINTENANCE:
         return
     row = conn.execute(
-        f"""SELECT COUNT(DISTINCT report_id) AS count
+        f"""SELECT COUNT(DISTINCT report_id) AS report_count,
+            COUNT(DISTINCT actor_email) AS actor_count
         FROM {TABLE_ERRORS} WHERE area = ? AND reason = ?""",
         (area, reason),
     ).fetchone()
-    if int(row["count"]) < 2:
+    if int(row["report_count"]) < 2 or int(row["actor_count"]) < 2:
         return
     impact = "같은 원인의 오류 신고가 2건 접수되어 관련 결과·다운로드·공유를 차단했습니다."
     next_action = "원인 확인과 재검사 기록을 남긴 뒤, 운영자가 직접 재시작합니다."
@@ -1307,10 +1382,49 @@ def save_survey(
         (report_id, report_version, report_payload_sha256, actor_email, revision, rating,
          overall_feedback, business_distinction, add_information, delete_information, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (clean_id, snapshot_version, payload_sha256, actor, revision, int(rating),
+        (clean_id, snapshot_version, payload_sha256, actor, snapshot_revision, int(rating),
          overall, distinction, optional_add, optional_delete, now_iso),
     )
-    return revision
+    return snapshot_revision
+
+
+def get_survey_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    report_id: str,
+    report_version: int,
+    actor_email: str,
+) -> SurveySnapshot | None:
+    """현재 열어 본 보고서 버전에 해당하는 MEMBER 답변만 읽는다."""
+
+    clean_id = _clean(report_id, maximum=128)
+    clean_version = int(report_version)
+    actor = _actor(actor_email)
+    if not clean_id or clean_version < 1:
+        raise ValueError("올바른 보고서 버전이 필요합니다.")
+    row = conn.execute(
+        f"""SELECT report_id, report_version, actor_email, rating,
+            overall_feedback, business_distinction, add_information,
+            delete_information, revision, created_at, updated_at
+        FROM {TABLE_SURVEY_SNAPSHOTS}
+        WHERE report_id = ? AND report_version = ? AND actor_email = ?""",
+        (clean_id, clean_version, actor),
+    ).fetchone()
+    if row is None:
+        return None
+    return SurveySnapshot(
+        report_id=str(row["report_id"]),
+        report_version=int(row["report_version"]),
+        actor_email=str(row["actor_email"]),
+        rating=int(row["rating"]),
+        overall_feedback=str(row["overall_feedback"]),
+        business_distinction=str(row["business_distinction"]),
+        add_information=str(row["add_information"]),
+        delete_information=str(row["delete_information"]),
+        revision=int(row["revision"]),
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
+    )
 
 
 def get_service_state(conn: sqlite3.Connection) -> ServiceState:
@@ -1570,7 +1684,7 @@ def survey_summary(
     clean_start = _clean(start_day, maximum=10)
     query = f"""SELECT COUNT(*) AS total,
                    COALESCE(SUM(CASE WHEN s.rating >= 4 THEN 1 ELSE 0 END), 0) AS helpful
-            FROM {TABLE_SURVEYS} AS s
+            FROM {TABLE_SURVEY_SNAPSHOTS} AS s
             LEFT JOIN {TABLE_REPORT_TRASH} AS t ON t.report_id = s.report_id
             WHERE (t.status IS NULL OR t.status = ?)"""
     params: list[object] = [TRASH_ACTIVE]
@@ -1627,42 +1741,98 @@ def list_recent_resolved_issues(
 def list_member_feedback(
     conn: sqlite3.Connection, *, start_day: str = "", limit: int = 200
 ) -> list[MemberFeedback]:
-    """선택 기간의 MEMBER 최신 설문을 회사·보고서와 함께 돌려준다."""
+    """선택 기간의 MEMBER 설문을 정확한 보고서 버전별로 돌려준다.
+
+    append-only 설문 사건이 저장한 SHA-256과 immutable 버전 표의 SHA-256이 같고,
+    원본을 다시 계산한 SHA-256까지 같을 때만 관리자 스냅샷 링크를 연다. 누락·손상
+    자료를 현재 보고서 원본으로 대신하지 않는다.
+    """
+
     clean_start = _clean(start_day, maximum=10)
-    query = f"""SELECT s.report_id, r.corp_id, r.payload_json, r.job, s.actor_email, s.rating,
-            s.overall_feedback, s.business_distinction, s.add_information,
-            s.delete_information, s.revision, s.created_at, s.updated_at
-        FROM {TABLE_SURVEYS} AS s
-        JOIN {storage_constants.TABLE_REPORTS} AS r ON r.report_id = s.report_id
-        LEFT JOIN {TABLE_REPORT_TRASH} AS t ON t.report_id = s.report_id
+    query = f"""WITH latest_snapshot_events AS (
+            SELECT event.*
+            FROM {TABLE_SURVEY_SNAPSHOT_EVENTS} AS event
+            JOIN (
+                SELECT report_id, report_version, actor_email, MAX(id) AS event_id
+                FROM {TABLE_SURVEY_SNAPSHOT_EVENTS}
+                GROUP BY report_id, report_version, actor_email
+            ) AS latest ON latest.event_id = event.id
+        )
+        SELECT event.report_id, event.report_version, r.corp_id, r.job,
+            event.actor_email, event.rating, event.overall_feedback,
+            event.business_distinction, event.add_information,
+            event.delete_information, event.revision,
+            event.created_at, event.created_at AS updated_at,
+            s.revision AS projection_revision,
+            COALESCE(event.report_payload_sha256, '') AS event_sha256,
+            COALESCE(version.payload_sha256, '') AS stored_sha256,
+            COALESCE(version.payload_json, '') AS snapshot_payload_json
+        FROM latest_snapshot_events AS event
+        LEFT JOIN {TABLE_SURVEY_SNAPSHOTS} AS s
+          ON event.report_id = s.report_id
+         AND event.report_version = s.report_version
+         AND event.actor_email = s.actor_email
+        JOIN {storage_constants.TABLE_REPORTS} AS r
+          ON r.report_id = event.report_id
+        LEFT JOIN {TABLE_REPORT_VERSIONS} AS version
+          ON version.report_id = event.report_id
+         AND version.version = event.report_version
+         AND version.payload_sha256 = event.report_payload_sha256
+        LEFT JOIN {TABLE_REPORT_TRASH} AS t ON t.report_id = event.report_id
         WHERE (t.status IS NULL OR t.status = ?)"""
     params: list[object] = [TRASH_ACTIVE]
     if clean_start:
-        query += " AND substr(s.updated_at, 1, 10) >= ?"
+        query += " AND substr(event.created_at, 1, 10) >= ?"
         params.append(clean_start)
-    query += " ORDER BY s.updated_at DESC, s.report_id ASC LIMIT ?"
+    query += " ORDER BY event.created_at DESC, event.report_id ASC, event.report_version DESC LIMIT ?"
     params.append(max(1, min(int(limit), 500)))
     rows = conn.execute(query, tuple(params)).fetchall()
-    return [
-        MemberFeedback(
-            report_id=str(row["report_id"]),
-            corp_id=str(row["corp_id"]),
-            company=_report_company(
-                row["payload_json"], fallback=str(row["corp_id"])
-            ),
-            job=str(row["job"]),
-            actor_email=str(row["actor_email"]),
-            rating=int(row["rating"]),
-            overall_feedback=str(row["overall_feedback"]),
-            business_distinction=str(row["business_distinction"]),
-            add_information=str(row["add_information"]),
-            delete_information=str(row["delete_information"]),
-            revision=int(row["revision"]),
-            created_at=str(row["created_at"]),
-            updated_at=str(row["updated_at"]),
+    feedback: list[MemberFeedback] = []
+    for row in rows:
+        payload_json = str(row["snapshot_payload_json"])
+        event_sha256 = str(row["event_sha256"])
+        stored_sha256 = str(row["stored_sha256"])
+        event_revision = int(row["revision"])
+        projection_revision = (
+            None
+            if row["projection_revision"] is None
+            else int(row["projection_revision"])
         )
-        for row in rows
-    ]
+        snapshot_available = bool(
+            payload_json
+            and event_sha256
+            and projection_revision is not None
+            and event_revision == projection_revision
+            and event_sha256 == stored_sha256
+            and hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+            == stored_sha256
+        )
+        feedback.append(
+            MemberFeedback(
+                report_id=str(row["report_id"]),
+                corp_id=str(row["corp_id"]),
+                company=_report_company(
+                    payload_json if snapshot_available else "",
+                    fallback=str(row["corp_id"]),
+                ),
+                job=str(row["job"]),
+                actor_email=str(row["actor_email"]),
+                rating=int(row["rating"]),
+                overall_feedback=str(row["overall_feedback"]),
+                business_distinction=str(row["business_distinction"]),
+                add_information=str(row["add_information"]),
+                delete_information=str(row["delete_information"]),
+                revision=event_revision,
+                created_at=str(row["created_at"]),
+                updated_at=str(row["updated_at"]),
+                report_version=int(row["report_version"]),
+                report_payload_sha256=(
+                    stored_sha256 if snapshot_available else ""
+                ),
+                snapshot_available=snapshot_available,
+            )
+        )
+    return feedback
 
 
 def member_usage_today(conn: sqlite3.Connection, *, actor_email: str, day: str) -> tuple[int, int]:

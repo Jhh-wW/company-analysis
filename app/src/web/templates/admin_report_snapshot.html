@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}설문 당시 보고서 · 기업분석{% endblock %}
+{% block bodyclass %}admin-frame-page dashboard-mobile-restricted{% endblock %}
+{% block wrapclass %}wide admin-frame{% endblock %}
+{% block content %}
+<header class="frame-heading">
+  <p class="frame-kicker">관리자 전용 · 과거 스냅샷 · 읽기 전용</p>
+  <h1>{{ report.company }}</h1>
+  <p class="lede">MEMBER 설문이 제출된 당시의 보고서 버전 {{ report_snapshot.version }}입니다. 현재 보고서로 바꾸어 보여주지 않습니다.</p>
+</header>
+{% set dashboard_nav = "members" %}{% include "_admin_nav.html" %}
+
+<section class="frame-section">
+  <p class="frame-eyebrow">스냅샷 식별</p>
+  <article class="card">
+    <h2>버전 {{ report_snapshot.version }} · 읽기 전용</h2>
+    <p>동결 {{ report_snapshot.created_at }} · 생성 기준 {{ report.generated_at or "확인 불가" }}</p>
+    <details>
+      <summary>기술 식별값 보기</summary>
+      <p>보고서 ID {{ report_snapshot.report_id }}</p>
+      <p>SHA-256 {{ report_snapshot.payload_sha256 }}</p>
+    </details>
+    <p><a class="btn ghost" href="/admin/members">친구 의견으로 돌아가기</a> <a class="btn ghost" href="/admin/reports/{{ report_snapshot.report_id }}">현재 보고서 검토</a></p>
+  </article>
+</section>
+
+<section class="frame-section">
+  <p class="frame-eyebrow">당시 보고서 요약과 출처</p>
+  <article class="card">
+    <h2>{{ report.company }}</h2>
+    {% if report.summary_items %}<ol>{% for item in report.summary_items %}<li>{{ item.text }}</li>{% endfor %}</ol>{% else %}<p>당시 핵심 요약이 없는 보고서입니다.</p>{% endif %}
+    <h3>출처 {{ report.citations|length }}건</h3>
+    <ul>{% for source in report.citations %}<li>{{ source.label }}{% if source.url and (source.url.startswith('https://') or source.url.startswith('http://')) %} · <a href="{{ source.url }}" target="_blank" rel="noopener noreferrer">원문</a>{% elif source.url %} · <span class="muted">안전한 웹 주소가 아님</span>{% endif %}</li>{% else %}<li>저장된 출처가 없습니다.</li>{% endfor %}</ul>
+  </article>
+</section>
+
+<section class="frame-section">
+  <p class="frame-eyebrow">동결 원본</p>
+  <details class="card">
+    <summary>정확한 JSON 원본 보기</summary>
+    <p class="muted">아래 내용은 수정하거나 현재 보고서로 대체하지 않은 당시 원본입니다.</p>
+    <pre style="white-space:pre-wrap;overflow-wrap:anywhere">{{ report_snapshot.payload_json }}</pre>
+  </details>
+</section>
+{% endblock %}

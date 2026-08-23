@@ -5,9 +5,8 @@
 
 {% block content %}
 <section class="home-hero" aria-labelledby="home-title">
-  <p class="home-eyebrow">COMPANY INTELLIGENCE REPORT</p>
   <h1 id="home-title" class="brand-mark brand-mark-hero">기업 분석<span class="brand-mark-dot" aria-hidden="true"></span></h1>
-  <p class="home-subtitle">동종업계 속 회사의 우위와 근거를 이해하는 도구</p>
+  <p class="home-subtitle">취업 준비생을 위한 3분 기업 분석</p>
 </section>
 
 {% if share_notice %}
@@ -132,9 +131,9 @@
   </div>
 
   <div class="field">
-    <label for="region">회사 주소 구/군까지 <span class="optional">(선택)</span></label>
+    <label for="region">회사 주소 구/군까지</label>
     <div class="hint" id="region-hint">
-      같은 이름의 회사를 구분하는 데 사용합니다. 본사 주소와 달라도 확인 화면에서 선택할 수 있습니다.
+      같은 이름의 회사를 구분하는 데 사용합니다.
     </div>
     <input type="text" id="region" name="region" autocomplete="off"
            maxlength="{{ region_max_chars }}" aria-describedby="region-hint"

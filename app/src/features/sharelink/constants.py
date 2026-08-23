@@ -70,6 +70,9 @@ OPEN_WINDOW_ROWS_PER_LINK: Final[int] = 64
 #: 구형 개별 이벤트가 이미 많아도 관리 화면 읽기가 다시 증폭되지 않는 상한.
 LEGACY_OPEN_EVENTS_DISPLAY_LIMIT: Final[int] = 512
 
+#: 기존 연결 보고서 조회 사건은 append-only로 보존하되 관리자 한 화면은 제한한다.
+REPORT_VIEW_EVENTS_DISPLAY_LIMIT: Final[int] = 512
+
 # ══════════════════════════════════════════════════════════
 # 링크마다 따로 세는 예산
 # ══════════════════════════════════════════════════════════

@@ -13,7 +13,7 @@ from typing import Final
 
 
 _RAW_LINK_PATH: Final[re.Pattern[str]] = re.compile(
-    r"(?P<prefix>/(?:k|admin/link)/)[0-9a-f]{32}"
+    r"(?P<prefix>/(?:k|admin/links?)/)[0-9a-f]{32}"
     r"(?:[?#][^\s\"]*)?(?=$|[/\s\"])",
     re.IGNORECASE,
 )

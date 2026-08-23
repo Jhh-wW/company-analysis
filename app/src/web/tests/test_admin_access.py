@@ -72,7 +72,7 @@ def _assert_503_alert(response) -> None:
     assert 'role="alert"' in response.text
 
 
-def _assert_access_unknown(response) -> None:
+def _assert_access_unknown(response, *, revocation_available: bool = False) -> None:
     _assert_503_alert(response)
     assert "확인 불가" in response.text
     assert "오늘 실제 지출" not in response.text
@@ -80,7 +80,11 @@ def _assert_access_unknown(response) -> None:
     assert "구성상 차단 기준 합계" not in response.text
     assert 'action="/admin/link/new"' not in response.text
     assert 'action="/admin/invite"' not in response.text
-    assert 'action="/admin/revoke"' not in response.text
+    if revocation_available:
+        assert 'action="/admin/revoke"' in response.text
+        assert "비상 철회만 가능" in response.text
+    else:
+        assert 'action="/admin/revoke"' not in response.text
 
 
 def _security_audit_events(caplog) -> list[dict[str, str]]:
@@ -288,7 +292,9 @@ def test_접근목록이나_비용정본_장애는_0원과_빈목록으로_보�
 
     response = admin.get("/admin/access")
 
-    _assert_access_unknown(response)
+    _assert_access_unknown(
+        response, revocation_available=failure in {"ledger", "budget_health"}
+    )
     assert "private database detail" not in response.text
     assert "private ledger detail" not in response.text
 
@@ -615,7 +621,7 @@ def test_기존_링크에도_보고서를_연결하고_다시_해제할수있다
         follow_redirects=False,
     )
     assert attached.status_code == 303
-    assert attached.headers["location"] == f"/admin/link/{key_hash}"
+    assert attached.headers["location"] == f"/admin/links/{key_hash}"
     with storage_db.connect() as conn:
         assert share_store.load(conn, key).report_id == report_id
 
@@ -767,7 +773,7 @@ def test_링크를_닫을_수_있다(admin: TestClient):
         events = share_store.list_open_events_by_hash(conn, key_hash)
         runs = share_store.list_runs_by_hash(conn, key_hash)
     assert closed.status_code == 303
-    assert closed.headers["location"] == f"/admin/link/{key_hash}"
+    assert closed.headers["location"] == f"/admin/links/{key_hash}"
     assert link is not None
     assert link.is_revoked
     assert len(events) == 1
@@ -872,6 +878,110 @@ def test_친구를_초대하고_뺄_수_있다(admin: TestClient):
     with storage_db.connect() as conn:
         member = share_allow.load(conn, "friend@gmail.com")
         assert member is not None and member.note == "재초대"
+
+
+@pytest.mark.parametrize("failure", ["budget_health", "ledger_read"])
+def test_비용원장장애에도_비상화면에서_LINK와_MEMBER를_원자철회한다(
+    admin: TestClient, monkeypatch, failure: str
+):
+    created = admin.post(
+        "/admin/link/new",
+        data={"company": "카카오", "job": "마케팅"},
+        follow_redirects=False,
+    )
+    raw_key, key_hash = _issued_link(created)
+    invited = admin.post(
+        "/admin/invite",
+        data={"email": "emergency@example.com", "display_name": "비상 철회 대상"},
+        follow_redirects=False,
+    )
+    assert invited.status_code == 303
+    member_session = auth_logic.create_session("emergency@example.com", False)
+
+    if failure == "budget_health":
+        monkeypatch.setattr(admin_router.paid_runtime, "_BUDGET_STORE_HEALTHY", False)
+    else:
+        monkeypatch.setattr(
+            admin_router.spend_store,
+            "load_day",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                sqlite3.OperationalError("private ledger detail")
+            ),
+        )
+
+    emergency = admin.get("/admin/access")
+    _assert_access_unknown(emergency, revocation_available=True)
+    assert 'action="/admin/links/revoke"' in emergency.text
+    assert 'name="key" value="' + key_hash + '"' in emergency.text
+    assert 'action="/admin/link/new"' not in emergency.text
+    assert 'action="/admin/invite"' not in emergency.text
+
+    revoked_member = admin.post(
+        "/admin/revoke",
+        data={"email": "emergency@example.com"},
+        follow_redirects=False,
+    )
+    revoked_link = admin.post(
+        "/admin/link/delete",
+        data={"key": key_hash},
+        follow_redirects=False,
+    )
+
+    assert revoked_member.status_code == 303
+    assert revoked_link.status_code == 303
+    with storage_db.connect() as conn:
+        assert not share_allow.is_allowed(conn, "emergency@example.com")
+        link = share_store.load(conn, raw_key)
+        assert link is not None and link.is_revoked
+    assert auth_logic.get_session(member_session.token) is None
+    actions = [row["action"] for row in _durable_audit_rows()]
+    assert "admin.member.revoke" in actions
+    assert "admin.link.revoke" in actions
+
+
+def test_철회_감사정본실패는_LINK와_MEMBER권한_세션을_함께_rollback한다(
+    admin: TestClient, monkeypatch
+):
+    created = admin.post(
+        "/admin/link/new",
+        data={"company": "카카오", "job": "마케팅"},
+        follow_redirects=False,
+    )
+    raw_key, key_hash = _issued_link(created)
+    assert admin.post(
+        "/admin/invite",
+        data={"email": "atomic@example.com"},
+        follow_redirects=False,
+    ).status_code == 303
+    member_session = auth_logic.create_session("atomic@example.com", False)
+
+    def fail_success_audit(*_args, **_kwargs):
+        raise sqlite3.OperationalError("private durable audit failure")
+
+    monkeypatch.setattr(admin_router, "_queue_committed_change", fail_success_audit)
+    revoked_member = admin.post(
+        "/admin/revoke",
+        data={"email": "atomic@example.com"},
+        follow_redirects=False,
+    )
+    revoked_link = admin.post(
+        "/admin/link/delete",
+        data={"key": key_hash},
+        follow_redirects=False,
+    )
+
+    assert revoked_member.status_code == 503
+    assert revoked_link.status_code == 503
+    assert "private durable audit failure" not in revoked_member.text
+    assert "private durable audit failure" not in revoked_link.text
+    with storage_db.connect() as conn:
+        assert share_allow.is_allowed(conn, "atomic@example.com")
+        link = share_store.load(conn, raw_key)
+        assert link is not None and not link.is_revoked
+    assert auth_logic.get_session(member_session.token) is not None
+    actions = [row["action"] for row in _durable_audit_rows()]
+    assert "admin.member.revoke" not in actions
+    assert "admin.link.revoke" not in actions
 
 
 def test_이상한_이메일은_안_들어간다(admin: TestClient):
@@ -1280,8 +1390,8 @@ def test_raw_LINK는_일회성응답외_DB_HTML_로그에_남지않는다(
     # httpx의 클라이언트측 요청 로그는 서버 로그가 아니므로 별도 계약으로 분리한다.
     caplog.clear()
     legacy = admin.get(f"/admin/link/{raw_key}", follow_redirects=False)
-    assert legacy.status_code == 303
-    assert legacy.headers["location"] == f"/admin/link/{key_hash}"
+    assert legacy.status_code == 404
+    assert "location" not in legacy.headers
     assert raw_key not in legacy.text
 
 
@@ -1335,7 +1445,71 @@ def test_정본공개주소가_없거나_잘못되면_악성Host를_발급주소
 def test_없는_링크는_목록으로_보낸다(admin: TestClient):
     response = admin.get("/admin/link/" + "f" * 32, follow_redirects=False)
 
-    assert response.headers["location"] == "/admin/access"
+    assert response.status_code == 404
+    assert "location" not in response.headers
+
+
+def test_구형_LINK_관리주소는_해시만_신형으로_보내고_raw는_거절한다(
+    admin: TestClient, monkeypatch
+):
+    raw_key = "0f1e2d3c4b5a69780f1e2d3c4b5a6978"
+    key_hash = share_store.key_hash_of(raw_key)
+    with storage_db.connect() as conn:
+        assert share_store.insert_new(
+            conn,
+            key=raw_key,
+            company="카카오",
+            job="마케팅",
+            now_iso="2026-08-23T10:00:00+09:00",
+        )
+
+    canonical = admin.get(f"/admin/link/{key_hash}", follow_redirects=False)
+    assert canonical.status_code == 303
+    assert canonical.headers["location"] == f"/admin/links/{key_hash}"
+
+    def unexpected_lookup(*_args, **_kwargs):
+        raise AssertionError("raw LINK를 DB에서 조회하면 안 됩니다")
+
+    monkeypatch.setattr(share_store, "load", unexpected_lookup)
+    monkeypatch.setattr(share_store, "load_by_hash", unexpected_lookup)
+    for path in (f"/admin/link/{raw_key}", f"/admin/links/{raw_key}"):
+        rejected = admin.get(path, follow_redirects=False)
+        assert rejected.status_code == 404
+        assert "location" not in rejected.headers
+
+
+def test_raw_LINK는_신형_보고서연결과_철회_POST에서도_거절한다(
+    admin: TestClient,
+):
+    raw_key = "abcdef0123456789abcdef0123456789"
+    key_hash = share_store.key_hash_of(raw_key)
+    with storage_db.connect() as conn:
+        assert share_store.insert_new(
+            conn,
+            key=raw_key,
+            company="카카오",
+            job="마케팅",
+            now_iso="2026-08-23T10:00:00+09:00",
+        )
+
+    report_change = admin.post(
+        "/admin/links/report",
+        data={"key": raw_key, "report_reference": ""},
+        follow_redirects=False,
+    )
+    revoke = admin.post(
+        "/admin/links/revoke",
+        data={"key": raw_key},
+        follow_redirects=False,
+    )
+
+    assert report_change.status_code == 400
+    assert revoke.status_code == 400
+    with storage_db.connect() as conn:
+        stored = share_store.load_by_hash(conn, key_hash)
+    assert stored is not None
+    assert stored.report_id == ""
+    assert not stored.is_revoked
 
 
 def test_관리화면은_누구를_봤다고_과장하지않고_요청지표만_말한다(
@@ -1403,7 +1577,7 @@ def test_관리자_LINK이력은_완료상태_비용_출고해시와_보고서�
     assert "완료" in detail.text
     assert "AI 원가 321원" in detail.text
     assert "고객 청구 990원" in detail.text
-    assert f'href="/admin/link/report/{report_id}"' in detail.text
+    assert f'href="/admin/reports/{report_id}"' in detail.text
     assert "b" * 64 in detail.text
     assert raw_key not in detail.text
 
