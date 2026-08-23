@@ -140,6 +140,7 @@ def test_보고서만_전용_문서_레이아웃을_쓴다(monkeypatch):
         "_release_state",
         lambda **_kwargs: (object(), None),
     )
+    monkeypatch.setattr(reports_router, "is_notion_configured", lambda: True)
     session = auth_logic.create_session("admin@example.com", True)
 
     with TestClient(app) as client:
