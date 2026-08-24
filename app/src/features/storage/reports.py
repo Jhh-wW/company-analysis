@@ -318,8 +318,17 @@ def _fact_from_dict(data: dict[str, Any]) -> FactRecord:
 
 
 def report_to_dict(report: Report) -> dict[str, Any]:
-    """`Report` → JSON에 바로 쓸 수 있는 dict."""
-    return {
+    """`Report` → JSON에 바로 쓸 수 있는 dict.
+
+    ★ 새 키를 «있을 때만» 넣는 이유 (2026-08-25) — 이 payload의 바이트가
+      `export_pdf.automatic_release.report_sha256` 의 입력이고, 그 해시가
+      **이미 승인된 PDF 출고 기록**(`pdf_release_records`)에 박혀 있다.
+      키를 무조건 넣으면 옛 보고서의 해시가 통째로 달라져 지난 승인이 전부
+      안 맞게 된다. 그래서 `presentation` 이 기본값일 때 키를 빼는 것과
+      같은 방식으로, 빈 값이면 키를 아예 만들지 않는다.
+      (`test_report_presentation_compat.py` 가 이 계약을 지킨다.)
+    """
+    payload: dict[str, Any] = {
         "company": report.company,
         "job": report.job,
         "corp_type": report.corp_type,
@@ -338,6 +347,14 @@ def report_to_dict(report: Report) -> dict[str, Any]:
         "analysis_period": report.analysis_period,
         "latest_performance_period": report.latest_performance_period,
     }
+    # 엔진 v2 전용 — 부록 「사실 검증」 칸이 읽는 문장 등급.
+    # 비어 있으면(v1·옛 v2) 키를 아예 넣지 않아 옛 payload 바이트를 그대로 둔다.
+    if report.source_grades:
+        payload["source_grades"] = {
+            str(number): list(grades)
+            for number, grades in report.source_grades.items()
+        }
+    return payload
 
 
 def report_from_dict(data: dict[str, Any]) -> Report:
@@ -372,6 +389,13 @@ def report_from_dict(data: dict[str, Any]) -> Report:
         as_of_date=str(data.get("as_of_date", "")),
         analysis_period=str(data.get("analysis_period", "")),
         latest_performance_period=str(data.get("latest_performance_period", "")),
+        # 옛 저장본(이 키가 없는 v1·초기 v2)은 빈 사전으로 읽는다 — 그러면
+        # 부록이 예전처럼 화면 글자에서 등급을 되짚는 폴백으로 떨어진다.
+        source_grades={
+            str(number): [str(grade) for grade in grades]
+            for number, grades in (data.get("source_grades") or {}).items()
+            if isinstance(grades, list)
+        },
     )
 
 

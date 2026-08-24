@@ -599,6 +599,10 @@ def render_report(
 
     #: 부록 번호 → 그 번호를 인용한 장 id들 (v3 순서 유지)
     used_sections: dict[int, list[str]] = {}
+    #: 부록 번호(문자열) → 그 번호를 근거로 쓴 문장들의 등급 («확인»/«해석»).
+    #: 부록의 「사실 검증」 칸이 읽는다 — 자세한 이유는 `pipeline.port.Report`
+    #: 의 `source_grades` 주석에 있다.
+    source_grades: dict[str, list[str]] = {}
 
     sections: list[ReportSection] = []
     # 표기 방식을 적용한 가시성을 먼저 전부 계산한다 — 고아 번호를 되살리려면
@@ -649,6 +653,13 @@ def render_report(
                 owners = used_sections.setdefault(cited, [])
                 if section.section_id not in owners:
                     owners.append(section.section_id)
+                # ★ 등급도 «번호를 보였는지»와 무관하게 싣는다 (같은 이유).
+                #   부록의 「사실 검증」 칸이 이 값을 쓴다 — 화면 글자에서
+                #   되짚으면 숨겨진 «해석» 인용을 못 봐서 「사실 검증 완료」로
+                #   잘못 표시된다(2026-08-25 적대 검수가 재현).
+                grades = source_grades.setdefault(str(cited), [])
+                if sentence.grade not in grades:
+                    grades.append(sentence.grade)
 
         tables: list[ReportTable] = []
         # ★ 설계 변경(2026-08-25) — 「한 장에 표는 하나」라는 암묵적 단수
@@ -781,4 +792,5 @@ def render_report(
         as_of_date=as_of_date,
         analysis_period=analysis_period,
         latest_performance_period=latest_performance_period,
+        source_grades=source_grades,
     )

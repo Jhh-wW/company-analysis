@@ -621,6 +621,13 @@ def section_content_blocks(
 #: composer 쪽 값이 바뀌면 이 상수도 같이 바꿔야 한다.
 _V2_INTERPRETATION_MARKER = " — 해석"
 
+#: 엔진 v2 문장 등급 중 «해석». `composer.constants.GRADE_INTERPRETED`의 값을
+#: 그대로 옮겨 적었다 — 위 표지 상수와 같은 이유(cross-feature import를 새로
+#: 만들지 않는다). 두 값이 어긋나면 시험이 잡는다
+#: (`test_source_verification_label_v2.py::test_해석_표지_상수가_composer_원본과_같다`
+#:  와 짝인 등급 상수 시험).
+_V2_INTERPRETED_GRADE = "해석"
+
 #: 본문 표시 문장에 박힌 인용 번호 ``[1]`` ``[12]`` 같은 것을 읽는다.
 _CITATION_NUMBER_PATTERN = re.compile(r"\[(\d+)\]")
 
@@ -681,34 +688,46 @@ def _source_verification_label_v1(report: Report, source_id: str) -> str:
 
 
 def _source_verification_label_v2(report: Report, source_id: str) -> str:
-    """엔진 v2(사실 카드 없음) 경로 — 문장 뒤 «확인/해석» 등급을 센다.
+    """엔진 v2(사실 카드 없음) 경로 — 이 자료를 근거로 쓴 문장들의 등급을 센다.
 
-    v2는 fact_records 대신 부록 번호(``report.citations``의 ``Source.number``,
-    ``_source_number_map``과 같은 방식으로 읽는다)와 본문 ``prose_lines``
-    표시 문자열에 박힌 ``[번호]``로 «이 문장이 이 자료에서 왔다»를 되짚는다.
-    render.py는 최종 화면 문자열만 ``pipeline.Report``로 넘기고 문장별
-    원본 등급 객체(``ComposedSentence.grade``)는 그 뒤로 가져오지 않는다
-    (render.py:612-629 확인) — 그 파일은 이 기능 담당이 아니라 고치지 않고,
-    이미 있는 표시 문자열에서 되짚는 방식을 택했다.
+    전부 «확인»이면 「사실 검증 완료」, «해석»이 하나라도 섞이면 「부분 검증」,
+    이 자료를 쓴 문장이 없으면 「본문 사실 없음」.
 
-    ★ 알려진 한계(확인함, 지어내지 않음) — render.py의 절충안 인용 규칙상
-      «해석» 문장은 원래 ``[n]``을 안 보여준다(render.py:274-276). 그 자료가
-      «해석» 문장에서만 인용되면 render.py의 ``_ensure_no_orphan_markers``가
-      최소 한 곳에서는 번호를 되살려 반드시 보이게 만들어 주므로(부록이
-      고아 번호를 만들면 출고 검증이 막는다 — render.py:363-388) 그 경우는
-      이 함수가 잡는다. 다만 같은 번호가 «확인» 문장에서 이미 한 번 보이고
-      있으면 되살릴 필요가 없어, 그 «해석» 문장의 번호는 계속 숨겨진 채로
-      남는다 — 이때는 그 해석 인용을 텍스트에서 찾을 수 없어 「사실 검증
-      완료」로 나올 수 있다(실제로는 「부분 검증」이 맞을 수 있다). 이 칸이
-      「본문 사실 없음」처럼 명백히 틀린 표시를 내지는 않지만, «완료» 쪽으로
-      쏠릴 수 있는 구조적 한계다. render.py가 문장별 등급을
-      ``pipeline.Report``까지 들고 오지 않는 한 이 함수만으로는 못 고친다.
+    ★ 등급을 «어디서» 읽나 — 두 갈래다.
+      ① ``report.source_grades`` (정확한 길). render가 「번호를 보였는지와
+         무관하게」 실어 보낸 값이다. 새로 만든 v2 보고서는 전부 이 길로 간다.
+      ② 그 값이 없으면(이 필드가 생기기 «전»에 저장된 보고서) 예전처럼 본문
+         표시 문자열의 ``[번호]``와 문장 끝 «— 해석» 표지로 되짚는다.
+
+    ★ 왜 ②만으로는 부족한가 (2026-08-25 적대 검수가 «재현»한 결함) —
+      render.py의 절충안 인용 규칙은 «해석» 문장의 ``[n]`` 을 숨긴다. 그 번호가
+      어디에도 안 보이면 ``_ensure_no_orphan_markers`` 가 한 곳을 되살리지만,
+      같은 번호를 «확인» 문장이 이미 보여주고 있으면 되살릴 필요가 없어
+      «해석» 쪽 번호는 끝까지 숨는다. 그러면 ②는 그 해석 인용을 못 보고
+      「사실 검증 완료」라고 적는다 — 실제로는 「부분 검증」이 맞다.
+      ★ 「사실 언급 → 그 사실의 해석」은 이 엔진이 «기본»으로 만드는 문장
+        배열이라 드문 일이 아니다. 그래서 ①을 새로 뚫었다.
+
+    ★ ②를 «지우지» 않는 이유 — 이미 저장된 v2 보고서에는 새 필드가 없다.
+      지우면 그 보고서들이 전부 「본문 사실 없음」으로 되돌아간다(고치기 전
+      바로 그 결함). 옛 저장본은 ②로 계속 읽는다 — 「완료」 쪽으로 쏠릴 수
+      있다는 한계는 그 보고서들에 한해 남는다.
     """
 
     number = _source_number_map(report).get(source_id)
     if number is None:
         return "본문 사실 없음"
 
+    # ① render가 실어 보낸 등급 — 표시 방식과 무관한 «사실»이다.
+    if report.source_grades:
+        grades = report.source_grades.get(str(number))
+        if not grades:
+            return "본문 사실 없음"
+        if any(grade == _V2_INTERPRETED_GRADE for grade in grades):
+            return "부분 검증"
+        return "사실 검증 완료"
+
+    # ② 옛 저장본 폴백 — 화면 글자에서 되짚는다(위 한계 있음).
     found_any = False
     has_interpreted = False
     for section in report.sections:
