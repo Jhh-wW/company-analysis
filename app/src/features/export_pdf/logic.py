@@ -71,6 +71,8 @@ from src.features.report_standard.section_content import (
     summary_topic,
 )
 from src.features.report_standard.visualization import (
+    Card,
+    ChartPoint,
     composition_tone,
     TableVisualization,
     table_visualization,
@@ -142,11 +144,17 @@ class _HorizontalRule(Flowable):
         canvas.line(0, self.height / 2, self.width, self.height / 2)
 
 
-#: 범례 한 줄의 높이와 열 수. 항목이 늘면 높이도 늘어야 글이 겹치지 않는다.
+#: 범례 한 줄의 «최소» 높이(짧은 이름은 이 값 그대로) + 막대~첫 줄 간격,
+#: 그리고 열 수. 항목이 늘면(줄 수) «그리고» 이름이 길면(줄 안 줄바꿈)
+#: 모두 높이가 늘어야 글이 겹치지 않는다.
 _LEGEND_ROW_MM: Final[float] = 5.2
 _LEGEND_COLUMNS: Final[int] = 2
 #: 막대와 여백이 차지하는 고정분 (범례 제외).
 _COMPOSITION_FIXED_MM: Final[float] = 15.4
+#: 범례 칸 안에서 스와치·여백이 차지하는 왼쪽 폭 + 다음 칸과의 여유(pt).
+#: 글자가 실제로 쓸 수 있는 폭 = 칸 폭 − 이 값. draw()·측정 두 곳이 같은
+#: 값을 써야 한다 — 안 맞으면 측정한 높이와 실제로 그리는 줄 수가 어긋난다.
+_LEGEND_LABEL_INSET_PT: Final[float] = 17.0
 
 
 def _composition_color(
@@ -166,16 +174,50 @@ class _CompositionGraphic(Flowable):
     ★ 높이를 «항목 수로 계산»한다. 예전에는 31mm 고정이라 범례가 두 줄
       (항목 4개)까지만 들어갔다 — 6개가 되면 마지막 줄이 도식 밖으로 나가
       다음 문단과 겹친다.
+    ★ 범례 «한 줄»도 내용 길이에 맞춰 늘어난다(2026-08-25, 팀장 실측 —
+      하이브 「MD 및 라이선싱 공식 상품(MD), IP 라이선싱 등」처럼 긴
+      이름이 고정폭 한 줄(``canvas.drawString``)로 찍혀 옆 칸 글자와
+      겹쳤다). 최소 높이는 예전 5.2mm 그대로라 짧은 이름의 모양은 안
+      바뀐다.
     """
 
     def __init__(self, visual: TableVisualization, width: float) -> None:
         super().__init__()
         self.visual = visual
         self.width = width
-        legend_rows = -(-len(visual.items) // _LEGEND_COLUMNS)  # 올림 나눗셈
-        self.height = (
-            _COMPOSITION_FIXED_MM + legend_rows * _LEGEND_ROW_MM
-        ) * mm
+        self._legend_style = ParagraphStyle(
+            "CompositionLegend",
+            fontName=constants.FONT_REGULAR,
+            fontSize=7.5,
+            leading=9.0,
+            textColor=colors.HexColor(constants.COLOR_MUTED),
+            wordWrap="CJK",
+        )
+        self._row_heights = self._measure_legend_row_heights()
+        self.height = (_COMPOSITION_FIXED_MM * mm) + sum(self._row_heights)
+
+    @staticmethod
+    def _legend_text(item: ChartPoint) -> str:
+        return f"{item.label}  {item.display}"
+
+    def _legend_available_width(self) -> float:
+        column_width = self.width / _LEGEND_COLUMNS
+        return max(10.0, column_width - _LEGEND_LABEL_INSET_PT)
+
+    def _measure_legend_row_heights(self) -> list[float]:
+        available = self._legend_available_width()
+        items = self.visual.items
+        heights: list[float] = []
+        for row_start in range(0, len(items), _LEGEND_COLUMNS):
+            row_items = items[row_start : row_start + _LEGEND_COLUMNS]
+            tallest = _LEGEND_ROW_MM * mm
+            for item in row_items:
+                paragraph = Paragraph(_escape(self._legend_text(item)), self._legend_style)
+                # 세로 공간을 사실상 무한대로 주고 «자연 높이»만 잰다.
+                _, needed = paragraph.wrap(available, 200 * mm)
+                tallest = max(tallest, needed)
+            heights.append(tallest)
+        return heights
 
     def wrap(self, avail_width: float, avail_height: float) -> tuple[float, float]:
         self.width = min(self.width, avail_width)
@@ -207,27 +249,35 @@ class _CompositionGraphic(Flowable):
             )
             x += segment_width
 
-        columns = 2
-        column_width = self.width / columns
+        column_width = self.width / _LEGEND_COLUMNS
+        available = self._legend_available_width()
+        # 줄마다 «위쪽 y»를 미리 쌓아 둔다 — 줄 높이가 서로 달라서(긴 이름은
+        # 여러 줄) row * 고정값으로는 다음 줄이 이전 줄과 겹칠 수 있다.
+        row_tops: list[float] = []
+        top = bar_y - (_LEGEND_ROW_MM * mm)
+        for row_height in self._row_heights:
+            row_tops.append(top)
+            top -= row_height
         for index, item in enumerate(self.visual.items):
-            column = index % columns
-            row = index // columns
-            y = bar_y - (5.2 * mm) - (row * 5.2 * mm)
+            column = index % _LEGEND_COLUMNS
+            row = index // _LEGEND_COLUMNS
+            row_top = row_tops[row]
+            row_bottom = row_top - self._row_heights[row]
             color = colors.HexColor(_composition_color(palette, index, item_count))
             canvas.setFillColor(color)
             canvas.setStrokeColor(colors.HexColor(constants.COLOR_MUTED))
             canvas.rect(
                 column * column_width,
-                y + 1.2,
+                row_top - 7,
                 7,
                 7,
                 fill=1,
                 stroke=1,
             )
             canvas.setFillColor(colors.HexColor(constants.COLOR_MUTED))
-            canvas.setFont(constants.FONT_REGULAR, 7.5)
-            label = _single_line_pdf_text(f"{item.label}  {item.display}")
-            canvas.drawString((column * column_width) + 11, y, label)
+            paragraph = Paragraph(_escape(self._legend_text(item)), self._legend_style)
+            paragraph.wrap(available, self._row_heights[row])
+            paragraph.drawOn(canvas, (column * column_width) + 11, row_bottom)
 
 
 class _TrendGraphic(Flowable):
@@ -310,19 +360,71 @@ class _TrendGraphic(Flowable):
                 canvas.drawCentredString(center_x, labels_y, _single_line_pdf_text(point.label))
 
 
+#: 흐름 상자 한 칸의 «최소» 높이. 예전엔 이 값이 고정 높이였다 — 짧은
+#: 내용의 모양은 이 값 그대로 유지한다.
+_FLOW_MIN_ROW_HEIGHT_MM: Final[float] = 18.0
+#: 칸 위아래 안쪽 여백 + 라벨·값 사이 간격의 합(포인트). draw()가 실제로
+#: 쓰는 5(좌우)·3(라벨-값 간격) 여백과 맞춰 둔다 — 안 맞으면 글자가
+#: 상자 테두리에 닿는다.
+_FLOW_ROW_PADDING_PT: Final[float] = 10.0
+
+
 class _FlowGraphic(Flowable):
-    """표의 각 행을 3~4단계 왼쪽→오른쪽 흐름으로 표시한다."""
+    """표의 각 행을 3~4단계 왼쪽→오른쪽 흐름으로 표시한다.
+
+    ★ 줄 높이를 «내용 길이에 맞춰» 계산한다(2026-08-25, 카드 도입과 함께
+      고침). 예전엔 18mm 고정이라 값이 길면 글자가 상자 밖으로 겹쳐
+      나갔다 — 카드로 뺀 1·6·8장뿐 아니라 «진짜 흐름»으로 남긴 2·5·7장도
+      AI가 긴 문장을 넣으면 같은 위험이 있었다. 최소 높이는 예전 18mm를
+      그대로 둬서 짧은 내용의 모양은 바뀌지 않는다.
+    """
 
     def __init__(self, visual: TableVisualization, headers: Sequence[str], width: float) -> None:
         super().__init__()
         self.visual = visual
         self.headers = tuple(headers)
         self.width = width
-        self.row_height = 18 * mm
         self.row_gap = 4 * mm
-        self.height = (len(visual.flows) * self.row_height) + (
+        self._header_style = ParagraphStyle(
+            "FlowHead",
+            fontName=constants.FONT_SEMIBOLD,
+            fontSize=7.5,
+            leading=9.5,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor(constants.COLOR_MUTED),
+            wordWrap="CJK",
+        )
+        self._value_style = ParagraphStyle(
+            "FlowValue",
+            fontName=constants.FONT_REGULAR,
+            fontSize=7.5,
+            leading=9.7,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor(constants.COLOR_INK),
+            wordWrap="CJK",
+        )
+        self._row_heights = [self._measure_row_height(flow) for flow in visual.flows]
+        self.height = sum(self._row_heights) + (
             max(0, len(visual.flows) - 1) * self.row_gap
         )
+
+    def _box_width(self, flow: Sequence[str]) -> float:
+        gap = 8 * mm
+        return (self.width - (gap * (len(flow) - 1))) / len(flow)
+
+    def _measure_row_height(self, flow: Sequence[str]) -> float:
+        box_width = self._box_width(flow)
+        tallest = _FLOW_MIN_ROW_HEIGHT_MM * mm
+        for column, value in enumerate(flow):
+            header = Paragraph(_escape(self.headers[column]), self._header_style)
+            body = Paragraph(_escape(value), self._value_style)
+            # 세로 공간을 사실상 무한대로 주고 «자연 높이»만 잰다 — 실제
+            # 그리기는 이 높이로 만든 상자 안에서 다시 wrap()한다.
+            _, header_height = header.wrap(box_width - 10, 1000 * mm)
+            _, body_height = body.wrap(box_width - 10, 1000 * mm)
+            needed = header_height + body_height + _FLOW_ROW_PADDING_PT
+            tallest = max(tallest, needed)
+        return tallest
 
     def wrap(self, avail_width: float, avail_height: float) -> tuple[float, float]:
         self.width = min(self.width, avail_width)
@@ -332,8 +434,9 @@ class _FlowGraphic(Flowable):
         canvas = cast(Canvas, self.canv)
         for row_index, flow in enumerate(self.visual.flows):
             gap = 8 * mm
-            box_width = (self.width - (gap * (len(flow) - 1))) / len(flow)
-            y = self.height - ((row_index + 1) * self.row_height) - (row_index * self.row_gap)
+            row_height = self._row_heights[row_index]
+            box_width = self._box_width(flow)
+            y = self.height - sum(self._row_heights[: row_index + 1]) - (row_index * self.row_gap)
             for column, value in enumerate(flow):
                 x = column * (box_width + gap)
                 canvas.setFillColor(
@@ -341,37 +444,19 @@ class _FlowGraphic(Flowable):
                 )
                 canvas.setStrokeColor(colors.HexColor(constants.COLOR_LINE))
                 canvas.setLineWidth(0.55)
-                canvas.roundRect(x, y, box_width, self.row_height, 4, fill=1, stroke=1)
-                header_style = ParagraphStyle(
-                    f"FlowHead-{row_index}-{column}",
-                    fontName=constants.FONT_SEMIBOLD,
-                    fontSize=7.5,
-                    leading=9.5,
-                    alignment=TA_CENTER,
-                    textColor=colors.HexColor(constants.COLOR_MUTED),
-                    wordWrap="CJK",
-                )
-                value_style = ParagraphStyle(
-                    f"FlowValue-{row_index}-{column}",
-                    fontName=constants.FONT_REGULAR,
-                    fontSize=7.5,
-                    leading=9.7,
-                    alignment=TA_CENTER,
-                    textColor=colors.HexColor(constants.COLOR_INK),
-                    wordWrap="CJK",
-                )
-                header = Paragraph(_escape(self.headers[column]), header_style)
-                body = Paragraph(_escape(value), value_style)
-                _, header_height = header.wrap(box_width - 10, self.row_height)
-                _, body_height = body.wrap(box_width - 10, self.row_height)
+                canvas.roundRect(x, y, box_width, row_height, 4, fill=1, stroke=1)
+                header = Paragraph(_escape(self.headers[column]), self._header_style)
+                body = Paragraph(_escape(value), self._value_style)
+                _, header_height = header.wrap(box_width - 10, row_height)
+                _, body_height = body.wrap(box_width - 10, row_height)
                 total_height = header_height + body_height + 3
-                body_y = y + ((self.row_height - total_height) / 2)
+                body_y = y + ((row_height - total_height) / 2)
                 body.drawOn(canvas, x + 5, body_y)
                 header.drawOn(canvas, x + 5, body_y + body_height + 3)
                 if column < len(flow) - 1:
                     start = x + box_width + 3
                     end = x + box_width + gap - 3
-                    arrow_y = y + (self.row_height / 2)
+                    arrow_y = y + (row_height / 2)
                     canvas.setStrokeColor(colors.HexColor(constants.COLOR_INK))
                     canvas.setLineWidth(0.8)
                     canvas.line(start, arrow_y, end, arrow_y)
@@ -900,6 +985,77 @@ def _split_wide_table(table: ReportTable, *, max_columns: int = 5) -> list[Repor
     return chunks
 
 
+def _flow_card_table(
+    card: Card, styles: dict[str, ParagraphStyle], width: float
+) -> Table | None:
+    """카드 하나를 라벨:값 2열 표로 만든다 — ``_add_section_content_block``과
+    같은 모양(제목 행 + 구분선 있는 라벨·값 행)이다. 두 함수가 코드를
+    공유하지 않는 것은 의도적이다: SectionContentBlock 카드는 사실
+    원장에서, 이 카드는 AI가 낸 경로표에서 나와 정본이 다르므로, 한쪽을
+    고치다 다른 쪽이 조용히 어긋나는 사고를 막기 위해 분리해 둔다.
+    """
+    if not card.fields:
+        return None
+    data: list[list[Paragraph]] = []
+    commands: list[tuple[object, ...]] = [
+        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor(constants.COLOR_LINE)),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 7),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]
+    if card.title:
+        data.append(
+            [Paragraph(_escape(card.title), styles["card_title"]), Paragraph("", styles["card_body"])]
+        )
+        commands.append(("SPAN", (0, 0), (1, 0)))
+        commands.append(("LINEBELOW", (0, 0), (-1, 0), 0.6, colors.HexColor(constants.COLOR_LINE)))
+    field_start = len(data)
+    data.extend(
+        [
+            [Paragraph(_escape(field.label), styles["card_label"]), Paragraph(_escape(field.value), styles["card_body"])]
+            for field in card.fields
+        ]
+    )
+    # 마지막 줄 밑에는 선을 안 긋는다(바깥 BOX 테두리와 겹친다) — 줄이
+    # 하나뿐이면 그을 «가운데» 선도 없다.
+    if len(data) - field_start > 1:
+        commands.append(
+            ("LINEBELOW", (0, field_start), (-1, -2), 0.45, colors.HexColor(constants.COLOR_LINE))
+        )
+    card_table = Table(data, colWidths=[width * 0.29, width * 0.71], hAlign="LEFT")
+    card_table.setStyle(TableStyle(commands))
+    return card_table
+
+
+def _add_flow_card_visualization(
+    story: list[Flowable],
+    table: ReportTable,
+    visual: TableVisualization,
+    styles: dict[str, ParagraphStyle],
+    width: float,
+) -> None:
+    """흐름표가 «카드」로 판정됐을 때 — 화살표 없이 라벨:값 카드로 낸다.
+
+    ★ 화면(.section-content-card)과 같은 모양을 재현한다 — 웹·PDF가
+      어긋나면 「한쪽만 고친」 사고가 되므로, 목업이 보여 준 카드 모양
+      (제목·구분선 있는 라벨·값 행)을 여기서도 그대로 따른다.
+    """
+    caption = _cited_text(table.caption, table.cite)
+    flowables: list[Flowable] = [
+        Paragraph(_escape(caption), styles["small_bold"]),
+        Spacer(1, 3),
+    ]
+    story.append(KeepTogether(flowables))
+    for card in visual.cards:
+        card_table = _flow_card_table(card, styles, width)
+        if card_table is None:
+            continue
+        story.append(KeepTogether([card_table, Spacer(1, 8)]))
+    story.append(Spacer(1, 4))
+
+
 def _add_report_visualization(
     story: list[Flowable],
     table: ReportTable,
@@ -909,6 +1065,9 @@ def _add_report_visualization(
     visual = table_visualization(table)
     if visual is None:
         return False
+    if visual.kind == "card":
+        _add_flow_card_visualization(story, table, visual, styles, width)
+        return True
     caption = _cited_text(table.caption, table.cite)
     if visual.kind == "composition":
         graphic: Flowable = _CompositionGraphic(visual, width)
@@ -1025,6 +1184,37 @@ def _add_report_table(
     story.extend([report_table, Spacer(1, 9)])
 
 
+#: 문단 번호 접두어의 글자 크기(pt). 본문(BODY_FONT_SIZE_PT)보다 작게 —
+#: 웹의 ``.pno``도 본문보다 작은 10.x px다(style.css). 값 자체가 사실이
+#: 아니라 «표시 크기»이므로 매직 넘버로 두지 않고 여기 상수로 뽑는다.
+_PARAGRAPH_NUMBER_FONT_SIZE_PT: Final[float] = 8.3
+
+
+def _paragraph_number_markup(section: ReportSection, position: int) -> str:
+    """웹(result.html의 ``.pno``, v2-32/c881cb5)과 «같은 계산식»으로
+    문단 앞에 «장번호-문단번호»(예: 2-1)를 붙인다.
+
+    ★ 왜 코드가 붙이나 — v2-32와 같은 이유. 번호는 «표시 방식»이지
+      «사실»이 아니다. AI에게 시키면 번호가 본문 글자로 들어가 인용
+      추적·중복 검사·부록 1:1 검사가 그 번호를 사실로 오인한다. 여기서
+      붙이면 ``_escape(text)``가 받는 문장은 한 글자도 안 바뀐다.
+    ★ PDF가 «다운로드 정본»이다 — 웹에만 있고 PDF에 없으면 「3-2 문단
+      보세요」가 성립하지 않는다(팀장 실측: 웹 25개 · PDF 0개).
+    ★ ``display_number``가 비어 있을 때(드묾)는 웹도 이 문단 자신의
+      0-기준 순번을 «장번호 자리에» 대신 쓴다 — 이상해 보이지만 그것이
+      실제 웹 동작이다(Jinja의 ``loop.index0``가 바깥 장 루프가 아니라
+      이 문단 루프를 가리킨다). 여기서 다르게 계산하면 오히려 웹·PDF
+      번호가 갈린다 — 「같은 체계」 요구는 이 quirk까지 포함한다.
+    """
+    section_number = section.display_number or str(position - 1)
+    return (
+        f'<font name="{constants.FONT_SEMIBOLD}" '
+        f'size="{_PARAGRAPH_NUMBER_FONT_SIZE_PT}" '
+        f'color="{constants.COLOR_MUTED}">{_escape(section_number)}-{position}'
+        f"</font>&#160;&#160;"
+    )
+
+
 def _add_section(
     story: list[Flowable],
     report: Report,
@@ -1062,8 +1252,8 @@ def _add_section(
         #   덩어리로 냈다. 첫 문단만 제목과 함께 묶어 쪽 넘김에서 떨어지지
         #   않게 하고, 나머지는 이어서 흘린다.
         paragraphs = [
-            Paragraph(_escape(text), styles["body"])
-            for text in section.prose_paragraphs
+            Paragraph(_paragraph_number_markup(section, position) + _escape(text), styles["body"])
+            for position, text in enumerate(section.prose_paragraphs, start=1)
         ]
         story.append(KeepTogether([*heading_flowables, paragraphs[0]]))
         story.extend(paragraphs[1:])

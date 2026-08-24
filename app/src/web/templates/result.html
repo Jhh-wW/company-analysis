@@ -98,6 +98,27 @@
   {% if visual.reading %}<p class="chart-reading">{{ visual.reading }}</p>{% endif %}
   <p class="chart-note">자료{{ ref(t.cite) }} · {{ visual.note }}</p>
   </figure>
+  {% elif visual and visual.kind == 'card' %}
+  {# ★ 흐름표(경로표)인데 칸끼리 이어지지 않는 속성 나열(1·6·8장 등) —
+     화살표 대신 이미 검증된 .section-content-card(라벨:값 카드)를
+     그대로 재사용한다. 새 카드 모양을 또 만들지 않는다(어긋남 방지). #}
+  <figure class="report-visual card-chart" aria-labelledby="{{ table_id }}-caption">
+  <figcaption class="cap" id="{{ table_id }}-caption">
+  {{ t.caption }}{{ ref(t.cite) }}
+  </figcaption>
+  <div class="card-rows">
+  {% for card in visual.cards %}
+  <article class="section-content-card">
+  {% if card.title %}<h3>{{ card.title }}</h3>{% endif %}
+  <dl>
+  {% for field in card.fields %}
+  <div><dt>{{ field.label }}</dt><dd>{{ field.value }}</dd></div>
+  {% endfor %}
+  </dl>
+  </article>
+  {% endfor %}
+  </div>
+  </figure>
   {% elif visual and visual.kind == 'flow' %}
   <figure class="report-visual flow-chart" aria-labelledby="{{ table_id }}-caption">
   <figcaption class="cap" id="{{ table_id }}-caption">
@@ -446,8 +467,17 @@
 <aside class="report-support ui-only" aria-label="보고서 이용 안내와 의견 보내기">
   <p class="frame-eyebrow">이용 안내</p>
   <p>중요한 판단 전에는 각 항목의 원출처를 함께 확인해 주세요. 이상한 부분을 발견하면 아래에서 알려주실 수 있습니다.</p>
-  {% if member_feedback_allowed %}
+  {# ★ 오류 신고는 MEMBER 전용 설문과 분리된 기준으로 보여준다 — LINK 손님도
+     신고는 낼 수 있어야 한다(사용자 확정: 대상은 「로그인 회원 + 링크
+     손님」). 설문(member-survey-form)은 초대 회원 전용 기능이라 그대로
+     member_feedback_allowed에 묶어 두고, «오류 신고» 카드만
+     feedback_report_allowed(= member_feedback_allowed OR LINK 손님)로
+     연다. 완전 익명은 feedback_report_allowed도 거짓이라 이 블록 자체가
+     안 그려진다 — 화면에서 숨기는 것은 배려일 뿐, 진짜 차단은
+     POST /feedback이 매 요청마다 CSRF로 다시 한다(위 안내 참고). #}
+  {% if feedback_report_allowed %}
   <div class="frame-grid frame-grid-two">
+    {% if member_feedback_allowed %}
     <form class="card" id="member-survey-form" method="post" action="/reports/{{ job.job_id }}/survey"
           data-draft-key="member-survey:{{ job.job_id }}:v{{ member_feedback_report_version }}:{{ member_feedback_draft_key }}"
           data-has-saved-survey="{{ 'yes' if member_survey else 'no' }}">
@@ -461,12 +491,14 @@
       <p class="muted">작성 중인 답변은 이 브라우저 탭에 임시 보관합니다. 로그인이 만료돼도 다시 로그인하면 이어 쓸 수 있습니다.</p>
       <button class="btn ghost" type="submit">{{ '설문 수정 저장' if member_survey else '설문 저장' }}</button>
     </form>
+    {% endif %}
     <div class="card">
       <h3>오류 신고</h3>
       <p class="muted">신고를 접수해도 이 보고서의 열람·다운로드·공유는 멈추지 않습니다. 관리자가 검토 후 조치합니다.</p>
       <a class="btn danger" href="/feedback?stage=보고서&amp;company={{ job.user_input.company|urlencode }}&amp;report={{ job.job_id|urlencode }}">오류 신고</a>
     </div>
   </div>
+  {% if member_feedback_allowed %}
   <script>
     (function () {
       var form = document.getElementById('member-survey-form');
@@ -502,6 +534,7 @@
       }
     }());
   </script>
+  {% endif %}
   {% endif %}
 </aside>
 

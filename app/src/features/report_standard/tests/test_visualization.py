@@ -7,6 +7,12 @@ from src.features.report_standard.visualization import (
     COMPOSITION_MAX_ITEMS,
     COMPOSITION_MIN_ITEMS,
     COMPOSITION_TONE_STEPS,
+    CardField,
+    _CARD_HEADER_KEY_SETS,
+    _CARD_HEADER_SETS,
+    _CARD_LIMITATION_LABEL,
+    _CARD_LIMITATION_TEXT_BY_HEADER_KEY,
+    _CARD_TITLE_COLUMN_BY_HEADER_KEY,
     composition_tone,
 )
 from src.features.report_standard.visualization import table_visualization
@@ -297,6 +303,381 @@ def test_flow_rejects_incomplete_rows(rows: list[list[str]]) -> None:
     )
 
     assert table_visualization(table) is None
+
+
+# ══════════════════════════════════════════════════════════
+# ⑦-2 흐름표를 카드로 — 화살표가 안 맞는 속성 나열
+# ══════════════════════════════════════════════════════════
+#
+# ★ 왜 이 시험이 있나 (목업 실측·2026-08-25) — 1·6·8장은 composer가 5·7장과
+#   «같은 그릇»(경로표)을 쓰지만, 칸끼리 이어지지 않는 독립된 답이다.
+#   화살표를 그리면 없는 인과를 있는 것처럼 보인다. 목업은 이 세 장을
+#   화살표 없는 라벨:값 카드로 낸다 — 아래 시험이 그 판정을 코드로 고정한다.
+
+
+def test_identity_headers_become_a_card_not_an_arrow() -> None:
+    """1장 «회사가 스스로를 어떻게 규정하나»는 카드다."""
+    visualization = table_visualization(
+        ReportTable(
+            caption="회사가 스스로를 어떻게 규정하나",
+            headers=["공식 자기정의", "사업 범위", "이 보고서의 해석"],
+            rows=[["소재 가공 회사", "가구·가전용 시트", "B2B 소재 회사"]],
+            cite="[3]",
+            presentation="flow",
+        )
+    )
+
+    assert visualization is not None
+    assert visualization.kind == "card"
+    assert visualization.flows == ()
+    assert len(visualization.cards) == 1
+    card = visualization.cards[0]
+    assert card.title == ""
+    assert card.fields == (
+        CardField(label="공식 자기정의", value="소재 가공 회사"),
+        CardField(label="사업 범위", value="가구·가전용 시트"),
+        CardField(label="이 보고서의 해석", value="B2B 소재 회사"),
+    )
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        ["계획", "시점", "공시된 내용"],  # 6장 성장 계획
+        ["내건 가치", "일하는 원칙", "확인된 사례"],  # 8장 인재상
+    ],
+)
+def test_strategy_and_culture_headers_also_become_cards(headers: list[str]) -> None:
+    visualization = table_visualization(
+        ReportTable(
+            caption="속성 나열 표",
+            headers=headers,
+            rows=[["가", "나", "다"]],
+            presentation="flow",
+        )
+    )
+
+    assert visualization is not None
+    assert visualization.kind == "card"
+
+
+def test_old_column_order_from_stored_reports_still_becomes_a_card() -> None:
+    """★ 회귀 시험 (팀장 실측·2026-08-25) — 저장된 보고서 31건은 6장 칸이
+    옛 순서(「시점, 계획, 공시된 내용」)다. composer가 «값은 그대로 두고
+    순서만» 「계획, 시점, 공시된 내용」으로 바꿨는데, tuple 완전일치로
+    판정하면 그 31건의 6장이 배포 즉시 «카드 → 화살표»로 되돌아간다 —
+    사용자가 이미 받아 본 보고서의 모양이 바뀌는 것이라 실제 회귀다.
+
+    frozenset 비교(_CARD_HEADER_KEY_SETS)로 바꾼 뒤에는 옛 순서도 새
+    순서도 같은 칸 «구성»이므로 둘 다 카드여야 한다 — 이 시험이 그걸
+    고정한다. 순서는 composer 쪽 시험(test_section_tables.py)이 지키므로
+    여기서 순서까지 다시 검사하지 않는다.
+    """
+    visualization = table_visualization(
+        ReportTable(
+            caption="회사가 밝힌 성장 계획",
+            headers=["시점", "계획", "공시된 내용"],  # 옛 순서 — 저장본 그대로
+            rows=[["2026년 하반기", "열분해 설비", "중장기 기업가치 제고 계획"]],
+            presentation="flow",
+        )
+    )
+
+    assert visualization is not None
+    assert visualization.kind == "card", (
+        "옛 순서 저장본의 6장이 카드가 아니라 흐름(화살표)으로 나옵니다 — "
+        "회귀가 되살아났습니다"
+    )
+    assert visualization.cards[0].fields == (
+        CardField(label="시점", value="2026년 하반기"),
+        CardField(label="계획", value="열분해 설비"),
+        CardField(label="공시된 내용", value="중장기 기업가치 제고 계획"),
+        CardField(label="범위·한계", value="아직 실행되지 않은 계획입니다"),
+    )
+
+
+# ══════════════════════════════════════════════════════════
+# ⑦-3 3장 핵심 제품·서비스 — 4칸 + «제목 칸이 있는» 유일한 카드
+# ══════════════════════════════════════════════════════════
+#
+# ★ 왜 다른가 (팀장 지시·2026-08-25) — composer.constants.PORTFOLIO_TABLE_HEADERS는
+#   4칸이고, 1번 칸(제품·서비스명)이 «그 줄의 주제»다. 목업 3장도 제품마다
+#   카드 1장(제목=제품명)씩 나온다. 1·6·8장은 표 자신이 주제 칸을 안
+#   알려줘 제목을 비워 뒀지만, 3장은 «제품·서비스명»이라는 이름으로 주제
+#   칸이 명시돼 있으므로 지어내는 것이 아니라 표가 준 정보를 쓰는 것이다.
+
+
+def test_portfolio_four_column_headers_become_a_card_with_a_title() -> None:
+    visualization = table_visualization(
+        ReportTable(
+            caption="지금 무엇을 미는가 — 핵심 제품·서비스와 역할",
+            headers=["제품·서비스명", "제품·서비스 범위", "중점 추진 근거", "사업적 역할"],
+            rows=[
+                [
+                    "리얼 알루미늄 합지 필름",
+                    "가전 표면재 납품 제품",
+                    "생산확대·투자",
+                    "전사 수익 경로",
+                ]
+            ],
+            cite="[1]",
+            presentation="flow",
+        )
+    )
+
+    assert visualization is not None
+    assert visualization.kind == "card"
+    assert len(visualization.cards) == 1
+    card = visualization.cards[0]
+    # 제품·서비스명이 제목으로 «빠지고», 나머지 3칸만 라벨:값으로 남는다.
+    assert card.title == "리얼 알루미늄 합지 필름"
+    assert card.fields == (
+        CardField(label="제품·서비스 범위", value="가전 표면재 납품 제품"),
+        CardField(label="중점 추진 근거", value="생산확대·투자"),
+        CardField(label="사업적 역할", value="전사 수익 경로"),
+        CardField(label="범위·한계", value="공식 근거가 확인한 범위로 한정합니다"),
+    )
+
+
+def test_portfolio_multiple_products_become_multiple_titled_cards() -> None:
+    """근거가 확인된 제품이 여럿이면 카드도 여럿이고, 각 카드 제목이 다르다."""
+    visualization = table_visualization(
+        ReportTable(
+            caption="지금 무엇을 미는가 — 핵심 제품·서비스와 역할",
+            headers=["제품·서비스명", "제품·서비스 범위", "중점 추진 근거", "사업적 역할"],
+            rows=[
+                ["리얼 알루미늄 합지 필름", "가전 표면재", "생산확대", "전사 수익 경로"],
+                ["폐플라스틱 열분해유", "자원순환 판매 제품", "투자·증설", "전사 수익 경로"],
+            ],
+            presentation="flow",
+        )
+    )
+
+    assert visualization is not None
+    assert visualization.kind == "card"
+    assert [card.title for card in visualization.cards] == [
+        "리얼 알루미늄 합지 필름",
+        "폐플라스틱 열분해유",
+    ]
+    # 3칸(범위·중점근거·역할) + 「범위·한계」 1칸 = 4.
+    assert len(visualization.cards[0].fields) == 4
+    assert len(visualization.cards[1].fields) == 4
+    assert visualization.cards[0].fields[-1] == CardField(
+        label="범위·한계", value="공식 근거가 확인한 범위로 한정합니다"
+    )
+
+
+def test_portfolio_blank_product_name_falls_back_to_no_title() -> None:
+    """제품명 칸이 비었으면(있을 수 있는 빈 칸) 제목을 지어내지 않는다."""
+    visualization = table_visualization(
+        ReportTable(
+            caption="지금 무엇을 미는가 — 핵심 제품·서비스와 역할",
+            headers=["제품·서비스명", "제품·서비스 범위", "중점 추진 근거", "사업적 역할"],
+            rows=[["", "가전 표면재", "생산확대", "전사 수익 경로"]],
+            presentation="flow",
+        )
+    )
+
+    assert visualization is not None
+    assert visualization.kind == "card"
+    assert visualization.cards[0].title == ""
+    assert visualization.cards[0].fields == (
+        CardField(label="제품·서비스 범위", value="가전 표면재"),
+        CardField(label="중점 추진 근거", value="생산확대"),
+        CardField(label="사업적 역할", value="전사 수익 경로"),
+        CardField(label="범위·한계", value="공식 근거가 확인한 범위로 한정합니다"),
+    )
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        ["핵심 자산", "제품·서비스", "고객 행동·과금", "반복·확장 수익"],  # 2장 — e2e 시험이 flow-row를 요구
+        ["무엇으로 시작하나", "회사가 하는 일", "누구에게 닿나"],  # 7장 — e2e 시험이 flow-row를 요구
+        ["지금 겪는 과제", "회사가 밝힌 대응"],  # 5장 — 문제→대응 방향성이 있어 화살표 유지
+    ],
+)
+def test_genuinely_causal_headers_stay_as_arrow_flow(headers: list[str]) -> None:
+    """★ 2·7장은 test_e2e_offline.py가 literal ``class="flow-row"``를 요구한다.
+
+    이 칸 이름을 실수로 카드 집합에 넣으면 그 이음매 시험이 빨간불이 된다
+    — 그래서 여기서도 «카드가 아님»을 못 박는다.
+    """
+    row = tuple(f"칸{i}" for i in range(len(headers)))
+    visualization = table_visualization(
+        ReportTable(
+            caption="흐름표",
+            headers=headers,
+            rows=[list(row)],
+            presentation="flow",
+        )
+    )
+
+    assert visualization is not None
+    assert visualization.kind == "flow"
+    assert visualization.cards == ()
+
+
+def test_card_drops_blank_cells_and_titles_multi_row_tables_blank() -> None:
+    """줄이 여럿이면 카드도 여럿이다. 빈 칸은 그 카드에서만 빠지고,
+    제목은 지어내지 않는다(빈 문자열 — 표 캡션이 이미 제목 역할)."""
+    visualization = table_visualization(
+        ReportTable(
+            caption="회사가 밝힌 성장 계획",
+            headers=["계획", "시점", "공시된 내용"],
+            rows=[
+                ["열분해 설비", "2026년 하반기", ""],
+                ["해외 납품 확대", "2026~2028년", "차량 외장재·방염 필름"],
+            ],
+            presentation="flow",
+        )
+    )
+
+    assert visualization is not None
+    assert visualization.kind == "card"
+    assert len(visualization.cards) == 2
+    assert visualization.cards[0].fields == (
+        CardField(label="계획", value="열분해 설비"),
+        CardField(label="시점", value="2026년 하반기"),
+        CardField(label="범위·한계", value="아직 실행되지 않은 계획입니다"),
+    )
+    assert visualization.cards[1].fields == (
+        CardField(label="계획", value="해외 납품 확대"),
+        CardField(label="시점", value="2026~2028년"),
+        CardField(label="공시된 내용", value="차량 외장재·방염 필름"),
+        CardField(label="범위·한계", value="아직 실행되지 않은 계획입니다"),
+    )
+    assert all(card.title == "" for card in visualization.cards)
+
+
+# ══════════════════════════════════════════════════════════
+# ⑦-4 카드 맨 아래 「범위·한계」 행 — 층2(코드)만, AI 호출 0
+# ══════════════════════════════════════════════════════════
+#
+# ★ 왜 이 시험이 있나 (사용자 승인·2026-08-25) — 목업 카드는 거의 항상
+#   마지막 줄에 「공식 근거가 확인한 범위로 한정」 같은 절차적 사실
+#   서술이 있다. `docs/실행계획_엔진v2/11_결정_전수대조_04_범위한계_
+#   재현안.md` §2-1이 정리한 v1 폴백 문구를 그대로 옮긴다 — citations
+#   개수·section_id만으로 정하고, 가치 판단(좋다/나쁘다/위험 등)은 한
+#   글자도 안 쓴다(같은 문서 §5 — v1도 13건 전수에서 0건이었다).
+
+
+def test_culture_card_gets_the_v1_precedent_phrase() -> None:
+    """8장은 v1(_culture_blocks)이 실제로 쓰던 라벨·문구를 그대로 쓴다."""
+    visualization = table_visualization(
+        ReportTable(
+            caption="무엇을 내걸고 어떻게 일하나",
+            headers=["내건 가치", "일하는 원칙", "확인된 사례"],
+            rows=[["고객 최우선", "공식 경영철학", ""]],
+            presentation="flow",
+        )
+    )
+
+    assert visualization is not None
+    assert visualization.cards[0].fields[-1] == CardField(
+        label=_CARD_LIMITATION_LABEL, value="전사 공통 공식 기준입니다"
+    )
+
+
+def test_limitation_phrase_stays_neutral_when_a_column_is_blank() -> None:
+    """★ 실측(팀장·2026-08-25, 하이브) — 6장 「시점」 칸이 두 행 다 비었다.
+    이건 정상이다(사용자 결정: 안 적혀 있으면 칸을 비우고 줄은 살린다).
+    「범위·한계」 문구가 그걸 보고 «자료 부족」류로 바뀌면 안 된다 — 빈
+    칸은 정직한 결과지 결함이 아니다. 이 문구는 «장 종류»만 보고 정하지
+    «어느 칸이 비었는지»는 아예 안 본다 — 이 시험이 그걸 못 박는다.
+    """
+    both_rows_missing_시점 = table_visualization(
+        ReportTable(
+            caption="회사가 밝힌 성장 계획",
+            headers=["계획", "시점", "공시된 내용"],
+            rows=[
+                ["글로벌 시장 진출", "", ""],
+                ["멀티 레이블 시스템의 글로벌 확대", "", "중장기 기업가치 제고 계획"],
+            ],
+            presentation="flow",
+        )
+    )
+
+    assert both_rows_missing_시점 is not None
+    for card in both_rows_missing_시점.cards:
+        limitation_fields = [f for f in card.fields if f.label == _CARD_LIMITATION_LABEL]
+        assert len(limitation_fields) == 1
+        assert limitation_fields[0].value == "아직 실행되지 않은 계획입니다"
+        for word in ("자료", "부족", "미확인", "확인되지 않"):
+            assert word not in limitation_fields[0].value, (
+                f"빈 칸을 보고 「자료 부족」류 문구로 바뀌었습니다: {limitation_fields[0].value!r}"
+            )
+
+
+def test_identity_card_gets_no_limitation_row() -> None:
+    """★ 1장은 «일부러» 뺐다 — v1도 목업도 1장 카드엔 이 줄이 없다
+    (재현안 문서 §1: "1장은 층2 고정 문구가 없는 유일한 장"). 조건에
+    안 걸리면 문구를 지어내지 않고 그냥 없다 — 이 시험이 그걸 못 박는다.
+    """
+    visualization = table_visualization(
+        ReportTable(
+            caption="회사가 스스로를 어떻게 규정하나",
+            headers=["공식 자기정의", "사업 범위", "이 보고서의 해석"],
+            rows=[["소재 가공 회사", "가구·가전용 시트", "B2B 소재 회사"]],
+            presentation="flow",
+        )
+    )
+
+    assert visualization is not None
+    assert not any(field.label == _CARD_LIMITATION_LABEL for field in visualization.cards[0].fields)
+
+
+def test_limitation_text_never_uses_judgmental_words() -> None:
+    """★ 가치 판단(평가어) 금지 — 문구 사전 자체에 평가어가 없는지 못
+    박는다. 재현안 문서 §5: v1도 13건 전수에서 0건이었다."""
+    금지어 = ("좋", "나쁘", "우수", "위험", "우려", "미흡", "훌륭", "탁월")
+    for text in _CARD_LIMITATION_TEXT_BY_HEADER_KEY.values():
+        for word in 금지어:
+            assert word not in text, f"「범위·한계」 문구가 판단을 합니다: 「{word}」 in {text!r}"
+
+
+def test_card_header_sets_stay_in_sync_with_composer_constants() -> None:
+    """★ 취약점 실측 — visualization.py의 _CARD_HEADER_SETS는 composer/
+    constants.py의 칸 이름을 «문자열로만» 그대로 옮겼다(장 id가 없어서).
+    두 파일이 코드로 이어져 있지 않으므로, 누군가 composer 쪽 칸 이름을
+    바꾸면 이 판정이 «조용히» 깨진다(카드가 다시 화살표로 돌아간다) —
+    이 시험이 있어야 그 변경이 여기서도 빨간불로 걸린다.
+
+    이 저장소는 「조용히 되돌아가는 것」에 이미 네 번 당했다
+    (test_e2e_offline.py 상단 주석 참조) — 다섯 번째를 여기서 막는다.
+    """
+    from src.features.composer import constants as composer_constants
+
+    # 카드여야 하는 칸 이름 4개 — composer 쪽 상수와 «자모 하나까지» 같아야 한다.
+    # (순서까지 정확히 같은지도 기록해 둔다 — 순서만 다르면 아래 frozenset
+    # 비교는 통과하므로, 이 줄이 «지금 기록된 순서»가 실제와 같은지 알려 준다.)
+    assert composer_constants.IDENTITY_TABLE_HEADERS in _CARD_HEADER_SETS
+    assert composer_constants.STRATEGY_TABLE_HEADERS in _CARD_HEADER_SETS
+    assert composer_constants.CULTURE_TABLE_HEADERS in _CARD_HEADER_SETS
+    assert composer_constants.PORTFOLIO_TABLE_HEADERS in _CARD_HEADER_SETS
+
+    # 화살표를 유지해야 하는 칸 이름 3개 — 실수로 카드 집합에 들어가면 안 된다.
+    assert composer_constants.BUSINESS_FLOW_HEADERS not in _CARD_HEADER_SETS
+    assert composer_constants.OPERATIONS_FLOW_HEADERS not in _CARD_HEADER_SETS
+    assert composer_constants.CHALLENGE_FLOW_HEADERS not in _CARD_HEADER_SETS
+
+    # ★ 실제 판정 코드(_flow())가 쓰는 것은 이 frozenset이다 — 순서가 바뀌어도
+    # (값은 그대로면) 안 흔들리는지를 «실행 경로 그대로» 확인한다. 2026-08-25
+    # composer가 6장 칸 순서를 바꾼 사건이 실제로 있었다 — 이 비교가 그
+    # 실패 모드(순서 변경)를 없앤다. «값»이 바뀌는 실패 모드는 위 tuple
+    # 비교가 잡는다 — 둘을 같이 둬야 한다.
+    assert frozenset(composer_constants.IDENTITY_TABLE_HEADERS) in _CARD_HEADER_KEY_SETS
+    assert frozenset(composer_constants.STRATEGY_TABLE_HEADERS) in _CARD_HEADER_KEY_SETS
+    assert frozenset(composer_constants.CULTURE_TABLE_HEADERS) in _CARD_HEADER_KEY_SETS
+    assert frozenset(composer_constants.PORTFOLIO_TABLE_HEADERS) in _CARD_HEADER_KEY_SETS
+    assert frozenset(composer_constants.BUSINESS_FLOW_HEADERS) not in _CARD_HEADER_KEY_SETS
+    assert frozenset(composer_constants.OPERATIONS_FLOW_HEADERS) not in _CARD_HEADER_KEY_SETS
+    assert frozenset(composer_constants.CHALLENGE_FLOW_HEADERS) not in _CARD_HEADER_KEY_SETS
+
+    # ★ 3장은 «제목 칸이 있는» 유일한 카드다 — 제목 칸 이름도 실제 상수와
+    # 맞아야 한다. composer가 필드명을 바꾸면(예: 「제품·서비스명」→다른
+    # 이름) 제목 추출이 조용히 멈춘다 — 이 줄이 그것도 잡는다.
+    portfolio_key = frozenset(composer_constants.PORTFOLIO_TABLE_HEADERS)
+    assert _CARD_TITLE_COLUMN_BY_HEADER_KEY.get(portfolio_key) in composer_constants.PORTFOLIO_TABLE_HEADERS
 
 
 @pytest.mark.parametrize("presentation", ["table", "", "radar", "unknown", "  FLOW "])
