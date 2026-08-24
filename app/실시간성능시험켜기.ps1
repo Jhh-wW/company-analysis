@@ -13,6 +13,9 @@ param(
 
     [string]$ProviderEnvFile = "",
 
+    # 엔진 v2(composer 생성 경로)로 보고서를 만든다. 끄면 기존 v1 경로 그대로.
+    [switch]$EngineV2,
+
     [switch]$DeleteDataOnExit
 )
 
@@ -368,6 +371,10 @@ $childEnvironment["ANALYSIS_ENGINE_DISABLE_DOTENV"] = "1"
 $childEnvironment["GOOGLE_PLACES_BILLING_ACK"] = "0"
 $childEnvironment["GOOGLE_PLACES_TERMS_ACK"] = "no"
 $childEnvironment["BUSINESS_CANDIDATE_PROVIDER"] = "disabled"
+# 엔진 v2 스위치: 값이 정확히 "1"일 때만 real.py가 composer 경로로 분기한다.
+if ($EngineV2) {
+    $childEnvironment["ENGINE_V2"] = "1"
+}
 
 $allowedChildEnvironmentNames = $allowedParentNames + @(
     "PYTHONUTF8", "PYTHONIOENCODING", "PYTHONUNBUFFERED", "PIPELINE",
@@ -377,7 +384,7 @@ $allowedChildEnvironmentNames = $allowedParentNames + @(
     "REALTIME_EVALUATION_PER_RUN_CAP_KRW", "REALTIME_EVALUATION_DAILY_CAP_KRW",
     "PROVENANCE_SEAL_SECRET",
     "ANALYSIS_ENGINE_DISABLE_DOTENV", "GOOGLE_PLACES_BILLING_ACK",
-    "GOOGLE_PLACES_TERMS_ACK", "BUSINESS_CANDIDATE_PROVIDER"
+    "GOOGLE_PLACES_TERMS_ACK", "BUSINESS_CANDIDATE_PROVIDER", "ENGINE_V2"
 )
 foreach ($name in @($childEnvironment.Keys)) {
     if ($allowedChildEnvironmentNames -notcontains [string]$name) {
