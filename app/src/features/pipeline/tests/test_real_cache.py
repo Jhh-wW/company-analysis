@@ -32,7 +32,14 @@ from src.features.budget.constants import (
     SPEND_PHASE_PIPELINE,
 )
 from src.features.pipeline import real
-from src.features.pipeline.port import CompanyCard, Grade, Outcome, ReportTable, UserInput
+from src.features.pipeline.port import (
+    CompanyCard,
+    Grade,
+    Outcome,
+    ReportTable,
+    RunResult,
+    UserInput,
+)
 #: 8·9 생성 지시문임을 알아보는 표시. 글자를 베끼지 않고 «상수를 그대로» 쓴다 —
 #: 지시문이 바뀌어도 이 시험이 조용히 어긋나지 않는다.
 from src.features.spanselect.constants import PROMPT_PICK
@@ -2785,3 +2792,64 @@ def test_캐시_없이는_매번_생성AI가_돈다(engine: FakeEngine, monkeypa
     calls_after_first = engine.generate_ai_calls
     _run()
     assert engine.generate_ai_calls > calls_after_first
+
+
+# ══════════════════════════════════════════════════════════
+# ★ v2를 켜면 1층 캐시를 읽지 않는다
+# ══════════════════════════════════════════════════════════
+#
+# ★ 왜 이 시험이 있나 (실측 사고) — 1층 캐시 조회가 v2 분기«보다 앞»에 있어서,
+#   ENGINE_V2=1을 켜도 그 회사의 v1 저장본이 살아 있으면 v1 보고서가 그대로
+#   반환됐다. 실제 로컬 DB에 8개 회사(진영·하이브·카카오 등)가 유효한 상태로
+#   남아 있어서, 그 회사들로 시험하면 v2 수정이 하나도 반영 안 된 것처럼 보였다.
+#   화면에는 「이전에 조사한 결과입니다」만 뜨므로 원인을 알아채기도 어렵다.
+#   v2는 캐시에 «저장»도 하지 않으므로 적중분은 반드시 옛 v1 보고서다.
+
+_V2_도달_표식 = "이 응답은 v2 경로에서 나왔다 (시험 전용 표식)"
+
+
+def test_v2를_켜면_1층_캐시_적중을_무시하고_v2로_간다(
+    engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v2를 켠 요청에 옛 v1 보고서를 돌려주는 것은 조용한 거짓말이다."""
+    first = _run()
+    assert first.outcome is Outcome.REPORT
+    assert not first.cache_hit
+
+    # 대조군 — v1에서는 캐시가 «먹어야» 한다. 안 먹으면 이 시험이 헛돈 것이다.
+    assert _run().cache_hit, "v1 캐시가 애초에 안 먹었습니다(시험 전제가 깨졌습니다)"
+
+    조회된_인자: list[dict] = []
+
+    def 기록하는_조회(**kwargs):
+        조회된_인자.append(kwargs)
+        return _company_cache_lookup_원본(**kwargs)
+
+    _company_cache_lookup_원본 = real._company_cache_lookup
+    monkeypatch.setattr(real, "_company_cache_lookup", 기록하는_조회)
+    monkeypatch.setattr(
+        real,
+        "_run_v2_composer",
+        lambda **kwargs: RunResult(outcome=Outcome.REPORT, message=_V2_도달_표식),
+    )
+    monkeypatch.setenv(real.ENGINE_V2_ENV_NAME, real.ENGINE_V2_ENV_ON)
+
+    v2결과 = _run()
+
+    assert 조회된_인자 == [], (
+        "v2를 켰는데 1층 캐시를 읽었습니다 — 옛 v1 보고서가 그대로 나갈 수 있습니다"
+    )
+    assert not v2결과.cache_hit
+    assert v2결과.message == _V2_도달_표식, "v2 분기까지 도달하지 못했습니다"
+
+
+def test_v2를_끄면_1층_캐시는_예전처럼_그대로_먹는다(engine: FakeEngine) -> None:
+    """v1 경로의 동작은 하나도 바뀌지 않는다 (04장 «v1 무변» 원칙)."""
+    first = _run()
+    assert first.outcome is Outcome.REPORT
+    호출수 = engine.generate_ai_calls
+
+    second = _run()
+
+    assert second.cache_hit
+    assert engine.generate_ai_calls == 호출수, "v1 캐시가 생성 AI를 못 막았습니다"

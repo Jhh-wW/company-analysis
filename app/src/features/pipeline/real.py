@@ -197,6 +197,17 @@ _FINAL_GATE_REASON_KO: Final[dict[str, str]] = {
 ENGINE_V2_ENV_NAME: Final[str] = "ENGINE_V2"
 ENGINE_V2_ENV_ON: Final[str] = "1"
 
+
+def _engine_v2_enabled() -> bool:
+    """지금 요청이 v2 경로로 가는가 — 판단을 한 곳에만 둔다.
+
+    ★ 왜 함수로 빼는가 (실측 사고) — 1층 캐시 조회가 v2 분기«보다 앞»에 있어서
+      ENGINE_V2=1을 켜도 그 회사의 v1 저장본이 살아 있으면 v1 보고서가 그대로
+      반환됐다. 화면에는 「이전에 조사한 결과입니다」만 뜨므로 사용자는 v2가
+      안 고쳐진 줄로 읽는다. 두 곳이 같은 답을 보게 묶어 둔다.
+    """
+    return os.environ.get(ENGINE_V2_ENV_NAME) == ENGINE_V2_ENV_ON
+
 #: v2 작가·검수 호출의 출력 token 상한. 작가는 장 하나(6~12문장 JSON)를 돌려준다.
 #: 검수는 보고서 전체 «확인» 문장(50개+)의 판정 목록을 «한 번에» 돌려주므로
 #: 절단 여유를 크게 둔다 — v1 파일럿 전멸 원인이 max_tokens 절단(3,000→6,000도
@@ -1663,9 +1674,17 @@ class RealPipeline:
         financials, fin_years = engine.fetch_financials(corp_code, counter)
         filing = engine.latest_report_rcept(corp_code, judgment.corp_type, counter)
         current_fiscal_year = _current_fiscal_year(fin_years, filing)
-        cached = _company_cache_lookup(
-            corp_id=corp_code,
-            current_fiscal_year=current_fiscal_year,
+        # ★ v2 경로는 1층 캐시를 «읽지 않는다». v2는 캐시에 저장하지도 않으므로
+        #   여기서 적중하면 나오는 것은 반드시 옛 v1 보고서다. v2를 켠 요청에
+        #   v1 보고서를 돌려주는 것은 조용한 거짓말이라 값을 아끼는 것보다 나쁘다.
+        #   (v1 경로의 동작은 하나도 바뀌지 않는다 — 04장 «v1 무변» 원칙)
+        cached = (
+            None
+            if _engine_v2_enabled()
+            else _company_cache_lookup(
+                corp_id=corp_code,
+                current_fiscal_year=current_fiscal_year,
+            )
         )
         if cached is not None:
             tell("output")   # 6~10을 통째로 건너뛴다
@@ -1718,7 +1737,7 @@ class RealPipeline:
         # ── 엔진 v2 분기 (유일한 분기 지점) ──────────────
         # 수집(6)·법인 판정(5)이 끝났고 실적표 재료(financials)가 확보된 지점이다.
         # ENGINE_V2=1일 때만 composer 경로로 간다. 미설정이면 아래 v1 경로 그대로다.
-        if os.environ.get(ENGINE_V2_ENV_NAME) == ENGINE_V2_ENV_ON:
+        if _engine_v2_enabled():
             tell("generate")
             return _run_v2_composer(
                 engine=engine,
