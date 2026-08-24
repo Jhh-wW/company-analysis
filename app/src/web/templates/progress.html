@@ -3,20 +3,36 @@
 {% block bodyclass %}progress-page{% endblock %}
 
 {% block content %}
-<h1>{{ job.card.legal_name }} 조사 중</h1>
+<h1>기업 보고서 조사 중</h1>
 <p class="lede">
-  공시 자료를 읽고 있습니다. 회사와 자료량, 외부 연결 상태에 따라 걸리는 시간이 달라질 수 있습니다.
-  <br>이 화면을 켜둔 채 기다려 주세요.
+  공시와 공식 자료를 읽고 보고서를 만들고 있습니다.
+  <br>페이지를 닫아도 조사는 계속 진행됩니다. 이 주소로 다시 들어오면 이어서 확인할 수 있습니다.
 </p>
 
 <div class="card">
-  <ul class="steps" id="steps" aria-label="조사 진행 단계">
-    {% for key, label in steps %}
-      <li data-key="{{ key }}"><span class="mark" aria-hidden="true">{{ loop.index }}</span><span>{{ label }}</span></li>
+  <p class="progress-field-label">조사 대상 기업</p>
+  <p class="progress-company-name">{{ job.card.legal_name }}</p>
+</div>
+
+<div class="card">
+  <p class="progress-field-label">현재 단계</p>
+  <p class="progress-current-step" id="current-step-label">조사를 준비하고 있습니다</p>
+
+  <ol class="phase-cards" id="steps" aria-label="조사 진행 단계">
+    {% for title, keys in phases %}
+      <li data-keys="{{ keys | join(' ') }}">
+        <span class="phase-no"><span class="mark" aria-hidden="true"></span>{{ loop.index }}단계</span>
+        <span class="phase-title">{{ title }}</span>
+        <span class="phase-state">대기</span>
+      </li>
     {% endfor %}
-  </ul>
+  </ol>
   <p id="progress-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true">
     조사를 시작했습니다.
+  </p>
+  <p class="muted progress-eta">
+    지금까지 조사는 대체로 5분 안에 끝났습니다.
+    회사와 자료량, 외부 연결 상태에 따라 걸리는 시간이 달라질 수 있습니다.
   </p>
 </div>
 
@@ -51,7 +67,10 @@
 
 <script>
   var JOB_ID = "{{ job.job_id }}";
+  // 백엔드가 실제로 보고하는 세부 단계 키 → 사람이 읽을 이름.
+  var STEP_LABELS = {{ step_labels | tojson }};
   var items = document.querySelectorAll('#steps li');
+  var currentStepLabel = document.getElementById('current-step-label');
   var progressStatus = document.getElementById('progress-status');
   var interrupted = document.getElementById('progress-interrupted');
   var interruptedTitle = document.getElementById('progress-interrupted-title');
@@ -103,25 +122,41 @@
   }
 
   function paint(done, current) {
-    var currentLabel = '';
+    // 카드는 백엔드가 보고한 완료/현재 키만으로 칠한다 — 추정 진행률(%)은 만들지 않는다.
+    var fineLabel = current ? (STEP_LABELS[current] || '') : '';
     items.forEach(function (li) {
-      var key = li.dataset.key;
+      var keys = li.dataset.keys.split(' ');
+      var doneCount = 0;
+      keys.forEach(function (key) {
+        if (done.indexOf(key) !== -1) doneCount += 1;
+      });
+      var isCurrent = current !== '' && keys.indexOf(current) !== -1;
+      var isDone = doneCount === keys.length && !isCurrent;
+      var mark = li.querySelector('.mark');
+      var state = li.querySelector('.phase-state');
       li.classList.remove('done', 'current');
       li.removeAttribute('aria-current');
-      if (done.indexOf(key) !== -1) {
+      if (isDone) {
         li.classList.add('done');
-        li.querySelector('.mark').textContent = '✓';
-      } else if (key === current) {
+        mark.textContent = '✓';
+        state.textContent = '완료';
+      } else if (isCurrent || doneCount > 0) {
         li.classList.add('current');
-        li.setAttribute('aria-current', 'step');
-        li.querySelector('.mark').textContent = '';
-        currentLabel = li.querySelector('span:last-child').textContent.trim();
+        if (isCurrent) li.setAttribute('aria-current', 'step');
+        mark.textContent = '';
+        state.textContent = '진행 중';
+      } else {
+        mark.textContent = '';
+        state.textContent = '대기';
       }
     });
 
-    var announcement = currentLabel
-      ? '현재 단계: ' + currentLabel + '. ' + done.length + '개 단계 완료.'
-      : done.length + '개 단계 완료.';
+    currentStepLabel.textContent = fineLabel
+      || (done.length ? '마무리 중입니다' : '조사를 준비하고 있습니다');
+
+    var announcement = fineLabel
+      ? '현재 단계: ' + fineLabel + '. ' + done.length + '개 세부 단계 완료.'
+      : done.length + '개 세부 단계 완료.';
     if (announcement !== lastAnnouncement) {
       progressStatus.textContent = announcement;
       lastAnnouncement = announcement;

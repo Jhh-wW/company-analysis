@@ -11,67 +11,76 @@
     비교한 뒤 맞는 후보를 직접 선택해 주세요. 선택하면 전자공시(DART)에서 다시 확인합니다.
   </p>
 
+  {# 법인/개인사업자·폐업 구분은 후보 데이터에 없어 필터를 만들지 않고 건수만 보여준다. #}
+  <p class="candidate-total">총 {{ candidate_options|length }}건</p>
+
   <div class="candidate-list" aria-label="회사 후보 목록">
     {% for option in candidate_options %}
       {% set candidate = option.candidate %}
-      <section class="company-card candidate-card">
-        <div class="head">
-          <h2 class="legal">{{ candidate.candidate_name }}</h2>
+      <section class="candidate-row">
+        <div class="candidate-identity">
+          <h2 class="candidate-name">{{ candidate.candidate_name }}</h2>
+          {% if candidate.english_name and candidate.english_name != candidate.candidate_name %}
+            <p class="candidate-english">{{ candidate.english_name }}</p>
+          {% endif %}
+          <p class="candidate-address">{{ candidate.address or '주소 미확인' }}</p>
+          <p class="candidate-homepage">
+            {% if candidate.homepage %}
+              <a class="company-homepage-link" href="{{ candidate.homepage }}"
+                 target="_blank" rel="noopener noreferrer external">
+                {{ candidate.homepage }} <span aria-hidden="true">↗</span>
+              </a>
+            {% else %}
+              <span class="muted">홈페이지 미확인</span>
+            {% endif %}
+          </p>
         </div>
-        <div class="body">
-          <dl>
-            {% if candidate.english_name and candidate.english_name != candidate.candidate_name %}
-              <dt>DART 영문명</dt><dd>{{ candidate.english_name }}</dd>
-            {% endif %}
-            <dt>회사 주소</dt><dd>{{ candidate.address or '확인되지 않음' }}</dd>
-            <dt>홈페이지</dt>
+
+        <dl class="candidate-meta">
+          <div class="meta-item">
+            <dt>후보 출처</dt>
             <dd>
-              {% if candidate.homepage %}
-                <a class="company-homepage-link" href="{{ candidate.homepage }}"
-                   target="_blank" rel="noopener noreferrer external">
-                  {{ candidate.homepage }} <span aria-hidden="true">↗</span>
-                </a>
-              {% else %}
-                <span class="muted">확인되지 않음</span>
-              {% endif %}
-            </dd>
-            <dt>일치 근거</dt>
-            <dd>
-              <ul class="candidate-evidence">
-                {% for reason in candidate.evidence %}<li>{{ reason }}</li>{% endfor %}
-              </ul>
-            </dd>
-            {% if candidate.stock_code %}
-              <dt>종목코드</dt><dd>{{ candidate.stock_code }}</dd>
-            {% endif %}
-            {% if candidate.modify_date %}
-              <dt>DART 정보 갱신</dt>
-              <dd>{{ candidate.modify_date[:4] }}-{{ candidate.modify_date[4:6] }}-{{ candidate.modify_date[6:] }}</dd>
-            {% endif %}
-            {% if candidate.source_label %}
-              <dt>후보 출처</dt>
-              <dd>
+              {% if candidate.source_label %}
                 {% if candidate.source_url %}
                   <a href="{{ candidate.source_url }}" target="_blank"
                      rel="noopener noreferrer external">{{ candidate.source_label }}</a>
                 {% else %}{{ candidate.source_label }}{% endif %}
-              </dd>
-            {% endif %}
-          </dl>
+              {% elif candidate.provider_name %}{{ candidate.provider_name }}
+              {% else %}미확인{% endif %}
+            </dd>
+          </div>
+          <div class="meta-item">
+            <dt>종목코드</dt>
+            <dd>{{ candidate.stock_code or '미확인' }}</dd>
+          </div>
+          <div class="meta-item">
+            <dt>DART 정보 갱신</dt>
+            <dd>
+              {% if candidate.modify_date %}
+                {{ candidate.modify_date[:4] }}-{{ candidate.modify_date[4:6] }}-{{ candidate.modify_date[6:] }}
+              {% else %}미확인{% endif %}
+            </dd>
+          </div>
+        </dl>
 
-          {% if candidate.provider_name == 'Google Maps' %}
-            <div class="google-maps-content-attribution">
-              <span class="GMP-attribution" translate="no">Google Maps</span>
-              {% for provider_label, provider_url in candidate.attributions %}
-                <span aria-hidden="true"> · </span>
-                {% if provider_url %}
-                  <a href="{{ provider_url }}" target="_blank"
-                     rel="noopener noreferrer external">{{ provider_label }}</a>
-                {% else %}<span>{{ provider_label }}</span>{% endif %}
-              {% endfor %}
-            </div>
+        <div class="candidate-evidence-cell">
+          <p class="evidence-heading">일치 근거</p>
+          <ul class="candidate-chips">
+            {% for chip in option.match_chips %}
+              <li class="candidate-chip tone-{{ chip.tone }}">{{ chip.label }}</li>
+            {% endfor %}
+          </ul>
+          {% if candidate.evidence %}
+            <details class="candidate-evidence-more">
+              <summary>자세한 근거 {{ candidate.evidence|length }}건</summary>
+              <ul class="candidate-evidence">
+                {% for reason in candidate.evidence %}<li>{{ reason }}</li>{% endfor %}
+              </ul>
+            </details>
           {% endif %}
+        </div>
 
+        <div class="candidate-action">
           <form method="post" action="/confirm">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="company" value="{{ user_input.company }}">
@@ -88,9 +97,22 @@
             <input type="hidden" name="candidate_ref" value="{{ candidate.candidate_ref }}">
             <input type="hidden" name="evaluation_consent_grant"
                    value="{{ evaluation_consent_grant }}">
-            <button type="submit" class="btn wide">이 법인으로 확인하기</button>
+            <button type="submit" class="btn">이 기업 선택</button>
           </form>
         </div>
+
+        {% if candidate.provider_name == 'Google Maps' %}
+          <div class="google-maps-content-attribution">
+            <span class="GMP-attribution" translate="no">Google Maps</span>
+            {% for provider_label, provider_url in candidate.attributions %}
+              <span aria-hidden="true"> · </span>
+              {% if provider_url %}
+                <a href="{{ provider_url }}" target="_blank"
+                   rel="noopener noreferrer external">{{ provider_label }}</a>
+              {% else %}<span>{{ provider_label }}</span>{% endif %}
+            {% endfor %}
+          </div>
+        {% endif %}
       </section>
     {% endfor %}
   </div>
@@ -104,8 +126,17 @@
       이 후보 검색은 비용을 사용하지 않았습니다.
     {% endif %}
   </p>
-  <div class="btn-row">
-    <a class="btn ghost" href="/">해당 후보 없음 · 직접 다시 입력하기</a>
+
+  <div class="candidate-refine">
+    <p class="candidate-refine-ask">원하는 기업이 없으신가요?</p>
+    <p class="candidate-refine-row">
+      <a class="candidate-refine-link" href="/">검색어 수정하기</a>
+      <span class="muted">후보에 없는 기업은 검색어를 바꿔 다시 조회할 수 있습니다.</span>
+    </p>
+    <p class="muted">
+      후보가 모두 다른 회사인가요?
+      <a href="/feedback?stage=기업선택&amp;company={{ user_input.company|urlencode }}">오류 신고</a>
+    </p>
   </div>
 </div>
 {% endblock %}

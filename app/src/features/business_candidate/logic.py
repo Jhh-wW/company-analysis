@@ -468,6 +468,94 @@ def score_business_candidate(
     )
 
 
+# ── 화면 전용 일치 근거 요약 칩 ──────────────────────────
+# 후보 수집·점수 로직을 바꾸지 않는 표시용 매핑이다. 계산한 사실만 요약하고,
+# 계산하지 않았거나 비교 재료가 없는 항목은 '불확실'로 정직하게 말한다.
+CHIP_TONE_OK = "ok"
+CHIP_TONE_PART = "part"
+CHIP_TONE_NO = "no"
+CHIP_TONE_UNKNOWN = "unknown"
+
+_CHIP_ID_EXACT = "식별번호 일치"
+_CHIP_NAME_EXACT = "법인명 일치"
+_CHIP_NAME_PARTIAL = "법인명 부분 일치"
+_CHIP_NAME_SIMILAR = "법인명 유사"
+_CHIP_NAME_UNKNOWN = "법인명 불확실"
+_CHIP_ADDRESS_MATCH = "주소 일치"
+_CHIP_ADDRESS_MISMATCH = "주소 불일치"
+_CHIP_ADDRESS_UNKNOWN = "주소 불확실"
+
+_PARTIAL_MATCH_KINDS = frozenset(
+    {"acronym_token", "acronym_reading", "acronym_cross_script", "token"}
+)
+
+
+@dataclass(frozen=True)
+class CandidateDisplayChip:
+    """후보 목록 행에 보여줄 일치 근거 요약 한 개."""
+
+    tone: str
+    label: str
+
+
+def _name_chip(candidate: BusinessCandidate, query: str) -> CandidateDisplayChip:
+    """이름 비교 결과를 _score와 같은 결정 규칙으로 칩 한 개로 요약한다."""
+    match_kind = (
+        candidate.name_match_kind
+        if candidate.name_match_kind in MATCH_KIND_PRIORITY
+        else ""
+    )
+    query_key = _company_key(query)
+    candidate_key = _company_key(candidate.candidate_name)
+    english_key = _company_key(candidate.english_name)
+    expanded_query_key = _company_key(_latin_acronym_korean(query))
+
+    if match_kind == "exact_id":
+        return CandidateDisplayChip(CHIP_TONE_OK, _CHIP_ID_EXACT)
+    if match_kind in {"exact_name", "legal_suffix"} or (
+        query_key and query_key in {candidate_key, english_key}
+    ):
+        return CandidateDisplayChip(CHIP_TONE_OK, _CHIP_NAME_EXACT)
+    if match_kind == "trigram":
+        return CandidateDisplayChip(CHIP_TONE_PART, _CHIP_NAME_SIMILAR)
+    if match_kind in _PARTIAL_MATCH_KINDS:
+        return CandidateDisplayChip(CHIP_TONE_PART, _CHIP_NAME_PARTIAL)
+    if _latin_acronym_token_match(query, candidate.candidate_name) or (
+        candidate.english_name
+        and _latin_acronym_token_match(query, candidate.english_name)
+    ):
+        return CandidateDisplayChip(CHIP_TONE_PART, _CHIP_NAME_PARTIAL)
+    if expanded_query_key and expanded_query_key in {candidate_key, english_key}:
+        return CandidateDisplayChip(CHIP_TONE_PART, _CHIP_NAME_PARTIAL)
+    if query_key and candidate_key and (
+        query_key in candidate_key or candidate_key in query_key
+    ):
+        return CandidateDisplayChip(CHIP_TONE_PART, _CHIP_NAME_PARTIAL)
+    if expanded_query_key and candidate_key and expanded_query_key in candidate_key:
+        return CandidateDisplayChip(CHIP_TONE_PART, _CHIP_NAME_PARTIAL)
+    if _tokens(query) & _tokens(candidate.candidate_name):
+        return CandidateDisplayChip(CHIP_TONE_PART, _CHIP_NAME_PARTIAL)
+    return CandidateDisplayChip(CHIP_TONE_UNKNOWN, _CHIP_NAME_UNKNOWN)
+
+
+def _address_chip(candidate: BusinessCandidate, address_hint: str) -> CandidateDisplayChip:
+    """주소 토큰 비교를 칩 한 개로 요약한다. 비교 재료가 없으면 '불확실'이다."""
+    hint_tokens = _address_tokens(address_hint)
+    candidate_tokens = _address_tokens(candidate.address)
+    if not hint_tokens or not candidate_tokens:
+        return CandidateDisplayChip(CHIP_TONE_UNKNOWN, _CHIP_ADDRESS_UNKNOWN)
+    if hint_tokens & candidate_tokens:
+        return CandidateDisplayChip(CHIP_TONE_OK, _CHIP_ADDRESS_MATCH)
+    return CandidateDisplayChip(CHIP_TONE_NO, _CHIP_ADDRESS_MISMATCH)
+
+
+def candidate_match_chips(
+    candidate: BusinessCandidate, *, query: str, address_hint: str
+) -> tuple[CandidateDisplayChip, ...]:
+    """후보 목록 화면 전용 일치 근거 칩. 수집·점수·순서에는 영향을 주지 않는다."""
+    return (_name_chip(candidate, query), _address_chip(candidate, address_hint))
+
+
 def anonymous_rate_key(*parts: str) -> str:
     """IP·User-Agent 원문을 남기지 않는 프로세스 한정 rate-limit 열쇠."""
     material = "\x1f".join(str(part or "")[:512] for part in parts).encode(

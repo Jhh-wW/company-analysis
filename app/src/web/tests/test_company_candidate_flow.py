@@ -533,7 +533,8 @@ def test_DART_local_후보는_사람이_선택해야만_DART를_다시_부르고
         assert candidates.status_code == 200
         assert "확인할 회사 후보입니다" in candidates.text
         assert "(주)제이와이피엔터테인먼트" in candidates.text
-        assert "해당 후보 없음 · 직접 다시 입력하기" in candidates.text
+        assert "원하는 기업이 없으신가요?" in candidates.text
+        assert "검색어 수정하기" in candidates.text
         assert pipeline.search_calls == 1
         assert pipeline.lookup_calls == 0
         assert _hidden(candidates.text, "company") == "JYP"

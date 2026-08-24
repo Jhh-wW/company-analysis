@@ -80,6 +80,15 @@ _COMPANY_ANALYSIS_PROGRESS_STEPS = tuple(
 _COMPANY_ANALYSIS_PROGRESS_KEYS = frozenset(
     key for key, _label in _COMPANY_ANALYSIS_PROGRESS_STEPS
 )
+#: 진행 화면 표시용 단계 카드. 실제 파이프라인 단계 키(PROGRESS_STEPS)를 묶어서만
+#: 보여준다 — 백엔드가 주지 않는 진행률(%)은 만들지 않는다. 단계 키가 바뀌면
+#: 표시 묶음도 함께 고치도록 web 시험이 키 일치를 검사한다.
+_COMPANY_ANALYSIS_PROGRESS_PHASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("기업 식별", ("identify", "judge")),
+    ("공시·공식 자료 수집", ("collect", "gate")),
+    ("본문 작성·검증(AI)", ("generate", "verify")),
+    ("출고 검사·마무리", ("output",)),
+)
 _PROGRESS_UNAVAILABLE_MESSAGE = (
     "진행 정보가 더 이상 남아 있지 않습니다. 서버가 다시 시작되었거나 "
     "오래된 작업의 진행 정보가 정리된 경우입니다. 결과가 저장되지 않아 "
@@ -498,6 +507,12 @@ def _register_candidate_attempt(
         {
             "candidate": candidate,
             "candidate_index": index,
+            # 화면 전용 일치 근거 요약. 후보 점수·순서·선택 서명에는 쓰지 않는다.
+            "match_chips": candidate_logic.candidate_match_chips(
+                candidate,
+                query=user_input.company,
+                address_hint=user_input.region,
+            ),
             "candidate_selection_token": candidate_logic.candidate_selection_token(
                 binding=f"{token}:{index}:{spend_store.bucket_id(share_key)}",
                 original_company=user_input.company,
@@ -1414,7 +1429,10 @@ async def progress_page(request: Request, job_id: str):
         request=request,
         name="progress.html",
         context=request_helpers._ctx(
-            request, job=job, steps=_COMPANY_ANALYSIS_PROGRESS_STEPS
+            request,
+            job=job,
+            phases=_COMPANY_ANALYSIS_PROGRESS_PHASES,
+            step_labels=dict(_COMPANY_ANALYSIS_PROGRESS_STEPS),
         ),
     )
 
