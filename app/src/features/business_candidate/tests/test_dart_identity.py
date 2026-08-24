@@ -163,6 +163,80 @@ def test_official_acronym_reverse_alias_keeps_qualified_and_homonym_candidates(
     assert "00999999" not in sm_codes
 
 
+def test_glued_korean_company_type_suffix_recovers_the_same_matches_as_spaced_query():
+    """공백 없이 붙여 쓴 입력도 공백을 넣은 입력과 같은 결과가 나와야 한다.
+
+    실서비스 진행로그에 "제이와이피엔터테인먼트"를 붙여 치면 구법인
+    "(주)제이와이피"만 잡힌다고 기록돼 있었지만, 실제로 재현한 결과는
+    구법인이 이기는 게 아니라 매칭 5단계(exact/derived/acronym/token/
+    trigram)가 전부 빗나가 **빈 결과**였다(trigram은 길이차 가드
+    ``TRIGRAM_MAX_LENGTH_RATIO_GAP``에 걸려 조용히 기권). `_name_tokens`가
+    업종형 접미사를 붙여 쓴 토큰을 본체+접미사로 쪼개 기존 acronym_cross_script
+    경로를 타게 만드는 게 이 시험이 지키는 고정점이다.
+    """
+    index = build_dart_company_index(_records())
+    spaced = generate_dart_company_matches(index, "제이와이피 엔터테인먼트", limit=5)
+    assert [item.record.corp_code for item in spaced][:2] == [
+        "00258689",
+        "00535454",
+    ]
+
+    for glued in (
+        "제이와이피엔터테인먼트",
+        "주식회사 제이와이피엔터테인먼트",
+        "JYP엔터테인먼트",
+    ):
+        matches = generate_dart_company_matches(index, glued, limit=5)
+        codes = [item.record.corp_code for item in matches]
+        assert codes[:2] == ["00258689", "00535454"], glued
+        assert matches[0].match_kind == spaced[0].match_kind == "acronym_cross_script"
+        assert "00999999" not in codes
+
+
+def test_glued_company_type_suffix_split_keeps_exact_self_match_as_top1():
+    """접미사 분리가 «와이지» 계열 법인들 사이에서 자기 자신을 top1으로 지킨다.
+
+    ``dart_yg_full_catalog_slice.json``에는 "와이지엔터테인먼트"·"와이지
+    인터내셔널"처럼 접두어(와이지)는 같고 업종형 접미사만 다른 법인이 실제
+    DART 스냅숏 그대로 여러 건 들어 있다. 참고: "와이지"라는 한글 낱말은
+    이번 수정과 무관하게 이미 "YG" 약어의 결정적 독음이라, 이 접두어를
+    공유하는 15개 법인 전부가 acronym_cross_script로 하위 순위에 걸린다
+    (원래부터 그렇던 동작 — bare "와이지" 질의로도 재현됨). 이번 접미사
+    분리 수정이 지켜야 하는 것은 그 목록의 **1등**이 여전히 정확한 자기
+    자신인지이다 — exact_name(우선순위 5)이 acronym_cross_script(우선순위
+    4)를 항상 이긴다.
+    """
+    fixture_path = (
+        Path(__file__).parent / "fixtures" / "dart_yg_full_catalog_slice.json"
+    )
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    index = build_dart_company_index(
+        DartCompanyRecord(**row) for row in payload["records"]
+    )
+
+    glued_entertainment = generate_dart_company_matches(
+        index, "와이지엔터테인먼트", limit=5
+    )
+    assert glued_entertainment
+    assert glued_entertainment[0].record.corp_code == "00613318"
+    assert glued_entertainment[0].match_kind == "exact_name"
+
+    glued_international = generate_dart_company_matches(
+        index, "와이지인터내셔널", limit=5
+    )
+    assert glued_international
+    assert glued_international[0].record.corp_code == "01727715"
+    assert glued_international[0].match_kind == "exact_name"
+
+    # 이 절대 조각(YG 약어 정렬 · 하이픈 구분)은 이번 수정과 무관하게 그대로 유지돼야 한다.
+    assert generate_dart_company_matches(index, "ｙＧ", limit=15)[
+        3
+    ].record.corp_code == "00613318"
+    assert generate_dart_company_matches(index, "와이지-원", limit=5)[
+        0
+    ].record.corp_code == "00139719"
+
+
 def test_reverse_alias_requires_literal_official_uppercase_acronym_token():
     index = build_dart_company_index(
         (

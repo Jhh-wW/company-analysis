@@ -46,6 +46,25 @@ _ENGLISH_CORPORATE_TOKENS = frozenset(
     }
 )
 
+# DART 정식 상호는 "회사이름 + 공백 + 업종형 접미사"로 등록된 경우가 많아
+# 색인용 별칭 토큰은 대개 이미 분리돼 있다. 그런데 사용자가 입력을 붙여
+# 쓰면(예: "제이와이피엔터테인먼트") `_TOKEN_RE`가 공백 없는 한글 전체를
+# 토큰 1개로 묶어버려서, 별칭 쪽엔 있는 "제이와이피"/"엔터테인먼트" 개별
+# 토큰과 전혀 만나지 못하고 exact/derived/token/trigram 전 단계가 빗나간다
+# (trigram은 길이차 가드에 걸려 조용히 기권한다). 여기서만 좁게 쪼갠다 —
+# 임의의 단어를 다 쪼개면 무관한 회사가 토큰 경로로 섞여 들어올 수 있어서,
+# 잘 알려진 업종형 접미사 목록으로만 한정한다.
+_GLUED_COMPANY_TYPE_SUFFIXES: tuple[str, ...] = tuple(
+    sorted(
+        {"엔터테인먼트", "홀딩스", "인터내셔널", "테크놀로지"},
+        key=len,
+        reverse=True,
+    )
+)
+# 접미사만 남고 본체가 없는 경우(예: 접미사 자체가 상호인 극단값)는 쪼개지
+# 않는다. 최소 2자 이상 남아야 "본체 이름"으로 본다.
+_GLUED_SUFFIX_MIN_BASE_LENGTH = 2
+
 # Trigram is an abstaining typo block, not a general fuzzy-name fallback.
 TRIGRAM_MIN_CHARS = 6
 TRIGRAM_MIN_SIMILARITY = 0.78
@@ -111,17 +130,35 @@ class DartCompanyMatch:
     matched_field: str
 
 
+def _split_glued_company_type_suffix(token: str) -> tuple[str, ...]:
+    """공백 없이 붙은 업종형 접미사를 본체와 분리한다.
+
+    가장 긴 접미사부터 검사해 접미사끼리 겹치는 경우를 피한다(현재 목록엔
+    없지만 향후 추가를 대비). 매칭되는 접미사가 없으면 원래 토큰 그대로
+    1개짜리 튜플을 돌려준다.
+    """
+    for suffix in _GLUED_COMPANY_TYPE_SUFFIXES:
+        if token.endswith(suffix):
+            base = token[: -len(suffix)]
+            if len(base) >= _GLUED_SUFFIX_MIN_BASE_LENGTH:
+                return (base, suffix)
+    return (token,)
+
+
 def _name_tokens(value: object, *, drop_english_suffixes: bool) -> tuple[str, ...]:
     text = unicodedata.normalize("NFKC", str(value or "")).casefold()
     for marker in _CORPORATE_MARKERS:
         text = text.replace(marker, " ")
-    return tuple(
-        token
-        for token in _TOKEN_RE.findall(text)
-        if token
-        and token not in _KOREAN_CORPORATE_TOKENS
-        and (not drop_english_suffixes or token not in _ENGLISH_CORPORATE_TOKENS)
-    )
+    tokens: list[str] = []
+    for token in _TOKEN_RE.findall(text):
+        if (
+            not token
+            or token in _KOREAN_CORPORATE_TOKENS
+            or (drop_english_suffixes and token in _ENGLISH_CORPORATE_TOKENS)
+        ):
+            continue
+        tokens.extend(_split_glued_company_type_suffix(token))
+    return tuple(tokens)
 
 
 def _normalized_parts(value: object) -> tuple[str, tuple[str, ...]]:
