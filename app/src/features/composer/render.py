@@ -547,7 +547,7 @@ def render_report(
     latest_performance_period: str = "",
     table_presentation: str = "table",
     filing_meta: Optional[FilingMeta] = None,
-    composition_table: Optional[PerformanceTable] = None,
+    composition_tables: tuple[PerformanceTable, ...] = (),
     citation_style: str = DEFAULT_CITATION_STYLE,
 ) -> Report:
     """검증 끝난 ComposedReport를 웹·PDF 공용 pipeline Report로 바꾼다.
@@ -564,10 +564,12 @@ def render_report(
         grade: 표지 등급. 기본 완성 — 완성 여부 실측은 06장 몫이다.
         table_presentation: 원본 pipeline ReportTable.presentation을 넘기면
             기존 차트(trend·composition)가 그대로 재사용된다. 기본은 일반 표.
-        composition_table: 2장에 실을 매출 구성표. v1은 이 표를 이미 만들어
-            business_model 장에 붙이는데 v2 호출부가 넘기지 않아 «표도 도식도»
-            사라져 있었다(실측 결함 — 9장 중 4장 하나만 표를 받았다).
-            없으면 표 없이 간다(억지로 만들지 않는다).
+        composition_tables: 2장에 실을 매출 구성표들(제품별·지역별 등). v1은 이
+            표들을 이미 만들어 business_model 장에 «전부» 붙이는데 v2 호출부가
+            넘기지 않아 «표도 도식도» 사라져 있었다(실측 결함 — 9장 중 4장
+            하나만 표를 받았다). 표는 여러 개일 수 있고 각각 도식이 함께 나간다
+            — 첫 표만 쓰지 않는다(2026-08-25 설계 변경). 비어 있으면 표 없이
+            간다(억지로 만들지 않는다).
         citation_style: 본문 인용 번호 표기 방식. `inline`은 문장마다 번호를
             붙이고(기존), `merged`는 해석 문장의 번호를 빼고 같은 출처가 이어지는
             확인 문장 묶음은 마지막 문장에만 번호를 단다. 부록과의 1:1은 두 방식
@@ -640,21 +642,30 @@ def render_report(
                     owners.append(section.section_id)
 
         tables: list[ReportTable] = []
-        slot: Optional[tuple[PerformanceTable, str]] = None
+        # ★ 설계 변경(2026-08-25) — 「한 장에 표는 하나」라는 암묵적 단수
+        #   가정을 걷어냈다. slots는 이 장에 실릴 «프로그램표»(실적/구성) 목록
+        #   이다 — 4장은 실적표 하나, 2장은 구성표가 여러 개(제품별·지역별)일
+        #   수 있다. 여기 흐름표(경로표)까지 «같은 장에 함께» 실릴 수 있다
+        #   (예: 2장 = 흐름표 + 구성표 2개).
+        slots: list[tuple[PerformanceTable, str]] = []
         if (
             section.section_id == PERFORMANCE_TABLE_SECTION_ID
             and performance_table is not None
             and performance_table.rows
         ):
-            slot = (performance_table, table_presentation)
-        elif (
-            section.section_id == COMPOSITION_TABLE_SECTION_ID
-            and composition_table is not None
-            and composition_table.rows
-        ):
-            slot = (composition_table, COMPOSITION_PRESENTATION)
-        # 흐름표를 내는 장(5장·7장). 실적표·구성표 자리를 이미 쓴 장은 건너뛴다.
-        if section.section_id in FLOW_HEADERS_BY_SECTION and slot is None:
+            slots.append((performance_table, table_presentation))
+        elif section.section_id == COMPOSITION_TABLE_SECTION_ID:
+            slots.extend(
+                (table, COMPOSITION_PRESENTATION)
+                for table in composition_tables
+                if table.rows
+            )
+        # 흐름표를 내는 장(1·2·5·6·7·8장). 예전에는 「프로그램표 자리를 이미
+        # 쓴 장은 건너뛴다」(slot is None)는 배타 조건이 있었는데, 2장처럼
+        # 구성표와 흐름표가 «함께» 실리는 장이 생겨 그 조건을 없앴다 — 흐름표를
+        # 먼저 넣고 프로그램표를 뒤에 붙인다(목업이 요구하는 「흐름 → 구성」
+        # 순서와도 맞는다).
+        if section.section_id in FLOW_HEADERS_BY_SECTION:
             flow_table = _flow_report_table(section, numbers)
             if flow_table is not None:
                 flow_cite = citation_number(flow_table.cite)
@@ -663,8 +674,8 @@ def render_report(
                     if section.section_id not in owners:
                         owners.append(section.section_id)
                 tables.append(flow_table)
-        if slot is not None:
-            converted = _performance_report_table(slot[0], slot[1])
+        for table, presentation in slots:
+            converted = _performance_report_table(table, presentation)
             cite_number_text = citation_number(converted.cite)
             if cite_number_text and int(cite_number_text) in meta_by_number:
                 # 표 캡션의 〔n〕도 본문 인용이다 — 부록과 1:1을 지키려고

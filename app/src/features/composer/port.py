@@ -262,35 +262,49 @@ def _composition_shape(
     return (headers[0], headers[ratio_index]), trimmed
 
 
-def composition_table_from_raw(tables: Any) -> Optional[PerformanceTable]:
-    """`revenuemix.build()`가 돌려준 표 목록의 «첫 표»를 구성표로 바꾼다.
+def composition_tables_from_raw(tables: Any) -> tuple[PerformanceTable, ...]:
+    """`revenuemix.build()`가 돌려준 표 목록을 «전부» 구성표로 바꾼다.
 
-    ★ 왜 필요한가 (실측 결함) — v1은 이 표를 만들어 2장에 붙이는데
+    ★ 왜 필요한가 (실측 결함 ①) — v1은 이 표를 만들어 2장에 붙이는데
       (`pipeline/real.py`의 tables_by_section["business_model"]),
       v2 호출부가 넘기지 않아 «표도 도식도» 통째로 빠져 있었다.
       9개 장 중 4장 하나만 표를 받는 상태였다.
-    ★ 첫 표만 쓴다 — revenuemix는 제품별·지역별 두 표를 낼 수 있는데
-      2장 한 자리에 둘 다 넣으면 같은 매출을 두 번 보여 주게 된다
-      (정본 §5 「같은 수치를 문장과 표에 각각 씀」 중복 판정).
+    ★ 왜 여러 개인가 (실측 결함 ②, 설계 변경 2026-08-25) — 예전에는 «첫 표만»
+      썼다. revenuemix는 제품별·지역별 두 표를 낼 수 있는데, 첫 표만 쓰면
+      지역별 표가 통째로 사라진다. v1은 이미 둘 다 2장에 붙이고
+      (`ReportTable(**table) for table in revenue_tables`), 정본
+      §4 소유권 표(2장 = 「수익 구조·고객 유형·고객·지역·채널 우선순위」)에도
+      지역 우선순위가 명시돼 있다 — 첫 표만 쓰는 건 v2만의 축소였다. 다른
+      장으로 옮기지 않고 «2장에 표 여러 개»를 그대로 허용한다(사용자 결정).
+      «같은 매출을 두 번 보여 준다»는 예전 우려는 성립하지 않는다 —
+      제품별·지역별은 같은 매출을 «다른 축»으로 나눈 것이라 정본 §5의
+      「같은 수치의 반복」이 아니다.
+    ★ 표마다 «구성 도식 모양»으로 따로 줄인다(_composition_shape) — 표 하나가
+      도식 하한(3행)에 못 미쳐도 다른 표에는 영향을 주지 않는다.
     """
     if not tables:
-        return None
-    first = tables[0] if isinstance(tables, (list, tuple)) else tables
-    if not isinstance(first, Mapping):
-        return None
-    headers = tuple(str(head) for head in (first.get("headers") or ()))
-    rows = tuple(
-        tuple(str(cell) for cell in row) for row in (first.get("rows") or ())
-    )
-    if not rows:
-        return None
-    headers, rows = _composition_shape(headers, rows)
-    if not rows:
-        return None
-    return PerformanceTable(
-        caption=str(first.get("caption") or ""),
-        headers=headers,
-        rows=rows,
-        unit=str(first.get("display_unit") or ""),
-        cite=str(first.get("cite") or ""),
-    )
+        return ()
+    items = tables if isinstance(tables, (list, tuple)) else (tables,)
+    out: list[PerformanceTable] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        headers = tuple(str(head) for head in (item.get("headers") or ()))
+        rows = tuple(
+            tuple(str(cell) for cell in row) for row in (item.get("rows") or ())
+        )
+        if not rows:
+            continue
+        headers, rows = _composition_shape(headers, rows)
+        if not rows:
+            continue
+        out.append(
+            PerformanceTable(
+                caption=str(item.get("caption") or ""),
+                headers=headers,
+                rows=rows,
+                unit=str(item.get("display_unit") or ""),
+                cite=str(item.get("cite") or ""),
+            )
+        )
+    return tuple(out)

@@ -18,6 +18,13 @@
   공시는 경쟁 관계를 말하면서도 상대 이름을 거의 밝히지 않는다
   (실측: 4개사 원문에서 법인 지목 0건). 이름 없는 비교표는 지어낸 비교다.
   대신 동종업계 «경쟁우위»를 산문으로 쓴다.
+
+★ 3장도 나중에 같은 방식으로 늘렸다(2026-08-25) — 하이브 실측에서 3장이
+  문장 2개·표 0개로 9개 장 중 가장 빈약했다. 「목업에도 3장 시각 요소가
+  없다」는 진행로그 기록은 목업을 잘못 읽은 것이었다(재확인: 목업 3장에
+  제품 카드 2개 실존). 3장 헤더 「제품·서비스명 / 제품·서비스 범위 /
+  중점 추진 근거 / 사업적 역할」은 목업 4행 중 「2장 수익 분류 참조」·
+  「해석 한계」 두 줄을 뺀 것이다(이유는 constants.py 주석).
 """
 
 from __future__ import annotations
@@ -33,8 +40,11 @@ from src.features.composer.constants import (
     FLOW_PROMPT_BY_SECTION,
     IDENTITY_TABLE_HEADERS,
     IDENTITY_TABLE_SECTION_ID,
+    PORTFOLIO_TABLE_HEADERS,
+    PORTFOLIO_TABLE_SECTION_ID,
     SECTION_IDS,
     SECTION_TITLES,
+    STRATEGY_TABLE_GUIDE,
     STRATEGY_TABLE_HEADERS,
     STRATEGY_TABLE_SECTION_ID,
 )
@@ -92,17 +102,21 @@ def _section_of(report, cell: str):
 
 
 # ══════════════════════════════════════════════════════════
-# ① 목업이 요구한 세 장이 표를 낸다
+# ① 목업이 요구한 여러 장이 표를 낸다
 # ══════════════════════════════════════════════════════════
+#
+# ★ 이름을 「세 장」에서 「여러 장」으로 고쳤다(2026-08-25, 3장 추가) —
+#   숫자를 이름에 박으면 장이 늘 때마다 이름도 거짓말이 된다.
 
 _새_장 = (
     (IDENTITY_TABLE_SECTION_ID, IDENTITY_TABLE_HEADERS),
+    (PORTFOLIO_TABLE_SECTION_ID, PORTFOLIO_TABLE_HEADERS),
     (STRATEGY_TABLE_SECTION_ID, STRATEGY_TABLE_HEADERS),
     (CULTURE_TABLE_SECTION_ID, CULTURE_TABLE_HEADERS),
 )
 
 
-def test_목업이_요구한_세_장이_표_그릇을_갖는다():
+def test_목업이_요구한_여러_장이_표_그릇을_갖는다():
     for section_id, headers in _새_장:
         assert FLOW_HEADERS_BY_SECTION.get(section_id) == headers, section_id
 
@@ -214,6 +228,16 @@ def test_각_장의_칸_이름이_그_장_프롬프트에만_나온다():
             if other != section_id
             for name in other_headers
         } - set(headers)
+        # ★ 2026-08-25 정정 — 3장을 추가하며 또 다른 오탐 유형이 나왔다.
+        #   2장 칸 「제품·서비스」는 3장 칸 「제품·서비스명」·「제품·서비스
+        #   범위」의 «부분 문자열»이다. 이건 남의 칸이 «새어 든» 게 아니라
+        #   내 칸 이름 자체에 그 낱말이 들어 있는 것뿐이다(3장 표제가
+        #   원래 «핵심 제품·서비스와 포트폴리오 역할»이니 당연하다). 남의
+        #   칸이 «내 칸 이름의 부분»이면 leak이 아니라고 본다 — 남의 칸이
+        #   «내 칸과 무관하게 통째로 튀어나왔을 때»만 진짜 leak이다.
+        남의칸 = {
+            name for name in 남의칸 if not any(name in own for own in headers)
+        }
         샌_것 = [name for name in 남의칸 if name in 지침]
         assert not 샌_것, f"{section_id}에 남의 칸 이름이 샜습니다: {샌_것}"
 
@@ -240,3 +264,41 @@ def test_장마다_칸_수가_다른_것을_파서가_지킨다():
 
         # 칸 수가 맞는 줄만 남는다 (2칸 계약인 장이면 반대로 걸러진다)
         assert all(len(row.cells) == len(headers) for row in rows), section_id
+
+
+# ══════════════════════════════════════════════════════════
+# ④ 6장 «계획» 칸 순서 정정 (2026-08-25, 실측 결함)
+# ══════════════════════════════════════════════════════════
+#
+# ★ 왜 이 시험이 있나 — 하이브 실측에서 6장 1행의 「시점」 칸에 시점이 아니라
+#   주제(「글로벌 시장 진출」)가 들어갔다. 원인: 흐름표를 쓰는 6개 장 중
+#   1·2·5·7·8장은 전부 «1번 칸 = 그 줄의 주제»인데 6장만 1번 칸이 시간
+#   속성(시점)이라 주제를 담을 자리가 없었다 — AI 잘못이 아니라 구조 문제
+#   였다(`docs/실행계획_엔진v2/11_결정_전수대조_05_6장_시점칸_원인.md`).
+#   「계획」을 1번 칸으로 옮기고 지침에 정의를 추가하는 두 조치를 «함께»
+#   해야 재발하지 않는다 — 이 시험은 그 두 조치가 실제로 남아 있는지 잠근다.
+
+
+def test_6장_칸_순서가_계획_시점_공시된_내용이다():
+    """★★ 순서 자체가 계약이다 — 다시 시점을 1번으로 되돌리면 재발한다."""
+    assert STRATEGY_TABLE_HEADERS == ("계획", "시점", "공시된 내용")
+
+
+def test_6장_지침에_계획_칸의_정의가_있다():
+    """★ 정의 없이 칸만 옮기면 AI가 여전히 무엇을 써야 할지 모른다."""
+    assert "「계획」은 이 줄의" in STRATEGY_TABLE_GUIDE
+    # 「시점」·「공시된 내용」 정의도 이번에 안 잃었는지 함께 확인한다.
+    assert "「시점」은 공식 자료에 적힌 대로" in STRATEGY_TABLE_GUIDE
+    assert "「공시된 내용」은 회사가 실제로 밝힌" in STRATEGY_TABLE_GUIDE
+
+
+def test_6장_프롬프트_스키마도_새_순서를_그대로_반영한다():
+    """★ _flow_schema_guide가 STRATEGY_TABLE_HEADERS «순서 그대로» JSON 칸 목록을
+    만든다 — 여기서 헤더 순서와 스키마 문구가 어긋나면 작가가 옛 순서로 쓴다.
+    """
+    지침 = FLOW_PROMPT_BY_SECTION[STRATEGY_TABLE_SECTION_ID]
+    계획_위치 = 지침.find('"<계획>"')
+    시점_위치 = 지침.find('"<시점>"')
+    공시_위치 = 지침.find('"<공시된 내용>"')
+    assert -1 not in (계획_위치, 시점_위치, 공시_위치), 지침
+    assert 계획_위치 < 시점_위치 < 공시_위치, "스키마의 칸 순서가 헤더 순서와 다릅니다"

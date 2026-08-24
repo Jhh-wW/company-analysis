@@ -462,9 +462,21 @@ IDENTITY_TABLE_HEADERS: Final[tuple[str, str, str]] = (
 IDENTITY_TABLE_CAPTION: Final[str] = "회사가 스스로를 어떻게 규정하나"
 
 STRATEGY_TABLE_SECTION_ID: Final[str] = "future_strategy"
+#: ★ 칸 순서 정정(2026-08-25, `docs/실행계획_엔진v2/11_결정_전수대조_05_6장_시점칸_원인.md`
+#:   조사 결론) — 원래 「시점 / 계획 / 공시된 내용」이었다. 흐름표를 쓰는
+#:   6개 장 중 5개(1·2·5·7·8장)는 전부 «1번 칸 = 그 줄의 주제»인데 6장만
+#:   1번 칸이 시간 속성(시점)이라 주제를 담을 자리가 없었다 — 그래서 AI가
+#:   시점 칸에 주제를 밀어 넣고(1행) 나머지 줄은 비워 냈다(2행)는 것이
+#:   실측·규칙성으로 확인됐다. 「계획」을 1번 칸으로 옮겨 다른 5개 장과 같은
+#:   패턴으로 맞췄다 — 프롬프트만 손보면 주제가 갈 곳이 없어 재발한다.
+#: ⚠️ `report_standard/visualization.py`의 `_CARD_HEADER_SETS`가 이 칸 이름을
+#:   «순서까지 포함해» 문자열로 그대로 들고 있다(카드 도식 판정, card-render
+#:   소유 — 이 파일은 그 상수를 고치지 않는다). 여기서 순서를 바꾸면 그쪽
+#:   상수도 같이 바뀌어야 한다 — 두 파일이 문자열로만 묶여 있어 한쪽만
+#:   고치면 조용히 깨진다(카드 대신 화살표 흐름표로 되돌아간다).
 STRATEGY_TABLE_HEADERS: Final[tuple[str, str, str]] = (
-    "시점",
     "계획",
+    "시점",
     "공시된 내용",
 )
 STRATEGY_TABLE_CAPTION: Final[str] = "회사가 밝힌 성장 계획"
@@ -476,6 +488,52 @@ CULTURE_TABLE_HEADERS: Final[tuple[str, str, str]] = (
     "확인된 사례",
 )
 CULTURE_TABLE_CAPTION: Final[str] = "무엇을 내걸고 어떻게 일하나"
+
+#: ══ 2장 «사업 구조와 수익 모델» 흐름표 ═══════════════════
+#:
+#: ★ 왜 추가하나 (사용자가 완성 기준으로 정한 목업 대조) — 목업 2장은 도식이
+#:   «흐름 + 구성» 두 개인데 우리는 구성 하나뿐이었다. 새 도식 종류를 만들지
+#:   않고 5·7장이 쓰는 흐름표 계약에 장만 늘린다(1·6·8장과 같은 방식).
+#: ★ 칸 이름은 출력 기준(`docs/출력물 기준/02_사업_구조와_수익_모델/README.md`
+#:   §출력 필드/형식 「가치와 수익의 흐름」)이 정한 4칸을 그대로 옮겼다 —
+#:   «지어낸 도식»이 아니라 이미 합의된 기준 문서를 코드로 옮긴 것이다.
+BUSINESS_FLOW_SECTION_ID: Final[str] = "business_model"
+BUSINESS_FLOW_HEADERS: Final[tuple[str, str, str, str]] = (
+    "핵심 자산",
+    "제품·서비스",
+    "고객 행동·과금",
+    "반복·확장 수익",
+)
+BUSINESS_FLOW_CAPTION: Final[str] = "가치와 수익이 흐르는 경로"
+
+#: ══ 3장 «핵심 제품·서비스와 포트폴리오 역할» 표 ═══════════
+#:
+#: ★ 왜 추가하나 (실측, 2026-08-25) — 하이브 실측에서 3장은 문장 2개·표
+#:   0개(그마저 둘 다 «해석» 등급, «확인» 등급 0개)로 9개 장 중 가장
+#:   빈약했다. 목업(진영) 3장은 제품마다 카드 1장씩 «2개»가 있다 — 처음
+#:   진행로그에 「목업에도 없음」이라 적었던 것은 목업을 잘못 읽은 것이었다
+#:   (재확인: 목업 PDF 3장에 카드 2개 실존).
+#: ★ 목업 카드 4행을 그대로 옮기지 않았다 — 두 줄은 뺐다:
+#:   ·「2장 수익 분류 참조」— 다른 장을 가리키는 참조라 우리 구조(장마다
+#:     독립된 흐름표 계약)에 없는 개념이다. 억지로 넣으면 실제로 참조할
+#:     수단이 없어 AI가 지어낸 참조 문구를 쓰게 된다.
+#:   ·「해석 한계」— 「범위·한계」 행은 card-render가 별도 과제로 만든다
+#:     (등급·인용 데이터로 «코드가» 만드는 것이지 AI가 쓰는 칸이 아니다).
+#:     여기서 중복해서 만들면 두 군데서 각자 다른 한계 문구가 나온다.
+#: ★ 칸 순서는 «1번 칸 = 그 줄의 주제» 원칙(1·2·6·8장과 동일)을 따른다.
+#:   3장의 주제는 «제품·서비스 이름» 그 자체다 — 6장이 이 원칙을 어겨서
+#:   시점 칸에 주제가 밀려 들어간 사고가 났다(같은 실수를 반복하지 않는다).
+#: ★ 근거 문서: `docs/출력물 기준/03_핵심_제품서비스와_포트폴리오_역할/
+#:   README.md` §출력 필드/형식 — 「제품·서비스 범위」·「중점 추진 근거」·
+#:   「사업적 역할(product_role)」 세 필드는 그대로 옮기고, 위 두 줄만 뺐다.
+PORTFOLIO_TABLE_SECTION_ID: Final[str] = "portfolio"
+PORTFOLIO_TABLE_HEADERS: Final[tuple[str, str, str, str]] = (
+    "제품·서비스명",
+    "제품·서비스 범위",
+    "중점 추진 근거",
+    "사업적 역할",
+)
+PORTFOLIO_TABLE_CAPTION: Final[str] = "지금 무엇을 미는가 — 핵심 제품·서비스와 역할"
 
 #: 1장 표 요청.
 IDENTITY_TABLE_GUIDE: Final[str] = (
@@ -493,11 +551,20 @@ IDENTITY_TABLE_GUIDE: Final[str] = (
 )
 
 #: 6장 표 요청.
+#: ★ 「계획」 칸 정의를 새로 추가했다(2026-08-25) — 예전엔 이 칸이 없어서
+#:   AI가 이 줄의 «주제»를 담을 자리를 못 찾고 「시점」 칸에 밀어 넣었다
+#:   (실측: 1행 「글로벌 시장 진출」이 시점 칸에 들어감). 지침만 고치고
+#:   칸을 안 만들면 주제가 갈 곳이 여전히 없어 재발한다 — 그래서
+#:   STRATEGY_TABLE_HEADERS 순서 변경과 «함께» 고쳐야 한다.
 STRATEGY_TABLE_GUIDE: Final[str] = (
     "\n이 장에서는 위 문장들과 «별도로», 성장 계획을 표로도 낸다.\n"
     "표 규칙:\n"
     "- 계획 하나가 «한 줄»이다. 서로 다른 계획은 반드시 줄을 나눈다.\n"
-    "- 각 줄은 «시점 / 계획 / 공시된 내용» 세 칸이다.\n"
+    "- 각 줄은 «계획 / 시점 / 공시된 내용» 세 칸이다.\n"
+    "- 「계획」은 이 줄의 «주제»를 짧은 이름으로 쓴다(예: 「글로벌 시장 진출」, "
+    "「신사업 확대」, 「생산 능력 확충」). 회사가 공식 자료에서 실제로 "
+    "추진한다고 밝힌 계획의 «이름»만 쓴다 — 시점이나 세부 공시 내용을 이 "
+    "칸에 섞지 않는다(그건 뒤의 두 칸이 각각 맡는다).\n"
     "- 「시점」은 공식 자료에 적힌 대로 쓴다(예: 2026년, 중장기, 단계적). "
     "시점이 안 적혀 있으면 그 칸을 «비워 둔다» — 계획 자체는 근거가 있으니 "
     "줄은 넣는다. 다만 없는 시점을 지어내지 않는다.\n"
@@ -526,6 +593,59 @@ CULTURE_TABLE_GUIDE: Final[str] = (
     "지어내지 않는다.\n"
 )
 
+#: 3장 표 요청. 기준 문서(03_핵심_제품서비스와_포트폴리오_역할/README.md)의
+#: 카드 필드를 옮기되 「2장 수익 분류 참조」·「해석 한계」 두 줄은 뺐다
+#: (constants.py의 PORTFOLIO_TABLE_HEADERS 주석에 이유가 있다).
+PORTFOLIO_TABLE_GUIDE: Final[str] = (
+    "\n이 장에서는 위 문장들과 «별도로», 지금 미는 제품·서비스를 표로도 낸다.\n"
+    "표 규칙:\n"
+    "- 제품·서비스 하나가 «한 줄»이다. 근거가 확인된 1~3개만 넣는다 — "
+    "숫자를 맞추려고 약한 후보를 추가하지 않는다.\n"
+    "- 각 줄은 «제품·서비스명 / 제품·서비스 범위 / 중점 추진 근거 / "
+    "사업적 역할» 네 칸이다.\n"
+    "- 「제품·서비스명」은 원문에 실제로 적힌 정확한 이름만 쓴다(상위 "
+    "제품군이나 다른 모델로 범위를 넓히지 않는다).\n"
+    "- 「중점 추진 근거」에는 «서로 다른» 실제 우선 신호를 2개 이상 쓴다"
+    "(예: 출시·수주·투자·증설·유통 확대·매출 발생). 같은 실적 수치를 "
+    "표현만 바꿔 두 신호로 세지 않는다. 아직 실행되지 않은 발표·홍보 문구만 "
+    "있고 실행 신호가 없으면 그 제품은 줄에 넣지 않는다.\n"
+    "- 「사업적 역할」에는 전체 포트폴리오에서 이 제품이 맡는 기능적 역할을 "
+    "쓴다. 근거가 뚜렷하면 «신규·성장·주력·안정» 중 하나로 분류해도 되지만, "
+    "이건 회사의 공식 분류가 아니라 «보고서 분류»다 — 회사가 쓴 말인 것처럼 "
+    "표현하지 않는다.\n"
+    "- 고객·시장·수익 경로의 «수치»는 2장이 소유한다. 이 표에서는 되풀이하지 "
+    "않는다 — 2장 참조 같은 안내 문구도 만들지 않는다(가리킬 대상이 우리 "
+    "구조에 없다).\n"
+    "- 해석의 한계·불확실성은 이 표의 칸이 아니다. 넣지 않는다(다른 절차가 "
+    "따로 처리한다).\n"
+    "- 줄은 최대 3개, 각 칸은 «짧은 구»로 쓴다(한 문장을 통째로 넣지 않는다).\n"
+    "- 줄마다 근거 조각 id를 «인용»에 넣는다. 근거가 없으면 그 줄을 넣지 않는다.\n"
+    "- 중점 제품을 확인할 근거가 없으면 표를 통째로 비운다(빈 배열). "
+    "지어내지 않는다.\n"
+)
+
+#: 2장 흐름표 요청. 기준 문서(02_사업_구조와_수익_모델/README.md)의
+#: 「가치와 수익의 흐름: 핵심 자산 → 제품·서비스 → 고객 행동/과금 →
+#: 반복·확장 수익」을 그대로 표 규칙으로 옮겼다.
+BUSINESS_FLOW_GUIDE: Final[str] = (
+    "\n이 장에서는 위 문장들과 «별도로», 가치와 수익이 흐르는 경로를 표로도 낸다.\n"
+    "표 규칙:\n"
+    "- 경로 하나가 «한 줄»이다. 전사 매출 대부분을 설명하는 핵심 수익 경로 "
+    "2~4개만 고른다.\n"
+    "- 각 줄은 «핵심 자산 / 제품·서비스 / 고객 행동·과금 / 반복·확장 수익» "
+    "네 칸이다.\n"
+    "- 「고객 행동·과금」 칸에는 고객이 «무엇에 왜 지불하는지»를 쓴다. "
+    "제품·서비스 이름을 그대로 반복하지 않는다.\n"
+    "- 「반복·확장 수익」 칸에는 반복 매출·구독·교차판매·후속 상품처럼 «수익이 "
+    "이어지는 방식»을 쓴다. 확장 경로가 확인되지 않으면 그 칸을 «비워 둔다» — "
+    "「해당 없음」·「미상」 같은 말로 채우지 않는다.\n"
+    "- 매출 비중이 가장 큰 경로를 «첫 줄»에 둔다.\n"
+    "- 줄은 최대 4개, 각 칸은 «짧은 구»로 쓴다(한 문장을 통째로 넣지 않는다).\n"
+    "- 줄마다 근거 조각 id를 «인용»에 넣는다. 근거가 없으면 그 줄을 넣지 않는다.\n"
+    "- 수익 경로를 확인할 근거가 없으면 표를 통째로 비운다(빈 배열). "
+    "지어내지 않는다.\n"
+)
+
 
 def _flow_schema_guide(cells: tuple[str, ...]) -> str:
     """장별 출력 형식 안내를 «한 곳»에서 만든다.
@@ -551,6 +671,8 @@ def _flow_schema_guide(cells: tuple[str, ...]) -> str:
 #:   세 곳이 각자 알고 있으면 한 곳만 고쳐 조용히 어긋난다(실측 4회).
 FLOW_HEADERS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
     IDENTITY_TABLE_SECTION_ID: IDENTITY_TABLE_HEADERS,
+    PORTFOLIO_TABLE_SECTION_ID: PORTFOLIO_TABLE_HEADERS,
+    BUSINESS_FLOW_SECTION_ID: BUSINESS_FLOW_HEADERS,
     OPERATIONS_FLOW_SECTION_ID: OPERATIONS_FLOW_HEADERS,
     CHALLENGE_FLOW_SECTION_ID: CHALLENGE_FLOW_HEADERS,
     STRATEGY_TABLE_SECTION_ID: STRATEGY_TABLE_HEADERS,
@@ -560,6 +682,8 @@ FLOW_HEADERS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
 #: 장 id → 그 장의 흐름표 캡션.
 FLOW_CAPTION_BY_SECTION: Final[dict[str, str]] = {
     IDENTITY_TABLE_SECTION_ID: IDENTITY_TABLE_CAPTION,
+    PORTFOLIO_TABLE_SECTION_ID: PORTFOLIO_TABLE_CAPTION,
+    BUSINESS_FLOW_SECTION_ID: BUSINESS_FLOW_CAPTION,
     OPERATIONS_FLOW_SECTION_ID: OPERATIONS_FLOW_CAPTION,
     CHALLENGE_FLOW_SECTION_ID: CHALLENGE_FLOW_CAPTION,
     STRATEGY_TABLE_SECTION_ID: STRATEGY_TABLE_CAPTION,
@@ -570,6 +694,12 @@ FLOW_CAPTION_BY_SECTION: Final[dict[str, str]] = {
 FLOW_PROMPT_BY_SECTION: Final[dict[str, str]] = {
     IDENTITY_TABLE_SECTION_ID: (
         IDENTITY_TABLE_GUIDE + _flow_schema_guide(IDENTITY_TABLE_HEADERS)
+    ),
+    PORTFOLIO_TABLE_SECTION_ID: (
+        PORTFOLIO_TABLE_GUIDE + _flow_schema_guide(PORTFOLIO_TABLE_HEADERS)
+    ),
+    BUSINESS_FLOW_SECTION_ID: (
+        BUSINESS_FLOW_GUIDE + _flow_schema_guide(BUSINESS_FLOW_HEADERS)
     ),
     OPERATIONS_FLOW_SECTION_ID: OPERATIONS_FLOW_GUIDE + OPERATIONS_FLOW_SCHEMA_GUIDE,
     CHALLENGE_FLOW_SECTION_ID: CHALLENGE_FLOW_GUIDE + CHALLENGE_FLOW_SCHEMA_GUIDE,

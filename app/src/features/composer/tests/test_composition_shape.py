@@ -7,11 +7,16 @@
 ★ v1이 쓰는 `revenuemix`는 고치지 않는다(v1 무변). composer가 «도식용 모양»만
   만든다. 값을 바꾸거나 만들지 않고 «줄이기»만 한다.
 ★ 억지로 도식을 만들지 않는다 — 조건에 못 맞추면 원표 그대로 두고 표로 나간다.
+
+★ 2026-08-25 설계 변경 — `composition_table_from_raw`(«첫 표만»)를
+  `composition_tables_from_raw`(«표 전부»)로 바꿨다. 제품별·지역별 두 표를
+  다 2장에 붙이기 위해서다(과제 2). 시험도 tuple 반환에 맞춰 고쳤다 — 값
+  검증 내용(줄이기만 한다·합계를 뺀다 등)은 그대로 지킨다.
 """
 
 from __future__ import annotations
 
-from src.features.composer.port import composition_table_from_raw
+from src.features.composer.port import composition_tables_from_raw
 from src.features.pipeline.port import ReportTable
 from src.features.report_standard.visualization import table_visualization
 
@@ -42,9 +47,10 @@ def _as_report_table(table) -> ReportTable:
 
 
 def test_실측표가_도식이_그려지는_모양으로_바뀐다():
-    표 = composition_table_from_raw(_실측표)
+    표들 = composition_tables_from_raw(_실측표)
 
-    assert 표 is not None
+    assert len(표들) == 1
+    표 = 표들[0]
     assert 표.headers == ("구분", "비중")
     assert len(표.rows) == 4  # 합계 행이 빠졌다
     assert table_visualization(_as_report_table(표)).kind == "composition"
@@ -52,16 +58,16 @@ def test_실측표가_도식이_그려지는_모양으로_바뀐다():
 
 def test_합계_행을_뺀다():
     """합계가 섞이면 「부분의 합이 전체」라는 그림이 깨진다."""
-    표 = composition_table_from_raw(_실측표)
+    표들 = composition_tables_from_raw(_실측표)
 
-    assert all("합계" not in row[0] for row in 표.rows)
+    assert all("합계" not in row[0] for row in 표들[0].rows)
 
 
 def test_값을_바꾸지_않는다():
     """줄이기만 한다 — 비중을 다시 계산하거나 반올림하지 않는다."""
-    표 = composition_table_from_raw(_실측표)
+    표들 = composition_tables_from_raw(_실측표)
 
-    assert 표.rows == (
+    assert 표들[0].rows == (
         ("한국", "89.29%"),
         ("중국", "4.52%"),
         ("인도", "4.99%"),
@@ -79,10 +85,10 @@ def test_비중_열이_없으면_원표를_그대로_둔다():
         }
     ]
 
-    표 = composition_table_from_raw(원표)
+    표들 = composition_tables_from_raw(원표)
 
-    assert 표.headers == ("구분", "2024", "2025")
-    assert len(표.rows) == 3
+    assert 표들[0].headers == ("구분", "2024", "2025")
+    assert len(표들[0].rows) == 3
 
 
 def test_항목이_셋_미만이면_원표를_그대로_둔다():
@@ -95,10 +101,10 @@ def test_항목이_셋_미만이면_원표를_그대로_둔다():
         }
     ]
 
-    표 = composition_table_from_raw(원표)
+    표들 = composition_tables_from_raw(원표)
 
-    assert 표.headers == ("구분", "매출액", "비중")
-    assert len(표.rows) == 3
+    assert 표들[0].headers == ("구분", "매출액", "비중")
+    assert len(표들[0].rows) == 3
 
 
 def test_이미_두_열이면_손대지_않는다():
@@ -109,7 +115,61 @@ def test_이미_두_열이면_손대지_않는다():
         }
     ]
 
-    표 = composition_table_from_raw(원표)
+    표들 = composition_tables_from_raw(원표)
 
-    assert 표.headers == ("부문", "비중")
-    assert len(표.rows) == 4
+    assert 표들[0].headers == ("부문", "비중")
+    assert len(표들[0].rows) == 4
+
+
+def test_표가_여럿이면_전부_바꾼다():
+    """★★ 과제 2 — 제품별·지역별 두 표를 «둘 다» 구성표로 바꾼다.
+
+    예전에는 첫 표만 썼다(«같은 매출을 두 번 보여 준다»는 우려 때문). 하지만
+    제품별·지역별은 같은 매출을 «다른 축»으로 나눈 것이라 중복이 아니고,
+    정본 §4 소유권 표(2장 = 「고객·지역·채널 우선순위」)에도 지역 우선순위가
+    명시돼 있다 — 첫 표만 쓰는 건 v2만의 축소였다.
+    """
+    표들 = composition_tables_from_raw(
+        [
+            {"caption": "제품별", "headers": ["부문", "비중"], "rows": [["A", "60"], ["B", "30"], ["C", "10"]]},
+            {"caption": "지역별", "headers": ["지역", "비중"], "rows": [["국내", "70"], ["해외", "30"], ["기타", "0"]]},
+        ]
+    )
+
+    assert len(표들) == 2
+    assert 표들[0].caption == "제품별"
+    assert 표들[1].caption == "지역별"
+
+
+def test_표_하나가_도식_하한에_못_미쳐도_다른_표는_영향받지_않는다():
+    """표마다 따로 줄인다 — 한 표의 실패가 다른 표를 건드리지 않는다."""
+    표들 = composition_tables_from_raw(
+        [
+            {
+                "caption": "항목이 둘뿐",
+                "headers": ["구분", "비중"],
+                "rows": [["가", "60"], ["나", "40"]],  # 3행 하한 미달 → 그대로
+            },
+            {
+                "caption": "정상 표",
+                "headers": ["구분", "매출액", "비중"],
+                "rows": [["가", "1", "60%"], ["나", "1", "30%"], ["다", "1", "10%"]],
+            },
+        ]
+    )
+
+    assert len(표들) == 2
+    assert 표들[0].headers == ("구분", "비중")  # 하한 미달 — 손대지 않음
+    assert 표들[1].headers == ("구분", "비중")  # 정상 — 구성 모양으로 줄어듦
+
+
+def test_빈_표_목록이면_빈_튜플이다():
+    assert composition_tables_from_raw([]) == ()
+    assert composition_tables_from_raw(None) == ()
+
+
+def test_행이_비면_그_표만_빠진다():
+    표들 = composition_tables_from_raw(
+        [{"caption": "빈 표", "headers": ["a"], "rows": []}]
+    )
+    assert 표들 == ()

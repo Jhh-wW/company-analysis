@@ -77,7 +77,7 @@ def run_v2(
     latest_performance_period: str = "",
     table_presentation: str = "table",
     filing_meta: Optional[FilingMeta] = None,
-    composition_table: Optional[PerformanceTable] = None,
+    composition_tables: tuple[PerformanceTable, ...] = (),
     citation_style: str = DEFAULT_CITATION_STYLE,
 ) -> V2RunOutput:
     """엔진 v2 전체 흐름을 한 번 돌려 최종 보고서를 만든다 (04장 3-4절).
@@ -103,8 +103,10 @@ def run_v2(
             render_report에 그대로 전달된다.
         filing_meta: 내려받은 공시의 신원. 주면 부록 출처에 전자공시 원문
             주소가 실린다 (없으면 주소 없이 나간다).
-        composition_table: 2장에 실을 매출 구성표. 주면 표와 «구성 도식»이
-            함께 나간다 (도식 판정은 report_standard/visualization.py 몫).
+        composition_tables: 2장에 실을 매출 구성표들(제품별·지역별 등). 주면
+            표마다 «구성 도식»이 함께 나간다(도식 판정은
+            report_standard/visualization.py 몫). 표는 여러 개일 수 있고
+            2장에 «전부» 붙는다 — 첫 표만 쓰지 않는다(2026-08-25 설계 변경).
         citation_style: 본문 인용 번호 표기 방식. 기본은 절충안이며,
             시험이 «문장마다 번호가 실리는가»를 볼 때 inline으로 고정한다.
 
@@ -179,7 +181,7 @@ def run_v2(
         latest_performance_period=latest_performance_period,
         table_presentation=table_presentation,
         filing_meta=filing_meta,
-        composition_table=composition_table,
+        composition_tables=composition_tables,
         citation_style=citation_style,
     )
 

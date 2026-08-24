@@ -434,6 +434,72 @@ def test_v2_보고서가_PDF_바이트와_요구_구조까지_도달한다(
     assert leaked == [], leaked
 
 
+def test_2장에_구성표_2개가_있어도_v2_출고_게이트를_통과해_PDF까지_나온다(
+    engine: _JypFakeEngine,
+) -> None:
+    """★★ 과제 2 — 「지역별 표를 2장에 붙이면 중복 검사 게이트가 걸려 PDF 출고가
+    막힌다」는 우려를 «추론»이 아니라 «실행 결과»로 확인한다 (team-lead 요구).
+
+    ★ 중복 검사 게이트의 실체 — `report_standard/publish.py:2900
+    validate_publishable()`(그 안의 `_semantic_duplicate_key` 등 `[duplicate]`
+    판정들, publish.py:595·2952-3059)이다. 이 게이트는 `FactRecord`(v1
+    canonical 전용 자료형)를 검사 대상으로 삼는다. v2는 FactRecord를 아예
+    만들지 않는다(port.py 머리말 주석 — report_standard의 SectionContentBlock은
+    FactRecord 전용이라 v2는 쓰지 않는다).
+    ★ v2 PDF 출고 진입점은 이 게이트를 «부르지 않는다» — 직접 확인:
+      `export_pdf/release.py:279-297 prepare_pdf_release()`가
+      `report.schema_version == ENGINE_V2_SCHEMA_VERSION`이면
+      `build_published_report()`(위 게이트를 부르는 함수) 대신
+      `validate_v2(report)`(내부 키·인용-부록 1:1·요약 존재 3검사, 중복 검사
+      없음 — `composer/validate.py` 머리말 주석)만 부른다. 화면 출고 진입점
+      `web/routers/reports.py:106-119 _report_for_output()`도 같은 분기다.
+    ★ 이 시험은 그 사실을 «본다»가 아니라 «돌려서» 증명한다 — 실제로 검증이
+      끝난 v2 Report(JYP 리허설, 다른 시험에서 이미 PDF까지 통과가 검증된
+      바로 그 보고서)의 2장에 구성표 2개(제품별·지역별, 서로 다른 캡션)를
+      심고, «프로덕션 진입점»(`validate_v2`·`pdf_release.prepare_pdf_release`)
+      을 monkeypatch 없이 그대로 통과시킨다.
+    """
+    import copy
+
+    from src.features.composer.validate import validate_v2
+    from src.features.pipeline.port import ReportTable
+
+    result = _run(engine)
+    report = copy.deepcopy(result.report)
+    사업장 = next(s for s in report.sections if s.cell == "business_model")
+    assert 사업장.tables == [], "이 fixture는 원래 2장에 표가 없다 — 전제가 깨졌다"
+
+    # 인용 부록에 영향을 안 주려고 cite를 비운다(이 시험의 관심사는 «중복
+    # 검사 게이트»뿐이다 — 인용-부록 1:1은 다른 시험이 이미 지킨다).
+    사업장.tables.append(
+        ReportTable(
+            caption="2025년 제품별 매출 구성",
+            headers=["구분", "비중"],
+            rows=[["음반·음원", "40%"], ["공연", "35%"], ["MD", "25%"]],
+            cite="",
+            numeric=False,
+            presentation="composition",
+        )
+    )
+    사업장.tables.append(
+        ReportTable(
+            caption="2025년 지역별 매출 구성",
+            headers=["구분", "비중"],
+            rows=[["국내", "43%"], ["아시아", "40%"], ["북미", "17%"]],
+            cite="",
+            numeric=False,
+            presentation="composition",
+        )
+    )
+
+    # ── 마디 1: v2 출고 게이트(validate_v2) — 예외가 나면 이 시험이 실패한다
+    validate_v2(report)  # 예외를 던지지 않아야 통과다
+
+    # ── 마디 2: 실제 PDF 조립부까지 — 프로덕션 진입점을 그대로 탄다
+    candidate = pdf_release.prepare_pdf_release(report)
+    assert candidate.pdf_bytes.startswith(b"%PDF-"), "PDF 바이트가 만들어지지 않았다"
+
+
 # ══════════════════════════════════════════════════════════
 # ④ ★ 이음매 시험 — 작가 응답부터 «화면 HTML»까지 통째로
 # ══════════════════════════════════════════════════════════
@@ -561,7 +627,19 @@ def test_이음매_중복제거가_일어나도_경로표는_화면까지_간다
 def test_이음매_2장_구성_도식과_4장_추이_도식도_화면까지_간다(
     engine: _JypFakeEngine,
 ) -> None:
-    """7장만 지키면 나머지가 조용히 끊긴다 — 세 도식을 한 시험에서 함께 본다."""
+    """7장만 지키면 나머지가 조용히 끊긴다 — 세 도식을 한 시험에서 함께 본다.
+
+    ⚠️ 이름과 다르게 **지금 실제로 검증하는 것은 4장 추이표 + 7장 흐름표뿐**이다
+    (2026-08-25 확인). 「2장 구성 도식」은 이름에만 있고 아래 단정 어디에도
+    없다 — JYP 리허설 fixture의 `read_filing_text()`가 한 줄짜리 원문이라
+    revenuemix가 매출 구성표를 못 뽑아 business_model 장이 이 시험에서는
+    표를 0개 받기 때문이다(과제 2 버그가 있던 시절부터 있던 gap, 내가 만든
+    게 아니다). fixture의 filing_text를 늘리면 `filing_relationships.add_to()`
+    가 우연히 조각을 더 뽑아 이 파일의 다른 700줄짜리 단정(문장 수·인용
+    1:1)이 흔들릴 위험이 있어 지금은 손대지 않았다 — 2장 구성표(복수)가
+    render_report까지 정확히 가는지는 `test_render_composition_table.py`가
+    별도로 지킨다(composer 조립 계층, real.py 전체 경로는 아님).
+    """
     result = _run(engine)
     report = result.report
     assert report is not None
@@ -577,6 +655,67 @@ def test_이음매_2장_구성_도식과_4장_추이_도식도_화면까지_간�
     body = _v2_report_to_result_page(report)
     assert 'class="trend-panels"' in body, "4장 추이 도식이 화면에 없습니다"
     assert 'class="flow-row"' in body, "7장 흐름도가 화면에 없습니다"
+
+
+def test_이음매_2장_사업_흐름표도_7장과_같은_사슬을_지나_화면까지_간다(
+    engine: _JypFakeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★★ 과제 3 — 2장(business_model)에 «사업 흐름» 경로표를 새로 추가했다.
+
+    7장 경로표가 «네 번» 화면에서 사라졌던 바로 그 사슬(compose→verify→
+    dedupe→check_diagrams→render)을 2장도 «똑같이» 지난다. 흐름표 계약
+    (FLOW_HEADERS_BY_SECTION)에 장 id만 추가하는 방식이라 사슬 자체는
+    새로 만들지 않았지만, «장이 하나 늘었다고 사슬이 조용히 끊기지 않는가»는
+    직접 확인해야 한다 — 그래서 7장과 같은 패턴으로 이 시험을 만든다.
+
+    공유 fixture(_RESPONSES_FIXTURE)는 건드리지 않는다(다른 시험의 문장 수
+    계약이 깨진다) — 이 시험 안에서만 deepcopy로 2장 응답에 경로표를 심는다.
+    """
+    import copy
+
+    from src.features.composer.constants import (
+        BUSINESS_FLOW_CAPTION,
+        BUSINESS_FLOW_HEADERS,
+    )
+
+    responses = copy.deepcopy(_RESPONSES_FIXTURE)
+    responses["장별_응답"]["business_model"]["경로표"] = [
+        {
+            "칸": [
+                "음반·음원·공연·MD 등 아티스트 IP",
+                "레이블 통합 제작·유통",
+                "팬이 음원·공연·MD에 지불",
+                "음원 스트리밍·재공연·후속 MD 반복 매출",
+            ],
+            "인용": ["3"],
+        },
+    ]
+    monkeypatch.setitem(globals(), "_RESPONSES_FIXTURE", responses)
+
+    result = _run(engine)
+    report = result.report
+    assert report is not None
+
+    # ── 마디 1: 엔진이 2장에 flow 표를 실었는가 ──────────
+    사업장 = next(s for s in report.sections if s.cell == "business_model")
+    assert 사업장.tables, (
+        "2장에 표가 없습니다 — 작가가 낸 사업 흐름표가 엔진 안에서 사라졌습니다. "
+        "compose→verify→dedupe→check_diagrams 중 한 곳이 flow_rows를 버렸습니다."
+    )
+    흐름표 = 사업장.tables[0]
+    assert 흐름표.presentation == "flow", (
+        f"2장 표의 표현이 flow가 아닙니다: {흐름표.presentation!r}"
+    )
+    assert 흐름표.caption == BUSINESS_FLOW_CAPTION
+    assert 흐름표.headers == list(BUSINESS_FLOW_HEADERS)
+    assert len(흐름표.rows) >= 1, "경로표에 남은 줄이 없습니다 — 도식 검증이 다 버렸습니다"
+
+    # ── 마디 2: 화면이 그것을 «도식»으로 그리는가 ────────
+    body = _v2_report_to_result_page(report)
+    assert 'class="flow-row"' in body, (
+        "화면에 흐름도가 없습니다 — 표는 있는데 도식으로 안 그려졌습니다."
+    )
+    assert 흐름표.caption in body
 
 
 # ══════════════════════════════════════════════════════════
