@@ -741,6 +741,11 @@ def _demote_all_confirmed_report(report: ComposedReport) -> ComposedReport:
             section_id=section.section_id,
             sentences=tuple(_demoted(s) for s in section.sentences),
             notice=section.notice,
+            # ★ 도식 재료를 «반드시» 함께 넘긴다. 안 넘기면 기본값 ()로
+            #   떨어져 7장 경로표가 검증 단계에서 통째로 사라진다 —
+            #   작가가 정상적으로 냈는데도 화면에 흐름도가 안 나온
+            #   진짜 원인이었다. 문장을 판정하는 단계가 도식을 지우면 안 된다.
+            flow_rows=section.flow_rows,
         )
         for section in report.sections
     )
@@ -786,6 +791,8 @@ def _verify_report_inner(
                 section_id=section.section_id,
                 sentences=tuple(kept),
                 notice=notice,
+                # ★ 위와 같은 이유 — 검증이 도식 재료를 지우면 안 된다.
+                flow_rows=section.flow_rows,
             )
         )
     return ComposedReport(

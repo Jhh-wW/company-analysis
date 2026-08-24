@@ -28,6 +28,7 @@ from src.features.composer.port import (
     ComposedReport,
     ComposedSection,
     ComposedSentence,
+    FlowRow,
     PerformanceTable,
 )
 from src.features.composer.verify import (
@@ -584,3 +585,79 @@ def test_검증기_내부가_망가져도_확인_강등_바닥으로_내려간�
     # 제거·차단 없이 «확인»만 해석으로 강등된 채 전부 남는다
     assert len(verified.sections[0].sentences) == 1
     assert verified.sections[0].sentences[0].grade == GRADE_INTERPRETED
+
+
+# ══════════════════════════════════════════════════════════
+# ⑥ 도식 재료(경로표)는 검증을 통과해도 살아남는다
+# ══════════════════════════════════════════════════════════
+#
+# ★ 왜 이 시험이 있나 (실측 결함) — 7장 흐름도가 화면에도 PDF에도 안 나왔다.
+#   작가는 근거 있는 경로표를 정상적으로 냈는데, verify_report가 장을 다시
+#   조립할 때 ComposedSection(section_id=, sentences=, notice=)만 넘겨
+#   flow_rows가 기본값 ()로 떨어지고 있었다. 문장을 판정하는 단계가
+#   그림 재료까지 지운 것이다. 화면 쪽(v2-21)·중복 제거 쪽(v2-24)을 고쳐도
+#   여기가 남아 있어 흐름도는 계속 안 나왔다.
+
+
+def _flow_report(
+    sentences: tuple[ComposedSentence, ...],
+    flow_rows: tuple[FlowRow, ...],
+) -> ComposedReport:
+    return ComposedReport(
+        sections=(
+            ComposedSection(
+                section_id="operations_partners",
+                sentences=sentences,
+                flow_rows=flow_rows,
+            ),
+        ),
+        summary=(),
+    )
+
+
+_경로 = (
+    FlowRow(cells=("반도체 웨이퍼", "검사 장비 제조", "국내 파운드리"), citations=("1",)),
+)
+
+
+def test_검증을_통과해도_경로표는_남는다():
+    report = _flow_report(
+        (_sentence("가나다전자는 반도체 검사 장비 전문기업이다.", ("1",)),), _경로
+    )
+
+    검증됨 = verify_report(
+        report, _raw_fragments(), _table(), _FakeVerifier([_all_true(1)])
+    )
+
+    assert 검증됨.sections[0].flow_rows == _경로, "검증이 도식 재료를 지웠습니다"
+
+
+def test_문장이_전부_걷혀도_경로표는_남는다():
+    """문장이 다 빠져 안내문만 남는 장에서도 그림은 그릴 수 있어야 한다."""
+    report = _flow_report(
+        (_sentence("이 회사는 우주선을 만든다.", ("99",)),), _경로
+    )
+
+    검증됨 = verify_report(
+        report, _raw_fragments(), _table(), _FakeVerifier([_all_true(1)])
+    )
+
+    assert 검증됨.sections[0].sentences == ()
+    assert 검증됨.sections[0].notice == NOTICE_ALL_SENTENCES_REJECTED
+    assert 검증됨.sections[0].flow_rows == _경로
+
+
+def test_검수_불능_비상경로에서도_경로표는_남는다():
+    """검수 AI가 죽어 전원 강등으로 떨어지는 바닥 경로에서도 마찬가지다."""
+
+    def 죽는_검수(_prompt: str) -> str:
+        raise RuntimeError("검수 AI 내부 오류")
+
+    report = _flow_report(
+        (_sentence("가나다전자는 반도체 검사 장비 전문기업이다.", ("1",)),), _경로
+    )
+
+    검증됨 = verify_report(report, _raw_fragments(), _table(), 죽는_검수)
+
+    assert 검증됨.sections[0].sentences[0].grade == GRADE_INTERPRETED
+    assert 검증됨.sections[0].flow_rows == _경로
