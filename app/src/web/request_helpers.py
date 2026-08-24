@@ -61,6 +61,7 @@ from src.features.sharelink.constants import (
     PUBLIC_NOT_ALLOWED_MESSAGE,
 )
 from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
+from src.features.report_standard.cover_metrics import cover_metrics
 from src.features.report_standard.visualization import table_visualization
 from src.features.report_standard.section_content import (
     section_content_blocks,
@@ -135,6 +136,9 @@ def _ctx(request: Request, **kwargs) -> dict:
         "interpretation_label": INTERPRETATION_LABEL,
         # 표의 사실을 반복하지 않고 구성비·추세·흐름 표현으로 바꾸는 순수 함수다.
         "table_visualization": table_visualization,
+        # 표지 띠에 올릴 값을 «고르는» 순수 함수. PDF(export_pdf/logic.py)와
+        # 같은 함수여야 화면과 인쇄물의 표지 숫자가 안 어긋난다.
+        "cover_metrics": cover_metrics,
         "section_content_blocks": section_content_blocks,
         "source_verification_label": source_verification_label,
         "summary_topic": summary_topic,

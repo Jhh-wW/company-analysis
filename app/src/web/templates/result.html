@@ -169,6 +169,30 @@
       </p>
       {% endif %}
     </div>
+    {# ── 표지 실적 띠 — 정본: 디자인과_PDF_QA.md 6-1절.
+       ★ 여기 숫자는 «새 주장이 아니다». 4장 실적표(전자공시 원수치로 만든 표)의
+         최신 사업연도 행을 글자 그대로 다시 보여 줄 뿐이라 출처도 그 표와 같다.
+       ★ 값을 못 고르면 띠를 통째로 안 그린다 — 빈 제목이나 「—」로 채운 칸을
+         표지에 남기지 않는다 (실적표가 없는 회사가 실제로 있다).
+       ★ 고르는 일은 틀이 하지 않는다. PDF와 «같은 순수 함수»(cover_metrics)가
+         고른 값만 쓴다 — 두 곳에서 따로 고르면 화면과 인쇄물이 갈라진다. #}
+    {# ★ `is defined` 방어를 «일부러» 두지 않는다 — 등록을 빠뜨리면 띠가 조용히
+       사라지는 대신 화면이 바로 깨져야 한다. 등록 자체는 시험이 지킨다
+       (report_standard/tests/test_cover_metrics_contract.py). #}
+    {% set cover = cover_metrics(report) %}
+    {% if cover %}
+    <section class="cover-metrics" aria-labelledby="cover-metrics-title">
+      <p class="cover-metrics-title" id="cover-metrics-title">{{ cover.title }}{{ ref(cover.cite) }}</p>
+      <dl class="cover-metrics-list">
+        {% for item in cover.items %}
+        <div class="cover-metric">
+          <dt>{{ item.label }}</dt>
+          <dd><span class="cover-metric-value">{{ item.value }}</span><span class="cover-metric-unit">{{ item.unit }}</span></dd>
+        </div>
+        {% endfor %}
+      </dl>
+    </section>
+    {% endif %}
     {% if report.summary_items %}
     <section class="report-summary" aria-labelledby="report-summary-title">
       <h2 id="report-summary-title">핵심 요약</h2>

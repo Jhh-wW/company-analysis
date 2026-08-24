@@ -121,13 +121,56 @@ def test_launcher_enforces_the_child_environment_allowlist() -> None:
 
 
 def test_launcher_never_reads_or_prints_secret_files() -> None:
-    """.env를 읽지 않고, 비밀값을 화면에 찍지 않는다."""
-    assert "Get-Content" not in SCRIPT_CODE
-    assert "GetEnvironmentVariable" not in SCRIPT_CODE
-    assert "analysis_engine/.env" not in SCRIPT
-    assert "app/.env" not in SCRIPT
+    """비밀 파일을 «몰래» 읽지 않고, 비밀값을 화면·파일에 남기지 않는다.
+
+    ★ 적대 검수가 잡은 «가짜 잣대» — 예전 이 시험은 `Get-Content`가
+      없다는 것만 봤다. 그런데 이 실행기는 파일을 `[System.IO.File]::
+      ReadAllLines`로 읽으므로 그 단언은 «항상 참»이었다. 지키는 것이
+      하나도 없는 시험이었다.
+
+    ★ 지금 지키는 것 — 이 실행기는 파일을 «읽어도 된다». 사람이
+      -ProviderEnvFile로 «직접 지정한» 파일만 읽는 것이 계약이다.
+      금지되는 것은 ① 저장소 안 비밀 경로를 코드에 박아 두는 것
+      ② 값을 화면에 찍는 것 ③ 값을 어딘가에 저장하는 것이다.
+    """
+    # ① 비밀 파일 경로를 코드에 박아 두지 않는다 — 사람이 지정한 것만 읽는다.
+    for hardcoded in ("analysis_engine/.env", "app/.env", ".env\"", "'.env'"):
+        assert hardcoded not in SCRIPT_CODE, hardcoded
+    # 파일을 읽는 곳은 «사람이 지정한 경로»에서만 온다.
+    # PowerShell은 인자를 여러 줄에 걸쳐 쓰므로 그 줄부터 몇 줄을 함께 본다.
+    코드줄 = SCRIPT_CODE.splitlines()
+    _ARG_WINDOW = 4
+    for reader in ("ReadAllLines", "ReadAllText", "Get-Content", "StreamReader"):
+        for index, line in enumerate(코드줄):
+            if reader not in line:
+                continue
+            창 = "\n".join(코드줄[index : index + _ARG_WINDOW])
+            assert "ProviderEnvFile" in 창, (
+                f"사람이 지정하지 않은 경로를 읽습니다: {reader}"
+            )
+
+    # ② 값을 «어디에도 저장하지 않는다» — 이 실행기에는 파일 쓰기가 없다.
+    for writer in ("Out-File", "Set-Content", "Add-Content", "Export-Clixml"):
+        assert writer not in SCRIPT_CODE, f"비밀값이 파일로 샐 수 있습니다: {writer}"
+
+    # ③ 값을 화면에 찍지 않는다 — 비밀 변수 이름이 출력문에 등장하면 안 된다.
+    출력문 = [
+        line
+        for line in SCRIPT_CODE.splitlines()
+        if "Write-Host" in line or "Write-Output" in line
+    ]
+    assert 출력문, "출력문이 하나도 없습니다(시험이 헛돈 것)"
+    for line in 출력문:
+        for name in DEPLOYMENT_SECRET_NAMES:
+            assert f"${name}" not in line and f"$env:{name}" not in line, (
+                f"비밀값을 화면에 찍습니다: {name}"
+            )
+        assert "$secureValue" not in line
+        assert "$plainValue" not in line
+
+    # ④ 물어볼 때는 화면에 안 보이게 받는다.
+    assert "-AsSecureString" in SCRIPT_CODE
     assert "값은 표시하지 않음" in SCRIPT
-    assert "-AsSecureString" in SCRIPT
 
 
 def test_launcher_isolates_run_data_and_can_delete_it() -> None:

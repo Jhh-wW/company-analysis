@@ -63,6 +63,7 @@ from src.features.pipeline.port import Grade, Report, ReportSection, ReportTable
 from src.features.provenance.sources import Source, SourceKind, visible_citations
 from src.features.report_standard import build_published_report
 from src.features.report_standard.constants import SECTION_BY_ID, TIME_SECTION_IDS
+from src.features.report_standard.cover_metrics import CoverMetrics, cover_metrics
 from src.features.report_standard.section_content import (
     SectionContentBlock,
     section_content_blocks,
@@ -365,8 +366,32 @@ class _FlowGraphic(Flowable):
                     canvas.line(end, arrow_y, end - 4, arrow_y - 3)
 
 
+#: 표지 실적 띠가 들어가는 영역 (상단에서 mm).
+#: 정본: docs/출력물 기준/90_공통_규칙/디자인과_PDF_QA.md 1절·6-1절.
+#: 제목 블록(72~118mm)과 핵심 요약(190~262mm) 사이의 «고정» 자리라
+#: 회사별 글 길이가 달라도 이 좌표는 움직이지 않는다.
+_COVER_METRICS_TOP_MM: Final[float] = 138.0
+_COVER_METRICS_BOTTOM_MM: Final[float] = 166.0
+#: 그릴 때 쓰는 안쪽 여유(mm). Paragraph glyph ascender가 선언 좌표보다 위에
+#: 찍히므로(핵심 요약이 191mm를 쓰는 것과 같은 이유) 이만큼 안쪽에서 시작해야
+#: «실제로 보이는 글자»가 정본의 138mm 경계 안에 들어온다. 실측 1.5mm.
+_COVER_METRICS_ASCENDER_INSET_MM: Final[float] = 1.5
+#: 띠 값 글자 크기. 정본 6-1절의 15~18pt 범위이며 표지 제목(31pt)보다 작고
+#: 장 제목(17pt)을 넘지 않는다.
+_COVER_METRIC_VALUE_PT: Final[float] = 16.5
+_COVER_METRIC_VALUE_LEADING_PT: Final[float] = 20.0
+#: 제목 아래 구분선 — 표 테두리와 같은 0.55pt 회색 선을 쓴다.
+_COVER_METRICS_RULE_PT: Final[float] = 0.55
+#: 칸 사이 좌우 여백(pt). 값이 옆 칸 글자에 붙어 읽히지 않게 한다.
+_COVER_METRICS_COLUMN_GAP_PT: Final[float] = 8.0
+#: 제목·구분선·라벨·값 사이 세로 간격(pt).
+_COVER_METRICS_TITLE_GAP_PT: Final[float] = 3.0
+_COVER_METRICS_LABEL_GAP_PT: Final[float] = 7.0
+_COVER_METRICS_VALUE_GAP_PT: Final[float] = 2.0
+
+
 class _CoverContent(Flowable):
-    """회사별 글 길이와 무관하게 표지 제목·요약을 정본 영역에 고정한다."""
+    """회사별 글 길이와 무관하게 표지 제목·실적 띠·요약을 정본 영역에 고정한다."""
 
     def __init__(
         self,
@@ -413,6 +438,12 @@ class _CoverContent(Flowable):
             _, status_height = status.wrap(self.width, 18 * mm)
             status.drawOn(canvas, 0, metadata_bottom - status_height - 12)
 
+        # 표지 실적 띠 — 화면(result.html)과 «같은 순수 함수»가 고른 값만 쓴다.
+        # 값이 없으면 아무것도 그리지 않고 예전처럼 표지 여백으로 남긴다.
+        metrics = cover_metrics(self.report)
+        if metrics:
+            self._draw_cover_metrics(canvas, metrics)
+
         summary = _summary_table(self.report, self.styles, self.width)
         if summary is None:
             return
@@ -429,6 +460,58 @@ class _CoverContent(Flowable):
         canvas.line(0, rule_y, self.width, rule_y)
         _, table_height = summary.wrap(self.width, 70 * mm)
         summary.drawOn(canvas, 0, rule_y - 6 - table_height)
+
+    def _draw_cover_metrics(self, canvas: Canvas, metrics: CoverMetrics) -> None:
+        """4장 실적표의 최신 사업연도 행을 표지 정본 좌표에 다시 보여 준다.
+
+        여기서 숫자를 만들지 않는다 — ``cover_metrics``가 표에서 글자 그대로
+        옮겨 온 값만 배치한다 (정본 6-1절 「새로 계산한 숫자 금지」).
+        """
+
+        # 선언 좌표가 아니라 «실제로 보이는 글자»가 정본 영역 안에 들어와야 한다.
+        # ascender 여유만큼 안쪽에서 시작한다 (핵심 요약이 191mm를 쓰는 것과 같다).
+        band_top = (
+            A4[1]
+            - ((_COVER_METRICS_TOP_MM + _COVER_METRICS_ASCENDER_INSET_MM) * mm)
+            - constants.PAGE_BOTTOM_MARGIN_PT
+        )
+        # 출처 번호는 4장 실적표와 «같은 것»을 쓴다. 표지에 새 출처를 만들지
+        # 않으므로 부록 번호와 1:1이 깨지지 않는다.
+        title = Paragraph(
+            _escape(_cited_text(metrics.title, metrics.cite)),
+            self.styles["cover_meta"],
+        )
+        _, title_height = title.wrap(self.width, 12 * mm)
+        title.drawOn(canvas, 0, band_top - title_height)
+
+        rule_y = band_top - title_height - _COVER_METRICS_TITLE_GAP_PT
+        canvas.setStrokeColor(colors.HexColor(constants.COLOR_LINE))
+        canvas.setLineWidth(_COVER_METRICS_RULE_PT)
+        canvas.line(0, rule_y, self.width, rule_y)
+
+        column_width = self.width / len(metrics.items)
+        text_width = column_width - _COVER_METRICS_COLUMN_GAP_PT
+        for index, item in enumerate(metrics.items):
+            label = Paragraph(
+                _escape(item.label), self.styles["cover_metric_label"]
+            )
+            # 단위는 값보다 작게 붙인다 — 표지에서 크게 읽혀야 하는 것은 숫자다.
+            value = Paragraph(
+                f"{_escape(item.value)} "
+                f'<font name="{constants.FONT_REGULAR}" '
+                f'size="{constants.SMALL_FONT_SIZE_PT}" '
+                f'color="{constants.COLOR_MUTED}">{_escape(item.unit)}</font>',
+                self.styles["cover_metric_value"],
+            )
+            _, label_height = label.wrap(text_width, 10 * mm)
+            _, value_height = value.wrap(text_width, 14 * mm)
+            label_y = rule_y - _COVER_METRICS_LABEL_GAP_PT - label_height
+            label.drawOn(canvas, index * column_width, label_y)
+            value.drawOn(
+                canvas,
+                index * column_width,
+                label_y - _COVER_METRICS_VALUE_GAP_PT - value_height,
+            )
 
 
 def _register_fonts() -> None:
@@ -596,6 +679,28 @@ def _styles() -> dict[str, ParagraphStyle]:
             alignment=TA_LEFT,
             textColor=muted,
             spaceAfter=2,
+            wordWrap="CJK",
+        ),
+        # 표지 실적 띠 — 라벨은 카드 본문 크기(8.4pt) 보조색, 값은 SemiBold.
+        # 정본: 디자인과_PDF_QA.md 6-1절 「모양」.
+        "cover_metric_label": ParagraphStyle(
+            "CoverMetricLabel",
+            parent=base["BodyText"],
+            fontName=constants.FONT_SEMIBOLD,
+            fontSize=constants.CARD_FONT_SIZE_PT,
+            leading=constants.CARD_LEADING_PT,
+            alignment=TA_LEFT,
+            textColor=muted,
+            wordWrap="CJK",
+        ),
+        "cover_metric_value": ParagraphStyle(
+            "CoverMetricValue",
+            parent=base["BodyText"],
+            fontName=constants.FONT_SEMIBOLD,
+            fontSize=_COVER_METRIC_VALUE_PT,
+            leading=_COVER_METRIC_VALUE_LEADING_PT,
+            alignment=TA_LEFT,
+            textColor=ink,
             wordWrap="CJK",
         ),
         "heading": ParagraphStyle(

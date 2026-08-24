@@ -139,15 +139,17 @@ Notion, 공유 링크, real provider, 외부 백업과 cron 시험은 무료 dem
   안전한 상태»만 담고, 실제로 v2를 켤지는 배포 manifest가 한 곳에서 정한다.
   덕분에 로컬 smoke 컨테이너(`scripts/deploy/smoke-container.ps1`)와
   `deploy/compose.yaml`·`deploy/kubernetes/`는 v1 그대로 남는다.
-- **값을 잘못 적으면 «조용히» v1이 된다.** `1`(따옴표 없음 → YAML 정수),
-  `true`, `yes`, 앞뒤 공백이 붙은 `" 1 "`은 전부 v1로 떨어진다.
-  시작 검증(`deploy/validate_environment.py`)은 모르는 이름을 거부하지도,
-  이 값의 형식을 보지도 않으므로 **오류 메시지가 한 줄도 나오지 않는다.**
-  화면에는 평소대로 보고서가 뜨기 때문에 사람이 눈치채기 어렵다.
-  그래서 값의 글자와 자료형은
-  `deploy/tests/test_deployment_contract.py`의
-  `test_render_blueprint_turns_engine_v2_on_while_image_default_stays_v1`이
-  대신 지킨다.
+- **값을 잘못 적으면 시작이 거부된다.** 코드는 값이 «정확히 `1`»일 때만
+  v2로 가므로, `true`·`yes`·`on`·앞뒤 공백이 붙은 `" 1 "`은 원래
+  «조용히» v1로 떨어졌다. 화면에는 평소대로 보고서가 떠서 사람이
+  눈치챌 방법이 없었다.
+  지금은 시작 검증(`deploy/validate_environment.py`)이 `1`과 `0` 외의
+  값을 거부한다 — 컨테이너가 아예 안 뜬다. **값을 아예 안 넣는 것은
+  오류가 아니다**(v1을 쓰겠다는 정상적인 선택이다).
+  지키는 시험: `deploy/tests/test_deployment_contract.py`의
+  `test_engine_v2_rejects_values_that_silently_fall_back_to_v1`
+  (값의 글자·자료형은 같은 파일의
+  `test_render_blueprint_turns_engine_v2_on_while_image_default_stays_v1`).
 - **되돌리는 방법**: `render.yaml`에서 `ENGINE_V2` 한 쌍을 지우고 재배포한다.
   값을 `0`으로 바꿔도 v1로 가지만, 위 시험이 실패해 의도를 되묻게 된다.
 
@@ -159,8 +161,12 @@ Notion, 공유 링크, real provider, 외부 백업과 cron 시험은 무료 dem
 - **켜면 달라지는 것**: 보고서 본문을 composer가 새로 쓰고, 2·4·7장에 도식이
   실린다. 대신 **v2는 1층 캐시를 쓰지 않으므로** 같은 회사를 두 번 조사하면
   두 번 다 본조사 비용이 나간다.
-- **로컬에서 켜 보기**: `app/실시간성능시험켜기.ps1 -EngineV2`. 이 실행기가
-  `ENGINE_V2`를 자식에게 넘기는 저장소 안의 유일한 경로다.
+- **로컬에서 켜 보기** — 두 실행기가 `ENGINE_V2`를 자식에게 넘긴다.
+  - `app/실시간성능시험켜기.ps1 -EngineV2` — 로그인 게이트를 «끈» 채
+    조사 흐름만 본다. 관리자 화면은 못 본다.
+  - `app/배포리허설켜기.ps1` — 배포와 «같은 조건»(관리자 게이트 켬)으로
+    켠다. v2가 기본이고 `-DisableEngineV2`로 끌 수 있다.
+    준비물과 절차는 `app/docs/배포리허설_사용법.md`를 따른다.
 
 `AUTH_COOKIE_INSECURE`와 로컬 관리자 capability는 로컬 전용이다. Render에는 설정하지 않는다.
 실제 값의 형식은 `app/.env.example`의 설명을 따르되 실제 사람의 `sub`나 비밀값을 파일에

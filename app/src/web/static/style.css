@@ -1388,6 +1388,54 @@ td.center { text-align: center; }
   border-bottom: 1px solid var(--line);
 }
 .result-page .report-title-block { width: 100%; }
+/* 표지 실적 띠 — 정본: 디자인과_PDF_QA.md 6-1절.
+   기존 결과 화면 토큰(--ink/--ink-3/--line/--surface, 카드 모서리 24px)만 쓴다.
+   새 색을 만들지 않는다 — 표지에 색을 하나 더하면 장마다 강조색이 생긴다. */
+.result-page .cover-metrics {
+  width: 100%;
+  margin-top: 44px;
+}
+.result-page .cover-metrics-title {
+  margin: 0 0 11px;
+  color: var(--ink-3);
+  font-size: 12.5px;
+  letter-spacing: -.01em;
+}
+.result-page .cover-metrics-list {
+  display: grid;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--result-card-radius);
+  background: var(--surface);
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
+}
+.result-page .cover-metric { padding: 18px 22px 20px; }
+.result-page .cover-metric + .cover-metric { border-left: 1px solid var(--line); }
+.result-page .cover-metric dt {
+  color: var(--ink-3);
+  font-size: 12.5px;
+  font-weight: 650;
+  letter-spacing: -.02em;
+}
+.result-page .cover-metric dd {
+  display: flex;
+  align-items: baseline;
+  margin: 5px 0 0;
+  color: var(--ink);
+  gap: 5px;
+}
+.result-page .cover-metric-value {
+  font-size: clamp(26px, 4vw, 34px);
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -.035em;
+  /* 자릿수가 달라도 숫자 폭이 흔들리지 않게 한다 — 표지에서 가장 크게 읽히는 값이다. */
+  font-variant-numeric: tabular-nums;
+}
+.result-page .cover-metric-unit { color: var(--ink-3); font-size: 13px; }
 .result-page .report-summary {
   width: 100%;
   margin-top: auto;
@@ -1855,6 +1903,13 @@ td.center { text-align: center; }
     margin-bottom: 34px;
     padding: 64px 0 28px;
   }
+  /* 좁은 화면에서는 칸을 세로로 쌓는다 — 가로로 두면 큰 숫자가 잘린다. */
+  .result-page .cover-metrics { margin-top: 32px; }
+  .result-page .cover-metrics-list { grid-auto-flow: row; }
+  .result-page .cover-metric + .cover-metric {
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
   .result-page .report-summary { padding-top: 42px; }
   .result-page .report-summary li {
     grid-template-columns: 46px 70px minmax(0, 1fr) 48px;
@@ -1933,6 +1988,15 @@ td.center { text-align: center; }
     border-bottom: 0;
     break-after: page;
   }
+  /* 브라우저 인쇄에서도 띠는 제목과 핵심 요약 «사이»에 남는다.
+     PDF 정본의 138~166mm 고정은 export_pdf가 좌표로 지킨다 — 브라우저 인쇄는
+     글 길이에 따라 흐르므로 mm를 여기서 다시 주장하지 않는다. */
+  .result-page .cover-metrics { margin-top: 26mm; }
+  .result-page .cover-metrics-list {
+    border-radius: 0;
+    break-inside: avoid;
+  }
+  .result-page .cover-metric-value { font-size: 17pt; }
   .result-page .report-summary {
     margin-top: auto;
     padding-top: 24mm;
