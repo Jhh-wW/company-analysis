@@ -53,13 +53,13 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from collections.abc import Mapping, Sequence
 from typing import Callable, Final, Optional
 
 from src.features.composer.constants import PARSE_RETRY_LIMIT, RETRY_REMINDER
+from src.features.composer.logic import extract_json_payload
 from src.features.composer.verify import (
     _SentenceNumber,
     _evidence_number_pools,
@@ -213,16 +213,11 @@ def _safe_ask(ask: Callable[[str], str], prompt: str) -> str:
 
 def _parse_verdicts(raw: str) -> dict[int, str]:
     """검수 응답을 «번호 → 결과»로 읽는다. 못 읽으면 빈 사전(=검수 불능)."""
-    if not raw:
-        return {}
-    text = raw.strip()
-    start, end = text.find("{"), text.rfind("}")
-    if start < 0 or end <= start:
-        return {}
-    try:
-        payload = json.loads(text[start : end + 1])
-    except (ValueError, TypeError):
-        return {}
+    # ★ 같은 JSON 꺼내기 규칙이 composer 안에 세 벌 있었다(3-strikes, 2026-08-25).
+    #   여기에 있던 것만 «맨 앞의 json.loads 시도»를 빼먹은 채였다 — 응답이
+    #   최상위 배열이면 배열 «안»의 객체 하나가 잘려 나와 정상 응답으로
+    #   오인될 수 있었다. logic의 공개 함수 한 벌로 모으면서 그 구멍도 막힌다.
+    payload = extract_json_payload(raw)
     if not isinstance(payload, Mapping):
         return {}
     items = payload.get(_VERDICT_KEY)

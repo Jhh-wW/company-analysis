@@ -23,7 +23,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from collections.abc import Mapping, Sequence
@@ -40,6 +39,9 @@ from src.features.composer.constants import (
 from src.features.composer.logic import (
     AskFn,
     FragmentsInput,
+    # ★ 같은 JSON 꺼내기 규칙이 composer 안에 세 벌 있었다(3-strikes, 2026-08-25).
+    #   여기에 있던 복사본을 지우고 logic의 «공개» 함수 한 벌로 모았다.
+    extract_json_payload,
     _strip_inline_citation_markers,
 )
 from src.features.composer.port import (
@@ -167,28 +169,6 @@ def _demoted(sentence: ComposedSentence) -> ComposedSentence:
     if sentence.grade == GRADE_INTERPRETED:
         return sentence
     return replace(sentence, grade=GRADE_INTERPRETED)
-
-
-def _extract_payload(raw: str) -> Optional[Any]:
-    """응답에서 JSON을 꺼낸다 — 코드 펜스·앞뒤 설명이 붙어도 살린다.
-
-    logic.py의 파싱과 같은 관용 규칙이다. logic의 비공개 함수에 묶이지
-    않으려고 작게 다시 두었다 (내용 검사가 아니라 «읽히는가»만 본다).
-    """
-    text = (raw or "").strip()
-    if not text:
-        return None
-    try:
-        return json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        pass
-    start, end = text.find("{"), text.rfind("}")
-    if start < 0 or end <= start:
-        return None
-    try:
-        return json.loads(text[start : end + 1])
-    except (json.JSONDecodeError, ValueError):
-        return None
 
 
 def _safe_ask(ask: AskFn, prompt: str) -> Optional[str]:
@@ -517,7 +497,7 @@ def _parse_verdicts(raw: Optional[str]) -> Optional[dict[int, str]]:
     """
     if raw is None:
         return None
-    payload = _extract_payload(raw)
+    payload = extract_json_payload(raw)
     if not isinstance(payload, Mapping):
         return None
     entries = payload.get(REVIEW_VERDICTS_KEY)

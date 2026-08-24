@@ -182,10 +182,32 @@ def _strip_inline_citation_markers(text: str) -> str:
     return " ".join(cleaned.split())
 
 
-def _extract_payload(raw: str) -> Optional[Any]:
+def extract_json_payload(raw: str) -> Optional[Any]:
     """응답 문자열에서 JSON을 꺼낸다. 코드 펜스·앞뒤 설명이 붙어도 살린다.
 
     ★ 내용 검사가 아니다 — 「JSON으로 읽히는가」만 본다.
+
+    ★ 왜 «공개» 함수인가 (2026-08-25, 3-strikes) — 같은 규칙이 composer 안에
+      **세 벌** 있었다: 여기, `verify.py`, `diagram_check.py`. 앞의 둘은 글자까지
+      같았고, `diagram_check` 쪽만 «첫 `{`부터 마지막 `}`까지 자르기»만 하고
+      맨 앞의 `json.loads` 시도를 빼먹은 채였다. 그래서 한 곳을 고쳐도 나머지
+      둘은 그대로였다.
+      전에는 「logic의 «비공개» 함수에 묶이지 않으려고」 일부러 복사했는데,
+      `verify.py`가 이미 `_strip_inline_citation_markers`(역시 비공개)를
+      import 하고 있어 그 이유가 실제로는 지켜지지 않고 있었다.
+      → 숨기는 대신 «계약이 있는 공개 함수»로 올려 한 벌로 만든다.
+
+    ★ 맨 앞의 `json.loads(text)` 시도를 빼면 안 되는 이유 —
+      응답이 최상위 «배열»(`[{...}]`)일 때, 자르기만 하면 배열 «안»의 객체
+      하나가 잘려 나와 Mapping으로 읽힌다. 부르는 쪽은 그것을 정상 응답으로
+      착각한다. 통째로 먼저 읽어 보면 배열은 배열로 나오고, 부르는 쪽의
+      `isinstance(payload, Mapping)` 검사가 정상적으로 걸러 낸다.
+
+    Args:
+        raw: AI 응답 원문. None·빈 문자열도 받는다.
+
+    Returns:
+        JSON으로 읽힌 값(보통 dict). 못 읽으면 None.
     """
     text = (raw or "").strip()
     if not text:
@@ -245,7 +267,7 @@ def parse_section_response(raw: str) -> Optional[tuple[ComposedSentence, ...]]:
     ★ 인용 id는 여기서 «보존만» 한다. 실존하지 않는 id의 처분(문장 제거)은
       소단계 3-2 검증기의 몫이다.
     """
-    payload = _extract_payload(raw)
+    payload = extract_json_payload(raw)
     if not isinstance(payload, Mapping):
         return None
     items = payload.get(RESPONSE_SENTENCES_KEY)
@@ -318,7 +340,7 @@ def parse_flow_rows(raw: str, section_id: str = OPERATIONS_FLOW_SECTION_ID) -> t
     headers = FLOW_HEADERS_BY_SECTION.get(section_id)
     if headers is None:
         return ()
-    payload = _extract_payload(raw)
+    payload = extract_json_payload(raw)
     if not isinstance(payload, Mapping):
         return ()
     items = payload.get(RESPONSE_FLOW_KEY)
