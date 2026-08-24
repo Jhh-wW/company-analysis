@@ -23,6 +23,8 @@ from typing import Final, Optional
 
 from src.core.citations import citation_number
 from src.features.composer.constants import (
+    DART_DOCUMENT_HOST,
+    DART_DOCUMENT_URL_TEMPLATE,
     GRADE_INTERPRETED,
     SECTION_IDS,
     SECTION_TITLES,
@@ -31,6 +33,7 @@ from src.features.composer.logic import FragmentsInput
 from src.features.composer.port import (
     ComposedReport,
     ComposedSentence,
+    FilingMeta,
     PerformanceTable,
 )
 from src.features.pipeline.port import (
@@ -100,6 +103,11 @@ class _FragmentMeta:
     #: 홈페이지 조각의 «문서일» — CollectedFragment 어댑터에는 없는 필드라
     #: 원시 dict를 받았을 때만 채워진다 (port.py는 3-1 소유라 손대지 않는다).
     document_date: str = ""
+    #: 전자공시 절(사업내용·MD&A 등)에서 떠 온 조각인가.
+    #: ★ 조각 자체에 «출처»가 비어 있다는 모양 하나로만 정한다 — 종류 이름을
+    #:   목록으로 검사하지 않는다(닫힌 목록 게이트 금지, 01_원칙과_금지.md).
+    #:   이 값은 공시 원문 주소를 붙이기 «전»에 확정해야 한다.
+    from_filing: bool = False
 
 
 def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
@@ -116,14 +124,16 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
             text = str(item.get("원문") or "").strip()
             if not text:
                 continue
+            source_url = str(item.get("출처") or "").strip()
             out.append(
                 _FragmentMeta(
                     fragment_id=str(number),
                     kind=str(item.get("종류") or "").strip(),
-                    source_url=str(item.get("출처") or "").strip(),
+                    source_url=source_url,
                     document_title=str(item.get("문서명") or "").strip(),
                     location=str(item.get("원문위치") or "").strip(),
                     document_date=str(item.get("문서일") or "").strip(),
+                    from_filing=not source_url,
                 )
             )
         return tuple(out)
@@ -134,6 +144,7 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
             source_url=str(getattr(fragment, "source_url", "") or ""),
             document_title=str(getattr(fragment, "document_title", "") or ""),
             location=str(getattr(fragment, "location", "") or ""),
+            from_filing=not str(getattr(fragment, "source_url", "") or ""),
         )
         for fragment in fragments
     )
@@ -230,17 +241,20 @@ def _performance_report_table(
 # ══════════════════════════════════════════════════════════
 
 
-def _source_label(meta: _FragmentMeta) -> str:
-    """부록에 보일 문서명 — 문서명 > (전자공시) 종류 > 기본 라벨 순."""
+def _source_label(meta: _FragmentMeta, filing_meta: Optional[FilingMeta]) -> str:
+    """부록에 보일 문서명 — 문서명 > 공시 보고서명·절 > (전자공시) 종류 순."""
     if meta.document_title:
         return meta.document_title
     if not meta.kind:
         return FALLBACK_SOURCE_LABEL
-    # URL 없는 조각은 전자공시 절(사업내용·MD&A 등)이다 — 절 이름만 덜렁
-    # 내보내면 독자가 어느 문서인지 알 수 없어 발행 채널을 앞에 붙인다.
-    if not meta.source_url:
-        return f"{FILING_LABEL_PREFIX} {meta.kind}"
-    return meta.kind
+    if not meta.from_filing:
+        return meta.kind
+    # 전자공시 절(사업내용·MD&A 등)은 절 이름만 덜렁 내보내면 독자가 어느
+    # 문서인지 알 수 없다. 보고서명을 알면 「반기보고서 · 사업내용」처럼
+    # 문서와 절을 함께 보여 주고, 모르면 발행 채널만 앞에 붙인다.
+    if filing_meta is not None and filing_meta.title:
+        return f"{filing_meta.title} · {meta.kind}"
+    return f"{FILING_LABEL_PREFIX} {meta.kind}"
 
 
 def _build_source(
@@ -248,23 +262,50 @@ def _build_source(
     number: int,
     company_name: str,
     used_in: Sequence[str],
+    filing_meta: Optional[FilingMeta] = None,
 ) -> Source:
     """인용된 조각 하나를 부록 Source 한 줄로 만든다.
 
     kind 구분은 «URL이 있는가»라는 모양만 본다(내용 목록 검사 아님) —
     전자공시 절 조각은 출처 URL이 없고, 홈페이지·공식 IR 조각만 URL을 갖는다.
+
+    ★ 전자공시 조각의 원문 주소는 «조각»이 아니라 «그 조각을 떠 온 문서»가
+      가지고 있다. filing_meta를 받으면 접수번호로 원문 주소를 만들어 실어,
+      독자가 부록에서 원문을 바로 열 수 있게 한다. filing_meta가 없으면
+      예전처럼 주소 없이 나가며 그 사실이 화면에 그대로 보인다.
     """
-    kind = SourceKind.OTHER if meta.source_url else SourceKind.FILING
+    if not meta.from_filing:
+        return Source(
+            number=number,
+            kind=SourceKind.OTHER,
+            label=_source_label(meta, filing_meta),
+            collected_at=meta.document_date,
+            source_id=f"{V2_SOURCE_ID_PREFIX}{meta.fragment_id}",
+            title=meta.document_title,
+            publisher=company_name,
+            url=meta.source_url,
+            location=meta.location,
+            used_in=list(used_in),
+        )
+    document_id = filing_meta.document_id if filing_meta is not None else ""
     return Source(
         number=number,
-        kind=kind,
-        label=_source_label(meta),
+        kind=SourceKind.FILING,
+        label=_source_label(meta, filing_meta),
+        disclosed_at=filing_meta.disclosed_at if filing_meta is not None else "",
         collected_at=meta.document_date,
         source_id=f"{V2_SOURCE_ID_PREFIX}{meta.fragment_id}",
-        title=meta.document_title,
+        title=filing_meta.title if filing_meta is not None else "",
         publisher=company_name,
-        url=meta.source_url,
-        location=meta.location,
+        host=DART_DOCUMENT_HOST if document_id else "",
+        url=(
+            DART_DOCUMENT_URL_TEMPLATE.format(document_id=document_id)
+            if document_id
+            else ""
+        ),
+        document_id=document_id,
+        # 어느 절에서 떠 왔는지가 원문 안에서 찾아갈 위치다.
+        location=meta.location or meta.kind,
         used_in=list(used_in),
     )
 
@@ -287,6 +328,7 @@ def render_report(
     analysis_period: str = "",
     latest_performance_period: str = "",
     table_presentation: str = "table",
+    filing_meta: Optional[FilingMeta] = None,
 ) -> Report:
     """검증 끝난 ComposedReport를 웹·PDF 공용 pipeline Report로 바꾼다.
 
@@ -302,6 +344,9 @@ def render_report(
         grade: 표지 등급. 기본 완성 — 완성 여부 실측은 06장 몫이다.
         table_presentation: 원본 pipeline ReportTable.presentation을 넘기면
             기존 차트(trend·composition)가 그대로 재사용된다. 기본은 일반 표.
+        filing_meta: 이번 조사가 내려받은 공시의 신원(접수번호·보고서명·공시일).
+            주면 전자공시 조각의 부록 줄에 «원문 주소»가 실린다. 없으면 주소
+            없이 나가며, 그 사실이 화면에 그대로 보인다(빈 값을 지어내지 않는다).
 
     Returns:
         pipeline `Report` — 9개 장 전부(prose_lines: 문장 + [n] + 해석 표지,
@@ -395,6 +440,7 @@ def render_report(
             number,
             company_name,
             used_sections[number],
+            filing_meta,
         )
         for number in sorted(used_sections)
         if number in meta_by_number

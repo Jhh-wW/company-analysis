@@ -11,7 +11,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
+
+from src.features.composer.constants import RCEPT_DT_LENGTH
 
 
 class AskFatalError(Exception):
@@ -137,4 +139,60 @@ def performance_table_from_report_table(table: Any) -> PerformanceTable:
         ),
         unit=str(getattr(table, "display_unit", "") or ""),
         cite=str(getattr(table, "cite", "") or ""),
+    )
+
+
+# ══════════════════════════════════════════════════════════
+# 공시 신원 — 부록 출처에 «원문 주소»를 싣기 위한 어댑터
+# ══════════════════════════════════════════════════════════
+
+
+@dataclass(frozen=True)
+class FilingMeta:
+    """이번 조사가 실제로 내려받은 공시 1건의 신원.
+
+    ★ 왜 이 타입이 필요한가 (실측 결함) — 전자공시 절 조각(사업내용·MD&A 등)에는
+      조각 자체에 주소가 없다. 주소를 가진 것은 조각이 아니라 «그 조각을 떠 온
+      문서»다. 그런데 v2는 그 문서 신원을 render까지 넘기지 않아, 현대자동차
+      실측에서 부록 출처 12건 중 11건이 「주소 없음」으로 나갔다.
+      독자가 원문을 열 수 없으면 근거 표기는 장식일 뿐이다.
+    ★ v1은 같은 정보를 provenance/citations.py에서 이미 쓰고 있다. v1 경로는
+      건드리지 않고(계획 01장 「v1 무변」), v2가 같은 재료를 받아 쓰게만 한다.
+    """
+
+    #: 공시 접수번호 (`rcept_no`). 이것이 있어야 원문 주소를 만들 수 있다.
+    document_id: str = ""
+    #: 보고서 이름 (`report_nm`). 예: "반기보고서 (2026.06)".
+    title: str = ""
+    #: 공시일 `YYYY-MM-DD`. 원래 모양이 아니면 비운다 (지어내지 않는다).
+    disclosed_at: str = ""
+
+
+def _format_disclosed_at(raw: str) -> str:
+    """DART 공시일(`YYYYMMDD`) → `"YYYY-MM-DD"`. 모양이 안 맞으면 빈 문자열.
+
+    ★ 날짜를 지어내지 않는다 — 틀린 공시일은 없는 공시일보다 나쁘다.
+      v1 `provenance/citations.py._format_rcept_dt`와 같은 규칙이다.
+    """
+    digits = raw.strip()
+    if len(digits) != RCEPT_DT_LENGTH or not digits.isdigit():
+        return ""
+    return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
+
+
+def filing_meta_from_raw(filing: Any) -> Optional[FilingMeta]:
+    """real.py의 공시 dict(`rcept_no`·`report_nm`·`rcept_dt`)를 FilingMeta로.
+
+    접수번호가 없으면 주소를 만들 수 없으므로 ``None``을 돌려준다 — 이때는
+    부록이 예전처럼 주소 없이 나가며, 그 사실이 화면에 그대로 보인다.
+    """
+    if not isinstance(filing, Mapping):
+        return None
+    document_id = str(filing.get("rcept_no") or filing.get("rceptNo") or "").strip()
+    if not document_id:
+        return None
+    return FilingMeta(
+        document_id=document_id,
+        title=str(filing.get("report_nm") or "").strip(),
+        disclosed_at=_format_disclosed_at(str(filing.get("rcept_dt") or "")),
     )

@@ -2698,6 +2698,7 @@ def _run_v2_composer(
     from src.features.composer import pipeline as composer_pipeline  # noqa: PLC0415
     from src.features.composer.port import (  # noqa: PLC0415
         AskFatalError,
+        filing_meta_from_raw,
         performance_table_from_report_table,
     )
     from src.features.composer.validate import V2ValidationError  # noqa: PLC0415
@@ -2741,6 +2742,9 @@ def _run_v2_composer(
             table_presentation=(
                 str(getattr(report_table, "presentation", "") or "") or "table"
             ),
+            # 전자공시 조각에는 조각 자체에 주소가 없다. 주소를 가진 것은
+            # «떠 온 문서»이므로 그 신원을 함께 넘겨 부록에 원문 주소를 싣는다.
+            filing_meta=filing_meta_from_raw(filing),
         )
     except AskFatalError as exc:
         # 예산 소진·billing-uncertain 같은 요청 전역 장애 — «출고 검증 실패»로

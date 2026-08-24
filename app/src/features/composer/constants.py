@@ -181,3 +181,22 @@ NOTICE_INSUFFICIENT_EVIDENCE: Final[str] = (
     "공식 자료에서 이 장의 근거를 충분히 찾지 못했습니다. "
     "찾은 범위 안에서만 서술하며, 근거 없는 내용을 채워 넣지 않았습니다."
 )
+
+# ══════════════════════════════════════════════════════════
+# 공시 원문 주소 — 부록 출처를 «사용자가 직접 열 수 있게» 만든다
+# ══════════════════════════════════════════════════════════
+
+#: 전자공시 원문 뷰어 주소 틀. 접수번호(rcept_no)만 넣으면 원문이 열린다.
+#: ★ v1 경로(provenance/citations.py)가 쓰는 주소 틀과 «같은 값»이다.
+#:   두 벌로 나뉘면 같은 문서가 서로 다른 주소로 나가므로 값을 맞춰 둔다.
+DART_DOCUMENT_URL_TEMPLATE: Final[str] = (
+    "https://dart.fss.or.kr/dsaf001/main.do?rcpNo={document_id}"
+)
+
+#: DART 공시일(`rcept_dt`)의 원래 모양 — 8자리 숫자(`YYYYMMDD`) 하나뿐이다.
+#: 모양이 안 맞으면 날짜를 «지어내지 않고» 비운다 (v1 _format_rcept_dt와 같은 규칙).
+RCEPT_DT_LENGTH: Final[int] = 8
+
+#: 전자공시 원문을 호스팅하는 기관 도메인. Source.host에 실어 「누가 보관한
+#: 문서인가」를 발행 주체(회사)와 구분해 보여 준다.
+DART_DOCUMENT_HOST: Final[str] = "dart.fss.or.kr"
