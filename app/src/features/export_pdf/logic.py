@@ -268,17 +268,30 @@ class _TrendGraphic(Flowable):
             chart_height = max(24.0, panel_height - 48)
             group_width = (panel_width - 22) / max(1, len(series.points))
             bar_width = min(18.0, group_width * 0.48)
-            axis_y = negative_axis if series.risk else positive_axis
+            # ★ 한 계열에 흑자와 적자가 «섞이면» 0선을 가운데에 두고 위아래로
+            #   나눠 긋는다. 예전에는 그런 표를 아예 안 그렸는데, 하필 그 조건에
+            #   걸리는 것이 «흑자→적자 전환»이라 가장 중요한 사실이 사라졌다.
+            mixed = any(point.below for point in series.points) and any(
+                not point.below for point in series.points
+            )
+            if mixed:
+                axis_y = positive_axis + (chart_height / 2)
+                chart_height = chart_height / 2
+            else:
+                axis_y = negative_axis if series.risk else positive_axis
             canvas.setStrokeColor(colors.HexColor(constants.COLOR_LINE))
             canvas.setLineWidth(0.45)
             canvas.line(x0 + 8, axis_y, x0 + panel_width - 8, axis_y)
             for point_index, point in enumerate(series.points):
                 center_x = x0 + 11 + (group_width * point_index) + (group_width / 2)
                 bar_height = chart_height * max(0.0, point.ratio) / 100.0
-                bar_y = axis_y - bar_height if series.risk else axis_y
+                # 아래로 그릴 값인가 — 점의 부호가 정본이고, 계열 전체가 손실인
+                # 옛 경로(risk)도 같은 뜻이라 함께 본다.
+                draws_down = point.below or series.risk
+                bar_y = axis_y - bar_height if draws_down else axis_y
                 canvas.setFillColor(
                     colors.HexColor(
-                        constants.COLOR_RISK if series.risk else constants.COLOR_CHART_DARK
+                        constants.COLOR_RISK if draws_down else constants.COLOR_CHART_DARK
                     )
                 )
                 canvas.rect(
@@ -290,7 +303,7 @@ class _TrendGraphic(Flowable):
                     stroke=0,
                 )
                 canvas.setFont(constants.FONT_SEMIBOLD, 7.5)
-                value_y = bar_y - 9 if series.risk else bar_y + bar_height + 3
+                value_y = bar_y - 9 if draws_down else bar_y + bar_height + 3
                 canvas.drawCentredString(center_x, value_y, _single_line_pdf_text(point.display))
                 canvas.setFillColor(colors.HexColor(constants.COLOR_MUTED))
                 canvas.setFont(constants.FONT_REGULAR, 7.5)

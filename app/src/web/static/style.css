@@ -1673,6 +1673,32 @@ td.center { text-align: center; }
   margin: 16px 0 24px;
   break-inside: avoid;
 }
+/* 문단 번호 «2-1» — 본문 왼쪽에 붙는 작은 표지.
+   ★ 본문 글자가 아니라 «표시»다. 화면 낭독기에는 안 읽히게 aria-hidden을
+      쓴다(틀에서 지정). 번호가 문장 안으로 들어가면 인용 추적이 깨진다. */
+.result-page .prose { position: relative; }
+.result-page .pno {
+  display: inline-block;
+  min-width: 2.6em;
+  margin-right: .5em;
+  font-family: "Prata", Georgia, serif;
+  font-size: .82em;
+  font-variant-numeric: tabular-nums;
+  color: #737373;
+  letter-spacing: .02em;
+  user-select: none;
+}
+@media (min-width: 900px) {
+  /* 넓은 화면에서는 본문 바깥 여백으로 빼 글줄이 안 밀리게 한다 */
+  .result-page .pno {
+    position: absolute;
+    left: -3.6em;
+    margin-right: 0;
+    text-align: right;
+    min-width: 3em;
+  }
+}
+
 .result-page .composition-track {
   display: flex;
   width: 100%;
@@ -1758,6 +1784,16 @@ td.center { text-align: center; }
   border-bottom: 1px solid var(--line);
 }
 .result-page .trend-bar { display: block; width: min(34px, 64%); min-height: 2px; background: #0a0a0a; }
+/* ★ 0선 «아래» 값 — 한 계열에 흑자와 적자가 섞였을 때.
+   막대를 위에서 아래로 내려 긋고 빨강으로 칠해, 부호가 바뀐 해를
+   한눈에 알아보게 한다. 예전에는 이런 표를 아예 안 그렸다(하이브 실측). */
+.result-page .trend-point.below .trend-bar-wrap {
+  align-items: flex-start;
+  border-top: 1px solid var(--line);
+  border-bottom: 0;
+}
+.result-page .trend-point.below .trend-bar { background: #e7000b; }
+.result-page .trend-point.below .trend-value { color: #b00009; }
 .result-page .trend-panel.risk .trend-bar-wrap {
   align-items: flex-start;
   border-top: 1px solid var(--line);

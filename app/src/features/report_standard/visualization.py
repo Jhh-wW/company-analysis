@@ -60,6 +60,14 @@ class ChartPoint:
     value: float
     display: str
     ratio: float
+    #: 이 값을 0선 «아래로» 그려야 하는가.
+    #:
+    #: ★ 왜 계열이 아니라 «점»마다 두나 (하이브 실측) — 예전에는 계열 전체가
+    #:   음수일 때만 아래로 그렸고, 한 계열에 양수·음수가 «섞이면» 도식을
+    #:   아예 안 그렸다. 그런데 하이브 당기순이익은 +1,834 → -34 → -2,544로
+    #:   «흑자에서 적자로 돌아선» 경우였다. 그건 숨길 사실이 아니라 독자가
+    #:   가장 봐야 할 사실이다. 점마다 방향을 두면 그대로 그릴 수 있다.
+    below: bool = False
 
 
 @dataclass(frozen=True)
@@ -197,21 +205,23 @@ def _trend(table: ReportTable) -> TableVisualization | None:
         maximum = max((abs(value) for _label, value, _display in parsed), default=Decimal("0"))
         if maximum == 0:
             return None
-        has_positive = any(value > 0 for _label, value, _display in parsed)
+        # ★ 부호가 섞여도 그린다 — 점마다 0선 위/아래로 나눠 그리기 때문이다.
+        #   예전에는 여기서 도식을 통째로 포기했는데, 그 조건에 걸리는 것이
+        #   하필 «흑자→적자 전환»처럼 가장 중요한 경우였다(하이브 실측).
         has_negative = any(value < 0 for _label, value, _display in parsed)
-        # 양수·음수가 한 계열에 섞이면 하나의 단순 막대 축으로 오해 없이 표현할 수 없다.
-        if has_positive and has_negative:
-            return None
         header = str(table.headers[column]).strip()
-        risk = (all(value <= 0 for _label, value, _display in parsed) and any(
-            value < 0 for _label, value, _display in parsed
-        )) or "손실" in header
+        # 계열 «전체»가 손실일 때만 계열을 위험으로 본다. 섞인 경우는 점마다
+        # 방향으로 나타내므로 계열 표시를 바꾸지 않는다 — 흑자 해까지 빨갛게
+        # 칠하면 사실보다 나쁘게 읽힌다.
+        all_non_positive = all(value <= 0 for _label, value, _display in parsed)
+        risk = (all_non_positive and has_negative) or "손실" in header
         points = tuple(
             ChartPoint(
                 label=label,
                 value=float(value),
                 display=display,
                 ratio=float((abs(value) / maximum) * 100),
+                below=value < 0,
             )
             for label, value, display in parsed
         )

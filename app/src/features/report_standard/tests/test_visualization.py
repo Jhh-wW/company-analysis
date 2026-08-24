@@ -204,7 +204,14 @@ def test_trend_prefers_explicit_display_unit_and_rejects_non_numeric_series() ->
     assert invalid is None
 
 
-def test_trend_with_mixed_signs_falls_back_to_a_table() -> None:
+def test_trend_with_mixed_signs_is_drawn_not_dropped() -> None:
+    """★ 예전에는 여기서 도식을 포기했다 — 그게 사용자 신고의 원인이었다.
+
+    「부호가 섞이면 한 축으로 오해 없이 표현할 수 없다」가 옛 이유였다.
+    맞는 걱정이지만 답이 틀렸다. 답은 «안 그리기»가 아니라 «0선을 두고
+    위아래로 나눠 그리기»다. 실제로 이 조건에 걸리는 것이 하필
+    «흑자→적자 전환»이라, 가장 중요한 사실일 때만 그림이 사라졌다.
+    """
     table = ReportTable(
         caption="실적 (단위: 억원)",
         headers=["사업연도", "영업손익"],
@@ -212,7 +219,11 @@ def test_trend_with_mixed_signs_falls_back_to_a_table() -> None:
         presentation="trend",
     )
 
-    assert table_visualization(table) is None
+    visualization = table_visualization(table)
+
+    assert visualization is not None, "부호가 섞였다고 도식을 포기했습니다"
+    아래 = {point.label: point.below for point in visualization.series[0].points}
+    assert 아래 == {"2023": True, "2024": False, "2025": False}
 
 
 def test_flow_preserves_each_complete_left_to_right_row() -> None:
@@ -266,3 +277,91 @@ def test_default_or_unknown_presentation_falls_back_to_the_original_table(
     )
 
     assert table_visualization(table) is None
+
+
+# ══════════════════════════════════════════════════════════
+# ⑦ 부호가 섞여도 그린다 — «흑자 → 적자» 전환
+# ══════════════════════════════════════════════════════════
+#
+# ★ 하이브 실측 — 당기순이익이 +1,834 → -34 → -2,544였다. 예전 규칙은
+#   「한 계열에 양수·음수가 섞이면 그리지 않는다」라서 4장 도식이 통째로
+#   사라졌다. 그런데 그 조건에 걸리는 것이 하필 «흑자에서 적자로 돌아선»
+#   경우다 — 독자가 가장 봐야 할 사실인데 그때만 그림이 없어졌다.
+#   지금은 점마다 0선 위/아래를 나눠 그린다.
+
+
+def _trend_table(rows: list[list[str]], headers: list[str]) -> ReportTable:
+    return ReportTable(
+        caption="세 사업연도 실적 (단위: 억원)",
+        headers=headers,
+        rows=rows,
+        cite="[1]",
+        numeric=True,
+        presentation="trend",
+    )
+
+
+def test_trend_draws_series_that_turns_from_profit_to_loss() -> None:
+    table = _trend_table(
+        [
+            ["2025", "26499", "-2544"],
+            ["2024", "22556", "-34"],
+            ["2023", "21781", "1834"],
+        ],
+        ["사업연도", "매출액", "당기순이익"],
+    )
+
+    visualization = table_visualization(table)
+
+    assert visualization is not None, "흑자→적자 전환 계열이 있다고 도식을 포기했습니다"
+    순이익 = next(s for s in visualization.series if s.label == "당기순이익")
+    아래 = [point.below for point in 순이익.points]
+    assert True in 아래 and False in 아래, f"부호가 점마다 안 나뉘었습니다: {아래}"
+    # 흑자 해까지 «위험»으로 칠하면 사실보다 나쁘게 읽힌다.
+    assert 순이익.risk is False
+
+
+def test_trend_marks_each_point_by_its_own_sign() -> None:
+    table = _trend_table(
+        [["2025", "-100"], ["2024", "50"], ["2023", "-20"]],
+        ["사업연도", "영업이익"],
+    )
+
+    visualization = table_visualization(table)
+
+    assert visualization is not None
+    points = visualization.series[0].points
+    by_label = {point.label: point for point in points}
+    assert by_label["2025"].below is True
+    assert by_label["2024"].below is False
+    assert by_label["2023"].below is True
+
+
+def test_trend_series_that_is_all_loss_stays_marked_risk() -> None:
+    """계열 «전체»가 손실이면 예전처럼 계열을 위험으로 본다 (동작 무변)."""
+    table = _trend_table(
+        [["2025", "-100"], ["2024", "-50"], ["2023", "-20"]],
+        ["사업연도", "영업이익"],
+    )
+
+    visualization = table_visualization(table)
+
+    assert visualization is not None
+    series = visualization.series[0]
+    assert series.risk is True
+    assert all(point.below for point in series.points)
+
+
+def test_trend_all_positive_series_is_unchanged() -> None:
+    """흔한 경우가 예전과 똑같이 나오는지 — 회귀 방지."""
+    table = _trend_table(
+        [["2025", "300"], ["2024", "200"], ["2023", "100"]],
+        ["사업연도", "매출액"],
+    )
+
+    visualization = table_visualization(table)
+
+    assert visualization is not None
+    series = visualization.series[0]
+    assert series.risk is False
+    assert not any(point.below for point in series.points)

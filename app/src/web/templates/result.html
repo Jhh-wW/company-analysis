@@ -65,7 +65,9 @@
   <h3>{{ series.label }}{% if visual.unit %} <span>({{ visual.unit }})</span>{% endif %}</h3>
   <div class="trend-points">
   {% for point in series.points %}
-  <div class="trend-point">
+  {# ★ 점마다 0선 위/아래를 나눈다. 한 계열에 흑자와 적자가 섞여도 그대로
+     보여 준다 — 그 전환이 독자가 가장 봐야 할 사실이기 때문이다. #}
+  <div class="trend-point{% if point.below %} below{% endif %}">
   <span class="trend-value">{{ point.display }}</span>
   <span class="trend-bar-wrap" aria-hidden="true"><span class="trend-bar" style="height: {{ '%.4f'|format(point.ratio) }}%"></span></span>
   <span class="trend-label">{{ point.label }}</span>
@@ -234,9 +236,15 @@
          ★ 본문 속 [n]은 «작은 위첨자 링크»로 바꿔 인쇄한다. 그냥 찍으면
          본문과 같은 크기의 대괄호 숫자가 박혀 읽기가 끊긴다. 번호는 render.py가
          부록과 1:1로 맞춘 값이라 새로 매기지 않고 모양만 바꾼다. #}
+      {# ★ 문단마다 «장번호-문단번호»를 붙인다 (2-1, 2-2 …).
+         왜 코드가 붙이나 — 넘버링은 «표시 방식»이지 «사실»이 아니다. AI에게
+         부탁하면 회사마다 다르게 매기고, 번호가 본문 글자로 들어가 인용
+         추적·중복 검사·부록 1:1 검사가 전부 그 번호를 사실로 오인한다.
+         여기서 붙이면 문장은 한 글자도 안 바뀐다.
+         ★ 읽는 사람이 「2-3이 이상해요」로 짚을 수 있게 하는 것이 목적이다. #}
       {% if s.prose_paragraphs %}
         {% for paragraph in s.prose_paragraphs %}
-        <p class="prose">{{ inline_refs(paragraph) }}</p>
+        <p class="prose"><span class="pno" aria-hidden="true">{{ s.display_number or loop.index0 }}-{{ loop.index }}</span>{{ inline_refs(paragraph) }}</p>
         {% endfor %}
       {% elif s.prose_lines %}
       <p class="prose">
