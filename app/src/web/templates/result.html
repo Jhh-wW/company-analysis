@@ -278,15 +278,20 @@
          ★ 본문 속 [n]은 «작은 위첨자 링크»로 바꿔 인쇄한다. 그냥 찍으면
          본문과 같은 크기의 대괄호 숫자가 박혀 읽기가 끊긴다. 번호는 render.py가
          부록과 1:1로 맞춘 값이라 새로 매기지 않고 모양만 바꾼다. #}
-      {# ★ 문단마다 «장번호-문단번호»를 붙인다 (2-1, 2-2 …).
+      {# ★ 문단마다 «문단번호»를 붙인다 (1. 2. 3. …).
          왜 코드가 붙이나 — 넘버링은 «표시 방식»이지 «사실»이 아니다. AI에게
          부탁하면 회사마다 다르게 매기고, 번호가 본문 글자로 들어가 인용
          추적·중복 검사·부록 1:1 검사가 전부 그 번호를 사실로 오인한다.
          여기서 붙이면 문장은 한 글자도 안 바뀐다.
-         ★ 읽는 사람이 「2-3이 이상해요」로 짚을 수 있게 하는 것이 목적이다. #}
+         ★ 읽는 사람이 「3번 문단이 이상해요」로 짚을 수 있게 하는 것이 목적이다.
+         ★ 2026-08-25에 «장번호-문단번호»(2-1)에서 «문단번호만»(1.)로 바꿨다.
+            이유(사용자): 이미 「2. 사업 구조와 수익 모델」 장 제목 아래에 있으므로
+            장 번호를 문단마다 되풀이할 이유가 없다. PDF도 같은 커밋에서 함께 바꿨다
+            (export_pdf/logic.py::_paragraph_number_markup) — 한쪽만 고치면
+            「3-2 문단 보세요」가 다시 어긋난다. #}
       {% if s.prose_paragraphs %}
         {% for paragraph in s.prose_paragraphs %}
-        <p class="prose"><span class="pno" aria-hidden="true">{{ s.display_number or loop.index0 }}-{{ loop.index }}</span>{{ inline_refs(paragraph) }}</p>
+        <p class="prose"><span class="pno" aria-hidden="true">{{ loop.index }}.</span>{{ inline_refs(paragraph) }}</p>
         {% endfor %}
       {% elif s.prose_lines %}
       <p class="prose">

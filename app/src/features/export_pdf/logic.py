@@ -1190,27 +1190,27 @@ def _add_report_table(
 _PARAGRAPH_NUMBER_FONT_SIZE_PT: Final[float] = 8.3
 
 
-def _paragraph_number_markup(section: ReportSection, position: int) -> str:
-    """웹(result.html의 ``.pno``, v2-32/c881cb5)과 «같은 계산식»으로
-    문단 앞에 «장번호-문단번호»(예: 2-1)를 붙인다.
+def _paragraph_number_markup(position: int) -> str:
+    """웹(result.html의 ``.pno``)과 «같은 계산식»으로 문단 앞에 «1.» «2.»를 붙인다.
 
     ★ 왜 코드가 붙이나 — v2-32와 같은 이유. 번호는 «표시 방식»이지
       «사실»이 아니다. AI에게 시키면 번호가 본문 글자로 들어가 인용
       추적·중복 검사·부록 1:1 검사가 그 번호를 사실로 오인한다. 여기서
       붙이면 ``_escape(text)``가 받는 문장은 한 글자도 안 바뀐다.
-    ★ PDF가 «다운로드 정본»이다 — 웹에만 있고 PDF에 없으면 「3-2 문단
+    ★ PDF가 «다운로드 정본»이다 — 웹에만 있고 PDF에 없으면 「3번 문단
       보세요」가 성립하지 않는다(팀장 실측: 웹 25개 · PDF 0개).
-    ★ ``display_number``가 비어 있을 때(드묾)는 웹도 이 문단 자신의
-      0-기준 순번을 «장번호 자리에» 대신 쓴다 — 이상해 보이지만 그것이
-      실제 웹 동작이다(Jinja의 ``loop.index0``가 바깥 장 루프가 아니라
-      이 문단 루프를 가리킨다). 여기서 다르게 계산하면 오히려 웹·PDF
-      번호가 갈린다 — 「같은 체계」 요구는 이 quirk까지 포함한다.
+    ★ 2026-08-25에 «장번호-문단번호»(예: 2-1)에서 «문단번호만»으로 바꿨다.
+      이유(사용자): 이미 「2. 사업 구조와 수익 모델」이라는 장 제목 아래에
+      있으므로 장 번호를 문단마다 되풀이할 이유가 없다.
+      부수 효과로 옛 quirk가 사라진다 — 전에는 ``display_number``가 비면
+      웹이 «문단 자신의 0-기준 순번»을 장번호 자리에 대신 써서 「0-1」
+      「1-2」 같은 번호가 나왔다. 이제 장번호를 아예 안 쓰므로 그 자리가
+      없어졌고, 웹·PDF가 어긋날 여지도 같이 없어졌다.
     """
-    section_number = section.display_number or str(position - 1)
     return (
         f'<font name="{constants.FONT_SEMIBOLD}" '
         f'size="{_PARAGRAPH_NUMBER_FONT_SIZE_PT}" '
-        f'color="{constants.COLOR_MUTED}">{_escape(section_number)}-{position}'
+        f'color="{constants.COLOR_MUTED}">{position}.'
         f"</font>&#160;&#160;"
     )
 
@@ -1252,7 +1252,7 @@ def _add_section(
         #   덩어리로 냈다. 첫 문단만 제목과 함께 묶어 쪽 넘김에서 떨어지지
         #   않게 하고, 나머지는 이어서 흘린다.
         paragraphs = [
-            Paragraph(_paragraph_number_markup(section, position) + _escape(text), styles["body"])
+            Paragraph(_paragraph_number_markup(position) + _escape(text), styles["body"])
             for position, text in enumerate(section.prose_paragraphs, start=1)
         ]
         story.append(KeepTogether([*heading_flowables, paragraphs[0]]))
