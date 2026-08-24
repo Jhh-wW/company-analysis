@@ -24,6 +24,7 @@ import re
 import sys
 import threading
 import time
+import urllib.parse
 from contextlib import contextmanager
 from dataclasses import replace
 from functools import lru_cache
@@ -3103,6 +3104,76 @@ def _collect_news(
     return newspick_logic.to_fragments(picked)
 
 
+def _homepage_compare_host(url: str) -> str:
+    """주소에서 «비교용 host»만 뽑는다. 못 뽑으면 빈 문자열.
+
+    ★ 왜 `browser_url()`을 먼저 통과시키나 — 세 가지를 한 번에 해결하기 때문이다.
+      1) **스킴이 없을 수 있다.** DART `hm_url`은 대부분 "www.foo.co.kr" 모양이다.
+         `urlsplit("www.hanjin.com:443/kor")`은 host가 아니라 **scheme을
+         "www.hanjin.com"으로 읽는다**(실측 확인). `browser_url()`은 "://"가
+         없으면 https를 먼저 붙이므로 이 함정을 지나간다.
+      2) **대소문자·끝점·한글 도메인.** host는 DNS 규칙상 대소문자를 안 가리고
+         (RFC 4343), 끝의 "."은 root label 표기일 뿐 같은 이름이다. 한글 도메인은
+         punycode로 적으면 같은 이름이다. `browser_url()`이 셋 다 정규화한다.
+      3) **위험한 주소는 빈 문자열.** 그러면 아래에서 «다름»으로 떨어져
+         원래 주소를 그대로 쓴다 — fail-closed다.
+
+    ⚠️ **포트는 일부러 뺀다.** `hostname`은 ":443"을 포함하지 않는다.
+      실측에서 www.hanjin.co.kr → https://www.hanjin.com:443/... 처럼 포트가 붙어
+      돌아오는데, 포트는 «어느 회사냐»가 아니라 «어떻게 연결하냐»다. 포트까지
+      비교하면 같은 사이트의 "https://foo.co.kr" 과 "https://foo.co.kr:443" 을
+      다른 회사로 오판한다. 포트 안전성은 `browser_url`의 ALLOWED_PORTS가 이미 본다.
+    """
+    normalized = homepage_link.browser_url(url)
+    if not normalized:
+        return ""
+    try:
+        return urllib.parse.urlsplit(normalized).hostname or ""
+    except ValueError:
+        return ""
+
+
+def _homepage_url_for_collector(raw: str) -> str:
+    """홈페이지 수집기에 넘길 주소를 고른다 — **같은 회사일 때만** 바꾼다.
+
+    `workable_url()`은 실제로 열어 보고 «열리는 주소»를 준다. 자체서명 인증서
+    때문에 https가 통째로 죽은 회사((주)진영 실측)에서 조각이 0개가 되는 것을
+    막아 준다. 그런데 **리다이렉트를 따라가므로 다른 회사 host가 올 수 있다.**
+
+    ★ 실측(2026-08-25, 대기업 표본에서 3건) —
+        www.hyundai.co.kr → https://www.hyundaimotorgroup.com/ko/main/mainRecommend
+        www.hyosung.co.kr → https://www.hyosung.com/kr/index
+        www.hanjin.co.kr  → https://www.hanjin.com:443/kor/Main.do
+      이걸 그대로 넘기면 **남의 회사 사이트가 「이 회사 공식 웹」으로** 들어오고,
+      게다가 조각에 후보출처검증="https_exact_dart_host"(= DART host와 정확히
+      같음) 도장까지 찍힌다 — 거짓말이 근거로 박힌다.
+
+    ★ 그래서 규칙은 하나 — **host가 같을 때만 바꾼다. 다르면 원래 주소 그대로.**
+      "다르면 그대로"는 오늘과 완전히 같은 동작이라 새 예외를 만들지 않는다.
+
+    ⚠️ **"www." 접두어는 지우지 않는다** — 즉 apex와 www는 «다른 host»로 본다.
+      DART가 apex를 적었는데 실제로는 www인 경우는 `collect_homepage_fragments`의
+      `allow_dart_www_alias` 경로가 이미 다룬다. 그 경로는 별도 probe로 이동을
+      증명하고 조각에 이동 흔적(IR_DART_WWW_REDIRECT_*)을 남긴다. 여기서 www를
+      말없이 같은 것으로 쳐 버리면 **그 흔적이 사라진 채로** 통과한다.
+
+    Args:
+        raw: DART 기업개황이 준 `hm_url` (스킴이 없을 수도 있다).
+
+    Returns:
+        열리는 주소(host가 같을 때) 또는 `raw` 그대로.
+    """
+    raw_host = _homepage_compare_host(raw)
+    if not raw_host:
+        # 주소가 비었거나 링크로 만들 수 없는 모양이다. 접속을 시도할 이유가 없다.
+        return raw
+    # `workable_url`은 lru_cache라 회사 확인 화면에서 이미 부른 주소면 재접속하지 않는다.
+    candidate = homepage_link.workable_url(raw)
+    if not candidate or _homepage_compare_host(candidate) != raw_host:
+        return raw
+    return candidate
+
+
 def _collect(
     engine: Any,
     client: Any,
@@ -3189,7 +3260,7 @@ def _collect(
     # 회사 홈페이지 — 2번(뭘 잘하나)이 만성적으로 비는 원인이었다 (문제로그 P-35 · D14-7).
     # ★ 실패를 「없음」과 반드시 구분한다. 섞으면 「이 회사는 자료가 없다」로 잘못 읽힌다.
     homepage = collect_homepage_fragments(
-        profile.get("hm_url", ""),
+        _homepage_url_for_collector(profile.get("hm_url", "")),
         allow_dart_www_alias=True,
     )
     if homepage.state == "ok":
