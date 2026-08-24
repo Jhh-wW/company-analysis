@@ -293,6 +293,37 @@ def _marker_visibility(
 # ══════════════════════════════════════════════════════════
 
 
+def _ensure_no_orphan_markers(
+    groups: Sequence[tuple[Sequence[ComposedSentence], list[bool]]],
+    numbers: Mapping[str, int],
+) -> None:
+    """부록에 실릴 번호가 «본문 어디에도» 안 보이는 일을 막는다 (제자리 수정).
+
+    ★ 왜 필요한가 (골든 fixture가 잡은 결함) — 절충안 규칙 ①은 해석 문장의
+      번호를 뺀다. 그런데 어떤 조각이 «해석 문장에서만» 인용되면 그 번호가
+      본문에 한 번도 안 나온다. 부록은 인용된 조각으로 만들어지므로 그 줄이
+      고아가 되고, 출고 검증(validate_v2)이 「부록에 있는 번호를 본문
+      어디에서도 인용하지 않았습니다」로 보고서를 통째로 막는다.
+    ★ 그래서 규칙을 적용한 «뒤»에 한 번 더 훑어, 어디에도 안 보이는 번호는
+      그 번호를 인용한 «마지막» 문장에서 되살린다. 번호는 줄이되 추적은
+      끊지 않는다 — 둘 중 하나를 고르는 문제가 아니다.
+    """
+    visible: set[int] = set()
+    for sentences, shows in groups:
+        for index, sentence in enumerate(sentences):
+            if shows[index]:
+                visible.update(_sentence_citation_numbers(sentence, numbers))
+    # 어디에 마지막으로 나왔는지 기억해 두었다가, 안 보이는 번호만 되살린다.
+    last_seen: dict[int, tuple[int, int]] = {}
+    for group_index, (sentences, _shows) in enumerate(groups):
+        for index, sentence in enumerate(sentences):
+            for number in _sentence_citation_numbers(sentence, numbers):
+                last_seen[number] = (group_index, index)
+    for number, (group_index, index) in last_seen.items():
+        if number not in visible:
+            groups[group_index][1][index] = True
+
+
 def _performance_report_table(
     table: PerformanceTable, presentation: str
 ) -> ReportTable:
@@ -489,13 +520,29 @@ def render_report(
     used_sections: dict[int, list[str]] = {}
 
     sections: list[ReportSection] = []
+    # 표기 방식을 적용한 가시성을 먼저 전부 계산한다 — 고아 번호를 되살리려면
+    # 본문과 요약을 «함께» 봐야 한다.
+    visibility_groups: list[tuple[Sequence[ComposedSentence], list[bool]]] = [
+        (section.sentences, list(_marker_visibility(section.sentences, numbers, citation_style)))
+        for section in report.sections
+    ]
+    visibility_groups.append(
+        (report.summary, list(_marker_visibility(report.summary, numbers, citation_style)))
+    )
+    _ensure_no_orphan_markers(visibility_groups, numbers)
+    section_shows = {
+        section.section_id: visibility_groups[index][1]
+        for index, section in enumerate(report.sections)
+    }
+    summary_shows = visibility_groups[-1][1]
+
     for section in report.sections:
         prose_lines: list[tuple[str, str]] = []
         # 자료 부족·생성 실패의 정직한 안내문을 본문 «앞»에 둔다
         # (기준문서 3절: 안내 1~2문장 + 찾은 만큼의 내용).
         if section.notice:
             prose_lines.append((section.notice, ""))
-        shows = _marker_visibility(section.sentences, numbers, citation_style)
+        shows = section_shows[section.section_id]
         for index, sentence in enumerate(section.sentences):
             prose_lines.append(
                 (
@@ -581,7 +628,6 @@ def render_report(
         )
 
     summary_items: list[SummaryItem] = []
-    summary_shows = _marker_visibility(report.summary, numbers, citation_style)
     for index, sentence in enumerate(report.summary):
         summary_items.append(
             SummaryItem(

@@ -170,8 +170,12 @@ def test_v2_결과_화면은_장_제목과_인용_해석_표지를_담는다(
     본문 = body[body.index('<p class="prose">') : body.index("</p>")]
     assert "[1]" not in 본문, "본문에 평문 대괄호 번호가 남아 있습니다"
     assert 'class="ref"' in 본문
-    # "— 해석" 표지 — 확인/해석을 구분하는 v2 렌더 표지.
-    assert INTERPRETATION_MARKER in body
+    # 해석 표지 — 하이픈 붙은 글이 아니라 «둥근 배지»로 나간다.
+    # ★ 표지를 없앤 게 아니다. 확인(공시에 그대로 적힌 사실)과 해석(우리가
+    #   읽어 낸 것)을 구분하는 것은 이 제품의 핵심 약속이라 «모양»만 바꿨다.
+    assert '<span class="grade-tag">해석</span>' in body
+    본문2 = body[body.index('<p class="prose">') : body.index("</p>")]
+    assert INTERPRETATION_MARKER not in 본문2, "본문에 하이픈 표지가 남아 있습니다"
     # 핵심 요약과 출처 부록.
     assert 'id="report-summary-title">핵심 요약</h2>' in body
     assert (

@@ -22,6 +22,7 @@ from typing import Any, Final
 import pytest
 
 from src.features.composer.constants import (
+    CITATION_STYLE_INLINE,
     GRADE_CONFIRMED,
     NOTICE_COMPOSE_FAILED,
     NOTICE_INSUFFICIENT_EVIDENCE,
@@ -169,6 +170,10 @@ def floor_run() -> tuple[V2RunOutput, _AllTrueReviewer]:
         reviewer_ask=reviewer,
         corp_type="상장사",
         as_of_date="2026-08-24",
+        # ★ 이 시험은 «문장마다 근거가 붙는가»를 본다. 화면 기본값은 절충안
+        #   (같은 출처 묶음은 마지막에만 번호)이라 표기 방식을 여기서 못 박는다
+        #   — 기본값이 또 바뀌어도 이 시험의 의도가 흔들리지 않게.
+        citation_style=CITATION_STYLE_INLINE,
     )
     return output, reviewer
 

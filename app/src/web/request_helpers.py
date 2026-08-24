@@ -16,7 +16,12 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from src.core import clock, paths
-from src.core.citations import citation_number, split_citation_markers
+from src.core.citations import (
+    INTERPRETATION_LABEL,
+    citation_number,
+    split_citation_markers,
+    split_interpretation_marker,
+)
 from src.core.constants import (
     CELL_LABELS,
     COMPANY_LOOKUP_FAILED_MESSAGE,
@@ -117,6 +122,9 @@ def _ctx(request: Request, **kwargs) -> dict:
         # 본문에 박힌 [n]을 작은 위첨자 링크로 바꿔 인쇄하기 위한 분해기.
         # v1은 이미 .ref 위첨자를 쓰는데 v2만 평문 대괄호였다(사용자 신고).
         "split_citation_markers": split_citation_markers,
+        # 문장 끝 «— 해석»을 떼어 둥근 배지로 보여 주기 위한 분리기.
+        "split_interpretation_marker": split_interpretation_marker,
+        "interpretation_label": INTERPRETATION_LABEL,
         # 표의 사실을 반복하지 않고 구성비·추세·흐름 표현으로 바꾸는 순수 함수다.
         "table_visualization": table_visualization,
         "section_content_blocks": section_content_blocks,

@@ -89,9 +89,9 @@ def _render(composed, style):
 # ══════════════════════════════════════════════════════════
 
 
-def test_기본값은_기존_방식이다():
-    """화면 기본 동작을 말없이 바꾸지 않는다 — 사용자가 고른 뒤에 바꾼다."""
-    assert DEFAULT_CITATION_STYLE == CITATION_STYLE_INLINE
+def test_기본값은_절충안이다():
+    """사용자가 두 방식을 나란히 보고 절충안으로 확정했다 (2026-08-24)."""
+    assert DEFAULT_CITATION_STYLE == CITATION_STYLE_MERGED
 
 
 def test_기존_방식은_문장마다_번호를_붙인다():
@@ -242,3 +242,63 @@ def test_부록_사용_장_기록은_표기_방식과_무관하다():
     merged = {s.number: sorted(s.used_in) for s in _full_report(CITATION_STYLE_MERGED).citations}
 
     assert inline == merged
+
+
+# ══════════════════════════════════════════════════════════
+# ★ 고아 방지 — 해석 문장에서만 인용된 조각
+# ══════════════════════════════════════════════════════════
+
+
+def test_해석_문장에서만_인용된_조각도_번호가_살아남는다():
+    """★ 골든 fixture가 잡은 실측 결함.
+
+    절충안 규칙 ①은 해석 문장의 번호를 뺀다. 그런데 어떤 조각이 «해석
+    문장에서만» 인용되면 그 번호가 본문에 한 번도 안 나온다. 부록은 인용된
+    조각으로 만들어지므로 그 줄이 고아가 되고, 출고 검증이 「부록에 있는
+    번호를 본문 어디에서도 인용하지 않았습니다」로 보고서를 통째로 막는다.
+    그래서 어디에도 안 보이는 번호는 마지막 인용 문장에서 되살린다.
+    """
+    composed = _report(
+        identity=(_s("검사 장비를 만든다.", ("1",)),),
+        # 조각 2는 «해석» 문장에서만 인용된다 — 규칙대로면 번호가 사라진다.
+        business_model=(_s("성장 흐름으로 읽힌다.", ("2",), GRADE_INTERPRETED),),
+        culture=(_s("고객 최우선을 내건다.", ("3",)),),
+        summary=(
+            _s("검사 장비 중심 구조다.", ("1",)),
+            _s("고객 가치를 앞세운다.", ("3",)),
+            _s("장비 회사로 읽힌다.", ("1",), GRADE_INTERPRETED),
+        ),
+    )
+
+    report = _render(composed, CITATION_STYLE_MERGED)
+
+    본문번호: set[int] = set()
+    for section in report.sections:
+        for text, _cite in section.prose_lines:
+            본문번호.update(int(v) for v in _MARKER_RE.findall(text))
+    for item in report.summary_items:
+        본문번호.update(int(v) for v in _MARKER_RE.findall(item.text))
+
+    assert 2 in 본문번호, "해석 문장에서만 인용된 조각의 번호가 사라졌습니다"
+    validate_v2(report)  # 출고 검증도 통과해야 한다
+
+
+def test_되살린_번호는_꼭_필요한_곳에만_붙는다():
+    """고아 방지가 절충안을 무력화하면 안 된다 — 필요한 만큼만 되살린다."""
+    composed = _report(
+        identity=(
+            _s("검사 장비를 만든다.", ("1",)),
+            _s("장비는 반도체 공정에 쓰인다.", ("1",)),
+            _s("생산 거점은 국내에 있다.", ("1",)),
+        ),
+        business_model=(_s("2025년 매출은 1,200억원이다.", ("2",)),),
+        culture=(_s("고객 최우선을 내건다.", ("3",)),),
+    )
+
+    lines = _identity_lines(_render(composed, CITATION_STYLE_MERGED))
+
+    # 조각 1은 확인 문장 묶음이라 마지막 하나에만 붙는다 — 되살리기가 개입할
+    # 이유가 없다.
+    assert not _MARKER_RE.search(lines[0])
+    assert not _MARKER_RE.search(lines[1])
+    assert lines[2].endswith("[1]")

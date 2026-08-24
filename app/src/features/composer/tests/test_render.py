@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from src.features.composer.constants import (
+    CITATION_STYLE_INLINE,
     GRADE_CONFIRMED,
     GRADE_INTERPRETED,
     NOTICE_INSUFFICIENT_EVIDENCE,
@@ -132,6 +133,10 @@ def _rendered(
         performance_table if performance_table is not None else _table(),
         corp_type="상장사",
         as_of_date="2026-08-24",
+        # ★ 이 시험은 «문장마다 근거가 붙는가»를 본다. 화면 기본값은 절충안
+        #   (같은 출처 묶음은 마지막에만 번호)이라 표기 방식을 여기서 못 박는다
+        #   — 기본값이 또 바뀌어도 이 시험의 의도가 흔들리지 않게.
+        citation_style=CITATION_STYLE_INLINE,
     )
 
 

@@ -2468,3 +2468,24 @@ td.center { text-align: center; }
   .feedback-admin-page .fr-filter-grid { grid-template-columns: 1fr; }
   .feedback-admin-page .fr-summary { max-width: 200px; }
 }
+
+/* 해석 문장 표지 — 본문에 「— 해석」을 글로 붙이면 문장 끝이 지저분해진다.
+   ★ 표지를 없애는 게 아니라 모양만 바꾼다. 확인(공시에 그대로 적힌 사실)과
+     해석(우리가 읽어 낸 것)을 구분하는 것은 이 제품의 핵심 약속이다.
+   ★ 알약 문법은 서비스 공통 규칙을 따른다: border-radius 99px, 무채색.
+     상태 알약(--ok/--part/--no)과 달리 «판정»이 아니라 «성격»이라 색을 쓰지 않는다. */
+.result-page .grade-tag {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  background: var(--paper-2);
+  color: var(--ink-3);
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.5;
+  vertical-align: 1px;
+  white-space: nowrap;
+}

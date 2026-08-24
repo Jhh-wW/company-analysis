@@ -12,10 +12,15 @@
 {# 본문 문자열에 박힌 [n]을 작은 위첨자 링크로 바꾼다. 본문 글자는 그대로 두고
    대괄호 표기만 모양을 바꾼다 — 번호를 새로 매기거나 없애지 않는다. #}
 {% macro inline_refs(text) %}
-  {%- for part in split_citation_markers(text) -%}
+  {%- set split = split_interpretation_marker(text) -%}
+  {%- for part in split_citation_markers(split[0]) -%}
     {%- if part.number -%}<a class="ref" href="#src{{ part.number }}" title="출처 {{ part.number }}번">{{ part.number }}</a>
     {%- else -%}{{ part.text }}{%- endif -%}
   {%- endfor -%}
+  {#- 해석 문장은 하이픈 붙은 글 대신 둥근 배지로 성격을 알린다.
+      표지를 없애는 게 아니라 «모양»만 바꾼다 — 확인과 해석의 구분은
+      이 제품의 핵심 약속이다. -#}
+  {%- if split[1] %} <span class="grade-tag">{{ interpretation_label }}</span>{% endif -%}
 {% endmacro %}
 {% macro refs(numbers) %}
   {%- for n in numbers -%}

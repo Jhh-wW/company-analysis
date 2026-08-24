@@ -79,3 +79,30 @@ def split_citation_markers(text: str) -> tuple[CitationPart, ...]:
     if remainder:
         parts.append(CitationPart(text=remainder))
     return tuple(parts)
+
+
+#: 문장 끝 «해석» 표지. render.py가 붙이는 것과 같은 값이다.
+#: ★ 저장 문자열에는 이 모양을 그대로 둔다 — PDF·노션이 같은 문자열을 쓰고,
+#:   이미 저장된 보고서도 다시 읽어야 한다. «화면 모양»만 아래에서 바꾼다.
+INTERPRETATION_SUFFIX: Final[str] = " — 해석"
+
+#: 배지에 찍을 글자 (하이픈 없이).
+INTERPRETATION_LABEL: Final[str] = "해석"
+
+
+def split_interpretation_marker(text: str) -> tuple[str, bool]:
+    """문장 끝의 «— 해석» 표지를 떼어 낸다.
+
+    ★ 왜 떼는가 (사용자 지시) — 하이픈과 함께 본문에 붙은 「— 해석」이 글처럼
+      읽혀 문장 끝이 지저분하다. 표지는 «글»이 아니라 «이 문장이 어떤
+      성격인지 알리는 딱지»이므로 둥근 배지로 따로 보여 준다.
+    ★ 표지 자체를 없애지 않는다 — 확인과 해석을 구분하는 것은 이 제품의
+      핵심 약속이다. 모양만 바꾼다.
+
+    Returns:
+        (표지를 뗀 본문, 해석 문장인가).
+    """
+    body = text or ""
+    if body.endswith(INTERPRETATION_SUFFIX):
+        return body[: -len(INTERPRETATION_SUFFIX)].rstrip(), True
+    return body, False

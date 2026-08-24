@@ -286,9 +286,10 @@ VALID_CITATION_STYLES: Final[frozenset[str]] = frozenset(
     {CITATION_STYLE_INLINE, CITATION_STYLE_MERGED}
 )
 
-#: 기본값. 두 방식을 나란히 비교한 뒤 사용자가 확정할 때까지는 기존 동작을
-#: 유지한다 — 화면 기본을 말없이 바꾸지 않는다.
-DEFAULT_CITATION_STYLE: Final[str] = CITATION_STYLE_INLINE
+#: 기본값 — 사용자가 두 방식을 나란히 보고 «절충안»으로 확정했다(2026-08-24).
+#: 실측(JYP 48문장): 번호 붙은 문장 42→14개(87.5%→29.2%), 총 번호 52→16개.
+#: 부록 15건은 전부 본문에 한 번씩 남아 추적성은 그대로다.
+DEFAULT_CITATION_STYLE: Final[str] = CITATION_STYLE_MERGED
 
 
 # ══════════════════════════════════════════════════════════

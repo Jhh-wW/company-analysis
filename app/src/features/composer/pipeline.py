@@ -29,6 +29,7 @@ from src.features.composer.logic import (
     compose_sections,
     compose_summary,
 )
+from src.features.composer.constants import DEFAULT_CITATION_STYLE
 from src.features.composer.dedupe import drop_cross_section_duplicates
 from src.features.composer.diagram_check import check_diagrams
 from src.features.composer.port import ComposedReport, FilingMeta, PerformanceTable
@@ -76,6 +77,7 @@ def run_v2(
     table_presentation: str = "table",
     filing_meta: Optional[FilingMeta] = None,
     composition_table: Optional[PerformanceTable] = None,
+    citation_style: str = DEFAULT_CITATION_STYLE,
 ) -> V2RunOutput:
     """엔진 v2 전체 흐름을 한 번 돌려 최종 보고서를 만든다 (04장 3-4절).
 
@@ -102,6 +104,8 @@ def run_v2(
             주소가 실린다 (없으면 주소 없이 나간다).
         composition_table: 2장에 실을 매출 구성표. 주면 표와 «구성 도식»이
             함께 나간다 (도식 판정은 report_standard/visualization.py 몫).
+        citation_style: 본문 인용 번호 표기 방식. 기본은 절충안이며,
+            시험이 «문장마다 번호가 실리는가»를 볼 때 inline으로 고정한다.
 
     Returns:
         V2RunOutput — 검증 끝난 Report와 초안·생존 문장 수.
@@ -168,6 +172,7 @@ def run_v2(
         table_presentation=table_presentation,
         filing_meta=filing_meta,
         composition_table=composition_table,
+        citation_style=citation_style,
     )
 
     # ⑥ 출고 검증 — 실패하면 V2ValidationError (사유는 예외 problems에 전부)
