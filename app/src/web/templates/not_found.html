@@ -186,6 +186,14 @@
       <a class="btn ghost" href="/">처음 화면으로 돌아가기</a>
     </div>
   {% endif %}
+
+  {% if is_real %}
+    <p class="muted" style="margin-top:16px">
+      <strong>도움이 필요하신가요?</strong>
+      기업 정보가 누락되었거나 오류가 있다고 생각되면 알려주세요. 관리자가 검토하여 데이터를 개선하겠습니다.
+      <a href="/feedback?stage=검색없음&amp;company={{ user_input.company|urlencode }}">피드백 보내기</a>
+    </p>
+  {% endif %}
 </div>
 
 {% if demo_companies %}

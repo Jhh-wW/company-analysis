@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}오류 신고 · 기업분석{% endblock %}
+
+{% block content %}
+<div class="card">
+  <h1>오류 신고
+    {% if report_ref and not submitted %}
+      <a href="/result/{{ report_ref }}" style="font-size:14px;font-weight:400;margin-left:10px">보고서로 돌아가기</a>
+    {% endif %}
+  </h1>
+
+  {% if submitted %}
+    <p class="lede"><strong>신고가 접수되었습니다. 관리자 검토 후 조치됩니다.</strong></p>
+    <p class="muted">접수 번호 {{ report_id }}</p>
+    <div class="btn-row">
+      {% if report_ref %}
+        <a class="btn" href="/result/{{ report_ref }}">보고서로 돌아가기</a>
+      {% else %}
+        <a class="btn" href="/">처음 화면으로</a>
+      {% endif %}
+    </div>
+  {% else %}
+    {% if form_error %}
+      <div class="warn-line crit" role="alert">
+        <span aria-hidden="true">⚠️</span><span>{{ form_error }}</span>
+      </div>
+    {% endif %}
+
+    <div class="warn-line" role="status">
+      <span aria-hidden="true">ℹ️</span><span>{{ guide_notice }}</span>
+    </div>
+
+    {% if company_name or stage_label %}
+    <div class="field">
+      <p class="hint">신고 대상 정보</p>
+      {% if company_name %}<p><strong>기업명</strong> {{ company_name }}</p>{% endif %}
+      {% if stage_label %}<p><strong>발생 단계</strong> {{ stage_label }}</p>{% endif %}
+    </div>
+    {% endif %}
+
+    <form method="post" action="/feedback">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="stage" value="{{ stage }}">
+      <input type="hidden" name="company" value="{{ company_name }}">
+      <input type="hidden" name="report" value="{{ report_ref }}">
+
+      <div class="field">
+        <label for="feedback-category">신고 유형</label>
+        <select id="feedback-category" name="category">
+          {% for value in categories %}
+            <option value="{{ value }}" {% if value == category %}selected{% endif %}>{{ value }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="feedback-item-label">오류가 발생한 항목명</label>
+        <input type="text" id="feedback-item-label" name="item_label"
+               maxlength="{{ max_item_label_chars }}" value="{{ item_label }}">
+      </div>
+
+      <div class="field">
+        <label for="feedback-body">오류 내용 및 올바른 정보<span class="req">*</span></label>
+        <textarea id="feedback-body" name="body" maxlength="{{ max_body_chars }}"
+                  required>{{ body }}</textarea>
+      </div>
+
+      <div class="field">
+        <label for="feedback-ref-url">참고 URL (선택)</label>
+        <input type="text" id="feedback-ref-url" name="ref_url" placeholder="https://"
+               maxlength="{{ max_ref_url_chars }}" value="{{ ref_url }}">
+      </div>
+
+      <div class="btn-row">
+        <a class="btn ghost" href="{% if report_ref %}/result/{{ report_ref }}{% else %}/{% endif %}">취소</a>
+        <button type="submit" class="btn">신고 제출</button>
+      </div>
+    </form>
+  {% endif %}
+</div>
+{% endblock %}

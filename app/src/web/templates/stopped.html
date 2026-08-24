@@ -61,6 +61,11 @@
       </a>
     {% endif %}
   </div>
+
+  <p class="muted" style="margin-top:16px">
+    이 판정이 틀렸다고 생각되면 알려주세요.
+    <a href="/feedback?stage=생성중{% if job is defined and job %}&amp;company={{ job.user_input.company|urlencode }}&amp;report={{ job.job_id|urlencode }}{% endif %}">오류 신고</a>
+  </p>
 </div>
 
 {% if result.sources %}

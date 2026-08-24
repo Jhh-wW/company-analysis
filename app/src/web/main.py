@@ -25,6 +25,7 @@ from src.web.routers import (
     auth,
     backup,
     dashboard,
+    feedback,
     health,
     maintenance,
     reports,
@@ -89,6 +90,7 @@ app.include_router(backup.router)
 app.include_router(maintenance.router)
 app.include_router(analysis.router)
 app.include_router(reports.router)
+app.include_router(feedback.router)
 app.include_router(auth.router)
 app.include_router(dashboard.router)
 app.include_router(admin.router)

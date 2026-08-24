@@ -66,8 +66,10 @@ BETA_PUBLIC_PATH_PREFIXES: Final[tuple[str, ...]] = (
 
 # 살아 있는 공유 capability 쿠키로 열 수 있는 사용자 흐름만 명시한다. 관리자·검수·
 # 외부 내보내기 경로는 각 라우터의 자체 권한 검사와 별개로 beta gate에서도 닫는다.
+# /feedback은 로그인·LINK 없이도 검색없음·기업선택·생성중 화면에서 신고를 접수해야
+# 하므로 함께 연다 — 안 열면 시험공개 중인 실제 손님은 신고 화면에 아예 못 들어간다.
 BETA_SHARE_PATHS: Final[frozenset[str]] = frozenset(
-    {"/", "/confirm", "/reject", "/run", "/robots.txt"}
+    {"/", "/confirm", "/reject", "/run", "/robots.txt", "/feedback"}
 )
 BETA_SHARE_PATH_PREFIXES: Final[tuple[str, ...]] = (
     "/progress/",
