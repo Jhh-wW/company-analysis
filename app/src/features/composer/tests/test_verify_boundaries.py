@@ -72,6 +72,18 @@ def _expected_total() -> int:
     return body + len(_RESPONSES_FIXTURE["핵심요약_응답"]["문장들"])
 
 
+#: 골든 fixture 자체에 «같은 사실이 두 장에 든» 대목이 하나 있다 — 1장이 쓴
+#: 회사 표어를 8장이 다시 쓴다. 정본 §4에서 공식 가치는 8장 소유이므로
+#: 장 간 중복 제거(dedupe)가 1장 쪽 한 문장을 8장으로 모은다. 그 결과 최종
+#: 문장 수가 초안보다 «이만큼 더» 줄어든다. 검수와 무관한 감소분이라
+#: 검수 시험의 기대값에서 따로 뺀다.
+DEDUPE_MOVED_IN_FIXTURE: int = 1
+
+#: 그 한 문장이 어느 장에서 빠지는가 — 1장이 쓴 회사 표어가 8장으로 간다.
+#: 장별 문장 수를 단정하는 곳에서 이 값을 빼 준다.
+DEDUPE_MOVED_BY_SECTION: dict[str, int] = {"identity": 1}
+
+
 # ══════════════════════════════════════════════════════════
 # 가짜 작가·검수 — AI·네트워크 호출 0회
 # ══════════════════════════════════════════════════════════
@@ -159,13 +171,18 @@ def _section_texts(report: Report, section_id: str) -> list[str]:
 def _assert_other_sections_intact(
     report: Report, sections: dict[str, Any], touched_section_id: str
 ) -> None:
-    """건드린 장 밖의 모든 장이 초안 문장 수 그대로 생존했는지 단정한다."""
+    """건드린 장 밖의 모든 장이 초안 문장 수 그대로 생존했는지 단정한다.
+
+    ★ 장 간 중복 제거로 «다른 장으로 옮겨간» 문장은 검수가 지운 것이 아니므로
+      기대값에서 빼 준다. 옮김은 소실이 아니다 — 그 문장은 소유 장에 그대로 있다.
+    """
     for section_id in SECTION_IDS:
         if section_id == touched_section_id:
             continue
-        assert len(_section_texts(report, section_id)) == len(
-            sections[section_id]["문장들"]
-        ), section_id
+        expected = len(sections[section_id]["문장들"]) - DEDUPE_MOVED_BY_SECTION.get(
+            section_id, 0
+        )
+        assert len(_section_texts(report, section_id)) == expected, section_id
 
 
 # ══════════════════════════════════════════════════════════
@@ -184,13 +201,13 @@ def test_깨진_인용_문장만_제거되고_나머지는_전부_생존한다()
 
     # 그 문장만 사라졌다
     identity_texts = _section_texts(report, "identity")
-    assert len(identity_texts) == len(sections["identity"]["문장들"]) - 1
+    assert len(identity_texts) == len(sections["identity"]["문장들"]) - 1 - DEDUPE_MOVED_BY_SECTION["identity"]
     assert all(broken_text not in text for text in identity_texts)
     # 나머지 장·요약·보고서는 그대로 살아 렌더·출고 검증까지 도달했다
     _assert_other_sections_intact(report, sections, "identity")
     assert report.schema_version == ENGINE_V2_SCHEMA_VERSION
     assert output.composed_sentences == _expected_total()
-    assert output.verified_sentences == _expected_total() - 1
+    assert output.verified_sentences == _expected_total() - 1 - DEDUPE_MOVED_IN_FIXTURE
 
 
 # ══════════════════════════════════════════════════════════
@@ -217,7 +234,7 @@ def test_틀린_단위_숫자_문장만_제거되고_장은_생존한다() -> No
         not text.endswith(INTERPRETATION_MARKER) for text in survivors
     )
     _assert_other_sections_intact(report, sections, "business_model")
-    assert output.verified_sentences == _expected_total() - 1
+    assert output.verified_sentences == _expected_total() - 1 - DEDUPE_MOVED_IN_FIXTURE
 
 
 def test_틀린_맨_숫자_문장은_제거가_아니라_해석_강등이고_장은_생존한다() -> None:
@@ -236,7 +253,7 @@ def test_틀린_맨_숫자_문장은_제거가_아니라_해석_강등이고_장
     assert len(demoted) == 1
     assert demoted[0].endswith(INTERPRETATION_MARKER)
     _assert_other_sections_intact(report, sections, "portfolio")
-    assert output.verified_sentences == _expected_total()
+    assert output.verified_sentences == _expected_total() - DEDUPE_MOVED_IN_FIXTURE
 
 
 # ══════════════════════════════════════════════════════════
@@ -276,7 +293,7 @@ def test_검수_거짓_문장은_재작성_1회와_재검수를_거쳐_확인으
         for text in culture_texts
     )
     assert all(target_text not in text for text in culture_texts)
-    assert output.verified_sentences == _expected_total()
+    assert output.verified_sentences == _expected_total() - DEDUPE_MOVED_IN_FIXTURE
 
 
 # ══════════════════════════════════════════════════════════
@@ -293,12 +310,13 @@ def test_검수가_완전_불능이면_확인_전원이_해석_강등되고_예�
 
     assert reviewer.calls >= 2  # 실제로 검수를 불렀고, 그때마다 죽었다
     # 제거된 문장이 하나도 없다 — 강등이지 차단이 아니다
-    assert output.verified_sentences == _expected_total()
+    assert output.verified_sentences == _expected_total() - DEDUPE_MOVED_IN_FIXTURE
     for section_id in SECTION_IDS:
         texts = _section_texts(report, section_id)
-        assert len(texts) == len(
+        expected = len(
             _RESPONSES_FIXTURE["장별_응답"][section_id]["문장들"]
-        ), section_id
+        ) - DEDUPE_MOVED_BY_SECTION.get(section_id, 0)
+        assert len(texts) == expected, section_id
         # 검증 못 한 문장을 «확인»으로 내보내지 않는다 — 전 문장 해석 표지
         assert all(text.endswith(INTERPRETATION_MARKER) for text in texts)
     assert report.summary_items
@@ -329,8 +347,10 @@ def test_역경_조합에서도_보고서_전체_차단은_없다() -> None:
     assert [section.cell for section in report.sections] == list(SECTION_IDS)
     # 처분은 딱 두 문장(제거 2) — 나머지는 강등으로 전부 생존했다
     assert output.composed_sentences == _expected_total()
-    assert output.verified_sentences == _expected_total() - 2
-    assert len(_section_texts(report, "identity")) == len(
+    assert output.verified_sentences == _expected_total() - 2 - DEDUPE_MOVED_IN_FIXTURE
+    assert len(_section_texts(report, "identity")) == -DEDUPE_MOVED_BY_SECTION[
+        "identity"
+    ] + len(
         sections["identity"]["문장들"]
     ) - 1
     assert len(_section_texts(report, "business_model")) == len(

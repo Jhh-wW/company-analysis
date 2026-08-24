@@ -303,9 +303,13 @@ def test_ENGINE_V2_전체_흐름이_검증된_v2_보고서를_만든다(
     # v2 스키마 + 9장 전부, v3 정본 순서 (장 삭제 없음)
     assert report.schema_version == ENGINE_V2_SCHEMA_VERSION
     assert [section.cell for section in report.sections] == list(SECTION_IDS)
-    # 장마다 fixture 6문장이 안내문 없이 전부 생존했다
+    # 장마다 fixture 6문장이 안내문 없이 전부 생존했다.
+    # ★ 예외 1장 — fixture 자체가 회사 표어를 1장과 8장에 둘 다 실었다.
+    #   정본 §4에서 공식 가치는 8장 소유라 장 간 중복 제거가 1장 쪽을 8장으로
+    #   모은다. 소실이 아니라 이동이므로 8장에는 그대로 있다.
     for section in report.sections:
-        assert len(section.prose_lines) == 6, section.cell
+        expected = 6 - (1 if section.cell == "identity" else 0)
+        assert len(section.prose_lines) == expected, section.cell
 
     all_prose = [
         text for section in report.sections for text, _cite in section.prose_lines
@@ -344,7 +348,8 @@ def test_ENGINE_V2_전체_흐름이_검증된_v2_보고서를_만든다(
     assert result.fragments_collected == 11
     assert result.fragments_cited == 11
     assert result.sentences_made == _expected_sentence_total()
-    assert result.sentences_passed == _expected_sentence_total()
+    # fixture가 회사 표어를 1장·8장에 둘 다 실어, 중복 제거가 1장 쪽을 옮긴다.
+    assert result.sentences_passed == _expected_sentence_total() - 1
 
 
 # ══════════════════════════════════════════════════════════

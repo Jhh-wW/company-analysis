@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Optional
 
@@ -27,11 +28,14 @@ from src.features.composer.logic import (
     compose_sections,
     compose_summary,
 )
+from src.features.composer.dedupe import drop_cross_section_duplicates
 from src.features.composer.port import ComposedReport, FilingMeta, PerformanceTable
 from src.features.composer.render import render_report
 from src.features.composer.validate import validate_v2
 from src.features.composer.verify import verify_report, verify_sentences
 from src.features.pipeline.port import Grade, Report
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -108,6 +112,13 @@ def run_v2(
 
     # ② 본문 검증 (검수 — 문장 단위 제거/강등만, 장 삭제 없음)
     verified = verify_report(draft, fragments, performance_table, reviewer_ask)
+
+    # ②-b 사실 단일 소유 강제 — 여러 장에 반복된 같은 사실을 소유 장 하나만
+    #     남기고 뺀다. 요약 «앞»에 둔다 — 곧 사라질 문장을 요약 재료로 고르면
+    #     본문에 없는 요약이 남는다.
+    verified, moved_sentences = drop_cross_section_duplicates(verified)
+    if moved_sentences:
+        logger.info("장 간 중복 %d문장을 소유 장으로 모았습니다", moved_sentences)
 
     # ③ 핵심 요약 — «검증된» 본문을 재료로 새로 쓴다 (본문 재탕 금지)
     with_summary = compose_summary(verified, writer_ask)

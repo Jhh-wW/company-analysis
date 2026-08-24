@@ -369,10 +369,14 @@ def test_기준문서_6절_하한을_fixture가_만족하고_시스템이_훼손
         for section in report.sections
         for text in _substantive_texts(section)
     ]
-    assert len(body_texts) == len(fixture_body)
+    # 장 간 중복 제거가 fixture의 «같은 사실 두 장» 한 건을 소유 장으로 모은다.
+    # 검수가 지운 것이 아니라 옮긴 것이라 총량에서 그만큼만 줄어든다.
+    DEDUPE_MOVED_IN_FIXTURE = 1
+    assert len(body_texts) == len(fixture_body) - DEDUPE_MOVED_IN_FIXTURE
     assert len(report.summary_items) == len(_fixture_summary_sentences())
     assert output.composed_sentences == len(fixture_all)
-    assert output.verified_sentences == len(fixture_all)
+    # 중복 제거가 fixture의 «같은 사실 두 장» 한 건을 소유 장으로 옮긴다.
+    assert output.verified_sentences == len(fixture_all) - 1
     assert reviewer.rewrite_prompts == []
 
     # ③ 최종 산출물 기준으로도 하한을 만족한다
@@ -382,5 +386,6 @@ def test_기준문서_6절_하한을_fixture가_만족하고_시스템이_훼손
         1 for text in rendered if not text.endswith(INTERPRETATION_MARKER)
     )
     assert len(body_texts) >= MIN_SUBSTANTIVE_SENTENCES
-    assert rendered_confirmed == fixture_confirmed
+    # 옮겨간 문장(회사 표어)이 «확인» 등급이라 렌더된 확인 수도 그만큼 준다.
+    assert rendered_confirmed == fixture_confirmed - 1
     assert rendered_confirmed / len(rendered) >= MIN_CONFIRMED_RATIO
