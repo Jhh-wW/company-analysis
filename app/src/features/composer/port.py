@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Final, Optional
 
 from src.features.composer.constants import RCEPT_DT_LENGTH
 
@@ -215,6 +215,53 @@ def filing_meta_from_raw(filing: Any) -> Optional[FilingMeta]:
     )
 
 
+#: 합계 행을 알아보는 말들. 도식 판정기(`report_standard/visualization.py`)가
+#: 쓰는 것과 같은 뜻이다 — 합계가 섞이면 「부분의 합이 전체」라는 그림이 깨진다.
+_TOTAL_LABELS: Final[tuple[str, ...]] = ("합계", "총계", "계", "소계", "합 계")
+
+#: 비중 열을 알아보는 말.
+_RATIO_HEADER_HINTS: Final[tuple[str, ...]] = ("비중", "%")
+
+
+def _composition_shape(
+    headers: tuple[str, ...], rows: tuple[tuple[str, ...], ...]
+) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
+    """구성 도식이 그려질 수 있는 «항목 + 비중» 두 열 모양으로 줄인다.
+
+    ★ 왜 필요한가 (실측) — `revenuemix`가 만드는 표는 「구분 · 금액 · 비중」
+      3열이고 «합계» 행이 붙는다. 그런데 도식 판정기는 「정확히 2열 · 합계 행
+      없음 · 3~5행」일 때만 100% 누적 막대를 그린다. 그래서 진영 실측에서
+      **표는 붙었는데 도식은 안 그려졌다.**
+    ★ v1이 쓰는 `revenuemix`를 고치지 않는다(v1 무변). 여기서 «도식용 모양»만
+      만든다.
+    ★ 줄이는 것뿐이고 값을 바꾸거나 만들지 않는다. 비중 열을 못 찾거나 항목
+      수가 안 맞으면 원래 모양을 그대로 돌려준다 — 그러면 표로만 나간다.
+      억지로 도식을 만들지 않는다.
+    """
+    if len(headers) <= 2:
+        return headers, rows
+    ratio_index = next(
+        (
+            index
+            for index in range(len(headers) - 1, 0, -1)
+            if any(hint in headers[index] for hint in _RATIO_HEADER_HINTS)
+        ),
+        None,
+    )
+    if ratio_index is None:
+        return headers, rows
+    trimmed = tuple(
+        (row[0], row[ratio_index])
+        for row in rows
+        if len(row) > ratio_index
+        and not any(token in str(row[0]) for token in _TOTAL_LABELS)
+    )
+    if len(trimmed) < 3:
+        # 도식 판정기의 하한(3행)에 못 미친다 — 원표를 그대로 두는 편이 낫다.
+        return headers, rows
+    return (headers[0], headers[ratio_index]), trimmed
+
+
 def composition_table_from_raw(tables: Any) -> Optional[PerformanceTable]:
     """`revenuemix.build()`가 돌려준 표 목록의 «첫 표»를 구성표로 바꾼다.
 
@@ -231,14 +278,18 @@ def composition_table_from_raw(tables: Any) -> Optional[PerformanceTable]:
     first = tables[0] if isinstance(tables, (list, tuple)) else tables
     if not isinstance(first, Mapping):
         return None
+    headers = tuple(str(head) for head in (first.get("headers") or ()))
     rows = tuple(
         tuple(str(cell) for cell in row) for row in (first.get("rows") or ())
     )
     if not rows:
         return None
+    headers, rows = _composition_shape(headers, rows)
+    if not rows:
+        return None
     return PerformanceTable(
         caption=str(first.get("caption") or ""),
-        headers=tuple(str(head) for head in (first.get("headers") or ())),
+        headers=headers,
         rows=rows,
         unit=str(first.get("display_unit") or ""),
         cite=str(first.get("cite") or ""),

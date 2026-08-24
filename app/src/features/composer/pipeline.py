@@ -20,6 +20,7 @@ from typing import Optional
 from src.features.composer.logic import (
     AskFn,
     FragmentsInput,
+    _normalize_fragments,
     SUMMARY_MAX_SENTENCES,
     SUMMARY_MIN_SENTENCES,
     # 요약 보충 규칙(본문 «확인» 문장 재사용·서로 다른 장 우선)은 3-3이 정의한
@@ -29,6 +30,7 @@ from src.features.composer.logic import (
     compose_summary,
 )
 from src.features.composer.dedupe import drop_cross_section_duplicates
+from src.features.composer.diagram_check import check_diagrams
 from src.features.composer.port import ComposedReport, FilingMeta, PerformanceTable
 from src.features.composer.render import render_report
 from src.features.composer.validate import validate_v2
@@ -122,6 +124,15 @@ def run_v2(
     verified, moved_sentences = drop_cross_section_duplicates(verified)
     if moved_sentences:
         logger.info("장 간 중복 %d문장을 소유 장으로 모았습니다", moved_sentences)
+
+    # ②-c 도식 검증 — 관계 도식의 각 줄이 «인용한 원문에 실제로 있는가».
+    #     적대 검증에서 결함이 전부 관계 도식에서만 나왔다(수치 0 / 관계 7).
+    #     근거 없는 줄만 빼며, 줄이 다 빠지면 도식을 안 그릴 뿐 장은 남는다.
+    verified, diagram_problems = check_diagrams(
+        verified, _normalize_fragments(fragments)
+    )
+    for problem in diagram_problems:
+        logger.warning("도식 검증에서 뺀 경로 — %s", problem)
 
     # ③ 핵심 요약 — «검증된» 본문을 재료로 새로 쓴다 (본문 재탕 금지)
     with_summary = compose_summary(verified, writer_ask)
