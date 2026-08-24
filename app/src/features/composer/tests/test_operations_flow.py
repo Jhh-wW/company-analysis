@@ -272,6 +272,36 @@ def test_경로표_지침은_7장에만_붙는다():
     assert "경로표" not in 정체성
 
 
+def test_7장_프롬프트에_출력형식_안내가_하나뿐이다():
+    """★ 진영 실측 결함 — 기본 스키마 안내가 「이 JSON«만» 출력한다」고 못 박은
+    뒤에 경로표 안내를 «덧붙이면» 작가가 앞의 강한 지시를 따라 경로표를
+    빼먹는다. 재료가 충분했는데도 경로표가 통째로 안 나왔다.
+    그래서 7장은 스키마 안내를 «대체»한다 — 두 개가 있으면 안 된다."""
+    prompt = build_section_prompt(
+        "진영(주)", OPERATIONS_FLOW_SECTION_ID, _fragment_objs(), None
+    )
+
+    assert prompt.count("설명·머리말 없이") == 1, "출력 형식 안내가 둘 이상입니다"
+    assert "«두 키를 모두»" in prompt
+
+
+def test_7장_스키마가_두_키를_모두_보여_준다():
+    prompt = build_section_prompt(
+        "진영(주)", OPERATIONS_FLOW_SECTION_ID, _fragment_objs(), None
+    )
+    형식 = prompt[prompt.index("출력 형식") :]
+
+    assert '"문장들"' in 형식
+    assert '"경로표"' in 형식
+
+
+def test_다른_장은_기본_스키마를_그대로_쓴다():
+    prompt = build_section_prompt("진영(주)", "identity", _fragment_objs(), None)
+
+    assert prompt.count("설명·머리말 없이") == 1
+    assert "경로표" not in prompt
+
+
 def test_지침이_고객이_다르면_줄을_나누라고_말한다():
     prompt = build_section_prompt(
         "진영(주)", OPERATIONS_FLOW_SECTION_ID, _fragment_objs(), None

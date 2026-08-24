@@ -140,11 +140,13 @@ def build_section_prompt(
         CITATION_RULES_GUIDE,
         FORBIDDEN_TOPICS_GUIDE,
         SENTENCE_RANGE_GUIDE.format(minimum=minimum, maximum=maximum),
-        JSON_SCHEMA_GUIDE,
+        # 7장은 «경로표»를 함께 내야 해서 스키마 안내를 통째로 바꾼다.
+        # 덧붙이면 기본 안내의 「이 JSON만 출력한다」와 충돌해 작가가 경로표를
+        # 빼먹는다 (진영 실측).
         (
             OPERATIONS_FLOW_GUIDE + OPERATIONS_FLOW_SCHEMA_GUIDE
             if section_id == OPERATIONS_FLOW_SECTION_ID
-            else ""
+            else JSON_SCHEMA_GUIDE
         ),
         _render_table(performance_table),
         _render_already_written(already_written),
