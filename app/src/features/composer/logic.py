@@ -28,11 +28,20 @@ from src.features.composer.constants import (
     JSON_SCHEMA_GUIDE,
     NOTICE_COMPOSE_FAILED,
     NOTICE_INSUFFICIENT_EVIDENCE,
+    OPERATIONS_FLOW_GUIDE,
+    OPERATIONS_FLOW_HEADERS,
+    OPERATIONS_FLOW_MAX_CELL_CHARS,
+    OPERATIONS_FLOW_MAX_ROWS,
+    OPERATIONS_FLOW_SCHEMA_GUIDE,
+    OPERATIONS_FLOW_SECTION_ID,
     PARSE_RETRY_LIMIT,
     PROMPT_FRAGMENTS_HEAD,
     PROMPT_HEADER,
     PROMPT_TABLE_HEAD,
     RESPONSE_CITATIONS_KEY,
+    RESPONSE_FLOW_KEY,
+    RESPONSE_FLOW_ROW_CELLS_KEY,
+    RESPONSE_FLOW_ROW_CITATIONS_KEY,
     RESPONSE_GRADE_KEY,
     RESPONSE_SENTENCES_KEY,
     RESPONSE_TEXT_KEY,
@@ -50,6 +59,7 @@ from src.features.composer.port import (
     ComposedReport,
     ComposedSection,
     ComposedSentence,
+    FlowRow,
     PerformanceTable,
     fragments_from_raw,
 )
@@ -131,6 +141,11 @@ def build_section_prompt(
         FORBIDDEN_TOPICS_GUIDE,
         SENTENCE_RANGE_GUIDE.format(minimum=minimum, maximum=maximum),
         JSON_SCHEMA_GUIDE,
+        (
+            OPERATIONS_FLOW_GUIDE + OPERATIONS_FLOW_SCHEMA_GUIDE
+            if section_id == OPERATIONS_FLOW_SECTION_ID
+            else ""
+        ),
         _render_table(performance_table),
         _render_already_written(already_written),
         _render_fragments(fragments),
@@ -248,10 +263,63 @@ def parse_section_response(raw: str) -> Optional[tuple[ComposedSentence, ...]]:
 # ══════════════════════════════════════════════════════════
 
 
+def _flow_row_from_item(item: Any) -> Optional[FlowRow]:
+    """경로표 한 줄을 계약대로 읽는다. 모양이 어긋나면 그 줄만 버린다.
+
+    ★ «모양»만 본다 — 칸 개수, 빈 칸 여부, 길이, 근거 유무. 내용이 좋은지
+      나쁜지는 판단하지 않는다(닫힌 목록 게이트 금지).
+    ★ 칸 길이를 제한하는 이유: 칸은 이름·짧은 구를 담는 자리다. 길어지면
+      주장이 표 안으로 숨어 문장 검증을 피해 간다.
+    """
+    if not isinstance(item, Mapping):
+        return None
+    cells_raw = item.get(RESPONSE_FLOW_ROW_CELLS_KEY)
+    if not isinstance(cells_raw, list):
+        return None
+    cells = tuple(" ".join(str(cell).split()) for cell in cells_raw)
+    if len(cells) != len(OPERATIONS_FLOW_HEADERS):
+        return None
+    if any(not cell for cell in cells):
+        return None
+    if any(len(cell) > OPERATIONS_FLOW_MAX_CELL_CHARS for cell in cells):
+        return None
+    citations_raw = item.get(RESPONSE_FLOW_ROW_CITATIONS_KEY)
+    citations = tuple(
+        str(value).strip()
+        for value in (citations_raw if isinstance(citations_raw, list) else ())
+        if str(value).strip()
+    )
+    if not citations:
+        # 근거 없는 경로는 싣지 않는다 — 도식은 본문보다 눈에 먼저 들어온다.
+        return None
+    return FlowRow(cells=cells, citations=citations)
+
+
+def parse_flow_rows(raw: str) -> tuple[FlowRow, ...]:
+    """작가 응답에서 경로표를 읽는다. 없거나 못 읽으면 빈 튜플(도식 없음)."""
+    payload = _extract_payload(raw)
+    if not isinstance(payload, Mapping):
+        return ()
+    items = payload.get(RESPONSE_FLOW_KEY)
+    if not isinstance(items, list):
+        return ()
+    rows = tuple(
+        row
+        for row in (_flow_row_from_item(item) for item in items)
+        if row is not None
+    )
+    return rows[:OPERATIONS_FLOW_MAX_ROWS]
+
+
 def _ask_and_parse(
     ask: AskFn, prompt: str
-) -> Optional[tuple[ComposedSentence, ...]]:
+) -> tuple[Optional[tuple[ComposedSentence, ...]], str]:
     """AI를 부르고 파싱까지. 호출 자체가 죽어도 None으로 삼킨다(전체 중단 금지).
+
+    Returns:
+        (문장 튜플 또는 None, 응답 원문). 원문을 함께 돌려주는 이유는 7장
+        경로표가 «같은 응답»에 실려 오기 때문이다 — 표를 따로 받으려고 AI를
+        한 번 더 부르지 않는다.
 
     ★ 예외다: AskFatalError(예산 소진·billing-uncertain 같은 «요청 전역»
       장애)는 삼키지 않고 그대로 재전파한다 — 문장 하나의 실패로 위장하면
@@ -262,19 +330,26 @@ def _ask_and_parse(
     except AskFatalError:
         raise
     except Exception:  # noqa: BLE001 - 한 장의 실패가 보고서 전체를 멈추면 안 된다
-        return None
-    return parse_section_response(str(raw))
+        return None, ""
+    text = str(raw)
+    return parse_section_response(text), text
 
 
 def _compose_one_section(
     section_id: str, prompt: str, ask: AskFn
 ) -> ComposedSection:
     """장 하나를 쓴다. 실패 시 재요청 1회, 그래도 실패면 정직한 안내문으로 남긴다."""
-    sentences = _ask_and_parse(ask, prompt)
+    sentences, raw = _ask_and_parse(ask, prompt)
     retries = 0
     while sentences is None and retries < PARSE_RETRY_LIMIT:
         retries += 1
-        sentences = _ask_and_parse(ask, prompt + RETRY_REMINDER)
+        sentences, raw = _ask_and_parse(ask, prompt + RETRY_REMINDER)
+    # 경로표는 7장에서만 읽는다. 같은 응답에서 꺼내므로 추가 호출이 없다.
+    flow_rows = (
+        parse_flow_rows(raw)
+        if section_id == OPERATIONS_FLOW_SECTION_ID and raw
+        else ()
+    )
     if sentences is None:
         # 생성 실패 — 자료 부재로 위장하지 않는다 («없다»와 «못 만들었다»는 다르다)
         return ComposedSection(
@@ -285,8 +360,14 @@ def _compose_one_section(
             section_id=section_id,
             sentences=(),
             notice=NOTICE_INSUFFICIENT_EVIDENCE,
+            flow_rows=flow_rows,
         )
-    return ComposedSection(section_id=section_id, sentences=sentences, notice="")
+    return ComposedSection(
+        section_id=section_id,
+        sentences=sentences,
+        notice="",
+        flow_rows=flow_rows,
+    )
 
 
 def _normalize_fragments(
@@ -522,17 +603,18 @@ def compose_summary(report: ComposedReport, ask: AskFn) -> ComposedReport:
         # 본문이 통째로 비면 요약할 재료가 없다 — 헛호출도, 차단도 하지 않는다
         return ComposedReport(sections=report.sections, summary=())
     prompt = build_summary_prompt(report)
-    sentences = _ask_and_parse(ask, prompt)
+    # 요약에는 경로표가 없다 — 응답 원문은 버린다.
+    sentences, _raw = _ask_and_parse(ask, prompt)
     retries = 0
     while sentences is None and retries < PARSE_RETRY_LIMIT:
         retries += 1
-        sentences = _ask_and_parse(ask, prompt + RETRY_REMINDER)
+        sentences, _raw = _ask_and_parse(ask, prompt + RETRY_REMINDER)
     if sentences is None:
         sentences = ()
     kept, had_duplicate = _split_out_duplicates(sentences, body_keys)
     if had_duplicate:
         # 재탕 검출 → 1회 재요청. 실패하거나 또 전부 재탕이면 1차 생존 문장 유지.
-        retry_sentences = _ask_and_parse(
+        retry_sentences, _retry_raw = _ask_and_parse(
             ask, prompt + SUMMARY_DUPLICATE_REMINDER
         )
         if retry_sentences:

@@ -45,6 +45,21 @@ class ComposedSentence:
 
 
 @dataclass(frozen=True)
+class FlowRow:
+    """사업 경로 한 줄 — «무엇으로 시작 / 회사가 하는 일 / 누구에게 닿나».
+
+    ★ 한 줄이 한 «경로»다. 고객이 다르면 다른 줄이다. 이 규칙이 도식 결함
+      세 가지(주 경로 누락·고객 혼동·지원 관계를 판매 경로에 놓기)를 구조적으로
+      막는다 — 기존 flow 렌더러가 「표의 한 행 = 왼쪽→오른쪽 한 흐름」으로
+      그리기 때문이다.
+    """
+
+    cells: tuple[str, ...]
+    #: 이 줄의 근거 조각 id. 비면 근거 없는 줄이라 싣지 않는다.
+    citations: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ComposedSection:
     """장 하나. 장 삭제 금지 — 자료가 부족해도 안내문으로 남긴다."""
 
@@ -54,6 +69,8 @@ class ComposedSection:
     sentences: tuple[ComposedSentence, ...]
     #: 자료 부족·생성 실패의 정직한 안내문. 문제없으면 "".
     notice: str = ""
+    #: 7장 운영 경로표. 근거가 없으면 빈 튜플 — 빈 도식을 만들지 않는다.
+    flow_rows: tuple[FlowRow, ...] = ()
 
 
 @dataclass(frozen=True)

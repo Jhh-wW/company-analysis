@@ -24,6 +24,10 @@ from typing import Final, Optional
 from src.core.citations import citation_number
 from src.features.composer.constants import (
     CITATION_STYLE_MERGED,
+    FLOW_PRESENTATION,
+    OPERATIONS_FLOW_CAPTION,
+    OPERATIONS_FLOW_HEADERS,
+    OPERATIONS_FLOW_SECTION_ID,
     DART_DOCUMENT_HOST,
     DART_DOCUMENT_URL_TEMPLATE,
     DEFAULT_CITATION_STYLE,
@@ -34,6 +38,7 @@ from src.features.composer.constants import (
 from src.features.composer.logic import FragmentsInput
 from src.features.composer.port import (
     ComposedReport,
+    ComposedSection,
     ComposedSentence,
     FilingMeta,
     PerformanceTable,
@@ -327,6 +332,48 @@ def _source_label(meta: _FragmentMeta, filing_meta: Optional[FilingMeta]) -> str
     return f"{FILING_LABEL_PREFIX} {meta.kind}"
 
 
+def _flow_report_table(
+    section: ComposedSection, numbers: Mapping[str, int]
+) -> Optional[ReportTable]:
+    """7장 경로표를 흐름도용 ReportTable로 바꾼다. 실을 줄이 없으면 None.
+
+    ★ 「한 행 = 한 경로」가 이 표의 계약이다. 웹(`.flow-row`)과 PDF
+      (`_FlowGraphic`)가 한 행을 왼쪽→오른쪽 한 흐름으로 그린다. 경로를
+      행으로 나누면 도식 결함 세 가지가 구조적으로 막힌다:
+        · 주 경로(회사가 고객에 직접 닿는 길) 누락 — 첫 줄에 오게 지침이 요구
+        · 고객 혼동 — 고객이 다르면 다른 줄이라 한 상자로 합쳐질 수 없다
+        · 지원 관계를 판매 경로에 놓기 — 고객에 안 닿는 관계는 표에 못 들어온다
+    ★ 근거 없는 줄은 파싱에서 이미 버려졌다. 여기서는 «실존하는 조각을
+      가리키는가»만 한 번 더 본다 — 없는 번호를 캡션에 인쇄하지 않기 위해서다.
+    """
+    if not section.flow_rows:
+        return None
+    rows: list[list[str]] = []
+    cited: list[int] = []
+    for row in section.flow_rows:
+        row_numbers = [
+            numbers[str(citation).strip()]
+            for citation in row.citations
+            if str(citation).strip() in numbers
+        ]
+        if not row_numbers:
+            continue
+        rows.append(list(row.cells))
+        cited.extend(row_numbers)
+    if not rows:
+        return None
+    # 캡션 근거는 «표 전체»를 대표하는 첫 조각 하나만 단다. 행마다 번호를
+    # 흩뿌리면 정본 §7(기준일·출처 반복 방지)에 어긋난다.
+    return ReportTable(
+        caption=OPERATIONS_FLOW_CAPTION,
+        headers=list(OPERATIONS_FLOW_HEADERS),
+        rows=rows,
+        cite=f"[{min(cited)}]",
+        numeric=False,
+        presentation=FLOW_PRESENTATION,
+    )
+
+
 def _build_source(
     meta: _FragmentMeta,
     number: int,
@@ -479,6 +526,18 @@ def render_report(
             and composition_table.rows
         ):
             slot = (composition_table, COMPOSITION_PRESENTATION)
+        if (
+            section.section_id == OPERATIONS_FLOW_SECTION_ID
+            and slot is None
+        ):
+            flow_table = _flow_report_table(section, numbers)
+            if flow_table is not None:
+                flow_cite = citation_number(flow_table.cite)
+                if flow_cite and int(flow_cite) in meta_by_number:
+                    owners = used_sections.setdefault(int(flow_cite), [])
+                    if section.section_id not in owners:
+                        owners.append(section.section_id)
+                tables.append(flow_table)
         if slot is not None:
             converted = _performance_report_table(slot[0], slot[1])
             cite_number_text = citation_number(converted.cite)
