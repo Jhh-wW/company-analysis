@@ -92,6 +92,191 @@ def _full_report() -> Report:
     )
 
 
+def _v2_report_for_roundtrip():
+    """엔진 v2(composer) 경로로 만든 실측형 v2 Report — 다장·인용·해석·실적표.
+
+    ★ 긴급 결함(항목 8) 재현 재료: v2의 모든 prose_line은 cite=""로 저장된다
+      (render.py — 인용 번호를 cite 필드가 아니라 문장 텍스트 안 "[n]"으로
+      담기 때문). 여러 장·요약에 걸쳐 이 모양이 나오게 해 v1 전용 «cite
+      없으면 버림» 필터가 v2 본문 전체를 지우는 사고를 재현한다.
+    """
+    from src.features.composer.constants import (
+        GRADE_CONFIRMED,
+        GRADE_INTERPRETED,
+        NOTICE_INSUFFICIENT_EVIDENCE,
+        SECTION_IDS,
+    )
+    from src.features.composer.port import (
+        ComposedReport,
+        ComposedSection,
+        ComposedSentence,
+        PerformanceTable,
+    )
+    from src.features.composer.render import render_report
+
+    fragments = {
+        1: {"종류": "사업내용", "원문": "가나다전자는 반도체 검사 장비 전문기업이다."},
+        2: {
+            "종류": "홈페이지",
+            "원문": "고객의 성공을 최우선 가치로 삼는다.",
+            "출처": "https://www.ganada.example/about",
+        },
+        3: {
+            "종류": "공식 IR",
+            "원문": "2025년 매출액은 1,200억원이다.",
+            "출처": "https://www.ganada.example/ir.pdf",
+            "문서명": "2025 IR자료",
+            "원문위치": "PDF p.3 1문단",
+        },
+    }
+    sections = []
+    for section_id in SECTION_IDS:
+        if section_id == "identity":
+            sections.append(
+                ComposedSection(
+                    section_id=section_id,
+                    sentences=(
+                        ComposedSentence(
+                            text="반도체 검사 장비를 주력으로 한다.",
+                            citations=("1",),
+                            grade=GRADE_CONFIRMED,
+                        ),
+                        ComposedSentence(
+                            text="검사 장비 축이 무게중심으로 읽힌다.",
+                            citations=("1",),
+                            grade=GRADE_INTERPRETED,
+                        ),
+                    ),
+                )
+            )
+        elif section_id == "past_changes":
+            sections.append(
+                ComposedSection(
+                    section_id=section_id,
+                    sentences=(
+                        ComposedSentence(
+                            text="2025년 매출액은 1,200억원이다.",
+                            citations=("3",),
+                            grade=GRADE_CONFIRMED,
+                        ),
+                    ),
+                )
+            )
+        elif section_id == "culture":
+            sections.append(
+                ComposedSection(
+                    section_id=section_id,
+                    sentences=(
+                        ComposedSentence(
+                            text="고객의 성공을 최우선 가치로 삼는다.",
+                            citations=("2",),
+                            grade=GRADE_CONFIRMED,
+                        ),
+                    ),
+                )
+            )
+        else:
+            sections.append(
+                ComposedSection(
+                    section_id=section_id,
+                    sentences=(),
+                    notice=NOTICE_INSUFFICIENT_EVIDENCE,
+                )
+            )
+    summary = (
+        ComposedSentence(
+            text="반도체 검사 장비 중심의 사업 구조다.",
+            citations=("1",),
+            grade=GRADE_CONFIRMED,
+        ),
+        ComposedSentence(
+            text="최근 매출은 성장 흐름이다.", citations=("3",), grade=GRADE_CONFIRMED
+        ),
+        ComposedSentence(
+            text="고객 가치를 앞세운 문화를 내세운다.",
+            citations=("2",),
+            grade=GRADE_CONFIRMED,
+        ),
+    )
+    return render_report(
+        "가나다전자",
+        ComposedReport(sections=tuple(sections), summary=summary),
+        fragments,
+        PerformanceTable(
+            caption="3개년 주요 실적",
+            headers=("항목", "2023", "2024", "2025"),
+            rows=(("매출액", "900", "1,000", "1,200"),),
+            unit="억원",
+            cite="조각 3·공식 IR",
+        ),
+        corp_type="상장사",
+        as_of_date="2026-08-24",
+        generated_at="2026-08-24",
+        analysis_period="2023~2025 완료 회계연도",
+        latest_performance_period="2025년 4분기",
+    )
+
+
+def test_v2_보고서는_dict_json_왕복에서_prose_lines가_전부_보존된다() -> None:
+    """긴급 결함(항목 8) 재현·수정 확인 — 유료 실행 완주 후 재로드하면
+    prose_lines가 0개가 되어 인용-부록 불일치로 결과 화면이 막혔다."""
+    original = _v2_report_for_roundtrip()
+    # 재료 확인 — 실제로 cite=""인 prose_line이 있어야 이 시험이 유효하다.
+    assert any(
+        cite == "" for section in original.sections for _text, cite in section.prose_lines
+    )
+    assert any(section.prose_lines for section in original.sections)
+
+    dict_restored = reports.report_from_dict(reports.report_to_dict(original))
+    json_restored = reports.report_from_json(reports.report_to_json(original))
+
+    assert dict_restored == original
+    assert json_restored == original
+    for before, after in zip(original.sections, json_restored.sections):
+        assert after.prose_lines == before.prose_lines
+
+
+def test_v2_보고서는_저장_왕복_후에도_출고검증을_통과한다() -> None:
+    """전체 필드 왕복 감사 — prose_lines 외 필드 소실이 있었다면 v2 3검사
+    (내부 키·인용-부록 1:1·요약 문장 수)가 먼저 걸린다."""
+    from src.features.composer.validate import v2_validation_problems
+
+    original = _v2_report_for_roundtrip()
+    assert v2_validation_problems(original) == ()  # 저장 전에도 통과해야 비교가 유효하다
+
+    restored = reports.report_from_json(reports.report_to_json(original))
+
+    assert v2_validation_problems(restored) == ()
+
+
+def test_v2_보고서는_save_load_DB_왕복에서도_그대로_보존된다(tmp_path: Path) -> None:
+    original = _v2_report_for_roundtrip()
+    target = tmp_path / "storage-v2.db"
+
+    with db.connect(target) as conn:
+        reports.save(conn, "v2-roundtrip", "CORP-JYP", "", original)
+
+    with db.connect(target) as conn:
+        restored = reports.load(conn, "v2-roundtrip")
+
+    assert restored == original
+
+
+def test_v1_보고서는_cite_없는_표시용글을_여전히_버린다() -> None:
+    """v1(canonical 아닌 옛 payload 포함)은 이 수정으로 동작이 바뀌지 않는다
+    — schema_version이 v2가 아니면 종전처럼 cite 없는 줄을 버린다."""
+    data = reports.report_to_dict(_full_report())
+    assert data.get("schema_version", "") != reports.ENGINE_V2_SCHEMA_VERSION
+    data["sections"][0]["prose_lines"] = [
+        ["정상 문장", "[1]"],
+        ["출처 없음", ""],
+    ]
+
+    restored = reports.report_from_dict(data)
+
+    assert restored.sections[0].prose_lines == [("정상 문장", "[1]")]
+
+
 def test_경쟁사후보_v1은_report_dict_json_왕복에서_그대로_보존된다() -> None:
     basis = encode_comparison_basis_v1(
         {

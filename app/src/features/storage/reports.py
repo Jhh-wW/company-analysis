@@ -24,6 +24,7 @@ from typing import Any, Optional
 
 from src.core.constants import COUNTED_CELLS, HIDDEN_CELLS
 from src.core.persisted_json import validate_persisted_json_text
+from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
 from src.features.grading.logic import grade_of
 from src.features.pipeline.port import (
     FactRecord,
@@ -77,11 +78,23 @@ def _table_from_dict(data: dict[str, Any]) -> ReportTable:
     )
 
 
-def _prose_lines_from_dict(data: dict[str, Any]) -> list[tuple[str, str]]:
+def _prose_lines_from_dict(
+    data: dict[str, Any], *, is_v2: bool
+) -> list[tuple[str, str]]:
     """선택 층인 표시용 글만 안전하게 되살린다.
 
-    ★ 옛 저장값에는 이 필드가 없다. 깨진 항목·출처 없는 항목·옛 문자열 prose는
-      검증 여부를 증명할 수 없으므로 버리고, 근거 원문 보고서는 계속 연다(P-117·P-118).
+    ★ v1(canonical)은 옛 저장값에 이 필드가 없을 수 있다. 깨진 항목·출처
+      없는 항목·옛 문자열 prose는 검증 여부를 증명할 수 없으므로 버리고,
+      근거 원문 보고서는 계속 연다(P-117·P-118) — v1은 줄마다 cite(부록
+      번호 표기)가 있어야 «검증된 표시용 글»로 본다.
+    ★ v2(엔진 v2 composer)는 다르다: 인용 번호를 cite 필드가 아니라 문장
+      텍스트 안 "[n]" 표기로 담고(render.sentence_display_text), «해석»
+      문장이나 안내문은 인용 자체가 없어도 정당하다(render.py의 모든
+      prose_line이 cite=""로 저장된다). v1의 «cite 없으면 버림» 규칙을
+      v2에 그대로 적용하면 저장된 v2 본문이 «전부» 사라진다(실측 결함 —
+      유료 실행이 완주해 87문장을 저장했는데, 재로드 시 prose_lines가
+      0개가 되어 인용-부록 불일치로 결과 화면이 409로 막혔다). 그래서
+      v2는 cite가 비어 있어도 글만 있으면 살린다.
     """
     out: list[tuple[str, str]] = []
     for item in data.get("prose_lines", []):
@@ -90,7 +103,9 @@ def _prose_lines_from_dict(data: dict[str, Any]) -> list[tuple[str, str]]:
         text, cite = item
         if not isinstance(text, str) or not isinstance(cite, str):
             continue
-        if text.strip() and cite.strip():
+        if not text.strip():
+            continue
+        if is_v2 or cite.strip():
             out.append((text, cite))
     return out
 
@@ -113,13 +128,13 @@ def _section_to_dict(section: ReportSection) -> dict[str, Any]:
     }
 
 
-def _section_from_dict(data: dict[str, Any]) -> ReportSection:
+def _section_from_dict(data: dict[str, Any], *, is_v2: bool) -> ReportSection:
     return ReportSection(
         cell=data["cell"],
         title=data["title"],
         lines=[(text, cite) for text, cite in data.get("lines", [])],
         # 옛 저장 보고서에는 키가 없다. 빈 목록으로 읽어 원문 보고서를 그대로 살린다.
-        prose_lines=_prose_lines_from_dict(data),
+        prose_lines=_prose_lines_from_dict(data, is_v2=is_v2),
         guidance_lines=[
             item.strip()
             for item in data.get("guidance_lines", [])
@@ -317,19 +332,23 @@ def report_to_dict(report: Report) -> dict[str, Any]:
 
 def report_from_dict(data: dict[str, Any]) -> Report:
     """dict → `Report`. `report_to_dict`의 역함수 — 왕복해도 같아야 한다."""
+    schema_version = str(data.get("schema_version", ""))
+    is_v2 = schema_version == ENGINE_V2_SCHEMA_VERSION
     return Report(
         company=data["company"],
         job=data["job"],
         corp_type=data["corp_type"],
         grade=Grade(data["grade"]),
-        sections=[_section_from_dict(s) for s in data.get("sections", [])],
+        sections=[
+            _section_from_dict(s, is_v2=is_v2) for s in data.get("sections", [])
+        ],
         requirements=list(data.get("requirements", [])),
         sources=[_source_status_from_dict(s) for s in data.get("sources", [])],
         citations=[_citation_from_dict(c) for c in data.get("citations", [])],
         cells=dict(data.get("cells", {})),
         shortfall_reasons=list(data.get("shortfall_reasons", [])),
         generated_at=data.get("generated_at", ""),
-        schema_version=str(data.get("schema_version", "")),
+        schema_version=schema_version,
         summary_items=[
             _summary_from_dict(item)
             for item in data.get("summary_items", [])
