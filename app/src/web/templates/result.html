@@ -27,6 +27,94 @@
     <a class="ref" href="#src{{ n }}" title="출처 {{ n }}번">{{ n }}</a>
   {%- endfor -%}
 {% endmacro %}
+
+{# 표 하나를 화면에 낸다 — 도식으로 그릴 수 있으면 도식, 아니면 표.
+   ★ v1·v2가 «같은» 매크로를 쓴다. 예전에는 v1 분기에만 이 로직이 있어서,
+     v2가 표에 presentation을 붙여도 화면이 그 값을 보지 않았다. 그래서
+     구성·추이·흐름 도식이 v2에서는 한 번도 안 그려졌다 (실측 결함).
+   ★ 도식을 못 그리는 표는 «그냥 표»로 낸다 — 빈 자리를 남기지 않는다. #}
+{% macro report_table_block(t, table_id) %}
+  {%- set visual = table_visualization(t) -%}
+  {% if visual and visual.kind == 'composition' %}
+  <figure class="report-visual composition-chart" aria-labelledby="{{ table_id }}-caption">
+  <figcaption class="cap" id="{{ table_id }}-caption">
+  {{ t.caption }}{{ ref(t.cite) }}
+  </figcaption>
+  <div class="composition-track" role="img" aria-label="{{ t.caption }}">
+  {% for item in visual.items %}
+  <span class="composition-segment tone-{{ loop.index0 % 5 }}"
+  style="width: {{ '%.4f'|format(item.ratio) }}%"
+  title="{{ item.label }} {{ item.display }}"></span>
+  {% endfor %}
+  </div>
+  <ul class="chart-legend" aria-label="구성 항목">
+  {% for item in visual.items %}
+  <li><span class="legend-swatch tone-{{ loop.index0 % 5 }}" aria-hidden="true"></span><span>{{ item.label }}</span><strong>{{ item.display }}</strong></li>
+  {% endfor %}
+  </ul>
+  <p class="chart-note">자료{{ ref(t.cite) }} · {{ visual.note }}</p>
+  </figure>
+  {% elif visual and visual.kind == 'trend' %}
+  <figure class="report-visual trend-chart" aria-labelledby="{{ table_id }}-caption">
+  <figcaption class="cap" id="{{ table_id }}-caption">
+  {{ t.caption }}{{ ref(t.cite) }}
+  </figcaption>
+  <div class="trend-panels">
+  {% for series in visual.series %}
+  <section class="trend-panel{% if series.risk %} risk{% endif %}" aria-label="{{ series.label }}">
+  <h3>{{ series.label }}{% if visual.unit %} <span>({{ visual.unit }})</span>{% endif %}</h3>
+  <div class="trend-points">
+  {% for point in series.points %}
+  <div class="trend-point">
+  <span class="trend-value">{{ point.display }}</span>
+  <span class="trend-bar-wrap" aria-hidden="true"><span class="trend-bar" style="height: {{ '%.4f'|format(point.ratio) }}%"></span></span>
+  <span class="trend-label">{{ point.label }}</span>
+  </div>
+  {% endfor %}
+  </div>
+  </section>
+  {% endfor %}
+  </div>
+  <p class="chart-note">자료{{ ref(t.cite) }} · {{ visual.note }}</p>
+  </figure>
+  {% elif visual and visual.kind == 'flow' %}
+  <figure class="report-visual flow-chart" aria-labelledby="{{ table_id }}-caption">
+  <figcaption class="cap" id="{{ table_id }}-caption">
+  {{ t.caption }}{{ ref(t.cite) }}
+  </figcaption>
+  <div class="flow-rows">
+  {% for flow in visual.flows %}
+  <ol class="flow-row">
+  {% for value in flow %}
+  <li><small>{{ t.headers[loop.index0] }}</small><span>{{ value }}</span></li>
+  {% endfor %}
+  </ol>
+  {% endfor %}
+  </div>
+  </figure>
+  {% else %}
+  <div class="numtable">
+  <div class="cap" id="{{ table_id }}-caption">
+  {{ t.caption }}{{ ref(t.cite) }}
+  </div>
+  <div class="scroll" tabindex="0" role="region" aria-labelledby="{{ table_id }}-caption">
+  <table class="{{ 'nums' if t.numeric else 'texts' }}" aria-labelledby="{{ table_id }}-caption">
+  <thead><tr>{% for h in t.headers %}<th scope="col">{{ h }}</th>{% endfor %}</tr></thead>
+  <tbody>
+  {% for row in t.rows %}
+  <tr>
+  {% for cell in row %}
+  <td{% if t.numeric and not loop.first %} class="num"{% endif %}>{{ cell }}</td>
+  {% endfor %}
+  </tr>
+  {% endfor %}
+  </tbody>
+  </table>
+  </div>
+  </div>
+  {% endif %}
+{% endmacro %}
+
 {% if report.schema_version not in (canonical_schema_version, engine_v2_schema_version) %}
 <section class="warn-line" role="alert">
   <div>
@@ -128,27 +216,11 @@
         {%- endfor -%}
       </p>
       {% endif %}
+      {# 표는 v1과 «같은» 매크로로 낸다 — 도식으로 그릴 수 있으면 도식이
+         나간다. 예전에는 v2가 표를 그냥 찍어서 presentation을 붙여도
+         도식이 한 번도 안 그려졌다 (실측 결함). #}
       {% for t in s.tables %}
-        {% set table_id = 'report-table-v2-' ~ loop.index0 ~ '-' ~ loop.index %}
-        <div class="numtable">
-          <div class="cap" id="{{ table_id }}-caption">
-            {{ t.caption }}{{ ref(t.cite) }}
-          </div>
-          <div class="scroll" tabindex="0" role="region" aria-labelledby="{{ table_id }}-caption">
-            <table class="{{ 'nums' if t.numeric else 'texts' }}" aria-labelledby="{{ table_id }}-caption">
-              <thead><tr>{% for h in t.headers %}<th scope="col">{{ h }}</th>{% endfor %}</tr></thead>
-              <tbody>
-                {% for row in t.rows %}
-                  <tr>
-                    {% for cell in row %}
-                      <td{% if t.numeric and not loop.first %} class="num"{% endif %}>{{ cell }}</td>
-                    {% endfor %}
-                  </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        {{ report_table_block(t, 'report-table-v2-' ~ loop.index0 ~ '-' ~ loop.index) }}
       {% endfor %}
     </section>
   {% endfor %}
@@ -248,85 +320,7 @@
         {# 숫자는 문장으로 바꾸지 않고 표 그대로 낸다 (결정기록 D13) #}
         {% for t in s.tables %}
           {% set table_id = 'report-table-' ~ section_index ~ '-' ~ loop.index %}
-          {% set visual = table_visualization(t) %}
-          {% if visual and visual.kind == 'composition' %}
-          <figure class="report-visual composition-chart" aria-labelledby="{{ table_id }}-caption">
-            <figcaption class="cap" id="{{ table_id }}-caption">
-              {{ t.caption }}{{ ref(t.cite) }}
-            </figcaption>
-            <div class="composition-track" role="img" aria-label="{{ t.caption }}">
-              {% for item in visual.items %}
-              <span class="composition-segment tone-{{ loop.index0 % 5 }}"
-                    style="width: {{ '%.4f'|format(item.ratio) }}%"
-                    title="{{ item.label }} {{ item.display }}"></span>
-              {% endfor %}
-            </div>
-            <ul class="chart-legend" aria-label="구성 항목">
-              {% for item in visual.items %}
-              <li><span class="legend-swatch tone-{{ loop.index0 % 5 }}" aria-hidden="true"></span><span>{{ item.label }}</span><strong>{{ item.display }}</strong></li>
-              {% endfor %}
-            </ul>
-            <p class="chart-note">자료{{ ref(t.cite) }} · {{ visual.note }}</p>
-          </figure>
-          {% elif visual and visual.kind == 'trend' %}
-          <figure class="report-visual trend-chart" aria-labelledby="{{ table_id }}-caption">
-            <figcaption class="cap" id="{{ table_id }}-caption">
-              {{ t.caption }}{{ ref(t.cite) }}
-            </figcaption>
-            <div class="trend-panels">
-              {% for series in visual.series %}
-              <section class="trend-panel{% if series.risk %} risk{% endif %}" aria-label="{{ series.label }}">
-                <h3>{{ series.label }}{% if visual.unit %} <span>({{ visual.unit }})</span>{% endif %}</h3>
-                <div class="trend-points">
-                  {% for point in series.points %}
-                  <div class="trend-point">
-                    <span class="trend-value">{{ point.display }}</span>
-                    <span class="trend-bar-wrap" aria-hidden="true"><span class="trend-bar" style="height: {{ '%.4f'|format(point.ratio) }}%"></span></span>
-                    <span class="trend-label">{{ point.label }}</span>
-                  </div>
-                  {% endfor %}
-                </div>
-              </section>
-              {% endfor %}
-            </div>
-            <p class="chart-note">자료{{ ref(t.cite) }} · {{ visual.note }}</p>
-          </figure>
-          {% elif visual and visual.kind == 'flow' %}
-          <figure class="report-visual flow-chart" aria-labelledby="{{ table_id }}-caption">
-            <figcaption class="cap" id="{{ table_id }}-caption">
-              {{ t.caption }}{{ ref(t.cite) }}
-            </figcaption>
-            <div class="flow-rows">
-              {% for flow in visual.flows %}
-              <ol class="flow-row">
-                {% for value in flow %}
-                <li><small>{{ t.headers[loop.index0] }}</small><span>{{ value }}</span></li>
-                {% endfor %}
-              </ol>
-              {% endfor %}
-            </div>
-          </figure>
-          {% else %}
-          <div class="numtable">
-            <div class="cap" id="{{ table_id }}-caption">
-              {{ t.caption }}{{ ref(t.cite) }}
-            </div>
-            <div class="scroll" tabindex="0" role="region" aria-labelledby="{{ table_id }}-caption">
-              <table class="{{ 'nums' if t.numeric else 'texts' }}" aria-labelledby="{{ table_id }}-caption">
-                <thead><tr>{% for h in t.headers %}<th scope="col">{{ h }}</th>{% endfor %}</tr></thead>
-                <tbody>
-                  {% for row in t.rows %}
-                    <tr>
-                      {% for cell in row %}
-                        <td{% if t.numeric and not loop.first %} class="num"{% endif %}>{{ cell }}</td>
-                      {% endfor %}
-                    </tr>
-                  {% endfor %}
-                </tbody>
-              </table>
-            </div>
-          </div>
-          {% endif %}
+          {{ report_table_block(t, table_id) }}
         {% endfor %}
       {% endif %}
       </section>

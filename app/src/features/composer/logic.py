@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any, Callable, Final, Optional, Union
@@ -63,6 +64,8 @@ from src.features.composer.port import (
     PerformanceTable,
     fragments_from_raw,
 )
+
+logger = logging.getLogger(__name__)
 
 #: 프롬프트 문자열을 받아 AI 응답 문자열을 돌려주는 주입 함수
 AskFn = Callable[[str], str]
@@ -352,6 +355,15 @@ def _compose_one_section(
         if section_id == OPERATIONS_FLOW_SECTION_ID and raw
         else ()
     )
+    if section_id == OPERATIONS_FLOW_SECTION_ID and not flow_rows:
+        # ★ 진단 — 도식이 안 나올 때 «작가가 안 냈는지» «우리가 걸렀는지»를
+        #   구분하지 못하면 엉뚱한 데를 고치게 된다(실측에서 두 번 헛짚었다).
+        #   원문은 남기지 않는다 — 어느 쪽인지만 기록한다.
+        logger.warning(
+            "7장 경로표 없음 — 응답에 «경로표» 키 %s / 응답 길이 %d자",
+            "있었으나 쓸 줄이 없음" if RESPONSE_FLOW_KEY in (raw or "") else "아예 없음",
+            len(raw or ""),
+        )
     if sentences is None:
         # 생성 실패 — 자료 부재로 위장하지 않는다 («없다»와 «못 만들었다»는 다르다)
         return ComposedSection(

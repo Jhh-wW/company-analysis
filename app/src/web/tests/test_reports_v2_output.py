@@ -188,3 +188,91 @@ def test_v2_결과_화면은_장_제목과_인용_해석_표지를_담는다(
     # Notion 채널은 구조적으로 막혀 있다(항목 ④) — 실패가 확실한 버튼을 숨긴다.
     assert f'action="/notion/{job_id}"' not in body
     assert "노션으로 보내기" not in body
+
+
+def test_v2_화면이_구성표를_도식으로_그린다(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★ 실측 결함 — v2 분기가 도식을 아예 안 그렸다.
+
+    `table_visualization()`을 부르는 곳이 v1 분기 한 곳뿐이라, v2가 표에
+    `presentation="composition"`을 붙여도 화면이 그 값을 보지 않았다.
+    그래서 매출 구성이 100% 누적 막대가 아니라 «평범한 표»로 나갔다.
+    지금은 v1·v2가 같은 매크로를 쓴다.
+    """
+    from src.features.pipeline.port import ReportTable
+
+    report = _v2_report()
+    # 도식 판정기가 받아 주는 모양: 정확히 2열 · 3~5행 · 합계 행 없음 · 합 100%
+    구성표 = ReportTable(
+        caption="어디서 번 돈인가 — 지역별 매출 비중",
+        headers=["구분", "비중"],
+        rows=[["한국", "89.29%"], ["중국", "4.52%"], ["인도", "4.99%"], ["기타", "1.19%"]],
+        cite="[1]",
+        presentation="composition",
+    )
+    for section in report.sections:
+        if section.cell == "business_model":
+            section.tables.append(구성표)
+
+    job_id = f"result-v2-visual-{uuid.uuid4().hex}"
+    job_runtime._JOBS.pop(job_id, None)
+    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
+    monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
+    monkeypatch.setattr(
+        reports_router, "_release_state", lambda **_kwargs: (object(), None)
+    )
+    monkeypatch.setattr(reports_router, "is_notion_configured", lambda: True)
+    session = auth_logic.create_session("admin@example.com", True)
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/result/{job_id}",
+            cookies={auth_constants.SESSION_COOKIE_NAME: session.token},
+        )
+
+    assert response.status_code == 200
+    body = response.text
+    assert 'class="report-visual composition-chart"' in body, "구성 도식이 안 그려졌습니다"
+    assert 'class="composition-track"' in body
+    assert 'class="chart-legend"' in body
+    # 도식으로 그렸으면 같은 표를 «평범한 표»로 또 내지 않는다.
+    # (캡션 문구는 figcaption과 aria-label 두 곳에 나오는 것이 정상이라
+    #  개수로 세지 않고 «표 마크업이 없는가»로 본다.)
+    assert 'class="numtable"' not in body
+
+
+def test_도식으로_못_그리는_표는_그냥_표로_나간다(monkeypatch: pytest.MonkeyPatch) -> None:
+    """빈 자리를 남기지 않는다 — 조건에 못 맞추면 원표를 그대로 보여 준다."""
+    from src.features.pipeline.port import ReportTable
+
+    report = _v2_report()
+    표 = ReportTable(
+        caption="합계가 섞인 표",
+        headers=["구분", "금액", "비중"],
+        rows=[["한국", "100", "90%"], ["기타", "10", "10%"], ["합계", "110", "100%"]],
+        cite="[1]",
+        presentation="composition",
+    )
+    for section in report.sections:
+        if section.cell == "business_model":
+            section.tables.append(표)
+
+    job_id = f"result-v2-plain-{uuid.uuid4().hex}"
+    job_runtime._JOBS.pop(job_id, None)
+    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
+    monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
+    monkeypatch.setattr(
+        reports_router, "_release_state", lambda **_kwargs: (object(), None)
+    )
+    monkeypatch.setattr(reports_router, "is_notion_configured", lambda: True)
+    session = auth_logic.create_session("admin@example.com", True)
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/result/{job_id}",
+            cookies={auth_constants.SESSION_COOKIE_NAME: session.token},
+        )
+
+    body = response.text
+    assert "합계가 섞인 표" in body
+    assert 'class="composition-track"' not in body
+    assert 'class="numtable"' in body
