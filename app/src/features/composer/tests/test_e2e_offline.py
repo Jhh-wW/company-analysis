@@ -325,11 +325,17 @@ def test_ENGINE_V2_전체_흐름이_검증된_v2_보고서를_만든다(
         not text.endswith(INTERPRETATION_MARKER) for text in unit_number_lines
     )
 
-    # 4장에만 프로그램 실적표가 실리고 골든 샘플 수치가 억원 표시로 들어간다
+    # 표는 «정해진 장에만» 실린다 — 4장 실적표(trend), 7장 경로표(flow).
+    # ★ v2-27 전에는 「4장 외에는 표가 0개」였는데, 그것은 7장 흐름도가
+    #   엔진 안에서 사라지던 «결함을 기대값으로 굳힌» 것이었다. 지금은
+    #   7장 경로표가 정상적으로 실린다(이음매 시험이 화면까지 지킨다).
     tables_by_cell = {section.cell: section.tables for section in report.sections}
+    expected_tables = {"past_changes": 1, "operations_partners": 1}
     for section_id in SECTION_IDS:
-        expected = 1 if section_id == "past_changes" else 0
-        assert len(tables_by_cell[section_id]) == expected, section_id
+        assert len(tables_by_cell[section_id]) == expected_tables.get(
+            section_id, 0
+        ), section_id
+    assert tables_by_cell["operations_partners"][0].presentation == "flow"
     performance = tables_by_cell["past_changes"][0]
     assert performance.numeric is True
     assert any("8,219" in cell for row in performance.rows for cell in row)
@@ -426,3 +432,148 @@ def test_v2_보고서가_PDF_바이트와_요구_구조까지_도달한다(
         if _INTERNAL_KEY_RE.fullmatch(token)
     ]
     assert leaked == [], leaked
+
+
+# ══════════════════════════════════════════════════════════
+# ④ ★ 이음매 시험 — 작가 응답부터 «화면 HTML»까지 통째로
+# ══════════════════════════════════════════════════════════
+#
+# ★ 왜 이 시험이 있나 (세 번 놓친 실측 사고)
+#   7장 흐름도가 화면에도 PDF에도 안 나왔다. 원인이 «사슬의 네 마디»에 걸쳐
+#   있었는데, 마디마다 따로 시험이 있어서 한 마디를 고칠 때마다 시험은 전부
+#   통과했고 화면에는 계속 안 나왔다:
+#     ① 화면이 도식 함수를 안 부름        (result.html)      → v2-21
+#     ② 중복 제거가 flow_rows를 버림       (dedupe.py)        → v2-24
+#     ③ 검증이 flow_rows를 버림            (verify.py 두 곳)  → v2-25
+#     ④ 도식 검증이 근거 있는 줄까지 다 버림 (diagram_check.py) → v2-27
+#   「작가가 경로표를 내면 화면에 흐름도가 뜬다」를 «통째로» 보는 시험이
+#   하나도 없었던 것이 진짜 원인이다. 이 시험이 그 자리를 메운다.
+#
+# ★ 이 시험은 마디를 하나라도 끊으면 반드시 빨간불이 된다.
+#   위 네 곳 중 어디를 되돌려도 실패한다 — 그것이 이 시험의 존재 이유다.
+
+
+def _v2_report_to_result_page(report) -> str:
+    """엔진이 만든 v2 보고서를 «진짜 결과 화면»에 태워 HTML을 받는다."""
+    import uuid
+
+    from fastapi.testclient import TestClient
+
+    from src.features.auth import constants as auth_constants
+    from src.features.auth import logic as auth_logic
+    from src.web.main import app
+    from src.web import job_runtime
+    from src.web.routers import reports as reports_router
+
+    job_id = f"seam-{uuid.uuid4().hex}"
+    job_runtime._JOBS.pop(job_id, None)
+    saved = {"보고서": report}
+
+    with pytest.MonkeyPatch.context() as mp:
+        # ★ 이 시험은 composer 폴더에 있어 web/tests/conftest.py의 공개 모드
+        #   설정을 못 받는다. 같은 값을 여기서 명시한다 — 안 하면 결과 화면
+        #   대신 로그인 안내가 돌아와 「도식이 없다」로 잘못 읽힌다.
+        mp.setenv(auth_constants.ENV_BETA_ADMIN_ONLY, "0")
+        mp.setenv(auth_constants.ENV_ADMIN_EMAILS, "admin@example.com")
+        job_runtime._start_job_runtime()
+        mp.setattr(job_runtime, "_load_saved_report", lambda _job_id: saved["보고서"])
+        mp.setattr(job_runtime, "_link_expired", lambda _report: False)
+        mp.setattr(
+            reports_router, "_release_state", lambda **_kwargs: (object(), None)
+        )
+        mp.setattr(reports_router, "is_notion_configured", lambda: True)
+        session = auth_logic.create_session("admin@example.com", True)
+        with TestClient(app) as client:
+            response = client.get(
+                f"/result/{job_id}",
+                cookies={auth_constants.SESSION_COOKIE_NAME: session.token},
+            )
+    assert response.status_code == 200, response.text[:400]
+    return response.text
+
+
+def test_이음매_작가가_낸_경로표가_화면_흐름도까지_도달한다(
+    engine: _JypFakeEngine,
+) -> None:
+    """★ 사슬 전체를 한 번에 지킨다 — 한 마디만 끊겨도 여기서 빨간불이 난다."""
+    result = _run(engine)
+    report = result.report
+    assert report is not None
+
+    # ── 마디 1: 엔진이 7장에 flow 표를 실었는가 ──────────
+    운영장 = next(s for s in report.sections if s.cell == "operations_partners")
+    assert 운영장.tables, (
+        "7장에 표가 없습니다 — 작가가 낸 경로표가 엔진 안에서 사라졌습니다. "
+        "compose→verify→dedupe→check_diagrams 중 한 곳이 flow_rows를 버렸습니다."
+    )
+    경로표 = 운영장.tables[0]
+    assert 경로표.presentation == "flow", (
+        f"7장 표의 표현이 flow가 아닙니다: {경로표.presentation!r}"
+    )
+    assert len(경로표.rows) >= 1, "경로표에 남은 줄이 없습니다 — 도식 검증이 다 버렸습니다"
+
+    # ── 마디 2: 화면이 그것을 «도식»으로 그리는가 ────────
+    body = _v2_report_to_result_page(report)
+    assert 'class="flow-row"' in body, (
+        "화면에 흐름도가 없습니다 — 표는 있는데 도식으로 안 그려졌습니다. "
+        "result.html이 표 매크로를 부르는지, visualization.py의 flow 판정 "
+        "조건(열 3~4·행 1~5·빈 칸 없음)을 넘는지 확인하세요."
+    )
+    # 도식으로 그렸으면 같은 표를 평범한 표로 또 내지 않는다.
+    assert 경로표.caption in body
+
+
+def test_이음매_중복제거가_일어나도_경로표는_화면까지_간다(
+    engine: _JypFakeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 중복 제거가 7장을 «재조립»하는 경로까지 지킨다.
+
+    골든 fixture만으로는 7장이 중복 제거를 안 탄다(다른 장과 겹치는 문장이
+    없다). 그러면 dedupe가 장을 그대로 돌려주므로, dedupe가 flow_rows를
+    빠뜨려도 이음매 시험이 못 잡는다 — v2-24가 고친 결함이 조용히 되살아난다.
+    그래서 «이 시험 안에서만» 8장 소유 문장을 7장에 하나 심어 재조립을
+    강제한다. 공유 fixture는 건드리지 않는다(다른 시험의 문장 수 계약이 깨진다).
+    """
+    import copy
+
+    responses = copy.deepcopy(_RESPONSES_FIXTURE)
+    표어 = responses["장별_응답"]["culture"]["문장들"][0]
+    responses["장별_응답"]["operations_partners"]["문장들"].append(
+        {"글": 표어["글"], "인용": list(표어["인용"]), "등급": "확인"}
+    )
+    monkeypatch.setitem(globals(), "_RESPONSES_FIXTURE", responses)
+
+    result = _run(engine)
+    report = result.report
+    assert report is not None
+
+    운영장 = next(s for s in report.sections if s.cell == "operations_partners")
+    # 중복이 «실제로» 옮겨졌는지 먼저 확인한다 — 안 옮겨졌으면 이 시험은 헛돈다.
+    assert all(표어["글"] not in text for text, _cite in 운영장.prose_lines), (
+        "중복 제거가 안 일어났습니다 — 이 시험이 재조립 경로를 못 지킵니다"
+    )
+    assert 운영장.tables and 운영장.tables[0].presentation == "flow", (
+        "중복 제거가 장을 다시 조립하면서 경로표를 버렸습니다"
+    )
+    assert 'class="flow-row"' in _v2_report_to_result_page(report)
+
+
+def test_이음매_2장_구성_도식과_4장_추이_도식도_화면까지_간다(
+    engine: _JypFakeEngine,
+) -> None:
+    """7장만 지키면 나머지가 조용히 끊긴다 — 세 도식을 한 시험에서 함께 본다."""
+    result = _run(engine)
+    report = result.report
+    assert report is not None
+
+    표현 = {
+        section.cell: [table.presentation for table in section.tables]
+        for section in report.sections
+        if section.tables
+    }
+    assert "trend" in 표현.get("past_changes", []), f"4장 추이표가 없습니다: {표현}"
+    assert "flow" in 표현.get("operations_partners", []), f"7장 경로표가 없습니다: {표현}"
+
+    body = _v2_report_to_result_page(report)
+    assert 'class="trend-panels"' in body, "4장 추이 도식이 화면에 없습니다"
+    assert 'class="flow-row"' in body, "7장 흐름도가 화면에 없습니다"

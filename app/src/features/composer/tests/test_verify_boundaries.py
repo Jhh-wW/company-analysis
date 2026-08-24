@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Final, Optional, Sequence
 
 from src.features.composer.constants import SECTION_GUIDES, SECTION_IDS
+from src.features.composer.diagram_check import FLOW_REVIEW_PROMPT_HEADER
 from src.features.composer.logic import AskFn, SUMMARY_PROMPT_HEADER
 from src.features.composer.pipeline import V2RunOutput, run_v2
 from src.features.composer.render import (
@@ -81,6 +82,8 @@ DEDUPE_MOVED_IN_FIXTURE: int = 1
 
 #: 그 한 문장이 어느 장에서 빠지는가 — 1장이 쓴 회사 표어가 8장으로 간다.
 #: 장별 문장 수를 단정하는 곳에서 이 값을 빼 준다.
+#: 장 간 중복 제거가 «소유 장»으로 옮기는 문장 수 (소실이 아니라 이동이다).
+#: fixture가 회사 표어를 1장과 8장에 둘 다 실었다 → 8장이 소유한다.
 DEDUPE_MOVED_BY_SECTION: dict[str, int] = {"identity": 1}
 
 
@@ -123,11 +126,19 @@ class _ScriptedReviewer:
         self._rewrite_text = rewrite_text
         self.review_prompts: list[str] = []
         self.rewrite_prompts: list[str] = []
+        self.flow_review_prompts: list[str] = []
 
     def __call__(self, prompt: str) -> str:
         if REWRITE_PROMPT_HEADER in prompt:
             self.rewrite_prompts.append(prompt)
             return self._rewrite_text
+        if FLOW_REVIEW_PROMPT_HEADER in prompt:
+            # ★ 도식 검수(v2-27)는 같은 검수 클로저를 쓰지만 «다른» 물음이다.
+            #   이 시험들은 «문장» 판정 경계를 소유하므로 도식은 손대지 않는다.
+            #   여기서 판정을 안 돌려주면 도식 검증이 「검수 불능」으로 보고
+            #   경로를 그대로 남긴다 — 이 시험의 관심사가 아니다.
+            self.flow_review_prompts.append(prompt)
+            return ""
         assert REVIEW_PROMPT_HEADER in prompt, "검수가 알 수 없는 프롬프트를 받았다"
         self.review_prompts.append(prompt)
         verdicts = [

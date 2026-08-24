@@ -129,11 +129,14 @@ def run_v2(
     if moved_sentences:
         logger.info("장 간 중복 %d문장을 소유 장으로 모았습니다", moved_sentences)
 
-    # ②-c 도식 검증 — 관계 도식의 각 줄이 «인용한 원문에 실제로 있는가».
+    # ②-c 도식 검증 — 관계 도식의 각 줄이 «근거에 맞는가».
     #     적대 검증에서 결함이 전부 관계 도식에서만 나왔다(수치 0 / 관계 7).
+    #     ① 칸 안의 숫자가 원문에 있나(기계) ② 이 경로가 근거에 맞나(검수 AI 1회).
+    #     ★ 검수기를 «반드시» 넘긴다. 안 넘기면 숫자 검사만 돌아 관계 결함이
+    #       그대로 통과한다 — 이 단계를 만든 이유가 사라진다.
     #     근거 없는 줄만 빼며, 줄이 다 빠지면 도식을 안 그릴 뿐 장은 남는다.
     verified, diagram_problems = check_diagrams(
-        verified, _normalize_fragments(fragments)
+        verified, _normalize_fragments(fragments), reviewer_ask
     )
     for problem in diagram_problems:
         logger.warning("도식 검증에서 뺀 경로 — %s", problem)
