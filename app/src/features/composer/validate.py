@@ -10,6 +10,15 @@
 ★ ①의 정규식은 «값 전체»가 영문 snake_case 토큰일 때만 걸린다 — 한국어
   산문·캡션·URL·날짜는 절대 걸리지 않는다 (section_content.py의
   _INTERNAL_KEY_SHAPE와 같은 판정).
+
+★ 중복 검사(정본 「출력 전 중복 검사 게이트」)는 여기 없다 — v2에는 아직
+  «찾아내는» 단계만 있다. `composer.dup_detect.find_numeric_duplicates`가
+  같은 수치가 두 장·두 형식(문장·표)에 있는지 후보를 찾아 «확정/의심»으로
+  분류해 돌려주지만, 예외를 던지지 않고 이 파일의 `validate_v2`에도 배선돼
+  있지 않다. 실제 보고서로 오탐률을 먼저 사람이 확인한 뒤 막을지 정하기
+  위함이다(잘못 막으면 정상 보고서까지 출고가 안 나간다 — 중복이 나가는
+  것보다 나쁘다). `composer/tests/test_validate.py`의
+  `test_출고를_막지_않는다_중복_검출은_배선되지_않았다`가 이 사실을 못 박는다.
 """
 
 from __future__ import annotations

@@ -21,6 +21,10 @@ from src.features.composer.constants import (
     NOTICE_INSUFFICIENT_EVIDENCE,
     SECTION_IDS,
 )
+from src.features.composer.dup_detect import (
+    CONFIDENCE_CONFIRMED,
+    find_numeric_duplicates,
+)
 from src.features.composer.port import (
     ComposedReport,
     ComposedSection,
@@ -285,3 +289,26 @@ def test_검사는_사유를_한꺼번에_모아_알린다():
     with pytest.raises(V2ValidationError) as caught:
         validate_v2(broken)
     assert len(caught.value.problems) >= 2  # 내부 키 + 요약 문장 수
+
+
+# ══════════════════════════════════════════════════════════
+# ⑤ 중복 검출은 출고를 막지 않는다 (엔진 v2 인수 작업 — 아직 «찾기»만 한다)
+# ══════════════════════════════════════════════════════════
+
+
+def test_출고를_막지_않는다_중복_검출은_배선되지_않았다():
+    """dup_detect가 잡아내는 중복이 있어도 validate_v2는 그대로 통과시켜야 한다.
+
+    ★ 이 시험 재료(_rendered)는 4장 본문 문장 「2025년 매출액은 1,200억원이다」와
+      같은 장의 실적표 행(매출액·2025·1,200)이 값+단위+기간까지 겹치는
+      «실제» 확정급 중복을 담고 있다(정본 「같은 사실을 문장·표로 반복하지
+      않는다」 위반 후보). find_numeric_duplicates는 이를 잡아내야 하고,
+      동시에 validate_v2는 그것과 무관하게 통과해야 한다 — 검출과 차단이
+      아직 분리돼 있다는 사실을 코드로 못 박는다. 나중에 누가 실수로 두
+      함수를 이어 붙이면 이 시험이 바로 빨간불이 된다.
+    """
+    rendered = _rendered()
+    findings = find_numeric_duplicates(rendered)
+    assert findings != ()  # 검출은 된다
+    assert any(f.confidence == CONFIDENCE_CONFIRMED for f in findings)
+    validate_v2(rendered)  # 그래도 출고 검증은 통과한다(예외 없음)
