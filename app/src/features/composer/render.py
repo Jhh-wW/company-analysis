@@ -26,6 +26,7 @@ from src.features.composer.constants import (
     CITATION_STYLE_MERGED,
     PARAGRAPH_MAX_SENTENCES,
     FLOW_PRESENTATION,
+    FLOW_UNCONFIRMED_CELL,
     OPERATIONS_FLOW_CAPTION,
     FLOW_CAPTION_BY_SECTION,
     FLOW_HEADERS_BY_SECTION,
@@ -457,7 +458,15 @@ def _flow_report_table(
         ]
         if not row_numbers:
             continue
-        rows.append(list(row.cells))
+        # ★ 회사가 안 밝힌 칸은 «빈 칸»이 아니라 「미확인」으로 채운다.
+        #   빈 문자열이면 흐름도에 «라벨만 있고 속이 빈 76px 상자»가 화살표와 함께
+        #   그려져 고장처럼 보인다(constants.FLOW_UNCONFIRMED_CELL 주석에 실측 근거).
+        #   ★ 여기(데이터 층)에서 채우는 이유 — 웹(result.html)과 PDF(_FlowGraphic)가
+        #     각자 채우면 한쪽만 고쳐져 갈린다. 2026-08-25에 문단 번호에서 같은
+        #     사고가 있었다. 두 렌더러가 같은 값을 받게 한 곳에서 정한다.
+        rows.append(
+            [str(cell).strip() or FLOW_UNCONFIRMED_CELL for cell in row.cells]
+        )
         cited.extend(row_numbers)
     if not rows:
         return None
