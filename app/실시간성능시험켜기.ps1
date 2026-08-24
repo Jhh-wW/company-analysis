@@ -214,6 +214,13 @@ if ($PerRunExpectedCostCapKrw -gt $DailyExpectedCostCapKrw) {
 $appRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
 $python = Join-Path $appRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+    # 이 저장소는 venv를 저장소 루트에 둔다 (app\.venv가 아님) — 부모 폴더도 확인한다.
+    $repoRootPython = Join-Path (Split-Path -Parent $appRoot) ".venv\Scripts\python.exe"
+    if (Test-Path -LiteralPath $repoRootPython -PathType Leaf) {
+        $python = $repoRootPython
+    }
+}
+if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     $pythonCommand = @(
         Get-Command "python" -CommandType Application -ErrorAction SilentlyContinue
     ) | Select-Object -First 1
