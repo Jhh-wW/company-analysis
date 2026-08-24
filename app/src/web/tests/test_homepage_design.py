@@ -60,7 +60,8 @@ def test_첫화면에만_새_디자인_범위가_붙는다(monkeypatch):
     assert "공시·뉴스·회사 홈페이지를 근거로" not in home.text
     assert "실제 공시·뉴스를 조사합니다" not in home.text
     base_template = (TEMPLATES / "base.html").read_text(encoding="utf-8")
-    assert "실제 공시·IR·회사 공식 자료를 조사합니다" in base_template
+    # 「실제 조사」 배지는 화면에서 뺐다(정상 상태라 알릴 필요가 없다) — 남는 것은
+    # 옛 카피가 다시 새지 않는지뿐이다. 배지 자체 부재는 test_internal_status_copy_removed.py가 지킨다.
     assert "실제 공시·뉴스를 조사합니다" not in base_template
     admin_template = (TEMPLATES / "admin_home.html").read_text(encoding="utf-8")
     assert "공시·IR·회사 공식 자료를 모아" in admin_template

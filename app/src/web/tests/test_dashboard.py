@@ -439,9 +439,9 @@ def test_issue_priority_and_partial_read_failure_remain_visible(monkeypatch, tmp
     assert "개별 신고 문제" in partial.text
 
 
-def test_narrow_free_admin_demo_explains_and_disables_deferred_actions(
-    monkeypatch, tmp_path
-):
+def test_narrow_free_admin_demo_disables_deferred_actions(monkeypatch, tmp_path):
+    """배포 범위 배너는 내부 사정이라 화면에서 뺐다(2-6) — 여기서는 실제로
+    LINK 발급·친구 초대가 막히는지(폼이 없고 버튼이 비활성인지)만 지킨다."""
     monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(tmp_path / "storage.db"))
     monkeypatch.setenv(
         deployment_mode.ENV_DEPLOYMENT_RUNTIME_CONTRACT,
@@ -456,16 +456,16 @@ def test_narrow_free_admin_demo_explains_and_disables_deferred_actions(
         access = client.get("/admin/access")
 
     assert dashboard.status_code == 200 and access.status_code == 200
-    assert "무료 관리자 데모" in dashboard.text
-    assert "재배포 때 운영 데이터가 초기화" in dashboard.text
     assert "LINK 발급 보류" in access.text and "친구 초대 보류" in access.text
     assert 'action="/admin/link/new"' not in access.text
     assert 'action="/admin/invite"' not in access.text
 
 
-def test_admin_real_contract_is_admin_only_and_labels_real_operating_scope(
+def test_admin_real_contract_is_admin_only_and_disables_deferred_actions(
     monkeypatch, tmp_path
 ):
+    """배포 범위 배너는 내부 사정이라 화면에서 뺐다(2-6) — 여기서는 관리자 전용
+    접근 제어와, 실제로 LINK 발급·친구 초대가 막히는지만 지킨다."""
     monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(tmp_path / "storage.db"))
     monkeypatch.setenv(
         deployment_mode.ENV_DEPLOYMENT_RUNTIME_CONTRACT,
@@ -484,12 +484,6 @@ def test_admin_real_contract_is_admin_only_and_labels_real_operating_scope(
     assert denied.status_code == 303
     assert denied.headers["location"] == "/auth/login"
     assert dashboard.status_code == 200 and access.status_code == 200
-    assert "실제 분석 관리자 운영판" in dashboard.text
-    assert "무료 관리자 데모" not in dashboard.text
-    assert "재배포 때 운영 데이터가 초기화" not in dashboard.text
-    assert "외부 사용자용 친구 MEMBER와 지원 LINK는 아직 열지 않았습니다" in (
-        dashboard.text
-    )
     assert "LINK 발급 보류" in access.text and "친구 초대 보류" in access.text
     assert 'action="/admin/link/new"' not in access.text
     assert 'action="/admin/invite"' not in access.text

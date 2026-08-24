@@ -12,11 +12,10 @@
   <header class="topbar">
     <a class="brand brand-mark brand-mark-compact" href="/" aria-label="기업 분석">기업 분석<span class="brand-mark-dot" aria-hidden="true"></span></a>
     {# 지금 무엇으로 돌고 있는지 정직하게 알린다. 진짜인데 「데모」라고 쓰면 거짓말이다. #}
+    {# 실제 조사는 정상 상태라 사용자에게 따로 알릴 필요가 없다 — 데모·시험 모드만 배지로 알린다. #}
     {% if evaluation_mode %}
       <span class="tag evaluation" title="로컬에서 외부 조사 성능과 비용을 제한해 시험합니다">실시간 성능시험</span>
-    {% elif is_real %}
-      <span class="tag real" title="실제 공시·IR·회사 공식 자료를 조사합니다">실제 조사</span>
-    {% else %}
+    {% elif not is_real %}
       <span class="tag">샘플 모드</span>
     {% endif %}
     <span class="spacer"></span>

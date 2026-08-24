@@ -1673,7 +1673,7 @@ td.center { text-align: center; }
   margin: 16px 0 24px;
   break-inside: avoid;
 }
-/* 문단 번호 «2-1» — 본문 왼쪽에 붙는 작은 표지.
+/* 문단 번호 «1.» — 본문 왼쪽에 붙는 작은 표지.
    ★ 본문 글자가 아니라 «표시»다. 화면 낭독기에는 안 읽히게 aria-hidden을
       쓴다(틀에서 지정). 번호가 문장 안으로 들어가면 인용 추적이 깨진다. */
 .result-page .prose { position: relative; }
@@ -2407,7 +2407,12 @@ td.center { text-align: center; }
 .candidate-page .candidate-meta {
   margin: 0;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  /* 84px는 실제 값 기준 실측(84px)이 아니라 감이었다 — 실제 배포본에서
+     「전자공시(DART) 기업개황」이 한 줄에 필요한 폭을 재니 155px였다(실측).
+     84px 칸에 억지로 넣으니 낱글자가 갈려 3줄로 쪼개졌다. 여기서는 155px에
+     여유를 더한 176px를 최솟값으로 둔다 — 이 폭보다 넓어야만 옆 칸이 생기므로
+     지금 폭(약 191px)에서는 1칸으로 세로로 흐르고, 어떤 값도 잘리지 않는다. */
+  grid-template-columns: repeat(auto-fit, minmax(176px, 1fr));
   gap: 10px;
 }
 .candidate-page .candidate-meta dt {

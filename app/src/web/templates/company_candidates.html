@@ -1,6 +1,9 @@
 {% extends "base.html" %}
 {% block title %}회사 후보를 확인해 주세요 · 기업분석{% endblock %}
 {% block bodyclass %}candidate-page{% endblock %}
+{# 행마다 4칸(회사정보·메타3종·근거·버튼)을 나눠 쓰므로 기본 780px 폭은 너무 좁다.
+   기존 .wrap.wide(960px)를 그대로 재사용해 이 화면에만 폭을 넓힌다. #}
+{% block wrapclass %}wide{% endblock %}
 
 {% block content %}
 <div class="card">
