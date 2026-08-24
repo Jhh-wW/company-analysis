@@ -63,6 +63,10 @@ PERSISTENT_SCHEMA_BOOTSTRAPS: Final[tuple[PersistentSchemaBootstrap, ...]] = (
         "유료 파일럿 결속", "src.features.pilot_evaluation.schema",
         "src/features/pilot_evaluation/schema.py",
     ),
+    PersistentSchemaBootstrap(
+        "오류 신고", "src.features.feedback_report.store",
+        "src/features/feedback_report/store.py",
+    ),
 )
 
 

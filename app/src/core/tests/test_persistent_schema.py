@@ -40,6 +40,10 @@ EXPECTED_TABLES = {
     "src.features.final_gate_diagnostic.store": {"pipeline_final_gate_diagnostics"},
     "src.features.spanselect.diagnostic_store": {"pilot_span_selection_diagnostics"},
     "src.features.pilot_evaluation.schema": {"canonical_pilot25_bindings"},
+    "src.features.feedback_report.store": {
+        "feedback_reports",
+        "feedback_report_events",
+    },
 }
 
 BASE_SCHEMA_OWNERS = {
