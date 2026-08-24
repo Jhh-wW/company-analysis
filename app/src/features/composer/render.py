@@ -331,6 +331,34 @@ def _paragraph_breaks(
     return tuple(starts)
 
 
+def _summary_source_section(
+    sentence: ComposedSentence,
+    numbers: Mapping[str, int],
+    section_citations: Mapping[str, frozenset[int]],
+) -> str:
+    """요약 문장이 «어느 장에서 온 이야기인가»를 인용으로 되짚는다.
+
+    ★ 왜 필요한가 (실측) — v2는 SummaryItem에 section_id를 안 채웠다. 그래서
+      요약 카드의 주제 라벨이 전부 「핵심결론」으로 나오고, 「→ 4장」 링크 칸이
+      통째로 비었다. 독자가 「이 요약이 어느 장 이야기인지」를 알 수 없다.
+    ★ 요약은 검증된 본문을 재료로 «새로» 쓰므로 어느 장에서 왔는지가 기록되지
+      않는다. 대신 «같은 근거를 가장 많이 공유하는 장»을 찾는다 — 근거가
+      겹친다는 것은 같은 이야기를 한다는 뜻이다.
+    ★ 겹치는 장이 없으면 빈 문자열을 돌려준다. 억지로 붙이지 않는다 —
+      틀린 장을 가리키는 것이 라벨이 없는 것보다 나쁘다.
+    """
+    cited = frozenset(_sentence_citation_numbers(sentence, numbers))
+    if not cited:
+        return ""
+    best_id = ""
+    best_score = 0
+    for section_id in SECTION_IDS:
+        score = len(cited & section_citations.get(section_id, frozenset()))
+        if score > best_score:
+            best_id, best_score = section_id, score
+    return best_id
+
+
 def _ensure_no_orphan_markers(
     groups: Sequence[tuple[Sequence[ComposedSentence], list[bool]]],
     numbers: Mapping[str, int],
@@ -680,13 +708,25 @@ def render_report(
             )
         )
 
+    # 요약 문장이 어느 장 이야기인지 되짚기 위한 장별 인용 묶음.
+    section_citations = {
+        section.section_id: frozenset(
+            number
+            for sentence in section.sentences
+            for number in _sentence_citation_numbers(sentence, numbers)
+        )
+        for section in report.sections
+    }
     summary_items: list[SummaryItem] = []
     for index, sentence in enumerate(report.summary):
         summary_items.append(
             SummaryItem(
                 text=sentence_display_text(
                     sentence, numbers, show_markers=summary_shows[index]
-                )
+                ),
+                section_id=_summary_source_section(
+                    sentence, numbers, section_citations
+                ),
             )
         )
         for cited in _sentence_citation_numbers(sentence, numbers):
