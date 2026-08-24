@@ -13,10 +13,12 @@ import json
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
 from src.features.export_pdf.release import (
     PDFReleaseBlockedError,
     PdfReleaseCandidate,
     _candidate_integrity_problems,
+    report_fact_id_ledger,
 )
 from src.shared.automatic_release_record import (
     AUTOMATIC_CHECKER_VERSION,
@@ -142,19 +144,35 @@ def run_automatic_checks(
 
     channel_ok = False
     if canonical_ok and published is not None:
-        try:
-            # Import lazily so PDF generation and Notion adapters remain separate.
-            from src.features.export_notion.logic import build_blocks  # noqa: PLC0415
+        if published.schema_version == ENGINE_V2_SCHEMA_VERSION:
+            # v2(엔진 v2): Notion 채널은 04장 3-4절 4항 정책대로 후속 과제다
+            # (PDF·웹 우선). export_notion.build_blocks는 내부에서 v1
+            # build_published_report를 다시 호출해 v2 Report를 구조적으로
+            # 거부한다(실측 — PublishBlockedError, "company-report-v2-composer
+            # 보고서만..." 사유가 아니라 "canonical 보고서만..." 사유로 막힘).
+            # 그래서 v2는 Notion 렌더 성공을 채널 동등성 증거로 쓰지 않고,
+            # PDF 후보와 실제 보고서 내용(인용 장부)이 같은 재료로 만들어졌는지만
+            # 확인한다 — web·PDF는 같은 report 객체를 쓰고 그 결속은 ④(해시
+            # 재검사)가 report_sha256으로 이미 강제한다.
+            try:
+                published_fact_ids = report_fact_id_ledger(published)
+                channel_ok = bool(published_fact_ids) and (
+                    candidate.expected_fact_ids == published_fact_ids
+                )
+            except Exception:  # fail closed at a public-channel boundary
+                channel_ok = False
+        else:
+            try:
+                # Import lazily so PDF generation and Notion adapters remain separate.
+                from src.features.export_notion.logic import build_blocks  # noqa: PLC0415
 
-            notion_blocks = build_blocks(published)
-            published_fact_ids = tuple(
-                fact.fact_id for fact in published.fact_records
-            )
-            channel_ok = bool(notion_blocks) and (
-                candidate.expected_fact_ids == published_fact_ids
-            )
-        except Exception:  # fail closed at a public-channel boundary
-            channel_ok = False
+                notion_blocks = build_blocks(published)
+                published_fact_ids = report_fact_id_ledger(published)
+                channel_ok = bool(notion_blocks) and (
+                    candidate.expected_fact_ids == published_fact_ids
+                )
+            except Exception:  # fail closed at a public-channel boundary
+                channel_ok = False
     if not channel_ok:
         reasons.append("웹·PDF·Notion 채널 동등성 검사를 통과하지 못했습니다")
     channel_check = AutomaticCheckResult(

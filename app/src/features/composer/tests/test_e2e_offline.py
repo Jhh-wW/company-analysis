@@ -11,12 +11,12 @@
   그 문장들의 숫자가 전부 원문에 존재하도록 같은 근거에서 발췌했다
   (수치 검증 3-2를 실제로 통과시키기 위함 — 검증 우회 아님).
 
-★ PDF 경계의 알려진 미완(총괄 결정 대기): export_pdf.logic._build_pdf 첫 줄의
-  build_published_report(v1 canonical 게이트)는 아직 v2 분기가 없어 v2 Report를
-  차단한다. 이 시험은 «v2 스키마일 때만» 게이트를 통과시키는 monkeypatch로
-  3-4a에서 실측된 조립부(_register_fonts→…→_add_accessibility_metadata)를
-  그대로 태운다. 총괄이 프로덕션 v2 진입을 넣으면 이 패치는 자연히 무해한
-  no-op이 된다 (v1 보고서는 패치 안에서도 원래 게이트를 그대로 지난다).
+★ PDF 경계: export_pdf.release.prepare_pdf_release·export_pdf.logic.build_pdf가
+  schema_version으로 v1/v2를 가른다(04장 3-4절 2항 배선 완료). v2는
+  build_published_report(v1 canonical 게이트)를 타지 않고 composer의
+  validate_v2만 다시 확인한 뒤 실제 조립부(_register_fonts→…→
+  _add_accessibility_metadata)를 그대로 지난다. 이 시험은 monkeypatch 없이
+  release.prepare_pdf_release(report)라는 «프로덕션 진입점»을 그대로 호출한다.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ from src.features.composer.render import (
     SECTION_DISPLAY_NUMBERS,
 )
 from src.features.composer.verify import REVIEW_PROMPT_HEADER, REWRITE_PROMPT_HEADER
-from src.features.export_pdf import logic as pdf_logic
+from src.features.export_pdf import release as pdf_release
 from src.features.pipeline import real
 from src.features.pipeline.port import CompanyCard, Outcome, RunResult, UserInput
 from src.features.pipeline.tests.test_real_cache import (
@@ -377,26 +377,23 @@ def test_유료_호출은_없고_가짜_ask_횟수만_증가한다(
 
 
 def test_v2_보고서가_PDF_바이트와_요구_구조까지_도달한다(
-    engine: _JypFakeEngine, monkeypatch: pytest.MonkeyPatch
+    engine: _JypFakeEngine,
 ) -> None:
     result = _run(engine)
     report = result.report
     assert report is not None
 
-    # 알려진 미완(모듈 docstring 참조): v1 canonical 게이트만 v2 스키마에 한해
-    # 통과시키고, 이후 조립부는 프로덕션 코드를 그대로 탄다. v1 보고서가
-    # 들어오면 원래 게이트를 그대로 지나므로 v1 동작은 바뀌지 않는다.
-    original_gate = pdf_logic.build_published_report
-
-    def _v2_pass_gate(candidate: Any) -> Any:
-        if getattr(candidate, "schema_version", "") == ENGINE_V2_SCHEMA_VERSION:
-            return candidate
-        return original_gate(candidate)
-
-    monkeypatch.setattr(pdf_logic, "build_published_report", _v2_pass_gate)
-
-    pdf_bytes = pdf_logic.build_pdf(report)
+    # 프로덕션 진입점을 monkeypatch 없이 그대로 탄다(04장 3-4절 2항 배선 완료).
+    # v2는 v1 canonical 게이트(build_published_report)를 타지 않고 composer의
+    # validate_v2만 다시 확인한 뒤 실제 조립부를 지난다.
+    candidate = pdf_release.prepare_pdf_release(report)
+    pdf_bytes = candidate.pdf_bytes
     assert pdf_bytes.startswith(b"%PDF-")
+    # v2 사실 장부 대체 결속(release.report_fact_id_ledger) — fact_records가
+    # 없는 v2는 실제 부록에 실린 인용 번호로 후보 무결성 검사를 통과한다.
+    assert candidate.expected_fact_ids == tuple(
+        f"v2-citation-{number}" for number in range(1, 12)
+    )
 
     raw_text = "\n".join(
         page.extract_text() or ""

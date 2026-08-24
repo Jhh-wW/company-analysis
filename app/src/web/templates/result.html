@@ -4,7 +4,17 @@
 {% block wrapclass %}wide result{% endblock %}
 
 {% block content %}
-{% if report.schema_version != canonical_schema_version %}
+{% macro ref(cite) %}
+  {%- set n = citation_number(cite) -%}
+  {# 내부 이름은 title에도 넣지 않는다. 화면에는 아래 출처 목록을 가리키는 번호만 필요하다(P-127). #}
+  {%- if n -%}<a class="ref" href="#src{{ n }}" title="출처 {{ n }}번">{{ n }}</a>{%- endif -%}
+{% endmacro %}
+{% macro refs(numbers) %}
+  {%- for n in numbers -%}
+    <a class="ref" href="#src{{ n }}" title="출처 {{ n }}번">{{ n }}</a>
+  {%- endfor -%}
+{% endmacro %}
+{% if report.schema_version not in (canonical_schema_version, engine_v2_schema_version) %}
 <section class="warn-line" role="alert">
   <div>
     <b>현재 보고서 기준을 통과하지 못해 결과를 표시하지 않았습니다.</b>
@@ -83,17 +93,102 @@
    ⓐ 「조각 10·신규사업전망」이라는 **내부 이름을 감추고** ⓑ 번호만 남겨 ⓒ 누르면 가게 했다.
    ★ 없애지는 않는다 — 「지어내지 않았다」를 사람이 직접 확인할 수 있어야 하고,
      정본 W5(출처 각주)가 요구하는 항목이다. #}
-{% macro ref(cite) %}
-  {%- set n = citation_number(cite) -%}
-  {# 내부 이름은 title에도 넣지 않는다. 화면에는 아래 출처 목록을 가리키는 번호만 필요하다(P-127). #}
-  {%- if n -%}<a class="ref" href="#src{{ n }}" title="출처 {{ n }}번">{{ n }}</a>{%- endif -%}
-{% endmacro %}
-{% macro refs(numbers) %}
-  {%- for n in numbers -%}
-    <a class="ref" href="#src{{ n }}" title="출처 {{ n }}번">{{ n }}</a>
-  {%- endfor -%}
-{% endmacro %}
+{% if report.schema_version == engine_v2_schema_version %}
+{# ── 엔진 v2(composer) 본문 — prose_lines에 문장 끝 [n] 인용과 "— 해석" 표지가
+   이미 문자열로 찍혀 있다(render.py sentence_display_text). v1의 fact_records
+   기반 구조 카드·「사실 검증」 열은 v2에 없는 개념이라 쓰지 않는다
+   (실행계획 04장 3-4절 3항 — 미완 목록 ③). #}
+<div class="report">
+  {% set v2_sections = report.sections|sort(attribute='display_number') %}
+  {% for s in v2_sections %}
+    <section class="report-section" data-report-cell="{{ s.cell }}">
+      <h2><span class="no">{{ s.display_number or loop.index }}</span><span class="txt">{{ s.title }}</span>{% if s.tag %}<span class="section-tag">{{ s.tag }}</span>{% endif %}</h2>
+      {% if s.prose_lines %}
+      <p class="prose">
+        {%- for text, _cite in s.prose_lines -%}
+          {{ text }}{% if not loop.last %} {% endif %}
+        {%- endfor -%}
+      </p>
+      {% endif %}
+      {% for t in s.tables %}
+        {% set table_id = 'report-table-v2-' ~ loop.index0 ~ '-' ~ loop.index %}
+        <div class="numtable">
+          <div class="cap" id="{{ table_id }}-caption">
+            {{ t.caption }}{{ ref(t.cite) }}
+          </div>
+          <div class="scroll" tabindex="0" role="region" aria-labelledby="{{ table_id }}-caption">
+            <table class="{{ 'nums' if t.numeric else 'texts' }}" aria-labelledby="{{ table_id }}-caption">
+              <thead><tr>{% for h in t.headers %}<th scope="col">{{ h }}</th>{% endfor %}</tr></thead>
+              <tbody>
+                {% for row in t.rows %}
+                  <tr>
+                    {% for cell in row %}
+                      <td{% if t.numeric and not loop.first %} class="num"{% endif %}>{{ cell }}</td>
+                    {% endfor %}
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      {% endfor %}
+    </section>
+  {% endfor %}
+</div>
 
+{% if public_citations %}
+  <section class="report-support" aria-labelledby="report-citations-title">
+    <h2 id="report-citations-title"><span class="no">부록</span><span class="txt">출처와 검증 상태</span></h2>
+    <p class="muted section-note">
+      본문 문장 끝의 번호가 아래 원문을 가리킵니다. 표시된 문장은 모두 인용 원문 대조와 수치 검증을 거쳤습니다.
+    </p>
+    <div class="scroll report-scroll" tabindex="0" role="region" aria-labelledby="report-citations-title">
+      <table class="texts" aria-labelledby="report-citations-title">
+        <thead><tr><th scope="col" style="width:56px">#</th><th scope="col">자료</th><th scope="col">기준일·자료 상태</th><th scope="col">원문 위치</th><th scope="col">본문 사용 장</th></tr></thead>
+        <tbody>
+          {% set v2_seen = namespace(numbers=[]) %}
+          {% for c in public_citations %}
+          {% if c.number not in v2_seen.numbers %}
+          <tr id="src{{ c.number }}">
+            <td>[{{ c.number }}]</td>
+            <td>
+              {%- set source_label = c.title or c.label -%}
+              {%- if c.url and (c.url.startswith('https://') or c.url.startswith('http://')) -%}
+                <a class="source-link" href="{{ c.url }}" target="_blank" rel="noopener noreferrer">{{ source_label }}</a>
+              {%- else -%}
+                {{ source_label }}
+              {%- endif -%}
+              {%- if c.publisher and c.publisher not in source_label %} · {{ c.publisher }}{% endif -%}
+            </td>
+            <td>
+              {%- if c.published_at %}{{ c.published_at }} 보도
+              {%- elif c.disclosed_at %}{{ c.disclosed_at }} 공시
+              {%- elif c.collected_at %}{{ c.collected_at }} 확인
+              {%- else %}기준일 미확인{% endif %}
+              {%- if c.domain %} · {{ c.domain }}{% endif %}
+              {%- if c.source_type %} · {{ c.source_type }}{% endif %}
+            </td>
+            <td>{{ c.location or '—' }}</td>
+            <td>
+              {%- set usage = namespace(first=true) -%}
+              {%- for section in report.sections -%}
+                {%- if section.cell in c.used_in -%}
+                  {%- if not usage.first %} · {% endif -%}{{ section.display_number }}장
+                  {%- set usage.first = false -%}
+                {%- endif -%}
+              {%- endfor -%}
+              {%- if usage.first %}—{% endif -%}
+            </td>
+          </tr>
+          {% set v2_seen.numbers = v2_seen.numbers + [c.number] %}
+          {% endif %}
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endif %}
+{% else %}
 <div class="report">
   {% set output_sections = report.sections|sort(attribute='display_number') %}
   {% for s in output_sections %}
@@ -275,6 +370,7 @@
     </div>
   </section>
 {% endif %}
+{% endif %}
 </article>
 
 <aside class="report-support ui-only" aria-label="보고서 이용 안내와 의견 보내기">
@@ -346,7 +442,11 @@
     PDF 보고서 받기
   </a>
   {# ⚠️ 버튼을 숨기는 것은 «권한»이 아니다 — 진짜 차단은 서버가 매 요청마다 한다.
-     여기 숨기는 것은 «관리자가 아닌 사람에게 못 쓸 버튼을 안 보여주는» 배려일 뿐이다. #}
+     여기 숨기는 것은 «관리자가 아닌 사람에게 못 쓸 버튼을 안 보여주는» 배려일 뿐이다.
+     엔진 v2는 Notion 채널이 아직 없다(04장 3-4절 4항 — PDF·웹 우선, Notion 후속:
+     export_notion.build_blocks가 v1 canonical 투영에 결합돼 있어 v2 보고서를
+     구조적으로 거부한다). 그래서 v2에서는 실패가 확실한 버튼을 아예 보여주지 않는다. #}
+  {% if report.schema_version != engine_v2_schema_version %}
   {% if auth_is_admin and notion_configured %}
     <form class="report-action-form" method="post" action="/notion/{{ job.job_id }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -356,9 +456,11 @@
     <button type="button" class="btn ghost" disabled
             aria-describedby="notion-setup-note">노션 설정 필요</button>
   {% endif %}
+  {% endif %}
   <a class="btn ghost" href="/">다른 회사 분석하기</a>
 </nav>
 
+{% if report.schema_version != engine_v2_schema_version %}
 {% if auth_is_admin and not notion_configured %}
 <p class="muted result-admin-note" id="notion-setup-note">
   노션 연결 설정이 아직 없습니다. 연결을 설정한 뒤 이 보고서를 다시 열면 보낼 수 있습니다.
@@ -367,6 +469,7 @@
 <p class="muted result-admin-note">
   노션 보내기는 <strong>관리자만</strong> 쓸 수 있습니다.
 </p>
+{% endif %}
 {% endif %}
 {% endif %}
 {% endblock %}

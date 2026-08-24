@@ -56,6 +56,8 @@ from reportlab.platypus import (
 from src.core import clock
 from src.core.citations import citation_marker
 from src.core.constants import section_display_heading
+from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
+from src.features.composer.validate import validate_v2
 from src.features.export_pdf import constants
 from src.features.pipeline.port import Grade, Report, ReportSection, ReportTable
 from src.features.provenance.sources import Source, SourceKind, visible_citations
@@ -1354,9 +1356,17 @@ def _add_accessibility_metadata(
 def _build_pdf(report: Report) -> bytes:
     """``build_pdf``의 실제 생성 경로. 공개 경계에서 오류 문구를 정규화한다."""
 
-    # 공개 내보내기는 저장 시점과 관계없이 현재 canonical 게이트를 다시 통과한다.
-    # 구형 보고서를 호환 렌더링하면 폐기한 목차·직무 내용이 다시 노출될 수 있다.
-    report = build_published_report(report)
+    if report.schema_version == ENGINE_V2_SCHEMA_VERSION:
+        # v2(엔진 v2 composer): v1 canonical 투영(build_published_report)은
+        # v2 구조(빈 fact_records·다른 검증 방식)와 맞지 않아 태우지 않는다.
+        # composer 자체 3검사(validate_v2)만 다시 확인하고 검증된 Report를
+        # 그대로 조립한다 (실행계획 04장 3-4절 2항 — v1 경로는 무변, 분기는
+        # schema_version 비교로만 나눈다).
+        validate_v2(report)
+    else:
+        # 공개 내보내기는 저장 시점과 관계없이 현재 canonical 게이트를 다시 통과한다.
+        # 구형 보고서를 호환 렌더링하면 폐기한 목차·직무 내용이 다시 노출될 수 있다.
+        report = build_published_report(report)
     _register_fonts()
     title = f"{_single_line_pdf_text(report.company)} 분석 보고서"
     author = f"{constants.PDF_AUTHOR} · {_single_line_pdf_text(report.company)} 분석"

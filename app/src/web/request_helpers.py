@@ -39,6 +39,7 @@ from src.features.budget.constants import (
     RATE_WINDOW_SEC,
 )
 from src.features.business_candidate.logic import CandidateResolution
+from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
 from src.features.observability import admin_audit
 from src.features.pipeline.demo import DemoPipeline, available_companies
 from src.features.pipeline.port import CompanyLookupResult, Outcome, RunResult, UserInput
@@ -110,6 +111,7 @@ def _ctx(request: Request, **kwargs) -> dict:
         "cell_labels": CELL_LABELS,
         "section_display_parts": section_display_parts,
         "canonical_schema_version": CANONICAL_SCHEMA_VERSION,
+        "engine_v2_schema_version": ENGINE_V2_SCHEMA_VERSION,
         # 내부 ``조각 N·종류``를 템플릿에서 직접 자르면 다른 출력과 다시 갈린다(P-127).
         "citation_number": citation_number,
         # 표의 사실을 반복하지 않고 구성비·추세·흐름 표현으로 바꾸는 순수 함수다.

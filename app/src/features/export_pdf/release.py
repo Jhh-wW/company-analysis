@@ -23,8 +23,11 @@ import pypdfium2 as pdfium
 from PIL import Image
 from pypdf import PdfReader
 
+from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
+from src.features.composer.validate import validate_v2
 from src.features.export_pdf.logic import PDFGenerationError, build_pdf
 from src.features.pipeline.port import Report
+from src.features.provenance.sources import visible_citations
 from src.features.report_standard import build_published_report
 
 PNG_MAGIC: Final[bytes] = b"\x89PNG\r\n\x1a\n"
@@ -252,13 +255,45 @@ def _render_all_pages(pdf_bytes: bytes, *, scale: float) -> tuple[RenderedPdfPag
     return tuple(pages)
 
 
+def report_fact_id_ledger(report: Report) -> tuple[str, ...]:
+    """PDF 결속 장부 — v1은 fact_id, v2는 실제 인용 번호로 대체한다.
+
+    v1 canonical 보고서는 문장·표가 잠긴 ``fact_records``를 인용하므로 그
+    ``fact_id`` 집합이 「출고된 PDF가 검수한 사실과 정확히 같다」는 결속이다.
+    v2(엔진 v2 composer) 보고서는 ``fact_records``가 없다 — 문장 단위 인용
+    검증(출처 실존·수치 대조·의미 검수, 04장 3-2절)이 사실 검수를 대신하기
+    때문이다. 그래서 v2에서는 본문·요약이 실제로 표시하는 인용 번호 집합을
+    장부로 삼는다: 인용이 바뀌면(추가·삭제·번호 변경) 이 장부도 바뀌어 해시
+    결속이 깨진다 — v1의 fact_id 결속과 같은 역할을 하는 대체 결속이다.
+    실행계획 04장 3-4절 2항.
+    """
+
+    if report.schema_version == ENGINE_V2_SCHEMA_VERSION:
+        numbers = sorted(
+            {source.number for source in visible_citations(report.citations)}
+        )
+        return tuple(f"v2-citation-{number}" for number in numbers)
+    return tuple(fact.fact_id for fact in report.fact_records)
+
+
 def prepare_pdf_release(report: Report, *, render_scale: float = 1.5) -> PdfReleaseCandidate:
-    """canonical PDF 후보를 만들고 모든 페이지의 PNG 검수 재료를 준비한다."""
+    """canonical PDF 후보를 만들고 모든 페이지의 PNG 검수 재료를 준비한다.
+
+    v2(엔진 v2 composer) 보고서는 v1 canonical 게이트(``build_published_report``)
+    를 건너뛰고 composer 자체 3검사(``validate_v2``)만 다시 확인한 뒤 검증된
+    Report를 그대로 조립에 태운다. 사실 장부는 ``report_fact_id_ledger``가
+    만드는 인용 번호 기반 대체 결속을 쓴다 (실행계획 04장 3-4절 2항).
+    """
 
     try:
-        published = build_published_report(report)
-        expected_fact_ids = tuple(fact.fact_id for fact in published.fact_records)
-        pdf_bytes = build_pdf(published)
+        if report.schema_version == ENGINE_V2_SCHEMA_VERSION:
+            validate_v2(report)
+            expected_fact_ids = report_fact_id_ledger(report)
+            pdf_bytes = build_pdf(report)
+        else:
+            published = build_published_report(report)
+            expected_fact_ids = report_fact_id_ledger(published)
+            pdf_bytes = build_pdf(published)
         return prepare_pdf_bytes(
             pdf_bytes,
             render_scale=render_scale,
