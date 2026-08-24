@@ -73,6 +73,7 @@ def run_v2(
     latest_performance_period: str = "",
     table_presentation: str = "table",
     filing_meta: Optional[FilingMeta] = None,
+    composition_table: Optional[PerformanceTable] = None,
 ) -> V2RunOutput:
     """엔진 v2 전체 흐름을 한 번 돌려 최종 보고서를 만든다 (04장 3-4절).
 
@@ -97,6 +98,8 @@ def run_v2(
             render_report에 그대로 전달된다.
         filing_meta: 내려받은 공시의 신원. 주면 부록 출처에 전자공시 원문
             주소가 실린다 (없으면 주소 없이 나간다).
+        composition_table: 2장에 실을 매출 구성표. 주면 표와 «구성 도식»이
+            함께 나간다 (도식 판정은 report_standard/visualization.py 몫).
 
     Returns:
         V2RunOutput — 검증 끝난 Report와 초안·생존 문장 수.
@@ -153,6 +156,7 @@ def run_v2(
         latest_performance_period=latest_performance_period,
         table_presentation=table_presentation,
         filing_meta=filing_meta,
+        composition_table=composition_table,
     )
 
     # ⑥ 출고 검증 — 실패하면 V2ValidationError (사유는 예외 problems에 전부)

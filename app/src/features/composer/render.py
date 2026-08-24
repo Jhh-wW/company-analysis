@@ -63,6 +63,15 @@ INTERPRETATION_MARKER: Final[str] = f" — {GRADE_INTERPRETED}"
 #: 실적표가 실리는 장 — 04장 3-4절: 「4장은 기존 실적표·차트 재사용」
 PERFORMANCE_TABLE_SECTION_ID: Final[str] = "past_changes"
 
+#: 매출 구성표가 붙는 장. v1이 `real.py`에서 business_model에 붙이는 것과
+#: 같은 자리다 — 두 경로가 다른 장에 붙으면 같은 회사 보고서가 채널마다
+#: 달라진다.
+COMPOSITION_TABLE_SECTION_ID: Final[str] = "business_model"
+
+#: 구성표의 기본 표시 방식. `report_standard/visualization.py`가 이 값과
+#: 표 모양을 함께 보고 100% 누적 막대를 그릴지 정한다.
+COMPOSITION_PRESENTATION: Final[str] = "composition"
+
 #: 시간 장 표시 태그 — report_standard SECTION_SPECS와 같은 값을 «복사»했다.
 #: (composer→report_standard import 금지 규칙. 정본이 바뀌면 같이 바꾼다.)
 SECTION_TAGS: Final[dict[str, str]] = {
@@ -329,6 +338,7 @@ def render_report(
     latest_performance_period: str = "",
     table_presentation: str = "table",
     filing_meta: Optional[FilingMeta] = None,
+    composition_table: Optional[PerformanceTable] = None,
 ) -> Report:
     """검증 끝난 ComposedReport를 웹·PDF 공용 pipeline Report로 바꾼다.
 
@@ -344,6 +354,10 @@ def render_report(
         grade: 표지 등급. 기본 완성 — 완성 여부 실측은 06장 몫이다.
         table_presentation: 원본 pipeline ReportTable.presentation을 넘기면
             기존 차트(trend·composition)가 그대로 재사용된다. 기본은 일반 표.
+        composition_table: 2장에 실을 매출 구성표. v1은 이 표를 이미 만들어
+            business_model 장에 붙이는데 v2 호출부가 넘기지 않아 «표도 도식도»
+            사라져 있었다(실측 결함 — 9장 중 4장 하나만 표를 받았다).
+            없으면 표 없이 간다(억지로 만들지 않는다).
         filing_meta: 이번 조사가 내려받은 공시의 신원(접수번호·보고서명·공시일).
             주면 전자공시 조각의 부록 줄에 «원문 주소»가 실린다. 없으면 주소
             없이 나가며, 그 사실이 화면에 그대로 보인다(빈 값을 지어내지 않는다).
@@ -376,14 +390,21 @@ def render_report(
                     owners.append(section.section_id)
 
         tables: list[ReportTable] = []
+        slot: Optional[tuple[PerformanceTable, str]] = None
         if (
             section.section_id == PERFORMANCE_TABLE_SECTION_ID
             and performance_table is not None
             and performance_table.rows
         ):
-            converted = _performance_report_table(
-                performance_table, table_presentation
-            )
+            slot = (performance_table, table_presentation)
+        elif (
+            section.section_id == COMPOSITION_TABLE_SECTION_ID
+            and composition_table is not None
+            and composition_table.rows
+        ):
+            slot = (composition_table, COMPOSITION_PRESENTATION)
+        if slot is not None:
+            converted = _performance_report_table(slot[0], slot[1])
             cite_number_text = citation_number(converted.cite)
             if cite_number_text and int(cite_number_text) in meta_by_number:
                 # 표 캡션의 〔n〕도 본문 인용이다 — 부록과 1:1을 지키려고

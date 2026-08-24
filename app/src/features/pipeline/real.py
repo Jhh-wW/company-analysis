@@ -1728,6 +1728,9 @@ class RealPipeline:
                 frags=frags,
                 financials=financials,
                 filing=filing,
+                # v1이 2장에 붙이는 매출 구성표를 v2도 받는다. 안 넘기면
+                # 표도 «구성 도식»도 통째로 사라진다 (실측 결함).
+                revenue_tables=revenue_tables,
                 sources=sources,
                 business_date=business_date,
                 model=model,
@@ -2679,6 +2682,7 @@ def _run_v2_composer(
     frags: dict[int, dict[str, str]],
     financials: Any,
     filing: Optional[dict[str, Any]],
+    revenue_tables: list[dict[str, Any]],
     sources: list[SourceStatus],
     business_date: Any,
     model: str,
@@ -2698,6 +2702,7 @@ def _run_v2_composer(
     from src.features.composer import pipeline as composer_pipeline  # noqa: PLC0415
     from src.features.composer.port import (  # noqa: PLC0415
         AskFatalError,
+        composition_table_from_raw,
         filing_meta_from_raw,
         performance_table_from_report_table,
     )
@@ -2745,6 +2750,7 @@ def _run_v2_composer(
             # 전자공시 조각에는 조각 자체에 주소가 없다. 주소를 가진 것은
             # «떠 온 문서»이므로 그 신원을 함께 넘겨 부록에 원문 주소를 싣는다.
             filing_meta=filing_meta_from_raw(filing),
+            composition_table=composition_table_from_raw(revenue_tables),
         )
     except AskFatalError as exc:
         # 예산 소진·billing-uncertain 같은 요청 전역 장애 — «출고 검증 실패»로
