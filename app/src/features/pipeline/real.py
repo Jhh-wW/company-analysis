@@ -27,7 +27,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Final, Iterable, Optional
 
 from src.core import paths
 from src.core.clock import today_kst
@@ -161,6 +161,12 @@ from src.shared.final_gate_diagnostics import (
     FINAL_GATE_REASON_PUBLISH_BLOCKED,
 )
 from src.shared.span_selection_diagnostics import (
+    MAJORITY_REASON_ALL_REJECTED,
+    MAJORITY_REASON_NO_CONSENSUS,
+    MAJORITY_REASON_OUTPUT_LIMIT,
+    MAJORITY_REASON_PARSE_FAILURE,
+    MAJORITY_REASON_PROVIDER_EMPTY,
+    SELECTION_REASON_INSUFFICIENT_COVERAGE,
     SELECTION_REASON_PREFLIGHT_CANDIDATES,
     SELECTION_REASON_PREFLIGHT_PERFORMANCE,
     SpanSelectionRoundDiagnostic,
@@ -171,6 +177,54 @@ from src.features.storage import cache as cache_store
 from src.features.storage import db as storage_db
 
 logger = logging.getLogger(__name__)
+
+#: 중단 안내에 병기할 최종 게이트 사유 코드 → 한국어 표기.
+#: 새 게이트가 아니다 — 이미 기록되는 닫힌 코드의 화면 표기 변환일 뿐이다.
+_FINAL_GATE_REASON_KO: Final[dict[str, str]] = {
+    FINAL_GATE_REASON_COMPARISON_BLOCKED: "동종업계 비교 검증 실패",
+    FINAL_GATE_REASON_PUBLISH_BLOCKED: "출고 전 자동 검증 거절",
+    FINAL_GATE_REASON_MISSING_IDENTITY: "회사 정체성 필수 사실 미확보",
+    FINAL_GATE_REASON_MISSING_REVENUE: "수익 구조 필수 사실 미확보",
+    FINAL_GATE_REASON_MISSING_IDENTITY_REVENUE: (
+        "정체성·수익 구조 필수 사실 미확보"
+    ),
+    FINAL_GATE_REASON_OTHER_GATE: "출고 전 자동 검증",
+}
+
+#: other_gate일 때 세부를 보태는 span-selection 결과 사유 코드 → 한국어 표기.
+_SPAN_RESULT_REASON_KO: Final[dict[str, str]] = {
+    MAJORITY_REASON_OUTPUT_LIMIT: "AI 응답 길이 초과 의심",
+    MAJORITY_REASON_PARSE_FAILURE: "AI 응답 해석 실패",
+    MAJORITY_REASON_PROVIDER_EMPTY: "AI 사실 선택 결과 없음",
+    MAJORITY_REASON_ALL_REJECTED: "선택 후보 전부 검증 거절",
+    MAJORITY_REASON_NO_CONSENSUS: "선택 결과 합의 실패",
+    SELECTION_REASON_INSUFFICIENT_COVERAGE: "기본 보고서 필수 항목 미충족",
+    SELECTION_REASON_PREFLIGHT_PERFORMANCE: "3개년 완료 실적표 미확보",
+    SELECTION_REASON_PREFLIGHT_CANDIDATES: "공식 원문 후보 없음",
+}
+
+
+def _stop_reason_note(
+    final_gate_reason: str, span_result_reason: str = ""
+) -> str:
+    """중단 안내 끝에 붙일 「 (사유: …)」 한국어 병기를 만든다.
+
+    옛 이름 "자료부족_중단"이 모든 게이트 중단을 덮어 진단을 왜곡했으므로,
+    사용자 안내에도 실제 사유를 한국어로 함께 적는다. 코드가 매핑에 없으면
+    아무것도 붙이지 않는다 (내부 코드 원문을 화면에 내보내지 않는다).
+    """
+
+    labels: list[str] = []
+    gate_label = _FINAL_GATE_REASON_KO.get(final_gate_reason, "")
+    if gate_label:
+        labels.append(gate_label)
+    if final_gate_reason == FINAL_GATE_REASON_OTHER_GATE:
+        detail_label = _SPAN_RESULT_REASON_KO.get(span_result_reason, "")
+        if detail_label:
+            labels.append(detail_label)
+    if not labels:
+        return ""
+    return " (사유: " + " · ".join(labels) + ")"
 
 
 def _publish_gate_reason_for_missing_minimum_roles(
@@ -1637,6 +1691,7 @@ class RealPipeline:
                 message=(
                     "이번 조사에서는 공식 자료에서 분석에 쓸 회사 사실을 찾지 못했습니다. "
                     "확인되지 않은 내용을 채우지 않고 여기서 멈췄습니다."
+                    + _stop_reason_note(FINAL_GATE_REASON_OTHER_GATE)
                 ),
                 sources=sources,
                 corp_type=judgment.corp_type,
@@ -1846,6 +1901,10 @@ class RealPipeline:
                     "연속 3개 완료 사업연도의 공식 실적표를 확보하지 못해 "
                     "기본 보고서를 안전하게 만들 수 없습니다. AI를 반복 호출해도 "
                     "고칠 수 없는 조건이라 비용을 쓰기 전에 멈췄습니다."
+                    + _stop_reason_note(
+                        FINAL_GATE_REASON_OTHER_GATE,
+                        SELECTION_REASON_PREFLIGHT_PERFORMANCE,
+                    )
                 ),
                 sources=sources,
                 corp_type=judgment.corp_type,
@@ -1872,6 +1931,10 @@ class RealPipeline:
                 message=(
                     "선택할 수 있는 공식 원문 후보가 없어 기본 보고서를 안전하게 "
                     "만들 수 없습니다. 빈 입력으로 AI를 부르지 않고 멈췄습니다."
+                    + _stop_reason_note(
+                        FINAL_GATE_REASON_OTHER_GATE,
+                        SELECTION_REASON_PREFLIGHT_CANDIDATES,
+                    )
                 ),
                 sources=sources,
                 corp_type=judgment.corp_type,
@@ -1980,6 +2043,10 @@ class RealPipeline:
                     "사업·제품·3개년 변화·성장 전략·운영 구조)에 필요한 회사 "
                     "사실과 연결관계를 모두 확보하지 못했습니다. 확인되지 않은 "
                     "내용을 보고서처럼 보여주지 않고 여기서 멈췄습니다."
+                    + _stop_reason_note(
+                        FINAL_GATE_REASON_OTHER_GATE,
+                        selection_result_reason_code,
+                    )
                 ),
                 sources=sources,
                 corp_type=judgment.corp_type,
@@ -2165,6 +2232,7 @@ class RealPipeline:
                     "양사 공식 원문을 같은 지표·기간·연결범위로 비교할 수 없어 "
                     "보고서를 내보내지 않았습니다. 경쟁우위가 없다는 뜻이 아니라, "
                     "현재 공개 근거로는 확인할 수 없다는 뜻입니다."
+                    + _stop_reason_note(FINAL_GATE_REASON_COMPARISON_BLOCKED)
                 ),
                 sources=sources,
                 corp_type=judgment.corp_type,
@@ -2187,12 +2255,16 @@ class RealPipeline:
                     "사유": list(exc.validation.reasons),
                 }
             )
+            publish_gate_reason = _publish_gate_reason_for_missing_minimum_roles(
+                missing_minimum_roles_after_verify
+            )
             return RunResult(
                 outcome=Outcome.GATE_STOPPED,
                 message=(
                     "필수 회사 사실과 검증 근거가 충분하지 않아 보고서를 "
                     "내보내지 않았습니다. 확인되지 않은 내용을 정상 보고서처럼 "
                     "보여주지 않습니다."
+                    + _stop_reason_note(publish_gate_reason)
                 ),
                 sources=sources,
                 corp_type=judgment.corp_type,
@@ -2203,9 +2275,7 @@ class RealPipeline:
                 model=model,
                 span_selection_diagnostics=tuple(selection_diagnostics),
                 span_selection_result_reason=selection_result_reason_code,
-                final_gate_reason=_publish_gate_reason_for_missing_minimum_roles(
-                    missing_minimum_roles_after_verify
-                ),
+                final_gate_reason=publish_gate_reason,
             )
 
         # ── 13 출력 ──────────────────────────────────────

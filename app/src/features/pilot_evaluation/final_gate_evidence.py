@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import sqlite3
-from typing import Mapping
+from typing import Final, Mapping
 
 from src.shared.final_gate_diagnostics import (
     FINAL_GATE_DIAGNOSTIC_COLUMNS,
@@ -12,6 +12,11 @@ from src.shared.final_gate_diagnostics import (
     FINAL_GATE_DIAGNOSTIC_TABLE,
     SAFE_FINAL_GATE_REASONS,
 )
+
+
+#: 게이트 중단의 옛 이름. 과거 저장본(checkpoint/SQLite)을 읽을 때만 인식하고
+#: 새로 기록하지 않는다.
+LEGACY_GATE_STOPPED_OUTCOME: Final[str] = "자료부족_중단"
 
 
 class FinalGateEvidenceError(RuntimeError):
@@ -61,7 +66,8 @@ def read_bound_reason(
         if table_exists
         else []
     )
-    is_gate_stopped = outcome == gate_stopped_outcome
+    # 과거 저장본은 옛 이름으로 게이트 중단을 기록했다. 읽기 호환으로만 인식한다.
+    is_gate_stopped = outcome in (gate_stopped_outcome, LEGACY_GATE_STOPPED_OUTCOME)
     if not is_gate_stopped:
         if rows:
             raise FinalGateEvidenceError(
@@ -70,7 +76,7 @@ def read_bound_reason(
         return ""
     if len(rows) != 1:
         raise FinalGateEvidenceError(
-            "자료부족 중단에는 최종 게이트 진단 행이 정확히 하나여야 합니다"
+            "게이트 중단에는 최종 게이트 진단 행이 정확히 하나여야 합니다"
         )
 
     row = rows[0]

@@ -42,8 +42,11 @@ class Outcome(str, Enum):
     REJECT_NO_DISCLOSURE = "거부_공시없음"
     #: 올린 것이 채용공고가 아니다
     POSTING_DISCARDED = "공고_폐기"
-    #: 자료가 너무 없어 만들기 전에 멈췄다
-    GATE_STOPPED = "자료부족_중단"
+    #: 출고 전 자동 게이트가 멈췄다 — 자료 부족만이 아니라 응답 절단·검증 거절·
+    #: 비교 중단도 포함한다. 실제 사유는 ``final_gate_reason``이 구분한다.
+    #: 과거 저장본(checkpoint/SQLite)에는 옛 이름 "자료부족_중단"으로 남아 있으며
+    #: 읽는 쪽이 두 이름을 모두 인식한다.
+    GATE_STOPPED = "게이트_중단"
     #: 만들다 실패했다 — 항상 결함
     FAILED = "생성_실패"
 

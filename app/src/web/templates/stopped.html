@@ -11,7 +11,7 @@
     {% elif result.outcome.value == '거부_공시없음' %}분석할 근거를 모을 수 없습니다
     {% elif result.outcome.value == '회사_못찾음' %}회사를 정확히 확인하지 못했습니다
     {% elif result.outcome.value == '공고_폐기' %}회사 분석을 계속할 수 없습니다
-    {% elif result.outcome.value == '자료부족_중단' %}공식 근거가 부족해 보고서를 내보내지 않았습니다
+    {% elif result.outcome.value == '게이트_중단' %}출고 전 자동 검증에서 보고서를 내보내지 않았습니다
     {% else %}오류가 났습니다{% endif %}
   </h1>
   <p class="lede">
@@ -20,7 +20,7 @@
     {% else %}{{ result.message }}{% endif %}
   </p>
 
-  {% if result.outcome.value == '자료부족_중단' %}
+  {% if result.outcome.value == '게이트_중단' %}
     <aside class="evidence-stop-note" aria-labelledby="evidence-stop-meaning">
       <h2 id="evidence-stop-meaning">이 결과의 뜻</h2>
       <p>
@@ -53,9 +53,9 @@
 
   <div class="btn-row">
     <a class="btn" href="/" style="line-height:1.6">
-      {% if result.outcome.value == '자료부족_중단' %}회사·주소 확인하고 다시 시작{% else %}회사·주소 다시 입력{% endif %}
+      {% if result.outcome.value == '게이트_중단' %}회사·주소 확인하고 다시 시작{% else %}회사·주소 다시 입력{% endif %}
     </a>
-    {% if result.outcome.value == '자료부족_중단' and result.sources %}
+    {% if result.outcome.value == '게이트_중단' and result.sources %}
       <a class="btn ghost" href="#stopped-sources-title" style="line-height:1.6">
         확인한 자료 상태 보기
       </a>

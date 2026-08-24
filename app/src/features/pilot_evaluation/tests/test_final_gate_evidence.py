@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 from src.features.pilot_evaluation.final_gate_evidence import (
+    LEGACY_GATE_STOPPED_OUTCOME,
     FinalGateEvidenceError,
     read_bound_reason,
     validate_table_if_present,
@@ -52,6 +53,22 @@ def test_GATE_STOPPED는_정확히_한_행과_lifecycle_시각을_요구한다()
             gate_stopped_outcome=Outcome.GATE_STOPPED.value,
             lifecycle_record={"at": AT},
         )
+    assert reason == FINAL_GATE_REASON_COMPARISON_BLOCKED
+
+
+def test_과거저장본의_옛이름_자료부족중단도_게이트중단으로_읽는다() -> None:
+    # 이름 변경("자료부족_중단"→"게이트_중단") 전에 저장된 checkpoint/SQLite를
+    # 다시 검증할 때도 같은 결속 규칙이 적용돼야 한다 (읽기 호환).
+    with _connection() as conn:
+        _insert(conn)
+        reason = read_bound_reason(
+            conn,
+            run_id=RUN_ID,
+            outcome=LEGACY_GATE_STOPPED_OUTCOME,
+            gate_stopped_outcome=Outcome.GATE_STOPPED.value,
+            lifecycle_record={"at": AT},
+        )
+    assert LEGACY_GATE_STOPPED_OUTCOME != Outcome.GATE_STOPPED.value
     assert reason == FINAL_GATE_REASON_COMPARISON_BLOCKED
 
 

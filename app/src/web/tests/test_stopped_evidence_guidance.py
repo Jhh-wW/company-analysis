@@ -57,7 +57,7 @@ def test_근거부족은_정상보고서가_아니라_의미와_다음행동을_
         job_runtime._JOBS.pop(job_id, None)
 
     assert response.status_code == 200
-    assert "공식 근거가 부족해 보고서를 내보내지 않았습니다" in response.text
+    assert "출고 전 자동 검증에서 보고서를 내보내지 않았습니다" in response.text
     assert "회사에 강점이나 경쟁우위가 없다는 판정이 아닙니다" in response.text
     assert "입력과 공식 자료 상태가 그대로라면" in response.text
     assert "못 가져온 자료가 정상화되거나" in response.text

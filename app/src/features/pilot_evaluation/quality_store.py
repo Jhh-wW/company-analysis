@@ -54,14 +54,18 @@ QUALITY_FILENAME: Final[str] = "canonical-pilot25-quality.json"
 MAX_EVIDENCE_BYTES: Final[int] = 4 * 1024 * 1024
 _AUTOMATIC_RELEASE_TABLE: Final[str] = "pdf_automatic_release_records"
 _REPORT_OUTCOME: Final[str] = "보고서"
-_GATE_STOPPED_OUTCOME: Final[str] = "자료부족_중단"
+_GATE_STOPPED_OUTCOME: Final[str] = "게이트_중단"
+#: 게이트 중단의 옛 이름. 과거 checkpoint/SQLite 저장본 읽기 호환으로만 인식한다.
+_LEGACY_GATE_STOPPED_OUTCOME: Final[str] = "자료부족_중단"
 _OUTCOME_CODES: Final[Mapping[str, str]] = {
     "보고서": "report",
     "회사_못찾음": "not_found",
     "거부_공공기관": "reject_public",
     "거부_공시없음": "reject_no_disclosure",
     "공고_폐기": "posting_discarded",
-    "자료부족_중단": "gate_stopped",
+    _GATE_STOPPED_OUTCOME: "gate_stopped",
+    # 과거 저장본의 옛 이름도 같은 코드로 읽는다 (읽기 호환).
+    _LEGACY_GATE_STOPPED_OUTCOME: "gate_stopped",
     "생성_실패": "failed",
 }
 _NO_RUN_TERMINAL_STATES: Final[frozenset[str]] = frozenset(

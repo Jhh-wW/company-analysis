@@ -136,7 +136,7 @@ def test_최종게이트_저장실패는_lifecycle과_span도_같이_rollback한
         assert final_gate_store.read_for_run(conn, RUN_ID) is None
 
 
-def test_자료부족중단이_아닌결과에는_최종게이트_사유를_기록하지않는다(
+def test_게이트중단이_아닌결과에는_최종게이트_사유를_기록하지않는다(
     tmp_path, monkeypatch
 ) -> None:
     db_path = _configure_paths(tmp_path, monkeypatch)
@@ -154,7 +154,7 @@ def test_자료부족중단이_아닌결과에는_최종게이트_사유를_기�
     assert not db_path.exists()
 
 
-def test_기존_빈사유_자료부족중단은_부속표없이_그대로_기록된다(
+def test_기존_빈사유_게이트중단은_부속표없이_그대로_기록된다(
     tmp_path, monkeypatch
 ) -> None:
     db_path = _configure_paths(tmp_path, monkeypatch)

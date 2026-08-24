@@ -79,7 +79,7 @@ def record_run(
     """
     try:
         if result.final_gate_reason and result.outcome is not Outcome.GATE_STOPPED:
-            raise ValueError("최종 게이트 사유는 자료부족 중단 결과에만 기록할 수 있습니다")
+            raise ValueError("최종 게이트 사유는 게이트 중단 결과에만 기록할 수 있습니다")
         report = result.report
         cells_filled, cells_missing = _observed_cells(report)
         record = RunRecord(
