@@ -9,6 +9,14 @@
   {# 내부 이름은 title에도 넣지 않는다. 화면에는 아래 출처 목록을 가리키는 번호만 필요하다(P-127). #}
   {%- if n -%}<a class="ref" href="#src{{ n }}" title="출처 {{ n }}번">{{ n }}</a>{%- endif -%}
 {% endmacro %}
+{# 본문 문자열에 박힌 [n]을 작은 위첨자 링크로 바꾼다. 본문 글자는 그대로 두고
+   대괄호 표기만 모양을 바꾼다 — 번호를 새로 매기거나 없애지 않는다. #}
+{% macro inline_refs(text) %}
+  {%- for part in split_citation_markers(text) -%}
+    {%- if part.number -%}<a class="ref" href="#src{{ part.number }}" title="출처 {{ part.number }}번">{{ part.number }}</a>
+    {%- else -%}{{ part.text }}{%- endif -%}
+  {%- endfor -%}
+{% endmacro %}
 {% macro refs(numbers) %}
   {%- for n in numbers -%}
     <a class="ref" href="#src{{ n }}" title="출처 {{ n }}번">{{ n }}</a>
@@ -104,9 +112,14 @@
     <section class="report-section" data-report-cell="{{ s.cell }}">
       <h2><span class="no">{{ s.display_number or loop.index }}</span><span class="txt">{{ s.title }}</span>{% if s.tag %}<span class="section-tag">{{ s.tag }}</span>{% endif %}</h2>
       {% if s.prose_lines %}
+      {# ★ 본문 속 [n]을 «작은 위첨자 링크»로 바꿔 인쇄한다. 그냥 {{ text }}로
+         찍으면 본문과 같은 크기의 대괄호 숫자가 문장마다 박혀 읽기가 끊긴다
+         (사용자 신고 — v1은 이미 .ref 위첨자를 쓰는데 v2만 평문이었다).
+         번호는 render.py가 부록과 1:1로 맞춰 넣은 값이라 여기서 새로 매기지
+         않는다 — 모양만 바꾼다. #}
       <p class="prose">
         {%- for text, _cite in s.prose_lines -%}
-          {{ text }}{% if not loop.last %} {% endif %}
+          {{ inline_refs(text) }}{% if not loop.last %} {% endif %}
         {%- endfor -%}
       </p>
       {% endif %}

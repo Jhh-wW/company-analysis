@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Final
 
 
@@ -43,3 +44,38 @@ def citation_marker(cite: str | None) -> str:
 
     number = citation_number(cite)
     return f"〔{number}〕" if number else ""
+
+
+#: 본문 문자열에 박힌 인용 표기 `[12]`. render.py가 넣은 것과 같은 모양이다.
+_INLINE_MARKER_RE: Final[re.Pattern[str]] = re.compile(r"\[(\d+)\]")
+
+
+@dataclass(frozen=True)
+class CitationPart:
+    """본문 한 조각 — 보통 글이거나, 인용 번호 하나."""
+
+    text: str = ""
+    number: int = 0
+
+
+def split_citation_markers(text: str) -> tuple[CitationPart, ...]:
+    """본문 문자열을 «글»과 «인용 번호»로 쪼갠다.
+
+    ★ 왜 필요한가 (사용자 신고) — v2 본문은 `[1]`이 문자열 안에 박힌 채
+      템플릿에서 그대로 인쇄돼, 본문과 «같은 크기»의 대괄호 숫자가 문장마다
+      나온다. v1은 같은 번호를 `.ref` 작은 위첨자 링크로 낸다. 화면이 갈려
+      있던 것이라 v2도 같은 모양으로 맞춘다.
+    ★ 번호를 새로 매기거나 없애지 않는다 — 이미 부록과 1:1로 맞춰진 값이므로
+      «모양만» 바꾼다. 숫자가 아닌 대괄호는 건드리지 않는다.
+    """
+    parts: list[CitationPart] = []
+    last = 0
+    for match in _INLINE_MARKER_RE.finditer(text or ""):
+        if match.start() > last:
+            parts.append(CitationPart(text=text[last : match.start()]))
+        parts.append(CitationPart(number=int(match.group(1))))
+        last = match.end()
+    remainder = (text or "")[last:]
+    if remainder:
+        parts.append(CitationPart(text=remainder))
+    return tuple(parts)

@@ -161,8 +161,15 @@ def test_v2_결과_화면은_장_제목과_인용_해석_표지를_담는다(
     assert "현재 보고서 기준을 통과하지 못해" not in body
     # 장 제목 — v3 정본 제목(기업 정체성)과 표시 번호.
     assert '<span class="no">1</span><span class="txt">기업 정체성</span>' in body
-    # 문장 끝 [n] 인용 — render.sentence_display_text가 이미 문자열에 찍은 것.
-    assert "[1]" in body
+    # 문장 끝 인용은 «작은 위첨자 링크»로 나간다.
+    # ★ 예전에는 render.sentence_display_text가 찍은 「[1]」이 본문 문자열
+    #   그대로 인쇄돼, 본문과 «같은 크기»의 대괄호 숫자가 문장마다 박혔다
+    #   (사용자 신고 — v1은 이미 .ref 위첨자를 쓰는데 v2만 평문이었다).
+    #   번호를 없애거나 새로 매기지 않고 «모양만» 바꾼다.
+    assert '<a class="ref" href="#src1" title="출처 1번">1</a>' in body
+    본문 = body[body.index('<p class="prose">') : body.index("</p>")]
+    assert "[1]" not in 본문, "본문에 평문 대괄호 번호가 남아 있습니다"
+    assert 'class="ref"' in 본문
     # "— 해석" 표지 — 확인/해석을 구분하는 v2 렌더 표지.
     assert INTERPRETATION_MARKER in body
     # 핵심 요약과 출처 부록.
