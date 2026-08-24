@@ -140,8 +140,43 @@ FRAGMENT_KIND: Final[str] = "홈페이지"
 #: 비전·보도자료를 먼저 읽는다. IR 자료실과 PDF는 별도 공식 IR 수집기가
 #: 담당하므로, IR·주가·실적 목록이 6쪽 예산을 먼저 소진해 핵심 페이지를
 #: 놓치게 하면 안 된다.
+#:
+#: ★ `about` 바로 다음 묶음은 8장「인재상과 일하는 방식」의 재료다 —
+#:   경영철학·경영이념·핵심가치·인재상·윤리기준. 이 페이지들은 이름에
+#:   `about`·`business`가 없어 `company`(회사 공통 경로)로만 걸렸고, 그러면
+#:   연혁·조직도·CI/BI와 같은 순위가 되어 `MAX_PAGES`(6쪽) 예산 밖으로 밀린다.
+#:   실측((주)진영, 2026-08-25): 경영철학이 실린 `/company/overview.php`가
+#:   후보 42개 중 18번째라 6쪽 안에 못 들어왔다. `MAX_PAGES`를 올리면 모든
+#:   회사의 수집 시간이 늘어나므로, 예산은 그대로 두고 «순서»만 바꾼다.
+#:
+#: ⚠️ 여기 앞쪽에 넣는 말은 «회사 소개 경로에서만 쓰이는» 것으로 제한한다.
+#:   흔한 일반 단어를 올리면 엉뚱한 페이지가 6쪽을 먼저 차지한다.
+#:   실측 반례(삼성전자, 2026-08-25): 맨 앞에 `overview`만 넣었더니
+#:   `/sustainability/accessibility/overview/`가 1등이 되어 접근성 하위
+#:   페이지가 예산을 다 먹었고, 경영이념(인재제일·최고지향·변화선도·정도경영·
+#:   상생추구)이 실린 `/about-us/brand-identity/brand-story/`를 **놓쳤다**.
+#:   그래서 맨몸 `overview`는 앞에 두지 않고, 회사 경로와 붙은
+#:   `company/overview` 꼴만 앞에 둔다. 맨몸 `overview`는 `company` 바로
+#:   앞(연혁·조직도보다는 먼저, `about`·사업·비전보다는 나중)에 둔다.
 PRIORITY_PATH_KEYWORDS: Final[tuple[str, ...]] = (
     "about",
+    # ── 8장 재료: 경영철학·핵심가치·인재상·윤리 ──
+    "philosophy",
+    "경영철학",
+    "경영이념",
+    "핵심가치",
+    "corevalue",
+    "core-value",
+    "core_value",
+    "인재상",
+    "talent",
+    # 맨몸 `overview`가 아니라 «회사 경로에 붙은» 개요만 앞에 둔다 (위 반례).
+    "company/overview",
+    "company-overview",
+    "company_overview",
+    "ethics",
+    "윤리",
+    # ── 회사·사업 소개 ──
     "business",
     "vision",
     "press",
@@ -150,6 +185,8 @@ PRIORITY_PATH_KEYWORDS: Final[tuple[str, ...]] = (
     "companyintro",
     "introduce",
     "greeting",
+    # 맨몸 개요 — 연혁·조직도·CI/BI(`company`)보다는 먼저 읽는다.
+    "overview",
     "company",
     "product",
     "products",

@@ -860,3 +860,78 @@ def test_www_접두사_차이만_있어도_같은_회사로_본다():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# ── 8장「인재상과 일하는 방식」재료 우선순위 ────────────────
+#
+# 실측 배경(2026-08-25): (주)진영의 경영철학은 `/company/overview.php`에 있는데
+# `company`로만 걸려 후보 42개 중 18번째였고 6쪽 예산 밖으로 밀렸다.
+# 아래 두 시험은 그 순서를 못 박는다 — 하나는 「들어와야 한다」, 하나는
+# 「그렇다고 아무 overview나 올리면 안 된다」는 반대쪽 못이다.
+
+
+def _priority_pages(root: str, paths: tuple[str, ...]) -> dict[str, str]:
+    """루트에서 주어진 경로들로 링크가 나가는 가짜 사이트를 만든다."""
+    links = "".join(f'<a href="{path}">{path}</a>' for path in paths)
+    pages = {root: f"<html><body><p>루트 소개 문단입니다.</p>{links}</body></html>"}
+    for path in paths:
+        pages[f"{root}{path}"] = (
+            "<html><body><p>" + (f"{path} 내용입니다. " * 10) + "</p></body></html>"
+        )
+    return pages
+
+
+def test_경영철학_페이지를_연혁_조직도보다_먼저_읽는다():
+    """경영철학·핵심가치·인재상은 6쪽 예산 안에 들어와야 한다.
+
+    ★ 진영 실측 재현: `/company/overview`가 `/company/history`·`/company/ci`와
+      같은 순위(`company`)면 알파벳순으로 밀려 예산 밖으로 나간다.
+    """
+    paths = (
+        "/company/ci",
+        "/company/bi",
+        "/company/history",
+        "/company/organization",
+        "/company/overview",
+        "/esg/business_ethics",
+        "/ko/인재상",
+        "/ko/핵심가치",
+    )
+    fetch, calls = _fake_fetch(_priority_pages(ROOT, paths))
+
+    collect_homepage_fragments(ROOT, fetch=fetch)
+
+    page_calls = [c for c in calls if not c.endswith("robots.txt")]
+    읽은_경로 = set(page_calls)
+    for 재료 in ("/company/overview", "/esg/business_ethics", "/ko/인재상", "/ko/핵심가치"):
+        assert f"{ROOT}{재료}" in 읽은_경로, (
+            f"8장 재료 {재료} 가 {MAX_PAGES}쪽 예산 밖으로 밀렸습니다"
+        )
+    # 연혁·CI·BI·조직도는 8장 재료에 자리를 내준다 — 예산이 6쪽뿐이기 때문이다.
+    for 뒷순위 in ("/company/history", "/company/ci", "/company/bi"):
+        if f"{ROOT}{뒷순위}" in 읽은_경로:
+            assert page_calls.index(f"{ROOT}/company/overview") < page_calls.index(
+                f"{ROOT}{뒷순위}"
+            ), f"{뒷순위} 를 경영철학보다 먼저 읽었습니다"
+
+
+def test_회사와_무관한_overview는_회사소개보다_앞서지_않는다():
+    """맨몸 `overview`를 맨 앞에 두면 안 된다는 반대쪽 못.
+
+    ★ 삼성전자 실측 반례(2026-08-25): `overview`를 1순위로 올렸더니
+      `/sustainability/accessibility/overview/`가 예산을 다 먹고, 경영이념
+      (인재제일·최고지향·변화선도·정도경영·상생추구)이 실린
+      `/about-us/brand-identity/brand-story/`를 놓쳤다.
+    """
+    paths = (
+        "/sustainability/accessibility/overview",
+        "/about-us/brand-identity",
+    )
+    fetch, calls = _fake_fetch(_priority_pages(ROOT, paths))
+
+    collect_homepage_fragments(ROOT, fetch=fetch)
+
+    page_calls = [c for c in calls if not c.endswith("robots.txt")]
+    assert page_calls.index(f"{ROOT}/about-us/brand-identity") < page_calls.index(
+        f"{ROOT}/sustainability/accessibility/overview"
+    ), "회사소개(about)보다 접근성 overview를 먼저 읽으면 경영이념을 놓칩니다"
