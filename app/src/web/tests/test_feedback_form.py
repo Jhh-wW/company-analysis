@@ -186,9 +186,15 @@ def test_post_성공하면_접수확인화면을_보여주고_원문그대로_�
     # 저장은 원문 그대로 — escape는 렌더 계층의 몫이다.
     assert stored.body == hostile_body
     assert stored.company_name == "삼성전자"
-    # 신고자 식별자는 원문 이메일이 아니라 SHA-256 지문이다.
-    assert len(stored.reporter_key) == 64
-    assert all(ch in "0123456789abcdef" for ch in stored.reporter_key)
+    # 신고자 식별자는 «갈래 라벨:SHA-256 지문»이다 — 원문 이메일은 아니다.
+    # ★ 갈래 라벨(admin/member/link/public)이 reporter_key 앞에 붙는다
+    #   (2026-08-25 추가) — 관리자가 «회원 신고인지 링크 손님 신고인지»조차
+    #   구분 못 하던 실측 결함을 고치면서 바뀐 계약. 지문 부분의 길이·문자
+    #   구성·원문 비저장 보장은 그대로 지킨다.
+    assert stored.reporter_key.startswith("admin:")
+    digest = stored.reporter_key.split(":", 1)[1]
+    assert len(digest) == 64
+    assert all(ch in "0123456789abcdef" for ch in digest)
     assert "admin@example.com" not in stored.reporter_key
 
 
@@ -219,7 +225,10 @@ def test_post_검증실패는_메시지와_입력을_보존하며_escape한다()
 
 def test_post_하루상한_초과는_429와_상한메시지를_보여준다():
     client, csrf = _session_client()
-    reporter_key = spend_store.bucket_id("user:admin@example.com")
+    # ★ 실제 POST가 계산할 reporter_key와 같은 모양(admin: 접두)으로 미리
+    #   채워야 상한 판정이 같은 신고자로 묶인다 — 접두가 다르면 다른
+    #   신고자로 보여 상한에 걸리지 않는다(2026-08-25 계약 변경 반영).
+    reporter_key = f"admin:{spend_store.bucket_id('user:admin@example.com')}"
     with storage_db.connect() as conn:
         for _ in range(feedback_constants.DAILY_CREATE_LIMIT_PER_REPORTER):
             feedback_logic.create_report(
@@ -253,7 +262,10 @@ def test_PUBLIC이라도_초대안된_계정_하나가_상한을_채워도_다�
     전체의 신고가 그날 막혔다(실측 결함, 계정 하나로 신고 채널 전체를 잠그는
     DoS). 이제는 세션(로그인)이 있는 손님이면 계정별로 다른 통장을 쓴다."""
     stage = feedback_constants.STAGE_COMPANY_SELECT
-    reporter_key_a = spend_store.bucket_id(
+    # ★ 초대 안 된 손님은 track_of()가 여전히 PUBLIC을 돌려준다(초대 명단
+    #   여부가 기준 — decide_track). 통장만 계정별로 MEMBER 모양을 빌려
+    #   쓸 뿐 갈래 라벨은 "public:"이다(2026-08-25 계약 변경 반영).
+    reporter_key_a = "public:" + spend_store.bucket_id(
         share_tracks.bucket_of(
             share_tracks.Track.MEMBER, email="stranger-a@example.com", share_key=""
         )
@@ -318,8 +330,12 @@ def test_reporter_key는_PUBLIC_세션이_있으면_계정마다_다르다():
     key_b = feedback._reporter_key(request_b)
 
     assert key_a != key_b
-    # 원문 이메일이 아니라 SHA-256 지문이다 (원문 식별자 저장 금지 원칙 유지).
-    assert len(key_a) == 64 and all(ch in "0123456789abcdef" for ch in key_a)
+    # ★ 로그인은 했지만 초대 명단에 없는 세션이라 갈래는 "public:"이다.
+    #   지문 부분(콜론 뒤)은 여전히 원문 이메일이 아니라 SHA-256이다
+    #   (원문 식별자 저장 금지 원칙 유지, 2026-08-25 계약 변경 반영).
+    assert key_a.startswith("public:") and key_b.startswith("public:")
+    digest_a = key_a.split(":", 1)[1]
+    assert len(digest_a) == 64 and all(ch in "0123456789abcdef" for ch in digest_a)
     assert "session-a@example.com" not in key_a
 
 
@@ -329,7 +345,9 @@ def test_reporter_key는_세션조차_없는_진짜_익명만_공용_버킷을_�
 
     key = feedback._reporter_key(request)
 
-    assert key == spend_store.bucket_id(PUBLIC_BUCKET)
+    # ★ 진짜 익명도 갈래 라벨("public:")은 붙는다 — 지문(통장)만 공용이다
+    #   (2026-08-25 계약 변경 반영).
+    assert key == f"public:{spend_store.bucket_id(PUBLIC_BUCKET)}"
 
 
 def test_post_csrf가_틀리면_거절되고_아무것도_저장되지_않는다():

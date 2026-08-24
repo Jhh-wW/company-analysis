@@ -28,6 +28,7 @@ from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
 from src.features.storage import sessions as session_store
 from src.web import deployment_mode, job_runtime, paid_runtime, request_helpers, runtime
+from src.web.routers import feedback as feedback_router
 from src.web.security import (
     COMPANY_MAX_CHARS,
     CSRF_TOKEN_MAX_CHARS,
@@ -1198,6 +1199,10 @@ async def admin_feedback_reports(
             ),
             feedback_page_url_prefix=page_url_prefix,
             feedback_keyword_max_chars=feedback_constants.MAX_KEYWORD_CHARS,
+            # ★ 신고자 «갈래»(회원/링크 손님/비회원/관리자)만 화면에 올린다.
+            #   reporter_key의 지문(해시) 부분은 이 함수가 아예 반환하지
+            #   않는다 — 화면·캡처로 새어 나갈 값을 만들지 않기 위해서다.
+            reporter_track_label=feedback_router.reporter_track_label,
         ),
         status_code=400 if filter_error else 200,
     )
@@ -1249,6 +1254,8 @@ def _feedback_report_detail_page(
                 found.admin_note if note_value is None else note_value
             ),
             feedback_admin_note_max_chars=feedback_constants.MAX_ADMIN_NOTE_CHARS,
+            # ★ 목록과 같은 함수 — 갈래만 노출, 지문은 절대 넘기지 않는다.
+            reporter_track_label=feedback_router.reporter_track_label,
         ),
         status_code=status_code,
     )

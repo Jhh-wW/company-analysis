@@ -78,6 +78,7 @@
     <thead><tr>
       <th scope="col">신고 ID</th>
       <th scope="col">대상</th>
+      <th scope="col">신고자</th>
       <th scope="col">유형</th>
       <th scope="col">접수일</th>
       <th scope="col">처리 상태</th>
@@ -92,6 +93,10 @@
         {{ item.company_name or "—" }}
         {% if item.report_ref %}<br><span class="muted">{{ item.report_ref }}</span>{% endif %}
       </td>
+      {# ★ 신고자 «갈래»만 보여준다(회원/링크 손님/비회원/관리자/알 수 없음) —
+         원문 이메일·열쇠·지문은 애초에 reporter_track_label()이 돌려주지
+         않는다(feedback.py 참고). #}
+      <td>{{ reporter_track_label(item.reporter_key) }}</td>
       <td>
         {{ item.category }}
         <br><span class="muted">{{ item.stage }} 단계</span>

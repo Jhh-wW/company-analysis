@@ -24,6 +24,9 @@
     <table aria-label="신고 정보">
       <tbody>
         <tr><th scope="row">접수 시각</th><td>{{ feedback_created_at_label }} <span class="muted">(기준일 {{ feedback_report.day }})</span></td></tr>
+        {# ★ 신고자 «갈래»만 보여준다 — 원문 이메일·열쇠·지문은 표시하지
+           않는다(reporter_track_label()이 애초에 돌려주지 않는다). #}
+        <tr><th scope="row">신고자</th><td>{{ reporter_track_label(feedback_report.reporter_key) }}</td></tr>
         <tr><th scope="row">신고 단계</th><td>{{ feedback_report.stage }}</td></tr>
         <tr><th scope="row">신고 유형</th><td>{{ feedback_report.category }}</td></tr>
         <tr><th scope="row">기업명</th><td>{{ feedback_report.company_name or "—" }}</td></tr>

@@ -686,11 +686,53 @@ def _release_state(
         candidate = _candidate_for_report(report_id, report)
         digest = report_sha256(report)
         with storage_db.connect() as conn:
-            stored_record = pdf_release_store.load_automatic_release_record(
-                conn,
-                report_id=report_id,
-                report_sha256=digest,
-                pdf_sha256=candidate.pdf_sha256,
+            # ★ 재대조보다 먼저 «이미 확정됐는지»부터 본다. PDF를 그리는
+            #   코드(report_standard/visualization.py 등)가 바뀌면 보고서
+            #   내용은 그대로인데 candidate.pdf_sha256만 달라질 수 있다 —
+            #   원문 바이트를 DB에 남기지 않고 매번 다시 그려서 해시로만
+            #   결속하는 설계라 재렌더가 저장 당시와 «영원히 같아야 한다»는
+            #   요구는 지킬 수 없는 계약이다. 아래에서 이미 완료된 건에
+            #   한해 그 요구를 내려놓는다(already_completed).
+            link_run = share_store.load_run_by_report_id(conn, report_id)
+        already_completed = (
+            link_run is not None
+            and link_run.status == share_store.RUN_STATUS_COMPLETED
+            and link_run.report_id == report_id
+        )
+        stored_record = None
+        try:
+            with storage_db.connect() as conn:
+                stored_record = pdf_release_store.load_automatic_release_record(
+                    conn,
+                    report_id=report_id,
+                    report_sha256=digest,
+                    pdf_sha256=candidate.pdf_sha256,
+                )
+        except PDFReleaseBlockedError:
+            if not already_completed:
+                raise
+            # ★ 이미 확정된 건에서만 이 예외를 흡수한다. 여기서 막힌 이유는
+            #   «출고 당시 저장된 pdf_sha256과 지금 렌더가 다르다»는 것뿐
+            #   이며, 그 자체는 위조 신호가 아니다(아래 already_completed
+            #   분기가 실제 위조/손상 여부를 별도로 다시 검사한다).
+            stored_record = None
+        if stored_record is None and already_completed:
+            # ★ 저장된 해시가 «정본»이다 — 재대조 실패를 이유로 이미 확정된
+            #   보고서를 영영 못 열게 만들지 않는다. 다만 진짜 위조·손상
+            #   탐지까지 포기하진 않는다: automatic_release_pdf 내부의
+            #   4검사(정본·PDF 무결성·채널 동등성·해시 자기일관성)는 «이력과
+            #   비교»가 아니라 «지금 렌더 자체가 온전한가»를 보므로 그대로
+            #   태운다 — 여기서 실패하면(예: 보고서 내용이 실제로 깨졌다면)
+            #   여전히 PDFReleaseBlockedError로 막힌다.
+            #   ★ 이미 완료된 건은 새 자동출고 기록을 DB에 남기지도, run
+            #   이력(pdf_sha256·release_sha256·청구액)을 재기록하지도 않는다
+            #   — 최초 승인·청구 기록을 렌더러가 갱신될 때마다 덮어쓰면 감사
+            #   이력이 흔들리고 이중 청구 위험도 생긴다.
+            return candidate, automatic_release_pdf(
+                report,
+                candidate,
+                released_at=clock.iso_now_kst(),
+                content_validator=_content_validator_for(report),
             )
         if stored_record is None:
             released = automatic_release_pdf(
@@ -828,6 +870,15 @@ def _render_result_page(
                 )
         except Exception:
             logger.exception("현재 보고서 버전의 기존 MEMBER 설문을 읽지 못했습니다")
+    # ★ 오류 신고는 MEMBER 설문과 달리 링크 손님도 낼 수 있어야 한다
+    #   (사용자 확정: 대상은 「로그인 회원 + 링크 손님」, 완전 익명은 제외).
+    #   resolved_track은 위에서 이미 계산해 둔 «지금 이 요청이 유효한 LINK
+    #   쿠키로 들어왔는지»다 — 만료·철회된 링크는 애초에 Track.LINK가 아니라
+    #   PUBLIC으로 떨어지므로(request_helpers._track_of → _raw_share_key)
+    #   여기서 다시 만료를 검사할 필요가 없다.
+    feedback_report_allowed = (
+        bool(member_email) or resolved_track[0] is share_tracks.Track.LINK
+    )
     return job_runtime._shared(
         request_helpers.templates.TemplateResponse(
             request=request,
@@ -841,6 +892,7 @@ def _render_result_page(
                 notion_configured=is_notion_configured(),
                 internal_review_preview=internal_review_preview,
                 member_feedback_allowed=bool(member_email),
+                feedback_report_allowed=feedback_report_allowed,
                 member_survey=member_survey,
                 member_feedback_report_version=member_feedback_report_version,
                 member_feedback_draft_key=(

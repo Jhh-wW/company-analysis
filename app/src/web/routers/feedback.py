@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Final
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse
@@ -54,8 +55,14 @@ def _clean_report_ref(value: str) -> str:
     return str(value or "").strip()[: constants.MAX_REPORT_REF_CHARS]
 
 
+#: reporter_key 앞에 붙는 갈래 라벨과 원문 지문 사이의 구분자.
+#: track.value("member"/"link"/"public"/"admin")는 콜론이 없는 닫힌 목록이라
+#: 이 구분자로 라벨과 지문 경계가 흔들릴 일이 없다.
+_REPORTER_TRACK_SEPARATOR: Final[str] = ":"
+
+
 def _reporter_key(request: Request) -> str:
-    """원문 이메일·열쇠 대신 기존 지출 통장 지문을 신고자 식별자로 재사용한다.
+    """신고자 갈래 라벨 + 지출 통장 지문을 신고자 식별자로 쓴다.
 
     ``request_helpers._track_of()``가 이미 ADMIN/MEMBER는 이메일, LINK는 열쇠로
     손님을 나눠 돌려준다. 문제는 PUBLIC 갈래다 — ``tracks.bucket_of()``는
@@ -69,6 +76,11 @@ def _reporter_key(request: Request) -> str:
     다른 통장이 생겨 한 계정이 계층 전체를 잠그지 못한다. 세션조차 없는
     «진짜 익명»만 공용 통장을 공유한다(원문 이메일·열쇠는 여기서도 저장하지
     않는다 — ``spend_store.bucket_id()``가 SHA-256 지문으로만 바꾼다).
+
+    ★ 앞에 track.value를 그대로 남기는 이유 — 지문만 저장하면 관리자가
+    「이 신고가 회원이 낸 건지 링크 손님이 낸 건지」조차 구분 못 했다(실측
+    결함). 라벨은 닫힌 목록(admin/member/link/public)이라 개인정보가 아니고,
+    원문 이메일·열쇠는 여전히 저장하지 않는다 — 구분되는 건 «갈래»뿐이다.
     """
     track, bucket, _cap = request_helpers._track_of(request)
     if track is share_tracks.Track.PUBLIC:
@@ -78,7 +90,42 @@ def _reporter_key(request: Request) -> str:
             bucket = share_tracks.bucket_of(
                 share_tracks.Track.MEMBER, email=email, share_key=""
             )
-    return spend_store.bucket_id(bucket)
+    return f"{track.value}{_REPORTER_TRACK_SEPARATOR}{spend_store.bucket_id(bucket)}"
+
+
+#: reporter_key 갈래 라벨을 관리자 화면용 한국어로 옮긴다 — 상수로 빼서
+#: 매직 문자열을 피한다(admin.py가 그대로 가져다 쓴다).
+#: ★ track.value(닫힌 목록)만 키로 쓴다. 원문 이메일·열쇠·지문은 이 표에도,
+#:   화면에도 절대 올리지 않는다 — 갈래만 구분되면 충분하고, 지문까지
+#:   찍으면 캡처·공유로 새어 나갈 이유만 늘어난다.
+REPORTER_TRACK_LABELS_KO: Final[dict[str, str]] = {
+    share_tracks.Track.ADMIN.value: "관리자",
+    share_tracks.Track.MEMBER.value: "회원",
+    share_tracks.Track.LINK.value: "링크 손님",
+    share_tracks.Track.PUBLIC.value: "비회원",
+}
+
+#: 갈래 라벨 도입(2026-08-25) 이전에 저장된 옛 reporter_key는 접두가 없는
+#: raw SHA-256 지문뿐이다 — 갈래를 알 방법이 없으므로 이 라벨로 고정한다.
+REPORTER_TRACK_UNKNOWN_LABEL: Final[str] = "알 수 없음"
+
+
+def reporter_track_label(reporter_key: str) -> str:
+    """저장된 reporter_key에서 «갈래»만 한국어로 뽑아 관리자 화면에 보여준다.
+
+    지문(콜론 뒤)은 그대로 버린다 — 반환값에 절대 포함하지 않는다.
+
+    ★ 옛 기록 호환 — 접두 자체가 없으면(콜론이 없으면) 이 라벨을 붙이기
+      전에 만들어진 기록이다. 예외를 내지 않고 «알 수 없음»으로 고정한다.
+    ★ 모르는 갈래 — track 라벨이 있는데도 REPORTER_TRACK_LABELS_KO에 없는
+      값이면(예: 이후 새 Track이 추가됐는데 이 표를 못 따라간 경우) 화면이
+      깨지지 않도록 원문 라벨을 그대로 보여준다(빈 화면·예외보다 낫다).
+    """
+    raw = str(reporter_key or "")
+    prefix, separator, _digest = raw.partition(_REPORTER_TRACK_SEPARATOR)
+    if not separator:
+        return REPORTER_TRACK_UNKNOWN_LABEL
+    return REPORTER_TRACK_LABELS_KO.get(prefix, prefix)
 
 
 def _form_context(
@@ -156,6 +203,16 @@ async def feedback_form_submit(
     blocked = request_helpers.require_analysis_action_csrf(request, csrf_token)
     if blocked is not None:
         return blocked
+    if not request_helpers._request_csrf_secret(request):
+        # ★ require_analysis_action_csrf는 회사 확인·거절·조사 시작(confirm·run)을
+        #   위해 설계됐다 — 그 화면들은 돈·권한이 없는 DemoPipeline 손님이면
+        #   완전 익명이어도 same-origin만 맞으면 통과시킨다(무료 미리보기라
+        #   안전하기 때문). 오류 신고는 대상이 다르다: 로그인 회원과 링크
+        #   손님만 대상이고, 완전 익명(세션도 유효한 LINK 쿠키도 없음)은
+        #   대상이 아니다(사용자 확정). 그래서 위 CSRF 통과와 별개로
+        #   «신원 자체가 있는가»를 한 번 더 본다 — 없으면 DemoPipeline의
+        #   완화를 그대로 물려받지 않고 여기서 막는다.
+        return request_helpers._csrf_rejected()
 
     clean_stage = _clean_stage(stage)
     clean_company = _clean_company(company)
