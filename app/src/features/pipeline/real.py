@@ -3167,7 +3167,11 @@ def _homepage_url_for_collector(raw: str) -> str:
     if not raw_host:
         # 주소가 비었거나 링크로 만들 수 없는 모양이다. 접속을 시도할 이유가 없다.
         return raw
-    # `workable_url`은 lru_cache라 회사 확인 화면에서 이미 부른 주소면 재접속하지 않는다.
+    # `workable_url`은 `@lru_cache(maxsize=256)`이라(homepage/link.py:140) 회사 확인
+    # 화면에서 이미 부른 주소면 «보통은» 재접속하지 않는다.
+    # ⚠️ 「안 한다」가 아니라 「보통은 안 한다」다 — ①캐시가 256곳을 넘기면 밀려나고
+    #   ②확인 화면을 거치지 않고 바로 본조사가 도는 경로가 있는지는 확정하지 못했다
+    #   (검수 2026-08-25). 빗나가도 접속 1회가 더 늘 뿐 안전성 문제는 아니다.
     candidate = homepage_link.workable_url(raw)
     if not candidate or _homepage_compare_host(candidate) != raw_host:
         return raw
