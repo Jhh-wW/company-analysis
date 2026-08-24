@@ -20,7 +20,11 @@ from src.features.pipeline.section567_contract import (
     VALUE_CHAIN_STAGE_LABELS,
 )
 from src.features.provenance.sources import Source
-from src.features.report_standard.constants import COMPARISON_JUDGMENT_LABELS
+from src.features.report_standard.constants import (
+    COMPARISON_JUDGMENT_LABELS,
+    RELATIONSHIP_KEY_FALLBACK_LABEL,
+    RELATIONSHIP_KEY_LABELS,
+)
 from src.shared.comparison_candidate_basis import parse_comparison_basis
 
 
@@ -84,6 +88,29 @@ def _field(label: str, value: object, fallback: str = "") -> ContentField:
     return ContentField(label=label, value=_clean(value, fallback))
 
 
+#: 조립기 폴백이 남기는 영문 내부 키 모양. 정상 한국어 문장·캡션은 걸리지 않는다.
+_INTERNAL_KEY_SHAPE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def _relationship_display(value: object) -> str:
+    """relationship_or_action에 폴백된 내부 키를 화면용 한국어로 바꾼다.
+
+    조립기(canonical_report._fact_from_claim)는 이 필드를 채울 값이 없으면
+    claim_type·section_id 내부 키를 그대로 남긴다. v1에서는 폴백 자체를
+    지우면 사실 원장·해시 봉인이 연쇄로 깨지므로 렌더에서만 변환한다.
+    빈 문자열을 새로 만들어 돌려주면 출고 게이트의 빈 항목 검사에 걸려
+    보고서 전체가 차단되므로, 맵에 없는 내부 키도 기본 라벨로 바꾼다.
+    """
+
+    cleaned = _clean(value)
+    label = RELATIONSHIP_KEY_LABELS.get(cleaned)
+    if label is not None:
+        return label
+    if _INTERNAL_KEY_SHAPE.fullmatch(cleaned):
+        return RELATIONSHIP_KEY_FALLBACK_LABEL
+    return cleaned
+
+
 def _source_number_map(report: Report) -> dict[str, int]:
     return {
         item.source_id: item.number
@@ -135,21 +162,21 @@ def _identity_blocks(
             fields = (
                 _field("정체성 요약", fact.claim),
                 _field("근거 사업 범위", fact.subject_scope),
-                _field("산업 내 역할", fact.relationship_or_action),
+                _field("산업 내 역할", _relationship_display(fact.relationship_or_action)),
             )
         elif fact.claim_type == "official_self_definition":
             title = "회사의 공식 자기정의"
             fields = (
                 _field("공식 자기정의", fact.claim),
                 _field("적용 범위", fact.subject_scope),
-                _field("산업 내 역할", fact.relationship_or_action),
+                _field("산업 내 역할", _relationship_display(fact.relationship_or_action)),
             )
         elif fact.claim_type == "operating_scope":
             title = "산업에서 맡는 역할"
             fields = (
                 _field("산업 내 역할", fact.claim),
                 _field("사업 범위", fact.subject_scope),
-                _field("확인 근거", fact.relationship_or_action),
+                _field("확인 근거", _relationship_display(fact.relationship_or_action)),
             )
         else:
             continue
@@ -172,7 +199,7 @@ def _business_blocks(
         if fact.claim_type == "revenue_model":
             fields = (
                 _field("수익 경로", fact.claim),
-                _field("가치·거래 방식", fact.relationship_or_action),
+                _field("가치·거래 방식", _relationship_display(fact.relationship_or_action)),
                 _field(
                     "가격·계약·반복 조건",
                     fact.limitations or fact.limitation,
@@ -455,7 +482,7 @@ def _operations_blocks(
                         "관계 유형",
                         RELATIONSHIP_TYPE_LABELS.get(fact.relationship_type, ""),
                     ),
-                    _field("확인된 역할", fact.relationship_or_action),
+                    _field("확인된 역할", _relationship_display(fact.relationship_or_action)),
                     _field(
                         "운영 범위·한계",
                         "현재 상태: 공식 근거에서 현재 운영 확인 · "

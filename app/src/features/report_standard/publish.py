@@ -2371,6 +2371,19 @@ def _declared_candidate_fact_ids(report: Report) -> set[str]:
     }
 
 
+#: 화면 값으로 절대 그대로 나가면 안 되는 닫힌 claim_type 내부 키 전체.
+#: 렌더 라벨맵(section_content._relationship_display)이 정상 작동하면 걸릴 일이
+#: 없는 안전망이다. 실행계획 v2 02장 1-A가 명시 허용한 유일한 게이트 추가.
+_INTERNAL_CLAIM_TYPE_KEYS: frozenset[str] = frozenset(
+    key
+    for keys in (
+        *CANONICAL_CLAIM_TYPES_BY_SECTION.values(),
+        *INTERNAL_ONLY_CLAIM_TYPES_BY_SECTION.values(),
+    )
+    for key in keys
+)
+
+
 def _section_projection_problems(
     report: Report,
     section: ReportSection,
@@ -2423,7 +2436,8 @@ def _section_projection_problems(
         labels: set[str] = set()
         for field_index, field in enumerate(block.fields, start=1):
             label = field.label.strip()
-            if not label or not field.value.strip():
+            value = field.value.strip()
+            if not label or not value:
                 problems.append(
                     f"[presentation] {section.cell}: 구조 블록 {block_index}의 "
                     f"{field_index}번 항목이 비었습니다"
@@ -2432,6 +2446,12 @@ def _section_projection_problems(
                 problems.append(
                     f"[presentation] {section.cell}: 구조 블록 {block_index}에 "
                     f"'{label}' 항목이 중복됐습니다"
+                )
+            # 안전망: 내부 claim_type 키가 화면 값으로 그대로 나가는 것을 막는다.
+            if value in _INTERNAL_CLAIM_TYPE_KEYS:
+                problems.append(
+                    f"[presentation] {section.cell}: 구조 블록 {block_index}의 "
+                    f"{field_index}번 항목이 내부 키 '{value}'를 그대로 노출합니다"
                 )
             labels.add(label)
 

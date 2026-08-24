@@ -216,3 +216,42 @@ CANONICAL_CLAIM_TYPES_BY_SECTION: Final[dict[str, frozenset[str]]] = {
 }
 SUMMARY_MIN_ITEMS: Final[int] = 3
 SUMMARY_MAX_ITEMS: Final[int] = 5
+
+#: relationship_or_action에 내부 claim_type 키가 폴백된 경우의 화면용 한국어 라벨.
+#: 조립기(canonical_report._fact_from_claim)는 이 필드를 채울 값이 없으면
+#: claim_type 내부 키를 그대로 남기므로, 렌더는 이 맵을 경유해 한국어로 바꾼다.
+#: CANONICAL_CLAIM_TYPES_BY_SECTION의 모든 claim_type 키를 빠짐없이 포함해야
+#: 하며, 완전성은 시험(test_render_no_internal_keys.py)이 보장한다.
+RELATIONSHIP_KEY_LABELS: Final[dict[str, str]] = {
+    # 1장 기업 정체성
+    "identity_summary": "공식 자료 기반 정체성 요약",
+    "official_self_definition": "회사의 공식 자기정의",
+    "operating_scope": "공식 자료에 적힌 사업 범위",
+    # 2장 사업 구조와 수익 모델
+    "revenue_model": "공식 자료 기반 수익 구조",
+    "customer_market": "공식 자료 기반 고객·시장",
+    "revenue_mix": "공식 자료 기반 수익 구성",
+    # 3장 핵심 제품·서비스
+    "priority_product": "공식 자료 기반 중점 제품·서비스",
+    # 4장 3개년 주요 변화와 실행
+    "completed_execution": "공식 자료로 확인된 완료 실행",
+    "change_interpretation": "공식 실적에 근거한 변화 해석",
+    "historical_performance": "완료 사업연도 공식 실적",
+    # 5장 당면 과제와 대응
+    "current_issue": "공식 자료로 확인된 현재 과제",
+    "current_response": "공식 자료로 확인된 진행 중 대응",
+    # 6장 성장 전략
+    "future_plan": "공식 발표된 미실행 계획",
+    # 7장 사업 운영과 파트너 구조
+    "operating_core": "공식 자료 기반 핵심 운영",
+    "partner_role": "공식 자료 기반 파트너 역할",
+    # 8장 인재상과 일하는 방식
+    "official_value": "회사의 공식 가치",
+    "work_example": "공식 자료 기반 업무 사례",
+    # 9장 동종업계 비교
+    "competitive_comparison": "공식 자료 기반 동종업계 비교",
+}
+
+#: 맵에 없는 영문 내부 키가 폴백돼도 빈 문자열 대신 쓰는 기본 라벨.
+#: 빈 값은 출고 게이트의 빈 항목 검사에 걸려 보고서 전체 차단을 일으킨다.
+RELATIONSHIP_KEY_FALLBACK_LABEL: Final[str] = "공식 자료 기반 확인 항목"
