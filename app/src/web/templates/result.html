@@ -52,6 +52,7 @@
   <li><span class="legend-swatch tone-{{ composition_tone(loop.index0, visual.items|length) }}" aria-hidden="true"></span><span>{{ item.label }}</span><strong>{{ item.display }}</strong></li>
   {% endfor %}
   </ul>
+  {% if visual.reading %}<p class="chart-reading">{{ visual.reading }}</p>{% endif %}
   <p class="chart-note">자료{{ ref(t.cite) }} · {{ visual.note }}</p>
   </figure>
   {% elif visual and visual.kind == 'trend' %}
@@ -59,6 +60,23 @@
   <figcaption class="cap" id="{{ table_id }}-caption">
   {{ t.caption }}{{ ref(t.cite) }}
   </figcaption>
+  {# ★ 3개년 «변화 요약» — 막대 위에 둔다. 목업이 그렇게 했고, 독자가
+     그림을 보기 «전»에 무엇이 얼마나 변했는지 먼저 알게 하려는 것이다.
+     ★ 숫자는 이 표의 첫 행·마지막 행 두 값에서만 나온다. 그래서 독자가
+     바로 아래 막대와 눈으로 대조해 재검산할 수 있다. #}
+  {%- set 변화 = period_summary_from_table(t) -%}
+  {% if 변화.items %}
+  <ul class="period-summary" aria-label="{{ 변화.title }}">
+  {% for item in 변화.items %}
+  <li class="dir-{{ item.direction }}">
+  <span class="ps-label">{{ item.label }}</span>
+  <strong class="ps-change">{{ item.change }}</strong>
+  <span class="ps-basis">{{ item.basis_text }}</span>
+  {% if item.note %}<span class="ps-note">{{ item.note }}</span>{% endif %}
+  </li>
+  {% endfor %}
+  </ul>
+  {% endif %}
   <div class="trend-panels">
   {% for series in visual.series %}
   <section class="trend-panel{% if series.risk %} risk{% endif %}" aria-label="{{ series.label }}">
@@ -77,6 +95,7 @@
   </section>
   {% endfor %}
   </div>
+  {% if visual.reading %}<p class="chart-reading">{{ visual.reading }}</p>{% endif %}
   <p class="chart-note">자료{{ ref(t.cite) }} · {{ visual.note }}</p>
   </figure>
   {% elif visual and visual.kind == 'flow' %}
@@ -93,6 +112,8 @@
   </ol>
   {% endfor %}
   </div>
+  {% if visual.reading %}<p class="chart-reading">{{ visual.reading }}</p>{% endif %}
+  <p class="chart-note">자료{{ ref(t.cite) }}</p>
   </figure>
   {% else %}
   <div class="numtable">

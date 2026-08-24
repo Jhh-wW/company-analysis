@@ -247,14 +247,48 @@ def test_flow_preserves_each_complete_left_to_right_row() -> None:
     )
 
 
+def test_flow_keeps_rows_with_a_blank_cell() -> None:
+    """★ 사용자 결정 (2026-08-24) — 한 칸이 비었다고 표를 버리지 않는다.
+
+    8장 「확인된 사례」처럼 «없을 수 있는» 칸 때문에 표 전체가 사라졌다.
+    비었다는 것도 정보다 — 지어낸 값보다 훨씬 낫다.
+    """
+    visualization = table_visualization(
+        ReportTable(
+            caption="사업 흐름",
+            headers=["입력", "실행", "결과"],
+            rows=[["입력", "", "결과"]],
+            presentation="flow",
+        )
+    )
+
+    assert visualization is not None
+    assert visualization.flows == (("입력", "", "결과"),)
+
+
+def test_flow_drops_a_row_where_every_cell_is_blank() -> None:
+    """빈 칸은 허용하되 «전부» 빈 줄은 아무 말도 하지 않는다."""
+    assert (
+        table_visualization(
+            ReportTable(
+                caption="사업 흐름",
+                headers=["입력", "실행", "결과"],
+                rows=[["", "", ""]],
+                presentation="flow",
+            )
+        )
+        is None
+    )
+
+
 @pytest.mark.parametrize(
     "rows",
     [
-        [["입력", "", "결과"]],
         [["입력", "결과"]],
     ],
 )
-def test_flow_rejects_blank_or_incomplete_rows(rows: list[list[str]]) -> None:
+def test_flow_rejects_incomplete_rows(rows: list[list[str]]) -> None:
+    """칸 «개수»가 머리말과 다른 줄은 여전히 버린다 — 어느 칸인지 알 수 없다."""
     table = ReportTable(
         caption="사업 흐름",
         headers=["입력", "실행", "결과"],
@@ -365,3 +399,107 @@ def test_trend_all_positive_series_is_unchanged() -> None:
     series = visualization.series[0]
     assert series.risk is False
     assert not any(point.below for point in series.points)
+
+
+# ══════════════════════════════════════════════════════════
+# ⑧ 그림 «읽는 법» — 무엇을 봐야 하는지 한 줄
+# ══════════════════════════════════════════════════════════
+#
+# ★ 왜 필요한가 — 사용자가 완성 기준으로 정한 목업은 그림 밑에
+#   「오른쪽 선이 3년 내내 0선 아래에 있다」처럼 읽는 법을 달아 준다.
+#   우리 캡션은 제목뿐이었고, 그것이 「이해도가 다르다」는 신고의 실체였다.
+#
+# ★ 여기서 지키는 가장 중요한 것 — 이 줄은 «그림에 이미 인쇄된 숫자»만으로
+#   만든다. AI가 아니라 코드가 만든다. 그림에 없는 말이 들어가면 그것은
+#   검증할 수 없는 주장이 되고, 이 엔진의 근거 추적이 통째로 무너진다.
+
+
+def test_composition_reading_names_the_largest_share() -> None:
+    visualization = table_visualization(
+        _composition_table(
+            [["가", "40"], ["나", "35"], ["다", "15"], ["라", "10"]]
+        )
+    )
+
+    assert visualization is not None
+    reading = visualization.reading
+    assert "가" in reading and "40" in reading, reading
+    # 상위 둘의 합(75)도 그림에서 눈으로 더할 수 있는 값이다.
+    assert "75" in reading, reading
+
+
+def test_trend_reading_states_direction_and_zero_line() -> None:
+    visualization = table_visualization(
+        _trend_table(
+            [["2025", "-2544"], ["2024", "-34"], ["2023", "1834"]],
+            ["사업연도", "당기순이익"],
+        )
+    )
+
+    assert visualization is not None
+    reading = visualization.reading
+    assert "당기순이익" in reading
+    assert "2023" in reading and "2025" in reading
+    assert "0선 아래" in reading, reading
+
+
+def test_flow_reading_counts_paths() -> None:
+    visualization = table_visualization(
+        ReportTable(
+            caption="사업 경로",
+            headers=["무엇으로 시작하나", "회사가 하는 일", "누구에게 닿나"],
+            rows=[["가", "나", "다"], ["라", "마", "바"], ["사", "아", "자"]],
+            cite="[1]",
+            presentation="flow",
+        )
+    )
+
+    assert visualization is not None
+    assert "3개" in visualization.reading, visualization.reading
+
+
+def test_reading_never_judges() -> None:
+    """★ 코드가 만드는 문장이 «판단»을 하면 검증할 수 없는 주장이 된다.
+
+    적자를 그리되 「나쁘다」·「위험하다」·「우려된다」고 말하지 않는다.
+    그림에 그려진 방향과 개수만 말한다.
+    """
+    금지어 = (
+        "나쁘", "위험", "우려", "심각", "부진", "악화", "훌륭", "좋", "우수", "탁월"
+    )
+    표들 = [
+        _trend_table(
+            [["2025", "-2544"], ["2024", "-34"], ["2023", "1834"]],
+            ["사업연도", "당기순이익"],
+        ),
+        _trend_table(
+            [["2025", "-100"], ["2024", "-50"], ["2023", "-20"]],
+            ["사업연도", "영업이익"],
+        ),
+        _composition_table([["가", "40"], ["나", "35"], ["다", "25"]]),
+    ]
+    for table in 표들:
+        visualization = table_visualization(table)
+        assert visualization is not None
+        for word in 금지어:
+            assert word not in visualization.reading, (
+                f"읽는 법이 판단을 합니다: 「{word}」 in {visualization.reading!r}"
+            )
+
+
+def test_reading_is_empty_when_there_is_nothing_to_say() -> None:
+    """말할 것이 없으면 빈 줄을 만들지 않는다 — 화면이 자리를 안 남긴다."""
+    visualization = table_visualization(
+        ReportTable(
+            caption="경로",
+            headers=["가", "나"],
+            rows=[["A", "B"]],
+            cite="[1]",
+            presentation="flow",
+        )
+    )
+
+    assert visualization is not None
+    # 줄이 하나면 «그 줄 자체»를 말해 준다 — 빈 문자열이 아니다.
+    assert visualization.reading
+    assert "A" in visualization.reading and "B" in visualization.reading

@@ -1744,12 +1744,61 @@ td.center { text-align: center; }
 }
 .result-page .legend-swatch { width: 9px; height: 9px; }
 .result-page .chart-legend strong { color: var(--ink); font-variant-numeric: tabular-nums; }
+/* 그림 «읽는 법» — 무엇을 봐야 하는지 한 줄.
+   ★ 출처 설명(.chart-note)보다 «위»에, 조금 더 진하게 둔다. 독자가 그림을
+      보고 바로 읽는 순서가 「그림 → 읽는 법 → 출처」이기 때문이다.
+   ★ 이 문장은 코드가 그림 속 숫자만으로 만든다 — 새 주장이 아니다. */
+.result-page .chart-reading {
+  margin: 10px 0 0;
+  color: var(--ink);
+  font-size: 12.5px;
+  line-height: 1.55;
+  word-break: keep-all;
+}
+
 .result-page .chart-note {
   margin: 9px 0 0;
   color: var(--ink-3);
   font-size: 11.5px;
   line-height: 1.45;
 }
+/* 3개년 «변화 요약» 줄 — 막대 위. 목업의 4장 요약 숫자와 같은 자리.
+   ★ 값은 바로 아래 표의 첫 행·마지막 행에서만 나온다 — 독자가 눈으로
+      재검산할 수 있게 근거(basis)를 값 옆에 같이 둔다. */
+.result-page .period-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px 16px;
+  margin: 0 0 16px;
+  padding: 0;
+  list-style: none;
+}
+.result-page .period-summary li {
+  display: grid;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper-2);
+}
+.result-page .ps-label { color: var(--ink-3); font-size: 11.5px; }
+.result-page .ps-change {
+  color: var(--ink);
+  font-size: 17px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -.01em;
+}
+/* 방향은 «좋고 나쁨»이 아니라 수치의 방향이다. 그래서 색을 쓰되
+   빨강은 «0선 아래로 내려간 것»에만 준다(추이 막대와 같은 규칙). */
+.result-page .period-summary li.dir-down .ps-change { color: #b00009; }
+.result-page .ps-basis {
+  color: var(--ink-3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.result-page .ps-note { color: var(--ink-3); font-size: 11px; line-height: 1.45; word-break: keep-all; }
+
 .result-page .trend-panels {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));

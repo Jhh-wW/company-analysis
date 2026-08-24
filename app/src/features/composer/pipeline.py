@@ -142,6 +142,7 @@ def run_v2(
     verified, diagram_problems = check_diagrams(
         verified, _normalize_fragments(fragments), diagram_ask or reviewer_ask
     )
+
     for problem in diagram_problems:
         logger.warning("도식 검증에서 뺀 경로 — %s", problem)
 

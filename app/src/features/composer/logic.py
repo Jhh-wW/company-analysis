@@ -285,10 +285,18 @@ def _flow_row_from_item(item: Any, cell_count: int) -> Optional[FlowRow]:
     cells = tuple(" ".join(str(cell).split()) for cell in cells_raw)
     if len(cells) != cell_count:
         return None
-    if any(not cell for cell in cells):
+    # ★ 빈 칸을 허용한다 (사용자 결정 2026-08-24). 예전에는 한 칸이라도
+    #   비면 줄을 버렸는데, 8장 「확인된 사례」처럼 «없을 수 있는» 칸 때문에
+    #   쓸 만한 줄이 통째로 사라졌다. 다만 «전부» 빈 줄은 아무 말도 하지
+    #   않으므로 그때만 버린다.
+    if not any(cell for cell in cells):
         return None
-    if any(len(cell) > OPERATIONS_FLOW_MAX_CELL_CHARS for cell in cells):
-        return None
+    # ★ 칸 글자 수 상한을 없앴다 (사용자 결정). 24자는 너무 빡빡했다 —
+    #   「글로벌 사업 확대에 따른 환율변동위험」이 이미 19자다.
+    #   상한을 두었던 본래 이유는 「긴 주장이 표 안으로 숨어 문장 검증을
+    #   피해 간다」였는데, 그 사이 도식 검증(diagram_check)이 생겨 표의
+    #   칸도 숫자 근거·의미 검수를 받는다. 그래서 지금은 상한이 없어도
+    #   검증을 피해 갈 수 없다. 길이는 프롬프트로만 «부탁»한다.
     citations_raw = item.get(RESPONSE_FLOW_ROW_CITATIONS_KEY)
     citations = tuple(
         str(value).strip()

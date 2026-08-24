@@ -219,18 +219,39 @@ def test_칸_개수가_다르면_그_줄만_버린다():
     assert rows[0].cells[0] == "폐플라스틱"
 
 
-def test_빈_칸이_있으면_그_줄을_버린다():
+def test_빈_칸이_있어도_줄을_살린다():
+    """★ 사용자 결정 (2026-08-24) — 한 칸이 비었다고 줄을 버리지 않는다.
+
+    8장 「확인된 사례」처럼 «없을 수 있는» 칸 때문에 쓸 만한 줄이 통째로
+    사라졌다. 「내건 가치」와 「일하는 원칙」만 있어도 볼 만한 표다.
+    """
     rows = parse_flow_rows(_response([{"칸": ["수지", "", "가구사"], "인용": ["1"]}]))
 
+    assert len(rows) == 1
+    assert rows[0].cells == ("수지", "", "가구사")
+
+
+def test_모든_칸이_비면_그_줄은_버린다():
+    """빈 칸은 허용하되, «전부» 빈 줄은 아무 말도 하지 않는다."""
+    rows = parse_flow_rows(_response([{"칸": ["", "", ""], "인용": ["1"]}]))
+
     assert rows == ()
 
 
-def test_칸이_너무_길면_그_줄을_버린다():
-    """칸은 이름 자리다 — 길어지면 주장이 표로 숨어 문장 검증을 피해 간다."""
-    긴칸 = "가" * (OPERATIONS_FLOW_MAX_CELL_CHARS + 1)
+def test_칸이_길어도_줄을_버리지_않는다():
+    """★ 사용자 결정 — 24자 상한이 너무 빡빡했다.
+
+    「글로벌 사업 확대에 따른 환율변동위험」이 이미 19자다. 조금만 길어도
+    쓸 만한 줄이 사라졌다.
+    ★ 원래 이유(「긴 주장이 표로 숨어 문장 검증을 피해 간다」)는 그 사이
+      도식 검증(diagram_check)이 생겨 해소됐다 — 표의 칸도 숫자 근거와
+      의미 검수를 받는다. 상한이 없어도 검증을 피해 갈 수 없다.
+    """
+    긴칸 = "가" * (OPERATIONS_FLOW_MAX_CELL_CHARS + 20)
     rows = parse_flow_rows(_response([{"칸": ["수지", 긴칸, "가구사"], "인용": ["1"]}]))
 
-    assert rows == ()
+    assert len(rows) == 1
+    assert rows[0].cells[1] == 긴칸
 
 
 def test_줄_수_상한을_지킨다():
@@ -262,14 +283,30 @@ def _fragment_objs() -> tuple[CollectedFragment, ...]:
     )
 
 
-def test_경로표_지침은_7장에만_붙는다():
-    운영 = build_section_prompt(
-        "진영(주)", OPERATIONS_FLOW_SECTION_ID, _fragment_objs(), None
-    )
-    정체성 = build_section_prompt("진영(주)", "identity", _fragment_objs(), None)
+def test_표_지침은_정해진_장에만_붙는다():
+    """★ 표를 내는 장이 늘었다 — 1·5·6·7·8장.
 
-    assert "경로표" in 운영
-    assert "경로표" not in 정체성
+    목업(사용자가 완성 기준으로 정한 것)의 표들은 숫자 표가 아니라
+    «AI가 쓰는 말을 칸에 나눠 담은 것»이었다. 재료가 없어서 못 만든 게
+    아니라 우리가 받는 그릇이 «문장 배열» 하나뿐이었다.
+    그릇을 늘리되, 표를 «안 내는» 장에는 지침이 새지 않아야 한다.
+    """
+    from src.features.composer.constants import FLOW_HEADERS_BY_SECTION
+
+    표를_내는_장 = set(FLOW_HEADERS_BY_SECTION)
+    assert OPERATIONS_FLOW_SECTION_ID in 표를_내는_장
+    # 표를 안 내는 장이 «반드시» 남아 있어야 한다 — 전부 표면 이 시험이 헛돈다.
+    표_없는_장 = [sid for sid in SECTION_IDS if sid not in 표를_내는_장]
+    assert 표_없는_장, "모든 장이 표를 냅니다 — 이 시험이 지킬 것이 없습니다"
+
+    for section_id in SECTION_IDS:
+        prompt = build_section_prompt(
+            "진영(주)", section_id, _fragment_objs(), None
+        )
+        if section_id in 표를_내는_장:
+            assert "경로표" in prompt, section_id
+        else:
+            assert "경로표" not in prompt, section_id
 
 
 def test_7장_프롬프트에_출력형식_안내가_하나뿐이다():
@@ -295,11 +332,44 @@ def test_7장_스키마가_두_키를_모두_보여_준다():
     assert '"경로표"' in 형식
 
 
-def test_다른_장은_기본_스키마를_그대로_쓴다():
-    prompt = build_section_prompt("진영(주)", "identity", _fragment_objs(), None)
+def test_표를_안_내는_장은_기본_스키마를_그대로_쓴다():
+    from src.features.composer.constants import FLOW_HEADERS_BY_SECTION
+
+    표_없는_장 = next(
+        sid for sid in SECTION_IDS if sid not in FLOW_HEADERS_BY_SECTION
+    )
+    prompt = build_section_prompt("진영(주)", 표_없는_장, _fragment_objs(), None)
 
     assert prompt.count("설명·머리말 없이") == 1
     assert "경로표" not in prompt
+
+
+def test_표를_내는_모든_장이_출력형식_안내를_하나만_갖는다():
+    """★ 두 개면 작가가 앞의 「이 JSON만 출력한다」를 따라 표를 빼먹는다.
+
+    장이 늘어날 때마다 이 사고가 되풀이될 수 있어 «모든 장»을 함께 본다.
+    """
+    from src.features.composer.constants import FLOW_HEADERS_BY_SECTION
+
+    for section_id in FLOW_HEADERS_BY_SECTION:
+        prompt = build_section_prompt(
+            "진영(주)", section_id, _fragment_objs(), None
+        )
+        assert prompt.count("설명·머리말 없이") == 1, section_id
+        assert "«두 키를 모두»" in prompt, section_id
+
+
+def test_장마다_자기_칸_이름이_스키마에_나온다():
+    """머리말과 스키마가 어긋나면 작가가 다른 칸을 채운다."""
+    from src.features.composer.constants import FLOW_HEADERS_BY_SECTION
+
+    for section_id, headers in FLOW_HEADERS_BY_SECTION.items():
+        prompt = build_section_prompt(
+            "진영(주)", section_id, _fragment_objs(), None
+        )
+        형식 = prompt[prompt.index("출력 형식") :]
+        for name in headers:
+            assert name in 형식, f"{section_id}: 「{name}」이 스키마에 없습니다"
 
 
 def test_지침이_고객이_다르면_줄을_나누라고_말한다():
@@ -311,14 +381,30 @@ def test_지침이_고객이_다르면_줄을_나누라고_말한다():
     assert "고객에게 닿지 않는" in prompt
 
 
-def test_작성_단계가_경로표를_같은_응답에서_읽는다():
-    """표를 따로 받으려고 AI를 한 번 더 부르지 않는다."""
+def test_작성_단계가_표를_같은_응답에서_읽는다():
+    """★ 표를 따로 받으려고 AI를 «한 번 더» 부르지 않는다.
+
+    표를 내는 장이 다섯이라 따로 부르면 호출이 5회 늘어난다. 본조사 예산이
+    900원이고 실측 실행비가 이미 348~585원이라 그만한 여유가 없다.
+    """
+    from src.features.composer.constants import FLOW_HEADERS_BY_SECTION
+
     calls: list[str] = []
 
     def ask(prompt: str) -> str:
         calls.append(prompt)
+        # 그 장이 요구하는 «칸 수»에 맞춰 답한다 — 실제 작가처럼.
+        칸수 = 3
+        for headers in FLOW_HEADERS_BY_SECTION.values():
+            for name in headers:
+                if name in prompt:
+                    칸수 = len(headers)
+                    break
+            else:
+                continue
+            break
         flow = (
-            [{"칸": ["수지", "가공", "가구사"], "인용": ["1"]}]
+            [{"칸": [f"칸{i + 1}" for i in range(칸수)], "인용": ["1"]}]
             if "경로표" in prompt
             else []
         )
@@ -326,9 +412,12 @@ def test_작성_단계가_경로표를_같은_응답에서_읽는다():
 
     report = compose_sections("진영(주)", _fragment_objs(), None, ask)
 
-    assert len(calls) == len(SECTION_IDS)  # 장마다 1회, 추가 호출 없음
+    assert len(calls) == len(SECTION_IDS), "장마다 1회여야 한다 — 추가 호출이 있습니다"
     for section in report.sections:
-        if section.section_id == OPERATIONS_FLOW_SECTION_ID:
-            assert len(section.flow_rows) == 1
+        if section.section_id in FLOW_HEADERS_BY_SECTION:
+            assert len(section.flow_rows) == 1, section.section_id
+            assert len(section.flow_rows[0].cells) == len(
+                FLOW_HEADERS_BY_SECTION[section.section_id]
+            ), f"{section.section_id}: 칸 수가 그 장 계약과 다릅니다"
         else:
-            assert section.flow_rows == ()
+            assert section.flow_rows == (), section.section_id

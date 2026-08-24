@@ -83,9 +83,75 @@ class TableVisualization:
     caption: str
     unit: str = ""
     note: str = ""
+    #: 그림에서 «무엇을 봐야 하는지» 한 줄. 출처 설명(note)과 다른 자리다.
+    #:
+    #: ★ 왜 필요한가 (사용자가 완성 기준으로 정한 목업과의 차이) — 목업은
+    #:   그림 밑에 「오른쪽 선이 3년 내내 0선 아래에 있다」처럼 «읽는 법»을
+    #:   달아 준다. 우리 캡션은 제목뿐이라 독자가 그림을 스스로 해석해야
+    #:   했다. 「이해도가 다르다」는 신고의 실체가 이것이다.
+    #:
+    #: ★ 이 줄은 «AI가 아니라 코드»가 만든다. 그림에 이미 인쇄된 숫자만
+    #:   가지고 산술로 만든다 — 새 주장이 아니라 «보이는 것의 요약»이다.
+    #:   AI에게 시키면 그림에 없는 말을 붙이고, 그것을 검증할 방법이 없다.
+    reading: str = ""
     items: tuple[ChartPoint, ...] = ()
     series: tuple[ChartSeries, ...] = ()
     flows: tuple[tuple[str, ...], ...] = ()
+
+
+def _composition_reading(items: "tuple[ChartPoint, ...]") -> str:
+    """구성 도식 읽는 법 — 가장 큰 몫과 상위 둘의 합만 말한다."""
+    if len(items) < 2:
+        return ""
+    ordered = sorted(items, key=lambda point: point.value, reverse=True)
+    top, second = ordered[0], ordered[1]
+    two = top.value + second.value
+    return (
+        f"가장 큰 몫은 「{top.label}」 {top.display}이고, "
+        f"위 둘을 합치면 {two:.0f}%다."
+    )
+
+
+def _trend_reading(series: "tuple[ChartSeries, ...]", unit: str) -> str:
+    """추이 도식 읽는 법 — 방향과 «0선 아래»만 말한다.
+
+    ★ 판단하지 않는다. 「나쁘다」·「위험하다」를 쓰지 않는다. 그림에 그려진
+      막대의 방향과 개수만 말한다 — 독자가 눈으로 셀 수 있는 것이다.
+    """
+    parts: list[str] = []
+    for one in series:
+        if len(one.points) < 2:
+            continue
+        first, last = one.points[0], one.points[-1]
+        below = sum(1 for point in one.points if point.below)
+        방향 = (
+            "늘었다"
+            if last.value > first.value
+            else "줄었다"
+            if last.value < first.value
+            else "같다"
+        )
+        말 = f"「{one.label}」은 {first.label} {first.display}에서 {last.label} {last.display}로 {방향}"
+        if below and below < len(one.points):
+            말 += f" (0선 아래 {below}개 해)"
+        elif below == len(one.points):
+            말 += " (세 해 모두 0선 아래)"
+        parts.append(말)
+    return ". ".join(parts) + "." if parts else ""
+
+
+def _flow_reading(flows: "tuple[tuple[str, ...], ...]", headers: list[str]) -> str:
+    """흐름 도식 읽는 법 — 줄 수와 «끝 칸이 몇 가지인가»만 말한다."""
+    if not flows:
+        return ""
+    끝칸 = {row[-1] for row in flows if row}
+    끝이름 = headers[-1] if headers else ""
+    if len(flows) == 1:
+        return f"경로가 하나다: {' → '.join(flows[0])}."
+    말 = f"경로가 {len(flows)}개다"
+    if 끝이름 and 끝칸:
+        말 += f". 「{끝이름}」이 {len(끝칸)}가지로 갈린다"
+    return 말 + "."
 
 
 def _number(value: object) -> Decimal | None:
@@ -168,6 +234,7 @@ def _composition(table: ReportTable) -> TableVisualization | None:
     return TableVisualization(
         kind="composition",
         caption=table.caption,
+        reading=_composition_reading(items),
         unit="%",
         note=(
             f"원문 비율을 {_decimal_place_label(table.scale_places)}로 반올림해 표시"
@@ -229,6 +296,7 @@ def _trend(table: ReportTable) -> TableVisualization | None:
     return TableVisualization(
         kind="trend",
         caption=table.caption,
+        reading=_trend_reading(tuple(series), _unit(table)),
         unit=_unit(table),
         note=(
             f"원값을 {_unit(table)} 단위로 환산해 표시"
@@ -249,12 +317,18 @@ def _flow(table: ReportTable) -> TableVisualization | None:
         if len(row) != len(table.headers):
             return None
         values = tuple(str(value).strip() for value in row)
-        if any(not value for value in values):
-            return None
+        # ★ 빈 칸을 허용한다 (사용자 결정 2026-08-24). 8장 「확인된 사례」처럼
+        #   «없을 수 있는» 칸 때문에 표 전체가 사라지던 것을 막는다.
+        #   전부 빈 줄만 버린다 — 그런 줄은 아무 말도 하지 않는다.
+        if not any(values):
+            continue
         flows.append(values)
+    if not flows:
+        return None
     return TableVisualization(
         kind="flow",
         caption=table.caption,
+        reading=_flow_reading(tuple(flows), list(table.headers)),
         flows=tuple(flows),
     )
 

@@ -15,6 +15,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
+from src.features.report_standard.period_summary import period_summary_from_table
 from src.features.report_standard.visualization import composition_tone
 
 from src.core import clock, paths
@@ -84,6 +85,10 @@ templates = Jinja2Templates(directory=str(paths.TEMPLATES_DIR))
 #   틀 안에서 `loop.index0 % 5` 식으로 따로 계산하면 항목 수가 바뀔 때
 #   두 곳이 조용히 달라진다 (하이브 6부문에서 실제로 그랬다).
 templates.env.globals["composition_tone"] = composition_tone
+
+# ★ 4장 «3개년 변화 요약» — 표 안의 두 값만으로 증감을 만든다.
+#   PDF와 «같은 함수»를 써야 화면과 인쇄물의 숫자가 안 어긋난다.
+templates.env.globals["period_summary_from_table"] = period_summary_from_table
 
 
 def company_analysis_input(*, company: str, region: str) -> UserInput:
