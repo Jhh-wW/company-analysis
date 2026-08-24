@@ -205,7 +205,12 @@ h3 {
   border-left: 2px solid var(--line);
 }
 p { margin: 0 0 12px; }
-.lede { color: var(--ink-2); margin-bottom: 22px; }
+.lede {
+  color: var(--ink-2);
+  margin-bottom: 22px;
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
 .muted { color: var(--ink-3); font-size: 13px; }
 .sr-only {
   position: absolute;
@@ -512,6 +517,11 @@ tr:target > td:first-child { box-shadow: inset 3px 0 0 var(--ink-strong); }
 .prose {
   margin: 4px 0 8px;
   line-height: 1.85;
+  /* ★ 한국어 어절을 음절 단위로 쪼개지 않는다 — 이게 없으면 「계약」이
+     「계/약」으로 잘린다(실측 신고). keep-all만 걸면 끊을 데 없는 긴 URL·
+     숫자열이 컨테이너를 뚫으므로 break-word를 «짝으로» 건다. */
+  word-break: keep-all;
+  overflow-wrap: break-word;
   font-size: 15px;
 }
 /* 원문 접기 — ★ 원문을 «버리지 않았다»는 것이 눈에 보여야 한다 */
@@ -1528,6 +1538,10 @@ td.center { text-align: center; }
   color: var(--ink-2);
   font-size: 15.5px;
   line-height: 1.85;
+  /* 보고서 본문도 같은 규칙 — 전역 .prose가 이미 걸어 두지만, 나중에
+     이 블록만 보고 고치는 사람이 빠뜨리지 않도록 여기에도 명시한다. */
+  word-break: keep-all;
+  overflow-wrap: break-word;
 }
 .result-page .section-content-grid {
   display: grid;
@@ -1743,6 +1757,8 @@ td.center { text-align: center; }
 .result-page th,
 .result-page td {
   padding: 9px 11px;
+  word-break: keep-all;
+  overflow-wrap: break-word;
   border: 0;
   border-bottom: 1px solid var(--line);
   text-align: left;

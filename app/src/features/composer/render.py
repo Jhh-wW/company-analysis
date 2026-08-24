@@ -23,8 +23,10 @@ from typing import Final, Optional
 
 from src.core.citations import citation_number
 from src.features.composer.constants import (
+    CITATION_STYLE_MERGED,
     DART_DOCUMENT_HOST,
     DART_DOCUMENT_URL_TEMPLATE,
+    DEFAULT_CITATION_STYLE,
     GRADE_INTERPRETED,
     SECTION_IDS,
     SECTION_TITLES,
@@ -208,18 +210,77 @@ def _sentence_citation_numbers(
 
 
 def sentence_display_text(
-    sentence: ComposedSentence, numbers: Mapping[str, int]
+    sentence: ComposedSentence,
+    numbers: Mapping[str, int],
+    *,
+    show_markers: bool = True,
 ) -> str:
-    """문장 하나를 «글 [n][m] — 해석» 모양으로 만든다 (04장 3-4절 1항)."""
+    """문장 하나를 «글 [n][m] — 해석» 모양으로 만든다 (04장 3-4절 1항).
+
+    Args:
+        show_markers: False면 인용 번호를 붙이지 않는다. «해석» 표지는 그대로
+            남는다 — 그건 번호가 아니라 이 문장이 어떤 성격인지 알리는 표지다.
+    """
     text = " ".join(sentence.text.split())
-    markers = "".join(
-        f"[{number}]" for number in _sentence_citation_numbers(sentence, numbers)
-    )
-    if markers:
-        text = f"{text} {markers}"
+    if show_markers:
+        markers = "".join(
+            f"[{number}]" for number in _sentence_citation_numbers(sentence, numbers)
+        )
+        if markers:
+            text = f"{text} {markers}"
     if sentence.grade == GRADE_INTERPRETED:
         text = f"{text}{INTERPRETATION_MARKER}"
     return text
+
+
+def _marker_visibility(
+    sentences: Sequence[ComposedSentence],
+    numbers: Mapping[str, int],
+    style: str,
+) -> tuple[bool, ...]:
+    """문장마다 인용 번호를 «보일지» 정한다.
+
+    ★ 왜 문장 하나가 아니라 묶음을 보나 — 절충안의 핵심이 「같은 출처를
+      잇달아 인용하는 문장은 묶음의 마지막에만 번호를 단다」이기 때문이다.
+      앞뒤를 봐야 그 판단이 선다.
+
+    규칙(CITATION_STYLE_MERGED):
+      ① «해석» 문장은 번호를 뺀다 — 종합 판단이라 특정 출처를 가리키지 않고,
+         이미 « — 해석» 표지가 성격을 말해 준다.
+      ② «확인» 문장은 다음 문장이 «같은 출처 집합»을 인용하는 확인 문장이면
+         번호를 미룬다. 그 묶음의 마지막 문장이 대표로 번호를 단다.
+
+    ★ 부록과의 1:1은 깨지지 않는다 — 묶음의 마지막 문장이 그 출처 번호를
+      «반드시» 표시하므로, 본문에 한 번도 안 나오는 부록 번호가 생기지 않는다.
+      (validate_v2의 인용-부록 상호 검사 계약)
+    """
+    if style != CITATION_STYLE_MERGED:
+        return tuple(True for _ in sentences)
+
+    keys = [
+        frozenset(_sentence_citation_numbers(sentence, numbers))
+        for sentence in sentences
+    ]
+    visible: list[bool] = []
+    for index, sentence in enumerate(sentences):
+        if sentence.grade == GRADE_INTERPRETED:
+            visible.append(False)
+            continue
+        if not keys[index]:
+            visible.append(False)
+            continue
+        # 다음 «확인» 문장이 같은 출처 묶음이면 번호를 그쪽으로 미룬다.
+        following = next(
+            (
+                position
+                for position in range(index + 1, len(sentences))
+                if sentences[position].grade != GRADE_INTERPRETED
+            ),
+            None,
+        )
+        defer = following is not None and keys[following] == keys[index]
+        visible.append(not defer)
+    return tuple(visible)
 
 
 # ══════════════════════════════════════════════════════════
@@ -339,6 +400,7 @@ def render_report(
     table_presentation: str = "table",
     filing_meta: Optional[FilingMeta] = None,
     composition_table: Optional[PerformanceTable] = None,
+    citation_style: str = DEFAULT_CITATION_STYLE,
 ) -> Report:
     """검증 끝난 ComposedReport를 웹·PDF 공용 pipeline Report로 바꾼다.
 
@@ -358,6 +420,10 @@ def render_report(
             business_model 장에 붙이는데 v2 호출부가 넘기지 않아 «표도 도식도»
             사라져 있었다(실측 결함 — 9장 중 4장 하나만 표를 받았다).
             없으면 표 없이 간다(억지로 만들지 않는다).
+        citation_style: 본문 인용 번호 표기 방식. `inline`은 문장마다 번호를
+            붙이고(기존), `merged`는 해석 문장의 번호를 빼고 같은 출처가 이어지는
+            확인 문장 묶음은 마지막 문장에만 번호를 단다. 부록과의 1:1은 두 방식
+            모두에서 유지된다.
         filing_meta: 이번 조사가 내려받은 공시의 신원(접수번호·보고서명·공시일).
             주면 전자공시 조각의 부록 줄에 «원문 주소»가 실린다. 없으면 주소
             없이 나가며, 그 사실이 화면에 그대로 보인다(빈 값을 지어내지 않는다).
@@ -382,8 +448,18 @@ def render_report(
         # (기준문서 3절: 안내 1~2문장 + 찾은 만큼의 내용).
         if section.notice:
             prose_lines.append((section.notice, ""))
-        for sentence in section.sentences:
-            prose_lines.append((sentence_display_text(sentence, numbers), ""))
+        shows = _marker_visibility(section.sentences, numbers, citation_style)
+        for index, sentence in enumerate(section.sentences):
+            prose_lines.append(
+                (
+                    sentence_display_text(
+                        sentence, numbers, show_markers=shows[index]
+                    ),
+                    "",
+                )
+            )
+            # ★ 부록 사용 장 기록은 «번호를 보였는지»와 무관하다 — 근거를
+            #   실제로 쓴 장은 표기 방식과 상관없이 그 장이다.
             for cited in _sentence_citation_numbers(sentence, numbers):
                 owners = used_sections.setdefault(cited, [])
                 if section.section_id not in owners:
@@ -446,9 +522,14 @@ def render_report(
         )
 
     summary_items: list[SummaryItem] = []
-    for sentence in report.summary:
+    summary_shows = _marker_visibility(report.summary, numbers, citation_style)
+    for index, sentence in enumerate(report.summary):
         summary_items.append(
-            SummaryItem(text=sentence_display_text(sentence, numbers))
+            SummaryItem(
+                text=sentence_display_text(
+                    sentence, numbers, show_markers=summary_shows[index]
+                )
+            )
         )
         for cited in _sentence_citation_numbers(sentence, numbers):
             # 요약 전용 인용도 부록에는 실려야 한다 (장 목록에는 안 더한다 —
