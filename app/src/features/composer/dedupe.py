@@ -208,7 +208,14 @@ def drop_cross_section_duplicates(
         notice = section.notice or (NOTICE_DUPLICATE_MOVED if not kept else "")
         rebuilt.append(
             ComposedSection(
-                section_id=section.section_id, sentences=kept, notice=notice
+                section_id=section.section_id,
+                sentences=kept,
+                notice=notice,
+                # ★ 경로표를 «반드시» 함께 넘긴다. 안 넘기면 기본값 ()로 떨어져
+                #   7장에서 문장이 하나라도 빠질 때 도식 재료가 통째로 사라진다
+                #   — 실측에서 7장 흐름도가 두 번 연속 안 나온 진짜 원인이었다.
+                #   중복 «문장»을 옮기는 단계가 «도식»까지 지우면 안 된다.
+                flow_rows=section.flow_rows,
             )
         )
 

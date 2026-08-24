@@ -23,6 +23,7 @@ from src.features.composer.port import (
     ComposedReport,
     ComposedSection,
     ComposedSentence,
+    FlowRow,
 )
 
 _파트너_문장 = (
@@ -261,3 +262,80 @@ def test_짧은_문장은_비교하지_않는다():
     _, 뺀수 = drop_cross_section_duplicates(report)
 
     assert 뺀수 == 0
+
+
+# ══════════════════════════════════════════════════════════
+# ★ 도식 재료 보존 — 문장을 옮기는 단계가 그림을 지우면 안 된다
+# ══════════════════════════════════════════════════════════
+
+
+def test_문장을_빼도_경로표는_남는다():
+    """★ 실측 결함 — 7장 흐름도가 두 번 연속 안 나온 진짜 원인.
+
+    중복 제거가 ComposedSection을 다시 만들면서 flow_rows를 안 넘겨,
+    7장에서 문장이 하나라도 빠지면 도식 재료가 통째로 사라졌다.
+    그러면 뒤따르는 도식 검증도 볼 것이 없어 아무 일도 안 하고,
+    화면에는 흐름도가 영영 안 나온다.
+    """
+    경로 = (
+        FlowRow(cells=("수지", "가공", "가구사"), citations=("12",)),
+        FlowRow(cells=("폐플라스틱", "열분해유", "폐기물 사업장"), citations=("13",)),
+    )
+    report = ComposedReport(
+        sections=tuple(
+            ComposedSection(
+                section_id=section_id,
+                sentences=(
+                    (_sentence(_파트너_문장, ("12",)),)
+                    if section_id == "identity"
+                    else (
+                        _sentence(_파트너_문장_변형, ("12",)),
+                        _sentence(_공연_문장, ("12", "13")),
+                    )
+                    if section_id == "operations_partners"
+                    else ()
+                ),
+                flow_rows=경로 if section_id == "operations_partners" else (),
+            )
+            for section_id in SECTION_IDS
+        )
+    )
+
+    새보고서, 뺀수 = drop_cross_section_duplicates(report)
+
+    assert 뺀수 >= 1  # 실제로 문장이 빠지는 상황이어야 의미가 있다
+    운영 = next(
+        s for s in 새보고서.sections if s.section_id == "operations_partners"
+    )
+    assert 운영.flow_rows == 경로, "문장을 옮기면서 도식 재료가 사라졌습니다"
+
+
+def test_문장이_다_빠져도_경로표는_남는다():
+    """장이 비어도 도식은 남는다 — 그림은 문장과 별개 재료다."""
+    경로 = (FlowRow(cells=("수지", "가공", "가구사"), citations=("12",)),)
+    report = ComposedReport(
+        sections=tuple(
+            ComposedSection(
+                section_id=section_id,
+                sentences=(
+                    (_sentence(_파트너_문장, ("12",)),)
+                    if section_id == "operations_partners"
+                    else (
+                        _sentence(_파트너_문장_변형, ("12",)),
+                        _sentence(_공연_문장, ("12",)),
+                    )
+                    if section_id == "identity"
+                    else ()
+                ),
+                flow_rows=경로 if section_id == "operations_partners" else (),
+            )
+            for section_id in SECTION_IDS
+        )
+    )
+
+    새보고서, _ = drop_cross_section_duplicates(report)
+
+    운영 = next(
+        s for s in 새보고서.sections if s.section_id == "operations_partners"
+    )
+    assert 운영.flow_rows == 경로
