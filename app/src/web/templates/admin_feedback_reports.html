@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% block title %}신고 관리 · 기업분석{% endblock %}
+{% block bodyclass %}admin-frame-page feedback-admin-page{% endblock %}
+{% block wrapclass %}wide admin-frame{% endblock %}
+{% block content %}
+<header class="frame-heading"><p class="frame-kicker">관리자 전용</p><h1>신고 관리</h1><p class="lede">사용자가 접수한 오류 신고를 검토하고 처리 상태를 남깁니다. 신고 내용은 원문 그대로 보존됩니다.</p></header>
+{% set dashboard_nav = "feedback" %}{% include "_admin_nav.html" %}
+
+<section class="frame-section frame-desktop-only">
+  <div class="card">
+    <h2 id="feedback-filter-title">검색 및 필터</h2>
+    <form method="get" action="/admin/feedback-reports" aria-labelledby="feedback-filter-title">
+      <div class="fr-filter-grid">
+        <div class="field">
+          <label for="fr-keyword">검색어</label>
+          <input id="fr-keyword" name="keyword" maxlength="{{ feedback_keyword_max_chars }}"
+                 placeholder="신고 ID·회사명·항목·내용" value="{{ feedback_filters.keyword }}">
+        </div>
+        <div class="field">
+          <label for="fr-stage">신고 단계</label>
+          <select id="fr-stage" name="stage">
+            <option value="">전체</option>
+            {% for option in feedback_stage_options %}
+            <option value="{{ option }}" {% if feedback_filters.stage == option %}selected{% endif %}>{{ option }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label for="fr-category">신고 유형</label>
+          <select id="fr-category" name="category">
+            <option value="">전체</option>
+            {% for option in feedback_category_options %}
+            <option value="{{ option }}" {% if feedback_filters.category == option %}selected{% endif %}>{{ option }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label for="fr-status">처리 상태</label>
+          <select id="fr-status" name="status">
+            <option value="">전체</option>
+            {% for option in feedback_status_options %}
+            <option value="{{ option }}" {% if feedback_filters.status == option %}selected{% endif %}>{{ option }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label for="fr-date-from">접수 시작일</label>
+          <input type="date" id="fr-date-from" name="date_from" value="{{ feedback_filters.date_from }}">
+        </div>
+        <div class="field">
+          <label for="fr-date-to">접수 종료일</label>
+          <input type="date" id="fr-date-to" name="date_to" value="{{ feedback_filters.date_to }}">
+        </div>
+      </div>
+      <div class="fr-filter-actions">
+        <a class="btn ghost" href="/admin/feedback-reports">필터 초기화</a>
+        <button type="submit" class="btn">검색</button>
+      </div>
+    </form>
+  </div>
+
+  {% if feedback_filter_error %}
+  <div class="warn-line" role="alert" style="margin-top:14px">
+    <span>⚠️</span><span><strong>필터를 적용하지 못했습니다.</strong><br>{{ feedback_filter_error }}</span>
+  </div>
+  {% endif %}
+
+  <p class="fr-count-badges">
+    <strong>전체 신고 {{ feedback_total }}</strong>
+    {% for option in feedback_status_options %}
+    <span class="fr-chip {{ feedback_status_tones.get(option, '') }}">{{ option }} {{ feedback_counts.get(option, 0) }}</span>
+    {% endfor %}
+  </p>
+
+  {% if feedback_page is not none and feedback_page.items %}
+  <div class="data-table-scroll" role="region" tabindex="0" aria-label="신고 목록">
+  <table aria-label="신고 목록">
+    <thead><tr>
+      <th scope="col">신고 ID</th>
+      <th scope="col">대상</th>
+      <th scope="col">유형</th>
+      <th scope="col">접수일</th>
+      <th scope="col">처리 상태</th>
+      <th scope="col">신고 내용 요약</th>
+      <th scope="col" aria-label="상세"></th>
+    </tr></thead>
+    <tbody>
+    {% for item in feedback_page.items %}
+    <tr>
+      <td class="fr-id-cell">{{ item.report_id }}</td>
+      <td>
+        {{ item.company_name or "—" }}
+        {% if item.report_ref %}<br><span class="muted">{{ item.report_ref }}</span>{% endif %}
+      </td>
+      <td>
+        {{ item.category }}
+        <br><span class="muted">{{ item.stage }} 단계</span>
+      </td>
+      <td class="fr-date-cell">{{ item.day }}</td>
+      <td><span class="fr-status {{ feedback_status_tones.get(item.status, '') }}">{{ item.status }}</span></td>
+      <td><span class="fr-summary">{{ item.body | truncate(48, true, "…") }}</span></td>
+      <td><a class="fr-detail-link" href="/admin/feedback-reports/{{ item.report_id }}">상세 보기</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+
+  {% if feedback_page.page_count > 1 %}
+  <nav class="fr-pagination" aria-label="신고 목록 페이지">
+    {% if feedback_page.page > 1 %}
+    <a class="btn ghost" href="{{ feedback_page_url_prefix }}{{ feedback_page.page - 1 }}">이전</a>
+    {% endif %}
+    {% for number in feedback_page_numbers %}
+    {% if number == feedback_page.page %}
+    <span class="fr-page-current" aria-current="page">{{ number }}</span>
+    {% else %}
+    <a class="fr-page-link" href="{{ feedback_page_url_prefix }}{{ number }}">{{ number }}</a>
+    {% endif %}
+    {% endfor %}
+    {% if feedback_page.page < feedback_page.page_count %}
+    <a class="btn ghost" href="{{ feedback_page_url_prefix }}{{ feedback_page.page + 1 }}">다음</a>
+    {% endif %}
+    <span class="muted">{{ feedback_page.page }} / {{ feedback_page.page_count }} 페이지 · 총 {{ feedback_page.total }}건</span>
+  </nav>
+  {% endif %}
+
+  {% elif not feedback_filter_error %}
+  <article class="card frame-empty-state"><h3>표시할 신고가 없습니다</h3><p>필터 조건에 맞는 신고가 없거나 아직 접수된 신고가 없습니다.</p><a class="btn ghost" href="/admin/feedback-reports">전체 신고 보기</a></article>
+  {% endif %}
+</section>
+
+<aside class="frame-mobile-notice"><strong>모바일 운영 범위</strong><span>신고 검토와 상태 변경은 PC에서만 확인합니다.</span></aside>
+{% endblock %}

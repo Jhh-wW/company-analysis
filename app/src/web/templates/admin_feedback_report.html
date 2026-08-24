@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}{{ feedback_report.report_id }} 신고 상세 · 기업분석{% endblock %}
+{% block bodyclass %}admin-frame-page feedback-admin-page{% endblock %}
+{% block wrapclass %}wide admin-frame{% endblock %}
+{% block content %}
+<header class="frame-heading"><p class="frame-kicker">관리자 전용</p><h1>신고 상세</h1><p class="lede">신고 원문과 처리 이력을 확인하고, 허용된 다음 상태로만 바꿉니다.</p></header>
+{% set dashboard_nav = "feedback" %}{% include "_admin_nav.html" %}
+
+<section class="frame-section frame-desktop-only">
+  <p><a class="btn ghost" href="/admin/feedback-reports">← 신고 목록으로</a></p>
+
+  {% if feedback_status_error %}
+  <div class="warn-line" role="alert" style="margin-bottom:16px">
+    <span>⚠️</span><span><strong>상태를 바꾸지 못했습니다.</strong><br>{{ feedback_status_error }}</span>
+  </div>
+  {% endif %}
+
+  <div class="card">
+    <p class="muted" style="margin-bottom:4px">신고 ID</p>
+    <h2 style="margin-top:0">{{ feedback_report.report_id }}
+      <span class="fr-status {{ feedback_status_tones.get(feedback_report.status, '') }}">{{ feedback_report.status }}</span>
+    </h2>
+    <div class="data-table-scroll compact" role="region" tabindex="0" aria-label="신고 정보">
+    <table aria-label="신고 정보">
+      <tbody>
+        <tr><th scope="row">접수 시각</th><td>{{ feedback_created_at_label }} <span class="muted">(기준일 {{ feedback_report.day }})</span></td></tr>
+        <tr><th scope="row">신고 단계</th><td>{{ feedback_report.stage }}</td></tr>
+        <tr><th scope="row">신고 유형</th><td>{{ feedback_report.category }}</td></tr>
+        <tr><th scope="row">기업명</th><td>{{ feedback_report.company_name or "—" }}</td></tr>
+        <tr><th scope="row">대상 보고서</th><td>{{ feedback_report.report_ref or "—" }}</td></tr>
+        <tr><th scope="row">오류 발생 항목</th><td>{{ feedback_report.item_label or "—" }}</td></tr>
+        <tr><th scope="row">참고 URL</th>
+          <td>{% if feedback_report.ref_url %}<a href="{{ feedback_report.ref_url }}" rel="noopener noreferrer nofollow" target="_blank">{{ feedback_report.ref_url }}</a>{% else %}—{% endif %}</td></tr>
+        <tr><th scope="row">마지막 변경</th><td>{{ feedback_updated_at_label }}</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>신고 내용</h2>
+    <p class="fr-body-block">{{ feedback_report.body }}</p>
+  </div>
+
+  <div class="card">
+    <h2>관리자 메모</h2>
+    {% if feedback_report.admin_note %}
+    <p class="fr-body-block">{{ feedback_report.admin_note }}</p>
+    {% else %}
+    <p class="muted">아직 남긴 메모가 없습니다.</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2 id="feedback-status-form-title">처리 상태 변경</h2>
+    {% if feedback_transition_targets %}
+    <p class="muted" style="margin-top:6px">
+      현재 상태는 <strong>{{ feedback_report.status }}</strong>입니다.
+      허용된 다음 상태로만 바꿀 수 있으며, 변경은 이력으로 남습니다.
+    </p>
+    <form method="post" action="/admin/feedback-reports/{{ feedback_report.report_id }}/status"
+          aria-labelledby="feedback-status-form-title" style="margin-top:14px">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="field">
+        <label for="fr-admin-note">관리자 메모 <span class="muted">(선택 · 비우면 기존 메모 유지)</span></label>
+        <textarea id="fr-admin-note" name="admin_note" rows="4"
+                  maxlength="{{ feedback_admin_note_max_chars }}"
+                  placeholder="확인한 내용, 조치 결과를 남겨주세요">{{ feedback_admin_note_value }}</textarea>
+      </div>
+      <div class="fr-transition-actions">
+        {% for target in feedback_transition_targets %}
+        <button type="submit" class="btn" name="to_status" value="{{ target }}">{{ target }}(으)로 변경</button>
+        {% endfor %}
+      </div>
+    </form>
+    {% else %}
+    <p class="muted" style="margin-top:6px">
+      <strong>{{ feedback_report.status }}</strong> 상태는 종결 상태입니다. 더 바꿀 수 있는 상태가 없습니다.
+    </p>
+    {% endif %}
+  </div>
+</section>
+
+<aside class="frame-mobile-notice"><strong>모바일 운영 범위</strong><span>신고 검토와 상태 변경은 PC에서만 확인합니다.</span></aside>
+{% endblock %}

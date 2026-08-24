@@ -4,11 +4,17 @@ import datetime as dt
 import logging
 import os
 import string
+from urllib.parse import quote, urlencode
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from src.core import clock
+from src.features.admin_dashboard import store as dashboard_store
+from src.features.auth import constants as auth_constants
+from src.features.auth import logic as auth_logic
+from src.features.feedback_report import constants as feedback_constants
+from src.features.feedback_report import logic as feedback_logic
 from src.features.observability import admin_audit, admin_audit_store
 from src.features.budget import spend_store
 from src.features.pipeline.demo import DemoPipeline
@@ -1079,4 +1085,280 @@ async def admin_revoke(
     )
     return _admin_response(
         request, RedirectResponse("/admin/access", status_code=303)
+    )
+
+
+# ══════════════════════════════════════════════════════════
+# 신고 관리 — feedback_report 원장의 관리자 화면
+# ══════════════════════════════════════════════════════════
+
+_FEEDBACK_LIST_PATH = "/admin/feedback-reports"
+
+#: 목록·상세 화면의 상태 배지 색상 구분. 값 목록은 feedback_constants가 정본이다.
+_FEEDBACK_STATUS_TONES = {
+    feedback_constants.STATUS_OPEN: "tone-open",
+    feedback_constants.STATUS_REVIEWING: "tone-reviewing",
+    feedback_constants.STATUS_RESOLVED: "tone-resolved",
+    feedback_constants.STATUS_REJECTED: "tone-rejected",
+}
+
+#: 현재 페이지 앞뒤로 보여줄 페이지 번호 개수.
+_FEEDBACK_PAGE_WINDOW = 2
+
+
+def _admin_actor_digest(request: Request) -> str:
+    """상태 변경 기록용 처리자 식별자. 원문 이메일은 저장하지 않는다."""
+    session = auth_logic.get_session(
+        request.cookies.get(auth_constants.SESSION_COOKIE_NAME)
+    )
+    if session is None or not session.is_admin:
+        raise PermissionError("관리자 세션이 필요합니다")
+    return dashboard_store.actor_digest(session.email)
+
+
+def _feedback_page_numbers(page: int, page_count: int) -> list[int]:
+    """현재 페이지 주변의 번호만 잘라 페이지네이션에 보여준다."""
+    if page_count <= 0:
+        return []
+    current = min(max(1, page), page_count)
+    start = max(1, current - _FEEDBACK_PAGE_WINDOW)
+    end = min(page_count, current + _FEEDBACK_PAGE_WINDOW)
+    return list(range(start, end + 1))
+
+
+@router.get("/admin/feedback-reports", response_class=HTMLResponse)
+async def admin_feedback_reports(
+    request: Request,
+    status: str = "",
+    category: str = "",
+    stage: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    keyword: str = "",
+    page: str = "1",
+):
+    """신고 목록 화면 — 상태 집계·필터·페이지네이션."""
+    blocked = request_helpers.require_admin(request)
+    if blocked is not None:
+        return blocked
+    try:
+        page_number = max(1, int(str(page).strip() or "1"))
+    except ValueError:
+        page_number = 1
+    filters = {
+        "status": str(status or "").strip(),
+        "category": str(category or "").strip(),
+        "stage": str(stage or "").strip(),
+        "date_from": str(date_from or "").strip(),
+        "date_to": str(date_to or "").strip(),
+        "keyword": str(keyword or "").strip(),
+    }
+    filter_error = ""
+    page_data = None
+    try:
+        with storage_db.connect() as conn:
+            counts = feedback_logic.count_by_status(conn)
+            try:
+                page_data = feedback_logic.list_reports(
+                    conn, page=page_number, **filters
+                )
+            except feedback_logic.FeedbackReportError as error:
+                # 필터 값이 계약을 벗어났다 — 집계는 유지하고 메시지를 그대로 보여준다.
+                filter_error = str(error)
+    except Exception:  # noqa: BLE001 — 읽지 못한 목록을 0건 정상처럼 보이지 않는다
+        logger.error("신고 목록 또는 집계를 읽지 못했습니다")
+        return _admin_response(
+            request,
+            HTMLResponse("신고 목록을 안전하게 읽지 못했습니다.", status_code=503),
+        )
+    active_filters = {key: value for key, value in filters.items() if value}
+    filter_query = urlencode(active_filters)
+    page_url_prefix = (
+        f"{_FEEDBACK_LIST_PATH}?{filter_query}&page="
+        if filter_query
+        else f"{_FEEDBACK_LIST_PATH}?page="
+    )
+    response = request_helpers.templates.TemplateResponse(
+        request=request,
+        name="admin_feedback_reports.html",
+        context=request_helpers._ctx(
+            request,
+            feedback_counts=counts,
+            feedback_total=sum(counts.values()),
+            feedback_page=page_data,
+            feedback_filters=filters,
+            feedback_filter_error=filter_error,
+            feedback_status_options=feedback_constants.REPORT_STATUSES,
+            feedback_category_options=feedback_constants.REPORT_CATEGORIES,
+            feedback_stage_options=feedback_constants.REPORT_STAGES,
+            feedback_status_tones=_FEEDBACK_STATUS_TONES,
+            feedback_page_numbers=_feedback_page_numbers(
+                page_data.page if page_data is not None else 1,
+                page_data.page_count if page_data is not None else 0,
+            ),
+            feedback_page_url_prefix=page_url_prefix,
+            feedback_keyword_max_chars=feedback_constants.MAX_KEYWORD_CHARS,
+        ),
+        status_code=400 if filter_error else 200,
+    )
+    return _admin_response(request, response)
+
+
+def _feedback_report_detail_page(
+    request: Request,
+    report_id: str,
+    *,
+    status_error: str = "",
+    note_value: str | None = None,
+    status_code: int = 200,
+):
+    """신고 상세 화면. 상태 변경 실패 시 오류 메시지와 함께 다시 그린다."""
+    try:
+        with storage_db.connect() as conn:
+            found = feedback_logic.get_report(conn, report_id)
+    except Exception:  # noqa: BLE001 — 못 읽은 신고를 없는 신고로 단정하지 않는다
+        logger.error("신고 상세를 읽지 못했습니다")
+        return _admin_response(
+            request,
+            HTMLResponse("신고 내용을 안전하게 읽지 못했습니다.", status_code=503),
+        )
+    if found is None:
+        return _admin_response(
+            request,
+            HTMLResponse("해당 신고를 찾을 수 없습니다.", status_code=404),
+        )
+    allowed = feedback_constants.ALLOWED_STATUS_TRANSITIONS.get(
+        found.status, frozenset()
+    )
+    response = request_helpers.templates.TemplateResponse(
+        request=request,
+        name="admin_feedback_report.html",
+        context=request_helpers._ctx(
+            request,
+            feedback_report=found,
+            feedback_status_error=status_error,
+            feedback_transition_targets=[
+                target
+                for target in feedback_constants.REPORT_STATUSES
+                if target in allowed
+            ],
+            feedback_status_tones=_FEEDBACK_STATUS_TONES,
+            feedback_created_at_label=_kst_timestamp_label(found.created_at),
+            feedback_updated_at_label=_kst_timestamp_label(found.updated_at),
+            feedback_admin_note_value=(
+                found.admin_note if note_value is None else note_value
+            ),
+            feedback_admin_note_max_chars=feedback_constants.MAX_ADMIN_NOTE_CHARS,
+        ),
+        status_code=status_code,
+    )
+    return _admin_response(request, response)
+
+
+@router.get("/admin/feedback-reports/{report_id}", response_class=HTMLResponse)
+async def admin_feedback_report_detail(request: Request, report_id: str):
+    """신고 한 건의 전체 필드와 상태 변경 폼."""
+    blocked = request_helpers.require_admin(request)
+    if blocked is not None:
+        return blocked
+    return _feedback_report_detail_page(request, report_id)
+
+
+@router.post("/admin/feedback-reports/{report_id}/status")
+async def admin_feedback_report_status(
+    request: Request,
+    report_id: str,
+    to_status: str = Form(..., max_length=20),
+    admin_note: str = Form("", max_length=feedback_constants.MAX_ADMIN_NOTE_CHARS),
+    csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
+):
+    """허용된 전이만 실행한다. 위반 메시지는 상세 화면에 그대로 보여준다."""
+    action = "admin.feedback_report.status"
+    target = admin_audit.target_id("feedback", report_id)
+    blocked = request_helpers.require_admin_action(
+        request, csrf_token, action=action, target=target
+    )
+    if blocked is not None:
+        return blocked
+    try:
+        actor = _admin_actor_digest(request)
+    except Exception:  # noqa: BLE001 — 처리자를 확정하지 못한 변경은 시작하지 않는다
+        logger.error("신고 처리자 식별자를 만들지 못했습니다")
+        _audit_failed_change(
+            request, action=action, target=target, reason="actor_unavailable"
+        )
+        return _admin_response(
+            request,
+            HTMLResponse(
+                "처리자 정보를 확인하지 못했습니다. 잠시 후 다시 시도해주세요.",
+                status_code=503,
+            ),
+        )
+    validation_error = ""
+    try:
+        with storage_db.connect() as conn:
+            try:
+                changed = feedback_logic.change_status(
+                    conn,
+                    report_id=report_id,
+                    to_status=to_status,
+                    admin_note=admin_note,
+                    actor=actor,
+                    now_iso=clock.iso_now_kst(),
+                )
+            except feedback_logic.FeedbackReportError as error:
+                validation_error = str(error)
+            else:
+                _queue_committed_change(
+                    conn,
+                    request,
+                    action=action,
+                    target=admin_audit.target_id("feedback", changed.report_id),
+                    reason="status_changed",
+                )
+    except Exception:  # noqa: BLE001 — 변경 확인 실패를 성공으로 처리하지 않는다
+        logger.error("신고 상태 변경 또는 변경 확인에 실패했습니다")
+        _audit_failed_change(
+            request, action=action, target=target, reason="storage_unavailable"
+        )
+        return _admin_response(
+            request,
+            HTMLResponse(
+                "신고 상태를 저장하지 못했습니다. 잠시 후 다시 시도해주세요.",
+                status_code=503,
+            ),
+        )
+    if validation_error:
+        try:
+            _audit_change(
+                request,
+                action=action,
+                target=target,
+                outcome="rejected",
+                reason="transition_rejected",
+            )
+        except Exception:  # noqa: BLE001 — 감사 실패 시 관리자 작업을 계속하지 않는다
+            return _admin_response(
+                request,
+                HTMLResponse(
+                    "요청 기록을 남기지 못했습니다. 잠시 후 다시 시도해주세요.",
+                    status_code=503,
+                ),
+            )
+        return _feedback_report_detail_page(
+            request,
+            report_id,
+            status_error=validation_error,
+            note_value=admin_note,
+            status_code=400,
+        )
+    _mirror_committed_change(
+        request, action=action, target=target, reason="status_changed"
+    )
+    return _admin_response(
+        request,
+        RedirectResponse(
+            f"{_FEEDBACK_LIST_PATH}/{quote(str(report_id).strip())}",
+            status_code=303,
+        ),
     )

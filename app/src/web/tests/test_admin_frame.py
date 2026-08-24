@@ -56,7 +56,7 @@ def test_mobile_emergency_stop_is_present_but_other_mobile_forms_stay_hidden():
     assert "새 생성 긴급 중단" in response.text
 
 
-def test_pc_dashboard_has_exactly_five_menus_and_contextual_access_actions():
+def test_pc_dashboard_has_exactly_six_menus_and_contextual_access_actions():
     runtime._PIPELINE = DemoPipeline()
     with TestClient(main.app) as client:
         session = auth_logic.create_session("admin@example.com", True)
@@ -69,9 +69,10 @@ def test_pc_dashboard_has_exactly_five_menus_and_contextual_access_actions():
 
     assert response.status_code == 200
     menu = response.text.split('<nav class="frame-menu"', 1)[1].split("</nav>", 1)[0]
-    assert menu.count("<a ") == 5
+    assert menu.count("<a ") == 6
     assert ">오늘</a>" in menu and ">문제·보고서</a>" in menu
     assert ">친구</a>" in menu and ">지원 LINK</a>" in menu and "⚙" in menu
+    assert ">신고 관리</a>" in menu
     assert 'href="/admin/access"' not in menu
     assert destination.status_code == 200
     assert "초대·LINK 관리" in destination.text
