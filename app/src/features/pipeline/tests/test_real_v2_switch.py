@@ -20,6 +20,7 @@ import pytest
 
 import src.features.composer.pipeline as composer_pipeline
 from src.features.budget import provider_budget
+from src.features.composer.port import AskFatalError
 from src.features.composer.validate import V2ValidationError
 from src.features.pipeline import real
 from src.features.pipeline.port import (
@@ -231,6 +232,56 @@ def test_분기_함수는_v1_자산을_재사용해_run_v2에_넘긴다(
     assert steps[-1]["step"] == "v2_composer_완료"
 
 
+def test_v2_분기는_AskFatalError_원인을_그대로_다시_던진다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """예산 소진 같은 요청 전역 장애는 GATE_STOPPED(출고 검증 실패)가 아니라
+    원인 예외 그대로 재전파돼야 v1과 같은 FAILED 처리로 흐른다(실측 결함)."""
+    fake = FakeEngine()
+    engine, client, frags, financials, filing = _branch_ingredients(fake)
+    cause = provider_budget.ProviderBudgetExceeded("이번 단계 예약 잔액을 넘었습니다")
+
+    def failing_run_v2(*_args: Any, **_kwargs: Any):
+        raise AskFatalError(cause)
+
+    monkeypatch.setattr(composer_pipeline, "run_v2", failing_run_v2)
+    steps: list[dict[str, Any]] = []
+
+    with pytest.raises(provider_budget.ProviderBudgetExceeded):
+        real._run_v2_composer(
+            engine=engine,
+            client=client,
+            company_name="가나다전자",
+            corp_type="상장사",
+            frags=frags,
+            financials=financials,
+            filing=filing,
+            sources=[],
+            business_date=_DATE,
+            model="가짜모델",
+            steps=steps,
+        )
+
+
+def test_v2_요청전역_장애는_출고검증실패_아니라_v1과_같은_FAILED로_끝난다(
+    engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """run() 전체를 통해 확인 — «검증 실패»로 오표기되지 않는다."""
+    monkeypatch.setenv(real.ENGINE_V2_ENV_NAME, real.ENGINE_V2_ENV_ON)
+
+    def failing_run_v2(*_args: Any, **_kwargs: Any):
+        raise AskFatalError(
+            provider_budget.ProviderBudgetExceeded("이번 단계 예약 잔액을 넘었습니다")
+        )
+
+    monkeypatch.setattr(composer_pipeline, "run_v2", failing_run_v2)
+
+    result = _run()
+
+    assert result.outcome is Outcome.FAILED
+    assert result.final_gate_reason == ""  # publish_blocked 사유로 오표기되지 않는다
+
+
 def test_v2_출고검증_실패는_GATE_STOPPED로_끝난다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -291,3 +342,45 @@ def test_v2_ask는_계량_client_경계를_지난다() -> None:
     # 사용량이 요청별 계량기에 stage와 함께 쌓인다 (0원 위장 금지)
     assert engine.usages
     assert engine.usages[0]["stage"] == "v2_compose"
+
+
+def test_v2_ask는_예산소진을_AskFatalError로_감싸_재전파한다() -> None:
+    """예산 소진·billing-uncertain은 문장 하나의 실패가 아니라 요청 전역
+    장애다 — composer가 삼키지 못하게 AskFatalError로 감싼다(실측 결함)."""
+    fake = FakeEngine()
+    engine = real._MeteredEngine(fake)
+    client = real._metered_client(engine, fake._client())
+    cause = provider_budget.ProviderBudgetExceeded("이번 단계 예약 잔액을 넘었습니다")
+
+    def exhausted(**_kwargs: Any) -> Any:
+        raise cause
+
+    client.messages.create = exhausted  # type: ignore[method-assign]
+    ask = real._v2_ask_via_provider(
+        engine, client, stage="v2_compose", max_tokens=real.V2_WRITER_MAX_TOKENS
+    )
+
+    with pytest.raises(AskFatalError) as caught:
+        ask("프롬프트 본문")
+    assert caught.value.cause is cause
+
+
+def test_v2_ask는_billing_uncertain_차단도_AskFatalError로_감싼다() -> None:
+    fake = FakeEngine()
+    engine = real._MeteredEngine(fake)
+    client = real._metered_client(engine, fake._client())
+    cause = provider_budget.ProviderBudgetUnavailable(
+        "미확정 provider 호출 뒤에는 같은 요청에서 다시 호출할 수 없습니다"
+    )
+
+    def blocked(**_kwargs: Any) -> Any:
+        raise cause
+
+    client.messages.create = blocked  # type: ignore[method-assign]
+    ask = real._v2_ask_via_provider(
+        engine, client, stage="v2_review", max_tokens=real.V2_REVIEWER_MAX_TOKENS
+    )
+
+    with pytest.raises(AskFatalError) as caught:
+        ask("프롬프트 본문")
+    assert caught.value.cause is cause

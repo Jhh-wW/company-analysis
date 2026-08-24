@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any, Callable, Final, Optional, Union
 
@@ -41,6 +42,7 @@ from src.features.composer.constants import (
     VALID_GRADES,
 )
 from src.features.composer.port import (
+    AskFatalError,
     CollectedFragment,
     ComposedReport,
     ComposedSection,
@@ -117,6 +119,24 @@ def build_section_prompt(
 # ══════════════════════════════════════════════════════════
 
 
+#: 문장 «글» 안에 흉내낸 인용 표기 — [숫자]·[인용: …]·[조각 …].
+#: ★ 정식 인용은 citations 배열이 유일한 정본이고, 부록(render.py)도 그
+#:   배열에서만 만들어진다. 작가 프롬프트가 자료를 「[조각 n]」·「[인용: 1, 2]」
+#:   모양으로 보여주므로 모델이 산문 속에도 같은 모양을 흉내 내는 사고가
+#:   실재한다(critical 결함 — validate.py의 인용-부록 1:1 검사가 이 숫자를
+#:   진짜 인용으로 오인해 유료 실행 전체를 GATE_STOPPED로 죽인다). 이건 내용
+#:   검열 게이트가 아니라 출력 «형식» 정리다 — 값을 판단하지 않고 모양만 본다.
+_INLINE_CITATION_MARKER_RE: Final[re.Pattern[str]] = re.compile(
+    r"\[(?:\d+|인용\s*:[^\]]*|조각[^\]]*)\]"
+)
+
+
+def _strip_inline_citation_markers(text: str) -> str:
+    """문장 텍스트 속 흉내낸 인용 대괄호를 걷어내고 공백을 정리한다."""
+    cleaned = _INLINE_CITATION_MARKER_RE.sub(" ", text)
+    return " ".join(cleaned.split())
+
+
 def _extract_payload(raw: str) -> Optional[Any]:
     """응답 문자열에서 JSON을 꺼낸다. 코드 펜스·앞뒤 설명이 붙어도 살린다.
 
@@ -144,10 +164,15 @@ def _sentence_from_item(item: Any) -> Optional[ComposedSentence]:
 
     ★ 여기서 보는 것은 «형식»뿐이다 — 글이 비었는가, 등급이 계약된 두 값인가,
       인용이 배열인가. 문장 내용은 일절 검사하지 않는다(닫힌 게이트 금지).
+      단, 글 속에 흉내낸 인용 대괄호([n]·[인용: …]·[조각 …])는 형식 정리로
+      걷어낸다 — 정식 인용은 citations 배열로만 표시된다.
     """
     if not isinstance(item, Mapping):
         return None
     text = str(item.get(RESPONSE_TEXT_KEY) or "").strip()
+    if not text:
+        return None
+    text = _strip_inline_citation_markers(text)
     if not text:
         return None
     grade = str(item.get(RESPONSE_GRADE_KEY) or "").strip()
@@ -202,9 +227,16 @@ def parse_section_response(raw: str) -> Optional[tuple[ComposedSentence, ...]]:
 def _ask_and_parse(
     ask: AskFn, prompt: str
 ) -> Optional[tuple[ComposedSentence, ...]]:
-    """AI를 부르고 파싱까지. 호출 자체가 죽어도 None으로 삼킨다(전체 중단 금지)."""
+    """AI를 부르고 파싱까지. 호출 자체가 죽어도 None으로 삼킨다(전체 중단 금지).
+
+    ★ 예외다: AskFatalError(예산 소진·billing-uncertain 같은 «요청 전역»
+      장애)는 삼키지 않고 그대로 재전파한다 — 문장 하나의 실패로 위장하면
+      real.py의 FAILED 처리 대신 v2 출고 검증 실패로 오표기된다.
+    """
     try:
         raw = ask(prompt)
+    except AskFatalError:
+        raise
     except Exception:  # noqa: BLE001 - 한 장의 실패가 보고서 전체를 멈추면 안 된다
         return None
     return parse_section_response(str(raw))
@@ -306,6 +338,8 @@ SUMMARY_RULES_GUIDE: Final[str] = (
     f"   - 등급 «{GRADE_INTERPRETED}»: 공식 자료에 기반한 분석·의미 부여. "
     "종합적 해석이면 빈 배열도 허용된다.\n"
     "4. 본문에 없는 사실·숫자를 지어내지 않는다.\n"
+    "5. «글» 문장 본문 안에 [숫자]·[인용: …] 같은 대괄호 표기를 직접 쓰지 "
+    "않는다. 인용은 반드시 위 «인용» 배열로만 표시한다.\n"
 )
 
 #: 요약 출력 JSON 안내 — 장별 JSON_SCHEMA_GUIDE와 같은 모양(키 상수 공유).

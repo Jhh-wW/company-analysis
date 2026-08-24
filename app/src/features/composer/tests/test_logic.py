@@ -13,6 +13,8 @@ import json
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from src.features.composer.constants import (
     FORBIDDEN_TOPICS_GUIDE,
     GRADE_CONFIRMED,
@@ -29,6 +31,7 @@ from src.features.composer.logic import (
     parse_section_response,
 )
 from src.features.composer.port import (
+    AskFatalError,
     CollectedFragment,
     PerformanceTable,
     fragments_from_raw,
@@ -187,6 +190,16 @@ def test_ask가_예외를_던져도_전체가_중단되지_않는다():
         assert section.notice == NOTICE_COMPOSE_FAILED
 
 
+def test_AskFatalError는_삼키지_않고_그대로_재전파한다():
+    """예산 소진 같은 요청 전역 장애는 장 실패 안내문으로 위장하지 않는다."""
+
+    def dying_ask(prompt: str) -> str:
+        raise AskFatalError(RuntimeError("예산 소진"))
+
+    with pytest.raises(AskFatalError):
+        compose_sections("가나다전자", _raw_fragments(), _table(), dying_ask)
+
+
 def test_빈_문장_목록은_자료부족_안내로_남는다():
     """작가가 «쓸 문장이 없다»고 정상적으로 답한 경우 — 재요청하지 않는다."""
     ask = _FakeAsk([json.dumps({"문장들": []}, ensure_ascii=False)])
@@ -252,6 +265,47 @@ def test_형식이_깨진_항목만_빼고_살린다():
 
     assert parsed is not None
     assert [s.text for s in parsed] == ["정상 문장이다."]
+
+
+def test_글_안의_인라인_대괄호_인용_표기는_제거된다():
+    """작가가 «글» 안에 [3]·[인용: 1, 2]·[조각 2] 같은 표기를 흉내내도(critical
+    결함 — validate.py가 이를 진짜 인용 번호로 오인해 GATE_STOPPED로 죽인다)
+    형식 정리로 걷어낸다. 인용 배열(citations)은 그대로 보존된다."""
+    response = json.dumps(
+        {
+            "문장들": [
+                {
+                    "글": "자료 [3]에서 밝힌 대로 성장했다.",
+                    "인용": ["1"],
+                    "등급": GRADE_CONFIRMED,
+                },
+                {
+                    "글": "실적은 [인용: 1, 2] 개선됐다.",
+                    "인용": ["1"],
+                    "등급": GRADE_CONFIRMED,
+                },
+                {
+                    "글": "이는 [조각 2]에 근거한다.",
+                    "인용": ["2"],
+                    "등급": GRADE_CONFIRMED,
+                },
+            ]
+        },
+        ensure_ascii=False,
+    )
+
+    parsed = parse_section_response(response)
+
+    assert parsed is not None
+    texts = [s.text for s in parsed]
+    assert texts == [
+        "자료 에서 밝힌 대로 성장했다.",
+        "실적은 개선됐다.",
+        "이는 에 근거한다.",
+    ]
+    assert all("[" not in t and "]" not in t for t in texts)
+    # 정식 인용(citations 배열)은 그대로 보존된다 — 정리 대상은 텍스트뿐이다
+    assert [s.citations for s in parsed] == [("1",), ("1",), ("2",)]
 
 
 def test_코드펜스로_감싼_JSON도_읽는다():

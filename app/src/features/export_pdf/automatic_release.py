@@ -143,6 +143,11 @@ def run_automatic_checks(
     )
 
     channel_ok = False
+    # ★ 채널 검사가 막을 때 사유를 정직하게 남기려고 기본값(동등성 불일치)에서
+    #   출발해, 원인이 «인용 0건»으로 밝혀지면 이 변수만 그 사유로 바꾼다
+    #   (차단은 그대로 유지 — v2 인용 장부가 비면 web·PDF·Notion 동등성을
+    #   증거로 확인할 방법이 없다는 사실은 안 바뀐다).
+    channel_reason = "웹·PDF·Notion 채널 동등성 검사를 통과하지 못했습니다"
     if canonical_ok and published is not None:
         if published.schema_version == ENGINE_V2_SCHEMA_VERSION:
             # v2(엔진 v2): Notion 채널은 04장 3-4절 4항 정책대로 후속 과제다
@@ -156,9 +161,15 @@ def run_automatic_checks(
             # 재검사)가 report_sha256으로 이미 강제한다.
             try:
                 published_fact_ids = report_fact_id_ledger(published)
-                channel_ok = bool(published_fact_ids) and (
-                    candidate.expected_fact_ids == published_fact_ids
-                )
+                if not published_fact_ids:
+                    # 인용이 0건인 v2 보고서(해석 문장만·실적표 없음)는 합법적
+                    # 결과물이다 — «채널이 안 맞다»가 아니라 «비교할 인용 장부
+                    # 자체가 없다»가 실제 사유이므로 무관한 채널 동등성 사유로
+                    # 오표기하지 않는다.
+                    channel_reason = "인용된 출처가 없어 PDF 자동 출고를 보류했습니다"
+                    channel_ok = False
+                else:
+                    channel_ok = candidate.expected_fact_ids == published_fact_ids
             except Exception:  # fail closed at a public-channel boundary
                 channel_ok = False
         else:
@@ -174,7 +185,7 @@ def run_automatic_checks(
             except Exception:  # fail closed at a public-channel boundary
                 channel_ok = False
     if not channel_ok:
-        reasons.append("웹·PDF·Notion 채널 동등성 검사를 통과하지 못했습니다")
+        reasons.append(channel_reason)
     channel_check = AutomaticCheckResult(
         name=REQUIRED_AUTOMATIC_CHECKS[2],
         passed=channel_ok,

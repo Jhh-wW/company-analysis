@@ -197,10 +197,13 @@ _FINAL_GATE_REASON_KO: Final[dict[str, str]] = {
 ENGINE_V2_ENV_NAME: Final[str] = "ENGINE_V2"
 ENGINE_V2_ENV_ON: Final[str] = "1"
 
-#: v2 작가·검수 호출의 출력 token 상한. 작가는 장 하나(6~12문장 JSON)를,
-#: 검수는 판정 목록 JSON을 돌려주므로 작가 쪽을 더 크게 잡는다.
+#: v2 작가·검수 호출의 출력 token 상한. 작가는 장 하나(6~12문장 JSON)를 돌려준다.
+#: 검수는 보고서 전체 «확인» 문장(50개+)의 판정 목록을 «한 번에» 돌려주므로
+#: 절단 여유를 크게 둔다 — v1 파일럿 전멸 원인이 max_tokens 절단(3,000→6,000도
+#: 부족)이었고, 검수 절단은 재요청 실패 시 확인 전원 해석 강등으로 이어진다.
+#: 실제 비용은 실행기의 건당·일일 예상비용 상한이 계속 지킨다.
 V2_WRITER_MAX_TOKENS: Final[int] = 4000
-V2_REVIEWER_MAX_TOKENS: Final[int] = 2000
+V2_REVIEWER_MAX_TOKENS: Final[int] = 8000
 
 #: other_gate일 때 세부를 보태는 span-selection 결과 사유 코드 → 한국어 표기.
 _SPAN_RESULT_REASON_KO: Final[dict[str, str]] = {
@@ -2637,16 +2640,30 @@ def _v2_ask_via_provider(
     writer 경로와 같은 계량 client 경계를 지난다 — 비용 계량·예산 가드·요청별
     모델 고정이 전부 그 경계에서 적용된다. 구조화 출력(output_config)은 쓰지
     않는다: composer가 응답 문자열에서 직접 JSON을 관용 파싱하기 때문이다.
+
+    ★ 예산 소진·billing-uncertain 차단은 «이 요청 전역» 장애다 — composer가
+      문장 단위 실패로 삼키면 실제 원인이 «출고 검증 실패»로 오표기된다
+      (실측 결함). AskFatalError로 감싸 던져 composer의 삼킴 지점들이
+      재전파하게 하고(_run_v2_composer가 다시 풀어 v1과 같은 FAILED로 끝낸다).
     """
+    # composer는 v2 전용이라 지연 import한다 — v1 경로의 module 적재 비용을
+    # 바꾸지 않기 위해서다.
+    from src.features.composer.port import AskFatalError  # noqa: PLC0415
 
     def ask(prompt: str) -> str:
-        with _meter_stage(engine, stage):
-            response = client.messages.create(
-                model=getattr(engine, "MODEL", "") or GENERATION_MODEL,
-                max_tokens=max_tokens,
-                temperature=0,  # 원문 인용 충실도 우선 (1판 _ask와 동일)
-                messages=[{"role": "user", "content": prompt}],
-            )
+        try:
+            with _meter_stage(engine, stage):
+                response = client.messages.create(
+                    model=getattr(engine, "MODEL", "") or GENERATION_MODEL,
+                    max_tokens=max_tokens,
+                    temperature=0,  # 원문 인용 충실도 우선 (1판 _ask와 동일)
+                    messages=[{"role": "user", "content": prompt}],
+                )
+        except (
+            provider_budget.ProviderBudgetExceeded,
+            provider_budget.ProviderBudgetUnavailable,
+        ) as error:
+            raise AskFatalError(error) from error
         blocks = getattr(response, "content", None) or []
         return "".join(str(getattr(block, "text", "") or "") for block in blocks)
 
@@ -2680,6 +2697,7 @@ def _run_v2_composer(
     # 바꾸지 않기 위해서다 (pipeline→composer 방향은 계획이 허용한 연결이다).
     from src.features.composer import pipeline as composer_pipeline  # noqa: PLC0415
     from src.features.composer.port import (  # noqa: PLC0415
+        AskFatalError,
         performance_table_from_report_table,
     )
     from src.features.composer.validate import V2ValidationError  # noqa: PLC0415
@@ -2724,6 +2742,11 @@ def _run_v2_composer(
                 str(getattr(report_table, "presentation", "") or "") or "table"
             ),
         )
+    except AskFatalError as exc:
+        # 예산 소진·billing-uncertain 같은 요청 전역 장애 — «출고 검증 실패»로
+        # 오표기하지 않는다. 원인 예외를 그대로 다시 던져 v1과 같은 경로로
+        # run()의 바깥 except가 FAILED로 정직하게 끝내게 한다.
+        raise exc.cause from exc
     except V2ValidationError as exc:
         # v2 출고 3검사 실패 — 원문 없는 검증 사유만 운영 기록에 남긴다.
         logger.warning("엔진 v2 출고 검증 차단: %s", list(exc.problems))

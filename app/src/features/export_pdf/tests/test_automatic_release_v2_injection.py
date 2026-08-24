@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import pytest
 
+from src.features.composer.constants import GRADE_INTERPRETED, SECTION_IDS
+from src.features.composer.port import ComposedReport, ComposedSection, ComposedSentence
+from src.features.composer.render import render_report
 from src.features.export_pdf import automatic_release
 from src.features.export_pdf.automatic_release import (
     AutomaticGateStopped,
@@ -123,4 +126,74 @@ def test_주입_검증기_자체가_죽어도_fail_closed다(report, candidate):
     with pytest.raises(AutomaticGateStopped, match="GATE_STOPPED"):
         automatic_release_pdf(
             report, candidate, released_at=_AT, content_validator=broken
+        )
+
+
+# ══════════════════════════════════════════════════════════
+# v2 인용 0건 — 차단은 유지하되 사유가 정직해야 한다 (실측 결함)
+# ══════════════════════════════════════════════════════════
+
+
+@pytest.fixture(scope="module")
+def zero_citation_v2_report():
+    """인용이 하나도 없는 v2 보고서 — 전 문장이 «해석»이고 실적표도 없다.
+
+    validate_v2의 3검사(내부 키·인용-부록 1:1·요약 3~5문장)는 전부 통과하는
+    «합법적인» v2 결과물이다 — 근거가 극히 빈약한 회사에서 실제로 나올 수
+    있는 입력이다.
+    """
+    sections = tuple(
+        ComposedSection(
+            section_id=section_id,
+            sentences=(
+                ComposedSentence(
+                    text=f"{section_id} 장은 해석만으로 서술됐다.",
+                    citations=(),
+                    grade=GRADE_INTERPRETED,
+                ),
+            ),
+        )
+        for section_id in SECTION_IDS
+    )
+    summary = tuple(
+        ComposedSentence(
+            text=f"핵심 요약 {order}번째 해석이다.", citations=(), grade=GRADE_INTERPRETED
+        )
+        for order in range(1, 4)
+    )
+    composed = ComposedReport(sections=sections, summary=summary)
+    return render_report(
+        "가나다전자",
+        composed,
+        {},
+        None,
+        corp_type="상장사",
+        as_of_date="2026-08-24",
+    )
+
+
+@pytest.fixture(scope="module")
+def zero_citation_v2_candidate(zero_citation_v2_report):
+    return prepare_pdf_release(zero_citation_v2_report)
+
+
+def test_v2_인용0건은_차단은_유지하되_사유가_정직하다(
+    zero_citation_v2_report, zero_citation_v2_candidate
+):
+    checks, reasons = run_automatic_checks(
+        zero_citation_v2_report,
+        zero_citation_v2_candidate,
+        content_validator=lambda _report: (),  # 내용 검증 자체는 통과(합법적 v2 결과물)
+    )
+
+    channel_check = checks[2]
+    assert channel_check.passed is False  # 차단은 그대로 유지한다
+    assert any("인용된 출처가 없어" in reason for reason in reasons)
+    assert not any("채널 동등성" in reason for reason in reasons)
+    with pytest.raises(AutomaticGateStopped, match="인용된 출처가 없어"):
+        automatic_release_pdf(
+            zero_citation_v2_report,
+            zero_citation_v2_candidate,
+            released_at=_AT,
+            content_validator=lambda _report: (),
         )

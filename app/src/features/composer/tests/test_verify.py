@@ -16,11 +16,14 @@ import json
 import logging
 from typing import Any
 
+import pytest
+
 from src.features.composer.constants import (
     GRADE_CONFIRMED,
     GRADE_INTERPRETED,
 )
 from src.features.composer.port import (
+    AskFatalError,
     CollectedFragment,
     ComposedReport,
     ComposedSection,
@@ -243,6 +246,76 @@ def test_실적표_수치도_근거로_인정된다():
     assert verified.sections[0].sentences[0].grade == GRADE_CONFIRMED
 
 
+# ── ② 개선: 실적표 unit과 다른 단위를 우기면 통과하지 못한다 (실측 결함) ──
+
+
+def _billion_won_table() -> PerformanceTable:
+    """unit=억원인 실적표 — 셀은 맨 숫자 "5,695"뿐이다."""
+    return PerformanceTable(
+        caption="3개년 주요 실적",
+        headers=("항목", "2022", "2023", "2024"),
+        rows=(("매출액", "5,000", "5,300", "5,695"),),
+        unit="억원",
+        cite="조각 1·사업내용",
+    )
+
+
+def test_표_단위와_다른_단위를_우기면_숫자가_같아도_확인으로_남지_않는다():
+    """실적표 unit=억원인 셀 "5,695"를 «5,695원»·«5,695만원»·«5,695%»가
+    그대로 가로채던 사고(실측 결함) — 이제는 단위가 다르면 통과하지 못한다."""
+    table = _billion_won_table()
+    for wrong_sentence in (
+        "2024년 매출액은 5,695원이다.",
+        "2024년 매출액은 5,695만원이다.",
+        "2024년 매출액은 5,695%이다.",
+    ):
+        report = _report((_sentence(wrong_sentence, ("1",)),))
+        ask = _FakeVerifier([])
+
+        verified = verify_report(report, _raw_fragments(), table, ask)
+
+        assert verified.sections[0].sentences == (), wrong_sentence
+
+
+def test_표_단위와_같은_단위면_확인으로_남는다():
+    table = _billion_won_table()
+    report = _report((_sentence("2024년 매출액은 5,695억원이다.", ("1",)),))
+    ask = _FakeVerifier([_all_true(1)])
+
+    verified = verify_report(report, _raw_fragments(), table, ask)
+
+    assert len(verified.sections[0].sentences) == 1
+    assert verified.sections[0].sentences[0].grade == GRADE_CONFIRMED
+
+
+def test_원_단위_전액_환산_표기도_통과한다():
+    # 5,695억원 == 569,500,000,000원 — 값이 정확히 일치하는 환산이다.
+    table = _billion_won_table()
+    report = _report(
+        (_sentence("2024년 매출액은 569,500,000,000원이다.", ("1",)),)
+    )
+    ask = _FakeVerifier([_all_true(1)])
+
+    verified = verify_report(report, _raw_fragments(), table, ask)
+
+    assert len(verified.sections[0].sentences) == 1
+    assert verified.sections[0].sentences[0].grade == GRADE_CONFIRMED
+
+
+def test_근거_전체에_단위정보가_없으면_확인불가로_강등된다_제거아님():
+    """단위 붙은 문장 숫자인데 근거 «어디에도» 단위 정보가 없으면(표도 없고
+    조각 원문도 맨 숫자뿐) 확인도 반증도 못 한다 — 제거가 아니라 해석 강등."""
+    raw = {1: {"종류": "사업내용", "원문": "가나다전자는 매출로 5695를 기록했다."}}
+    report = _report((_sentence("매출은 5,695억원이다.", ("1",)),))
+    ask = _FakeVerifier([])
+
+    verified = verify_report(report, raw, None, ask)
+
+    section = verified.sections[0]
+    assert len(section.sentences) == 1  # 제거되지 않는다
+    assert section.sentences[0].grade == GRADE_INTERPRETED  # 해석으로 강등
+
+
 # ══════════════════════════════════════════════════════════
 # ③ 의미 검수
 # ══════════════════════════════════════════════════════════
@@ -341,6 +414,32 @@ def test_검수_응답이_계속_깨지면_제거_없이_전부_해석_강등한
     assert len(section.sentences) == 2  # 하나도 제거되지 않는다
     assert all(s.grade == GRADE_INTERPRETED for s in section.sentences)
     assert len(ask.review_prompts) == 2  # 원요청 + 재요청 1회
+
+
+def test_AskFatalError는_verify_report가_삼키지_않고_재전파한다():
+    """예산 소진 같은 요청 전역 장애를 «검증기 내부 오류»(전원 해석 강등)로
+    위장하면 안 된다 — 그대로 재전파해 real.py가 v1과 같은 FAILED로 끝내게
+    한다."""
+
+    def dying_ask(prompt: str) -> str:
+        raise AskFatalError(RuntimeError("예산 소진"))
+
+    report = _report(
+        (_sentence("가나다전자는 반도체 검사 장비 전문기업이다.", ("1",)),)
+    )
+
+    with pytest.raises(AskFatalError):
+        verify_report(report, _raw_fragments(), _table(), dying_ask)
+
+
+def test_AskFatalError는_verify_sentences도_재전파한다():
+    def dying_ask(prompt: str) -> str:
+        raise AskFatalError(RuntimeError("예산 소진"))
+
+    sentences = (_sentence("가나다전자는 반도체 검사 장비 전문기업이다.", ("1",)),)
+
+    with pytest.raises(AskFatalError):
+        verify_sentences(sentences, _raw_fragments(), _table(), dying_ask)
 
 
 def test_검수_호출이_계속_죽어도_예외가_새지_않는다():

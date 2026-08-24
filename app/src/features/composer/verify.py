@@ -7,6 +7,10 @@
   ② 수치 검증 — «확인» 문장의 숫자는 인용 조각 원문·실적표에 있어야 한다.
      억원/원/%/배 환산은 ROUND_HALF_UP 재계산으로 허용 (publish.py의 철학 재사용,
      import는 하지 않음 — core/shared에 재사용 가능한 수치 헬퍼가 없음을 실측 확인).
+     단위가 붙은 문장 숫자(억원 등)는 원시 토큰 그대로 존재 규칙을 쓰지 않는다
+     — 근거 쪽 단위(조각 인접 단위 또는 실적표 unit 필드)와 정규화한 값이
+     맞아야 «찾음»이다. 근거 전체에 단위 정보가 어디에도 없으면 확인도
+     반증도 못 하므로 제거가 아니라 해석 강등이다.
   ③ 의미 검수 — 문장+인용 원문을 검수 AI에 나란히 보낸다 (writer/verify.py의
      근거 대조 철학 재사용, 단 «애매하면 거짓» → «애매하면 해석 강등»으로 변경).
   ④ 라벨 정합 — 인용 없는 «확인»은 자동 «해석» 강등. 장의 해석 비율>50%는
@@ -33,8 +37,13 @@ from src.features.composer.constants import (
     PARSE_RETRY_LIMIT,
     RETRY_REMINDER,
 )
-from src.features.composer.logic import AskFn, FragmentsInput
+from src.features.composer.logic import (
+    AskFn,
+    FragmentsInput,
+    _strip_inline_citation_markers,
+)
 from src.features.composer.port import (
+    AskFatalError,
     CollectedFragment,
     ComposedReport,
     ComposedSection,
@@ -74,8 +83,11 @@ NOTICE_ALL_SENTENCES_REJECTED: Final[str] = (
 
 # ── 의미 검수 프롬프트 ──
 # writer/verify.py:52-63의 판정 규칙을 재사용하되 두 곳을 바꿨다:
-#   · 규칙 2: «반올림·환산도 거짓» → 단위 환산은 이 파일의 ② 수치 검증이
-#     코드로 이미 확인하므로, 환산·반올림을 거짓으로 보지 않는다 (기준문서 4-1).
+#   · 규칙 2: «반올림·환산도 거짓» → «값이 정확히 일치하는 단위 환산만 같은
+#     것으로 본다»로 교체(②의 개선). 이 파일의 ② 수치 검증이 단위를 코드로
+#     확인하지만(단위가 붙은 숫자의 원시 토큰 일치는 더 이상 통과시키지
+#     않는다), 검수 AI에게도 «값이 실제로 같아야 한다»는 것을 명시해 둘째
+#     방어선이 관대한 지시로 뚫리지 않게 한다.
 #   · 규칙 5: «애매하면 거짓» → «애매하면 애매로 판정» (→ 해석 강등, 기준문서 4-2).
 REVIEW_PROMPT_HEADER: Final[str] = (
     "아래는 기업분석 보고서 초안의 «확인» 등급 문장과, 각 문장이 인용한 근거 자료다.\n"
@@ -85,7 +97,9 @@ REVIEW_PROMPT_RULES: Final[str] = (
     "\n■ 판정 규칙\n"
     "1. 근거에 없는 정보가 한 조각이라도 들어 있으면 «거짓»이다.\n"
     "2. 숫자·연도·고유명사가 근거와 다르면 «거짓»이다. "
-    "단, 단위 환산(원↔억원 등)과 그에 따른 반올림은 다른 것으로 보지 않는다.\n"
+    "단, 값이 정확히 일치하는 단위 환산(예: 569,500,000,000원 ↔ 5,695억원)"
+    "만 같은 것으로 본다. 단위가 달라 값이 달라지면(예: 5,695억원을 "
+    "5,695원·5,695만원으로 쓴 경우) «거짓»이다.\n"
     "3. 근거를 요약하거나 쉬운 말로 바꾼 것은 «참»이다. 뜻이 같으면 된다.\n"
     "4. 근거에 없는 원인·결과·전망을 덧붙였으면 «거짓»이다. "
     "(예: 근거는 「매출이 줄었다」인데 문장이 「경쟁 심화로 매출이 줄었다」면 거짓)\n"
@@ -179,9 +193,15 @@ def _extract_payload(raw: str) -> Optional[Any]:
 
 def _safe_ask(ask: AskFn, prompt: str) -> Optional[str]:
     """AI를 부른다. 호출이 죽어도 None으로 삼킨다 — 문장 검증 실패가
-    보고서 전체를 멈추면 안 된다."""
+    보고서 전체를 멈추면 안 된다.
+
+    ★ 예외다: AskFatalError(예산 소진·billing-uncertain 같은 «요청 전역»
+      장애)는 삼키지 않고 재전파한다 — logic.py의 같은 예외와 짝이다.
+    """
     try:
         return str(ask(prompt))
+    except AskFatalError:
+        raise
     except Exception:  # noqa: BLE001 - 검수 호출 실패는 «검수 불능»으로 처리한다
         logger.warning("검수 AI 호출이 실패했다 — 해당 판정은 «불능»으로 처리한다")
         return None
@@ -224,18 +244,27 @@ def _extract_numbers(text: str) -> tuple[_SentenceNumber, ...]:
 
 def _evidence_number_pools(
     evidence_texts: Sequence[str],
-) -> tuple[frozenset[Decimal], frozenset[Decimal]]:
-    """근거 글 묶음에서 (원시 토큰 값, 배율 적용 절대값) 두 집합을 만든다."""
+) -> tuple[frozenset[Decimal], frozenset[Decimal], bool]:
+    """근거 글 묶음에서 (원시 토큰 값, 배율 적용 절대값, 단위 정보 존재 여부)를 만든다.
+
+    ★ 세 번째 값은 근거 «어딘가»에 명시적 단위(조각 원문의 인접 단위 또는
+      실적표 unit 필드로 채워 넣은 값 — 아래 _table_texts)가 하나라도
+      있었는지다. 전부 맨 숫자뿐이면 단위 붙은 문장 숫자를 확인도 반증도
+      못 한다(②의 개선 — 하단 _numeric_disposal 참고).
+    """
     raw_values: set[Decimal] = set()
     absolute_values: set[Decimal] = set()
+    has_unit_context = False
     for text in evidence_texts:
         for number in _extract_numbers(text):
             raw_values.add(number.token)
+            if number.unit_marked:
+                has_unit_context = True
             try:
                 absolute_values.add(number.token * number.scale)
             except (InvalidOperation, Overflow):
                 continue
-    return frozenset(raw_values), frozenset(absolute_values)
+    return frozenset(raw_values), frozenset(absolute_values), has_unit_context
 
 
 def _number_found(
@@ -243,15 +272,15 @@ def _number_found(
     raw_values: frozenset[Decimal],
     absolute_values: frozenset[Decimal],
 ) -> bool:
-    """문장 숫자 하나가 근거에 존재하는가.
+    """단위 «없는» 문장 숫자(연도·개수 등) 전용 — 종전 규칙 그대로.
 
-    허용 규칙 3가지:
-      ⓐ 토큰 그대로 존재 (예: 실적표 셀 「1,683」 ↔ 문장 「1,683억원」)
-      ⓑ 배율 적용 절대값이 정확히 존재 (예: 「1,683억원」 ↔ 「168,300,000,000원」)
-      ⓒ 근거 절대값을 문장 단위로 환산해 ROUND_HALF_UP 반올림하면 같음
-         (예: 원 단위 공시값 168,312,345,678원 ↔ 「1,683억원」).
-         ★ ⓒ는 단위 환산이 실제로 있을 때(scale≠1)만 허용한다 —
-           맨 숫자까지 반올림 일치를 허용하면 「2.6」이 「3배」로 통과해 버린다.
+    허용 규칙 2가지:
+      ⓐ 토큰 그대로 존재 (예: 실적표 셀 「456」 ↔ 문장 「456곳」)
+      ⓑ 배율 적용 절대값이 정확히 존재 — 단위 없는 숫자는 scale이 항상
+         1이므로 ⓐ와 같은 값이다.
+    ★ 단위 붙은 문장 숫자는 이 함수를 쓰지 않는다 — _number_matches_by_math를
+      쓴다(아래, ②의 개선). 단위 없는 숫자는 scale이 늘 1이라 ROUND_HALF_UP
+      환산(옛 ⓒ)이 트리거될 일이 없어 여기서는 뺐다.
     """
     if number.token in raw_values:
         return True
@@ -259,10 +288,29 @@ def _number_found(
         absolute = number.token * number.scale
     except (InvalidOperation, Overflow):
         return False
+    return absolute in absolute_values
+
+
+def _number_matches_by_math(
+    number: _SentenceNumber,
+    absolute_values: frozenset[Decimal],
+) -> bool:
+    """단위 «붙은» 문장 숫자 전용 — 셈이 맞는 경우만 «찾음»이다(②의 개선).
+
+    허용 규칙 2가지:
+      ⓑ 배율 적용 절대값이 정확히 존재 (예: 「1,683억원」 ↔ 「168,300,000,000원」)
+      ⓒ 근거 절대값을 문장 단위로 환산해 ROUND_HALF_UP 반올림하면 같음
+         (예: 원 단위 공시값 168,312,345,678원 ↔ 「1,683억원」).
+    ★ 원시 토큰 그대로 존재(옛 ⓐ)는 여기 없다 — 단위가 다르면 숫자가 같아도
+      다른 값이다. 실적표 셀 「5,695」(unit=억원)를 「5,695원」이 그대로
+      가로채는 사고가 바로 이 규칙 때문이었다(실측 결함).
+    """
+    try:
+        absolute = number.token * number.scale
+    except (InvalidOperation, Overflow):
+        return False
     if absolute in absolute_values:
         return True
-    if number.scale == _NO_SCALE:
-        return False
     exponent = number.token.as_tuple().exponent
     if not isinstance(exponent, int):
         return False
@@ -279,14 +327,35 @@ def _number_found(
     return False
 
 
+def _table_row_cell_texts(table: Optional[PerformanceTable]) -> tuple[str, ...]:
+    """실적표 «행» 셀에 표의 unit을 이어 붙여 단위를 아는 근거로 만든다.
+
+    ★ 표 셀은 「1,683」처럼 맨 숫자다 — 단위는 표 전체의 unit 필드
+      (예: "억원")에 있다. 그 단위를 셀 숫자 뒤에 그대로 이어 붙이면
+      _NUMBER_UNIT_RE가 사람이 쓴 "1,683억원"과 «똑같은 모양»으로 단위를
+      읽는다. unit이 비었으면 표에도 단위 정보가 없다는 뜻이므로 맨 숫자
+      그대로 둔다(«단위 불명»과 «단위 원» 구분).
+    """
+    if table is None:
+        return ()
+    unit = (table.unit or "").strip()
+    cells = [cell.strip() for row in table.rows for cell in row if cell.strip()]
+    if not unit:
+        return tuple(cells)
+    return tuple(f"{cell}{unit}" for cell in cells)
+
+
 def _table_texts(table: Optional[PerformanceTable]) -> tuple[str, ...]:
-    """실적표를 수치 대조용 글 조각들로 편다. 표가 없으면 빈 튜플."""
+    """실적표를 수치 대조용 글 조각들로 편다. 표가 없으면 빈 튜플.
+
+    ★ 행 셀만 표의 unit을 붙인다(②의 개선) — 캡션·머리글(연도 등)은
+      금액이 아니므로 단위를 붙이지 않는다.
+    """
     if table is None:
         return ()
     cells: list[str] = [table.caption, table.unit]
     cells.extend(table.headers)
-    for row in table.rows:
-        cells.extend(row)
+    cells.extend(_table_row_cell_texts(table))
     return tuple(cell for cell in cells if cell)
 
 
@@ -299,7 +368,10 @@ def _numeric_disposal(
 
     ★ 「핵심 vs 부수」 판단 기준 (04장 3-2절 2번의 지시로 명시):
       · 단위(조/억/만·원·%·배)가 붙은 숫자는 금액·비율 주장 그 자체다 —
-        이 숫자가 틀리면 문장의 사실 주장이 무너지므로 **문장 제거**.
+        _number_matches_by_math(셈이 맞는지만 본다, 옛 ⓐ 없음)로 확인하고,
+        틀리면 원칙적으로 **문장 제거**다. 단, 근거 «전체»에 단위 정보가
+        어디에도 없으면(맨 숫자뿐) 확인도 반증도 못 하므로 **해석 강등**에
+        그친다(제거 아님 — ②의 개선).
       · 단위 없는 맨 숫자(연도·개수 등)는 서술의 부수 정보다 —
         실패해도 문장 뼈대는 남을 수 있으므로 **해석 강등**에 그친다.
     """
@@ -311,19 +383,27 @@ def _numeric_disposal(
         for citation in sentence.citations
         if citation in frag_by_id
     ]
-    raw_values, absolute_values = _evidence_number_pools(
+    raw_values, absolute_values, has_unit_context = _evidence_number_pools(
         [*cited_texts, *table_texts]
     )
-    failed = [
-        number
-        for number in numbers
-        if not _number_found(number, raw_values, absolute_values)
-    ]
-    if not failed:
-        return NUMERIC_PASS
-    if any(number.unit_marked for number in failed):
+    remove = False
+    demote = False
+    for number in numbers:
+        if number.unit_marked:
+            if _number_matches_by_math(number, absolute_values):
+                continue
+            if has_unit_context:
+                remove = True
+            else:
+                # 근거 전체가 단위 정보 없는 맨 숫자뿐 — 확인도 반증도 못 한다.
+                demote = True
+        elif not _number_found(number, raw_values, absolute_values):
+            demote = True
+    if remove:
         return NUMERIC_REMOVE
-    return NUMERIC_DEMOTE
+    if demote:
+        return NUMERIC_DEMOTE
+    return NUMERIC_PASS
 
 
 # ══════════════════════════════════════════════════════════
@@ -496,8 +576,13 @@ def _ask_rewrite(
     # 코드 펜스·빈 줄을 걷어내고 첫 실속 있는 한 줄만 쓴다 (한 줄만 요구했다)
     for line in raw.strip().splitlines():
         stripped = line.strip().strip("`").strip()
-        if stripped:
-            return stripped
+        if not stripped:
+            continue
+        # 재작성 응답도 작가 응답과 같은 흉내낸 인용 대괄호 위험이 있다
+        # (logic._sentence_from_item과 같은 형식 정리, critical 결함 재발 방지).
+        cleaned = _strip_inline_citation_markers(stripped)
+        if cleaned:
+            return cleaned
     return ""
 
 
@@ -729,6 +814,9 @@ def verify_report(
     """
     try:
         return _verify_report_inner(report, fragments, performance_table, ask)
+    except AskFatalError:
+        # 요청 전역 장애 — «검증기 내부 오류»로 위장하지 않고 그대로 재전파한다.
+        raise
     except Exception:  # noqa: BLE001 - 검증기 결함이 보고서 생산을 멈추면 안 된다
         logger.exception(
             "검증기 내부 오류 — «확인» 전부를 해석으로 강등해 돌려준다 (차단 금지)"
@@ -757,6 +845,8 @@ def verify_sentences(
             [checked], frag_by_id, table_texts, performance_table, ask
         )
         return tuple(reviewed[0])
+    except AskFatalError:
+        raise  # 요청 전역 장애 — 위 verify_report와 같은 이유로 재전파한다
     except Exception:  # noqa: BLE001 - 위 verify_report와 같은 비상 바닥
         logger.exception(
             "문장 검증 내부 오류 — «확인» 전부를 해석으로 강등해 돌려준다"

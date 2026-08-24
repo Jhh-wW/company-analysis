@@ -170,6 +170,47 @@ def test_작가와_검수는_서로_다른_프롬프트만_받는다():
     assert not any("핵심 요약" in prompt for prompt in reviewer.prompts)
 
 
+def test_인라인_대괄호_인용_흉내는_출고검증을_막지_않는다():
+    """작가가 «글» 안에 [2]처럼 대괄호 인용을 흉내내도(critical 결함) 파싱
+    단계에서 걷어내, 가짜 인용-부록 불일치로 GATE_STOPPED에 빠지지 않는다."""
+
+    def writer(prompt: str) -> str:
+        if "핵심 요약" in prompt:
+            return _summary_json()
+        mark = _SECTION_MARKS[writer.calls % len(_SECTION_MARKS)]
+        writer.calls += 1
+        return json.dumps(
+            {
+                "문장들": [
+                    {
+                        "글": f"{mark} 장은 자료 [2]에서 밝힌 대로 성장했다.",
+                        "인용": ["1"],
+                        "등급": GRADE_CONFIRMED,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+
+    writer.calls = 0
+    reviewer = _FakeReviewer()
+
+    output = run_v2(
+        "가나다전자",
+        _raw_fragments(),
+        None,
+        writer_ask=writer,
+        reviewer_ask=reviewer,
+    )  # V2ValidationError 없이 끝나야 한다
+
+    report = output.report
+    for section in report.sections:
+        for text, _cite in section.prose_lines:
+            assert "[2]" not in text  # 흉내낸 번호가 텍스트에 남지 않는다
+    # 실제로 인용된 조각(1)만 부록에 실린다 — 흉내낸 [2]로 가짜 인용이 붙지 않는다
+    assert sorted(source.number for source in report.citations) == [1]
+
+
 def test_초안과_생존_문장_수를_그대로_센다():
     writer = _FakeWriter()
     reviewer = _FakeReviewer()

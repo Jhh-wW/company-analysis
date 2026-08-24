@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import uuid
 
+from fastapi import Request
 from fastapi.testclient import TestClient
 
 from src.features.auth import constants as auth_constants
@@ -34,9 +35,12 @@ from src.features.pipeline.port import (
     UserInput,
 )
 from src.features.sharelink import allowlist
+from src.features.sharelink import tracks as share_tracks
+from src.features.sharelink.constants import PUBLIC_BUCKET
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
 from src.web import job_runtime, main, runtime
+from src.web.routers import feedback
 
 
 def _session_client(
@@ -80,13 +84,57 @@ def test_get_렌더는_신고유형select와_안내문을_보여준다():
     assert "기업 선택" in response.text
 
 
-def test_get는_닫힌목록밖_stage를_400아니라_빈값으로_받는다():
+def test_get는_닫힌목록밖_stage를_400아니라_고를_수_있는_select로_보여준다():
+    """옛 동작(hidden 빈 값)은 사용자가 고칠 수 없어 POST가 늘 400으로 막다른
+    폼이었다(실측 결함). 이제는 닫힌 목록 4개짜리 select로 렌더해 고를 수 있다."""
     client, _csrf = _session_client()
 
     response = client.get("/feedback", params={"stage": "없는단계"})
 
     assert response.status_code == 200
-    assert 'name="stage" value=""' in response.text
+    assert 'name="stage" value=""' not in response.text
+    assert '<select id="feedback-stage" name="stage"' in response.text
+    for value in feedback_constants.REPORT_STAGES:
+        assert f'<option value="{value}">' in response.text
+
+
+def test_get는_유효한_stage면_지금처럼_hidden으로_그대로_넣는다():
+    """정상 진입(쿼리에 유효 stage)은 select가 아니라 종전처럼 hidden이다."""
+    client, _csrf = _session_client()
+
+    response = client.get(
+        "/feedback", params={"stage": feedback_constants.STAGE_COMPANY_SELECT}
+    )
+
+    assert response.status_code == 200
+    assert (
+        f'name="stage" value="{feedback_constants.STAGE_COMPANY_SELECT}"'
+        in response.text
+    )
+    assert "feedback-stage" not in response.text
+
+
+def test_stage_없이_들어와도_select에서_골라_제출할_수_있다():
+    """예전엔 stage가 hidden 빈 값이라 폼을 다 채워도 항상 400이었다(막다른
+    폼, stage를 사용자가 고칠 방법이 없었다). 이제는 select에서 골라 제출하면
+    정상 접수된다."""
+    client, csrf = _session_client()
+
+    form = client.get("/feedback", params={"stage": "없는단계"})
+    assert '<select id="feedback-stage" name="stage"' in form.text
+
+    response = client.post(
+        "/feedback",
+        data={
+            "stage": feedback_constants.STAGE_NO_SEARCH,
+            "category": feedback_constants.CATEGORY_OTHER,
+            "body": "select로 직접 고른 단계로 제출한 신고",
+            "csrf_token": csrf,
+        },
+    )
+
+    assert response.status_code == 200
+    assert "신고가 접수되었습니다" in response.text
 
 
 def test_get는_company_쿼리를_escape해서_보여준다():
@@ -197,6 +245,91 @@ def test_post_하루상한_초과는_429와_상한메시지를_보여준다():
     with storage_db.connect() as conn:
         page = feedback_logic.list_reports(conn, stage=feedback_constants.STAGE_COMPANY_SELECT)
     assert page.total == feedback_constants.DAILY_CREATE_LIMIT_PER_REPORTER
+
+
+def test_PUBLIC이라도_초대안된_계정_하나가_상한을_채워도_다른_계정은_막히지_않는다():
+    """옛 동작: PUBLIC 손님 전원이 고정 공용 버킷(``PUBLIC_BUCKET``) 하나를
+    공유해, 초대 안 된 구글 계정 하나가 하루 상한(20건)을 채우면 같은 계층
+    전체의 신고가 그날 막혔다(실측 결함, 계정 하나로 신고 채널 전체를 잠그는
+    DoS). 이제는 세션(로그인)이 있는 손님이면 계정별로 다른 통장을 쓴다."""
+    stage = feedback_constants.STAGE_COMPANY_SELECT
+    reporter_key_a = spend_store.bucket_id(
+        share_tracks.bucket_of(
+            share_tracks.Track.MEMBER, email="stranger-a@example.com", share_key=""
+        )
+    )
+    with storage_db.connect() as conn:
+        for _ in range(feedback_constants.DAILY_CREATE_LIMIT_PER_REPORTER):
+            feedback_logic.create_report(
+                conn,
+                stage=stage,
+                category=feedback_constants.CATEGORY_OTHER,
+                body="A 계정이 이미 채운 상한",
+                reporter_key=reporter_key_a,
+            )
+
+    client_a, csrf_a = _session_client(email="stranger-a@example.com", is_admin=False)
+    blocked = client_a.post(
+        "/feedback",
+        data={
+            "stage": stage,
+            "category": feedback_constants.CATEGORY_OTHER,
+            "body": "A 계정의 21번째 신고",
+            "csrf_token": csrf_a,
+        },
+    )
+    assert blocked.status_code == 429  # A 계정 본인은 자기 상한에 걸린다
+
+    client_b, csrf_b = _session_client(email="stranger-b@example.com", is_admin=False)
+    allowed = client_b.post(
+        "/feedback",
+        data={
+            "stage": stage,
+            "category": feedback_constants.CATEGORY_OTHER,
+            "body": "B 계정의 첫 신고 — A 계정 때문에 막히면 안 된다",
+            "csrf_token": csrf_b,
+        },
+    )
+    assert allowed.status_code == 200
+    assert "신고가 접수되었습니다" in allowed.text
+
+
+def test_reporter_key는_PUBLIC_세션이_있으면_계정마다_다르다():
+    session_a = auth_logic.create_session("session-a@example.com", False)
+    session_b = auth_logic.create_session("session-b@example.com", False)
+    request_a = Request(
+        {
+            "type": "http",
+            "headers": [
+                (b"cookie", f"{auth_constants.SESSION_COOKIE_NAME}={session_a.token}".encode())
+            ],
+        }
+    )
+    request_b = Request(
+        {
+            "type": "http",
+            "headers": [
+                (b"cookie", f"{auth_constants.SESSION_COOKIE_NAME}={session_b.token}".encode())
+            ],
+        }
+    )
+
+    key_a = feedback._reporter_key(request_a)
+    key_b = feedback._reporter_key(request_b)
+
+    assert key_a != key_b
+    # 원문 이메일이 아니라 SHA-256 지문이다 (원문 식별자 저장 금지 원칙 유지).
+    assert len(key_a) == 64 and all(ch in "0123456789abcdef" for ch in key_a)
+    assert "session-a@example.com" not in key_a
+
+
+def test_reporter_key는_세션조차_없는_진짜_익명만_공용_버킷을_공유한다():
+    """정말 아무 식별자도 없을 때만 고정 공용 버킷(PUBLIC_BUCKET)을 쓴다."""
+    request = Request({"type": "http", "headers": []})
+
+    key = feedback._reporter_key(request)
+
+    assert key == spend_store.bucket_id(PUBLIC_BUCKET)
 
 
 def test_post_csrf가_틀리면_거절되고_아무것도_저장되지_않는다():

@@ -13,9 +13,12 @@ import logging
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse
 
+from src.features.auth import constants as auth_constants
+from src.features.auth import logic as auth_logic
 from src.features.budget import spend_store
 from src.features.feedback_report import constants
 from src.features.feedback_report import logic as feedback_logic
+from src.features.sharelink import tracks as share_tracks
 from src.features.storage import db as storage_db
 from src.web import request_helpers
 from src.web.security import CSRF_TOKEN_MAX_CHARS
@@ -30,6 +33,11 @@ _STAGE_LABELS: dict[str, str] = {
     constants.STAGE_GENERATING: "보고서 생성 중",
     constants.STAGE_REPORT: "보고서 열람",
 }
+
+#: stage가 닫힌 목록 밖(빈 값)일 때 사용자가 직접 고를 select 선택지.
+_STAGE_OPTIONS: tuple[tuple[str, str], ...] = tuple(
+    (value, _STAGE_LABELS[value]) for value in constants.REPORT_STAGES
+)
 
 
 def _clean_stage(value: str) -> str:
@@ -49,13 +57,27 @@ def _clean_report_ref(value: str) -> str:
 def _reporter_key(request: Request) -> str:
     """원문 이메일·열쇠 대신 기존 지출 통장 지문을 신고자 식별자로 재사용한다.
 
-    ``request_helpers._track_of()``가 이미 ADMIN/MEMBER는 이메일, LINK는 열쇠,
-    PUBLIC은 공용 통장으로 손님을 나눠 돌려준다. ``spend_store.bucket_id()``가
-    그 값을 원문 없이 SHA-256 지문으로만 바꿔, 하루 접수 상한이 실제 방문자
-    단위로 나뉘게 한다. 빈 문자열이 나올 일이 없어 익명 전체가 한 버킷으로
-    묶이는 사고를 막는다.
+    ``request_helpers._track_of()``가 이미 ADMIN/MEMBER는 이메일, LINK는 열쇠로
+    손님을 나눠 돌려준다. 문제는 PUBLIC 갈래다 — ``tracks.bucket_of()``는
+    PUBLIC 손님 «전원»에게 고정 공용 통장 하나(``PUBLIC_BUCKET``)를 돌려주므로,
+    로그인은 했지만 초대되지 않아 PUBLIC으로 떨어진 손님끼리도 신고 상한을
+    통째로 공유한다 — 계정 하나가 하루 상한(20건)을 채우면 같은 계층 전체의
+    신고가 그날 막힌다(실측 결함).
+
+    그래서 PUBLIC일 때는 한 단계 더 본다: 세션(로그인) 자체는 있는데 초대
+    명단에만 없는 손님이면 그 세션의 이메일을 안정 식별자로 쓴다 — 계정마다
+    다른 통장이 생겨 한 계정이 계층 전체를 잠그지 못한다. 세션조차 없는
+    «진짜 익명»만 공용 통장을 공유한다(원문 이메일·열쇠는 여기서도 저장하지
+    않는다 — ``spend_store.bucket_id()``가 SHA-256 지문으로만 바꾼다).
     """
-    _track, bucket, _cap = request_helpers._track_of(request)
+    track, bucket, _cap = request_helpers._track_of(request)
+    if track is share_tracks.Track.PUBLIC:
+        token = request.cookies.get(auth_constants.SESSION_COOKIE_NAME)
+        email = auth_logic.current_email(token) or ""
+        if email:
+            bucket = share_tracks.bucket_of(
+                share_tracks.Track.MEMBER, email=email, share_key=""
+            )
     return spend_store.bucket_id(bucket)
 
 
@@ -77,6 +99,10 @@ def _form_context(
         request,
         stage=stage,
         stage_label=_STAGE_LABELS.get(stage, ""),
+        # stage가 닫힌 목록 밖(빈 값)일 때만 템플릿이 이걸로 select를 그린다 —
+        # hidden 빈 값은 사용자가 고칠 수 없어 POST가 항상 400으로 막다른
+        # 폼이 됐다(실측 결함). 유효 stage는 지금처럼 hidden을 그대로 쓴다.
+        stage_options=_STAGE_OPTIONS,
         company_name=company_name,
         report_ref=report_ref,
         category=category,

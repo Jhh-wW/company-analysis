@@ -14,6 +14,22 @@ from dataclasses import dataclass
 from typing import Any
 
 
+class AskFatalError(Exception):
+    """AI 호출이 «문장 내용 문제»가 아니라 «요청 전역 장애»로 죽었을 때만 쓴다.
+
+    ★ 예산 소진(ProviderBudgetExceeded)·billing-uncertain 차단(요청 전체가
+      더 못 부르는 상태)은 문장 하나의 실패가 아니라 이 요청 전체의 장애다.
+      composer의 다른 모든 예외는 문장 단위로 삼켜 안내문·강등으로 바꾸지만,
+      이 타입만은 어디서 잡히든 재전파해 pipeline.run_v2까지 뚫고 나가야
+      한다 — 그래야 real.py가 v1과 같은 FAILED로 정직하게 끝낼 수 있다
+      (전역 장애를 «검증 실패»로 오표기하지 않기 위함).
+    """
+
+    def __init__(self, cause: BaseException) -> None:
+        self.cause = cause
+        super().__init__(str(cause))
+
+
 @dataclass(frozen=True)
 class ComposedSentence:
     """작가 AI가 쓴 문장 하나."""

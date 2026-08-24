@@ -40,7 +40,19 @@
 
     <form method="post" action="/feedback">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <input type="hidden" name="stage" value="{{ stage }}">
+      {% if stage %}
+        <input type="hidden" name="stage" value="{{ stage }}">
+      {% else %}
+        <div class="field">
+          <label for="feedback-stage">발생 단계<span class="req">*</span></label>
+          <select id="feedback-stage" name="stage" required>
+            <option value="">선택해 주세요</option>
+            {% for value, label in stage_options %}
+              <option value="{{ value }}">{{ label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+      {% endif %}
       <input type="hidden" name="company" value="{{ company_name }}">
       <input type="hidden" name="report" value="{{ report_ref }}">
 
