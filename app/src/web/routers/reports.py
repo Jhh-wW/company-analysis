@@ -50,6 +50,12 @@ from src.features.pipeline.port import (
     RunResult,
     UserInput,
 )
+from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
+from src.features.composer.validate import (
+    V2ValidationError,
+    v2_validation_problems,
+    validate_v2,
+)
 from src.features.report_standard import PublishBlockedError, build_published_report
 from src.features.sharelink import store as share_store
 from src.features.sharelink import allowlist as share_allow
@@ -100,9 +106,25 @@ def _report_unavailable_redirect() -> RedirectResponse:
 
 
 def _report_for_output(report: Report) -> Report:
-    """현재 canonical 출고 게이트를 통과한 공개본만 돌려준다."""
+    """현재 canonical 출고 게이트를 통과한 공개본만 돌려준다.
 
+    엔진 v2(composer) 보고서는 canonical 게이트 대상이 아니다 — v2 3검사
+    (내부 키·인용-부록 1:1·요약 존재)만 통과하면 별도 공개본 투영 없이 정본
+    그대로 공개한다 (실행계획 04장 3-4절 2항). v1 경로는 기존 동작 그대로다.
+    """
+
+    if report.schema_version == ENGINE_V2_SCHEMA_VERSION:
+        validate_v2(report)
+        return report
     return build_published_report(report)
+
+
+def _content_validator_for(report: Report):
+    """자동출고 4검사의 내용 검증기 선택 — v2 보고서에만 v2 3검사를 주입한다."""
+
+    if report.schema_version == ENGINE_V2_SCHEMA_VERSION:
+        return v2_validation_problems
+    return None
 
 
 def _approved_public_report(report_id: str, fallback: Report) -> Report | None:
@@ -361,7 +383,7 @@ async def _result_page_response(
             return job_runtime._expired_screen(request)
         try:
             output_report = _report_for_output(saved)
-        except PublishBlockedError:
+        except (PublishBlockedError, V2ValidationError):
             _mark_link_release_gate_stopped(job_id)
             return _blocked_report_response(request)
         try:
@@ -417,7 +439,7 @@ async def _result_page_response(
         return job_runtime._expired_screen(request)
     try:
         output_report = _report_for_output(report)
-    except PublishBlockedError:
+    except (PublishBlockedError, V2ValidationError):
         _mark_link_release_gate_stopped(job_id)
         return _blocked_report_response(request)
     try:
@@ -675,6 +697,8 @@ def _release_state(
                 report,
                 candidate,
                 released_at=clock.iso_now_kst(),
+                # v2 보고서에만 내용 검증을 v2 3검사로 대체한다 (v1은 None=기존).
+                content_validator=_content_validator_for(report),
             )
             with storage_db.connect() as conn:
                 stored_record = pdf_release_store.save_automatic_release(
@@ -971,7 +995,7 @@ async def send_to_notion(
 
     try:
         report = _report_for_output(report)
-    except PublishBlockedError:
+    except (PublishBlockedError, V2ValidationError):
         _mark_link_release_gate_stopped(job_id)
         return _blocked_report_response(request)
     try:

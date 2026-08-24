@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from typing import Callable, Optional
 
 from src.features.export_pdf.release import (
     PDFReleaseBlockedError,
@@ -29,6 +30,14 @@ from src.shared.automatic_release_record import (
 from src.features.pipeline.port import Report
 from src.features.report_standard import build_published_report, validate_publishable
 from src.features.storage.reports import report_to_dict
+
+
+#: 주입식 내용 검증기 (엔진 v2용) — 보고서를 받아 «검증 실패 사유» 튜플을
+#: 돌려준다. 빈 튜플이면 통과다. None(기본)이면 기존 canonical 검사 그대로다.
+ContentValidator = Callable[[Report], tuple[str, ...]]
+
+#: 주입 검증기 자체가 죽었을 때의 fail-closed 사유 (통과로 위장하지 않는다)
+_INJECTED_VALIDATOR_FAILED_REASON = "주입된 내용 검증기가 실패했습니다"
 
 
 @dataclass(frozen=True)
@@ -71,20 +80,39 @@ def _evidence_sha256(name: str, *values: object) -> str:
 def run_automatic_checks(
     report: Report,
     candidate: PdfReleaseCandidate,
+    *,
+    content_validator: Optional[ContentValidator] = None,
 ) -> tuple[tuple[AutomaticCheckResult, ...], tuple[str, ...]]:
-    """Run every mandatory check and return non-sensitive hash evidence."""
+    """Run every mandatory check and return non-sensitive hash evidence.
+
+    ``content_validator``가 주어지면(엔진 v2) 4검사 중 첫 번째 «내용 검증»만
+    그 함수로 대체한다 — v1 기본(None)의 동작은 그대로다. 렌더 무결성·채널
+    동등성·해시 재검사는 어느 경로든 똑같이 태운다 (04장 3-4절 3항).
+    """
 
     reasons: list[str] = []
     initial_report_hash = report_sha256(report)
-    validation = validate_publishable(report)
-    canonical_ok = bool(validation)
     published: Report | None = None
-    if canonical_ok:
+    if content_validator is None:
+        validation = validate_publishable(report)
+        canonical_ok = bool(validation)
+        if canonical_ok:
+            try:
+                published = build_published_report(report)
+                canonical_ok = report_sha256(published) == initial_report_hash
+            except Exception:  # fail closed; raw report details must not escape
+                canonical_ok = False
+        validation_reasons = tuple(validation.reasons)
+    else:
+        # 주입 검증(v2): 내용 검증만 대체한다. v2는 별도 공개본 투영이 없으므로
+        # 통과 시 정본 그대로를 published로 삼아 뒤 채널 동등성 검사를 태운다.
         try:
-            published = build_published_report(report)
-            canonical_ok = report_sha256(published) == initial_report_hash
-        except Exception:  # fail closed; raw report details must not escape
-            canonical_ok = False
+            validation_reasons = tuple(content_validator(report))
+        except Exception:  # fail closed — 검증기 오류를 통과로 위장하지 않는다
+            validation_reasons = (_INJECTED_VALIDATOR_FAILED_REASON,)
+        canonical_ok = not validation_reasons
+        if canonical_ok:
+            published = report
     if not canonical_ok:
         reasons.append("사실·인용·수치·목차·금지 문구 정본 검사를 통과하지 못했습니다")
     canonical_check = AutomaticCheckResult(
@@ -93,7 +121,7 @@ def run_automatic_checks(
         evidence_sha256=_evidence_sha256(
             REQUIRED_AUTOMATIC_CHECKS[0],
             initial_report_hash,
-            tuple(validation.reasons),
+            validation_reasons,
         ),
     )
 
@@ -178,10 +206,17 @@ def automatic_release_pdf(
     candidate: PdfReleaseCandidate,
     *,
     released_at: str,
+    content_validator: Optional[ContentValidator] = None,
 ) -> AutomaticallyReleasedPdf:
-    """Release only when all mandatory automatic checks pass together."""
+    """Release only when all mandatory automatic checks pass together.
 
-    checks, reasons = run_automatic_checks(report, candidate)
+    ``content_validator``는 ``run_automatic_checks``에 그대로 전달된다 —
+    None(기본)이면 기존 v1 동작과 완전히 같다.
+    """
+
+    checks, reasons = run_automatic_checks(
+        report, candidate, content_validator=content_validator
+    )
     if not _valid_timestamp(released_at):
         reasons = (*reasons, "자동출고 시각에 시간대가 없습니다")
     if reasons or any(check.passed is not True for check in checks):

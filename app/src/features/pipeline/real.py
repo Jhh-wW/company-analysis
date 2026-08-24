@@ -19,6 +19,7 @@ import importlib
 import importlib.util
 import itertools
 import logging
+import os
 import re
 import sys
 import threading
@@ -190,6 +191,16 @@ _FINAL_GATE_REASON_KO: Final[dict[str, str]] = {
     ),
     FINAL_GATE_REASON_OTHER_GATE: "출고 전 자동 검증",
 }
+
+#: 엔진 v2 스위치 — 환경변수 이름과 켜짐 값. 정확히 "1"일 때만 v2 경로다
+#: (04장: 기본(미설정)은 v1 그대로 — 바이트 단위 무변).
+ENGINE_V2_ENV_NAME: Final[str] = "ENGINE_V2"
+ENGINE_V2_ENV_ON: Final[str] = "1"
+
+#: v2 작가·검수 호출의 출력 token 상한. 작가는 장 하나(6~12문장 JSON)를,
+#: 검수는 판정 목록 JSON을 돌려주므로 작가 쪽을 더 크게 잡는다.
+V2_WRITER_MAX_TOKENS: Final[int] = 4000
+V2_REVIEWER_MAX_TOKENS: Final[int] = 2000
 
 #: other_gate일 때 세부를 보태는 span-selection 결과 사유 코드 → 한국어 표기.
 _SPAN_RESULT_REASON_KO: Final[dict[str, str]] = {
@@ -1701,6 +1712,25 @@ class RealPipeline:
                 final_gate_reason=FINAL_GATE_REASON_OTHER_GATE,
             )
 
+        # ── 엔진 v2 분기 (유일한 분기 지점) ──────────────
+        # 수집(6)·법인 판정(5)이 끝났고 실적표 재료(financials)가 확보된 지점이다.
+        # ENGINE_V2=1일 때만 composer 경로로 간다. 미설정이면 아래 v1 경로 그대로다.
+        if os.environ.get(ENGINE_V2_ENV_NAME) == ENGINE_V2_ENV_ON:
+            tell("generate")
+            return _run_v2_composer(
+                engine=engine,
+                client=client,
+                company_name=company_name,
+                corp_type=judgment.corp_type,
+                frags=frags,
+                financials=financials,
+                filing=filing,
+                sources=sources,
+                business_date=business_date,
+                model=model,
+                steps=steps,
+            )
+
         # 유료 span 선택 전에 후보 원문도 정식 provenance 경계에서 한 번 봉인한다.
         # DART 전체 원문과 exact-attested HTTPS 웹·IR만 사전검사에 넣으며, 수집
         # 실패·robots 차단·상한 잘림이 있으면 "후보 없음"으로 확정하지 않는다.
@@ -2588,6 +2618,153 @@ def _company_cache_save(
             )
     except Exception:  # noqa: BLE001 — 저장 실패가 사용자를 막으면 안 된다
         logger.exception("회사분석 캐시 저장 실패 (보고서는 정상) — corp_id=%s", corp_id)
+
+
+# ══════════════════════════════════════════════════════════
+# 엔진 v2 (composer) 연결 — ENGINE_V2=1일 때만 탄다 (04장 3-1 항목3·3-4절)
+# ══════════════════════════════════════════════════════════
+
+
+def _v2_ask_via_provider(
+    engine: _MeteredEngine,
+    client: Any,
+    *,
+    stage: str,
+    max_tokens: int,
+):
+    """composer의 AskFn(프롬프트→응답 문자열)을 기존 provider 포트로 감싼다.
+
+    writer 경로와 같은 계량 client 경계를 지난다 — 비용 계량·예산 가드·요청별
+    모델 고정이 전부 그 경계에서 적용된다. 구조화 출력(output_config)은 쓰지
+    않는다: composer가 응답 문자열에서 직접 JSON을 관용 파싱하기 때문이다.
+    """
+
+    def ask(prompt: str) -> str:
+        with _meter_stage(engine, stage):
+            response = client.messages.create(
+                model=getattr(engine, "MODEL", "") or GENERATION_MODEL,
+                max_tokens=max_tokens,
+                temperature=0,  # 원문 인용 충실도 우선 (1판 _ask와 동일)
+                messages=[{"role": "user", "content": prompt}],
+            )
+        blocks = getattr(response, "content", None) or []
+        return "".join(str(getattr(block, "text", "") or "") for block in blocks)
+
+    return ask
+
+
+def _run_v2_composer(
+    *,
+    engine: _MeteredEngine,
+    client: Any,
+    company_name: str,
+    corp_type: str,
+    frags: dict[int, dict[str, str]],
+    financials: Any,
+    filing: Optional[dict[str, Any]],
+    sources: list[SourceStatus],
+    business_date: Any,
+    model: str,
+    steps: list[dict[str, Any]],
+) -> RunResult:
+    """엔진 v2: composer 경로로 보고서를 만든다.
+
+    v1 자산 재사용(04장 설계 개요): 수집 조각(frags)·법인 판정 결과·
+    ``build_three_year_table`` 실적표를 그대로 받아 쓴다. 작가 ask와 검수 ask는
+    «다른 클로저»로 주입한다 (Generator/Evaluator 분리).
+
+    ★ v2 보고서는 1층 캐시에 저장하지 않는다 — 캐시는 canonical(v4)만
+      반환·저장하는 계약이라 v2 스키마를 섞으면 v1 요청이 오염된다.
+    """
+    # composer는 v2 전용이라 지연 import한다 — v1 경로의 module 적재 비용·의존을
+    # 바꾸지 않기 위해서다 (pipeline→composer 방향은 계획이 허용한 연결이다).
+    from src.features.composer import pipeline as composer_pipeline  # noqa: PLC0415
+    from src.features.composer.port import (  # noqa: PLC0415
+        performance_table_from_report_table,
+    )
+    from src.features.composer.validate import V2ValidationError  # noqa: PLC0415
+
+    # 실적표 — v1과 같은 생성부(재사용). 없으면 None으로 계속 간다 (차단 아님).
+    financial_cite = _first_fragment_cite(
+        frags, kind="재무", text_prefix="주요계정(DART API):"
+    )
+    report_table = (
+        build_three_year_table(financials, cite=financial_cite)
+        if financial_cite
+        else None
+    )
+    performance_table = (
+        performance_table_from_report_table(report_table)
+        if report_table is not None
+        else None
+    )
+    analysis_period, latest_performance_period = _performance_period_labels(
+        report_table, filing
+    )
+
+    writer_ask = _v2_ask_via_provider(
+        engine, client, stage="v2_compose", max_tokens=V2_WRITER_MAX_TOKENS
+    )
+    reviewer_ask = _v2_ask_via_provider(
+        engine, client, stage="v2_review", max_tokens=V2_REVIEWER_MAX_TOKENS
+    )
+    try:
+        output = composer_pipeline.run_v2(
+            company_name,
+            frags,
+            performance_table,
+            writer_ask=writer_ask,
+            reviewer_ask=reviewer_ask,
+            corp_type=corp_type,
+            generated_at=business_date.isoformat(),
+            as_of_date=business_date.isoformat(),
+            analysis_period=analysis_period,
+            latest_performance_period=latest_performance_period,
+            table_presentation=(
+                str(getattr(report_table, "presentation", "") or "") or "table"
+            ),
+        )
+    except V2ValidationError as exc:
+        # v2 출고 3검사 실패 — 원문 없는 검증 사유만 운영 기록에 남긴다.
+        logger.warning("엔진 v2 출고 검증 차단: %s", list(exc.problems))
+        steps.append({"step": "v2_출고검증_차단", "사유": list(exc.problems)})
+        return RunResult(
+            outcome=Outcome.GATE_STOPPED,
+            message=(
+                "엔진 v2 출고 검증을 통과하지 못해 보고서를 내보내지 않았습니다. "
+                "확인되지 않은 내용을 정상 보고서처럼 보여주지 않습니다."
+                + _stop_reason_note(FINAL_GATE_REASON_PUBLISH_BLOCKED)
+            ),
+            sources=sources,
+            corp_type=corp_type,
+            fragments_collected=len(frags),
+            cost_krw=_request_spent_krw(engine),
+            model=model,
+            final_gate_reason=FINAL_GATE_REASON_PUBLISH_BLOCKED,
+        )
+
+    report = output.report
+    steps.append(
+        {
+            "step": "v2_composer_완료",
+            "생성문장": output.composed_sentences,
+            "생존문장": output.verified_sentences,
+            "인용조각": len(report.citations),
+        }
+    )
+    return RunResult(
+        outcome=Outcome.REPORT,
+        report=report,
+        sources=sources,
+        charged=True,  # 보고서가 나가면 1 차감 — v1과 같은 3분법
+        corp_type=corp_type,
+        fragments_collected=len(frags),
+        fragments_cited=len(report.citations),
+        sentences_made=output.composed_sentences,
+        sentences_passed=output.verified_sentences,
+        cost_krw=_request_spent_krw(engine),
+        model=model,
+    )
 
 
 def _write_prose(
