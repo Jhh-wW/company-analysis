@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from src.features.composer.constants import NOTICE_DUPLICATE_MOVED, SECTION_IDS
 from src.features.composer.dedupe import drop_cross_section_duplicates
 from src.features.composer.port import (
@@ -25,6 +27,8 @@ from src.features.composer.port import (
     ComposedSentence,
     FlowRow,
 )
+
+_LOGGER_NAME = "src.features.composer.dedupe"
 
 _파트너_문장 = (
     "회사는 Sony Music, TME, Republic Records 등 글로벌 유수의 음반·음원 "
@@ -339,3 +343,61 @@ def test_문장이_다_빠져도_경로표는_남는다():
         s for s in 새보고서.sections if s.section_id == "operations_partners"
     )
     assert 운영.flow_rows == 경로
+
+
+# ══════════════════════════════════════════════════════════
+# ⑥ 장별 문장 수를 로그로 남긴다 (무과금 진단용)
+# ══════════════════════════════════════════════════════════
+
+
+def test_장별_문장_수가_로그로_남는다(caplog):
+    """문장이 빠진 장·그대로인 장 모두 «정리 전→후» 개수가 한 줄로 남는다."""
+    report = _report(
+        identity=(_sentence(_파트너_문장, ("12",)),),
+        portfolio=(_sentence(_파트너_문장_변형, ("12",)),),
+        operations_partners=(
+            _sentence(_파트너_문장, ("12",)),
+            _sentence(_공연_문장, ("12", "13")),
+        ),
+    )
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        새보고서, 뺀수 = drop_cross_section_duplicates(report)
+
+    # 반환값은 이 로그와 무관하게 그대로다 (다른 시험과 같은 재료로 재확인).
+    assert 뺀수 == 2
+    assert _texts(새보고서, "identity") == []
+    assert _texts(새보고서, "operations_partners") == [_파트너_문장, _공연_문장]
+
+    assert "장별 문장 수(정리 전→후)" in caplog.text
+    assert "identity:1→0" in caplog.text
+    assert "portfolio:1→0" in caplog.text
+    assert "operations_partners:2→2" in caplog.text
+    # 문장 본문이 로그에 그대로 새면 안 된다 (회사 원문 보호).
+    assert _파트너_문장 not in caplog.text
+
+
+def test_지울_것이_없어도_장별_문장_수를_남긴다(caplog):
+    """중복이 없어 아무것도 안 지워도(뺀수 0) 개수는 그대로 로그에 남는다."""
+    report = _report(
+        identity=(_sentence(_파트너_문장, ("12",)),),
+        culture=(_sentence(_다른_사실, ("12",)),),
+    )
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        _, 뺀수 = drop_cross_section_duplicates(report)
+
+    assert 뺀수 == 0
+    assert "identity:1→1" in caplog.text
+    assert "culture:1→1" in caplog.text
+
+
+def test_문장이_하나뿐이어도_장별_문장_수를_남긴다(caplog):
+    """flat < 2로 즉시 끝나는 경로(문장 총 1개 이하)도 로그가 남는다."""
+    report = _report(identity=(_sentence(_다른_사실, ("12",)),))
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        _, 뺀수 = drop_cross_section_duplicates(report)
+
+    assert 뺀수 == 0
+    assert "identity:1→1" in caplog.text

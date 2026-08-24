@@ -1,14 +1,22 @@
-"""엔진 v2 오케스트레이션 (소단계 3-4b) — 쓰기→검증→요약→렌더→출고검증.
+"""엔진 v2 오케스트레이션 (소단계 3-4b) — 쓰기→검증→요약→렌더→중복경고→출고검증.
 
 ★ 이 파일은 composer 조각들을 «정해진 순서로 잇기만» 한다:
     compose_sections → verify_report → compose_summary → (요약 재검증·보충)
-    → render_report → validate_v2
+    → render_report → (중복 검출 경고) → validate_v2
   각 단계의 규칙은 각 소유 파일(logic/verify/render/validate)에 있다.
 ★ AI 호출은 두 개의 주입 함수로만 한다 — 작가(writer_ask)와 검수(reviewer_ask)는
   «다른 클로저»여야 한다 (Generator/Evaluator 분리, rules/harness.md).
   provider 연결은 부르는 쪽(real.py)의 몫이다. 여기서 provider를 모른다.
 ★ 닫힌 정규식 게이트 없음 — 문장 내용을 거르는 검사를 하지 않는다.
   마지막 validate_v2(내부 키·인용-부록 1:1·요약 존재 3검사)만 fail-closed다.
+★ 중복 검출(`dup_detect.find_numeric_duplicates`)은 여기서 «경고 로그로만»
+  붙인다 — `validate_v2` 안에는 넣지 않는다. `validate_v2`는 정본이 fail-closed로
+  못 박은 3검사 전용 게이트이고, 그 안에 넣으면 나중에 누가 실수로 raise를
+  보태기 쉽다(실제로 오늘 두 번 「검사 하나 늘렸다가 정상 보고서까지 막힌」
+  사고가 났다 — `docs/실행계획_엔진v2/되돌린_작업분/`). 호출을 이 함수(오케스트레이션
+  층)에서 분리해두면 dup_detect가 예외를 던지는 버그가 있어도 validate_v2의
+  fail-closed 계약과 무관하게 남는다. 막을지는 실제 보고서로 오탐률을 더
+  쌓은 뒤 사람이 정한다(`composer/dup_detect.py` 모듈 docstring 참고).
 """
 
 from __future__ import annotations
@@ -32,6 +40,7 @@ from src.features.composer.logic import (
 from src.features.composer.constants import DEFAULT_CITATION_STYLE
 from src.features.composer.dedupe import drop_cross_section_duplicates
 from src.features.composer.diagram_check import check_diagrams
+from src.features.composer.dup_detect import CONFIDENCE_CONFIRMED, find_numeric_duplicates
 from src.features.composer.port import ComposedReport, FilingMeta, PerformanceTable
 from src.features.composer.render import render_report
 from src.features.composer.validate import validate_v2
@@ -58,6 +67,36 @@ def _total_sentences(report: ComposedReport) -> int:
     return (
         sum(len(section.sentences) for section in report.sections)
         + len(report.summary)
+    )
+
+
+def _log_duplicate_findings(rendered: Report) -> None:
+    """중복 검출 결과를 «경고 로그»로만 남긴다 — 출고를 막지 않는다.
+
+    ★ 예외를 삼킨다 — `find_numeric_duplicates`는 스스로 예외를 던지지
+      않는다고 문서화돼 있지만(dup_detect.py), 여기서 검출기 버그까지
+      출고를 끊으면 이 배선의 목적(«막지 않는다»)이 깨진다. 원인은
+      exception 로그로 남으므로 조용히 사라지지 않는다
+      (diagram_check._safe_ask와 같은 이유로 broad except).
+    """
+    try:
+        findings = find_numeric_duplicates(rendered)
+    except Exception:  # noqa: BLE001 — 검출기 오류가 출고를 막으면 안 된다
+        logger.exception("중복 검출 중 오류 — 경고를 건너뛰고 출고는 계속합니다")
+        return
+    if not findings:
+        return
+    confirmed = sum(1 for f in findings if f.confidence == CONFIDENCE_CONFIRMED)
+    suspected = len(findings) - confirmed
+    sections = sorted(
+        {occ.section_label for finding in findings for occ in finding.occurrences}
+    )
+    logger.warning(
+        "중복 검출(경고 전용 — 출고는 막지 않음): 확정 %d건 · 의심 %d건 · "
+        "대상 장 [%s]",
+        confirmed,
+        suspected,
+        ", ".join(sections),
     )
 
 
@@ -89,6 +128,8 @@ def run_v2(
         ④ 요약 재검증 — 새로 쓴 요약 문장에 같은 검증을 적용하고, 부족하면
            이미 검증된 본문 «확인» 문장으로 보충한다 (이때만 재사용 허용).
         ⑤ render_report — 웹·PDF 공용 pipeline Report로 변환.
+        ⑤-b 중복 검출 경고 — 값+단위(+기간) 반복 후보를 로그로만 남긴다.
+           출고를 막지 않는다(아직 오탐률을 사람이 확인 중).
         ⑥ validate_v2 — 내부 키·인용-부록 1:1·요약 존재 3검사 (fail-closed).
 
     Args:
@@ -184,6 +225,10 @@ def run_v2(
         composition_tables=composition_tables,
         citation_style=citation_style,
     )
+
+    # ⑤-b 중복 검출 경고 — «찾아서 로그만 남긴다», 출고는 막지 않는다.
+    #     validate_v2 «안»에 넣지 않은 이유는 위 모듈 docstring 참고.
+    _log_duplicate_findings(rendered)
 
     # ⑥ 출고 검증 — 실패하면 V2ValidationError (사유는 예외 problems에 전부)
     validate_v2(rendered)

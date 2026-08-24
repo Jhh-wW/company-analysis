@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from typing import Final
@@ -34,6 +35,8 @@ from src.features.composer.constants import (
     SECTION_IDS,
 )
 from src.features.composer.port import ComposedReport, ComposedSection, ComposedSentence
+
+logger = logging.getLogger(__name__)
 
 #: 글자 n-그램 길이. 한국어는 조사가 붙어 어절이 달라지므로(「파트너십을」·
 #: 「파트너십과」) 어절 단위로는 같은 사실을 못 알아본다. 글자 3-그램은
@@ -105,6 +108,31 @@ def _tight_groups(similar: dict[int, set[int]], size: int) -> list[list[int]]:
     return groups
 
 
+def _section_sentence_counts(report: ComposedReport) -> dict[str, int]:
+    return {section.section_id: len(section.sentences) for section in report.sections}
+
+
+def _log_chapter_sentence_counts(before: ComposedReport, after: ComposedReport) -> None:
+    """장별 문장 수를 «정리 전→후»로 한 줄에 남긴다 (무과금 진단용).
+
+    ★ 왜 필요한가 — 어느 장이 이 단계에서 얼마나 깎였는지 지금까지는 코드로
+      볼 방법이 없어 실측(=유료 AI 재호출)을 다시 돌려야 했다(2026-08-25,
+      대조 회사 재조사 2건). 장 id와 «개수»만 남기고 문장 본문은 넣지 않는다
+      — 로그에 회사 원문이 그대로 남으면 안 된다.
+    ★ 문장마다 찍지 않는다 — 장 단위로 한 줄만 남겨 본 작업(중복 제거)을
+      느리게 하지 않는다.
+    """
+    before_counts = _section_sentence_counts(before)
+    after_counts = _section_sentence_counts(after)
+    logger.info(
+        "장별 문장 수(정리 전→후): %s",
+        ", ".join(
+            f"{section_id}:{before_counts[section_id]}→{after_counts.get(section_id, 0)}"
+            for section_id in before_counts
+        ),
+    )
+
+
 def drop_cross_section_duplicates(
     report: ComposedReport,
 ) -> tuple[ComposedReport, int]:
@@ -130,6 +158,7 @@ def drop_cross_section_duplicates(
         for sentence_index, sentence in enumerate(section.sentences):
             flat.append((section_index, sentence_index, sentence))
     if len(flat) < 2:
+        _log_chapter_sentence_counts(report, report)
         return report, 0
 
     signatures = [_signature(item[2].text) for item in flat]
@@ -187,6 +216,7 @@ def drop_cross_section_duplicates(
                 drop.add(index)
 
     if not drop:
+        _log_chapter_sentence_counts(report, report)
         return report, 0
 
     dropped_by_section: dict[int, set[int]] = {}
@@ -219,7 +249,6 @@ def drop_cross_section_duplicates(
             )
         )
 
-    return (
-        ComposedReport(sections=tuple(rebuilt), summary=report.summary),
-        len(drop),
-    )
+    result = ComposedReport(sections=tuple(rebuilt), summary=report.summary)
+    _log_chapter_sentence_counts(report, result)
+    return result, len(drop)

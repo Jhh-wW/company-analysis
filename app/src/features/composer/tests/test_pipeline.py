@@ -8,23 +8,39 @@
   ③ fail-closed — 본문이 통째로 비어 요약을 만들 수 없으면 V2ValidationError로
      끝난다 (조용한 통과 없음).
   ④ 관측 지표 — 초안·생존 문장 수가 실제 개수와 일치한다.
+  ⑤ 중복 검출 경고 — dup_detect가 뭔가 잡아도 run_v2는 그대로 끝난다(예외
+     없음). 잡히면 WARNING 로그로만 남는다. `find_numeric_duplicates`를
+     실제 보고서로 다시 만들지 않고 monkeypatch로 대체한다 — compose→
+     verify→dedupe 각 단계가 저마다 문장을 걸러내 실제 중복을 살아남게
+     만들기 어렵고(2026-08-25 실측), 이 시험이 지켜야 할 것은 «잡히면
+     막지 않는다»는 배선이지 dup_detect 판정 정확도(그건 test_dup_detect.py
+     몫)가 아니기 때문이다.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import re
 
 import pytest
 
+from src.features.composer import pipeline as pipeline_module
 from src.features.composer.constants import (
     GRADE_CONFIRMED,
     GRADE_INTERPRETED,
     SECTION_IDS,
 )
+from src.features.composer.dup_detect import (
+    CONFIDENCE_CONFIRMED,
+    DuplicateFinding,
+    NumericOccurrence,
+)
 from src.features.composer.pipeline import V2RunOutput, run_v2
 from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
 from src.features.composer.validate import V2ValidationError
+
+_LOGGER_NAME = "src.features.composer.pipeline"
 
 #: 장 순서를 표시할 숫자 없는 한국어 표지 — 숫자를 넣으면 수치 검증(3-2)이
 #: 근거에 없는 숫자로 보고 강등하므로 일부러 뺀다.
@@ -252,3 +268,99 @@ def test_본문이_통째로_비면_V2ValidationError로_끝난다():
     # 본문이 비면 요약·검수 헛호출도 없어야 한다 (작가 9회로 끝)
     assert len(writer.prompts) == 9
     assert reviewer.prompts == []
+
+
+# ══════════════════════════════════════════════════════════
+# ⑤ 중복 검출 경고 — 잡혀도 출고는 막지 않는다
+# ══════════════════════════════════════════════════════════
+
+
+def _fake_confirmed_finding() -> DuplicateFinding:
+    """실측과 같은 모양의 «확정»급 중복 하나 (값+단위+기간 일치)."""
+    occurrence_a = NumericOccurrence(
+        section_id="business_model",
+        section_label="2장 사업모델",
+        format="문장",
+        value="900",
+        unit="억원",
+        period="2025",
+        metric_hint="매출액",
+        excerpt="2025년 매출액은 900억원이다.",
+    )
+    occurrence_b = NumericOccurrence(
+        section_id="financials",
+        section_label="4장 재무",
+        format="표",
+        value="900",
+        unit="억원",
+        period="2025",
+        metric_hint="매출액",
+        excerpt="주요 재무 · 매출액 2025=900",
+    )
+    return DuplicateFinding(
+        confidence=CONFIDENCE_CONFIRMED,
+        reason="서로 다른 장에 같은 수치가 반복됨",
+        occurrences=(occurrence_a, occurrence_b),
+    )
+
+
+def test_중복이_있어도_출고가_막히지_않는다(monkeypatch: pytest.MonkeyPatch):
+    """dup_detect가 확정급 중복을 잡아도 run_v2는 예외 없이 끝난다."""
+    monkeypatch.setattr(
+        pipeline_module,
+        "find_numeric_duplicates",
+        lambda rendered: (_fake_confirmed_finding(),),
+    )
+    writer = _FakeWriter()
+    reviewer = _FakeReviewer()
+
+    output = run_v2(
+        "가나다전자",
+        _raw_fragments(),
+        None,
+        writer_ask=writer,
+        reviewer_ask=reviewer,
+    )
+
+    assert isinstance(output, V2RunOutput)  # 예외 없이 출고까지 끝났다
+
+
+def test_중복_경고가_로그로_남는다(monkeypatch: pytest.MonkeyPatch, caplog):
+    """dup_detect가 잡은 결과가 WARNING 로그 한 줄로 남는다 — 예외가 아니다."""
+    monkeypatch.setattr(
+        pipeline_module,
+        "find_numeric_duplicates",
+        lambda rendered: (_fake_confirmed_finding(),),
+    )
+    writer = _FakeWriter()
+    reviewer = _FakeReviewer()
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        run_v2(
+            "가나다전자",
+            _raw_fragments(),
+            None,
+            writer_ask=writer,
+            reviewer_ask=reviewer,
+        )
+
+    assert "경고 전용" in caplog.text
+    assert "확정 1건" in caplog.text
+    assert "2장 사업모델" in caplog.text and "4장 재무" in caplog.text
+
+
+def test_중복이_없으면_경고를_남기지_않는다(caplog):
+    """정상 흐름(숫자 없는 가짜 본문)에서는 중복 경고가 아예 안 남는다."""
+    writer = _FakeWriter()
+    reviewer = _FakeReviewer()
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        run_v2(
+            "가나다전자",
+            _raw_fragments(),
+            None,
+            writer_ask=writer,
+            reviewer_ask=reviewer,
+        )
+
+    assert "중복 검출" not in caplog.text
