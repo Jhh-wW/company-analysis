@@ -18,6 +18,9 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Callable, Final, Optional, Union
 
 from src.features.composer.constants import (
+    ALREADY_WRITTEN_GUIDE,
+    ALREADY_WRITTEN_HEAD,
+    ALREADY_WRITTEN_MAX_SENTENCES,
     CITATION_RULES_GUIDE,
     FORBIDDEN_TOPICS_GUIDE,
     GRADE_CONFIRMED,
@@ -91,13 +94,33 @@ def _render_table(table: Optional[PerformanceTable]) -> str:
     return "".join(lines)
 
 
+def _render_already_written(already_written: Sequence[str]) -> str:
+    """앞 장이 이미 쓴 문장 목록 — 같은 사실 재탕을 막기 위한 지침 블록.
+
+    ★ 게이트가 아니다. 문장을 지우지 않고 «보여 주고 알려 줄» 뿐이다.
+      비어 있으면(첫 장) 블록 자체를 넣지 않아 프롬프트를 늘리지 않는다.
+    """
+    kept = [text.strip() for text in already_written if text and text.strip()]
+    if not kept:
+        return ""
+    kept = kept[:ALREADY_WRITTEN_MAX_SENTENCES]
+    lines = "".join(f"- {text}\n" for text in kept)
+    return f"{ALREADY_WRITTEN_HEAD}{lines}{ALREADY_WRITTEN_GUIDE}"
+
+
 def build_section_prompt(
     company_name: str,
     section_id: str,
     fragments: Sequence[CollectedFragment],
     performance_table: Optional[PerformanceTable],
+    already_written: Sequence[str] = (),
 ) -> str:
-    """장 하나를 쓰게 하는 지시문 — 지침 + 조각 전체 + 실적표 + JSON 강제."""
+    """장 하나를 쓰게 하는 지시문 — 지침 + 조각 전체 + 실적표 + JSON 강제.
+
+    Args:
+        already_written: 앞 장들이 이미 쓴 문장. 같은 사실을 다시 쓰지 않도록
+            보여 준다. 비어 있으면 블록을 넣지 않는다 (첫 장).
+    """
     minimum, maximum = SECTION_SENTENCE_RANGES[section_id]
     parts = [
         PROMPT_HEADER.format(company=company_name),
@@ -109,6 +132,7 @@ def build_section_prompt(
         SENTENCE_RANGE_GUIDE.format(minimum=minimum, maximum=maximum),
         JSON_SCHEMA_GUIDE,
         _render_table(performance_table),
+        _render_already_written(already_written),
         _render_fragments(fragments),
     ]
     return "".join(parts)
@@ -292,19 +316,29 @@ def compose_sections(
     Returns:
         9개 장이 «전부» 들어 있는 ComposedReport. 실패한 장도 삭제하지 않고
         빈 문장 + 안내문으로 남는다. summary는 빈 튜플(소단계 3-3이 채운다).
+
+    ★ 장은 «순서대로» 쓴다. 앞 장이 쓴 문장을 뒤 장 프롬프트에 넘겨 같은
+      사실이 여러 장에 반복되는 것을 막기 위해서다 (실측 결함 — 한 사실이
+      최대 7개 장에 등장했다). 병렬로 돌리면 이 정보가 흐르지 못한다.
     """
     normalized = _normalize_fragments(fragments)
-    sections = tuple(
-        _compose_one_section(
+    sections: list[ComposedSection] = []
+    already_written: list[str] = []
+    for section_id in SECTION_IDS:
+        section = _compose_one_section(
             section_id,
             build_section_prompt(
-                company_name, section_id, normalized, performance_table
+                company_name,
+                section_id,
+                normalized,
+                performance_table,
+                already_written,
             ),
             ask,
         )
-        for section_id in SECTION_IDS
-    )
-    return ComposedReport(sections=sections, summary=())
+        sections.append(section)
+        already_written.extend(sentence.text for sentence in section.sentences)
+    return ComposedReport(sections=tuple(sections), summary=())
 
 
 # ══════════════════════════════════════════════════════════
