@@ -63,6 +63,8 @@ from src.features.provenance.sources import (
     SourceKind,
     official_web_currentness_is_usable,
 )
+from src.features.composer.build_id import build_id_is_usable
+from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
 from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
 from src.features.report_standard.publish import PublishBlockedError, validate_publishable
 from src.features.storage import reports as reports_store
@@ -336,6 +338,86 @@ def save_company_report(
         corp_id=corp_id,
         job=_COMPANY_ANALYSIS_PRODUCT_KEY,
         requirements=list(_COMPANY_ANALYSIS_SCHEMA_REQUIREMENTS),
+        report=report,
+        fiscal_year=fiscal_year,
+        now=now,
+    )
+
+
+def _v2_requirements(build_id: str) -> list[str]:
+    """v2 캐시 namespace — 스키마 + «지금 코드 지문».
+
+    ★ 코드 지문을 열쇠에 넣는 이유 (오늘 실측으로 당한 사고)
+      캐시가 옛 보고서를 물고 오면 「엔진을 고쳐도 화면이 그대로」가 된다.
+      v2-26에서 «v2는 캐시를 아예 안 읽는다»로 막았지만, 그 대가로 같은
+      회사를 두 번 조사하면 두 번 다 본조사 비용이 나갔다.
+      지문을 열쇠에 넣으면 둘 다 해결된다 — 코드가 그대로면 적중해 돈을
+      아끼고, 한 글자라도 바뀌면 저절로 불일치라 옛 결과가 절대 안 나온다.
+      사람이 「캐시를 비워야지」를 기억할 필요가 없다.
+    """
+    return [f"schema:{ENGINE_V2_SCHEMA_VERSION}", f"build:{build_id}"]
+
+
+def get_v2_report_hit(
+    conn: sqlite3.Connection,
+    *,
+    corp_id: str,
+    build_id: str,
+    current_fiscal_year: Optional[int] = None,
+    today: Optional[dt.date] = None,
+) -> Optional[Report]:
+    """엔진 v2 보고서 전용 1층 캐시를 조회한다.
+
+    ★ v1 캐시와 «열쇠가 다르다» — 서로의 보고서를 절대 못 꺼낸다.
+    ★ 지문을 못 만들었으면(«모르는 상태») 조회하지 않는다.
+      「모르겠다」를 「같다」로 바꾸면 옛 결과가 새 결과인 척 나간다.
+    """
+    if not build_id_is_usable(build_id):
+        return None
+    report = get_layer1_hit(
+        conn,
+        corp_id=corp_id,
+        job=_COMPANY_ANALYSIS_PRODUCT_KEY,
+        requirements=_v2_requirements(build_id),
+        current_fiscal_year=current_fiscal_year,
+        today=today,
+    )
+    # 열쇠가 맞아도 «내용»이 v2가 아니면 안 준다. 저장 경로가 잘못된 과거
+    # 코드가 남긴 것을 v2인 척 돌려주지 않기 위한 이중 확인이다.
+    if report is None or report.schema_version != ENGINE_V2_SCHEMA_VERSION:
+        return None
+    return report
+
+
+def save_v2_report(
+    conn: sqlite3.Connection,
+    *,
+    corp_id: str,
+    report: Report,
+    build_id: str,
+    fiscal_year: Optional[int] = None,
+    now: Optional[dt.datetime] = None,
+) -> Optional[str]:
+    """엔진 v2 보고서를 «그 코드 지문»과 함께 저장한다.
+
+    Returns:
+        저장한 보고서 id. 저장하지 않았으면 ``None``.
+
+    ★ v1의 canonical 출고 게이트(validate_publishable)를 태우지 않는다 —
+      v2는 그 게이트를 지나지 않는 다른 계약이고, 이미 출고 직전에
+      validate_v2를 통과한 보고서만 여기 온다(real.py).
+    ★ 스키마가 v2가 아니면 «조용히 안 저장한다». v1 보고서가 v2 열쇠 아래
+      들어가면 다음 조사에서 v1이 v2인 척 나온다.
+    """
+    if not build_id_is_usable(build_id):
+        return None
+    if report.schema_version != ENGINE_V2_SCHEMA_VERSION:
+        return None
+    return save_layer1(
+        conn,
+        corp_id=corp_id,
+        job=_COMPANY_ANALYSIS_PRODUCT_KEY,
+        requirements=_v2_requirements(build_id),
         report=report,
         fiscal_year=fiscal_year,
         now=now,

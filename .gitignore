@@ -36,6 +36,7 @@
 !/app/서버켜기.ps1
 !/app/로컬데모켜기.ps1
 !/app/실시간성능시험켜기.ps1
+!/app/배포리허설켜기.ps1
 !/app/docs/
 !/app/src/
 !/app/tools/

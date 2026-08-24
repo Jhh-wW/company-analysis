@@ -1684,12 +1684,17 @@ class RealPipeline:
         financials, fin_years = engine.fetch_financials(corp_code, counter)
         filing = engine.latest_report_rcept(corp_code, judgment.corp_type, counter)
         current_fiscal_year = _current_fiscal_year(fin_years, filing)
-        # ★ v2 경로는 1층 캐시를 «읽지 않는다». v2는 캐시에 저장하지도 않으므로
-        #   여기서 적중하면 나오는 것은 반드시 옛 v1 보고서다. v2를 켠 요청에
-        #   v1 보고서를 돌려주는 것은 조용한 거짓말이라 값을 아끼는 것보다 나쁘다.
-        #   (v1 경로의 동작은 하나도 바뀌지 않는다 — 04장 «v1 무변» 원칙)
+        # ★ v1 캐시와 v2 캐시는 «열쇠가 다르다» — 서로의 보고서를 못 꺼낸다.
+        #   v2를 켠 요청에 v1 보고서를 돌려주는 것은 조용한 거짓말이고,
+        #   그 반대도 마찬가지다.
+        # ★ v2 캐시 열쇠에는 «지금 코드의 지문»이 들어간다. 코드가 그대로면
+        #   적중해 900원을 아끼고, 한 글자라도 바뀌면 저절로 불일치라
+        #   옛 결과가 절대 안 나온다 — 「고쳤는데 화면이 그대로」를 막는다.
         cached = (
-            None
+            _v2_cache_lookup(
+                corp_id=corp_code,
+                current_fiscal_year=current_fiscal_year,
+            )
             if _engine_v2_enabled()
             else _company_cache_lookup(
                 corp_id=corp_code,
@@ -1764,6 +1769,8 @@ class RealPipeline:
                 business_date=business_date,
                 model=model,
                 steps=steps,
+                corp_id=corp_code,
+                current_fiscal_year=current_fiscal_year,
             )
 
         # 유료 span 선택 전에 후보 원문도 정식 provenance 경계에서 한 번 봉인한다.
@@ -2634,6 +2641,71 @@ def _company_cache_lookup(
     return hit
 
 
+def _v2_cache_lookup(
+    *,
+    corp_id: str,
+    current_fiscal_year: Optional[int],
+) -> Optional[Report]:
+    """엔진 v2 보고서 캐시를 조회한다 (지금 코드 지문이 같을 때만)."""
+    if not corp_id:
+        return None
+    from src.features.composer.build_id import engine_build_id  # noqa: PLC0415
+
+    build_id = engine_build_id()
+    try:
+        with storage_db.connect() as conn:
+            hit = cache_store.get_v2_report_hit(
+                conn,
+                corp_id=corp_id,
+                build_id=build_id,
+                current_fiscal_year=current_fiscal_year,
+            )
+    except Exception:  # noqa: BLE001 — 캐시 실패가 조사를 막으면 안 된다
+        logger.exception("v2 캐시 조회 실패 — 새로 조사합니다 (corp_id=%s)", corp_id)
+        return None
+
+    if hit is None:
+        logger.info(
+            "v2 캐시 미적중 — 새로 만듭니다 (corp_id=%s · 코드지문=%s)",
+            corp_id,
+            build_id,
+        )
+    else:
+        logger.info(
+            "v2 캐시 적중 — 생성·검증 AI를 건너뜁니다 (corp_id=%s · 조사일=%s)",
+            corp_id,
+            hit.generated_at,
+        )
+    return hit
+
+
+def _v2_cache_save(
+    *,
+    corp_id: str,
+    report: Report,
+    fiscal_year: Optional[int],
+) -> None:
+    """v2 보고서를 «그 코드 지문»과 함께 저장한다.
+
+    ★ 저장 실패가 사용자를 막지 않는다. 보고서는 이미 만들어졌다.
+    """
+    if not corp_id:
+        return
+    from src.features.composer.build_id import engine_build_id  # noqa: PLC0415
+
+    try:
+        with storage_db.connect() as conn:
+            cache_store.save_v2_report(
+                conn,
+                corp_id=corp_id,
+                report=report,
+                build_id=engine_build_id(),
+                fiscal_year=fiscal_year,
+            )
+    except Exception:  # noqa: BLE001 — 저장 실패가 사용자를 막으면 안 된다
+        logger.exception("v2 캐시 저장 실패 (보고서는 정상) — corp_id=%s", corp_id)
+
+
 def _company_cache_save(
     *,
     corp_id: str,
@@ -2716,6 +2788,10 @@ def _run_v2_composer(
     business_date: Any,
     model: str,
     steps: list[dict[str, Any]],
+    # ★ 캐시 저장에 필요한 두 값. 조회할 때 쓴 것과 «같은» 값이어야 다음
+    #   조사에서 적중한다 — 여기서 다시 계산하면 두 곳이 어긋난다.
+    corp_id: str = "",
+    current_fiscal_year: Optional[int] = None,
 ) -> RunResult:
     """엔진 v2: composer 경로로 보고서를 만든다.
 
@@ -2817,6 +2893,17 @@ def _run_v2_composer(
             "생존문장": output.verified_sentences,
             "인용조각": len(report.citations),
         }
+    )
+    # ★ 출고 검증(validate_v2)을 이미 통과한 보고서만 여기 온다. 그것을
+    #   «지금 코드 지문»과 함께 저장해 두면, 코드가 그대로일 때 같은 회사를
+    #   다시 조사해도 900원이 안 나간다. 코드가 바뀌면 지문이 달라져 저절로
+    #   미적중이므로 옛 결과가 새 결과인 척 나올 수 없다.
+    # ★ 저장 실패는 삼킨다 — 보고서는 이미 만들어졌고, 저장이 안 됐다고
+    #   사용자에게 실패를 돌려주면 돈만 쓰고 결과를 못 받는다.
+    _v2_cache_save(
+        corp_id=corp_id,
+        report=report,
+        fiscal_year=current_fiscal_year,
     )
     return RunResult(
         outcome=Outcome.REPORT,

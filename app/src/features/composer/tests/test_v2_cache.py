@@ -1,0 +1,227 @@
+"""v2 캐시를 못 박는다 — «돈은 아끼되 옛 결과는 절대 안 나온다».
+
+★ 왜 이 시험이 있나 (오늘 실측으로 당한 사고 2건)
+  ① 1층 캐시가 v2 분기보다 앞에 있어서, ENGINE_V2=1을 켜도 그 회사의 v1
+     저장본이 살아 있으면 «옛 v1 보고서»가 그대로 반환됐다. 화면에는
+     「이전에 조사한 결과입니다」만 뜨므로 「엔진을 고쳐도 하나도 안
+     고쳐졌다」로 보였다. → v2-26에서 v2가 v1 캐시를 안 읽게 막았다.
+  ② 그 대가로 같은 회사를 두 번 조사하면 두 번 다 900원이 나갔다.
+
+★ 그래서 v2 전용 캐시를 «코드 지문»과 함께 만든다:
+  - 코드가 그대로면 적중 → 돈을 아낀다
+  - 코드가 한 글자라도 바뀌면 저절로 미적중 → 옛 결과가 절대 안 나온다
+  사람이 「이번엔 캐시를 비워야지」를 기억할 필요가 없다.
+  기억에 의존하는 안전장치는 반드시 잊힌다 — 이 프로젝트가 네 번 증명했다.
+
+★ 여기서 지키는 것:
+  ① v1 캐시와 v2 캐시는 열쇠가 달라 서로의 보고서를 못 꺼낸다.
+  ② 코드가 바뀌면 캐시가 저절로 무효가 된다.
+  ③ 지문을 못 만들었으면(«모르는 상태») 읽지도 쓰지도 않는다.
+  ④ v1 보고서가 v2 열쇠 아래로 들어가지 않는다.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+from pathlib import Path
+
+import pytest
+
+from src.features.composer import build_id as build_id_module
+from src.features.composer.build_id import (
+    UNKNOWN_BUILD_ID,
+    build_id_is_usable,
+    engine_build_id,
+)
+from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
+from src.features.pipeline.port import Grade, Report
+from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
+from src.features.storage import cache as cache_store
+from src.features.storage import db as storage_db
+
+CORP_ID = "00126380"
+FISCAL_YEAR = 2025
+
+
+@pytest.fixture(autouse=True)
+def _fresh_build_id():
+    """지문 기억을 시험마다 비운다 — 앞 시험이 남긴 값이 새면 안 된다."""
+    build_id_module._cached_build_id = None
+    yield
+    build_id_module._cached_build_id = None
+
+
+def _v2_report() -> Report:
+    return Report(
+        company="가나다전자",
+        job="",
+        corp_type="상장사",
+        grade=Grade.COMPLETE,
+        sections=[],
+        schema_version=ENGINE_V2_SCHEMA_VERSION,
+        generated_at="2026-08-24",
+    )
+
+
+def _v1_report() -> Report:
+    return Report(
+        company="가나다전자",
+        job="",
+        corp_type="상장사",
+        grade=Grade.COMPLETE,
+        sections=[],
+        schema_version=CANONICAL_SCHEMA_VERSION,
+        generated_at="2026-08-24",
+    )
+
+
+def _save(report: Report, build_id: str):
+    with storage_db.connect() as conn:
+        return cache_store.save_v2_report(
+            conn,
+            corp_id=CORP_ID,
+            report=report,
+            build_id=build_id,
+            fiscal_year=FISCAL_YEAR,
+        )
+
+
+def _hit(build_id: str):
+    with storage_db.connect() as conn:
+        return cache_store.get_v2_report_hit(
+            conn,
+            corp_id=CORP_ID,
+            build_id=build_id,
+            current_fiscal_year=FISCAL_YEAR,
+            today=dt.date(2026, 8, 24),
+        )
+
+
+# ══════════════════════════════════════════════════════════
+# ② 코드가 바뀌면 캐시가 저절로 무효가 된다 (가장 중요)
+# ══════════════════════════════════════════════════════════
+
+
+def test_같은_코드면_적중해서_돈을_아낀다():
+    _save(_v2_report(), "buildA")
+
+    적중 = _hit("buildA")
+
+    assert 적중 is not None
+    assert 적중.schema_version == ENGINE_V2_SCHEMA_VERSION
+
+
+def test_코드가_바뀌면_옛_결과가_안_나온다():
+    """★ 「고쳤는데 화면이 그대로」를 구조적으로 불가능하게 만든다."""
+    _save(_v2_report(), "buildA")
+
+    assert _hit("buildB") is None, (
+        "코드가 바뀌었는데 옛 캐시가 나왔습니다 — 고쳐도 화면이 그대로가 됩니다"
+    )
+
+
+def test_엔진_소스가_바뀌면_지문이_달라진다():
+    """지문이 «실제 코드»에 반응하는지 본다 — 상수만 바꾸면 의미가 없다."""
+    처음 = engine_build_id()
+    대상 = Path(build_id_module.__file__).resolve().parent / "dedupe.py"
+    원본 = 대상.read_bytes()
+    try:
+        대상.write_bytes(원본 + "\n# 지문 시험용 한 줄\n".encode("utf-8"))
+        build_id_module._cached_build_id = None
+        바뀐뒤 = engine_build_id()
+    finally:
+        대상.write_bytes(원본)
+        build_id_module._cached_build_id = None
+
+    assert 처음 != 바뀐뒤, "엔진 코드를 바꿨는데 지문이 그대로입니다"
+    assert engine_build_id() == 처음, "되돌렸는데 지문이 안 돌아왔습니다"
+
+
+def test_시험_파일을_고쳐도_지문은_그대로다():
+    """시험은 보고서 «모양»을 안 바꾼다 — 지문이 반응하면 캐시가 늘 미적중이다."""
+    처음 = engine_build_id()
+    대상 = Path(__file__).resolve()
+    원본 = 대상.read_bytes()
+    try:
+        대상.write_bytes(원본 + "\n# 지문 시험용 한 줄\n".encode("utf-8"))
+        build_id_module._cached_build_id = None
+        assert engine_build_id() == 처음
+    finally:
+        대상.write_bytes(원본)
+        build_id_module._cached_build_id = None
+
+
+# ══════════════════════════════════════════════════════════
+# ①④ v1과 v2는 서로의 보고서를 못 꺼낸다
+# ══════════════════════════════════════════════════════════
+
+
+def test_v1_보고서는_v2_열쇠_아래로_안_들어간다():
+    """★ 들어가면 다음 조사에서 v1이 v2인 척 나온다."""
+    assert _save(_v1_report(), "buildA") is None
+    assert _hit("buildA") is None
+
+
+def test_v1_열쇠로_저장한_것을_v2가_못_꺼낸다():
+    """★ 열쇠(namespace)가 다르다는 것을 저장 계층에서 직접 확인한다.
+
+    save_company_report는 v1 출고 게이트(validate_publishable)를 먼저 태우므로
+    여기서는 그 게이트를 지나지 않는 «저수준» 저장으로 v1 열쇠를 만든다 —
+    이 시험이 보려는 것은 게이트가 아니라 «열쇠 분리»다.
+    """
+    with storage_db.connect() as conn:
+        cache_store.save_layer1(
+            conn,
+            corp_id=CORP_ID,
+            job=cache_store._COMPANY_ANALYSIS_PRODUCT_KEY,
+            requirements=list(cache_store._COMPANY_ANALYSIS_SCHEMA_REQUIREMENTS),
+            report=_v1_report(),
+            fiscal_year=FISCAL_YEAR,
+        )
+
+    assert _hit(engine_build_id()) is None, (
+        "v1 열쇠로 저장한 보고서를 v2가 꺼냈습니다 — v1이 v2인 척 나갑니다"
+    )
+
+
+def test_v2_캐시에_저장한_것을_v1이_못_꺼낸다():
+    _save(_v2_report(), "buildA")
+
+    with storage_db.connect() as conn:
+        v1적중 = cache_store.get_company_report_hit(
+            conn,
+            corp_id=CORP_ID,
+            current_fiscal_year=FISCAL_YEAR,
+            today=dt.date(2026, 8, 24),
+        )
+
+    assert v1적중 is None
+
+
+# ══════════════════════════════════════════════════════════
+# ③ 「모르겠다」를 「같다」로 바꾸지 않는다
+# ══════════════════════════════════════════════════════════
+
+
+def test_지문을_못_만들면_읽지도_쓰지도_않는다():
+    assert not build_id_is_usable(UNKNOWN_BUILD_ID)
+    assert not build_id_is_usable("")
+
+    assert _save(_v2_report(), UNKNOWN_BUILD_ID) is None
+    assert _hit(UNKNOWN_BUILD_ID) is None
+
+
+def test_사업연도가_바뀌면_적중하지_않는다():
+    """신선도(O9)는 v2에서도 그대로다 — 작년 보고서를 올해 것으로 주지 않는다."""
+    _save(_v2_report(), "buildA")
+
+    with storage_db.connect() as conn:
+        적중 = cache_store.get_v2_report_hit(
+            conn,
+            corp_id=CORP_ID,
+            build_id="buildA",
+            current_fiscal_year=FISCAL_YEAR + 1,
+            today=dt.date(2026, 8, 24),
+        )
+
+    assert 적중 is None

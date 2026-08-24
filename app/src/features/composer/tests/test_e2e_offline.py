@@ -647,3 +647,60 @@ def test_도식_검수는_전용_상한을_쓴다() -> None:
     )
     # 응답은 «경로 줄마다 참/거짓» 한 줄씩(장당 최대 5줄)이다. 넉넉해도 1000 미만.
     assert V2_DIAGRAM_MAX_TOKENS <= 1024
+
+
+# ══════════════════════════════════════════════════════════
+# ⑥ v2 캐시 — 돈은 아끼되 «옛 결과»는 안 나온다
+# ══════════════════════════════════════════════════════════
+#
+# ★ 이 시험은 파이프라인 «전체»를 두 번 돌린다. 캐시 함수만 따로 보는 시험
+#   (test_v2_cache.py)과 달리, real.py의 조회·저장 배선까지 함께 지킨다 —
+#   함수는 멀쩡한데 «부르는 곳»이 빠져 있던 사고가 이 프로젝트에 네 번 있었다.
+
+
+def test_같은_회사를_다시_조사하면_생성AI가_안_나간다(
+    engine: _JypFakeEngine,
+) -> None:
+    """★ v2 캐시의 존재 이유 — 두 번째 요청에서 «비싼 쪽»이 0이어야 한다."""
+    first = _run(engine)
+    assert first.outcome is Outcome.REPORT
+    첫_호출수 = engine.client.messages.calls
+    assert 첫_호출수 > 0, "첫 조사에서 AI가 안 돌았습니다(시험이 헛돈 것)"
+
+    second = _run(engine)
+
+    assert second.outcome is Outcome.REPORT
+    assert engine.client.messages.calls == 첫_호출수, (
+        "두 번째 조사에서 생성·검증 AI가 또 나갔습니다 — v2 캐시가 안 먹었습니다"
+    )
+    assert second.charged is False, "캐시 반환인데 이용 횟수를 차감했습니다"
+
+
+def test_엔진_코드가_바뀌면_캐시가_저절로_무효가_된다(
+    engine: _JypFakeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 「고쳤는데 화면이 그대로」를 구조적으로 불가능하게 만든다.
+
+    오늘 v1 캐시에서 정확히 이 사고를 겪었다 — 엔진을 고쳐도 저장본이
+    살아 있어 옛 보고서가 나왔고, 사용자는 「하나도 안 고쳐졌다」로 읽었다.
+    """
+    from src.features.composer import build_id as build_id_module
+
+    first = _run(engine)
+    assert first.outcome is Outcome.REPORT
+    첫_호출수 = engine.client.messages.calls
+
+    # 캐시가 실제로 먹는 상태인지 먼저 확인한다(대조군).
+    _run(engine)
+    assert engine.client.messages.calls == 첫_호출수
+
+    # 이제 «코드가 바뀐 것처럼» 지문만 다르게 만든다.
+    monkeypatch.setattr(build_id_module, "_cached_build_id", "다른코드지문")
+
+    third = _run(engine)
+
+    assert third.outcome is Outcome.REPORT
+    assert engine.client.messages.calls > 첫_호출수, (
+        "코드가 바뀌었는데 옛 캐시가 나왔습니다 — 고쳐도 화면이 그대로가 됩니다"
+    )
+    assert third.charged is True, "새로 만들었으면 차감해야 한다"
