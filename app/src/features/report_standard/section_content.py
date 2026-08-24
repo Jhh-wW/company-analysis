@@ -612,8 +612,48 @@ def section_content_blocks(
     return tuple(builder(facts, source_numbers))
 
 
+#: 엔진 v2 문장 뒤에 붙는 «해석» 표지. composer.render.INTERPRETATION_MARKER의
+#: 값(" — 해석")을 그대로 옮겨 적었다 — composer/render.py는 report_standard를
+#: import하지 않는 방향으로 설계돼 있고(render.py 머리말 "report_standard・
+#: publish는 import 하지 않는다"), 그 반대 방향으로 새 cross-feature import를
+#: 만드는 대신 값만 미러링했다. render.py가 SECTION_TAGS를 report_standard
+#: SECTION_SPECS에서 미러링하는 것과 같은 방식(render.py:87 주석 참고).
+#: composer 쪽 값이 바뀌면 이 상수도 같이 바꿔야 한다.
+_V2_INTERPRETATION_MARKER = " — 해석"
+
+#: 본문 표시 문장에 박힌 인용 번호 ``[1]`` ``[12]`` 같은 것을 읽는다.
+_CITATION_NUMBER_PATTERN = re.compile(r"\[(\d+)\]")
+
+
 def source_verification_label(report: Report, source_id: str) -> str:
-    """부록에서 자료 상태와 별도로 사실 검증 상태를 표시한다."""
+    """부록에서 자료 상태와 별도로 사실 검증 상태를 표시한다.
+
+    ★ v1/v2 분기(2026-08-25, 실측 결함 수정) — v1은 사실을
+      ``report.fact_records``(사실 카드)로 쪼개 카드마다 검증 상태를 붙이지만,
+      엔진 v2는 카드를 만들지 않고 문장 뒤에 «확인/해석» 등급만 붙인다
+      (``fact_records``가 v2 보고서에서는 항상 빈 리스트). 그래서 이 함수가
+      카드만 셌을 때는 v2 보고서에서 무조건 「본문 사실 없음」이 나왔는데,
+      같은 줄 「본문 사용 장」 칸은 실제로 인용된 장을 보여줘 한 줄 안에서
+      모순된 표시가 났다(부록 9건 전부 재현). ``fact_records`` 유무로
+      명시적으로 분기해 v1 동작은 손대지 않고, v2에서는 문장 단위로 다시 센다.
+    """
+
+    if report.fact_records:
+        return _source_verification_label_v1(report, source_id)
+    return _source_verification_label_v2(report, source_id)
+
+
+def _source_verification_label_v1(report: Report, source_id: str) -> str:
+    """v1(사실 카드) 경로 — 이 함수를 나누기 전과 동일한 판정.
+
+    ★ v2에는 없는 개념 — 「후보 선정 근거」・「근거 불충분」은 v1의
+      ``FactRecord.comparison_basis``(후보 비교 근거)・``insufficient``
+      상태를 읽는데, 엔진 v2의 문장(``ComposedSentence``)·부록(``Source``)
+      어디에도 이 두 개념이 없다(composer 패키지 전체에 candidate_source_id·
+      comparison_basis·insufficient 문자열이 하나도 없음 — 확인함). v2가 아직
+      후보 비교 리포트를 만들지 않으므로 v2 경로(아래)에는 이 두 라벨이
+      없다. v1과 같은 개념이 v2에 생기면 그때 v2 쪽에도 추가해야 한다.
+    """
 
     facts = []
     is_candidate_evidence = False
@@ -638,3 +678,51 @@ def source_verification_label(report: Report, source_id: str) -> str:
     ):
         return "근거 불충분"
     return "부분 검증"
+
+
+def _source_verification_label_v2(report: Report, source_id: str) -> str:
+    """엔진 v2(사실 카드 없음) 경로 — 문장 뒤 «확인/해석» 등급을 센다.
+
+    v2는 fact_records 대신 부록 번호(``report.citations``의 ``Source.number``,
+    ``_source_number_map``과 같은 방식으로 읽는다)와 본문 ``prose_lines``
+    표시 문자열에 박힌 ``[번호]``로 «이 문장이 이 자료에서 왔다»를 되짚는다.
+    render.py는 최종 화면 문자열만 ``pipeline.Report``로 넘기고 문장별
+    원본 등급 객체(``ComposedSentence.grade``)는 그 뒤로 가져오지 않는다
+    (render.py:612-629 확인) — 그 파일은 이 기능 담당이 아니라 고치지 않고,
+    이미 있는 표시 문자열에서 되짚는 방식을 택했다.
+
+    ★ 알려진 한계(확인함, 지어내지 않음) — render.py의 절충안 인용 규칙상
+      «해석» 문장은 원래 ``[n]``을 안 보여준다(render.py:274-276). 그 자료가
+      «해석» 문장에서만 인용되면 render.py의 ``_ensure_no_orphan_markers``가
+      최소 한 곳에서는 번호를 되살려 반드시 보이게 만들어 주므로(부록이
+      고아 번호를 만들면 출고 검증이 막는다 — render.py:363-388) 그 경우는
+      이 함수가 잡는다. 다만 같은 번호가 «확인» 문장에서 이미 한 번 보이고
+      있으면 되살릴 필요가 없어, 그 «해석» 문장의 번호는 계속 숨겨진 채로
+      남는다 — 이때는 그 해석 인용을 텍스트에서 찾을 수 없어 「사실 검증
+      완료」로 나올 수 있다(실제로는 「부분 검증」이 맞을 수 있다). 이 칸이
+      「본문 사실 없음」처럼 명백히 틀린 표시를 내지는 않지만, «완료» 쪽으로
+      쏠릴 수 있는 구조적 한계다. render.py가 문장별 등급을
+      ``pipeline.Report``까지 들고 오지 않는 한 이 함수만으로는 못 고친다.
+    """
+
+    number = _source_number_map(report).get(source_id)
+    if number is None:
+        return "본문 사실 없음"
+
+    found_any = False
+    has_interpreted = False
+    for section in report.sections:
+        for text, _cite in section.prose_lines:
+            numbers_in_line = {
+                int(match) for match in _CITATION_NUMBER_PATTERN.findall(text)
+            }
+            if number not in numbers_in_line:
+                continue
+            found_any = True
+            if text.endswith(_V2_INTERPRETATION_MARKER):
+                has_interpreted = True
+    if not found_any:
+        return "본문 사실 없음"
+    if has_interpreted:
+        return "부분 검증"
+    return "사실 검증 완료"
