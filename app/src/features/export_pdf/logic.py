@@ -913,6 +913,16 @@ def _add_section(
         story.append(KeepTogether([*heading_flowables, *first_content]))
         for block in detail_blocks[1:]:
             _add_section_content_block(story, block, styles, width)
+    elif section.prose_paragraphs:
+        # ★ 문단 단위로 낸다 — 예전에는 한 장의 문장을 전부 이어 붙여 한
+        #   덩어리로 냈다. 첫 문단만 제목과 함께 묶어 쪽 넘김에서 떨어지지
+        #   않게 하고, 나머지는 이어서 흘린다.
+        paragraphs = [
+            Paragraph(_escape(text), styles["body"])
+            for text in section.prose_paragraphs
+        ]
+        story.append(KeepTogether([*heading_flowables, paragraphs[0]]))
+        story.extend(paragraphs[1:])
     elif section.prose_lines:
         prose = " ".join(_cited_text(text, cite) for text, cite in section.prose_lines)
         story.append(
@@ -927,7 +937,13 @@ def _add_section(
     else:
         story.extend(heading_flowables)
 
-    table_start = 1 if not detail_blocks and not section.prose_lines else 0
+    table_start = (
+        1
+        if not detail_blocks
+        and not section.prose_lines
+        and not section.prose_paragraphs
+        else 0
+    )
     for item in section.tables[table_start:]:
         _add_report_table(story, item, styles, width)
 

@@ -217,6 +217,12 @@ class ReportSection:
     #: 작가와 독립 검토를 통과한 공개 문장 및 실제 출처 표기.
     #: canonical 렌더러는 이것과 표만 표시하며 원문 ``lines``로 대체하지 않는다.
     prose_lines: list[tuple[str, str]] = field(default_factory=list)
+    #: 화면·PDF가 «문단»을 만드는 단위. 한 항목이 한 문단이다.
+    #: ★ 왜 prose_lines와 따로 두나 — prose_lines는 «문장» 단위이고 출고
+    #:   검증·저장이 그 단위를 쓴다. 표시용 묶음을 같은 필드에 섞으면
+    #:   그 계약이 깨진다. 비어 있으면 소비하는 쪽이 예전처럼 prose_lines를
+    #:   이어 붙인다(뒤로 호환).
+    prose_paragraphs: list[str] = field(default_factory=list)
     #: 회사 사실과 분리해 보여 주는 프로그램 작성 안내·준비 질문.
     #: 출처가 있는 사실이 아니므로 ``lines``/``prose_lines``에 섞지 않는다.
     #: 옛 저장 payload에는 이 키가 없으며 빈 목록으로 읽는다.

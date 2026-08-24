@@ -111,7 +111,7 @@ def _prose_lines_from_dict(
 
 
 def _section_to_dict(section: ReportSection) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "cell": section.cell,
         "title": section.title,
         "lines": [[text, cite] for text, cite in section.lines],
@@ -126,6 +126,13 @@ def _section_to_dict(section: ReportSection) -> dict[str, Any]:
         "empty_reason": section.empty_reason,
         "tables": [_table_to_dict(t) for t in section.tables],
     }
+    # 화면·PDF가 문단을 만드는 단위. 저장하지 않으면 다시 열었을 때 문단이
+    # 통째로 사라져 한 덩어리로 보인다(v2 본문 소실과 같은 유형).
+    # ★ 비어 있으면 키를 «넣지 않는다» — 옛 보고서의 저장 바이트와 해시가
+    #   그대로 유지돼야 한다(결속 검사).
+    if section.prose_paragraphs:
+        payload["prose_paragraphs"] = list(section.prose_paragraphs)
+    return payload
 
 
 def _section_from_dict(data: dict[str, Any], *, is_v2: bool) -> ReportSection:
@@ -135,6 +142,9 @@ def _section_from_dict(data: dict[str, Any], *, is_v2: bool) -> ReportSection:
         lines=[(text, cite) for text, cite in data.get("lines", [])],
         # 옛 저장 보고서에는 키가 없다. 빈 목록으로 읽어 원문 보고서를 그대로 살린다.
         prose_lines=_prose_lines_from_dict(data, is_v2=is_v2),
+        prose_paragraphs=[
+            str(text) for text in (data.get("prose_paragraphs") or []) if str(text).strip()
+        ],
         guidance_lines=[
             item.strip()
             for item in data.get("guidance_lines", [])

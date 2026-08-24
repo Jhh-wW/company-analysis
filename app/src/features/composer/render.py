@@ -24,6 +24,7 @@ from typing import Final, Optional
 from src.core.citations import citation_number
 from src.features.composer.constants import (
     CITATION_STYLE_MERGED,
+    PARAGRAPH_MAX_SENTENCES,
     FLOW_PRESENTATION,
     OPERATIONS_FLOW_CAPTION,
     OPERATIONS_FLOW_HEADERS,
@@ -293,6 +294,43 @@ def _marker_visibility(
 # ══════════════════════════════════════════════════════════
 
 
+def _paragraph_breaks(
+    sentences: Sequence[ComposedSentence], numbers: Mapping[str, int]
+) -> tuple[int, ...]:
+    """문단이 시작되는 문장 위치들.
+
+    ★ 왜 나누나 (실측) — 화면도 PDF도 한 장의 문장을 «전부 이어 붙여» 한
+      문단으로 냈다. 진영 2장은 8문장이 줄바꿈 없이 한 덩어리였다.
+    ★ 기준은 «같은 출처를 인용하는 묶음». 인용이 바뀌면 이야기가 바뀐 것이고,
+      절충안이 번호를 다는 자리(묶음의 끝)와도 정확히 맞는다.
+      해석 문장은 앞 문장의 뜻풀이라 묶음을 끊지 않는다.
+    ★ 출처가 안 바뀌어도 상한에서 끊는다 — 안 그러면 문단이 다시 벽이 된다.
+    """
+    if not sentences:
+        return ()
+    starts = [0]
+    current_key: Optional[frozenset[int]] = None
+    length = 0
+    for index, sentence in enumerate(sentences):
+        key = frozenset(_sentence_citation_numbers(sentence, numbers))
+        is_interpretation = sentence.grade == GRADE_INTERPRETED
+        if index == 0:
+            current_key = key
+            length = 1
+            continue
+        changed = bool(key) and not is_interpretation and key != current_key
+        if changed or length >= PARAGRAPH_MAX_SENTENCES:
+            starts.append(index)
+            length = 1
+            if key:
+                current_key = key
+            continue
+        if key and not is_interpretation:
+            current_key = key
+        length += 1
+    return tuple(starts)
+
+
 def _ensure_no_orphan_markers(
     groups: Sequence[tuple[Sequence[ComposedSentence], list[bool]]],
     numbers: Mapping[str, int],
@@ -538,20 +576,30 @@ def render_report(
 
     for section in report.sections:
         prose_lines: list[tuple[str, str]] = []
+        notice_paragraph = ""
         # 자료 부족·생성 실패의 정직한 안내문을 본문 «앞»에 둔다
         # (기준문서 3절: 안내 1~2문장 + 찾은 만큼의 내용).
         if section.notice:
             prose_lines.append((section.notice, ""))
+            notice_paragraph = section.notice
         shows = section_shows[section.section_id]
+        breaks = set(_paragraph_breaks(section.sentences, numbers))
+        prose_paragraphs: list[str] = []
+        buffer: list[str] = []
         for index, sentence in enumerate(section.sentences):
-            prose_lines.append(
-                (
-                    sentence_display_text(
-                        sentence, numbers, show_markers=shows[index]
-                    ),
-                    "",
-                )
+            display = sentence_display_text(
+                sentence, numbers, show_markers=shows[index]
             )
+            # prose_lines는 «문장» 단위 그대로 둔다 — 출고 검증과 저장이 이
+            # 단위를 쓴다. 문단은 화면·PDF 표시용으로 «따로» 모은다.
+            prose_lines.append((display, ""))
+            if index in breaks and buffer:
+                prose_paragraphs.append(" ".join(buffer))
+                buffer = []
+            buffer.append(display)
+        if buffer:
+            prose_paragraphs.append(" ".join(buffer))
+        for index, sentence in enumerate(section.sentences):
             # ★ 부록 사용 장 기록은 «번호를 보였는지»와 무관하다 — 근거를
             #   실제로 쓴 장은 표기 방식과 상관없이 그 장이다.
             for cited in _sentence_citation_numbers(sentence, numbers):
@@ -620,6 +668,11 @@ def render_report(
                 lines=list(prose_lines),
                 tables=tables,
                 prose_lines=prose_lines,
+                # 화면·PDF가 문단을 만드는 단위. 비면 소비하는 쪽이 예전처럼
+                # prose_lines를 이어 붙인다 (뒤로 호환).
+                prose_paragraphs=(
+                    ([notice_paragraph] if notice_paragraph else []) + prose_paragraphs
+                ),
                 display_number=SECTION_DISPLAY_NUMBERS.get(
                     section.section_id, ""
                 ),
