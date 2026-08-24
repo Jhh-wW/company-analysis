@@ -577,3 +577,73 @@ def test_이음매_2장_구성_도식과_4장_추이_도식도_화면까지_간�
     body = _v2_report_to_result_page(report)
     assert 'class="trend-panels"' in body, "4장 추이 도식이 화면에 없습니다"
     assert 'class="flow-row"' in body, "7장 흐름도가 화면에 없습니다"
+
+
+# ══════════════════════════════════════════════════════════
+# ⑤ 예산 — «진짜 본조사 상한 900원»에서도 완주한다
+# ══════════════════════════════════════════════════════════
+#
+# ★ 왜 이 시험이 있나 (적대 검토 실측)
+#   위 이음매 시험들은 provider_budget.activate(100_000.0)로 돈다. 10만원
+#   문맥에서는 어떤 호출을 추가해도 절대 한도를 못 넘으므로, 「예산 초과로
+#   보고서 «전체»가 실패한다」는 가장 비싼 실패를 저장소 어디에서도 못 잡았다.
+#   실측: 도식 검수를 검수용 상한(8000토큰) 그대로 쓰면 예약만으로 195원 —
+#   본조사 900원의 21.7%다. 실제 실행비가 이미 584원(삼성전자)이라 여유가
+#   8% 미만이었다. 그래서 도식 전용 상한(512토큰)을 따로 뒀고, 이 시험이
+#   그 결정을 지킨다.
+
+
+def test_한_호출의_예약이_본조사_예산을_혼자_먹지_않는다() -> None:
+    """★ 예산은 «출력 상한»으로 미리 잡는다 — 상한이 크면 호출 한 번이 예산을 먹는다.
+
+    오프라인 파이프라인을 900원 문맥으로 그냥 돌릴 수는 없다: 가짜 client가
+    돌려주는 모델 이름이 «모르는 모델»이라 요금표가 최고가로 잡히고(작가 1회
+    예약만 1,050원) 실제 운영 요금과 무관한 값이 나온다. 그래서 여기서는
+    «운영에서 실제로 쓰는 모델·상한»으로 예약 비용을 직접 계산해 못 박는다.
+    """
+    from src.core.constants import GENERATION_MODEL
+    from src.features.budget.constants import (
+        PAID_PHASE_PROVIDER_BUDGET_KRW,
+        SPEND_PHASE_PIPELINE,
+    )
+    from src.features.budget.provider_budget import usage_cost_krw
+    from src.features.pipeline.real import (
+        V2_DIAGRAM_MAX_TOKENS,
+        V2_REVIEWER_MAX_TOKENS,
+        V2_WRITER_MAX_TOKENS,
+    )
+
+    예산 = PAID_PHASE_PROVIDER_BUDGET_KRW[SPEND_PHASE_PIPELINE]
+    # 조각 전체 + 앞 장 문장까지 실린 «가장 큰» 프롬프트를 넉넉히 가정한다.
+    입력상한 = 30_000
+
+    비용 = {
+        "작가": usage_cost_krw(GENERATION_MODEL, 입력상한, V2_WRITER_MAX_TOKENS),
+        "검수": usage_cost_krw(GENERATION_MODEL, 입력상한, V2_REVIEWER_MAX_TOKENS),
+        "도식": usage_cost_krw(GENERATION_MODEL, 3_000, V2_DIAGRAM_MAX_TOKENS),
+    }
+    for 이름, 값 in 비용.items():
+        assert 값 < 예산 / 2, (
+            f"{이름} 호출 1회 예약이 {값:.0f}원 — 본조사 예산 {예산:.0f}원의 절반을 "
+            f"넘습니다. 다른 호출이 이미 쓴 돈과 합쳐지면 보고서 전체가 실패합니다."
+        )
+
+    # ★ 도식 검수는 «덧붙인» 단계다. 기존 검수의 절반도 안 되게 유지한다.
+    assert 비용["도식"] < 비용["검수"] / 2, (
+        f"도식 검수 예약 {비용['도식']:.0f}원이 기존 검수 {비용['검수']:.0f}원에 "
+        f"비해 큽니다 — 전용 상한이 제 역할을 못 하고 있습니다"
+    )
+
+
+def test_도식_검수는_전용_상한을_쓴다() -> None:
+    """★ 검수용 상한을 그대로 쓰면 예약만으로 예산의 5분의 1을 먹는다."""
+    from src.features.pipeline.real import (
+        V2_DIAGRAM_MAX_TOKENS,
+        V2_REVIEWER_MAX_TOKENS,
+    )
+
+    assert V2_DIAGRAM_MAX_TOKENS < V2_REVIEWER_MAX_TOKENS, (
+        "도식 검수가 검수용 상한을 그대로 쓰고 있습니다"
+    )
+    # 응답은 «경로 줄마다 참/거짓» 한 줄씩(장당 최대 5줄)이다. 넉넉해도 1000 미만.
+    assert V2_DIAGRAM_MAX_TOKENS <= 1024

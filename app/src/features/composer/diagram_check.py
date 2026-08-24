@@ -59,6 +59,14 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Callable, Final, Optional
 
+from src.features.composer.constants import PARSE_RETRY_LIMIT, RETRY_REMINDER
+from src.features.composer.verify import (
+    _SentenceNumber,
+    _evidence_number_pools,
+    _extract_numbers,
+    _number_found,
+    _number_matches_by_math,
+)
 from src.features.composer.port import (
     CollectedFragment,
     ComposedReport,
@@ -79,48 +87,48 @@ _VERDICT_RESULT_KEY: Final[str] = "결과"
 VERDICT_TRUE: Final[str] = "참"
 VERDICT_FALSE: Final[str] = "거짓"
 
-#: 숫자로 볼 글자. 천 단위 쉼표는 표기 차이라 지우지만 «소수점은 남긴다».
-#:
-#: ★ 적대 검토가 잡은 결함 — 처음엔 소수점도 지웠다. 그러면 「1.5조원」과
-#:   「15개국」이 같은 열쇠 «15»가 되어, 원문에 15가 있으면 지어낸 1.5가
-#:   통과한다. 자릿수를 세는 검사에서 소수점은 표기가 아니라 «값»이다.
-_DIGITS_RE: Final[re.Pattern[str]] = re.compile(r"\d[\d,.]*")
-_THOUSANDS_RE: Final[re.Pattern[str]] = re.compile(r",")
-
-
-def _digit_keys(text: str) -> list[str]:
-    """글에서 수를 뽑아 비교용 열쇠로 바꾼다 («1,389» → «1389», «1.5» → «1.5»)."""
-    keys: list[str] = []
-    for chunk in _DIGITS_RE.findall(text or ""):
-        cleaned = _THOUSANDS_RE.sub("", chunk).rstrip(".")
-        if not cleaned:
-            continue
-        # 앞의 0은 표기 차이다 («007» == «7»). 소수점 아래는 그대로 둔다.
-        whole, _dot, frac = cleaned.partition(".")
-        whole = whole.lstrip("0") or "0"
-        keys.append(f"{whole}.{frac}" if frac else whole)
-    return keys
-
-
 def _numbers_are_grounded(cell: str, source_text: str) -> Optional[str]:
-    """칸 안의 숫자가 인용 원문에 있는가. 없으면 그 숫자를 돌려준다.
+    """칸 안의 수가 인용 원문에 있는가. 없으면 그 수를 돌려준다.
 
-    ★ 자릿수만 본다 — 단위(억원/원)나 표기(1,389 / 1389)는 보지 않는다.
-      단위 환산까지 여기서 다시 하면 문장 검증과 «두 벌»이 되어 서로
-      어긋난다. 도식에서 위험한 것은 「원문에 없는 수를 지어낸 것」이므로
-      존재 여부만으로 충분하다.
+    ★ 잣대를 «문장 검증과 같은 것»으로 쓴다 (verify._extract_numbers ·
+      _evidence_number_pools · _number_matches_by_math · _number_found).
+      적대 검토가 잡은 결함 — 여기서 따로 만든 자릿수 비교는 단위를 안 봐서
+      「1,683원」이 「1,683억원」 근거로 통과했고, 소수점을 지워 「1.5조원」과
+      「15개국」이 같은 수가 됐다. 잣대가 두 벌이면 반드시 어긋난다.
+
+    ★ 근거 원문이 비어 있으면 «없음»이 아니라 «판단 불가»다 — 문장 쪽이
+      같은 상황에서 제거가 아니라 강등에 그치는 것과 같은 원칙으로 남긴다.
     """
     if not (source_text or "").strip():
-        # ★ 적대 검토가 잡은 결함 — 근거 원문을 못 찾았을 때(인용 id가 조각과
-        #   안 맞는 등) «전부 지어낸 수»로 취급해 줄을 지우고 있었다.
-        #   문장 쪽(verify._machine_check)은 같은 상황에서 제거가 아니라
-        #   강등에 그친다. 대조할 것이 없는 것과 틀린 것은 다르다.
         return None
-    source_keys = set(_digit_keys(source_text))
-    for key in _digit_keys(cell):
-        if key not in source_keys:
-            return key
+    numbers = _extract_numbers(cell)
+    if not numbers:
+        return None
+    raw_values, absolute_values, has_unit_context = _evidence_number_pools(
+        [source_text]
+    )
+    for number in numbers:
+        if number.unit_marked:
+            if _number_matches_by_math(number, absolute_values):
+                continue
+            # ★ 여기서 «문장 규칙과 갈라진다». 문장은 근거에 단위 정보가
+            #   아예 없을 때 제거가 아니라 «해석 강등»으로 남긴다 — 독자가
+            #   배지를 보고 확정 사실이 아님을 안다. 도식에는 그 배지가
+            #   없다. 단위 붙은 수를 근거 없이 그리면 독자는 «확정»으로
+            #   읽는다. 그래서 도식에서는 그 줄을 뺀다.
+            #   (fail-closed. 문장은 그대로 남으므로 내용은 안 사라진다.)
+            _ = has_unit_context
+        elif _number_found(number, raw_values, absolute_values):
+            continue
+        return _format_number(number)
     return None
+
+
+def _format_number(number: "_SentenceNumber") -> str:
+    """사유 기록에 쓸 수 표기 — 원문을 담지 않는다."""
+    token = number.token.normalize()
+    text = format(token, "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
 
 
 def _fragment_texts(fragments: Sequence[CollectedFragment]) -> dict[str, str]:
@@ -194,6 +202,15 @@ def _review_prompt(items: Sequence[tuple[int, FlowRow, str]]) -> str:
     return "\n".join(lines)
 
 
+def _safe_ask(ask: Callable[[str], str], prompt: str) -> str:
+    """검수 호출이 죽어도 보고서를 같이 죽이지 않는다."""
+    try:
+        return ask(prompt) or ""
+    except Exception:  # noqa: BLE001 — 검수 실패가 보고서를 죽이면 안 된다
+        logger.exception("도식 의미 검수 호출이 실패했습니다")
+        return ""
+
+
 def _parse_verdicts(raw: str) -> dict[int, str]:
     """검수 응답을 «번호 → 결과»로 읽는다. 못 읽으면 빈 사전(=검수 불능)."""
     if not raw:
@@ -245,13 +262,17 @@ def _review_rows(
     if not items:
         return {section_id: rows for section_id, rows in by_section}, []
 
-    try:
-        raw = ask(_review_prompt(items))
-    except Exception:  # noqa: BLE001 — 검수 실패가 보고서를 죽이면 안 된다
-        logger.exception("도식 의미 검수가 실패했습니다 — 경로를 그대로 둡니다")
-        raw = ""
+    prompt = _review_prompt(items)
+    verdicts = _parse_verdicts(_safe_ask(ask, prompt))
+    retries = 0
+    # ★ 적대 검토가 잡은 결함 — AI 표기가 한 번 흔들리면(번호를 문자열로 쓰는
+    #   등) 의미 검수가 통째로 무력화되는데, 그 사실이 「전부 남김」으로 덮여
+    #   «검수 통과»처럼 보였다. 문장 검수(verify._ask_verdicts)는 이미 파싱
+    #   실패 시 1회 재요청한다. 같은 규칙을 쓴다.
+    while not verdicts and retries < PARSE_RETRY_LIMIT:
+        retries += 1
+        verdicts = _parse_verdicts(_safe_ask(ask, prompt + RETRY_REMINDER))
 
-    verdicts = _parse_verdicts(raw)
     if not verdicts:
         # ★ 검수 불능 = 거짓이 아니다. 문장 쪽 규칙과 같게 «남긴다».
         logger.warning(

@@ -126,6 +126,30 @@ Notion, 공유 링크, real provider, 외부 백업과 cron 시험은 무료 dem
 | `BACKUP_DATA_BOUNDARY_ID` | DB/sidecar 저장소의 불변 경계 식별자. 실제 값은 환경에만 주입 |
 | `BACKUP_DATA_AUTHORITY_ID` | DB/sidecar 쓰기 주체의 불변 식별자. 실제 값은 환경에만 주입 |
 | `BACKUP_MANIFEST_MIN_RETENTION_DAYS` | 독립 manifest 최소 보존일. DB 백업 보존일 이상으로 명시 |
+| `ENGINE_V2` | **현재 배포에 넣지 않음(=v1 경로).** 정확히 `1`일 때만 composer(v2)로 간다. → 아래 «엔진 v2 스위치» 참고 |
+
+### 엔진 v2 스위치 (`ENGINE_V2`)
+
+**지금 배포하면 v1 보고서가 나간다.** `ENGINE_V2`는 `render.yaml`·`Dockerfile`·
+`deploy/` 어디에도 없고, 코드는 `os.environ.get("ENGINE_V2") == "1"` 하나로만
+갈린다(`app/src/features/pipeline/real.py`). 값이 없으면 v1 경로 그대로다.
+
+- **누락이 아니라 미결이다.** v2를 기본 경로로 승격할지는
+  `docs/실행계획_엔진v2/06_측정과_합격판정.md`에서 사람이 정할 항목으로 남아 있다.
+- **켜는 방법**: `render.yaml`의 `envVars`에 아래 한 쌍을 추가한다.
+  시작 검증(`deploy/validate_environment.py`)은 모르는 이름을 거부하지 않으므로
+  이 값이 막히지는 않는다.
+
+  ```yaml
+      - key: ENGINE_V2
+        value: "1"
+  ```
+
+- **켜면 달라지는 것**: 보고서 본문을 composer가 새로 쓰고, 2·4·7장에 도식이
+  실린다. 대신 **v2는 1층 캐시를 쓰지 않으므로** 같은 회사를 두 번 조사하면
+  두 번 다 본조사 비용이 나간다.
+- **로컬에서 켜 보기**: `app/실시간성능시험켜기.ps1 -EngineV2`. 이 실행기가
+  `ENGINE_V2`를 자식에게 넘기는 저장소 안의 유일한 경로다.
 
 `AUTH_COOKIE_INSECURE`와 로컬 관리자 capability는 로컬 전용이다. Render에는 설정하지 않는다.
 실제 값의 형식은 `app/.env.example`의 설명을 따르되 실제 사람의 `sub`나 비밀값을 파일에

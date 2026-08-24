@@ -216,6 +216,16 @@ def _engine_v2_enabled() -> bool:
 V2_WRITER_MAX_TOKENS: Final[int] = 4000
 V2_REVIEWER_MAX_TOKENS: Final[int] = 8000
 
+#: 도식 검수의 출력 상한. 응답은 «경로 줄마다 참/거짓» 한 줄씩이고 줄은 장당
+#: 최대 5개다 — 실제로 200토큰이면 충분하다.
+#:
+#: ★ 왜 따로 두나 (적대 검토 실측) — 예산은 «출력 상한»으로 미리 잡는다
+#:   (provider_budget.reserve_call). 검수 상한 8000을 그대로 쓰면 도식 검수
+#:   한 번이 본조사 900원의 21.7%인 195원을 잡아 버린다. 실측 실행비가 이미
+#:   584원(삼성전자)이라 여유가 8% 미만이고, 넘으면 «도식이 빠지는» 정도가
+#:   아니라 ProviderBudgetExceeded로 «보고서 전체»가 실패한다.
+V2_DIAGRAM_MAX_TOKENS: Final[int] = 512
+
 #: other_gate일 때 세부를 보태는 span-selection 결과 사유 코드 → 한국어 표기.
 _SPAN_RESULT_REASON_KO: Final[dict[str, str]] = {
     MAJORITY_REASON_OUTPUT_LIMIT: "AI 응답 길이 초과 의심",
@@ -2751,6 +2761,9 @@ def _run_v2_composer(
     reviewer_ask = _v2_ask_via_provider(
         engine, client, stage="v2_review", max_tokens=V2_REVIEWER_MAX_TOKENS
     )
+    diagram_ask = _v2_ask_via_provider(
+        engine, client, stage="v2_diagram", max_tokens=V2_DIAGRAM_MAX_TOKENS
+    )
     try:
         output = composer_pipeline.run_v2(
             company_name,
@@ -2758,6 +2771,7 @@ def _run_v2_composer(
             performance_table,
             writer_ask=writer_ask,
             reviewer_ask=reviewer_ask,
+            diagram_ask=diagram_ask,
             corp_type=corp_type,
             generated_at=business_date.isoformat(),
             as_of_date=business_date.isoformat(),

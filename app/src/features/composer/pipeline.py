@@ -68,6 +68,7 @@ def run_v2(
     *,
     writer_ask: AskFn,
     reviewer_ask: AskFn,
+    diagram_ask: Optional[AskFn] = None,
     corp_type: str = "",
     grade: Grade = Grade.COMPLETE,
     generated_at: str = "",
@@ -134,9 +135,12 @@ def run_v2(
     #     ① 칸 안의 숫자가 원문에 있나(기계) ② 이 경로가 근거에 맞나(검수 AI 1회).
     #     ★ 검수기를 «반드시» 넘긴다. 안 넘기면 숫자 검사만 돌아 관계 결함이
     #       그대로 통과한다 — 이 단계를 만든 이유가 사라진다.
+    #     ★ diagram_ask는 출력 상한이 훨씬 작은 «도식 전용» 클로저다.
+    #       검수용(8000토큰)을 그대로 쓰면 예약만으로 예산의 21.7%를 먹어
+    #       비싼 회사에서 보고서 «전체»가 예산 초과로 실패한다(실측).
     #     근거 없는 줄만 빼며, 줄이 다 빠지면 도식을 안 그릴 뿐 장은 남는다.
     verified, diagram_problems = check_diagrams(
-        verified, _normalize_fragments(fragments), reviewer_ask
+        verified, _normalize_fragments(fragments), diagram_ask or reviewer_ask
     )
     for problem in diagram_problems:
         logger.warning("도식 검증에서 뺀 경로 — %s", problem)

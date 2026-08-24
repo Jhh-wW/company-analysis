@@ -355,3 +355,24 @@ def test_delete_data_on_exit_removes_only_the_generated_run_directory(
     runs_root = app_copy / ".local_evaluation_runs"
     assert runs_root.is_dir()
     assert list(runs_root.iterdir()) == []
+
+
+def test_launcher_can_turn_on_engine_v2() -> None:
+    """★ v2를 켜는 «유일한» 경로를 못 박는다.
+
+    실측: 저장소 전체에서 ENGINE_V2를 자식 프로세스에 넣는 곳은 이 실행기
+    하나뿐이다(render.yaml·Dockerfile·deploy/·다른 실행기 전부 0건).
+    그런데 이 세 줄을 지워도 깨지는 시험이 없었다 — v2 경로가 무방비였다.
+
+    ★ 이 시험은 «배포에서 v2가 켜지는가»는 보지 않는다. 그것은 아직
+      사용자 결정 대기 항목이다(docs/실행계획_엔진v2/06_측정과_합격판정.md).
+      여기서 지키는 것은 「로컬에서 v2를 켤 수 있다」뿐이다.
+    """
+    assert "[switch]$EngineV2" in SCRIPT, "-EngineV2 스위치가 사라졌습니다"
+    assert '$childEnvironment["ENGINE_V2"] = "1"' in SCRIPT, (
+        "스위치는 있는데 자식에게 ENGINE_V2를 안 넘깁니다"
+    )
+    # allowlist에 없으면 실행기가 시작을 «거부»한다 — 셋이 함께 있어야 동작한다.
+    assert '"ENGINE_V2"' in SCRIPT.split("$allowedChildEnvironmentNames")[1], (
+        "ENGINE_V2가 자식 환경 허용 목록에 없습니다 — 실행기가 시작을 거부합니다"
+    )
