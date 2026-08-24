@@ -9,6 +9,43 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from typing import Final
+
+#: 구성 도식(100% 누적 막대)에 그릴 수 있는 분류 개수.
+#:
+#: ★ 상한을 5에서 7로 올린 이유 (하이브 실측) — 하이브 매출은 6개 부문이고
+#:   비중 합계가 «정확히» 100.00%인데도 도식이 안 그려지고 평범한 표로 나갔다.
+#:   막힌 것은 자료의 문제가 아니라 이 숫자 하나였다. 색 계단도 5단계뿐이라
+#:   6번째 칸이 첫 칸과 같은 색이 되고 PDF는 색이 아예 모자랐다 — 그래서
+#:   상한과 색을 «함께» 올렸다. 한쪽만 올리면 도식이 깨진다.
+#: ★ 하한 3은 그대로다. 두 조각짜리 「구성」은 막대로 그릴 값이 없다.
+COMPOSITION_MIN_ITEMS: Final[int] = 3
+COMPOSITION_MAX_ITEMS: Final[int] = 7
+
+#: 무채색 계단의 단계 수. 웹(style.css .tone-N)과 PDF(COMPOSITION_PALETTE)가
+#: 이 수만큼 색을 갖고 있어야 한다 — 시험이 세 곳의 일치를 지킨다.
+COMPOSITION_TONE_STEPS: Final[int] = 7
+
+
+def composition_tone(index: int, count: int) -> int:
+    """칸 번호에 색 단계 번호를 준다 — 마지막 칸은 «항상» 가장 옅은 단계다.
+
+    ★ 왜 「앞에서부터 차례로」가 아닌가 — 항목이 3개든 7개든
+      「가장 진한 것에서 시작해 흰색으로 끝난다」는 인상을 지키기 위해서다.
+      앞에서부터 자르면 항목이 적을 때 흰색이 안 나와 회사마다 도식이
+      달라 보인다. 사용자가 「회사가 달라도 같은 장은 비슷한 도식」을
+      요구한 이유가 이것이다.
+
+    ★ 웹 템플릿과 PDF가 «같은 이 함수»를 쓴다. 두 벌로 만들면 화면과
+      인쇄물의 색이 어긋난다.
+    """
+    last = max(count - 1, 0)
+    if last <= 0:
+        return 0
+    if index >= last:
+        return COMPOSITION_TONE_STEPS - 1
+    step = (COMPOSITION_TONE_STEPS - 1) / last
+    return min(int(round(index * step)), COMPOSITION_TONE_STEPS - 2)
 
 from src.features.pipeline.port import ReportTable
 
@@ -106,7 +143,10 @@ def _composition(table: ReportTable) -> TableVisualization | None:
         values.append((label, number, str(row[value_index]).strip()))
     total = sum((value for _label, value, _display in values), Decimal("0"))
     # 구성 그래프는 전체 분류가 공시 합계와 맞을 때만 허용한다. 소수 반올림 오차만 받는다.
-    if not 3 <= len(values) <= 5 or not Decimal("98.5") <= total <= Decimal("101.5"):
+    if (
+        not COMPOSITION_MIN_ITEMS <= len(values) <= COMPOSITION_MAX_ITEMS
+        or not Decimal("98.5") <= total <= Decimal("101.5")
+    ):
         return None
     items = tuple(
         ChartPoint(
@@ -190,7 +230,9 @@ def _trend(table: ReportTable) -> TableVisualization | None:
 
 
 def _flow(table: ReportTable) -> TableVisualization | None:
-    if not (3 <= len(table.headers) <= 4) or not (1 <= len(table.rows) <= 5):
+    # ★ 열 하한이 2다 — 5장 «과제 → 대응»은 두 칸짜리 흐름이다.
+    #   렌더러(웹 .flow-row / PDF _FlowGraphic)는 열 수에 무관하게 그린다.
+    if not (2 <= len(table.headers) <= 4) or not (1 <= len(table.rows) <= 5):
         return None
     flows: list[tuple[str, ...]] = []
     for row in table.rows:

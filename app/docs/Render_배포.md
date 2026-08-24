@@ -126,19 +126,30 @@ Notion, 공유 링크, real provider, 외부 백업과 cron 시험은 무료 dem
 | `BACKUP_DATA_BOUNDARY_ID` | DB/sidecar 저장소의 불변 경계 식별자. 실제 값은 환경에만 주입 |
 | `BACKUP_DATA_AUTHORITY_ID` | DB/sidecar 쓰기 주체의 불변 식별자. 실제 값은 환경에만 주입 |
 | `BACKUP_MANIFEST_MIN_RETENTION_DAYS` | 독립 manifest 최소 보존일. DB 백업 보존일 이상으로 명시 |
-| `ENGINE_V2` | **현재 배포에 넣지 않음(=v1 경로).** 정확히 `1`일 때만 composer(v2)로 간다. → 아래 «엔진 v2 스위치» 참고 |
+| `ENGINE_V2` | **`1`. 배포하면 composer(v2) 경로로 간다.** 정확히 `1`일 때만 v2다. → 아래 «엔진 v2 스위치» 참고 |
 
 ### 엔진 v2 스위치 (`ENGINE_V2`)
 
-**지금 배포하면 v1 보고서가 나간다.** `ENGINE_V2`는 `render.yaml`·`Dockerfile`·
-`deploy/` 어디에도 없고, 코드는 `os.environ.get("ENGINE_V2") == "1"` 하나로만
-갈린다(`app/src/features/pipeline/real.py`). 값이 없으면 v1 경로 그대로다.
+**지금 배포하면 v2 보고서가 나간다.** `render.yaml`의 `envVars`에
+`ENGINE_V2: "1"`이 들어 있다. 코드는 `os.environ.get("ENGINE_V2") == "1"`
+하나로만 갈린다(`app/src/features/pipeline/real.py`).
 
-- **누락이 아니라 미결이다.** v2를 기본 경로로 승격할지는
-  `docs/실행계획_엔진v2/06_측정과_합격판정.md`에서 사람이 정할 항목으로 남아 있다.
-- **켜는 방법**: `render.yaml`의 `envVars`에 아래 한 쌍을 추가한다.
-  시작 검증(`deploy/validate_environment.py`)은 모르는 이름을 거부하지 않으므로
-  이 값이 막히지는 않는다.
+- **켜져 있는 곳은 `render.yaml` 한 곳뿐이다.** `app/Dockerfile`의 기본값에는
+  일부러 넣지 않았다. 이미지 기본값은 `PIPELINE=demo`처럼 «돈이 들지 않는
+  안전한 상태»만 담고, 실제로 v2를 켤지는 배포 manifest가 한 곳에서 정한다.
+  덕분에 로컬 smoke 컨테이너(`scripts/deploy/smoke-container.ps1`)와
+  `deploy/compose.yaml`·`deploy/kubernetes/`는 v1 그대로 남는다.
+- **값을 잘못 적으면 «조용히» v1이 된다.** `1`(따옴표 없음 → YAML 정수),
+  `true`, `yes`, 앞뒤 공백이 붙은 `" 1 "`은 전부 v1로 떨어진다.
+  시작 검증(`deploy/validate_environment.py`)은 모르는 이름을 거부하지도,
+  이 값의 형식을 보지도 않으므로 **오류 메시지가 한 줄도 나오지 않는다.**
+  화면에는 평소대로 보고서가 뜨기 때문에 사람이 눈치채기 어렵다.
+  그래서 값의 글자와 자료형은
+  `deploy/tests/test_deployment_contract.py`의
+  `test_render_blueprint_turns_engine_v2_on_while_image_default_stays_v1`이
+  대신 지킨다.
+- **되돌리는 방법**: `render.yaml`에서 `ENGINE_V2` 한 쌍을 지우고 재배포한다.
+  값을 `0`으로 바꿔도 v1로 가지만, 위 시험이 실패해 의도를 되묻게 된다.
 
   ```yaml
       - key: ENGINE_V2

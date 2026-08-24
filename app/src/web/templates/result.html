@@ -42,14 +42,14 @@
   </figcaption>
   <div class="composition-track" role="img" aria-label="{{ t.caption }}">
   {% for item in visual.items %}
-  <span class="composition-segment tone-{{ loop.index0 % 5 }}"
+  <span class="composition-segment tone-{{ composition_tone(loop.index0, visual.items|length) }}"
   style="width: {{ '%.4f'|format(item.ratio) }}%"
   title="{{ item.label }} {{ item.display }}"></span>
   {% endfor %}
   </div>
   <ul class="chart-legend" aria-label="구성 항목">
   {% for item in visual.items %}
-  <li><span class="legend-swatch tone-{{ loop.index0 % 5 }}" aria-hidden="true"></span><span>{{ item.label }}</span><strong>{{ item.display }}</strong></li>
+  <li><span class="legend-swatch tone-{{ composition_tone(loop.index0, visual.items|length) }}" aria-hidden="true"></span><span>{{ item.label }}</span><strong>{{ item.display }}</strong></li>
   {% endfor %}
   </ul>
   <p class="chart-note">자료{{ ref(t.cite) }} · {{ visual.note }}</p>

@@ -1633,12 +1633,24 @@ td.center { text-align: center; }
   border-radius: 4px;
   background: var(--paper-2);
 }
-.result-page .composition-segment { display: block; min-width: 1px; }
+/* 칸마다 오른쪽에 얇은 선을 둔다 — 색 단계가 촘촘해져도 이웃한 두 칸이
+   항상 나뉘어 보인다 (마지막 칸은 막대 끝이라 선을 뺀다). */
+.result-page .composition-segment {
+  display: block;
+  min-width: 1px;
+  box-shadow: inset -1px 0 0 var(--paper);
+}
+.result-page .composition-segment:last-child { box-shadow: none; }
+/* 구성 도식 무채색 계단 — «칸 수만큼» 색이 있어야 한다.
+   ★ 왜 7단계인가 (하이브 실측): 옛 5단계에서는 6개 부문이 tone-0과 같은 색으로
+      되돌아가 첫 칸과 여섯째 칸이 구별되지 않았다. PDF는 아예 색이 모자랐다. */
 .result-page .tone-0 { background: #0a0a0a; }
-.result-page .tone-1 { background: #5f5f5f; }
-.result-page .tone-2 { background: #a3a3a3; }
-.result-page .tone-3 { background: #d4d4d4; }
-.result-page .tone-4 { border: 1px solid #737373; background: #fff; }
+.result-page .tone-1 { background: #3d3d3d; }
+.result-page .tone-2 { background: #6b6b6b; }
+.result-page .tone-3 { background: #949494; }
+.result-page .tone-4 { background: #b8b8b8; }
+.result-page .tone-5 { background: #dcdcdc; }
+.result-page .tone-6 { border: 1px solid #737373; background: #fff; }
 .result-page .chart-legend {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

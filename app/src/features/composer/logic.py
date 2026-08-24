@@ -29,6 +29,8 @@ from src.features.composer.constants import (
     JSON_SCHEMA_GUIDE,
     NOTICE_COMPOSE_FAILED,
     NOTICE_INSUFFICIENT_EVIDENCE,
+    FLOW_HEADERS_BY_SECTION,
+    FLOW_PROMPT_BY_SECTION,
     OPERATIONS_FLOW_GUIDE,
     OPERATIONS_FLOW_HEADERS,
     OPERATIONS_FLOW_MAX_CELL_CHARS,
@@ -146,11 +148,10 @@ def build_section_prompt(
         # 7장은 «경로표»를 함께 내야 해서 스키마 안내를 통째로 바꾼다.
         # 덧붙이면 기본 안내의 「이 JSON만 출력한다」와 충돌해 작가가 경로표를
         # 빼먹는다 (진영 실측).
-        (
-            OPERATIONS_FLOW_GUIDE + OPERATIONS_FLOW_SCHEMA_GUIDE
-            if section_id == OPERATIONS_FLOW_SECTION_ID
-            else JSON_SCHEMA_GUIDE
-        ),
+        # 흐름표를 내는 장(5장 대응표·7장 경로표)은 스키마 안내를 통째로 «바꾼다».
+        # 덧붙이면 기본 안내의 「이 JSON만 출력한다」와 충돌해 작가가 표를
+        # 빼먹는다 (진영 실측).
+        FLOW_PROMPT_BY_SECTION.get(section_id, JSON_SCHEMA_GUIDE),
         _render_table(performance_table),
         _render_already_written(already_written),
         _render_fragments(fragments),
@@ -268,7 +269,7 @@ def parse_section_response(raw: str) -> Optional[tuple[ComposedSentence, ...]]:
 # ══════════════════════════════════════════════════════════
 
 
-def _flow_row_from_item(item: Any) -> Optional[FlowRow]:
+def _flow_row_from_item(item: Any, cell_count: int) -> Optional[FlowRow]:
     """경로표 한 줄을 계약대로 읽는다. 모양이 어긋나면 그 줄만 버린다.
 
     ★ «모양»만 본다 — 칸 개수, 빈 칸 여부, 길이, 근거 유무. 내용이 좋은지
@@ -282,7 +283,7 @@ def _flow_row_from_item(item: Any) -> Optional[FlowRow]:
     if not isinstance(cells_raw, list):
         return None
     cells = tuple(" ".join(str(cell).split()) for cell in cells_raw)
-    if len(cells) != len(OPERATIONS_FLOW_HEADERS):
+    if len(cells) != cell_count:
         return None
     if any(not cell for cell in cells):
         return None
@@ -300,8 +301,15 @@ def _flow_row_from_item(item: Any) -> Optional[FlowRow]:
     return FlowRow(cells=cells, citations=citations)
 
 
-def parse_flow_rows(raw: str) -> tuple[FlowRow, ...]:
-    """작가 응답에서 경로표를 읽는다. 없거나 못 읽으면 빈 튜플(도식 없음)."""
+def parse_flow_rows(raw: str, section_id: str = OPERATIONS_FLOW_SECTION_ID) -> tuple[FlowRow, ...]:
+    """작가 응답에서 흐름표를 읽는다. 없거나 못 읽으면 빈 튜플(도식 없음).
+
+    ★ 장마다 칸 수가 다르다 — 7장은 3칸(투입→하는 일→도달), 5장은 2칸
+      (과제→대응). 칸 수는 FLOW_HEADERS_BY_SECTION 한 곳에서만 정한다.
+    """
+    headers = FLOW_HEADERS_BY_SECTION.get(section_id)
+    if headers is None:
+        return ()
     payload = _extract_payload(raw)
     if not isinstance(payload, Mapping):
         return ()
@@ -310,7 +318,7 @@ def parse_flow_rows(raw: str) -> tuple[FlowRow, ...]:
         return ()
     rows = tuple(
         row
-        for row in (_flow_row_from_item(item) for item in items)
+        for row in (_flow_row_from_item(item, len(headers)) for item in items)
         if row is not None
     )
     return rows[:OPERATIONS_FLOW_MAX_ROWS]
@@ -349,18 +357,17 @@ def _compose_one_section(
     while sentences is None and retries < PARSE_RETRY_LIMIT:
         retries += 1
         sentences, raw = _ask_and_parse(ask, prompt + RETRY_REMINDER)
-    # 경로표는 7장에서만 읽는다. 같은 응답에서 꺼내므로 추가 호출이 없다.
-    flow_rows = (
-        parse_flow_rows(raw)
-        if section_id == OPERATIONS_FLOW_SECTION_ID and raw
-        else ()
-    )
-    if section_id == OPERATIONS_FLOW_SECTION_ID and not flow_rows:
+    # 흐름표는 정해진 장(5장 대응표·7장 경로표)에서만 읽는다.
+    # 같은 응답에서 꺼내므로 추가 AI 호출이 «0회»다.
+    wants_flow = section_id in FLOW_HEADERS_BY_SECTION
+    flow_rows = parse_flow_rows(raw, section_id) if wants_flow and raw else ()
+    if wants_flow and not flow_rows:
         # ★ 진단 — 도식이 안 나올 때 «작가가 안 냈는지» «우리가 걸렀는지»를
         #   구분하지 못하면 엉뚱한 데를 고치게 된다(실측에서 두 번 헛짚었다).
         #   원문은 남기지 않는다 — 어느 쪽인지만 기록한다.
         logger.warning(
-            "7장 경로표 없음 — 응답에 «경로표» 키 %s / 응답 길이 %d자",
+            "%s 흐름표 없음 — 응답에 «경로표» 키 %s / 응답 길이 %d자",
+            section_id,
             "있었으나 쓸 줄이 없음" if RESPONSE_FLOW_KEY in (raw or "") else "아예 없음",
             len(raw or ""),
         )

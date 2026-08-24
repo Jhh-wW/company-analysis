@@ -38,6 +38,25 @@ COLOR_CHART_DARK: Final[str] = "#0A0A0A"
 COLOR_CHART_MID: Final[str] = "#5F5F5F"
 COLOR_CHART_LIGHT: Final[str] = "#A3A3A3"
 COLOR_CHART_PALE: Final[str] = "#D4D4D4"
+
+#: 구성 도식(100% 누적 막대)의 무채색 계단. «칸 수만큼» 색이 있어야 한다.
+#:
+#: ★ 왜 넓혔나 (하이브 실측) — 옛 팔레트는 정확히 5색이었고 구성 도식도
+#:   3~5행만 그렸다. 하이브 매출은 6개 부문이고 비중 합계가 정확히 100.00%인데,
+#:   «행 수»만으로 도식이 안 그려지고 평범한 표로 나갔다. 6번째 색이 없어서
+#:   PDF는 IndexError, 웹은 1번 색과 같은 색이 되기 때문이었다.
+#:
+#: ★ 마지막 칸은 흰색 + 테두리다 — 종이에서 「남은 몫」으로 읽히게 하기 위함.
+#:   중간 단계는 균등 간격으로 두어 이웃한 두 칸이 항상 구별된다.
+COMPOSITION_PALETTE: Final[tuple[str, ...]] = (
+    "#0A0A0A",
+    "#3D3D3D",
+    "#6B6B6B",
+    "#949494",
+    "#B8B8B8",
+    "#DCDCDC",
+    "#FFFFFF",
+)
 COLOR_RISK: Final[str] = "#E7000B"
 COLOR_PARTIAL: Final[str] = "#737373"
 COLOR_PARTIAL_FILL: Final[str] = "#F5F5F5"

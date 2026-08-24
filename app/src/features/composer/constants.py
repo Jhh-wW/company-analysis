@@ -330,6 +330,42 @@ OPERATIONS_FLOW_MAX_ROWS: Final[int] = 5
 #: 주장을 담는 자리가 아니다 — 길어지면 문장이 표로 숨어 검증을 피해 간다.
 OPERATIONS_FLOW_MAX_CELL_CHARS: Final[int] = 24
 
+#: ══ 5장 «당면 과제와 대응» 대응표 ══════════════════════
+#:
+#: ★ 왜 같은 «흐름» 계약을 쓰나 — 새 도식 종류를 만들면 웹·PDF 렌더러를
+#:   각각 새로 짜야 하고, 그때마다 「한쪽만 고쳐 화면과 인쇄물이 어긋나는」
+#:   사고가 난다(실측 2회). 흐름도는 「한 행 = 왼쪽에서 오른쪽으로 가는 한
+#:   흐름」이라는 계약이라, 칸이 2개인 «과제 → 대응»도 그대로 담긴다.
+#: ★ 2칸 고정: 지금 겪는 과제와, 회사가 «밝힌» 대응. 회사가 달라도 이 두
+#:   칸은 같다 — 「섹션마다 같은 도식」 요구.
+#: ★ 「회사가 밝힌」이 중요하다. 우리가 추측한 대응을 그리면 그것은 도식으로
+#:   숨긴 주장이 된다. 근거 인용이 필수인 이유도 같다.
+CHALLENGE_FLOW_SECTION_ID: Final[str] = "current_challenges"
+
+CHALLENGE_FLOW_HEADERS: Final[tuple[str, str]] = (
+    "지금 겪는 과제",
+    "회사가 밝힌 대응",
+)
+
+CHALLENGE_FLOW_CAPTION: Final[str] = "과제와 대응"
+
+#: 5장 프롬프트에 덧붙이는 대응표 요청.
+CHALLENGE_FLOW_GUIDE: Final[str] = (
+    "\n이 장에서는 위 문장들과 «별도로», 과제와 대응을 표로도 낸다.\n"
+    "대응표 규칙:\n"
+    "- 과제 하나가 «한 줄»이다. 서로 다른 과제는 반드시 줄을 나눈다.\n"
+    "- 각 줄은 «지금 겪는 과제 / 회사가 밝힌 대응» 두 칸이다.\n"
+    "- 회사에 미치는 영향이 큰 과제를 «첫 줄»에 둔다.\n"
+    "- 대응 칸에는 «회사가 공식 자료에서 밝힌» 것만 쓴다. 우리가 짐작한 "
+    "대응을 쓰지 않는다 — 그건 도식으로 숨긴 주장이 된다.\n"
+    "- 회사가 과제만 말하고 대응을 밝히지 않았으면 그 줄을 넣지 않는다. "
+    "대응 칸을 「없음」·「미상」으로 채우지 않는다.\n"
+    "- 줄은 최대 5개, 각 칸은 24자 이내의 짧은 이름·구로 쓴다.\n"
+    "- 줄마다 근거 조각 id를 «인용»에 넣는다. 근거가 없으면 그 줄을 넣지 않는다.\n"
+    "- 대응을 확인할 근거가 없으면 대응표를 통째로 비운다(빈 배열). "
+    "지어내지 않는다.\n"
+)
+
 #: 작가 응답에서 흐름표를 담는 키.
 RESPONSE_FLOW_KEY: Final[str] = "경로표"
 RESPONSE_FLOW_ROW_CELLS_KEY: Final[str] = "칸"
@@ -367,6 +403,43 @@ OPERATIONS_FLOW_SCHEMA_GUIDE: Final[str] = (
     '"인용"의 조각id는 아래 자료 목록의 [조각 n] 번호를 그대로 쓴다.\n'
     "경로를 확인할 근거가 하나도 없을 때만 «경로표»를 빈 배열로 둔다.\n"
 )
+
+#: 5장 출력 형식 안내 — 7장과 «같은 키(경로표)»를 쓴다.
+#:
+#: ★ 왜 키를 새로 만들지 않나 — 파서(logic.parse_flow_rows)와 검증
+#:   (diagram_check)이 이미 이 키를 다룬다. 키를 늘리면 두 곳을 또 고쳐야 하고,
+#:   한 곳을 빠뜨리면 「작가는 냈는데 화면에 안 나오는」 사고가 되풀이된다
+#:   (실측 4회). 다른 것은 «칸이 몇 개인가»뿐이고 그건 장 id로 안다.
+CHALLENGE_FLOW_SCHEMA_GUIDE: Final[str] = (
+    "출력 형식 — 설명·머리말 없이 아래 모양의 JSON만 출력한다. "
+    "«두 키를 모두» 넣는다:\n"
+    '{"문장들": [{"글": "<문장>", "인용": ["<조각id>", "..."], '
+    '"등급": "확인" 또는 "해석"}],\n'
+    ' "경로표": [{"칸": ["<지금 겪는 과제>", "<회사가 밝힌 대응>"], '
+    '"인용": ["<조각id>"]}]}\n'
+    '"인용"의 조각id는 아래 자료 목록의 [조각 n] 번호를 그대로 쓴다.\n'
+    "회사가 밝힌 대응을 확인할 근거가 하나도 없을 때만 «경로표»를 빈 배열로 둔다.\n"
+)
+
+#: 장 id → 그 장의 흐름표 머리말. 여기 없는 장은 흐름표를 만들지 않는다.
+#: ★ 한 곳에서만 정한다 — 파서·렌더러·프롬프트가 모두 이 표를 본다.
+#:   세 곳이 각자 알고 있으면 한 곳만 고쳐 조용히 어긋난다(실측 4회).
+FLOW_HEADERS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
+    OPERATIONS_FLOW_SECTION_ID: OPERATIONS_FLOW_HEADERS,
+    CHALLENGE_FLOW_SECTION_ID: CHALLENGE_FLOW_HEADERS,
+}
+
+#: 장 id → 그 장의 흐름표 캡션.
+FLOW_CAPTION_BY_SECTION: Final[dict[str, str]] = {
+    OPERATIONS_FLOW_SECTION_ID: OPERATIONS_FLOW_CAPTION,
+    CHALLENGE_FLOW_SECTION_ID: CHALLENGE_FLOW_CAPTION,
+}
+
+#: 장 id → 프롬프트에서 «기본 스키마 안내 대신» 넣을 안내.
+FLOW_PROMPT_BY_SECTION: Final[dict[str, str]] = {
+    OPERATIONS_FLOW_SECTION_ID: OPERATIONS_FLOW_GUIDE + OPERATIONS_FLOW_SCHEMA_GUIDE,
+    CHALLENGE_FLOW_SECTION_ID: CHALLENGE_FLOW_GUIDE + CHALLENGE_FLOW_SCHEMA_GUIDE,
+}
 
 
 

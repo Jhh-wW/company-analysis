@@ -21,7 +21,7 @@ import threading
 import unicodedata
 import urllib.parse
 from collections import OrderedDict
-from typing import Iterable, Sequence, cast
+from typing import Final, Iterable, Sequence, cast
 
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import (
@@ -70,6 +70,7 @@ from src.features.report_standard.section_content import (
     summary_topic,
 )
 from src.features.report_standard.visualization import (
+    composition_tone,
     TableVisualization,
     table_visualization,
 )
@@ -140,14 +141,40 @@ class _HorizontalRule(Flowable):
         canvas.line(0, self.height / 2, self.width, self.height / 2)
 
 
+#: 범례 한 줄의 높이와 열 수. 항목이 늘면 높이도 늘어야 글이 겹치지 않는다.
+_LEGEND_ROW_MM: Final[float] = 5.2
+_LEGEND_COLUMNS: Final[int] = 2
+#: 막대와 여백이 차지하는 고정분 (범례 제외).
+_COMPOSITION_FIXED_MM: Final[float] = 15.4
+
+
+def _composition_color(
+    palette: "tuple[str, ...]", index: int, count: int
+) -> str:
+    """칸 번호에 색을 준다 — 화면과 «같은 규칙»을 쓴다.
+
+    ★ 색 고르는 규칙은 report_standard.visualization에 «한 벌»만 둔다.
+      PDF가 따로 계산하면 화면과 인쇄물의 색이 조용히 어긋난다.
+    """
+    return palette[composition_tone(index, count)]
+
+
 class _CompositionGraphic(Flowable):
-    """최대 다섯 범주의 100% 누적 막대와 직접 라벨."""
+    """100% 누적 막대와 직접 라벨.
+
+    ★ 높이를 «항목 수로 계산»한다. 예전에는 31mm 고정이라 범례가 두 줄
+      (항목 4개)까지만 들어갔다 — 6개가 되면 마지막 줄이 도식 밖으로 나가
+      다음 문단과 겹친다.
+    """
 
     def __init__(self, visual: TableVisualization, width: float) -> None:
         super().__init__()
         self.visual = visual
         self.width = width
-        self.height = 31 * mm
+        legend_rows = -(-len(visual.items) // _LEGEND_COLUMNS)  # 올림 나눗셈
+        self.height = (
+            _COMPOSITION_FIXED_MM + legend_rows * _LEGEND_ROW_MM
+        ) * mm
 
     def wrap(self, avail_width: float, avail_height: float) -> tuple[float, float]:
         self.width = min(self.width, avail_width)
@@ -155,28 +182,27 @@ class _CompositionGraphic(Flowable):
 
     def draw(self) -> None:
         canvas = cast(Canvas, self.canv)
-        palette = (
-            constants.COLOR_CHART_DARK,
-            constants.COLOR_CHART_MID,
-            constants.COLOR_CHART_LIGHT,
-            constants.COLOR_CHART_PALE,
-            "#FFFFFF",
-        )
+        palette = constants.COMPOSITION_PALETTE
+        item_count = len(self.visual.items)
         bar_y = self.height - (9 * mm)
         bar_height = 7 * mm
         x = 0.0
         for index, item in enumerate(self.visual.items):
             segment_width = self.width * max(0.0, item.ratio) / 100.0
-            canvas.setFillColor(colors.HexColor(palette[index]))
+            canvas.setFillColor(
+                colors.HexColor(_composition_color(palette, index, item_count))
+            )
             canvas.setStrokeColor(colors.HexColor(constants.COLOR_MUTED))
             canvas.setLineWidth(0.5)
+            # ★ 칸마다 테두리를 두른다. 색 단계가 촘촘해질수록 이웃한 두 칸이
+            #   붙어 보이는데, 얇은 선 하나면 몇 칸이든 항상 나뉘어 보인다.
             canvas.rect(
                 x,
                 bar_y,
                 segment_width,
                 bar_height,
                 fill=1,
-                stroke=1 if index == 4 else 0,
+                stroke=1,
             )
             x += segment_width
 
@@ -186,7 +212,7 @@ class _CompositionGraphic(Flowable):
             column = index % columns
             row = index // columns
             y = bar_y - (5.2 * mm) - (row * 5.2 * mm)
-            color = colors.HexColor(palette[index])
+            color = colors.HexColor(_composition_color(palette, index, item_count))
             canvas.setFillColor(color)
             canvas.setStrokeColor(colors.HexColor(constants.COLOR_MUTED))
             canvas.rect(
@@ -195,7 +221,7 @@ class _CompositionGraphic(Flowable):
                 7,
                 7,
                 fill=1,
-                stroke=1 if index == 4 else 0,
+                stroke=1,
             )
             canvas.setFillColor(colors.HexColor(constants.COLOR_MUTED))
             canvas.setFont(constants.FONT_REGULAR, 7.5)

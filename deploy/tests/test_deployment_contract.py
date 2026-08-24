@@ -358,3 +358,91 @@ def test_local_scripts_do_not_push_or_deploy_and_smoke_disables_network() -> Non
     assert (DEPLOY_ROOT / "release-policy.sha256").read_text(
         encoding="ascii"
     ).strip() == "BLOCKED"
+
+
+def test_render_blueprint_turns_engine_v2_on_while_image_default_stays_v1() -> None:
+    """배포하면 엔진 v2가 켜지는지, 그리고 이미지 기본값은 v1로 남는지 못 박는다.
+
+    ★ 왜 값의 «글자»까지 고정하는가 — 코드는
+      ``os.environ.get("ENGINE_V2") == "1"`` 하나로만 갈린다
+      (app/src/features/pipeline/real.py). 정확히 문자열 "1"이 아니면
+      시작 검증도 통과하고 오류도 없이 «조용히» v1 보고서가 나간다.
+      따옴표가 빠져 YAML이 정수 1로 읽히거나 "true"로 바뀌는 순간
+      아무도 모르게 v1로 되돌아가므로 자료형까지 함께 단언한다.
+    """
+    blueprint = yaml.safe_load(
+        (REPOSITORY_ROOT / "render.yaml").read_text(encoding="utf-8")
+    )
+    web_service = next(
+        service for service in blueprint["services"] if service["type"] == "web"
+    )
+    render_values = {item["key"]: item.get("value") for item in web_service["envVars"]}
+
+    assert "ENGINE_V2" in render_values, (
+        "render.yaml에 ENGINE_V2가 없으면 배포된 서비스는 v1 보고서를 냅니다"
+    )
+    assert isinstance(render_values["ENGINE_V2"], str), (
+        "따옴표 없는 1은 YAML 정수로 읽힙니다 — value: \"1\"로 적어야 합니다"
+    )
+    assert render_values["ENGINE_V2"] == "1"
+
+    # render.yaml의 이름·값이 실제 분기 상수와 계속 같은지 함께 묶는다.
+    # 코드에서 이름이 바뀌면 blueprint에 죽은 키만 남고 배포는 조용히 v1이 된다.
+    switch_source = (
+        REPOSITORY_ROOT / "app" / "src" / "features" / "pipeline" / "real.py"
+    ).read_text(encoding="utf-8")
+    assert 'ENGINE_V2_ENV_NAME: Final[str] = "ENGINE_V2"' in switch_source
+    assert 'ENGINE_V2_ENV_ON: Final[str] = "1"' in switch_source
+
+    # 이미지 기본값은 PIPELINE=demo와 같은 성격이다. Dockerfile은 비용이 들지
+    # 않는 안전한 기본만 담고, v2로 갈지는 배포 manifest 한 곳에서만 정한다.
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    assert "PIPELINE=demo" in dockerfile
+    assert "ENGINE_V2" not in dockerfile
+
+    # v2는 1층 캐시를 쓰지 않아 같은 회사를 두 번 조사하면 두 번 다 돈이 든다.
+    # 켜 두는 동안 이 비용 경고가 문서에서 사라지면 안 된다.
+    render_guide = (
+        REPOSITORY_ROOT / "app" / "docs" / "Render_배포.md"
+    ).read_text(encoding="utf-8")
+    assert "두 번 다 본조사 비용이 나간다" in render_guide
+    assert "지금 배포하면 v1 보고서가 나간다" not in render_guide
+
+
+def test_engine_v2_rejects_values_that_silently_fall_back_to_v1() -> None:
+    """★ «조용히 v1로 되돌아가는 것»을 시작 검증이 막는다.
+
+    코드는 값이 «정확히 "1"»일 때만 v2로 간다. 그래서 true·yes·on·" 1 "처럼
+    사람 눈에는 켜진 것처럼 보이는 값이 오류 없이 v1 보고서를 내보낸다.
+    이 프로젝트에서 「고쳤는데 화면에 안 나온다」가 네 번 반복된 원인이
+    정확히 이런 «조용한 되돌아감»이었다.
+
+    ★ 값을 «안 넣는 것»은 정상이다(= v1). 넣었는데 못 알아듣는 값일 때만 막는다.
+    """
+    for value in ("true", "yes", "on", " 1 ", "V2", "2", ""):
+        environment = _base_environment()
+        environment["ENGINE_V2"] = value
+        errors = validator.validate(environment, "web")
+        assert any("ENGINE_V2" in error for error in errors), (
+            f"ENGINE_V2={value!r}가 오류 없이 통과했습니다 — 배포는 조용히 v1이 됩니다"
+        )
+
+    for value in ("1", "0"):
+        environment = _base_environment()
+        environment["ENGINE_V2"] = value
+        errors = validator.validate(environment, "web")
+        assert not any("ENGINE_V2" in error for error in errors), value
+
+    # 아예 없는 것은 오류가 아니다 — v1 경로를 쓰겠다는 정상적인 선택이다.
+    errors = validator.validate(_base_environment(), "web")
+    assert not any("ENGINE_V2" in error for error in errors)
+
+
+def test_engine_v2_error_never_leaks_the_value() -> None:
+    """오류 문구에 설정값 자체가 들어가면 안 된다 (이 모듈 전체의 계약)."""
+    environment = _base_environment()
+    environment["ENGINE_V2"] = "비밀처럼보이는값"
+
+    errors = validator.validate(environment, "web")
+
+    assert all("비밀처럼보이는값" not in error for error in errors)

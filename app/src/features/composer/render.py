@@ -27,6 +27,8 @@ from src.features.composer.constants import (
     PARAGRAPH_MAX_SENTENCES,
     FLOW_PRESENTATION,
     OPERATIONS_FLOW_CAPTION,
+    FLOW_CAPTION_BY_SECTION,
+    FLOW_HEADERS_BY_SECTION,
     OPERATIONS_FLOW_HEADERS,
     OPERATIONS_FLOW_SECTION_ID,
     DART_DOCUMENT_HOST,
@@ -462,8 +464,10 @@ def _flow_report_table(
     # 캡션 근거는 «표 전체»를 대표하는 첫 조각 하나만 단다. 행마다 번호를
     # 흩뿌리면 정본 §7(기준일·출처 반복 방지)에 어긋난다.
     return ReportTable(
-        caption=OPERATIONS_FLOW_CAPTION,
-        headers=list(OPERATIONS_FLOW_HEADERS),
+        # 장마다 머리말·캡션이 다르다(5장 과제→대응, 7장 투입→하는 일→도달).
+        # 그 대응은 constants 한 곳에서만 정한다.
+        caption=FLOW_CAPTION_BY_SECTION[section.section_id],
+        headers=list(FLOW_HEADERS_BY_SECTION[section.section_id]),
         rows=rows,
         cite=f"[{min(cited)}]",
         numeric=False,
@@ -649,10 +653,8 @@ def render_report(
             and composition_table.rows
         ):
             slot = (composition_table, COMPOSITION_PRESENTATION)
-        if (
-            section.section_id == OPERATIONS_FLOW_SECTION_ID
-            and slot is None
-        ):
+        # 흐름표를 내는 장(5장·7장). 실적표·구성표 자리를 이미 쓴 장은 건너뛴다.
+        if section.section_id in FLOW_HEADERS_BY_SECTION and slot is None:
             flow_table = _flow_report_table(section, numbers)
             if flow_table is not None:
                 flow_cite = citation_number(flow_table.cite)

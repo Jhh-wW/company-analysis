@@ -15,6 +15,8 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
+from src.features.report_standard.visualization import composition_tone
+
 from src.core import clock, paths
 from src.core.citations import (
     INTERPRETATION_LABEL,
@@ -75,6 +77,12 @@ from src.web.security import (
 
 logger = logging.getLogger(__name__)
 templates = Jinja2Templates(directory=str(paths.TEMPLATES_DIR))
+
+# ★ 구성 도식의 «색 고르는 규칙»을 화면 틀에서도 쓴다.
+#   PDF(export_pdf/logic.py)와 «같은 함수»여야 화면과 인쇄물의 색이 안 어긋난다.
+#   틀 안에서 `loop.index0 % 5` 식으로 따로 계산하면 항목 수가 바뀔 때
+#   두 곳이 조용히 달라진다 (하이브 6부문에서 실제로 그랬다).
+templates.env.globals["composition_tone"] = composition_tone
 
 
 def company_analysis_input(*, company: str, region: str) -> UserInput:

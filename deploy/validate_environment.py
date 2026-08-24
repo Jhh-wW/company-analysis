@@ -679,6 +679,17 @@ def validate(
     if pipeline not in {"demo", "real"}:
         errors.append("PIPELINE: demo 또는 real만 허용합니다")
 
+    # ★ 엔진 v2 스위치 — «조용히 v1로 되돌아가는 것»을 막는다.
+    #   코드는 값이 «정확히 "1"»일 때만 v2로 간다
+    #   (app/src/features/pipeline/real.py: _engine_v2_enabled).
+    #   그래서 true·yes·on·" 1 " 같은 값은 오류 없이 v1 보고서를 내보낸다.
+    #   이 프로젝트에서 「고쳤는데 화면에 안 나온다」가 반복된 원인이 정확히
+    #   이런 «조용한 되돌아감»이었다. 안 넣는 것(v1)은 정상이지만, 넣었는데
+    #   못 알아듣는 값이면 시작을 거부한다.
+    engine_v2 = environment.get("ENGINE_V2")
+    if engine_v2 is not None and engine_v2 not in {"1", "0"}:
+        errors.append('ENGINE_V2: "1"(v2) 또는 "0"(v1)만 허용합니다')
+
     port_error = _integer_error("PORT", environment.get("PORT", ""), 1, 65535)
     if port_error:
         errors.append(port_error)

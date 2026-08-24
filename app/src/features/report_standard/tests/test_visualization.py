@@ -3,6 +3,12 @@ from __future__ import annotations
 import pytest
 
 from src.features.pipeline.port import ReportTable
+from src.features.report_standard.visualization import (
+    COMPOSITION_MAX_ITEMS,
+    COMPOSITION_MIN_ITEMS,
+    COMPOSITION_TONE_STEPS,
+    composition_tone,
+)
 from src.features.report_standard.visualization import table_visualization
 
 
@@ -72,7 +78,12 @@ def test_composition_rejects_bad_values_partial_totals_and_incomplete_categories
     assert table_visualization(_composition_table(rows)) is None
 
 
-def test_composition_rejects_more_than_five_categories() -> None:
+def test_composition_accepts_six_categories() -> None:
+    """★ 하이브 실측 — 6개 부문, 비중 합계 정확히 100.00%인데 도식이 안 나왔다.
+
+    막은 것은 자료가 아니라 「최대 5개」라는 숫자 하나였다. 색 계단도 함께
+    넓혀야 6번째 칸이 첫 칸과 같은 색이 되지 않는다(웹·PDF 모두).
+    """
     table = _composition_table(
         [
             [f"범주-{index}", value]
@@ -80,7 +91,57 @@ def test_composition_rejects_more_than_five_categories() -> None:
         ]
     )
 
+    visualization = table_visualization(table)
+
+    assert visualization is not None
+    assert visualization.kind == "composition"
+    assert len(visualization.items) == 6
+
+
+def test_composition_rejects_more_than_seven_categories() -> None:
+    """상한은 여전히 있다 — 무한정 늘리면 막대가 읽히지 않는다."""
+    table = _composition_table(
+        [
+            [f"범주-{index}", "12.5"]
+            for index in range(1, 9)  # 8개 · 합계 100%
+        ]
+    )
+
     assert table_visualization(table) is None
+
+
+def test_composition_tone_always_ends_pale_and_never_repeats() -> None:
+    """★ 색 규칙을 못 박는다 — 웹 틀과 PDF가 «이 함수 하나»를 함께 쓴다.
+
+    항목이 3개든 7개든 「가장 진한 것 → 가장 옅은 것」으로 끝나야 회사가 달라도
+    같은 장의 도식 인상이 같다(사용자 요구). 그리고 한 도식 안에서 같은 색이
+    두 번 나오면 두 부문이 한 덩어리로 보인다.
+    """
+    for count in range(COMPOSITION_MIN_ITEMS, COMPOSITION_MAX_ITEMS + 1):
+        tones = [composition_tone(index, count) for index in range(count)]
+        assert tones[0] == 0, count
+        assert tones[-1] == COMPOSITION_TONE_STEPS - 1, count
+        assert len(set(tones)) == count, f"{count}칸에서 색이 겹칩니다: {tones}"
+        assert tones == sorted(tones), f"{count}칸에서 색이 진하기 순이 아닙니다"
+
+
+def test_web_css_and_pdf_palette_have_enough_tones() -> None:
+    """★ 세 곳(판정 상한·웹 CSS·PDF 팔레트)이 «같은 수»의 색을 가져야 한다.
+
+    한 곳만 늘리면 조용히 깨진다 — PDF는 IndexError로 보고서가 통째로 막히고,
+    웹은 색이 되돌아가 첫 칸과 마지막 칸이 같아진다.
+    """
+    from pathlib import Path
+
+    from src.features.export_pdf.constants import COMPOSITION_PALETTE
+
+    assert len(COMPOSITION_PALETTE) == COMPOSITION_TONE_STEPS
+    assert COMPOSITION_MAX_ITEMS <= COMPOSITION_TONE_STEPS
+
+    css = Path(__file__).resolve().parents[3] / "web" / "static" / "style.css"
+    style = css.read_text(encoding="utf-8")
+    for step in range(COMPOSITION_TONE_STEPS):
+        assert f".tone-{step} " in style, f"웹 CSS에 .tone-{step}이 없습니다"
 
 
 def test_trend_preserves_rows_calculates_ratios_marks_negative_risk_and_reads_unit() -> None:

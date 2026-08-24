@@ -360,13 +360,14 @@ def test_delete_data_on_exit_removes_only_the_generated_run_directory(
 def test_launcher_can_turn_on_engine_v2() -> None:
     """★ v2를 켜는 «유일한» 경로를 못 박는다.
 
-    실측: 저장소 전체에서 ENGINE_V2를 자식 프로세스에 넣는 곳은 이 실행기
-    하나뿐이다(render.yaml·Dockerfile·deploy/·다른 실행기 전부 0건).
-    그런데 이 세 줄을 지워도 깨지는 시험이 없었다 — v2 경로가 무방비였다.
+    실측(v2-28 시점): 이 세 줄을 지워도 깨지는 시험이 없었다 —
+    ENGINE_V2를 자식에게 넘기는 «유일한» 실행기인데 무방비였다.
 
-    ★ 이 시험은 «배포에서 v2가 켜지는가»는 보지 않는다. 그것은 아직
-      사용자 결정 대기 항목이다(docs/실행계획_엔진v2/06_측정과_합격판정.md).
-      여기서 지키는 것은 「로컬에서 v2를 켤 수 있다」뿐이다.
+    ★ 이 시험은 «로컬에서 v2를 켤 수 있는가»만 본다.
+      «배포에서 v2가 켜지는가»는 render.yaml이 소유하고
+      deploy/tests/test_deployment_contract.py가 따로 지킨다(v2-29에서 추가).
+      두 시험이 각자 자기 경로를 지킨다 — 한 시험이 둘 다 지키면
+      한쪽을 고칠 때 다른 쪽이 조용히 풀린다.
     """
     assert "[switch]$EngineV2" in SCRIPT, "-EngineV2 스위치가 사라졌습니다"
     assert '$childEnvironment["ENGINE_V2"] = "1"' in SCRIPT, (
