@@ -78,8 +78,8 @@
   <h2 id="company-links-title">LINK 발급</h2>
   <p class="muted" style="margin-top:6px">
     {% if narrow_admin_no_forwarded %}
-    현재 외부 사용자용 LINK는 열지 않았습니다. 기존 이력이 있으면 아래에서 상태를
-    확인하거나 철회할 수 있지만 새 권한은 만들 수 없습니다.
+    이 운영판에서는 새 LINK를 발급할 수 없습니다. 기존 이력이 있으면 아래에서 상태를
+    확인하거나 철회할 수 있습니다.
     {% else %}
     받은 사람은 <strong>로그인 없이</strong> 어느 회사든 분석할 수 있습니다.
     지원 회사·직무는 전달 맥락을 나타내는 꼬리표이며 권한 제한이 아닙니다.
@@ -90,8 +90,8 @@
   </p>
 
   {% if narrow_admin_no_forwarded %}
-  <div class="warn-line" role="note" style="margin-top:14px"><span>ℹ️</span><span><strong>관리자 전용 운영판에서는 LINK 발급을 보류했습니다.</strong><br>{% if narrow_admin_real %}관리자가 여러 회사의 실제 분석 결과를 검수하는 동안 외부 공유 권한은 열지 않습니다.{% else %}정식 저장소와 실제 조사 범위를 연결한 뒤 활성화합니다.{% endif %}</span></div>
-  <button class="btn" type="button" disabled>LINK 발급 보류</button>
+  <div class="warn-line" role="note" style="margin-top:14px"><span>ℹ️</span><span><strong>이 운영판에서는 LINK를 발급할 수 없습니다.</strong><br>이미 발급한 LINK는 아래 목록에서 상태를 확인하고 철회할 수 있습니다.</span></div>
+  <button class="btn" type="button" disabled>LINK 발급 불가</button>
   {% else %}
   <form method="post" action="/admin/links/new" style="margin-top:14px">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -198,8 +198,8 @@
   <h2 id="invited-members-title">친구 초대</h2>
   <p class="muted" style="margin-top:6px">
     {% if narrow_admin_no_forwarded %}
-    현재는 관리자만 사이트 본문과 실제 조사에 들어올 수 있습니다.
-    외부 계정의 새 MEMBER 권한은 만들지 않습니다.
+    이 운영판에서는 관리자만 사이트 본문과 실제 조사에 들어올 수 있습니다.
+    외부 계정에는 새 MEMBER 권한을 만들 수 없습니다.
     {% else %}
     <strong>여기 있는 사람만</strong> 구글 로그인 후 실제 조사를 할 수 있습니다
     (한국시간 기준 성공 보고서 3건).
@@ -208,8 +208,8 @@
   </p>
 
   {% if narrow_admin_no_forwarded %}
-  <div class="warn-line" role="note" style="margin-top:14px"><span>ℹ️</span><span><strong>관리자 전용 운영판에서는 친구 MEMBER 이용을 보류했습니다.</strong><br>{% if narrow_admin_real %}관리자 검수가 끝나고 외부 공개 범위를 정한 뒤 활성화합니다.{% else %}현재 초대해도 실제 조사를 쓸 수 없으므로 정식 저장소 전환 뒤 활성화합니다.{% endif %}</span></div>
-  <button class="btn" type="button" disabled>친구 초대 보류</button>
+  <div class="warn-line" role="note" style="margin-top:14px"><span>ℹ️</span><span><strong>이 운영판에서는 친구를 초대할 수 없습니다.</strong><br>이미 초대한 사람은 아래 목록에서 확인하고 뺄 수 있습니다.</span></div>
+  <button class="btn" type="button" disabled>친구 초대 불가</button>
   {% else %}
   <form method="post" action="/admin/invite" style="margin-top:14px">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

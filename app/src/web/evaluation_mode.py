@@ -38,8 +38,8 @@ CONSENT_TRANSITION_CONTINUE: Final[str] = "continue"
 WORKFLOW_ID_HEX_LENGTH: Final[int] = 32
 MAX_PENDING_WORKFLOWS: Final[int] = 4096
 PREVIEW_BLOCKED_MESSAGE: Final[str] = (
-    "현재는 실시간 성능시험 미리보기라 외부 호출이 잠겨 있습니다. "
-    "서버를 끈 뒤 -EnablePaidProviders를 명시해서 다시 실행해 주세요."
+    "지금은 미리보기라 분석을 시작할 수 없습니다. "
+    "외부 서비스 호출과 비용은 발생하지 않았습니다."
 )
 REQUIRED_PROVIDER_ENV_NAMES: Final[tuple[str, ...]] = (
     "DART_API_KEY",

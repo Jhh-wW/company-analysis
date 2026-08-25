@@ -399,7 +399,7 @@ def test_좁은Render관리자운영판은_링크와_MEMBER를_발급하지않�
     assert link_response.status_code == 404
     assert link_response.text == "찾을 수 없습니다."
     assert member_response.status_code == 409
-    assert "친구 MEMBER 초대를 보류" in member_response.text
+    assert "이 운영판에서는 친구를 초대할 수 없습니다." in member_response.text
     assert after == before
     assert member is None
 

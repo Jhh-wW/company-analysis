@@ -30,7 +30,7 @@
   {% if evaluation_mode %}
   <section class="evaluation-notice{% if not evaluation_paid_providers %} preview{% endif %}"
            id="evaluation-notice" aria-labelledby="evaluation-notice-title">
-    <h3 id="evaluation-notice-title">실시간 성능시험</h3>
+    <h3 id="evaluation-notice-title">외부 서비스 호출과 비용</h3>
     {% if evaluation_paid_providers %}
       <p><strong>확인 후 외부 서비스 호출과 실제 비용이 발생할 수 있습니다.</strong></p>
       <p>
@@ -48,8 +48,8 @@
         외부 서비스 호출과 비용 발생 가능성 및 위 운영 기준을 확인했습니다.
       </label>
     {% else %}
-      <p><strong>미리보기에서는 외부 서비스 호출이 0건이며 분석 시작이 잠겨 있습니다.</strong></p>
-      <p>실제 성능시험은 서버를 <code>-EnablePaidProviders</code>로 다시 켜야 합니다.</p>
+      <p><strong>지금은 미리보기라 분석을 시작할 수 없습니다.</strong></p>
+      <p>미리보기에서는 외부 서비스 호출이 0건이라 비용도 발생하지 않습니다.</p>
     {% endif %}
   </section>
   {% endif %}

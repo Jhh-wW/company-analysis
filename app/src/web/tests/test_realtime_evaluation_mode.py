@@ -210,7 +210,7 @@ def test_preview_ui_is_explicit_and_submit_is_locked(monkeypatch) -> None:
         response = client.get("/")
 
     assert response.status_code == 200
-    assert response.text.count("실시간 성능시험") >= 2
+    assert response.text.count("실시간 성능시험") >= 1
     assert "외부 서비스 호출이 0건" in response.text
     assert "미리보기 · 외부 조사 잠김" in response.text
     assert 'id="confirmSubmitButton"' in response.text

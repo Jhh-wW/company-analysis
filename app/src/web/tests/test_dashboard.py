@@ -456,7 +456,7 @@ def test_narrow_free_admin_demo_disables_deferred_actions(monkeypatch, tmp_path)
         access = client.get("/admin/access")
 
     assert dashboard.status_code == 200 and access.status_code == 200
-    assert "LINK 발급 보류" in access.text and "친구 초대 보류" in access.text
+    assert "LINK 발급 불가" in access.text and "친구 초대 불가" in access.text
     assert 'action="/admin/link/new"' not in access.text
     assert 'action="/admin/invite"' not in access.text
 
@@ -484,7 +484,7 @@ def test_admin_real_contract_is_admin_only_and_disables_deferred_actions(
     assert denied.status_code == 303
     assert denied.headers["location"] == "/auth/login"
     assert dashboard.status_code == 200 and access.status_code == 200
-    assert "LINK 발급 보류" in access.text and "친구 초대 보류" in access.text
+    assert "LINK 발급 불가" in access.text and "친구 초대 불가" in access.text
     assert 'action="/admin/link/new"' not in access.text
     assert 'action="/admin/invite"' not in access.text
 

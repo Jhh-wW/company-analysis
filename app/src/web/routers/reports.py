@@ -681,7 +681,7 @@ def _pdf_review_pending_response(
     """
 
     request_id = admin_audit.request_id(request)
-    reasons = _gate_reasons(error)
+    reasons = (str(error),)
     logger.info(
         "자동검사 출고 차단 report_id=%s reasons=%s request_id=%s",
         " ".join(str(job_id).split())[:_LOG_REPORT_ID_MAX_CHARS],
@@ -1156,8 +1156,8 @@ async def send_to_notion(
             error,
             job_id=job_id,
             company=getattr(report, "company", ""),
-            exit_url=f"/notion/{job_id}",
-            exit_label="자동검사 상태 다시 확인",
+            exit_url=_ADMIN_DASHBOARD_URL,
+            exit_label=_ADMIN_DASHBOARD_LABEL,
         )
     except Exception as error:  # noqa: BLE001 — 승인 원장을 확인 못 하면 Notion도 닫는다
         return _pdf_unavailable_response(request, error)

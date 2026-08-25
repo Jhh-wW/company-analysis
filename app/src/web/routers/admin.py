@@ -969,7 +969,7 @@ async def admin_invite(
     if deployment_mode.render_admin_no_forwarded():
         return _admin_response(
             request,
-            HTMLResponse("관리자 전용 운영판에서는 친구 MEMBER 초대를 보류했습니다.", status_code=409),
+            HTMLResponse("이 운영판에서는 친구를 초대할 수 없습니다.", status_code=409),
         )
     email_clean = share_allow.normalize(email)
     action = "admin.member.invite"
