@@ -681,7 +681,7 @@ def _pdf_review_pending_response(
     """
 
     request_id = admin_audit.request_id(request)
-    reasons = (str(error),)
+    reasons = _gate_reasons(error)
     logger.info(
         "자동검사 출고 차단 report_id=%s reasons=%s request_id=%s",
         " ".join(str(job_id).split())[:_LOG_REPORT_ID_MAX_CHARS],
