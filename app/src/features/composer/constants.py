@@ -328,16 +328,25 @@ OPERATIONS_FLOW_SECTION_ID: Final[str] = "operations_partners"
 FLOW_PRESENTATION: Final[str] = "flow"
 
 #: 흐름표에서 회사가 «밝히지 않은» 칸에 넣는 글.
+#: ★ 이 글은 «화살표로 그려지는 장»에만 들어간다 — 아래 FLOW_ARROW_SECTION_IDS 참조.
 #:
-#: ★ 왜 빈 칸으로 두면 안 되나 (2026-08-25 실측) — 흐름도의 칸은 CSS에서
+#: ★ 왜 빈 칸으로 두면 안 되나 (2026-08-25 실측) — 화살표 흐름도의 칸은 CSS에서
 #:   `min-height: 76px` 에 테두리·배경·화살표가 붙는다(style.css:1863-1883).
 #:   값이 빈 문자열이면 «작은 라벨만 있고 속이 텅 빈 76px 상자»가 화살표와 함께
 #:   그려져, 읽는 사람에게는 「글자가 안 불러와진 고장」으로 보인다.
-#:   실제로 (주)진영 6장 「회사가 밝힌 성장 계획」은 4줄 중 **3줄**의 「시점」 칸이
-#:   그 모양이었다(저장본에서 확인).
+#:
+#: ⚠️ 정정(2026-08-25 적대 검수) — 이 자리에 원래 «(주)진영 6장 「회사가 밝힌 성장
+#:   계획」이 4줄 중 3줄의 「시점」 칸이 그 모양이었다»고 적혀 있었다. **틀린 근거다.**
+#:   저장본에 그 빈 칸이 있었던 것은 사실이지만, 6장 머리말
+#:   (STRATEGY_TABLE_HEADERS)은 `report_standard/visualization.py` 의
+#:   `_CARD_HEADER_SETS` 에 등록돼 있어 **화살표가 아니라 카드로 그려지고**,
+#:   카드(`_flow_cards`)는 빈 칸을 아예 «빼고» 낸다 — 빈 76px 상자가 될 수 없다.
+#:   빈 상자가 실제로 그려질 수 있는 장은 화살표를 유지한 2·5·7장뿐이다.
 #:
 #: ★ 왜 «칸을 숨기지» 않나 — 줄마다 칸 수가 달라지면 흐름도의 화살표와 열이
 #:   줄끼리 어긋난다. 칸은 그대로 두고 «모른다»고 정직하게 적는 쪽이 맞다.
+#:   (카드에는 화살표도 열 정렬도 없어서 이 이유가 성립하지 않는다 — 그래서
+#:    카드 장은 예전처럼 빈 칸을 «빼는» 쪽이 맞다.)
 #: ★ 왜 «줄을 버리지» 않나 — 「빈 칸이 있다고 줄을 버리지 않는다」가 이미 정해진
 #:   결정이다(12장 「안 하기로 정한 것」). 여기서도 아무것도 버리지 않는다.
 #: ★ 「미확인」은 이 제품이 이미 쓰는 말이다(회사 후보 화면의 주소·종목코드·
@@ -695,6 +704,33 @@ FLOW_HEADERS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
     STRATEGY_TABLE_SECTION_ID: STRATEGY_TABLE_HEADERS,
     CULTURE_TABLE_SECTION_ID: CULTURE_TABLE_HEADERS,
 }
+
+#: 흐름표를 내는 장 중 «화살표»로 그려지는 장 id — 2장(사업 구조)·5장(과제와
+#: 대응)·7장(사업이 돌아가는 경로). 나머지 네 장(1·3·6·8장)은
+#: `report_standard/visualization.py` 의 `_CARD_HEADER_SETS` 에 걸려 «카드»로
+#: 그려진다.
+#:
+#: ★ 무엇에 쓰나 — `FLOW_UNCONFIRMED_CELL`(「미확인」) 채우기를 **이 장들에만**
+#:   건다(`render.py::_flow_report_table`).
+#: ★ 왜 «전 장»에 걸면 안 되나 (2026-08-25 적대 검수가 코드로 재현) — 카드
+#:   렌더러 `_flow_cards` 는 «값이 있는 칸만» 낸다. 데이터 층에서 빈 칸을 전부
+#:   「미확인」으로 채우면 그 조건이 영원히 참이 되어 두 가지가 깨진다:
+#:     · 8장 「확인된 사례」는 «없을 수 있는» 칸인데 항상 「확인된 사례: 미확인」이
+#:       인쇄된다(예전에는 그 줄이 통째로 빠졌다).
+#:     · 3장은 「제품·서비스명」이 카드 «제목»이라, 그 칸이 비면 제목이 문자열
+#:       「미확인」이 되어 **「미확인」이라는 제목의 카드**가 화면에 뜬다.
+#: ★ 왜 장 id를 여기 «복사»해 두나 — composer는 report_standard를 import 하지
+#:   않는다(render.py 머리말·port.py 머리말 규칙). 그래서 카드/화살표 판정을
+#:   그쪽에서 불러올 수 없고 값만 미러링한다. 두 파일이 어긋나면
+#:   `report_standard/tests/test_visualization.py::
+#:   test_화살표_장_집합이_카드_판정과_어긋나지_않는다` 가 빨간불로 잡는다.
+FLOW_ARROW_SECTION_IDS: Final[frozenset[str]] = frozenset(
+    {
+        BUSINESS_FLOW_SECTION_ID,
+        CHALLENGE_FLOW_SECTION_ID,
+        OPERATIONS_FLOW_SECTION_ID,
+    }
+)
 
 #: 장 id → 그 장의 흐름표 캡션.
 FLOW_CAPTION_BY_SECTION: Final[dict[str, str]] = {

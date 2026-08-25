@@ -884,3 +884,30 @@ def test_reading_is_empty_when_there_is_nothing_to_say() -> None:
     # 줄이 하나면 «그 줄 자체»를 말해 준다 — 빈 문자열이 아니다.
     assert visualization.reading
     assert "A" in visualization.reading and "B" in visualization.reading
+
+
+def test_화살표_장_집합이_카드_판정과_어긋나지_않는다() -> None:
+    """★ composer의 `FLOW_ARROW_SECTION_IDS`와 여기 카드 판정은 «서로 다른
+    파일의 다른 기준»(장 id vs 칸 이름)이다 — 어긋나면 조용히 망가진다.
+
+    어긋나면 무슨 일이 나나:
+      · 카드 장이 화살표 집합에 «들어가면» → 빈 칸이 「미확인」으로 채워져
+        「확인된 사례: 미확인」·제목이 「미확인」인 카드가 인쇄된다.
+      · 화살표 장이 «빠지면» → 빈 칸이 그대로 나가 화면에 «라벨만 있고 속이
+        빈 76px 상자»가 화살표와 함께 그려진다.
+    두 실패 모두 예외를 내지 않으므로, 이 시험이 유일한 그물이다.
+    """
+    from src.features.composer import constants as composer_constants
+
+    for section_id, headers in composer_constants.FLOW_HEADERS_BY_SECTION.items():
+        그린다_카드로 = frozenset(headers) in _CARD_HEADER_KEY_SETS
+        화살표_장이다 = section_id in composer_constants.FLOW_ARROW_SECTION_IDS
+        assert 그린다_카드로 != 화살표_장이다, (
+            f"{section_id} 장: 카드 판정={그린다_카드로} 인데 "
+            f"FLOW_ARROW_SECTION_IDS 등록={화살표_장이다} 입니다 — "
+            f"둘 중 하나가 틀렸습니다"
+        )
+
+    # 화살표 장은 정확히 셋이다(2·5·7장). 늘거나 줄면 위 대조가 통과해도
+    # 사람이 한 번 더 보게 한다.
+    assert len(composer_constants.FLOW_ARROW_SECTION_IDS) == 3

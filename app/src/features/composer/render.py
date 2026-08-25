@@ -25,6 +25,7 @@ from src.core.citations import citation_number
 from src.features.composer.constants import (
     CITATION_STYLE_MERGED,
     PARAGRAPH_MAX_SENTENCES,
+    FLOW_ARROW_SECTION_IDS,
     FLOW_PRESENTATION,
     FLOW_UNCONFIRMED_CELL,
     OPERATIONS_FLOW_CAPTION,
@@ -450,6 +451,10 @@ def _flow_report_table(
         return None
     rows: list[list[str]] = []
     cited: list[int] = []
+    # ★ 「미확인」 채우기는 «화살표로 그려지는 장»(2·5·7장)에만 건다.
+    #   카드로 그려지는 장(1·3·6·8장)은 빈 칸을 그대로 둔다 — 이유는
+    #   constants.FLOW_ARROW_SECTION_IDS 주석(카드는 빈 칸을 «빼는» 렌더러다).
+    fills_unconfirmed = section.section_id in FLOW_ARROW_SECTION_IDS
     for row in section.flow_rows:
         row_numbers = [
             numbers[str(citation).strip()]
@@ -458,14 +463,23 @@ def _flow_report_table(
         ]
         if not row_numbers:
             continue
-        # ★ 회사가 안 밝힌 칸은 «빈 칸»이 아니라 「미확인」으로 채운다.
-        #   빈 문자열이면 흐름도에 «라벨만 있고 속이 빈 76px 상자»가 화살표와 함께
-        #   그려져 고장처럼 보인다(constants.FLOW_UNCONFIRMED_CELL 주석에 실측 근거).
+        # ★ 화살표 장에서는 회사가 안 밝힌 칸을 «빈 칸»이 아니라 「미확인」으로
+        #   채운다. 빈 문자열이면 흐름도에 «라벨만 있고 속이 빈 76px 상자»가
+        #   화살표와 함께 그려져 고장처럼 보인다
+        #   (constants.FLOW_UNCONFIRMED_CELL 주석에 실측 근거).
         #   ★ 여기(데이터 층)에서 채우는 이유 — 웹(result.html)과 PDF(_FlowGraphic)가
         #     각자 채우면 한쪽만 고쳐져 갈린다. 2026-08-25에 문단 번호에서 같은
         #     사고가 있었다. 두 렌더러가 같은 값을 받게 한 곳에서 정한다.
+        #   ★ 카드 장에서는 채우지 않는다 — 카드 렌더러가 빈 칸을 «빼도록»
+        #     설계돼 있어서, 채우면 「확인된 사례: 미확인」·제목이 「미확인」인
+        #     카드가 인쇄된다(FLOW_ARROW_SECTION_IDS 주석의 실측 2건).
         rows.append(
-            [str(cell).strip() or FLOW_UNCONFIRMED_CELL for cell in row.cells]
+            [
+                (str(cell).strip() or FLOW_UNCONFIRMED_CELL)
+                if fills_unconfirmed
+                else str(cell).strip()
+                for cell in row.cells
+            ]
         )
         cited.extend(row_numbers)
     if not rows:
@@ -766,6 +780,14 @@ def render_report(
             # 요약 전용 인용도 부록에는 실려야 한다 (장 목록에는 안 더한다 —
             # used_in은 본문 장 표시 전용이라 요약은 대응하는 장이 없다).
             used_sections.setdefault(cited, [])
+            # ★ 등급은 본문과 «똑같이» 싣는다 (2026-08-25 적대 검수가 재현).
+            #   요약 문장도 본문과 같은 verify_sentences를 타므로 «해석»으로
+            #   강등될 수 있고, 그때 인용은 그대로 남는다. 여기서 등급을
+            #   빠뜨리면 그 해석이 부록에 안 보여 「사실 검증 완료」로 잘못
+            #   적힌다 — 실제로는 「부분 검증」이 맞다.
+            grades = source_grades.setdefault(str(cited), [])
+            if sentence.grade not in grades:
+                grades.append(sentence.grade)
 
     citations: list[Source] = [
         _build_source(

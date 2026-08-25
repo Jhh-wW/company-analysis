@@ -31,10 +31,21 @@ from __future__ import annotations
 
 from typing import Final
 
-from src.features.composer.constants import GRADE_CONFIRMED, GRADE_INTERPRETED, SECTION_IDS
-from src.features.composer.port import ComposedReport, ComposedSection, ComposedSentence
+from src.features.composer.constants import (
+    GRADE_CONFIRMED,
+    GRADE_INTERPRETED,
+    OPERATIONS_FLOW_SECTION_ID,
+    SECTION_IDS,
+)
+from src.features.composer.port import (
+    ComposedReport,
+    ComposedSection,
+    ComposedSentence,
+    FlowRow,
+)
 from src.features.composer.render import render_report
 from src.features.report_standard.section_content import (
+    SOURCE_VERIFICATION_TABLE_ONLY_LABEL,
     _V2_INTERPRETED_GRADE,
     source_verification_label,
 )
@@ -54,8 +65,15 @@ def _fragments() -> dict[int, dict[str, str]]:
     }
 
 
-def _report(*sentences: ComposedSentence) -> ComposedReport:
-    """문장들을 «첫 장»에만 담은 v2 보고서. 나머지 장은 빈 장으로 둔다."""
+def _report(
+    *sentences: ComposedSentence,
+    summary: tuple[ComposedSentence, ...] | None = None,
+) -> ComposedReport:
+    """문장들을 «첫 장»에만 담은 v2 보고서. 나머지 장은 빈 장으로 둔다.
+
+    ``summary``를 주면 핵심 요약을 갈아 끼운다 — 요약 쪽 등급을 다루는
+    시험(아래 ④)에 필요하다. 안 주면 기본 요약을 쓴다.
+    """
     return ComposedReport(
         sections=tuple(
             ComposedSection(
@@ -65,17 +83,23 @@ def _report(*sentences: ComposedSentence) -> ComposedReport:
             for index, section_id in enumerate(SECTION_IDS)
         ),
         summary=(
-            ComposedSentence(
-                text="매출이 늘었다.", citations=(_FRAGMENT_ID,), grade=GRADE_CONFIRMED
-            ),
-            ComposedSentence(
-                text="증가 폭이 눈에 띈다.",
-                citations=(_FRAGMENT_ID,),
-                grade=GRADE_CONFIRMED,
-            ),
-            ComposedSentence(
-                text="성장 국면으로 읽힌다.", citations=(), grade=GRADE_INTERPRETED
-            ),
+            summary
+            if summary is not None
+            else (
+                ComposedSentence(
+                    text="매출이 늘었다.",
+                    citations=(_FRAGMENT_ID,),
+                    grade=GRADE_CONFIRMED,
+                ),
+                ComposedSentence(
+                    text="증가 폭이 눈에 띈다.",
+                    citations=(_FRAGMENT_ID,),
+                    grade=GRADE_CONFIRMED,
+                ),
+                ComposedSentence(
+                    text="성장 국면으로 읽힌다.", citations=(), grade=GRADE_INTERPRETED
+                ),
+            )
         ),
     )
 
@@ -221,5 +245,177 @@ def test_본문이_그_자료를_안_쓰면_본문_사실_없음이다() -> None
         return
     assert (
         source_verification_label(rendered, 안_쓴_자료[0].source_id)
+        == "본문 사실 없음"
+    )
+
+
+# ══════════════════════════════════════════════════════════
+# ④ 핵심 요약의 «해석»도 등급이다 (2026-08-25 적대 검수가 재현)
+# ══════════════════════════════════════════════════════════
+
+
+def test_요약의_해석이_같은_자료를_쓰면_부분_검증이다() -> None:
+    """★ 재현된 결함 — 요약 문장의 등급이 통째로 빠져 있었다.
+
+    render는 요약 인용을 부록 번호에는 실으면서(`used_sections.setdefault`)
+    «등급»은 안 담았다. 요약 문장도 본문과 같은 `verify_sentences`를 타므로
+    「해석」으로 강등될 수 있고, 그때 인용은 그대로 남는다. 그러면 본문이
+    전부 「확인」일 때 부록은 「사실 검증 완료」라고 적는다 — 그 자료를
+    쓴 문장 중에 해석이 있으므로 「부분 검증」이 맞다.
+    """
+    rendered = render_report(
+        "가나다전자",
+        _report(
+            ComposedSentence(
+                text="회사는 2024년에 매출 100억원을 기록했다.",
+                citations=(_FRAGMENT_ID,),
+                grade=GRADE_CONFIRMED,
+            ),
+            summary=(
+                ComposedSentence(
+                    text="매출이 늘었다.",
+                    citations=(_FRAGMENT_ID,),
+                    grade=GRADE_CONFIRMED,
+                ),
+                ComposedSentence(
+                    text="성장 국면으로 읽힌다.",
+                    citations=(_FRAGMENT_ID,),
+                    grade=GRADE_INTERPRETED,
+                ),
+            ),
+        ),
+        _fragments(),
+        None,
+    )
+
+    # 전제 확인 — 본문에는 해석이 하나도 없다. 그러니 아래 「부분 검증」은
+    # 오직 «요약» 때문이어야 한다.
+    본문 = [text for section in rendered.sections for text, _ in section.prose_lines]
+    assert not any("해석" in text for text in 본문), f"본문에 해석이 있습니다: {본문}"
+
+    assert _label_of_first_source(rendered) == "부분 검증"
+
+
+def test_render가_요약_문장의_등급도_실어_보낸다() -> None:
+    """통로 자체를 지킨다 — 라벨만 보면 «왜» 맞았는지 알 수 없다."""
+    rendered = render_report(
+        "가나다전자",
+        _report(
+            ComposedSentence(
+                text="회사는 2024년에 매출 100억원을 기록했다.",
+                citations=(_FRAGMENT_ID,),
+                grade=GRADE_CONFIRMED,
+            ),
+            summary=(
+                ComposedSentence(
+                    text="성장 국면으로 읽힌다.",
+                    citations=(_FRAGMENT_ID,),
+                    grade=GRADE_INTERPRETED,
+                ),
+            ),
+        ),
+        _fragments(),
+        None,
+    )
+
+    assert GRADE_INTERPRETED in rendered.source_grades[_FRAGMENT_ID], (
+        f"요약 문장의 등급이 안 실렸습니다: {rendered.source_grades}"
+    )
+
+
+# ══════════════════════════════════════════════════════════
+# ⑤ 표·도식만 인용한 자료 (2026-08-25 적대 검수가 재현)
+# ══════════════════════════════════════════════════════════
+
+
+def _report_with_flow_only_source() -> ComposedReport:
+    """7장 «흐름표»만 조각 2를 인용하는 보고서.
+
+    문장은 전부 조각 1만 쓴다 — 그래서 조각 2에는 «문장 등급»이 하나도
+    없고, 부록에는 「본문 사용 장: 7장」만 남는다. 이 조합이 결함을 만들던
+    바로 그 모양이다.
+    """
+    return ComposedReport(
+        sections=tuple(
+            ComposedSection(
+                section_id=section_id,
+                sentences=(
+                    ComposedSentence(
+                        text="회사는 2024년에 매출 100억원을 기록했다.",
+                        citations=(_FRAGMENT_ID,),
+                        grade=GRADE_CONFIRMED,
+                    ),
+                ),
+                flow_rows=(
+                    (
+                        FlowRow(
+                            cells=("원자재 매입", "시트 가공", "가구 제조사"),
+                            citations=("2",),
+                        ),
+                    )
+                    if section_id == OPERATIONS_FLOW_SECTION_ID
+                    else ()
+                ),
+            )
+            for section_id in SECTION_IDS
+        ),
+        summary=(
+            ComposedSentence(
+                text="매출이 늘었다.", citations=(_FRAGMENT_ID,), grade=GRADE_CONFIRMED
+            ),
+        ),
+    )
+
+
+def _rendered_with_flow_only_source():
+    fragments = _fragments()
+    fragments[2] = {
+        "종류": "사업내용",
+        "원문": "회사는 원자재를 매입해 시트를 가공한 뒤 가구 제조사에 공급한다.",
+    }
+    return render_report(
+        "가나다전자", _report_with_flow_only_source(), fragments, None
+    )
+
+
+def _source_number_2(rendered):
+    사료 = [source for source in rendered.citations if source.number == 2]
+    assert 사료, f"부록에 조각 2가 없습니다: {[s.number for s in rendered.citations]}"
+    return 사료[0]
+
+
+def test_흐름표만_인용한_자료는_본문_사실_없음이_아니다() -> None:
+    """★ 재현된 결함 — 「본문 사실 없음」과 「본문 사용 장: 7장」이 한 줄 안에서
+    모순됐다. 읽는 사람이 바로 알아채는 거짓말이라 반드시 갈라야 한다.
+    """
+    rendered = _rendered_with_flow_only_source()
+    source = _source_number_2(rendered)
+
+    # 전제 확인 — 이 자료는 «표»가 썼고(사용 장 있음) «문장»은 안 썼다(등급 없음).
+    assert source.used_in, "전제가 깨졌습니다 — 흐름표가 사용 장을 안 남겼습니다"
+    assert not rendered.source_grades.get("2"), (
+        f"전제가 깨졌습니다 — 표 인용에 문장 등급이 생겼습니다: "
+        f"{rendered.source_grades}"
+    )
+
+    assert (
+        source_verification_label(rendered, source.source_id)
+        == SOURCE_VERIFICATION_TABLE_ONLY_LABEL
+    )
+
+
+def test_표가_쓴_자료와_아무도_안_쓴_자료는_다르게_적는다() -> None:
+    """「표·도식 근거」가 «모든» 자료에 번지지 않는지 함께 지킨다.
+
+    사용 장이 비어 있으면(요약 전용·미사용) 예전 그대로 「본문 사실 없음」이다.
+    """
+    rendered = _rendered_with_flow_only_source()
+
+    문장이_쓴_자료 = [s for s in rendered.citations if s.number == 1][0]
+    assert source_verification_label(rendered, 문장이_쓴_자료.source_id) == (
+        "사실 검증 완료"
+    )
+    assert (
+        source_verification_label(rendered, "존재하지 않는-source-id")
         == "본문 사실 없음"
     )

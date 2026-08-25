@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
-from typing import Iterable
+from typing import Final, Iterable
 
 from src.features.pipeline.port import FactRecord, Report, ReportSection
 from src.features.pipeline.section567_contract import (
@@ -631,6 +631,33 @@ _V2_INTERPRETED_GRADE = "해석"
 #: 본문 표시 문장에 박힌 인용 번호 ``[1]`` ``[12]`` 같은 것을 읽는다.
 _CITATION_NUMBER_PATTERN = re.compile(r"\[(\d+)\]")
 
+#: 부록 「사실 검증」 칸 — «문장이 아니라 표·도식이» 근거로 쓴 자료에 붙는 값.
+#:
+#: ★ 왜 새로 만들었나 (2026-08-25, 적대 검수가 render_report로 재현) — 흐름표·
+#:   실적표 캡션의 〔n〕도 본문 인용이라 `render.py` 가 그 조각을
+#:   ``Source.used_in`` 에 넣는다. 그런데 표에는 «문장 등급»이라는 것이 아예
+#:   없어서 ``source_grades`` 에는 안 들어간다. 그 상태로 「본문 사실 없음」을
+#:   적으면 **같은 줄의 「본문 사용 장」 칸이 7장이라고 말하는 것과 모순**된다
+#:   — 읽는 사람이 바로 알아채는 거짓말이다.
+#: ★ 왜 «등급을 지어내지» 않나 — 표 칸에는 확인/해석 판정이 붙은 적이 없다.
+#:   render가 「확인」이라고 채워 넣으면 그게 더 큰 거짓말이 된다. 그래서
+#:   등급을 만들지 않고, 여기서 «어떤 자격으로 쓰였는지»만 정확히 적는다.
+#: ★ 이 값은 v2(문장 등급) 경로에만 쓴다 — 옛 저장본 폴백(아래 ②)은 «해석»
+#:   문장의 번호가 화면에서 숨겨질 수 있어 「문장이 안 썼다」를 확신할 수
+#:   없다. 확신 없이 「표·도식 근거」라고 적으면 새 거짓말이 된다.
+SOURCE_VERIFICATION_TABLE_ONLY_LABEL: Final[str] = "표·도식 근거"
+
+
+def _source_used_in(report: Report, source_id: str) -> tuple[str, ...]:
+    """부록 한 줄의 「본문 사용 장」 목록. 없으면 빈 튜플."""
+
+    for item in report.citations:
+        if isinstance(item, Source) and item.source_id == source_id:
+            return tuple(
+                str(cell).strip() for cell in item.used_in if str(cell).strip()
+            )
+    return ()
+
 
 def source_verification_label(report: Report, source_id: str) -> str:
     """부록에서 자료 상태와 별도로 사실 검증 상태를 표시한다.
@@ -692,6 +719,8 @@ def _source_verification_label_v2(report: Report, source_id: str) -> str:
 
     전부 «확인»이면 「사실 검증 완료」, «해석»이 하나라도 섞이면 「부분 검증」,
     이 자료를 쓴 문장이 없으면 「본문 사실 없음」.
+    ★ 문장은 안 썼는데 표·도식이 근거로 쓴 자료는 「표·도식 근거」다 —
+      `SOURCE_VERIFICATION_TABLE_ONLY_LABEL` 주석에 이유가 있다.
 
     ★ 등급을 «어디서» 읽나 — 두 갈래다.
       ① ``report.source_grades`` (정확한 길). render가 「번호를 보였는지와
@@ -722,6 +751,12 @@ def _source_verification_label_v2(report: Report, source_id: str) -> str:
     if report.source_grades:
         grades = report.source_grades.get(str(number))
         if not grades:
+            # 문장이 이 자료를 안 썼다. 그래도 「본문 사용 장」이 차 있으면
+            # 표·도식 캡션의 〔n〕이 쓴 것이다 — 그때 「본문 사실 없음」이라고
+            # 적으면 같은 줄 안에서 모순된다
+            # (SOURCE_VERIFICATION_TABLE_ONLY_LABEL 주석에 재현 기록).
+            if _source_used_in(report, source_id):
+                return SOURCE_VERIFICATION_TABLE_ONLY_LABEL
             return "본문 사실 없음"
         if any(grade == _V2_INTERPRETED_GRADE for grade in grades):
             return "부분 검증"
