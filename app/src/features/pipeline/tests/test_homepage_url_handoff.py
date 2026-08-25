@@ -28,6 +28,11 @@
         만약 조건이 없었다면 state=ok 조각 6개 — 출처host www.hyundaimotorgroup.com,
         게다가 6개 전부 후보출처검증="https_exact_dart_host" 도장이 찍혔다.
 
+★ 2026-08-25 적대 검수 — 잠금이 **조각 수집 한 곳에만** 걸려 있었다.
+  같은 `workable_url()`을 부르는 **화면 경로 3곳**(후보 목록·확인 카드 2개)은
+  잠금을 건너뛰고 있었다. 그래서 사용자는 후보 목록에서 **남의 회사 주소가
+  글자 그대로 인쇄된 화면을 보고 회사를 골랐다.** §3이 그 못이다.
+
 ★ 이 파일은 네트워크에 나가지 않는다. `workable_url`을 가짜로 바꿔 끼워
   실측에서 본 «결과 모양»만 재현한다.
 """
@@ -66,7 +71,7 @@ def _고른다(monkeypatch: pytest.MonkeyPatch, raw: str, workable: str) -> str:
         return workable
 
     monkeypatch.setattr(real.homepage_link, "workable_url", 가짜_workable_url)
-    결과 = real._homepage_url_for_collector(raw)
+    결과 = real._homepage_url_same_host_only(raw)
     # 원래 주소를 그대로 물려줘야 캐시가 회사 확인 화면과 같은 열쇠로 맞는다.
     assert 불린 in ([], [raw]), f"workable_url을 이상한 값으로 불렀습니다: {불린}"
     return 결과
@@ -253,7 +258,7 @@ def test_링크로_만들_수_없는_주소는_접속조차_시도하지_않는�
 
     monkeypatch.setattr(real.homepage_link, "workable_url", 가짜_workable_url)
 
-    assert real._homepage_url_for_collector(raw) == raw
+    assert real._homepage_url_same_host_only(raw) == raw
     assert 불린 == [], f"열 수 없는 주소로 접속을 시도했습니다: {불린}"
 
 
@@ -361,3 +366,245 @@ def test_collect는_다른_회사로_튕기면_원래_hm_url을_수집기에_넘
         )
         == "www.hyundai.co.kr"
     )
+
+
+# ══════════════════════════════════════════════════════════
+# 3. ★ 못 — 화면 경로 3곳도 같은 잠금을 거치는가
+#    (수집기만 잠그면 사용자는 «남의 회사 주소»를 보고 회사를 고른다)
+# ══════════════════════════════════════════════════════════
+
+#: 후보 검색용 1곳짜리 회사 목록. tuple 하나를 재사용해야 후보 색인이 매번
+#: 다시 만들어지지 않는다 — `real._company_candidate_index`가 tuple 자체를
+#: 열쇠로 캐시하기 때문이다.
+_카탈로그 = ((CORP_ID, "가나다전자", "", "000001", "20260819"),)
+
+#: 사고 재현값 — 현대차 루트는 남의 회사(hyundaimotorgroup.com)로 튕긴다.
+_사고_원본 = "www.hyundai.co.kr"
+_사고_리다이렉트 = "https://www.hyundaimotorgroup.com/ko/main/mainRecommend"
+#: 잠금을 통과하면 화면에는 DART 원본이 «링크로 걸 수 있는 모양»으로 남는다.
+_사고_기대값 = "https://www.hyundai.co.kr"
+
+
+def _가짜_기업개황(hm_url: str) -> dict[str, Any]:
+    """DART 기업개황 응답 모양. 화면 3곳이 전부 이 dict만 보고 카드를 만든다."""
+    return {
+        "status": "000",
+        "corp_code": CORP_ID,
+        "corp_name": "가나다전자",
+        "adres": "서울특별시 강남구 테헤란로 1",
+        "ceo_nm": "홍길동",
+        "est_dt": "20000101",
+        "hm_url": hm_url,
+    }
+
+
+def _화면_준비(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    hm_url: str,
+    workable: str,
+) -> None:
+    """DART가 `hm_url`을 주고, 접속하면 `workable`로 튕긴다고 치고 판을 깐다."""
+    monkeypatch.setattr(real.homepage_link, "workable_url", lambda _raw: workable)
+    monkeypatch.setattr(engine, "get_json", lambda *_a, **_k: _가짜_기업개황(hm_url))
+
+
+def _사용자입력() -> UserInput:
+    return UserInput(
+        company="가나다전자",
+        job=JOB,
+        region="서울 강남구",
+        posting_text=POSTING,
+    )
+
+
+def _후보목록_홈페이지(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    hm_url: str,
+    workable: str,
+) -> str:
+    """후보 목록 빌더를 **실제로 돌려** 화면에 인쇄될 「homepage」를 돌려준다.
+
+    `company_candidates.html`은 이 값을 링크 주소로도 쓰고 **눈에 보이는 글자로도
+    그대로 인쇄**한다.
+    """
+    _화면_준비(engine, monkeypatch, hm_url=hm_url, workable=workable)
+    monkeypatch.setattr(real, "_company_catalog", lambda: _카탈로그)
+    rows = real.RealPipeline().search_business_candidates(
+        company="가나다전자", address_hint="서울 강남구", limit=3, timeout_sec=8.0
+    )
+    assert len(rows) == 1, f"후보가 1개가 아니라 {len(rows)}개입니다"
+    return str(rows[0]["homepage"])
+
+
+def _확인카드_고유번호_홈페이지(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    hm_url: str,
+    workable: str,
+) -> str:
+    """사람이 후보를 고른 뒤 다시 확인하는 경로(`find_company_by_ref_metered`)."""
+    _화면_준비(engine, monkeypatch, hm_url=hm_url, workable=workable)
+    결과 = real.RealPipeline().find_company_by_ref_metered(_사용자입력(), CORP_ID)
+    assert 결과.card is not None, "확인 카드를 만들지 못했습니다"
+    return 결과.card.homepage_url
+
+
+def _확인카드_이름식별_홈페이지(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    hm_url: str,
+    workable: str,
+) -> str:
+    """이름으로 바로 확인 카드를 만드는 경로(`find_company_metered`)."""
+    _화면_준비(engine, monkeypatch, hm_url=hm_url, workable=workable)
+    # `_company_index`는 `@lru_cache`라 진짜를 부르면 다른 시험과 값을 나눠 쓴다.
+    monkeypatch.setattr(real, "_company_index", lambda: {})
+    monkeypatch.setattr(engine, "identify", lambda *_a, **_k: CORP_ID, raising=False)
+    결과 = real.RealPipeline().find_company_metered(_사용자입력())
+    assert 결과.card is not None, "확인 카드를 만들지 못했습니다"
+    return 결과.card.homepage_url
+
+
+#: 사용자가 실제로 보는 화면 3곳. 셋 다 같은 잠금을 거쳐야 한다.
+_화면경로 = [
+    pytest.param(_후보목록_홈페이지, id="후보목록"),
+    pytest.param(_확인카드_고유번호_홈페이지, id="확인카드_고유번호"),
+    pytest.param(_확인카드_이름식별_홈페이지, id="확인카드_이름식별"),
+]
+
+
+@pytest.mark.parametrize("화면", _화면경로)
+def test_화면_3곳은_남의_회사로_튕겨도_DART_원본만_보여준다(
+    engine: FakeEngine, monkeypatch: pytest.MonkeyPatch, 화면: Any
+) -> None:
+    """★ 사고를 막는 못 — 이게 빨간불이면 남의 회사 주소가 화면에 인쇄된다.
+
+    후보 목록은 이 글자를 **눈에 보이는 글자로도** 찍는다. 사용자는 그 글자를
+    보고 회사를 «고른다» — 판단 근거가 통째로 오염된다.
+    """
+    보인_주소 = 화면(engine, monkeypatch, hm_url=_사고_원본, workable=_사고_리다이렉트)
+    assert (
+        "hyundaimotorgroup" not in 보인_주소
+    ), f"남의 회사 host가 화면으로 새어 나갔습니다: {보인_주소}"
+    assert 보인_주소 == _사고_기대값
+
+
+@pytest.mark.parametrize("화면", _화면경로)
+def test_화면_3곳은_같은_회사면_열리는_주소를_그대로_링크로_건다(
+    engine: FakeEngine, monkeypatch: pytest.MonkeyPatch, 화면: Any
+) -> None:
+    """(주)진영 대역 — https 인증서가 죽어 http로 열린다. 회사는 그대로다.
+
+    ★ 이게 깨지면 링크를 눌렀을 때 브라우저 경고창이 뜨고, 사용자는
+      「이 회사가 맞나」를 의심한다 (문제로그 P-114에서 실제로 벌어진 일).
+    """
+    assert (
+        화면(
+            engine,
+            monkeypatch,
+            hm_url="www.jyp21.co.kr",
+            workable="http://www.jyp21.co.kr/en/",
+        )
+        == "http://www.jyp21.co.kr/en/"
+    )
+
+
+@pytest.mark.parametrize("화면", _화면경로)
+def test_화면_3곳은_스킴없는_주소를_링크주소에_그대로_넣지_않는다(
+    engine: FakeEngine, monkeypatch: pytest.MonkeyPatch, 화면: Any
+) -> None:
+    """★ DART 원본은 대개 "www.foo.co.kr"처럼 앞머리(스킴)가 없다.
+
+    그 글자를 링크 주소에 그대로 넣으면 브라우저는 **우리 사이트 안의 상대
+    경로**로 읽는다. 잠금이 원본을 돌려줄 때도 링크로 걸 수 있는 모양이어야 한다.
+    """
+    보인_주소 = 화면(engine, monkeypatch, hm_url=_사고_원본, workable=_사고_리다이렉트)
+    assert 보인_주소.startswith(
+        ("https://", "http://")
+    ), f"링크로 걸 수 없는 모양입니다: {보인_주소}"
+
+
+@pytest.mark.parametrize("화면", _화면경로)
+def test_화면_3곳은_링크로_만들_수_없는_주소를_빈_문자열로_둔다(
+    engine: FakeEngine, monkeypatch: pytest.MonkeyPatch, 화면: Any
+) -> None:
+    """빈 문자열이어야 화면이 링크 대신 「홈페이지 미확인」 글자만 보여 준다."""
+    assert (
+        화면(
+            engine,
+            monkeypatch,
+            hm_url="javascript:alert(1)",
+            workable="https://evil.example",
+        )
+        == ""
+    )
+
+
+def test_후보_점수도_남의_회사_도메인으로_흔들리지_않는다(
+    engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 화면만의 문제가 아니다 — 이 값은 후보 «순서»에도 들어간다.
+
+    `score_business_candidate(homepage=...)`는 도메인에 입력한 영문명이 있으면
+    가점을 준다. 리다이렉트된 남의 host가 들어가면 남의 도메인으로 점수가 붙어
+    후보 순서가 흔들린다.
+    """
+    from src.features.business_candidate import logic as 후보점수  # noqa: PLC0415
+
+    진짜_점수 = 후보점수.score_business_candidate
+    넘어간_홈페이지: list[str] = []
+
+    def 스파이(**kwargs: Any) -> Any:
+        넘어간_홈페이지.append(str(kwargs.get("homepage", "")))
+        return 진짜_점수(**kwargs)
+
+    monkeypatch.setattr(후보점수, "score_business_candidate", 스파이)
+
+    _후보목록_홈페이지(engine, monkeypatch, hm_url=_사고_원본, workable=_사고_리다이렉트)
+
+    assert 넘어간_홈페이지 == [
+        _사고_기대값
+    ], f"점수 계산에 넘어간 홈페이지가 잘못됐습니다: {넘어간_홈페이지}"
+
+
+# ── 잠금 껍데기 자체 ──────────────────────────────────────
+
+
+def test_화면용_주소는_잠금을_통과한_뒤_링크_모양으로_바뀐다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_homepage_url_for_display`가 하는 일은 «잠금 + 링크 모양» 둘뿐이다."""
+    monkeypatch.setattr(
+        real.homepage_link, "workable_url", lambda _raw: _사고_리다이렉트
+    )
+    assert real._homepage_url_for_display(_사고_원본) == _사고_기대값
+
+    monkeypatch.setattr(
+        real.homepage_link, "workable_url", lambda _raw: "http://www.jyp21.co.kr/en/"
+    )
+    assert (
+        real._homepage_url_for_display("www.jyp21.co.kr")
+        == "http://www.jyp21.co.kr/en/"
+    )
+
+
+def test_수집기는_화면과_달리_DART_원본_글자를_그대로_받는다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ 둘을 같은 값으로 만들면 안 된다 — 수집기 쪽은 원본 글자가 필요하다.
+
+    `collect_homepage_fragments(allow_dart_www_alias=True)`가 DART가 적은 글자
+    그대로를 기준으로 www 이동을 증명하고 조각에 흔적을 남긴다. 화면용으로
+    앞머리를 붙여 버리면 그 기준이 달라진다.
+    """
+    monkeypatch.setattr(
+        real.homepage_link, "workable_url", lambda _raw: _사고_리다이렉트
+    )
+    assert real._homepage_url_same_host_only(_사고_원본) == _사고_원본
+    assert real._homepage_url_for_display(_사고_원본) != _사고_원본

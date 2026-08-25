@@ -1379,7 +1379,7 @@ class RealPipeline:
                 )
             candidate_name = str(profile.get("corp_name") or record.corp_name)
             address = str(profile.get("adres") or "")
-            homepage = homepage_link.workable_url(profile.get("hm_url", ""))
+            homepage = _homepage_url_for_display(profile.get("hm_url", ""))
             score, _evidence = score_business_candidate(
                 query=company,
                 address_hint=address_hint,
@@ -1465,7 +1465,7 @@ class RealPipeline:
                 ceo=str(profile.get("ceo_nm") or ""),
                 founded=str(profile.get("est_dt") or ""),
                 homepage=str(profile.get("hm_url") or ""),
-                homepage_url=homepage_link.workable_url(profile.get("hm_url", "")),
+                homepage_url=_homepage_url_for_display(profile.get("hm_url", "")),
                 region_warning=warning,
                 ref=corp_code,
             )
@@ -1519,7 +1519,7 @@ class RealPipeline:
                         ceo=profile.get("ceo_nm", ""),
                         founded=profile.get("est_dt", ""),
                         homepage=profile.get("hm_url", ""),
-                        homepage_url=homepage_link.workable_url(
+                        homepage_url=_homepage_url_for_display(
                             profile.get("hm_url", "")
                         ),
                         region_warning=warning,
@@ -3133,8 +3133,13 @@ def _homepage_compare_host(url: str) -> str:
         return ""
 
 
-def _homepage_url_for_collector(raw: str) -> str:
-    """홈페이지 수집기에 넘길 주소를 고른다 — **같은 회사일 때만** 바꾼다.
+def _homepage_url_same_host_only(raw: str) -> str:
+    """홈페이지 주소를 고른다 — **같은 회사일 때만** 바꾼다.
+
+    ★ 이름에 「수집기」가 없는 이유 — 조각 수집만 잠그면 소용이 없다. 화면(후보 목록·
+      회사 확인 카드)도 같은 `workable_url()`을 부르므로, 한쪽만 잠그면 **사용자가
+      보는 화면에 남의 회사 주소가 인쇄된 채로** 회사를 고르게 된다
+      (적대 검수 2026-08-25에 실제로 발견됐다). 네 곳이 이 하나를 공유한다.
 
     `workable_url()`은 실제로 열어 보고 «열리는 주소»를 준다. 자체서명 인증서
     때문에 https가 통째로 죽은 회사((주)진영 실측)에서 조각이 0개가 되는 것을
@@ -3176,6 +3181,31 @@ def _homepage_url_for_collector(raw: str) -> str:
     if not candidate or _homepage_compare_host(candidate) != raw_host:
         return raw
     return candidate
+
+
+def _homepage_url_for_display(raw: str) -> str:
+    """화면 링크(후보 목록·회사 확인 카드)에 걸 주소를 고른다.
+
+    ★ 왜 잠금만으로는 부족한가 — `_homepage_url_same_host_only()`는 «다른 회사»라고
+      판정하면 DART 원본 글자를 그대로 돌려준다. 그런데 그 글자는 대개
+      "www.foo.co.kr"처럼 **앞머리(스킴)가 없다.** 스킴 없는 글자를 HTML의 href에
+      그대로 넣으면 브라우저는 그걸 **우리 사이트 안의 상대 경로**로 읽는다.
+      그래서 `browser_url()`을 한 번 더 통과시켜 «링크로 걸 수 있는 모양», 또는
+      걸면 안 되는 주소면 빈 문자열로 만든다. 빈 문자열이면 화면은 링크 대신
+      글자만 보여 준다(company_candidates.html·confirm.html이 이미 그렇게 한다).
+
+    ⚠️ 이 값은 화면에만 쓰이지 않는다 — 후보 점수
+      `score_business_candidate(homepage=...)`에도 그대로 들어간다. 리다이렉트된
+      남의 host가 들어가면 `_domain_key`가 **남의 도메인으로 +0.12**를 줘 후보
+      순서가 흔들린다 (`features/business_candidate/logic.py`의 도메인 가점).
+
+    Args:
+        raw: DART 기업개황이 준 `hm_url` (스킴이 없을 수도 있다).
+
+    Returns:
+        `https://…`/`http://…`, 또는 링크로 만들 수 없으면 `""`.
+    """
+    return homepage_link.browser_url(_homepage_url_same_host_only(raw))
 
 
 def _collect(
@@ -3264,7 +3294,7 @@ def _collect(
     # 회사 홈페이지 — 2번(뭘 잘하나)이 만성적으로 비는 원인이었다 (문제로그 P-35 · D14-7).
     # ★ 실패를 「없음」과 반드시 구분한다. 섞으면 「이 회사는 자료가 없다」로 잘못 읽힌다.
     homepage = collect_homepage_fragments(
-        _homepage_url_for_collector(profile.get("hm_url", "")),
+        _homepage_url_same_host_only(profile.get("hm_url", "")),
         allow_dart_www_alias=True,
     )
     if homepage.state == "ok":
