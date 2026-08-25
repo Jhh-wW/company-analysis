@@ -40,6 +40,7 @@ from src.features.export_notion.notion import (
     is_notion_configured,
     send_report_to_notion,
 )
+from src.features.feedback_report import constants as feedback_constants
 from src.features.grading.logic import grade_message
 from src.features.observability import admin_audit
 from src.features.pipeline.port import (
@@ -74,6 +75,16 @@ logger = logging.getLogger(__name__)
 # an ambiguous operation that a later click could duplicate.
 _NOTION_EXPORT_WORKERS: set[asyncio.Task] = set()
 _REPORT_UNAVAILABLE_HOME = "/?report_status=unavailable"
+#: 관리자만 오는 경로(POST /notion)의 출구. 홈보다 관리 화면이 할 일에 가깝다.
+_ADMIN_DASHBOARD_URL = "/admin/dashboard"
+_ADMIN_DASHBOARD_LABEL = "관리 대시보드로"
+#: 자동검사 사유는 automatic_release가 정한 고정 한국어 문구뿐이지만, 화면과
+#: 로그가 예상 밖의 길이·줄바꿈에 흔들리지 않도록 상한을 둔다.
+_GATE_REASON_MAX_CHARS = 120
+_GATE_REASON_MAX_COUNT = 8
+_GATE_UNKNOWN_REASON = "자동 출고 승인을 확인하지 못했습니다"
+#: 로그 상관 필드에 넣을 보고서 식별자 상한 (경로에서 온 값이라 길이를 자른다).
+_LOG_REPORT_ID_MAX_CHARS = 64
 
 
 def _report_grade_note(report: Report) -> str:
@@ -391,7 +402,9 @@ async def _result_page_response(
                 _release_state, report_id=job_id, report=output_report
             )
         except PDFReleaseBlockedError as error:
-            return _pdf_review_pending_response(request, error)
+            return _pdf_review_pending_response(
+                request, error, job_id=job_id, company=saved.company
+            )
         except Exception as error:  # noqa: BLE001 — 공개 경계는 승인 저장소도 fail-closed
             return _pdf_unavailable_response(request, error)
         preview = released is None
@@ -447,7 +460,9 @@ async def _result_page_response(
             _release_state, report_id=job_id, report=output_report
         )
     except PDFReleaseBlockedError as error:
-        return _pdf_review_pending_response(request, error)
+        return _pdf_review_pending_response(
+            request, error, job_id=job_id, company=job.user_input.company
+        )
     except Exception as error:  # noqa: BLE001 — 공개 경계는 승인 저장소도 fail-closed
         return _pdf_unavailable_response(request, error)
     preview = released is None
@@ -520,6 +535,16 @@ def _revoked_member_response(request: Request, *, unavailable: bool) -> Response
         if not unavailable
         else "MEMBER 권한 상태를 확인할 수 없어 결과와 다운로드를 잠시 열지 않습니다."
     )
+    # 권한 «상태를 못 읽은» 경우에만 같은 화면 재확인이 진짜 재시도다.
+    # 권한이 없는 것이 확정된 경우는 다시 열어도 결과가 같으므로 홈으로 보낸다.
+    if unavailable:
+        retry_context = job_runtime.retry_or_exit(request, retry_label="다시 확인")
+    else:
+        retry_context = {
+            "retry_url": job_runtime.DEFAULT_EXIT_URL,
+            "retry_label": job_runtime.DEFAULT_EXIT_LABEL,
+            "retry_same_page": False,
+        }
     response = request_helpers.templates.TemplateResponse(
         request=request,
         name="progress_unavailable.html",
@@ -528,8 +553,7 @@ def _revoked_member_response(request: Request, *, unavailable: bool) -> Response
             interruption_title="MEMBER 권한을 확인해 주세요",
             interruption_message=message,
             interruption_hint="관리자에게 초대 상태를 문의해 주세요.",
-            retry_url="",
-            retry_label="",
+            **retry_context,
         ),
         status_code=503 if unavailable else 403,
     )
@@ -553,8 +577,7 @@ def _dashboard_blocked_response(request: Request, *, unavailable: bool) -> Respo
             interruption_title=title,
             interruption_message=message,
             interruption_hint="새 조사를 다시 시작할 필요가 없습니다.",
-            retry_url="",
-            retry_label="상태 다시 확인",
+            **job_runtime.retry_or_exit(request, retry_label="상태 다시 확인"),
         ),
         status_code=503 if unavailable else 409,
     )
@@ -589,8 +612,8 @@ def _pdf_unavailable_response(
             interruption_hint=(
                 "현재 보고서 화면은 그대로 사용할 수 있으며 새 조사를 시작할 필요가 없습니다."
             ),
-            retry_url="",
-            retry_label="PDF 다시 받기",
+            **job_runtime.retry_or_exit(request, retry_label="PDF 다시 받기"),
+            support_reference=request_id,
         ),
         status_code=503,
     )
@@ -599,13 +622,70 @@ def _pdf_unavailable_response(
     return job_runtime._retryable_response(response)
 
 
-def _pdf_review_pending_response(request: Request, error: Exception) -> Response:
-    """필수 자동검사에서 멈춘 전체 결과를 부분 공개하지 않는다."""
+def _gate_reasons(error: Exception) -> tuple[str, ...]:
+    """자동검사가 «무엇을» 막았는지 화면과 로그에 같이 쓸 문구.
+
+    ``AutomaticGateStopped.reasons``만 읽는다. ``str(error)``를 쓰면 안 된다 —
+    composer.validate에는 보고서 값을 그대로 문장에 박아 넣는 사유가 있어
+    공개 화면에 그리면 보고서 원문이 새어 나간다. reasons는 automatic_release가
+    정한 고정 한국어 문구뿐이라 안전하다.
+    """
+    raw = getattr(error, "reasons", ())
+    if isinstance(raw, (str, bytes)):
+        # 문자열을 그대로 tuple()에 넣으면 한 글자씩 쪼개진다.
+        raw = ()
+    try:
+        candidates = tuple(raw)[:_GATE_REASON_MAX_COUNT]
+    except TypeError:
+        candidates = ()
+    cleaned: list[str] = []
+    for reason in candidates:
+        # 줄바꿈을 없애 로그 한 줄이 쪼개지지 않게 한다.
+        cleaned_reason = " ".join(str(reason).split())[:_GATE_REASON_MAX_CHARS]
+        if cleaned_reason and cleaned_reason not in cleaned:
+            cleaned.append(cleaned_reason)
+    return tuple(cleaned) or (_GATE_UNKNOWN_REASON,)
+
+
+def _gate_feedback_allowed(request: Request) -> bool:
+    """오류 신고 링크를 그릴 대상인지 판정한다(결과 화면과 같은 기준).
+
+    대상은 「로그인 회원 + 링크 손님」이다. 완전 익명은 ``POST /feedback``이
+    어차피 막으므로 갈 수 없는 링크를 보여 주지 않는다. 판정 자체가 실패하면
+    링크를 감춘다 — 막다른 화면에서 또 막히는 것이 더 나쁘다.
+    """
+    try:
+        if _member_feedback_email(request):
+            return True
+        return request_helpers._track_of(request)[0] is share_tracks.Track.LINK
+    except Exception:  # noqa: BLE001 — 신고 링크 판정 실패가 안내 화면을 깨면 안 된다
+        logger.exception("오류 신고 링크 표시 대상을 판정하지 못했습니다")
+        return False
+
+
+def _pdf_review_pending_response(
+    request: Request,
+    error: Exception,
+    *,
+    job_id: str = "",
+    company: str = "",
+    exit_url: str = job_runtime.DEFAULT_EXIT_URL,
+    exit_label: str = job_runtime.DEFAULT_EXIT_LABEL,
+) -> Response:
+    """필수 자동검사에서 멈춘 전체 결과를 부분 공개하지 않는다.
+
+    ★ 버튼은 «다시 시도»가 아니라 «나가기»다. 게이트 판정은 같은 보고서에
+      대해 결정적이라 같은 주소를 다시 열어도 결과가 바뀌지 않는다. 그리고
+      호출지점이 POST인 경로(``/notion/{id}``)에서 현재 주소를 걸면 브라우저가
+      GET으로 열어 405가 난다 — 그래서 출구는 호출지점이 정해 넘긴다.
+    """
 
     request_id = admin_audit.request_id(request)
+    reasons = _gate_reasons(error)
     logger.info(
-        "자동검사 출고 차단 error_type=%s request_id=%s",
-        type(error).__name__,
+        "자동검사 출고 차단 report_id=%s reasons=%s request_id=%s",
+        " ".join(str(job_id).split())[:_LOG_REPORT_ID_MAX_CHARS],
+        " | ".join(reasons),
         request_id,
     )
     response = request_helpers.templates.TemplateResponse(
@@ -613,15 +693,26 @@ def _pdf_review_pending_response(request: Request, error: Exception) -> Response
         name="progress_unavailable.html",
         context=request_helpers._ctx(
             request,
+            # ↻(다시 시도) 대신 멈춤 표시를 쓴다 — 다시 열어도 결과가 같다.
+            interruption_icon="⛔",
             interruption_title="보고서 자동검사가 중단되었습니다",
             interruption_message=(
                 "필수 검사 중 하나라도 통과하지 못하면 웹·PDF·Notion 전체를 제공하지 않습니다."
             ),
             interruption_hint=(
-                "이 건은 고객에게 청구되지 않습니다. 관리자가 원인을 확인한 뒤 새로 생성해야 합니다."
+                "같은 조건으로 다시 열어도 결과는 같습니다. "
+                "아래 문의 번호와 함께 알려주시면 원인을 확인하겠습니다."
             ),
-            retry_url="",
-            retry_label="자동검사 상태 다시 확인",
+            gate_reasons=reasons,
+            support_reference=request_id,
+            feedback_report_allowed=_gate_feedback_allowed(request),
+            feedback_stage=feedback_constants.STAGE_REPORT,
+            feedback_company=company,
+            # ★ retry_same_page=False — 게이트 판정은 결정적이라 같은 주소를
+            #   다시 열면 이 화면이 그대로 다시 뜬다. 새로고침을 권하지 않는다.
+            retry_url=exit_url or job_runtime.DEFAULT_EXIT_URL,
+            retry_label=exit_label or job_runtime.DEFAULT_EXIT_LABEL,
+            retry_same_page=False,
         ),
         status_code=409,
     )
@@ -809,8 +900,8 @@ def _link_view_event_unavailable_response(request: Request) -> Response:
                 "현재는 결과를 열지 않습니다."
             ),
             interruption_hint="잠시 후 같은 LINK로 다시 시도해 주세요.",
-            retry_url="",
-            retry_label="",
+            # 안내가 「같은 LINK로 다시 시도」이므로 재요청이 진짜 재시도다.
+            **job_runtime.retry_or_exit(request, retry_label="다시 확인"),
         ),
         status_code=503,
     )
@@ -997,7 +1088,12 @@ async def download_pdf(request: Request, job_id: str):
             build_pdf_download_filename(report)
         )
     except PDFReleaseBlockedError as error:
-        return _pdf_review_pending_response(request, error)
+        return _pdf_review_pending_response(
+            request,
+            error,
+            job_id=job_id,
+            company=getattr(report, "company", ""),
+        )
     except PDFGenerationError as error:
         return _pdf_unavailable_response(request, error)
     except Exception as error:  # noqa: BLE001 - 다운로드 경계는 raw 500을 내보내지 않는다
@@ -1055,13 +1151,24 @@ async def send_to_notion(
             _release_state, report_id=job_id, report=report
         )
     except PDFReleaseBlockedError as error:
-        return _pdf_review_pending_response(request, error)
+        return _pdf_review_pending_response(
+            request,
+            error,
+            job_id=job_id,
+            company=getattr(report, "company", ""),
+            exit_url=f"/notion/{job_id}",
+            exit_label="자동검사 상태 다시 확인",
+        )
     except Exception as error:  # noqa: BLE001 — 승인 원장을 확인 못 하면 Notion도 닫는다
         return _pdf_unavailable_response(request, error)
     if released is None:
         return _pdf_review_pending_response(
             request,
             PDFReleaseBlockedError("PDF 출고 승인이 없습니다"),
+            job_id=job_id,
+            company=getattr(report, "company", ""),
+            exit_url=_ADMIN_DASHBOARD_URL,
+            exit_label=_ADMIN_DASHBOARD_LABEL,
         )
 
     digest = notion_store.report_digest(report)

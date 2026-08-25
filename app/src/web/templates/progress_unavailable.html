@@ -4,7 +4,9 @@
 
 {% block content %}
 <div class="card" role="alert" aria-labelledby="interrupted-title">
-  <div class="stopped-icon" aria-hidden="true">↻</div>
+  {# 기본 ↻는 «다시 하면 된다»는 뜻이다. 다시 해도 결과가 같은 화면은
+     그 기대를 주지 않도록 아이콘을 바꿔 넘긴다. #}
+  <div class="stopped-icon" aria-hidden="true">{{ interruption_icon|default('↻', true) }}</div>
   <h1 id="interrupted-title">{{ interruption_title|default('조사가 중단되었습니다') }}</h1>
   <p class="lede">{{ interruption_message }}</p>
 
@@ -13,8 +15,47 @@
     <span><b>입력 오류가 아닙니다.</b> {{ interruption_hint|default('입력 화면에서 같은 회사와 직무로 다시 시작해 주세요.') }}</span>
   </div>
 
-  <div class="btn-row">
-    <a class="btn" href="{{ retry_url }}">{{ retry_label|default('처음부터 다시 조사하기') }}</a>
+  {# 무엇이 막았는지 알려준다. gate_reasons에는 서버가 정한 고정 문구만 들어온다
+     (routers/reports.py의 _gate_reasons) — 보고서 원문·예외 메시지는 섞이지 않는다. #}
+  {% if gate_reasons %}
+  <div class="warn-line">
+    <span>
+      <b>통과하지 못한 검사</b>
+      <ul style="margin:6px 0 0; padding-left:18px">
+        {% for reason in gate_reasons %}<li>{{ reason }}</li>{% endfor %}
+      </ul>
+    </span>
   </div>
+  {% endif %}
+
+  <div class="btn-row">
+    {# 버튼은 두 가지 뜻 중 하나다.
+       ① retry_same_page — 일시 장애라 «이 화면을 그대로 다시 여는 것»이 재시도다.
+          빈 href는 HTML에서 «지금 이 주소»를 뜻한다. 주소에 든 조사 번호를 화면에
+          되비추지 않으려고 일부러 주소 문자열을 쓰지 않는다(routers 주석 참고).
+       ② 그 외 — 다시 열어도 결과가 같으므로 다른 곳으로 내보낸다.
+       ★ default의 세 번째 인자(true)가 있어야 빈 문자열도 기본값으로 접힌다.
+         없으면 아무 데도 안 가고 글자도 없는 버튼이 그려진다. #}
+    {% if retry_same_page %}
+    <a class="btn" href="">{{ retry_label|default('이 페이지 다시 확인', true) }}</a>
+    {% else %}
+    <a class="btn" href="{{ retry_url|default('/', true) }}">{{ retry_label|default('처음부터 다시 조사하기', true) }}</a>
+    {% endif %}
+  </div>
+
+  {% if support_reference %}
+  <p class="muted" style="margin-top:16px">문의 번호 <code>{{ support_reference }}</code></p>
+  {% endif %}
+
+  {# 신고 링크는 로그인 회원·링크 손님에게만 그린다. 완전 익명은 POST /feedback이
+     어차피 막으므로 갈 수 없는 곳으로 보내지 않는다.
+     ★ report= 는 넘기지 않는다 — 신고 폼의 「보고서로 돌아가기」가 지금 막힌
+     바로 그 화면으로 되돌려 보내기 때문이다. 보고서 식별은 문의 번호로 한다. #}
+  {% if feedback_report_allowed %}
+  <p class="muted">
+    이 화면이 계속 나오면 알려주세요.
+    <a href="/feedback?stage={{ feedback_stage|urlencode }}{% if feedback_company %}&amp;company={{ feedback_company|urlencode }}{% endif %}">오류 신고</a>
+  </p>
+  {% endif %}
 </div>
 {% endblock %}

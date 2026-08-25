@@ -360,9 +360,9 @@ def test_수동승인은410이고_자동검사객체만_웹과PDF를_연다(monk
     release_errors: list[str] = []
     real_pending_response = reports_router._pdf_review_pending_response
 
-    def capture_release_error(request, error):
+    def capture_release_error(request, error, **kwargs):
         release_errors.append(str(error))
-        return real_pending_response(request, error)
+        return real_pending_response(request, error, **kwargs)
 
     monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
     monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)

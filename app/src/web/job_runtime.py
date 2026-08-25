@@ -272,6 +272,45 @@ def _job_work_admitted(job: Job) -> bool:
     return _ACCEPTING_JOBS and not job.slot_released and bool(stored_bucket)
 
 
+#: 재시도가 의미 없을 때 안내 화면 버튼이 향할 기본 출구.
+DEFAULT_EXIT_URL = "/"
+DEFAULT_EXIT_LABEL = "처음 화면으로"
+
+
+def retry_or_exit(
+    request: Request,
+    *,
+    retry_label: str,
+    fallback_url: str = DEFAULT_EXIT_URL,
+    fallback_label: str = DEFAULT_EXIT_LABEL,
+) -> dict[str, object]:
+    """안내 화면 버튼에 실을 값을 정해 template context 조각으로 돌려준다.
+
+    «이 화면을 그대로 다시 여는 것»이 진짜 재시도인 일시 장애 화면들이 쓴다.
+
+    ★ 왜 현재 주소를 문자열로 만들어 넣지 않는가
+      주소에는 조사 번호·보고서 번호가 들어 있다. 그 값을 화면에 되비추지
+      않는 것이 이미 시험으로 고정된 계약이다(``test_survives_restart.py`` —
+      「없는 진행번호의 410은 번호나 내부정보를 반사하지 않는다」). 그래서
+      같은 화면 재요청은 빈 ``href``(= HTML에서 «지금 이 주소»)로 표현하고,
+      템플릿이 그것을 «의도된 새로고침»으로 알아보게 ``retry_same_page``를
+      같이 넘긴다.
+
+    ★ 왜 POST를 갈라내는가
+      POST로 들어온 요청의 주소를 버튼에 걸면 브라우저는 그 주소를 GET으로
+      연다. ``/notion/{id}``처럼 POST만 있는 경로는 405 평문이 뜬다. 그래서
+      POST일 때는 안전한 출구로 접고 글자도 같이 바꿔 「다시 확인하면
+      달라진다」는 거짓 기대를 주지 않는다.
+    """
+    if request.method != "GET":
+        return {
+            "retry_url": fallback_url,
+            "retry_label": fallback_label,
+            "retry_same_page": False,
+        }
+    return {"retry_url": "", "retry_label": retry_label, "retry_same_page": True}
+
+
 def _retryable_response(response: Response) -> Response:
     """일시 장애 응답을 브라우저·중간 캐시가 저장하지 않게 한다."""
     response.headers["Retry-After"] = _RETRY_AFTER_SEC
@@ -316,8 +355,7 @@ def _storage_unavailable_response(request: Request) -> HTMLResponse:
                 interruption_hint=(
                     "새 조사를 시작하지 마세요. 잠시 후 이 페이지에서 다시 확인해 주세요."
                 ),
-                retry_url="",
-                retry_label="다시 확인",
+                **retry_or_exit(request, retry_label="다시 확인"),
             ),
             status_code=503,
         )
