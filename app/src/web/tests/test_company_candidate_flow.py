@@ -410,6 +410,52 @@ class _AnalysisClock:
         return time.perf_counter()
 
 
+def _analysis_clock() -> _AnalysisClock:
+    """TTL 경계 시험에 물릴 가짜 시계를 만든다.
+
+    시작값은 **진짜 시계를 정수로 반올림한 값**이다. 조건 두 개를 «동시에»
+    만족해야 하기 때문이고, 2026-08-26에 둘 다 실측으로 확인했다.
+
+    ① **진짜 시계와 가까울 것.** ``job_runtime._sweep_jobs``는 monkeypatch되지
+       않아 «진짜» 시계를 본다. ``1000.0`` 같은 먼 값을 시드로 쓰면 기록을 만든
+       즉시 「너무 오래됐다」로 쓸려 나가 grant 경계 시험이 **곧바로 403**이 된다.
+
+    ② **300.0을 더하고 빼도 오차가 없을 것.** 경계 시험은 ``clock.now += 300.0``
+       한 뒤 서비스 코드가 다시 빼서 ``(x + 300.0) - x``를 계산한다. 컴퓨터가
+       소수를 아주 살짝 반올림해 저장하는 탓에 이 값이 «항상» 300.0이 되지는
+       않는다 — 시드가 ``1000.123456789``이면 ``300.0000000000001``이 나오고,
+       서비스 코드의 ``> CANDIDATE_ATTEMPT_TTL_SEC``에 걸려 「나이가 정확히
+       TTL이면 아직 유효(200)」인 시험이 **403으로 뒤집힌다.**
+       진짜 시계 값은 기계가 켜져 있던 시간마다 다르므로, 이 시험은 «돌리는
+       순간에 따라» 빨간불이 됐다 — 원인 모를 흔들림의 정체가 이것이다.
+
+    정수로 반올림한 값은 ①과 ②를 둘 다 만족한다(정수끼리의 덧셈·뺄셈에는
+    반올림 오차가 없다).
+
+    ★ 서비스 코드는 **고치지 않았다.** 진짜 운영에서는 두 시각이 각각 따로
+      측정되어 「정확히 TTL」이 나올 일이 없다. 시험이 만든 인공적인 경계를
+      맞추려고 서비스의 만료 규칙을 바꾸는 것은 앞뒤가 뒤바뀐 수정이다.
+    """
+    return _AnalysisClock(float(round(time.monotonic())))
+
+
+def test_가짜_시계_시작값이_두_조건을_모두_지킨다():
+    """★ 이 단언이 깨지면 아래 두 경계 시험이 «무작위로» 빨간불이 된다."""
+    나이 = float(CANDIDATE_ATTEMPT_TTL_SEC)
+    시드 = _analysis_clock().now
+
+    # ② 300.0을 더하고 빼도 오차가 없다
+    assert (시드 + 나이) - 시드 == 나이
+    assert 시드 == float(round(시드)), "정수가 아니면 오차가 생긴다"
+
+    # ① 진짜 시계와 가깝다 (_sweep_jobs 가 쓸어 가지 않도록)
+    assert abs(시드 - time.monotonic()) < 나이
+
+    # 반대 증거 — 「나쁜 자릿수」를 넣으면 정말로 어긋난다
+    나쁜_시드 = 1000.123456789
+    assert (나쁜_시드 + 나이) - 나쁜_시드 > 나이
+
+
 @pytest.mark.parametrize(
     ("age_sec", "expected_status", "expected_lookups"),
     (
@@ -422,7 +468,7 @@ def test_후보attempt는_TTL_정확경계까지만_선택에_재사용된다(
 ):
     from src.web.routers import analysis as analysis_router
 
-    clock = _AnalysisClock(time.monotonic())
+    clock = _analysis_clock()
     monkeypatch.setattr(analysis_router, "time", clock)
     pipeline = CandidateAwareFakeRealPipeline(local_candidates=True)
     monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
@@ -468,7 +514,7 @@ def test_후보검색_grant는_TTL_정확경계까지만_provider를_허용한�
     from src.features.business_candidate import providers
     from src.web.routers import analysis as analysis_router
 
-    clock = _AnalysisClock(time.monotonic())
+    clock = _analysis_clock()
     monkeypatch.setattr(analysis_router, "time", clock)
     pipeline = CandidateAwareFakeRealPipeline(local_candidates=False)
     google = PaidGoogleFixture()
