@@ -16,10 +16,20 @@
 Python 3.13을 사용한다. `app/`과 `analysis_engine/`의 형제 폴더 관계를 유지한다.
 
 ```powershell
-cd app
+# ★ 가상환경은 «저장소 루트»에 만든다 (app/ 안이 아니다)
 py -3.13 -m venv .venv
-.\.venv\Scripts\python -m pip install -r requirements.txt -r ..\.github\requirements-ci.txt
+.\.venv\Scripts\python -m pip install -r app\requirements.txt -r .github\requirements-ci.txt
+
+cd app
 .\로컬데모켜기.ps1
+```
+
+시험은 반드시 `app/` 폴더에서 돌린다. 저장소 루트에서 돌리면 파일명 충돌로 수집이
+중단된다(사유는 `pytest.ini` 주석 참고).
+
+```powershell
+cd app
+..\.venv\Scripts\python -m pytest -q -p no:cacheprovider
 ```
 
 로컬 데모는 외부 유료 API를 호출하지 않는다. 실제 조사 모드는 사용자 승인과 별도

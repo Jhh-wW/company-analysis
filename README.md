@@ -5,9 +5,25 @@
 사실을 설명하는 분석 보고서를 만드는 FastAPI 웹서비스입니다. 지원 직무·채용공고·지원자 경험은 받지
 않으며 자기소개서·면접 답안이나 일반 준비 질문을 만들지 않습니다.
 
-기본 배포 설정은 **관리자 전용 데모**입니다. 현재 코드는 로컬 검증까지만 끝났고 실제
-배포는 보류 중입니다. 보고서 품질을 확인한 뒤에만 실제 조사 모드와 허용 사용자를
+기본 배포 설정은 **관리자 전용 베타**입니다. 보고서 품질을 확인한 뒤에만 허용 사용자를
 단계적으로 엽니다.
+
+## 지금 상태 (2026-08-26)
+
+| | |
+|---|---|
+| 배포 | ✅ 운영 중 — https://company-analysis-beta.onrender.com (Render · Docker · Standard) |
+| 접근 | 관리자 로그인 필요 (`BETA_ADMIN_ONLY=1`) |
+| 조사 엔진 | **엔진 v2**(`company-report-v2-composer`)가 본선 |
+| 자동 시험 | 4,181건 통과 / 0 실패 |
+| 배포 방식 | ⛔ **수동 배포만** — 커밋을 올려도 자동으로 반영되지 않는다 (`render.yaml`의 `autoDeployTrigger: off`) |
+
+배포본이 최신인지 확인하는 방법:
+
+```bash
+curl -s https://company-analysis-beta.onrender.com/healthz
+# {"status":"ok","commit":"<7자리>"} 가 `git rev-parse --short=7 HEAD` 와 같으면 최신
+```
 
 ## 작동 흐름
 
@@ -26,12 +42,18 @@ DART·회사 공식 웹 기반 공식 근거 수집
 ## 기본 안전 설정
 
 - `BETA_ADMIN_ONLY=1`: 관리자 이메일로 로그인한 사람만 접속
-- `PIPELINE=demo`: 배포 전 기본값에서 외부 AI 조사 비용 차단
-- GitHub Actions의 시험과 Docker 상태 확인이 통과된 커밋만 Render가 배포
+- `PIPELINE`: **코드 기본값은 `demo`**(외부 AI 조사 비용 0). 운영 배포에서만
+  `render.yaml`이 `real`로 올린다 — 즉 «로컬에서 실수로 돈이 나가는 일»이 없다
+- ⚠️ **자동 시험(GitHub Actions)이 지금은 안 돕니다.**
+  워크플로가 `push: branches: [master]`에만 반응하는데 **작업·배포 브랜치는 `engine-v2`**입니다
+  (2026-08-27 실측: `engine-v2`에서 quality-gate 실행 **0회**).
+  실제 안전장치는 **로컬 전체 시험 + 사람이 누르는 수동 배포** 두 가지입니다.
+  → 이 구멍을 어떻게 할지는 [20장 §5](docs/실행계획_엔진v2/20_저장소_정리_2026-08-27.md) 참고
 - Render 인스턴스와 SQLite 쓰기 프로세스를 각각 1개로 고정
 - API 키·로그인 비밀값은 파일이 아닌 Render 환경변수로만 설정
 - 새 분석 입력은 회사 이름과 주소만 받으며 직무·공고·이미지 원본을 받지 않음
-- `Report.schema_version=company-report-v4-canonical`만 신규 출고 정본으로 인정하고 같은 버전의 캐시 토큰만 재사용
+- 출고 정본 스키마는 두 가지다 — **엔진 v2(현재 본선)는 `company-report-v2-composer`**,
+  v1 경로는 `company-report-v4-canonical`. 캐시 토큰은 같은 버전끼리만 재사용한다
 - PDF는 사용자 다운로드 정본이며 구조 검사와 모든 페이지 시각 QA를 통과해야 함
 
 ## 저장소 구조
@@ -54,21 +76,34 @@ company-analysis-beta/
 │   │   └── core/            # DART·네이버·실행경로·사용량 기반
 │   ├── data/pilot/          # 비용 없이 재생하는 데모 자료
 │   └── tools/               # 실제 조사 엔진 진입점
+├── deploy/                  # 클라우드 중립 릴리스 패키지와 배포 검증
+├── ops/                     # 배포·운영 절차 문서
+├── scripts/                 # 배포 보조 스크립트
 ├── docs/
-│   ├── 출력물 기준/         # 목차별 작성·근거·PDF·런타임 출고 정본
+│   ├── 출력물 기준/         # 목차별 작성·근거·PDF·런타임 출고 정본 (최상위 정본)
+│   ├── 실행계획_엔진v2/     # 엔진 v2 전환 기록·인수인계 (가장 최근 작업)
 │   ├── architecture/        # 기능 지도
-│   └── adr/                 # 구조를 선택한 이유
+│   ├── adr/                 # 구조를 선택한 이유
+│   ├── evidence/            # 목차 설계의 조사 근거 (문서 50개 분석)
+│   ├── research/            # 설계 당시 조사 자료 (현재 규범이 아님)
+│   ├── 골든샘플/            # 품질 하한 비교용 기준 산출물
+│   ├── 관리대시보드/        # 운영 대시보드 설계
+│   └── reviews/             # 날짜별 검토 스냅샷 (현재 판정이 아님)
 ├── render.yaml              # Render 관리자 베타 설정
-├── .gitignore               # 비밀값·DB·로그·작업 산출물 제외
+├── pytest.ini               # 시험 수집 규칙
+├── CONTRIBUTING.md          # 기여·검증 방법
+├── SECURITY.md              # 취약점 신고 절차
+├── .gitignore               # 비밀값·DB·로그·작업 산출물 제외 (허용 목록 방식)
 └── .dockerignore            # 실행에 필요한 파일만 이미지에 포함
 ```
 
 `analysis_engine`은 현재 실제 조사 모드가 사용하는 필수 엔진입니다. 구조를 정리할
 때도 삭제하거나 데모 자료로 대체하지 않습니다.
 
-배포 설정에는 매일 외부 SQLite 백업, 주간 관리자 XLSX, 매일 휴지통·멈춘 작업 정리가
-각각 독립 cron으로 선언되어 있습니다. 코드는 로컬 시험을 통과했지만 실제 Render·S3
-연결과 원격 실행은 아직 하지 않았습니다.
+⚠️ **정기 작업(cron)은 아직 선언돼 있지 않습니다.** `render.yaml`에는 웹 서비스 1개만
+있습니다(2026-08-27 실측: `type: cron` 0건). 외부 SQLite 백업·주간 관리자 XLSX·휴지통
+정리는 **코드와 인증 경로는 준비돼 있으나 스케줄이 아직 안 붙었습니다.**
+Render 배포 자체는 운영 중이고, 외부 S3 백업 연결도 아직 돌려 보지 않았습니다.
 
 ### 이 작업 폴더에만 있는 로컬 검수 자료
 
@@ -106,9 +141,11 @@ Python 3.13을 사용합니다. 처음 한 번만 환경을 준비한 뒤 로컬
 사용합니다.
 
 ```powershell
-cd app
+# ★ 가상환경은 «저장소 루트»에 만든다 (app/ 안이 아니다)
 py -3.13 -m venv .venv
-.\.venv\Scripts\python -m pip install -r requirements.txt -r ..\.github\requirements-ci.txt
+.\.venv\Scripts\python -m pip install -r app\requirements.txt -r .github\requirements-ci.txt
+
+cd app
 .\로컬데모켜기.ps1
 ```
 
@@ -122,18 +159,35 @@ py -3.13 -m venv .venv
 
 ## 시험
 
-```powershell
-# app 폴더에서 웹서비스와 백업 도구 시험
-$env:TLDEXTRACT_CACHE="$PWD\.cache\tldextract"
-.\.venv\Scripts\python -m pytest src tools/tests -q `
-  -m "not local_integration" `
-  --basetemp=.pytest_tmp_readme_app
+시험은 **네 묶음**으로 나뉘어 있습니다 (2026-08-27 실측, 합계 **4,575건**).
 
-# 저장소 루트에서 조사 엔진 시험
+```powershell
+# ① 웹서비스 — 가장 큼. ★ 반드시 app 폴더에서 돌린다
+cd app
+..\.venv\Scripts\python -m pytest -q -p no:cacheprovider -m "not local_integration"
+
+# ②③④ 나머지는 저장소 루트에서
 cd ..
-.\app\.venv\Scripts\python -m pytest analysis_engine/src -q `
-  --basetemp=app/.pytest_tmp_readme_engine
+.\.venv\Scripts\python -m pytest analysis_engine/src -q   # 조사 엔진
+.\.venv\Scripts\python -m pytest deploy -q                # 배포 계약
+.\.venv\Scripts\python -m pytest ops -q                   # 운영 절차
 ```
+
+| 묶음 | 건수 | 소요 |
+|---|---:|---|
+| `app/` (웹서비스) | 4,181 | 약 6분 |
+| `analysis_engine/src` | 173 | |
+| `deploy` | 100 | |
+| `ops` | 121 | |
+| **합계** | **4,575** | |
+
+**★ `app/`에서 돌려야 하는 이유** — `test_logic.py`라는 같은 이름의 파일이 두 폴더에
+있고 둘 다 `__init__.py`가 없어, 저장소 루트에서 돌리면 수집 단계에서 중단됩니다
+(`import file mismatch`). 두 파일은
+`analysis_engine/.../provider_diagnostics/tests/`와 `app/src/features/report_summary/tests/`입니다.
+
+**★ `-m "not local_integration"`** — 저장소에 넣지 않는 대용량 로컬 자료가 필요한 시험 4건을
+제외합니다. 새로 클론한 환경에서는 이 마커 없이 돌리면 실패할 수 있습니다.
 
 GitHub Actions는 위 시험에 더해 실제 Docker 이미지를 만들고 `/healthz` 응답까지
 확인합니다. 신규 보고서 변경은 정본 목차, 서비스 범위, 사실 단일 소유,

@@ -72,9 +72,13 @@ checkpoint와 같은 run·사유·시각의 최종 게이트 행이 정확히 �
 | `PIPELINE=demo` | 저장된 데모 자료 재생 | 없음 |
 | `PIPELINE=real` | DART·공식 IR·회사 홈페이지·생성 AI를 사용하는 실제 조사. 공개 사실/교차검증에 쓰이지 않는 뉴스 검색·AI 선별은 생략 | 발생 가능 |
 
-배포 전 안전값은 `PIPELINE=demo`, `BETA_ADMIN_ONLY=1`입니다. 현재 실제 배포는 보류
-중입니다. 실제 조사 모드는 환경변수와 비용 안전장치를 확인하고 작은 입력 한 건으로
-시험한 뒤 전환합니다.
+**코드 기본값은 `PIPELINE=demo`·`BETA_ADMIN_ONLY=1`**입니다 — 로컬에서 실수로 비용이
+나가지 않게 하기 위해서입니다.
+
+운영 배포(Render)는 **2026-08-26부터 `PIPELINE=real`로 운영 중**이며,
+접근은 관리자 로그인으로 막혀 있습니다(`BETA_ADMIN_ONLY=1`).
+자동 배포는 꺼져 있어(`render.yaml`의 `autoDeployTrigger: off`) 커밋을 올려도
+사람이 Manual Deploy를 누르기 전에는 반영되지 않습니다.
 
 ## 로컬 데모
 

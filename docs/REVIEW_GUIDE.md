@@ -147,7 +147,10 @@ GET/POST는 `410 Gone`이며 구형 세 역할 승인 테이블은
 
 ## 8. 배포·정기 작업·복구
 
-- 배포 전 안전값: `PIPELINE=demo`, `BETA_ADMIN_ONLY=1`
+- 코드 기본 안전값: `PIPELINE=demo`, `BETA_ADMIN_ONLY=1`
+  (★ 2026-08-26 정정 — 운영 배포는 `PIPELINE=real`로 **이미 돌고 있다**.
+   기본값이 `demo`인 것은 «로컬에서 실수로 과금되지 않게» 하기 위한 것이지
+   「아직 배포 안 했다」는 뜻이 아니다)
 - 첫 무료 배포는 Uvicorn worker `1`, Render instance `1`, 임시 `/var/data`이며 잠듦·재시작 시
   세션·보고서·실행 기록 초기화를 허용한다. 정식 베타 전에는 Starter와 영속 디스크로 전환한다.
 - 매일 04:00 KST 외부 SQLite 백업, 월요일 04:10 주간 관리자 XLSX,
