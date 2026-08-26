@@ -413,8 +413,8 @@ def test_회사분석은_레거시_이미지를_무시하고_식별_본조사비
         assert records[0].cost_krw == 40.0
         with storage_db.connect() as conn:
             spend_store.ensure_schema(conn)
-            snapshot = spend_store.load_day(conn, dt.date.today())
-            unresolved = spend_store.load_unresolved_day(conn, dt.date.today())
+            snapshot = spend_store.load_day(conn, clock.today_kst())
+            unresolved = spend_store.load_unresolved_day(conn, clock.today_kst())
         assert snapshot.by_run == {job_id: 40.0}
         assert unresolved == frozenset()
 
@@ -433,7 +433,7 @@ def test_OCR_직전_예산검사에_걸리면_extractor를_안_부른다(monkeyp
     client = TestClient(main.app)
     _발급(client)
     token, ref = _확인값(_confirm(client).text)
-    today = dt.date.today()
+    today = clock.today_kst()
     paid_runtime._LINK_SPEND = share_logic.add_spend(
         share_logic.DailySpend(day=today),
         spend_store.bucket_id(_LINK_A),
@@ -577,7 +577,7 @@ def test_레거시_이미지의_OCR_provider는_호출하지_않는다(monkeypat
     assert pipeline.run_calls == 1
     assert calls == 0
     with storage_db.connect() as conn:
-        unresolved = spend_store.load_unresolved_day(conn, dt.date.today())
+        unresolved = spend_store.load_unresolved_day(conn, clock.today_kst())
     assert spend_store.bucket_id(_LINK_A) not in unresolved
 
 
@@ -602,11 +602,11 @@ def test_레거시_이미지의_OCR_계약은_회사분석_실행에_관여하�
     assert pipeline.run_calls == 1
     assert paid_runtime._RUNNING == 0
     assert paid_runtime._ACTIVE_PAID_PHASES == set()
-    assert (dt.date.today().isoformat(), spend_store.bucket_id(_LINK_A)) not in (
+    assert (clock.today_kst().isoformat(), spend_store.bucket_id(_LINK_A)) not in (
         paid_runtime._UNRESOLVED_BUCKETS
     )
     with storage_db.connect() as conn:
-        rows = spend_store.list_inflight_day(conn, dt.date.today())
+        rows = spend_store.list_inflight_day(conn, clock.today_kst())
     assert [(row.phase, row.bucket_id) for row in rows] == []
 
 
@@ -638,8 +638,8 @@ def test_본조사_provider예외는_알려진비용과_미확정표식을_함�
     assert job_runtime._JOBS[job_id].result.cost_krw == 40.0
     assert _confirm(client).status_code == 429
     with storage_db.connect() as conn:
-        snapshot = spend_store.load_day(conn, dt.date.today())
-        unresolved = spend_store.load_unresolved_day(conn, dt.date.today())
+        snapshot = spend_store.load_day(conn, clock.today_kst())
+        unresolved = spend_store.load_unresolved_day(conn, clock.today_kst())
     assert snapshot.by_run[job_id] == 40.0
     assert spend_store.bucket_id(_LINK_A) in unresolved
 
@@ -664,7 +664,7 @@ def test_비용원장_쓰기실패뒤에는_다음_AI호출을_닫는다(monkeyp
 
 
 def test_재시작때_원장_일부단계와_이력총액의_차이를_같은통장에_보충한다():
-    today = dt.date.today()
+    today = clock.today_kst()
     user_input = UserInput(company="가나다", job="영업", region="서울")
     with storage_db.connect() as conn:
         spend_store.ensure_schema(conn)
@@ -795,8 +795,8 @@ def test_식별_API예외는_알려진비용을_남기고_현재통장만_즉시
     assert other.status_code == 200
     assert pipeline.lookup_calls == 2
     with storage_db.connect() as conn:
-        snapshot = spend_store.load_day(conn, dt.date.today())
-        unresolved = spend_store.load_unresolved_day(conn, dt.date.today())
+        snapshot = spend_store.load_day(conn, clock.today_kst())
+        unresolved = spend_store.load_unresolved_day(conn, clock.today_kst())
     assert snapshot.by_bucket[spend_store.bucket_id(_LINK_A)] == 10.0
     assert spend_store.bucket_id(_LINK_A) in unresolved
     assert spend_store.bucket_id(_LINK_B) not in unresolved
@@ -857,8 +857,8 @@ def test_같은링크_세건을_다른스레드에서_함께마감해도_거짓�
     assert paid_runtime._ACTIVE_PAID_PHASES == set()
     assert paid_runtime._UNRESOLVED_BUCKETS == set()
     with storage_db.connect() as conn:
-        snapshot = spend_store.load_day(conn, dt.date.today())
-        inflight = spend_store.list_inflight_day(conn, dt.date.today())
+        snapshot = spend_store.load_day(conn, clock.today_kst())
+        inflight = spend_store.list_inflight_day(conn, clock.today_kst())
     assert snapshot.total_krw == 30.0
     assert inflight == ()
 
@@ -880,12 +880,12 @@ def test_DB마감뒤_메모리장부실패도_active를_지우고_전체를_fail
 
     assert not paid_runtime._BUDGET_STORE_HEALTHY
     assert paid_runtime._ACTIVE_PAID_PHASES == set()
-    assert (dt.date.today().isoformat(), ticket.bucket_id) in (
+    assert (clock.today_kst().isoformat(), ticket.bucket_id) in (
         paid_runtime._UNRESOLVED_BUCKETS
     )
     with storage_db.connect() as conn:
-        snapshot = spend_store.load_day(conn, dt.date.today())
-        inflight = spend_store.list_inflight_day(conn, dt.date.today())
+        snapshot = spend_store.load_day(conn, clock.today_kst())
+        inflight = spend_store.list_inflight_day(conn, clock.today_kst())
     assert snapshot.by_run == {"memory-ledger-failure": 10.0}
     assert inflight == ()
 
@@ -924,14 +924,14 @@ def test_to_thread_취소는_비용을_0원확정하지_않고_통장만_닫는�
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(job_runtime._run_job(job))
 
-    unresolved_key = (dt.date.today().isoformat(), ticket.bucket_id)
+    unresolved_key = (clock.today_kst().isoformat(), ticket.bucket_id)
     assert job.result is not None and job.result.billing_uncertain
     assert unresolved_key in paid_runtime._UNRESOLVED_BUCKETS
     assert paid_runtime._ACTIVE_PAID_PHASES == set()
     assert paid_runtime._RUNNING == 0
     assert paid_runtime._RUNNING_BY_BUCKET == {}
     with storage_db.connect() as conn:
-        rows = spend_store.list_inflight_day(conn, dt.date.today())
+        rows = spend_store.list_inflight_day(conn, clock.today_kst())
     assert [(row.run_id, row.phase) for row in rows] == [
         ("cancelled-run", SPEND_PHASE_PIPELINE)
     ]
@@ -1042,7 +1042,7 @@ def test_바깥요청이_취소돼도_실제_worker가_끝날때까지_동시자
     assert paid_runtime._ACTIVE_PAID_PHASES == set()
     assert paid_runtime._UNRESOLVED_BUCKETS == set()
     with storage_db.connect() as conn:
-        assert spend_store.list_inflight_day(conn, dt.date.today()) == ()
+        assert spend_store.list_inflight_day(conn, clock.today_kst()) == ()
 
 
 def test_본조사_계약밖결과도_active고아없이_미확정으로_마감한다(monkeypatch):
@@ -1087,18 +1087,18 @@ def test_본조사_계약밖결과도_active고아없이_미확정으로_마감�
     assert paid_runtime._RUNNING == 0
     assert paid_runtime._RUNNING_BY_BUCKET == {}
     assert paid_runtime._ACTIVE_PAID_PHASES == set()
-    assert (dt.date.today().isoformat(), ticket.bucket_id) in (
+    assert (clock.today_kst().isoformat(), ticket.bucket_id) in (
         paid_runtime._UNRESOLVED_BUCKETS
     )
     with storage_db.connect() as conn:
-        rows = spend_store.list_inflight_day(conn, dt.date.today())
+        rows = spend_store.list_inflight_day(conn, clock.today_kst())
     assert [(row.run_id, row.phase) for row in rows] == [
         ("invalid-result-run", SPEND_PHASE_PIPELINE)
     ]
 
 
 def test_오늘_미확정표식을_재시작복원하면_그통장만_식별전에_막는다(monkeypatch):
-    today = dt.date.today()
+    today = clock.today_kst()
     with storage_db.connect() as conn:
         spend_store.ensure_schema(conn)
         spend_store.begin_inflight(
@@ -1126,7 +1126,7 @@ def test_오늘_미확정표식을_재시작복원하면_그통장만_식별전�
 
 
 def test_어제_메모리표식은_오늘을_막지_않고_어제마감이_오늘표식을_지우지_않는다():
-    today = dt.date.today()
+    today = clock.today_kst()
     yesterday = today - dt.timedelta(days=1)
     stored_bucket = spend_store.bucket_id(_LINK_A)
     old = paid_runtime.PaidPhase(
@@ -1260,7 +1260,7 @@ def test_배경작업등록예외는_슬롯과_본조사표식을_함께_되돌�
     assert paid_runtime._RUNNING == 0
     assert job_runtime._JOBS == {}
     with storage_db.connect() as conn:
-        assert spend_store.load_unresolved_day(conn, dt.date.today()) == frozenset()
+        assert spend_store.load_unresolved_day(conn, clock.today_kst()) == frozenset()
 
 
 def test_confirm의_가드와_원장은_한번_읽은_같은통장을_쓴다(monkeypatch):
@@ -1292,7 +1292,7 @@ def test_confirm의_가드와_원장은_한번_읽은_같은통장을_쓴다(mon
     assert response.status_code == 200
     assert calls == 1
     with storage_db.connect() as conn:
-        snapshot = spend_store.load_day(conn, dt.date.today())
+        snapshot = spend_store.load_day(conn, clock.today_kst())
     assert snapshot.by_bucket == {spend_store.bucket_id(_LINK_A): 10.0}
 
 
@@ -1592,7 +1592,7 @@ def test_run도_가드_토큰_OCR재검사에_같은통장을_한번만_쓴다(m
 
 
 def test_자정걸친_요청은_어제비용을_오늘로_보충하지_않는다():
-    today = dt.date.today()
+    today = clock.today_kst()
     yesterday = today - dt.timedelta(days=1)
     with storage_db.connect() as conn:
         spend_store.ensure_schema(conn)
@@ -1620,7 +1620,7 @@ def test_자정걸친_요청은_어제비용을_오늘로_보충하지_않는다
 
 
 def test_자정걸친_요청의_누락차액은_날짜를_지어내지_않고_fail_closed한다():
-    today = dt.date.today()
+    today = clock.today_kst()
     yesterday = today - dt.timedelta(days=1)
     with storage_db.connect() as conn:
         spend_store.ensure_schema(conn)
@@ -1666,7 +1666,7 @@ def test_깨진_관측줄이_하나라도_있으면_비용누락가능성으로_
 
 
 def test_링크_사용자_관리자_통장을_재시작뒤_각각_복원하고_두번_seed해도_안겹친다():
-    today = dt.date.today()
+    today = clock.today_kst()
     buckets = {
         _LINK_A: 10.0,
         "user:member@example.com": 20.0,

@@ -55,6 +55,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
+from src.core import clock
 from src.core.persisted_json import validate_persisted_json_text
 from src.features.pipeline.port import Report
 from src.features.provenance.freshness import is_stale
@@ -146,7 +147,14 @@ def _is_layer1_fresh(
     if cached_fiscal_year != current_fiscal_year:
         return False
 
-    reference_date = today or dt.date.today()
+    # ★ 「오늘」은 반드시 KST 다 (2026-08-27 실측으로 찾은 결함).
+    #   수집일(`collected_at`)은 저장할 때 KST 로 적는다(`real.py` 의 `today_kst()`).
+    #   그런데 여기서 «서버 로컬 날짜»로 재면 서버가 UTC 일 때 하루가 어긋나,
+    #   방금 저장한 자료가 «미래에 수집된 것»(age_days = -1)이 되어 캐시가 통째로 거절된다.
+    #   실측: 리눅스(UTC) 에서 UTC 15:00~24:00 (= KST 00:00~09:00) 동안
+    #   같은 회사를 다시 조사하면 캐시가 «절대» 안 먹어 본조사 비용이 또 나갔다.
+    #   재현법: `TZ=UTC0` 로 test_real_cache.py 를 돌리면 4건이 빨간불이 된다.
+    reference_date = today or clock.today_kst()
     for citation in report.citations:
         if not isinstance(citation, Source) or citation.kind is SourceKind.FILING:
             # 공시(DART)는 위에서 이미 사업연도로 비교했다 — 날짜 뺄셈을 또
@@ -165,7 +173,11 @@ def _is_layer1_fresh(
         date_str = citation.published_at or citation.collected_at
         if not date_str:
             continue
-        if is_stale(date_str, today=today) is True:
+        # ★ 위에서 정한 `reference_date`(KST)를 그대로 넘긴다.
+        #   인자 `today`(호출부에서 보통 None)를 넘기면 `freshness.is_stale` 안에서
+        #   다시 «서버 로컬 날짜»로 떨어져, 같은 함수 안에서 기준일이 두 개가 된다.
+        #   여기는 3년 창이라 하루 차이로 판정이 뒤집히진 않지만, 기준을 하나로 둔다.
+        if is_stale(date_str, today=reference_date) is True:
             return False
     return True
 

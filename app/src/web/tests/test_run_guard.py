@@ -18,6 +18,7 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 
+from src.core import clock
 from src.features.auth import logic as auth_logic
 from src.features.admin_dashboard import store as dashboard_store
 from src.features.budget import logic as budget_logic
@@ -126,7 +127,7 @@ def _열쇠로_들어온다(client: TestClient) -> None:
 def _예산을_다_쓴다(monkeypatch, 통장: str = _열쇠,
                    금액: float = PER_LINK_DAILY_BUDGET_KRW) -> None:
     """그 통장의 «오늘 몫»을 다 쓴 상태로 만든다."""
-    오늘 = dt.date.today()
+    오늘 = clock.today_kst()
     다_쓴 = share_logic.add_spend(
         share_logic.DailySpend(day=오늘), 통장, 오늘, 금액
     )
@@ -205,7 +206,7 @@ def test_날이_바뀌면_예산이_되살아난다(client: TestClient, monkeypa
     """어제 다 썼다고 오늘까지 막히면 안 된다."""
     monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
     _열쇠로_들어온다(client)
-    어제 = dt.date.today() - dt.timedelta(days=1)
+    어제 = clock.today_kst() - dt.timedelta(days=1)
     다_쓴_장부 = share_logic.add_spend(
         share_logic.DailySpend(day=어제), _열쇠, 어제, PER_LINK_DAILY_BUDGET_KRW
     )

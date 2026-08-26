@@ -24,6 +24,7 @@ import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
 
+from src.core import clock
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
 from src.features.budget import spend_store
@@ -764,7 +765,7 @@ def test_한_링크가_다_써도_다른_링크는_돈다(client: TestClient, mo
     """★ P-94의 핵심 — 「전체 하나」가 아니라 「링크당」을 고른 이유다."""
     _링크발급(_카카오열쇠, "카카오")
     _링크발급(_네이버열쇠, "카카오")
-    오늘 = dt.date.today()
+    오늘 = clock.today_kst()
     monkeypatch.setattr(runtime, "_PIPELINE", object())          # 돈이 드는 것으로 본다
     monkeypatch.setattr(
         paid_runtime, "_LINK_SPEND",
@@ -793,7 +794,7 @@ def test_한_링크가_다_써도_다른_링크는_돈다(client: TestClient, mo
 
 def test_열쇠_없는_손님도_상한을_받는다(client: TestClient, monkeypatch):
     """★ 안 걸면 「열쇠 없이 들어오는 길」이 상한 없는 구멍이 된다."""
-    오늘 = dt.date.today()
+    오늘 = clock.today_kst()
     monkeypatch.setattr(runtime, "_PIPELINE", object())
     monkeypatch.setattr(
         paid_runtime, "_LINK_SPEND",
@@ -873,7 +874,7 @@ def test_링크로_들어와_로그인해도_링크_몫만_쓴다(client: TestCl
     하나 더 생기지 않는다.
     """
     _링크발급(_카카오열쇠, "카카오")
-    오늘 = dt.date.today()
+    오늘 = clock.today_kst()
     monkeypatch.setattr(runtime, "_PIPELINE", object())
     monkeypatch.setattr(
         paid_runtime, "_LINK_SPEND",

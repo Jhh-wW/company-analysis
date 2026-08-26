@@ -59,10 +59,17 @@ def _fresh_guards():
     job_runtime._PAID_ATTEMPTS.clear()
     with public_ids._RESERVATION_LOCK:
         public_ids._RESERVED_IDS.clear()
+    from src.core import clock  # noqa: PLC0415
+
     paid_runtime._RATE_HISTORY = budget_logic.RateHistory()
-    paid_runtime._LEDGER = budget_logic.Ledger(day=dt.date.today())
+    # ★ 「오늘」은 반드시 KST 다 — 제품 코드가 그렇게 정해 놨다
+    #   (`paid_runtime.py` 는 전부 `clock.today_kst()` 를 쓴다).
+    #   여기서 «서버 로컬 날짜»를 쓰면 서버가 UTC 일 때 하루가 어긋나,
+    #   시험이 만든 장부와 제품이 보는 장부가 «다른 날»이 된다.
+    #   실측(2026-08-27): `TZ=UTC0` 로 돌리면 이것 때문에 17건이 빨간불이었다.
+    paid_runtime._LEDGER = budget_logic.Ledger(day=clock.today_kst())
     # ★ 예산은 «링크별»로 센다 (P-94) — 이것도 같이 비워야 한다.
-    paid_runtime._LINK_SPEND = share_logic.DailySpend(day=dt.date.today())
+    paid_runtime._LINK_SPEND = share_logic.DailySpend(day=clock.today_kst())
     paid_runtime._RUNNING = 0
     paid_runtime._RUNNING_BY_BUCKET.clear()
     paid_runtime._BUDGET_STORE_HEALTHY = True
