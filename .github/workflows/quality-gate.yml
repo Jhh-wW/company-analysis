@@ -2,7 +2,11 @@ name: quality-gate
 
 on:
   push:
-    branches: [master]
+    # ★ 작업·배포 브랜치인 engine-v2 를 반드시 포함한다 (2026-08-27 추가).
+    #   전에는 master 만 있었는데 실제 작업은 engine-v2 에서 하고 있어서
+    #   자동 시험이 «한 번도 돌지 않았다»(실측: engine-v2 실행 0회).
+    #   기본 브랜치도 engine-v2 로 바뀌었다.
+    branches: [master, engine-v2]
   pull_request:
 
 permissions:
