@@ -12,11 +12,14 @@ from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from src.core import paths
+from src.core import logging_setup, paths
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
 from src.features.sharelink.constants import KEY_COOKIE_NAME
-from src.features.sharelink.access_log import install_uvicorn_access_log_filter
+from src.features.sharelink.access_log import (
+    CapabilityAccessLogFilter,
+    install_uvicorn_access_log_filter,
+)
 from src.web import deployment_mode, request_helpers, runtime
 from src.web.response_security import ResponseSecurityMiddleware
 from src.web.routers import (
@@ -33,6 +36,11 @@ from src.web.routers import (
 from src.web.security import RequestBodyLimitMiddleware
 
 
+# ★ 로그 설정을 «가장 먼저» 한다. 이게 없으면 최상위 로거가 핸들러 0개·WARNING이라
+#   앱의 `logger.info`는 레코드조차 안 만들어진다 (실측 근거는 core/logging_setup.py).
+#   비밀 링크 주소를 가리는 필터를 «핸들러»에 함께 걸어, 애플리케이션 로그로 새는
+#   길까지 막는다 — 아래 `install_uvicorn_access_log_filter`는 접근 로그만 막는다.
+logging_setup.configure_logging(filters=(CapabilityAccessLogFilter(),))
 logger = logging.getLogger(__name__)
 install_uvicorn_access_log_filter()
 app = FastAPI(title="기업분석 도구", lifespan=runtime._lifespan)
