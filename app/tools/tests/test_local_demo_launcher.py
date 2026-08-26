@@ -625,7 +625,11 @@ def test_windows_powershell_5_1_실제서버는_loopback_격리_충돌_종료를
         shown_port, capability = _wait_for_capability(live)
         assert shown_port == port
         status, _headers, body = _request(port, "GET", "/healthz")
-        assert status == 200 and json.loads(body) == {"status": "ok"}
+        health = json.loads(body)
+        # ★ 키 목록까지 본다 — 「예상 밖의 값이 liveness 응답에 섞이지 않는다」가
+        #   이 단언의 뜻이다. commit 값 자체는 환경에 따라 달라지므로 보지 않는다.
+        assert status == 200 and health["status"] == "ok"
+        assert set(health) == {"status", "commit"}
 
         system_root = Path(environment["SystemRoot"])
         listeners = _listener_rows(port, system_root)
