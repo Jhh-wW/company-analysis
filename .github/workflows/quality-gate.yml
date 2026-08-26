@@ -45,6 +45,11 @@ jobs:
         run: python -m pytest analysis_engine/src -q --basetemp .pytest_tmp_ci_engine
       - name: 배포 계약 전체 시험
         run: python -m pytest deploy/tests -q --basetemp .pytest_tmp_ci_deploy
+      # ★ 2026-08-27 추가 — 그전에는 CI 가 ops/ 를 «아예 안 봤다»(121건 사각지대).
+      #   ⚠️ 이 중 3건은 Windows 에서 symlink 권한 때문에 건너뛰므로 로컬에서
+      #   검증할 수 없고, 리눅스인 여기서 처음 실행된다.
+      - name: 운영 절차 전체 시험
+        run: python -m pytest ops -q --basetemp .pytest_tmp_ci_ops
 
   container-smoke:
     needs: tests
