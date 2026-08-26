@@ -32,6 +32,11 @@ _RAW_LINK_PATH: Final[re.Pattern[str]] = re.compile(
 )
 _REDACTED = r"\g<prefix>[LINK_REDACTED]"
 
+#: 경로 접두어만 찾는 «싼» 검사. 비싼 포맷을 할지 말지 여기서 먼저 거른다.
+_LINK_PREFIX: Final[re.Pattern[str]] = re.compile(
+    r"/(?:k|admin/links?)/", re.IGNORECASE
+)
+
 
 def redact_capability_path(value: object) -> object:
     """문자열 속 LINK 경로만 가리고 나머지 로그 인자는 그대로 둔다."""
@@ -76,7 +81,38 @@ class CapabilityAccessLogFilter(logging.Filter):
                 )
                 for key, value in record.args.items()
             }
+        self._redact_split_across_args(record)
         return True
+
+    @staticmethod
+    def _redact_split_across_args(record: logging.LogRecord) -> None:
+        """「형식 문자열에 ``/k/``, 열쇠는 «인자»로」 오는 모양까지 막는다.
+
+        예: ``logger.info("열람 링크 /k/%s 를 처리했습니다", key)``
+
+        ★ 위 두 단계는 ``msg``와 ``args``를 **따로** 본다. 이 모양은 둘을 합쳐야
+          비로소 열쇠 경로가 되므로 양쪽 다 놓친다 (2026-08-26 실측으로 확인).
+          지금 저장소에 이런 호출부는 **0곳**이지만, 최상위 로거를 켜면서
+          이 필터가 «앱 로그 전체»를 지키게 됐으므로 미리 막아 둔다.
+
+        ⚠️ 여기서 포맷을 미리 해 버리면 파이썬 로깅의 「필요할 때만 문자열을
+          만든다」는 이점이 사라진다. 그래서 **형식 문자열에 경로 접두어가
+          보일 때만** 한다 — uvicorn 접근 로그(``'%s - "%s %s HTTP/%s" %d'``)는
+          접두어가 없으므로 이 검사를 타지 않는다.
+        """
+        if not record.args or not isinstance(record.msg, str):
+            return
+        if not _LINK_PREFIX.search(record.msg):
+            return
+        try:
+            formatted = record.getMessage()
+        except (TypeError, ValueError, KeyError):
+            # 포맷이 깨진 레코드까지 우리가 고칠 일은 아니다. 원본을 그대로 둔다.
+            return
+        if not _contains_raw_link_path(formatted):
+            return
+        record.msg = redact_capability_path(formatted)
+        record.args = ()
 
 
 def install_uvicorn_access_log_filter() -> None:
