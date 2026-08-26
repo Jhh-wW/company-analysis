@@ -661,3 +661,41 @@ def test_검수_불능_비상경로에서도_경로표는_남는다():
 
     assert 검증됨.sections[0].sentences[0].grade == GRADE_INTERPRETED
     assert 검증됨.sections[0].flow_rows == _경로
+
+
+# ══════════════════════════════════════════════════════════
+# ⑥ 로그에 «회사 원문»이 새면 안 된다 (2026-08-26 적대 검수)
+# ══════════════════════════════════════════════════════════
+
+_원문_문장 = "가나다전자는 2024년에 검사 장비 사업으로 168,312,345,678원을 벌었다"
+
+
+def test_기계_검증_로그에_문장_본문이_안_들어간다(caplog):
+    """★ 이 시험이 지키는 것 — 로그는 «개수»만 남긴다.
+
+    예전에는 처분마다 `%.60s`로 문장 앞 60자를 찍었다. 그 60자는 회사 보고서
+    원문이다. 최상위 로거 설정이 없던 동안에는 이 호출이 레코드조차 만들지
+    않아 드러나지 않았을 뿐이고, 로그를 켜는 순간 운영 로그에 원문이 쌓인다.
+    """
+    문장들 = (
+        # ① 실존하지 않는 조각을 인용 → 제거된다
+        _sentence(_원문_문장, citations=("없는조각",)),
+        # 정상 문장 하나 (남는다)
+        _sentence("가나다전자는 반도체 검사 장비 전문기업이다.", citations=("1",)),
+    )
+
+    검수 = _FakeVerifier([_all_true(1)])
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        남은것 = verify_sentences(문장들, _raw_fragments(), _table(), 검수)
+
+    assert len(남은것) == 1
+
+    # ★ 원문이 한 글자도 로그에 없어야 한다 (앞 60자만 찍던 옛 방식도 잡는다)
+    assert _원문_문장 not in caplog.text
+    assert _원문_문장[:60] not in caplog.text
+    assert "168,312,345,678" not in caplog.text
+    assert "가나다전자" not in caplog.text
+
+    # 그래도 «무엇이 몇 건 처분됐는지»는 남아야 한다 (진단용 로그의 목적)
+    assert "코드 검증 처분" in caplog.text
+    assert "인용 미실존 제거 1" in caplog.text

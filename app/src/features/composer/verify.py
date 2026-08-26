@@ -396,13 +396,27 @@ def _machine_check(
     frag_by_id: Mapping[str, CollectedFragment],
     table_texts: Sequence[str],
 ) -> list[ComposedSentence]:
-    """AI 없이 코드로 확정할 수 있는 3가지 검증. 전부 문장 단위 처분이다."""
+    """AI 없이 코드로 확정할 수 있는 3가지 검증. 전부 문장 단위 처분이다.
+
+    ★ 로그에 문장 «본문»을 넣지 않는다 (2026-08-26 적대 검수 지적).
+      예전에는 처분마다 `%.60s`로 문장 앞 60자를 찍었다. 그 60자는 회사 보고서
+      원문이다. 최상위 로거 설정이 없던 동안에는 이 호출이 레코드조차 만들지
+      않아 «드러나지 않았을 뿐»이고, 로그를 켜는 순간 운영 로그에 원문이 쌓인다.
+      자매 함수 `dedupe._log_chapter_sentence_counts`가 같은 이유로 이미
+      「개수만 남긴다」로 정해 두었다 — 여기도 그 규칙을 따른다.
+
+    ★ 문장마다 찍지 않고 «한 번»만 남긴다. 진단에 필요한 것은 「어느 규칙이
+      몇 문장을 처분했는가」이고, 그건 개수로 충분하다.
+    """
     kept: list[ComposedSentence] = []
+    제거_인용실존: int = 0
+    제거_수치근거: int = 0
+    강등_수치근거: int = 0
     for sentence in sentences:
         # ① 출처 실존 — 깨진 인용이 «하나라도» 있는 문장은 제거한다.
         #   깨진 인용이 달린 문장은 지어낸 것과 구별할 방법이 없다.
         if any(citation not in frag_by_id for citation in sentence.citations):
-            logger.info("인용 조각이 실존하지 않아 문장 제거: %.60s", sentence.text)
+            제거_인용실존 += 1
             continue
         # ④-a 라벨 정합 — 인용 없는 «확인»은 사실 주장을 뒷받침할 근거가 없다.
         #   제거가 아니라 «해석» 강등이다 (분석으로서의 가치는 남긴다).
@@ -412,16 +426,21 @@ def _machine_check(
         if sentence.grade == GRADE_CONFIRMED:
             disposal = _numeric_disposal(sentence, frag_by_id, table_texts)
             if disposal == NUMERIC_REMOVE:
-                logger.info(
-                    "단위 붙은 수치가 근거에 없어 문장 제거: %.60s", sentence.text
-                )
+                제거_수치근거 += 1
                 continue
             if disposal == NUMERIC_DEMOTE:
-                logger.info(
-                    "부수 수치가 근거에 없어 해석 강등: %.60s", sentence.text
-                )
+                강등_수치근거 += 1
                 sentence = _demoted(sentence)
         kept.append(sentence)
+    logger.info(
+        "코드 검증 처분(문장 %d→%d): 인용 미실존 제거 %d · 단위 수치 미근거 제거 %d"
+        " · 부수 수치 미근거 해석 강등 %d",
+        len(sentences),
+        len(kept),
+        제거_인용실존,
+        제거_수치근거,
+        강등_수치근거,
+    )
     return kept
 
 
