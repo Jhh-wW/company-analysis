@@ -36,7 +36,6 @@ from src.features.homepage.link import browser_url
 from src.features.company_use.logic import build_company_use_section
 from src.features.grading.financial import FINANCIAL_CITE, parse_financial_table
 from src.features.provenance.citations import build_citations
-from src.features.provenance.extra_numbers import build_extra_numbers_section
 from src.features.provenance.sources import Source, SourceKind
 from src.features.provenance.freshness import append_direction_warning
 from src.features.grading.logic import grade_of, is_accounting_policy, is_table_dump
@@ -918,15 +917,13 @@ def _load_report(record: dict) -> Optional[Report]:
     #   (문제로그 P-43). AI를 부르지 않는다.
     sections, redrawn_cells = _redraw_situation(record, sections)
 
-    # 附 — 기존 조사 기록에는 직원 현황이 없다. 「없다」가 아니라 «왜 없는지»를 적는다 (D14-4).
     corp_type_raw = record.get("corp_type", "")
     corp_type = "비상장 외감" if "비상장" in corp_type_raw else "상장사"
-    # ★ fetch_failed=True인 이유 — 데모는 «회사에 자료가 없어서»가 아니라
-    #   «당시 조사 엔진이 직원 현황을 안 받아왔기 때문»에 비어 있다.
-    #   ❌(회사 사정)와 ⚠️(우리 사정)를 섞으면 사용자가 그 회사를 포기해버린다 (07_출력 §빈칸 사유).
-    extra = build_extra_numbers_section(response=None, corp_type=corp_type, fetch_failed=True)
+
+    # ★ 附(참고 숫자 — 1인평균급여액·평균근속연수)는 2026-08-27에 걷어냈다.
+    #   이 보고서는 「지원동기를 합격 퀄리티로 만드는 정보」만 담는다(사용자 지시).
+    #   옛 기록에 附이 남아 있어도 화면에 올리지 않는다.
     sections = [s for s in sections if s.cell in COMPANY_FACT_CELLS and s.cell != "附"]
-    sections.append(extra)
 
     # ★ 재도출한 칸에 「데모가 다시 고른 것」임을 밝힌다. 8번 표를 만든 «뒤»다 —
     #   안내 줄이 교차표의 재료로 섞이면 근거 없는 행이 생긴다.
