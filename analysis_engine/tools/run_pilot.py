@@ -315,13 +315,51 @@ def identify(client: anthropic.Anthropic, company: str, address: str,
 
 # ── 6번 수집 ──────────────────────────────────────────────────────────────
 
+#: 원문으로 쓸 공시를 «어떤 순서»로 찾을지. (공시유형 코드, 보고서 이름).
+#:
+#: ★ 2026-08-28 — 비상장에 「사업보고서」를 «먼저» 넣었다. 실측 근거:
+#:   현대카드(비상장)는 `pblntf_ty="F"`(외부감사관련)에 **0건**(status 013)인데
+#:   `pblntf_ty="A"`(정기공시)에는 **사업보고서가 3건** 있다.
+#:   대형 비상장사는 감사보고서를 «따로 내지 않고» 사업보고서에 첨부해 낸다
+#:   (외부감사법 23조① 단서 — 첨부해 내면 감사인이 제출한 것으로 «본다»).
+#:
+#: ⚠️ 고치기 전에 무슨 일이 났나 — 「감사보고서」만 찾다 못 찾으면 이 함수가 None 을
+#:   돌려주고, 원문이 «빈 문자열»이 되고, 조각이 **0개**가 된다. 그러면 재무 API
+#:   숫자만으로 보고서가 쓰여 **각 장이 한 문장씩**인 껍데기가 나온다.
+#:   2026-08-27 에 «판정»만 고치고(재무 자료가 있으면 대상) 이 «수집»을 안 고쳐서,
+#:   문은 열어 주고 안에는 아무것도 안 넣어 주는 상태였다.
+#:
+#: ★ 감사보고서 폴백을 «지운 것이 아니다». 사업보고서를 안 내는 비상장 중소기업은
+#:   감사보고서가 유일한 원문이다. 순서만 바꿨다.
+FILING_LOOKUP_ORDER: Final[dict[str, tuple[tuple[str, str], ...]]] = {
+    "상장사": (("A", "사업보고서"),),
+}
+#: 상장사가 아닌 모든 구분(비상장 외감 등)이 쓰는 순서.
+FILING_LOOKUP_DEFAULT: Final[tuple[tuple[str, str], ...]] = (
+    ("A", "사업보고서"),
+    ("F", "감사보고서"),
+)
+
+
 def latest_report_rcept(corp_code: str, corp_type: str,
                         counter: UsageCounter) -> Optional[dict[str, Any]]:
-    """최신 원문 1건 — 상장은 사업보고서(A), 비상장은 감사보고서(F)."""
+    """최신 원문 1건.
+
+    상장은 사업보고서(A)만 본다. 비상장은 **사업보고서를 먼저** 보고,
+    없을 때만 감사보고서(F)로 넘어간다 (`FILING_LOOKUP_ORDER` 머리말 참고).
+    """
+    for ty, want in FILING_LOOKUP_ORDER.get(corp_type, FILING_LOOKUP_DEFAULT):
+        found = _latest_of_kind(corp_code, ty, want, counter)
+        if found is not None:
+            return found
+    return None
+
+
+def _latest_of_kind(corp_code: str, ty: str, want: str,
+                    counter: UsageCounter) -> Optional[dict[str, Any]]:
+    """공시 유형 하나에서 「원하는 이름」의 최신 보고서를 고른다. 없으면 None."""
     end = dt.date.today()
     bgn = end.replace(year=end.year - AUDIT_WINDOW_YEARS)
-    ty = "A" if corp_type == "상장사" else "F"
-    want = "사업보고서" if corp_type == "상장사" else "감사보고서"
     payload = get_json("list.json", {
         "corp_code": corp_code, "bgn_de": bgn.strftime("%Y%m%d"),
         "end_de": end.strftime("%Y%m%d"), "pblntf_ty": ty, "page_count": "100"}, counter)
