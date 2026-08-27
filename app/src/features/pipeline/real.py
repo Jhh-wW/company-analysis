@@ -782,6 +782,28 @@ _OUTCOME_MAP: dict[str, Outcome] = {
 }
 
 
+def _reject_outcome(status: str) -> Outcome:
+    """판정 status 를 «화면 종류»로 옮긴다 — 데모와 «같은 규칙»(앞부분 맞추기).
+
+    ★ 왜 정확일치가 아닌가 (2026-08-27 실측 — 운영 결함이었다)
+      `_OUTCOME_MAP` 의 열쇠는 run_pilot 의 `fin(...)` 이름인 「거부_거부A」인데,
+      판정이 내놓는 값은 「거부A_공공기관」이라 열쇠가 「거부_거부A_공공기관」이 된다.
+      정확일치로 찾으면 **둘 다 표에 없어** 기본값으로 떨어졌고, 그래서
+      **공공기관(거부A)이 「공개된 재무 자료가 없습니다」 화면**을 봤다.
+      거부B 는 기본값이 우연히 맞아 티가 안 났다.
+      데모 쪽(`demo._outcome_of`)은 처음부터 앞부분 맞추기라 멀쩡했다 —
+      **같은 뜻을 두 곳이 다른 방법으로 옮기고 있었던 것**이 진짜 원인이다.
+
+    ★ 못 찾으면 「실패」다. 「자료 없음」으로 접지 않는다 — 모르는 것을
+      아는 것처럼 말하는 화면이 바로 이 결함의 정체였다.
+    """
+    raw = f"거부_{status}"
+    for prefix, outcome in _OUTCOME_MAP.items():
+        if raw.startswith(prefix):
+            return outcome
+    return Outcome.FAILED
+
+
 def _engine() -> Any:
     """1판 엔진을 요청마다 독립 module namespace로 불러온다.
 
@@ -1648,14 +1670,36 @@ class RealPipeline:
         has_audit = any(
             "감사보고서" in (row.get("report_nm") or "") for row in audit_rows
         )
+        # ── 조건 2-b: 공개된 재무제표가 «실제로» 있나 (2026-08-27) ─────
+        #
+        # ★ 왜 판정 «전»으로 올렸나 — 「감사보고서라는 이름의 공시가 없다」는
+        #   「분석할 자료가 없다」가 아니다. 사업보고서를 내는 회사는 감사보고서를
+        #   그 «안에» 첨부하므로 별도 공시가 안 생긴다(외부감사법 23조① 단서 —
+        #   첨부해 내면 감사인이 제출한 것으로 «본다»).
+        #   실측 2026-08-27: 현대카드·우리은행·현대캐피탈·SC제일은행·토스·야놀자가
+        #   그래서 거부됐는데, 재무 API 는 20~38개 계정을 정상으로 준다.
+        #   이름난 비상장사 13곳을 재보니 7곳이 이 갈래로 되살아난다.
+        #   → 물어야 할 것은 「감사보고서가 있나」가 아니라
+        #     **「분석할 재무 자료가 실제로 있나」**다. 이 제품이 거부하는 이유가 그것이다.
+        #
+        # ★ 「감사보고서」 갈래를 «안» 없앤 이유 — 없애면 회귀한다(실측).
+        #   삼성디스플레이·쿠팡·우아한형제들은 감사보고서는 있는데 재무 API 는
+        #   자료가 없다. 두 갈래는 서로 다른 회사를 살린다. 대체가 아니라 «추가»다.
+        #
+        # ★ 값은 아래에서 그대로 재사용한다 — 같은 것을 두 번 받지 않는다.
+        #   전자공시 조회일 뿐 **AI 는 안 부른다**(0원).
+        # ★ 여기서 오류가 나면 «거부»가 아니라 실패로 터진다 — 위 공시목록과 같은
+        #   원칙이다. 기술 실패를 「자료가 없음」으로 접으면 거짓 분류가 된다.
+        financials, fin_years = engine.fetch_financials(corp_code, counter)
         judgment = engine.decide(
             profile.get("corp_cls", ""),
             has_audit,
             profile.get("bizr_no"),
             lambda b: engine.match_public_org(b, registry),
+            has_financial_statements=bool(fin_years),
         )
         if judgment.status != "대상":
-            outcome = _OUTCOME_MAP.get(f"거부_{judgment.status}", Outcome.REJECT_NO_DISCLOSURE)
+            outcome = _reject_outcome(judgment.status)
             return RunResult(
                 outcome=outcome,
                 message=_message(outcome),
@@ -1664,7 +1708,7 @@ class RealPipeline:
                         SourceStatus(
                             "전자공시",
                             "none",
-                            "최근 3년 안에 감사보고서 공시가 없습니다",
+                            "최근 3년 안에 공개된 재무 자료가 없습니다",
                         )
                     ]
                     if audit_no_data
@@ -1682,7 +1726,7 @@ class RealPipeline:
         #   「저장 당시 사업연도 == 지금 최신 사업연도」를 보기 때문이다.
         #   둘 다 전자공시 조회일 뿐 **AI는 안 부른다**(0원). 미적중이면
         #   6 수집에 그대로 넘겨 같은 것을 두 번 받지 않는다.
-        financials, fin_years = engine.fetch_financials(corp_code, counter)
+        # financials·fin_years 는 위 「조건 2-b」에서 이미 받아 두었다 (두 번 안 받는다).
         filing = engine.latest_report_rcept(corp_code, judgment.corp_type, counter)
         current_fiscal_year = _current_fiscal_year(fin_years, filing)
         # ★ v1 캐시와 v2 캐시는 «열쇠가 다르다» — 서로의 보고서를 못 꺼낸다.

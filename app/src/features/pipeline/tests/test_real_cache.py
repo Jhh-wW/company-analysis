@@ -140,6 +140,8 @@ class FakeEngine:
     _spent_usd = 0.0
 
     def __init__(self, fiscal_years: Optional[list[int]] = None) -> None:
+        #: `decide()` 가 받은 인자 기록 — 「무엇을 근거로 판정했나」를 시험이 본다
+        self.decide_calls: list[dict[str, Any]] = []
         #: 5.5(공고 판별·요구역량 추출) AI 호출 수
         self.posting_ai_calls = 0
         self.posting_ai_prompts: list[str] = []
@@ -200,8 +202,26 @@ class FakeEngine:
         return None
 
     def decide(
-        self, corp_cls: str, has_audit: bool, bizr_no: Any, matcher: Any
+        self,
+        corp_cls: str,
+        has_audit: bool,
+        bizr_no: Any,
+        matcher: Any,
+        has_financial_statements: bool = False,
     ) -> _FakeJudgment:
+        """★ 진짜 `judgment.logic.decide`와 «같은 모양»을 유지한다.
+
+        모양이 어긋나면 앱은 TypeError로 죽는데, 가짜가 `**kwargs`로 다 받아
+        주면 시험은 초록불이라 그 사고를 못 잡는다. 그래서 인자를 하나하나 적는다.
+        """
+        # 앱이 «무엇을 근거로» 판정을 요청했는지 기록한다 — 시험이 이 값을 대조한다.
+        self.decide_calls.append(
+            {
+                "corp_cls": corp_cls,
+                "has_audit": has_audit,
+                "has_financial_statements": has_financial_statements,
+            }
+        )
         return _FakeJudgment()
 
     # ── 5.5 공고 판별 (AI) · 8·9 생성 (AI) ────────────────
@@ -1088,9 +1108,20 @@ def test_본조사_DART_공시목록오류는_감사보고서없음으로_거부
     assert result.cost_krw == 0
 
 
-def test_본조사_DART_013은_비상장_공시없음으로_명확히거부하고_추가호출하지않는다(
+def test_본조사_DART_013이고_재무제표도_없으면_공시없음으로_명확히거부한다(
     engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """★ 2026-08-27 계약 변경 — 옛 이름은 「013은 …추가호출하지않는다」였다.
+
+    013(감사보고서 목록 비어 있음)은 「이름이 감사보고서인 공시가 없다」일 뿐
+    「분석할 자료가 없다」가 아니다. 사업보고서를 내는 회사는 감사보고서를 그
+    안에 첨부하므로 별도 공시가 안 생긴다(외부감사법 23조① 단서). 그래서 이제
+    **재무제표를 한 번 더 확인한 뒤에** 거부한다 — 그 확인도 없이 거부하던 것이
+    현대카드·우리은행을 삼킨 결함이었다.
+
+    이 시험은 「둘 다 없을 때」의 거부 화면을 지킨다. 「감사보고서는 없지만
+    재무제표는 있을 때」는 바로 아래 시험이 지킨다.
+    """
     original = engine.get_json
     endpoints: list[str] = []
 
@@ -1106,6 +1137,8 @@ def test_본조사_DART_013은_비상장_공시없음으로_명확히거부하�
         raise AssertionError(f"013 뒤 추가 provider 호출: {endpoint}")
 
     monkeypatch.setattr(engine, "get_json", no_disclosure)
+    # 재무제표«도» 없는 상황을 만든다 — 그래야 거부가 «정직한» 거부다.
+    monkeypatch.setattr(engine, "fetch_financials", lambda *_a, **_k: (None, []))
     monkeypatch.setattr(
         engine,
         "decide",
@@ -1115,11 +1148,87 @@ def test_본조사_DART_013은_비상장_공시없음으로_명확히거부하�
     result = _run()
 
     assert result.outcome is Outcome.REJECT_NO_DISCLOSURE
-    assert "감사보고서" in result.message
+    # ★ 화면은 «우리가 찾은 방법»이 아니라 «사용자가 알아야 할 사실»을 말한다.
+    #   옛 문구 「감사보고서를 낸 기록이 없습니다」는 방법이었고, 틀리기도 했다.
+    assert "재무 자료" in result.message
+    assert "감사보고서" not in result.message
     assert result.sources[0].state == "none"
+    # ★ 가짜 엔진의 fetch_financials 는 get_json 을 안 거치므로 여기 안 잡힌다.
+    #   진짜 엔진에서는 fnlttSinglAcnt.json 이 «3번» 더 나간다 (최근 3개 사업연도).
+    #   ⚠️ 돈은 0원이지만 DART 일일 호출 한도는 그만큼 쓴다. 게다가 판정 «전»으로
+    #      옮겼으므로 거부될 회사도 3번을 쓴다 — 예전엔 통과분만 썼다.
+    #      개수를 못 박는 시험은 test_engine_financials_contract.py 에 있다.
     assert endpoints == ["company.json", "list.json"]
     assert engine.client.messages.calls == 0
     assert result.cost_krw == 0
+
+
+def test_본조사_감사보고서가_없어도_재무제표가_있으면_그_사실을_판정에_넘긴다(
+    engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 현대카드·우리은행 부류 — 이 시험이 2026-08-27 수정의 «이유»다.
+
+    실측: 현대카드는 3년간 331건을 공시하고 재무 API 가 38개 계정을 정상으로
+    주는데도, 「감사보고서」라는 이름의 공시가 없다는 이유로 거부됐다.
+    이름난 비상장사 13곳을 재보니 7곳이 같은 이유로 막혀 있었다
+    (우리은행·SC제일은행·토스·야놀자·현대카드·현대캐피탈·현대커머셜).
+
+    이 시험은 앱이 판정에 «무엇을 근거로» 넘기는지를 못 박는다.
+    판정 사다리 자체는 `analysis_engine/src/features/judgment/tests` 가 지킨다.
+    """
+    original = engine.get_json
+
+    def no_audit_but_has_financials(
+        endpoint: str, params: dict[str, Any], counter: Any
+    ) -> dict[str, Any]:
+        if endpoint == "company.json":
+            profile = dict(original(endpoint, params, counter))
+            profile["corp_cls"] = "E"  # 비상장 — 조건 2 로 내려간다
+            return profile
+        if endpoint == "list.json":
+            counter.count += 1
+            return {"status": "013", "message": "조회된 데이타가 없습니다."}
+        return original(endpoint, params, counter)
+
+    monkeypatch.setattr(engine, "get_json", no_audit_but_has_financials)
+
+    _run()
+
+    assert engine.decide_calls, "판정이 아예 호출되지 않았다"
+    넘긴것 = engine.decide_calls[-1]
+    assert 넘긴것["corp_cls"] == "E"
+    assert 넘긴것["has_audit"] is False, "감사보고서가 없는 상황이어야 한다"
+    # ↓ 이 한 줄이 이번 수정의 핵심이다. 빠지면 현대카드가 다시 거부된다.
+    assert 넘긴것["has_financial_statements"] is True
+
+
+def test_본조사_재무제표도_없으면_판정에_없다고_넘긴다(
+    engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """위 시험의 «반대쪽» — 자료가 정말 없을 때 있다고 넘기면 안 된다."""
+    original = engine.get_json
+
+    def nothing_at_all(
+        endpoint: str, params: dict[str, Any], counter: Any
+    ) -> dict[str, Any]:
+        if endpoint == "company.json":
+            profile = dict(original(endpoint, params, counter))
+            profile["corp_cls"] = "E"
+            return profile
+        if endpoint == "list.json":
+            counter.count += 1
+            return {"status": "013", "message": "조회된 데이타가 없습니다."}
+        return original(endpoint, params, counter)
+
+    monkeypatch.setattr(engine, "get_json", nothing_at_all)
+    monkeypatch.setattr(engine, "fetch_financials", lambda *_a, **_k: (None, []))
+
+    _run()
+
+    assert engine.decide_calls, "판정이 아예 호출되지 않았다"
+    넘긴것 = engine.decide_calls[-1]
+    assert 넘긴것["has_audit"] is False
+    assert 넘긴것["has_financial_statements"] is False
 
 
 @pytest.mark.parametrize(

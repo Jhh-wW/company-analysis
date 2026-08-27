@@ -158,3 +158,43 @@ def test_진짜_알맹이는_아직_안_꽂혀_있다():
     assert isinstance(runtime._PIPELINE, DemoPipeline), (
         "진짜 파이프라인이 꽂혔습니다. AI 호출 = 비용이 발생합니다."
     )
+
+# ══ 판정 status → 화면 종류 (2026-08-27 운영 결함) ═══════════════════
+
+
+def test_판정이_내놓는_모든_status가_제_화면으로_간다():
+    """★ 이 시험이 생긴 이유 — 공공기관이 「재무 자료가 없습니다」를 보고 있었다.
+
+    `_OUTCOME_MAP` 의 열쇠는 1판 `fin(...)` 이름인 「거부_거부A」인데, 판정이
+    내놓는 값은 「거부A_공공기관」이라 열쇠가 「거부_거부A_공공기관」이 된다.
+    예전 코드는 «정확일치»로 찾아서 둘 다 못 찾고 기본값으로 떨어뜨렸다.
+    거부B 는 기본값이 우연히 맞아 티가 안 났고, **거부A 만 조용히 틀렸다.**
+
+    ★ 「우연히 맞는 것」은 맞는 것이 아니다. 두 갈래를 다 못 박는다.
+    """
+    from src.features.pipeline.port import Outcome
+
+    엔진_판정 = paths.PROJECT_ROOT / "analysis_engine" / "src" / "features" / "judgment" / "logic.py"
+    글자 = 엔진_판정.read_text(encoding="utf-8")
+    # 판정이 실제로 내놓는 status 문자열을 «엔진 파일에서 직접» 읽는다.
+    # 여기에 손으로 적으면 엔진이 바뀔 때 이 시험이 같이 안 바뀐다.
+    상수: dict[str, str] = {}
+    for node in ast.parse(글자).body:
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                상수[node.target.id] = node.value.value
+        elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+            for t in node.targets:
+                if isinstance(t, ast.Name) and isinstance(node.value.value, str):
+                    상수[t.id] = node.value.value
+
+    assert "STATUS_REJECT_A" in 상수 and "STATUS_REJECT_B" in 상수, f"엔진 상수를 못 읽었다: {상수}"
+    assert real._reject_outcome(상수["STATUS_REJECT_A"]) is Outcome.REJECT_PUBLIC
+    assert real._reject_outcome(상수["STATUS_REJECT_B"]) is Outcome.REJECT_NO_DISCLOSURE
+
+
+def test_모르는_status는_자료없음이_아니라_실패다():
+    """모르는 것을 아는 것처럼 말하는 화면이 이 결함의 정체였다."""
+    from src.features.pipeline.port import Outcome
+
+    assert real._reject_outcome("듣도보도못한값") is Outcome.FAILED

@@ -55,7 +55,13 @@ class DartResponseError(DartClientError):
     """DART가 예상한 계약과 다른 응답을 돌려줬다."""
 
 
-_AUTH_STATUSES = frozenset({"010", "011", "012"})
+#: 인증이 죽은 상태들 — 회사의 문제가 아니라 «열쇠»의 문제다.
+#: ★ 901 추가 (2026-08-27, 적대 검수 D12) — 공식 코드표에서 901 은
+#:   「사용자 계정의 개인정보 보유기간이 만료되어 사용할 수 없는 키」다.
+#:   여기 없으면 열쇠가 죽었는데도 회사마다 오류로 나와, 배치가 남은 회사를
+#:   전부 돌며 DART 호출만 계속 태운다. 열쇠가 죽었으면 즉시 멈추는 게 맞다.
+#:   출처: https://opendart.fss.or.kr/guide/detail.do?apiGrpCd=DS003&apiId=2019016
+_AUTH_STATUSES = frozenset({"010", "011", "012", "901"})
 _STATUS_PATTERNS = (
     re.compile(rb"<status>\s*([0-9]{3})\s*</status>", re.IGNORECASE),
     re.compile(rb'"status"\s*:\s*"([0-9]{3})"', re.IGNORECASE),

@@ -36,7 +36,7 @@ import sys
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Final
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
@@ -348,14 +348,33 @@ def latest_report_rcept(corp_code: str, corp_type: str,
     return max(main_rows or rows, key=lambda r: r["rcept_no"])
 
 
+#: 재무 조회에서 «정상»으로 볼 상태값. 그 밖은 기술 실패다.
+#: 000 = 정상 · 013 = 조회 범위에 자료 없음(빈 결과이지 오류가 아니다).
+#: 인증(010~012)·한도(020)는 dart_client.get_json 이 이미 예외로 터뜨린다.
+FINANCIALS_OK_STATUSES: Final[frozenset[str]] = frozenset({"000", "013"})
+
+
 def fetch_financials(corp_code: str, counter: UsageCounter) -> tuple[Optional[dict], list[int]]:
-    """단일회사 주요계정 — 최근 3개 사업연도 시도. (첫 성공 payload, 성공 연도들)."""
+    """단일회사 주요계정 — 최근 3개 사업연도 시도. (첫 성공 payload, 성공 연도들).
+
+    ★ 왜 오류를 «터뜨리나» (2026-08-27 추가)
+      예전에는 status 가 000 이 아니면 «전부» 조용히 건너뛰고 빈 결과를 돌려줬다.
+      그래서 DART 시스템 점검(800)·정의되지 않은 오류(900)·오류(901) 같은
+      **기술 실패가 「이 회사는 재무 자료가 없다」로 둔갑**했다.
+      이 값이 판정에 쓰이게 되면서(조건 2-b) 그 둔갑은 곧바로 «거부»가 된다 —
+      점검 시간에 멀쩡한 회사가 「분석할 근거가 없다」는 화면을 보게 된다.
+      공시 목록 쪽은 이미 같은 원칙을 지키고 있다(app/.../real.py 의 013 처리):
+      **「빈 결과」와 「못 물어봄」은 다르다.**
+    """
     got, years = None, []
     this_year = dt.date.today().year
     for year in range(this_year - 1, this_year - 4, -1):
         payload = get_json("fnlttSinglAcnt.json", {
             "corp_code": corp_code, "bsns_year": str(year), "reprt_code": "11011"}, counter)
-        if payload.get("status") == "000":
+        status = payload.get("status")
+        if status not in FINANCIALS_OK_STATUSES:
+            raise RuntimeError("DART 재무 조회 응답이 정상 상태가 아닙니다")
+        if status == "000":
             years.append(year)
             if got is None:
                 got = payload
