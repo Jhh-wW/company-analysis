@@ -61,14 +61,40 @@ def _repo_root() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), *[".."] * 6))
 
 
+#: 실행 기록이 쌓이는 갈래들. `app/data/storage.db` 와 함께 «세 갈래»가 되고,
+#: 순서가 «우선순위»다 — main()이 report_id마다 먼저 만난 것을 쓰고 뒤에 나온
+#: 같은 id는 버린다.
+#:
+#: ⚠️ 이 목록은 `<갈래>/<실행폴더>/storage.db` 모양만 잡는다. `app/.local_demo/`
+#:   처럼 «실행폴더 없이» 바로 밑에 둔 저장본 4개는 지금도 안 보인다
+#:   (2026-08-27 실측 — 넷 다 v2 보고서 0건이라 실해는 없다).
+#:
+#: ★ 왜 `.local_evaluation_runs`가 «맨 뒤»인가 (2026-08-27 추가)
+#:   앞에 끼우면 이미 굳어 있는 픽스처 5건의 출처가 바뀔 수 있다. 맨 뒤에
+#:   붙이면 기존 우선순위가 그대로 보존된다.
+#:   (실측: 그 5건은 evaluation_runs에 «없으므로» 지금은 순서와 무관하다.
+#:    그래도 앞으로 대상이 늘 때를 위해 안전한 쪽으로 못 박는다.)
+#: ★ 왜 이 갈래가 빠져 있었나 — 두 갈래만 훑는 바람에 evaluation_runs의
+#:   v2 보고서 9건(제이와이피·삼성전자·현대자동차 포함)을 통째로 못 봤다.
+#:   그 결과 「v2 모양 보고서의 회사는 둘뿐」이라는 틀린 주장이 시험
+#:   머리말에 적혔다 → `test_stored_reports_regression.py` 머리말에
+#:   2026-08-27 정정을 남겼다.
+_RUN_DIRS: Final[tuple[str, ...]] = (
+    ".local_deployment_rehearsal_runs",
+    ".local_evaluation_runs",
+)
+
+
 def _storage_paths(root: str) -> list[str]:
     paths = [os.path.join(root, "app", "data", "storage.db")]
-    paths += sorted(
-        glob.glob(
-            os.path.join(root, "app", ".local_deployment_rehearsal_runs", "*", "storage.db")
+    for run_dir in _RUN_DIRS:
+        paths += sorted(
+            glob.glob(os.path.join(root, "app", run_dir, "*", "storage.db"))
         )
-    )
-    return [path for path in paths if os.path.exists(path)]
+    # ★ exists 가 아니라 isfile 이다 (2026-08-27, 적대 검수 D3)
+    #   `storage.db` 라는 «폴더»가 있으면 exists 는 통과시키고, 그 뒤
+    #   sqlite3 가 OperationalError 로 죽는다. 여기서 거르는 편이 낫다.
+    return [path for path in paths if os.path.isfile(path)]
 
 
 def _split_sentence(display: str) -> tuple[str, str, tuple[int, ...]]:
