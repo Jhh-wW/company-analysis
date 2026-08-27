@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Protocol
 
 if TYPE_CHECKING:
     from src.features.cost_tracking.store import AiCostEvent
@@ -49,6 +49,44 @@ class Outcome(str, Enum):
     GATE_STOPPED = "게이트_중단"
     #: 만들다 실패했다 — 항상 결함
     FAILED = "생성_실패"
+
+
+def outcome_for(raw: str, table: Mapping[str, Outcome]) -> Outcome:
+    """종료 문자열을 «화면 종류»로 옮긴다 — 앞부분 맞추기.
+
+    ★ 왜 이 함수가 여기 있나 (2026-08-27 · 적대 검수 권고)
+      ─────────────────────────────────────────────────────────
+      진짜 파이프라인(`real.py`)과 데모(`demo.py`)가 **같은 뜻을 다른 방법으로**
+      옮기고 있었다. 데모는 앞부분 맞추기, 진짜는 정확일치였다.
+      그 차이가 운영 결함을 만들었다 — 판정이 내놓는 값이 「거부A」에서
+      「거부A_공공기관」으로 길어지자 정확일치가 못 찾아 기본값으로 떨어졌고,
+      **공공기관이 「공개된 재무 자료가 없습니다」 화면**을 봤다.
+      6개월간 아무도 몰랐고, 데모 쪽은 멀쩡했다.
+
+    ★ 왜 «표»는 안 합치나
+      두 표의 열쇠는 애초에 다른 생산자가 낸다 — `real` 쪽은 1판 엔진의
+      `fin(...)` 이름을, `demo` 쪽은 데모가 스스로 쓰는 종료 문자열을 옮긴다.
+      겹치는 열쇠는 절반뿐이라, 하나로 합치면 「어느 쪽이 무엇을 내는지」를
+      읽는 사람이 알 수 없게 된다. **갈라져 있던 것은 표가 아니라 규칙이었다.**
+
+    ★ 앞부분 맞추기인 이유
+      엔진이 내는 이름은 「거부_거부A」처럼 «부류»로 시작하고 뒤에 사유가 붙는다.
+      사유가 늘어나도 부류는 그대로이므로 앞부분으로 잡는 것이 맞다.
+
+    ★ 못 찾으면 「실패」다 — 「자료 없음」으로 접지 않는다.
+      모르는 것을 아는 것처럼 말하는 화면이 바로 위 결함의 정체였다.
+
+    Args:
+        raw: 엔진·데모가 내놓은 종료 문자열 (예: "거부_거부A_공공기관").
+        table: 그 문자열의 «앞부분» → 화면 종류 표. 부르는 쪽이 자기 것을 넘긴다.
+
+    Returns:
+        맞는 화면 종류. 아무 열쇠와도 안 맞으면 ``Outcome.FAILED``.
+    """
+    for prefix, outcome in table.items():
+        if raw.startswith(prefix):
+            return outcome
+    return Outcome.FAILED
 
 
 class Grade(str, Enum):

@@ -198,3 +198,70 @@ def test_모르는_status는_자료없음이_아니라_실패다():
     from src.features.pipeline.port import Outcome
 
     assert real._reject_outcome("듣도보도못한값") is Outcome.FAILED
+
+
+def _엔진_status_상수() -> dict[str, str]:
+    """판정이 «실제로» 내놓는 status 문자열을 엔진 파일에서 직접 읽는다.
+
+    손으로 적으면 엔진이 바뀔 때 이 시험이 같이 안 바뀐다.
+    """
+    엔진_판정 = (
+        paths.PROJECT_ROOT / "analysis_engine" / "src" / "features" / "judgment" / "logic.py"
+    )
+    상수: dict[str, str] = {}
+    for node in ast.parse(엔진_판정.read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                상수[node.target.id] = node.value.value
+        elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+            for t in node.targets:
+                if isinstance(t, ast.Name) and isinstance(node.value.value, str):
+                    상수[t.id] = node.value.value
+    return 상수
+
+
+@pytest.mark.parametrize("어느표", ["real", "demo"])
+def test_두_표가_같은_규칙으로_같은_답을_낸다(어느표: str):
+    """★ 2026-08-27 — 이 시험이 지키는 것은 «표»가 아니라 «규칙»이다.
+
+    진짜 파이프라인과 데모가 같은 뜻을 다른 방법으로 옮기고 있었다.
+    데모는 앞부분 맞추기, 진짜는 정확일치였고, 그 차이 때문에
+    **공공기관이 「공개된 재무 자료가 없습니다」 화면**을 봤다.
+    이제 둘 다 `port.outcome_for` 를 쓴다 — 한쪽만 바꾸면 여기가 빨간불이 된다.
+
+    ★ 표는 «합치지 않았다». 두 표의 열쇠는 애초에 다른 생산자가 낸다
+      (real=1판 엔진의 fin 이름 / demo=데모 자신의 종료 문자열).
+      합치면 「어느 쪽이 무엇을 내는지」를 읽는 사람이 알 수 없게 된다.
+    """
+    from src.features.pipeline import demo as demo_module
+    from src.features.pipeline.port import Outcome, outcome_for
+
+    상수 = _엔진_status_상수()
+    assert "STATUS_REJECT_A" in 상수 and "STATUS_REJECT_B" in 상수, f"엔진 상수를 못 읽었다: {상수}"
+
+    표 = real._OUTCOME_MAP if 어느표 == "real" else demo_module._OUTCOME_MAP
+    기대 = {
+        상수["STATUS_REJECT_A"]: Outcome.REJECT_PUBLIC,
+        상수["STATUS_REJECT_B"]: Outcome.REJECT_NO_DISCLOSURE,
+    }
+    for status, want in 기대.items():
+        assert outcome_for(f"거부_{status}", 표) is want, (
+            f"{어느표} 표가 {status!r} 를 {want.value!r} 로 못 옮긴다"
+        )
+
+
+def test_공용_규칙을_쓰는지_글자로_확인한다():
+    """두 모듈이 «자기 판 4줄»을 도로 만들어 두지 않았는지 본다.
+
+    ★ 이 시험이 없으면 다음 사람이 「간단하니까」 하며 각자 다시 짤 수 있다.
+      그게 이번 결함이 생긴 경로다.
+    """
+    for path in (
+        REAL_PATH,
+        paths.APP_ROOT / "src" / "features" / "pipeline" / "demo.py",
+    ):
+        글자 = path.read_text(encoding="utf-8")
+        assert "outcome_for" in 글자, f"{path.name} 이 공용 규칙을 안 쓴다"
+        assert "raw.startswith(prefix)" not in 글자, (
+            f"{path.name} 에 «자기 판» 앞부분 맞추기가 다시 생겼다 — port.outcome_for 를 써라"
+        )

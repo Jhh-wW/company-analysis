@@ -127,6 +127,7 @@ from src.features.pipeline.port import (
     SourceStatus,
     StepReporter,
     UserInput,
+    outcome_for,
 )
 from src.features.report_standard.constants import (
     COMPARISON_SHORTFALL_REASON,
@@ -797,11 +798,7 @@ def _reject_outcome(status: str) -> Outcome:
     ★ 못 찾으면 「실패」다. 「자료 없음」으로 접지 않는다 — 모르는 것을
       아는 것처럼 말하는 화면이 바로 이 결함의 정체였다.
     """
-    raw = f"거부_{status}"
-    for prefix, outcome in _OUTCOME_MAP.items():
-        if raw.startswith(prefix):
-            return outcome
-    return Outcome.FAILED
+    return outcome_for(f"거부_{status}", _OUTCOME_MAP)
 
 
 def _engine() -> Any:

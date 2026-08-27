@@ -57,6 +57,7 @@ from src.features.pipeline.port import (
     SourceStatus,
     StepReporter,
     UserInput,
+    outcome_for,
 )
 from src.features.pipeline.canonical_demo import (
     DEMO_ALIASES as CANONICAL_DEMO_ALIASES,
@@ -191,11 +192,13 @@ def _in_report_order(sections: list[ReportSection]) -> list[ReportSection]:
 
 
 def _outcome_of(raw: str) -> Outcome:
-    """기존 조사 기록의 종료 문자열을 종료 종류로 옮긴다."""
-    for prefix, outcome in _OUTCOME_MAP.items():
-        if raw.startswith(prefix):
-            return outcome
-    return Outcome.FAILED
+    """기존 조사 기록의 종료 문자열을 종료 종류로 옮긴다.
+
+    ★ 옮기는 «규칙»은 `port.outcome_for` 한 곳에 있다 (2026-08-27).
+      예전에는 이 4줄을 진짜 파이프라인이 «다른 방법»으로 따로 갖고 있었고,
+      그 차이가 운영 결함이 됐다. 표(`_OUTCOME_MAP`)는 데모 것이 따로 맞다.
+    """
+    return outcome_for(raw, _OUTCOME_MAP)
 
 
 def _step(record: dict, name: str) -> Optional[dict]:
