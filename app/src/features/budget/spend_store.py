@@ -526,6 +526,81 @@ def finish_inflight(
     return inserted
 
 
+def settle_inflight_as_reserved(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    phase: str,
+    created_at: str,
+) -> tuple[bool, float]:
+    """미확정 단계를 «예약액을 쓴 것으로» 확정해 마감한다 (관리자 대사용).
+
+    Returns:
+        (새로 적었나, 확정한 금액).
+
+    ★ 왜 `finish_inflight` 를 못 쓰나 (2026-08-28)
+      `finish_inflight` 는 `bucket` 을 «원문»으로 받아 `bucket_id()` 로 지문화해
+      대조한다. 그런데 관리자는 원문 통장을 «가질 수 없다» — 재시작 뒤에는
+      저장된 지문(`list_inflight_day`의 `bucket_id`)밖에 남지 않기 때문이다.
+      그걸 그대로 넘기면 지문을 한 번 더 지문화해 항상 어긋난다.
+      그래서 **저장된 값을 그대로 읽어** 쓴다.
+
+    ★ 금액은 «예약액»이다. 실제 청구액을 모를 때 적게 잡으면 하루 상한이
+      실제보다 헐거워진다. 안전한 쪽으로 기운다.
+
+    ★ 예약액과 확정액이 같으므로 초과 기록(`_record_overrun`)은 남기지 않는다 —
+      초과가 아니기 때문이다.
+    """
+    clean_run = _clean_run_id(run_id)
+    _check_phase(phase)
+    row = conn.execute(
+        f"""
+        SELECT day, bucket_id, reserved_krw FROM {TABLE_SPEND_INFLIGHT}
+         WHERE run_id = ? AND phase = ?
+        """,
+        (clean_run, phase),
+    ).fetchone()
+    if row is None:
+        raise ValueError("마감할 진행 중 비용 표식이 없습니다")
+    day_text = str(row[0])
+    stored_bucket = str(row[1])
+    amount = _clean_amount(float(row[2]))
+
+    inserted = False
+    if amount > 0:
+        cursor = conn.execute(
+            f"""
+            INSERT OR IGNORE INTO {TABLE_SPEND_EVENTS}
+                (run_id, phase, day, bucket_id, cost_krw, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (clean_run, phase, day_text, stored_bucket, amount, created_at),
+        )
+        inserted = cursor.rowcount == 1
+        if not inserted:
+            # 이미 있는 행이 «완전히 같을» 때만 멱등으로 인정한다.
+            raced = conn.execute(
+                f"""
+                SELECT day, bucket_id, cost_krw
+                  FROM {TABLE_SPEND_EVENTS}
+                 WHERE run_id = ? AND phase = ?
+                """,
+                (clean_run, phase),
+            ).fetchone()
+            같은가 = raced is not None and (
+                str(raced[0]) == day_text
+                and str(raced[1]) == stored_bucket
+                and float(raced[2]) == amount
+            )
+            if not 같은가:
+                raise ValueError("같은 요청·단계의 비용 원장 값이 기존 기록과 다릅니다")
+    conn.execute(
+        f"DELETE FROM {TABLE_SPEND_INFLIGHT} WHERE run_id = ? AND phase = ?",
+        (clean_run, phase),
+    )
+    return inserted, amount
+
+
 def keep_inflight_with_known_spend(
     conn: sqlite3.Connection,
     *,

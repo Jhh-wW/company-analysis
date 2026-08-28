@@ -35,7 +35,9 @@ from src.web.security import (
     EMAIL_MAX_CHARS,
     JOB_MAX_CHARS,
     NOTE_MAX_CHARS,
+    PHASE_MAX_CHARS,
     REFERENCE_MAX_CHARS,
+    RUN_ID_MAX_CHARS,
 )
 
 
@@ -262,6 +264,8 @@ async def admin_frame(request: Request):
 def _access_context(request: Request, *, today: dt.date, **kwargs) -> dict:
     """초대·링크 관리 화면이 쓸 값을 모은다."""
     report_states: dict[str, str] = {}
+    # ★ 원장 검사보다 «먼저» 읽는다 — 원장이 나빠도 무엇이 걸렸는지는 보여야 한다.
+    unresolved_spend, unresolved_spend_available = paid_runtime.list_unresolved_spend(today)
     _assert_budget_store_healthy()
 
     try:
@@ -337,6 +341,8 @@ def _access_context(request: Request, *, today: dt.date, **kwargs) -> dict:
         access_data_available=True,
         paid_research_closed=paid_research_closed,
         paid_research_closed_reason=paid_research_closed_reason,
+        unresolved_spend=unresolved_spend,
+        unresolved_spend_available=unresolved_spend_available,
         job_max_chars=JOB_MAX_CHARS,
         note_max_chars=NOTE_MAX_CHARS,
         reference_max_chars=REFERENCE_MAX_CHARS,
@@ -352,6 +358,9 @@ def _access_page(
         page_context = _access_context(request, today=today, **context)
     except _AccessDataUnavailable:
         status_code = 503
+        # ★ 원장을 못 읽어도 «무엇이 걸렸는지»는 따로 읽어 보여 준다 —
+        #   대사하라면서 대사할 대상을 안 보여 주면 관리자는 아무것도 못 한다.
+        축소_미확정, 축소_미확정_읽었나 = paid_runtime.list_unresolved_spend(today)
         revocation_links = []
         revocation_members = []
         revocation_data_available = False
@@ -389,6 +398,8 @@ def _access_page(
             revocation_data_available=revocation_data_available,
             revocation_links=revocation_links,
             revocation_members=revocation_members,
+            unresolved_spend=축소_미확정,
+            unresolved_spend_available=축소_미확정_읽었나,
             paid_research_closed=True,
             paid_research_closed_reason=(
                 "비용 기록을 확인할 수 없어 유료 조사를 닫았습니다. "
@@ -980,14 +991,74 @@ async def admin_budget_recheck(
         target=target,
         reason="opened" if opened else "still_closed",
     )
-    if opened:
+    # ★ 「원장은 살아났지만 미확정 통장이 남아 계속 막혀 있다」는 «부분 성공»이다.
+    #   전에는 이때도 그냥 리다이렉트해서, 관리자 눈에는 **버튼이 아무 일도 안 한
+    #   것처럼** 보였다 (2026-08-28 사용자 신고: 「그냥 버튼만 있는 거 아니냐」).
+    막힌채, _사유 = paid_runtime.paid_research_block()
+    if opened and not 막힌채:
         return _admin_response(
             request, RedirectResponse("/admin/access", status_code=303)
         )
     return _access_page(
         request,
         status_code=503,
-        access_error_title="유료 조사를 다시 열지 못했습니다.",
+        access_error_title=(
+            "아직 유료 조사가 닫혀 있습니다."
+            if opened
+            else "유료 조사를 다시 열지 못했습니다."
+        ),
+        access_error=notice,
+    )
+
+
+@router.post("/admin/budget/settle")
+async def admin_budget_settle(
+    request: Request,
+    run_id: str = Form("", max_length=RUN_ID_MAX_CHARS),
+    phase: str = Form("", max_length=PHASE_MAX_CHARS),
+    csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
+):
+    """미확정 유료 단계 하나를 «대사 완료»로 마감한다.
+
+    ★ 왜 이 경로가 생겼나 (2026-08-28) — 화면은 「관리자가 미확정 비용을 대사해야
+      해당 통장이 다시 열립니다」라고 말하는데, **대사할 방법이 코드에 없었다.**
+      `finish_inflight` 는 내부 정산에서만 불렸고 관리자 경로가 0개였다.
+      그래서 「원장 다시 읽기」를 눌러도 미확정은 그대로 남아 계속 막혔다 —
+      재시작해도 DB에서 다시 읽히므로 **영원히 안 풀렸다.**
+
+    ★ 예약액을 «쓴 것으로» 확정한다. 실제 청구액을 모를 때는 많이 썼다고 가정해야
+      하루 상한이 느슨해지지 않는다 (`paid_runtime.settle_unresolved_spend`).
+    """
+    action = "admin.budget.settle"
+    target = admin_audit.target_id("budget", "inflight")
+    blocked = request_helpers.require_admin_action(
+        request, csrf_token, action=action, target=target
+    )
+    if blocked is not None:
+        return blocked
+
+    마감했나, notice = paid_runtime.settle_unresolved_spend(run_id, phase)
+
+    # 돈을 «썼다고 확정»하는 일이라 성공도 실패도 기록에 남긴다.
+    _mirror_committed_change(
+        request,
+        action=action,
+        target=target,
+        reason="settled" if 마감했나 else "settle_failed",
+    )
+    막힌채, _사유 = paid_runtime.paid_research_block()
+    if 마감했나 and not 막힌채:
+        return _admin_response(
+            request, RedirectResponse("/admin/access", status_code=303)
+        )
+    return _access_page(
+        request,
+        status_code=503,
+        access_error_title=(
+            "한 건을 마감했지만 아직 닫혀 있습니다."
+            if 마감했나
+            else "미확정 비용을 마감하지 못했습니다."
+        ),
         access_error=notice,
     )
 

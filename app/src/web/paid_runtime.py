@@ -208,6 +208,95 @@ def paid_research_block() -> tuple[bool, str]:
     return False, ""
 
 
+def list_unresolved_spend(
+    day: dt.date | None = None,
+) -> tuple[tuple[spend_store.InflightSpend, ...], bool]:
+    """그날 마감되지 않은 유료 단계를 «그대로» 돌려준다.
+
+    Args:
+        day: 기준 날짜. **호출부가 이미 잡아 둔 「오늘」을 넘겨라** —
+            화면 한 장이 시계를 두 번 읽으면 자정을 걸칠 때 스스로 어긋난다
+            (`test_admin_access.py` 의 「요청당 한 번 캡처」 시험이 이걸 지킨다).
+
+    Returns:
+        (미확정 항목들, 읽는 데 성공했나).
+
+    ★ 왜 필요한가 (2026-08-28)
+      화면은 「관리자가 미확정 비용을 대사해야 다시 열립니다」라고 말하는데,
+      **무엇이 걸려 있는지 볼 화면이 없었다.** 대사하라면서 대사할 대상을
+      안 보여 주면 관리자는 아무것도 할 수 없다.
+
+    읽기에 실패하면 «빈 목록 + False» 를 돌려준다 — 못 읽은 것을 「없다」로
+    보이게 하면 안 된다(있는데 없다고 하면 관리자가 손을 뗀다).
+    """
+    try:
+        with storage_db.connect() as conn:
+            spend_store.ensure_schema(conn)
+            기준일 = clock.today_kst() if day is None else day
+            return (spend_store.list_inflight_day(conn, 기준일), True)
+    except Exception:  # noqa: BLE001 — 못 읽어도 관리자 화면은 떠야 한다
+        logger.exception("미확정 유료 단계를 읽지 못했습니다")
+        return ((), False)
+
+
+def settle_unresolved_spend(run_id: str, phase: str) -> tuple[bool, str]:
+    """미확정 단계 하나를 «예약액을 쓴 것으로 확정»해 마감한다.
+
+    Returns:
+        (마감했나, 사람에게 보여 줄 한 줄).
+
+    ★ 왜 «예약액»으로 확정하나 — 실제 청구액을 모르기 때문이다.
+      모를 때는 **많이 썼다고 가정**해야 하루 상한이 느슨해지지 않는다.
+      0원으로 마감하면 「돈은 나갔는데 장부엔 안 남는」 상태가 되어
+      상한이 실제보다 헐거워진다. 안전한 쪽으로 기운다.
+
+    ★★ **진행 중인 유료 단계는 건드리지 않는다.** 돌고 있는 조사를 마감하면
+      그 조사가 끝났을 때 두 번 적히거나 표식을 못 찾아 실패한다.
+    """
+    깨끗한_run = str(run_id or "").strip()
+    깨끗한_phase = str(phase or "").strip()
+    if not 깨끗한_run or not 깨끗한_phase:
+        return (False, "마감할 요청과 단계를 지정해 주세요.")
+
+    with _PAID_PHASE_LOCK:
+        with _SLOT_LOCK:
+            진행중 = {(활성[0], 활성[1]) for 활성 in _ACTIVE_PAID_PHASES}
+        if (깨끗한_run, 깨끗한_phase) in 진행중:
+            return (
+                False,
+                "지금 돌고 있는 단계입니다. 끝난 뒤에 다시 확인해 주세요.",
+            )
+        try:
+            오늘 = clock.today_kst()
+            with storage_db.connect() as conn:
+                spend_store.ensure_schema(conn)
+                대상 = [
+                    항목
+                    for 항목 in spend_store.list_inflight_day(conn, 오늘)
+                    if 항목.run_id == 깨끗한_run and 항목.phase == 깨끗한_phase
+                ]
+                if not 대상:
+                    return (False, "그 미확정 항목을 찾지 못했습니다. 이미 마감됐을 수 있습니다.")
+                항목 = 대상[0]
+                # ⚠️ `finish_inflight` 를 쓰면 «지문을 또 지문화»해 항상 어긋난다 —
+                #   관리자는 원문 통장을 가질 수 없다(재시작 뒤엔 지문만 남는다).
+                spend_store.settle_inflight_as_reserved(
+                    conn,
+                    run_id=항목.run_id,
+                    phase=항목.phase,
+                    created_at=clock.iso_now_kst(),
+                )
+        except Exception:  # noqa: BLE001 — 실패를 성공처럼 보이게 하지 않는다
+            logger.exception("미확정 유료 단계를 마감하지 못했습니다")
+            return (False, "마감하지 못했습니다. 비용 원장을 사람이 직접 확인해야 합니다.")
+        # 마감했으니 장부를 다시 읽어 상태를 새로 정한다.
+        _seed_ledger()
+        남은 = len(_UNRESOLVED_BUCKETS)
+    if 남은:
+        return (True, f"한 건을 마감했습니다. 아직 {남은}건이 남아 있습니다.")
+    return (True, "마감했습니다. 유료 조사를 다시 열었습니다.")
+
+
 def recheck_budget_store() -> tuple[bool, str]:
     """관리자가 「원장을 확인했다」고 할 때 상태를 **다시 계산**한다.
 
