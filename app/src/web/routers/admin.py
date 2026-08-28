@@ -16,6 +16,7 @@ from src.features.auth import logic as auth_logic
 from src.features.feedback_report import constants as feedback_constants
 from src.features.feedback_report import logic as feedback_logic
 from src.features.observability import admin_audit, admin_audit_store
+from src.features.budget import constants as budget_constants
 from src.features.budget import spend_store
 from src.features.pipeline.demo import DemoPipeline
 from src.features.sharelink import allowlist as share_allow
@@ -343,6 +344,7 @@ def _access_context(request: Request, *, today: dt.date, **kwargs) -> dict:
         paid_research_closed_reason=paid_research_closed_reason,
         unresolved_spend=unresolved_spend,
         unresolved_spend_available=unresolved_spend_available,
+        spend_phase_labels=budget_constants.SPEND_PHASE_LABELS,
         job_max_chars=JOB_MAX_CHARS,
         note_max_chars=NOTE_MAX_CHARS,
         reference_max_chars=REFERENCE_MAX_CHARS,
@@ -400,6 +402,7 @@ def _access_page(
             revocation_members=revocation_members,
             unresolved_spend=축소_미확정,
             unresolved_spend_available=축소_미확정_읽었나,
+            spend_phase_labels=budget_constants.SPEND_PHASE_LABELS,
             paid_research_closed=True,
             paid_research_closed_reason=(
                 "비용 기록을 확인할 수 없어 유료 조사를 닫았습니다. "

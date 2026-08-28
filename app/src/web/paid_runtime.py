@@ -195,15 +195,15 @@ def paid_research_block() -> tuple[bool, str]:
         if not _BUDGET_STORE_HEALTHY:
             return (
                 True,
-                "비용 기록을 복원할 수 없어 모든 유료 조사를 닫았습니다. "
-                "관리자가 원장과 손상 기록을 확인해야 다시 열립니다.",
+                "비용 기록 파일을 읽지 못해 돈이 드는 새 조사를 모두 막아 뒀습니다. "
+                "얼마를 썼는지 알 수 없는 상태로는 하루 한도를 지킬 수 없기 때문입니다.",
             )
     with _SLOT_LOCK:
         if _UNRESOLVED_BUCKETS:
             return (
                 True,
-                "provider 과금 여부를 확정하지 못한 통장의 유료 조사를 닫았습니다. "
-                "관리자가 미확정 비용을 대사해야 해당 통장이 다시 열립니다.",
+                "조사 도중 오류가 나서 돈이 얼마 나갔는지 확인되지 않은 건이 남아 있습니다. "
+                "그대로 두면 하루에 쓸 수 있는 돈을 넘겨도 알 수 없어 새 조사를 막아 뒀습니다.",
             )
     return False, ""
 
@@ -256,7 +256,7 @@ def settle_unresolved_spend(run_id: str, phase: str) -> tuple[bool, str]:
     깨끗한_run = str(run_id or "").strip()
     깨끗한_phase = str(phase or "").strip()
     if not 깨끗한_run or not 깨끗한_phase:
-        return (False, "마감할 요청과 단계를 지정해 주세요.")
+        return (False, "마감할 조사와 단계를 지정해 주세요.")
 
     with _PAID_PHASE_LOCK:
         with _SLOT_LOCK:
@@ -288,13 +288,13 @@ def settle_unresolved_spend(run_id: str, phase: str) -> tuple[bool, str]:
                 )
         except Exception:  # noqa: BLE001 — 실패를 성공처럼 보이게 하지 않는다
             logger.exception("미확정 유료 단계를 마감하지 못했습니다")
-            return (False, "마감하지 못했습니다. 비용 원장을 사람이 직접 확인해야 합니다.")
+            return (False, "마감하지 못했습니다. 비용 기록을 사람이 직접 확인해야 합니다.")
         # 마감했으니 장부를 다시 읽어 상태를 새로 정한다.
         _seed_ledger()
         남은 = len(_UNRESOLVED_BUCKETS)
     if 남은:
         return (True, f"한 건을 마감했습니다. 아직 {남은}건이 남아 있습니다.")
-    return (True, "마감했습니다. 유료 조사를 다시 열었습니다.")
+    return (True, "마감했습니다. 새 조사를 다시 열었습니다.")
 
 
 def recheck_budget_store() -> tuple[bool, str]:
@@ -324,24 +324,25 @@ def recheck_budget_store() -> tuple[bool, str]:
         if 진행중:
             return (
                 _BUDGET_STORE_HEALTHY,
-                f"진행 중인 유료 단계가 {진행중}건 있어 다시 검사하지 않았습니다. "
+                f"지금 돌고 있는 조사가 {진행중}건 있어 다시 검사하지 않았습니다. "
                 "끝난 뒤에 다시 눌러 주세요.",
             )
         _seed_ledger()
         열렸나 = _BUDGET_STORE_HEALTHY
         미확정 = len(_UNRESOLVED_BUCKETS)
     if 열렸나 and not 미확정:
-        return (True, "원장을 다시 읽었습니다. 유료 조사를 다시 열었습니다.")
+        return (True, "비용 기록을 다시 읽었습니다. 새 조사를 다시 열었습니다.")
     if 열렸나:
         return (
             True,
-            f"원장은 복원했지만 마감되지 않은 통장이 {미확정}건 남아 "
-            "그 통장만 계속 막혀 있습니다.",
+            f"비용 기록은 다시 읽었습니다. 다만 돈이 얼마 나갔는지 "
+            f"확인되지 않은 건이 {미확정}건 남아 있어 아직 막혀 있습니다. "
+            "위 표에서 그 건을 마감해 주세요.",
         )
     return (
         False,
-        "원장을 다시 읽었지만 여전히 복원할 수 없습니다. "
-        "이력 파일과 비용 원장을 사람이 직접 확인해야 합니다.",
+        "다시 읽어 봤지만 비용 기록을 여전히 읽지 못했습니다. "
+        "기록 파일을 사람이 직접 확인해야 합니다.",
     )
 
 

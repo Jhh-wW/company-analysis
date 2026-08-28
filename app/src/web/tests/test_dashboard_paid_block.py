@@ -44,7 +44,7 @@ def test_원장이_막히면_차단으로_판정한다() -> None:
     막혔나, 사유 = paid_runtime.paid_research_block()
 
     assert 막혔나 is True
-    assert "비용 기록" in 사유
+    assert "비용 기록 파일을 읽지 못해" in 사유
 
 
 def test_미확정_통장만_있어도_차단으로_판정한다() -> None:
@@ -54,7 +54,7 @@ def test_미확정_통장만_있어도_차단으로_판정한다() -> None:
     막혔나, 사유 = paid_runtime.paid_research_block()
 
     assert 막혔나 is True
-    assert "확정하지 못한" in 사유
+    assert "확인되지 않은 건이 남아" in 사유
 
 
 def test_멀쩡하면_차단_아님() -> None:
@@ -98,7 +98,7 @@ def test_첫화면이_유료_차단을_최우선으로_띄운다(monkeypatch: py
     assert 이슈 is not None, "★ 첫 화면이 유료 조사 차단을 안 알린다"
     assert 이슈["kind"] == "paid_research"
     assert 이슈["href"] == "/admin/access", "누를 곳을 알려줘야 한다"
-    assert "비용 기록" in 이슈["detail"]
+    assert "비용 기록 파일을 읽지 못해" in 이슈["detail"]
 
 
 def test_멀쩡하면_첫화면이_유료_차단을_안_띄운다(monkeypatch: pytest.MonkeyPatch) -> None:

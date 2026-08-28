@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 
 import pytest
 
@@ -182,13 +183,9 @@ def test_화면에_마감_버튼과_경고가_있다() -> None:
     """무엇을 하는 버튼인지 옆에 적어야 한다 — 돈을 썼다고 확정하는 일이다."""
     from src.core import paths
 
-    화면 = (
-        paths.APP_ROOT / "src" / "web" / "templates" / "admin_access.html"
-    ).read_text(encoding="utf-8")
-
-    assert 'action="/admin/budget/settle"' in 화면
-    assert "예약액만큼 썼다고 확정" in 화면
-    assert "unresolved_spend" in 화면
+    assert 'action="/admin/budget/settle"' in 전체화면()
+    assert "미리 잡아 둔 금액만큼 쓴 것으로 칩니다" in 전체화면()
+    assert "unresolved_spend" in 전체화면()
 
 
 # ══════════════════════════════════════════════════════════
@@ -233,7 +230,7 @@ def test_미확정이_남으면_다시읽기가_말없이_돌아가지_않는다
 
     assert 응답.status_code == 503, "★ 말없이 303 으로 돌아가면 안 된다"
     assert "아직 유료 조사가 닫혀 있습니다" in 응답.text
-    assert "마감되지 않은 통장" in 응답.text
+    assert "확인되지 않은 건이" in 응답.text
 
 
 def test_화면에_걸린_항목이_실제로_그려진다(_관리자) -> None:
@@ -243,9 +240,9 @@ def test_화면에_걸린_항목이_실제로_그려진다(_관리자) -> None:
 
     화면 = _관리자.get("/admin/access").text
 
-    assert "마감되지 않은 유료 단계" in 화면
+    assert "마감해야 다시 열립니다" in 전체화면()
     assert "run-보이나"[:12] in 화면
-    assert 'action="/admin/budget/settle"' in 화면
+    assert 'action="/admin/budget/settle"' in 전체화면()
 
 
 def test_마감_버튼을_누르면_실제로_열린다(_관리자) -> None:
@@ -283,6 +280,93 @@ def test_원장이_깨진_축소화면에도_걸린_항목이_보인다(_관리�
 
     assert 응답.status_code == 503
     assert "확인 불가" in 응답.text, "축소 화면이 맞는지 확인"
-    assert "마감되지 않은 유료 단계" in 응답.text
+    assert "마감해야 다시 열립니다" in 응답.text
     assert "run-축소본"[:12] in 응답.text
     assert 'action="/admin/budget/settle"' in 응답.text
+
+
+# ══════════════════════════════════════════════════════════
+# ⑥ 화면 문구가 «읽히는가»  ← 2026-08-28 「이게 뭔소리야?」
+# ══════════════════════════════════════════════════════════
+
+
+def _주석을_뺀다(화면: str) -> str:
+    """Jinja 주석({# ... #})은 «개발자용»이라 문구 검사 대상이 아니다.
+
+    ⚠️ 여러 줄에 걸친 주석도 통째로 지운다 — 줄 단위로 지우면 이어지는 줄이 샌다.
+    """
+    return re.sub(r"\{#.*?#\}", "", 화면, flags=re.DOTALL)
+
+
+def 전체화면() -> str:
+    from src.core import paths
+
+    return (
+        paths.APP_ROOT / "src" / "web" / "templates" / "admin_access.html"
+    ).read_text(encoding="utf-8")
+
+
+def _배너화면() -> str:
+    """이번에 다시 쓴 «차단 배너»만 잘라낸다.
+
+    ⚠️ 같은 화면의 다른 절(호출 비용 표 등)에도 내부 용어가 남아 있지만
+      이번 작업 범위가 아니다. 범위를 말없이 넓히지 않는다.
+    """
+    from src.core import paths
+
+    화면 = (
+        paths.APP_ROOT / "src" / "web" / "templates" / "admin_access.html"
+    ).read_text(encoding="utf-8")
+    시작 = 화면.index("{# ──────── 차단 배너 시작 ──────── #}")
+    끝 = 화면.index("{# ──────── 차단 배너 끝 ──────── #}")
+    return 화면[시작:끝]
+
+
+def test_화면에_내부_용어를_쓰지_않는다() -> None:
+    """★ 앞 판은 「통장·대사·원장·예약액」으로 쓰여 주인이 못 읽었다.
+
+    이 화면의 독자는 «개발자가 아니라» 이 서비스의 주인이다.
+    """
+    화면 = _배너화면()
+    금지 = ("provider", "통장", "대사", "원장", "예약액", "미확정", "과금")
+
+    # 주석({# ... #})은 «개발자용»이라 검사 대상이 아니다.
+    # ⚠️ 여러 줄에 걸친 주석도 통째로 지운다 — 줄 단위로 지우면 이어지는 줄이 샌다.
+    본문 = _주석을_뺀다(화면)
+    새어나온것 = [말 for 말 in 금지 if 말 in 본문]
+
+    assert not 새어나온것, f"★ 내부 용어가 화면에 나왔다: {새어나온것}"
+
+
+def test_저절로_풀린다고_말하지_않는다() -> None:
+    """★ 「잠시」는 시간이 지나면 열린다는 뜻으로 읽힌다 — 사실이 아니다.
+
+    서버를 껐다 켜도 안 풀린다. 사람이 마감해야만 열린다.
+    """
+    from src.features.budget.constants import BUDGET_STORE_BLOCKED_MESSAGE
+
+    본문 = _주석을_뺀다(_배너화면())
+
+    assert "잠시" not in BUDGET_STORE_BLOCKED_MESSAGE
+    assert "잠시" not in 본문
+    assert "저절로 풀리지 않습니다" in 본문, "안 풀린다는 사실을 말해야 한다"
+
+
+def test_단계_이름을_읽을_수_있게_보여_준다() -> None:
+    """화면에 「회사_식별」처럼 밑줄 붙은 내부 값이 그대로 나오면 안 된다."""
+    from src.features.budget import constants as budget_constants
+
+    이름표 = budget_constants.SPEND_PHASE_LABELS
+
+    assert set(이름표) == set(budget_constants.SPEND_PHASES), "빠진 단계가 있다"
+    for 값, 이름 in 이름표.items():
+        assert "_" not in 이름, f"{값} → {이름} 에 밑줄이 남았다"
+    assert "spend_phase_labels" in _배너화면()
+
+
+def test_눌러야_할_버튼이_무엇인지_말해_준다() -> None:
+    """★ 버튼이 둘인데 하나만 효과가 있다. 헛클릭을 막아야 한다."""
+    화면 = _배너화면()
+
+    assert "눌러도 열리지 않습니다" in 화면
+    assert "이미 만들어 둔 보고서는 그대로 보실 수 있습니다" in 화면

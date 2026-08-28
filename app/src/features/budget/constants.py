@@ -63,9 +63,13 @@ BUSY_MESSAGE: Final[str] = (
 
 # 재시작이나 대기만으로 풀리지 않는 비용 원장 장애에는 동시 실행 문구를 쓰지 않는다.
 BUDGET_STORE_BLOCKED_MESSAGE: Final[str] = (
-    "비용 기록을 확인할 수 없어 새 조사를 잠시 멈췄습니다. "
-    "관리자 확인이 끝나야 다시 열립니다."
+    "비용 기록에 확인되지 않은 것이 있어 새 조사를 막아 뒀습니다. "
+    "관리자가 확인해야 다시 열립니다."
 )
+# ⚠️ 「잠시」를 쓰지 마라 (2026-08-28). 이 상태는 시간이 지나거나 서버를 다시 켜도
+#   풀리지 않는다 — 사람이 마감해야만 열린다. 「잠시」는 가장 많이 읽히는 줄에서
+#   «기다리면 저절로 열린다»는 틀린 안심을 준다.
+
 
 # ══════════════════════════════════════════════════════════
 # 메모리 청소 (문제로그 P-92-b)
@@ -97,6 +101,14 @@ SPEND_PHASES: Final[tuple[str, ...]] = (
     SPEND_PHASE_OCR,
     SPEND_PHASE_PIPELINE,
 )
+#: 화면에 그대로 그리는 단계 이름. 내부 값(`회사_식별`)은 밑줄이 그대로 보인다.
+#: ★ 값을 바꾸는 게 아니라 «읽을 이름»만 따로 둔다 — 원장에 적히는 값은 그대로다.
+SPEND_PHASE_LABELS: Final[dict[str, str]] = {
+    SPEND_PHASE_CANDIDATE: "회사 후보 찾기",
+    SPEND_PHASE_IDENTIFY: "회사 확인",
+    SPEND_PHASE_OCR: "이미지에서 글자 읽기",
+    SPEND_PHASE_PIPELINE: "본조사",
+}
 
 #: 각 phase가 SQLite에서 먼저 잡고 provider gateway 안에서만 쓰는 예상비용 기준.
 #: 동시 요청의 경쟁 창을 닫는 운영 중단 기준이며 provider 실제 token 집계·환율과

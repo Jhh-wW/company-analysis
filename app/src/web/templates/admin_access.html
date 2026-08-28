@@ -13,63 +13,89 @@
 {# ★ 2026-08-28 — 「관리자 확인이 끝나야 다시 열립니다」라고 말해 놓고
      정작 «확인»을 실행할 버튼이 없었다. 원장을 다시 읽는 버튼을 여기 둔다.
      ⚠️ 강제로 여는 버튼이 아니다 — 자료가 여전히 나쁘면 닫힌 채로 남는다. #}
+{# ──────── 차단 배너 시작 ──────── #}
 {% if paid_research_closed %}
+{# ★ 2026-08-28 문구 재작성 — 앞 판은 「통장·대사·원장·예약액」 같은 내부 용어로 쓰여
+   있어서 주인이 읽고 「이게 뭔소리야?」라고 했다. 이 화면의 독자는 개발자가 아니다.
+   ⚠️ 「잠시」류의 말을 쓰지 마라: 시간이 지나거나 서버를 다시 켜도 안 풀린다.
+      사람이 마감해야만 열린다 — 「잠시」는 틀린 안심을 준다. #}
 <div class="warn-line" role="alert" style="margin-bottom:16px">
-  <span>⚠️</span><span><strong>지금 유료 조사가 닫혀 있습니다.</strong><br>
+  <span>⚠️</span><span>
+  {% if unresolved_spend %}
+    <strong>새 조사가 멈췄습니다 — 아래 {{ unresolved_spend|length }}건을 마감해야 다시 열립니다.</strong><br>
+    AI가 조사하던 중에 오류가 나서, 돈이 얼마 나갔는지 확인되지 않은 조사가
+    {{ unresolved_spend|length }}건 남았습니다.<br>
+    얼마 썼는지 모르는 채로 계속하면 하루에 쓸 수 있는 돈을 넘겨도 알 수 없어서,
+    돈이 드는 새 조사를 막아 뒀습니다.<br>
+    <span class="muted" style="font-size:13px">
+      시간이 지나거나 서버를 다시 켜도 저절로 풀리지 않습니다.
+      이미 만들어 둔 보고서는 그대로 보실 수 있습니다.
+    </span>
+
+    <table style="margin-top:12px;font-size:13px">
+      <thead>
+        <tr><th>시작한 시각</th><th>조사 번호</th><th>멈춘 단계</th>
+            <th>미리 잡아 둔 금액</th><th>마감</th></tr>
+      </thead>
+      <tbody>
+      {% for 항목 in unresolved_spend %}
+        <tr>
+          <td>{{ 항목.started_at }}</td>
+          <td><code>{{ 항목.run_id[:12] }}</code></td>
+          <td>{{ spend_phase_labels.get(항목.phase, 항목.phase) }}</td>
+          <td>{{ '%.0f'|format(항목.reserved_krw) }}원</td>
+          <td>
+            <form method="post" action="/admin/budget/settle" style="margin:0">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="run_id" value="{{ 항목.run_id }}">
+              <input type="hidden" name="phase" value="{{ 항목.phase }}">
+              <button class="btn" type="submit">이 건 마감하기</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <span class="muted" style="font-size:13px">
+      마감하면 그 줄이 끝난 것으로 처리됩니다. 남은 줄이 없어지면 새 조사가 다시 열립니다.<br>
+      실제로 얼마가 나갔는지 알 수 없어서 <strong>미리 잡아 둔 금액만큼 쓴 것으로 칩니다.</strong>
+      적게 잡으면 오늘 남은 돈이 실제보다 많아 보이기 때문에, 많이 쓴 쪽으로 잡습니다.
+    </span>
+
+    <details style="margin-top:12px">
+      <summary class="muted" style="font-size:13px">비용 기록 자체를 못 읽는 경우라면</summary>
+      <form method="post" action="/admin/budget/recheck" style="margin-top:8px">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="btn" type="submit">비용 기록 다시 읽어 보기</button>
+      </form>
+      <span class="muted" style="font-size:13px">
+        비용 기록 파일 자체를 못 읽어서 막혔을 때 쓰는 버튼입니다.
+        위에 마감 안 된 줄이 남아 있는 한, 눌러도 열리지 않습니다.
+      </span>
+    </details>
+  {% else %}
+    <strong>새 조사가 멈췄습니다.</strong><br>
     {{ paid_research_closed_reason }}<br>
     <form method="post" action="/admin/budget/recheck" style="margin-top:10px">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button class="btn" type="submit">원장을 다시 읽고 열기를 시도</button>
+      <button class="btn" type="submit">비용 기록 다시 읽어 보기</button>
     </form>
     <span class="muted" style="font-size:13px">
-      강제로 열지 않습니다. 서버가 뜰 때와 같은 검사를 다시 돌릴 뿐이라,
-      기록이 여전히 복원되지 않으면 닫힌 채로 남습니다.
+      기록을 처음부터 다시 읽어 봅니다. <strong>강제로 열지 않습니다</strong> —
+      기록이 여전히 읽히지 않으면 막힌 채로 남습니다.
+      이미 만들어 둔 보고서는 그대로 보실 수 있습니다.
     </span>
-
-    {# ★ 2026-08-28 — 「관리자가 미확정 비용을 대사해야 다시 열립니다」라고
-       말하면서 **무엇이 걸렸는지 보여주지도, 대사할 수단도 없었다.**
-       그래서 「원장 다시 읽기」를 눌러도 그대로 막혀 있었고, 재시작해도
-       DB에서 다시 읽혀 영영 안 풀렸다. 여기서 하나씩 마감한다. #}
-    {% if unresolved_spend %}
-    <div style="margin-top:14px">
-      <strong>마감되지 않은 유료 단계 {{ unresolved_spend|length }}건</strong>
-      <span class="muted" style="font-size:13px">— 이게 남아 있으면 그 통장은 계속 막힙니다.</span>
-      <table style="margin-top:8px;font-size:13px">
-        <thead>
-          <tr><th>시작</th><th>요청</th><th>단계</th><th>예약액</th><th>대사</th></tr>
-        </thead>
-        <tbody>
-        {% for 항목 in unresolved_spend %}
-          <tr>
-            <td>{{ 항목.started_at }}</td>
-            <td><code>{{ 항목.run_id[:12] }}</code></td>
-            <td>{{ 항목.phase }}</td>
-            <td>{{ '%.0f'|format(항목.reserved_krw) }}원</td>
-            <td>
-              <form method="post" action="/admin/budget/settle" style="margin:0">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <input type="hidden" name="run_id" value="{{ 항목.run_id }}">
-                <input type="hidden" name="phase" value="{{ 항목.phase }}">
-                <button class="btn" type="submit">썼다고 확정</button>
-              </form>
-            </td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-      <span class="muted" style="font-size:13px">
-        실제 청구액을 모르므로 <strong>예약액만큼 썼다고 확정</strong>합니다.
-        모를 때 적게 잡으면 하루 상한이 실제보다 헐거워집니다.
-      </span>
-    </div>
-    {% elif unresolved_spend_available is defined and not unresolved_spend_available %}
-    <p class="muted" style="margin-top:12px">
-      마감되지 않은 단계를 <strong>읽지 못했습니다.</strong> 없는 것과 다릅니다 —
-      비용 원장을 사람이 직접 확인해야 합니다.
+    {% if unresolved_spend_available is defined and not unresolved_spend_available %}
+    <p class="muted" style="margin-top:10px">
+      마감 안 된 줄이 있는지도 <strong>읽지 못했습니다.</strong> 없는 것과 다릅니다 —
+      비용 기록을 사람이 직접 확인해야 합니다.
     </p>
-    {% endif %}</span>
+    {% endif %}
+  {% endif %}
+  </span>
 </div>
 {% endif %}
+{# ──────── 차단 배너 끝 ──────── #}
 
 {% if access_error %}
 <div class="warn-line" role="alert" style="margin-bottom:16px">
