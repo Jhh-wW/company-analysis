@@ -86,7 +86,7 @@ def test_HTTP오류를_비밀값없는_예외로_정규화한다(
     def fail(request, **_kwargs):
         raise urllib.error.HTTPError(request.full_url, status, secret, None, None)
 
-    monkeypatch.setattr(naver_client.urllib.request, "urlopen", fail)
+    monkeypatch.setattr(naver_client, "_urlopen", fail)
 
     with pytest.raises(error_type) as caught:
         naver_client.search_news("회사")
@@ -109,8 +109,8 @@ def test_timeout을_비밀값없는_통신오류로_정규화한다(
         lambda: tmp_path / "usage.json",
     )
     monkeypatch.setattr(
-        naver_client.urllib.request,
-        "urlopen",
+        naver_client,
+        "_urlopen",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError(secret)),
     )
 
@@ -135,7 +135,7 @@ def test_깨진_JSON과_items_누락을_계약오류로_막는다(
         lambda: tmp_path / "usage.json",
     )
     monkeypatch.setattr(
-        naver_client.urllib.request, "urlopen", lambda *_args, **_kwargs: _Response(body)
+        naver_client, "_urlopen", lambda *_args, **_kwargs: _Response(body)
     )
 
     with pytest.raises(naver_client.NaverResponseError):
@@ -153,8 +153,8 @@ def test_필드_형식이_틀려도_전체_호출이_터지지_않는다(
         lambda: tmp_path / "usage.json",
     )
     monkeypatch.setattr(
-        naver_client.urllib.request,
-        "urlopen",
+        naver_client,
+        "_urlopen",
         lambda *_args, **_kwargs: _Response(
             b'{"items":[{"title":null,"link":3,"pubDate":false}]}'
         ),
@@ -182,8 +182,8 @@ def test_뉴스_JSON은_상한보다_한_바이트만_더_읽고_원문없이_�
         lambda: tmp_path / "usage.json",
     )
     monkeypatch.setattr(
-        naver_client.urllib.request,
-        "urlopen",
+        naver_client,
+        "_urlopen",
         lambda *_args, **_kwargs: response,
     )
 

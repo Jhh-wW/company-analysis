@@ -484,6 +484,29 @@ class TestSendReportToNotion:
         assert title_text == "(주)진영 분석 보고서 (2026-08-19)"
         assert "test-token-do-not-log" not in str(body)  # 토큰이 본문에 섞여 들어가면 안 된다
 
+    @pytest.mark.parametrize(
+        "unsafe_url",
+        [
+            "javascript:alert(document.domain)",
+            "data:text/html,<script>alert(1)</script>",
+            "http://notion.example/page",
+            "https://user:password@notion.example/page",
+            "https://notion.example:444/page",
+        ],
+    )
+    def test_외부응답의_위험한_페이지주소는_결과링크로_남기지_않는다(
+        self, notion_env, unsafe_url
+    ):
+        spy = _RecordingSend(
+            responses=[{"id": "page-abc123", "url": unsafe_url}]
+        )
+
+        result = notion.send_report_to_notion(_make_report(), send=spy)
+
+        assert result.success is True
+        assert result.page_id == "page-abc123"
+        assert result.page_url == ""
+
     def test_블록이_100개_넘으면_나눠_보내고_조각_수를_돌려준다(
         self, notion_env, monkeypatch
     ):
@@ -573,7 +596,7 @@ class TestSendReportToNotion:
         def timeout(*_args, **_kwargs):
             raise TimeoutError(secret)
 
-        monkeypatch.setattr(notion.urllib.request, "urlopen", timeout)
+        monkeypatch.setattr(notion, "_urlopen", timeout)
         send = notion._make_urllib_send("notion-secret-token")
 
         with caplog.at_level(logging.WARNING), pytest.raises(notion.NotionAPIError) as exc:
@@ -583,6 +606,52 @@ class TestSendReportToNotion:
         assert secret not in caplog.text
         assert "notion-secret-token" not in caplog.text
         assert "report-original" not in caplog.text
+
+    def test_응답_크기와_최종_URL을_고정해_Bearer_호출을_닫는다(
+        self, monkeypatch
+    ):
+        class Response:
+            headers = {}
+
+            def __init__(self, *, final_url: str, body: bytes) -> None:
+                self.final_url = final_url
+                self.body = body
+                self.read_sizes: list[int] = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def geturl(self) -> str:
+                return self.final_url
+
+            def read(self, amount: int) -> bytes:
+                self.read_sizes.append(amount)
+                return self.body[:amount]
+
+        oversized = Response(
+            final_url=constants.NOTION_API_BASE + constants.PAGES_PATH,
+            body=b"x" * (constants.API_RESPONSE_MAX_BYTES + 1),
+        )
+        redirected = Response(
+            final_url="https://attacker.example/collect",
+            body=b'{}',
+        )
+        send = notion._make_urllib_send("notion-secret-token")
+
+        monkeypatch.setattr(notion, "_urlopen", lambda *_args, **_kwargs: oversized)
+        with pytest.raises(notion.NotionAPIError) as too_large:
+            send("POST", constants.PAGES_PATH, {"private": "report-original"})
+        assert too_large.value.uncertain is True
+        assert oversized.read_sizes == [constants.API_RESPONSE_MAX_BYTES + 1]
+
+        monkeypatch.setattr(notion, "_urlopen", lambda *_args, **_kwargs: redirected)
+        with pytest.raises(notion.NotionAPIError) as wrong_location:
+            send("POST", constants.PAGES_PATH, {"private": "report-original"})
+        assert wrong_location.value.uncertain is True
+        assert redirected.read_sizes == []
 
     def test_명시적_429만_Retry_After만큼_제한재시도한다(self, notion_env):
         calls = 0

@@ -7,8 +7,12 @@ Compose와 Kubernetes에서 같은 비-root 계정, 상태 확인 경로, 영속
 
 - 프로세스 UID/GID는 `1000:1000`이며 root 실행과 권한 상승을 거절한다.
 - `/healthz`는 liveness, `/readyz`는 SQLite·로그인 설정 readiness다.
-- SQLite, 관측 기록, tldextract 캐시는 모두 `/var/data` 영속 볼륨 아래에 둔다.
-- 앱의 작업 드레인 상한은 240초다. Uvicorn은 300초, 플랫폼은 330초를 기다린 뒤 종료한다.
+- SQLite 관측 정본, 전환 전 JSONL 호환 사본, tldextract 캐시는 모두 `/var/data`
+  영속 볼륨 아래에 둔다. 새 비용 원장 전환 뒤 관측·비용 검증은 SQLite만 읽는다.
+- 앱의 작업 드레인 상한은 240초다. Uvicorn은 HTTP task를 먼저 기다린 뒤
+  lifespan 종료를 부르므로 이 두 시간은 겹치지 않고 더해진다. 모든 배포에서
+  Uvicorn HTTP 정리는 20초로 고정하고, Compose·Kubernetes 330초 또는 Render
+  300초 안에 앱 정리 240초·취소 1초·프로세스 종료 여유까지 남긴다.
 - 애플리케이션·Uvicorn 로그는 stdout/stderr로만 보낸다. Compose의 로컬 로그 회전은
   10MB × 5개이며, 운영 플랫폼에서는 표준 출력 수집기를 연결한다.
 - 컨테이너 루트 파일시스템은 읽기 전용으로 쓸 수 있다. 쓰기 경로는 `/var/data`와
@@ -201,8 +205,9 @@ evidence/policy와 다시 대조한다. artifact나 parser가 없거나 결과�
 `BACKUP_TRIGGER_SECRET`, S3 전용 자격증명, `BACKUP_DATA_BOUNDARY_ID`,
 `BACKUP_DATA_AUTHORITY_ID`, `BACKUP_MANIFEST_MIN_RETENTION_DAYS`가 모두 필요하다.
 현재 저장소에는 production-ready `BackupManifestAppender` 구현과 앱 시작 시 provider
-설치 호출이 없으므로 환경 검증은 구성된 외부 백업 배포를 의도적으로 차단한다. DB bucket과
-다른 권한·보존 경계의 append-only sink, signer, 최신 checkpoint 통제 경로를 구현하고
+설치 호출이 없으므로 환경 검증은 구성된 외부 백업 배포를 의도적으로 차단한다. DB와
+그 snapshot이 참조하는 불변 PDF를 한 recovery generation object set으로 저장하는 bucket,
+그 bucket과 다른 권한·보존 경계의 append-only sink, signer, 최신 checkpoint 통제 경로를 구현하고
 `install_manifest_appender_provider(...)`로 주입한 코드가 포함되기 전에는 이 차단을
 환경 표식만으로 해제하지 않는다.
 
@@ -222,4 +227,6 @@ evidence/policy와 다시 대조한다. artifact나 parser가 없거나 결과�
 
 스토리지 클래스는 환경마다 다르므로 PVC에 고정하지 않았다. 볼륨이 UID/GID 1000으로
 쓸 수 있는지, 플랫폼이 `fsGroup`을 지원하는지 먼저 확인한다. 배포 후 `/healthz`와
-`/readyz`를 별도로 관측하고, `/var/data/storage.db`의 플랫폼 외부 백업을 구성한다.
+`/readyz`를 별도로 관측한다. 플랫폼 외부 백업은 `/var/data/storage.db`와 그 DB가
+참조하는 `/var/data/report-artifacts`의 exact bytes를 같은 generation으로 결속해야 한다.
+`storage.db` 한 파일만 백업 완료로 처리하지 않는다.

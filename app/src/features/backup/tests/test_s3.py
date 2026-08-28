@@ -199,6 +199,44 @@ def _database(path: Path) -> str:
     return raw_key
 
 
+def _database_with_external_artifact_reference(path: Path) -> None:
+    _database(path)
+    digest = "a" * 64
+    blob_key = f"sha256/aa/{digest}.blob"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE report_delivery_artifacts ("
+            "artifact_id TEXT PRIMARY KEY, channel TEXT NOT NULL, "
+            "original_state TEXT NOT NULL, blob_key TEXT NOT NULL, "
+            "bytes_sha256 TEXT NOT NULL, byte_length INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE artifact_blob_intents ("
+            "intent_id TEXT PRIMARY KEY, storage_identity TEXT NOT NULL, "
+            "blob_key TEXT NOT NULL, bytes_sha256 TEXT NOT NULL, "
+            "byte_length INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE artifact_blob_intent_events ("
+            "event_id INTEGER PRIMARY KEY, intent_id TEXT NOT NULL, "
+            "event_type TEXT NOT NULL, artifact_id TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO report_delivery_artifacts VALUES "
+            "('artifact-1', 'pdf', 'stored', ?, ?, 7)",
+            (blob_key, digest),
+        )
+        conn.execute(
+            "INSERT INTO artifact_blob_intents VALUES "
+            "('intent-1', 'filesystem:/var/data/report-artifacts', ?, ?, 7)",
+            (blob_key, digest),
+        )
+        conn.execute(
+            "INSERT INTO artifact_blob_intent_events VALUES "
+            "(1, 'intent-1', 'bound', 'artifact-1')"
+        )
+
+
 def test_업로드한_두_파일을_다시_받아_검증하고_원문열쇠를_남기지_않는다(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -228,6 +266,28 @@ def test_업로드한_두_파일을_다시_받아_검증하고_원문열쇠를_�
     assert result.manifest_backup_id == appender.requests[0].backup_id
     assert appender.requests[0].object_key == result.object_key
     assert appender.requests[0].checksum_key == result.checksum_key
+
+
+def test_과거_DB두객체_mechanics는_artifact참조_DB를_업로드하지않는다(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "storage.db"
+    _database_with_external_artifact_reference(source)
+    client = FakeS3()
+    appender = FakeManifestAppender()
+    monkeypatch.setattr(s3, "_new_s3_client", lambda _config: client)
+
+    with pytest.raises(s3.ExternalBackupError, match="SQLite 백업|검증"):
+        _run_backup_mechanics(
+            config=_config(),
+            source_path=source,
+            now=NOW,
+            manifest_appender=appender,
+        )
+
+    assert client.objects == {}
+    assert appender.requests == []
 
 
 def test_보관기간이나_개수상한을_넘은_관리대상_한쌍만_지운다(

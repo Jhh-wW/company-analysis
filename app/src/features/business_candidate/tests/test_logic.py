@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars
 import time
 
 from src.features.budget import logic as budget_logic
@@ -102,6 +103,30 @@ def test_jyp와_주소로_정식법인_후보를_점수화하지만_자동확정
     assert provider.calls == 1
     assert provider.arguments[0]["limit"] == MAX_CANDIDATES
     assert provider.arguments[0]["timeout_sec"] == PROVIDER_TIMEOUT_SEC
+
+
+def test_provider_worker에도_요청로컬_context가_전파된다(monkeypatch):
+    _fresh_rate(monkeypatch)
+    marker = contextvars.ContextVar("candidate_test_marker", default="missing")
+
+    class ContextProvider(FixtureProvider):
+        def search(self, **kwargs):
+            assert marker.get() == "paid-request"
+            return super().search(**kwargs)
+
+    token = marker.set("paid-request")
+    try:
+        result = logic.resolve_candidates(
+            ContextProvider([_jyp_row()]),
+            company="JYP",
+            address_hint="서울 강동구",
+            rate_key="context-propagation",
+            now=15.0,
+        )
+    finally:
+        marker.reset(token)
+
+    assert result.status is logic.ResolutionStatus.OK
 
 
 def test_한글_제이와이피도_법인명_포함으로_후보가_된다(monkeypatch):

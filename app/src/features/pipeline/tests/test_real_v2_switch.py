@@ -19,6 +19,8 @@ from typing import Any
 import pytest
 
 import src.features.composer.pipeline as composer_pipeline
+from src.core.provider_gateway import attempt_context
+from src.core.provider_gateway.attempt_context import ProviderAttemptCallbacks
 from src.features.budget import provider_budget
 from src.features.composer.port import AskFatalError
 from src.features.composer.validate import V2ValidationError
@@ -63,7 +65,13 @@ def engine(monkeypatch: pytest.MonkeyPatch) -> FakeEngine:
 @pytest.fixture(autouse=True)
 def _paid_provider_budget_context():
     """직접 RealPipeline 시험도 웹 worker와 같은 유료 문맥에서 실행한다."""
-    with provider_budget.activate(100_000.0):
+    callbacks = ProviderAttemptCallbacks(
+        lambda _provider, _operation, _reserved: object(),
+        lambda _token: None,
+        lambda _token: None,
+        lambda _token, _observation: None,
+    )
+    with provider_budget.activate(100_000.0), attempt_context.activate(callbacks):
         yield
 
 
@@ -117,6 +125,8 @@ def test_ENGINE_V2_미설정이면_v1_경로_그대로다(
     assert result.report is not None
     assert result.report.schema_version == CANONICAL_SCHEMA_VERSION  # v1 정본
     assert engine.generate_ai_calls > 0  # 기존 생성 경로가 실제로 돌았다
+    assert result.dart_receipt_numbers == ("20260315000123",)
+    assert len(result.financial_payload_digest) == 64
 
 
 def test_ENGINE_V2가_1이면_composer_분기를_탄다(
@@ -129,6 +139,8 @@ def test_ENGINE_V2가_1이면_composer_분기를_탄다(
 
     assert len(calls) == 1
     assert result.message == _V2_SENTINEL_MESSAGE
+    assert result.dart_receipt_numbers == ("20260315000123",)
+    assert len(result.financial_payload_digest) == 64
     # 분기는 수집·판정이 «끝난 뒤»다 — 조각과 판정 결과가 그대로 전달된다
     assert calls[0]["company_name"] == "가나다전자"
     assert calls[0]["corp_type"] == "상장사"
@@ -223,7 +235,8 @@ def test_분기_함수는_v1_자산을_재사용해_run_v2에_넘긴다(
     assert captured["writer_ask"] is not captured["reviewer_ask"]
     # RunResult 매핑
     assert result.outcome is Outcome.REPORT
-    assert result.report is dummy_report
+    assert result.report == dummy_report
+    assert result.report is not None and result.report.sources == []
     assert result.charged is True
     assert result.corp_type == "상장사"
     assert result.fragments_collected == len(frags)
@@ -231,6 +244,131 @@ def test_분기_함수는_v1_자산을_재사용해_run_v2에_넘긴다(
     assert result.sentences_made == 21
     assert result.sentences_passed == 18
     assert steps[-1]["step"] == "v2_composer_완료"
+
+
+def test_v2도_일시적수집실패_보고서를_장기캐시에_저장하지않는다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeEngine()
+    engine, client, frags, financials, _filing = _branch_ingredients(fake)
+    section_ids = real.REQUIRED_SECTION_IDS | real.OPTIONAL_BASIC_SECTION_IDS
+    report = Report(
+        company="가나다전자",
+        job="",
+        corp_type="상장사",
+        grade=Grade.COMPLETE,
+        sections=[
+            real.ReportSection(cell=section_id, title=section_id)
+            for section_id in sorted(section_ids)
+        ],
+    )
+    monkeypatch.setattr(
+        composer_pipeline,
+        "run_v2",
+        lambda *_args, **_kwargs: composer_pipeline.V2RunOutput(
+            report=report,
+            composed_sentences=21,
+            verified_sentences=18,
+        ),
+    )
+    cache_saves: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        real,
+        "_v2_cache_save",
+        lambda **kwargs: cache_saves.append(kwargs),
+    )
+    steps = [
+        {"step": "6_수집_홈페이지", "후보범위완전": True},
+        {"step": "6_수집_공식IR", "후보범위완전": True},
+    ]
+    source_statuses = [
+        real.SourceStatus("회사 공식 IR", "failed", "시간 초과")
+    ]
+
+    result = real._run_v2_composer(
+        engine=engine,
+        client=client,
+        company_name="가나다전자",
+        corp_type="상장사",
+        frags=frags,
+        financials=financials,
+        filing=None,
+        revenue_tables=[],
+        sources=source_statuses,
+        business_date=_DATE,
+        model="가짜모델",
+        steps=steps,
+        corp_id=CORP_ID,
+        current_fiscal_year=2025,
+        source_identity_digest="d" * 64,
+    )
+
+    assert result.outcome is Outcome.REPORT
+    assert result.report is not None
+    assert result.report.sources == source_statuses
+    assert result.generation_cache_eligible is False
+    assert cache_saves == []
+
+
+def test_v2의_완전한수집결과는_수집신원과함께_장기캐시에_저장한다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeEngine()
+    engine, client, frags, financials, _filing = _branch_ingredients(fake)
+    section_ids = real.REQUIRED_SECTION_IDS | real.OPTIONAL_BASIC_SECTION_IDS
+    report = Report(
+        company="가나다전자",
+        job="",
+        corp_type="상장사",
+        grade=Grade.COMPLETE,
+        sections=[
+            real.ReportSection(cell=section_id, title=section_id)
+            for section_id in sorted(section_ids)
+        ],
+    )
+    monkeypatch.setattr(
+        composer_pipeline,
+        "run_v2",
+        lambda *_args, **_kwargs: composer_pipeline.V2RunOutput(
+            report=report,
+            composed_sentences=21,
+            verified_sentences=18,
+        ),
+    )
+    cache_saves: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        real,
+        "_v2_cache_save",
+        lambda **kwargs: cache_saves.append(kwargs),
+    )
+    source_statuses = [real.SourceStatus("회사 공식 IR", "none", "자료 없음")]
+
+    result = real._run_v2_composer(
+        engine=engine,
+        client=client,
+        company_name="가나다전자",
+        corp_type="상장사",
+        frags=frags,
+        financials=financials,
+        filing=None,
+        revenue_tables=[],
+        sources=source_statuses,
+        business_date=_DATE,
+        model="가짜모델",
+        steps=[
+            {"step": "6_수집_홈페이지", "후보범위완전": True},
+            {"step": "6_수집_공식IR", "후보범위완전": True},
+        ],
+        corp_id=CORP_ID,
+        current_fiscal_year=2025,
+        source_identity_digest="d" * 64,
+    )
+
+    assert result.outcome is Outcome.REPORT
+    assert result.report is not None and result.report.sources == source_statuses
+    assert result.generation_cache_eligible is True
+    assert len(cache_saves) == 1
+    assert cache_saves[0]["report"].sources == source_statuses
 
 
 def test_v2_분기는_AskFatalError_원인을_그대로_다시_던진다(

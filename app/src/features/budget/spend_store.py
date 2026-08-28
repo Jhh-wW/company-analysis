@@ -23,6 +23,11 @@ from src.features.budget.constants import SPEND_PHASES
 TABLE_SPEND_EVENTS = "budget_spend_events"
 TABLE_SPEND_INFLIGHT = "budget_spend_inflight"
 TABLE_SPEND_OVERRUNS = "budget_spend_overruns"
+TABLE_BUDGET_SCHEMA_MIGRATIONS = "budget_schema_migrations"
+TABLE_BUDGET_PHASES = "budget_phase_accounts"
+TABLE_BUDGET_ATTEMPTS = "budget_provider_attempts"
+TABLE_BUDGET_ATTEMPT_EVENTS = "budget_provider_attempt_events"
+BUDGET_STATE_CUTOVER_VERSION = "attempt-ledger-v1"
 
 CREATE_SQL = f"""
 CREATE TABLE IF NOT EXISTS {TABLE_SPEND_EVENTS} (
@@ -76,6 +81,167 @@ CREATE_OVERRUN_DAY_INDEX_SQL = f"""
 CREATE INDEX IF NOT EXISTS idx_budget_spend_overrun_day
     ON {TABLE_SPEND_OVERRUNS}(day)
 """
+
+# 새 비용 상태기계의 schema는 이 feature의 기존 영속 bootstrap이 함께 소유한다.
+# 기존 세 표는 호환용으로 그대로 보존하며, 실제 전환은 state_machine.prepare_cutover()
+# 를 명시적으로 호출할 때만 일어난다. schema 생성만으로 실행 중 legacy 행을 고아로
+# 오판하면 안 되기 때문이다.
+CREATE_BUDGET_SCHEMA_MIGRATIONS_SQL = f"""
+CREATE TABLE IF NOT EXISTS {TABLE_BUDGET_SCHEMA_MIGRATIONS} (
+    version                 TEXT PRIMARY KEY,
+    migrated_at             TEXT NOT NULL,
+    legacy_phases           INTEGER NOT NULL CHECK(legacy_phases >= 0),
+    legacy_known_attempts   INTEGER NOT NULL CHECK(legacy_known_attempts >= 0),
+    legacy_unknown_attempts INTEGER NOT NULL CHECK(legacy_unknown_attempts >= 0)
+)
+"""
+
+CREATE_BUDGET_SCHEMA_MIGRATIONS_NO_UPDATE_TRIGGER_SQL = f"""
+CREATE TRIGGER IF NOT EXISTS {TABLE_BUDGET_SCHEMA_MIGRATIONS}_no_update
+BEFORE UPDATE ON {TABLE_BUDGET_SCHEMA_MIGRATIONS}
+BEGIN SELECT RAISE(ABORT, 'budget schema migrations are append-only'); END
+"""
+
+CREATE_BUDGET_SCHEMA_MIGRATIONS_NO_DELETE_TRIGGER_SQL = f"""
+CREATE TRIGGER IF NOT EXISTS {TABLE_BUDGET_SCHEMA_MIGRATIONS}_no_delete
+BEFORE DELETE ON {TABLE_BUDGET_SCHEMA_MIGRATIONS}
+BEGIN SELECT RAISE(ABORT, 'budget schema migrations are append-only'); END
+"""
+
+CREATE_BUDGET_PHASES_SQL = f"""
+CREATE TABLE IF NOT EXISTS {TABLE_BUDGET_PHASES} (
+    run_id             TEXT NOT NULL,
+    phase              TEXT NOT NULL,
+    day                TEXT NOT NULL,
+    bucket_id          TEXT NOT NULL,
+    state              TEXT NOT NULL CHECK(
+        state IN ('ACTIVE', 'SUCCEEDED', 'FAILED', 'UNKNOWN_LEGACY')
+    ),
+    reservation_krw    REAL NOT NULL CHECK(reservation_krw >= 0),
+    lease_owner_id     TEXT,
+    lease_expires_at   TEXT,
+    started_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL,
+    version            INTEGER NOT NULL DEFAULT 0 CHECK(version >= 0),
+    PRIMARY KEY (run_id, phase),
+    CHECK(
+        (state = 'ACTIVE' AND lease_owner_id IS NOT NULL
+                          AND lease_expires_at IS NOT NULL)
+        OR
+        (state <> 'ACTIVE' AND lease_owner_id IS NULL
+                           AND lease_expires_at IS NULL
+                           AND reservation_krw = 0)
+    )
+)
+"""
+
+CREATE_BUDGET_PHASES_DAY_INDEX_SQL = f"""
+CREATE INDEX IF NOT EXISTS idx_budget_phase_day_bucket_state
+    ON {TABLE_BUDGET_PHASES}(day, bucket_id, state)
+"""
+
+CREATE_BUDGET_ATTEMPTS_SQL = f"""
+CREATE TABLE IF NOT EXISTS {TABLE_BUDGET_ATTEMPTS} (
+    attempt_id    TEXT PRIMARY KEY,
+    run_id        TEXT NOT NULL,
+    phase         TEXT NOT NULL,
+    attempt_no    INTEGER NOT NULL CHECK(attempt_no >= 0),
+    provider      TEXT NOT NULL CHECK(length(provider) BETWEEN 1 AND 64),
+    operation     TEXT NOT NULL CHECK(length(operation) BETWEEN 1 AND 80),
+    estimated_krw REAL NOT NULL CHECK(estimated_krw >= 0),
+    created_at    TEXT NOT NULL,
+    UNIQUE (run_id, phase, attempt_no),
+    FOREIGN KEY (run_id, phase)
+        REFERENCES {TABLE_BUDGET_PHASES}(run_id, phase)
+)
+"""
+
+CREATE_BUDGET_ATTEMPTS_PHASE_INDEX_SQL = f"""
+CREATE INDEX IF NOT EXISTS idx_budget_attempt_phase
+    ON {TABLE_BUDGET_ATTEMPTS}(run_id, phase, attempt_no)
+"""
+
+CREATE_BUDGET_ATTEMPT_EVENTS_SQL = f"""
+CREATE TABLE IF NOT EXISTS {TABLE_BUDGET_ATTEMPT_EVENTS} (
+    event_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    attempt_id       TEXT NOT NULL,
+    event_seq        INTEGER NOT NULL CHECK(event_seq >= 0),
+    transport_state  TEXT NOT NULL CHECK(
+        transport_state IN (
+            'PLANNED', 'DISPATCH_INTENT_RECORDED', 'RESPONSE_RECEIVED',
+            'TRANSPORT_AMBIGUOUS', 'LOCAL_FAILURE', 'UNKNOWN_LEGACY'
+        )
+    ),
+    billing_state    TEXT NOT NULL CHECK(
+        billing_state IN (
+            'RESERVED', 'KNOWN_COST', 'CONSERVATIVE_LIABILITY',
+            'LIABILITY_CONFIRMED', 'KNOWN_ZERO', 'UNKNOWN_LEGACY'
+        )
+    ),
+    reservation_krw REAL NOT NULL CHECK(reservation_krw >= 0),
+    known_cost_krw  REAL NOT NULL CHECK(known_cost_krw >= 0),
+    liability_krw   REAL NOT NULL CHECK(liability_krw >= 0),
+    status_code     INTEGER CHECK(status_code IS NULL OR status_code BETWEEN 100 AND 599),
+    error_type      TEXT NOT NULL DEFAULT '' CHECK(length(error_type) <= 128),
+    request_id      TEXT NOT NULL DEFAULT '' CHECK(length(request_id) <= 128),
+    actor_id        TEXT NOT NULL CHECK(length(actor_id) BETWEEN 1 AND 80),
+    reason_code     TEXT NOT NULL CHECK(length(reason_code) BETWEEN 1 AND 64),
+    occurred_at     TEXT NOT NULL,
+    UNIQUE (attempt_id, event_seq),
+    FOREIGN KEY (attempt_id) REFERENCES {TABLE_BUDGET_ATTEMPTS}(attempt_id)
+)
+"""
+
+CREATE_BUDGET_ATTEMPT_EVENTS_INDEX_SQL = f"""
+CREATE INDEX IF NOT EXISTS idx_budget_attempt_event_latest
+    ON {TABLE_BUDGET_ATTEMPT_EVENTS}(attempt_id, event_seq DESC)
+"""
+
+CREATE_BUDGET_ATTEMPTS_NO_UPDATE_TRIGGER_SQL = f"""
+CREATE TRIGGER IF NOT EXISTS {TABLE_BUDGET_ATTEMPTS}_no_update
+BEFORE UPDATE ON {TABLE_BUDGET_ATTEMPTS}
+BEGIN SELECT RAISE(ABORT, 'budget provider attempts are append-only'); END
+"""
+
+CREATE_BUDGET_ATTEMPTS_NO_DELETE_TRIGGER_SQL = f"""
+CREATE TRIGGER IF NOT EXISTS {TABLE_BUDGET_ATTEMPTS}_no_delete
+BEFORE DELETE ON {TABLE_BUDGET_ATTEMPTS}
+BEGIN SELECT RAISE(ABORT, 'budget provider attempts are append-only'); END
+"""
+
+CREATE_BUDGET_ATTEMPT_EVENTS_NO_UPDATE_TRIGGER_SQL = f"""
+CREATE TRIGGER IF NOT EXISTS {TABLE_BUDGET_ATTEMPT_EVENTS}_no_update
+BEFORE UPDATE ON {TABLE_BUDGET_ATTEMPT_EVENTS}
+BEGIN SELECT RAISE(ABORT, 'budget provider attempt events are append-only'); END
+"""
+
+CREATE_BUDGET_ATTEMPT_EVENTS_NO_DELETE_TRIGGER_SQL = f"""
+CREATE TRIGGER IF NOT EXISTS {TABLE_BUDGET_ATTEMPT_EVENTS}_no_delete
+BEFORE DELETE ON {TABLE_BUDGET_ATTEMPT_EVENTS}
+BEGIN SELECT RAISE(ABORT, 'budget provider attempt events are append-only'); END
+"""
+
+# 전환 표식 뒤 구판 표에 새 행을 쓰면 신·구 원장이 갈라진다. 기존 web 통합이
+# 빠진 채 전환된 경우 조용히 과소계상하지 않고 즉시 실패하도록 write barrier를 둔다.
+CREATE_LEGACY_WRITE_BARRIER_SQLS = tuple(
+    f"""
+    CREATE TRIGGER IF NOT EXISTS {table_name}_{operation.lower()}_after_cutover
+    BEFORE {operation} ON {table_name}
+    WHEN EXISTS (
+        SELECT 1 FROM {TABLE_BUDGET_SCHEMA_MIGRATIONS}
+         WHERE version = '{BUDGET_STATE_CUTOVER_VERSION}'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'legacy budget ledger is disabled after cutover');
+    END
+    """
+    for table_name in (
+        TABLE_SPEND_EVENTS,
+        TABLE_SPEND_INFLIGHT,
+        TABLE_SPEND_OVERRUNS,
+    )
+    for operation in ("INSERT", "UPDATE", "DELETE")
+)
 
 
 @dataclass(frozen=True)
@@ -167,6 +333,21 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_INFLIGHT_DAY_INDEX_SQL)
     conn.execute(CREATE_OVERRUN_SQL)
     conn.execute(CREATE_OVERRUN_DAY_INDEX_SQL)
+    conn.execute(CREATE_BUDGET_SCHEMA_MIGRATIONS_SQL)
+    conn.execute(CREATE_BUDGET_SCHEMA_MIGRATIONS_NO_UPDATE_TRIGGER_SQL)
+    conn.execute(CREATE_BUDGET_SCHEMA_MIGRATIONS_NO_DELETE_TRIGGER_SQL)
+    conn.execute(CREATE_BUDGET_PHASES_SQL)
+    conn.execute(CREATE_BUDGET_PHASES_DAY_INDEX_SQL)
+    conn.execute(CREATE_BUDGET_ATTEMPTS_SQL)
+    conn.execute(CREATE_BUDGET_ATTEMPTS_PHASE_INDEX_SQL)
+    conn.execute(CREATE_BUDGET_ATTEMPT_EVENTS_SQL)
+    conn.execute(CREATE_BUDGET_ATTEMPT_EVENTS_INDEX_SQL)
+    conn.execute(CREATE_BUDGET_ATTEMPTS_NO_UPDATE_TRIGGER_SQL)
+    conn.execute(CREATE_BUDGET_ATTEMPTS_NO_DELETE_TRIGGER_SQL)
+    conn.execute(CREATE_BUDGET_ATTEMPT_EVENTS_NO_UPDATE_TRIGGER_SQL)
+    conn.execute(CREATE_BUDGET_ATTEMPT_EVENTS_NO_DELETE_TRIGGER_SQL)
+    for statement in CREATE_LEGACY_WRITE_BARRIER_SQLS:
+        conn.execute(statement)
 
 
 def _record_overrun(

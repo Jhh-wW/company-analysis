@@ -217,6 +217,11 @@ class ReportTable:
     #: 못하는 값이나 데이터는 표로 되돌아가며, 그래프와 표를 동시에 반복하지 않는다.
     #: 기존 positional 생성자의 ``evidence_rows`` 위치를 바꾸지 않도록 맨 뒤에 둔다.
     presentation: str = "table"
+    #: 구조화 수치 claim이 표 제목을 추측하지 않고 읽는 원자료 이름표.
+    #: 값이 없으면 파생 claim을 만들지 않는다.
+    entity_scope: str = ""
+    raw_unit: str = ""
+    unit_dimension: str = ""
 
     @property
     def is_valid(self) -> bool:
@@ -440,6 +445,16 @@ class FactRecord:
     #: 비교 조건을 양사별로 분리한 닫힌 구조. 고객·제품·시장과 양쪽의 기간·
     #: 지표 정의·회계 범위가 모두 같음을 게이트가 직접 검산한다.
     comparison_conditions: dict[str, str] = field(default_factory=dict)
+    #: 새 생성 품질 계약의 구조화 claim 이름표. 모두 additive이며, 빈 값인
+    #: 과거 JSON은 예전과 같은 FactRecord로 복원된다.
+    claim_slot: str = ""
+    metric: str = ""
+    period_start: str = ""
+    period_end: str = ""
+    sign: str = ""
+    unit: str = ""
+    unit_dimension: str = ""
+    formula: str = ""
 
 
 @dataclass(frozen=True)
@@ -497,6 +512,13 @@ class Report:
     analysis_period: str = ""
     #: 가장 최신 실적의 기간·확정 상태. 예: ``2026년 2분기 잠정``.
     latest_performance_period: str = ""
+    #: 새 생성 시점에 적용한 품질 계약과 안전 판정. 빈 값은 이 필드가 생기기 전
+    #: 과거 보고서이며, 조회 때 현재 계약으로 소급 판정하지 않는다.
+    quality_contract_version: str = ""
+    safety_decision: str = ""
+    #: 안전 판정과 실제 공개 행동을 분리한 정책 ID. ``legacy-shadow-exception``은
+    #: 안전 통과를 뜻하지 않으며 화면·PDF가 그 사실을 반드시 알려야 한다.
+    publication_policy: str = ""
 
     @property
     def fact_ledger(self) -> list[FactRecord]:
@@ -578,6 +600,20 @@ class RunResult:
     #: GATE_STOPPED의 후단 원인을 원문 없이 구분하는 닫힌 기계 코드.
     #: 고정 RunRecord 13종에는 넣지 않고 별도 SQLite 부속 원장으로만 보낸다.
     final_gate_reason: str = ""
+    #: 실제 수집 때 확인한 DART 본문·정정공시 접수번호. 원문은 싣지 않는다.
+    dart_receipt_numbers: tuple[str, ...] = ()
+    #: 실제 DART 재무 응답을 정규화한 SHA-256. 재무 원값은 싣지 않는다.
+    financial_payload_digest: str = ""
+    #: single-flight/cache가 실제로 재사용한 불변 보고서 원본 ID.
+    #: 단순히 같은 Report 값을 다시 직렬화한 경우에는 비워 둔다.
+    reused_content_snapshot_id: str = ""
+    #: 위 원본에 최초 승인되어 저장된 PDF artifact ID.
+    #: content와 둘 중 하나만 채워진 결과는 웹 출고 경계가 거절한다.
+    reused_artifact_id: str = ""
+    #: 이 결과를 이후 새 조사 요청의 장기 생성 캐시로 재사용해도 되는가.
+    #: 현재 사용자의 불변 링크·PDF 저장이나 같은 순간 waiter의 짧은 fan-out과는
+    #: 별개다. 파이프라인이 명시적으로 증명하지 않으면 fail-closed로 끈다.
+    generation_cache_eligible: bool = False
 
 
 class Pipeline(Protocol):
@@ -585,6 +621,10 @@ class Pipeline(Protocol):
 
     `demo.py`도 이걸 지키고, 나중에 만들 진짜 파이프라인도 이걸 지킨다.
     """
+
+    #: 공고 이미지 OCR 결과를 실제 보고서 입력으로 쓰는가. 웹은 이 값을
+    #: 확인하기 전에는 OCR provider를 열지 않는다.
+    supports_posting_image_input: bool
 
     def find_company(self, user_input: UserInput) -> Optional[CompanyCard]:
         """입력한 이름으로 회사 하나를 찾는다.

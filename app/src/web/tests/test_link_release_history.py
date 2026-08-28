@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from src.features.auth import constants as auth_constants
@@ -15,6 +16,7 @@ from src.features.report_standard.publish import (
     PublishValidation,
 )
 from src.features.sharelink import store as share_store
+from src.features.sharelink.constants import KEY_COOKIE_NAME
 from src.features.storage import db as storage_db
 from src.web import job_runtime
 from src.web.main import app
@@ -58,19 +60,46 @@ def _publish_blocked(_report):
     )
 
 
-def test_publish_gate_409_stops_only_the_bound_LINK_run(monkeypatch):
-    report_id = "link-publish-blocked-report"
-    _awaiting_link_run(raw_key="publish-blocked-link", report_id=report_id)
+def test_publish_gate_출고시점에만_결속된_LINK_run을_막고_GET은_이력을_읽기만한다(
+    monkeypatch,
+):
+    report_id = "44" * 16
+    raw_key = "55" * 16
+    _awaiting_link_run(raw_key=raw_key, report_id=report_id)
     job_runtime._JOBS.clear()
-    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: object())
-    monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
-    monkeypatch.setattr(reports_router, "_report_for_output", _publish_blocked)
+    validation_calls: list[str] = []
+
+    def publication_blocked(_report):
+        validation_calls.append("called")
+        return _publish_blocked(_report)
+
+    monkeypatch.setattr(reports_router, "_report_for_output", publication_blocked)
+
+    with pytest.raises(PublishBlockedError):
+        reports_router.finalize_new_report_delivery(
+            report_id=report_id,
+            corp_id="corp-naver",
+            billing_bucket_id=raw_key,
+            report=object(),
+            actual_models=("test-model",),
+            reused_from_cache=False,
+        )
+
+    assert validation_calls == ["called"]
 
     with TestClient(app) as client:
+        # 실제 생성 흐름에서는 조사 시작 전에 /k가 이 쿠키를 발급한다.
+        # 여기서는 시작 보고서가 없는 실행 이력만 만들었으므로 그 이미 끝난
+        # 입구를 재연하지 않고, 재시작을 가로질러 살아야 할 쿠키+run 결속을 쓴다.
+        client.cookies.set(KEY_COOKIE_NAME, raw_key)
+        with storage_db.connect() as conn:
+            assert share_store.load_run(conn, report_id) is not None
         blocked = client.get(f"/result/{report_id}", follow_redirects=False)
 
     assert blocked.status_code == 409
     assert "현재 보고서 기준을 통과한 근거가 충분하지 않아" in blocked.text
+    # 공개 GET은 현재 validator를 다시 불러 상태나 판정을 바꾸지 않는다.
+    assert validation_calls == ["called"]
     with storage_db.connect() as conn:
         run = share_store.load_run(conn, report_id)
         assert run is not None
@@ -81,10 +110,11 @@ def test_publish_gate_409_stops_only_the_bound_LINK_run(monkeypatch):
         assert run.internal_ai_cost_krw == 123.0
 
 
-def test_publish_gate_history_storage_failure_does_not_mask_409(monkeypatch):
+def test_publish_gate_history_storage_failure_does_not_mask_original_failure_or_409(
+    monkeypatch,
+):
+    report_id = "56" * 16
     job_runtime._JOBS.clear()
-    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: object())
-    monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
     monkeypatch.setattr(reports_router, "_report_for_output", _publish_blocked)
     monkeypatch.setattr(
         share_store,
@@ -92,8 +122,25 @@ def test_publish_gate_history_storage_failure_does_not_mask_409(monkeypatch):
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("storage down")),
     )
 
+    # 부가 이력 저장 장애가 원래의 출고 차단 예외를 바꾸면 안 된다.
+    with pytest.raises(PublishBlockedError):
+        reports_router.finalize_new_report_delivery(
+            report_id=report_id,
+            corp_id="corp-test",
+            billing_bucket_id="public",
+            report=object(),
+            actual_models=("test-model",),
+            reused_from_cache=False,
+        )
+
+    # 재시작 뒤 공개 GET은 실패 intent를 읽어 같은 409를 내며, 동적 검사를
+    # 다시 실행하지 않는다. 관리자는 현재 권한으로만 이 이력을 볼 수 있다.
+    session = auth_logic.create_session(
+        "admin@example.com", True, subject="google:test-release-admin"
+    )
     with TestClient(app) as client:
-        blocked = client.get("/result/non-link-report", follow_redirects=False)
+        client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
+        blocked = client.get(f"/result/{report_id}", follow_redirects=False)
 
     assert blocked.status_code == 409
     assert "현재 보고서 기준을 통과한 근거가 충분하지 않아" in blocked.text
@@ -102,8 +149,8 @@ def test_publish_gate_history_storage_failure_does_not_mask_409(monkeypatch):
 def test_direct_notion_publish_gate_stops_bound_link_without_calling_notion(
     monkeypatch,
 ):
-    report_id = "link-notion-publish-blocked"
-    _awaiting_link_run(raw_key="notion-publish-blocked-link", report_id=report_id)
+    report_id = "66" * 16
+    _awaiting_link_run(raw_key="77" * 16, report_id=report_id)
     session = auth_logic.create_session("admin@example.com", True)
     monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: object())
     monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
@@ -137,9 +184,9 @@ def test_direct_notion_publish_gate_stops_bound_link_without_calling_notion(
 def test_release_uses_bound_run_id_for_cost_and_does_not_create_report_id_summary(
     monkeypatch,
 ):
-    raw_key = "separate-run-report-link"
-    run_id = "public-run-id"
-    report_id = "stored-report-id"
+    raw_key = "88" * 16
+    run_id = "99" * 16
+    report_id = "aa" * 16
     with storage_db.connect() as conn:
         assert share_store.insert_new(
             conn,

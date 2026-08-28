@@ -47,7 +47,7 @@ render.yaml
 ## 내부 정기 작업 경계
 
 ```text
-Render cron
+향후 Render cron (현재 외부 adapter 부재로 BLOCKED)
   -> python -m tools.trigger_backup 또는 tools.trigger_maintenance
   -> 정확한 HTTPS URL + 작업별 Bearer 비밀, redirect 거부
   -> /internal/backup/run 또는 /internal/maintenance/run
@@ -57,8 +57,8 @@ Render cron
 
 cron 컨테이너는 웹 영속 디스크와 S3 자격증명을 직접 읽지 않는다. 백업 호출 비밀과
 관리 정기작업 비밀은 분리하며, 주간 XLSX와 정리 작업은 AI·DART·Naver·Anthropic을
-호출하지 않는다. 이 경계는 로컬 코드·회귀 시험까지만 검증됐고 실제 Render·S3 연결은
-배포 전 보류 상태다.
+호출하지 않는다. 이 경계는 로컬 코드·회귀 시험까지만 검증됐고 현재 `render.yaml`에는
+cron과 외부 백업 비밀이 없다. 실제 Render·S3 연결과 독립 서명 복구 훈련은 BLOCKED다.
 
 ## 신뢰 경계
 
@@ -81,17 +81,40 @@ cron 컨테이너는 웹 영속 디스크와 S3 자격증명을 직접 읽지 �
 Render에서는 `/var/data` 하나를 영속 루트로 사용한다.
 
 - `storage.db`: 보고서, 세션, 공유, 예산, 자동출고·내부 AI 원가·고객 청구 원장. 구형 PDF 수동 승인 원장은 감사자료로 보존
-- `observability/runs.jsonl`: 실행·비용·게이트 결과
+- `report-artifacts/`: 신규 보고서의 최초 승인 PDF bytes. DB에는 이 파일의 내용주소·hash·길이만 저장
+- `storage.db`의 `observability_run_lifecycle`과 변경 금지 audit: 실행·비용·게이트
+  결과의 현재 정본. 비용 attempt 원장 전환 뒤 재시작 검증과 대시보드는 이 DB를 읽음
+- `observability/runs.jsonl`: 전환 전 외부 분석도구용 호환 사본. 전환 뒤에는 더 쓰지
+  않으며 64MiB 파일·16KiB 행 상한 안에서만 스트리밍해 옛 자료를 이관함
 - `cache/`: 공식 API·도메인 분석의 재생성 가능한 캐시
-- `backups/`: SQLite online backup과 SHA-256
+- `backups/`: SQLite online snapshot과 그 snapshot이 참조하는 PDF bytes를 묶은 recovery generation
 
 SQLite는 런타임 버전을 확인해 WAL-reset 결함 수정판(3.51.3 이상 또는 공식
 3.44.6·3.50.7 역이식 계열)에서만 WAL을 쓴다. 영향을 받는 버전에서는 데이터 안전을
 우선해 `DELETE` rollback journal로 자동 하향한다. 패치판으로 전환한 뒤에는 WAL 복귀와
-동시 요청 부하를 다시 검증한다.
+동시 요청 부하를 다시 검증한다. 모든 쓰기 연결은 라이브러리 기본값에 기대지 않고
+`PRAGMA synchronous=EXTRA`를 강제한다. 현재처럼 `DELETE` journal을 쓸 때 EXTRA는
+commit에 쓰인 rollback journal을 지운 **부모 디렉터리까지** 동기화하므로, commit 직후
+전원 중단으로 마지막 거래가 되돌아가는 위험을 줄인다. 이 연결별 설정을 낮추는 것은
+성능 조정이 아니라 원장 내구성 변경이므로 별도 승인·전원 중단 시험 없이는 금지한다.
+근거: [SQLite PRAGMA synchronous](https://sqlite.org/pragma.html#pragma_synchronous).
 
-DB 백업만으로는 배포를 복구할 수 없다. OAuth 비밀, `PROVENANCE_SEAL_SECRET`,
-공개 origin 설정은 별도 비밀 저장소에 함께 보관한다. 구형
+실행 중 이미 열어 쓴 DB 경로에서 저장소 identity가 사라지면 빈 DB를 새 설치처럼 만들지
+않고 기동/요청을 닫는다. identity와 전체 schema를 가진 검증 복구 DB의 원자 교체만 다시
+bootstrap한다. 단, DB와 같은 영속 볼륨 전체가 함께 사라진 경우는 로컬 identity만으로
+최초 설치와 구분할 수 없으므로 독립 외부 복구 세대·운영 점검이 여전히 필요하다.
+
+최초 승인 PDF는 파일 본문을 `fsync`한 뒤 새 내용주소·임시 hard-link 삭제·새 shard
+디렉터리를 부모 순서로 다시 `fsync`하고 나서야 DB 결속을 허용한다. 이 전원 중단 계약은
+directory handle을 지원하는 Render/Linux 기준이다. Python의 로컬 Windows 파일시스템은
+directory `fsync`를 제공하지 않으므로 그 환경에서는 프로세스 중단 안전성만 주장하며,
+최종 경로가 고전 Windows 지원 길이(문자열 259자)를 넘으면 원시 경로 오류 대신 backend
+생성 단계에서 명시적으로 실패한다. Windows 로컬 통과를 Linux 전원 중단 증거로 쓰지 않는다.
+
+DB 한 파일만으로는 새 보고서 PDF를 복구할 수 없다. 로컬 backup CLI는 DB와 참조
+artifact를 한 generation으로 묶지만, 운영 외부 업로드·독립 서명·restore adapter는
+아직 BLOCKED다. OAuth 비밀, `PROVENANCE_SEAL_SECRET`, 공개 origin 설정은 별도 비밀
+저장소에 함께 보관한다. 구형
 `PDF_RELEASE_PARTICIPANTS`는 감사기록 해석용일 뿐 신규 출고 권한이 아니다.
 
 내부 AI 변동원가는 성공·실패와 무관하게 단계별 실제 model/token/cache/batch 사용량으로 기록한다. 고객 청구는 같은 자동출고 레코드가 생긴 완료 보고서에만 별도로 결정하며, 서버비는 월 고정비 표에 분리한다.

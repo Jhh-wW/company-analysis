@@ -15,6 +15,8 @@ import pytest
 
 from src.core.constants import PIPELINE_ENV, PIPELINE_REAL
 from src.features.auth import logic as auth_logic
+from src.features.auth import constants as auth_constants
+from src.features.budget import state_machine as budget_state_machine
 from src.features.budget.constants import (
     SPEND_PHASE_CANDIDATE,
     SPEND_PHASE_IDENTIFY,
@@ -34,10 +36,18 @@ from src.features.pipeline.port import (
     UserInput,
 )
 from src.features.posting_image import logic as image_logic
+from src.features.report_access import constants as report_access_constants
 from src.features.sharelink import tracks as share_tracks
 from src.features.storage import db as storage_db
 from src.web import evaluation_mode, job_runtime, request_helpers, runtime
 from src.web.main import app
+
+
+# 웹 공통 fixture는 접근·CSRF 같은 비출고 시험을 빠르게 돌리려고 worker의 무거운
+# 출고를 성공 대역으로 바꾼다. 이 파일의 마지막 E2E만은 legacy 보고서가 실제
+# 출고 게이트에서 멈추는지 보므로 fixture 적용 전 원본을 명시적으로 되돌린다.
+_REAL_REQUIRE_REPORT_DELIVERY = job_runtime._require_report_delivery
+_REAL_FINALIZE_REPORT_DELIVERY = job_runtime._finalize_report_delivery
 
 
 class _FakeRealPipeline:
@@ -152,6 +162,9 @@ def _set_evaluation_environment(monkeypatch, *, paid: bool) -> None:
     monkeypatch.setenv(evaluation_mode.ENV_DISABLE_ENGINE_DOTENV, "1")
     monkeypatch.setenv(evaluation_mode.ENV_PER_RUN_CAP_KRW, "1200")
     monkeypatch.setenv(evaluation_mode.ENV_DAILY_CAP_KRW, "2200")
+    # 실제 로컬 실행기도 이 값을 넣는다. 요청 URL·server·peer가 모두 loopback일
+    # 때에만 Secure를 내리는 제품 경계를 그대로 타야 progress grant가 왕복한다.
+    monkeypatch.setenv(auth_constants.ENV_COOKIE_INSECURE, "1")
     if paid:
         for name in evaluation_mode.REQUIRED_PROVIDER_ENV_NAMES:
             monkeypatch.setenv(name, f"unit-test-{name.lower()}")
@@ -196,6 +209,33 @@ def _hidden(html: str, name: str) -> str:
     )
     assert match is not None, f"숨은 입력 {name!r}을 찾지 못했습니다"
     return match.group(1)
+
+
+def test_로컬평가의_비용갈래와_보고서열람신원을_분리한다(monkeypatch) -> None:
+    _set_evaluation_environment(monkeypatch, paid=False)
+
+    assert job_runtime._requires_public_report_grant(
+        (
+            share_tracks.Track.ADMIN,
+            evaluation_mode.LOCAL_BUCKET,
+            2_200.0,
+        )
+    )
+    assert not job_runtime._requires_public_report_grant(
+        (share_tracks.Track.ADMIN, "user:admin@example.com", 5_000.0)
+    )
+    assert job_runtime._requires_public_report_grant(
+        (share_tracks.Track.PUBLIC, "public", 0.0)
+    )
+
+    monkeypatch.setenv(evaluation_mode.ENV_MODE, "0")
+    assert not job_runtime._requires_public_report_grant(
+        (
+            share_tracks.Track.ADMIN,
+            evaluation_mode.LOCAL_BUCKET,
+            2_200.0,
+        )
+    )
 
 
 def test_preview_ui_is_explicit_and_submit_is_locked(monkeypatch) -> None:
@@ -253,6 +293,19 @@ def test_paid_configuration_fails_closed_without_google_ack(monkeypatch) -> None
         assert "GOOGLE_PLACES_BILLING_ACK=1" in str(exc)
     else:  # pragma: no cover - 실패 메시지를 더 분명하게 보이기 위한 분기
         raise AssertionError("Google Places 비용 동의 없이 시작 설정이 통과했습니다")
+
+
+def test_로컬평가_쿠키설정이_빠지면_비용호출전에_시작을_거절한다(
+    monkeypatch,
+) -> None:
+    _set_evaluation_environment(monkeypatch, paid=True)
+    monkeypatch.delenv(auth_constants.ENV_COOKIE_INSECURE, raising=False)
+
+    with pytest.raises(
+        evaluation_mode.EvaluationConfigurationError,
+        match="AUTH_COOKIE_INSECURE=1",
+    ):
+        evaluation_mode.validate_startup_configuration()
 
 
 def test_paid_configuration_allows_google_disabled_without_google_key(
@@ -640,6 +693,16 @@ def test_jyp_fake_adapters_complete_signed_flow_but_legacy_report_is_gate_stoppe
 
     monkeypatch.setattr(google_places, "_urlopen", fake_transport)
     monkeypatch.setattr(job_runtime, "default_extract", fake_extract)
+    monkeypatch.setattr(
+        job_runtime,
+        "_require_report_delivery",
+        _REAL_REQUIRE_REPORT_DELIVERY,
+    )
+    monkeypatch.setattr(
+        job_runtime,
+        "_finalize_report_delivery",
+        _REAL_FINALIZE_REPORT_DELIVERY,
+    )
     origin = {"Origin": "http://127.0.0.1:8020"}
 
     with TestClient(
@@ -728,6 +791,11 @@ def test_jyp_fake_adapters_complete_signed_flow_but_legacy_report_is_gate_stoppe
         )
         assert run.status_code == 303
         job_id = run.headers["location"].rsplit("/", 1)[-1]
+        # 로컬 평가는 비용상 ADMIN 통장을 쓰지만 로그인 관리자는 아니다. 따라서
+        # 해당 브라우저만 progress/결과를 여는 별도 PUBLIC grant가 꼭 있어야 한다.
+        assert client.cookies.get(
+            report_access_constants.PUBLIC_GRANT_COOKIE_NAME
+        )
         for _ in range(100):
             if client.get(f"/api/progress/{job_id}").json()["finished"]:
                 break
@@ -746,24 +814,32 @@ def test_jyp_fake_adapters_complete_signed_flow_but_legacy_report_is_gate_stoppe
     assert transport_calls == 1
     # 회사분석 전용 흐름은 레거시 이미지 필드를 받아도 OCR을 호출하지 않는다.
     assert ocr_calls == 0
+    # 전환 뒤 정본은 legacy budget_spend_events가 아니라 상태기계의 phase/attempt
+    # 원장이다. 공개 API로 같은 실행의 최신 확정 비용만 합쳐 중복 event를 세지 않는다.
     with storage_db.connect() as conn:
-        rows = [
-            (str(row[0]), str(row[1]), float(row[2]))
-            for row in conn.execute(
-                "SELECT run_id, phase, cost_krw FROM budget_spend_events"
-            ).fetchall()
-        ]
-    candidate_run_ids = {
-        run_id for run_id, phase, _cost in rows if phase == SPEND_PHASE_CANDIDATE
-    }
-    assert len(candidate_run_ids) == 1
-    candidate_run_id = next(iter(candidate_run_ids))
-    same_attempt_costs = {
-        phase: cost for run_id, phase, cost in rows if run_id == candidate_run_id
-    }
+        phases = budget_state_machine.list_phases(conn, run_id=job_id)
+        same_attempt_costs = {
+            phase.phase: sum(
+                attempt.known_cost_krw
+                for attempt in budget_state_machine.list_attempts(
+                    conn,
+                    run_id=job_id,
+                    phase=phase.phase,
+                )
+            )
+            for phase in phases
+        }
+        exposure = budget_state_machine.load_run_exposure(conn, run_id=job_id)
+    assert all(
+        phase.state is budget_state_machine.PhaseState.SUCCEEDED
+        for phase in phases
+    )
     assert same_attempt_costs == {
         SPEND_PHASE_CANDIDATE: 49.0,
         SPEND_PHASE_IDENTIFY: 100.0,
         SPEND_PHASE_PIPELINE: 900.0,
     }
     assert sum(same_attempt_costs.values()) == 1049.0
+    assert exposure.known_cost_krw == 1049.0
+    assert exposure.liability_krw == 0.0
+    assert exposure.reservation_krw == 0.0

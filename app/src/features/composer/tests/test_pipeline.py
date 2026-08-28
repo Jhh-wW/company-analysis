@@ -37,8 +37,10 @@ from src.features.composer.dup_detect import (
     NumericOccurrence,
 )
 from src.features.composer.pipeline import V2RunOutput, run_v2
+from src.features.composer.port import FilingMeta, PerformanceTable
 from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
 from src.features.composer.validate import V2ValidationError
+from src.features.pipeline.port import Grade
 
 _LOGGER_NAME = "src.features.composer.pipeline"
 
@@ -47,7 +49,9 @@ _LOGGER_NAME = "src.features.composer.pipeline"
 _SECTION_MARKS = "가나다라마바사아자"
 
 #: 검수 프롬프트에서 대조 문장 번호를 읽는 모양 (verify._build_review_prompt)
-_REVIEW_NUMBER_RE = re.compile(r"\[(\d+)\] \(인용:")
+_REVIEW_NUMBER_RE = re.compile(
+    r"\[(\d+)\] \(등급: [^,\n]+, 인용:"
+)
 
 
 def _raw_fragments() -> dict[int, dict[str, str]]:
@@ -161,8 +165,93 @@ def test_정상_흐름이면_검증된_v2_Report가_나온다():
     # 핵심 요약 3~5문장 — validate_v2를 통과했다는 뜻이다 (예외 없음)
     assert len(report.summary_items) == 3
     assert report.corp_type == "상장사"
+    assert report.grade is Grade.PARTIAL
+    # v2에는 아직 원자 claim 장부가 없다. shadow assessor는 이를 가짜 fact로
+    # 통과시키지 않고 공개 차단/미완성으로 정직하게 측정한다.
+    assert report.fact_records == []
+    assert output.quality_observation.mode == "generation-shadow"
+    assert output.quality_observation.safety_decision == "공개 차단"
+    assert output.quality_observation.publication_grade == "미완성"
+    assert output.quality_observation.release_allowed is False
+    assert report.quality_contract_version == output.quality_observation.contract_version
+    assert report.safety_decision == "공개 차단"
+    assert report.publication_policy == "legacy-shadow-exception-v1"
+    assert any(
+        "안전 검사에서 아직 확인하지 못한 문장·표·도식" in reason
+        for reason in report.shortfall_reasons
+    )
+    assert any(
+        "fact_id와 결속되지 않은 공개 내용" in problem
+        for problem in output.quality_observation.safety_problems
+    )
     # 부록은 인용된 조각(1·2)만, 번호는 조각 번호 그대로
     assert sorted(source.number for source in report.citations) == [1, 2]
+
+
+def _structured_financial_table() -> PerformanceTable:
+    payload = {
+        "status": "000",
+        "list": [
+            {
+                "fs_div": "CFS",
+                "sj_div": "IS",
+                "account_id": "ifrs-full_Revenue",
+                "account_nm": "매출액",
+                "bsns_year": "2025",
+                "reprt_code": "11011",
+                "currency": "KRW",
+                "thstrm_dt": "2025.01.01 ~ 2025.12.31",
+                "thstrm_amount": "1242800000000",
+                "frmtrm_dt": "2024.01.01 ~ 2024.12.31",
+                "frmtrm_amount": "1100000000000",
+                "bfefrmtrm_dt": "2023.01.01 ~ 2023.12.31",
+                "bfefrmtrm_amount": "1000000000000",
+            },
+            {
+                "fs_div": "CFS",
+                "sj_div": "IS",
+                "account_id": "dart_OperatingIncomeLoss",
+                "account_nm": "영업이익",
+                "bsns_year": "2025",
+                "reprt_code": "11011",
+                "currency": "KRW",
+                "thstrm_dt": "2025.01.01 ~ 2025.12.31",
+                "thstrm_amount": "200000000000",
+                "frmtrm_dt": "2024.01.01 ~ 2024.12.31",
+                "frmtrm_amount": "150000000000",
+                "bfefrmtrm_dt": "2023.01.01 ~ 2023.12.31",
+                "bfefrmtrm_amount": "100000000000",
+            },
+        ],
+    }
+    evidence = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return PerformanceTable(
+        caption="전자공시 최근 세 사업연도 연결 주요 실적",
+        headers=("사업연도", "매출액", "영업이익"),
+        rows=(
+            ("2025", "12,428", "2,000"),
+            ("2024", "11,000", "1,500"),
+            ("2023", "10,000", "1,000"),
+        ),
+        unit="억원",
+        cite="조각 9·재무",
+        raw_rows=(
+            ("2025", "1,242,800,000,000", "200,000,000,000"),
+            ("2024", "1,100,000,000,000", "150,000,000,000"),
+            ("2023", "1,000,000,000,000", "100,000,000,000"),
+        ),
+        scale_divisor="100000000",
+        scale_places=0,
+        evidence_rows=(evidence,) * 3,
+        entity_scope="consolidated",
+        raw_unit="원",
+        unit_dimension="currency",
+    )
 
 
 def test_작가와_검수는_서로_다른_프롬프트만_받는다():
@@ -364,3 +453,134 @@ def test_중복이_없으면_경고를_남기지_않는다(caplog):
         )
 
     assert "중복 검출" not in caplog.text
+
+
+def test_잘못된_연평균_AI문장은_최종_Report에서_빠지고_누적claim만_남는다():
+    fragments = {
+        9: {
+            "종류": "재무",
+            "원문": "주요계정(DART API): 매출액 1,242,800,000,000",
+        }
+    }
+
+    class Writer:
+        def __init__(self) -> None:
+            self.section_calls = 0
+
+        def __call__(self, prompt: str) -> str:
+            if "핵심 요약" in prompt:
+                return json.dumps(
+                    {
+                        "문장들": [
+                            {
+                                "글": "연평균 성장률은 25% 이상이다.",
+                                "인용": ["9"],
+                                "등급": GRADE_INTERPRETED,
+                            },
+                            {
+                                "글": "공식 자료에서 사업 변화가 확인된다.",
+                                "인용": ["9"],
+                                "등급": GRADE_CONFIRMED,
+                            },
+                            {
+                                "글": "변화의 배경은 추가 확인이 필요하다.",
+                                "인용": ["9"],
+                                "등급": GRADE_CONFIRMED,
+                            },
+                        ]
+                    },
+                    ensure_ascii=False,
+                )
+            mark = _SECTION_MARKS[self.section_calls]
+            is_past = self.section_calls == 3
+            self.section_calls += 1
+            sentences = [
+                {
+                    "글": f"{mark} 장에서 확인한 회사 사실이다.",
+                    "인용": ["9"],
+                    "등급": GRADE_CONFIRMED,
+                },
+                {
+                    "글": (
+                        "2년 누적 24.28%를 연평균 25% 이상으로 해석할 수 있다."
+                        if is_past
+                        else f"{mark} 장의 자료가 보여 주는 의미다."
+                    ),
+                    "인용": ["9"],
+                    "등급": GRADE_INTERPRETED,
+                },
+            ]
+            return json.dumps({"문장들": sentences}, ensure_ascii=False)
+
+    output = run_v2(
+        "가나다전자",
+        fragments,
+        _structured_financial_table(),
+        writer_ask=Writer(),
+        reviewer_ask=_FakeReviewer(),
+        grade=Grade.COMPLETE,
+        as_of_date="2026-08-28",
+        filing_meta=FilingMeta(
+            document_id="20260828000123",
+            title="사업보고서",
+            disclosed_at="2026-03-20",
+        ),
+    )
+
+    public_text = " ".join(
+        [
+            text
+            for section in output.report.sections
+            for text, _citation in section.prose_lines
+        ]
+        + [item.text for item in output.report.summary_items]
+    )
+    assert "연평균 25%" not in public_text
+    assert "누적 증감률은 24.28%" in public_text
+    assert len(output.report.fact_records) == 2
+    assert all(fact.formula == "rate" for fact in output.report.fact_records)
+    assert output.report.grade is Grade.PARTIAL
+    assert any(
+        "수치·날짜 문장" in reason
+        for reason in output.report.shortfall_reasons
+    )
+
+
+def test_한문장_장이_있으면_COMPLETE가_아니라_PARTIAL과_이유가_나온다():
+    class OneSentenceWriter:
+        def __init__(self) -> None:
+            self.section_calls = 0
+
+        def __call__(self, prompt: str) -> str:
+            if "핵심 요약" in prompt:
+                return _summary_json()
+            mark = _SECTION_MARKS[self.section_calls]
+            self.section_calls += 1
+            return json.dumps(
+                {
+                    "문장들": [
+                        {
+                            "글": f"{mark} 장에서 확인한 회사의 고유 사실이다.",
+                            "인용": ["1"],
+                            "등급": GRADE_CONFIRMED,
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+
+    output = run_v2(
+        "가나다전자",
+        _raw_fragments(),
+        None,
+        writer_ask=OneSentenceWriter(),
+        reviewer_ask=_FakeReviewer(),
+        grade=Grade.COMPLETE,
+    )
+
+    assert output.report.grade is Grade.PARTIAL
+    assert "identity" in output.quality_observation.underfilled_sections
+    assert any(
+        "공개 문장이 1개라 완성 기준 2개에 못 미칩니다" in reason
+        for reason in output.report.shortfall_reasons
+    )

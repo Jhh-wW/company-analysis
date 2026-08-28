@@ -1002,6 +1002,8 @@ def _metrics_of(record: dict, report: Optional[Report]) -> dict:
 class DemoPipeline:
     """저장된 파일럿 기록을 돌려주는 알맹이."""
 
+    supports_posting_image_input = False
+
     def find_company(self, user_input: UserInput) -> Optional[CompanyCard]:
         """입력한 이름으로 회사 하나를 찾는다."""
         if _is_canonical_demo_name(user_input.company):

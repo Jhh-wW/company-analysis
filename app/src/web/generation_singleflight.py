@@ -1,0 +1,814 @@
+"""웹 유료 실행과 report_delivery single-flight를 잇는 adapter.
+
+서로 다른 비용 통장은 같은 회사라도 절대 합치지 않는다. 소유자가
+확정된 뒤에만 본조사 유료 phase를 만들어, waiter의 중복 예약이
+owner를 입구에서 막는 순서 역전을 피한다.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import datetime as dt
+import logging
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Any, Final
+
+from src.core import clock
+from src.core.constants import MAX_AI_CALLS_PER_REQUEST
+from src.features.budget.constants import PAID_PHASE_LEASE_SEC, SPEND_PHASE_PIPELINE
+from src.features.pipeline.constants import ANTHROPIC_TIMEOUT_SEC
+from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
+from src.features.report_delivery import artifact as delivery_artifact
+from src.features.report_delivery import singleflight
+from src.features.report_delivery import store as delivery_store
+from src.features.report_delivery.cache_identity import CacheLookupKey
+from src.features.report_delivery.models import DeliveryPolicy
+from src.features.storage import db as storage_db
+from src.features.storage import reports as report_store
+from src.shared import generation_coordination
+from src.shared.generation_cache_identity import GenerationCacheNamespace
+from src.shared.report_source_identity import ReportSourceIdentity
+from src.web import paid_runtime
+
+
+logger = logging.getLogger(__name__)
+
+# 단일 provider timeout보다 넉넉하게 잡아, heartbeat 직후 process가 멎어도
+# 살아 있는 provider 호출과 takeover가 겹치지 않게 한다.
+LEASE_TTL: Final[dt.timedelta] = dt.timedelta(minutes=15)
+HEARTBEAT_INTERVAL_SEC: Final[float] = 30.0
+RESULT_FANOUT_TTL: Final[dt.timedelta] = dt.timedelta(minutes=2)
+FAILURE_FANOUT_TTL: Final[dt.timedelta] = dt.timedelta(minutes=2)
+WAITER_POLL_SEC: Final[float] = 0.2
+
+# ``MAX_RESPONSE_SEC=300``은 진행 화면의 안내 기준이지 작업 강제 종료 시간이
+# 아니다. 실제 유료 경계의 근거 있는 상한은 다음 두 기존 계약이다.
+#
+# * 한 요청의 provider 호출은 최대 15회
+# * 한 호출의 SDK timeout은 180초
+#
+# 최악의 provider 대기 45분에 DART·공식 웹 수집과 로컬 검증 여유 15분을 더한
+# 기존 paid-phase lease 1시간을 single-flight owner의 절대 상한으로도 쓴다.
+# 이 값 뒤에는 heartbeat를 더 연장하지 않아 멈춘 thread가 영구 owner가 될 수 없다.
+OWNER_MAX_AGE: Final[dt.timedelta] = dt.timedelta(seconds=PAID_PHASE_LEASE_SEC)
+PROVIDER_IN_FLIGHT_GRACE: Final[dt.timedelta] = dt.timedelta(
+    seconds=ANTHROPIC_TIMEOUT_SEC + (2 * HEARTBEAT_INTERVAL_SEC)
+)
+OWNER_PROVIDER_ADMISSION_AGE: Final[dt.timedelta] = (
+    OWNER_MAX_AGE - PROVIDER_IN_FLIGHT_GRACE
+)
+WAITER_MAX_AGE_SEC: Final[float] = float(PAID_PHASE_LEASE_SEC)
+
+if MAX_AI_CALLS_PER_REQUEST * ANTHROPIC_TIMEOUT_SEC > (
+    OWNER_PROVIDER_ADMISSION_AGE.total_seconds()
+):  # pragma: no cover - 서로 다른 정본 상수가 어긋나면 import부터 실패한다.
+    raise RuntimeError("provider 최악 대기보다 single-flight owner 상한이 짧습니다")
+
+
+class GenerationSingleflightUnavailable(
+    generation_coordination.GenerationCoordinationError
+):
+    """lease/DB 무결성을 확인할 수 없어 provider를 열지 않는다."""
+
+
+class PaidGenerationAdmissionUnavailable(
+    generation_coordination.GenerationCoordinationError
+):
+    """owner의 본조사 비용 phase를 예약하지 못했다."""
+
+
+@dataclass
+class GenerationSession:
+    """배경 Job 하나의 lease·대기·지연 유료 phase 상태."""
+
+    run_id: str
+    share_key: str
+    billing_bucket_id: str
+    cap_krw: float | None
+    on_paid_phase: Any
+    _state: str = field(default="new", init=False)
+    _key: singleflight.LeaseKey | None = field(default=None, init=False)
+    _cache_namespace: GenerationCacheNamespace | None = field(default=None, init=False)
+    _preflight_identity_digest: str = field(default="", init=False)
+    _handle: singleflight.LeaseHandle | None = field(default=None, init=False)
+    _paid_phase: paid_runtime.PaidPhase | None = field(default=None, init=False)
+    _provider_stack: contextlib.ExitStack | None = field(default=None, init=False)
+    _cancel_wait: threading.Event = field(default_factory=threading.Event, init=False)
+    _stop_heartbeat: threading.Event = field(default_factory=threading.Event, init=False)
+    _heartbeat_thread: threading.Thread | None = field(default=None, init=False)
+    _lease_error: BaseException | None = field(default=None, init=False)
+    # Job scheduler가 이 세션을 만들 때부터 한 시간 전체 마감이 흐른다.
+    # owner를 늦게 얻었다고 다시 한 시간을 주면 preflight→wait→takeover가
+    # 이어질 때 한 요청의 슬롯 수명이 계속 늘어나므로, 최초 요청 시각 한 벌을
+    # 모든 waiter·owner·bypass 경계가 함께 쓴다.
+    _execution_started_at: dt.datetime | None = field(default=None, init=False)
+    _execution_started_monotonic: float = field(default=0.0, init=False)
+    _lock: threading.RLock = field(default_factory=threading.RLock, init=False)
+
+    def __post_init__(self) -> None:
+        # 함수 객체를 dataclass default_factory에 고정하지 않는다. 시험 clock과
+        # 운영 clock adapter가 교체돼도 생성 순간의 같은 두 시계를 읽어야 한다.
+        self._execution_started_at = clock.now_kst()
+        self._execution_started_monotonic = time.monotonic()
+
+    @property
+    def callbacks(self) -> generation_coordination.GenerationCallbacks:
+        return generation_coordination.GenerationCallbacks(
+            coordinate=self.coordinate,
+            ensure_paid_phase=self.ensure_paid_phase,
+        )
+
+    @property
+    def owns_generation(self) -> bool:
+        with self._lock:
+            return self._state == "owner"
+
+    @property
+    def paid_phase(self) -> paid_runtime.PaidPhase | None:
+        with self._lock:
+            return self._paid_phase
+
+    @property
+    def cache_namespace(self) -> GenerationCacheNamespace | None:
+        """pipeline이 provider 전에 확정해 이 세션에 맡긴 생성기 신원."""
+
+        with self._lock:
+            return self._cache_namespace
+
+    @property
+    def preflight_identity_digest(self) -> str:
+        """DART 접수번호·재무 응답으로 싸게 재검증한 출처 지문."""
+
+        with self._lock:
+            return self._preflight_identity_digest
+
+    def _set_owner(
+        self,
+        *,
+        key: singleflight.LeaseKey,
+        handle: singleflight.LeaseHandle,
+    ) -> None:
+        with self._lock:
+            self._key = key
+            self._handle = handle
+            self._state = "owner"
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop,
+            name=f"generation-lease:{self.run_id}",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
+
+    def _owner_deadlines(
+        self,
+        handle: singleflight.LeaseHandle | None,
+    ) -> tuple[dt.datetime, dt.datetime]:
+        """새 provider 마감과 절대 마감을 요청 전체 시작 시각에서 계산한다.
+
+        ``handle``은 owner 호출부와 기존 시험의 인터페이스를 유지하기 위해 받는다.
+        bypass에서는 ``None``이며, 마감 기준은 어느 경우든 세션 생성 시각이다.
+        """
+
+        del handle
+        started_at = self._execution_started_at
+        if started_at is None:  # pragma: no cover - dataclass 생성 계약 방어
+            raise GenerationSingleflightUnavailable(
+                "보고서 생성 전체 시작 시각이 없습니다"
+            )
+        started_at = started_at.astimezone(dt.timezone.utc)
+
+        return (
+            started_at + OWNER_PROVIDER_ADMISSION_AGE,
+            started_at + OWNER_MAX_AGE,
+        )
+
+    def _monotonic_owner_remaining(self) -> dt.timedelta:
+        """벽시계가 뒤로 움직여도 owner 수명이 늘지 않게 하는 두 번째 시계."""
+
+        with self._lock:
+            started = self._execution_started_monotonic
+        remaining_sec = (
+            started + OWNER_MAX_AGE.total_seconds() - time.monotonic()
+        )
+        return dt.timedelta(seconds=max(0.0, remaining_sec))
+
+    def _bounded_owner_ttl(self, now: dt.datetime) -> dt.timedelta:
+        """최초 획득과 heartbeat 모두 요청 전체 절대 상한 안에 묶는다.
+
+        무료 preflight가 오래 걸린 뒤 owner가 되면 ``acquire``의 기본 15분을
+        그대로 주는 것만으로도 전체 한 시간이 다시 늘어난다. 그래서 아직
+        handle이 없는 최초 획득도 최초 요청 시각의 남은 시간만 받는다.
+        """
+
+        _provider_deadline, lease_deadline = self._owner_deadlines(None)
+        remaining = min(
+            lease_deadline - now.astimezone(dt.timezone.utc),
+            self._monotonic_owner_remaining(),
+        )
+        if remaining <= dt.timedelta(0):
+            raise generation_coordination.GenerationExecutionDeadlineExceeded(
+                "보고서 생성 owner의 최대 실행 시간을 넘었습니다"
+            )
+        return min(LEASE_TTL, remaining)
+
+    def _bounded_heartbeat_ttl(
+        self,
+        handle: singleflight.LeaseHandle,
+        now: dt.datetime,
+    ) -> dt.timedelta:
+        """heartbeat가 최초 요청의 절대 상한을 한 번도 넘지 않게 한다."""
+
+        del handle
+        return self._bounded_owner_ttl(now)
+
+    def _require_provider_admission_time(
+        self,
+        handle: singleflight.LeaseHandle | None,
+        now: dt.datetime,
+    ) -> None:
+        provider_deadline, _lease_deadline = self._owner_deadlines(handle)
+        with self._lock:
+            started = self._execution_started_monotonic
+        monotonic_deadline = (
+            started + OWNER_PROVIDER_ADMISSION_AGE.total_seconds()
+        )
+        if (
+            now.astimezone(dt.timezone.utc) >= provider_deadline
+            or time.monotonic() >= monotonic_deadline
+        ):
+            raise generation_coordination.GenerationExecutionDeadlineExceeded(
+                "보고서 생성 제한시간이 가까워 새 provider 호출을 시작하지 않습니다"
+            )
+
+    def _heartbeat_loop(self) -> None:
+        while not self._stop_heartbeat.wait(HEARTBEAT_INTERVAL_SEC):
+            try:
+                with self._lock:
+                    handle = self._handle
+                    if self._state != "owner" or handle is None:
+                        return
+                heartbeat_at = clock.now_kst()
+                lease_ttl = self._bounded_heartbeat_ttl(handle, heartbeat_at)
+                with storage_db.connect() as conn:
+                    refreshed = singleflight.heartbeat(
+                        conn,
+                        handle=handle,
+                        now=heartbeat_at,
+                        lease_ttl=lease_ttl,
+                    )
+                if refreshed is None:
+                    raise GenerationSingleflightUnavailable(
+                        "보고서 생성 lease 소유권을 잃었습니다"
+                    )
+                with self._lock:
+                    self._handle = refreshed
+            except BaseException as exc:  # noqa: BLE001 - 다음 provider를 닫는다
+                with self._lock:
+                    self._lease_error = exc
+                logger.exception(
+                    "보고서 생성 lease heartbeat 실패 run_id=%s",
+                    self.run_id,
+                )
+                return
+
+    def _read_completed(
+        self,
+        conn: Any,
+        *,
+        key: singleflight.LeaseKey,
+        content_id: str,
+        artifact_id: str,
+    ) -> generation_coordination.ReusedGeneration:
+        content = delivery_store.load_content_snapshot(conn, content_id)
+        if content is None:
+            raise GenerationSingleflightUnavailable(
+                "완료 lease가 가리키는 보고서 내용이 없습니다"
+            )
+        if content.cache_namespace_id != key.cache_namespace_id:
+            raise GenerationSingleflightUnavailable(
+                "완료 lease와 보고서의 생성기 신원이 다릅니다"
+            )
+        source = delivery_store.load_source_snapshot(conn, content.source_snapshot_id)
+        if source is None:
+            raise GenerationSingleflightUnavailable(
+                "완료된 보고서의 출처 snapshot이 없습니다"
+            )
+        pipeline_source_digest = ReportSourceIdentity(
+            dart_receipt_numbers=source.dart_receipt_nos,
+            financial_payload_digest=source.financial_payload_sha256,
+        ).cache_digest
+        if pipeline_source_digest != key.source_identity_digest:
+            raise GenerationSingleflightUnavailable(
+                "lease와 보고서의 출처 신원이 다릅니다"
+            )
+        artifact = delivery_artifact.load_artifact_metadata(conn, artifact_id)
+        if artifact is None or artifact.content_snapshot_id != content.content_id:
+            raise GenerationSingleflightUnavailable(
+                "완료 lease의 PDF artifact가 보고서 원본과 다릅니다"
+            )
+        try:
+            report = report_store.report_from_json(content.payload.decode("utf-8"))
+        except (UnicodeDecodeError, TypeError, ValueError) as exc:
+            raise GenerationSingleflightUnavailable(
+                "완료된 보고서 내용을 읽지 못했습니다"
+            ) from exc
+        cache_key = CacheLookupKey(
+            billing_bucket_id=key.billing_bucket_id,
+            corp_id=key.corp_id,
+            namespace_id=key.cache_namespace_id,
+            preflight_identity_digest=key.source_identity_digest,
+        )
+        cache_eligible = delivery_store.cache_entry_matches_exactly(
+            conn,
+            key=cache_key,
+            content_snapshot_id=content.content_id,
+            artifact_id=artifact.artifact_id,
+        )
+        return generation_coordination.ReusedGeneration(
+            content_snapshot_id=content.content_id,
+            artifact_id=artifact.artifact_id,
+            report=report,
+            actual_models=content.actual_models,
+            generation_cache_eligible=cache_eligible,
+        )
+
+    def _read_cached_release(
+        self,
+        conn: Any,
+        *,
+        key: CacheLookupKey,
+    ) -> generation_coordination.ReusedGeneration | None:
+        """전역 캐시의 본문·최초 PDF 결속을 한 묶음으로 읽는다."""
+
+        policy = DeliveryPolicy(
+            content_max_age=dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS),
+            public_link_lifetime=dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS),
+        )
+        cached = delivery_store.load_cache_hit(
+            conn,
+            key=key,
+            policy=policy,
+            delivered_at=clock.now_kst(),
+        )
+        if cached is None:
+            return None
+        lease_key = singleflight.LeaseKey(
+            billing_bucket_id=key.billing_bucket_id,
+            corp_id=key.corp_id,
+            cache_namespace_id=key.namespace_id,
+            source_identity_digest=key.preflight_identity_digest,
+        )
+
+        def invalidate(reason_code: str) -> None:
+            invalidated_at = clock.now_kst()
+            removed = delivery_store.invalidate_cache_entry(
+                conn,
+                key=key,
+                expected_content_snapshot_id=cached.content.content_id,
+                expected_artifact_id=cached.artifact_id,
+                reason_code=reason_code,
+                invalidated_at=invalidated_at,
+            )
+            if removed:
+                singleflight.expire_completed_result(
+                    conn,
+                    key=lease_key,
+                    content_snapshot_id=cached.content.content_id,
+                    artifact_id=cached.artifact_id,
+                    now=invalidated_at,
+                )
+
+        try:
+            metadata = delivery_artifact.load_artifact_metadata(
+                conn,
+                cached.artifact_id,
+            )
+        except delivery_artifact.ArtifactError:
+            invalidate("artifact_metadata_corrupt")
+            return None
+        if (
+            metadata is None
+            or metadata.content_snapshot_id != cached.content.content_id
+            or metadata.blob_pointer is None
+        ):
+            invalidate("artifact_binding_missing")
+            return None
+        # backend와 자동승인 원장은 web adapter가 소유한다. 실제 생성 조회에서만
+        # 읽고, 과거 공개 GET의 fail-closed 계약은 건드리지 않는다.
+        from src.features.export_pdf import release_store as pdf_release_store  # noqa: PLC0415
+        from src.features.export_pdf.automatic_release import (  # noqa: PLC0415
+            report_sha256,
+        )
+        from src.web import report_delivery_adapter  # noqa: PLC0415
+
+        try:
+            inspection = delivery_artifact.inspect_artifact(
+                conn,
+                report_delivery_adapter.configured_artifact_backend(),
+                metadata.artifact_id,
+            )
+        except delivery_artifact.ArtifactError:
+            invalidate("artifact_inspection_failed")
+            return None
+        if (
+            inspection is None
+            or inspection.status
+            is not delivery_artifact.ArtifactInspectionStatus.AVAILABLE
+            or inspection.pdf_bytes is None
+        ):
+            invalidate("artifact_bytes_unavailable")
+            return None
+        try:
+            report = report_store.report_from_json(
+                cached.content.payload.decode("utf-8")
+            )
+        except (UnicodeDecodeError, TypeError, ValueError) as exc:
+            invalidate("report_payload_invalid")
+            return None
+        approval_found = False
+        try:
+            for origin in delivery_artifact.deliveries_for_artifact(
+                conn,
+                artifact_id=metadata.artifact_id,
+            ):
+                if origin.billing_bucket_id != key.billing_bucket_id:
+                    continue
+                record = pdf_release_store.load_automatic_release_record(
+                    conn,
+                    report_id=origin.public_id,
+                    report_sha256=report_sha256(report),
+                    pdf_sha256=metadata.blob_pointer.sha256,
+                    checker_version=metadata.version.checker_version,
+                )
+                if record is not None:
+                    approval_found = True
+                    break
+        except (ValueError, RuntimeError):
+            invalidate("approval_record_corrupt")
+            return None
+        if not approval_found:
+            invalidate("approval_record_missing")
+            return None
+        return generation_coordination.ReusedGeneration(
+            content_snapshot_id=cached.content.content_id,
+            artifact_id=cached.artifact_id,
+            report=report,
+            actual_models=cached.content.actual_models,
+            generation_cache_eligible=True,
+        )
+
+    def coordinate(
+        self,
+        corp_id: str,
+        cache_namespace: GenerationCacheNamespace | None,
+        preflight_identity_digest: str,
+    ) -> generation_coordination.ReusedGeneration | None:
+        """전역 cache를 먼저 읽고, miss면 같은 사전 신원 owner를 정한다."""
+
+        with self._lock:
+            if self._state != "new":
+                raise GenerationSingleflightUnavailable(
+                    "한 조사에서 생성 조정을 두 번 시작할 수 없습니다"
+                )
+        clean_corp = str(corp_id).strip()
+        clean_namespace = (
+            cache_namespace.namespace_id
+            if isinstance(cache_namespace, GenerationCacheNamespace)
+            else ""
+        )
+        clean_source = str(preflight_identity_digest).strip()
+        # 부분 지문으로 예전 결과를 공유하는 것이 더 위험하다. 이때는
+        # lease를 작대기로 만들지 않고 요청별로 새로 생성한다.
+        if not clean_corp or not clean_namespace or not clean_source:
+            with self._lock:
+                self._cache_namespace = None
+                self._preflight_identity_digest = ""
+                self._state = "bypass"
+            return None
+        with self._lock:
+            self._cache_namespace = cache_namespace
+            self._preflight_identity_digest = clean_source
+        key = singleflight.LeaseKey(
+            billing_bucket_id=self.billing_bucket_id,
+            corp_id=clean_corp,
+            cache_namespace_id=clean_namespace,
+            source_identity_digest=clean_source,
+        )
+        cache_key = CacheLookupKey.from_preflight(
+            billing_bucket_id=self.billing_bucket_id,
+            corp_id=clean_corp,
+            namespace=cache_namespace,
+            preflight_identity_digest=clean_source,
+            preflight_cache_usable=True,
+        )
+
+        # DART preflight가 오래 걸렸다고 여기서 대기 시간을 새로 한 시간 주지
+        # 않는다. 요청 전체 절대 마감 한 벌을 owner와 waiter가 같이 쓴다.
+        wait_deadline = self._execution_started_monotonic + WAITER_MAX_AGE_SEC
+        while True:
+            if self._cancel_wait.is_set():
+                with self._lock:
+                    self._state = "cancelled"
+                raise generation_coordination.GenerationWaitCancelled(
+                    "보고서 생성 대기 요청이 취소됐습니다"
+                )
+            wait_remaining = wait_deadline - time.monotonic()
+            if wait_remaining <= 0:
+                with self._lock:
+                    self._state = "timed_out"
+                raise generation_coordination.GenerationWaitTimedOut(
+                    "먼저 시작한 보고서 생성을 기다리는 최대 시간을 넘었습니다"
+                )
+            try:
+                with storage_db.connect() as conn:
+                    delivery_store.save_cache_namespace(conn, cache_namespace)
+                    cached = self._read_cached_release(conn, key=cache_key)
+                    if cached is not None:
+                        with self._lock:
+                            self._key = key
+                            self._state = "cache_reused"
+                        return cached
+                    acquired_at = clock.now_kst()
+                    acquired = singleflight.acquire(
+                        conn,
+                        key=key,
+                        owner_id=self.run_id,
+                        now=acquired_at,
+                        lease_ttl=self._bounded_owner_ttl(acquired_at),
+                    )
+                    if acquired.disposition is singleflight.AcquireDisposition.COMPLETED:
+                        reused = self._read_completed(
+                            conn,
+                            key=key,
+                            content_id=acquired.completed_content_id,
+                            artifact_id=acquired.completed_artifact_id,
+                        )
+                        with self._lock:
+                            self._key = key
+                            self._state = "reused"
+                        return reused
+                    if acquired.disposition is singleflight.AcquireDisposition.FAILED:
+                        with self._lock:
+                            self._key = key
+                            self._state = "failed"
+                        raise generation_coordination.GenerationOwnerFailed(
+                            f"먼저 시작한 보고서 생성이 실패했습니다: "
+                            f"{acquired.failure_code or 'generation_failed'}"
+                        )
+            except generation_coordination.GenerationCoordinationError:
+                raise
+            except BaseException as exc:  # noqa: BLE001 - DB 미확정 뒤 중복 과금 금지
+                raise GenerationSingleflightUnavailable(
+                    "보고서 단일 실행 상태를 확인하지 못해 provider를 호출하지 않습니다"
+                ) from exc
+
+            if acquired.disposition in (
+                singleflight.AcquireDisposition.ACQUIRED,
+                singleflight.AcquireDisposition.TAKEOVER,
+            ):
+                if acquired.handle is None:  # pragma: no cover - primitive 계약 방어
+                    raise GenerationSingleflightUnavailable(
+                        "획득한 보고서 lease 표식이 없습니다"
+                    )
+                self._set_owner(key=key, handle=acquired.handle)
+                return None
+            # WAIT인 동안 owner의 lease를 바꾸지 않고, 취소 신호를 짧게 본다.
+            self._cancel_wait.wait(min(WAITER_POLL_SEC, wait_remaining))
+
+    def _refresh_owner_lease(self) -> None:
+        with self._lock:
+            if self._lease_error is not None:
+                raise GenerationSingleflightUnavailable(
+                    "lease heartbeat를 확인하지 못해 provider를 호출하지 않습니다"
+                ) from self._lease_error
+            handle = self._handle
+        if handle is None:
+            return
+        heartbeat_at = clock.now_kst()
+        self._require_provider_admission_time(handle, heartbeat_at)
+        lease_ttl = self._bounded_heartbeat_ttl(handle, heartbeat_at)
+        try:
+            with storage_db.connect() as conn:
+                refreshed = singleflight.heartbeat(
+                    conn,
+                    handle=handle,
+                    now=heartbeat_at,
+                    lease_ttl=lease_ttl,
+                )
+        except BaseException as exc:  # noqa: BLE001 - provider 전이므로 안전하게 중단
+            raise GenerationSingleflightUnavailable(
+                "provider 호출 전 lease heartbeat를 저장하지 못했습니다"
+            ) from exc
+        if refreshed is None:
+            raise GenerationSingleflightUnavailable(
+                "provider 호출 전 보고서 생성 lease를 잃었습니다"
+            )
+        with self._lock:
+            self._handle = refreshed
+
+    def ensure_paid_phase(self) -> None:
+        """owner/bypass만 첫 provider 전에 비용 phase와 attempt 문맥을 연다."""
+
+        if self._cancel_wait.is_set():
+            raise generation_coordination.GenerationWaitCancelled(
+                "취소된 보고서 요청에서 provider를 시작할 수 없습니다"
+            )
+        with self._lock:
+            state = self._state
+            provider_context_is_open = self._provider_stack is not None
+        if state not in {"owner", "bypass"}:
+            raise GenerationSingleflightUnavailable(
+                "보고서 owner 확정 전에는 provider를 호출할 수 없습니다"
+            )
+        # context가 이미 열렸더라도 provider 호출마다 lease 오류와 fencing을
+        # 다시 확인한다. 첫 호출 뒤 heartbeat가 죽었는데 여기서 곧장 return하면
+        # takeover owner와 다음 provider 호출이 겹쳐 이중 과금될 수 있다.
+        if state == "owner":
+            self._refresh_owner_lease()
+        else:
+            # 부분 지문으로 single-flight를 우회해도 같은 요청 전체 마감은
+            # 우회하지 않는다. 그렇지 않으면 bypass 경로만 호출을 영원히 보낼 수 있다.
+            self._require_provider_admission_time(None, clock.now_kst())
+        if provider_context_is_open:
+            return
+        ticket = paid_runtime._begin_paid_phase(
+            run_id=self.run_id,
+            phase=SPEND_PHASE_PIPELINE,
+            share_key=self.share_key,
+            cap_krw=self.cap_krw,
+        )
+        if ticket is None:
+            raise PaidGenerationAdmissionUnavailable(
+                "본조사 비용 한도 예약을 얻지 못했습니다"
+            )
+        if self._cancel_wait.is_set():
+            paid_runtime._cancel_paid_phase(ticket)
+            raise generation_coordination.GenerationWaitCancelled(
+                "비용 phase 예약 중 요청이 취소되어 provider를 호출하지 않습니다"
+            )
+        stack = contextlib.ExitStack()
+        try:
+            stack.enter_context(paid_runtime._activate_paid_provider(ticket))
+        except BaseException:
+            paid_runtime._cancel_paid_phase(ticket)
+            raise
+        with self._lock:
+            # 한 worker 문맥에서만 불리므로 중복 진입은 계약 위반이다.
+            if self._provider_stack is not None:  # pragma: no cover - 동일 스레드 방어
+                stack.close()
+                paid_runtime._cancel_paid_phase(ticket)
+                return
+            self._paid_phase = ticket
+            self._provider_stack = stack
+        self.on_paid_phase(ticket)
+
+    def close_provider_context(self) -> None:
+        """pipeline worker 스레드에서 ContextVar를 제자리로 돌린다."""
+
+        with self._lock:
+            stack = self._provider_stack
+            self._provider_stack = None
+        if stack is not None:
+            stack.close()
+
+    def complete(
+        self,
+        content_snapshot_id: str,
+        artifact_id: str,
+        *,
+        cache_eligible: bool,
+    ) -> None:
+        """불변 content 저장까지 끝난 owner만 waiter를 풀어 준다.
+
+        장기 캐시 불가 결과도 같은 순간 대기자에게는 2분 동안 공유해 중복
+        과금을 막는다. 이때 정식 캐시 결속만 요구하지 않으며, fan-out 만료 뒤
+        다음 요청은 새 owner가 된다.
+        """
+
+        with self._lock:
+            handle = self._handle
+            is_owner = self._state == "owner"
+        if not is_owner or handle is None:
+            return
+        self._stop_heartbeat.set()
+        try:
+            with storage_db.connect() as conn:
+                content = delivery_store.load_content_snapshot(
+                    conn, content_snapshot_id
+                )
+                artifact = delivery_artifact.load_artifact_metadata(
+                    conn, artifact_id
+                )
+                if (
+                    content is None
+                    or artifact is None
+                    or artifact.content_snapshot_id != content.content_id
+                ):
+                    raise GenerationSingleflightUnavailable(
+                        "owner의 content와 최초 PDF artifact 결속이 없습니다"
+                    )
+                if content.cache_namespace_id != handle.key.cache_namespace_id:
+                    raise GenerationSingleflightUnavailable(
+                        "owner의 content와 lease 생성기 신원이 다릅니다"
+                    )
+                source = delivery_store.load_source_snapshot(
+                    conn, content.source_snapshot_id
+                )
+                if source is None or ReportSourceIdentity(
+                    dart_receipt_numbers=source.dart_receipt_nos,
+                    financial_payload_digest=source.financial_payload_sha256,
+                ).cache_digest != handle.key.source_identity_digest:
+                    raise GenerationSingleflightUnavailable(
+                        "owner의 content와 lease 출처 신원이 다릅니다"
+                    )
+                if cache_eligible:
+                    namespace = self.cache_namespace
+                    if namespace is None:
+                        raise GenerationSingleflightUnavailable(
+                            "owner의 cache namespace 원본을 잃었습니다"
+                        )
+                    cache_key = CacheLookupKey.from_preflight(
+                        billing_bucket_id=handle.key.billing_bucket_id,
+                        corp_id=handle.key.corp_id,
+                        namespace=namespace,
+                        preflight_identity_digest=handle.key.source_identity_digest,
+                        preflight_cache_usable=True,
+                    )
+                    cached = delivery_store.load_cache_hit(
+                        conn,
+                        key=cache_key,
+                        policy=DeliveryPolicy(
+                            content_max_age=dt.timedelta(
+                                days=REPORT_LINK_MAX_AGE_DAYS
+                            ),
+                            public_link_lifetime=dt.timedelta(
+                                days=REPORT_LINK_MAX_AGE_DAYS
+                            ),
+                        ),
+                        delivered_at=clock.now_kst(),
+                    )
+                    if (
+                        cached is None
+                        or cached.content.content_id != content.content_id
+                        or cached.artifact_id != artifact.artifact_id
+                    ):
+                        raise GenerationSingleflightUnavailable(
+                            "owner의 content·PDF가 정식 캐시에 결속되지 않았습니다"
+                        )
+                completed = singleflight.complete(
+                    conn,
+                    handle=handle,
+                    content_snapshot_id=content_snapshot_id,
+                    artifact_id=artifact_id,
+                    now=clock.now_kst(),
+                    result_fanout_ttl=RESULT_FANOUT_TTL,
+                )
+        except BaseException as exc:  # noqa: BLE001
+            raise GenerationSingleflightUnavailable(
+                "완료된 보고서를 waiter에게 공유하지 못했습니다"
+            ) from exc
+        if not completed:
+            raise GenerationSingleflightUnavailable(
+                "완료 직전 보고서 생성 lease 소유권을 잃었습니다"
+            )
+        with self._lock:
+            self._state = "completed"
+
+    def fail(self, failure_code: str = "generation_failed") -> None:
+        """owner 실패를 짧게 fan-out해 동시 재호출 폭주를 막는다."""
+
+        with self._lock:
+            handle = self._handle
+            is_owner = self._state == "owner"
+        if not is_owner or handle is None:
+            return
+        self._stop_heartbeat.set()
+        try:
+            with storage_db.connect() as conn:
+                failed = singleflight.fail(
+                    conn,
+                    handle=handle,
+                    failure_code=failure_code,
+                    now=clock.now_kst(),
+                    failure_fanout_ttl=FAILURE_FANOUT_TTL,
+                )
+        except BaseException as exc:  # noqa: BLE001
+            raise GenerationSingleflightUnavailable(
+                "보고서 생성 실패 fan-out을 저장하지 못했습니다"
+            ) from exc
+        if failed:
+            with self._lock:
+                self._state = "failed"
+
+    def cancel_waiter(self) -> None:
+        """waiter만 깨우고 owner lease는 바꾸지 않는다."""
+
+        self._cancel_wait.set()
+
+    def abandon(self) -> None:
+        """강제 종료는 성공·실패를 지어내지 않고 lease 만료에 맡긴다."""
+
+        self._cancel_wait.set()
+        self._stop_heartbeat.set()

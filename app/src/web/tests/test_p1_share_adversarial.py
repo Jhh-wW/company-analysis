@@ -1,4 +1,4 @@
-"""web 조립 경계에서 공유 capability GET 저장소를 공격적으로 검수한다."""
+"""공유 LINK가 개인정보 없이도 비용 경계와 보존 계약을 지키는지 공격한다."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 
 from src.core import clock
-from src.features.sharelink import access_control
 from src.features.sharelink import constants
 from src.features.sharelink import store as share_store
 
@@ -50,104 +49,163 @@ def _counts(connection: sqlite3.Connection) -> tuple[int, int, int]:
     )
 
 
-def test_FK_OFF에서도_긴시간공격의_window와요청자행은_링크별상한이다(
+def test_FK_OFF_긴시간공격에도_window만_링크별상한이고_subject는_항상빈다(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "share.sqlite3"
     _create_database(database)
     start = dt.datetime(2026, 8, 23, 9, 0, tzinfo=clock.KST)
-    client_host = "203.0.113.17"
-    requester_hash = access_control.requester_hash_of(CAPABILITY, client_host)
 
-    # SQLite 기본값인 foreign_keys=OFF에서도 CASCADE에 의존해 orphan을 남기면 안 된다.
     with _connect(database, foreign_keys=False) as connection:
         for index in range(constants.OPEN_WINDOW_ROWS_PER_LINK + 6):
             now_iso = (
                 start + dt.timedelta(seconds=(constants.ACCESS_WINDOW_SECONDS + 1) * index)
             ).isoformat(timespec="seconds")
-            assert share_store.mark_opened(
-                connection,
-                CAPABILITY,
-                now_iso,
-                requester_hash=requester_hash,
-            )
+            assert share_store.mark_opened(connection, CAPABILITY, now_iso)
 
         assert _counts(connection) == (
             0,
             constants.OPEN_WINDOW_ROWS_PER_LINK,
-            constants.OPEN_WINDOW_ROWS_PER_LINK,
+            0,
         )
         stored = share_store.load(connection, CAPABILITY)
         assert stored is not None
         assert stored.opened_count == constants.OPEN_WINDOW_ROWS_PER_LINK + 6
 
-    raw_database = database.read_bytes()
-    assert CAPABILITY.encode("ascii") not in raw_database
-    assert client_host.encode("ascii") not in raw_database
+    assert CAPABILITY.encode("ascii") not in database.read_bytes()
 
 
-def test_프로세스재시작후에도_같은요청자_window상한은_DB에서유지된다(
+def test_기존_subject만_secure_delete하고_window와전체횟수는_보존한다(
     tmp_path: Path,
 ) -> None:
-    database = tmp_path / "share.sqlite3"
-    _create_database(database)
-    requester_hash = access_control.requester_hash_of(CAPABILITY, "198.51.100.9")
-    now_iso = "2026-08-23T10:00:05+09:00"
+    database = tmp_path / "legacy-subject.sqlite3"
+    key_hash = share_store.key_hash_of(CAPABILITY)
+    first = "2026-08-23T10:00:05+09:00"
+    last = "2026-08-23T10:00:25+09:00"
 
     with _connect(database) as connection:
-        for _ in range(constants.ACCESS_PER_REQUESTER_LIMIT):
-            assert share_store.mark_opened(
-                connection,
-                CAPABILITY,
-                now_iso,
-                requester_hash=requester_hash,
+        connection.execute(share_store.CREATE_SQL)
+        connection.execute(share_store.CREATE_OPEN_WINDOWS_SQL)
+        connection.execute(share_store.CREATE_OPEN_WINDOWS_UNIQUE_INDEX_SQL)
+        connection.execute(share_store.CREATE_ACCESS_SUBJECTS_SQL)
+        connection.execute(share_store.CREATE_ACCESS_SUBJECTS_UNIQUE_INDEX_SQL)
+        connection.execute(
+            f"""INSERT INTO {share_store.TABLE_SHARE_LINKS}
+                (key_hash, company, job, created_at, opened_count,
+                 first_opened_at, last_opened_at)
+                VALUES (?, '과거 회사', '과거 직무', ?, 7, ?, ?)""",
+            (key_hash, CREATED_AT, first, last),
+        )
+        window_id = int(
+            connection.execute(
+                f"""INSERT INTO {share_store.TABLE_OPEN_WINDOWS}
+                    (link_key_hash, window_started_at, opened_count,
+                     first_opened_at, last_opened_at)
+                    VALUES (?, ?, 7, ?, ?) RETURNING id""",
+                (key_hash, "2026-08-23T01:00:00+00:00", first, last),
+            ).fetchone()[0]
+        )
+        connection.executemany(
+            f"""INSERT INTO {share_store.TABLE_ACCESS_SUBJECTS}
+                (window_id, requester_hash, opened_count) VALUES (?, ?, ?)""",
+            ((window_id, "a" * 64, 3), (window_id, "b" * 64, 4)),
+        )
+        connection.commit()
+
+        share_store.ensure_schema(connection)
+
+        assert connection.execute("PRAGMA secure_delete").fetchone()[0] == 1
+        assert connection.execute(
+            f"SELECT COUNT(*) FROM {share_store.TABLE_ACCESS_SUBJECTS}"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            f"""SELECT opened_count, first_opened_at, last_opened_at
+                FROM {share_store.TABLE_OPEN_WINDOWS}"""
+        ).fetchone() == (7, first, last)
+        stored = share_store.load(connection, CAPABILITY)
+        assert stored is not None
+        assert (stored.opened_count, stored.first_opened_at, stored.last_opened_at) == (
+            7,
+            first,
+            last,
+        )
+
+    raw_database = database.read_bytes()
+    assert ("a" * 64).encode("ascii") not in raw_database
+    assert ("b" * 64).encode("ascii") not in raw_database
+
+
+def test_개인정보_tombstone_migration은_멱등이고_두번째에는_행삭제도없다(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "idempotent.sqlite3"
+    with _connect(database) as connection:
+        share_store.ensure_schema(connection)
+        connection.commit()
+        changes_before = connection.total_changes
+
+        share_store.ensure_schema(connection)
+
+        assert connection.total_changes == changes_before
+        assert _counts(connection) == (0, 0, 0)
+
+
+def test_옛코드가_subject를_다시쓰려하면_DB가_fail_closed한다(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "rollback.sqlite3"
+    _create_database(database)
+    with _connect(database) as connection:
+        assert share_store.mark_opened(
+            connection,
+            CAPABILITY,
+            "2026-08-23T10:00:05+09:00",
+        )
+        window_id = int(
+            connection.execute(
+                f"SELECT id FROM {share_store.TABLE_OPEN_WINDOWS}"
+            ).fetchone()[0]
+        )
+
+        with pytest.raises(sqlite3.IntegrityError, match="수집은 폐기"):
+            connection.execute(
+                f"""INSERT INTO {share_store.TABLE_ACCESS_SUBJECTS}
+                    (window_id, requester_hash, opened_count) VALUES (?, ?, 1)""",
+                (window_id, "c" * 64),
             )
 
-    # 새 connection은 프로세스 재시작 뒤 새 DB 연결을 흉내 낸다.
-    with _connect(database) as restarted:
-        assert not share_store.mark_opened(
-            restarted,
-            CAPABILITY,
-            now_iso,
-            requester_hash=requester_hash,
-        )
-        assert _counts(restarted) == (0, 1, 1)
-        window_count = restarted.execute(
-            f"SELECT opened_count FROM {share_store.TABLE_OPEN_WINDOWS}"
-        ).fetchone()[0]
-        subject_count = restarted.execute(
-            f"SELECT opened_count FROM {share_store.TABLE_ACCESS_SUBJECTS}"
-        ).fetchone()[0]
-        assert window_count == subject_count == constants.ACCESS_PER_REQUESTER_LIMIT
+        trigger_names = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?",
+                (share_store.TABLE_ACCESS_SUBJECTS,),
+            )
+        }
+        assert trigger_names == {
+            f"{share_store.TABLE_ACCESS_SUBJECTS}_no_insert",
+            f"{share_store.TABLE_ACCESS_SUBJECTS}_no_update",
+        }
+        assert _counts(connection) == (0, 1, 0)
 
 
-def test_다중SQLite연결의_동시GET도_capability_window상한을_넘지않는다(
+def test_다중SQLite연결의_동시GET도_전역60개를_정확히_넘지않는다(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "share.sqlite3"
     _create_database(database)
-    attempts = constants.OPEN_WINDOW_MAX_COUNT + 20
+    attempts = constants.ACCESS_PER_CAPABILITY_LIMIT + 20
     now_iso = "2026-08-23T11:00:20+09:00"
 
-    def attempt(index: int) -> bool:
-        requester_hash = access_control.requester_hash_of(
-            CAPABILITY,
-            f"203.0.113.{index + 1}",
-        )
+    def attempt(_index: int) -> bool:
         with _connect(database) as connection:
-            return share_store.mark_opened(
-                connection,
-                CAPABILITY,
-                now_iso,
-                requester_hash=requester_hash,
-            )
+            return share_store.mark_opened(connection, CAPABILITY, now_iso)
 
     with ThreadPoolExecutor(max_workers=16) as pool:
         accepted = sum(pool.map(attempt, range(attempts)))
 
-    assert accepted == constants.OPEN_WINDOW_MAX_COUNT
+    assert accepted == constants.ACCESS_PER_CAPABILITY_LIMIT
     with _connect(database) as connection:
-        assert _counts(connection) == (0, 1, constants.OPEN_WINDOW_MAX_COUNT)
+        assert _counts(connection) == (0, 1, 0)
         window_count = connection.execute(
             f"SELECT opened_count FROM {share_store.TABLE_OPEN_WINDOWS}"
         ).fetchone()[0]
@@ -183,16 +241,11 @@ def test_폐기_만료_없는capability는_집계상태를_전혀바꾸지않는
                 f"FROM {share_store.TABLE_SHARE_LINKS} ORDER BY key_hash"
             ).fetchall(),
         )
-        for key, host in (
-            (CAPABILITY, "192.0.2.1"),
-            (expired, "192.0.2.2"),
-            (missing, "192.0.2.3"),
-        ):
+        for key in (CAPABILITY, expired, missing):
             assert not share_store.mark_opened(
                 connection,
                 key,
                 "2026-08-23T12:00:00+09:00",
-                requester_hash=access_control.requester_hash_of(key, host),
             )
         after = (
             _counts(connection),

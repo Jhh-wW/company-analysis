@@ -19,12 +19,14 @@ import logging
 import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 from src.features.export_notion import constants, logic
 from src.features.pipeline.port import Report
+from src.shared import credentialed_http
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,14 @@ logger = logging.getLogger(__name__)
 #: (method, path, body) -> 응답(dict). 시험에서 가짜로 바꿔 끼운다.
 SendFn = Callable[[str, str, dict], dict]
 SleepFn = Callable[[float], None]
+
+_NOTION_OPENER = credentialed_http.build_no_redirect_opener()
+
+
+def _urlopen(request: urllib.request.Request, *, timeout: float):
+    """Notion 고정 endpoint를 Bearer redirect 없이 한 번만 연다."""
+
+    return _NOTION_OPENER.open(request, timeout=timeout)
 
 
 class MissingCredentialError(Exception):
@@ -57,6 +67,33 @@ class NotionAPIError(Exception):
         self.status_code = status_code
         self.retry_after = retry_after
         self.uncertain = uncertain
+
+
+def safe_notion_page_url(value: object) -> str:
+    """화면 링크로 써도 되는 HTTPS 페이지 주소만 돌려준다.
+
+    API 응답과 예전 DB 행은 외부 데이터다. ``javascript:`` 같은 값을 그대로
+    ``href``에 넣으면 사용자가 결과 버튼을 누르는 순간 같은 출처의 스크립트가
+    실행될 수 있으므로, 저장 전과 화면 직전에 같은 최소 계약을 적용한다.
+    """
+
+    raw = str(value or "").strip()
+    if not raw or any(ord(char) < 32 or ord(char) == 127 for char in raw):
+        return ""
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme.casefold() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or (port is not None and port != 443)
+    ):
+        return ""
+    return raw
 
 
 def _retry_after_seconds(value: object) -> float | None:
@@ -148,10 +185,16 @@ def _make_urllib_send(token: str) -> SendFn:
             },
         )
         try:
-            with urllib.request.urlopen(
-                request, timeout=constants.HTTP_TIMEOUT_SEC
-            ) as response:
-                return json.loads(response.read().decode("utf-8"))
+            with _urlopen(request, timeout=constants.HTTP_TIMEOUT_SEC) as response:
+                credentialed_http.require_exact_response_url(
+                    response,
+                    expected_url=request.full_url,
+                )
+                raw = credentialed_http.read_limited_bytes(
+                    response,
+                    max_bytes=constants.API_RESPONSE_MAX_BYTES,
+                )
+                return json.loads(raw.decode("utf-8"))
         except urllib.error.HTTPError as exc:
             # 응답 본문은 기록하지 않는다. 외부 서비스가 요청 원문을 오류 본문에
             # 되비추면 보고서 내용이 로그에 남을 수 있기 때문이다.
@@ -166,7 +209,7 @@ def _make_urllib_send(token: str) -> SendFn:
                 f"노션 API가 오류를 돌려줬습니다 (상태 코드 {exc.code})",
                 status_code=exc.code,
                 retry_after=retry_after,
-                uncertain=exc.code >= 500,
+                uncertain=exc.code >= 500 or 300 <= exc.code < 400,
             ) from exc
         except urllib.error.URLError as exc:
             logger.warning(
@@ -187,6 +230,11 @@ def _make_urllib_send(token: str) -> SendFn:
             logger.warning("노션 응답을 해석하지 못함 type=%s", type(exc).__name__)
             raise NotionAPIError(
                 "노션 응답을 해석하지 못했습니다", uncertain=True
+            ) from exc
+        except credentialed_http.CredentialedHTTPContractError as exc:
+            logger.warning("노션 응답 안전 계약 위반")
+            raise NotionAPIError(
+                "노션 응답을 안전하게 읽지 못했습니다", uncertain=True
             ) from exc
 
     return send
@@ -353,7 +401,7 @@ def send_report_to_notion(
     page_id_value = created.get("id", "")
     page_url_value = created.get("url", "")
     page_id = page_id_value.strip() if isinstance(page_id_value, str) else ""
-    page_url = page_url_value.strip() if isinstance(page_url_value, str) else ""
+    page_url = safe_notion_page_url(page_url_value)
     if not page_id:
         return NotionExportResult(
             success=False,

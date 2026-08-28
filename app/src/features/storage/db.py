@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 import os
+import secrets
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Final, Iterator, Optional
@@ -20,6 +22,7 @@ from typing import Final, Iterator, Optional
 from src.core import paths
 from src.core.persistent_schema import ensure_persistent_schema
 from src.features.storage import constants
+from src.shared.bounded_file_lock import exclusive_file_lock
 
 
 def default_db_path() -> Path:
@@ -46,6 +49,14 @@ CREATE TABLE IF NOT EXISTS {constants.TABLE_SESSIONS} (
 """
 _LEGACY_SESSIONS_TABLE: Final[str] = "sessions_legacy_raw_token"
 _SESSION_MIGRATION_SAVEPOINT: Final[str] = "migrate_sessions_token_hash"
+_DATABASE_IDENTITY_TABLE: Final[str] = "storage_database_identity"
+
+# 요청마다 모든 feature의 DDL과 migration을 다시 실행하면, 첫 동시 요청끼리
+# journal/schema 쓰기 잠금을 다투고 정상 DB에서도 연결 실패가 난다. DB 안의
+# 불변 identity와 SQLite schema cookie를 함께 기억해 같은 파일은 한 프로세스에서
+# 한 번만 bootstrap한다. 파일 교체·schema 변화는 다음 연결이 다시 감지한다.
+_BOOTSTRAP_GUARD = threading.RLock()
+_BOOTSTRAPPED_DATABASES: dict[Path, tuple[str, int]] = {}
 
 _SchemaColumn = tuple[str, str, int, object, int, int]
 _SchemaSignature = tuple[_SchemaColumn, ...]
@@ -84,6 +95,20 @@ def _configure_journal_mode(conn: sqlite3.Connection) -> str:
         raise RuntimeError(
             "SQLite 안전 저널 모드 전환에 실패했습니다 "
             f"(요청={requested}, 실제={actual or '응답 없음'})"
+        )
+    return actual
+
+
+def _configure_synchronous_durability(conn: sqlite3.Connection) -> int:
+    """모든 쓰기 연결에 전원 중단까지 포함한 명시적 commit 내구성을 건다."""
+
+    conn.execute(f"PRAGMA synchronous={constants.SQLITE_SYNCHRONOUS_MODE}")
+    row = conn.execute("PRAGMA synchronous").fetchone()
+    actual = -1 if row is None else int(row[0])
+    if actual != constants.SQLITE_SYNCHRONOUS_LEVEL:
+        raise RuntimeError(
+            "SQLite commit 내구성 설정에 실패했습니다 "
+            f"(요청={constants.SQLITE_SYNCHRONOUS_MODE}, 실제={actual})"
         )
     return actual
 
@@ -138,6 +163,22 @@ _HASHED_SESSION_SCHEMAS: Final[tuple[_SchemaSignature, ...]] = (
 #: 표를 만드는 SQL. 전부 `IF NOT EXISTS`라 여러 번 불러도 안전하다(멱등).
 _SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
     f"""
+    CREATE TABLE IF NOT EXISTS {_DATABASE_IDENTITY_TABLE} (
+        singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+        identity     TEXT NOT NULL UNIQUE
+    )
+    """,
+    f"""
+    CREATE TRIGGER IF NOT EXISTS storage_database_identity_no_update
+    BEFORE UPDATE ON {_DATABASE_IDENTITY_TABLE}
+    BEGIN SELECT RAISE(ABORT, 'storage database identity is immutable'); END
+    """,
+    f"""
+    CREATE TRIGGER IF NOT EXISTS storage_database_identity_no_delete
+    BEFORE DELETE ON {_DATABASE_IDENTITY_TABLE}
+    BEGIN SELECT RAISE(ABORT, 'storage database identity is immutable'); END
+    """,
+    f"""
     CREATE TABLE IF NOT EXISTS {constants.TABLE_REPORTS} (
         report_id    TEXT PRIMARY KEY,
         corp_id      TEXT NOT NULL,
@@ -182,6 +223,120 @@ _SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
     )
     """,
 )
+
+
+def _bootstrap_lock_path(db_path: Path) -> Path:
+    return db_path.with_name(f".{db_path.name}.schema.lock")
+
+
+@contextmanager
+def _cross_process_bootstrap_lock(db_path: Path) -> Iterator[None]:
+    """같은 DB의 journal 전환과 schema migration을 프로세스 사이에서도 한 줄로 세운다."""
+
+    # backup/recovery와 같은 공용 잠금 경계를 쓴다. ``Path.open('a+b')``를
+    # 여기서 다시 구현하면 symlink/reparse point를 따라가 잠금 대상이 아닌 파일을
+    # 열 수 있고, Windows의 진짜 I/O 오류까지 "잠금 중"으로 오인한다.
+    with exclusive_file_lock(
+        _bootstrap_lock_path(db_path),
+        timeout_seconds=constants.DB_SCHEMA_LOCK_TIMEOUT_SEC,
+    ):
+        yield
+
+
+def _read_database_identity(
+    conn: sqlite3.Connection,
+) -> Optional[tuple[str, int]]:
+    """bootstrap 표가 완결된 DB만 identity와 schema cookie를 돌려준다."""
+
+    try:
+        rows = conn.execute(
+            f"SELECT singleton_id, identity FROM {_DATABASE_IDENTITY_TABLE}"
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return None
+        raise
+    if len(rows) != 1 or int(rows[0][0]) != 1:
+        raise RuntimeError("SQLite 저장소 identity 표가 완결된 한 행이 아닙니다")
+    identity = str(rows[0][1])
+    if len(identity) != 64 or any(ch not in "0123456789abcdef" for ch in identity):
+        raise RuntimeError("SQLite 저장소 identity 값이 올바르지 않습니다")
+    schema_row = conn.execute("PRAGMA schema_version").fetchone()
+    if schema_row is None:
+        raise RuntimeError("SQLite schema version을 읽을 수 없습니다")
+    return identity, int(schema_row[0])
+
+
+def _cached_identity(db_path: Path) -> Optional[tuple[str, int]]:
+    with _BOOTSTRAP_GUARD:
+        return _BOOTSTRAPPED_DATABASES.get(db_path)
+
+
+def _current_journal_mode(conn: sqlite3.Connection) -> str:
+    row = conn.execute("PRAGMA journal_mode").fetchone()
+    return "" if row is None else str(row[0]).upper()
+
+
+def _connection_is_bootstrapped(
+    conn: sqlite3.Connection, db_path: Path
+) -> bool:
+    cached = _cached_identity(db_path)
+    current = _read_database_identity(conn)
+    if cached is not None and current is None:
+        # 이 프로세스가 이미 같은 경로의 완결 DB를 썼는데 identity가 통째로
+        # 사라졌다면 파일 삭제·빈 파일 교체·불완전 복구다. 여기서 자동 bootstrap하면
+        # 데이터 소실을 "새 설치"로 가장한 채 서비스가 정상으로 열린다.
+        # identity를 가진 완전한 DB로 원자 교체한 경우는 아래 비교가 False가 되어
+        # 정상 migration/재검증 경로로 들어간다.
+        raise RuntimeError(
+            "실행 중 SQLite 저장소 identity가 사라졌습니다; "
+            "빈 DB를 자동 생성하지 않고 복구를 기다립니다"
+        )
+    return bool(
+        cached is not None
+        and current == cached
+        and _current_journal_mode(conn) == preferred_journal_mode()
+    )
+
+
+def _ensure_connection_bootstrapped(
+    conn: sqlite3.Connection, db_path: Path
+) -> None:
+    """현재 프로세스·현재 DB 파일 조합에 전체 schema를 정확히 한 번 적용한다."""
+
+    if _connection_is_bootstrapped(conn, db_path):
+        return
+
+    # RLock은 같은 프로세스의 첫 요청들을 직렬화한다. 파일 잠금은 배포 교체 때
+    # 잠깐 겹친 두 프로세스가 동시에 journal/DDL을 바꾸는 일을 막는다.
+    with _BOOTSTRAP_GUARD:
+        if _connection_is_bootstrapped(conn, db_path):
+            return
+        with _cross_process_bootstrap_lock(db_path):
+            if _connection_is_bootstrapped(conn, db_path):
+                return
+            _configure_journal_mode(conn)
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                _ensure_schema(conn)
+                conn.execute(
+                    f"INSERT OR IGNORE INTO {_DATABASE_IDENTITY_TABLE} "
+                    "(singleton_id, identity) VALUES (1, ?)",
+                    (secrets.token_hex(32),),
+                )
+                identity = _read_database_identity(conn)
+                if identity is None:
+                    raise RuntimeError("SQLite 저장소 identity를 만들지 못했습니다")
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+            # commit 뒤 schema cookie를 다시 읽어 성공한 파일만 cache한다.
+            committed_identity = _read_database_identity(conn)
+            if committed_identity is None:
+                raise RuntimeError("SQLite schema 준비 결과를 확인할 수 없습니다")
+            _BOOTSTRAPPED_DATABASES[db_path] = committed_identity
 
 
 def _schema_object_type(conn: sqlite3.Connection, name: str) -> Optional[str]:
@@ -325,21 +480,65 @@ def connect(db_path: Optional[Path] = None) -> Iterator[sqlite3.Connection]:
     Raises:
         예외가 나면 롤백하고 그대로 다시 던진다 — 절반만 쓰인 상태가 남지 않는다.
     """
-    resolved = db_path if db_path is not None else default_db_path()
+    configured = db_path if db_path is not None else default_db_path()
+    resolved = Path(configured).resolve()
     resolved.parent.mkdir(parents=True, exist_ok=True)
 
     conn = sqlite3.connect(str(resolved), timeout=constants.DB_BUSY_TIMEOUT_SEC)
     conn.row_factory = sqlite3.Row
     try:
-        # 패치된 SQLite는 WAL을 쓰고, WAL-reset 결함 범위에서는 데이터
-        # 손상 가능성을 없애기 위해 rollback journal(DELETE)로 내린다.
-        _configure_journal_mode(conn)
+        # synchronous는 DB 파일 속성이 아니라 연결 속성이다. 최초 migration뿐
+        # 아니라 cache hit인 모든 새 연결에서 transaction 전에 다시 강제한다.
+        _configure_synchronous_durability(conn)
+        # journal 전환과 전체 migration은 DB 파일마다 첫 연결에서 원자적으로
+        # 끝낸다. 이후 요청은 identity+schema cookie를 읽기만 하므로 동시 첫
+        # 요청이 DDL 쓰기 잠금을 다투지 않는다.
+        _ensure_connection_bootstrapped(conn, resolved)
         conn.execute("PRAGMA foreign_keys=ON")
-        _ensure_schema(conn)
         yield conn
         conn.commit()
     except Exception:
         conn.rollback()
         raise
+    finally:
+        conn.close()
+
+
+@contextmanager
+def connect_readonly_existing(
+    db_path: Optional[Path] = None,
+) -> Iterator[Optional[sqlite3.Connection]]:
+    """이미 존재하는 DB만 읽고 파일·폴더·schema는 만들지 않는다.
+
+    공개 GET처럼 조회 자체가 상태를 만들면 안 되는 경계에서 쓴다. 파일이
+    없으면 정상 miss인 ``None``을 넘긴다. 존재하는 파일은 SQLite ``mode=ro``와
+    ``query_only``를 함께 적용해, 아래 조회 함수가 실수로 쓰기를 시도해도 DB가
+    거부하게 한다. 일반 ``connect``와 달리 journal 전환·schema bootstrap·commit을
+    전혀 수행하지 않는다.
+    """
+
+    configured = db_path if db_path is not None else default_db_path()
+    resolved = Path(configured).resolve()
+    if not resolved.is_file():
+        yield None
+        return
+    uri = resolved.as_uri() + "?mode=ro"
+    try:
+        conn = sqlite3.connect(
+            uri,
+            uri=True,
+            timeout=constants.DB_BUSY_TIMEOUT_SEC,
+        )
+    except sqlite3.OperationalError:
+        # 존재 확인 직후 파일이 사라진 경쟁은 처음부터 없었던 GET과 같다.
+        if not resolved.is_file():
+            yield None
+            return
+        raise
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA foreign_keys=ON")
+        yield conn
     finally:
         conn.close()

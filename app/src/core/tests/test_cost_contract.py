@@ -113,14 +113,35 @@ def test_네_비용경로가_공통_원화환산을_사용한다():
         assert f"{call_text}(" in source, f"공통 환산 호출 누락: {path}"
 
 
-def test_운영한도와_paid_phase_호출계약은_숨은_3000원을_두지_않는다():
+def test_영속원장밖_수동파일럿은_secret과_provider보다_먼저_실행을_거부한다():
+    pilot = paths.PROJECT_ROOT / "analysis_engine" / "tools" / "run_pilot.py"
+    tree = ast.parse(pilot.read_text(encoding="utf-8"), filename=str(pilot))
+    main = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+    first = main.body[0]
+    assert isinstance(first, ast.Raise)
+    assert isinstance(first.exc, ast.Call)
+    assert isinstance(first.exc.func, ast.Name)
+    assert first.exc.func.id == "SystemExit"
+
+    source = pilot.read_text(encoding="utf-8")
+    assert source.index("raise SystemExit(PAID_EXECUTION_DISABLED_MESSAGE)") < source.index(
+        "loaded = load_env()"
+    )
+
+
+def test_운영한도와_paid_phase_호출계약은_정본에_명시한_상한만_쓴다():
     assert PER_LINK_DAILY_BUDGET_KRW == 3000.0
-    assert PER_USER_DAILY_BUDGET_KRW is None
+    assert PER_USER_DAILY_BUDGET_KRW == 3000.0
     assert ADMIN_DAILY_BUDGET_KRW == 5000.0
 
     definitions: dict[str, list[Path]] = {
         "DAILY_BUDGET_KRW": [],
         "PER_LINK_DAILY_BUDGET_KRW": [],
+        "PER_USER_DAILY_BUDGET_KRW": [],
     }
     production_calls: list[tuple[Path, ast.Call]] = []
     paid_runtime_path = paths.PROJECT_ROOT / "app" / "src" / "web" / "paid_runtime.py"
@@ -157,6 +178,7 @@ def test_운영한도와_paid_phase_호출계약은_숨은_3000원을_두지_않
     )
     assert definitions["DAILY_BUDGET_KRW"] == []
     assert definitions["PER_LINK_DAILY_BUDGET_KRW"] == [link_canonical]
+    assert definitions["PER_USER_DAILY_BUDGET_KRW"] == [link_canonical]
     assert paid_runtime_tree is not None
 
     begin = next(
@@ -166,7 +188,10 @@ def test_운영한도와_paid_phase_호출계약은_숨은_3000원을_두지_않
     )
     cap_index = [arg.arg for arg in begin.args.kwonlyargs].index("cap_krw")
     assert begin.args.kw_defaults[cap_index] is None
-    assert len(production_calls) == 4
+    # 호출 지점 수는 OCR·식별·지연 single-flight owner처럼 제품 경계가
+    # 늘 때 달라질 수 있다. 안전 계약은 개수가 아니라 «새 호출까지 전부
+    # 통장별 cap을 명시하는가»이므로 아래 전수검사를 정본으로 삼는다.
+    assert production_calls
     for path, call in production_calls:
         assert any(keyword.arg == "cap_krw" for keyword in call.keywords), (
             f"cap_krw를 명시하지 않은 production 호출: {path}:{call.lineno}"

@@ -449,23 +449,31 @@ def read_final(conn: sqlite3.Connection, run_id: str) -> RunRecord | None:
     return entry.final_record
 
 
+def iter_final(conn: sqlite3.Connection) -> Iterator[RunRecord]:
+    """현재 상태가 final인 관측값을 정렬된 DB cursor에서 한 건씩 읽는다.
+
+    재시작 비용 대조는 전체 이력을 list와 dict로 복제할 필요가 없다. 행 하나가
+    깨졌을 때는 list_final과 똑같이 조용히 건너뛰지 않고 손상을 드러낸다.
+    """
+
+    cursor = conn.execute(
+        _SELECT_CURRENT + " WHERE state = ? ORDER BY at, run_id",
+        (STATE_FINAL,),
+    )
+    for row in cursor:
+        entry = _entry_from_row(row)
+        if entry.final_record is None:
+            raise LifecycleCorruptionError("final 상태인데 최종 관측값이 없습니다")
+        yield entry.final_record
+
+
 def list_final(conn: sqlite3.Connection) -> list[RunRecord]:
     """현재 상태가 final인 관측값을 ``(at, run_id)`` 순서로 읽는다.
 
     대시보드는 이 결과를 그대로 집계할 수 있다. JSON이나 상태가 깨진 행은 조용히
     건너뛰지 않고 ``LifecycleCorruptionError``를 내어 관측 누락을 드러낸다.
     """
-    rows = conn.execute(
-        _SELECT_CURRENT + " WHERE state = ?",
-        (STATE_FINAL,),
-    ).fetchall()
-    records: list[RunRecord] = []
-    for row in rows:
-        entry = _entry_from_row(row)
-        if entry.final_record is None:
-            raise LifecycleCorruptionError("final 상태인데 최종 관측값이 없습니다")
-        records.append(entry.final_record)
-    return sorted(records, key=lambda record: (record.at, record.run_id))
+    return list(iter_final(conn))
 
 
 def list_expired_pending(

@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import re
+import threading
 import unicodedata
 from dataclasses import asdict, dataclass
 from typing import Final
@@ -26,6 +27,16 @@ from pypdf import PdfReader
 
 from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
 from src.features.composer.validate import validate_v2
+from src.features.export_pdf.constants import (
+    PAGE_BOTTOM_MARGIN_PT,
+    PAGE_TOP_MARGIN_PT,
+    PDFIUM_RENDER_LOCK_TIMEOUT_SEC,
+)
+from src.features.export_pdf.content_manifest import (
+    CONTENT_MANIFEST_VERSION,
+    PDF_MANIFEST_SHA256_KEY,
+    PDF_MANIFEST_VERSION_KEY,
+)
 from src.features.export_pdf.logic import PDFGenerationError, build_pdf
 from src.features.pipeline.port import Report
 from src.features.provenance.sources import visible_citations
@@ -47,6 +58,7 @@ REVIEWER_ID_RE: Final[re.Pattern[str]] = re.compile(
 ALLOWED_VISUAL_REVIEW_KINDS: Final[frozenset[str]] = frozenset(
     {"human"}
 )
+_PDFIUM_RENDER_LOCK = threading.Lock()
 
 
 class PDFReleaseBlockedError(RuntimeError):
@@ -124,6 +136,8 @@ class PdfReleaseCandidate:
     pages: tuple[RenderedPdfPage, ...]
     expected_fact_ids: tuple[str, ...] = ()
     render_scale: float = 1.5
+    content_manifest_version: str = ""
+    content_manifest_sha256: str = ""
 
     @property
     def page_count(self) -> int:
@@ -239,9 +253,15 @@ def _body_text_is_visually_present(
             except Exception:  # pragma: no cover - damaged PDFium object is fail-closed below
                 return False
             center_y = (bottom + top) / 2
-            # 반복 머리말·쪽번호는 본문 가시성의 증거가 아니다. 중앙 76%는 sparse
-            # cover의 제목도 포함하면서 일반적인 header/footer를 제외한다.
-            if not (height_pt * 0.12 < center_y < height_pt * 0.88):
+            # 반복 머리말·쪽번호는 본문 가시성의 증거가 아니다. 비율 추측 대신
+            # PDF 조립부(SimpleDocTemplate)가 쓰는 본문 frame의 정본 여백을
+            # 공유한다. 그러면 표 뒤에서 새 페이지가 생겨 본문이 frame 맨 위에
+            # 놓여도 인정하고, _page_furniture의 머리말·꼬리말은 계속 제외한다.
+            if not (
+                PAGE_BOTTOM_MARGIN_PT
+                < center_y
+                < height_pt - PAGE_TOP_MARGIN_PT
+            ):
                 continue
             if right <= left or top <= bottom:
                 continue
@@ -275,43 +295,49 @@ def _body_text_is_visually_present(
 def _render_all_pages(pdf_bytes: bytes, *, scale: float) -> tuple[RenderedPdfPage, ...]:
     """PDFium으로 모든 페이지를 실제 PNG bytes까지 렌더링한다."""
 
-    document = pdfium.PdfDocument(pdf_bytes)
-    pages: list[RenderedPdfPage] = []
+    acquired = _PDFIUM_RENDER_LOCK.acquire(timeout=PDFIUM_RENDER_LOCK_TIMEOUT_SEC)
+    if not acquired:
+        raise _blocked("PDF 렌더 작업이 제한 시간 안에 시작되지 못했습니다")
     try:
-        for index in range(len(document)):
-            page = document[index]
-            try:
-                bitmap = page.render(scale=scale)
+        document = pdfium.PdfDocument(pdf_bytes)
+        pages: list[RenderedPdfPage] = []
+        try:
+            for index in range(len(document)):
+                page = document[index]
                 try:
-                    image = bitmap.to_pil()
-                    has_visible_content = _has_visible_page_content(image)
-                    has_visible_body_text = _body_text_is_visually_present(page, image)
-                    output = io.BytesIO()
-                    image.save(output, format="PNG")
-                    png_bytes = output.getvalue()
-                    width_px, height_px = image.size
+                    bitmap = page.render(scale=scale)
+                    try:
+                        image = bitmap.to_pil()
+                        has_visible_content = _has_visible_page_content(image)
+                        has_visible_body_text = _body_text_is_visually_present(page, image)
+                        output = io.BytesIO()
+                        image.save(output, format="PNG")
+                        png_bytes = output.getvalue()
+                        width_px, height_px = image.size
+                    finally:
+                        bitmap.close()
                 finally:
-                    bitmap.close()
-            finally:
-                page.close()
-            if not png_bytes.startswith(PNG_MAGIC) or width_px <= 0 or height_px <= 0:
-                raise _blocked("PDF 페이지 PNG 렌더 증거가 올바르지 않습니다")
-            if not has_visible_content:
-                raise _blocked("PDF 페이지가 시각적으로 비어 있어 출고할 수 없습니다")
-            if not has_visible_body_text:
-                raise _blocked("PDF 본문 글자가 렌더 화면에서 보이지 않아 출고할 수 없습니다")
-            pages.append(
-                RenderedPdfPage(
-                    number=index + 1,
-                    png_bytes=png_bytes,
-                    png_sha256=_sha256(png_bytes),
-                    width_px=width_px,
-                    height_px=height_px,
+                    page.close()
+                if not png_bytes.startswith(PNG_MAGIC) or width_px <= 0 or height_px <= 0:
+                    raise _blocked("PDF 페이지 PNG 렌더 증거가 올바르지 않습니다")
+                if not has_visible_content:
+                    raise _blocked("PDF 페이지가 시각적으로 비어 있어 출고할 수 없습니다")
+                if not has_visible_body_text:
+                    raise _blocked("PDF 본문 글자가 렌더 화면에서 보이지 않아 출고할 수 없습니다")
+                pages.append(
+                    RenderedPdfPage(
+                        number=index + 1,
+                        png_bytes=png_bytes,
+                        png_sha256=_sha256(png_bytes),
+                        width_px=width_px,
+                        height_px=height_px,
+                    )
                 )
-            )
+        finally:
+            document.close()
+        return tuple(pages)
     finally:
-        document.close()
-    return tuple(pages)
+        _PDFIUM_RENDER_LOCK.release()
 
 
 def report_fact_id_ledger(report: Report) -> tuple[str, ...]:
@@ -399,12 +425,19 @@ def prepare_pdf_bytes(
         pages = _render_all_pages(pdf_bytes, scale=render_scale)
         if len(pages) != len(reader.pages):
             raise _blocked("PDF 페이지와 PNG 검수 페이지 수가 다릅니다")
+        metadata = reader.metadata or {}
         return PdfReleaseCandidate(
             pdf_bytes=pdf_bytes,
             pdf_sha256=_sha256(pdf_bytes),
             pages=pages,
             expected_fact_ids=expected_fact_ids,
             render_scale=render_scale,
+            content_manifest_version=str(
+                metadata.get(PDF_MANIFEST_VERSION_KEY, "") or ""
+            ),
+            content_manifest_sha256=str(
+                metadata.get(PDF_MANIFEST_SHA256_KEY, "") or ""
+            ),
         )
     except PDFReleaseBlockedError:
         raise
@@ -658,6 +691,10 @@ def _candidate_integrity_problems(
         or candidate.render_scale <= 0
     ):
         problems.append("최종 PDF의 PNG 렌더 배율이 올바르지 않습니다")
+    if not isinstance(candidate.content_manifest_version, str):
+        problems.append("최종 PDF 공개 내용 지문 버전 형식이 올바르지 않습니다")
+    if not isinstance(candidate.content_manifest_sha256, str):
+        problems.append("최종 PDF 공개 내용 지문 형식이 올바르지 않습니다")
 
     expected_numbers = tuple(range(1, len(candidate.pages) + 1))
     if any(
@@ -703,6 +740,39 @@ def _candidate_integrity_problems(
         try:
             reader = PdfReader(io.BytesIO(candidate.pdf_bytes), strict=True)
             actual_pdf_page_count = len(reader.pages)
+            metadata = reader.metadata or {}
+            actual_manifest_version = str(
+                metadata.get(PDF_MANIFEST_VERSION_KEY, "") or ""
+            )
+            actual_manifest_sha256 = str(
+                metadata.get(PDF_MANIFEST_SHA256_KEY, "") or ""
+            )
+            candidate_manifest_version = (
+                candidate.content_manifest_version
+                if isinstance(candidate.content_manifest_version, str)
+                else ""
+            )
+            candidate_manifest_sha256 = (
+                candidate.content_manifest_sha256
+                if isinstance(candidate.content_manifest_sha256, str)
+                else ""
+            )
+            if any(
+                (
+                    actual_manifest_version,
+                    actual_manifest_sha256,
+                    candidate_manifest_version,
+                    candidate_manifest_sha256,
+                )
+            ):
+                if actual_manifest_version != CONTENT_MANIFEST_VERSION:
+                    problems.append("최종 PDF 공개 내용 지문 버전이 올바르지 않습니다")
+                if not is_valid_sha256(actual_manifest_sha256):
+                    problems.append("최종 PDF 공개 내용 지문 형식이 올바르지 않습니다")
+                if candidate_manifest_version != actual_manifest_version:
+                    problems.append("PDF bytes와 후보의 공개 내용 지문 버전이 다릅니다")
+                if candidate_manifest_sha256 != actual_manifest_sha256:
+                    problems.append("PDF bytes와 후보의 공개 내용 지문이 다릅니다")
             if any(not (page.extract_text() or "").strip() for page in reader.pages):
                 problems.append("최종 PDF에 글자가 없는 페이지가 있습니다")
         except Exception:

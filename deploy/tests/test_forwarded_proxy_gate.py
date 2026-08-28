@@ -27,7 +27,7 @@ def _base() -> dict[str, str]:
         "BETA_ADMIN_ONLY": "0",
         "PORT": "10000",
         "LOG_LEVEL": "info",
-        "GRACEFUL_SHUTDOWN_SECONDS": "300",
+        "GRACEFUL_SHUTDOWN_SECONDS": "20",
         "APP_DATA_ROOT": "/var/data",
         "STORAGE_DB_PATH": "/var/data/storage.db",
         "OBSERVABILITY_RECORDS_PATH": "/var/data/observability/runs.jsonl",
@@ -46,6 +46,7 @@ def _render_public() -> dict[str, str]:
             "DEPLOYMENT_EXPOSURE": "public",
             "DEPLOYMENT_PLATFORM": "render",
             "DEPLOYMENT_RUNTIME_CONTRACT": validator.RUNTIME_CONTRACT_RENDER_WEB,
+            "GRACEFUL_SHUTDOWN_SECONDS": "20",
             "PUBLIC_ORIGIN": "https://company.example",
             "FORWARDED_ALLOW_IPS": "1.1.1.1/32",
             "HTTPS_ORIGIN_CSRF_CANARY_EVIDENCE_SHA256": EVIDENCE,
@@ -67,6 +68,7 @@ def _render_admin_demo() -> dict[str, str]:
             "DEPLOYMENT_RUNTIME_CONTRACT": (
                 validator.RUNTIME_CONTRACT_RENDER_ADMIN_DEMO
             ),
+            "GRACEFUL_SHUTDOWN_SECONDS": "20",
             "PUBLIC_ORIGIN": "https://company.example",
             "RENDER_EXTERNAL_URL": "https://company.example",
             "FORWARDED_ALLOW_IPS": "",
@@ -95,6 +97,17 @@ def _render_admin_real() -> dict[str, str]:
         }
     )
     return environment
+
+
+def test_Render는_플랫폼보다_짧은_Uvicorn_종료유예를_강제한다() -> None:
+    environment = _render_admin_demo()
+    assert validator.validate(environment, "web") == []
+
+    environment["GRACEFUL_SHUTDOWN_SECONDS"] = "300"
+    errors = "\n".join(validator.validate(environment, "web"))
+
+    assert "GRACEFUL_SHUTDOWN_SECONDS" in errors
+    assert "20" in errors
 
 
 @pytest.mark.parametrize(
@@ -246,7 +259,7 @@ def test_Render_관리자_demo는_forwarded를_비신뢰할_때만_통과한다(
             "--port \"${PORT:-10000}\" --workers 1 --no-proxy-headers "
             "--limit-concurrency 20 --backlog 32 --timeout-keep-alive 5 "
             "--timeout-graceful-shutdown "
-            "\"${GRACEFUL_SHUTDOWN_SECONDS:-300}\" --log-level "
+            "\"${GRACEFUL_SHUTDOWN_SECONDS:-20}\" --log-level "
             "\"${LOG_LEVEL:-info}\"",
         ],
     )
@@ -268,7 +281,7 @@ def test_Render_관리자_실분석은_필수비밀과_forwarded비신뢰일_때
             "--port \"${PORT:-10000}\" --workers 1 --no-proxy-headers "
             "--limit-concurrency 20 --backlog 32 --timeout-keep-alive 5 "
             "--timeout-graceful-shutdown "
-            "\"${GRACEFUL_SHUTDOWN_SECONDS:-300}\" --log-level "
+            "\"${GRACEFUL_SHUTDOWN_SECONDS:-20}\" --log-level "
             "\"${LOG_LEVEL:-info}\"",
         ],
     )

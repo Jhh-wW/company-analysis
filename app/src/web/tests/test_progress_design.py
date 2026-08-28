@@ -8,6 +8,8 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from src.core.constants import PROGRESS_STEPS
+from src.features.auth import constants as auth_constants
+from src.features.auth import logic as auth_logic
 from src.web import job_runtime, main
 from src.web.routers import analysis
 
@@ -15,6 +17,13 @@ from src.web.routers import analysis
 WEB = Path(__file__).parents[1]
 TEMPLATE = WEB / "templates" / "progress.html"
 STYLE = WEB / "static" / "style.css"
+
+
+def _set_admin_cookie(client: TestClient) -> None:
+    session = auth_logic.create_session(
+        "admin@example.com", True, subject="google:progress-design-admin"
+    )
+    client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
 
 
 def _render_progress_page(job_id: str, legal_name: str) -> str:
@@ -25,6 +34,7 @@ def _render_progress_page(job_id: str, legal_name: str) -> str:
     )
     try:
         with TestClient(main.app) as client:
+            _set_admin_cookie(client)
             response = client.get(f"/progress/{job_id}")
     finally:
         job_runtime._JOBS.pop(job_id, None)
@@ -49,14 +59,14 @@ def test_단계_카드_묶음은_실제_백엔드_단계_키와_정확히_일치
 
 
 def test_진행_화면은_조사_대상_기업명을_보여준다():
-    html = _render_progress_page("progress-design-company", "제이와이피엔터테인먼트")
+    html = _render_progress_page("1" * 32, "제이와이피엔터테인먼트")
 
     assert "조사 대상 기업" in html
     assert "제이와이피엔터테인먼트" in html
 
 
 def test_진행_화면은_단계_카드를_그리고_가짜_진행률은_만들지_않는다():
-    html = _render_progress_page("progress-design-cards", "샘플기업")
+    html = _render_progress_page("2" * 32, "샘플기업")
 
     assert html.count("<li data-keys=") == len(
         analysis._COMPANY_ANALYSIS_PROGRESS_PHASES
@@ -184,7 +194,7 @@ def test_완료_표시는_승인색이_아닌_중립_회색과_체크를_함께_
 
 
 def test_회사분석_진행_API는_레거시_공고단계를_노출하지_않는다():
-    job_id = "company-only-progress"
+    job_id = "3" * 32
     job_runtime._JOBS[job_id] = SimpleNamespace(
         done_steps=["identify", "posting"],
         current_step="posting",
@@ -194,6 +204,7 @@ def test_회사분석_진행_API는_레거시_공고단계를_노출하지_않�
     )
     try:
         with TestClient(main.app) as client:
+            _set_admin_cookie(client)
             response = client.get(f"/api/progress/{job_id}")
     finally:
         job_runtime._JOBS.pop(job_id, None)
@@ -205,7 +216,7 @@ def test_회사분석_진행_API는_레거시_공고단계를_노출하지_않�
 
 def test_끝난_작업은_결과_주소로_보낸다_실패도_같은_동선이다():
     """실패한 실행도 /result로 이동해 기존 중단 안내(stopped) 화면으로 이어진다."""
-    job_id = "company-progress-finished"
+    job_id = "4" * 32
     job_runtime._JOBS[job_id] = SimpleNamespace(
         done_steps=[key for key, _label in PROGRESS_STEPS],
         current_step="",
@@ -215,6 +226,7 @@ def test_끝난_작업은_결과_주소로_보낸다_실패도_같은_동선이�
     )
     try:
         with TestClient(main.app) as client:
+            _set_admin_cookie(client)
             response = client.get(f"/api/progress/{job_id}")
     finally:
         job_runtime._JOBS.pop(job_id, None)

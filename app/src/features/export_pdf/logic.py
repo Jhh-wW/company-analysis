@@ -59,6 +59,12 @@ from src.core.constants import section_display_heading
 from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
 from src.features.composer.validate import validate_v2
 from src.features.export_pdf import constants
+from src.features.export_pdf.content_manifest import (
+    CONTENT_MANIFEST_VERSION,
+    PDF_MANIFEST_SHA256_KEY,
+    PDF_MANIFEST_VERSION_KEY,
+    public_content_manifest_sha256,
+)
 from src.features.pipeline.port import Grade, Report, ReportSection, ReportTable
 from src.features.provenance.sources import Source, SourceKind, visible_citations
 from src.features.report_standard import build_published_report
@@ -77,6 +83,7 @@ from src.features.report_standard.visualization import (
     TableVisualization,
     table_visualization,
 )
+from src.shared.report_quality.models import PublicationPolicy
 
 _FONT_LOCK = threading.Lock()
 _ISO_DATE_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}(?:$|T|\s)")
@@ -86,6 +93,37 @@ _PDF_TEXT_REPLACEMENTS = (
     ("⚠", "주의:"),
     ("・", "·"),
 )
+
+
+def _legacy_shadow_publication(report: Report) -> bool:
+    return (
+        report.publication_policy
+        == PublicationPolicy.LEGACY_SHADOW_EXCEPTION.value
+    )
+
+
+def _partial_publication_copy(
+    report: Report,
+    *,
+    detailed: bool,
+) -> tuple[str, str]:
+    """표지와 본문이 같은 공개 정책을 서로 다른 말로 꾸미지 않게 한다."""
+
+    if _legacy_shadow_publication(report):
+        detail = (
+            "확인되지 않은 숫자 문장은 제외했지만 모든 문장·표·도식의 새 "
+            "검증은 아직 끝나지 않았습니다. 아래에 남은 이유를 표시합니다."
+            if detailed
+            else "모든 문장·표·도식의 새 검증은 아직 끝나지 않았습니다."
+        )
+        return "안전 확인 중인 임시 부분 보고서", detail
+    detail = (
+        "공식 근거로 확인된 항목만 제공합니다. 아래 미제공 사유는 "
+        "해당 사실이 없다는 판정이 아닙니다."
+        if detailed
+        else "공식 근거로 확인된 항목만 수록했습니다."
+    )
+    return "검증된 부분 보고서(부분 완성)", detail
 
 
 class PDFGenerationError(RuntimeError):
@@ -528,9 +566,12 @@ class _CoverContent(Flowable):
             metadata_bottom = title_y - meta_height - 7
 
         if self.report.grade is Grade.PARTIAL:
+            status_title, status_detail = _partial_publication_copy(
+                self.report,
+                detailed=False,
+            )
             status = Paragraph(
-                "<b>검증된 부분 보고서(부분 완성)</b><br/>"
-                "공식 근거로 확인된 항목만 수록했습니다.",
+                f"<b>{status_title}</b><br/>{status_detail}",
                 self.styles["cover_meta"],
             )
             _, status_height = status.wrap(self.width, 18 * mm)
@@ -663,6 +704,23 @@ def _display_report_date(report: Report) -> str:
         parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
         if parsed.tzinfo is not None:
             return parsed.astimezone(clock.KST).date().strftime("%Y.%m.%d")
+        return parsed.date().strftime("%Y.%m.%d")
+    except ValueError:
+        return ""
+
+
+def _display_generated_at(report: Report) -> str:
+    """저장된 실제 생성 시각이 ISO 형식일 때만 KST 날짜로 표시한다."""
+
+    raw = report.generated_at.strip()
+    if not raw or _ISO_DATE_PREFIX.match(raw) is None:
+        return ""
+    try:
+        if len(raw) == 10:
+            return dt.date.fromisoformat(raw).strftime("%Y.%m.%d")
+        parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(clock.KST)
         return parsed.date().strftime("%Y.%m.%d")
     except ValueError:
         return ""
@@ -1188,6 +1246,10 @@ def _add_report_table(
 #: 웹의 ``.pno``도 본문보다 작은 10.x px다(style.css). 값 자체가 사실이
 #: 아니라 «표시 크기»이므로 매직 넘버로 두지 않고 여기 상수로 뽑는다.
 _PARAGRAPH_NUMBER_FONT_SIZE_PT: Final[float] = 8.3
+#: 번호 열과 본문 열을 분리하는 고정 폭. 한 Paragraph에 접두어로 넣으면 둘째
+#: 줄이 번호 아래로 되돌아가므로 실제 두 열로 배치한다.
+_PARAGRAPH_NUMBER_COLUMN_PT: Final[float] = 18.0
+_PARAGRAPH_NUMBER_GAP_PT: Final[float] = 5.0
 
 
 def _paragraph_number_markup(position: int) -> str:
@@ -1211,8 +1273,54 @@ def _paragraph_number_markup(position: int) -> str:
         f'<font name="{constants.FONT_SEMIBOLD}" '
         f'size="{_PARAGRAPH_NUMBER_FONT_SIZE_PT}" '
         f'color="{constants.COLOR_MUTED}">{position}.'
-        f"</font>&#160;&#160;"
+        f"</font>"
     )
+
+
+def _numbered_paragraph(
+    position: int,
+    text: str,
+    styles: dict[str, ParagraphStyle],
+    width: float,
+) -> Table:
+    """번호와 본문을 실제 두 열로 놓아 모든 줄의 본문 시작선을 맞춘다."""
+
+    number_style = ParagraphStyle(
+        f"ReportParagraphNumber{position}",
+        parent=styles["body"],
+        fontName=constants.FONT_SEMIBOLD,
+        fontSize=_PARAGRAPH_NUMBER_FONT_SIZE_PT,
+        textColor=colors.HexColor(constants.COLOR_MUTED),
+        alignment=TA_RIGHT,
+        spaceAfter=0,
+    )
+    body_style = ParagraphStyle(
+        f"ReportNumberedBody{position}",
+        parent=styles["body"],
+        spaceAfter=0,
+    )
+    number = Paragraph(_paragraph_number_markup(position), number_style)
+    body = Paragraph(_escape(text), body_style)
+    number_column = min(_PARAGRAPH_NUMBER_COLUMN_PT, width)
+    table = Table(
+        [[number, body]],
+        colWidths=[number_column, max(1.0, width - number_column)],
+        hAlign="LEFT",
+    )
+    table.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (0, 0), _PARAGRAPH_NUMBER_GAP_PT),
+                ("RIGHTPADDING", (1, 0), (1, 0), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ]
+        )
+    )
+    table.spaceAfter = styles["body"].spaceAfter
+    return table
 
 
 def _add_section(
@@ -1252,7 +1360,7 @@ def _add_section(
         #   덩어리로 냈다. 첫 문단만 제목과 함께 묶어 쪽 넘김에서 떨어지지
         #   않게 하고, 나머지는 이어서 흘린다.
         paragraphs = [
-            Paragraph(_paragraph_number_markup(position) + _escape(text), styles["body"])
+            _numbered_paragraph(position, text, styles, width)
             for position, text in enumerate(section.prose_paragraphs, start=1)
         ]
         story.append(KeepTogether([*heading_flowables, paragraphs[0]]))
@@ -1479,8 +1587,10 @@ def _source_used_sections(source: Source) -> str:
 
 def _cover_metadata(report: Report) -> str:
     display_date = _display_report_date(report)
+    generated_date = _display_generated_at(report)
     values = [
         f"기준일 {display_date}" if display_date else "",
+        f"내용 생성 {generated_date}" if generated_date else "",
         report.corp_type.strip(),
         report.analysis_period.strip(),
         (
@@ -1562,15 +1672,15 @@ def _document_header(
         _OutlineAnchor("report-body", "분석 본문", level=0),
     ]
     if report.grade is Grade.PARTIAL:
+        partial_title, partial_detail = _partial_publication_copy(
+            report,
+            detailed=True,
+        )
         items.extend(
             [
                 _OutlineAnchor("partial-notice", "부분 보고서 안내", level=1),
-                Paragraph("검증된 부분 보고서(부분 완성)", styles["heading"]),
-                Paragraph(
-                    "공식 근거로 확인된 항목만 제공합니다. 아래 미제공 사유는 "
-                    "해당 사실이 없다는 판정이 아닙니다.",
-                    styles["body"],
-                ),
+                Paragraph(partial_title, styles["heading"]),
+                Paragraph(partial_detail, styles["body"]),
                 *[
                     Paragraph(f"- {_escape(reason)}", styles["body"])
                     for reason in report.shortfall_reasons
@@ -1618,7 +1728,12 @@ def _page_furniture(canvas: Canvas, doc: SimpleDocTemplate) -> None:
 
 
 def _add_accessibility_metadata(
-    raw_pdf: bytes, title: str, *, author: str, subject: str
+    raw_pdf: bytes,
+    title: str,
+    *,
+    author: str,
+    subject: str,
+    content_manifest_sha256: str,
 ) -> bytes:
     """문서 제목·언어·제목 표시 설정을 추가한다(가짜 tagged 구조는 만들지 않는다)."""
 
@@ -1675,6 +1790,8 @@ def _add_accessibility_metadata(
             "/Title": title,
             "/Subject": subject,
             "/Author": author,
+            PDF_MANIFEST_VERSION_KEY: CONTENT_MANIFEST_VERSION,
+            PDF_MANIFEST_SHA256_KEY: content_manifest_sha256,
         }
     )
     root = writer._root_object
@@ -1759,7 +1876,11 @@ def _build_pdf(report: Report) -> bytes:
         canvasmaker=_BrandedCanvas,
     )
     return _add_accessibility_metadata(
-        buffer.getvalue(), title, author=author, subject=subject
+        buffer.getvalue(),
+        title,
+        author=author,
+        subject=subject,
+        content_manifest_sha256=public_content_manifest_sha256(report),
     )
 
 

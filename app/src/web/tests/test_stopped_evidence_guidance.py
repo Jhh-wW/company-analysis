@@ -16,6 +16,7 @@ from src.features.pipeline.port import (
     UserInput,
 )
 from src.web import job_runtime, main
+from src.web.tests.report_route_support import bind_public_report_access
 
 
 def _stopped_job(*, sources: bool = True) -> tuple[str, job_runtime.Job]:
@@ -51,7 +52,8 @@ def test_근거부족은_정상보고서가_아니라_의미와_다음행동을_
     job_id, job = _stopped_job()
     job_runtime._JOBS[job_id] = job
     try:
-        with TestClient(main.app) as client:
+        with TestClient(main.app, base_url="https://testserver") as client:
+            bind_public_report_access(client, job_id)
             response = client.get(f"/result/{job_id}")
     finally:
         job_runtime._JOBS.pop(job_id, None)
@@ -81,7 +83,8 @@ def test_정책상_쓰지_않은_뉴스와_일부만_탐색한_IR을_자료없�
     )
     job_runtime._JOBS[job_id] = job
     try:
-        with TestClient(main.app) as client:
+        with TestClient(main.app, base_url="https://testserver") as client:
+            bind_public_report_access(client, job_id)
             response = client.get(f"/result/{job_id}")
     finally:
         job_runtime._JOBS.pop(job_id, None)
@@ -98,7 +101,8 @@ def test_확인한_자료가_없으면_존재하지_않는_자료표_링크를_�
     job_id, job = _stopped_job(sources=False)
     job_runtime._JOBS[job_id] = job
     try:
-        with TestClient(main.app) as client:
+        with TestClient(main.app, base_url="https://testserver") as client:
+            bind_public_report_access(client, job_id)
             response = client.get(f"/result/{job_id}")
     finally:
         job_runtime._JOBS.pop(job_id, None)
@@ -117,7 +121,8 @@ def test_회사를_못찾은_중단을_기술오류라고_부르지_않는다() 
     )
     job_runtime._JOBS[job_id] = job
     try:
-        with TestClient(main.app) as client:
+        with TestClient(main.app, base_url="https://testserver") as client:
+            bind_public_report_access(client, job_id)
             response = client.get(f"/result/{job_id}")
     finally:
         job_runtime._JOBS.pop(job_id, None)
@@ -139,7 +144,8 @@ def test_관리자에게는_중단까지_사용된_AI비용을_숨기지_않는�
     session = auth_logic.create_session("admin@example.com", True)
     job_runtime._JOBS[job_id] = job
     try:
-        with TestClient(main.app) as client:
+        with TestClient(main.app, base_url="https://testserver") as client:
+            bind_public_report_access(client, job_id)
             client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
             response = client.get(f"/result/{job_id}")
     finally:

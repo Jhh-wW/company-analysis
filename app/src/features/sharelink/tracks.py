@@ -6,7 +6,7 @@
 | 갈래 | 누구 | 하루 상한 | 통장 이름 |
 |---|---|---:|---|
 | `ADMIN`  | 나 (관리자 명단) | 5,000원 | `user:<이메일>` |
-| `MEMBER` | 초대한 친구      | 성공 3건 | `user:<이메일>` |
+| `MEMBER` | 초대한 친구      | 3,000원 + 성공 3건 | `user:<이메일>` |
 | `LINK`   | 열쇠 링크 방문자 | 3,000원 | `<열쇠>` |
 | `PUBLIC` | 그냥 들어온 사람  | **0원** | `(열쇠 없음)` |
 
@@ -24,6 +24,7 @@ from enum import Enum
 from src.features.sharelink.constants import (
     ADMIN_DAILY_BUDGET_KRW,
     PER_LINK_DAILY_BUDGET_KRW,
+    PER_USER_DAILY_BUDGET_KRW,
     PUBLIC_BUCKET,
     PUBLIC_DAILY_BUDGET_KRW,
     USER_BUCKET_PREFIX,
@@ -40,10 +41,10 @@ class Track(str, Enum):
     PUBLIC = "public"    #: 로그인도 열쇠도 없는 손님
 
 
-#: 갈래별 비용 하루 상한. MEMBER는 성공 보고서 수로 제한하므로 비용 상한이 없다.
-BUDGET_BY_TRACK: dict[Track, float | None] = {
+#: 갈래별 비용 하루 입장 상한. MEMBER는 성공 3건 제한도 별도로 함께 적용한다.
+BUDGET_BY_TRACK: dict[Track, float] = {
     Track.ADMIN: ADMIN_DAILY_BUDGET_KRW,
-    Track.MEMBER: None,
+    Track.MEMBER: PER_USER_DAILY_BUDGET_KRW,
     Track.LINK: PER_LINK_DAILY_BUDGET_KRW,
     Track.PUBLIC: PUBLIC_DAILY_BUDGET_KRW,
 }
@@ -100,6 +101,9 @@ def bucket_of(track: Track, *, email: str, share_key: str) -> str:
     return PUBLIC_BUCKET
 
 
-def budget_of(track: Track) -> float | None:
-    """이 갈래의 비용 하루 상한. MEMBER는 성공 3건 정책이라 ``None``이다."""
+def budget_of(track: Track) -> float:
+    """이 갈래의 비용 하루 입장 상한.
+
+    MEMBER에는 이 값과 별도로 성공 보고서 3건 제한도 함께 적용한다.
+    """
     return BUDGET_BY_TRACK[track]

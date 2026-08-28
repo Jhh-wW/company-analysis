@@ -19,6 +19,7 @@ from src.features.export_pdf.logic import (
     PDFGenerationError,
     _add_report_table,
     _normalize_pdf_text,
+    _partial_publication_copy,
     _single_line_pdf_text,
     _styles,
     build_ascii_filename,
@@ -115,6 +116,7 @@ def test_pdf는_검색가능한_한글_본문과_모든_canonical_요소를_보�
         "(주)진영",
         "분석 보고서",
         "기준일 2026.08.19",
+        "내용 생성 2026.08.19",
         "핵심 요약",
         "1. 기업 정체성",
         "2. 사업 구조와 수익 모델",
@@ -162,6 +164,7 @@ def test_첫_페이지는_회사명과_보고서명을_줄바꿈해_표시한다
 
     assert "(주)진영\n분석 보고서" in first_page
     assert "기준일 2026.08.19" in first_page
+    assert "내용 생성 2026.08.19" in first_page
     assert "핵심 요약" in first_page
     assert "1. 기업 정체성" not in first_page
     assert "1. 기업 정체성" in second_page
@@ -314,6 +317,7 @@ def test_생성일이_깨졌다면_그_문자열이나_로컬_오늘을_공개�
     assert "확정 날짜" not in text
     assert "2031-02-03" not in text
     assert "기준일 2026.08.19" in text
+    assert "내용 생성" not in text
 
 
 @pytest.mark.parametrize(
@@ -403,6 +407,20 @@ def test_canonical_부분보고서는_PDF에도_등급과_미제공사유를_표
     assert "검증된 부분 보고서(부분 완성)" in text
     assert "공식 근거로 확인된 항목만" in text
     assert "8장 인재상과 일하는 방식" in text
+
+
+def test_안전미통과_임시공개본을_PDF가_검증완료라고_부르지_않는다() -> None:
+    report = replace(
+        _report(),
+        grade=Grade.PARTIAL,
+        publication_policy="legacy-shadow-exception-v1",
+    )
+
+    title, detail = _partial_publication_copy(report, detailed=True)
+
+    assert title == "안전 확인 중인 임시 부분 보고서"
+    assert "검증은 아직 끝나지 않았습니다" in detail
+    assert "검증된 부분 보고서" not in title
 
 
 def test_폰트_라이선스_원문을_배포물과_함께_둔다() -> None:

@@ -39,8 +39,19 @@ def _token_hash(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
 
 
-def save_session(conn: sqlite3.Connection, record: SessionRecord) -> None:
-    """세션을 저장한다(같은 토큰 지문이면 덮어쓴다)."""
+def save_session(
+    conn: sqlite3.Connection,
+    record: SessionRecord,
+    *,
+    now: Optional[float] = None,
+) -> None:
+    """세션을 저장하고 이미 만료된 다른 세션을 함께 정리한다.
+
+    새 쿠키를 만들 때마다 DB 행이 하나씩 생기므로, 사용자가 다시 제시하지 않은
+    예전 쿠키는 ``load_session``만으로는 영원히 정리되지 않는다. 로그인이라는
+    기존 쓰기 경계에서 전체 만료분을 치워 세션 표가 시간에 따라 끝없이 커지지
+    않게 한다.
+    """
     conn.execute(
         f"""
         INSERT INTO {TABLE_SESSIONS}
@@ -58,12 +69,26 @@ def save_session(conn: sqlite3.Connection, record: SessionRecord) -> None:
             record.expires_at,
         ),
     )
+    checked = now if now is not None else dt.datetime.now().timestamp()
+    conn.execute(
+        f"DELETE FROM {TABLE_SESSIONS} WHERE expires_at < ?",
+        (checked,),
+    )
 
 
 def load_session(
-    conn: sqlite3.Connection, token: Optional[str], *, now: Optional[float] = None
+    conn: sqlite3.Connection,
+    token: Optional[str],
+    *,
+    now: Optional[float] = None,
+    delete_invalid: bool = True,
 ) -> Optional[SessionRecord]:
-    """토큰으로 세션을 찾는다. 없거나 만료됐으면 `None`(만료분은 조회하는 김에 지운다)."""
+    """토큰으로 세션을 찾는다.
+
+    일반 인증 요청은 예전처럼 만료·구형 행을 지운다. 공개 보고서 GET처럼
+    연결 전체가 읽기 전용인 경계는 ``delete_invalid=False``로 조회만 하며,
+    정리는 다음 쓰기 가능한 인증 요청이나 주기 작업에 맡긴다.
+    """
     if not token:
         return None
     token_hash = _token_hash(token)
@@ -77,15 +102,17 @@ def load_session(
     # 마이그레이션 전 세션은 이메일만 갖고 있어 동일 인물의 이메일 별칭을 구별할
     # 수 없다. 승인자 신원으로 승격하지 않고 폐기해 재로그인시킨다.
     if not isinstance(row["subject"], str) or not row["subject"].strip():
-        conn.execute(
-            f"DELETE FROM {TABLE_SESSIONS} WHERE token_hash = ?", (token_hash,)
-        )
+        if delete_invalid:
+            conn.execute(
+                f"DELETE FROM {TABLE_SESSIONS} WHERE token_hash = ?", (token_hash,)
+            )
         return None
     checked = now if now is not None else dt.datetime.now().timestamp()
     if row["expires_at"] < checked:
-        conn.execute(
-            f"DELETE FROM {TABLE_SESSIONS} WHERE token_hash = ?", (token_hash,)
-        )
+        if delete_invalid:
+            conn.execute(
+                f"DELETE FROM {TABLE_SESSIONS} WHERE token_hash = ?", (token_hash,)
+            )
         return None
     return SessionRecord(
         token=token,

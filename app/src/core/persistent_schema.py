@@ -24,8 +24,16 @@ class PersistentSchemaBootstrap:
 
 PERSISTENT_SCHEMA_BOOTSTRAPS: Final[tuple[PersistentSchemaBootstrap, ...]] = (
     PersistentSchemaBootstrap(
+        "OAuth state 발급 원장", "src.features.auth.state_store",
+        "src/features/auth/state_store.py",
+    ),
+    PersistentSchemaBootstrap(
         "비용 예약 원장", "src.features.budget.spend_store",
         "src/features/budget/spend_store.py",
+    ),
+    PersistentSchemaBootstrap(
+        "provider 건강", "src.features.provider_health.store",
+        "src/features/provider_health/store.py",
     ),
     PersistentSchemaBootstrap(
         "관측 수명주기", "src.features.observability.lifecycle",
@@ -66,6 +74,26 @@ PERSISTENT_SCHEMA_BOOTSTRAPS: Final[tuple[PersistentSchemaBootstrap, ...]] = (
     PersistentSchemaBootstrap(
         "오류 신고", "src.features.feedback_report.store",
         "src/features/feedback_report/store.py",
+    ),
+    PersistentSchemaBootstrap(
+        "보고서 내용·전달", "src.features.report_delivery.store",
+        "src/features/report_delivery/store.py",
+    ),
+    PersistentSchemaBootstrap(
+        "보고서 불변 산출물", "src.features.report_delivery.artifact",
+        "src/features/report_delivery/artifact.py",
+    ),
+    PersistentSchemaBootstrap(
+        "보고서 휴지통 정리", "src.features.report_delivery.retention",
+        "src/features/report_delivery/retention.py",
+    ),
+    PersistentSchemaBootstrap(
+        "보고서 단일 실행 lease", "src.features.report_delivery.singleflight",
+        "src/features/report_delivery/singleflight.py",
+    ),
+    PersistentSchemaBootstrap(
+        "보고서 접근 grant", "src.features.report_access.store",
+        "src/features/report_access/store.py",
     ),
 )
 

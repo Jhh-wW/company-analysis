@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 
 from src.features.admin_dashboard import maintenance
 from src.features.storage import db as storage_db
-from src.web import internal_cron
+from src.web import internal_cron, report_retention_adapter
 
 
 router = APIRouter()
@@ -22,6 +22,11 @@ def _run(operation: str) -> maintenance.MaintenanceResult:
     return maintenance.run_current_operation(
         storage_db.connect,
         operation=operation,
+        cleanup_runner=(
+            report_retention_adapter.purge_expired_reports
+            if operation == maintenance.OPERATION_CLEANUP
+            else None
+        ),
     )
 
 

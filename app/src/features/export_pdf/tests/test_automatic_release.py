@@ -250,3 +250,86 @@ def test_손상된_자동출고_JSON_scalar는_저장소_도메인오류로_fail
                 )
     finally:
         conn.close()
+
+
+def test_모르는_역사검사버전은_행이없어도_없음으로_완화하지않는다():
+    conn = _conn()
+    try:
+        with pytest.raises(
+            release_store.PdfReleaseStoreError,
+            match="지원하지 않는 자동검사 버전",
+        ):
+            release_store.load_automatic_release_record(
+                conn,
+                report_id="unknown-checker",
+                report_sha256="a" * 64,
+                pdf_sha256="b" * 64,
+                checker_version="automatic-release-v999",
+            )
+    finally:
+        conn.close()
+
+
+def test_새출고저장소는_지원되는_과거레코드라도_현재버전이아니면_거부한다(
+    monkeypatch,
+):
+    report = _report()
+    candidate = prepare_pdf_release(report)
+    released_v1 = automatic_release_pdf(report, candidate, released_at=_AT)
+    conn = _conn()
+    try:
+        monkeypatch.setattr(
+            release_store,
+            "AUTOMATIC_CHECKER_VERSION",
+            "automatic-release-v2",
+        )
+        with pytest.raises(
+            release_store.PdfReleaseStoreError,
+            match="자동출고 결과의 무결성",
+        ):
+            release_store.save_automatic_release(
+                conn,
+                report_id="stale-new-release",
+                released_pdf=released_v1,
+            )
+
+        # 거부한 레코드를 일부라도 먼저 저장하지 않는다.
+        assert conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='table' AND name=?",
+            (release_store.AUTOMATIC_TABLE_NAME,),
+        ).fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("changed_column", ("report_sha256", "pdf_sha256"))
+def test_DB의_본문또는_PDF지문변조는_기존승인없음으로_완화하지않는다(
+    changed_column: str,
+):
+    report = _report()
+    candidate = prepare_pdf_release(report)
+    released = automatic_release_pdf(report, candidate, released_at=_AT)
+    conn = _conn()
+    try:
+        release_store.save_automatic_release(
+            conn,
+            report_id="hash-tampering",
+            released_pdf=released,
+        )
+        conn.execute(
+            f"UPDATE {release_store.AUTOMATIC_TABLE_NAME} "
+            f"SET {changed_column}=? WHERE report_id=?",
+            ("e" * 64, "hash-tampering"),
+        )
+
+        with pytest.raises(AutomaticGateStopped, match="지문이 변경"):
+            release_store.load_automatic_release_record(
+                conn,
+                report_id="hash-tampering",
+                report_sha256=released.record.report_sha256,
+                pdf_sha256=released.record.pdf_sha256,
+                checker_version=released.record.checker_version,
+            )
+    finally:
+        conn.close()

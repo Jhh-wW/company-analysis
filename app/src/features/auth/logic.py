@@ -16,6 +16,7 @@ import json
 import os
 import re
 import secrets
+import sqlite3
 import time
 from dataclasses import dataclass
 from typing import Iterable, Optional
@@ -379,6 +380,7 @@ def create_session(
                 is_admin=session.is_admin,
                 expires_at=session.expires_at,
             ),
+            now=started,
         )
     return session
 
@@ -420,11 +422,17 @@ def rotate_session(
                 is_admin=session.is_admin,
                 expires_at=session.expires_at,
             ),
+            now=started,
         )
     return session
 
 
-def get_session(token: Optional[str], *, now: Optional[float] = None) -> Optional[Session]:
+def get_session(
+    token: Optional[str],
+    *,
+    now: Optional[float] = None,
+    readonly_existing: bool = False,
+) -> Optional[Session]:
     """토큰으로 세션을 찾는다. 없거나 만료됐으면 None.
 
     만료된 세션은 조회하는 김에 지운다 — 로그아웃 없이 방치돼도 메모리가 계속 커지지 않게.
@@ -434,16 +442,35 @@ def get_session(token: Optional[str], *, now: Optional[float] = None) -> Optiona
     if not token:
         return None
     # ★ 만료 판정은 저장소가 한다 — 만료된 세션은 아예 안 돌려준다.
-    with db.connect() as conn:
-        record = store.load_session(conn, token, now=now)
+    # 공개 보고서 GET은 schema·행을 만들거나 정리하지 않는 별도 경계다.
+    if readonly_existing:
+        try:
+            with db.connect_readonly_existing() as conn:
+                if conn is None:
+                    return None
+                record = store.load_session(
+                    conn,
+                    token,
+                    now=now,
+                    delete_invalid=False,
+                )
+        except sqlite3.DatabaseError:
+            # 이 모드는 공개 GET의 안내 화면을 그리기 위한 보조 조회다. 본 접근
+            # 게이트가 저장소 장애를 503으로 닫으므로 여기서는 세션 없음으로만
+            # 처리해 그 503 화면 자체가 다시 500으로 깨지지 않게 한다.
+            return None
+    else:
+        with db.connect() as conn:
+            record = store.load_session(conn, token, now=now)
     if record is None:
         return None
     try:
         normalize_identity_subject(record.subject)
     except UnverifiedIdentityError:
         # DB 변조·부분 마이그레이션 값을 이메일 신원으로 대체하지 않는다.
-        with db.connect() as conn:
-            store.delete_session(conn, token)
+        if not readonly_existing:
+            with db.connect() as conn:
+                store.delete_session(conn, token)
         return None
 
     # 관리자 권한은 로그인 당시의 스냅샷을 믿지 않는다. 운영 중 ADMIN_EMAILS에서

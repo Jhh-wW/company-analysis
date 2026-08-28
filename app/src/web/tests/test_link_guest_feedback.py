@@ -32,6 +32,8 @@ from src.features.auth import logic as auth_logic
 from src.features.feedback_report import constants as feedback_constants
 from src.features.pipeline.canonical_demo import build_demo_report
 from src.features.pipeline.demo import DemoPipeline
+from src.features.report_access import constants as report_access_constants
+from src.features.report_access import store as report_access_store
 from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import store as share_store
 from src.features.sharelink.constants import KEY_COOKIE_NAME
@@ -52,7 +54,10 @@ def client():
 
 
 def _저장된_보고서로_링크를_발급한다(key: str) -> str:
-    report_id = "hash-drift-불필요-link-guest-report"
+    # 공개 주소는 열쇠가 아니라 32자리 locator다. 임의 문자열을 넣으면
+    # 실제 서비스에서는 소유권을 보기 전부터 거부되므로 시험도 실제 발급
+    # 모양을 써야 한다.
+    report_id = "11" * 16
     report = build_demo_report()
     with storage_db.connect() as conn:
         report_store.save(conn, report_id, "demo-corp", report.job, report)
@@ -101,19 +106,46 @@ def test_LINK_손님도_결과화면에서_오류신고_버튼이_보인다(clie
     assert 'id="member-survey-form"' not in result.text
 
 
-def test_완전_익명은_결과화면에서_오류신고_버튼이_안_보인다(client: TestClient):
-    """★ 화면에 숨기는 것은 배려일 뿐 진짜 차단이 아니다 — 진짜 차단은
+def test_PUBLIC_grant_손님은_결과화면에서_오류신고_버튼이_안_보인다(
+    client: TestClient,
+):
+    """PUBLIC grant는 보고서만 볼 수 있고 MEMBER/LINK 신원은 얻지 않는다.
+
+    ★ 화면에 숨기는 것은 배려일 뿐 진짜 차단이 아니다 — 진짜 차단은
     POST /feedback이 매 요청마다 CSRF+신원으로 다시 한다(아래 시험).
     이 시험은 «불필요한 유도조차 안 한다»만 확인한다.
     """
-    report_id = "anon-visible-report"
+    report_id = "22" * 16
     report = build_demo_report()
     with storage_db.connect() as conn:
         report_store.save(conn, report_id, "demo-corp", report.job, report)
+        grant = report_access_store.issue_and_bind(
+            conn, existing_token=None, run_id=report_id
+        )
+    client.cookies.set(
+        report_access_constants.PUBLIC_GRANT_COOKIE_NAME,
+        grant.token,
+    )
 
     result = client.get(f"/result/{report_id}")
 
     assert result.status_code == 200
+    assert "오류 신고" not in result.text
+
+
+def test_소유증명_없는_주소만으로는_결과와_오류신고_버튼을_볼수없다(
+    client: TestClient,
+):
+    """보고서 ID 자체를 옛 bearer 열쇠로 되돌리는 회귀를 막는다."""
+
+    report_id = "23" * 16
+    report = build_demo_report()
+    with storage_db.connect() as conn:
+        report_store.save(conn, report_id, "demo-corp", report.job, report)
+
+    result = client.get(f"/result/{report_id}", follow_redirects=False)
+
+    assert result.status_code == 404
     assert "오류 신고" not in result.text
 
 
@@ -154,15 +186,29 @@ def test_LINK_손님의_오류신고_POST가_통과하고_링크로_구분되어
 def test_MEMBER의_오류신고_POST도_통과하고_회원으로_구분되어_남는다(
     client: TestClient,
 ):
-    report_id = "member-feedback-report"
+    report_id = "33" * 16
     report = build_demo_report()
+    session = auth_logic.create_session(
+        "friend@example.com",
+        False,
+        subject="google:test-feedback-member",
+    )
     with storage_db.connect() as conn:
         report_store.save(conn, report_id, "demo-corp", report.job, report)
         share_allow.invite(
             conn, email="friend@example.com", note="시험",
             now_iso="2026-08-16T10:00:00",
         )
-    session = auth_logic.create_session("friend@example.com", False)
+        assert report_access_store.bind_member_run(
+            conn,
+            run_id=report_id,
+            identity_subject=session.subject,
+        )
+        assert report_access_store.bind_report(
+            conn,
+            run_id=report_id,
+            report_id=report_id,
+        )
     client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
 
     result = client.get(f"/result/{report_id}")

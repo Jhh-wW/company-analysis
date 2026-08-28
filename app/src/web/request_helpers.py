@@ -17,6 +17,7 @@ from fastapi.templating import Jinja2Templates
 
 from src.features.report_standard.period_summary import period_summary_from_table
 from src.features.report_standard.visualization import composition_tone
+from src.features.report_access import logic as report_access_logic
 
 from src.core import clock, paths
 from src.core.citations import (
@@ -79,6 +80,11 @@ from src.web.security import (
 
 logger = logging.getLogger(__name__)
 templates = Jinja2Templates(directory=str(paths.TEMPLATES_DIR))
+_READONLY_EXISTING_REQUEST_STATE = "public_get_readonly_existing"
+
+
+def _request_uses_readonly_existing(request: Request) -> bool:
+    return bool(getattr(request.state, _READONLY_EXISTING_REQUEST_STATE, False))
 
 # ★ 구성 도식의 «색 고르는 규칙»을 화면 틀에서도 쓴다.
 #   PDF(export_pdf/logic.py)와 «같은 함수»여야 화면과 인쇄물의 색이 안 어긋난다.
@@ -123,7 +129,10 @@ def _ctx(request: Request, **kwargs) -> dict:
             getattr(report, "citations", ())
         )
     token = request.cookies.get(auth_constants.SESSION_COOKIE_NAME)
-    session = auth_logic.get_session(token)
+    session = auth_logic.get_session(
+        token,
+        readonly_existing=_request_uses_readonly_existing(request),
+    )
     csrf_secret = _request_csrf_secret(request)
     evaluation = evaluation_mode.settings()
     base = {
@@ -173,6 +182,86 @@ def _ctx(request: Request, **kwargs) -> dict:
     }
     base.update(kwargs)
     return base
+
+
+def mark_public_get_readonly_existing(request: Request) -> None:
+    """이 공개 GET의 공통 화면 조회도 기존 DB를 읽기만 하도록 표시한다."""
+
+    setattr(request.state, _READONLY_EXISTING_REQUEST_STATE, True)
+
+
+def require_report_access(
+    request: Request, locator: str, *, api: bool = False
+) -> Response | None:
+    """결과·PDF·두 progress 채널이 함께 쓰는 한곳짜리 권한 경계."""
+
+    decision = report_access_logic.authorize_report_access(request, locator)
+    if decision.allowed:
+        return None
+    unavailable = decision.reason in {
+        "store_unavailable",
+        "store_missing",
+        "store_incomplete",
+        "store_unreadable",
+    }
+    status_code = (
+        503
+        if unavailable
+        else 409
+        if decision.reason == "resource_revoked"
+        else 403
+        if decision.reason == "member_revoked"
+        else 404
+    )
+    if api:
+        from fastapi.responses import JSONResponse  # noqa: PLC0415
+
+        response: Response = JSONResponse(
+            {
+                "error": (
+                    "보고서 접근 권한을 잠시 확인할 수 없습니다."
+                    if unavailable
+                    else "이 보고서를 열 수 없습니다."
+                ),
+                "code": (
+                    "report_access_store_unavailable"
+                    if unavailable
+                    else "report_access_denied"
+                ),
+                "retryable": unavailable,
+            },
+            status_code=status_code,
+        )
+    else:
+        if decision.reason == "resource_revoked":
+            response = HTMLResponse(
+                "<h1>보고서를 열 수 없습니다</h1>"
+                "<p>오류 신고가 접수되어 결과·다운로드·공유를 잠시 멈췄습니다. "
+                "관리자가 원본과 출처를 확인한 뒤 직접 다시 공개합니다.</p>",
+                status_code=status_code,
+            )
+        else:
+            response = HTMLResponse(
+                "<h1>보고서를 열 수 없습니다</h1>"
+                "<p>보고서 번호만으로는 열람 권한이 되지 않습니다. "
+                "조사를 시작한 브라우저나 현재 초대 계정·링크로 다시 열어 주세요.</p>",
+                status_code=status_code,
+            )
+    response.headers["Cache-Control"] = "private, no-store"
+    store_status = {
+        "store_missing": "missing",
+        "store_incomplete": "incomplete",
+        "store_unreadable": "unreadable",
+    }.get(decision.reason, "")
+    if store_status:
+        response.headers["X-Report-Store-Status"] = store_status
+    return response
+
+
+def public_get_uses_readonly_existing(request: Request) -> bool:
+    """공개 GET의 하위 화면 조립기가 같은 읽기 전용 계약을 이어받게 한다."""
+
+    return _request_uses_readonly_existing(request)
 
 def _retry_screen(
     request: Request,
@@ -271,6 +360,9 @@ def _current_share_link(request: Request):
     if not share_logic.is_valid_key(key):
         return None
     try:
+        if _request_uses_readonly_existing(request):
+            with storage_db.connect_readonly_existing() as conn:
+                return None if conn is None else _load_active_share_link(conn, key)
         with storage_db.connect() as conn:
             return _load_active_share_link(conn, key)
     except Exception:  # noqa: BLE001 — 링크를 못 읽어도 화면은 떠야 한다
@@ -314,6 +406,14 @@ def _raw_share_key(request: Request) -> str:
     if not share_logic.is_valid_key(key):
         return ""
     try:
+        if _request_uses_readonly_existing(request):
+            with storage_db.connect_readonly_existing() as conn:
+                return (
+                    key
+                    if conn is not None
+                    and _load_active_share_link(conn, key) is not None
+                    else ""
+                )
         with storage_db.connect() as conn:
             return key if _load_active_share_link(conn, key) is not None else ""
     except Exception:  # noqa: BLE001 — 링크 확인 실패는 권한을 주지 않는 쪽으로
@@ -344,14 +444,24 @@ def _track_of(request: Request) -> tuple[share_tracks.Track, str, float | None]:
         )
 
     token = request.cookies.get(auth_constants.SESSION_COOKIE_NAME)
-    email = auth_logic.current_email(token) or ""
-    is_admin = auth_logic.is_admin_session(token)
+    session = auth_logic.get_session(
+        token,
+        readonly_existing=_request_uses_readonly_existing(request),
+    )
+    email = session.email if session is not None else ""
+    is_admin = bool(session is not None and session.is_admin)
 
     is_member = False
     if email and not is_admin:
         try:
-            with storage_db.connect() as conn:
-                is_member = share_allow.is_allowed(conn, email)
+            if _request_uses_readonly_existing(request):
+                with storage_db.connect_readonly_existing() as conn:
+                    is_member = bool(
+                        conn is not None and share_allow.is_allowed(conn, email)
+                    )
+            else:
+                with storage_db.connect() as conn:
+                    is_member = share_allow.is_allowed(conn, email)
         except Exception:  # noqa: BLE001 — 못 읽으면 «안 된 사람»으로 본다
             logger.exception("초대 명단을 못 읽었습니다 — 초대 안 된 것으로 봅니다")
 
@@ -479,6 +589,8 @@ def _guard_run(
     #     링크를 몇 개 뿌렸는지가 곧 예산이다 (관리 화면에서 확인).
     costs_money = not isinstance(runtime._PIPELINE, DemoPipeline)
     track, bucket, cap = resolved_track or _track_of(request)
+    if costs_money and not paid_runtime.reap_expired_paid_phases():
+        return _throttled(request, BUDGET_STORE_BLOCKED_MESSAGE, "budget-store")
     # 횟수 제한도 권한 통장의 지문을 쓴다. 프록시가 전달한 IP는 신뢰 경계가
     # 아니므로 X-Forwarded-For를 바꿔도 새 횟수 통장을 만들 수 없다.
     rate_key = spend_store.bucket_id(bucket)
@@ -506,8 +618,9 @@ def _guard_run(
         )
     )
     if track is share_tracks.Track.MEMBER:
-        # MEMBER의 사용자 제한은 비용이 아니라 KST 성공 보고서 3건이다. 여기서는
-        # 빠른 사전 확인만 하고, Job 등록 직전 SQLite reservation이 동시 경쟁을 닫는다.
+        # MEMBER는 위에서 실패까지 포함한 비용 상한을 먼저 확인하고, 여기서는
+        # 성공 보고서 3건도 따로 확인한다. 빠른 사전 확인 뒤 Job 등록 직전의
+        # SQLite reservation이 성공 건수의 동시 경쟁을 닫는다.
         try:
             with storage_db.connect() as conn:
                 member_available = dashboard_store.member_can_start(

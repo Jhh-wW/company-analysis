@@ -270,6 +270,28 @@ def test_member_success_limit_reserves_concurrently_and_returns_failures(tmp_pat
         assert store.member_usage_today(conn, actor_email="member@example.com", day="2026-08-22") == (1, 2)
 
 
+def test_member_restart_recovery_can_list_only_unsettled_reservations(tmp_path):
+    target = tmp_path / "dashboard.db"
+    with db.connect(target) as conn:
+        assert store.reserve_member_run(
+            conn, run_id="reserved", actor_email="member@example.com",
+            day="2026-08-22", now_iso="2026-08-22T10:00:00+09:00",
+        )
+        assert store.reserve_member_run(
+            conn, run_id="returned", actor_email="member@example.com",
+            day="2026-08-22", now_iso="2026-08-22T10:01:00+09:00",
+        )
+        assert store.settle_member_run(
+            conn, run_id="returned", succeeded=False, report_id="",
+            now_iso="2026-08-22T10:02:00+09:00",
+        )
+
+        reservations = store.list_reserved_member_runs(conn)
+
+    assert tuple(item.run_id for item in reservations) == ("reserved",)
+    assert reservations[0].actor_email == "member@example.com"
+
+
 def test_member_statistics_keeps_latest_result_type_and_cost_state(tmp_path):
     target = tmp_path / "dashboard.db"
     with db.connect(target) as conn:
@@ -480,7 +502,7 @@ def test_same_member_repeated_error_blocks_each_report_without_global_maintenanc
         ).fetchone()[0] == 0
 
 
-def test_distinct_members_and_reports_enter_maintenance_but_never_restart_automatically(tmp_path):
+def test_distinct_member_free_text_reports_never_control_global_maintenance(tmp_path):
     target = tmp_path / "dashboard.db"
     with db.connect(target) as conn:
         for report_id, actor_email in (
@@ -492,11 +514,12 @@ def test_distinct_members_and_reports_enter_maintenance_but_never_restart_automa
                 area="source", reason="same source mismatch", now_iso="2026-08-22T10:00:00+09:00",
             )
         service = store.get_service_state(conn)
-        assert service.status == store.SERVICE_MAINTENANCE
-        assert "2" in service.impact
+        assert service.status == store.SERVICE_NORMAL
+        assert store.report_is_blocked(conn, "report-a")
+        assert store.report_is_blocked(conn, "report-b")
         assert conn.execute(
             f"SELECT COUNT(*) FROM {store.TABLE_SERVICE_EVENTS} WHERE actor = ?", ("system:repeated-error",)
-        ).fetchone()[0] == 1
+        ).fetchone()[0] == 0
 
 
 def test_distinct_members_on_one_report_do_not_enter_global_maintenance(tmp_path):
@@ -517,8 +540,16 @@ def test_single_critical_incident_enters_maintenance_and_is_append_only(tmp_path
     with db.connect(target) as conn:
         error = store.record_error(
             conn, report_id="report-a", actor_email="member@example.com", area="보안",
-            reason="권한 경계가 의심됩니다", incident_kind=store.INCIDENT_SECURITY,
+            reason="권한 경계가 의심됩니다",
             now_iso="2026-08-22T10:00:00+09:00",
+        )
+        store.record_incident(
+            conn,
+            kind=store.INCIDENT_SECURITY,
+            summary="코드가 권한 경계 위반을 확인했습니다",
+            error_id=error.id,
+            report_id=error.report_id,
+            now_iso="2026-08-22T10:00:01+09:00",
         )
         incidents = store.list_incidents(conn)
         service = store.get_service_state(conn)
@@ -530,7 +561,7 @@ def test_single_critical_incident_enters_maintenance_and_is_append_only(tmp_path
     assert service.status == store.SERVICE_MAINTENANCE
 
 
-def test_repeated_rate_limit_enters_maintenance_on_second_incident(tmp_path):
+def test_repeated_rate_limit_stays_scoped_and_does_not_enter_global_maintenance(tmp_path):
     target = tmp_path / "dashboard.db"
     with db.connect(target) as conn:
         for minute in ("00", "01"):
@@ -538,6 +569,39 @@ def test_repeated_rate_limit_enters_maintenance_on_second_incident(tmp_path):
                 conn, kind=store.INCIDENT_RATE_LIMIT, summary="DART candidate rate limit",
                 stage="candidate_resolution", now_iso=f"2026-08-22T10:{minute}:00+09:00",
             )
+        service = store.get_service_state(conn)
+        incidents = store.list_incidents(conn)
+
+    assert service.status == store.SERVICE_NORMAL
+    assert len(incidents) == 2
+
+
+def test_provider_response_incident_is_recorded_without_global_maintenance(tmp_path):
+    target = tmp_path / "dashboard.db"
+    with db.connect(target) as conn:
+        store.record_incident(
+            conn,
+            kind=store.INCIDENT_PROVIDER_RESPONSE,
+            summary="DART 응답 변경 의심",
+            stage="candidate_resolution",
+            now_iso="2026-08-22T10:00:00+09:00",
+        )
+        service = store.get_service_state(conn)
+        incidents = store.list_incidents(conn)
+
+    assert service.status == store.SERVICE_NORMAL
+    assert incidents[0]["kind"] == store.INCIDENT_PROVIDER_RESPONSE
+
+
+def test_source_global_incident_keeps_immediate_maintenance_safety_line(tmp_path):
+    target = tmp_path / "dashboard.db"
+    with db.connect(target) as conn:
+        store.record_incident(
+            conn,
+            kind=store.INCIDENT_SOURCE_GLOBAL,
+            summary="DART 원문이 전체적으로 잘못 매핑됨",
+            now_iso="2026-08-22T10:00:00+09:00",
+        )
         service = store.get_service_state(conn)
 
     assert service.status == store.SERVICE_MAINTENANCE

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import urllib.error
 
 import pytest
@@ -66,8 +67,8 @@ class _FakeHTTPResponse:
     def __exit__(self, *exc_info):
         return False
 
-    def read(self) -> bytes:
-        return self._body
+    def read(self, amount: int = -1) -> bytes:
+        return self._body if amount < 0 else self._body[:amount]
 
 
 # ══════════════════════════════════════════════════════════
@@ -254,6 +255,15 @@ def test_만료된_세션은_None이고_지워진다():
     # 만료된 세션은 «몇 번을 물어도» 안 나와야 한다 (저장소가 걸러낸다)
     assert logic.get_session(session.token, now=later) is None
     assert logic.is_admin_session(session.token, now=later) is False
+
+
+def test_주입한_시각으로_만든_세션은_그_시각의_유효기간동안_조회된다():
+    session = logic.create_session("a@b.com", is_admin=False, now=1_000.0)
+
+    found = logic.get_session(session.token, now=1_001.0)
+
+    assert found is not None
+    assert found.token == session.token
 
 
 def test_로그아웃하면_세션이_사라진다():
@@ -583,7 +593,7 @@ def test_기본_교환_함수는_필요한_값을_담아_POST한다(monkeypatch)
         captured["timeout"] = timeout
         return _FakeHTTPResponse({"access_token": "tok", "token_type": "Bearer"})
 
-    monkeypatch.setattr(google.urllib.request, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(google, "_urlopen", _fake_urlopen)
 
     result = google._default_exchange_code(
         code="the-code",
@@ -608,7 +618,7 @@ def test_기본_사용자정보_함수는_인증_헤더를_담아_GET한다(monk
         captured["auth_header"] = request.get_header("Authorization")
         return _FakeHTTPResponse({"email": "a@b.com", "email_verified": True})
 
-    monkeypatch.setattr(google.urllib.request, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(google, "_urlopen", _fake_urlopen)
 
     result = google._default_fetch_userinfo("the-access-token")
 
@@ -617,25 +627,124 @@ def test_기본_사용자정보_함수는_인증_헤더를_담아_GET한다(monk
     assert captured["auth_header"] == "Bearer the-access-token"
 
 
-def test_통신_실패시_한국어_예외로_감싼다(monkeypatch):
-    def _raise_url_error(request, timeout=None):
-        raise urllib.error.URLError("연결 거부")
+def test_통신_실패시_예외원문의_비밀을_로그에_반사하지_않는다(
+    monkeypatch, caplog
+):
+    reflected_secret = "oauth-transport-secret"
 
-    monkeypatch.setattr(google.urllib.request, "urlopen", _raise_url_error)
+    def _raise_url_error(request, timeout=None):
+        raise urllib.error.URLError(reflected_secret)
+
+    monkeypatch.setattr(google, "_urlopen", _raise_url_error)
 
     with pytest.raises(google.GoogleAuthError):
         google._default_exchange_code("code", "https://example.com/cb", "cid", "csecret")
 
+    assert reflected_secret not in caplog.text
+    assert "str" in caplog.text
+
 
 def test_이상한_응답이면_한국어_예외로_감싼다(monkeypatch):
     class _BadJSONResponse(_FakeHTTPResponse):
-        def read(self) -> bytes:
-            return "이건 JSON이 아니다".encode("utf-8")
+        def read(self, amount: int = -1) -> bytes:
+            body = "이건 JSON이 아니다".encode("utf-8")
+            return body if amount < 0 else body[:amount]
 
     def _fake_urlopen(request, timeout=None):
         return _BadJSONResponse({})
 
-    monkeypatch.setattr(google.urllib.request, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(google, "_urlopen", _fake_urlopen)
 
     with pytest.raises(google.GoogleAuthError):
         google._default_fetch_userinfo("token")
+
+
+def test_OAuth_응답은_상한보다_한_바이트만_더_읽고_닫는다(monkeypatch):
+    class OversizedResponse(_FakeHTTPResponse):
+        def __init__(self) -> None:
+            self.read_sizes: list[int] = []
+
+        def read(self, amount: int = -1) -> bytes:
+            self.read_sizes.append(amount)
+            return b"x" * amount
+
+    response = OversizedResponse()
+    monkeypatch.setattr(google, "_urlopen", lambda *_args, **_kwargs: response)
+
+    with pytest.raises(google.GoogleAuthError, match="안전하게 읽지 못했습니다"):
+        google._default_fetch_userinfo("token")
+
+    assert response.read_sizes == [constants.OAUTH_RESPONSE_MAX_BYTES + 1]
+
+
+def test_OAuth_응답_위치가_고정_endpoint에서_바뀌면_거부한다(monkeypatch):
+    class RedirectedResponse(_FakeHTTPResponse):
+        def geturl(self) -> str:
+            return "https://attacker.example/collect"
+
+    monkeypatch.setattr(
+        google,
+        "_urlopen",
+        lambda *_args, **_kwargs: RedirectedResponse({"access_token": "stolen"}),
+    )
+
+    with pytest.raises(google.GoogleAuthError, match="안전하게 읽지 못했습니다"):
+        google._default_exchange_code(
+            "code", "https://example.com/cb", "client", "secret"
+        )
+
+
+def test_토큰교환과_사용자조회는_하나의_전체_deadline을_공유한다(
+    credentials_env,
+) -> None:
+    state = logic.make_state()
+    fetch_calls = 0
+
+    def slow_exchange(*_args):
+        time.sleep(0.04)
+        return {"access_token": "never-forward-after-deadline"}
+
+    def forbidden_fetch(_token):
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return {
+            "email": "person@example.com",
+            "email_verified": True,
+            "sub": "deadline-person",
+        }
+
+    with pytest.raises(google.GoogleAuthDeadlineError):
+        google.handle_callback(
+            "code",
+            state,
+            state,
+            exchange=slow_exchange,
+            fetch=forbidden_fetch,
+            provider_deadline_monotonic=time.monotonic() + 0.02,
+        )
+    assert fetch_calls == 0
+
+
+def test_개별_urlopen_timeout도_전체_deadline의_남은시간보다_길수없다(
+    monkeypatch,
+) -> None:
+    captured: list[float] = []
+
+    def fake_urlopen(_request, timeout=None):
+        captured.append(float(timeout))
+        return _FakeHTTPResponse({"access_token": "token"})
+
+    monkeypatch.setattr(google, "_urlopen", fake_urlopen)
+    deadline = time.monotonic() + 1.0
+
+    google._default_exchange_code(
+        "code",
+        "https://example.com/cb",
+        "client",
+        "secret",
+        deadline_monotonic=deadline,
+    )
+
+    assert len(captured) == 1
+    assert 0 < captured[0] <= 1.0
+    assert captured[0] < constants.HTTP_TIMEOUT_SEC

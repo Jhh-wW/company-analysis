@@ -21,7 +21,7 @@
       사람이 마감해야만 열린다 — 「잠시」는 틀린 안심을 준다. #}
 <div class="warn-line" role="alert" style="margin-bottom:16px">
   <span>⚠️</span><span>
-  {% if unresolved_spend %}
+  {% if unresolved_spend and unresolved_spend[0].attempt_id is not defined %}
     <strong>새 조사가 멈췄습니다 — 아래 {{ unresolved_spend|length }}건을 마감해야 다시 열립니다.</strong><br>
     AI가 조사하던 중에 오류가 나서, 돈이 얼마 나갔는지 확인되지 않은 조사가
     {{ unresolved_spend|length }}건 남았습니다.<br>
@@ -97,6 +97,63 @@
 {% endif %}
 {# ──────── 차단 배너 끝 ──────── #}
 
+{% if unresolved_spend and unresolved_spend[0].attempt_id is defined %}
+<div class="warn-line" role="status" style="margin-bottom:16px">
+  <span>🧾</span><span>
+    <strong>확인할 외부 API 비용이 {{ unresolved_spend|length }}건 있습니다.</strong><br>
+    새 시스템은 이 한 건 때문에 모든 조사를 멈추지 않습니다. 대신 아래 금액을
+    해당 비용 통장에 남겨 두고, 확인된 사실에 맞는 버튼만 누르게 합니다.
+    {% if paid_research_closed %}<br>지금 새 조사가 멈춘 이유는 이 한 건 자체가 아니라
+    <strong>{{ paid_research_closed_reason }}</strong>입니다.{% endif %}
+    <table style="margin-top:12px;font-size:13px">
+      <thead><tr><th>발생 시각</th><th>조사·단계</th><th>공급자 작업</th>
+        <th>실패 단서</th><th>보수적으로 잡은 금액</th><th>확인 결과</th></tr></thead>
+      <tbody>
+      {% for 항목 in unresolved_spend %}
+        <tr>
+          <td>{{ 항목.occurred_at }}</td>
+          <td><code>{{ 항목.run_id[:12] }}</code><br>{{ spend_phase_labels.get(항목.phase, 항목.phase) }}</td>
+          <td>{{ 항목.provider }} · {{ 항목.operation }}</td>
+          <td>
+            {% if 항목.status_code %}HTTP {{ 항목.status_code }}{% endif %}
+            {% if 항목.error_type %}{% if 항목.status_code %}<br>{% endif %}{{ 항목.error_type }}{% endif %}
+            {% if 항목.request_id %}<br><span class="muted">요청 {{ 항목.request_id }}</span>{% endif %}
+            {% if not 항목.status_code and not 항목.error_type and not 항목.request_id %}확인 못 함{% endif %}
+          </td>
+          <td>{{ '%.0f'|format(항목.liability_krw) }}원</td>
+          <td>
+            <form method="post" action="/admin/budget/settle" style="margin:0 0 6px">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="attempt_id" value="{{ 항목.attempt_id }}">
+              <input type="hidden" name="resolution_action" value="CONFIRM_ACTUAL">
+              <label>실제 비용 <input name="actual_cost_krw" inputmode="decimal" size="7" required> 원</label>
+              <button class="btn" type="submit">실제 비용 기록</button>
+            </form>
+            <form method="post" action="/admin/budget/settle" style="display:inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="attempt_id" value="{{ 항목.attempt_id }}">
+              <input type="hidden" name="resolution_action" value="CONFIRM_ZERO">
+              <button class="btn" type="submit">청구 0원 확인</button>
+            </form>
+            <form method="post" action="/admin/budget/settle" style="display:inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="attempt_id" value="{{ 항목.attempt_id }}">
+              <input type="hidden" name="resolution_action" value="CONFIRM_CONSERVATIVE_LIABILITY">
+              <button class="btn" type="submit">아직 모름·금액 유지</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <span class="muted" style="font-size:13px">
+      HTTP 오류 번호만 보고 0원으로 고르지 마세요. Anthropic·Google 관리 화면이나
+      청구 자료로 확인한 경우에만 실제 비용 또는 0원을 선택합니다.
+    </span>
+  </span>
+</div>
+{% endif %}
+
 {% if access_error %}
 <div class="warn-line" role="alert" style="margin-bottom:16px">
   <span>⚠️</span><span><strong>{{ access_error_title or "링크를 만들지 못했습니다." }}</strong><br>{{ access_error }}</span>
@@ -113,6 +170,8 @@
   </h2>
   <div class="hero-nums">
     <div><b>{{ "{:,.0f}".format(spent_today) }}원</b><span>오늘 실제 지출</span></div>
+    <div><b>{{ "{:,.0f}".format(liability_today or 0) }}원</b><span>확인 전 보수부채</span></div>
+    <div><b>{{ "{:,.0f}".format(reservation_today or 0) }}원</b><span>현재 진행 예약</span></div>
     <div><b>{{ "{:,.0f}".format(configured_stop_threshold_krw) }}원</b><span>구성상 차단 기준 합계</span></div>
     <div><b>{{ active_link_count }}개</b><span>살아 있는 링크</span></div>
     <div><b>{{ members|length }}명</b><span>초대한 친구</span></div>
@@ -141,9 +200,9 @@
     <span>
       <b>전체 상한이 없습니다.</b>
       지금 구성의 <strong>호출 전 예상비용 차단 기준 합계는 {{ "{:,.0f}".format(configured_stop_threshold_krw) }}원</strong>입니다
-      — 살아 있는 링크 {{ active_link_count }}개 × 3,000원 + 관리자 5,000원입니다.
-      유료 호출 전에 예상비용을 예약하고 LINK·관리자 기준에 닿으면 새 호출을 차단합니다.
-      MEMBER는 비용 금액이 아니라 한국시간 기준 성공 보고서 3건으로 별도 제한합니다.
+      — 살아 있는 링크 {{ active_link_count }}개 × 3,000원 + 초대한 친구 {{ members|length }}명 × 3,000원 + 관리자 5,000원입니다.
+      유료 호출 전에 예상비용을 예약하고 각 통장 기준에 닿으면 새 호출을 차단합니다.
+      MEMBER는 이 금액 제한에 더해 한국시간 기준 성공 보고서 3건으로도 제한합니다.
       다만 이 값은 실제 청구의 최댓값이 아닙니다. 실제 provider 토큰 집계와 가격·환율 차이로
       확정 청구액이 예상 예약액이나 이 합계를 넘을 수 있습니다.
       <br>줄이려면 <strong>안 쓰는 링크를 닫으세요.</strong>
@@ -282,7 +341,7 @@
     외부 계정에는 새 MEMBER 권한을 만들 수 없습니다.
     {% else %}
     <strong>여기 있는 사람만</strong> 구글 로그인 후 실제 조사를 할 수 있습니다
-    (한국시간 기준 성공 보고서 3건).
+    (한국시간 기준 비용 입장 상한 3,000원 + 성공 보고서 3건).
     <br>명단에 없으면 로그인해도 <strong>데모만</strong> 보입니다.
     {% endif %}
   </p>

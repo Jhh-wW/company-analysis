@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 from core.runtime_paths import ENV_DATA_ROOT, LOCAL_LOG_DIR, runtime_log_dir
-from core import usage_store
+from core import credentialed_http, usage_store
 
 BASE_URL = "https://naverapihub.apigw.ntruss.com/search/v1/news"
 TIMEOUT_SEC = 15
@@ -60,9 +60,22 @@ class NaverResponseError(NaverClientError):
     stop_further_requests = True
 
 
+_NO_REDIRECT_OPENER = credentialed_http.build_no_redirect_opener()
+
+
+def _urlopen(request: urllib.request.Request, *, timeout: float):
+    """고정 Naver API 요청을 redirect 없이 한 번만 연다."""
+
+    return _NO_REDIRECT_OPENER.open(request, timeout=timeout)
+
+
 def _read_json(request: urllib.request.Request) -> dict:
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT_SEC) as response:
+        with _urlopen(request, timeout=TIMEOUT_SEC) as response:
+            credentialed_http.require_exact_response_url(
+                response,
+                expected_url=request.full_url,
+            )
             data = response.read(JSON_RESPONSE_MAX_BYTES + 1)
             if len(data) > JSON_RESPONSE_MAX_BYTES:
                 raise NaverResponseError(
@@ -75,6 +88,10 @@ def _read_json(request: urllib.request.Request) -> dict:
             raise NaverAuthenticationError("Naver 뉴스 API 인증이 거부되었습니다") from None
         raise NaverResponseError(
             f"Naver 뉴스 API가 HTTP {error.code} 오류를 돌려줬습니다"
+        ) from None
+    except credentialed_http.CredentialedHTTPContractError:
+        raise NaverResponseError(
+            "Naver 뉴스 API 응답 위치가 올바르지 않습니다"
         ) from None
     except (urllib.error.URLError, TimeoutError, OSError):
         raise NaverTransportError("Naver 뉴스 API와 통신하지 못했습니다") from None

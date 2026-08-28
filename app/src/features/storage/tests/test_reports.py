@@ -236,6 +236,23 @@ def test_v2_보고서는_dict_json_왕복에서_prose_lines가_전부_보존된�
         assert after.prose_lines == before.prose_lines
 
 
+def test_새_품질안전판정과_임시공개정책은_저장왕복에서_사라지지_않는다() -> None:
+    original = replace(
+        _v2_report_for_roundtrip(),
+        quality_contract_version="generation-v1",
+        safety_decision="공개 차단",
+        publication_policy="legacy-shadow-exception-v1",
+    )
+
+    restored = reports.report_from_json(reports.report_to_json(original))
+
+    assert restored == original
+    payload = reports.report_to_dict(original)
+    assert payload["quality_contract_version"] == "generation-v1"
+    assert payload["safety_decision"] == "공개 차단"
+    assert payload["publication_policy"] == "legacy-shadow-exception-v1"
+
+
 def test_v2_보고서는_저장_왕복_후에도_출고검증을_통과한다() -> None:
     """전체 필드 왕복 감사 — prose_lines 외 필드 소실이 있었다면 v2 3검사
     (내부 키·인용-부록 1:1·요약 문장 수)가 먼저 걸린다."""
@@ -711,3 +728,46 @@ def test_db_file_never_contains_raw_posting_text(tmp_path: Path) -> None:
 
     raw_bytes = target.read_bytes()
     assert marker.encode("utf-8") not in raw_bytes
+
+
+def test_과거_fact_json에는_새구조필드가_생기지_않고_새fact만_왕복한다() -> None:
+    old_fact = FactRecord(fact_id="legacy-fact", claim="과거 사실")
+
+    old_payload = reports._fact_to_dict(old_fact)
+
+    assert "claim_slot" not in old_payload
+    assert "metric" not in old_payload
+    assert reports._fact_from_dict(old_payload) == old_fact
+
+    structured = replace(
+        old_fact,
+        claim_slot="past_changes:cumulative_rate:1:2023-2025",
+        metric="매출액",
+        period_start="2023",
+        period_end="2025",
+        sign="positive",
+        unit="%",
+        unit_dimension="percent",
+        formula="rate",
+    )
+    structured_payload = reports._fact_to_dict(structured)
+
+    assert structured_payload["claim_slot"] == structured.claim_slot
+    assert reports._fact_from_dict(structured_payload) == structured
+
+
+def test_표의_구조화수치이름표는_있을때만_저장한다() -> None:
+    legacy = ReportTable("표", ["연도", "매출"], [["2025", "1"]])
+    structured = replace(
+        legacy,
+        entity_scope="consolidated",
+        raw_unit="원",
+        unit_dimension="currency",
+    )
+
+    legacy_payload = reports._table_to_dict(legacy)
+    structured_payload = reports._table_to_dict(structured)
+
+    assert "entity_scope" not in legacy_payload
+    assert reports._table_from_dict(legacy_payload) == legacy
+    assert reports._table_from_dict(structured_payload) == structured

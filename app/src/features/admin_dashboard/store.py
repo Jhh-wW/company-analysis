@@ -10,7 +10,7 @@ import hashlib
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Final
 
 from src.core.persisted_json import validate_persisted_json_text
@@ -59,7 +59,7 @@ INCIDENT_KINDS: Final[frozenset[str]] = frozenset(
     {INCIDENT_SECURITY, INCIDENT_COST, INCIDENT_SOURCE_GLOBAL, INCIDENT_PROVIDER_RESPONSE, INCIDENT_RATE_LIMIT}
 )
 _IMMEDIATE_MAINTENANCE_INCIDENTS: Final[frozenset[str]] = frozenset(
-    {INCIDENT_SECURITY, INCIDENT_COST, INCIDENT_SOURCE_GLOBAL, INCIDENT_PROVIDER_RESPONSE}
+    {INCIDENT_SECURITY, INCIDENT_COST, INCIDENT_SOURCE_GLOBAL}
 )
 
 MEMBER_DAILY_SUCCESS_LIMIT: Final[int] = 3
@@ -569,6 +569,16 @@ class MemberFeedback:
 
 
 @dataclass(frozen=True)
+class MemberUsageReservation:
+    """프로세스 재시작 때 성공 여부를 다시 판정해야 하는 MEMBER 예약."""
+
+    run_id: str
+    actor_email: str
+    day: str
+    created_at: str
+
+
+@dataclass(frozen=True)
 class ServiceState:
     status: str
     cause: str
@@ -945,46 +955,182 @@ def list_trashed_reports(conn: sqlite3.Connection, *, limit: int = 100) -> list[
     ]
 
 
-def purge_expired_trash(conn: sqlite3.Connection, *, now_iso: str) -> int:
-    """30일이 지난 휴지통의 원 저장 보고서를 AI 호출 없이 영구 삭제한다."""
+def retention_cleanup_candidates(
+    conn: sqlite3.Connection,
+    *,
+    now_iso: str,
+    limit: int = 500,
+    status: str | None = None,
+) -> list[TrashRecord]:
+    """30일 경과 건과 옛 코드가 이미 purged로 표시한 누락 건을 돌려준다.
+
+    ``purged``도 포함하는 이유는 예전 정리가 legacy 표만 지우고 v2
+    ContentSnapshot·Delivery·Artifact를 남긴 배포를 다음 정리에서 복구하기
+    위해서다. 실제 v2 행 존재 여부는 웹 adapter가 정본 표에서 확인한다.
+    """
+
     try:
-        cutoff = (datetime.fromisoformat(now_iso) - timedelta(days=30)).isoformat(timespec="seconds")
+        current = datetime.fromisoformat(now_iso)
     except ValueError as exc:
         raise ValueError("휴지통 정리 시각이 올바르지 않습니다") from exc
+    if current.tzinfo is None:
+        raise ValueError("휴지통 정리 시각에는 시간대가 필요합니다")
+    cutoff = current.astimezone(timezone.utc) - timedelta(days=30)
+    if status is not None and status not in {TRASH_TRASHED, TRASH_PURGED}:
+        raise ValueError("휴지통 정리 후보 상태가 올바르지 않습니다")
+    where = (
+        "status IN ('trashed', 'purged')"
+        if status is None
+        else "status = ?"
+    )
+    parameters: tuple[object, ...] = () if status is None else (status,)
     rows = conn.execute(
-        f"""SELECT report_id FROM {TABLE_REPORT_TRASH}
-        WHERE status = 'trashed' AND trashed_at <> '' AND trashed_at <= ?""",
-        (cutoff,),
+        f"""
+        SELECT report_id, status, trashed_at, restored_at, purged_at
+        FROM {TABLE_REPORT_TRASH}
+        WHERE {where}
+        ORDER BY CASE status WHEN 'purged' THEN 0 ELSE 1 END,
+                 trashed_at, report_id
+        """,
+        parameters,
     ).fetchall()
+    candidates: list[TrashRecord] = []
+    for row in rows:
+        record = TrashRecord(
+            str(row["report_id"]),
+            str(row["status"]),
+            str(row["trashed_at"]),
+            str(row["restored_at"]),
+            str(row["purged_at"]),
+        )
+        if record.status == TRASH_TRASHED:
+            try:
+                trashed = datetime.fromisoformat(record.trashed_at)
+            except ValueError as exc:
+                raise ValueError("휴지통 이동 시각이 올바르지 않습니다") from exc
+            if trashed.tzinfo is None:
+                raise ValueError("휴지통 이동 시각에는 시간대가 필요합니다")
+            if trashed.astimezone(timezone.utc) > cutoff:
+                continue
+        candidates.append(record)
+        if len(candidates) >= max(1, min(int(limit), 5000)):
+            break
+    return candidates
+
+
+def _has_current_delivery(conn: sqlite3.Connection, report_id: str) -> bool:
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='report_delivery_deliveries'"
+    ).fetchone()
+    if table is None:
+        return False
+    return conn.execute(
+        "SELECT 1 FROM report_delivery_deliveries WHERE public_id = ? LIMIT 1",
+        (report_id,),
+    ).fetchone() is not None
+
+
+def purge_expired_trash_item(
+    conn: sqlite3.Connection,
+    *,
+    report_id: str,
+    now_iso: str,
+) -> bool:
+    """v2 정본이 먼저 사라진 한 건의 legacy payload와 상태를 마감한다.
+
+    이 함수가 v2 Delivery를 발견하면 조용히 ``purged``로 표시하지 않는다.
+    파일 backend와 별도 intent 없이 여기서 지우면 DB·파일 반쪽 상태를 다시
+    만들기 때문이다. 웹 report_retention adapter가 v2를 먼저 정리한 같은
+    transaction 안에서만 이 함수를 이어 호출한다.
+    """
+
+    clean_id = _clean(report_id, maximum=128)
+    if not clean_id:
+        raise ValueError("정리할 보고서 ID가 필요합니다")
+    try:
+        current = datetime.fromisoformat(now_iso)
+    except ValueError as exc:
+        raise ValueError("휴지통 정리 시각이 올바르지 않습니다") from exc
+    if current.tzinfo is None:
+        raise ValueError("휴지통 정리 시각에는 시간대가 필요합니다")
+    if _has_current_delivery(conn, clean_id):
+        raise RuntimeError("v2 보고서는 retirement intent로 먼저 정리해야 합니다")
+    row = conn.execute(
+        f"SELECT status FROM {TABLE_REPORT_TRASH} WHERE report_id = ?",
+        (clean_id,),
+    ).fetchone()
+    if row is None or str(row["status"]) != TRASH_TRASHED:
+        return False
+    trashed_at = conn.execute(
+        f"SELECT trashed_at FROM {TABLE_REPORT_TRASH} WHERE report_id = ?",
+        (clean_id,),
+    ).fetchone()
+    try:
+        trashed = datetime.fromisoformat(str(trashed_at[0]))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("휴지통 이동 시각이 올바르지 않습니다") from exc
+    if trashed.tzinfo is None:
+        raise ValueError("휴지통 이동 시각에는 시간대가 필요합니다")
+    if current.astimezone(timezone.utc) < (
+        trashed.astimezone(timezone.utc) + timedelta(days=30)
+    ):
+        return False
+    conn.execute(
+        f"DELETE FROM {storage_constants.TABLE_LAYER1_CACHE} WHERE report_id = ?",
+        (clean_id,),
+    )
+    conn.execute(f"DELETE FROM {TABLE_SURVEYS} WHERE report_id = ?", (clean_id,))
+    conn.execute(f"DELETE FROM {TABLE_REPORT_STATES} WHERE report_id = ?", (clean_id,))
+    conn.execute(
+        f"DELETE FROM {storage_constants.TABLE_REPORTS} WHERE report_id = ?",
+        (clean_id,),
+    )
+    cursor = conn.execute(
+        f"""
+        UPDATE {TABLE_REPORT_TRASH}
+        SET status = 'purged', purged_at = ?
+        WHERE report_id = ? AND status = 'trashed'
+        """,
+        (now_iso, clean_id),
+    )
+    if cursor.rowcount != 1:
+        return False
+    conn.execute(
+        f"""
+        INSERT INTO {TABLE_REPORT_TRASH_EVENTS}
+        (report_id, action, actor, reason, created_at)
+        VALUES (?, 'purged', 'system:trash-cleanup', '30_day_retention', ?)
+        """,
+        (clean_id, now_iso),
+    )
+    return True
+
+
+def purge_expired_trash(conn: sqlite3.Connection, *, now_iso: str) -> int:
+    """legacy-only 보고서를 정리한다; v2를 만나면 누락 대신 실패한다.
+
+    운영 정기 작업은 ``src.web.report_retention_adapter``를 사용한다. 이
+    호환 진입점은 v2 정본이 없는 과거 DB와 기존 단위 시험만 지원하며, current
+    Delivery가 있으면 반드시 별도 intent 경계로 보내도록 닫혀 있다.
+    """
+
+    rows = [
+        item
+        for item in retention_cleanup_candidates(
+            conn,
+            now_iso=now_iso,
+            status=TRASH_TRASHED,
+        )
+        if item.status == TRASH_TRASHED
+    ]
     purged = 0
     for row in rows:
-        report_id = str(row["report_id"])
-        conn.execute(
-            f"DELETE FROM {storage_constants.TABLE_LAYER1_CACHE} WHERE report_id = ?", (report_id,)
-        )
-        conn.execute(
-            f"DELETE FROM {TABLE_SURVEYS} WHERE report_id = ?", (report_id,)
-        )
-        conn.execute(
-            f"DELETE FROM {TABLE_REPORT_STATES} WHERE report_id = ?", (report_id,)
-        )
-        conn.execute(
-            f"DELETE FROM {storage_constants.TABLE_REPORTS} WHERE report_id = ?", (report_id,)
-        )
-        cursor = conn.execute(
-            f"""UPDATE {TABLE_REPORT_TRASH}
-            SET status = 'purged', purged_at = ? WHERE report_id = ? AND status = 'trashed'""",
-            (now_iso, report_id),
-        )
-        if cursor.rowcount != 1:
-            continue
-        conn.execute(
-            f"""INSERT INTO {TABLE_REPORT_TRASH_EVENTS}
-            (report_id, action, actor, reason, created_at)
-            VALUES (?, 'purged', 'system:trash-cleanup', '30_day_retention', ?)""",
-            (report_id, now_iso),
-        )
-        purged += 1
+        if purge_expired_trash_item(
+            conn,
+            report_id=row.report_id,
+            now_iso=now_iso,
+        ):
+            purged += 1
     return purged
 
 
@@ -1158,9 +1304,14 @@ def report_is_blocked(conn: sqlite3.Connection, report_id: str) -> bool:
 
 def record_error(
     conn: sqlite3.Connection, *, report_id: str, actor_email: str, area: str,
-    reason: str, now_iso: str, incident_kind: str = "",
+    reason: str, now_iso: str,
 ) -> ReportError:
-    """신고를 남기고 같은 transaction에서 결과 공개를 즉시 닫는다."""
+    """MEMBER 신고를 남기고 같은 transaction에서 해당 보고서만 닫는다.
+
+    자유 서술은 관측 신호이지 전역 서비스 차단 권한이 아니다. 코드가 확인한
+    구조화 incident는 :func:`record_incident`, 사람의 판단은
+    :func:`set_service_state`라는 별도 경계만 사용한다.
+    """
     clean_id = _clean(report_id, maximum=128)
     clean_area = _clean(area, maximum=1000)
     clean_reason = _clean(reason, maximum=3000)
@@ -1202,59 +1353,7 @@ def record_error(
         VALUES (?, 'error_reported', ?, ?, 1, ?, ?, ?)""",
         (clean_id, old.status, REPORT_STATUS_PENDING, actor_digest(actor), "member_report", now_iso),
     )
-    clean_incident = _clean(incident_kind, maximum=40)
-    if clean_incident:
-        record_incident(
-            conn,
-            kind=clean_incident,
-            summary=clean_reason,
-            error_id=int(cursor.lastrowid),
-            report_id=clean_id,
-            now_iso=now_iso,
-        )
-    _enter_maintenance_for_repeated_error(
-        conn, area=clean_area, reason=clean_reason, now_iso=now_iso
-    )
     return ReportError(int(cursor.lastrowid), clean_id, actor, clean_area, clean_reason, REPORT_STATUS_PENDING, now_iso)
-
-
-def _enter_maintenance_for_repeated_error(
-    conn: sqlite3.Connection, *, area: str, reason: str, now_iso: str
-) -> None:
-    """서로 다른 두 MEMBER·보고서에서 같은 신고가 확인되면 점검으로 전환한다.
-
-    자유 서술을 추정하거나 외부 호출로 심각도를 판정하지 않는다. 정확히 같은
-    대상과 원인이 서로 다른 인증 MEMBER와 서로 다른 보고서에 기록된 경우에만
-    보수적으로 전환한다. 한 MEMBER의 반복 신고는 각 보고서만 차단하며 전역 점검을
-    만들지 않는다. 정상 복귀는 관리자 POST로만 가능하다.
-    """
-    current = get_service_state(conn)
-    if current.status == SERVICE_MAINTENANCE:
-        return
-    row = conn.execute(
-        f"""SELECT COUNT(DISTINCT report_id) AS report_count,
-            COUNT(DISTINCT actor_email) AS actor_count
-        FROM {TABLE_ERRORS} WHERE area = ? AND reason = ?""",
-        (area, reason),
-    ).fetchone()
-    if int(row["report_count"]) < 2 or int(row["actor_count"]) < 2:
-        return
-    impact = "같은 원인의 오류 신고가 2건 접수되어 관련 결과·다운로드·공유를 차단했습니다."
-    next_action = "원인 확인과 재검사 기록을 남긴 뒤, 운영자가 직접 재시작합니다."
-    conn.execute(
-        f"""INSERT INTO {TABLE_SERVICE_STATE}
-        (singleton, status, cause, impact, next_action, updated_at, updated_by)
-        VALUES (1, ?, ?, ?, ?, ?, 'system:repeated-error')
-        ON CONFLICT(singleton) DO UPDATE SET status=excluded.status, cause=excluded.cause,
-            impact=excluded.impact, next_action=excluded.next_action,
-            updated_at=excluded.updated_at, updated_by=excluded.updated_by""",
-        (SERVICE_MAINTENANCE, reason, impact, next_action, now_iso),
-    )
-    conn.execute(
-        f"""INSERT INTO {TABLE_SERVICE_EVENTS}
-        (status, cause, impact, next_action, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)""",
-        (SERVICE_MAINTENANCE, reason, impact, next_action, "system:repeated-error", now_iso),
-    )
 
 
 _ALLOWED_TRANSITIONS: Final[dict[str, frozenset[str]]] = {
@@ -1509,7 +1608,12 @@ def record_incident(
     conn: sqlite3.Connection, *, kind: str, summary: str, now_iso: str,
     error_id: int = 0, report_id: str = "", stage: str = "", incurred_cost_krw: float = 0.0,
 ) -> None:
-    """구조화된 운영 incident를 남기고, 중대한 것은 한 건만으로 새 생성을 닫는다."""
+    """구조화된 운영 incident를 남기고, 전역 사고만 새 생성을 닫는다.
+
+    provider 응답·429는 사건으로 남지만 서비스 전체 점검으로 올리지
+    않는다. 해당 provider의 유한 차단은 provider_health가 소유한다.
+    보안·확정된 비용 사고·원출처 전역 오염은 기존 즉시 점검 선을 지킨다.
+    """
     clean_kind = _clean(kind, maximum=40)
     clean_summary = _clean(summary, maximum=3000)
     clean_report = _clean(report_id, maximum=128)
@@ -1526,22 +1630,11 @@ def record_incident(
         VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (max(0, int(error_id)), clean_report, clean_kind, clean_stage, clean_cost, clean_summary, now_iso),
     )
-    repeated_rate_limit = False
-    if clean_kind == INCIDENT_RATE_LIMIT:
-        row = conn.execute(
-            f"SELECT COUNT(*) AS count FROM {TABLE_INCIDENTS} WHERE kind = ? AND summary = ?",
-            (INCIDENT_RATE_LIMIT, clean_summary),
-        ).fetchone()
-        repeated_rate_limit = int(row["count"]) >= 2
-    if clean_kind not in _IMMEDIATE_MAINTENANCE_INCIDENTS and not repeated_rate_limit:
+    if clean_kind not in _IMMEDIATE_MAINTENANCE_INCIDENTS:
         return
     if get_service_state(conn).status == SERVICE_MAINTENANCE:
         return
-    impact = (
-        "같은 rate limit이 반복되어 새 보고서 생성을 멈췄습니다."
-        if repeated_rate_limit
-        else "중대한 전역 문제가 1건 확인되어 새 보고서 생성을 멈췄습니다."
-    )
+    impact = "중대한 전역 문제가 1건 확인되어 새 보고서 생성을 멈췄습니다."
     next_action = "원인·수정 내용과 관련 보고서 재검사·전체 시험을 기록한 뒤 관리자가 직접 재가동합니다."
     conn.execute(
         f"""INSERT INTO {TABLE_SERVICE_STATE}
@@ -1846,6 +1939,29 @@ def member_usage_today(conn: sqlite3.Connection, *, actor_email: str, day: str) 
         (MEMBER_USAGE_USED, MEMBER_USAGE_RESERVED, actor, _clean(day, maximum=20)),
     ).fetchone()
     return int(row["used"]), int(row["reserved"])
+
+
+def list_reserved_member_runs(
+    conn: sqlite3.Connection,
+) -> tuple[MemberUsageReservation, ...]:
+    """hard restart 뒤 현재 프로세스가 이어갈 수 없는 성공 건수 예약을 읽는다."""
+
+    rows = conn.execute(
+        f"""SELECT run_id, actor_email, day, created_at
+        FROM {TABLE_MEMBER_USAGE}
+        WHERE state = ?
+        ORDER BY created_at, run_id""",
+        (MEMBER_USAGE_RESERVED,),
+    ).fetchall()
+    return tuple(
+        MemberUsageReservation(
+            run_id=str(row["run_id"]),
+            actor_email=str(row["actor_email"]),
+            day=str(row["day"]),
+            created_at=str(row["created_at"]),
+        )
+        for row in rows
+    )
 
 
 def member_can_start(conn: sqlite3.Connection, *, actor_email: str, day: str) -> bool:

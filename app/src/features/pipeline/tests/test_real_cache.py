@@ -26,6 +26,8 @@ from typing import Any, Optional
 import pytest
 
 from src.core.constants import GENERATION_MODEL
+from src.core.provider_gateway import attempt_context
+from src.core.provider_gateway.attempt_context import ProviderAttemptCallbacks
 from src.features.budget import provider_budget
 from src.features.budget.constants import (
     PAID_PHASE_PROVIDER_BUDGET_KRW,
@@ -544,7 +546,7 @@ class FakeEngine:
 
     # ── 6 수집 ───────────────────────────────────────────
     def latest_report_rcept(
-        self, corp_code: str, corp_type: str, counter: Any
+        self, corp_code: str, corp_type: str, counter: Any, *, business_date: Any = None
     ) -> dict[str, Any]:
         year = self.filing_year
         name = "사업보고서" if year is None else f"사업보고서 ({year}.12)"
@@ -566,7 +568,7 @@ class FakeEngine:
         )
 
     def fetch_financials(
-        self, corp_code: str, counter: Any
+        self, corp_code: str, counter: Any, *, business_date: Any = None
     ) -> tuple[dict[str, Any], list[int]]:
         comparator = corp_code == "00999999"
 
@@ -783,7 +785,13 @@ def engine(monkeypatch: pytest.MonkeyPatch) -> FakeEngine:
 @pytest.fixture(autouse=True)
 def _paid_provider_budget_context():
     """직접 RealPipeline 시험도 웹 worker와 같은 유료 문맥에서 실행한다."""
-    with provider_budget.activate(100_000.0):
+    callbacks = ProviderAttemptCallbacks(
+        lambda _provider, _operation, _reserved: object(),
+        lambda _token: None,
+        lambda _token: None,
+        lambda _token, _observation: None,
+    )
+    with provider_budget.activate(100_000.0), attempt_context.activate(callbacks):
         yield
 
 
@@ -875,7 +883,7 @@ def test_로컬통합_삼성전자_저장원문은_가짜AI로_생성이후까�
             return {"status": "000"}
 
         def latest_report_rcept(
-            self, corp_code: str, corp_type: str, counter: Any
+            self, corp_code: str, corp_type: str, counter: Any, *, business_date: Any = None
         ) -> dict[str, Any]:
             assert corp_code == CORP_ID
             return {
@@ -2573,7 +2581,11 @@ def test_3개년표만_있고_필수_정체성제품근거가_없으면_출고�
             row("ifrs-full_ProfitLoss", "당기순이익", ("101000000000", "90000000000", "80000000000")),
         ]
     }
-    monkeypatch.setattr(engine, "fetch_financials", lambda _corp, _counter: (financials, [2025]))
+    monkeypatch.setattr(
+        engine,
+        "fetch_financials",
+        lambda _corp, _counter, **_kwargs: (financials, [2025]),
+    )
     monkeypatch.setattr(
         engine,
         "make_fragments",
@@ -2738,6 +2750,7 @@ def test_수집_실패가_끼면_캐시에_저장하지_않는다(
     second = _run()
 
     assert first.outcome is Outcome.REPORT      # 보고서 자체는 나간다
+    assert first.generation_cache_eligible is False
     assert count == 0, "우리 쪽 실패가 낀 결과를 캐시에 저장했습니다"
     assert engine.generate_ai_calls > calls_after_first  # 다시 시도하면 새로 만든다
     assert second.message == ""
@@ -2774,6 +2787,7 @@ def test_조건부_기본장_누락_부분본은_고정하지_않고_다음번�
     second = _run()
 
     assert first.outcome is Outcome.REPORT
+    assert first.generation_cache_eligible is False
     assert second.outcome is Outcome.REPORT
     assert count == 0
     assert engine.generate_ai_calls > calls_after_first
@@ -2804,6 +2818,7 @@ def test_핵심내용_결손_부분본도_고정하지_않고_다음번에_다�
     second = _run()
 
     assert first.outcome is Outcome.REPORT
+    assert first.generation_cache_eligible is False
     assert second.outcome is Outcome.REPORT
     assert count == 0
     assert engine.generate_ai_calls > calls_after_first
@@ -2828,6 +2843,7 @@ def test_비교장만_누락된_부분본은_기본보고서로_캐시한다(
     second = _run()
 
     assert first.outcome is Outcome.REPORT
+    assert first.generation_cache_eligible is True
     assert first.report is not None
     assert first.report.grade is Grade.PARTIAL
     assert second.outcome is Outcome.REPORT
@@ -2837,7 +2853,8 @@ def test_비교장만_누락된_부분본은_기본보고서로_캐시한다(
 
 def test_자료가_없는_것은_실패가_아니므로_캐시한다(engine: FakeEngine) -> None:
     """❌ 없음(회사의 사실)과 ⚠️ 못 가져옴(우리 실패)을 섞으면 캐시가 영영 안 찬다."""
-    _run()
+    first = _run()
+    assert first.generation_cache_eligible is True
     calls_after_first = engine.generate_ai_calls
     _run()
     assert engine.generate_ai_calls == calls_after_first
@@ -2900,6 +2917,24 @@ def test_캐시_없이는_매번_생성AI가_돈다(engine: FakeEngine, monkeypa
     _run()
     calls_after_first = engine.generate_ai_calls
     _run()
+    assert engine.generate_ai_calls > calls_after_first
+
+
+def test_paid_불변캐시경로는_생성기신원없는_옛layer1을_명시적miss로_본다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """옛 Report를 현재 배포·모델 결과라고 거짓 승격하지 않는다."""
+
+    first = _run()
+    assert first.outcome is Outcome.REPORT
+    calls_after_first = engine.generate_ai_calls
+    assert _run().cache_hit, "옛 layer1 대조군이 먼저 적중해야 합니다"
+
+    monkeypatch.setattr(real.generation_coordination, "is_active", lambda: True)
+    paid_result = _run()
+
+    assert not paid_result.cache_hit
     assert engine.generate_ai_calls > calls_after_first
 
 

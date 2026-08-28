@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from core.runtime_paths import ENV_DATA_ROOT, LOCAL_LOG_DIR, runtime_log_dir
-from core import usage_store
+from core import credentialed_http, usage_store
 
 DAILY_LIMIT = 20_000          # 공식 한도 (오류 020)
 WARN_RATIO = 0.8              # 경보 문턱 — 80% 소진 시 경고
@@ -67,6 +67,14 @@ _STATUS_PATTERNS = (
     re.compile(rb'"status"\s*:\s*"([0-9]{3})"', re.IGNORECASE),
 )
 
+_NO_REDIRECT_OPENER = credentialed_http.build_no_redirect_opener()
+
+
+def _urlopen(url: str, *, timeout: float):
+    """고정 DART API 요청을 API key redirect 없이 한 번만 연다."""
+
+    return _NO_REDIRECT_OPENER.open(url, timeout=timeout)
+
 
 def _read_url(
     url: str,
@@ -77,7 +85,11 @@ def _read_url(
 ) -> bytes:
     """URL·키·원문을 예외에 싣지 않고 응답 바이트를 읽는다."""
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:
+        with _urlopen(url, timeout=timeout) as response:
+            credentialed_http.require_exact_response_url(
+                response,
+                expected_url=url,
+            )
             data = response.read(max_bytes + 1)
             if len(data) > max_bytes:
                 raise DartResponseError(
@@ -92,6 +104,8 @@ def _read_url(
         raise DartResponseError(
             f"DART API가 HTTP {error.code} 오류를 돌려줬습니다"
         ) from None
+    except credentialed_http.CredentialedHTTPContractError:
+        raise DartResponseError("DART API 응답 위치가 올바르지 않습니다") from None
     except (urllib.error.URLError, TimeoutError, OSError):
         raise DartTransportError("DART API와 통신하지 못했습니다") from None
 

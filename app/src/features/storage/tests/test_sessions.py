@@ -101,6 +101,32 @@ def test_save_same_token_twice_overwrites(tmp_path: Path) -> None:
     assert loaded.is_admin is True
 
 
+def test_saving_new_session_sweeps_all_expired_rows(tmp_path: Path) -> None:
+    """다시 제시되지 않는 옛 쿠키도 다음 로그인 때 전역 정리한다."""
+
+    expired = sessions.SessionRecord(
+        "tok-expired", "old@example.com", "google:old", False, 100.0
+    )
+    active = sessions.SessionRecord(
+        "tok-active", "active@example.com", "google:active", False, 500.0
+    )
+    newest = sessions.SessionRecord(
+        "tok-new", "new@example.com", "google:new", False, 600.0
+    )
+
+    with db.connect(tmp_path / "storage.db") as conn:
+        sessions.save_session(conn, expired, now=50.0)
+        sessions.save_session(conn, active, now=50.0)
+        sessions.save_session(conn, newest, now=200.0)
+
+        stored_emails = {
+            row["email"]
+            for row in conn.execute("SELECT email FROM sessions").fetchall()
+        }
+
+    assert stored_emails == {"active@example.com", "new@example.com"}
+
+
 def test_delete_session_removes_it(tmp_path: Path) -> None:
     with db.connect(tmp_path / "storage.db") as conn:
         sessions.save_session(

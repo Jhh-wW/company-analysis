@@ -20,6 +20,10 @@ from src.features.export_pdf.release import (
     _candidate_integrity_problems,
     report_fact_id_ledger,
 )
+from src.features.export_pdf.content_manifest import (
+    CONTENT_MANIFEST_VERSION,
+    public_content_manifest_sha256,
+)
 from src.shared.automatic_release_record import (
     AUTOMATIC_CHECKER_VERSION,
     REQUIRED_AUTOMATIC_CHECKS,
@@ -169,7 +173,21 @@ def run_automatic_checks(
                     channel_reason = "인용된 출처가 없어 PDF 자동 출고를 보류했습니다"
                     channel_ok = False
                 else:
-                    channel_ok = candidate.expected_fact_ids == published_fact_ids
+                    manifest_ok = (
+                        candidate.content_manifest_version
+                        == CONTENT_MANIFEST_VERSION
+                        and candidate.content_manifest_sha256
+                        == public_content_manifest_sha256(published)
+                    )
+                    channel_ok = (
+                        candidate.expected_fact_ids == published_fact_ids
+                        and manifest_ok
+                    )
+                    if not manifest_ok:
+                        channel_reason = (
+                            "PDF 공개 내용이 이 보고서의 문장·표·출처 장부와 "
+                            "결속되지 않았습니다"
+                        )
             except Exception:  # fail closed at a public-channel boundary
                 channel_ok = False
         else:
@@ -194,6 +212,8 @@ def run_automatic_checks(
             initial_report_hash,
             candidate.pdf_sha256,
             candidate.expected_fact_ids,
+            candidate.content_manifest_version,
+            candidate.content_manifest_sha256,
         ),
     )
 

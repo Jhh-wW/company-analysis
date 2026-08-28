@@ -23,6 +23,7 @@ from src.features.composer.constants import (
     ALREADY_WRITTEN_HEAD,
     ALREADY_WRITTEN_MAX_SENTENCES,
     CITATION_RULES_GUIDE,
+    CLAIM_SLOTS_BY_SECTION,
     FORBIDDEN_TOPICS_GUIDE,
     GRADE_CONFIRMED,
     GRADE_INTERPRETED,
@@ -46,6 +47,7 @@ from src.features.composer.constants import (
     RESPONSE_FLOW_ROW_CELLS_KEY,
     RESPONSE_FLOW_ROW_CITATIONS_KEY,
     RESPONSE_GRADE_KEY,
+    RESPONSE_CLAIM_SLOT_KEY,
     RESPONSE_SENTENCES_KEY,
     RESPONSE_TEXT_KEY,
     RETRY_REMINDER,
@@ -137,6 +139,14 @@ def build_section_prompt(
             보여 준다. 비어 있으면 블록을 넣지 않는다 (첫 장).
     """
     minimum, maximum = SECTION_SENTENCE_RANGES[section_id]
+    claim_slots = CLAIM_SLOTS_BY_SECTION.get(section_id, ())
+    claim_slot_guide = (
+        "\n원자 주장 계획 — 각 문장은 가장 알맞은 id를 «주장슬롯»에 넣고, "
+        "같은 id를 두 번 쓰지 않는다. 어느 자리에도 맞지 않으면 빈 문자열로 "
+        "두며 새 id를 만들지 않는다:\n- " + "\n- ".join(claim_slots) + "\n"
+        if claim_slots
+        else ""
+    )
     parts = [
         PROMPT_HEADER.format(company=company_name),
         "\n",
@@ -145,6 +155,7 @@ def build_section_prompt(
         CITATION_RULES_GUIDE,
         FORBIDDEN_TOPICS_GUIDE,
         SENTENCE_RANGE_GUIDE.format(minimum=minimum, maximum=maximum),
+        claim_slot_guide,
         # 7장은 «경로표»를 함께 내야 해서 스키마 안내를 통째로 바꾼다.
         # 덧붙이면 기본 안내의 「이 JSON만 출력한다」와 충돌해 작가가 경로표를
         # 빼먹는다 (진영 실측).
@@ -226,7 +237,9 @@ def extract_json_payload(raw: str) -> Optional[Any]:
         return None
 
 
-def _sentence_from_item(item: Any) -> Optional[ComposedSentence]:
+def _sentence_from_item(
+    item: Any, section_id: str = ""
+) -> Optional[ComposedSentence]:
     """항목 하나를 문장으로 바꾼다. 계약(글·인용·등급)이 안 맞으면 None.
 
     ★ 여기서 보는 것은 «형식»뿐이다 — 글이 비었는가, 등급이 계약된 두 값인가,
@@ -253,10 +266,23 @@ def _sentence_from_item(item: Any) -> Optional[ComposedSentence]:
     citations = tuple(
         str(value).strip() for value in raw_citations if str(value).strip()
     )
-    return ComposedSentence(text=text, citations=citations, grade=grade)
+    raw_claim_slot = str(item.get(RESPONSE_CLAIM_SLOT_KEY) or "").strip()
+    allowed_claim_slots = CLAIM_SLOTS_BY_SECTION.get(section_id, ())
+    planned_claim_slot = (
+        raw_claim_slot if raw_claim_slot in allowed_claim_slots else ""
+    )
+    return ComposedSentence(
+        text=text,
+        citations=citations,
+        grade=grade,
+        planned_claim_slot=planned_claim_slot,
+        verification_state="unverified",
+    )
 
 
-def parse_section_response(raw: str) -> Optional[tuple[ComposedSentence, ...]]:
+def parse_section_response(
+    raw: str, section_id: str = ""
+) -> Optional[tuple[ComposedSentence, ...]]:
     """작가 응답을 문장 튜플로 바꾼다.
 
     Returns:
@@ -277,7 +303,7 @@ def parse_section_response(raw: str) -> Optional[tuple[ComposedSentence, ...]]:
         return ()
     sentences = tuple(
         sentence
-        for sentence in (_sentence_from_item(item) for item in items)
+        for sentence in (_sentence_from_item(item, section_id) for item in items)
         if sentence is not None
     )
     # 항목이 있었는데 하나도 못 살렸다면 응답 형식이 통째로 어긋난 것 — 재요청 대상
@@ -355,7 +381,7 @@ def parse_flow_rows(raw: str, section_id: str = OPERATIONS_FLOW_SECTION_ID) -> t
 
 
 def _ask_and_parse(
-    ask: AskFn, prompt: str
+    ask: AskFn, prompt: str, section_id: str = ""
 ) -> tuple[Optional[tuple[ComposedSentence, ...]], str]:
     """AI를 부르고 파싱까지. 호출 자체가 죽어도 None으로 삼킨다(전체 중단 금지).
 
@@ -375,18 +401,18 @@ def _ask_and_parse(
     except Exception:  # noqa: BLE001 - 한 장의 실패가 보고서 전체를 멈추면 안 된다
         return None, ""
     text = str(raw)
-    return parse_section_response(text), text
+    return parse_section_response(text, section_id), text
 
 
 def _compose_one_section(
     section_id: str, prompt: str, ask: AskFn
 ) -> ComposedSection:
     """장 하나를 쓴다. 실패 시 재요청 1회, 그래도 실패면 정직한 안내문으로 남긴다."""
-    sentences, raw = _ask_and_parse(ask, prompt)
+    sentences, raw = _ask_and_parse(ask, prompt, section_id)
     retries = 0
     while sentences is None and retries < PARSE_RETRY_LIMIT:
         retries += 1
-        sentences, raw = _ask_and_parse(ask, prompt + RETRY_REMINDER)
+        sentences, raw = _ask_and_parse(ask, prompt + RETRY_REMINDER, section_id)
     # 흐름표는 정해진 장(5장 대응표·7장 경로표)에서만 읽는다.
     # 같은 응답에서 꺼내므로 추가 AI 호출이 «0회»다.
     wants_flow = section_id in FLOW_HEADERS_BY_SECTION

@@ -35,6 +35,8 @@ from src.features.pipeline.port import (
     RunResult,
     UserInput,
 )
+from src.features.provider_health import constants as provider_health_constants
+from src.features.provider_health import store as provider_health_store
 from src.features.sharelink import store as share_store
 from src.features.sharelink.constants import KEY_COOKIE_NAME
 from src.features.storage import db as storage_db
@@ -1435,6 +1437,9 @@ def test_무료_DART_후보보강_응답오류는_외부상태만남기고_전�
     with storage_db.connect() as conn:
         service = dashboard_store.get_service_state(conn)
         incidents = dashboard_store.list_incidents(conn)
+        health = provider_health_store.get_state(
+            conn, provider_health_constants.PROVIDER_DART
+        )
         external = conn.execute(
             "SELECT status, error_summary FROM dashboard_external_status_events "
             "WHERE provider = ? ORDER BY id DESC LIMIT 1",
@@ -1442,17 +1447,50 @@ def test_무료_DART_후보보강_응답오류는_외부상태만남기고_전�
         ).fetchone()
     assert service.status == dashboard_store.SERVICE_NORMAL
     assert incidents == []
+    assert health.state is provider_health_store.ProviderHealthState.DEGRADED
     assert external is not None
     assert tuple(external) == ("error", "응답을 안전하게 해석하지 못함")
 
 
-def test_표식없는_DART_실패는_기존처럼_전역점검으로_격상한다(monkeypatch, tmp_path):
+def test_반복_DART_실패는_DART만_열고_전역점검으로_번지지않는다(monkeypatch, tmp_path):
+    monkeypatch.setenv("STORAGE_DB_PATH", str(tmp_path / "storage.db"))
+
+    for _ in range(2):
+        analysis_router._observe_candidate_resolution(
+            CandidateResolution(
+                ResolutionStatus.FAILED,
+                provider_called=True,
+                provider_name="DART",
+            )
+        )
+
+    with storage_db.connect() as conn:
+        service = dashboard_store.get_service_state(conn)
+        incidents = dashboard_store.list_incidents(conn)
+        dart_health = provider_health_store.get_state(
+            conn, provider_health_constants.PROVIDER_DART
+        )
+        anthropic_permission = provider_health_store.peek_permission(
+            conn,
+            provider_health_constants.PROVIDER_ANTHROPIC,
+            now_iso="2026-08-28T10:00:00+09:00",
+        )
+    assert service.status == dashboard_store.SERVICE_NORMAL
+    assert len(incidents) == 2
+    assert incidents[0]["kind"] == dashboard_store.INCIDENT_PROVIDER_RESPONSE
+    assert dart_health.state is provider_health_store.ProviderHealthState.OPEN
+    assert anthropic_permission.allowed is True
+
+
+def test_provider미호출_rate_limit은_provider장애로_세지않는다(
+    monkeypatch, tmp_path
+):
     monkeypatch.setenv("STORAGE_DB_PATH", str(tmp_path / "storage.db"))
 
     analysis_router._observe_candidate_resolution(
         CandidateResolution(
-            ResolutionStatus.FAILED,
-            provider_called=True,
+            ResolutionStatus.RATE_LIMITED,
+            provider_called=False,
             provider_name="DART",
         )
     )
@@ -1460,9 +1498,251 @@ def test_표식없는_DART_실패는_기존처럼_전역점검으로_격상한�
     with storage_db.connect() as conn:
         service = dashboard_store.get_service_state(conn)
         incidents = dashboard_store.list_incidents(conn)
-    assert service.status == dashboard_store.SERVICE_MAINTENANCE
-    assert len(incidents) == 1
-    assert incidents[0]["kind"] == dashboard_store.INCIDENT_PROVIDER_RESPONSE
+        health = provider_health_store.get_state(
+            conn, provider_health_constants.PROVIDER_DART
+        )
+        event_count = conn.execute(
+            f"SELECT COUNT(*) FROM {provider_health_store.TABLE_EVENTS}"
+        ).fetchone()[0]
+
+    assert service.status == dashboard_store.SERVICE_NORMAL
+    assert incidents == []
+    assert health.version == 0
+    assert event_count == 0
+
+
+def test_Google후보관측은_paid_callback소유라서_여기서_중복기록하지않는다(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("STORAGE_DB_PATH", str(tmp_path / "storage.db"))
+
+    analysis_router._observe_candidate_resolution(
+        CandidateResolution(
+            ResolutionStatus.FAILED,
+            provider_called=True,
+            provider_name="Google Maps",
+        )
+    )
+
+    with storage_db.connect() as conn:
+        google_health = provider_health_store.get_state(
+            conn, provider_health_constants.PROVIDER_GOOGLE_PLACES
+        )
+        dart_health = provider_health_store.get_state(
+            conn, provider_health_constants.PROVIDER_DART
+        )
+        event_count = conn.execute(
+            f"SELECT COUNT(*) FROM {provider_health_store.TABLE_EVENTS}"
+        ).fetchone()[0]
+    assert google_health.version == 0
+    assert dart_health.version == 0
+    assert event_count == 0
+
+
+def test_DART_cooldown중에는_실제후보provider를_부르지않고_관측도_늘리지않는다(
+    monkeypatch, tmp_path
+):
+    class FreeDartProvider:
+        costs_money = False
+        provider_name = "DART"
+
+        def __init__(self):
+            self.calls = 0
+
+        def search(self, **_kwargs):
+            self.calls += 1
+            raise AssertionError("cooldown 중 DART provider를 호출하면 안 됩니다")
+
+    class RequestFixture:
+        client = type("Client", (), {"host": "127.0.0.1"})()
+
+    now_iso = "2026-08-28T10:00:00+09:00"
+    monkeypatch.setenv("STORAGE_DB_PATH", str(tmp_path / "storage.db"))
+    monkeypatch.setattr(analysis_router.clock, "iso_now_kst", lambda: now_iso)
+    monkeypatch.setattr(
+        paid_runtime, "_reserve_run_slot", lambda _track, _bucket: "dart-slot"
+    )
+    released: list[str] = []
+    monkeypatch.setattr(paid_runtime, "_release_run_slot", released.append)
+    with storage_db.connect() as conn:
+        for _ in range(provider_health_constants.FAILURES_TO_OPEN):
+            provider_health_store.record_failure(
+                conn,
+                provider_health_constants.PROVIDER_DART,
+                failure_kind=provider_health_store.ProviderFailureKind.TIMEOUT,
+                now_iso=now_iso,
+            )
+
+    provider = FreeDartProvider()
+    outcome = asyncio.run(
+        analysis_router._resolve_business_candidates(
+            RequestFixture(),  # type: ignore[arg-type]
+            provider=provider,
+            user_input=UserInput("JYP", "매니지먼트", "서울", "채용 공고"),
+            resolved_track=(object(), "fixture-bucket", None),  # type: ignore[arg-type]
+            allow_paid_provider=False,
+            analysis_run_id="dart-cooldown-run",
+        )
+    )
+
+    assert isinstance(outcome, tuple)
+    result, cost_krw = outcome
+    assert result.status is ResolutionStatus.RATE_LIMITED
+    assert result.provider_called is False
+    assert provider.calls == 0
+    assert cost_krw == 0.0
+    assert released == ["dart-slot"]
+    # 실제 호출부가 하듯 관측 함수를 지나도 provider 미호출은 실패로 세지 않는다.
+    analysis_router._observe_candidate_resolution(result)
+    with storage_db.connect() as conn:
+        state = provider_health_store.get_state(
+            conn, provider_health_constants.PROVIDER_DART
+        )
+        event_count = conn.execute(
+            f"SELECT COUNT(*) FROM {provider_health_store.TABLE_EVENTS}"
+        ).fetchone()[0]
+    assert state.state is provider_health_store.ProviderHealthState.OPEN
+    assert state.version == provider_health_constants.FAILURES_TO_OPEN
+    assert event_count == provider_health_constants.FAILURES_TO_OPEN
+
+
+def test_DART_local_rate제한이면_만료된_probe권한도_미리잡지않는다(
+    monkeypatch, tmp_path
+):
+    from src.features.business_candidate import logic as candidate_logic
+
+    class FreeDartProvider:
+        costs_money = False
+        provider_name = "DART"
+
+        def __init__(self):
+            self.calls = 0
+
+        def search(self, **_kwargs):
+            self.calls += 1
+            raise AssertionError("로컬 rate 제한 뒤 provider를 호출하면 안 됩니다")
+
+    class RequestFixture:
+        client = type("Client", (), {"host": "127.0.0.1"})()
+
+    opened_at = "2026-08-28T10:00:00+09:00"
+    after_cooldown = "2026-08-28T10:01:01+09:00"
+    monkeypatch.setenv("STORAGE_DB_PATH", str(tmp_path / "storage.db"))
+    monkeypatch.setattr(
+        analysis_router.clock, "iso_now_kst", lambda: after_cooldown
+    )
+    monkeypatch.setattr(candidate_logic, "_claim_rate", lambda *_args: False)
+    monkeypatch.setattr(
+        paid_runtime, "_reserve_run_slot", lambda _track, _bucket: "dart-rate-slot"
+    )
+    monkeypatch.setattr(paid_runtime, "_release_run_slot", lambda _slot: None)
+    with storage_db.connect() as conn:
+        for _ in range(provider_health_constants.FAILURES_TO_OPEN):
+            provider_health_store.record_failure(
+                conn,
+                provider_health_constants.PROVIDER_DART,
+                failure_kind=provider_health_store.ProviderFailureKind.TIMEOUT,
+                now_iso=opened_at,
+            )
+
+    provider = FreeDartProvider()
+    outcome = asyncio.run(
+        analysis_router._resolve_business_candidates(
+            RequestFixture(),  # type: ignore[arg-type]
+            provider=provider,
+            user_input=UserInput("JYP", "매니지먼트", "서울", "채용 공고"),
+            resolved_track=(object(), "fixture-bucket", None),  # type: ignore[arg-type]
+            allow_paid_provider=False,
+            analysis_run_id="dart-local-rate-run",
+        )
+    )
+
+    assert isinstance(outcome, tuple)
+    result, _cost_krw = outcome
+    assert result.status is ResolutionStatus.RATE_LIMITED
+    assert result.provider_called is False
+    assert provider.calls == 0
+    with storage_db.connect() as conn:
+        state = provider_health_store.get_state(
+            conn, provider_health_constants.PROVIDER_DART
+        )
+        event_count = conn.execute(
+            f"SELECT COUNT(*) FROM {provider_health_store.TABLE_EVENTS}"
+        ).fetchone()[0]
+    assert state.state is provider_health_store.ProviderHealthState.OPEN
+    assert event_count == provider_health_constants.FAILURES_TO_OPEN
+
+
+def test_DART_cooldown뒤_탐색하나와_그결과관측하나만_기록한다(
+    monkeypatch, tmp_path
+):
+    class FreeDartProvider:
+        costs_money = False
+        provider_name = "DART"
+
+        def __init__(self):
+            self.calls = 0
+
+        def search(self, **_kwargs):
+            self.calls += 1
+            return []
+
+    class RequestFixture:
+        client = type("Client", (), {"host": "127.0.0.1"})()
+
+    opened_at = "2026-08-28T10:00:00+09:00"
+    after_cooldown = "2026-08-28T10:01:01+09:00"
+    monkeypatch.setenv("STORAGE_DB_PATH", str(tmp_path / "storage.db"))
+    monkeypatch.setattr(
+        analysis_router.clock, "iso_now_kst", lambda: after_cooldown
+    )
+    monkeypatch.setattr(
+        paid_runtime, "_reserve_run_slot", lambda _track, _bucket: "dart-probe-slot"
+    )
+    released: list[str] = []
+    monkeypatch.setattr(paid_runtime, "_release_run_slot", released.append)
+    with storage_db.connect() as conn:
+        for _ in range(provider_health_constants.FAILURES_TO_OPEN):
+            provider_health_store.record_failure(
+                conn,
+                provider_health_constants.PROVIDER_DART,
+                failure_kind=provider_health_store.ProviderFailureKind.TIMEOUT,
+                now_iso=opened_at,
+            )
+
+    provider = FreeDartProvider()
+    outcome = asyncio.run(
+        analysis_router._resolve_business_candidates(
+            RequestFixture(),  # type: ignore[arg-type]
+            provider=provider,
+            user_input=UserInput("JYP", "매니지먼트", "서울", "채용 공고"),
+            resolved_track=(object(), "fixture-bucket", None),  # type: ignore[arg-type]
+            allow_paid_provider=False,
+            analysis_run_id="dart-probe-run",
+        )
+    )
+
+    assert isinstance(outcome, tuple)
+    result, cost_krw = outcome
+    assert result.status is ResolutionStatus.NO_MATCHES
+    assert result.provider_called is True
+    assert provider.calls == 1
+    assert cost_krw == 0.0
+    assert released == ["dart-probe-slot"]
+    analysis_router._observe_candidate_resolution(result)
+    with storage_db.connect() as conn:
+        state = provider_health_store.get_state(
+            conn, provider_health_constants.PROVIDER_DART
+        )
+        event_kinds = [
+            str(row[0])
+            for row in conn.execute(
+                f"SELECT event_kind FROM {provider_health_store.TABLE_EVENTS} "
+                "ORDER BY id"
+            ).fetchall()
+        ]
+    assert state.state is provider_health_store.ProviderHealthState.HEALTHY
+    assert event_kinds == ["failure", "failure", "probe_acquired", "success"]
 
 
 def test_점검429는_실제_confirm에서_DART후보조회보다_먼저_막는다(monkeypatch, tmp_path):

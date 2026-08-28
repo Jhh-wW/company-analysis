@@ -10,14 +10,31 @@ import pytest
 from PIL import Image
 
 from src.core.pricing import AI_COST_KRW_PER_USD, usage_cost_krw
+from src.core.provider_gateway import attempt_context
+from src.core.provider_gateway.attempt_context import ProviderAttemptCallbacks
+from src.core.provider_gateway.types import BillingDisposition
 from src.features.budget import provider_budget
 from src.features.posting_image import constants, logic
 
 
 @pytest.fixture(autouse=True)
 def _paid_provider_budget_context():
-    with provider_budget.activate(10_000.0):
-        yield
+    events: list[tuple[object, ...]] = []
+
+    def begin(provider: str, operation: str, reserved_krw: float) -> str:
+        events.append(("begin", provider, operation, reserved_krw))
+        return "attempt:ocr-test"
+
+    callbacks = ProviderAttemptCallbacks(
+        begin_attempt=begin,
+        heartbeat=lambda token: events.append(("heartbeat", token)),
+        mark_dispatch_intent=lambda token: events.append(("dispatch", token)),
+        record_observation=lambda token, observation: events.append(
+            ("observation", token, observation)
+        ),
+    )
+    with provider_budget.activate(10_000.0), attempt_context.activate(callbacks):
+        yield events
 
 
 def _png() -> bytes:
@@ -112,6 +129,52 @@ def test_응답_JSON_파싱실패여도_usage_비용을_보존한다(monkeypatch
     assert usage.constructor_calls == [
         {"max_retries": 0, "timeout": constants.ANTHROPIC_TIMEOUT_SEC}
     ]
+
+
+def test_OCR도_영속_attempt와_gateway를_거쳐서만_전송한다(
+    monkeypatch,
+    _paid_provider_budget_context,
+):
+    _fake_anthropic(
+        monkeypatch,
+        content=[
+            types.SimpleNamespace(
+                type="text",
+                text='{"full_text":"채용 공고","is_job_posting":true}',
+            )
+        ],
+    )
+
+    result = logic.default_extract([_png()])
+
+    event_names = [event[0] for event in _paid_provider_budget_context]
+    assert result.text == "채용 공고"
+    assert event_names == ["begin", "heartbeat", "dispatch", "observation"]
+    observation = _paid_provider_budget_context[-1][2]
+    assert observation.billing_disposition is BillingDisposition.KNOWN_COST
+
+
+def test_attempt문맥이_없으면_OCR_client도_만들지_않고_전송하지_않는다(
+    monkeypatch,
+):
+    usage = _fake_anthropic(
+        monkeypatch,
+        content=[
+            types.SimpleNamespace(
+                type="text",
+                text='{"full_text":"채용 공고","is_job_posting":true}',
+            )
+        ],
+    )
+
+    def missing_context():
+        raise attempt_context.ProviderAttemptContextUnavailable("강제 문맥 없음")
+
+    monkeypatch.setattr(attempt_context, "current", missing_context)
+    with pytest.raises(provider_budget.ProviderBudgetUnavailable):
+        logic.default_extract([_png()])
+
+    assert usage.constructor_calls == []
 
 
 def test_응답_JSON이_객체가_아니어도_usage_비용을_보존한다(monkeypatch):

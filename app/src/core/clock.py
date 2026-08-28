@@ -34,6 +34,22 @@ def today_kst() -> dt.date:
     return now_kst().date()
 
 
+def subtract_years(value: dt.date, years: int) -> dt.date:
+    """달력 날짜에서 연도를 빼고, 없는 윤년 말일은 2월 28일로 맞춘다.
+
+    공시 조회창처럼 「같은 월·일의 N년 전」이 필요한 곳에서 각자 윤년 예외를
+    처리하지 않도록 한곳에 둔다. 음수는 이름과 반대 동작이므로 허용하지 않는다.
+    """
+    if years < 0:
+        raise ValueError("뺄 연도 수는 0 이상이어야 합니다")
+    try:
+        return value.replace(year=value.year - years)
+    except ValueError:
+        if value.month == 2 and value.day == 29:
+            return value.replace(year=value.year - years, day=28)
+        raise
+
+
 def iso_now_kst() -> str:
     """감사·비용 원장에 넣을 offset 포함 한국 시각."""
     return now_kst().isoformat(timespec="seconds")

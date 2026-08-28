@@ -48,6 +48,7 @@ for p in (APP_DIR, SRC_DIR, PROJECT_ROOT / "tools"):
 import anthropic  # noqa: E402
 
 from src.core import pricing as ai_pricing  # noqa: E402
+from src.core.clock import subtract_years, today_kst  # noqa: E402
 from core.env import load_env  # noqa: E402
 from core.logging_util import log_step  # noqa: E402
 from core.paths import PUBLIC_ORG_REGISTRY  # noqa: E402
@@ -82,6 +83,11 @@ RUN_ID = "파일럿_야간50"
 
 MODEL = "claude-haiku-4-5"          # 확정 운영 모델 (3단 조합·비용 목표 정합)
 BUDGET_STOP_USD = 8.0
+PAID_EXECUTION_DISABLED_MESSAGE = (
+    "야간 파일럿의 유료 실행은 중단됐습니다. 이 도구에는 재시작 뒤에도 남는 "
+    "attempt 비용 원장과 공용 provider gateway가 아직 없습니다. 두 경계를 붙이기 "
+    "전에는 ANTHROPIC_API_KEY를 읽거나 provider를 호출할 수 없습니다."
+)
 AI_NAME_RETRY_MAX = 5               # 층2 재시도 상한 (OWASP LLM06 가드레일)
 ANTHROPIC_TIMEOUT_SEC = 180.0        # 단일 provider 호출 worker 점유 상한
 AUDIT_WINDOW_YEARS = 3              # 조건 2 창 (P-07 잠정 3년)
@@ -339,27 +345,48 @@ FILING_LOOKUP_DEFAULT: Final[tuple[tuple[str, str], ...]] = (
     ("A", "사업보고서"),
     ("F", "감사보고서"),
 )
+#: 본문으로 고른 1건과 별개로, 같은 조회에서 확인한 기재·첨부 정정까지
+#: completion 출처 지문에 싣는 비민감 필드. 원문·회사정보는 넣지 않는다.
+SOURCE_IDENTITY_RCEPT_NOS_KEY: Final[str] = "source_identity_rcept_nos"
 
 
-def latest_report_rcept(corp_code: str, corp_type: str,
-                        counter: UsageCounter) -> Optional[dict[str, Any]]:
+def latest_report_rcept(
+    corp_code: str,
+    corp_type: str,
+    counter: UsageCounter,
+    *,
+    business_date: Optional[dt.date] = None,
+) -> Optional[dict[str, Any]]:
     """최신 원문 1건.
 
     상장은 사업보고서(A)만 본다. 비상장은 **사업보고서를 먼저** 보고,
     없을 때만 감사보고서(F)로 넘어간다 (`FILING_LOOKUP_ORDER` 머리말 참고).
     """
+    effective_date = business_date or today_kst()
     for ty, want in FILING_LOOKUP_ORDER.get(corp_type, FILING_LOOKUP_DEFAULT):
-        found = _latest_of_kind(corp_code, ty, want, counter)
+        found = _latest_of_kind(
+            corp_code,
+            ty,
+            want,
+            counter,
+            business_date=effective_date,
+        )
         if found is not None:
             return found
     return None
 
 
-def _latest_of_kind(corp_code: str, ty: str, want: str,
-                    counter: UsageCounter) -> Optional[dict[str, Any]]:
+def _latest_of_kind(
+    corp_code: str,
+    ty: str,
+    want: str,
+    counter: UsageCounter,
+    *,
+    business_date: Optional[dt.date] = None,
+) -> Optional[dict[str, Any]]:
     """공시 유형 하나에서 「원하는 이름」의 최신 보고서를 고른다. 없으면 None."""
-    end = dt.date.today()
-    bgn = end.replace(year=end.year - AUDIT_WINDOW_YEARS)
+    end = business_date or today_kst()
+    bgn = subtract_years(end, AUDIT_WINDOW_YEARS)
     payload = get_json("list.json", {
         "corp_code": corp_code, "bgn_de": bgn.strftime("%Y%m%d"),
         "end_de": end.strftime("%Y%m%d"), "pblntf_ty": ty, "page_count": "100"}, counter)
@@ -383,7 +410,18 @@ def _latest_of_kind(corp_code: str, ty: str, want: str,
         return None
     # 「[첨부정정]」 공시의 원본 zip엔 본문이 없고 고친 첨부만 있다 (로보스타 실측) — 본문 있는 공시 우선
     main_rows = [r for r in rows if "첨부정정" not in (r.get("report_nm") or "")]
-    return max(main_rows or rows, key=lambda r: r["rcept_no"])
+    selected = dict(max(main_rows or rows, key=lambda r: r["rcept_no"]))
+    # 본문 zip은 첨부정정을 피해서 고르되, 정정 사실까지 출처 신원에서 지우면
+    # 같은 원문 번호만 보고 옛 캐시가 살아난다. 조회 범위의 같은 보고서 종류
+    # 접수번호를 전부 싣고, delivery 쪽에서 14자리·중복·순서를 다시 검산한다.
+    selected[SOURCE_IDENTITY_RCEPT_NOS_KEY] = sorted(
+        {
+            str(row.get("rcept_no") or "").strip()
+            for row in rows
+            if str(row.get("rcept_no") or "").strip()
+        }
+    )
+    return selected
 
 
 #: 재무 조회에서 «정상»으로 볼 상태값. 그 밖은 기술 실패다.
@@ -393,7 +431,12 @@ def _latest_of_kind(corp_code: str, ty: str, want: str,
 FINANCIALS_OK_STATUSES: Final[frozenset[str]] = frozenset({"000", "013"})
 
 
-def fetch_financials(corp_code: str, counter: UsageCounter) -> tuple[Optional[dict], list[int]]:
+def fetch_financials(
+    corp_code: str,
+    counter: UsageCounter,
+    *,
+    business_date: Optional[dt.date] = None,
+) -> tuple[Optional[dict], list[int]]:
     """단일회사 주요계정 — 최근 3개 사업연도 시도. (첫 성공 payload, 성공 연도들).
 
     ★ 왜 오류를 «터뜨리나» (2026-08-27 추가)
@@ -408,7 +451,7 @@ def fetch_financials(corp_code: str, counter: UsageCounter) -> tuple[Optional[di
       **「빈 결과」와 「못 물어봄」은 다르다.**
     """
     got, years = None, []
-    this_year = dt.date.today().year
+    this_year = (business_date or today_kst()).year
     for year in range(this_year - 1, this_year - 4, -1):
         payload = get_json("fnlttSinglAcnt.json", {
             "corp_code": corp_code, "bsns_year": str(year), "reprt_code": "11011"}, counter)
@@ -446,7 +489,8 @@ def make_fragments(filing_text: str, financials: Optional[dict]) -> dict[int, di
 
 
 def collect_news(company: str, profile: dict[str, Any], homonym_count: int,
-                 steps: list[dict[str, Any]]) -> list[dict[str, str]]:
+                 steps: list[dict[str, Any]], *,
+                 business_date: Optional[dt.date] = None) -> list[dict[str, str]]:
     """6번 뉴스 수집 — 채택 조건(소스정책: 제목 회사명·3년·동명 시 본문 단서) 통과분만.
 
     동명 단서는 기업개황의 대표자·주소 토큰과 대조한다(P-15 조치의 실구현).
@@ -457,7 +501,7 @@ def collect_news(company: str, profile: dict[str, Any], homonym_count: int,
     except Exception as exc:  # 한도·인증·네트워크 — 사유만 기록하고 뉴스 없이 진행
         steps.append({"step": "6_수집_뉴스", "오류": f"{type(exc).__name__}: {str(exc)[:80]}"})
         return []
-    today = dt.date.today()
+    today = business_date or today_kst()
     ceo = (profile.get("ceo_nm") or "").strip().split(",")[0].strip()
     adres_tokens = [t for t in (profile.get("adres") or "").split()[:2] if len(t) >= 2]
     # 2026-08-16 결정 2=A: 동명 단서를 대표자·주소에 더해 업종·제품·계열까지 인정한다.
@@ -620,9 +664,11 @@ EMPTY_REASONS = {
 
 
 def write_report(run: dict[str, Any], kept: list[DraftItem],
-                 frags: dict[int, dict[str, str]], cells: dict[str, bool]) -> Path:
+                 frags: dict[int, dict[str, str]], cells: dict[str, bool], *,
+                 business_date: Optional[dt.date] = None) -> Path:
+    generated_on = business_date or today_kst()
     lines = [f"# {run['input']['company']} · {run['input']['job']} — 지원동기 재료 보고서 (파일럿)",
-             "", f"> 유형: {run.get('corp_type')} · 생성 {dt.date.today().isoformat()} · "
+             "", f"> 유형: {run.get('corp_type')} · 생성 {generated_on.isoformat()} · "
              "자료 연도는 각 출처 참조 — 3년 밖 자료 없음(신선도 O9)", ""]
     by_block: dict[str, list[DraftItem]] = {}
     for it in kept:
@@ -673,6 +719,7 @@ def build_inputs() -> list[dict[str, str]]:
 
 def run_one(item: dict[str, str], ctx: dict[str, Any]) -> dict[str, Any]:
     client, index, registry, counter = ctx["client"], ctx["index"], ctx["registry"], ctx["counter"]
+    business_date = today_kst()
     address = item.get("address", "모름")
     steps: list[dict[str, Any]] = [
         {"step": "1_계정할당량", "결과": "배치 모드 생략 (계정·차감 없음)"},
@@ -711,9 +758,9 @@ def run_one(item: dict[str, str], ctx: dict[str, Any]) -> dict[str, Any]:
     steps.append({"step": "4_캐시", "결과": "캐시 없음 — 신규 (배치)"})
 
     # 5 판정 (전부 코드)
-    end = dt.date.today()
+    end = business_date
     audit = get_json("list.json", {
-        "corp_code": corp_code, "bgn_de": end.replace(year=end.year - AUDIT_WINDOW_YEARS)
+        "corp_code": corp_code, "bgn_de": subtract_years(end, AUDIT_WINDOW_YEARS)
         .strftime("%Y%m%d"), "end_de": end.strftime("%Y%m%d"),
         "pblntf_ty": "F", "page_count": "100"}, counter)
     has_audit = any("감사보고서" in (r.get("report_nm") or "") for r in audit.get("list", []))
@@ -761,7 +808,12 @@ def run_one(item: dict[str, str], ctx: dict[str, Any]) -> dict[str, Any]:
     run["fingerprint"] = fp
 
     # 6 수집
-    report = latest_report_rcept(corp_code, judgment.corp_type, counter)
+    report = latest_report_rcept(
+        corp_code,
+        judgment.corp_type,
+        counter,
+        business_date=business_date,
+    )
     filing_text = ""
     if report:
         try:
@@ -769,11 +821,21 @@ def run_one(item: dict[str, str], ctx: dict[str, Any]) -> dict[str, Any]:
             filing_text = read_filing_text(path)
         except (RuntimeError, OSError) as exc:
             steps.append({"step": "6_수집_원문", "오류": str(exc)[:120]})
-    financials, fin_years = fetch_financials(corp_code, counter)
+    financials, fin_years = fetch_financials(
+        corp_code,
+        counter,
+        business_date=business_date,
+    )
     frags = make_fragments(filing_text, financials)
     homonym = max((s.get("후보수", 1) for s in steps
                    if s["step"].startswith("2_식별") and s.get("후보수")), default=1)
-    for nf in collect_news(item["company"], profile, homonym, steps):
+    for nf in collect_news(
+        item["company"],
+        profile,
+        homonym,
+        steps,
+        business_date=business_date,
+    ):
         frags[max(frags, default=0) + 1] = nf
     FRAG_DIR.mkdir(parents=True, exist_ok=True)
     (FRAG_DIR / f"{item['id']}.json").write_text(
@@ -823,7 +885,13 @@ def run_one(item: dict[str, str], ctx: dict[str, Any]) -> dict[str, Any]:
                   "파일럿 생략 — 미달 칸 X·문장 삭제만, 재수집·재생성 루프 없음"})
 
     # 13 출력 + 14 저장
-    report_path = write_report(run, kept, frags, final_cells)
+    report_path = write_report(
+        run,
+        kept,
+        frags,
+        final_cells,
+        business_date=business_date,
+    )
     steps.append({"step": "13_출력", "파일": report_path.name,
                   "빈칸사유": "프로그램이 부착 (AI 아님)"})
     return fin("완료_성립" if ok2 else "완료_성립미달",
@@ -832,6 +900,13 @@ def run_one(item: dict[str, str], ctx: dict[str, Any]) -> dict[str, Any]:
 
 
 def main() -> None:
+    # 이 수동 도구는 웹의 영속 비용 원장 밖에 있다. usage 없는 실패·프로세스
+    # 재시작을 0원으로 보는 옛 $8 메모리 가드는 안전하지 않으므로 실행 자체를
+    # 먼저 닫는다. ``load_env``보다 앞이어야 secret도 읽지 않는다.
+    raise SystemExit(PAID_EXECUTION_DISABLED_MESSAGE)
+
+    # 아래 코드는 과거 파일럿 재현 자료로만 보존한다. 영속 batch attempt 원장과
+    # 공용 gateway를 연결할 때 별도 변경으로 다시 활성화해야 한다.
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--only", type=str, default=None, help="특정 id만 (재실행용, 콤마 구분)")

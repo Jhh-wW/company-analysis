@@ -1,7 +1,12 @@
 import pytest
 
 from starlette.applications import Starlette
-from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from starlette.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+)
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
@@ -27,6 +32,10 @@ async def _readiness(_request):
     return JSONResponse({"status": "ready"})
 
 
+async def _redirect(_request):
+    return RedirectResponse("/", status_code=303)
+
+
 def _client(*, base_url: str = "http://testserver") -> TestClient:
     app = Starlette(
         routes=[
@@ -35,6 +44,10 @@ def _client(*, base_url: str = "http://testserver") -> TestClient:
             Route("/static/a.css", _page),
             Route("/healthz", _health),
             Route("/readyz", _readiness),
+            Route("/k/{key}", _redirect),
+            Route("/auth/callback", _redirect),
+            Route("/auth/local-demo/start", _redirect),
+            Route("/ordinary-redirect", _redirect),
         ]
     )
     app.add_middleware(ResponseSecurityMiddleware)
@@ -62,6 +75,30 @@ def test_POST_form_HTML문서는_same_origin_정책을_쓴다():
     with _client() as client:
         response = client.get("/form")
 
+    assert response.headers["referrer-policy"] == "same-origin"
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "/k/" + "a" * 32 + "?from=messenger",
+        "/auth/callback?code=authorization-secret&state=" + "s" * 43,
+        "/auth/local-demo/start?token=" + "ab" * 32,
+    ),
+)
+def test_민감한_교환주소는_다음요청에_원래_URL을_Referer로_넘기지않는다(path):
+    with _client() as client:
+        response = client.get(path, follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["referrer-policy"] == "no-referrer"
+
+
+def test_일반_이동응답은_기존_same_origin_정책을_유지한다():
+    with _client() as client:
+        response = client.get("/ordinary-redirect", follow_redirects=False)
+
+    assert response.status_code == 303
     assert response.headers["referrer-policy"] == "same-origin"
 
 

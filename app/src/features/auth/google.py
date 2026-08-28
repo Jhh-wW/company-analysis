@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,6 +23,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from src.features.auth import constants, logic
+from src.shared import credentialed_http
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,14 @@ ExchangeFn = Callable[[str, str, str, str], dict]
 #: access_token으로 사용자 정보를 가져오는 함수의 모양. access_token -> 사용자 정보(dict)
 UserInfoFn = Callable[[str], dict]
 
+_OAUTH_OPENER = credentialed_http.build_no_redirect_opener()
+
+
+def _urlopen(request: urllib.request.Request, *, timeout: float):
+    """Google 고정 endpoint를 인증정보 redirect 없이 한 번만 연다."""
+
+    return _OAUTH_OPENER.open(request, timeout=timeout)
+
 
 class MissingCredentialError(Exception):
     """구글 로그인에 필요한 환경변수가 없다."""
@@ -38,6 +48,10 @@ class MissingCredentialError(Exception):
 
 class GoogleAuthError(Exception):
     """구글과의 통신이나 응답이 이상하다. 사용자에게 내부 내용을 그대로 보여주지 않는다."""
+
+
+class GoogleAuthDeadlineError(GoogleAuthError):
+    """토큰 교환과 사용자 조회를 합친 전체 제한시간을 넘겼다."""
 
 
 @dataclass(frozen=True)
@@ -144,7 +158,12 @@ def start_login() -> LoginStart:
 # ══════════════════════════════════════════════════════════
 
 def _default_exchange_code(
-    code: str, redirect_uri: str, client_id: str, client_secret: str
+    code: str,
+    redirect_uri: str,
+    client_id: str,
+    client_secret: str,
+    *,
+    deadline_monotonic: float | None = None,
 ) -> dict:
     """인가 코드를 토큰으로 바꾼다. (실제로 구글 서버에 접속한다)"""
     data = urllib.parse.urlencode(
@@ -157,21 +176,46 @@ def _default_exchange_code(
         }
     ).encode("utf-8")
     request = urllib.request.Request(constants.GOOGLE_TOKEN_ENDPOINT, data=data, method="POST")
-    return _call_and_parse(request, what="토큰 교환")
+    return _call_and_parse(
+        request,
+        what="토큰 교환",
+        deadline_monotonic=deadline_monotonic,
+    )
 
 
-def _default_fetch_userinfo(access_token: str) -> dict:
+def _default_fetch_userinfo(
+    access_token: str, *, deadline_monotonic: float | None = None
+) -> dict:
     """access_token으로 사용자 정보(이메일 등)를 가져온다. (실제로 구글 서버에 접속한다)"""
     request = urllib.request.Request(
         constants.GOOGLE_USERINFO_ENDPOINT,
         headers={"Authorization": f"Bearer {access_token}"},
     )
-    return _call_and_parse(request, what="사용자 정보 조회")
+    return _call_and_parse(
+        request,
+        what="사용자 정보 조회",
+        deadline_monotonic=deadline_monotonic,
+    )
 
 
 #: 로그에 남길 구글 오류 설명의 최대 글자 수.
 #: ★ 자르는 이유 — 구글이 언젠가 긴 본문을 보내도 로그가 통째로 뒤덮이지 않게.
 _ERROR_DETAIL_MAX_CHARS = 200
+_SAFE_OAUTH_ERROR_CODES = frozenset(
+    {
+        "access_denied",
+        "admin_policy_enforced",
+        "invalid_client",
+        "invalid_grant",
+        "invalid_request",
+        "invalid_scope",
+        "redirect_uri_mismatch",
+        "server_error",
+        "temporarily_unavailable",
+        "unauthorized_client",
+        "unsupported_grant_type",
+    }
+)
 
 
 def _error_detail(exc: urllib.error.HTTPError) -> str:
@@ -181,45 +225,81 @@ def _error_detail(exc: urllib.error.HTTPError) -> str:
         exc: `urlopen`이 던진 HTTP 오류.
 
     Returns:
-        `invalid_client: Unauthorized` 같은 짧은 설명. 못 읽으면 `(본문 없음)`.
+        ``invalid_client`` 같은 닫힌 오류 코드. 못 읽거나 알 수 없는 값이면
+        고정 문구를 돌려준다.
 
     ★ 이 값은 **로그에만** 쓴다. 화면에는 안 내보낸다 (사용자에게 내부 사정을 흘리지 않는다).
-    ⚠️ 본문에는 우리가 보낸 열쇠·코드가 되돌아오지 않는다 — 구글이 붙인 오류 코드뿐이다.
-      그래도 만일을 대비해 길이를 자른다.
+    오류 설명과 비정형 본문은 외부 입력이다. 공급자가 요청값을 되비추더라도
+    인가 코드·비밀키가 로그에 남지 않도록 절대 반환하지 않는다.
     """
     try:
-        body = exc.read().decode("utf-8", errors="replace")
+        raw = exc.read(constants.OAUTH_ERROR_RESPONSE_MAX_BYTES + 1)
     except OSError:
         return "(본문 없음)"
+    if len(raw) > constants.OAUTH_ERROR_RESPONSE_MAX_BYTES:
+        return "(오류 본문이 너무 큼)"
+    body = raw.decode("utf-8", errors="replace")
     if not body.strip():
         return "(본문 없음)"
     try:
         parsed = json.loads(body)
     except json.JSONDecodeError:
-        return body[:_ERROR_DETAIL_MAX_CHARS]
+        return "(오류 코드 해석 불가)"
     if not isinstance(parsed, dict):
-        return body[:_ERROR_DETAIL_MAX_CHARS]
+        return "(오류 코드 해석 불가)"
     code = str(parsed.get("error", "")).strip()
-    description = str(parsed.get("error_description", "")).strip()
-    joined = ": ".join(part for part in (code, description) if part)
-    return (joined or body)[:_ERROR_DETAIL_MAX_CHARS]
+    if code in _SAFE_OAUTH_ERROR_CODES:
+        return code
+    return "(알 수 없는 오류 코드)"
 
 
-def _call_and_parse(request: urllib.request.Request, *, what: str) -> dict:
+def _remaining_network_timeout(deadline_monotonic: float | None) -> float:
+    """개별 10초 상한과 OAuth 전체 deadline 중 더 짧은 시간을 고른다."""
+
+    if deadline_monotonic is None:
+        return constants.HTTP_TIMEOUT_SEC
+    remaining = float(deadline_monotonic) - time.monotonic()
+    if remaining <= 0:
+        raise GoogleAuthDeadlineError("구글 로그인 전체 제한시간을 넘겼습니다")
+    return min(float(constants.HTTP_TIMEOUT_SEC), remaining)
+
+
+def _ensure_before_deadline(deadline_monotonic: float | None) -> None:
+    if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+        raise GoogleAuthDeadlineError("구글 로그인 전체 제한시간을 넘겼습니다")
+
+
+def _call_and_parse(
+    request: urllib.request.Request,
+    *,
+    what: str,
+    deadline_monotonic: float | None = None,
+) -> dict:
     """구글에 요청을 보내고 JSON 응답을 dict로 돌려준다. 실패하면 한국어 예외로 감싼다.
 
     ★ 예외 메시지에 요청 내용(코드·비밀키·토큰)을 담지 않는다 — 로그에 민감정보가 남지 않게.
     """
     try:
-        with urllib.request.urlopen(request, timeout=constants.HTTP_TIMEOUT_SEC) as response:
-            return json.loads(response.read().decode("utf-8"))
+        timeout = _remaining_network_timeout(deadline_monotonic)
+        with _urlopen(request, timeout=timeout) as response:
+            credentialed_http.require_exact_response_url(
+                response,
+                expected_url=request.full_url,
+            )
+            raw = credentialed_http.read_limited_bytes(
+                response,
+                max_bytes=constants.OAUTH_RESPONSE_MAX_BYTES,
+            )
+            result = json.loads(raw.decode("utf-8"))
+        _ensure_before_deadline(deadline_monotonic)
+        return result
     except urllib.error.HTTPError as exc:
         # ★ 구글은 «왜» 거절했는지를 «본문»에 담아 보낸다 — 그걸 안 읽으면
         #   로그에 「HTTP Error 401」만 남아 원인을 영영 못 찾는다. 실제로 그랬다.
         #   본문 예: {"error":"invalid_client","error_description":"Unauthorized"}
         #   → 열쇠가 틀렸는지(invalid_client) 주소가 안 맞는지(redirect_uri_mismatch)가 갈린다.
-        # ⚠️ 본문에는 «우리가 보낸 값»이 안 들어온다 — 구글의 오류 코드뿐이라 안전하다.
-        #   그래도 혹시 모르니 길이를 잘라 남긴다.
+        # 오류 본문은 외부 입력이다. 진단에는 닫힌 오류 코드만 쓰고 설명·원문은
+        # 버려, 공급자가 요청값을 되비춰도 코드·비밀키가 로그에 남지 않게 한다.
         logger.warning(
             "구글 %s 실패: HTTP %s — %s", what, exc.code, _error_detail(exc)
         )
@@ -227,10 +307,17 @@ def _call_and_parse(request: urllib.request.Request, *, what: str) -> dict:
             f"구글이 요청을 거절했습니다 ({what} · HTTP {exc.code})"
         ) from exc
     except urllib.error.URLError as exc:
-        logger.warning("구글 %s 실패: %s", what, exc)
+        logger.warning(
+            "구글 %s 통신 실패 type=%s",
+            what,
+            type(getattr(exc, "reason", exc)).__name__,
+        )
         raise GoogleAuthError(f"구글 서버와 통신하지 못했습니다 ({what})") from exc
+    except credentialed_http.CredentialedHTTPContractError as exc:
+        logger.warning("구글 %s 응답 안전 계약 위반", what)
+        raise GoogleAuthError(f"구글 응답을 안전하게 읽지 못했습니다 ({what})") from exc
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        logger.warning("구글 %s 응답을 읽지 못함: %s", what, exc)
+        logger.warning("구글 %s 응답 해석 실패 type=%s", what, type(exc).__name__)
         raise GoogleAuthError(f"구글 응답을 해석하지 못했습니다 ({what})") from exc
 
 
@@ -255,6 +342,7 @@ def handle_callback(
     previous_session_token: Optional[str] = None,
     exchange: ExchangeFn = _default_exchange_code,
     fetch: UserInfoFn = _default_fetch_userinfo,
+    provider_deadline_monotonic: float | None = None,
 ) -> LoginResult:
     """콜백에서 받은 인가 코드로 로그인을 끝까지 마친다.
 
@@ -281,10 +369,24 @@ def handle_callback(
     if not logic.state_matches(state_expected or "", state_received):
         raise logic.StateMismatchError("state 값이 일치하지 않습니다 (CSRF 의심)")
 
+    _ensure_before_deadline(provider_deadline_monotonic)
     credentials = load_credentials()
-    token_response = exchange(
-        code, credentials.redirect_uri, credentials.client_id, credentials.client_secret
-    )
+    if exchange is _default_exchange_code:
+        token_response = _default_exchange_code(
+            code,
+            credentials.redirect_uri,
+            credentials.client_id,
+            credentials.client_secret,
+            deadline_monotonic=provider_deadline_monotonic,
+        )
+    else:
+        token_response = exchange(
+            code,
+            credentials.redirect_uri,
+            credentials.client_id,
+            credentials.client_secret,
+        )
+    _ensure_before_deadline(provider_deadline_monotonic)
 
     access_token = token_response.get("access_token")
     if not access_token:
@@ -292,10 +394,18 @@ def handle_callback(
         logger.warning("구글 토큰 응답에 access_token이 없음")
         raise GoogleAuthError("구글이 access_token을 돌려주지 않았습니다")
 
-    userinfo = fetch(access_token)
+    if fetch is _default_fetch_userinfo:
+        userinfo = _default_fetch_userinfo(
+            access_token,
+            deadline_monotonic=provider_deadline_monotonic,
+        )
+    else:
+        userinfo = fetch(access_token)
+    _ensure_before_deadline(provider_deadline_monotonic)
     identity = logic.extract_verified_identity(userinfo)
     email = identity.email
     is_admin = logic.check_admin(email)
+    _ensure_before_deadline(provider_deadline_monotonic)
     session = logic.rotate_session(
         email,
         is_admin,

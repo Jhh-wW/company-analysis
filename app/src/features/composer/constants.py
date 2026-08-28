@@ -50,6 +50,53 @@ SECTION_TITLES: Final[dict[str, str]] = {
     "competitive_position": "동종업계에서의 경쟁우위",
 }
 
+#: 작가가 문장을 어떤 원자 주장 계획에 놓았는지 명시하는 닫힌 자리 목록.
+#: 목록 밖 값과 누락은 추측해 채우지 않고 빈칸으로 남겨 품질 평가가 잡는다.
+CLAIM_SLOTS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
+    "identity": (
+        "identity:corporate_identity", "identity:business_definition",
+        "identity:legal_scope", "identity:official_location", "identity:self_positioning",
+    ),
+    "business_model": (
+        "business_model:revenue_model", "business_model:customer_type",
+        "business_model:sales_channel", "business_model:regional_mix",
+        "business_model:value_exchange",
+    ),
+    "portfolio": (
+        "portfolio:product_role", "portfolio:portfolio_priority",
+        "portfolio:customer_fit", "portfolio:revenue_link", "portfolio:lifecycle_stage",
+    ),
+    "past_changes": (
+        "past_changes:historical_performance", "past_changes:completed_execution",
+        "past_changes:cumulative_change", "past_changes:change_context",
+        "past_changes:change_limit",
+    ),
+    "current_challenges": (
+        "current_challenges:issue", "current_challenges:response",
+        "current_challenges:initial_signal", "current_challenges:unresolved_gap",
+        "current_challenges:next_check",
+    ),
+    "future_strategy": (
+        "future_strategy:stated_plan", "future_strategy:plan_status",
+        "future_strategy:plan_timing", "future_strategy:plan_condition",
+        "future_strategy:execution_signal",
+    ),
+    "operations_partners": (
+        "operations_partners:value_chain", "operations_partners:operating_role",
+        "operations_partners:supply_relation", "operations_partners:distribution_relation",
+        "operations_partners:partnership",
+    ),
+    "culture": (
+        "culture:leadership", "culture:work_principle", "culture:decision_process",
+        "culture:organization_change", "culture:verified_case",
+    ),
+    "competitive_position": (
+        "competitive_position:comparison_target", "competitive_position:comparison_metric",
+        "competitive_position:comparison_basis", "competitive_position:comparison_judgment",
+        "competitive_position:limitation",
+    ),
+}
+
 #: 장별 작성 지침 — 그 장이 «무엇을 말하는 자리»인지 작가에게 알려 준다.
 SECTION_GUIDES: Final[dict[str, str]] = {
     "identity": (
@@ -181,7 +228,7 @@ SENTENCE_RANGE_GUIDE: Final[str] = (
 JSON_SCHEMA_GUIDE: Final[str] = (
     "출력 형식 — 설명·머리말 없이 아래 모양의 JSON만 출력한다:\n"
     '{"문장들": [{"글": "<문장>", "인용": ["<조각id>", "..."], '
-    '"등급": "확인" 또는 "해석"}]}\n'
+    '"등급": "확인" 또는 "해석", "주장슬롯": "<허용된 id 또는 빈 문자열>"}]}\n'
     "\"인용\"의 조각id는 아래 자료 목록의 [조각 n] 번호를 그대로 쓴다.\n"
 )
 
@@ -205,6 +252,7 @@ RESPONSE_SENTENCES_KEY: Final[str] = "문장들"
 RESPONSE_TEXT_KEY: Final[str] = "글"
 RESPONSE_CITATIONS_KEY: Final[str] = "인용"
 RESPONSE_GRADE_KEY: Final[str] = "등급"
+RESPONSE_CLAIM_SLOT_KEY: Final[str] = "주장슬롯"
 
 # ══════════════════════════════════════════════════════════
 # 자료 부족·실패 안내문 (기준문서 3절 — 장 삭제 금지, 정직한 안내)
@@ -240,6 +288,17 @@ RCEPT_DT_LENGTH: Final[int] = 8
 #: 전자공시 원문을 호스팅하는 기관 도메인. Source.host에 실어 「누가 보관한
 #: 문서인가」를 발행 주체(회사)와 구분해 보여 준다.
 DART_DOCUMENT_HOST: Final[str] = "dart.fss.or.kr"
+
+#: 주요계정 조각은 위 사업보고서 원문과 다른 OpenDART API 응답이다. 선택된
+#: 사업보고서 접수번호를 갖다 붙이면 서로 다른 문서를 같은 출처로 꾸미게 된다.
+#: canonical provenance와 같은 별도 문서 신원을 composer도 명시한다.
+DART_FINANCIAL_API_PREFIX: Final[str] = "주요계정(DART API):"
+DART_FINANCIAL_API_LABEL: Final[str] = "전자공시 주요계정(DART API)"
+DART_FINANCIAL_API_HOST: Final[str] = "opendart.fss.or.kr"
+DART_FINANCIAL_API_URL: Final[str] = (
+    "https://opendart.fss.or.kr/api/fnlttSinglAcnt.json"
+)
+DART_FINANCIAL_API_DOCUMENT_ID: Final[str] = "fnlttSinglAcnt.json"
 
 # ══════════════════════════════════════════════════════════
 # 사실 단일 소유 — 같은 사실이 여러 장에 반복되는 것을 막는다
@@ -443,7 +502,7 @@ OPERATIONS_FLOW_SCHEMA_GUIDE: Final[str] = (
     "출력 형식 — 설명·머리말 없이 아래 모양의 JSON만 출력한다. "
     "«두 키를 모두» 넣는다:\n"
     '{"문장들": [{"글": "<문장>", "인용": ["<조각id>", "..."], '
-    '"등급": "확인" 또는 "해석"}],\n'
+    '"등급": "확인" 또는 "해석", "주장슬롯": "<허용된 id 또는 빈 문자열>"}],\n'
     ' "경로표": [{"칸": ["<무엇으로 시작하나>", "<회사가 하는 일>", '
     '"<누구에게 닿나>"], "인용": ["<조각id>"]}]}\n'
     '"인용"의 조각id는 아래 자료 목록의 [조각 n] 번호를 그대로 쓴다.\n'
@@ -460,7 +519,7 @@ CHALLENGE_FLOW_SCHEMA_GUIDE: Final[str] = (
     "출력 형식 — 설명·머리말 없이 아래 모양의 JSON만 출력한다. "
     "«두 키를 모두» 넣는다:\n"
     '{"문장들": [{"글": "<문장>", "인용": ["<조각id>", "..."], '
-    '"등급": "확인" 또는 "해석"}],\n'
+    '"등급": "확인" 또는 "해석", "주장슬롯": "<허용된 id 또는 빈 문자열>"}],\n'
     ' "경로표": [{"칸": ["<지금 겪는 과제>", "<회사가 밝힌 대응>"], '
     '"인용": ["<조각id>"]}]}\n'
     '"인용"의 조각id는 아래 자료 목록의 [조각 n] 번호를 그대로 쓴다.\n'
@@ -685,7 +744,7 @@ def _flow_schema_guide(cells: tuple[str, ...]) -> str:
         "출력 형식 — 설명·머리말 없이 아래 모양의 JSON만 출력한다. "
         "«두 키를 모두» 넣는다:\n"
         '{"문장들": [{"글": "<문장>", "인용": ["<조각id>", "..."], '
-        '"등급": "확인" 또는 "해석"}],\n'
+        '"등급": "확인" 또는 "해석", "주장슬롯": "<허용된 id 또는 빈 문자열>"}],\n'
         ' "경로표": [{"칸": [' + 칸 + '], "인용": ["<조각id>"]}]}\n'
         '"인용"의 조각id는 아래 자료 목록의 [조각 n] 번호를 그대로 쓴다.\n'
         "표에 담을 근거가 하나도 없을 때만 «경로표»를 빈 배열로 둔다.\n"

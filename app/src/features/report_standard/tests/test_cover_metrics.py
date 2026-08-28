@@ -38,6 +38,7 @@ from src.features.report_standard.cover_metrics import (
 )
 from src.web import job_runtime
 from src.web.main import app
+from src.web.tests.report_route_support import serve_legacy_report_snapshot
 
 
 _CITE = "조각 1·재무"
@@ -167,7 +168,7 @@ def _result_html(monkeypatch: pytest.MonkeyPatch, report: Report) -> str:
     monkeypatch.setenv(auth_constants.ENV_ADMIN_EMAILS, "admin@example.com")
     job_id = f"band-{uuid.uuid4().hex}"
     job_runtime._JOBS.pop(job_id, None)
-    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _report_id: report)
+    serve_legacy_report_snapshot(monkeypatch, report, report_id=job_id)
     monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
     session = auth_logic.create_session("admin@example.com", True)
 

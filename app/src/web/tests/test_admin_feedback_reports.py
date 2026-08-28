@@ -173,6 +173,8 @@ def test_detail_shows_fields_and_only_allowed_transition_buttons(client: TestCli
         feedback_constants.STAGE_REPORT, feedback_constants.CATEGORY_WRONG_INFO,
     ):
         assert expected in response.text
+    assert 'href="https://example.com/news"' not in response.text
+    assert "신고자가 쓴 주소는 자동으로 열지 않습니다" in response.text
     # 미처리 상태에서는 검토중 버튼만 노출된다.
     assert f'value="{feedback_constants.STATUS_REVIEWING}"' in response.text
     assert f'value="{feedback_constants.STATUS_RESOLVED}"' not in response.text

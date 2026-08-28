@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import base64
+import contextvars
 import hashlib
 import hmac
 import html
@@ -699,7 +700,11 @@ def _call_once(
         )
 
     try:
-        future = executor.submit(invoke)
+        # paid worker 안에서 다시 만든 thread에도 요청 로컬 attempt/예산 문맥을
+        # 명시적으로 복사한다. ThreadPoolExecutor는 contextvars를 자동 전파하지
+        # 않으므로 그대로 submit하면 provider 직전 gateway가 문맥 없음으로 막힌다.
+        request_context = contextvars.copy_context()
+        future = executor.submit(request_context.run, invoke)
         # 완료·예외·시작 전 취소 모두 callback을 정확히 한 번 부른다. timeout 뒤
         # underlying thread가 계속 돌면 완료 때까지 슬롯을 붙잡아 thread 폭증을 막는다.
         future.add_done_callback(lambda _future: _PROVIDER_WORKER_SLOTS.release())

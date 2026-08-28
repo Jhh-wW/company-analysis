@@ -29,7 +29,35 @@ def test_LINK_원문은_uvicorn_접근로그에서_가린다():
     assert "/k/[LINK_REDACTED]" in rendered
 
 
-def test_안전한_관리자_해시와_일반_보고서_ID는_로그에서_유지한다():
+def test_percent_encoding으로_숨긴_LINK와_보고서_locator도_가린다():
+    """라우터가 해석하는 경로와 접근 로그의 wire 경로가 달라도 비밀은 남지 않는다."""
+    raw_key = "a1b2c3d4e5f60718a1b2c3d4e5f60718"
+    report_id = "e3adff5240b75984c9f15ea5620c2629"
+    filter_ = CapabilityAccessLogFilter()
+
+    link_record = _uvicorn_record(
+        "/k%2F%61" + raw_key[1:] + "?from=messenger"
+    )
+    report_record = _uvicorn_record(
+        "/result%2F%65" + report_id[1:] + "?download=1"
+    )
+
+    filter_.filter(link_record)
+    filter_.filter(report_record)
+
+    link_log = link_record.getMessage()
+    report_log = report_record.getMessage()
+    assert "%61" not in link_log and raw_key[1:] not in link_log
+    assert "%65" not in report_log and report_id[1:] not in report_log
+    assert "/k/[LINK_REDACTED]" in link_log
+    assert "/result/[REPORT_ID_REDACTED]" in report_log
+    assert "from=messenger" not in link_log
+    assert "download=1" not in report_log
+    assert "127.0.0.1" not in link_log
+    assert "127.0.0.1" not in report_log
+
+
+def test_관리자_해시는_유지하고_보고서_locator와_client는_가린다():
     report_id = "b" * 32
     key_hash = "c" * 64
     report_record = _uvicorn_record(f"/result/{report_id}")
@@ -39,8 +67,88 @@ def test_안전한_관리자_해시와_일반_보고서_ID는_로그에서_유�
     filter_.filter(report_record)
     filter_.filter(admin_record)
 
-    assert report_id in report_record.getMessage()
+    assert report_id not in report_record.getMessage()
+    assert "127.0.0.1" not in report_record.getMessage()
+    assert "/result/[REPORT_ID_REDACTED]" in report_record.getMessage()
     assert key_hash in admin_record.getMessage()
+
+
+def test_네_공개채널과_ID_로그인자를_모두_가린다():
+    report_id = "e3adff5240b75984c9f15ea5620c2629"
+    filter_ = CapabilityAccessLogFilter()
+
+    for path in (
+        f"/result/{report_id}",
+        f"/progress/{report_id}",
+        f"/api/progress/{report_id}",
+        f"/download/pdf/{report_id}",
+        f"/reports/{report_id}",
+    ):
+        record = _uvicorn_record(path)
+        filter_.filter(record)
+        rendered = record.getMessage()
+        assert report_id not in rendered
+        assert "127.0.0.1" not in rendered
+        assert "[REPORT_ID_REDACTED]" in rendered
+
+    for field in ("report_id", "job_id", "public_id", "run_id"):
+        record = _app_record(f"실패 {field}=%s", (report_id,))
+        filter_.filter(record)
+        assert report_id not in record.getMessage()
+        assert f"{field}=[REPORT_ID_REDACTED]" in record.getMessage()
+
+
+def test_OAuth_callback의_code와_state_query를_통째로_가린다():
+    code = "authorization-code-secret"
+    state = "s" * 43
+    filter_ = CapabilityAccessLogFilter()
+
+    for path in (
+        f"/auth/callback?code={code}&state={state}",
+        f"/auth/callback?state={state}&code={code}&code=duplicate",
+        f"/AUTH/CALLBACK?error=x&state={state}",
+    ):
+        record = _uvicorn_record(path)
+        filter_.filter(record)
+        rendered = record.getMessage()
+        assert code not in rendered
+        assert state not in rendered
+        assert "127.0.0.1" not in rendered
+        assert "/auth/callback?" in rendered.lower()
+        assert "[OAUTH_QUERY_REDACTED]" in rendered
+
+
+def test_로컬데모_root_capability_query와_client를_통째로_가린다():
+    """실행기 root token은 1회 교환 전까지 관리자 권한 그 자체다."""
+
+    raw_token = "ab" * 32
+    filter_ = CapabilityAccessLogFilter()
+
+    for path in (
+        f"/auth/local-demo/start?token={raw_token}",
+        f"/auth/local-demo/start?to%6ben={raw_token}",
+        f"/auth/local-demo/start?token=%61%62{raw_token[2:]}",
+        f"/auth/local-demo%2Fstart?token={raw_token}&token=duplicate",
+        f"/AUTH/LOCAL-DEMO/START?next=x&token={raw_token}",
+    ):
+        record = _uvicorn_record(path)
+        filter_.filter(record)
+        rendered = record.getMessage()
+        assert raw_token not in rendered
+        assert raw_token[2:] not in rendered
+        assert "%61%62" not in rendered
+        assert "127.0.0.1" not in rendered
+        assert "/auth/local-demo/start?" in rendered.lower()
+        assert "[LOCAL_DEMO_QUERY_REDACTED]" in rendered
+
+
+def test_쿼리가_없는_OAuth_callback은_일반경로라_그대로_둔다():
+    record = _uvicorn_record("/auth/callback")
+
+    CapabilityAccessLogFilter().filter(record)
+
+    assert "/auth/callback" in record.getMessage()
+    assert "127.0.0.1" in record.getMessage()
 
 
 def test_구형과_신형_관리자_주소의_raw_LINK를_모두_가린다():

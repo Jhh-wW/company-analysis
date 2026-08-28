@@ -44,7 +44,8 @@ def client():
     그러면 `finished=True`인데 `result=None`인 «반쪽 상태»가 되어
     보고서가 영영 안 나온다 — 실제로 그것 때문에 시험 8개가 깨졌다.
     """
-    with TestClient(main.app) as client:
+    # 운영과 같은 HTTPS에서 Secure report grant cookie가 실제 후속 요청에 붙는다.
+    with TestClient(main.app, base_url="https://testserver") as client:
         yield client
 
 
@@ -136,6 +137,16 @@ def test_내려받기에도_같은_보호가_걸린다(
     client: TestClient, approved_pdf_route
 ):
     job_id = _보고서를_만든다(client)
+    report = job_runtime._JOBS[job_id].result.report
+    assert report is not None
+    reports_router.finalize_new_report_delivery(
+        report_id=job_id,
+        corp_id="link-sharing-pdf-corp",
+        billing_bucket_id="public",
+        report=report,
+        actual_models=("deterministic-demo",),
+        reused_from_cache=False,
+    )
 
     response = client.get(f"/download/pdf/{job_id}")
     headers = response.headers

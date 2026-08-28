@@ -72,7 +72,7 @@ pipeline ── demo 또는 real 조사 조립
 | 기능 | 책임 | 입력 → 출력 | 담당하지 않는 것 |
 |---|---|---|---|
 | `storage` | 보고서·사실 원장·세션·캐시 저장과 조회 | DB·정본 스키마 → 저장·조회 결과 | 구형 캐시를 새 정본으로 승격 |
-| `backup` | 실행 중 SQLite의 일관된 스냅샷을 외부 S3 저장소에 올리고 재검증·보관 정리 | 영속 DB·백업 설정 → 검증된 DB·체크섬 한 쌍 | DB 복구 전환·비밀값 백업 |
+| `backup` | 실행 중 SQLite snapshot과 그 snapshot이 참조하는 불변 PDF를 한 recovery generation으로 봉인·재검증 | 영속 DB·artifact root → exact DB/PDF/manifest 세대 | 운영 외부 업로드·독립 서명·복구 전환·비밀값 백업(현재 BLOCKED) |
 | `admin_dashboard` | 관리자 보고서·휴지통·주간 XLSX와 기간별 정기 작업 상태 관리 | 운영 DB·관리자 명령·cron claim → 대시보드 조회·XLSX·정리 결과 | 분석 실행·AI 호출·사용자 보고서 내용 변경 |
 | `observability` | 단계·게이트·비용·시간·실패 이유 기록 | 실행 사건 → 감사 기록·지표 | 분석 실행·비용 차단 |
 | `export_pdf` | 정본을 A4 PDF로 준비하고 report/PDF/page hash 결속 자동검사·자동출고 관리 | 정본 보고서 → 자동출고 PDF 또는 `GATE_STOPPED` | 사실 추가·수동 승인 우회 |

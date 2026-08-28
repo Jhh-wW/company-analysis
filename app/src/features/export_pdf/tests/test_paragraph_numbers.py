@@ -36,7 +36,7 @@ _register_fonts()
 _WIDTH = A4[0] - 124
 
 
-def _render_sections(sections: list[ReportSection]) -> str:
+def _render_sections_pdf(sections: list[ReportSection]) -> bytes:
     report = Report(
         company="테스트",
         job="",
@@ -58,7 +58,12 @@ def _render_sections(sections: list[ReportSection]) -> str:
         buffer, pagesize=A4, leftMargin=62, rightMargin=62, topMargin=62, bottomMargin=62
     )
     document.build(story)
-    with pdfplumber.open(io.BytesIO(buffer.getvalue())) as pdf:
+    return buffer.getvalue()
+
+
+def _render_sections(sections: list[ReportSection]) -> str:
+    pdf_bytes = _render_sections_pdf(sections)
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         return "\n".join(page.extract_text() or "" for page in pdf.pages)
 
 
@@ -154,3 +159,42 @@ def test_prose_lines_only_sections_stay_unnumbered_like_the_web() -> None:
     # ★ 장 제목 줄도 「1. 기업 정체성」이라 번호로 시작한다. 문단이 있는
     #   «그 줄»만 봐야 문단 번호가 «안» 붙었다는 것을 정확히 잰다.
     assert not _line_with(text, "문장 한 줄.").startswith("1.")
+
+
+def test_PDF_번호는_본문_왼쪽_열이고_둘째줄도_본문_시작선에_맞는다() -> None:
+    """접두어를 본문 글자에 붙이면 둘째 줄이 번호 아래로 되돌아가는 결함을 잡는다."""
+
+    section = ReportSection(
+        cell="business_model",
+        title="사업 구조와 수익 모델",
+        lines=[("근거", "[1]")],
+        prose_paragraphs=["본문단어 " * 70],
+        display_number="2",
+    )
+
+    with pdfplumber.open(io.BytesIO(_render_sections_pdf([section]))) as pdf:
+        page = pdf.pages[0]
+        words = page.extract_words()
+        body_chars = [
+            char
+            for char in page.chars
+            if "Regular" in str(char.get("fontname", ""))
+            and abs(float(char.get("size", 0)) - 9.4) <= 0.1
+            and str(char.get("text", "")).strip()
+        ]
+
+    line_starts: list[float] = []
+    for top in sorted({round(float(char["top"]), 1) for char in body_chars}):
+        on_line = [
+            float(char["x0"])
+            for char in body_chars
+            if round(float(char["top"]), 1) == top
+        ]
+        line_starts.append(min(on_line))
+    number = next(word for word in words if word["text"] == "1.")
+
+    assert len(line_starts) >= 2
+    # ReportLab의 CJK 줄바꿈이 행 머리 공백 폭(약 1.7pt)을 남길 수 있어 2pt만
+    # 허용한다. 예전 접두어 방식의 번호 열 폭 차이(약 10pt)는 통과하지 못한다.
+    assert max(line_starts) - min(line_starts) <= 2.0
+    assert float(number["x0"]) < min(line_starts) - 3.0

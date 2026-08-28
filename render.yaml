@@ -10,6 +10,10 @@ services:
     dockerfilePath: ./app/Dockerfile
     dockerContext: .
     healthCheckPath: /readyz
+    # Uvicorn은 HTTP task를 먼저 기다린 «뒤» lifespan 종료를 호출한다. 따라서
+    # 두 시간은 겹치지 않고 더해진다. HTTP 20초 + 앱 조사 정리 240초 + 취소 1초
+    # + 종료 여유 30초가 Render 최대 300초 안에 끝나도록 고정한다.
+    maxShutdownDelaySeconds: 300
     # 첫 관리자 베타는 비용과 외부 변경을 통제하도록 수동 배포만 허용한다.
     autoDeployTrigger: off
 
@@ -29,7 +33,8 @@ services:
       # 보고서 본문을 composer(엔진 v2)가 쓴다. 코드는 이 값이 정확히 "1"일
       # 때만 갈리므로(app/src/features/pipeline/real.py) 따옴표를 지운 1이나
       # true로 바꾸면 오류 없이 조용히 v1로 되돌아간다.
-      # v2는 1층 캐시를 쓰지 않아 같은 회사를 두 번 조사하면 두 번 다 비용이 든다.
+      # v2는 전용 1층 캐시를 쓴다. 배포·생성기·사업연도·실제 DART 공시/재무
+      # 지문 중 하나라도 달라지면 옛 결과를 쓰지 않고, 모두 같을 때만 재사용한다.
       - key: ENGINE_V2
         value: "1"
 
@@ -48,10 +53,16 @@ services:
           envVarKey: RENDER_EXTERNAL_URL
       - key: FORWARDED_ALLOW_IPS
         value: ""
+      - key: GRACEFUL_SHUTDOWN_SECONDS
+        value: "20"
 
       # 위 영속 디스크 안에 운영 데이터와 캐시를 모은다.
       - key: APP_DATA_ROOT
         value: /var/data
+      # 1GB 디스크의 절반만 최초 승인 PDF 원본에 배정한다. 나머지는 SQLite·
+      # 감사 기록·캐시의 여유다. 한도를 넘으면 과거 원본을 지우지 않고 새 출고를 막는다.
+      - key: REPORT_ARTIFACT_CAPACITY_BYTES
+        value: "536870912"
       - key: STORAGE_DB_PATH
         value: /var/data/storage.db
       - key: OBSERVABILITY_RECORDS_PATH
@@ -82,3 +93,7 @@ services:
       # 실행 기록을 재시작 뒤에도 검증할 수 있도록 Render가 고정 비밀을 만든다.
       - key: PROVENANCE_SEAL_SECRET
         generateValue: true
+
+# 외부 백업 cron과 BACKUP_* 값은 의도적으로 선언하지 않는다. 현재 운영 adapter는
+# DB+불변 PDF 복구 세대 전체를 독립 서명 manifest에 결속하지 못하므로, 값을 미리
+# 넣거나 배포 버튼만 누르는 것으로 재해 복구가 완료되지 않는다.

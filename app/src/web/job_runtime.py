@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field, replace
-from typing import Callable, Optional, TypeVar
+from typing import Any, Callable, Optional, TypeVar
 
 from fastapi import File, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -16,10 +16,13 @@ from src.core.constants import PIPELINE_FAILED_MESSAGE, PROGRESS_STEPS
 from src.features.budget import expiry as link_expiry
 from src.features.budget import spend_store
 from src.features.admin_dashboard import store as dashboard_store
+from src.features.auth import constants as auth_constants
+from src.features.auth import logic as auth_logic
 from src.features.budget.constants import (
     BUSY_MESSAGE,
     JOB_KEEP_SEC,
     JOB_MAX_KEPT,
+    PAID_PHASE_LEASE_SEC,
     SPEND_PHASE_OCR,
     SPEND_PHASE_PIPELINE,
 )
@@ -61,7 +64,14 @@ from src.features.sharelink.constants import PUBLIC_BUCKET
 from src.features.storage import db as storage_db
 from src.features.storage import job_interruptions
 from src.features.storage import reports as report_store
-from src.web import public_ids, request_helpers, runtime
+from src.shared import generation_coordination
+from src.web import (
+    evaluation_mode,
+    generation_singleflight,
+    public_ids,
+    request_helpers,
+    runtime,
+)
 from src.web.paid_runtime import (
     PaidPhase,
     _begin_paid_phase,
@@ -88,10 +98,20 @@ _IMAGE_CONSENT_ERROR = (
     "사진 원본을 Anthropic에 보내 글자를 추출하는 데 동의해야 사진을 사용할 수 있습니다. "
     "동의하지 않으시면 사진을 지우고 공고 글자를 붙여넣어 주세요."
 )
+from src.features.report_access import constants as report_access_constants
+from src.features.report_access import store as report_access_store
+_IMAGE_PIPELINE_UNSUPPORTED_ERROR = (
+    "현재 기업분석 엔진은 공고 사진을 보고서에 사용하지 않습니다. "
+    "사진을 지우고 회사명으로 조사해 주세요."
+)
 _UPLOAD_READ_CHUNK_BYTES = 64 * 1024
 _UPLOAD_CLOSE_TIMEOUT_SEC = 1.0
 _JOB_DRAIN_TIMEOUT_SEC = 240.0
 _JOB_CANCEL_GRACE_SEC = 1.0
+# 5분은 진행 화면 문구가 바뀌는 UX 기준일 뿐 강제 종료 계약이 아니다.
+# 실제 provider 경계는 15회×180초를 포함하도록 기존 유료 phase lease 1시간을
+# 쓰며, generation_singleflight도 같은 정본으로 새 호출 마감·heartbeat를 닫는다.
+_JOB_EXECUTION_MAX_SEC = float(PAID_PHASE_LEASE_SEC)
 _RETRY_AFTER_SEC = "3"
 _PERSISTENCE_WARNING = (
     "이 보고서는 아직 저장되지 않았습니다. 현재 화면과 다운로드는 사용할 수 있지만 "
@@ -106,6 +126,10 @@ class JobAdmissionClosed(RuntimeError):
 
 class ReportStoreUnavailable(RuntimeError):
     """보고서 저장소를 읽을 수 없어 없음 여부를 판단할 수 없음."""
+
+
+class JobExecutionDeadlineExceeded(RuntimeError):
+    """한 작업이 전체 실행 절대 마감을 넘겨 더는 슬롯을 소유할 수 없음."""
 
 
 @dataclass
@@ -138,12 +162,35 @@ class Job:
     upfront_cost_events: tuple[cost_store.AiCostEvent, ...] = ()
     #: 진짜 본조사라면 provider 호출 전 만든 표식. 데모는 None이다.
     paid_phase: Optional[PaidPhase] = None
+    #: 유료 조사 자격. phase는 single-flight owner 확정 뒤에만 지연 생성되므로
+    #: ``paid_phase is not None``으로 자격을 추측하면 waiter/cache hit이 누락된다.
+    is_paid: bool = False
+    paid_cap_krw: float | None = None
+    #: 웹 adapter가 소유하는 lease·waiter·지연 phase 상태. 영속 정보는 DB에 있다.
+    generation_session: Any = None
+    generation_abandoned: bool = False
+    #: scheduler가 자리를 넘긴 단조 시각. worker 시작이 밀려도 전체 한 시간이
+    #: 새로 시작되지 않게 single-flight와 실행 supervisor가 함께 쓴다.
+    execution_started_monotonic: float = 0.0
+    #: 종료 drain이 provider task 취소 전에 중단 원장을 이미 커밋했는지.
+    #: stubborn 강제 정리가 같은 행을 위해 무거운 schema 연결을 다시 열지 않는다.
+    shutdown_interruption_persisted: bool = False
+    #: drain의 stubborn 정리와 task 자체 finally가 경합해도 종료 이력·비용·슬롯
+    #: 묶음을 두 번 실행하지 않게 하는 마지막 표식.
+    shutdown_cleanup_completed: bool = False
     #: 예약한 동시 실행 자리. 작업과 종료 정리가 같은 자리를 두 번 풀지 않게 쓴다.
     slot_bucket_id: str = ""
     slot_released: bool = False
     paid_phase_settled: bool = False
     #: 보고서가 DB에 남았는지. None은 보고서가 없거나 아직 시도 전이다.
     report_persisted: Optional[bool] = None
+    #: 불변 Content·Delivery·PDF artifact가 함께 확정됐는지.
+    delivery_persisted: Optional[bool] = None
+    delivery_content_id: str = ""
+    delivery_artifact_id: str = ""
+    #: single-flight waiter가 owner의 원본을 새로 만들지 않고 발급받는 결속.
+    delivery_origin_content_id: str = ""
+    delivery_origin_artifact_id: str = ""
     persistence_warning: str = ""
 
 
@@ -272,6 +319,25 @@ def _job_work_admitted(job: Job) -> bool:
     return _ACCEPTING_JOBS and not job.slot_released and bool(stored_bucket)
 
 
+def _requires_public_report_grant(
+    resolved_track: tuple[share_tracks.Track, str, float | None],
+) -> bool:
+    """로그인 소유자가 없는 실행은 브라우저별 열람 난수를 요구한다.
+
+    로컬 실시간 평가는 비용 한도를 재사용하려고 ``Track.ADMIN``을 쓰지만 로그인한
+    관리자는 아니다. 비용 갈래를 곧 열람 신원으로 해석하면 조사는 완료·과금되고도
+    progress와 결과는 404가 된다. 엄격한 loopback 판정이 만든 전용 bucket에만
+    PUBLIC과 같은 브라우저 결속을 발급해 두 책임을 분리한다.
+    """
+
+    track, bucket, _cap = resolved_track
+    return track is share_tracks.Track.PUBLIC or bool(
+        track is share_tracks.Track.ADMIN
+        and bucket == evaluation_mode.LOCAL_BUCKET
+        and evaluation_mode.enabled()
+    )
+
+
 #: 재시도가 의미 없을 때 안내 화면 버튼이 향할 기본 출구.
 DEFAULT_EXIT_URL = "/"
 DEFAULT_EXIT_LABEL = "처음 화면으로"
@@ -363,18 +429,95 @@ def _storage_unavailable_response(request: Request) -> HTMLResponse:
 
 async def _await_worker_after_cancel(
     worker: asyncio.Task[_WorkerResult],
+    *,
+    execution_deadline_monotonic: float | None = None,
 ) -> _WorkerResult:
-    """바깥 요청이 여러 번 취소돼도 실제 스레드가 끝날 때까지 기다린다.
+    """반복 취소는 worker에 전파하지 않되 명시된 전체 마감은 지킨다.
 
     ``asyncio.to_thread``의 Task를 취소해도 이미 시작한 provider 스레드는 멈추지
     않는다. 정리가 기다리는 동안 두 번째 취소가 와도 계속 shield해야 실제 호출 수와
-    비용 표식이 먼저 풀리지 않는다.
+    비용 표식이 먼저 풀리지 않는다. 다만 Job 전체 절대 마감까지 무시하면 바깥 취소
+    한 번으로 1시간 supervisor를 우회할 수 있으므로 Job 호출자는 같은 마감을 넘긴다.
     """
     while not worker.done():
+        timeout: float | None = None
+        if execution_deadline_monotonic is not None:
+            timeout = max(
+                0.0,
+                execution_deadline_monotonic - time.monotonic(),
+            )
+            if timeout <= 0:
+                raise JobExecutionDeadlineExceeded(
+                    "조사 전체 실행 제한시간을 넘었습니다"
+                )
         try:
-            await asyncio.shield(worker)
+            done, _pending = await asyncio.wait((worker,), timeout=timeout)
         except asyncio.CancelledError:
             continue
+        if worker not in done:
+            raise JobExecutionDeadlineExceeded(
+                "조사 전체 실행 제한시간을 넘었습니다"
+            )
+    return worker.result()
+
+
+def _mark_job_execution_deadline(
+    job: Job,
+    worker: asyncio.Task[_WorkerResult] | None,
+) -> None:
+    """어느 await 경로에서 마감됐든 같은 취소·원장 표식을 남긴다."""
+
+    logger.error("파이프라인 전체 실행 마감 초과 job_id=%s", job.job_id)
+    if job.generation_session is not None:
+        job.generation_session.cancel_waiter()
+        job.generation_session.abandon()
+        job.generation_abandoned = True
+    if worker is not None and not worker.done():
+        worker.cancel()
+    job.result = RunResult(
+        outcome=Outcome.FAILED,
+        message=PIPELINE_FAILED_MESSAGE,
+        billing_uncertain=job.paid_phase is not None,
+    )
+    try:
+        job_interruptions.persist(
+            job_id=job.job_id,
+            interrupted_at=clock.iso_now_kst(),
+            reason="execution_deadline",
+        )
+    except BaseException:  # noqa: BLE001 — 비용·슬롯 마감은 계속한다
+        logger.exception(
+            "실행 마감 초과 상태를 저장하지 못했습니다 job_id=%s",
+            job.job_id,
+        )
+
+
+async def _await_worker_before_execution_deadline(
+    job: Job,
+    worker: asyncio.Task[_WorkerResult],
+) -> _WorkerResult:
+    """worker를 전체 작업 절대 마감까지만 기다리고 wrapper는 임의 취소하지 않는다.
+
+    ``asyncio.wait_for(to_thread(...))``는 timeout과 worker가 직접 던진
+    ``TimeoutError``를 구분하기 어렵고 wrapper를 먼저 취소한다. 완료 집합을 직접
+    확인하면 provider 예외는 그대로 보존하면서 supervisor 마감만 별도 분류할 수
+    있다. 실제 thread는 Python에서 강제 종료할 수 없으므로 호출자는 세션을 먼저
+    abandon해 이후 provider를 닫고 wrapper를 정리한다.
+    """
+
+    started = job.execution_started_monotonic
+    if started <= 0:
+        started = time.monotonic()
+        job.execution_started_monotonic = started
+    remaining = max(
+        0.0,
+        started + _JOB_EXECUTION_MAX_SEC - time.monotonic(),
+    )
+    done, _pending = await asyncio.wait((worker,), timeout=remaining)
+    if worker not in done:
+        raise JobExecutionDeadlineExceeded(
+            "조사 전체 실행 제한시간을 넘었습니다"
+        )
     return worker.result()
 
 def _sweep_jobs(now: float) -> None:
@@ -432,19 +575,131 @@ def _mark_step(job: Job) -> Callable[[str], None]:
 
     return report
 
+
+def _job_is_paid(job: Job) -> bool:
+    """지연 phase 생성 전의 owner·waiter도 유료 Job으로 판정한다."""
+
+    return bool(job.is_paid or job.paid_phase is not None)
+
+
+def _install_job_paid_phase(job: Job, ticket: PaidPhase) -> None:
+    """single-flight owner가 얻은 phase를 마감 주체인 Job에 즉시 인계한다."""
+
+    if job.paid_phase is not None and job.paid_phase != ticket:
+        raise RuntimeError("한 조사에 본조사 비용 phase를 두 번 설치할 수 없습니다")
+    job.paid_phase = ticket
+
+
+def _prepare_generation_session(job: Job) -> None:
+    """배경 task 시작 전에 취소 신호를 받을 요청 로컬 세션을 만든다."""
+
+    if (
+        not job.is_paid
+        or job.paid_phase is not None
+        or job.generation_session is not None
+        or not bool(
+            getattr(runtime._PIPELINE, "supports_deferred_paid_phase", False)
+        )
+    ):
+        return
+    job.generation_session = generation_singleflight.GenerationSession(
+        run_id=job.job_id,
+        share_key=job.share_key,
+        billing_bucket_id=(
+            job.slot_bucket_id or spend_store.bucket_id(job.share_key)
+        ),
+        cap_krw=job.paid_cap_krw,
+        on_paid_phase=lambda ticket: _install_job_paid_phase(job, ticket),
+    )
+
+
+def _run_pipeline_worker(job: Job) -> RunResult:
+    """무료 preflight→owner 확정→지연 비용 phase 순서로 pipeline을 돌린다."""
+
+    # 기존 단위시험·즉시 예약 호출자는 엣 경계를 그대로 통과한다.
+    if job.paid_phase is not None:
+        return _call_paid_provider(
+            job.paid_phase,
+            runtime._PIPELINE.run,
+            job.user_input,
+            job.card,
+            _mark_step(job),
+        )
+    if not job.is_paid:
+        return runtime._PIPELINE.run(job.user_input, job.card, _mark_step(job))
+
+    # 새 계약을 모르는 교체 pipeline은 provider를 무표식으로 보내게 두지
+    # 않고 기존처럼 전체 phase를 먼저 연다. 운영 RealPipeline만 아래의
+    # DART snapshot→owner→지연 phase capability를 명시한다.
+    if not bool(
+        getattr(runtime._PIPELINE, "supports_deferred_paid_phase", False)
+    ):
+        ticket = _begin_paid_phase(
+            run_id=job.job_id,
+            phase=SPEND_PHASE_PIPELINE,
+            share_key=job.share_key,
+            cap_krw=job.paid_cap_krw,
+        )
+        if ticket is None:
+            raise generation_singleflight.PaidGenerationAdmissionUnavailable(
+                "본조사 비용 phase를 예약하지 못했습니다"
+            )
+        _install_job_paid_phase(job, ticket)
+        return _call_paid_provider(
+            ticket,
+            runtime._PIPELINE.run,
+            job.user_input,
+            job.card,
+            _mark_step(job),
+        )
+
+    _prepare_generation_session(job)
+    session = job.generation_session
+    if session is None:  # pragma: no cover - capability 방어선
+        raise RuntimeError("지연 본조사 조정 세션이 없습니다")
+    try:
+        with generation_coordination.activate(session.callbacks):
+            return runtime._PIPELINE.run(
+                job.user_input,
+                job.card,
+                _mark_step(job),
+            )
+    finally:
+        # ContextVar token은 설치한 같은 worker thread에서 닫아야 한다.
+        session.close_provider_context()
+
+
+def _apply_reused_delivery_origin(job: Job, result: RunResult) -> None:
+    """모든 worker 완료 경로에서 content·artifact 원본을 함께 인계한다."""
+
+    origin_ids = (
+        result.reused_content_snapshot_id,
+        result.reused_artifact_id,
+    )
+    if bool(origin_ids[0]) != bool(origin_ids[1]):
+        raise TypeError("재사용 보고서의 content와 artifact 결속이 불완전합니다")
+    job.delivery_origin_content_id = origin_ids[0]
+    job.delivery_origin_artifact_id = origin_ids[1]
+
+
 async def _run_job(job: Job) -> None:
     """뒤에서 파이프라인을 돌리며 진행 상황을 갱신한다.
 
-    ★ 파이프라인은 오래 걸리고 중간에 막힌다 (최대 5분). 그대로 부르면
-      그동안 **다른 사용자의 화면까지 멈춘다.** 그래서 별도 실행 흐름에서 돌린다.
+    ★ 파이프라인은 오래 걸리고 중간에 막힐 수 있다. 그대로 부르면 그동안
+      **다른 사용자의 화면까지 멈춘다.** 그래서 별도 실행 흐름에서 돌린다.
+    ★ 5분은 진행 화면 안내가 바뀌는 시점이다. 강제 종료는 기존 15회×180초
+      provider 계약과 유료 phase lease를 함께 만족하는 전체 1시간에서 한다.
     """
     started = time.perf_counter()
+    if job.execution_started_monotonic <= 0:
+        job.execution_started_monotonic = time.monotonic()
     worker: Optional[asyncio.Task[RunResult]] = None
+    shutdown_cleanup_only = False
     try:
         # schedule 검사 뒤 task가 실제로 실행되기 전 shutdown이 시작될 수 있다.
         # provider를 한 번도 부르지 않은 phase는 취소하고 비용 불확실성을 만들지 않는다.
         if not _ACCEPTING_JOBS or (
-            job.paid_phase is not None and not _job_work_admitted(job)
+            _job_is_paid(job) and not _job_work_admitted(job)
         ):
             if job.paid_phase is not None and not job.paid_phase_settled:
                 job.paid_phase_settled = True
@@ -454,44 +709,54 @@ async def _run_job(job: Job) -> None:
                 message=PIPELINE_FAILED_MESSAGE,
             )
             return
-        worker = asyncio.create_task(
-            asyncio.to_thread(
-                _call_paid_provider,
-                job.paid_phase,
-                runtime._PIPELINE.run,
-                job.user_input,
-                job.card,
-                _mark_step(job),
-            )
-            if job.paid_phase is not None
-            else asyncio.to_thread(
-                runtime._PIPELINE.run, job.user_input, job.card, _mark_step(job)
-            )
-        )
-        job.result = await asyncio.shield(worker)
+        worker = asyncio.create_task(asyncio.to_thread(_run_pipeline_worker, job))
+        job.result = await _await_worker_before_execution_deadline(job, worker)
         if not isinstance(job.result, RunResult):
             raise TypeError("파이프라인 결과 계약이 올바르지 않습니다")
+        _apply_reused_delivery_origin(job, job.result)
+    except JobExecutionDeadlineExceeded:
+        # configured provider는 마감 4분 전부터 새로 시작할 수 없고 단일 호출
+        # timeout은 180초다. 여기까지 살아 있다면 정상 지연이 아니라 계약 위반·
+        # 멈춘 로컬 처리다. 세션을 먼저 닫아 background thread가 뒤늦게 다음
+        # provider를 보내지 못하게 한 뒤 슬롯과 비용을 보수적으로 마감한다.
+        _mark_job_execution_deadline(job, worker)
     except asyncio.CancelledError:
         if _SHUTTING_DOWN:
             # 종료 제한시간이 지난 뒤에는 죽일 수 없는 provider 스레드를 더 기다리지
             # 않는다. 실제 비용은 알 수 없으므로 아래 마감에서 미확정으로 fail-closed한다.
             if worker is not None and not worker.done():
+                if job.generation_session is not None:
+                    job.generation_session.cancel_waiter()
+                    job.generation_session.abandon()
+                    job.generation_abandoned = True
                 worker.cancel()
             job.result = RunResult(
                 outcome=Outcome.FAILED,
                 message=PIPELINE_FAILED_MESSAGE,
                 billing_uncertain=job.paid_phase is not None,
             )
+            shutdown_cleanup_only = True
             raise
         # 사용자가 창을 닫아도 provider 스레드는 멈추지 않는다. 끝날 때까지 슬롯을
         # 유지한다. 정리 중 다시 취소돼도 shield를 반복해 실제 worker를 기다린다.
         try:
             if worker is None:
                 raise RuntimeError("파이프라인 worker가 만들어지지 않았습니다")
-            job.result = await _await_worker_after_cancel(worker)
+            job.result = await _await_worker_after_cancel(
+                worker,
+                execution_deadline_monotonic=(
+                    job.execution_started_monotonic + _JOB_EXECUTION_MAX_SEC
+                ),
+            )
             if not isinstance(job.result, RunResult):
                 raise TypeError("파이프라인 결과 계약이 올바르지 않습니다")
+            _apply_reused_delivery_origin(job, job.result)
+        except JobExecutionDeadlineExceeded:
+            _mark_job_execution_deadline(job, worker)
         except BaseException:  # noqa: BLE001 — 끝내 결과를 모르면 fail-closed
+            if job.generation_session is not None:
+                job.generation_session.abandon()
+                job.generation_abandoned = True
             job.result = RunResult(
                 outcome=Outcome.FAILED,
                 message=PIPELINE_FAILED_MESSAGE,
@@ -509,6 +774,12 @@ async def _run_job(job: Job) -> None:
         )
         del exc
     finally:
+        if shutdown_cleanup_only:
+            # process 종료 취소에는 전체 78표 bootstrap·보고서 출고를 새로
+            # 시작하지 않는다. 앞서 커밋한 중단 표식과 최소 비용/슬롯 정리만
+            # 끝내고 취소를 그대로 전파한다.
+            _force_shutdown_cleanup(job)
+            raise asyncio.CancelledError
         try:
             # 최외곽에서도 계약을 한 번 더 닫는다. provider 호출 뒤 잘못된 객체가
             # 돌아와도 비용 표식을 active로 남기거나 0원 확정하면 안 된다.
@@ -524,8 +795,6 @@ async def _run_job(job: Job) -> None:
                 if key not in job.done_steps:
                     job.done_steps.append(key)
             job.current_step = ""
-            job.finished = True
-            job.finished_at = time.monotonic()
             # 14. 이력 1행 — 성공·실패 무관하게 남긴다 (기획서 08 관측).
             if (
                 job.result.billing_uncertain
@@ -591,18 +860,99 @@ async def _run_job(job: Job) -> None:
                 job.upfront_elapsed_sec + time.perf_counter() - started,
                 run_id=job.job_id,
                 expected_state=(
-                    lifecycle.STATE_RUNNING if job.paid_phase is not None else None
+                    lifecycle.STATE_RUNNING if _job_is_paid(job) else None
                 ),
             )
-            report_saved = _save_report(job)
+            delivery_required = False
+            if job.result.outcome is Outcome.REPORT and job.result.report is not None:
+                try:
+                    delivery_required = await asyncio.to_thread(
+                        _require_report_delivery,
+                        job,
+                    )
+                except Exception:  # noqa: BLE001 - 새 보고서를 legacy로 저장하지 않는다
+                    job.delivery_persisted = False
+                    logger.exception(
+                        "불변 보고서 delivery 의무 표식 실패 job_id=%s",
+                        job.job_id,
+                    )
+            report_saved = (
+                _save_report(job)
+                if job.result.outcome is not Outcome.REPORT or delivery_required
+                else False
+            )
+            delivery_content_id = ""
+            if job.result.outcome is Outcome.REPORT and report_saved:
+                try:
+                    job.delivery_persisted = await asyncio.to_thread(
+                        _finalize_report_delivery,
+                        job,
+                    )
+                    delivery_content_id = (
+                        job.delivery_content_id
+                        if job.delivery_persisted is True
+                        else ""
+                    )
+                except Exception:  # noqa: BLE001 - 구형 보고서 저장과 다른 경계
+                    job.delivery_persisted = False
+                    logger.exception(
+                        "불변 보고서 delivery 확정 실패 job_id=%s",
+                        job.job_id,
+                    )
+                    try:
+                        await asyncio.to_thread(_fail_report_delivery, job)
+                    except Exception:  # noqa: BLE001 - required 표식만으로도 fail-closed
+                        logger.exception(
+                            "불변 보고서 delivery 실패 표식 실패 job_id=%s",
+                            job.job_id,
+                        )
+            elif job.result.outcome is Outcome.REPORT and delivery_required:
+                job.delivery_persisted = False
+                try:
+                    await asyncio.to_thread(_fail_report_delivery, job)
+                except Exception:  # noqa: BLE001 - required 표식만으로도 fail-closed
+                    logger.exception(
+                        "보고서 저장 실패의 delivery 표식 마감 실패 job_id=%s",
+                        job.job_id,
+                    )
+            if (
+                job.generation_session is not None
+                and not job.generation_abandoned
+            ):
+                try:
+                    if delivery_content_id:
+                        await asyncio.to_thread(
+                            job.generation_session.complete,
+                            delivery_content_id,
+                            job.delivery_artifact_id,
+                            cache_eligible=(
+                                job.result.generation_cache_eligible
+                            ),
+                        )
+                    elif job.generation_session.owns_generation:
+                        await asyncio.to_thread(
+                            job.generation_session.fail,
+                            "generation_failed",
+                        )
+                except Exception:  # noqa: BLE001 - 새 delivery는 유지하고 lease는 만료로 회수
+                    logger.exception(
+                        "보고서 single-flight 마감 실패 job_id=%s",
+                        job.job_id,
+                    )
+                    job.generation_session.abandon()
+            report_available = (
+                job.result.outcome is Outcome.REPORT
+                and report_saved
+                and job.delivery_persisted is True
+            )
             if job.member_email:
                 try:
                     with storage_db.connect() as conn:
                         dashboard_store.settle_member_run(
                             conn,
                             run_id=job.job_id,
-                            succeeded=(job.result.outcome is Outcome.REPORT and report_saved),
-                            report_id=(job.job_id if job.result.outcome is Outcome.REPORT and report_saved else ""),
+                            succeeded=report_available,
+                            report_id=(job.job_id if report_available else ""),
                             now_iso=clock.iso_now_kst(),
                             outcome=job.result.outcome.value,
                             company_type=(
@@ -615,7 +965,7 @@ async def _run_job(job: Job) -> None:
                         )
                 except Exception:  # noqa: BLE001 — unconfirmed reservation must not reopen itself
                     logger.exception("MEMBER 성공 보고서 사용량을 마감하지 못했습니다")
-            if job.share_link_hash and not report_saved:
+            if job.share_link_hash and not report_available:
                 _finish_link_job(
                     job,
                     status=share_store.RUN_STATUS_STOPPED,
@@ -625,6 +975,10 @@ async def _run_job(job: Job) -> None:
         finally:
             # 비용 마감과 이력 정리를 시도한 뒤에만 자리를 돌려준다. 중간에 어떤
             # 예외가 나도 이 최외곽 finally는 실행되어 자리가 영구히 새지 않는다.
+            # 화면의 ``finished``는 본문·PDF artifact 확정 시도보다 먼저
+            # 열리지 않아야 최초 GET이 구형 재렌더 경로로 빠지지 않는다.
+            job.finished = True
+            job.finished_at = time.monotonic()
             _ensure_link_job_closed(job)
             _release_job_slot(job)
 
@@ -729,6 +1083,84 @@ def _ensure_link_job_closed(job: Job) -> None:
         logger.exception("LINK 생성 이력을 확인하지 못했습니다 job_id=%s", job.job_id)
 
 
+def _finalize_report_delivery(job: Job) -> bool:
+    """보고서 생성 worker 안에서만 최초 승인 PDF와 delivery를 확정한다."""
+
+    if (
+        not isinstance(job.result, RunResult)
+        or job.result.outcome is not Outcome.REPORT
+        or job.result.report is None
+    ):
+        return False
+    # reports는 job_runtime을 import하므로 module 로드 중 순환을 피해
+    # worker가 실제 완료될 때 adapter 함수만 늦게 읽는다.
+    from src.web.routers import reports as reports_router  # noqa: PLC0415
+
+    models = _model_tuple(
+        *(event.model_id for event in job.result.ai_cost_events),
+        job.result.model,
+    )
+    generation_session = job.generation_session
+    cache_namespace = (
+        generation_session.cache_namespace
+        if generation_session is not None
+        else None
+    )
+    preflight_identity_digest = (
+        generation_session.preflight_identity_digest
+        if generation_session is not None
+        else ""
+    )
+    public_delivery = reports_router.finalize_new_report_delivery(
+        report_id=job.job_id,
+        corp_id=job.card.ref or job.card.legal_name,
+        billing_bucket_id=(
+            job.slot_bucket_id or spend_store.bucket_id(job.share_key)
+        ),
+        report=job.result.report,
+        actual_models=models,
+        # 옛 layer1은 Report 값만 돌려주고 불변 content ID는 운반하지 않는다.
+        # 실제 원본 ID가 있을 때만 Delivery에 cache-origin을 기록한다.
+        reused_from_cache=bool(job.delivery_origin_content_id),
+        dart_receipt_numbers=job.result.dart_receipt_numbers,
+        financial_payload_digest=job.result.financial_payload_digest,
+        reuse_content_snapshot_id=job.delivery_origin_content_id,
+        reuse_artifact_id=job.delivery_origin_artifact_id,
+        cache_namespace=cache_namespace,
+        preflight_identity_digest=preflight_identity_digest,
+        cache_eligible=job.result.generation_cache_eligible,
+    )
+    job.delivery_content_id = public_delivery.content.content_id
+    if public_delivery.artifact is None:
+        raise RuntimeError("확정 delivery의 PDF artifact가 없습니다")
+    job.delivery_artifact_id = public_delivery.artifact.artifact_id
+    return True
+
+
+def _require_report_delivery(job: Job) -> bool:
+    """구형 보고서 저장 전에 새 delivery 의무를 별도 거래로 확정한다."""
+
+    from src.web import report_delivery_adapter  # noqa: PLC0415
+
+    report_delivery_adapter.require_public_delivery(
+        job.job_id,
+        required_at=clock.now_kst(),
+    )
+    return True
+
+
+def _fail_report_delivery(job: Job) -> None:
+    """완료 worker 바깥 예외도 새 보고서 표식을 required로 방치하지 않는다."""
+
+    from src.web import report_delivery_adapter  # noqa: PLC0415
+
+    report_delivery_adapter.fail_public_delivery(
+        job.job_id,
+        failure_code="artifact_finalization_failed",
+        failed_at=clock.now_kst(),
+    )
+
+
 def _save_report(job: Job) -> bool:
     """만든 보고서를 파일 저장소에 남긴다.
 
@@ -753,6 +1185,13 @@ def _save_report(job: Job) -> bool:
                 corp_type=job.result.report.corp_type,
                 now_iso=clock.iso_now_kst(),
                 payload_json=report_store.report_to_json(job.result.report),
+            )
+            # PUBLIC 데모 권한은 run 주소와 별개다. 같은 저장 transaction에서
+            # report 결속까지 붙여 재시작 직후에도 그 브라우저만 열 수 있게 한다.
+            report_access_store.bind_report(
+                conn,
+                run_id=job.job_id,
+                report_id=job.job_id,
             )
             job_interruptions.delete(conn, job.job_id)
             if job.share_link_hash and not share_store.finish_run(
@@ -984,9 +1423,16 @@ def _forget_finished_task(task: asyncio.Task[None]) -> None:
 def _schedule_job(job: Job) -> asyncio.Task[None]:
     """배경 작업을 강하게 참조해 실행 중 소실과 종료 시 누락을 막는다."""
     if not _ACCEPTING_JOBS or (
-        job.paid_phase is not None and not _job_work_admitted(job)
+        _job_is_paid(job) and not _job_work_admitted(job)
     ):
         raise JobAdmissionClosed("server shutdown has started")
+    if job.execution_started_monotonic <= 0:
+        # task가 event loop에서 실제로 실행될 때가 아니라 이미 예약한 슬롯을
+        # 넘기는 이 순간부터 전체 절대 마감이 흐른다.
+        job.execution_started_monotonic = time.monotonic()
+    # task/worker 스레드보다 먼저 세션을 Job에 달아야 이벤트루프
+    # 취소가 먼저 와도 늦은 provider 시작을 닫을 수 있다.
+    _prepare_generation_session(job)
     task = asyncio.create_task(
         _run_job(job), name=f"analysis-job:{job.job_id}"
     )
@@ -998,6 +1444,13 @@ def _schedule_job(job: Job) -> asyncio.Task[None]:
 
 def _force_shutdown_cleanup(job: Job) -> None:
     """취소 유예 안에도 끝나지 않은 Job의 비용과 슬롯을 fail-closed로 닫는다."""
+    if job.shutdown_cleanup_completed:
+        return
+    if job.generation_session is not None:
+        # 아직 살아 있을 수 있는 provider thread와 takeover가 겹치지 않게
+        # 성공·실패를 지어내지 않고 마지막 heartbeat+TTL에 회수를 맡긴다.
+        job.generation_session.abandon()
+        job.generation_abandoned = True
     if not isinstance(job.result, RunResult):
         job.result = RunResult(
             outcome=Outcome.FAILED,
@@ -1011,16 +1464,16 @@ def _force_shutdown_cleanup(job: Job) -> None:
     job.current_step = ""
     job.finished = True
     job.finished_at = job.finished_at or time.monotonic()
-    try:
-        with storage_db.connect() as conn:
-            job_interruptions.mark(
-                conn,
+    if not job.shutdown_interruption_persisted:
+        try:
+            job_interruptions.persist(
                 job_id=job.job_id,
                 interrupted_at=clock.iso_now_kst(),
                 reason="shutdown_timeout",
             )
-    except BaseException:  # noqa: BLE001 — 종료 정리는 계속하되 원인은 로그에 남긴다
-        logger.exception("중단된 조사 상태를 저장하지 못했습니다 job_id=%s", job.job_id)
+            job.shutdown_interruption_persisted = True
+        except BaseException:  # noqa: BLE001 — 종료 정리는 계속하되 원인은 로그에 남긴다
+            logger.exception("중단된 조사 상태를 저장하지 못했습니다 job_id=%s", job.job_id)
     if job.paid_phase is not None and not job.paid_phase_settled:
         job.paid_phase_settled = True
         try:
@@ -1030,15 +1483,18 @@ def _force_shutdown_cleanup(job: Job) -> None:
         except BaseException:  # noqa: BLE001 — 종료는 계속하고 통장은 보수적으로 닫는다
             logger.exception("종료 중 비용 표식을 미확정으로 마감하지 못했습니다")
     if job.paid_phase is not None:
-        record_end(
-            run_id=job.job_id,
-            job=job.user_input.job,
-            end_step=obs.END_STEP_GENERATE,
-            cost_krw=job.upfront_cost_krw,
-            elapsed_sec=job.upfront_elapsed_sec,
-            model=_model_label(job.upfront_models),
-            expected_state=lifecycle.STATE_RUNNING,
-        )
+        try:
+            record_end(
+                run_id=job.job_id,
+                job=job.user_input.job,
+                end_step=obs.END_STEP_GENERATE,
+                cost_krw=job.upfront_cost_krw,
+                elapsed_sec=job.upfront_elapsed_sec,
+                model=_model_label(job.upfront_models),
+                expected_state=lifecycle.STATE_RUNNING,
+            )
+        except BaseException:  # noqa: BLE001 — 관측 실패가 슬롯 반환을 막으면 안 된다
+            logger.exception("종료 중 실행 이력을 마감하지 못했습니다 job_id=%s", job.job_id)
     if job.share_link_hash:
         _finish_link_job(
             job,
@@ -1050,6 +1506,7 @@ def _force_shutdown_cleanup(job: Job) -> None:
         _release_job_slot(job)
     except BaseException:  # noqa: BLE001 — 한 작업 오류가 다른 작업 정리를 막지 않는다
         logger.exception("종료 중 조사 슬롯을 반환하지 못했습니다")
+    job.shutdown_cleanup_completed = True
 
 
 async def _drain_job_tasks(
@@ -1094,13 +1551,12 @@ async def _drain_job_tasks(
         if job is None:
             continue
         try:
-            with storage_db.connect() as conn:
-                job_interruptions.mark(
-                    conn,
-                    job_id=job.job_id,
-                    interrupted_at=clock.iso_now_kst(),
-                    reason="shutdown_timeout",
-                )
+            job_interruptions.persist(
+                job_id=job.job_id,
+                interrupted_at=clock.iso_now_kst(),
+                reason="shutdown_timeout",
+            )
+            job.shutdown_interruption_persisted = True
         except BaseException:  # noqa: BLE001
             logger.exception(
                 "종료 전 중단 상태를 저장하지 못했습니다 job_id=%s", job.job_id
@@ -1152,6 +1608,7 @@ async def _start_with_reserved_slot(
     link_history_hash = ""
     member_usage_reserved = False
     member_email = ""
+    public_grant: report_access_store.IssuedGrant | None = None
     early_stop_status = share_store.RUN_STATUS_STOPPED
     early_stop_step = obs.END_STEP_GENERATE
     early_stop_reason = "generation_not_started"
@@ -1218,7 +1675,24 @@ async def _start_with_reserved_slot(
         if posting_images:
             image_bytes: list[bytes] = []
             has_named_image = any(upload.filename for upload in posting_images)
-            if has_named_image and not posting_image_consent:
+            if (
+                is_paid
+                and has_named_image
+                and not bool(
+                    getattr(
+                        runtime._PIPELINE,
+                        "supports_posting_image_input",
+                        False,
+                    )
+                )
+            ):
+                # UI를 숨겼더라도 옛 화면·직접 요청은 올 수 있다. 현재 pipeline이
+                # 실제로 쓰지 않는 입력에 OCR 비용을 쓰기 전에 서버에서 닫는다.
+                image_error = _IMAGE_PIPELINE_UNSUPPORTED_ERROR
+                image_failure_kind = "input"
+                early_stop_step = obs.END_STEP_IMAGE_INPUT
+                early_stop_reason = "posting_image_pipeline_unsupported"
+            elif has_named_image and not posting_image_consent:
                 image_bytes = []
                 image_error = _IMAGE_CONSENT_ERROR
                 image_failure_kind = "input"
@@ -1404,6 +1878,20 @@ async def _start_with_reserved_slot(
                     )
                 if resolved_track[0] is share_tracks.Track.MEMBER:
                     member_email = share_key.removeprefix("user:")
+                    member_session = auth_logic.get_session(
+                        request.cookies.get(auth_constants.SESSION_COOKIE_NAME)
+                    )
+                    if (
+                        member_session is None
+                        or member_session.is_admin
+                        or member_session.email != member_email
+                        or not auth_logic.is_approval_identity_subject(
+                            member_session.subject
+                        )
+                    ):
+                        raise RuntimeError(
+                            "MEMBER 실행의 불변 계정 subject를 확인할 수 없습니다"
+                        )
                     member_usage_reserved = dashboard_store.reserve_member_run(
                         conn,
                         run_id=run_id,
@@ -1411,6 +1899,12 @@ async def _start_with_reserved_slot(
                         day=clock.today_kst().isoformat(),
                         now_iso=clock.iso_now_kst(),
                     )
+                    if member_usage_reserved and not report_access_store.bind_member_run(
+                        conn,
+                        run_id=run_id,
+                        identity_subject=member_session.subject,
+                    ):
+                        raise RuntimeError("MEMBER 실행 소유권을 결속하지 못했습니다")
         except Exception:  # noqa: BLE001 — 상태·사용량을 모르면 새 provider를 열지 않는다
             logger.exception("전역 상태 또는 MEMBER 성공 보고서 예약을 저장하지 못했습니다")
             return _storage_unavailable_response(request)
@@ -1422,10 +1916,14 @@ async def _start_with_reserved_slot(
                     "member-success-limit",
                 )
 
-        if is_paid:
-            # route가 죽어도 첫 provider 호출 전 표식은 이미 커밋돼 있어야 한다.
-            if not _reserved_work_admitted(slot_bucket_id):
-                return admission_rejection()
+        if is_paid and not _reserved_work_admitted(slot_bucket_id):
+            return admission_rejection()
+        if is_paid and not bool(
+            getattr(runtime._PIPELINE, "supports_deferred_paid_phase", False)
+        ):
+            # 새 capability를 모르는 교체 pipeline은 무표식 provider로
+            # 바뀌지 않게 예전처럼 route에서 예약한다. 운영 RealPipeline은
+            # 반드시 DART snapshot→owner→지연 phase 경로를 쓴다.
             pipeline_phase = _begin_paid_phase(
                 run_id=run_id,
                 phase=SPEND_PHASE_PIPELINE,
@@ -1446,10 +1944,36 @@ async def _start_with_reserved_slot(
                 return request_helpers._throttled(
                     request, BUSY_MESSAGE, "budget-store"
                 )
-            # phase DB 쓰기와 실제 pipeline task 등록 사이의 마지막 fail-closed fence.
-            if not _reserved_work_admitted(slot_bucket_id):
+
+        # 익명 데모는 주소 자체가 아니라 별도 브라우저 grant로만 이후 화면을
+        # 연다. 작업을 scheduler에 넘기기 전에 DB 결속을 확정해야 첫 progress
+        # redirect가 권한 없이 떠 버리는 틈이 없다.
+        if _requires_public_report_grant(resolved_track):
+            try:
+                with storage_db.connect() as conn:
+                    public_grant = report_access_store.issue_and_bind(
+                        conn,
+                        existing_token=request.cookies.get(
+                            report_access_constants.PUBLIC_GRANT_COOKIE_NAME
+                        ),
+                        run_id=run_id,
+                    )
+            except Exception:  # noqa: BLE001 — grant 없는 공개 작업은 시작하지 않는다
+                logger.exception("PUBLIC 보고서 열람 grant를 발급하지 못했습니다")
+                return _storage_unavailable_response(request)
+        # phase/grant DB 쓰기와 실제 pipeline task 등록 사이의 마지막 fence.
+        # PUBLIC에만 두면 MEMBER·LINK·ADMIN은 그 사이 비용 저장소가 닫혀도
+        # provider 작업을 등록할 수 있다.
+        if is_paid and not _reserved_work_admitted(slot_bucket_id):
+            # RealPipeline은 owner 확정 전이라 phase가 아직 없다. ``None``을
+            # 취소 함수에 넘기면 원래의 503 대신 AttributeError가 나고, route의
+            # 바깥 실패 처리까지 왜곡된다. 실제로 만든 legacy phase만 취소한다.
+            if pipeline_phase is not None:
                 _cancel_paid_phase(pipeline_phase)
-                return admission_rejection()
+            return admission_rejection()
+        # RealPipeline의 본조사 phase는 여기서 미리 예약하지 않는다. 무료
+        # DART preflight로 source snapshot을 고정하고 single-flight owner를
+        # 결정한 뒤, owner만 첫 Anthropic 호출 직전에 지연 예약한다.
 
         new_job = Job(
             job_id=run_id,
@@ -1463,6 +1987,8 @@ async def _start_with_reserved_slot(
             upfront_elapsed_sec=upfront_elapsed,
             upfront_cost_events=upfront_cost_events,
             paid_phase=pipeline_phase,
+            is_paid=is_paid,
+            paid_cap_krw=resolved_track[2],
             slot_bucket_id=slot_bucket_id,
         )
         if not public_ids.register(_JOBS, run_id, new_job):
@@ -1500,7 +2026,18 @@ async def _start_with_reserved_slot(
                 _cancel_paid_phase(pipeline_phase)
             raise
         handed_off = True
-        return RedirectResponse(f"/progress/{run_id}", status_code=303)
+        response = RedirectResponse(f"/progress/{run_id}", status_code=303)
+        if public_grant is not None:
+            response.set_cookie(
+                report_access_constants.PUBLIC_GRANT_COOKIE_NAME,
+                public_grant.token,
+                max_age=report_access_constants.PUBLIC_GRANT_MAX_AGE_SEC,
+                httponly=True,
+                secure=request_helpers._cookie_secure(request),
+                samesite="lax",
+                path="/",
+            )
+        return response
     except BaseException:
         early_stop_reason = "generation_start_failed"
         if is_paid:

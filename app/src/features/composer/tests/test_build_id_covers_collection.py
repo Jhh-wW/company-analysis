@@ -88,6 +88,13 @@ def test_수집_흐름_파일도_들어간다() -> None:
         assert f"app/src/features/filingclean/{조각모듈}" in build_id._CONTENT_MODULES
 
 
+def test_새_composer모듈과_공유품질정본은_손목록없이_지문에_들어간다() -> None:
+    assert "structured_claims.py" in build_id._SHAPING_MODULES
+    assert "app/src/features/company_performance/logic.py" in build_id._CONTENT_MODULES
+    assert "app/src/shared/report_quality/fact_binding.py" in build_id._CONTENT_MODULES
+    assert "app/src/shared/report_quality/numeric.py" in build_id._CONTENT_MODULES
+
+
 # ══════════════════════════════════════════════════════════
 # ② 목록이 «실제로 있는» 파일을 가리키는가
 # ══════════════════════════════════════════════════════════
@@ -122,3 +129,37 @@ def test_지문은_같은_코드에서_늘_같다() -> None:
 
     assert 첫번째 == 두번째
     assert len(첫번째) == build_id._DIGEST_CHARS
+
+
+def test_배포_커밋이_바뀌면_손목록밖_변경이어도_지문이_바뀐다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """배포 revision은 손으로 적은 파일 목록의 마지막 안전망이다.
+
+    새 품질·claim 모듈을 목록에 넣는 것을 사람이 잊어도, 다른 커밋으로 배포되면
+    이전 생성기의 캐시를 새 생성 결과처럼 꺼내면 안 된다.
+    """
+    monkeypatch.setenv(
+        "RENDER_GIT_COMMIT", "1111111111111111111111111111111111111111"
+    )
+    처음 = build_id.engine_build_id()
+
+    monkeypatch.setenv(
+        "RENDER_GIT_COMMIT", "2222222222222222222222222222222222222222"
+    )
+    build_id._cached_build_id = None
+    바뀐뒤 = build_id.engine_build_id()
+
+    assert 처음 != 바뀐뒤
+
+
+def test_오염된_배포_커밋은_지문_재료로_신뢰하지_않는다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "1234567-not-a-commit")
+
+    오염값 = build_id.engine_build_id()
+    build_id._cached_build_id = None
+    monkeypatch.delenv("RENDER_GIT_COMMIT")
+
+    assert build_id.engine_build_id() == 오염값

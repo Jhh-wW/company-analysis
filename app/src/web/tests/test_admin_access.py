@@ -1283,10 +1283,11 @@ def test_호출전_예상비용_차단기준을_실제청구_최댓값으로_과
 
     text = admin.get("/admin/access").text
 
-    # 링크 1개(3,000) + 관리자(5,000) = 8,000원. MEMBER는 비용이 아니라
-    # 성공 보고서 3건으로 별도 제한하므로 금액 합계에 넣지 않는다.
+    # 링크 1개(3,000) + MEMBER 1명(3,000) + 관리자(5,000) = 11,000원.
+    # MEMBER에는 이 금액 상한과 성공 3건 제한이 함께 적용된다.
     assert "호출 전 예상비용 차단 기준 합계" in text
-    assert "8,000원" in text
+    assert "11,000원" in text
+    assert "친구 1명 × 3,000원" in text
     assert "성공 보고서 3건" in text
     assert "기준에 닿으면 새 호출을 차단" in text
     assert "실제 청구의 최댓값이 아닙니다" in text
@@ -1359,7 +1360,7 @@ def test_관리자_첫화면은_승인된_운영대시보드로_연결된다(
     text = admin.get("/admin").text
 
     assert "운영 대시보드" in text
-    assert "하루 성공 3건" in text
+    assert "하루 3,000원 입장 기준 + 성공 3건" in text
     assert "최악의 하루 지출" not in text
 
 

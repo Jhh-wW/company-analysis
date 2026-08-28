@@ -32,7 +32,9 @@ from pathlib import Path
 from typing import Any, Final, Iterable, Optional
 
 from src.core import paths
-from src.core.clock import today_kst
+from src.core.clock import subtract_years, today_kst
+from src.core.provider_gateway import attempt_context, gateway
+from src.core.provider_gateway.anthropic_adapter import AnthropicAdapter
 from src.core.constants import (
     AUDIT_WINDOW_YEARS,
     CACHE_HIT_LAYER1,
@@ -51,6 +53,7 @@ from src.core.constants import (
     EMPTY_REASON_NEWS_NONE,
     EMPTY_REASON_NO_MATERIAL,
     HOMEPAGE_GATE_CELLS,
+    MAX_AI_CALLS_PER_REQUEST,
     REVENUE_CITE,
     SUBSTANCE_FAILED_REASON,
     TABLE_DUMP_REASON,
@@ -103,6 +106,9 @@ from src.features.spanselect.constants import (
     USAGE_MODEL_KEY,
 )
 from src.shared.official_ir import verified_official_ir_fragment_is_usable
+from src.shared import generation_coordination
+from src.shared.generation_cache_identity import GenerationCacheNamespace
+from src.shared.report_source_identity import ReportSourceIdentity
 from src.features.filingclean import extra as filing_extra
 from src.features.filingclean import logic as filing_clean
 from src.features.filingclean import relationships as filing_relationships
@@ -130,6 +136,7 @@ from src.features.pipeline.port import (
     outcome_for,
 )
 from src.features.report_standard.constants import (
+    CANONICAL_SCHEMA_VERSION,
     COMPARISON_SHORTFALL_REASON,
     CUSTOMER_MARKET_SHORTFALL_REASON,
     IDENTITY_SUMMARY_SHORTFALL_REASON,
@@ -209,6 +216,52 @@ def _engine_v2_enabled() -> bool:
       안 고쳐진 줄로 읽는다. 두 곳이 같은 답을 보게 묶어 둔다.
     """
     return os.environ.get(ENGINE_V2_ENV_NAME) == ENGINE_V2_ENV_ON
+
+
+def _generation_cache_namespace(engine: Any) -> GenerationCacheNamespace | None:
+    """캐시와 single-flight가 함께 쓰는 사전 생성기 신원을 만든다.
+
+    배포 revision·모델·출력 설정은 provider 호출 전에 모두 확정된다.
+    pipeline과 delivery가 서로 다른 문자열 해시를 만들지 않고 shared의
+    ``GenerationCacheNamespace`` 한 벌을 ContentSnapshot까지 운반한다.
+    """
+
+    model = str(getattr(engine, "MODEL", "") or GENERATION_MODEL).strip()
+    if not model:
+        return None
+    from src.core import deployment_identity  # noqa: PLC0415
+
+    revision = deployment_identity.deployed_commit()
+    image_digest = ""
+    if _engine_v2_enabled():
+        from src.features.composer.build_id import (  # noqa: PLC0415
+            build_id_is_usable,
+            engine_build_id,
+        )
+        from src.features.composer.render import (  # noqa: PLC0415
+            ENGINE_V2_SCHEMA_VERSION,
+        )
+
+        build_id = engine_build_id()
+        if not build_id_is_usable(build_id):
+            return None
+        schema_version = ENGINE_V2_SCHEMA_VERSION
+        if not revision:
+            # 로컬에는 배포 commit/image digest가 없으므로 결과 코드 지문임을
+            # 접두어로 명시한다. 운영은 실제 배포 commit을 우선한다.
+            image_digest = f"generator-build:{build_id}"
+    else:
+        if not revision:
+            return None
+        schema_version = CANONICAL_SCHEMA_VERSION
+    return GenerationCacheNamespace.create(
+        product="company-analysis",
+        schema_version=schema_version,
+        deployment_revision=revision,
+        image_digest=image_digest,
+        requested_models={"pipeline": model},
+        output_settings={"temperature": 0},
+    )
 
 #: v2 작가·검수 호출의 출력 token 상한. 작가는 장 하나(6~12문장 JSON)를 돌려준다.
 #: 검수는 보고서 전체 «확인» 문장(50개+)의 판정 목록을 «한 번에» 돌려주므로
@@ -401,6 +454,8 @@ class _MeteredEngine:
         object.__setattr__(self, "_billing_uncertain", False)
         object.__setattr__(self, "_stage", "unspecified")
         object.__setattr__(self, "_prompt_cache", False)
+        object.__setattr__(self, "_provider_call_count", 0)
+        object.__setattr__(self, "_provider_call_lock", threading.Lock())
 
     def __getattr__(self, name: str) -> Any:
         if name == "MODEL":
@@ -415,6 +470,8 @@ class _MeteredEngine:
             "_billing_uncertain",
             "_stage",
             "_prompt_cache",
+            "_provider_call_count",
+            "_provider_call_lock",
         }:
             object.__setattr__(self, name, value)
         elif name == "MODEL":
@@ -445,6 +502,26 @@ class _MeteredEngine:
     def set_stage(self, stage: str) -> None:
         clean = str(stage).strip()
         object.__setattr__(self, "_stage", clean or "unspecified")
+
+    def reserve_provider_call(self) -> int:
+        """요청 전체 AI 호출 상한을 실제 전송 경계에서 원자적으로 강제한다.
+
+        성공 usage 목록의 길이를 세면 예외·usage 누락 호출이 빠진다. 호출을 보내기
+        전에 별도 계수를 올려 실패도 포함하고, 16번째부터는 원장·네트워크 전에
+        멈춘다.
+        """
+
+        with self._provider_call_lock:
+            if self._provider_call_count >= MAX_AI_CALLS_PER_REQUEST:
+                raise provider_budget.ProviderBudgetExceeded(
+                    "한 요청의 AI 호출 횟수 상한을 넘었습니다"
+                )
+            object.__setattr__(
+                self,
+                "_provider_call_count",
+                self._provider_call_count + 1,
+            )
+            return int(self._provider_call_count)
 
     @contextmanager
     def stage_context(self, stage: str, *, prompt_cache: bool = False):
@@ -559,6 +636,51 @@ def _meter_stage(
         yield
 
 
+def _anthropic_usage_event(
+    value: object,
+    *,
+    fallback_model: str,
+    stage: str,
+    failed: bool,
+) -> dict[str, Any] | None:
+    """SDK 응답 또는 usage-bearing 예외를 같은 확정 비용 사건으로 바꾼다."""
+    usage = getattr(value, "usage", None)
+    if failed and usage is None:
+        usage = getattr(getattr(value, "response", None), "usage", None)
+    try:
+        tokens_in = int(getattr(usage, "input_tokens"))
+        tokens_out = int(getattr(usage, "output_tokens"))
+        cache_creation = int(
+            getattr(usage, "cache_creation_input_tokens", 0) or 0
+        )
+        cache_read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+        if min(tokens_in, tokens_out, cache_creation, cache_read) < 0:
+            raise ValueError
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return None
+    used_model = str(getattr(value, "model", "") or fallback_model)
+    actual_cost = detailed_usage_cost_krw(
+        used_model,
+        input_tokens=tokens_in,
+        output_tokens=tokens_out,
+        cache_creation_tokens=cache_creation,
+        cache_read_tokens=cache_read,
+        batch=False,
+    )
+    return {
+        "in": tokens_in,
+        "out": tokens_out,
+        "cache_creation": cache_creation,
+        "cache_read": cache_read,
+        "batch": False,
+        "stage": stage,
+        "cost_krw": actual_cost,
+        "failed": failed,
+        "cache_hit": cache_read > 0,
+        USAGE_MODEL_KEY: used_model,
+    }
+
+
 class _MeteredMessages:
     """Anthropic `messages.create`의 성공 응답 사용량을 요청별로 모은다."""
 
@@ -581,6 +703,14 @@ class _MeteredMessages:
             raise provider_budget.ProviderBudgetUnavailable(
                 "미확정 provider 호출 뒤에는 같은 요청에서 다시 호출할 수 없습니다"
             )
+        # ``MAX_AI_CALLS_PER_REQUEST``가 문서와 시험에만 있으면 실패 응답처럼
+        # usages에 안 쌓이는 호출은 무한히 반복될 수 있다. 실제 전송보다 먼저
+        # 요청 로컬 계수를 잡아 16번째 호출을 원장·네트워크 앞에서 닫는다.
+        self._metered.reserve_provider_call()
+        # 본조사는 DART snapshot과 single-flight owner가 확정된 뒤에만
+        # phase를 연다. 이 호출은 누락된 새 provider 경로도 예산 문맥
+        # 없이 밖으로 나가지 못하게 하는 마지막 방어선이다.
+        generation_coordination.ensure_paid_phase()
         call_kwargs = dict(kwargs)
         # 1판 `_ask`는 모듈 전역 MODEL을 읽지만 그 값은 다른 요청과 공유된다.
         # provider에 나가는 마지막 경계에서 이 요청의 로컬 모델로 바로잡는다.
@@ -612,132 +742,107 @@ class _MeteredMessages:
             max_tokens=max_tokens,
         )
         try:
-            response = self._messages.create(*args, **call_kwargs)
+            callbacks = attempt_context.current()
+            attempt_token = callbacks.begin_attempt(
+                "anthropic",
+                self._metered.current_stage,
+                call_reservation.estimated_krw,
+            )
         except Exception as error:
-            # Some provider failures still carry authoritative usage.  Preserve
-            # that real cost as a failed-call event instead of flattening it to
-            # zero.  If usage is absent, the existing billing-uncertain path
-            # remains fail-closed.
-            failure_usage = getattr(error, "usage", None)
-            if failure_usage is None:
-                failure_usage = getattr(
-                    getattr(error, "response", None), "usage", None
-                )
-            try:
-                failure_in = int(getattr(failure_usage, "input_tokens"))
-                failure_out = int(getattr(failure_usage, "output_tokens"))
-                failure_create = int(
-                    getattr(failure_usage, "cache_creation_input_tokens", 0) or 0
-                )
-                failure_read = int(
-                    getattr(failure_usage, "cache_read_input_tokens", 0) or 0
-                )
-                if min(
-                    failure_in, failure_out, failure_create, failure_read
-                ) < 0:
-                    raise ValueError
-            except (AttributeError, TypeError, ValueError, OverflowError):
-                failure_usage = None
-            if failure_usage is not None:
-                failed_model = str(
-                    getattr(error, "model", "") or call_kwargs.get("model", "")
-                )
-                failed_cost = detailed_usage_cost_krw(
-                    failed_model,
-                    input_tokens=failure_in,
-                    output_tokens=failure_out,
-                    cache_creation_tokens=failure_create,
-                    cache_read_tokens=failure_read,
-                    batch=False,
-                )
-                self._usages.append(
-                    {
-                        "in": failure_in,
-                        "out": failure_out,
-                        "cache_creation": failure_create,
-                        "cache_read": failure_read,
-                        "batch": False,
-                        "stage": self._metered.current_stage,
-                        "cost_krw": failed_cost,
-                        "failed": True,
-                        "cache_hit": failure_read > 0,
-                        USAGE_MODEL_KEY: failed_model,
-                    }
-                )
+            # 영속 attempt를 열지 못했으므로 provider에는 아직 아무것도 보내지 않았다.
+            provider_budget.current().cancel_before_dispatch(call_reservation)
+            raise provider_budget.ProviderBudgetUnavailable(
+                "provider 시도 원장을 시작할 수 없어 호출하지 않았습니다"
+            ) from error
+
+        fallback_model = str(call_kwargs.get("model", ""))
+        stage = self._metered.current_stage
+
+        def usage_cost(value: object, *, failed: bool) -> float | None:
+            event = _anthropic_usage_event(
+                value,
+                fallback_model=fallback_model,
+                stage=stage,
+                failed=failed,
+            )
+            return None if event is None else float(event["cost_krw"])
+
+        adapter = AnthropicAdapter(
+            lambda value: usage_cost(value, failed=False),
+            failure_cost_resolver=lambda value: usage_cost(value, failed=True),
+        )
+
+        def before_dispatch() -> None:
+            callbacks.heartbeat(attempt_token)
+            callbacks.mark_dispatch_intent(attempt_token)
+
+        try:
+            response = gateway.call_once(
+                adapter=adapter,
+                reserved_krw=call_reservation.estimated_krw,
+                before_dispatch=before_dispatch,
+                send=lambda: self._messages.create(*args, **call_kwargs),
+                record_observation=lambda observation: callbacks.record_observation(
+                    attempt_token, observation
+                ),
+            )
+        except gateway.ProviderDispatchNotStarted as error:
+            provider_budget.current().cancel_before_dispatch(call_reservation)
+            raise provider_budget.ProviderBudgetUnavailable(
+                "provider 전송 의도를 기록하지 못해 호출하지 않았습니다"
+            ) from error
+        except gateway.ProviderObservationRecordFailed as error:
+            # 전송은 이미 일어났다. 결과를 DB에 못 썼으므로 예약을 반환하지 않고
+            # lease 만료가 보수부채로 회수하도록 같은 요청도 여기서 멈춘다.
+            self._metered._billing_uncertain = True
+            provider_budget.current().mark_unknown(call_reservation)
+            raise provider_budget.ProviderBudgetUnavailable(
+                "provider 호출 결과를 비용 원장에 기록하지 못했습니다"
+            ) from error
+        except gateway.ProviderCallFailed as wrapped:
+            error = wrapped.__cause__
+            if not isinstance(error, Exception):
+                raise provider_budget.ProviderBudgetUnavailable(
+                    "provider 실패 원인을 확인할 수 없습니다"
+                ) from wrapped
+            failure_event = _anthropic_usage_event(
+                error,
+                fallback_model=fallback_model,
+                stage=stage,
+                failed=True,
+            )
+            if failure_event is not None:
+                self._usages.append(failure_event)
                 try:
                     provider_budget.current().settle_call(
                         call_reservation,
-                        actual_krw=failed_cost,
+                        actual_krw=float(failure_event["cost_krw"]),
                     )
                 except provider_budget.ProviderCostInvariantError:
                     self._metered._billing_uncertain = True
-                raise
-            # timeout/API 예외는 서버가 요청을 처리했는지 알 수 없다. 응답이 없다고
-            # 0원으로 마감하면 재시작 뒤 예산이 다시 열리므로 표식을 남길 신호를 보낸다.
+                raise error
+            # SDK 예외에는 보통 usage가 없다. 0원으로 마감하지 않고 adapter가
+            # 기록한 보수부채와 요청 로컬 예약을 함께 유지한다.
             self._metered._billing_uncertain = True
             provider_budget.current().mark_unknown(call_reservation)
-            raise
-        usage = getattr(response, "usage", None)
-        tokens_in = getattr(usage, "input_tokens", None) if usage is not None else None
-        tokens_out = getattr(usage, "output_tokens", None) if usage is not None else None
-        if tokens_in is None or tokens_out is None:
-            # 응답은 왔지만 usage가 없으면 실제 비용을 확정할 수 없다. 0원으로
-            # 적지 않고 같은 통장의 진행 중 표식을 남긴다.
-            self._metered._billing_uncertain = True
-            provider_budget.current().mark_unknown(call_reservation)
-            return response
-        try:
-            clean_in, clean_out = int(tokens_in), int(tokens_out)
-        except (TypeError, ValueError, OverflowError):
-            self._metered._billing_uncertain = True
-            provider_budget.current().mark_unknown(call_reservation)
-            return response
-        if clean_in < 0 or clean_out < 0:
-            self._metered._billing_uncertain = True
-            provider_budget.current().mark_unknown(call_reservation)
-            return response
-        used_model = str(
-            getattr(response, "model", "") or call_kwargs.get("model", "")
+            raise error
+
+        usage_event = _anthropic_usage_event(
+            response,
+            fallback_model=fallback_model,
+            stage=stage,
+            failed=False,
         )
-        try:
-            cache_creation = int(
-                getattr(usage, "cache_creation_input_tokens", 0) or 0
-            )
-            cache_read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
-        except (TypeError, ValueError, OverflowError):
+        if usage_event is None:
+            # 응답은 왔지만 usage가 없으면 adapter도 같은 예약액을 부채로 남겼다.
             self._metered._billing_uncertain = True
             provider_budget.current().mark_unknown(call_reservation)
             return response
-        if cache_creation < 0 or cache_read < 0:
-            self._metered._billing_uncertain = True
-            provider_budget.current().mark_unknown(call_reservation)
-            return response
-        actual_cost = detailed_usage_cost_krw(
-            used_model,
-            input_tokens=clean_in,
-            output_tokens=clean_out,
-            cache_creation_tokens=cache_creation,
-            cache_read_tokens=cache_read,
-            batch=False,
-        )
-        self._usages.append(
-            {
-                "in": clean_in,
-                "out": clean_out,
-                "cache_creation": cache_creation,
-                "cache_read": cache_read,
-                "batch": False,
-                "stage": self._metered.current_stage,
-                "cost_krw": actual_cost,
-                "failed": False,
-                "cache_hit": cache_read > 0,
-                USAGE_MODEL_KEY: used_model,
-            }
-        )
+        self._usages.append(usage_event)
         try:
             provider_budget.current().settle_call(
                 call_reservation,
-                actual_krw=actual_cost,
+                actual_krw=float(usage_event["cost_krw"]),
             )
         except provider_budget.ProviderCostInvariantError:
             # usage는 먼저 보존했다. 이미 생긴 비용을 숨기지 않고 상위에서
@@ -1333,6 +1438,38 @@ def _comparison_candidate_scope_complete(
     return True
 
 
+def _generation_cache_eligibility(
+    report: Report,
+    *,
+    sources: list[SourceStatus],
+    steps: list[dict[str, Any]],
+    filing: Optional[dict[str, Any]],
+) -> tuple[bool, set[str], set[str]]:
+    """현재 결과가 이후 새 조사에 재사용 가능한지 한 정본으로 판정한다.
+
+    링크·최초 PDF 저장은 이 판정과 무관하다. 일시적 수집 실패나 후보 범위
+    불완전은 현재 사용자에게 결과를 주더라도 다음 조사까지 60일 고정하지 않는다.
+    v1·v2·불변 Delivery 캐시가 반드시 이 같은 판정을 공유한다.
+    """
+
+    included_section_ids = {section.cell for section in report.sections}
+    missing_sections = (
+        OPTIONAL_BASIC_SECTION_IDS | REQUIRED_SECTION_IDS
+    ) - included_section_ids
+    content_shortfall_reasons = {
+        IDENTITY_SUMMARY_SHORTFALL_REASON,
+        CUSTOMER_MARKET_SHORTFALL_REASON,
+        PAST_NARRATIVE_SHORTFALL_REASON,
+    }.intersection(report.shortfall_reasons)
+    eligible = not (
+        _has_failed_source(sources)
+        or not _comparison_candidate_scope_complete(steps, filing=filing)
+        or missing_sections
+        or content_shortfall_reasons
+    )
+    return eligible, missing_sections, content_shortfall_reasons
+
+
 class LocalDartProfileEnrichmentError(RuntimeError):
     """로컬 DART 후보의 선택 전 profile 보강만 실패했음을 표시한다."""
 
@@ -1346,6 +1483,15 @@ class RealPipeline:
       `CompanyCard.ref`(전자공시 고유번호)로만 넘긴다.
       서버가 여러 대로 늘어나도 그대로 돈다.
     """
+
+    # 웹 실행기가 DART preflight 전에 본조사 phase를 미리 예약하지
+    # 않아도 된다는 명시적 capability. ``_run_metered``가 완전한 source
+    # 지문→single-flight owner→phase 순서를 직접 지킨다.
+    supports_deferred_paid_phase = True
+
+    # 현재 기업분석 전용 엔진은 직무·공고를 보고서 입력으로 사용하지 않는다.
+    # UI 표시와 별개로 서버가 OCR provider를 열지 않게 하는 capability 정본이다.
+    supports_posting_image_input = False
 
     # corpCode 로컬 색인과 무료 DART 기업개황만 쓰며 AI/Places 비용은 만들지 않는다.
     business_candidate_provider_costs_money = False
@@ -1635,7 +1781,7 @@ class RealPipeline:
             "list.json",
             {
                 "corp_code": corp_code,
-                "bgn_de": end.replace(year=end.year - AUDIT_WINDOW_YEARS).strftime("%Y%m%d"),
+                "bgn_de": subtract_years(end, AUDIT_WINDOW_YEARS).strftime("%Y%m%d"),
                 "end_de": end.strftime("%Y%m%d"),
                 "pblntf_ty": "F",
                 "page_count": "100",
@@ -1687,7 +1833,11 @@ class RealPipeline:
         #   전자공시 조회일 뿐 **AI 는 안 부른다**(0원).
         # ★ 여기서 오류가 나면 «거부»가 아니라 실패로 터진다 — 위 공시목록과 같은
         #   원칙이다. 기술 실패를 「자료가 없음」으로 접으면 거짓 분류가 된다.
-        financials, fin_years = engine.fetch_financials(corp_code, counter)
+        financials, fin_years = engine.fetch_financials(
+            corp_code,
+            counter,
+            business_date=business_date,
+        )
         judgment = engine.decide(
             profile.get("corp_cls", ""),
             has_audit,
@@ -1724,25 +1874,93 @@ class RealPipeline:
         #   둘 다 전자공시 조회일 뿐 **AI는 안 부른다**(0원). 미적중이면
         #   6 수집에 그대로 넘겨 같은 것을 두 번 받지 않는다.
         # financials·fin_years 는 위 「조건 2-b」에서 이미 받아 두었다 (두 번 안 받는다).
-        filing = engine.latest_report_rcept(corp_code, judgment.corp_type, counter)
+        filing = engine.latest_report_rcept(
+            corp_code,
+            judgment.corp_type,
+            counter,
+            business_date=business_date,
+        )
+        source_identity = ReportSourceIdentity.capture(
+            filing=filing,
+            financial_payload=financials,
+        )
         current_fiscal_year = _current_fiscal_year(fin_years, filing)
+        # 불변 content+PDF 캐시는 옛 layer1보다 먼저 본다. 새 계약의 hit이면
+        # 최초 원본 ID를 그대로 운반하고, miss면 같은 열쇠로 owner lease를
+        # 먼저 얻는다. 옛 layer1에는 생성 당시 배포·모델·설정 신원이 없으므로
+        # 실제 paid 경로에서 현재 namespace 결과로 «승격»하지 않는다. 그렇게
+        # 하면 옛 본문을 현재 코드가 만든 것처럼 거짓 표기하게 된다. 한 번
+        # 명시적 miss로 새로 만들고, 그때부터 정확한 불변 원본을 재사용한다.
+        generation_namespace = _generation_cache_namespace(engine)
+        reused_generation = generation_coordination.coordinate(
+            corp_id=corp_code,
+            cache_namespace=generation_namespace,
+            preflight_identity_digest=source_identity.cache_digest,
+        )
+        if reused_generation is not None:
+            reused_report = reused_generation.report
+            if not isinstance(reused_report, Report):
+                raise generation_coordination.GenerationCoordinationError(
+                    "재사용 보고서가 pipeline 계약이 아닙니다"
+                )
+            expected_schema = (
+                generation_namespace.schema_version
+                if generation_namespace is not None
+                else ""
+            )
+            if not expected_schema or reused_report.schema_version != expected_schema:
+                raise generation_coordination.GenerationCoordinationError(
+                    "재사용 보고서의 생성기 schema가 현재 요청과 다릅니다"
+                )
+            tell("output")
+            return RunResult(
+                outcome=Outcome.REPORT,
+                report=reused_report,
+                message=CACHE_HIT_MESSAGE.format(
+                    generated_at=(
+                        reused_report.generated_at or CACHE_HIT_UNKNOWN_DATE
+                    )
+                ),
+                sources=list(reused_report.sources),
+                charged=False,
+                corp_type=reused_report.corp_type or judgment.corp_type,
+                cost_krw=_request_spent_krw(engine),
+                model=(
+                    MODEL_LABEL_SEPARATOR.join(reused_generation.actual_models)
+                    or model
+                ),
+                cache_hit=CACHE_HIT_LAYER1,
+                dart_receipt_numbers=source_identity.dart_receipt_numbers,
+                financial_payload_digest=source_identity.financial_payload_digest,
+                reused_content_snapshot_id=reused_generation.content_snapshot_id,
+                reused_artifact_id=reused_generation.artifact_id,
+                generation_cache_eligible=(
+                    reused_generation.generation_cache_eligible
+                ),
+            )
         # ★ v1 캐시와 v2 캐시는 «열쇠가 다르다» — 서로의 보고서를 못 꺼낸다.
         #   v2를 켠 요청에 v1 보고서를 돌려주는 것은 조용한 거짓말이고,
         #   그 반대도 마찬가지다.
         # ★ v2 캐시 열쇠에는 «지금 코드의 지문»이 들어간다. 코드가 그대로면
         #   적중해 900원을 아끼고, 한 글자라도 바뀌면 저절로 불일치라
         #   옛 결과가 절대 안 나온다 — 「고쳤는데 화면이 그대로」를 막는다.
-        cached = (
-            _v2_cache_lookup(
-                corp_id=corp_code,
-                current_fiscal_year=current_fiscal_year,
+        cached = None
+        if not generation_coordination.is_active():
+            # demo·순수 pipeline 단위 경로는 delivery 원본을 발급하지 않으므로
+            # 기존 Report 캐시 호환을 유지한다. 실제 웹은 위 새 계약만 쓴다.
+            cached = (
+                _v2_cache_lookup(
+                    corp_id=corp_code,
+                    current_fiscal_year=current_fiscal_year,
+                    source_identity_digest=source_identity.cache_digest,
+                )
+                if _engine_v2_enabled()
+                else _company_cache_lookup(
+                    corp_id=corp_code,
+                    current_fiscal_year=current_fiscal_year,
+                    source_identity_digest=source_identity.cache_digest,
+                )
             )
-            if _engine_v2_enabled()
-            else _company_cache_lookup(
-                corp_id=corp_code,
-                current_fiscal_year=current_fiscal_year,
-            )
-        )
         if cached is not None:
             tell("output")   # 6~10을 통째로 건너뛴다
             return RunResult(
@@ -1763,6 +1981,9 @@ class RealPipeline:
                 # 화면 배지와 대시보드 ⑤가 이 값을 읽는다. 안 실으면 캐시가
                 # 돌아도 「재사용 0건」으로 보인다 (P-63과 같은 사고).
                 cache_hit=CACHE_HIT_LAYER1,
+                dart_receipt_numbers=source_identity.dart_receipt_numbers,
+                financial_payload_digest=source_identity.financial_payload_digest,
+                generation_cache_eligible=True,
             )
 
         # ── 6 수집 (AI 0회) ──────────────────────────────
@@ -1795,8 +2016,11 @@ class RealPipeline:
         # 수집(6)·법인 판정(5)이 끝났고 실적표 재료(financials)가 확보된 지점이다.
         # ENGINE_V2=1일 때만 composer 경로로 간다. 미설정이면 아래 v1 경로 그대로다.
         if _engine_v2_enabled():
+            # waiter는 위에서 이미 돌아갔다. owner(또는 부분 지문으로
+            # 공유를 포기한 요청)만 첫 provider 전에 phase를 연다.
+            generation_coordination.ensure_paid_phase()
             tell("generate")
-            return _run_v2_composer(
+            v2_result = _run_v2_composer(
                 engine=engine,
                 client=client,
                 company_name=company_name,
@@ -1813,7 +2037,17 @@ class RealPipeline:
                 steps=steps,
                 corp_id=corp_code,
                 current_fiscal_year=current_fiscal_year,
+                source_identity_digest=source_identity.cache_digest,
             )
+            return replace(
+                v2_result,
+                dart_receipt_numbers=source_identity.dart_receipt_numbers,
+                financial_payload_digest=source_identity.financial_payload_digest,
+            )
+
+        # v1도 같은 소유권·비용 순서를 지킨다. 이후 간접 함수가
+        # messages.create를 부르더라도 외곽에서 설치한 요청 문맥을 물려받는다.
+        generation_coordination.ensure_paid_phase()
 
         # 유료 span 선택 전에 후보 원문도 정식 provenance 경계에서 한 번 봉인한다.
         # DART 전체 원문과 exact-attested HTTPS 웹·IR만 사전검사에 넣으며, 수집
@@ -2306,6 +2540,7 @@ class RealPipeline:
                         self_official_text=filing_text,
                         steps=steps,
                         collected_on=business_date.isoformat(),
+                        business_date=business_date,
                         official_candidate_sentences=official_candidate_sentences,
                         candidate_source_registry=tuple(all_citations),
                     )
@@ -2399,32 +2634,20 @@ class RealPipeline:
         # 회사분석 전용 버전 키로 저장해 옛 직무·공고 보고서와 섞이지 않는다.
         # ★ 우리 쪽 수집 실패(⚠️)가 낀 결과는 «저장하지 않는다» —
         #   그날만 죽은 소스 때문에 그 회사가 「자료 없는 회사」로 굳는다.
-        candidate_collection_incomplete = not _comparison_candidate_scope_complete(
-            steps,
-            filing=filing,
+        cache_eligible, missing_sections, content_shortfall_reasons = (
+            _generation_cache_eligibility(
+                report,
+                sources=sources,
+                steps=steps,
+                filing=filing,
+            )
         )
-        included_section_ids = {section.cell for section in report.sections}
-        optional_basic_sections_missing = (
-            OPTIONAL_BASIC_SECTION_IDS - included_section_ids
-        )
-        required_basic_sections_missing = REQUIRED_SECTION_IDS - included_section_ids
-        content_shortfall_reasons = {
-            IDENTITY_SUMMARY_SHORTFALL_REASON,
-            CUSTOMER_MARKET_SHORTFALL_REASON,
-            PAST_NARRATIVE_SHORTFALL_REASON,
-        }.intersection(report.shortfall_reasons)
-        if (
-            _has_failed_source(sources)
-            or candidate_collection_incomplete
-            or optional_basic_sections_missing
-            or required_basic_sections_missing
-            or content_shortfall_reasons
-        ):
+        if not cache_eligible:
             logger.info(
                 "수집 실패·후보범위 불완전·기본 장/내용 결손이 껴 1층 캐시에 "
                 "저장하지 않습니다 — corp_id=%s · 장누락=%s · 내용결손=%s",
                 corp_code,
-                sorted(optional_basic_sections_missing | required_basic_sections_missing),
+                sorted(missing_sections),
                 sorted(content_shortfall_reasons),
             )
         else:
@@ -2432,6 +2655,7 @@ class RealPipeline:
                 corp_id=corp_code,
                 report=report,
                 fiscal_year=current_fiscal_year,
+                source_identity_digest=source_identity.cache_digest,
             )
 
         return RunResult(
@@ -2453,6 +2677,9 @@ class RealPipeline:
             model=model,
             span_selection_diagnostics=tuple(selection_diagnostics),
             span_selection_result_reason=selection_result_reason_code,
+            dart_receipt_numbers=source_identity.dart_receipt_numbers,
+            financial_payload_digest=source_identity.financial_payload_digest,
+            generation_cache_eligible=cache_eligible,
         )
 
 
@@ -2509,6 +2736,8 @@ def _load_official_comparator_bundle(
     engine: Any,
     counter: Any,
     record: DartCompanyRecord,
+    *,
+    business_date: Any,
 ) -> OfficialCompanyBundle | None:
     """DART 고유번호 하나의 기업개황·연간 원문·주요계정을 별도로 받는다."""
 
@@ -2527,8 +2756,13 @@ def _load_official_comparator_bundle(
         record.corp_code,
         "상장사" if listed else "비상장 외감",
         counter,
+        business_date=business_date,
     )
-    financials, _years = engine.fetch_financials(record.corp_code, counter)
+    financials, _years = engine.fetch_financials(
+        record.corp_code,
+        counter,
+        business_date=business_date,
+    )
     official_text = ""
     if filing:
         path = engine.download_document(filing["rcept_no"], engine.RAW_DIR, counter)
@@ -2554,6 +2788,7 @@ def _attach_competitive_position(
     self_official_text: str,
     steps: list[dict[str, Any]],
     collected_on: str,
+    business_date: Any,
     official_candidate_sentences: tuple[OfficialCandidateSentence, ...] = (),
     candidate_source_registry: tuple[Source, ...] = (),
 ) -> Report:
@@ -2572,7 +2807,10 @@ def _attach_competitive_position(
         self_bundle=self_bundle,
         catalog=records,
         fetch_comparator=lambda record: _load_official_comparator_bundle(
-            engine, counter, record
+            engine,
+            counter,
+            record,
+            business_date=business_date,
         ),
         collected_on=collected_on,
         official_candidate_sentences=official_candidate_sentences,
@@ -2652,6 +2890,7 @@ def _company_cache_lookup(
     *,
     corp_id: str,
     current_fiscal_year: Optional[int],
+    source_identity_digest: str,
 ) -> Optional[Report]:
     """회사분석 제품 namespace의 캐시만 조회한다."""
     if not corp_id:
@@ -2661,6 +2900,7 @@ def _company_cache_lookup(
             hit = cache_store.get_company_report_hit(
                 conn,
                 corp_id=corp_id,
+                source_identity_digest=source_identity_digest,
                 current_fiscal_year=current_fiscal_year,
             )
     except Exception:  # noqa: BLE001 — 캐시 실패가 조사를 막으면 안 된다
@@ -2687,6 +2927,7 @@ def _v2_cache_lookup(
     *,
     corp_id: str,
     current_fiscal_year: Optional[int],
+    source_identity_digest: str,
 ) -> Optional[Report]:
     """엔진 v2 보고서 캐시를 조회한다 (지금 코드 지문이 같을 때만)."""
     if not corp_id:
@@ -2700,6 +2941,7 @@ def _v2_cache_lookup(
                 conn,
                 corp_id=corp_id,
                 build_id=build_id,
+                source_identity_digest=source_identity_digest,
                 current_fiscal_year=current_fiscal_year,
             )
     except Exception:  # noqa: BLE001 — 캐시 실패가 조사를 막으면 안 된다
@@ -2726,6 +2968,7 @@ def _v2_cache_save(
     corp_id: str,
     report: Report,
     fiscal_year: Optional[int],
+    source_identity_digest: str,
 ) -> None:
     """v2 보고서를 «그 코드 지문»과 함께 저장한다.
 
@@ -2742,6 +2985,7 @@ def _v2_cache_save(
                 corp_id=corp_id,
                 report=report,
                 build_id=engine_build_id(),
+                source_identity_digest=source_identity_digest,
                 fiscal_year=fiscal_year,
             )
     except Exception:  # noqa: BLE001 — 저장 실패가 사용자를 막으면 안 된다
@@ -2753,6 +2997,7 @@ def _company_cache_save(
     corp_id: str,
     report: Report,
     fiscal_year: Optional[int],
+    source_identity_digest: str,
 ) -> None:
     """신규 회사분석 보고서를 옛 직무 캐시와 격리해 저장한다."""
     if not corp_id:
@@ -2763,6 +3008,7 @@ def _company_cache_save(
                 conn,
                 corp_id=corp_id,
                 report=report,
+                source_identity_digest=source_identity_digest,
                 fiscal_year=fiscal_year,
             )
     except Exception:  # noqa: BLE001 — 저장 실패가 사용자를 막으면 안 된다
@@ -2834,6 +3080,7 @@ def _run_v2_composer(
     #   조사에서 적중한다 — 여기서 다시 계산하면 두 곳이 어긋난다.
     corp_id: str = "",
     current_fiscal_year: Optional[int] = None,
+    source_identity_digest: str = "",
 ) -> RunResult:
     """엔진 v2: composer 경로로 보고서를 만든다.
 
@@ -2841,8 +3088,8 @@ def _run_v2_composer(
     ``build_three_year_table`` 실적표를 그대로 받아 쓴다. 작가 ask와 검수 ask는
     «다른 클로저»로 주입한다 (Generator/Evaluator 분리).
 
-    ★ v2 보고서는 1층 캐시에 저장하지 않는다 — 캐시는 canonical(v4)만
-      반환·저장하는 계약이라 v2 스키마를 섞으면 v1 요청이 오염된다.
+    ★ v2 보고서는 v1과 열쇠가 다른 전용 1층 캐시에만 저장한다. 배포 revision과
+      생성기 지문이 달라지면 자동 미적중이라 옛 결과가 새 코드 결과로 나오지 않는다.
     """
     # composer는 v2 전용이라 지연 import한다 — v1 경로의 module 적재 비용·의존을
     # 바꾸지 않기 위해서다 (pipeline→composer 방향은 계획이 허용한 연결이다).
@@ -2927,7 +3174,10 @@ def _run_v2_composer(
             final_gate_reason=FINAL_GATE_REASON_PUBLISH_BLOCKED,
         )
 
-    report = output.report
+    # composer는 본문·인용을 만들지만 수집 단계의 3상태(ok/none/failed)는
+    # 알지 못한다. RunResult에만 두면 최초 worker가 사라진 뒤 캐시·재시작
+    # 조회에서 수집 신원이 빈 목록으로 바뀌므로 불변 Report에도 함께 봉인한다.
+    report = replace(output.report, sources=list(sources))
     steps.append(
         {
             "step": "v2_composer_완료",
@@ -2942,11 +3192,29 @@ def _run_v2_composer(
     #   미적중이므로 옛 결과가 새 결과인 척 나올 수 없다.
     # ★ 저장 실패는 삼킨다 — 보고서는 이미 만들어졌고, 저장이 안 됐다고
     #   사용자에게 실패를 돌려주면 돈만 쓰고 결과를 못 받는다.
-    _v2_cache_save(
-        corp_id=corp_id,
-        report=report,
-        fiscal_year=current_fiscal_year,
+    cache_eligible, missing_sections, content_shortfall_reasons = (
+        _generation_cache_eligibility(
+            report,
+            sources=sources,
+            steps=steps,
+            filing=filing,
+        )
     )
+    if cache_eligible:
+        _v2_cache_save(
+            corp_id=corp_id,
+            report=report,
+            fiscal_year=current_fiscal_year,
+            source_identity_digest=source_identity_digest,
+        )
+    else:
+        logger.info(
+            "수집 실패·후보범위 불완전·기본 장/내용 결손이 껴 v2 캐시에 "
+            "저장하지 않습니다 — corp_id=%s · 장누락=%s · 내용결손=%s",
+            corp_id,
+            sorted(missing_sections),
+            sorted(content_shortfall_reasons),
+        )
     return RunResult(
         outcome=Outcome.REPORT,
         report=report,
@@ -2959,6 +3227,7 @@ def _run_v2_composer(
         sentences_passed=output.verified_sentences,
         cost_krw=_request_spent_krw(engine),
         model=model,
+        generation_cache_eligible=cache_eligible,
     )
 
 

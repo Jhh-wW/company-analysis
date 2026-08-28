@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from src.features.composer.constants import GRADE_INTERPRETED, SECTION_IDS
@@ -197,3 +199,98 @@ def test_v2_인용0건은_차단은_유지하되_사유가_정직하다(
             released_at=_AT,
             content_validator=lambda _report: (),
         )
+
+
+# ══════════════════════════════════════════════════════════
+# v2 PDF 공개 내용 결속 — 같은 인용 번호만으로 다른 PDF를 승인할 수 없다
+# ══════════════════════════════════════════════════════════
+
+
+def _cited_v2_report(company: str):
+    sections = tuple(
+        ComposedSection(
+            section_id=section_id,
+            sentences=(
+                ComposedSentence(
+                    text=f"{company}의 {section_id} 분석은 공식 사업 자료를 바탕으로 한다.",
+                    citations=("1",),
+                    grade=GRADE_INTERPRETED,
+                ),
+            ),
+        )
+        for section_id in SECTION_IDS
+    )
+    summary = tuple(
+        ComposedSentence(
+            text=f"{company} 핵심 요약 {order}이다.",
+            citations=("1",),
+            grade=GRADE_INTERPRETED,
+        )
+        for order in range(1, 4)
+    )
+    return render_report(
+        company,
+        ComposedReport(sections=sections, summary=summary),
+        {1: {"종류": "사업내용", "원문": f"{company}의 공식 사업 자료다."}},
+        None,
+        corp_type="상장사",
+        as_of_date="2026-08-24",
+    )
+
+
+@pytest.fixture(scope="module")
+def cited_v2_report():
+    return _cited_v2_report("가나다전자")
+
+
+@pytest.fixture(scope="module")
+def cited_v2_candidate(cited_v2_report):
+    return prepare_pdf_release(cited_v2_report)
+
+
+def test_v2_정상PDF는_문장_표_출처_지문까지_같아야_통과한다(
+    cited_v2_report, cited_v2_candidate
+):
+    checks, reasons = run_automatic_checks(
+        cited_v2_report,
+        cited_v2_candidate,
+        content_validator=lambda _report: (),
+    )
+
+    assert [check.passed for check in checks] == [True] * 4
+    assert reasons == ()
+    assert cited_v2_candidate.content_manifest_version
+    assert len(cited_v2_candidate.content_manifest_sha256) == 64
+
+
+def test_인용번호가_같아도_다른회사_PDF면_채널동등성에서_차단한다(
+    cited_v2_report,
+):
+    other_candidate = prepare_pdf_release(_cited_v2_report("다른회사"))
+    assert other_candidate.expected_fact_ids == ("v2-citation-1",)
+
+    checks, reasons = run_automatic_checks(
+        cited_v2_report,
+        other_candidate,
+        content_validator=lambda _report: (),
+    )
+
+    assert checks[0].passed is True
+    assert checks[1].passed is True
+    assert checks[2].passed is False
+    assert any("PDF 공개 내용" in reason for reason in reasons)
+
+
+def test_후보객체의_내용지문만_바꿔써도_PDF_bytes와_대조해_차단한다(
+    cited_v2_report, cited_v2_candidate
+):
+    forged = replace(cited_v2_candidate, content_manifest_sha256="f" * 64)
+
+    checks, _reasons = run_automatic_checks(
+        cited_v2_report,
+        forged,
+        content_validator=lambda _report: (),
+    )
+
+    assert checks[1].passed is False
+    assert checks[2].passed is False

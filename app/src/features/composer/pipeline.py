@@ -2,13 +2,14 @@
 
 ★ 이 파일은 composer 조각들을 «정해진 순서로 잇기만» 한다:
     compose_sections → verify_report → compose_summary → (요약 재검증·보충)
-    → render_report → (중복 검출 경고) → validate_v2
+    → render_report → (versioned 품질 shadow 판정) → (중복 검출 경고) → validate_v2
   각 단계의 규칙은 각 소유 파일(logic/verify/render/validate)에 있다.
 ★ AI 호출은 두 개의 주입 함수로만 한다 — 작가(writer_ask)와 검수(reviewer_ask)는
   «다른 클로저»여야 한다 (Generator/Evaluator 분리, rules/harness.md).
   provider 연결은 부르는 쪽(real.py)의 몫이다. 여기서 provider를 모른다.
-★ 닫힌 정규식 게이트 없음 — 문장 내용을 거르는 검사를 하지 않는다.
-  마지막 validate_v2(내부 키·인용-부록 1:1·요약 존재 3검사)만 fail-closed다.
+★ 산문 정규식으로 값의 뜻을 추측하거나 FactRecord를 만들지 않는다. 다만 새
+  공개 문장에 숫자가 있으면 구조화 의미 결속을 요구하고, 없으면 그 문장만 뺀다.
+  마지막 validate_v2의 기존 3검사는 그대로다.
 ★ 중복 검출(`dup_detect.find_numeric_duplicates`)은 여기서 «경고 로그로만»
   붙인다 — `validate_v2` 안에는 넣지 않는다. `validate_v2`는 정본이 fail-closed로
   못 박은 3검사 전용 게이트이고, 그 안에 넣으면 나중에 누가 실수로 raise를
@@ -22,9 +23,28 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from decimal import Decimal
 from typing import Optional
 
+from src.shared.report_quality.generation import (
+    GenerationQualityObservation,
+    LEGACY_SHADOW_PUBLICATION_REASON,
+    observe_generation,
+)
+from src.shared.report_quality.models import PublicationPolicy
+from src.shared.report_quality.dto import (
+    ClaimFact,
+    ReportCandidate,
+    ReportSectionCandidate,
+    SourceDocument,
+)
+from src.shared.report_quality.fact_binding import fact_evidence_binding
+from src.shared.report_quality.contract import contract_for_generation
+from src.shared.report_quality.source_identity import (
+    document_identity,
+    document_identity_from_parts,
+)
 from src.features.composer.logic import (
     AskFn,
     FragmentsInput,
@@ -37,15 +57,26 @@ from src.features.composer.logic import (
     compose_sections,
     compose_summary,
 )
-from src.features.composer.constants import DEFAULT_CITATION_STYLE
+from src.features.composer.constants import DEFAULT_CITATION_STYLE, SECTION_TITLES
 from src.features.composer.dedupe import drop_cross_section_duplicates
 from src.features.composer.diagram_check import check_diagrams
 from src.features.composer.dup_detect import CONFIDENCE_CONFIRMED, find_numeric_duplicates
-from src.features.composer.port import ComposedReport, FilingMeta, PerformanceTable
+from src.features.composer.port import (
+    ComposedReport,
+    ComposedSentence,
+    FilingMeta,
+    PerformanceTable,
+)
 from src.features.composer.render import render_report
+from src.features.composer.structured_claims import (
+    NumericSafetyFiltering,
+    append_past_changes_numeric_claims,
+    enforce_public_numeric_safety,
+)
 from src.features.composer.validate import validate_v2
 from src.features.composer.verify import verify_report, verify_sentences
 from src.features.pipeline.port import Grade, Report
+from src.features.provenance.sources import Source
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +91,9 @@ class V2RunOutput:
     composed_sentences: int
     #: 검증을 통과해 최종 보고서에 실린 문장 수 (본문 + 요약) — 분자
     verified_sentences: int
+    #: 새 생성 시점에만 실행한 versioned 품질·공개 안전 shadow 판정.
+    #: 과거 GET에서는 다시 계산하지 않는다.
+    quality_observation: GenerationQualityObservation | None = None
 
 
 def _total_sentences(report: ComposedReport) -> int:
@@ -100,6 +134,129 @@ def _log_duplicate_findings(rendered: Report) -> None:
     )
 
 
+def _apply_generation_quality_label(
+    rendered: Report,
+    observation: GenerationQualityObservation,
+    numeric_filtering: NumericSafetyFiltering,
+) -> Report:
+    """새 생성물에만 PARTIAL 꼬리표와 사람이 읽을 이유를 붙인다.
+
+    생성 당시 계약 결과를 저장될 ``Report``에 한 번 반영한다. 과거 GET은 이
+    함수를 호출하지 않으므로 새 코드가 이미 발급된 링크를 소급 차단하지 않는다.
+    """
+
+    reasons = list(rendered.shortfall_reasons)
+    for section_id, removed in numeric_filtering.removed_section_counts:
+        title = SECTION_TITLES.get(section_id, section_id)
+        reasons.append(
+            f"{title} 장에서 검산할 구조화 근거가 없는 수치·날짜 문장 "
+            f"{removed}개를 공개본에서 제외했습니다."
+        )
+    if numeric_filtering.removed_summary_count:
+        reasons.append(
+            "핵심 요약에서 검증된 본문 수치 claim과 결속되지 않은 수치·날짜 "
+            f"문장 {numeric_filtering.removed_summary_count}개를 제외했습니다."
+        )
+
+    contract = contract_for_generation(observation.contract_version)
+    counts = dict(observation.section_public_sentence_counts)
+    for section_id in observation.underfilled_sections:
+        count = counts.get(section_id, 0)
+        title = SECTION_TITLES.get(section_id, section_id)
+        reasons.append(
+            f"{title} 장의 공개 문장이 {count}개라 완성 기준 "
+            f"{contract.min_claims_per_covered_section}개에 못 미칩니다."
+        )
+
+    if len(observation.notice_only_sections) > contract.max_notice_only_sections:
+        titles = [
+            SECTION_TITLES.get(section_id, section_id)
+            for section_id in observation.notice_only_sections
+        ]
+        reasons.append(
+            "실질 내용 대신 안내만 있는 장이 "
+            f"{len(titles)}개({', '.join(titles)})라 완성 기준 "
+            f"{contract.max_notice_only_sections}개를 넘습니다."
+        )
+    if observation.substantive_claims < contract.min_substantive_claims:
+        reasons.append(
+            "근거와 의미가 구조로 확인된 실질 내용이 "
+            f"{observation.substantive_claims}개라 완성 기준 "
+            f"{contract.min_substantive_claims}개에 못 미칩니다."
+        )
+    try:
+        verified_ratio = Decimal(observation.verified_ratio)
+    except (ArithmeticError, ValueError):
+        verified_ratio = Decimal(0)
+    if verified_ratio < contract.min_verified_ratio:
+        reasons.append(
+            "구조로 확인된 실질 내용 중 검증을 마친 비율이 "
+            f"{verified_ratio:.0%}라 완성 기준 "
+            f"{contract.min_verified_ratio:.0%}에 못 미칩니다."
+        )
+    if observation.document_sources < contract.min_document_sources:
+        reasons.append(
+            "서로 다른 원문 문서가 "
+            f"{observation.document_sources}개라 완성 기준 "
+            f"{contract.min_document_sources}개에 못 미칩니다."
+        )
+
+    unique_reasons = list(dict.fromkeys(reason for reason in reasons if reason))
+    publication_policy = PublicationPolicy.STRUCTURED_SAFETY
+    if not observation.release_allowed:
+        publication_policy = PublicationPolicy.LEGACY_SHADOW_EXCEPTION
+        if LEGACY_SHADOW_PUBLICATION_REASON not in unique_reasons:
+            unique_reasons.append(LEGACY_SHADOW_PUBLICATION_REASON)
+    grade = rendered.grade
+    if (
+        unique_reasons
+        or observation.quality_grade != "완성"
+        or observation.publication_grade != "완성"
+    ) and grade is Grade.COMPLETE:
+        grade = Grade.PARTIAL
+    return replace(
+        rendered,
+        grade=grade,
+        shortfall_reasons=unique_reasons,
+        quality_contract_version=observation.contract_version,
+        safety_decision=observation.safety_decision,
+        publication_policy=publication_policy.value,
+    )
+
+
+def _supplement_safe_summary(
+    summary: tuple[ComposedSentence, ...],
+    report: ComposedReport,
+) -> tuple[ComposedSentence, ...]:
+    """수치 안전 경계 뒤 요약이 짧으면 안전한 본문으로 최소치만 채운다.
+
+    먼저 기존 계약대로 «확인» 문장을 고른다. reviewer가 전역 실패하면 모든
+    문장이 «해석»으로 강등돼 확인 문장이 0개일 수 있다. 그 경우에도 이미
+    미결속 수치 문장을 제거한 본문에서 장을 번갈아 골라, 예전의 «강등하되
+    보고서 전체는 막지 않는다» 안전선을 지킨다.
+    """
+
+    chosen = list(_supplement_summary(summary, report))
+    if len(chosen) >= SUMMARY_MIN_SENTENCES:
+        return tuple(chosen)
+    seen = {" ".join(sentence.text.split()) for sentence in chosen}
+    pools = [list(section.sentences) for section in report.sections]
+    deepest = max((len(pool) for pool in pools), default=0)
+    for round_index in range(deepest):
+        for pool in pools:
+            if len(chosen) >= SUMMARY_MIN_SENTENCES:
+                return tuple(chosen)
+            if round_index >= len(pool):
+                continue
+            candidate = pool[round_index]
+            key = " ".join(candidate.text.split())
+            if not key or key in seen:
+                continue
+            chosen.append(candidate)
+            seen.add(key)
+    return tuple(chosen)
+
+
 def run_v2(
     company_name: str,
     fragments: FragmentsInput,
@@ -109,7 +266,7 @@ def run_v2(
     reviewer_ask: AskFn,
     diagram_ask: Optional[AskFn] = None,
     corp_type: str = "",
-    grade: Grade = Grade.COMPLETE,
+    grade: Grade = Grade.PARTIAL,
     generated_at: str = "",
     as_of_date: str = "",
     analysis_period: str = "",
@@ -128,6 +285,9 @@ def run_v2(
         ④ 요약 재검증 — 새로 쓴 요약 문장에 같은 검증을 적용하고, 부족하면
            이미 검증된 본문 «확인» 문장으로 보충한다 (이때만 재사용 허용).
         ⑤ render_report — 웹·PDF 공용 pipeline Report로 변환.
+        ⑤-a 품질·안전 판정 — 구조화된 누적 증감률은 원자 claim으로, 나머지는
+           결속되지 않은 공개 내용으로 정직하게 측정한다. 전체 안전 판정은
+           관측으로 남기되 장별 하한은 PARTIAL 표시로 반영한다.
         ⑤-b 중복 검출 경고 — 값+단위(+기간) 반복 후보를 로그로만 남긴다.
            출고를 막지 않는다(아직 오탐률을 사람이 확인 중).
         ⑥ validate_v2 — 내부 키·인용-부록 1:1·요약 존재 3검사 (fail-closed).
@@ -189,6 +349,21 @@ def run_v2(
     for problem in diagram_problems:
         logger.warning("도식 검증에서 뺀 경로 — %s", problem)
 
+    # ②-d 첫 구조화 claim 슬라이스 — 검증된 DART 3개년 표의 원값에서
+    # 누적 증감률을 코드로 재계산한다. AI 산문에서 숫자를 역추출하지 않으며,
+    # 표의 회계범위·원단위·원 payload가 하나라도 빠지면 아무것도 만들지 않는다.
+    verified = append_past_changes_numeric_claims(
+        verified,
+        performance_table,
+        fragments,
+        filing_meta,
+    )
+    # ②-e 새 생성 수치 안전 경계. AI 산문에 숫자·날짜·백분율이 있으면
+    # 의미가 결속된 StructuredClaim/NumericBinding 없이는 공개 후보에서 뺀다.
+    # 산문을 역추출해 가짜 fact로 통과시키지 않는다. 프로그램이 만든 위 누적
+    # 증감률은 동일한 versioned 결속을 재검산한 뒤 그대로 남는다.
+    verified, body_numeric_filtering = enforce_public_numeric_safety(verified)
+
     # ③ 핵심 요약 — «검증된» 본문을 재료로 새로 쓴다 (본문 재탕 금지)
     with_summary = compose_summary(verified, writer_ask)
     summary_draft_count = len(with_summary.summary)
@@ -207,6 +382,16 @@ def run_v2(
         sections=verified.sections,
         summary=tuple(summary)[:SUMMARY_MAX_SENTENCES],
     )
+    # 요약은 새 AI 산문이라 본문과 별도로 같은 경계를 탄다. 미결속 수치를
+    # 제거해 3문장보다 짧아지면 이미 안전 검사를 통과한 본문 확인 문장으로만
+    # 보충한다. 그중 수치 문장은 본문 StructuredClaim을 그대로 상속한다.
+    final, summary_numeric_filtering = enforce_public_numeric_safety(final)
+    if len(final.summary) < SUMMARY_MIN_SENTENCES:
+        final = ComposedReport(
+            sections=final.sections,
+            summary=_supplement_safe_summary(final.summary, verified),
+        )
+    numeric_filtering = body_numeric_filtering.merged(summary_numeric_filtering)
 
     # ⑤ 렌더 — 웹·PDF가 이미 소비하는 공용 구조로
     rendered = render_report(
@@ -226,6 +411,28 @@ def run_v2(
         citation_style=citation_style,
     )
 
+    # ⑤-a 품질·공개 안전 shadow 판정 — 생성 시점에만 한 번 실행한다.
+    # past_changes의 프로그램 생성 누적 증감률은 원자 fact_id·claim slot·원문
+    # 결속을 갖춘 첫 수직 슬라이스다. 나머지 산문·요약·표·도식은 텍스트를
+    # 정규식으로 쪼개 가짜 fact를 만들지 않고 «결속되지 않은 공개 내용»으로
+    # 남긴다. 따라서 전체 안전 결과는 계속 미완성/차단이며, 숫자 문장 경계
+    # 밖의 공개 구조는 결속과 영향 측정 전까지 전체 hard gate로 승격하지 않는다.
+    quality_observation = observe_generation(
+        _generation_quality_candidate(rendered, final)
+    )
+    if not quality_observation.release_allowed:
+        logger.warning(
+            "v2 생성 품질 판정(전체 안전은 관측 전용): 계약=%s · 품질=%s · 안전=%s",
+            quality_observation.contract_version,
+            quality_observation.quality_grade,
+            quality_observation.safety_decision,
+        )
+    rendered = _apply_generation_quality_label(
+        rendered,
+        quality_observation,
+        numeric_filtering,
+    )
+
     # ⑤-b 중복 검출 경고 — «찾아서 로그만 남긴다», 출고는 막지 않는다.
     #     validate_v2 «안»에 넣지 않은 이유는 위 모듈 docstring 참고.
     _log_duplicate_findings(rendered)
@@ -237,4 +444,99 @@ def run_v2(
         report=rendered,
         composed_sentences=draft_body_count + summary_draft_count,
         verified_sentences=_total_sentences(final),
+        quality_observation=quality_observation,
+    )
+
+
+def _generation_quality_candidate(
+    rendered: Report,
+    composed: ComposedReport,
+) -> ReportCandidate:
+    """렌더 결과를 텍스트 역추출 없이 공유 품질 DTO로 투영한다."""
+
+    rendered_sections = {section.cell: section for section in rendered.sections}
+    sections: list[ReportSectionCandidate] = []
+    for section in composed.sections:
+        rendered_section = rendered_sections.get(section.section_id)
+        fact_ids = tuple(rendered_section.fact_ids) if rendered_section else ()
+        bound_fact_ids = set(fact_ids)
+        has_unbound_sentences = any(
+            sentence.structured_claim is None
+            or sentence.structured_claim.fact_id not in bound_fact_ids
+            for sentence in section.sentences
+        )
+        # 표·도식은 아직 셀/행 단위 fact_id 결속이 없다. 섹션 장부에 사실이
+        # 있다는 이유만으로 해당 공개 구조까지 검증됐다고 꾸미지 않는다.
+        has_unbound_structures = bool(
+            section.flow_rows
+            or (rendered_section is not None and rendered_section.tables)
+        )
+        sections.append(
+            ReportSectionCandidate(
+                section_id=section.section_id,
+                fact_ids=fact_ids,
+                notice_only=not section.sentences and not has_unbound_structures,
+                has_unbound_public_content=(
+                    has_unbound_sentences or has_unbound_structures
+                ),
+                public_sentence_count=len(section.sentences),
+            )
+        )
+
+    sources = tuple(
+        SourceDocument(
+            source_id=source.source_id,
+            document_identity=document_identity(source),
+        )
+        for source in rendered.citations
+        if isinstance(source, Source)
+    )
+    facts = tuple(
+        ClaimFact(
+            fact_id=fact.fact_id,
+            section_owner=fact.section_owner,
+            source_id=fact.source_id,
+            source_identity=document_identity_from_parts(
+                document_id=fact.source_document_id,
+                host=fact.source_host,
+                url=fact.source_url,
+            ),
+            verification_state=fact.verification_status or fact.status,
+            claim_slot=fact.claim_slot,
+            evidence_binding_valid=bool(fact.evidence_binding)
+            and fact.evidence_binding == fact_evidence_binding(fact),
+            claim=fact.claim,
+            subject_scope=fact.subject_scope,
+            raw_value=fact.raw_value,
+            calculation=fact.calculation,
+            display_value=fact.display_value,
+            rounding_rule=fact.rounding_rule,
+            numeric_checks=tuple(fact.numeric_checks),
+            metric=fact.metric,
+            period_start=fact.period_start,
+            period_end=fact.period_end,
+            sign=fact.sign,
+            unit=fact.unit,
+            unit_dimension=fact.unit_dimension,
+            formula=fact.formula,
+        )
+        for fact in rendered.fact_records
+    )
+    rendered_fact_ids = {fact.fact_id for fact in rendered.fact_records}
+    summary_fact_ids = tuple(
+        sentence.structured_claim.fact_id
+        for sentence in composed.summary
+        if sentence.structured_claim is not None
+        and sentence.structured_claim.fact_id in rendered_fact_ids
+    )
+    return ReportCandidate(
+        sections=tuple(sections),
+        facts=facts,
+        sources=sources,
+        summary_fact_ids=summary_fact_ids,
+        has_unbound_summary_content=any(
+            sentence.structured_claim is None
+            or sentence.structured_claim.fact_id not in rendered_fact_ids
+            for sentence in composed.summary
+        ),
     )

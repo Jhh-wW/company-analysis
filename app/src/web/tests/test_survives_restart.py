@@ -17,12 +17,16 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
+from src.features.auth import constants as auth_constants
+from src.features.auth import logic as auth_logic
 from src.features.export_pdf.release import ReleasedPdf, prepare_pdf_release
 from src.features.pipeline.canonical_demo import (
     DEMO_COMPANY as CANONICAL_DEMO_COMPANY,
 )
 from src.features.pipeline.demo import DemoPipeline
 from src.features.pipeline.port import Outcome
+from src.features.report_access import constants as report_access_constants
+from src.features.report_access import store as report_access_store
 from src.features.report_standard import CANONICAL_SECTION_IDS, SECTION_BY_ID
 from src.features.storage import db, job_interruptions, reports
 from src.core import clock
@@ -32,6 +36,36 @@ from src.web.routers import reports as reports_router
 
 #: 현재 출고 게이트를 통과하는 1~9장 canonical 데모 회사.
 COMPANY = CANONICAL_DEMO_COMPANY
+_REAL_REQUIRE_REPORT_DELIVERY = job_runtime._require_report_delivery
+
+
+class _OwnedReportId(str):
+    """문자열 호환 report ID와 브라우저 전용 grant를 함께 보존한다."""
+
+    grant_token: str
+
+    def __new__(cls, value: str, grant_token: str):
+        instance = super().__new__(cls, value)
+        instance.grant_token = grant_token
+        return instance
+
+
+def _owner_client(report_id: _OwnedReportId) -> TestClient:
+    client = TestClient(main.app, base_url="https://testserver")
+    client.cookies.set(
+        report_access_constants.PUBLIC_GRANT_COOKIE_NAME,
+        report_id.grant_token,
+    )
+    return client
+
+
+def _admin_client() -> TestClient:
+    client = TestClient(main.app, base_url="https://testserver")
+    session = auth_logic.create_session(
+        "admin@example.com", True, subject="google:restart-test-admin"
+    )
+    client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
+    return client
 
 
 @pytest.fixture
@@ -87,10 +121,14 @@ def _make_report(client: TestClient) -> str:
 @pytest.fixture
 def finished_job():
     """조사를 한 건 끝낸 뒤 «서버를 껐다 켠 것처럼» 메모리를 비운다."""
-    with TestClient(main.app) as client:
+    with TestClient(main.app, base_url="https://testserver") as client:
         job_id = _make_report(client)
+        grant_token = client.cookies.get(
+            report_access_constants.PUBLIC_GRANT_COOKIE_NAME
+        )
+        assert grant_token
     job_runtime._JOBS.clear()          # ★ 재시작 흉내 — 메모리에 있던 것이 전부 사라진다
-    yield job_id
+    yield _OwnedReportId(job_id, grant_token)
 
 
 def test_보고서가_저장소에_남는다(finished_job):
@@ -102,7 +140,7 @@ def test_보고서가_저장소에_남는다(finished_job):
 
 
 def test_재시작_뒤에도_보고서_화면이_열린다(finished_job):
-    with TestClient(main.app) as client:
+    with _owner_client(finished_job) as client:
         response = client.get(f"/result/{finished_job}", follow_redirects=False)
     assert response.status_code == 200
     # 본문 항목이 실제로 그려져야 한다 (껍데기만 뜨면 안 된다)
@@ -126,9 +164,14 @@ def test_기존_UUIDv4_32hex_결과도_재시작_뒤_계속_조회된다(finishe
         saved = reports.load(conn, finished_job)
         assert saved is not None
         reports.save(conn, legacy_uuid_id, "legacy-corp", saved.job, saved)
+        report_access_store.issue_and_bind(
+            conn,
+            existing_token=finished_job.grant_token,
+            run_id=legacy_uuid_id,
+        )
     job_runtime._JOBS.clear()
 
-    with TestClient(main.app) as client:
+    with _owner_client(finished_job) as client:
         response = client.get(f"/result/{legacy_uuid_id}", follow_redirects=False)
 
     assert response.status_code == 200
@@ -136,7 +179,7 @@ def test_기존_UUIDv4_32hex_결과도_재시작_뒤_계속_조회된다(finishe
 
 
 def test_재시작_뒤_완료된_진행주소는_저장된_결과로_복구한다(finished_job):
-    with TestClient(main.app) as client:
+    with _owner_client(finished_job) as client:
         page = client.get(f"/progress/{finished_job}", follow_redirects=False)
         state = client.get(f"/api/progress/{finished_job}")
 
@@ -154,7 +197,7 @@ def test_재시작_뒤_완료된_진행주소는_저장된_결과로_복구한�
 
 def test_재시작으로_미완료_진행정보가_사라지면_원인과_재시도를_보여준다():
     job_runtime._JOBS.clear()
-    with TestClient(main.app) as client:
+    with _admin_client() as client:
         page = client.get("/progress/interrupted-job", follow_redirects=False)
         state = client.get("/api/progress/interrupted-job")
 
@@ -181,7 +224,7 @@ def test_종료시간을_넘긴_작업은_재시작뒤_명시적_중단상태로
         )
     job_runtime._JOBS.clear()
 
-    with TestClient(main.app) as client:
+    with _admin_client() as client:
         page = client.get(f"/progress/{job_id}", follow_redirects=False)
         state = client.get(f"/api/progress/{job_id}")
 
@@ -195,7 +238,7 @@ def test_종료시간을_넘긴_작업은_재시작뒤_명시적_중단상태로
 def test_없는_진행번호의_410은_번호나_내부정보를_반사하지않는다():
     requested = "attacker-controlled-missing-job-secret"
     job_runtime._JOBS.clear()
-    with TestClient(main.app) as client:
+    with _admin_client() as client:
         page = client.get(f"/progress/{requested}", follow_redirects=False)
         state = client.get(f"/api/progress/{requested}")
 
@@ -214,7 +257,7 @@ def test_보고서_DB조회장애는_없는_job_410과_구분해_503_no_store로
         raise OSError("시험용 DB 조회 장애")
 
     job_runtime._JOBS.clear()
-    with TestClient(main.app) as client:
+    with _admin_client() as client:
         monkeypatch.setattr(job_runtime.report_store, "load", broken_load)
         page = client.get("/progress/db-outage", follow_redirects=False)
         state = client.get("/api/progress/db-outage")
@@ -230,38 +273,38 @@ def test_보고서_DB조회장애는_없는_job_410과_구분해_503_no_store로
     assert "새 조사를 시작하지 말고" in state.json()["error"]
 
 
-def test_보고서저장실패는_재시작복구불가를_알리고_새로고침으로_재시도한다(
+def test_새보고서저장실패는_불변출고없이_임시화면이나_재렌더로_열지않는다(
     monkeypatch,
 ):
+    monkeypatch.setattr(
+        job_runtime,
+        "_require_report_delivery",
+        _REAL_REQUIRE_REPORT_DELIVERY,
+    )
     original_save = job_runtime.report_store.insert_new
 
     def broken_save(*_args, **_kwargs):
         raise OSError("시험용 저장 장애")
 
-    with TestClient(main.app) as client:
+    with TestClient(main.app, base_url="https://testserver") as client:
         monkeypatch.setattr(job_runtime.report_store, "insert_new", broken_save)
         job_id = _make_report(client)
         first = client.get(f"/result/{job_id}")
 
-        assert first.status_code == 200
-        assert "아직 저장되지 않았습니다" in first.text
-        assert "서버가 다시 시작되면 복구할 수 없습니다" in first.text
-        assert "저장 다시 시도" in first.text
-        assert "지금 PDF도 내려받아 보관해 주세요" in first.text
-        assert "지금 PDF 보고서 받기" in first.text
-        assert "DOCX" not in first.text
+        assert first.status_code == 503
+        assert "저장된 보고서를 확인할 수 없습니다" in first.text
         assert job_runtime._JOBS[job_id].report_persisted is False
+        assert job_runtime._JOBS[job_id].delivery_persisted is False
 
         monkeypatch.setattr(job_runtime.report_store, "insert_new", original_save)
-        retried = client.get(f"/result/{job_id}")
-        assert retried.status_code == 200
-        assert "아직 저장되지 않았습니다" not in retried.text
-        assert job_runtime._JOBS[job_id].report_persisted is True
+        # 새로고침 GET이 저장·승인·PDF 생성을 대신하면 같은 결함이 되살아난다.
+        retried = client.get(f"/result/{job_id}", follow_redirects=False)
+        assert retried.status_code == 503
+        assert job_runtime._JOBS[job_id].report_persisted is False
 
         job_runtime._JOBS.clear()
-        recovered = client.get(f"/api/progress/{job_id}")
-        assert recovered.status_code == 200
-        assert recovered.json()["recovered"] is True
+        restarted = client.get(f"/result/{job_id}", follow_redirects=False)
+        assert restarted.status_code == 503
 
 
 def test_워드_다운로드는_재시작_뒤에도_410으로_닫혀_있다(finished_job):
@@ -275,7 +318,21 @@ def test_워드_다운로드는_재시작_뒤에도_410으로_닫혀_있다(fini
 def test_재시작_뒤에도_PDF로_내려받을_수_있다(
     finished_job, approved_pdf_route
 ):
-    with TestClient(main.app) as client:
+    # 이 파일의 공통 fixture는 unrelated 웹 시험을 빠르게 하려고 완료 adapter를
+    # 값싼 성공으로 바꾼다. PDF 재시작 계약만큼은 실제 불변 delivery를 먼저
+    # 확정해, 원본 없는 legacy를 오늘 renderer로 만드는 옛 동작에 기대지 않는다.
+    with db.connect() as conn:
+        saved = reports.load(conn, finished_job)
+    assert saved is not None
+    reports_router.finalize_new_report_delivery(
+        report_id=finished_job,
+        corp_id="restart-pdf-corp",
+        billing_bucket_id="public",
+        report=saved,
+        actual_models=("deterministic-demo",),
+        reused_from_cache=False,
+    )
+    with _owner_client(finished_job) as client:
         response = client.get(
             f"/download/pdf/{finished_job}", follow_redirects=False
         )
@@ -298,12 +355,18 @@ def test_재시작_뒤에도_PDF로_내려받을_수_있다(
 
 def test_PDF_저장소_조회장애는_503_no_store로_응답한다(monkeypatch):
     def unavailable(_job_id):
-        raise job_runtime.ReportStoreUnavailable("시험용 저장소 장애")
+        raise reports_router.report_delivery_adapter.DeliveryAdapterError(
+            "시험용 저장소 장애"
+        )
 
     job_runtime._JOBS.clear()
-    monkeypatch.setattr(job_runtime, "_load_saved_report", unavailable)
+    monkeypatch.setattr(
+        reports_router.report_delivery_adapter,
+        "load_legacy_public_report",
+        unavailable,
+    )
 
-    with TestClient(main.app) as client:
+    with _admin_client() as client:
         response = client.get(
             "/download/pdf/storage-outage", follow_redirects=False
         )
@@ -319,7 +382,7 @@ def test_PDF_저장소_조회장애는_503_no_store로_응답한다(monkeypatch)
 
 def test_없는_번호는_첫_화면으로_돌려보낸다():
     """★ 남의 번호를 찍어 넣어도 «남의 보고서»가 열리면 안 된다."""
-    with TestClient(main.app) as client:
+    with _admin_client() as client:
         for path in ("/result/없는번호zzz", "/download/pdf/없는번호zzz"):
             response = client.get(path, follow_redirects=False)
             assert response.status_code == 303, f"{path} 가 열렸습니다"
@@ -336,7 +399,7 @@ def test_없는_번호는_첫_화면으로_돌려보낸다():
 
 
 def test_공유링크와_보고서_안내가_동시에_있어도_둘다_표시한다():
-    with TestClient(main.app) as client:
+    with TestClient(main.app, base_url="https://testserver") as client:
         response = client.get("/?share_status=missing&report_status=unavailable")
 
     assert response.status_code == 200

@@ -31,22 +31,17 @@ import logging
 from pathlib import Path
 from typing import Final
 
-from src.core import paths
+from src.core import deployment_identity, paths
 
 logger = logging.getLogger(__name__)
 
-#: 보고서 «모양»을 정하는 파일들. 순서를 고정한다 — 순서가 흔들리면 같은
-#: 코드에서도 다른 지문이 나와 캐시가 영영 안 맞는다.
-_SHAPING_MODULES: Final[tuple[str, ...]] = (
-    "constants.py",
-    "logic.py",
-    "verify.py",
-    "dedupe.py",
-    "diagram_check.py",
-    "render.py",
-    "validate.py",
-    "pipeline.py",
-    "port.py",
+#: 보고서 «모양»을 정하는 composer 파일들. 사람이 목록에 새 모듈을 넣는
+#: 것을 기억하게 하지 않고 디렉터리에서 계산한다. 시험·패키지 표식·지문기
+#: 자신만 제외하며 이름 정렬로 같은 코드의 순서를 고정한다.
+_SHAPING_MODULES: Final[tuple[str, ...]] = tuple(
+    path.name
+    for path in sorted(Path(__file__).resolve().parent.glob("*.py"))
+    if path.name not in {"__init__.py", "build_id.py"}
 )
 
 #: 보고서 «내용»을 만드는 파일들. 프로젝트 뿌리 기준 경로다.
@@ -66,6 +61,8 @@ _CONTENT_MODULES: Final[tuple[str, ...]] = (
     "analysis_engine/tools/run_pilot.py",
     # v2 수집 흐름·회사 판정·캐시 열쇠
     "app/src/features/pipeline/real.py",
+    # 구조화 3개년 표의 raw 값·회계범위 계약
+    "app/src/features/company_performance/logic.py",
     # 조각 보정과 확장
     "app/src/features/filingclean/logic.py",
     "app/src/features/filingclean/extra.py",
@@ -77,6 +74,15 @@ _CONTENT_MODULES: Final[tuple[str, ...]] = (
     "app/src/features/report_standard/constants.py",
     "app/src/features/report_standard/section_content.py",
     "app/src/features/report_standard/publish.py",
+    # composer와 report_standard가 함께 쓰는 품질·수치·근거 결속 정본.
+    # 새 모듈을 추가해도 지문 목록을 손으로 고치지 않도록 계산한다.
+    *tuple(
+        f"app/src/shared/report_quality/{path.name}"
+        for path in sorted(
+            (paths.PROJECT_ROOT / "app/src/shared/report_quality").glob("*.py")
+        )
+        if path.name != "__init__.py"
+    ),
 )
 
 #: 지문 길이. 충돌 확률보다 로그 가독성을 우선한 값이다 — 16자리 16진수는
@@ -108,6 +114,14 @@ def engine_build_id() -> str:
     읽을것: list[tuple[str, Path]] = [(이름, here / 이름) for 이름 in _SHAPING_MODULES]
     읽을것 += [(이름, 뿌리 / 이름) for 이름 in _CONTENT_MODULES]
     digest = hashlib.sha256()
+    # 배포 commit은 손으로 적은 파일 목록의 마지막 안전망이다. 새 생성 모듈을
+    # `_CONTENT_MODULES`에 넣는 것을 잊어도 다른 revision이면 캐시가 갈린다.
+    # 로컬처럼 commit을 모르는 환경에서는 기존 파일 지문만 사용한다.
+    release_commit = deployment_identity.deployed_commit()
+    if release_commit:
+        digest.update(b"deployment-commit\x00")
+        digest.update(release_commit.encode("ascii"))
+        digest.update(b"\x00")
     for name, 파일 in 읽을것:
         try:
             digest.update(name.encode("utf-8"))

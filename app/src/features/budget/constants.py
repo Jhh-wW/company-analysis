@@ -119,3 +119,10 @@ PAID_PHASE_PROVIDER_BUDGET_KRW: Final[dict[str, float]] = {
     SPEND_PHASE_OCR: 100.0,
     SPEND_PHASE_PIPELINE: 900.0,
 }
+
+#: 유료 phase DB lease의 기본 수명. 현재 가장 긴 단일 provider timeout(180초)보다
+#: 충분히 길고, 정상 조사 전체가 외부 호출 사이의 로컬 처리 때문에 잘못 만료되지
+#: 않도록 1시간으로 둔다. 각 provider 전송 직전에 heartbeat로 다시 연장한다.
+#: 서버가 죽어도 이 시간이 지나면 ACTIVE 예약은 자동으로 확정비용이 아니라
+#: ``전송 의도가 남은 attempt의 보수부채``로만 축소된다.
+PAID_PHASE_LEASE_SEC: Final[int] = 3600

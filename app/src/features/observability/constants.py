@@ -33,6 +33,15 @@ DEFAULT_RECORDS_RELATIVE_PATH: Final[str] = "data/observability/runs.jsonl"
 #:   같은 방식으로 격리돼 있었는데 **이력만 빠져 있었다.**
 ENV_RECORDS_PATH: Final[str] = "OBSERVABILITY_RECORDS_PATH"
 
+# JSONL은 새 SQLite 관측 정본 도입 전 자료를 읽는 호환 사본이다. 1GB 운영
+# 디스크에서 이 파일이 끝없이 자라 DB·불변 PDF까지 쓰지 못하게 해서는 안 된다.
+# 정본 전환 뒤 신규 기록은 SQLite에만 남고, 옛 실행기에서도 이 물리 상한을 넘지 않는다.
+MAX_RECORDS_FILE_BYTES: Final[int] = 64 * 1024 * 1024
+
+# RunRecord의 길이 제한과 고정 필드 수보다 넉넉한 한 줄 상한. 직접 오염된 거대한
+# 한 줄이 스트리밍 읽기 한 번으로 큰 메모리를 잡는 것도 막는다.
+MAX_RECORD_LINE_BYTES: Final[int] = 16 * 1024
+
 # ══════════════════════════════════════════════════════════
 # 이력 1행 — 항목별 허용값 (정본 §이력 1행 13종)
 # ══════════════════════════════════════════════════════════

@@ -65,5 +65,11 @@ def _approved_pdf_release_for_unrelated_web_contracts(monkeypatch):
         "_release_state",
         lambda **_kwargs: (object(), released_pdf),
     )
+    # 새 완료 경계는 실제 PDF 전 페이지 렌더·검사를 포함한다. 링크 길이·CSRF처럼
+    # 그 경계와 무관한 시험 수백 건이 매번 PDF를 만들면 짧은 polling 계약까지
+    # 렌더 시간에 종속된다. 전용 report_delivery 통합 시험이 실제 경계를 검증하고,
+    # 나머지는 기존 보고서 경로를 쓰도록 두 worker 함수만 값싼 성공으로 격리한다.
+    monkeypatch.setattr(job_runtime, "_require_report_delivery", lambda _job: True)
+    monkeypatch.setattr(job_runtime, "_finalize_report_delivery", lambda _job: True)
     yield
     job_runtime._start_job_runtime()

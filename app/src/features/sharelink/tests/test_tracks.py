@@ -5,7 +5,7 @@
   사용자가 직접 지적해 잡힌 구멍이다 (2026-08-16).
 
 ★ 갈래별 상한
-  관리자 5,000 / 초대된 친구 성공 3건 / 열쇠 링크 3,000 / 모르는 손님 **0**
+  관리자 5,000 / 초대된 친구 3,000원+성공 3건 / 열쇠 링크 3,000 / 모르는 손님 **0**
 """
 
 from __future__ import annotations
@@ -50,7 +50,12 @@ def test_모르는_손님은_상한이_0원이다():
 
 def test_초대_명단에_있어야_친구다():
     assert _갈래(email=_친구, is_member=True) is Track.MEMBER
-    assert budget_of(Track.MEMBER) is PER_USER_DAILY_BUDGET_KRW is None
+    assert budget_of(Track.MEMBER) == PER_USER_DAILY_BUDGET_KRW == 3000.0
+
+
+def test_친구에게도_실패를_포함한_유료_단계_상한이_있다():
+    """성공 3건만 세면 실패를 반복해 성공 0건인 채 비용을 무한히 쓸 수 있다."""
+    assert budget_of(Track.MEMBER) > 0
 
 
 def test_명단에서_빼면_바로_모르는_손님이_된다():

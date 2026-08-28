@@ -19,6 +19,12 @@ ASGIApp = Callable[
     Awaitable[None],
 ]
 HOST_INDEPENDENT_HEALTH_PATHS = frozenset({"/healthz", "/readyz"})
+# URL 안에 권한을 담아 짧은 쿠키·세션으로 교환하는 입구다. 응답이 이동이든
+# 거절 화면이든 원래 URL을 다음 same-origin 요청의 Referer로 보내면 접근 로그에
+# root token·OAuth code/state·LINK가 다시 생길 수 있으므로 경로 전체를 닫는다.
+SENSITIVE_EXCHANGE_PATHS = frozenset(
+    {"/auth/callback", "/auth/local-demo/start"}
+)
 
 CSP_POLICY = (
     "default-src 'self'; "
@@ -53,10 +59,10 @@ class ResponseSecurityMiddleware:
                 headers["X-Content-Type-Options"] = "nosniff"
                 headers["X-Frame-Options"] = "DENY"
                 path = str(scope.get("path", ""))
-                status = int(message.get("status", 0))
                 content_type = headers.get("Content-Type", "").casefold()
-                if path.startswith("/k/") and 300 <= status < 400:
-                    # URL 자체가 capability인 최초 303은 다음 문서에 경로를 넘기지 않는다.
+                if path.startswith("/k/") or path in SENSITIVE_EXCHANGE_PATHS:
+                    # URL 자체가 capability인 교환 응답은 다음 문서에 원래 경로와
+                    # query를 넘기지 않는다. 실패 응답도 같은 비밀 URL을 보존한다.
                     headers["Referrer-Policy"] = CAPABILITY_REDIRECT_REFERRER_POLICY
                 elif content_type.startswith("text/html"):
                     # Chromium은 no-referrer 문서의 same-origin form POST Origin도

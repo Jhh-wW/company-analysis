@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 from io import BytesIO
+import re
 from typing import Any
+import unicodedata
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -25,11 +27,46 @@ _BLUE = "DCE6F1"
 _PALE = "F6F8FB"
 _WHITE = "FFFFFF"
 _THIN = Side(style="thin", color="B8C2CC")
+_EXCEL_FORMULA_PREFIXES = frozenset("=+-@")
+_ILLEGAL_XLSX_CONTROLS = re.compile(r"[\x00-\x08\x0B-\x0C\x0E-\x1F]")
 _COMPANY_LABELS = {
     store.COMPANY_LISTED: "상장사",
     store.COMPANY_AUDITED: "비상장 외감",
     store.COMPANY_UNDECIDED: "판정 전 종료",
 }
+
+
+def _safe_xlsx_value(value: Any) -> Any:
+    """외부 문자열이 관리자 PC에서 Excel 명령으로 실행되지 않게 한다.
+
+    XLSX의 문자열은 CSV가 아니어도 ``=``로 시작하면 수식으로 저장될 수 있다.
+    Excel이 앞에서 무시할 수 있는 공백·제어·서식 문자 뒤의 식별 문자까지 보고
+    텍스트 표식인 작은따옴표를 붙인다. 숫자 같은 비문자 값은 서식을 잃지 않게
+    그대로 둔다. XML에 넣을 수 없는 제어 문자는 파일 전체 생성을 깨지 않도록
+    대체 문자로 바꾼다.
+    """
+
+    if not isinstance(value, str):
+        return value
+    first_visible = next(
+        (
+            character
+            for character in value
+            if not character.isspace()
+            and not unicodedata.category(character).startswith("C")
+        ),
+        "",
+    )
+    safe_text = _ILLEGAL_XLSX_CONTROLS.sub("�", value)
+    if first_visible in _EXCEL_FORMULA_PREFIXES:
+        return "'" + safe_text
+    return safe_text
+
+
+def _write_cell(sheet, row: int, column: int, value: Any):
+    """주간 파일의 모든 셀 값을 단 하나의 출력 경계로 쓴다."""
+
+    return sheet.cell(row, column, _safe_xlsx_value(value))
 
 
 def build_weekly_workbook(conn, *, week_start: str) -> bytes:
@@ -240,7 +277,7 @@ def _write_overview(sheet, *, start: str, end: str, rows: list[tuple[Any, ...]])
     _write_header(sheet, row=4, headers=headers)
     for index, row in enumerate(rows, start=5):
         for column, value in enumerate(row, start=1):
-            sheet.cell(index, column, value)
+            _write_cell(sheet, index, column, value)
         sheet.cell(index, 5).number_format = "#,##0"
     _finish_sheet(sheet, max_row=max(5, 4 + len(rows)), max_col=6, widths=(20, 12, 12, 12, 20, 24))
 
@@ -252,14 +289,14 @@ def _write_feedback_sheet(sheet, *, start: str, end: str, feedback_rows, issue_r
     row_number = 5
     for row in feedback_rows:
         for column, value in enumerate(row, start=1):
-            sheet.cell(row_number, column, value)
+            _write_cell(sheet, row_number, column, value)
         row_number += 1
     if not feedback_rows:
-        sheet.cell(row_number, 1, "이 기간의 설문이 없습니다.")
+        _write_cell(sheet, row_number, 1, "이 기간의 설문이 없습니다.")
         row_number += 1
     row_number += 1
     sheet.merge_cells(start_row=row_number, start_column=1, end_row=row_number, end_column=5)
-    section = sheet.cell(row_number, 1, "오류 신고")
+    section = _write_cell(sheet, row_number, 1, "오류 신고")
     section.font = Font(bold=True, color=_WHITE)
     section.fill = PatternFill("solid", fgColor=_NAVY)
     row_number += 1
@@ -268,10 +305,10 @@ def _write_feedback_sheet(sheet, *, start: str, end: str, feedback_rows, issue_r
     row_number += 1
     for row in issue_rows:
         for column, value in enumerate(row, start=1):
-            sheet.cell(row_number, column, value)
+            _write_cell(sheet, row_number, column, value)
         row_number += 1
     if not issue_rows:
-        sheet.cell(row_number, 1, "이 기간의 오류 신고가 없습니다.")
+        _write_cell(sheet, row_number, 1, "이 기간의 오류 신고가 없습니다.")
         row_number += 1
     _finish_sheet(sheet, max_row=row_number, max_col=8, widths=(20, 10, 28, 24, 42, 42, 34, 34))
     sheet.freeze_panes = "A5"
@@ -282,23 +319,23 @@ def _write_table_sheet(sheet, *, title: str, subtitle: str, headers, rows, width
     _write_header(sheet, row=4, headers=headers)
     for row_number, row in enumerate(rows, start=5):
         for column, value in enumerate(row, start=1):
-            cell = sheet.cell(row_number, column, value)
+            cell = _write_cell(sheet, row_number, column, value)
             if column in number_columns:
                 cell.number_format = number_columns[column]
     if not rows:
-        sheet.cell(5, 1, "이 기간의 기록이 없습니다.")
+        _write_cell(sheet, 5, 1, "이 기간의 기록이 없습니다.")
     _finish_sheet(sheet, max_row=max(5, 4 + len(rows)), max_col=len(headers), widths=widths)
 
 
 def _write_title(sheet, title: str, subtitle: str, columns: int) -> None:
     sheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=columns)
-    title_cell = sheet.cell(1, 1, title)
+    title_cell = _write_cell(sheet, 1, 1, title)
     title_cell.font = Font(size=16, bold=True, color=_WHITE)
     title_cell.fill = PatternFill("solid", fgColor=_NAVY)
     title_cell.alignment = Alignment(horizontal="left", vertical="center")
     sheet.row_dimensions[1].height = 26
     sheet.merge_cells(start_row=2, start_column=1, end_row=2, end_column=columns)
-    subtitle_cell = sheet.cell(2, 1, subtitle)
+    subtitle_cell = _write_cell(sheet, 2, 1, subtitle)
     subtitle_cell.font = Font(italic=True, color="4A5568")
     subtitle_cell.fill = PatternFill("solid", fgColor=_PALE)
     subtitle_cell.alignment = Alignment(wrap_text=True, vertical="center")
@@ -307,7 +344,7 @@ def _write_title(sheet, title: str, subtitle: str, columns: int) -> None:
 
 def _write_header(sheet, *, row: int, headers) -> None:
     for column, header in enumerate(headers, start=1):
-        cell = sheet.cell(row, column, header)
+        cell = _write_cell(sheet, row, column, header)
         cell.font = Font(bold=True, color=_WHITE)
         cell.fill = PatternFill("solid", fgColor="2F5597")
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)

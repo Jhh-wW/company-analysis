@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -11,19 +12,31 @@ from fastapi.testclient import TestClient
 
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
+from src.core import clock
 from src.features.export_pdf.logic import PDFGenerationError
-from src.features.export_pdf.automatic_release import AutomaticGateStopped
 from src.features.export_pdf.release import prepare_pdf_release
 from src.features.export_pdf import release_store as pdf_release_store
+from src.features.export_notion.notion import NotionExportResult
 from src.features.pipeline.demo import DemoPipeline, available_companies
 from src.features.pipeline.port import Outcome, UserInput
-from src.web import job_runtime
+from src.web import job_runtime, report_delivery_adapter
 from src.web.main import app
 from src.web.routers import reports as reports_router
 from src.features.storage import db as storage_db
+from src.features.storage import reports as report_store
 
 
 _REAL_RELEASE_STATE = reports_router._release_state
+
+
+def _use_current_admin(client: TestClient) -> auth_logic.Session:
+    """PDF 내용 계약 시험에 현재 관리자라는 최소 명시 권한을 설치한다."""
+
+    session = auth_logic.create_session(
+        "admin@example.com", True, subject="test:pdf-route-admin"
+    )
+    client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
+    return session
 
 
 def _fake_candidate():
@@ -205,6 +218,26 @@ def _demo_report():
     return result.report
 
 
+def _persist_immutable_delivery(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    job_id: str,
+    report,
+):
+    """시험 보고서를 운영과 같은 자동검사·불변 PDF 완료 경계로 확정한다."""
+
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / f"artifacts-{job_id}"))
+    return reports_router.finalize_new_report_delivery(
+        report_id=job_id,
+        corp_id="demo-corp",
+        billing_bucket_id="test:pdf-route",
+        report=report,
+        actual_models=("deterministic-demo",),
+        reused_from_cache=False,
+    )
+
+
 @pytest.mark.parametrize(
     ("state", "expected_status"),
     (("missing", 303), ("expired", 410), ("storage", 503)),
@@ -225,20 +258,25 @@ def test_PDF_선행차단은_generator를_호출하지_않는다(
     def unavailable(_job_id):
         raise job_runtime.ReportStoreUnavailable("시험용 저장소 장애")
 
+    job_id = uuid.uuid4().hex
     job_runtime._JOBS.clear()
     monkeypatch.setattr(reports_router, "prepare_pdf_release", forbidden_generator)
     if state == "missing":
         monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: None)
         monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
     elif state == "expired":
-        monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
+        with storage_db.connect() as conn:
+            report_store.save(conn, job_id, "legacy-corp", report.job, report)
         monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: True)
     else:
-        monkeypatch.setattr(job_runtime, "_load_saved_report", unavailable)
+        monkeypatch.setattr(
+            report_delivery_adapter, "load_public_delivery_intent", unavailable
+        )
 
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver") as client:
+        _use_current_admin(client)
         response = client.get(
-            f"/download/pdf/{state}-report", follow_redirects=False
+            f"/download/pdf/{job_id}", follow_redirects=False
         )
 
     assert response.status_code == expected_status
@@ -264,7 +302,7 @@ def test_PDF_generator_오류는_원문없는_generic_503이다(
 ):
     report = _demo_report()
     company_secret = report.company
-    job_id = f"pdf-generation-failure-{uuid.uuid4().hex}"
+    job_id = uuid.uuid4().hex
 
     def failed_generator(_report):
         raise error
@@ -284,10 +322,13 @@ def test_PDF_generator_오류는_원문없는_generic_503이다(
     )
     caplog.set_level("INFO", logger=reports_router.__name__)
 
-    with TestClient(app) as client:
-        response = client.get(
-            f"/download/pdf/{job_id}",
-            follow_redirects=False,
+    with TestClient(app, base_url="https://testserver") as client:
+        session = _use_current_admin(client)
+        # 새 PDF GET은 저장된 최초 bytes만 읽는다. 동적 generator 실패 화면은
+        # 아직 자동출고를 확인하는 관리자 Notion POST 경계에서 검증한다.
+        response = client.post(
+            f"/notion/{job_id}",
+            data={"csrf_token": auth_logic.csrf_token_for_session(session.token)},
             headers={"X-Request-ID": "pdf/test request 01"},
         )
 
@@ -308,14 +349,22 @@ def test_PDF_generator_오류는_원문없는_generic_503이다(
     assert f"error_type={type(error).__name__}" in caplog.text
 
 
-def test_필수자동검사를_통과하면_웹과PDF가_같이자동출고된다(monkeypatch):
+def test_필수자동검사를_통과하면_웹과PDF가_같이자동출고된다(
+    monkeypatch,
+    tmp_path: Path,
+):
     report = _demo_report()
-    job_id = "pdf-release-unapproved"
-    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
-    monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
-    monkeypatch.setattr(reports_router, "_release_state", _REAL_RELEASE_STATE)
+    job_id = uuid.uuid4().hex
+    persisted = _persist_immutable_delivery(
+        monkeypatch,
+        tmp_path,
+        job_id=job_id,
+        report=report,
+    )
+    assert persisted.artifact is not None
 
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver") as client:
+        _use_current_admin(client)
         download = client.get(f"/download/pdf/{job_id}", follow_redirects=False)
         public_result = client.get(f"/result/{job_id}", follow_redirects=False)
 
@@ -327,24 +376,80 @@ def test_필수자동검사를_통과하면_웹과PDF가_같이자동출고된�
     assert len(download.headers["x-pdf-release-record"]) == 64
 
 
-def test_자동검사하나실패하면_웹PDFNotion을_모두차단한다(monkeypatch):
+def test_완료Delivery의_Notion은_저장승인본만_쓰고_동적출고를_다시하지않는다(
+    monkeypatch,
+    tmp_path: Path,
+):
     report = _demo_report()
-    job_id = f"auto-gate-stopped-{uuid.uuid4().hex}"
-    session = auth_logic.create_session("admin@example.com", True)
+    job_id = uuid.uuid4().hex
+    _persist_immutable_delivery(
+        monkeypatch,
+        tmp_path,
+        job_id=job_id,
+        report=report,
+    )
+    sent_companies: list[str] = []
 
-    def stopped(**_kwargs):
-        raise AutomaticGateStopped(("forced mandatory check failure",))
+    def forbidden_dynamic_release(*_args, **_kwargs):
+        raise AssertionError("완료 Delivery를 오늘 검사기로 다시 출고했습니다")
 
-    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
-    monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
-    monkeypatch.setattr(reports_router, "_release_state", stopped)
-    cookies = {auth_constants.SESSION_COOKIE_NAME: session.token}
-    with TestClient(app) as client:
-        web = client.get(f"/result/{job_id}", cookies=cookies)
-        pdf = client.get(f"/download/pdf/{job_id}", cookies=cookies)
+    def success(stored_report, **_kwargs):
+        sent_companies.append(stored_report.company)
+        return NotionExportResult(
+            success=True,
+            page_id="stored-delivery-page",
+            page_url="https://notion.example/stored-delivery-page",
+        )
+
+    monkeypatch.setattr(reports_router, "_release_state", forbidden_dynamic_release)
+    monkeypatch.setattr(reports_router, "send_report_to_notion", success)
+    monkeypatch.setattr(
+        job_runtime,
+        "_link_expired",
+        lambda _report: (_ for _ in ()).throw(
+            AssertionError("새 Delivery 만료를 보고서 생성일로 판정했습니다")
+        ),
+    )
+
+    with TestClient(app, base_url="https://testserver") as client:
+        session = _use_current_admin(client)
+        response = client.post(
+            f"/notion/{job_id}",
+            data={"csrf_token": auth_logic.csrf_token_for_session(session.token)},
+        )
+
+    assert response.status_code == 200
+    assert "노션으로 보냈습니다" in response.text
+    assert sent_companies == [report.company]
+
+
+def test_자동검사하나실패하면_웹PDFNotion을_모두차단한다(monkeypatch):
+    job_id = uuid.uuid4().hex
+    session = auth_logic.create_session(
+        "admin@example.com", True, subject="test:failed-delivery-admin"
+    )
+
+    report_delivery_adapter.require_public_delivery(
+        job_id,
+        required_at=clock.now_kst(),
+    )
+    report_delivery_adapter.fail_public_delivery(
+        job_id,
+        failure_code=reports_router._DELIVERY_AUTOMATIC_GATE_BLOCKED,
+        failed_at=clock.now_kst(),
+    )
+
+    def forbidden_legacy_path(*_args, **_kwargs):
+        raise AssertionError("실패한 새 Delivery가 옛 동적 출고 경로로 우회했습니다")
+
+    monkeypatch.setattr(job_runtime, "_load_saved_report", forbidden_legacy_path)
+    monkeypatch.setattr(reports_router, "_release_state", forbidden_legacy_path)
+    with TestClient(app, base_url="https://testserver") as client:
+        client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
+        web = client.get(f"/result/{job_id}")
+        pdf = client.get(f"/download/pdf/{job_id}")
         notion = client.post(
             f"/notion/{job_id}",
-            cookies=cookies,
             data={"csrf_token": auth_logic.csrf_token_for_session(session.token)},
         )
 
@@ -354,23 +459,17 @@ def test_자동검사하나실패하면_웹PDFNotion을_모두차단한다(monke
         assert "현재 보고서 화면은 그대로" not in response.text
 
 
-def test_수동승인은410이고_자동검사객체만_웹과PDF를_연다(monkeypatch):
+def test_수동승인은410이고_자동검사객체만_웹과PDF를_연다(
+    monkeypatch,
+    tmp_path: Path,
+):
     report = _demo_report()
-    job_id = f"pdf-release-approved-{uuid.uuid4().hex}"
-    release_errors: list[str] = []
-    real_pending_response = reports_router._pdf_review_pending_response
-
-    def capture_release_error(request, error, **kwargs):
-        release_errors.append(str(error))
-        return real_pending_response(request, error, **kwargs)
-
-    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
-    monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
-    monkeypatch.setattr(reports_router, "_release_state", _REAL_RELEASE_STATE)
-    monkeypatch.setattr(
-        reports_router,
-        "_pdf_review_pending_response",
-        capture_release_error,
+    job_id = uuid.uuid4().hex
+    _persist_immutable_delivery(
+        monkeypatch,
+        tmp_path,
+        job_id=job_id,
+        report=report,
     )
     monkeypatch.setenv(
         auth_constants.ENV_ADMIN_EMAILS,
@@ -401,7 +500,11 @@ def test_수동승인은410이고_자동검사객체만_웹과PDF를_연다(monk
         role: {auth_constants.SESSION_COOKIE_NAME: session.token}
         for role, session in sessions.items()
     }
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver") as client:
+        # 이후 result/PDF GET도 같은 현재 관리자 세션을 명시적으로 쓴다.
+        client.cookies.set(
+            auth_constants.SESSION_COOKIE_NAME, sessions["fact"].token
+        )
         review = client.get(f"/review/pdf/{job_id}", cookies=cookies["fact"])
         assert review.status_code == 410
 

@@ -7,9 +7,9 @@
   - 출처 부록: 실제 인용된 조각만으로 만들며, 번호는 본문 `[n]`과 1:1이다.
 ★ import 방향: composer → pipeline.port / provenance.sources는 «데이터 계약
   재사용»만이다(생성 함수·게이트 호출 없음). report_standard·publish는 import
-  하지 않는다. report_standard의 SectionContentBlock은 FactRecord 원장 투영
-  전용이라 v2 산문에는 구조적으로 맞지 않아 쓰지 않는다 — v2 본문은 기존
-  prose_lines 경로(웹·PDF 공통)를 그대로 탄다.
+  하지 않는다. v2 산문은 prose_lines 경로(웹·PDF 공통)를 그대로 타되,
+  구조화 근거가 있는 프로그램 생성 claim만 같은 변환에서 FactRecord 원장에도
+  결속한다. 일반 AI 산문은 근거 계약이 없으므로 FactRecord를 꾸며내지 않는다.
 ★ 여기는 «변환»만 한다. 거짓 검증은 3-2 verify.py, 출고 검증은 validate.py 몫.
   닫힌 정규식 게이트 없음 — 문장 내용을 거르는 검사를 하지 않는다.
 """
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final, Optional
 
 from src.core.citations import citation_number
@@ -35,6 +35,11 @@ from src.features.composer.constants import (
     OPERATIONS_FLOW_SECTION_ID,
     DART_DOCUMENT_HOST,
     DART_DOCUMENT_URL_TEMPLATE,
+    DART_FINANCIAL_API_DOCUMENT_ID,
+    DART_FINANCIAL_API_HOST,
+    DART_FINANCIAL_API_LABEL,
+    DART_FINANCIAL_API_PREFIX,
+    DART_FINANCIAL_API_URL,
     DEFAULT_CITATION_STYLE,
     GRADE_INTERPRETED,
     SECTION_IDS,
@@ -49,6 +54,7 @@ from src.features.composer.port import (
     PerformanceTable,
 )
 from src.features.pipeline.port import (
+    FactRecord,
     Grade,
     Report,
     ReportSection,
@@ -56,6 +62,11 @@ from src.features.pipeline.port import (
     SummaryItem,
 )
 from src.features.provenance.sources import Source, SourceKind
+from src.shared.report_quality.fact_binding import fact_evidence_binding
+from src.shared.report_quality.numeric_validation import (
+    validate_versioned_numeric_record,
+)
+from src.shared.report_quality.source_identity import document_identity
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +140,8 @@ class _FragmentMeta:
     #:   목록으로 검사하지 않는다(닫힌 목록 게이트 금지, 01_원칙과_금지.md).
     #:   이 값은 공시 원문 주소를 붙이기 «전»에 확정해야 한다.
     from_filing: bool = False
+    #: 선택된 사업보고서가 아니라 별도로 받은 OpenDART 주요계정 응답인가.
+    from_financial_api: bool = False
 
 
 def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
@@ -155,6 +168,7 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
                     location=str(item.get("원문위치") or "").strip(),
                     document_date=str(item.get("문서일") or "").strip(),
                     from_filing=not source_url,
+                    from_financial_api=text.startswith(DART_FINANCIAL_API_PREFIX),
                 )
             )
         return tuple(out)
@@ -166,6 +180,9 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
             document_title=str(getattr(fragment, "document_title", "") or ""),
             location=str(getattr(fragment, "location", "") or ""),
             from_filing=not str(getattr(fragment, "source_url", "") or ""),
+            from_financial_api=str(getattr(fragment, "text", "") or "").startswith(
+                DART_FINANCIAL_API_PREFIX
+            ),
         )
         for fragment in fragments
     )
@@ -409,6 +426,13 @@ def _performance_report_table(
         numeric=True,
         display_unit=table.unit,
         presentation=presentation or "table",
+        raw_rows=[list(row) for row in table.raw_rows],
+        scale_divisor=table.scale_divisor,
+        scale_places=table.scale_places,
+        evidence_rows=list(table.evidence_rows),
+        entity_scope=table.entity_scope,
+        raw_unit=table.raw_unit,
+        unit_dimension=table.unit_dimension,
     )
 
 
@@ -507,7 +531,8 @@ def _build_source(
 ) -> Source:
     """인용된 조각 하나를 부록 Source 한 줄로 만든다.
 
-    kind 구분은 «URL이 있는가»라는 모양만 본다(내용 목록 검사 아님) —
+    주요계정 API 표식은 선택된 사업보고서와 다른 OpenDART 문서로 먼저
+    분리한다. 그 밖의 kind 구분은 «URL이 있는가»라는 모양만 본다 —
     전자공시 절 조각은 출처 URL이 없고, 홈페이지·공식 IR 조각만 URL을 갖는다.
 
     ★ 전자공시 조각의 원문 주소는 «조각»이 아니라 «그 조각을 떠 온 문서»가
@@ -515,6 +540,23 @@ def _build_source(
       독자가 부록에서 원문을 바로 열 수 있게 한다. filing_meta가 없으면
       예전처럼 주소 없이 나가며 그 사실이 화면에 그대로 보인다.
     """
+    if meta.from_financial_api:
+        return Source(
+            number=number,
+            kind=SourceKind.FILING,
+            label=DART_FINANCIAL_API_LABEL,
+            collected_at=meta.document_date,
+            source_id=f"{V2_SOURCE_ID_PREFIX}{meta.fragment_id}",
+            title=DART_FINANCIAL_API_LABEL,
+            publisher="금융감독원",
+            host=DART_FINANCIAL_API_HOST,
+            url=DART_FINANCIAL_API_URL,
+            document_id=DART_FINANCIAL_API_DOCUMENT_ID,
+            location="주요계정 API 응답",
+            source_type="공식 재무 API",
+            fact_status="공시 실제값",
+            used_in=list(used_in),
+        )
     if not meta.from_filing:
         return Source(
             number=number,
@@ -551,6 +593,93 @@ def _build_source(
     )
 
 
+def _fact_from_structured_sentence(
+    sentence: ComposedSentence,
+    *,
+    section_id: str,
+    company_name: str,
+    as_of_date: str,
+    metas_by_fragment: Mapping[str, _FragmentMeta],
+    numbers: Mapping[str, int],
+    filing_meta: Optional[FilingMeta],
+) -> Optional[FactRecord]:
+    """프로그램 생성 claim을 FactRecord로 옮긴다. 불일치는 빈값으로 닫는다."""
+
+    claim = sentence.structured_claim
+    if (
+        claim is None
+        or not sentence.text.strip()
+        or claim.section_owner != section_id
+        or sentence.planned_claim_slot != claim.claim_slot
+        or sentence.verification_state != "verified"
+        or claim.verification_state != "verified"
+        or sentence.citations != (claim.source_fragment_id,)
+        or not claim.numeric_checks
+        or not claim.state_evidence
+    ):
+        return None
+    meta = metas_by_fragment.get(claim.source_fragment_id)
+    number = numbers.get(claim.source_fragment_id)
+    if meta is None or number is None:
+        return None
+    source = _build_source(
+        meta,
+        number,
+        company_name,
+        (section_id,),
+        filing_meta,
+    )
+    if document_identity(source) != claim.source_identity:
+        return None
+    source_type = (
+        "공식 공시·재무 API"
+        if source.kind is SourceKind.FILING
+        else "회사 공식 자료"
+    )
+    fact = FactRecord(
+        fact_id=claim.fact_id,
+        legal_entity=company_name,
+        subject_scope=claim.subject_scope,
+        relationship_or_action=claim.metric,
+        claim=sentence.text.strip(),
+        claim_type="historical_performance_rate",
+        section_owner=section_id,
+        time_state="past",
+        as_of=as_of_date,
+        source_id=source.source_id,
+        source_type=source_type,
+        source_title=source.title or source.label,
+        source_publisher=source.publisher,
+        source_host=source.host,
+        source_url=source.url,
+        source_document_id=source.document_id,
+        location=source.location,
+        status="verified",
+        fact_status="actual",
+        verification_status="verified",
+        state_evidence=claim.state_evidence,
+        source_date=(
+            source.published_at or source.disclosed_at or source.collected_at
+        ),
+        raw_value=claim.raw_value,
+        calculation=claim.calculation,
+        display_value=claim.display_value,
+        rounding_rule=claim.rounding_rule,
+        numeric_checks=list(claim.numeric_checks),
+        claim_slot=claim.claim_slot,
+        metric=claim.metric,
+        period_start=claim.period_start,
+        period_end=claim.period_end,
+        sign=claim.sign,
+        unit=claim.unit,
+        unit_dimension=claim.unit_dimension,
+        formula=claim.formula,
+    )
+    if validate_versioned_numeric_record(fact) != ():
+        return None
+    return replace(fact, evidence_binding=fact_evidence_binding(fact))
+
+
 # ══════════════════════════════════════════════════════════
 # 진입 함수
 # ══════════════════════════════════════════════════════════
@@ -563,7 +692,7 @@ def render_report(
     performance_table: Optional[PerformanceTable],
     *,
     corp_type: str = "",
-    grade: Grade = Grade.COMPLETE,
+    grade: Grade = Grade.PARTIAL,
     generated_at: str = "",
     as_of_date: str = "",
     analysis_period: str = "",
@@ -584,7 +713,7 @@ def render_report(
         corp_type / generated_at / as_of_date / analysis_period /
             latest_performance_period: 표지·머리말 메타 — real.py 연결부(3-4b)가
             기존 파이프라인 값 그대로 넘긴다. 없으면 표기 생략(거짓 없음).
-        grade: 표지 등급. 기본 완성 — 완성 여부 실측은 06장 몫이다.
+        grade: 표지 등급. 평가 전 생성물을 완성으로 간주하지 않아 기본은 부분 완성이다.
         table_presentation: 원본 pipeline ReportTable.presentation을 넘기면
             기존 차트(trend·composition)가 그대로 재사용된다. 기본은 일반 표.
         composition_tables: 2장에 실을 매출 구성표들(제품별·지역별 등). v1은 이
@@ -610,6 +739,27 @@ def render_report(
     metas = _fragment_metas(fragments)
     numbers = _citation_numbers(metas)
     meta_by_number = {numbers[meta.fragment_id]: meta for meta in metas}
+    metas_by_fragment = {meta.fragment_id: meta for meta in metas}
+
+    structured_facts_by_section: dict[str, list[FactRecord]] = {}
+    seen_fact_ids: set[str] = set()
+    for composed_section in report.sections:
+        for sentence in composed_section.sentences:
+            fact = _fact_from_structured_sentence(
+                sentence,
+                section_id=composed_section.section_id,
+                company_name=company_name,
+                as_of_date=as_of_date,
+                metas_by_fragment=metas_by_fragment,
+                numbers=numbers,
+                filing_meta=filing_meta,
+            )
+            if fact is None or fact.fact_id in seen_fact_ids:
+                continue
+            seen_fact_ids.add(fact.fact_id)
+            structured_facts_by_section.setdefault(
+                composed_section.section_id, []
+            ).append(fact)
 
     #: 부록 번호 → 그 번호를 인용한 장 id들 (v3 순서 유지)
     used_sections: dict[int, list[str]] = {}
@@ -752,6 +902,12 @@ def render_report(
                     section.section_id, ""
                 ),
                 tag=SECTION_TAGS.get(section.section_id, ""),
+                fact_ids=[
+                    fact.fact_id
+                    for fact in structured_facts_by_section.get(
+                        section.section_id, []
+                    )
+                ],
             )
         )
 
@@ -764,8 +920,19 @@ def render_report(
         )
         for section in report.sections
     }
+    facts_by_id = {
+        fact.fact_id: fact
+        for facts in structured_facts_by_section.values()
+        for fact in facts
+    }
     summary_items: list[SummaryItem] = []
     for index, sentence in enumerate(report.summary):
+        structured = sentence.structured_claim
+        summary_fact_ids = (
+            [structured.fact_id]
+            if structured is not None and structured.fact_id in facts_by_id
+            else []
+        )
         summary_items.append(
             SummaryItem(
                 text=sentence_display_text(
@@ -773,6 +940,12 @@ def render_report(
                 ),
                 section_id=_summary_source_section(
                     sentence, numbers, section_citations
+                ),
+                # 요약은 새 사실을 소유하지 않는다. 본문에서 검증·렌더된
+                # 구조화 claim을 글자 그대로 보충한 경우에만 그 fact_id를 잇는다.
+                fact_ids=summary_fact_ids,
+                verification_status=(
+                    sentence.verification_state if summary_fact_ids else ""
                 ),
             )
         )
@@ -815,4 +988,9 @@ def render_report(
         analysis_period=analysis_period,
         latest_performance_period=latest_performance_period,
         source_grades=source_grades,
+        fact_records=[
+            fact
+            for section in report.sections
+            for fact in structured_facts_by_section.get(section.section_id, [])
+        ],
     )

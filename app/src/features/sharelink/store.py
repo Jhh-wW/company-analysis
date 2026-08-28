@@ -121,12 +121,22 @@ CREATE TABLE IF NOT EXISTS {TABLE_ACCESS_SUBJECTS} (
     FOREIGN KEY (window_id) REFERENCES {TABLE_OPEN_WINDOWS}(id) ON DELETE CASCADE,
     CHECK (length(requester_hash) = 64),
     CHECK (requester_hash NOT GLOB '*[^0-9a-f]*'),
-    CHECK (opened_count BETWEEN 1 AND {constants.ACCESS_PER_REQUESTER_LIMIT})
+    CHECK (opened_count BETWEEN 1 AND {constants.LEGACY_ACCESS_PER_REQUESTER_LIMIT})
 )
 """
 CREATE_ACCESS_SUBJECTS_UNIQUE_INDEX_SQL = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS {INDEX_ACCESS_SUBJECT_WINDOW}
 ON {TABLE_ACCESS_SUBJECTS}(window_id, requester_hash)
+"""
+CREATE_ACCESS_SUBJECTS_NO_INSERT_SQL = f"""
+CREATE TRIGGER IF NOT EXISTS {TABLE_ACCESS_SUBJECTS}_no_insert
+BEFORE INSERT ON {TABLE_ACCESS_SUBJECTS}
+BEGIN SELECT RAISE(ABORT, 'LINK 요청자 식별값 수집은 폐기되었습니다'); END
+"""
+CREATE_ACCESS_SUBJECTS_NO_UPDATE_SQL = f"""
+CREATE TRIGGER IF NOT EXISTS {TABLE_ACCESS_SUBJECTS}_no_update
+BEFORE UPDATE ON {TABLE_ACCESS_SUBJECTS}
+BEGIN SELECT RAISE(ABORT, 'LINK 요청자 식별값 수집은 폐기되었습니다'); END
 """
 CREATE_RUN_HISTORY_SQL = f"""
 CREATE TABLE IF NOT EXISTS {TABLE_RUN_HISTORY} (
@@ -483,6 +493,54 @@ def _verify_report_view_event_schema(conn: sqlite3.Connection) -> None:
             )
 
 
+def _access_subject_trigger_contracts() -> tuple[tuple[str, str], ...]:
+    return (
+        (
+            f"{TABLE_ACCESS_SUBJECTS}_no_insert",
+            CREATE_ACCESS_SUBJECTS_NO_INSERT_SQL,
+        ),
+        (
+            f"{TABLE_ACCESS_SUBJECTS}_no_update",
+            CREATE_ACCESS_SUBJECTS_NO_UPDATE_SQL,
+        ),
+    )
+
+
+def _access_subject_tombstone_is_current(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(f"SELECT COUNT(*) FROM {TABLE_ACCESS_SUBJECTS}").fetchone()
+    if row is None or int(row[0]) != 0:
+        return False
+
+    for trigger_name, expected_sql in _access_subject_trigger_contracts():
+        trigger = conn.execute(
+            "SELECT type, tbl_name, sql FROM sqlite_master WHERE name = ?",
+            (trigger_name,),
+        ).fetchone()
+        if (
+            trigger is None
+            or str(trigger[0]) != "trigger"
+            or str(trigger[1]) != TABLE_ACCESS_SUBJECTS
+            or _normalized_schema_sql(trigger[2])
+            != _normalized_schema_sql(expected_sql)
+        ):
+            return False
+    return True
+
+
+def _verify_access_subject_tombstone(conn: sqlite3.Connection) -> None:
+    """폐기한 요청자 표가 비어 있고 재수집 차단 trigger가 정확한지 확인한다."""
+
+    if not {"id", "window_id", "requester_hash", "opened_count"}.issubset(
+        _table_columns(conn, TABLE_ACCESS_SUBJECTS)
+    ):
+        raise RuntimeError("share_link_access_subjects tombstone 표가 올바르지 않습니다")
+    if not _access_subject_tombstone_is_current(conn):
+        raise RuntimeError(
+            "share_link_access_subjects 개인정보 삭제 또는 재수집 차단을 "
+            "완결하지 못했습니다"
+        )
+
+
 def _copy_legacy_rows(conn: sqlite3.Connection) -> None:
     rows = conn.execute(
         f"""
@@ -575,6 +633,17 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             index=INDEX_ACCESS_SUBJECT_WINDOW,
             expected_columns=("window_id", "requester_hash"),
         )
+        # 개인정보를 수집하지 않는다는 화면 계약에 맞춰 과거의 IP 파생 지문만
+        # 정확히 지운다. PRAGMA secure_delete는 savepoint보다 먼저 켰다. 링크의
+        # 전체 요청 횟수·시간 구간·생성/조회 감사 이력은 이 DELETE 대상이 아니다.
+        if not _access_subject_tombstone_is_current(conn):
+            for trigger_name, _expected_sql in _access_subject_trigger_contracts():
+                escaped_trigger = trigger_name.replace('"', '""')
+                conn.execute(f'DROP TRIGGER IF EXISTS "{escaped_trigger}"')
+            conn.execute(f"DELETE FROM {TABLE_ACCESS_SUBJECTS}")
+            conn.execute(CREATE_ACCESS_SUBJECTS_NO_INSERT_SQL)
+            conn.execute(CREATE_ACCESS_SUBJECTS_NO_UPDATE_SQL)
+        _verify_access_subject_tombstone(conn)
         conn.execute(CREATE_RUN_HISTORY_SQL)
         conn.execute(CREATE_RUN_HISTORY_NO_DELETE_SQL)
         conn.execute(CREATE_REPORT_VIEW_EVENTS_SQL)
@@ -624,10 +693,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             "last_opened_at",
         }.issubset(_table_columns(conn, TABLE_OPEN_WINDOWS)):
             raise RuntimeError("share_link_open_windows 스키마가 올바르지 않습니다")
-        if not {"id", "window_id", "requester_hash", "opened_count"}.issubset(
-            _table_columns(conn, TABLE_ACCESS_SUBJECTS)
-        ):
-            raise RuntimeError("share_link_access_subjects 스키마가 올바르지 않습니다")
+        _verify_access_subject_tombstone(conn)
         if not {
             "run_id",
             "link_key_hash",
@@ -725,19 +791,14 @@ def mark_opened(
     conn: sqlite3.Connection,
     key: str,
     now_iso: str,
-    *,
-    requester_hash: str = "",
 ) -> bool:
     """active 링크 GET을 원자적 bounded 구간 집계에 남긴다.
 
     폐기·만료 상태를 writer lock 안에서 다시 확인하고, 같은 분 구간은 한 행만
-    UPSERT한다. capability 전체와 비가역 요청자 통장을 모두 영속 cap으로 제한하며
-    최근 구간만 보존한다. ``False``는 없음·비활성·cap 소진 중 하나다.
+    UPSERT한다. 사람을 식별하지 않고 capability 전체를 영속 cap으로 제한하며 최근
+    구간만 보존한다. ``False``는 없음·비활성·cap 소진 중 하나다.
     """
 
-    normalized_requester = str(requester_hash or "").strip().lower()
-    if normalized_requester and not is_key_hash(normalized_requester):
-        return False
     try:
         today = clock.business_date_from_iso(now_iso)
         window_started_at = _open_window_start(now_iso)
@@ -789,27 +850,6 @@ def mark_opened(
             _rollback_open_savepoint(conn, savepoint)
             return False
 
-        if normalized_requester:
-            subject = conn.execute(
-                f"""
-                INSERT INTO {TABLE_ACCESS_SUBJECTS}
-                    (window_id, requester_hash, opened_count)
-                VALUES (?, ?, 1)
-                ON CONFLICT(window_id, requester_hash) DO UPDATE SET
-                    opened_count = opened_count + 1
-                WHERE opened_count < ?
-                RETURNING opened_count
-                """,
-                (
-                    int(recorded[0]),
-                    normalized_requester,
-                    constants.ACCESS_PER_REQUESTER_LIMIT,
-                ),
-            ).fetchone()
-            if subject is None:
-                _rollback_open_savepoint(conn, savepoint)
-                return False
-
         cursor = conn.execute(
             f"""
             UPDATE {TABLE_SHARE_LINKS}
@@ -825,28 +865,6 @@ def mark_opened(
             raise RuntimeError("링크 요청 요약을 갱신하지 못했습니다")
 
         if int(recorded[1]) == 1:
-            # SQLite connection의 foreign_keys 설정과 무관하게 요청자 통장도
-            # 같은 bounded 보존 범위로 명시 정리한다.
-            conn.execute(
-                f"""
-                DELETE FROM {TABLE_ACCESS_SUBJECTS}
-                 WHERE window_id IN (
-                       SELECT id FROM {TABLE_OPEN_WINDOWS}
-                        WHERE link_key_hash = ?
-                          AND id NOT IN (
-                              SELECT id FROM {TABLE_OPEN_WINDOWS}
-                               WHERE link_key_hash = ?
-                               ORDER BY window_started_at DESC, id DESC
-                               LIMIT ?
-                          )
-                 )
-                """,
-                (
-                    key_hash,
-                    key_hash,
-                    constants.OPEN_WINDOW_ROWS_PER_LINK,
-                ),
-            )
             conn.execute(
                 f"""
                 DELETE FROM {TABLE_OPEN_WINDOWS}

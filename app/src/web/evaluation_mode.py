@@ -20,6 +20,7 @@ from typing import Final
 
 from src.core import clock
 from src.core.constants import PIPELINE_ENV, PIPELINE_REAL
+from src.features.auth import constants as auth_constants
 
 
 ENV_MODE: Final[str] = "REALTIME_EVALUATION_MODE"
@@ -149,6 +150,14 @@ def validate_startup_configuration() -> EvaluationSettings:
     if os.environ.get(ENV_DISABLE_ENGINE_DOTENV, "").strip() != "1":
         raise EvaluationConfigurationError(
             "실시간 성능시험에서는 analysis_engine .env 자동 읽기를 차단해야 합니다"
+        )
+    # 이 모드는 _strict_loopback_http_request가 확인한 로컬 HTTP에서만 열린다.
+    # 실행기가 이 값을 빼면 브라우저가 Secure 열람 쿠키를 HTTP로 되돌려 보내지
+    # 못해, 유료 조사는 끝났는데 progress/결과가 404가 된다. 실제 쿠키 완화는
+    # 이 값 하나가 아니라 URL·server·peer의 삼중 loopback 검사까지 통과해야 한다.
+    if os.environ.get(auth_constants.ENV_COOKIE_INSECURE, "").strip() != "1":
+        raise EvaluationConfigurationError(
+            "실시간 성능시험에는 로컬 HTTP 쿠키 설정 AUTH_COOKIE_INSECURE=1이 필요합니다"
         )
     if current.paid_providers_enabled:
         missing = missing_provider_names()

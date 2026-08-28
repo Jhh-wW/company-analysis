@@ -9,7 +9,6 @@ from collections.abc import Iterator
 
 import pytest
 
-from src.features.sharelink import access_control
 from src.features.sharelink import constants
 from src.features.sharelink import store as share_store
 
@@ -127,7 +126,6 @@ def test_raw_key_never_enters_database_or_new_history(
     conn: sqlite3.Connection,
 ) -> None:
     raw_key = "RAW-Link-Secret-Never-Persist"
-    raw_ip = "203.0.113.77"
     key_hash = share_store.key_hash_of(raw_key)
     _insert_link(conn, key=raw_key)
 
@@ -135,7 +133,6 @@ def test_raw_key_never_enters_database_or_new_history(
         conn,
         raw_key,
         "2026-08-21T09:01:00+09:00",
-        requester_hash=access_control.requester_hash_of(raw_key, raw_ip),
     )
     assert share_store.start_run(
         conn,
@@ -155,7 +152,6 @@ def test_raw_key_never_enters_database_or_new_history(
     dump = "\n".join(conn.iterdump())
     assert raw_key not in dump
     assert raw_key.lower() not in dump.lower()
-    assert raw_ip not in dump
     assert key_hash in dump
     for table in (
         share_store.TABLE_SHARE_LINKS,
@@ -345,11 +341,10 @@ def test_legacy_per_get_event_table_is_sealed_against_new_inserts(
     ).fetchone()[0] == 0
 
 
-def test_persistent_requester_and_capability_caps_survive_restart(tmp_path) -> None:
+def test_persistent_capability_cap_survives_restart(tmp_path) -> None:
     database = tmp_path / "share-access.db"
     raw_key = "persistent-capability-link"
     now_iso = "2026-08-21T10:00:30+09:00"
-    requester = access_control.requester_hash_of(raw_key, "203.0.113.8")
 
     first = sqlite3.connect(database)
     try:
@@ -357,13 +352,8 @@ def test_persistent_requester_and_capability_caps_survive_restart(tmp_path) -> N
         _insert_link(first, key=raw_key)
         first.commit()
         assert all(
-            share_store.mark_opened(
-                first,
-                raw_key,
-                now_iso,
-                requester_hash=requester,
-            )
-            for _ in range(constants.ACCESS_PER_REQUESTER_LIMIT)
+            share_store.mark_opened(first, raw_key, now_iso)
+            for _ in range(constants.ACCESS_PER_CAPABILITY_LIMIT)
         )
         first.commit()
     finally:
@@ -372,81 +362,56 @@ def test_persistent_requester_and_capability_caps_survive_restart(tmp_path) -> N
     restarted = sqlite3.connect(database)
     try:
         share_store.ensure_schema(restarted)
-        assert not share_store.mark_opened(
-            restarted,
-            raw_key,
-            now_iso,
-            requester_hash=requester,
-        )
+        assert not share_store.mark_opened(restarted, raw_key, now_iso)
         link = share_store.load(restarted, raw_key)
         assert link is not None
-        assert link.opened_count == constants.ACCESS_PER_REQUESTER_LIMIT
+        assert link.opened_count == constants.ACCESS_PER_CAPABILITY_LIMIT
         assert restarted.execute(
             f"SELECT COUNT(*) FROM {share_store.TABLE_OPEN_WINDOWS}"
         ).fetchone()[0] == 1
         assert restarted.execute(
             f"SELECT COUNT(*) FROM {share_store.TABLE_ACCESS_SUBJECTS}"
-        ).fetchone()[0] == 1
+        ).fetchone()[0] == 0
     finally:
         restarted.close()
 
 
-def test_requester_churn_cannot_evict_persistent_capability_cap(
+def test_repeated_requests_cannot_exceed_persistent_capability_cap(
     conn: sqlite3.Connection,
 ) -> None:
     raw_key = "capability-churn-link"
     now_iso = "2026-08-21T10:10:30+09:00"
     _insert_link(conn, key=raw_key)
 
-    for index in range(constants.ACCESS_PER_CAPABILITY_LIMIT):
-        requester = access_control.requester_hash_of(
-            raw_key,
-            f"2001:db8::{index + 1}",
-        )
-        assert share_store.mark_opened(
-            conn,
-            raw_key,
-            now_iso,
-            requester_hash=requester,
-        )
-    assert not share_store.mark_opened(
-        conn,
-        raw_key,
-        now_iso,
-        requester_hash=access_control.requester_hash_of(raw_key, "2001:db8::ffff"),
-    )
+    for _index in range(constants.ACCESS_PER_CAPABILITY_LIMIT):
+        assert share_store.mark_opened(conn, raw_key, now_iso)
+    assert not share_store.mark_opened(conn, raw_key, now_iso)
     assert conn.execute(
         f"SELECT opened_count FROM {share_store.TABLE_OPEN_WINDOWS}"
     ).fetchone()[0] == constants.ACCESS_PER_CAPABILITY_LIMIT
     assert conn.execute(
         f"SELECT COUNT(*) FROM {share_store.TABLE_ACCESS_SUBJECTS}"
-    ).fetchone()[0] == constants.ACCESS_PER_CAPABILITY_LIMIT
+    ).fetchone()[0] == 0
 
 
-def test_window_and_subject_rows_stay_bounded_with_foreign_keys_off(
+def test_window_rows_stay_bounded_and_subject_tombstone_stays_empty_with_foreign_keys_off(
     conn: sqlite3.Connection,
 ) -> None:
     raw_key = "bounded-retention-link"
     _insert_link(conn, key=raw_key)
     assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 0
     start = dt.datetime.fromisoformat("2026-08-21T00:00:00+09:00")
-    requester = access_control.requester_hash_of(raw_key, "198.51.100.10")
 
     for offset in range(constants.OPEN_WINDOW_ROWS_PER_LINK + 6):
         opened_at = (start + dt.timedelta(minutes=offset)).isoformat()
-        assert share_store.mark_opened(
-            conn,
-            raw_key,
-            opened_at,
-            requester_hash=requester,
-        )
+        assert share_store.mark_opened(conn, raw_key, opened_at)
 
     assert conn.execute(
         f"SELECT COUNT(*) FROM {share_store.TABLE_OPEN_WINDOWS}"
     ).fetchone()[0] == constants.OPEN_WINDOW_ROWS_PER_LINK
     assert conn.execute(
         f"SELECT COUNT(*) FROM {share_store.TABLE_ACCESS_SUBJECTS}"
-    ).fetchone()[0] == constants.OPEN_WINDOW_ROWS_PER_LINK
+    ).fetchone()[0] == 0
     link = share_store.load(conn, raw_key)
     assert link is not None
     assert link.opened_count == constants.OPEN_WINDOW_ROWS_PER_LINK + 6
@@ -470,10 +435,6 @@ def test_revoked_and_expired_links_cannot_mutate_open_history(
             conn,
             raw_key,
             "2026-08-21T10:00:00+09:00",
-            requester_hash=access_control.requester_hash_of(
-                raw_key,
-                "203.0.113.90",
-            ),
         )
         link = share_store.load(conn, raw_key)
         assert link is not None and link.opened_count == 0
@@ -486,11 +447,10 @@ def test_revoked_and_expired_links_cannot_mutate_open_history(
     ).fetchone()[0] == 0
 
 
-def test_concurrent_gets_cannot_exceed_persistent_requester_cap(tmp_path) -> None:
+def test_concurrent_gets_cannot_exceed_persistent_capability_cap(tmp_path) -> None:
     database = tmp_path / "concurrent-share-access.db"
     raw_key = "concurrent-capability-link"
     now_iso = "2026-08-21T11:00:30+09:00"
-    requester = access_control.requester_hash_of(raw_key, "198.51.100.44")
     initial = sqlite3.connect(database)
     try:
         share_store.ensure_schema(initial)
@@ -502,32 +462,27 @@ def test_concurrent_gets_cannot_exceed_persistent_requester_cap(tmp_path) -> Non
     def open_once() -> bool:
         worker = sqlite3.connect(database, timeout=15)
         try:
-            result = share_store.mark_opened(
-                worker,
-                raw_key,
-                now_iso,
-                requester_hash=requester,
-            )
+            result = share_store.mark_opened(worker, raw_key, now_iso)
             worker.commit()
             return result
         finally:
             worker.close()
 
-    attempts = constants.ACCESS_PER_REQUESTER_LIMIT * 2
+    attempts = constants.ACCESS_PER_CAPABILITY_LIMIT + 20
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         results = list(executor.map(lambda _index: open_once(), range(attempts)))
 
-    assert sum(results) == constants.ACCESS_PER_REQUESTER_LIMIT
+    assert sum(results) == constants.ACCESS_PER_CAPABILITY_LIMIT
     verified = sqlite3.connect(database)
     try:
         assert verified.execute(
             f"SELECT opened_count FROM {share_store.TABLE_OPEN_WINDOWS}"
-        ).fetchone()[0] == constants.ACCESS_PER_REQUESTER_LIMIT
+        ).fetchone()[0] == constants.ACCESS_PER_CAPABILITY_LIMIT
         assert verified.execute(
-            f"SELECT opened_count FROM {share_store.TABLE_ACCESS_SUBJECTS}"
-        ).fetchone()[0] == constants.ACCESS_PER_REQUESTER_LIMIT
+            f"SELECT COUNT(*) FROM {share_store.TABLE_ACCESS_SUBJECTS}"
+        ).fetchone()[0] == 0
         assert share_store.load(verified, raw_key).opened_count == (
-            constants.ACCESS_PER_REQUESTER_LIMIT
+            constants.ACCESS_PER_CAPABILITY_LIMIT
         )
     finally:
         verified.close()

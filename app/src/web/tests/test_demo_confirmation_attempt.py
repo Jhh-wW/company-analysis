@@ -44,13 +44,19 @@ def _run(client: TestClient, form: dict[str, str], token: str = ""):
     )
 
 
+def _production_client() -> TestClient:
+    """운영과 같은 HTTPS에서 Secure PUBLIC grant가 왕복하는 브라우저."""
+
+    return TestClient(main.app, base_url="https://testserver")
+
+
 @pytest.fixture(autouse=True)
 def _demo_pipeline(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
 
 
 def test_confirm은_회사식별값대신_일회용토큰만_브라우저에_둔다():
-    with TestClient(main.app) as client:
+    with _production_client() as client:
         response = client.post("/confirm", data={"company": "우리엔", "region": "서울"})
 
     token = _token(response.text)
@@ -63,7 +69,7 @@ def test_confirm은_회사식별값대신_일회용토큰만_브라우저에_둔
 
 
 def test_confirm없이_run을_직접_부르면_조사를_시작하지_않는다():
-    with TestClient(main.app) as client:
+    with _production_client() as client:
         response = client.post(
             "/run",
             data={"company": "우리엔", "region": "서울"},
@@ -79,7 +85,7 @@ def test_confirm없이_run을_직접_부르면_조사를_시작하지_않는다(
 def test_유효하지않은_run_5회는_rate를_소비하지않고_다음정상run을_막지않는다(
     invalid_kind: str,
 ):
-    with TestClient(main.app) as client:
+    with _production_client() as client:
         baseline = 0
         form = {"company": "우리엔", "region": "서울"}
         token = ""
@@ -118,7 +124,7 @@ def test_유효하지않은_run_5회는_rate를_소비하지않고_다음정상r
 def test_TTL_정확한_경계는_같은_시각으로_sweep하고_정상1회만_기록한다(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    with TestClient(main.app) as client:
+    with _production_client() as client:
         token, form = _confirm(client)
         attempt = job_runtime._PAID_ATTEMPTS[token]
         job_runtime._PAID_ATTEMPTS[token] = dataclasses.replace(
@@ -149,7 +155,7 @@ def test_TTL_정확한_경계는_같은_시각으로_sweep하고_정상1회만_�
 def test_TTL을_1ms_넘긴_attempt는_rate없이_정리한다(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    with TestClient(main.app) as client:
+    with _production_client() as client:
         token, form = _confirm(client)
         attempt = job_runtime._PAID_ATTEMPTS[token]
         job_runtime._PAID_ATTEMPTS[token] = dataclasses.replace(
@@ -172,7 +178,7 @@ def test_TTL을_1ms_넘긴_attempt는_rate없이_정리한다(
 
 
 def test_원입력을_바꾸면_토큰을_소비하고_재사용도_거절한다():
-    with TestClient(main.app) as client:
+    with _production_client() as client:
         token, form = _confirm(client)
         changed = client.post(
             "/run",
@@ -192,7 +198,7 @@ def test_원입력을_바꾸면_토큰을_소비하고_재사용도_거절한다
 
 
 def test_숨은_회사값을_위조해도_확인한_서버카드를_사용한다():
-    with TestClient(main.app) as client:
+    with _production_client() as client:
         token, form = _confirm(client)
         confirmed_card = job_runtime._PAID_ATTEMPTS[token].card
         response = client.post(
@@ -214,7 +220,7 @@ def test_숨은_회사값을_위조해도_확인한_서버카드를_사용한다
 
 
 def test_만료와_거절은_데모_확인기록을_정리한다():
-    with TestClient(main.app) as client:
+    with _production_client() as client:
         expired_token, expired_form = _confirm(client)
         attempt = job_runtime._PAID_ATTEMPTS[expired_token]
         job_runtime._PAID_ATTEMPTS[expired_token] = dataclasses.replace(
@@ -241,7 +247,7 @@ def test_만료와_거절은_데모_확인기록을_정리한다():
 
 def test_정상_전체흐름은_한번만_실행되고_결과까지_열린다(monkeypatch):
     monkeypatch.setenv("DEMO_STEP_DELAY_SEC", "0")
-    with TestClient(main.app) as client:
+    with _production_client() as client:
         assert client.get("/").status_code == 200
         token, form = _confirm(client, DEMO_COMPANY)
         run = client.post(

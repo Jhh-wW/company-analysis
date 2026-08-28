@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import re
 import uuid
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -50,6 +52,28 @@ def _demo_report(*, with_table: bool = False):
             continue
         return result.report
     raise AssertionError("조건에 맞는 데모 보고서가 없습니다")
+
+
+def _serve_current_delivery(monkeypatch, job_id: str, report) -> None:
+    """디자인 시험을 legacy 재렌더가 아닌 불변 current GET에 연결한다."""
+
+    from src.web.routers import reports as reports_router
+
+    stored = reports_router._StoredPublicDelivery(
+        delivery=SimpleNamespace(
+            expires_at=dt.datetime(2099, 1, 1, tzinfo=dt.timezone.utc)
+        ),
+        report=report,
+        pdf_bytes=b"%PDF-1.4\n% immutable design fixture\n",
+        pdf_sha256="a" * 64,
+        artifact_id="artifact_design_fixture",
+        release_record_sha256="b" * 64,
+    )
+    monkeypatch.setattr(
+        reports_router,
+        "_stored_public_delivery",
+        lambda public_id: stored if public_id == job_id else None,
+    )
 
 
 def _approve_report(job_id: str, report) -> None:
@@ -133,7 +157,7 @@ def test_보고서만_전용_문서_레이아웃을_쓴다(monkeypatch):
     report = _demo_report()
     job_id = f"result-design-preview-{uuid.uuid4().hex}"
     job_runtime._JOBS.pop(job_id, None)
-    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
+    _serve_current_delivery(monkeypatch, job_id, report)
     monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
     monkeypatch.setattr(
         reports_router,
@@ -163,6 +187,7 @@ def test_보고서만_전용_문서_레이아웃을_쓴다(monkeypatch):
         f'<h1><span>{report.company}</span><span>분석 보고서</span></h1>'
         in response.text
     )
+    assert f"내용 생성 {report.generated_at}" in response.text
     assert 'class="report-section"' in response.text
     assert 'class="scroll report-scroll"' in response.text
     assert 'id="report-citations-title"><span class="no">부록</span><span class="txt">출처와 검증 상태</span>' in response.text
@@ -193,7 +218,7 @@ def test_관리자에게_노션_미설정을_실행가능한_버튼처럼_보이
     report = _demo_report()
     job_id = "result-notion-unconfigured"
     job_runtime._JOBS.pop(job_id, None)
-    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
+    _serve_current_delivery(monkeypatch, job_id, report)
     monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
     monkeypatch.delenv(notion_constants.ENV_NOTION_TOKEN, raising=False)
     monkeypatch.delenv(notion_constants.ENV_NOTION_PARENT_PAGE_ID, raising=False)
@@ -230,7 +255,7 @@ def test_PDF_다운로드_파일명은_헤더주입과_경로문자를_허용하
 def test_관리자이고_노션설정이_완전할때만_전송폼이_열린다(monkeypatch):
     report = _demo_report()
     job_id = "result-notion-configured"
-    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
+    _serve_current_delivery(monkeypatch, job_id, report)
     monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
     monkeypatch.setenv(notion_constants.ENV_NOTION_TOKEN, "test-secret")
     monkeypatch.setenv(notion_constants.ENV_NOTION_PARENT_PAGE_ID, "test-parent")
@@ -255,7 +280,7 @@ def test_보고서_표는_제목행과_가로스크롤_경계를_가진다(monke
     report = _demo_report(with_table=True)
     job_id = "result-design-table"
     job_runtime._JOBS.pop(job_id, None)
-    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
+    _serve_current_delivery(monkeypatch, job_id, report)
     monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
     session = auth_logic.create_session("admin@example.com", True)
 

@@ -76,6 +76,10 @@ from src.features.storage.constants import (
     TABLE_LAYER2_CACHE,
     TABLE_REPORTS,
 )
+from src.shared.report_source_identity import (
+    ReportSourceIdentityError,
+    require_financial_payload_digest,
+)
 
 _WHITESPACE = re.compile(r"\s+")
 #: 정규화한 요구역량 문장을 이어붙일 때 쓰는 구분자. 문장 안에는 절대
@@ -84,11 +88,24 @@ _WHITESPACE = re.compile(r"\s+")
 _FINGERPRINT_JOIN = "\x1f"
 
 # 회사분석 제품은 옛 ``회사×직무×공고지문`` 캐시와 같은 테이블을 읽지만,
-# 제품 namespace와 schema version을 모두 키에 넣어 빈 직무/빈 지문인 옛
-# 항목과 섞이지 않게 한다. 이 값들은 보고서 본문이나 사용자 화면에는 노출되지
-# 않는 저장소 내부 식별자다.
+# 제품 namespace·schema version·실제 출처 지문을 모두 키에 넣어 빈 직무/
+# 빈 지문인 옛 항목이나 정정 전 DART 자료와 섞이지 않게 한다. 이 값들은
+# 보고서 본문이나 사용자 화면에는 노출되지 않는 저장소 내부 식별자다.
 _COMPANY_ANALYSIS_PRODUCT_KEY = "product:company-analysis"
 _COMPANY_ANALYSIS_SCHEMA_REQUIREMENTS = (f"schema:{CANONICAL_SCHEMA_VERSION}",)
+
+
+def _source_identity_requirement(source_identity_digest: str) -> str | None:
+    """완전한 출처 신원 SHA-256만 캐시 열쇠로 허용한다."""
+
+    try:
+        digest = require_financial_payload_digest(
+            source_identity_digest,
+            allow_empty=False,
+        )
+    except ReportSourceIdentityError:
+        return None
+    return f"source:{digest}"
 
 
 # ══════════════════════════════════════════════════════════
@@ -306,19 +323,23 @@ def get_company_report_hit(
     conn: sqlite3.Connection,
     *,
     corp_id: str,
+    source_identity_digest: str,
     current_fiscal_year: Optional[int] = None,
     today: Optional[dt.date] = None,
 ) -> Optional[Report]:
     """회사분석 전용 1층 캐시를 조회한다.
 
-    옛 범용 API에 빈 ``job``/빈 공고 지문을 넘기지 않고 명시적인 제품·스키마
-    namespace를 사용하므로 과거 직무 보고서와 충돌하지 않는다.
+    옛 범용 API에 빈 ``job``/빈 공고 지문을 넘기지 않고 명시적인 제품·스키마·
+    출처 namespace를 사용하므로 과거 직무 보고서나 정정 전 자료와 충돌하지 않는다.
     """
+    source_requirement = _source_identity_requirement(source_identity_digest)
+    if source_requirement is None:
+        return None
     report = get_layer1_hit(
         conn,
         corp_id=corp_id,
         job=_COMPANY_ANALYSIS_PRODUCT_KEY,
-        requirements=list(_COMPANY_ANALYSIS_SCHEMA_REQUIREMENTS),
+        requirements=[*_COMPANY_ANALYSIS_SCHEMA_REQUIREMENTS, source_requirement],
         current_fiscal_year=current_fiscal_year,
         today=today,
     )
@@ -338,10 +359,14 @@ def save_company_report(
     *,
     corp_id: str,
     report: Report,
+    source_identity_digest: str,
     fiscal_year: Optional[int] = None,
     now: Optional[dt.datetime] = None,
-) -> str:
+) -> Optional[str]:
     """회사분석 보고서를 제품·스키마 namespace로 격리해 저장한다."""
+    source_requirement = _source_identity_requirement(source_identity_digest)
+    if source_requirement is None:
+        return None
     validation = validate_publishable(report)
     if not validation:
         raise PublishBlockedError(validation)
@@ -349,15 +374,15 @@ def save_company_report(
         conn,
         corp_id=corp_id,
         job=_COMPANY_ANALYSIS_PRODUCT_KEY,
-        requirements=list(_COMPANY_ANALYSIS_SCHEMA_REQUIREMENTS),
+        requirements=[*_COMPANY_ANALYSIS_SCHEMA_REQUIREMENTS, source_requirement],
         report=report,
         fiscal_year=fiscal_year,
         now=now,
     )
 
 
-def _v2_requirements(build_id: str) -> list[str]:
-    """v2 캐시 namespace — 스키마 + «지금 코드 지문».
+def _v2_requirements(build_id: str, source_identity_digest: str) -> list[str]:
+    """v2 캐시 namespace — 스키마 + 코드 지문 + 실제 출처 지문.
 
     ★ 코드 지문을 열쇠에 넣는 이유 (오늘 실측으로 당한 사고)
       캐시가 옛 보고서를 물고 오면 「엔진을 고쳐도 화면이 그대로」가 된다.
@@ -366,8 +391,17 @@ def _v2_requirements(build_id: str) -> list[str]:
       지문을 열쇠에 넣으면 둘 다 해결된다 — 코드가 그대로면 적중해 돈을
       아끼고, 한 글자라도 바뀌면 저절로 불일치라 옛 결과가 절대 안 나온다.
       사람이 「캐시를 비워야지」를 기억할 필요가 없다.
+      실제 DART 접수번호나 정규화한 재무 응답이 달라져도 같은 원리로
+      열쇠가 달라지므로, 같은 사업연도 안의 정정도 놓치지 않는다.
     """
-    return [f"schema:{ENGINE_V2_SCHEMA_VERSION}", f"build:{build_id}"]
+    source_requirement = _source_identity_requirement(source_identity_digest)
+    if source_requirement is None:
+        return []
+    return [
+        f"schema:{ENGINE_V2_SCHEMA_VERSION}",
+        f"build:{build_id}",
+        source_requirement,
+    ]
 
 
 def get_v2_report_hit(
@@ -375,6 +409,7 @@ def get_v2_report_hit(
     *,
     corp_id: str,
     build_id: str,
+    source_identity_digest: str,
     current_fiscal_year: Optional[int] = None,
     today: Optional[dt.date] = None,
 ) -> Optional[Report]:
@@ -384,13 +419,14 @@ def get_v2_report_hit(
     ★ 지문을 못 만들었으면(«모르는 상태») 조회하지 않는다.
       「모르겠다」를 「같다」로 바꾸면 옛 결과가 새 결과인 척 나간다.
     """
-    if not build_id_is_usable(build_id):
+    requirements = _v2_requirements(build_id, source_identity_digest)
+    if not build_id_is_usable(build_id) or not requirements:
         return None
     report = get_layer1_hit(
         conn,
         corp_id=corp_id,
         job=_COMPANY_ANALYSIS_PRODUCT_KEY,
-        requirements=_v2_requirements(build_id),
+        requirements=requirements,
         current_fiscal_year=current_fiscal_year,
         today=today,
     )
@@ -407,6 +443,7 @@ def save_v2_report(
     corp_id: str,
     report: Report,
     build_id: str,
+    source_identity_digest: str,
     fiscal_year: Optional[int] = None,
     now: Optional[dt.datetime] = None,
 ) -> Optional[str]:
@@ -421,7 +458,8 @@ def save_v2_report(
     ★ 스키마가 v2가 아니면 «조용히 안 저장한다». v1 보고서가 v2 열쇠 아래
       들어가면 다음 조사에서 v1이 v2인 척 나온다.
     """
-    if not build_id_is_usable(build_id):
+    requirements = _v2_requirements(build_id, source_identity_digest)
+    if not build_id_is_usable(build_id) or not requirements:
         return None
     if report.schema_version != ENGINE_V2_SCHEMA_VERSION:
         return None
@@ -429,7 +467,7 @@ def save_v2_report(
         conn,
         corp_id=corp_id,
         job=_COMPANY_ANALYSIS_PRODUCT_KEY,
-        requirements=_v2_requirements(build_id),
+        requirements=requirements,
         report=report,
         fiscal_year=fiscal_year,
         now=now,

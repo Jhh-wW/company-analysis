@@ -8,8 +8,11 @@
 ★ 가짜 작가 응답(fixtures/jyp_ask_responses.json)은 골든 샘플
   (docs/골든샘플/build_jyp_report.py)의 실제 문장에서 발췌했다 — 장별 6문장,
   인용 조각 id와 확인/해석 등급 포함. 수집 조각(fixtures/jyp_fragments.json)은
-  그 문장들의 숫자가 전부 원문에 존재하도록 같은 근거에서 발췌했다
-  (수치 검증 3-2를 실제로 통과시키기 위함 — 검증 우회 아님).
+  그 문장들의 숫자가 전부 원문에 존재하도록 같은 근거에서 발췌했다. 이는
+  예전 3-2 «원문 문자열 대조»를 통과한 골든 입력이라는 뜻이지, 수치의 지표·
+  기간·공식까지 결속한 NumericBinding이라는 뜻은 아니다. 입력의 장별 6문장
+  하한은 그대로 지키되, 새 생성 공개본에서는 미결속 AI 수치를 문장 단위로
+  빼고 DART 원값에서 프로그램이 계산한 claim만 남아 PARTIAL이 되는지 본다.
 
 ★ PDF 경계: export_pdf.release.prepare_pdf_release·export_pdf.logic.build_pdf가
   schema_version으로 v1/v2를 가른다(04장 3-4절 2항 배선 완료). v2는
@@ -31,13 +34,20 @@ from typing import Any, Optional
 import pytest
 from pypdf import PdfReader
 
+from src.core.provider_gateway import attempt_context
+from src.core.provider_gateway.attempt_context import ProviderAttemptCallbacks
 from src.features.budget import provider_budget
 from src.features.composer.constants import (
     SECTION_GUIDES,
     SECTION_IDS,
     SECTION_TITLES,
 )
-from src.features.composer.logic import SUMMARY_PROMPT_HEADER
+from src.features.composer.diagram_check import FLOW_REVIEW_PROMPT_HEADER
+from src.features.composer.logic import (
+    SUMMARY_MAX_SENTENCES,
+    SUMMARY_MIN_SENTENCES,
+    SUMMARY_PROMPT_HEADER,
+)
 from src.features.composer.render import (
     ENGINE_V2_SCHEMA_VERSION,
     INTERPRETATION_MARKER,
@@ -46,7 +56,7 @@ from src.features.composer.render import (
 from src.features.composer.verify import REVIEW_PROMPT_HEADER, REWRITE_PROMPT_HEADER
 from src.features.export_pdf import release as pdf_release
 from src.features.pipeline import real
-from src.features.pipeline.port import CompanyCard, Outcome, RunResult, UserInput
+from src.features.pipeline.port import CompanyCard, Grade, Outcome, RunResult, UserInput
 from src.features.pipeline.tests.test_real_cache import (
     CORP_ID,
     JOB,
@@ -54,6 +64,11 @@ from src.features.pipeline.tests.test_real_cache import (
     FakeEngine,
     _FakeClient,
     _FakeMessages,
+)
+from src.shared.report_quality.assessment import has_public_numeric_token
+from src.shared.report_quality.constants import MIN_CLAIMS_PER_COVERED_SECTION
+from src.shared.report_quality.numeric_validation import (
+    validate_versioned_numeric_record,
 )
 
 # ── 리허설 고정값 ─────────────────────────────────────────
@@ -68,7 +83,12 @@ _RESPONSES_FIXTURE: dict[str, Any] = json.loads(
 )
 
 #: 검수 프롬프트에서 대조 문장 번호를 읽는 모양 (verify._build_review_prompt)
-_REVIEW_NUMBER_RE = re.compile(r"\[(\d+)\] \(인용:")
+_REVIEW_NUMBER_RE = re.compile(
+    r"\[(\d+)\] \(등급: [^,\n]+, 인용:"
+)
+
+#: 도식 검수에서 경로 번호를 읽는 모양. 관계 글자는 보지 않는다.
+_FLOW_NUMBER_RE = re.compile(r"^\[(\d+)\] 경로\(JSON 배열\):", re.MULTILINE)
 
 #: 화면 노출이 금지된 영문 내부 키 모양 — validate.INTERNAL_KEY_SHAPE와 같은 판정
 _INTERNAL_KEY_RE = re.compile(r"[a-z][a-z0-9_]*")
@@ -90,6 +110,32 @@ def _expected_sentence_total() -> int:
         for payload in _RESPONSES_FIXTURE["장별_응답"].values()
     )
     return body + len(_RESPONSES_FIXTURE["핵심요약_응답"]["문장들"])
+
+
+def _fixture_unbound_numeric_by_section() -> dict[str, tuple[str, ...]]:
+    """골든 AI 산문 중 숫자 토큰은 있지만 NumericBinding은 없는 문장들."""
+
+    return {
+        section_id: tuple(
+            str(sentence["글"])
+            for sentence in payload["문장들"]
+            if has_public_numeric_token(str(sentence["글"]))
+        )
+        for section_id, payload in _RESPONSES_FIXTURE["장별_응답"].items()
+    }
+
+
+def _fixture_unbound_numeric_summary() -> tuple[str, ...]:
+    return tuple(
+        str(sentence["글"])
+        for sentence in _RESPONSES_FIXTURE["핵심요약_응답"]["문장들"]
+        if has_public_numeric_token(str(sentence["글"]))
+    )
+
+
+# fixture의 회사 표어가 identity와 culture에 겹친다. 정본 소유 장은 culture라
+# 기존 장 간 중복 제거가 identity에서 한 문장만 옮긴다.
+_DEDUPE_REMOVED_BY_SECTION = {"identity": 1}
 
 
 # ══════════════════════════════════════════════════════════
@@ -117,6 +163,12 @@ class _JypFakeMessages(_FakeMessages):
 
     def _route(self, prompt: str) -> Optional[str]:
         """v2 프롬프트면 fixture 응답 문자열을, 아니면 None을 돌려준다."""
+        if FLOW_REVIEW_PROMPT_HEADER in prompt:
+            numbers = [int(value) for value in _FLOW_NUMBER_RE.findall(prompt)]
+            return json.dumps(
+                {"판정": [{"번호": number, "결과": "참"} for number in numbers]},
+                ensure_ascii=False,
+            )
         if REVIEW_PROMPT_HEADER in prompt:
             self.review_calls += 1
             numbers = [int(value) for value in _REVIEW_NUMBER_RE.findall(prompt)]
@@ -183,7 +235,11 @@ class _JypFakeEngine(FakeEngine):
         return "제이와이피엔터테인먼트는 아티스트 발굴과 음악 콘텐츠의 제작·유통 사업을 영위한다."
 
     def fetch_financials(
-        self, corp_code: str, counter: Any
+        self,
+        corp_code: str,
+        counter: Any,
+        *,
+        business_date: Any = None,
     ) -> tuple[dict[str, Any], list[int]]:
         """골든 샘플 수치(억원: 8,219·5,665 등)로 3개년 실적표 재료를 만든다."""
 
@@ -243,7 +299,13 @@ class _JypFakeEngine(FakeEngine):
 @pytest.fixture(autouse=True)
 def _paid_provider_budget_context():
     """직접 RealPipeline 시험도 웹 worker와 같은 유료 문맥에서 실행한다."""
-    with provider_budget.activate(100_000.0):
+    callbacks = ProviderAttemptCallbacks(
+        lambda _provider, _operation, _reserved: object(),
+        lambda _token: None,
+        lambda _token: None,
+        lambda _token, _observation: None,
+    )
+    with provider_budget.activate(100_000.0), attempt_context.activate(callbacks):
         yield
 
 
@@ -303,27 +365,84 @@ def test_ENGINE_V2_전체_흐름이_검증된_v2_보고서를_만든다(
     # v2 스키마 + 9장 전부, v3 정본 순서 (장 삭제 없음)
     assert report.schema_version == ENGINE_V2_SCHEMA_VERSION
     assert [section.cell for section in report.sections] == list(SECTION_IDS)
-    # 장마다 fixture 6문장이 안내문 없이 전부 생존했다.
-    # ★ 예외 1장 — fixture 자체가 회사 표어를 1장과 8장에 둘 다 실었다.
-    #   정본 §4에서 공식 가치는 8장 소유라 장 간 중복 제거가 1장 쪽을 8장으로
-    #   모은다. 소실이 아니라 이동이므로 8장에는 그대로 있다.
+
+    # 먼저 «입력 골든 하한»을 그대로 잠근다. 공개 안전 규칙이 생겼다고 fixture
+    # 자체를 3문장짜리로 줄여 기대값을 맞추면 과거 6문장 품질 약속을 숨기게 된다.
+    fixture_sections = _RESPONSES_FIXTURE["장별_응답"]
+    assert set(fixture_sections) == set(SECTION_IDS)
+    assert all(len(payload["문장들"]) == 6 for payload in fixture_sections.values())
+    assert _expected_sentence_total() == 58
+
+    # 이 골든 입력의 숫자는 원문 문자열 대조는 통과하지만 AI JSON에는 지표·
+    # 기간·공식의 NumericBinding이 없다. 본문 16문장과 요약 2문장이 그 대상임을
+    # 실측으로 잠그고, 공개본에서 그 문장들만 빠졌는지 아래에서 확인한다.
+    unbound_by_section = _fixture_unbound_numeric_by_section()
+    unbound_counts = {
+        section_id: len(sentences)
+        for section_id, sentences in unbound_by_section.items()
+    }
+    assert unbound_counts == {
+        "identity": 0,
+        "business_model": 3,
+        "portfolio": 1,
+        "past_changes": 5,
+        "current_challenges": 2,
+        "future_strategy": 2,
+        "operations_partners": 1,
+        "culture": 0,
+        "competitive_position": 2,
+    }
+    unbound_summary = _fixture_unbound_numeric_summary()
+    assert len(unbound_summary) == 2
+
+    # DART 3개년 원값에서 프로그램이 계산한 세 지표의 누적 증감률만 구조화
+    # 수치 claim으로 다시 들어온다. AI 산문을 역추출해 FactRecord로 꾸미지 않는다.
+    assert len(report.fact_records) == 3
+    assert all(fact.section_owner == "past_changes" for fact in report.fact_records)
+    assert all(fact.formula == "rate" for fact in report.fact_records)
+    assert all(
+        validate_versioned_numeric_record(fact) == ()
+        for fact in report.fact_records
+    )
+
+    structured_counts = {
+        section_id: sum(
+            fact.section_owner == section_id for fact in report.fact_records
+        )
+        for section_id in SECTION_IDS
+    }
+    # 최종 장별 수는 «6문장 하한을 낮춘 값»이 아니라
+    # 원래 6 - 미결속 수치 - 기존 중복 이동 + 검증된 프로그램 claim이다.
     for section in report.sections:
-        expected = 6 - (1 if section.cell == "identity" else 0)
+        expected = (
+            6
+            - len(unbound_by_section[section.cell])
+            - _DEDUPE_REMOVED_BY_SECTION.get(section.cell, 0)
+            + structured_counts[section.cell]
+        )
         assert len(section.prose_lines) == expected, section.cell
+        assert len(section.prose_lines) >= MIN_CLAIMS_PER_COVERED_SECTION
 
     all_prose = [
         text for section in report.sections for text, _cite in section.prose_lines
     ]
+    for sentences in unbound_by_section.values():
+        for unsafe_text in sentences:
+            assert all(unsafe_text not in visible for visible in all_prose)
+    assert all(
+        any(fact.claim in visible for visible in all_prose)
+        for fact in report.fact_records
+    )
+    assert report.grade is Grade.PARTIAL
+    assert any(
+        "수치·날짜 문장" in reason for reason in report.shortfall_reasons
+    )
     # 해석 표지와 [n] 인용이 본문에 실제로 찍힌다
     assert any(INTERPRETATION_MARKER in text for text in all_prose)
     assert any(re.search(r"\[\d+\]", text) for text in all_prose)
-    # 단위 붙은 수치(8,219억 원)를 말한 «확인» 문장이 수치 검증(3-2)을 지나
-    # 해석 강등 없이 «확인»으로 살아남았다 — 검증이 실제로 돌았다는 실측이다.
-    unit_number_lines = [text for text in all_prose if "8,219억" in text]
-    assert unit_number_lines
-    assert all(
-        not text.endswith(INTERPRETATION_MARKER) for text in unit_number_lines
-    )
+    # 원문에 값이 있었다는 이유만으로 8,219억 AI 문장을 공개하지 않는다.
+    # 같은 원값은 아래의 구조화 실적표에는 손실 없이 남는다.
+    assert all("8,219억" not in text for text in all_prose)
 
     # 표는 «정해진 장에만» 실린다 — 4장 실적표(trend), 7장 경로표(flow).
     # ★ v2-27 전에는 「4장 외에는 표가 0개」였는데, 그것은 7장 흐름도가
@@ -343,19 +462,50 @@ def test_ENGINE_V2_전체_흐름이_검증된_v2_보고서를_만든다(
     # 부록: 인용된 조각 1~11 전부, 번호는 조각 번호 그대로 (본문 [n]과 1:1)
     assert sorted(source.number for source in report.citations) == list(range(1, 12))
 
-    # 핵심 요약 — fixture 4문장, «확인»은 표지 없음·«해석»만 표지
-    assert len(report.summary_items) == 4
-    assert "8,219억" in report.summary_items[1].text
-    assert INTERPRETATION_MARKER not in report.summary_items[1].text
-    assert report.summary_items[3].text.endswith(INTERPRETATION_MARKER)
+    # 핵심 요약도 같은 계약이다. 미결속 수치 2문장은 빠지고, 숫자 없는 원래
+    # 요약 2문장은 보존되며 안전한 본문 한 문장으로 최소 3문장을 채운다.
+    assert (
+        SUMMARY_MIN_SENTENCES
+        <= len(report.summary_items)
+        <= SUMMARY_MAX_SENTENCES
+    )
+    visible_summary = [item.text for item in report.summary_items]
+    for unsafe_text in unbound_summary:
+        assert all(unsafe_text not in text for text in visible_summary)
+    safe_fixture_summary = [
+        str(sentence["글"])
+        for sentence in _RESPONSES_FIXTURE["핵심요약_응답"]["문장들"]
+        if not has_public_numeric_token(str(sentence["글"]))
+    ]
+    assert len(safe_fixture_summary) == 2
+    assert all(
+        any(safe_text in visible for visible in visible_summary)
+        for safe_text in safe_fixture_summary
+    )
 
-    # 관측 수치 — 초안 58문장이 전부 생존했고 보고서가 나갔으니 1 차감이다
+    # 관측 수치도 입력 하한 58을 숨기지 않고 처분별로 계산한다.
     assert result.charged is True
     assert result.fragments_collected == 11
     assert result.fragments_cited == 11
     assert result.sentences_made == _expected_sentence_total()
-    # fixture가 회사 표어를 1장·8장에 둘 다 실어, 중복 제거가 1장 쪽을 옮긴다.
-    assert result.sentences_passed == _expected_sentence_total() - 1
+    safe_summary_before_supplement = (
+        len(_RESPONSES_FIXTURE["핵심요약_응답"]["문장들"])
+        - len(unbound_summary)
+    )
+    summary_supplements = len(report.summary_items) - safe_summary_before_supplement
+    expected_passed = (
+        _expected_sentence_total()
+        - sum(len(sentences) for sentences in unbound_by_section.values())
+        - len(unbound_summary)
+        - sum(_DEDUPE_REMOVED_BY_SECTION.values())
+        + len(report.fact_records)
+        + summary_supplements
+    )
+    assert result.sentences_passed == expected_passed
+    assert result.sentences_passed == (
+        sum(len(section.prose_lines) for section in report.sections)
+        + len(report.summary_items)
+    )
 
 
 # ══════════════════════════════════════════════════════════
@@ -519,8 +669,8 @@ def test_2장에_구성표_2개가_있어도_v2_출고_게이트를_통과해_PD
 #   위 네 곳 중 어디를 되돌려도 실패한다 — 그것이 이 시험의 존재 이유다.
 
 
-def _v2_report_to_result_page(report) -> str:
-    """엔진이 만든 v2 보고서를 «진짜 결과 화면»에 태워 HTML을 받는다."""
+def _v2_report_to_result_page(report, artifact_root: Path) -> str:
+    """엔진 보고서를 불변 Delivery로 확정한 뒤 진짜 결과 화면에 태운다."""
     import uuid
 
     from fastapi.testclient import TestClient
@@ -531,9 +681,8 @@ def _v2_report_to_result_page(report) -> str:
     from src.web import job_runtime
     from src.web.routers import reports as reports_router
 
-    job_id = f"seam-{uuid.uuid4().hex}"
+    job_id = uuid.uuid4().hex
     job_runtime._JOBS.pop(job_id, None)
-    saved = {"보고서": report}
 
     with pytest.MonkeyPatch.context() as mp:
         # ★ 이 시험은 composer 폴더에 있어 web/tests/conftest.py의 공개 모드
@@ -541,12 +690,17 @@ def _v2_report_to_result_page(report) -> str:
         #   대신 로그인 안내가 돌아와 「도식이 없다」로 잘못 읽힌다.
         mp.setenv(auth_constants.ENV_BETA_ADMIN_ONLY, "0")
         mp.setenv(auth_constants.ENV_ADMIN_EMAILS, "admin@example.com")
+        mp.setenv("APP_DATA_ROOT", str(artifact_root))
         job_runtime._start_job_runtime()
-        mp.setattr(job_runtime, "_load_saved_report", lambda _job_id: saved["보고서"])
-        mp.setattr(job_runtime, "_link_expired", lambda _report: False)
-        mp.setattr(
-            reports_router, "_release_state", lambda **_kwargs: (object(), None)
+        persisted = reports_router.finalize_new_report_delivery(
+            report_id=job_id,
+            corp_id="offline-e2e-corp",
+            billing_bucket_id="test:composer-e2e",
+            report=report,
+            actual_models=("offline-fake-model",),
+            reused_from_cache=False,
         )
+        assert persisted.artifact is not None
         mp.setattr(reports_router, "is_notion_configured", lambda: True)
         session = auth_logic.create_session("admin@example.com", True)
         with TestClient(app) as client:
@@ -560,6 +714,7 @@ def _v2_report_to_result_page(report) -> str:
 
 def test_이음매_작가가_낸_경로표가_화면_흐름도까지_도달한다(
     engine: _JypFakeEngine,
+    tmp_path: Path,
 ) -> None:
     """★ 사슬 전체를 한 번에 지킨다 — 한 마디만 끊겨도 여기서 빨간불이 난다."""
     result = _run(engine)
@@ -579,7 +734,7 @@ def test_이음매_작가가_낸_경로표가_화면_흐름도까지_도달한�
     assert len(경로표.rows) >= 1, "경로표에 남은 줄이 없습니다 — 도식 검증이 다 버렸습니다"
 
     # ── 마디 2: 화면이 그것을 «도식»으로 그리는가 ────────
-    body = _v2_report_to_result_page(report)
+    body = _v2_report_to_result_page(report, tmp_path / "flow-seam")
     assert 'class="flow-row"' in body, (
         "화면에 흐름도가 없습니다 — 표는 있는데 도식으로 안 그려졌습니다. "
         "result.html이 표 매크로를 부르는지, visualization.py의 flow 판정 "
@@ -590,7 +745,9 @@ def test_이음매_작가가_낸_경로표가_화면_흐름도까지_도달한�
 
 
 def test_이음매_중복제거가_일어나도_경로표는_화면까지_간다(
-    engine: _JypFakeEngine, monkeypatch: pytest.MonkeyPatch
+    engine: _JypFakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """★ 중복 제거가 7장을 «재조립»하는 경로까지 지킨다.
 
@@ -621,11 +778,14 @@ def test_이음매_중복제거가_일어나도_경로표는_화면까지_간다
     assert 운영장.tables and 운영장.tables[0].presentation == "flow", (
         "중복 제거가 장을 다시 조립하면서 경로표를 버렸습니다"
     )
-    assert 'class="flow-row"' in _v2_report_to_result_page(report)
+    assert 'class="flow-row"' in _v2_report_to_result_page(
+        report, tmp_path / "dedupe-flow-seam"
+    )
 
 
 def test_이음매_2장_구성_도식과_4장_추이_도식도_화면까지_간다(
     engine: _JypFakeEngine,
+    tmp_path: Path,
 ) -> None:
     """7장만 지키면 나머지가 조용히 끊긴다 — 세 도식을 한 시험에서 함께 본다.
 
@@ -652,13 +812,15 @@ def test_이음매_2장_구성_도식과_4장_추이_도식도_화면까지_간�
     assert "trend" in 표현.get("past_changes", []), f"4장 추이표가 없습니다: {표현}"
     assert "flow" in 표현.get("operations_partners", []), f"7장 경로표가 없습니다: {표현}"
 
-    body = _v2_report_to_result_page(report)
+    body = _v2_report_to_result_page(report, tmp_path / "diagram-seam")
     assert 'class="trend-panels"' in body, "4장 추이 도식이 화면에 없습니다"
     assert 'class="flow-row"' in body, "7장 흐름도가 화면에 없습니다"
 
 
 def test_이음매_2장_사업_흐름표도_7장과_같은_사슬을_지나_화면까지_간다(
-    engine: _JypFakeEngine, monkeypatch: pytest.MonkeyPatch
+    engine: _JypFakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """★★ 과제 3 — 2장(business_model)에 «사업 흐름» 경로표를 새로 추가했다.
 
@@ -711,7 +873,7 @@ def test_이음매_2장_사업_흐름표도_7장과_같은_사슬을_지나_화�
     assert len(흐름표.rows) >= 1, "경로표에 남은 줄이 없습니다 — 도식 검증이 다 버렸습니다"
 
     # ── 마디 2: 화면이 그것을 «도식»으로 그리는가 ────────
-    body = _v2_report_to_result_page(report)
+    body = _v2_report_to_result_page(report, tmp_path / "business-flow-seam")
     assert 'class="flow-row"' in body, (
         "화면에 흐름도가 없습니다 — 표는 있는데 도식으로 안 그려졌습니다."
     )

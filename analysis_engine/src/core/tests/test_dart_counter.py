@@ -126,7 +126,7 @@ def test_HTTP오류를_키없는_예외로_정규화한다(
     def fail(request_url, **_kwargs):
         raise urllib.error.HTTPError(request_url, status, "provider body", None, None)
 
-    monkeypatch.setattr(dart_client.urllib.request, "urlopen", fail)
+    monkeypatch.setattr(dart_client, "_urlopen", fail)
     counter = UsageCounter(path=tmp_path / "usage.json", limit=10)
 
     with pytest.raises(error_type) as caught:
@@ -145,8 +145,8 @@ def test_timeout을_비밀값없는_통신오류로_정규화한다(
     secret = "timeout-secret"
     monkeypatch.setenv("DART_API_KEY", "fake-key")
     monkeypatch.setattr(
-        dart_client.urllib.request,
-        "urlopen",
+        dart_client,
+        "_urlopen",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError(secret)),
     )
 
@@ -167,7 +167,7 @@ def test_깨진_JSON과_누락_응답을_계약오류로_막는다(
 ):
     monkeypatch.setenv("DART_API_KEY", "fake-key")
     monkeypatch.setattr(
-        dart_client.urllib.request, "urlopen", lambda *_args, **_kwargs: _Response(body)
+        dart_client, "_urlopen", lambda *_args, **_kwargs: _Response(body)
     )
 
     with pytest.raises(dart_client.DartResponseError):
@@ -182,8 +182,8 @@ def test_zip이_아닌_다운로드응답의_원문을_반사하지_않는다(
     secret = "reflected-secret"
     monkeypatch.setenv("DART_API_KEY", "fake-key")
     monkeypatch.setattr(
-        dart_client.urllib.request,
-        "urlopen",
+        dart_client,
+        "_urlopen",
         lambda *_args, **_kwargs: _Response(
             f"<error><message>{secret}</message></error>".encode()
         ),
@@ -206,7 +206,7 @@ def test_DART_JSON은_상한보다_한_바이트만_더_읽고_거부한다(
     monkeypatch.setattr(dart_client, "JSON_RESPONSE_MAX_BYTES", 8)
     monkeypatch.setenv("DART_API_KEY", "fake-key")
     monkeypatch.setattr(
-        dart_client.urllib.request, "urlopen", lambda *_args, **_kwargs: response
+        dart_client, "_urlopen", lambda *_args, **_kwargs: response
     )
 
     with pytest.raises(dart_client.DartResponseError) as caught:
@@ -216,6 +216,30 @@ def test_DART_JSON은_상한보다_한_바이트만_더_읽고_거부한다(
 
     assert response.read_sizes == [9]
     assert secret.decode() not in str(caught.value)
+
+
+def test_DART_응답이_다른_host로_바뀌면_본문을_읽기전에_거부한다(
+    tmp_path, monkeypatch
+):
+    class RedirectedResponse(_Response):
+        def geturl(self):
+            return "https://attacker.example/forged-dart-response"
+
+    response = RedirectedResponse(b'{"status":"000"}')
+    monkeypatch.setenv("DART_API_KEY", "query-secret-must-not-follow")
+    monkeypatch.setattr(dart_client, "_urlopen", lambda *_args, **_kwargs: response)
+
+    with pytest.raises(
+        dart_client.DartResponseError,
+        match="응답 위치",
+    ):
+        dart_client.get_json(
+            "company.json",
+            {},
+            UsageCounter(path=tmp_path / "usage.json", limit=10),
+        )
+
+    assert response.read_sizes == []
 
 
 @pytest.mark.parametrize(
@@ -232,7 +256,7 @@ def test_DART_ZIP응답은_용도별_압축크기_상한을_지킨다(
     monkeypatch.setattr(dart_client, cap_name, 8)
     monkeypatch.setenv("DART_API_KEY", "fake-key")
     monkeypatch.setattr(
-        dart_client.urllib.request, "urlopen", lambda *_args, **_kwargs: response
+        dart_client, "_urlopen", lambda *_args, **_kwargs: response
     )
     counter = UsageCounter(path=tmp_path / f"{cap_name}.json", limit=10)
 
@@ -254,8 +278,8 @@ def test_corpCode_ZIP의_선언_해제크기_초과를_파일생성전에_막는
     monkeypatch.setattr(dart_client, "CORPCODE_ZIP_TOTAL_UNCOMPRESSED_MAX_BYTES", 8)
     body = _zip_bytes({"CORPCODE.xml": b"x" * 9})
     monkeypatch.setattr(
-        dart_client.urllib.request,
-        "urlopen",
+        dart_client,
+        "_urlopen",
         lambda *_args, **_kwargs: _Response(body),
     )
     dest_dir = tmp_path / "corpcode"
@@ -274,8 +298,8 @@ def test_공시ZIP의_전체_선언크기_초과를_막는다(tmp_path, monkeypa
     monkeypatch.setattr(dart_client, "DOCUMENT_ZIP_TOTAL_UNCOMPRESSED_MAX_BYTES", 10)
     body = _zip_bytes({"first.xml": b"a" * 6, "second.xml": b"b" * 6})
     monkeypatch.setattr(
-        dart_client.urllib.request,
-        "urlopen",
+        dart_client,
+        "_urlopen",
         lambda *_args, **_kwargs: _Response(body),
     )
 
@@ -294,8 +318,8 @@ def test_ZipFile_생성전에_중앙디렉터리_항목수를_제한한다(
     monkeypatch.setattr(dart_client, "DOCUMENT_ZIP_MAX_MEMBERS", 1)
     body = _zip_bytes({"first.xml": b"a", "second.xml": b"b"})
     monkeypatch.setattr(
-        dart_client.urllib.request,
-        "urlopen",
+        dart_client,
+        "_urlopen",
         lambda *_args, **_kwargs: _Response(body),
     )
 
@@ -311,8 +335,8 @@ def test_분할_ZIP은_ZipFile_생성전에_거부한다(tmp_path, monkeypatch):
     monkeypatch.setenv("DART_API_KEY", "fake-key")
     body = _replace_zip_end_u16(_zip_bytes({"CORPCODE.xml": b"data"}), 4, 1)
     monkeypatch.setattr(
-        dart_client.urllib.request,
-        "urlopen",
+        dart_client,
+        "_urlopen",
         lambda *_args, **_kwargs: _Response(body),
     )
 
@@ -329,8 +353,8 @@ def test_ZIP64는_ZipFile_생성전에_거부한다(tmp_path, monkeypatch):
     body = _replace_zip_end_u16(body, 8, 0xFFFF)
     body = _replace_zip_end_u16(body, 10, 0xFFFF)
     monkeypatch.setattr(
-        dart_client.urllib.request,
-        "urlopen",
+        dart_client,
+        "_urlopen",
         lambda *_args, **_kwargs: _Response(body),
     )
 
@@ -348,8 +372,8 @@ def test_중앙디렉터리_크기_상한을_ZipFile_생성전에_검증한다(
     monkeypatch.setattr(dart_client, "CORPCODE_ZIP_CENTRAL_DIRECTORY_MAX_BYTES", 1)
     body = _zip_bytes({"CORPCODE.xml": b"data"})
     monkeypatch.setattr(
-        dart_client.urllib.request,
-        "urlopen",
+        dart_client,
+        "_urlopen",
         lambda *_args, **_kwargs: _Response(body),
     )
 
@@ -368,8 +392,8 @@ def test_암호화로_선언된_ZIP항목을_해제전에_거부한다(tmp_path,
     flags = struct.unpack_from("<H", body, central_offset + 8)[0]
     struct.pack_into("<H", body, central_offset + 8, flags | 0x1)
     monkeypatch.setattr(
-        dart_client.urllib.request,
-        "urlopen",
+        dart_client,
+        "_urlopen",
         lambda *_args, **_kwargs: _Response(bytes(body)),
     )
 
@@ -387,8 +411,8 @@ def test_corpCode_ZIP의_필수항목_중복을_거부한다(tmp_path, monkeypat
             [("CORPCODE.xml", b"first"), ("CORPCODE.xml", b"second")]
         )
     monkeypatch.setattr(
-        dart_client.urllib.request,
-        "urlopen",
+        dart_client,
+        "_urlopen",
         lambda *_args, **_kwargs: _Response(body),
     )
 
@@ -404,8 +428,8 @@ def test_ZIP의_과도한_압축비를_막는다(tmp_path, monkeypatch):
     monkeypatch.setattr(dart_client, "ZIP_MEMBER_MAX_COMPRESSION_RATIO", 1)
     body = _zip_bytes({"CORPCODE.xml": b"a" * 100})
     monkeypatch.setattr(
-        dart_client.urllib.request,
-        "urlopen",
+        dart_client,
+        "_urlopen",
         lambda *_args, **_kwargs: _Response(body),
     )
 
@@ -443,8 +467,8 @@ def test_정상_corpCode와_공시ZIP은_명시한_파일만_저장한다(
         ]
     )
     monkeypatch.setattr(
-        dart_client.urllib.request,
-        "urlopen",
+        dart_client,
+        "_urlopen",
         lambda *_args, **_kwargs: _Response(next(bodies)),
     )
     counter = UsageCounter(path=tmp_path / "usage.json", limit=10)

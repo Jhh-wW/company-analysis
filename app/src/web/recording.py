@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 
 from src.core import paths
+from src.features.budget import state_machine as budget_state_machine
 from src.features.final_gate_diagnostic import store as final_gate_diagnostic_store
 from src.features.observability import constants as obs
 from src.features.observability import lifecycle
@@ -109,8 +110,8 @@ def record_run(
             elapsed_sec=round(elapsed_sec, 1),
             model=result.model,
         )
-        # SQLite current 행이 요청당 최종값 하나를 보장한다. JSONL은 기존 분석
-        # 도구와 원본 감사 호환을 위한 append-only 사본이다.
+        # SQLite current 행이 요청당 최종값 하나를 보장하고 별도 audit 표가 상태
+        # 전이를 변경 불가로 남긴다. JSONL은 새 비용 원장 전환 전 도구만 위한 호환 사본이다.
         with storage_db.connect() as conn:
             # lifecycle.finalize_once()는 독립 호출도 지원하려고 savepoint를 쓴다.
             # 여기서는 부속 span 진단과 crash-gap 없이 함께 남겨야 하므로 명시적
@@ -118,6 +119,7 @@ def record_run(
             if not conn.in_transaction:
                 conn.execute("BEGIN IMMEDIATE")
             lifecycle.ensure_schema(conn)
+            write_legacy_jsonl = not budget_state_machine.cutover_applied(conn)
             inserted = lifecycle.finalize_once(
                 conn,
                 record,
@@ -140,7 +142,7 @@ def record_run(
                     reason_code=result.final_gate_reason,
                     recorded_at=record.at,
                 )
-        if inserted:
+        if inserted and write_legacy_jsonl:
             try:
                 append_record(record, records_path())
             except Exception:  # noqa: BLE001 — SQLite 최종값은 이미 남았다

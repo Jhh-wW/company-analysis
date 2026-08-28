@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import uuid
 
 import pytest
 from fastapi.testclient import TestClient
@@ -148,6 +149,33 @@ def test_성공한_페이지는_새로고침과_재접속에도_재사용하고_
     assert record.page_id == "persisted-page"
 
 
+def test_외부_adapter의_javascript_페이지주소는_저장도_화면링크도_되지_않는다(
+    notion_admin, monkeypatch
+):
+    client, report, csrf = notion_admin
+    monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
+
+    def poisoned_result(*_args, **_kwargs):
+        return NotionExportResult(
+            success=True,
+            page_id="created-page",
+            page_url="javascript:alert(document.domain)",
+        )
+
+    monkeypatch.setattr(reports_router, "send_report_to_notion", poisoned_result)
+
+    response = client.post("/notion/unsafe-url-job", data={"csrf_token": csrf})
+
+    assert response.status_code == 200
+    assert "javascript:" not in response.text
+    assert "노션에서 열기" not in response.text
+    digest = notion_store.report_digest(report)
+    with storage_db.connect() as conn:
+        record = notion_store.load(conn, "unsafe-url-job", digest)
+    assert record is not None
+    assert record.page_url == ""
+
+
 @pytest.mark.parametrize(
     ("failed_result", "expected_text"),
     [
@@ -239,6 +267,11 @@ def test_partial_unknown은_자동중복을_막고_확인한_CAS재시도만_허
 
 def test_클라이언트취소뒤에도_worker가_결과를_저장해_중복을_막는다(monkeypatch):
     report = _demo_report()
+    job_id = f"cancel-job-{uuid.uuid4().hex}"
+    # 이 시험은 TestClient 시작 수명주기를 우회해 route를 직접 호출한다.
+    # 운영과 같은 fail-closed 공개 상태 조회가 가능하도록 저장소를 먼저 연다.
+    with storage_db.connect():
+        pass
     started = threading.Event()
     release = threading.Event()
     monkeypatch.setattr(
@@ -265,8 +298,8 @@ def test_클라이언트취소뒤에도_worker가_결과를_저장해_중복을_
             "http_version": "1.1",
             "method": "POST",
             "scheme": "http",
-            "path": "/notion/cancel-job",
-            "raw_path": b"/notion/cancel-job",
+            "path": f"/notion/{job_id}",
+            "raw_path": f"/notion/{job_id}".encode("ascii"),
             "query_string": b"",
             "headers": [],
             "client": ("127.0.0.1", 1),
@@ -278,13 +311,19 @@ def test_클라이언트취소뒤에도_worker가_결과를_저장해_중복을_
         route_task = asyncio.create_task(
             reports_router.send_to_notion(
                 request,
-                "cancel-job",
+                job_id,
                 csrf_token="test",
                 retry_revision="",
                 confirm_duplicate="",
             )
         )
-        assert await asyncio.to_thread(started.wait, 2)
+        worker_started = await asyncio.to_thread(started.wait, 2)
+        if not worker_started and route_task.done():
+            response = route_task.result()
+            pytest.fail(
+                f"Notion 작업자 시작 전 응답: status={response.status_code}"
+            )
+        assert worker_started
         route_task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await route_task
@@ -302,7 +341,7 @@ def test_클라이언트취소뒤에도_worker가_결과를_저장해_중복을_
 
     digest = notion_store.report_digest(report)
     with storage_db.connect() as conn:
-        record = notion_store.load(conn, "cancel-job", digest)
+        record = notion_store.load(conn, job_id, digest)
     assert record is not None
     assert record.state == notion_store.STATE_SUCCEEDED
     assert record.page_id == "page-after-cancel"
@@ -313,6 +352,9 @@ def test_claim_commit직후_요청취소도_supervisor가_adapter와_finish를_�
 ):
     """OUT-NOTION-08: claim 반환값이 폐기되던 정확한 취소 경계를 고정한다."""
     report = _demo_report()
+    job_id = f"claim-cancel-job-{uuid.uuid4().hex}"
+    with storage_db.connect():
+        pass
     claim_committed = threading.Event()
     allow_claim_return = threading.Event()
     adapter_calls: list[bool] = []
@@ -348,8 +390,8 @@ def test_claim_commit직후_요청취소도_supervisor가_adapter와_finish를_�
             "http_version": "1.1",
             "method": "POST",
             "scheme": "http",
-            "path": "/notion/claim-cancel-job",
-            "raw_path": b"/notion/claim-cancel-job",
+            "path": f"/notion/{job_id}",
+            "raw_path": f"/notion/{job_id}".encode("ascii"),
             "query_string": b"",
             "headers": [],
             "client": ("127.0.0.1", 1),
@@ -361,7 +403,7 @@ def test_claim_commit직후_요청취소도_supervisor가_adapter와_finish를_�
         route_task = asyncio.create_task(
             reports_router.send_to_notion(
                 request,
-                "claim-cancel-job",
+                job_id,
                 csrf_token="test",
                 retry_revision="",
                 confirm_duplicate="",
@@ -375,7 +417,7 @@ def test_claim_commit직후_요청취소도_supervisor가_adapter와_finish를_�
 
         def load_claimed():
             with storage_db.connect() as conn:
-                return notion_store.load(conn, "claim-cancel-job", digest)
+                return notion_store.load(conn, job_id, digest)
 
         claimed = await asyncio.to_thread(load_claimed)
         assert claimed is not None and claimed.state == notion_store.STATE_IN_PROGRESS
@@ -397,7 +439,7 @@ def test_claim_commit직후_요청취소도_supervisor가_adapter와_finish를_�
 
     digest = notion_store.report_digest(report)
     with storage_db.connect() as conn:
-        record = notion_store.load(conn, "claim-cancel-job", digest)
+        record = notion_store.load(conn, job_id, digest)
     assert adapter_calls == [True]
     assert record is not None
     assert record.state == notion_store.STATE_SUCCEEDED

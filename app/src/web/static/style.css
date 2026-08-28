@@ -1676,28 +1676,25 @@ td.center { text-align: center; }
 /* 문단 번호 «1.» — 본문 왼쪽에 붙는 작은 표지.
    ★ 본문 글자가 아니라 «표시»다. 화면 낭독기에는 안 읽히게 aria-hidden을
       쓴다(틀에서 지정). 번호가 문장 안으로 들어가면 인용 추적이 깨진다. */
-.result-page .prose { position: relative; }
+.result-page .prose {
+  display: grid;
+  grid-template-columns: 2.6em minmax(0, 1fr);
+  align-items: start;
+  column-gap: .5em;
+}
 .result-page .pno {
-  display: inline-block;
-  min-width: 2.6em;
-  margin-right: .5em;
+  display: block;
+  min-width: 0;
+  margin: 0;
   font-family: "Prata", Georgia, serif;
   font-size: .82em;
   font-variant-numeric: tabular-nums;
   color: #737373;
   letter-spacing: .02em;
+  text-align: right;
   user-select: none;
 }
-@media (min-width: 900px) {
-  /* 넓은 화면에서는 본문 바깥 여백으로 빼 글줄이 안 밀리게 한다 */
-  .result-page .pno {
-    position: absolute;
-    left: -3.6em;
-    margin-right: 0;
-    text-align: right;
-    min-width: 3em;
-  }
-}
+.result-page .prose-text { min-width: 0; }
 
 .result-page .composition-track {
   display: flex;

@@ -42,6 +42,38 @@ class ComposedSentence:
     citations: tuple[str, ...]
     #: "확인"(인용 원문에 직접 근거가 있는 사실) | "해석"(공식 자료 기반 분석·의미 부여)
     grade: str
+    #: 생성 계획에서 작가가 선택한 원자 claim 자리. 누락·계약 밖 값은 빈칸이다.
+    planned_claim_slot: str = ""
+    #: 작가가 아니라 독립 검증기가 확정하는 상태. 기본은 절대 verified가 아니다.
+    verification_state: str = "unverified"
+    #: 프로그램이 구조화 원자료로 만든 claim만 갖는 손실 없는 결속 DTO.
+    structured_claim: Optional["StructuredClaim"] = None
+
+
+@dataclass(frozen=True)
+class StructuredClaim:
+    """텍스트 역추출 없이 공개 문장과 FactRecord를 1:1로 잇는 계약."""
+
+    fact_id: str
+    claim_slot: str
+    section_owner: str
+    source_fragment_id: str
+    source_identity: str
+    verification_state: str
+    state_evidence: str
+    subject_scope: str = ""
+    metric: str = ""
+    period_start: str = ""
+    period_end: str = ""
+    sign: str = ""
+    unit: str = ""
+    unit_dimension: str = ""
+    formula: str = ""
+    raw_value: str = ""
+    calculation: str = ""
+    display_value: str = ""
+    rounding_rule: str = ""
+    numeric_checks: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -143,6 +175,13 @@ class PerformanceTable:
     rows: tuple[tuple[str, ...], ...]
     unit: str = ""
     cite: str = ""
+    raw_rows: tuple[tuple[str, ...], ...] = ()
+    scale_divisor: str = ""
+    scale_places: int = 0
+    evidence_rows: tuple[str, ...] = ()
+    entity_scope: str = ""
+    raw_unit: str = ""
+    unit_dimension: str = ""
 
 
 def performance_table_from_report_table(table: Any) -> PerformanceTable:
@@ -156,6 +195,18 @@ def performance_table_from_report_table(table: Any) -> PerformanceTable:
         ),
         unit=str(getattr(table, "display_unit", "") or ""),
         cite=str(getattr(table, "cite", "") or ""),
+        raw_rows=tuple(
+            tuple(str(cell) for cell in row)
+            for row in (getattr(table, "raw_rows", None) or ())
+        ),
+        scale_divisor=str(getattr(table, "scale_divisor", "") or ""),
+        scale_places=int(getattr(table, "scale_places", 0) or 0),
+        evidence_rows=tuple(
+            str(value) for value in (getattr(table, "evidence_rows", None) or ())
+        ),
+        entity_scope=str(getattr(table, "entity_scope", "") or ""),
+        raw_unit=str(getattr(table, "raw_unit", "") or ""),
+        unit_dimension=str(getattr(table, "unit_dimension", "") or ""),
     )
 
 

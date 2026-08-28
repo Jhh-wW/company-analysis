@@ -103,6 +103,37 @@ def test_여러_행을_덧붙이면_순서대로_쌓인다(tmp_path: Path):
     assert [r.run_id for r in result.records] == ["r1", "r2"]
 
 
+def test_읽기는_파일전체_read_text복사본을_만들지_않는다(
+    tmp_path: Path, monkeypatch,
+):
+    """큰 호환 JSONL을 문자열+splitlines로 두 번 복제하면 시작 OOM이 난다."""
+
+    path = tmp_path / "runs.jsonl"
+    append_record(_record(run_id="streamed"), path)
+
+    def forbidden_read_text(*_args, **_kwargs):
+        raise AssertionError("관측 JSONL 전체 read_text는 금지합니다")
+
+    monkeypatch.setattr(Path, "read_text", forbidden_read_text)
+
+    assert read_records(path).records == [_record(run_id="streamed")]
+
+
+def test_호환_JSONL은_정해진_디스크_상한을_넘겨_자라지_않는다(
+    tmp_path: Path, monkeypatch,
+):
+    from src.features.observability import records as records_module
+
+    path = tmp_path / "runs.jsonl"
+    one = _record(run_id="first")
+    monkeypatch.setattr(records_module, "MAX_RECORDS_FILE_BYTES", 1)
+
+    with pytest.raises(records_module.RecordsCapacityError):
+        append_record(one, path)
+
+    assert not path.exists() or path.stat().st_size == 0
+
+
 def test_저장_경로의_폴더가_없으면_만든다(tmp_path: Path):
     path = tmp_path / "새폴더" / "runs.jsonl"
     append_record(_record(), path)

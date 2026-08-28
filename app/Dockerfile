@@ -19,7 +19,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DEPLOYMENT_PLATFORM=local \
     FORWARDED_ALLOW_IPS=127.0.0.1 \
     LOG_LEVEL=info \
-    GRACEFUL_SHUTDOWN_SECONDS=300 \
+    GRACEFUL_SHUTDOWN_SECONDS=20 \
     HEALTHCHECK_PATH=/readyz
 
 WORKDIR /srv/app
@@ -68,4 +68,4 @@ HEALTHCHECK --interval=15s --timeout=4s --start-period=45s --retries=4 \
 ENTRYPOINT ["company-analysis-entrypoint"]
 
 # SQLite와 메모리 작업 상태를 한 프로세스만 다루도록 worker는 반드시 1개다.
-CMD ["sh", "-c", "exec python -m uvicorn src.web.main:app --host 0.0.0.0 --port \"${PORT:-10000}\" --workers 1 --no-proxy-headers --limit-concurrency 20 --backlog 32 --timeout-keep-alive 5 --timeout-graceful-shutdown \"${GRACEFUL_SHUTDOWN_SECONDS:-300}\" --log-level \"${LOG_LEVEL:-info}\""]
+CMD ["sh", "-c", "exec python -m uvicorn src.web.main:app --host 0.0.0.0 --port \"${PORT:-10000}\" --workers 1 --no-proxy-headers --limit-concurrency 20 --backlog 32 --timeout-keep-alive 5 --timeout-graceful-shutdown \"${GRACEFUL_SHUTDOWN_SECONDS:-20}\" --log-level \"${LOG_LEVEL:-info}\""]

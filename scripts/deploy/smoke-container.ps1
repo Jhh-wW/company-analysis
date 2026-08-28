@@ -37,7 +37,7 @@ function Start-SmokeContainer {
         --env STORAGE_DB_PATH=/var/data/storage.db `
         --env OBSERVABILITY_RECORDS_PATH=/var/data/observability/runs.jsonl `
         --env TLDEXTRACT_CACHE=/var/data/cache/tldextract `
-        --env GRACEFUL_SHUTDOWN_SECONDS=300 `
+        --env GRACEFUL_SHUTDOWN_SECONDS=20 `
         --mount "type=volume,src=$($script:volumeName),dst=/var/data" `
         $Image | Out-Null
     if ($LASTEXITCODE -ne 0) {

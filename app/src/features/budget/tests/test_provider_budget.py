@@ -71,6 +71,19 @@ def test_usage_불명은_호출전_예상액을_계속_보류한다():
     assert budget.accounted_krw == pytest.approx(reservation.estimated_krw)
 
 
+def test_provider에_보내기전_callback실패는_호출예약을_반환한다():
+    budget = provider_budget.ProviderBudget(10.0)
+    reservation = budget.reserve_call(
+        model=_HAIKU, input_tokens_upper=100, max_tokens=100
+    )
+
+    budget.cancel_before_dispatch(reservation)
+
+    assert budget.accounted_krw == 0.0
+    with pytest.raises(provider_budget.ProviderCostInvariantError):
+        budget.cancel_before_dispatch(reservation)
+
+
 def test_동시_호출도_단계_예상액을_원자적으로_예약한다():
     budget = provider_budget.ProviderBudget(1.0)
     barrier = Barrier(4)

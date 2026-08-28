@@ -28,6 +28,8 @@ from typing import Callable, Optional
 from PIL import Image, UnidentifiedImageError
 
 from src.core.pricing import usage_cost_krw
+from src.core.provider_gateway import attempt_context, gateway
+from src.core.provider_gateway.anthropic_adapter import AnthropicAdapter
 from src.features.budget import provider_budget
 from src.features.posting_image import constants
 
@@ -401,40 +403,121 @@ def default_extract(images: list[bytes]) -> ExtractResult:
         ),
         max_tokens=constants.DEFAULT_EXTRACT_MAX_TOKENS,
     )
-    client = anthropic.Anthropic(
-        max_retries=0,
-        timeout=constants.ANTHROPIC_TIMEOUT_SEC,
-    )
-    try:
-        response = client.messages.create(
-            model=constants.DEFAULT_EXTRACT_MODEL,
-            max_tokens=constants.DEFAULT_EXTRACT_MAX_TOKENS,
-            messages=[{"role": "user", "content": content}],
-            output_config={"format": {"type": "json_schema", "schema": schema}},
-        )
-    except Exception as exc:
-        failure_usage = getattr(exc, "usage", None)
-        if failure_usage is None:
-            failure_usage = getattr(getattr(exc, "response", None), "usage", None)
+
+    def usage_details(value: object) -> tuple[str, int, int, float] | None:
+        usage = getattr(value, "usage", None)
+        if usage is None:
+            usage = getattr(getattr(value, "response", None), "usage", None)
         try:
-            failure_in = int(getattr(failure_usage, "input_tokens"))
-            failure_out = int(getattr(failure_usage, "output_tokens"))
-            if failure_in < 0 or failure_out < 0:
+            tokens_in = int(getattr(usage, "input_tokens"))
+            tokens_out = int(getattr(usage, "output_tokens"))
+            if tokens_in < 0 or tokens_out < 0:
                 raise ValueError
         except (AttributeError, TypeError, ValueError, OverflowError):
-            provider_budget.current().mark_unknown(call_reservation)
-            raise
-        failure_model = str(
-            getattr(exc, "model", "") or constants.DEFAULT_EXTRACT_MODEL
+            return None
+        model = str(
+            getattr(value, "model", "") or constants.DEFAULT_EXTRACT_MODEL
         )
-        failure_cost = usage_cost_krw(failure_model, failure_in, failure_out)
+        return (
+            model,
+            tokens_in,
+            tokens_out,
+            usage_cost_krw(model, tokens_in, tokens_out),
+        )
+
+    try:
+        callbacks = attempt_context.current()
+    except Exception as error:
+        provider_budget.current().cancel_before_dispatch(call_reservation)
+        raise provider_budget.ProviderBudgetUnavailable(
+            "OCR provider 시도 원장이 없어 호출하지 않았습니다"
+        ) from error
+    try:
+        client = anthropic.Anthropic(
+            max_retries=0,
+            timeout=constants.ANTHROPIC_TIMEOUT_SEC,
+        )
+    except Exception:
+        provider_budget.current().cancel_before_dispatch(call_reservation)
+        raise
+    try:
+        attempt_token = callbacks.begin_attempt(
+            "anthropic",
+            "ocr",
+            call_reservation.estimated_krw,
+        )
+    except Exception as error:
+        provider_budget.current().cancel_before_dispatch(call_reservation)
+        raise provider_budget.ProviderBudgetUnavailable(
+            "OCR provider 시도 원장을 시작할 수 없어 호출하지 않았습니다"
+        ) from error
+
+    adapter = AnthropicAdapter(
+        lambda value: (
+            None
+            if (details := usage_details(value)) is None
+            else details[3]
+        ),
+        failure_cost_resolver=lambda value: (
+            None
+            if (details := usage_details(value)) is None
+            else details[3]
+        ),
+    )
+
+    def before_dispatch() -> None:
+        callbacks.heartbeat(attempt_token)
+        callbacks.mark_dispatch_intent(attempt_token)
+
+    try:
+        response = gateway.call_once(
+            adapter=adapter,
+            reserved_krw=call_reservation.estimated_krw,
+            before_dispatch=before_dispatch,
+            send=lambda: client.messages.create(
+                model=constants.DEFAULT_EXTRACT_MODEL,
+                max_tokens=constants.DEFAULT_EXTRACT_MAX_TOKENS,
+                messages=[{"role": "user", "content": content}],
+                output_config={
+                    "format": {"type": "json_schema", "schema": schema}
+                },
+            ),
+            record_observation=lambda observation: callbacks.record_observation(
+                attempt_token, observation
+            ),
+        )
+    except gateway.ProviderDispatchNotStarted as error:
+        provider_budget.current().cancel_before_dispatch(call_reservation)
+        raise provider_budget.ProviderBudgetUnavailable(
+            "OCR provider 전송 의도를 기록하지 못해 호출하지 않았습니다"
+        ) from error
+    except gateway.ProviderObservationRecordFailed as error:
+        # 전송은 이미 일어났으므로 예약을 반환하지 않는다. DB lease 만료가
+        # 보수부채로 회수하고 상위 OCR phase도 미확정으로 끝낸다.
+        provider_budget.current().mark_unknown(call_reservation)
+        raise provider_budget.ProviderBudgetUnavailable(
+            "OCR provider 결과를 비용 원장에 기록하지 못했습니다"
+        ) from error
+    except gateway.ProviderCallFailed as wrapped:
+        error = wrapped.__cause__
+        if not isinstance(error, Exception):
+            provider_budget.current().mark_unknown(call_reservation)
+            raise provider_budget.ProviderBudgetUnavailable(
+                "OCR provider 실패 원인을 확인할 수 없습니다"
+            ) from wrapped
+        details = usage_details(error)
+        if details is None:
+            # SDK 예외에는 대개 usage가 없다. adapter가 같은 예약액을 영속
+            # 보수부채로 기록했으므로 로컬 예약도 0원으로 지우지 않는다.
+            provider_budget.current().mark_unknown(call_reservation)
+            raise error
+        failure_model, _failure_in, _failure_out, failure_cost = details
         provider_budget.current().settle_call(
-            call_reservation,
-            actual_krw=failure_cost,
+            call_reservation, actual_krw=failure_cost
         )
         logger.warning(
             "OCR provider가 usage를 포함한 실패를 돌려줬습니다 type=%s",
-            type(exc).__name__,
+            type(error).__name__,
         )
         return ExtractResult(
             text="",
@@ -442,33 +525,20 @@ def default_extract(images: list[bytes]) -> ExtractResult:
             model=failure_model,
             technical_failure=True,
         )
-    model = str(getattr(response, "model", "") or constants.DEFAULT_EXTRACT_MODEL)
-    usage = getattr(response, "usage", None)
-    tokens_in = getattr(usage, "input_tokens", None) if usage is not None else None
-    tokens_out = getattr(usage, "output_tokens", None) if usage is not None else None
-    if tokens_in is None or tokens_out is None:
+    details = usage_details(response)
+    if details is None:
         # 응답이 왔어도 usage가 없으면 실제 금액을 0원으로 확정할 수 없다.
+        # 영속 attempt도 AnthropicAdapter가 같은 보수부채로 이미 닫았다.
         provider_budget.current().mark_unknown(call_reservation)
+        model = str(
+            getattr(response, "model", "") or constants.DEFAULT_EXTRACT_MODEL
+        )
         return ExtractResult(text="", model=model, billing_uncertain=True)
-    try:
-        clean_in, clean_out = int(tokens_in), int(tokens_out)
-    except (TypeError, ValueError, OverflowError):
-        provider_budget.current().mark_unknown(call_reservation)
-        return ExtractResult(text="", model=model, billing_uncertain=True)
-    if clean_in < 0 or clean_out < 0:
-        provider_budget.current().mark_unknown(call_reservation)
-        return ExtractResult(text="", model=model, billing_uncertain=True)
-    cost_krw = usage_cost_krw(
-        model,
-        clean_in,
-        clean_out,
-    )
+    model, _clean_in, _clean_out, cost_krw = details
     try:
         provider_budget.current().settle_call(
             call_reservation,
-            actual_krw=provider_budget.usage_cost_krw(
-                model, clean_in, clean_out
-            ),
+            actual_krw=cost_krw,
         )
     except provider_budget.ProviderCostInvariantError:
         # 실제 usage 금액은 반환값에 보존돼 상위 원장이 숨기지 않는다.

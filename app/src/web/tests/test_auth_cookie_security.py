@@ -13,11 +13,13 @@ from src.features.pipeline.demo import DemoPipeline
 from src.features.storage import sessions as session_store
 from src.web import runtime
 from src.web.main import app
+from src.web.routers import auth as auth_router
 
 
 SESSION = auth_constants.SESSION_COOKIE_NAME
 STATE = auth_constants.STATE_COOKIE_NAME
 LOCAL_DEMO_TOKEN = "ab" * 32
+OAUTH_STATE = "s" * auth_constants.STATE_TOKEN_CHARS
 
 
 REQUEST_CASES = (
@@ -105,7 +107,7 @@ def test_oauth_state_cookie_secure_is_scoped_to_direct_loopback_http(
         "start_login",
         lambda: auth_google.LoginStart(
             auth_url="https://accounts.example/authorize",
-            state="server-state",
+            state=OAUTH_STATE,
         ),
     )
 
@@ -129,7 +131,7 @@ def test_explicit_flag_is_required_even_on_direct_loopback_http(monkeypatch):
         "start_login",
         lambda: auth_google.LoginStart(
             auth_url="https://accounts.example/authorize",
-            state="server-state",
+            state=OAUTH_STATE,
         ),
     )
 
@@ -158,25 +160,28 @@ def test_oauth_success_rotates_session_and_scopes_set_and_delete_cookies(
         state_expected,
         *,
         previous_session_token=None,
+        provider_deadline_monotonic=None,
     ):
+        assert provider_deadline_monotonic is not None
         assert (code, state_received, state_expected) == (
             "code",
-            "server-state",
-            "server-state",
+            OAUTH_STATE,
+            OAUTH_STATE,
         )
         assert previous_session_token == old.token
         return _callback_result(previous_session_token)
 
     monkeypatch.setattr(auth_google, "handle_callback", fake_callback)
+    auth_router._issue_oauth_state(OAUTH_STATE)
     request_headers = {
         **headers,
-        "Cookie": f"{STATE}=server-state; {SESSION}={old.token}",
+        "Cookie": f"{STATE}={OAUTH_STATE}; {SESSION}={old.token}",
     }
     with TestClient(
         app, base_url=base_url, client=(client_host, 50000)
     ) as client:
         response = client.get(
-            "/auth/callback?code=code&state=server-state",
+            f"/auth/callback?code=code&state={OAUTH_STATE}",
             headers=request_headers,
             follow_redirects=False,
         )

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import threading
 import uuid
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
@@ -32,8 +33,17 @@ from src.features.observability.constants import (
     LEGACY_COUNTED_CELLS,
     LEGACY_HIDDEN_CELLS,
     LEGACY_TOTAL_CELLS,
+    MAX_RECORD_LINE_BYTES,
+    MAX_RECORDS_FILE_BYTES,
     TOTAL_CELLS,
 )
+
+
+_APPEND_LOCK = threading.Lock()
+
+
+class RecordsCapacityError(RuntimeError):
+    """옛 JSONL 호환 사본이 운영 디스크 예약 상한에 도달했다."""
 
 
 @dataclass(frozen=True)
@@ -189,10 +199,24 @@ def append_record(record: RunRecord, path: Path) -> None:
         record: 저장할 이력 1행. 만들 때 이미 `__post_init__` 검증을 통과했다.
         path: 저장할 JSONL 파일 경로. 부모 폴더가 없으면 만든다.
     """
+    line = (json.dumps(asdict(record), ensure_ascii=False) + "\n").encode("utf-8")
+    if len(line) > MAX_RECORD_LINE_BYTES:
+        raise RecordsCapacityError("관측 JSONL 한 행이 안전한 길이 상한을 넘었습니다")
     path.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(asdict(record), ensure_ascii=False)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(line + "\n")
+    # 배포 계약은 process/worker 1개지만 같은 process의 background task와 요청
+    # thread는 동시에 마감될 수 있다. 크기 확인과 append를 한 경계로 묶어 상한을
+    # 경합으로 넘지 않는다. SQLite 정본은 이 호출 전에 이미 commit된다.
+    with _APPEND_LOCK:
+        try:
+            current_size = path.stat().st_size
+        except FileNotFoundError:
+            current_size = 0
+        if current_size + len(line) > MAX_RECORDS_FILE_BYTES:
+            raise RecordsCapacityError(
+                "관측 JSONL 호환 사본이 디스크 예약 상한에 도달했습니다"
+            )
+        with path.open("ab") as file_pointer:
+            file_pointer.write(line)
 
 
 @dataclass(frozen=True)
@@ -220,17 +244,42 @@ def read_records(path: Path) -> ReadResult:
     if not path.exists():
         return ReadResult(records=[], skipped=0)
 
+    try:
+        file_size = path.stat().st_size
+    except OSError as exc:
+        raise RecordsCapacityError("관측 JSONL 크기를 확인할 수 없습니다") from exc
+    if file_size > MAX_RECORDS_FILE_BYTES:
+        raise RecordsCapacityError(
+            "관측 JSONL 호환 사본이 읽기 안전 상한을 넘었습니다"
+        )
+
     records: list[RunRecord] = []
     skipped = 0
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue  # 빈 줄(마지막 개행 등)은 손상이 아니다 — 세지 않는다
-        record = _parse_line(line)
-        if record is None:
-            skipped += 1
-            continue
-        records.append(record)
+    # ``read_text().splitlines()``는 파일 전체 문자열과 줄 목록을 동시에 메모리에
+    # 올린다. 호환 파일은 한 줄씩 제한 길이로 읽어 OOM 없이 SQLite 전환할 수 있게 한다.
+    with path.open("rb") as file_pointer:
+        while True:
+            raw_line = file_pointer.readline(MAX_RECORD_LINE_BYTES + 1)
+            if not raw_line:
+                break
+            if len(raw_line) > MAX_RECORD_LINE_BYTES:
+                # 한 논리 행을 한 번만 손상으로 세고 다음 개행까지 bounded chunk로 버린다.
+                while raw_line and not raw_line.endswith(b"\n"):
+                    raw_line = file_pointer.readline(MAX_RECORD_LINE_BYTES + 1)
+                skipped += 1
+                continue
+            try:
+                line = raw_line.decode("utf-8").strip()
+            except UnicodeDecodeError:
+                skipped += 1
+                continue
+            if not line:
+                continue  # 빈 줄(마지막 개행 등)은 손상이 아니다 — 세지 않는다
+            record = _parse_line(line)
+            if record is None:
+                skipped += 1
+                continue
+            records.append(record)
     return ReadResult(records=records, skipped=skipped)
 
 

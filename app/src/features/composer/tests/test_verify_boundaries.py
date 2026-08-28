@@ -32,6 +32,7 @@ from src.features.composer.verify import (
     REWRITE_PROMPT_HEADER,
 )
 from src.features.pipeline.port import Report
+from src.shared.report_quality.assessment import has_public_numeric_token
 
 COMPANY_NAME: Final[str] = "제이와이피엔터테인먼트"
 
@@ -43,10 +44,13 @@ _RESPONSES_FIXTURE: Final[dict[str, Any]] = json.loads(
     (_FIXTURE_DIR / "jyp_ask_responses.json").read_text(encoding="utf-8")
 )
 
-#: 검수 프롬프트의 대조 항목 한 줄 — 번호와 문장 원문을 같이 읽는다
-#: (verify._build_review_prompt가 만드는 「[n] (인용: …)\\n  문장: …」 모양)
+#: 검수 프롬프트의 대조 항목 한 줄 — 번호와 JSON 문자열 문장을 같이 읽는다.
 _REVIEW_ITEM_RE: Final[re.Pattern[str]] = re.compile(
-    r"\[(\d+)\] \(인용: [^\n]*\)\n  문장: (.+)"
+    r"\[(\d+)\] \(등급: [^,\n]+, 인용: [^\n]*\)\n"
+    r"  문장\(JSON 문자열\): (.+)"
+)
+_FLOW_ITEM_RE: Final[re.Pattern[str]] = re.compile(
+    r"^\[(\d+)\] 경로\(JSON 배열\):", re.MULTILINE
 )
 
 
@@ -72,13 +76,6 @@ def _expected_total() -> int:
     )
     return body + len(_RESPONSES_FIXTURE["핵심요약_응답"]["문장들"])
 
-
-#: 골든 fixture 자체에 «같은 사실이 두 장에 든» 대목이 하나 있다 — 1장이 쓴
-#: 회사 표어를 8장이 다시 쓴다. 정본 §4에서 공식 가치는 8장 소유이므로
-#: 장 간 중복 제거(dedupe)가 1장 쪽 한 문장을 8장으로 모은다. 그 결과 최종
-#: 문장 수가 초안보다 «이만큼 더» 줄어든다. 검수와 무관한 감소분이라
-#: 검수 시험의 기대값에서 따로 뺀다.
-DEDUPE_MOVED_IN_FIXTURE: int = 1
 
 #: 그 한 문장이 어느 장에서 빠지는가 — 1장이 쓴 회사 표어가 8장으로 간다.
 #: 장별 문장 수를 단정하는 곳에서 이 값을 빼 준다.
@@ -134,20 +131,30 @@ class _ScriptedReviewer:
             return self._rewrite_text
         if FLOW_REVIEW_PROMPT_HEADER in prompt:
             # ★ 도식 검수(v2-27)는 같은 검수 클로저를 쓰지만 «다른» 물음이다.
-            #   이 시험들은 «문장» 판정 경계를 소유하므로 도식은 손대지 않는다.
-            #   여기서 판정을 안 돌려주면 도식 검증이 「검수 불능」으로 보고
-            #   경로를 그대로 남긴다 — 이 시험의 관심사가 아니다.
+            #   이 시험들은 문장 판정 경계를 소유하므로, 도식은 모두
+            #   «참»으로 대답해 문장 시험의 변수가 되지 않게 한다.
             self.flow_review_prompts.append(prompt)
-            return ""
+            numbers = [int(value) for value in _FLOW_ITEM_RE.findall(prompt)]
+            return json.dumps(
+                {"판정": [{"번호": number, "결과": "참"} for number in numbers]},
+                ensure_ascii=False,
+            )
         assert REVIEW_PROMPT_HEADER in prompt, "검수가 알 수 없는 프롬프트를 받았다"
         self.review_prompts.append(prompt)
-        verdicts = [
-            {
-                "번호": int(number),
-                "결과": "거짓" if text.strip() in self._false_texts else "참",
-            }
-            for number, text in _REVIEW_ITEM_RE.findall(prompt)
-        ]
+        verdicts = []
+        for number, encoded_text in _REVIEW_ITEM_RE.findall(prompt):
+            try:
+                text = json.loads(encoded_text)
+            except json.JSONDecodeError:
+                text = ""
+            verdicts.append(
+                {
+                    "번호": int(number),
+                    "결과": (
+                        "거짓" if str(text).strip() in self._false_texts else "참"
+                    ),
+                }
+            )
         return json.dumps({"판정": verdicts}, ensure_ascii=False)
 
 
@@ -179,6 +186,34 @@ def _section_texts(report: Report, section_id: str) -> list[str]:
     return [text for text, _cite in section.prose_lines]
 
 
+def _safe_section_count(sections: dict[str, Any], section_id: str) -> int:
+    """새 생성 안전 경계 뒤 남아야 할 미결속 숫자 없는 문장 수."""
+
+    return sum(
+        not has_public_numeric_token(str(sentence["글"]))
+        for sentence in sections[section_id]["문장들"]
+    ) - DEDUPE_MOVED_BY_SECTION.get(section_id, 0)
+
+
+def _uncited_interpretation_count(
+    sections: dict[str, Any], section_id: str
+) -> int:
+    """검수 근거가 없어 현재 별도 정책으로 남는 해석 문장 수."""
+
+    return sum(
+        not sentence.get("인용")
+        and sentence.get("등급") == "해석"
+        and not has_public_numeric_token(str(sentence["글"]))
+        for sentence in sections[section_id]["문장들"]
+    )
+
+
+def _visible_sentence_count(report: Report) -> int:
+    return sum(len(_section_texts(report, section_id)) for section_id in SECTION_IDS) + len(
+        report.summary_items
+    )
+
+
 def _assert_other_sections_intact(
     report: Report, sections: dict[str, Any], touched_section_id: str
 ) -> None:
@@ -190,9 +225,7 @@ def _assert_other_sections_intact(
     for section_id in SECTION_IDS:
         if section_id == touched_section_id:
             continue
-        expected = len(sections[section_id]["문장들"]) - DEDUPE_MOVED_BY_SECTION.get(
-            section_id, 0
-        )
+        expected = _safe_section_count(sections, section_id)
         assert len(_section_texts(report, section_id)) == expected, section_id
 
 
@@ -212,13 +245,13 @@ def test_깨진_인용_문장만_제거되고_나머지는_전부_생존한다()
 
     # 그 문장만 사라졌다
     identity_texts = _section_texts(report, "identity")
-    assert len(identity_texts) == len(sections["identity"]["문장들"]) - 1 - DEDUPE_MOVED_BY_SECTION["identity"]
+    assert len(identity_texts) == _safe_section_count(sections, "identity") - 1
     assert all(broken_text not in text for text in identity_texts)
     # 나머지 장·요약·보고서는 그대로 살아 렌더·출고 검증까지 도달했다
     _assert_other_sections_intact(report, sections, "identity")
     assert report.schema_version == ENGINE_V2_SCHEMA_VERSION
     assert output.composed_sentences == _expected_total()
-    assert output.verified_sentences == _expected_total() - 1 - DEDUPE_MOVED_IN_FIXTURE
+    assert output.verified_sentences == _visible_sentence_count(report)
 
 
 # ══════════════════════════════════════════════════════════
@@ -236,19 +269,16 @@ def test_틀린_단위_숫자_문장만_제거되고_장은_생존한다() -> No
     report = output.report
 
     business_texts = _section_texts(report, "business_model")
-    assert len(business_texts) == len(sections["business_model"]["문장들"]) - 1
+    assert len(business_texts) == _safe_section_count(sections, "business_model")
     assert all("99.9%" not in text for text in business_texts)
-    # 같은 장의 다른 «확인» 문장(8,219억 원)은 강등 없이 생존했다
+    # 같은 장의 다른 AI 수치 문장도 의미 결속이 없으므로 새 공개본에는 없다.
     survivors = [text for text in business_texts if "8,219억" in text]
-    assert survivors
-    assert all(
-        not text.endswith(INTERPRETATION_MARKER) for text in survivors
-    )
+    assert survivors == []
     _assert_other_sections_intact(report, sections, "business_model")
-    assert output.verified_sentences == _expected_total() - 1 - DEDUPE_MOVED_IN_FIXTURE
+    assert output.verified_sentences == _visible_sentence_count(report)
 
 
-def test_틀린_맨_숫자_문장은_제거가_아니라_해석_강등이고_장은_생존한다() -> None:
+def test_틀린_맨_숫자도_최종_공개본에서는_제외되고_장은_생존한다() -> None:
     sections = _golden_sections()
     wrong = sections["portfolio"]["문장들"][3]
     # 인용한 조각 10 원문에 없는 맨 숫자(연도) — 서술의 부수 정보가 틀린 경우
@@ -258,13 +288,11 @@ def test_틀린_맨_숫자_문장은_제거가_아니라_해석_강등이고_장
     report = output.report
 
     portfolio_texts = _section_texts(report, "portfolio")
-    # 문장 수 그대로 — 제거가 아니다
-    assert len(portfolio_texts) == len(sections["portfolio"]["문장들"])
+    assert len(portfolio_texts) == _safe_section_count(sections, "portfolio")
     demoted = [text for text in portfolio_texts if "2031년" in text]
-    assert len(demoted) == 1
-    assert demoted[0].endswith(INTERPRETATION_MARKER)
+    assert demoted == []
     _assert_other_sections_intact(report, sections, "portfolio")
-    assert output.verified_sentences == _expected_total() - DEDUPE_MOVED_IN_FIXTURE
+    assert output.verified_sentences == _visible_sentence_count(report)
 
 
 # ══════════════════════════════════════════════════════════
@@ -295,8 +323,8 @@ def test_검수_거짓_문장은_재작성_1회와_재검수를_거쳐_확인으
     assert rewritten_text in reviewer.review_prompts[1]
     # 문장은 제거되지 않고 고쳐진 «확인»으로 남았다 — 장·보고서 생존
     culture_texts = _section_texts(report, "culture")
-    assert len(culture_texts) == len(
-        _RESPONSES_FIXTURE["장별_응답"]["culture"]["문장들"]
+    assert len(culture_texts) == _safe_section_count(
+        _RESPONSES_FIXTURE["장별_응답"], "culture"
     )
     assert any(
         text.startswith(rewritten_text)
@@ -304,15 +332,15 @@ def test_검수_거짓_문장은_재작성_1회와_재검수를_거쳐_확인으
         for text in culture_texts
     )
     assert all(target_text not in text for text in culture_texts)
-    assert output.verified_sentences == _expected_total() - DEDUPE_MOVED_IN_FIXTURE
+    assert output.verified_sentences == _visible_sentence_count(report)
 
 
 # ══════════════════════════════════════════════════════════
-# 4-B-4. 검수 AI 완전 불능 → «확인» 전원 해석 강등 (제거 아님, 예외 무전파)
+# 4-B-4. 검수 AI 완전 불능 → 미확인 인용 문장 공개 제외
 # ══════════════════════════════════════════════════════════
 
 
-def test_검수가_완전_불능이면_확인_전원이_해석_강등되고_예외는_새지_않는다() -> None:
+def test_검수가_완전_불능이면_미확인_인용_문장을_공개하지_않는다() -> None:
     reviewer = _DeadReviewer()
 
     # 검수가 호출마다 죽어도 run_v2는 예외 없이 보고서를 돌려줘야 한다
@@ -320,16 +348,20 @@ def test_검수가_완전_불능이면_확인_전원이_해석_강등되고_예�
     report = output.report
 
     assert reviewer.calls >= 2  # 실제로 검수를 불렀고, 그때마다 죽었다
-    # 제거된 문장이 하나도 없다 — 강등이지 차단이 아니다
-    assert output.verified_sentences == _expected_total() - DEDUPE_MOVED_IN_FIXTURE
+    # 인용이 있는 AI 문장은 라벨만 바꿔 살리지 않는다. 인용 없는
+    # 해석은 아직 별도 정책으로 남지만, 품질 관측은 정직하게 공개 차단이다.
+    assert not output.quality_observation.release_allowed
     for section_id in SECTION_IDS:
         texts = _section_texts(report, section_id)
-        expected = len(
-            _RESPONSES_FIXTURE["장별_응답"][section_id]["문장들"]
-        ) - DEDUPE_MOVED_BY_SECTION.get(section_id, 0)
-        assert len(texts) == expected, section_id
-        # 검증 못 한 문장을 «확인»으로 내보내지 않는다 — 전 문장 해석 표지
-        assert all(text.endswith(INTERPRETATION_MARKER) for text in texts)
+        expected = _uncited_interpretation_count(
+            _RESPONSES_FIXTURE["장별_응답"], section_id
+        )
+        if expected:
+            assert len(texts) == expected, section_id
+            assert all(text.endswith(INTERPRETATION_MARKER) for text in texts)
+        else:
+            # 원래 문장이 있었으므로 단순 자료 부재가 아닌 검수 탈락 안내가 남는다.
+            assert section_id in output.quality_observation.notice_only_sections
     assert report.summary_items
     assert all(
         item.text.endswith(INTERPRETATION_MARKER)
@@ -356,15 +388,13 @@ def test_역경_조합에서도_보고서_전체_차단은_없다() -> None:
     # 보고서는 렌더와 출고 검증(validate_v2)까지 통과해 나왔다 — 전체 차단 없음
     assert report.schema_version == ENGINE_V2_SCHEMA_VERSION
     assert [section.cell for section in report.sections] == list(SECTION_IDS)
-    # 처분은 딱 두 문장(제거 2) — 나머지는 강등으로 전부 생존했다
+    # 깨진 인용·틀린 수치·검수 미완료 인용 문장은 단위별로 빠진다.
     assert output.composed_sentences == _expected_total()
-    assert output.verified_sentences == _expected_total() - 2 - DEDUPE_MOVED_IN_FIXTURE
-    assert len(_section_texts(report, "identity")) == -DEDUPE_MOVED_BY_SECTION[
-        "identity"
-    ] + len(
-        sections["identity"]["문장들"]
-    ) - 1
-    assert len(_section_texts(report, "business_model")) == len(
-        sections["business_model"]["문장들"]
-    ) - 1
+    assert not output.quality_observation.release_allowed
+    assert len(_section_texts(report, "identity")) == _uncited_interpretation_count(
+        sections, "identity"
+    )
+    assert len(
+        _section_texts(report, "business_model")
+    ) == _uncited_interpretation_count(sections, "business_model")
     assert len(report.summary_items) >= 3

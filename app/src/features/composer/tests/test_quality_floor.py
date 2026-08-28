@@ -29,6 +29,7 @@ from src.features.composer.constants import (
     SECTION_GUIDES,
     SECTION_IDS,
 )
+from src.features.composer.diagram_check import FLOW_REVIEW_PROMPT_HEADER
 from src.features.composer.logic import (
     SUMMARY_MAX_SENTENCES,
     SUMMARY_MIN_SENTENCES,
@@ -43,6 +44,7 @@ from src.features.composer.verify import (
 )
 from src.features.pipeline.port import Report, ReportSection
 from src.features.provenance.sources import visible_citations
+from src.shared.report_quality.assessment import has_public_numeric_token
 
 COMPANY_NAME: Final[str] = "제이와이피엔터테인먼트"
 
@@ -73,7 +75,12 @@ _INTERNAL_KEY_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_]*$"
 #: 본문 문장 끝의 `[n]` 인용 표기 (render.sentence_display_text가 만드는 모양)
 _CITATION_MARKER_RE: Final[re.Pattern[str]] = re.compile(r"\[(\d+)\]")
 #: 검수 프롬프트에서 대조 문장 번호를 읽는 모양 (verify._build_review_prompt)
-_REVIEW_NUMBER_RE: Final[re.Pattern[str]] = re.compile(r"\[(\d+)\] \(인용:")
+_REVIEW_NUMBER_RE: Final[re.Pattern[str]] = re.compile(
+    r"\[(\d+)\] \(등급: [^,\n]+, 인용:"
+)
+_FLOW_NUMBER_RE: Final[re.Pattern[str]] = re.compile(
+    r"^\[(\d+)\] 경로\(JSON 배열\):", re.MULTILINE
+)
 
 #: 시스템이 붙일 수 있는 안내문 전부 — «실질 문장» 집계에서 뺀다
 _NOTICE_TEXTS: Final[frozenset[str]] = frozenset(
@@ -149,6 +156,12 @@ class _AllTrueReviewer:
         if REWRITE_PROMPT_HEADER in prompt:
             self.rewrite_prompts.append(prompt)
             return ""
+        if FLOW_REVIEW_PROMPT_HEADER in prompt:
+            numbers = [int(value) for value in _FLOW_NUMBER_RE.findall(prompt)]
+            return json.dumps(
+                {"판정": [{"번호": number, "결과": "참"} for number in numbers]},
+                ensure_ascii=False,
+            )
         assert REVIEW_PROMPT_HEADER in prompt, "검수가 알 수 없는 프롬프트를 받았다"
         numbers = [int(value) for value in _REVIEW_NUMBER_RE.findall(prompt)]
         return json.dumps(
@@ -285,8 +298,13 @@ def test_요약은_3에서_5문장이고_본문_재탕이_아니다(
     summary_texts = [item.text for item in report.summary_items]
     # 하한: 요약 전 문장이 본문과 동일하면 «재탕» — 실패다 (05장 4-A-2)
     assert not all(text in body_texts for text in summary_texts)
-    # 골든 입력에서는 보충 경로가 발동하지 않아 전부 새 문장이어야 한다
-    assert all(text not in body_texts for text in summary_texts)
+    # 옛 골든 fixture의 AI 요약 수치는 의미 결속이 없으므로 새 생성 안전
+    # 경계가 제외하고, 부족분은 이미 검증된 본문으로 보충할 수 있다. 보충을
+    # 금지해 미결속 수치를 되살리는 것보다 최종 요약에 숫자가 없는지가 정본이다.
+    assert all(
+        not has_public_numeric_token(_CITATION_MARKER_RE.sub("", text))
+        for text in summary_texts
+    )
 
 
 # ══════════════════════════════════════════════════════════
@@ -353,7 +371,7 @@ def test_부록_번호와_본문_인용이_1대1이다(
 # ══════════════════════════════════════════════════════════
 
 
-def test_기준문서_6절_하한을_fixture가_만족하고_시스템이_훼손하지_않는다(
+def test_기준문서_하한은_낮추지_않고_미결속_수치를_제외한_결과는_partial이다(
     floor_run: tuple[V2RunOutput, _AllTrueReviewer],
 ) -> None:
     output, reviewer = floor_run
@@ -368,29 +386,47 @@ def test_기준문서_6절_하한을_fixture가_만족하고_시스템이_훼손
     assert len(fixture_body) >= MIN_SUBSTANTIVE_SENTENCES
     assert fixture_confirmed / len(fixture_all) >= MIN_CONFIRMED_RATIO
 
-    # ② 시스템이 그 입력을 훼손하지 않았다 — 문장 수 전부 보존, 재작성 0회
+    # ② 숫자가 없는 문장은 전부 보존하고, 의미 결속이 없는 AI 수치 문장만
+    #    제외한다. 40문장 하한 자체를 결과에 맞춰 낮추지 않는다.
     body_texts = [
         text
         for section in report.sections
         for text in _substantive_texts(section)
     ]
-    # 장 간 중복 제거가 fixture의 «같은 사실 두 장» 한 건을 소유 장으로 모은다.
-    # 검수가 지운 것이 아니라 옮긴 것이라 총량에서 그만큼만 줄어든다.
+    unbound_numeric_body = [
+        sentence
+        for sentence in fixture_body
+        if has_public_numeric_token(sentence["글"])
+    ]
+    assert unbound_numeric_body
+    # 기존 장 간 중복 소유권 규칙이 숫자 없는 중복 한 문장도 별도로 모은다.
     DEDUPE_MOVED_IN_FIXTURE = 1
-    assert len(body_texts) == len(fixture_body) - DEDUPE_MOVED_IN_FIXTURE
-    assert len(report.summary_items) == len(_fixture_summary_sentences())
+    assert len(body_texts) == (
+        len(fixture_body)
+        - len(unbound_numeric_body)
+        - DEDUPE_MOVED_IN_FIXTURE
+    )
+    assert SUMMARY_MIN_SENTENCES <= len(report.summary_items) <= SUMMARY_MAX_SENTENCES
     assert output.composed_sentences == len(fixture_all)
-    # 중복 제거가 fixture의 «같은 사실 두 장» 한 건을 소유 장으로 옮긴다.
-    assert output.verified_sentences == len(fixture_all) - 1
+    assert output.verified_sentences == len(body_texts) + len(report.summary_items)
     assert reviewer.rewrite_prompts == []
 
-    # ③ 최종 산출물 기준으로도 하한을 만족한다
-    #    («확인» = 해석 표지가 붙지 않은 문장 — render의 표기 규칙 그대로)
+    # ③ 본문 40문장 하한에 못 미치면 COMPLETE로 꾸미지 않고 PARTIAL과 이유를
+    #    표시한다. 기준값 40은 그대로다.
     rendered = _all_sentence_texts(report)
     rendered_confirmed = sum(
         1 for text in rendered if not text.endswith(INTERPRETATION_MARKER)
     )
-    assert len(body_texts) >= MIN_SUBSTANTIVE_SENTENCES
-    # 옮겨간 문장(회사 표어)이 «확인» 등급이라 렌더된 확인 수도 그만큼 준다.
-    assert rendered_confirmed == fixture_confirmed - 1
-    assert rendered_confirmed / len(rendered) >= MIN_CONFIRMED_RATIO
+    assert len(body_texts) < MIN_SUBSTANTIVE_SENTENCES
+    assert report.grade.value == "부분 완성"
+    assert any("수치·날짜 문장" in reason for reason in report.shortfall_reasons)
+    assert any(
+        "근거와 의미가 구조로 확인된 실질 내용" in reason
+        and str(MIN_SUBSTANTIVE_SENTENCES) in reason
+        for reason in report.shortfall_reasons
+    )
+    assert any(
+        "서로 다른 원문 문서" in reason and "8개" in reason
+        for reason in report.shortfall_reasons
+    )
+    assert rendered_confirmed / len(rendered) < MIN_CONFIRMED_RATIO

@@ -6,16 +6,29 @@ import datetime as dt
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
+from types import MappingProxyType
 from typing import Final
 
 
-AUTOMATIC_CHECKER_VERSION: Final[str] = "automatic-release-v1"
-REQUIRED_AUTOMATIC_CHECKS: Final[tuple[str, ...]] = (
+AUTOMATIC_CHECKER_V1: Final[str] = "automatic-release-v1"
+AUTOMATIC_RELEASE_V1_CHECKS: Final[tuple[str, ...]] = (
     "canonical_fact_citation_numeric_structure_forbidden",
     "pdf_all_pages_rendered",
     "web_pdf_notion_channel_equivalence",
     "final_hash_binding",
+)
+# 새 출고가 쓰는 alias와 역사적 계약의 이름을 분리한다. 다음 버전에서 현재
+# alias만 v2로 바꿔도 아래 v1 registry 행이 우연히 사라지면 안 된다.
+AUTOMATIC_CHECKER_VERSION: Final[str] = AUTOMATIC_CHECKER_V1
+REQUIRED_AUTOMATIC_CHECKS: Final[tuple[str, ...]] = AUTOMATIC_RELEASE_V1_CHECKS
+SUPPORTED_AUTOMATIC_CHECKS_BY_VERSION: Final[Mapping[str, tuple[str, ...]]] = (
+    MappingProxyType(
+        {
+            AUTOMATIC_CHECKER_V1: AUTOMATIC_RELEASE_V1_CHECKS,
+        }
+    )
 )
 _SHA256_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 
@@ -73,15 +86,43 @@ def automatic_release_json(record: AutomaticReleaseRecord) -> str:
     return _canonical_json(asdict(record)).decode("utf-8")
 
 
+def automatic_checks_for_version(checker_version: object) -> tuple[str, ...] | None:
+    """코드에 고정해 둔 검사 계약만 돌려준다.
+
+    DB나 artifact에 적힌 버전 문자열은 신뢰 입력이 아니다. 호출자가 건넨
+    문자열을 현재 버전으로 해석하거나 비슷한 이름으로 보정하지 않는다.
+    """
+
+    if (
+        type(checker_version) is not str
+        or checker_version != checker_version.strip()
+        or not checker_version
+    ):
+        return None
+    return SUPPORTED_AUTOMATIC_CHECKS_BY_VERSION.get(checker_version)
+
+
 def validate_automatic_release_record(
     record: AutomaticReleaseRecord,
+    *,
+    expected_checker_version: str | None = None,
 ) -> tuple[str, ...]:
-    """손상된 런타임 값에도 예외 대신 무결성 문제 목록을 반환한다."""
+    """지정한 역사적 검사 계약으로 손상 여부를 검증한다.
+
+    기본값은 새 출고에 쓰는 현재 계약이다. 이미 승인된 artifact를 읽을 때는
+    그 artifact에 저장된 버전을 명시해야 하며, 코드가 모르는 버전은 열지 않는다.
+    """
 
     if not isinstance(record, AutomaticReleaseRecord):
         return ("자동출고 레코드 형식이 올바르지 않습니다",)
 
     problems: list[str] = []
+    selected_checker_version = (
+        AUTOMATIC_CHECKER_VERSION
+        if expected_checker_version is None
+        else expected_checker_version
+    )
+    expected_checks = automatic_checks_for_version(selected_checker_version)
     checker_version_valid = type(record.checker_version) is str
     report_sha256_valid = type(record.report_sha256) is str
     pdf_sha256_valid = type(record.pdf_sha256) is str
@@ -105,10 +146,11 @@ def validate_automatic_release_record(
     record_sha256_valid = type(record.record_sha256) is str
 
     if (
-        not checker_version_valid
-        or record.checker_version != AUTOMATIC_CHECKER_VERSION
+        expected_checks is None
+        or not checker_version_valid
+        or record.checker_version != selected_checker_version
     ):
-        problems.append("자동검사 버전이 현재 출고 계약과 다릅니다")
+        problems.append("자동검사 버전을 지원하는 출고 계약으로 확인할 수 없습니다")
     if (
         not report_sha256_valid
         or _SHA256_RE.fullmatch(record.report_sha256) is None
@@ -135,7 +177,8 @@ def validate_automatic_release_record(
         problems.append("자동검사 사실 장부가 비었거나 중복됐습니다")
     if (
         not check_scalars_valid
-        or tuple(check.name for check in record.checks) != REQUIRED_AUTOMATIC_CHECKS
+        or expected_checks is None
+        or tuple(check.name for check in record.checks) != expected_checks
     ):
         problems.append("필수 자동검사 목록이 완전하지 않습니다")
     if not check_scalars_valid or any(
@@ -168,7 +211,11 @@ def validate_automatic_release_record(
     return tuple(problems)
 
 
-def parse_automatic_release_json(raw: str) -> AutomaticReleaseRecord:
+def parse_automatic_release_json(
+    raw: str,
+    *,
+    expected_checker_version: str | None = None,
+) -> AutomaticReleaseRecord:
     """허용 필드만 있는 정규 JSON을 자동출고 레코드로 복원한다."""
 
     try:
@@ -211,8 +258,11 @@ def parse_automatic_release_json(raw: str) -> AutomaticReleaseRecord:
         record = AutomaticReleaseRecord(**payload)
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("자동출고 기록 JSON을 안전하게 읽을 수 없습니다") from exc
-    if validate_automatic_release_record(record):
-        raise ValueError("자동출고 기록이 현재 무결성 계약을 통과하지 못했습니다")
+    if validate_automatic_release_record(
+        record,
+        expected_checker_version=expected_checker_version,
+    ):
+        raise ValueError("자동출고 기록이 지정한 무결성 계약을 통과하지 못했습니다")
     if automatic_release_json(record) != raw:
         raise ValueError("자동출고 기록 JSON이 정규 형식과 다릅니다")
     return record
@@ -239,7 +289,10 @@ def validate_persisted_automatic_release(
     )
     if any(type(value) is not str for value in values):
         raise ValueError("자동출고 DB 형식이 손상됐습니다")
-    record = parse_automatic_release_json(release_json)
+    record = parse_automatic_release_json(
+        release_json,
+        expected_checker_version=checker_version,
+    )
     if (
         record.report_sha256 != report_sha256
         or record.pdf_sha256 != pdf_sha256

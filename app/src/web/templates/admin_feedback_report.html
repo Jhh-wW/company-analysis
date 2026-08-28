@@ -33,7 +33,7 @@
         <tr><th scope="row">대상 보고서</th><td>{{ feedback_report.report_ref or "—" }}</td></tr>
         <tr><th scope="row">오류 발생 항목</th><td>{{ feedback_report.item_label or "—" }}</td></tr>
         <tr><th scope="row">참고 URL</th>
-          <td>{% if feedback_report.ref_url %}<a href="{{ feedback_report.ref_url }}" rel="noopener noreferrer nofollow" target="_blank">{{ feedback_report.ref_url }}</a>{% else %}—{% endif %}</td></tr>
+          <td>{% if feedback_report.ref_url %}<span class="fr-body-block">{{ feedback_report.ref_url }}</span><br><span class="muted">신고자가 쓴 주소는 자동으로 열지 않습니다. 필요하면 주소와 대상을 확인한 뒤 복사해 사용하세요.</span>{% else %}—{% endif %}</td></tr>
         <tr><th scope="row">마지막 변경</th><td>{{ feedback_updated_at_label }}</td></tr>
       </tbody>
     </table>

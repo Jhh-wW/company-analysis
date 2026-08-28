@@ -60,6 +60,10 @@ def _table_to_dict(table: ReportTable) -> dict[str, Any]:
     # 승인이 이유 없이 바뀌지 않는다. 실제 시각화 힌트가 있을 때만 새 키를 저장한다.
     if table.presentation != "table":
         payload["presentation"] = table.presentation
+    for name in ("entity_scope", "raw_unit", "unit_dimension"):
+        value = getattr(table, name, "")
+        if value:
+            payload[name] = value
     return payload
 
 
@@ -75,6 +79,9 @@ def _table_from_dict(data: dict[str, Any]) -> ReportTable:
         scale_places=int(data.get("scale_places", 0)),
         display_unit=str(data.get("display_unit", "")),
         presentation=str(data.get("presentation", "table")),
+        entity_scope=str(data.get("entity_scope", "")),
+        raw_unit=str(data.get("raw_unit", "")),
+        unit_dimension=str(data.get("unit_dimension", "")),
     )
 
 
@@ -307,10 +314,26 @@ def _summary_from_dict(data: dict[str, Any]) -> SummaryItem:
 
 
 _FACT_FIELDS = tuple(item.name for item in fields(FactRecord))
+_OPTIONAL_STRUCTURED_FACT_FIELDS = frozenset(
+    {
+        "claim_slot",
+        "metric",
+        "period_start",
+        "period_end",
+        "sign",
+        "unit",
+        "unit_dimension",
+        "formula",
+    }
+)
 
 
 def _fact_to_dict(fact: FactRecord) -> dict[str, Any]:
-    return {name: getattr(fact, name) for name in _FACT_FIELDS}
+    return {
+        name: getattr(fact, name)
+        for name in _FACT_FIELDS
+        if name not in _OPTIONAL_STRUCTURED_FACT_FIELDS or getattr(fact, name)
+    }
 
 
 def _fact_from_dict(data: dict[str, Any]) -> FactRecord:
@@ -354,6 +377,12 @@ def report_to_dict(report: Report) -> dict[str, Any]:
             str(number): list(grades)
             for number, grades in report.source_grades.items()
         }
+    if report.quality_contract_version:
+        payload["quality_contract_version"] = report.quality_contract_version
+    if report.safety_decision:
+        payload["safety_decision"] = report.safety_decision
+    if report.publication_policy:
+        payload["publication_policy"] = report.publication_policy
     return payload
 
 
@@ -389,6 +418,9 @@ def report_from_dict(data: dict[str, Any]) -> Report:
         as_of_date=str(data.get("as_of_date", "")),
         analysis_period=str(data.get("analysis_period", "")),
         latest_performance_period=str(data.get("latest_performance_period", "")),
+        quality_contract_version=str(data.get("quality_contract_version", "")),
+        safety_decision=str(data.get("safety_decision", "")),
+        publication_policy=str(data.get("publication_policy", "")),
         # 옛 저장본(이 키가 없는 v1·초기 v2)은 빈 사전으로 읽는다 — 그러면
         # 부록이 예전처럼 화면 글자에서 등급을 되짚는 폴백으로 떨어진다.
         source_grades={

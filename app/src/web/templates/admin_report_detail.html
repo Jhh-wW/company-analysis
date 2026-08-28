@@ -120,7 +120,7 @@
     <p class="muted">생성 기준 {{ report.generated_at or "확인 불가" }} · 공개 버전 {{ report_state.version }}</p>
     {% if report.summary_items %}<ol>{% for item in report.summary_items %}<li>{{ item.text }}</li>{% endfor %}</ol>{% else %}<p>핵심 요약이 없는 저장 보고서입니다.</p>{% endif %}
     <h3>출처 {{ report.citations|length }}건</h3>
-    <ul>{% for source in report.citations %}<li>{{ source.label }}{% if source.url %} · <a href="{{ source.url }}" rel="noreferrer">원문</a>{% endif %}</li>{% endfor %}</ul>
+    <ul>{% for source in report.citations %}<li>{{ source.label }}{% if source.url and (source.url.startswith('https://') or source.url.startswith('http://')) %} · <a href="{{ source.url }}" target="_blank" rel="noopener noreferrer">원문</a>{% elif source.url %} · <span class="muted">안전한 웹 주소가 아님</span>{% endif %}</li>{% endfor %}</ul>
   </details>
 </section>
 {% endblock %}

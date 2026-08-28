@@ -176,7 +176,8 @@ def list_all(conn: sqlite3.Connection) -> list[AllowedUser]:
     """초대한 사람 전부. 최근에 넣은 사람부터.
 
     ★ 관리 화면에서 «몇 명을 초대했는지»를 보기 위한 것이다.
-      최악의 하루 지출 = 1인 상한 × 명단 인원이므로, 이 숫자가 곧 예산이다.
+      호출 전 비용 입장 기준 합계 = 1인 기준 × 명단 인원이다. 실제 청구의
+      절대 상한은 아니지만, 이 숫자가 비용 노출 규모를 정한다.
     """
     rows = conn.execute(
         f"SELECT email, display_name, note, invited_at FROM {TABLE_ALLOWED_USERS} "

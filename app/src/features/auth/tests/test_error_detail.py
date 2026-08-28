@@ -8,8 +8,8 @@
   · `redirect_uri_mismatch` → 콘솔에 등록한 주소가 다르다
   이 둘은 **고치는 법이 완전히 다른데** 구별할 방법이 없었다.
 
-★ 왜 로그에 남겨도 되나 — 이 본문에는 **우리가 보낸 값이 되돌아오지 않는다.**
-  구글이 붙인 오류 코드뿐이다. 그래도 만일을 대비해 길이를 자른다.
+★ 외부 오류 설명은 신뢰하지 않는다. 공급자가 요청값을 되비춰도 비밀이 로그에
+  남지 않게, 운영 판단에 필요한 닫힌 오류 코드만 기록한다.
 
 ⚠️ 사용자 «화면»에는 여전히 안 내보낸다. 내부 사정을 흘리지 않는 규칙은 그대로다.
 """
@@ -56,7 +56,7 @@ def test_구글이_준_오류_코드를_꺼낸다(오류코드: str, 설명: str
     detail = _error_detail(exc)
 
     assert 오류코드 in detail
-    assert 설명 in detail
+    assert detail == 오류코드
 
 
 def test_설명이_없어도_코드는_꺼낸다():
@@ -64,6 +64,34 @@ def test_설명이_없어도_코드는_꺼낸다():
     exc = _http_error('{"error": "invalid_client"}')
 
     assert "invalid_client" in _error_detail(exc)
+
+
+def test_오류설명이_요청비밀을_반사해도_로그문구에_남기지_않는다():
+    reflected_secret = "oauth-code-or-client-secret-must-not-log"
+    exc = _http_error(
+        json.dumps(
+            {
+                "error": "invalid_client",
+                "error_description": reflected_secret,
+            }
+        )
+    )
+
+    detail = _error_detail(exc)
+
+    assert detail == "invalid_client"
+    assert reflected_secret not in detail
+
+
+def test_알수없는_error필드에_비밀을_넣어도_그대로_반사하지_않는다():
+    reflected_secret = "secret-in-error-field"
+
+    detail = _error_detail(
+        _http_error(json.dumps({"error": reflected_secret}))
+    )
+
+    assert detail == "(알 수 없는 오류 코드)"
+    assert reflected_secret not in detail
 
 
 # ══════════════════════════════════════════════════════════
@@ -108,3 +136,15 @@ def test_아주_긴_본문은_잘라서_남긴다():
     detail = _error_detail(_http_error(긴본문))
 
     assert len(detail) <= _ERROR_DETAIL_MAX_CHARS
+
+
+def test_오류_본문도_고정_바이트_이상은_읽거나_로그에_반사하지_않는다():
+    secret_tail = "provider-secret-reflection"
+    exc = _http_error(
+        "x" * 5000 + secret_tail,
+    )
+
+    detail = _error_detail(exc)
+
+    assert detail == "(오류 본문이 너무 큼)"
+    assert secret_tail not in detail

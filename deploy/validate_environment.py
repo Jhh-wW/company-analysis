@@ -46,6 +46,7 @@ LOG_LEVELS = frozenset({"trace", "debug", "info", "warning", "error", "critical"
 SCOPES = ("web", "backup-trigger", "maintenance-trigger", "generic")
 DEPLOYMENT_EXPOSURES = frozenset({"local", "public"})
 DEPLOYMENT_PLATFORMS = frozenset({"local", "render", "kubernetes"})
+RENDER_GRACEFUL_SHUTDOWN_SECONDS = "20"
 EVIDENCE_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_PROXY_RANGES = 16
 MIN_PROXY_PREFIX = {4: 24, 6: 64}
@@ -395,7 +396,7 @@ def _render_admin_no_forwarded_command_errors(command: Sequence[str]) -> list[st
         "--timeout-keep-alive",
         "5",
         "--timeout-graceful-shutdown",
-        "${GRACEFUL_SHUTDOWN_SECONDS:-300}",
+        "${GRACEFUL_SHUTDOWN_SECONDS:-20}",
         "--log-level",
         "${LOG_LEVEL:-info}",
     )
@@ -696,11 +697,29 @@ def validate(
     grace_error = _integer_error(
         "GRACEFUL_SHUTDOWN_SECONDS",
         environment.get("GRACEFUL_SHUTDOWN_SECONDS", ""),
-        250,
+        1,
         3600,
     )
     if grace_error:
         errors.append(grace_error)
+    render_runtime = (
+        environment.get("DEPLOYMENT_PLATFORM", "").strip().lower() == "render"
+        or _runtime_contract(environment, runtime_contract)
+        in {
+            RUNTIME_CONTRACT_RENDER_WEB,
+            RUNTIME_CONTRACT_RENDER_ADMIN_DEMO,
+            RUNTIME_CONTRACT_RENDER_ADMIN_REAL,
+        }
+    )
+    if (
+        render_runtime
+        and environment.get("GRACEFUL_SHUTDOWN_SECONDS", "").strip()
+        != RENDER_GRACEFUL_SHUTDOWN_SECONDS
+    ):
+        errors.append(
+            "GRACEFUL_SHUTDOWN_SECONDS: Uvicorn HTTP 정리 뒤 앱 240초 정리가 "
+            "직렬 실행되므로 Render 플랫폼 300초 안에 끝나도록 20이어야 합니다"
+        )
     errors.extend(_validate_persistence_paths(environment))
 
     log_level = environment.get("LOG_LEVEL", "").strip().lower()

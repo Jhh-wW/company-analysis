@@ -11,6 +11,10 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from src.core.citations import citation_number
+from src.shared.report_quality.numeric_validation import validate_versioned_numeric_record
+from src.shared.report_quality.fact_binding import (
+    fact_evidence_binding as _shared_fact_evidence_binding,
+)
 from src.features.pipeline.market_contract import (
     MARKET_STAGE_EVIDENCE_PATTERNS,
     MARKET_STAGES,
@@ -397,78 +401,7 @@ def _binding_digest(payload: object) -> str:
 def fact_evidence_binding(fact: FactRecord) -> str:
     """검증 뒤 claim이나 원문 근거가 바뀌면 무효가 되는 결정론적 지문."""
 
-    return _binding_digest(
-        {
-            "fact_id": fact.fact_id,
-            "legal_entity": fact.legal_entity,
-            "subject_scope": fact.subject_scope,
-            "relationship_or_action": fact.relationship_or_action,
-            "claim": fact.claim,
-            "claim_type": fact.claim_type,
-            "section_owner": fact.section_owner,
-            "time_state": fact.time_state,
-            "as_of": fact.as_of,
-            "source_id": fact.source_id,
-            "source_type": fact.source_type,
-            "source_title": fact.source_title,
-            "source_publisher": fact.source_publisher,
-            "source_host": fact.source_host,
-            "source_url": fact.source_url,
-            "source_document_id": fact.source_document_id,
-            "source_date": fact.source_date,
-            "location": fact.location,
-            "state_evidence": fact.state_evidence,
-            "fact_status": fact.fact_status,
-            "verification_status": fact.verification_status,
-            "evidence_support_terms": list(fact.evidence_support_terms),
-            "raw_value": fact.raw_value,
-            "calculation": fact.calculation,
-            "display_value": fact.display_value,
-            "rounding_rule": fact.rounding_rule,
-            "numeric_checks": list(fact.numeric_checks),
-            "fiscal_year": fact.fiscal_year,
-            "event_date": fact.event_date,
-            "market_priority": fact.market_priority,
-            "market_stage": fact.market_stage,
-            "market_observation": fact.market_observation,
-            "product_role": fact.product_role,
-            "portfolio_stage": fact.portfolio_stage,
-            "revenue_model_fact_id": fact.revenue_model_fact_id,
-            "priority_signals": list(fact.priority_signals),
-            "basis_fact_ids": list(fact.basis_fact_ids),
-            "response_to_fact_id": fact.response_to_fact_id,
-            "response_action": fact.response_action,
-            "initial_signal": fact.initial_signal,
-            "next_check_metric": fact.next_check_metric,
-            "plan_status": fact.plan_status,
-            "plan_timing": fact.plan_timing,
-            "plan_condition": fact.plan_condition,
-            "plan_expected_effect": fact.plan_expected_effect,
-            "plan_execution_signal": fact.plan_execution_signal,
-            "value_chain_stage": fact.value_chain_stage,
-            "relationship_type": fact.relationship_type,
-            "supports_causality": fact.supports_causality,
-            "causal_subject": fact.causal_subject,
-            "causal_mechanism": fact.causal_mechanism,
-            "causal_outcome": fact.causal_outcome,
-            "causal_evidence": fact.causal_evidence,
-            "comparison_target": fact.comparison_target,
-            "comparison_metric": fact.comparison_metric,
-            "comparison_definition": fact.comparison_definition,
-            "comparison_basis": fact.comparison_basis,
-            "comparison_period": fact.comparison_period,
-            "comparison_scope": fact.comparison_scope,
-            "comparison_judgment": fact.comparison_judgment,
-            "comparator_source_id": fact.comparator_source_id,
-            "comparator_state_evidence": fact.comparator_state_evidence,
-            "comparator_evidence_support_terms": list(
-                fact.comparator_evidence_support_terms
-            ),
-            "comparison_conditions": dict(sorted(fact.comparison_conditions.items())),
-            "limitations": fact.limitations,
-            "limitation": fact.limitation,
-        }
-    )
+    return _shared_fact_evidence_binding(fact)
 
 
 def summary_evidence_text(fact_ids: list[str], facts: dict[str, FactRecord]) -> str:
@@ -1219,6 +1152,16 @@ def _decimal(value: str) -> Decimal | None:
 
 def _numeric_problems(fact: FactRecord) -> list[str]:
     """공개 수치를 원시값부터 ROUND_HALF_UP 표시값까지 재계산한다."""
+
+    # 새 의미 결속 형식은 report_quality와 같은 단일 검증기를 쓴다. 결과가
+    # None일 때만 아래의 발급 당시 레거시 ``raw|divisor|places|display``
+    # 계약을 적용한다. 새 형식을 이 파일에서 별도로 재구현하지 않는다.
+    versioned_problems = validate_versioned_numeric_record(fact)
+    if versioned_problems is not None:
+        return [
+            f"[number] {fact.fact_id}: {problem}"
+            for problem in versioned_problems
+        ]
 
     problems: list[str] = []
     claim_numbers = _NUMBER_TOKEN.findall(fact.claim)

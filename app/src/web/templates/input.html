@@ -15,6 +15,12 @@
 </div>
 {% endif %}
 
+{% if image_error %}
+<div class="warn-line crit" role="alert" style="margin-bottom:18px">
+  <span aria-hidden="true">⚠️</span><span>{{ image_error }}</span>
+</div>
+{% endif %}
+
 <form class="card analysis-form" id="analysisForm" method="post" action="/confirm"
       aria-labelledby="analysis-form-title">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

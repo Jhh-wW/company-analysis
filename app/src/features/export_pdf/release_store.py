@@ -36,6 +36,7 @@ from src.features.export_pdf.automatic_release import (
 from src.shared.automatic_release_record import (
     AUTOMATIC_CHECKER_VERSION,
     AutomaticReleaseRecord,
+    automatic_checks_for_version,
     automatic_release_json,
     parse_automatic_release_json,
     validate_automatic_release_record,
@@ -1009,16 +1010,26 @@ def load_automatic_release_record(
     report_id: str,
     report_sha256: str,
     pdf_sha256: str,
+    checker_version: str | None = None,
 ) -> AutomaticReleaseRecord | None:
-    """Load only the current checker version and exact immutable subject."""
+    """정확한 본문·PDF와 지원되는 검사 버전의 승인만 읽는다.
+
+    버전을 생략한 새 출고 경로는 현재 계약만 읽는다. 불변 artifact 조회는
+    그 artifact에 저장된 역사적 버전을 반드시 명시해야 한다.
+    """
 
     clean_report_id = report_id.strip()
+    selected_checker_version = (
+        AUTOMATIC_CHECKER_VERSION if checker_version is None else checker_version
+    )
     if (
         not clean_report_id
         or not is_valid_sha256(report_sha256)
         or not is_valid_sha256(pdf_sha256)
     ):
         raise PdfReleaseStoreError("올바른 보고서·PDF 지문만 조회할 수 있습니다")
+    if automatic_checks_for_version(selected_checker_version) is None:
+        raise PdfReleaseStoreError("지원하지 않는 자동검사 버전은 조회할 수 없습니다")
     _ensure_schema(conn)
     _reject_changed_automatic_subject(
         conn,
@@ -1037,7 +1048,7 @@ def load_automatic_release_record(
             clean_report_id,
             report_sha256,
             pdf_sha256,
-            AUTOMATIC_CHECKER_VERSION,
+            selected_checker_version,
         ),
     ).fetchone()
     if row is None:
@@ -1049,7 +1060,7 @@ def load_automatic_release_record(
         record = validate_persisted_automatic_release(
             report_sha256=report_sha256,
             pdf_sha256=pdf_sha256,
-            checker_version=AUTOMATIC_CHECKER_VERSION,
+            checker_version=selected_checker_version,
             release_json=raw_json,
             release_sha256=db_digest,
             released_at=db_released_at,
@@ -1075,6 +1086,7 @@ def save_automatic_release(
     record = released_pdf.record
     if (
         hashlib.sha256(released_pdf.content).hexdigest() != record.pdf_sha256
+        or record.checker_version != AUTOMATIC_CHECKER_VERSION
         or validate_automatic_release_record(record)
     ):
         raise PdfReleaseStoreError("자동출고 결과의 무결성을 확인할 수 없습니다")
@@ -1110,6 +1122,7 @@ def save_automatic_release(
         report_id=clean_report_id,
         report_sha256=record.report_sha256,
         pdf_sha256=record.pdf_sha256,
+        checker_version=AUTOMATIC_CHECKER_VERSION,
     )
     if stored != record:
         raise PdfReleaseStoreError(
@@ -1254,6 +1267,7 @@ def validate_persisted_release_records(
                 report_id=report_id,
                 report_sha256=report_sha256,
                 pdf_sha256=pdf_sha256,
+                checker_version=checker_version,
             )
             if consumed != record:
                 raise PdfReleaseStoreError(

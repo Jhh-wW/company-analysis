@@ -22,6 +22,11 @@ DEFAULT_DB_RELATIVE_PATH: Final[str] = "data/storage.db"
 #: 다른 연결이 쓰는 중일 때 몇 초까지 기다렸다 포기하나 ("database is locked" 방지).
 DB_BUSY_TIMEOUT_SEC: Final[float] = 5.0
 
+#: 첫 schema bootstrap을 다른 프로세스와 직렬화할 때 기다리는 상한.
+#: 일반 쿼리 잠금과 달리 배포 직후 한 번만 잡는 파일 잠금이라, 느린 영속
+#: 디스크에서도 정상 migration이 끝날 여유를 주되 영원히 매달리지는 않는다.
+DB_SCHEMA_LOCK_TIMEOUT_SEC: Final[float] = 30.0
+
 # SQLite 공식 문서의 WAL-reset 결함 수정 경계.
 # 3.7.0~3.51.2 기본 계열은 영향을 받으며, 3.44.6·3.50.7에는 수정이
 # 별도로 역이식되었다. 패치되지 않은 런타임은 rollback journal을 쓴다.
@@ -34,6 +39,13 @@ SQLITE_WAL_FIXED_BACKPORT_RANGES: Final[
 )
 SQLITE_JOURNAL_MODE_WAL: Final[str] = "WAL"
 SQLITE_JOURNAL_MODE_FALLBACK: Final[str] = "DELETE"
+
+# SQLite 공식 ``PRAGMA synchronous`` 숫자 계약. 영향을 받는 런타임이 DELETE
+# rollback journal을 쓰므로 FULL(2)에 맡기지 않고 EXTRA(3)를 명시한다. EXTRA는
+# commit 때 journal을 지운 부모 directory까지 동기화해 직후 전원 중단의 내구성을
+# 보강한다. WAL에서는 EXTRA와 FULL의 동기화 계약이 같다.
+SQLITE_SYNCHRONOUS_MODE: Final[str] = "EXTRA"
+SQLITE_SYNCHRONOUS_LEVEL: Final[int] = 3
 
 # ── 표 이름 ──────────────────────────────────────────────
 TABLE_REPORTS: Final[str] = "reports"

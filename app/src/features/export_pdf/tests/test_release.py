@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import hashlib
 import io
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
 import pytest
 from PIL import Image
+from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen.canvas import Canvas
 
+from src.features.export_pdf.constants import (
+    PAGE_BOTTOM_MARGIN_PT,
+    PAGE_TOP_MARGIN_PT,
+)
+from src.features.export_pdf import release as pdf_release
 from src.features.export_pdf.release import (
     ApprovalDecision,
     PDFReleaseBlockedError,
@@ -24,6 +32,64 @@ _FACT_IDS = ("fact-1", "fact-2")
 _FACT_REVIEWER = "user:" + "1" * 20
 _EDITORIAL_REVIEWER = "user:" + "2" * 20
 _VISUAL_REVIEWER = "user:" + "3" * 20
+
+
+def test_PDFium렌더는_동시보고서에서도_한프로세스에_한번만_실행된다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows PDFium page close의 네이티브 동시성 중단을 회귀로 막는다."""
+
+    first_started = threading.Event()
+    allow_finish = threading.Event()
+    state_lock = threading.Lock()
+    constructor_calls = 0
+    active_documents = 0
+    max_active_documents = 0
+
+    class FakeDocument:
+        def __init__(self, _pdf_bytes: bytes) -> None:
+            nonlocal constructor_calls, active_documents, max_active_documents
+            with state_lock:
+                constructor_calls += 1
+                active_documents += 1
+                max_active_documents = max(max_active_documents, active_documents)
+            first_started.set()
+            assert allow_finish.wait(timeout=3)
+
+        def __len__(self) -> int:
+            return 0
+
+        def close(self) -> None:
+            nonlocal active_documents
+            with state_lock:
+                active_documents -= 1
+
+    monkeypatch.setattr(pdf_release.pdfium, "PdfDocument", FakeDocument)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(pdf_release._render_all_pages, b"first", scale=1.0)
+        assert first_started.wait(timeout=2)
+        second = pool.submit(pdf_release._render_all_pages, b"second", scale=1.0)
+        # 두 번째 생성자까지 들어갔다면 이미 PDFium 호출이 겹친 것이다.
+        assert constructor_calls == 1
+        allow_finish.set()
+        assert first.result(timeout=3) == ()
+        assert second.result(timeout=3) == ()
+
+    assert constructor_calls == 2
+    assert max_active_documents == 1
+
+
+def test_PDFium렌더잠금이_고장나도_뒤보고서를_영원히기다리게하지않는다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pdf_release, "PDFIUM_RENDER_LOCK_TIMEOUT_SEC", 0.01)
+    assert pdf_release._PDFIUM_RENDER_LOCK.acquire(timeout=0.1)
+    try:
+        with pytest.raises(PDFReleaseBlockedError, match="제한 시간"):
+            pdf_release._render_all_pages(b"not-opened", scale=1.0)
+    finally:
+        pdf_release._PDFIUM_RENDER_LOCK.release()
 
 
 def _two_page_pdf() -> bytes:
@@ -74,6 +140,45 @@ def _white_body_with_gray_footer_pdf() -> bytes:
     canvas.drawString(72, 620, "MORE INVISIBLE BODY TEXT")
     canvas.setFillColorRGB(0.55, 0.55, 0.55)
     canvas.drawCentredString(300, 24, "1")
+    canvas.showPage()
+    canvas.save()
+    return output.getvalue()
+
+
+def _white_body_with_gray_header_and_footer_pdf() -> bytes:
+    """실제 조립부의 furniture만 보이고 본문은 흰색인 실패 후보."""
+
+    output = io.BytesIO()
+    canvas = Canvas(output, pagesize=A4, invariant=1)
+    canvas.setFillColorRGB(1, 1, 1)
+    canvas.drawString(72, 650, "INVISIBLE WHITE BODY TEXT MUST NOT SHIP")
+    canvas.setFillColorRGB(0.55, 0.55, 0.55)
+    canvas.drawString(72, A4[1] - 34, "VISIBLE HEADER IS NOT BODY")
+    canvas.drawCentredString(300, 24, "1")
+    canvas.showPage()
+    canvas.save()
+    return output.getvalue()
+
+
+def _body_at_canonical_frame_top_pdf() -> bytes:
+    """표 뒤 새 쪽처럼 본문 frame 맨 위에서 시작하는 정상 후보."""
+
+    output = io.BytesIO()
+    canvas = Canvas(output, pagesize=A4, invariant=1)
+    canvas.setFillColorRGB(0.55, 0.55, 0.55)
+    canvas.drawString(72, A4[1] - 34, "VISIBLE HEADER IS NOT BODY")
+    canvas.drawCentredString(300, 24, "1")
+    canvas.setFillColorRGB(0, 0, 0)
+    canvas.drawString(
+        72,
+        A4[1] - PAGE_TOP_MARGIN_PT - 8,
+        "VISIBLE BODY STARTS AT THE CANONICAL FRAME TOP",
+    )
+    canvas.drawString(
+        72,
+        PAGE_BOTTOM_MARGIN_PT + 8,
+        "VISIBLE BODY CAN REACH THE CANONICAL FRAME BOTTOM",
+    )
     canvas.showPage()
     canvas.save()
     return output.getvalue()
@@ -347,6 +452,24 @@ def test_흰본문을_회색쪽번호로_숨긴_PDF를_prepare와_release에서_
     )
     with pytest.raises(PDFReleaseBlockedError, match="다시 렌더"):
         release_pdf(candidate, _approval(candidate), released_at=_AT)
+
+
+def test_머리말과_꼬리말만_보이는_PDF는_본문증거로_인정하지_않는다():
+    with pytest.raises(PDFReleaseBlockedError, match="본문 글자"):
+        prepare_pdf_bytes(
+            _white_body_with_gray_header_and_footer_pdf(),
+            render_scale=0.75,
+            expected_fact_ids=("invented-fact",),
+        )
+
+
+def test_정본_frame_위아래의_본문은_머리말꼬리말로_오인하지_않는다():
+    candidate = prepare_pdf_bytes(
+        _body_at_canonical_frame_top_pdf(),
+        render_scale=0.75,
+        expected_fact_ids=("frame-fact",),
+    )
+    assert candidate.page_count == 1
 
 
 def test_중앙제목이_보이는_성긴_표지는_본문가시성_검사로_오거부하지_않는다():

@@ -79,6 +79,11 @@ TABLE_LEADING_PT: Final[float] = 10.0
 META_FONT_SIZE_PT: Final[float] = 6.8
 PDF_AUTHOR: Final[str] = "기업분석2"
 
+# PDFium은 한 프로세스에서 동시에 문서/page를 닫을 때 Windows 네이티브
+# 중단점 예외를 낼 수 있다. 유료 조사 두 건이 겹쳐도 렌더 증거 확정은 한 번씩
+# 실행하며, 고장 난 렌더 하나가 뒤 작업을 영원히 붙들지는 못하게 한다.
+PDFIUM_RENDER_LOCK_TIMEOUT_SEC: Final[float] = 180.0
+
 REQUIREMENTS_CELL: Final[str] = "5"
 REQUIREMENTS_NOTE: Final[str] = (
     "공고 원문 그대로입니다. 다듬지 않았습니다 — 자소서에 그대로 옮겨 쓰시라고요."

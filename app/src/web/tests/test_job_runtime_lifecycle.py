@@ -48,6 +48,13 @@ def _job(job_id: str) -> job_runtime.Job:
     )
 
 
+def _bootstrap_storage_runtime() -> None:
+    """직접 runtime을 부르는 시험도 실제 lifespan의 DB 시작 계약을 지킨다."""
+
+    with storage_db.connect() as conn:
+        conn.execute("SELECT 1").fetchone()
+
+
 def test_회사식별과_본조사_AI비용이_한_보고서의_단계별_원가로_합쳐진다(monkeypatch):
     identify_event = cost_store.AiCostEvent(
         stage="company_identification",
@@ -145,6 +152,160 @@ def test_앱_lifespan_종료가_작업_마감을_호출한다(monkeypatch):
     assert calls == 1
 
 
+def test_전체실행마감은_멈춘worker의_다음호출을닫고_비용과슬롯을_마감한다(
+    monkeypatch,
+):
+    _bootstrap_storage_runtime()
+    entered = threading.Event()
+    release_worker = threading.Event()
+    releases: list[str] = []
+    settlements: list[dict] = []
+
+    class Session:
+        def __init__(self) -> None:
+            self.cancel_calls = 0
+            self.abandon_calls = 0
+
+        def cancel_waiter(self) -> None:
+            self.cancel_calls += 1
+
+        def abandon(self) -> None:
+            self.abandon_calls += 1
+
+    session = Session()
+
+    def hanging_worker(_job: job_runtime.Job) -> RunResult:
+        entered.set()
+        if not release_worker.wait(timeout=2):
+            raise AssertionError("시험 worker를 끝내지 못했습니다")
+        return RunResult(outcome=Outcome.GATE_STOPPED)
+
+    def settle(_ticket, **kwargs) -> None:
+        settlements.append(kwargs)
+
+    monkeypatch.setattr(job_runtime, "_JOB_EXECUTION_MAX_SEC", 0.02)
+    monkeypatch.setattr(job_runtime, "_run_pipeline_worker", hanging_worker)
+    monkeypatch.setattr(job_runtime, "_settle_paid_phase", settle)
+    monkeypatch.setattr(job_runtime, "record_run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(job_runtime, "_save_report", lambda _job: False)
+    monkeypatch.setattr(job_runtime, "_release_run_slot", releases.append)
+    job = _job("execution-deadline")
+    job.is_paid = True
+    job.slot_bucket_id = "execution-deadline-slot"
+    job.paid_phase = SimpleNamespace(phase=SPEND_PHASE_PIPELINE)
+    job.generation_session = session
+
+    async def scenario() -> None:
+        task = asyncio.create_task(job_runtime._run_job(job))
+        deadline = asyncio.get_running_loop().time() + 1
+        while not entered.is_set():
+            if asyncio.get_running_loop().time() >= deadline:
+                raise AssertionError("시험 worker가 시작되지 않았습니다")
+            await asyncio.sleep(0.001)
+        await asyncio.wait_for(task, timeout=1)
+
+        # Python thread가 아직 살아 있어도 새 provider 가능성부터 닫고 슬롯을
+        # 반환해야 다른 요청이 영원히 막히지 않는다.
+        assert not release_worker.is_set()
+        assert job.finished
+        assert releases == ["execution-deadline-slot"]
+        assert session.cancel_calls == session.abandon_calls == 1
+        assert job.generation_abandoned is True
+        assert job.result is not None
+        assert job.result.outcome is Outcome.FAILED
+        assert job.result.billing_uncertain is True
+        assert settlements == [
+            {"amount_krw": 0.0, "billing_uncertain": True}
+        ]
+        with storage_db.connect() as conn:
+            assert job_interruptions.exists(conn, job.job_id)
+        release_worker.set()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        release_worker.set()
+
+
+def test_작업전체마감은_유료phase_정본1시간과_같다() -> None:
+    from src.features.budget.constants import PAID_PHASE_LEASE_SEC
+
+    assert job_runtime._JOB_EXECUTION_MAX_SEC == PAID_PHASE_LEASE_SEC
+
+
+def test_바깥취소가_와도_멈춘worker는_전체마감을_우회하지못한다(
+    monkeypatch,
+):
+    _bootstrap_storage_runtime()
+    entered = threading.Event()
+    release_worker = threading.Event()
+    releases: list[str] = []
+    settlements: list[dict] = []
+
+    class Session:
+        cancel_calls = 0
+        abandon_calls = 0
+
+        def cancel_waiter(self) -> None:
+            self.cancel_calls += 1
+
+        def abandon(self) -> None:
+            self.abandon_calls += 1
+
+    session = Session()
+
+    def hanging_worker(_job: job_runtime.Job) -> RunResult:
+        entered.set()
+        if not release_worker.wait(timeout=2):
+            raise AssertionError("취소 마감 시험 worker를 끝내지 못했습니다")
+        return RunResult(outcome=Outcome.GATE_STOPPED)
+
+    monkeypatch.setattr(job_runtime, "_JOB_EXECUTION_MAX_SEC", 0.03)
+    monkeypatch.setattr(job_runtime, "_run_pipeline_worker", hanging_worker)
+    monkeypatch.setattr(
+        job_runtime,
+        "_settle_paid_phase",
+        lambda _ticket, **kwargs: settlements.append(kwargs),
+    )
+    monkeypatch.setattr(job_runtime, "record_run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(job_runtime, "_save_report", lambda _job: False)
+    monkeypatch.setattr(job_runtime, "_release_run_slot", releases.append)
+    job = _job("cancelled-execution-deadline")
+    job.is_paid = True
+    job.slot_bucket_id = "cancelled-execution-slot"
+    job.paid_phase = SimpleNamespace(phase=SPEND_PHASE_PIPELINE)
+    job.generation_session = session
+
+    async def scenario() -> None:
+        task = asyncio.create_task(job_runtime._run_job(job))
+        deadline = asyncio.get_running_loop().time() + 1
+        while not entered.is_set():
+            if asyncio.get_running_loop().time() >= deadline:
+                raise AssertionError("취소 마감 시험 worker가 시작되지 않았습니다")
+            await asyncio.sleep(0.001)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+
+        # 취소 뒤 무기한 wait하지 않고 원래의 전체 마감에서 자리를 돌려준다.
+        assert not release_worker.is_set()
+        assert releases == ["cancelled-execution-slot"]
+        assert session.cancel_calls == session.abandon_calls == 1
+        assert job.generation_abandoned is True
+        assert job.result is not None and job.result.billing_uncertain is True
+        assert settlements == [
+            {"amount_krw": 0.0, "billing_uncertain": True}
+        ]
+        with storage_db.connect() as conn:
+            assert job_interruptions.exists(conn, job.job_id)
+        release_worker.set()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        release_worker.set()
+
+
 class _BlockingUpload:
     filename = "posting.png"
 
@@ -193,12 +354,71 @@ class _BarrierUpload:
 
 
 class _NeverPipeline:
+    supports_posting_image_input = True
+
     def __init__(self) -> None:
         self.run_calls = 0
 
     def run(self, *_args, **_kwargs) -> RunResult:
         self.run_calls += 1
         raise AssertionError("shutdown admission 뒤 pipeline을 부르면 안 됩니다")
+
+
+def test_pipeline이_공고입력을_지원하지않으면_이미지도읽지않고_OCR은_0회다(
+    monkeypatch,
+) -> None:
+    upload = _BarrierUpload(block_read=False)
+    phases: list[str] = []
+    ocr_calls = 0
+    releases: list[str] = []
+    monkeypatch.setattr(
+        runtime,
+        "_PIPELINE",
+        SimpleNamespace(supports_posting_image_input=False),
+    )
+
+    def begin_phase(*, phase: str, **_kwargs):
+        phases.append(phase)
+        raise AssertionError("미지원 이미지 입력에 비용 phase를 만들면 안 됩니다")
+
+    def extract(*_args, **_kwargs):
+        nonlocal ocr_calls
+        ocr_calls += 1
+        raise AssertionError("미지원 이미지 입력에 OCR provider를 부르면 안 됩니다")
+
+    monkeypatch.setattr(job_runtime, "_begin_paid_phase", begin_phase)
+    monkeypatch.setattr(job_runtime, "extract_posting_text", extract)
+    monkeypatch.setattr(job_runtime, "record_end", lambda **_kwargs: None)
+    monkeypatch.setattr(job_runtime, "_release_run_slot", releases.append)
+
+    response = asyncio.run(
+        job_runtime._start_with_reserved_slot(
+            request=_request(),
+            original_input=UserInput(company="회사", job="", region="서울"),
+            card=_job("unsupported-image").card,
+            posting_images=[upload],
+            posting_image_consent=True,
+            is_paid=True,
+            resolved_track=(
+                share_tracks.Track.MEMBER,
+                "unsupported@example.com",
+                100.0,
+            ),
+            run_id="unsupported-image",
+            upfront_cost=0.0,
+            upfront_models=(),
+            upfront_elapsed=0.0,
+            slot_bucket_id="unsupported-slot",
+        )
+    )
+
+    assert response.status_code == 200
+    assert job_runtime._IMAGE_PIPELINE_UNSUPPORTED_ERROR in response.body.decode("utf-8")
+    assert upload.read_count == 0
+    assert upload.closed
+    assert phases == []
+    assert ocr_calls == 0
+    assert releases == ["unsupported-slot"]
 
 
 def _request() -> Request:
@@ -216,6 +436,160 @@ def _request() -> Request:
             "server": ("testserver", 80),
         }
     )
+
+
+def test_pipeline비용예약_실패는_작업등록전에_즉시_끝난다(monkeypatch):
+    """예약 None 뒤 계속 진행하던 통합 회귀는 무표식 유료 호출을 만들 수 있었다."""
+
+    pipeline = SimpleNamespace(
+        supports_posting_image_input=False,
+        supports_deferred_paid_phase=False,
+    )
+    ends: list[dict] = []
+    releases: list[str] = []
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    monkeypatch.setattr(job_runtime, "_reserved_work_admitted", lambda _key: True)
+    monkeypatch.setattr(job_runtime, "_begin_paid_phase", lambda **_kwargs: None)
+    monkeypatch.setattr(job_runtime, "record_end", lambda **kwargs: ends.append(kwargs))
+    monkeypatch.setattr(job_runtime, "_release_run_slot", releases.append)
+    monkeypatch.setattr(
+        job_runtime,
+        "_schedule_job",
+        lambda _job: (_ for _ in ()).throw(
+            AssertionError("비용 예약 실패 뒤 작업을 등록하면 안 됩니다")
+        ),
+    )
+
+    response = asyncio.run(
+        job_runtime._start_with_reserved_slot(
+            request=_request(),
+            original_input=UserInput(company="회사", job="직무", region="서울"),
+            card=_job("budget-phase-denied").card,
+            posting_images=[],
+            posting_image_consent=False,
+            is_paid=True,
+            resolved_track=(share_tracks.Track.PUBLIC, PUBLIC_BUCKET, 100.0),
+            run_id="budget-phase-denied",
+            upfront_cost=0.0,
+            upfront_models=(),
+            upfront_elapsed=0.0,
+            slot_bucket_id="budget-phase-slot",
+        )
+    )
+
+    assert response.status_code == 429
+    assert response.headers["X-Company-Analysis-Block"] == "budget-store"
+    assert len(ends) == 1
+    assert releases == ["budget-phase-slot"]
+    assert "budget-phase-denied" not in job_runtime._JOBS
+
+
+def test_phase예약뒤_마지막_admission_fence는_PUBLIC외_트랙도_막는다(
+    monkeypatch,
+):
+    """최종 fence가 PUBLIC 분기 안으로 들어가 MEMBER/ADMIN만 우회하던 회귀 방지."""
+
+    pipeline = SimpleNamespace(
+        supports_posting_image_input=False,
+        supports_deferred_paid_phase=False,
+    )
+    checks = iter((True, True, False))
+    ticket = SimpleNamespace(phase=SPEND_PHASE_PIPELINE)
+    cancelled: list[object] = []
+    ends: list[dict] = []
+    releases: list[str] = []
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    monkeypatch.setattr(
+        job_runtime, "_reserved_work_admitted", lambda _key: next(checks)
+    )
+    monkeypatch.setattr(
+        job_runtime, "_begin_paid_phase", lambda **_kwargs: ticket
+    )
+    monkeypatch.setattr(job_runtime, "_cancel_paid_phase", cancelled.append)
+    monkeypatch.setattr(job_runtime, "record_end", lambda **kwargs: ends.append(kwargs))
+    monkeypatch.setattr(job_runtime, "_release_run_slot", releases.append)
+    monkeypatch.setattr(
+        job_runtime,
+        "_schedule_job",
+        lambda _job: (_ for _ in ()).throw(
+            AssertionError("마지막 admission 실패 뒤 작업을 등록하면 안 됩니다")
+        ),
+    )
+
+    response = asyncio.run(
+        job_runtime._start_with_reserved_slot(
+            request=_request(),
+            original_input=UserInput(company="회사", job="직무", region="서울"),
+            card=_job("admin-final-fence").card,
+            posting_images=[],
+            posting_image_consent=False,
+            is_paid=True,
+            resolved_track=(share_tracks.Track.ADMIN, "admin:bucket", 100.0),
+            run_id="admin-final-fence",
+            upfront_cost=0.0,
+            upfront_models=(),
+            upfront_elapsed=0.0,
+            slot_bucket_id="admin-final-slot",
+        )
+    )
+
+    assert response.status_code == 503
+    assert cancelled == [ticket]
+    assert len(ends) == 1
+    assert releases == ["admin-final-slot"]
+    assert "admin-final-fence" not in job_runtime._JOBS
+
+
+def test_지연phase경로의_마지막_fence는_없는phase를_취소하지않고_503이다(
+    monkeypatch,
+):
+    """RealPipeline은 owner 전 phase가 None이다. 이를 취소하면 503도 못 돌려줬다."""
+
+    pipeline = SimpleNamespace(
+        supports_posting_image_input=False,
+        supports_deferred_paid_phase=True,
+    )
+    checks = iter((True, True, False))
+    cancelled: list[object] = []
+    ends: list[dict] = []
+    releases: list[str] = []
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    monkeypatch.setattr(
+        job_runtime, "_reserved_work_admitted", lambda _key: next(checks)
+    )
+    monkeypatch.setattr(job_runtime, "_cancel_paid_phase", cancelled.append)
+    monkeypatch.setattr(job_runtime, "record_end", lambda **kwargs: ends.append(kwargs))
+    monkeypatch.setattr(job_runtime, "_release_run_slot", releases.append)
+    monkeypatch.setattr(
+        job_runtime,
+        "_schedule_job",
+        lambda _job: (_ for _ in ()).throw(
+            AssertionError("마지막 admission 실패 뒤 작업을 등록하면 안 됩니다")
+        ),
+    )
+
+    response = asyncio.run(
+        job_runtime._start_with_reserved_slot(
+            request=_request(),
+            original_input=UserInput(company="회사", job="직무", region="서울"),
+            card=_job("deferred-final-fence").card,
+            posting_images=[],
+            posting_image_consent=False,
+            is_paid=True,
+            resolved_track=(share_tracks.Track.ADMIN, "admin:bucket", 100.0),
+            run_id="deferred-final-fence",
+            upfront_cost=0.0,
+            upfront_models=(),
+            upfront_elapsed=0.0,
+            slot_bucket_id="deferred-final-slot",
+        )
+    )
+
+    assert response.status_code == 503
+    assert cancelled == []
+    assert len(ends) == 1
+    assert releases == ["deferred-final-slot"]
+    assert "deferred-final-fence" not in job_runtime._JOBS
 
 
 def test_업로드읽기와_close중_반복취소도_모든파일을_닫고_슬롯을_한번만_푼다(
@@ -301,6 +675,7 @@ def test_한_upload_close가_지연돼도_모든_close를_시도하고_제한시
 
 
 def test_shutdown은_제한시간뒤_task를_취소하고_슬롯을_정리한다(monkeypatch):
+    _bootstrap_storage_runtime()
     pipeline = _WaitingDemoPipeline()
     releases: list[str] = []
     monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
@@ -332,6 +707,46 @@ def test_shutdown은_제한시간뒤_task를_취소하고_슬롯을_정리한다
     finally:
         pipeline.release.set()
         job_runtime._start_job_runtime()
+
+
+def test_강제종료정리는_두번불려도_한번이고_이력실패가_슬롯을막지않는다(
+    monkeypatch,
+):
+    settlements: list[dict] = []
+    record_calls: list[str] = []
+    releases: list[str] = []
+    interruption_calls: list[str] = []
+
+    def broken_record_end(**kwargs) -> None:
+        record_calls.append(kwargs["run_id"])
+        raise OSError("시험용 종료 이력 장애")
+
+    monkeypatch.setattr(
+        job_runtime,
+        "_settle_paid_phase",
+        lambda _ticket, **kwargs: settlements.append(kwargs),
+    )
+    monkeypatch.setattr(job_runtime, "record_end", broken_record_end)
+    monkeypatch.setattr(job_runtime, "_release_run_slot", releases.append)
+    monkeypatch.setattr(
+        job_runtime.job_interruptions,
+        "persist",
+        lambda **kwargs: interruption_calls.append(kwargs["job_id"]),
+    )
+    job = _job("idempotent-shutdown-cleanup")
+    job.paid_phase = SimpleNamespace(phase=SPEND_PHASE_PIPELINE)
+    job.slot_bucket_id = "idempotent-shutdown-slot"
+
+    job_runtime._force_shutdown_cleanup(job)
+    job_runtime._force_shutdown_cleanup(job)
+
+    assert job.shutdown_cleanup_completed is True
+    assert interruption_calls == [job.job_id]
+    assert settlements == [
+        {"amount_krw": 0.0, "billing_uncertain": True}
+    ]
+    assert record_calls == [job.job_id]
+    assert releases == ["idempotent-shutdown-slot"]
 
 
 def test_shutdown_admission은_새_task와_사용자요청을_503으로_거절한다():

@@ -25,6 +25,8 @@ from src.core.constants import PIPELINE_ENV
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
 from src.features.pipeline.demo import DemoPipeline
+from src.features.provider_health import constants as provider_health_constants
+from src.features.provider_health import store as provider_health_store
 from src.features.sharelink import store as web_share_store
 from src.features.sharelink.constants import KEY_COOKIE_NAME
 from src.features.storage import db as web_storage_db
@@ -33,6 +35,7 @@ from src.web import paid_runtime, request_helpers, runtime
 from src.features.provenance import sources as provenance_sources
 from src.web.main import app, require_admin
 from src.web.routers import auth as auth_router
+from src.web.routers import health as health_router
 
 SESSION = auth_constants.SESSION_COOKIE_NAME
 ANALYSIS_FORM = {
@@ -367,7 +370,7 @@ def test_grant와_state는_성공뒤_재사용할수없다(monkeypatch):
 
 def test_2분이_지난_grant는_깨끗한_화면도_열지못한다(monkeypatch):
     _enable_local_demo_login(monkeypatch)
-    issued_at = auth_router.time.monotonic()
+    issued_at = auth_router._monotonic_now()
     with _local_auth_client() as local_client:
         start = local_client.get(
             f"/auth/local-demo/start?token={LOCAL_DEMO_TOKEN}",
@@ -375,8 +378,8 @@ def test_2분이_지난_grant는_깨끗한_화면도_열지못한다(monkeypatch
         )
         assert start.status_code == 303
         monkeypatch.setattr(
-            auth_router.time,
-            "monotonic",
+            auth_router,
+            "_monotonic_now",
             lambda: issued_at + auth_constants.LOCAL_DEMO_GRANT_MAX_AGE_SEC + 1,
         )
         expired = local_client.get("/auth/local-demo", follow_redirects=False)
@@ -1094,6 +1097,7 @@ def test_real_비용원장잠김은_유료조사만_degraded로_드러낸다(cli
     monkeypatch.setenv(auth_constants.ENV_BETA_ADMIN_ONLY, "0")
     monkeypatch.setenv(PIPELINE_ENV, "real")
     monkeypatch.setattr(runtime, "_check_storage_read_ready", lambda: None)
+    monkeypatch.setattr(paid_runtime, "budget_state_machine_ready", lambda: True)
     monkeypatch.setattr(paid_runtime, "_BUDGET_STORE_HEALTHY", False)
 
     ready = client.get("/readyz")
@@ -1103,6 +1107,67 @@ def test_real_비용원장잠김은_유료조사만_degraded로_드러낸다(cli
         "status": "degraded",
         "blocked_capabilities": ["paid_research:budget_store"],
     }
+
+
+def test_real_readyz는_provider별차단을_읽기만하고_200_degraded로_알린다(
+    client, monkeypatch
+):
+    now_iso = "2026-08-28T10:00:00+09:00"
+    monkeypatch.setenv(auth_constants.ENV_BETA_ADMIN_ONLY, "0")
+    monkeypatch.setenv(PIPELINE_ENV, "real")
+    monkeypatch.setattr(runtime, "_check_storage_read_ready", lambda: None)
+    monkeypatch.setattr(paid_runtime, "budget_state_machine_ready", lambda: True)
+    monkeypatch.setattr(paid_runtime, "_BUDGET_STORE_HEALTHY", True)
+    monkeypatch.setattr(health_router.clock, "iso_now_kst", lambda: now_iso)
+
+    providers = (
+        provider_health_constants.PROVIDER_ANTHROPIC,
+        provider_health_constants.PROVIDER_GOOGLE_PLACES,
+        provider_health_constants.PROVIDER_DART,
+    )
+    with web_storage_db.connect() as conn:
+        for provider in providers:
+            for _ in range(provider_health_constants.FAILURES_TO_OPEN):
+                provider_health_store.record_failure(
+                    conn,
+                    provider,
+                    failure_kind=provider_health_store.ProviderFailureKind.TIMEOUT,
+                    now_iso=now_iso,
+                )
+        before_states = tuple(
+            tuple(row)
+            for row in conn.execute(
+                f"SELECT * FROM {provider_health_store.TABLE_STATES} ORDER BY provider"
+            ).fetchall()
+        )
+        before_events = conn.execute(
+            f"SELECT COUNT(*) FROM {provider_health_store.TABLE_EVENTS}"
+        ).fetchone()[0]
+
+    first = client.get("/readyz")
+    second = client.get("/readyz")
+
+    assert first.status_code == second.status_code == 200
+    assert first.json() == second.json() == {
+        "status": "degraded",
+        "blocked_capabilities": [
+            "provider:anthropic:cooldown",
+            "provider:google_places:cooldown",
+            "provider:dart:cooldown",
+        ],
+    }
+    with web_storage_db.connect() as conn:
+        after_states = tuple(
+            tuple(row)
+            for row in conn.execute(
+                f"SELECT * FROM {provider_health_store.TABLE_STATES} ORDER BY provider"
+            ).fetchall()
+        )
+        after_events = conn.execute(
+            f"SELECT COUNT(*) FROM {provider_health_store.TABLE_EVENTS}"
+        ).fetchone()[0]
+    assert after_states == before_states
+    assert after_events == before_events
 
 
 def test_demo는_비용원장상태를_readiness에_쓰지않는다(client, monkeypatch):
@@ -1133,14 +1198,25 @@ def test_저장소상태확인용_SQLite연결은_항상_닫는다(tmp_path, mon
     class FakeConnection:
         closed = False
         in_transaction = False
+        last_sql = ""
 
         def execute(self, sql):
+            self.last_sql = sql
             if sql == "BEGIN IMMEDIATE":
                 self.in_transaction = True
             return self
 
         def fetchone(self):
+            if "PRAGMA schema_version" in self.last_sql:
+                return (7,)
+            if "PRAGMA journal_mode" in self.last_sql:
+                return (web_storage_db.preferred_journal_mode(),)
             return (1,)
+
+        def fetchall(self):
+            if "storage_database_identity" in self.last_sql:
+                return [(1, "a" * 64)]
+            return []
 
         def rollback(self):
             self.in_transaction = False
@@ -1154,6 +1230,11 @@ def test_저장소상태확인용_SQLite연결은_항상_닫는다(tmp_path, mon
         return conn
 
     monkeypatch.setattr(web_storage_db, "default_db_path", lambda: tmp_path / "db")
+    monkeypatch.setattr(
+        web_storage_db,
+        "_cached_identity",
+        lambda _path: ("a" * 64, 7),
+    )
     monkeypatch.setattr(runtime.sqlite3, "connect", connect)
 
     runtime._check_storage_write_ready()
@@ -1161,6 +1242,54 @@ def test_저장소상태확인용_SQLite연결은_항상_닫는다(tmp_path, mon
 
     assert len(connections) == 2
     assert all(conn.closed for conn in connections)
+
+
+def test_readiness는_identity없는_빈DB교체를_ready로_거짓말하지않는다(
+    tmp_path,
+    monkeypatch,
+):
+    target = tmp_path / "ready-storage.db"
+    archived = tmp_path / "ready-storage-intact.db"
+    monkeypatch.setenv("STORAGE_DB_PATH", str(target))
+    with web_storage_db.connect(target):
+        pass
+    runtime._check_storage_read_ready()
+
+    target.replace(archived)
+    with sqlite3.connect(target):
+        pass
+    empty_before = target.read_bytes()
+
+    with pytest.raises(RuntimeError, match="bootstrap한 저장소와 다릅니다"):
+        runtime._check_storage_read_ready()
+
+    assert target.read_bytes() == empty_before
+
+
+def test_정상_readiness는_DB나_schema를_한글자도_바꾸지않는다(
+    tmp_path,
+    monkeypatch,
+):
+    target = tmp_path / "readonly-ready-storage.db"
+    monkeypatch.setenv("STORAGE_DB_PATH", str(target))
+    with web_storage_db.connect(target) as conn:
+        before_schema = int(conn.execute("PRAGMA schema_version").fetchone()[0])
+    before_files = {
+        path.name: path.read_bytes()
+        for path in target.parent.iterdir()
+        if path.is_file()
+    }
+
+    runtime._check_storage_read_ready()
+
+    after_files = {
+        path.name: path.read_bytes()
+        for path in target.parent.iterdir()
+        if path.is_file()
+    }
+    assert after_files == before_files
+    with sqlite3.connect(target) as conn:
+        assert int(conn.execute("PRAGMA schema_version").fetchone()[0]) == before_schema
 
 
 def test_real_pipeline은_영속_provenance_key가_없으면_시작전에_실패한다(

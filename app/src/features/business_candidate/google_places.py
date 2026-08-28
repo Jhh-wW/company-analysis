@@ -18,6 +18,8 @@ import urllib.request
 from collections.abc import Callable, Sequence
 from typing import Any
 
+from src.core.provider_gateway import attempt_context, gateway
+from src.core.provider_gateway.google_places_adapter import GooglePlacesAdapter
 from src.features.business_candidate.constants import (
     GOOGLE_PLACES_ACCOUNTING_COST_KRW,
     MAX_CANDIDATES,
@@ -27,6 +29,7 @@ from src.features.business_candidate.logic import (
     ProviderTimedOut,
     RawBusinessCandidate,
 )
+from src.shared import credentialed_http
 
 
 ENDPOINT = "https://places.googleapis.com/v1/places:searchText"
@@ -41,13 +44,19 @@ MAX_QUERY_CHARS = 256
 class GooglePlacesError(RuntimeError):
     """키·응답 본문을 싣지 않는 공급자 경계 오류."""
 
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 class GooglePlacesRateLimited(ProviderRateLimited, GooglePlacesError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        GooglePlacesError.__init__(self, message, status_code=status_code)
 
 
 class GooglePlacesTimedOut(ProviderTimedOut, GooglePlacesError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        GooglePlacesError.__init__(self, message, status_code=status_code)
 
 
 class GooglePlacesUnavailable(GooglePlacesError):
@@ -57,14 +66,7 @@ class GooglePlacesUnavailable(GooglePlacesError):
 Transport = Callable[[urllib.request.Request, float], Any]
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """API key가 다른 호스트로 전달되는 redirect를 따르지 않는다."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
-        return None
-
-
-_OPENER = urllib.request.build_opener(_NoRedirect())
+_OPENER = credentialed_http.build_no_redirect_opener()
 
 
 def _urlopen(request: urllib.request.Request, timeout_sec: float):
@@ -114,50 +116,120 @@ class GooglePlacesTextSearchProvider:
                 "X-Goog-FieldMask": FIELD_MASK,
             },
         )
-        response = None
         try:
-            response = self._transport(request, timeout_sec)
-            final_url = str(getattr(response, "geturl", lambda: ENDPOINT)())
-            if final_url != ENDPOINT:
-                raise GooglePlacesUnavailable("Google Places 응답 위치가 올바르지 않습니다")
-            status = int(getattr(response, "status", 200))
-            if status == 429:
-                raise GooglePlacesRateLimited("Google Places 요청 한도에 도달했습니다")
-            if status < 200 or status >= 300:
-                raise GooglePlacesUnavailable("Google Places가 정상 응답하지 않았습니다")
-            raw = response.read(MAX_RESPONSE_BYTES + 1)
-        except urllib.error.HTTPError as exc:
+            callbacks = attempt_context.current()
+            attempt_token = callbacks.begin_attempt(
+                "google_places",
+                "text_search",
+                float(self.accounting_cost_krw),
+            )
+        except Exception as error:
+            raise GooglePlacesUnavailable(
+                "Google Places 비용 원장을 시작할 수 없어 호출하지 않았습니다"
+            ) from error
+
+        def send_and_decode() -> dict[str, Any]:
+            response = None
+            status: int | None = None
             try:
-                if exc.code == 429:
+                response = self._transport(request, timeout_sec)
+                status = int(getattr(response, "status", 200))
+                credentialed_http.require_exact_response_url(
+                    response,
+                    expected_url=ENDPOINT,
+                )
+                if status == 429:
                     raise GooglePlacesRateLimited(
-                        "Google Places 요청 한도에 도달했습니다"
+                        "Google Places 요청 한도에 도달했습니다",
+                        status_code=status,
+                    )
+                if status < 200 or status >= 300:
+                    raise GooglePlacesUnavailable(
+                        "Google Places가 정상 응답하지 않았습니다",
+                        status_code=status,
+                    )
+                raw = credentialed_http.read_limited_bytes(
+                    response,
+                    max_bytes=MAX_RESPONSE_BYTES,
+                )
+            except urllib.error.HTTPError as exc:
+                try:
+                    if exc.code == 429:
+                        raise GooglePlacesRateLimited(
+                            "Google Places 요청 한도에 도달했습니다",
+                            status_code=int(exc.code),
+                        ) from None
+                    raise GooglePlacesUnavailable(
+                        "Google Places가 정상 응답하지 않았습니다",
+                        status_code=int(exc.code),
                     ) from None
+                finally:
+                    try:
+                        exc.close()
+                    except Exception:
+                        pass
+            except GooglePlacesError:
+                raise
+            except (TimeoutError, socket.timeout):
+                raise GooglePlacesTimedOut(
+                    "Google Places 연결 시간이 초과되었습니다",
+                    status_code=status,
+                ) from None
+            except Exception:
+                # URL, key, provider 응답/예외 본문을 상위 로그에 노출하지 않는다.
                 raise GooglePlacesUnavailable(
-                    "Google Places가 정상 응답하지 않았습니다"
+                    "Google Places 연결에 실패했습니다",
+                    status_code=status,
                 ) from None
             finally:
-                exc.close()
-        except GooglePlacesError:
-            raise
-        except (TimeoutError, socket.timeout):
-            raise GooglePlacesTimedOut("Google Places 연결 시간이 초과되었습니다") from None
-        except Exception:
-            # URL, key, provider 응답/예외 본문을 상위 로그에 노출하지 않는다.
-            raise GooglePlacesUnavailable("Google Places 연결에 실패했습니다") from None
-        finally:
-            if response is not None:
-                try:
-                    response.close()
-                except Exception:
-                    pass
-        if len(raw) > MAX_RESPONSE_BYTES:
-            raise GooglePlacesUnavailable("Google Places 응답이 허용 크기를 넘었습니다")
+                if response is not None:
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+            try:
+                document = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                raise GooglePlacesUnavailable(
+                    "Google Places 응답 형식이 올바르지 않습니다",
+                    status_code=status,
+                ) from None
+            if not isinstance(document, dict):
+                raise GooglePlacesUnavailable(
+                    "Google Places 응답 형식이 올바르지 않습니다",
+                    status_code=status,
+                )
+            return document
+
+        def before_dispatch() -> None:
+            callbacks.heartbeat(attempt_token)
+            callbacks.mark_dispatch_intent(attempt_token)
+
         try:
-            document = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            raise GooglePlacesUnavailable("Google Places 응답 형식이 올바르지 않습니다") from None
-        if not isinstance(document, dict):
-            raise GooglePlacesUnavailable("Google Places 응답 형식이 올바르지 않습니다")
+            document = gateway.call_once(
+                adapter=GooglePlacesAdapter(
+                    accounting_cost_krw=float(self.accounting_cost_krw)
+                ),
+                reserved_krw=float(self.accounting_cost_krw),
+                before_dispatch=before_dispatch,
+                send=send_and_decode,
+                record_observation=lambda observation: callbacks.record_observation(
+                    attempt_token, observation
+                ),
+            )
+        except gateway.ProviderDispatchNotStarted as error:
+            raise GooglePlacesUnavailable(
+                "Google Places 전송 의도를 기록하지 못해 호출하지 않았습니다"
+            ) from error
+        except gateway.ProviderObservationRecordFailed as error:
+            raise GooglePlacesUnavailable(
+                "Google Places 호출 결과를 비용 원장에 기록하지 못했습니다"
+            ) from error
+        except gateway.ProviderCallFailed as wrapped:
+            error = wrapped.__cause__
+            if isinstance(error, GooglePlacesError):
+                raise error
+            raise GooglePlacesUnavailable("Google Places 연결에 실패했습니다") from wrapped
 
         out: list[RawBusinessCandidate] = []
         places = document.get("places")

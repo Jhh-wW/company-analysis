@@ -276,7 +276,8 @@ def test_schema_version과_메타가_v2로_찍힌다():
     assert report.company == "가나다전자"
     assert report.corp_type == "상장사"
     assert report.as_of_date == "2026-08-24"
-    assert report.grade is Grade.COMPLETE
+    # 평가 전 생성물을 근거 없이 «완성»으로 도장 찍지 않는다.
+    assert report.grade is Grade.PARTIAL
     assert report.fact_records == []  # 사실 원장을 위조하지 않는다
 
 

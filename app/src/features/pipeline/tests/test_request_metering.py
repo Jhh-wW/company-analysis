@@ -11,10 +11,14 @@ from types import SimpleNamespace
 import pytest
 
 from src.core.constants import (
+    MAX_AI_CALLS_PER_REQUEST,
     MODEL_PRICES_USD_PER_MTOK,
     UNKNOWN_MODEL_PRICE_USD_PER_MTOK,
 )
 from src.core.pricing import AI_COST_KRW_PER_USD
+from src.core.provider_gateway import attempt_context
+from src.core.provider_gateway.attempt_context import ProviderAttemptCallbacks
+from src.core.provider_gateway.types import BillingDisposition, ProviderObservation
 from src.features.budget import provider_budget
 from src.features.pipeline import real
 from src.features.pipeline.port import CompanyCard, Outcome, UserInput
@@ -24,11 +28,40 @@ _HAIKU = "claude-haiku-4-5"
 _SONNET = "claude-sonnet-4-6"
 
 
+class _AttemptRecorder:
+    """DB 대신 callback 순서와 비민감 비용 관측만 담는 시험 원장."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple] = []
+        self.observations: list[ProviderObservation] = []
+
+    def callbacks(self) -> ProviderAttemptCallbacks:
+        def begin(provider: str, operation: str, reserved_krw: float) -> int:
+            token = len(self.observations) + 1
+            self.events.append(("begin", token, provider, operation, reserved_krw))
+            return token
+
+        def mark(token: int) -> None:
+            self.events.append(("dispatch", token))
+
+        def heartbeat(token: int) -> None:
+            self.events.append(("heartbeat", token))
+
+        def record(token: int, observation: ProviderObservation) -> None:
+            self.events.append(("observation", token))
+            self.observations.append(observation)
+
+        return ProviderAttemptCallbacks(begin, heartbeat, mark, record)
+
+
 @pytest.fixture(autouse=True)
 def _paid_provider_budget_context():
     """직접 engine 단위시험도 운영 경계와 같은 요청별 예약 문맥을 쓴다."""
-    with provider_budget.activate(100_000.0):
-        yield
+    recorder = _AttemptRecorder()
+    with provider_budget.activate(100_000.0), attempt_context.activate(
+        recorder.callbacks()
+    ):
+        yield recorder
 
 
 class FakeMessages:
@@ -152,6 +185,69 @@ def test_모듈함수가_client를_직접_불러도_식별과_알맹이_usage를
         2 * one_call_usd * AI_COST_KRW_PER_USD
     )
     assert real._request_model_label(metered) == _HAIKU
+
+
+def test_요청당_AI호출_15회상한은_실제전송경계에서_강제된다(
+    _paid_provider_budget_context,
+):
+    messages = FakeMessages()
+    metered = real._MeteredEngine(FakeRawEngine(messages))
+    client = _client(metered)
+
+    for _ in range(MAX_AI_CALLS_PER_REQUEST):
+        client.messages.create(model=_HAIKU, max_tokens=700)
+
+    with pytest.raises(
+        provider_budget.ProviderBudgetExceeded,
+        match="AI 호출 횟수 상한",
+    ):
+        client.messages.create(model=_HAIKU, max_tokens=700)
+
+    assert len(messages.calls) == MAX_AI_CALLS_PER_REQUEST
+    assert sum(
+        event[0] == "begin" for event in _paid_provider_budget_context.events
+    ) == MAX_AI_CALLS_PER_REQUEST
+
+
+def test_usage가_있는_실패를_반복해도_16번째는_전송전에_막힌다(
+    _paid_provider_budget_context,
+):
+    class FailedWithUsage(RuntimeError):
+        def __init__(self):
+            super().__init__("provider rejected after usage")
+            self.model = _HAIKU
+            self.usage = SimpleNamespace(
+                input_tokens=10,
+                output_tokens=1,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+            )
+
+    class FailedMessages:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def create(self, **_kwargs):
+            self.calls += 1
+            raise FailedWithUsage()
+
+    messages = FailedMessages()
+    metered = real._MeteredEngine(FakeRawEngine(messages))
+    client = _client(metered)
+
+    for _ in range(MAX_AI_CALLS_PER_REQUEST):
+        with pytest.raises(FailedWithUsage):
+            client.messages.create(model=_HAIKU, max_tokens=100)
+    with pytest.raises(
+        provider_budget.ProviderBudgetExceeded,
+        match="AI 호출 횟수 상한",
+    ):
+        client.messages.create(model=_HAIKU, max_tokens=100)
+
+    assert messages.calls == MAX_AI_CALLS_PER_REQUEST
+    assert sum(
+        event[0] == "begin" for event in _paid_provider_budget_context.events
+    ) == MAX_AI_CALLS_PER_REQUEST
 
 
 def test_Sonnet_선택3회용_prompt_cache와_단계별비용을_기록한다():
@@ -297,7 +393,9 @@ def test_schema_정규화가_실패하면_예약과_provider호출은_모두_0�
     assert metered.usages == []
 
 
-def test_usage가_있는_실패호출도_실제원가이벤트로_보존한다():
+def test_usage가_있는_실패호출도_실제원가이벤트로_보존한다(
+    _paid_provider_budget_context,
+):
     class FailedWithUsage(RuntimeError):
         def __init__(self):
             super().__init__("provider rejected after usage")
@@ -326,6 +424,9 @@ def test_usage가_있는_실패호출도_실제원가이벤트로_보존한다()
     assert event.input_tokens == 2000
     assert event.cost_krw > 0
     assert real._request_spent_krw(metered) == event.cost_krw
+    observation = _paid_provider_budget_context.observations[-1]
+    assert observation.billing_disposition is BillingDisposition.KNOWN_COST
+    assert observation.known_cost_krw == event.cost_krw
 
 
 def test_두_요청의_모델과_usage는_겹쳐불러도_각자에게만_쌓인다():
@@ -398,7 +499,9 @@ def test_두_thread가_교차해도_8달러_가드는_각_요청에만_작동한
 
     def run_two(key, engine, client):
         try:
-            with provider_budget.activate(100_000.0):
+            with provider_budget.activate(100_000.0), attempt_context.activate(
+                _AttemptRecorder().callbacks()
+            ):
                 for turn in range(2):
                     try:
                         engine._ask(client, f"{key}-{turn}", {})
@@ -474,7 +577,9 @@ def test_five_interleaved_requests_keep_budget_usage_and_model_isolated(
 
     def run_two(index, engine, client):
         try:
-            with provider_budget.activate(100_000.0):
+            with provider_budget.activate(100_000.0), attempt_context.activate(
+                _AttemptRecorder().callbacks()
+            ):
                 for turn in range(2):
                     try:
                         engine._ask(client, f"request-{index}-{turn}", {})
@@ -617,13 +722,22 @@ def test_모르는_응답모델은_보수적_공통값을_쓴다():
     assert real._request_spent_krw(metered) == pytest.approx(expected)
 
 
-def test_응답은_왔지만_usage가_없으면_0원으로_확정하지_않는다():
+def test_응답은_왔지만_usage가_없으면_0원으로_확정하지_않는다(
+    _paid_provider_budget_context,
+):
     metered = real._MeteredEngine(FakeRawEngine(FakeMessages(omit_usage=True)))
 
     _client(metered).messages.create(model=_HAIKU, max_tokens=700)
 
     assert real._request_spent_krw(metered) == 0.0
     assert real._request_billing_uncertain(metered) is True
+    observation = _paid_provider_budget_context.observations[-1]
+    assert (
+        observation.billing_disposition
+        is BillingDisposition.CONSERVATIVE_LIABILITY
+    )
+    assert observation.known_cost_krw == 0.0
+    assert observation.liability_krw > 0
 
 
 def test_응답뒤_후속코드가_터져도_그_요청비용으로_FAILED를_돌려준다(monkeypatch):
@@ -676,7 +790,9 @@ def test_provider_예외는_앞선_확정비용을_남기고_과금불확실을_
     assert result.billing_uncertain is True
 
 
-def test_usage없는_provider_예외뒤에는_같은요청의_추가호출을_막는다():
+def test_usage없는_provider_예외뒤에는_같은요청의_추가호출을_막는다(
+    _paid_provider_budget_context,
+):
     messages = FakeMessages(fail_on_call=1)
     metered = real._MeteredEngine(FakeRawEngine(messages))
     client = _client(metered)
@@ -696,6 +812,12 @@ def test_usage없는_provider_예외뒤에는_같은요청의_추가호출을_�
 
     assert messages.calls == [_HAIKU]
     assert metered.billing_uncertain is True
+    observation = _paid_provider_budget_context.observations[-1]
+    assert (
+        observation.billing_disposition
+        is BillingDisposition.CONSERVATIVE_LIABILITY
+    )
+    assert observation.liability_krw > 0
 
 
 def test_DART_회사응답_실패는_회사없음이_아니라_기술실패다(monkeypatch):
@@ -725,7 +847,9 @@ def test_DART_회사응답_실패는_회사없음이_아니라_기술실패다(m
     assert result.model == "", "AI 응답이 없는데 기본 모델을 썼다고 적으면 안 된다"
 
 
-def test_작은_입력은_gateway를_거쳐_provider를_한번_부른다():
+def test_작은_입력은_gateway를_거쳐_provider를_한번_부른다(
+    _paid_provider_budget_context,
+):
     messages = FakeMessages()
     metered = real._MeteredEngine(FakeRawEngine(messages))
 
@@ -738,6 +862,16 @@ def test_작은_입력은_gateway를_거쳐_provider를_한번_부른다():
 
     assert messages.calls == [_HAIKU]
     assert len(metered.usages) == 1
+    assert [event[0] for event in _paid_provider_budget_context.events] == [
+        "begin",
+        "heartbeat",
+        "dispatch",
+        "observation",
+    ]
+    assert (
+        _paid_provider_budget_context.observations[-1].billing_disposition
+        is BillingDisposition.KNOWN_COST
+    )
 
 
 def test_예상예약_잔액이_부족하면_provider는_0회다():
@@ -771,6 +905,109 @@ def test_예약문맥이_없으면_provider는_0회다():
         provider_budget._CURRENT.reset(token)
 
     assert messages.calls == []
+
+
+def test_attempt_문맥이_없으면_로컬예약을_돌려주고_provider는_0회다():
+    messages = FakeMessages()
+    metered = real._MeteredEngine(FakeRawEngine(messages))
+    token = attempt_context._CURRENT.set(None)
+    try:
+        with provider_budget.activate(10_000.0) as budget:
+            with pytest.raises(provider_budget.ProviderBudgetUnavailable):
+                _client(metered).messages.create(
+                    model=_HAIKU,
+                    max_tokens=700,
+                    messages=[{"role": "user", "content": "호출하면 안 됨"}],
+                )
+            assert budget.accounted_krw == 0.0
+    finally:
+        attempt_context._CURRENT.reset(token)
+
+    assert messages.calls == []
+
+
+def test_heartbeat_callback이_실패하면_로컬예약을_돌려주고_provider는_0회다():
+    messages = FakeMessages()
+    metered = real._MeteredEngine(FakeRawEngine(messages))
+    dispatches = []
+
+    def fail_heartbeat(_token):
+        raise RuntimeError("시험용 lease 연장 실패")
+
+    callbacks = ProviderAttemptCallbacks(
+        lambda _provider, _operation, _reserved: "attempt-1",
+        fail_heartbeat,
+        lambda token: dispatches.append(token),
+        lambda _token, _observation: None,
+    )
+    with provider_budget.activate(10_000.0) as budget, attempt_context.activate(
+        callbacks
+    ):
+        with pytest.raises(provider_budget.ProviderBudgetUnavailable):
+            _client(metered).messages.create(
+                model=_HAIKU,
+                max_tokens=700,
+                messages=[{"role": "user", "content": "호출하면 안 됨"}],
+            )
+        assert budget.accounted_krw == 0.0
+
+    assert dispatches == []
+    assert messages.calls == []
+
+
+def test_전송의도_callback이_실패하면_로컬예약을_돌려주고_provider는_0회다():
+    messages = FakeMessages()
+    metered = real._MeteredEngine(FakeRawEngine(messages))
+
+    def fail_dispatch(_token):
+        raise RuntimeError("시험용 DB 실패")
+
+    callbacks = ProviderAttemptCallbacks(
+        lambda _provider, _operation, _reserved: "attempt-1",
+        lambda _token: None,
+        fail_dispatch,
+        lambda _token, _observation: None,
+    )
+    with provider_budget.activate(10_000.0) as budget, attempt_context.activate(
+        callbacks
+    ):
+        with pytest.raises(provider_budget.ProviderBudgetUnavailable):
+            _client(metered).messages.create(
+                model=_HAIKU,
+                max_tokens=700,
+                messages=[{"role": "user", "content": "호출하면 안 됨"}],
+            )
+        assert budget.accounted_krw == 0.0
+
+    assert messages.calls == []
+
+
+def test_결과_callback이_실패하면_provider는_1회이고_예약을_부채후보로_남긴다():
+    messages = FakeMessages()
+    metered = real._MeteredEngine(FakeRawEngine(messages))
+
+    def fail_record(_token, _observation):
+        raise RuntimeError("시험용 결과 DB 실패")
+
+    callbacks = ProviderAttemptCallbacks(
+        lambda _provider, _operation, _reserved: "attempt-1",
+        lambda _token: None,
+        lambda _token: None,
+        fail_record,
+    )
+    with provider_budget.activate(10_000.0) as budget, attempt_context.activate(
+        callbacks
+    ):
+        with pytest.raises(provider_budget.ProviderBudgetUnavailable):
+            _client(metered).messages.create(
+                model=_HAIKU,
+                max_tokens=700,
+                messages=[{"role": "user", "content": "한 번만 호출"}],
+            )
+        assert budget.accounted_krw > 0.0
+
+    assert messages.calls == [_HAIKU]
+    assert metered.billing_uncertain is True
 
 
 def test_sdk_내부_retry를_provider경계에서_0으로_고정한다():

@@ -30,6 +30,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 from typing import Any
 
 import pytest
@@ -185,6 +186,10 @@ def test_첨부정정보다_본문_있는_공시를_고른다(monkeypatch: pytes
     고른것 = engine.latest_report_rcept("00222374", "비상장 외감", _계수기())
 
     assert "첨부정정" not in 고른것["report_nm"]
+    assert 고른것["source_identity_rcept_nos"] == [
+        "20260101000001",
+        "20260101000002",
+    ], "본문은 원 공시를 쓰더라도 정정 접수번호를 출처 지문에서 빼면 안 된다"
 
 
 def test_이름이_안_맞으면_그_유형은_건너뛴다(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -213,3 +218,28 @@ def test_찾는_순서표가_그대로다() -> None:
         ("A", "사업보고서"),
         ("F", "감사보고서"),
     )
+
+
+def test_조사_기준일을_한번_정하면_윤년에도_같은_3년창을_쓴다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """서버 날짜를 다시 읽거나 2월 29일에 죽으면 조사 내부 시점이 갈라진다."""
+
+    engine = real._engine()
+    받은값: list[dict[str, Any]] = []
+
+    def 가짜_get_json(endpoint: str, params: dict[str, Any], counter: Any) -> dict[str, Any]:
+        받은값.append(dict(params))
+        return _없음
+
+    monkeypatch.setattr(engine, "get_json", 가짜_get_json)
+
+    engine.latest_report_rcept(
+        "00222374",
+        "비상장 외감",
+        _계수기(),
+        business_date=dt.date(2028, 2, 29),
+    )
+
+    assert 받은값[0]["bgn_de"] == "20250228"
+    assert 받은값[0]["end_de"] == "20280229"

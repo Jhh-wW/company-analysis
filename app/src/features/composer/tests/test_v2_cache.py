@@ -15,7 +15,7 @@
 
 ★ 여기서 지키는 것:
   ① v1 캐시와 v2 캐시는 열쇠가 달라 서로의 보고서를 못 꺼낸다.
-  ② 코드가 바뀌면 캐시가 저절로 무효가 된다.
+  ② 코드나 실제 DART 출처가 바뀌면 캐시가 저절로 무효가 된다.
   ③ 지문을 못 만들었으면(«모르는 상태») 읽지도 쓰지도 않는다.
   ④ v1 보고서가 v2 열쇠 아래로 들어가지 않는다.
 """
@@ -41,6 +41,7 @@ from src.features.storage import db as storage_db
 
 CORP_ID = "00126380"
 FISCAL_YEAR = 2025
+SOURCE_IDENTITY_DIGEST = "a" * 64
 
 
 @pytest.fixture(autouse=True)
@@ -75,23 +76,32 @@ def _v1_report() -> Report:
     )
 
 
-def _save(report: Report, build_id: str):
+def _save(
+    report: Report,
+    build_id: str,
+    source_identity_digest: str = SOURCE_IDENTITY_DIGEST,
+):
     with storage_db.connect() as conn:
         return cache_store.save_v2_report(
             conn,
             corp_id=CORP_ID,
             report=report,
             build_id=build_id,
+            source_identity_digest=source_identity_digest,
             fiscal_year=FISCAL_YEAR,
         )
 
 
-def _hit(build_id: str):
+def _hit(
+    build_id: str,
+    source_identity_digest: str = SOURCE_IDENTITY_DIGEST,
+):
     with storage_db.connect() as conn:
         return cache_store.get_v2_report_hit(
             conn,
             corp_id=CORP_ID,
             build_id=build_id,
+            source_identity_digest=source_identity_digest,
             current_fiscal_year=FISCAL_YEAR,
             today=dt.date(2026, 8, 24),
         )
@@ -118,6 +128,14 @@ def test_코드가_바뀌면_옛_결과가_안_나온다():
     assert _hit("buildB") is None, (
         "코드가 바뀌었는데 옛 캐시가 나왔습니다 — 고쳐도 화면이 그대로가 됩니다"
     )
+
+
+def test_DART_출처가_바뀌면_코드가_같아도_옛_결과가_안_나온다():
+    """정정공시나 재무값 정정 뒤 옛 본문을 재사용하지 않는다."""
+
+    _save(_v2_report(), "buildA", "a" * 64)
+
+    assert _hit("buildA", "b" * 64) is None
 
 
 def test_엔진_소스가_바뀌면_지문이_달라진다():
@@ -191,6 +209,7 @@ def test_v2_캐시에_저장한_것을_v1이_못_꺼낸다():
         v1적중 = cache_store.get_company_report_hit(
             conn,
             corp_id=CORP_ID,
+            source_identity_digest=SOURCE_IDENTITY_DIGEST,
             current_fiscal_year=FISCAL_YEAR,
             today=dt.date(2026, 8, 24),
         )
@@ -209,6 +228,8 @@ def test_지문을_못_만들면_읽지도_쓰지도_않는다():
 
     assert _save(_v2_report(), UNKNOWN_BUILD_ID) is None
     assert _hit(UNKNOWN_BUILD_ID) is None
+    assert _save(_v2_report(), "buildA", "") is None
+    assert _hit("buildA", "") is None
 
 
 def test_사업연도가_바뀌면_적중하지_않는다():
@@ -220,6 +241,7 @@ def test_사업연도가_바뀌면_적중하지_않는다():
             conn,
             corp_id=CORP_ID,
             build_id="buildA",
+            source_identity_digest=SOURCE_IDENTITY_DIGEST,
             current_fiscal_year=FISCAL_YEAR + 1,
             today=dt.date(2026, 8, 24),
         )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 from datetime import date, datetime
 from io import BytesIO
@@ -17,28 +18,67 @@ from src.features.auth import logic as auth_logic
 from src.features.backup import status as backup_status
 from src.features.pipeline.canonical_demo import build_demo_report
 from src.features.pipeline.demo import DemoPipeline
+from src.features.report_access import store as report_access_store
 from src.features.sharelink import allowlist
 from src.features.sharelink import store as share_store
 from src.features.storage import constants as storage_constants
 from src.features.storage import db, reports
-from src.web import main, runtime
+from src.web import main, report_retention_adapter, runtime
 from src.web import deployment_mode
 from src.web.routers import dashboard as dashboard_router
 from src.web.routers import maintenance as maintenance_router
 from src.web.routers import reports as reports_router
 
 
+def _identity_subject(email: str) -> str:
+    digest = hashlib.sha256(email.lower().encode("utf-8")).hexdigest()[:24]
+    return f"google:test-{digest}"
+
+
 def _session(client: TestClient, *, email: str, is_admin: bool) -> str:
-    session = auth_logic.create_session(email, is_admin)
+    session = auth_logic.create_session(
+        email,
+        is_admin,
+        subject=_identity_subject(email),
+    )
     client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
     return auth_logic.csrf_token_for_session(session.token)
 
 
 def _seed_report() -> str:
-    report_id = "dashboard-report-1"
+    report_id = "da" * 16
     with db.connect() as conn:
         reports.save(conn, report_id, "CORP-001", "", build_demo_report())
     return report_id
+
+
+def _bind_member_report(conn, *, report_id: str, email: str) -> None:
+    """실제 MEMBER 출고처럼 run 예약·불변 계정·report를 한 소유권으로 묶는다."""
+
+    assert dashboard_store.reserve_member_run(
+        conn,
+        run_id=report_id,
+        actor_email=email,
+        day="2026-08-22",
+        now_iso="2026-08-22T10:00:00+09:00",
+    )
+    assert report_access_store.bind_member_run(
+        conn,
+        run_id=report_id,
+        identity_subject=_identity_subject(email),
+    )
+    assert report_access_store.bind_report(
+        conn,
+        run_id=report_id,
+        report_id=report_id,
+    )
+    assert dashboard_store.settle_member_run(
+        conn,
+        run_id=report_id,
+        succeeded=True,
+        report_id=report_id,
+        now_iso="2026-08-22T10:01:00+09:00",
+    )
 
 
 def test_admin_dashboard_has_no_public_json_and_refresh_is_admin_only(monkeypatch, tmp_path):
@@ -66,6 +106,7 @@ def test_member_error_closes_result_and_pdf_until_manual_republish(monkeypatch, 
     report_id = _seed_report()
     with db.connect() as conn:
         assert allowlist.invite(conn, email="member@example.com", note="", now_iso="2026-08-22T10:00:00+09:00")
+        _bind_member_report(conn, report_id=report_id, email="member@example.com")
     with TestClient(main.app) as client:
         csrf = _session(client, email="member@example.com", is_admin=False)
         reported = client.post(
@@ -89,6 +130,7 @@ def test_member_cannot_escalate_own_report_to_a_global_incident(monkeypatch, tmp
         allowlist.invite(
             conn, email="member@example.com", note="", now_iso="2026-08-22T10:00:00+09:00"
         )
+        _bind_member_report(conn, report_id=report_id, email="member@example.com")
     with TestClient(main.app) as member:
         csrf = _session(member, email="member@example.com", is_admin=False)
         response = member.post(
@@ -116,6 +158,7 @@ def test_survey_is_member_only_and_revision_is_visible_to_admin(monkeypatch, tmp
     report_id = _seed_report()
     with db.connect() as conn:
         allowlist.invite(conn, email="member@example.com", note="친구", now_iso="2026-08-22T10:00:00+09:00")
+        _bind_member_report(conn, report_id=report_id, email="member@example.com")
     with TestClient(main.app) as member:
         csrf = _session(member, email="member@example.com", is_admin=False)
         viewed = member.get(f"/result/{report_id}")
@@ -137,9 +180,11 @@ def test_survey_is_member_only_and_revision_is_visible_to_admin(monkeypatch, tmp
             conn, report_id=report_id, version=1
         )
         assert snapshot is not None and len(snapshot.payload_sha256) == 64
+        # 공개 GET은 권한 판정뿐 아니라 KPI 사건도 쓰지 않는다. 첫 열람을
+        # GET 부작용으로 재도입하지 않는 한 응답시간 KPI는 측정 불가다.
         assert dashboard_kpi.summary(conn) == dashboard_kpi.KpiSummary(
-            measured_responses=1,
-            within_target=1,
+            measured_responses=0,
+            within_target=0,
         )
 
 
@@ -161,6 +206,7 @@ def test_member_survey_prefills_saved_answer_and_keeps_browser_draft(monkeypatch
             conn, email="member@example.com", display_name="김민지", note="스터디",
             now_iso="2026-08-22T10:00:00+09:00",
         )
+        _bind_member_report(conn, report_id=report_id, email="member@example.com")
         dashboard_store.save_survey(
             conn, report_id=report_id, actor_email="member@example.com", rating=4,
             overall_feedback="기존 소감", business_distinction="기존 구분점",
@@ -210,6 +256,7 @@ def test_member_survey_prefill_and_admin_snapshot_are_scoped_to_report_version(
             note="스터디",
             now_iso="2026-08-22T09:01:00+09:00",
         )
+        _bind_member_report(conn, report_id=report_id, email="member@example.com")
         assert dashboard_store.save_survey(
             conn,
             report_id=report_id,
@@ -510,6 +557,7 @@ def test_member_revocation_blocks_existing_session_result_and_pdf(monkeypatch, t
     report_id = _seed_report()
     with db.connect() as conn:
         assert allowlist.invite(conn, email="member@example.com", note="", now_iso="2026-08-22T10:00:00+09:00")
+        _bind_member_report(conn, report_id=report_id, email="member@example.com")
     with TestClient(main.app) as client:
         _session(client, email="member@example.com", is_admin=False)
         with db.connect() as conn:
@@ -706,8 +754,9 @@ def test_admin_button_and_internal_cron_use_the_same_maintenance_service(
         *,
         operation,
         actor_email=dashboard_maintenance.SYSTEM_ACTOR_EMAIL,
+        cleanup_runner=None,
     ):
-        calls.append((connect, operation, actor_email))
+        calls.append((connect, operation, actor_email, cleanup_runner))
         return dashboard_maintenance.MaintenanceResult(
             operation=operation,
             period_key=(
@@ -753,6 +802,10 @@ def test_admin_button_and_internal_cron_use_the_same_maintenance_service(
     assert calls[1][2] == "admin@example.com"
     assert calls[2][2] == dashboard_maintenance.SYSTEM_ACTOR_EMAIL
     assert calls[3][2] == dashboard_maintenance.SYSTEM_ACTOR_EMAIL
+    assert calls[0][3] is None
+    assert calls[1][3] is report_retention_adapter.purge_expired_reports
+    assert calls[2][3] is None
+    assert calls[3][3] is report_retention_adapter.purge_expired_reports
     assert cron_weekly.period_key == "2026-08-17"
     assert cron_cleanup.period_key == "2026-08-24"
 

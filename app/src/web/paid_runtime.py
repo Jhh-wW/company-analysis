@@ -5,27 +5,38 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import math
+import sqlite3
 import threading
-from contextlib import contextmanager
+import uuid
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, TypeVar
 
 from src.core import clock
 from src.core.constants import MODEL_LABEL_SEPARATOR, REPLAY_MODEL_MARK
+from src.core.provider_gateway import attempt_context
+from src.core.provider_gateway.types import (
+    BillingDisposition as ProviderBillingDisposition,
+    ProviderObservation,
+)
 from src.features.budget import logic as budget_logic
 from src.features.budget import provider_budget
 from src.features.budget import spend_store
+from src.features.budget import state_machine
 from src.features.budget.constants import (
     JOB_KEEP_SEC,
     MAX_CONCURRENT_PER_LINK,
     MAX_CONCURRENT_PER_USER,
     MAX_CONCURRENT_RUNS,
+    PAID_PHASE_LEASE_SEC,
     PAID_PHASE_PROVIDER_BUDGET_KRW,
     SPEND_PHASE_OCR,
 )
 from src.features.observability import constants as obs
 from src.features.observability import lifecycle
 from src.features.observability.records import read_records
+from src.features.provider_health import constants as provider_health_constants
+from src.features.provider_health import store as provider_health_store
 from src.features.sharelink import logic as share_logic
 from src.features.sharelink import tracks as share_tracks
 from src.features.storage import db as storage_db
@@ -50,7 +61,12 @@ _PAID_PHASE_LOCK = threading.RLock()
 _BUDGET_STORE_HEALTHY = False
 _UNRESOLVED_BUCKETS: set[tuple[str, str]] = set()
 _ACTIVE_PAID_PHASES: set[tuple[str, str, str, str]] = set()
+_LEASE_OWNER_ID = f"process:{uuid.uuid4().hex}"
 _WorkerResult = TypeVar("_WorkerResult")
+
+
+class ProviderCircuitOpen(RuntimeError):
+    """해당 provider의 유한 cooldown 동안 네트워크 전송을 거부함."""
 
 @dataclass(frozen=True)
 class PaidPhase:
@@ -62,6 +78,69 @@ class PaidPhase:
     share_key: str
     bucket_id: str
     reserved_krw: float = 0.0
+    lease_owner_id: str = ""
+
+
+def _phase_lease_expires_at(now: dt.datetime | None = None) -> str:
+    """한 provider phase의 DB lease 만료 시각을 KST aware ISO로 만든다."""
+
+    captured = clock.now_kst() if now is None else now
+    return (captured + dt.timedelta(seconds=PAID_PHASE_LEASE_SEC)).isoformat(
+        timespec="seconds"
+    )
+
+
+def _budget_state_machine_enabled(conn) -> bool:  # noqa: ANN001
+    """명시적 forward-only cutover가 끝난 DB에서만 새 원장을 사용한다."""
+
+    return state_machine.cutover_applied(conn)
+
+
+def prepare_budget_state_machine_cutover() -> state_machine.CutoverSummary:
+    """real 서비스 시작 시 legacy를 보존한 채 새 attempt 원장으로 전환한다.
+
+    schema bootstrap만으로 행동을 바꾸지 않는다. 같은 write transaction 안에서
+    dry-run을 먼저 통과한 뒤 실제 전환을 실행한다. 구 표와 행은 삭제하지 않고,
+    전환 뒤 write barrier가 구 코드의 늦은 쓰기를 막는다.
+    """
+
+    migrated_at = clock.iso_now_kst()
+    with _PAID_PHASE_LOCK:
+        with storage_db.connect() as conn:
+            spend_store.ensure_schema(conn)
+            observed_costs: dict[str, float] | None = None
+            if not state_machine.cutover_applied(conn):
+                read_result = read_records(records_path())
+                if read_result.skipped:
+                    raise RuntimeError(
+                        "깨진 관측 이력이 있어 비용 원장을 안전하게 전환할 수 없습니다"
+                    )
+                latest = {record.run_id: record for record in read_result.records}
+                observed_costs = {
+                    run_id: float(record.cost_krw)
+                    for run_id, record in latest.items()
+                    if REPLAY_MODEL_MARK not in (record.model or "")
+                }
+            state_machine.prepare_cutover(
+                conn,
+                migrated_at=migrated_at,
+                dry_run=True,
+                observed_costs_by_run=observed_costs,
+            )
+            summary = state_machine.prepare_cutover(
+                conn,
+                migrated_at=migrated_at,
+                dry_run=False,
+                observed_costs_by_run=observed_costs,
+            )
+    logger.info(
+        "비용 attempt 원장 전환 완료: phase=%d known=%d unknown=%d already=%s",
+        summary.legacy_phases,
+        summary.legacy_known_attempts,
+        summary.legacy_unknown_attempts,
+        summary.already_applied,
+    )
+    return summary
 
 
 @dataclass
@@ -208,9 +287,22 @@ def paid_research_block() -> tuple[bool, str]:
     return False, ""
 
 
+def budget_state_machine_ready() -> bool:
+    """readiness가 새 유료 호출의 DB 정본 전환 완료를 직접 확인한다."""
+
+    try:
+        uri = storage_db.default_db_path().resolve().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True, timeout=1.0)) as conn:
+            conn.execute("PRAGMA query_only=ON")
+            return _budget_state_machine_enabled(conn)
+    except Exception:  # noqa: BLE001 — readiness는 상세 DB 오류를 밖에 흘리지 않는다
+        logger.exception("비용 상태기계 준비 상태를 읽지 못했습니다")
+        return False
+
+
 def list_unresolved_spend(
     day: dt.date | None = None,
-) -> tuple[tuple[spend_store.InflightSpend, ...], bool]:
+) -> tuple[tuple[object, ...], bool]:
     """그날 마감되지 않은 유료 단계를 «그대로» 돌려준다.
 
     Args:
@@ -232,6 +324,10 @@ def list_unresolved_spend(
     try:
         with storage_db.connect() as conn:
             spend_store.ensure_schema(conn)
+            if _budget_state_machine_enabled(conn):
+                # 새 원장은 어제 이전 보수부채도 숨기지 않는다. 화면이 오늘만
+                # 보여 주면 자정이 지난 고아를 영영 정산할 수 없기 때문이다.
+                return (tuple(state_machine.list_reconcilable(conn)), True)
             기준일 = clock.today_kst() if day is None else day
             return (spend_store.list_inflight_day(conn, 기준일), True)
     except Exception:  # noqa: BLE001 — 못 읽어도 관리자 화면은 떠야 한다
@@ -270,6 +366,12 @@ def settle_unresolved_spend(run_id: str, phase: str) -> tuple[bool, str]:
             오늘 = clock.today_kst()
             with storage_db.connect() as conn:
                 spend_store.ensure_schema(conn)
+                if _budget_state_machine_enabled(conn):
+                    return (
+                        False,
+                        "새 비용 기록은 실제비용·0원·보수부채 중 무엇을 확인했는지 "
+                        "선택해서 마감해야 합니다.",
+                    )
                 대상 = [
                     항목
                     for 항목 in spend_store.list_inflight_day(conn, 오늘)
@@ -295,6 +397,51 @@ def settle_unresolved_spend(run_id: str, phase: str) -> tuple[bool, str]:
     if 남은:
         return (True, f"한 건을 마감했습니다. 아직 {남은}건이 남아 있습니다.")
     return (True, "마감했습니다. 새 조사를 다시 열었습니다.")
+
+
+def resolve_budget_liability(
+    *,
+    attempt_id: str,
+    action: state_machine.ResolutionAction,
+    actual_cost_krw: float | None,
+    actor_id: str,
+    reason_code: str,
+) -> tuple[bool, str]:
+    """새 원장의 보수부채 한 건을 명시적인 근거와 행동으로만 마감한다."""
+
+    clean_attempt = str(attempt_id or "").strip()
+    if not clean_attempt:
+        return False, "확인할 provider 호출 번호를 지정해 주세요."
+    try:
+        with _PAID_PHASE_LOCK:
+            with storage_db.connect() as conn:
+                spend_store.ensure_schema(conn)
+                if not _budget_state_machine_enabled(conn):
+                    return False, "아직 구 비용 기록을 사용 중입니다."
+                state_machine.resolve_liability(
+                    conn,
+                    attempt_id=clean_attempt,
+                    action=action,
+                    actual_cost_krw=actual_cost_krw,
+                    actor_id=actor_id,
+                    reason_code=reason_code,
+                    resolved_at=clock.iso_now_kst(),
+                )
+            _seed_ledger()
+    except state_machine.ActivePhaseError:
+        return False, "지금 실행 중인 호출은 끝난 뒤에만 확인할 수 있습니다."
+    except (state_machine.BudgetStateError, ValueError):
+        logger.exception("보수부채 확인 값이 원장 계약과 맞지 않습니다")
+        return False, "선택한 호출과 확인 결과를 비용 기록에 반영하지 못했습니다."
+    except Exception:  # noqa: BLE001 — 저장 실패를 성공처럼 보이지 않는다
+        logger.exception("보수부채를 확인하지 못했습니다")
+        return False, "비용 기록을 읽거나 쓰지 못했습니다. 잠시 후 다시 확인해 주세요."
+
+    if action is state_machine.ResolutionAction.CONFIRM_ACTUAL:
+        return True, "provider 자료에서 확인한 실제 비용을 기록했습니다."
+    if action is state_machine.ResolutionAction.CONFIRM_ZERO:
+        return True, "provider 자료에서 청구가 없음을 확인해 0원으로 기록했습니다."
+    return True, "정확한 비용을 아직 몰라 보수부채를 그대로 유지했습니다."
 
 
 def recheck_budget_store() -> tuple[bool, str]:
@@ -346,6 +493,77 @@ def recheck_budget_store() -> tuple[bool, str]:
     )
 
 
+def _seed_attempt_ledger(
+    today: dt.date, *, verify_observation_history: bool = False
+) -> bool:
+    """전환된 DB면 새 attempt 원장으로 메모리의 빠른 조회값을 다시 만든다.
+
+    반환값 ``False``는 아직 cutover 전이라는 뜻이지 장애가 아니다. 확정비용만
+    ``_LEDGER``의 실제 지출로 표시하고, 입장 판단용 ``_LINK_SPEND``에는 확정비용,
+    보수부채, ACTIVE 예약을 모두 넣는다. 따라서 모르는 호출을 0원으로 만들지도,
+    별도 전역 스위치로 모든 통장을 닫지도 않는다.
+    """
+
+    global _LEDGER, _LINK_SPEND, _BUDGET_STORE_HEALTHY, _UNRESOLVED_BUCKETS
+    observed_at = clock.iso_now_kst()
+    observation_mismatch_count = 0
+    with storage_db.connect() as conn:
+        spend_store.ensure_schema(conn)
+        if not _budget_state_machine_enabled(conn):
+            return False
+        state_machine.expire_due_phase_leases(conn, observed_at=observed_at)
+        snapshot = state_machine.load_day_exposures(conn, day=today)
+        if verify_observation_history:
+            # cutover 뒤에는 SQLite current 행과 변경 불가 audit가 정본이다. 옛
+            # append-only JSONL을 매 재시작마다 통째로 읽으면 파일 성장에 따라
+            # OOM이 나고, 같은 최종값을 두 저장소에 영원히 중복하게 된다.
+            lifecycle.ensure_schema(conn)
+            for record in lifecycle.iter_final(conn):
+                if (
+                    record.cost_krw <= 0
+                    or REPLAY_MODEL_MARK in (record.model or "")
+                ):
+                    continue
+                exposure = state_machine.load_run_exposure(
+                    conn, run_id=record.run_id
+                )
+                # 새 attempt DB가 비용 정본이다. JSONL 최종 이력이 더 크다면
+                # 차액을 메모리로만 덧대지 않고 paid capability를 닫아 조용한
+                # 과소계상을 드러낸다. 반대 방향은 관리자 실제비용 확인 뒤 생길
+                # 수 있으므로 DB 정본을 줄이지 않는다.
+                if float(record.cost_krw) - exposure.known_cost_krw > 0.01:
+                    observation_mismatch_count += 1
+
+    _LEDGER = budget_logic.Ledger(
+        day=today,
+        spent_krw=snapshot.total.known_cost_krw,
+    )
+    _LINK_SPEND = share_logic.DailySpend(
+        day=today,
+        by_key={
+            bucket_id: exposure.admission_exposure_krw
+            for bucket_id, exposure in snapshot.by_bucket.items()
+        },
+    )
+    # 새 원장은 미확정 호출을 해당 금액의 보수부채로 이미 입장 합계에 넣는다.
+    # 과거의 별도 bucket 영구잠금 집합을 함께 쓰면 같은 위험을 두 번 세게 된다.
+    _UNRESOLVED_BUCKETS = set()
+    _BUDGET_STORE_HEALTHY = observation_mismatch_count == 0
+    if observation_mismatch_count:
+        logger.error(
+            "관측 최종 비용보다 attempt 원장이 작은 요청 %d건이 있어 유료 호출을 닫습니다",
+            observation_mismatch_count,
+        )
+    logger.info(
+        "새 비용 원장으로 시작합니다: 확정 %.1f원, 보수부채 %.1f원, "
+        "진행예약 %.1f원",
+        snapshot.total.known_cost_krw,
+        snapshot.total.liability_krw,
+        snapshot.total.reservation_krw,
+    )
+    return True
+
+
 def _seed_ledger() -> None:
     """서버가 뜰 때 «오늘 이미 쓴 돈»을 이력에서 읽어 장부에 채운다.
 
@@ -359,6 +577,8 @@ def _seed_ledger() -> None:
     with _SLOT_LOCK:
         _ACTIVE_PAID_PHASES.clear()
     try:
+        if _seed_attempt_ledger(today, verify_observation_history=True):
+            return
         read_result = read_records(records_path())
         records = read_result.records
         latest = {}
@@ -501,6 +721,47 @@ def _begin_paid_phase(
             requested_cost_krw=requested_cost_krw,
         )
 
+
+def _reap_expired_attempt_phases_locked(*, day: dt.date) -> bool:
+    """만료 lease를 입장 판단보다 먼저 닫고 메모리 빠른 조회값도 다시 만든다.
+
+    ``begin_phase``가 상한 초과로 거절된 뒤에 정리하면 그 예외와 함께 정리 작업도
+    rollback된다. 그래서 정리 transaction을 먼저 끝낸 뒤 새 예약 transaction을
+    연다. 전송 전 만료는 예약을 풀고, 전송 의도 뒤 만료는 보수부채를 남긴다.
+    """
+
+    observed_at = clock.iso_now_kst()
+    with storage_db.connect() as conn:
+        spend_store.ensure_schema(conn)
+        if not _budget_state_machine_enabled(conn):
+            return True
+        due = state_machine.list_active_phases(
+            conn,
+            expired_at_or_before=observed_at,
+        )
+        if not due:
+            return True
+        state_machine.expire_due_phase_leases(conn, observed_at=observed_at)
+    _seed_attempt_ledger(day)
+    return True
+
+
+def reap_expired_paid_phases() -> bool:
+    """POST 입장 사전검사에서 만료 예약을 스스로 회복한다.
+
+    저장소를 읽거나 정리하지 못하면 ``False``를 반환하고 유료 기능 건강 상태를
+    내린다. 호출부는 이 값을 무시하고 provider로 진행하면 안 된다.
+    """
+
+    global _BUDGET_STORE_HEALTHY
+    with _PAID_PHASE_LOCK:
+        try:
+            return _reap_expired_attempt_phases_locked(day=clock.today_kst())
+        except Exception:  # noqa: BLE001 — 비용 정리 실패는 fail-closed다
+            logger.exception("만료된 비용 예약을 정리하지 못해 진짜 조사를 닫습니다")
+            _BUDGET_STORE_HEALTHY = False
+            return False
+
 def _begin_paid_phase_locked(
     *,
     run_id: str,
@@ -525,27 +786,66 @@ def _begin_paid_phase_locked(
         bucket_id=spend_store.bucket_id(share_key),
         reserved_krw=requested,
     )
+    using_attempt_ledger = False
     try:
+        # 만료 예약이 상한을 먼저 먹어 새 예약을 거절하기 전에 별도 transaction으로
+        # 정리한다. 거절 뒤 seed하는 옛 순서는 영원히 자기 회복하지 못했다.
+        _reap_expired_attempt_phases_locked(day=day)
         with storage_db.connect() as conn:
             spend_store.ensure_schema(conn)
-            inserted = spend_store.begin_inflight(
-                conn,
-                run_id=run_id,
-                phase=phase,
-                day=day,
-                bucket=share_key,
-                started_at=clock.iso_now_kst(),
-                requested_cost_krw=requested,
-                cap_krw=cap_krw,
-                run_cap_krw=(
-                    evaluation_mode.settings().per_run_cap_krw
-                    if evaluation_mode.enabled()
-                    else None
-                ),
-            )
-    except spend_store.BudgetCapExceeded:
+            if _budget_state_machine_enabled(conn):
+                using_attempt_ledger = True
+                started_at = clock.iso_now_kst()
+                ticket = PaidPhase(
+                    run_id=run_id,
+                    phase=phase,
+                    day=day,
+                    share_key=share_key,
+                    bucket_id=spend_store.bucket_id(share_key),
+                    reserved_krw=requested,
+                    lease_owner_id=_LEASE_OWNER_ID,
+                )
+                state_machine.begin_phase(
+                    conn,
+                    run_id=run_id,
+                    phase=phase,
+                    day=day,
+                    bucket=share_key,
+                    reservation_krw=requested,
+                    bucket_limit_krw=cap_krw,
+                    run_limit_krw=(
+                        evaluation_mode.settings().per_run_cap_krw
+                        if evaluation_mode.enabled()
+                        else None
+                    ),
+                    lease_owner_id=ticket.lease_owner_id,
+                    lease_expires_at=_phase_lease_expires_at(),
+                    started_at=started_at,
+                )
+                inserted = True
+            else:
+                inserted = spend_store.begin_inflight(
+                    conn,
+                    run_id=run_id,
+                    phase=phase,
+                    day=day,
+                    bucket=share_key,
+                    started_at=clock.iso_now_kst(),
+                    requested_cost_krw=requested,
+                    cap_krw=cap_krw,
+                    run_cap_krw=(
+                        evaluation_mode.settings().per_run_cap_krw
+                        if evaluation_mode.enabled()
+                        else None
+                    ),
+                )
+    except (spend_store.BudgetCapExceeded, state_machine.AdmissionLimitExceeded):
         # 정상적인 운영 기준 거절이다. 저장소 장애나 미확정 비용으로 오인하지 않는다.
         logger.info("유료 단계 예상예약이 통장 운영 기준에서 거절됐습니다: %s", phase)
+        return None
+    except state_machine.BudgetStateError:
+        # 같은 run/phase 재사용이나 전환 계약 위반은 이중 과금을 막는 정상 거절이다.
+        logger.warning("유료 단계 상태가 이미 존재해 다시 시작하지 않습니다: %s", phase)
         return None
     except Exception:  # noqa: BLE001 — 표식이 없으면 provider를 절대 부르지 않는다
         logger.exception("비용 진행 중 표식을 쓰지 못해 진짜 조사를 닫습니다")
@@ -556,6 +856,11 @@ def _begin_paid_phase_locked(
         with _SLOT_LOCK:
             _UNRESOLVED_BUCKETS.add((ticket.day.isoformat(), ticket.bucket_id))
         return None
+    if using_attempt_ledger:
+        # ACTIVE 여부와 통장별 예약은 이제 DB lease가 정본이다. 메모리 tuple과
+        # 미확정 bucket 집합에 중복 기록하면 재시작 때 다시 영구잠금이 생긴다.
+        _seed_attempt_ledger(day)
+        return ticket
     # 정상 진행 중인 표식은 장애가 아니다. 같은 초대 링크의 세 자리를 허용하려면
     # 이것을 재시작·API 예외 표식과 섞어 같은 통장을 즉시 닫으면 안 된다.
     with _SLOT_LOCK:
@@ -578,6 +883,13 @@ def _settle_paid_phase_locked(
 ) -> None:
     """확정 응답은 원자적으로 마감하고, API 예외면 알려진 돈과 표식을 함께 남긴다."""
     global _BUDGET_STORE_HEALTHY, _UNRESOLVED_BUCKETS
+    if ticket.lease_owner_id:
+        _settle_attempt_ledger_phase(
+            ticket,
+            amount_krw=amount_krw,
+            billing_uncertain=billing_uncertain,
+        )
+        return
     inserted = False
     remaining: tuple[spend_store.InflightSpend, ...] = ()
     try:
@@ -616,6 +928,185 @@ def _settle_paid_phase_locked(
             _ACTIVE_PAID_PHASES.discard(_paid_phase_key(ticket))
             _UNRESOLVED_BUCKETS.add((ticket.day.isoformat(), ticket.bucket_id))
 
+
+def _record_transition_attempt(
+    conn,  # noqa: ANN001
+    *,
+    ticket: PaidPhase,
+    estimated_krw: float,
+    known_cost_krw: float,
+    liability_krw: float,
+    close_phase: bool,
+) -> None:
+    """저수준 gateway 전환 중 누락된 외곽 관측을 한 번만 보수적으로 남긴다."""
+
+    attempt_id = f"transition:{uuid.uuid4().hex}"
+    at = clock.iso_now_kst()
+    state_machine.begin_attempt(
+        conn,
+        run_id=ticket.run_id,
+        phase=ticket.phase,
+        attempt_id=attempt_id,
+        provider="transition-wrapper",
+        operation="phase-summary",
+        estimated_krw=estimated_krw,
+        lease_owner_id=ticket.lease_owner_id,
+        created_at=at,
+    )
+    state_machine.mark_dispatch_intent(
+        conn,
+        attempt_id=attempt_id,
+        lease_owner_id=ticket.lease_owner_id,
+        recorded_at=at,
+    )
+    is_liability = liability_krw > 0
+    state_machine.record_attempt_outcome(
+        conn,
+        attempt_id=attempt_id,
+        transport_state=(
+            state_machine.TransportState.TRANSPORT_AMBIGUOUS
+            if is_liability
+            else state_machine.TransportState.RESPONSE_RECEIVED
+        ),
+        billing_state=(
+            state_machine.BillingState.CONSERVATIVE_LIABILITY
+            if is_liability
+            else state_machine.BillingState.KNOWN_COST
+        ),
+        known_cost_krw=known_cost_krw,
+        liability_krw=liability_krw,
+        close_phase=close_phase,
+        phase_succeeded=not is_liability,
+        recorded_at=at,
+        lease_owner_id=ticket.lease_owner_id,
+        error_type="TransitionBoundaryUnknown" if is_liability else "",
+    )
+
+
+def _settle_attempt_ledger_phase(
+    ticket: PaidPhase, *, amount_krw: float, billing_uncertain: bool
+) -> None:
+    """attempt 정본을 중복 없이 마감하고 메모리 조회값을 DB에서 다시 만든다."""
+
+    global _BUDGET_STORE_HEALTHY
+    try:
+        already_closed = False
+        with storage_db.connect() as conn:
+            spend_store.ensure_schema(conn)
+            phase_account = state_machine.get_phase(
+                conn,
+                run_id=ticket.run_id,
+                phase=ticket.phase,
+            )
+            if phase_account.state is not state_machine.PhaseState.ACTIVE:
+                # liability 관측은 결과 기록과 같은 transaction에서 phase를 닫는다.
+                # 바깥 finally가 두 번째로 불려도 같은 돈을 다시 쓰지 않는다.
+                already_closed = True
+
+            if not already_closed:
+                attempts = state_machine.list_attempts(
+                    conn,
+                    run_id=ticket.run_id,
+                    phase=ticket.phase,
+                )
+                active_attempts = tuple(
+                    item
+                    for item in attempts
+                    if item.billing_state is state_machine.BillingState.RESERVED
+                )
+                if len(active_attempts) > 1:
+                    raise state_machine.AttemptStateError(
+                        "한 phase에 진행 중 provider 시도가 여러 개입니다"
+                    )
+                if active_attempts:
+                    active = active_attempts[0]
+                    at = clock.iso_now_kst()
+                    if active.transport_state is state_machine.TransportState.PLANNED:
+                        # dispatch-intent commit 전 실패했으므로 provider send는 0회다.
+                        state_machine.record_pre_dispatch_failure(
+                            conn,
+                            attempt_id=active.attempt_id,
+                            lease_owner_id=ticket.lease_owner_id,
+                            error_type="OuterBoundaryBeforeDispatch",
+                            close_phase=True,
+                            recorded_at=at,
+                        )
+                    elif (
+                        active.transport_state
+                        is state_machine.TransportState.DISPATCH_INTENT_RECORDED
+                    ):
+                        # 전송 의도 뒤 관측 저장이 끊겼다. 이 호출의 예약액만
+                        # 보수부채로 남기고 phase를 닫는다.
+                        state_machine.record_attempt_outcome(
+                            conn,
+                            attempt_id=active.attempt_id,
+                            transport_state=(
+                                state_machine.TransportState.TRANSPORT_AMBIGUOUS
+                            ),
+                            billing_state=(
+                                state_machine.BillingState.CONSERVATIVE_LIABILITY
+                            ),
+                            known_cost_krw=0.0,
+                            liability_krw=active.estimated_krw,
+                            close_phase=True,
+                            phase_succeeded=False,
+                            recorded_at=at,
+                            lease_owner_id=ticket.lease_owner_id,
+                            error_type="ObservationMissingAfterDispatchIntent",
+                        )
+                    else:
+                        raise state_machine.AttemptStateError(
+                            "진행 중 provider 시도의 전송 상태가 올바르지 않습니다"
+                        )
+                    already_closed = True
+
+            if not already_closed:
+                # 저수준 attempt 결과가 정본이다. 전환 기간에만 바깥 usage 합계가
+                # 더 큰 경우 그 확정 차액을 보존하며, 모른다는 이유로 phase 전체
+                # 잔액을 가짜 부채로 만들지는 않는다.
+                attempts = state_machine.list_attempts(
+                    conn,
+                    run_id=ticket.run_id,
+                    phase=ticket.phase,
+                )
+                known = sum(item.known_cost_krw for item in attempts)
+                transition_known = max(0.0, float(amount_krw) - known)
+                if transition_known > 0:
+                    estimate = min(transition_known, phase_account.reservation_krw)
+                    if estimate <= 0:
+                        raise state_machine.BudgetStateError(
+                            "확정 비용은 늘었지만 phase 예약 잔액이 없습니다"
+                        )
+                    # actual은 admission 추정값을 넘을 수 있다. 이미 생긴 비용은
+                    # estimate에 맞춰 자르지 않고 전액 기록한다.
+                    _record_transition_attempt(
+                        conn,
+                        ticket=ticket,
+                        estimated_krw=estimate,
+                        known_cost_krw=transition_known,
+                        liability_krw=0.0,
+                        close_phase=False,
+                    )
+                    phase_account = state_machine.get_phase(
+                        conn,
+                        run_id=ticket.run_id,
+                        phase=ticket.phase,
+                    )
+
+                state_machine.complete_phase(
+                    conn,
+                    run_id=ticket.run_id,
+                    phase=ticket.phase,
+                    lease_owner_id=ticket.lease_owner_id,
+                    succeeded=not billing_uncertain,
+                    completed_at=clock.iso_now_kst(),
+                )
+        _seed_attempt_ledger(clock.today_kst())
+    except Exception:  # noqa: BLE001 — provider 뒤 원장 실패는 성공으로 가장하지 않는다
+        logger.exception("새 비용 attempt phase를 마감하지 못했습니다")
+        _BUDGET_STORE_HEALTHY = False
+
+
 def _cancel_paid_phase(ticket: PaidPhase) -> None:
     """시작 취소도 다른 시작·마감과 같은 순서열 안에서 처리한다."""
     with _PAID_PHASE_LOCK:
@@ -624,6 +1115,29 @@ def _cancel_paid_phase(ticket: PaidPhase) -> None:
 def _cancel_paid_phase_locked(ticket: PaidPhase) -> None:
     """provider를 아직 부르지 않았음이 확실한 작업 등록 실패에서만 표식을 취소한다."""
     global _BUDGET_STORE_HEALTHY, _UNRESOLVED_BUCKETS
+    if ticket.lease_owner_id:
+        try:
+            with storage_db.connect() as conn:
+                spend_store.ensure_schema(conn)
+                account = state_machine.get_phase(
+                    conn,
+                    run_id=ticket.run_id,
+                    phase=ticket.phase,
+                )
+                if account.state is state_machine.PhaseState.ACTIVE:
+                    state_machine.complete_phase(
+                        conn,
+                        run_id=ticket.run_id,
+                        phase=ticket.phase,
+                        lease_owner_id=ticket.lease_owner_id,
+                        succeeded=False,
+                        completed_at=clock.iso_now_kst(),
+                    )
+            _seed_attempt_ledger(clock.today_kst())
+        except Exception:  # noqa: BLE001 — 실패 phase는 lease 만료가 다시 회수한다
+            logger.exception("새 비용 phase의 전송 전 취소를 기록하지 못했습니다")
+            _BUDGET_STORE_HEALTHY = False
+        return
     try:
         with storage_db.connect() as conn:
             spend_store.ensure_schema(conn)
@@ -663,11 +1177,253 @@ def _observation_now() -> str:
     return clock.iso_now_kst()
 
 
+def _provider_failure_kind(
+    observation: ProviderObservation,
+) -> provider_health_store.ProviderFailureKind | None:
+    """provider 전체 가용성에 관한 증거만 실패 종류로 돌려준다.
+
+    400은 요청 형식과 Anthropic 조직 지출 한도가 겹쳐 status만으로 원인을
+    확정할 수 없다. 그런 4xx는 성공/실패 어느 쪽에도 넣지 않는다. 반면
+    401·402·403은 현재 계정으로 provider를 운영할 수 없다는 신호이므로
+    별도 account/config 종류로 누적한다.
+    """
+
+    if observation.status_code == 429:
+        return provider_health_store.ProviderFailureKind.RATE_LIMIT
+    error_type = observation.error_type.casefold()
+    if "timeout" in error_type or observation.status_code in {408, 504}:
+        return provider_health_store.ProviderFailureKind.TIMEOUT
+    if any(
+        marker in error_type
+        for marker in ("connection", "connect", "network", "socket")
+    ):
+        return provider_health_store.ProviderFailureKind.CONNECTION
+    if observation.status_code in {401, 402, 403}:
+        return provider_health_store.ProviderFailureKind.ACCOUNT_CONFIGURATION
+    if observation.status_code is not None and observation.status_code >= 500:
+        return provider_health_store.ProviderFailureKind.PROVIDER_RESPONSE
+    return None
+
+
+def _provider_health_response_is_healthy(
+    observation: ProviderObservation,
+) -> bool:
+    """2xx는 usage 누락·본문 해석 실패여도 provider 건강상 성공이다."""
+
+    status = observation.status_code
+    return status is not None and 200 <= status < 300
+
+
+def _provider_attempt_callbacks(
+    ticket: PaidPhase,
+) -> attempt_context.ProviderAttemptCallbacks:
+    """저수준 provider 한 번과 영속 attempt 원장을 잇는 요청 로컬 경계."""
+
+    if not ticket.lease_owner_id:
+        raise state_machine.CutoverRequiredError(
+            "attempt 원장 전환 전에는 새 provider gateway를 열 수 없습니다"
+        )
+
+    def begin_attempt(provider: str, operation: str, reserved_krw: float) -> str:
+        attempt_id = f"attempt:{uuid.uuid4().hex}"
+        recorded_at = clock.iso_now_kst()
+        with storage_db.connect() as conn:
+            spend_store.ensure_schema(conn)
+            provider_health_store.ensure_schema(conn)
+            state_machine.begin_attempt(
+                conn,
+                run_id=ticket.run_id,
+                phase=ticket.phase,
+                attempt_id=attempt_id,
+                provider=provider,
+                operation=operation,
+                estimated_krw=reserved_krw,
+                lease_owner_id=ticket.lease_owner_id,
+                created_at=recorded_at,
+            )
+            # 여기서는 순수 조회만 한다. OPEN의 cooldown이 끝났더라도 probe
+            # 소유권은 실제 전송 의도를 기록하는 transaction에서만 잡는다.
+            # 먼저 잡고 heartbeat/dispatch DB 쓰기가 실패하면 300초 동안
+            # PROBING에 갇히는 반쪽 상태가 생기기 때문이다.
+            permission = provider_health_store.peek_permission(
+                conn,
+                provider,
+                now_iso=recorded_at,
+            )
+            if not permission.allowed:
+                # attempt를 먼저 만든 뒤 같은 transaction에서 0원으로 닫는다.
+                # 따라서 차단기 거부가 비용 누락이나 provider 전송으로 바뀔 수 없다.
+                state_machine.record_pre_dispatch_failure(
+                    conn,
+                    attempt_id=attempt_id,
+                    lease_owner_id=ticket.lease_owner_id,
+                    error_type="ProviderCircuitOpen",
+                    close_phase=True,
+                    recorded_at=recorded_at,
+                )
+        if not permission.allowed:
+            raise ProviderCircuitOpen(
+                f"{provider} provider가 잠시 쉬는 중입니다({permission.reason_code})"
+            )
+        return attempt_id
+
+    def heartbeat(_attempt_id: Any) -> None:
+        # 같은 초에 여러 호출이 이어져도 기존 만료시각보다 반드시 뒤로 간다.
+        now = clock.now_kst()
+        with storage_db.connect() as conn:
+            spend_store.ensure_schema(conn)
+            phase_account = state_machine.get_phase(
+                conn,
+                run_id=ticket.run_id,
+                phase=ticket.phase,
+            )
+            proposed = (now + dt.timedelta(seconds=PAID_PHASE_LEASE_SEC)).replace(
+                microsecond=0
+            )
+            if phase_account.lease_expires_at:
+                current_expiry = dt.datetime.fromisoformat(
+                    phase_account.lease_expires_at
+                )
+                if proposed <= current_expiry:
+                    proposed = current_expiry + dt.timedelta(seconds=1)
+            state_machine.heartbeat_phase(
+                conn,
+                run_id=ticket.run_id,
+                phase=ticket.phase,
+                lease_owner_id=ticket.lease_owner_id,
+                lease_expires_at=proposed.isoformat(timespec="seconds"),
+                heartbeat_at=now.isoformat(timespec="seconds"),
+            )
+
+    def mark_dispatch_intent(attempt_id: Any) -> None:
+        recorded_at = clock.iso_now_kst()
+        with storage_db.connect() as conn:
+            spend_store.ensure_schema(conn)
+            provider_health_store.ensure_schema(conn)
+            attempt_account = state_machine.get_attempt(
+                conn, attempt_id=str(attempt_id)
+            )
+            permission = provider_health_store.acquire_probe(
+                conn,
+                attempt_account.provider,
+                now_iso=recorded_at,
+            )
+            if permission.allowed:
+                # probe 획득과 전송 의도 기록은 같은 SQLite transaction이다.
+                # 어느 한쪽이라도 실패하면 둘 다 rollback되어 provider가
+                # 가짜 PROBING 상태로 남지 않는다.
+                state_machine.mark_dispatch_intent(
+                    conn,
+                    attempt_id=str(attempt_id),
+                    lease_owner_id=ticket.lease_owner_id,
+                    recorded_at=recorded_at,
+                )
+            else:
+                state_machine.record_pre_dispatch_failure(
+                    conn,
+                    attempt_id=str(attempt_id),
+                    lease_owner_id=ticket.lease_owner_id,
+                    error_type="ProviderCircuitOpen",
+                    close_phase=True,
+                    recorded_at=recorded_at,
+                )
+        if not permission.allowed:
+            raise ProviderCircuitOpen(
+                f"{attempt_account.provider} provider가 잠시 쉬는 중입니다"
+                f"({permission.reason_code})"
+            )
+
+    def record_observation(
+        attempt_id: Any, observation: ProviderObservation
+    ) -> None:
+        is_liability = (
+            observation.billing_disposition
+            is ProviderBillingDisposition.CONSERVATIVE_LIABILITY
+        )
+        recorded_at = clock.iso_now_kst()
+        with storage_db.connect() as conn:
+            spend_store.ensure_schema(conn)
+            provider_health_store.ensure_schema(conn)
+            attempt_account = state_machine.record_attempt_outcome(
+                conn,
+                attempt_id=str(attempt_id),
+                transport_state=state_machine.TransportState(
+                    observation.transport_state.value
+                ),
+                billing_state=state_machine.BillingState(
+                    observation.billing_disposition.value
+                ),
+                known_cost_krw=observation.known_cost_krw,
+                liability_krw=observation.liability_krw,
+                # 모르는 청구는 더 쌓지 않도록 이 phase만 닫는다. 다른 통장과
+                # 서비스 전체는 닫지 않고 이 부채만 입장 합계에 남긴다.
+                close_phase=is_liability,
+                phase_succeeded=False,
+                recorded_at=recorded_at,
+                lease_owner_id=ticket.lease_owner_id,
+                status_code=observation.status_code,
+                error_type=observation.error_type,
+                request_id=observation.request_id,
+            )
+            failure_kind = _provider_failure_kind(observation)
+            if _provider_health_response_is_healthy(observation):
+                # MissingUsage는 비용상 보수부채여도 provider 응답 성공이다.
+                provider_health_store.record_success(
+                    conn,
+                    provider=attempt_account.provider,
+                    now_iso=recorded_at,
+                )
+            elif failure_kind is not None:
+                provider_health_store.record_failure(
+                    conn,
+                    provider=attempt_account.provider,
+                    failure_kind=failure_kind,
+                    now_iso=recorded_at,
+                )
+            else:
+                # 요청별 4xx·분류할 수 없는 로컬 오류는 provider 전체의
+                # 성공/실패로 날조하지 않는다. 단, probe를 잡았다면 즉시
+                # 반납해 300초짜리 가짜 PROBING만 남지 않게 한다.
+                provider_health_store.release_probe_without_health_signal(
+                    conn,
+                    provider=attempt_account.provider,
+                    now_iso=recorded_at,
+                )
+
+    return attempt_context.ProviderAttemptCallbacks(
+        begin_attempt=begin_attempt,
+        heartbeat=heartbeat,
+        mark_dispatch_intent=mark_dispatch_intent,
+        record_observation=record_observation,
+    )
+
+
+@contextmanager
+def _activate_paid_provider(ticket: PaidPhase):
+    """worker 문맥에 phase의 호출별 예산·attempt callback을 설치한다.
+
+    즉시 provider를 부르는 OCR·회사 식별과, source snapshot으로
+    single-flight owner를 고른 뒤 지연해 phase를 여는 본조사가 같은
+    기계 경계를 쓴다.
+    """
+
+    with provider_budget.activate(ticket.reserved_krw):
+        if not getattr(ticket, "lease_owner_id", ""):
+            # legacy 모드는 배포 전 기존 단위시험과 데모 호환만 유지한다. real
+            # lifespan은 provider보다 먼저 forward-only cutover를 끝낸다.
+            yield
+            return
+        callbacks = _provider_attempt_callbacks(ticket)
+        with attempt_context.activate(callbacks):
+            yield
+
+
 def _call_paid_provider(
     ticket: PaidPhase, call: Callable[..., _WorkerResult], *args: Any, **kwargs: Any
 ) -> _WorkerResult:
     """worker thread 안에 phase 예약을 설치한 뒤에만 provider 경로를 실행한다."""
-    with provider_budget.activate(ticket.reserved_krw):
+
+    with _activate_paid_provider(ticket):
         return call(*args, **kwargs)
 
 def _begin_observation_pending(
@@ -754,9 +1510,19 @@ def _recover_observation_lifecycle() -> None:
                 if entry.state != lifecycle.STATE_RUNNING:
                     continue
                 try:
-                    running_phases[entry.run_id] = spend_store.get_inflight_phase(
-                        conn, entry.run_id
-                    )
+                    if _budget_state_machine_enabled(conn):
+                        phases = state_machine.list_phases(
+                            conn, run_id=entry.run_id
+                        )
+                        # startup seed가 만료 lease를 이미 FAILED로 닫았어도 마지막
+                        # 실행 단계의 정체는 phase 이력에 남는다.
+                        running_phases[entry.run_id] = (
+                            phases[-1].phase if phases else None
+                        )
+                    else:
+                        running_phases[entry.run_id] = spend_store.get_inflight_phase(
+                            conn, entry.run_id
+                        )
                 except ValueError:
                     # 한 run에 진행 단계가 여러 개인 손상 상태처럼 어느 단계였는지
                     # 단정할 수 없으면 일반 생성 실패로 보수적으로 마감한다.

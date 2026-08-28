@@ -33,7 +33,7 @@ services:
       TLDEXTRACT_CACHE: /var/data/cache/tldextract
       XDG_CACHE_HOME: /var/data/cache
       TMPDIR: /tmp
-      GRACEFUL_SHUTDOWN_SECONDS: "300"
+      GRACEFUL_SHUTDOWN_SECONDS: "20"
       HEALTHCHECK_PATH: /readyz
     volumes:
       - app-data:/var/data

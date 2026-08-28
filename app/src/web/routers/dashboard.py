@@ -21,6 +21,7 @@ from src.features.admin_dashboard import maintenance as dashboard_maintenance
 from src.features.admin_dashboard import store as dashboard_store
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
+from src.features.report_access import logic as report_access_logic
 from src.features.backup import status as backup_status
 from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import logic as share_logic
@@ -29,7 +30,7 @@ from src.features.storage import constants as storage_constants
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
 from src.features.report_standard import PublishBlockedError, build_published_report
-from src.web import job_runtime, paid_runtime, request_helpers
+from src.web import job_runtime, paid_runtime, report_retention_adapter, request_helpers
 from src.web.security import CSRF_TOKEN_MAX_CHARS, REFERENCE_MAX_CHARS
 
 
@@ -123,6 +124,22 @@ def _member_action(request: Request, csrf_token: str) -> tuple[Response | None, 
     if not allowed:
         return HTMLResponse("초대된 MEMBER만 이 작업을 할 수 있습니다.", status_code=403), ""
     return None, session.email
+
+
+def _member_report_owner_action(
+    request: Request, report_id: str, csrf_token: str
+) -> tuple[Response | None, str]:
+    """CSRF 뒤, 쓰기 연결 전에 현재 MEMBER의 정확한 report 소유권을 확인한다."""
+
+    denied, email = _member_action(request, csrf_token)
+    if denied is not None:
+        return denied, ""
+    decision = report_access_logic.authorize_report_access(request, report_id)
+    if decision.allowed and decision.role is report_access_logic.AccessRole.MEMBER:
+        return None, email
+    if decision.reason == "store_unavailable":
+        return HTMLResponse("권한 상태를 확인할 수 없습니다.", status_code=503), ""
+    return HTMLResponse("자신이 만든 보고서만 변경할 수 있습니다.", status_code=403), ""
 
 
 def _report_rows(conn, *, limit: int = 100) -> list[dict[str, object]]:
@@ -817,7 +834,7 @@ async def submit_survey(
     delete_information: str = Form("", max_length=_FEEDBACK_MAX_CHARS),
     csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
 ):
-    denied, email = _member_action(request, csrf_token)
+    denied, email = _member_report_owner_action(request, report_id, csrf_token)
     if denied is not None:
         return denied
     try:
@@ -874,7 +891,7 @@ async def submit_error(
     area: str = Form(..., max_length=1000), reason: str = Form(..., max_length=_FEEDBACK_MAX_CHARS),
     csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
 ):
-    denied, email = _member_action(request, csrf_token)
+    denied, email = _member_report_owner_action(request, report_id, csrf_token)
     if denied is not None:
         return denied
     try:
@@ -1182,6 +1199,7 @@ async def run_trash_cleanup(
             storage_db.connect,
             operation=dashboard_maintenance.OPERATION_CLEANUP,
             actor_email=_admin_email(request),
+            cleanup_runner=report_retention_adapter.purge_expired_reports,
         )
     except dashboard_maintenance.MaintenanceRunError:
         return HTMLResponse("휴지통 정리에 실패했습니다. 문제 목록에서 기록을 확인해 주세요.", status_code=503)

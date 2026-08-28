@@ -11,6 +11,12 @@
 - 기존 무료 확인판은 `PIPELINE=demo`, `BETA_ADMIN_ONLY=1`로 시작했다. 현재 Blueprint는 실제
   회사 결과를 비교하기 위한 관리자 전용 실분석 운영판을 준비한다.
 - Uvicorn worker와 Render instance는 각각 `1`로 유지한다.
+- 종료 시간은 서로 겹치지 않는다. Uvicorn이 먼저 HTTP task를 최대 20초
+  정리한 **뒤** lifespan의 앱 조사 정리(최대 240초)와 취소 유예(1초)를 실행한다.
+  `20 + 240 + 1 + 종료 여유 30 <= Render 300초`를 유지한다. Render의 기본
+  30초를 쓰면 비용·중단 표식을 저장하기 전에 프로세스가 강제 종료될 수 있으므로
+  `maxShutdownDelaySeconds: 300`을 제거하지 않는다.
+  근거는 [Render Blueprint의 종료 유예 계약](https://render.com/docs/blueprint-spec#maxshutdowndelayseconds)이다.
 - 관리자 실분석 운영판은 `standard` web plan과 `/var/data` 1GB 영속 디스크를 사용한다.
   실제 DART 118,747사 후보 색인이 Starter의 512MB를 넘어 `/confirm` 중 인스턴스가
   재시작된 운영 측정에 따른 최소 사양이다. 플랜·디스크 비용은 바뀔 수 있으므로 배포 직전
@@ -92,11 +98,14 @@ Notion, 공유 링크, real provider, 외부 백업과 cron 시험은 무료 dem
    보존되는지 확인한다. Blueprint가 새 값을 다시 만들도록 기존 값을 삭제하지 않는다.
 6. `PIPELINE=real`, `BETA_ADMIN_ONLY=1`,
    `DEPLOYMENT_RUNTIME_CONTRACT=render-admin-real-no-forwarded-v1`, 빈
-   `FORWARDED_ALLOW_IPS`, `/var/data` 1GB disk mount를 확인한다.
+   `FORWARDED_ALLOW_IPS`, `GRACEFUL_SHUTDOWN_SECONDS=20`, Render 종료 유예 300초,
+   `/var/data` 1GB disk mount를 확인한다.
 7. `PUBLIC_ORIGIN`과 Google OAuth 승인 URI, `GOOGLE_REDIRECT_URI`가 모두 정확히 같은
    `<HTTPS origin>/auth/callback`을 가리키는지 확인한다.
-8. Render Dashboard에서 수동 배포한다. `/healthz`, `/readyz`, 관리자 로그인, 비관리자 차단,
-   MEMBER/LINK 생성 차단을 먼저 확인한다.
+8. Render Dashboard의 일반 `Deploy latest commit`이 아니라, 이 서비스를 관리하는
+   Blueprint에서 **Manual Sync / Deploy Blueprint**를 한 번 실행한다. 그래야 코드와
+   `maxShutdownDelaySeconds: 300`·Uvicorn HTTP 정리 20초가 함께 반영된다. `/healthz`, `/readyz`,
+   관리자 로그인, 비관리자 차단, MEMBER/LINK 생성 차단을 먼저 확인한다.
 9. 작은 회사 1건을 실제 조사해 DART·뉴스·홈페이지 수집, 화면/PDF 정본 게이트, 비용 기록,
    재시작 뒤 결과 보존을 확인한 다음 회사 수를 늘린다.
 
@@ -159,8 +168,10 @@ Notion, 공유 링크, real provider, 외부 백업과 cron 시험은 무료 dem
   ```
 
 - **켜면 달라지는 것**: 보고서 본문을 composer가 새로 쓰고, 2·4·7장에 도식이
-  실린다. 대신 **v2는 1층 캐시를 쓰지 않으므로** 같은 회사를 두 번 조사하면
-  두 번 다 본조사 비용이 나간다.
+  실린다. v2 전용 1층 캐시는 배포 revision·생성기 코드 지문·최신 사업연도뿐
+  아니라 실제 DART 접수번호와 정규화한 재무 응답 지문까지 모두 같을 때만
+  재사용한다. 코드·사업연도·공시·재무값 중 하나라도 바뀌면 옛 결과를 내지 않고
+  새로 조사하며, 모두 같으면 캐시 적중으로 본조사 비용을 다시 쓰지 않는다.
 - **로컬에서 켜 보기** — 두 실행기가 `ENGINE_V2`를 자식에게 넘긴다.
   - `app/실시간성능시험켜기.ps1 -EngineV2` — 로그인 게이트를 «끈» 채
     조사 흐름만 본다. 관리자 화면은 못 본다.
@@ -241,6 +252,35 @@ report_standard 통과
 재시작과 재배포 뒤에도 보존한다. 다만 S3 외부 백업이나 backup/maintenance cron은 아직
 없으며 관련 환경변수를 설정하지 않는다.
 
+현재 Docker의 SQLite는 WAL-reset 수정 전 계열이면 `DELETE` journal로 내려가며, 모든
+쓰기 연결은 `synchronous=EXTRA`를 강제한다. 이는 유료 비용·승인 출고 원장의 마지막
+commit이 전원 중단 직후 되돌아가지 않도록 rollback-journal 삭제 디렉터리까지 동기화하는
+계약이다. 성능을 이유로 FULL/NORMAL/OFF로 낮추지 않는다. 실행 중 DB 파일이나 identity가
+사라지면 빈 DB 자동 생성 대신 서비스가 닫힌다. 검증된 완전 DB를 새 경로/새 디스크에
+준비해 전환하며 운영 파일을 실행 중 삭제·이동하지 않는다.
+
+최초 승인 PDF 원본에는 `REPORT_ARTIFACT_CAPACITY_BYTES=536870912`(512MiB)를
+따로 배정한다. 이 숫자는 운영 PDF 평균 크기를 실측해 산정한 보존량이 아니다. 1GB 한
+장에 SQLite·감사 기록·캐시도 함께 있으므로 우선 절반을 다른 운영 자료의 여유로 남기는
+보수적 배포 상한이다. 원본 저장소는 용량이 부족해도 **자동으로 과거 원본을 지우지
+않는다.** 상한을 넘으면 이미 승인된 원본은 그대로 두고 **새 보고서 출고를 닫는다**
+(fail-closed: 안전을 확인하지 못하면 공개하지 않는 동작). 관리자는 디스크 용량과 원본
+증가량을 확인한 뒤 보존·이관 정책을 별도로 승인해야 하며, 설정값을 새 결과에 맞춰
+늘리는 것을 장애 해결로 간주하면 안 된다.
+
+출고·보존 정리·로컬 복구 세대 생성은 같은 artifact root 파일 잠금을 사용한다. 다른
+thread/process가 잠금을 놓지 않으면 10초 뒤 `ArtifactRootBusy` 또는 백업 실패로
+fail-closed하며 요청을 무기한 붙잡지 않는다. 이 실패를 보고 lock 파일이나 PDF를 손으로
+지우지 말고, 점유 프로세스와 진행 중 작업을 먼저 확인한 뒤 안전하게 재기동한다.
+
+로컬 도구는 이제 SQLite snapshot과 그 snapshot이 참조하는 최초 승인 PDF bytes를 한
+복구 세대 manifest로 묶고 누락·변조·경로 공격을 dry-run에서 차단한다. 그러나 **이 복구
+세대를 독립 외부 저장소에 올리고 다시 복구한 운영 증거는 아직 없다.** 아래 외부 백업
+설계도 현재는 BLOCKED다. 따라서 지금 단계에서 이 원본을 영구 보관 또는 재해 복구
+완료라고 부르지 않는다.
+
+즉, **최초 승인 PDF 원본의 외부 백업은 아직 확인하지 못했다.**
+
 Render 영속 디스크와 플랫폼 snapshot은 같은 플랫폼 경계 안의 보존 수단이며 독립 외부
 백업 완료를 뜻하지 않는다. 아래 구조는 운영 adapter를 구현한 뒤의 후속 설계다. Render
 cron job은 다른 서비스의 영속 디스크를 읽을 수 없으므로 웹 프로세스가 다음 구조로 매일
@@ -249,29 +289,38 @@ cron job은 다른 서비스의 영속 디스크를 읽을 수 없으므로 웹 
 ```text
 Render cron
   → POST https://<웹 주소>/internal/backup/run (Bearer 비밀)
-  → 웹 프로세스가 자기 디스크의 SQLite Backup API 스냅샷 생성
-  → 비공개 S3 호환 bucket에 DB와 .sha256 업로드
-  → 두 파일을 다시 내려받아 SHA-256·SQLite integrity·외래키 검사
-  → 다른 권한·보존 경계의 서명 append-only manifest에 원격 객체·지문 append
-  → manifest chain/head·서명·정확한 객체 결속 read-back 재검증
+  → 웹 프로세스가 DB snapshot+그 DB가 참조하는 PDF bytes를 한 recovery generation으로 봉인
+  → 비공개 S3 호환 bucket에 generation manifest와 DB/PDF object set 전부 업로드
+  → 세대 전부를 다시 내려받아 hash·길이·경로·SQLite integrity·외래키·완전성 검사
+  → 다른 권한·보존 경계의 서명 append-only manifest에 세대 ID와 모든 원격 객체 지문 append
+  → manifest chain/head·서명·세대 object set 전체 결속 read-back 재검증
   → 위 단계가 모두 끝난 뒤에만 성공 반환 및 과거 백업 정리
 ```
 
-향후 추가할 백업 cron의 기준 시각은 매일 `19:00 UTC`, 한국 시각 다음 날 `04:00`이다. 백업
-파일은 `company-analysis/storage-backup-<UTC시각>.sqlite3`와 같은 이름의
-`.sha256` 한 쌍이다. 성공 응답은 원격 파일 재검증과 독립 manifest append/read-back을
-모두 마친 뒤에만 반환되며 manifest backup ID·sequence·record hash를 포함한다.
+향후 추가할 백업 cron의 기준 시각은 매일 `19:00 UTC`, 한국 시각 다음 날 `04:00`이다.
+원격 object key 형식과 서명 wire schema는 recovery generation의 가변 PDF object 목록을
+결속하도록 새로 정해야 한다. 과거 `storage-backup-...sqlite3`와 `.sha256` 두 객체 계약은
+새 보고서 복구에 불완전하므로 재사용하지 않는다. 성공 응답은 세대 전체 재검증과 독립
+manifest append/read-back을 모두 마친 뒤에만 반환되며 manifest backup ID·sequence·record
+hash를 포함해야 한다.
 
 **현재 외부 백업 배포는 BLOCKED다.** 저장소에는 production-ready
-`BackupManifestAppender` 구현, signer, 독립 sink, 앱 시작 시 provider 설치 호출, 최신
-checkpoint 공급 경로가 없다. S3 변수 세트만 채우면 되는 상태가 아니며, appender 누락 시
+recovery-generation object set을 지원하는 `BackupManifestAppender` 구현, signer, 독립
+sink, 앱 시작 시 provider 설치 호출, 최신 checkpoint 공급 경로가 없다. 현재
+`BackupManifestRequest` v2와 시험 mechanics는 DB 두 객체만 표현하므로 운영에 사용할 수
+없다. S3 변수 세트만 채우면 되는 상태가 아니며, appender 누락 시
 백업 경로와 cron은 성공을 반환하지 않는다. `deploy/validate_environment.py`도
 `BACKUP_S3_BUCKET`이 설정된 배포를 현 상태에서 fail-closed한다. 웹 demo만 운영하려면
 외부 백업 bucket을 활성화하지 않고 이 차단을 배포 예외로 오인하지 않는다.
 
+따라서 현재 사람이 누를 수 있는 배포 버튼은 **웹 서비스와 같은 Render 디스크에 자료를
+남기는 것까지만** 수행한다. 배포만 누르면 독립 재해 복구가 끝나는 상태가 아니다. 아래
+adapter 구현과 계정·bucket·자격증명·cron·외부 경보 설정 및 실제 복구 훈련은 별도 사람
+작업으로 남아 있다.
+
 ### 외부 adapter 구현 후 최초 한 번 설정
 
-1. DB bucket 관리 주체와 다른 권한·보존 경계에 WORM/object-lock 또는 동등한
+1. recovery-generation bucket 관리 주체와 다른 권한·보존 경계에 WORM/object-lock 또는 동등한
    append-only manifest sink를 구성하고 최소 35일 보존과 조건부 append(CAS)를 검증한다.
 2. 서명 키는 조직 비밀 관리자에서 signer에 주입하고 key ID·회전·과거 서명 검증 정책을
    정한다. 실제 키 값이나 adapter 전용 변수명은 저장소 문서에 기록하지 않는다.
@@ -296,7 +345,7 @@ checkpoint 공급 경로가 없다. S3 변수 세트만 채우면 되는 상태�
 8. 기존 Blueprint에 서비스를 추가하는 경우 새 `sync: false` 값은 자동 반영되지 않을 수
    있다. 웹의 bucket·자격증명과 cron URL이 실제 대시보드에 있는지 직접 확인한다.
 9. Render 알림에서 `company-analysis-backup`의 실패 알림을 운영 수신처로 켠다. 별도로
-   외부 저장소 또는 감시 도구에서 최신 DB 객체와 독립 manifest checkpoint가 24시간 넘게
+   외부 저장소 또는 감시 도구에서 최신 복구 세대 전체와 독립 manifest checkpoint가 24시간 넘게
    함께 생성되지 않으면 알리도록 설정한다. 이 감시는 Render 장애로 cron 자체가 실행되지
    않는 경우까지 잡기 위해 Render 밖에 둔다.
 
@@ -332,23 +381,26 @@ S3 호환 공급자가 path-style 주소만 지원하면 `BACKUP_S3_ADDRESSING_S
 
 위 BLOCKED 항목을 모두 닫은 뒤에만 Render 대시보드에서 cron을 한 번 수동 실행한다. 로그의
 `외부 백업 완료`와 manifest backup ID·sequence·record hash가 함께 있는지 확인한다. 외부
-bucket에서 같은 이름의 `.sqlite3`와 `.sha256`을 내려받아 아래 전송 검사를 수행할 수 있다.
+bucket에서 한 복구 세대의 object set 전체를 내려받아 원래 디렉터리 구조로 둔 뒤 아래
+로컬 dry-run을 수행해야 한다.
 
 ```console
-python tools/backup_sqlite.py verify <내려받은.sqlite3> --checksum <내려받은.sqlite3.sha256>
+python tools/backup_sqlite.py verify <내려받은-rg-세대-디렉터리>
 ```
 
-이 명령은 DB와 같은 위치의 sidecar만 확인하므로 복구 진본성 증거로는 충분하지 않다.
+이 명령은 DB와 PDF의 완전성까지 확인하지만, 같은 저장 경계의 로컬 manifest이므로 복구
+진본성 증거로는 충분하지 않다.
 S3와 다른 통제 경로에서 최신 sequence checkpoint를 가져와 승인된 adapter wrapper가
 `ops/release_readiness.py`의 manifest gate와 임시 복구를 실행해야 한다. 직접 ops CLI는
 sink/signer가 없으면 실패하는 것이 정상이다. 정확한 인자와 검증 절차는
 [배포 운영 런북](../../ops/배포_운영_런북.md)의 `백업 무결성과 독립 서명 manifest`를
-따른다. 다음 날에도 새 DB/sidecar와 checkpoint가 함께 생겼는지 확인하고 같은 gate를
+따른다. 다음 날에도 새 recovery generation과 checkpoint가 함께 생겼는지 확인하고 같은 gate를
 통과시킨다. 하나라도 없거나 검증이 실패하면 성공으로 보지 않는다.
 
-`python tools/backup_sqlite.py restore`와 공개 `restore_backup()`은 sidecar-only 운영 복구
-우회를 막기 위해 현재 항상 실패하고 대상 DB를 만들지 않는다. 실제 새 DB 게시와
-`STORAGE_DB_PATH` 전환은 승인된 manifest adapter wrapper가 구현된 뒤에만 한다.
+`python tools/backup_sqlite.py restore`와 공개 `restore_backup()`은 로컬 manifest만으로
+운영 복구하는 우회를 막기 위해 현재 항상 실패하고 대상 DB·PDF를 만들지 않는다. 실제 새
+DB와 artifact staging root 게시 및 `STORAGE_DB_PATH` 전환은 승인된 manifest adapter
+wrapper가 구현된 뒤에만 한다.
 
 외부 저장소가 아직 준비되지 않은 비상 상황에서만 Render Shell에서 아래 명령으로 일관성
 있는 임시 백업을 만들 수 있다. 같은 디스크에만 남겨 두면 디스크 장애를 견디지 못한다.
@@ -357,7 +409,7 @@ sink/signer가 없으면 실패하는 것이 정상이다. 정확한 인자와 �
 python tools/backup_sqlite.py backup
 ```
 
-DB 백업에는 환경 비밀이 들어 있지 않으므로 다음 **복구 묶음**을 조직 비밀 관리자에 별도로
+복구 세대에는 환경 비밀이 들어 있지 않으므로 다음 **비밀 복구 묶음**을 조직 비밀 관리자에 별도로
 보관한다.
 
 - Google OAuth ID·비밀과 승인 URI

@@ -48,3 +48,9 @@ def test_aware_instant와_legacy_naive를_같은_kst_사업일로_해석한다()
     assert clock.business_date_from_iso("2026-08-18T14:59:59Z") == dt.date(
         2026, 8, 18
     )
+
+
+def test_subtract_years는_윤년_말일을_안전하게_보정한다():
+    """2월 29일 조사도 같은 3년 조회창을 끝까지 만들 수 있어야 한다."""
+
+    assert clock.subtract_years(dt.date(2028, 2, 29), 3) == dt.date(2025, 2, 28)

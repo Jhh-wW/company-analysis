@@ -5,7 +5,9 @@ from dataclasses import replace
 
 import pytest
 
+from src.shared import automatic_release_record as release_contract
 from src.shared.automatic_release_record import (
+    AUTOMATIC_CHECKER_V1,
     AUTOMATIC_CHECKER_VERSION,
     REQUIRED_AUTOMATIC_CHECKS,
     AutomaticCheckResult,
@@ -127,3 +129,63 @@ def test_파서는_자동검사_scalar의_exact_type을_요구한다(
 
     with pytest.raises(ValueError, match="안전하게 읽을 수 없습니다"):
         parse_automatic_release_json(raw)
+
+
+def test_지원버전목록은_실행중_수정할수없는_코드계약이다():
+    assert release_contract.SUPPORTED_AUTOMATIC_CHECKS_BY_VERSION[
+        AUTOMATIC_CHECKER_V1
+    ] == REQUIRED_AUTOMATIC_CHECKS
+    with pytest.raises(TypeError):
+        release_contract.SUPPORTED_AUTOMATIC_CHECKS_BY_VERSION[
+            "automatic-release-forged"
+        ] = REQUIRED_AUTOMATIC_CHECKS
+
+
+def test_모르는버전은_자체지문이맞아도_승인으로_복원하지않는다():
+    unknown_version = "automatic-release-v999"
+    draft = replace(
+        _valid_record(),
+        checker_version=unknown_version,
+        record_sha256="",
+    )
+    unknown = replace(
+        draft,
+        record_sha256=automatic_release_record_sha256(draft),
+    )
+
+    assert any(
+        "지원하는 출고 계약" in problem
+        for problem in validate_automatic_release_record(
+            unknown,
+            expected_checker_version=unknown_version,
+        )
+    )
+    with pytest.raises(ValueError, match="지정한 무결성 계약"):
+        parse_automatic_release_json(
+            automatic_release_json(unknown),
+            expected_checker_version=unknown_version,
+        )
+
+
+def test_현재버전이바뀌어도_명시한_지원역사버전은_독립적으로검증한다(
+    monkeypatch,
+):
+    record = _valid_record()
+    monkeypatch.setattr(
+        release_contract,
+        "AUTOMATIC_CHECKER_VERSION",
+        "automatic-release-v2",
+    )
+
+    # 현재 alias와 분리된 역사 키라서 v2 전환 자체가 v1 계약을 지우지 않는다.
+    assert release_contract.SUPPORTED_AUTOMATIC_CHECKS_BY_VERSION[
+        AUTOMATIC_CHECKER_V1
+    ] == REQUIRED_AUTOMATIC_CHECKS
+
+    # 버전을 생략한 새 출고 검증은 새 현재 버전을 따르므로 v1을 거부한다.
+    assert validate_automatic_release_record(record)
+    # 이미 발급된 artifact 소비자는 저장된 v1을 명시해 그대로 검증한다.
+    assert not validate_automatic_release_record(
+        record,
+        expected_checker_version="automatic-release-v1",
+    )

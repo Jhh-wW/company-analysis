@@ -29,6 +29,7 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import replace
+from pathlib import Path
 from typing import Final
 
 import pytest
@@ -40,6 +41,7 @@ from src.features.pipeline.port import Report
 from src.web import job_runtime
 from src.web.main import app
 from src.web.routers import reports as reports_router
+from src.web.tests.report_route_support import serve_legacy_report_snapshot
 
 # 출고 검증(validate_v2 — 내부 키·인용-부록 1:1·요약 문장 수)을 통과하는 v2 보고서를
 # 만드는 방법은 v2 화면 시험이 이미 갖고 있다. 같은 것을 두 벌 만들면 한쪽만
@@ -59,6 +61,8 @@ _PARAGRAPHS: Final[tuple[str, ...]] = (
     "두 번째 문단입니다.",
     "세 번째 문단입니다.",
 )
+
+_STYLE_PATH: Final[Path] = Path(__file__).parents[1] / "static" / "style.css"
 
 
 def _v2_report_with_paragraphs(*, display_number: str = "2") -> Report:
@@ -91,7 +95,7 @@ def _render(monkeypatch: pytest.MonkeyPatch, report: Report) -> str:
     """저장 보고서 화면을 실제로 그려 HTML을 돌려준다."""
     job_id = f"pno-{uuid.uuid4().hex}"
     job_runtime._JOBS.pop(job_id, None)
-    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
+    serve_legacy_report_snapshot(monkeypatch, report, report_id=job_id)
     monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
     # PDF 자동출고 해시 결속은 이 시험의 관심사가 아니다 — 화면 렌더만 격리한다.
     monkeypatch.setattr(
@@ -184,3 +188,21 @@ def test_웹과_PDF가_같은_문단_번호_형식을_쓴다(
     assert web_numbers == pdf_numbers, (
         f"웹({web_numbers})과 PDF({pdf_numbers})의 문단 번호 형식이 갈렸습니다"
     )
+
+
+def test_웹_번호와_본문은_모든_폭에서_같은_두_열에_놓인다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """화면 폭에 따라 inline/absolute로 갈리면 번호와 줄바꿈 시작점도 갈린다."""
+
+    body = _render(monkeypatch, _v2_report_with_paragraphs())
+    css = _STYLE_PATH.read_text(encoding="utf-8")
+
+    assert '<span class="prose-text">' in body
+    assert ".result-page .prose {\n  display: grid;" in css
+    assert "grid-template-columns: 2.6em minmax(0, 1fr);" in css
+    pno_rules = "\n".join(
+        block.split("}", 1)[0]
+        for block in css.split(".result-page .pno {")[1:]
+    )
+    assert "position: absolute" not in pno_rules

@@ -35,7 +35,7 @@ def _base_environment() -> dict[str, str]:
         "BETA_ADMIN_ONLY": "0",
         "PORT": "10000",
         "LOG_LEVEL": "info",
-        "GRACEFUL_SHUTDOWN_SECONDS": "300",
+        "GRACEFUL_SHUTDOWN_SECONDS": "20",
         "DEPLOYMENT_EXPOSURE": "local",
         "DEPLOYMENT_PLATFORM": "local",
         "DEPLOYMENT_RUNTIME_CONTRACT": validator.RUNTIME_CONTRACT_LOCAL_WEB,
@@ -184,6 +184,8 @@ def test_backup_examples_expose_required_names_without_a_readiness_bypass() -> N
         assert f"{name}=" in runtime_example
         assert f"{name}=" in app_example
         assert name not in render_names
+    for name in validator.BACKUP_RUNTIME_VARIABLES:
+        assert name not in render_names
     assert not any(
         service["type"] == "cron" for service in blueprint["services"]
     )
@@ -195,6 +197,9 @@ def test_backup_examples_expose_required_names_without_a_readiness_bypass() -> N
     ).read_text(encoding="utf-8")
     assert "현재 외부 백업 배포는 BLOCKED" in render_guide
     assert "install_manifest_appender_provider(...)" in render_guide
+    blueprint_text = (REPOSITORY_ROOT / "render.yaml").read_text(encoding="utf-8")
+    assert "외부 백업 cron과 BACKUP_* 값은 의도적으로 선언하지 않는다" in blueprint_text
+    assert "배포 버튼만 누르는 것으로 재해 복구가 완료되지 않는다" in blueprint_text
 
 
 def test_real_environment_fails_closed_without_leaking_values() -> None:
@@ -400,13 +405,105 @@ def test_render_blueprint_turns_engine_v2_on_while_image_default_stays_v1() -> N
     assert "PIPELINE=demo" in dockerfile
     assert "ENGINE_V2" not in dockerfile
 
-    # v2는 1층 캐시를 쓰지 않아 같은 회사를 두 번 조사하면 두 번 다 돈이 든다.
-    # 켜 두는 동안 이 비용 경고가 문서에서 사라지면 안 된다.
+    # 배포 설명도 실제 전용 캐시 계약을 말해야 한다. 과거의 「캐시 없음」 문구를
+    # 제품 약속으로 고정하면 구현을 고친 뒤에도 문서가 거짓말하게 된다.
     render_guide = (
         REPOSITORY_ROOT / "app" / "docs" / "Render_배포.md"
     ).read_text(encoding="utf-8")
-    assert "두 번 다 본조사 비용이 나간다" in render_guide
+    assert "v2 전용 1층 캐시" in render_guide
+    assert "실제 DART 접수번호" in render_guide
+    assert "정규화한 재무 응답 지문" in render_guide
+    assert "캐시 적중으로 본조사 비용을 다시 쓰지 않는다" in render_guide
+    assert "v2는 1층 캐시를 쓰지 않으므로" not in render_guide
     assert "지금 배포하면 v1 보고서가 나간다" not in render_guide
+
+
+def test_render_shutdown_window_covers_serial_uvicorn_and_app_shutdown() -> None:
+    """Uvicorn 요청 정리와 lifespan 정리는 직렬이므로 합계가 플랫폼보다 짧다."""
+
+    blueprint = yaml.safe_load(
+        (REPOSITORY_ROOT / "render.yaml").read_text(encoding="utf-8")
+    )
+    web_service = next(
+        service for service in blueprint["services"] if service["type"] == "web"
+    )
+    render_values = {item["key"]: item.get("value") for item in web_service["envVars"]}
+
+    platform_seconds = web_service["maxShutdownDelaySeconds"]
+    uvicorn_seconds = int(render_values["GRACEFUL_SHUTDOWN_SECONDS"])
+    runtime_source = (
+        REPOSITORY_ROOT / "app" / "src" / "web" / "job_runtime.py"
+    ).read_text(encoding="utf-8")
+
+    assert platform_seconds == 300
+    assert render_values["GRACEFUL_SHUTDOWN_SECONDS"] == "20"
+    assert "_JOB_DRAIN_TIMEOUT_SEC = 240.0" in runtime_source
+    assert "_JOB_CANCEL_GRACE_SEC = 1.0" in runtime_source
+    # Uvicorn 0.52.3은 먼저 HTTP task를 이 시간만큼 기다린 뒤에야
+    # lifespan.shutdown을 호출한다. 270 < 300 같은 개별 비교는 거짓 안전이다.
+    assert uvicorn_seconds + 240 + 1 + 30 <= platform_seconds
+
+    runbook = (REPOSITORY_ROOT / "ops" / "배포_운영_런북.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Render 300초" in runbook
+    assert "Uvicorn HTTP 요청 정리 최대 20초" in runbook
+    normalized_runbook = " ".join(runbook.split())
+    assert "Blueprint의 Manual Sync / Deploy Blueprint" in normalized_runbook
+
+    render_guide = (
+        REPOSITORY_ROOT / "app" / "docs" / "Render_배포.md"
+    ).read_text(encoding="utf-8")
+    normalized_render_guide = " ".join(render_guide.split())
+    assert (
+        "Blueprint에서 **Manual Sync / Deploy Blueprint**"
+        in normalized_render_guide
+    )
+
+    historical_directive = (
+        REPOSITORY_ROOT / "app" / "docs" / "출시전_수정_지시서.md"
+    ).read_text(encoding="utf-8")
+    assert "종료 계약 정정(2026-08-28)" in historical_directive
+    assert (
+        "Render 영속 디스크 서비스는 Blueprint의 `maxShutdownDelaySeconds`와 "
+        "함께 쓸 수 없으므로"
+        not in historical_directive
+    )
+
+
+def test_render_reserves_only_half_the_persistent_disk_for_immutable_pdf_artifacts() -> None:
+    """1GB 공용 디스크를 PDF가 끝까지 채우지 못하게 배포값을 고정한다."""
+
+    blueprint = yaml.safe_load(
+        (REPOSITORY_ROOT / "render.yaml").read_text(encoding="utf-8")
+    )
+    web_service = next(
+        service for service in blueprint["services"] if service["type"] == "web"
+    )
+    render_values = {item["key"]: item.get("value") for item in web_service["envVars"]}
+
+    assert web_service["disk"]["sizeGB"] == 1
+    assert render_values["REPORT_ARTIFACT_CAPACITY_BYTES"] == "536870912"
+    assert isinstance(render_values["REPORT_ARTIFACT_CAPACITY_BYTES"], str)
+
+    adapter_source = (
+        REPOSITORY_ROOT / "app" / "src" / "web" / "report_delivery_adapter.py"
+    ).read_text(encoding="utf-8")
+    assert (
+        '_ARTIFACT_CAPACITY_ENV: Final[str] = "REPORT_ARTIFACT_CAPACITY_BYTES"'
+        in adapter_source
+    )
+
+    render_guide = (
+        REPOSITORY_ROOT / "app" / "docs" / "Render_배포.md"
+    ).read_text(encoding="utf-8")
+    normalized_guide = " ".join(render_guide.split())
+    assert "자동으로 과거 원본을 지우지 않는다" in normalized_guide
+    assert "새 보고서 출고를 닫는다" in normalized_guide
+    assert (
+        "최초 승인 PDF 원본의 외부 백업은 아직 확인하지 못했다"
+        in normalized_guide
+    )
 
 
 def test_engine_v2_rejects_values_that_silently_fall_back_to_v1() -> None:

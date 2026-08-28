@@ -20,6 +20,7 @@ from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
 from src.features.pipeline.port import Grade, Report, ReportSection, ReportTable, SummaryItem
 from src.features.provenance.sources import Source, SourceKind
 from src.web import job_runtime
+from src.web.tests.report_route_support import serve_legacy_report_snapshot
 
 
 def _v2_card_report() -> Report:
@@ -60,7 +61,7 @@ def _render(report: Report) -> str:
         mp.setenv(auth_constants.ENV_BETA_ADMIN_ONLY, "0")
         mp.setenv(auth_constants.ENV_ADMIN_EMAILS, "admin@example.com")
         job_runtime._start_job_runtime()
-        mp.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
+        serve_legacy_report_snapshot(mp, report, report_id=job_id)
         mp.setattr(job_runtime, "_link_expired", lambda _report: False)
         mp.setattr(reports_router, "_release_state", lambda **_kwargs: (object(), None))
         mp.setattr(reports_router, "is_notion_configured", lambda: True)

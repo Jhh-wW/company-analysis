@@ -40,7 +40,8 @@ from src.features.report_standard import (
 )
 from src.features.report_standard.publish import PublishBlockedError
 from src.features.report_standard.section_content import section_content_blocks
-from src.web import job_runtime
+from src.features.storage import reports as report_store
+from src.web import job_runtime, report_delivery_adapter
 from src.web import main as web_main
 from src.web.routers.reports import _report_grade_note
 
@@ -223,6 +224,19 @@ def test_canonical_부분본_완성도는_장_개수로_오해시키지_않는�
     assert "개 중" not in note
 
 
+def test_안전미통과_임시공개본을_웹이_검증완료라고_부르지_않는다() -> None:
+    report = replace(
+        canonical_report(),
+        grade=Grade.PARTIAL,
+        publication_policy="legacy-shadow-exception-v1",
+    )
+
+    note = _report_grade_note(report)
+
+    assert "안전 확인 중인 임시 부분 보고서" in note
+    assert "검증된 부분 보고서" not in note
+
+
 def test_9개_장이_모두_있는_의미_결손_부분본도_모순된_개수를_표시하지_않는다() -> None:
     report = build_demo_report()
     customer = next(
@@ -300,7 +314,19 @@ def _screen_text(
 ) -> tuple[str, str]:
     job_id = "canonical-output-parity"
     job_runtime._JOBS.pop(job_id, None)
-    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _report_id: report)
+    # 결과 GET의 정본은 더 이상 ``_load_saved_report``가 아니라 불변 Delivery
+    # adapter다. 이 시험은 Delivery 도입 전 보고서의 읽기 전용 화면을 사용해
+    # 웹·PDF·Notion 표현만 비교하므로 실제로 소비되는 legacy 경계를 주입한다.
+    monkeypatch.setattr(
+        report_delivery_adapter,
+        "load_legacy_public_report",
+        lambda _report_id: report_delivery_adapter.LegacyPublicReport(
+            report=report,
+            payload_json=report_store.report_to_json(report),
+            generated_at=report.generated_at,
+            stored_at=report.generated_at,
+        ),
+    )
     monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
     session = auth_logic.create_session("admin@example.com", True)
     with TestClient(app) as client:
@@ -508,7 +534,7 @@ def test_네_출력은_canonical_순서와_장별_구조블록_계약을_지킨�
                     )
 
 
-def test_레거시_직무_완성도_AI수집_메타가_있는_부분본은_출력하지_않는다(
+def test_레거시_부분본은_웹본문만_읽기전용으로보존하고_새PDF와Notion은_막는다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     report = _legacy_incomplete_report()
@@ -519,7 +545,9 @@ def test_레거시_직무_완성도_AI수집_메타가_있는_부분본은_출�
         build_blocks(report)
 
     _html, visible = _screen_text(report, monkeypatch)
-    assert "현재 보고서 기준을 통과한 근거가 충분하지 않아" in visible
+    assert "과거 방식으로 저장된 본문을 그대로 보여드립니다" in visible
+    assert "당시 검증 상태와 PDF 원본은 확인할 수 없습니다" in visible
+    assert "공식 문서가 회사를 기술 중심 기업으로 규정한다" in visible
     assert _LEGACY_META not in visible
 
 

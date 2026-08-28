@@ -41,6 +41,8 @@ from src.features.pipeline.port import (
     RunResult,
     UserInput,
 )
+from src.features.provider_health import constants as provider_health_constants
+from src.features.provider_health import store as provider_health_store
 from src.features.sharelink import access_control as share_access
 from src.features.sharelink import logic as share_logic
 from src.features.sharelink import store as share_store
@@ -99,6 +101,60 @@ _PROGRESS_INTERRUPTED_MESSAGE = (
     "입력 오류가 아니며, 서버가 다시 열린 뒤 처음 화면에서 다시 시도해 주세요."
 )
 
+_CANDIDATE_PROVIDER_HEALTH_KEYS = {
+    "DART": provider_health_constants.PROVIDER_DART,
+}
+
+
+class _FreeCandidateProviderHealthGuard:
+    """DART 전송 직전에만 provider 탐색 권한을 잡는 얇은 어댑터."""
+
+    def __init__(self, provider: object, provider_health_key: str) -> None:
+        self._provider = provider
+        self._provider_health_key = provider_health_key
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._provider, name)
+
+    def search(
+        self, *, company: str, address_hint: str, limit: int, timeout_sec: float
+    ) -> object:
+        # resolve_candidates의 rate/worker 경계를 지난 뒤라서 여기까지 왔을 때만
+        # PROBING lease를 잡는다. 더 일찍 잡으면 로컬 rate-limit에도 provider가
+        # 5분간 “탐색 중”으로 남는다.
+        try:
+            with storage_db.connect() as conn:
+                permission = provider_health_store.acquire_probe(
+                    conn,
+                    self._provider_health_key,
+                    now_iso=clock.iso_now_kst(),
+                )
+        except Exception as exc:  # noqa: BLE001 — 상태 정본 없이는 외부 호출 금지
+            logger.exception("DART 후보 provider 상태를 확인하지 못했습니다")
+            raise candidate_logic.ProviderWorkerUnavailable from exc
+        if not permission.allowed:
+            # 실제 provider를 부르지 않았다는 기존 결과 계약을 재사용한다.
+            raise candidate_logic.ProviderWorkerUnavailable
+        return self._provider.search(
+            company=company,
+            address_hint=address_hint,
+            limit=limit,
+            timeout_sec=timeout_sec,
+        )
+
+
+def _guard_free_candidate_provider(provider: object) -> object:
+    """무과금 DART만 감싸고 유료 provider는 paid callback에 그대로 맡긴다."""
+    if bool(getattr(provider, "costs_money", True)):
+        return provider
+    provider_name = candidate_logic.canonical_provider_name(
+        getattr(provider, "provider_name", "")
+    )
+    provider_health_key = _CANDIDATE_PROVIDER_HEALTH_KEYS.get(provider_name)
+    if provider_health_key is None:
+        return provider
+    return _FreeCandidateProviderHealthGuard(provider, provider_health_key)
+
 
 def _observe_candidate_resolution(
     resolution: candidate_logic.CandidateResolution, *, incurred_cost_krw: float = 0.0
@@ -107,6 +163,7 @@ def _observe_candidate_resolution(
     provider = resolution.provider_name or "DART"
     if provider == "Google Maps":
         provider = "Places"
+    provider_health_key = _CANDIDATE_PROVIDER_HEALTH_KEYS.get(provider)
     status = resolution.status
     if status not in {
         candidate_logic.ResolutionStatus.OK,
@@ -121,11 +178,26 @@ def _observe_candidate_resolution(
         with storage_db.connect() as conn:
             if status in {candidate_logic.ResolutionStatus.OK, candidate_logic.ResolutionStatus.NO_MATCHES}:
                 if resolution.provider_called:
+                    if provider_health_key is not None:
+                        provider_health_store.record_success(
+                            conn, provider_health_key, now_iso=now_iso
+                        )
                     dashboard_store.record_external_status(
                         conn, provider=provider, status="normal", last_success_at=now_iso, now_iso=now_iso
                     )
                 return
+            # 로컬 rate/worker 제한은 provider에 요청을 보내지 않았다.
+            # 이를 provider 장애로 세면 정상 provider까지 열리므로 오판한다.
+            if not resolution.provider_called:
+                return
             if status is candidate_logic.ResolutionStatus.RATE_LIMITED:
+                if provider_health_key is not None:
+                    provider_health_store.record_failure(
+                        conn,
+                        provider_health_key,
+                        failure_kind=provider_health_store.ProviderFailureKind.RATE_LIMIT,
+                        now_iso=now_iso,
+                    )
                 summary = f"{provider} 후보 공급자 rate limit"
                 dashboard_store.record_external_status(
                     conn, provider=provider, status="error", error_at=now_iso,
@@ -136,6 +208,18 @@ def _observe_candidate_resolution(
                     stage="candidate_resolution", incurred_cost_krw=incurred_cost_krw, now_iso=now_iso,
                 )
                 return
+            if provider_health_key is not None:
+                failure_kind = (
+                    provider_health_store.ProviderFailureKind.TIMEOUT
+                    if status is candidate_logic.ResolutionStatus.TIMED_OUT
+                    else provider_health_store.ProviderFailureKind.PROVIDER_RESPONSE
+                )
+                provider_health_store.record_failure(
+                    conn,
+                    provider_health_key,
+                    failure_kind=failure_kind,
+                    now_iso=now_iso,
+                )
             summary = f"{provider} 외부 서비스 응답 변경 의심"
             dashboard_store.record_external_status(
                 conn, provider=provider, status="error", error_at=now_iso,
@@ -149,11 +233,10 @@ def _observe_candidate_resolution(
                 and resolution.local_profile_enrichment_failed
             ):
                 return
-            if resolution.provider_called:
-                dashboard_store.record_incident(
-                    conn, kind=dashboard_store.INCIDENT_PROVIDER_RESPONSE, summary=summary,
-                    stage="candidate_resolution", incurred_cost_krw=incurred_cost_krw, now_iso=now_iso,
-                )
+            dashboard_store.record_incident(
+                conn, kind=dashboard_store.INCIDENT_PROVIDER_RESPONSE, summary=summary,
+                stage="candidate_resolution", incurred_cost_krw=incurred_cost_krw, now_iso=now_iso,
+            )
     except Exception:  # noqa: BLE001 — 관측 기록이 원래의 실패 경로를 막지 않는다
         logger.exception("후보 공급자 관측을 저장하지 못했습니다")
 
@@ -289,16 +372,9 @@ async def open_share_link(request: Request, key: str):
                 return _share_redirect_without_cookie(request, "expired")
 
             now_iso = clock.iso_now_kst()
-            client_host = request.client.host if request.client is not None else ""
-            if not share_access.allow_request(clean, client_host, now_iso):
+            if not share_access.allow_request(clean, now_iso):
                 return _share_rate_limited()
-            requester_hash = share_access.requester_hash_of(clean, client_host)
-            if not share_store.mark_opened(
-                conn,
-                clean,
-                now_iso,
-                requester_hash=requester_hash,
-            ):
+            if not share_store.mark_opened(conn, clean, now_iso):
                 # DB writer lock 안에서 폐기·만료가 다시 확인된다. 사전 load 뒤
                 # 상태가 바뀐 경우에는 권한 상태를, 그대로 active면 영속 cap을
                 # 의미하므로 429를 돌려준다.
@@ -441,8 +517,11 @@ async def _resolve_business_candidates(
                 )
             )
         else:
+            guarded_provider = _guard_free_candidate_provider(provider)
             task = asyncio.create_task(
-                asyncio.to_thread(candidate_logic.resolve_candidates, provider, **kwargs)
+                asyncio.to_thread(
+                    candidate_logic.resolve_candidates, guarded_provider, **kwargs
+                )
             )
         result = await asyncio.shield(task)
         settle(result)
@@ -1390,6 +1469,10 @@ async def start_run(
 @router.get("/progress/{job_id}", response_class=HTMLResponse)
 async def progress_page(request: Request, job_id: str):
     """단계별 진행을 보여주는 화면."""
+    request_helpers.mark_public_get_readonly_existing(request)
+    access_blocked = request_helpers.require_report_access(request, job_id)
+    if access_blocked is not None:
+        return access_blocked
     job = job_runtime._JOBS.get(job_id)
     if job is None:
         # 작업 메모리만 사라지고 보고서가 저장된 경우에는 결과로 복구한다.
@@ -1438,8 +1521,14 @@ async def progress_page(request: Request, job_id: str):
 
 
 @router.get("/api/progress/{job_id}")
-async def progress_api(job_id: str):
+async def progress_api(request: Request, job_id: str):
     """진행 화면이 물어보는 곳. 끝났으면 어디로 갈지도 알려준다."""
+    request_helpers.mark_public_get_readonly_existing(request)
+    access_blocked = request_helpers.require_report_access(
+        request, job_id, api=True
+    )
+    if access_blocked is not None:
+        return access_blocked
     job = job_runtime._JOBS.get(job_id)
     if job is None:
         try:

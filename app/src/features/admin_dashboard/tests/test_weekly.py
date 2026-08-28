@@ -22,6 +22,63 @@ def test_empty_weekly_workbook_has_the_three_required_sheets(tmp_path):
     assert workbook["피드백·문제"].freeze_panes == "A5"
 
 
+def test_xlsx_value_boundary_preserves_types_and_neutralizes_formula_prefixes():
+    assert weekly._safe_xlsx_value(7) == 7
+    assert weekly._safe_xlsx_value(12.5) == 12.5
+    assert weekly._safe_xlsx_value("일반 문장") == "일반 문장"
+    assert weekly._safe_xlsx_value("=1+1") == "'=1+1"
+    assert weekly._safe_xlsx_value("  +SUM(A1:A2)") == "'  +SUM(A1:A2)"
+    assert weekly._safe_xlsx_value("\u200b-10") == "'\u200b-10"
+    assert weekly._safe_xlsx_value("\ufeff@SUM(A1:A2)") == "'\ufeff@SUM(A1:A2)"
+    assert weekly._safe_xlsx_value("\x01=1+1") == "'�=1+1"
+
+
+def test_member_text_is_never_an_executable_formula_in_weekly_xlsx(tmp_path):
+    target = tmp_path / "weekly-formula-boundary.db"
+    with db.connect(target) as conn:
+        store.save_survey(
+            conn,
+            report_id="report-formula-boundary",
+            actor_email="member@example.com",
+            rating=5,
+            overall_feedback='=HYPERLINK("https://attacker.invalid", "열기")',
+            business_distinction="+SUM(A1:A2)",
+            add_information="\u200b-10+20",
+            delete_information="@SUM(A1:A2)",
+            now_iso="2026-08-18T10:00:00+09:00",
+        )
+        store.record_error(
+            conn,
+            report_id="report-formula-boundary",
+            actor_email="member@example.com",
+            area="=WEBSERVICE(\"https://attacker.invalid\")",
+            reason="\ufeff+CMD",
+            now_iso="2026-08-18T10:01:00+09:00",
+        )
+        workbook_blob = weekly.build_weekly_workbook(
+            conn,
+            week_start="2026-08-17",
+        )
+
+    workbook = load_workbook(BytesIO(workbook_blob), data_only=False)
+    sheet = workbook["피드백·문제"]
+
+    assert sheet["B5"].value == 5
+    assert sheet["B5"].data_type == "n"
+    assert sheet["E5"].value.startswith("'=")
+    assert sheet["F5"].value.startswith("'+")
+    assert sheet["G5"].value.startswith("'\u200b-")
+    assert sheet["H5"].value.startswith("'@")
+    assert sheet["C9"].value.startswith("'=")
+    assert sheet["D9"].value.startswith("'\ufeff+")
+    assert all(
+        cell.data_type != "f"
+        for worksheet in workbook.worksheets
+        for row in worksheet.iter_rows()
+        for cell in row
+    )
+
+
 def test_weekly_file_is_saved_once_for_a_week_and_downloadable_from_storage(tmp_path):
     target = tmp_path / "weekly.db"
     with db.connect(target) as conn:

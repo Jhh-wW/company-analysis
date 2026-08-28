@@ -1,4 +1,10 @@
-"""실행 중 SQLite를 S3 호환 저장소에 올리고 다시 검증한다."""
+"""과거 DB-only S3 mechanics와 운영 fail-closed 경계.
+
+불변 PDF 도입 뒤 운영 백업 단위는 DB 두 파일이 아니라 recovery generation
+전체다. 공개 ``run_backup``은 generation object set까지 결속하는 서명 manifest
+adapter가 구현될 때까지 계속 업로드 전 차단한다. 아래 mechanics는 과거 wire
+계약을 시험하기 위한 내부 capability일 뿐 운영 caller에서 참조할 수 없다.
+"""
 
 from __future__ import annotations
 
@@ -44,8 +50,8 @@ _BACKUP_NAME_RE = re.compile(
 _RUN_LOCK = threading.Lock()
 _TEST_ONLY_MECHANICS_TOKEN = object()
 PRODUCTION_TRUST_BLOCKER_MESSAGE: Final[str] = (
-    "운영 manifest의 고정 공개키 commit 검증과 독립 checkpoint adapter가 "
-    "구현되지 않아 외부 백업을 차단합니다"
+    "복구 세대(DB+불변 artifact) 전체를 결속하는 운영 manifest의 고정 공개키 "
+    "commit 검증과 독립 checkpoint adapter가 구현되지 않아 외부 백업을 차단합니다"
 )
 
 

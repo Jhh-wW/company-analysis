@@ -41,7 +41,8 @@
 - `app/`: FastAPI 화면, 인증, 비용·공유 제어, pipeline 조립, 저장, PDF·Notion
 - `analysis_engine/`: 실제 회사 식별·자료 수집·판정 엔진
 - `docs/출력물 기준/`: 사람이 읽는 내용·출고 정본
-- `render.yaml`: 관리자 전용 웹 1개와 인증된 정기 작업 3개의 배포 전 Blueprint
+- `render.yaml`: 관리자 전용 웹 1개만 선언한 Blueprint. 인증된 정기 작업 3개는
+  코드·내부 경로까지만 있고 운영 adapter가 없어 아직 cron으로 선언하지 않음
 - `.github/workflows/quality-gate.yml`: app·engine 회귀 시험과 Docker health 확인
 
 `analysis_engine`은 독립 설치 패키지가 아니다. `app/src/features/pipeline/real.py`가
@@ -153,17 +154,20 @@ GET/POST는 `410 Gone`이며 구형 세 역할 승인 테이블은
    「아직 배포 안 했다」는 뜻이 아니다)
 - 첫 무료 배포는 Uvicorn worker `1`, Render instance `1`, 임시 `/var/data`이며 잠듦·재시작 시
   세션·보고서·실행 기록 초기화를 허용한다. 정식 베타 전에는 Starter와 영속 디스크로 전환한다.
-- 매일 04:00 KST 외부 SQLite 백업, 월요일 04:10 주간 관리자 XLSX,
-  매일 04:20 휴지통·멈춘 작업 정리가 Blueprint에 선언되어 있다.
+- 매일 04:00 KST 외부 recovery-generation 백업, 월요일 04:10 주간 관리자 XLSX,
+  매일 04:20 휴지통·멈춘 작업 정리는 **후속 목표 시각**이다. 현재 Blueprint에는
+  production adapter가 없어 cron을 의도적으로 선언하지 않았다.
 - cron은 영속 디스크를 직접 읽지 않고, 서로 분리된 32바이트 이상 Bearer 비밀과 정확한
   HTTPS 내부 경로로 웹에 요청한다. redirect는 거부하고 작업은 기간별 claim으로 멱등화한다.
-- SQLite 백업과 `.sha256`을 함께 내려받아 검증한다.
+- SQLite snapshot과 그 snapshot이 참조하는 최초 승인 PDF를 묶은 `rg-...` 복구 세대
+  전체를 내려받아 `backup_sqlite.py verify <세대 디렉터리>`로 검증한다. DB 한 파일은
+  신규 PDF 복구 자료로 인정하지 않는다.
 - DB와 별도로 OAuth·provider·Notion 비밀, `SHARE_PUBLIC_BASE_URL`,
   `PROVENANCE_SEAL_SECRET`을 비밀 관리자에 보관
 
-위 정기 작업은 코드·로컬 회귀까지만 완료했다. 실제 Render 서비스, trigger URL,
-S3 bucket·권한·실패 알림은 아직 만들거나 실행하지 않았으며 사용자 지시에 따라 배포
-직전에 멈춘 상태다.
+위 정기 작업은 코드·로컬 회귀까지만 완료했다. 실제 Render trigger URL,
+S3 bucket·권한·독립 signer/checkpoint·실패 알림은 아직 만들거나 실행하지 않았다.
+현재 웹 배포 버튼만 눌러도 이 재해 복구 경계가 자동으로 생기지는 않는다.
 
 `PROVENANCE_SEAL_SECRET`을 잃거나 바꾸면 기존 seal·캐시의 신뢰를 복구할 수 없어
 출고가 차단된다. 구형 참여자 JSON은 과거 감사자료의 역할 해석에만 필요하다.

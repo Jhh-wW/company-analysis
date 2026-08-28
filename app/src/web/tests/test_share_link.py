@@ -15,6 +15,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import inspect
 import re
 import time
 import uuid
@@ -35,12 +37,13 @@ from src.features.pipeline.canonical_demo import (
 from src.features.pipeline.demo import DemoPipeline
 from src.features.pipeline.port import CompanyCard, Outcome
 from src.features.report_standard import CANONICAL_SECTION_IDS
+from src.features.sharelink import access_control as share_access
 from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import logic as share_logic
 from src.features.sharelink import store as share_store
 from src.features.sharelink import tracks as share_tracks
 from src.features.sharelink.constants import (
-    ACCESS_PER_REQUESTER_LIMIT,
+    ACCESS_PER_CAPABILITY_LIMIT,
     KEY_COOKIE_NAME,
     PER_LINK_DAILY_BUDGET_KRW,
     PUBLIC_BUCKET,
@@ -109,6 +112,14 @@ def test_시험공개에서도_살아있는_링크는_자동출고본문과PDF�
         report_store.save(
             conn, report_id, "demo-corp", report.job, report
         )
+    reports_router.finalize_new_report_delivery(
+        report_id=report_id,
+        corp_id="demo-corp",
+        billing_bucket_id="link-test",
+        report=report,
+        actual_models=("deterministic-demo",),
+        reused_from_cache=False,
+    )
     _링크발급(_카카오열쇠, report.company, report_id=report_id)
     monkeypatch.setenv(auth_constants.ENV_BETA_ADMIN_ONLY, "1")
     monkeypatch.setattr(reports_router, "_release_state", _REAL_RELEASE_STATE)
@@ -137,7 +148,9 @@ def test_시험공개에서도_살아있는_링크는_자동출고본문과PDF�
         views = share_store.list_report_view_events_by_hash(
             conn, share_store.key_hash_of(_카카오열쇠)
         )
-    assert [view.report_id for view in views] == [report_id]
+    # 결과/PDF GET은 권한 판정·Delivery 읽기만 한다. 조회 KPI 쓰기는 immutable
+    # 공개 GET 계약과 충돌하므로 /k open 사건만 별도 원장에 남는다.
+    assert views == []
 
 
 def test_LINK결과는_조회사건연결을_다시확인하지못하면_열지않는다(
@@ -359,7 +372,7 @@ def test_열어보면_offset포함_KST_기록이_남는다(
     assert [event.opened_count for event in events] == [2]
 
 
-def test_반복_GET은_DB와_응답에서_요청자_상한을_지킨다(
+def test_반복_GET은_개인을_식별하지않고_링크전체상한을_지킨다(
     client: TestClient,
     monkeypatch,
 ):
@@ -367,9 +380,20 @@ def test_반복_GET은_DB와_응답에서_요청자_상한을_지킨다(
     fixed = "2026-08-20T00:30:00+09:00"
     monkeypatch.setattr(analysis_router.clock, "iso_now_kst", lambda: fixed)
 
+    def requester_path_must_not_run(*_args, **_kwargs):
+        raise AssertionError("LINK GET이 요청자 식별 함수를 불렀습니다")
+
+    # 과거 함수 이름을 일부러 폭탄으로 심는다. 실제 /k 경로가 이 값을 읽지 않아야 한다.
+    monkeypatch.setattr(
+        share_access,
+        "requester_hash_of",
+        requester_path_must_not_run,
+        raising=False,
+    )
+
     responses = [
         client.get(f"/k/{_카카오열쇠}", follow_redirects=False)
-        for _ in range(ACCESS_PER_REQUESTER_LIMIT + 1)
+        for _ in range(ACCESS_PER_CAPABILITY_LIMIT + 1)
     ]
 
     assert all(response.status_code == 303 for response in responses[:-1])
@@ -386,13 +410,19 @@ def test_반복_GET은_DB와_응답에서_요청자_상한을_지킨다(
             f"FROM {share_store.TABLE_ACCESS_SUBJECTS}"
         ).fetchall()
         dump = "\n".join(conn.iterdump())
-    assert link is not None and link.opened_count == ACCESS_PER_REQUESTER_LIMIT
-    assert [int(row[0]) for row in windows] == [ACCESS_PER_REQUESTER_LIMIT]
-    assert len(subjects) == 1
-    assert len(str(subjects[0][0])) == 64
-    assert int(subjects[0][1]) == ACCESS_PER_REQUESTER_LIMIT
+    assert link is not None and link.opened_count == ACCESS_PER_CAPABILITY_LIMIT
+    assert [int(row[0]) for row in windows] == [ACCESS_PER_CAPABILITY_LIMIT]
+    assert subjects == []
     assert _카카오열쇠 not in dump
     assert "testclient" not in dump
+
+
+def test_LINK_GET_제품경로에는_IP나_요청자_파생의존이_없다() -> None:
+    source = inspect.getsource(analysis_router.open_share_link)
+
+    assert "request.client" not in source
+    assert "client_host" not in source
+    assert "requester" not in source
 
 
 def test_처음_열어본_시각은_안_덮인다(client: TestClient):
@@ -820,7 +850,8 @@ def test_열쇠_없는_손님도_상한을_받는다(client: TestClient, monkeyp
 
 def _로그인시킨다(client: TestClient, email: str, *, is_admin: bool = False) -> None:
     """이 손님을 «로그인한 상태»로 만든다 (초대 여부는 별개다)."""
-    session = auth_logic.create_session(email, is_admin)
+    subject = "google:test-" + hashlib.sha256(email.encode("utf-8")).hexdigest()[:20]
+    session = auth_logic.create_session(email, is_admin, subject=subject)
     client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
 
 

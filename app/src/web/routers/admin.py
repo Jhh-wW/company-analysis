@@ -18,6 +18,7 @@ from src.features.feedback_report import logic as feedback_logic
 from src.features.observability import admin_audit, admin_audit_store
 from src.features.budget import constants as budget_constants
 from src.features.budget import spend_store
+from src.features.budget import state_machine as budget_state_machine
 from src.features.pipeline.demo import DemoPipeline
 from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import constants as share_constants
@@ -211,7 +212,12 @@ def _assert_access_write_ready(conn) -> None:
     share_store.list_all(conn)
     share_allow.list_all(conn)
     spend_store.ensure_schema(conn)
-    spend_store.load_day(conn, clock.today_kst())
+    if budget_state_machine.cutover_applied(conn):
+        # 전환 뒤 입장 판단의 정본은 attempt 원장이다. 폐기 예정인 legacy 표를
+        # 읽을 수 있다는 사실로 새 원장이 정상이라고 오판하지 않는다.
+        budget_state_machine.load_day_exposures(conn, day=clock.today_kst())
+    else:
+        spend_store.load_day(conn, clock.today_kst())
     spend_store.load_overrun_day(conn, clock.today_kst())
     _assert_budget_store_healthy()
 
@@ -274,7 +280,16 @@ def _access_context(request: Request, *, today: dt.date, **kwargs) -> dict:
             links = share_store.list_all(conn)
             members = share_allow.list_all(conn)
             spend_store.ensure_schema(conn)
-            spend = spend_store.load_day(conn, today)
+            if budget_state_machine.cutover_applied(conn):
+                exposure = budget_state_machine.load_day_exposures(conn, day=today)
+                spent_today = exposure.total.known_cost_krw
+                liability_today = exposure.total.liability_krw
+                reservation_today = exposure.total.reservation_krw
+            else:
+                spend = spend_store.load_day(conn, today)
+                spent_today = spend.total_krw
+                liability_today = 0.0
+                reservation_today = 0.0
             overrun = spend_store.load_overrun_day(conn, today)
             for link in links:
                 try:
@@ -311,10 +326,11 @@ def _access_context(request: Request, *, today: dt.date, **kwargs) -> dict:
         member.email: _kst_timestamp_label(member.invited_at)
         for member in members
     }
-    # MEMBER는 금액 통장이 아니라 KST 성공 보고서 3건으로 제한한다. 여기에 임의
-    # 금액을 넣으면 폐기한 1,000원 정책이 다시 운영 수치로 살아난다.
+    # LINK·MEMBER는 각각 독립 통장이므로 활성 개수만큼 입장 상한이 생긴다.
+    # MEMBER는 이 금액 제한에 더해 KST 성공 보고서 3건 제한도 함께 적용한다.
     configured_stop_threshold = (
         active_link_count * (share_tracks.budget_of(share_tracks.Track.LINK) or 0.0)
+        + len(members) * (share_tracks.budget_of(share_tracks.Track.MEMBER) or 0.0)
         + (share_tracks.budget_of(share_tracks.Track.ADMIN) or 0.0)
     )
     paid_research_closed, paid_research_closed_reason = _paid_research_status()
@@ -331,10 +347,12 @@ def _access_context(request: Request, *, today: dt.date, **kwargs) -> dict:
         link_expiry_date_labels=link_expiry_date_labels,
         members=members,
         member_invited_at_labels=member_invited_at_labels,
-        spent_today=spend.total_krw,
+        spent_today=spent_today,
+        liability_today=liability_today,
+        reservation_today=reservation_today,
         configured_stop_threshold_krw=configured_stop_threshold,
         actual_over_threshold_krw=max(
-            0.0, spend.total_krw - configured_stop_threshold
+            0.0, spent_today - configured_stop_threshold
         ),
         estimate_overrun_count=overrun.count,
         estimate_overrun_krw=overrun.excess_krw,
@@ -1019,6 +1037,9 @@ async def admin_budget_settle(
     request: Request,
     run_id: str = Form("", max_length=RUN_ID_MAX_CHARS),
     phase: str = Form("", max_length=PHASE_MAX_CHARS),
+    attempt_id: str = Form("", max_length=RUN_ID_MAX_CHARS),
+    resolution_action: str = Form("", max_length=48),
+    actual_cost_krw: str = Form("", max_length=32),
     csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
 ):
     """미확정 유료 단계 하나를 «대사 완료»로 마감한다.
@@ -1033,21 +1054,64 @@ async def admin_budget_settle(
       하루 상한이 느슨해지지 않는다 (`paid_runtime.settle_unresolved_spend`).
     """
     action = "admin.budget.settle"
-    target = admin_audit.target_id("budget", "inflight")
+    target = admin_audit.target_id(
+        "budget-attempt" if attempt_id else "budget",
+        attempt_id or "inflight",
+    )
     blocked = request_helpers.require_admin_action(
         request, csrf_token, action=action, target=target
     )
     if blocked is not None:
         return blocked
 
-    마감했나, notice = paid_runtime.settle_unresolved_spend(run_id, phase)
+    reason = "settle_failed"
+    if attempt_id:
+        try:
+            resolution = budget_state_machine.ResolutionAction(resolution_action)
+            if resolution is budget_state_machine.ResolutionAction.CONFIRM_ACTUAL:
+                actual = float(actual_cost_krw)
+            else:
+                actual = None
+        except (TypeError, ValueError):
+            마감했나, notice = (
+                False,
+                "확인한 결과와 실제 비용 값을 다시 확인해 주세요.",
+            )
+        else:
+            마감했나, notice = paid_runtime.resolve_budget_liability(
+                attempt_id=attempt_id,
+                action=resolution,
+                actual_cost_krw=actual,
+                actor_id=admin_audit.actor_id(request),
+                reason_code={
+                    budget_state_machine.ResolutionAction.CONFIRM_ACTUAL:
+                        "provider-actual-confirmed",
+                    budget_state_machine.ResolutionAction.CONFIRM_ZERO:
+                        "provider-zero-confirmed",
+                    budget_state_machine.ResolutionAction.CONFIRM_CONSERVATIVE_LIABILITY:
+                        "liability-retained",
+                }[resolution],
+            )
+            if 마감했나:
+                reason = {
+                    budget_state_machine.ResolutionAction.CONFIRM_ACTUAL:
+                        "actual_confirmed",
+                    budget_state_machine.ResolutionAction.CONFIRM_ZERO:
+                        "zero_confirmed",
+                    budget_state_machine.ResolutionAction.CONFIRM_CONSERVATIVE_LIABILITY:
+                        "liability_retained",
+                }[resolution]
+    else:
+        마감했나, notice = paid_runtime.settle_unresolved_spend(run_id, phase)
+        if 마감했나:
+            reason = "legacy_settled"
 
     # 돈을 «썼다고 확정»하는 일이라 성공도 실패도 기록에 남긴다.
     _mirror_committed_change(
         request,
         action=action,
         target=target,
-        reason="settled" if 마감했나 else "settle_failed",
+        reason=reason,
     )
     막힌채, _사유 = paid_runtime.paid_research_block()
     if 마감했나 and not 막힌채:

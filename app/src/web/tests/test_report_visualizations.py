@@ -15,6 +15,7 @@ from src.features.auth import logic as auth_logic
 from src.features.pipeline.canonical_demo import build_demo_report
 from src.web import job_runtime
 from src.web.main import app
+from src.web.tests.report_route_support import serve_legacy_report_snapshot
 
 
 _COMPOSITION_CAPTION = "2026년 상반기 매출 구성 (단위: %)"
@@ -155,7 +156,7 @@ def _render_demo(monkeypatch: pytest.MonkeyPatch) -> tuple[_RenderedDOM, str]:
     report = build_demo_report()
     job_id = f"report-visualizations-{uuid.uuid4().hex}"
     job_runtime._JOBS.pop(job_id, None)
-    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _report_id: report)
+    serve_legacy_report_snapshot(monkeypatch, report, report_id=job_id)
     monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
     session = auth_logic.create_session("admin@example.com", True)
 

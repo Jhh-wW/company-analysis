@@ -23,6 +23,7 @@ from src.features.report_standard.section_content import (
 )
 from src.web import job_runtime
 from src.web import main as web_main
+from src.web.tests.report_route_support import serve_legacy_report_snapshot
 
 
 def _compact(text: str) -> str:
@@ -52,7 +53,7 @@ def _notion_text(blocks: list[dict[str, Any]]) -> str:
 def _render_web(report, monkeypatch: pytest.MonkeyPatch):
     report_id = "section-content-channel-parity"
     job_runtime._JOBS.pop(report_id, None)
-    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _report_id: report)
+    serve_legacy_report_snapshot(monkeypatch, report, report_id=report_id)
     monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
     session = auth_logic.create_session("admin@example.com", True)
 

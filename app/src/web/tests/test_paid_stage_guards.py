@@ -951,6 +951,8 @@ def test_바깥요청이_취소돼도_실제_worker가_끝날때까지_동시자
                 outcome=Outcome.GATE_STOPPED,
                 cost_krw=self.pipeline_cost,
                 model="pipeline-model",
+                reused_content_snapshot_id="cancel-origin-content",
+                reused_artifact_id="cancel-origin-artifact",
             )
 
     pipeline = BlockingRunPipeline()
@@ -1033,6 +1035,8 @@ def test_바깥요청이_취소돼도_실제_worker가_끝날때까지_동시자
     assert job.result is not None
     assert job.result.cost_krw == pipeline.pipeline_cost
     assert not job.result.billing_uncertain
+    assert job.delivery_origin_content_id == "cancel-origin-content"
+    assert job.delivery_origin_artifact_id == "cancel-origin-artifact"
     assert paid_runtime._RUNNING == MAX_CONCURRENT_RUNS - 1
     for stored_bucket in other_slots:
         assert stored_bucket is not None

@@ -105,6 +105,12 @@ SESSION_TOKEN_BYTES: Final[int] = 32
 LOCAL_DEMO_AUTH_TOKEN_HEX_CHARS: Final[int] = 64
 #: state는 로그인 흐름(리다이렉트 왕복) 동안만 살아있으면 된다.
 STATE_MAX_AGE_SEC: Final[int] = 600  # 10분
+#: ``token_urlsafe(32)``가 만드는 padding 없는 URL-safe 문자열의 정확한 길이.
+#: 콜백의 공개 입력은 이 모양이 아니면 DB와 구글에 닿기 전에 거부한다.
+STATE_TOKEN_CHARS: Final[int] = 43
+#: 아직 만료되지 않은 OAuth 로그인 왕복을 서버가 동시에 기억할 최대 개수.
+#: 로그인 시작을 무한 호출해도 SQLite가 끝없이 자라지 않게 한다.
+OAUTH_STATE_MAX_RECORDS: Final[int] = 256
 #: capability URL을 깨끗한 주소로 바꾼 뒤 로그인 폼을 끝낼 짧은 시간.
 LOCAL_DEMO_GRANT_MAX_AGE_SEC: Final[int] = 120
 #: 세션 유효시간. 너무 길면 탈취됐을 때 위험이 커지고, 너무 짧으면 자꾸 다시 로그인해야 한다.
@@ -113,3 +119,17 @@ SESSION_MAX_AGE_SEC: Final[int] = 8 * 60 * 60  # 8시간
 # ── 네트워크 ──────────────────────────────────────────────
 #: 구글 서버 호출 타임아웃(초). 응답이 없을 때 화면이 무한히 멈추지 않게 한다.
 HTTP_TIMEOUT_SEC: Final[int] = 10
+#: 토큰 교환과 사용자 정보 조회를 합친 OAuth 제공자 통신의 전체 제한시간.
+OAUTH_PROVIDER_TOTAL_DEADLINE_SEC: Final[float] = 15.0
+#: worker가 deadline 예외를 event loop에 돌려줄 아주 짧은 정리 여유.
+OAUTH_DEADLINE_RETURN_GRACE_SEC: Final[float] = 0.1
+#: worker=1 웹 프로세스에서 동시에 구글과 통신할 수 있는 콜백 수.
+OAUTH_PROVIDER_MAX_CONCURRENCY: Final[int] = 2
+#: 고정 슬롯이 찼을 때 브라우저에 안내할 최소 재시도 간격.
+OAUTH_OVERLOAD_RETRY_AFTER_SEC: Final[int] = 2
+#: 공개 콜백의 인가 코드에 허용할 최대 길이. 구글의 정상 코드는 이보다 훨씬 짧다.
+OAUTH_CODE_MAX_CHARS: Final[int] = 4096
+#: Google token/userinfo JSON 한 건의 실제 바이트 상한. 로그인 응답은 매우 작다.
+OAUTH_RESPONSE_MAX_BYTES: Final[int] = 64 * 1024
+#: 내부 진단용 Google 오류 본문도 전부 읽지 않고 이 크기까지만 본다.
+OAUTH_ERROR_RESPONSE_MAX_BYTES: Final[int] = 4 * 1024

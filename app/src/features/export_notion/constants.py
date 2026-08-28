@@ -32,6 +32,8 @@ NOTION_VERSION: Final[str] = "2022-06-28"
 
 #: 노션 서버 호출 타임아웃(초). 응답이 없을 때 화면이 무한히 멈추지 않게 한다.
 HTTP_TIMEOUT_SEC: Final[int] = 15
+#: 페이지/블록 응답 JSON의 선언값과 실제 읽기에 함께 적용하는 상한.
+API_RESPONSE_MAX_BYTES: Final[int] = 2 * 1024 * 1024
 
 #: 명시적 429 + 유효한 Retry-After만 재시도한다. 타임아웃·5xx는 원격 적용
 #: 여부를 알 수 없으므로 절대 자동 재시도하지 않는다.

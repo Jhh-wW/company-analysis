@@ -153,6 +153,16 @@ class ProviderBudget:
                 # 비용은 숨기지 않고 전액 반영하며 차이를 관측값으로 남긴다.
                 self._estimate_overrun_krw += actual - estimate
 
+    def cancel_before_dispatch(self, reservation: CallReservation) -> None:
+        """provider에 보내지 않았음이 확실할 때만 호출 예약을 전액 반환한다."""
+        with self._lock:
+            estimate = self._pending.pop(reservation.call_id, None)
+            if estimate is None:
+                raise ProviderCostInvariantError(
+                    "취소할 provider 호출 예약이 없거나 이미 마감됐습니다"
+                )
+            self._held_estimated_krw -= estimate
+
     def mark_unknown(self, reservation: CallReservation) -> None:
         """예외·usage 누락은 호출 전 예상비용을 반환하지 않는다."""
         with self._lock:

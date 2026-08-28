@@ -29,6 +29,7 @@ OPERATIONS: Final[frozenset[str]] = frozenset(
 STALE_RUNNING_AFTER: Final[timedelta] = timedelta(minutes=30)
 
 ConnectionFactory = Callable[[], AbstractContextManager[sqlite3.Connection]]
+CleanupRunner = Callable[..., int]
 
 
 class MaintenanceConfigurationError(RuntimeError):
@@ -72,6 +73,7 @@ def run_operation(
     today: date,
     now_iso: str,
     actor_email: str = SYSTEM_ACTOR_EMAIL,
+    cleanup_runner: CleanupRunner | None = None,
 ) -> MaintenanceResult:
     """관리자 버튼과 내부 cron이 공유하는 유일한 정기 작업 실행 진입점."""
     if operation == OPERATION_WEEKLY:
@@ -87,6 +89,7 @@ def run_operation(
             today=today,
             now_iso=now_iso,
             actor_email=actor_email,
+            cleanup_runner=cleanup_runner,
         )
     raise ValueError("지원하지 않는 정기 작업입니다")
 
@@ -96,16 +99,19 @@ def run_current_operation(
     *,
     operation: str,
     actor_email: str = SYSTEM_ACTOR_EMAIL,
+    cleanup_runner: CleanupRunner | None = None,
 ) -> MaintenanceResult:
     """한 번 캡처한 KST 시각으로 기간 판정과 원장 시각을 함께 고정한다."""
     current = clock.now_kst()
-    return run_operation(
-        connect,
-        operation=operation,
-        today=current.date(),
-        now_iso=current.isoformat(timespec="seconds"),
-        actor_email=actor_email,
-    )
+    kwargs = {
+        "operation": operation,
+        "today": current.date(),
+        "now_iso": current.isoformat(timespec="seconds"),
+        "actor_email": actor_email,
+    }
+    if cleanup_runner is not None:
+        kwargs["cleanup_runner"] = cleanup_runner
+    return run_operation(connect, **kwargs)
 
 
 def run_weekly_xlsx(
@@ -177,6 +183,7 @@ def run_daily_cleanup(
     today: date,
     now_iso: str,
     actor_email: str = SYSTEM_ACTOR_EMAIL,
+    cleanup_runner: CleanupRunner | None = None,
 ) -> MaintenanceResult:
     """30일 휴지통과 이전 날짜 멈춘 작업을 AI 호출 없이 멱등 정리한다."""
     day = today.isoformat()
@@ -201,7 +208,12 @@ def run_daily_cleanup(
                 before_iso=f"{day}T00:00:00+09:00",
                 now_iso=now_iso,
             )
-            purged = store.purge_expired_trash(conn, now_iso=now_iso)
+        if cleanup_runner is None:
+            with connect() as conn:
+                purged = store.purge_expired_trash(conn, now_iso=now_iso)
+        else:
+            purged = cleanup_runner(connect, now_iso=now_iso)
+        with connect() as conn:
             if not store.complete_operation(
                 conn,
                 key=claim,

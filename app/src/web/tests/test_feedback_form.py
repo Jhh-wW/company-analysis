@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
+from src.features.admin_dashboard import store as dashboard_store
 from src.features.budget import logic as budget_logic
 from src.features.budget import spend_store
 from src.features.business_candidate import logic as candidate_logic
@@ -34,6 +35,8 @@ from src.features.pipeline.port import (
     RunResult,
     UserInput,
 )
+from src.features.report_access import constants as report_access_constants
+from src.features.report_access import store as report_access_store
 from src.features.sharelink import allowlist
 from src.features.sharelink import tracks as share_tracks
 from src.features.sharelink.constants import PUBLIC_BUCKET
@@ -44,7 +47,10 @@ from src.web.routers import feedback
 
 
 def _session_client(
-    *, email: str = "admin@example.com", is_admin: bool = True
+    *,
+    email: str = "admin@example.com",
+    is_admin: bool = True,
+    subject: str | None = None,
 ) -> tuple[TestClient, str]:
     """CSRF와 Origin이 맞는 로그인 손님 클라이언트.
 
@@ -58,7 +64,7 @@ def _session_client(
         base_url="http://127.0.0.1:8000",
         headers={"Origin": "http://127.0.0.1:8000"},
     )
-    session = auth_logic.create_session(email, is_admin)
+    session = auth_logic.create_session(email, is_admin, subject=subject)
     client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
     return client, auth_logic.csrf_token_for_session(session.token)
 
@@ -470,9 +476,18 @@ def _stopped_job(job_id: str) -> job_runtime.Job:
 
 def test_중단화면에_생성중_단계_신고링크와_보고서식별자가_있다():
     job_id = uuid.uuid4().hex
-    job_runtime._JOBS[job_id] = _stopped_job(job_id)
     try:
         with TestClient(main.app) as client:
+            # lifespan이 Job 메모리를 초기화한 뒤, 실제 시작 응답이 남겼을
+            # grant와 in-memory Job을 같은 순서로 준비한다.
+            job_runtime._JOBS[job_id] = _stopped_job(job_id)
+            with storage_db.connect() as conn:
+                grant = report_access_store.issue_and_bind(
+                    conn, existing_token="", run_id=job_id
+                )
+            client.cookies.set(
+                report_access_constants.PUBLIC_GRANT_COOKIE_NAME, grant.token
+            )
             response = client.get(f"/result/{job_id}")
     finally:
         job_runtime._JOBS.pop(job_id, None)
@@ -486,14 +501,37 @@ def test_중단화면에_생성중_단계_신고링크와_보고서식별자가_
 
 
 def test_결과화면은_기존신고폼_대신_새_신고링크를_보여준다():
-    report_id = f"feedback-entry-{uuid.uuid4().hex}"
+    report_id = uuid.uuid4().hex
+    subject = "google:feedback-entry-owner"
     with storage_db.connect() as conn:
         report_store.save(conn, report_id, "CORP-001", "", build_demo_report())
         assert allowlist.invite(
             conn, email="member@example.com", note="", now_iso="2026-08-24T10:00:00+09:00"
         )
+        assert dashboard_store.reserve_member_run(
+            conn,
+            run_id=report_id,
+            actor_email="member@example.com",
+            day="2026-08-24",
+            now_iso="2026-08-24T10:00:00+09:00",
+        )
+        assert report_access_store.bind_member_run(
+            conn, run_id=report_id, identity_subject=subject
+        )
+        assert report_access_store.bind_report(
+            conn, run_id=report_id, report_id=report_id
+        )
+        assert dashboard_store.settle_member_run(
+            conn,
+            run_id=report_id,
+            succeeded=True,
+            report_id=report_id,
+            now_iso="2026-08-24T10:01:00+09:00",
+        )
 
-    client, _csrf = _session_client(email="member@example.com", is_admin=False)
+    client, _csrf = _session_client(
+        email="member@example.com", is_admin=False, subject=subject
+    )
     response = client.get(f"/result/{report_id}")
 
     assert response.status_code == 200
@@ -505,14 +543,37 @@ def test_결과화면은_기존신고폼_대신_새_신고링크를_보여준다
 
 def test_기존_reports_errors_라우트는_삭제되지_않고_그대로_동작한다():
     """화면 진입만 새 시스템으로 바뀌었을 뿐, 회원 전용 차단형 신고 경로는 그대로다."""
-    report_id = f"legacy-errors-{uuid.uuid4().hex}"
+    report_id = uuid.uuid4().hex
+    subject = "google:legacy-errors-owner"
     with storage_db.connect() as conn:
         report_store.save(conn, report_id, "CORP-001", "", build_demo_report())
         assert allowlist.invite(
             conn, email="legacy-member@example.com", note="",
             now_iso="2026-08-24T10:00:00+09:00",
         )
-    client, csrf = _session_client(email="legacy-member@example.com", is_admin=False)
+        assert dashboard_store.reserve_member_run(
+            conn,
+            run_id=report_id,
+            actor_email="legacy-member@example.com",
+            day="2026-08-24",
+            now_iso="2026-08-24T10:00:00+09:00",
+        )
+        assert report_access_store.bind_member_run(
+            conn, run_id=report_id, identity_subject=subject
+        )
+        assert report_access_store.bind_report(
+            conn, run_id=report_id, report_id=report_id
+        )
+        assert dashboard_store.settle_member_run(
+            conn,
+            run_id=report_id,
+            succeeded=True,
+            report_id=report_id,
+            now_iso="2026-08-24T10:01:00+09:00",
+        )
+    client, csrf = _session_client(
+        email="legacy-member@example.com", is_admin=False, subject=subject
+    )
 
     reported = client.post(
         f"/reports/{report_id}/errors",
@@ -523,7 +584,7 @@ def test_기존_reports_errors_라우트는_삭제되지_않고_그대로_동작
 
     assert reported.status_code == 303
     assert blocked_result.status_code == 409
-    assert "오류 신고가 접수되어" in blocked_result.text
+    assert "보고서를 열 수 없습니다" in blocked_result.text
 
 
 def test_narrow_beta_공유경로목록에_feedback이_포함된다():

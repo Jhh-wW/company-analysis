@@ -11,10 +11,19 @@ from src.core import persistent_schema
 
 
 EXPECTED_TABLES = {
+    "src.features.auth.state_store": {"oauth_login_states"},
     "src.features.budget.spend_store": {
         "budget_spend_events",
         "budget_spend_inflight",
         "budget_spend_overruns",
+        "budget_schema_migrations",
+        "budget_phase_accounts",
+        "budget_provider_attempts",
+        "budget_provider_attempt_events",
+    },
+    "src.features.provider_health.store": {
+        "provider_health_states",
+        "provider_health_events",
     },
     "src.features.observability.lifecycle": {
         "observability_run_lifecycle",
@@ -43,6 +52,36 @@ EXPECTED_TABLES = {
     "src.features.feedback_report.store": {
         "feedback_reports",
         "feedback_report_events",
+    },
+    "src.features.report_delivery.store": {
+        "report_delivery_source_snapshots",
+        "report_delivery_cache_namespaces",
+        "report_delivery_content_snapshots",
+        "report_delivery_deliveries",
+        "report_delivery_cache_entries",
+        "report_delivery_cache_invalidations",
+        "report_delivery_intents",
+    },
+    "src.features.report_delivery.artifact": {
+        "artifact_blob_intents",
+        "artifact_blob_intent_events",
+        "report_delivery_artifacts",
+        "report_delivery_delivery_artifacts",
+    },
+    "src.features.report_delivery.retention": {
+        "report_delivery_retirement_intents",
+        "report_delivery_retirement_events",
+        "report_delivery_retired_public_ids",
+    },
+    "src.features.report_delivery.singleflight": {
+        "report_delivery_singleflight_leases",
+    },
+    "src.features.report_access.store": {
+        "report_access_public_grants",
+        "report_access_public_bindings",
+        "report_access_member_bindings",
+        "report_access_cutover",
+        "report_access_legacy_resources",
     },
 }
 

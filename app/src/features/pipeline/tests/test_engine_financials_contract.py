@@ -35,6 +35,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 from typing import Any
 
 import pytest
@@ -126,6 +127,29 @@ def test_세_해를_다_물어본다(monkeypatch: pytest.MonkeyPatch) -> None:
     engine.fetch_financials("00000000", counter)
 
     assert counter.ticks == 3
+
+
+def test_재무연도는_조사_시작일을_기준으로_고정한다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """자정이 지나도 한 조사 안에서 조회 사업연도가 바뀌면 안 된다."""
+
+    engine = real._engine()
+    받은연도: list[int] = []
+
+    def 가짜_get_json(endpoint: str, params: dict[str, Any], counter: Any) -> dict[str, Any]:
+        받은연도.append(int(params["bsns_year"]))
+        return {"status": "013"}
+
+    monkeypatch.setattr(engine, "get_json", 가짜_get_json)
+
+    engine.fetch_financials(
+        "00222374",
+        _계수기(),
+        business_date=dt.date(2030, 1, 1),
+    )
+
+    assert 받은연도 == [2029, 2028, 2027]
 
 
 def _올해() -> int:

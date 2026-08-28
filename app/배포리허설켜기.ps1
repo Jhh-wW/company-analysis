@@ -85,7 +85,7 @@ $plainTextSecretEnvironmentNames = @("GOOGLE_CLIENT_ID")
 $uvicornLimitConcurrency = 20
 $uvicornBacklog = 32
 $uvicornKeepAliveSeconds = 5
-$uvicornGracefulShutdownSeconds = 300
+$uvicornGracefulShutdownSeconds = 20
 $uvicornLogLevel = "info"
 
 function Get-CompatibleChildEnvironment {
