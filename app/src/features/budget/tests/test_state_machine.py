@@ -726,6 +726,61 @@ def test_cutover는_JSONL에만_있던_확정차액을_조용히_버리지않는
     connection.close()
 
 
+def test_cutover는_옛관측이_원장보다_작아도_서버를_못뜨게_하지_않는다(caplog) -> None:
+    """★ 2026-08-29 운영 사고 — 이 검사가 서버 기동을 통째로 막았다.
+
+    Render 배포가 `Exited with status 3` 로 죽었고, 원인은
+    「legacy DB 확정 비용이 관측 최종 비용보다 큽니다」였다.
+
+    ★ 왜 중단이 틀렸나
+      원장(구 DB)이 옛 관측값보다 «크다»는 것은 우리가 이미 더 많이 세어 뒀다는 뜻이다 —
+      돈이 «빠진» 게 아니라 오히려 보수적인 쪽이다. 게다가 옛 JSONL 은 손상 이력이
+      문서에 남아 있어(`app/docs/출시전_수정_지시서.md` 「관측 정본 정정」)
+      덜 적혀 있는 것이 정상이다.
+
+    ⚠️ 그래도 «조용히» 넘기지는 않는다 — 개수를 로그에 남긴다.
+    """
+    import logging
+
+    connection = sqlite3.connect(":memory:")
+    spend_store.ensure_schema(connection)
+    assert spend_store.append_spend(
+        connection,
+        run_id="legacy-bigger",
+        phase=SPEND_PHASE_PIPELINE,
+        day=DAY,
+        bucket="link:one",
+        cost_krw=40.0,
+        created_at=STARTED_AT,
+    )
+
+    with caplog.at_level(logging.WARNING, logger=state_machine.__name__):
+        # 옛 관측값(20원)이 확정 원장(40원)보다 «작다» — 예전엔 여기서 죽었다.
+        dry = state_machine.prepare_cutover(
+            connection,
+            migrated_at="2026-08-28T09:10:00+09:00",
+            dry_run=True,
+            observed_costs_by_run={"legacy-bigger": 20.0},
+        )
+
+    # ★ 예외 없이 «끝까지» 와야 한다. 여기서 죽으면 서버가 못 뜬다.
+    assert dry.legacy_known_attempts == 1, "차액을 지어내면 안 된다"
+    assert any(
+        "보정하지 않은 요청" in 기록.getMessage() for 기록 in caplog.records
+    ), "★ 조용히 넘기면 안 된다 — 개수를 남겨야 한다"
+
+    # 실제 실행도 막히지 않는다.
+    state_machine.prepare_cutover(
+        connection,
+        migrated_at="2026-08-28T09:10:00+09:00",
+        observed_costs_by_run={"legacy-bigger": 20.0},
+    )
+    exposure = state_machine.load_run_exposure(connection, run_id="legacy-bigger")
+    # 원장 값이 그대로 남는다 — 관측이 작다고 «깎지» 않는다.
+    assert exposure.known_cost_krw == 40.0
+    connection.close()
+
+
 def test_cutover는_통장을_모르는_JSONL비용을_임의통장에_넣지않는다() -> None:
     connection = sqlite3.connect(":memory:")
     spend_store.ensure_schema(connection)

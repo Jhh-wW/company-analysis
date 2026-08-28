@@ -15,6 +15,7 @@ provider 전송과 SQLite commit은 원자적으로 묶을 수 없으므로 실�
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import hashlib
 import math
 import sqlite3
@@ -89,6 +90,9 @@ class LeaseOwnershipError(BudgetStateError):
 
 class AttemptStateError(BudgetStateError):
     """attempt 상태 전이 순서가 맞지 않음."""
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -329,6 +333,7 @@ def _legacy_observation_adjustments(
     중단한다.
     """
 
+    lower_than_ledger: list[str] = []
     if not observed_costs_by_run:
         return {}
     keys_by_run: dict[str, list[tuple[str, str]]] = {}
@@ -347,17 +352,32 @@ def _legacy_observation_adjustments(
             continue
         known_total = sum(known[key][2] for key in keys if key in known)
         delta = round(observed - known_total, 6)
-        if delta < -0.01:
-            raise BudgetStateError(
-                "legacy DB 확정 비용이 관측 최종 비용보다 큽니다"
-            )
         if delta <= 0.01:
+            # ★ 2026-08-29 — 여기서 «중단»하지 마라. 서버가 아예 못 뜬다.
+            #   운영 실측: 기동이 `Exited with status 3` 으로 죽었고, 원인은
+            #   「legacy DB 확정 비용이 관측 최종 비용보다 큽니다」였다.
+            #
+            #   DB 가 관측보다 «크다»는 것은 우리가 이미 더 많이 세어 뒀다는 뜻이다 —
+            #   돈이 «빠진» 게 아니라 오히려 보수적인 쪽이다. 게다가 옛 JSONL 은
+            #   손상 이력이 문서에 남아 있어(`app/docs/출시전_수정_지시서.md`
+            #   「관측 정본 정정」) 덜 적혀 있는 것이 정상이다.
+            #
+            #   ⚠️ 그래서 «건너뛰되 세어서 알린다». 조용히 무시하지 않는다.
+            if delta < -0.01:
+                lower_than_ledger.append(run_id)
             continue
         target = max(
             keys,
             key=lambda key: (unknown.get(key) or known[key])[3],
         )
         adjustments[target] = delta
+    if lower_than_ledger:
+        # 개수와 사유만 남긴다 — 회사 원문·통장 원문은 로그에 넣지 않는다.
+        logger.warning(
+            "옛 관측값이 확정 원장보다 작아 보정하지 않은 요청 %d건 "
+            "(원장이 더 크므로 비용을 적게 세지 않는다)",
+            len(lower_than_ledger),
+        )
     return adjustments
 
 
