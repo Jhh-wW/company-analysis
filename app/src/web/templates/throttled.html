@@ -12,21 +12,27 @@
      그걸 피해 가는 방법을 알려주는 셈이 된다. #}
 
 {% block content %}
+{# ★ 2026-08-28 — 같은 말을 «세 번» 하고 있었다.
+     「관리자가 확인해야 다시 열립니다」가 두 번, 「저장된 보고서는 보실 수
+     있습니다」도 두 번. 게다가 제목이 「잠시 기다려 주세요」인데 본문은
+     «기다려도 안 풀린다»고 말했다.
+   → 왜 막혔는지 «한 줄»만 남기고 나머지를 지운다. #}
 <div class="card">
+  {% if throttle_is_fault %}
+  <div class="stopped-icon">⛔</div>
+  <h1>새 조사가 멈췄습니다</h1>
+  {% else %}
   <div class="stopped-icon">⏳</div>
   <h1>잠시 기다려 주세요</h1>
+  {% endif %}
+
+  {# 왜 막혔는지 — 이 한 줄이 전부다. 여기서 되풀이하지 마라. #}
   <p class="lede">{{ throttle_message }}</p>
 
   {% if throttle_is_fault %}
-  {# ★ 여기는 «진짜 고장»이다 (비용 원장을 못 읽음). 「고장이 아니다」라고
-     말하면 거짓말이 된다. 사람이 확인해야 풀리므로 신고할 번호를 준다. #}
-  <p class="muted" style="margin-top:14px">
-    <strong>저희 쪽 문제입니다.</strong>
-    관리자가 확인해야 다시 열립니다. 저장된 보고서는 그대로 보실 수 있습니다.
-  </p>
-  {% if support_reference %}
-  <p class="muted" style="margin-top:8px">문의 번호 <code>{{ support_reference }}</code></p>
-  {% endif %}
+    {% if support_reference %}
+    <p class="muted" style="margin-top:12px">문의 번호 <code>{{ support_reference }}</code></p>
+    {% endif %}
   {% else %}
   <p class="muted" style="margin-top:14px">
     <strong>고장이 아닙니다.</strong>
@@ -39,9 +45,13 @@
     <a class="btn" href="/" style="line-height:1.6">다른 회사 둘러보기</a>
   </div>
 
+  {# ★ 2026-08-28 실측 — 앞 판은 「첫 화면의 회사 버튼을 눌러보세요」라고 했는데
+     **그 버튼이 없다.** 실운영 모드에서는 첫 화면에 저장된 보고서로 가는 UI 가
+     아예 안 그려진다(`input.html` 의 샘플 칩은 데모 모드 전용).
+     회사명으로 찾아가는 공개 경로도 저장소 전체에 없다.
+   → 없는 기능을 가리키지 않는다. «주소를 이미 가진 경우»만 참이므로 그렇게만 쓴다. #}
   <p class="muted" style="margin-top:14px">
-    이미 만들어진 보고서는 <strong>그대로 보실 수 있습니다</strong> —
-    첫 화면의 회사 버튼을 눌러보세요.
+    이미 받으신 보고서 주소는 <strong>그대로 열립니다.</strong>
   </p>
 </div>
 {% endblock %}

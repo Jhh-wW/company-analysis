@@ -211,10 +211,16 @@ def test_원장이_깨져_막혔을_때는_고장이_아니라고_말하지_않�
 
     assert response.status_code == 429
     assert "고장이 아닙니다" not in text, "★ 고장인데 아니라고 말하고 있다"
-    assert "저희 쪽 문제입니다" in text
+    assert "새 조사가 멈췄습니다" in text, "제목이 「잠시 기다려」면 기다리면 풀린다고 읽힌다"
+    assert "잠시 기다려" not in text
     assert "문의 번호" in text, "★ 신고할 번호가 없으면 관리자에게 안 닿는다"
     # 막다른 길은 여전히 만들지 않는다.
     assert "다른 회사 둘러보기" in text
+    # ★ 같은 말을 두 번 하지 않는다 (2026-08-28 — 세 번 하고 있었다).
+    assert text.count("관리자가 확인해야 다시 열립니다") == 1
+    assert text.count("그대로 열립니다") == 1
+    # ★ 없는 기능을 가리키지 않는다 — 첫 화면에 「회사 버튼」은 없다(실측).
+    assert "회사 버튼" not in text
 
 
 def test_고장으로_보는_차단_종류가_그대로다() -> None:

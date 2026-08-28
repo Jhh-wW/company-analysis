@@ -31,6 +31,8 @@ import logging
 from pathlib import Path
 from typing import Final
 
+from src.core import paths
+
 logger = logging.getLogger(__name__)
 
 #: 보고서 «모양»을 정하는 파일들. 순서를 고정한다 — 순서가 흔들리면 같은
@@ -45,6 +47,36 @@ _SHAPING_MODULES: Final[tuple[str, ...]] = (
     "validate.py",
     "pipeline.py",
     "port.py",
+)
+
+#: 보고서 «내용»을 만드는 파일들. 프로젝트 뿌리 기준 경로다.
+#:
+#: ★ 왜 생겼나 (2026-08-28) — 캐시 열쇠가 `_SHAPING_MODULES`(composer/ 9개)만
+#:   봤다. 그런데 원문을 «모으는» 코드는 그 밖에 있다. 실제로 v2-90 이
+#:   `analysis_engine/tools/run_pilot.py` 를 고쳐 비상장 회사의 공시 원문을
+#:   0자에서 37만자로 늘렸는데, **지문이 그대로라 옛 껍데기 보고서가 계속 나왔다.**
+#:   배포하고 재시작해도 안 바뀌었다 — 이 모듈이 스스로 약속한
+#:   「고쳤는데 화면이 그대로」를 막지 못한 것이다.
+#:
+#: ⚠️ 넓게 잡는 쪽이 안전하다. 빠뜨리면 «틀린 옛 보고서»가 나가고,
+#:   더 넣으면 캐시가 한 번 더 빗나가 900원을 더 쓸 뿐이다.
+#:   돈보다 «거짓말하지 않는 것»이 우선이다.
+_CONTENT_MODULES: Final[tuple[str, ...]] = (
+    # 1판 엔진 — 공시 원문과 조각을 실제로 모으는 곳 (real.py 가 동적 로드한다)
+    "analysis_engine/tools/run_pilot.py",
+    # v2 수집 흐름·회사 판정·캐시 열쇠
+    "app/src/features/pipeline/real.py",
+    # 조각 보정과 확장
+    "app/src/features/filingclean/logic.py",
+    "app/src/features/filingclean/extra.py",
+    "app/src/features/filingclean/relationships.py",
+    # 홈페이지·대표 이름
+    "app/src/features/newspick/logic.py",
+    "app/src/features/newspick/constants.py",
+    # 출력 계약 (장 구성·검증 문구)
+    "app/src/features/report_standard/constants.py",
+    "app/src/features/report_standard/section_content.py",
+    "app/src/features/report_standard/publish.py",
 )
 
 #: 지문 길이. 충돌 확률보다 로그 가독성을 우선한 값이다 — 16자리 16진수는
@@ -65,19 +97,22 @@ def engine_build_id() -> str:
         16자리 16진수. 파일을 하나라도 못 읽으면 ``UNKNOWN_BUILD_ID``.
 
     ★ 한 번 계산하고 기억한다. 한 요청 안에서 파일이 바뀌는 일은 없고,
-      매번 읽으면 조사마다 디스크를 9번씩 두드리게 된다.
+      매번 읽으면 조사마다 디스크를 여러 번 두드리게 된다.
     """
     global _cached_build_id
     if _cached_build_id is not None:
         return _cached_build_id
 
     here = Path(__file__).resolve().parent
+    뿌리 = paths.PROJECT_ROOT
+    읽을것: list[tuple[str, Path]] = [(이름, here / 이름) for 이름 in _SHAPING_MODULES]
+    읽을것 += [(이름, 뿌리 / 이름) for 이름 in _CONTENT_MODULES]
     digest = hashlib.sha256()
-    for name in _SHAPING_MODULES:
+    for name, 파일 in 읽을것:
         try:
             digest.update(name.encode("utf-8"))
             digest.update(b"\x00")
-            digest.update((here / name).read_bytes())
+            digest.update(파일.read_bytes())
         except OSError:
             # 못 읽으면 «모르는 상태»다. 캐시를 쓰면 안 된다 (아래 참고).
             logger.warning(
