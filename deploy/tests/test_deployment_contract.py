@@ -418,6 +418,11 @@ def test_render_blueprint_turns_engine_v2_on_while_image_default_stays_v1() -> N
     assert "지금 배포하면 v1 보고서가 나간다" not in render_guide
 
 
+#: Render 가 디스크 서비스에 주는 종료 유예 기본값(초).
+#: Blueprint 로 늘릴 수 없다 — 늘리려 하면 동기화가 거부된다(2026-08-29 실측).
+RENDER_DEFAULT_SHUTDOWN_SECONDS = 30
+
+
 def test_render_shutdown_window_covers_serial_uvicorn_and_app_shutdown() -> None:
     """Uvicorn 요청 정리와 lifespan 정리는 직렬이므로 합계가 플랫폼보다 짧다."""
 
@@ -429,24 +434,37 @@ def test_render_shutdown_window_covers_serial_uvicorn_and_app_shutdown() -> None
     )
     render_values = {item["key"]: item.get("value") for item in web_service["envVars"]}
 
-    platform_seconds = web_service["maxShutdownDelaySeconds"]
+    # ★ 2026-08-29 실측 — Render 는 «디스크가 붙은 서비스»에 이 값을 허용하지 않는다.
+    #   Blueprint 동기화가 이 오류로 거부됐다:
+    #     services[0].maxShutdownDelaySeconds
+    #     max shutdown delay is not supported for services with a disk
+    #   그래서 render.yaml 에 «있으면 안 된다». 다시 넣으면 배포가 통째로 막힌다.
+    assert "maxShutdownDelaySeconds" not in web_service, (
+        "★ Render 가 디스크 서비스에는 이 값을 거부한다 — 넣으면 배포가 막힌다"
+    )
+    platform_seconds = RENDER_DEFAULT_SHUTDOWN_SECONDS
     uvicorn_seconds = int(render_values["GRACEFUL_SHUTDOWN_SECONDS"])
     runtime_source = (
         REPOSITORY_ROOT / "app" / "src" / "web" / "job_runtime.py"
     ).read_text(encoding="utf-8")
 
-    assert platform_seconds == 300
     assert render_values["GRACEFUL_SHUTDOWN_SECONDS"] == "20"
     assert "_JOB_DRAIN_TIMEOUT_SEC = 240.0" in runtime_source
     assert "_JOB_CANCEL_GRACE_SEC = 1.0" in runtime_source
-    # Uvicorn 0.52.3은 먼저 HTTP task를 이 시간만큼 기다린 뒤에야
-    # lifespan.shutdown을 호출한다. 270 < 300 같은 개별 비교는 거짓 안전이다.
-    assert uvicorn_seconds + 240 + 1 + 30 <= platform_seconds
+    # ⚠️ 앱이 기대하는 시간이 플랫폼이 주는 시간보다 «크다». 이건 지금 사실이다.
+    #   Uvicorn 0.52.3 은 HTTP task 를 먼저 기다린 뒤에야 lifespan.shutdown 을
+    #   부르므로 두 시간은 겹치지 않고 더해진다.
+    #   → 배포·재시작 중이던 조사는 정리를 끝내기 전에 잘릴 수 있다.
+    #   이 시험은 그 «어긋남을 숨기지 않기 위해» 남긴다. 숫자를 맞춰 통과시키지 마라.
+    앱_기대 = uvicorn_seconds + 240 + 1
+    assert 앱_기대 > platform_seconds, (
+        "이 어긋남이 해소됐다면 render.yaml·런북·이 시험을 «같이» 고쳐라"
+    )
 
     runbook = (REPOSITORY_ROOT / "ops" / "배포_운영_런북.md").read_text(
         encoding="utf-8"
     )
-    assert "Render 300초" in runbook
+    assert "Render 기본 30초" in runbook
     assert "Uvicorn HTTP 요청 정리 최대 20초" in runbook
     normalized_runbook = " ".join(runbook.split())
     assert "Blueprint의 Manual Sync / Deploy Blueprint" in normalized_runbook
@@ -463,12 +481,8 @@ def test_render_shutdown_window_covers_serial_uvicorn_and_app_shutdown() -> None
     historical_directive = (
         REPOSITORY_ROOT / "app" / "docs" / "출시전_수정_지시서.md"
     ).read_text(encoding="utf-8")
-    assert "종료 계약 정정(2026-08-28)" in historical_directive
-    assert (
-        "Render 영속 디스크 서비스는 Blueprint의 `maxShutdownDelaySeconds`와 "
-        "함께 쓸 수 없으므로"
-        not in historical_directive
-    )
+    # ★ 2026-08-28 의 「정정」은 «틀렸다». Render 가 2026-08-29 에 실측으로 뒤집었다.
+    assert "종료 계약 재정정(2026-08-29)" in historical_directive
 
 
 def test_render_reserves_only_half_the_persistent_disk_for_immutable_pdf_artifacts() -> None:

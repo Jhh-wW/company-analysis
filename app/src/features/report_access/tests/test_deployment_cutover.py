@@ -33,7 +33,9 @@ def test_Render_cutover는_영속disk_단일instance라서_old_new_writer가_겹
         "mountPath": "/var/data",
         "sizeGB": 1,
     }
-    assert web["maxShutdownDelaySeconds"] == 300
+    # ★ Render 는 디스크가 붙은 서비스에 이 값을 «거부»한다 (2026-08-29 실측).
+    #   넣으면 Blueprint 동기화가 실패해 배포 자체가 막힌다.
+    assert "maxShutdownDelaySeconds" not in web
 
 
 def test_cutover문서는_stop_drain_startup순서와_구성변경조건을_숨기지않는다():

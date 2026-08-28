@@ -11,12 +11,15 @@
 - 기존 무료 확인판은 `PIPELINE=demo`, `BETA_ADMIN_ONLY=1`로 시작했다. 현재 Blueprint는 실제
   회사 결과를 비교하기 위한 관리자 전용 실분석 운영판을 준비한다.
 - Uvicorn worker와 Render instance는 각각 `1`로 유지한다.
-- 종료 시간은 서로 겹치지 않는다. Uvicorn이 먼저 HTTP task를 최대 20초
-  정리한 **뒤** lifespan의 앱 조사 정리(최대 240초)와 취소 유예(1초)를 실행한다.
-  `20 + 240 + 1 + 종료 여유 30 <= Render 300초`를 유지한다. Render의 기본
-  30초를 쓰면 비용·중단 표식을 저장하기 전에 프로세스가 강제 종료될 수 있으므로
-  `maxShutdownDelaySeconds: 300`을 제거하지 않는다.
-  근거는 [Render Blueprint의 종료 유예 계약](https://render.com/docs/blueprint-spec#maxshutdowndelayseconds)이다.
+- ⛔ `maxShutdownDelaySeconds`를 `render.yaml`에 **넣지 마라** (2026-08-29 실측).
+  Render 가 Blueprint 동기화를 거부한다 — `max shutdown delay is not supported for
+  services with a disk`. 디스크는 SQLite·보고서·감사 기록을 보존하므로 뺄 수 없다.
+- ⚠️ 그래서 종료 유예는 Render 기본 **30초**다. 그런데 종료 시간은 서로 겹치지 않는다 —
+  Uvicorn이 먼저 HTTP task를 최대 20초 정리한 **뒤** lifespan의 앱 조사 정리(최대 240초)와
+  취소 유예(1초)를 실행한다. 즉 앱이 기대하는 261초가 플랫폼이 주는 30초를 **넘는다.**
+  배포·재시작 중이던 조사는 비용·중단 표식을 저장하기 전에 잘릴 수 있다.
+  이건 새로 생긴 문제가 아니라 `master` 배포본이 내내 있던 상태다.
+  근본 해결은 `docs/실행계획_엔진v2/27·28장`의 「실패해도 안전한 종료」를 따른다.
 - 관리자 실분석 운영판은 `standard` web plan과 `/var/data` 1GB 영속 디스크를 사용한다.
   실제 DART 118,747사 후보 색인이 Starter의 512MB를 넘어 `/confirm` 중 인스턴스가
   재시작된 운영 측정에 따른 최소 사양이다. 플랜·디스크 비용은 바뀔 수 있으므로 배포 직전
@@ -103,8 +106,8 @@ Notion, 공유 링크, real provider, 외부 백업과 cron 시험은 무료 dem
 7. `PUBLIC_ORIGIN`과 Google OAuth 승인 URI, `GOOGLE_REDIRECT_URI`가 모두 정확히 같은
    `<HTTPS origin>/auth/callback`을 가리키는지 확인한다.
 8. Render Dashboard의 일반 `Deploy latest commit`이 아니라, 이 서비스를 관리하는
-   Blueprint에서 **Manual Sync / Deploy Blueprint**를 한 번 실행한다. 그래야 코드와
-   `maxShutdownDelaySeconds: 300`·Uvicorn HTTP 정리 20초가 함께 반영된다. `/healthz`, `/readyz`,
+   Blueprint에서 **Manual Sync / Deploy Blueprint**를 한 번 실행한다. 그래야 `render.yaml`의
+   설정 변경과 코드가 «함께» 반영된다. `/healthz`, `/readyz`,
    관리자 로그인, 비관리자 차단, MEMBER/LINK 생성 차단을 먼저 확인한다.
 9. 작은 회사 1건을 실제 조사해 DART·뉴스·홈페이지 수집, 화면/PDF 정본 게이트, 비용 기록,
    재시작 뒤 결과 보존을 확인한 다음 회사 수를 늘린다.

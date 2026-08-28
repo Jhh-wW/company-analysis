@@ -10,10 +10,17 @@ services:
     dockerfilePath: ./app/Dockerfile
     dockerContext: .
     healthCheckPath: /readyz
-    # Uvicorn은 HTTP task를 먼저 기다린 «뒤» lifespan 종료를 호출한다. 따라서
-    # 두 시간은 겹치지 않고 더해진다. HTTP 20초 + 앱 조사 정리 240초 + 취소 1초
-    # + 종료 여유 30초가 Render 최대 300초 안에 끝나도록 고정한다.
-    maxShutdownDelaySeconds: 300
+    # ⛔ maxShutdownDelaySeconds 를 «여기 넣지 마라» (2026-08-29 실측).
+    #   Render 가 Blueprint 동기화를 거부한다:
+    #     services[0].maxShutdownDelaySeconds
+    #     max shutdown delay is not supported for services with a disk
+    #   아래 disk: 와 함께 쓸 수 없다. 디스크는 SQLite·보고서·감사 기록을
+    #   보존하므로 뺄 수 없다 — 그래서 이쪽을 뺀다.
+    # ⚠️ 결과: 종료 유예는 Render 기본값(30초)이다. 그런데 앱은
+    #   HTTP 정리 20초 + 조사 drain 240초 + 취소 1초 를 «직렬»로 기대한다.
+    #   즉 배포·재시작 중이던 조사는 정리를 끝내기 전에 잘릴 수 있다.
+    #   이건 v2-98 이 만든 문제가 아니라 master 배포본이 내내 있던 상태다.
+    #   근본 해결은 docs/실행계획_엔진v2/27·28장의 「실패해도 안전한 종료」에 있다.
     # 첫 관리자 베타는 비용과 외부 변경을 통제하도록 수동 배포만 허용한다.
     autoDeployTrigger: off
 
