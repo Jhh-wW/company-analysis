@@ -17,11 +17,23 @@
   <h1>잠시 기다려 주세요</h1>
   <p class="lede">{{ throttle_message }}</p>
 
+  {% if throttle_is_fault %}
+  {# ★ 여기는 «진짜 고장»이다 (비용 원장을 못 읽음). 「고장이 아니다」라고
+     말하면 거짓말이 된다. 사람이 확인해야 풀리므로 신고할 번호를 준다. #}
+  <p class="muted" style="margin-top:14px">
+    <strong>저희 쪽 문제입니다.</strong>
+    관리자가 확인해야 다시 열립니다. 저장된 보고서는 그대로 보실 수 있습니다.
+  </p>
+  {% if support_reference %}
+  <p class="muted" style="margin-top:8px">문의 번호 <code>{{ support_reference }}</code></p>
+  {% endif %}
+  {% else %}
   <p class="muted" style="margin-top:14px">
     <strong>고장이 아닙니다.</strong>
     이 도구는 조사할 때마다 실제 비용이 들어서,
     하루에 돌릴 수 있는 양을 미리 정해 두었습니다.
   </p>
+  {% endif %}
 
   <div class="btn-row" style="margin-top:18px">
     <a class="btn" href="/" style="line-height:1.6">다른 회사 둘러보기</a>

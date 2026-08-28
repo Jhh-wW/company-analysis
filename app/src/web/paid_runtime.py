@@ -182,6 +182,80 @@ def _release_run_slot(stored_bucket: str) -> None:
         else:
             _RUNNING_BY_BUCKET.pop(stored_bucket, None)
 
+def paid_research_block() -> tuple[bool, str]:
+    """유료 조사가 막혀 있는지와 «사람이 풀어야 하는 이유»를 돌려준다.
+
+    ★ 왜 여기 있나 (2026-08-28)
+      이 판정이 관리자 라우터 안에만 있어서 `/admin/access` 를 «직접 열어야만»
+      보였다. 관리자 첫 화면(`/admin`)은 이 상태를 아예 안 읽어서,
+      모든 유료 조사가 막힌 날에도 첫 화면은 「문제 없음」이었다.
+      상태가 사는 이 모듈에 두고 두 화면이 같은 판정을 쓴다.
+    """
+    with _PAID_PHASE_LOCK:
+        if not _BUDGET_STORE_HEALTHY:
+            return (
+                True,
+                "비용 기록을 복원할 수 없어 모든 유료 조사를 닫았습니다. "
+                "관리자가 원장과 손상 기록을 확인해야 다시 열립니다.",
+            )
+    with _SLOT_LOCK:
+        if _UNRESOLVED_BUCKETS:
+            return (
+                True,
+                "provider 과금 여부를 확정하지 못한 통장의 유료 조사를 닫았습니다. "
+                "관리자가 미확정 비용을 대사해야 해당 통장이 다시 열립니다.",
+            )
+    return False, ""
+
+
+def recheck_budget_store() -> tuple[bool, str]:
+    """관리자가 「원장을 확인했다」고 할 때 상태를 **다시 계산**한다.
+
+    Returns:
+        (지금 유료 조사가 열려 있나, 사람에게 보여 줄 한 줄).
+
+    ★ **강제로 열지 않는다.** 서버가 뜰 때와 «같은 검사»(`_seed_ledger`)를 다시
+      돌릴 뿐이다. 근본 자료가 여전히 나쁘면 **닫힌 채로 남는다** — 그게 맞는 동작이다.
+      돈이 걸린 문을 사람 말 한마디로 여는 길은 만들지 않는다.
+
+    ★★ **진행 중인 유료 단계가 있으면 «하지 않는다».**
+      `_seed_ledger()` 는 진행중 표식을 전부 「결과를 모르는 것」으로 다시 분류한다
+      (같은 함수 머리말 참고). 돌아가는 조사를 미확정으로 만들면 **오히려 더 막힌다.**
+      그래서 비어 있을 때만 돌린다.
+
+    ★ 왜 이 경로가 생겼나 (2026-08-28) — 화면은 사용자에게
+      「비용 기록을 확인할 수 없어 새 조사를 잠시 멈췄습니다. **관리자 확인이 끝나야
+      다시 열립니다.**」라고 말하는데, 정작 **관리자가 「확인」을 실행할 방법이 없었다.**
+      `_BUDGET_STORE_HEALTHY` 를 True 로 되돌리는 곳이 기동 시 `_seed_ledger()` 한 곳뿐이라,
+      운영 중 한 번 꺼지면 **서버를 재시작하기 전까지 모든 유료 조사가 막혔다.**
+    """
+    with _PAID_PHASE_LOCK:
+        with _SLOT_LOCK:
+            진행중 = len(_ACTIVE_PAID_PHASES)
+        if 진행중:
+            return (
+                _BUDGET_STORE_HEALTHY,
+                f"진행 중인 유료 단계가 {진행중}건 있어 다시 검사하지 않았습니다. "
+                "끝난 뒤에 다시 눌러 주세요.",
+            )
+        _seed_ledger()
+        열렸나 = _BUDGET_STORE_HEALTHY
+        미확정 = len(_UNRESOLVED_BUCKETS)
+    if 열렸나 and not 미확정:
+        return (True, "원장을 다시 읽었습니다. 유료 조사를 다시 열었습니다.")
+    if 열렸나:
+        return (
+            True,
+            f"원장은 복원했지만 마감되지 않은 통장이 {미확정}건 남아 "
+            "그 통장만 계속 막혀 있습니다.",
+        )
+    return (
+        False,
+        "원장을 다시 읽었지만 여전히 복원할 수 없습니다. "
+        "이력 파일과 비용 원장을 사람이 직접 확인해야 합니다.",
+    )
+
+
 def _seed_ledger() -> None:
     """서버가 뜰 때 «오늘 이미 쓴 돈»을 이력에서 읽어 장부에 채운다.
 

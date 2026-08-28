@@ -13,6 +13,7 @@ import datetime as dt
 import hashlib
 import io
 import json
+import logging
 import math
 import re
 import unicodedata
@@ -30,6 +31,13 @@ from src.features.pipeline.port import Report
 from src.features.provenance.sources import visible_citations
 from src.features.report_standard import build_published_report
 
+logger = logging.getLogger(__name__)
+
+#: 「PDF 만들기」가 실패했을 때 화면에 그대로 쓰는 «고정» 사유.
+#: ★ 보고서 값을 절대 섞지 않는다 — 이 문구는 공개 화면에 그려진다.
+RENDER_BLOCKED_REASON: Final[str] = "PDF 파일을 만드는 단계에서 멈췄습니다"
+RENDER_BLOCKED_MESSAGE: Final[str] = "PDF 전 페이지 검수 재료를 만들지 못했습니다"
+
 PNG_MAGIC: Final[bytes] = b"\x89PNG\r\n\x1a\n"
 SHA256_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 REVIEWER_ID_RE: Final[re.Pattern[str]] = re.compile(
@@ -42,7 +50,62 @@ ALLOWED_VISUAL_REVIEW_KINDS: Final[frozenset[str]] = frozenset(
 
 
 class PDFReleaseBlockedError(RuntimeError):
-    """승인 또는 전 페이지 렌더 증거가 없어 PDF 공개를 중단한다."""
+    """승인 또는 전 페이지 렌더 증거가 없어 PDF 공개를 중단한다.
+
+    ★ ``reasons``: 화면·로그에 그대로 써도 안전한 «고정» 문구만 담는다.
+      ``str(self)``에는 보고서 값이 섞일 수 있어 화면에 쓰면 안 된다
+      (``reports._gate_reasons``가 ``reasons``만 읽는 이유).
+
+    ⚠️ 여기에 ``__init__``을 «만들지 마라». ``AutomaticGateStopped``는
+      ``self.reasons``를 먼저 넣고 ``super().__init__``을 부르므로,
+      부모가 ``__init__``에서 ``reasons``를 세팅하면 그 값을 덮어쓴다.
+    """
+
+    #: 사유를 안 실어 보내는 경우의 기본값(빈 튜플).
+    reasons: tuple[str, ...] = ()
+
+
+class PdfRenderBlockedError(PDFReleaseBlockedError):
+    """「PDF 후보 만들기」 자체가 실패했다 — 자동검사(4종)는 돌지도 않았다.
+
+    ★ 왜 «전용» 예외인가 (2026-08-28)
+      맨 ``PDFReleaseBlockedError`` 를 던지는 자리가 이 모듈에만 12곳이고
+      대부분은 렌더 실패가 아니다(출고 승인 없음·장부 무결성 등).
+      「사유가 없으면 렌더 실패」로 뭉뚱그리면 **화면이 또 틀린 말을 한다.**
+      실제로 렌더에서 막힌 경우만 이 클래스로 좁힌다.
+    """
+
+    reasons: tuple[str, ...] = (RENDER_BLOCKED_REASON,)
+
+
+def _render_blocked() -> PdfRenderBlockedError:
+    """「PDF 만들기」 실패를 «사유 있는» 차단으로 바꾼다.
+
+    ★ 왜 필요한가 (2026-08-28 실측)
+      이 자리에서 던지던 맨 예외에는 ``reasons``가 없어서, 화면이
+      「자동 출고 승인을 확인하지 못했습니다」라는 «다른 단계» 문구로 떨어졌다.
+      자동검사(4종)는 돌지도 않았는데 자동검사가 막은 것처럼 보였다.
+      서버 로그에도 원본 예외가 안 남아 관리자가 원인을 찾을 수 없었다.
+
+    ``logger.exception``은 «호출 사슬»만 남긴다 — 보고서 값은 안 들어간다.
+    """
+    logger.exception(RENDER_BLOCKED_MESSAGE)
+    return PdfRenderBlockedError(RENDER_BLOCKED_MESSAGE)
+
+
+def _blocked(reason: str) -> PdfRenderBlockedError:
+    """「PDF 후보 만들기」 구조 검사 실패 — «어느 검사»였는지를 로그에 남긴다.
+
+    ★ 왜 나눴나 (2026-08-28)
+      이 검사들은 사유 없이 던져서, 화면도 로그도 「자동 출고 승인을
+      확인하지 못했습니다」 한 줄뿐이었다 — **관리자가 원인을 찾을 수 없었다.**
+
+    화면에는 ``RENDER_BLOCKED_REASON`` 한 줄만 나간다. 여기 ``reason`` 은
+    내부 검사 이름이라 사용자에게는 잡음이고, 로그에서만 쓸모가 있다.
+    ⚠️ 그래서 ``reason`` 에는 **고정 문자열만** 넘겨라 — 보고서 값을 넣지 마라.
+    """
+    logger.warning("PDF 후보 검사 차단: %s", reason)
+    return PdfRenderBlockedError(reason)
 
 
 @dataclass(frozen=True)
@@ -232,15 +295,11 @@ def _render_all_pages(pdf_bytes: bytes, *, scale: float) -> tuple[RenderedPdfPag
             finally:
                 page.close()
             if not png_bytes.startswith(PNG_MAGIC) or width_px <= 0 or height_px <= 0:
-                raise PDFReleaseBlockedError("PDF 페이지 PNG 렌더 증거가 올바르지 않습니다")
+                raise _blocked("PDF 페이지 PNG 렌더 증거가 올바르지 않습니다")
             if not has_visible_content:
-                raise PDFReleaseBlockedError(
-                    "PDF 페이지가 시각적으로 비어 있어 출고할 수 없습니다"
-                )
+                raise _blocked("PDF 페이지가 시각적으로 비어 있어 출고할 수 없습니다")
             if not has_visible_body_text:
-                raise PDFReleaseBlockedError(
-                    "PDF 본문 글자가 렌더 화면에서 보이지 않아 출고할 수 없습니다"
-                )
+                raise _blocked("PDF 본문 글자가 렌더 화면에서 보이지 않아 출고할 수 없습니다")
             pages.append(
                 RenderedPdfPage(
                     number=index + 1,
@@ -304,7 +363,7 @@ def prepare_pdf_release(report: Report, *, render_scale: float = 1.5) -> PdfRele
     except PDFGenerationError:
         raise
     except Exception as exc:
-        raise PDFReleaseBlockedError("PDF 전 페이지 검수 재료를 만들지 못했습니다") from exc
+        raise _render_blocked() from exc
 
 
 def prepare_pdf_bytes(
@@ -323,23 +382,23 @@ def prepare_pdf_bytes(
     ):
         raise ValueError("PDF 페이지 렌더 배율은 양수여야 합니다")
     if not isinstance(pdf_bytes, bytes) or not pdf_bytes:
-        raise PDFReleaseBlockedError("PDF bytes가 비었습니다")
+        raise _blocked("PDF bytes가 비었습니다")
     if not isinstance(expected_fact_ids, tuple) or any(
         not isinstance(fact_id, str) or not fact_id.strip()
         for fact_id in expected_fact_ids
     ):
-        raise PDFReleaseBlockedError("사실 장부에 빈 fact_id가 있습니다")
+        raise _blocked("사실 장부에 빈 fact_id가 있습니다")
     if len(expected_fact_ids) != len(set(expected_fact_ids)):
-        raise PDFReleaseBlockedError("사실 장부의 fact_id가 중복됐습니다")
+        raise _blocked("사실 장부의 fact_id가 중복됐습니다")
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes), strict=True)
         if not reader.pages:
-            raise PDFReleaseBlockedError("PDF에 페이지가 없습니다")
+            raise _blocked("PDF에 페이지가 없습니다")
         if any(not (page.extract_text() or "").strip() for page in reader.pages):
-            raise PDFReleaseBlockedError("글자가 없는 PDF 페이지가 있습니다")
+            raise _blocked("글자가 없는 PDF 페이지가 있습니다")
         pages = _render_all_pages(pdf_bytes, scale=render_scale)
         if len(pages) != len(reader.pages):
-            raise PDFReleaseBlockedError("PDF 페이지와 PNG 검수 페이지 수가 다릅니다")
+            raise _blocked("PDF 페이지와 PNG 검수 페이지 수가 다릅니다")
         return PdfReleaseCandidate(
             pdf_bytes=pdf_bytes,
             pdf_sha256=_sha256(pdf_bytes),
@@ -350,7 +409,7 @@ def prepare_pdf_bytes(
     except PDFReleaseBlockedError:
         raise
     except Exception as exc:
-        raise PDFReleaseBlockedError("PDF 전 페이지 검수 재료를 만들지 못했습니다") from exc
+        raise _render_blocked() from exc
 
 
 def _approval_datetime(value: str) -> dt.datetime | None:

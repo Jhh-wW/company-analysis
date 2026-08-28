@@ -10,10 +10,21 @@
 
 {% block content %}
 
+{# ★ 2026-08-28 — 「관리자 확인이 끝나야 다시 열립니다」라고 말해 놓고
+     정작 «확인»을 실행할 버튼이 없었다. 원장을 다시 읽는 버튼을 여기 둔다.
+     ⚠️ 강제로 여는 버튼이 아니다 — 자료가 여전히 나쁘면 닫힌 채로 남는다. #}
 {% if paid_research_closed %}
 <div class="warn-line" role="alert" style="margin-bottom:16px">
   <span>⚠️</span><span><strong>지금 유료 조사가 닫혀 있습니다.</strong><br>
-    {{ paid_research_closed_reason }}</span>
+    {{ paid_research_closed_reason }}<br>
+    <form method="post" action="/admin/budget/recheck" style="margin-top:10px">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="btn" type="submit">원장을 다시 읽고 열기를 시도</button>
+    </form>
+    <span class="muted" style="font-size:13px">
+      강제로 열지 않습니다. 서버가 뜰 때와 같은 검사를 다시 돌릴 뿐이라,
+      기록이 여전히 복원되지 않으면 닫힌 채로 남습니다.
+    </span></span>
 </div>
 {% endif %}
 

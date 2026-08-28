@@ -20,10 +20,12 @@ from src.features.export_pdf.logic import (
 )
 from src.features.export_pdf.release import (
     PDFReleaseBlockedError,
+    PdfRenderBlockedError,
     PdfReleaseCandidate,
     prepare_pdf_release,
 )
 from src.features.export_pdf.automatic_release import (
+    AutomaticGateStopped,
     AutomaticallyReleasedPdf,
     automatic_release_pdf,
     report_sha256,
@@ -173,12 +175,20 @@ def _blocked_report_response(request: Request) -> Response:
     return response
 
 
-def _mark_link_release_gate_stopped(report_id: str) -> None:
+def _mark_link_release_gate_stopped(
+    report_id: str,
+    *,
+    stop_step: str = "automatic_release_gate",
+    stop_reason: str = "automatic_release_gate_stopped",
+) -> None:
     """출고 검사에 막힌 LINK 실행만 안정적인 중단 상태로 마감한다.
 
     공개 차단 응답이 정본이므로 이력 저장 장애가 원래 ``PublishBlockedError`` 또는
     ``PDFReleaseBlockedError``를 가려서는 안 된다. LINK에 결속되지 않은 보고서는
     갱신 대상이 없어 그대로 끝난다.
+
+    ★ ``stop_step``/``stop_reason`` 은 «사유 코드»만 받는다 — 보고서 값을 넣지 마라.
+      `/admin/link/{key}` 화면에 그대로 그려진다.
     """
 
     try:
@@ -187,14 +197,31 @@ def _mark_link_release_gate_stopped(report_id: str) -> None:
                 conn,
                 report_id=report_id,
                 stopped_at=clock.iso_now_kst(),
-                stop_step="automatic_release_gate",
-                stop_reason="automatic_release_gate_stopped",
+                stop_step=stop_step,
+                stop_reason=stop_reason,
             )
     except Exception:  # noqa: BLE001 — 원래 출고 차단을 절대 가리지 않는다
         logger.exception(
             "LINK 자동출고 중단 이력을 저장하지 못했습니다 report_id=%s",
             report_id,
         )
+
+
+def _pdf_gate_stop_codes(error: Exception) -> dict[str, str]:
+    """관리자 이력에 남길 «단계·사유 코드». 보고서 값은 절대 안 넣는다.
+
+    자동검사가 떨어진 것과 「PDF 만들기」가 실패한 것은 다른 사건이다 —
+    같은 코드로 남기면 관리자가 로그에서 둘을 못 가른다.
+    """
+    if isinstance(error, PdfRenderBlockedError):
+        return {"stop_step": "pdf_candidate_render", "stop_reason": "pdf_render_failed"}
+    if isinstance(error, AutomaticGateStopped):
+        return {
+            "stop_step": "automatic_release_gate",
+            "stop_reason": "automatic_release_gate_stopped",
+        }
+    # 그 밖의 출고 차단(승인 없음·장부 무결성 등) — 억지로 둘 중 하나로 몰지 않는다.
+    return {"stop_step": "pdf_release", "stop_reason": "pdf_release_blocked"}
 
 
 @dataclass(frozen=True)
@@ -402,6 +429,11 @@ async def _result_page_response(
                 _release_state, report_id=job_id, report=output_report
             )
         except PDFReleaseBlockedError as error:
+            # ★ 2026-08-28 까지 이 자리에 이력 기록이 «없었다» — 관리자가
+            #   우리은행 차단 사건을 볼 화면이 저장소 전체에 하나도 없었다.
+            _mark_link_release_gate_stopped(
+                job_id, **_pdf_gate_stop_codes(error)
+            )
             return _pdf_review_pending_response(
                 request, error, job_id=job_id, company=saved.company
             )
@@ -460,6 +492,7 @@ async def _result_page_response(
             _release_state, report_id=job_id, report=output_report
         )
     except PDFReleaseBlockedError as error:
+        _mark_link_release_gate_stopped(job_id, **_pdf_gate_stop_codes(error))
         return _pdf_review_pending_response(
             request, error, job_id=job_id, company=job.user_input.company
         )
@@ -682,8 +715,15 @@ def _pdf_review_pending_response(
 
     request_id = admin_audit.request_id(request)
     reasons = _gate_reasons(error)
+    # ★ 「자동검사가 떨어진 것」과 「만들다가 실패한 것」은 다른 사건이다.
+    #   2026-08-28 우리은행 건에서 후자였는데 화면이 전자라고 말했다 —
+    #   자동검사는 돌지도 않았다. 사용자도 관리자도 엉뚱한 곳을 보게 된다.
+    # ★ 렌더 실패«만» 따로 말한다. 나머지 차단은 종전 문구를 그대로 둔다 —
+    #   맨 예외를 싸잡아 「만들다 실패」라고 하면 그것 또한 틀린 말이 된다.
+    만들다_실패했다 = isinstance(error, PdfRenderBlockedError)
     logger.info(
-        "자동검사 출고 차단 report_id=%s reasons=%s request_id=%s",
+        "출고 차단 stage=%s report_id=%s reasons=%s request_id=%s",
+        "render" if 만들다_실패했다 else "gate",
         " ".join(str(job_id).split())[:_LOG_REPORT_ID_MAX_CHARS],
         " | ".join(reasons),
         request_id,
@@ -695,9 +735,15 @@ def _pdf_review_pending_response(
             request,
             # ↻(다시 시도) 대신 멈춤 표시를 쓴다 — 다시 열어도 결과가 같다.
             interruption_icon="⛔",
-            interruption_title="보고서 자동검사가 중단되었습니다",
+            interruption_title=(
+                "보고서를 내보내지 못했습니다"
+                if 만들다_실패했다
+                else "보고서 자동검사가 중단되었습니다"
+            ),
             interruption_message=(
-                "필수 검사 중 하나라도 통과하지 못하면 웹·PDF·Notion 전체를 제공하지 않습니다."
+                "완성본을 파일로 만드는 도중 멈췄습니다. 일부만 보여 드리지 않습니다."
+                if 만들다_실패했다
+                else "필수 검사 중 하나라도 통과하지 못하면 웹·PDF·Notion 전체를 제공하지 않습니다."
             ),
             interruption_hint=(
                 "같은 조건으로 다시 열어도 결과는 같습니다. "

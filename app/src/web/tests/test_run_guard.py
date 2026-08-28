@@ -193,6 +193,37 @@ def test_막혔을_때_고장이_아니라고_말한다(client: TestClient, monk
     assert "다른 회사 둘러보기" in text, "막다른 길을 만들면 안 된다"
 
 
+def test_원장이_깨져_막혔을_때는_고장이_아니라고_말하지_않는다(
+    client: TestClient, monkeypatch
+):
+    """★ 2026-08-28. 「고장이 아닙니다」를 «모든» 차단에 붙이고 있었다.
+
+    비용 원장을 못 읽어 막힌 사용자도 그 말을 봤다 — **사실이 아니다.**
+    그건 사람이 원장을 확인해야 풀리는 진짜 고장이고, 그때까지 새 조사는 안 된다.
+    게다가 문의 번호가 없어 **사용자가 이 순간을 신고할 방법이 없었다.**
+    """
+    monkeypatch.setattr(runtime, "_PIPELINE", _가짜진짜알맹이())
+    _열쇠로_들어온다(client)
+    monkeypatch.setattr(paid_runtime, "_BUDGET_STORE_HEALTHY", False)
+
+    response = _조사시작(client)
+    text = response.text
+
+    assert response.status_code == 429
+    assert "고장이 아닙니다" not in text, "★ 고장인데 아니라고 말하고 있다"
+    assert "저희 쪽 문제입니다" in text
+    assert "문의 번호" in text, "★ 신고할 번호가 없으면 관리자에게 안 닿는다"
+    # 막다른 길은 여전히 만들지 않는다.
+    assert "다른 회사 둘러보기" in text
+
+
+def test_고장으로_보는_차단_종류가_그대로다() -> None:
+    """★ 여기에 「예산 소진」을 넣으면 정상 동작을 고장이라고 말하게 된다."""
+    assert request_helpers.THROTTLE_FAULT_KINDS == frozenset(
+        {"budget-store", "budget-unresolved", "member-usage-store"}
+    )
+
+
 def test_데모는_예산을_다_써도_돈다(client: TestClient, monkeypatch):
     """★ 반대 방향 — 데모는 0원인데 막으면 «공짜 화면»이 멈춘다."""
     monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())

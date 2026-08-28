@@ -29,7 +29,7 @@ from src.features.storage import constants as storage_constants
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
 from src.features.report_standard import PublishBlockedError, build_published_report
-from src.web import job_runtime, request_helpers
+from src.web import job_runtime, paid_runtime, request_helpers
 from src.web.security import CSRF_TOKEN_MAX_CHARS, REFERENCE_MAX_CHARS
 
 
@@ -382,6 +382,9 @@ def _dashboard_context(request: Request) -> dict:
     operation_issues = sorted(
         operation_issues, key=lambda item: (str(item["created_at"]), str(item["operation_key"]))
     )
+    # ★ 유료 조사가 통째로 막혔는지 — 2026-08-28 까지 첫 화면이 이걸 «안 읽었다».
+    #   모든 유료 조사가 닫힌 날에도 관리자 첫 화면은 「문제 없음」이었다.
+    유료차단, 유료차단_사유 = paid_runtime.paid_research_block()
     service_dict = (
         asdict(service)
         if service is not None
@@ -401,6 +404,13 @@ def _dashboard_context(request: Request) -> dict:
             "kind": "service", "title": service_dict["cause"] or "전역 점검 중",
             "status": "전체 점검 우선", "detail": service_dict["impact"],
             "href": "/admin/settings", "action": "원인·다음 행동 보기",
+        }
+    elif 유료차단:
+        # 개별 보고서 문제보다 앞에 둔다 — 이건 «모든» 새 조사가 멈춘 상태다.
+        primary_issue = {
+            "kind": "paid_research", "title": "유료 조사가 막혀 있습니다",
+            "status": "새 조사 불가", "detail": 유료차단_사유,
+            "href": "/admin/access", "action": "원장 다시 읽기",
         }
     elif errors:
         issue = errors[0]

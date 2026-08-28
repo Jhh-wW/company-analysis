@@ -193,23 +193,13 @@ def _assert_budget_store_healthy() -> None:
 
 
 def _paid_research_status() -> tuple[bool, str]:
-    """관리자가 유료 조사 차단 여부와 사람이 풀어야 하는 이유를 확인하게 한다."""
+    """관리자가 유료 조사 차단 여부와 사람이 풀어야 하는 이유를 확인하게 한다.
 
-    with paid_runtime._PAID_PHASE_LOCK:
-        if not paid_runtime._BUDGET_STORE_HEALTHY:
-            return (
-                True,
-                "비용 기록을 복원할 수 없어 모든 유료 조사를 닫았습니다. "
-                "관리자가 원장과 손상 기록을 확인해야 다시 열립니다.",
-            )
-    with paid_runtime._SLOT_LOCK:
-        if paid_runtime._UNRESOLVED_BUCKETS:
-            return (
-                True,
-                "provider 과금 여부를 확정하지 못한 통장의 유료 조사를 닫았습니다. "
-                "관리자가 미확정 비용을 대사해야 해당 통장이 다시 열립니다.",
-            )
-    return False, ""
+    판정 자체는 `paid_runtime` 이 갖는다 — 관리자 첫 화면(`/admin`)도
+    «같은» 판정을 써야 두 화면이 어긋나지 않는다.
+    """
+
+    return paid_runtime.paid_research_block()
 
 
 def _assert_access_write_ready(conn) -> None:
@@ -954,6 +944,51 @@ async def admin_link_delete(
     return _admin_response(
         request,
         RedirectResponse(f"/admin/links/{detail_key_hash}", status_code=303),
+    )
+
+
+@router.post("/admin/budget/recheck")
+async def admin_budget_recheck(
+    request: Request,
+    csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
+):
+    """비용 원장을 «다시 읽어» 유료 조사를 열 수 있는지 확인한다.
+
+    ★ 왜 이 경로가 생겼나 (2026-08-28) — 사용자 화면은
+      「비용 기록을 확인할 수 없어 새 조사를 잠시 멈췄습니다. **관리자 확인이 끝나야
+      다시 열립니다.**」라고 말하는데, 정작 **관리자가 「확인」을 실행할 방법이 없었다.**
+      `_BUDGET_STORE_HEALTHY` 를 True 로 되돌리는 곳이 기동 시 한 곳뿐이라,
+      운영 중 한 번 꺼지면 **서버를 재시작하기 전까지 모든 유료 조사가 막혔다.**
+
+    ★ **강제로 열지 않는다.** 기동 때와 «같은 검사»를 다시 돌릴 뿐이고,
+      자료가 여전히 나쁘면 닫힌 채로 남는다 (`paid_runtime.recheck_budget_store`).
+    """
+    action = "admin.budget.recheck"
+    target = admin_audit.target_id("budget", "store")
+    blocked = request_helpers.require_admin_action(
+        request, csrf_token, action=action, target=target
+    )
+    if blocked is not None:
+        return blocked
+
+    opened, notice = paid_runtime.recheck_budget_store()
+
+    # 돈이 걸린 문을 여닫는 일이라 «성공도 실패도» 기록에 남긴다.
+    _mirror_committed_change(
+        request,
+        action=action,
+        target=target,
+        reason="opened" if opened else "still_closed",
+    )
+    if opened:
+        return _admin_response(
+            request, RedirectResponse("/admin/access", status_code=303)
+        )
+    return _access_page(
+        request,
+        status_code=503,
+        access_error_title="유료 조사를 다시 열지 못했습니다.",
+        access_error=notice,
     )
 
 

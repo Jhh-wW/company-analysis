@@ -8,7 +8,7 @@ import logging
 import os
 import sqlite3
 import time
-from typing import Optional
+from typing import Final, Optional
 from urllib.parse import urlsplit
 
 from fastapi import Request
@@ -566,6 +566,13 @@ def _guard_run(
         )
     return None
 
+#: 이 이유로 막힌 것은 «정상 동작이 아니라 고장»이다 — 화면이 그렇게 말해야 한다.
+#: 사람이 원장을 확인해야 풀리므로, 사용자에게 문의 번호를 줘야 신고가 닿는다.
+THROTTLE_FAULT_KINDS: Final[frozenset[str]] = frozenset(
+    {"budget-store", "budget-unresolved", "member-usage-store"}
+)
+
+
 def _throttled(request: Request, message: str, kind: str) -> HTMLResponse:
     """조사를 막았을 때 보여줄 화면.
 
@@ -574,13 +581,26 @@ def _throttled(request: Request, message: str, kind: str) -> HTMLResponse:
         message: 사용자에게 보여줄 말.
         kind: 왜 막았는지 (`rate` | `busy` | `budget`). 로그·화면 구분용.
 
-    ★ 429는 「지금은 안 된다」이지 「고장」이 아니다. 화면이 그걸 분명히 말한다.
+    ★ 429는 대개 「지금은 안 된다」이지 「고장」이 아니다. 화면이 그걸 분명히 말한다.
+
+    ⚠️ 단, ``THROTTLE_FAULT_KINDS`` 는 진짜 고장이다 (2026-08-28).
+      그때까지 이 화면은 **모든** 경우에 「고장이 아닙니다」라고 단언했고,
+      비용 원장이 깨져 막힌 사용자도 그 말을 봤다 — 사실이 아니고,
+      신고할 번호도 없어 관리자에게 알릴 길이 없었다.
     """
     logger.info("조사를 막았습니다: %s", kind)
+    고장이다 = kind in THROTTLE_FAULT_KINDS
     response = templates.TemplateResponse(
         request=request,
         name="throttled.html",
-        context=_ctx(request, throttle_message=message, throttle_kind=kind),
+        context=_ctx(
+            request,
+            throttle_message=message,
+            throttle_kind=kind,
+            throttle_is_fault=고장이다,
+            # 고장일 때만 문의 번호를 준다 — 정상 차단에는 필요 없는 잡음이다.
+            support_reference=admin_audit.request_id(request) if 고장이다 else "",
+        ),
         status_code=429,
     )
     # 유료 파일럿 실행기만 429의 안전한 재시도 가능 여부를 증명할 수 있게 한다.
