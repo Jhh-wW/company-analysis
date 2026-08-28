@@ -467,7 +467,20 @@ def test_render_shutdown_window_covers_serial_uvicorn_and_app_shutdown() -> None
     assert "Render 기본 30초" in runbook
     assert "Uvicorn HTTP 요청 정리 최대 20초" in runbook
     normalized_runbook = " ".join(runbook.split())
-    assert "Blueprint의 Manual Sync / Deploy Blueprint" in normalized_runbook
+    # ★ 2026-08-29 실측으로 «절차가 바뀌었다».
+    #   그날 배포는 Blueprint Sync 가 아니라 서비스 화면의 Manual Deploy 로 성공했다.
+    #   오히려 Blueprint 는 «다른 브랜치»(master)를 보고 있어 Sync 하면 옛 render.yaml 이
+    #   적용될 뻔했다. 그래서 런북은 이제 둘을 «구분»해야 한다.
+    assert "Manual Deploy" in normalized_runbook, "코드만 바뀐 경우의 절차가 있어야 한다"
+    assert "render.yaml` 이 바뀐 경우에만" in normalized_runbook, (
+        "Blueprint Sync 를 언제 쓰는지 구분해야 한다"
+    )
+    assert "Blueprint 화면의 브랜치를 «반드시» 확인" in normalized_runbook, (
+        "★ 브랜치가 어긋나 있었다 — 이 경고가 사라지면 같은 사고가 다시 난다"
+    )
+    # 자동 배포가 켜졌다는 사실과 그 전제(push = 배포)도 런북에 있어야 한다.
+    assert "Auto-Deploy" in normalized_runbook
+    assert "push 는 「배포해도 되는 상태」일 때만" in normalized_runbook
 
     render_guide = (
         REPOSITORY_ROOT / "app" / "docs" / "Render_배포.md"
