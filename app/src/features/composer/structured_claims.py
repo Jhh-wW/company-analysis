@@ -179,6 +179,18 @@ def _structured_numeric_fact(
     )
 
 
+#: ③ «이미 통과한 검사»를 인정할 것인가 (2026-08-29, 사용자 결정).
+#:
+#: True  — `verification_state == "verified"` 인 문장은 통과시킨다.
+#:         그 표식은 ① 숫자를 인용 조각·실적표와 대조 통과 ② 검수 AI 가 참으로 판정
+#:         을 «둘 다» 거쳐야만 붙는다(기본값은 "unverified", 작가가 못 붙인다).
+#: False — v2-98 원래 동작. 구조화 사실이 붙은 문장만 통과 →
+#:         작가가 쓴 숫자 문장은 «전부» 삭제된다(실측: 45→25문장, 점수 33/100).
+#:
+#: ⚠️ 되돌리려면 이 값을 False 로 바꾸면 된다. 다른 코드는 건드릴 필요 없다.
+ALLOW_VERIFIED_NUMERIC_SENTENCES: bool = True
+
+
 def is_release_ready_numeric_sentence(
     sentence: ComposedSentence,
     *,
@@ -187,6 +199,23 @@ def is_release_ready_numeric_sentence(
     """숫자가 든 공개 문장이 의미 결속까지 완전한가."""
 
     if not has_public_numeric_token(sentence.text):
+        return True
+    # ③ 이미 두 번 검사를 통과한 문장에 «또» 증명서를 요구하지 않는다.
+    #   ⚠️ 네 조건을 «모두» 요구한다 — 하나라도 빼면 검사를 빼는 것이 된다.
+    #     · 증명서 없음 : 증명서가 «발급된» 문장은 아래 대조 경로로 보낸다.
+    #       발급됐다는 건 표시 숫자를 계산값과 맞춰 볼 수 있다는 뜻이고,
+    #       맞춰 볼 수 있으면 반드시 맞춰 본다. 이걸 빼면 표시값만 25%로
+    #       바꿔치기한 문장이 «검수 통과» 표식을 달고 그대로 나간다.
+    #     · verified : 숫자 대조 + 검수 AI 판정을 둘 다 통과했다는 표식
+    #     · 확인 등급 : 「해석」은 사실 주장이 아니므로 숫자를 실을 자격이 없다
+    #     · 인용 있음 : 어느 근거에서 온 숫자인지 되짚을 수 있어야 한다
+    if (
+        ALLOW_VERIFIED_NUMERIC_SENTENCES
+        and sentence.structured_claim is None
+        and sentence.verification_state == VerificationState.VERIFIED.value
+        and sentence.grade == GRADE_CONFIRMED
+        and sentence.citations
+    ):
         return True
     fact = _structured_numeric_fact(sentence, section_id=section_id)
     return fact is not None and validate_versioned_numeric_claim(fact) == ()

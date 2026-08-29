@@ -19,7 +19,7 @@ import re
 from pathlib import Path
 from typing import Any, Final, Optional, Sequence
 
-from src.features.composer.constants import SECTION_GUIDES, SECTION_IDS
+from src.features.composer.constants import GRADE_CONFIRMED, SECTION_GUIDES, SECTION_IDS
 from src.features.composer.diagram_check import FLOW_REVIEW_PROMPT_HEADER
 from src.features.composer.logic import AskFn, SUMMARY_PROMPT_HEADER
 from src.features.composer.pipeline import V2RunOutput, run_v2
@@ -187,11 +187,29 @@ def _section_texts(report: Report, section_id: str) -> list[str]:
 
 
 def _safe_section_count(sections: dict[str, Any], section_id: str) -> int:
-    """새 생성 안전 경계 뒤 남아야 할 미결속 숫자 없는 문장 수."""
+    """새 생성 안전 경계 뒤 남아야 할 문장 수를 fixture만 보고 예측한다.
+
+    ★ 2026-08-29, 사용자 결정 ③ — v2-98의 예측식(「숫자 토큰이 없는 문장만
+      남는다」)은 옛 규칙을 그대로 베낀 것이라 새 규칙에서는 틀린다. 새 규칙은
+      숫자 문장이라도 (검수 통과 + 확인 등급 + 인용 있음) 셋을 다 채우면
+      살린다(`structured_claims.is_release_ready_numeric_sentence`). 이
+      fixture는 golden 데이터라 «확인» 등급 + 인용 있는 숫자 문장은 실제로
+      근거와 셈이 맞는다(실측 확인) — 이 시험들의 가짜 검수(`_ScriptedReviewer`)도
+      건드리지 않은 문장은 전부 «참»만 돌려주므로, 세 조건을 fixture 필드만
+      보고 그대로 셀 수 있다.
+    ★ 이 예측식은 시험이 «일부러 조작한» 문장은 구분하지 못한다 — 등급·인용은
+      그대로 두고 «글»만 틀리게 바꾸면(숫자만 조작), fixture 필드로는 여전히
+      «안전»으로 보이지만 실제로는 근거와 안 맞아 제거된다. 그 문장을 건드린
+      시험은 호출부에서 `- 1`로 직접 보정한다(§4-B-2, §4-B-3).
+    """
+
+    def _predicted_safe(sentence: dict[str, Any]) -> bool:
+        if not has_public_numeric_token(str(sentence["글"])):
+            return True
+        return sentence.get("등급") == GRADE_CONFIRMED and bool(sentence.get("인용"))
 
     return sum(
-        not has_public_numeric_token(str(sentence["글"]))
-        for sentence in sections[section_id]["문장들"]
+        _predicted_safe(sentence) for sentence in sections[section_id]["문장들"]
     ) - DEDUPE_MOVED_BY_SECTION.get(section_id, 0)
 
 
@@ -269,11 +287,16 @@ def test_틀린_단위_숫자_문장만_제거되고_장은_생존한다() -> No
     report = output.report
 
     business_texts = _section_texts(report, "business_model")
-    assert len(business_texts) == _safe_section_count(sections, "business_model")
+    # 이 시험이 조작한 문장(2번 인덱스)은 등급·인용이 그대로라 예측식은
+    # «안전»으로 셀 수밖에 없다 — 실제로는 조작한 숫자가 근거와 안 맞아
+    # 제거된다. 그 한 문장만 예측식에서 직접 빼 준다(위 도우미 docstring 참고).
+    assert len(business_texts) == _safe_section_count(sections, "business_model") - 1
     assert all("99.9%" not in text for text in business_texts)
-    # 같은 장의 다른 AI 수치 문장도 의미 결속이 없으므로 새 공개본에는 없다.
+    # 같은 장의 «건드리지 않은» 다른 확인·숫자 문장(8,219억)은 여전히 살아
+    # 남는다 — 새 규칙에서 한 문장의 조작이 같은 장의 다른 문장까지 지우지
+    # 않는다는 «번짐 방지»(파일 docstring)를 이 시험이 직접 증명한다.
     survivors = [text for text in business_texts if "8,219억" in text]
-    assert survivors == []
+    assert survivors != []
     _assert_other_sections_intact(report, sections, "business_model")
     assert output.verified_sentences == _visible_sentence_count(report)
 
@@ -288,7 +311,10 @@ def test_틀린_맨_숫자도_최종_공개본에서는_제외되고_장은_생�
     report = output.report
 
     portfolio_texts = _section_texts(report, "portfolio")
-    assert len(portfolio_texts) == _safe_section_count(sections, "portfolio")
+    # 위 business_model 시험과 같은 이유 — 이 시험이 건드린 문장(3번 인덱스)은
+    # 등급·인용이 그대로라 예측식은 «안전»으로 셀 수밖에 없다. 실제로는
+    # 조작해 넣은 맨 숫자(2031년)가 근거에 없어 해석 강등 후 제거된다.
+    assert len(portfolio_texts) == _safe_section_count(sections, "portfolio") - 1
     demoted = [text for text in portfolio_texts if "2031년" in text]
     assert demoted == []
     _assert_other_sections_intact(report, sections, "portfolio")

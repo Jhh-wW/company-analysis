@@ -24,6 +24,7 @@ import pytest
 from src.features.composer.constants import (
     CITATION_STYLE_INLINE,
     GRADE_CONFIRMED,
+    GRADE_INTERPRETED,
     NOTICE_COMPOSE_FAILED,
     NOTICE_INSUFFICIENT_EVIDENCE,
     SECTION_GUIDES,
@@ -386,8 +387,12 @@ def test_기준문서_하한은_낮추지_않고_미결속_수치를_제외한_�
     assert len(fixture_body) >= MIN_SUBSTANTIVE_SENTENCES
     assert fixture_confirmed / len(fixture_all) >= MIN_CONFIRMED_RATIO
 
-    # ② 숫자가 없는 문장은 전부 보존하고, 의미 결속이 없는 AI 수치 문장만
-    #    제외한다. 40문장 하한 자체를 결과에 맞춰 낮추지 않는다.
+    # ② 숫자가 없는 문장은 전부 보존한다. 2026-08-29 사용자 결정 ③ 이후에는
+    #    «검사를 이미 두 번 통과한» 수치 문장(등급 확인 + 인용 있음 + 검수 AI가
+    #    참으로 판정해 verified)까지 살아남는다 — 구조화 근거(NumericBinding)를
+    #    요구하는 옛 규칙은 «해석» 등급 수치 문장에만 남는다(해석은 사실
+    #    주장이 아니라 애초에 구조화 근거를 만들 길이 없다). 주장이 아니라
+    #    fixture 등급 실측으로 확인한다.
     body_texts = [
         text
         for section in report.sections
@@ -399,11 +404,27 @@ def test_기준문서_하한은_낮추지_않고_미결속_수치를_제외한_�
         if has_public_numeric_token(sentence["글"])
     ]
     assert unbound_numeric_body
+    interpreted_unbound_numeric_body = [
+        sentence
+        for sentence in unbound_numeric_body
+        if sentence["등급"] == GRADE_INTERPRETED
+    ]
+    confirmed_unbound_numeric_body = [
+        sentence
+        for sentence in unbound_numeric_body
+        if sentence["등급"] == GRADE_CONFIRMED
+    ]
+    # 이 fixture의 «확인» 등급 수치 문장은 전부 인용이 있다 — 세 조건 중
+    # 인용 조건은 걸리지 않고 등급(해석)만 걸린다는 것을 실측으로 못 박는다.
+    assert len(confirmed_unbound_numeric_body) + len(
+        interpreted_unbound_numeric_body
+    ) == len(unbound_numeric_body)
+    assert all(sentence["인용"] for sentence in confirmed_unbound_numeric_body)
     # 기존 장 간 중복 소유권 규칙이 숫자 없는 중복 한 문장도 별도로 모은다.
     DEDUPE_MOVED_IN_FIXTURE = 1
     assert len(body_texts) == (
         len(fixture_body)
-        - len(unbound_numeric_body)
+        - len(interpreted_unbound_numeric_body)
         - DEDUPE_MOVED_IN_FIXTURE
     )
     assert SUMMARY_MIN_SENTENCES <= len(report.summary_items) <= SUMMARY_MAX_SENTENCES
@@ -411,14 +432,20 @@ def test_기준문서_하한은_낮추지_않고_미결속_수치를_제외한_�
     assert output.verified_sentences == len(body_texts) + len(report.summary_items)
     assert reviewer.rewrite_prompts == []
 
-    # ③ 본문 40문장 하한에 못 미치면 COMPLETE로 꾸미지 않고 PARTIAL과 이유를
-    #    표시한다. 기준값 40은 그대로다.
+    # ③ 하한 자체(본문 40문장·확인 비율 50%)는 낮추지 않는다 — 안전선.
+    #    2026-08-29 사용자 결정 ③ 이후 이 fixture는 «회복»해 두 지표 모두
+    #    하한을 넘긴다. 그런데도 등급은 여전히 PARTIAL이다 — 이유는 이 시험이
+    #    다루는 게이트(수치 문장 결속)가 아니라 «구조화 사실(FactRecord) 하한»
+    #    이라는 별도 게이트다. 이 시험은 실적표(table=None)를 일부러 안 주므로
+    #    report.fact_records가 0건이라 그 게이트를 못 채운다 — 표가 있는
+    #    경로는 test_e2e_offline.py가 본다(assessment.py의 substantive_claims는
+    #    fact_records만 세지, 렌더된 문장 수를 세지 않는다).
     rendered = _all_sentence_texts(report)
     rendered_confirmed = sum(
         1 for text in rendered if not text.endswith(INTERPRETATION_MARKER)
     )
-    assert len(body_texts) < MIN_SUBSTANTIVE_SENTENCES
-    assert report.grade.value == "부분 완성"
+    assert len(body_texts) >= MIN_SUBSTANTIVE_SENTENCES, "회복 확인: 40문장 하한을 넘겼다"
+    assert report.grade.value == "부분 완성"  # ← 안전선: 등급은 여전히 PARTIAL이다
     assert any("수치·날짜 문장" in reason for reason in report.shortfall_reasons)
     assert any(
         "근거와 의미가 구조로 확인된 실질 내용" in reason
@@ -429,4 +456,6 @@ def test_기준문서_하한은_낮추지_않고_미결속_수치를_제외한_�
         "서로 다른 원문 문서" in reason and "8개" in reason
         for reason in report.shortfall_reasons
     )
-    assert rendered_confirmed / len(rendered) < MIN_CONFIRMED_RATIO
+    assert rendered_confirmed / len(rendered) >= MIN_CONFIRMED_RATIO, (
+        "회복 확인: 확인 비율도 50% 하한을 넘겼다"
+    )
