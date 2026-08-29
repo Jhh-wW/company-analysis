@@ -435,6 +435,9 @@ def _machine_check(
     제거_인용실존: int = 0
     제거_수치근거: int = 0
     강등_수치근거: int = 0
+    # ★ 2026-08-29 — 이 강등은 «세지 않고» 있었다. 로그만 보면 원인이
+    #   아닌 것처럼 보여, 해석 비율 40%의 진짜 출처를 못 찾게 만들었다.
+    강등_라벨정합: int = 0
     for sentence in sentences:
         # ① 출처 실존 — 깨진 인용이 «하나라도» 있는 문장은 제거한다.
         #   깨진 인용이 달린 문장은 지어낸 것과 구별할 방법이 없다.
@@ -444,6 +447,7 @@ def _machine_check(
         # ④-a 라벨 정합 — 인용 없는 «확인»은 사실 주장을 뒷받침할 근거가 없다.
         #   제거가 아니라 «해석» 강등이다 (분석으로서의 가치는 남긴다).
         if sentence.grade == GRADE_CONFIRMED and not sentence.citations:
+            강등_라벨정합 += 1
             sentence = _demoted(sentence)
         # ② 수치 검증 — «확인» 문장만. 해석은 사실 주장이 아니므로 대상이 아니다.
         if sentence.grade == GRADE_CONFIRMED:
@@ -457,12 +461,13 @@ def _machine_check(
         kept.append(sentence)
     logger.info(
         "코드 검증 처분(문장 %d→%d): 인용 미실존 제거 %d · 단위 수치 미근거 제거 %d"
-        " · 부수 수치 미근거 해석 강등 %d",
+        " · 부수 수치 미근거 해석 강등 %d · 인용없는 확인→해석 강등 %d",
         len(sentences),
         len(kept),
         제거_인용실존,
         제거_수치근거,
         강등_수치근거,
+        강등_라벨정합,
     )
     return kept
 
@@ -735,6 +740,26 @@ def _semantic_review(
                 # 응답에 번호가 없는 것은 «애매» 판정이 아니라 검수
                 # 미완료다. 라벨 교체로 공개하지 않는다.
                 final[item.number] = None
+        # ★ 2026-08-29 — 여기가 «완전히 침묵»하고 있었다. 판정별 개수를 남긴다.
+        #   ⚠️ 문장 본문은 넣지 않는다 — 개수와 판정 이름만.
+        _센다 = {"참": 0, "거짓_재작성": 0, "거짓_제거": 0, "애매_강등": 0, "번호없음_제거": 0}
+        for item in items:
+            v = verdicts.get(item.number)
+            if v == VERDICT_TRUE:
+                _센다["참"] += 1
+            elif v == VERDICT_FALSE:
+                _센다["거짓_재작성" if item.sentence.grade == GRADE_CONFIRMED else "거짓_제거"] += 1
+            elif v == VERDICT_UNCLEAR:
+                _센다["애매_강등"] += 1
+            else:
+                _센다["번호없음_제거"] += 1
+        logger.info(
+            "의미 검수 판정(문장 %d): 참 %d · 거짓→재작성 %d · 거짓→제거 %d"
+            " · 애매→해석강등 %d · 응답에 번호없음→제거 %d",
+            len(items),
+            _센다["참"], _센다["거짓_재작성"], _센다["거짓_제거"],
+            _센다["애매_강등"], _센다["번호없음_제거"],
+        )
         if rewrite_targets:
             _rewrite_and_recheck(
                 ask, rewrite_targets, frag_by_id, table_texts, table_evidence, final

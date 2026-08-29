@@ -363,6 +363,16 @@ def run_v2(
     # 산문을 역추출해 가짜 fact로 통과시키지 않는다. 프로그램이 만든 위 누적
     # 증감률은 동일한 versioned 결속을 재검산한 뒤 그대로 남는다.
     verified, body_numeric_filtering = enforce_public_numeric_safety(verified)
+    # ★ 2026-08-29 — 이 삭제는 보고서 «안»에만 적히고 서버 로그엔 흔적이 없었다.
+    #   실측: 현대카드에서 최소 16문장이 여기서 사라졌는데 로그로는 안 보였다.
+    if body_numeric_filtering.removed_section_counts:
+        logger.warning(
+            "수치 안전 제외: 구조화 근거 없는 수치·날짜 문장 %d개 (장별 %s)",
+            sum(n for _, n in body_numeric_filtering.removed_section_counts),
+            ", ".join(
+                f"{sid}:{n}" for sid, n in body_numeric_filtering.removed_section_counts
+            ),
+        )
 
     # ③ 핵심 요약 — «검증된» 본문을 재료로 새로 쓴다 (본문 재탕 금지)
     with_summary = compose_summary(verified, writer_ask)
