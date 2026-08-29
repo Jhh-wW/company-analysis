@@ -55,6 +55,7 @@ from src.features.composer.constants import (
     SECTION_IDS,
     SECTION_TITLES,
     SECTION_SENTENCE_RANGES,
+    MAX_INTERPRETED_SENTENCES_PER_SECTION,
     SENTENCE_RANGE_GUIDE,
     VALID_GRADES,
 )
@@ -154,7 +155,11 @@ def build_section_prompt(
         "\n\n",
         CITATION_RULES_GUIDE,
         FORBIDDEN_TOPICS_GUIDE,
-        SENTENCE_RANGE_GUIDE.format(minimum=minimum, maximum=maximum),
+        SENTENCE_RANGE_GUIDE.format(
+            minimum=minimum,
+            maximum=maximum,
+            interpretation_cap=MAX_INTERPRETED_SENTENCES_PER_SECTION,
+        ),
         claim_slot_guide,
         # 7장은 «경로표»를 함께 내야 해서 스키마 안내를 통째로 바꾼다.
         # 덧붙이면 기본 안내의 「이 JSON만 출력한다」와 충돌해 작가가 경로표를

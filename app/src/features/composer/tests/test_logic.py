@@ -18,12 +18,15 @@ import pytest
 from src.features.composer.constants import (
     FORBIDDEN_TOPICS_GUIDE,
     GRADE_CONFIRMED,
+    DEFAULT_SENTENCE_RANGE,
     GRADE_INTERPRETED,
+    MAX_INTERPRETED_SENTENCES_PER_SECTION,
     NOTICE_COMPOSE_FAILED,
     NOTICE_INSUFFICIENT_EVIDENCE,
     RETRY_REMINDER,
     SECTION_GUIDES,
     SECTION_IDS,
+    SECTION_SENTENCE_RANGES,
 )
 from src.features.composer.logic import (
     build_section_prompt,
@@ -333,6 +336,71 @@ def test_프롬프트에_금지주제_지침이_들어간다():
         assert "자소서" in prompt
         assert "면접" in prompt
         assert "연봉 추정" in prompt
+
+
+def test_최소_문장에서_멈추지_말라고_지시한다():
+    """★ 2026-08-29 실측 — 이 지시가 없으면 작가가 최소치 6문장에 머문다.
+
+    실측(현대카드): 장별 작성 8·7·6·6·8·6·6·6·6 — 아홉 장 중 여섯 장이
+    범위의 «최소»였다. 장당 평균 4.44문장으로 기준 보고서(진영 5.67 ·
+    하이브 5.56)에 못 미쳐 채점 8/15점이었다.
+    """
+
+    prompt = build_section_prompt("가나다전자", "past_changes", fragments_from_raw(_raw_fragments()), _table())
+
+    assert "멈추지 마라" in prompt
+    assert "아직 쓰지 않은" in prompt
+
+
+def test_근거가_여러_조각이면_모두_인용하라고_말한다():
+    """★ 2026-08-29 실측 — 부록 출처 수가 만점 문턱(8개) 바로 아래(7개)였다.
+
+    스키마 예시가 `"인용": ["<조각id>"]` 단수라 작가가 조각 하나만 인용하는
+    습관이 생겼다. 근거가 여러 조각에 걸쳐 있으면 모두 인용해야 부록 출처가
+    늘고, 도식 검수도 더 많은 근거 원문을 받는다.
+    ⚠️ 짝 문구(「뒷받침하지 않는 조각은 넣지 마라」)를 지우면 근거 없는 인용을
+      부르므로 함께 지키다.
+    """
+
+    prompt = build_section_prompt("가나다전자", "identity", fragments_from_raw(_raw_fragments()), _table())
+
+    assert "«모두» 인용한다" in prompt
+    assert "뒷받침하지 않는 조각은 넣지 마라" in prompt
+
+
+def test_장별_최소_문장수는_8이다():
+    """★ 실측으로 정한 값이다 — 낮추면 보고서가 다시 얇아진다.
+
+    작가는 거의 언제나 «최소치»를 쓴다(현대카드 두 번 실측: 아홉 장 중 여섯
+    장이 최소치). 작가 산출의 약 35%가 장 간 중복 제거·검증에서 빠지므로,
+    기준 보고서와 같은 장당 5문장(총 45문장)에 닿으려면 장당 약 7.7문장을
+    써야 한다. 8은 그 반올림이다.
+    ⚠️ 이 값을 되돌리려면 «실측»을 근거로 대라. 문구만 바꾸는 것으로는
+      작가가 움직이지 않는다는 것도 실측으로 확인됐다(산출 59→58).
+    """
+
+    minimum, maximum = DEFAULT_SENTENCE_RANGE
+    assert minimum == 8
+    assert maximum == 12
+    assert all(
+        SECTION_SENTENCE_RANGES[section_id] == DEFAULT_SENTENCE_RANGE
+        for section_id in SECTION_IDS
+    )
+
+
+def test_분량을_늘리라면서_해석_천장도_같이_준다():
+    """★ 안전선 — 「더 써라」만 있으면 작가가 근거 없이 «해석»으로 채운다.
+
+    두 지시는 «짝»이다. 천장 문구를 지우면 해석 비율이 다시 올라간다.
+    """
+
+    prompt = build_section_prompt("가나다전자", "past_changes", fragments_from_raw(_raw_fragments()), _table())
+
+    assert "근거가 없으면 차라리 적게 쓴다" in prompt
+    assert (
+        f"«해석» 등급은 {MAX_INTERPRETED_SENTENCES_PER_SECTION}문장을 넘기지 않는다"
+        in prompt
+    )
 
 
 def test_프롬프트에_회사명과_조각_전체와_실적표가_실린다():

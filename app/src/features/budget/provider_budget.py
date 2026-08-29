@@ -42,6 +42,20 @@ class ProviderBudgetExceeded(RuntimeError):
     """다음 호출의 방어적 예상비용이 단계 예약 잔액을 넘음."""
 
 
+class RequestCallLimitReached(ProviderBudgetExceeded):
+    """돈이 아니라 «한 요청에 허락된 AI 호출 «횟수»»를 다 썼다.
+
+    ★ 왜 따로 두나 (2026-08-29 실측) — 이 둘은 뜻이 다르다.
+      · 예산 초과 : 더 부르면 «돈»이 넘는다 → 요청 전체를 멈추는 게 맞다.
+      · 횟수 상한 : 이미 만들어 둔 장·문장이 손에 있는데 «선택적 다듬기»를
+        한 번 더 못 부를 뿐이다. 그때까지 만든 보고서를 버릴 이유가 없다.
+      한 타입으로 뭉쳐 두었더니, 다듬기 한 번을 못 불렀다고 완성된 9개 장이
+      통째로 버려졌다(현대카드·우리은행 실측).
+    ★ 부모를 그대로 상속하므로 기존에 ProviderBudgetExceeded 를 잡던 곳은
+      «하나도» 동작이 바뀌지 않는다. 구분이 필요한 곳만 이 타입을 본다.
+    """
+
+
 class ProviderCostInvariantError(RuntimeError):
     """provider 비용 예약 생명주기 자체가 깨졌음."""
 

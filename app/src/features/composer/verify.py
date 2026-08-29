@@ -627,6 +627,40 @@ def _ask_rewrite(
     return ""
 
 
+#: 한 번의 검증에서 «거짓» 문장을 되살리려고 쓸 수 있는 재작성 호출의 최대 수.
+#:
+#: ★ 왜 필요한가 (2026-08-29 실측) — 재작성은 «거짓 문장 1개당 AI 1회»다.
+#:   문장이 늘면 호출이 선형으로 늘어 한 요청 상한(18회)을 넘겼고, 그 초과
+#:   하나로 완성된 보고서가 통째로 실패했다(현대카드 실측: 초과 3회).
+#:
+#: ★ 왜 3인가 — 한 보고서의 «고정» 호출을 세면 이렇다:
+#:     9(장 작성) + 1(본문 검수) + 1(본문 재검수) + 1(도식 검수)
+#:     + 1(요약 작성) + 1(요약 검수) = 14
+#:   상한 18에서 14를 빼면 4가 남고, 파싱 실패 재요청 1회분을 남겨 3으로 둔다.
+#:
+#: ⚠️ 이 「14」는 «낙관적 추정»이다 (적대 검증이 지적, 2026-08-29).
+#:   장 작성·본문 검수·도식 검수·요약 검수는 각자 파싱 실패 시 1회씩 더
+#:   부를 수 있어(`PARSE_RETRY_LIMIT`), 어느 한 곳이라도 재시도가 걸리면
+#:   재작성에 남는 여유는 3보다 줄어든다.
+#:   그래도 «구멍»은 아니다 — 진짜 강제는 이 숫자가 아니라
+#:   `real.py` 의 전역 원자 카운터이고, 셈이 빗나가 실제 상한을 넘겨도
+#:   아래 `except AskFatalError` 저하 경로가 그대로 받아 보고서를 지킨다.
+#:   즉 이 값은 «저하가 아예 필요 없게 만들려는» 여유값이지 안전선이 아니다.
+#:   ⚠️ `core.constants.MAX_AI_CALLS_PER_REQUEST` 를 바꾸면 이 셈도 다시 해야
+#:     한다. 두 값은 «짝»이다.
+#:
+#: ⚠️ 「본문 1차 검수」는 «우아한 저하» 대상이 아니다 (적대 검증이 지적, 2026-08-29).
+#:   재작성·요약·도식 검수는 못 하면 포기하고 넘어갈 수 있지만, 본문 1차 검수를
+#:   못 하면 «검증되지 않은 본문»만 남아 낼 것이 없다 — 그래서 그 호출만은
+#:   실패하면 요청 전체가 멈춘다(예전과 같음). 위 셈에서 본문 1차 검수가
+#:   10번째 호출이라 상한 18까지 여유가 있는 것이 그 안전의 근거다.
+#:   이 예산을 늘려 본문 1차 검수를 뒤로 밀면 그 안전이 사라진다.
+#:
+#: ★ 넘친 문장은 어떻게 되나 — 재작성 없이 «제거»된다. 이미 검수 AI 가
+#:   「거짓」이라고 판정한 문장이므로, 못 살리면 빼는 것이 안전한 쪽이다.
+MAX_REWRITE_CALLS_PER_VERIFY: Final[int] = 3
+
+
 def _rewrite_and_recheck(
     ask: AskFn,
     targets: Sequence[_ReviewItem],
@@ -647,7 +681,19 @@ def _rewrite_and_recheck(
           문장이라, 확인 못 한 채 남기는 쪽이 더 위험하다.
     """
     recheck_items: list[_ReviewItem] = []
-    for item in targets:
+    if len(targets) > MAX_REWRITE_CALLS_PER_VERIFY:
+        logger.warning(
+            "재작성 대상이 %d개라 호출 예산(%d회)을 넘는다 — 앞 %d개만 되살리고 "
+            "나머지는 제거한다",
+            len(targets),
+            MAX_REWRITE_CALLS_PER_VERIFY,
+            MAX_REWRITE_CALLS_PER_VERIFY,
+        )
+    for order, item in enumerate(targets):
+        if order >= MAX_REWRITE_CALLS_PER_VERIFY:
+            # 이미 «거짓» 판정을 받은 문장이다. 못 살리면 빼는 쪽이 안전하다.
+            final[item.number] = None
+            continue
         rewritten_text = _ask_rewrite(ask, item.sentence, frag_by_id)
         if not rewritten_text:
             final[item.number] = None
@@ -761,9 +807,29 @@ def _semantic_review(
             _센다["애매_강등"], _센다["번호없음_제거"],
         )
         if rewrite_targets:
-            _rewrite_and_recheck(
-                ask, rewrite_targets, frag_by_id, table_texts, table_evidence, final
-            )
+            try:
+                _rewrite_and_recheck(
+                    ask, rewrite_targets, frag_by_id, table_texts, table_evidence, final
+                )
+            except AskFatalError as error:
+                # ★ 2026-08-29 실측 — «호출 «횟수» 상한»만은 여기서 멈추지 않는다.
+                #   재작성은 «거짓 판정 문장을 살려 보려는» 선택적 다듬기다.
+                #   못 하면 그 문장들은 재작성 대신 «제거»되므로 결과는 오히려
+                #   더 보수적이고, 이미 만든 나머지 장·문장은 멀쩡히 남는다.
+                #   이 갈래가 없던 동안에는 다듬기 한 번을 못 불렀다는 이유로
+                #   완성된 9개 장이 통째로 버려졌다(현대카드·우리은행 실측).
+                #   돈·계정 장애(call_limit=False)는 그대로 재전파한다.
+                if not getattr(error, "call_limit", False):
+                    raise
+                logger.warning(
+                    "AI 호출 횟수 상한이라 «거짓» 판정 문장 %d개의 재작성을 "
+                    "포기하고 제거한다 — 나머지 보고서는 그대로 낸다",
+                    len(rewrite_targets),
+                )
+                # 예외 «전»에 이미 확정된 처분(제거·강등)은 그대로 두고,
+                # 아직 처리되지 않은 것만 «제거»로 채운다.
+                for item in rewrite_targets:
+                    final.setdefault(item.number, None)
 
     rebuilt: list[list[ComposedSentence]] = []
     for group_index, group in enumerate(groups):

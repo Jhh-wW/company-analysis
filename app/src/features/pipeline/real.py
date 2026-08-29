@@ -513,7 +513,11 @@ class _MeteredEngine:
 
         with self._provider_call_lock:
             if self._provider_call_count >= MAX_AI_CALLS_PER_REQUEST:
-                raise provider_budget.ProviderBudgetExceeded(
+                # ★ 돈이 아니라 «횟수»다 — 전용 타입으로 구분해 던진다.
+                #   composer 의 «선택적 다듬기»는 이 구분을 보고 포기하고
+                #   지금까지 만든 보고서로 끝낸다(2026-08-29 실측 근거는
+                #   composer/port.py::AskFatalError 주석 참조).
+                raise provider_budget.RequestCallLimitReached(
                     "한 요청의 AI 호출 횟수 상한을 넘었습니다"
                 )
             object.__setattr__(
@@ -3119,7 +3123,12 @@ def _v2_ask_via_provider(
             provider_budget.ProviderBudgetExceeded,
             provider_budget.ProviderBudgetUnavailable,
         ) as error:
-            raise AskFatalError(error) from error
+            raise AskFatalError(
+                error,
+                call_limit=isinstance(
+                    error, provider_budget.RequestCallLimitReached
+                ),
+            ) from error
         blocks = getattr(response, "content", None) or []
         return "".join(str(getattr(block, "text", "") or "") for block in blocks)
 

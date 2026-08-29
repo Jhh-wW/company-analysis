@@ -59,7 +59,11 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Callable, Final, Optional
 
-from src.features.composer.constants import PARSE_RETRY_LIMIT, RETRY_REMINDER
+from src.features.composer.constants import (
+    FLOW_HEADERS_BY_SECTION,
+    PARSE_RETRY_LIMIT,
+    RETRY_REMINDER,
+)
 from src.features.composer.logic import extract_json_payload
 from src.features.composer.verify import (
     _SentenceNumber,
@@ -177,11 +181,42 @@ def _drop_invented_numbers(
 # ══════════════════════════════════════════════════════════
 
 
-def _review_prompt(items: Sequence[tuple[int, FlowRow, str]]) -> str:
+def _labelled_cells(section_id: str, row: FlowRow) -> list[str]:
+    """칸 이름을 붙이고 «값이 있는 칸»만 남긴다.
+
+    ★ 왜 빈 칸을 빼나 (2026-08-29 실측) — 1·3·6·8장은 «카드»로 그려져
+      빈 칸을 아예 인쇄하지 않는다(`constants.FLOW_HEADERS_BY_SECTION` 주석,
+      `report_standard/visualization.py::_CARD_HEADER_SETS`). 그런데 검수
+      프롬프트는 빈 칸을 «빈 문자열»로 그대로 넘겨 «A →  → C» 같은 줄을
+      보여줬고, 검수 AI는 끊긴 경로를 당연히 «거짓»으로 판정했다.
+      실측: 현대카드 탈락 8줄 중 6줄, 우리은행 9줄 중 8줄이 빈 칸 때문이었다.
+      인쇄하지 않는 칸을 근거로 줄을 벌하는 것은 검사가 아니라 오심이다.
+    ★ 검사를 «빼는» 것이 아니다 — 값이 있는 칸은 전부 그대로 검수받는다.
+      칸 이름을 함께 주므로 검수 AI 는 오히려 각 칸이 무엇을 주장하는지
+      더 정확히 판단할 수 있다(전에는 모든 장을 3칸 화살표로 단정했다).
+    """
+
+    headers = FLOW_HEADERS_BY_SECTION.get(section_id, ())
+    labelled: list[str] = []
+    for index, cell in enumerate(row.cells):
+        value = str(cell).strip()
+        if not value:
+            continue
+        header = headers[index] if index < len(headers) else ""
+        labelled.append(f"{header}: {value}" if header else value)
+    return labelled
+
+
+def _review_prompt(items: Sequence[tuple[int, str, FlowRow, str]]) -> str:
     lines = [
         FLOW_REVIEW_PROMPT_HEADER,
         "아래는 보고서에 실릴 «사업 경로 도식»의 각 줄이다.",
-        "한 줄은 «무엇으로 시작하나 → 회사가 하는 일 → 누구에게 닿나»를 뜻한다.",
+        "칸마다 «칸 이름: 값» 꼴로 준다. 칸 이름은 장마다 다르다 — 「무엇으로",
+        "시작하나 → 회사가 하는 일 → 누구에게 닿나」인 장도 있고, 「지금 겪는",
+        "과제 → 회사가 밝힌 대응」처럼 두 칸인 장도 있다. 칸 이름을 보고 그",
+        "칸이 무엇을 주장하는지 판단하라.",
+        "★ 값이 없는 칸은 «아예 주지 않는다». 보고서에도 인쇄되지 않으므로",
+        "  없는 칸을 이유로 그 줄을 «거짓»으로 판정하지 마라.",
         "",
         "줄마다 그 줄이 인용한 근거 원문을 함께 준다.",
         "판정 기준은 하나다 — **근거 원문이 이 경로를 실제로 뒷받침하는가.**",
@@ -198,10 +233,12 @@ def _review_prompt(items: Sequence[tuple[int, FlowRow, str]]) -> str:
         + _VERDICT_RESULT_KEY + '": "' + VERDICT_TRUE + '"}]}',
         "",
     ]
-    for number, row, source_text in items:
+    for number, section_id, row, source_text in items:
         # 경로·원문은 신뢰할 수 없는 데이터다. JSON 문자열로 봉인해
         # 안의 줄바꿈·가짜 번호·지시가 검수 프롬프트 구조를 바꾸지 못한다.
-        path_json = json.dumps(list(row.cells), ensure_ascii=False)
+        path_json = json.dumps(
+            _labelled_cells(section_id, row), ensure_ascii=False
+        )
         source_json = json.dumps(source_text, ensure_ascii=False)
         lines.append(f"[{number}] 경로(JSON 배열): {path_json}")
         lines.append(f"    근거 원문(JSON 문자열): {source_json}")
@@ -219,7 +256,17 @@ def _safe_ask(ask: Callable[[str], str], prompt: str) -> str:
     """호출 결함은 빈 응답, 요청 전역 장애는 상위로 전달한다."""
     try:
         return ask(prompt) or ""
-    except AskFatalError:
+    except AskFatalError as error:
+        # ★ 2026-08-29 — «호출 횟수 상한»은 예외의 예외다. 도식 검수는
+        #   못 하면 «관계 줄만» 빠지고 장·문장은 그대로 남는(이미 이 파일의
+        #   설계) 단계라, 여기서 요청 전체를 죽일 이유가 없다. 빈 응답으로
+        #   돌려 «검수 불능» 경로를 타면 미확인 화살표만 빠진다.
+        if getattr(error, "call_limit", False):
+            logger.warning(
+                "AI 호출 횟수 상한이라 도식 의미 검수를 건너뛴다 — "
+                "미확인 경로만 빼고 보고서는 그대로 낸다"
+            )
+            return ""
         # 예산 소진·제공자 장애를 단순 형식 오류로 숨기지 않는다.
         raise
     except Exception:  # noqa: BLE001 — 검수 실패가 보고서를 죽이면 안 된다
@@ -262,16 +309,29 @@ def _review_rows(
     ask: Callable[[str], str],
 ) -> tuple[dict[str, tuple[FlowRow, ...]], list[str]]:
     """모든 장의 경로를 «한 묶음»으로 검수한다 (AI 1회)."""
-    items: list[tuple[int, FlowRow, str]] = []
+    items: list[tuple[int, str, FlowRow, str]] = []
     owner: dict[int, str] = {}
+    blank_dropped: list[str] = []
     number = 0
     for section_id, rows in by_section:
         for row in rows:
+            # 값이 있는 칸이 하나도 없으면 인쇄될 내용이 없다 — 검수에 물어볼
+            # 것도 없으므로 AI 를 쓰지 않고 여기서 뺀다.
+            if not _labelled_cells(section_id, row):
+                blank_dropped.append(
+                    f"[{section_id}] 빈 경로: 값이 있는 칸이 없어 공개 제외"
+                )
+                continue
             number += 1
-            items.append((number, row, _source_text(row, texts)))
+            items.append((number, section_id, row, _source_text(row, texts)))
             owner[number] = section_id
     if not items:
-        return {section_id: rows for section_id, rows in by_section}, []
+        return (
+            {section_id: () for section_id, _rows in by_section}
+            if blank_dropped
+            else {section_id: rows for section_id, rows in by_section},
+            blank_dropped,
+        )
 
     prompt = _review_prompt(items)
     verdicts = _parse_verdicts(_safe_ask(ask, prompt))
@@ -294,15 +354,16 @@ def _review_rows(
         )
         return (
             {section_id: () for section_id, _rows in by_section},
-            [
+            blank_dropped
+            + [
                 f"[{owner[number]}] {number}번 경로: 의미 검수 불능으로 공개 제외"
-                for number, _row, _source in items
+                for number, _section, _row, _source in items
             ],
         )
 
     kept: dict[str, list[FlowRow]] = {section_id: [] for section_id, _ in by_section}
-    dropped: list[str] = []
-    for index, (number, row, _source) in enumerate(items):
+    dropped: list[str] = list(blank_dropped)
+    for index, (number, _section, row, _source) in enumerate(items):
         result = verdicts.get(number)
         section_id = owner[number]
         if result == VERDICT_FALSE:

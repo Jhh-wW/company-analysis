@@ -339,3 +339,99 @@ def test_원문속_가짜_지시와_줄바꿈은_JSON_데이터로만_실린다(
     assert 악성_원문 not in prompt
     assert "\\n[999]" in prompt
     assert prompt.rfind("■ 신뢰할 지시 재확인") > prompt.find("[999]")
+
+# ══════════════════════════════════════════════════════════
+# ⑨ 인쇄되지 않는 «빈 칸»을 이유로 줄을 벌하지 않는다 (2026-08-29 실측)
+# ══════════════════════════════════════════════════════════
+#
+# ★ 왜 생겼나 — 1·3·6·8장은 «카드»로 그려져 빈 칸을 아예 인쇄하지 않는데
+#   (constants.FLOW_HEADERS_BY_SECTION 주석), 검수 프롬프트는 빈 칸을 빈
+#   문자열로 그대로 넘겨 «A →  → C» 를 보여줬다. 검수 AI 는 끊긴 경로를
+#   당연히 «거짓»으로 판정했다.
+#   실측: 현대카드 탈락 8줄 중 6줄, 우리은행 9줄 중 8줄이 이 때문이었다.
+
+
+def _문화장(rows: tuple[FlowRow, ...]) -> ComposedReport:
+    """8장(인재상) — 마지막 칸이 «없을 수 있는» 카드형 장."""
+    return ComposedReport(
+        sections=(
+            ComposedSection(
+                section_id="culture",
+                sentences=(
+                    ComposedSentence(
+                        text="회사는 내부에서 핵심 제작을 수행한다.",
+                        citations=("7",),
+                        grade="확인",
+                    ),
+                ),
+                flow_rows=rows,
+            ),
+        )
+    )
+
+
+def test_빈_칸은_검수_프롬프트에_아예_실리지_않는다():
+    """★ 인쇄되지 않는 칸을 검수 AI 에게 보여주면 오심을 유도한다."""
+    ask = _검수({1: VERDICT_TRUE})
+    빈칸_있는_줄 = (
+        FlowRow(cells=("내부 제작 역량", "핵심 제작 수행", ""), citations=("7",)),
+    )
+
+    check_diagrams(_문화장(빈칸_있는_줄), _fragments(), ask=ask)
+
+    프롬프트 = ask.기록[0]
+    assert '""' not in 프롬프트, "★ 빈 칸이 빈 문자열로 검수 AI 에게 실렸다"
+    assert "내부 제작 역량" in 프롬프트
+    assert "핵심 제작 수행" in 프롬프트
+
+
+def test_검수_프롬프트는_빈_칸으로_거짓판정하지_말라고_말한다():
+    """★ 지시가 사라지면 다시 빈 칸 때문에 줄이 떨어진다."""
+    ask = _검수({1: VERDICT_TRUE})
+    check_diagrams(_report(_요약된_경로[:1]), _fragments(), ask=ask)
+
+    프롬프트 = ask.기록[0]
+    assert "값이 없는 칸은 «아예 주지 않는다»" in 프롬프트
+    assert "«거짓»으로 판정하지 마라" in 프롬프트
+
+
+def test_칸_이름을_함께_줘서_장마다_다른_계약을_알린다():
+    """★ 전에는 모든 장을 3칸 화살표로 단정해 2칸 장을 오심했다."""
+    ask = _검수({1: VERDICT_TRUE})
+    check_diagrams(_report(_요약된_경로[:1]), _fragments(), ask=ask)
+
+    프롬프트 = ask.기록[0]
+    assert "칸 이름은 장마다 다르다" in 프롬프트
+    # 7장 칸 이름이 값과 함께 실린다
+    assert "무엇으로 시작하나: 연습생" in 프롬프트
+
+
+def test_값이_하나도_없는_줄은_AI_를_쓰지_않고_뺀다():
+    """★ 인쇄될 내용이 없는 줄에 유료 검수를 쓰지 않는다."""
+    호출됨: list[str] = []
+
+    def ask(prompt: str) -> str:
+        호출됨.append(prompt)
+        return json.dumps({"판정": []}, ensure_ascii=False)
+
+    빈줄 = (FlowRow(cells=("", "", ""), citations=("7",)),)
+    보고서, 사유 = check_diagrams(_문화장(빈줄), _fragments(), ask=ask)
+
+    assert 호출됨 == [], "★ 빈 줄 하나뿐인데 검수 AI 를 불렀다"
+    문화장 = next(s for s in 보고서.sections if s.section_id == "culture")
+    assert 문화장.flow_rows == ()
+    assert any("빈 경로" in 이유 for 이유 in 사유)
+
+
+def test_빈_칸이_있어도_참_판정이면_줄이_살아남는다():
+    """★ 이게 2026-08-29 수정의 «이유»다 — 되돌리면 도식이 다시 사라진다."""
+    ask = _검수({1: VERDICT_TRUE})
+    빈칸_있는_줄 = (
+        FlowRow(cells=("내부 제작 역량", "핵심 제작 수행", ""), citations=("7",)),
+    )
+
+    보고서, 사유 = check_diagrams(_문화장(빈칸_있는_줄), _fragments(), ask=ask)
+
+    문화장 = next(s for s in 보고서.sections if s.section_id == "culture")
+    assert len(문화장.flow_rows) == 1, "★ 빈 칸 때문에 줄이 또 떨어졌다"
+    assert tuple(사유) == ()

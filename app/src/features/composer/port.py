@@ -25,10 +25,22 @@ class AskFatalError(Exception):
       이 타입만은 어디서 잡히든 재전파해 pipeline.run_v2까지 뚫고 나가야
       한다 — 그래야 real.py가 v1과 같은 FAILED로 정직하게 끝낼 수 있다
       (전역 장애를 «검증 실패»로 오표기하지 않기 위함).
+
+    ★ 예외의 예외 — «호출 «횟수» 상한»만은 다르다 (2026-08-29 실측).
+      돈이 떨어진 것이 아니라 «이 요청에 허락된 AI 호출 수»를 다 쓴 것이다.
+      그때는 이미 만들어 둔 장·문장이 멀쩡히 손에 있는데도 보고서 전체가
+      버려졌다(현대카드·우리은행 실측 — 완성된 9개 장이 통째로 사라지고
+      화면에는 「보고서를 만들다 오류가 났습니다」만 남았다).
+      선택적 다듬기(거짓 문장 «재작성»)에서 이 한도를 만나면, 다듬기를
+      포기하고 «지금까지 만든 것»으로 끝내는 편이 정직하고 안전하다 —
+      다듬지 못한 문장은 재작성 대신 «제거»되므로 검증은 오히려 더 보수적이다.
+      `call_limit=True` 가 그 구분을 나른다. 돈·계정 장애는 여전히 False 다.
     """
 
-    def __init__(self, cause: BaseException) -> None:
+    def __init__(self, cause: BaseException, *, call_limit: bool = False) -> None:
         self.cause = cause
+        #: 호출 «횟수» 상한이라 선택적 단계를 포기하고 이어가도 되는가.
+        self.call_limit = bool(call_limit)
         super().__init__(str(cause))
 
 

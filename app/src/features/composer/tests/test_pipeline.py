@@ -36,6 +36,7 @@ from src.features.composer.dup_detect import (
     DuplicateFinding,
     NumericOccurrence,
 )
+from src.features.composer.port import AskFatalError
 from src.features.composer.pipeline import V2RunOutput, run_v2
 from src.features.composer.port import FilingMeta, PerformanceTable
 from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
@@ -336,6 +337,54 @@ def test_초안과_생존_문장_수를_그대로_센다():
 # ══════════════════════════════════════════════════════════
 # ③ fail-closed — 빈 본문은 출고 검증에서 막힌다
 # ══════════════════════════════════════════════════════════
+
+
+def test_요약이_호출상한이면_본문을_버리지_않고_보고서를_낸다():
+    """★ 2026-08-29 실측 — 요약 호출 하나가 완성된 9개 장을 통째로 버렸다.
+
+    요약은 «이미 검증된» 본문 확인 문장으로 채울 길이 있고 그 길은 AI 를
+    한 번도 부르지 않는다. 그러니 본문을 버릴 이유가 없다.
+    """
+
+    class _요약에서_한도(_FakeWriter):
+        def __call__(self, prompt: str) -> str:
+            if "핵심 요약" in prompt:
+                raise AskFatalError(RuntimeError("한도"), call_limit=True)
+            return super().__call__(prompt)
+
+    output = run_v2(
+        "가나다전자",
+        _raw_fragments(),
+        None,
+        writer_ask=_요약에서_한도(),
+        reviewer_ask=_FakeReviewer(),
+    )
+
+    report = output.report
+    assert [section.cell for section in report.sections] == list(SECTION_IDS)
+    assert all(section.prose_lines for section in report.sections), (
+        "★ 본문이 사라지면 안 된다"
+    )
+    assert report.summary_items, "★ 요약은 본문 확인 문장으로 채워져야 한다"
+
+
+def test_요약이_돈문제면_여전히_요청_전체가_멈춘다():
+    """★ 안전선 — 예산 소진을 「요약만 대체」로 숨기지 않는다."""
+
+    class _요약에서_예산소진(_FakeWriter):
+        def __call__(self, prompt: str) -> str:
+            if "핵심 요약" in prompt:
+                raise AskFatalError(RuntimeError("예산"))
+            return super().__call__(prompt)
+
+    with pytest.raises(AskFatalError):
+        run_v2(
+            "가나다전자",
+            _raw_fragments(),
+            None,
+            writer_ask=_요약에서_예산소진(),
+            reviewer_ask=_FakeReviewer(),
+        )
 
 
 def test_본문이_통째로_비면_V2ValidationError로_끝난다():

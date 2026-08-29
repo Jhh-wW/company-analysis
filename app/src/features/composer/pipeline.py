@@ -62,6 +62,7 @@ from src.features.composer.dedupe import drop_cross_section_duplicates
 from src.features.composer.diagram_check import check_diagrams
 from src.features.composer.dup_detect import CONFIDENCE_CONFIRMED, find_numeric_duplicates
 from src.features.composer.port import (
+    AskFatalError,
     ComposedReport,
     ComposedSentence,
     FilingMeta,
@@ -375,15 +376,44 @@ def run_v2(
         )
 
     # ③ 핵심 요약 — «검증된» 본문을 재료로 새로 쓴다 (본문 재탕 금지)
-    with_summary = compose_summary(verified, writer_ask)
+    #
+    # ★ 2026-08-29 실측 — 여기서 «호출 횟수 상한»을 만나면 완성된 9개 장이
+    #   통째로 버려졌다. 요약은 새로 «쓰지» 못해도 «이미 검증된 본문 확인
+    #   문장»으로 채울 길이 아래(_supplement_summary)에 이미 있고, 그 길은
+    #   AI 를 한 번도 부르지 않는다. 그러니 본문을 버릴 이유가 없다.
+    #   돈·계정 장애(call_limit=False)는 그대로 재전파한다.
+    summary_call_limited = False
+    try:
+        with_summary = compose_summary(verified, writer_ask)
+    except AskFatalError as error:
+        if not getattr(error, "call_limit", False):
+            raise
+        summary_call_limited = True
+        with_summary = verified
+        logger.warning(
+            "AI 호출 횟수 상한이라 핵심 요약을 «새로 쓰지» 못했다 — "
+            "검증을 마친 본문 문장으로 채운다"
+        )
     summary_draft_count = len(with_summary.summary)
 
     # ④ 요약 재검증 — 새로 쓴 문장이므로 본문과 같은 검증을 적용한다
     summary = with_summary.summary
-    if summary:
-        summary = verify_sentences(
-            summary, fragments, performance_table, reviewer_ask
-        )
+    if summary and not summary_call_limited:
+        try:
+            summary = verify_sentences(
+                summary, fragments, performance_table, reviewer_ask
+            )
+        except AskFatalError as error:
+            # ★ 검증하지 못한 새 요약을 그대로 내보내지 않는다 — 버리고,
+            #   «이미 검증을 마친» 본문 확인 문장으로 채운다(AI 호출 0회).
+            #   돈·계정 장애는 그대로 재전파한다.
+            if not getattr(error, "call_limit", False):
+                raise
+            summary = ()
+            logger.warning(
+                "AI 호출 횟수 상한이라 새 요약을 검증하지 못했다 — 검증하지 "
+                "않은 요약을 내보내는 대신 본문 확인 문장으로 채운다"
+            )
     if len(summary) < SUMMARY_MIN_SENTENCES:
         # 검증이 요약을 깎았으면 «이미 검증된» 본문 확인 문장으로 보충한다.
         # 보충분은 본문 검증(②)을 통과한 문장이라 추가 검수 호출이 필요 없다.
