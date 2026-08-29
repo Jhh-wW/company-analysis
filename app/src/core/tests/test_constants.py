@@ -7,7 +7,23 @@ from src.core import constants as C
 
 def test_비용과판정_안전상수가_승인된값이다():
     assert C.MAX_RETRY_INPUT == 3
-    assert C.MAX_AI_CALLS_PER_REQUEST == 15
+    # ★ 2026-08-29 — 숫자를 박지 않는다. «왜 그 숫자인지»를 지킨다.
+    #   상한은 시간 규약이 정하는 천장을 넘을 수 없다(generation_singleflight.py:64).
+    #   그리고 v2 가 한 보고서를 끝내는 데 필요한 최소 횟수보다 커야 한다.
+    from src.features.budget.constants import PAID_PHASE_LEASE_SEC
+    from src.features.pipeline.constants import ANTHROPIC_TIMEOUT_SEC
+
+    하트비트 = 30.0  # generation_singleflight.HEARTBEAT_INTERVAL_SEC
+    천장초 = PAID_PHASE_LEASE_SEC - (ANTHROPIC_TIMEOUT_SEC + 2 * 하트비트)
+    assert C.MAX_AI_CALLS_PER_REQUEST * ANTHROPIC_TIMEOUT_SEC <= 천장초, (
+        "★ 시간 규약을 넘었다 — generation_singleflight 가 import 부터 실패한다"
+    )
+
+    # v2 최소 필요 횟수: 9개 장 + 문장검증 + 도식 + 요약작성 + 요약검증 + 회사식별
+    V2_최소_필요 = 9 + 1 + 1 + 1 + 1 + 1
+    assert C.MAX_AI_CALLS_PER_REQUEST >= V2_최소_필요, (
+        "★ 실측(2026-08-29): 15 로는 요약 직전에 상한을 넘겨 보고서가 통째로 실패했다"
+    )
     assert C.MIN_FILLED_CELLS == 4
     assert C.VOTE_ROUNDS == 2
     assert C.AUDIT_WINDOW_YEARS == 3

@@ -398,7 +398,16 @@ def _ask_and_parse(
         raw = ask(prompt)
     except AskFatalError:
         raise
-    except Exception:  # noqa: BLE001 - 한 장의 실패가 보고서 전체를 멈추면 안 된다
+    except Exception as error:  # noqa: BLE001 - 한 장의 실패가 보고서 전체를 멈추면 안 된다
+        # ★ 2026-08-29 — 여기가 «1차 원인»을 통째로 삼켰다. 서버 로그에는
+        #   2차 증상(ProviderBudgetUnavailable)만 남아 원인을 못 찾았다.
+        #   ⚠️ 예외 «메시지»는 남기지 않는다 — provider 응답 본문이 섞일 수 있다.
+        #     클래스 이름과 어느 장인지만 남긴다.
+        logger.warning(
+            "장 작성 실패(삼킴) section=%s kind=%s",
+            section_id,
+            type(error).__name__,
+        )
         return None, ""
     text = str(raw)
     return parse_section_response(text, section_id), text

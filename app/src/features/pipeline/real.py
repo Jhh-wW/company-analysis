@@ -794,6 +794,7 @@ class _MeteredMessages:
         except gateway.ProviderObservationRecordFailed as error:
             # 전송은 이미 일어났다. 결과를 DB에 못 썼으므로 예약을 반환하지 않고
             # lease 만료가 보수부채로 회수하도록 같은 요청도 여기서 멈춘다.
+            _log_billing_uncertain(stage, "observation_record_failed", error)
             self._metered._billing_uncertain = True
             provider_budget.current().mark_unknown(call_reservation)
             raise provider_budget.ProviderBudgetUnavailable(
@@ -818,11 +819,28 @@ class _MeteredMessages:
                         call_reservation,
                         actual_krw=float(failure_event["cost_krw"]),
                     )
-                except provider_budget.ProviderCostInvariantError:
+                except provider_budget.ProviderCostInvariantError as invariant:
+                    _log_billing_uncertain(stage, "settle_invariant_on_failure", invariant)
                     self._metered._billing_uncertain = True
                 raise error
-            # SDK 예외에는 보통 usage가 없다. 0원으로 마감하지 않고 adapter가
-            # 기록한 보수부채와 요청 로컬 예약을 함께 유지한다.
+            # ★ 2026-08-29 — 여기서 «모든» 실패를 미확정으로 접으면, 타임아웃 한 번에
+            #   보고서 전체가 날아간다(실측: 현대카드 본조사가 1초 만에 죽었다).
+            #   provider 가 요청을 «받아들이지 않은» 것이 확실한 거절(400·401·403·404)은
+            #   토큰을 만들지 않았으므로 0원으로 «확정» 마감한다. 그러면 같은 요청의
+            #   다음 호출을 막을 이유가 없다.
+            if _is_determinate_zero_cost(error):
+                logger.warning(
+                    "provider 가 요청을 거절했습니다(0원 확정) stage=%s kind=%s status=%s",
+                    stage or "unknown",
+                    type(error).__name__,
+                    getattr(error, "status_code", None)
+                    or getattr(getattr(error, "response", None), "status_code", None),
+                )
+                provider_budget.current().settle_call(call_reservation, actual_krw=0.0)
+                raise error
+            # 나머지(타임아웃·연결끊김·429·5xx)는 «서버가 받았는지» 알 수 없다.
+            # 0원으로 마감하지 않고 adapter가 기록한 보수부채와 예약을 함께 유지한다.
+            _log_billing_uncertain(stage, "sdk_error_without_usage", error)
             self._metered._billing_uncertain = True
             provider_budget.current().mark_unknown(call_reservation)
             raise error
@@ -835,6 +853,7 @@ class _MeteredMessages:
         )
         if usage_event is None:
             # 응답은 왔지만 usage가 없으면 adapter도 같은 예약액을 부채로 남겼다.
+            _log_billing_uncertain(stage, "response_without_usage", None)
             self._metered._billing_uncertain = True
             provider_budget.current().mark_unknown(call_reservation)
             return response
@@ -844,15 +863,60 @@ class _MeteredMessages:
                 call_reservation,
                 actual_krw=float(usage_event["cost_krw"]),
             )
-        except provider_budget.ProviderCostInvariantError:
+        except provider_budget.ProviderCostInvariantError as invariant:
             # usage는 먼저 보존했다. 이미 생긴 비용을 숨기지 않고 상위에서
             # billing-uncertain으로 phase를 닫게 한다.
+            _log_billing_uncertain(stage, "settle_invariant_on_success", invariant)
             self._metered._billing_uncertain = True
             raise
         return response
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._messages, name)
+
+
+#: provider 가 «요청을 받아들이지 않아» 토큰을 만들지 않은 것이 확실한 HTTP 상태.
+#: 이때는 0원으로 «확정» 마감한다 — 모호하지 않으므로 요청을 막을 이유가 없다.
+#:
+#: ⚠️ 좁게 잡는다. 애매하면 «모름»에 남긴다 — 돈을 적게 세는 쪽으로 기울면 안 된다.
+#:   429(한도)·5xx(서버 오류)는 요청이 서버까지 갔다 거절된 것이라 여전히 모호하다.
+#:   408·409 등도 넣지 않는다.
+#: ⚠️ 이 판정은 «스트리밍이 아닌» messages.create 에만 맞다. 스트리밍을 도입하면
+#:   중간에 400 이 날 수 있어 이미 만들어진 토큰이 생긴다 — 그때는 이 목록을 비워라.
+_DETERMINATE_ZERO_COST_STATUSES: Final[frozenset[int]] = frozenset({400, 401, 403, 404})
+
+
+def _is_determinate_zero_cost(error: BaseException) -> bool:
+    """토큰을 만들지 않은 것이 «확실한» 거절인가.
+
+    anthropic 을 import 하지 않고 status_code 속성만 본다 — SDK 버전이 바뀌어도
+    깨지지 않고, 다른 provider 로 바뀌어도 같은 규약이면 그대로 동작한다.
+    """
+    status = getattr(error, "status_code", None)
+    if not isinstance(status, int):
+        response = getattr(error, "response", None)
+        status = getattr(response, "status_code", None)
+    return isinstance(status, int) and status in _DETERMINATE_ZERO_COST_STATUSES
+
+
+def _log_billing_uncertain(stage: str, reason: str, error: BaseException | None) -> None:
+    """미확정으로 «왜» 접었는지 남긴다.
+
+    ★ 2026-08-29 이전에는 이 자리에 로그가 «하나도» 없어서, 조사가 통째로 죽어도
+      서버 로그에 흔적이 없었다(27장 결함 D).
+    ⚠️ 예외 «메시지»는 남기지 않는다 — provider 응답 본문이 섞일 수 있다.
+      클래스 이름과 상태코드만 남긴다.
+    """
+    status = getattr(error, "status_code", None)
+    if not isinstance(status, int):
+        status = getattr(getattr(error, "response", None), "status_code", None)
+    logger.warning(
+        "비용 미확정으로 접었습니다 stage=%s reason=%s kind=%s status=%s",
+        stage or "unknown",
+        reason,
+        type(error).__name__ if error is not None else "none",
+        status if isinstance(status, int) else "none",
+    )
 
 
 class _MeteredClient:

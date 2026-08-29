@@ -17,7 +17,9 @@ import math
 import re
 import secrets
 import threading
+import logging
 import time
+import traceback
 import unicodedata
 from dataclasses import dataclass
 from enum import Enum
@@ -108,6 +110,9 @@ class ResolutionStatus(str, Enum):
 
 class ProviderRateLimited(RuntimeError):
     """공급자 429/quota. 응답 원문을 포함하지 않는다."""
+
+
+logger = logging.getLogger(__name__)
 
 
 class ProviderWorkerUnavailable(ProviderRateLimited):
@@ -753,12 +758,14 @@ def resolve_candidates(
     try:
         raw_candidates = _call_once(provider, safe_company, safe_address_hint)
     except (concurrent.futures.TimeoutError, ProviderTimedOut):
+        logger.warning("회사 후보 검색 시간초과 provider=%s", provider_name)
         return CandidateResolution(
             ResolutionStatus.TIMED_OUT,
             provider_called=True,
             provider_name=provider_name,
         )
     except ProviderWorkerUnavailable:
+        logger.warning("회사 후보 검색 worker 부족 provider=%s", provider_name)
         return CandidateResolution(
             ResolutionStatus.RATE_LIMITED,
             provider_called=False,
@@ -771,6 +778,16 @@ def resolve_candidates(
             provider_name=provider_name,
         )
     except Exception as error:  # noqa: BLE001 — 공급자 원문/예외 본문은 로그에 남기지 않는다
+        # ★ 2026-08-29 — 예외를 통째로 삼켜서 화면도 로그도 원인을 못 말했다.
+        #   «클래스 이름과 발생 위치»만 남긴다. 응답 본문·예외 메시지는 남기지 않는다
+        #   (그 안에 공급자 원문이 섞일 수 있다 — 원래 주석의 의도를 지킨다).
+        _마지막 = traceback.extract_tb(error.__traceback__)[-1:] or None
+        logger.warning(
+            "회사 후보 검색 실패 provider=%s kind=%s at=%s",
+            provider_name,
+            type(error).__name__,
+            f"{_마지막[0].filename.rsplit('/', 1)[-1]}:{_마지막[0].lineno}" if _마지막 else "unknown",
+        )
         return CandidateResolution(
             ResolutionStatus.FAILED,
             provider_called=True,

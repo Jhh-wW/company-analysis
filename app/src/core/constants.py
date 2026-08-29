@@ -278,8 +278,21 @@ RAW_SOURCE_NOTE: Final[str] = "위 글이 기댄 근거입니다"
 #: 회사를 못 찾았을 때 이름을 다시 넣을 수 있는 횟수
 MAX_RETRY_INPUT: Final[int] = 3
 
-#: 한 요청에서 쓸 수 있는 AI 질의 총량 (재입력 3회 × 층2 5회)
-MAX_AI_CALLS_PER_REQUEST: Final[int] = 15
+#: 한 요청에서 쓸 수 있는 AI 질의 총량.
+#:
+#: ★ 2026-08-29 — 15 → 18. 옛 값 15 는 「재입력 3회 × 층2 5회」라는 «v1» 구조의
+#:   셈이었다. v2(composer)는 9개 장 작성 + 문장 검증 + 도식 검사 + 요약 작성·검증이라
+#:   구조가 다른데 같은 상한을 물려받아, 실측에서 «요약 직전에» 상한을 넘겨
+#:   보고서가 통째로 실패했다(현대카드, 로컬 실행).
+#:
+#: ⚠️ 18 은 «천장»이다. 더 올리면 `generation_singleflight.py` 의 시간 규약이 깨져
+#:   import 부터 실패한다:
+#:     MAX_AI_CALLS_PER_REQUEST × ANTHROPIC_TIMEOUT_SEC ≤ OWNER_PROVIDER_ADMISSION_AGE
+#:     = PAID_PHASE_LEASE_SEC − (ANTHROPIC_TIMEOUT_SEC + 2×HEARTBEAT_INTERVAL_SEC)
+#:     = 3600 − 240 = 3360초  →  18×180=3240 ✅ / 19×180=3420 ❌
+#:   더 필요하면 상한이 아니라 «lease 시간»을 먼저 늘려야 한다 — 그건 복구 계약을
+#:   건드리는 일이라 사람이 결정한다.
+MAX_AI_CALLS_PER_REQUEST: Final[int] = 18
 
 # ── 응답 시간 ────────────────────────────────────────────
 # 정본: 확정/99_기준/3_기준/01_통과선전체표.md §운영
