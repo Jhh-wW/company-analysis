@@ -30,12 +30,14 @@ from typing import Any
 
 from src.features.company_performance.logic import (
     _ACCOUNT_IDS,
+    MIN_METRICS_FOR_TABLE,
     _row_signature as _표_서명,
     build_three_year_table,
 )
 from src.features.composer.port import performance_table_from_report_table
 from src.shared.dart_financial_provenance import (
     _ACCOUNT_IDENTITIES,
+    MIN_METRICS_FOR_MATCH,
     _row_signature as _대조_서명,
     dart_payload_matches_table,
 )
@@ -245,3 +247,62 @@ def test_무관한_필드만_다른_중복행이_있어도_대조가_통과한�
     assert dart_payload_matches_table(표, _봉인(payload)) is True, (
         "★ 표시 순서만 다른 중복 행 때문에 대조가 실패했다"
     )
+
+
+# ══════════════════════════════════════════════════════════
+# ⑤ 매출액이 없는 업종(은행)도 대조가 성립한다
+# ══════════════════════════════════════════════════════════
+
+
+def test_매출액이_없는_표도_대조가_통과한다() -> None:
+    """★ 2026-08-29 실측(우리은행) — 은행 손익계산서에는 매출액 계정이 없다.
+
+    v2-107 이 표를 만드는 쪽에서 「매출액·영업이익 둘 다」 가정을 걷어냈는데
+    대조기에는 남아 있어서, 표는 만들어지지만 대조는 «영원히» 실패했다(분기 8).
+    그 결과 우리은행 보고서의 구조화 사실이 계속 0개였다.
+    ⚠️ 이 시험이 깨지면 은행·보험 업종에서 4장 문장이 다시 사라진다.
+    """
+    행들 = [
+        _행("dart_OperatingIncomeLoss", "영업이익", _영업이익),
+        _행("ifrs-full_ProfitLoss", "당기순이익", _당기순이익),
+    ]
+    payload = _payload(행들)
+    표 = _표(payload)
+    assert 표 is not None, "시험 전제 — 매출액 없이도 표가 만들어져야 한다"
+    assert "매출액" not in 표.headers
+
+    assert dart_payload_matches_table(표, _봉인(payload)) is True, (
+        "★ 매출액이 없다는 이유로 대조가 실패했다"
+    )
+
+
+def test_지표가_하나뿐인_표는_여전히_대조에서_막힌다() -> None:
+    """★ 안전선 — 열이 하나면 비교표가 아니다. 관문이 사라지지 않았다."""
+    한개 = _payload([_행("dart_OperatingIncomeLoss", "영업이익", _영업이익)])
+    # 표 자체가 안 만들어지는 것이 정상 — 그 전제부터 확인한다.
+    assert _표(한개) is None
+
+    # 손으로 한 열짜리 표를 만들어 대조기에 직접 물어도 막혀야 한다.
+    두열표 = _표(_payload(_기본_행들()))
+    assert 두열표 is not None
+    깎은표 = 두열표.__class__(
+        caption=두열표.caption,
+        headers=("사업연도", "영업이익"),
+        rows=tuple(tuple([row[0], row[2]]) for row in 두열표.rows),
+        unit=두열표.unit,
+        cite=두열표.cite,
+        raw_rows=tuple(tuple([row[0], row[2]]) for row in 두열표.raw_rows),
+        scale_divisor=두열표.scale_divisor,
+        scale_places=두열표.scale_places,
+        evidence_rows=두열표.evidence_rows,
+        entity_scope=두열표.entity_scope,
+        raw_unit=두열표.raw_unit,
+        unit_dimension=두열표.unit_dimension,
+    )
+
+    assert dart_payload_matches_table(깎은표, _봉인(_payload(_기본_행들()))) is False
+
+
+def test_두_모듈의_최소_지표_수가_같다() -> None:
+    """★ 표는 만들어지는데 대조만 실패하는 어긋남을 막는다."""
+    assert MIN_METRICS_FOR_MATCH == MIN_METRICS_FOR_TABLE

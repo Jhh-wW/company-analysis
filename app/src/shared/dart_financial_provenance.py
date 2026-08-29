@@ -64,6 +64,18 @@ _ACCOUNT_IDENTITIES: tuple[
         ("당기순이익", "당기순이익(손실)", "연결당기순이익"),
     ),
 )
+#: 대조가 성립하려면 표에 «아는» 금액 지표가 최소 몇 개 있어야 하는가.
+#:
+#: ★ 2026-08-29 — 예전에는 「매출액과 영업이익이 «둘 다» 있을 것」을 요구했다.
+#:   그런데 은행 손익계산서에는 매출액에 해당하는 계정이 «아예 없다»
+#:   (실측: 우리은행 — 표가 영업이익·당기순이익 두 열로 만들어진다).
+#:   그래서 우리은행은 표가 생겨도 대조가 «영원히» 실패했다(실측: 분기 8).
+#: ★ v2-107 이 표를 만드는 쪽에서 같은 가정을 걷어냈는데 대조기에는 남아 있었다.
+#:   두 쪽 규칙이 다르면 「만들 수는 있지만 검증은 못 하는」 표가 생긴다.
+#: ⚠️ `company_performance/logic.py::MIN_METRICS_FOR_TABLE` 과 «같아야» 한다.
+#:   시험이 두 값을 묶어 지킨다.
+MIN_METRICS_FOR_MATCH: int = 2
+
 _PERIOD_FIELDS = (
     ("thstrm_amount", "thstrm_dt"),
     ("frmtrm_amount", "frmtrm_dt"),
@@ -318,7 +330,7 @@ def dart_payload_matches_table(
     if (
         len(metrics) != len(set(metrics))
         or any(metric not in allowed_metrics for metric in metrics)
-        or not {"매출액", "영업이익"}.issubset(metrics)
+        or len(metrics) < MIN_METRICS_FOR_MATCH
         or metrics != tuple(metric for metric in allowed_metrics if metric in metrics)
     ):
         return _no_match(8)
