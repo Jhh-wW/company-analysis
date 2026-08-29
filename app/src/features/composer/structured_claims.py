@@ -19,6 +19,8 @@ from decimal import (
     localcontext,
 )
 
+import logging
+
 from src.core.citations import citation_number
 from src.features.composer.constants import (
     DART_FINANCIAL_API_DOCUMENT_ID,
@@ -95,6 +97,18 @@ class NumericSafetyFiltering:
                 self.removed_summary_count + other.removed_summary_count
             ),
         )
+
+
+logger = logging.getLogger(__name__)
+
+
+#: 4장 누적 증감률 claim 이 «왜» 안 만들어졌는지 남기는 사유 코드.
+#: ★ 2026-08-29 — 저장 보고서 38건이 전부 구조화 사실 0개인데 오프라인
+#:   시험은 3개를 만든다. 즉 «실제 자료에서만» 죽는데 그 이유가 로그에
+#:   한 줄도 없었다. 조기 반환마다 사유 코드를 남긴다.
+#: ⚠️ 회사 원문·금액은 남기지 않는다 — 사유 코드와 개수만.
+def _log_no_claim(reason: str) -> None:
+    logger.warning("4장 누적 증감률 claim 을 만들지 못했습니다: %s", reason)
 
 
 def _cumulative_rate_claim_text(
@@ -310,6 +324,7 @@ def _source_context(
 
     fragment_id = citation_number(table.cite)
     if not fragment_id:
+        _log_no_claim("표의 인용 번호가 비었음")
         return None
     fragment = next(
         (
@@ -320,10 +335,12 @@ def _source_context(
         None,
     )
     if fragment is None:
+        _log_no_claim("표가 가리키는 인용 조각을 못 찾음")
         return None
     # 주요계정 값은 선택된 사업보고서와 별도의 OpenDART API 호출에서 왔다.
     # filing_meta 접수번호로 fallback하면 서로 다른 문서를 같은 근거로 꾸민다.
     if not fragment.text.startswith(DART_FINANCIAL_API_PREFIX):
+        _log_no_claim("인용 조각이 DART 주요계정 API 원문이 아님")
         return None
     source_identity = document_identity_from_parts(
         document_id=DART_FINANCIAL_API_DOCUMENT_ID,
@@ -333,11 +350,14 @@ def _source_context(
     evidence = tuple(dict.fromkeys(value for value in table.evidence_rows if value.strip()))
     # 하나의 claim을 서로 다른 원문 payload에 억지로 묶지 않는다. 현재 DART
     # 3개년 표는 한 API payload를 세 행에 그대로 보존한다.
-    if (
-        not source_identity
-        or len(evidence) != 1
-        or not dart_payload_matches_table(table, evidence[0])
-    ):
+    if not source_identity:
+        _log_no_claim("독립 문서 신원을 만들지 못함")
+        return None
+    if len(evidence) != 1:
+        _log_no_claim(f"표의 근거 payload 가 1개가 아님 ({len(evidence)}개)")
+        return None
+    if not dart_payload_matches_table(table, evidence[0]):
+        _log_no_claim("표와 DART 원 payload 의 대조가 실패함")
         return None
     return fragment_id, source_identity, evidence[0]
 
@@ -368,15 +388,18 @@ def build_past_changes_numeric_claims(
         or not table.raw_unit
         or not table.unit_dimension
     ):
+        _log_no_claim("실적표가 없거나 범위·단위 정보가 비었음")
         return ()
     source = _source_context(table, fragments, filing_meta)
     if source is None:
+        # 사유는 _source_context 가 이미 남겼다.
         return ()
     fragment_id, source_identity, state_evidence = source
     try:
         entity_scope = EntityScope(table.entity_scope)
         operand_dimension = UnitDimension(table.unit_dimension)
     except ValueError:
+        _log_no_claim("표의 범위·단위 값이 알려진 목록에 없음")
         return ()
 
     indexed_rows: list[tuple[int, tuple[str, ...], tuple[str, ...]]] = []
@@ -388,15 +411,18 @@ def build_past_changes_numeric_claims(
             or len(raw_row[0]) != 4
             or not raw_row[0].isdigit()
         ):
+            _log_no_claim("표의 행 모양이 «연도 + 지표»가 아님")
             return ()
         indexed_rows.append((int(raw_row[0]), display_row, raw_row))
     indexed_rows.sort(key=lambda item: item[0])
     start_year, _start_display, start_raw = indexed_rows[0]
     end_year, _end_display, end_raw = indexed_rows[-1]
     if start_year >= end_year:
+        _log_no_claim("시작 연도가 끝 연도보다 뒤임")
         return ()
 
     if entity_scope not in (EntityScope.CONSOLIDATED, EntityScope.SEPARATE):
+        _log_no_claim("표의 범위가 연결·별도가 아님")
         return ()
 
     claims: list[ComposedSentence] = []
