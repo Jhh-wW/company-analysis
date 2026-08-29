@@ -40,7 +40,20 @@ _PERIOD_FIELDS: tuple[tuple[str, str], ...] = (
     ("frmtrm_amount", "frmtrm_dt"),
     ("bfefrmtrm_amount", "bfefrmtrm_dt"),
 )
-_REQUIRED_METRICS = frozenset({"매출액", "영업이익"})
+#: 표를 만들려면 «기간이 서로 맞는» 금액 지표가 최소 몇 개 있어야 하는가.
+#:
+#: ★ 2026-08-29 — 옛 규칙은 「매출액과 영업이익이 «둘 다» 있어야 한다」였다.
+#:   그런데 은행 손익계산서에는 «매출액에 해당하는 계정 자체가 없다» —
+#:   실측(우리은행): 17개 행에서 영업이익·당기순이익은 찾았고 매출액만 없었다.
+#:   그 결과 3개년 실적표가 통째로 안 만들어지고, 표지 실적 박스·4장 표·
+#:   변화 요약 띠가 «전부» 사라졌다.
+#: ★ 왜 계정 별칭을 늘리지 않았나 — 은행의 「매출액」을 무엇으로 볼지는
+#:   (이자수익? 영업수익?) 표지에 크게 찍히는 «금액의 뜻»을 바꾸는 판단이다.
+#:   이름을 잘못 고르면 틀린 숫자가 사실처럼 실린다. 그래서 «없는 지표를
+#:   지어내는» 대신 «있는 지표로 표를 만드는» 쪽을 골랐다(2026-08-29 사용자 결정).
+#: ★ 왜 2인가 — 열이 하나뿐이면 «비교표»가 아니라 숫자 나열이다. 서로 다른
+#:   지표가 최소 둘은 있어야 독자가 관계를 읽을 수 있다.
+MIN_METRICS_FOR_TABLE: Final[int] = 2
 _ANNUAL_REPORT_CODE = "11011"
 _INCOME_STATEMENT_CODES = frozenset({"IS", "CIS"})
 _WON_CURRENCIES = frozenset({"KRW", "원", "WON"})
@@ -343,40 +356,85 @@ def build_three_year_table(
 
     observations: dict[str, _MetricObservation] = {}
     observation_rows: dict[str, dict[str, Any]] = {}
+    #: 계정은 «있는데» 값·기간을 못 읽은 지표. 자료가 깨졌다는 뜻이다.
+    unusable_labels: list[str] = []
     for label, ids, names in _ACCOUNT_IDS:
         row = _metric_row(scoped_rows, ids, names)
         if row is None:
+            # ★ 공시에 그 계정이 «아예 없다» — 업종 차이다(은행 손익계산서에는
+            #   매출액이 없다). 이건 결함이 아니므로 나머지 지표로 표를 만든다.
             continue
         observation = _metric_observation(label, row)
-        if observation is not None:
-            observations[label] = observation
-            observation_rows[label] = row
+        if observation is None:
+            # ★ 계정은 «있는데» 못 읽었다 — 자료가 깨졌거나 기간이 어긋난 것이다.
+            #   이건 업종 차이가 아니라 «결함»이므로 예전처럼 표 전체를 막는다.
+            #   두 경우를 뭉치면 「깨진 값을 조용히 빼고 표를 그리는」 일이 생긴다.
+            unusable_labels.append(label)
+            continue
+        observations[label] = observation
+        observation_rows[label] = row
 
-    if not _REQUIRED_METRICS.issubset(observations):
+    if unusable_labels:
+        logger.warning(
+            "3개년 실적표를 만들지 못했습니다: 계정은 있으나 값·기간을 읽을 수 "
+            "없는 지표 %s (훑은 행 %d개)",
+            sorted(unusable_labels),
+            len(scoped_rows),
+        )
+        return None
+
+    if not observations:
         # ★ 2026-08-29 — 여기서 조용히 None 을 돌려주면 보고서에 3개년 실적표가
         #   통째로 빠지고, 머리말이 「기준일 전 36개월」로 바뀐다. 실측(우리은행)에서
         #   그 일이 일어났는데 «왜»인지 알 방법이 로그에 없었다.
         #   ⚠️ 회사 원문(계정 이름)은 남기지 않는다 — 우리 상수 이름과 개수만.
         logger.warning(
-            "3개년 실적표를 만들지 못했습니다: 필수 지표 %s 중 %s 를 못 찾음 "
-            "(훑은 행 %d개, 찾은 지표 %s)",
-            sorted(_REQUIRED_METRICS),
-            sorted(_REQUIRED_METRICS - set(observations)),
+            "3개년 실적표를 만들지 못했습니다: 금액 지표를 하나도 못 찾음 "
+            "(훑은 행 %d개)",
             len(scoped_rows),
-            sorted(observations),
         )
         return None
 
-    reference_periods = observations["매출액"].periods
-    reference_year = observations["매출액"].business_year
-    if (
-        observations["영업이익"].periods != reference_periods
-        or observations["영업이익"].business_year != reference_year
-    ):
+    present_labels = [
+        label for label, _ids, _names in _ACCOUNT_IDS if label in observations
+    ]
+    if len(present_labels) < MIN_METRICS_FOR_TABLE:
+        logger.warning(
+            "3개년 실적표를 만들지 못했습니다: 읽어낸 금액 지표가 %d개뿐이라 "
+            "최소 %d개에 못 미침 (훑은 행 %d개, 찾은 지표 %s)",
+            len(present_labels),
+            MIN_METRICS_FOR_TABLE,
+            len(scoped_rows),
+            present_labels,
+        )
         return None
 
-    # 선택 지표도 기간·범위가 다르면 비교표에서 제외한다. 필수 두 지표의 계약은
-    # 위에서 별도로 실패 처리했으므로 선택 지표 누락이 표 전체를 가장하지 않는다.
+    # 기간 기준점은 «공시에 있는 지표 중 맨 앞»이다(_ACCOUNT_IDS 순서라 결정론적).
+    # 옛 규칙은 「매출액」을 기준으로 못 박아, 매출액이 없는 업종에서는 표가
+    # 통째로 만들어지지 않았다.
+    reference_label = present_labels[0]
+    reference_periods = observations[reference_label].periods
+    reference_year = observations[reference_label].business_year
+
+    # ★ 앞의 MIN_METRICS_FOR_TABLE 개는 기간·사업연도가 «반드시» 맞아야 한다.
+    #   옛 규칙의 「매출액·영업이익이 어긋나면 표 전체 실패」를 그대로 옮긴 것이다 —
+    #   달라진 건 «어느 지표가 그 자리에 오느냐»뿐이다(업종에 따라 매출액이 없다).
+    #   결산월이 섞이거나 사업연도가 어긋난 자료는 비교표가 될 수 없다.
+    if any(
+        observations[label].periods != reference_periods
+        or observations[label].business_year != reference_year
+        for label in present_labels[:MIN_METRICS_FOR_TABLE]
+    ):
+        logger.warning(
+            "3개년 실적표를 만들지 못했습니다: 앞선 %d개 지표의 기간·사업연도가 "
+            "서로 다름 (찾은 지표 %s)",
+            MIN_METRICS_FOR_TABLE,
+            present_labels,
+        )
+        return None
+
+    # 기간·사업연도가 기준과 어긋나는 지표는 비교표에서 뺀다 — 서로 다른 기간의
+    # 값을 한 표에 나란히 두면 독자가 같은 기간으로 읽는다.
     metric_labels = [
         label
         for label, _ids, _names in _ACCOUNT_IDS

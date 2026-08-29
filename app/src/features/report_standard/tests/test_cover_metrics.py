@@ -32,6 +32,8 @@ from src.features.pipeline.port import (
 )
 from src.features.provenance.sources import Source, SourceKind
 from src.features.report_standard.cover_metrics import (
+    COVER_METRIC_CANDIDATES,
+    COVER_METRIC_COUNT,
     COVER_METRIC_LABELS,
     PERIOD_HEADER,
     cover_metrics,
@@ -86,6 +88,57 @@ def _financials() -> dict[str, Any]:
             _dart_row("dart_OperatingIncomeLoss", "영업이익", _OPERATING_INCOME),
         ],
     }
+
+
+#: 은행 손익계산서 모양 — 「매출액」에 해당하는 계정이 «아예 없다».
+#:   실측(우리은행 2026-08-29): 17개 행에서 영업이익·당기순이익만 나왔다.
+_NET_INCOME = ("118400000000", "97300000000", "129900000000")
+
+
+def _bank_financials() -> dict[str, Any]:
+    return {
+        "status": "000",
+        "list": [
+            _dart_row("dart_OperatingIncomeLoss", "영업이익", _OPERATING_INCOME),
+            _dart_row("ifrs-full_ProfitLoss", "당기순이익", _NET_INCOME),
+        ],
+    }
+
+
+def test_매출액이_없는_표도_표지_띠를_그린다() -> None:
+    """★ 2026-08-29 사용자 결정 ① — 없는 지표를 지어내지 말고 있는 것으로 그린다.
+
+    예전에는 매출액·영업이익이 «둘 다» 있어야 띠를 그려서, 매출액 계정이 없는
+    은행은 표지 실적 박스가 통째로 사라졌다.
+    ⚠️ 이 시험이 깨지면 은행·보험 업종의 표지가 다시 비어 나간다.
+    """
+    table = build_three_year_table(_bank_financials(), cite=_CITE)
+    assert table is not None, "시험 전제 — 은행 모양 표가 만들어져야 한다"
+
+    metrics = cover_metrics(_report(table))
+
+    assert [item.label for item in metrics.items] == ["영업이익", "당기순이익"]
+    assert len(metrics.items) == COVER_METRIC_COUNT
+
+
+def test_세_지표가_다_있으면_예전과_같은_두_칸이다() -> None:
+    """★ 회귀 방지 — 보통 회사의 표지는 하나도 바뀌면 안 된다."""
+    full = _financials()
+    full["list"].append(
+        _dart_row("ifrs-full_ProfitLoss", "당기순이익", _NET_INCOME)
+    )
+    table = build_three_year_table(full, cite=_CITE)
+    assert table is not None
+
+    metrics = cover_metrics(_report(table))
+
+    assert [item.label for item in metrics.items] == list(COVER_METRIC_LABELS)
+
+
+def test_띠_후보는_닫힌_목록이다() -> None:
+    """★ 안전선 — 표에 있는 아무 열이나 표지에 크게 띄우지 않는다."""
+    assert COVER_METRIC_CANDIDATES == ("매출액", "영업이익", "당기순이익")
+    assert COVER_METRIC_LABELS == COVER_METRIC_CANDIDATES[:COVER_METRIC_COUNT]
 
 
 @pytest.fixture(scope="module")

@@ -18,12 +18,16 @@ import pytest
 from src.features.company_performance.logic import build_three_year_table
 from src.features.pipeline.port import Grade, Report, ReportSection, ReportTable
 from src.features.report_standard.cover_metrics import (
+    COVER_METRIC_CANDIDATES,
+    COVER_METRIC_COUNT,
     COVER_METRIC_LABELS,
     PERIOD_HEADER,
     cover_metrics,
 )
 from src.features.report_standard.period_summary import (
     AMOUNT_METRIC_LABELS,
+    KNOWN_METRIC_LABELS,
+    MIN_METRICS_FOR_BAND,
     EMPTY_PERIOD_SUMMARY,
     LOSS_CONTINUED_PHRASE,
     LOSS_NARROWED_PHRASE,
@@ -101,6 +105,73 @@ def _table(
     table = build_three_year_table({"status": "000", "list": rows}, cite=_CITE)
     assert table is not None, "시험 전제가 깨졌다 — 실적표가 만들어져야 한다."
     return table
+
+
+def _bank_table(
+    *,
+    operating: tuple[int, int, int] = (1552, 1600, 1694),
+    net: tuple[int, int, int] = (1184, 973, 1299),
+) -> ReportTable:
+    """은행 손익계산서 모양 — 「매출액」 계정이 «아예 없다».
+
+    실측(우리은행 2026-08-29): 17개 행에서 영업이익·당기순이익만 나왔다.
+    """
+
+    table = build_three_year_table(
+        {
+            "status": "000",
+            "list": [
+                _dart_row("dart_OperatingIncomeLoss", "영업이익", operating),
+                _dart_row("ifrs-full_ProfitLoss", "당기순이익", net),
+            ],
+        },
+        cite=_CITE,
+    )
+    assert table is not None, "시험 전제 — 은행 모양 표가 만들어져야 한다"
+    return table
+
+
+def test_매출액이_없는_표도_변화_요약_띠를_그린다() -> None:
+    """★ 2026-08-29 사용자 결정 ① — 없는 지표를 지어내지 말고 있는 것으로 그린다.
+
+    예전 관문은 「매출액·영업이익이 «둘 다» 표에 있어야 한다」였다. 매출액 계정이
+    없는 은행은 4장 변화 요약 띠가 통째로 사라졌다.
+    ⚠️ 이 시험이 깨지면 은행·보험 업종의 4장이 다시 비어 나간다.
+    """
+    summary = period_summary(_report(_bank_table()))
+
+    labels = [item.label for item in summary.items]
+    assert "영업이익" in labels
+    assert "당기순이익" in labels
+
+
+def test_없는_매출액은_조용히_빠지지_않고_없다고_적힌다() -> None:
+    """★ 정직성 안전선 — 열이 빠진 것과 값이 0인 것은 다르다.
+
+    조용히 건너뛰면 독자는 왜 빠졌는지 알 수 없다.
+    """
+    summary = period_summary(_report(_bank_table()))
+
+    빠진칸 = [item for item in summary.items if item.label == "매출액"]
+    assert 빠진칸, "★ 없는 지표를 아무 말 없이 뺐다"
+    assert 빠진칸[0].note == MISSING_METRIC_NOTE
+    assert 빠진칸[0].latest_value == "", "★ 없는 값에 가짜 숫자를 채웠다"
+
+
+def test_매출액이_없으면_영업이익률도_만들지_않는다() -> None:
+    """★ 안전선 — 나눗셈의 분모가 없으면 비율을 지어내지 않는다."""
+    summary = period_summary(_report(_bank_table()))
+
+    assert MARGIN_LABEL not in [item.label for item in summary.items]
+
+
+def test_두_띠와_표의_최소_지표_수가_같다() -> None:
+    """★ 표는 만들어졌는데 띠만 안 나오는 어긋남을 막는다."""
+    from src.features.company_performance.logic import MIN_METRICS_FOR_TABLE
+
+    assert MIN_METRICS_FOR_BAND == MIN_METRICS_FOR_TABLE
+    assert MIN_METRICS_FOR_BAND == COVER_METRIC_COUNT
+    assert KNOWN_METRIC_LABELS == COVER_METRIC_CANDIDATES
 
 
 def _manual_table(

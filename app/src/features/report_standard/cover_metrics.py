@@ -36,6 +36,30 @@ PERIOD_HEADER: Final[str] = "사업연도"
 #:   지원자 직무 소재로 보고 차단한다.
 COVER_METRIC_LABELS: Final[tuple[str, ...]] = ("매출액", "영업이익")
 
+#: 띠에 올릴 «후보» 지표 — 앞에서부터 표에 있는 것으로 COVER_METRIC_COUNT 개를 고른다.
+#:
+#: ★ 2026-08-29 — 은행 손익계산서에는 「매출액」에 해당하는 계정이 «아예 없다»
+#:   (실측: 우리은행). 예전에는 매출액·영업이익이 «둘 다» 있어야 띠를 그렸기 때문에
+#:   그런 회사는 표지 실적 박스가 통째로 사라졌다.
+#:   후보를 하나 늘려 「매출액·영업이익」이 안 되면 「영업이익·당기순이익」으로 그린다.
+#: ★ 보통 회사(세 지표가 다 있는 경우)는 앞 둘이 그대로 뽑혀 예전과 «똑같다».
+#: ★ 목록은 여전히 «닫혀» 있다 — 표에 있는 아무 열이나 크게 띄우지 않는다.
+COVER_METRIC_CANDIDATES: Final[tuple[str, ...]] = (
+    "매출액",
+    "영업이익",
+    "당기순이익",
+)
+
+#: 띠에 올리는 칸 수. 회사마다 칸 수가 달라지면 표지 모양이 흔들린다.
+COVER_METRIC_COUNT: Final[int] = len(COVER_METRIC_LABELS)
+
+
+def cover_metric_labels(headers: list[str]) -> list[str]:
+    """표의 열 이름에서 띠에 올릴 지표를 «후보 순서대로» 고른다."""
+
+    present = [label for label in COVER_METRIC_CANDIDATES if label in headers]
+    return present[:COVER_METRIC_COUNT]
+
 #: 띠 제목의 꼬리말. 표 캡션의 「주요 실적」과 같은 뜻이며 새 주장이 아니다.
 COVER_TITLE_SUFFIX: Final[str] = "실적"
 
@@ -103,7 +127,7 @@ def _is_performance_table(table: Any) -> bool:
         return False
     if headers[0] != PERIOD_HEADER:
         return False
-    if not set(COVER_METRIC_LABELS).issubset(headers):
+    if len(cover_metric_labels(headers)) < COVER_METRIC_COUNT:
         return False
     if not bool(getattr(table, "numeric", False)):
         return False
@@ -150,7 +174,7 @@ def cover_metrics(report: Any) -> CoverMetrics:
 
     unit = str(getattr(table, "display_unit", "") or "").strip()
     items: list[CoverMetric] = []
-    for label in COVER_METRIC_LABELS:
+    for label in cover_metric_labels(headers):
         value = latest[headers.index(label)]
         # 한 칸이라도 비거나 모양이 어긋나면 띠 «전체»를 그리지 않는다.
         # 반쪽짜리 띠는 없는 것보다 나쁘다.

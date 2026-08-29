@@ -330,36 +330,74 @@ def test_연결행이_전혀_없을_때만_별도표를_만든다() -> None:
     assert "별도" in table.caption
 
 
-def test_필수_지표를_못_찾으면_이유를_로그에_남긴다(caplog) -> None:
-    """★ 2026-08-29 실측 — 표가 없으면 보고서에서 3개년 실적이 통째로 빠지고
-    머리말이 「기준일 전 36개월」로 바뀌는데, 그 «이유»가 어디에도 없었다.
-    실제로 우리은행에서 그 일이 났고 원인을 로그로 좁히지 못했다.
+def _계정_뺀_자료(*빼는_이름: str) -> dict:
+    """정상 자료에서 특정 계정 «행 자체»를 뺀다 — 업종 차이를 흉내 낸다.
 
-    ⚠️ 회사 원문(계정 이름)은 로그에 넣지 않는다 — 우리 상수와 개수만.
+    은행 손익계산서에는 「매출액」에 해당하는 계정이 «아예 없다»(실측: 우리은행
+    17개 행에서 영업이익·당기순이익만 나왔다). 값이 깨진 것과는 다른 상황이다.
+    """
+    자료 = _financials()
+    자료["list"] = [
+        row
+        for row in 자료["list"]
+        if not any(이름 in str(row.get("account_nm") or "") for 이름 in 빼는_이름)
+    ]
+    return 자료
+
+
+def test_매출액이_없는_업종도_남은_지표로_표를_만든다() -> None:
+    """★ 2026-08-29 사용자 결정 ① — 없는 지표를 지어내지 말고 있는 것으로 만든다.
+
+    실측: 우리은행은 매출액 계정이 없어 3개년 실적표가 통째로 사라졌고,
+    그 여파로 표지 실적 박스·4장 표·변화 요약 띠가 «전부» 빠졌다.
+    ⚠️ 이 시험이 깨지면 은행·보험 같은 업종에서 다시 표가 사라진다.
+    """
+    표 = build_three_year_table(_계정_뺀_자료("매출액"), cite="조각 1·재무")
+
+    assert 표 is not None, "★ 매출액이 없다는 이유로 표를 통째로 버렸다"
+    assert 표.headers[0] == "사업연도"
+    assert "매출액" not in 표.headers, "★ 없는 지표를 표에 지어냈다"
+    assert 표.headers[1:] == ["영업이익", "당기순이익"], (
+        f"★ 남은 지표가 그대로 실려야 한다: {표.headers}"
+    )
+
+
+def test_지표가_하나뿐이면_표를_만들지_않는다(caplog) -> None:
+    """★ 안전선 — 열이 하나면 «비교표»가 아니라 숫자 나열이다.
+
+    ⚠️ 이 시험이 깨지면 관문이 사실상 사라진 것이다.
     """
     import logging
 
-    # 정상 자료에서 «영업이익 행만» 뺀다 — 은행처럼 계정 이름이 달라
-    # 필수 지표 하나를 못 찾는 상황을 그대로 흉내 낸다.
-    영업이익_없음 = _financials()
-    영업이익_없음["list"] = [
-        row
-        for row in 영업이익_없음["list"]
-        if "영업이익" not in str(row.get("account_nm") or "")
-    ]
+    한개만 = _계정_뺀_자료("매출액", "영업이익")
 
     with caplog.at_level(logging.WARNING):
-        assert build_three_year_table(영업이익_없음, cite="조각 1·재무") is None
+        assert build_three_year_table(한개만, cite="조각 1·재무") is None
 
-    남은_경고 = [r.getMessage() for r in caplog.records if "3개년 실적표" in r.getMessage()]
-    assert 남은_경고, "★ 표를 못 만든 이유가 로그에 없다"
-    한줄 = 남은_경고[0]
-    못찾은쪽 = 한줄.split("중 ")[1].split(" 를 못 찾음")[0]
-    찾은쪽 = 한줄.split("찾은 지표 ")[1]
+    경고 = [r.getMessage() for r in caplog.records if "3개년 실적표" in r.getMessage()]
+    assert 경고, "★ 표를 못 만든 이유가 로그에 없다"
+    assert "1개뿐" in 경고[0], f"★ 몇 개였는지 안 적혔다: {경고[0]}"
 
-    assert "영업이익" in 못찾은쪽, f"★ 없는 지표를 못 알아본다: {한줄}"
-    assert "매출액" not in 못찾은쪽, f"★ 있는 지표를 없다고 적었다: {한줄}"
-    assert "매출액" in 찾은쪽, f"★ 찾은 지표가 안 적혔다: {한줄}"
+
+def test_계정은_있는데_값이_깨졌으면_여전히_표를_막는다(caplog) -> None:
+    """★ 안전선 — 「업종이라 없다」와 「있는데 깨졌다」는 다르다.
+
+    앞은 남은 지표로 표를 만들어도 되지만, 뒤는 자료 결함이라 예전처럼
+    표 전체를 막아야 한다. 둘을 뭉치면 «깨진 값을 조용히 빼고» 표를 그린다.
+    """
+    import logging
+
+    깨진_매출액 = _financials()
+    for row in 깨진_매출액["list"]:
+        if "매출액" in str(row.get("account_nm") or ""):
+            row["thstrm_amount"] = "숫자아님"
+
+    with caplog.at_level(logging.WARNING):
+        assert build_three_year_table(깨진_매출액, cite="조각 1·재무") is None
+
+    경고 = [r.getMessage() for r in caplog.records if "3개년 실적표" in r.getMessage()]
+    assert 경고, "★ 막은 이유가 로그에 없다"
+    assert "읽을 수 없는" in 경고[0], f"★ 사유가 «자료 결함»으로 안 적혔다: {경고[0]}"
 
 
 def test_필수_두_지표나_공식_범위가_없으면_표를_만들지_않는다() -> None:

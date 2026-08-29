@@ -52,6 +52,21 @@ AMOUNT_METRIC_LABELS: Final[tuple[str, ...]] = ("매출액", "영업이익")
 #:   닫힌 목록이 아니면 「없는 것」을 끝없이 나열하게 되어 안내가 아니라 잡음이 된다.
 OPTIONAL_METRIC_LABELS: Final[tuple[str, ...]] = ("당기순이익",)
 
+#: 띠가 아는 금액 지표 «전부». 표를 알아보는 관문이 이 목록을 센다.
+#:
+#: ★ 2026-08-29 — 예전 관문은 「매출액·영업이익이 «둘 다» 표에 있어야 한다」였다.
+#:   은행 손익계산서에는 매출액에 해당하는 계정이 «아예 없어»(실측: 우리은행)
+#:   그런 회사는 4장 변화 요약 띠가 통째로 사라졌다.
+#: ★ 보통 회사는 세 지표가 다 있어 예전과 «똑같이» 동작한다.
+KNOWN_METRIC_LABELS: Final[tuple[str, ...]] = (
+    AMOUNT_METRIC_LABELS + OPTIONAL_METRIC_LABELS
+)
+
+#: 띠를 그리려면 표에 금액 지표가 최소 몇 개 있어야 하는가.
+#: ``company_performance/logic.py``의 ``MIN_METRICS_FOR_TABLE``과 같은 값이어야
+#: 한다 — 표는 만들어졌는데 띠만 안 나오는 어긋남을 막는다.
+MIN_METRICS_FOR_BAND: Final[int] = 2
+
 #: 표의 두 칸(영업이익 ÷ 매출액)으로 만드는 유일한 파생 지표.
 #: ★ 여기만 표에 없는 이름을 쓴다. 허용하는 이유 — 두 값이 «같은 표의 같은 행»에
 #:   인쇄돼 있어 독자가 나눗셈을 눈으로 확인할 수 있고, 부호가 바뀌어도 %p(차이)는
@@ -220,7 +235,9 @@ def _is_performance_table(table: Any) -> bool:
         return False
     if headers[0] != PERIOD_HEADER:
         return False
-    if not set(AMOUNT_METRIC_LABELS).issubset(headers):
+    if len([label for label in KNOWN_METRIC_LABELS if label in headers]) < (
+        MIN_METRICS_FOR_BAND
+    ):
         return False
     if not bool(getattr(table, "numeric", False)):
         return False
@@ -460,7 +477,13 @@ def period_summary_from_table(table: Any) -> PeriodSummary:
     items: list[PeriodSummaryItem] = []
     # ① 표에 반드시 있는 금액 지표 → ② 파생 지표 → ③ 있을 수도 없을 수도 있는 지표.
     #    목업의 칸 순서(매출액·영업손익·영업이익률·당기순이익)와 같다.
+    missing: list[PeriodSummaryItem] = []
     for label in AMOUNT_METRIC_LABELS:
+        if label not in headers:
+            # ★ 업종에 따라 이 열이 «아예 없다»(은행엔 매출액이 없다).
+            #   조용히 건너뛰면 독자는 왜 빠졌는지 알 수 없다 — 「없음」으로 적는다.
+            missing.append(_missing_item(label))
+            continue
         item = _amount_item(
             label,
             periods=periods,
@@ -476,7 +499,6 @@ def period_summary_from_table(table: Any) -> PeriodSummary:
     if margin is not None:
         items.append(margin)
 
-    missing: list[PeriodSummaryItem] = []
     for label in OPTIONAL_METRIC_LABELS:
         if label in headers:
             item = _amount_item(
