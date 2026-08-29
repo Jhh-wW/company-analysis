@@ -330,6 +330,38 @@ def test_연결행이_전혀_없을_때만_별도표를_만든다() -> None:
     assert "별도" in table.caption
 
 
+def test_필수_지표를_못_찾으면_이유를_로그에_남긴다(caplog) -> None:
+    """★ 2026-08-29 실측 — 표가 없으면 보고서에서 3개년 실적이 통째로 빠지고
+    머리말이 「기준일 전 36개월」로 바뀌는데, 그 «이유»가 어디에도 없었다.
+    실제로 우리은행에서 그 일이 났고 원인을 로그로 좁히지 못했다.
+
+    ⚠️ 회사 원문(계정 이름)은 로그에 넣지 않는다 — 우리 상수와 개수만.
+    """
+    import logging
+
+    # 정상 자료에서 «영업이익 행만» 뺀다 — 은행처럼 계정 이름이 달라
+    # 필수 지표 하나를 못 찾는 상황을 그대로 흉내 낸다.
+    영업이익_없음 = _financials()
+    영업이익_없음["list"] = [
+        row
+        for row in 영업이익_없음["list"]
+        if "영업이익" not in str(row.get("account_nm") or "")
+    ]
+
+    with caplog.at_level(logging.WARNING):
+        assert build_three_year_table(영업이익_없음, cite="조각 1·재무") is None
+
+    남은_경고 = [r.getMessage() for r in caplog.records if "3개년 실적표" in r.getMessage()]
+    assert 남은_경고, "★ 표를 못 만든 이유가 로그에 없다"
+    한줄 = 남은_경고[0]
+    못찾은쪽 = 한줄.split("중 ")[1].split(" 를 못 찾음")[0]
+    찾은쪽 = 한줄.split("찾은 지표 ")[1]
+
+    assert "영업이익" in 못찾은쪽, f"★ 없는 지표를 못 알아본다: {한줄}"
+    assert "매출액" not in 못찾은쪽, f"★ 있는 지표를 없다고 적었다: {한줄}"
+    assert "매출액" in 찾은쪽, f"★ 찾은 지표가 안 적혔다: {한줄}"
+
+
 def test_필수_두_지표나_공식_범위가_없으면_표를_만들지_않는다() -> None:
     one_metric = {
         "list": [_row("ifrs-full_Revenue", "매출액", "100", "90", "80")]

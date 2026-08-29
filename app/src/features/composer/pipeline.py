@@ -147,11 +147,20 @@ def _apply_generation_quality_label(
     """
 
     reasons = list(rendered.shortfall_reasons)
-    for section_id, removed in numeric_filtering.removed_section_counts:
-        title = SECTION_TITLES.get(section_id, section_id)
+    # ★ 2026-08-29 — 장마다 한 줄씩(최대 9줄) 거의 같은 문장을 찍던 것을 «한 줄»로
+    #   모은다. 빼는 정보는 없다 — 총 개수와 장 이름을 그대로 싣는다.
+    #   눈가림 독립 평가에서 「제외 사유 나열문이 완결성·서술품질을 깎는다」는
+    #   지적을 받았고, 읽는 사람에게 필요한 것은 «무엇이 몇 개 빠졌나»지
+    #   같은 문장을 아홉 번 읽는 것이 아니다.
+    if numeric_filtering.removed_section_counts:
+        removed_total = sum(n for _, n in numeric_filtering.removed_section_counts)
+        removed_titles = ", ".join(
+            SECTION_TITLES.get(section_id, section_id)
+            for section_id, _ in numeric_filtering.removed_section_counts
+        )
         reasons.append(
-            f"{title} 장에서 검산할 구조화 근거가 없는 수치·날짜 문장 "
-            f"{removed}개를 공개본에서 제외했습니다."
+            f"검산할 구조화 근거가 없는 수치·날짜 문장 {removed_total}개를 "
+            f"공개본에서 제외했습니다 ({removed_titles})."
         )
     if numeric_filtering.removed_summary_count:
         reasons.append(

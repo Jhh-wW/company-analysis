@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -10,6 +11,8 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Optional
 
 from src.features.pipeline.port import ReportTable
+
+logger = logging.getLogger(__name__)
 
 
 _ACCOUNT_IDS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
@@ -350,6 +353,18 @@ def build_three_year_table(
             observation_rows[label] = row
 
     if not _REQUIRED_METRICS.issubset(observations):
+        # ★ 2026-08-29 — 여기서 조용히 None 을 돌려주면 보고서에 3개년 실적표가
+        #   통째로 빠지고, 머리말이 「기준일 전 36개월」로 바뀐다. 실측(우리은행)에서
+        #   그 일이 일어났는데 «왜»인지 알 방법이 로그에 없었다.
+        #   ⚠️ 회사 원문(계정 이름)은 남기지 않는다 — 우리 상수 이름과 개수만.
+        logger.warning(
+            "3개년 실적표를 만들지 못했습니다: 필수 지표 %s 중 %s 를 못 찾음 "
+            "(훑은 행 %d개, 찾은 지표 %s)",
+            sorted(_REQUIRED_METRICS),
+            sorted(_REQUIRED_METRICS - set(observations)),
+            len(scoped_rows),
+            sorted(observations),
+        )
         return None
 
     reference_periods = observations["매출액"].periods
