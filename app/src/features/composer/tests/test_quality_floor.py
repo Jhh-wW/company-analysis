@@ -446,16 +446,22 @@ def test_기준문서_하한은_낮추지_않고_미결속_수치를_제외한_�
     )
     assert len(body_texts) >= MIN_SUBSTANTIVE_SENTENCES, "회복 확인: 40문장 하한을 넘겼다"
     assert report.grade.value == "부분 완성"  # ← 안전선: 등급은 여전히 PARTIAL이다
-    assert any("수치·날짜 문장" in reason for reason in report.shortfall_reasons)
+    assert any("숫자·날짜 문장" in reason for reason in report.shortfall_reasons)
+    report_facts = output.quality_observation.substantive_claims
+    report_sources = output.quality_observation.document_sources
+    # ★ 2026-08-29 — 머리말에서 «내부 임계값»(40개·8개)을 뺐다. 그 숫자는 화면
+    #   어디에도 설명이 없어 「40점 만점에 3점」으로 오독되고, 독자가 할 수 있는
+    #   일도 없다. 대신 «실제 개수»는 그대로 싣는다 — 그게 신뢰도 판단의 근거다.
+    #   ⚠️ 여기서 지키는 것은 「임계값이 보이나」가 아니라 「사실이 남았나」다.
     assert any(
-        "근거와 의미가 구조로 확인된 실질 내용" in reason
-        and str(MIN_SUBSTANTIVE_SENTENCES) in reason
+        "출처와 뜻이 함께 확인된 사실" in reason
+        and f"{report_facts}건" in reason
         for reason in report.shortfall_reasons
-    )
+    ), "★ 확인된 사실 개수가 독자에게 안 보인다"
     assert any(
-        "서로 다른 원문 문서" in reason and "8개" in reason
+        "원문 문서" in reason and f"{report_sources}개" in reason
         for reason in report.shortfall_reasons
-    )
+    ), "★ 참고한 원문 문서 개수가 독자에게 안 보인다"
     assert rendered_confirmed / len(rendered) >= MIN_CONFIRMED_RATIO, (
         "회복 확인: 확인 비율도 50% 하한을 넘겼다"
     )

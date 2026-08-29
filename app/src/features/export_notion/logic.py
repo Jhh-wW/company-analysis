@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.core.citations import citation_marker
+from src.shared.report_quality.models import PublicationPolicy
 from src.core.constants import section_display_heading
 from src.features.export_notion import constants
 from src.features.pipeline.port import (
@@ -323,11 +324,28 @@ def build_blocks(report: Report, *, grade_note: str = "") -> list[NotionBlock]:
 
     blocks: list[NotionBlock] = [_heading_1(report.company), _heading_1("분석 보고서")]
     if report.grade is Grade.PARTIAL:
+        # ★ 2026-08-29 — 노션만 정책과 «무관하게» 「검증된 부분 보고서」라고 불렀다.
+        #   같은 보고서를 웹·PDF 는 「안전 확인 중인 임시 부분 보고서」라고 부른다
+        #   (`web/routers/reports.py::_report_grade_note`). 한 보고서가 채널마다
+        #   다른 이름으로 불리면, 그중 하나는 반드시 사실보다 후하게 말하는 것이다.
+        #   여기서는 노션이 더 후했다 — 아직 표·도식을 확인하지 못한 보고서를
+        #   「검증된」이라고 불렀다. 웹·PDF 와 같은 기준으로 맞춘다.
+        확인_중 = (
+            report.publication_policy
+            == PublicationPolicy.LEGACY_SHADOW_EXCEPTION.value
+        )
         blocks.extend(
             [
-                _heading_2("검증된 부분 보고서(부분 완성)"),
+                _heading_2(
+                    "안전 확인 중인 임시 부분 보고서"
+                    if 확인_중
+                    else "검증된 부분 보고서(부분 완성)"
+                ),
                 _paragraph(
-                    "공식 근거로 확인된 항목만 담았습니다. "
+                    "확인되지 않은 숫자 문장은 제외했지만 모든 문장·표·도식의 "
+                    "확인은 아직 끝나지 않았습니다."
+                    if 확인_중
+                    else "공식 근거로 확인된 항목만 담았습니다. "
                     "확인되지 않은 내용은 추측해 채우지 않았습니다."
                 ),
                 *(_paragraph(reason) for reason in report.shortfall_reasons),

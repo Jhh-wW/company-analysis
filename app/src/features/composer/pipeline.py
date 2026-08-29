@@ -146,6 +146,13 @@ def _apply_generation_quality_label(
     함수를 호출하지 않으므로 새 코드가 이미 발급된 링크를 소급 차단하지 않는다.
     """
 
+    # ★ 2026-08-29 — 아래 문구들은 «독자»가 읽는다. 눈가림 독립 평가에서
+    #   세 평가자가 모두 「내부 문구 노출」을 감점 1위로 지목했다:
+    #   「claim」·「결속」 같은 개발자 어휘, 「완성 기준 40개」 같은 내부 임계값,
+    #   「새 안전 검사」 같은 우리 일정 사정이 그대로 인쇄되고 있었다.
+    #   (내부 임계값 40은 화면 어디에도 설명이 없어 「40점 만점에 3점」으로 오독된다.)
+    # ⚠️ 정직성은 «깎지 않는다» — 개수·장 이름·비율은 전부 그대로 남긴다.
+    #   숨기는 것과 쉬운 말로 바꾸는 것은 다르다. 시험이 그 경계를 지킨다.
     reasons = list(rendered.shortfall_reasons)
     # ★ 2026-08-29 — 장마다 한 줄씩(최대 9줄) 거의 같은 문장을 찍던 것을 «한 줄»로
     #   모은다. 빼는 정보는 없다 — 총 개수와 장 이름을 그대로 싣는다.
@@ -159,13 +166,13 @@ def _apply_generation_quality_label(
             for section_id, _ in numeric_filtering.removed_section_counts
         )
         reasons.append(
-            f"검산할 구조화 근거가 없는 수치·날짜 문장 {removed_total}개를 "
-            f"공개본에서 제외했습니다 ({removed_titles})."
+            f"원문과 맞춰 보지 못한 숫자·날짜 문장 {removed_total}개를 뺐습니다 "
+            f"({removed_titles}). 틀렸다는 뜻이 아니라 확인하지 못했다는 뜻입니다."
         )
     if numeric_filtering.removed_summary_count:
         reasons.append(
-            "핵심 요약에서 검증된 본문 수치 claim과 결속되지 않은 수치·날짜 "
-            f"문장 {numeric_filtering.removed_summary_count}개를 제외했습니다."
+            "핵심 요약에서도 같은 이유로 숫자 문장 "
+            f"{numeric_filtering.removed_summary_count}개를 뺐습니다."
         )
 
     contract = contract_for_generation(observation.contract_version)
@@ -174,8 +181,7 @@ def _apply_generation_quality_label(
         count = counts.get(section_id, 0)
         title = SECTION_TITLES.get(section_id, section_id)
         reasons.append(
-            f"{title} 장의 공개 문장이 {count}개라 완성 기준 "
-            f"{contract.min_claims_per_covered_section}개에 못 미칩니다."
+            f"{title} 장은 확인된 문장이 {count}개뿐이라 내용이 얇습니다."
         )
 
     if len(observation.notice_only_sections) > contract.max_notice_only_sections:
@@ -184,15 +190,13 @@ def _apply_generation_quality_label(
             for section_id in observation.notice_only_sections
         ]
         reasons.append(
-            "실질 내용 대신 안내만 있는 장이 "
-            f"{len(titles)}개({', '.join(titles)})라 완성 기준 "
-            f"{contract.max_notice_only_sections}개를 넘습니다."
+            f"내용 대신 안내문만 실린 장이 {len(titles)}개입니다 "
+            f"({', '.join(titles)})."
         )
     if observation.substantive_claims < contract.min_substantive_claims:
         reasons.append(
-            "근거와 의미가 구조로 확인된 실질 내용이 "
-            f"{observation.substantive_claims}개라 완성 기준 "
-            f"{contract.min_substantive_claims}개에 못 미칩니다."
+            f"출처와 뜻이 함께 확인된 사실이 {observation.substantive_claims}건뿐이라, "
+            "회사 전체를 설명하기에는 얇습니다."
         )
     try:
         verified_ratio = Decimal(observation.verified_ratio)
@@ -200,15 +204,12 @@ def _apply_generation_quality_label(
         verified_ratio = Decimal(0)
     if verified_ratio < contract.min_verified_ratio:
         reasons.append(
-            "구조로 확인된 실질 내용 중 검증을 마친 비율이 "
-            f"{verified_ratio:.0%}라 완성 기준 "
-            f"{contract.min_verified_ratio:.0%}에 못 미칩니다."
+            f"확인된 사실 중 검증을 마친 것이 {verified_ratio:.0%}뿐입니다."
         )
     if observation.document_sources < contract.min_document_sources:
         reasons.append(
-            "서로 다른 원문 문서가 "
-            f"{observation.document_sources}개라 완성 기준 "
-            f"{contract.min_document_sources}개에 못 미칩니다."
+            f"이 보고서가 참고한 원문 문서는 {observation.document_sources}개입니다. "
+            "자료가 적으니 다른 자료와 함께 보시길 권합니다."
         )
 
     unique_reasons = list(dict.fromkeys(reason for reason in reasons if reason))

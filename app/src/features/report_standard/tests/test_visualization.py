@@ -391,7 +391,7 @@ def test_old_column_order_from_stored_reports_still_becomes_a_card() -> None:
         CardField(label="시점", value="2026년 하반기"),
         CardField(label="계획", value="열분해 설비"),
         CardField(label="공시된 내용", value="중장기 기업가치 제고 계획"),
-        CardField(label="범위·한계", value="아직 실행되지 않은 계획입니다"),
+        CardField(label="범위·한계", value="실행 여부는 확인하지 않았습니다"),
     )
 
 
@@ -538,13 +538,13 @@ def test_card_drops_blank_cells_and_titles_multi_row_tables_blank() -> None:
     assert visualization.cards[0].fields == (
         CardField(label="계획", value="열분해 설비"),
         CardField(label="시점", value="2026년 하반기"),
-        CardField(label="범위·한계", value="아직 실행되지 않은 계획입니다"),
+        CardField(label="범위·한계", value="실행 여부는 확인하지 않았습니다"),
     )
     assert visualization.cards[1].fields == (
         CardField(label="계획", value="해외 납품 확대"),
         CardField(label="시점", value="2026~2028년"),
         CardField(label="공시된 내용", value="차량 외장재·방염 필름"),
-        CardField(label="범위·한계", value="아직 실행되지 않은 계획입니다"),
+        CardField(label="범위·한계", value="실행 여부는 확인하지 않았습니다"),
     )
     assert all(card.title == "" for card in visualization.cards)
 
@@ -601,7 +601,7 @@ def test_limitation_phrase_stays_neutral_when_a_column_is_blank() -> None:
     for card in both_rows_missing_시점.cards:
         limitation_fields = [f for f in card.fields if f.label == _CARD_LIMITATION_LABEL]
         assert len(limitation_fields) == 1
-        assert limitation_fields[0].value == "아직 실행되지 않은 계획입니다"
+        assert limitation_fields[0].value == "실행 여부는 확인하지 않았습니다"
         for word in ("자료", "부족", "미확인", "확인되지 않"):
             assert word not in limitation_fields[0].value, (
                 f"빈 칸을 보고 「자료 부족」류 문구로 바뀌었습니다: {limitation_fields[0].value!r}"
@@ -911,3 +911,33 @@ def test_화살표_장_집합이_카드_판정과_어긋나지_않는다() -> No
     # 화살표 장은 정확히 셋이다(2·5·7장). 늘거나 줄면 위 대조가 통과해도
     # 사람이 한 번 더 보게 한다.
     assert len(composer_constants.FLOW_ARROW_SECTION_IDS) == 3
+
+
+def test_한계_문구는_행마다_달라지는_사실을_단정하지_않는다() -> None:
+    """★ 2026-08-29 실측 — 6장 문구가 「아직 실행되지 않은 계획입니다」였다.
+
+    그 문장은 «각 행이 실행됐는지»를 단정하는데, 이 층에는 판정할 재료가 없다.
+    조건도 「칸 이름이 6장 것인가」 하나뿐이라 그 표의 «모든 행»에 무조건 붙었다.
+    실측: 우리은행 4/4행·현대카드 2/2행에 붙었고 그중 4행은 같은 보고서 본문이
+    과거형으로 「출시하여 … 구축했으며」라고 써서 정면으로 어긋났다.
+
+    ★ 이 층의 문구는 «행 내용과 무관하게 참»이어야 한다. 그렇지 않은 문구는
+      근거 없는 주장이다. 아래 낱말은 행마다 달라지는 상태를 단정한다.
+    ⚠️ 이 시험이 깨지면 보고서가 다시 「본문과 어긋나는 라벨」을 인쇄한다.
+    """
+    단정하는_말 = ("않은", "미실행", "완료됐", "실행됐", "중단된", "예정입니다")
+
+    for 칸이름, 문구 in _CARD_LIMITATION_TEXT_BY_HEADER_KEY.items():
+        for 말 in 단정하는_말:
+            assert 말 not in 문구, (
+                f"★ 한계 문구가 행별 사실을 단정한다: {sorted(칸이름)} → 「{문구}」"
+            )
+
+
+def test_계획_표_한계_문구는_확인하지_않았다고_말한다() -> None:
+    """★ 우리가 실제로 한 일(확인하지 않음)을 그대로 적는다."""
+    문구 = _CARD_LIMITATION_TEXT_BY_HEADER_KEY[
+        frozenset(("계획", "시점", "공시된 내용"))
+    ]
+
+    assert "확인하지 않았습니다" in 문구, f"★ 문구가 바뀌었다: 「{문구}」"

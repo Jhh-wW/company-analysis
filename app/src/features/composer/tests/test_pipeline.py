@@ -177,10 +177,19 @@ def test_정상_흐름이면_검증된_v2_Report가_나온다():
     assert report.quality_contract_version == output.quality_observation.contract_version
     assert report.safety_decision == "공개 차단"
     assert report.publication_policy == "legacy-shadow-exception-v1"
+    # ★ 2026-08-29 — 이 줄의 문구를 바꿨다. 옛 문구는 「«새 안전 검사»에서 …
+    #   «새 구조로» 검증하는 작업은 아직 끝나지 않았습니다」로, 우리가 검증
+    #   방식을 바꾸는 중이라는 «우리 사정»이었고 바로 위 제목 줄과 겹쳤다.
+    #   지금은 제목이 말하지 않는 것 — «독자가 무엇을 하면 되는지» — 를 담는다.
+    #   ⚠️ 지키는 것은 «문구»가 아니라 «고지가 사라지지 않았는가»다.
     assert any(
-        "안전 검사에서 아직 확인하지 못한 문장·표·도식" in reason
+        "아직 하나씩 확인하지 못했습니다" in reason
         for reason in report.shortfall_reasons
-    )
+    ), "★ 「아직 다 확인하지 못했다」는 고지가 사라졌다"
+    assert any(
+        "원문을 함께 확인해 주세요" in reason
+        for reason in report.shortfall_reasons
+    ), "★ 독자가 무엇을 하면 되는지가 사라졌다"
     assert any(
         "fact_id와 결속되지 않은 공개 내용" in problem
         for problem in output.quality_observation.safety_problems
@@ -590,7 +599,7 @@ def test_잘못된_연평균_AI문장은_최종_Report에서_빠지고_누적cla
     assert all(fact.formula == "rate" for fact in output.report.fact_records)
     assert output.report.grade is Grade.PARTIAL
     assert any(
-        "수치·날짜 문장" in reason
+        "숫자·날짜 문장" in reason
         for reason in output.report.shortfall_reasons
     )
 
@@ -630,6 +639,6 @@ def test_한문장_장이_있으면_COMPLETE가_아니라_PARTIAL과_이유가_�
     assert output.report.grade is Grade.PARTIAL
     assert "identity" in output.quality_observation.underfilled_sections
     assert any(
-        "공개 문장이 1개라 완성 기준 2개에 못 미칩니다" in reason
+        "확인된 문장이 1개뿐이라 내용이 얇습니다" in reason
         for reason in output.report.shortfall_reasons
     )

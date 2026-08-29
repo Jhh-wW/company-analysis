@@ -470,7 +470,7 @@ def test_ENGINE_V2_전체_흐름이_검증된_v2_보고서를_만든다(
     )
     assert report.grade is Grade.PARTIAL
     assert any(
-        "수치·날짜 문장" in reason for reason in report.shortfall_reasons
+        "숫자·날짜 문장" in reason for reason in report.shortfall_reasons
     )
     # 해석 표지와 [n] 인용이 본문에 실제로 찍힌다
     assert any(INTERPRETATION_MARKER in text for text in all_prose)

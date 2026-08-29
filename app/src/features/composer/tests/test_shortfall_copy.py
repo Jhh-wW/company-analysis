@@ -60,7 +60,7 @@ def _고지들() -> list[str]:
         _관측(),
         NumericSafetyFiltering(removed_section_counts=_빠진_장),
     )
-    return [reason for reason in labelled.shortfall_reasons if "수치·날짜 문장" in reason]
+    return [reason for reason in labelled.shortfall_reasons if "숫자·날짜 문장" in reason]
 
 
 def test_제외_고지는_장마다가_아니라_한_줄이다() -> None:
@@ -91,4 +91,85 @@ def test_빠진_문장이_없으면_고지도_없다() -> None:
         _보고서(), _관측(), NumericSafetyFiltering()
     )
 
-    assert not [r for r in labelled.shortfall_reasons if "수치·날짜 문장" in r]
+    assert not [r for r in labelled.shortfall_reasons if "숫자·날짜 문장" in r]
+
+
+# ══════════════════════════════════════════════════════════
+# 개발자 말투가 독자에게 새지 않는다 (2026-08-29 눈가림 평가 감점 1위)
+# ══════════════════════════════════════════════════════════
+
+#: 독자가 읽는 문장에 있으면 안 되는 말.
+#:
+#: ★ 왜 (2026-08-29) — 눈가림 독립 평가에서 «세 평가자 모두» 표지·머리말의
+#:   내부 문구 노출을 감점 1위로 꼽았다. 실제로 이런 문장이 인쇄됐다:
+#:     「핵심 요약에서 검증된 본문 수치 claim과 결속되지 않은 …」
+#:     「근거와 의미가 구조로 확인된 실질 내용이 3개라 완성 기준 40개에 못 미칩니다.」
+#:   「claim」은 한국어 문장 안의 영어 식별자, 「결속」은 이 저장소 내부 용어,
+#:   「완성 기준 40개」는 화면 어디에도 설명 없는 내부 임계값이다
+#:   (그래서 「40점 만점에 3점」으로 오독된다).
+#: ⚠️ 이건 «숨기라»는 뜻이 아니다 — 개수·장 이름·비율은 그대로 남긴다.
+#:   위 시험들이 그 경계를 따로 지킨다.
+_개발자_말투 = (
+    "claim",
+    "결속",
+    "완성 기준",
+    "구조화 근거",
+    "실질 내용",
+    "공개본",
+    "새 안전 검사",
+    "fact",
+)
+
+
+def _모든_사유() -> list[str]:
+    """머리말에 나올 수 있는 문장을 «가능한 갈래마다» 한 번씩 만든다."""
+    from dataclasses import replace
+
+    관측 = replace(
+        _관측(),
+        quality_grade="부분 완성",
+        release_allowed=False,
+        substantive_claims=3,
+        verified_claims=1,
+        verified_ratio="0.33",
+        document_sources=1,
+        section_public_sentence_counts=(("identity", 1),),
+        underfilled_sections=("identity",),
+        notice_only_sections=("portfolio", "culture"),
+    )
+    labelled = _apply_generation_quality_label(
+        _보고서(),
+        관측,
+        NumericSafetyFiltering(
+            removed_section_counts=_빠진_장, removed_summary_count=2
+        ),
+    )
+    return list(labelled.shortfall_reasons)
+
+
+def test_머리말에_개발자_말투가_없다() -> None:
+    """★ 독자는 우리 내부 용어를 모른다. 알 필요도 없다."""
+    사유들 = _모든_사유()
+    assert len(사유들) >= 6, f"시험 전제 — 갈래가 충분히 켜져야 한다: {len(사유들)}줄"
+
+    for 사유 in 사유들:
+        for 말 in _개발자_말투:
+            assert 말 not in 사유, f"★ 개발자 말투가 새어 나왔다: 「{말}」 in 「{사유}」"
+
+
+def test_쉬운_말로_바꿔도_숫자는_그대로_남는다() -> None:
+    """★ 정직성 안전선 — 쉬운 말로 바꾸는 것과 «가리는» 것은 다르다."""
+    한줄로 = " / ".join(_모든_사유())
+
+    assert "3건" in 한줄로, "★ 확인된 사실 개수가 사라졌다"
+    assert "1개" in 한줄로, "★ 참고한 원문 문서 개수가 사라졌다"
+    assert "33%" in 한줄로, "★ 검증을 마친 비율이 사라졌다"
+    assert "2개" in 한줄로, "★ 요약에서 뺀 문장 수가 사라졌다"
+
+
+def test_임계값은_독자에게_보이지_않는다() -> None:
+    """★ 40·8·50%는 내부 계약값이고 화면 어디에도 설명이 없다."""
+    한줄로 = " / ".join(_모든_사유())
+
+    for 임계값 in ("40개", "8개에", "50%에"):
+        assert 임계값 not in 한줄로, f"★ 내부 임계값이 다시 새어 나왔다: 「{임계값}」"
