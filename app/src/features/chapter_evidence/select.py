@@ -11,6 +11,14 @@
 포기한다 — ChapterEvidenceCandidates 계약 자체가 문자 합계 상한을 어기면
 생성 즉시 거부하기 때문에 이 규칙은 어길 수 없다. DEFAULT_MAX_CHARS_PER_SECTION
 은 이 경우가 실무에서 드물도록 여유 있게 잡았다(constants.py 주석 참조).
+
+정책: 자격 없는 조각은 조용히 필터링하고(예외로 죽이지 않고) 전용 사유
+코드를 남긴다(fail-closed, quiet-filter) — produce.py의 attempt 필터링과
+같은 정책이다. 이유: 수집기 한 건의 실수(엉뚱한 company_id·해시)가 그
+회사의 아홉 장 생산 전체를 죽이면 안 된다. 조각의 자격은 두 겹으로 확인
+한다 — 1층 company_id 결속(generation=8), 2층 exact_evidence_hashes
+결속(generation=7). 한쪽 방어가 뚫려도(예: company_id는 맞는데 문서
+충돌) 다른 쪽이 혼자 잡을 수 있도록 층을 분리해 순서대로 확인한다.
 """
 
 from __future__ import annotations
@@ -88,20 +96,27 @@ def select_section_fragments(
     collector_slot_set = set(collector_slot_order)
 
     eligible: list[EvidenceFragment] = []
+    company_mismatch_count = 0
     unbound_count = 0
     for fragment in fragments:
         if fragment.section_id != section_id:
             continue
         if fragment.slot_id not in collector_slot_set:
             continue
+        # generation=8 결속 방어(fail-closed), 1층 — 조각 자신의 company_id가
+        # 대상 회사와 다르면 document_id가 우연히 겹쳐도(수집기 버그) 여기서
+        # 먼저 걸러낸다. exact_evidence_hashes 결속(2층)과 방어 층을 분리해,
+        # 한쪽이 뚫려도 다른 쪽이 혼자 잡을 수 있게 한다.
+        if fragment.company_id != company_id:
+            company_mismatch_count += 1
+            continue
         document = own_documents_by_id.get(fragment.document_id)
         if document is None:
             continue
-        # generation=7 계약 결속 방어(fail-closed) — 조각의 text_sha256이 원본
-        # 문서의 exact_evidence_hashes 허용 목록에 없으면 여기서 먼저 걸러낸다.
-        # 안 그러면 ChapterEvidenceCandidates 생성 시 계약이 예외를 던져 이
-        # 회사 전체 생산이 죽는다. document_id가 다른 회사와 우연히 겹쳐도
-        # (수집기 버그) 이 결속 확인이 남의 원문이 조용히 섞이는 것을 막는다.
+        # generation=7 결속 방어(fail-closed), 2층 — 조각의 text_sha256이
+        # 원본 문서의 exact_evidence_hashes 허용 목록에 없으면 여기서
+        # 걸러낸다. 안 그러면 ChapterEvidenceCandidates 생성 시 계약이
+        # 예외를 던져 이 회사 전체 생산이 죽는다.
         if fragment.text_sha256 not in document.exact_evidence_hashes:
             unbound_count += 1
             continue
@@ -183,6 +198,8 @@ def select_section_fragments(
     reason_codes: list[str] = []
     if duplicate_count:
         reason_codes.append(f"duplicate_fragments_removed:{duplicate_count}")
+    if company_mismatch_count:
+        reason_codes.append(f"fragment_company_mismatch:{company_mismatch_count}")
     if unbound_count:
         reason_codes.append(f"fragment_not_bound_to_document:{unbound_count}")
     for slot_id in oversized_slots:

@@ -191,6 +191,28 @@ def test_문서에_결속되지_않은_조각은_사유코드와_함께_제외�
     assert "fragment_not_bound_to_document:1" in selection.reason_codes
 
 
+def test_다른_회사_조각은_해시가_결속돼도_회사_결속으로_제외된다() -> None:
+    # 겹마다 따로 확인한다 — text_sha256 결속(2층)이 뚫려도(우연히 같은 원문)
+    # company_id 결속(1층)이 혼자서 이 조각을 잡아야 한다. 두 층을 한꺼번에
+    # 어기는 입력으로만 시험하면 어느 층이 실제로 막았는지 알 수 없다.
+    fragment = _fragment(company_id="corp-2", fragment_id="f1", text="같은 원문")
+    document = _document(exact_evidence_hashes=(fragment.text_sha256,))
+
+    selection = select_section_fragments(
+        section_id="business_model",
+        company_id="corp-1",
+        documents=(document,),
+        fragments=(fragment,),
+    )
+
+    assert selection.fragments == ()
+    assert "fragment_company_mismatch:1" in selection.reason_codes
+    # 회사 결속에서 이미 걸렀으므로 해시 결속 사유까지 중복으로 세지 않는다.
+    assert not any(
+        code.startswith("fragment_not_bound_to_document:") for code in selection.reason_codes
+    )
+
+
 def test_슬롯_커버리지가_점수보다_우선한다() -> None:
     # revenue_model 슬롯은 저점(600)짜리 대표 하나뿐이고, customer_type 슬롯은
     # 고점(950)짜리 조각이 둘이다. 예산이 세 조각을 다 담을 만큼 넉넉하면

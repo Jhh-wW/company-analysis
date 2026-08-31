@@ -91,6 +91,88 @@ def test_다른_회사_문서는_한_건도_섞이지_않는다() -> None:
         }
 
 
+def test_다른_회사_조각은_회사식별자_결속확인으로_걸러진다() -> None:
+    # generation=8 — 조각 자신의 company_id가 대상 회사와 다르면
+    # document_id·해시가 우연히 맞아떨어져도(가정) select.py가 먼저
+    # 걸러내야 한다(1층 방어). 여기서는 대상 회사 자신의 실제 문서를
+    # 가리키게 해 "document_id는 맞다"는 조건까지 갖췄는데도 company_id
+    # 하나만으로 제외되는지 본다.
+    fixture = build_listed_fixture(company_id="corp-listed")
+    own_document_id = fixture["documents"][0]["document_id"]
+    foreign_fragment = make_fragment(
+        company_id="corp-other",
+        fragment_id="frag-foreign-company",
+        document_id=own_document_id,
+        section_id="business_model",
+        slot_id="business_model:revenue_model",
+        text="다른 회사가 우리 문서 위에 심으려는 조각.",
+        score_millis=999,
+    )
+    fragments = [*fixture["fragments"], foreign_fragment]
+
+    candidates = produce_chapter_evidence_candidates(
+        company_id="corp-listed",
+        company_type="listed",
+        documents=fixture["documents"],
+        fragments=fragments,
+        attempts=fixture["attempts"],
+    )
+
+    business_model = next(
+        candidate for candidate in candidates if candidate.section_id == "business_model"
+    )
+    assert "frag-foreign-company" not in {
+        fragment.fragment_id for fragment in business_model.fragments
+    }
+    assert any(
+        code.startswith("fragment_company_mismatch:")
+        for code in business_model.reason_codes
+    )
+
+
+def test_다른_회사_시도는_슬롯을_확인된_것으로_만들지_못한다() -> None:
+    # generation=8 — attempt도 company_id가 다르면 걸러진다. 대상 회사가
+    # 이 슬롯을 실제로는 조회한 적이 없어야(UNKNOWN) 하는데, 다른 회사의
+    # REQUIRED 정상 확인 기록이 «우리도 확인했다»로 위장하면 결함이다.
+    fixture = build_listed_fixture(company_id="corp-listed")
+    section_id = "future_strategy"
+    fragments = [
+        fragment for fragment in fixture["fragments"] if fragment["section_id"] != section_id
+    ]
+    attempts = [
+        attempt
+        for attempt in fixture["attempts"]
+        if not all(slot_id.startswith(f"{section_id}:") for slot_id in attempt["slot_ids"])
+    ]
+    foreign_attempt = make_attempt(
+        company_id="corp-other",
+        attempt_id="attempt-foreign-future_strategy",
+        source_kind="dart_business_report",
+        slot_ids=collector_slots_for(section_id),
+        state=CollectionState.MISSING.value,
+        reason_code="dart_business_report_missing",
+    )
+    attempts.append(foreign_attempt)
+
+    candidates = produce_chapter_evidence_candidates(
+        company_id="corp-listed",
+        company_type="listed",
+        documents=fixture["documents"],
+        fragments=fragments,
+        attempts=attempts,
+    )
+
+    future_strategy = next(
+        candidate for candidate in candidates if candidate.section_id == section_id
+    )
+    assert future_strategy.candidate_readiness is EvidenceReadiness.UNKNOWN
+    assert all(attempt.company_id == "corp-listed" for attempt in future_strategy.attempts)
+    assert any(
+        code.startswith("attempt_company_mismatch:")
+        for code in future_strategy.reason_codes
+    )
+
+
 def test_장별_후보는_전부_같은_집합이_아니다() -> None:
     fixture = build_listed_fixture()
 

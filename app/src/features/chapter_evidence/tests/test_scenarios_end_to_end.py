@@ -242,3 +242,93 @@ def test_진단이_INSUFFICIENT인_장은_계약도_UNKNOWN이_아니다(
         assert bundle.readiness is not EvidenceReadiness.UNKNOWN, (
             f"{candidate.section_id}: 진단은 INSUFFICIENT인데 계약은 UNKNOWN입니다"
         )
+
+
+def test_혼합_회사_입력이_섞여도_대상회사_후보와_판정에_영향없다() -> None:
+    """혼합 회사 입력 종단시험 — documents·fragments·attempts 세 곳 모두에 다른
+
+    회사 값을 섞어도 대상 회사의 후보·준비 판정이 한 건도 바뀌지 않아야
+    한다. 특히 웹 필수 장이 조회 장애(FAILED)로 UNKNOWN인 상태에서, 다른
+    회사의 «정상 확인»(REQUIRED·MISSING) attempt가 그 슬롯을 «우리도
+    확인했다»로 위장해 UNKNOWN을 INSUFFICIENT로 바꾸지 못해야 한다 —
+    바로 그 실패 방향이 생산부가 장애를 자료 부재로 축소하는 결함이다.
+    """
+
+    target_company_id = "corp-js-render"
+    foreign_company_id = "corp-other"
+    fixture = build_javascript_render_failure_fixture(company_id=target_company_id)
+
+    baseline_candidates = produce_chapter_evidence_candidates(
+        company_id=target_company_id, company_type="audit_only", **fixture
+    )
+    baseline_by_section = {c.section_id: c for c in baseline_candidates}
+
+    # UNKNOWN인 웹 필수 장(예: future_strategy) 슬롯을 다른 회사가
+    # «정상 확인(MISSING)»한 것처럼 attempt를 심는다 — 진짜 이 회사가
+    # 확인한 게 아니므로 UNKNOWN이 유지돼야 한다.
+    unknown_section_id = "future_strategy"
+    foreign_attempt = make_attempt(
+        company_id=foreign_company_id,
+        attempt_id="attempt-foreign-mixed",
+        source_kind="official_homepage",
+        slot_ids=collector_slots_for(unknown_section_id),
+        state=CollectionState.MISSING.value,
+        reason_code="official_homepage_missing",
+    )
+
+    # READY인 장(예: business_model)의 빈 슬롯이 없는 상태에 다른 회사의
+    # 조각·문서를 더 얹어도 대상 회사 조각 구성은 그대로여야 한다.
+    ready_section_id = "business_model"
+    foreign_document = make_document(
+        company_id=foreign_company_id,
+        document_id="foreign-doc-mixed",
+        source_kind="dart_business_report",
+        exact_evidence_hashes=None,
+    )
+    foreign_fragment = make_fragment(
+        company_id=foreign_company_id,
+        fragment_id="frag-foreign-mixed",
+        document_id="foreign-doc-mixed",
+        section_id=ready_section_id,
+        slot_id="business_model:revenue_model",
+        text="다른 회사가 섞어 넣으려는 매출 구조 서술.",
+        score_millis=999,
+    )
+
+    mixed_documents = [*fixture["documents"], foreign_document]
+    mixed_fragments = [*fixture["fragments"], foreign_fragment]
+    mixed_attempts = [*fixture["attempts"], foreign_attempt]
+
+    mixed_candidates = produce_chapter_evidence_candidates(
+        company_id=target_company_id,
+        company_type="audit_only",
+        documents=mixed_documents,
+        fragments=mixed_fragments,
+        attempts=mixed_attempts,
+    )
+    mixed_by_section = {c.section_id: c for c in mixed_candidates}
+
+    for section_id in REQUIRED_EVIDENCE_SECTION_IDS:
+        baseline = baseline_by_section[section_id]
+        mixed = mixed_by_section[section_id]
+        assert mixed.candidate_readiness is baseline.candidate_readiness, (
+            f"{section_id}: 혼합 입력이 준비 판정을 바꿨습니다"
+        )
+        assert {f.fragment_id for f in mixed.fragments} == {
+            f.fragment_id for f in baseline.fragments
+        }, f"{section_id}: 혼합 입력이 근거 조각 구성을 바꿨습니다"
+        assert all(document.company_id == target_company_id for document in mixed.documents)
+        assert all(fragment.company_id == target_company_id for fragment in mixed.fragments)
+        assert all(attempt.company_id == target_company_id for attempt in mixed.attempts)
+
+    # 특히 UNKNOWN 유지가 핵심 주장이다 — 다른 회사 attempt가 이걸 뒤집으면
+    # 안 된다.
+    assert mixed_by_section[unknown_section_id].candidate_readiness is EvidenceReadiness.UNKNOWN
+    assert any(
+        code.startswith("attempt_company_mismatch:")
+        for code in mixed_by_section[unknown_section_id].reason_codes
+    )
+    assert any(
+        code.startswith("fragment_company_mismatch:")
+        for code in mixed_by_section[ready_section_id].reason_codes
+    )
