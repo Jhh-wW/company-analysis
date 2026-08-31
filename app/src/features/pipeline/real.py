@@ -238,14 +238,9 @@ def _generation_cache_namespace(
     model = str(getattr(engine, "MODEL", "") or GENERATION_MODEL).strip()
     if not model:
         return None
-    from src.features.composer.build_id import (  # noqa: PLC0415
-        EngineBuildIdentity,
-        capture_engine_build_identity,
-    )
-
     if build_identity is None:
-        build_identity = capture_engine_build_identity()
-    if not isinstance(build_identity, EngineBuildIdentity):
+        build_identity = engine_build_identity.capture_engine_build_identity()
+    if not isinstance(build_identity, engine_build_identity.EngineBuildIdentity):
         raise TypeError("요청 시작 때 고정한 엔진 빌드 신원이 필요합니다")
     if not build_identity.cache_usable:
         return None
@@ -1792,15 +1787,10 @@ class RealPipeline:
     ) -> RunResult:
         """5 판정부터 13 출력까지 돌리고 예외 때도 이미 쓴 비용을 보존한다."""
         engine = _MeteredEngine(_engine())
-        from src.features.composer.build_id import (  # noqa: PLC0415
-            EngineBuildIdentity,
-            capture_engine_build_identity,
-        )
-
         frozen_identity = generation_coordination.frozen_engine_build_identity()
         if frozen_identity is None:
-            build_identity = capture_engine_build_identity()
-        elif isinstance(frozen_identity, EngineBuildIdentity):
+            build_identity = engine_build_identity.capture_engine_build_identity()
+        elif isinstance(frozen_identity, engine_build_identity.EngineBuildIdentity):
             build_identity = frozen_identity
         else:
             raise generation_coordination.GenerationCoordinationError(
@@ -3144,7 +3134,7 @@ def _v2_cache_save(
                 conn,
                 corp_id=corp_id,
                 report=report,
-                build_id=build_identity.build_id,
+                build_identity=build_identity,
                 source_identity_digest=source_identity_digest,
                 fiscal_year=fiscal_year,
             )
@@ -3169,7 +3159,7 @@ def _company_cache_save(
                 conn,
                 corp_id=corp_id,
                 report=report,
-                build_id=build_identity.build_id,
+                build_identity=build_identity,
                 source_identity_digest=source_identity_digest,
                 fiscal_year=fiscal_year,
             )
@@ -3362,11 +3352,7 @@ def _run_v2_composer(
       생성기 지문이 달라지면 자동 미적중이라 옛 결과가 새 코드 결과로 나오지 않는다.
     """
     if build_identity is None:
-        from src.features.composer.build_id import (  # noqa: PLC0415
-            capture_engine_build_identity,
-        )
-
-        build_identity = capture_engine_build_identity()
+        build_identity = engine_build_identity.capture_engine_build_identity()
     # composer는 v2 전용이라 지연 import한다 — v1 경로의 module 적재 비용·의존을
     # 바꾸지 않기 위해서다 (pipeline→composer 방향은 계획이 허용한 연결이다).
     from src.features.composer import pipeline as composer_pipeline  # noqa: PLC0415

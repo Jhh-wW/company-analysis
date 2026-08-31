@@ -26,8 +26,8 @@ from src.core.provider_gateway import attempt_context
 from src.core.provider_gateway.attempt_context import ProviderAttemptCallbacks
 from src.features.budget import provider_budget
 from src.features.composer.port import AskFatalError
-from src.features.composer import build_id as composer_build_id
 from src.features.composer.constants import GRADE_CONFIRMED, SECTION_IDS
+from src.shared import engine_build_identity as build_identity_contract
 from src.features.composer.validate import V2ValidationError
 from src.features.pipeline import real
 from src.features.pipeline.port import (
@@ -441,9 +441,9 @@ def test_v2도_배포commit을_모르면_cache_eligible과_저장을_모두_끈�
         corp_id=CORP_ID,
         current_fiscal_year=2025,
         source_identity_digest="d" * 64,
-        build_identity=composer_build_id.EngineBuildIdentity(
+        build_identity=build_identity_contract.EngineBuildIdentity(
             deployment_revision="",
-            build_id=composer_build_id.UNKNOWN_BUILD_ID,
+            build_id=build_identity_contract.UNKNOWN_BUILD_ID,
         ),
     )
 

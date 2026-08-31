@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Final
 
 from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
-from src.features.composer import build_id as composer_build_id
 from src.features.export_pdf.automatic_release import report_sha256
 from src.features.export_pdf import constants as pdf_constants
 from src.features.export_pdf import release_store as pdf_release_store
@@ -34,6 +33,7 @@ from src.features.report_delivery.models import (
 from src.features.report_delivery.source_identity import SourceSnapshot
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
+from src.shared import engine_build_identity as build_identity_contract
 from src.shared.automatic_release_record import AUTOMATIC_CHECKER_VERSION
 from src.shared.automatic_release_record import AutomaticReleaseRecord
 from src.shared.report_source_identity import (
@@ -192,9 +192,9 @@ def reconcile_configured_artifact_blob_intents(
 
 
 def _release_identity(
-    identity: composer_build_id.EngineBuildIdentity | None = None,
+    identity: build_identity_contract.EngineBuildIdentity | None = None,
 ) -> tuple[str, str]:
-    identity = identity or composer_build_id.capture_engine_build_identity()
+    identity = identity or build_identity_contract.capture_engine_build_identity()
     if identity.cache_usable:
         # 한 raw snapshot에서 revision과 contract-version build ID를 함께 만든다.
         return (
@@ -208,7 +208,7 @@ def _release_identity(
 
 
 def _assert_frozen_identity_is_current(
-    identity: composer_build_id.EngineBuildIdentity,
+    identity: build_identity_contract.EngineBuildIdentity,
 ) -> None:
     """정상 배포에서 시작한 생성이 다른 배포에서 출고되지 않게 막는다.
 
@@ -216,17 +216,13 @@ def _assert_frozen_identity_is_current(
     sentinel이고 캐시 결속·재사용이 금지된다.
     """
 
-    if not isinstance(identity, composer_build_id.EngineBuildIdentity):
-        raise DeliveryAdapterError("생성 시작 때 고정한 엔진 빌드 신원이 없습니다")
-    current = composer_build_id.capture_engine_build_identity()
-    if identity.cache_usable and current != identity:
-        raise DeliveryAdapterError(
-            "생성 시작과 출고 시점의 검증된 배포 신원이 다릅니다"
-        )
-    if not identity.cache_usable and current.cache_usable:
-        raise DeliveryAdapterError(
-            "unknown 배포에서 시작한 결과를 뒤늦게 나타난 정상 배포에 저장할 수 없습니다"
-        )
+    try:
+        build_identity_contract.assert_engine_build_identity_current(identity)
+    except (
+        TypeError,
+        build_identity_contract.EngineBuildIdentityChangedError,
+    ) as exc:
+        raise DeliveryAdapterError(str(exc).replace("저장 시점", "출고 시점")) from exc
 
 
 def _is_unverified_local_release(release: tuple[str, str]) -> bool:
@@ -350,7 +346,7 @@ def persist_approved_delivery(
     cache_namespace: CacheNamespace | None = None,
     preflight_identity_digest: str = "",
     bind_cache_entry: bool,
-    engine_build_identity: composer_build_id.EngineBuildIdentity | None = None,
+    engine_build_identity: build_identity_contract.EngineBuildIdentity | None = None,
 ) -> PublicDelivery:
     """자동검사가 승인한 본문·delivery·PDF를 한 DB 거래에 결속한다.
 
@@ -372,7 +368,7 @@ def persist_approved_delivery(
         )
     frozen_identity = (
         engine_build_identity
-        or composer_build_id.capture_engine_build_identity()
+        or build_identity_contract.capture_engine_build_identity()
     )
     if engine_build_identity is not None:
         _assert_frozen_identity_is_current(frozen_identity)
@@ -572,7 +568,7 @@ def persist_reused_delivery(
     financial_payload_digest: str,
     cache_key: CacheLookupKey | None = None,
     reuse_singleflight_key: delivery_singleflight.LeaseKey | None = None,
-    engine_build_identity: composer_build_id.EngineBuildIdentity | None = None,
+    engine_build_identity: build_identity_contract.EngineBuildIdentity | None = None,
 ) -> tuple[PublicDelivery, AutomaticReleaseRecord]:
     """owner의 불변 본문·최초 PDF를 검증하고 새 Delivery만 발급한다.
 

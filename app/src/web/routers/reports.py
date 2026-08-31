@@ -56,7 +56,6 @@ from src.features.pipeline.port import (
     RunResult,
     UserInput,
 )
-from src.features.composer import build_id as composer_build_id
 from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
 from src.features.composer.validate import (
     V2ValidationError,
@@ -76,6 +75,7 @@ from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import tracks as share_tracks
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
+from src.shared import engine_build_identity as build_identity_contract
 from src.shared.generation_cache_identity import GenerationCacheNamespace
 from src.web import job_runtime, report_delivery_adapter, request_helpers
 from src.web.security import CSRF_TOKEN_MAX_CHARS
@@ -1222,7 +1222,7 @@ def finalize_new_report_delivery(
     cache_eligible: bool = False,
     completed_at: dt.datetime | None = None,
     public_access_run_id: str = "",
-    engine_build_identity: composer_build_id.EngineBuildIdentity | None = None,
+    engine_build_identity: build_identity_contract.EngineBuildIdentity | None = None,
     reuse_singleflight_key: LeaseKey | None = None,
 ) -> report_delivery_adapter.PublicDelivery:
     """새 보고서 완료 경계에서 자동승인·과금·artifact를 한번만 확정한다.
@@ -1259,7 +1259,7 @@ def finalize_new_report_delivery(
 
     frozen_build_identity = (
         engine_build_identity
-        or composer_build_id.capture_engine_build_identity()
+        or build_identity_contract.capture_engine_build_identity()
     )
     if engine_build_identity is not None:
         report_delivery_adapter._assert_frozen_identity_is_current(

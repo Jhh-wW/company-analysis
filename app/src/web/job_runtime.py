@@ -35,7 +35,6 @@ from src.features.budget.sharing import (
 )
 from src.features.business_candidate.constants import CANDIDATE_ATTEMPT_TTL_SEC
 from src.features.cost_tracking import store as cost_store
-from src.features.composer import build_id as composer_build_id
 from src.features.observability import constants as obs
 from src.features.observability import lifecycle
 from src.features.pipeline.demo import available_companies
@@ -67,6 +66,7 @@ from src.features.sharelink.constants import PUBLIC_BUCKET
 from src.features.storage import db as storage_db
 from src.features.storage import job_interruptions
 from src.features.storage import reports as report_store
+from src.shared import engine_build_identity as build_identity_contract
 from src.shared import generation_coordination
 from src.web import (
     evaluation_mode,
@@ -124,6 +124,12 @@ _PERSISTENCE_WARNING = (
 )
 
 
+def _commit_report_connection(conn: Any) -> None:
+    """legacy 보고서 fence 직후 commit하며 시험은 실패를 이 seam에 주입한다."""
+
+    conn.commit()
+
+
 class JobAdmissionClosed(RuntimeError):
     """서버 종료가 시작되어 새 배경 작업을 받을 수 없음."""
 
@@ -174,7 +180,7 @@ class Job:
     generation_session: Any = None
     #: scheduler가 생성 시작 전에 한 번 고정한 배포·빌드 신원. 저장 시 다시
     #: 환경에서 만들지 않으며 unknown도 이 Job이 끝날 때까지 그대로다.
-    engine_build_identity: composer_build_id.EngineBuildIdentity | None = None
+    engine_build_identity: build_identity_contract.EngineBuildIdentity | None = None
     generation_abandoned: bool = False
     #: scheduler가 자리를 넘긴 단조 시각. worker 시작이 밀려도 전체 한 시간이
     #: 새로 시작되지 않게 single-flight와 실행 supervisor가 함께 쓴다.
@@ -641,7 +647,7 @@ def _prepare_generation_session(job: Job) -> None:
     """배경 task 시작 전에 취소 신호를 받을 요청 로컬 세션을 만든다."""
 
     if job.engine_build_identity is None:
-        job.engine_build_identity = composer_build_id.capture_engine_build_identity()
+        job.engine_build_identity = build_identity_contract.capture_engine_build_identity()
     if (
         not job.is_paid
         or job.paid_phase is not None
@@ -1164,7 +1170,7 @@ def _ensure_link_job_closed(job: Job) -> None:
         logger.exception("LINK 생성 이력을 확인하지 못했습니다 job_id=%s", job.job_id)
 
 
-def _frozen_job_build_identity(job: Job) -> composer_build_id.EngineBuildIdentity:
+def _frozen_job_build_identity(job: Job) -> build_identity_contract.EngineBuildIdentity:
     """Job과 세션이 함께 운반한 생성 시작 신원을 한 벌로 확인한다."""
 
     job_identity = job.engine_build_identity
@@ -1182,9 +1188,9 @@ def _frozen_job_build_identity(job: Job) -> composer_build_id.EngineBuildIdentit
     identity = session_identity or job_identity
     if identity is None:
         # scheduler를 통하지 않는 호환 호출도 이 경계에서 한 번만 고정한다.
-        identity = composer_build_id.capture_engine_build_identity()
+        identity = build_identity_contract.capture_engine_build_identity()
         job.engine_build_identity = identity
-    if not isinstance(identity, composer_build_id.EngineBuildIdentity):
+    if not isinstance(identity, build_identity_contract.EngineBuildIdentity):
         raise RuntimeError("Job의 엔진 빌드 신원 형식이 올바르지 않습니다")
     return identity
 
@@ -1394,10 +1400,17 @@ def _save_report(job: Job) -> bool:
         return False
     try:
         with storage_db.connect() as conn:
+            frozen_identity = _frozen_job_build_identity(job)
+            build_identity_contract.assert_engine_build_identity_current(
+                frozen_identity
+            )
             stage_report_storage(conn, job)
-            # 호환 wrapper만 독립 commit한다. 최종izer는 같은 staging 함수를
-            # caller-owned transaction 안에서 사용해 전체 출고와 함께 확정한다.
-            conn.commit()
+            # transaction 안의 여러 INSERT 도중 배포가 바뀌었으면 commit 전에
+            # 모두 rollback한다.
+            build_identity_contract.assert_engine_build_identity_current(
+                frozen_identity
+            )
+            _commit_report_connection(conn)
         job.report_persisted = True
         job.persistence_warning = ""
         return True

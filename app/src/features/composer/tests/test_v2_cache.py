@@ -29,10 +29,12 @@ from pathlib import Path
 import pytest
 
 from src.core import deployment_identity
-from src.features.composer.build_id import (
+from src.shared.engine_build_identity import (
     ENGINE_BUILD_ID_CONTRACT_VERSION,
+    EngineBuildIdentity,
     UNKNOWN_BUILD_ID,
     build_id_is_usable,
+    capture_engine_build_identity,
     engine_build_id,
 )
 from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
@@ -40,12 +42,15 @@ from src.features.pipeline.port import Grade, Report
 from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
 from src.features.storage import cache as cache_store
 from src.features.storage import db as storage_db
+from src.shared import engine_build_identity
 
 CORP_ID = "00126380"
 FISCAL_YEAR = 2025
 SOURCE_IDENTITY_DIGEST = "a" * 64
 BUILD_A = f"{ENGINE_BUILD_ID_CONTRACT_VERSION}:{'a' * 40}"
 BUILD_B = f"{ENGINE_BUILD_ID_CONTRACT_VERSION}:{'b' * 40}"
+BUILD_IDENTITY_A = EngineBuildIdentity("a" * 40, BUILD_A)
+UNKNOWN_BUILD_IDENTITY = EngineBuildIdentity("", UNKNOWN_BUILD_ID)
 
 
 @pytest.fixture(autouse=True)
@@ -54,7 +59,7 @@ def _verified_deployment_commit(monkeypatch: pytest.MonkeyPatch):
 
     for name in deployment_identity.COMMIT_ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("RENDER_GIT_COMMIT", "1" * deployment_identity.COMMIT_FULL_LEN)
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "a" * deployment_identity.COMMIT_FULL_LEN)
 
 
 def _v2_report() -> Report:
@@ -83,7 +88,7 @@ def _v1_report() -> Report:
 
 def _save(
     report: Report,
-    build_id: str,
+    build_identity: EngineBuildIdentity,
     source_identity_digest: str = SOURCE_IDENTITY_DIGEST,
 ):
     with storage_db.connect() as conn:
@@ -91,7 +96,7 @@ def _save(
             conn,
             corp_id=CORP_ID,
             report=report,
-            build_id=build_id,
+            build_identity=build_identity,
             source_identity_digest=source_identity_digest,
             fiscal_year=FISCAL_YEAR,
         )
@@ -118,7 +123,7 @@ def _hit(
 
 
 def test_같은_배포commit이면_적중해서_돈을_아낀다():
-    _save(_v2_report(), BUILD_A)
+    _save(_v2_report(), BUILD_IDENTITY_A)
 
     적중 = _hit(BUILD_A)
 
@@ -128,17 +133,54 @@ def test_같은_배포commit이면_적중해서_돈을_아낀다():
 
 def test_배포commit이_바뀌면_옛_결과가_안_나온다():
     """★ 「고쳤는데 화면이 그대로」를 구조적으로 불가능하게 만든다."""
-    _save(_v2_report(), BUILD_A)
+    _save(_v2_report(), BUILD_IDENTITY_A)
 
     assert _hit(BUILD_B) is None, (
         "배포 commit이 바뀌었는데 옛 캐시가 나왔습니다"
     )
 
 
+@pytest.mark.parametrize("current_commit", ("b" * 40, ""))
+def test_v2_실제저장직전_A가_B나unknown이면_행을_남기지_않는다(
+    current_commit: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if current_commit:
+        monkeypatch.setenv("RENDER_GIT_COMMIT", current_commit)
+    else:
+        monkeypatch.delenv("RENDER_GIT_COMMIT", raising=False)
+
+    with pytest.raises(engine_build_identity.EngineBuildIdentityChangedError):
+        _save(_v2_report(), BUILD_IDENTITY_A)
+
+    with storage_db.connect() as conn:
+        assert conn.execute(
+            f"SELECT COUNT(*) FROM {cache_store.TABLE_LAYER1_CACHE}"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            f"SELECT COUNT(*) FROM {cache_store.TABLE_REPORTS}"
+        ).fetchone()[0] == 0
+
+
+def test_v2_unknown생성뒤_commit이_생겨도_행을_남기지_않는다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in deployment_identity.COMMIT_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    frozen = capture_engine_build_identity()
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "b" * 40)
+
+    assert _save(_v2_report(), frozen) is None
+    with storage_db.connect() as conn:
+        assert conn.execute(
+            f"SELECT COUNT(*) FROM {cache_store.TABLE_LAYER1_CACHE}"
+        ).fetchone()[0] == 0
+
+
 def test_DART_출처가_바뀌면_배포가_같아도_옛_결과가_안_나온다():
     """정정공시나 재무값 정정 뒤 옛 본문을 재사용하지 않는다."""
 
-    _save(_v2_report(), BUILD_A, "a" * 64)
+    _save(_v2_report(), BUILD_IDENTITY_A, "a" * 64)
 
     assert _hit(BUILD_A, "b" * 64) is None
 
@@ -165,7 +207,7 @@ def test_배포_commit이_바뀌면_옛_v2_캐시에_적중하지_않는다(
     monkeypatch: pytest.MonkeyPatch,
 ):
     처음 = engine_build_id()
-    _save(_v2_report(), 처음)
+    _save(_v2_report(), capture_engine_build_identity())
 
     monkeypatch.setenv("RENDER_GIT_COMMIT", "2" * deployment_identity.COMMIT_FULL_LEN)
     바뀐뒤 = engine_build_id()
@@ -181,7 +223,7 @@ def test_배포_commit이_바뀌면_옛_v2_캐시에_적중하지_않는다(
 
 def test_v1_보고서는_v2_열쇠_아래로_안_들어간다():
     """★ 들어가면 다음 조사에서 v1이 v2인 척 나온다."""
-    assert _save(_v1_report(), BUILD_A) is None
+    assert _save(_v1_report(), BUILD_IDENTITY_A) is None
     assert _hit(BUILD_A) is None
 
 
@@ -199,6 +241,7 @@ def test_v1_열쇠로_저장한_것을_v2가_못_꺼낸다():
             job=cache_store._COMPANY_ANALYSIS_PRODUCT_KEY,
             requirements=list(cache_store._COMPANY_ANALYSIS_SCHEMA_REQUIREMENTS),
             report=_v1_report(),
+            engine_build_identity=BUILD_IDENTITY_A,
             fiscal_year=FISCAL_YEAR,
         )
 
@@ -208,7 +251,7 @@ def test_v1_열쇠로_저장한_것을_v2가_못_꺼낸다():
 
 
 def test_v2_캐시에_저장한_것을_v1이_못_꺼낸다():
-    _save(_v2_report(), BUILD_A)
+    _save(_v2_report(), BUILD_IDENTITY_A)
 
     with storage_db.connect() as conn:
         v1적중 = cache_store.get_company_report_hit(
@@ -232,15 +275,15 @@ def test_지문을_못_만들면_읽지도_쓰지도_않는다():
     assert not build_id_is_usable(UNKNOWN_BUILD_ID)
     assert not build_id_is_usable("")
 
-    assert _save(_v2_report(), UNKNOWN_BUILD_ID) is None
+    assert _save(_v2_report(), UNKNOWN_BUILD_IDENTITY) is None
     assert _hit(UNKNOWN_BUILD_ID) is None
-    assert _save(_v2_report(), BUILD_A, "") is None
+    assert _save(_v2_report(), BUILD_IDENTITY_A, "") is None
     assert _hit(BUILD_A, "") is None
 
 
 def test_사업연도가_바뀌면_적중하지_않는다():
     """신선도(O9)는 v2에서도 그대로다 — 작년 보고서를 올해 것으로 주지 않는다."""
-    _save(_v2_report(), BUILD_A)
+    _save(_v2_report(), BUILD_IDENTITY_A)
 
     with storage_db.connect() as conn:
         적중 = cache_store.get_v2_report_hit(

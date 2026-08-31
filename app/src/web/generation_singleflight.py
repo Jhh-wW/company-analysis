@@ -18,7 +18,6 @@ from typing import Any, Final
 from src.core import clock
 from src.core.constants import MAX_AI_CALLS_PER_REQUEST
 from src.features.budget.constants import PAID_PHASE_LEASE_SEC, SPEND_PHASE_PIPELINE
-from src.features.composer import build_id as composer_build_id
 from src.features.pipeline.constants import ANTHROPIC_TIMEOUT_SEC
 from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
 from src.features.report_delivery import artifact as delivery_artifact
@@ -28,6 +27,7 @@ from src.features.report_delivery.cache_identity import CacheLookupKey
 from src.features.report_delivery.models import DeliveryPolicy
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
+from src.shared import engine_build_identity as build_identity_contract
 from src.shared import generation_coordination
 from src.shared.generation_cache_identity import GenerationCacheNamespace
 from src.shared.report_source_identity import ReportSourceIdentity
@@ -62,6 +62,13 @@ OWNER_PROVIDER_ADMISSION_AGE: Final[dt.timedelta] = (
 )
 WAITER_MAX_AGE_SEC: Final[float] = float(PAID_PHASE_LEASE_SEC)
 
+
+def _commit_connection(conn: Any) -> None:
+    """완료 신원 최종 검사 직후 commit하며 시험은 실패를 이 seam에 주입한다."""
+
+    conn.commit()
+
+
 if MAX_AI_CALLS_PER_REQUEST * ANTHROPIC_TIMEOUT_SEC > (
     OWNER_PROVIDER_ADMISSION_AGE.total_seconds()
 ):  # pragma: no cover - 서로 다른 정본 상수가 어긋나면 import부터 실패한다.
@@ -89,7 +96,7 @@ class GenerationSession:
     billing_bucket_id: str
     cap_krw: float | None
     on_paid_phase: Any
-    build_identity: InitVar[composer_build_id.EngineBuildIdentity]
+    build_identity: InitVar[build_identity_contract.EngineBuildIdentity]
     _state: str = field(default="new", init=False)
     _key: singleflight.LeaseKey | None = field(default=None, init=False)
     _cache_namespace: GenerationCacheNamespace | None = field(default=None, init=False)
@@ -101,7 +108,7 @@ class GenerationSession:
     _stop_heartbeat: threading.Event = field(default_factory=threading.Event, init=False)
     _heartbeat_thread: threading.Thread | None = field(default=None, init=False)
     _lease_error: BaseException | None = field(default=None, init=False)
-    _frozen_build_identity: composer_build_id.EngineBuildIdentity = field(init=False)
+    _frozen_build_identity: build_identity_contract.EngineBuildIdentity = field(init=False)
     # Job scheduler가 이 세션을 만들 때부터 한 시간 전체 마감이 흐른다.
     # owner를 늦게 얻었다고 다시 한 시간을 주면 preflight→wait→takeover가
     # 이어질 때 한 요청의 슬롯 수명이 계속 늘어나므로, 최초 요청 시각 한 벌을
@@ -112,9 +119,9 @@ class GenerationSession:
 
     def __post_init__(
         self,
-        build_identity: composer_build_id.EngineBuildIdentity,
+        build_identity: build_identity_contract.EngineBuildIdentity,
     ) -> None:
-        if not isinstance(build_identity, composer_build_id.EngineBuildIdentity):
+        if not isinstance(build_identity, build_identity_contract.EngineBuildIdentity):
             raise TypeError("보고서 생성 시작의 엔진 빌드 신원이 필요합니다")
         self._frozen_build_identity = build_identity
         # 함수 객체를 dataclass default_factory에 고정하지 않는다. 시험 clock과
@@ -131,7 +138,7 @@ class GenerationSession:
         )
 
     @property
-    def engine_build_identity(self) -> composer_build_id.EngineBuildIdentity:
+    def engine_build_identity(self) -> build_identity_contract.EngineBuildIdentity:
         """세션 생성 순간 한 번 고정한 배포·빌드 신원."""
 
         return self._frozen_build_identity
@@ -792,6 +799,11 @@ class GenerationSession:
                         raise GenerationSingleflightUnavailable(
                             "owner의 content·PDF가 정식 캐시에 결속되지 않았습니다"
                         )
+                # content/cache 검증이 끝난 뒤, COMPLETED UPDATE와 같은 거래에서
+                # 생성 시작 신원을 다시 읽는다. 달라졌으면 waiter 증거를 쓰지 않는다.
+                build_identity_contract.assert_engine_build_identity_current(
+                    self._frozen_build_identity
+                )
                 completed = singleflight.complete(
                     conn,
                     handle=handle,
@@ -800,6 +812,12 @@ class GenerationSession:
                     now=clock.now_kst(),
                     result_fanout_ttl=RESULT_FANOUT_TTL,
                 )
+                # UPDATE 도중 drift가 생겼으면 connect context가 commit하기 전에
+                # 예외를 내 전체 거래를 rollback한다.
+                build_identity_contract.assert_engine_build_identity_current(
+                    self._frozen_build_identity
+                )
+                _commit_connection(conn)
         except BaseException as exc:  # noqa: BLE001
             raise GenerationSingleflightUnavailable(
                 "완료된 보고서를 waiter에게 공유하지 못했습니다"

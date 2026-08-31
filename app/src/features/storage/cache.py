@@ -36,27 +36,23 @@
   문장 안에서 "그 연도"를 읽어내는 건 텍스트 분석이 필요해 이 파일의
   범위(순수 캐시 조회·저장)를 넘는다. 알려진 한계로 남긴다.
 
-# 캐시 2층 — 회사(고유번호) → 수집 자료 재사용
+# 캐시 2층 — build/source namespace 도입 전 차단
 
-`layer2_cache`에 회사 단위로 조각(fragments)·공시 메타(filing)·칸별
-판정(cell_judgments)을 저장한다. 이 히트의 신선도(04 게이트 몫)는 이
-파일이 판정하지 않는다 — 정본이 "04 게이트의 신선도 검사는 2층 히트분만
-본다"고 명시했으므로, 이 파일은 자료를 있는 그대로 보관·반환만 한다.
+옛 `layer2_cache`는 회사 고유번호 하나만 키로 써 배포·출처가 다른 수집 자료를
+가를 수 없다. 현재 생산 호출은 없으며, 테이블 키와 API가 검증된 build/source
+신원을 함께 받도록 migration되기 전까지 읽기·쓰기를 모두 명시적으로 막는다.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import hashlib
-import json
 import re
 import sqlite3
 import uuid
-from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
 from src.core import clock
-from src.core.persisted_json import validate_persisted_json_text
 from src.features.pipeline.port import Report
 from src.features.provenance.freshness import is_stale
 from src.features.provenance.sources import (
@@ -64,7 +60,6 @@ from src.features.provenance.sources import (
     SourceKind,
     official_web_currentness_is_usable,
 )
-from src.shared.report_generation.build_identity import build_id_is_usable
 from src.shared.report_generation.constants import ENGINE_V2_SCHEMA_VERSION
 from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
 from src.features.report_standard.publish import PublishBlockedError, validate_publishable
@@ -73,9 +68,9 @@ from src.features.storage.constants import (
     LAYER1_MAX_ENTRIES_PER_JOB,
     TABLE_ALIAS_CACHE,
     TABLE_LAYER1_CACHE,
-    TABLE_LAYER2_CACHE,
     TABLE_REPORTS,
 )
+from src.shared import engine_build_identity as build_identity_contract
 from src.shared.report_source_identity import (
     ReportSourceIdentityError,
     require_financial_payload_digest,
@@ -93,6 +88,12 @@ _FINGERPRINT_JOIN = "\x1f"
 # 보고서 본문이나 사용자 화면에는 노출되지 않는 저장소 내부 식별자다.
 _COMPANY_ANALYSIS_PRODUCT_KEY = "product:company-analysis"
 _COMPANY_ANALYSIS_SCHEMA_REQUIREMENTS = (f"schema:{CANONICAL_SCHEMA_VERSION}",)
+
+
+def _commit_connection(conn: sqlite3.Connection) -> None:
+    """신원 최종 검사 직후 commit하며 시험은 실패를 이 seam에 주입한다."""
+
+    conn.commit()
 
 
 def _source_identity_requirement(source_identity_digest: str) -> str | None:
@@ -272,6 +273,7 @@ def save_layer1(
     job: str,
     requirements: list[str],
     report: Report,
+    engine_build_identity: build_identity_contract.EngineBuildIdentity,
     fiscal_year: Optional[int] = None,
     now: Optional[dt.datetime] = None,
 ) -> str:
@@ -279,11 +281,17 @@ def save_layer1(
 
     같은 (corp_id, job, requirements)로 다시 부르면 **덮어쓴다**(새 report_id로
     바뀌고, 더 이상 아무도 안 가리키게 된 옛 보고서 본문은 지운다 — DB가
-    무한히 자라지 않게).
+    무한히 자라지 않게). 이 함수가 해당 layer1 transaction의 commit까지
+    소유하므로 더 큰 원자 transaction 안의 부분 쓰기로 사용하지 않는다.
 
     Returns:
         이번에 저장된 `report_id`.
     """
+    if not isinstance(
+        engine_build_identity,
+        build_identity_contract.EngineBuildIdentity,
+    ) or not engine_build_identity.cache_usable:
+        raise ValueError("검증된 정상 배포의 엔진 빌드 신원이 필요합니다")
     job_key = normalize_job(job)
     fingerprint = posting_fingerprint(requirements)
     stamp = (now or dt.datetime.now()).isoformat(timespec="seconds")
@@ -297,7 +305,15 @@ def save_layer1(
     ).fetchone()
 
     report_id = uuid.uuid4().hex
+    build_identity_contract.assert_engine_build_identity_current(
+        engine_build_identity
+    )
     reports_store.save(conn, report_id, corp_id, job, report, created_at=stamp)
+    # 본문 INSERT 뒤 환경이 바뀌었으면 아래 cache INSERT를 하지 않고 호출
+    # transaction 전체를 rollback하게 한다.
+    build_identity_contract.assert_engine_build_identity_current(
+        engine_build_identity
+    )
     conn.execute(
         f"""
         INSERT INTO {TABLE_LAYER1_CACHE}
@@ -316,6 +332,12 @@ def save_layer1(
         )
 
     _evict_layer1_overflow(conn, corp_id, job_key, current_fiscal_year=fiscal_year)
+    build_identity_contract.assert_engine_build_identity_current(
+        engine_build_identity
+    )
+    # 이 함수가 layer1 본문·열쇠 transaction을 소유한다. context manager의
+    # __exit__에 commit을 미루면 마지막 fence와 실제 영속화 사이가 다시 열린다.
+    _commit_connection(conn)
     return report_id
 
 
@@ -360,13 +382,15 @@ def save_company_report(
     *,
     corp_id: str,
     report: Report,
-    build_id: str,
+    build_identity: build_identity_contract.EngineBuildIdentity,
     source_identity_digest: str,
     fiscal_year: Optional[int] = None,
     now: Optional[dt.datetime] = None,
 ) -> Optional[str]:
     """회사분석 보고서를 제품·스키마 namespace로 격리해 저장한다."""
-    requirements = _company_requirements(build_id, source_identity_digest)
+    if not isinstance(build_identity, build_identity_contract.EngineBuildIdentity):
+        raise TypeError("검증된 엔진 빌드 신원이 필요합니다")
+    requirements = _company_requirements(build_identity.build_id, source_identity_digest)
     if not requirements:
         return None
     validation = validate_publishable(report)
@@ -378,6 +402,7 @@ def save_company_report(
         job=_COMPANY_ANALYSIS_PRODUCT_KEY,
         requirements=requirements,
         report=report,
+        engine_build_identity=build_identity,
         fiscal_year=fiscal_year,
         now=now,
     )
@@ -387,7 +412,7 @@ def _company_requirements(build_id: str, source_identity_digest: str) -> list[st
     """v1도 배포 빌드와 실제 출처가 모두 확정됐을 때만 쓰는 열쇠."""
 
     source_requirement = _source_identity_requirement(source_identity_digest)
-    if not build_id_is_usable(build_id) or source_requirement is None:
+    if not build_identity_contract.build_id_is_usable(build_id) or source_requirement is None:
         return []
     return [
         *_COMPANY_ANALYSIS_SCHEMA_REQUIREMENTS,
@@ -435,7 +460,7 @@ def get_v2_report_hit(
       「모르겠다」를 「같다」로 바꾸면 옛 결과가 새 결과인 척 나간다.
     """
     requirements = _v2_requirements(build_id, source_identity_digest)
-    if not build_id_is_usable(build_id) or not requirements:
+    if not build_identity_contract.build_id_is_usable(build_id) or not requirements:
         return None
     report = get_layer1_hit(
         conn,
@@ -457,7 +482,7 @@ def save_v2_report(
     *,
     corp_id: str,
     report: Report,
-    build_id: str,
+    build_identity: build_identity_contract.EngineBuildIdentity,
     source_identity_digest: str,
     fiscal_year: Optional[int] = None,
     now: Optional[dt.datetime] = None,
@@ -473,8 +498,10 @@ def save_v2_report(
     ★ 스키마가 v2가 아니면 «조용히 안 저장한다». v1 보고서가 v2 열쇠 아래
       들어가면 다음 조사에서 v1이 v2인 척 나온다.
     """
-    requirements = _v2_requirements(build_id, source_identity_digest)
-    if not build_id_is_usable(build_id) or not requirements:
+    if not isinstance(build_identity, build_identity_contract.EngineBuildIdentity):
+        raise TypeError("검증된 엔진 빌드 신원이 필요합니다")
+    requirements = _v2_requirements(build_identity.build_id, source_identity_digest)
+    if not build_identity.cache_usable or not requirements:
         return None
     if report.schema_version != ENGINE_V2_SCHEMA_VERSION:
         return None
@@ -484,6 +511,7 @@ def save_v2_report(
         job=_COMPANY_ANALYSIS_PRODUCT_KEY,
         requirements=requirements,
         report=report,
+        engine_build_identity=build_identity,
         fiscal_year=fiscal_year,
         now=now,
     )
@@ -532,41 +560,8 @@ def _evict_layer1_overflow(
 # ══════════════════════════════════════════════════════════
 
 
-@dataclass(frozen=True)
-class Layer2Cache:
-    """회사 단위로 재사용하는 수집 자료 한 벌."""
-
-    corp_id: str
-    #: 조각 번호 → {"종류":..., "원문":..., "출처":...} (real.py의 `frags`와 같은 모양)
-    fragments: dict[int, dict[str, str]]
-    #: 최근 공시 메타(보고서명·접수번호 등). 없으면 `None`.
-    filing: Optional[dict[str, Any]]
-    #: 칸별 판정 결과. 없으면 `None`.
-    cell_judgments: Optional[dict[str, bool]]
-    #: 수집 당시 최신 사업연도. 04 게이트가 신선도를 볼 때 쓴다.
-    fiscal_year: Optional[int]
-    collected_at: str
-    updated_at: str
-
-
-def _fragments_to_json(fragments: dict[int, dict[str, str]]) -> str:
-    """`dict[int, ...]`를 JSON으로 왕복시킨다.
-
-    ★ JSON 객체 키는 문자열만 허용된다. `{fragment_id: ...}`를 그대로
-      `json.dumps`하면 다시 읽을 때 키가 문자열로 바뀐다(정수 조각 번호가
-      깨진다). `[id, value]` 쌍의 배열로 감싸 정수 키를 그대로 지킨다.
-    """
-    payload = json.dumps(
-        [[fid, val] for fid, val in fragments.items()],
-        ensure_ascii=False,
-    )
-    validate_persisted_json_text(payload)
-    return payload
-
-
-def _fragments_from_json(text: str) -> dict[int, dict[str, str]]:
-    pairs = json.loads(text)
-    return {int(fid): val for fid, val in pairs}
+class Layer2CacheIdentityRequiredError(RuntimeError):
+    """corp-only 2층 캐시는 검증된 build/source namespace 없이는 사용할 수 없다."""
 
 
 def save_layer2(
@@ -579,64 +574,20 @@ def save_layer2(
     fiscal_year: Optional[int] = None,
     now: Optional[dt.datetime] = None,
 ) -> None:
-    """2층 캐시(회사 단위 수집 자료)를 저장한다. 같은 `corp_id`면 통째로 덮어쓴다.
+    """옛 corp-only 2층 쓰기를 명시적으로 차단한다.
 
-    ★ 정본 §4 — 2층 키는 회사 단위다. 소스별 부분 갱신(예: DART만 새로
-      받기)은 1차 범위 밖이라 이 함수도 "전체를 한 번에" 저장·교체한다.
+    생산 호출은 없으며, build/source namespace가 스키마와 API에 함께 들어오기
+    전에는 옛 행을 새 배포 결과로 덮어쓸 수 없다.
     """
-    stamp = (now or dt.datetime.now()).isoformat(timespec="seconds")
-    fragments_json = _fragments_to_json(fragments)
-    filing_json = json.dumps(filing, ensure_ascii=False) if filing is not None else None
-    judgments_json = (
-        json.dumps(cell_judgments, ensure_ascii=False)
-        if cell_judgments is not None
-        else None
-    )
-    for payload in (filing_json, judgments_json):
-        if payload is not None:
-            validate_persisted_json_text(payload)
-    conn.execute(
-        f"""
-        INSERT INTO {TABLE_LAYER2_CACHE}
-            (corp_id, fragments_json, filing_json, cell_judgments_json,
-             fiscal_year, collected_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(corp_id) DO UPDATE SET
-            fragments_json=excluded.fragments_json,
-            filing_json=excluded.filing_json,
-            cell_judgments_json=excluded.cell_judgments_json,
-            fiscal_year=excluded.fiscal_year,
-            updated_at=excluded.updated_at
-        """,
-        (
-            corp_id,
-            fragments_json,
-            filing_json,
-            judgments_json,
-            fiscal_year,
-            stamp,
-            stamp,
-        ),
+    raise Layer2CacheIdentityRequiredError(
+        "corp-only 2층 캐시는 build/source 신원 없이 저장할 수 없습니다"
     )
 
 
-def get_layer2(conn: sqlite3.Connection, corp_id: str) -> Optional[Layer2Cache]:
-    """회사 고유번호로 2층 캐시를 불러온다. 없으면 `None`."""
-    row = conn.execute(
-        f"SELECT * FROM {TABLE_LAYER2_CACHE} WHERE corp_id = ?", (corp_id,)
-    ).fetchone()
-    if row is None:
-        return None
-    return Layer2Cache(
-        corp_id=row["corp_id"],
-        fragments=_fragments_from_json(row["fragments_json"]),
-        filing=json.loads(row["filing_json"]) if row["filing_json"] else None,
-        cell_judgments=json.loads(row["cell_judgments_json"])
-        if row["cell_judgments_json"]
-        else None,
-        fiscal_year=row["fiscal_year"],
-        collected_at=row["collected_at"],
-        updated_at=row["updated_at"],
+def get_layer2(conn: sqlite3.Connection, corp_id: str) -> None:
+    """옛 corp-only 2층 읽기를 명시적으로 차단한다."""
+    raise Layer2CacheIdentityRequiredError(
+        "corp-only 2층 캐시는 build/source 신원 없이 재사용할 수 없습니다"
     )
 
 

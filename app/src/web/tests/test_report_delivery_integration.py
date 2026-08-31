@@ -21,7 +21,6 @@ from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
 from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
 from src.features.cost_tracking import store as cost_store
-from src.features.composer import build_id as composer_build_id
 from src.features.export_pdf import automatic_release as automatic_release_module
 from src.features.export_pdf import release_store as pdf_release_store
 from src.features.pipeline.demo import DemoPipeline, available_companies
@@ -45,6 +44,7 @@ from src.features.report_standard import PublishBlockedError, PublishValidation
 from src.features.storage import db as storage_db
 from src.features.storage import constants as storage_constants
 from src.features.storage import reports as report_store
+from src.shared import engine_build_identity as build_identity_contract
 from src.web import generation_singleflight, job_runtime, paid_runtime, runtime
 from src.web import report_delivery_adapter
 from src.web.main import app
@@ -765,7 +765,7 @@ def test_배포commit이_없는_로컬출고는_저장용_비검증신원만_쓴
 
     assert revision == ""
     assert image == report_delivery_adapter._UNCACHEABLE_LOCAL_RELEASE_ID
-    assert not report_delivery_adapter.composer_build_id.build_id_is_usable(image)
+    assert not build_identity_contract.build_id_is_usable(image)
 
 
 def test_출고배포신원도_full_commit만_권위로_쓴다(
@@ -779,7 +779,7 @@ def test_출고배포신원도_full_commit만_권위로_쓴다(
     assert revision == full_commit
     assert image == (
         "generator-build:"
-        f"{report_delivery_adapter.composer_build_id.ENGINE_BUILD_ID_CONTRACT_VERSION}:"
+        f"{build_identity_contract.ENGINE_BUILD_ID_CONTRACT_VERSION}:"
         f"{full_commit}"
     )
 
@@ -829,7 +829,7 @@ def test_생성_A뒤_출고가_B나_unknown이면_거절한다(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("RENDER_GIT_COMMIT", "a" * 40)
-    frozen = composer_build_id.capture_engine_build_identity()
+    frozen = build_identity_contract.capture_engine_build_identity()
     if after == "different":
         monkeypatch.setenv("RENDER_GIT_COMMIT", "b" * 40)
     else:
@@ -857,7 +857,7 @@ def test_unknown에서_생성한뒤_commit이_생겨도_저장으로_승격하�
 ) -> None:
     for name in deployment_identity.COMMIT_ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
-    frozen_unknown = composer_build_id.capture_engine_build_identity()
+    frozen_unknown = build_identity_contract.capture_engine_build_identity()
     monkeypatch.setenv("RENDER_GIT_COMMIT", "b" * 40)
     monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "unknown-to-verified"))
 
@@ -1127,7 +1127,7 @@ def test_부분출처_bypass는_캐시결속없이도_정상출고한다(monkeyp
         billing_bucket_id="partial-bucket",
         cap_krw=900.0,
         on_paid_phase=lambda _ticket: None,
-        build_identity=composer_build_id.capture_engine_build_identity(),
+        build_identity=build_identity_contract.capture_engine_build_identity(),
     )
     assert session.coordinate("demo-corp", namespace, "") is None
     assert session.cache_namespace is None
@@ -1434,7 +1434,7 @@ def test_일반캐시_hit은_같은통장안에서_원본content와PDF로_새del
         billing_bucket_id="owner-bucket",
         cap_krw=900.0,
         on_paid_phase=lambda _ticket: None,
-        build_identity=composer_build_id.capture_engine_build_identity(),
+        build_identity=build_identity_contract.capture_engine_build_identity(),
     )
     reused = session.coordinate("demo-corp", namespace, preflight_digest)
     assert reused is not None
@@ -1671,7 +1671,7 @@ def test_손상PDF캐시와_남은완료fanout은_격리하고_provider한번으
         billing_bucket_id=bucket,
         cap_krw=900.0,
         on_paid_phase=lambda _ticket: None,
-        build_identity=composer_build_id.capture_engine_build_identity(),
+        build_identity=build_identity_contract.capture_engine_build_identity(),
     )
     assert session.coordinate(corp_id, namespace, preflight_digest) is None
     assert session.owns_generation
@@ -1842,7 +1842,7 @@ def test_다른두통장의_동시miss는_각자content와PDF를_정상확정한
             billing_bucket_id=bucket,
             cap_krw=900.0,
             on_paid_phase=lambda _ticket: None,
-            build_identity=composer_build_id.capture_engine_build_identity(),
+            build_identity=build_identity_contract.capture_engine_build_identity(),
         )
         for bucket in ("bucket-a", "bucket-b")
     )

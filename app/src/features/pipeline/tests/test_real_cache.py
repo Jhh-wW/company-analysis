@@ -34,18 +34,24 @@ from src.features.budget.constants import (
     PAID_PHASE_PROVIDER_BUDGET_KRW,
     SPEND_PHASE_PIPELINE,
 )
+from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
 from src.features.pipeline import real
+from src.features.pipeline.canonical_demo import build_demo_report
 from src.features.pipeline.port import (
     CompanyCard,
     Grade,
     Outcome,
+    Report,
     ReportTable,
     RunResult,
     UserInput,
 )
+from src.features.storage import cache as cache_store
+from src.features.storage import db as storage_db
 #: 8·9 생성 지시문임을 알아보는 표시. 글자를 베끼지 않고 «상수를 그대로» 쓴다 —
 #: 지시문이 바뀌어도 이 시험이 조용히 어긋나지 않는다.
 from src.features.spanselect.constants import PROMPT_PICK
+from src.shared import engine_build_identity as build_identity_contract
 from src.shared.official_ir import (
     IR_DART_WWW_REDIRECT_FIELD,
     IR_DART_WWW_REDIRECT_FROM_FIELD,
@@ -132,6 +138,58 @@ def test_v1_롤백namespace도_같은_배포build_contract를_쓴다(
     assert namespace.schema_version == real.CANONICAL_SCHEMA_VERSION
     assert namespace.deployment_revision == commit
     assert namespace.image_digest.endswith(commit)
+
+
+@pytest.mark.parametrize("cache_kind", ("v1", "v2"))
+@pytest.mark.parametrize(
+    ("start_commit", "current_commit"),
+    (("a" * 40, "b" * 40), ("a" * 40, ""), ("", "b" * 40)),
+)
+def test_layer1_생성helper는_쓰기직전_배포drift때_행을_남기지_않는다(
+    cache_kind: str,
+    start_commit: str,
+    current_commit: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in deployment_identity.COMMIT_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    if start_commit:
+        monkeypatch.setenv("RENDER_GIT_COMMIT", start_commit)
+    frozen = build_identity_contract.capture_engine_build_identity()
+    if current_commit:
+        monkeypatch.setenv("RENDER_GIT_COMMIT", current_commit)
+    else:
+        monkeypatch.delenv("RENDER_GIT_COMMIT", raising=False)
+
+    if cache_kind == "v1":
+        real._company_cache_save(
+            corp_id=CORP_ID,
+            report=build_demo_report(),
+            fiscal_year=FILING_YEAR,
+            source_identity_digest="a" * 64,
+            build_identity=frozen,
+        )
+    else:
+        real._v2_cache_save(
+            corp_id=CORP_ID,
+            report=Report(
+                company="테스트전자",
+                job="",
+                corp_type="상장사",
+                grade=Grade.COMPLETE,
+                sections=[],
+                schema_version=ENGINE_V2_SCHEMA_VERSION,
+                generated_at="2026-08-31",
+            ),
+            fiscal_year=FILING_YEAR,
+            source_identity_digest="a" * 64,
+            build_identity=frozen,
+        )
+
+    with storage_db.connect() as conn:
+        assert conn.execute(
+            f"SELECT COUNT(*) FROM {cache_store.TABLE_LAYER1_CACHE}"
+        ).fetchone()[0] == 0
 
 
 class _FakeCounter:

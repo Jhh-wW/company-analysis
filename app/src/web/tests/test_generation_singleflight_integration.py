@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime as dt
+import sqlite3
 import threading
 from types import SimpleNamespace
 
@@ -13,7 +14,6 @@ import pytest
 from src.core import deployment_identity
 from src.core.constants import MAX_AI_CALLS_PER_REQUEST
 from src.features.budget.constants import PAID_PHASE_LEASE_SEC
-from src.features.composer import build_id as composer_build_id
 from src.features.export_pdf import release_store as pdf_release_store
 from src.features.pipeline.constants import ANTHROPIC_TIMEOUT_SEC
 from src.features.pipeline.port import (
@@ -32,6 +32,7 @@ from src.features.report_delivery.models import ContentSnapshot, Delivery, Deliv
 from src.features.report_delivery.source_identity import SourceSnapshot
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
+from src.shared import engine_build_identity as build_identity_contract
 from src.shared import generation_coordination
 from src.shared.report_source_identity import ReportSourceIdentity
 from src.web import generation_singleflight, job_runtime, paid_runtime, runtime
@@ -40,9 +41,9 @@ from src.web import generation_singleflight, job_runtime, paid_runtime, runtime
 _RECEIPT = "20260828000123"
 _FINANCIAL_DIGEST = "b" * 64
 _COMMIT = "a" * 40
-_BUILD_IDENTITY = composer_build_id.EngineBuildIdentity(
+_BUILD_IDENTITY = build_identity_contract.EngineBuildIdentity(
     deployment_revision=_COMMIT,
-    build_id=f"{composer_build_id.ENGINE_BUILD_ID_CONTRACT_VERSION}:{_COMMIT}",
+    build_id=f"{build_identity_contract.ENGINE_BUILD_ID_CONTRACT_VERSION}:{_COMMIT}",
 )
 _NAMESPACE = CacheNamespace.create(
     product="company-analysis",
@@ -89,6 +90,7 @@ def _session(
     bucket: str,
     *,
     on_paid_phase=lambda _ticket: None,
+    build_identity: build_identity_contract.EngineBuildIdentity = _BUILD_IDENTITY,
 ) -> generation_singleflight.GenerationSession:
     return generation_singleflight.GenerationSession(
         run_id=run_id,
@@ -96,7 +98,7 @@ def _session(
         billing_bucket_id=bucket,
         cap_krw=900.0,
         on_paid_phase=on_paid_phase,
-        build_identity=_BUILD_IDENTITY,
+        build_identity=build_identity,
     )
 
 
@@ -403,6 +405,139 @@ def test_캐시불가_owner결과는_동시waiter에게만_짧게공유하고_�
     assert fresh.coordinate("00126380", _NAMESPACE, _source_digest()) is None
     assert fresh.owns_generation
     fresh.abandon()
+
+
+@pytest.mark.parametrize("current_commit", ("b" * 40, ""))
+def test_owner완료직전_A가_B나unknown이면_COMPLETED를_남기지_않는다(
+    current_commit: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    content, artifact = _persist_shared_content(
+        _report(),
+        artifact_root=tmp_path / "identity-drift-artifacts",
+    )
+    owner = _session("identity-drift-owner", "bucket-a")
+    assert owner.coordinate("00126380", _NAMESPACE, _source_digest()) is None
+    if current_commit:
+        monkeypatch.setenv("RENDER_GIT_COMMIT", current_commit)
+    else:
+        monkeypatch.delenv("RENDER_GIT_COMMIT", raising=False)
+
+    with pytest.raises(
+        generation_singleflight.GenerationSingleflightUnavailable,
+        match="공유하지 못했습니다",
+    ):
+        owner.complete(
+            content.content_id,
+            artifact.artifact_id,
+            cache_eligible=False,
+        )
+
+    with storage_db.connect() as conn:
+        assert conn.execute(
+            f"SELECT COUNT(*) FROM {singleflight.TABLE_SINGLEFLIGHT_LEASES} "
+            "WHERE state = ?",
+            (singleflight.LeaseState.COMPLETED.value,),
+        ).fetchone()[0] == 0
+
+
+def test_owner완료_commit실패는_UPDATE를_rollback한다(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    content, artifact = _persist_shared_content(
+        _report(),
+        artifact_root=tmp_path / "commit-failure-artifacts",
+    )
+    owner = _session("commit-failure-owner", "bucket-a")
+    assert owner.coordinate("00126380", _NAMESPACE, _source_digest()) is None
+
+    def fail_commit(_conn) -> None:
+        raise sqlite3.OperationalError("주입한 commit 실패")
+
+    monkeypatch.setattr(generation_singleflight, "_commit_connection", fail_commit)
+    with pytest.raises(
+        generation_singleflight.GenerationSingleflightUnavailable,
+        match="공유하지 못했습니다",
+    ):
+        owner.complete(
+            content.content_id,
+            artifact.artifact_id,
+            cache_eligible=False,
+        )
+
+    with storage_db.connect() as conn:
+        row = conn.execute(
+            f"SELECT state, completed_content_id, completed_artifact_id "
+            f"FROM {singleflight.TABLE_SINGLEFLIGHT_LEASES}"
+        ).fetchone()
+    assert row is not None
+    assert row["state"] == singleflight.LeaseState.ACTIVE.value
+    assert row["completed_content_id"] == ""
+    assert row["completed_artifact_id"] == ""
+
+
+def test_owner완료_UPDATE도중_A에서_B로_바뀌면_rollback한다(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    content, artifact = _persist_shared_content(
+        _report(),
+        artifact_root=tmp_path / "mid-update-drift-artifacts",
+    )
+    owner = _session("mid-update-drift-owner", "bucket-a")
+    assert owner.coordinate("00126380", _NAMESPACE, _source_digest()) is None
+    build_b = build_identity_contract.EngineBuildIdentity(
+        "b" * 40,
+        f"{build_identity_contract.ENGINE_BUILD_ID_CONTRACT_VERSION}:{'b' * 40}",
+    )
+    captures = iter((_BUILD_IDENTITY, build_b))
+    monkeypatch.setattr(
+        build_identity_contract,
+        "capture_engine_build_identity",
+        lambda: next(captures),
+    )
+
+    with pytest.raises(generation_singleflight.GenerationSingleflightUnavailable):
+        owner.complete(
+            content.content_id,
+            artifact.artifact_id,
+            cache_eligible=False,
+        )
+
+    with storage_db.connect() as conn:
+        row = conn.execute(
+            f"SELECT state, completed_content_id, completed_artifact_id "
+            f"FROM {singleflight.TABLE_SINGLEFLIGHT_LEASES}"
+        ).fetchone()
+    assert row is not None
+    assert row["state"] == singleflight.LeaseState.ACTIVE.value
+    assert row["completed_content_id"] == ""
+    assert row["completed_artifact_id"] == ""
+
+
+def test_unknown생성은_commit이_생겨도_lease나_COMPLETED를_만들지_않는다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in deployment_identity.COMMIT_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    frozen_unknown = build_identity_contract.capture_engine_build_identity()
+    session = _session(
+        "unknown-no-completion",
+        "bucket-a",
+        build_identity=frozen_unknown,
+    )
+
+    assert session.coordinate("00126380", None, _source_digest()) is None
+    assert not session.owns_generation
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "b" * 40)
+    session.complete("content-not-written", "artifact-not-written", cache_eligible=False)
+
+    with storage_db.connect() as conn:
+        assert conn.execute(
+            f"SELECT COUNT(*) FROM {singleflight.TABLE_SINGLEFLIGHT_LEASES}"
+        ).fetchone()[0] == 0
 
 
 @pytest.mark.parametrize(

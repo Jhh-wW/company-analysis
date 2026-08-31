@@ -21,7 +21,7 @@ from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
 from src.core import deployment_identity, paths
-from src.features.composer import build_id
+from src.shared import engine_build_identity as build_id
 
 
 _FULL_COMMIT_A = "1" * deployment_identity.COMMIT_FULL_LEN
