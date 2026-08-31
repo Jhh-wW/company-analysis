@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
+import stat
 from pathlib import Path
 from typing import Final
 
@@ -48,46 +50,102 @@ _SHAPING_MODULES: Final[tuple[str, ...]] = tuple(
     if path.name not in {"__init__.py", "build_id.py"}
 )
 
-#: 보고서 «내용»을 만드는 파일들. 프로젝트 뿌리 기준 경로다.
-#:
-#: ★ 왜 생겼나 (2026-08-28) — 캐시 열쇠가 `_SHAPING_MODULES`(composer/ 9개)만
-#:   봤다. 그런데 원문을 «모으는» 코드는 그 밖에 있다. 실제로 v2-90 이
-#:   `analysis_engine/tools/run_pilot.py` 를 고쳐 비상장 회사의 공시 원문을
-#:   0자에서 37만자로 늘렸는데, **지문이 그대로라 옛 껍데기 보고서가 계속 나왔다.**
-#:   배포하고 재시작해도 안 바뀌었다 — 이 모듈이 스스로 약속한
-#:   「고쳤는데 화면이 그대로」를 막지 못한 것이다.
-#:
-#: ⚠️ 넓게 잡는 쪽이 안전하다. 빠뜨리면 «틀린 옛 보고서»가 나가고,
-#:   더 넣으면 캐시가 한 번 더 빗나가 900원을 더 쓸 뿐이다.
-#:   돈보다 «거짓말하지 않는 것»이 우선이다.
-_CONTENT_MODULES: Final[tuple[str, ...]] = (
-    # 1판 엔진 — 공시 원문과 조각을 실제로 모으는 곳 (real.py 가 동적 로드한다)
+#: 패키지 밖에 있어 자동 발견할 수 없는 필수 생산 파일. 이 파일은 하나라도
+#: 없거나 읽을 수 없으면 지문을 ``unknown``으로 만들어 캐시를 닫는다.
+_REQUIRED_CONTENT_MODULES: Final[tuple[str, ...]] = (
     "analysis_engine/tools/run_pilot.py",
-    # v2 수집 흐름·회사 판정·캐시 열쇠
     "app/src/features/pipeline/real.py",
-    # 구조화 3개년 표의 raw 값·회계범위 계약
-    "app/src/features/company_performance/logic.py",
-    # 조각 보정과 확장
-    "app/src/features/filingclean/logic.py",
-    "app/src/features/filingclean/extra.py",
-    "app/src/features/filingclean/relationships.py",
-    # 홈페이지·대표 이름
-    "app/src/features/newspick/logic.py",
-    "app/src/features/newspick/constants.py",
-    # 출력 계약 (장 구성·검증 문구)
-    "app/src/features/report_standard/constants.py",
-    "app/src/features/report_standard/section_content.py",
-    "app/src/features/report_standard/publish.py",
-    # composer와 report_standard가 함께 쓰는 품질·수치·근거 결속 정본.
-    # 새 모듈을 추가해도 지문 목록을 손으로 고치지 않도록 계산한다.
-    *tuple(
-        f"app/src/shared/report_quality/{path.name}"
-        for path in sorted(
-            (paths.PROJECT_ROOT / "app/src/shared/report_quality").glob("*.py")
-        )
-        if path.name != "__init__.py"
-    ),
 )
+
+#: 보고서의 원문·표·근거·공개 모양을 생산하는 feature/package 뿌리.
+#:
+#: ★ 왜 파일 목록이 아니라 패키지 뿌리인가 (2026-08-31)
+#:   홈페이지와 매출 구성 모듈이 실제 수집 경로에 들어왔는데도 사람이 이 파일의
+#:   목록을 고치지 않아 지문에서 빠졌다. 같은 방식이면 새 evidence_collection,
+#:   report_evidence, chapter_evidence도 또 빠진다. 여기에는 책임 경계인 패키지
+#:   뿌리만 고정하고, 그 아래 production ``.py``는 실행 때 전부 자동 발견한다.
+#:
+#: 아직 생기지 않은 신규 패키지 뿌리는 건너뛴다. 그 패키지가 추가되는 순간부터
+#: 별도 지문 목록 수정 없이 안의 production 모듈이 자동으로 들어간다.
+_CONTENT_PACKAGE_ROOTS: Final[tuple[str, ...]] = (
+    "analysis_engine/src/features/evidence_collection",
+    "app/src/features/chapter_evidence",
+    "app/src/features/company_performance",
+    "app/src/features/filingclean",
+    "app/src/features/homepage",
+    "app/src/features/newspick",
+    "app/src/features/report_standard",
+    "app/src/features/revenuemix",
+    "app/src/shared/report_evidence",
+    "app/src/shared/report_quality",
+)
+
+_IGNORED_CONTENT_DIRECTORIES: Final[frozenset[str]] = frozenset(
+    {"tests", "__pycache__"}
+)
+_IGNORED_CONTENT_FILENAMES: Final[frozenset[str]] = frozenset(
+    {"__init__.py", "conftest.py"}
+)
+
+
+def _raise_walk_error(error: OSError) -> None:
+    """``os.walk``가 접근 실패를 조용히 삼키지 않게 한다."""
+
+    raise error
+
+
+def _production_python_modules(
+    project_root: Path, package_root_name: str
+) -> tuple[str, ...]:
+    """한 content package 아래 production Python 모듈을 결정론적으로 찾는다.
+
+    존재하지 않는 뿌리는 아직 합쳐지지 않은 신규 feature일 수 있으므로 빈 결과다.
+    반면 존재하지만 디렉터리가 아니거나 읽을 수 없으면 ``OSError``를 올린다.
+    호출자는 이를 «지문을 모름»으로 바꿔 캐시를 fail-closed 한다.
+    """
+
+    package_root = project_root / package_root_name
+    try:
+        mode = package_root.stat().st_mode
+    except FileNotFoundError:
+        return ()
+    if not stat.S_ISDIR(mode):
+        raise OSError(f"content package 뿌리가 디렉터리가 아닙니다: {package_root_name}")
+
+    found: list[str] = []
+    for current, directories, filenames in os.walk(
+        package_root,
+        topdown=True,
+        onerror=_raise_walk_error,
+        followlinks=False,
+    ):
+        directories[:] = sorted(
+            name
+            for name in directories
+            if name not in _IGNORED_CONTENT_DIRECTORIES
+        )
+        current_path = Path(current)
+        for filename in sorted(filenames):
+            if (
+                not filename.endswith(".py")
+                or filename in _IGNORED_CONTENT_FILENAMES
+                or filename.startswith("test_")
+                or filename.endswith("_test.py")
+            ):
+                continue
+            relative = (current_path / filename).relative_to(project_root)
+            found.append(relative.as_posix())
+    return tuple(found)
+
+
+def _content_modules(project_root: Path) -> tuple[str, ...]:
+    """필수 단일 파일과 package 생산 모듈을 중복 없이 이름순으로 돌려준다."""
+
+    found = set(_REQUIRED_CONTENT_MODULES)
+    for package_root_name in _CONTENT_PACKAGE_ROOTS:
+        found.update(_production_python_modules(project_root, package_root_name))
+    return tuple(sorted(found))
+
 
 #: 지문 길이. 충돌 확률보다 로그 가독성을 우선한 값이다 — 16자리 16진수는
 #: 우연히 겹칠 일이 사실상 없으면서 로그 한 줄에 들어간다.
@@ -114,10 +172,21 @@ def engine_build_id() -> str:
     here = Path(__file__).resolve().parent
     뿌리 = paths.PROJECT_ROOT
     읽을것: list[tuple[str, Path]] = [(이름, here / 이름) for 이름 in _SHAPING_MODULES]
-    읽을것 += [(이름, 뿌리 / 이름) for 이름 in _CONTENT_MODULES]
+    try:
+        content_modules = _content_modules(뿌리)
+    except OSError as error:
+        # production 패키지를 일부만 훑은 지문은 완전한 지문이 아니다.
+        # 접근 실패 경로는 노출하지 않고 예외 종류만 남긴다.
+        logger.warning(
+            "엔진 content 모듈을 전부 찾을 수 없습니다(kind=%s). "
+            "이번 실행에서는 캐시를 쓰지 않습니다.",
+            type(error).__name__,
+        )
+        _cached_build_id = UNKNOWN_BUILD_ID
+        return _cached_build_id
+    읽을것 += [(이름, 뿌리 / 이름) for 이름 in content_modules]
     digest = hashlib.sha256()
-    # 배포 commit은 손으로 적은 파일 목록의 마지막 안전망이다. 새 생성 모듈을
-    # `_CONTENT_MODULES`에 넣는 것을 잊어도 다른 revision이면 캐시가 갈린다.
+    # 배포 commit은 자동 발견 뿌리 바깥의 변경까지 덮는 마지막 안전망이다.
     # 로컬처럼 commit을 모르는 환경에서는 기존 파일 지문만 사용한다.
     release_commit = deployment_identity.deployed_commit()
     if release_commit:

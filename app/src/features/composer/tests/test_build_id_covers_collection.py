@@ -38,6 +38,16 @@ def _지문_기억을_지운다():
     build_id._cached_build_id = None
 
 
+def _생산모듈을_가짜뿌리로_복사한다(가짜뿌리) -> None:
+    """현재 자동 발견된 content 모듈을 임시 프로젝트에 같은 구조로 복사한다."""
+
+    for 이름 in build_id._content_modules(paths.PROJECT_ROOT):
+        원본 = paths.PROJECT_ROOT / 이름
+        사본 = 가짜뿌리 / 이름
+        사본.parent.mkdir(parents=True, exist_ok=True)
+        사본.write_bytes(원본.read_bytes())
+
+
 # ══════════════════════════════════════════════════════════
 # ① 수집 코드가 바뀌면 지문이 바뀌는가  ← 이게 핵심이다
 # ══════════════════════════════════════════════════════════
@@ -55,13 +65,7 @@ def test_원문_수집_코드가_바뀌면_지문도_바뀐다(
 
     # 1판 엔진 파일이 «한 글자» 바뀐 상황을 만든다.
     가짜뿌리 = tmp_path / "repo"
-    for 이름 in build_id._CONTENT_MODULES + tuple(
-        f"app/src/features/composer/{n}" for n in build_id._SHAPING_MODULES
-    ):
-        원본 = paths.PROJECT_ROOT / 이름
-        사본 = 가짜뿌리 / 이름
-        사본.parent.mkdir(parents=True, exist_ok=True)
-        사본.write_bytes(원본.read_bytes())
+    _생산모듈을_가짜뿌리로_복사한다(가짜뿌리)
 
     바뀐파일 = 가짜뿌리 / "analysis_engine/tools/run_pilot.py"
     바뀐파일.write_bytes(바뀐파일.read_bytes() + b"\n# v2-90\n")
@@ -78,21 +82,89 @@ def test_원문_수집_코드가_바뀌면_지문도_바뀐다(
 
 def test_1판_엔진이_지문에_들어간다() -> None:
     """★ 이 파일을 목록에서 빼면 v2-90 과 «똑같은» 사고가 다시 난다."""
-    assert "analysis_engine/tools/run_pilot.py" in build_id._CONTENT_MODULES
+    assert "analysis_engine/tools/run_pilot.py" in build_id._REQUIRED_CONTENT_MODULES
 
 
 def test_수집_흐름_파일도_들어간다() -> None:
     """`real.py` 는 어느 공시를 쓸지·조각을 어떻게 붙일지를 정한다."""
-    assert "app/src/features/pipeline/real.py" in build_id._CONTENT_MODULES
+    모듈 = build_id._content_modules(paths.PROJECT_ROOT)
+    assert "app/src/features/pipeline/real.py" in 모듈
     for 조각모듈 in ("logic.py", "extra.py", "relationships.py"):
-        assert f"app/src/features/filingclean/{조각모듈}" in build_id._CONTENT_MODULES
+        assert f"app/src/features/filingclean/{조각모듈}" in 모듈
 
 
-def test_새_composer모듈과_공유품질정본은_손목록없이_지문에_들어간다() -> None:
+def test_생산패키지의_현재모듈은_손목록없이_지문에_들어간다() -> None:
+    모듈 = build_id._content_modules(paths.PROJECT_ROOT)
     assert "structured_claims.py" in build_id._SHAPING_MODULES
-    assert "app/src/features/company_performance/logic.py" in build_id._CONTENT_MODULES
-    assert "app/src/shared/report_quality/fact_binding.py" in build_id._CONTENT_MODULES
-    assert "app/src/shared/report_quality/numeric.py" in build_id._CONTENT_MODULES
+    assert "app/src/features/company_performance/logic.py" in 모듈
+    assert "app/src/features/homepage/logic.py" in 모듈
+    assert "app/src/features/revenuemix/logic.py" in 모듈
+    assert "app/src/shared/report_evidence/logic.py" in 모듈
+    assert "app/src/shared/report_quality/fact_binding.py" in 모듈
+    assert "app/src/shared/report_quality/numeric.py" in 모듈
+
+
+@pytest.mark.parametrize(
+    "새모듈",
+    (
+        "app/src/features/homepage/new_official_source.py",
+        "app/src/features/revenuemix/new_table_source.py",
+        "analysis_engine/src/features/evidence_collection/new_collector.py",
+        "app/src/features/chapter_evidence/new_adapter.py",
+        "app/src/shared/report_evidence/new_contract.py",
+    ),
+)
+def test_생산패키지에_새_py가_생기면_목록수정없이_지문이_바뀐다(
+    새모듈: str, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """새 feature가 병합돼도 사람이 지문 파일 목록을 고칠 필요가 없다."""
+
+    가짜뿌리 = tmp_path / "repo"
+    _생산모듈을_가짜뿌리로_복사한다(가짜뿌리)
+    monkeypatch.setattr(paths, "PROJECT_ROOT", 가짜뿌리)
+
+    추가전 = build_id.engine_build_id()
+    assert 추가전 != build_id.UNKNOWN_BUILD_ID
+
+    추가파일 = 가짜뿌리 / 새모듈
+    추가파일.parent.mkdir(parents=True, exist_ok=True)
+    추가파일.write_text("OUTPUT_RULE = '새 근거 규칙'\n", encoding="utf-8")
+    build_id._cached_build_id = None
+
+    assert build_id.engine_build_id() != 추가전
+
+
+@pytest.mark.parametrize(
+    "무관파일",
+    (
+        "app/src/features/homepage/tests/test_new_source.py",
+        "app/src/features/homepage/__pycache__/generated.py",
+        "app/src/features/homepage/__init__.py",
+        "app/src/features/homepage/conftest.py",
+        "app/src/features/homepage/test_accidental.py",
+        "app/src/features/homepage/readme.txt",
+    ),
+)
+def test_시험과_패키지표식은_추가돼도_지문이_바뀌지_않는다(
+    무관파일: str, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    가짜뿌리 = tmp_path / "repo"
+    _생산모듈을_가짜뿌리로_복사한다(가짜뿌리)
+    monkeypatch.setattr(paths, "PROJECT_ROOT", 가짜뿌리)
+
+    추가전 = build_id.engine_build_id()
+    추가파일 = 가짜뿌리 / 무관파일
+    추가파일.parent.mkdir(parents=True, exist_ok=True)
+    추가파일.write_text("시험 또는 패키지 표식\n", encoding="utf-8")
+    build_id._cached_build_id = None
+
+    assert build_id.engine_build_id() == 추가전
+
+
+def test_자동발견_결과는_중복없이_이름순이다() -> None:
+    모듈 = build_id._content_modules(paths.PROJECT_ROOT)
+
+    assert 모듈 == tuple(sorted(set(모듈)))
 
 
 # ══════════════════════════════════════════════════════════
@@ -100,13 +172,13 @@ def test_새_composer모듈과_공유품질정본은_손목록없이_지문에_�
 # ══════════════════════════════════════════════════════════
 
 
-def test_목록의_파일이_전부_존재한다() -> None:
+def test_자동발견한_파일이_전부_존재한다() -> None:
     """★ 하나라도 없으면 지문이 UNKNOWN 이 되어 캐시가 «영영» 꺼진다.
 
     그러면 같은 회사를 볼 때마다 900원이 다시 나간다 — 조용히 돈이 샌다.
     """
     없는것 = [
-        이름 for 이름 in build_id._CONTENT_MODULES
+        이름 for 이름 in build_id._content_modules(paths.PROJECT_ROOT)
         if not (paths.PROJECT_ROOT / 이름).is_file()
     ]
 
@@ -117,6 +189,17 @@ def test_파일을_못_읽으면_캐시를_끈다(monkeypatch: pytest.MonkeyPatc
     """★ 「모르는 상태」를 캐시 적중으로 바꾸지 않는다 — fail-closed."""
     monkeypatch.setattr(paths, "PROJECT_ROOT", tmp_path / "없는폴더")
     build_id._cached_build_id = None
+
+    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
+
+
+def test_필수_단일파일_하나가_없어도_캐시를_끈다(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    가짜뿌리 = tmp_path / "repo"
+    _생산모듈을_가짜뿌리로_복사한다(가짜뿌리)
+    (가짜뿌리 / "analysis_engine/tools/run_pilot.py").unlink()
+    monkeypatch.setattr(paths, "PROJECT_ROOT", 가짜뿌리)
 
     assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
 
