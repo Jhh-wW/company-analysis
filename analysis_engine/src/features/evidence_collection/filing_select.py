@@ -9,6 +9,7 @@ DART 연동은 다음 담당자가 `core/dart_client.py`를 재사용해 구현�
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -43,6 +44,12 @@ class DocumentFetchResult:
     text: str = ""
     elapsed_ms: int = 0
     bytes_downloaded: int = 0
+    #: fetcher가 실제로 확인한 문서 소유 회사 corp_code(P1-4). fetcher가 이
+    #: 신원을 돌려주지 못하면(예: DART document.xml 응답 자체에는 구조화된
+    #: corp_code가 없다) 빈 문자열로 둔다 — 「대조했다」고 거짓 주장하지
+    #: 않기 위함이다. 값이 있고 요청 corp_code와 다르면 collect.py가 그
+    #: 문서를 버린다.
+    corp_code: str = ""
 
 
 class DartFetcher(Protocol):
@@ -77,6 +84,15 @@ class FilingSelectionResult:
 _CORRECTION_PREFIX_PATTERN = re.compile(
     rf"^\[[^\]]*{re.escape(c.CONTENT_CORRECTION_BRACKET_MARKER)}[^\]]*\]\s*"
 )
+#: 정정 계보 이름 대조용 — 괄호 앞뒤 공백 차이(「사업보고서(2025.03)」 대
+#: 「사업보고서 (2025.03)」)만으로 계보가 끊기지 않게 모든 공백을 지우고
+#: 비교한다(P2, 2026-08-31). 원공시·정정본 판정 자체(정규식 매칭)는 그대로다
+#: — 이건 어디까지나 「같은 이름인지」 비교 시의 공백 관용이다.
+_WHITESPACE_PATTERN = re.compile(r"\s+")
+
+
+def _normalize_report_name(name: str) -> str:
+    return _WHITESPACE_PATTERN.sub("", name)
 
 
 def _safe_fetch_list(fetcher: DartFetcher, company_id: str, pblntf_ty: str) -> FilingListResult:
@@ -99,33 +115,41 @@ def _filter_rows(rows: tuple[RawFilingRow, ...], name_keyword: str) -> list[RawF
 
 
 def _pick_latest_with_lineage(rows: list[RawFilingRow]) -> tuple[RawFilingRow, str]:
-    """가장 최근 정정본을 우선 채택하고, 있으면 원공시 rcept_no를 계보로 돌려준다.
+    """가장 최근 공시를 고르고, 그것이 정정본이면 원공시 rcept_no를 계보로 남긴다.
+
+    ★ P0-6 수정(2026-08-31, 3관점 독립 확정) — 예전 코드는 정정본이 하나라도
+    있으면 «정정본 그룹 안에서만» 최신을 골랐다. 조회 창에 여러 사업연도가
+    들어오면(연 단위 조회라 흔하다) 옛 연도의 정정본이 더 최신인 다음 연도
+    원공시를 밀어내는 결함이 있었다. 지금은 정정본·원공시를 «같은 무대»에서
+    접수번호로만 비교한다 — 정정은 항상 원공시보다 나중에 접수되므로, 같은
+    문서 계보 안에서는 이 비교만으로도 정정본이 자연히 이긴다. 서로 다른
+    계보(다른 사업연도)면 접수번호가 더 큰(=더 최신인) 쪽이 그대로 이긴다.
 
     정정 판정은 report_nm이 「[...기재정정...]」로 «시작»할 때만이다(느슨한
     부분일치가 아니라 선두 대괄호 표기만 — 실측 근거 없는 패턴 추측을 피하기
     위해 가장 보수적인 규칙을 쓴다). 같은 대괄호를 뗀 나머지 이름이 완전히
     같고 접수번호가 더 이른 공시만 원공시 후보로 본다.
     """
-    corrections: list[tuple[RawFilingRow, str]] = []
-    plain: list[RawFilingRow] = []
+    correction_base_name: dict[str, str] = {}
     for row in rows:
         matched = _CORRECTION_PREFIX_PATTERN.match(row.report_nm)
         if matched:
-            corrections.append((row, row.report_nm[matched.end():].strip()))
-        else:
-            plain.append(row)
+            correction_base_name[row.rcept_no] = row.report_nm[matched.end():].strip()
 
-    if corrections:
-        chosen, base_name = max(corrections, key=lambda pair: pair[0].rcept_no)
-        earlier_originals = [
-            row for row in plain
-            if row.report_nm.strip() == base_name and row.rcept_no < chosen.rcept_no
-        ]
-        original = max(earlier_originals, key=lambda row: row.rcept_no) if earlier_originals else None
-        return chosen, (original.rcept_no if original else "")
+    chosen = max(rows, key=lambda row: row.rcept_no)
+    base_name = correction_base_name.get(chosen.rcept_no)
+    if base_name is None:
+        return chosen, ""  # 정정본이 아니라 원공시가 최신 — 계보 없음
 
-    chosen = max(plain, key=lambda row: row.rcept_no)
-    return chosen, ""
+    normalized_base_name = _normalize_report_name(base_name)
+    earlier_originals = [
+        row for row in rows
+        if row.rcept_no not in correction_base_name  # 정정본이 아닌 것(원공시 후보)만
+        and _normalize_report_name(row.report_nm) == normalized_base_name
+        and row.rcept_no < chosen.rcept_no
+    ]
+    original = max(earlier_originals, key=lambda row: row.rcept_no) if earlier_originals else None
+    return chosen, (original.rcept_no if original else "")
 
 
 def _attempt_for_list_query(
@@ -162,12 +186,33 @@ def _attempt_for_list_query(
     return attempt, filtered
 
 
-def select_related_filings(fetcher: DartFetcher, company_id: str) -> FilingSelectionResult:
+def _deadline_list_attempt(spec: c.FilingKindSpec) -> CollectionAttempt:
+    return CollectionAttempt(
+        attempt_id=f"list:{spec.source_kind}",
+        source_kind=spec.source_kind,
+        requirement=spec.requirement,
+        state=c.ATTEMPT_STATE_TRUNCATED,
+        slot_ids=c.SOURCE_KIND_SLOT_SCOPE[spec.source_kind],
+        reason_code=c.REASON_DEADLINE_EXCEEDED,
+        elapsed_ms=0,
+        bytes_downloaded=0,
+        documents_seen=0,
+    )
+
+
+def select_related_filings(
+    fetcher: DartFetcher, company_id: str, *, deadline_at: float | None = None,
+) -> FilingSelectionResult:
     """관련 공시 묶음을 고른다 — 사업보고서 우선, 없으면 감사보고서(요구사항 1번).
 
     반기·분기보고서는 있으면 보충으로 더한다(OPTIONAL). 상한(MAX_RELATED_FILINGS)을
     넘는 후보는 TRUNCATED로 기록하고 뺀다 — 상한은 관측용이지 회사를 거절하는
     근거가 아니다.
+
+    ``deadline_at``이 주어지면(``time.monotonic()`` 기준) 새 목록 조회를
+    시작하기 «직전»마다 다시 확인한다(P1-3) — 이미 넘겼으면 그 조회는
+    시작하지 않고 TRUNCATED로 남긴다(캐시된 결과 재사용은 새 조회가 아니므로
+    막지 않는다).
     """
     attempts: list[CollectionAttempt] = []
     candidates: list[SelectedFiling] = []
@@ -181,8 +226,14 @@ def select_related_filings(fetcher: DartFetcher, company_id: str) -> FilingSelec
             list_result_cache[pblntf_ty] = _safe_fetch_list(fetcher, company_id, pblntf_ty)
         return list_result_cache[pblntf_ty]
 
+    def deadline_exceeded() -> bool:
+        return deadline_at is not None and time.monotonic() > deadline_at
+
     for source_kind in c.PRIMARY_LOOKUP_ORDER:
         spec = c.FILING_KIND_SPEC_BY_SOURCE_KIND[source_kind]
+        if spec.pblntf_ty not in list_result_cache and deadline_exceeded():
+            attempts.append(_deadline_list_attempt(spec))
+            continue
         result = fetch_cached(spec.pblntf_ty)
         attempt, filtered = _attempt_for_list_query(spec, result)
         attempts.append(attempt)
@@ -200,6 +251,9 @@ def select_related_filings(fetcher: DartFetcher, company_id: str) -> FilingSelec
 
     for source_kind in c.SUPPLEMENT_LOOKUP_ORDER:
         spec = c.FILING_KIND_SPEC_BY_SOURCE_KIND[source_kind]
+        if spec.pblntf_ty not in list_result_cache and deadline_exceeded():
+            attempts.append(_deadline_list_attempt(spec))
+            continue
         result = fetch_cached(spec.pblntf_ty)
         attempt, filtered = _attempt_for_list_query(spec, result)
         attempts.append(attempt)
