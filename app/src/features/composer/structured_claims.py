@@ -362,9 +362,54 @@ def _source_context(
     return fragment_id, source_identity, evidence[0]
 
 
-def _fact_id(*, source_identity: str, claim_slot: str) -> str:
+def _fact_id(
+    *,
+    source_identity: str,
+    claim_slot: str,
+    binding: NumericBinding,
+    state_evidence: str,
+) -> str:
+    """주장 범주와 실제 수치 사실을 분리해 안정적인 사실 ID를 만든다.
+
+    ``claim_slot``은 같은 종류의 여러 사실이 함께 쓰는 닫힌 범주다. 따라서
+    범주와 문서 신원만으로 ID를 만들면 매출액과 영업이익처럼 서로 다른
+    사실이 같은 ID로 충돌한다. 원값·기간·공식과 실제 원문 해시까지 포함해
+    내용이 다른 사실은 반드시 다른 ID가 되게 한다.
+    """
+
     payload = json.dumps(
-        {"source_identity": source_identity, "claim_slot": claim_slot},
+        {
+            "version": NUMERIC_BINDING_VERSION,
+            "source_identity": source_identity,
+            "claim_slot": claim_slot,
+            "metric": binding.metric,
+            "entity_scope": binding.entity_scope.value,
+            "period_start": binding.period_start,
+            "period_end": binding.period_end,
+            "formula": binding.formula.value,
+            "operands": [
+                {
+                    "role": operand.role,
+                    "metric": operand.metric,
+                    "entity_scope": operand.entity_scope.value,
+                    "period": operand.period,
+                    "value": operand.value,
+                    "sign": operand.sign.value,
+                    "unit": operand.unit,
+                    "unit_dimension": operand.unit_dimension.value,
+                    "source_identity": operand.source_identity,
+                }
+                for operand in binding.operands
+            ],
+            "calculated_value": binding.calculated_value,
+            "display_value": binding.display_value,
+            "rounding_mode": binding.rounding_mode,
+            "rounding_places": binding.rounding_places,
+            "tolerance": binding.tolerance,
+            "state_evidence_sha256": hashlib.sha256(
+                state_evidence.encode("utf-8")
+            ).hexdigest(),
+        },
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -461,13 +506,10 @@ def build_past_changes_numeric_claims(
         if display_decimal == 0:
             display_decimal = Decimal("0.00")
         display_value = f"{display_decimal:.2f}"
-        claim_slot = (
-            f"past_changes:cumulative_rate:{column}:{start_year}-{end_year}"
-        )
-        fact_id = _fact_id(
-            source_identity=source_identity,
-            claim_slot=claim_slot,
-        )
+        # claim_slot은 사실의 고유 번호가 아니라 원자 주장 범주다. 지표·기간을
+        # 끼워 넣은 동적 문자열은 닫힌 9장 정책을 어기고, 검사기와 생성기의
+        # 계약을 서로 다르게 만든다. 사실별 고유성은 아래 fact_id가 맡는다.
+        claim_slot = "past_changes:cumulative_change"
         operands = (
             NumericOperand(
                 role="start",
@@ -513,6 +555,12 @@ def build_past_changes_numeric_claims(
         )
         if numeric_binding_problems(binding):
             continue
+        fact_id = _fact_id(
+            source_identity=source_identity,
+            claim_slot=claim_slot,
+            binding=binding,
+            state_evidence=state_evidence,
+        )
         claim_text = _cumulative_rate_claim_text(
             entity_scope=entity_scope.value,
             metric=metric,

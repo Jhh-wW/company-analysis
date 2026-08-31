@@ -261,7 +261,7 @@ def test_구조화_공개문장과_factrecord와_원문지문이_한번에_결�
         item.fact_id for item in rendered.fact_records
     ]
     assert fact.claim in rendered.sections[0].prose_lines[0][0]
-    assert fact.claim_slot.startswith("past_changes:cumulative_rate:")
+    assert fact.claim_slot == "past_changes:cumulative_change"
     assert fact.metric == "매출액"
     assert fact.sign == "positive"
     assert fact.unit == "%"
@@ -272,6 +272,58 @@ def test_구조화_공개문장과_factrecord와_원문지문이_한번에_결�
     assert _filing().document_id not in fact.source_document_id
     assert validate_versioned_numeric_record(fact) == ()
     assert fact.evidence_binding == fact_evidence_binding(fact)
+
+
+def test_주장범주는_공유해도_서로_다른_수치사실의_ID는_충돌하지_않는다() -> None:
+    claims = build_past_changes_numeric_claims(_table(), _fragments(), _filing())
+
+    assert len(claims) == 2
+    assert {
+        sentence.planned_claim_slot for sentence in claims
+    } == {"past_changes:cumulative_change"}
+    assert len(
+        {
+            sentence.structured_claim.fact_id
+            for sentence in claims
+            if sentence.structured_claim is not None
+        }
+    ) == 2
+
+
+def test_수치원문이_바뀌면_같은_범주여도_사실_ID가_바뀐다() -> None:
+    original = build_past_changes_numeric_claims(_table(), _fragments(), _filing())
+    changed_payload = json.loads(_table().evidence_rows[0])
+    changed_payload["list"][0]["thstrm_amount"] = "1300000000000"
+    changed_evidence = json.dumps(
+        changed_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    changed_table = replace(
+        _table(),
+        rows=(
+            ("2025", "13,000", "2,000"),
+            ("2024", "11,000", "1,500"),
+            ("2023", "10,000", "1,000"),
+        ),
+        raw_rows=(
+            ("2025", "1,300,000,000,000", "200,000,000,000"),
+            ("2024", "1,100,000,000,000", "150,000,000,000"),
+            ("2023", "1,000,000,000,000", "100,000,000,000"),
+        ),
+        evidence_rows=(changed_evidence,) * 3,
+    )
+    changed = build_past_changes_numeric_claims(
+        changed_table, _fragments(), _filing()
+    )
+
+    assert original[0].structured_claim is not None
+    assert changed[0].structured_claim is not None
+    assert (
+        original[0].structured_claim.fact_id
+        != changed[0].structured_claim.fact_id
+    )
 
 
 def test_미결속_AI_수치문장은_빼고_프로그램_누적claim은_남긴다() -> None:
