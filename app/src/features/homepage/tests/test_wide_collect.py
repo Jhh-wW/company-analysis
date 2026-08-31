@@ -656,29 +656,36 @@ def test_ir_attempt도_전체슬롯_fallback을_받는다(monkeypatch):
     assert set(ir_attempt.slot_ids) == set(WIDE_REQUIRED_SLOT_IDS)
 
 
-# ── 정정 1(P0): REQUIRED + OK/MISSING이 광역 17-slot을 주장하면 안 된다 ──
+# ── 정정 1 최종판(P0, 결합 종단시험 실측): 광역 slot 주장은 상태와
+#    무관하게 절대 REQUIRED가 될 수 없다 ─────────────────────────
 
 
-def _assert_no_false_confirmation(attempts) -> None:
-    """불변식: requirement가 REQUIRED이고 slot_ids가 허용 어휘 17개 전체(광역
-    fallback)라면, state는 반드시 FAILED 또는 TRUNCATED여야 한다.
+def _assert_no_broad_required_slot_claim(attempts) -> None:
+    """불변식(최종판): slot_ids가 허용 어휘 17개 전체(광역 fallback)인 attempt는
+    상태(OK/MISSING/FAILED/TRUNCATED)와 무관하게 requirement가 반드시
+    OPTIONAL이어야 한다 — REQUIRED는 0건이어야 한다.
 
-    OK·MISSING과 결합하면 「이 회사는 17개 slot 전부 근거가 없다」는 거짓
-    확인(false confirmation)이 되어, 수집 사정(확인 못 함)과 회사 자료 부재
-    (근거 없음)를 혼동하게 만든다(팀 리드 정정 1).
+    처음엔 「FAILED·TRUNCATED면 REQUIRED가 정확하다」로 정정했으나, 그건
+    그 경로가 그 slot의 유일한 확인 경로일 때만 참이다. 웹 수집기는 17개
+    slot 전부의 유일한 경로가 아니다(공시 문서 수집·페이지 유형이 좁힌
+    경로가 따로 있다) — REQUIRED+광역으로 나가면 attempt 하나(예: IR PDF
+    조회 FAILED)의 실패가 다른 소스가 채운 근거까지 UNKNOWN으로 끌어내린다
+    (팀 리드가 결합 종단시험에서 실측한 P0: IR FAILED attempt 하나 때문에
+    9개 장 중 8개가 UNKNOWN, 최종 게이트 STOP_TRANSIENT_FAILURE로 떨어짐).
     """
     all_slots = set(WIDE_REQUIRED_SLOT_IDS)
     for attempt in attempts:
-        if attempt.requirement == "REQUIRED" and set(attempt.slot_ids) == all_slots:
-            assert attempt.state in ("FAILED", "TRUNCATED"), (
-                f"거짓 확인 위반: attempt_id={attempt.attempt_id} "
-                f"source_kind={attempt.source_kind} state={attempt.state}"
+        if set(attempt.slot_ids) == all_slots:
+            assert attempt.requirement == "OPTIONAL", (
+                f"광역 REQUIRED 주장 위반: attempt_id={attempt.attempt_id} "
+                f"source_kind={attempt.source_kind} state={attempt.state} "
+                f"requirement={attempt.requirement}"
             )
 
 
-def test_불변식_REQUIRED_광역slot은_FAILED_TRUNCATED와만_공존한다_정상수집():
+def test_불변식_광역slot은_REQUIRED가_0건이다_정상수집():
     """가장 흔한 정상 수집 경로(robots ok, sitemap 없음, 루트 페이지 성공)만
-    돌려도 위반이 없어야 한다 — 이게 바로 정정 1이 막으려는 실사용 경로다."""
+    돌려도 위반이 없어야 한다 — 이게 바로 이 불변식이 막으려는 실사용 경로다."""
     pages = {
         "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
         "https://company.example/sitemap.xml": _missing("https://company.example/sitemap.xml"),
@@ -687,17 +694,20 @@ def test_불변식_REQUIRED_광역slot은_FAILED_TRUNCATED와만_공존한다_�
     site = _FakeWideSite(pages)
     result = _collect(site)
     assert result.attempts
-    _assert_no_false_confirmation(result.attempts)
+    _assert_no_broad_required_slot_claim(result.attempts)
 
 
-def test_불변식_REQUIRED_광역slot은_FAILED_TRUNCATED와만_공존한다_robots차단():
+def test_불변식_광역slot은_REQUIRED가_0건이다_robots차단():
+    """robots 조회 자체가 실패(FAILED)해도 광역 attempt는 REQUIRED가 아니다
+    — 이 사례가 바로 팀 리드가 결합 종단시험에서 실측한 P0(IR FAILED)와
+    같은 원인이다."""
     site = _FakeWideSite({"https://company.example/": _page(_body("루트 페이지"), "https://company.example/")})
     result = _collect(site)
     assert result.attempts
-    _assert_no_false_confirmation(result.attempts)
+    _assert_no_broad_required_slot_claim(result.attempts)
 
 
-def test_불변식_REQUIRED_광역slot은_FAILED_TRUNCATED와만_공존한다_페이지수상한():
+def test_불변식_광역slot은_REQUIRED가_0건이다_페이지수상한():
     links = "".join(f'<a href="/page{i}">페이지{i}</a>' for i in range(WIDE_MAX_PAGES + 10))
     pages = {
         "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
@@ -710,10 +720,10 @@ def test_불변식_REQUIRED_광역slot은_FAILED_TRUNCATED와만_공존한다_�
     site = _FakeWideSite(pages)
     result = _collect(site)
     assert result.attempts
-    _assert_no_false_confirmation(result.attempts)
+    _assert_no_broad_required_slot_claim(result.attempts)
 
 
-def test_불변식_REQUIRED_광역slot은_FAILED_TRUNCATED와만_공존한다_sitemap_상한():
+def test_불변식_광역slot은_REQUIRED가_0건이다_sitemap_상한():
     entries = "".join(
         f"<url><loc>https://company.example/p{i}</loc></url>" for i in range(WIDE_MAX_SITEMAP_ENTRIES + 20)
     )
@@ -728,10 +738,12 @@ def test_불변식_REQUIRED_광역slot은_FAILED_TRUNCATED와만_공존한다_si
     site = _FakeWideSite(pages)
     result = _collect(site)
     assert result.attempts
-    _assert_no_false_confirmation(result.attempts)
+    _assert_no_broad_required_slot_claim(result.attempts)
 
 
-def test_불변식_REQUIRED_광역slot은_FAILED_TRUNCATED와만_공존한다_ir_none_failed(monkeypatch):
+def test_불변식_광역slot은_REQUIRED가_0건이다_ir_none_failed(monkeypatch):
+    """★ 팀 리드가 결합 종단시험에서 실측한 P0를 웹 수집기 단위에서 직접
+    재현·고정한다 — IR PDF 조회 FAILED가 REQUIRED+광역으로 나가면 안 된다."""
     def fake_collect_ir(homepage_url, **_kwargs):
         if "company.example" in homepage_url:
             return OfficialIrCollectResult(state="none", fragments=[], downloaded_pdf_bytes=0)
@@ -746,7 +758,7 @@ def test_불변식_REQUIRED_광역slot은_FAILED_TRUNCATED와만_공존한다_ir
     site = _FakeWideSite(pages)
     result = _collect(site)
     assert result.attempts
-    _assert_no_false_confirmation(result.attempts)
+    _assert_no_broad_required_slot_claim(result.attempts)
 
 
 def test_robots_성공은_OPTIONAL로_낮아진다():
@@ -764,14 +776,16 @@ def test_robots_성공은_OPTIONAL로_낮아진다():
     assert robots_attempt.requirement == "OPTIONAL"
 
 
-def test_robots_차단은_REQUIRED를_유지한다():
-    """실패는 「이것 때문에 확인 못 했다」는 정확한 뜻이라 REQUIRED를 유지해야
-    소비측이 UNKNOWN으로 안전하게 이어간다."""
+def test_robots_차단도_OPTIONAL이다():
+    """★ 최종판(정정 1 재정정): robots는 17개 slot 전부의 유일한 확인
+    경로가 아니므로, 실패(FAILED)했다고 REQUIRED로 올리면 안 된다 — 공시
+    문서 수집·페이지 유형이 좁힌 경로가 이미 그 slot들을 따로 확인한다.
+    실패 사실 자체는 reason_code(robots_unreachable)로 그대로 남는다."""
     site = _FakeWideSite({"https://company.example/": _page(_body("루트 페이지"), "https://company.example/")})
     result = _collect(site)
     robots_attempt = next(a for a in result.attempts if a.source_kind == "robots_txt")
     assert robots_attempt.state == "FAILED"
-    assert robots_attempt.requirement == "REQUIRED"
+    assert robots_attempt.requirement == "OPTIONAL"
 
 
 def test_sitemap_성공은_OPTIONAL로_낮아진다():
@@ -825,6 +839,28 @@ def test_유형_미상_페이지_성공은_OPTIONAL로_낮아진다():
     assert root_document.requirement == "REQUIRED"
 
 
+def test_유형_미상_페이지_실패도_OPTIONAL이다():
+    """★ 최종판(정정 1 재정정): 페이지 fetch 자체가 실패(FAILED)해도, URL로
+    유형을 못 알아낸 페이지는 여전히 OPTIONAL이어야 한다 — 예전엔 FAILED만
+    예외로 REQUIRED를 유지했지만, 이 attempt는 애초에 어떤 slot의 유일한
+    확인 경로도 아니었으므로 실패했다고 REQUIRED로 올라가면 안 된다."""
+    pages = {
+        "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
+        "https://company.example/sitemap.xml": _missing("https://company.example/sitemap.xml"),
+        "https://company.example/": _page(
+            _body("루트 페이지 본문") + '<a href="/xyz-unrelated">기타</a>', "https://company.example/"
+        ),
+        # "/xyz-unrelated"는 일부러 pages에 없어 접속 자체가 실패(FAILED)한다.
+    }
+    site = _FakeWideSite(pages)
+    result = _collect(site)
+    unmatched_attempt = next(
+        a for a in result.attempts if a.state == "FAILED" and a.source_kind == "official_web_page"
+    )
+    assert set(unmatched_attempt.slot_ids) == set(WIDE_REQUIRED_SLOT_IDS)
+    assert unmatched_attempt.requirement == "OPTIONAL"
+
+
 def test_유형이_잡히는_페이지_성공은_REQUIRED를_유지한다():
     """slot_ids가 실제로 좁혀진(비어 있지 않은) 경우는 광역 fallback이 아니므로
     정정 1과 무관하다 — 등록 하위도메인 페이지는 여전히 REQUIRED다."""
@@ -865,7 +901,12 @@ def test_ir_none은_OPTIONAL로_낮아진다(monkeypatch):
     assert ir_attempt.requirement == "OPTIONAL"
 
 
-def test_ir_failed는_REQUIRED를_유지한다(monkeypatch):
+def test_ir_failed도_OPTIONAL이다(monkeypatch):
+    """★ 팀 리드가 결합 종단시험에서 실측한 P0의 원인 그 자체 — IR PDF 조회가
+    FAILED(일시 장애)로 실패했다고 REQUIRED+광역으로 나가면, 공시·페이지
+    유형이 채운 다른 근거까지 소비 계약에서 UNKNOWN으로 끌려 내려간다.
+    IR은 그 17개 slot 전부의 유일한 확인 경로가 아니므로 OPTIONAL이 맞다
+    — 실패 사실은 reason_code(ir_pdf_failed)로 그대로 남아 진단에 쓰인다."""
     def fake_collect_ir_failed(homepage_url, **_kwargs):
         return OfficialIrCollectResult(state="failed", fragments=[], downloaded_pdf_bytes=0)
 
@@ -879,7 +920,8 @@ def test_ir_failed는_REQUIRED를_유지한다(monkeypatch):
     result = _collect(site)
     ir_attempt = next(a for a in result.attempts if a.source_kind == "official_ir_pdf")
     assert ir_attempt.state == "FAILED"
-    assert ir_attempt.requirement == "REQUIRED"
+    assert ir_attempt.reason_code == "ir_pdf_failed"
+    assert ir_attempt.requirement == "OPTIONAL"
 
 
 # ── IR PDF 위임 ───────────────────────────────────────────
