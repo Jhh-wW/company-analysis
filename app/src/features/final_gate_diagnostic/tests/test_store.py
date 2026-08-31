@@ -32,6 +32,29 @@ def test_최종게이트_진단은_재연결뒤에도_같은값으로_복원된�
     )
 
 
+def test_품질하한_닫힌코드도_원문없이_저장되고_복원된다(tmp_path) -> None:
+    """task 022 — publish_blocked_quality_floor도 다른 닫힌 코드와 같이
+    원문 없이 SQLite CHECK 제약을 통과해 저장·복원된다."""
+    db_path = tmp_path / "storage.db"
+    with sqlite3.connect(db_path) as conn:
+        assert store.record_once(
+            conn,
+            run_id=RUN_ID,
+            reason_code="publish_blocked_quality_floor",
+            recorded_at=RECORDED_AT,
+        )
+
+    with sqlite3.connect(db_path) as conn:
+        restored = store.read_for_run(conn, RUN_ID)
+
+    assert restored == store.PersistedFinalGateDiagnostic(
+        run_id=RUN_ID,
+        schema_version=1,
+        reason_code="publish_blocked_quality_floor",
+        recorded_at=RECORDED_AT,
+    )
+
+
 def test_읽기는_표를_새로_만들지않는다() -> None:
     with sqlite3.connect(":memory:") as conn:
         assert store.read_for_run(conn, RUN_ID) is None

@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -46,9 +47,15 @@ from src.features.pipeline.tests.test_real_cache import (
 )
 from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
 from src.shared import generation_coordination
-from src.shared.final_gate_diagnostics import FINAL_GATE_REASON_PUBLISH_BLOCKED
+from src.shared.final_gate_diagnostics import (
+    FINAL_GATE_REASON_PUBLISH_BLOCKED,
+    FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR,
+    QUALITY_FLOOR_PROBLEM_CODES,
+    classify_v2_validation_final_gate_reason,
+)
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_evidence.constants import ReleaseMode
+from src.shared.report_quality.models import QualityProblemCode
 
 _V2_SENTINEL_MESSAGE = "v2-분기-표식"
 _DATE = dt.date(2026, 8, 24)
@@ -608,6 +615,290 @@ def test_v2_출고검증과_회복실패는_닫힌사유의_GATE_STOPPED로_끝�
     assert steps[-1]["step"] == "v2_출고검증_차단"
     assert steps[-1]["사유"] == [closed_problem]
     assert cache_saves == []
+
+
+# ══════════════════════════════════════════════════════════
+# ⑥ 품질 하한 사유 구분 — task 022 (모든 V2ValidationError를 하나로
+#    뭉뚱그리지 않는다: too_few_substantive_claims/too_few_document_sources/
+#    low_verified_ratio «세 코드일 때만» 새 최종 게이트 사유로 떼어낸다.
+#    분류 자체는 src/shared/final_gate_diagnostics.py의 순수 함수 한 곳이
+#    권위다 — real.py는 그 함수를 호출만 한다.)
+# ══════════════════════════════════════════════════════════
+
+
+def test_품질하한_코드집합은_정확히_세_개다() -> None:
+    """★ 앵커 시험 — task 022 정밀화. 새 사유로 분기하는 코드 집합이
+    ``src.shared.final_gate_diagnostics.QUALITY_FLOOR_PROBLEM_CODES``
+    상수 하나로 뽑혀 있고, 그 값이 정확히 이 세 개(too_few_substantive_claims
+    · too_few_document_sources · low_verified_ratio)뿐임을 고정한다.
+    승인된 50% 검증 비율(low_verified_ratio)도 40건·8건과 같은 «수치
+    품질 하한»이다 — 빼면 회사 규모가 작아 표본이 적은 케이스의 거짓
+    거절 원인이 축소된다.
+    """
+    assert QUALITY_FLOOR_PROBLEM_CODES == frozenset(
+        {
+            "too_few_substantive_claims",
+            "too_few_document_sources",
+            "low_verified_ratio",
+        }
+    )
+    assert QUALITY_FLOOR_PROBLEM_CODES == frozenset(
+        {
+            QualityProblemCode.TOO_FEW_SUBSTANTIVE_CLAIMS.value,
+            QualityProblemCode.TOO_FEW_DOCUMENT_SOURCES.value,
+            QualityProblemCode.LOW_VERIFIED_RATIO.value,
+        }
+    )
+
+
+@pytest.mark.parametrize("code", list(QualityProblemCode))
+def test_품질코드_전수에_대해_최종게이트사유_분기가_고정돼있다(
+    code: QualityProblemCode,
+) -> None:
+    """★ 앵커 시험 — task 022 정밀화. ``QualityProblemCode`` 7개 전수
+    (숫자 하한 3 · 구조 4)를 하나씩 돌며, 지정된 세 코드 «만» 새 사유를
+    받고 나머지 네(구조 코드)는 개별적으로 기존 publish_blocked를 그대로
+    받는지 고정한다. 이 시험이 없으면 ``QualityProblemCode``에 코드가
+    새로 추가돼도 이 분기 로직이 조용히 새 사유로 새 코드를 흘려보내도
+    아무도 못 잡는다.
+    """
+    reason = classify_v2_validation_final_gate_reason((code.value,))
+    if code in (
+        QualityProblemCode.TOO_FEW_SUBSTANTIVE_CLAIMS,
+        QualityProblemCode.TOO_FEW_DOCUMENT_SOURCES,
+        QualityProblemCode.LOW_VERIFIED_RATIO,
+    ):
+        assert reason == FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR
+    else:
+        assert reason == FINAL_GATE_REASON_PUBLISH_BLOCKED
+
+
+@pytest.mark.parametrize(
+    "quality_floor_code",
+    ["too_few_substantive_claims", "too_few_document_sources", "low_verified_ratio"],
+)
+def test_v2_품질하한_세_코드는_새_최종게이트사유로_구분된다(
+    monkeypatch: pytest.MonkeyPatch, quality_floor_code: str
+) -> None:
+    """40건(실질 claim)·8건(독립 문서)·50%(검증 비율) 하한 미달 «각각»이
+    새 사유를 받는다."""
+    fake = FakeEngine()
+    engine, client, frags, financials, filing = _branch_ingredients(fake)
+
+    def failing_run_v2(*_args: Any, **_kwargs: Any):
+        raise V2ValidationError(
+            ("실질 claim이 하한보다 적습니다",),
+            problem_codes=(quality_floor_code,),
+        )
+
+    monkeypatch.setattr(composer_pipeline, "run_v2", failing_run_v2)
+    steps: list[dict[str, Any]] = []
+
+    result = real._run_v2_composer(
+        engine=engine,
+        client=client,
+        company_name="가나다전자",
+        corp_type="상장사",
+        frags=frags,
+        financials=financials,
+        filing=filing,
+        revenue_tables=[],
+        sources=[],
+        business_date=_DATE,
+        model="가짜모델",
+        steps=steps,
+        build_identity=_build_identity(),
+        generation_mode=_frozen_v2_mode(),
+    )
+
+    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.final_gate_reason == FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR
+    # 화면 안내는 닫힌 한국어 표기만 병기한다 — 원문(problems)이 새어 나가지 않는다
+    assert "실질 claim이 하한보다 적습니다" not in result.message
+    assert "보고서 품질 최소 기준 미달" in result.message
+
+
+@pytest.mark.parametrize(
+    "other_problem_codes",
+    [
+        (),  # 안전 오류 등 problem_codes 없이 던져진 기존 호출자
+        ("low_semantic_coverage",),
+        ("too_many_notice_only_sections",),
+        ("one_claim_sections", "low_public_sentence_coverage"),
+    ],
+)
+def test_v2_다른_품질코드나_안전오류는_기존_publish_blocked를_유지한다(
+    monkeypatch: pytest.MonkeyPatch, other_problem_codes: tuple[str, ...]
+) -> None:
+    """★ 앵커 시험 — 구조 코드 4개(too_many_notice_only_sections ·
+    one_claim_sections · low_semantic_coverage · low_public_sentence_coverage)
+    는 개별로도 섞여도 품질 하한 세 코드가 «없으면» 기존 publish_blocked
+    사유 그대로다."""
+    fake = FakeEngine()
+    engine, client, frags, financials, filing = _branch_ingredients(fake)
+
+    def failing_run_v2(*_args: Any, **_kwargs: Any):
+        raise V2ValidationError(
+            ("출고 검증에 걸렸습니다",),
+            problem_codes=other_problem_codes,
+        )
+
+    monkeypatch.setattr(composer_pipeline, "run_v2", failing_run_v2)
+    steps: list[dict[str, Any]] = []
+
+    result = real._run_v2_composer(
+        engine=engine,
+        client=client,
+        company_name="가나다전자",
+        corp_type="상장사",
+        frags=frags,
+        financials=financials,
+        filing=filing,
+        revenue_tables=[],
+        sources=[],
+        business_date=_DATE,
+        model="가짜모델",
+        steps=steps,
+        build_identity=_build_identity(),
+        generation_mode=_frozen_v2_mode(),
+    )
+
+    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.final_gate_reason == FINAL_GATE_REASON_PUBLISH_BLOCKED
+
+
+@pytest.mark.parametrize(
+    "mixed_problem_codes",
+    [
+        ("too_few_substantive_claims", "low_semantic_coverage"),
+        ("one_claim_sections", "low_verified_ratio"),
+        (
+            "too_many_notice_only_sections",
+            "one_claim_sections",
+            "too_few_document_sources",
+        ),
+    ],
+)
+def test_v2_혼합코드는_품질하한코드가_하나라도_있으면_품질하한사유가_뽑힌다(
+    monkeypatch: pytest.MonkeyPatch, mixed_problem_codes: tuple[str, ...]
+) -> None:
+    """★ 앵커 시험 — 숫자 하한 코드와 구조 코드가 «섞여» 들어와도, 하한
+    코드가 하나라도 있으면 품질 하한 사유가 뽑힌다(구조 코드가 몇 개
+    섞였든 무관)."""
+    fake = FakeEngine()
+    engine, client, frags, financials, filing = _branch_ingredients(fake)
+
+    def failing_run_v2(*_args: Any, **_kwargs: Any):
+        raise V2ValidationError(
+            ("출고 검증에 걸렸습니다",),
+            problem_codes=mixed_problem_codes,
+        )
+
+    monkeypatch.setattr(composer_pipeline, "run_v2", failing_run_v2)
+    steps: list[dict[str, Any]] = []
+
+    result = real._run_v2_composer(
+        engine=engine,
+        client=client,
+        company_name="가나다전자",
+        corp_type="상장사",
+        frags=frags,
+        financials=financials,
+        filing=filing,
+        revenue_tables=[],
+        sources=[],
+        business_date=_DATE,
+        model="가짜모델",
+        steps=steps,
+        build_identity=_build_identity(),
+        generation_mode=_frozen_v2_mode(),
+    )
+
+    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.final_gate_reason == FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR
+
+
+def test_v2_기존_예외_호환_problem_codes없이_던져도_그대로_동작한다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """problem_codes 키워드를 모르는 기존 호출자 — 동작이 그대로 보존된다."""
+    fake = FakeEngine()
+    engine, client, frags, financials, filing = _branch_ingredients(fake)
+
+    def failing_run_v2(*_args: Any, **_kwargs: Any):
+        raise V2ValidationError(("핵심 요약이 부족합니다",))  # problem_codes 생략
+
+    monkeypatch.setattr(composer_pipeline, "run_v2", failing_run_v2)
+    steps: list[dict[str, Any]] = []
+
+    result = real._run_v2_composer(
+        engine=engine,
+        client=client,
+        company_name="가나다전자",
+        corp_type="상장사",
+        frags=frags,
+        financials=financials,
+        filing=filing,
+        revenue_tables=[],
+        sources=[],
+        business_date=_DATE,
+        model="가짜모델",
+        steps=steps,
+        build_identity=_build_identity(),
+        generation_mode=_frozen_v2_mode(),
+    )
+
+    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.final_gate_reason == FINAL_GATE_REASON_PUBLISH_BLOCKED
+
+
+def test_v2_real자체_transport_무결성_실패도_품질게이트_사유를_고르지_않는다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """real.py 자신이 던지는 STRICT transport 무결성 V2ValidationError(품질
+    게이트가 아니다 — 40·8 하한과 무관)도 except V2ValidationError가 «출처
+    불문 전부» 잡는다. problem_codes가 비어 있으므로 기존 publish_blocked를
+    그대로 받아야 한다 — 새 사유로 오판하면 이 시험이 빨간불이 된다."""
+    fake = FakeEngine()
+    engine, client, frags, financials, filing = _branch_ingredients(fake)
+    monkeypatch.setenv(
+        real.REPORT_RELEASE_MODE_ENV_NAME, ReleaseMode.ENFORCE_NO_PARTIAL.value
+    )
+
+    # composer.run_v2가 transport가 깨진 결과를 돌려준다 — real.py 자신의
+    # 자체검사(pipeline/real.py의 GenerationRunMetrics 타입 검사)가 이걸 잡고
+    # V2ValidationError를 던진다. FULL이 아니므로 build_identity 등은 불필요.
+    broken_output = SimpleNamespace(
+        generation_metrics=None, quality_observation=None, report=None
+    )
+
+    def fake_run_v2(*_args: Any, **_kwargs: Any):
+        return broken_output
+
+    monkeypatch.setattr(composer_pipeline, "run_v2", fake_run_v2)
+    steps: list[dict[str, Any]] = []
+
+    result = real._run_v2_composer(
+        engine=engine,
+        client=client,
+        company_name="가나다전자",
+        corp_type="상장사",
+        frags=frags,
+        financials=financials,
+        filing=filing,
+        revenue_tables=[],
+        sources=[],
+        business_date=_DATE,
+        model="가짜모델",
+        steps=steps,
+        build_identity=_build_identity(),
+        generation_mode=_frozen_v2_mode(),
+    )
+
+    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.final_gate_reason == FINAL_GATE_REASON_PUBLISH_BLOCKED
+    assert result.final_gate_reason != FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR
+    assert "transport" in steps[-1]["사유"][0]
 
 
 def test_운영_FULL은_typed_packet과_실제_9_writer_1_bundled_reviewer를_운반한다(

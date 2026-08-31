@@ -46,10 +46,23 @@ CITATION_MARKER_RE: Final[re.Pattern[str]] = re.compile(r"\[(\d+)\]")
 
 
 class V2ValidationError(ValueError):
-    """v2 출고 검증 실패 — 사유 전부를 한국어로 담는다."""
+    """v2 출고 검증 실패 — 사유 전부를 한국어로 담는다.
 
-    def __init__(self, problems: Iterable[str]) -> None:
+    ★ ``problem_codes`` — 사람이 읽는 ``problems`` 문구와 별도로, 최종 게이트가
+      «품질 하한 미달(too_few_substantive_claims/too_few_document_sources)»과
+      다른 검증 실패를 구분할 수 있게 하는 닫힌 기계 코드다. 기존 호출자는
+      이 인자를 몰라도 되도록 기본값을 빈 불변 tuple로 둔다 — 동작이 그대로
+      보존된다.
+    """
+
+    def __init__(
+        self,
+        problems: Iterable[str],
+        *,
+        problem_codes: Iterable[str] = (),
+    ) -> None:
         self.problems: tuple[str, ...] = tuple(problems)
+        self.problem_codes: tuple[str, ...] = tuple(problem_codes)
         super().__init__(
             "v2 출고 검증 실패: " + " / ".join(self.problems)
         )

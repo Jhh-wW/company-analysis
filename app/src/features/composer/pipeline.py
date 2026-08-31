@@ -1204,7 +1204,14 @@ def run_v2(
             strict_problems.append(
                 "엄격 품질·공개 안전 계약이 완성 보고서로 판정하지 않았습니다"
             )
-        raise V2ValidationError(strict_problems)
+        # ★ 이 raise «만» 품질 코드를 함께 싣는다 — 최종 게이트가 «품질 하한
+        #   미달»과 다른 구조·안전 오류를 구분하려면 여기서 나온 코드가
+        #   필요하다. 다른 raise 지점(구조 결속·생산 증거 등)은 quality
+        #   assessor를 거치지 않으므로 코드를 지어내지 않는다.
+        raise V2ValidationError(
+            strict_problems,
+            problem_codes=quality_observation.quality_problem_codes,
+        )
     if release_mode is ReleaseMode.SHADOW:
         rendered = _apply_generation_quality_label(
             rendered,

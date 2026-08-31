@@ -369,8 +369,20 @@ def test_작가와_검수는_서로_다른_프롬프트만_받는다():
     assert not any("핵심 요약" in prompt for prompt in reviewer.prompts)
 
 
-def test_엄격모드는_AI요약을_부르지_않고_얇은_보고서를_막는다():
-    """FULL 후보는 9장을 채웠다는 이유만으로 얇은 결과를 내보내지 않는다."""
+@pytest.mark.parametrize(
+    ("release_mode", "expects_quality_codes"),
+    [
+        # FULL은 회복 정책이 사유를 소유한다 — 얇은 결과는 report_recovery 코드로
+        # 닫히고, 품질 코드를 지어내지 않는다.
+        (ReleaseMode.FULL, False),
+        # 회복 정책이 없는 엄격 경로에서만 숫자 하한 코드가 실린다(task 022).
+        (ReleaseMode.ENFORCE_NO_PARTIAL, True),
+    ],
+)
+def test_엄격모드는_AI요약을_부르지_않고_얇은_보고서를_막는다(
+    release_mode: ReleaseMode, expects_quality_codes: bool
+):
+    """얇은 후보는 9장을 채웠다는 이유만으로 나가지 않는다 — 사유 주인은 모드마다 다르다."""
 
     class StrictWriter(_FakeWriter):
         def __call__(self, prompt: str) -> str:
@@ -412,7 +424,7 @@ def test_엄격모드는_AI요약을_부르지_않고_얇은_보고서를_막는
             None,
             writer_ask=writer,
             reviewer_ask=reviewer,
-            release_mode=ReleaseMode.FULL,
+            release_mode=release_mode,
             section_evidence_packets=_strict_packet_set(),
             company_id="00123456",
             build_identity_sha256="b" * 64,
@@ -422,6 +434,19 @@ def test_엄격모드는_AI요약을_부르지_않고_얇은_보고서를_막는
     assert not any("핵심 요약" in prompt for prompt in writer.prompts)
     assert len(reviewer.prompts) == 1
     assert caught.value.problems
+    # 실질 claim 9건 < 하한 40건. 여기서 «어느 게이트가 사유를 소유하는가»를
+    # 모드별로 못 박는다 — 이 순서가 뒤집히면 사용자에게 다른 이유가 나간다.
+    if expects_quality_codes:
+        # 엄격 경로만 숫자 하한 코드를 함께 싣는다(task 022).
+        assert "too_few_substantive_claims" in caught.value.problem_codes
+    else:
+        # FULL은 회복 정책이 먼저 닫는다. 품질 코드를 지어내지 않고,
+        # 사유는 사람 원문 없이 닫힌 report_recovery 코드 하나다.
+        assert caught.value.problem_codes == ()
+        assert all(
+            problem.startswith("report_recovery:")
+            for problem in caught.value.problems
+        )
 
 
 def test_엄격모드는_충분한_검증사실만_완성으로_봉인한다():
@@ -632,6 +657,9 @@ def test_본문이_통째로_비면_V2ValidationError로_끝난다():
     # 본문이 비면 요약·검수 헛호출도 없어야 한다 (작가 9회로 끝)
     assert len(writer.prompts) == 9
     assert reviewer.prompts == []
+    # 이 raise는 STRICT 품질 게이트가 아니라 validate_v2의 구조 검사다
+    # (release_mode 기본값 SHADOW) — 품질 코드를 지어내지 않는다(task 022).
+    assert caught.value.problem_codes == ()
 
 
 # ══════════════════════════════════════════════════════════

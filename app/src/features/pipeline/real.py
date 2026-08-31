@@ -176,6 +176,8 @@ from src.shared.final_gate_diagnostics import (
     FINAL_GATE_REASON_MISSING_REVENUE,
     FINAL_GATE_REASON_OTHER_GATE,
     FINAL_GATE_REASON_PUBLISH_BLOCKED,
+    FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR,
+    classify_v2_validation_final_gate_reason,
 )
 from src.shared.span_selection_diagnostics import (
     MAJORITY_REASON_ALL_REJECTED,
@@ -200,6 +202,7 @@ logger = logging.getLogger(__name__)
 _FINAL_GATE_REASON_KO: Final[dict[str, str]] = {
     FINAL_GATE_REASON_COMPARISON_BLOCKED: "동종업계 비교 검증 실패",
     FINAL_GATE_REASON_PUBLISH_BLOCKED: "출고 전 자동 검증 거절",
+    FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR: "보고서 품질 최소 기준 미달",
     FINAL_GATE_REASON_MISSING_IDENTITY: "회사 정체성 필수 사실 미확보",
     FINAL_GATE_REASON_MISSING_REVENUE: "수익 구조 필수 사실 미확보",
     FINAL_GATE_REASON_MISSING_IDENTITY_REVENUE: (
@@ -3561,6 +3564,12 @@ def _run_v2_composer(
         raise exc.cause from exc
     except V2ValidationError as exc:
         # v2 출고 3검사 실패 — 원문 없는 검증 사유만 운영 기록에 남긴다.
+        # ★ 품질 하한(40건 실질 claim·8건 독립 문서·50% 검증 비율) 미달일
+        #   때만 별도 사유로 구분한다 — 그 외 출고 검증 실패는 여전히
+        #   publish_blocked로 남는다(뭉뚱그림 금지). 분류 자체는
+        #   src/shared/final_gate_diagnostics.py의 순수 함수 한 곳이
+        #   권위다(shadow 진단 하네스와 공유).
+        gate_reason = classify_v2_validation_final_gate_reason(exc.problem_codes)
         logger.warning("엔진 v2 출고 검증 차단: %s", list(exc.problems))
         steps.append({"step": "v2_출고검증_차단", "사유": list(exc.problems)})
         return RunResult(
@@ -3568,14 +3577,14 @@ def _run_v2_composer(
             message=(
                 "엔진 v2 출고 검증을 통과하지 못해 보고서를 내보내지 않았습니다. "
                 "확인되지 않은 내용을 정상 보고서처럼 보여주지 않습니다."
-                + _stop_reason_note(FINAL_GATE_REASON_PUBLISH_BLOCKED)
+                + _stop_reason_note(gate_reason)
             ),
             sources=sources,
             corp_type=corp_type,
             fragments_collected=len(frags),
             cost_krw=_request_spent_krw(engine),
             model=model,
-            final_gate_reason=FINAL_GATE_REASON_PUBLISH_BLOCKED,
+            final_gate_reason=gate_reason,
         )
 
     # composer는 본문·인용을 만들지만 수집 단계의 3상태(ok/none/failed)는

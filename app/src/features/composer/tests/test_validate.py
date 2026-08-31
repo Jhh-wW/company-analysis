@@ -10,11 +10,14 @@
 
 from __future__ import annotations
 
+import ast
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from src.core import paths
 from src.features.composer.constants import (
     GRADE_CONFIRMED,
     GRADE_INTERPRETED,
@@ -359,3 +362,77 @@ def test_출고를_막지_않는다_중복_검출은_배선되지_않았다():
     assert findings != ()  # 검출은 된다
     assert any(f.confidence == CONFIDENCE_CONFIRMED for f in findings)
     validate_v2(rendered)  # 그래도 출고 검증은 통과한다(예외 없음)
+
+
+# ══════════════════════════════════════════════════════════
+# ⑥ V2ValidationError.problem_codes — 게이트 사유 구분용 기계 코드 (task 022)
+# ══════════════════════════════════════════════════════════
+
+
+def test_V2ValidationError_기본_problem_codes는_빈_불변튜플이다():
+    """기존 호출자(problem_codes 없이 생성)의 동작이 그대로 보존돼야 한다."""
+    error = V2ValidationError(("핵심 요약이 부족합니다",))
+    assert error.problem_codes == ()
+    assert isinstance(error.problem_codes, tuple)
+
+
+def test_V2ValidationError_problem_codes는_키워드로_전달하고_튜플로_굳는다():
+    error = V2ValidationError(
+        ("문제 있음",),
+        problem_codes=["too_few_substantive_claims", "too_few_document_sources"],
+    )
+    assert error.problem_codes == (
+        "too_few_substantive_claims",
+        "too_few_document_sources",
+    )
+    assert isinstance(error.problem_codes, tuple)  # 리스트로 넘겨도 불변으로 굳는다
+    # 사람이 읽는 사유(problems)는 problem_codes와 무관하게 그대로 유지된다
+    assert error.problems == ("문제 있음",)
+
+
+def _v2_validation_error_call_sites(path: Path) -> list[tuple[int, int, list[str]]]:
+    """``V2ValidationError(...)`` 호출을 실행하지 않고 코드로 직접 세어본다.
+
+    (줄번호, 위치인자 개수, 키워드인자 이름 목록)의 목록을 돌려준다.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return [
+        (node.lineno, len(node.args), [kw.arg for kw in node.keywords])
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "V2ValidationError"
+    ]
+
+
+def test_V2ValidationError_problem_codes_운반자는_한_권위_경로뿐이다():
+    """task 022 정밀화 — «호출부가 정확히 몇 개인지»는 세지 않는다(구현이
+    조금만 바뀌어도 깨지는 결합이라 뺐다). 대신 지키는 의미 계약은 하나:
+    ``problem_codes`` 키워드를 실제로 싣는 호출부가 STRICT 품질 게이트
+    «한 곳뿐»이라는 것. 이 파일(validate.py)과 ``pipeline.py``를 대상으로
+    본다 — composer feature 밖(``pipeline/real.py``)은 feature 경계를
+    넘는 import 없이 이 시험이 볼 수 없으므로, 그 경계 안 호출부는
+    ``pipeline`` feature 자신의 시험
+    (``test_v2_기존_예외_호환_problem_codes없이_던져도_그대로_동작한다`` 등)
+    이 지킨다.
+
+    ``problem_codes``는 키워드 전용(``*,``) 인자이므로, 이 계약을 어기고
+    두 번째 위치 인자로 몰래 흘려보내는 호출도 함께 걸러낸다 — 모든
+    호출이 위치 인자(problems)를 정확히 하나만 넘겨야 한다.
+    """
+    composer_dir = Path(paths.APP_ROOT) / "src" / "features" / "composer"
+    sites = _v2_validation_error_call_sites(
+        composer_dir / "pipeline.py"
+    ) + _v2_validation_error_call_sites(composer_dir / "validate.py")
+
+    assert sites  # composer 안에 최소 한 곳은 있어야 한다(회귀 방지)
+    with_problem_codes = [s for s in sites if s[2] == ["problem_codes"]]
+    assert len(with_problem_codes) == 1  # STRICT 품질 게이트 한 곳뿐
+    # 그 한 곳을 뺀 나머지는 problem_codes 키워드를 아예 쓰지 않는다 —
+    # 다른 raise 지점이 조용히 코드를 지어내 실어보내지 않는다.
+    assert all(
+        s[2] == [] for s in sites if s not in with_problem_codes
+    )
+    # 모든 호출이 위치 인자(problems)를 정확히 하나만 넘긴다 — 두 번째
+    # 위치 인자로 problem_codes를 몰래 넘기는 호출은 없다(키워드 전용 계약).
+    assert all(args == 1 for _lineno, args, _kw in sites)
