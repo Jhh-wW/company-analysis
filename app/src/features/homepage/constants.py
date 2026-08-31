@@ -337,3 +337,112 @@ SINGLE_LABEL_PUBLIC_SUFFIXES: Final[frozenset[str]] = frozenset(
         "shop",
     }
 )
+
+# ── 넓은 공식 웹 수집 (Writer B, P-8da84a36) ────────────────
+#
+# 여러 공식 호스트(채용·IR·뉴스룸·정적 HTML)에 흩어진 공식 문서를 결속 근거와
+# 함께 모으는 별도 수집기(wide_collect.py 등)의 상한. 아래 숫자는 실사용
+# 트래픽으로 검증한 값이 아니라 «관측용 상한»이며, 이 값에 걸렸다고 해서
+# 정상 회사를 거절하는 근거로 쓰면 안 된다 — 상한 도달은 TRUNCATED로 남긴다.
+
+#: 도메인군 전체(root+하위도메인+결속된 후보 호스트 합계)에서 시도하는
+#: 최대 일반 웹 페이지 수(robots.txt·sitemap.xml 조회는 포함하지 않는다).
+WIDE_MAX_PAGES: Final[int] = 12
+
+#: 도메인군 전체에서 내려받기를 시도하는 공식 IR PDF 최대 수.
+WIDE_MAX_IR_DOCUMENTS: Final[int] = 3
+
+#: robots·sitemap·모든 페이지·모든 IR PDF를 합친 전체 수집 상한(초).
+WIDE_COLLECTION_TIMEOUT_SEC: Final[int] = 45
+
+#: 일반 웹 페이지 전체(여러 호스트 합계)에서 내려받는 최대 바이트.
+#: 페이지 수 상한보다 이 예산이 우선한다 — 큰 페이지 몇 개가 12쪽 예산을
+#: 다 쓰기 전에 시간·바이트로 먼저 멈출 수 있게 한다.
+WIDE_MAX_TOTAL_BYTES: Final[int] = 6 * 1024 * 1024
+
+#: 결속 근거가 있어도 무한히 늘지 않도록 두는 호스트 수 상한
+#: (root 1개 + 하위도메인 + 링크로 발견된 후보 호스트 합계).
+WIDE_MAX_HOSTS: Final[int] = 8
+
+#: sitemap.xml 하나에서 읽는 최대 바이트.
+WIDE_MAX_SITEMAP_BYTES: Final[int] = 2 * 1024 * 1024
+
+#: sitemap.xml에서 뽑아 후보 큐에 넣는 최대 URL 항목 수.
+WIDE_MAX_SITEMAP_ENTRIES: Final[int] = 200
+
+#: 문서 하나에서 보존하는 usable_ranges(본문 구간) 최대 개수.
+WIDE_MAX_USABLE_RANGES_PER_DOCUMENT: Final[int] = 40
+
+#: usable_ranges 구간 하나의 최대 글자 수.
+WIDE_MAX_CHARS_PER_RANGE: Final[int] = 1_500
+
+#: 구간으로 남기기엔 너무 짧은 글자 수(메뉴 부스러기 제외).
+WIDE_MIN_CHARS_PER_RANGE: Final[int] = 40
+
+#: 문서 identity의 source_kind 값.
+WIDE_SOURCE_KIND_WEB_PAGE: Final[str] = "official_web_page"
+WIDE_SOURCE_KIND_IR_PDF: Final[str] = "official_ir_pdf"
+WIDE_SOURCE_KIND_RECRUIT_PAGE: Final[str] = "official_recruit_page"
+
+#: 문서·attempt의 requirement 값.
+WIDE_REQUIREMENT_REQUIRED: Final[str] = "REQUIRED"
+WIDE_REQUIREMENT_OPTIONAL: Final[str] = "OPTIONAL"
+
+#: attempt의 state 값. 「없다」와 「못 가져옴」은 반드시 구분한다.
+WIDE_ATTEMPT_OK: Final[str] = "OK"
+WIDE_ATTEMPT_MISSING: Final[str] = "MISSING"
+WIDE_ATTEMPT_FAILED: Final[str] = "FAILED"
+WIDE_ATTEMPT_TRUNCATED: Final[str] = "TRUNCATED"
+
+#: 원문 위치·수집기 계약에 함께 봉인할 버전 문자열.
+WIDE_COLLECTOR_VERSION: Final[str] = "homepage-wide-collector/1"
+WIDE_PARSER_VERSION: Final[str] = "homepage-wide-parser/1"
+
+#: 채용·IR·뉴스룸·블로그 호스트·경로를 먼저 살펴보게 하는 우선순위 키워드.
+WIDE_PRIORITY_HOST_KEYWORDS: Final[tuple[str, ...]] = (
+    "recruit",
+    "career",
+    "careers",
+    "jobs",
+    "채용",
+    "ir",
+    "investor",
+    "news",
+    "press",
+    "newsroom",
+    "blog",
+)
+
+#: 공식 페이지에 링크돼 있어도 «회사의 다른 공식 채널»로 보지 않는 흔한
+#: 소셜/광고/분석 호스트 접미사. 후보 결속 대상에서 제외한다(품질 필터,
+#: SSRF 방어와는 무관 — 그 방어는 항상 safe_http가 담당한다).
+WIDE_EXCLUDED_LINKED_HOST_SUFFIXES: Final[tuple[str, ...]] = (
+    "facebook.com",
+    "instagram.com",
+    "youtube.com",
+    "youtu.be",
+    "twitter.com",
+    "x.com",
+    "linkedin.com",
+    "kakao.com",
+    "pf.kakao.com",
+    "band.us",
+    "google.com",
+    "googletagmanager.com",
+    "google-analytics.com",
+    "doubleclick.net",
+    "naver.com",
+    "channel.io",
+)
+
+#: composer/constants.py의 CLAIM_SLOTS_BY_SECTION 대표값 «사본»이다.
+#: ★ 정본이 아니다 — attempt.slot_ids 예시로만 쓰며, composer 쪽 정본이
+#: 바뀌면 이 사본도 다시 확인해야 한다(읽기 전용으로 참조만 함).
+WIDE_REPRESENTATIVE_SLOT_IDS: Final[tuple[str, ...]] = (
+    "portfolio:product_role",
+    "culture:work_principle",
+    "future_strategy:stated_plan",
+    "identity:self_positioning",
+    "business_model:revenue_model",
+    "operations_partners:partnership",
+)
