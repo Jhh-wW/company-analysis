@@ -71,6 +71,8 @@ def _authority_payload(
     evidence_generation_sha256: str,
     build_identity_sha256: str,
     automatic_release_sha256: str,
+    charge_run_id: str,
+    charge_decision_sha256: str,
     origin_authority_id: str,
     issued_at: dt.datetime,
 ) -> dict[str, object]:
@@ -91,6 +93,8 @@ def _authority_payload(
         "evidence_generation_sha256": evidence_generation_sha256,
         "build_identity_sha256": build_identity_sha256,
         "automatic_release_sha256": automatic_release_sha256,
+        "charge_run_id": charge_run_id,
+        "charge_decision_sha256": charge_decision_sha256,
         "origin_authority_id": origin_authority_id,
         "issued_at": utc_text(issued_at, label="출고 권위 발급"),
     }
@@ -116,6 +120,8 @@ class ReleaseAuthority:
     evidence_generation_sha256: str
     build_identity_sha256: str
     automatic_release_sha256: str
+    charge_run_id: str
+    charge_decision_sha256: str
     origin_authority_id: str
     issued_at: dt.datetime
     version: str = RELEASE_AUTHORITY_VERSION
@@ -132,6 +138,7 @@ class ReleaseAuthority:
             "billing_bucket_id",
             "content_snapshot_id",
             "artifact_id",
+            "charge_run_id",
         )
         for name in text_fields:
             object.__setattr__(
@@ -148,6 +155,7 @@ class ReleaseAuthority:
             "evidence_generation_sha256",
             "build_identity_sha256",
             "automatic_release_sha256",
+            "charge_decision_sha256",
         )
         for name in digest_fields:
             object.__setattr__(
@@ -180,6 +188,8 @@ class ReleaseAuthority:
             evidence_generation_sha256=self.evidence_generation_sha256,
             build_identity_sha256=self.build_identity_sha256,
             automatic_release_sha256=self.automatic_release_sha256,
+            charge_run_id=self.charge_run_id,
+            charge_decision_sha256=self.charge_decision_sha256,
             origin_authority_id=origin,
             issued_at=issued_at,
         )
@@ -205,6 +215,8 @@ class ReleaseAuthority:
         evidence_generation_sha256: str,
         build_identity_sha256: str,
         automatic_release_sha256: str,
+        charge_run_id: str,
+        charge_decision_sha256: str,
         issued_at: dt.datetime,
     ) -> "ReleaseAuthority":
         values = {
@@ -253,6 +265,11 @@ class ReleaseAuthority:
                 automatic_release_sha256,
                 label="automatic_release_sha256",
             ),
+            "charge_run_id": _required_text(charge_run_id, label="charge_run_id"),
+            "charge_decision_sha256": require_sha256_hex(
+                charge_decision_sha256,
+                label="charge_decision_sha256",
+            ),
             "origin_authority_id": "",
             "issued_at": require_aware(issued_at, label="출고 권위 발급"),
         }
@@ -272,6 +289,8 @@ class ReleaseAuthority:
         delivery_id: str,
         billing_bucket_id: str,
         automatic_release_sha256: str,
+        charge_run_id: str,
+        charge_decision_sha256: str,
         issued_at: dt.datetime,
     ) -> "ReleaseAuthority":
         if type(origin) is not ReleaseAuthority:
@@ -292,6 +311,18 @@ class ReleaseAuthority:
             or str(delivery_id).strip() == origin.delivery_id
         ):
             raise ValueError("재사용 권위에는 새 공개 ID와 delivery가 필요합니다")
+        clean_charge_run_id = _required_text(
+            charge_run_id,
+            label="charge_run_id",
+        )
+        if clean_charge_run_id == origin.charge_run_id:
+            raise ValueError("재사용 출고는 원본 조사의 청구 행을 다시 쓸 수 없습니다")
+        reuse_release_sha256 = require_sha256_hex(
+            automatic_release_sha256,
+            label="automatic_release_sha256",
+        )
+        if reuse_release_sha256 != origin.automatic_release_sha256:
+            raise ValueError("재사용 출고는 원본과 같은 자동승인 영수증을 써야 합니다")
         values = {
             "kind": ReleaseAuthorityKind.REUSE,
             "public_id": _required_text(public_id, label="public_id"),
@@ -307,9 +338,11 @@ class ReleaseAuthority:
             "public_manifest_sha256": origin.public_manifest_sha256,
             "evidence_generation_sha256": origin.evidence_generation_sha256,
             "build_identity_sha256": origin.build_identity_sha256,
-            "automatic_release_sha256": require_sha256_hex(
-                automatic_release_sha256,
-                label="automatic_release_sha256",
+            "automatic_release_sha256": reuse_release_sha256,
+            "charge_run_id": clean_charge_run_id,
+            "charge_decision_sha256": require_sha256_hex(
+                charge_decision_sha256,
+                label="charge_decision_sha256",
             ),
             "origin_authority_id": origin.authority_id,
             "issued_at": reuse_issued_at,
@@ -345,6 +378,8 @@ _SCHEMA: Final[tuple[str, ...]] = (
         evidence_generation_sha256  TEXT NOT NULL,
         build_identity_sha256       TEXT NOT NULL,
         automatic_release_sha256    TEXT NOT NULL,
+        charge_run_id               TEXT NOT NULL UNIQUE,
+        charge_decision_sha256      TEXT NOT NULL,
         origin_authority_id         TEXT NOT NULL,
         issued_at                   TEXT NOT NULL
     )
@@ -409,6 +444,7 @@ _SCHEMA: Final[tuple[str, ...]] = (
           AND origin.public_manifest_sha256 = NEW.public_manifest_sha256
           AND origin.evidence_generation_sha256 = NEW.evidence_generation_sha256
           AND origin.build_identity_sha256 = NEW.build_identity_sha256
+          AND origin.automatic_release_sha256 = NEW.automatic_release_sha256
     )
     BEGIN
         SELECT RAISE(ABORT, 'release authority origin mismatch');
@@ -466,6 +502,8 @@ def _row_values(authority: ReleaseAuthority) -> tuple[object, ...]:
         authority.evidence_generation_sha256,
         authority.build_identity_sha256,
         authority.automatic_release_sha256,
+        authority.charge_run_id,
+        authority.charge_decision_sha256,
         authority.origin_authority_id,
         utc_text(authority.issued_at, label="출고 권위 발급"),
     )
@@ -491,8 +529,9 @@ def save_release_authority(
                 assessment_sha256, public_content_sha256,
                 public_manifest_sha256, evidence_generation_sha256,
                 build_identity_sha256, automatic_release_sha256,
+                charge_run_id, charge_decision_sha256,
                 origin_authority_id, issued_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             values,
         )
@@ -531,8 +570,10 @@ def _from_row(row: sqlite3.Row | tuple[object, ...]) -> ReleaseAuthority:
             evidence_generation_sha256=str(row[14]),
             build_identity_sha256=str(row[15]),
             automatic_release_sha256=str(row[16]),
-            origin_authority_id=str(row[17]),
-            issued_at=datetime_from_utc_text(row[18], label="출고 권위 발급"),
+            charge_run_id=str(row[17]),
+            charge_decision_sha256=str(row[18]),
+            origin_authority_id=str(row[19]),
+            issued_at=datetime_from_utc_text(row[20], label="출고 권위 발급"),
         )
     except (TypeError, ValueError) as exc:
         raise ReleaseAuthorityCorrupt("저장된 출고 권위가 손상됐습니다") from exc
@@ -603,6 +644,7 @@ def _assert_storage_binding(
                 "public_manifest_sha256",
                 "evidence_generation_sha256",
                 "build_identity_sha256",
+                "automatic_release_sha256",
             )
         ):
             raise ReleaseAuthorityCorrupt("재사용 권위가 정확한 원본 권위와 다릅니다")

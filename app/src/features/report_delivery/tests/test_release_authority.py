@@ -110,6 +110,8 @@ def _owner(
         evidence_generation_sha256=_digest("e"),
         build_identity_sha256=_digest("f"),
         automatic_release_sha256=_digest("1"),
+        charge_run_id=f"charge:{delivery.public_id}",
+        charge_decision_sha256=_digest("2"),
         issued_at=now,
     )
 
@@ -205,6 +207,8 @@ def test_본문_지문이나_delivery_결속을_꾸민_권위는_DB가_거절한
         evidence_generation_sha256=authority.evidence_generation_sha256,
         build_identity_sha256=authority.build_identity_sha256,
         automatic_release_sha256=authority.automatic_release_sha256,
+        charge_run_id=authority.charge_run_id,
+        charge_decision_sha256=authority.charge_decision_sha256,
         issued_at=authority.issued_at,
     )
 
@@ -263,7 +267,9 @@ def test_재사용_권위는_원본의_본문_pdf_생성증거를_그대로_상�
         public_id=reused_delivery.public_id,
         delivery_id=reused_delivery.delivery_id,
         billing_bucket_id=reused_delivery.billing_bucket_id,
-        automatic_release_sha256=_digest("2"),
+        automatic_release_sha256=owner.automatic_release_sha256,
+        charge_run_id="charge:authority-waiter",
+        charge_decision_sha256=_digest("3"),
         issued_at=now + dt.timedelta(seconds=1),
     )
 
@@ -273,6 +279,31 @@ def test_재사용_권위는_원본의_본문_pdf_생성증거를_그대로_상�
     assert reused.producer_evidence_sha256 == owner.producer_evidence_sha256
     assert reused.content_snapshot_id == owner.content_snapshot_id
     assert reused.artifact_id == owner.artifact_id
+    assert reused.automatic_release_sha256 == owner.automatic_release_sha256
+    assert reused.charge_run_id != owner.charge_run_id
+
+    with pytest.raises(ValueError, match="같은 자동승인"):
+        ReleaseAuthority.issue_reuse(
+            origin=owner,
+            public_id="authority-waiter-wrong-release",
+            delivery_id="delivery-waiter-wrong-release",
+            billing_bucket_id=owner.billing_bucket_id,
+            automatic_release_sha256=_digest("9"),
+            charge_run_id="charge:authority-waiter-wrong-release",
+            charge_decision_sha256=_digest("3"),
+            issued_at=now + dt.timedelta(seconds=2),
+        )
+    with pytest.raises(ValueError, match="청구 행"):
+        ReleaseAuthority.issue_reuse(
+            origin=owner,
+            public_id="authority-waiter-same-charge",
+            delivery_id="delivery-waiter-same-charge",
+            billing_bucket_id=owner.billing_bucket_id,
+            automatic_release_sha256=owner.automatic_release_sha256,
+            charge_run_id=owner.charge_run_id,
+            charge_decision_sha256=_digest("3"),
+            issued_at=now + dt.timedelta(seconds=2),
+        )
 
 
 def test_원본_권위가_없는_재사용은_거절한다(
@@ -318,7 +349,9 @@ def test_원본_권위가_없는_재사용은_거절한다(
         public_id=delivery.public_id,
         delivery_id=delivery.delivery_id,
         billing_bucket_id=delivery.billing_bucket_id,
-        automatic_release_sha256=_digest("2"),
+        automatic_release_sha256=imaginary_origin.automatic_release_sha256,
+        charge_run_id="charge:authority-orphan-reuse",
+        charge_decision_sha256=_digest("3"),
         issued_at=now,
     )
 
@@ -364,7 +397,9 @@ def test_다른_비용통장은_승인된_원본을_가져다_재사용할_수_�
             public_id="authority-other-bucket",
             delivery_id="delivery-other-bucket",
             billing_bucket_id="bucket-attacker",
-            automatic_release_sha256=_digest("2"),
+            automatic_release_sha256=owner.automatic_release_sha256,
+            charge_run_id="charge:authority-other-bucket",
+            charge_decision_sha256=_digest("3"),
             issued_at=now + dt.timedelta(seconds=1),
         )
 
@@ -408,6 +443,75 @@ def test_저장된_권위는_update_delete할_수_없다(
         )
     with pytest.raises(sqlite3.IntegrityError, match="immutable"):
         conn.execute(f"DELETE FROM {TABLE_RELEASE_AUTHORITIES}")
+
+
+def test_재사용_권위의_자동승인_영수증을_DB에서_바꿔도_조회가_거절한다(
+    conn: sqlite3.Connection,
+    content,
+    now: dt.datetime,
+    tmp_path: Path,
+) -> None:
+    owner_delivery = _delivery(
+        public_id="authority-release-owner",
+        bucket="bucket-release-binding",
+        content=content,
+        now=now,
+        reused=False,
+    )
+    save_delivery(conn, owner_delivery)
+    artifact = _stored_pdf(
+        conn,
+        content=content,
+        now=now,
+        root=tmp_path / "blobs-release-binding",
+    )
+    bind_artifact_to_delivery(
+        conn,
+        delivery_id=owner_delivery.delivery_id,
+        artifact_id=artifact.artifact_id,
+    )
+    owner = _owner(
+        delivery=owner_delivery,
+        artifact_id=artifact.artifact_id,
+        content=content,
+        now=now,
+    )
+    save_release_authority(conn, owner)
+
+    reused_delivery = _delivery(
+        public_id="authority-release-waiter",
+        bucket=owner.billing_bucket_id,
+        content=content,
+        now=now + dt.timedelta(seconds=1),
+        reused=True,
+    )
+    save_delivery(conn, reused_delivery)
+    bind_artifact_to_delivery(
+        conn,
+        delivery_id=reused_delivery.delivery_id,
+        artifact_id=artifact.artifact_id,
+    )
+    reused = ReleaseAuthority.issue_reuse(
+        origin=owner,
+        public_id=reused_delivery.public_id,
+        delivery_id=reused_delivery.delivery_id,
+        billing_bucket_id=reused_delivery.billing_bucket_id,
+        automatic_release_sha256=owner.automatic_release_sha256,
+        charge_run_id="charge:authority-release-waiter",
+        charge_decision_sha256=_digest("3"),
+        issued_at=now + dt.timedelta(seconds=1),
+    )
+    save_release_authority(conn, reused)
+
+    conn.execute("DROP TRIGGER report_release_authorities_no_update")
+    conn.execute(
+        f"UPDATE {TABLE_RELEASE_AUTHORITIES} "
+        "SET automatic_release_sha256 = ? WHERE authority_id = ?",
+        (_digest("9"), reused.authority_id),
+    )
+
+    with pytest.raises(ReleaseAuthorityCorrupt, match="손상"):
+        load_release_authority(conn, reused.authority_id)
 
 
 def test_trigger를_우회해_행을_손상해도_조회가_권위로_인정하지_않는다(
@@ -495,6 +599,8 @@ def test_권위_subclass가_검사를_덮어써도_저장하거나_상속할_수
             public_id="authority-subclass-reuse",
             delivery_id="delivery-forged",
             billing_bucket_id="bucket-subclass",
-            automatic_release_sha256=_digest("2"),
+            automatic_release_sha256=authority.automatic_release_sha256,
+            charge_run_id="charge:authority-subclass-reuse",
+            charge_decision_sha256=_digest("3"),
             issued_at=now,
         )

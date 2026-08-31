@@ -104,6 +104,48 @@ def test_자동출고전에는_청구불가_출고후에도_가격미확정이�
         conn.close()
 
 
+def test_청구결정_지문은_run_출고물_결정_모두에_결속된다():
+    decision = store.CustomerChargeDecision(
+        eligible=True,
+        amount_krw=1000.0,
+        reason="released",
+    )
+    baseline = store.charge_decision_sha256(
+        run_id="charge-run",
+        automatic_release_sha256="a" * 64,
+        decision=decision,
+    )
+
+    assert baseline == store.charge_decision_sha256(
+        run_id="charge-run",
+        automatic_release_sha256="a" * 64,
+        decision=store.CustomerChargeDecision(
+            eligible=True,
+            amount_krw=1000,
+            reason="released",
+        ),
+    )
+    assert baseline != store.charge_decision_sha256(
+        run_id="other-run",
+        automatic_release_sha256="a" * 64,
+        decision=decision,
+    )
+    assert baseline != store.charge_decision_sha256(
+        run_id="charge-run",
+        automatic_release_sha256="b" * 64,
+        decision=decision,
+    )
+    assert baseline != store.charge_decision_sha256(
+        run_id="charge-run",
+        automatic_release_sha256="a" * 64,
+        decision=store.CustomerChargeDecision(
+            eligible=True,
+            amount_krw=1001,
+            reason="released",
+        ),
+    )
+
+
 def test_확정된_출고지문을_다른_PDF로_바꾸지_못한다():
     conn = _conn()
     try:

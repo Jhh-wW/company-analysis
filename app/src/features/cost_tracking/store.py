@@ -13,6 +13,7 @@ import json
 import math
 import sqlite3
 from dataclasses import asdict, dataclass
+from decimal import Decimal
 from typing import Iterable
 
 from src.features.export_pdf.release import is_valid_sha256
@@ -69,6 +70,38 @@ class CustomerChargeDecision:
 
 class CostAuthorityConflict(RuntimeError):
     """이미 확정된 고객 청구 근거를 다른 출고물로 바꾸려 했다."""
+
+
+def charge_decision_sha256(
+    *,
+    run_id: str,
+    automatic_release_sha256: str,
+    decision: CustomerChargeDecision,
+) -> str:
+    """실제 조사·자동출고·청구 결정을 하나의 안정적인 지문으로 묶는다."""
+
+    clean_run_id = run_id if type(run_id) is str else ""
+    if not clean_run_id or clean_run_id != clean_run_id.strip():
+        raise ValueError("청구 결정 지문에는 정확한 run ID가 필요합니다")
+    if not is_valid_sha256(automatic_release_sha256):
+        raise ValueError("청구 결정 지문에는 자동출고 SHA-256이 필요합니다")
+    if type(decision) is not CustomerChargeDecision:
+        raise TypeError("청구 결정 지문에는 정확한 CustomerChargeDecision이 필요합니다")
+    amount = format(Decimal(str(decision.amount_krw)).normalize(), "f")
+    payload = json.dumps(
+        {
+            "version": 1,
+            "run_id": clean_run_id,
+            "automatic_release_sha256": automatic_release_sha256,
+            "eligible": decision.eligible,
+            "amount_krw": amount,
+            "reason": decision.reason,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _now() -> str:
