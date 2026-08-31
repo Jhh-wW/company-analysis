@@ -58,9 +58,15 @@ def _document(
     )
 
 
-def _fragment(*, slot_id: str = "business_model", document_id: str = "doc-1") -> EvidenceFragment:
+def _fragment(
+    *,
+    company_id: str = "corp-1",
+    slot_id: str = "business_model",
+    document_id: str = "doc-1",
+) -> EvidenceFragment:
     text = _FRAGMENT_TEXT
     return EvidenceFragment(
+        company_id=company_id,
         fragment_id=f"fragment-{slot_id}",
         document_id=document_id,
         location="본문 1문단",
@@ -75,11 +81,13 @@ def _fragment(*, slot_id: str = "business_model", document_id: str = "doc-1") ->
 
 def _attempt(
     *,
+    company_id: str = "corp-1",
     slot_id: str,
     state: CollectionState,
     requirement: SourceRequirement = SourceRequirement.REQUIRED,
 ) -> CollectionAttempt:
     return CollectionAttempt(
+        company_id=company_id,
         attempt_id=f"attempt-{slot_id}-{state.value}-{requirement.value}",
         source_kind="official_homepage",
         requirement=requirement,
@@ -308,6 +316,20 @@ def test_문서와_조각의_회사_및_원본_결속을_강제한다() -> None:
             max_estimated_tokens=100,
         )
 
+    with pytest.raises(ValueError, match="다른 회사의 근거 조각"):
+        _candidate(fragments=(_fragment(company_id="corp-2"),))
+
+    with pytest.raises(ValueError, match="다른 회사의 수집 시도"):
+        _candidate(
+            attempts=(
+                _attempt(
+                    company_id="corp-2",
+                    slot_id="business_model",
+                    state=CollectionState.MISSING,
+                ),
+            )
+        )
+
 
 def test_조각의_정확한_원문해시가_원본문서_허용목록에_없으면_거절한다() -> None:
     with pytest.raises(ValueError, match="원본 문서의 허용 목록"):
@@ -341,9 +363,23 @@ def test_최종묶음도_원본문서가_허용하지_않은_조각해시를_거
         )
 
 
+def test_최종묶음도_다른회사의_조각으로_바꿔치기할수없다() -> None:
+    bundle = build_section_bundle(
+        _candidate(fragments=(_fragment(),), readiness=EvidenceReadiness.READY),
+        required_slot_ids=("business_model",),
+    )
+
+    with pytest.raises(ValueError, match="다른 회사의 근거 조각"):
+        replace(
+            bundle,
+            fragments=(_fragment(company_id="corp-2"),),
+        )
+
+
 def test_근거_원문_hash가_다르면_생성즉시_거절한다() -> None:
     with pytest.raises(ValueError, match="일치하지 않습니다"):
         EvidenceFragment(
+            company_id="corp-1",
             fragment_id="fragment-1",
             document_id="doc-1",
             location="본문",
@@ -365,6 +401,7 @@ def test_enum값은_json에서_영어_기계코드로_보존된다() -> None:
 def test_사유코드에는_원문이나_사람문장을_넣을_수_없다() -> None:
     with pytest.raises(ValueError, match="기계 코드"):
         _attempt(slot_id="business_model", state=CollectionState.FAILED).__class__(
+            company_id="corp-1",
             attempt_id="attempt-raw-reason",
             source_kind="official_homepage",
             requirement=SourceRequirement.REQUIRED,

@@ -121,6 +121,7 @@ class CollectedEvidenceDocument:
 class EvidenceFragment:
     """출처 문서의 위치와 원문 해시에 묶인 장별 근거 한 조각."""
 
+    company_id: str
     fragment_id: str
     document_id: str
     location: str
@@ -137,6 +138,7 @@ class EvidenceFragment:
 
     def __post_init__(self) -> None:
         for label, value in (
+            ("회사 식별자", self.company_id),
             ("근거 조각 식별자", self.fragment_id),
             ("원본 문서 식별자", self.document_id),
             ("원문 위치", self.location),
@@ -159,6 +161,7 @@ class EvidenceFragment:
 class CollectionAttempt:
     """근거를 못 찾은 경우까지 보존하는 출처 조회 기록."""
 
+    company_id: str
     attempt_id: str
     source_kind: str
     requirement: SourceRequirement
@@ -170,6 +173,7 @@ class CollectionAttempt:
     documents_seen: int = 0
 
     def __post_init__(self) -> None:
+        _require_text(self.company_id, label="회사 식별자")
         _require_text(self.attempt_id, label="수집 시도 식별자")
         _require_text(self.source_kind, label="수집 출처 종류")
         _require_unique_texts(self.slot_ids, label="수집 대상 의미 칸")
@@ -213,6 +217,8 @@ class ChapterEvidenceCandidates:
             raise ValueError("다른 회사의 문서를 한 장 후보에 섞을 수 없습니다")
         fragment_ids = tuple(fragment.fragment_id for fragment in self.fragments)
         _require_unique_texts(fragment_ids, label="근거 조각 식별자")
+        if any(fragment.company_id != self.company_id for fragment in self.fragments):
+            raise ValueError("다른 회사의 근거 조각을 한 장 후보에 섞을 수 없습니다")
         if any(fragment.section_id != self.section_id for fragment in self.fragments):
             raise ValueError("다른 장의 근거 조각을 한 장 후보에 섞을 수 없습니다")
         unknown_documents = sorted(
@@ -243,6 +249,8 @@ class ChapterEvidenceCandidates:
             )
         attempt_ids = tuple(attempt.attempt_id for attempt in self.attempts)
         _require_unique_texts(attempt_ids, label="수집 시도 식별자")
+        if any(attempt.company_id != self.company_id for attempt in self.attempts):
+            raise ValueError("다른 회사의 수집 시도를 한 장 후보에 섞을 수 없습니다")
         if sum(len(fragment.text) for fragment in self.fragments) > self.max_chars:
             raise ValueError("장별 근거 원문이 선언한 문자 예산을 초과했습니다")
 
@@ -310,6 +318,8 @@ class SectionEvidenceBundle:
             raise ValueError("다른 회사의 문서를 최종 근거 묶음에 섞을 수 없습니다")
         fragment_ids = tuple(fragment.fragment_id for fragment in self.fragments)
         _require_unique_texts(fragment_ids, label="근거 조각 식별자")
+        if any(fragment.company_id != self.company_id for fragment in self.fragments):
+            raise ValueError("다른 회사의 근거 조각을 최종 근거 묶음에 섞을 수 없습니다")
         if any(fragment.section_id != self.section_id for fragment in self.fragments):
             raise ValueError("다른 장의 근거 조각을 최종 근거 묶음에 섞을 수 없습니다")
         unknown_fragment_slots = sorted(
