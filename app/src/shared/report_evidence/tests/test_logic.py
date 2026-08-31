@@ -232,6 +232,39 @@ def test_모든_필수장이_ready일_때만_ai호출을_허용하고_complete�
     assert decision.can_call_ai is True
 
 
+def test_긴_사유코드에_장_접두를_붙여도_게이트가_예외로_죽지_않는다() -> None:
+    long_reason_a = "a" * 120
+    long_reason_b = "a" * 119 + "b"
+    candidate = ChapterEvidenceCandidates(
+        company_id="corp-1",
+        section_id="business_model",
+        documents=(_document(),),
+        fragments=(_fragment(),),
+        attempts=(),
+        candidate_readiness=EvidenceReadiness.READY,
+        reason_codes=(long_reason_a, long_reason_b),
+        estimated_tokens=500,
+        max_chars=5000,
+        max_estimated_tokens=2000,
+    )
+    bundle = build_section_bundle(
+        candidate,
+        required_slot_ids=("business_model",),
+    )
+
+    decision = assess_generation_gate(
+        company_id="corp-1",
+        bundles=(bundle,),
+        required_section_ids=("business_model",),
+    )
+
+    assert decision.can_call_ai is True
+    assert len(decision.reason_codes) == 2
+    assert len(set(decision.reason_codes)) == 2
+    assert all(len(code) <= 120 for code in decision.reason_codes)
+    assert all(":sha256_" in code for code in decision.reason_codes)
+
+
 def test_문서와_조각의_회사_및_원본_결속을_강제한다() -> None:
     with pytest.raises(ValueError, match="원본 문서"):
         _candidate(fragments=(_fragment(document_id="other-document"),))

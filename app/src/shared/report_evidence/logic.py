@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 from collections.abc import Iterable
 
 from src.shared.report_evidence.constants import (
@@ -11,6 +13,10 @@ from src.shared.report_evidence.constants import (
     ReportExecutionOutcome,
     SourceRequirement,
 )
+
+
+_MAX_REASON_CODE_CHARS = 120
+_MACHINE_CODE = re.compile(r"^[A-Za-z0-9_.:-]+$")
 from src.shared.report_evidence.models import (
     ChapterEvidenceCandidates,
     GenerationGateDecision,
@@ -30,6 +36,28 @@ def _unique(values: Iterable[str], *, label: str) -> tuple[str, ...]:
 
 def _dedupe(values: Iterable[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(value for value in values if value))
+
+
+def _scoped_reason_code(scope: str, reason_code: str) -> str:
+    """장 이름을 붙인 사유 코드가 저장 계약 120자를 넘지 않게 보존한다.
+
+    단순 절단은 끝부분만 다른 두 장애를 같은 코드로 만든다. 전체 원문 기계 코드의
+    SHA-256 일부를 붙여 서로 다른 원인은 계속 구분하고, 사용자 문장이나 원문은
+    새로 싣지 않는다. 정책 밖 장 이름이 들어와도 전체 게이트가 예외로 죽지 않게
+    장 이름 자체는 안전한 해시 표식으로 바꾼다.
+    """
+
+    clean_scope = str(scope).strip()
+    if not clean_scope or _MACHINE_CODE.fullmatch(clean_scope) is None:
+        scope_digest = hashlib.sha256(clean_scope.encode("utf-8")).hexdigest()[:16]
+        clean_scope = f"section_sha256_{scope_digest}"
+    combined = f"{clean_scope}:{reason_code}"
+    if len(combined) <= _MAX_REASON_CODE_CHARS:
+        return combined
+    digest = hashlib.sha256(combined.encode("utf-8")).hexdigest()[:16]
+    suffix = f":sha256_{digest}"
+    prefix = combined[: _MAX_REASON_CODE_CHARS - len(suffix)].rstrip("_.:-")
+    return f"{prefix}{suffix}"
 
 
 def build_section_bundle(
@@ -156,7 +184,8 @@ def assess_generation_gate(
         else:
             unknown.append(section_id)
         reasons.extend(
-            f"{section_id}:{reason_code}" for reason_code in bundle.reason_codes
+            _scoped_reason_code(section_id, reason_code)
+            for reason_code in bundle.reason_codes
         )
 
     if unknown:
