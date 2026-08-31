@@ -18,6 +18,7 @@ from typing import Final
 
 from src.core import clock
 from src.features.report_access import constants
+from src.features.report_access.models import ReportAudience, ReportBindingResult
 
 
 TABLE_GRANTS: Final[str] = "report_access_public_grants"
@@ -168,6 +169,10 @@ class ReportBindingConflict(RuntimeError):
 
 class MixedReportOwnershipConflict(RuntimeError):
     """같은 run을 PUBLIC과 MEMBER가 동시에 소유한다고 주장함."""
+
+
+class ReportAudienceConflict(RuntimeError):
+    """작업 입장에서 고정한 audience와 DB 소유 표가 다름."""
 
 
 def _object_type(conn: sqlite3.Connection, name: str) -> str:
@@ -525,6 +530,18 @@ def _active_hash(
     return digest if row is not None else ""
 
 
+def _acquire_writer_fence(conn: sqlite3.Connection) -> None:
+    """production clock보다 먼저 SQLite writer 순서를 확정한다."""
+
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+        return
+    # caller가 BEGIN DEFERRED나 SELECT로만 연 transaction은 writer lock을
+    # 보장하지 않는다. 행을 바꾸지 않는 write로 다른 worker와
+    # 순서를 먼저 고정한 다음에만 wall-clock을 읽는다.
+    conn.execute(f"UPDATE {TABLE_GRANTS} SET expires_at = expires_at WHERE 0")
+
+
 def issue_and_bind(
     conn: sqlite3.Connection,
     *,
@@ -539,15 +556,7 @@ def issue_and_bind(
         char not in "0123456789abcdef" for char in clean_run
     ):
         raise ValueError("공개 grant에는 정확한 32자리 run ID가 필요합니다")
-    if not conn.in_transaction:
-        conn.execute("BEGIN IMMEDIATE")
-    else:
-        # caller가 SELECT로 연 deferred transaction이어도 wall-clock을 읽기 전에
-        # 실제 writer 자리를 얻는다. WHERE 0은 행을 바꾸지 않지만 SQLite의 write
-        # transaction 경계를 지나므로 다른 프로세스의 발급과 순서를 고정한다.
-        conn.execute(
-            f"UPDATE {TABLE_GRANTS} SET expires_at = expires_at WHERE 0"
-        )
+    _acquire_writer_fence(conn)
     # 요청 도착 시각이 아니라 DB writer 순서가 권위다. 잠금 전에 시각을 잡으면
     # 만료 전 요청 A가 멈춘 사이 만료 후 B가 먼저 회전하고, A가 또 다른 token을
     # 만들어 같은 브라우저의 두 보고서를 갈라놓을 수 있다.
@@ -750,9 +759,10 @@ def bind_report(
     *,
     run_id: str,
     report_id: str,
+    expected_audience: ReportAudience,
     delivery_expires_at: float | None,
     now: float | None = None,
-) -> bool:
+) -> ReportBindingResult:
     """저장 transaction 안에서 기존 run에 정확한 report를 붙인다.
 
     PUBLIC은 쓰기 잠금을 잡은 뒤 철회·생성시각과 **실제 Delivery 만료 시각**을
@@ -761,16 +771,17 @@ def bind_report(
     60일 열람 보장을 증명하지 못하므로 PUBLIC 행에는 허용하지 않는다.
 
     MEMBER는 grant 수명과 무관하며 기존 subject 결속 갱신 계약을 그대로 쓴다.
+    LINK·ADMIN은 report_access 표에 소유 행이 없어야 한다. 호출자가
+    고정한 audience와 DB 표의 실제 종류가 다르면 자동 복구하지 않는다.
     """
 
     clean_run = str(run_id or "").strip().lower()
     clean_report = str(report_id or "").strip().lower()
+    if type(expected_audience) is not ReportAudience:
+        raise TypeError("보고서 결속에는 닫힌 audience가 필요합니다")
     if not clean_run or not clean_report:
         raise ValueError("run/report ID가 필요합니다")
-    if not conn.in_transaction:
-        # SELECT 뒤 다른 연결이 revoke하는 검사-사용 틈을 닫는다. 이미 보고서 저장
-        # transaction 안이면 그 writer lock을 그대로 사용한다.
-        conn.execute("BEGIN IMMEDIATE")
+    _acquire_writer_fence(conn)
     checked_at = float(time.time() if now is None else now)
 
     public_rows = conn.execute(
@@ -796,7 +807,26 @@ def bind_report(
         raise MixedReportOwnershipConflict(
             "같은 run에 PUBLIC과 MEMBER 소유권이 동시에 존재합니다"
         )
-    if member_row is not None:
+    actual_audience = (
+        ReportAudience.PUBLIC
+        if public_rows
+        else (ReportAudience.MEMBER if member_row is not None else None)
+    )
+    if actual_audience is not None and actual_audience is not expected_audience:
+        raise ReportAudienceConflict(
+            "작업에 고정한 보고서 audience와 DB 소유 표가 다릅니다"
+        )
+    if expected_audience is not ReportAudience.PUBLIC and delivery_expires_at is not None:
+        raise ValueError("PUBLIC이 아닌 결속에 Delivery 만료 시각을 넘길 수 없습니다")
+    if actual_audience is None:
+        return ReportBindingResult(expected_audience, False)
+
+    if expected_audience is ReportAudience.MEMBER:
+        existing_member_report = str(member_row[0])
+        if existing_member_report not in ("", clean_report):
+            raise ReportBindingConflict(
+                "같은 MEMBER run은 서로 다른 두 보고서에 결속할 수 없습니다"
+            )
         member_cursor = conn.execute(
             f"""
             UPDATE {TABLE_MEMBER_BINDINGS}
@@ -805,9 +835,14 @@ def bind_report(
             """,
             (clean_report, clean_run, clean_report),
         )
-        return member_cursor.rowcount > 0
-    if not public_rows:
-        return False
+        return ReportBindingResult(
+            ReportAudience.MEMBER, member_cursor.rowcount > 0
+        )
+
+    if expected_audience in (ReportAudience.LINK, ReportAudience.ADMIN):
+        # actual_audience가 없을 때 위에서 이미 반환한다. 여기에 닿으면
+        # 미래 변경이 닫힌 Enum 계약을 깨뜨린 것이다.
+        raise AssertionError("LINK·ADMIN에 report_access 소유 행이 존재합니다")
 
     if delivery_expires_at is None:
         raise PublicGrantBindingUnavailable(
@@ -857,7 +892,7 @@ def bind_report(
         raise PublicGrantBindingUnavailable(
             "PUBLIC grant가 실제 Delivery 만료와 저장 여유까지 살아 있지 않습니다"
         )
-    return True
+    return ReportBindingResult(ReportAudience.PUBLIC, True)
 
 
 def member_subject_allows(
@@ -991,12 +1026,14 @@ def migrate_legacy_member_bindings(
                 now=checked_at,
             ):
                 raise RuntimeError("기존 MEMBER run의 subject 결속을 만들지 못했습니다")
-            if not bind_report(
+            binding = bind_report(
                 conn,
                 run_id=str(run_id),
                 report_id=str(report_id),
+                expected_audience=ReportAudience.MEMBER,
                 delivery_expires_at=None,
-            ):
+            )
+            if binding != ReportBindingResult(ReportAudience.MEMBER, True):
                 raise RuntimeError("기존 MEMBER report 결속을 만들지 못했습니다")
             migrated += 1
     except BaseException:

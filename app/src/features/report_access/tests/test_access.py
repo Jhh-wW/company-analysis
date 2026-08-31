@@ -16,6 +16,7 @@ from src.features.admin_dashboard import store as dashboard_store
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
 from src.features.report_access import constants, logic, store
+from src.features.report_access.models import ReportAudience, ReportBindingResult
 from src.features.sharelink import allowlist
 from src.features.sharelink import store as share_store
 from src.features.sharelink.constants import KEY_COOKIE_NAME
@@ -195,8 +196,10 @@ def test_PUBLIC_grant는_스케줄러인계와_최대작업뒤_보고서60일과
         latest_delivery_expiry
         + constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
         + constants.PUBLIC_GRANT_ADMISSION_MARGIN_SEC
+        + constants.PUBLIC_GRANT_POSTPROCESS_MAX_SEC
     )
     assert constants.PUBLIC_GRANT_ADMISSION_MARGIN_SEC > 0
+    assert constants.PUBLIC_GRANT_POSTPROCESS_MAX_SEC > 0
     assert constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC > 0
     assert grant.expires_at == expected_expiry
     with storage_db.connect() as conn:
@@ -239,9 +242,10 @@ def test_PUBLIC_1초인계와_3599점5초실행뒤_60일Delivery결속이_정상
             conn,
             run_id="09" * 16,
             report_id="19" * 16,
+            expected_audience=ReportAudience.PUBLIC,
             delivery_expires_at=delivery_expires_at,
             now=completed_at,
-        )
+        ) == ReportBindingResult(ReportAudience.PUBLIC, True)
         assert grant.expires_at > (
             delivery_expires_at + constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
         )
@@ -249,6 +253,7 @@ def test_PUBLIC_1초인계와_3599점5초실행뒤_60일Delivery결속이_정상
             delivery_expires_at + constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
         ) == pytest.approx(
             constants.PUBLIC_GRANT_ADMISSION_MARGIN_SEC
+            + constants.PUBLIC_GRANT_POSTPROCESS_MAX_SEC
             - (1.0 + 3599.5 - REPORT_GENERATION_EXECUTION_MAX_SEC)
         )
     finally:
@@ -261,17 +266,19 @@ def test_PUBLIC_1초인계와_3599점5초실행뒤_60일Delivery결속이_정상
         (
             REPORT_GENERATION_EXECUTION_MAX_SEC
             + constants.PUBLIC_GRANT_ADMISSION_MARGIN_SEC
+            + constants.PUBLIC_GRANT_POSTPROCESS_MAX_SEC
             - 0.001,
             True,
         ),
         (
             REPORT_GENERATION_EXECUTION_MAX_SEC
-            + constants.PUBLIC_GRANT_ADMISSION_MARGIN_SEC,
+            + constants.PUBLIC_GRANT_ADMISSION_MARGIN_SEC
+            + constants.PUBLIC_GRANT_POSTPROCESS_MAX_SEC,
             False,
         ),
     ),
 )
-def test_PUBLIC_scheduler인계여유는_끝직전까지만_유한하게보장한다(
+def test_PUBLIC_scheduler인계와후처리여유는_끝직전까지만_유한하게보장한다(
     elapsed_from_issue: float,
     allowed: bool,
 ):
@@ -297,15 +304,17 @@ def test_PUBLIC_scheduler인계여유는_끝직전까지만_유한하게보장�
                 conn,
                 run_id="29" * 16,
                 report_id="39" * 16,
+                expected_audience=ReportAudience.PUBLIC,
                 delivery_expires_at=delivery_expires_at,
                 now=completed_at,
-            )
+            ) == ReportBindingResult(ReportAudience.PUBLIC, True)
         else:
             with pytest.raises(store.PublicGrantBindingUnavailable):
                 store.bind_report(
                     conn,
                     run_id="29" * 16,
                     report_id="39" * 16,
+                    expected_audience=ReportAudience.PUBLIC,
                     delivery_expires_at=delivery_expires_at,
                     now=completed_at,
                 )
@@ -388,9 +397,10 @@ def test_PUBLIC_만료직전_동시시작은_같은grant를연장해_두run과�
             conn,
             run_id="10" * 16,
             report_id="12" * 16,
+            expected_audience=ReportAudience.PUBLIC,
             delivery_expires_at=issued_at + 100,
             now=issued_at + 1,
-        )
+        ) == ReportBindingResult(ReportAudience.PUBLIC, True)
         conn.commit()
 
         # 두 HTTP 요청이 첫 Set-Cookie를 받기 전에 같은 옛 cookie를 들고 왔다.
@@ -454,9 +464,10 @@ def test_PUBLIC_만료직후_서로다른연결의_lock순서와_응답순서가
             seed,
             run_id=old_run,
             report_id=old_report,
+            expected_audience=ReportAudience.PUBLIC,
             delivery_expires_at=issued_at + 100,
             now=issued_at + 1,
-        )
+        ) == ReportBindingResult(ReportAudience.PUBLIC, True)
         seed.commit()
 
     request_a_arrived = threading.Event()
@@ -689,6 +700,7 @@ def test_PUBLIC_완성결속은_commit여유가_남은grant만_받는다():
                 conn,
                 run_id="20" * 16,
                 report_id="21" * 16,
+                expected_audience=ReportAudience.PUBLIC,
                 delivery_expires_at=delivery_expires_at,
                 now=checked_at,
             )
@@ -745,6 +757,7 @@ def test_PUBLIC_시간이모순되거나_철회된grant는_완성결속에서_�
                 conn,
                 run_id="30" * 16,
                 report_id="31" * 16,
+                expected_audience=ReportAudience.PUBLIC,
                 delivery_expires_at=checked_at + 100,
                 now=checked_at,
             )
@@ -786,6 +799,7 @@ def test_PUBLIC_31초남은grant도_60일Delivery를_결속하지않는다(monke
                 conn,
                 run_id="40" * 16,
                 report_id="41" * 16,
+                expected_audience=ReportAudience.PUBLIC,
                 delivery_expires_at=checked_at + 60 * 24 * 60 * 60,
             )
         conn.rollback()
@@ -817,9 +831,10 @@ def test_PUBLIC_결속검사와_commit사이에_다른연결이_grant를철회�
             owner,
             run_id="45" * 16,
             report_id="46" * 16,
+            expected_audience=ReportAudience.PUBLIC,
             delivery_expires_at=checked_at + 60 * 24 * 60 * 60,
             now=checked_at + 1,
-        )
+        ) == ReportBindingResult(ReportAudience.PUBLIC, True)
 
         # bind_report의 BEGIN IMMEDIATE writer lock은 명시 commit 전까지 유지된다.
         # 따라서 검사 직후 다른 연결이 revoke를 끼워 넣는 TOCTOU 경합이 닫힌다.
@@ -842,6 +857,116 @@ def test_PUBLIC_결속검사와_commit사이에_다른연결이_grant를철회�
         owner.close()
 
 
+def test_PUBLIC_bind_report는_이미deferred여도_clock전에_writer를얻는다(
+    tmp_path,
+    monkeypatch,
+):
+    db_path = tmp_path / "bind-writer-clock.db"
+    with sqlite3.connect(db_path) as seed:
+        store.ensure_schema(seed)
+        issued_at = 1_800_002_700.0
+        store.issue_and_bind(
+            seed,
+            existing_token="",
+            run_id="47" * 16,
+            now=issued_at,
+        )
+        seed.commit()
+
+    clock_read = threading.Event()
+    worker_started = threading.Event()
+
+    def ordered_time() -> float:
+        clock_read.set()
+        return issued_at + 1
+
+    monkeypatch.setattr(store.time, "time", ordered_time)
+    blocker = sqlite3.connect(db_path, timeout=5.0)
+    blocker.execute("BEGIN IMMEDIATE")
+
+    def bind_after_lock():
+        with sqlite3.connect(db_path, timeout=5.0) as conn:
+            conn.execute("BEGIN DEFERRED")
+            worker_started.set()
+            binding = store.bind_report(
+                conn,
+                run_id="47" * 16,
+                report_id="48" * 16,
+                expected_audience=ReportAudience.PUBLIC,
+                delivery_expires_at=issued_at + 100,
+            )
+            conn.commit()
+            return binding
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(bind_after_lock)
+            assert worker_started.wait(timeout=2)
+            assert not clock_read.wait(timeout=0.2)
+            blocker.commit()
+            binding = future.result(timeout=5)
+    finally:
+        blocker.close()
+
+    assert clock_read.is_set()
+    assert binding == ReportBindingResult(ReportAudience.PUBLIC, True)
+
+
+def test_PUBLIC선언에_MEMBER행만있으면_다른소유자로결속하지않는다():
+    conn = sqlite3.connect(":memory:")
+    try:
+        store.ensure_schema(conn)
+        run_id = "49" * 16
+        assert store.bind_member_run(
+            conn,
+            run_id=run_id,
+            identity_subject="google:wrong-public-owner",
+            now=100,
+        )
+        conn.commit()
+
+        with pytest.raises(store.ReportAudienceConflict, match="audience"):
+            store.bind_report(
+                conn,
+                run_id=run_id,
+                report_id="4a" * 16,
+                expected_audience=ReportAudience.PUBLIC,
+                delivery_expires_at=1_000,
+                now=101,
+            )
+        conn.rollback()
+        assert conn.execute(
+            f"SELECT report_id FROM {store.TABLE_MEMBER_BINDINGS} WHERE run_id=?",
+            (run_id,),
+        ).fetchone()[0] == ""
+    finally:
+        conn.close()
+
+
+def test_bind_report결과는_bool로_audience를숨길수없다():
+    result = ReportBindingResult(ReportAudience.ADMIN, False)
+    with pytest.raises(TypeError, match="명시적"):
+        bool(result)
+
+
+@pytest.mark.parametrize("audience", (ReportAudience.LINK, ReportAudience.ADMIN))
+def test_LINK_ADMIN은_소유행이없어도_PUBLIC_Delivery필드를받지않는다(audience):
+    conn = sqlite3.connect(":memory:")
+    try:
+        store.ensure_schema(conn)
+        with pytest.raises(ValueError, match="PUBLIC이 아닌"):
+            store.bind_report(
+                conn,
+                run_id="4b" * 16,
+                report_id="4c" * 16,
+                expected_audience=audience,
+                delivery_expires_at=1_000,
+                now=100,
+            )
+    finally:
+        conn.close()
+
+
 def test_PUBLIC_같은run은_첫보고서에서_다른보고서로_바꿀수없다():
     conn = sqlite3.connect(":memory:")
     try:
@@ -857,9 +982,10 @@ def test_PUBLIC_같은run은_첫보고서에서_다른보고서로_바꿀수없�
             conn,
             run_id="50" * 16,
             report_id="51" * 16,
+            expected_audience=ReportAudience.PUBLIC,
             delivery_expires_at=issued_at + 100,
             now=issued_at + 1,
-        )
+        ) == ReportBindingResult(ReportAudience.PUBLIC, True)
         conn.commit()
 
         with pytest.raises(store.ReportBindingConflict, match="두 보고서"):
@@ -867,6 +993,7 @@ def test_PUBLIC_같은run은_첫보고서에서_다른보고서로_바꿀수없�
                 conn,
                 run_id="50" * 16,
                 report_id="52" * 16,
+                expected_audience=ReportAudience.PUBLIC,
                 delivery_expires_at=issued_at + 100,
                 now=issued_at + 2,
             )
@@ -897,9 +1024,10 @@ def test_MEMBER_완성결속은_PUBLIC_grant시간정책의_영향을받지않�
             conn,
             run_id=run_id,
             report_id=report_id,
+            expected_audience=ReportAudience.MEMBER,
             delivery_expires_at=None,
             now=10**15,
-        )
+        ) == ReportBindingResult(ReportAudience.MEMBER, True)
         assert store.member_subject_allows(
             conn,
             identity_subject="google:member-public-time-boundary",
@@ -939,6 +1067,7 @@ def test_같은run의_MEMBER와_PUBLIC_혼합소유는_아무행도_고치지않
                 conn,
                 run_id=run_id,
                 report_id="71" * 16,
+                expected_audience=ReportAudience.PUBLIC,
                 delivery_expires_at=issued_at + 100,
                 now=issued_at + 2,
             )

@@ -68,6 +68,7 @@ from src.features.report_delivery.cache_identity import CacheLookupKey
 from src.features.report_delivery.models import Delivery
 from src.features.report_delivery import store as delivery_store
 from src.features.report_access import store as report_access_store
+from src.features.report_access.models import ReportAudience, ReportBindingResult
 from src.features.sharelink import store as share_store
 from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import tracks as share_tracks
@@ -1240,12 +1241,14 @@ def finalize_new_report_delivery(
         clean_run = str(public_access_run_id).strip().lower()
         if not clean_run:
             return
-        if not report_access_store.bind_report(
+        binding = report_access_store.bind_report(
             conn,
             run_id=clean_run,
             report_id=report_id,
+            expected_audience=ReportAudience.PUBLIC,
             delivery_expires_at=public_delivery.delivery.expires_at.timestamp(),
-        ):
+        )
+        if binding != ReportBindingResult(ReportAudience.PUBLIC, True):
             raise report_access_store.PublicGrantBindingUnavailable(
                 "PUBLIC 실행의 report 결속을 최종 출고에서 확인하지 못했습니다"
             )

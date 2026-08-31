@@ -19,6 +19,7 @@ from src.features.backup import status as backup_status
 from src.features.pipeline.canonical_demo import build_demo_report
 from src.features.pipeline.demo import DemoPipeline
 from src.features.report_access import store as report_access_store
+from src.features.report_access.models import ReportAudience, ReportBindingResult
 from src.features.sharelink import allowlist
 from src.features.sharelink import store as share_store
 from src.features.storage import constants as storage_constants
@@ -71,8 +72,9 @@ def _bind_member_report(conn, *, report_id: str, email: str) -> None:
         conn,
         run_id=report_id,
         report_id=report_id,
+        expected_audience=ReportAudience.MEMBER,
         delivery_expires_at=None,
-    )
+    ) == ReportBindingResult(ReportAudience.MEMBER, True)
     assert dashboard_store.settle_member_run(
         conn,
         run_id=report_id,

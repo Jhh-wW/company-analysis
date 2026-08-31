@@ -101,6 +101,7 @@ _IMAGE_CONSENT_ERROR = (
     "동의하지 않으시면 사진을 지우고 공고 글자를 붙여넣어 주세요."
 )
 from src.features.report_access import constants as report_access_constants
+from src.features.report_access.models import ReportAudience, ReportBindingResult
 from src.features.report_access import store as report_access_store
 _IMAGE_PIPELINE_UNSUPPORTED_ERROR = (
     "현재 기업분석 엔진은 공고 사진을 보고서에 사용하지 않습니다. "
@@ -188,9 +189,9 @@ class Job:
     report_persisted: Optional[bool] = None
     #: 불변 Content·Delivery·PDF artifact가 함께 확정됐는지.
     delivery_persisted: Optional[bool] = None
-    #: 작업 입장 때 확정한 열람 권한 종류. 완료 시 share track이나 비용 상태를
-    #: 다시 추측하면 PUBLIC 저장 실패를 LINK/ADMIN 성공으로 잘못 통과시킬 수 있다.
-    requires_public_report_grant: bool = False
+    #: 작업 입장 때 확정한 닫힌 열람 소유권. None은 아직 입장하지 않은
+    #: 임시·중단 Job에만 허용하며 보고서 저장 경계는 반드시 거절한다.
+    report_audience: ReportAudience | None = None
     #: 입장 응답 당시 관측한 PUBLIC grant 만료. 최종 권한 판정에는 쓰지 않는다.
     #: 같은 token을 다른 탭이 연장할 수 있으므로 정본은 마지막 DB 거래의 행이다.
     public_grant_expires_at: float = 0.0
@@ -204,6 +205,12 @@ class Job:
     delivery_origin_content_id: str = ""
     delivery_origin_artifact_id: str = ""
     persistence_warning: str = ""
+
+    @property
+    def requires_public_report_grant(self) -> bool:
+        """PUBLIC 여부는 닫힌 audience에서만 계산한다."""
+
+        return self.report_audience is ReportAudience.PUBLIC
 
 
 @dataclass(frozen=True)
@@ -348,6 +355,25 @@ def _requires_public_report_grant(
         and bucket == evaluation_mode.LOCAL_BUCKET
         and evaluation_mode.enabled()
     )
+
+
+def _report_audience_for_track(
+    resolved_track: tuple[share_tracks.Track, str, float | None],
+) -> ReportAudience:
+    """입장이 확정한 비용 track을 닫힌 열람 소유권으로 바꾼다."""
+
+    if _requires_public_report_grant(resolved_track):
+        return ReportAudience.PUBLIC
+    track = resolved_track[0]
+    mapping = {
+        share_tracks.Track.MEMBER: ReportAudience.MEMBER,
+        share_tracks.Track.LINK: ReportAudience.LINK,
+        share_tracks.Track.ADMIN: ReportAudience.ADMIN,
+    }
+    try:
+        return mapping[track]
+    except KeyError as exc:
+        raise TypeError("알 수 없는 보고서 입장 track입니다") from exc
 
 
 #: 재시도가 의미 없을 때 안내 화면 버튼이 향할 기본 출구.
@@ -1232,8 +1258,27 @@ def stage_report_storage(conn: sqlite3.Connection, job: Job) -> None:
 
     if job.result is None or job.result.report is None:
         raise ValueError("저장할 보고서가 없습니다")
+    audience = job.report_audience
+    if type(audience) is not ReportAudience:
+        raise TypeError("보고서 저장 전에 닫힌 audience가 확정돼야 합니다")
+    has_member = bool(str(job.member_email).strip())
+    has_link = bool(str(job.share_link_hash).strip())
+    if audience is ReportAudience.MEMBER:
+        if not has_member or has_link:
+            raise report_access_store.ReportAudienceConflict(
+                "MEMBER 저장의 소유자 표식이 불완전합니다"
+            )
+    elif audience is ReportAudience.LINK:
+        if not has_link or has_member:
+            raise report_access_store.ReportAudienceConflict(
+                "LINK 저장의 소유자 표식이 불완전합니다"
+            )
+    elif has_member or has_link:
+        raise report_access_store.ReportAudienceConflict(
+            "PUBLIC·ADMIN 저장에 다른 audience 표식을 섞을 수 없습니다"
+        )
     delivery_expires_at: float | None = None
-    if job.requires_public_report_grant:
+    if audience is ReportAudience.PUBLIC:
         if job.delivery_expires_at is None:
             raise report_access_store.PublicGrantBindingUnavailable(
                 "PUBLIC 저장 전에 Delivery 만료 시각이 고정되지 않았습니다"
@@ -1254,20 +1299,31 @@ def stage_report_storage(conn: sqlite3.Connection, job: Job) -> None:
         now_iso=clock.iso_now_kst(),
         payload_json=report_store.report_to_json(job.result.report),
     )
-    report_bound = report_access_store.bind_report(
+    binding = report_access_store.bind_report(
         conn,
         run_id=job.job_id,
         report_id=job.job_id,
+        expected_audience=audience,
         delivery_expires_at=delivery_expires_at,
     )
-    if job.requires_public_report_grant and not report_bound:
+    if type(binding) is not ReportBindingResult:
+        raise TypeError("보고서 저장은 정확한 typed 결속 결과만 받습니다")
+    if binding.audience is not audience:
+        raise report_access_store.ReportAudienceConflict(
+            "저장 audience와 DB 결속 결과가 다릅니다"
+        )
+    if audience is ReportAudience.PUBLIC and not binding.bound:
         raise report_access_store.PublicGrantBindingUnavailable(
             "PUBLIC 실행에 결속된 브라우저 grant가 없습니다"
         )
-    if job.member_email and not report_bound:
+    if audience is ReportAudience.MEMBER and not binding.bound:
         raise RuntimeError("MEMBER 실행에 결속된 불변 계정 소유권이 없습니다")
+    if audience in (ReportAudience.LINK, ReportAudience.ADMIN) and binding.bound:
+        raise report_access_store.ReportAudienceConflict(
+            "LINK·ADMIN 저장에 report_access 결속을 붙일 수 없습니다"
+        )
     job_interruptions.delete(conn, job.job_id)
-    if job.share_link_hash and not share_store.finish_run(
+    if audience is ReportAudience.LINK and not share_store.finish_run(
         conn,
         run_id=job.job_id,
         status=share_store.RUN_STATUS_AWAITING_RELEASE,
@@ -2039,9 +2095,8 @@ async def _start_with_reserved_slot(
         # 익명 데모는 주소 자체가 아니라 별도 브라우저 grant로만 이후 화면을
         # 연다. 작업을 scheduler에 넘기기 전에 DB 결속을 확정해야 첫 progress
         # redirect가 권한 없이 떠 버리는 틈이 없다.
-        requires_public_report_grant = _requires_public_report_grant(
-            resolved_track
-        )
+        report_audience = _report_audience_for_track(resolved_track)
+        requires_public_report_grant = report_audience is ReportAudience.PUBLIC
         if requires_public_report_grant:
             try:
                 with storage_db.connect() as conn:
@@ -2084,7 +2139,7 @@ async def _start_with_reserved_slot(
             is_paid=is_paid,
             paid_cap_krw=resolved_track[2],
             slot_bucket_id=slot_bucket_id,
-            requires_public_report_grant=requires_public_report_grant,
+            report_audience=report_audience,
             public_grant_expires_at=(
                 public_grant.expires_at if public_grant is not None else 0.0
             ),

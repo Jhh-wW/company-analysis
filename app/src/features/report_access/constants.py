@@ -16,17 +16,22 @@ PUBLIC_GRANT_COMMIT_MARGIN_SEC: Final[int] = 30
 # 1시간 실행이 그 사이의 짧은 처리시간 때문에 만료되지 않게 따로 남기는 여유다.
 # commit 여유와 목적이 다르므로 한 상수를 두 이름으로 재사용하지 않는다.
 PUBLIC_GRANT_ADMISSION_MARGIN_SEC: Final[int] = 30
+# provider 응답 후 비용·이력·PDF·저장 transaction을 끝내는 유한 상한.
+# 각 DB 잠금 대기와 artifact 잠금을 여러 번 거쳐도 정상 완료할 수 있게
+# 5분을 두되, 이 경계에 닿으면 새 60일 Delivery를 발급하지 않는다.
+PUBLIC_GRANT_POSTPROCESS_MAX_SEC: Final[int] = 5 * 60
 # 브라우저는 응답을 받은 뒤부터 Max-Age를 세므로 서버 DB보다 cookie가 몇 초 더
 # 살아 있을 수 있다. 그 짧은 차이에 같은 stale token으로 시작한 두 탭만 동일
 # grant를 다시 살릴 수 있다. 이 시간이 지난 token과 철회 token은 새 grant다.
 PUBLIC_GRANT_STALE_RENEWAL_GRACE_SEC: Final[int] = 30
 # grant는 조사 시작 때 생기지만 Delivery의 60일은 보고서가 완성된 뒤 시작한다.
-# 따라서 정상 최대 실행시간, scheduler 인계 여유, 마지막 DB commit 여유를
-# 각각 더해야 권한 쿠키가 먼저 끝나지 않는다. 실제 보고서는 Delivery가 60일에
+# 따라서 정상 최대 실행시간, scheduler 인계, 후처리 상한, 마지막 DB commit
+# 여유를 각각 더해야 권한 쿠키가 먼저 끝나지 않는다. 실제 보고서는 Delivery가 60일에
 # 먼저 닫으므로 열람기간을 늘리는 값이 아니다.
 PUBLIC_GRANT_MAX_AGE_SEC: Final[int] = (
     REPORT_LINK_MAX_AGE_DAYS * 24 * 60 * 60
     + REPORT_GENERATION_EXECUTION_MAX_SEC
+    + PUBLIC_GRANT_POSTPROCESS_MAX_SEC
     + PUBLIC_GRANT_COMMIT_MARGIN_SEC
     + PUBLIC_GRANT_ADMISSION_MARGIN_SEC
 )

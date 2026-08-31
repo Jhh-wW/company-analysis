@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.core import clock
+from src.core.constants import REPORT_GENERATION_EXECUTION_MAX_SEC
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
 from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
@@ -38,6 +39,7 @@ from src.features.report_delivery.cache_identity import CacheLookupKey, CacheNam
 from src.features.report_delivery.models import DeliveryPolicy
 from src.features.report_access import constants as report_access_constants
 from src.features.report_access import store as report_access_store
+from src.features.report_access.models import ReportAudience, ReportBindingResult
 from src.features.report_standard import PublishBlockedError, PublishValidation
 from src.features.storage import db as storage_db
 from src.features.storage import constants as storage_constants
@@ -94,7 +96,7 @@ def _public_job_for_save(report, *, report_id: str) -> job_runtime.Job:
             ref="demo-corp",
         ),
         result=RunResult(outcome=Outcome.REPORT, report=report),
-        requires_public_report_grant=True,
+        report_audience=ReportAudience.PUBLIC,
         public_grant_expires_at=(
             expires_at.timestamp()
             + report_access_constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
@@ -132,13 +134,118 @@ def test_LINK와ADMIN저장은_grant결속False가_정상이고_MEMBER계약도_
     report = _demo_report()
     report_id = uuid.uuid4().hex
     job = _public_job_for_save(report, report_id=report_id)
-    job.requires_public_report_grant = False
+    job.report_audience = ReportAudience.ADMIN
     job.public_grant_expires_at = 0.0
-    monkeypatch.setattr(report_access_store, "bind_report", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        report_access_store,
+        "bind_report",
+        lambda *_a, **_k: ReportBindingResult(ReportAudience.ADMIN, False),
+    )
 
     assert job_runtime._save_report(job) is True
     with storage_db.connect() as conn:
         assert report_store.load(conn, report_id) is not None
+
+
+@pytest.mark.parametrize(
+    ("track", "audience"),
+    (
+        (job_runtime.share_tracks.Track.PUBLIC, ReportAudience.PUBLIC),
+        (job_runtime.share_tracks.Track.MEMBER, ReportAudience.MEMBER),
+        (job_runtime.share_tracks.Track.LINK, ReportAudience.LINK),
+        (job_runtime.share_tracks.Track.ADMIN, ReportAudience.ADMIN),
+    ),
+)
+def test_admission은_4개track을_닫힌audience로한번만확정한다(track, audience):
+    resolved = (track, f"bucket-{track.value}", 100.0)
+    assert job_runtime._report_audience_for_track(resolved) is audience
+
+
+def test_stage는_문자열audience를_ADMIN으로추측하지않는다():
+    report = _demo_report()
+    report_id = uuid.uuid4().hex
+    job = _public_job_for_save(report, report_id=report_id)
+    job.report_audience = "public"  # type: ignore[assignment]
+
+    with pytest.raises(TypeError, match="닫힌 audience"):
+        with storage_db.connect() as conn:
+            job_runtime.stage_report_storage(conn, job)
+    with storage_db.connect() as conn:
+        assert report_store.load(conn, report_id) is None
+
+
+def test_stage는_binding의_속성만맞는_위조typed결과를거절한다(monkeypatch):
+    report = _demo_report()
+    report_id = uuid.uuid4().hex
+    job = _public_job_for_save(report, report_id=report_id)
+
+    class ForgedBinding(ReportBindingResult):
+        pass
+
+    monkeypatch.setattr(
+        report_access_store,
+        "bind_report",
+        lambda *_args, **_kwargs: ForgedBinding(ReportAudience.PUBLIC, True),
+    )
+    with pytest.raises(TypeError, match="typed 결속"):
+        with storage_db.connect() as conn:
+            job_runtime.stage_report_storage(conn, job)
+
+    with storage_db.connect() as conn:
+        assert report_store.load(conn, report_id) is None
+
+
+def test_PUBLIC선언에_MEMBER결속만있으면_해당MEMBER에게보고서를주지않는다():
+    report = _demo_report()
+    report_id = uuid.uuid4().hex
+    subject = "google:wrong-owner-for-public"
+    job = _public_job_for_save(report, report_id=report_id)
+    with storage_db.connect() as conn:
+        assert report_access_store.bind_member_run(
+            conn,
+            run_id=report_id,
+            identity_subject=subject,
+        )
+
+    with pytest.raises(report_access_store.ReportAudienceConflict, match="audience"):
+        with storage_db.connect() as conn:
+            job_runtime.stage_report_storage(conn, job)
+
+    with storage_db.connect() as conn:
+        assert report_store.load(conn, report_id) is None
+        assert conn.execute(
+            f"SELECT report_id FROM {report_access_store.TABLE_MEMBER_BINDINGS} "
+            "WHERE run_id=?",
+            (report_id,),
+        ).fetchone()[0] == ""
+
+
+@pytest.mark.parametrize(
+    ("audience", "member_email", "link_hash"),
+    (
+        (ReportAudience.MEMBER, "", ""),
+        (ReportAudience.LINK, "", ""),
+        (ReportAudience.ADMIN, "member@example.com", ""),
+        (ReportAudience.PUBLIC, "", "unexpected-link-hash"),
+    ),
+)
+def test_stage는_audience와_빈값표식이모순되면_저장전에거절한다(
+    audience,
+    member_email,
+    link_hash,
+):
+    report = _demo_report()
+    report_id = uuid.uuid4().hex
+    job = _public_job_for_save(report, report_id=report_id)
+    job.report_audience = audience
+    job.member_email = member_email
+    job.share_link_hash = link_hash
+
+    with pytest.raises(report_access_store.ReportAudienceConflict):
+        with storage_db.connect() as conn:
+            job_runtime.stage_report_storage(conn, job)
+    with storage_db.connect() as conn:
+        assert report_store.load(conn, report_id) is None
 
 
 def test_PUBLIC_보고서staging은_caller연결을_commit하지않고_rollback된다():
@@ -236,6 +343,52 @@ def test_PUBLIC_다른탭이_DB_grant를연장하면_Job의옛만료복사본과
         )
 
 
+@pytest.mark.parametrize("boundary_offset", (-0.001, 0.0))
+def test_PUBLIC_stage는_scheduler실행후처리_정확한경계를_같은DB계약으로쓴다(
+    monkeypatch,
+    boundary_offset: float,
+):
+    report = _demo_report()
+    report_id = uuid.uuid4().hex
+    issued_at = dt.datetime(2026, 8, 31, 12, 0, tzinfo=clock.KST)
+    elapsed = (
+        REPORT_GENERATION_EXECUTION_MAX_SEC
+        + report_access_constants.PUBLIC_GRANT_ADMISSION_MARGIN_SEC
+        + report_access_constants.PUBLIC_GRANT_POSTPROCESS_MAX_SEC
+        + boundary_offset
+    )
+    completed_at = issued_at + dt.timedelta(seconds=elapsed)
+    job = _public_job_for_save(report, report_id=report_id)
+    job.delivery_issued_at = completed_at
+    job.delivery_expires_at = completed_at + dt.timedelta(
+        days=REPORT_LINK_MAX_AGE_DAYS
+    )
+    with storage_db.connect() as conn:
+        report_access_store.issue_and_bind(
+            conn,
+            existing_token="",
+            run_id=report_id,
+            now=issued_at.timestamp(),
+        )
+    monkeypatch.setattr(
+        report_access_store.time,
+        "time",
+        lambda: completed_at.timestamp(),
+    )
+
+    if boundary_offset < 0:
+        with storage_db.connect() as conn:
+            job_runtime.stage_report_storage(conn, job)
+            conn.rollback()
+    else:
+        with pytest.raises(report_access_store.PublicGrantBindingUnavailable):
+            with storage_db.connect() as conn:
+                job_runtime.stage_report_storage(conn, job)
+
+    with storage_db.connect() as conn:
+        assert report_store.load(conn, report_id) is None
+
+
 @pytest.mark.parametrize("binding_state", ("missing", "deleted"))
 def test_MEMBER_소유권결속이_없거나삭제되면_보고서와projection을_모두rollback한다(
     binding_state: str,
@@ -243,7 +396,7 @@ def test_MEMBER_소유권결속이_없거나삭제되면_보고서와projection�
     report = _demo_report()
     report_id = uuid.uuid4().hex
     job = _public_job_for_save(report, report_id=report_id)
-    job.requires_public_report_grant = False
+    job.report_audience = ReportAudience.MEMBER
     job.public_grant_expires_at = 0.0
     job.member_email = "member@example.com"
     if binding_state == "deleted":
@@ -342,7 +495,7 @@ def test_worker는_한번잡은_완료시각으로_모든권한종류를_실제�
             founded="",
             ref="worker-time-corp",
         ),
-        requires_public_report_grant=track == "PUBLIC",
+        report_audience=ReportAudience[track],
         member_email=("member@example.com" if track == "MEMBER" else ""),
     )
     public_token = ""

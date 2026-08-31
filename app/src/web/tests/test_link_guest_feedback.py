@@ -34,6 +34,7 @@ from src.features.pipeline.canonical_demo import build_demo_report
 from src.features.pipeline.demo import DemoPipeline
 from src.features.report_access import constants as report_access_constants
 from src.features.report_access import store as report_access_store
+from src.features.report_access.models import ReportAudience, ReportBindingResult
 from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import store as share_store
 from src.features.sharelink.constants import KEY_COOKIE_NAME
@@ -208,8 +209,9 @@ def test_MEMBER의_오류신고_POST도_통과하고_회원으로_구분되어_�
             conn,
             run_id=report_id,
             report_id=report_id,
+            expected_audience=ReportAudience.MEMBER,
             delivery_expires_at=None,
-        )
+        ) == ReportBindingResult(ReportAudience.MEMBER, True)
     client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
 
     result = client.get(f"/result/{report_id}")

@@ -37,6 +37,7 @@ from src.features.pipeline.port import (
 )
 from src.features.report_access import constants as report_access_constants
 from src.features.report_access import store as report_access_store
+from src.features.report_access.models import ReportAudience, ReportBindingResult
 from src.features.sharelink import allowlist
 from src.features.sharelink import tracks as share_tracks
 from src.features.sharelink.constants import PUBLIC_BUCKET
@@ -522,8 +523,9 @@ def test_결과화면은_기존신고폼_대신_새_신고링크를_보여준다
             conn,
             run_id=report_id,
             report_id=report_id,
+            expected_audience=ReportAudience.MEMBER,
             delivery_expires_at=None,
-        )
+        ) == ReportBindingResult(ReportAudience.MEMBER, True)
         assert dashboard_store.settle_member_run(
             conn,
             run_id=report_id,
@@ -568,8 +570,9 @@ def test_기존_reports_errors_라우트는_삭제되지_않고_그대로_동작
             conn,
             run_id=report_id,
             report_id=report_id,
+            expected_audience=ReportAudience.MEMBER,
             delivery_expires_at=None,
-        )
+        ) == ReportBindingResult(ReportAudience.MEMBER, True)
         assert dashboard_store.settle_member_run(
             conn,
             run_id=report_id,

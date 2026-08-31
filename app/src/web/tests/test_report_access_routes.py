@@ -19,6 +19,7 @@ from src.features.pipeline.canonical_demo import (
 )
 from src.features.report_access import constants, logic
 from src.features.report_access import store as report_access_store
+from src.features.report_access.models import ReportAudience, ReportBindingResult
 from src.features.sharelink import allowlist
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
@@ -70,6 +71,7 @@ def test_새_PUBLIC_demo는_별도_cookie로_완주하고_ID만_아는_브라우
         assert constants.PUBLIC_GRANT_MAX_AGE_SEC == (
             REPORT_LINK_MAX_AGE_DAYS * 24 * 60 * 60
             + REPORT_GENERATION_EXECUTION_MAX_SEC
+            + constants.PUBLIC_GRANT_POSTPROCESS_MAX_SEC
             + constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
             + constants.PUBLIC_GRANT_ADMISSION_MARGIN_SEC
         )
@@ -77,6 +79,7 @@ def test_새_PUBLIC_demo는_별도_cookie로_완주하고_ID만_아는_브라우
         raw_grant = owner.cookies.get(constants.PUBLIC_GRANT_COOKIE_NAME)
         assert raw_grant
         assert report_id not in raw_grant
+        assert job_runtime._JOBS[report_id].report_audience is ReportAudience.PUBLIC
 
         _wait_finished(owner, report_id)
         assert owner.get(f"/result/{report_id}").status_code == 200
@@ -282,8 +285,9 @@ def test_MEMBER는_남의report에_설문이나_오류차단을_쓸수없다():
                 conn,
                 run_id=report_id,
                 report_id=report_id,
+                expected_audience=ReportAudience.MEMBER,
                 delivery_expires_at=None,
-            )
+            ) == ReportBindingResult(ReportAudience.MEMBER, True)
             assert dashboard_store.settle_member_run(
                 conn,
                 run_id=report_id,
