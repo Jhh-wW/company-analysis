@@ -254,10 +254,17 @@ def build_generation_quality_candidate(
             )
             for sentence in section.sentences
         )
+        public_sentence_fact_ids = {
+            fact_id for fact_id in sentence_fact_ids if fact_id
+        }
         has_unbound_sentences = any(
             not fact_id or fact_id not in bound_fact_ids
             for fact_id in sentence_fact_ids
         )
+        # 숨은 FactRecord를 section.fact_ids에만 덧붙이면 문장은 그대로인데
+        # 전역 40건 하한만 부풀릴 수 있다. 구조 행 계약 전에는 공개 문장과
+        # 장부 ID 집합이 정확히 같아야 하며 여분·누락 어느 쪽도 허용하지 않는다.
+        has_fact_mapping_mismatch = bound_fact_ids != public_sentence_fact_ids
         # 표·도식은 셀/행 fact_id 계약이 추가되기 전까지 결속됐다고 꾸미지
         # 않는다. 이 모듈이 나중에 그 자료형을 읽는 단일 확장점이다.
         has_unbound_structures = bool(
@@ -270,7 +277,9 @@ def build_generation_quality_candidate(
                 fact_ids=fact_ids,
                 notice_only=not section.sentences and not has_unbound_structures,
                 has_unbound_public_content=(
-                    has_unbound_sentences or has_unbound_structures
+                    has_unbound_sentences
+                    or has_fact_mapping_mismatch
+                    or has_unbound_structures
                 ),
                 public_sentence_count=len(section.sentences),
             )

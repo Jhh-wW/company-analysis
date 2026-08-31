@@ -169,6 +169,24 @@ def test_같은_문장키의_사실이_둘이면_임의로_하나를_고르지_�
     assert candidate.summary_fact_ids == ()
 
 
+def test_화면에_없는_숨은_사실ID로_품질개수를_부풀릴수없다() -> None:
+    _sentence_value, _source_value, fact, composed, rendered = _inputs()
+    hidden = replace(
+        fact,
+        fact_id="hidden-fact",
+        claim="화면에는 없는 숨은 사실입니다.",
+        claim_slot="business_model:customer_type",
+        relationship_or_action="customer_type",
+    )
+    hidden = replace(hidden, evidence_binding=fact_evidence_binding(hidden))
+    rendered.fact_records.append(hidden)
+    rendered.sections[0].fact_ids.append(hidden.fact_id)
+
+    candidate = build_generation_quality_candidate(rendered, composed)
+
+    assert candidate.sections[0].has_unbound_public_content
+
+
 def test_렌더뒤_문장의_검증상태나_인용을_바꾸면_결속이_끊긴다() -> None:
     sentence, _source_value, _fact_value, composed, rendered = _inputs()
     changed_sentence = replace(sentence, citations=("9",))
