@@ -186,6 +186,41 @@ def test_출고가_확정된_조사를_나중에_실패로_바꾸지_못한다()
         conn.close()
 
 
+@pytest.mark.parametrize(
+    "column, value",
+    (
+        ("outcome", "failed"),
+        ("customer_charge_krw", -1),
+        ("charge_eligible", 2),
+        ("charge_reason", ""),
+    ),
+)
+def test_손상된_기존_청구행을_재시도로_정상인척하지_않는다(
+    column: str,
+    value: object,
+):
+    conn = _conn()
+    try:
+        store.mark_automatic_release(
+            conn,
+            run_id="corrupt-release",
+            automatic_release_sha256="e" * 64,
+        )
+        conn.execute(
+            f"UPDATE report_cost_summaries SET {column}=? WHERE run_id=?",
+            (value, "corrupt-release"),
+        )
+
+        with pytest.raises(store.CostAuthorityConflict):
+            store.mark_automatic_release(
+                conn,
+                run_id="corrupt-release",
+                automatic_release_sha256="e" * 64,
+            )
+    finally:
+        conn.close()
+
+
 def test_서버월고정비는_AI변동원가와_다른표에만_기록한다():
     conn = _conn()
     try:

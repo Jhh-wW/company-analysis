@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import math
 import sqlite3
 from dataclasses import asdict, dataclass
 from typing import Iterable
@@ -46,6 +47,24 @@ class CustomerChargeDecision:
     eligible: bool
     amount_krw: float
     reason: str
+
+    def __post_init__(self) -> None:
+        if type(self.eligible) is not bool:
+            raise TypeError("고객 청구 가능 판정은 bool이어야 합니다")
+        if (
+            isinstance(self.amount_krw, bool)
+            or not isinstance(self.amount_krw, (int, float))
+            or not math.isfinite(float(self.amount_krw))
+            or float(self.amount_krw) < 0
+        ):
+            raise ValueError("고객 청구액은 0원 이상의 유한한 수여야 합니다")
+        if (
+            type(self.reason) is not str
+            or self.reason != self.reason.strip()
+            or not self.reason
+        ):
+            raise ValueError("고객 청구 결정에는 닫힌 사유가 필요합니다")
+        object.__setattr__(self, "amount_krw", float(self.amount_krw))
 
 
 class CostAuthorityConflict(RuntimeError):
@@ -266,18 +285,33 @@ def mark_automatic_release(
         )
     stored = conn.execute(
         f"""
-        SELECT customer_charge_krw, charge_eligible, charge_reason,
+        SELECT outcome, customer_charge_krw, charge_eligible, charge_reason,
                automatic_release_sha256
         FROM {RUN_COST_TABLE} WHERE run_id = ?
         """,
         (clean_run_id,),
     ).fetchone()
-    if stored is None or str(stored[3]) != automatic_release_sha256:
+    if (
+        stored is None
+        or type(stored[0]) is not str
+        or stored[0] != Outcome.REPORT.value
+        or isinstance(stored[1], bool)
+        or not isinstance(stored[1], (int, float))
+        or not math.isfinite(float(stored[1]))
+        or float(stored[1]) < 0
+        or type(stored[2]) is not int
+        or stored[2] not in (0, 1)
+        or type(stored[3]) is not str
+        or stored[3] != stored[3].strip()
+        or not stored[3]
+        or type(stored[4]) is not str
+        or stored[4] != automatic_release_sha256
+    ):
         raise CostAuthorityConflict("자동 출고 청구 결정을 다시 확인하지 못했습니다")
     return CustomerChargeDecision(
-        eligible=bool(stored[1]),
-        amount_krw=float(stored[0]),
-        reason=str(stored[2]),
+        eligible=bool(stored[2]),
+        amount_krw=float(stored[1]),
+        reason=stored[3],
     )
 
 
