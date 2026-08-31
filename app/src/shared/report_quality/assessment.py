@@ -399,14 +399,30 @@ def assess_quality(
         if substantive
         else Decimal(0)
     )
-    document_identities: set[str] = set()
+    # URL만 다른 복제 페이지 여덟 개를 독립 문서 여덟 건으로 세면 출처 하한을
+    # 쉽게 부풀릴 수 있다. 정확한 근거 바이트 묶음이 같으면 신원이 달라도 한
+    # 문서로 센다. 아직 해시 계약이 없는 레거시 호출자만 identity로 폴백한다.
+    document_evidence_keys: set[tuple[str, ...]] = set()
     for fact_id in unique_public_ids:
         fact = facts[fact_id]
         source_ids = fact.supporting_source_ids or (fact.source_id,)
         for source_id in source_ids:
             source = sources.get(source_id)
             if source is not None and source.document_identity:
-                document_identities.add(source.document_identity)
+                evidence_hashes = tuple(
+                    sorted(
+                        dict.fromkeys(
+                            value.strip()
+                            for value in source.exact_evidence_hashes
+                            if value.strip()
+                        )
+                    )
+                )
+                document_evidence_keys.add(
+                    ("evidence", *evidence_hashes)
+                    if evidence_hashes
+                    else ("identity", source.document_identity)
+                )
 
     shortfalls: list[str] = []
     if len(notice_only) > contract.max_notice_only_sections:
@@ -435,9 +451,9 @@ def assess_quality(
         shortfalls.append(
             f"검증 claim 비율이 {ratio:.2%}로 하한 {contract.min_verified_ratio:.0%}보다 낮습니다"
         )
-    if len(document_identities) < contract.min_document_sources:
+    if len(document_evidence_keys) < contract.min_document_sources:
         shortfalls.append(
-            f"독립 문서 출처가 {len(document_identities)}건으로 하한 {contract.min_document_sources}건보다 적습니다"
+            f"독립 문서 출처가 {len(document_evidence_keys)}건으로 하한 {contract.min_document_sources}건보다 적습니다"
         )
 
     grade = (
@@ -453,7 +469,7 @@ def assess_quality(
         substantive_claims=substantive,
         verified_claims=verified,
         verified_ratio=ratio,
-        document_sources=len(document_identities),
+        document_sources=len(document_evidence_keys),
         notice_only_sections=tuple(notice_only),
         one_claim_sections=tuple(one_claim),
         section_claim_counts=tuple(section_counts),

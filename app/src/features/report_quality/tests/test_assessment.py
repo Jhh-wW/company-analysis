@@ -111,6 +111,23 @@ def test_조각8개가_같은문서면_출처는_한건으로_센다() -> None:
     assert result.safety.decision is ReleaseDecision.RELEASE_ALLOWED
 
 
+def test_URL만_다르고_원문바이트가_같으면_출처는_한건으로_센다() -> None:
+    candidate = _candidate()
+    copied = replace(
+        candidate,
+        sources=tuple(
+            replace(source, exact_evidence_hashes=("a" * 64,))
+            for source in candidate.sources
+        ),
+    )
+
+    result = assess_generation(copied)
+
+    assert result.quality.document_sources == 1
+    assert result.quality.grade is QualityGrade.PARTIAL
+    assert result.safety.decision is ReleaseDecision.RELEASE_ALLOWED
+
+
 def test_품질이_충분해도_미검증_claim은_공개안전을_통과하지_못한다() -> None:
     candidate = _candidate()
     first = candidate.facts[0]

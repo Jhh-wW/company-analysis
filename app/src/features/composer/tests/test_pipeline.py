@@ -70,14 +70,23 @@ def _raw_fragments() -> dict[int, dict[str, str]]:
 
 
 def _strict_fragments() -> dict[int, dict[str, str]]:
-    evidence = (
-        "가나다전자는 공식 자료에서 회사 사업 고객 제품 전략 운영 문화 경쟁 "
-        "과제 대응 협력 실적을 설명한다."
+    document_marks = (
+        "가람",
+        "나래",
+        "다솜",
+        "라온",
+        "마루",
+        "바다",
+        "사랑",
+        "아람",
     )
     return {
         number: {
             "종류": "공식 홈페이지",
-            "원문": evidence,
+            "원문": (
+                "가나다전자는 공식 자료에서 회사 사업 고객 제품 전략 운영 문화 "
+                f"경쟁 과제 대응 협력 실적을 설명한다. 문서 표지는 {document_marks[number - 1]}이다."
+            ),
             "출처": f"https://www.ganada.example/document/{number}",
             "문서명": f"공식 자료 {number}",
         }
