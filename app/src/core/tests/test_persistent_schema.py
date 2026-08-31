@@ -68,6 +68,9 @@ EXPECTED_TABLES = {
         "report_delivery_artifacts",
         "report_delivery_delivery_artifacts",
     },
+    "src.features.report_delivery.authority": {
+        "report_delivery_release_authorities",
+    },
     "src.features.report_delivery.retention": {
         "report_delivery_retirement_intents",
         "report_delivery_retirement_events",

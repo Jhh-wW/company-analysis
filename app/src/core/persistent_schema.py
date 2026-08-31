@@ -84,6 +84,10 @@ PERSISTENT_SCHEMA_BOOTSTRAPS: Final[tuple[PersistentSchemaBootstrap, ...]] = (
         "src/features/report_delivery/artifact.py",
     ),
     PersistentSchemaBootstrap(
+        "보고서 출고 권위", "src.features.report_delivery.authority",
+        "src/features/report_delivery/authority.py",
+    ),
+    PersistentSchemaBootstrap(
         "보고서 휴지통 정리", "src.features.report_delivery.retention",
         "src/features/report_delivery/retention.py",
     ),
