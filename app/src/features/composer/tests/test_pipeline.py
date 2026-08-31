@@ -69,6 +69,22 @@ def _raw_fragments() -> dict[int, dict[str, str]]:
     }
 
 
+def _strict_fragments() -> dict[int, dict[str, str]]:
+    evidence = (
+        "가나다전자는 공식 자료에서 회사 사업 고객 제품 전략 운영 문화 경쟁 "
+        "과제 대응 협력 실적을 설명한다."
+    )
+    return {
+        number: {
+            "종류": "공식 홈페이지",
+            "원문": evidence,
+            "출처": f"https://www.ganada.example/document/{number}",
+            "문서명": f"공식 자료 {number}",
+        }
+        for number in range(1, 9)
+    }
+
+
 def _section_json(mark: str) -> str:
     """장 하나 응답 — «확인» 1문장(조각 1) + «해석» 1문장(조각 2)."""
     return json.dumps(
@@ -339,6 +355,74 @@ def test_엄격모드는_AI요약을_부르지_않고_얇은_보고서를_막는
     assert any("40" in problem for problem in caught.value.problems), (
         caught.value.problems
     )
+
+
+def test_엄격모드는_충분한_검증사실만_완성으로_봉인한다():
+    """엄격 경로가 항상 막히는 장식용 게이트가 아님을 실제 조립으로 증명한다."""
+
+    topics = (
+        "법인 정체성과 설립 목적 및 공식 사업 범위",
+        "고객 유형별 수익 방식과 판매 채널 및 가치 교환",
+        "제품 묶음별 역할과 고객 적합성 및 사업 연결",
+        "과거 완료 실행과 실적 변화 및 확인할 한계",
+        "현재 해결 과제와 대응 행동 및 남은 점검 항목",
+        "향후 발표 전략과 실행 시점 및 필요한 선행 조건",
+        "공급 생산 유통 협력 관계와 회사의 운영 역할",
+        "리더십 업무 원칙 의사결정 방식과 검증 사례",
+        "비교 대상 지표 기준 범위와 경쟁 판단의 한계",
+    )
+    endings = (
+        "첫째 의미를 공식 자료에서 확인했다.",
+        "둘째 대상을 공식 자료에서 확인했다.",
+        "셋째 경로를 공식 자료에서 확인했다.",
+        "넷째 범위를 공식 자료에서 확인했다.",
+        "다섯째 근거를 공식 자료에서 확인했다.",
+    )
+
+    class CompleteWriter(_FakeWriter):
+        def __call__(self, prompt: str) -> str:
+            self.prompts.append(prompt)
+            section_index = self.section_calls
+            section_id = SECTION_IDS[section_index]
+            self.section_calls += 1
+            slots = CLAIM_SLOTS_BY_SECTION[section_id]
+            return json.dumps(
+                {
+                    "문장들": [
+                        {
+                            "글": f"가나다전자는 {topics[section_index]}의 {ending}",
+                            "인용": [str((section_index * 5 + index) % 8 + 1)],
+                            "등급": GRADE_CONFIRMED,
+                            "주장슬롯": slots[index],
+                        }
+                        for index, ending in enumerate(endings)
+                    ]
+                },
+                ensure_ascii=False,
+            )
+
+    writer = CompleteWriter()
+    reviewer = _FakeReviewer()
+    output = run_v2(
+        "가나다전자",
+        _strict_fragments(),
+        None,
+        writer_ask=writer,
+        reviewer_ask=reviewer,
+        release_mode=ReleaseMode.FULL,
+    )
+
+    assert output.report.grade is Grade.COMPLETE
+    assert output.report.shortfall_reasons == []
+    assert output.report.publication_policy == "structured-safety-v1"
+    assert output.quality_observation.quality_grade == "완성"
+    assert output.quality_observation.safety_decision == "공개 가능"
+    assert output.quality_observation.release_allowed is True
+    assert len(output.report.fact_records) == 45
+    assert len(output.report.summary_items) == 5
+    assert len(writer.prompts) == 9
+    assert len(reviewer.prompts) == 1
+    assert not any("핵심 요약" in prompt for prompt in writer.prompts)
 
 
 def test_인라인_대괄호_인용_흉내는_출고검증을_막지_않는다():

@@ -545,11 +545,24 @@ def run_v2(
                 "엄격 품질·공개 안전 계약이 완성 보고서로 판정하지 않았습니다"
             )
         raise V2ValidationError(strict_problems)
-    rendered = _apply_generation_quality_label(
-        rendered,
-        quality_observation,
-        numeric_filtering,
-    )
+    if release_mode is ReleaseMode.SHADOW:
+        rendered = _apply_generation_quality_label(
+            rendered,
+            quality_observation,
+            numeric_filtering,
+        )
+    else:
+        # 엄격 계약을 실제로 통과한 결과만 여기 온다. 입력 grade의 옛 기본값
+        # PARTIAL을 그대로 두면 내용은 완성인데 화면·결제층은 부분 보고서로
+        # 보는 모순이 생긴다. 엄격 assessor를 단일 판정자로 삼아 완성으로 봉인한다.
+        rendered = replace(
+            rendered,
+            grade=Grade.COMPLETE,
+            shortfall_reasons=[],
+            quality_contract_version=quality_observation.contract_version,
+            safety_decision=quality_observation.safety_decision,
+            publication_policy=PublicationPolicy.STRUCTURED_SAFETY.value,
+        )
 
     # ⑤-b 중복 검출 경고 — «찾아서 로그만 남긴다», 출고는 막지 않는다.
     #     validate_v2 «안»에 넣지 않은 이유는 위 모듈 docstring 참고.
