@@ -73,8 +73,14 @@ SLOT_KEYWORDS: dict[str, tuple[str, ...]] = {
     #   limitation)은 여기 없다. Codex가 채운다. 수집기는 «자사가 스스로
     #   서술한 시장 내 위치·강점»만 self_context로 담는다(상대 이름·순위 비교
     #   없이 자사 서술만 — composer 45개 어휘에 없던 새 슬롯).
+    # ★ 2026-08-31 team-lead 통보 — 「시장점유율」·「선도」는 team-lead가
+    #   직접 예시로 든 낱말이다. 「선도」는 identity:self_positioning과도
+    #   겹친다(둘 다 composer 45개 어휘의 자기규정 개념과 인접) — 알려진
+    #   중복이며, 실제 배정은 점수·표제 힌트로 갈린다(동점이면 아래 채점
+    #   함수가 수집기 슬롯을 우선한다).
     "competitive_position:self_context": (
         "경쟁력을 갖추고", "강점으로", "차별화된", "보유하고 있다", "자사의 강점",
+        "시장점유율", "선도", "최초로", "독보적",
     ),
 }
 

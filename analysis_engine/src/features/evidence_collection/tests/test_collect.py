@@ -14,6 +14,32 @@ from features.evidence_collection.tests.fixtures.synthetic_documents import (
 
 _NOW = "2026-08-31T00:00:00+09:00"
 
+#: Codex 소관 슬롯(historical_performance·비교 4종)의 «옛» 트리거 낱말과
+#: self_context 트리거 낱말을 한 문서에 일부러 섞은 시험 전용 원문
+#: (2026-08-31 team-lead 통보 — 「산출 fragment에 이 슬롯이 0건임을
+#: 시험으로 고정하라」).
+_COMPETITIVE_AND_HISTORICAL_PROBE_TEXT = """\
+I. 회사의 개요
+당사는 반도체 부품을 생산하는 법인이다.
+
+II. 재무에 관한 사항
+최근 3개년 매출액과 영업이익, 당기순이익은 아래와 같이 늘었다.
+동종업계 경쟁사 대비 업계는 과점 구조이며 점유율과 순위, 규모는 공시 기준으로 확인된다.
+
+III. 시장 현황
+당사는 특허를 다수 보유해 경쟁력을 갖추고 있으며 시장점유율에서 업계를 선도한다.
+다만 이 경쟁력과 강점, 우위는 상대 회사 이름을 밝히지 않아 확인되지 않는다, 한계와 제약이 있다.
+"""
+
+_EXCLUDED_SLOT_IDS = frozenset({
+    "past_changes:historical_performance",
+    "competitive_position:comparison_target",
+    "competitive_position:comparison_metric",
+    "competitive_position:comparison_basis",
+    "competitive_position:comparison_judgment",
+    "competitive_position:limitation",
+})
+
 
 def _fetcher(pblntf_ty: str, row: RawFilingRow, text: str) -> FakeFetcher:
     return FakeFetcher(
@@ -130,3 +156,21 @@ def test_동일한_내용_SHA256은_문서_중복으로_제거한다() -> None:
     duplicate_attempts = [a for a in harvest.attempts if a.reason_code == c.REASON_DOCUMENT_DUPLICATE]
     assert len(duplicate_attempts) == 1
     assert duplicate_attempts[0].state == c.ATTEMPT_STATE_OK
+
+
+def test_다른_엔진_소유_슬롯은_실제_수집_산출물에도_0건이다() -> None:
+    """team-lead 통보(2026-08-31) — 산출 fragment에 이 슬롯이 0건임을 시험으로 고정.
+
+    옛 트리거 낱말(매출액·영업이익·동종업계·점유율 등)을 일부러 섞은 문서를
+    실제로 수집·분할·채점까지 전부 거쳐도 historical_performance·비교 4종
+    슬롯은 fragment에 «절대» 달리지 않아야 한다(Codex 소관). 같은 문서가
+    self_context는 실제로 만들어 내는지도 함께 확인한다.
+    """
+    row = RawFilingRow("20250315000001", "사업보고서 (2025.03)", "20250315")
+    fetcher = _fetcher("A", row, _COMPETITIVE_AND_HISTORICAL_PROBE_TEXT)
+
+    harvest = collect_dart_evidence(fetcher, "00126380", now=_NOW)
+
+    produced_slot_ids = {f.slot_id for f in harvest.fragments if f.slot_id}
+    assert produced_slot_ids.isdisjoint(_EXCLUDED_SLOT_IDS)
+    assert "competitive_position:self_context" in produced_slot_ids
