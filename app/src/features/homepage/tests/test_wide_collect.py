@@ -9,7 +9,11 @@ IR PDF 위임은 이미 `test_ir_pdf.py`가 그 내부 로직을 검증하므로
 from __future__ import annotations
 
 from src.features.homepage import wide_collect
-from src.features.homepage.constants import WIDE_MAX_PAGES, WIDE_MAX_SITEMAP_ENTRIES
+from src.features.homepage.constants import (
+    WIDE_MAX_PAGES,
+    WIDE_MAX_SITEMAP_ENTRIES,
+    WIDE_REQUIRED_SLOT_IDS_BY_SECTION,
+)
 from src.features.homepage.ir_pdf import OfficialIrCollectResult
 from src.features.homepage.wide_collect import collect_official_web_documents
 from src.features.homepage.wide_fetch import WideRawResponse, WideTransportError
@@ -359,6 +363,97 @@ def test_같은_내용_다른_URL은_내용해시로_중복제거된다():
     result = _collect(site)
 
     assert len(result.documents) == 1
+
+
+# ── slot_ids 매핑 ────────────────────────────────────────
+
+
+def test_채용_페이지는_culture_슬롯을_받는다():
+    pages = {
+        "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
+        "https://company.example/sitemap.xml": _missing("https://company.example/sitemap.xml"),
+        "https://company.example/": _page(
+            _body("루트 페이지 본문") + '<a href="/careers">채용</a>', "https://company.example/"
+        ),
+        "https://company.example/careers": _page(_body("채용 페이지 본문"), "https://company.example/careers"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(site)
+
+    careers_attempt = next(
+        a for a in result.attempts if a.source_kind == "official_recruit_page" and a.state == "OK"
+    )
+    assert careers_attempt.slot_ids == WIDE_REQUIRED_SLOT_IDS_BY_SECTION["culture"]
+
+
+def test_회사소개_페이지는_identity와_competitive_position_슬롯을_받는다():
+    pages = {
+        "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
+        "https://company.example/sitemap.xml": _missing("https://company.example/sitemap.xml"),
+        "https://company.example/": _page(
+            _body("루트 페이지 본문") + '<a href="/about">회사소개</a>', "https://company.example/"
+        ),
+        "https://company.example/about": _page(_body("회사소개 본문"), "https://company.example/about"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(site)
+
+    about_attempt = next(
+        a
+        for a in result.attempts
+        if a.source_kind == "official_web_page"
+        and a.state == "OK"
+        and a.slot_ids == (
+            WIDE_REQUIRED_SLOT_IDS_BY_SECTION["identity"]
+            + WIDE_REQUIRED_SLOT_IDS_BY_SECTION["competitive_position"]
+        )
+    )
+    assert "competitive_position:self_context" in about_attempt.slot_ids
+
+
+def test_제품_페이지는_portfolio와_business_model_슬롯을_받는다():
+    pages = {
+        "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
+        "https://company.example/sitemap.xml": _missing("https://company.example/sitemap.xml"),
+        "https://company.example/": _page(
+            _body("루트 페이지 본문") + '<a href="/products">제품</a>', "https://company.example/"
+        ),
+        "https://company.example/products": _page(_body("제품 소개 본문"), "https://company.example/products"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(site)
+
+    products_attempt = next(
+        a for a in result.attempts if a.state == "OK" and "portfolio:product_role" in a.slot_ids
+    )
+    assert set(products_attempt.slot_ids) == set(
+        WIDE_REQUIRED_SLOT_IDS_BY_SECTION["portfolio"] + WIDE_REQUIRED_SLOT_IDS_BY_SECTION["business_model"]
+    )
+
+
+def test_뉴스룸_페이지는_future_strategy와_past_changes_슬롯을_받는다():
+    pages = {
+        "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
+        "https://company.example/sitemap.xml": _missing("https://company.example/sitemap.xml"),
+        "https://company.example/": _page(
+            _body("루트 페이지 본문") + '<a href="/news">뉴스룸</a>', "https://company.example/"
+        ),
+        "https://company.example/news": _page(_body("뉴스룸 본문"), "https://company.example/news"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(site)
+
+    news_attempt = next(
+        a for a in result.attempts if a.state == "OK" and "past_changes:completed_execution" in a.slot_ids
+    )
+    assert set(news_attempt.slot_ids) == set(
+        WIDE_REQUIRED_SLOT_IDS_BY_SECTION["future_strategy"]
+        + WIDE_REQUIRED_SLOT_IDS_BY_SECTION["past_changes"]
+    )
 
 
 # ── IR PDF 위임 ───────────────────────────────────────────

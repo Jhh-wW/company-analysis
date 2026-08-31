@@ -435,14 +435,40 @@ WIDE_EXCLUDED_LINKED_HOST_SUFFIXES: Final[tuple[str, ...]] = (
     "channel.io",
 )
 
-#: composer/constants.py의 CLAIM_SLOTS_BY_SECTION 대표값 «사본»이다.
-#: ★ 정본이 아니다 — attempt.slot_ids 예시로만 쓰며, composer 쪽 정본이
-#: 바뀌면 이 사본도 다시 확인해야 한다(읽기 전용으로 참조만 함).
-WIDE_REPRESENTATIVE_SLOT_IDS: Final[tuple[str, ...]] = (
-    "portfolio:product_role",
-    "culture:work_principle",
-    "future_strategy:stated_plan",
-    "identity:self_positioning",
-    "business_model:revenue_model",
-    "operations_partners:partnership",
+#: 넓은 공식 웹 수집기가 attempt.slot_ids·조각 태그에 쓰는 «수집기 필수 슬롯»
+#: 목록의 «사본»이다(장별).
+#: ★ 정본은 `app/src/shared/report_evidence/policy.py`의
+#:   `CLAIM_SLOTS_BY_SECTION`이다(계약 담당 Codex가 2026-08-31 확정). 이
+#:   워크트리의 기준 커밋에는 아직 그 파일이 없어 팀 리드가 전달한 값을
+#:   그대로 사본으로 둔다 — 정본 파일이 이 워크트리에 들어오면(다른
+#:   워크트리가 병합된 뒤) 이 사본도 다시 대조해야 한다.
+#: ★ `composer/constants.py`의 `CLAIM_SLOTS_BY_SECTION`과는 다른 목록이다.
+#:   `competitive_position:self_context`는 composer 목록에 없는 새 슬롯으로,
+#:   자사 강점·시장 내 위치를 회사 스스로 서술한 페이지 전용이다 — 비교
+#:   슬롯 5개는 이 수집기가 만들지 않는다(다른 소스에서 Codex가 별도 주입).
+WIDE_REQUIRED_SLOT_IDS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
+    "identity": ("identity:corporate_identity", "identity:business_definition"),
+    "business_model": (
+        "business_model:revenue_model",
+        "business_model:customer_type",
+        "business_model:value_exchange",
+    ),
+    "portfolio": ("portfolio:product_role", "portfolio:revenue_link"),
+    "past_changes": ("past_changes:completed_execution",),
+    "current_challenges": ("current_challenges:issue", "current_challenges:response"),
+    "future_strategy": ("future_strategy:stated_plan", "future_strategy:plan_status"),
+    "operations_partners": (
+        "operations_partners:value_chain",
+        "operations_partners:operating_role",
+    ),
+    "culture": ("culture:work_principle", "culture:verified_case"),
+    #: composer 목록에 없는 새 슬롯 — 자사 서술 원문 전용, 하나뿐이다.
+    "competitive_position": ("competitive_position:self_context",),
+}
+
+#: 위 dict을 평탄화한 전체 슬롯 목록(중복 없음) — attempt.slot_ids 참고·검증용.
+WIDE_REQUIRED_SLOT_IDS: Final[tuple[str, ...]] = tuple(
+    slot
+    for slots in WIDE_REQUIRED_SLOT_IDS_BY_SECTION.values()
+    for slot in slots
 )

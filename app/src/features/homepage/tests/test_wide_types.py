@@ -40,7 +40,7 @@ def _attempt(**overrides: object) -> WideCollectionAttempt:
         source_kind="official_web_page",
         requirement="REQUIRED",
         state="OK",
-        slot_ids=("identity:self_positioning",),
+        slot_ids=("identity:corporate_identity",),
         reason_code="page_ok",
         elapsed_ms=10,
         bytes_downloaded=100,

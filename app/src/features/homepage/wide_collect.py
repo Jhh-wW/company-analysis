@@ -35,6 +35,7 @@ from src.features.homepage.constants import (
     WIDE_MAX_USABLE_RANGES_PER_DOCUMENT,
     WIDE_PARSER_VERSION,
     WIDE_PRIORITY_HOST_KEYWORDS,
+    WIDE_REQUIRED_SLOT_IDS_BY_SECTION,
     WIDE_SOURCE_KIND_IR_PDF,
     WIDE_SOURCE_KIND_RECRUIT_PAGE,
     WIDE_SOURCE_KIND_WEB_PAGE,
@@ -89,15 +90,38 @@ _PRIORITY_KEYWORDS: tuple[str, ...] = WIDE_PRIORITY_HOST_KEYWORDS + PRIORITY_PAT
 #: url 안에 있으면 «채용 페이지」로 분류하는 키워드.
 _RECRUIT_MARKERS: tuple[str, ...] = ("recruit", "career", "jobs", "채용")
 
-#: attempt.slot_ids 대표값 매핑 — `constants.WIDE_REPRESENTATIVE_SLOT_IDS`의
-#: 대표 문자열을 그대로 쓴다(정본은 composer/constants.py, §최종 보고서 참조).
+#: attempt.slot_ids 매핑 — `constants.WIDE_REQUIRED_SLOT_IDS_BY_SECTION`의
+#: 장별 필수 슬롯을 그대로 쓴다(정본은 `shared/report_evidence/policy.py`,
+#: 팀 리드 2026-08-31 통보). 채용→culture, 제품→portfolio·business_model,
+#: 뉴스룸/IR/비전·전략→future_strategy·past_changes:completed_execution,
+#: 회사소개→identity·competitive_position:self_context 순으로 매칭한다.
+#: 먼저 맞는 키워드 묶음을 쓰므로 순서가 우선순위다.
+_SLOTS = WIDE_REQUIRED_SLOT_IDS_BY_SECTION
 _SLOT_KEYWORD_MAP: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
-    (("recruit", "career", "culture", "채용", "인재"), ("culture:work_principle",)),
-    (("product", "products", "service", "tech", "portfolio"), ("portfolio:product_role",)),
-    (("vision", "strategy", "future"), ("future_strategy:stated_plan",)),
-    (("about", "company", "overview"), ("identity:self_positioning",)),
-    (("business",), ("business_model:revenue_model",)),
-    (("partner", "partnership"), ("operations_partners:partnership",)),
+    (
+        ("recruit", "career", "careers", "jobs", "채용", "인재", "culture"),
+        _SLOTS["culture"],
+    ),
+    (
+        ("product", "products", "service", "tech", "portfolio"),
+        _SLOTS["portfolio"] + _SLOTS["business_model"],
+    ),
+    (
+        ("news", "press", "newsroom", "blog", "ir", "investor", "vision", "strategy", "future"),
+        _SLOTS["future_strategy"] + _SLOTS["past_changes"],
+    ),
+    (
+        ("about", "company", "overview"),
+        _SLOTS["identity"] + _SLOTS["competitive_position"],
+    ),
+    (
+        ("business",),
+        _SLOTS["business_model"],
+    ),
+    (
+        ("partner", "partnership"),
+        _SLOTS["operations_partners"],
+    ),
 )
 
 
