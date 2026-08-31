@@ -104,6 +104,88 @@ def test_자동출고전에는_청구불가_출고후에도_가격미확정이�
         conn.close()
 
 
+def test_확정된_출고지문을_다른_PDF로_바꾸지_못한다():
+    conn = _conn()
+    try:
+        store.record_run_costs(
+            conn,
+            run_id="immutable-release",
+            outcome=Outcome.REPORT,
+            internal_ai_cost_krw=12.3,
+        )
+        store.mark_automatic_release(
+            conn,
+            run_id="immutable-release",
+            automatic_release_sha256="a" * 64,
+        )
+
+        with pytest.raises(store.CostAuthorityConflict):
+            store.mark_automatic_release(
+                conn,
+                run_id="immutable-release",
+                automatic_release_sha256="b" * 64,
+            )
+
+        row = conn.execute(
+            "SELECT outcome, internal_ai_cost_krw, automatic_release_sha256 "
+            "FROM report_cost_summaries WHERE run_id='immutable-release'"
+        ).fetchone()
+        assert tuple(row) == (Outcome.REPORT.value, 12.3, "a" * 64)
+    finally:
+        conn.close()
+
+
+def test_같은_출고지문_재시도는_최초_청구결정을_바꾸지_않는다():
+    conn = _conn()
+    try:
+        first = store.mark_automatic_release(
+            conn,
+            run_id="idempotent-release",
+            automatic_release_sha256="c" * 64,
+        )
+        retry = store.mark_automatic_release(
+            conn,
+            run_id="idempotent-release",
+            automatic_release_sha256="c" * 64,
+            configured_price_krw=9999,
+        )
+
+        assert retry == first
+        row = conn.execute(
+            "SELECT customer_charge_krw, charge_eligible, charge_reason "
+            "FROM report_cost_summaries WHERE run_id='idempotent-release'"
+        ).fetchone()
+        assert tuple(row) == (0.0, 1, "price_not_configured")
+    finally:
+        conn.close()
+
+
+def test_출고가_확정된_조사를_나중에_실패로_바꾸지_못한다():
+    conn = _conn()
+    try:
+        store.mark_automatic_release(
+            conn,
+            run_id="released-outcome",
+            automatic_release_sha256="d" * 64,
+        )
+
+        with pytest.raises(store.CostAuthorityConflict):
+            store.record_run_costs(
+                conn,
+                run_id="released-outcome",
+                outcome=Outcome.FAILED,
+                internal_ai_cost_krw=88.0,
+            )
+
+        row = conn.execute(
+            "SELECT outcome, internal_ai_cost_krw, automatic_release_sha256 "
+            "FROM report_cost_summaries WHERE run_id='released-outcome'"
+        ).fetchone()
+        assert tuple(row) == (Outcome.REPORT.value, 0.0, "d" * 64)
+    finally:
+        conn.close()
+
+
 def test_서버월고정비는_AI변동원가와_다른표에만_기록한다():
     conn = _conn()
     try:

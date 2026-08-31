@@ -6,6 +6,7 @@ from importlib import import_module
 
 __all__ = [
     "AiCostEvent",
+    "CostAuthorityConflict",
     "CustomerChargeDecision",
     "decide_customer_charge",
     "mark_automatic_release",

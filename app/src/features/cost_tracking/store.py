@@ -48,6 +48,10 @@ class CustomerChargeDecision:
     reason: str
 
 
+class CostAuthorityConflict(RuntimeError):
+    """이미 확정된 고객 청구 근거를 다른 출고물로 바꾸려 했다."""
+
+
 def _now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
@@ -121,6 +125,19 @@ def record_run_costs(
     for event in event_values:
         _validate_event(event)
     ensure_schema(conn)
+    existing_release = conn.execute(
+        f"SELECT outcome, automatic_release_sha256 FROM {RUN_COST_TABLE} "
+        "WHERE run_id = ?",
+        (clean_run_id,),
+    ).fetchone()
+    if (
+        existing_release is not None
+        and str(existing_release[1]).strip()
+        and outcome is not Outcome.REPORT
+    ):
+        raise CostAuthorityConflict(
+            "자동 출고가 확정된 조사를 실패 결과로 바꿀 수 없습니다"
+        )
     created_at = _now()
     for sequence, event in enumerate(event_values, start=1):
         conn.execute(
@@ -202,18 +219,36 @@ def mark_automatic_release(
         configured_price_krw=configured_price_krw,
     )
     now = _now()
-    conn.execute(
+    cursor = conn.execute(
         f"""
         INSERT INTO {RUN_COST_TABLE} (
             run_id, outcome, internal_ai_cost_krw, customer_charge_krw,
             charge_eligible, automatic_release_sha256, charge_reason, updated_at
         ) VALUES (?, ?, 0, ?, ?, ?, ?, ?)
         ON CONFLICT(run_id) DO UPDATE SET
-            customer_charge_krw=excluded.customer_charge_krw,
-            charge_eligible=excluded.charge_eligible,
-            automatic_release_sha256=excluded.automatic_release_sha256,
-            charge_reason=excluded.charge_reason,
-            updated_at=excluded.updated_at
+            customer_charge_krw=CASE
+                WHEN {RUN_COST_TABLE}.automatic_release_sha256=''
+                THEN excluded.customer_charge_krw
+                ELSE {RUN_COST_TABLE}.customer_charge_krw END,
+            charge_eligible=CASE
+                WHEN {RUN_COST_TABLE}.automatic_release_sha256=''
+                THEN excluded.charge_eligible
+                ELSE {RUN_COST_TABLE}.charge_eligible END,
+            automatic_release_sha256=CASE
+                WHEN {RUN_COST_TABLE}.automatic_release_sha256=''
+                THEN excluded.automatic_release_sha256
+                ELSE {RUN_COST_TABLE}.automatic_release_sha256 END,
+            charge_reason=CASE
+                WHEN {RUN_COST_TABLE}.automatic_release_sha256=''
+                THEN excluded.charge_reason
+                ELSE {RUN_COST_TABLE}.charge_reason END,
+            updated_at=CASE
+                WHEN {RUN_COST_TABLE}.automatic_release_sha256=''
+                THEN excluded.updated_at
+                ELSE {RUN_COST_TABLE}.updated_at END
+        WHERE {RUN_COST_TABLE}.automatic_release_sha256 IN (
+            '', excluded.automatic_release_sha256
+        )
         """,
         (
             clean_run_id,
@@ -225,7 +260,25 @@ def mark_automatic_release(
             now,
         ),
     )
-    return decision
+    if cursor.rowcount != 1:
+        raise CostAuthorityConflict(
+            "이미 확정된 자동 출고 지문을 다른 값으로 바꿀 수 없습니다"
+        )
+    stored = conn.execute(
+        f"""
+        SELECT customer_charge_krw, charge_eligible, charge_reason,
+               automatic_release_sha256
+        FROM {RUN_COST_TABLE} WHERE run_id = ?
+        """,
+        (clean_run_id,),
+    ).fetchone()
+    if stored is None or str(stored[3]) != automatic_release_sha256:
+        raise CostAuthorityConflict("자동 출고 청구 결정을 다시 확인하지 못했습니다")
+    return CustomerChargeDecision(
+        eligible=bool(stored[1]),
+        amount_krw=float(stored[0]),
+        reason=str(stored[2]),
+    )
 
 
 def record_monthly_server_cost(
