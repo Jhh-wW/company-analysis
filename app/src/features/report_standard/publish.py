@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from dataclasses import dataclass, replace
@@ -14,6 +13,10 @@ from src.core.citations import citation_number
 from src.shared.report_quality.numeric_validation import validate_versioned_numeric_record
 from src.shared.report_quality.fact_binding import (
     fact_evidence_binding as _shared_fact_evidence_binding,
+)
+from src.shared.report_quality.summary_binding import (
+    summary_evidence_text as _shared_summary_evidence_text,
+    summary_verification_binding as _shared_summary_verification_binding,
 )
 from src.features.pipeline.market_contract import (
     MARKET_STAGE_EVIDENCE_PATTERNS,
@@ -388,16 +391,6 @@ def _parse_iso_date(value: str) -> date | None:
         return None
 
 
-def _binding_digest(payload: object) -> str:
-    encoded = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
 def fact_evidence_binding(fact: FactRecord) -> str:
     """검증 뒤 claim이나 원문 근거가 바뀌면 무효가 되는 결정론적 지문."""
 
@@ -407,7 +400,7 @@ def fact_evidence_binding(fact: FactRecord) -> str:
 def summary_evidence_text(fact_ids: list[str], facts: dict[str, FactRecord]) -> str:
     """요약 검증기가 보는 정본 근거 묶음."""
 
-    return "\n".join(f"{fact_id}: {facts[fact_id].claim}" for fact_id in fact_ids)
+    return _shared_summary_evidence_text(fact_ids, facts)
 
 
 def summary_verification_binding(
@@ -420,15 +413,13 @@ def summary_verification_binding(
 ) -> str:
     """검증된 본문 재사용 요약과 그 근거의 사후 변조를 감지한다."""
 
-    return _binding_digest(
-        {
-            "text": text,
-            "section_id": section_id,
-            "fact_ids": list(fact_ids),
-            "evidence_text": evidence_text,
-            "verification_status": verification_status,
-            "support_terms": list(support_terms),
-        }
+    return _shared_summary_verification_binding(
+        text,
+        section_id,
+        fact_ids,
+        evidence_text,
+        verification_status,
+        support_terms,
     )
 
 
