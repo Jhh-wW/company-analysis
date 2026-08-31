@@ -27,6 +27,8 @@ from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Optional
 
+from src.shared.report_evidence.constants import ReleaseMode
+from src.shared.report_quality.constants import STRICT_QUALITY_CONTRACT_VERSION
 from src.shared.report_quality.generation import (
     GenerationQualityObservation,
     LEGACY_SHADOW_PUBLICATION_REASON,
@@ -50,6 +52,7 @@ from src.features.composer.constants import DEFAULT_CITATION_STYLE, SECTION_TITL
 from src.features.composer.dedupe import drop_cross_section_duplicates
 from src.features.composer.diagram_check import check_diagrams
 from src.features.composer.dup_detect import CONFIDENCE_CONFIRMED, find_numeric_duplicates
+from src.features.composer.extractive_summary import select_extractive_summary
 from src.features.composer.port import (
     AskFatalError,
     ComposedReport,
@@ -66,7 +69,7 @@ from src.features.composer.structured_claims import (
     append_past_changes_numeric_claims,
     enforce_public_numeric_safety,
 )
-from src.features.composer.validate import validate_v2
+from src.features.composer.validate import V2ValidationError, validate_v2
 from src.features.composer.verify import verify_report, verify_sentences
 from src.features.pipeline.port import Grade, Report
 
@@ -259,6 +262,64 @@ def _supplement_safe_summary(
     return tuple(chosen)
 
 
+def _legacy_summary_stage(
+    verified: ComposedReport,
+    fragments: FragmentsInput,
+    performance_table: Optional[PerformanceTable],
+    *,
+    writer_ask: AskFn,
+    reviewer_ask: AskFn,
+    body_numeric_filtering: NumericSafetyFiltering,
+) -> tuple[ComposedReport, int, NumericSafetyFiltering]:
+    """기존 SHADOW 요약 경로를 글자·호출 순서까지 그대로 보존한다."""
+
+    summary_call_limited = False
+    try:
+        with_summary = compose_summary(verified, writer_ask)
+    except AskFatalError as error:
+        if not getattr(error, "call_limit", False):
+            raise
+        summary_call_limited = True
+        with_summary = verified
+        logger.warning(
+            "AI 호출 횟수 상한이라 핵심 요약을 «새로 쓰지» 못했다 — "
+            "검증을 마친 본문 문장으로 채운다"
+        )
+    summary_draft_count = len(with_summary.summary)
+
+    summary = with_summary.summary
+    if summary and not summary_call_limited:
+        try:
+            summary = verify_sentences(
+                summary, fragments, performance_table, reviewer_ask
+            )
+        except AskFatalError as error:
+            if not getattr(error, "call_limit", False):
+                raise
+            summary = ()
+            logger.warning(
+                "AI 호출 횟수 상한이라 새 요약을 검증하지 못했다 — 검증하지 "
+                "않은 요약을 내보내는 대신 본문 확인 문장으로 채운다"
+            )
+    if len(summary) < SUMMARY_MIN_SENTENCES:
+        summary = _supplement_summary(summary, verified)
+    final = ComposedReport(
+        sections=verified.sections,
+        summary=tuple(summary)[:SUMMARY_MAX_SENTENCES],
+    )
+    final, summary_numeric_filtering = enforce_public_numeric_safety(final)
+    if len(final.summary) < SUMMARY_MIN_SENTENCES:
+        final = ComposedReport(
+            sections=final.sections,
+            summary=_supplement_safe_summary(final.summary, verified),
+        )
+    return (
+        final,
+        summary_draft_count,
+        body_numeric_filtering.merged(summary_numeric_filtering),
+    )
+
+
 def run_v2(
     company_name: str,
     fragments: FragmentsInput,
@@ -277,6 +338,7 @@ def run_v2(
     filing_meta: Optional[FilingMeta] = None,
     composition_tables: tuple[PerformanceTable, ...] = (),
     citation_style: str = DEFAULT_CITATION_STYLE,
+    release_mode: ReleaseMode = ReleaseMode.SHADOW,
 ) -> V2RunOutput:
     """엔진 v2 전체 흐름을 한 번 돌려 최종 보고서를 만든다 (04장 3-4절).
 
@@ -312,6 +374,9 @@ def run_v2(
             2장에 «전부» 붙는다 — 첫 표만 쓰지 않는다(2026-08-25 설계 변경).
         citation_style: 본문 인용 번호 표기 방식. 기본은 절충안이며,
             시험이 «문장마다 번호가 실리는가»를 볼 때 inline으로 고정한다.
+        release_mode: SHADOW는 기존 생성·요약·공개 동작을 그대로 쓴다.
+            그 밖의 엄격 모드는 검증된 본문 사실을 글자 그대로 골라 요약하고,
+            엄격 품질 계약을 통과하지 못하면 결과를 반환하지 않는다.
 
     Returns:
         V2RunOutput — 검증 끝난 Report와 초안·생존 문장 수.
@@ -321,6 +386,9 @@ def run_v2(
             요약 3문장을 만들 수 없는 경우). 그 외 생성·검증 단계는 예외를
             밖으로 던지지 않는다 (장 삭제·전체 중단 금지 원칙).
     """
+    if not isinstance(release_mode, ReleaseMode):
+        raise TypeError("release_mode는 ReleaseMode 값이어야 합니다")
+
     # ① 본문 9장 작성 (작가)
     draft = compose_sections(company_name, fragments, performance_table, writer_ask)
     draft_body_count = _total_sentences(draft)  # 이 시점 summary는 빈 튜플이다
@@ -376,63 +444,49 @@ def run_v2(
             ),
         )
 
-    # ③ 핵심 요약 — «검증된» 본문을 재료로 새로 쓴다 (본문 재탕 금지)
-    #
-    # ★ 2026-08-29 실측 — 여기서 «호출 횟수 상한»을 만나면 완성된 9개 장이
-    #   통째로 버려졌다. 요약은 새로 «쓰지» 못해도 «이미 검증된 본문 확인
-    #   문장»으로 채울 길이 아래(_supplement_summary)에 이미 있고, 그 길은
-    #   AI 를 한 번도 부르지 않는다. 그러니 본문을 버릴 이유가 없다.
-    #   돈·계정 장애(call_limit=False)는 그대로 재전파한다.
-    summary_call_limited = False
-    try:
-        with_summary = compose_summary(verified, writer_ask)
-    except AskFatalError as error:
-        if not getattr(error, "call_limit", False):
-            raise
-        summary_call_limited = True
-        with_summary = verified
-        logger.warning(
-            "AI 호출 횟수 상한이라 핵심 요약을 «새로 쓰지» 못했다 — "
-            "검증을 마친 본문 문장으로 채운다"
+    # ③~④ 요약. SHADOW는 이미 운영 중인 AI 작성·재검증 경로를 그대로
+    # 보존한다. 엄격 모드는 본문에 없던 말을 새로 만들지 않고, 렌더러가
+    # 만든 검증 FactRecord에 정확히 결속된 본문 문장을 0원으로 재사용한다.
+    if release_mode is ReleaseMode.SHADOW:
+        final, summary_draft_count, numeric_filtering = _legacy_summary_stage(
+            verified,
+            fragments,
+            performance_table,
+            writer_ask=writer_ask,
+            reviewer_ask=reviewer_ask,
+            body_numeric_filtering=body_numeric_filtering,
         )
-    summary_draft_count = len(with_summary.summary)
-
-    # ④ 요약 재검증 — 새로 쓴 문장이므로 본문과 같은 검증을 적용한다
-    summary = with_summary.summary
-    if summary and not summary_call_limited:
-        try:
-            summary = verify_sentences(
-                summary, fragments, performance_table, reviewer_ask
+    else:
+        body_rendered = render_report(
+            company_name,
+            verified,
+            fragments,
+            performance_table,
+            corp_type=corp_type,
+            grade=grade,
+            generated_at=generated_at,
+            as_of_date=as_of_date,
+            analysis_period=analysis_period,
+            latest_performance_period=latest_performance_period,
+            table_presentation=table_presentation,
+            filing_meta=filing_meta,
+            composition_tables=composition_tables,
+            citation_style=citation_style,
+        )
+        extractive = select_extractive_summary(verified, body_rendered.fact_records)
+        if not extractive.release_ready:
+            raise V2ValidationError(
+                (
+                    "엄격 출고용 핵심 요약에 서로 다른 장의 검증 사실이 "
+                    f"3개 이상 필요하지만 {len(extractive.items)}개뿐입니다",
+                )
             )
-        except AskFatalError as error:
-            # ★ 검증하지 못한 새 요약을 그대로 내보내지 않는다 — 버리고,
-            #   «이미 검증을 마친» 본문 확인 문장으로 채운다(AI 호출 0회).
-            #   돈·계정 장애는 그대로 재전파한다.
-            if not getattr(error, "call_limit", False):
-                raise
-            summary = ()
-            logger.warning(
-                "AI 호출 횟수 상한이라 새 요약을 검증하지 못했다 — 검증하지 "
-                "않은 요약을 내보내는 대신 본문 확인 문장으로 채운다"
-            )
-    if len(summary) < SUMMARY_MIN_SENTENCES:
-        # 검증이 요약을 깎았으면 «이미 검증된» 본문 확인 문장으로 보충한다.
-        # 보충분은 본문 검증(②)을 통과한 문장이라 추가 검수 호출이 필요 없다.
-        summary = _supplement_summary(summary, verified)
-    final = ComposedReport(
-        sections=verified.sections,
-        summary=tuple(summary)[:SUMMARY_MAX_SENTENCES],
-    )
-    # 요약은 새 AI 산문이라 본문과 별도로 같은 경계를 탄다. 미결속 수치를
-    # 제거해 3문장보다 짧아지면 이미 안전 검사를 통과한 본문 확인 문장으로만
-    # 보충한다. 그중 수치 문장은 본문 StructuredClaim을 그대로 상속한다.
-    final, summary_numeric_filtering = enforce_public_numeric_safety(final)
-    if len(final.summary) < SUMMARY_MIN_SENTENCES:
         final = ComposedReport(
-            sections=final.sections,
-            summary=_supplement_safe_summary(final.summary, verified),
+            sections=verified.sections,
+            summary=extractive.bound_sentences,
         )
-    numeric_filtering = body_numeric_filtering.merged(summary_numeric_filtering)
+        summary_draft_count = 0
+        numeric_filtering = body_numeric_filtering
 
     # ⑤ 렌더 — 웹·PDF가 이미 소비하는 공용 구조로
     rendered = render_report(
@@ -459,7 +513,12 @@ def run_v2(
     # 남긴다. 따라서 전체 안전 결과는 계속 미완성/차단이며, 숫자 문장 경계
     # 밖의 공개 구조는 결속과 영향 측정 전까지 전체 hard gate로 승격하지 않는다.
     quality_observation = observe_generation(
-        build_generation_quality_candidate(rendered, final)
+        build_generation_quality_candidate(rendered, final),
+        contract_version=(
+            ""
+            if release_mode is ReleaseMode.SHADOW
+            else STRICT_QUALITY_CONTRACT_VERSION
+        ),
     )
     if not quality_observation.release_allowed:
         logger.warning(
@@ -468,6 +527,24 @@ def run_v2(
             quality_observation.quality_grade,
             quality_observation.safety_decision,
         )
+    if release_mode is not ReleaseMode.SHADOW and (
+        quality_observation.quality_grade != "완성"
+        or quality_observation.publication_grade != "완성"
+        or not quality_observation.release_allowed
+    ):
+        strict_problems = list(
+            dict.fromkeys(
+                (
+                    *quality_observation.quality_shortfalls,
+                    *quality_observation.safety_problems,
+                )
+            )
+        )
+        if not strict_problems:
+            strict_problems.append(
+                "엄격 품질·공개 안전 계약이 완성 보고서로 판정하지 않았습니다"
+            )
+        raise V2ValidationError(strict_problems)
     rendered = _apply_generation_quality_label(
         rendered,
         quality_observation,

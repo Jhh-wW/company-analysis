@@ -42,6 +42,8 @@ from src.features.composer.port import FilingMeta, PerformanceTable
 from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
 from src.features.composer.validate import V2ValidationError
 from src.features.pipeline.port import Grade
+from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
+from src.shared.report_evidence.constants import ReleaseMode
 
 _LOGGER_NAME = "src.features.composer.pipeline"
 
@@ -283,6 +285,60 @@ def test_작가와_검수는_서로_다른_프롬프트만_받는다():
     assert len(reviewer.prompts) == 2
     assert all("판정" in prompt for prompt in reviewer.prompts)
     assert not any("핵심 요약" in prompt for prompt in reviewer.prompts)
+
+
+def test_엄격모드는_AI요약을_부르지_않고_얇은_보고서를_막는다():
+    """FULL 후보는 9장을 채웠다는 이유만으로 얇은 결과를 내보내지 않는다."""
+
+    class StrictWriter(_FakeWriter):
+        def __call__(self, prompt: str) -> str:
+            self.prompts.append(prompt)
+            section_id = SECTION_IDS[self.section_calls]
+            text = (
+                "고객 존중을 회사의 법인 정체성과 공식 소개에서 확인했다.",
+                "고객에게 가치를 전달하는 판매 경로와 수익 구조를 확인했다.",
+                "고객이 선택할 제품 묶음과 각 제품의 역할을 확인했다.",
+                "회사가 과거에 실행한 변화와 그 결과의 흐름을 확인했다.",
+                "현재 해결해야 할 운영 과제와 대응 행동을 확인했다.",
+                "앞으로 추진한다고 밝힌 전략과 실행 조건을 확인했다.",
+                "협력사와 유통사가 맡는 운영 역할과 연결 관계를 확인했다.",
+                "조직이 일하고 결정할 때 따르는 문화 원칙을 확인했다.",
+                "경쟁 대상을 비교할 기준과 회사의 차별점을 확인했다.",
+            )[self.section_calls]
+            self.section_calls += 1
+            return json.dumps(
+                {
+                    "문장들": [
+                        {
+                            "글": text,
+                            "인용": ["2"],
+                            "등급": GRADE_CONFIRMED,
+                            "주장슬롯": CLAIM_SLOTS_BY_SECTION[section_id][0],
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+
+    writer = StrictWriter()
+    reviewer = _FakeReviewer()
+
+    with pytest.raises(V2ValidationError) as caught:
+        run_v2(
+            "가나다전자",
+            _raw_fragments(),
+            None,
+            writer_ask=writer,
+            reviewer_ask=reviewer,
+            release_mode=ReleaseMode.FULL,
+        )
+
+    assert len(writer.prompts) == 9
+    assert not any("핵심 요약" in prompt for prompt in writer.prompts)
+    assert len(reviewer.prompts) == 1
+    assert any("40" in problem for problem in caught.value.problems), (
+        caught.value.problems
+    )
 
 
 def test_인라인_대괄호_인용_흉내는_출고검증을_막지_않는다():
