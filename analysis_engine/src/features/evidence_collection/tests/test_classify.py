@@ -60,6 +60,7 @@ def test_매출액_언급이_있으면_금융_키워드가_있어도_financial�
 
 def _list_attempt(source_kind: str, state: str, requirement: str = c.REQUIREMENT_REQUIRED) -> CollectionAttempt:
     return CollectionAttempt(
+        company_id="00126380",
         attempt_id=f"list:{source_kind}",
         source_kind=source_kind,
         requirement=requirement,

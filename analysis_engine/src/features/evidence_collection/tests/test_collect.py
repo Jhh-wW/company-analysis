@@ -528,3 +528,43 @@ def test_P1_5_중복_문서는_누적_바이트에_가산되지_않는다(monkey
     truncated = [a for a in harvest.attempts if a.reason_code == c.REASON_TOTAL_BYTES_EXCEEDED]
     assert len(duplicate_attempts) == 1
     assert truncated == []  # 유령 소비가 없으면 TRUNCATED가 생기지 않는다
+
+
+# ══════════════════════════════════════════════════════════
+# generation=8 — fragment·attempt도 회사 소유권을 직접 운반한다
+# ══════════════════════════════════════════════════════════
+
+
+def test_gen8_회사_A_수집_산출의_모든_fragment_attempt는_A의_company_id를_갖는다() -> None:
+    """team-lead 통보(2026-08-31) — 회사 A 대상 수집 산출의 모든 fragment·
+    attempt가 A의 company_id를 갖는지 고정한다. list 단계 attempts·문서
+    단계 attempts·scored fragments를 전부 만들어내도록 사업보고서+반기보고서
+    두 건을 함께 수집한다(list attempt 여러 종류 + document attempt +
+    fragments attempt까지 골고루 나오게).
+    """
+    company_a = "00126380"
+    business_row = RawFilingRow("20250315000001", "사업보고서 (2025.03)", "20250315")
+    semiannual_row = RawFilingRow("20250815000002", "반기보고서 (2025.06)", "20250815")
+    fetcher = FakeFetcher(
+        list_responses_by_pblntf_ty={
+            "A": FilingListResult(state="OK", rows=(business_row, semiannual_row)),
+        },
+        document_responses_by_rcept_no={
+            business_row.rcept_no: DocumentFetchResult(state="OK", text=LISTED_BUSINESS_REPORT_TEXT),
+            semiannual_row.rcept_no: DocumentFetchResult(state="OK", text=_MIXED_SIGNAL_TEXT),
+        },
+    )
+
+    harvest = collect_dart_evidence(fetcher, company_a, now=_NOW)
+
+    assert harvest.documents  # 문서가 실제로 만들어졌는지(공허하게 통과하지 않도록)
+    assert harvest.fragments
+    assert harvest.attempts
+    assert all(document.company_id == company_a for document in harvest.documents)
+    assert all(fragment.company_id == company_a for fragment in harvest.fragments)
+    assert all(attempt.company_id == company_a for attempt in harvest.attempts)
+
+    # 직렬화 산출에서도 동일하게 성립해야 한다.
+    mapping = harvest_to_mapping(harvest)
+    assert all(f["company_id"] == company_a for f in mapping["fragments"])
+    assert all(a["company_id"] == company_a for a in mapping["attempts"])

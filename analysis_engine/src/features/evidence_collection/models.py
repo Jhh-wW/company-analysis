@@ -119,8 +119,17 @@ class CollectedDocument:
 
 @dataclass(frozen=True)
 class EvidenceFragment:
-    """문서 안의 의미 조각 — 장·슬롯 채점 결과까지 실은 최종 단위."""
+    """문서 안의 의미 조각 — 장·슬롯 채점 결과까지 실은 최종 단위.
 
+    ★ generation=8(2026-08-31 team-lead 통보) — ``company_id``는 이 조각을
+    만든 «조회가 실제로 대상으로 한 회사»를 직접 싣는다. harvest의
+    company_id에서 나중에 채워 넣는 값이 아니다 — 수집 시점(collect.py)에
+    실제 대상 값을 넣어야 하고, DartEvidenceHarvest가 이 값과 harvest 전체의
+    company_id가 다르면 생성을 거절한다(아래). 「회사별로 따로 수집하니
+    섞일 리 없다」는 호출자 기억에 기대지 않고 자료형이 직접 막는다.
+    """
+
+    company_id: str
     fragment_id: str
     document_id: str
     location: str
@@ -137,6 +146,7 @@ class EvidenceFragment:
 
     def __post_init__(self) -> None:
         for value, name in (
+            (self.company_id, "company_id"),
             (self.fragment_id, "fragment_id"),
             (self.document_id, "document_id"),
             (self.location, "location"),
@@ -169,8 +179,13 @@ class EvidenceFragment:
 
 @dataclass(frozen=True)
 class CollectionAttempt:
-    """조회 경로 하나의 결과 — 「수집 장애」와 「자료 없음」을 분리해 남긴다."""
+    """조회 경로 하나의 결과 — 「수집 장애」와 「자료 없음」을 분리해 남긴다.
 
+    ★ generation=8 — ``company_id``는 EvidenceFragment와 같은 이유로
+    필수다: 이 조회가 실제로 대상으로 한 회사를 조회기록 자신이 싣는다.
+    """
+
+    company_id: str
     attempt_id: str
     source_kind: str
     requirement: str
@@ -182,6 +197,7 @@ class CollectionAttempt:
     documents_seen: int
 
     def __post_init__(self) -> None:
+        _require_nonempty(self.company_id, "company_id")
         _require_nonempty(self.attempt_id, "attempt_id")
         _require_nonempty(self.source_kind, "source_kind")
         _require_choice(self.requirement, c.VALID_REQUIREMENTS, "requirement")
@@ -222,4 +238,23 @@ class DartEvidenceHarvest:
             if fragment.document_id not in known_document_ids:
                 raise EvidenceCollectionError(
                     f"조각 {fragment.fragment_id}의 document_id가 documents에 없습니다"
+                )
+        # ★ generation=8 — document·fragment·attempt 어느 하나라도 harvest의
+        # company_id와 다르면 즉시 거절한다. 같은 document_id·같은 슬롯의
+        # 「다른 회사」 조회 결과가 섞여 들어와도 대상 회사의 준비 판정을
+        # 조용히 바꾸지 못하게 자료형이 직접 막는다(호출자 기억에 기대지 않음).
+        for document in self.documents:
+            if document.company_id != self.company_id:
+                raise EvidenceCollectionError(
+                    f"문서 {document.document_id}의 company_id가 harvest와 다릅니다"
+                )
+        for fragment in self.fragments:
+            if fragment.company_id != self.company_id:
+                raise EvidenceCollectionError(
+                    f"조각 {fragment.fragment_id}의 company_id가 harvest와 다릅니다"
+                )
+        for attempt in self.attempts:
+            if attempt.company_id != self.company_id:
+                raise EvidenceCollectionError(
+                    f"시도 {attempt.attempt_id}의 company_id가 harvest와 다릅니다"
                 )

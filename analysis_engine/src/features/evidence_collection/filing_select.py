@@ -153,10 +153,11 @@ def _pick_latest_with_lineage(rows: list[RawFilingRow]) -> tuple[RawFilingRow, s
 
 
 def _attempt_for_list_query(
-    spec: c.FilingKindSpec, result: FilingListResult,
+    company_id: str, spec: c.FilingKindSpec, result: FilingListResult,
 ) -> tuple[CollectionAttempt, list[RawFilingRow]]:
     if result.state == c.ATTEMPT_STATE_FAILED:
         attempt = CollectionAttempt(
+            company_id=company_id,
             attempt_id=f"list:{spec.source_kind}",
             source_kind=spec.source_kind,
             requirement=spec.requirement,
@@ -173,6 +174,7 @@ def _attempt_for_list_query(
     state = c.ATTEMPT_STATE_OK if filtered else c.ATTEMPT_STATE_MISSING
     reason = c.REASON_LIST_QUERY_OK if filtered else c.REASON_LIST_QUERY_MISSING
     attempt = CollectionAttempt(
+        company_id=company_id,
         attempt_id=f"list:{spec.source_kind}",
         source_kind=spec.source_kind,
         requirement=spec.requirement,
@@ -186,8 +188,9 @@ def _attempt_for_list_query(
     return attempt, filtered
 
 
-def _deadline_list_attempt(spec: c.FilingKindSpec) -> CollectionAttempt:
+def _deadline_list_attempt(company_id: str, spec: c.FilingKindSpec) -> CollectionAttempt:
     return CollectionAttempt(
+        company_id=company_id,
         attempt_id=f"list:{spec.source_kind}",
         source_kind=spec.source_kind,
         requirement=spec.requirement,
@@ -232,10 +235,10 @@ def select_related_filings(
     for source_kind in c.PRIMARY_LOOKUP_ORDER:
         spec = c.FILING_KIND_SPEC_BY_SOURCE_KIND[source_kind]
         if spec.pblntf_ty not in list_result_cache and deadline_exceeded():
-            attempts.append(_deadline_list_attempt(spec))
+            attempts.append(_deadline_list_attempt(company_id, spec))
             continue
         result = fetch_cached(spec.pblntf_ty)
-        attempt, filtered = _attempt_for_list_query(spec, result)
+        attempt, filtered = _attempt_for_list_query(company_id, spec, result)
         attempts.append(attempt)
         if filtered:
             chosen, lineage_original = _pick_latest_with_lineage(filtered)
@@ -252,10 +255,10 @@ def select_related_filings(
     for source_kind in c.SUPPLEMENT_LOOKUP_ORDER:
         spec = c.FILING_KIND_SPEC_BY_SOURCE_KIND[source_kind]
         if spec.pblntf_ty not in list_result_cache and deadline_exceeded():
-            attempts.append(_deadline_list_attempt(spec))
+            attempts.append(_deadline_list_attempt(company_id, spec))
             continue
         result = fetch_cached(spec.pblntf_ty)
-        attempt, filtered = _attempt_for_list_query(spec, result)
+        attempt, filtered = _attempt_for_list_query(company_id, spec, result)
         attempts.append(attempt)
         if filtered:
             chosen, lineage_original = _pick_latest_with_lineage(filtered)
@@ -272,6 +275,7 @@ def select_related_filings(
     overflow = candidates[c.MAX_RELATED_FILINGS:]
     for extra in overflow:
         attempts.append(CollectionAttempt(
+            company_id=company_id,
             attempt_id=f"cap:{extra.source_kind}:{extra.rcept_no}",
             source_kind=extra.source_kind,
             requirement=extra.requirement,

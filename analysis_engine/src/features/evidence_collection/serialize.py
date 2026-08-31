@@ -10,6 +10,14 @@ team-lead 통보). frozen dataclass·frozenset·tuple 같은 파이썬 전용 �
 collect.py가 이미 scored fragment만 넣도록 보장하므로(P0-1·P0-3) 이 값은
 documents에 실린 문서마다 절대 비지 않는다 — 두 보장이 같은 경계(scored
 fragment 존재 여부)에서 나온다.
+
+★ generation=8 계약(2026-08-31 team-lead 통보) — fragments·attempts 각
+항목에도 ``company_id``가 있다. **이 값은 harvest.company_id에서 채워
+넣거나 호출 인자로 덮어쓰지 않는다** — fragment.company_id·attempt.company_id를
+있는 그대로 옮길 뿐이다(아래 ``_fragment_to_mapping``·``_attempt_to_mapping``은
+harvest를 아예 받지 않는다 — 덮어쓸 방법 자체가 없다). 값 자체가 harvest의
+company_id와 다르면 그보다 앞서 ``DartEvidenceHarvest.__post_init__``이
+생성을 거절하므로 여기 도달하는 값은 이미 검증된 값이다.
 """
 
 from __future__ import annotations
@@ -52,6 +60,7 @@ def _document_to_mapping(
 
 def _fragment_to_mapping(fragment: EvidenceFragment) -> dict[str, object]:
     return {
+        "company_id": fragment.company_id,
         "fragment_id": fragment.fragment_id,
         "document_id": fragment.document_id,
         "location": fragment.location,
@@ -70,6 +79,7 @@ def _fragment_to_mapping(fragment: EvidenceFragment) -> dict[str, object]:
 
 def _attempt_to_mapping(attempt: CollectionAttempt) -> dict[str, object]:
     return {
+        "company_id": attempt.company_id,
         "attempt_id": attempt.attempt_id,
         "source_kind": attempt.source_kind,
         "requirement": attempt.requirement,

@@ -12,9 +12,14 @@ from features.evidence_collection.models import (
     DocumentTextRange,
     EvidenceFragment,
 )
-from features.evidence_collection.serialize import harvest_to_mapping
+from features.evidence_collection.serialize import (
+    _attempt_to_mapping,
+    _fragment_to_mapping,
+    harvest_to_mapping,
+)
 
 _JSON_SAFE_SCALAR_TYPES = (str, int, float, bool, type(None))
+_COMPANY_ID = "00126380"
 
 
 def _assert_json_safe(value: object) -> None:
@@ -30,9 +35,9 @@ def _assert_json_safe(value: object) -> None:
         assert isinstance(value, _JSON_SAFE_SCALAR_TYPES), f"JSON-safe하지 않은 값: {value!r}"
 
 
-def _document(document_id: str) -> CollectedDocument:
+def _document(document_id: str, company_id: str = _COMPANY_ID) -> CollectedDocument:
     return CollectedDocument(
-        company_id="00126380",
+        company_id=company_id,
         document_id=document_id,
         canonical_url="https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20250315000001",
         source_tier=c.SOURCE_TIER_OFFICIAL,
@@ -42,7 +47,7 @@ def _document(document_id: str) -> CollectedDocument:
         published_on="20250315",
         collected_at="2026-08-31T00:00:00+09:00",
         content_sha256="a" * 64,
-        identity_binding="corp_code=00126380;rcept_no=20250315000001",
+        identity_binding=f"corp_code={company_id};rcept_no=20250315000001",
         usable_ranges=(DocumentTextRange(0, 10), DocumentTextRange(20, 35)),
         collector_version=c.COLLECTOR_VERSION,
         parser_version=c.PARSER_VERSION,
@@ -50,9 +55,10 @@ def _document(document_id: str) -> CollectedDocument:
     )
 
 
-def _fragment(fragment_id: str, document_id: str) -> EvidenceFragment:
+def _fragment(fragment_id: str, document_id: str, company_id: str = _COMPANY_ID) -> EvidenceFragment:
     text = f"조각 원문 {fragment_id}"
     return EvidenceFragment(
+        company_id=company_id,
         fragment_id=fragment_id,
         document_id=document_id,
         location="0-20",
@@ -65,8 +71,9 @@ def _fragment(fragment_id: str, document_id: str) -> EvidenceFragment:
     )
 
 
-def _attempt(attempt_id: str) -> CollectionAttempt:
+def _attempt(attempt_id: str, company_id: str = _COMPANY_ID) -> CollectionAttempt:
     return CollectionAttempt(
+        company_id=company_id,
         attempt_id=attempt_id,
         source_kind=c.SOURCE_KIND_BUSINESS_REPORT,
         requirement=c.REQUIREMENT_REQUIRED,
@@ -83,7 +90,7 @@ def _harvest() -> DartEvidenceHarvest:
     doc_a = _document("dart_business_report:20250315000001")
     doc_b = _document("dart_business_report:20250815000002")
     return DartEvidenceHarvest(
-        company_id="00126380",
+        company_id=_COMPANY_ID,
         company_type=c.COMPANY_TYPE_LISTED,
         documents=(doc_a, doc_b),
         fragments=(
@@ -150,7 +157,7 @@ def test_fragments_필드_이름과_값이_원본과_일치하고_reason_codes�
     serialized = mapping["fragments"][0]
 
     assert set(serialized.keys()) == {
-        "fragment_id", "document_id", "location", "text_sha256", "text",
+        "company_id", "fragment_id", "document_id", "location", "text_sha256", "text",
         "section_id", "slot_id", "score_millis", "reason_codes",
         "period_start", "period_end", "unit", "company_scope",
     }
@@ -159,6 +166,7 @@ def test_fragments_필드_이름과_값이_원본과_일치하고_reason_codes�
     assert serialized["score_millis"] == original.score_millis
     assert serialized["reason_codes"] == list(original.reason_codes)
     assert isinstance(serialized["reason_codes"], list)
+    assert serialized["company_id"] == original.company_id
 
 
 def test_attempts_필드_이름과_값이_원본과_일치하고_slot_ids는_list다() -> None:
@@ -168,13 +176,14 @@ def test_attempts_필드_이름과_값이_원본과_일치하고_slot_ids는_lis
     serialized = mapping["attempts"][0]
 
     assert set(serialized.keys()) == {
-        "attempt_id", "source_kind", "requirement", "state", "slot_ids",
+        "company_id", "attempt_id", "source_kind", "requirement", "state", "slot_ids",
         "reason_code", "elapsed_ms", "bytes_downloaded", "documents_seen",
     }
     assert serialized["attempt_id"] == original.attempt_id
     assert serialized["slot_ids"] == list(original.slot_ids)
     assert isinstance(serialized["slot_ids"], list)
     assert serialized["elapsed_ms"] == original.elapsed_ms
+    assert serialized["company_id"] == original.company_id
 
 
 def test_documents_fragments_attempts_순서는_원본_순서를_보존한다() -> None:
@@ -197,6 +206,7 @@ def test_P0_5_exact_evidence_hashes는_같은_문서_fragment의_text_sha256_전
     doc = _document("dart_business_report:20250315000001")
     frag_a = _fragment("frag-a", doc.document_id)
     frag_b = EvidenceFragment(
+        company_id=_COMPANY_ID,
         fragment_id="frag-b",
         document_id=doc.document_id,
         location="20-40",
@@ -208,7 +218,7 @@ def test_P0_5_exact_evidence_hashes는_같은_문서_fragment의_text_sha256_전
         reason_codes=("keyword_hit:business_model:revenue_model",),
     )
     harvest = DartEvidenceHarvest(
-        company_id="00126380",
+        company_id=_COMPANY_ID,
         company_type=c.COMPANY_TYPE_LISTED,
         documents=(doc,),
         fragments=(frag_a, frag_b),
@@ -238,19 +248,19 @@ def test_P0_5_exact_evidence_hashes는_중복_없이_담는다() -> None:
     same_text = "당사는 서로 다른 위치에 같은 문장이 반복돼 실린 경우다."
     same_hash = hashlib.sha256(same_text.encode("utf-8")).hexdigest()
     frag_a = EvidenceFragment(
-        fragment_id="frag-a", document_id=doc.document_id, location="0-30",
+        company_id=_COMPANY_ID, fragment_id="frag-a", document_id=doc.document_id, location="0-30",
         text_sha256=same_hash, text=same_text, section_id="identity",
         slot_id="identity:corporate_identity", score_millis=500,
         reason_codes=("keyword_hit:identity:corporate_identity",),
     )
     frag_b = EvidenceFragment(
-        fragment_id="frag-b", document_id=doc.document_id, location="500-530",
+        company_id=_COMPANY_ID, fragment_id="frag-b", document_id=doc.document_id, location="500-530",
         text_sha256=same_hash, text=same_text, section_id="identity",
         slot_id="identity:corporate_identity", score_millis=500,
         reason_codes=("keyword_hit:identity:corporate_identity",),
     )
     harvest = DartEvidenceHarvest(
-        company_id="00126380",
+        company_id=_COMPANY_ID,
         company_type=c.COMPANY_TYPE_LISTED,
         documents=(doc,),
         fragments=(frag_a, frag_b),
@@ -271,7 +281,7 @@ def test_P0_5_문서가_있으면_exact_evidence_hashes는_절대_비지_않는�
 
 def test_빈_harvest도_빈_리스트로_직렬화된다() -> None:
     harvest = DartEvidenceHarvest(
-        company_id="00126380",
+        company_id=_COMPANY_ID,
         company_type=c.COMPANY_TYPE_AUDIT_ONLY,
         documents=(),
         fragments=(),
@@ -281,3 +291,38 @@ def test_빈_harvest도_빈_리스트로_직렬화된다() -> None:
     assert mapping["documents"] == []
     assert mapping["fragments"] == []
     assert mapping["attempts"] == []
+
+
+# ══════════════════════════════════════════════════════════
+# generation=8 — fragments·attempts의 company_id
+# ══════════════════════════════════════════════════════════
+
+
+def test_gen8_fragments_attempts_각_항목에_company_id_키가_있다() -> None:
+    harvest = _harvest()
+    mapping = harvest_to_mapping(harvest)
+
+    for fragment_mapping in mapping["fragments"]:
+        assert fragment_mapping["company_id"] == _COMPANY_ID
+    for attempt_mapping in mapping["attempts"]:
+        assert attempt_mapping["company_id"] == _COMPANY_ID
+
+
+def test_gen8_fragment_mapping은_harvest_company_id로_덮어쓰지_않고_자기_필드를_쓴다() -> None:
+    """_fragment_to_mapping은 fragment 하나만 받는다 — harvest.company_id로
+    「채워 넣거나」 호출 인자로 「덮어쓸」 방법 자체가 없다는 것을 직접 증명한다.
+    """
+    fragment = _fragment("frag-x", "dart_business_report:20250315000001", company_id="00999999")
+
+    mapping = _fragment_to_mapping(fragment)
+
+    assert mapping["company_id"] == "00999999"
+
+
+def test_gen8_attempt_mapping은_harvest_company_id로_덮어쓰지_않고_자기_필드를_쓴다() -> None:
+    """_attempt_to_mapping도 attempt 하나만 받는다 — 덮어쓸 방법 자체가 없다."""
+    attempt = _attempt("attempt-x", company_id="00999999")
+
+    mapping = _attempt_to_mapping(attempt)
+
+    assert mapping["company_id"] == "00999999"

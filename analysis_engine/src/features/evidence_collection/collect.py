@@ -32,6 +32,7 @@ def _safe_fetch_document(fetcher: DartFetcher, rcept_no: str) -> DocumentFetchRe
 
 
 def _document_attempt(
+    company_id: str,
     filing: SelectedFiling,
     state: str,
     reason_code: str,
@@ -40,6 +41,7 @@ def _document_attempt(
     documents_seen: int = 1,
 ) -> CollectionAttempt:
     return CollectionAttempt(
+        company_id=company_id,
         attempt_id=f"document:{filing.source_kind}:{filing.rcept_no}",
         source_kind=filing.source_kind,
         requirement=filing.requirement,
@@ -52,9 +54,12 @@ def _document_attempt(
     )
 
 
-def _unscored_fragments_attempt(filing: SelectedFiling, unscored_count: int) -> CollectionAttempt:
+def _unscored_fragments_attempt(
+    company_id: str, filing: SelectedFiling, unscored_count: int,
+) -> CollectionAttempt:
     """무신호 문단 개수를 관측치로만 남긴다(P0-1) — 조각 자체는 harvest에 넣지 않는다."""
     return CollectionAttempt(
+        company_id=company_id,
         attempt_id=f"fragments:{filing.source_kind}:{filing.rcept_no}",
         source_kind=filing.source_kind,
         requirement=filing.requirement,
@@ -67,8 +72,9 @@ def _unscored_fragments_attempt(filing: SelectedFiling, unscored_count: int) -> 
     )
 
 
-def _deadline_attempt(filing: SelectedFiling) -> CollectionAttempt:
+def _deadline_attempt(company_id: str, filing: SelectedFiling) -> CollectionAttempt:
     return CollectionAttempt(
+        company_id=company_id,
         attempt_id=f"deadline:{filing.source_kind}:{filing.rcept_no}",
         source_kind=filing.source_kind,
         requirement=filing.requirement,
@@ -113,6 +119,12 @@ def collect_dart_evidence(
     문단은 harvest 밖으로 사라지지 않고 ``attempts``에 개수·사유 코드로
     남는다. 같은 이유로 채점된 조각이 하나도 없는 문서는 ``documents``에도
     올라가지 않는다(P0-3) — 「조회했다」는 사실 자체는 attempt로 보존한다.
+
+    ``documents``·``fragments``·``attempts`` 전부가 이 함수에 넘긴
+    ``company_id``를 자기 필드로 직접 싣는다(generation=8, 2026-08-31
+    team-lead 통보) — 만드는 자리에서 실제 대상 회사 값을 넣고,
+    DartEvidenceHarvest 생성 시 하나라도 다르면 즉시 거절된다. 「회사별로
+    따로 수집하니 섞일 리 없다」는 호출자 기억에 기대지 않는다.
     """
     deadline_at = time.monotonic() + deadline_seconds
     selection = filing_select.select_related_filings(fetcher, company_id, deadline_at=deadline_at)
@@ -130,7 +142,7 @@ def collect_dart_evidence(
 
     for filing in selection.selected:
         if time.monotonic() > deadline_at:
-            attempts.append(_deadline_attempt(filing))
+            attempts.append(_deadline_attempt(company_id, filing))
             continue
 
         fetch_result = _safe_fetch_document(fetcher, filing.rcept_no)
@@ -138,7 +150,7 @@ def collect_dart_evidence(
         if fetch_result.state == c.ATTEMPT_STATE_MISSING:
             # 확인된 부재(P0-2) — 전송 장애(FAILED)와 분리해서 남긴다.
             attempts.append(_document_attempt(
-                filing, c.ATTEMPT_STATE_MISSING, c.REASON_DOCUMENT_FETCH_MISSING, fetch_result,
+                company_id, filing, c.ATTEMPT_STATE_MISSING, c.REASON_DOCUMENT_FETCH_MISSING, fetch_result,
             ))
             continue
         if fetch_result.state != c.ATTEMPT_STATE_OK:
@@ -146,21 +158,21 @@ def collect_dart_evidence(
             # FAILED 처리한다(P0-2) — 「모르는 상태」를 「확인된 부재」로
             # 착각하지 않는다.
             attempts.append(_document_attempt(
-                filing, c.ATTEMPT_STATE_FAILED, c.REASON_DOCUMENT_FETCH_FAILED, fetch_result,
+                company_id, filing, c.ATTEMPT_STATE_FAILED, c.REASON_DOCUMENT_FETCH_FAILED, fetch_result,
             ))
             continue
 
         if fetch_result.corp_code and fetch_result.corp_code != company_id:
             # 다른 회사 문서가 섞여 들어오는 것을 막는다(P1-4).
             attempts.append(_document_attempt(
-                filing, c.ATTEMPT_STATE_FAILED, c.REASON_DOCUMENT_IDENTITY_MISMATCH, fetch_result,
+                company_id, filing, c.ATTEMPT_STATE_FAILED, c.REASON_DOCUMENT_IDENTITY_MISMATCH, fetch_result,
             ))
             continue
 
         text_bytes = len(fetch_result.text.encode("utf-8"))
         if text_bytes > c.MAX_DOCUMENT_TEXT_BYTES:
             attempts.append(_document_attempt(
-                filing, c.ATTEMPT_STATE_FAILED, c.REASON_DOCUMENT_TOO_LARGE, fetch_result,
+                company_id, filing, c.ATTEMPT_STATE_FAILED, c.REASON_DOCUMENT_TOO_LARGE, fetch_result,
             ))
             continue
 
@@ -171,13 +183,13 @@ def collect_dart_evidence(
             # 판정을 하면 실제로 쓰이지 않는 바이트가 예산을 유령처럼
             # 소비해 무관한 다음 문서가 부당하게 TRUNCATED될 수 있었다.
             attempts.append(_document_attempt(
-                filing, c.ATTEMPT_STATE_OK, c.REASON_DOCUMENT_DUPLICATE, fetch_result,
+                company_id, filing, c.ATTEMPT_STATE_OK, c.REASON_DOCUMENT_DUPLICATE, fetch_result,
             ))
             continue
 
         if total_bytes + text_bytes > c.MAX_TOTAL_TEXT_BYTES:
             attempts.append(_document_attempt(
-                filing, c.ATTEMPT_STATE_TRUNCATED, c.REASON_TOTAL_BYTES_EXCEEDED, fetch_result,
+                company_id, filing, c.ATTEMPT_STATE_TRUNCATED, c.REASON_TOTAL_BYTES_EXCEEDED, fetch_result,
             ))
             continue
         total_bytes += text_bytes
@@ -187,7 +199,7 @@ def collect_dart_evidence(
             # 조회 자체가 느려 deadline을 넘겼는데도 분할·채점이 검사 없이
             # 진행되던 결함(P1-3) — 조회 직후 다시 확인한다.
             attempts.append(_document_attempt(
-                filing, c.ATTEMPT_STATE_TRUNCATED, c.REASON_DEADLINE_EXCEEDED, fetch_result,
+                company_id, filing, c.ATTEMPT_STATE_TRUNCATED, c.REASON_DEADLINE_EXCEEDED, fetch_result,
             ))
             continue
 
@@ -207,7 +219,7 @@ def collect_dart_evidence(
             # 채점 가능한 근거가 하나도 없다 — 문서 자체를 최종 산출에서
             # 뺀다(P0-3). 조회는 성공했다는 사실만 attempt로 남긴다.
             attempts.append(_document_attempt(
-                filing, c.ATTEMPT_STATE_OK, c.REASON_DOCUMENT_NO_SCORED_EVIDENCE, fetch_result,
+                company_id, filing, c.ATTEMPT_STATE_OK, c.REASON_DOCUMENT_NO_SCORED_EVIDENCE, fetch_result,
                 documents_seen=len(candidates),
             ))
             continue
@@ -235,6 +247,7 @@ def collect_dart_evidence(
             )
             new_fragments = [
                 EvidenceFragment(
+                    company_id=company_id,
                     fragment_id=f"{document_id}:frag{index}",
                     document_id=document_id,
                     location=f"{candidate.start}-{candidate.end}",
@@ -251,17 +264,17 @@ def collect_dart_evidence(
             # 자료형 검증 실패 하나가 harvest 전체(이미 쌓인 attempts 포함)를
             # 무너뜨리지 않게 이 문서만 버리고 다음 문서로 넘어간다(P1-2).
             attempts.append(_document_attempt(
-                filing, c.ATTEMPT_STATE_FAILED, c.REASON_DOCUMENT_MODEL_INVALID, fetch_result,
+                company_id, filing, c.ATTEMPT_STATE_FAILED, c.REASON_DOCUMENT_MODEL_INVALID, fetch_result,
             ))
             continue
 
         documents.append(document)
         fragments.extend(new_fragments)
         attempts.append(_document_attempt(
-            filing, c.ATTEMPT_STATE_OK, c.REASON_DOCUMENT_FETCH_OK, fetch_result,
+            company_id, filing, c.ATTEMPT_STATE_OK, c.REASON_DOCUMENT_FETCH_OK, fetch_result,
         ))
         if unscored_count:
-            attempts.append(_unscored_fragments_attempt(filing, unscored_count))
+            attempts.append(_unscored_fragments_attempt(company_id, filing, unscored_count))
 
     company_type = classify.classify_company_type(documents, classify_probe_texts, attempts=attempts)
 
