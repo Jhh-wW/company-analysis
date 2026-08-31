@@ -143,64 +143,104 @@ def _recover_member_run_history() -> None:
     recovered_used = 0
     recovered_returned = 0
     recovered_at = clock.iso_now_kst()
+    # 예약 한 건의 artifact 오류가 다른 회원의 복구와 서버 시작까지 막지 않게
+    # 목록 읽기와 각 settlement를 서로 다른 transaction으로 격리한다.
     with storage_db.connect() as conn:
-        if not conn.in_transaction:
-            conn.execute("BEGIN IMMEDIATE")
-        for reservation in dashboard_store.list_reserved_member_runs(conn):
-            intent = delivery_store.load_delivery_intent(conn, reservation.run_id)
-            delivery = (
-                delivery_store.load_delivery_by_public_id(conn, reservation.run_id)
-                if intent is not None
-                and intent.state == delivery_store.DELIVERY_INTENT_COMPLETE
-                else None
-            )
-            artifact = (
-                delivery_artifact.artifact_for_delivery(
-                    conn,
-                    delivery_id=delivery.delivery_id,
+        reservations = dashboard_store.list_reserved_member_runs(conn)
+    try:
+        backend = report_delivery_adapter.configured_artifact_backend()
+    except Exception:  # noqa: BLE001 — 저장소 설정 오류도 서버 전체 시작을 막지 않는다
+        logger.exception(
+            "MEMBER 재시작 복구용 artifact 저장소를 열지 못해 예약을 보존합니다"
+        )
+        return
+
+    for reservation in reservations:
+        try:
+            with storage_db.connect() as conn:
+                if not conn.in_transaction:
+                    conn.execute("BEGIN IMMEDIATE")
+                intent = delivery_store.load_delivery_intent(
+                    conn, reservation.run_id
                 )
-                if delivery is not None
-                else None
-            )
-            inspection = (
-                delivery_artifact.inspect_artifact(
-                    conn,
-                    report_delivery_adapter.configured_artifact_backend(),
-                    artifact.artifact_id,
+                delivery = (
+                    delivery_store.load_delivery_by_public_id(
+                        conn, reservation.run_id
+                    )
+                    if intent is not None
+                    and intent.state == delivery_store.DELIVERY_INTENT_COMPLETE
+                    else None
                 )
-                if artifact is not None
-                else None
-            )
-            # DB에 PDF의 주소표만 남고 실제 파일이 사라지거나 깨졌다면 사용자는
-            # 보고서를 열 수 없다. 재시작 복구가 주소표의 존재만 보고 성공 건수를
-            # 차감하면 "성공으로 결제됐지만 받을 파일은 없는" 상태가 된다.
-            succeeded = (
-                inspection is not None
-                and inspection.status
-                is delivery_artifact.ArtifactInspectionStatus.AVAILABLE
-            )
-            settled = dashboard_store.settle_member_run(
-                conn,
-                run_id=reservation.run_id,
-                succeeded=succeeded,
-                report_id=reservation.run_id if succeeded else "",
-                now_iso=recovered_at,
-                outcome=(
-                    "server_restart_report_available"
-                    if succeeded
-                    else "server_restart_interrupted"
-                ),
-                # 성공 건수 복구에서 비용을 0원으로 추측하지 않는다. 금액은 별도
-                # attempt 원장이 정본이며 MEMBER 요약에는 불확실로 표시한다.
-                cost_krw=0.0,
-                cost_uncertain=True,
-            )
-            if not settled:
-                raise RuntimeError("MEMBER 성공 건수 예약을 재시작 뒤 마감하지 못했습니다")
+                artifact = (
+                    delivery_artifact.artifact_for_delivery(
+                        conn,
+                        delivery_id=delivery.delivery_id,
+                    )
+                    if delivery is not None
+                    else None
+                )
+                inspection_failed = False
+                try:
+                    inspection = (
+                        delivery_artifact.inspect_artifact(
+                            conn,
+                            backend,
+                            artifact.artifact_id,
+                        )
+                        if artifact is not None
+                        else None
+                    )
+                except Exception:  # noqa: BLE001 — 한 PDF I/O 오류만 무차감 반환
+                    inspection = None
+                    inspection_failed = True
+                    logger.exception(
+                        "MEMBER 재시작 artifact를 읽지 못해 해당 예약만 반환합니다 "
+                        "run_id=%s",
+                        reservation.run_id,
+                    )
+                # DB에 PDF의 주소표만 남고 실제 파일이 사라지거나 깨졌다면 사용자는
+                # 보고서를 열 수 없다. 주소표의 존재만 보고 성공 건수를 차감하지 않는다.
+                succeeded = (
+                    inspection is not None
+                    and inspection.status
+                    is delivery_artifact.ArtifactInspectionStatus.AVAILABLE
+                )
+                settled = dashboard_store.settle_member_run(
+                    conn,
+                    run_id=reservation.run_id,
+                    succeeded=succeeded,
+                    report_id=reservation.run_id if succeeded else "",
+                    now_iso=recovered_at,
+                    outcome=(
+                        "server_restart_report_available"
+                        if succeeded
+                        else (
+                            "server_restart_artifact_inspection_failed"
+                            if inspection_failed
+                            else "server_restart_interrupted"
+                        )
+                    ),
+                    # 성공 건수 복구에서 비용을 0원으로 추측하지 않는다. 금액은 별도
+                    # attempt 원장이 정본이며 MEMBER 요약에는 불확실로 표시한다.
+                    cost_krw=0.0,
+                    cost_uncertain=True,
+                )
+                if not settled:
+                    logger.warning(
+                        "MEMBER 재시작 예약이 이미 다른 경로에서 마감됐습니다 "
+                        "run_id=%s",
+                        reservation.run_id,
+                    )
+                    continue
             if succeeded:
                 recovered_used += 1
             else:
                 recovered_returned += 1
+        except Exception:  # noqa: BLE001 — 손상된 예약 한 건 때문에 startup을 막지 않는다
+            logger.exception(
+                "MEMBER 재시작 예약 복구를 격리했습니다 run_id=%s",
+                reservation.run_id,
+            )
     if recovered_used or recovered_returned:
         logger.warning(
             "서버 재시작 MEMBER 예약을 마감했습니다: 성공 %d건, 반환 %d건",
