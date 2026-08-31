@@ -550,6 +550,27 @@ def test_평가나_후보가_바뀌면_영수증지문도_바뀐다() -> None:
     assert other_candidate.receipt_sha256 != primary.receipt_sha256
 
 
+def test_영수증_하위클래스를_실제_출고_권위로_받지_않는다() -> None:
+    primary = _primary(_assessment())
+
+    class ForgedReceipt(GenerationValidationReceipt):
+        pass
+
+    forged = ForgedReceipt(
+        company_id=primary.company_id,
+        candidate_sha256=primary.candidate_sha256,
+        assessment=primary.assessment,
+        round=primary.round,
+        writer_calls=primary.writer_calls,
+        reviewer_calls=primary.reviewer_calls,
+        section_sha256s=primary.section_sha256s,
+        evidence_packet_sha256s=primary.evidence_packet_sha256s,
+    )
+
+    with pytest.raises(TypeError):
+        decide_post_validation(forged)
+
+
 def test_불일치한평가등급이나_문제코드는_영수증이되지못한다() -> None:
     inconsistent_publication = replace(
         _assessment(),

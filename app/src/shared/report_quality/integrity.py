@@ -13,8 +13,11 @@ from decimal import Decimal
 from src.shared.report_quality.contract import contract_for_generation
 from src.shared.report_quality.models import (
     GenerationAssessment,
+    QualityAssessment,
     QualityGrade,
+    QualityProblemCode,
     ReleaseDecision,
+    SafetyAssessment,
 )
 
 
@@ -34,7 +37,15 @@ def _ordered_counts(
     required_section_ids: tuple[str, ...],
     label: str,
 ) -> tuple[int, ...]:
-    section_ids = tuple(str(section_id).strip() for section_id, _count in values)
+    if type(values) is not tuple or any(
+        type(item) is not tuple
+        or len(item) != 2
+        or type(item[0]) is not str
+        or item[0] != item[0].strip()
+        for item in values
+    ):
+        raise AssessmentIntegrityError(f"{label}의 저장 형식이 손상됐습니다")
+    section_ids = tuple(section_id for section_id, _count in values)
     if section_ids != required_section_ids:
         raise AssessmentIntegrityError(
             f"{label}에는 계약 순서의 필수 장이 정확히 한 번씩 필요합니다"
@@ -54,10 +65,21 @@ def assert_complete_generation_assessment(
     완성이라고 주장할 때만 호출하며, 모순이 하나라도 있으면 예외로 막는다.
     """
 
-    if not isinstance(assessment, GenerationAssessment):
+    if type(assessment) is not GenerationAssessment:
         raise TypeError("완성 재검산에는 GenerationAssessment가 필요합니다")
     quality = assessment.quality
     safety = assessment.safety
+    if type(quality) is not QualityAssessment or type(safety) is not SafetyAssessment:
+        raise TypeError("완성 재검산에는 정확한 품질·안전 판정이 필요합니다")
+    if any(
+        type(value) is not str or value != value.strip() or not value
+        for value in (
+            assessment.contract_version,
+            quality.contract_version,
+            safety.contract_version,
+        )
+    ):
+        raise AssessmentIntegrityError("품질·안전 계약 버전 형식이 손상됐습니다")
     contract = contract_for_generation(assessment.contract_version)
     versions = {
         assessment.contract_version,
@@ -81,6 +103,27 @@ def assert_complete_generation_assessment(
         or quality.semantic_underfilled_sections
     ):
         raise AssessmentIntegrityError("완성 판정에 품질 부족 장이나 사유가 남아 있습니다")
+    tuple_text_fields = (
+        (quality.shortfall_reasons, "품질 부족 사유"),
+        (quality.notice_only_sections, "안내문 장"),
+        (quality.one_claim_sections, "한 claim 장"),
+        (quality.underfilled_sections, "공개 문장 부족 장"),
+        (quality.semantic_underfilled_sections, "의미 부족 장"),
+        (safety.verified_fact_ids, "검증 fact"),
+        (safety.unverified_fact_ids, "미검증 fact"),
+        (safety.rejected_fact_ids, "거절 fact"),
+        (safety.problems, "안전 문제"),
+    )
+    for values, label in tuple_text_fields:
+        if type(values) is not tuple or any(
+            type(value) is not str or value != value.strip() or not value
+            for value in values
+        ):
+            raise AssessmentIntegrityError(f"{label} 저장 형식이 손상됐습니다")
+    if type(quality.problem_codes) is not tuple or any(
+        type(code) is not QualityProblemCode for code in quality.problem_codes
+    ):
+        raise AssessmentIntegrityError("품질 문제 코드는 닫힌 enum 목록이어야 합니다")
     if safety.problems or safety.unverified_fact_ids or safety.rejected_fact_ids:
         raise AssessmentIntegrityError("완성 판정에 미검증·거절·안전 문제가 남아 있습니다")
 
@@ -100,7 +143,7 @@ def assert_complete_generation_assessment(
         raise AssessmentIntegrityError("완성 판정의 실질 claim 수가 계약 하한보다 적습니다")
     if verified != substantive:
         raise AssessmentIntegrityError("공개 가능 완성본의 모든 claim이 검증되지 않았습니다")
-    verified_ids = tuple(str(value).strip() for value in safety.verified_fact_ids)
+    verified_ids = safety.verified_fact_ids
     if (
         any(not value for value in verified_ids)
         or len(verified_ids) != len(set(verified_ids))
@@ -108,7 +151,11 @@ def assert_complete_generation_assessment(
     ):
         raise AssessmentIntegrityError("검증 claim 수와 안전 판정의 fact 목록이 다릅니다")
     expected_ratio = Decimal(verified) / Decimal(substantive)
-    if not quality.verified_ratio.is_finite() or quality.verified_ratio != expected_ratio:
+    if (
+        type(quality.verified_ratio) is not Decimal
+        or not quality.verified_ratio.is_finite()
+        or quality.verified_ratio != expected_ratio
+    ):
         raise AssessmentIntegrityError("검증 claim 비율이 실제 개수와 다릅니다")
     if quality.verified_ratio < contract.min_verified_ratio:
         raise AssessmentIntegrityError("완성 판정의 검증 비율이 계약 하한보다 낮습니다")

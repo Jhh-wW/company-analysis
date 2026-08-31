@@ -107,3 +107,40 @@ def test_검증_fact_목록을_줄이고_개수만_완성으로_꾸밀_수_없�
 
     with pytest.raises(AssessmentIntegrityError):
         assert_complete_generation_assessment(forged)
+
+
+def test_판정_dataclass_하위클래스로_완성을_위조할_수_없다() -> None:
+    assessment = _complete_assessment()
+
+    class ForgedGenerationAssessment(GenerationAssessment):
+        pass
+
+    forged = ForgedGenerationAssessment(
+        contract_version=assessment.contract_version,
+        quality=assessment.quality,
+        safety=assessment.safety,
+        publication_grade=assessment.publication_grade,
+    )
+
+    with pytest.raises(TypeError):
+        assert_complete_generation_assessment(forged)
+
+
+def test_bool_개수나_숫자_fact_id를_정상값으로_보정하지_않는다() -> None:
+    assessment = _complete_assessment()
+    bool_count = replace(
+        assessment,
+        quality=replace(assessment.quality, substantive_claims=True),
+    )
+    numeric_fact = replace(
+        assessment,
+        safety=replace(
+            assessment.safety,
+            verified_fact_ids=(1, *assessment.safety.verified_fact_ids[1:]),  # type: ignore[arg-type]
+        ),
+    )
+
+    with pytest.raises(AssessmentIntegrityError):
+        assert_complete_generation_assessment(bool_count)
+    with pytest.raises(AssessmentIntegrityError):
+        assert_complete_generation_assessment(numeric_fact)

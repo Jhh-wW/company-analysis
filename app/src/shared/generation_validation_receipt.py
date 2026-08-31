@@ -16,9 +16,11 @@ from src.shared.report_quality.integrity import (
 )
 from src.shared.report_quality.models import (
     GenerationAssessment,
+    QualityAssessment,
     QualityGrade,
     QualityProblemCode,
     ReleaseDecision,
+    SafetyAssessment,
 )
 
 
@@ -28,7 +30,9 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 def require_sha256(value: str, *, label: str) -> str:
     """외부에서 받은 값이 소문자 canonical SHA-256인지 확인한다."""
 
-    normalized = str(value).strip().lower()
+    if type(value) is not str or value != value.strip():
+        raise ValueError(f"{label}은 소문자 SHA-256 64자리여야 합니다")
+    normalized = value
     if not _SHA256_RE.fullmatch(normalized):
         raise ValueError(f"{label}은 SHA-256 64자리여야 합니다")
     return normalized
@@ -75,9 +79,18 @@ def _section_sha256s(
     *,
     label: str,
 ) -> tuple[tuple[str, str], ...]:
+    if type(values) is not tuple or any(
+        type(item) is not tuple
+        or len(item) != 2
+        or type(item[0]) is not str
+        or item[0] != item[0].strip()
+        or not item[0]
+        for item in values
+    ):
+        raise ValueError(f"{label} 저장 형식이 손상됐습니다")
     normalized = tuple(
         (
-            str(section_id).strip(),
+            section_id,
             require_sha256(digest, label=f"{label} {section_id}"),
         )
         for section_id, digest in values
@@ -118,11 +131,22 @@ class GenerationValidationReceipt:
     receipt_sha256: str = field(init=False)
 
     def __post_init__(self) -> None:
-        company_id = str(self.company_id).strip()
-        if not company_id:
+        if (
+            type(self.company_id) is not str
+            or self.company_id != self.company_id.strip()
+            or not self.company_id
+        ):
             raise ValueError("검증 영수증에는 회사 식별자가 필요합니다")
-        if not isinstance(self.assessment, GenerationAssessment):
+        company_id = self.company_id
+        if type(self.assessment) is not GenerationAssessment:
             raise TypeError("검증 영수증에는 실제 GenerationAssessment가 필요합니다")
+        if (
+            type(self.assessment.quality) is not QualityAssessment
+            or type(self.assessment.safety) is not SafetyAssessment
+        ):
+            raise TypeError("검증 영수증의 품질·안전 판정 형식이 손상됐습니다")
+        if type(self.round) is not ValidationRound:
+            raise TypeError("검증 회차는 닫힌 ValidationRound여야 합니다")
         if not all(
             isinstance(code, QualityProblemCode)
             for code in self.assessment.quality.problem_codes
@@ -180,9 +204,14 @@ class GenerationValidationReceipt:
             self.evidence_packet_sha256s,
             label="근거 꾸러미 지문",
         )
-        section_ids = tuple(
-            str(item).strip() for item in self.supplemented_section_ids
-        )
+        if type(self.supplemented_section_ids) is not tuple or any(
+            type(item) is not str
+            or item != item.strip()
+            or not item
+            for item in self.supplemented_section_ids
+        ):
+            raise ValueError("보충 장 식별자 저장 형식이 손상됐습니다")
+        section_ids = self.supplemented_section_ids
         if any(not item for item in section_ids):
             raise ValueError("보충 장 식별자는 비어 있을 수 없습니다")
         if len(section_ids) != len(set(section_ids)):

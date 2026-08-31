@@ -300,7 +300,7 @@ def decide_post_validation(
     호출 영수증을 함께 내야 하며, 두 번째 실패 뒤에는 재보충하지 않는다.
     """
 
-    if not isinstance(primary_receipt, GenerationValidationReceipt):
+    if type(primary_receipt) is not GenerationValidationReceipt:
         raise TypeError("첫 검증의 결속된 영수증이 필요합니다")
     if primary_receipt.round is not ValidationRound.PRIMARY:
         raise ValueError("첫 영수증은 기본 생성 회차여야 합니다")
@@ -311,6 +311,11 @@ def decide_post_validation(
         raise ValueError("첫 영수증에는 실제 9회 작성·1회 검수가 필요합니다")
     if (supplement_authorization is None) != (supplement_receipt is None):
         raise ValueError("보충 승인과 실제 보충 영수증은 함께 필요합니다")
+    if supplement_authorization is not None and (
+        type(supplement_authorization) is not SupplementAuthorization
+        or type(supplement_receipt) is not GenerationValidationReceipt
+    ):
+        raise TypeError("보충에는 정확한 승인과 검증 영수증이 필요합니다")
     if supplement_authorization is None or supplement_receipt is None:
         return _decide_first_validation(primary_receipt)
     return _decide_second_validation(
