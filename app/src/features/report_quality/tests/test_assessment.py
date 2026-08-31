@@ -94,6 +94,32 @@ def test_40개_claim_8개_독립문서와_장별coverage면_complete다() -> Non
     assert result.publication_grade is QualityGrade.COMPLETE
 
 
+def test_실질claim이_하한_미만이면_TOO_FEW_SUBSTANTIVE_CLAIMS다() -> None:
+    # 장별 의미범주 하한(MIN_CLAIMS_PER_COVERED_SECTION=2)은 8개 장 모두
+    # 정확히 채우되, 전역 실질 claim 총량만 하한(40) 밑으로 떨어뜨린다 —
+    # 8개 장 × 2건 = 16건 < 40건. assessment.py의
+    # "substantive < contract.min_substantive_claims" 게이트가 실제로
+    # 뜨는지 아무도 확인하지 않았던 빈틈을 메운다.
+    counts = {section_id: 2 for section_id in REQUIRED_QUALITY_SECTION_IDS}
+
+    result = assess_generation(_candidate(counts))
+
+    assert result.quality.substantive_claims == 16
+    assert result.quality.grade is QualityGrade.PARTIAL
+    assert QualityProblemCode.TOO_FEW_SUBSTANTIVE_CLAIMS in result.quality.problem_codes
+    # ★ 이 시험이 고정하는 것: 장별 coverage(2건)는 정확히 채웠으므로
+    #   LOW_SEMANTIC_COVERAGE·LOW_PUBLIC_SENTENCE_COVERAGE·ONE_CLAIM_SECTIONS는
+    #   섞이지 않는다 — 전역 총량 부족 게이트 하나만 걸린다는 것을 못 박는다.
+    assert result.quality.problem_codes == (
+        QualityProblemCode.TOO_FEW_SUBSTANTIVE_CLAIMS,
+    )
+    assert result.quality.one_claim_sections == ()
+    assert result.quality.semantic_underfilled_sections == ()
+    assert result.quality.underfilled_sections == ()
+    assert result.safety.decision is ReleaseDecision.RELEASE_ALLOWED
+    assert result.publication_grade is QualityGrade.PARTIAL
+
+
 def test_FULL계약은_주소만있고_정확한원문조각결속이없으면_공개하지않는다() -> None:
     result = assess_generation(
         _candidate(),
