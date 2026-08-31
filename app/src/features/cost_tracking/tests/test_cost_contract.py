@@ -146,6 +146,41 @@ def test_청구결정_지문은_run_출고물_결정_모두에_결속된다():
     )
 
 
+def test_commit응답을잃어도_확정된_자동출고청구를_정확히_다시읽는다():
+    conn = _conn()
+    try:
+        store.record_run_costs(
+            conn,
+            run_id="charge-readback",
+            outcome=Outcome.REPORT,
+            internal_ai_cost_krw=123.0,
+        )
+        decision = store.mark_automatic_release(
+            conn,
+            run_id="charge-readback",
+            automatic_release_sha256="a" * 64,
+            configured_price_krw=1000,
+        )
+        assert store.load_automatic_release_charge(
+            conn,
+            run_id="charge-readback",
+            automatic_release_sha256="a" * 64,
+        ) == decision
+        assert store.load_automatic_release_charge(
+            conn,
+            run_id="missing-run",
+            automatic_release_sha256="a" * 64,
+        ) is None
+        with pytest.raises(store.CostAuthorityConflict, match="다시 확인"):
+            store.load_automatic_release_charge(
+                conn,
+                run_id="charge-readback",
+                automatic_release_sha256="b" * 64,
+            )
+    finally:
+        conn.close()
+
+
 def test_확정된_출고지문을_다른_PDF로_바꾸지_못한다():
     conn = _conn()
     try:

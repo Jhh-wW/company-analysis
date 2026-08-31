@@ -316,7 +316,31 @@ def mark_automatic_release(
         raise CostAuthorityConflict(
             "이미 확정된 자동 출고 지문을 다른 값으로 바꿀 수 없습니다"
         )
-    stored = conn.execute(
+    stored = load_automatic_release_charge(
+        conn,
+        run_id=clean_run_id,
+        automatic_release_sha256=automatic_release_sha256,
+    )
+    if stored is None:  # pragma: no cover - 같은 거래 안의 방어선
+        raise CostAuthorityConflict("자동 출고 청구 결정을 다시 확인하지 못했습니다")
+    return stored
+
+
+def load_automatic_release_charge(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    automatic_release_sha256: str,
+) -> CustomerChargeDecision | None:
+    """commit 응답 유실 뒤에도 정확한 자동출고 청구 행만 다시 읽는다."""
+
+    clean_run_id = run_id if type(run_id) is str else ""
+    if not clean_run_id or clean_run_id != clean_run_id.strip():
+        raise ValueError("자동출고 청구 조회에는 정확한 run ID가 필요합니다")
+    if not is_valid_sha256(automatic_release_sha256):
+        raise ValueError("자동출고 청구 조회에는 자동출고 지문이 필요합니다")
+    ensure_schema(conn)
+    row = conn.execute(
         f"""
         SELECT outcome, customer_charge_krw, charge_eligible, charge_reason,
                automatic_release_sha256
@@ -324,27 +348,28 @@ def mark_automatic_release(
         """,
         (clean_run_id,),
     ).fetchone()
+    if row is None:
+        return None
     if (
-        stored is None
-        or type(stored[0]) is not str
-        or stored[0] != Outcome.REPORT.value
-        or isinstance(stored[1], bool)
-        or not isinstance(stored[1], (int, float))
-        or not math.isfinite(float(stored[1]))
-        or float(stored[1]) < 0
-        or type(stored[2]) is not int
-        or stored[2] not in (0, 1)
-        or type(stored[3]) is not str
-        or stored[3] != stored[3].strip()
-        or not stored[3]
-        or type(stored[4]) is not str
-        or stored[4] != automatic_release_sha256
+        type(row[0]) is not str
+        or row[0] != Outcome.REPORT.value
+        or isinstance(row[1], bool)
+        or not isinstance(row[1], (int, float))
+        or not math.isfinite(float(row[1]))
+        or float(row[1]) < 0
+        or type(row[2]) is not int
+        or row[2] not in (0, 1)
+        or type(row[3]) is not str
+        or row[3] != row[3].strip()
+        or not row[3]
+        or type(row[4]) is not str
+        or row[4] != automatic_release_sha256
     ):
         raise CostAuthorityConflict("자동 출고 청구 결정을 다시 확인하지 못했습니다")
     return CustomerChargeDecision(
-        eligible=bool(stored[2]),
-        amount_krw=float(stored[1]),
-        reason=stored[3],
+        eligible=bool(row[2]),
+        amount_krw=float(row[1]),
+        reason=row[3],
     )
 
 

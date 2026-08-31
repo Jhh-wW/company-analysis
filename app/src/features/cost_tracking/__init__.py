@@ -10,6 +10,7 @@ __all__ = [
     "CustomerChargeDecision",
     "charge_decision_sha256",
     "decide_customer_charge",
+    "load_automatic_release_charge",
     "mark_automatic_release",
     "record_run_costs",
 ]
