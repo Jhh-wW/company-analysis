@@ -129,6 +129,7 @@ def test_layer1_save_then_hit(tmp_path: Path) -> None:
             corp_id="CORP-001",
             job="영업",
             requirements=["3년 이상 경력"],
+            engine_build_identity=BUILD_IDENTITY_A,
             current_fiscal_year=2025,
         )
     assert hit == report
@@ -167,6 +168,7 @@ def test_layer1_miss_when_posting_fingerprint_differs(tmp_path: Path) -> None:
             corp_id="CORP-001",
             job="영업",
             requirements=["전혀 다른 요구역량"],
+            engine_build_identity=BUILD_IDENTITY_A,
             current_fiscal_year=2025,
         )
     assert hit is None
@@ -187,7 +189,7 @@ def test_옛_빈직무_빈공고_항목은_회사분석_캐시에_적중하지_�
         hit = cache.get_company_report_hit(
             conn,
             corp_id="CORP-001",
-            build_id=BUILD_A,
+            build_identity=BUILD_IDENTITY_A,
             source_identity_digest=SOURCE_IDENTITY_DIGEST,
             current_fiscal_year=2025,
         )
@@ -209,7 +211,7 @@ def test_회사분석_캐시는_직무와_공고_없이_전용_namespace로_왕�
         hit = cache.get_company_report_hit(
             conn,
             corp_id="CORP-001",
-            build_id=BUILD_A,
+            build_identity=BUILD_IDENTITY_A,
             source_identity_digest=SOURCE_IDENTITY_DIGEST,
             current_fiscal_year=2025,
         )
@@ -246,36 +248,149 @@ def test_layer1_commit실패는_본문과열쇠를_모두_rollback한다(
         ).fetchone()[0] == 0
 
 
-def test_layer1_INSERT도중_A에서_B로_바뀌면_모두_rollback한다(
+def test_layer1_commit응답만_잃으면_exact_key와_epoch로_성공을_복구한다(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captures = iter((BUILD_IDENTITY_A, BUILD_IDENTITY_A, BUILD_IDENTITY_B))
-    monkeypatch.setattr(
-        build_identity_contract,
-        "capture_engine_build_identity",
-        lambda: next(captures),
+    target = tmp_path / "cache-commit-response-loss.db"
+
+    def commit_then_lose_response(conn) -> None:
+        conn.commit()
+        raise sqlite3.OperationalError("commit 응답만 손실")
+
+    monkeypatch.setattr(cache, "_commit_connection", commit_then_lose_response)
+    with db.connect_explicit_commit(target) as conn:
+        report_id = cache.save_company_report(
+            conn,
+            corp_id="CORP-001",
+            report=_company_report(),
+            build_identity=BUILD_IDENTITY_A,
+            source_identity_digest=SOURCE_IDENTITY_DIGEST,
+            fiscal_year=2025,
+        )
+
+    assert report_id
+    with db.connect(target) as conn:
+        row = conn.execute(
+            f"""
+            SELECT c.report_id, c.engine_epoch_digest, r.engine_epoch_digest
+            FROM {cache.TABLE_LAYER1_CACHE} AS c
+            JOIN {cache.TABLE_REPORTS} AS r ON r.report_id = c.report_id
+            """
+        ).fetchone()
+    assert row is not None
+    assert tuple(row) == (
+        report_id,
+        BUILD_IDENTITY_A.epoch_digest,
+        BUILD_IDENTITY_A.epoch_digest,
     )
 
-    with pytest.raises(build_identity_contract.EngineBuildIdentityChangedError):
-        with db.connect(tmp_path / "storage.db") as conn:
-            cache.save_layer1(
+
+def test_layer1_commit뒤_epoch영수증이_바뀌면_캐시와본문을_격리한다(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "cache-commit-drift.db"
+
+    def commit_tamper_then_lose_response(conn) -> None:
+        conn.commit()
+        conn.execute(
+            f"UPDATE {cache.TABLE_REPORTS} SET engine_epoch_digest = ?",
+            (BUILD_IDENTITY_B.epoch_digest,),
+        )
+        conn.commit()
+        raise sqlite3.OperationalError("commit 뒤 epoch 영수증 drift")
+
+    monkeypatch.setattr(
+        cache,
+        "_commit_connection",
+        commit_tamper_then_lose_response,
+    )
+    with pytest.raises(sqlite3.OperationalError, match="영수증 drift"):
+        with db.connect_explicit_commit(target) as conn:
+            cache.save_company_report(
                 conn,
                 corp_id="CORP-001",
-                job="영업",
-                requirements=["3년 이상 경력"],
-                report=_report(),
-                engine_build_identity=BUILD_IDENTITY_A,
+                report=_company_report(),
+                build_identity=BUILD_IDENTITY_A,
+                source_identity_digest=SOURCE_IDENTITY_DIGEST,
                 fiscal_year=2025,
             )
 
-    with db.connect(tmp_path / "storage.db") as conn:
+    with db.connect(target) as conn:
         assert conn.execute(
             f"SELECT COUNT(*) FROM {cache.TABLE_LAYER1_CACHE}"
         ).fetchone()[0] == 0
         assert conn.execute(
             f"SELECT COUNT(*) FROM {cache.TABLE_REPORTS}"
         ).fetchone()[0] == 0
+
+
+def test_layer1_commit직후_process_epoch가_바뀌면_새행을_격리한다(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "cache-post-commit-process-drift.db"
+
+    def commit_then_change_process_epoch(conn) -> None:
+        conn.commit()
+        build_identity_contract._reset_process_engine_build_identity_for_tests()  # noqa: SLF001
+        build_identity_contract.freeze_process_engine_build_identity(BUILD_IDENTITY_B)
+
+    monkeypatch.setattr(
+        cache,
+        "_commit_connection",
+        commit_then_change_process_epoch,
+    )
+    with pytest.raises(build_identity_contract.EngineBuildIdentityChangedError):
+        with db.connect_explicit_commit(target) as conn:
+            cache.save_company_report(
+                conn,
+                corp_id="CORP-001",
+                report=_company_report(),
+                build_identity=BUILD_IDENTITY_A,
+                source_identity_digest=SOURCE_IDENTITY_DIGEST,
+                fiscal_year=2025,
+            )
+
+    with db.connect(target) as conn:
+        assert conn.execute(
+            f"SELECT COUNT(*) FROM {cache.TABLE_LAYER1_CACHE}"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            f"SELECT COUNT(*) FROM {cache.TABLE_REPORTS}"
+        ).fetchone()[0] == 0
+
+
+def test_layer1은_요청중_raw환경변화가_아닌_process_epoch_A만_쓴다(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captures = iter((BUILD_IDENTITY_A, BUILD_IDENTITY_B))
+    monkeypatch.setattr(
+        build_identity_contract,
+        "capture_engine_build_identity",
+        lambda: next(captures),
+    )
+
+    with db.connect(tmp_path / "storage.db") as conn:
+        cache.save_layer1(
+            conn,
+            corp_id="CORP-001",
+            job="영업",
+            requirements=["3년 이상 경력"],
+            report=_report(),
+            engine_build_identity=BUILD_IDENTITY_A,
+            fiscal_year=2025,
+        )
+
+    with db.connect(tmp_path / "storage.db") as conn:
+        assert conn.execute(
+            f"SELECT COUNT(*) FROM {cache.TABLE_LAYER1_CACHE}"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            f"SELECT COUNT(*) FROM {cache.TABLE_REPORTS}"
+        ).fetchone()[0] == 1
 
 
 def test_v1_회사분석_캐시는_배포_A_결과를_배포_B에_주지_않는다(
@@ -294,14 +409,14 @@ def test_v1_회사분석_캐시는_배포_A_결과를_배포_B에_주지_않는�
         hit_a = cache.get_company_report_hit(
             conn,
             corp_id="CORP-001",
-            build_id=BUILD_A,
+            build_identity=BUILD_IDENTITY_A,
             source_identity_digest=SOURCE_IDENTITY_DIGEST,
             current_fiscal_year=2025,
         )
         hit_b = cache.get_company_report_hit(
             conn,
             corp_id="CORP-001",
-            build_id=BUILD_B,
+            build_identity=BUILD_IDENTITY_B,
             source_identity_digest=SOURCE_IDENTITY_DIGEST,
             current_fiscal_year=2025,
         )
@@ -380,7 +495,7 @@ def test_v1_회사분석_캐시는_배포commit을_모르면_읽지도_쓰지도
         hit = cache.get_company_report_hit(
             conn,
             corp_id="CORP-001",
-            build_id="unknown",
+            build_identity=UNKNOWN_BUILD_IDENTITY,
             source_identity_digest=SOURCE_IDENTITY_DIGEST,
             current_fiscal_year=2025,
         )
@@ -409,7 +524,7 @@ def test_회사분석_캐시는_DART_출처가_바뀌면_옛_보고서를_내주
         hit = cache.get_company_report_hit(
             conn,
             corp_id="CORP-001",
-            build_id=BUILD_A,
+            build_identity=BUILD_IDENTITY_A,
             source_identity_digest="b" * 64,
             current_fiscal_year=2025,
         )
@@ -432,7 +547,7 @@ def test_회사분석_캐시는_출처를_모르면_읽지도_쓰지도_않는�
         hit = cache.get_company_report_hit(
             conn,
             corp_id="CORP-001",
-            build_id=BUILD_A,
+            build_identity=BUILD_IDENTITY_A,
             source_identity_digest="",
             current_fiscal_year=2025,
         )
@@ -476,7 +591,7 @@ def test_회사분석_schema_version이_바뀌면_옛_캐시는_미적중한다(
         hit = cache.get_company_report_hit(
             conn,
             corp_id="CORP-001",
-            build_id=BUILD_A,
+            build_identity=BUILD_IDENTITY_A,
             source_identity_digest=SOURCE_IDENTITY_DIGEST,
             current_fiscal_year=2025,
         )
@@ -501,7 +616,7 @@ def test_v2_회사분석_payload는_v3_캐시에_적중하지_않는다(tmp_path
         hit = cache.get_company_report_hit(
             conn,
             corp_id="CORP-001",
-            build_id=BUILD_A,
+            build_identity=BUILD_IDENTITY_A,
             source_identity_digest=SOURCE_IDENTITY_DIGEST,
             current_fiscal_year=2025,
         )
@@ -537,14 +652,17 @@ def test_layer1_never_leaks_across_different_companies(tmp_path: Path) -> None:
 
         hit_a = cache.get_layer1_hit(
             conn, corp_id="CORP-A", job="영업", requirements=requirements,
+            engine_build_identity=BUILD_IDENTITY_A,
             current_fiscal_year=2025,
         )
         hit_b = cache.get_layer1_hit(
             conn, corp_id="CORP-B", job="영업", requirements=requirements,
+            engine_build_identity=BUILD_IDENTITY_A,
             current_fiscal_year=2025,
         )
         miss_c = cache.get_layer1_hit(
             conn, corp_id="CORP-C", job="영업", requirements=requirements,
+            engine_build_identity=BUILD_IDENTITY_A,
             current_fiscal_year=2025,
         )
 
@@ -575,6 +693,7 @@ def test_layer1_save_twice_same_key_updates_report(tmp_path: Path) -> None:
         ).fetchone()["n"]
         hit = cache.get_layer1_hit(
             conn, corp_id="CORP-001", job="영업", requirements=requirements,
+            engine_build_identity=BUILD_IDENTITY_A,
             current_fiscal_year=2025,
         )
     assert count == 1
@@ -596,6 +715,7 @@ def test_layer1_stale_when_fiscal_year_changed(tmp_path: Path) -> None:
         )
         hit = cache.get_layer1_hit(
             conn, corp_id="CORP-001", job="영업", requirements=requirements,
+            engine_build_identity=BUILD_IDENTITY_A,
             current_fiscal_year=2025,  # 사업연도가 바뀌었다
         )
     assert hit is None
@@ -611,6 +731,7 @@ def test_layer1_treated_as_stale_when_fiscal_year_unknown(tmp_path: Path) -> Non
         )
         hit = cache.get_layer1_hit(
             conn, corp_id="CORP-001", job="영업", requirements=requirements,
+            engine_build_identity=BUILD_IDENTITY_A,
             current_fiscal_year=None,
         )
     assert hit is None
@@ -627,6 +748,7 @@ def test_layer1_stale_when_news_citation_older_than_3_years(tmp_path: Path) -> N
         )
         hit = cache.get_layer1_hit(
             conn, corp_id="CORP-001", job="영업", requirements=requirements,
+            engine_build_identity=BUILD_IDENTITY_A,
             current_fiscal_year=2025, today=dt.date(2026, 8, 15),
         )
     assert hit is None
@@ -643,6 +765,7 @@ def test_layer1_fresh_when_news_citation_within_3_years(tmp_path: Path) -> None:
         )
         hit = cache.get_layer1_hit(
             conn, corp_id="CORP-001", job="영업", requirements=requirements,
+            engine_build_identity=BUILD_IDENTITY_A,
             current_fiscal_year=2025, today=dt.date(2026, 8, 15),
         )
     assert hit is not None
@@ -702,11 +825,13 @@ def test_layer1_evicts_oldest_beyond_cap(tmp_path: Path) -> None:
         # 가장 먼저 저장한(가장 오래된) 지문 두 개는 지워졌어야 한다.
         earliest_hit = cache.get_layer1_hit(
             conn, corp_id="CORP-001", job="영업", requirements=["요구역량-0"],
+            engine_build_identity=BUILD_IDENTITY_A,
             current_fiscal_year=2025,
         )
         latest_hit = cache.get_layer1_hit(
             conn, corp_id="CORP-001", job="영업",
             requirements=[f"요구역량-{cache.LAYER1_MAX_ENTRIES_PER_JOB + 1}"],
+            engine_build_identity=BUILD_IDENTITY_A,
             current_fiscal_year=2025,
         )
     assert count == cache.LAYER1_MAX_ENTRIES_PER_JOB
@@ -753,10 +878,12 @@ def test_layer1_eviction_prefers_stale_fiscal_year_first(tmp_path: Path) -> None
 
         stale_hit = cache.get_layer1_hit(
             conn, corp_id="CORP-001", job="영업", requirements=["옛-사업연도"],
+            engine_build_identity=BUILD_IDENTITY_A,
             current_fiscal_year=2025,
         )
         oldest_fresh_hit = cache.get_layer1_hit(
             conn, corp_id="CORP-001", job="영업", requirements=["신선-가장오래됨"],
+            engine_build_identity=BUILD_IDENTITY_A,
             current_fiscal_year=2025,
         )
 

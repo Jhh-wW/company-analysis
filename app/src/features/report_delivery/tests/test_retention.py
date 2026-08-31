@@ -89,6 +89,7 @@ def _store_current(
         source_snapshot=source,
         cache_namespace=namespace,
         content_generated_at=NOW,
+        engine_epoch_digest="a" * 64,
         actual_models=("offline-test",),
     )
     policy = DeliveryPolicy(
@@ -344,6 +345,7 @@ def test_active_cache_protects_shared_original_but_tombstone_blocks_old_url_revi
         namespace=_namespace(),
         preflight_identity_digest="a" * 64,
         preflight_cache_usable=True,
+        engine_epoch_digest=stored.content.engine_epoch_digest,
     )
     with storage_db.connect(db_path) as conn:
         delivery_store.bind_cache_entry(

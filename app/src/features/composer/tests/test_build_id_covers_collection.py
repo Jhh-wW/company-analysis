@@ -113,19 +113,20 @@ def test_짧거나_오염된_revision은_UNKNOWN이다(
     assert not build_id.build_id_is_usable(actual)
 
 
-def test_커밋이_없으면_매호출_UNKNOWN이고_나중_full_commit을_즉시_본다(
+def test_커밋이_없으면_process_epoch는_UNKNOWN으로_동결된다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """UNKNOWN도 usable 값도 프로세스 장기 memoization하지 않는다."""
+    """요청 중 환경변수 변화가 process 신원을 바꾸면 안 된다."""
 
     assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
     assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
 
     _set_full_commit(monkeypatch)
-    assert build_id.build_id_is_usable(build_id.engine_build_id())
+    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
 
     monkeypatch.setenv("RENDER_GIT_COMMIT", _FULL_COMMIT_B)
-    assert build_id.engine_build_id().endswith(_FULL_COMMIT_B)
+    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
+    assert build_id.capture_engine_build_identity().build_id.endswith(_FULL_COMMIT_B)
 
 
 def test_로컬파일을_바꿔도_UNKNOWN이라_캐시할수없다(
@@ -155,7 +156,8 @@ def test_full_commit이_바뀌면_namespace도_바뀐다(
 
     _set_full_commit(monkeypatch, _FULL_COMMIT_B)
 
-    assert build_id.engine_build_id() != before
+    assert build_id.engine_build_id() == before
+    assert build_id.capture_engine_build_identity().build_id != before
 
 
 def test_contract_version이_바뀌면_같은_commit도_옛_namespace와_갈린다(
@@ -170,7 +172,7 @@ def test_contract_version이_바뀌면_같은_commit도_옛_namespace와_갈린�
         "deployment-commit-v2",
     )
 
-    assert build_id.engine_build_id() != before
+    assert build_id.engine_build_id() == before
 
 
 @pytest.mark.parametrize(
@@ -237,10 +239,11 @@ def test_Docker_배포모양에서_full_commit만_usable이다(
     assert build_id.build_id_is_usable(build_id.engine_build_id())
 
     monkeypatch.setenv("RENDER_GIT_COMMIT", "abc1234")
-    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
+    assert build_id.build_id_is_usable(build_id.engine_build_id())
+    assert build_id.capture_engine_build_identity().build_id == build_id.UNKNOWN_BUILD_ID
 
     monkeypatch.delenv("RENDER_GIT_COMMIT")
-    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
+    assert build_id.build_id_is_usable(build_id.engine_build_id())
 
 
 def test_Docker_base_image는_tag와_sha256_digest를_함께_고정한다() -> None:

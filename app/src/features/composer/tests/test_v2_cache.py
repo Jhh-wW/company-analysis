@@ -50,6 +50,7 @@ SOURCE_IDENTITY_DIGEST = "a" * 64
 BUILD_A = f"{ENGINE_BUILD_ID_CONTRACT_VERSION}:{'a' * 40}"
 BUILD_B = f"{ENGINE_BUILD_ID_CONTRACT_VERSION}:{'b' * 40}"
 BUILD_IDENTITY_A = EngineBuildIdentity("a" * 40, BUILD_A)
+BUILD_IDENTITY_B = EngineBuildIdentity("b" * 40, BUILD_B)
 UNKNOWN_BUILD_IDENTITY = EngineBuildIdentity("", UNKNOWN_BUILD_ID)
 
 
@@ -103,14 +104,14 @@ def _save(
 
 
 def _hit(
-    build_id: str,
+    build_identity: EngineBuildIdentity,
     source_identity_digest: str = SOURCE_IDENTITY_DIGEST,
 ):
     with storage_db.connect() as conn:
         return cache_store.get_v2_report_hit(
             conn,
             corp_id=CORP_ID,
-            build_id=build_id,
+            build_identity=build_identity,
             source_identity_digest=source_identity_digest,
             current_fiscal_year=FISCAL_YEAR,
             today=dt.date(2026, 8, 24),
@@ -125,7 +126,7 @@ def _hit(
 def test_같은_배포commit이면_적중해서_돈을_아낀다():
     _save(_v2_report(), BUILD_IDENTITY_A)
 
-    적중 = _hit(BUILD_A)
+    적중 = _hit(BUILD_IDENTITY_A)
 
     assert 적중 is not None
     assert 적중.schema_version == ENGINE_V2_SCHEMA_VERSION
@@ -135,7 +136,7 @@ def test_배포commit이_바뀌면_옛_결과가_안_나온다():
     """★ 「고쳤는데 화면이 그대로」를 구조적으로 불가능하게 만든다."""
     _save(_v2_report(), BUILD_IDENTITY_A)
 
-    assert _hit(BUILD_B) is None, (
+    assert _hit(BUILD_IDENTITY_B) is None, (
         "배포 commit이 바뀌었는데 옛 캐시가 나왔습니다"
     )
 
@@ -182,7 +183,7 @@ def test_DART_출처가_바뀌면_배포가_같아도_옛_결과가_안_나온�
 
     _save(_v2_report(), BUILD_IDENTITY_A, "a" * 64)
 
-    assert _hit(BUILD_A, "b" * 64) is None
+    assert _hit(BUILD_IDENTITY_A, "b" * 64) is None
 
 
 def test_로컬_소스가_바뀌어도_full_commit이_없으면_UNKNOWN이다(
@@ -203,17 +204,19 @@ def test_로컬_소스가_바뀌어도_full_commit이_없으면_UNKNOWN이다(
     assert not build_id_is_usable(처음)
 
 
-def test_배포_commit이_바뀌면_옛_v2_캐시에_적중하지_않는다(
+def test_요청중_환경commit이_바뀌어도_process_epoch는_A로_고정된다(
     monkeypatch: pytest.MonkeyPatch,
 ):
     처음 = engine_build_id()
     _save(_v2_report(), capture_engine_build_identity())
 
-    monkeypatch.setenv("RENDER_GIT_COMMIT", "2" * deployment_identity.COMMIT_FULL_LEN)
-    바뀐뒤 = engine_build_id()
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "b" * deployment_identity.COMMIT_FULL_LEN)
+    process_after = engine_build_id()
+    raw_after = capture_engine_build_identity()
 
-    assert 바뀐뒤 != 처음
-    assert _hit(바뀐뒤) is None
+    assert process_after == 처음
+    assert raw_after == BUILD_IDENTITY_B
+    assert _hit(raw_after) is None
 
 
 # ══════════════════════════════════════════════════════════
@@ -224,7 +227,7 @@ def test_배포_commit이_바뀌면_옛_v2_캐시에_적중하지_않는다(
 def test_v1_보고서는_v2_열쇠_아래로_안_들어간다():
     """★ 들어가면 다음 조사에서 v1이 v2인 척 나온다."""
     assert _save(_v1_report(), BUILD_IDENTITY_A) is None
-    assert _hit(BUILD_A) is None
+    assert _hit(BUILD_IDENTITY_A) is None
 
 
 def test_v1_열쇠로_저장한_것을_v2가_못_꺼낸다():
@@ -245,7 +248,7 @@ def test_v1_열쇠로_저장한_것을_v2가_못_꺼낸다():
             fiscal_year=FISCAL_YEAR,
         )
 
-    assert _hit(engine_build_id()) is None, (
+    assert _hit(BUILD_IDENTITY_A) is None, (
         "v1 열쇠로 저장한 보고서를 v2가 꺼냈습니다 — v1이 v2인 척 나갑니다"
     )
 
@@ -257,7 +260,7 @@ def test_v2_캐시에_저장한_것을_v1이_못_꺼낸다():
         v1적중 = cache_store.get_company_report_hit(
             conn,
             corp_id=CORP_ID,
-            build_id=BUILD_A,
+            build_identity=BUILD_IDENTITY_A,
             source_identity_digest=SOURCE_IDENTITY_DIGEST,
             current_fiscal_year=FISCAL_YEAR,
             today=dt.date(2026, 8, 24),
@@ -276,9 +279,9 @@ def test_지문을_못_만들면_읽지도_쓰지도_않는다():
     assert not build_id_is_usable("")
 
     assert _save(_v2_report(), UNKNOWN_BUILD_IDENTITY) is None
-    assert _hit(UNKNOWN_BUILD_ID) is None
+    assert _hit(UNKNOWN_BUILD_IDENTITY) is None
     assert _save(_v2_report(), BUILD_IDENTITY_A, "") is None
-    assert _hit(BUILD_A, "") is None
+    assert _hit(BUILD_IDENTITY_A, "") is None
 
 
 def test_사업연도가_바뀌면_적중하지_않는다():
@@ -289,7 +292,7 @@ def test_사업연도가_바뀌면_적중하지_않는다():
         적중 = cache_store.get_v2_report_hit(
             conn,
             corp_id=CORP_ID,
-            build_id=BUILD_A,
+            build_identity=BUILD_IDENTITY_A,
             source_identity_digest=SOURCE_IDENTITY_DIGEST,
             current_fiscal_year=FISCAL_YEAR + 1,
             today=dt.date(2026, 8, 24),

@@ -15,6 +15,7 @@ from src.features.report_delivery.canonical import (
     utc_text,
 )
 from src.features.report_delivery.source_identity import SourceSnapshot
+from src.shared.engine_build_identity import epoch_digest_is_valid
 
 
 class DeliveryPolicyError(ValueError):
@@ -33,6 +34,9 @@ class ContentSnapshot:
     cache_namespace_id: str
     content_generated_at: dt.datetime
     actual_models: tuple[str, ...]
+    # 빈 값은 배포 전 역사적 content를 읽기 위한 비권위 호환값이다. 새 생성은
+    # create()에서 반드시 정상 digest를 받아 ID 자체에 결속한다.
+    engine_epoch_digest: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.payload, bytes) or not self.payload:
@@ -45,15 +49,18 @@ class ContentSnapshot:
             raise ValueError("실제 모델 신원에 빈 값을 넣을 수 없습니다")
         if tuple(dict.fromkeys(self.actual_models)) != self.actual_models:
             raise ValueError("실제 모델 신원을 중복 저장할 수 없습니다")
-        expected = "content_" + canonical_digest(
-            {
+        identity_payload = {
                 "payload_sha256": payload_digest,
                 "source_snapshot_id": self.source_snapshot_id,
                 "cache_namespace_id": self.cache_namespace_id,
                 "content_generated_at": utc_text(generated, label="내용 생성"),
                 "actual_models": self.actual_models,
-            }
-        )
+        }
+        if self.engine_epoch_digest:
+            if not epoch_digest_is_valid(self.engine_epoch_digest):
+                raise ValueError("내용 원본의 engine epoch 영수증이 손상됐습니다")
+            identity_payload["engine_epoch_digest"] = self.engine_epoch_digest
+        expected = "content_" + canonical_digest(identity_payload)
         if self.content_id != expected:
             raise ValueError("저장된 내용 ID가 본문·출처·생성기 신원과 맞지 않습니다")
 
@@ -65,6 +72,7 @@ class ContentSnapshot:
         source_snapshot: SourceSnapshot,
         cache_namespace: CacheNamespace,
         content_generated_at: dt.datetime,
+        engine_epoch_digest: str,
         actual_models: tuple[str, ...] = (),
     ) -> "ContentSnapshot":
         if not isinstance(payload, bytes) or not payload:
@@ -74,6 +82,8 @@ class ContentSnapshot:
             dict.fromkeys(str(model).strip() for model in actual_models if str(model).strip())
         )
         payload_digest = sha256_hex(payload)
+        if not epoch_digest_is_valid(engine_epoch_digest):
+            raise ValueError("새 내용 원본에는 정상 engine epoch 영수증이 필요합니다")
         content_id = "content_" + canonical_digest(
             {
                 "payload_sha256": payload_digest,
@@ -81,6 +91,7 @@ class ContentSnapshot:
                 "cache_namespace_id": cache_namespace.namespace_id,
                 "content_generated_at": utc_text(generated, label="내용 생성"),
                 "actual_models": models,
+                "engine_epoch_digest": engine_epoch_digest,
             }
         )
         return cls(
@@ -92,6 +103,7 @@ class ContentSnapshot:
             cache_namespace_id=cache_namespace.namespace_id,
             content_generated_at=generated,
             actual_models=models,
+            engine_epoch_digest=engine_epoch_digest,
         )
 
 

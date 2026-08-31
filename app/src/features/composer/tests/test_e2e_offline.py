@@ -66,6 +66,7 @@ from src.features.pipeline.tests.test_real_cache import (
     _FakeClient,
     _FakeMessages,
 )
+from src.shared import engine_build_identity as build_identity_contract
 from src.shared.report_quality.assessment import has_public_numeric_token
 from src.shared.report_quality.constants import MIN_CLAIMS_PER_COVERED_SECTION
 from src.shared.report_quality.numeric_validation import (
@@ -748,6 +749,7 @@ def _v2_report_to_result_page(report, artifact_root: Path) -> str:
             report=report,
             actual_models=("offline-fake-model",),
             reused_from_cache=False,
+            engine_build_identity=build_identity_contract.process_engine_build_identity(),
         )
         assert persisted.artifact is not None
         mp.setattr(reports_router, "is_notion_configured", lambda: True)
@@ -1042,8 +1044,10 @@ def test_배포_commit이_바뀌면_캐시가_저절로_무효가_된다(
     _run(engine)
     assert engine.client.messages.calls == 첫_호출수
 
-    # 코드·Docker·requirements를 함께 가르는 full commit을 바꾼다.
+    # 코드·Docker·requirements를 함께 가르는 full commit으로 새 process가
+    # 시작된 상황을 흉내 낸다. 살아 있는 process는 raw 환경을 재조회하지 않는다.
     monkeypatch.setenv("RENDER_GIT_COMMIT", "2" * 40)
+    build_identity_contract._reset_process_engine_build_identity_for_tests()
 
     third = _run(engine)
 

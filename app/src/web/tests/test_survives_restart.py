@@ -30,6 +30,7 @@ from src.features.report_access import store as report_access_store
 from src.features.report_standard import CANONICAL_SECTION_IDS, SECTION_BY_ID
 from src.features.storage import db, job_interruptions, reports
 from src.core import clock
+from src.shared import engine_build_identity as build_identity_contract
 from src.web import main
 from src.web import job_runtime, runtime
 from src.web.routers import reports as reports_router
@@ -343,6 +344,7 @@ def test_재시작_뒤에도_PDF로_내려받을_수_있다(
         report=saved,
         actual_models=("deterministic-demo",),
         reused_from_cache=False,
+        engine_build_identity=build_identity_contract.process_engine_build_identity(),
     )
     with _owner_client(finished_job) as client:
         response = client.get(

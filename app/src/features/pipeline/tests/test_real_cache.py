@@ -110,13 +110,16 @@ def test_생성cache_namespace는_교대하는_raw환경도_한_snapshot만_쓴�
         SimpleNamespace(environ=AlternatingRawEnvironment()),
     )
 
+    identity = build_identity_contract.process_engine_build_identity()
     namespace = real._generation_cache_namespace(
-        SimpleNamespace(MODEL="snapshot-test-model")
+        SimpleNamespace(MODEL="snapshot-test-model"),
+        identity,
     )
 
     assert namespace is not None
     assert namespace.deployment_revision == first
-    assert namespace.image_digest.endswith(first)
+    # 배포 revision이 따로 있어도 생성기 build 계약을 image에서 버리면 안 된다.
+    assert namespace.image_digest == f"generator-build:{identity.build_id}"
     assert second not in namespace.image_digest
     assert commit_reads == 1
 
@@ -130,14 +133,16 @@ def test_v1_롤백namespace도_같은_배포build_contract를_쓴다(
     monkeypatch.delenv(real.ENGINE_V2_ENV_NAME, raising=False)
     monkeypatch.setenv("RENDER_GIT_COMMIT", commit)
 
+    identity = build_identity_contract.process_engine_build_identity()
     namespace = real._generation_cache_namespace(
-        SimpleNamespace(MODEL="rollback-test-model")
+        SimpleNamespace(MODEL="rollback-test-model"),
+        identity,
     )
 
     assert namespace is not None
     assert namespace.schema_version == real.CANONICAL_SCHEMA_VERSION
     assert namespace.deployment_revision == commit
-    assert namespace.image_digest.endswith(commit)
+    assert namespace.image_digest == f"generator-build:{identity.build_id}"
 
 
 @pytest.mark.parametrize("cache_kind", ("v1", "v2"))
@@ -2529,21 +2534,21 @@ def test_캐시_적중은_할당량을_안_깎는다(engine: FakeEngine) -> None
     assert second.charged is False
 
 
-def test_v1은_배포commit을_모르면_1층캐시를_읽지도_쓰지도_않는다(
+def test_v1은_배포commit을_모르면_provider전에_fail_closed한다(
     engine: FakeEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for name in deployment_identity.COMMIT_ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
 
-    first = _run()
-    calls_after_first = engine.generate_ai_calls
-    second = _run()
+    with pytest.raises(
+        real.generation_coordination.GenerationCoordinationError,
+        match="정상 배포 epoch",
+    ):
+        _run()
 
-    assert first.generation_cache_eligible is False
-    assert second.generation_cache_eligible is False
-    assert second.charged is True
-    assert engine.generate_ai_calls > calls_after_first
+    assert engine.generate_ai_calls == 0
+    assert engine.posting_ai_calls == 0
     with real.storage_db.connect() as conn:
         rows = conn.execute(
             f"SELECT COUNT(*) FROM {real.cache_store.TABLE_LAYER1_CACHE}"
@@ -3151,5 +3156,27 @@ def test_v2를_꺼도_v1캐시는_같은배포에서만_재사용한다(
     monkeypatch.setenv("RENDER_GIT_COMMIT", "b" * 40)
     third = _run()
 
-    assert not third.cache_hit
-    assert engine.generate_ai_calls > 호출수, "다른 배포가 v1 캐시를 재사용했습니다"
+    # 프로세스가 살아 있는 동안 raw 환경만 바뀌는 것은 새 배포가 아니다.
+    # 요청마다 다시 읽으면 한 보고서 안에서 A/B가 찢어지는 TOCTOU가 생긴다.
+    assert third.cache_hit
+    assert engine.generate_ai_calls == 호출수
+
+
+def test_프로세스가_재시작되어_B로_동결되면_A의_v1캐시를_재사용하지않는다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _run()
+    assert first.outcome is Outcome.REPORT
+    호출수 = engine.generate_ai_calls
+    assert _run().cache_hit
+
+    # 실제 새 process를 단위시험에서 흉내 낸다. production 요청에서는 이 reset을
+    # 호출할 수 없고, process bootstrap만 새 환경 B를 한 번 읽는다.
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "b" * 40)
+    build_identity_contract._reset_process_engine_build_identity_for_tests()
+
+    after_restart = _run()
+
+    assert not after_restart.cache_hit
+    assert engine.generate_ai_calls > 호출수, "새 배포가 A의 v1 캐시를 재사용했습니다"

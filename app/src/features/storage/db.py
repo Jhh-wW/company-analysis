@@ -185,7 +185,8 @@ _SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
         job          TEXT NOT NULL,
         payload_json TEXT NOT NULL,
         generated_at TEXT NOT NULL,
-        created_at   TEXT NOT NULL
+        created_at   TEXT NOT NULL,
+        engine_epoch_digest TEXT NOT NULL DEFAULT ''
     )
     """,
     f"""
@@ -197,6 +198,7 @@ _SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
         report_id           TEXT NOT NULL REFERENCES {constants.TABLE_REPORTS}(report_id),
         fiscal_year         INTEGER,
         created_at          TEXT NOT NULL,
+        engine_epoch_digest TEXT NOT NULL DEFAULT '',
         UNIQUE(corp_id, job_key, posting_fingerprint)
     )
     """,
@@ -465,21 +467,28 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             f"ALTER TABLE {constants.TABLE_SESSIONS} ADD COLUMN subject TEXT"
         )
 
+    # 과거 공개 보고서는 그대로 읽되, 새 캐시 권위에는 process epoch가 반드시
+    # 들어간다. DEFAULT ''은 옛 행을 명시적인 비권위 상태로 보존한다.
+    for table_name in (
+        constants.TABLE_REPORTS,
+        constants.TABLE_LAYER1_CACHE,
+    ):
+        columns = {
+            str(row[1])
+            for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+        }
+        if "engine_epoch_digest" not in columns:
+            conn.execute(
+                f'ALTER TABLE "{table_name}" '
+                "ADD COLUMN engine_epoch_digest TEXT NOT NULL DEFAULT ''"
+            )
 
-@contextmanager
-def connect(db_path: Optional[Path] = None) -> Iterator[sqlite3.Connection]:
-    """DB 연결을 열고 표를 갖춘 뒤 넘겨준다. `with` 블록이 끝나면 커밋하고 닫는다.
 
-    Args:
-        db_path: DB 파일 경로. 생략하면 `default_db_path()`.
-            ★ 부모 폴더가 없으면 만든다 — 첫 실행에서도 바로 동작해야 한다.
+def _open_bootstrapped_connection(
+    db_path: Optional[Path],
+) -> sqlite3.Connection:
+    """같은 설정·schema 계약으로 쓰기 연결 하나를 준비한다."""
 
-    Yields:
-        `sqlite3.Row`를 쓰는 연결(컬럼 이름으로 접근 가능).
-
-    Raises:
-        예외가 나면 롤백하고 그대로 다시 던진다 — 절반만 쓰인 상태가 남지 않는다.
-    """
     configured = db_path if db_path is not None else default_db_path()
     resolved = Path(configured).resolve()
     resolved.parent.mkdir(parents=True, exist_ok=True)
@@ -495,9 +504,57 @@ def connect(db_path: Optional[Path] = None) -> Iterator[sqlite3.Connection]:
         # 요청이 DDL 쓰기 잠금을 다투지 않는다.
         _ensure_connection_bootstrapped(conn, resolved)
         conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+    except BaseException:
+        conn.close()
+        raise
+
+
+@contextmanager
+def connect(db_path: Optional[Path] = None) -> Iterator[sqlite3.Connection]:
+    """DB 연결을 열고 표를 갖춘 뒤 넘겨준다. `with` 블록이 끝나면 커밋하고 닫는다.
+
+    Args:
+        db_path: DB 파일 경로. 생략하면 `default_db_path()`.
+            ★ 부모 폴더가 없으면 만든다 — 첫 실행에서도 바로 동작해야 한다.
+
+    Yields:
+        `sqlite3.Row`를 쓰는 연결(컬럼 이름으로 접근 가능).
+
+    Raises:
+        예외가 나면 롤백하고 그대로 다시 던진다 — 절반만 쓰인 상태가 남지 않는다.
+    """
+    conn = _open_bootstrapped_connection(db_path)
+    try:
         yield conn
         conn.commit()
     except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+@contextmanager
+def connect_explicit_commit(
+    db_path: Optional[Path] = None,
+) -> Iterator[sqlite3.Connection]:
+    """호출부가 최종 fence 바로 뒤 commit을 직접 소유하는 연결이다.
+
+    정상 ``with`` 탈출 때 transaction이 남아 있으면 조용히 한 번 더 commit하지
+    않는다. 이는 명시 commit 뒤 후속 쓰기가 생겨 신원 fence 밖에서 영속되는
+    실수를 rollback하고 시험에서 즉시 드러낸다.
+    """
+
+    conn = _open_bootstrapped_connection(db_path)
+    try:
+        yield conn
+        if conn.in_transaction:
+            conn.rollback()
+            raise RuntimeError(
+                "명시 commit 연결에 fence 밖의 미확정 transaction이 남았습니다"
+            )
+    except BaseException:
         conn.rollback()
         raise
     finally:

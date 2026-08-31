@@ -1222,7 +1222,7 @@ def finalize_new_report_delivery(
     cache_eligible: bool = False,
     completed_at: dt.datetime | None = None,
     public_access_run_id: str = "",
-    engine_build_identity: build_identity_contract.EngineBuildIdentity | None = None,
+    engine_build_identity: build_identity_contract.EngineBuildIdentity,
     reuse_singleflight_key: LeaseKey | None = None,
 ) -> report_delivery_adapter.PublicDelivery:
     """새 보고서 완료 경계에서 자동승인·과금·artifact를 한번만 확정한다.
@@ -1257,14 +1257,23 @@ def finalize_new_report_delivery(
                 "PUBLIC 실행의 report 결속을 최종 출고에서 확인하지 못했습니다"
             )
 
-    frozen_build_identity = (
-        engine_build_identity
-        or build_identity_contract.capture_engine_build_identity()
-    )
-    if engine_build_identity is not None:
-        report_delivery_adapter._assert_frozen_identity_is_current(
-            frozen_build_identity
+    try:
+        frozen_build_identity = (
+            build_identity_contract.require_exact_engine_build_identity(
+                engine_build_identity
+            )
         )
+    except (TypeError, ValueError) as exc:
+        raise report_delivery_adapter.DeliveryAdapterError(
+            "최종 출고에는 생성 시작 engine epoch 영수증이 필요합니다"
+        ) from exc
+    if not frozen_build_identity.cache_usable:
+        raise report_delivery_adapter.DeliveryAdapterError(
+            "검증되지 않은 배포 결과에는 새 출고 권위를 줄 수 없습니다"
+        )
+    report_delivery_adapter._assert_frozen_identity_is_current(
+        frozen_build_identity
+    )
     if bool(str(reuse_content_snapshot_id).strip()) != bool(
         str(reuse_artifact_id).strip()
     ):
@@ -1282,6 +1291,7 @@ def finalize_new_report_delivery(
             namespace=cache_namespace,
             preflight_identity_digest=preflight_identity_digest,
             preflight_cache_usable=True,
+            engine_epoch_digest=frozen_build_identity.epoch_digest,
         )
         if cache_namespace is not None and cache_eligible
         else None

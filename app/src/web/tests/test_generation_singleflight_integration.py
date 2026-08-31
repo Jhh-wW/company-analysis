@@ -121,6 +121,7 @@ def _persist_shared_content(
         source_snapshot=source,
         cache_namespace=_NAMESPACE,
         content_generated_at=captured,
+        engine_epoch_digest=_BUILD_IDENTITY.epoch_digest,
         actual_models=("claude-test",),
     )
     with storage_db.connect() as conn:
@@ -254,6 +255,7 @@ def test_같은통장의_동시job은_provider한번만_쓰고_각자delivery를
                     namespace=_NAMESPACE,
                     preflight_identity_digest=_source_digest(),
                     preflight_cache_usable=True,
+                    engine_epoch_digest=_BUILD_IDENTITY.epoch_digest,
                 ),
                 content=content,
                 artifact_id=artifact.artifact_id,
@@ -386,6 +388,7 @@ def test_캐시불가_owner결과는_동시waiter에게만_짧게공유하고_�
         namespace=_NAMESPACE,
         preflight_identity_digest=_source_digest(),
         preflight_cache_usable=True,
+        engine_epoch_digest=_BUILD_IDENTITY.epoch_digest,
     )
     with storage_db.connect() as conn:
         assert delivery_store.load_cache_hit(
@@ -408,7 +411,7 @@ def test_캐시불가_owner결과는_동시waiter에게만_짧게공유하고_�
 
 
 @pytest.mark.parametrize("current_commit", ("b" * 40, ""))
-def test_owner완료직전_A가_B나unknown이면_COMPLETED를_남기지_않는다(
+def test_owner완료중_raw환경변화는_process_epoch_A를_바꾸지_않는다(
     current_commit: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -424,22 +427,18 @@ def test_owner완료직전_A가_B나unknown이면_COMPLETED를_남기지_않는�
     else:
         monkeypatch.delenv("RENDER_GIT_COMMIT", raising=False)
 
-    with pytest.raises(
-        generation_singleflight.GenerationSingleflightUnavailable,
-        match="공유하지 못했습니다",
-    ):
-        owner.complete(
-            content.content_id,
-            artifact.artifact_id,
-            cache_eligible=False,
-        )
+    owner.complete(
+        content.content_id,
+        artifact.artifact_id,
+        cache_eligible=False,
+    )
 
     with storage_db.connect() as conn:
         assert conn.execute(
             f"SELECT COUNT(*) FROM {singleflight.TABLE_SINGLEFLIGHT_LEASES} "
             "WHERE state = ?",
             (singleflight.LeaseState.COMPLETED.value,),
-        ).fetchone()[0] == 0
+        ).fetchone()[0] == 1
 
 
 def test_owner완료_commit실패는_UPDATE를_rollback한다(
@@ -478,7 +477,223 @@ def test_owner완료_commit실패는_UPDATE를_rollback한다(
     assert row["completed_artifact_id"] == ""
 
 
-def test_owner완료_UPDATE도중_A에서_B로_바뀌면_rollback한다(
+def test_owner완료_commit응답만_잃으면_exact_epoch완료행으로_복구한다(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    content, artifact = _persist_shared_content(
+        _report(),
+        artifact_root=tmp_path / "commit-response-loss-artifacts",
+    )
+    owner = _session("commit-response-loss-owner", "bucket-a")
+    assert owner.coordinate("00126380", _NAMESPACE, _source_digest()) is None
+
+    def commit_then_lose_response(conn) -> None:
+        conn.commit()
+        raise sqlite3.OperationalError("commit 응답만 손실")
+
+    monkeypatch.setattr(
+        generation_singleflight,
+        "_commit_connection",
+        commit_then_lose_response,
+    )
+    owner.complete(
+        content.content_id,
+        artifact.artifact_id,
+        cache_eligible=False,
+    )
+
+    with storage_db.connect() as conn:
+        row = conn.execute(
+            f"""
+            SELECT state, completed_content_id, completed_artifact_id,
+                   engine_epoch_digest
+            FROM {singleflight.TABLE_SINGLEFLIGHT_LEASES}
+            """
+        ).fetchone()
+    assert row is not None
+    assert tuple(row) == (
+        singleflight.LeaseState.COMPLETED.value,
+        content.content_id,
+        artifact.artifact_id,
+        _BUILD_IDENTITY.epoch_digest,
+    )
+
+
+def test_owner완료_commit뒤_waiter영수증이_바뀌면_즉시격리한다(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    content, artifact = _persist_shared_content(
+        _report(),
+        artifact_root=tmp_path / "commit-drift-artifacts",
+    )
+    owner = _session("commit-drift-owner", "bucket-a")
+    assert owner.coordinate("00126380", _NAMESPACE, _source_digest()) is None
+
+    def commit_tamper_then_lose_response(conn) -> None:
+        conn.commit()
+        conn.execute(
+            f"""
+            UPDATE {singleflight.TABLE_SINGLEFLIGHT_LEASES}
+            SET completed_artifact_id = ?
+            WHERE engine_epoch_digest = ?
+            """,
+            ("f" * 64, _BUILD_IDENTITY.epoch_digest),
+        )
+        conn.commit()
+        raise sqlite3.OperationalError("commit 뒤 waiter 영수증 drift")
+
+    monkeypatch.setattr(
+        generation_singleflight,
+        "_commit_connection",
+        commit_tamper_then_lose_response,
+    )
+    with pytest.raises(
+        generation_singleflight.GenerationSingleflightUnavailable,
+        match="공유하지 못했습니다",
+    ):
+        owner.complete(
+            content.content_id,
+            artifact.artifact_id,
+            cache_eligible=False,
+        )
+
+    # 손상된 COMPLETED를 waiter가 받지 않고 같은 epoch의 새 owner가 된다.
+    fresh = _session("commit-drift-fresh", "bucket-a")
+    assert fresh.coordinate("00126380", _NAMESPACE, _source_digest()) is None
+    assert fresh.owns_generation
+    fresh.abandon()
+
+
+def test_owner완료_commit뒤_cache영수증이_바뀌면_cache와_waiter를_함께격리한다(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    content, artifact = _persist_shared_content(
+        _report(),
+        artifact_root=tmp_path / "cache-commit-drift-artifacts",
+    )
+    owner = _session("cache-commit-drift-owner", "bucket-a")
+    assert owner.coordinate("00126380", _NAMESPACE, _source_digest()) is None
+    cache_key = CacheLookupKey.from_preflight(
+        billing_bucket_id="bucket-a",
+        corp_id="00126380",
+        namespace=_NAMESPACE,
+        preflight_identity_digest=_source_digest(),
+        preflight_cache_usable=True,
+        engine_epoch_digest=_BUILD_IDENTITY.epoch_digest,
+    )
+    with storage_db.connect() as conn:
+        delivery_store.bind_cache_entry(
+            conn,
+            key=cache_key,
+            content=content,
+            artifact_id=artifact.artifact_id,
+            cached_at=dt.datetime.now(dt.timezone.utc),
+        )
+
+    def commit_tamper_then_lose_response(conn) -> None:
+        conn.commit()
+        conn.execute(
+            f"""
+            UPDATE {delivery_store.TABLE_CACHE_ENTRIES}
+            SET artifact_id = ?
+            WHERE engine_epoch_digest = ?
+            """,
+            ("e" * 64, _BUILD_IDENTITY.epoch_digest),
+        )
+        conn.commit()
+        raise sqlite3.OperationalError("commit 뒤 cache 영수증 drift")
+
+    monkeypatch.setattr(
+        generation_singleflight,
+        "_commit_connection",
+        commit_tamper_then_lose_response,
+    )
+    with pytest.raises(
+        generation_singleflight.GenerationSingleflightUnavailable,
+        match="공유하지 못했습니다",
+    ):
+        owner.complete(
+            content.content_id,
+            artifact.artifact_id,
+            cache_eligible=True,
+        )
+
+    with storage_db.connect() as conn:
+        assert not delivery_store.cache_entry_matches_exactly(
+            conn,
+            key=cache_key,
+            content_snapshot_id=content.content_id,
+            artifact_id=artifact.artifact_id,
+        )
+        invalidation = conn.execute(
+            f"""
+            SELECT reason_code FROM {delivery_store.TABLE_CACHE_INVALIDATIONS}
+            WHERE billing_bucket_id = ? AND corp_id = ?
+            """,
+            ("bucket-a", "00126380"),
+        ).fetchone()
+    assert invalidation is not None
+    assert invalidation[0] == "completion_receipt_mismatch"
+    fresh = _session("cache-commit-drift-fresh", "bucket-a")
+    assert fresh.coordinate("00126380", _NAMESPACE, _source_digest()) is None
+    assert fresh.owns_generation
+    fresh.abandon()
+
+
+def test_owner완료_commit직후_process_epoch가_바뀌면_waiter권위를_격리한다(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    content, artifact = _persist_shared_content(
+        _report(),
+        artifact_root=tmp_path / "post-commit-epoch-drift-artifacts",
+    )
+    owner = _session("post-commit-epoch-drift-owner", "bucket-a")
+    assert owner.coordinate("00126380", _NAMESPACE, _source_digest()) is None
+    build_b = build_identity_contract.EngineBuildIdentity(
+        "b" * 40,
+        f"{build_identity_contract.ENGINE_BUILD_ID_CONTRACT_VERSION}:{'b' * 40}",
+    )
+
+    def commit_then_change_process_epoch(conn) -> None:
+        conn.commit()
+        build_identity_contract._reset_process_engine_build_identity_for_tests()  # noqa: SLF001
+        build_identity_contract.freeze_process_engine_build_identity(build_b)
+
+    monkeypatch.setattr(
+        generation_singleflight,
+        "_commit_connection",
+        commit_then_change_process_epoch,
+    )
+    with pytest.raises(
+        generation_singleflight.GenerationSingleflightUnavailable,
+        match="공유하지 못했습니다",
+    ):
+        owner.complete(
+            content.content_id,
+            artifact.artifact_id,
+            cache_eligible=False,
+        )
+
+    with storage_db.connect() as conn:
+        row = conn.execute(
+            f"""
+            SELECT state, expires_at FROM {singleflight.TABLE_SINGLEFLIGHT_LEASES}
+            WHERE engine_epoch_digest = ?
+            """,
+            (_BUILD_IDENTITY.epoch_digest,),
+        ).fetchone()
+    assert row is not None
+    assert row[0] == singleflight.LeaseState.COMPLETED.value
+    assert singleflight.datetime_from_utc_text(
+        str(row[1]), label="시험 격리 만료"
+    ) <= dt.datetime.now(dt.timezone.utc)
+
+
+def test_owner완료는_요청중_raw_recapture를_사용하지_않는다(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
@@ -499,12 +714,11 @@ def test_owner완료_UPDATE도중_A에서_B로_바뀌면_rollback한다(
         lambda: next(captures),
     )
 
-    with pytest.raises(generation_singleflight.GenerationSingleflightUnavailable):
-        owner.complete(
-            content.content_id,
-            artifact.artifact_id,
-            cache_eligible=False,
-        )
+    owner.complete(
+        content.content_id,
+        artifact.artifact_id,
+        cache_eligible=False,
+    )
 
     with storage_db.connect() as conn:
         row = conn.execute(
@@ -512,27 +726,23 @@ def test_owner완료_UPDATE도중_A에서_B로_바뀌면_rollback한다(
             f"FROM {singleflight.TABLE_SINGLEFLIGHT_LEASES}"
         ).fetchone()
     assert row is not None
-    assert row["state"] == singleflight.LeaseState.ACTIVE.value
-    assert row["completed_content_id"] == ""
-    assert row["completed_artifact_id"] == ""
+    assert row["state"] == singleflight.LeaseState.COMPLETED.value
+    assert row["completed_content_id"] == content.content_id
+    assert row["completed_artifact_id"] == artifact.artifact_id
 
 
-def test_unknown생성은_commit이_생겨도_lease나_COMPLETED를_만들지_않는다(
+def test_unknown생성영수증은_세션생성부터_거절한다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for name in deployment_identity.COMMIT_ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
     frozen_unknown = build_identity_contract.capture_engine_build_identity()
-    session = _session(
-        "unknown-no-completion",
-        "bucket-a",
-        build_identity=frozen_unknown,
-    )
-
-    assert session.coordinate("00126380", None, _source_digest()) is None
-    assert not session.owns_generation
-    monkeypatch.setenv("RENDER_GIT_COMMIT", "b" * 40)
-    session.complete("content-not-written", "artifact-not-written", cache_eligible=False)
+    with pytest.raises(TypeError, match="정상 engine epoch"):
+        _session(
+            "unknown-no-completion",
+            "bucket-a",
+            build_identity=frozen_unknown,
+        )
 
     with storage_db.connect() as conn:
         assert conn.execute(
@@ -804,6 +1014,7 @@ def test_만료된_owner는_더높은_fencing_token으로_takeover한다() -> No
         corp_id="00126380",
         cache_namespace_id=_NAMESPACE_ID,
         source_identity_digest=_source_digest(),
+        engine_epoch_digest=_BUILD_IDENTITY.epoch_digest,
     )
     old = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)
     with storage_db.connect() as conn:
@@ -822,6 +1033,32 @@ def test_만료된_owner는_더높은_fencing_token으로_takeover한다() -> No
     assert recovery._handle is not None
     assert recovery._handle.fencing_token == crashed.handle.fencing_token + 1
     recovery.abandon()
+
+
+def test_owner선정은_namespace저장전부터_BEGIN_IMMEDIATE로_직렬화한다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A/B가 서로 없는 것으로 읽고 둘 다 provider를 여는 틈을 막는다."""
+
+    original_acquire = singleflight.acquire
+    lock_checked: list[bool] = []
+
+    def assert_write_lock(conn, **kwargs):
+        contender = sqlite3.connect(str(storage_db.default_db_path()), timeout=0)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                contender.execute("BEGIN IMMEDIATE")
+        finally:
+            contender.close()
+        lock_checked.append(True)
+        return original_acquire(conn, **kwargs)
+
+    monkeypatch.setattr(singleflight, "acquire", assert_write_lock)
+    session = _session("serialized-owner", "bucket-a")
+
+    assert session.coordinate("00126380", _NAMESPACE, _source_digest()) is None
+    assert lock_checked == [True]
+    session.abandon()
 
 
 def test_lease_DB를_확인할수없으면_provider를_열지_않는다(

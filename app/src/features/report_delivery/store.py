@@ -18,6 +18,7 @@ from src.features.report_delivery.canonical import (
 )
 from src.features.report_delivery.models import ContentSnapshot, Delivery, DeliveryPolicy
 from src.features.report_delivery.source_identity import SourceSnapshot
+from src.shared.engine_build_identity import epoch_digest_is_valid
 
 
 TABLE_SOURCE_SNAPSHOTS: Final[str] = "report_delivery_source_snapshots"
@@ -52,6 +53,7 @@ CREATE TABLE IF NOT EXISTS {TABLE_CACHE_ENTRIES} (
     corp_id                   TEXT NOT NULL,
     cache_namespace_id        TEXT NOT NULL,
     preflight_identity_digest TEXT NOT NULL,
+    engine_epoch_digest       TEXT NOT NULL,
     source_identity_digest    TEXT NOT NULL,
     content_snapshot_id       TEXT NOT NULL
                               REFERENCES {TABLE_CONTENT_SNAPSHOTS}(content_id),
@@ -59,7 +61,7 @@ CREATE TABLE IF NOT EXISTS {TABLE_CACHE_ENTRIES} (
     cached_at                 TEXT NOT NULL,
     PRIMARY KEY (
         billing_bucket_id, corp_id, cache_namespace_id,
-        preflight_identity_digest
+        preflight_identity_digest, engine_epoch_digest
     )
 )
 """
@@ -159,7 +161,8 @@ _SCHEMA: Final[tuple[str, ...]] = (
         cache_namespace_id       TEXT NOT NULL
                                  REFERENCES {TABLE_CACHE_NAMESPACES}(namespace_id),
         content_generated_at     TEXT NOT NULL,
-        actual_models_json       TEXT NOT NULL
+        actual_models_json       TEXT NOT NULL,
+        engine_epoch_digest      TEXT NOT NULL DEFAULT ''
     )
     """,
     f"""
@@ -222,7 +225,7 @@ def _cache_primary_key(conn: sqlite3.Connection) -> tuple[str, ...]:
 
 
 def _rebuild_bucket_scoped_cache_table(conn: sqlite3.Connection) -> None:
-    """SQLite에서 바꿀 수 없는 옛 PRIMARY KEY를 실제 4열 key로 교체한다."""
+    """SQLite에서 바꿀 수 없는 옛 PRIMARY KEY를 실제 5열 key로 교체한다."""
 
     old_columns = tuple(
         str(row[1])
@@ -250,15 +253,17 @@ def _rebuild_bucket_scoped_cache_table(conn: sqlite3.Connection) -> None:
                 f"""
                 INSERT OR IGNORE INTO {TABLE_CACHE_ENTRIES} (
                     billing_bucket_id, corp_id, cache_namespace_id,
-                    preflight_identity_digest, source_identity_digest,
+                    preflight_identity_digest, engine_epoch_digest,
+                    source_identity_digest,
                     content_snapshot_id, artifact_id, cached_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     bucket,
                     str(values.get("corp_id", "")),
                     str(values.get("cache_namespace_id", "")),
                     preflight,
+                    str(values.get("engine_epoch_digest", "")),
                     str(values.get("source_identity_digest", "")),
                     str(values.get("content_snapshot_id", "")),
                     artifact_id,
@@ -299,11 +304,23 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
     for statement in _SCHEMA:
         conn.execute(statement)
+    content_columns = {
+        str(row[1])
+        for row in conn.execute(
+            f'PRAGMA table_info("{TABLE_CONTENT_SNAPSHOTS}")'
+        ).fetchall()
+    }
+    if "engine_epoch_digest" not in content_columns:
+        conn.execute(
+            f"ALTER TABLE {TABLE_CONTENT_SNAPSHOTS} "
+            "ADD COLUMN engine_epoch_digest TEXT NOT NULL DEFAULT ''"
+        )
     expected_pk = (
         "billing_bucket_id",
         "corp_id",
         "cache_namespace_id",
         "preflight_identity_digest",
+        "engine_epoch_digest",
     )
     if _cache_primary_key(conn) != expected_pk:
         _rebuild_bucket_scoped_cache_table(conn)
@@ -313,7 +330,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE UNIQUE INDEX IF NOT EXISTS {_CACHE_PREFLIGHT_INDEX}
         ON {TABLE_CACHE_ENTRIES}(
             billing_bucket_id, corp_id, cache_namespace_id,
-            preflight_identity_digest
+            preflight_identity_digest, engine_epoch_digest
         )
         WHERE billing_bucket_id <> '' AND preflight_identity_digest <> ''
         """
@@ -482,6 +499,10 @@ def save_content_snapshot(conn: sqlite3.Connection, content: ContentSnapshot) ->
     """본문 bytes를 한 번만 저장하고 여러 delivery가 참조하게 한다."""
 
     ensure_schema(conn)
+    if not epoch_digest_is_valid(content.engine_epoch_digest):
+        raise LifecycleStoreError(
+            "새 내용 원본에는 정상 engine epoch 영수증이 필요합니다"
+        )
     source = load_source_snapshot(conn, content.source_snapshot_id)
     if source is None:
         raise LifecycleStoreError("내용보다 source snapshot을 먼저 저장해야 합니다")
@@ -498,14 +519,15 @@ def save_content_snapshot(conn: sqlite3.Connection, content: ContentSnapshot) ->
         content.cache_namespace_id,
         utc_text(content.content_generated_at, label="내용 생성"),
         _json_tuple(tuple(content.actual_models)),
+        content.engine_epoch_digest,
     )
     cursor = conn.execute(
         f"""
         INSERT OR IGNORE INTO {TABLE_CONTENT_SNAPSHOTS} (
             content_id, payload, payload_sha256, source_snapshot_id,
             source_identity_digest, cache_namespace_id,
-            content_generated_at, actual_models_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            content_generated_at, actual_models_json, engine_epoch_digest
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         payload,
     )
@@ -515,7 +537,7 @@ def save_content_snapshot(conn: sqlite3.Connection, content: ContentSnapshot) ->
         f"""
         SELECT content_id, payload, payload_sha256, source_snapshot_id,
                source_identity_digest, cache_namespace_id,
-               content_generated_at, actual_models_json
+               content_generated_at, actual_models_json, engine_epoch_digest
         FROM {TABLE_CONTENT_SNAPSHOTS} WHERE content_id = ?
         """,
         (content.content_id,),
@@ -529,6 +551,7 @@ def save_content_snapshot(conn: sqlite3.Connection, content: ContentSnapshot) ->
         content.cache_namespace_id,
         utc_text(content.content_generated_at, label="내용 생성"),
         _json_tuple(tuple(content.actual_models)),
+        content.engine_epoch_digest,
     )
     if existing is None or tuple(existing) != expected:
         raise ImmutableRecordConflict("같은 content ID를 다른 본문으로 덮어쓸 수 없습니다")
@@ -544,7 +567,7 @@ def load_content_snapshot(
         f"""
         SELECT content_id, payload, payload_sha256, source_snapshot_id,
                source_identity_digest, cache_namespace_id,
-               content_generated_at, actual_models_json
+               content_generated_at, actual_models_json, engine_epoch_digest
         FROM {TABLE_CONTENT_SNAPSHOTS} WHERE content_id = ?
         """,
         (str(content_id).strip(),),
@@ -565,6 +588,7 @@ def load_content_snapshot(
             cache_namespace_id=str(row[5]),
             content_generated_at=datetime_from_utc_text(row[6], label="내용 생성"),
             actual_models=models,
+            engine_epoch_digest=str(row[8]),
         )
     except (TypeError, ValueError) as exc:
         raise LifecycleStoreCorrupt("content snapshot metadata가 손상됐습니다") from exc
@@ -589,6 +613,8 @@ def bind_cache_entry(
     ensure_schema(conn)
     if content.cache_namespace_id != key.namespace_id:
         raise LifecycleStoreError("캐시 열쇠와 내용의 생성기 신원이 다릅니다")
+    if content.engine_epoch_digest != key.engine_epoch_digest:
+        raise LifecycleStoreError("캐시 열쇠와 내용의 engine epoch가 다릅니다")
     if load_content_snapshot(conn, content.content_id) is None:
         raise LifecycleStoreError("내용 원본을 먼저 저장해야 캐시에 연결할 수 있습니다")
     clean_artifact_id = str(artifact_id).strip()
@@ -616,6 +642,7 @@ def bind_cache_entry(
         key.corp_id,
         key.namespace_id,
         key.preflight_identity_digest,
+        key.engine_epoch_digest,
         content.source_identity_digest,
         content.content_id,
         clean_artifact_id,
@@ -625,9 +652,9 @@ def bind_cache_entry(
         f"""
         INSERT OR IGNORE INTO {TABLE_CACHE_ENTRIES} (
             billing_bucket_id, corp_id, cache_namespace_id,
-            preflight_identity_digest,
+            preflight_identity_digest, engine_epoch_digest,
             source_identity_digest, content_snapshot_id, artifact_id, cached_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         payload,
     )
@@ -636,22 +663,24 @@ def bind_cache_entry(
     existing = conn.execute(
         f"""
         SELECT billing_bucket_id, corp_id, cache_namespace_id,
-               preflight_identity_digest, source_identity_digest,
-               content_snapshot_id, artifact_id, cached_at
+               preflight_identity_digest, engine_epoch_digest,
+               source_identity_digest, content_snapshot_id, artifact_id, cached_at
         FROM {TABLE_CACHE_ENTRIES}
         WHERE billing_bucket_id = ? AND corp_id = ? AND cache_namespace_id = ?
           AND preflight_identity_digest = ?
+          AND engine_epoch_digest = ?
         """,
         (
             key.billing_bucket_id,
             key.corp_id,
             key.namespace_id,
             key.preflight_identity_digest,
+            key.engine_epoch_digest,
         ),
     ).fetchone()
     # cached_at은 첫 저장 시각을 보존한다. 같은 content를 장애 재시도로 다시
     # 연결할 때 현재 시각이 달라졌다는 이유로 불변식 오류를 만들지 않는다.
-    if existing is None or tuple(existing[:7]) != payload[:7]:
+    if existing is None or tuple(existing[:8]) != payload[:8]:
         raise ImmutableRecordConflict(
             "같은 캐시 신원에 다른 내용을 덮어쓸 수 없습니다; single-flight 상태를 확인하세요"
         )
@@ -669,16 +698,19 @@ def load_cache_hit(
     ensure_schema(conn)
     row = conn.execute(
         f"""
-        SELECT source_identity_digest, content_snapshot_id, artifact_id
+        SELECT source_identity_digest, content_snapshot_id, artifact_id,
+               engine_epoch_digest
         FROM {TABLE_CACHE_ENTRIES}
         WHERE billing_bucket_id = ? AND corp_id = ? AND cache_namespace_id = ?
           AND preflight_identity_digest = ?
+          AND engine_epoch_digest = ?
         """,
         (
             key.billing_bucket_id,
             key.corp_id,
             key.namespace_id,
             key.preflight_identity_digest,
+            key.engine_epoch_digest,
         ),
     ).fetchone()
     if row is None:
@@ -689,6 +721,7 @@ def load_cache_hit(
     if (
         content.cache_namespace_id != key.namespace_id
         or content.source_identity_digest != str(row[0])
+        or content.engine_epoch_digest != str(row[3])
     ):
         raise LifecycleStoreCorrupt("캐시와 내용 원본의 생성기·전체 출처 신원이 다릅니다")
     if not policy.content_is_reusable(content, delivered_at=delivered_at):
@@ -722,6 +755,7 @@ def cache_entry_matches_exactly(
         SELECT 1 FROM {TABLE_CACHE_ENTRIES}
         WHERE billing_bucket_id = ? AND corp_id = ?
           AND cache_namespace_id = ? AND preflight_identity_digest = ?
+          AND engine_epoch_digest = ?
           AND content_snapshot_id = ? AND artifact_id = ?
         """,
         (
@@ -729,6 +763,7 @@ def cache_entry_matches_exactly(
             key.corp_id,
             key.namespace_id,
             key.preflight_identity_digest,
+            key.engine_epoch_digest,
             str(content_snapshot_id).strip(),
             str(artifact_id).strip(),
         ),
@@ -765,6 +800,7 @@ def invalidate_cache_entry(
         DELETE FROM {TABLE_CACHE_ENTRIES}
         WHERE billing_bucket_id = ? AND corp_id = ?
           AND cache_namespace_id = ? AND preflight_identity_digest = ?
+          AND engine_epoch_digest = ?
           AND content_snapshot_id = ? AND artifact_id = ?
         """,
         (
@@ -772,6 +808,7 @@ def invalidate_cache_entry(
             key.corp_id,
             key.namespace_id,
             key.preflight_identity_digest,
+            key.engine_epoch_digest,
             content_id,
             artifact_id,
         ),
@@ -797,6 +834,84 @@ def invalidate_cache_entry(
             utc_text(
                 require_aware(invalidated_at, label="캐시 무효화"),
                 label="캐시 무효화",
+            ),
+        ),
+    )
+    return True
+
+
+def quarantine_cache_key_after_receipt_mismatch(
+    conn: sqlite3.Connection,
+    *,
+    key: CacheLookupKey,
+    reason_code: str,
+    invalidated_at: dt.datetime,
+) -> bool:
+    """commit 재대조가 어긋난 정확한 cache key를 대상 drift와 함께 지운다.
+
+    일반 무효화는 기대한 content·artifact가 정확히 같을 때만 지운다. 반면
+    commit 뒤 행 자체가 바뀐 경우 그 조건은 독성 행을 남기므로, 이 복구 전용
+    함수는 5열 key를 권위로 삼고 현재 관측한 대상을 감사 원장에 기록한다.
+    """
+
+    ensure_schema(conn)
+    reason = str(reason_code).strip()
+    if _CACHE_INVALIDATION_REASON_RE.fullmatch(reason) is None:
+        raise LifecycleStoreError("캐시 격리 사유는 닫힌 기계 코드여야 합니다")
+    observed = conn.execute(
+        f"""
+        SELECT content_snapshot_id, artifact_id
+        FROM {TABLE_CACHE_ENTRIES}
+        WHERE billing_bucket_id = ? AND corp_id = ?
+          AND cache_namespace_id = ? AND preflight_identity_digest = ?
+          AND engine_epoch_digest = ?
+        """,
+        (
+            key.billing_bucket_id,
+            key.corp_id,
+            key.namespace_id,
+            key.preflight_identity_digest,
+            key.engine_epoch_digest,
+        ),
+    ).fetchone()
+    if observed is None:
+        return False
+    cursor = conn.execute(
+        f"""
+        DELETE FROM {TABLE_CACHE_ENTRIES}
+        WHERE billing_bucket_id = ? AND corp_id = ?
+          AND cache_namespace_id = ? AND preflight_identity_digest = ?
+          AND engine_epoch_digest = ?
+        """,
+        (
+            key.billing_bucket_id,
+            key.corp_id,
+            key.namespace_id,
+            key.preflight_identity_digest,
+            key.engine_epoch_digest,
+        ),
+    )
+    if cursor.rowcount != 1:  # pragma: no cover - BEGIN IMMEDIATE 안쪽 방어선
+        raise LifecycleStoreError("격리 중 캐시 행이 동시에 바뀌었습니다")
+    conn.execute(
+        f"""
+        INSERT INTO {TABLE_CACHE_INVALIDATIONS} (
+            billing_bucket_id, corp_id, cache_namespace_id,
+            preflight_identity_digest, content_snapshot_id, artifact_id,
+            reason_code, invalidated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            key.billing_bucket_id,
+            key.corp_id,
+            key.namespace_id,
+            key.preflight_identity_digest,
+            str(observed[0]),
+            str(observed[1]),
+            reason,
+            utc_text(
+                require_aware(invalidated_at, label="캐시 격리"),
+                label="캐시 격리",
             ),
         ),
     )

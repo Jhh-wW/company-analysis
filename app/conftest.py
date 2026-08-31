@@ -23,6 +23,17 @@ from src.features.storage import constants as storage_constants
 
 
 @pytest.fixture(autouse=True)
+def _fresh_process_engine_build_identity():
+    """시험끼리 process epoch가 새지 않게 하되 시험 중에는 재동결하지 않는다."""
+
+    from src.shared import engine_build_identity  # noqa: PLC0415
+
+    engine_build_identity._reset_process_engine_build_identity_for_tests()  # noqa: SLF001
+    yield
+    engine_build_identity._reset_process_engine_build_identity_for_tests()  # noqa: SLF001
+
+
+@pytest.fixture(autouse=True)
 def _isolated_storage(tmp_path, monkeypatch):
     """모든 시험이 «임시 폴더»의 저장소와 이력을 쓰게 한다.
 

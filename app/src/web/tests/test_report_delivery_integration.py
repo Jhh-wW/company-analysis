@@ -110,6 +110,7 @@ def _public_job_for_save(report, *, report_id: str) -> job_runtime.Job:
             + report_access_constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
             + 1
         ),
+        engine_build_identity=_current_build_identity(),
         delivery_issued_at=issued_at,
         delivery_expires_at=expires_at,
     )
@@ -657,6 +658,7 @@ def test_PUBLIC_최종출고는_실제60일만료보다_grant가짧으면_청구
             reused_from_cache=False,
             completed_at=completed_at,
             public_access_run_id=report_id,
+            engine_build_identity=_current_build_identity(),
         )
     with storage_db.connect() as conn:
         assert delivery_store.load_delivery_by_public_id(conn, report_id) is None
@@ -682,7 +684,7 @@ def test_PUBLIC_waiter와cache도_최종grant결속False면_출고와청구를_r
     finance_digest = financial_payload_digest(
         {"status": "000", "list": [{"account_nm": "매출액", "thstrm_amount": "100"}]}
     )
-    revision, image = report_delivery_adapter._release_identity()
+    revision, image = _current_release_identity()
     namespace = CacheNamespace.create(
         product="company-analysis",
         schema_version=report.schema_version or "legacy-report-schema",
@@ -707,6 +709,7 @@ def test_PUBLIC_waiter와cache도_최종grant결속False면_출고와청구를_r
         cache_namespace=namespace,
         preflight_identity_digest=preflight_digest,
         cache_eligible=True,
+        engine_build_identity=_current_build_identity(),
     )
     assert owner.artifact is not None
     target_id = uuid.uuid4().hex
@@ -738,6 +741,7 @@ def test_PUBLIC_waiter와cache도_최종grant결속False면_출고와청구를_r
             reuse_content_snapshot_id=owner.content.content_id,
             reuse_artifact_id=owner.artifact.artifact_id,
             public_access_run_id=target_id,
+            engine_build_identity=_current_build_identity(),
             **extra,
         )
     with storage_db.connect() as conn:
@@ -746,6 +750,12 @@ def test_PUBLIC_waiter와cache도_최종grant결속False면_출고와청구를_r
             f"SELECT 1 FROM {cost_store.RUN_COST_TABLE} WHERE run_id=?",
             (target_id,),
         ).fetchone() is None
+def _current_build_identity() -> build_identity_contract.EngineBuildIdentity:
+    return build_identity_contract.process_engine_build_identity()
+
+
+def _current_release_identity() -> tuple[str, str]:
+    return report_delivery_adapter._release_identity(_current_build_identity())
 
 
 def _database_dump(path: Path) -> tuple[str, ...]:
@@ -761,7 +771,7 @@ def test_배포commit이_없는_로컬출고는_저장용_비검증신원만_쓴
     for name in deployment_identity.COMMIT_ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
 
-    revision, image = report_delivery_adapter._release_identity()
+    revision, image = _current_release_identity()
 
     assert revision == ""
     assert image == report_delivery_adapter._UNCACHEABLE_LOCAL_RELEASE_ID
@@ -775,7 +785,7 @@ def test_출고배포신원도_full_commit만_권위로_쓴다(
         monkeypatch.delenv(name, raising=False)
     full_commit = "a" * deployment_identity.COMMIT_FULL_LEN
     monkeypatch.setenv("RENDER_GIT_COMMIT", full_commit)
-    revision, image = report_delivery_adapter._release_identity()
+    revision, image = _current_release_identity()
     assert revision == full_commit
     assert image == (
         "generator-build:"
@@ -784,9 +794,13 @@ def test_출고배포신원도_full_commit만_권위로_쓴다(
     )
 
     monkeypatch.setenv("RENDER_GIT_COMMIT", "abc1234")
-    assert report_delivery_adapter._release_identity() == (
-        "",
-        report_delivery_adapter._UNCACHEABLE_LOCAL_RELEASE_ID,
+    assert _current_release_identity() == (
+        full_commit,
+        (
+            "generator-build:"
+            f"{build_identity_contract.ENGINE_BUILD_ID_CONTRACT_VERSION}:"
+            f"{full_commit}"
+        ),
     )
 
 
@@ -814,7 +828,7 @@ def test_출고revision과_build도_교대환경을_한번만_읽는다(
         SimpleNamespace(environ=AlternatingRawEnvironment()),
     )
 
-    revision, image = report_delivery_adapter._release_identity()
+    revision, image = _current_release_identity()
 
     assert revision == first
     assert image.endswith(first)
@@ -823,32 +837,30 @@ def test_출고revision과_build도_교대환경을_한번만_읽는다(
 
 
 @pytest.mark.parametrize("after", ("different", "unknown"))
-def test_생성_A뒤_출고가_B나_unknown이면_거절한다(
+def test_프로세스_A를_동결하면_raw환경이_B나_unknown이어도_A로_출고한다(
     after: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("RENDER_GIT_COMMIT", "a" * 40)
     frozen = build_identity_contract.capture_engine_build_identity()
+    build_identity_contract.freeze_process_engine_build_identity(frozen)
     if after == "different":
         monkeypatch.setenv("RENDER_GIT_COMMIT", "b" * 40)
     else:
         monkeypatch.delenv("RENDER_GIT_COMMIT", raising=False)
     monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / f"release-{after}"))
 
-    with pytest.raises(
-        report_delivery_adapter.DeliveryAdapterError,
-        match="생성 시작과 출고 시점",
-    ):
-        reports_router.finalize_new_report_delivery(
-            report_id=f"release-mismatch-{after}-{uuid.uuid4().hex}",
-            corp_id="demo-corp",
-            billing_bucket_id="release-bucket",
-            report=_demo_report(),
-            actual_models=("deterministic-demo",),
-            reused_from_cache=False,
-            engine_build_identity=frozen,
-        )
+    persisted = reports_router.finalize_new_report_delivery(
+        report_id=f"release-frozen-{after}-{uuid.uuid4().hex}",
+        corp_id="demo-corp",
+        billing_bucket_id="release-bucket",
+        report=_demo_report(),
+        actual_models=("deterministic-demo",),
+        reused_from_cache=False,
+        engine_build_identity=frozen,
+    )
+    assert persisted.content.engine_epoch_digest == frozen.epoch_digest
 
 
 def test_unknown에서_생성한뒤_commit이_생겨도_저장으로_승격하지않는다(
@@ -858,12 +870,13 @@ def test_unknown에서_생성한뒤_commit이_생겨도_저장으로_승격하�
     for name in deployment_identity.COMMIT_ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
     frozen_unknown = build_identity_contract.capture_engine_build_identity()
+    build_identity_contract.freeze_process_engine_build_identity(frozen_unknown)
     monkeypatch.setenv("RENDER_GIT_COMMIT", "b" * 40)
     monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "unknown-to-verified"))
 
     with pytest.raises(
         report_delivery_adapter.DeliveryAdapterError,
-        match="unknown 배포에서 시작한 결과",
+        match="검증되지 않은 배포",
     ):
         reports_router.finalize_new_report_delivery(
             report_id=f"unknown-upgrade-{uuid.uuid4().hex}",
@@ -876,7 +889,7 @@ def test_unknown에서_생성한뒤_commit이_생겨도_저장으로_승격하�
         )
 
 
-def test_검증안된_로컬도_새delivery와_PDF는_저장하되_cache_origin은_비운다(
+def test_검증안된_로컬은_새delivery와_PDF를_저장하지않는다(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -884,24 +897,18 @@ def test_검증안된_로컬도_새delivery와_PDF는_저장하되_cache_origin�
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "local-artifacts"))
 
-    persisted = reports_router.finalize_new_report_delivery(
-        report_id=f"local-new-{uuid.uuid4().hex}",
-        corp_id="demo-corp",
-        billing_bucket_id="local-bucket",
-        report=_demo_report(),
-        actual_models=("deterministic-demo",),
-        reused_from_cache=False,
-    )
-
-    assert persisted.delivery.cache_origin_content_id == ""
-    assert persisted.inspection is not None
-    assert persisted.inspection.pdf_bytes is not None
-    with storage_db.connect() as conn:
-        assert (
-            conn.execute(
-                f"SELECT COUNT(*) FROM {delivery_store.TABLE_CACHE_ENTRIES}"
-            ).fetchone()[0]
-            == 0
+    with pytest.raises(
+        report_delivery_adapter.DeliveryAdapterError,
+        match="검증되지 않은 배포",
+    ):
+        reports_router.finalize_new_report_delivery(
+            report_id=f"local-new-{uuid.uuid4().hex}",
+            corp_id="demo-corp",
+            billing_bucket_id="local-bucket",
+            report=_demo_report(),
+            actual_models=("deterministic-demo",),
+            reused_from_cache=False,
+            engine_build_identity=_current_build_identity(),
         )
 
 
@@ -923,9 +930,10 @@ def test_검증안된_로컬은_호출자flag로_캐시행동을_켤수없다(
         "actual_models": ("deterministic-demo",),
         "reused_from_cache": attack == "reuse",
         "cache_eligible": attack == "bind",
+        "engine_build_identity": _current_build_identity(),
     }
     if attack == "sentinel_namespace":
-        revision, image = report_delivery_adapter._release_identity()
+        revision, image = _current_release_identity()
         arguments.update(
             cache_namespace=CacheNamespace.create(
                 product="company-analysis",
@@ -941,14 +949,12 @@ def test_검증안된_로컬은_호출자flag로_캐시행동을_켤수없다(
 
     with pytest.raises(
         report_delivery_adapter.DeliveryAdapterError,
-        match="로컬 출고는 캐시 결속·재사용",
+        match="검증되지 않은 배포",
     ):
         reports_router.finalize_new_report_delivery(**arguments)
 
 
-@pytest.mark.parametrize("current_release", ("local", "verified"))
-def test_검증안된_로컬의_기존content와_PDF는_새delivery로_재사용하지않는다(
-    current_release: str,
+def test_검증안된_로컬은_재사용할_owner_content도_만들지않는다(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -960,40 +966,20 @@ def test_검증안된_로컬의_기존content와_PDF는_새delivery로_재사용
     finance_digest = financial_payload_digest(
         {"status": "000", "list": [{"account_nm": "매출액", "thstrm_amount": "1"}]}
     )
-    owner = reports_router.finalize_new_report_delivery(
-        report_id=f"local-owner-{uuid.uuid4().hex}",
-        corp_id="demo-corp",
-        billing_bucket_id="local-bucket",
-        report=report,
-        actual_models=("deterministic-demo",),
-        reused_from_cache=False,
-        dart_receipt_numbers=(receipt,),
-        financial_payload_digest=finance_digest,
-    )
-    assert owner.artifact is not None
-
-    # 나중에 정식 배포 commit이 생겨도, 로컬 sentinel로 저장한 옛 결과를
-    # 현재 배포가 만든 캐시 원본처럼 승격해서는 안 된다.
-    expected_error = "로컬 출고 결과는 새 요청에 재사용"
-    if current_release == "verified":
-        monkeypatch.setenv("RENDER_GIT_COMMIT", "b" * 40)
-        expected_error = "현재 검증된 배포의 캐시 원본이 아닙니다"
-
     with pytest.raises(
         report_delivery_adapter.DeliveryAdapterError,
-        match=expected_error,
+        match="검증되지 않은 배포",
     ):
         reports_router.finalize_new_report_delivery(
-            report_id=f"local-waiter-{uuid.uuid4().hex}",
+            report_id=f"local-owner-{uuid.uuid4().hex}",
             corp_id="demo-corp",
             billing_bucket_id="local-bucket",
             report=report,
             actual_models=("deterministic-demo",),
-            reused_from_cache=True,
+            reused_from_cache=False,
+            engine_build_identity=_current_build_identity(),
             dart_receipt_numbers=(receipt,),
             financial_payload_digest=finance_digest,
-            reuse_content_snapshot_id=owner.content.content_id,
-            reuse_artifact_id=owner.artifact.artifact_id,
         )
 
 
@@ -1083,6 +1069,7 @@ def test_completion_adapter는_수집시점의_비민감_출처지문을_그대�
             financial_payload_digest=finance_digest,
             generation_cache_eligible=False,
         ),
+        engine_build_identity=_current_build_identity(),
     )
     captured: dict[str, object] = {}
 
@@ -1112,7 +1099,7 @@ def test_completion_adapter는_수집시점의_비민감_출처지문을_그대�
 
 def test_부분출처_bypass는_캐시결속없이도_정상출고한다(monkeypatch):
     report = _demo_report()
-    revision, image = report_delivery_adapter._release_identity()
+    revision, image = _current_release_identity()
     namespace = CacheNamespace.create(
         product="company-analysis",
         schema_version=report.schema_version or "legacy-report-schema",
@@ -1183,6 +1170,7 @@ def test_새_delivery의_결과와_PDF_GET은_저장본만_반복해서_읽는�
         report=report,
         actual_models=("deterministic-demo",),
         reused_from_cache=False,
+        engine_build_identity=build_identity_contract.process_engine_build_identity(),
         dart_receipt_numbers=("20260828000123",),
         financial_payload_digest=finance_digest,
     )
@@ -1264,6 +1252,7 @@ def test_cache_key없는_재사용은_singleflight완료증거없이_발급하�
         report=report,
         actual_models=("deterministic-demo",),
         reused_from_cache=False,
+        engine_build_identity=_current_build_identity(),
         dart_receipt_numbers=(receipt,),
         financial_payload_digest=finance_digest,
     )
@@ -1287,6 +1276,7 @@ def test_cache_key없는_재사용은_singleflight완료증거없이_발급하�
             report=owner.report,
             actual_models=owner.content.actual_models,
             reused_from_cache=True,
+            engine_build_identity=_current_build_identity(),
             dart_receipt_numbers=(receipt,),
             financial_payload_digest=finance_digest,
             reuse_content_snapshot_id=owner.content.content_id,
@@ -1312,7 +1302,7 @@ def test_cache_key없는_waiter도_정확한_singleflight완료증거면_재사�
             "list": [{"account_nm": "매출액", "thstrm_amount": "100"}],
         }
     )
-    revision, image = report_delivery_adapter._release_identity()
+    revision, image = _current_release_identity()
     namespace = CacheNamespace.create(
         product="company-analysis",
         schema_version=report.schema_version or "legacy-report-schema",
@@ -1332,6 +1322,7 @@ def test_cache_key없는_waiter도_정확한_singleflight완료증거면_재사�
         report=report,
         actual_models=("deterministic-demo",),
         reused_from_cache=False,
+        engine_build_identity=build_identity_contract.process_engine_build_identity(),
         dart_receipt_numbers=(receipt,),
         financial_payload_digest=finance_digest,
         cache_namespace=namespace,
@@ -1344,6 +1335,7 @@ def test_cache_key없는_waiter도_정확한_singleflight완료증거면_재사�
         corp_id="demo-corp",
         cache_namespace_id=namespace.namespace_id,
         source_identity_digest=preflight_digest,
+        engine_epoch_digest=_current_build_identity().epoch_digest,
     )
     now = dt.datetime.now(dt.timezone.utc)
     with storage_db.connect() as conn:
@@ -1371,6 +1363,7 @@ def test_cache_key없는_waiter도_정확한_singleflight완료증거면_재사�
         report=owner.report,
         actual_models=owner.content.actual_models,
         reused_from_cache=True,
+        engine_build_identity=_current_build_identity(),
         dart_receipt_numbers=(receipt,),
         financial_payload_digest=finance_digest,
         reuse_content_snapshot_id=owner.content.content_id,
@@ -1399,7 +1392,7 @@ def test_일반캐시_hit은_같은통장안에서_원본content와PDF로_새del
             "list": [{"account_nm": "매출액", "thstrm_amount": "100"}],
         }
     )
-    revision, image = report_delivery_adapter._release_identity()
+    revision, image = _current_release_identity()
     namespace = CacheNamespace.create(
         product="company-analysis",
         schema_version=report.schema_version or "legacy-report-schema",
@@ -1419,6 +1412,7 @@ def test_일반캐시_hit은_같은통장안에서_원본content와PDF로_새del
         report=report,
         actual_models=("deterministic-demo",),
         reused_from_cache=False,
+        engine_build_identity=_current_build_identity(),
         dart_receipt_numbers=(receipt,),
         financial_payload_digest=finance_digest,
         cache_namespace=namespace,
@@ -1467,6 +1461,7 @@ def test_일반캐시_hit은_같은통장안에서_원본content와PDF로_새del
         report=reused.report,
         actual_models=reused.actual_models,
         reused_from_cache=True,
+        engine_build_identity=_current_build_identity(),
         dart_receipt_numbers=(receipt,),
         financial_payload_digest=finance_digest,
         reuse_content_snapshot_id=reused.content_snapshot_id,
@@ -1513,7 +1508,7 @@ def test_일시적수집실패_보고서는_전달하되_정식캐시에는_묶�
     finance_digest = financial_payload_digest(
         {"status": "000", "list": [{"account_nm": "매출액", "thstrm_amount": "100"}]}
     )
-    revision, image = report_delivery_adapter._release_identity()
+    revision, image = _current_release_identity()
     namespace = CacheNamespace.create(
         product="company-analysis",
         schema_version=report.schema_version or "legacy-report-schema",
@@ -1536,6 +1531,7 @@ def test_일시적수집실패_보고서는_전달하되_정식캐시에는_묶�
         report=report,
         actual_models=("deterministic-demo",),
         reused_from_cache=False,
+        engine_build_identity=_current_build_identity(),
         dart_receipt_numbers=(receipt,),
         financial_payload_digest=finance_digest,
         cache_namespace=namespace,
@@ -1549,6 +1545,7 @@ def test_일시적수집실패_보고서는_전달하되_정식캐시에는_묶�
         namespace=namespace,
         preflight_identity_digest=preflight_digest,
         preflight_cache_usable=True,
+        engine_epoch_digest=_current_build_identity().epoch_digest,
     )
     with storage_db.connect() as conn:
         assert delivery_store.load_cache_hit(
@@ -1585,7 +1582,7 @@ def test_손상PDF캐시와_남은완료fanout은_격리하고_provider한번으
             "list": [{"account_nm": "매출액", "thstrm_amount": "100"}],
         }
     )
-    revision, image = report_delivery_adapter._release_identity()
+    revision, image = _current_release_identity()
     namespace = CacheNamespace.create(
         product="company-analysis",
         schema_version=report.schema_version or "legacy-report-schema",
@@ -1608,6 +1605,7 @@ def test_손상PDF캐시와_남은완료fanout은_격리하고_provider한번으
         report=report,
         actual_models=("deterministic-demo",),
         reused_from_cache=False,
+        engine_build_identity=_current_build_identity(),
         dart_receipt_numbers=(receipt,),
         financial_payload_digest=finance_digest,
         cache_namespace=namespace,
@@ -1622,6 +1620,7 @@ def test_손상PDF캐시와_남은완료fanout은_격리하고_provider한번으
         corp_id=corp_id,
         cache_namespace_id=namespace.namespace_id,
         source_identity_digest=preflight_digest,
+        engine_epoch_digest=_current_build_identity().epoch_digest,
     )
     completed_at = dt.datetime.now(dt.timezone.utc)
     with storage_db.connect() as conn:
@@ -1693,6 +1692,7 @@ def test_손상PDF캐시와_남은완료fanout은_격리하고_provider한번으
         namespace=namespace,
         preflight_identity_digest=preflight_digest,
         preflight_cache_usable=True,
+        engine_epoch_digest=_current_build_identity().epoch_digest,
     )
     with storage_db.connect() as conn:
         assert delivery_store.load_cache_hit(
@@ -1730,7 +1730,7 @@ def test_COMPLETE재시도는_같은통장과_정식cache신원일때만_멱등�
     finance_digest = financial_payload_digest(
         {"status": "000", "list": [{"account_nm": "매출액"}]}
     )
-    revision, image = report_delivery_adapter._release_identity()
+    revision, image = _current_release_identity()
     namespace = CacheNamespace.create(
         product="company-analysis",
         schema_version=report.schema_version or "legacy-report-schema",
@@ -1756,6 +1756,7 @@ def test_COMPLETE재시도는_같은통장과_정식cache신원일때만_멱등�
         cache_namespace=namespace,
         preflight_identity_digest=preflight_digest,
         cache_eligible=True,
+        engine_build_identity=_current_build_identity(),
     )
     owner = reports_router.finalize_new_report_delivery(**arguments)
     retry = reports_router.finalize_new_report_delivery(**arguments)
@@ -1784,7 +1785,7 @@ def test_다른두통장의_동시miss는_각자content와PDF를_정상확정한
             "list": [{"account_nm": "매출액", "thstrm_amount": "100"}],
         }
     )
-    revision, image = report_delivery_adapter._release_identity()
+    revision, image = _current_release_identity()
     namespace = CacheNamespace.create(
         product="company-analysis",
         schema_version=report.schema_version or "legacy-report-schema",
@@ -1806,6 +1807,7 @@ def test_다른두통장의_동시miss는_각자content와PDF를_정상확정한
             report=report,
             actual_models=("deterministic-demo",),
             reused_from_cache=False,
+            engine_build_identity=_current_build_identity(),
             dart_receipt_numbers=(receipt,),
             financial_payload_digest=finance_digest,
             cache_namespace=namespace,
@@ -1873,6 +1875,7 @@ def test_singleflight_content는_다른비용통장에_넘겨주지않는다(
         report=report,
         actual_models=("deterministic-demo",),
         reused_from_cache=False,
+        engine_build_identity=_current_build_identity(),
         dart_receipt_numbers=("20260828000123",),
         financial_payload_digest=finance_digest,
     )
@@ -1886,6 +1889,7 @@ def test_singleflight_content는_다른비용통장에_넘겨주지않는다(
             report=owner.report,
             actual_models=owner.content.actual_models,
             reused_from_cache=True,
+            engine_build_identity=_current_build_identity(),
             dart_receipt_numbers=("20260828000123",),
             financial_payload_digest=finance_digest,
             reuse_content_snapshot_id=owner.content.content_id,
@@ -1908,6 +1912,7 @@ def test_향후_checker_v2배포를흉내내도_v1승인artifact는_그계약으
         report=report,
         actual_models=("deterministic-demo",),
         reused_from_cache=False,
+        engine_build_identity=_current_build_identity(),
     )
     assert persisted.artifact is not None
     assert persisted.inspection is not None
@@ -1980,6 +1985,7 @@ def test_artifact_checker버전변조는_현재버전으로_보정하지않고_�
         report=report,
         actual_models=("deterministic-demo",),
         reused_from_cache=False,
+        engine_build_identity=_current_build_identity(),
     )
     assert persisted.artifact is not None
 
@@ -2032,6 +2038,7 @@ def test_저장본문이나_PDF_hash불일치는_재생성없이_닫는다(
         report=report,
         actual_models=("deterministic-demo",),
         reused_from_cache=False,
+        engine_build_identity=_current_build_identity(),
     )
     assert persisted.artifact is not None
     assert persisted.artifact.blob_pointer is not None
@@ -2128,6 +2135,7 @@ def test_실패한_새보고서는_재시작뒤에도_legacy재렌더로_우회�
             report=report,
             actual_models=("deterministic-demo",),
             reused_from_cache=False,
+            engine_build_identity=_current_build_identity(),
         )
     with storage_db.connect() as conn:
         intent = delivery_store.load_delivery_intent(conn, report_id)
@@ -2179,6 +2187,7 @@ def test_blob저장후_후속DB장애는_별도intent로_시작복구된다(
             report=report,
             actual_models=("deterministic-demo",),
             reused_from_cache=False,
+            engine_build_identity=_current_build_identity(),
         )
 
     with storage_db.connect() as conn:
@@ -2240,6 +2249,7 @@ def test_출고본문계약차단은_저장장애503으로_바뀌지않고_GET�
             report=report,
             actual_models=("deterministic-demo",),
             reused_from_cache=False,
+            engine_build_identity=_current_build_identity(),
         )
     assert validation_calls == ["called"]
     with storage_db.connect() as conn:
@@ -2314,6 +2324,7 @@ def test_PDF후보생성과_자동검사차단은_서로다른_영속코드로_�
             report=report,
             actual_models=("deterministic-demo",),
             reused_from_cache=False,
+            engine_build_identity=_current_build_identity(),
         )
 
     with storage_db.connect() as conn:

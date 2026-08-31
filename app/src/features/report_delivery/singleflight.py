@@ -14,6 +14,7 @@ from src.features.report_delivery.canonical import (
     require_aware,
     utc_text,
 )
+from src.shared.engine_build_identity import epoch_digest_is_valid
 
 
 TABLE_SINGLEFLIGHT_LEASES: Final[str] = "report_delivery_singleflight_leases"
@@ -35,6 +36,7 @@ class LeaseKey:
     corp_id: str
     cache_namespace_id: str
     source_identity_digest: str
+    engine_epoch_digest: str
 
     def __post_init__(self) -> None:
         if any(
@@ -44,9 +46,12 @@ class LeaseKey:
                 self.corp_id,
                 self.cache_namespace_id,
                 self.source_identity_digest,
+                self.engine_epoch_digest,
             )
         ):
             raise ValueError("single-flight에는 통장·회사·생성기·출처 신원이 필요합니다")
+        if not epoch_digest_is_valid(self.engine_epoch_digest):
+            raise ValueError("single-flight engine epoch 영수증이 손상됐습니다")
 
 
 class LeaseState(str, Enum):
@@ -89,6 +94,7 @@ CREATE TABLE IF NOT EXISTS {TABLE_SINGLEFLIGHT_LEASES} (
     corp_id                 TEXT NOT NULL,
     cache_namespace_id      TEXT NOT NULL,
     source_identity_digest  TEXT NOT NULL,
+    engine_epoch_digest     TEXT NOT NULL DEFAULT '',
     state                   TEXT NOT NULL CHECK(state IN ('active', 'completed', 'failed')),
     owner_id                TEXT NOT NULL,
     lease_token             TEXT NOT NULL,
@@ -100,16 +106,115 @@ CREATE TABLE IF NOT EXISTS {TABLE_SINGLEFLIGHT_LEASES} (
     completed_artifact_id   TEXT NOT NULL,
     failure_code            TEXT NOT NULL,
     PRIMARY KEY (
-        billing_bucket_id, corp_id, cache_namespace_id, source_identity_digest
+        billing_bucket_id, corp_id, cache_namespace_id, source_identity_digest,
+        engine_epoch_digest
     )
 )
 """
+
+
+def _primary_key(conn: sqlite3.Connection) -> tuple[str, ...]:
+    """현재 표의 선언 순서 PRIMARY KEY 열을 돌려준다."""
+
+    rows = conn.execute(
+        f'PRAGMA table_info("{TABLE_SINGLEFLIGHT_LEASES}")'
+    ).fetchall()
+    return tuple(
+        str(row[1])
+        for row in sorted(
+            (row for row in rows if int(row[5]) > 0),
+            key=lambda row: int(row[5]),
+        )
+    )
+
+
+def _rebuild_epoch_scoped_table(conn: sqlite3.Connection) -> None:
+    """옛 4열 PK를 5열로 바꾸되 진행 중 lease는 빈 epoch 장벽으로 보존한다."""
+
+    columns = tuple(
+        str(row[1])
+        for row in conn.execute(
+            f'PRAGMA table_info("{TABLE_SINGLEFLIGHT_LEASES}")'
+        ).fetchall()
+    )
+    rows = tuple(
+        conn.execute(f"SELECT * FROM {TABLE_SINGLEFLIGHT_LEASES}").fetchall()
+    )
+    legacy_table = f"{TABLE_SINGLEFLIGHT_LEASES}_legacy_epoch"
+    conn.execute(f"ALTER TABLE {TABLE_SINGLEFLIGHT_LEASES} RENAME TO {legacy_table}")
+    conn.execute(_CREATE_SQL)
+    required = {
+        "billing_bucket_id",
+        "corp_id",
+        "cache_namespace_id",
+        "source_identity_digest",
+        "state",
+        "owner_id",
+        "lease_token",
+        "fencing_token",
+        "acquired_at",
+        "heartbeat_at",
+        "expires_at",
+        "completed_content_id",
+        "failure_code",
+    }
+    if required.issubset(columns):
+        for raw in rows:
+            values = {
+                name: raw[position]
+                for position, name in enumerate(columns)
+            }
+            epoch = str(values.get("engine_epoch_digest", "") or "").strip()
+            if not epoch_digest_is_valid(epoch):
+                epoch = ""
+            conn.execute(
+                f"""
+                INSERT OR IGNORE INTO {TABLE_SINGLEFLIGHT_LEASES} (
+                    billing_bucket_id, corp_id, cache_namespace_id,
+                    source_identity_digest, engine_epoch_digest,
+                    state, owner_id, lease_token, fencing_token,
+                    acquired_at, heartbeat_at, expires_at,
+                    completed_content_id, completed_artifact_id, failure_code
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(values["billing_bucket_id"]),
+                    str(values["corp_id"]),
+                    str(values["cache_namespace_id"]),
+                    str(values["source_identity_digest"]),
+                    epoch,
+                    str(values["state"]),
+                    str(values["owner_id"]),
+                    str(values["lease_token"]),
+                    int(values["fencing_token"]),
+                    str(values["acquired_at"]),
+                    str(values["heartbeat_at"]),
+                    str(values["expires_at"]),
+                    str(values["completed_content_id"]),
+                    str(values.get("completed_artifact_id", "") or ""),
+                    str(values["failure_code"]),
+                ),
+            )
+    conn.execute(f"DROP TABLE {legacy_table}")
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     """영속 schema registry용 표준 bootstrap."""
 
     conn.execute(_CREATE_SQL)
+    expected_primary_key = (
+        "billing_bucket_id",
+        "corp_id",
+        "cache_namespace_id",
+        "source_identity_digest",
+        "engine_epoch_digest",
+    )
+    if _primary_key(conn) != expected_primary_key:
+        # 옛 4열 PK에 epoch 열만 보태면 A 행 때문에 B INSERT가 무시된다.
+        # 그렇다고 활성 A 행을 버리면 B가 같은 AI를 동시에 호출한다. 5열로
+        # 재작성하면서 옛 행은 빈 epoch 장벽으로만 보존해 결과 재사용은 막고
+        # 살아 있는 provider가 끝날 시간은 지킨다.
+        _rebuild_epoch_scoped_table(conn)
     columns = {
         str(row[1])
         for row in conn.execute(
@@ -123,6 +228,13 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             f"ALTER TABLE {TABLE_SINGLEFLIGHT_LEASES} "
             "ADD COLUMN completed_artifact_id TEXT NOT NULL DEFAULT ''"
         )
+    if "engine_epoch_digest" not in columns:
+        conn.execute(
+            f"ALTER TABLE {TABLE_SINGLEFLIGHT_LEASES} "
+            "ADD COLUMN engine_epoch_digest TEXT NOT NULL DEFAULT ''"
+        )
+    # 새 5열 API는 빈 epoch를 만들지 않는다. 빈 값은 구 process의 진행 중
+    # provider가 끝날 때까지만 쓰는 이관 장벽이며 결과로 재사용하지 않는다.
 
 
 def ensure_lease_schema(conn: sqlite3.Connection) -> None:
@@ -131,12 +243,13 @@ def ensure_lease_schema(conn: sqlite3.Connection) -> None:
     ensure_schema(conn)
 
 
-def _key_values(key: LeaseKey) -> tuple[str, str, str, str]:
+def _key_values(key: LeaseKey) -> tuple[str, str, str, str, str]:
     return (
         key.billing_bucket_id.strip(),
         key.corp_id.strip(),
         key.cache_namespace_id.strip(),
         key.source_identity_digest.strip(),
+        key.engine_epoch_digest,
     )
 
 
@@ -155,8 +268,42 @@ def _select_row(conn: sqlite3.Connection, key: LeaseKey) -> tuple[object, ...] |
         FROM {TABLE_SINGLEFLIGHT_LEASES}
         WHERE billing_bucket_id = ? AND corp_id = ?
           AND cache_namespace_id = ? AND source_identity_digest = ?
+          AND engine_epoch_digest = ?
         """,
         _key_values(key),
+    ).fetchone()
+    return None if row is None else tuple(row)
+
+
+def _select_foreign_active_row(
+    conn: sqlite3.Connection,
+    key: LeaseKey,
+    *,
+    current_text: str,
+) -> tuple[object, ...] | None:
+    """다른 namespace/epoch의 살아 있는 provider를 재사용 없이 기다린다."""
+
+    row = conn.execute(
+        f"""
+        SELECT state, owner_id, lease_token, fencing_token,
+               acquired_at, heartbeat_at, expires_at,
+               completed_content_id, completed_artifact_id, failure_code
+        FROM {TABLE_SINGLEFLIGHT_LEASES}
+        WHERE billing_bucket_id = ? AND corp_id = ?
+          AND source_identity_digest = ?
+          AND (cache_namespace_id <> ? OR engine_epoch_digest <> ?)
+          AND state = ? AND expires_at > ?
+        ORDER BY expires_at DESC LIMIT 1
+        """,
+        (
+            key.billing_bucket_id,
+            key.corp_id,
+            key.source_identity_digest,
+            key.cache_namespace_id,
+            key.engine_epoch_digest,
+            LeaseState.ACTIVE.value,
+            current_text,
+        ),
     ).fetchone()
     return None if row is None else tuple(row)
 
@@ -213,6 +360,10 @@ def acquire(
     """
 
     ensure_lease_schema(conn)
+    # foreign-epoch 확인과 새 owner INSERT를 같은 write lock 아래 직렬화한다.
+    # 그렇지 않으면 A/B가 서로 없다고 읽은 직후 둘 다 provider를 열 수 있다.
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     owner = str(owner_id).strip()
     if not owner:
         raise ValueError("single-flight owner ID가 필요합니다")
@@ -220,6 +371,16 @@ def acquire(
     ttl = _duration(lease_ttl, label="lease TTL")
     current_text = utc_text(current, label="lease 획득")
     expires_text = utc_text(current + ttl, label="lease 만료")
+    foreign_active = _select_foreign_active_row(
+        conn,
+        key,
+        current_text=current_text,
+    )
+    if foreign_active is not None:
+        return AcquireResult(
+            disposition=AcquireDisposition.WAIT,
+            handle=_handle_from_row(key, foreign_active),
+        )
     token = uuid.uuid4().hex
     insert_payload = (
         *_key_values(key),
@@ -238,10 +399,11 @@ def acquire(
         f"""
         INSERT OR IGNORE INTO {TABLE_SINGLEFLIGHT_LEASES} (
             billing_bucket_id, corp_id, cache_namespace_id,
-            source_identity_digest, state, owner_id, lease_token,
+            source_identity_digest, engine_epoch_digest,
+            state, owner_id, lease_token,
             fencing_token, acquired_at, heartbeat_at, expires_at,
             completed_content_id, completed_artifact_id, failure_code
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         insert_payload,
     )
@@ -272,6 +434,7 @@ def acquire(
             failure_code = ''
         WHERE billing_bucket_id = ? AND corp_id = ?
           AND cache_namespace_id = ? AND source_identity_digest = ?
+          AND engine_epoch_digest = ?
           AND fencing_token = ? AND expires_at <= ?
         """,
         (
@@ -319,6 +482,7 @@ def heartbeat(
         SET heartbeat_at = ?, expires_at = ?
         WHERE billing_bucket_id = ? AND corp_id = ?
           AND cache_namespace_id = ? AND source_identity_digest = ?
+          AND engine_epoch_digest = ?
           AND state = ? AND owner_id = ? AND lease_token = ?
           AND fencing_token = ? AND expires_at > ?
         """,
@@ -365,6 +529,7 @@ def complete(
             completed_content_id = ?, completed_artifact_id = ?, failure_code = ''
         WHERE billing_bucket_id = ? AND corp_id = ?
           AND cache_namespace_id = ? AND source_identity_digest = ?
+          AND engine_epoch_digest = ?
           AND state = ? AND owner_id = ? AND lease_token = ?
           AND fencing_token = ? AND expires_at > ?
         """,
@@ -410,6 +575,7 @@ def expire_completed_result(
         SET expires_at = ?, heartbeat_at = ?
         WHERE billing_bucket_id = ? AND corp_id = ?
           AND cache_namespace_id = ? AND source_identity_digest = ?
+          AND engine_epoch_digest = ?
           AND state = ? AND completed_content_id = ?
           AND completed_artifact_id = ? AND expires_at > ?
         """,
@@ -421,6 +587,43 @@ def expire_completed_result(
             str(content_snapshot_id).strip(),
             str(artifact_id).strip(),
             current_text,
+        ),
+    )
+    return cursor.rowcount == 1
+
+
+def quarantine_completed_key_after_receipt_mismatch(
+    conn: sqlite3.Connection,
+    *,
+    key: LeaseKey,
+    now: dt.datetime,
+) -> bool:
+    """commit 재대조가 어긋난 정확한 epoch 완료행을 즉시 만료한다.
+
+    일반 무효화는 기대한 content·artifact가 일치해야 하지만, 행 자체가
+    drift한 경우에는 그 조건이 독성 waiter 결과를 남긴다. 이 복구 전용
+    경로는 5열 epoch key와 COMPLETED 상태를 조건으로 삼고 행은 보존해 다음
+    owner의 fencing token이 계속 증가하게 한다.
+    """
+
+    ensure_lease_schema(conn)
+    current_text = utc_text(
+        require_aware(now, label="완료 fan-out 격리"),
+        label="완료 fan-out 격리",
+    )
+    cursor = conn.execute(
+        f"""
+        UPDATE {TABLE_SINGLEFLIGHT_LEASES}
+        SET expires_at = ?, heartbeat_at = ?
+        WHERE billing_bucket_id = ? AND corp_id = ?
+          AND cache_namespace_id = ? AND source_identity_digest = ?
+          AND engine_epoch_digest = ? AND state = ?
+        """,
+        (
+            current_text,
+            current_text,
+            *_key_values(key),
+            LeaseState.COMPLETED.value,
         ),
     )
     return cursor.rowcount == 1
@@ -483,6 +686,7 @@ def fail(
             completed_content_id = '', completed_artifact_id = '', failure_code = ?
         WHERE billing_bucket_id = ? AND corp_id = ?
           AND cache_namespace_id = ? AND source_identity_digest = ?
+          AND engine_epoch_digest = ?
           AND state = ? AND owner_id = ? AND lease_token = ?
           AND fencing_token = ? AND expires_at > ?
         """,

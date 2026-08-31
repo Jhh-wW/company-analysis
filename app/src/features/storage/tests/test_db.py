@@ -101,6 +101,52 @@ def test_모든쓰기연결은_SQLite_EXTRA_commit내구성을_명시한다(
     )
 
 
+def test_명시commit연결은_미commit쓰기와_commit뒤후속쓰기를_자동확정하지않는다(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "explicit-commit.db"
+    with db.connect(target) as conn:
+        conn.execute("CREATE TABLE explicit_commit_probe(value TEXT PRIMARY KEY)")
+
+    with pytest.raises(RuntimeError, match="미확정 transaction"):
+        with db.connect_explicit_commit(target) as conn:
+            conn.execute("INSERT INTO explicit_commit_probe VALUES ('uncommitted')")
+
+    with pytest.raises(RuntimeError, match="미확정 transaction"):
+        with db.connect_explicit_commit(target) as conn:
+            conn.execute("INSERT INTO explicit_commit_probe VALUES ('fenced')")
+            conn.commit()
+            # 최종 fence/commit 뒤 새 쓰기가 생겨도 __exit__이 두 번째 commit을
+            # 해 주지 않는다. 이 행만 rollback되고 앞의 명시 commit은 보존된다.
+            conn.execute("INSERT INTO explicit_commit_probe VALUES ('after-fence')")
+
+    with db.connect(target) as conn:
+        values = tuple(
+            str(row[0])
+            for row in conn.execute(
+                "SELECT value FROM explicit_commit_probe ORDER BY value"
+            ).fetchall()
+        )
+    assert values == ("fenced",)
+
+
+def test_명시commit연결은_호출자가_확정한_거래만_정상종료한다(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "explicit-commit-success.db"
+    with db.connect(target) as conn:
+        conn.execute("CREATE TABLE explicit_commit_probe(value TEXT PRIMARY KEY)")
+
+    with db.connect_explicit_commit(target) as conn:
+        conn.execute("INSERT INTO explicit_commit_probe VALUES ('committed')")
+        conn.commit()
+
+    with db.connect(target) as conn:
+        assert conn.execute(
+            "SELECT value FROM explicit_commit_probe"
+        ).fetchone()[0] == "committed"
+
+
 def test_종료직전_최소중단표식도_EXTRA내구성으로_commit한다(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

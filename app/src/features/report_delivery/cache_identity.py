@@ -12,6 +12,7 @@ from src.shared.generation_cache_identity import (
     CacheIdentityUnavailable,
     GenerationCacheNamespace,
 )
+from src.shared.engine_build_identity import epoch_digest_is_valid
 
 
 # 과거 import 이름은 유지하되 구현은 shared 정본 한 벌만 쓴다.
@@ -33,6 +34,11 @@ class CacheLookupKey:
     corp_id: str
     namespace_id: str
     preflight_identity_digest: str
+    engine_epoch_digest: str
+
+    def __post_init__(self) -> None:
+        if not epoch_digest_is_valid(self.engine_epoch_digest):
+            raise CacheIdentityUnavailable("생성 시작 engine epoch 영수증이 손상됐습니다")
 
     @classmethod
     def from_preflight(
@@ -43,6 +49,7 @@ class CacheLookupKey:
         namespace: CacheNamespace,
         preflight_identity_digest: str,
         preflight_cache_usable: bool,
+        engine_epoch_digest: str,
     ) -> "CacheLookupKey":
         clean_bucket = str(billing_bucket_id).strip()
         clean_corp_id = str(corp_id).strip()
@@ -59,4 +66,5 @@ class CacheLookupKey:
             clean_corp_id,
             namespace.namespace_id,
             _require_preflight_digest(preflight_identity_digest),
+            engine_epoch_digest,
         )

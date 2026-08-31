@@ -29,6 +29,7 @@ from src.features.pipeline.canonical_demo import (
 from src.features.pipeline.demo import DemoPipeline
 from src.features.pipeline.port import Grade, Outcome, Report
 from src.features.report_standard import CANONICAL_SECTION_IDS
+from src.shared import engine_build_identity as build_identity_contract
 from src.web import main
 from src.web import job_runtime, runtime
 from src.web.routers import reports as reports_router
@@ -146,6 +147,7 @@ def test_내려받기에도_같은_보호가_걸린다(
         report=report,
         actual_models=("deterministic-demo",),
         reused_from_cache=False,
+        engine_build_identity=build_identity_contract.process_engine_build_identity(),
     )
 
     response = client.get(f"/download/pdf/{job_id}")

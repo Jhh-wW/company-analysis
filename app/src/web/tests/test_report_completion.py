@@ -14,6 +14,7 @@ from src.features.pipeline.port import Outcome, UserInput
 from src.features.report_delivery import authority as authority_store
 from src.features.storage import constants as storage_constants
 from src.features.storage import db as storage_db
+from src.shared import engine_build_identity
 from src.shared.automatic_release_record import (
     AutomaticCheckResult,
     AutomaticReleaseRecord,
@@ -377,6 +378,7 @@ def test_실제DB의_저장JSON지문과_자동검사지문이_달라도_완료�
         report=result.report,
         actual_models=("deterministic-demo",),
         reused_from_cache=False,
+        engine_build_identity=engine_build_identity.process_engine_build_identity(),
     )
     artifact = delivered.artifact
     assert artifact is not None and artifact.blob_pointer is not None

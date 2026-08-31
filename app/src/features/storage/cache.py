@@ -96,6 +96,69 @@ def _commit_connection(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _layer1_receipt_matches_exactly(
+    conn: sqlite3.Connection,
+    *,
+    corp_id: str,
+    job_key: str,
+    fingerprint: str,
+    report_id: str,
+    engine_epoch_digest: str,
+) -> bool:
+    row = conn.execute(
+        f"""
+        SELECT 1
+        FROM {TABLE_LAYER1_CACHE} AS c
+        JOIN {TABLE_REPORTS} AS r ON r.report_id = c.report_id
+        WHERE c.corp_id = ? AND c.job_key = ?
+          AND c.posting_fingerprint = ? AND c.report_id = ?
+          AND c.engine_epoch_digest = ? AND r.engine_epoch_digest = ?
+        """,
+        (
+            corp_id,
+            job_key,
+            fingerprint,
+            report_id,
+            engine_epoch_digest,
+            engine_epoch_digest,
+        ),
+    ).fetchone()
+    return row is not None
+
+
+def _quarantine_layer1_receipt(
+    conn: sqlite3.Connection,
+    *,
+    corp_id: str,
+    job_key: str,
+    fingerprint: str,
+    report_id: str,
+) -> None:
+    """모순된 이번 cache 포인터와 고아 본문만 보상 거래로 제거한다."""
+
+    conn.rollback()
+    removed = conn.execute(
+        f"""
+        DELETE FROM {TABLE_LAYER1_CACHE}
+        WHERE corp_id = ? AND job_key = ? AND posting_fingerprint = ?
+          AND report_id = ?
+        """,
+        (corp_id, job_key, fingerprint, report_id),
+    ).rowcount
+    orphan = conn.execute(
+        f"""
+        DELETE FROM {TABLE_REPORTS}
+        WHERE report_id = ? AND NOT EXISTS (
+            SELECT 1 FROM {TABLE_LAYER1_CACHE} AS cache
+            WHERE cache.report_id = {TABLE_REPORTS}.report_id
+        )
+        """,
+        (report_id,),
+    ).rowcount
+    if removed or orphan:
+        conn.commit()
+
+
 def _source_identity_requirement(source_identity_digest: str) -> str | None:
     """완전한 출처 신원 SHA-256만 캐시 열쇠로 허용한다."""
 
@@ -224,6 +287,7 @@ def get_layer1_hit(
     corp_id: str,
     job: str,
     requirements: list[str],
+    engine_build_identity: build_identity_contract.EngineBuildIdentity,
     current_fiscal_year: Optional[int] = None,
     today: Optional[dt.date] = None,
 ) -> Optional[Report]:
@@ -242,12 +306,35 @@ def get_layer1_hit(
     Returns:
         지문이 일치하고 O9를 통과한 보고서. 아니면 `None`(2층 경로로).
     """
+    try:
+        identity = build_identity_contract.require_exact_engine_build_identity(
+            engine_build_identity
+        )
+        build_identity_contract.assert_engine_build_identity_current(identity)
+    except (
+        TypeError,
+        ValueError,
+        build_identity_contract.EngineBuildIdentityChangedError,
+    ):
+        return None
+    if not identity.cache_usable:
+        return None
+
     row = conn.execute(
         f"""
-        SELECT report_id, fiscal_year FROM {TABLE_LAYER1_CACHE}
-        WHERE corp_id = ? AND job_key = ? AND posting_fingerprint = ?
+        SELECT c.report_id, c.fiscal_year
+        FROM {TABLE_LAYER1_CACHE} AS c
+        JOIN {TABLE_REPORTS} AS r ON r.report_id = c.report_id
+        WHERE c.corp_id = ? AND c.job_key = ? AND c.posting_fingerprint = ?
+          AND c.engine_epoch_digest = ? AND r.engine_epoch_digest = ?
         """,
-        (corp_id, normalize_job(job), posting_fingerprint(requirements)),
+        (
+            corp_id,
+            normalize_job(job),
+            posting_fingerprint(requirements),
+            identity.epoch_digest,
+            identity.epoch_digest,
+        ),
     ).fetchone()
     if row is None:
         return None
@@ -287,10 +374,10 @@ def save_layer1(
     Returns:
         이번에 저장된 `report_id`.
     """
-    if not isinstance(
-        engine_build_identity,
-        build_identity_contract.EngineBuildIdentity,
-    ) or not engine_build_identity.cache_usable:
+    identity = build_identity_contract.require_exact_engine_build_identity(
+        engine_build_identity
+    )
+    if not identity.cache_usable:
         raise ValueError("검증된 정상 배포의 엔진 빌드 신원이 필요합니다")
     job_key = normalize_job(job)
     fingerprint = posting_fingerprint(requirements)
@@ -306,25 +393,43 @@ def save_layer1(
 
     report_id = uuid.uuid4().hex
     build_identity_contract.assert_engine_build_identity_current(
-        engine_build_identity
+        identity
     )
-    reports_store.save(conn, report_id, corp_id, job, report, created_at=stamp)
+    reports_store.save(
+        conn,
+        report_id,
+        corp_id,
+        job,
+        report,
+        created_at=stamp,
+        engine_epoch_digest=identity.epoch_digest,
+    )
     # 본문 INSERT 뒤 환경이 바뀌었으면 아래 cache INSERT를 하지 않고 호출
     # transaction 전체를 rollback하게 한다.
     build_identity_contract.assert_engine_build_identity_current(
-        engine_build_identity
+        identity
     )
     conn.execute(
         f"""
         INSERT INTO {TABLE_LAYER1_CACHE}
-            (corp_id, job_key, posting_fingerprint, report_id, fiscal_year, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (corp_id, job_key, posting_fingerprint, report_id, fiscal_year, created_at,
+             engine_epoch_digest)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(corp_id, job_key, posting_fingerprint) DO UPDATE SET
             report_id=excluded.report_id,
             fiscal_year=excluded.fiscal_year,
-            created_at=excluded.created_at
+            created_at=excluded.created_at,
+            engine_epoch_digest=excluded.engine_epoch_digest
         """,
-        (corp_id, job_key, fingerprint, report_id, fiscal_year, stamp),
+        (
+            corp_id,
+            job_key,
+            fingerprint,
+            report_id,
+            fiscal_year,
+            stamp,
+            identity.epoch_digest,
+        ),
     )
     if existing is not None and existing["report_id"] != report_id:
         conn.execute(
@@ -333,11 +438,64 @@ def save_layer1(
 
     _evict_layer1_overflow(conn, corp_id, job_key, current_fiscal_year=fiscal_year)
     build_identity_contract.assert_engine_build_identity_current(
-        engine_build_identity
+        identity
     )
     # 이 함수가 layer1 본문·열쇠 transaction을 소유한다. context manager의
     # __exit__에 commit을 미루면 마지막 fence와 실제 영속화 사이가 다시 열린다.
-    _commit_connection(conn)
+    try:
+        _commit_connection(conn)
+    except sqlite3.Error:
+        # commit은 성공했지만 응답만 잃은 경우 rollback은 no-op이다. 정확한
+        # key와 epoch의 두 행이 모두 보일 때만 성공으로 복구한다.
+        conn.rollback()
+        if not _layer1_receipt_matches_exactly(
+            conn,
+            corp_id=corp_id,
+            job_key=job_key,
+            fingerprint=fingerprint,
+            report_id=report_id,
+            engine_epoch_digest=identity.epoch_digest,
+        ):
+            _quarantine_layer1_receipt(
+                conn,
+                corp_id=corp_id,
+                job_key=job_key,
+                fingerprint=fingerprint,
+                report_id=report_id,
+            )
+            raise
+    else:
+        if not _layer1_receipt_matches_exactly(
+            conn,
+            corp_id=corp_id,
+            job_key=job_key,
+            fingerprint=fingerprint,
+            report_id=report_id,
+            engine_epoch_digest=identity.epoch_digest,
+        ):
+            _quarantine_layer1_receipt(
+                conn,
+                corp_id=corp_id,
+                job_key=job_key,
+                fingerprint=fingerprint,
+                report_id=report_id,
+            )
+            raise RuntimeError("1층 캐시 commit 영수증이 저장 결과와 다릅니다")
+    try:
+        build_identity_contract.assert_engine_build_identity_current(identity)
+    except (
+        TypeError,
+        ValueError,
+        build_identity_contract.EngineBuildIdentityChangedError,
+    ):
+        _quarantine_layer1_receipt(
+            conn,
+            corp_id=corp_id,
+            job_key=job_key,
+            fingerprint=fingerprint,
+            report_id=report_id,
+        )
+        raise
     return report_id
 
 
@@ -345,7 +503,7 @@ def get_company_report_hit(
     conn: sqlite3.Connection,
     *,
     corp_id: str,
-    build_id: str,
+    build_identity: build_identity_contract.EngineBuildIdentity,
     source_identity_digest: str,
     current_fiscal_year: Optional[int] = None,
     today: Optional[dt.date] = None,
@@ -355,7 +513,13 @@ def get_company_report_hit(
     옛 범용 API에 빈 ``job``/빈 공고 지문을 넘기지 않고 명시적인 제품·스키마·
     출처 namespace를 사용하므로 과거 직무 보고서나 정정 전 자료와 충돌하지 않는다.
     """
-    requirements = _company_requirements(build_id, source_identity_digest)
+    try:
+        identity = build_identity_contract.require_exact_engine_build_identity(
+            build_identity
+        )
+    except (TypeError, ValueError):
+        return None
+    requirements = _company_requirements(identity.build_id, source_identity_digest)
     if not requirements:
         return None
     report = get_layer1_hit(
@@ -363,6 +527,7 @@ def get_company_report_hit(
         corp_id=corp_id,
         job=_COMPANY_ANALYSIS_PRODUCT_KEY,
         requirements=requirements,
+        engine_build_identity=identity,
         current_fiscal_year=current_fiscal_year,
         today=today,
     )
@@ -388,8 +553,9 @@ def save_company_report(
     now: Optional[dt.datetime] = None,
 ) -> Optional[str]:
     """회사분석 보고서를 제품·스키마 namespace로 격리해 저장한다."""
-    if not isinstance(build_identity, build_identity_contract.EngineBuildIdentity):
-        raise TypeError("검증된 엔진 빌드 신원이 필요합니다")
+    build_identity = build_identity_contract.require_exact_engine_build_identity(
+        build_identity
+    )
     requirements = _company_requirements(build_identity.build_id, source_identity_digest)
     if not requirements:
         return None
@@ -448,7 +614,7 @@ def get_v2_report_hit(
     conn: sqlite3.Connection,
     *,
     corp_id: str,
-    build_id: str,
+    build_identity: build_identity_contract.EngineBuildIdentity,
     source_identity_digest: str,
     current_fiscal_year: Optional[int] = None,
     today: Optional[dt.date] = None,
@@ -459,14 +625,21 @@ def get_v2_report_hit(
     ★ 지문을 못 만들었으면(«모르는 상태») 조회하지 않는다.
       「모르겠다」를 「같다」로 바꾸면 옛 결과가 새 결과인 척 나간다.
     """
-    requirements = _v2_requirements(build_id, source_identity_digest)
-    if not build_identity_contract.build_id_is_usable(build_id) or not requirements:
+    try:
+        identity = build_identity_contract.require_exact_engine_build_identity(
+            build_identity
+        )
+    except (TypeError, ValueError):
+        return None
+    requirements = _v2_requirements(identity.build_id, source_identity_digest)
+    if not identity.cache_usable or not requirements:
         return None
     report = get_layer1_hit(
         conn,
         corp_id=corp_id,
         job=_COMPANY_ANALYSIS_PRODUCT_KEY,
         requirements=requirements,
+        engine_build_identity=identity,
         current_fiscal_year=current_fiscal_year,
         today=today,
     )
@@ -498,8 +671,9 @@ def save_v2_report(
     ★ 스키마가 v2가 아니면 «조용히 안 저장한다». v1 보고서가 v2 열쇠 아래
       들어가면 다음 조사에서 v1이 v2인 척 나온다.
     """
-    if not isinstance(build_identity, build_identity_contract.EngineBuildIdentity):
-        raise TypeError("검증된 엔진 빌드 신원이 필요합니다")
+    build_identity = build_identity_contract.require_exact_engine_build_identity(
+        build_identity
+    )
     requirements = _v2_requirements(build_identity.build_id, source_identity_digest)
     if not build_identity.cache_usable or not requirements:
         return None

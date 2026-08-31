@@ -226,7 +226,7 @@ def _engine_v2_enabled() -> bool:
 
 def _generation_cache_namespace(
     engine: Any,
-    build_identity: Any = None,
+    build_identity: Any,
 ) -> GenerationCacheNamespace | None:
     """캐시와 single-flight가 함께 쓰는 사전 생성기 신원을 만든다.
 
@@ -238,10 +238,9 @@ def _generation_cache_namespace(
     model = str(getattr(engine, "MODEL", "") or GENERATION_MODEL).strip()
     if not model:
         return None
-    if build_identity is None:
-        build_identity = engine_build_identity.capture_engine_build_identity()
-    if not isinstance(build_identity, engine_build_identity.EngineBuildIdentity):
-        raise TypeError("요청 시작 때 고정한 엔진 빌드 신원이 필요합니다")
+    build_identity = engine_build_identity.require_exact_engine_build_identity(
+        build_identity
+    )
     if not build_identity.cache_usable:
         return None
     revision = build_identity.deployment_revision
@@ -1789,12 +1788,20 @@ class RealPipeline:
         engine = _MeteredEngine(_engine())
         frozen_identity = generation_coordination.frozen_engine_build_identity()
         if frozen_identity is None:
-            build_identity = engine_build_identity.capture_engine_build_identity()
-        elif isinstance(frozen_identity, engine_build_identity.EngineBuildIdentity):
-            build_identity = frozen_identity
+            build_identity = engine_build_identity.process_engine_build_identity()
         else:
+            try:
+                build_identity = engine_build_identity.require_exact_engine_build_identity(
+                    frozen_identity
+                )
+            except (TypeError, ValueError) as exc:
+                raise generation_coordination.GenerationCoordinationError(
+                    "웹 Job이 고정한 엔진 빌드 신원 형식이 올바르지 않습니다"
+                ) from exc
+        engine_build_identity.assert_engine_build_identity_current(build_identity)
+        if not build_identity.cache_usable:
             raise generation_coordination.GenerationCoordinationError(
-                "웹 Job이 고정한 엔진 빌드 신원 형식이 올바르지 않습니다"
+                "유료 생성을 시작하려면 정상 배포 epoch 영수증이 필요합니다"
             )
         try:
             result = self._run_metered(
@@ -2127,7 +2134,9 @@ class RealPipeline:
                 cache_hit=CACHE_HIT_LAYER1,
                 dart_receipt_numbers=source_identity.dart_receipt_numbers,
                 financial_payload_digest=source_identity.financial_payload_digest,
-                generation_cache_eligible=True,
+                # Report-only layer1에는 재사용할 Content/PDF ID가 없다. 웹의
+                # 장기 생성 캐시 권위로 승격하지 않는다.
+                generation_cache_eligible=False,
                 generation_evidence=cached.generation_evidence,
                 generation_metrics=metrics,
                 quality_observation=cached.quality_observation,
@@ -2799,6 +2808,14 @@ class RealPipeline:
                 sorted(missing_sections),
                 sorted(content_shortfall_reasons),
             )
+        elif generation_coordination.is_active():
+            # 유료 웹의 정본은 승인된 Content+PDF delivery 캐시 한 벌이다.
+            # Report-only layer1은 웹이 읽지 않으므로 두 번째 완료 권위를
+            # 만들지 않고, 아래 eligibility만 출고 transaction에 운반한다.
+            logger.info(
+                "유료 웹은 Report-only 1층 저장을 건너뜁니다 — corp_id=%s",
+                corp_code,
+            )
         else:
             _company_cache_save(
                 corp_id=corp_code,
@@ -3051,7 +3068,7 @@ def _company_cache_lookup(
             hit = cache_store.get_company_report_hit(
                 conn,
                 corp_id=corp_id,
-                build_id=build_identity.build_id,
+                build_identity=build_identity,
                 source_identity_digest=source_identity_digest,
                 current_fiscal_year=current_fiscal_year,
             )
@@ -3091,7 +3108,7 @@ def _v2_cache_lookup(
             hit = cache_store.get_v2_report_hit(
                 conn,
                 corp_id=corp_id,
-                build_id=build_id,
+                build_identity=build_identity,
                 source_identity_digest=source_identity_digest,
                 current_fiscal_year=current_fiscal_year,
             )
@@ -3129,7 +3146,7 @@ def _v2_cache_save(
     if not corp_id:
         return
     try:
-        with storage_db.connect() as conn:
+        with storage_db.connect_explicit_commit() as conn:
             cache_store.save_v2_report(
                 conn,
                 corp_id=corp_id,
@@ -3154,7 +3171,7 @@ def _company_cache_save(
     if not corp_id:
         return
     try:
-        with storage_db.connect() as conn:
+        with storage_db.connect_explicit_commit() as conn:
             cache_store.save_company_report(
                 conn,
                 corp_id=corp_id,
@@ -3340,7 +3357,7 @@ def _run_v2_composer(
     corp_id: str = "",
     current_fiscal_year: Optional[int] = None,
     source_identity_digest: str = "",
-    build_identity: engine_build_identity.EngineBuildIdentity | None = None,
+    build_identity: engine_build_identity.EngineBuildIdentity,
 ) -> RunResult:
     """엔진 v2: composer 경로로 보고서를 만든다.
 
@@ -3351,8 +3368,14 @@ def _run_v2_composer(
     ★ v2 보고서는 v1과 열쇠가 다른 전용 1층 캐시에만 저장한다. 배포 revision과
       생성기 지문이 달라지면 자동 미적중이라 옛 결과가 새 코드 결과로 나오지 않는다.
     """
-    if build_identity is None:
-        build_identity = engine_build_identity.capture_engine_build_identity()
+    build_identity = engine_build_identity.require_exact_engine_build_identity(
+        build_identity
+    )
+    engine_build_identity.assert_engine_build_identity_current(build_identity)
+    if not build_identity.cache_usable:
+        raise generation_coordination.GenerationCoordinationError(
+            "v2 provider에는 정상 배포 epoch 영수증이 필요합니다"
+        )
     # composer는 v2 전용이라 지연 import한다 — v1 경로의 module 적재 비용·의존을
     # 바꾸지 않기 위해서다 (pipeline→composer 방향은 계획이 허용한 연결이다).
     from src.features.composer import pipeline as composer_pipeline  # noqa: PLC0415
@@ -3566,12 +3589,8 @@ def _run_v2_composer(
             filing=filing,
         )
     )
-    cache_eligible = bool(
-        build_identity is not None
-        and build_identity.cache_usable
-        and content_eligible
-    )
-    if cache_eligible:
+    cache_eligible = bool(build_identity.cache_usable and content_eligible)
+    if cache_eligible and not generation_coordination.is_active():
         _v2_cache_save(
             corp_id=corp_id,
             report=report,
@@ -3579,13 +3598,18 @@ def _run_v2_composer(
             source_identity_digest=source_identity_digest,
             build_identity=build_identity,
         )
-    else:
+    elif not cache_eligible:
         logger.info(
             "수집 실패·후보범위 불완전·기본 장/내용 결손이 껴 v2 캐시에 "
             "저장하지 않습니다 — corp_id=%s · 장누락=%s · 내용결손=%s",
             corp_id,
             sorted(missing_sections),
             sorted(content_shortfall_reasons),
+        )
+    else:
+        logger.info(
+            "유료 웹은 Report-only v2 1층 저장을 건너뜁니다 — corp_id=%s",
+            corp_id,
         )
     return RunResult(
         outcome=Outcome.REPORT,

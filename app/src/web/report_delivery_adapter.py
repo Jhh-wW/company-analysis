@@ -192,9 +192,9 @@ def reconcile_configured_artifact_blob_intents(
 
 
 def _release_identity(
-    identity: build_identity_contract.EngineBuildIdentity | None = None,
+    identity: build_identity_contract.EngineBuildIdentity,
 ) -> tuple[str, str]:
-    identity = identity or build_identity_contract.capture_engine_build_identity()
+    identity = build_identity_contract.require_exact_engine_build_identity(identity)
     if identity.cache_usable:
         # 한 raw snapshot에서 revision과 contract-version build ID를 함께 만든다.
         return (
@@ -323,8 +323,8 @@ def _font_bundle_version() -> str:
     return "sha256:" + digest.hexdigest()
 
 
-def _renderer_version(release: tuple[str, str] | None = None) -> str:
-    revision, build = release or _release_identity()
+def _renderer_version(release: tuple[str, str]) -> str:
+    revision, build = release
     return f"deployment:{revision}" if revision else build
 
 
@@ -346,7 +346,7 @@ def persist_approved_delivery(
     cache_namespace: CacheNamespace | None = None,
     preflight_identity_digest: str = "",
     bind_cache_entry: bool,
-    engine_build_identity: build_identity_contract.EngineBuildIdentity | None = None,
+    engine_build_identity: build_identity_contract.EngineBuildIdentity,
 ) -> PublicDelivery:
     """자동검사가 승인한 본문·delivery·PDF를 한 DB 거래에 결속한다.
 
@@ -356,22 +356,19 @@ def persist_approved_delivery(
 
     if not str(corp_id).strip():
         raise DeliveryAdapterError("회사 고유번호가 없어 출처 신원을 확정할 수 없습니다")
-    cache_action = bool(
-        cache_namespace is not None
-        or str(preflight_identity_digest).strip()
-        or bind_cache_entry
-        or reused_from_cache
-    )
-    if engine_build_identity is None and cache_action:
-        raise DeliveryAdapterError(
-            "캐시 출고에는 생성 시작 때 고정한 엔진 빌드 신원이 필요합니다"
+    try:
+        frozen_identity = build_identity_contract.require_exact_engine_build_identity(
+            engine_build_identity
         )
-    frozen_identity = (
-        engine_build_identity
-        or build_identity_contract.capture_engine_build_identity()
-    )
-    if engine_build_identity is not None:
-        _assert_frozen_identity_is_current(frozen_identity)
+    except (TypeError, ValueError) as exc:
+        raise DeliveryAdapterError(
+            "출고에는 생성 시작 때 고정한 engine epoch 영수증이 필요합니다"
+        ) from exc
+    if not frozen_identity.cache_usable:
+        raise DeliveryAdapterError(
+            "검증되지 않은 배포의 결과에는 새 출고 권위를 줄 수 없습니다"
+        )
+    _assert_frozen_identity_is_current(frozen_identity)
     release = _release_identity(frozen_identity)
     unverified_local = _is_unverified_local_release(release)
     if unverified_local and (
@@ -402,6 +399,8 @@ def persist_approved_delivery(
         )
         if content is None or content.payload != payload:
             raise DeliveryAdapterError("공개 ID의 기존 본문과 새 승인 본문이 다릅니다")
+        if content.engine_epoch_digest != frozen_identity.epoch_digest:
+            raise DeliveryAdapterError("공개 ID의 기존 본문과 생성 engine epoch가 다릅니다")
         if unverified_local and existing.cache_origin_content_id:
             raise DeliveryAdapterError(
                 "검증되지 않은 로컬 출고에 캐시 출처가 기록돼 있습니다"
@@ -455,6 +454,7 @@ def persist_approved_delivery(
                 fallback=completed_at,
             ),
             actual_models=tuple(models.values()),
+            engine_epoch_digest=frozen_identity.epoch_digest,
         )
         policy = DeliveryPolicy(
             content_max_age=dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS),
@@ -534,6 +534,7 @@ def persist_approved_delivery(
                     namespace=cache_namespace,
                     preflight_identity_digest=preflight_identity_digest,
                     preflight_cache_usable=True,
+                    engine_epoch_digest=frozen_identity.epoch_digest,
                 ),
                 content=content,
                 artifact_id=metadata.artifact_id,
@@ -568,7 +569,7 @@ def persist_reused_delivery(
     financial_payload_digest: str,
     cache_key: CacheLookupKey | None = None,
     reuse_singleflight_key: delivery_singleflight.LeaseKey | None = None,
-    engine_build_identity: build_identity_contract.EngineBuildIdentity | None = None,
+    engine_build_identity: build_identity_contract.EngineBuildIdentity,
 ) -> tuple[PublicDelivery, AutomaticReleaseRecord]:
     """owner의 불변 본문·최초 PDF를 검증하고 새 Delivery만 발급한다.
 
@@ -577,11 +578,19 @@ def persist_reused_delivery(
     기존 Delivery가 이 artifact를 실제로 소유하는지도 함께 확인한다.
     """
 
-    if engine_build_identity is None:
-        raise DeliveryAdapterError(
-            "재사용 출고에는 생성 시작 때 고정한 엔진 빌드 신원이 필요합니다"
+    try:
+        engine_build_identity = (
+            build_identity_contract.require_exact_engine_build_identity(
+                engine_build_identity
+            )
         )
+    except (TypeError, ValueError) as exc:
+        raise DeliveryAdapterError(
+            "재사용 출고에는 생성 시작 engine epoch 영수증이 필요합니다"
+        ) from exc
     _assert_frozen_identity_is_current(engine_build_identity)
+    if not engine_build_identity.cache_usable:
+        raise DeliveryAdapterError("검증되지 않은 배포 결과는 재사용할 수 없습니다")
     release = _release_identity(engine_build_identity)
     if _is_unverified_local_release(release):
         raise DeliveryAdapterError(
@@ -603,6 +612,8 @@ def persist_reused_delivery(
     content = delivery_store.load_content_snapshot(conn, clean_content_id)
     if content is None:
         raise DeliveryAdapterError("재사용할 보고서 원본이 없습니다")
+    if content.engine_epoch_digest != engine_build_identity.epoch_digest:
+        raise DeliveryAdapterError("재사용 보고서와 현재 engine epoch가 다릅니다")
     origin_namespace = delivery_store.load_cache_namespace(
         conn,
         content.cache_namespace_id,
@@ -662,6 +673,7 @@ def persist_reused_delivery(
             or proof.corp_id != clean_corp
             or proof.cache_namespace_id != content.cache_namespace_id
             or proof.source_identity_digest != expected_source.cache_digest
+            or proof.engine_epoch_digest != engine_build_identity.epoch_digest
             or not delivery_singleflight.completed_result_matches(
                 conn,
                 key=proof,
@@ -678,6 +690,8 @@ def persist_reused_delivery(
             raise DeliveryAdapterError(
                 "정식 캐시 열쇠와 새 Delivery의 비용 통장이 다릅니다"
             )
+        if cache_key.engine_epoch_digest != engine_build_identity.epoch_digest:
+            raise DeliveryAdapterError("정식 캐시 열쇠와 현재 engine epoch가 다릅니다")
         cached = delivery_store.load_cache_hit(
             conn,
             key=cache_key,

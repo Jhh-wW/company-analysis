@@ -704,7 +704,12 @@ def test_insert_new_same_id_preserves_existing_public_report(tmp_path: Path) -> 
     with db.connect(target) as conn:
         reports.save(conn, "public-id", "CORP-001", "영업", first)
         inserted = reports.insert_new(
-            conn, "public-id", "CORP-999", "개발", replacement
+            conn,
+            "public-id",
+            "CORP-999",
+            "개발",
+            replacement,
+            engine_epoch_digest="a" * 64,
         )
         restored = reports.load(conn, "public-id")
 

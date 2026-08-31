@@ -18,6 +18,7 @@ from src.features.report_standard.publish import (
 from src.features.sharelink import store as share_store
 from src.features.sharelink.constants import KEY_COOKIE_NAME
 from src.features.storage import db as storage_db
+from src.shared import engine_build_identity as build_identity_contract
 from src.web import job_runtime
 from src.web.main import app
 from src.web.routers import reports as reports_router
@@ -83,6 +84,7 @@ def test_publish_gate_출고시점에만_결속된_LINK_run을_막고_GET은_이
             report=object(),
             actual_models=("test-model",),
             reused_from_cache=False,
+            engine_build_identity=build_identity_contract.process_engine_build_identity(),
         )
 
     assert validation_calls == ["called"]
@@ -131,6 +133,7 @@ def test_publish_gate_history_storage_failure_does_not_mask_original_failure_or_
             report=object(),
             actual_models=("test-model",),
             reused_from_cache=False,
+            engine_build_identity=build_identity_contract.process_engine_build_identity(),
         )
 
     # 재시작 뒤 공개 GET은 실패 intent를 읽어 같은 409를 내며, 동적 검사를

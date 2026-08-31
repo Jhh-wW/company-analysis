@@ -11,8 +11,13 @@ import contextlib
 import contextvars
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 
+from src.shared.engine_build_identity import (
+    EngineBuildIdentity,
+    assert_engine_build_identity_current,
+    require_exact_engine_build_identity,
+)
 from src.shared.generation_cache_identity import GenerationCacheNamespace
 
 
@@ -36,16 +41,6 @@ class GenerationExecutionDeadlineExceeded(GenerationCoordinationError):
     """한 owner가 가질 수 있는 유한한 실행 시간을 모두 썼다."""
 
 
-class EngineBuildIdentityView(Protocol):
-    """feature를 역참조하지 않고 운반하는 요청 고정 빌드 신원."""
-
-    deployment_revision: str
-    build_id: str
-
-    @property
-    def cache_usable(self) -> bool: ...
-
-
 @dataclass(frozen=True)
 class ReusedGeneration:
     """owner가 완료한 불변 content를 waiter가 읽을 때의 결과."""
@@ -67,7 +62,7 @@ class GenerationCallbacks:
         ReusedGeneration | None,
     ]
     ensure_paid_phase: Callable[[], None]
-    engine_build_identity: EngineBuildIdentityView
+    engine_build_identity: EngineBuildIdentity
 
 
 _CURRENT: contextvars.ContextVar[GenerationCallbacks | None] = (
@@ -87,6 +82,10 @@ def activate(callbacks: GenerationCallbacks) -> Iterator[GenerationCallbacks]:
 
     if not isinstance(callbacks, GenerationCallbacks):
         raise TypeError("보고서 단일 실행 callback 형식이 올바르지 않습니다")
+    exact = require_exact_engine_build_identity(callbacks.engine_build_identity)
+    assert_engine_build_identity_current(exact)
+    if not exact.cache_usable:
+        raise TypeError("유료 생성 callback에는 정상 engine epoch 영수증이 필요합니다")
     token = _CURRENT.set(callbacks)
     try:
         yield callbacks
@@ -116,7 +115,7 @@ def coordinate(
     )
 
 
-def frozen_engine_build_identity() -> EngineBuildIdentityView | None:
+def frozen_engine_build_identity() -> EngineBuildIdentity | None:
     """웹 Job이 생성 시작 때 고정한 빌드 신원을 그대로 돌려준다."""
 
     callbacks = _CURRENT.get()

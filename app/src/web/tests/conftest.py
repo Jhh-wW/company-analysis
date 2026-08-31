@@ -15,6 +15,11 @@ from src.features.auth import constants as auth_constants
 
 @pytest.fixture(autouse=True)
 def _explicitly_disable_beta_gate(monkeypatch):
+    # 웹 프로세스는 시작 때 exact full commit을 동결한다. 배포 신원이 필요한
+    # 출고 시험들이 로컬 shell 환경에 우연히 의존하지 않게 정상 기본값을 둔다.
+    # unknown 동작을 보는 시험은 자기 본문에서 두 이름을 명시적으로 지운다.
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "a" * 40)
+    monkeypatch.delenv("APP_GIT_COMMIT", raising=False)
     monkeypatch.setenv(auth_constants.ENV_BETA_ADMIN_ONLY, "0")
     # 관리자 여부는 이제 저장된 로그인 스냅샷이 아니라 매 요청의 현재 목록으로
     # 다시 계산한다. 웹 시험에서 쓰는 두 관리자 주소를 명시해 환경에 독립시킨다.

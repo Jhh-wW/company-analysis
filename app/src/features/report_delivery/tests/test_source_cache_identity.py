@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import sqlite3
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from src.features.report_delivery.cache_identity import (
     CacheLookupKey,
     CacheNamespace,
 )
+from src.features.report_delivery.canonical import canonical_digest, sha256_hex, utc_text
 from src.features.report_delivery.models import ContentSnapshot, DeliveryPolicy
 from src.features.report_delivery.source_identity import (
     SourceSnapshot,
@@ -30,11 +32,13 @@ from src.features.report_delivery.store import (
     TABLE_CACHE_ENTRIES,
     TABLE_CACHE_INVALIDATIONS,
     TABLE_CACHE_NAMESPACES,
+    TABLE_CONTENT_SNAPSHOTS,
     TABLE_SOURCE_SNAPSHOTS,
     bind_cache_entry,
     ensure_schema,
     load_cache_namespace,
     load_cache_hit,
+    load_content_snapshot,
     load_source_snapshot,
     save_cache_namespace,
     save_content_snapshot,
@@ -246,6 +250,105 @@ def test_incomplete_source_cannot_make_cache_key(
             namespace=namespace,
             preflight_identity_digest="",
             preflight_cache_usable=incomplete.cache_usable,
+            engine_epoch_digest="a" * 64,
+        )
+
+
+def test_새content와_cache_key는_engine_epoch누락을_fail_closed한다(
+    source: SourceSnapshot,
+    namespace: CacheNamespace,
+    now: dt.datetime,
+) -> None:
+    with pytest.raises(ValueError, match="engine epoch"):
+        ContentSnapshot.create(
+            payload=b'{"company":"sample"}',
+            source_snapshot=source,
+            cache_namespace=namespace,
+            content_generated_at=now,
+            engine_epoch_digest="",
+        )
+
+
+def test_배포전_역사content는_공개읽기만_유지하고_새cache권위는_주지않는다(
+    conn: sqlite3.Connection,
+    source: SourceSnapshot,
+    namespace: CacheNamespace,
+    now: dt.datetime,
+) -> None:
+    payload = b'{"company":"historical"}'
+    payload_digest = sha256_hex(payload)
+    models = ("historical-model",)
+    old_content_id = "content_" + canonical_digest(
+        {
+            "payload_sha256": payload_digest,
+            "source_snapshot_id": source.snapshot_id,
+            "cache_namespace_id": namespace.namespace_id,
+            "content_generated_at": utc_text(now, label="내용 생성"),
+            "actual_models": models,
+        }
+    )
+    historical = ContentSnapshot(
+        content_id=old_content_id,
+        payload=payload,
+        payload_sha256=payload_digest,
+        source_snapshot_id=source.snapshot_id,
+        source_identity_digest=source.identity_digest,
+        cache_namespace_id=namespace.namespace_id,
+        content_generated_at=now,
+        actual_models=models,
+        engine_epoch_digest="",
+    )
+    save_source_snapshot(conn, source)
+    save_cache_namespace(conn, namespace)
+    with pytest.raises(LifecycleStoreError, match="engine epoch"):
+        save_content_snapshot(conn, historical)
+
+    # 배포 전에 이미 있던 행을 그대로 흉내 낸다. 공개 링크의 과거 원본은
+    # 읽을 수 있어야 하지만 빈 epoch를 현재 cache key로 승격하면 안 된다.
+    conn.execute(
+        f"""
+        INSERT INTO {TABLE_CONTENT_SNAPSHOTS} (
+            content_id, payload, payload_sha256, source_snapshot_id,
+            source_identity_digest, cache_namespace_id,
+            content_generated_at, actual_models_json, engine_epoch_digest
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '')
+        """,
+        (
+            historical.content_id,
+            historical.payload,
+            historical.payload_sha256,
+            historical.source_snapshot_id,
+            historical.source_identity_digest,
+            historical.cache_namespace_id,
+            utc_text(now, label="내용 생성"),
+            json.dumps(models, ensure_ascii=False, separators=(",", ":")),
+        ),
+    )
+    assert load_content_snapshot(conn, historical.content_id) == historical
+    current_key = CacheLookupKey.from_preflight(
+        billing_bucket_id="bucket-a",
+        corp_id="00126380",
+        namespace=namespace,
+        preflight_identity_digest=_preflight_digest(source),
+        preflight_cache_usable=True,
+        engine_epoch_digest="a" * 64,
+    )
+    with pytest.raises(LifecycleStoreError, match="engine epoch"):
+        bind_cache_entry(
+            conn,
+            key=current_key,
+            content=historical,
+            artifact_id="artifact-never-reached",
+            cached_at=now,
+        )
+    with pytest.raises(CacheIdentityUnavailable, match="engine epoch"):
+        CacheLookupKey.from_preflight(
+            billing_bucket_id="bucket-a",
+            corp_id="00126380",
+            namespace=namespace,
+            preflight_identity_digest=_preflight_digest(source),
+            preflight_cache_usable=True,
+            engine_epoch_digest="",
         )
 
 
@@ -263,6 +366,7 @@ def test_cache_hit_requires_company_namespace_and_current_source_identity(
         namespace=namespace,
         preflight_identity_digest=_preflight_digest(source),
         preflight_cache_usable=source.cache_usable,
+        engine_epoch_digest=content.engine_epoch_digest,
     )
     # 생성 뒤 provenance에는 공식문서/adapter도 들어가므로 사전 지문과
     # 달라지는 것이 정상이다. 둘을 같다고 강제하면 실제 제품은 늘 miss한다.
@@ -304,6 +408,7 @@ def test_cache_hit_requires_company_namespace_and_current_source_identity(
         namespace=namespace,
         preflight_identity_digest=_preflight_digest(corrected),
         preflight_cache_usable=corrected.cache_usable,
+        engine_epoch_digest=content.engine_epoch_digest,
     )
     assert (
         load_cache_hit(
@@ -327,6 +432,7 @@ def test_cache_entry_is_first_writer_wins_not_silent_overwrite(
         namespace=namespace,
         preflight_identity_digest=_preflight_digest(source),
         preflight_cache_usable=True,
+        engine_epoch_digest=content.engine_epoch_digest,
     )
     original_artifact_id = _store_artifact(
         conn,
@@ -347,6 +453,7 @@ def test_cache_entry_is_first_writer_wins_not_silent_overwrite(
         source_snapshot=source,
         cache_namespace=namespace,
         content_generated_at=now + dt.timedelta(seconds=1),
+        engine_epoch_digest=content.engine_epoch_digest,
     )
     save_source_snapshot(conn, source)
     save_content_snapshot(conn, competitor)
@@ -381,6 +488,7 @@ def test_cache_entry_rejects_content_without_approved_artifact(
         namespace=namespace,
         preflight_identity_digest=_preflight_digest(source),
         preflight_cache_usable=True,
+        engine_epoch_digest=content.engine_epoch_digest,
     )
 
     with pytest.raises(LifecycleStoreError, match="PDF artifact"):
@@ -407,6 +515,7 @@ def test_cache_hit_fails_closed_when_artifact_binding_is_missing(
         namespace=namespace,
         preflight_identity_digest=_preflight_digest(source),
         preflight_cache_usable=True,
+        engine_epoch_digest=content.engine_epoch_digest,
     )
     artifact_id = _store_artifact(
         conn,
@@ -492,6 +601,7 @@ def test_legacy_content_only_cache_row_is_migrated_as_explicit_miss(
             namespace=namespace,
             preflight_identity_digest=_preflight_digest(source),
             preflight_cache_usable=True,
+            engine_epoch_digest="a" * 64,
         )
         assert (
             load_cache_hit(
@@ -549,6 +659,7 @@ def test_old_primary_key_is_rebuilt_so_two_buckets_can_bind_independently(
         "corp_id",
         "cache_namespace_id",
         "preflight_identity_digest",
+        "engine_epoch_digest",
     )
 
     competitor = ContentSnapshot.create(
@@ -556,6 +667,7 @@ def test_old_primary_key_is_rebuilt_so_two_buckets_can_bind_independently(
         source_snapshot=source,
         cache_namespace=namespace,
         content_generated_at=now,
+        engine_epoch_digest=content.engine_epoch_digest,
     )
     save_content_snapshot(conn, competitor)
     first_artifact = _store_artifact(
@@ -579,6 +691,7 @@ def test_old_primary_key_is_rebuilt_so_two_buckets_can_bind_independently(
             namespace=namespace,
             preflight_identity_digest=_preflight_digest(source),
             preflight_cache_usable=True,
+            engine_epoch_digest=content.engine_epoch_digest,
         )
         for bucket in ("bucket-a", "bucket-b")
     )

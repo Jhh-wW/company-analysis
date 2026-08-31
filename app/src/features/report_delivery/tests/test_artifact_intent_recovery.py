@@ -60,6 +60,7 @@ def _content(path: Path, now: dt.datetime) -> ContentSnapshot:
         source_snapshot=source,
         cache_namespace=namespace,
         content_generated_at=now,
+        engine_epoch_digest="a" * 64,
         actual_models=("offline-test",),
     )
     with _connect(path) as conn:

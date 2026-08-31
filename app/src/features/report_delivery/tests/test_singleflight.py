@@ -3,12 +3,15 @@ from __future__ import annotations
 import datetime as dt
 import sqlite3
 
+from src.features.report_delivery.canonical import utc_text
 from src.features.report_delivery.singleflight import (
     AcquireDisposition,
     LeaseKey,
+    TABLE_SINGLEFLIGHT_LEASES,
     acquire,
     complete,
     completed_result_matches,
+    ensure_schema,
     expire_completed_result,
     fail,
     heartbeat,
@@ -21,6 +24,7 @@ def _key(bucket: str = "bucket-hash-a") -> LeaseKey:
         corp_id="00126380",
         cache_namespace_id="cache-namespace-a",
         source_identity_digest="source-digest-a",
+        engine_epoch_digest="a" * 64,
     )
 
 
@@ -71,6 +75,186 @@ def test_different_billing_buckets_never_share_one_paid_owner(
     assert second.disposition is AcquireDisposition.ACQUIRED
     assert first.handle is not None and second.handle is not None
     assert first.handle.lease_token != second.handle.lease_token
+
+
+def test_다른engine_epoch는_활성provider만_기다리고_그결과는_재사용하지않는다(
+    conn: sqlite3.Connection,
+    now: dt.datetime,
+) -> None:
+    key_a = _key()
+    key_b = LeaseKey(
+        billing_bucket_id=key_a.billing_bucket_id,
+        corp_id=key_a.corp_id,
+        cache_namespace_id=key_a.cache_namespace_id,
+        source_identity_digest=key_a.source_identity_digest,
+        engine_epoch_digest="b" * 64,
+    )
+
+    owner_a = acquire(
+        conn,
+        key=key_a,
+        owner_id="worker-a",
+        now=now,
+        lease_ttl=dt.timedelta(seconds=30),
+    )
+    waiting_b = acquire(
+        conn,
+        key=key_b,
+        owner_id="worker-b",
+        now=now,
+        lease_ttl=dt.timedelta(seconds=30),
+    )
+    owner_b = acquire(
+        conn,
+        key=key_b,
+        owner_id="worker-b",
+        now=now + dt.timedelta(seconds=31),
+        lease_ttl=dt.timedelta(seconds=30),
+    )
+
+    assert owner_a.disposition is AcquireDisposition.ACQUIRED
+    assert waiting_b.disposition is AcquireDisposition.WAIT
+    assert owner_b.disposition is AcquireDisposition.ACQUIRED
+    assert owner_a.handle is not None and owner_b.handle is not None
+    assert owner_a.handle.lease_token != owner_b.handle.lease_token
+
+
+def test_교대배포로_namespace와epoch가_둘다달라도_활성provider를_기다린다(
+    conn: sqlite3.Connection,
+    now: dt.datetime,
+) -> None:
+    key_a = _key()
+    key_b = LeaseKey(
+        billing_bucket_id=key_a.billing_bucket_id,
+        corp_id=key_a.corp_id,
+        cache_namespace_id="cache-namespace-b",
+        source_identity_digest=key_a.source_identity_digest,
+        engine_epoch_digest="b" * 64,
+    )
+
+    owner_a = acquire(
+        conn,
+        key=key_a,
+        owner_id="worker-a",
+        now=now,
+        lease_ttl=dt.timedelta(seconds=30),
+    )
+    waiting_b = acquire(
+        conn,
+        key=key_b,
+        owner_id="worker-b",
+        now=now + dt.timedelta(seconds=1),
+        lease_ttl=dt.timedelta(seconds=30),
+    )
+    owner_b = acquire(
+        conn,
+        key=key_b,
+        owner_id="worker-b",
+        now=now + dt.timedelta(seconds=31),
+        lease_ttl=dt.timedelta(seconds=30),
+    )
+
+    assert owner_a.disposition is AcquireDisposition.ACQUIRED
+    assert waiting_b.disposition is AcquireDisposition.WAIT
+    assert owner_b.disposition is AcquireDisposition.ACQUIRED
+
+
+def test_옛4열PK_singleflight표는_활성행을_격리하고_5열epoch표로_교체한다(
+    conn: sqlite3.Connection,
+    now: dt.datetime,
+) -> None:
+    conn.execute(
+        f"""
+        CREATE TABLE {TABLE_SINGLEFLIGHT_LEASES} (
+            billing_bucket_id TEXT NOT NULL,
+            corp_id TEXT NOT NULL,
+            cache_namespace_id TEXT NOT NULL,
+            source_identity_digest TEXT NOT NULL,
+            state TEXT NOT NULL,
+            owner_id TEXT NOT NULL,
+            lease_token TEXT NOT NULL,
+            fencing_token INTEGER NOT NULL,
+            acquired_at TEXT NOT NULL,
+            heartbeat_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            completed_content_id TEXT NOT NULL,
+            completed_artifact_id TEXT NOT NULL,
+            failure_code TEXT NOT NULL,
+            PRIMARY KEY (
+                billing_bucket_id, corp_id, cache_namespace_id,
+                source_identity_digest
+            )
+        )
+        """
+    )
+    now_text = utc_text(now, label="옛 lease 시작")
+    expires_text = utc_text(
+        now + dt.timedelta(seconds=30),
+        label="옛 lease 만료",
+    )
+    conn.execute(
+        f"INSERT INTO {TABLE_SINGLEFLIGHT_LEASES} VALUES "
+        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "bucket-hash-a",
+            "00126380",
+            "cache-namespace-a",
+            "source-digest-a",
+            "active",
+            "legacy-worker",
+            "legacy-token",
+            7,
+            now_text,
+            now_text,
+            expires_text,
+            "",
+            "",
+            "",
+        ),
+    )
+
+    ensure_schema(conn)
+
+    primary_key = tuple(
+        str(row[1])
+        for row in sorted(
+            (
+                row
+                for row in conn.execute(
+                    f'PRAGMA table_info("{TABLE_SINGLEFLIGHT_LEASES}")'
+                ).fetchall()
+                if int(row[5]) > 0
+            ),
+            key=lambda row: int(row[5]),
+        )
+    )
+    assert primary_key == (
+        "billing_bucket_id",
+        "corp_id",
+        "cache_namespace_id",
+        "source_identity_digest",
+        "engine_epoch_digest",
+    )
+    legacy = conn.execute(
+        f"SELECT engine_epoch_digest, owner_id FROM {TABLE_SINGLEFLIGHT_LEASES}"
+    ).fetchone()
+    assert legacy == ("", "legacy-worker")
+    waiting = acquire(
+        conn,
+        key=_key(),
+        owner_id="worker-after-migration",
+        now=now + dt.timedelta(seconds=1),
+        lease_ttl=dt.timedelta(seconds=30),
+    )
+    acquired = acquire(
+        conn,
+        key=_key(),
+        owner_id="worker-after-expiry",
+        now=now + dt.timedelta(seconds=31),
+        lease_ttl=dt.timedelta(seconds=30),
+    )
+    assert waiting.disposition is AcquireDisposition.WAIT
+    assert acquired.disposition is AcquireDisposition.ACQUIRED
 
 
 def test_crashed_owner_is_taken_over_with_higher_fencing_token(

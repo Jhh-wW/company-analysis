@@ -51,6 +51,7 @@ from src.features.sharelink.constants import (
 )
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
+from src.shared import engine_build_identity as build_identity_contract
 from src.web import deployment_mode, job_runtime, main
 from src.web import paid_runtime, request_helpers, runtime
 from src.web.routers import analysis as analysis_router
@@ -119,6 +120,7 @@ def test_시험공개에서도_살아있는_링크는_자동출고본문과PDF�
         report=report,
         actual_models=("deterministic-demo",),
         reused_from_cache=False,
+        engine_build_identity=build_identity_contract.process_engine_build_identity(),
     )
     _링크발급(_카카오열쇠, report.company, report_id=report_id)
     monkeypatch.setenv(auth_constants.ENV_BETA_ADMIN_ONLY, "1")

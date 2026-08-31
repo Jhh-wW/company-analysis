@@ -669,6 +669,7 @@ def save(
     report: Report,
     *,
     created_at: Optional[str] = None,
+    engine_epoch_digest: str = "",
 ) -> None:
     """보고서 본문을 저장한다(같은 `report_id`면 덮어쓴다).
 
@@ -690,16 +691,26 @@ def save(
     conn.execute(
         f"""
         INSERT INTO {TABLE_REPORTS}
-            (report_id, corp_id, job, payload_json, generated_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (report_id, corp_id, job, payload_json, generated_at, created_at,
+             engine_epoch_digest)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(report_id) DO UPDATE SET
             corp_id=excluded.corp_id,
             job=excluded.job,
             payload_json=excluded.payload_json,
             generated_at=excluded.generated_at,
-            created_at=excluded.created_at
+            created_at=excluded.created_at,
+            engine_epoch_digest=excluded.engine_epoch_digest
         """,
-        (report_id, corp_id, job, report_to_json(report), report.generated_at, stamp),
+        (
+            report_id,
+            corp_id,
+            job,
+            report_to_json(report),
+            report.generated_at,
+            stamp,
+            engine_epoch_digest,
+        ),
     )
 
 
@@ -710,17 +721,31 @@ def insert_new(
     job: str,
     report: Report,
     *,
+    engine_epoch_digest: str,
     created_at: Optional[str] = None,
 ) -> bool:
     """새 공개 결과만 저장한다. 같은 ID의 기존 보고서는 절대 덮지 않는다."""
+    from src.shared import engine_build_identity as build_identity_contract  # noqa: PLC0415
+
+    if not build_identity_contract.epoch_digest_is_valid(engine_epoch_digest):
+        raise ValueError("신규 공개 보고서에는 정상 engine epoch 영수증이 필요합니다")
     stamp = created_at or dt.datetime.now().isoformat(timespec="seconds")
     cursor = conn.execute(
         f"""
         INSERT OR IGNORE INTO {TABLE_REPORTS}
-            (report_id, corp_id, job, payload_json, generated_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (report_id, corp_id, job, payload_json, generated_at, created_at,
+             engine_epoch_digest)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (report_id, corp_id, job, report_to_json(report), report.generated_at, stamp),
+        (
+            report_id,
+            corp_id,
+            job,
+            report_to_json(report),
+            report.generated_at,
+            stamp,
+            engine_epoch_digest,
+        ),
     )
     return cursor.rowcount == 1
 
@@ -731,6 +756,16 @@ def exists(conn: sqlite3.Connection, report_id: str) -> bool:
         f"SELECT 1 FROM {TABLE_REPORTS} WHERE report_id = ?", (report_id,)
     ).fetchone()
     return row is not None
+
+
+def engine_epoch_digest(conn: sqlite3.Connection, report_id: str) -> str:
+    """공개 GET에는 영향 없이 새 생성 권위 판정용 epoch만 읽는다."""
+
+    row = conn.execute(
+        f"SELECT engine_epoch_digest FROM {TABLE_REPORTS} WHERE report_id = ?",
+        (report_id,),
+    ).fetchone()
+    return "" if row is None else str(row["engine_epoch_digest"])
 
 
 def load(conn: sqlite3.Connection, report_id: str) -> Optional[Report]:

@@ -49,6 +49,7 @@ from src.shared.engine_build_identity import (
     ENGINE_BUILD_ID_CONTRACT_VERSION,
     EngineBuildIdentity,
 )
+from src.shared import generation_coordination
 from src.shared.final_gate_diagnostics import FINAL_GATE_REASON_PUBLISH_BLOCKED
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_evidence.constants import ReleaseMode
@@ -110,6 +111,10 @@ def _run() -> RunResult:
         company="가나다전자", job=JOB, region="서울 강남구", posting_text=POSTING
     )
     return real.RealPipeline().run(user_input, _card())
+
+
+def _build_identity() -> build_identity_contract.EngineBuildIdentity:
+    return build_identity_contract.process_engine_build_identity()
 
 
 def _v2_branch_recorder(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
@@ -240,6 +245,7 @@ def test_분기_함수는_v1_자산을_재사용해_run_v2에_넘긴다(
         business_date=_DATE,
         model="가짜모델",
         steps=steps,
+        build_identity=_build_identity(),
     )
 
     # run_v2 입력 — 조각 원본 그대로 + 프로그램 실적표 + 기간 라벨 재사용
@@ -320,6 +326,7 @@ def test_v2도_일시적수집실패_보고서를_장기캐시에_저장하지�
         corp_id=CORP_ID,
         current_fiscal_year=2025,
         source_identity_digest="d" * 64,
+        build_identity=_build_identity(),
     )
 
     assert result.outcome is Outcome.REPORT
@@ -381,6 +388,7 @@ def test_v2의_완전한수집결과는_수집신원과함께_장기캐시에_�
         corp_id=CORP_ID,
         current_fiscal_year=2025,
         source_identity_digest="d" * 64,
+        build_identity=_build_identity(),
     )
 
     assert result.outcome is Outcome.REPORT
@@ -390,9 +398,12 @@ def test_v2의_완전한수집결과는_수집신원과함께_장기캐시에_�
     assert cache_saves[0]["report"].sources == source_statuses
 
 
-def test_v2도_배포commit을_모르면_cache_eligible과_저장을_모두_끈다(
+def test_v2도_배포commit을_모르면_provider진입부터_막는다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    for name in deployment_identity.COMMIT_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    unknown_identity = build_identity_contract.process_engine_build_identity()
     fake = FakeEngine()
     engine, client, frags, financials, _filing = _branch_ingredients(fake)
     section_ids = real.REQUIRED_SECTION_IDS | real.OPTIONAL_BASIC_SECTION_IDS
@@ -422,33 +433,32 @@ def test_v2도_배포commit을_모르면_cache_eligible과_저장을_모두_끈�
         lambda **kwargs: cache_saves.append(kwargs),
     )
 
-    result = real._run_v2_composer(
-        engine=engine,
-        client=client,
-        company_name="가나다전자",
-        corp_type="상장사",
-        frags=frags,
-        financials=financials,
-        filing=None,
-        revenue_tables=[],
-        sources=[real.SourceStatus("회사 공식 IR", "none", "자료 없음")],
-        business_date=_DATE,
-        model="가짜모델",
-        steps=[
-            {"step": "6_수집_홈페이지", "후보범위완전": True},
-            {"step": "6_수집_공식IR", "후보범위완전": True},
-        ],
-        corp_id=CORP_ID,
-        current_fiscal_year=2025,
-        source_identity_digest="d" * 64,
-        build_identity=build_identity_contract.EngineBuildIdentity(
-            deployment_revision="",
-            build_id=build_identity_contract.UNKNOWN_BUILD_ID,
-        ),
-    )
+    with pytest.raises(
+        generation_coordination.GenerationCoordinationError,
+        match="정상 배포 epoch",
+    ):
+        real._run_v2_composer(
+            engine=engine,
+            client=client,
+            company_name="가나다전자",
+            corp_type="상장사",
+            frags=frags,
+            financials=financials,
+            filing=None,
+            revenue_tables=[],
+            sources=[real.SourceStatus("회사 공식 IR", "none", "자료 없음")],
+            business_date=_DATE,
+            model="가짜모델",
+            steps=[
+                {"step": "6_수집_홈페이지", "후보범위완전": True},
+                {"step": "6_수집_공식IR", "후보범위완전": True},
+            ],
+            corp_id=CORP_ID,
+            current_fiscal_year=2025,
+            source_identity_digest="d" * 64,
+            build_identity=unknown_identity,
+        )
 
-    assert result.outcome is Outcome.REPORT
-    assert result.generation_cache_eligible is False
     assert cache_saves == []
 
 
@@ -481,6 +491,7 @@ def test_v2_분기는_AskFatalError_원인을_그대로_다시_던진다(
             business_date=_DATE,
             model="가짜모델",
             steps=steps,
+            build_identity=_build_identity(),
         )
 
 
@@ -528,6 +539,7 @@ def test_v2_출고검증_실패는_GATE_STOPPED로_끝난다(
         business_date=_DATE,
         model="가짜모델",
         steps=steps,
+        build_identity=_build_identity(),
     )
 
     assert result.outcome is Outcome.GATE_STOPPED

@@ -130,6 +130,33 @@ def _commit_report_connection(conn: Any) -> None:
     conn.commit()
 
 
+def _report_transaction_matches_exactly(
+    conn: Any,
+    *,
+    job: "Job",
+    identity: build_identity_contract.EngineBuildIdentity,
+) -> bool:
+    """legacy commit 응답 손실 뒤 이번 보고서 영수증만 성공으로 인정한다."""
+
+    if job.result is None or job.result.report is None:
+        return False
+    row = conn.execute(
+        f"""
+        SELECT corp_id, job, payload_json, engine_epoch_digest
+        FROM {report_store.TABLE_REPORTS} WHERE report_id = ?
+        """,
+        (job.job_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    return tuple(row) == (
+        job.card.ref or job.card.legal_name,
+        job.user_input.job,
+        report_store.report_to_json(job.result.report),
+        identity.epoch_digest,
+    )
+
+
 class JobAdmissionClosed(RuntimeError):
     """서버 종료가 시작되어 새 배경 작업을 받을 수 없음."""
 
@@ -647,7 +674,9 @@ def _prepare_generation_session(job: Job) -> None:
     """배경 task 시작 전에 취소 신호를 받을 요청 로컬 세션을 만든다."""
 
     if job.engine_build_identity is None:
-        job.engine_build_identity = build_identity_contract.capture_engine_build_identity()
+        job.engine_build_identity = (
+            build_identity_contract.process_engine_build_identity()
+        )
     if (
         not job.is_paid
         or job.paid_phase is not None
@@ -671,6 +700,14 @@ def _prepare_generation_session(job: Job) -> None:
 
 def _run_pipeline_worker(job: Job) -> RunResult:
     """무료 preflight→owner 확정→지연 비용 phase 순서로 pipeline을 돌린다."""
+
+    # 직접 worker를 부르는 복구·시험 경로도 scheduler와 같은 시작 영수증을
+    # 먼저 받는다. 이미 준비된 Job에는 아무 변화가 없는 멱등 호출이다.
+    _prepare_generation_session(job)
+    if job.is_paid or job.paid_phase is not None:
+        # deferred capability가 없는 교체 pipeline과 이미 예약된 legacy phase도
+        # epoch 영수증 없이 provider로 빠져나가면 안 된다.
+        _frozen_job_build_identity(job)
 
     # 기존 단위시험·즉시 예약 호출자는 엣 경계를 그대로 통과한다.
     if job.paid_phase is not None:
@@ -709,7 +746,6 @@ def _run_pipeline_worker(job: Job) -> RunResult:
             _mark_step(job),
         )
 
-    _prepare_generation_session(job)
     session = job.generation_session
     if session is None:  # pragma: no cover - capability 방어선
         raise RuntimeError("지연 본조사 조정 세션이 없습니다")
@@ -1187,12 +1223,15 @@ def _frozen_job_build_identity(job: Job) -> build_identity_contract.EngineBuildI
         raise RuntimeError("Job과 생성 세션의 엔진 빌드 신원이 다릅니다")
     identity = session_identity or job_identity
     if identity is None:
-        # scheduler를 통하지 않는 호환 호출도 이 경계에서 한 번만 고정한다.
-        identity = build_identity_contract.capture_engine_build_identity()
-        job.engine_build_identity = identity
-    if not isinstance(identity, build_identity_contract.EngineBuildIdentity):
-        raise RuntimeError("Job의 엔진 빌드 신원 형식이 올바르지 않습니다")
-    return identity
+        raise RuntimeError("Job에 생성 시작 epoch 영수증이 없습니다")
+    try:
+        exact = build_identity_contract.require_exact_engine_build_identity(identity)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Job의 엔진 빌드 신원 형식이 올바르지 않습니다") from exc
+    build_identity_contract.assert_engine_build_identity_current(exact)
+    if not exact.cache_usable:
+        raise RuntimeError("Job의 생성 시작 epoch를 캐시·출고에 사용할 수 없습니다")
+    return exact
 
 
 def _finalize_report_delivery(job: Job) -> bool:
@@ -1312,6 +1351,7 @@ def stage_report_storage(conn: sqlite3.Connection, job: Job) -> None:
 
     if job.result is None or job.result.report is None:
         raise ValueError("저장할 보고서가 없습니다")
+    frozen_identity = _frozen_job_build_identity(job)
     audience = job.report_audience
     if type(audience) is not ReportAudience:
         raise TypeError("보고서 저장 전에 닫힌 audience가 확정돼야 합니다")
@@ -1344,6 +1384,7 @@ def stage_report_storage(conn: sqlite3.Connection, job: Job) -> None:
         corp_id=job.card.ref or job.card.legal_name,
         job=job.user_input.job,
         report=job.result.report,
+        engine_epoch_digest=frozen_identity.epoch_digest,
     ):
         raise RuntimeError("공개 보고서 ID가 이미 사용 중입니다")
     dashboard_store.register_report(
@@ -1386,6 +1427,9 @@ def stage_report_storage(conn: sqlite3.Connection, job: Job) -> None:
         internal_ai_cost_krw=job.result.cost_krw,
     ):
         raise RuntimeError("LINK 보고서 생성 이력을 연결하지 못했습니다")
+    # caller가 나중에 같은 transaction에 Delivery·charge를 더 쓰더라도,
+    # 보고서 staging 자체는 시작 epoch가 바뀐 상태로 반환되지 않는다.
+    build_identity_contract.assert_engine_build_identity_current(frozen_identity)
 
 
 def _save_report(job: Job) -> bool:
@@ -1399,7 +1443,7 @@ def _save_report(job: Job) -> bool:
     if job.result is None or job.result.report is None:
         return False
     try:
-        with storage_db.connect() as conn:
+        with storage_db.connect_explicit_commit() as conn:
             frozen_identity = _frozen_job_build_identity(job)
             build_identity_contract.assert_engine_build_identity_current(
                 frozen_identity
@@ -1410,7 +1454,19 @@ def _save_report(job: Job) -> bool:
             build_identity_contract.assert_engine_build_identity_current(
                 frozen_identity
             )
-            _commit_report_connection(conn)
+            try:
+                _commit_report_connection(conn)
+            except sqlite3.Error:
+                # SQLite가 실제 commit한 뒤 응답만 잃은 경우에는 rollback이
+                # no-op이다. 정확한 report ID·본문·epoch가 모두 같은 때만
+                # 성공으로 복구하며, 행이 없거나 다르면 원래 오류를 보존한다.
+                conn.rollback()
+                if not _report_transaction_matches_exactly(
+                    conn,
+                    job=job,
+                    identity=frozen_identity,
+                ):
+                    raise
         job.report_persisted = True
         job.persistence_warning = ""
         return True

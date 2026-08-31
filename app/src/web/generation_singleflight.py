@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 import logging
+import sqlite3
 import threading
 import time
 from dataclasses import InitVar, dataclass, field
@@ -69,6 +70,75 @@ def _commit_connection(conn: Any) -> None:
     conn.commit()
 
 
+def _completion_receipt_matches_exactly(
+    conn: Any,
+    *,
+    handle: singleflight.LeaseHandle,
+    content_snapshot_id: str,
+    artifact_id: str,
+    completed_at: dt.datetime,
+    cache_key: CacheLookupKey | None,
+) -> bool:
+    """완료 fan-out과 선택적 장기 cache가 같은 epoch 원본인지 재대조한다."""
+
+    try:
+        if not singleflight.completed_result_matches(
+            conn,
+            key=handle.key,
+            content_snapshot_id=content_snapshot_id,
+            artifact_id=artifact_id,
+            now=completed_at,
+        ):
+            return False
+        return cache_key is None or delivery_store.cache_entry_matches_exactly(
+            conn,
+            key=cache_key,
+            content_snapshot_id=content_snapshot_id,
+            artifact_id=artifact_id,
+        )
+    except (sqlite3.Error, RuntimeError, TypeError, ValueError):
+        return False
+
+
+def _quarantine_completion_receipt(
+    conn: Any,
+    *,
+    handle: singleflight.LeaseHandle,
+    cache_key: CacheLookupKey | None,
+    committed_completion_known: bool,
+    quarantined_at: dt.datetime,
+) -> None:
+    """모순된 완료표와 cache key를 다음 waiter·조회의 권위에서 뺀다."""
+
+    conn.rollback()
+    completed_quarantined = (
+        singleflight.quarantine_completed_key_after_receipt_mismatch(
+            conn,
+            key=handle.key,
+            now=quarantined_at,
+        )
+    )
+    cache_quarantined = False
+    # commit 자체가 실패했으면 기존 장기 cache는 이번 UPDATE와 무관하다.
+    # 정상 commit 뒤 drift였거나 실제 COMPLETED 행이 보일 때만 같은 epoch의
+    # cache key도 격리해, 정상인 과거 cache를 응답 오류만으로 지우지 않는다.
+    if cache_key is not None and (
+        committed_completion_known or completed_quarantined
+    ):
+        cache_quarantined = (
+            delivery_store.quarantine_cache_key_after_receipt_mismatch(
+                conn,
+                key=cache_key,
+                reason_code="completion_receipt_mismatch",
+                invalidated_at=quarantined_at,
+            )
+        )
+    if completed_quarantined or cache_quarantined:
+        # 오류 주입용 commit seam을 다시 통과하면 같은 응답 손실을 반복한다.
+        # 격리는 별도 보상 거래이며 SQLite 자체 commit으로 즉시 닫는다.
+        conn.commit()
+
+
 if MAX_AI_CALLS_PER_REQUEST * ANTHROPIC_TIMEOUT_SEC > (
     OWNER_PROVIDER_ADMISSION_AGE.total_seconds()
 ):  # pragma: no cover - 서로 다른 정본 상수가 어긋나면 import부터 실패한다.
@@ -121,9 +191,13 @@ class GenerationSession:
         self,
         build_identity: build_identity_contract.EngineBuildIdentity,
     ) -> None:
-        if not isinstance(build_identity, build_identity_contract.EngineBuildIdentity):
-            raise TypeError("보고서 생성 시작의 엔진 빌드 신원이 필요합니다")
-        self._frozen_build_identity = build_identity
+        exact = build_identity_contract.require_exact_engine_build_identity(
+            build_identity
+        )
+        build_identity_contract.assert_engine_build_identity_current(exact)
+        if not exact.cache_usable:
+            raise TypeError("유료 보고서 생성에는 정상 engine epoch 영수증이 필요합니다")
+        self._frozen_build_identity = exact
         # 함수 객체를 dataclass default_factory에 고정하지 않는다. 시험 clock과
         # 운영 clock adapter가 교체돼도 생성 순간의 같은 두 시계를 읽어야 한다.
         self._execution_started_at = clock.now_kst()
@@ -320,6 +394,10 @@ class GenerationSession:
             raise GenerationSingleflightUnavailable(
                 "완료 lease와 보고서의 생성기 신원이 다릅니다"
             )
+        if content.engine_epoch_digest != key.engine_epoch_digest:
+            raise GenerationSingleflightUnavailable(
+                "완료 lease와 보고서의 engine epoch가 다릅니다"
+            )
         source = delivery_store.load_source_snapshot(conn, content.source_snapshot_id)
         if source is None:
             raise GenerationSingleflightUnavailable(
@@ -349,6 +427,7 @@ class GenerationSession:
             corp_id=key.corp_id,
             namespace_id=key.cache_namespace_id,
             preflight_identity_digest=key.source_identity_digest,
+            engine_epoch_digest=key.engine_epoch_digest,
         )
         cache_eligible = delivery_store.cache_entry_matches_exactly(
             conn,
@@ -389,6 +468,7 @@ class GenerationSession:
             corp_id=key.corp_id,
             cache_namespace_id=key.namespace_id,
             source_identity_digest=key.preflight_identity_digest,
+            engine_epoch_digest=key.engine_epoch_digest,
         )
 
         def invalidate(reason_code: str) -> None:
@@ -497,6 +577,10 @@ class GenerationSession:
     ) -> generation_coordination.ReusedGeneration | None:
         """전역 cache를 먼저 읽고, miss면 같은 사전 신원 owner를 정한다."""
 
+        build_identity_contract.assert_engine_build_identity_current(
+            self._frozen_build_identity
+        )
+
         with self._lock:
             if self._state != "new":
                 raise GenerationSingleflightUnavailable(
@@ -537,6 +621,7 @@ class GenerationSession:
             corp_id=clean_corp,
             cache_namespace_id=clean_namespace,
             source_identity_digest=clean_source,
+            engine_epoch_digest=self._frozen_build_identity.epoch_digest,
         )
         cache_key = CacheLookupKey.from_preflight(
             billing_bucket_id=self.billing_bucket_id,
@@ -544,12 +629,16 @@ class GenerationSession:
             namespace=cache_namespace,
             preflight_identity_digest=clean_source,
             preflight_cache_usable=True,
+            engine_epoch_digest=self._frozen_build_identity.epoch_digest,
         )
 
         # DART preflight가 오래 걸렸다고 여기서 대기 시간을 새로 한 시간 주지
         # 않는다. 요청 전체 절대 마감 한 벌을 owner와 waiter가 같이 쓴다.
         wait_deadline = self._execution_started_monotonic + WAITER_MAX_AGE_SEC
         while True:
+            build_identity_contract.assert_engine_build_identity_current(
+                self._frozen_build_identity
+            )
             if self._cancel_wait.is_set():
                 with self._lock:
                     self._state = "cancelled"
@@ -565,6 +654,11 @@ class GenerationSession:
                 )
             try:
                 with storage_db.connect() as conn:
+                    # namespace 저장·cache 조회·foreign epoch 확인·owner INSERT를
+                    # 같은 write lock 아래 둔다. namespace INSERT가 먼저 deferred
+                    # transaction을 열게 두면 A/B process가 모두 foreign owner가
+                    # 없다고 읽은 뒤 각각 provider를 열 수 있다.
+                    conn.execute("BEGIN IMMEDIATE")
                     delivery_store.save_cache_namespace(conn, cache_namespace)
                     cached = self._read_cached_release(conn, key=cache_key)
                     if cached is not None:
@@ -653,6 +747,10 @@ class GenerationSession:
     def ensure_paid_phase(self) -> None:
         """owner/bypass만 첫 provider 전에 비용 phase와 attempt 문맥을 연다."""
 
+        build_identity_contract.assert_engine_build_identity_current(
+            self._frozen_build_identity
+        )
+
         if self._cancel_wait.is_set():
             raise generation_coordination.GenerationWaitCancelled(
                 "취소된 보고서 요청에서 provider를 시작할 수 없습니다"
@@ -736,7 +834,8 @@ class GenerationSession:
             return
         self._stop_heartbeat.set()
         try:
-            with storage_db.connect() as conn:
+            with storage_db.connect_explicit_commit() as conn:
+                cache_key: CacheLookupKey | None = None
                 content = delivery_store.load_content_snapshot(
                     conn, content_snapshot_id
                 )
@@ -754,6 +853,10 @@ class GenerationSession:
                 if content.cache_namespace_id != handle.key.cache_namespace_id:
                     raise GenerationSingleflightUnavailable(
                         "owner의 content와 lease 생성기 신원이 다릅니다"
+                    )
+                if content.engine_epoch_digest != handle.key.engine_epoch_digest:
+                    raise GenerationSingleflightUnavailable(
+                        "owner의 content와 lease engine epoch가 다릅니다"
                     )
                 source = delivery_store.load_source_snapshot(
                     conn, content.source_snapshot_id
@@ -777,6 +880,7 @@ class GenerationSession:
                         namespace=namespace,
                         preflight_identity_digest=handle.key.source_identity_digest,
                         preflight_cache_usable=True,
+                        engine_epoch_digest=handle.key.engine_epoch_digest,
                     )
                     cached = delivery_store.load_cache_hit(
                         conn,
@@ -804,12 +908,13 @@ class GenerationSession:
                 build_identity_contract.assert_engine_build_identity_current(
                     self._frozen_build_identity
                 )
+                completed_at = clock.now_kst()
                 completed = singleflight.complete(
                     conn,
                     handle=handle,
                     content_snapshot_id=content_snapshot_id,
                     artifact_id=artifact_id,
-                    now=clock.now_kst(),
+                    now=completed_at,
                     result_fanout_ttl=RESULT_FANOUT_TTL,
                 )
                 # UPDATE 도중 drift가 생겼으면 connect context가 commit하기 전에
@@ -817,7 +922,63 @@ class GenerationSession:
                 build_identity_contract.assert_engine_build_identity_current(
                     self._frozen_build_identity
                 )
-                _commit_connection(conn)
+                try:
+                    _commit_connection(conn)
+                except sqlite3.Error:
+                    # SQLite commit이 실제로 끝난 뒤 응답만 잃을 수 있다. rollback
+                    # 뒤 exact key·epoch·content·artifact 완료행이 보일 때만 성공을
+                    # 복구하고, 그 외에는 원래 오류를 그대로 실패 처리한다.
+                    conn.rollback()
+                    if not _completion_receipt_matches_exactly(
+                        conn,
+                        handle=handle,
+                        content_snapshot_id=content_snapshot_id,
+                        artifact_id=artifact_id,
+                        completed_at=completed_at,
+                        cache_key=cache_key,
+                    ):
+                        _quarantine_completion_receipt(
+                            conn,
+                            handle=handle,
+                            cache_key=cache_key,
+                            committed_completion_known=False,
+                            quarantined_at=clock.now_kst(),
+                        )
+                        raise
+                else:
+                    # 성공 응답도 직후 영수증 한 벌을 다시 읽는다. 다른 연결이
+                    # commit 뒤 cache/완료표를 바꾼 TOCTOU를 성공으로 내보내지 않는다.
+                    if not _completion_receipt_matches_exactly(
+                        conn,
+                        handle=handle,
+                        content_snapshot_id=content_snapshot_id,
+                        artifact_id=artifact_id,
+                        completed_at=completed_at,
+                        cache_key=cache_key,
+                    ):
+                        _quarantine_completion_receipt(
+                            conn,
+                            handle=handle,
+                            cache_key=cache_key,
+                            committed_completion_known=True,
+                            quarantined_at=clock.now_kst(),
+                        )
+                        raise GenerationSingleflightUnavailable(
+                            "완료 commit 영수증이 저장 결과와 다릅니다"
+                        )
+                try:
+                    build_identity_contract.assert_engine_build_identity_current(
+                        self._frozen_build_identity
+                    )
+                except (RuntimeError, TypeError, ValueError):
+                    _quarantine_completion_receipt(
+                        conn,
+                        handle=handle,
+                        cache_key=cache_key,
+                        committed_completion_known=True,
+                        quarantined_at=clock.now_kst(),
+                    )
+                    raise
         except BaseException as exc:  # noqa: BLE001
             raise GenerationSingleflightUnavailable(
                 "완료된 보고서를 waiter에게 공유하지 못했습니다"

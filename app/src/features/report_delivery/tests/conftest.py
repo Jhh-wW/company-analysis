@@ -74,6 +74,7 @@ def content(
         source_snapshot=source,
         cache_namespace=namespace,
         content_generated_at=now,
+        engine_epoch_digest="a" * 64,
         actual_models=("claude-writer", "claude-reviewer"),
     )
     save_source_snapshot(conn, source)

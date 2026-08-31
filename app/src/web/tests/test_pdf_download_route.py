@@ -24,6 +24,7 @@ from src.web.main import app
 from src.web.routers import reports as reports_router
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
+from src.shared import engine_build_identity as build_identity_contract
 
 
 _REAL_RELEASE_STATE = reports_router._release_state
@@ -235,6 +236,7 @@ def _persist_immutable_delivery(
         report=report,
         actual_models=("deterministic-demo",),
         reused_from_cache=False,
+        engine_build_identity=build_identity_contract.process_engine_build_identity(),
     )
 
 

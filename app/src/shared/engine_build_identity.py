@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import threading
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final
 
@@ -139,6 +138,9 @@ def freeze_process_engine_build_identity(
         raise TypeError("신원 객체와 raw snapshot을 동시에 지정할 수 없습니다")
     global _PROCESS_IDENTITY
     with _PROCESS_IDENTITY_LOCK:
+        # 인자를 생략한 idempotent bootstrap은 raw 환경을 두 번 읽지 않는다.
+        # 최초 요청 두 개가 동시에 들어와도 capture 자체를 lock 안에 두어 서로
+        # 다른 A/B snapshot을 후보로 만드는 틈을 없앤다.
         if identity is None and snapshot is None and _PROCESS_IDENTITY is not None:
             return _PROCESS_IDENTITY
         candidate = (
@@ -160,7 +162,11 @@ def freeze_process_engine_build_identity(
 
 
 def process_engine_build_identity() -> EngineBuildIdentity:
-    """프로세스 시작 때 동결한 신원을 돌려준다."""
+    """프로세스 시작 때 동결한 신원을 돌려준다.
+
+    CLI·단위시험처럼 lifespan이 없는 진입점도 최초 호출 한 번만 raw 환경을
+    읽는다. 이후 요청에서는 환경이 변해도 같은 객체를 돌려준다.
+    """
 
     with _PROCESS_IDENTITY_LOCK:
         current = _PROCESS_IDENTITY
@@ -206,17 +212,11 @@ def epoch_digest_is_valid(value: str) -> bool:
 
 def assert_engine_build_identity_current(
     frozen: EngineBuildIdentity,
-    *,
-    capture_current: Callable[[], EngineBuildIdentity] | None = None,
 ) -> EngineBuildIdentity:
     """생성 영수증이 현재 동결 process epoch와 exact 일치하는지 확인한다."""
 
     frozen_exact = require_exact_engine_build_identity(frozen)
-    raw_current = (
-        process_engine_build_identity()
-        if capture_current is None
-        else capture_current()
-    )
+    raw_current = process_engine_build_identity()
     current = require_exact_engine_build_identity(raw_current)
     if current == frozen_exact:
         return raw_current
