@@ -161,6 +161,13 @@ class DartRuntimeFetcher:
                 rcept_no=str(row.get("rcept_no") or ""),
                 report_nm=str(row.get("report_nm") or ""),
                 rcept_dt=str(row.get("rcept_dt") or ""),
+                # item 3(2026-08-31 team-lead 통보) — corp_code·corp_name이
+                # 실려 오면 방어적으로(.get) 읽어 filing_select.py의 행
+                # 수준 혼입 방어에 쓴다. 실제 list.json 응답에 이 필드가
+                # 오는지는 실측하지 못했다(확인 못 함 — live smoke 필요) —
+                # 없으면 빈 문자열로 남아 지금처럼 대조 없이 통과한다.
+                corp_code=str(row.get("corp_code") or ""),
+                corp_name=str(row.get("corp_name") or ""),
             )
             for row in raw_rows
             if isinstance(row, dict) and row.get("rcept_no") and row.get("report_nm")

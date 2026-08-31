@@ -239,3 +239,141 @@ def test_P1_3_deadline이_없으면_예전과_같이_전부_조회한다() -> No
 
     assert len(fetcher.list_calls) >= 1
     assert result.selected[0].rcept_no == "20250315000001"
+
+
+# ══════════════════════════════════════════════════════════
+# generation=8 후속 item 2 — 광역 slot_ids와 「필수 + 성공」 조합 금지
+# ══════════════════════════════════════════════════════════
+
+
+def _assert_no_wide_required_success_violations(attempts) -> None:
+    """team-lead 통보(2026-08-31, item 2) — REQUIRED + OK/MISSING 조합에
+    source_kind의 «전체» slot scope를 그대로 붙이면 안 된다.
+    """
+    for attempt in attempts:
+        if attempt.requirement != c.REQUIREMENT_REQUIRED:
+            continue
+        if attempt.state not in (c.ATTEMPT_STATE_OK, c.ATTEMPT_STATE_MISSING):
+            continue
+        full_scope = set(c.SOURCE_KIND_SLOT_SCOPE.get(attempt.source_kind, ()))
+        assert set(attempt.slot_ids) != full_scope, (
+            f"{attempt.attempt_id}가 REQUIRED+{attempt.state}인데 광역 slot_ids를 그대로 씁니다"
+        )
+
+
+def test_item2_목록_조회_OK는_REQUIRED가_아니라_OPTIONAL로_내려간다() -> None:
+    fetcher = FakeFetcher(list_responses_by_pblntf_ty={
+        "A": FilingListResult(state="OK", rows=(_row("20250315000001", "사업보고서 (2025.03)"),)),
+    })
+
+    result = select_related_filings(fetcher, "00126380")
+
+    list_attempt = [a for a in result.attempts if a.attempt_id == "list:dart_business_report"][0]
+    assert list_attempt.state == c.ATTEMPT_STATE_OK
+    assert list_attempt.requirement == c.REQUIREMENT_OPTIONAL
+    _assert_no_wide_required_success_violations(result.attempts)
+
+
+def test_item2_목록_조회_MISSING도_REQUIRED가_아니라_OPTIONAL로_내려간다() -> None:
+    fetcher = FakeFetcher(list_responses_by_pblntf_ty={
+        "A": FilingListResult(state="OK", rows=()),
+        "F": FilingListResult(state="OK", rows=()),
+    })
+
+    result = select_related_filings(fetcher, "00164788")
+
+    missing_attempts = [a for a in result.attempts if a.state == c.ATTEMPT_STATE_MISSING]
+    assert missing_attempts  # 사업·감사 둘 다 MISSING이 남는지
+    assert all(a.requirement == c.REQUIREMENT_OPTIONAL for a in missing_attempts)
+    _assert_no_wide_required_success_violations(result.attempts)
+
+
+def test_item2_목록_조회_FAILED는_그대로_REQUIRED를_유지한다() -> None:
+    """P1-1의 필수 목록 조회 실패 판정이 이 값에 의존한다 — 다운그레이드하면 안 된다.
+
+    사업/감사보고서(REQUIRED spec)만 확인한다 — 반기/분기(OPTIONAL spec)는
+    원래도 OPTIONAL이라 이 시험의 관심사가 아니다.
+    """
+    fetcher = FakeFetcher(list_responses_by_pblntf_ty={
+        "A": FilingListResult(state=c.ATTEMPT_STATE_FAILED),
+        "F": FilingListResult(state=c.ATTEMPT_STATE_FAILED),
+    })
+
+    result = select_related_filings(fetcher, "00126380")
+
+    required_failed_attempts = [
+        a for a in result.attempts
+        if a.state == c.ATTEMPT_STATE_FAILED
+        and a.source_kind in (c.SOURCE_KIND_BUSINESS_REPORT, c.SOURCE_KIND_AUDIT_REPORT)
+    ]
+    assert required_failed_attempts
+    assert all(a.requirement == c.REQUIREMENT_REQUIRED for a in required_failed_attempts)
+
+
+# ══════════════════════════════════════════════════════════
+# generation=8 후속 item 3 — 목록 행 수준 혼입 방어(corp_code)
+# ══════════════════════════════════════════════════════════
+
+
+def test_item3_행의_corp_code가_요청과_다르면_그_행을_버리고_전용_attempt를_남긴다() -> None:
+    own_row = RawFilingRow("20250315000001", "사업보고서 (2025.03)", "20250315", corp_code="00126380")
+    other_row = RawFilingRow(
+        "20250315000002", "사업보고서 (2025.03)", "20250315", corp_code="99999999",
+    )
+    fetcher = FakeFetcher(list_responses_by_pblntf_ty={
+        "A": FilingListResult(state="OK", rows=(own_row, other_row)),
+    })
+
+    result = select_related_filings(fetcher, "00126380")
+
+    # 다른 회사 행은 후보에서 완전히 빠진다.
+    assert result.selected[0].rcept_no == "20250315000001"
+    mismatch_attempts = [a for a in result.attempts if a.reason_code == c.REASON_LIST_ROW_IDENTITY_MISMATCH]
+    assert len(mismatch_attempts) == 1
+    assert mismatch_attempts[0].documents_seen == 1  # 걸러낸 행 1건
+    assert mismatch_attempts[0].company_id == "00126380"
+
+
+def test_item3_corp_code가_없는_행은_지금처럼_통과한다() -> None:
+    """확인 못 함(필드 부재)이지 불일치가 아니다 — 동작이 나빠지면 안 된다."""
+    row = _row("20250315000001", "사업보고서 (2025.03)")  # corp_code 기본값 ""
+    fetcher = FakeFetcher(list_responses_by_pblntf_ty={
+        "A": FilingListResult(state="OK", rows=(row,)),
+    })
+
+    result = select_related_filings(fetcher, "00126380")
+
+    assert result.selected[0].rcept_no == "20250315000001"
+    assert not any(a.reason_code == c.REASON_LIST_ROW_IDENTITY_MISMATCH for a in result.attempts)
+
+
+# ══════════════════════════════════════════════════════════
+# generation=8 후속 item 4 — 「행을 봤지만 전부 필터로 제외」와 「행이 아예
+# 없음」을 다른 사유 코드로 구분
+# ══════════════════════════════════════════════════════════
+
+
+def test_item4_행은_있지만_이름_키워드로_전부_걸러지면_전용_사유_코드를_남긴다() -> None:
+    fetcher = FakeFetcher(list_responses_by_pblntf_ty={
+        "A": FilingListResult(state="OK", rows=(_row("20250315000001", "다른 종류의 공시"),)),
+        "F": FilingListResult(state="OK", rows=()),
+    })
+
+    result = select_related_filings(fetcher, "00126380")
+
+    business_attempt = [a for a in result.attempts if a.attempt_id == "list:dart_business_report"][0]
+    assert business_attempt.state == c.ATTEMPT_STATE_MISSING
+    assert business_attempt.reason_code == c.REASON_LIST_ROWS_ALL_FILTERED
+
+
+def test_item4_행이_아예_없으면_기존_사유_코드를_그대로_쓴다() -> None:
+    fetcher = FakeFetcher(list_responses_by_pblntf_ty={
+        "A": FilingListResult(state="OK", rows=()),
+        "F": FilingListResult(state="OK", rows=()),
+    })
+
+    result = select_related_filings(fetcher, "00126380")
+
+    business_attempt = [a for a in result.attempts if a.attempt_id == "list:dart_business_report"][0]
+    assert business_attempt.state == c.ATTEMPT_STATE_MISSING
+    assert business_attempt.reason_code == c.REASON_LIST_QUERY_MISSING

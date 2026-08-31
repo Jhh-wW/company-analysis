@@ -357,3 +357,19 @@ REASON_DOCUMENT_NO_SCORED_EVIDENCE: Final[str] = "document_no_scored_evidence"
 #: 못했는지를 정직하게 구분한다(«검증했다»고 거짓 주장하지 않는다).
 IDENTITY_CHECK_VERIFIED: Final[str] = "verified_match"
 IDENTITY_CHECK_UNVERIFIED: Final[str] = "unverifiable_no_fetcher_metadata"
+
+# ══════════════════════════════════════════════════════════
+# generation=8 후속 (2026-08-31 team-lead 통보) — 목록 행 수준 혼입 방어·
+# 필터 제외/행 없음 구분
+# ══════════════════════════════════════════════════════════
+
+#: list.json 행에 corp_code가 실려 왔는데 요청한 회사와 다를 때(item 3) —
+#: 문서를 아예 조회하지도 않고 목록 단계에서 미리 버린다. 다른 회사 문서가
+#: document 단계까지 흘러오는 것 자체를 줄인다(P1-4의 document 단계 방어와
+#: 이중 방어선).
+REASON_LIST_ROW_IDENTITY_MISMATCH: Final[str] = "list_row_identity_mismatch"
+#: DART가 행을 «돌려주긴 했지만»(대상 회사가 그 공시유형 자체는 낸 적이
+#: 있지만) 이름 키워드·연결/정정 제외·corp_code 불일치 등 필터로 전부
+#: 걸러졌을 때(item 4) — 「행이 아예 없었다」(list_query_missing)와 원인이
+#: 달라 구분한다. 실존 공시가 「자료 부재」로 잘못 읽히는 것을 막는다.
+REASON_LIST_ROWS_ALL_FILTERED: Final[str] = "list_rows_all_filtered"

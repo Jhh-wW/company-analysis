@@ -143,3 +143,49 @@ def test_종단_가짜_client_주입으로_collect_dart_evidence까지_돌아간
     assert harvest.documents[0].source_kind == c.SOURCE_KIND_BUSINESS_REPORT
     assert len(harvest.fragments) >= 1
     assert f"identity_check={c.IDENTITY_CHECK_UNVERIFIED}" in harvest.documents[0].identity_binding
+
+
+# ══════════════════════════════════════════════════════════
+# generation=8 후속 item 3 — list.json 행의 corp_code를 방어적으로 읽는다
+# ══════════════════════════════════════════════════════════
+
+
+def test_item3_list_json_행에_corp_code가_있으면_방어적으로_읽어_싣는다(tmp_path: Path) -> None:
+    def fake_get_json(endpoint: str, params: dict[str, Any], counter: UsageCounter) -> dict[str, Any]:
+        return {
+            "status": "000",
+            "list": [
+                {
+                    "rcept_no": "20250315000001",
+                    "report_nm": "사업보고서 (2025.03)",
+                    "rcept_dt": "20250315",
+                    "corp_code": "00126380",
+                    "corp_name": "샘플기업",
+                },
+            ],
+        }
+
+    fetcher = _fetcher(tmp_path, get_json_fn=fake_get_json, download_document_fn=lambda *a, **k: Path("unused"))
+
+    result = fetcher.fetch_filing_list("00126380", "A")
+
+    assert result.rows[0].corp_code == "00126380"
+    assert result.rows[0].corp_name == "샘플기업"
+
+
+def test_item3_list_json_행에_corp_code가_없으면_빈_문자열로_남긴다(tmp_path: Path) -> None:
+    """실제 응답에 이 필드가 오는지 실측하지 못했다 — 없으면 확인 못 함으로 남는다."""
+    def fake_get_json(endpoint: str, params: dict[str, Any], counter: UsageCounter) -> dict[str, Any]:
+        return {
+            "status": "000",
+            "list": [
+                {"rcept_no": "20250315000001", "report_nm": "사업보고서 (2025.03)", "rcept_dt": "20250315"},
+            ],
+        }
+
+    fetcher = _fetcher(tmp_path, get_json_fn=fake_get_json, download_document_fn=lambda *a, **k: Path("unused"))
+
+    result = fetcher.fetch_filing_list("00126380", "A")
+
+    assert result.rows[0].corp_code == ""
+    assert result.rows[0].corp_name == ""

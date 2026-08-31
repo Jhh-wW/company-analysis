@@ -19,11 +19,20 @@ from features.evidence_collection.models import CollectionAttempt
 
 @dataclass(frozen=True)
 class RawFilingRow:
-    """list.json 응답 행 하나 — 이 feature가 실제로 쓰는 필드만 남긴다."""
+    """list.json 응답 행 하나 — 이 feature가 실제로 쓰는 필드만 남긴다.
+
+    ★ item 3(2026-08-31 team-lead 통보) — ``corp_code``·``corp_name``은
+    fetcher가 방어적으로(``.get``) 읽어 실어 주면 요청 회사와 대조하는 데
+    쓴다. 필드가 실제로 list.json 응답에 오는지는 실측하지 못했다(확인 못
+    함 — live smoke 필요) — 그래서 기본값은 빈 문자열이고, 비어 있으면
+    지금처럼 대조 없이 통과시킨다(«불일치»가 아니라 «확인 못 함»).
+    """
 
     rcept_no: str
     report_nm: str
     rcept_dt: str
+    corp_code: str = ""
+    corp_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -105,13 +114,31 @@ def _safe_fetch_list(fetcher: DartFetcher, company_id: str, pblntf_ty: str) -> F
         return FilingListResult(state=c.ATTEMPT_STATE_FAILED)
 
 
-def _filter_rows(rows: tuple[RawFilingRow, ...], name_keyword: str) -> list[RawFilingRow]:
-    return [
-        row for row in rows
-        if name_keyword in row.report_nm
-        and c.CONSOLIDATED_REPORT_NAME_MARKER not in row.report_nm
-        and not any(marker in row.report_nm for marker in c.EXCLUDED_REPORT_NAME_MARKERS)
-    ]
+def _filter_rows(
+    rows: tuple[RawFilingRow, ...], name_keyword: str, company_id: str,
+) -> tuple[list[RawFilingRow], int]:
+    """이름 키워드·연결/정정 제외로 거르고, corp_code가 있는데 요청 회사와
+    다르면 문서를 조회하지도 않고 목록 단계에서 미리 버린다(item 3).
+
+    corp_code가 없는 행은 지금처럼 통과시킨다(«확인 못 함»이지 «불일치»가
+    아니다 — 실제 응답에 이 필드가 오는지 실측하지 못했다). 몇 건이
+    corp_code 불일치로 걸러졌는지 세어 함께 돌려준다(전용 사유 코드로
+    남기기 위함, item 3).
+    """
+    matched: list[RawFilingRow] = []
+    identity_mismatch_count = 0
+    for row in rows:
+        if name_keyword not in row.report_nm:
+            continue
+        if c.CONSOLIDATED_REPORT_NAME_MARKER in row.report_nm:
+            continue
+        if any(marker in row.report_nm for marker in c.EXCLUDED_REPORT_NAME_MARKERS):
+            continue
+        if row.corp_code and row.corp_code != company_id:
+            identity_mismatch_count += 1
+            continue
+        matched.append(row)
+    return matched, identity_mismatch_count
 
 
 def _pick_latest_with_lineage(rows: list[RawFilingRow]) -> tuple[RawFilingRow, str]:
@@ -154,7 +181,16 @@ def _pick_latest_with_lineage(rows: list[RawFilingRow]) -> tuple[RawFilingRow, s
 
 def _attempt_for_list_query(
     company_id: str, spec: c.FilingKindSpec, result: FilingListResult,
-) -> tuple[CollectionAttempt, list[RawFilingRow]]:
+) -> tuple[CollectionAttempt, list[RawFilingRow], int]:
+    """목록 조회 attempt 1건을 만든다. FAILED가 아니면 identity_mismatch_count도 함께 돌려준다.
+
+    ★ item 2(불변식, 2026-08-31 team-lead 통보) — 목록 조회는 문서 내용을
+    한 번도 보지 않았으므로 REQUIRED+OK/MISSING로 slot_ids(source_kind
+    전체 범위)를 «확인했다»고 주장하면 안 된다(넓은 slot 집합 + REQUIRED +
+    OK/MISSING 조합 금지). FAILED일 때만 REQUIRED를 유지하고(P1-1의
+    필수 목록 조회 실패 판정이 이 값에 의존한다), 그 밖(OK/MISSING)은
+    OPTIONAL로 내려 광역 slot_ids를 써도 불변식을 어기지 않게 한다.
+    """
     if result.state == c.ATTEMPT_STATE_FAILED:
         attempt = CollectionAttempt(
             company_id=company_id,
@@ -168,16 +204,26 @@ def _attempt_for_list_query(
             bytes_downloaded=max(0, result.bytes_downloaded),
             documents_seen=0,
         )
-        return attempt, []
+        return attempt, [], 0
 
-    filtered = _filter_rows(result.rows, spec.name_keyword)
-    state = c.ATTEMPT_STATE_OK if filtered else c.ATTEMPT_STATE_MISSING
-    reason = c.REASON_LIST_QUERY_OK if filtered else c.REASON_LIST_QUERY_MISSING
+    filtered, identity_mismatch_count = _filter_rows(result.rows, spec.name_keyword, company_id)
+    if filtered:
+        state = c.ATTEMPT_STATE_OK
+        reason = c.REASON_LIST_QUERY_OK
+    elif result.rows:
+        # item 4 — 행은 있었지만(대상 회사가 그 공시유형을 낸 적은 있지만)
+        # 이름 키워드·연결/정정 제외·corp_code 불일치로 전부 걸러졌다.
+        # 「행이 아예 없었다」와 원인이 다르므로 다른 사유 코드로 남긴다.
+        state = c.ATTEMPT_STATE_MISSING
+        reason = c.REASON_LIST_ROWS_ALL_FILTERED
+    else:
+        state = c.ATTEMPT_STATE_MISSING
+        reason = c.REASON_LIST_QUERY_MISSING
     attempt = CollectionAttempt(
         company_id=company_id,
         attempt_id=f"list:{spec.source_kind}",
         source_kind=spec.source_kind,
-        requirement=spec.requirement,
+        requirement=c.REQUIREMENT_OPTIONAL,  # item 2 — 위 docstring 참고
         state=state,
         slot_ids=c.SOURCE_KIND_SLOT_SCOPE[spec.source_kind],
         reason_code=reason,
@@ -185,7 +231,25 @@ def _attempt_for_list_query(
         bytes_downloaded=max(0, result.bytes_downloaded),
         documents_seen=len(result.rows),
     )
-    return attempt, filtered
+    return attempt, filtered, identity_mismatch_count
+
+
+def _identity_mismatch_list_attempt(
+    company_id: str, spec: c.FilingKindSpec, mismatch_count: int,
+) -> CollectionAttempt:
+    """목록 행 수준에서 다른 회사 corp_code로 걸러낸 건수를 관측치로 남긴다(item 3)."""
+    return CollectionAttempt(
+        company_id=company_id,
+        attempt_id=f"list_identity_mismatch:{spec.source_kind}",
+        source_kind=spec.source_kind,
+        requirement=c.REQUIREMENT_OPTIONAL,  # 관측용 — item 2 불변식과 무관
+        state=c.ATTEMPT_STATE_OK,
+        slot_ids=c.SOURCE_KIND_SLOT_SCOPE[spec.source_kind],
+        reason_code=c.REASON_LIST_ROW_IDENTITY_MISMATCH,
+        elapsed_ms=0,
+        bytes_downloaded=0,
+        documents_seen=mismatch_count,
+    )
 
 
 def _deadline_list_attempt(company_id: str, spec: c.FilingKindSpec) -> CollectionAttempt:
@@ -238,8 +302,10 @@ def select_related_filings(
             attempts.append(_deadline_list_attempt(company_id, spec))
             continue
         result = fetch_cached(spec.pblntf_ty)
-        attempt, filtered = _attempt_for_list_query(company_id, spec, result)
+        attempt, filtered, identity_mismatch_count = _attempt_for_list_query(company_id, spec, result)
         attempts.append(attempt)
+        if identity_mismatch_count:
+            attempts.append(_identity_mismatch_list_attempt(company_id, spec, identity_mismatch_count))
         if filtered:
             chosen, lineage_original = _pick_latest_with_lineage(filtered)
             candidates.append(SelectedFiling(
@@ -258,8 +324,10 @@ def select_related_filings(
             attempts.append(_deadline_list_attempt(company_id, spec))
             continue
         result = fetch_cached(spec.pblntf_ty)
-        attempt, filtered = _attempt_for_list_query(company_id, spec, result)
+        attempt, filtered, identity_mismatch_count = _attempt_for_list_query(company_id, spec, result)
         attempts.append(attempt)
+        if identity_mismatch_count:
+            attempts.append(_identity_mismatch_list_attempt(company_id, spec, identity_mismatch_count))
         if filtered:
             chosen, lineage_original = _pick_latest_with_lineage(filtered)
             candidates.append(SelectedFiling(

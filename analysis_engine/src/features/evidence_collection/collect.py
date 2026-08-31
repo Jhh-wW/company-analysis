@@ -39,14 +39,26 @@ def _document_attempt(
     fetch_result: DocumentFetchResult,
     *,
     documents_seen: int = 1,
+    slot_ids: tuple[str, ...] | None = None,
+    requirement: str | None = None,
 ) -> CollectionAttempt:
+    """문서 단계 attempt 1건을 만든다.
+
+    ★ item 2 불변식(2026-08-31 team-lead 통보) — ``slot_ids``를 지정하지
+    않으면 source_kind의 전체 범위(광역)를 쓴다. 이건 REQUIRED+OK/MISSING
+    조합에서는 금지된 조합이므로(광역 slot 집합 = «이 자료가 없다»는 사실
+    주장이 되어 버린다), 그 조합으로 호출하는 자리는 반드시 ``slot_ids``에
+    «실제로 확인한 슬롯만»을 넘기거나, ``requirement=REQUIREMENT_OPTIONAL``로
+    내려 불변식 예외 조건(b)를 타게 해야 한다. FAILED/TRUNCATED는 조건(a)로
+    이미 예외라 그대로 둬도 된다.
+    """
     return CollectionAttempt(
         company_id=company_id,
         attempt_id=f"document:{filing.source_kind}:{filing.rcept_no}",
         source_kind=filing.source_kind,
-        requirement=filing.requirement,
+        requirement=requirement if requirement is not None else filing.requirement,
         state=state,
-        slot_ids=c.SOURCE_KIND_SLOT_SCOPE[filing.source_kind],
+        slot_ids=slot_ids if slot_ids is not None else c.SOURCE_KIND_SLOT_SCOPE[filing.source_kind],
         reason_code=reason_code,
         elapsed_ms=max(0, fetch_result.elapsed_ms),
         bytes_downloaded=max(0, fetch_result.bytes_downloaded),
@@ -57,12 +69,16 @@ def _document_attempt(
 def _unscored_fragments_attempt(
     company_id: str, filing: SelectedFiling, unscored_count: int,
 ) -> CollectionAttempt:
-    """무신호 문단 개수를 관측치로만 남긴다(P0-1) — 조각 자체는 harvest에 넣지 않는다."""
+    """무신호 문단 개수를 관측치로만 남긴다(P0-1) — 조각 자체는 harvest에 넣지 않는다.
+
+    이 attempt는 어떤 슬롯도 확인/불확인하지 않는다(순수 관측) — item 2
+    불변식에 맞춰 requirement를 OPTIONAL로 둔다.
+    """
     return CollectionAttempt(
         company_id=company_id,
         attempt_id=f"fragments:{filing.source_kind}:{filing.rcept_no}",
         source_kind=filing.source_kind,
-        requirement=filing.requirement,
+        requirement=c.REQUIREMENT_OPTIONAL,
         state=c.ATTEMPT_STATE_OK,
         slot_ids=c.SOURCE_KIND_SLOT_SCOPE[filing.source_kind],
         reason_code=c.REASON_NO_SIGNAL,
@@ -148,9 +164,12 @@ def collect_dart_evidence(
         fetch_result = _safe_fetch_document(fetcher, filing.rcept_no)
 
         if fetch_result.state == c.ATTEMPT_STATE_MISSING:
-            # 확인된 부재(P0-2) — 전송 장애(FAILED)와 분리해서 남긴다.
+            # 확인된 부재(P0-2) — 전송 장애(FAILED)와 분리해서 남긴다. 문서
+            # 내용을 한 번도 못 봤으므로 광역 slot_ids를 REQUIRED로 확정하지
+            # 않는다(item 2 불변식).
             attempts.append(_document_attempt(
                 company_id, filing, c.ATTEMPT_STATE_MISSING, c.REASON_DOCUMENT_FETCH_MISSING, fetch_result,
+                requirement=c.REQUIREMENT_OPTIONAL,
             ))
             continue
         if fetch_result.state != c.ATTEMPT_STATE_OK:
@@ -182,8 +201,12 @@ def collect_dart_evidence(
             # 중복이면 total_bytes에 가산하지 않는다(P1-5) — 가산 후 중복
             # 판정을 하면 실제로 쓰이지 않는 바이트가 예산을 유령처럼
             # 소비해 무관한 다음 문서가 부당하게 TRUNCATED될 수 있었다.
+            # 이 문서는 분할·채점을 아예 건너뛰므로(원본 문서의 attempt가
+            # 이미 실제로 확인한 슬롯을 담고 있다) 광역 slot_ids를 REQUIRED로
+            # 확정하지 않는다(item 2 불변식).
             attempts.append(_document_attempt(
                 company_id, filing, c.ATTEMPT_STATE_OK, c.REASON_DOCUMENT_DUPLICATE, fetch_result,
+                requirement=c.REQUIREMENT_OPTIONAL,
             ))
             continue
 
@@ -218,9 +241,14 @@ def collect_dart_evidence(
         if not scored:
             # 채점 가능한 근거가 하나도 없다 — 문서 자체를 최종 산출에서
             # 뺀다(P0-3). 조회는 성공했다는 사실만 attempt로 남긴다.
+            # 「실제로 확인한 슬롯」이 0개이므로(문서를 다 훑었지만 어떤
+            # 슬롯도 채점하지 못했다) 광역 slot_ids를 REQUIRED로 확정하지
+            # 않는다(item 2 불변식) — v1 키워드 휴리스틱이 놓쳤을 수도 있어
+            # 「모든 슬롯이 확인된 부재」라고 단정하면 안 된다.
             attempts.append(_document_attempt(
                 company_id, filing, c.ATTEMPT_STATE_OK, c.REASON_DOCUMENT_NO_SCORED_EVIDENCE, fetch_result,
                 documents_seen=len(candidates),
+                requirement=c.REQUIREMENT_OPTIONAL,
             ))
             continue
 
@@ -270,8 +298,13 @@ def collect_dart_evidence(
 
         documents.append(document)
         fragments.extend(new_fragments)
+        # item 2 불변식 — REQUIRED+OK를 유지하되(이 값은 실제로 확인한
+        # 슬롯이므로 정당하다), slot_ids는 source_kind 전체가 아니라 이
+        # 문서에서 실제로 조각을 만들어 낸 슬롯만 담는다.
+        confirmed_slot_ids = tuple(sorted({slot_score.slot_id for _, slot_score in scored}))
         attempts.append(_document_attempt(
             company_id, filing, c.ATTEMPT_STATE_OK, c.REASON_DOCUMENT_FETCH_OK, fetch_result,
+            slot_ids=confirmed_slot_ids,
         ))
         if unscored_count:
             attempts.append(_unscored_fragments_attempt(company_id, filing, unscored_count))

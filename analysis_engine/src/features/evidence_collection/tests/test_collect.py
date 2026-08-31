@@ -568,3 +568,100 @@ def test_gen8_회사_A_수집_산출의_모든_fragment_attempt는_A의_company_
     mapping = harvest_to_mapping(harvest)
     assert all(f["company_id"] == company_a for f in mapping["fragments"])
     assert all(a["company_id"] == company_a for a in mapping["attempts"])
+
+
+# ══════════════════════════════════════════════════════════
+# generation=8 후속 item 2 — 광역 slot_ids와 「필수 + 성공」 조합 금지
+# ══════════════════════════════════════════════════════════
+
+
+def _assert_no_wide_required_success_violations(attempts) -> None:
+    """team-lead 통보(2026-08-31, item 2) — REQUIRED + OK/MISSING 조합에
+    source_kind의 «전체» slot scope를 그대로 붙이면 안 된다(조회 성공
+    사실이 «이 회사는 그 자료를 공개하지 않는다»는 사실 주장으로 둔갑한다).
+    """
+    for attempt in attempts:
+        if attempt.requirement != c.REQUIREMENT_REQUIRED:
+            continue
+        if attempt.state not in (c.ATTEMPT_STATE_OK, c.ATTEMPT_STATE_MISSING):
+            continue
+        full_scope = set(c.SOURCE_KIND_SLOT_SCOPE.get(attempt.source_kind, ()))
+        assert set(attempt.slot_ids) != full_scope, (
+            f"{attempt.attempt_id}가 REQUIRED+{attempt.state}인데 광역 slot_ids를 그대로 씁니다"
+        )
+
+
+def test_item2_문서_fetch_ok는_실제로_채점된_슬롯만_slot_ids에_담고_REQUIRED를_유지한다() -> None:
+    row = RawFilingRow("20250315000001", "사업보고서 (2025.03)", "20250315")
+    fetcher = _fetcher("A", row, LISTED_BUSINESS_REPORT_TEXT)
+
+    harvest = collect_dart_evidence(fetcher, "00126380", now=_NOW)
+
+    fetch_ok_attempt = [
+        a for a in harvest.attempts
+        if a.attempt_id.startswith("document:") and a.reason_code == c.REASON_DOCUMENT_FETCH_OK
+    ][0]
+    assert fetch_ok_attempt.requirement == c.REQUIREMENT_REQUIRED  # 실제로 확인했으므로 유지
+    confirmed_slot_ids = {f.slot_id for f in harvest.fragments}
+    assert set(fetch_ok_attempt.slot_ids) == confirmed_slot_ids
+    assert set(fetch_ok_attempt.slot_ids) != set(c.SOURCE_KIND_SLOT_SCOPE[c.SOURCE_KIND_BUSINESS_REPORT])
+
+
+def test_item2_no_scored_evidence_duplicate_missing_fetch는_OPTIONAL로_내려간다() -> None:
+    """세 가지 상황 모두 문서 내용을 실제로 확인하지 못했으므로(또는 처음부터
+    안 봤으므로) 광역 slot_ids를 REQUIRED로 확정하지 않아야 한다.
+    """
+    # 1) no scored evidence
+    row1 = RawFilingRow("20250401000001", "감사보고서", "20250401")
+    harvest1 = collect_dart_evidence(_fetcher("F", row1, _NO_SCORED_EVIDENCE_TEXT), "00164788", now=_NOW)
+    no_evidence_attempt = [
+        a for a in harvest1.attempts if a.reason_code == c.REASON_DOCUMENT_NO_SCORED_EVIDENCE
+    ][0]
+    assert no_evidence_attempt.requirement == c.REQUIREMENT_OPTIONAL
+
+    # 2) duplicate
+    business_row = RawFilingRow("20250315000001", "사업보고서 (2025.03)", "20250315")
+    semiannual_row = RawFilingRow("20250815000002", "반기보고서 (2025.06)", "20250815")
+    dup_fetcher = FakeFetcher(
+        list_responses_by_pblntf_ty={
+            "A": FilingListResult(state="OK", rows=(business_row, semiannual_row)),
+        },
+        document_responses_by_rcept_no={
+            business_row.rcept_no: DocumentFetchResult(state="OK", text=LISTED_BUSINESS_REPORT_TEXT),
+            semiannual_row.rcept_no: DocumentFetchResult(state="OK", text=LISTED_BUSINESS_REPORT_TEXT),
+        },
+    )
+    harvest2 = collect_dart_evidence(dup_fetcher, "00126380", now=_NOW)
+    duplicate_attempt = [a for a in harvest2.attempts if a.reason_code == c.REASON_DOCUMENT_DUPLICATE][0]
+    assert duplicate_attempt.requirement == c.REQUIREMENT_OPTIONAL
+
+    # 3) missing document fetch
+    row3 = RawFilingRow("20250315000001", "사업보고서", "20250315")
+    missing_fetcher = FakeFetcher(
+        list_responses_by_pblntf_ty={"A": FilingListResult(state="OK", rows=(row3,))},
+        document_responses_by_rcept_no={row3.rcept_no: DocumentFetchResult(state=c.ATTEMPT_STATE_MISSING)},
+    )
+    harvest3 = collect_dart_evidence(missing_fetcher, "00126380", now=_NOW)
+    missing_attempt = [a for a in harvest3.attempts if a.reason_code == c.REASON_DOCUMENT_FETCH_MISSING][0]
+    assert missing_attempt.requirement == c.REQUIREMENT_OPTIONAL
+
+    for harvest in (harvest1, harvest2, harvest3):
+        _assert_no_wide_required_success_violations(harvest.attempts)
+
+
+def test_item2_여러_시나리오에_걸쳐_위반_0건이다() -> None:
+    """team-lead 지시 — 「위반 0건을 세는 시험을 넣어라」. 상장·감사·금융·
+    무신호·목차 등 대표 시나리오를 전부 실제로 돌려 확인한다.
+    """
+    scenarios: list[tuple[str, str, str, str]] = [
+        ("A", "사업보고서 (2025.03)", "00126380", LISTED_BUSINESS_REPORT_TEXT),
+        ("F", "감사보고서", "00164788", AUDIT_ONLY_REPORT_TEXT),
+        ("A", "사업보고서 (2025.03)", "00355758", FINANCIAL_REPORT_TEXT),
+        ("A", "사업보고서 (2025.03)", "00126380", _MIXED_SIGNAL_TEXT),
+        ("F", "감사보고서", "00164788", _NO_SCORED_EVIDENCE_TEXT),
+    ]
+    for pblntf_ty, report_nm, company_id, text in scenarios:
+        row = RawFilingRow("20250315000001", report_nm, "20250315")
+        harvest = collect_dart_evidence(_fetcher(pblntf_ty, row, text), company_id, now=_NOW)
+        assert harvest.attempts  # 시나리오가 실제로 뭔가를 만들어냈는지(공허 통과 방지)
+        _assert_no_wide_required_success_violations(harvest.attempts)
