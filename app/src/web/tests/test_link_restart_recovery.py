@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
 from src.core import clock
 from src.features.budget import spend_store
 from src.features.budget.constants import SPEND_PHASE_IDENTIFY
 from src.features.admin_dashboard import store as dashboard_store
+from src.features.report_delivery import artifact as delivery_artifact
+from src.features.report_delivery import store as delivery_store
 from src.features.sharelink import store as share_store
 from src.features.storage import db as storage_db
 from src.web import paid_runtime, runtime
@@ -122,6 +126,69 @@ def test_startup_returns_MEMBER_success_slots_when_crashed_jobs_have_no_delivery
     # provider나 외부 요청 없이 lifespan의 재시작 복구만 실행한다.
     with TestClient(app):
         pass
+
+    with storage_db.connect() as conn:
+        assert dashboard_store.member_usage_today(
+            conn,
+            actor_email=actor,
+            day=day,
+        ) == (0, 0)
+        assert dashboard_store.member_can_start(
+            conn,
+            actor_email=actor,
+            day=day,
+        ) is True
+        assert dashboard_store.list_reserved_member_runs(conn) == ()
+
+
+def test_MEMBER재시작은_PDF주소표만_남고파일이_없으면_성공차감하지않는다(
+    monkeypatch,
+) -> None:
+    """메타데이터만 남은 유령 PDF를 성공 보고서로 세지 않는다."""
+
+    actor = "restart-missing-pdf@example.com"
+    run_id = "restart-missing-pdf"
+    day = clock.today_kst().isoformat()
+    with storage_db.connect() as conn:
+        assert dashboard_store.reserve_member_run(
+            conn,
+            run_id=run_id,
+            actor_email=actor,
+            day=day,
+            now_iso=f"{day}T09:00:00+09:00",
+        )
+
+    monkeypatch.setattr(
+        delivery_store,
+        "load_delivery_intent",
+        lambda _conn, _public_id: SimpleNamespace(
+            state=delivery_store.DELIVERY_INTENT_COMPLETE
+        ),
+    )
+    monkeypatch.setattr(
+        delivery_store,
+        "load_delivery_by_public_id",
+        lambda _conn, _public_id: SimpleNamespace(delivery_id="delivery-missing"),
+    )
+    monkeypatch.setattr(
+        delivery_artifact,
+        "artifact_for_delivery",
+        lambda _conn, *, delivery_id: SimpleNamespace(artifact_id="artifact-missing"),
+    )
+    monkeypatch.setattr(
+        runtime.report_delivery_adapter,
+        "configured_artifact_backend",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        delivery_artifact,
+        "inspect_artifact",
+        lambda _conn, _backend, _artifact_id: SimpleNamespace(
+            status=delivery_artifact.ArtifactInspectionStatus.MISSING
+        ),
+    )
+
+    runtime._recover_member_run_history()
 
     with storage_db.connect() as conn:
         assert dashboard_store.member_usage_today(

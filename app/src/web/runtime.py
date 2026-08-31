@@ -162,7 +162,23 @@ def _recover_member_run_history() -> None:
                 if delivery is not None
                 else None
             )
-            succeeded = artifact is not None
+            inspection = (
+                delivery_artifact.inspect_artifact(
+                    conn,
+                    report_delivery_adapter.configured_artifact_backend(),
+                    artifact.artifact_id,
+                )
+                if artifact is not None
+                else None
+            )
+            # DB에 PDF의 주소표만 남고 실제 파일이 사라지거나 깨졌다면 사용자는
+            # 보고서를 열 수 없다. 재시작 복구가 주소표의 존재만 보고 성공 건수를
+            # 차감하면 "성공으로 결제됐지만 받을 파일은 없는" 상태가 된다.
+            succeeded = (
+                inspection is not None
+                and inspection.status
+                is delivery_artifact.ArtifactInspectionStatus.AVAILABLE
+            )
             settled = dashboard_store.settle_member_run(
                 conn,
                 run_id=reservation.run_id,
