@@ -173,8 +173,12 @@ VALID_ATTEMPT_STATES: Final[frozenset[str]] = frozenset({
 COMPANY_TYPE_LISTED: Final[str] = "listed"
 COMPANY_TYPE_AUDIT_ONLY: Final[str] = "audit_only"
 COMPANY_TYPE_FINANCIAL: Final[str] = "financial"
+#: 판정 근거가 될 문서를 하나도 확보하지 못했거나 필수 목록 조회 자체가
+#: FAILED였을 때 쓴다(P1-1, 2026-08-31 team-lead 통보) — 「모르면 audit_only로
+#: 지어내지 않는다」. 소비자에게는 team-lead가 별도로 통보했다.
+COMPANY_TYPE_UNDECIDED: Final[str] = "undecided"
 VALID_COMPANY_TYPES: Final[frozenset[str]] = frozenset({
-    COMPANY_TYPE_LISTED, COMPANY_TYPE_AUDIT_ONLY, COMPANY_TYPE_FINANCIAL,
+    COMPANY_TYPE_LISTED, COMPANY_TYPE_AUDIT_ONLY, COMPANY_TYPE_FINANCIAL, COMPANY_TYPE_UNDECIDED,
 })
 
 #: CollectionAttempt.reason_code · EvidenceFragment.reason_codes 공통 형식.
@@ -327,9 +331,29 @@ REASON_LIST_QUERY_MISSING: Final[str] = "list_query_missing"
 REASON_LIST_QUERY_FAILED: Final[str] = "list_query_failed"
 REASON_DOCUMENT_FETCH_OK: Final[str] = "document_fetch_ok"
 REASON_DOCUMENT_FETCH_FAILED: Final[str] = "document_fetch_failed"
+#: 조회는 정상 처리됐지만 fetcher가 「이 문서는 원래 없다」고 확인한 경우
+#: (P0-2) — 전송 장애(document_fetch_failed)와 다른 값이어야 필수 슬롯이
+#: 일시 장애(FAILED)와 확인된 부재(MISSING)로 갈린다.
+REASON_DOCUMENT_FETCH_MISSING: Final[str] = "document_fetch_missing"
 REASON_DOCUMENT_TOO_LARGE: Final[str] = "document_too_large"
 REASON_TOTAL_BYTES_EXCEEDED: Final[str] = "total_bytes_exceeded"
 REASON_DOCUMENT_DUPLICATE: Final[str] = "document_duplicate_sha256"
 REASON_CAP_REACHED: Final[str] = "cap_reached"
 REASON_DEADLINE_EXCEEDED: Final[str] = "deadline_exceeded"
 REASON_NO_SIGNAL: Final[str] = "no_keyword_signal"
+#: fetcher가 돌려준 문서 메타의 corp_code가 요청한 회사와 다를 때(P1-4) — 다른
+#: 회사 문서가 조용히 섞여 들어가는 것을 막는다.
+REASON_DOCUMENT_IDENTITY_MISMATCH: Final[str] = "document_identity_mismatch"
+#: 자료형 생성 검증(EvidenceCollectionError)이 문서 1건에서만 실패했을 때(P1-2) —
+#: harvest 전체를 무너뜨리지 않고 이 문서만 버린다.
+REASON_DOCUMENT_MODEL_INVALID: Final[str] = "document_model_invalid"
+#: 문서를 성공적으로 받았지만 채점 가능한(scored) 조각이 하나도 없어 최종
+#: documents/fragments에서 제외했을 때(P0-3) — 「조회했다」는 사실은 이 attempt로
+#: 보존한다.
+REASON_DOCUMENT_NO_SCORED_EVIDENCE: Final[str] = "document_no_scored_evidence"
+
+#: identity_binding 문자열 안에 넣는 검증 상태 값(P1-4) — fetcher가 문서
+#: 소유 회사 메타를 실제로 돌려줘 대조했는지, 메타가 아예 없어 대조하지
+#: 못했는지를 정직하게 구분한다(«검증했다»고 거짓 주장하지 않는다).
+IDENTITY_CHECK_VERIFIED: Final[str] = "verified_match"
+IDENTITY_CHECK_UNVERIFIED: Final[str] = "unverifiable_no_fetcher_metadata"

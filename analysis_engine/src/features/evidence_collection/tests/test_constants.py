@@ -75,3 +75,19 @@ def test_source_kind_slot_scope는_전부_수집기_슬롯에서만_고른다() 
     for source_kind, slot_ids in c.SOURCE_KIND_SLOT_SCOPE.items():
         assert slot_ids, f"{source_kind}의 slot_ids가 비어 있습니다"
         assert set(slot_ids) <= c.COLLECTOR_SLOT_IDS, f"{source_kind}가 수집기 슬롯 밖 값을 씁니다"
+
+
+def test_P1_1_undecided는_VALID_COMPANY_TYPES에_있다() -> None:
+    assert c.COMPANY_TYPE_UNDECIDED in c.VALID_COMPANY_TYPES
+    assert c.COMPANY_TYPE_UNDECIDED == "undecided"
+
+
+def test_새로_추가된_reason_code_상수는_형식_규정을_지킨다() -> None:
+    new_reason_codes = (
+        c.REASON_DOCUMENT_FETCH_MISSING,
+        c.REASON_DOCUMENT_IDENTITY_MISMATCH,
+        c.REASON_DOCUMENT_MODEL_INVALID,
+        c.REASON_DOCUMENT_NO_SCORED_EVIDENCE,
+    )
+    for code in new_reason_codes:
+        assert c.REASON_CODE_PATTERN.fullmatch(code)
