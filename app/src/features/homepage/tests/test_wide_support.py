@@ -77,6 +77,22 @@ def test_공개접미사_목록_밖_TLD는_fail_closed():
     assert not is_registered_subdomain("company.zzzunknowntld", "sub.company.zzzunknowntld")
 
 
+def test_example은_정본_공개접미사_목록에_없다():
+    """정정 2: .example은 RFC 2606 예약 TLD로 시험 픽스처 전용이다 — 실제
+    회사 도메인 커버리지 목록(SINGLE_LABEL_PUBLIC_SUFFIXES)과 절대 섞이지
+    않아야, 나중에 이걸 실제 커버리지 항목으로 오해하지 않는다."""
+    from src.features.homepage.constants import (
+        SINGLE_LABEL_PUBLIC_SUFFIXES,
+        TEST_FIXTURE_ONLY_SINGLE_LABEL_SUFFIXES,
+    )
+
+    assert "example" not in SINGLE_LABEL_PUBLIC_SUFFIXES
+    assert "example" in TEST_FIXTURE_ONLY_SINGLE_LABEL_SUFFIXES
+    # 그럼에도 판정 시점에는 둘을 함께 봐서 .example 픽스처가 실제 코드
+    # 경로(등록 도메인 판정)를 그대로 지나간다.
+    assert registrable_core_name("company.example") == "company.example"
+
+
 def test_대소문자는_구분하지_않는다():
     assert registrable_core_name("Company.COM") == registrable_core_name("company.com")
     assert is_registered_subdomain("COMPANY.COM", "recruit.company.com")

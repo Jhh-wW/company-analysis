@@ -21,9 +21,18 @@ from dataclasses import dataclass
 from src.features.homepage.constants import (
     MULTI_LABEL_PUBLIC_SUFFIXES,
     SINGLE_LABEL_PUBLIC_SUFFIXES,
+    TEST_FIXTURE_ONLY_SINGLE_LABEL_SUFFIXES,
     WIDE_EXCLUDED_LINKED_HOST_SUFFIXES,
     WIDE_PRIORITY_HOST_KEYWORDS,
     WIDE_SLOT_KEYWORD_MAP,
+)
+
+#: 판정 시점에만 두 집합을 함께 본다 — 정본 SINGLE_LABEL_PUBLIC_SUFFIXES 자체는
+#: 절대 합치지 않는다(팀 리드 정정 2). 오프라인 시험 픽스처(``.example`` 등)가
+#: 실제 코드 경로를 그대로 지나가게 하되, 정본 상수를 읽는 다른 코드나 사람이
+#: 「.example도 실제 커버리지 TLD」라고 오해하지 않게 분리해 둔다.
+_SINGLE_LABEL_SUFFIXES_FOR_MATCHING: frozenset[str] = (
+    SINGLE_LABEL_PUBLIC_SUFFIXES | TEST_FIXTURE_ONLY_SINGLE_LABEL_SUFFIXES
 )
 
 #: 하위 도메인 이름으로도 매칭해도 안전한 키워드만(예: recruit.company.example).
@@ -56,7 +65,7 @@ def registrable_core_name(host: str) -> str:
         return ".".join(labels)
     if len(labels) >= 3 and ".".join(labels[-2:]) in MULTI_LABEL_PUBLIC_SUFFIXES:
         suffix_labels = 2
-    elif labels[-1] in SINGLE_LABEL_PUBLIC_SUFFIXES:
+    elif labels[-1] in _SINGLE_LABEL_SUFFIXES_FOR_MATCHING:
         suffix_labels = 1
     else:
         # 목록에 없는 접미사 — fail-closed. 경계를 모르는 채로 같다고

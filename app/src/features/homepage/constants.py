@@ -321,9 +321,9 @@ MULTI_LABEL_PUBLIC_SUFFIXES: Final[frozenset[str]] = frozenset(
 )
 
 #: 도메인 끝 «한 칸」만 공개 접미사로 보는 경우 (일반 gTLD·국가 코드).
-#: ``example``은 RFC 2606이 등록을 영구히 금지한 예약 TLD라 실제 회사가 쓸 수
-#: 없다 — 시험 픽스처 전용으로 넣어도 실제 회사 도메인을 오판할 위험이 없다
-#: (P0-1 fail-closed 수정 후에도 .example 시험 픽스처가 통과하려면 필요, 2026-08-31).
+#: 실제 회사가 등록해 쓸 수 있는 진짜 TLD만 담는다 - 아래
+#: TEST_FIXTURE_ONLY_SINGLE_LABEL_SUFFIXES 와 절대 섞지 않는다(팀 리드
+#: 정정 2, 2026-08-31: 실제 커버리지 항목으로 오해되면 안 된다).
 SINGLE_LABEL_PUBLIC_SUFFIXES: Final[frozenset[str]] = frozenset(
     {
         "kr",
@@ -338,9 +338,17 @@ SINGLE_LABEL_PUBLIC_SUFFIXES: Final[frozenset[str]] = frozenset(
         "tv",
         "asia",
         "shop",
-        "example",
     }
 )
+
+#: 오프라인 시험 픽스처 전용 TLD - 실제 등록 도메인 커버리지가 아니다.
+#: example 은 RFC 2606이 등록을 영구히 금지한 예약 TLD라 실제 회사가
+#: 등록해 쓸 수 없다(오탐 위험 0). P0-1 fail-closed 수정 후 fixture가
+#: company.example 같은 주소로 실제 코드 경로(등록 도메인 판정, 하위
+#: 도메인 자동결속)를 그대로 지나가게 하려고 별도 상수로 둔다(팀 리드
+#: 정정 2, 2026-08-31). SINGLE_LABEL_PUBLIC_SUFFIXES 와 절대 합치지
+#: 않고, 판정 시점에만(registrable_core_name) 두 집합을 함께 본다.
+TEST_FIXTURE_ONLY_SINGLE_LABEL_SUFFIXES: Final[frozenset[str]] = frozenset({"example"})
 
 # ── 넓은 공식 웹 수집 (Writer B, P-8da84a36) ────────────────
 #
