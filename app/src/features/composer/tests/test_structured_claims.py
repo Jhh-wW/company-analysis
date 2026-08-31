@@ -270,6 +270,12 @@ def test_구조화_공개문장과_factrecord와_원문지문이_한번에_결�
     assert fact.source_host == "opendart.fss.or.kr"
     assert fact.source_document_id == "fnlttSinglAcnt.json"
     assert _filing().document_id not in fact.source_document_id
+    assert fact.supporting_source_ids == [fact.source_id]
+    assert fact.supporting_source_identities == [
+        "document:opendart.fss.or.kr:fnlttsinglacnt.json"
+    ]
+    assert len(fact.supporting_evidence_hashes) == 1
+    assert fact.supporting_evidence_hashes[0] in rendered.citations[0].exact_evidence_hashes
     assert validate_versioned_numeric_record(fact) == ()
     assert fact.evidence_binding == fact_evidence_binding(fact)
 
