@@ -7,6 +7,7 @@ from decimal import Decimal
 
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_quality.contract import contract_for_generation
+from src.shared.report_quality.constants import STRICT_QUALITY_CONTRACT_VERSION
 from src.shared.report_quality.dto import ClaimFact, ReportCandidate, SourceDocument
 from src.shared.report_quality.models import (
     GenerationAssessment,
@@ -273,6 +274,14 @@ def assess_safety(
             fact.supporting_source_identities,
             fact.supporting_evidence_hashes,
         )
+        # v1은 발급 중인 레거시 생성 경로와의 호환을 지킨다. 반면 FULL은
+        # source_id/URL만으로 원문을 승인하지 않는다. 모든 공개 fact가 정확한
+        # 원문 조각 해시까지 세 열로 운반해야 같은 주소의 내용 교체도 잡힌다.
+        if (
+            contract.version == STRICT_QUALITY_CONTRACT_VERSION
+            and not all(supporting)
+        ):
+            problems.append(f"{fact_id}의 정확한 원문 조각 결속이 비었습니다")
         if any(supporting):
             lengths = {len(values) for values in supporting}
             if lengths != {len(fact.supporting_source_ids)} or not fact.supporting_source_ids:

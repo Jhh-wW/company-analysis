@@ -6,7 +6,10 @@ from src.features.report_quality.assessment import (
     assess_generation,
     has_public_numeric_token,
 )
-from src.features.report_quality.constants import REQUIRED_QUALITY_SECTION_IDS
+from src.features.report_quality.constants import (
+    REQUIRED_QUALITY_SECTION_IDS,
+    STRICT_QUALITY_CONTRACT_VERSION,
+)
 from src.features.report_quality.dto import (
     ClaimFact,
     ReportCandidate,
@@ -87,6 +90,19 @@ def test_40개_claim_8개_독립문서와_장별coverage면_complete다() -> Non
     assert result.quality.document_sources == 8
     assert result.safety.decision is ReleaseDecision.RELEASE_ALLOWED
     assert result.publication_grade is QualityGrade.COMPLETE
+
+
+def test_FULL계약은_주소만있고_정확한원문조각결속이없으면_공개하지않는다() -> None:
+    result = assess_generation(
+        _candidate(),
+        contract_version=STRICT_QUALITY_CONTRACT_VERSION,
+    )
+
+    assert result.safety.decision is ReleaseDecision.BLOCKED
+    assert any(
+        "정확한 원문 조각 결속" in problem
+        for problem in result.safety.problems
+    )
 
 
 def test_전체40개여도_한문장인_장이_있으면_complete가_아니다() -> None:

@@ -700,6 +700,12 @@ def _fact_from_structured_sentence(
         unit=claim.unit,
         unit_dimension=claim.unit_dimension,
         formula=claim.formula,
+        # 대표 출처의 주소만 남기면 같은 URL의 다른 원문 조각으로 바뀌어도
+        # 구조화 수치가 그대로 승인될 수 있다. 산문 FactRecord와 같은 세 열로
+        # 정확한 조각 바이트까지 묶어 FULL 안전 게이트가 직접 대조하게 한다.
+        supporting_source_ids=[source.source_id],
+        supporting_source_identities=[document_identity(source)],
+        supporting_evidence_hashes=list(source.exact_evidence_hashes),
     )
     if validate_versioned_numeric_record(fact) != ():
         return None
