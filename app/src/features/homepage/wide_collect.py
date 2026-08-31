@@ -35,7 +35,6 @@ from src.features.homepage.constants import (
     WIDE_MAX_USABLE_RANGES_PER_DOCUMENT,
     WIDE_PARSER_VERSION,
     WIDE_PRIORITY_HOST_KEYWORDS,
-    WIDE_REQUIRED_SLOT_IDS_BY_SECTION,
     WIDE_SOURCE_KIND_IR_PDF,
     WIDE_SOURCE_KIND_RECRUIT_PAGE,
     WIDE_SOURCE_KIND_WEB_PAGE,
@@ -55,6 +54,7 @@ from src.features.homepage.wide_domain import (
     bind_root_host,
     canonicalize_url,
     is_registered_subdomain,
+    slot_ids_for_url,
 )
 from src.features.homepage.wide_extract import (
     extract_inline_spa_ranges,
@@ -80,6 +80,7 @@ from src.features.homepage.wide_types import (
     ATTEMPT_STATE_TRUNCATED,
     REQUIREMENT_OPTIONAL,
     REQUIREMENT_REQUIRED,
+    SOURCE_TIER_1_OFFICIAL,
     WideCollectionAttempt,
     WideCollectionResult,
     WideDocumentIdentity,
@@ -89,40 +90,6 @@ _PRIORITY_KEYWORDS: tuple[str, ...] = WIDE_PRIORITY_HOST_KEYWORDS + PRIORITY_PAT
 
 #: url 안에 있으면 «채용 페이지」로 분류하는 키워드.
 _RECRUIT_MARKERS: tuple[str, ...] = ("recruit", "career", "jobs", "채용")
-
-#: attempt.slot_ids 매핑 — `constants.WIDE_REQUIRED_SLOT_IDS_BY_SECTION`의
-#: 장별 필수 슬롯을 그대로 쓴다(정본은 `shared/report_evidence/policy.py`,
-#: 팀 리드 2026-08-31 통보). 채용→culture, 제품→portfolio·business_model,
-#: 뉴스룸/IR/비전·전략→future_strategy·past_changes:completed_execution,
-#: 회사소개→identity·competitive_position:self_context 순으로 매칭한다.
-#: 먼저 맞는 키워드 묶음을 쓰므로 순서가 우선순위다.
-_SLOTS = WIDE_REQUIRED_SLOT_IDS_BY_SECTION
-_SLOT_KEYWORD_MAP: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
-    (
-        ("recruit", "career", "careers", "jobs", "채용", "인재", "culture"),
-        _SLOTS["culture"],
-    ),
-    (
-        ("product", "products", "service", "tech", "portfolio"),
-        _SLOTS["portfolio"] + _SLOTS["business_model"],
-    ),
-    (
-        ("news", "press", "newsroom", "blog", "ir", "investor", "vision", "strategy", "future"),
-        _SLOTS["future_strategy"] + _SLOTS["past_changes"],
-    ),
-    (
-        ("about", "company", "overview"),
-        _SLOTS["identity"] + _SLOTS["competitive_position"],
-    ),
-    (
-        ("business",),
-        _SLOTS["business_model"],
-    ),
-    (
-        ("partner", "partnership"),
-        _SLOTS["operations_partners"],
-    ),
-)
 
 
 @dataclass
@@ -377,7 +344,7 @@ def _visit_page(
     page_state, reason_code = classify_general_outcome(response, error)
     requirement = REQUIREMENT_REQUIRED if binding.is_high_confidence else REQUIREMENT_OPTIONAL
     source_kind = _source_kind_for(item.url)
-    slot_ids = _slot_ids_for(item.url)
+    slot_ids = slot_ids_for_url(item.url)
     response_bytes = len((response.text if response else "").encode("utf-8", errors="ignore"))
     state.total_bytes += response_bytes
 
@@ -452,6 +419,8 @@ def _build_web_document(
         collector_version=WIDE_COLLECTOR_VERSION,
         parser_version=WIDE_PARSER_VERSION,
         requirement=requirement,
+        #: 결속 확인된 공식 웹 문서 «후보» 등급. 최종 확정은 통합 담당의 몫이다.
+        source_tier=SOURCE_TIER_1_OFFICIAL,
     )
 
 
@@ -674,6 +643,7 @@ def _build_ir_document(
         collector_version=WIDE_COLLECTOR_VERSION,
         parser_version=WIDE_PARSER_VERSION,
         requirement=REQUIREMENT_REQUIRED,
+        source_tier=SOURCE_TIER_1_OFFICIAL,
     )
 
 
@@ -728,11 +698,3 @@ def _source_kind_for(url: str) -> str:
     if any(marker in lowered for marker in _RECRUIT_MARKERS):
         return WIDE_SOURCE_KIND_RECRUIT_PAGE
     return WIDE_SOURCE_KIND_WEB_PAGE
-
-
-def _slot_ids_for(url: str) -> tuple[str, ...]:
-    lowered = urllib.parse.unquote(url).lower()
-    for keywords, slots in _SLOT_KEYWORD_MAP:
-        if any(keyword in lowered for keyword in keywords):
-            return slots
-    return ()

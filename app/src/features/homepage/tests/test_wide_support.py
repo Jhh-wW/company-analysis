@@ -9,6 +9,7 @@ from src.features.homepage.wide_domain import (
     is_excluded_linked_host,
     is_registered_subdomain,
     registrable_core_name,
+    slot_ids_for_url,
 )
 from src.features.homepage.wide_extract import (
     extract_inline_spa_ranges,
@@ -89,6 +90,32 @@ def test_canonicalize_url은_쿼리_순서를_정렬한다():
     left = canonicalize_url("https://company.com/about?b=2&a=1")
     right = canonicalize_url("https://company.com/about?a=1&b=2")
     assert left == right
+
+
+def test_slot_ids_for_url은_경로_키워드로_매칭한다():
+    assert slot_ids_for_url("https://company.example/careers") == (
+        "culture:work_principle",
+        "culture:verified_case",
+    )
+
+
+def test_slot_ids_for_url은_하위도메인_키워드로도_매칭한다():
+    assert slot_ids_for_url("https://recruit.company.example/") == (
+        "culture:work_principle",
+        "culture:verified_case",
+    )
+
+
+def test_slot_ids_for_url은_등록도메인_자체_낱말에_오탐하지_않는다():
+    """company.example 같은 도메인이 «about/company» 범주를 우연히 채가면 안 된다.
+
+    (실측 회귀 — 실제로 이 테스트가 처음 실패해서 host-label 대조로 고쳤다.)
+    """
+    assert slot_ids_for_url("https://company.example/random-page") == ()
+
+
+def test_slot_ids_for_url은_알수없는_페이지면_빈_튜플():
+    assert slot_ids_for_url("https://company.example/xyz-unrelated") == ()
 
 
 # ── wide_extract ─────────────────────────────────────────

@@ -472,3 +472,63 @@ WIDE_REQUIRED_SLOT_IDS: Final[tuple[str, ...]] = tuple(
     for slots in WIDE_REQUIRED_SLOT_IDS_BY_SECTION.values()
     for slot in slots
 )
+
+#: URL 안의 페이지 유형 키워드 → 후보 슬롯 집합. `wide_domain.slot_ids_for_url`과
+#: `wide_fragments.py`가 함께 재사용한다(같은 표 하나만 둔다 — 중복 금지).
+#: 첫 번째로 맞는 키워드 묶음을 쓰므로 튜플 순서가 우선순위다. 채용→culture,
+#: 제품→portfolio·business_model, 뉴스룸/IR/비전·전략→future_strategy·
+#: past_changes, 회사소개→identity·competitive_position:self_context.
+WIDE_SLOT_KEYWORD_MAP: Final[tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]] = (
+    (
+        ("recruit", "career", "careers", "jobs", "채용", "인재", "culture"),
+        WIDE_REQUIRED_SLOT_IDS_BY_SECTION["culture"],
+    ),
+    (
+        ("product", "products", "service", "tech", "portfolio"),
+        WIDE_REQUIRED_SLOT_IDS_BY_SECTION["portfolio"]
+        + WIDE_REQUIRED_SLOT_IDS_BY_SECTION["business_model"],
+    ),
+    (
+        ("news", "press", "newsroom", "blog", "ir", "investor", "vision", "strategy", "future"),
+        WIDE_REQUIRED_SLOT_IDS_BY_SECTION["future_strategy"]
+        + WIDE_REQUIRED_SLOT_IDS_BY_SECTION["past_changes"],
+    ),
+    (
+        ("about", "company", "overview"),
+        WIDE_REQUIRED_SLOT_IDS_BY_SECTION["identity"]
+        + WIDE_REQUIRED_SLOT_IDS_BY_SECTION["competitive_position"],
+    ),
+    (
+        ("business",),
+        WIDE_REQUIRED_SLOT_IDS_BY_SECTION["business_model"],
+    ),
+    (
+        ("partner", "partnership"),
+        WIDE_REQUIRED_SLOT_IDS_BY_SECTION["operations_partners"],
+    ),
+)
+
+#: 조각(fragment) 본문에서 후보 슬롯을 더 좁히는 «가벼운» 신호 키워드.
+#: 본격적인 분류기가 아니다 — 후보 슬롯 중 이 키워드가 본문에 있으면 그
+#: 슬롯만, 하나도 없으면 페이지 유형이 준 후보 전체를 매긴다
+#: (`wide_fragments.py` 참조). 다루지 않는 슬롯은 이 dict에서 빠져 있어도
+#: 되며, 그 경우 페이지 유형 신호로만 매겨진다.
+WIDE_SLOT_BODY_KEYWORDS: Final[dict[str, tuple[str, ...]]] = {
+    "identity:corporate_identity": ("설립", "연혁", "사명", "비전", "미션"),
+    "identity:business_definition": ("사업영역", "주요사업", "업종", "우리는"),
+    "business_model:revenue_model": ("매출", "수익", "판매", "가격", "요금"),
+    "business_model:customer_type": ("고객", "타겟", "대상", "이용자"),
+    "business_model:value_exchange": ("제공", "가치", "혜택", "구독"),
+    "portfolio:product_role": ("제품", "서비스", "기능", "솔루션"),
+    "portfolio:revenue_link": ("매출 비중", "주력", "핵심 제품", "라인업"),
+    "past_changes:completed_execution": ("완료", "달성", "출시했", "런칭했", "성과"),
+    "current_challenges:issue": ("과제", "어려움", "리스크", "문제"),
+    "current_challenges:response": ("대응", "개선", "해결", "극복"),
+    "future_strategy:stated_plan": ("계획", "전략", "로드맵", "예정"),
+    "future_strategy:plan_status": ("진행중", "추진", "단계", "목표"),
+    "operations_partners:value_chain": ("공급망", "밸류체인", "협력사", "원자재"),
+    "operations_partners:operating_role": ("파트너", "제휴", "협업", "운영"),
+    "culture:work_principle": ("핵심가치", "인재상", "일하는 방식", "원칙"),
+    "culture:verified_case": ("사례", "후기", "인터뷰", "스토리"),
+    "competitive_position:self_context": ("강점", "차별화", "경쟁력", "1위", "선도"),
+}

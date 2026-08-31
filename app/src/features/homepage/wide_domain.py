@@ -22,7 +22,15 @@ from src.features.homepage.constants import (
     MULTI_LABEL_PUBLIC_SUFFIXES,
     SINGLE_LABEL_PUBLIC_SUFFIXES,
     WIDE_EXCLUDED_LINKED_HOST_SUFFIXES,
+    WIDE_PRIORITY_HOST_KEYWORDS,
+    WIDE_SLOT_KEYWORD_MAP,
 )
+
+#: 하위 도메인 이름으로도 매칭해도 안전한 키워드만(예: recruit.company.example).
+#: 「company」처럼 흔한 낱말은 회사 등록 도메인 자체에 우연히 들어 있을 수
+#: 있어(예: company.example) 호스트 전체 문자열 대조에 넣지 않는다 — 이미
+#: `constants.py`의 PRIORITY_PATH_KEYWORDS 주석에 실측으로 남긴 함정과 같다.
+_HOST_SAFE_KEYWORDS: frozenset[str] = frozenset(WIDE_PRIORITY_HOST_KEYWORDS)
 
 
 def registrable_core_name(host: str) -> str:
@@ -149,3 +157,32 @@ def canonicalize_url(url: str) -> str:
     return urllib.parse.urlunsplit(
         (parsed.scheme.casefold(), parsed.netloc.casefold(), path, query, "")
     )
+
+
+def slot_ids_for_url(url: str) -> tuple[str, ...]:
+    """URL 안의 페이지 유형 키워드로 후보 슬롯 집합을 고른다(첫 일치 우선).
+
+    경로(+쿼리)는 모든 키워드로 대조하지만, 호스트 이름은 «하위 도메인으로
+    써도 안전한» 키워드(``_HOST_SAFE_KEYWORDS``, recruit·ir·news 등)만
+    라벨 단위로 정확히 대조한다. 그래야 recruit.company.example 같은
+    도메인은 잡아내면서, company.example처럼 회사 도메인 자체에 우연히
+    들어 있는 낱말(«company» 등)이 모든 페이지를 잘못 분류하지 않는다.
+
+    `wide_collect.py`(attempt.slot_ids)와 `wide_fragments.py`(조각 슬롯 태깅)가
+    같은 표(`constants.WIDE_SLOT_KEYWORD_MAP`)를 이 함수 하나로 공유한다 —
+    두 곳에 각각 다른 매핑을 두지 않는다.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    host_labels = frozenset((parsed.hostname or "").lower().split("."))
+    path_and_query = urllib.parse.unquote(parsed.path).lower()
+    if parsed.query:
+        path_and_query = f"{path_and_query}?{urllib.parse.unquote(parsed.query).lower()}"
+
+    for keywords, slots in WIDE_SLOT_KEYWORD_MAP:
+        if any(keyword in path_and_query for keyword in keywords):
+            return slots
+        if any(
+            keyword in host_labels for keyword in keywords if keyword in _HOST_SAFE_KEYWORDS
+        ):
+            return slots
+    return ()

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 from src.features.homepage.wide_types import (
     WideCollectionAttempt,
     WideCollectionResult,
     WideDocumentIdentity,
+    WideFragment,
 )
 
 _SHA = "a" * 64
@@ -29,9 +32,27 @@ def _document(**overrides: object) -> WideDocumentIdentity:
         collector_version="v1",
         parser_version="v1",
         requirement="REQUIRED",
+        source_tier="TIER_1_OFFICIAL",
     )
     fields.update(overrides)
     return WideDocumentIdentity(**fields)
+
+
+def _fragment(**overrides: object) -> WideFragment:
+    text = "우리는 좋은 회사입니다."
+    fields = dict(
+        fragment_id="frag-1",
+        document_id="d1",
+        location="https://company.example/about#0",
+        text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        text=text,
+        section_id="identity",
+        slot_id="identity:corporate_identity",
+        score_millis=700,
+        reason_codes=("page_type_signal",),
+    )
+    fields.update(overrides)
+    return WideFragment(**fields)
 
 
 def _attempt(**overrides: object) -> WideCollectionAttempt:
@@ -68,6 +89,16 @@ def test_잘못된_sha256_형식은_ValueError():
 def test_대문자_sha256도_ValueError():
     with pytest.raises(ValueError):
         _document(content_sha256="A" * 64)
+
+
+def test_source_tier가_허용값이_아니면_ValueError():
+    with pytest.raises(ValueError):
+        _document(source_tier="TIER_0_UNKNOWN")
+
+
+def test_source_tier_TIER_1_OFFICIAL은_허용된다():
+    document = _document(source_tier="TIER_1_OFFICIAL")
+    assert document.source_tier == "TIER_1_OFFICIAL"
 
 
 def test_requirement이_REQUIRED_OPTIONAL이_아니면_ValueError():
@@ -123,6 +154,70 @@ def test_attempt_slot_ids_안에_빈_문자열이_있으면_ValueError():
 def test_attempt_slot_ids는_빈_튜플을_허용한다():
     attempt = _attempt(slot_ids=())
     assert attempt.slot_ids == ()
+
+
+def test_정상_fragment는_생성된다():
+    fragment = _fragment()
+    assert fragment.slot_id == "identity:corporate_identity"
+
+
+def test_fragment_text_sha256이_text와_불일치하면_ValueError():
+    with pytest.raises(ValueError):
+        _fragment(text_sha256="a" * 64)
+
+
+def test_fragment_slot_id가_허용_어휘_밖이면_ValueError():
+    with pytest.raises(ValueError):
+        _fragment(slot_id="identity:unknown_field", section_id="identity")
+
+
+def test_fragment_comparison_슬롯은_허용되지_않는다():
+    with pytest.raises(ValueError):
+        _fragment(slot_id="comparison_position:market_share", section_id="comparison_position")
+
+
+def test_fragment_limitation_슬롯은_허용되지_않는다():
+    with pytest.raises(ValueError):
+        _fragment(slot_id="limitation:disclaimer", section_id="limitation")
+
+
+def test_fragment_historical_performance_슬롯은_허용되지_않는다():
+    with pytest.raises(ValueError):
+        _fragment(slot_id="historical_performance:trend", section_id="historical_performance")
+
+
+def test_fragment_section_id가_slot_id_장과_다르면_ValueError():
+    with pytest.raises(ValueError):
+        _fragment(section_id="culture")  # slot_id는 identity:corporate_identity 그대로
+
+
+def test_fragment_score_millis_범위_밖이면_ValueError():
+    with pytest.raises(ValueError):
+        _fragment(score_millis=1001)
+    with pytest.raises(ValueError):
+        _fragment(score_millis=-1)
+
+
+def test_fragment_score_millis_경계값은_허용된다():
+    assert _fragment(score_millis=0).score_millis == 0
+    assert _fragment(score_millis=1000).score_millis == 1000
+
+
+def test_fragment_reason_codes가_비어있으면_ValueError():
+    with pytest.raises(ValueError):
+        _fragment(reason_codes=())
+
+
+def test_fragment_reason_codes_형식이_잘못되면_ValueError():
+    with pytest.raises(ValueError):
+        _fragment(reason_codes=("한글 사유",))
+
+
+def test_fragment_location_형식이_잘못되면_ValueError():
+    with pytest.raises(ValueError):
+        _fragment(location="https://company.example/about")  # '#index' 없음
+    with pytest.raises(ValueError):
+        _fragment(location="https://company.example/about#끝")  # 숫자 아님
 
 
 def test_result은_documents와_attempts를_묶는다():
