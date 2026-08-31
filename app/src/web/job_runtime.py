@@ -362,9 +362,14 @@ def _report_audience_for_track(
 ) -> ReportAudience:
     """입장이 확정한 비용 track을 닫힌 열람 소유권으로 바꾼다."""
 
+    track = resolved_track[0]
+    # Track은 문자열 Enum이라 원시 문자열과 값·hash가 같을 수 있다. 여기서
+    # exact type을 닫지 않으면 "member" 같은 느슨한 입력도 정식 MEMBER
+    # 입장으로 승격된다. 입장 시점의 typed 결정만 이후 저장 권위로 운반한다.
+    if type(track) is not share_tracks.Track:
+        raise TypeError("보고서 입장에는 닫힌 비용 track이 필요합니다")
     if _requires_public_report_grant(resolved_track):
         return ReportAudience.PUBLIC
-    track = resolved_track[0]
     mapping = {
         share_tracks.Track.MEMBER: ReportAudience.MEMBER,
         share_tracks.Track.LINK: ReportAudience.LINK,

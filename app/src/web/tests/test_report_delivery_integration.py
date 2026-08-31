@@ -161,6 +161,14 @@ def test_admission은_4개track을_닫힌audience로한번만확정한다(track,
     assert job_runtime._report_audience_for_track(resolved) is audience
 
 
+@pytest.mark.parametrize("raw_track", ("public", "member", "link", "admin"))
+def test_admission은_Track과_값이같은_원시문자열도_거절한다(raw_track):
+    with pytest.raises(TypeError, match="닫힌 비용 track"):
+        job_runtime._report_audience_for_track(  # type: ignore[arg-type]
+            (raw_track, f"bucket-{raw_track}", 100.0)
+        )
+
+
 def test_stage는_문자열audience를_ADMIN으로추측하지않는다():
     report = _demo_report()
     report_id = uuid.uuid4().hex
