@@ -33,18 +33,7 @@ from src.shared.report_quality.generation import (
     observe_generation,
 )
 from src.shared.report_quality.models import PublicationPolicy
-from src.shared.report_quality.dto import (
-    ClaimFact,
-    ReportCandidate,
-    ReportSectionCandidate,
-    SourceDocument,
-)
-from src.shared.report_quality.fact_binding import fact_evidence_binding
 from src.shared.report_quality.contract import contract_for_generation
-from src.shared.report_quality.source_identity import (
-    document_identity,
-    document_identity_from_parts,
-)
 from src.features.composer.logic import (
     AskFn,
     FragmentsInput,
@@ -68,6 +57,9 @@ from src.features.composer.port import (
     FilingMeta,
     PerformanceTable,
 )
+from src.features.composer.quality_projection import (
+    build_generation_quality_candidate,
+)
 from src.features.composer.render import render_report
 from src.features.composer.structured_claims import (
     NumericSafetyFiltering,
@@ -77,7 +69,6 @@ from src.features.composer.structured_claims import (
 from src.features.composer.validate import validate_v2
 from src.features.composer.verify import verify_report, verify_sentences
 from src.features.pipeline.port import Grade, Report
-from src.features.provenance.sources import Source
 
 logger = logging.getLogger(__name__)
 
@@ -468,7 +459,7 @@ def run_v2(
     # 남긴다. 따라서 전체 안전 결과는 계속 미완성/차단이며, 숫자 문장 경계
     # 밖의 공개 구조는 결속과 영향 측정 전까지 전체 hard gate로 승격하지 않는다.
     quality_observation = observe_generation(
-        _generation_quality_candidate(rendered, final)
+        build_generation_quality_candidate(rendered, final)
     )
     if not quality_observation.release_allowed:
         logger.warning(
@@ -498,95 +489,4 @@ def run_v2(
     )
 
 
-def _generation_quality_candidate(
-    rendered: Report,
-    composed: ComposedReport,
-) -> ReportCandidate:
-    """렌더 결과를 텍스트 역추출 없이 공유 품질 DTO로 투영한다."""
-
-    rendered_sections = {section.cell: section for section in rendered.sections}
-    sections: list[ReportSectionCandidate] = []
-    for section in composed.sections:
-        rendered_section = rendered_sections.get(section.section_id)
-        fact_ids = tuple(rendered_section.fact_ids) if rendered_section else ()
-        bound_fact_ids = set(fact_ids)
-        has_unbound_sentences = any(
-            sentence.structured_claim is None
-            or sentence.structured_claim.fact_id not in bound_fact_ids
-            for sentence in section.sentences
-        )
-        # 표·도식은 아직 셀/행 단위 fact_id 결속이 없다. 섹션 장부에 사실이
-        # 있다는 이유만으로 해당 공개 구조까지 검증됐다고 꾸미지 않는다.
-        has_unbound_structures = bool(
-            section.flow_rows
-            or (rendered_section is not None and rendered_section.tables)
-        )
-        sections.append(
-            ReportSectionCandidate(
-                section_id=section.section_id,
-                fact_ids=fact_ids,
-                notice_only=not section.sentences and not has_unbound_structures,
-                has_unbound_public_content=(
-                    has_unbound_sentences or has_unbound_structures
-                ),
-                public_sentence_count=len(section.sentences),
-            )
-        )
-
-    sources = tuple(
-        SourceDocument(
-            source_id=source.source_id,
-            document_identity=document_identity(source),
-        )
-        for source in rendered.citations
-        if isinstance(source, Source)
-    )
-    facts = tuple(
-        ClaimFact(
-            fact_id=fact.fact_id,
-            section_owner=fact.section_owner,
-            source_id=fact.source_id,
-            source_identity=document_identity_from_parts(
-                document_id=fact.source_document_id,
-                host=fact.source_host,
-                url=fact.source_url,
-            ),
-            verification_state=fact.verification_status or fact.status,
-            claim_slot=fact.claim_slot,
-            evidence_binding_valid=bool(fact.evidence_binding)
-            and fact.evidence_binding == fact_evidence_binding(fact),
-            claim=fact.claim,
-            subject_scope=fact.subject_scope,
-            raw_value=fact.raw_value,
-            calculation=fact.calculation,
-            display_value=fact.display_value,
-            rounding_rule=fact.rounding_rule,
-            numeric_checks=tuple(fact.numeric_checks),
-            metric=fact.metric,
-            period_start=fact.period_start,
-            period_end=fact.period_end,
-            sign=fact.sign,
-            unit=fact.unit,
-            unit_dimension=fact.unit_dimension,
-            formula=fact.formula,
-        )
-        for fact in rendered.fact_records
-    )
-    rendered_fact_ids = {fact.fact_id for fact in rendered.fact_records}
-    summary_fact_ids = tuple(
-        sentence.structured_claim.fact_id
-        for sentence in composed.summary
-        if sentence.structured_claim is not None
-        and sentence.structured_claim.fact_id in rendered_fact_ids
-    )
-    return ReportCandidate(
-        sections=tuple(sections),
-        facts=facts,
-        sources=sources,
-        summary_fact_ids=summary_fact_ids,
-        has_unbound_summary_content=any(
-            sentence.structured_claim is None
-            or sentence.structured_claim.fact_id not in rendered_fact_ids
-            for sentence in composed.summary
-        ),
-    )
+__all__ = ["V2RunOutput", "run_v2"]
