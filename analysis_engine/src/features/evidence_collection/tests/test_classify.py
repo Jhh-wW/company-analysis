@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from features.evidence_collection import constants as c
 from features.evidence_collection.classify import classify_company_type
-from features.evidence_collection.models import CollectedDocument, DocumentTextRange
+from features.evidence_collection.models import CollectedDocument, CollectionAttempt, DocumentTextRange
 
 
 def _document(source_kind: str, requirement: str = c.REQUIREMENT_REQUIRED) -> CollectedDocument:
@@ -58,5 +58,47 @@ def test_매출액_언급이_있으면_금융_키워드가_있어도_financial�
     assert classify_company_type(documents, fragments) == c.COMPANY_TYPE_LISTED
 
 
-def test_문서가_없으면_가장_보수적인_audit_only로_남긴다() -> None:
-    assert classify_company_type([], []) == c.COMPANY_TYPE_AUDIT_ONLY
+def _list_attempt(source_kind: str, state: str, requirement: str = c.REQUIREMENT_REQUIRED) -> CollectionAttempt:
+    return CollectionAttempt(
+        attempt_id=f"list:{source_kind}",
+        source_kind=source_kind,
+        requirement=requirement,
+        state=state,
+        slot_ids=("identity:corporate_identity",),
+        reason_code=c.REASON_LIST_QUERY_OK if state == c.ATTEMPT_STATE_OK else c.REASON_LIST_QUERY_FAILED,
+        elapsed_ms=0,
+        bytes_downloaded=0,
+        documents_seen=0,
+    )
+
+
+def test_P1_1_문서가_없으면_audit_only로_지어내지_않고_undecided를_돌려준다() -> None:
+    """team-lead 통보(2026-08-31) — audit_only는 긍정적 사실 주장이라 근거 없이 쓰면 안 된다."""
+    assert classify_company_type([], []) == c.COMPANY_TYPE_UNDECIDED
+
+
+def test_P1_1_필수_목록_조회가_FAILED면_문서가_있어도_undecided다() -> None:
+    documents = [_document(c.SOURCE_KIND_BUSINESS_REPORT)]
+    fragments = ["최근 3개년 매출액은 매년 증가했다."]
+    attempts = [_list_attempt(c.SOURCE_KIND_AUDIT_REPORT, c.ATTEMPT_STATE_FAILED)]
+
+    assert classify_company_type(documents, fragments, attempts=attempts) == c.COMPANY_TYPE_UNDECIDED
+
+
+def test_P1_1_선택_목록_조회_FAILED는_undecided_사유가_아니다() -> None:
+    """반기·분기(OPTIONAL) 조회 실패는 판정을 막지 않는다 — 필수 목록만 본다."""
+    documents = [_document(c.SOURCE_KIND_BUSINESS_REPORT)]
+    fragments = ["최근 3개년 매출액은 매년 증가했다."]
+    attempts = [
+        _list_attempt(c.SOURCE_KIND_SEMIANNUAL_REPORT, c.ATTEMPT_STATE_FAILED, requirement=c.REQUIREMENT_OPTIONAL),
+    ]
+
+    assert classify_company_type(documents, fragments, attempts=attempts) == c.COMPANY_TYPE_LISTED
+
+
+def test_P1_1_문서는_있지만_판정_신호가_없으면_undecided다() -> None:
+    """사업/감사보고서 어느 source_kind도 아닌 문서만 있는 경우(예: 보충 자료뿐)."""
+    documents = [_document(c.SOURCE_KIND_SEMIANNUAL_REPORT, requirement=c.REQUIREMENT_OPTIONAL)]
+    fragments = ["당사는 반기 실적을 보고한다."]
+
+    assert classify_company_type(documents, fragments) == c.COMPANY_TYPE_UNDECIDED
