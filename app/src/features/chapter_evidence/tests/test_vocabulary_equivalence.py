@@ -2,8 +2,11 @@
 
 엔진 모듈을 import하면 이 워크트리에 없는 무거운 의존성까지 끌려온다. import
 대신 파일 경로를 ast로 파싱해 ``COLLECTOR_SLOTS_BY_SECTION`` 딕셔너리
-리터럴만 꺼낸다. 이 생산부 워크트리에는 엔진 사본이 아직 없을 수 있으므로,
-그 경우 소리 나게 건너뛴다(조용히 통과시키지 않는다).
+리터럴만 꺼낸다. 엔진의 ``evidence_collection`` 모듈 자체가 아직 이
+워크트리에 병합되지 않았을 수 있으므로, 그 경우에만 소리 나게 건너뛴다
+(조용히 통과시키지 않는다). 모듈 폴더는 있는데 constants.py가 없거나,
+있어도 이 딕셔너리를 못 찾거나 값이 다르면 — 그건 진짜 어휘가 갈라진
+것이므로 건너뛰지 않고 반드시 실패해야 한다.
 """
 
 from __future__ import annotations
@@ -19,9 +22,9 @@ from src.shared.report_evidence.policy import (
 )
 
 
-def _engine_constants_path() -> Path:
+def _engine_module_dir() -> Path:
     # 이 시험 파일 위치 기준: <워크트리 루트>/analysis_engine/src/features/
-    #   evidence_collection/constants.py
+    #   evidence_collection/
     # app/src/features/chapter_evidence/tests/test_vocabulary_equivalence.py
     #   parents[0]=tests, [1]=chapter_evidence, [2]=features, [3]=src, [4]=app,
     #   [5]=워크트리 루트
@@ -32,19 +35,29 @@ def _engine_constants_path() -> Path:
         / "src"
         / "features"
         / "evidence_collection"
-        / "constants.py"
     )
+
+
+def _engine_constants_path() -> Path:
+    return _engine_module_dir() / "constants.py"
 
 
 def _extract_collector_slots_by_section(path: Path) -> dict[str, tuple[str, ...]]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
+        # 일반 대입(``NAME = {...}``)과 주석 붙은 대입(``NAME: Final[...] = {...}``)
+        # 둘 다 처리한다 — 엔진 사본은 후자(ast.AnnAssign) 형태를 쓴다.
+        if isinstance(node, ast.Assign):
+            targets = [target.id for target in node.targets if isinstance(target, ast.Name)]
+            value_node = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            targets = [node.target.id]
+            value_node = node.value
+        else:
             continue
-        targets = [target.id for target in node.targets if isinstance(target, ast.Name)]
-        if "COLLECTOR_SLOTS_BY_SECTION" not in targets:
+        if "COLLECTOR_SLOTS_BY_SECTION" not in targets or value_node is None:
             continue
-        literal = ast.literal_eval(node.value)
+        literal = ast.literal_eval(value_node)
         return {
             str(section_id): tuple(str(slot_id) for slot_id in slots)
             for section_id, slots in literal.items()
@@ -55,9 +68,18 @@ def _extract_collector_slots_by_section(path: Path) -> dict[str, tuple[str, ...]
 
 
 def test_엔진의_수집_슬롯_어휘가_정책과_같다() -> None:
+    engine_module_dir = _engine_module_dir()
+    if not engine_module_dir.exists():
+        pytest.skip(
+            "엔진 evidence_collection 모듈 자체가 없음 — 별도 워크트리에서 "
+            "아직 병합되지 않음"
+        )
+
     engine_path = _engine_constants_path()
-    if not engine_path.exists():
-        pytest.skip("엔진 사본 미존재 — 통합 트리에서 실행됨")
+    assert engine_path.exists(), (
+        "엔진 evidence_collection 모듈은 있는데 constants.py가 없습니다 — "
+        "건너뛰지 않고 실패로 처리합니다"
+    )
 
     engine_slots = _extract_collector_slots_by_section(engine_path)
 
