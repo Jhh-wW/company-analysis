@@ -46,11 +46,18 @@ class CompanyType(str, Enum):
     슬롯 요구 자체(REQUIRED_EVIDENCE_SLOTS_BY_SECTION)는 유형과 무관하게 항상
     같다. 유형이 바꾸는 것은 «그 슬롯을 확인하는 정상 경로가 공시인지 공식
     웹인지» 뿐이다.
+
+    UNDECIDED: DART 수집기가 판정 근거 문서를 하나도 확보하지 못해 회사
+    유형 자체를 아직 못 정한 경우. 기대 경로를 «모름»으로 다룬다 — 특정
+    접두어를 기대하지 않으므로 REQUIRED_PATH_PREFIX_BY_COMPANY_TYPE에
+    등록하지 않고, diagnose.py도 이 값에는 기대 경로 가산 확인을 적용하지
+    않는다(계약과 완전히 같은 판정만 쓴다).
     """
 
     LISTED = "listed"
     AUDIT_ONLY = "audit_only"
     FINANCIAL = "financial"
+    UNDECIDED = "undecided"
 
 
 # CollectionAttempt.source_kind 접두어 — 실제 접두어는 수집기(claude-a-dart,

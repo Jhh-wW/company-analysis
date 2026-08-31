@@ -63,6 +63,9 @@ def test_확인기록이_전혀_없는_빈슬롯은_unknown이다() -> None:
 def test_기대경로가_아닌_출처의_시도는_확인으로_치지_않는다() -> None:
     # listed 는 identity 의 기대 경로가 dart_ 다. official_ 로만 조회했다면
     # «기대 경로를 아직 확인 안 한 것»이라 INSUFFICIENT가 아니라 UNKNOWN이다.
+    # (계약 기준으로는 REQUIRED 조회가 있고 실패도 아니라 «정상 확인 후 부재»
+    # 이지만, 기대 경로 미관측이라는 가산 확인이 진단을 UNKNOWN 쪽으로 더
+    # 조심하게 튼다 — 그래서 사유 코드도 계약과 다른 expected_path_unobserved다.)
     wrong_path_attempt = _attempt(
         attempt_id="a1",
         source_kind="official_homepage",
@@ -78,7 +81,7 @@ def test_기대경로가_아닌_출처의_시도는_확인으로_치지_않는�
     )
 
     assert readiness is EvidenceReadiness.UNKNOWN
-    assert "required_path_unobserved:identity:corporate_identity" in reasons
+    assert "expected_path_unobserved:identity:corporate_identity" in reasons
 
 
 def test_기대경로를_정상확인했지만_부재면_insufficient다() -> None:
@@ -203,3 +206,48 @@ def test_일부만_찬_장은_빈슬롯만_진단한다() -> None:
 
     assert readiness is EvidenceReadiness.INSUFFICIENT
     assert reasons == ("evidence_absent_after_check:business_model:customer_type",)
+
+
+def test_undecided_회사유형은_기대경로_가산규칙을_적용하지_않는다() -> None:
+    # competitive_position 은 수집 슬롯이 self_context 하나뿐이라(비교 5칸은
+    # 주입 몫) 다른 빈 슬롯이 섞여 UNKNOWN으로 끌려가지 않는다. 회사 유형을
+    # 아직 모르면(undecided) 기대할 접두어 자체가 없다. LISTED라면 dart_가
+    # 기대 경로지만, 여기서는 official_로만 조회해도 «기대 경로 미관측» 가산
+    # 확인 없이 계약과 완전히 같은 판정(정상 확인 후 부재)만 내야 한다.
+    attempt = _attempt(
+        attempt_id="a1",
+        source_kind="official_homepage",
+        slot_ids=("competitive_position:self_context",),
+        state=CollectionState.MISSING,
+    )
+
+    readiness, reasons = diagnose_candidate_readiness(
+        section_id="competitive_position",
+        company_type=CompanyType.UNDECIDED,
+        filled_slot_ids=frozenset(),
+        attempts=(attempt,),
+    )
+
+    assert readiness is EvidenceReadiness.INSUFFICIENT
+    assert reasons == ("evidence_absent_after_check:competitive_position:self_context",)
+
+
+def test_undecided_회사유형도_조회_실패는_여전히_unknown이다() -> None:
+    # 가산 확인만 안 쓸 뿐, 계약과 동일한 1)·2) 규칙(REQUIRED 조회 자체가
+    # 없거나 실패·절단)은 undecided에서도 그대로 적용된다.
+    attempt = _attempt(
+        attempt_id="a1",
+        source_kind="dart_business_report",
+        slot_ids=("competitive_position:self_context",),
+        state=CollectionState.FAILED,
+    )
+
+    readiness, reasons = diagnose_candidate_readiness(
+        section_id="competitive_position",
+        company_type=CompanyType.UNDECIDED,
+        filled_slot_ids=frozenset(),
+        attempts=(attempt,),
+    )
+
+    assert readiness is EvidenceReadiness.UNKNOWN
+    assert "required_path_failed:competitive_position:self_context" in reasons

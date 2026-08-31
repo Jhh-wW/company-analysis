@@ -199,3 +199,41 @@ def test_한_장만_조회장애여도_다른_여덟_장은_영향받지_않는�
         if section_id == "future_strategy":
             continue
         assert by_section[section_id].candidate_readiness is EvidenceReadiness.READY
+
+
+_SCENARIO_FIXTURES = (
+    ("corp-wisely", "audit_only", build_wisely_type_fixture),
+    ("corp-listed", "listed", build_listed_fixture),
+    ("corp-financial", "financial", build_financial_fixture),
+    ("corp-no-homepage", "audit_only", build_no_homepage_fixture),
+    ("corp-js-render", "audit_only", build_javascript_render_failure_fixture),
+)
+
+
+@pytest.mark.parametrize(("company_id", "company_type", "fixture_builder"), _SCENARIO_FIXTURES)
+def test_진단이_INSUFFICIENT인_장은_계약도_UNKNOWN이_아니다(
+    company_id: str, company_type: str, fixture_builder
+) -> None:
+    """진단(producer diagnostic)이 계약보다 «덜 조심»하지 않음을 고정한다.
+
+    진단이 INSUFFICIENT라고 판단한 장은 최종 계약 판정(build_section_bundle)도
+    반드시 UNKNOWN이 아니어야 한다 — 진단이 조회 장애를 자료 부재로 축소해
+    사용자에게 잘못된 확신을 주면 안 된다. 다섯 시나리오 전부에서 위반이
+    0건임을 고정한다.
+    """
+
+    fixture = fixture_builder()
+    candidates = produce_chapter_evidence_candidates(
+        company_id=company_id, company_type=company_type, **fixture
+    )
+    for candidate in candidates:
+        if candidate.candidate_readiness is not EvidenceReadiness.INSUFFICIENT:
+            continue
+        bundle = build_section_bundle(
+            candidate,
+            required_slot_ids=required_slots_for(candidate.section_id),
+            injected_slot_facts=injected_facts_for(candidate.section_id),
+        )
+        assert bundle.readiness is not EvidenceReadiness.UNKNOWN, (
+            f"{candidate.section_id}: 진단은 INSUFFICIENT인데 계약은 UNKNOWN입니다"
+        )

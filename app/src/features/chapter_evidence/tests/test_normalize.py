@@ -211,6 +211,12 @@ def test_회사유형_문자열을_열거형으로_바꾼다() -> None:
     assert normalize_company_type(CompanyType.AUDIT_ONLY) is CompanyType.AUDIT_ONLY
 
 
+def test_undecided_회사유형_문자열도_받아들인다() -> None:
+    # DART 수집기가 판정 근거 문서를 하나도 확보 못 해 회사 유형을 아직
+    # 못 정한 경우(회사 유형 자체가 undecided).
+    assert normalize_company_type("undecided") is CompanyType.UNDECIDED
+
+
 def test_알수없는_회사유형은_거부한다() -> None:
     with pytest.raises(ValueError, match="알 수 없는 회사 유형"):
         normalize_company_type("unicorn")
