@@ -3,6 +3,13 @@
 app 쪽 adapter가 이 Mapping을 그대로 계약 자료형으로 변환한다(2026-08-31
 team-lead 통보). frozen dataclass·frozenset·tuple 같은 파이썬 전용 타입은
 하나도 새지 않는다 — JSON으로 그대로 dump할 수 있는 모양만 돌려준다.
+
+★ generation=7 계약(P0-5, 2026-08-31) — 각 document Mapping에는
+``exact_evidence_hashes``가 있다: 그 document_id로 실제 내보내는 fragment들의
+``text_sha256`` 전체를 결정론적 순서로, 중복 없이 담는다. ``harvest.fragments``는
+collect.py가 이미 scored fragment만 넣도록 보장하므로(P0-1·P0-3) 이 값은
+documents에 실린 문서마다 절대 비지 않는다 — 두 보장이 같은 경계(scored
+fragment 존재 여부)에서 나온다.
 """
 
 from __future__ import annotations
@@ -20,7 +27,9 @@ def _range_to_mapping(text_range: DocumentTextRange) -> dict[str, int]:
     return {"start": text_range.start, "end": text_range.end}
 
 
-def _document_to_mapping(document: CollectedDocument) -> dict[str, object]:
+def _document_to_mapping(
+    document: CollectedDocument, exact_evidence_hashes: list[str],
+) -> dict[str, object]:
     return {
         "company_id": document.company_id,
         "document_id": document.document_id,
@@ -37,6 +46,7 @@ def _document_to_mapping(document: CollectedDocument) -> dict[str, object]:
         "collector_version": document.collector_version,
         "parser_version": document.parser_version,
         "requirement": document.requirement,
+        "exact_evidence_hashes": exact_evidence_hashes,
     }
 
 
@@ -72,6 +82,16 @@ def _attempt_to_mapping(attempt: CollectionAttempt) -> dict[str, object]:
     }
 
 
+def _exact_evidence_hashes_by_document_id(harvest: DartEvidenceHarvest) -> dict[str, list[str]]:
+    """document_id별 fragment text_sha256을 정렬·중복 제거해 모은다(P0-5)."""
+    hashes_by_document_id: dict[str, set[str]] = {}
+    for fragment in harvest.fragments:
+        hashes_by_document_id.setdefault(fragment.document_id, set()).add(fragment.text_sha256)
+    return {
+        document_id: sorted(hashes) for document_id, hashes in hashes_by_document_id.items()
+    }
+
+
 def harvest_to_mapping(harvest: DartEvidenceHarvest) -> dict[str, object]:
     """DartEvidenceHarvest 전체를 dict·list·str·int만으로 직렬화한다.
 
@@ -79,10 +99,16 @@ def harvest_to_mapping(harvest: DartEvidenceHarvest) -> dict[str, object]:
     (재정렬하지 않는다 — 호출자가 순서로 의미를 둘 수 있으므로 결정론을
     지킨다). dataclass·frozenset·tuple은 하나도 남기지 않는다.
     """
+    exact_hashes_by_document_id = _exact_evidence_hashes_by_document_id(harvest)
     return {
         "company_id": harvest.company_id,
         "company_type": harvest.company_type,
-        "documents": [_document_to_mapping(document) for document in harvest.documents],
+        "documents": [
+            _document_to_mapping(
+                document, exact_hashes_by_document_id.get(document.document_id, []),
+            )
+            for document in harvest.documents
+        ],
         "fragments": [_fragment_to_mapping(fragment) for fragment in harvest.fragments],
         "attempts": [_attempt_to_mapping(attempt) for attempt in harvest.attempts],
     }

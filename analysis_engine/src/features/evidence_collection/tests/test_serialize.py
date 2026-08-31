@@ -123,7 +123,7 @@ def test_documents_필드_이름과_값이_원본과_일치한다() -> None:
         "company_id", "document_id", "canonical_url", "source_tier", "source_kind",
         "publisher", "title", "published_on", "collected_at", "content_sha256",
         "identity_binding", "usable_ranges", "collector_version", "parser_version",
-        "requirement",
+        "requirement", "exact_evidence_hashes",
     }
     assert serialized["document_id"] == original.document_id
     assert serialized["content_sha256"] == original.content_sha256
@@ -190,6 +190,83 @@ def test_documents_fragments_attempts_순서는_원본_순서를_보존한다() 
     assert [a["attempt_id"] for a in mapping["attempts"]] == [
         a.attempt_id for a in harvest.attempts
     ]
+
+
+def test_P0_5_exact_evidence_hashes는_같은_문서_fragment의_text_sha256_전체다() -> None:
+    """왕복 시험 — 문서 1개, 서로 다른 원문의 fragment 2개."""
+    doc = _document("dart_business_report:20250315000001")
+    frag_a = _fragment("frag-a", doc.document_id)
+    frag_b = EvidenceFragment(
+        fragment_id="frag-b",
+        document_id=doc.document_id,
+        location="20-40",
+        text_sha256=hashlib.sha256("또 다른 조각 원문".encode("utf-8")).hexdigest(),
+        text="또 다른 조각 원문",
+        section_id="business_model",
+        slot_id="business_model:revenue_model",
+        score_millis=500,
+        reason_codes=("keyword_hit:business_model:revenue_model",),
+    )
+    harvest = DartEvidenceHarvest(
+        company_id="00126380",
+        company_type=c.COMPANY_TYPE_LISTED,
+        documents=(doc,),
+        fragments=(frag_a, frag_b),
+        attempts=(),
+    )
+
+    mapping = harvest_to_mapping(harvest)
+    exact_hashes = mapping["documents"][0]["exact_evidence_hashes"]
+
+    assert exact_hashes == sorted([frag_a.text_sha256, frag_b.text_sha256])
+    assert all(len(h) == 64 for h in exact_hashes)
+
+
+def test_P0_5_exact_evidence_hashes는_다른_문서의_fragment를_섞지_않는다() -> None:
+    """문서 2개 — 각 document의 exact_evidence_hashes에는 자기 fragment의 해시만 있다."""
+    harvest = _harvest()  # doc_a에는 frag-1, doc_b에는 frag-2
+
+    mapping = harvest_to_mapping(harvest)
+
+    assert mapping["documents"][0]["exact_evidence_hashes"] == [harvest.fragments[0].text_sha256]
+    assert mapping["documents"][1]["exact_evidence_hashes"] == [harvest.fragments[1].text_sha256]
+
+
+def test_P0_5_exact_evidence_hashes는_중복_없이_담는다() -> None:
+    """같은 문서에 같은 text_sha256을 가진 fragment가 두 개면 한 번만 담는다."""
+    doc = _document("dart_business_report:20250315000001")
+    same_text = "당사는 서로 다른 위치에 같은 문장이 반복돼 실린 경우다."
+    same_hash = hashlib.sha256(same_text.encode("utf-8")).hexdigest()
+    frag_a = EvidenceFragment(
+        fragment_id="frag-a", document_id=doc.document_id, location="0-30",
+        text_sha256=same_hash, text=same_text, section_id="identity",
+        slot_id="identity:corporate_identity", score_millis=500,
+        reason_codes=("keyword_hit:identity:corporate_identity",),
+    )
+    frag_b = EvidenceFragment(
+        fragment_id="frag-b", document_id=doc.document_id, location="500-530",
+        text_sha256=same_hash, text=same_text, section_id="identity",
+        slot_id="identity:corporate_identity", score_millis=500,
+        reason_codes=("keyword_hit:identity:corporate_identity",),
+    )
+    harvest = DartEvidenceHarvest(
+        company_id="00126380",
+        company_type=c.COMPANY_TYPE_LISTED,
+        documents=(doc,),
+        fragments=(frag_a, frag_b),
+        attempts=(),
+    )
+
+    mapping = harvest_to_mapping(harvest)
+
+    assert mapping["documents"][0]["exact_evidence_hashes"] == [frag_a.text_sha256]
+
+
+def test_P0_5_문서가_있으면_exact_evidence_hashes는_절대_비지_않는다() -> None:
+    harvest = _harvest()
+    mapping = harvest_to_mapping(harvest)
+
+    assert all(document["exact_evidence_hashes"] for document in mapping["documents"])
 
 
 def test_빈_harvest도_빈_리스트로_직렬화된다() -> None:
