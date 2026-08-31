@@ -698,3 +698,76 @@ def test_item2_목록_OK인데_문서_fetch가_FAILED면_그_source_kind에는_�
     list_attempt = [a for a in business_report_attempts if a.attempt_id.startswith("list:")][0]
     assert list_attempt.state == c.ATTEMPT_STATE_OK
     assert list_attempt.requirement == c.REQUIREMENT_OPTIONAL
+
+
+# ══════════════════════════════════════════════════════════
+# team-lead 재확인(2026-08-31) — item2가 과잉 교정되면(광역 slot_ids를
+# 실제 확인된 슬롯으로 좁히면) 빈 슬롯을 덮는 REQUIRED 경로가 사라져
+# 모든 회사가 UNKNOWN(TRANSIENT_FAILURE)으로 오판정될 수 있었다. 「위반
+# 0건」 시험은 거짓 확인(false positive) 방향만 봤으므로, 반대 방향
+# (거짓 미확인 — false negative, 빈 슬롯의 REQUIRED 경로 소실)도 함께
+# 세는 시험을 추가한다. 계약을 import할 수 없으므로 계약이 보는 조건
+# (REQUIRED+OK/MISSING·REQUIRED+FAILED의 slot_ids 합집합)을 직접 검사한다.
+# ══════════════════════════════════════════════════════════
+
+_COVERAGE_SCENARIOS: tuple[tuple[str, str, str, str, str], ...] = (
+    ("A", "사업보고서 (2025.03)", "00126380", LISTED_BUSINESS_REPORT_TEXT, c.SOURCE_KIND_BUSINESS_REPORT),
+    ("F", "감사보고서", "00164788", AUDIT_ONLY_REPORT_TEXT, c.SOURCE_KIND_AUDIT_REPORT),
+    ("A", "사업보고서 (2025.03)", "00355758", FINANCIAL_REPORT_TEXT, c.SOURCE_KIND_BUSINESS_REPORT),
+)
+
+
+def test_gap_정상_수집시_그_source_kind의_collector_슬롯_전부가_REQUIRED_OK_MISSING로_덮인다() -> None:
+    """정상 수집(문서 fetch OK)이면 빈 슬롯도 REQUIRED 경로로 덮여 자료부족
+    (INSUFFICIENT) 방향이 되어야 한다 — UNKNOWN(TRANSIENT_FAILURE)로 새면
+    안 된다. 상장·감사·금융 3개 시나리오에서 미커버 슬롯 0개를 확인한다.
+    """
+    for pblntf_ty, report_nm, company_id, text, source_kind in _COVERAGE_SCENARIOS:
+        row = RawFilingRow("20250315000001", report_nm, "20250315")
+        harvest = collect_dart_evidence(_fetcher(pblntf_ty, row, text), company_id, now=_NOW)
+
+        full_scope = set(c.SOURCE_KIND_SLOT_SCOPE[source_kind])
+        required_ok_or_missing = [
+            a for a in harvest.attempts
+            if a.source_kind == source_kind
+            and a.requirement == c.REQUIREMENT_REQUIRED
+            and a.state in (c.ATTEMPT_STATE_OK, c.ATTEMPT_STATE_MISSING)
+        ]
+        assert required_ok_or_missing, f"{company_id}: REQUIRED+OK/MISSING attempt가 하나도 없습니다"
+        covered = set().union(*(a.slot_ids for a in required_ok_or_missing))
+        uncovered = full_scope - covered
+        assert uncovered == set(), f"{company_id}: 빈 슬롯이 REQUIRED 경로 밖으로 샙니다 — {uncovered}"
+
+
+def test_gap_문서_fetch가_FAILED면_그_슬롯들이_REQUIRED_FAILED로_덮인다() -> None:
+    """문서 fetch 자체가 실패하면(전송 장애) 그 source_kind의 슬롯 전부가
+    REQUIRED+FAILED로 덮여야 UNKNOWN 방향이 끝까지 보존된다 — 슬롯이
+    아무 REQUIRED attempt에도 안 걸려 조용히 자료부족으로 새면 안 된다.
+    """
+    for pblntf_ty, report_nm, company_id, _text, source_kind in _COVERAGE_SCENARIOS:
+        row = RawFilingRow("20250315000001", report_nm, "20250315")
+        fetcher = FakeFetcher(
+            list_responses_by_pblntf_ty={pblntf_ty: FilingListResult(state="OK", rows=(row,))},
+            document_responses_by_rcept_no={},  # 응답 없음 → FakeFetcher 기본값 FAILED
+        )
+        harvest = collect_dart_evidence(fetcher, company_id, now=_NOW)
+
+        full_scope = set(c.SOURCE_KIND_SLOT_SCOPE[source_kind])
+        required_failed = [
+            a for a in harvest.attempts
+            if a.source_kind == source_kind
+            and a.requirement == c.REQUIREMENT_REQUIRED
+            and a.state == c.ATTEMPT_STATE_FAILED
+        ]
+        assert required_failed, f"{company_id}: REQUIRED+FAILED attempt가 하나도 없습니다"
+        covered = set().union(*(a.slot_ids for a in required_failed))
+        uncovered = full_scope - covered
+        assert uncovered == set(), f"{company_id}: FAILED가 못 덮는 슬롯이 있습니다 — {uncovered}"
+        # 「확인했는데 근거가 없다」로 잘못 읽힐 REQUIRED+OK/MISSING은 없어야 한다.
+        confirmed_absent = [
+            a for a in harvest.attempts
+            if a.source_kind == source_kind
+            and a.requirement == c.REQUIREMENT_REQUIRED
+            and a.state in (c.ATTEMPT_STATE_OK, c.ATTEMPT_STATE_MISSING)
+        ]
+        assert confirmed_absent == [], f"{company_id}: FAILED 상황인데 REQUIRED+OK/MISSING이 섞여 있습니다"
