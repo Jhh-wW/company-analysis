@@ -36,6 +36,61 @@ def _require_company_id(value: str) -> str:
     return clean
 
 
+def produce_from_collection_envelopes(
+    *,
+    company_id: str,
+    company_type: CompanyType | str,
+    collection_envelopes: Iterable[Mapping[str, object]],
+) -> tuple[ChapterEvidenceCandidates, ...]:
+    """회사 소유권이 봉인된 수집 envelope들을 합쳐 아홉 장 후보를 만든다.
+
+    DART·공식 웹 mapper는 모두 최상위 ``company_id``와 그 회사의
+    documents/fragments/attempts를 함께 돌려준다. 이 최상위 식별자를 버리고
+    내부 배열만 이어 붙이면, 잘못 라우팅된 수집 결과도 중첩 값이 우연히
+    맞는 순간 조용히 통과한다. 운영 결합부는 이 함수를 유일한 merge
+    경계로 사용하고, 저수준 ``produce_chapter_evidence_candidates``는 이미
+    검증된 배열을 장별로 나누는 일만 맡는다.
+    """
+
+    clean_company_id = _require_company_id(company_id)
+    envelopes = tuple(collection_envelopes)
+    if not envelopes:
+        raise ValueError("합칠 수집 결과가 하나도 없습니다")
+
+    documents: list[object] = []
+    fragments: list[object] = []
+    attempts: list[object] = []
+    for index, envelope in enumerate(envelopes):
+        if not isinstance(envelope, Mapping):
+            raise ValueError(f"수집 결과 {index}가 Mapping이 아닙니다")
+        envelope_company_id = _require_company_id(
+            str(envelope.get("company_id") or "")
+        )
+        if envelope_company_id != clean_company_id:
+            raise ValueError(
+                "수집 결과의 최상위 company_id가 대상 회사와 다릅니다: "
+                f"index={index} expected={clean_company_id!r} "
+                f"actual={envelope_company_id!r}"
+            )
+        for key, destination in (
+            ("documents", documents),
+            ("fragments", fragments),
+            ("attempts", attempts),
+        ):
+            values = envelope.get(key)
+            if not isinstance(values, (list, tuple)):
+                raise ValueError(f"수집 결과 {index}의 {key}가 list/tuple이 아닙니다")
+            destination.extend(values)
+
+    return produce_chapter_evidence_candidates(
+        company_id=clean_company_id,
+        company_type=company_type,
+        documents=documents,
+        fragments=fragments,
+        attempts=attempts,
+    )
+
+
 def produce_chapter_evidence_candidates(
     *,
     company_id: str,

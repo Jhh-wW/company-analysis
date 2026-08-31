@@ -14,11 +14,66 @@ from src.shared.report_evidence.constants import (
     SourceTier,
 )
 from src.shared.report_evidence.models import InjectedSlotFacts
-from src.shared.report_evidence.policy import (
-    REQUIRED_EVIDENCE_SECTION_IDS,
-    collector_slots_for,
-    injected_slots_for,
+
+# 이 fixture는 생산 정책 함수를 import하지 않는다. 아래 표는 제품이 답해야
+# 하는 질문을 시험이 독립적으로 고정한 값이다. 생산 정책에서 슬롯을 실수로
+# 빼거나 이름을 바꾸면 fixture까지 자동으로 따라 바뀌지 않고 gate 시험이
+# 깨져야 한다(구현 자기복제 방지).
+_FROZEN_SECTION_IDS: tuple[str, ...] = (
+    "identity",
+    "business_model",
+    "portfolio",
+    "past_changes",
+    "current_challenges",
+    "future_strategy",
+    "operations_partners",
+    "culture",
+    "competitive_position",
 )
+
+_FROZEN_COLLECTOR_SLOTS: dict[str, tuple[str, ...]] = {
+    "identity": ("identity:corporate_identity", "identity:business_definition"),
+    "business_model": (
+        "business_model:revenue_model",
+        "business_model:customer_type",
+        "business_model:value_exchange",
+    ),
+    "portfolio": ("portfolio:product_role", "portfolio:revenue_link"),
+    "past_changes": ("past_changes:completed_execution",),
+    "current_challenges": (
+        "current_challenges:issue",
+        "current_challenges:response",
+    ),
+    "future_strategy": (
+        "future_strategy:stated_plan",
+        "future_strategy:plan_status",
+    ),
+    "operations_partners": (
+        "operations_partners:value_chain",
+        "operations_partners:operating_role",
+    ),
+    "culture": ("culture:work_principle", "culture:verified_case"),
+    "competitive_position": ("competitive_position:self_context",),
+}
+
+_FROZEN_INJECTED_SLOTS: dict[str, tuple[str, ...]] = {
+    "past_changes": ("past_changes:historical_performance",),
+    "competitive_position": (
+        "competitive_position:comparison_target",
+        "competitive_position:comparison_metric",
+        "competitive_position:comparison_basis",
+        "competitive_position:comparison_judgment",
+        "competitive_position:limitation",
+    ),
+}
+
+
+def _collector_slots_for(section_id: str) -> tuple[str, ...]:
+    return _FROZEN_COLLECTOR_SLOTS[section_id]
+
+
+def _injected_slots_for(section_id: str) -> tuple[str, ...]:
+    return _FROZEN_INJECTED_SLOTS.get(section_id, ())
 
 
 def sha256_of(text: str) -> str:
@@ -170,7 +225,7 @@ def build_filled_channel(
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """이 장의 수집 슬롯 전부를 한 채널(문서 하나)로 채운 조각·시도를 만든다."""
 
-    slots = collector_slots_for(section_id)
+    slots = _collector_slots_for(section_id)
     text_by_slot = text_by_slot or {}
     fragments = [
         make_fragment(
@@ -206,7 +261,7 @@ def build_unfilled_channel(
             company_id=company_id,
             attempt_id=f"attempt-{section_id}-unfilled-{state.lower()}",
             source_kind=source_kind,
-            slot_ids=collector_slots_for(section_id),
+            slot_ids=_collector_slots_for(section_id),
             state=state,
             reason_code=reason_code,
         )
@@ -218,7 +273,7 @@ def injected_facts_for(section_id: str) -> tuple[InjectedSlotFacts, ...]:
 
     return tuple(
         InjectedSlotFacts(slot_id=slot_id, fact_ids=(f"fact-{slot_id}",))
-        for slot_id in injected_slots_for(section_id)
+        for slot_id in _injected_slots_for(section_id)
     )
 
 
@@ -236,7 +291,7 @@ OFFICIAL_ONLY_SECTIONS: tuple[str, ...] = (
     "competitive_position",
 )
 assert set(DART_SECTIONS) | set(OFFICIAL_ONLY_SECTIONS) == set(
-    REQUIRED_EVIDENCE_SECTION_IDS
+    _FROZEN_SECTION_IDS
 )
 
 
@@ -254,7 +309,7 @@ def build_listed_fixture(*, company_id: str = "corp-listed") -> dict[str, list]:
     ]
     fragments: list[dict[str, object]] = []
     attempts: list[dict[str, object]] = []
-    for section_id in REQUIRED_EVIDENCE_SECTION_IDS:
+    for section_id in _FROZEN_SECTION_IDS:
         section_fragments, section_attempts = build_filled_channel(
             company_id=company_id,
             section_id=section_id,

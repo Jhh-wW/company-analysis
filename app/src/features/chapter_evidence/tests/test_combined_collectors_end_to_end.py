@@ -31,7 +31,7 @@ import sys
 import pytest
 
 from src.features.chapter_evidence.constants import CompanyType
-from src.features.chapter_evidence.produce import produce_chapter_evidence_candidates
+from src.features.chapter_evidence.produce import produce_from_collection_envelopes
 from src.features.homepage.wide_evidence_mapping import to_evidence_mappings
 from src.features.homepage.wide_fetch import WideRawResponse, WideTransportError
 from src.features.homepage.wide_fragments import build_fragments_for_collection
@@ -42,11 +42,30 @@ from src.shared.report_evidence.constants import (
 )
 from src.shared.report_evidence.logic import assess_generation_gate, build_section_bundle
 from src.shared.report_evidence.models import InjectedSlotFacts
-from src.shared.report_evidence.policy import (
-    REQUIRED_EVIDENCE_SECTION_IDS,
-    injected_slots_for,
-    required_slots_for,
+from src.shared.report_evidence.policy import required_slots_for
+
+_FROZEN_SECTION_IDS = (
+    "identity",
+    "business_model",
+    "portfolio",
+    "past_changes",
+    "current_challenges",
+    "future_strategy",
+    "operations_partners",
+    "culture",
+    "competitive_position",
 )
+
+_FROZEN_INJECTED_SLOTS = {
+    "past_changes": ("past_changes:historical_performance",),
+    "competitive_position": (
+        "competitive_position:comparison_target",
+        "competitive_position:comparison_metric",
+        "competitive_position:comparison_basis",
+        "competitive_position:comparison_judgment",
+        "competitive_position:limitation",
+    ),
+}
 
 #: 엔진 수집기는 app 패키지가 아니라 ``analysis_engine/src`` 아래에 산다.
 #: 통합 트리에서만 존재하므로 경로를 직접 얹고, 없으면 소리 나게 건너뛴다.
@@ -174,7 +193,7 @@ def _dart_mapping(**kwargs) -> dict[str, object]:
     return serialize.harvest_to_mapping(_collect_dart(**kwargs))
 
 
-def _web_mapping(*, ir_html_fetch=_ir_html_without_links) -> dict[str, list[dict[str, object]]]:
+def _web_mapping(*, ir_html_fetch=_ir_html_without_links) -> dict[str, object]:
     """공식 웹 수집을 가짜 사이트로 실제 실행하고 계약 Mapping으로 바꾼다."""
 
     base = f"https://{ROOT_HOST}"
@@ -209,12 +228,10 @@ def _produce(*, ir_html_fetch=_ir_html_without_links, **dart_kwargs):
 
     dart = _dart_mapping(**dart_kwargs)
     web = _web_mapping(ir_html_fetch=ir_html_fetch)
-    return produce_chapter_evidence_candidates(
+    return produce_from_collection_envelopes(
         company_id=TARGET_COMPANY_ID,
         company_type=CompanyType.LISTED,
-        documents=[*dart["documents"], *web["documents"]],
-        fragments=[*dart["fragments"], *web["fragments"]],
-        attempts=[*dart["attempts"], *web["attempts"]],
+        collection_envelopes=(dart, web),
     )
 
 
@@ -225,7 +242,7 @@ def _bundles(candidates):
     for candidate in candidates:
         injected = tuple(
             InjectedSlotFacts(slot_id=slot_id, fact_ids=(f"fact:{slot_id}",))
-            for slot_id in injected_slots_for(candidate.section_id)
+            for slot_id in _FROZEN_INJECTED_SLOTS.get(candidate.section_id, ())
         )
         bundles.append(
             build_section_bundle(
@@ -242,8 +259,8 @@ def test_두_수집기_산출이_계약_경계를_예외_없이_통과한다() -
 
     candidates = _produce()
 
-    assert len(candidates) == len(REQUIRED_EVIDENCE_SECTION_IDS)
-    assert tuple(c.section_id for c in candidates) == REQUIRED_EVIDENCE_SECTION_IDS
+    assert len(candidates) == len(_FROZEN_SECTION_IDS)
+    assert tuple(c.section_id for c in candidates) == _FROZEN_SECTION_IDS
     # 공허한 통과 방지 — 두 수집기가 실제로 근거를 냈는지 먼저 확인한다.
     assert any(candidate.fragments for candidate in candidates)
     assert any(candidate.documents for candidate in candidates)
@@ -263,6 +280,19 @@ def test_아홉_장이_같은_원문_묶음을_그대로_복사받지_않는다(
     assert len(fragment_sets) >= 2
     assert len(set(fragment_sets)) > 1
 
+    sections_by_exact_range: dict[tuple[str, str, str], set[str]] = {}
+    for candidate in candidates:
+        for fragment in candidate.fragments:
+            exact_range = (
+                fragment.document_id,
+                fragment.location,
+                fragment.text_sha256,
+            )
+            sections_by_exact_range.setdefault(exact_range, set()).add(
+                candidate.section_id
+            )
+    assert all(len(section_ids) == 1 for section_ids in sections_by_exact_range.values())
+
 
 def test_다른_회사_값은_한_건도_섞이지_않는다() -> None:
     candidates = _produce()
@@ -275,6 +305,21 @@ def test_다른_회사_값은_한_건도_섞이지_않는다() -> None:
             assert fragment.company_id == TARGET_COMPANY_ID
         for attempt in candidate.attempts:
             assert attempt.company_id == TARGET_COMPANY_ID
+
+
+@pytest.mark.parametrize("which", ["dart", "web"])
+def test_수집_envelope_최상위_회사가_다르면_배열을_합치기_전에_거절한다(which) -> None:
+    dart = _dart_mapping()
+    web = _web_mapping()
+    target = dart if which == "dart" else web
+    target["company_id"] = "other-company"
+
+    with pytest.raises(ValueError, match="최상위 company_id"):
+        produce_from_collection_envelopes(
+            company_id=TARGET_COMPANY_ID,
+            company_type=CompanyType.LISTED,
+            collection_envelopes=(dart, web),
+        )
 
 
 def test_모든_조각이_원본_문서의_허용_해시에_결속된다() -> None:
@@ -301,16 +346,17 @@ def test_정상_수집은_빈_칸을_확인_못_함이_아니라_자료_부족�
     decision = assess_generation_gate(
         company_id=TARGET_COMPANY_ID,
         bundles=bundles,
-        required_section_ids=REQUIRED_EVIDENCE_SECTION_IDS,
+        required_section_ids=_FROZEN_SECTION_IDS,
     )
 
     unobserved = [
         reason for reason in decision.reason_codes if "required_path_unobserved" in reason
     ]
     assert unobserved == []
-    assert decision.status is not GenerationGateStatus.STOP_TRANSIENT_FAILURE
+    assert decision.status is GenerationGateStatus.READY_FOR_GENERATION
+    assert decision.can_call_ai is True
     for bundle in bundles:
-        assert bundle.readiness is not EvidenceReadiness.UNKNOWN
+        assert bundle.readiness is EvidenceReadiness.READY
 
 
 def test_공시_조회_실패는_자료_부족이_아니라_확인_못_함으로_판정한다() -> None:
@@ -320,7 +366,7 @@ def test_공시_조회_실패는_자료_부족이_아니라_확인_못_함으로
     decision = assess_generation_gate(
         company_id=TARGET_COMPANY_ID,
         bundles=bundles,
-        required_section_ids=REQUIRED_EVIDENCE_SECTION_IDS,
+        required_section_ids=_FROZEN_SECTION_IDS,
     )
 
     assert decision.status is GenerationGateStatus.STOP_TRANSIENT_FAILURE
@@ -340,7 +386,7 @@ def test_보조_출처_한_곳의_실패가_보고서_전체를_일시_장애로
     decision = assess_generation_gate(
         company_id=TARGET_COMPANY_ID,
         bundles=bundles,
-        required_section_ids=REQUIRED_EVIDENCE_SECTION_IDS,
+        required_section_ids=_FROZEN_SECTION_IDS,
     )
 
     assert decision.status is not GenerationGateStatus.STOP_TRANSIENT_FAILURE
