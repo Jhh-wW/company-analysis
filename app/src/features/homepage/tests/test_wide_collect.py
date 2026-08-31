@@ -174,6 +174,62 @@ def test_robots가_403이면_본문을_긁지_않는다():
     assert "https://company.example/" not in site.calls
 
 
+def test_robots가_429면_일반_page_fetch가_0회다():
+    """P1(통합 담당 지시): 429(속도 제한)를 «robots 없음」으로 읽어 본문을
+    긁으면 안 된다 — 호출 카운터로 일반 페이지 fetch가 정말 0회인지 확인한다."""
+    pages = {
+        "https://company.example/robots.txt": WideRawResponse(
+            status=429, text="", effective_url="https://company.example/robots.txt", content_type=""
+        ),
+        "https://company.example/": _page(_body("루트 페이지 본문입니다"), "https://company.example/"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(site)
+
+    assert result.documents == ()
+    page_calls = [c for c in site.calls if not c.endswith("robots.txt") and not c.endswith("sitemap.xml")]
+    assert page_calls == []
+    robots_attempt = next(a for a in result.attempts if a.source_kind == "robots_txt")
+    assert robots_attempt.reason_code == "robots_transient"
+
+
+def test_robots가_407이면_본문을_긁지_않는다():
+    pages = {
+        "https://company.example/robots.txt": WideRawResponse(
+            status=407, text="", effective_url="https://company.example/robots.txt", content_type=""
+        ),
+        "https://company.example/": _page(_body("루트 페이지 본문입니다"), "https://company.example/"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(site)
+
+    assert result.documents == ()
+    assert "https://company.example/" not in site.calls
+    robots_attempt = next(a for a in result.attempts if a.source_kind == "robots_txt")
+    assert robots_attempt.reason_code == "robots_denied"
+
+
+def test_robots가_그밖의_4xx면_본문을_긁지_않는다():
+    """400처럼 denied·transient·missing 어디에도 없는 4xx는 «명시적 부재로
+    진행」이 아니라 차단이어야 한다."""
+    pages = {
+        "https://company.example/robots.txt": WideRawResponse(
+            status=400, text="", effective_url="https://company.example/robots.txt", content_type=""
+        ),
+        "https://company.example/": _page(_body("루트 페이지 본문입니다"), "https://company.example/"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(site)
+
+    assert result.documents == ()
+    assert "https://company.example/" not in site.calls
+    robots_attempt = next(a for a in result.attempts if a.source_kind == "robots_txt")
+    assert robots_attempt.reason_code == "robots_unreachable"
+
+
 # ── 도메인군 ──────────────────────────────────────────────
 
 

@@ -213,6 +213,18 @@ def classify_general_outcome(
     return "FAILED", f"page_failed_{response.status}"
 
 
+#: robots.txt가 «명시적으로 없다」로 인정하는 상태코드 — 정확히 이 둘뿐이다.
+#: 일반 응답 계약(``classify_general_outcome``)의 MISSING 판정(404·410)과
+#: 의미를 맞췄다 — 같은 파일 안에서 「없음」의 기준이 서로 다르면 안 된다.
+_ROBOTS_MISSING_STATUSES: Final[tuple[int, ...]] = (404, 410)
+
+#: 인증·권한 문제로 명시적으로 거부된 상태코드 — 「robots가 없다」가 아니다.
+_ROBOTS_DENIED_STATUSES: Final[tuple[int, ...]] = (401, 403, 407)
+
+#: 일시적 장애로 못 받은 상태코드 — 이것도 「robots가 없다」가 아니다.
+_ROBOTS_TRANSIENT_STATUSES: Final[tuple[int, ...]] = (408, 409, 429)
+
+
 def robots_decision(
     response: WideRawResponse | None,
     error: WideTransportError | None,
@@ -220,17 +232,23 @@ def robots_decision(
     """robots.txt 조회 결과의 (outcome, reason_code)를 RFC 9309 의미론으로 정한다.
 
     outcome:
-      - ``"proceed_empty_rules"``: HTTP 4xx로 명시적으로 없음(404·410 등) — 빈
-        규칙(전부 허용)으로 진행.
+      - ``"proceed_empty_rules"``: robots.txt가 명시적으로 없음(404·410만) —
+        빈 규칙(전부 허용)으로 진행.
       - ``"proceed_parsed"``: 200 — 받은 글자를 규칙으로 해석해 진행.
-      - ``"blocked"``: 그 외 전부(5xx·시간초과·DNS 등) — fail-closed, 이 호스트는 긁지 않는다.
+      - ``"blocked"``: 그 외 전부 — fail-closed, 이 호스트는 본문을 한 번도
+        긁지 않는다(``WideRobotsPolicy.blocked``가 상위 호출자의 본문 fetch를
+        전부 건너뛴다).
 
-    ★ P1-1 수정(2026-08-31, ROBOTS-EXPLICIT-DENIAL): 401·403은 「robots.txt가
-      없다」가 아니라 「인증·차단으로 못 받았다」는 명시적 거부다. 예전 구현은
-      4xx를 통째로 「명시적 부재 → 빈 규칙」으로 해석해 인증·차단 응답에서도
-      본문을 긁었다 — 이 설계의 robots fail-closed 약속과 어긋난다. 그래서
-      401·403만 따로 ``blocked``로 뺀다. 나머지 4xx(404·410 등)는 여전히
-      「robots 자체가 없다」는 뜻으로 보고 빈 규칙 진행을 유지한다.
+    ★ P1 수정(2026-08-31, 통합 담당 지시): 예전 구현은 401·403만 따로 빼고
+      «나머지 4xx 전체»(400·402·405·406·407·408·409·429 등)를 「명시적
+      부재 → 빈 규칙」으로 해석했다. 그래서 407(프록시 인증)·408(시간초과)·
+      429(속도 제한)까지 「robots가 없다」로 둔갑해 본문을 긁었고, 같은
+      파일의 일반 응답 계약(404·410만 MISSING)과도 의미가 모순됐다.
+
+      이제 「명시적 부재」는 정확히 404·410만 인정한다. 그 밖의 4xx는 원인별로
+      나눈다 — 401·403·407은 명시적 거부(``robots_denied``), 408·409·429는
+      일시 장애(``robots_transient``), 그 밖 전부는 도달 불가(``robots_unreachable``)
+      — 셋 다 ``blocked``라 본문 fetch로 이어지지 않는 점은 같다.
     """
     if error is not None:
         return "blocked", "robots_unreachable"
@@ -238,10 +256,12 @@ def robots_decision(
         return "blocked", "robots_unreachable"
     if response.status == 200:
         return "proceed_parsed", "robots_ok"
-    if response.status in (401, 403):
-        return "blocked", "robots_denied"
-    if 400 <= response.status <= 499:
+    if response.status in _ROBOTS_MISSING_STATUSES:
         return "proceed_empty_rules", "robots_missing"
+    if response.status in _ROBOTS_DENIED_STATUSES:
+        return "blocked", "robots_denied"
+    if response.status in _ROBOTS_TRANSIENT_STATUSES:
+        return "blocked", "robots_transient"
     return "blocked", "robots_unreachable"
 
 

@@ -372,6 +372,48 @@ def test_robots_전송실패는_차단된다():
     assert outcome == "blocked"
 
 
+# ── P1(통합 담당 지시, 2026-08-31): robots 상태 계약을 정확히 좁힌다 ──
+# 「명시적 부재」는 404·410만 인정한다. 그 밖의 4xx는 원인별로
+# blocked(robots_denied/robots_transient/robots_unreachable)로 나눈다.
+
+
+def test_robots_407도_명시적_거부로_차단된다():
+    """407(프록시 인증)도 401/403과 같은 «명시적 거부» — robots가 없다는
+    뜻이 아니다."""
+    outcome, reason = robots_decision(_response(407), None)
+    assert outcome == "blocked"
+    assert reason == "robots_denied"
+
+
+def test_robots_408은_일시장애로_차단된다():
+    outcome, reason = robots_decision(_response(408), None)
+    assert outcome == "blocked"
+    assert reason == "robots_transient"
+
+
+def test_robots_409는_일시장애로_차단된다():
+    outcome, reason = robots_decision(_response(409), None)
+    assert outcome == "blocked"
+    assert reason == "robots_transient"
+
+
+def test_robots_429는_일시장애로_차단된다():
+    """429(속도 제한)를 «robots 없음»으로 읽으면 안 된다 — 이 회사가
+    robots를 공개하지 않는다는 뜻이 아니라 일시적으로 못 받은 것이다."""
+    outcome, reason = robots_decision(_response(429), None)
+    assert outcome == "blocked"
+    assert reason == "robots_transient"
+
+
+def test_robots_그밖의_4xx는_도달불가로_차단된다():
+    """denied·transient·missing 목록 어디에도 없는 4xx(예: 400·402·405·406)는
+    robots_unreachable로 차단한다 — «명시적 부재로 진행」이 아니다."""
+    for status in (400, 402, 405, 406, 411, 451):
+        outcome, reason = robots_decision(_response(status), None)
+        assert outcome == "blocked", f"status={status}"
+        assert reason == "robots_unreachable", f"status={status}"
+
+
 # ── P1-2 공격 시험: sitemap 바이트 상한이 문자 상한이면 안 된다 ──────
 
 
