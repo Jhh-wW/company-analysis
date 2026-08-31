@@ -34,25 +34,39 @@ _HOST_SAFE_KEYWORDS: frozenset[str] = frozenset(WIDE_PRIORITY_HOST_KEYWORDS)
 
 
 def registrable_core_name(host: str) -> str:
-    """호스트에서 공개 접미사(.co.kr·.com 등)를 뗀 등록 도메인 핵심 이름 한 칸.
+    """호스트의 전체 등록 도메인(eTLD+1 — 공개 접미사 + 그 바로 앞 한 칸)을 돌려준다.
+
+    ★ P0-1 수정(2026-08-31): 예전 구현은 접미사를 뗀 뒤 «핵심 이름 한 칸만»
+      돌려줘서 ``company.com``·``company.net``·``company.co.kr``이 전부 같은
+      값(``"company"``)이 되어 서로 다른 등록 도메인이 같다고 오판했다(남의
+      도메인이 REQUIRED 고신뢰 문서로 자동 승격됨). 이제 접미사를 **포함해서**
+      돌려주므로(``"company.com"``·``"company.co.kr"`` 등) TLD가 다르면 값도
+      달라진다.
 
     Args:
         host: 포트·스킴이 없는 순수 호스트 이름.
 
     Returns:
-        핵심 이름 한 칸(소문자). 판정 불가(빈 문자열 등)면 ``""``.
+        eTLD+1 전체 문자열(소문자). 판정 불가(빈 문자열 등) 또는 공개 접미사
+        목록 밖의 접미사면 ``""``(fail-closed — 등록 도메인 경계를 모르는
+        채로 «같은 도메인」이라고 주장하지 않는다).
     """
     labels = [label for label in (host or "").lower().rstrip(".").split(".") if label]
     if len(labels) <= 1:
         return ".".join(labels)
     if len(labels) >= 3 and ".".join(labels[-2:]) in MULTI_LABEL_PUBLIC_SUFFIXES:
-        remainder = labels[:-2]
+        suffix_labels = 2
     elif labels[-1] in SINGLE_LABEL_PUBLIC_SUFFIXES:
-        remainder = labels[:-1]
+        suffix_labels = 1
     else:
-        # 목록에 없는 접미사 — 마지막 한 칸만 접미사로 보는 보수적 기본값.
-        remainder = labels[:-1]
-    return remainder[-1] if remainder else ""
+        # 목록에 없는 접미사 — fail-closed. 경계를 모르는 채로 같다고
+        # 주장하지 않는다(예전의 「한 칸만 접미사로 보는 보수적 기본값」은
+        # 서로 다른 미지 TLD를 같다고 오판할 수 있어 폐기했다).
+        return ""
+    remainder = labels[: len(labels) - suffix_labels]
+    if not remainder:
+        return ""
+    return ".".join(labels[-(suffix_labels + 1) :])
 
 
 def is_registered_subdomain(root_host: str, candidate_host: str) -> bool:

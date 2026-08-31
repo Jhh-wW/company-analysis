@@ -228,6 +228,60 @@ def test_소셜_링크는_결속되지_않는다():
     assert "https://facebook.com/company" not in site.calls
 
 
+# ── P0-1: 등록 도메인 판정이 TLD를 무시하면 안 된다 ─────────
+
+
+def test_같은_핵심이름_다른_TLD_링크는_REQUIRED로_자동승격되지_않는다():
+    """company.example과 company.net은 다른 회사가 등록할 수 있는 별개 도메인.
+
+    수정 전에는 registrable_core_name이 접미사를 떼고 핵심 이름 한 칸만
+    비교해 «company»가 같다는 이유로 REQUIRED 고신뢰 문서로 자동 승격됐다.
+    """
+    pages = {
+        "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
+        "https://company.example/sitemap.xml": _missing("https://company.example/sitemap.xml"),
+        "https://company.example/": _page(
+            _body("루트 페이지 본문") + '<a href="https://company.net/">남의 도메인</a>',
+            "https://company.example/",
+        ),
+        "https://company.net/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.net/robots.txt", "text/plain"),
+        "https://company.net/sitemap.xml": _missing("https://company.net/sitemap.xml"),
+        "https://company.net/": _page(_body("남의 회사 본문입니다"), "https://company.net/"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(site)
+
+    other_docs = [doc for doc in result.documents if "company.net" in doc.canonical_url]
+    assert len(other_docs) == 1
+    # 링크로만 발견된 후보이므로 OPTIONAL(«후보»)이어야 한다 — REQUIRED 자동승격 금지.
+    assert other_docs[0].requirement == "OPTIONAL"
+
+
+def test_sitemap의_다른_TLD_URL은_등록도메인_밖이라_따라가지_않는다():
+    """sitemap.xml이 도메인군 밖(다른 TLD) URL을 적어도 자동으로 큐에 넣으면 안 된다."""
+    sitemap_xml = (
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        "<url><loc>https://company.example/about</loc></url>"
+        "<url><loc>https://company.net/hijack</loc></url>"
+        "</urlset>"
+    )
+    pages = {
+        "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
+        "https://company.example/sitemap.xml": _page(
+            sitemap_xml, "https://company.example/sitemap.xml", "application/xml"
+        ),
+        "https://company.example/": _page(_body("루트 페이지 본문"), "https://company.example/"),
+        "https://company.example/about": _page(_body("회사소개 본문"), "https://company.example/about"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(site)
+
+    assert not any("company.net" in call for call in site.calls)
+    assert not any("company.net" in doc.canonical_url for doc in result.documents)
+
+
 # ── sitemap ───────────────────────────────────────────────
 
 

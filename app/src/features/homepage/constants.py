@@ -321,6 +321,9 @@ MULTI_LABEL_PUBLIC_SUFFIXES: Final[frozenset[str]] = frozenset(
 )
 
 #: 도메인 끝 «한 칸」만 공개 접미사로 보는 경우 (일반 gTLD·국가 코드).
+#: ``example``은 RFC 2606이 등록을 영구히 금지한 예약 TLD라 실제 회사가 쓸 수
+#: 없다 — 시험 픽스처 전용으로 넣어도 실제 회사 도메인을 오판할 위험이 없다
+#: (P0-1 fail-closed 수정 후에도 .example 시험 픽스처가 통과하려면 필요, 2026-08-31).
 SINGLE_LABEL_PUBLIC_SUFFIXES: Final[frozenset[str]] = frozenset(
     {
         "kr",
@@ -335,6 +338,7 @@ SINGLE_LABEL_PUBLIC_SUFFIXES: Final[frozenset[str]] = frozenset(
         "tv",
         "asia",
         "shop",
+        "example",
     }
 )
 

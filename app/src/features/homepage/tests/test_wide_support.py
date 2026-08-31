@@ -29,10 +29,12 @@ from src.features.homepage.wide_fetch import (
 # ── wide_domain ──────────────────────────────────────────
 
 
-def test_등록도메인_핵심이름은_공개접미사를_뗀다():
-    assert registrable_core_name("recruit.company.co.kr") == "company"
-    assert registrable_core_name("www.company.com") == "company"
-    assert registrable_core_name("company.io") == "company"
+def test_등록도메인_핵심이름은_eTLD플러스1을_돌려준다():
+    """P0-1: 접미사를 뗀 핵심 이름 한 칸이 아니라 접미사를 포함한 전체
+    등록 도메인(eTLD+1)을 돌려줘야 서로 다른 TLD가 같다고 오판하지 않는다."""
+    assert registrable_core_name("recruit.company.co.kr") == "company.co.kr"
+    assert registrable_core_name("www.company.com") == "company.com"
+    assert registrable_core_name("company.io") == "company.io"
 
 
 def test_같은_등록도메인의_하위도메인은_참():
@@ -42,6 +44,59 @@ def test_같은_등록도메인의_하위도메인은_참():
 
 def test_다른_등록도메인은_거짓():
     assert not is_registered_subdomain("company.com", "otherbrand.com")
+
+
+# ── P0-1 공격 시험: 등록 도메인 판정이 TLD를 무시하지 않는지 ──────────
+
+
+def test_같은_핵심이름_다른_TLD는_거짓():
+    """company.com과 company.net은 전혀 다른 회사가 등록할 수 있는 별개 도메인."""
+    assert not is_registered_subdomain("company.com", "company.net")
+    assert not is_registered_subdomain("company.net", "company.com")
+
+
+def test_co_kr과_com은_다른_등록도메인():
+    assert not is_registered_subdomain("company.co.kr", "company.com")
+    assert not is_registered_subdomain("company.com", "company.co.kr")
+
+
+def test_공개접미사_목록_밖_TLD는_fail_closed():
+    """목록에 없는 접미사는 등록 도메인 경계를 모르므로 같다고 주장하지 않는다."""
+    assert registrable_core_name("company.zzzunknowntld") == ""
+    # root도 candidate도 목록 밖 TLD면 같은 문자열이어도 참으로 단정하지 않는다.
+    assert not is_registered_subdomain("company.zzzunknowntld", "sub.company.zzzunknowntld")
+
+
+def test_대소문자는_구분하지_않는다():
+    assert registrable_core_name("Company.COM") == registrable_core_name("company.com")
+    assert is_registered_subdomain("COMPANY.COM", "recruit.company.com")
+
+
+def test_후행_점은_무시한다():
+    assert registrable_core_name("company.com.") == "company.com"
+
+
+def test_IDN_퓨니코드는_크래시_없이_fail_closed():
+    """공개 접미사 목록에 없는 퓨니코드 TLD는 예외 없이 판정 불가로 처리한다."""
+    assert registrable_core_name("xn--e1aybc.xn--p1ai") == ""
+
+
+def test_포트가_섞인_문자열은_크래시_없이_fail_closed():
+    """이 함수에 도달하기 전 urlsplit().hostname이 포트를 떼지만, 방어 심층화로
+    포트가 섞여 들어와도 예외 없이 다른 도메인이라고 오판하지 않아야 한다."""
+    assert registrable_core_name("company.com:8080") == ""
+    assert not is_registered_subdomain("company.com:8080", "company.com")
+
+
+def test_userinfo_트릭은_urlsplit_hostname_단계에서_이미_제거된다():
+    """evil.com@company.com처럼 URL에 사용자정보를 끼워 넣는 공격은
+    urllib.parse.urlsplit(url).hostname이 진짜 호스트만 남기므로,
+    wide_collect가 실제로 넘기는 host 값에는 '@' 앞부분이 없다(실측)."""
+    import urllib.parse
+
+    hostname = urllib.parse.urlsplit("http://evil.com@company.com/path").hostname
+    assert hostname == "company.com"
+    assert registrable_core_name(hostname) == "company.com"
 
 
 def test_등록_하위도메인_결속은_결속근거를_남긴다():
