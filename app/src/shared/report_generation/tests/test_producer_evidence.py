@@ -286,14 +286,14 @@ def test_PRIMARY_SUPPLEMENT_chain은_대상장만_바꾸고_전체_ledger를_봉
             _record(
                 11,
                 role="writer",
-                role_index=10,
+                role_index=1,
                 section_id="identity",
                 validation_round=ValidationRound.SUPPLEMENT,
             ),
             _record(
                 12,
                 role="reviewer",
-                role_index=2,
+                role_index=1,
                 section_id="bundled",
                 validation_round=ValidationRound.SUPPLEMENT,
             ),
@@ -304,7 +304,94 @@ def test_PRIMARY_SUPPLEMENT_chain은_대상장만_바꾸고_전체_ledger를_봉
 
     assert evidence.writer_calls == 10
     assert evidence.reviewer_calls == 2
+    assert tuple(record.sequence for record in ledger.records) == tuple(range(1, 13))
+    supplement_records = tuple(
+        record
+        for record in ledger.records
+        if record.validation_round is ValidationRound.SUPPLEMENT
+    )
+    assert tuple(record.role_index for record in supplement_records) == (1, 1)
     assert producer_evidence_from_dict(producer_evidence_to_dict(evidence)) == evidence
+
+
+def test_PRIMARY_9대1과_SUPPLEMENT_2대1은_각자_1부터_세고_전체는_1부터13이다() -> None:
+    base_sections = _digests(1)
+    primary = _primary_receipt(
+        assessment=_partial_assessment(),
+        candidate_sha256="c" * 64,
+        section_sha256s=base_sections,
+    )
+    targets = ("identity", "business_model")
+    final_sections = tuple(
+        (section_id, "f" * 64 if section_id in targets else digest)
+        for section_id, digest in base_sections
+    )
+    supplement = GenerationValidationReceipt(
+        company_id=primary.company_id,
+        candidate_sha256="d" * 64,
+        assessment=_complete_assessment(),
+        round=ValidationRound.SUPPLEMENT,
+        writer_calls=2,
+        reviewer_calls=1,
+        section_sha256s=final_sections,
+        evidence_packet_sha256s=primary.evidence_packet_sha256s,
+        base_receipt_sha256=primary.receipt_sha256,
+        supplemented_section_ids=targets,
+    )
+    ledger = GenerationCallLedger(
+        (
+            *_primary_ledger().records,
+            _record(
+                11,
+                role="writer",
+                role_index=1,
+                section_id="identity",
+                validation_round=ValidationRound.SUPPLEMENT,
+            ),
+            _record(
+                12,
+                role="writer",
+                role_index=2,
+                section_id="business_model",
+                validation_round=ValidationRound.SUPPLEMENT,
+            ),
+            _record(
+                13,
+                role="reviewer",
+                role_index=1,
+                section_id="bundled",
+                validation_round=ValidationRound.SUPPLEMENT,
+            ),
+        )
+    )
+
+    evidence = _evidence(receipts=(primary, supplement), ledger=ledger)
+
+    assert tuple(record.sequence for record in ledger.records) == tuple(range(1, 14))
+    primary_records = tuple(
+        record
+        for record in ledger.records
+        if record.validation_round is ValidationRound.PRIMARY
+    )
+    supplement_records = tuple(
+        record
+        for record in ledger.records
+        if record.validation_round is ValidationRound.SUPPLEMENT
+    )
+    assert tuple(
+        record.role_index for record in primary_records if record.role == "writer"
+    ) == tuple(range(1, 10))
+    assert tuple(
+        record.role_index for record in primary_records if record.role == "reviewer"
+    ) == (1,)
+    assert tuple(
+        record.role_index for record in supplement_records if record.role == "writer"
+    ) == (1, 2)
+    assert tuple(
+        record.role_index for record in supplement_records if record.role == "reviewer"
+    ) == (1,)
+    assert evidence.writer_calls == 11
+    assert evidence.reviewer_calls == 2
 
 
 def test_SUPPLEMENT가_비대상장을_바꾸면_성공_evidence를_못_만든다():
@@ -338,14 +425,14 @@ def test_SUPPLEMENT가_비대상장을_바꾸면_성공_evidence를_못_만든�
             _record(
                 11,
                 role="writer",
-                role_index=10,
+                role_index=1,
                 section_id="identity",
                 validation_round=ValidationRound.SUPPLEMENT,
             ),
             _record(
                 12,
                 role="reviewer",
-                role_index=2,
+                role_index=1,
                 section_id="bundled",
                 validation_round=ValidationRound.SUPPLEMENT,
             ),
@@ -353,6 +440,103 @@ def test_SUPPLEMENT가_비대상장을_바꾸면_성공_evidence를_못_만든�
     )
     with pytest.raises(ValueError, match="대상 밖 장"):
         _evidence(receipts=(primary, supplement), ledger=ledger)
+
+
+@pytest.mark.parametrize(
+    ("role", "old_global_index", "section_id"),
+    (("writer", 10, "identity"), ("reviewer", 2, "bundled")),
+)
+def test_SUPPLEMENT의_옛전역_role_index_10과2는_새회차영수증이_아니다(
+    role: str,
+    old_global_index: int,
+    section_id: str,
+) -> None:
+    records = (
+        *_primary_ledger().records,
+        _record(
+            11,
+            role=role,
+            role_index=old_global_index,
+            section_id=section_id,
+            validation_round=ValidationRound.SUPPLEMENT,
+        ),
+    )
+
+    with pytest.raises(ValueError, match=f"SUPPLEMENT {role}.*1부터"):
+        GenerationCallLedger(records)
+
+
+@pytest.mark.parametrize("role", ("writer", "reviewer"))
+@pytest.mark.parametrize("bad_indexes", ((2,), (1, 1), (1, 3)))
+def test_SUPPLEMENT_role의_round별_gap과duplicate를_거절한다(
+    role: str,
+    bad_indexes: tuple[int, ...],
+) -> None:
+    records = list(_primary_ledger().records)
+    for offset, role_index in enumerate(bad_indexes, start=1):
+        records.append(
+            _record(
+                10 + offset,
+                role=role,
+                role_index=role_index,
+                section_id=(
+                    "bundled"
+                    if role == "reviewer"
+                    else ("identity" if offset == 1 else "business_model")
+                ),
+                validation_round=ValidationRound.SUPPLEMENT,
+            )
+        )
+
+    with pytest.raises(ValueError, match=f"SUPPLEMENT {role}.*1부터"):
+        GenerationCallLedger(tuple(records))
+
+
+def test_SUPPLEMENT호출을_PRIMARY로_위장하면_receipt_chain과_결속되지않는다() -> None:
+    base_sections = _digests(1)
+    primary = _primary_receipt(
+        assessment=_partial_assessment(),
+        candidate_sha256="c" * 64,
+        section_sha256s=base_sections,
+    )
+    final_sections = tuple(
+        (section_id, "f" * 64 if section_id == "identity" else digest)
+        for section_id, digest in base_sections
+    )
+    supplement = GenerationValidationReceipt(
+        company_id=primary.company_id,
+        candidate_sha256="d" * 64,
+        assessment=_complete_assessment(),
+        round=ValidationRound.SUPPLEMENT,
+        writer_calls=1,
+        reviewer_calls=1,
+        section_sha256s=final_sections,
+        evidence_packet_sha256s=primary.evidence_packet_sha256s,
+        base_receipt_sha256=primary.receipt_sha256,
+        supplemented_section_ids=("identity",),
+    )
+    disguised = GenerationCallLedger(
+        (
+            *_primary_ledger().records,
+            _record(
+                11,
+                role="writer",
+                role_index=10,
+                section_id="identity",
+                validation_round=ValidationRound.PRIMARY,
+            ),
+            _record(
+                12,
+                role="reviewer",
+                role_index=2,
+                section_id="bundled",
+                validation_round=ValidationRound.PRIMARY,
+            ),
+        )
+    )
+
+    with pytest.raises(ValueError, match="검증 영수증|SUPPLEMENT|호출 수"):
+        _evidence(receipts=(primary, supplement), ledger=disguised)
 
 
 def test_receipt_wire는_unknown_missing_enum_digest_변조를_거절한다():

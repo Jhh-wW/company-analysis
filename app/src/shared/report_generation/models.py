@@ -195,12 +195,22 @@ class GenerationCallLedger:
             range(1, len(self.records) + 1)
         ):
             raise ValueError("AI 호출 장부의 전체 순번이 연속적이지 않습니다")
-        for role in _CALL_ROLES:
-            indexes = tuple(
-                record.role_index for record in self.records if record.role == role
-            )
-            if indexes != tuple(range(1, len(indexes) + 1)):
-                raise ValueError(f"{role} 호출 역할 순번이 연속적이지 않습니다")
+        # role_index는 전체 실행 누적 번호가 아니라 «그 검증 회차 안에서의
+        # 역할 순번»이다. PRIMARY writer 1..9 뒤 SUPPLEMENT writer 1..N이
+        # 다시 시작하며, 전체 실행 순서는 위 sequence만 1..13으로 잇는다.
+        for validation_round in ValidationRound:
+            for role in sorted(_CALL_ROLES):
+                indexes = tuple(
+                    record.role_index
+                    for record in self.records
+                    if record.validation_round is validation_round
+                    and record.role == role
+                )
+                if indexes != tuple(range(1, len(indexes) + 1)):
+                    raise ValueError(
+                        f"{validation_round.value} {role} 호출 역할 순번이 "
+                        "1부터 연속적이지 않습니다"
+                    )
 
     @property
     def writer_calls(self) -> int:
