@@ -344,6 +344,8 @@ def engine(monkeypatch: pytest.MonkeyPatch) -> _JypFakeEngine:
         real.REPORT_RELEASE_MODE_ENV_NAME,
         ReleaseMode.SHADOW.value,
     )
+    # v2 캐시는 정확한 immutable 배포 commit이 있을 때만 켜진다.
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "1" * 40)
     return fake
 
 
@@ -1024,7 +1026,7 @@ def test_같은_회사를_다시_조사하면_생성AI가_안_나간다(
     assert second.charged is False, "캐시 반환인데 이용 횟수를 차감했습니다"
 
 
-def test_엔진_코드가_바뀌면_캐시가_저절로_무효가_된다(
+def test_배포_commit이_바뀌면_캐시가_저절로_무효가_된다(
     engine: _JypFakeEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """★ 「고쳤는데 화면이 그대로」를 구조적으로 불가능하게 만든다.
@@ -1032,8 +1034,6 @@ def test_엔진_코드가_바뀌면_캐시가_저절로_무효가_된다(
     오늘 v1 캐시에서 정확히 이 사고를 겪었다 — 엔진을 고쳐도 저장본이
     살아 있어 옛 보고서가 나왔고, 사용자는 「하나도 안 고쳐졌다」로 읽었다.
     """
-    from src.features.composer import build_id as build_id_module
-
     first = _run(engine)
     assert first.outcome is Outcome.REPORT
     첫_호출수 = engine.client.messages.calls
@@ -1042,13 +1042,13 @@ def test_엔진_코드가_바뀌면_캐시가_저절로_무효가_된다(
     _run(engine)
     assert engine.client.messages.calls == 첫_호출수
 
-    # 이제 «코드가 바뀐 것처럼» 지문만 다르게 만든다.
-    monkeypatch.setattr(build_id_module, "_cached_build_id", "다른코드지문")
+    # 코드·Docker·requirements를 함께 가르는 full commit을 바꾼다.
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "2" * 40)
 
     third = _run(engine)
 
     assert third.outcome is Outcome.REPORT
     assert engine.client.messages.calls > 첫_호출수, (
-        "코드가 바뀌었는데 옛 캐시가 나왔습니다 — 고쳐도 화면이 그대로가 됩니다"
+        "배포 commit이 바뀌었는데 옛 캐시가 나왔습니다"
     )
     assert third.charged is True, "새로 만들었으면 차감해야 한다"

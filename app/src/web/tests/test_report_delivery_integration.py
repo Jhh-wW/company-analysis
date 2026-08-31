@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from src.core import clock
+from src.core import clock, deployment_identity
 from src.core.constants import REPORT_GENERATION_EXECUTION_MAX_SEC
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
@@ -745,6 +745,35 @@ def _database_dump(path: Path) -> tuple[str, ...]:
 
     with sqlite3.connect(path) as conn:
         return tuple(conn.iterdump())
+
+
+def test_배포commit이_없는_로컬출고는_저장용_비검증신원만_쓴다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in deployment_identity.COMMIT_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+
+    revision, image = report_delivery_adapter._release_identity()
+
+    assert revision == ""
+    assert image == report_delivery_adapter._UNCACHEABLE_LOCAL_RELEASE_ID
+    assert not report_delivery_adapter.composer_build_id.build_id_is_usable(image)
+
+
+def test_출고배포신원도_full_commit만_권위로_쓴다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in deployment_identity.COMMIT_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    full_commit = "a" * deployment_identity.COMMIT_FULL_LEN
+    monkeypatch.setenv("RENDER_GIT_COMMIT", full_commit)
+    assert report_delivery_adapter._release_identity() == (full_commit, "")
+
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "abc1234")
+    assert report_delivery_adapter._release_identity() == (
+        "",
+        report_delivery_adapter._UNCACHEABLE_LOCAL_RELEASE_ID,
+    )
 
 
 def test_신선한배포의_공개GET은_DB와artifact폴더를_만들지않는다(

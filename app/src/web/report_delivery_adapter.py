@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from src.core import deployment_identity
 from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
 from src.features.composer import build_id as composer_build_id
 from src.features.export_pdf.automatic_release import report_sha256
@@ -47,6 +46,7 @@ _ARTIFACT_DIR_NAME: Final[str] = "report-artifacts"
 _ARTIFACT_CAPACITY_ENV: Final[str] = "REPORT_ARTIFACT_CAPACITY_BYTES"
 _DATA_ROOT_ENV: Final[str] = "APP_DATA_ROOT"
 _DETERMINISTIC_MODEL_ID: Final[str] = "deterministic-no-provider"
+_UNCACHEABLE_LOCAL_RELEASE_ID: Final[str] = "unverified-local-no-cache-v1"
 _DART_RECEIPT_LENGTH: Final[int] = 14
 _KST: Final[dt.tzinfo] = dt.timezone(dt.timedelta(hours=9))
 
@@ -191,14 +191,15 @@ def reconcile_configured_artifact_blob_intents(
 
 
 def _release_identity() -> tuple[str, str]:
-    commit = deployment_identity.deployed_commit()
-    if commit:
-        return commit, ""
     build = composer_build_id.engine_build_id()
-    if not composer_build_id.build_id_is_usable(build):
-        raise DeliveryAdapterError("생성기 배포 신원을 확정할 수 없습니다")
-    # 로컬은 image digest가 없으므로 결과 코드 지문임을 접두어로 명시한다.
-    return "", f"generator-build:{build}"
+    if composer_build_id.build_id_is_usable(build):
+        # build id 계약이 이미 canonical full commit을 검증했다. 환경변수를 다시
+        # 읽어 두 호출 사이 값이 달라지는 race를 만들지 않고 namespace에서 꺼낸다.
+        return build.rsplit(":", 1)[-1], ""
+    # full commit이 없어도 새 보고서와 PDF 자체는 저장할 수 있어야 한다.
+    # 이 값은 composer build id로 usable하지 않고, 정식 cache_namespace가 없는
+    # 출고는 cache entry를 결속하지 않으므로 로컬 캐시 권위가 되지 않는다.
+    return "", _UNCACHEABLE_LOCAL_RELEASE_ID
 
 
 def _model_mapping(actual_models: tuple[str, ...]) -> dict[str, str]:

@@ -1,692 +1,280 @@
 # -*- coding: utf-8 -*-
-"""보고서 생산 런타임 전체가 캐시 지문에 들어가는지 못 박는다.
+"""캐시는 immutable 배포 commit만 믿는다는 제품 계약을 못 박는다.
 
-파일·feature 이름을 손목록으로 관리하면 새 수집기나 근거 계약이 생길 때마다
-누락된다. 지문은 활성 production 뿌리 세 곳을 전부 순회하고, 불완전하게 읽은
-목록은 절대 정상 지문으로 쓰지 않아야 한다.
+이전 시험은 가변 로컬 파일을 훑어 usable 지문을 만들도록 강제했다. 그러나
+마지막 파일 검사 직후의 변경은 끝내 막을 수 없으므로 그 약속 자체를 폐기했다.
+이제 로컬 파일 변화는 언제나 UNKNOWN이고, 정확한 full deployment commit만
+캐시 namespace가 된다.
 """
 
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import os
-import shutil
-import stat
-import threading
-import time
 from pathlib import Path, PurePosixPath
-from types import SimpleNamespace
+import re
 
 import pytest
 
-from src.core import paths
+from src.core import deployment_identity, paths
 from src.features.composer import build_id
 
 
-_REVIEW_MISSING_PRODUCERS = (
-    "app/src/features/company_comparison/logic.py",
-    "app/src/features/company_specificity/logic.py",
-    "app/src/features/spanselect/logic.py",
-    "app/src/features/provenance/citations.py",
-    "app/src/shared/official_ir.py",
-    "app/src/shared/report_source_identity.py",
-    "app/src/shared/generation_cache_identity.py",
-    "app/src/features/report_delivery/source_identity.py",
-)
-
-_RUNTIME_RESOURCES = (
-    "analysis_engine/src/features/public_org/data/public_org_registry_2026.json",
-    "app/src/features/export_pdf/fonts/Freesentation-Regular.ttf",
-    "app/src/web/templates/result.html",
-    "app/src/web/static/style.css",
-    "app/requirements.txt",
-)
-
-
-def _reset_build_id_state() -> None:
-    with build_id._build_id_condition:
-        assert not build_id._scan_in_progress
-        build_id._cached_build_id = None
-        build_id._scan_owner_thread_id = None
-        build_id._scan_generation = 0
-        build_id._last_failed_generation = None
-        build_id._scan_reentry_detected = False
-        build_id._scan_waiter_count = 0
-        build_id._generation_results.clear()
-        build_id._generation_waiters.clear()
+_FULL_COMMIT_A = "1" * deployment_identity.COMMIT_FULL_LEN
+_FULL_COMMIT_B = "2" * deployment_identity.COMMIT_FULL_LEN
 
 
 @pytest.fixture(autouse=True)
-def _지문_기억을_지운다():
-    """성공 지문 memoization이 시험 사이에 섞이지 않게 한다."""
-
-    _reset_build_id_state()
-    yield
-    _reset_build_id_state()
+def _배포_커밋을_시험마다_비운다(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in deployment_identity.COMMIT_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
 
 
-@pytest.fixture
-def 가짜프로젝트(tmp_path: Path) -> Path:
-    """필수 production 코드·자원 뿌리를 갖춘 최소 프로젝트."""
-
-    project_root = tmp_path / "repo"
-    for root_name in build_id._PRODUCTION_ROOTS:
-        (project_root / root_name).mkdir(parents=True)
-    for root_name in build_id._RUNTIME_RESOURCE_ROOTS:
-        (project_root / root_name).mkdir(parents=True, exist_ok=True)
-    for relative in build_id._REQUIRED_RUNTIME_FILES:
-        target = project_root / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(b"required-runtime-resource\n")
-    return project_root
+def _set_full_commit(monkeypatch: pytest.MonkeyPatch, commit: str = _FULL_COMMIT_A) -> None:
+    monkeypatch.setenv("RENDER_GIT_COMMIT", commit)
 
 
-def _production_file(project_root: Path, relative: str, text: str = "VALUE = 1\n") -> Path:
-    target = project_root / relative
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text, encoding="utf-8")
-    return target
+def test_full_commit과_contract_version을_손실없이_namespace로_쓴다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_full_commit(monkeypatch)
+
+    actual = build_id.engine_build_id()
+
+    assert actual == (
+        f"{build_id.ENGINE_BUILD_ID_CONTRACT_VERSION}:{_FULL_COMMIT_A}"
+    )
+    assert build_id.build_id_is_usable(actual)
 
 
-def _use_project(monkeypatch: pytest.MonkeyPatch, project_root: Path) -> None:
-    monkeypatch.setattr(paths, "PROJECT_ROOT", project_root)
-    _reset_build_id_state()
+def test_대문자_full_commit은_공용배포신원규칙대로_canonicalize한다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commit = "ABCDEF0123456789ABCDEF0123456789ABCDEF01"
+    _set_full_commit(monkeypatch, commit)
+
+    assert build_id.engine_build_id().endswith(commit.lower())
 
 
-def test_활성_product_root_세곳만_고정한다() -> None:
-    """선택 feature 목록을 다시 만들지 않고 넓은 실행 경계만 고정한다."""
+@pytest.mark.parametrize(
+    "untrusted",
+    (
+        "a" * 7,
+        "a" * 39,
+        "a" * 41,
+        "g" * 40,
+        "a" * 40 + "-dirty",
+        "abcdef0;polluted",
+    ),
+)
+def test_짧거나_오염된_revision은_UNKNOWN이다(
+    untrusted: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RENDER_GIT_COMMIT", untrusted)
 
-    assert build_id._PRODUCTION_ROOTS == (
-        "analysis_engine/src",
-        "analysis_engine/tools",
-        "app/src",
+    actual = build_id.engine_build_id()
+
+    assert actual == build_id.UNKNOWN_BUILD_ID
+    assert not build_id.build_id_is_usable(actual)
+
+
+def test_커밋이_없으면_매호출_UNKNOWN이고_나중_full_commit을_즉시_본다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UNKNOWN도 usable 값도 프로세스 장기 memoization하지 않는다."""
+
+    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
+    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
+
+    _set_full_commit(monkeypatch)
+    assert build_id.build_id_is_usable(build_id.engine_build_id())
+
+    monkeypatch.setenv("RENDER_GIT_COMMIT", _FULL_COMMIT_B)
+    assert build_id.engine_build_id().endswith(_FULL_COMMIT_B)
+
+
+def test_로컬파일을_바꿔도_UNKNOWN이라_캐시할수없다(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """로컬 변화→usable 지문이라는 옛 약속을 안전한 fail-closed 계약으로 교체한다."""
+
+    monkeypatch.setattr(paths, "PROJECT_ROOT", tmp_path)
+    local_source = tmp_path / "app/src/features/new_feature/logic.py"
+    local_source.parent.mkdir(parents=True)
+    local_source.write_text("VALUE = 1\n", encoding="utf-8")
+
+    before = build_id.engine_build_id()
+    local_source.write_text("VALUE = 2\n", encoding="utf-8")
+    after = build_id.engine_build_id()
+
+    assert before == after == build_id.UNKNOWN_BUILD_ID
+    assert not build_id.build_id_is_usable(after)
+
+
+def test_full_commit이_바뀌면_namespace도_바뀐다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_full_commit(monkeypatch, _FULL_COMMIT_A)
+    before = build_id.engine_build_id()
+
+    _set_full_commit(monkeypatch, _FULL_COMMIT_B)
+
+    assert build_id.engine_build_id() != before
+
+
+def test_contract_version이_바뀌면_같은_commit도_옛_namespace와_갈린다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_full_commit(monkeypatch)
+    before = build_id.engine_build_id()
+
+    monkeypatch.setattr(
+        build_id,
+        "ENGINE_BUILD_ID_CONTRACT_VERSION",
+        "deployment-commit-v2",
     )
 
+    assert build_id.engine_build_id() != before
 
-def test_Docker와_paths가_requirements를_같은_배포위치에_보존한다() -> None:
-    dockerfile = (paths.PROJECT_ROOT / "app/Dockerfile").read_text(encoding="utf-8")
 
-    assert paths.PROJECT_ROOT == paths.APP_ROOT.parent
-    assert "WORKDIR /srv/app" in dockerfile
-    assert "COPY app/requirements.txt /tmp/requirements.txt" in dockerfile
-    assert "--requirement /tmp/requirements.txt" in dockerfile
-    assert "COPY app/requirements.txt /srv/app/requirements.txt" in dockerfile
-    assert "rm /srv/app/requirements.txt" not in dockerfile
-    assert "COPY app/src/ /srv/app/src/" in dockerfile
-    assert "COPY analysis_engine/src/ /srv/analysis_engine/src/" in dockerfile
-    for tool in (
-        "run_pilot.py",
-        "survey_audit_reports.py",
-        "build_goldenset_answer.py",
+@pytest.mark.parametrize(
+    "malformed",
+    (
+        "",
+        "unknown",
+        "buildA",
+        "deployment-commit-v1:" + "a" * 39,
+        "deployment-commit-v1:" + "g" * 40,
+        "deployment-commit-v1:" + "A" * 40,
+        "other-contract:" + "a" * 40,
+    ),
+)
+def test_usable검사도_현재계약의_full_commit만_받는다(malformed: str) -> None:
+    assert not build_id.build_id_is_usable(malformed)
+
+
+def test_동시_열여섯호출은_같은_commit_namespace이고_scan은_0회다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_full_commit(monkeypatch)
+    scan_calls = 0
+
+    def forbidden_scan(*_args, **_kwargs):
+        nonlocal scan_calls
+        scan_calls += 1
+        raise AssertionError("deployment commit 경로에서 파일 scan을 호출했습니다")
+
+    monkeypatch.setattr(os, "scandir", forbidden_scan)
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        results = list(executor.map(lambda _index: build_id.engine_build_id(), range(16)))
+
+    assert results == [results[0]] * 16
+    assert build_id.build_id_is_usable(results[0])
+    assert scan_calls == 0
+
+
+def test_옛_scan과_condition_구현은_죽은코드로_남지않는다() -> None:
+    for removed_name in (
+        "_content_modules",
+        "_compute_engine_build_id",
+        "_read_stable_content",
+        "_build_id_condition",
+        "_cached_build_id",
     ):
-        assert (
-            f"COPY analysis_engine/tools/{tool} "
-            f"/srv/analysis_engine/tools/{tool}"
-        ) in dockerfile
+        assert not hasattr(build_id, removed_name)
+
+
+def test_Docker_배포모양에서_full_commit만_usable이다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dockerfile = (paths.PROJECT_ROOT / "app/Dockerfile").read_text(encoding="utf-8")
     container_app_root = PurePosixPath("/srv/app")
+
+    assert "WORKDIR /srv/app" in dockerfile
+    assert "COPY app/requirements.txt /srv/app/requirements.txt" in dockerfile
     assert container_app_root.parent / "app/requirements.txt" == PurePosixPath(
         "/srv/app/requirements.txt"
     )
 
+    _set_full_commit(monkeypatch)
+    assert build_id.build_id_is_usable(build_id.engine_build_id())
 
-def test_Docker_배포모양에서_필수content를_모두찾아_지문을_만든다(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """컨테이너의 PROJECT_ROOT=/srv 모양을 임시 경로 아래 그대로 재현한다."""
-
-    image_project_root = tmp_path / "srv"
-    for root_name in build_id._PRODUCTION_ROOTS:
-        (image_project_root / root_name).mkdir(parents=True)
-    for root_name in build_id._RUNTIME_RESOURCE_ROOTS:
-        (image_project_root / root_name).mkdir(parents=True, exist_ok=True)
-    for relative in build_id._REQUIRED_RUNTIME_FILES:
-        target = image_project_root / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(b"docker-runtime-resource\n")
-    _production_file(image_project_root, "app/src/runtime.py")
-    _production_file(image_project_root, "analysis_engine/src/runtime.py")
-    _production_file(image_project_root, "analysis_engine/tools/runtime.py")
-    _use_project(monkeypatch, image_project_root)
-
-    contents = build_id._content_modules(image_project_root)
-    assert "app/requirements.txt" in contents
-    assert build_id.engine_build_id() != build_id.UNKNOWN_BUILD_ID
-
-
-def test_실제_runtime_resource가_자동발견_목록에_있다() -> None:
-    contents = build_id._content_modules(paths.PROJECT_ROOT)
-
-    for resource in _RUNTIME_RESOURCES:
-        assert resource in contents
-
-
-@pytest.mark.parametrize("resource", _RUNTIME_RESOURCES)
-def test_JSON_TTF_template_CSS_requirements_한_byte_변경도_지문을_바꾼다(
-    resource: str,
-    가짜프로젝트: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    target = 가짜프로젝트 / resource
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if not target.exists():
-        target.write_bytes(b"runtime-resource\n")
-    _use_project(monkeypatch, 가짜프로젝트)
-    before = build_id.engine_build_id()
-
-    target.write_bytes(target.read_bytes() + b"x")
-    build_id._cached_build_id = None
-
-    assert build_id.engine_build_id() != before
-
-
-@pytest.mark.parametrize("producer", _REVIEW_MISSING_PRODUCERS)
-def test_리뷰에서_찾은_내용과_출처신원_생산자가_실제_지문목록에_있다(
-    producer: str,
-) -> None:
-    """경쟁력·고유성·근거 선택·인용·캐시 source identity 누락을 막는다."""
-
-    assert producer in build_id._content_modules(paths.PROJECT_ROOT)
-
-
-@pytest.mark.parametrize("producer", _REVIEW_MISSING_PRODUCERS)
-def test_리뷰에서_찾은_생산자_각각의_변경이_지문을_바꾼다(
-    producer: str,
-    가짜프로젝트: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """목록 포함 주장에 그치지 않고 실제 파일 bytes가 지문에 결속됨을 증명한다."""
-
-    target = _production_file(가짜프로젝트, producer)
-    _use_project(monkeypatch, 가짜프로젝트)
-    before = build_id.engine_build_id()
-
-    target.write_bytes(target.read_bytes() + b"# changed\n")
-    build_id._cached_build_id = None
-
-    assert build_id.engine_build_id() != before
-
-
-def test_run_pilot_변경도_지문을_바꾼다(
-    가짜프로젝트: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    target = _production_file(
-        가짜프로젝트,
-        "analysis_engine/tools/run_pilot.py",
-    )
-    _use_project(monkeypatch, 가짜프로젝트)
-    before = build_id.engine_build_id()
-
-    target.write_bytes(target.read_bytes() + b"# collector changed\n")
-    build_id._cached_build_id = None
-
-    assert build_id.engine_build_id() != before
-
-
-def test_임의의_새_feature_py도_목록수정없이_지문에_들어간다(
-    가짜프로젝트: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """아직 이름조차 모르는 다음 feature도 app/src 경계 안이면 자동 포함한다."""
-
-    _use_project(monkeypatch, 가짜프로젝트)
-    before = build_id.engine_build_id()
-
-    _production_file(
-        가짜프로젝트,
-        "app/src/features/not_yet_planned/logic.py",
-    )
-    build_id._cached_build_id = None
-
-    assert build_id.engine_build_id() != before
-
-
-def test_init_py는_실행코드이므로_변경하면_지문도_바뀐다(
-    가짜프로젝트: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    target = _production_file(
-        가짜프로젝트,
-        "app/src/features/new_feature/__init__.py",
-        "ENABLED = False\n",
-    )
-    _use_project(monkeypatch, 가짜프로젝트)
-    before = build_id.engine_build_id()
-
-    target.write_text("ENABLED = True\n", encoding="utf-8")
-    build_id._cached_build_id = None
-
-    assert build_id.engine_build_id() != before
-
-
-@pytest.mark.parametrize(
-    "irrelevant",
-    (
-        "app/src/features/sample/tests/helper.py",
-        "app/src/features/sample/__pycache__/generated.py",
-        "app/src/features/sample/conftest.py",
-        "app/src/features/sample/test_logic.py",
-        "app/src/features/sample/logic_test.py",
-        "app/src/features/sample/readme.txt",
-        "app/src/features/sample/fixtures/sample.json",
-        "app/src/web/static/fixtures/snapshot.css",
-        "app/src/web/static/.cache/generated.css",
-        "app/src/web/static/local-artifacts/generated.css",
-        "app/src/web/static/debug.tmp",
-    ),
-)
-def test_시험과_임시파일은_지문에_영향을_주지_않는다(
-    irrelevant: str,
-    가짜프로젝트: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _use_project(monkeypatch, 가짜프로젝트)
-    before = build_id.engine_build_id()
-
-    _production_file(가짜프로젝트, irrelevant, "시험 전용\n")
-    build_id._cached_build_id = None
-
-    assert build_id.engine_build_id() == before
-
-
-def test_자동발견_결과는_중복없이_이름순이다() -> None:
-    modules = build_id._content_modules(paths.PROJECT_ROOT)
-
-    assert modules == tuple(sorted(set(modules)))
-
-
-@pytest.mark.parametrize("root_name", build_id._PRODUCTION_ROOTS)
-def test_필수_root가_하나라도_없으면_UNKNOWN이다(
-    root_name: str,
-    가짜프로젝트: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    shutil.rmtree(가짜프로젝트 / root_name)
-    _use_project(monkeypatch, 가짜프로젝트)
-
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "abc1234")
     assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
-    assert build_id._cached_build_id is None
 
-
-@pytest.mark.parametrize("root_name", build_id._PRODUCTION_ROOTS)
-def test_필수_root가_디렉터리가_아니면_UNKNOWN이다(
-    root_name: str,
-    가짜프로젝트: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = 가짜프로젝트 / root_name
-    shutil.rmtree(root)
-    root.write_text("디렉터리가 아님", encoding="utf-8")
-    _use_project(monkeypatch, 가짜프로젝트)
-
-    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
-    assert build_id._cached_build_id is None
-
-
-@pytest.mark.parametrize("relative", build_id._REQUIRED_RUNTIME_FILES)
-def test_필수_runtime_resource가_없으면_UNKNOWN이다(
-    relative: str,
-    가짜프로젝트: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    (가짜프로젝트 / relative).unlink()
-    _use_project(monkeypatch, 가짜프로젝트)
-
-    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
-    assert build_id._cached_build_id is None
-
-
-@pytest.mark.parametrize("root_name", build_id._RUNTIME_RESOURCE_ROOTS)
-def test_runtime_resource_root가_없으면_UNKNOWN이다(
-    root_name: str,
-    가짜프로젝트: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    shutil.rmtree(가짜프로젝트 / root_name)
-    _use_project(monkeypatch, 가짜프로젝트)
-
-    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
-    assert build_id._cached_build_id is None
-
-
-def test_runtime_resource가_reparse면_UNKNOWN이다(
-    가짜프로젝트: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    target = 가짜프로젝트 / build_id._REQUIRED_RUNTIME_FILES[0]
-    original_lstat = Path.lstat
-
-    def fake_lstat(path: Path):
-        if path == target:
-            return SimpleNamespace(
-                st_mode=stat.S_IFREG,
-                st_file_attributes=build_id._WINDOWS_REPARSE_POINT,
-            )
-        return original_lstat(path)
-
-    monkeypatch.setattr(Path, "lstat", fake_lstat)
-    _use_project(monkeypatch, 가짜프로젝트)
-
-    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
-    assert build_id._cached_build_id is None
-
-
-def test_순회오류는_UNKNOWN이고_다음시도에_회복한다(
-    가짜프로젝트: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """일시적인 scandir 오류를 프로세스 수명 동안 영구 캐시하지 않는다."""
-
-    _production_file(가짜프로젝트, "app/src/runtime.py")
-    _use_project(monkeypatch, 가짜프로젝트)
-    original_scandir = os.scandir
-    failed = False
-
-    def flaky_scandir(path):
-        nonlocal failed
-        if Path(path) == 가짜프로젝트 / "app/src" and not failed:
-            failed = True
-            raise OSError("일시 순회 실패")
-        return original_scandir(path)
-
-    monkeypatch.setattr(build_id.os, "scandir", flaky_scandir)
-
-    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
-    assert build_id._cached_build_id is None
-    assert build_id.engine_build_id() != build_id.UNKNOWN_BUILD_ID
-
-
-def test_파일읽기_오류는_UNKNOWN이고_다음시도에_회복한다(
-    가짜프로젝트: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """첫 read_bytes 실패 뒤 정상 파일을 다시 읽어 실제 지문을 만든다."""
-
-    target = _production_file(가짜프로젝트, "app/src/runtime.py")
-    _use_project(monkeypatch, 가짜프로젝트)
-    original_read = build_id._read_stable_content
-    failed = False
-
-    def flaky_read(path: Path):
-        nonlocal failed
-        if path == target and not failed:
-            failed = True
-            raise OSError("일시 파일 읽기 실패")
-        return original_read(path)
-
-    monkeypatch.setattr(build_id, "_read_stable_content", flaky_read)
-
-    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
-    assert build_id._cached_build_id is None
-    assert build_id.engine_build_id() != build_id.UNKNOWN_BUILD_ID
-
-
-@pytest.mark.parametrize(
-    "added",
-    (
-        "app/src/features/new_after_snapshot/logic.py",
-        "analysis_engine/src/features/public_org/data/new_after_snapshot.json",
-        "app/src/web/static/new_after_snapshot.css",
-    ),
-)
-def test_첫목록뒤_Python_JSON_static추가는_UNKNOWN이다(
-    added: str,
-    가짜프로젝트: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _use_project(monkeypatch, 가짜프로젝트)
-    original_collect = build_id._content_modules
-    collections = 0
-
-    def add_after_first(project_root: Path):
-        nonlocal collections
-        collected = original_collect(project_root)
-        collections += 1
-        if collections == 1:
-            _production_file(project_root, added, "새 production content\n")
-        return collected
-
-    monkeypatch.setattr(build_id, "_content_modules", add_after_first)
-
-    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
-    assert build_id._cached_build_id is None
-    assert collections == 2
-
-
-@pytest.mark.parametrize(
-    "removed",
-    (
-        "app/src/remove_after_snapshot.py",
-        "analysis_engine/src/features/public_org/data/remove_after_snapshot.json",
-        "app/src/web/static/remove_after_snapshot.css",
-    ),
-)
-def test_첫목록뒤_Python_JSON_static삭제는_UNKNOWN이다(
-    removed: str,
-    가짜프로젝트: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    target = _production_file(가짜프로젝트, removed)
-    _use_project(monkeypatch, 가짜프로젝트)
-    original_read = build_id._read_stable_content
-    deleted = False
-
-    def remove_after_read(path: Path):
-        nonlocal deleted
-        result = original_read(path)
-        if path == target and not deleted:
-            target.unlink()
-            deleted = True
-        return result
-
-    monkeypatch.setattr(build_id, "_read_stable_content", remove_after_read)
-
-    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
-    assert build_id._cached_build_id is None
-    assert deleted
-
-
-def test_파일을_읽은뒤_같은경로_bytes가_바뀌면_UNKNOWN이다(
-    가짜프로젝트: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    target = _production_file(가짜프로젝트, "app/src/change_after_read.py")
-    _use_project(monkeypatch, 가짜프로젝트)
-    original_read = build_id._read_stable_content
-    changed = False
-
-    def change_after_read(path: Path):
-        nonlocal changed
-        result = original_read(path)
-        if path == target and not changed:
-            target.write_bytes(target.read_bytes() + b"# changed after read\n")
-            changed = True
-        return result
-
-    monkeypatch.setattr(build_id, "_read_stable_content", change_after_read)
-
-    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
-    assert build_id._cached_build_id is None
-    assert changed
-
-
-@pytest.mark.parametrize("kind", ("symlink", "windows-reparse"))
-def test_link나_junction_root는_조용히_건너뛰지_않고_UNKNOWN이다(
-    kind: str,
-    가짜프로젝트: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Windows 권한 없이도 lstat/reparse 판정 계약을 직접 검증한다."""
-
-    target = 가짜프로젝트 / "app/src"
-    original_lstat = Path.lstat
-
-    def fake_lstat(path: Path):
-        if path != target:
-            return original_lstat(path)
-        if kind == "symlink":
-            return SimpleNamespace(st_mode=stat.S_IFLNK, st_file_attributes=0)
-        return SimpleNamespace(
-            st_mode=stat.S_IFDIR,
-            st_file_attributes=build_id._WINDOWS_REPARSE_POINT,
-        )
-
-    monkeypatch.setattr(Path, "lstat", fake_lstat)
-    _use_project(monkeypatch, 가짜프로젝트)
-
-    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
-    assert build_id._cached_build_id is None
-
-
-def test_scan뒤_open중_link교체가_보이면_UNKNOWN이다(
-    가짜프로젝트: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """권한 없는 Windows 시험에서도 open 전/후 reparse 재확인을 재현한다."""
-
-    target = _production_file(가짜프로젝트, "app/src/runtime.py")
-    original_lstat = Path.lstat
-    target_lstat_calls = 0
-
-    def swapped_lstat(path: Path):
-        nonlocal target_lstat_calls
-        if path == target:
-            target_lstat_calls += 1
-            if target_lstat_calls >= 2:
-                return SimpleNamespace(
-                    st_mode=stat.S_IFREG,
-                    st_file_attributes=build_id._WINDOWS_REPARSE_POINT,
-                )
-        return original_lstat(path)
-
-    monkeypatch.setattr(Path, "lstat", swapped_lstat)
-    _use_project(monkeypatch, 가짜프로젝트)
-
-    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
-    assert build_id._cached_build_id is None
-    assert target_lstat_calls >= 2
-
-
-def test_동시_cold_열여섯_호출은_scan을_한번만_한다(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls = 0
-    calls_lock = threading.Lock()
-    start = threading.Barrier(16)
-    expected = "a" * build_id._DIGEST_CHARS
-
-    def one_scan() -> str:
-        nonlocal calls
-        with calls_lock:
-            calls += 1
-        return expected
-
-    def call() -> str:
-        start.wait(timeout=5)
-        return build_id.engine_build_id()
-
-    monkeypatch.setattr(build_id, "_compute_engine_build_id", one_scan)
-    with ThreadPoolExecutor(max_workers=16) as executor:
-        results = list(executor.map(lambda _index: call(), range(16)))
-
-    assert results == [expected] * 16
-    assert calls == 1
-
-
-def test_동시_scan실패는_현재대기자와_UNKNOWN을_공유하고_다음호출이_회복한다(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls = 0
-    calls_lock = threading.Lock()
-    first_scan_started = threading.Event()
-    release_first_scan = threading.Event()
-    recovered = "b" * build_id._DIGEST_CHARS
-
-    def fail_once() -> str:
-        nonlocal calls
-        with calls_lock:
-            calls += 1
-            call_number = calls
-        if call_number == 1:
-            first_scan_started.set()
-            assert release_first_scan.wait(timeout=5)
-            raise OSError("동시 일시 실패")
-        return recovered
-
-    monkeypatch.setattr(build_id, "_compute_engine_build_id", fail_once)
-    with ThreadPoolExecutor(max_workers=16) as executor:
-        futures = [executor.submit(build_id.engine_build_id) for _ in range(16)]
-        assert first_scan_started.wait(timeout=5)
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            with build_id._build_id_condition:
-                if build_id._scan_waiter_count == 15:
-                    break
-            time.sleep(0.001)
-        with build_id._build_id_condition:
-            assert build_id._scan_waiter_count == 15
-        release_first_scan.set()
-        results = [future.result(timeout=5) for future in futures]
-
-    assert results == [build_id.UNKNOWN_BUILD_ID] * 16
-    assert calls == 1
-    assert build_id._cached_build_id is None
-
-    assert build_id.engine_build_id() == recovered
-    assert calls == 2
-
-
-def test_계산재진입은_deadlock대신_UNKNOWN이고_다음호출이_회복한다(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    nested: list[str] = []
-
-    def reentrant_scan() -> str:
-        nested.append(build_id.engine_build_id())
-        return "c" * build_id._DIGEST_CHARS
-
-    monkeypatch.setattr(build_id, "_compute_engine_build_id", reentrant_scan)
-
-    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
-    assert nested == [build_id.UNKNOWN_BUILD_ID]
-    assert build_id._cached_build_id is None
-    assert not build_id._scan_in_progress
-
-    recovered = "d" * build_id._DIGEST_CHARS
-    monkeypatch.setattr(build_id, "_compute_engine_build_id", lambda: recovered)
-    assert build_id.engine_build_id() == recovered
-
-
-def test_지문은_같은_코드에서_늘_같다() -> None:
-    first = build_id.engine_build_id()
-    build_id._cached_build_id = None
-    second = build_id.engine_build_id()
-
-    assert first == second
-    assert first != build_id.UNKNOWN_BUILD_ID
-    assert len(first) == build_id._DIGEST_CHARS
-
-
-def test_배포_커밋이_바뀌면_지문도_바뀐다(monkeypatch: pytest.MonkeyPatch) -> None:
-    """운영은 원래 모든 배포 변경에서 cache namespace를 가른다."""
-
-    monkeypatch.setenv(
-        "RENDER_GIT_COMMIT", "1111111111111111111111111111111111111111"
-    )
-    first = build_id.engine_build_id()
-
-    monkeypatch.setenv(
-        "RENDER_GIT_COMMIT", "2222222222222222222222222222222222222222"
-    )
-    build_id._cached_build_id = None
-
-    assert build_id.engine_build_id() != first
-
-
-def test_오염된_배포_커밋은_지문_재료로_신뢰하지_않는다(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("RENDER_GIT_COMMIT", "1234567-not-a-commit")
-    contaminated = build_id.engine_build_id()
-    build_id._cached_build_id = None
     monkeypatch.delenv("RENDER_GIT_COMMIT")
+    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
 
-    assert build_id.engine_build_id() == contaminated
+
+def test_Docker_base_image는_tag와_sha256_digest를_함께_고정한다() -> None:
+    dockerfile = (paths.PROJECT_ROOT / "app/Dockerfile").read_text(encoding="utf-8")
+    from_lines = [line.strip() for line in dockerfile.splitlines() if line.startswith("FROM ")]
+
+    assert len(from_lines) == 1
+    assert re.fullmatch(
+        r"FROM python:3\.13\.15-slim-trixie@sha256:[0-9a-f]{64}",
+        from_lines[0],
+    )
+
+
+def test_Docker_production_tree는_root가_만들고_appuser는_읽기만한다() -> None:
+    dockerfile = (paths.PROJECT_ROOT / "app/Dockerfile").read_text(encoding="utf-8")
+    lines = [line.strip() for line in dockerfile.splitlines() if line.strip()]
+    user_index = lines.index("USER appuser")
+    copy_indices = [index for index, line in enumerate(lines) if line.startswith("COPY ")]
+
+    assert copy_indices and max(copy_indices) < user_index
+    assert all("--chown" not in lines[index] for index in copy_indices)
+    assert not re.search(r"(?:chown|chmod)[^\n]*/srv", dockerfile)
+    assert 'VOLUME ["/var/data"]' in dockerfile
+    assert not any(
+        "/srv" in line for line in lines if line.startswith("VOLUME ")
+    )
+
+
+def test_requirements의_모든_직접전이항목은_exact_pin이다() -> None:
+    requirements = (paths.PROJECT_ROOT / "app/requirements.txt").read_text(
+        encoding="utf-8"
+    )
+    entries = [
+        line.strip()
+        for line in requirements.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    names: list[str] = []
+
+    for entry in entries:
+        if " @ " in entry:
+            name, url = entry.split(" @ ", 1)
+            assert re.fullmatch(r"[A-Za-z0-9_.-]+", name)
+            assert re.search(r"#sha256=[0-9a-f]{64}$", url)
+            names.append(name.casefold())
+            continue
+        requirement, _separator, _marker = entry.partition(";")
+        match = re.fullmatch(
+            r"([A-Za-z0-9_.-]+)(?:\[[A-Za-z0-9_,.-]+\])?==[^\s]+",
+            requirement.strip(),
+        )
+        assert match is not None, f"exact pin이 아닌 requirement: {entry}"
+        names.append(match.group(1).casefold())
+
+    assert len(names) == len(set(names))
+    # 직접 항목과 그 핵심 전이 의존성이 같은 lock 목록에 함께 있어야 한다.
+    assert {
+        "fastapi",
+        "starlette",
+        "pydantic",
+        "pydantic-core",
+        "anthropic",
+        "httpx",
+        "httpcore",
+        "boto3",
+        "botocore",
+        "s3transfer",
+        "spacy",
+        "thinc",
+        "numpy",
+    }.issubset(set(names))

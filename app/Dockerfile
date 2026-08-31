@@ -34,8 +34,8 @@ COPY app/requirements.txt /tmp/requirements.txt
 RUN python -m pip install --requirement /tmp/requirements.txt \
     && rm /tmp/requirements.txt
 
-# 캐시 build id도 이 파일 bytes를 읽는다. 설치용 /tmp 복사본을 지운 뒤에도
-# paths.PROJECT_ROOT(/srv) 기준 `app/requirements.txt` 자리에 보존한다.
+# full deployment commit이 가리키는 의존성 lock을 실행 이미지 안에서도 감사할
+# 수 있게 보존한다. 캐시 build id는 가변 파일 scan이 아니라 그 commit만 믿는다.
 COPY app/requirements.txt /srv/app/requirements.txt
 
 # 실행에 필요한 파일만 복사한다. analysis_engine/.env와 로컬 DB는 이미지에 넣지 않는다.

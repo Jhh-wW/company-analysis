@@ -7,15 +7,16 @@
      고쳐졌다」로 보였다. → v2-26에서 v2가 v1 캐시를 안 읽게 막았다.
   ② 그 대가로 같은 회사를 두 번 조사하면 두 번 다 900원이 나갔다.
 
-★ 그래서 v2 전용 캐시를 «코드 지문»과 함께 만든다:
-  - 코드가 그대로면 적중 → 돈을 아낀다
-  - 코드가 한 글자라도 바뀌면 저절로 미적중 → 옛 결과가 절대 안 나온다
+★ 그래서 v2 전용 캐시를 «검증된 배포 commit»과 함께 만든다:
+  - 같은 full commit이면 적중 → 돈을 아낀다
+  - 배포 commit이 바뀌면 저절로 미적중 → 옛 결과가 절대 안 나온다
+  - full commit이 없는 가변 로컬 트리는 캐시를 쓰지 않는다
   사람이 「이번엔 캐시를 비워야지」를 기억할 필요가 없다.
   기억에 의존하는 안전장치는 반드시 잊힌다 — 이 프로젝트가 네 번 증명했다.
 
 ★ 여기서 지키는 것:
   ① v1 캐시와 v2 캐시는 열쇠가 달라 서로의 보고서를 못 꺼낸다.
-  ② 코드나 실제 DART 출처가 바뀌면 캐시가 저절로 무효가 된다.
+  ② 배포 commit이나 실제 DART 출처가 바뀌면 캐시가 저절로 무효가 된다.
   ③ 지문을 못 만들었으면(«모르는 상태») 읽지도 쓰지도 않는다.
   ④ v1 보고서가 v2 열쇠 아래로 들어가지 않는다.
 """
@@ -27,8 +28,9 @@ from pathlib import Path
 
 import pytest
 
-from src.features.composer import build_id as build_id_module
+from src.core import deployment_identity
 from src.features.composer.build_id import (
+    ENGINE_BUILD_ID_CONTRACT_VERSION,
     UNKNOWN_BUILD_ID,
     build_id_is_usable,
     engine_build_id,
@@ -42,14 +44,17 @@ from src.features.storage import db as storage_db
 CORP_ID = "00126380"
 FISCAL_YEAR = 2025
 SOURCE_IDENTITY_DIGEST = "a" * 64
+BUILD_A = f"{ENGINE_BUILD_ID_CONTRACT_VERSION}:{'a' * 40}"
+BUILD_B = f"{ENGINE_BUILD_ID_CONTRACT_VERSION}:{'b' * 40}"
 
 
 @pytest.fixture(autouse=True)
-def _fresh_build_id():
-    """지문 기억을 시험마다 비운다 — 앞 시험이 남긴 값이 새면 안 된다."""
-    build_id_module._cached_build_id = None
-    yield
-    build_id_module._cached_build_id = None
+def _verified_deployment_commit(monkeypatch: pytest.MonkeyPatch):
+    """캐시 통합 시험은 immutable 배포 namespace에서 돈다."""
+
+    for name in deployment_identity.COMMIT_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "1" * deployment_identity.COMMIT_FULL_LEN)
 
 
 def _v2_report() -> Report:
@@ -108,65 +113,65 @@ def _hit(
 
 
 # ══════════════════════════════════════════════════════════
-# ② 코드가 바뀌면 캐시가 저절로 무효가 된다 (가장 중요)
+# ② 배포가 바뀌면 캐시가 저절로 무효가 된다 (가장 중요)
 # ══════════════════════════════════════════════════════════
 
 
-def test_같은_코드면_적중해서_돈을_아낀다():
-    _save(_v2_report(), "buildA")
+def test_같은_배포commit이면_적중해서_돈을_아낀다():
+    _save(_v2_report(), BUILD_A)
 
-    적중 = _hit("buildA")
+    적중 = _hit(BUILD_A)
 
     assert 적중 is not None
     assert 적중.schema_version == ENGINE_V2_SCHEMA_VERSION
 
 
-def test_코드가_바뀌면_옛_결과가_안_나온다():
+def test_배포commit이_바뀌면_옛_결과가_안_나온다():
     """★ 「고쳤는데 화면이 그대로」를 구조적으로 불가능하게 만든다."""
-    _save(_v2_report(), "buildA")
+    _save(_v2_report(), BUILD_A)
 
-    assert _hit("buildB") is None, (
-        "코드가 바뀌었는데 옛 캐시가 나왔습니다 — 고쳐도 화면이 그대로가 됩니다"
+    assert _hit(BUILD_B) is None, (
+        "배포 commit이 바뀌었는데 옛 캐시가 나왔습니다"
     )
 
 
-def test_DART_출처가_바뀌면_코드가_같아도_옛_결과가_안_나온다():
+def test_DART_출처가_바뀌면_배포가_같아도_옛_결과가_안_나온다():
     """정정공시나 재무값 정정 뒤 옛 본문을 재사용하지 않는다."""
 
-    _save(_v2_report(), "buildA", "a" * 64)
+    _save(_v2_report(), BUILD_A, "a" * 64)
 
-    assert _hit("buildA", "b" * 64) is None
+    assert _hit(BUILD_A, "b" * 64) is None
 
 
-def test_엔진_소스가_바뀌면_지문이_달라진다():
-    """지문이 «실제 코드»에 반응하는지 본다 — 상수만 바꾸면 의미가 없다."""
+def test_로컬_소스가_바뀌어도_full_commit이_없으면_UNKNOWN이다(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """파일 scan 지문을 없앤 것은 시험 삭제가 아니라 fail-closed 약속 교체다."""
+
+    for name in deployment_identity.COMMIT_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    대상 = tmp_path / "dedupe.py"
+    대상.write_text("VALUE = 1\n", encoding="utf-8")
     처음 = engine_build_id()
-    대상 = Path(build_id_module.__file__).resolve().parent / "dedupe.py"
-    원본 = 대상.read_bytes()
-    try:
-        대상.write_bytes(원본 + "\n# 지문 시험용 한 줄\n".encode("utf-8"))
-        build_id_module._cached_build_id = None
-        바뀐뒤 = engine_build_id()
-    finally:
-        대상.write_bytes(원본)
-        build_id_module._cached_build_id = None
 
-    assert 처음 != 바뀐뒤, "엔진 코드를 바꿨는데 지문이 그대로입니다"
-    assert engine_build_id() == 처음, "되돌렸는데 지문이 안 돌아왔습니다"
+    대상.write_text("VALUE = 2\n", encoding="utf-8")
+
+    assert 처음 == engine_build_id() == UNKNOWN_BUILD_ID
+    assert not build_id_is_usable(처음)
 
 
-def test_시험_파일을_고쳐도_지문은_그대로다():
-    """시험은 보고서 «모양»을 안 바꾼다 — 지문이 반응하면 캐시가 늘 미적중이다."""
+def test_배포_commit이_바뀌면_옛_v2_캐시에_적중하지_않는다(
+    monkeypatch: pytest.MonkeyPatch,
+):
     처음 = engine_build_id()
-    대상 = Path(__file__).resolve()
-    원본 = 대상.read_bytes()
-    try:
-        대상.write_bytes(원본 + "\n# 지문 시험용 한 줄\n".encode("utf-8"))
-        build_id_module._cached_build_id = None
-        assert engine_build_id() == 처음
-    finally:
-        대상.write_bytes(원본)
-        build_id_module._cached_build_id = None
+    _save(_v2_report(), 처음)
+
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "2" * deployment_identity.COMMIT_FULL_LEN)
+    바뀐뒤 = engine_build_id()
+
+    assert 바뀐뒤 != 처음
+    assert _hit(바뀐뒤) is None
 
 
 # ══════════════════════════════════════════════════════════
@@ -176,8 +181,8 @@ def test_시험_파일을_고쳐도_지문은_그대로다():
 
 def test_v1_보고서는_v2_열쇠_아래로_안_들어간다():
     """★ 들어가면 다음 조사에서 v1이 v2인 척 나온다."""
-    assert _save(_v1_report(), "buildA") is None
-    assert _hit("buildA") is None
+    assert _save(_v1_report(), BUILD_A) is None
+    assert _hit(BUILD_A) is None
 
 
 def test_v1_열쇠로_저장한_것을_v2가_못_꺼낸다():
@@ -203,7 +208,7 @@ def test_v1_열쇠로_저장한_것을_v2가_못_꺼낸다():
 
 
 def test_v2_캐시에_저장한_것을_v1이_못_꺼낸다():
-    _save(_v2_report(), "buildA")
+    _save(_v2_report(), BUILD_A)
 
     with storage_db.connect() as conn:
         v1적중 = cache_store.get_company_report_hit(
@@ -228,19 +233,19 @@ def test_지문을_못_만들면_읽지도_쓰지도_않는다():
 
     assert _save(_v2_report(), UNKNOWN_BUILD_ID) is None
     assert _hit(UNKNOWN_BUILD_ID) is None
-    assert _save(_v2_report(), "buildA", "") is None
-    assert _hit("buildA", "") is None
+    assert _save(_v2_report(), BUILD_A, "") is None
+    assert _hit(BUILD_A, "") is None
 
 
 def test_사업연도가_바뀌면_적중하지_않는다():
     """신선도(O9)는 v2에서도 그대로다 — 작년 보고서를 올해 것으로 주지 않는다."""
-    _save(_v2_report(), "buildA")
+    _save(_v2_report(), BUILD_A)
 
     with storage_db.connect() as conn:
         적중 = cache_store.get_v2_report_hit(
             conn,
             corp_id=CORP_ID,
-            build_id="buildA",
+            build_id=BUILD_A,
             source_identity_digest=SOURCE_IDENTITY_DIGEST,
             current_fiscal_year=FISCAL_YEAR + 1,
             today=dt.date(2026, 8, 24),
