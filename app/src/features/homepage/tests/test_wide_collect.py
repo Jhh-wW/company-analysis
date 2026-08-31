@@ -1236,8 +1236,9 @@ def test_전체_파이프라인_fragment와_attempt_모두_대상_회사_company
     )
     assert fragments == manual_fragments
 
-    mapped = to_evidence_mappings(documents=result.documents, fragments=fragments, attempts=result.attempts)
+    mapped = to_evidence_mappings(result=result, fragments=fragments)
 
+    assert mapped["company_id"] == target_company_id
     assert mapped["documents"]
     assert all(doc["company_id"] == target_company_id for doc in mapped["documents"])
     assert mapped["fragments"]
