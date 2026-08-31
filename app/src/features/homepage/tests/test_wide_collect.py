@@ -136,6 +136,42 @@ def test_robots가_4xx면_빈_규칙으로_진행한다():
     assert any(doc.canonical_url == "https://company.example/" for doc in result.documents)
 
 
+def test_robots가_401이면_본문을_긁지_않는다():
+    """P1-1(ROBOTS-EXPLICIT-DENIAL): 401은 인증 요구 — 빈 규칙으로 진행하면
+    안 된다(전체 오케스트레이션 수준 회귀)."""
+    pages = {
+        "https://company.example/robots.txt": WideRawResponse(
+            status=401, text="", effective_url="https://company.example/robots.txt", content_type=""
+        ),
+        "https://company.example/": _page(_body("루트 페이지 본문입니다"), "https://company.example/"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(site)
+
+    assert result.documents == ()
+    robots_attempts = [a for a in result.attempts if a.source_kind == "robots_txt"]
+    assert len(robots_attempts) == 1
+    assert robots_attempts[0].state == "FAILED"
+    assert robots_attempts[0].reason_code == "robots_denied"
+    assert "https://company.example/" not in site.calls
+
+
+def test_robots가_403이면_본문을_긁지_않는다():
+    pages = {
+        "https://company.example/robots.txt": WideRawResponse(
+            status=403, text="", effective_url="https://company.example/robots.txt", content_type=""
+        ),
+        "https://company.example/": _page(_body("루트 페이지 본문입니다"), "https://company.example/"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(site)
+
+    assert result.documents == ()
+    assert "https://company.example/" not in site.calls
+
+
 # ── 도메인군 ──────────────────────────────────────────────
 
 

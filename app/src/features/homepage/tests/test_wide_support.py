@@ -18,12 +18,22 @@ from src.features.homepage.wide_extract import (
     extract_usable_ranges,
     parse_sitemap_urls,
 )
+from urllib import robotparser
+
 from src.features.homepage.wide_fetch import (
     WideRawResponse,
+    WideRobotsPolicy,
     WideTransportError,
     classify_general_outcome,
+    fetch_sitemap,
     robots_decision,
 )
+
+
+def _allow_all_robots_policy(host: str = "company.example") -> WideRobotsPolicy:
+    parser = robotparser.RobotFileParser()
+    parser.parse([])  # 빈 규칙 = 전부 허용
+    return WideRobotsPolicy(host=host, parser=parser, outcome="proceed_parsed", reason_code="robots_ok")
 
 
 # ── wide_domain ──────────────────────────────────────────
@@ -308,8 +318,31 @@ def test_robots_404는_빈_규칙으로_진행한다():
     assert outcome == "proceed_empty_rules"
 
 
-def test_robots_401도_빈_규칙으로_진행한다():
-    outcome, _reason = robots_decision(_response(401), None)
+# ── P1-1 공격 시험: robots 401/403은 명시적 거부이지 「없음」이 아니다 ──
+
+
+def test_robots_401은_차단된다():
+    """ROBOTS-EXPLICIT-DENIAL: 401은 인증 요구 — «robots가 없다»가 아니다."""
+    outcome, reason = robots_decision(_response(401), None)
+    assert outcome == "blocked"
+    assert reason == "robots_denied"
+
+
+def test_robots_403은_차단된다():
+    outcome, reason = robots_decision(_response(403), None)
+    assert outcome == "blocked"
+    assert reason == "robots_denied"
+
+
+def test_robots_404는_여전히_빈_규칙으로_진행한다():
+    """404·410처럼 진짜 «없음»을 뜻하는 4xx는 fail-closed 대상이 아니다."""
+    outcome, reason = robots_decision(_response(404), None)
+    assert outcome == "proceed_empty_rules"
+    assert reason == "robots_missing"
+
+
+def test_robots_410도_여전히_빈_규칙으로_진행한다():
+    outcome, _reason = robots_decision(_response(410), None)
     assert outcome == "proceed_empty_rules"
 
 
@@ -321,3 +354,81 @@ def test_robots_500은_차단된다():
 def test_robots_전송실패는_차단된다():
     outcome, _reason = robots_decision(None, WideTransportError("시간초과"))
     assert outcome == "blocked"
+
+
+# ── P1-2 공격 시험: sitemap 바이트 상한이 문자 상한이면 안 된다 ──────
+
+
+def _sitemap_response(text: str, host: str = "company.example") -> WideRawResponse:
+    return WideRawResponse(
+        status=200,
+        text=text,
+        effective_url=f"https://{host}/sitemap.xml",
+        content_type="application/xml",
+    )
+
+
+def test_한글_sitemap은_문자수가_아니라_바이트수로_잘린다():
+    """ROOT CAUSE: 한글 한 글자는 UTF-8에서 최대 3바이트라, 예전엔
+    text[:max_bytes]가 «문자 수»를 잘라서 선언한 바이트 상한을 최대 3배
+    넘을 수 있었다."""
+    # 한글 5글자(각 3바이트) = 15바이트. max_bytes=10이면 3글자(9바이트)까지만 담아야 한다.
+    korean_text = "가나다라마"
+    assert len(korean_text.encode("utf-8")) == 15
+
+    result_text, reason = fetch_sitemap(
+        scheme="https",
+        host="company.example",
+        fetch=lambda url, url_allowed: _sitemap_response(korean_text),
+        robots=_allow_all_robots_policy(),
+        max_bytes=10,
+    )
+
+    assert reason == "sitemap_ok"
+    assert len(result_text.encode("utf-8")) <= 10
+    assert result_text == "가나다"  # 9바이트 — 그다음 글자(3바이트)를 넣으면 12바이트라 상한 초과
+
+
+def test_바이트_경계가_멀티바이트_문자_중간이어도_예외없이_안전하게_자른다():
+    """max_bytes가 한글 한 글자의 중간(예: 2바이트째)에서 끊겨도 깨진 바이트
+    시퀀스로 예외를 던지지 않고 조용히 버려야 한다."""
+    korean_text = "가나다라마"  # "가" 하나가 3바이트
+
+    result_text, _reason = fetch_sitemap(
+        scheme="https",
+        host="company.example",
+        fetch=lambda url, url_allowed: _sitemap_response(korean_text),
+        robots=_allow_all_robots_policy(),
+        max_bytes=2,  # "가"(3바이트)의 중간에서 끊긴다
+    )
+
+    assert len(result_text.encode("utf-8")) <= 2
+    assert result_text == ""  # 불완전한 앞 2바이트는 버려진다(예외 없음)
+
+
+def test_ascii_sitemap은_기존과_동일하게_바이트수로_자른다():
+    """영문 등 1바이트 문자는 문자수=바이트수라 예전 동작과 결과가 같아야 한다
+    (회귀 없음을 확인)."""
+    ascii_text = "abcdefghij"  # 10바이트
+
+    result_text, _reason = fetch_sitemap(
+        scheme="https",
+        host="company.example",
+        fetch=lambda url, url_allowed: _sitemap_response(ascii_text),
+        robots=_allow_all_robots_policy(),
+        max_bytes=5,
+    )
+
+    assert result_text == "abcde"
+
+
+def test_max_bytes보다_짧은_sitemap은_그대로_반환된다():
+    short_text = "짧은 문서"
+    result_text, _reason = fetch_sitemap(
+        scheme="https",
+        host="company.example",
+        fetch=lambda url, url_allowed: _sitemap_response(short_text),
+        robots=_allow_all_robots_policy(),
+        max_bytes=1_000_000,
+    )
+    assert result_text == short_text

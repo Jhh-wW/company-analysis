@@ -220,9 +220,17 @@ def robots_decision(
     """robots.txt 조회 결과의 (outcome, reason_code)를 RFC 9309 의미론으로 정한다.
 
     outcome:
-      - ``"proceed_empty_rules"``: HTTP 4xx로 명시적으로 없음 — 빈 규칙(전부 허용)으로 진행.
+      - ``"proceed_empty_rules"``: HTTP 4xx로 명시적으로 없음(404·410 등) — 빈
+        규칙(전부 허용)으로 진행.
       - ``"proceed_parsed"``: 200 — 받은 글자를 규칙으로 해석해 진행.
       - ``"blocked"``: 그 외 전부(5xx·시간초과·DNS 등) — fail-closed, 이 호스트는 긁지 않는다.
+
+    ★ P1-1 수정(2026-08-31, ROBOTS-EXPLICIT-DENIAL): 401·403은 「robots.txt가
+      없다」가 아니라 「인증·차단으로 못 받았다」는 명시적 거부다. 예전 구현은
+      4xx를 통째로 「명시적 부재 → 빈 규칙」으로 해석해 인증·차단 응답에서도
+      본문을 긁었다 — 이 설계의 robots fail-closed 약속과 어긋난다. 그래서
+      401·403만 따로 ``blocked``로 뺀다. 나머지 4xx(404·410 등)는 여전히
+      「robots 자체가 없다」는 뜻으로 보고 빈 규칙 진행을 유지한다.
     """
     if error is not None:
         return "blocked", "robots_unreachable"
@@ -230,6 +238,8 @@ def robots_decision(
         return "blocked", "robots_unreachable"
     if response.status == 200:
         return "proceed_parsed", "robots_ok"
+    if response.status in (401, 403):
+        return "blocked", "robots_denied"
     if 400 <= response.status <= 499:
         return "proceed_empty_rules", "robots_missing"
     return "blocked", "robots_unreachable"
@@ -301,5 +311,23 @@ def fetch_sitemap(
         return "", "sitemap_failed"
     if response.status != 200:
         return "", f"sitemap_missing_{response.status}"
-    text = response.text[: max_bytes if max_bytes > 0 else 0]
+    text = _truncate_utf8_bytes(response.text, max_bytes)
     return text, "sitemap_ok"
+
+
+def _truncate_utf8_bytes(text: str, max_bytes: int) -> str:
+    """UTF-8 «바이트」 기준으로 text를 max_bytes 이하로 자른다.
+
+    ★ P1-2 수정(2026-08-31, SITEMAP-BYTE-CAP-IS-CHAR-CAP): 예전엔 ``text[:max_bytes]``로
+      «문자 수»를 잘랐다. 한글 등 멀티바이트 문자는 UTF-8에서 문자당 최대
+      3바이트라, 한글 sitemap이면 선언한 바이트 상한을 최대 3배 넘을 수 있었다.
+    ★ 바이트 경계에서 멀티바이트 시퀀스 중간이 잘려도 예외를 던지지 않는다 —
+      잘린 꼬리 바이트는 ``errors="ignore"``로 조용히 버린다(깨진 문자 하나
+      없어지는 것이 예외로 전체 sitemap 처리를 막는 것보다 안전하다).
+    """
+    if max_bytes <= 0:
+        return ""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
