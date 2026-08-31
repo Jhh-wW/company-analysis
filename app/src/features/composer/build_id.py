@@ -32,6 +32,10 @@ from pathlib import Path
 from typing import Final
 
 from src.core import deployment_identity, paths
+from src.shared.report_generation.build_identity import (
+    UNKNOWN_BUILD_ID,
+    build_id_is_usable,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,8 +95,6 @@ _DIGEST_CHARS: Final[int] = 16
 
 #: 파일을 못 읽었을 때 쓰는 값. «알 수 없음»을 캐시 적중으로 바꾸지 않으려고
 #: 매번 달라지지 않는 «고정» 값을 쓴다 — 대신 아래에서 캐시를 끈다.
-UNKNOWN_BUILD_ID: Final[str] = "unknown"
-
 _cached_build_id: str | None = None
 
 
@@ -141,11 +143,4 @@ def engine_build_id() -> str:
     return _cached_build_id
 
 
-def build_id_is_usable(build_id: str) -> bool:
-    """이 지문으로 캐시를 써도 되는가.
-
-    ★ 「모르겠다」를 「같다」로 바꾸지 않는다. 지문을 못 만들었으면 캐시를
-      읽지도 쓰지도 않는다 — 옛 결과가 새 결과인 척 나가는 것이 이 캐시에서
-      가장 나쁜 결말이기 때문이다. 비용을 아끼는 것보다 중요하다.
-    """
-    return bool(build_id) and build_id != UNKNOWN_BUILD_ID
+__all__ = ["UNKNOWN_BUILD_ID", "build_id_is_usable", "engine_build_id"]

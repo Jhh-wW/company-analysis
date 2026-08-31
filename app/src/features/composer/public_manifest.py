@@ -22,6 +22,7 @@ from src.features.composer.constants import (
     DART_DOCUMENT_URL_TEMPLATE,
     DART_FINANCIAL_API_DOCUMENT_ID,
     DART_FINANCIAL_API_HOST,
+    DART_FINANCIAL_API_LABEL,
     DART_FINANCIAL_API_PREFIX,
     DART_FINANCIAL_API_URL,
     FLOW_ARROW_SECTION_IDS,
@@ -29,32 +30,63 @@ from src.features.composer.constants import (
     FLOW_HEADERS_BY_SECTION,
     FLOW_PRESENTATION,
     FLOW_UNCONFIRMED_CELL,
+    GRADE_INTERPRETED,
+    CITATION_STYLE_MERGED,
+    PARAGRAPH_MAX_SENTENCES,
     SECTION_IDS,
+    SECTION_TITLES,
 )
 from src.features.composer.logic import FragmentsInput, _normalize_fragments
 from src.features.composer.port import (
     CollectedFragment,
     ComposedReport,
+    ComposedSentence,
     FilingMeta,
     PerformanceTable,
     StructuredClaim,
 )
 from src.features.pipeline.port import Report, ReportTable
-from src.features.provenance.sources import Source, exact_evidence_text_hash
+from src.features.provenance.sources import (
+    Source,
+    SourceKind,
+    evidence_text_hash,
+    exact_evidence_text_hash,
+)
 from src.shared.dart_financial_provenance import dart_payload_matches_table
+from src.shared.report_generation.canonical import (
+    PUBLIC_STRUCTURE_MANIFEST_VERSION,
+    PublicManifestError,
+    assert_report_matches_manifest as _assert_report_matches_manifest,
+    report_verification_payload,
+)
+from src.shared.report_generation.models import canonical_sha256
+from src.shared.report_generation.constants import ENGINE_V2_SCHEMA_VERSION
+from src.shared.report_quality.constants import STRICT_QUALITY_CONTRACT_VERSION
+from src.shared.report_quality.models import (
+    PublicationPolicy,
+    QualityGrade,
+    ReleaseDecision,
+)
 from src.shared.report_quality.source_identity import (
     document_identity,
     document_identity_from_parts,
 )
 
 
-PUBLIC_STRUCTURE_MANIFEST_VERSION: Final[str] = "public-structure-manifest-v1"
 _COMPOSITION_PRESENTATION: Final[str] = "composition"
 _SOURCE_ID_PREFIX: Final[str] = "v2-frag-"
 _HEX_64_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 _NUMERIC_TOKEN_RE: Final[re.Pattern[str]] = re.compile(
     r"(?<![\w])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?"
 )
+_INTERPRETATION_MARKER: Final[str] = f" — {GRADE_INTERPRETED}"
+_SOURCE_LABEL_FALLBACK: Final[str] = "수집 자료"
+_FILING_LABEL_PREFIX: Final[str] = "전자공시"
+_SECTION_TAGS: Final[dict[str, str]] = {
+    "past_changes": "#과거",
+    "current_challenges": "#현재",
+    "future_strategy": "#미래",
+}
 _BINDING_KEYS: Final[frozenset[str]] = frozenset(
     {
         "source_fragment_ids",
@@ -66,16 +98,14 @@ _BINDING_KEYS: Final[frozenset[str]] = frozenset(
 )
 
 
-class PublicManifestError(ValueError):
-    """공개 구조를 원자료에 완전히 결속할 수 없을 때의 오류."""
-
-
 @dataclass(frozen=True)
 class PublicStructureSeal:
     """pipeline이 renderer에 전달하고 뒤에서 다시 검증할 immutable 봉인."""
 
     canonical_json: str
     table_refs: tuple[tuple[str, int, str], ...]
+    public_content_sha256: str
+    section_sha256s: tuple[tuple[str, str], ...]
 
     def ref_for(self, section_id: str, table_index: int) -> str:
         for owner, index, value in self.table_refs:
@@ -126,22 +156,19 @@ def _normalized_source_cites(fragment_ids: Sequence[str]) -> tuple[str, ...]:
     return tuple(f"[{number}]" for number in sorted(numbers))
 
 
-def _fallback_document_identity(fragment_id: str, exact_hash: str) -> str:
-    if not fragment_id or _HEX_64_RE.fullmatch(exact_hash) is None:
-        return ""
-    return "embedded:" + _sha256_text(
-        f"{_SOURCE_ID_PREFIX}{fragment_id}\x00{exact_hash}"
-    )
-
-
 def _fragment_binding(
     fragment: CollectedFragment, filing_meta: FilingMeta | None
 ) -> _FragmentBinding:
     fragment_id = str(fragment.fragment_id).strip()
     exact_hash = exact_evidence_text_hash(fragment.text)
-    identity = ""
+    declared_identity = str(fragment.document_identity).strip()
+    if not declared_identity or declared_identity.startswith("embedded:"):
+        raise PublicManifestError(
+            f"조각 {fragment_id!r}에 검증된 외부 문서 identity가 없습니다"
+        )
+    derived_identity = ""
     if str(fragment.text).startswith(DART_FINANCIAL_API_PREFIX):
-        identity = document_identity_from_parts(
+        derived_identity = document_identity_from_parts(
             document_id=DART_FINANCIAL_API_DOCUMENT_ID,
             host=DART_FINANCIAL_API_HOST,
             url=DART_FINANCIAL_API_URL,
@@ -151,22 +178,30 @@ def _fragment_binding(
             host = (urlsplit(fragment.source_url).hostname or "").casefold()
         except ValueError:
             host = ""
-        identity = document_identity_from_parts(host=host, url=fragment.source_url)
+        derived_identity = document_identity_from_parts(
+            host=host, url=fragment.source_url
+        )
     elif filing_meta is not None and filing_meta.document_id:
-        identity = document_identity_from_parts(
+        derived_identity = document_identity_from_parts(
             document_id=filing_meta.document_id,
             host=DART_DOCUMENT_HOST,
             url=DART_DOCUMENT_URL_TEMPLATE.format(
                 document_id=filing_meta.document_id
             ),
         )
-    if not identity:
-        identity = _fallback_document_identity(fragment_id, exact_hash)
-    if not fragment_id or not identity or _HEX_64_RE.fullmatch(exact_hash) is None:
+    if derived_identity and derived_identity != declared_identity:
+        raise PublicManifestError(
+            f"조각 {fragment_id!r}의 packet 문서 identity가 원문 주소와 다릅니다"
+        )
+    if (
+        not fragment_id
+        or not declared_identity
+        or _HEX_64_RE.fullmatch(exact_hash) is None
+    ):
         raise PublicManifestError(
             f"조각 {fragment_id!r}의 문서 신원 또는 exact evidence hash가 없습니다"
         )
-    return _FragmentBinding(fragment_id, identity, exact_hash)
+    return _FragmentBinding(fragment_id, declared_identity, exact_hash)
 
 
 def _source_binding(source: Source) -> _FragmentBinding | None:
@@ -180,9 +215,9 @@ def _source_binding(source: Source) -> _FragmentBinding | None:
     )
     if len(hashes) != 1:
         return None
-    identity = document_identity(source) or _fallback_document_identity(
-        fragment_id, hashes[0]
-    )
+    identity = document_identity(source)
+    if identity.startswith("embedded:"):
+        return None
     return (
         _FragmentBinding(fragment_id, identity, hashes[0])
         if identity
@@ -239,27 +274,12 @@ def _generic_evidence_matches_row(
     scale_divisor: str,
     scale_places: int,
 ) -> bool:
-    try:
-        payload = json.loads(evidence)
-    except (json.JSONDecodeError, TypeError, ValueError):
+    record = _matching_evidence_record(headers, evidence)
+    if record is None:
         return False
-    normalized_headers = tuple(" ".join(str(value).split()) for value in headers)
-    if len(normalized_headers) != len(row) or len(set(normalized_headers)) != len(
-        normalized_headers
-    ):
+    normalized_headers = tuple(_normalized_header(value) for value in headers)
+    if len(normalized_headers) != len(row):
         return False
-    candidates = []
-    for record in _evidence_records(payload):
-        normalized_record = {
-            " ".join(str(key).split()): value for key, value in record.items()
-        }
-        if all(header in normalized_record for header in normalized_headers):
-            candidates.append(normalized_record)
-    if len(candidates) != 1:
-        # 값이 evidence 어딘가에 존재한다는 사실만으로는 열 바꿔치기를 막지
-        # 못한다. 머리글→원값 대응을 하나로 특정할 수 있을 때만 재검산한다.
-        return False
-    record = candidates[0]
     if raw_row is not None:
         if len(raw_row) != len(row) or str(raw_row[0]) != str(row[0]):
             return False
@@ -308,6 +328,40 @@ def _generic_evidence_matches_row(
         elif normalized != " ".join(str(evidence_value).split()):
             return False
     return True
+
+
+def _normalized_header(value: object) -> str:
+    return " ".join(str(value).split())
+
+
+def _matching_evidence_record(
+    headers: Sequence[str], evidence: str
+) -> Mapping[str, object] | None:
+    """중복 없는 공개 머리글 전체를 가진 원자료 record 하나만 고른다."""
+
+    try:
+        payload = json.loads(evidence)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    normalized_headers = tuple(_normalized_header(value) for value in headers)
+    if (
+        not normalized_headers
+        or any(not value for value in normalized_headers)
+        or len(set(normalized_headers)) != len(normalized_headers)
+    ):
+        return None
+    candidates = []
+    for record in _evidence_records(payload):
+        normalized_record = {
+            _normalized_header(key): value for key, value in record.items()
+        }
+        if all(header in normalized_record for header in normalized_headers):
+            candidates.append(normalized_record)
+    if len(candidates) != 1:
+        # 값이 evidence 어딘가에 존재한다는 사실만으로는 열 바꿔치기를 막지
+        # 못한다. 머리글→원값 대응을 하나로 특정할 수 있을 때만 재검산한다.
+        return None
+    return candidates[0]
 
 
 def _validate_composition_total(table: PerformanceTable) -> None:
@@ -386,15 +440,168 @@ def _claim_supports_row(
     return True
 
 
+def _cell_kind(header: str, value: object) -> str:
+    normalized = _normalized_header(header).casefold()
+    if "%" in normalized or "비중" in normalized or "증감률" in normalized:
+        if _decimal(value) is None:
+            raise PublicManifestError(
+                f"비율 머리글 {header!r}의 공개 셀이 숫자가 아닙니다"
+            )
+        if "%" in normalized and not str(value).strip().endswith("%"):
+            raise PublicManifestError(
+                f"% 머리글 {header!r}의 공개 셀에 % 단위가 없습니다"
+            )
+        return "percentage"
+    return "number" if _decimal(value) is not None else "text"
+
+
+def _typed_cell(
+    *,
+    header: str,
+    column_index: int,
+    public_value: object,
+    source_field: str,
+    source_value: object,
+    values_equivalent: bool = True,
+) -> dict[str, object]:
+    if not source_field:
+        raise PublicManifestError("typed cell의 원자료 필드가 비었습니다")
+    kind = _cell_kind(header, public_value)
+    if values_equivalent and kind in {"number", "percentage"}:
+        if _decimal(public_value) != _decimal(source_value):
+            raise PublicManifestError(
+                f"머리글 {header!r}의 공개 숫자가 지정 원자료 필드와 다릅니다"
+            )
+    elif values_equivalent and _normalized_header(public_value) != _normalized_header(
+        source_value
+    ):
+        raise PublicManifestError(
+            f"머리글 {header!r}의 공개 셀이 지정 원자료 필드와 다릅니다"
+        )
+    return {
+        "column_index": column_index,
+        "header": _normalized_header(header),
+        "kind": kind,
+        "public_value_sha256": _sha256_text(str(public_value)),
+        "source_field": source_field,
+        "source_value_sha256": _sha256_text(str(source_value)),
+    }
+
+
+def _claim_field_for_cell(
+    claim: StructuredClaim,
+    header: str,
+    value: object,
+) -> tuple[str, object] | None:
+    """머리글 의미가 허용하는 claim 필드 하나만 선택한다.
+
+    행 전체 값의 집합만 비교하면 열을 맞바꿔도 통과한다. 머리글별 닫힌 필드
+    후보와 실제 값을 함께 비교해 열 위치를 잠근다.
+    """
+
+    key = _normalized_header(header).casefold()
+    if "%" in key or "비중" in key or "증감률" in key or "비율" in key:
+        candidates = ("display_value",)
+    elif "원시" in key or "원값" in key:
+        candidates = ("raw_value",)
+    elif "단위" in key:
+        candidates = ("unit", "unit_dimension")
+    elif "지표" in key or "항목" in key:
+        candidates = ("metric", "subject_scope")
+    elif "기간" in key or "연도" in key or "시점" in key:
+        candidates = ("period_end", "period_start")
+    elif any(
+        token in key
+        for token in ("제품", "사업", "지역", "구분", "대상", "범위", "명")
+    ):
+        candidates = ("subject_scope",)
+    elif _decimal(value) is not None:
+        candidates = ("display_value", "raw_value")
+    else:
+        candidates = ("metric", "subject_scope")
+    matches: list[tuple[str, object]] = []
+    for field_name in candidates:
+        source_value = getattr(claim, field_name)
+        if not str(source_value).strip():
+            continue
+        if _decimal(value) is not None:
+            matched = _decimal(value) == _decimal(source_value)
+        else:
+            matched = _normalized_header(value) == _normalized_header(source_value)
+        if matched:
+            matches.append((field_name, source_value))
+    return matches[0] if len(matches) == 1 else None
+
+
+def _fact_typed_cells(
+    headers: Sequence[str],
+    row: Sequence[str],
+    claim: StructuredClaim,
+) -> list[dict[str, object]]:
+    cells: list[dict[str, object]] = []
+    for column_index, (header, public_value) in enumerate(zip(headers, row)):
+        matched = _claim_field_for_cell(claim, header, public_value)
+        if matched is None:
+            raise PublicManifestError(
+                f"injected fact가 {header!r} 열의 공개 셀에 typed 결속되지 않았습니다"
+            )
+        source_field, source_value = matched
+        cells.append(
+            _typed_cell(
+                header=header,
+                column_index=column_index,
+                public_value=public_value,
+                source_field=f"claim:{source_field}",
+                source_value=source_value,
+            )
+        )
+    return cells
+
+
+def _evidence_typed_cells(
+    headers: Sequence[str],
+    row: Sequence[str],
+    raw_row: Sequence[str] | None,
+    evidence: str,
+) -> list[dict[str, object]]:
+    record = _matching_evidence_record(headers, evidence)
+    cells: list[dict[str, object]] = []
+    normalized_headers = tuple(_normalized_header(value) for value in headers)
+    for column_index, (header, public_value) in enumerate(zip(headers, row)):
+        source_value = (
+            raw_row[column_index]
+            if raw_row is not None
+            else record[normalized_headers[column_index]] if record is not None else None
+        )
+        if source_value is None:
+            raise PublicManifestError(
+                f"원자료에서 {header!r} 열의 typed cell 값을 찾지 못했습니다"
+            )
+        cells.append(
+            _typed_cell(
+                header=header,
+                column_index=column_index,
+                public_value=public_value,
+                source_field=f"evidence:{normalized_headers[column_index]}",
+                source_value=source_value,
+                values_equivalent=(raw_row is None or column_index == 0),
+            )
+        )
+    return cells
+
+
 def _validated_program_bindings(
     table: PerformanceTable,
     fragments: Mapping[str, _FragmentBinding],
     verified_claims: Mapping[str, StructuredClaim],
 ) -> tuple[dict[str, object], ...]:
     width = len(table.headers)
+    normalized_headers = tuple(_normalized_header(value) for value in table.headers)
     if (
         width == 0
         or not table.rows
+        or any(not value for value in normalized_headers)
+        or len(set(normalized_headers)) != len(normalized_headers)
         or any(len(row) != width for row in table.rows)
         or (table.raw_rows and len(table.raw_rows) != len(table.rows))
         or (table.row_fact_ids and len(table.row_fact_ids) != len(table.rows))
@@ -438,6 +645,7 @@ def _validated_program_bindings(
                     "프로그램 표 행의 injected fact가 출처·공개 셀에 완전히 "
                     f"결속되지 않았습니다: {fact_id}"
                 )
+            typed_cells = _fact_typed_cells(table.headers, row, claim)
         else:
             if not evidence:
                 raise PublicManifestError(
@@ -454,6 +662,12 @@ def _validated_program_bindings(
                 raise PublicManifestError(
                     f"프로그램 표 {index + 1}번 행을 원자료로 재검산할 수 없습니다"
                 )
+            typed_cells = _evidence_typed_cells(
+                table.headers,
+                row,
+                table.raw_rows[index] if table.raw_rows else None,
+                evidence,
+            )
         bindings.append(
             {
                 "source_fragment_ids": [source.fragment_id],
@@ -463,6 +677,7 @@ def _validated_program_bindings(
                     exact_evidence_text_hash(evidence) if evidence else ""
                 ),
                 "injected_fact_id": fact_id,
+                "typed_cells": typed_cells,
             }
         )
     return tuple(bindings)
@@ -471,6 +686,9 @@ def _validated_program_bindings(
 def _flow_binding(
     fragment_ids: Sequence[str],
     fragments: Mapping[str, _FragmentBinding],
+    *,
+    headers: Sequence[str],
+    row: Sequence[str],
 ) -> dict[str, object]:
     ids = tuple(dict.fromkeys(str(value).strip() for value in fragment_ids))
     sources = tuple(fragments.get(fragment_id) for fragment_id in ids)
@@ -483,6 +701,17 @@ def _flow_binding(
         "exact_evidence_hashes": [source.exact_evidence_hash for source in concrete],
         "row_evidence_hash": "",
         "injected_fact_id": "",
+        "semantic_review": "bundled:true",
+        "typed_cells": [
+            _typed_cell(
+                header=header,
+                column_index=index,
+                public_value=value,
+                source_field=f"bundled-reviewed-flow-cell:{index}",
+                source_value=value,
+            )
+            for index, (header, value) in enumerate(zip(headers, row))
+        ],
     }
 
 
@@ -504,11 +733,11 @@ def _table_payload(
     entity_scope: str,
     raw_unit: str,
     unit_dimension: str,
-    evidence_rows: Sequence[str],
     source_cites: Sequence[str],
     row_fact_ids: Sequence[str],
     row_bindings: Sequence[Mapping[str, object]],
 ) -> dict[str, object]:
+    binding_payloads = [dict(value) for value in row_bindings]
     return {
         "section_id": section_id,
         "table_index": table_index,
@@ -526,11 +755,386 @@ def _table_payload(
         "entity_scope": str(entity_scope),
         "raw_unit": str(raw_unit),
         "unit_dimension": str(unit_dimension),
-        "evidence_rows": [str(value) for value in evidence_rows],
         "source_cites": [str(value) for value in source_cites],
         "row_fact_ids": [str(value) for value in row_fact_ids],
-        "row_bindings": [dict(value) for value in row_bindings],
+        "row_evidence_refs": [
+            str(value.get("row_evidence_hash") or "")
+            for value in binding_payloads
+        ],
+        "row_binding_refs": [canonical_sha256(value) for value in binding_payloads],
+        "cell_binding_refs": [
+            [canonical_sha256(cell) for cell in value.get("typed_cells", [])]
+            for value in binding_payloads
+        ],
+        "row_bindings": binding_payloads,
         "numeric_tokens": _numeric_tokens(rows),
+    }
+
+
+def _citation_numbers_for_fragments(
+    fragments: Sequence[CollectedFragment],
+) -> dict[str, int]:
+    numbers: dict[str, int] = {}
+    pending: list[str] = []
+    for fragment in fragments:
+        fragment_id = str(fragment.fragment_id)
+        if fragment_id.isdigit() and int(fragment_id) > 0:
+            numbers[fragment_id] = int(fragment_id)
+        else:
+            pending.append(fragment_id)
+    next_number = max(numbers.values(), default=0) + 1
+    for fragment_id in pending:
+        numbers[fragment_id] = next_number
+        next_number += 1
+    return numbers
+
+
+def _sentence_numbers(
+    sentence: ComposedSentence, numbers: Mapping[str, int]
+) -> tuple[int, ...]:
+    out: list[int] = []
+    for citation in sentence.citations:
+        number = numbers.get(str(citation).strip())
+        if number is not None and number not in out:
+            out.append(number)
+    return tuple(out)
+
+
+def _marker_visibility_expected(
+    sentences: Sequence[ComposedSentence],
+    numbers: Mapping[str, int],
+    citation_style: str,
+) -> list[bool]:
+    if citation_style != CITATION_STYLE_MERGED:
+        return [True for _sentence in sentences]
+    keys = [frozenset(_sentence_numbers(sentence, numbers)) for sentence in sentences]
+    visible: list[bool] = []
+    for index, sentence in enumerate(sentences):
+        if sentence.grade == GRADE_INTERPRETED or not keys[index]:
+            visible.append(False)
+            continue
+        following = next(
+            (
+                position
+                for position in range(index + 1, len(sentences))
+                if sentences[position].grade != GRADE_INTERPRETED
+            ),
+            None,
+        )
+        visible.append(not (following is not None and keys[following] == keys[index]))
+    return visible
+
+
+def _ensure_expected_visible_markers(
+    groups: list[tuple[Sequence[ComposedSentence], list[bool]]],
+    numbers: Mapping[str, int],
+) -> None:
+    visible: set[int] = set()
+    last_seen: dict[int, tuple[int, int]] = {}
+    for group_index, (sentences, shows) in enumerate(groups):
+        for index, sentence in enumerate(sentences):
+            cited = _sentence_numbers(sentence, numbers)
+            if shows[index]:
+                visible.update(cited)
+            for number in cited:
+                last_seen[number] = (group_index, index)
+    for number, (group_index, index) in last_seen.items():
+        if number not in visible:
+            groups[group_index][1][index] = True
+
+
+def _expected_display_text(
+    sentence: ComposedSentence,
+    numbers: Mapping[str, int],
+    *,
+    show_markers: bool,
+) -> str:
+    text = " ".join(sentence.text.split())
+    if show_markers:
+        markers = "".join(
+            f"[{number}]" for number in _sentence_numbers(sentence, numbers)
+        )
+        if markers:
+            text = f"{text} {markers}"
+    if sentence.grade == GRADE_INTERPRETED:
+        text += _INTERPRETATION_MARKER
+    return text
+
+
+def _expected_paragraph_starts(
+    sentences: Sequence[ComposedSentence], numbers: Mapping[str, int]
+) -> tuple[int, ...]:
+    if not sentences:
+        return ()
+    starts = [0]
+    current_key: frozenset[int] | None = None
+    length = 0
+    for index, sentence in enumerate(sentences):
+        key = frozenset(_sentence_numbers(sentence, numbers))
+        interpreted = sentence.grade == GRADE_INTERPRETED
+        if index == 0:
+            current_key = key
+            length = 1
+            continue
+        changed = bool(key) and not interpreted and key != current_key
+        if changed or length >= PARAGRAPH_MAX_SENTENCES:
+            starts.append(index)
+            length = 1
+            if key:
+                current_key = key
+            continue
+        if key and not interpreted:
+            current_key = key
+        length += 1
+    return tuple(starts)
+
+
+def _expected_source_label(
+    fragment: CollectedFragment, filing_meta: FilingMeta | None
+) -> str:
+    if fragment.document_title:
+        return fragment.document_title
+    if not fragment.kind:
+        return _SOURCE_LABEL_FALLBACK
+    if fragment.source_url:
+        return fragment.kind
+    if filing_meta is not None and filing_meta.title:
+        return f"{filing_meta.title} · {fragment.kind}"
+    return f"{_FILING_LABEL_PREFIX} {fragment.kind}"
+
+
+def _expected_source(
+    fragment: CollectedFragment,
+    *,
+    number: int,
+    company_name: str,
+    used_in: Sequence[str],
+    filing_meta: FilingMeta | None,
+) -> Source:
+    normalized_hash = evidence_text_hash(fragment.text)
+    exact_hash = exact_evidence_text_hash(fragment.text)
+    evidence_hashes = [normalized_hash] if normalized_hash else []
+    exact_hashes = [exact_hash] if exact_hash else []
+    if fragment.text.startswith(DART_FINANCIAL_API_PREFIX):
+        return Source(
+            number=number,
+            kind=SourceKind.FILING,
+            label=DART_FINANCIAL_API_LABEL,
+            collected_at=fragment.document_date,
+            source_id=f"{_SOURCE_ID_PREFIX}{fragment.fragment_id}",
+            title=DART_FINANCIAL_API_LABEL,
+            publisher="금융감독원",
+            host=DART_FINANCIAL_API_HOST,
+            url=DART_FINANCIAL_API_URL,
+            document_id=DART_FINANCIAL_API_DOCUMENT_ID,
+            location="주요계정 API 응답",
+            source_type="공식 재무 API",
+            fact_status="공시 실제값",
+            used_in=list(used_in),
+            evidence_hashes=evidence_hashes,
+            exact_evidence_hashes=exact_hashes,
+        )
+    if fragment.source_url:
+        return Source(
+            number=number,
+            kind=SourceKind.OTHER,
+            label=_expected_source_label(fragment, filing_meta),
+            collected_at=fragment.document_date,
+            source_id=f"{_SOURCE_ID_PREFIX}{fragment.fragment_id}",
+            title=fragment.document_title,
+            publisher=company_name,
+            url=fragment.source_url,
+            location=fragment.location,
+            used_in=list(used_in),
+            evidence_hashes=evidence_hashes,
+            exact_evidence_hashes=exact_hashes,
+        )
+    document_id = filing_meta.document_id if filing_meta is not None else ""
+    return Source(
+        number=number,
+        kind=SourceKind.FILING,
+        label=_expected_source_label(fragment, filing_meta),
+        disclosed_at=filing_meta.disclosed_at if filing_meta is not None else "",
+        collected_at=fragment.document_date,
+        source_id=f"{_SOURCE_ID_PREFIX}{fragment.fragment_id}",
+        title=filing_meta.title if filing_meta is not None else "",
+        publisher=company_name,
+        host=DART_DOCUMENT_HOST if document_id else "",
+        url=(
+            DART_DOCUMENT_URL_TEMPLATE.format(document_id=document_id)
+            if document_id
+            else ""
+        ),
+        document_id=document_id,
+        location=fragment.location or fragment.kind,
+        used_in=list(used_in),
+        evidence_hashes=evidence_hashes,
+        exact_evidence_hashes=exact_hashes,
+    )
+
+
+def _public_table_from_manifest(table: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "caption": str(table.get("caption") or ""),
+        "headers": [str(value) for value in table.get("headers", [])],
+        "rows": [
+            [str(cell) for cell in row] for row in table.get("rows", [])
+        ],
+        "cite": str(table.get("cite") or ""),
+        "numeric": bool(table.get("numeric", False)),
+        "presentation": str(table.get("presentation") or "table"),
+        "display_unit": str(table.get("display_unit") or ""),
+    }
+
+
+def _expected_public_content_projection(
+    report: ComposedReport,
+    fragments: Sequence[CollectedFragment],
+    tables: Sequence[Mapping[str, object]],
+    *,
+    company_name: str,
+    company_id: str,
+    corp_type: str,
+    generated_at: str,
+    as_of_date: str,
+    analysis_period: str,
+    latest_performance_period: str,
+    citation_style: str,
+    filing_meta: FilingMeta | None,
+) -> dict[str, object]:
+    numbers = _citation_numbers_for_fragments(fragments)
+    groups = [
+        (
+            section.sentences,
+            _marker_visibility_expected(
+                section.sentences, numbers, citation_style
+            ),
+        )
+        for section in report.sections
+    ]
+    groups.append(
+        (
+            report.summary,
+            _marker_visibility_expected(report.summary, numbers, citation_style),
+        )
+    )
+    _ensure_expected_visible_markers(groups, numbers)
+    used_sections: dict[int, list[str]] = {}
+    public_sections: list[dict[str, object]] = []
+    for section_index, section in enumerate(report.sections):
+        shows = groups[section_index][1]
+        displays = [
+            _expected_display_text(sentence, numbers, show_markers=shows[index])
+            for index, sentence in enumerate(section.sentences)
+        ]
+        lines = ([[section.notice, ""]] if section.notice else []) + [
+            [display, ""] for display in displays
+        ]
+        starts = set(_expected_paragraph_starts(section.sentences, numbers))
+        paragraphs: list[str] = []
+        buffer: list[str] = []
+        for index, display in enumerate(displays):
+            if index in starts and buffer:
+                paragraphs.append(" ".join(buffer))
+                buffer = []
+            buffer.append(display)
+        if buffer:
+            paragraphs.append(" ".join(buffer))
+        if section.notice:
+            paragraphs.insert(0, section.notice)
+        for sentence in section.sentences:
+            for number in _sentence_numbers(sentence, numbers):
+                owners = used_sections.setdefault(number, [])
+                if section.section_id not in owners:
+                    owners.append(section.section_id)
+        section_tables = [
+            _public_table_from_manifest(table)
+            for table in tables
+            if table.get("section_id") == section.section_id
+        ]
+        for table in tables:
+            if table.get("section_id") != section.section_id:
+                continue
+            for raw_cite in table.get("source_cites", []):
+                number_text = citation_number(str(raw_cite))
+                if number_text:
+                    owners = used_sections.setdefault(int(number_text), [])
+                    if section.section_id not in owners:
+                        owners.append(section.section_id)
+        public_sections.append(
+            {
+                "cell": section.section_id,
+                "title": SECTION_TITLES.get(section.section_id, section.section_id),
+                "empty_reason": "",
+                "prose_lines": lines,
+                "prose_paragraphs": paragraphs,
+                "guidance_lines": [],
+                "display_number": str(section_index + 1),
+                "tag": _SECTION_TAGS.get(section.section_id, ""),
+                "tables": section_tables,
+            }
+        )
+    body_owner_matches: dict[
+        tuple[str, tuple[str, ...], str], list[str]
+    ] = {}
+    for section in report.sections:
+        for sentence in section.sentences:
+            key = (sentence.text, sentence.citations, sentence.planned_claim_slot)
+            body_owner_matches.setdefault(key, []).append(section.section_id)
+    summary_items: list[dict[str, object]] = []
+    summary_shows = groups[-1][1]
+    for index, sentence in enumerate(report.summary):
+        key = (sentence.text, sentence.citations, sentence.planned_claim_slot)
+        owners = body_owner_matches.get(key, [])
+        if len(owners) != 1:
+            raise PublicManifestError("추출식 요약의 본문 소유 장을 하나로 정할 수 없습니다")
+        summary_items.append(
+            {
+                "text": _expected_display_text(
+                    sentence,
+                    numbers,
+                    show_markers=summary_shows[index],
+                ),
+                "section_id": owners[0],
+            }
+        )
+        for number in _sentence_numbers(sentence, numbers):
+            used_sections.setdefault(number, [])
+    fragment_by_number = {
+        numbers[fragment.fragment_id]: fragment for fragment in fragments
+    }
+    citations = [
+        _expected_source(
+            fragment_by_number[number],
+            number=number,
+            company_name=company_name,
+            used_in=used_sections[number],
+            filing_meta=filing_meta,
+        )
+        for number in sorted(used_sections)
+        if number in fragment_by_number
+    ]
+    from src.shared.report_generation.models import canonical_value  # noqa: PLC0415
+
+    return {
+        "version": 1,
+        "company": company_name,
+        "company_id": company_id,
+        "job": "",
+        "corp_type": corp_type,
+        "generated_at": generated_at,
+        "schema_version": ENGINE_V2_SCHEMA_VERSION,
+        "as_of_date": as_of_date,
+        "analysis_period": analysis_period,
+        "latest_performance_period": latest_performance_period,
+        "grade": QualityGrade.COMPLETE.value,
+        "shortfall_reasons": [],
+        "quality_contract_version": STRICT_QUALITY_CONTRACT_VERSION,
+        "safety_decision": ReleaseDecision.RELEASE_ALLOWED.value,
+        "publication_policy": PublicationPolicy.STRUCTURED_SAFETY.value,
+        "sections": public_sections,
+        "summary_items": summary_items,
+        "citations": [canonical_value(source) for source in citations],
     }
 
 
@@ -542,6 +1146,16 @@ def build_public_structure_seal(
     filing_meta: FilingMeta | None,
     composition_tables: tuple[PerformanceTable, ...],
     table_presentation: str,
+    company_id: str,
+    evidence_generation_sha256: str,
+    evidence_packet_sha256s: tuple[tuple[str, str], ...],
+    company_name: str,
+    corp_type: str,
+    generated_at: str,
+    as_of_date: str,
+    analysis_period: str,
+    latest_performance_period: str,
+    citation_style: str,
 ) -> PublicStructureSeal:
     """검증된 pre-render 입력만으로 공개 표·flow 정본을 만든다."""
 
@@ -572,15 +1186,19 @@ def build_public_structure_seal(
             rows: list[list[str]] = []
             row_bindings: list[dict[str, object]] = []
             for row in section.flow_rows:
-                binding = _flow_binding(row.citations, fragment_bindings)
-                rows.append(
-                    [
-                        (str(cell).strip() or FLOW_UNCONFIRMED_CELL)
-                        if section.section_id in FLOW_ARROW_SECTION_IDS
-                        else str(cell).strip()
-                        for cell in row.cells
-                    ]
+                public_row = [
+                    (str(cell).strip() or FLOW_UNCONFIRMED_CELL)
+                    if section.section_id in FLOW_ARROW_SECTION_IDS
+                    else str(cell).strip()
+                    for cell in row.cells
+                ]
+                binding = _flow_binding(
+                    row.citations,
+                    fragment_bindings,
+                    headers=FLOW_HEADERS_BY_SECTION[section.section_id],
+                    row=public_row,
                 )
+                rows.append(public_row)
                 row_bindings.append(binding)
             source_ids = tuple(
                 fragment_id
@@ -588,7 +1206,6 @@ def build_public_structure_seal(
                 for fragment_id in binding["source_fragment_ids"]
             )
             source_cites = _normalized_source_cites(source_ids)
-            evidence_rows = tuple(_canonical_json(binding) for binding in row_bindings)
             section_tables.append(
                 _table_payload(
                     section_id=section.section_id,
@@ -607,7 +1224,6 @@ def build_public_structure_seal(
                     entity_scope="",
                     raw_unit="",
                     unit_dimension="",
-                    evidence_rows=evidence_rows,
                     source_cites=source_cites,
                     row_fact_ids=("",) * len(rows),
                     row_bindings=row_bindings,
@@ -658,7 +1274,6 @@ def build_public_structure_seal(
                     entity_scope=table.entity_scope,
                     raw_unit=table.raw_unit,
                     unit_dimension=table.unit_dimension,
-                    evidence_rows=table.evidence_rows,
                     source_cites=source_cites,
                     row_fact_ids=fact_ids,
                     row_bindings=row_bindings,
@@ -674,15 +1289,53 @@ def build_public_structure_seal(
     section_ids = tuple(section.section_id for section in report.sections)
     if section_ids != SECTION_IDS:
         raise PublicManifestError("pre-render 장 id·순서가 SECTION_IDS와 다릅니다")
+    if not re.fullmatch(r"[0-9]{8}", str(company_id).strip()):
+        raise PublicManifestError("manifest company_id는 gen8이어야 합니다")
+    if _HEX_64_RE.fullmatch(str(evidence_generation_sha256).strip()) is None:
+        raise PublicManifestError("manifest evidence generation 지문이 없습니다")
+    if (
+        tuple(section_id for section_id, _digest in evidence_packet_sha256s)
+        != SECTION_IDS
+        or any(_HEX_64_RE.fullmatch(str(digest)) is None for _sid, digest in evidence_packet_sha256s)
+    ):
+        raise PublicManifestError("manifest에는 정책 순서 아홉 packet 지문이 필요합니다")
     unsigned = {
         "version": PUBLIC_STRUCTURE_MANIFEST_VERSION,
+        "company_id": str(company_id).strip(),
+        "evidence_generation_sha256": str(evidence_generation_sha256).strip(),
+        "evidence_packet_sha256s": [
+            [section_id, digest] for section_id, digest in evidence_packet_sha256s
+        ],
         "sections": list(section_ids),
         "tables": tables,
     }
-    manifest = {**unsigned, "digest": _sha256_text(_canonical_json(unsigned))}
+    manifest = {**unsigned, "digest": canonical_sha256(unsigned)}
+    normalized_fragments = _normalize_fragments(fragments)
+    public_content = _expected_public_content_projection(
+        report,
+        normalized_fragments,
+        tables,
+        company_name=company_name,
+        company_id=str(company_id).strip(),
+        corp_type=corp_type,
+        generated_at=generated_at,
+        as_of_date=as_of_date,
+        analysis_period=analysis_period,
+        latest_performance_period=latest_performance_period,
+        citation_style=citation_style,
+        filing_meta=filing_meta,
+    )
+    public_sections = public_content["sections"]
+    section_sha256s = tuple(
+        (str(section["cell"]), canonical_sha256(section))
+        for section in public_sections
+        if isinstance(section, Mapping)
+    )
     return PublicStructureSeal(
         canonical_json=_canonical_json(manifest),
         table_refs=tuple(refs),
+        public_content_sha256=canonical_sha256(public_content),
+        section_sha256s=section_sha256s,
     )
 
 
@@ -886,43 +1539,24 @@ def assert_report_matches_public_structure(
         raise PublicManifestError("renderer actual에 공개 구조 manifest가 없습니다")
     if report.public_structure_manifest != seal.canonical_json:
         raise PublicManifestError("renderer actual의 공개 구조 manifest가 바뀌었습니다")
-    expected = _load_manifest(seal.canonical_json)
-    if [section.cell for section in report.sections] != expected["sections"]:
-        raise PublicManifestError("renderer actual 장 id·순서가 manifest와 다릅니다")
-    actual_tables = _actual_table_payloads(report)
-    if actual_tables != expected["tables"]:
-        raise PublicManifestError(
-            "renderer actual 표·flow의 행/셀/숫자/출처가 manifest와 다릅니다"
-        )
+    _assert_report_matches_manifest(
+        report_verification_payload(report), seal.canonical_json
+    )
 
 
 def assert_stored_strict_manifest(report: Report) -> None:
     """strict JSON 재로드 뒤 manifest와 모든 표 참조가 남았는지 확인한다."""
 
-    manifest = _load_manifest(report.public_structure_manifest)
-    if report.public_structure_manifest != _canonical_json(manifest):
-        raise PublicManifestError("strict 재로드 manifest canonical bytes가 바뀌었습니다")
-    if [section.cell for section in report.sections] != manifest["sections"]:
-        raise PublicManifestError("strict 재로드 장 id·순서가 manifest와 다릅니다")
-    actual_tables = _actual_table_payloads(report)
-    if actual_tables != manifest["tables"]:
-        raise PublicManifestError(
-            "strict 재로드 표·flow의 행/셀/숫자/출처가 manifest와 다릅니다"
-        )
-    for section in report.sections:
-        for table in section.tables:
-            has_evidence = (
-                len(table.evidence_rows) == len(table.rows)
-                and all(str(value).strip() for value in table.evidence_rows)
-            )
-            has_facts = (
-                len(table.row_fact_ids) == len(table.rows)
-                and all(str(value).strip() for value in table.row_fact_ids)
-            )
-            if not (has_evidence or has_facts):
-                raise PublicManifestError(
-                    "strict 재로드 표의 행 근거가 누락됐습니다"
-                )
+    expected_sha256 = (
+        report.generation_evidence.public_manifest_sha256
+        if report.generation_evidence is not None
+        else ""
+    )
+    _assert_report_matches_manifest(
+        report_verification_payload(report),
+        report.public_structure_manifest,
+        expected_manifest_sha256=expected_sha256,
+    )
 
 
 __all__ = [

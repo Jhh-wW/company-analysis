@@ -1110,10 +1110,15 @@ def _semantic_review_grouped(
                     flow_row=row,
                 )
             )
-    # 항목이 하나도 없는 경우도 bundled reviewer 호출을 생략하지 않는다.
-    # packet 작가 9개 응답이 전부 깨진 실행까지 포함해 FULL 호출 그래프를
-    # writer 9 + reviewer 1로 고정한다. 빈 판정은 아래 재조립에서 기존과
-    # 동일하게 비검수 문장만 유지하고 flow는 모두 제거한다.
+    # 검수할 draft가 0개면 reviewer를 부를 근거도 후보도 없다. writer 아홉
+    # 응답이 전부 파싱 실패한 실행은 실제 장부 9/0으로 끝내며, 성공 생산
+    # 증거도 만들지 않는다. 일부 문장/flow라도 있을 때만 아래 단 한 번의
+    # bundled reviewer 호출을 수행한다.
+    if not items:
+        return (
+            [list(group) for group in groups],
+            {section_id: () for section_id in flow_rows_by_section},
+        )
     verdicts = _ask_grouped_verdicts(ask, items, frag_by_id, table)
     sentence_by_number: dict[int, Optional[ComposedSentence]] = {}
     flow_kept_numbers: set[int] = set()

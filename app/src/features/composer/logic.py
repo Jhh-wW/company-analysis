@@ -70,6 +70,7 @@ from src.features.composer.port import (
     ComposedSentence,
     FlowRow,
     PerformanceTable,
+    SectionEvidencePacketSet,
     fragments_from_raw,
 )
 
@@ -85,7 +86,9 @@ FragmentsInput = Union[
 
 #: 장별 근거 묶음 입력. 키는 SECTION_IDS 아홉 개와 정확히 같아야 한다.
 #: 값은 기존 flat fragments와 같은 두 입력 모양을 그대로 재사용한다.
-SectionEvidencePackets = Mapping[str, FragmentsInput]
+SectionEvidencePackets = Union[
+    Mapping[str, FragmentsInput], SectionEvidencePacketSet
+]
 
 #: 실서비스 raw fragments의 dict[int, ...] 계약과 같은 공개 조각 번호.
 _CANONICAL_FRAGMENT_ID_RE: Final[re.Pattern[str]] = re.compile(r"[1-9][0-9]*")
@@ -98,6 +101,9 @@ class _PreparedSectionEvidencePackets:
     packets: Mapping[str, tuple[CollectedFragment, ...]]
     allowed_fragment_ids_by_section: Mapping[str, frozenset[str]]
     flat_union: tuple[CollectedFragment, ...]
+    company_id: str = ""
+    evidence_generation_sha256: str = ""
+    packet_sha256s: tuple[tuple[str, str], ...] = ()
 
 
 _NOTICE_OUTSIDE_PACKET_CITATIONS: Final[str] = (
@@ -679,6 +685,7 @@ def _normalize_packet_fragments(
             document_title=fragment.document_title,
             location=fragment.location,
             document_date=document_dates.get(fragment.fragment_id, ""),
+            document_identity=fragment.document_identity,
         )
         for fragment in normalized
     )
@@ -694,8 +701,19 @@ def _prepare_section_evidence_packets(
     프롬프트와 flat union에서는 각각 한 번만 남긴다.
     """
 
+    typed_packets = (
+        packets if isinstance(packets, SectionEvidencePacketSet) else None
+    )
+    packet_mapping: Mapping[str, FragmentsInput] = (
+        {
+            packet.section_id: packet.fragments
+            for packet in typed_packets.packets
+        }
+        if typed_packets is not None
+        else packets
+    )
     expected = set(SECTION_IDS)
-    actual = set(packets)
+    actual = set(packet_mapping)
     if actual != expected:
         missing = [section_id for section_id in SECTION_IDS if section_id not in actual]
         extra = sorted(str(section_id) for section_id in actual - expected)
@@ -714,7 +732,7 @@ def _prepare_section_evidence_packets(
     allowed_fragment_ids_by_section: dict[str, frozenset[str]] = {}
     empty_sections: list[str] = []
     for section_id in SECTION_IDS:
-        raw_packet = packets[section_id]
+        raw_packet = packet_mapping[section_id]
         if isinstance(raw_packet, Mapping):
             # ``fragments_from_raw``는 legacy 호환 때문에 빈 원문을 조용히
             # 제외한다. packet 모드는 그 전에 원시 항목을 검사해, 유효 조각
@@ -788,6 +806,15 @@ def _prepare_section_evidence_packets(
         packets=normalized_packets,
         allowed_fragment_ids_by_section=allowed_fragment_ids_by_section,
         flat_union=flat_union,
+        company_id=typed_packets.company_id if typed_packets is not None else "",
+        evidence_generation_sha256=(
+            typed_packets.evidence_generation_sha256
+            if typed_packets is not None
+            else ""
+        ),
+        packet_sha256s=(
+            typed_packets.packet_sha256s if typed_packets is not None else ()
+        ),
     )
 
 

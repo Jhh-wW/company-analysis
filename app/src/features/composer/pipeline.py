@@ -32,7 +32,8 @@ from src.shared.report_quality.constants import STRICT_QUALITY_CONTRACT_VERSION
 from src.shared.report_quality.generation import (
     GenerationQualityObservation,
     LEGACY_SHADOW_PUBLICATION_REASON,
-    observe_generation,
+    assess_and_observe_generation,
+    assert_observation_matches_assessment,
 )
 from src.shared.report_quality.models import PublicationPolicy
 from src.shared.report_quality.contract import contract_for_generation
@@ -53,7 +54,11 @@ from src.features.composer.logic import (
     compose_sections,
     compose_summary,
 )
-from src.features.composer.constants import DEFAULT_CITATION_STYLE, SECTION_TITLES
+from src.features.composer.constants import (
+    DEFAULT_CITATION_STYLE,
+    SECTION_IDS,
+    SECTION_TITLES,
+)
 from src.features.composer.dedupe import drop_cross_section_duplicates
 from src.features.composer.diagram_check import check_diagram_numbers, check_diagrams
 from src.features.composer.dup_detect import CONFIDENCE_CONFIRMED, find_numeric_duplicates
@@ -64,11 +69,31 @@ from src.features.composer.port import (
     ComposedSentence,
     FilingMeta,
     PerformanceTable,
+    SectionEvidencePacketSet,
+)
+from src.shared.report_generation.models import (
+    GenerationCallLedger,
+    GenerationCallRecord,
+    GenerationProducerEvidence,
+    GenerationRunMetrics,
+    canonical_sha256,
+    exact_text_sha256,
+    require_sha256,
+)
+from src.shared.generation_validation_receipt import (
+    GenerationValidationReceipt,
+    ValidationRound,
+)
+from src.shared.report_generation.canonical import (
+    assert_report_matches_generation_evidence,
+    public_content_digests,
+    report_verification_payload,
 )
 from src.features.composer.quality_projection import (
     build_generation_quality_candidate,
 )
 from src.features.composer.public_manifest import (
+    PublicManifestError,
     PublicStructureSeal,
     assert_report_matches_public_structure,
     build_public_structure_seal,
@@ -99,6 +124,63 @@ class V2RunOutput:
     #: 새 생성 시점에만 실행한 versioned 품질·공개 안전 shadow 판정.
     #: 과거 GET에서는 다시 계산하지 않는다.
     quality_observation: GenerationQualityObservation | None = None
+    #: FULL 성공 후보에만 존재하는 비권위 생산 증거. 공개·차감 결정은 없다.
+    generation_evidence: GenerationProducerEvidence | None = None
+    #: cache/storage가 0으로 꾸미지 않고 다시 운반할 원 실행 계측.
+    generation_metrics: GenerationRunMetrics | None = None
+
+
+class _CallLedgerRecorder:
+    """FULL의 실제 writer/reviewer 호출을 원문 없이 순서대로 기록한다."""
+
+    def __init__(self) -> None:
+        self._records: list[GenerationCallRecord] = []
+        self._role_counts = {"writer": 0, "reviewer": 0}
+
+    def wrap(self, ask: AskFn, *, role: str) -> AskFn:
+        def tracked(prompt: str) -> str:
+            self._role_counts[role] += 1
+            role_index = self._role_counts[role]
+            section_id = (
+                SECTION_IDS[role_index - 1]
+                if role == "writer" and role_index <= len(SECTION_IDS)
+                else "bundled" if role == "reviewer" else "unexpected"
+            )
+            sequence = len(self._records) + 1
+            try:
+                response = ask(prompt)
+            except Exception as error:
+                self._records.append(
+                    GenerationCallRecord(
+                        sequence=sequence,
+                        role=role,
+                        role_index=role_index,
+                        section_id=section_id,
+                        prompt_sha256=exact_text_sha256(prompt),
+                        response_sha256="",
+                        outcome="failed",
+                        error_kind=type(error).__name__,
+                    )
+                )
+                raise
+            text = str(response)
+            self._records.append(
+                GenerationCallRecord(
+                    sequence=sequence,
+                    role=role,
+                    role_index=role_index,
+                    section_id=section_id,
+                    prompt_sha256=exact_text_sha256(prompt),
+                    response_sha256=exact_text_sha256(text),
+                    outcome="returned",
+                )
+            )
+            return text
+
+        return tracked
+
+    def freeze(self) -> GenerationCallLedger:
+        return GenerationCallLedger(tuple(self._records))
 
 
 def _total_sentences(report: ComposedReport) -> int:
@@ -350,6 +432,8 @@ def run_v2(
     citation_style: str = DEFAULT_CITATION_STYLE,
     release_mode: ReleaseMode = ReleaseMode.SHADOW,
     section_evidence_packets: Optional[SectionEvidencePackets] = None,
+    company_id: str = "",
+    build_identity_sha256: str = "",
 ) -> V2RunOutput:
     """엔진 v2 전체 흐름을 한 번 돌려 최종 보고서를 만든다 (04장 3-4절).
 
@@ -400,6 +484,37 @@ def run_v2(
     if not isinstance(release_mode, ReleaseMode):
         raise TypeError("release_mode는 ReleaseMode 값이어야 합니다")
 
+    call_recorder: _CallLedgerRecorder | None = None
+    writer_for_run = writer_ask
+    reviewer_for_run = reviewer_ask
+    normalized_build_identity_sha256 = ""
+    if release_mode is ReleaseMode.FULL:
+        # 성공/실패 어느 쪽이든 첫 유료 호출 전에 typed 9장·회사·evidence
+        # generation·build identity를 닫는다. raw Mapping은 같은 내용을 가졌어도
+        # FULL 권위 입력이 아니다.
+        if type(section_evidence_packets) is not SectionEvidencePacketSet:
+            raise V2ValidationError(
+                ("FULL 생성에는 gen8 회사에 결속된 typed 아홉 장 packet이 필요합니다",)
+            )
+        if (
+            type(company_id) is not str
+            or company_id != company_id.strip()
+            or company_id != section_evidence_packets.company_id
+        ):
+            raise V2ValidationError(
+                ("FULL 생성 대상 회사와 section packet company_id가 다릅니다",)
+            )
+        try:
+            normalized_build_identity_sha256 = require_sha256(
+                build_identity_sha256,
+                label="FULL 생성 build identity",
+            )
+        except ValueError as error:
+            raise V2ValidationError((str(error),)) from error
+        call_recorder = _CallLedgerRecorder()
+        writer_for_run = call_recorder.wrap(writer_ask, role="writer")
+        reviewer_for_run = call_recorder.wrap(reviewer_ask, role="reviewer")
+
     # packet 계약은 첫 유료 호출 전에 닫는다. 작성에는 장별 packet만,
     # 검증·부록에는 충돌 검사를 마친 결정론적 union만 전달한다.
     prepared_evidence = None
@@ -437,32 +552,35 @@ def run_v2(
         company_name,
         fragments,
         performance_table,
-        writer_ask,
+        writer_for_run,
         section_evidence_packets=(
             prepared_evidence.packets if prepared_evidence is not None else None
         ),
     )
-    if prepared_evidence is not None:
-        draft = _sanitize_report_to_section_evidence(
-            draft, prepared_evidence.allowed_fragment_ids_by_section
-        )
-        _assert_composed_report_evidence_invariant(
-            draft,
-            prepared_evidence.allowed_fragment_ids_by_section,
-            packet_union_ids,
-            stage="draft-pre-review",
-        )
+    if release_mode is not ReleaseMode.SHADOW:
+        if prepared_evidence is not None:
+            draft = _sanitize_report_to_section_evidence(
+                draft,
+                prepared_evidence.allowed_fragment_ids_by_section,
+            )
+            _assert_composed_report_evidence_invariant(
+                draft,
+                prepared_evidence.allowed_fragment_ids_by_section,
+                packet_union_ids,
+                stage="draft-pre-review",
+            )
         # flow 숫자는 기존 canonical 검사로 먼저 재검산한다. 관계 의미는
         # 바로 다음 bundled reviewer 한 번에 본문과 함께 판정한다.
         draft, diagram_problems = check_diagram_numbers(
             draft, _normalize_fragments(verification_fragments)
         )
-        _assert_composed_report_evidence_invariant(
-            draft,
-            prepared_evidence.allowed_fragment_ids_by_section,
-            packet_union_ids,
-            stage="diagram-numeric-pre-review",
-        )
+        if prepared_evidence is not None:
+            _assert_composed_report_evidence_invariant(
+                draft,
+                prepared_evidence.allowed_fragment_ids_by_section,
+                packet_union_ids,
+                stage="diagram-numeric-pre-review",
+            )
     else:
         diagram_problems = ()
     draft_body_count = _total_sentences(draft)  # 이 시점 summary는 빈 튜플이다
@@ -470,14 +588,14 @@ def run_v2(
     # ② 본문 검증 (검수 — 문장 단위 제거/강등만, 장 삭제 없음)
     if prepared_evidence is None:
         verified = verify_report(
-            draft, verification_fragments, performance_table, reviewer_ask
+            draft, verification_fragments, performance_table, reviewer_for_run
         )
     else:
         verified = verify_report(
             draft,
             verification_fragments,
             performance_table,
-            reviewer_ask,
+            reviewer_for_run,
             allowed_fragment_ids_by_section=(
                 prepared_evidence.allowed_fragment_ids_by_section
             ),
@@ -512,12 +630,28 @@ def run_v2(
     #       검수용(8000토큰)을 그대로 쓰면 예약만으로 예산의 21.7%를 먹어
     #       비싼 회사에서 보고서 «전체»가 예산 초과로 실패한다(실측).
     #     근거 없는 줄만 빼며, 줄이 다 빠지면 도식을 안 그릴 뿐 장은 남는다.
-    if prepared_evidence is None:
+    if release_mode is ReleaseMode.SHADOW:
         verified, diagram_problems = check_diagrams(
             verified,
             _normalize_fragments(verification_fragments),
             diagram_ask or reviewer_ask,
         )
+    elif prepared_evidence is None:
+        # ENFORCE_NO_PARTIAL은 이식기 호환 모드라 typed packet/장별 bundled
+        # 의미 판정이 없다. 관계를 확인하지 못한 flow를 공개하거나 별도 diagram
+        # AI를 장부 밖에서 부르지 않고, 행만 보수적으로 미공개 처리한다.
+        hidden = sum(len(section.flow_rows) for section in verified.sections)
+        verified = replace(
+            verified,
+            sections=tuple(
+                replace(section, flow_rows=()) for section in verified.sections
+            ),
+        )
+        if hidden:
+            diagram_problems = (
+                *diagram_problems,
+                f"ENFORCE_NO_PARTIAL 미결속 관계 flow {hidden}행 공개 제외",
+            )
     else:
         _assert_composed_report_evidence_invariant(
             verified,
@@ -577,7 +711,7 @@ def run_v2(
             verification_fragments,
             performance_table,
             writer_ask=writer_ask,
-            reviewer_ask=reviewer_ask,
+            reviewer_ask=reviewer_for_run,
             body_numeric_filtering=body_numeric_filtering,
         )
     else:
@@ -596,6 +730,8 @@ def run_v2(
             filing_meta=filing_meta,
             composition_tables=composition_tables,
             citation_style=citation_style,
+            company_id=(str(company_id).strip() if release_mode is ReleaseMode.FULL else ""),
+            release_mode=release_mode.value,
         )
         extractive = select_extractive_summary(verified, body_rendered.fact_records)
         if not extractive.release_ready:
@@ -624,6 +760,8 @@ def run_v2(
     # SHADOW는 이 객체를 만들지도 전달하지도 않아 기존 호출·문자를 보존한다.
     public_structure_seal: Optional[PublicStructureSeal] = None
     if release_mode is ReleaseMode.FULL:
+        if prepared_evidence is None:  # preflight가 이미 막지만 타입 좁힘용 방어
+            raise V2ValidationError(("FULL section packet 준비값이 없습니다",))
         public_structure_seal = build_public_structure_seal(
             final,
             verification_fragments,
@@ -631,6 +769,18 @@ def run_v2(
             filing_meta=filing_meta,
             composition_tables=composition_tables,
             table_presentation=table_presentation,
+            company_id=prepared_evidence.company_id,
+            evidence_generation_sha256=(
+                prepared_evidence.evidence_generation_sha256
+            ),
+            evidence_packet_sha256s=prepared_evidence.packet_sha256s,
+            company_name=company_name,
+            corp_type=corp_type,
+            generated_at=generated_at,
+            as_of_date=as_of_date,
+            analysis_period=analysis_period,
+            latest_performance_period=latest_performance_period,
+            citation_style=citation_style,
         )
 
     # ⑤ 렌더 — 웹·PDF가 이미 소비하는 공용 구조로
@@ -654,6 +804,8 @@ def run_v2(
         filing_meta=filing_meta,
         composition_tables=composition_tables,
         citation_style=citation_style,
+        company_id=(str(company_id).strip() if release_mode is ReleaseMode.FULL else ""),
+        release_mode=("" if release_mode is ReleaseMode.SHADOW else release_mode.value),
         **seal_render_kwargs,
     )
     if public_structure_seal is not None:
@@ -665,8 +817,9 @@ def run_v2(
     # 정규식으로 쪼개 가짜 fact를 만들지 않고 «결속되지 않은 공개 내용»으로
     # 남긴다. 따라서 전체 안전 결과는 계속 미완성/차단이며, 숫자 문장 경계
     # 밖의 공개 구조는 결속과 영향 측정 전까지 전체 hard gate로 승격하지 않는다.
-    quality_observation = observe_generation(
-        build_generation_quality_candidate(rendered, final),
+    quality_candidate = build_generation_quality_candidate(rendered, final)
+    generation_assessment, quality_observation = assess_and_observe_generation(
+        quality_candidate,
         contract_version=(
             ""
             if release_mode is ReleaseMode.SHADOW
@@ -718,6 +871,93 @@ def run_v2(
         )
         if public_structure_seal is not None:
             assert_report_matches_public_structure(rendered, public_structure_seal)
+            actual_content_sha256, actual_section_sha256s = public_content_digests(
+                rendered
+            )
+            if (
+                actual_content_sha256
+                != public_structure_seal.public_content_sha256
+                or actual_section_sha256s != public_structure_seal.section_sha256s
+            ):
+                raise PublicManifestError(
+                    "renderer actual 본문·문단·요약·표·출처·출고표시가 "
+                    "pre-render 공개 content 봉인과 다릅니다"
+                )
+
+    # ``sentences_made``는 AI 호출 수가 아니라 공개 후보 문장 단위의 분모다.
+    # extractive summary는 추가 AI 0회지만 보고서에 실리는 후보 다섯 단위이므로
+    # 포함한다. 실제 AI 비용은 별도 call ledger가 정직하게 9/1을 봉인한다.
+    composed_item_count = max(
+        draft_body_count + summary_draft_count,
+        _total_sentences(final),
+    )
+    generation_metrics = GenerationRunMetrics(
+        fragments_collected=len(_normalize_fragments(verification_fragments)),
+        fragments_cited=len(rendered.citations),
+        sentences_made=composed_item_count,
+        sentences_passed=_total_sentences(final),
+    )
+    assert_observation_matches_assessment(
+        quality_observation,
+        generation_assessment,
+    )
+    rendered = replace(
+        rendered,
+        generation_metrics=generation_metrics,
+        quality_observation=(
+            quality_observation
+            if release_mode is not ReleaseMode.SHADOW
+            else None
+        ),
+    )
+
+    generation_evidence: GenerationProducerEvidence | None = None
+    if release_mode is ReleaseMode.FULL:
+        if (
+            public_structure_seal is None
+            or prepared_evidence is None
+            or call_recorder is None
+        ):
+            raise V2ValidationError(("FULL 생산 증거 재료가 누락됐습니다",))
+        candidate_sha256 = canonical_sha256(quality_candidate)
+        primary_receipt = GenerationValidationReceipt(
+            company_id=prepared_evidence.company_id,
+            candidate_sha256=candidate_sha256,
+            assessment=generation_assessment,
+            round=ValidationRound.PRIMARY,
+            writer_calls=call_recorder.freeze().writer_calls,
+            reviewer_calls=call_recorder.freeze().reviewer_calls,
+            section_sha256s=public_structure_seal.section_sha256s,
+            evidence_packet_sha256s=prepared_evidence.packet_sha256s,
+        )
+        generation_evidence = GenerationProducerEvidence(
+            company_id=prepared_evidence.company_id,
+            evidence_generation_sha256=(
+                prepared_evidence.evidence_generation_sha256
+            ),
+            build_identity_sha256=normalized_build_identity_sha256,
+            candidate_sha256=candidate_sha256,
+            assessment=generation_assessment,
+            public_manifest_sha256=exact_text_sha256(
+                public_structure_seal.canonical_json
+            ),
+            public_content_sha256=(
+                public_structure_seal.public_content_sha256
+            ),
+            section_sha256s=public_structure_seal.section_sha256s,
+            evidence_packet_sha256s=prepared_evidence.packet_sha256s,
+            validation_receipts=(primary_receipt,),
+            call_ledger=call_recorder.freeze(),
+        )
+        rendered = replace(
+            rendered,
+            generation_evidence=generation_evidence,
+        )
+        assert_report_matches_generation_evidence(
+            report_verification_payload(rendered),
+            generation_evidence,
+            manifest_bytes=rendered.public_structure_manifest.encode("utf-8"),
+        )
 
     # ⑤-b 중복 검출 경고 — «찾아서 로그만 남긴다», 출고는 막지 않는다.
     #     validate_v2 «안»에 넣지 않은 이유는 위 모듈 docstring 참고.
@@ -728,9 +968,11 @@ def run_v2(
 
     return V2RunOutput(
         report=rendered,
-        composed_sentences=draft_body_count + summary_draft_count,
+        composed_sentences=composed_item_count,
         verified_sentences=_total_sentences(final),
         quality_observation=quality_observation,
+        generation_evidence=generation_evidence,
+        generation_metrics=generation_metrics,
     )
 
 

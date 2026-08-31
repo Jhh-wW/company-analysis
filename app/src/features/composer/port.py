@@ -9,11 +9,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Final, Optional
 
-from src.features.composer.constants import RCEPT_DT_LENGTH
+from src.features.composer.constants import RCEPT_DT_LENGTH, SECTION_IDS
+from src.features.provenance.sources import exact_evidence_text_hash
 
 
 class AskFatalError(Exception):
@@ -151,6 +155,154 @@ class CollectedFragment:
     #: packet raw Mapping이 가진 문서 기준일. legacy ``fragments_from_raw``는
     #: byte 호환을 위해 채우지 않고 packet 준비 경계에서만 보존한다.
     document_date: str = ""
+    #: FULL typed packet이 수집 문서에서 확정한 독립 문서 신원. 임의 embedded
+    #: fallback은 허용하지 않으며 SHADOW legacy 조각만 빈 값을 유지한다.
+    document_identity: str = ""
+
+
+_GEN8_RE: Final[re.Pattern[str]] = re.compile(r"[0-9]{8}")
+_SHA256_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
+
+
+def _packet_json(value: object) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+@dataclass(frozen=True)
+class SectionEvidencePacket:
+    """한 회사·한 수집 generation·한 장에 고정된 FULL 작성 입력."""
+
+    company_id: str
+    evidence_generation_sha256: str
+    section_id: str
+    fragments: tuple[CollectedFragment, ...]
+    packet_sha256: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.company_id) is not str
+            or self.company_id != self.company_id.strip()
+            or type(self.evidence_generation_sha256) is not str
+            or self.evidence_generation_sha256
+            != self.evidence_generation_sha256.strip()
+        ):
+            raise ValueError("section packet 회사·generation 형식이 손상됐습니다")
+        company_id = self.company_id
+        generation = self.evidence_generation_sha256
+        if _GEN8_RE.fullmatch(company_id) is None:
+            raise ValueError("section packet의 company_id는 gen8이어야 합니다")
+        if _SHA256_RE.fullmatch(generation) is None:
+            raise ValueError("section packet의 evidence generation은 SHA-256이어야 합니다")
+        if type(self.section_id) is not str or self.section_id not in SECTION_IDS:
+            raise ValueError(f"알 수 없는 section packet 장입니다: {self.section_id!r}")
+        if type(self.fragments) is not tuple or any(
+            type(fragment) is not CollectedFragment for fragment in self.fragments
+        ):
+            raise TypeError("section packet 조각은 정확한 CollectedFragment tuple이어야 합니다")
+        if not self.fragments:
+            raise ValueError("FULL section packet은 빈 조각 묶음일 수 없습니다")
+        fragment_ids = tuple(fragment.fragment_id for fragment in self.fragments)
+        if len(fragment_ids) != len(set(fragment_ids)):
+            raise ValueError("section packet의 fragment_id가 중복됐습니다")
+        for fragment in self.fragments:
+            if any(
+                type(value) is not str
+                for value in (
+                    fragment.fragment_id,
+                    fragment.kind,
+                    fragment.text,
+                    fragment.source_url,
+                    fragment.document_title,
+                    fragment.location,
+                    fragment.document_date,
+                    fragment.document_identity,
+                )
+            ):
+                raise TypeError("section packet 조각 필드는 문자열이어야 합니다")
+            if not fragment.fragment_id.strip() or not fragment.text.strip():
+                raise ValueError("section packet 조각의 id·원문은 비울 수 없습니다")
+            identity = fragment.document_identity.strip()
+            if not identity or identity.startswith("embedded:"):
+                raise ValueError(
+                    "FULL section packet에는 검증된 비-embedded 문서 신원이 필요합니다"
+                )
+        payload = {
+            "version": 1,
+            "company_id": company_id,
+            "evidence_generation_sha256": generation,
+            "section_id": self.section_id,
+            "fragments": [
+                {
+                    "fragment_id": fragment.fragment_id,
+                    "kind": fragment.kind,
+                    "text_sha256": exact_evidence_text_hash(fragment.text),
+                    "source_url": fragment.source_url,
+                    "document_title": fragment.document_title,
+                    "location": fragment.location,
+                    "document_date": fragment.document_date,
+                    "document_identity": fragment.document_identity,
+                }
+                for fragment in self.fragments
+            ],
+        }
+        object.__setattr__(self, "company_id", company_id)
+        object.__setattr__(self, "evidence_generation_sha256", generation)
+        object.__setattr__(
+            self,
+            "packet_sha256",
+            hashlib.sha256(_packet_json(payload).encode("utf-8")).hexdigest(),
+        )
+
+
+@dataclass(frozen=True)
+class SectionEvidencePacketSet:
+    """정책 순서의 typed 아홉 장 packet을 한 회사 generation에 묶는다."""
+
+    company_id: str
+    evidence_generation_sha256: str
+    packets: tuple[SectionEvidencePacket, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.company_id) is not str
+            or self.company_id != self.company_id.strip()
+            or type(self.evidence_generation_sha256) is not str
+            or self.evidence_generation_sha256
+            != self.evidence_generation_sha256.strip()
+        ):
+            raise ValueError("packet set 회사·generation 형식이 손상됐습니다")
+        company_id = self.company_id
+        generation = self.evidence_generation_sha256
+        if _GEN8_RE.fullmatch(company_id) is None:
+            raise ValueError("packet set의 company_id는 gen8이어야 합니다")
+        if _SHA256_RE.fullmatch(generation) is None:
+            raise ValueError("packet set의 evidence generation은 SHA-256이어야 합니다")
+        if type(self.packets) is not tuple or any(
+            type(packet) is not SectionEvidencePacket for packet in self.packets
+        ):
+            raise TypeError("packet set에는 정확한 SectionEvidencePacket tuple이 필요합니다")
+        if tuple(packet.section_id for packet in self.packets) != SECTION_IDS:
+            raise ValueError("packet set에는 정책 순서의 typed 아홉 장이 필요합니다")
+        if any(packet.company_id != company_id for packet in self.packets):
+            raise ValueError("다른 회사의 section packet을 섞을 수 없습니다")
+        if any(
+            packet.evidence_generation_sha256 != generation
+            for packet in self.packets
+        ):
+            raise ValueError("다른 evidence generation의 section packet을 섞을 수 없습니다")
+        object.__setattr__(self, "company_id", company_id)
+        object.__setattr__(self, "evidence_generation_sha256", generation)
+
+    @property
+    def packet_sha256s(self) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            (packet.section_id, packet.packet_sha256) for packet in self.packets
+        )
 
 
 def fragments_from_raw(

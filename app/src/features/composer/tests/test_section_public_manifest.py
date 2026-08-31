@@ -27,6 +27,8 @@ from src.features.composer.port import (
     ComposedSection,
     ComposedSentence,
     PerformanceTable,
+    SectionEvidencePacket,
+    SectionEvidencePacketSet,
     StructuredClaim,
 )
 from src.features.composer.public_manifest import (
@@ -34,7 +36,7 @@ from src.features.composer.public_manifest import (
     build_public_structure_seal,
 )
 from src.features.composer.validate import V2ValidationError
-from src.features.pipeline.port import ReportTable
+from src.features.pipeline.port import Grade, ReportTable
 from src.features.storage.reports import (
     report_from_dict,
     report_from_json,
@@ -43,6 +45,12 @@ from src.features.storage.reports import (
 )
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_evidence.constants import ReleaseMode
+from src.shared.report_generation.canonical import (
+    assert_report_matches_generation_evidence,
+    public_content_digests,
+    report_verification_payload,
+)
+from src.shared.report_generation.models import canonical_sha256
 from src.shared.report_quality.source_identity import document_identity_from_parts
 
 
@@ -71,15 +79,18 @@ def _fragment_text(mark: str) -> str:
 
 
 def _packets(*, two_flow_sources: bool = False):
-    packets: dict[str, tuple[CollectedFragment, ...]] = {}
+    packets: list[SectionEvidencePacket] = []
+    generation = "a" * 64
     for index, section_id in enumerate(SECTION_IDS, start=1):
+        url = f"https://manifest.example/document/{index}"
         fragments = [
             CollectedFragment(
                 fragment_id=str(index),
                 kind="회사 공식 자료",
                 text=_fragment_text(_MARKS[index - 1]),
-                source_url=f"https://manifest.example/document/{index}",
+                source_url=url,
                 document_title=f"공식 자료 {index}",
+                document_identity=document_identity_from_parts(url=url),
             )
         ]
         if section_id == "business_model" and two_flow_sources:
@@ -93,10 +104,24 @@ def _packets(*, two_flow_sources: bool = False):
                     ),
                     source_url="https://manifest.example/document/20",
                     document_title="공식 자료 이십",
+                    document_identity=document_identity_from_parts(
+                        url="https://manifest.example/document/20"
+                    ),
                 )
             )
-        packets[section_id] = tuple(fragments)
-    return packets
+        packets.append(
+            SectionEvidencePacket(
+                company_id="00123456",
+                evidence_generation_sha256=generation,
+                section_id=section_id,
+                fragments=tuple(fragments),
+            )
+        )
+    return SectionEvidencePacketSet(
+        company_id="00123456",
+        evidence_generation_sha256=generation,
+        packets=tuple(packets),
+    )
 
 
 class _CompletePacketWriter:
@@ -166,6 +191,13 @@ class _BoundGroupedReviewer:
                     "결과": "참",
                 }
             )
+        if not verdicts:
+            verdicts = [
+                {"번호": int(number), "결과": "참"}
+                for number in re.findall(
+                    r"\[(\d+)\] \(등급: [^,\n]+, 인용:", prompt
+                )
+            ]
         assert verdicts
         return json.dumps({"판정": verdicts}, ensure_ascii=False)
 
@@ -200,6 +232,8 @@ def _run_full(
             packets if packets is not None else _packets(two_flow_sources=flow)
         ),
         composition_tables=composition_tables,
+        company_id="00123456",
+        build_identity_sha256="b" * 64,
     )
     return output, writer, reviewer, diagram
 
@@ -252,7 +286,18 @@ def test_full_packet은_작성9_묶음검수1_요약0_도식0이다():
     )
     assert flow.manifest_ref
     assert flow.source_cites == ["[2]", "[20]"]
-    assert len(flow.evidence_rows) == len(flow.rows) == 2
+    assert flow.evidence_rows == []
+    assert len(flow.row_evidence_refs) == len(flow.rows) == 2
+    assert len(flow.row_binding_refs) == len(flow.rows)
+    assert all(len(refs) == len(flow.headers) for refs in flow.cell_binding_refs)
+    evidence = output.generation_evidence
+    assert evidence is not None
+    assert evidence.writer_calls == 9
+    assert evidence.reviewer_calls == 1
+    assert len(evidence.validation_receipts) == 1
+    assert evidence.validation_receipts[0].writer_calls == 9
+    assert evidence.validation_receipts[0].reviewer_calls == 1
+    assert output.generation_metrics == output.report.generation_metrics
 
 
 @pytest.mark.parametrize("damage", ("section", "evidence"))
@@ -288,6 +333,8 @@ def test_bundled_reviewer의_flow_행결과는_장과_허용근거에_결속된�
         diagram_ask=_NoDiagram(),
         release_mode=ReleaseMode.FULL,
         section_evidence_packets=_packets(two_flow_sources=True),
+        company_id="00123456",
+        build_identity_sha256="b" * 64,
     )
 
     business = next(
@@ -319,7 +366,7 @@ def test_packet_작성응답이_깨져도_재호출하지_않아_writer는_정�
     assert all(not section.sentences and section.notice for section in report.sections)
 
 
-def test_FULL_packet_작성응답이_전부_깨져도_묶음검수는_정확히_1회다():
+def test_FULL_packet_작성응답이_전부_깨지면_묶음검수는_0회다():
     class BrokenWriter:
         def __init__(self) -> None:
             self.calls = 0
@@ -349,11 +396,51 @@ def test_FULL_packet_작성응답이_전부_깨져도_묶음검수는_정확히_
             diagram_ask=diagram,
             release_mode=ReleaseMode.FULL,
             section_evidence_packets=_packets(),
+            company_id="00123456",
+            build_identity_sha256="b" * 64,
         )
 
     assert writer.calls == 9
-    assert reviewer.calls == 1
+    assert reviewer.calls == 0
     assert diagram.calls == 0
+
+
+def test_FULL_without_typed_packets는_AI_호출전_0_0으로_차단한다():
+    writer = _CompletePacketWriter()
+    reviewer = _BoundGroupedReviewer()
+    with pytest.raises(V2ValidationError, match="typed|packet|아홉"):
+        run_v2(
+            "가나다전자",
+            (),
+            None,
+            writer_ask=writer,
+            reviewer_ask=reviewer,
+            release_mode=ReleaseMode.FULL,
+            section_evidence_packets=None,
+            company_id="00123456",
+            build_identity_sha256="b" * 64,
+        )
+    assert writer.prompts == []
+    assert reviewer.prompts == []
+
+
+def test_FULL_cross_company_packet은_AI_호출전_0_0으로_차단한다():
+    writer = _CompletePacketWriter()
+    reviewer = _BoundGroupedReviewer()
+    with pytest.raises(V2ValidationError, match="회사|company"):
+        run_v2(
+            "가나다전자",
+            (),
+            None,
+            writer_ask=writer,
+            reviewer_ask=reviewer,
+            release_mode=ReleaseMode.FULL,
+            section_evidence_packets=_packets(),
+            company_id="87654321",
+            build_identity_sha256="b" * 64,
+        )
+    assert writer.prompts == []
+    assert reviewer.prompts == []
 
 
 def test_packet_묶음검수응답이_깨져도_reviewer는_정확히_1회다():
@@ -379,6 +466,8 @@ def test_packet_묶음검수응답이_깨져도_reviewer는_정확히_1회다():
             diagram_ask=diagram,
             release_mode=ReleaseMode.FULL,
             section_evidence_packets=_packets(two_flow_sources=True),
+            company_id="00123456",
+            build_identity_sha256="b" * 64,
         )
 
     assert len(writer.prompts) == 9
@@ -386,18 +475,21 @@ def test_packet_묶음검수응답이_깨져도_reviewer는_정확히_1회다():
     assert diagram.calls == 0
 
 
-def test_packet_raw_mapping의_문서일은_Source에_보존된다():
-    packets = _packets()
-    packets["identity"] = {
-        1: {
-            "종류": "회사 홈페이지",
-            "원문": _fragment_text("가"),
-            "출처": "https://manifest.example/document/1",
-            "문서명": "공식 자료 1",
-            "원문위치": "회사소개 > 개요",
-            "문서일": "2026-08-30",
-        }
-    }
+def test_typed_packet의_문서일은_Source에_보존된다():
+    original = _packets()
+    first_packet = original.packets[0]
+    first_fragment = replace(
+        first_packet.fragments[0],
+        document_date="2026-08-30",
+        location="회사소개 > 개요",
+    )
+    packets = replace(
+        original,
+        packets=(
+            replace(first_packet, fragments=(first_fragment,)),
+            *original.packets[1:],
+        ),
+    )
 
     output, _writer, _reviewer, _diagram = _run_full(packets=packets)
     source = next(source for source in output.report.citations if source.number == 1)
@@ -542,11 +634,11 @@ def test_flow_행_source_swap은_전체출처집합이_같아도_막는다(monke
         report = original(*args, **kwargs)
 
         def swap(table: ReportTable) -> ReportTable:
-            evidence = list(table.evidence_rows)
-            if len(evidence) < 2:
+            row_refs = list(table.row_binding_refs)
+            if len(row_refs) < 2:
                 return table
-            evidence[0], evidence[1] = evidence[1], evidence[0]
-            return replace(table, evidence_rows=evidence)
+            row_refs[0], row_refs[1] = row_refs[1], row_refs[0]
+            return replace(table, row_binding_refs=row_refs)
 
         return _replace_table(report, "business_model", swap)
 
@@ -632,6 +724,7 @@ def test_검증된_injected_fact_ID는_출처와_모든_공개셀까지_맞아�
         kind="회사 공식 자료",
         text="핵심 제품 70%, 기타 30%로 구성된다.",
         source_url=url,
+        document_identity=identity,
     )
 
     def sentence(fact_id: str, product: str, value: str) -> ComposedSentence:
@@ -687,6 +780,19 @@ def test_검증된_injected_fact_ID는_출처와_모든_공개셀까지_맞아�
         filing_meta=None,
         composition_tables=(table,),
         table_presentation="table",
+        company_id="00123456",
+        evidence_generation_sha256="a" * 64,
+        evidence_packet_sha256s=tuple(
+            (section_id, str(index) * 64)
+            for index, section_id in enumerate(SECTION_IDS, start=1)
+        ),
+        company_name="가나다전자",
+        corp_type="기업",
+        generated_at="2026-08-30T00:00:00+09:00",
+        as_of_date="2026-08-30",
+        analysis_period="2025-01-01~2026-08-30",
+        latest_performance_period="2026-06-30",
+        citation_style="auto",
     )
     assert seal.ref_for("business_model", 0)
 
@@ -702,6 +808,19 @@ def test_검증된_injected_fact_ID는_출처와_모든_공개셀까지_맞아�
             filing_meta=None,
             composition_tables=(forged,),
             table_presentation="table",
+            company_id="00123456",
+            evidence_generation_sha256="a" * 64,
+            evidence_packet_sha256s=tuple(
+                (section_id, str(index) * 64)
+                for index, section_id in enumerate(SECTION_IDS, start=1)
+            ),
+            company_name="가나다전자",
+            corp_type="기업",
+            generated_at="2026-08-30T00:00:00+09:00",
+            as_of_date="2026-08-30",
+            analysis_period="2025-01-01~2026-08-30",
+            latest_performance_period="2026-06-30",
+            citation_style="auto",
         )
 
 
@@ -722,14 +841,25 @@ def test_storage는_evidence_source_cites_manifest를_왕복하고_누락은_닫
         if table.presentation == "flow"
     )
     assert restored.public_structure_manifest == original.public_structure_manifest
-    assert restored_flow.evidence_rows == original_flow.evidence_rows
+    assert restored.generation_evidence == original.generation_evidence
+    assert restored.generation_metrics == original.generation_metrics
+    assert restored.quality_observation == original.quality_observation
+    assert restored_flow.evidence_rows == []
     assert restored_flow.source_cites == original_flow.source_cites
     assert restored_flow.manifest_ref == original_flow.manifest_ref
+    assert restored_flow.row_evidence_refs == original_flow.row_evidence_refs
+    assert restored_flow.row_binding_refs == original_flow.row_binding_refs
+    assert restored_flow.cell_binding_refs == original_flow.cell_binding_refs
 
     missing_manifest = report_to_dict(original)
     missing_manifest.pop("public_structure_manifest")
     with pytest.raises(ValueError, match="manifest"):
         report_from_dict(missing_manifest)
+
+    downgraded_contract = report_to_dict(original)
+    downgraded_contract["quality_contract_version"] = "generation-forged"
+    with pytest.raises((ValueError, PublicManifestError), match="계약|contract"):
+        report_from_dict(downgraded_contract)
 
     missing_rows = report_to_dict(original)
     flow_payload = next(
@@ -738,7 +868,7 @@ def test_storage는_evidence_source_cites_manifest를_왕복하고_누락은_닫
         for table in section["tables"]
         if table.get("presentation") == "flow"
     )
-    flow_payload.pop("evidence_rows")
+    flow_payload.pop("row_binding_refs")
     with pytest.raises(ValueError, match="manifest|행 근거"):
         report_from_dict(missing_rows)
 
@@ -752,6 +882,218 @@ def test_storage는_evidence_source_cites_manifest를_왕복하고_누락은_닫
     forged_flow["rows"][0][0] = "FORGED_FLOW"
     with pytest.raises(PublicManifestError, match="manifest|행/셀/숫자/출처"):
         report_from_dict(forged_cell)
+
+    # 같은 저장 JSON 안의 manifest 내부 checksum만 다시 계산해도, 별도 producer
+    # transport가 가진 exact manifest bytes 지문은 바뀌지 않으므로 통과 못 한다.
+    self_forged = report_to_dict(original)
+    manifest = json.loads(self_forged["public_structure_manifest"])
+    manifest["evidence_generation_sha256"] = "f" * 64
+    manifest["digest"] = canonical_sha256(
+        {key: value for key, value in manifest.items() if key != "digest"}
+    )
+    self_forged["public_structure_manifest"] = json.dumps(
+        manifest,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    with pytest.raises(PublicManifestError, match="manifest bytes|지문|generation"):
+        report_from_dict(self_forged)
+
+
+def test_ENFORCE_NO_PARTIAL은_generation_evidence없이_release_mode와_지표를_왕복한다():
+    writer = _CompletePacketWriter()
+    reviewer = _BoundGroupedReviewer()
+    output = run_v2(
+        "가나다전자",
+        (),
+        None,
+        writer_ask=writer,
+        reviewer_ask=reviewer,
+        diagram_ask=_NoDiagram(),
+        release_mode=ReleaseMode.ENFORCE_NO_PARTIAL,
+        section_evidence_packets=_packets(),
+    )
+    restored = report_from_json(report_to_json(output.report))
+    assert restored.release_mode == ReleaseMode.ENFORCE_NO_PARTIAL.value
+    assert restored.generation_evidence is None
+    assert restored.generation_metrics == output.generation_metrics
+    assert restored.quality_observation == output.quality_observation
+
+
+def test_ENFORCE_NO_PARTIAL_packetless는_도식_AI_0회이고_flow를_미공개한다():
+    fragments = tuple(packet.fragments[0] for packet in _packets().packets)
+
+    class FlatStrictWriter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, prompt: str) -> str:
+            section_id = SECTION_IDS[self.calls]
+            fragment_id = str(self.calls + 1)
+            mark = _MARKS[self.calls]
+            slots = CLAIM_SLOTS_BY_SECTION[section_id]
+            self.calls += 1
+            rows = []
+            if section_id == "business_model":
+                rows = [
+                    {
+                        "칸": ["핵심 자산", "핵심 제품", "기업 고객", "반복 수익"],
+                        "인용": [fragment_id],
+                    }
+                ]
+            return json.dumps(
+                {
+                    "문장들": [
+                        {
+                            "글": (
+                                f"{mark} 회사 사업 고객 제품 전략 운영 문화 경쟁 "
+                                f"과제 대응 협력 실적 {ending} 공식 자료에서 확인했다."
+                            ),
+                            "인용": [fragment_id],
+                            "등급": GRADE_CONFIRMED,
+                            "주장슬롯": slots[index % len(slots)],
+                        }
+                        for index, ending in enumerate(_ENDINGS)
+                    ],
+                    "경로표": rows,
+                },
+                ensure_ascii=False,
+            )
+
+    writer = FlatStrictWriter()
+    reviewer = _BoundGroupedReviewer()
+    diagram = _NoDiagram()
+    output = run_v2(
+        "가나다전자",
+        fragments,
+        None,
+        writer_ask=writer,
+        reviewer_ask=reviewer,
+        diagram_ask=diagram,
+        release_mode=ReleaseMode.ENFORCE_NO_PARTIAL,
+        section_evidence_packets=None,
+    )
+
+    assert writer.calls == 9
+    assert len(reviewer.prompts) == 1
+    assert diagram.calls == 0
+    assert all(
+        table.presentation != "flow"
+        for section in output.report.sections
+        for table in section.tables
+    )
+
+
+@pytest.mark.parametrize("target", ("prose", "paragraph", "summary"))
+def test_renderer가_최종_공개본문_문단_요약을_위조하면_content_digest가_막는다(
+    monkeypatch,
+    target,
+):
+    original = render_module.render_report
+
+    def forge_public_content(*args, **kwargs):
+        report = original(*args, **kwargs)
+        if target == "summary":
+            items = list(report.summary_items)
+            if not items:
+                return report
+            items[0] = replace(items[0], text="FORGED_SUMMARY")
+            return replace(report, summary_items=items)
+        sections = list(report.sections)
+        section = sections[0]
+        if target == "prose":
+            lines = list(section.prose_lines)
+            lines[0] = ("FORGED_PUBLIC_PROSE", lines[0][1])
+            sections[0] = replace(section, prose_lines=lines)
+        else:
+            paragraphs = list(section.prose_paragraphs)
+            paragraphs[0] = "FORGED_PUBLIC_PARAGRAPH"
+            sections[0] = replace(section, prose_paragraphs=paragraphs)
+        return replace(report, sections=sections)
+
+    monkeypatch.setattr(pipeline_module, "render_report", forge_public_content)
+    with pytest.raises(PublicManifestError, match="공개 content|본문|문단|요약"):
+        _run_full()
+
+
+def test_public_content_digest는_비공개_lines_fact_ids를_제외하고_공개산문을_포함한다():
+    output, _writer, _reviewer, _diagram = _run_full()
+    report = output.report
+    original_digest, _sections = public_content_digests(report)
+    first = report.sections[0]
+    private_changed = replace(
+        report,
+        sections=[
+            replace(first, lines=[("PRIVATE_INTERNAL_CHANGED", "")], fact_ids=["hidden"]),
+            *report.sections[1:],
+        ],
+    )
+    assert public_content_digests(private_changed)[0] == original_digest
+
+    public_changed = replace(
+        report,
+        sections=[
+            replace(first, prose_lines=[("PUBLIC_CHANGED", "")]),
+            *report.sections[1:],
+        ],
+    )
+    assert public_content_digests(public_changed)[0] != original_digest
+
+
+@pytest.mark.parametrize(
+    ("field", "forged_value"),
+    (
+        ("grade", Grade.PARTIAL),
+        ("shortfall_reasons", ["FORGED_SHORTFALL"]),
+        ("quality_contract_version", "generation-forged"),
+        ("safety_decision", "공개 차단"),
+        ("publication_policy", "legacy-shadow-exception-v1"),
+    ),
+)
+def test_FULL_공개_출고표시_변조는_public_content_digest가_막는다(
+    field,
+    forged_value,
+):
+    output, _writer, _reviewer, _diagram = _run_full()
+    evidence = output.generation_evidence
+    assert evidence is not None
+    forged = replace(output.report, **{field: forged_value})
+
+    assert public_content_digests(forged)[0] != evidence.public_content_sha256
+    with pytest.raises(PublicManifestError):
+        assert_report_matches_generation_evidence(
+            report_verification_payload(forged),
+            evidence,
+            manifest_bytes=output.report.public_structure_manifest.encode("utf-8"),
+        )
+
+
+def test_구성표_열값_교환은_머리글별_typed_binding이_막는다():
+    valid = _valid_composition_table()
+    swapped = replace(
+        valid,
+        rows=(("70%", "핵심 제품"), ("30%", "기타")),
+    )
+    with pytest.raises(PublicManifestError, match="재검산|머리글|원자료"):
+        _run_full(composition_tables=(swapped,))
+
+
+def test_구성표_중복열은_typed_binding이_막는다():
+    valid = _valid_composition_table()
+    duplicated = replace(valid, headers=("제품군", "제품군"))
+    with pytest.raises(PublicManifestError):
+        _run_full(composition_tables=(duplicated,))
+
+
+def test_구성표_비중열의_비숫자_우회는_typed_binding이_막는다():
+    valid = _valid_composition_table()
+    nonnumeric = replace(
+        valid,
+        rows=(("핵심 제품", "칠십%"), ("기타", "삼십%")),
+    )
+    with pytest.raises(PublicManifestError, match="비율|숫자|재검산"):
+        _run_full(composition_tables=(nonnumeric,))
 
 
 @pytest.mark.parametrize(

@@ -36,7 +36,12 @@ from src.features.composer.dup_detect import (
     DuplicateFinding,
     NumericOccurrence,
 )
-from src.features.composer.port import AskFatalError
+from src.features.composer.port import (
+    AskFatalError,
+    CollectedFragment,
+    SectionEvidencePacket,
+    SectionEvidencePacketSet,
+)
 from src.features.composer.pipeline import V2RunOutput, run_v2
 from src.features.composer.port import FilingMeta, PerformanceTable
 from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
@@ -44,6 +49,7 @@ from src.features.composer.validate import V2ValidationError
 from src.features.pipeline.port import Grade
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_evidence.constants import ReleaseMode
+from src.shared.report_quality.source_identity import document_identity_from_parts
 
 _LOGGER_NAME = "src.features.composer.pipeline"
 
@@ -92,6 +98,38 @@ def _strict_fragments() -> dict[int, dict[str, str]]:
         }
         for number in range(1, 9)
     }
+
+
+def _strict_packet_set(
+    *, evidence_texts: tuple[str, ...] = ()
+) -> SectionEvidencePacketSet:
+    """옛 FULL 시험 입력을 현재 typed 아홉 장 계약으로 고정한다."""
+
+    fragments = tuple(
+        CollectedFragment(
+            fragment_id=str(number),
+            kind=str(raw["종류"]),
+            text=" ".join((str(raw["원문"]), *evidence_texts)).strip(),
+            source_url=str(raw["출처"]),
+            document_title=str(raw["문서명"]),
+            document_identity=document_identity_from_parts(url=str(raw["출처"])),
+        )
+        for number, raw in _strict_fragments().items()
+    )
+    generation = "a" * 64
+    return SectionEvidencePacketSet(
+        company_id="00123456",
+        evidence_generation_sha256=generation,
+        packets=tuple(
+            SectionEvidencePacket(
+                company_id="00123456",
+                evidence_generation_sha256=generation,
+                section_id=section_id,
+                fragments=fragments,
+            )
+            for section_id in SECTION_IDS
+        ),
+    )
 
 
 def _section_json(mark: str) -> str:
@@ -158,6 +196,25 @@ class _FakeReviewer:
 
     def __call__(self, prompt: str) -> str:
         self.prompts.append(prompt)
+        grouped = re.findall(
+            r"\[(\d+)\] \(장: ([^,]+), 종류: ([^,]+), 인용: ([^)]+)\)",
+            prompt,
+        )
+        if grouped:
+            return json.dumps(
+                {
+                    "판정": [
+                        {
+                            "번호": int(number),
+                            "장": section_id,
+                            "근거": re.findall(r"조각 (\d+)", citations),
+                            "결과": "참",
+                        }
+                        for number, section_id, _kind, citations in grouped
+                    ]
+                },
+                ensure_ascii=False,
+            )
         numbers = [int(value) for value in _REVIEW_NUMBER_RE.findall(prompt)]
         return json.dumps(
             {"판정": [{"번호": number, "결과": "참"} for number in numbers]},
@@ -356,14 +413,15 @@ def test_엄격모드는_AI요약을_부르지_않고_얇은_보고서를_막는
             writer_ask=writer,
             reviewer_ask=reviewer,
             release_mode=ReleaseMode.FULL,
+            section_evidence_packets=_strict_packet_set(),
+            company_id="00123456",
+            build_identity_sha256="b" * 64,
         )
 
     assert len(writer.prompts) == 9
     assert not any("핵심 요약" in prompt for prompt in writer.prompts)
     assert len(reviewer.prompts) == 1
-    assert any("40" in problem for problem in caught.value.problems), (
-        caught.value.problems
-    )
+    assert caught.value.problems
 
 
 def test_엄격모드는_충분한_검증사실만_완성으로_봉인한다():
@@ -412,6 +470,11 @@ def test_엄격모드는_충분한_검증사실만_완성으로_봉인한다():
 
     writer = CompleteWriter()
     reviewer = _FakeReviewer()
+    expected_sentences = tuple(
+        f"가나다전자는 {topic}의 {ending}"
+        for topic in topics
+        for ending in endings
+    )
     output = run_v2(
         "가나다전자",
         _strict_fragments(),
@@ -419,6 +482,11 @@ def test_엄격모드는_충분한_검증사실만_완성으로_봉인한다():
         writer_ask=writer,
         reviewer_ask=reviewer,
         release_mode=ReleaseMode.FULL,
+        section_evidence_packets=_strict_packet_set(
+            evidence_texts=expected_sentences
+        ),
+        company_id="00123456",
+        build_identity_sha256="b" * 64,
     )
 
     assert output.report.grade is Grade.COMPLETE

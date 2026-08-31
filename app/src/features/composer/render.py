@@ -75,6 +75,7 @@ from src.shared.report_quality.numeric_validation import (
     validate_versioned_numeric_record,
 )
 from src.shared.report_quality.source_identity import document_identity
+from src.shared.report_generation.constants import ENGINE_V2_SCHEMA_VERSION
 from src.shared.report_quality.summary_binding import (
     summary_evidence_text,
     summary_verification_binding,
@@ -90,8 +91,6 @@ logger = logging.getLogger(__name__)
 #: v1 게이트·저장 경로가 v2 보고서를 canonical로 착각하지 않게 한다.
 #: (웹 result.html은 canonical 버전만 표시하므로, v2 화면 연결은 3-4b가
 #:  라우트·템플릿 쪽에서 이 상수를 인정하도록 처리해야 한다 — 보고서에 명시.)
-ENGINE_V2_SCHEMA_VERSION: Final[str] = "company-report-v2-composer"
-
 #: «해석» 문장 뒤에 붙는 표지 (기준문서 5절 — 회사가 말한 것과 분석을 구분)
 INTERPRETATION_MARKER: Final[str] = f" — {GRADE_INTERPRETED}"
 
@@ -736,6 +735,8 @@ def render_report(
     composition_tables: tuple[PerformanceTable, ...] = (),
     citation_style: str = DEFAULT_CITATION_STYLE,
     public_structure_seal: Optional[PublicStructureSeal] = None,
+    company_id: str = "",
+    release_mode: str = "",
 ) -> Report:
     """검증 끝난 ComposedReport를 웹·PDF 공용 pipeline Report로 바꾼다.
 
@@ -968,15 +969,24 @@ def render_report(
                     continue
                 sealed = replace(
                     table,
-                    evidence_rows=[
-                        str(value) for value in entry.get("evidence_rows", [])
-                    ],
                     source_cites=[
                         str(value) for value in entry.get("source_cites", [])
                     ],
                     manifest_ref=str(entry.get("manifest_ref") or ""),
                     row_fact_ids=[
                         str(value) for value in entry.get("row_fact_ids", [])
+                    ],
+                    row_evidence_refs=[
+                        str(value)
+                        for value in entry.get("row_evidence_refs", [])
+                    ],
+                    row_binding_refs=[
+                        str(value)
+                        for value in entry.get("row_binding_refs", [])
+                    ],
+                    cell_binding_refs=[
+                        [str(value) for value in row]
+                        for row in entry.get("cell_binding_refs", [])
                     ],
                 )
                 for raw_cite in sealed.source_cites:
@@ -1134,4 +1144,6 @@ def render_report(
             if public_structure_seal is not None
             else ""
         ),
+        company_id=str(company_id),
+        release_mode=str(release_mode),
     )
