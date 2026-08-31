@@ -278,7 +278,10 @@ def test_MEMBER는_남의report에_설문이나_오류차단을_쓸수없다():
                 conn, run_id=report_id, identity_subject=subject
             )
             assert report_access_store.bind_report(
-                conn, run_id=report_id, report_id=report_id
+                conn,
+                run_id=report_id,
+                report_id=report_id,
+                delivery_expires_at=None,
             )
             assert dashboard_store.settle_member_run(
                 conn,

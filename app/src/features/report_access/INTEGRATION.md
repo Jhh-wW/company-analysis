@@ -17,7 +17,10 @@ commit 여유를 더한 값이며, `/run` 응답 쿠키의 `Max-Age`도 이 값�
 ## 보고서 저장
 
 `bind_report()`는 PUBLIC grant의 `revoked_at`, `created_at`, `expires_at`을 쓰기
-잠금이 잡힌 같은 거래 안에서 다시 확인한다. 호출자는 다음 세 규칙을 지킨다.
+잠금이 잡힌 같은 거래 안에서 다시 확인한다. PUBLIC 호출은 현재 시각 추정이 아니라
+실제 Delivery 영수증에 적힐 `delivery_expires_at`을 반드시 넘긴다. 저장소가 여기에
+commit 여유를 더해 grant가 **보고서의 60일 전체보다 오래 사는지** 검증한다.
+호출자는 다음 네 규칙을 지킨다.
 
 1. 보고서 저장 거래의 마지막 쓰기 경계 가까이에서 호출하고 곧바로 commit한다.
 2. PUBLIC 작업에서는 `PublicGrantBindingUnavailable`과 `False`를 모두 저장 실패로
@@ -25,6 +28,9 @@ commit 여유를 더한 값이며, `/run` 응답 쿠키의 `Max-Age`도 이 값�
    경우까지 닫기 위해 필요하다.
 3. `ReportBindingConflict`는 같은 run을 다른 report로 바꾸려는 불변식 위반이므로
    재시도하거나 덮어쓰지 않는다.
+4. 최종 Delivery 거래에서도 실제 저장된 `Delivery.expires_at`으로 한 번 더 결속한
+   뒤 명시적으로 commit한다. new·cache·single-flight waiter가 모두 이 경계를 쓰며,
+   실패하면 Delivery·자동출고 승인·고객 청구가 함께 rollback된다.
 
 같은 run이 PUBLIC과 MEMBER 표에 동시에 있으면
 `MixedReportOwnershipConflict`로 어느 행도 바꾸기 전에 거절한다. 호출자가 한쪽을
@@ -32,8 +38,11 @@ commit 여유를 더한 값이며, `/run` 응답 쿠키의 `Max-Age`도 이 값�
 않는다.
 
 MEMBER는 PUBLIC 시간 정책을 사용하지 않는다. 기존 `bind_member_run()`의 OAuth
-subject 결속과 `bind_report()`의 MEMBER 갱신 흐름은 그대로 유지한다.
+subject 결속과 `bind_report(delivery_expires_at=None)`의 MEMBER 갱신 흐름은 그대로
+유지한다. LINK·ADMIN처럼 report_access 표가 소유하지 않는 저장에서 나오는
+`False`도 정상이다.
 
-현재 `job_runtime`은 별도 통합 작업의 충돌을 피하려고 이 변경에 포함하지 않았다.
-그 호출자는 PUBLIC 여부를 이미 알고 있으므로 위의 `False` 처리를 그 경계에서
-연결해야 한다.
+`job_runtime.Job.requires_public_report_grant`는 작업 입장 때 한 번 확정한다. 완료
+시점의 비용 통장·share key·로그인 상태로 PUBLIC 여부를 다시 추측하지 않는다.
+같은 입장 응답에 실은 cookie의 서버 기준 만료(`public_grant_expires_at`)도 Job에
+동결하고, 고정한 Delivery 만료+commit 여유보다 먼저 끝나면 DB 쓰기 전에 닫는다.

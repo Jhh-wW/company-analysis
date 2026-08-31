@@ -15,8 +15,11 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
+from src.core import clock
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
+from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
+from src.features.cost_tracking import store as cost_store
 from src.features.export_pdf import automatic_release as automatic_release_module
 from src.features.export_pdf import release_store as pdf_release_store
 from src.features.pipeline.demo import DemoPipeline, available_companies
@@ -33,6 +36,8 @@ from src.features.report_delivery import singleflight
 from src.features.report_delivery import store as delivery_store
 from src.features.report_delivery.cache_identity import CacheLookupKey, CacheNamespace
 from src.features.report_delivery.models import DeliveryPolicy
+from src.features.report_access import constants as report_access_constants
+from src.features.report_access import store as report_access_store
 from src.features.report_standard import PublishBlockedError, PublishValidation
 from src.features.storage import db as storage_db
 from src.features.storage import constants as storage_constants
@@ -72,6 +77,269 @@ def _demo_report():
     result = pipeline.run(user_input, pipeline.find_company(user_input))
     assert result.outcome is Outcome.REPORT and result.report is not None
     return result.report
+
+
+def _public_job_for_save(report, *, report_id: str) -> job_runtime.Job:
+    issued_at = dt.datetime.now(clock.KST)
+    expires_at = issued_at + dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS)
+    return job_runtime.Job(
+        job_id=report_id,
+        user_input=UserInput(company=report.company, job=report.job, region=""),
+        card=CompanyCard(
+            legal_name=report.company,
+            typed_name=report.company,
+            address="",
+            ceo="",
+            founded="",
+            ref="demo-corp",
+        ),
+        result=RunResult(outcome=Outcome.REPORT, report=report),
+        requires_public_report_grant=True,
+        public_grant_expires_at=(
+            expires_at.timestamp()
+            + report_access_constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
+            + 1
+        ),
+        delivery_issued_at=issued_at,
+        delivery_expires_at=expires_at,
+    )
+
+
+@pytest.mark.parametrize("binding_failure", ("false", "unavailable"))
+def test_PUBLIC_저장은_grant결속실패때_보고서전체를_rollback한다(
+    monkeypatch,
+    binding_failure: str,
+):
+    report = _demo_report()
+    report_id = uuid.uuid4().hex
+    job = _public_job_for_save(report, report_id=report_id)
+
+    def fail_binding(*_args, **_kwargs):
+        if binding_failure == "false":
+            return False
+        raise report_access_store.PublicGrantBindingUnavailable("시험 권한 만료")
+
+    monkeypatch.setattr(report_access_store, "bind_report", fail_binding)
+    assert job_runtime._save_report(job) is False
+    assert job.report_persisted is False
+    with storage_db.connect() as conn:
+        assert report_store.load(conn, report_id) is None
+
+
+def test_LINK와ADMIN저장은_grant결속False가_정상이고_MEMBER계약도_바뀌지않는다(
+    monkeypatch,
+):
+    report = _demo_report()
+    report_id = uuid.uuid4().hex
+    job = _public_job_for_save(report, report_id=report_id)
+    job.requires_public_report_grant = False
+    job.public_grant_expires_at = 0.0
+    monkeypatch.setattr(report_access_store, "bind_report", lambda *_a, **_k: False)
+
+    assert job_runtime._save_report(job) is True
+    with storage_db.connect() as conn:
+        assert report_store.load(conn, report_id) is not None
+
+
+def test_PUBLIC_cookie가_Delivery보다먼저끝나면_DB쓰기전_거절한다(monkeypatch):
+    report = _demo_report()
+    report_id = uuid.uuid4().hex
+    job = _public_job_for_save(report, report_id=report_id)
+    assert job.delivery_expires_at is not None
+    job.public_grant_expires_at = (
+        job.delivery_expires_at.timestamp()
+        + report_access_constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
+    )
+    binding_calls = 0
+
+    def should_not_bind(*_args, **_kwargs):
+        nonlocal binding_calls
+        binding_calls += 1
+        return True
+
+    monkeypatch.setattr(report_access_store, "bind_report", should_not_bind)
+    assert job_runtime._save_report(job) is False
+    assert binding_calls == 0
+    with storage_db.connect() as conn:
+        assert report_store.load(conn, report_id) is None
+
+
+def test_PUBLIC_저장실패는_메모리성공과_출고호출과_차감을_모두닫는다(
+    monkeypatch,
+):
+    report = _demo_report()
+
+    class _ReportPipeline:
+        @staticmethod
+        def run(*_args, **_kwargs):
+            return RunResult(outcome=Outcome.REPORT, report=report)
+
+    job = _public_job_for_save(report, report_id=uuid.uuid4().hex)
+    job.result = None
+    finalized = 0
+    failed_intents = 0
+
+    def forbidden_finalize(_job):
+        nonlocal finalized
+        finalized += 1
+        return True
+
+    def failed_delivery(_job):
+        nonlocal failed_intents
+        failed_intents += 1
+
+    monkeypatch.setattr(runtime, "_PIPELINE", _ReportPipeline())
+    monkeypatch.setattr(job_runtime, "record_run", lambda *_a, **_k: None)
+    monkeypatch.setattr(job_runtime, "_save_report", lambda _job: False)
+    monkeypatch.setattr(job_runtime, "_finalize_report_delivery", forbidden_finalize)
+    monkeypatch.setattr(job_runtime, "_fail_report_delivery", failed_delivery)
+    monkeypatch.setattr(job_runtime, "_release_run_slot", lambda _bucket: None)
+
+    asyncio.run(job_runtime._run_job(job))
+
+    assert finalized == 0
+    assert failed_intents == 1
+    assert job.result is not None
+    assert job.result.outcome is Outcome.FAILED
+    assert job.result.report is None
+    assert job.result.charged is False
+    assert job.delivery_persisted is False
+
+
+def test_PUBLIC_최종출고는_실제60일만료보다_grant가짧으면_청구까지rollback한다(
+    monkeypatch,
+    tmp_path: Path,
+):
+    report = _demo_report()
+    report_id = uuid.uuid4().hex
+    completed_at = dt.datetime.now(clock.KST).replace(microsecond=0)
+    delivery_expires_at = completed_at + dt.timedelta(
+        days=REPORT_LINK_MAX_AGE_DAYS
+    )
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "pg"))
+    with storage_db.connect() as conn:
+        cost_store.record_run_costs(
+            conn,
+            run_id=report_id,
+            outcome=Outcome.REPORT,
+            internal_ai_cost_krw=123.0,
+        )
+        grant = report_access_store.issue_and_bind(
+            conn,
+            existing_token="",
+            run_id=report_id,
+            now=completed_at.timestamp(),
+        )
+        # 정확히 경계면 ``expires_at > required_until``을 만족하지 못한다.
+        conn.execute(
+            f"UPDATE {report_access_store.TABLE_GRANTS} SET expires_at=? "
+            "WHERE grant_hash=?",
+            (
+                delivery_expires_at.timestamp()
+                + report_access_constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC,
+                grant.grant_hash,
+            ),
+        )
+
+    with pytest.raises(report_access_store.PublicGrantBindingUnavailable):
+        reports_router.finalize_new_report_delivery(
+            report_id=report_id,
+            corp_id="demo-corp",
+            billing_bucket_id="public",
+            report=report,
+            actual_models=("deterministic-demo",),
+            reused_from_cache=False,
+            completed_at=completed_at,
+            public_access_run_id=report_id,
+        )
+    with storage_db.connect() as conn:
+        assert delivery_store.load_delivery_by_public_id(conn, report_id) is None
+        cost_row = conn.execute(
+            f"SELECT internal_ai_cost_krw, customer_charge_krw, "
+            "charge_eligible, automatic_release_sha256 "
+            f"FROM {cost_store.RUN_COST_TABLE} WHERE run_id=?",
+            (report_id,),
+        ).fetchone()
+        assert cost_row is not None
+        assert tuple(cost_row) == (123.0, 0.0, 0, "")
+
+
+@pytest.mark.parametrize("reuse_kind", ("waiter", "cache"))
+def test_PUBLIC_waiter와cache도_최종grant결속False면_출고와청구를_rollback한다(
+    monkeypatch,
+    tmp_path: Path,
+    reuse_kind: str,
+):
+    report = _demo_report()
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "reuse"))
+    receipt = "20260828000123"
+    finance_digest = financial_payload_digest(
+        {"status": "000", "list": [{"account_nm": "매출액", "thstrm_amount": "100"}]}
+    )
+    revision, image = report_delivery_adapter._release_identity()
+    namespace = CacheNamespace.create(
+        product="company-analysis",
+        schema_version=report.schema_version or "legacy-report-schema",
+        deployment_revision=revision,
+        image_digest=image,
+        requested_models={"pipeline": "deterministic-demo"},
+        output_settings={"temperature": 0},
+    )
+    preflight_digest = ReportSourceIdentity(
+        dart_receipt_numbers=(receipt,),
+        financial_payload_digest=finance_digest,
+    ).cache_digest
+    owner = reports_router.finalize_new_report_delivery(
+        report_id=f"owner-{uuid.uuid4().hex}",
+        corp_id="demo-corp",
+        billing_bucket_id="same-bucket",
+        report=report,
+        actual_models=("deterministic-demo",),
+        reused_from_cache=False,
+        dart_receipt_numbers=(receipt,),
+        financial_payload_digest=finance_digest,
+        cache_namespace=namespace,
+        preflight_identity_digest=preflight_digest,
+        cache_eligible=True,
+    )
+    assert owner.artifact is not None
+    target_id = uuid.uuid4().hex
+    monkeypatch.setattr(
+        report_access_store,
+        "bind_report",
+        lambda *_a, **_k: False,
+    )
+    extra = (
+        {
+            "cache_namespace": namespace,
+            "preflight_identity_digest": preflight_digest,
+            "cache_eligible": True,
+        }
+        if reuse_kind == "cache"
+        else {}
+    )
+
+    with pytest.raises(report_access_store.PublicGrantBindingUnavailable):
+        reports_router.finalize_new_report_delivery(
+            report_id=target_id,
+            corp_id="demo-corp",
+            billing_bucket_id="same-bucket",
+            report=report,
+            actual_models=("deterministic-demo",),
+            reused_from_cache=True,
+            dart_receipt_numbers=(receipt,),
+            financial_payload_digest=finance_digest,
+            reuse_content_snapshot_id=owner.content.content_id,
+            reuse_artifact_id=owner.artifact.artifact_id,
+            public_access_run_id=target_id,
+            **extra,
+        )
+    with storage_db.connect() as conn:
+        assert delivery_store.load_delivery_by_public_id(conn, target_id) is None
+        assert conn.execute(
+            f"SELECT 1 FROM {cost_store.RUN_COST_TABLE} WHERE run_id=?",
+            (target_id,),
+        ).fetchone() is None
 
 
 def _database_dump(path: Path) -> tuple[str, ...]:

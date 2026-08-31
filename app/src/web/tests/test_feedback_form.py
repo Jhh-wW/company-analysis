@@ -519,7 +519,10 @@ def test_결과화면은_기존신고폼_대신_새_신고링크를_보여준다
             conn, run_id=report_id, identity_subject=subject
         )
         assert report_access_store.bind_report(
-            conn, run_id=report_id, report_id=report_id
+            conn,
+            run_id=report_id,
+            report_id=report_id,
+            delivery_expires_at=None,
         )
         assert dashboard_store.settle_member_run(
             conn,
@@ -562,7 +565,10 @@ def test_기존_reports_errors_라우트는_삭제되지_않고_그대로_동작
             conn, run_id=report_id, identity_subject=subject
         )
         assert report_access_store.bind_report(
-            conn, run_id=report_id, report_id=report_id
+            conn,
+            run_id=report_id,
+            report_id=report_id,
+            delivery_expires_at=None,
         )
         assert dashboard_store.settle_member_run(
             conn,

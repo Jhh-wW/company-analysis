@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
 import time
 from dataclasses import dataclass, field, replace
@@ -186,6 +187,15 @@ class Job:
     report_persisted: Optional[bool] = None
     #: 불변 Content·Delivery·PDF artifact가 함께 확정됐는지.
     delivery_persisted: Optional[bool] = None
+    #: 작업 입장 때 확정한 열람 권한 종류. 완료 시 share track이나 비용 상태를
+    #: 다시 추측하면 PUBLIC 저장 실패를 LINK/ADMIN 성공으로 잘못 통과시킬 수 있다.
+    requires_public_report_grant: bool = False
+    #: 응답에 실은 PUBLIC cookie와 DB grant가 함께 끝나는 서버 기준 절대 시각.
+    public_grant_expires_at: float = 0.0
+    #: 한 번 고정한 Delivery 발급/만료 시각. 저장과 최종 출고가 같은 값을 써야
+    #: 60일 권한 보장을 현재시각 추정으로 대신하지 않는다.
+    delivery_issued_at: dt.datetime | None = None
+    delivery_expires_at: dt.datetime | None = None
     delivery_content_id: str = ""
     delivery_artifact_id: str = ""
     #: single-flight waiter가 owner의 원본을 새로 만들지 않고 발급받는 결속.
@@ -868,6 +878,10 @@ async def _run_job(job: Job) -> None:
             )
             delivery_required = False
             if job.result.outcome is Outcome.REPORT and job.result.report is not None:
+                job.delivery_issued_at = clock.now_kst()
+                job.delivery_expires_at = job.delivery_issued_at + dt.timedelta(
+                    days=REPORT_LINK_MAX_AGE_DAYS
+                )
                 try:
                     delivery_required = await asyncio.to_thread(
                         _require_report_delivery,
@@ -884,6 +898,30 @@ async def _run_job(job: Job) -> None:
                 if job.result.outcome is not Outcome.REPORT or delivery_required
                 else False
             )
+            if (
+                job.requires_public_report_grant
+                and job.result.outcome is Outcome.REPORT
+                and not report_saved
+            ):
+                # PUBLIC은 메모리 보고서만 보여 주는 임시 성공이 될 수 없다.
+                # grant 결속 실패는 저장 transaction을 되돌렸으므로 최종 결과도
+                # 실패·무차감으로 닫아 출고 adapter가 호출될 여지를 없앤다.
+                job.delivery_persisted = False
+                if delivery_required:
+                    try:
+                        await asyncio.to_thread(_fail_report_delivery, job)
+                    except Exception:  # noqa: BLE001 — required 표식만으로도 공개는 닫힌다
+                        logger.exception(
+                            "PUBLIC 권한 저장 실패의 delivery 표식 마감 실패 job_id=%s",
+                            job.job_id,
+                        )
+                job.result = replace(
+                    job.result,
+                    outcome=Outcome.FAILED,
+                    report=None,
+                    message=PIPELINE_FAILED_MESSAGE,
+                    charged=False,
+                )
             delivery_content_id = ""
             if job.result.outcome is Outcome.REPORT and report_saved:
                 try:
@@ -1132,6 +1170,10 @@ def _finalize_report_delivery(job: Job) -> bool:
         cache_namespace=cache_namespace,
         preflight_identity_digest=preflight_identity_digest,
         cache_eligible=job.result.generation_cache_eligible,
+        completed_at=job.delivery_issued_at,
+        public_access_run_id=(
+            job.job_id if job.requires_public_report_grant else ""
+        ),
     )
     job.delivery_content_id = public_delivery.content.content_id
     if public_delivery.artifact is None:
@@ -1168,11 +1210,28 @@ def _save_report(job: Job) -> bool:
     """만든 보고서를 파일 저장소에 남긴다.
 
     ★ 이게 없으면 **서버를 끄는 순간 보고서가 사라진다** (메모리에만 있었다).
-    ★ 저장이 실패해도 사용자가 화면을 못 보게 만들지 않는다 — 화면은 메모리에도 있다.
+    ★ LINK·ADMIN의 임시 미리보기는 저장 실패 경고와 함께 메모리에 남을 수 있다.
+      PUBLIC은 다르다. 브라우저 grant와 60일 Delivery를 함께 확정하지 못한 본문을
+      성공 화면으로 열면 저장·출고·차감이 서로 다른 상태가 되므로 전체 실패한다.
     """
     if job.result is None or job.result.report is None:
         return False
     try:
+        delivery_expires_at: float | None = None
+        if job.requires_public_report_grant:
+            if job.delivery_expires_at is None:
+                raise report_access_store.PublicGrantBindingUnavailable(
+                    "PUBLIC 저장 전에 Delivery 만료 시각이 고정되지 않았습니다"
+                )
+            delivery_expires_at = job.delivery_expires_at.timestamp()
+            required_cookie_expiry = (
+                delivery_expires_at
+                + report_access_constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
+            )
+            if job.public_grant_expires_at <= required_cookie_expiry:
+                raise report_access_store.PublicGrantBindingUnavailable(
+                    "PUBLIC cookie가 Delivery 만료와 저장 여유보다 먼저 끝납니다"
+                )
         with storage_db.connect() as conn:
             if not report_store.insert_new(
                 conn,
@@ -1191,11 +1250,16 @@ def _save_report(job: Job) -> bool:
             )
             # PUBLIC 데모 권한은 run 주소와 별개다. 같은 저장 transaction에서
             # report 결속까지 붙여 재시작 직후에도 그 브라우저만 열 수 있게 한다.
-            report_access_store.bind_report(
+            report_bound = report_access_store.bind_report(
                 conn,
                 run_id=job.job_id,
                 report_id=job.job_id,
+                delivery_expires_at=delivery_expires_at,
             )
+            if job.requires_public_report_grant and not report_bound:
+                raise report_access_store.PublicGrantBindingUnavailable(
+                    "PUBLIC 실행에 결속된 브라우저 grant가 없습니다"
+                )
             job_interruptions.delete(conn, job.job_id)
             if job.share_link_hash and not share_store.finish_run(
                 conn,
@@ -1206,6 +1270,9 @@ def _save_report(job: Job) -> bool:
                 internal_ai_cost_krw=job.result.cost_krw,
             ):
                 raise RuntimeError("LINK 보고서 생성 이력을 연결하지 못했습니다")
+            # bind_report가 잡은 writer lock을 다른 쓰기 뒤까지 유지한 채 여기서
+            # 직접 확정한다. 검사와 commit 사이에 revoke가 끼어들 수 없다.
+            conn.commit()
         job.report_persisted = True
         job.persistence_warning = ""
         return True
@@ -1951,7 +2018,10 @@ async def _start_with_reserved_slot(
         # 익명 데모는 주소 자체가 아니라 별도 브라우저 grant로만 이후 화면을
         # 연다. 작업을 scheduler에 넘기기 전에 DB 결속을 확정해야 첫 progress
         # redirect가 권한 없이 떠 버리는 틈이 없다.
-        if _requires_public_report_grant(resolved_track):
+        requires_public_report_grant = _requires_public_report_grant(
+            resolved_track
+        )
+        if requires_public_report_grant:
             try:
                 with storage_db.connect() as conn:
                     public_grant = report_access_store.issue_and_bind(
@@ -1993,6 +2063,10 @@ async def _start_with_reserved_slot(
             is_paid=is_paid,
             paid_cap_krw=resolved_track[2],
             slot_bucket_id=slot_bucket_id,
+            requires_public_report_grant=requires_public_report_grant,
+            public_grant_expires_at=(
+                public_grant.expires_at if public_grant is not None else 0.0
+            ),
         )
         if not public_ids.register(_JOBS, run_id, new_job):
             if pipeline_phase is not None:

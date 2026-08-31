@@ -300,11 +300,12 @@ def test_PUBLIC_완성결속은_commit여유가_남은grant만_받는다():
             run_id="20" * 16,
             now=checked_at - 100,
         )
+        delivery_expires_at = checked_at + 1
         conn.execute(
             f"UPDATE {store.TABLE_GRANTS} SET expires_at = ? "
             "WHERE grant_hash = ?",
             (
-                checked_at + constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC,
+                delivery_expires_at + constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC,
                 grant.grant_hash,
             ),
         )
@@ -315,6 +316,7 @@ def test_PUBLIC_완성결속은_commit여유가_남은grant만_받는다():
                 conn,
                 run_id="20" * 16,
                 report_id="21" * 16,
+                delivery_expires_at=delivery_expires_at,
                 now=checked_at,
             )
         conn.rollback()
@@ -370,6 +372,7 @@ def test_PUBLIC_시간이모순되거나_철회된grant는_완성결속에서_�
                 conn,
                 run_id="30" * 16,
                 report_id="31" * 16,
+                delivery_expires_at=checked_at + 100,
                 now=checked_at,
             )
         conn.rollback()
@@ -381,7 +384,7 @@ def test_PUBLIC_시간이모순되거나_철회된grant는_완성결속에서_�
         conn.close()
 
 
-def test_PUBLIC_검사직후_만료될grant도_commit전에_결속하지않는다(monkeypatch):
+def test_PUBLIC_31초남은grant도_60일Delivery를_결속하지않는다(monkeypatch):
     conn = sqlite3.connect(":memory:")
     try:
         store.ensure_schema(conn)
@@ -392,14 +395,13 @@ def test_PUBLIC_검사직후_만료될grant도_commit전에_결속하지않는�
             run_id="40" * 16,
             now=checked_at - 100,
         )
-        # 예전의 단순 ``expires_at > now`` 검사라면 통과하지만, 저장 commit
-        # 여유 안에 만료되는 행이다. bind_report가 호출 시각을 직접 다시 읽어
-        # 이 검사-사용 경합을 닫는지 확인한다.
+        # 예전의 ``now + 30초`` 검사라면 31초가 남아 통과한다. 하지만 실제
+        # Delivery 만료 시각까지는 살지 않으므로 결속하면 안 된다.
         conn.execute(
             f"UPDATE {store.TABLE_GRANTS} SET expires_at = ? "
             "WHERE grant_hash = ?",
             (
-                checked_at + constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC / 2,
+                checked_at + constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC + 1,
                 grant.grant_hash,
             ),
         )
@@ -411,6 +413,7 @@ def test_PUBLIC_검사직후_만료될grant도_commit전에_결속하지않는�
                 conn,
                 run_id="40" * 16,
                 report_id="41" * 16,
+                delivery_expires_at=checked_at + 60 * 24 * 60 * 60,
             )
         conn.rollback()
         assert conn.execute(
@@ -419,6 +422,51 @@ def test_PUBLIC_검사직후_만료될grant도_commit전에_결속하지않는�
         ).fetchone()[0] == ""
     finally:
         conn.close()
+
+
+def test_PUBLIC_결속검사와_commit사이에_다른연결이_grant를철회할수없다(
+    tmp_path,
+):
+    db_path = tmp_path / "access-lock.db"
+    owner = sqlite3.connect(db_path, timeout=1)
+    attacker = sqlite3.connect(db_path, timeout=0)
+    try:
+        store.ensure_schema(owner)
+        checked_at = 1_800_002_500.0
+        grant = store.issue_and_bind(
+            owner,
+            existing_token="",
+            run_id="45" * 16,
+            now=checked_at,
+        )
+        owner.commit()
+        assert store.bind_report(
+            owner,
+            run_id="45" * 16,
+            report_id="46" * 16,
+            delivery_expires_at=checked_at + 60 * 24 * 60 * 60,
+            now=checked_at + 1,
+        )
+
+        # bind_report의 BEGIN IMMEDIATE writer lock은 명시 commit 전까지 유지된다.
+        # 따라서 검사 직후 다른 연결이 revoke를 끼워 넣는 TOCTOU 경합이 닫힌다.
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            attacker.execute(
+                f"UPDATE {store.TABLE_GRANTS} SET revoked_at = ? "
+                "WHERE grant_hash = ?",
+                (checked_at + 2, grant.grant_hash),
+            )
+        attacker.rollback()
+        owner.commit()
+        assert attacker.execute(
+            f"UPDATE {store.TABLE_GRANTS} SET revoked_at = ? "
+            "WHERE grant_hash = ?",
+            (checked_at + 3, grant.grant_hash),
+        ).rowcount == 1
+        attacker.commit()
+    finally:
+        attacker.close()
+        owner.close()
 
 
 def test_PUBLIC_같은run은_첫보고서에서_다른보고서로_바꿀수없다():
@@ -436,6 +484,7 @@ def test_PUBLIC_같은run은_첫보고서에서_다른보고서로_바꿀수없�
             conn,
             run_id="50" * 16,
             report_id="51" * 16,
+            delivery_expires_at=issued_at + 100,
             now=issued_at + 1,
         )
         conn.commit()
@@ -445,6 +494,7 @@ def test_PUBLIC_같은run은_첫보고서에서_다른보고서로_바꿀수없�
                 conn,
                 run_id="50" * 16,
                 report_id="52" * 16,
+                delivery_expires_at=issued_at + 100,
                 now=issued_at + 2,
             )
         conn.rollback()
@@ -474,6 +524,7 @@ def test_MEMBER_완성결속은_PUBLIC_grant시간정책의_영향을받지않�
             conn,
             run_id=run_id,
             report_id=report_id,
+            delivery_expires_at=None,
             now=10**15,
         )
         assert store.member_subject_allows(
@@ -515,6 +566,7 @@ def test_같은run의_MEMBER와_PUBLIC_혼합소유는_아무행도_고치지않
                 conn,
                 run_id=run_id,
                 report_id="71" * 16,
+                delivery_expires_at=issued_at + 100,
                 now=issued_at + 2,
             )
         conn.rollback()

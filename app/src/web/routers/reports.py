@@ -67,6 +67,7 @@ from src.features.report_delivery.artifact import ArtifactInspectionStatus
 from src.features.report_delivery.cache_identity import CacheLookupKey
 from src.features.report_delivery.models import Delivery
 from src.features.report_delivery import store as delivery_store
+from src.features.report_access import store as report_access_store
 from src.features.sharelink import store as share_store
 from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import tracks as share_tracks
@@ -1216,6 +1217,8 @@ def finalize_new_report_delivery(
     cache_namespace: GenerationCacheNamespace | None = None,
     preflight_identity_digest: str = "",
     cache_eligible: bool = False,
+    completed_at: dt.datetime | None = None,
+    public_access_run_id: str = "",
 ) -> report_delivery_adapter.PublicDelivery:
     """새 보고서 완료 경계에서 자동승인·과금·artifact를 한번만 확정한다.
 
@@ -1224,7 +1227,28 @@ def finalize_new_report_delivery(
     SQLite 거래에 넣어, 일부만 성공한 출고를 남기지 않는다.
     """
 
-    completed_at = clock.now_kst()
+    completed_at = completed_at or clock.now_kst()
+    if completed_at.tzinfo is None or completed_at.utcoffset() is None:
+        raise report_delivery_adapter.DeliveryAdapterError(
+            "Delivery 완료 시각에는 시간대가 필요합니다"
+        )
+
+    def bind_public_access(
+        conn: sqlite3.Connection,
+        public_delivery: report_delivery_adapter.PublicDelivery,
+    ) -> None:
+        clean_run = str(public_access_run_id).strip().lower()
+        if not clean_run:
+            return
+        if not report_access_store.bind_report(
+            conn,
+            run_id=clean_run,
+            report_id=report_id,
+            delivery_expires_at=public_delivery.delivery.expires_at.timestamp(),
+        ):
+            raise report_access_store.PublicGrantBindingUnavailable(
+                "PUBLIC 실행의 report 결속을 최종 출고에서 확인하지 못했습니다"
+            )
     if bool(str(reuse_content_snapshot_id).strip()) != bool(
         str(reuse_artifact_id).strip()
     ):
@@ -1291,6 +1315,10 @@ def finalize_new_report_delivery(
                         raise report_delivery_adapter.DeliveryAdapterError(
                             "완료 delivery와 재시도의 정식 캐시 신원이 다릅니다"
                         )
+            if public_access_run_id:
+                with storage_db.connect() as conn:
+                    bind_public_access(conn, existing)
+                    conn.commit()
             return existing
         if reuse_content_snapshot_id:
             # single-flight waiter는 owner가 승인받은 최초 content/PDF를
@@ -1350,6 +1378,10 @@ def finalize_new_report_delivery(
                         customer_charge_krw=charge.amount_krw,
                     ):
                         raise RuntimeError("LINK 자동출고 이력을 확정하지 못했습니다")
+                # 실제 Delivery.expires_at을 확인하는 권한 fence가 출고·청구와
+                # 같은 transaction의 마지막 쓰기다. 실패하면 모두 rollback한다.
+                bind_public_access(conn, public_delivery)
+                conn.commit()
             return public_delivery
         candidate = _candidate_for_report(report_id, output_report)
         released = automatic_release_pdf(
@@ -1414,6 +1446,8 @@ def finalize_new_report_delivery(
                     customer_charge_krw=charge.amount_krw,
                 ):
                     raise RuntimeError("LINK 자동출고 이력을 확정하지 못했습니다")
+            bind_public_access(conn, public_delivery)
+            conn.commit()
         return public_delivery
     except Exception as exc:
         if isinstance(exc, (PublishBlockedError, V2ValidationError)):

@@ -71,6 +71,7 @@ def _bind_member_report(conn, *, report_id: str, email: str) -> None:
         conn,
         run_id=report_id,
         report_id=report_id,
+        delivery_expires_at=None,
     )
     assert dashboard_store.settle_member_run(
         conn,

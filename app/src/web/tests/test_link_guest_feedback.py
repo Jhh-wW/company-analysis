@@ -208,6 +208,7 @@ def test_MEMBER의_오류신고_POST도_통과하고_회원으로_구분되어_�
             conn,
             run_id=report_id,
             report_id=report_id,
+            delivery_expires_at=None,
         )
     client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
 

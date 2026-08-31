@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import datetime as dt
+import math
 import re
 import secrets
 import sqlite3
@@ -713,15 +714,15 @@ def bind_report(
     *,
     run_id: str,
     report_id: str,
+    delivery_expires_at: float | None,
     now: float | None = None,
 ) -> bool:
     """저장 transaction 안에서 기존 run에 정확한 report를 붙인다.
 
-    PUBLIC은 쓰기 잠금을 잡은 뒤 철회·생성시각·만료와 commit 여유를 다시
-    확인한다. 해당 run의 PUBLIC 행이 있는데 이 검증을 통과하지 못하면 ``False``로
-    조용히 넘기지 않고 :class:`PublicGrantBindingUnavailable`을 던진다. 호출자는
-    이를 저장 실패로 취급해 같은 transaction을 rollback하고, 이 함수를 마지막
-    쓰기 경계 가까이에서 호출한 뒤 즉시 commit해야 한다.
+    PUBLIC은 쓰기 잠금을 잡은 뒤 철회·생성시각과 **실제 Delivery 만료 시각**을
+    다시 확인한다. ``delivery_expires_at``은 Delivery 영수증에 적힐 절대 시각이며,
+    이 함수가 마지막 commit 여유를 더한다. 호출 시각에 30초만 더하는 값은
+    60일 열람 보장을 증명하지 못하므로 PUBLIC 행에는 허용하지 않는다.
 
     MEMBER는 grant 수명과 무관하며 기존 subject 결속 갱신 계약을 그대로 쓴다.
     """
@@ -772,6 +773,19 @@ def bind_report(
     if not public_rows:
         return False
 
+    if delivery_expires_at is None:
+        raise PublicGrantBindingUnavailable(
+            "PUBLIC 보고서 결속에는 실제 Delivery 만료 시각이 필요합니다"
+        )
+    exact_delivery_expiry = float(delivery_expires_at)
+    if (
+        not math.isfinite(exact_delivery_expiry)
+        or exact_delivery_expiry <= checked_at
+    ):
+        raise PublicGrantBindingUnavailable(
+            "PUBLIC 보고서의 Delivery 만료 시각이 현재보다 늦어야 합니다"
+        )
+
     if any(
         str(row[0]) not in ("", clean_report)
         for row in public_rows
@@ -780,7 +794,9 @@ def bind_report(
             "같은 PUBLIC run은 서로 다른 두 보고서에 결속할 수 없습니다"
         )
 
-    valid_until = checked_at + constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
+    valid_until = (
+        exact_delivery_expiry + constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
+    )
     public_cursor = conn.execute(
         f"""
         UPDATE {TABLE_BINDINGS}
@@ -803,7 +819,7 @@ def bind_report(
     )
     if public_cursor.rowcount <= 0:
         raise PublicGrantBindingUnavailable(
-            "PUBLIC grant가 철회·만료됐거나 안전한 저장 여유가 남지 않았습니다"
+            "PUBLIC grant가 실제 Delivery 만료와 저장 여유까지 살아 있지 않습니다"
         )
     return True
 
@@ -940,7 +956,10 @@ def migrate_legacy_member_bindings(
             ):
                 raise RuntimeError("기존 MEMBER run의 subject 결속을 만들지 못했습니다")
             if not bind_report(
-                conn, run_id=str(run_id), report_id=str(report_id)
+                conn,
+                run_id=str(run_id),
+                report_id=str(report_id),
+                delivery_expires_at=None,
             ):
                 raise RuntimeError("기존 MEMBER report 결속을 만들지 못했습니다")
             migrated += 1

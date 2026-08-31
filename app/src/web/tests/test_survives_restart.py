@@ -84,7 +84,11 @@ def approved_pdf_route(monkeypatch):
     monkeypatch.setattr(reports_router, "_release_state", release_state)
 
 
-def _make_report(client: TestClient) -> str:
+def _make_report(
+    client: TestClient,
+    *,
+    expected_outcome: Outcome = Outcome.REPORT,
+) -> str:
     """조사를 한 건 끝까지 돌리고 그 번호를 돌려준다."""
     runtime._PIPELINE = DemoPipeline()
     form = {
@@ -110,11 +114,14 @@ def _make_report(client: TestClient) -> str:
         pytest.fail("조사가 끝나지 않았습니다")
 
     result = job_runtime._JOBS[job_id].result
-    assert result is not None and result.outcome is Outcome.REPORT
-    assert result.report is not None
-    assert tuple(section.cell for section in result.report.sections) == (
-        CANONICAL_SECTION_IDS
-    )
+    assert result is not None and result.outcome is expected_outcome
+    if expected_outcome is Outcome.REPORT:
+        assert result.report is not None
+        assert tuple(section.cell for section in result.report.sections) == (
+            CANONICAL_SECTION_IDS
+        )
+    else:
+        assert result.report is None
     return job_id
 
 
@@ -288,18 +295,23 @@ def test_새보고서저장실패는_불변출고없이_임시화면이나_재�
 
     with TestClient(main.app, base_url="https://testserver") as client:
         monkeypatch.setattr(job_runtime.report_store, "insert_new", broken_save)
-        job_id = _make_report(client)
+        job_id = _make_report(client, expected_outcome=Outcome.FAILED)
         first = client.get(f"/result/{job_id}")
 
-        assert first.status_code == 503
-        assert "저장된 보고서를 확인할 수 없습니다" in first.text
-        assert job_runtime._JOBS[job_id].report_persisted is False
-        assert job_runtime._JOBS[job_id].delivery_persisted is False
+        assert first.status_code == 200
+        failed_job = job_runtime._JOBS[job_id]
+        assert failed_job.result is not None
+        assert failed_job.result.outcome is Outcome.FAILED
+        assert failed_job.result.report is None
+        assert failed_job.result.charged is False
+        assert failed_job.report_persisted is False
+        assert failed_job.delivery_persisted is False
+        assert "PDF 보고서 받기" not in first.text
 
         monkeypatch.setattr(job_runtime.report_store, "insert_new", original_save)
         # 새로고침 GET이 저장·승인·PDF 생성을 대신하면 같은 결함이 되살아난다.
         retried = client.get(f"/result/{job_id}", follow_redirects=False)
-        assert retried.status_code == 503
+        assert retried.status_code == 200
         assert job_runtime._JOBS[job_id].report_persisted is False
 
         job_runtime._JOBS.clear()
