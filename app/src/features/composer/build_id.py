@@ -35,6 +35,19 @@ class EngineBuildIdentity:
     deployment_revision: str
     build_id: str
 
+    def __post_init__(self) -> None:
+        revision = self.deployment_revision
+        if revision:
+            if (
+                len(revision) != deployment_identity.COMMIT_FULL_LEN
+                or revision != revision.lower()
+                or any(letter not in _LOWER_HEX for letter in revision)
+                or self.build_id != _namespace(revision)
+            ):
+                raise ValueError("엔진 빌드 신원과 배포 commit의 결속이 다릅니다")
+        elif self.build_id != UNKNOWN_BUILD_ID:
+            raise ValueError("배포 commit을 모르면 엔진 빌드 신원도 unknown이어야 합니다")
+
     @property
     def cache_usable(self) -> bool:
         return build_id_is_usable(self.build_id)

@@ -8,6 +8,7 @@ from src.features.report_delivery.singleflight import (
     LeaseKey,
     acquire,
     complete,
+    completed_result_matches,
     expire_completed_result,
     fail,
     heartbeat,
@@ -156,6 +157,50 @@ def test_completed_result_is_fanned_out_then_expires_for_fresh_cache_decision(
     assert after_fanout.disposition is AcquireDisposition.TAKEOVER
     assert after_fanout.handle is not None
     assert after_fanout.handle.fencing_token == acquired.handle.fencing_token + 1
+
+
+def test_완료증거는_열쇠와_두원본과_유효시간이_전부_같아야한다(
+    conn: sqlite3.Connection,
+    now: dt.datetime,
+) -> None:
+    acquired = acquire(
+        conn,
+        key=_key(),
+        owner_id="worker-proof",
+        now=now,
+        lease_ttl=dt.timedelta(seconds=60),
+    )
+    assert acquired.handle is not None
+    assert complete(
+        conn,
+        handle=acquired.handle,
+        content_snapshot_id="content-proof",
+        artifact_id="artifact-proof",
+        now=now + dt.timedelta(seconds=5),
+        result_fanout_ttl=dt.timedelta(seconds=20),
+    )
+
+    assert completed_result_matches(
+        conn,
+        key=_key(),
+        content_snapshot_id="content-proof",
+        artifact_id="artifact-proof",
+        now=now + dt.timedelta(seconds=10),
+    )
+    assert not completed_result_matches(
+        conn,
+        key=_key(),
+        content_snapshot_id="content-proof",
+        artifact_id="artifact-other",
+        now=now + dt.timedelta(seconds=10),
+    )
+    assert not completed_result_matches(
+        conn,
+        key=_key(),
+        content_snapshot_id="content-proof",
+        artifact_id="artifact-proof",
+        now=now + dt.timedelta(seconds=26),
+    )
 
 
 def test_손상cache와_같은완료결과만_즉시만료하고_fencing은_이어간다(

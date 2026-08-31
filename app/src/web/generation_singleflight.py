@@ -12,12 +12,13 @@ import datetime as dt
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from typing import Any, Final
 
 from src.core import clock
 from src.core.constants import MAX_AI_CALLS_PER_REQUEST
 from src.features.budget.constants import PAID_PHASE_LEASE_SEC, SPEND_PHASE_PIPELINE
+from src.features.composer import build_id as composer_build_id
 from src.features.pipeline.constants import ANTHROPIC_TIMEOUT_SEC
 from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
 from src.features.report_delivery import artifact as delivery_artifact
@@ -88,6 +89,7 @@ class GenerationSession:
     billing_bucket_id: str
     cap_krw: float | None
     on_paid_phase: Any
+    build_identity: InitVar[composer_build_id.EngineBuildIdentity]
     _state: str = field(default="new", init=False)
     _key: singleflight.LeaseKey | None = field(default=None, init=False)
     _cache_namespace: GenerationCacheNamespace | None = field(default=None, init=False)
@@ -99,6 +101,7 @@ class GenerationSession:
     _stop_heartbeat: threading.Event = field(default_factory=threading.Event, init=False)
     _heartbeat_thread: threading.Thread | None = field(default=None, init=False)
     _lease_error: BaseException | None = field(default=None, init=False)
+    _frozen_build_identity: composer_build_id.EngineBuildIdentity = field(init=False)
     # Job scheduler가 이 세션을 만들 때부터 한 시간 전체 마감이 흐른다.
     # owner를 늦게 얻었다고 다시 한 시간을 주면 preflight→wait→takeover가
     # 이어질 때 한 요청의 슬롯 수명이 계속 늘어나므로, 최초 요청 시각 한 벌을
@@ -107,7 +110,13 @@ class GenerationSession:
     _execution_started_monotonic: float = field(default=0.0, init=False)
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        build_identity: composer_build_id.EngineBuildIdentity,
+    ) -> None:
+        if not isinstance(build_identity, composer_build_id.EngineBuildIdentity):
+            raise TypeError("보고서 생성 시작의 엔진 빌드 신원이 필요합니다")
+        self._frozen_build_identity = build_identity
         # 함수 객체를 dataclass default_factory에 고정하지 않는다. 시험 clock과
         # 운영 clock adapter가 교체돼도 생성 순간의 같은 두 시계를 읽어야 한다.
         self._execution_started_at = clock.now_kst()
@@ -118,7 +127,14 @@ class GenerationSession:
         return generation_coordination.GenerationCallbacks(
             coordinate=self.coordinate,
             ensure_paid_phase=self.ensure_paid_phase,
+            engine_build_identity=self._frozen_build_identity,
         )
+
+    @property
+    def engine_build_identity(self) -> composer_build_id.EngineBuildIdentity:
+        """세션 생성 순간 한 번 고정한 배포·빌드 신원."""
+
+        return self._frozen_build_identity
 
     @property
     def owns_generation(self) -> bool:
@@ -143,6 +159,13 @@ class GenerationSession:
 
         with self._lock:
             return self._preflight_identity_digest
+
+    @property
+    def completed_reuse_key(self) -> singleflight.LeaseKey | None:
+        """정식 캐시가 아닌 waiter 재사용을 증명할 완료 lease 열쇠."""
+
+        with self._lock:
+            return self._key if self._state == "reused" else None
 
     def _set_owner(
         self,
@@ -479,6 +502,18 @@ class GenerationSession:
             else ""
         )
         clean_source = str(preflight_identity_digest).strip()
+        if cache_namespace is not None:
+            frozen = self._frozen_build_identity
+            expected_image = f"generator-build:{frozen.build_id}"
+            if (
+                not frozen.cache_usable
+                or cache_namespace.deployment_revision
+                != frozen.deployment_revision
+                or cache_namespace.image_digest != expected_image
+            ):
+                raise GenerationSingleflightUnavailable(
+                    "생성 namespace가 요청 시작 때 고정한 엔진 빌드 신원과 다릅니다"
+                )
         # 부분 지문으로 예전 결과를 공유하는 것이 더 위험하다. 이때는
         # lease를 작대기로 만들지 않고 요청별로 새로 생성한다.
         if not clean_corp or not clean_namespace or not clean_source:

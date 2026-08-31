@@ -323,6 +323,7 @@ def get_company_report_hit(
     conn: sqlite3.Connection,
     *,
     corp_id: str,
+    build_id: str,
     source_identity_digest: str,
     current_fiscal_year: Optional[int] = None,
     today: Optional[dt.date] = None,
@@ -332,14 +333,14 @@ def get_company_report_hit(
     옛 범용 API에 빈 ``job``/빈 공고 지문을 넘기지 않고 명시적인 제품·스키마·
     출처 namespace를 사용하므로 과거 직무 보고서나 정정 전 자료와 충돌하지 않는다.
     """
-    source_requirement = _source_identity_requirement(source_identity_digest)
-    if source_requirement is None:
+    requirements = _company_requirements(build_id, source_identity_digest)
+    if not requirements:
         return None
     report = get_layer1_hit(
         conn,
         corp_id=corp_id,
         job=_COMPANY_ANALYSIS_PRODUCT_KEY,
-        requirements=[*_COMPANY_ANALYSIS_SCHEMA_REQUIREMENTS, source_requirement],
+        requirements=requirements,
         current_fiscal_year=current_fiscal_year,
         today=today,
     )
@@ -359,13 +360,14 @@ def save_company_report(
     *,
     corp_id: str,
     report: Report,
+    build_id: str,
     source_identity_digest: str,
     fiscal_year: Optional[int] = None,
     now: Optional[dt.datetime] = None,
 ) -> Optional[str]:
     """회사분석 보고서를 제품·스키마 namespace로 격리해 저장한다."""
-    source_requirement = _source_identity_requirement(source_identity_digest)
-    if source_requirement is None:
+    requirements = _company_requirements(build_id, source_identity_digest)
+    if not requirements:
         return None
     validation = validate_publishable(report)
     if not validation:
@@ -374,11 +376,24 @@ def save_company_report(
         conn,
         corp_id=corp_id,
         job=_COMPANY_ANALYSIS_PRODUCT_KEY,
-        requirements=[*_COMPANY_ANALYSIS_SCHEMA_REQUIREMENTS, source_requirement],
+        requirements=requirements,
         report=report,
         fiscal_year=fiscal_year,
         now=now,
     )
+
+
+def _company_requirements(build_id: str, source_identity_digest: str) -> list[str]:
+    """v1도 배포 빌드와 실제 출처가 모두 확정됐을 때만 쓰는 열쇠."""
+
+    source_requirement = _source_identity_requirement(source_identity_digest)
+    if not build_id_is_usable(build_id) or source_requirement is None:
+        return []
+    return [
+        *_COMPANY_ANALYSIS_SCHEMA_REQUIREMENTS,
+        f"build:{build_id}",
+        source_requirement,
+    ]
 
 
 def _v2_requirements(build_id: str, source_identity_digest: str) -> list[str]:

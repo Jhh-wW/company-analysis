@@ -224,7 +224,10 @@ def _engine_v2_enabled() -> bool:
     return os.environ.get(ENGINE_V2_ENV_NAME) == ENGINE_V2_ENV_ON
 
 
-def _generation_cache_namespace(engine: Any) -> GenerationCacheNamespace | None:
+def _generation_cache_namespace(
+    engine: Any,
+    build_identity: Any = None,
+) -> GenerationCacheNamespace | None:
     """캐시와 single-flight가 함께 쓰는 사전 생성기 신원을 만든다.
 
     배포 revision·모델·출력 설정은 provider 호출 전에 모두 확정된다.
@@ -235,16 +238,15 @@ def _generation_cache_namespace(engine: Any) -> GenerationCacheNamespace | None:
     model = str(getattr(engine, "MODEL", "") or GENERATION_MODEL).strip()
     if not model:
         return None
-    from src.core import deployment_identity  # noqa: PLC0415
-
-    # revision과 build ID가 환경변수를 따로 읽으면 두 읽기 사이 값이 바뀌어
-    # 서로 다른 배포를 한 namespace로 묶을 수 있다. raw snapshot은 한 번만 뜬다.
-    deployment_snapshot = deployment_identity.capture_deployment_identity()
     from src.features.composer.build_id import (  # noqa: PLC0415
+        EngineBuildIdentity,
         capture_engine_build_identity,
     )
 
-    build_identity = capture_engine_build_identity(deployment_snapshot)
+    if build_identity is None:
+        build_identity = capture_engine_build_identity()
+    if not isinstance(build_identity, EngineBuildIdentity):
+        raise TypeError("요청 시작 때 고정한 엔진 빌드 신원이 필요합니다")
     if not build_identity.cache_usable:
         return None
     revision = build_identity.deployment_revision
@@ -1790,8 +1792,28 @@ class RealPipeline:
     ) -> RunResult:
         """5 판정부터 13 출력까지 돌리고 예외 때도 이미 쓴 비용을 보존한다."""
         engine = _MeteredEngine(_engine())
+        from src.features.composer.build_id import (  # noqa: PLC0415
+            EngineBuildIdentity,
+            capture_engine_build_identity,
+        )
+
+        frozen_identity = generation_coordination.frozen_engine_build_identity()
+        if frozen_identity is None:
+            build_identity = capture_engine_build_identity()
+        elif isinstance(frozen_identity, EngineBuildIdentity):
+            build_identity = frozen_identity
+        else:
+            raise generation_coordination.GenerationCoordinationError(
+                "웹 Job이 고정한 엔진 빌드 신원 형식이 올바르지 않습니다"
+            )
         try:
-            result = self._run_metered(user_input, card, on_step, engine=engine)
+            result = self._run_metered(
+                user_input,
+                card,
+                on_step,
+                engine=engine,
+                build_identity=build_identity,
+            )
         except Exception:  # noqa: BLE001 — AI 뒤 후속 코드가 터져도 쓴 돈은 0원이 아니다
             logger.exception("본조사 중 예기치 않은 실패가 발생했습니다")
             result = RunResult(
@@ -1815,6 +1837,7 @@ class RealPipeline:
         on_step: Optional[StepReporter],
         *,
         engine: _MeteredEngine,
+        build_identity: Any,
     ) -> RunResult:
         """본조사 본체. `_MeteredEngine`이 이 요청의 AI 사용량만 모은다.
 
@@ -1965,7 +1988,7 @@ class RealPipeline:
         # 실제 paid 경로에서 현재 namespace 결과로 «승격»하지 않는다. 그렇게
         # 하면 옛 본문을 현재 코드가 만든 것처럼 거짓 표기하게 된다. 한 번
         # 명시적 miss로 새로 만들고, 그때부터 정확한 불변 원본을 재사용한다.
-        generation_namespace = _generation_cache_namespace(engine)
+        generation_namespace = _generation_cache_namespace(engine, build_identity)
         reused_generation = generation_coordination.coordinate(
             corp_id=corp_code,
             cache_namespace=generation_namespace,
@@ -2054,12 +2077,14 @@ class RealPipeline:
                     corp_id=corp_code,
                     current_fiscal_year=current_fiscal_year,
                     source_identity_digest=source_identity.cache_digest,
+                    build_identity=build_identity,
                 )
                 if _engine_v2_enabled()
                 else _company_cache_lookup(
                     corp_id=corp_code,
                     current_fiscal_year=current_fiscal_year,
                     source_identity_digest=source_identity.cache_digest,
+                    build_identity=build_identity,
                 )
             )
         if cached is not None:
@@ -2170,6 +2195,7 @@ class RealPipeline:
                 corp_id=corp_code,
                 current_fiscal_year=current_fiscal_year,
                 source_identity_digest=source_identity.cache_digest,
+                build_identity=build_identity,
             )
             return replace(
                 v2_result,
@@ -2766,7 +2792,7 @@ class RealPipeline:
         # 회사분석 전용 버전 키로 저장해 옛 직무·공고 보고서와 섞이지 않는다.
         # ★ 우리 쪽 수집 실패(⚠️)가 낀 결과는 «저장하지 않는다» —
         #   그날만 죽은 소스 때문에 그 회사가 「자료 없는 회사」로 굳는다.
-        cache_eligible, missing_sections, content_shortfall_reasons = (
+        content_eligible, missing_sections, content_shortfall_reasons = (
             _generation_cache_eligibility(
                 report,
                 sources=sources,
@@ -2774,6 +2800,7 @@ class RealPipeline:
                 filing=filing,
             )
         )
+        cache_eligible = bool(build_identity.cache_usable and content_eligible)
         if not cache_eligible:
             logger.info(
                 "수집 실패·후보범위 불완전·기본 장/내용 결손이 껴 1층 캐시에 "
@@ -2788,6 +2815,7 @@ class RealPipeline:
                 report=report,
                 fiscal_year=current_fiscal_year,
                 source_identity_digest=source_identity.cache_digest,
+                build_identity=build_identity,
             )
 
         return RunResult(
@@ -3023,6 +3051,7 @@ def _company_cache_lookup(
     corp_id: str,
     current_fiscal_year: Optional[int],
     source_identity_digest: str,
+    build_identity: Any,
 ) -> Optional[Report]:
     """회사분석 제품 namespace의 캐시만 조회한다."""
     if not corp_id:
@@ -3032,6 +3061,7 @@ def _company_cache_lookup(
             hit = cache_store.get_company_report_hit(
                 conn,
                 corp_id=corp_id,
+                build_id=build_identity.build_id,
                 source_identity_digest=source_identity_digest,
                 current_fiscal_year=current_fiscal_year,
             )
@@ -3060,13 +3090,12 @@ def _v2_cache_lookup(
     corp_id: str,
     current_fiscal_year: Optional[int],
     source_identity_digest: str,
+    build_identity: Any,
 ) -> Optional[Report]:
     """엔진 v2 보고서 캐시를 조회한다 (지금 코드 지문이 같을 때만)."""
     if not corp_id:
         return None
-    from src.features.composer.build_id import engine_build_id  # noqa: PLC0415
-
-    build_id = engine_build_id()
+    build_id = build_identity.build_id
     try:
         with storage_db.connect() as conn:
             hit = cache_store.get_v2_report_hit(
@@ -3101,6 +3130,7 @@ def _v2_cache_save(
     report: Report,
     fiscal_year: Optional[int],
     source_identity_digest: str,
+    build_identity: Any,
 ) -> None:
     """v2 보고서를 «그 코드 지문»과 함께 저장한다.
 
@@ -3108,15 +3138,13 @@ def _v2_cache_save(
     """
     if not corp_id:
         return
-    from src.features.composer.build_id import engine_build_id  # noqa: PLC0415
-
     try:
         with storage_db.connect() as conn:
             cache_store.save_v2_report(
                 conn,
                 corp_id=corp_id,
                 report=report,
-                build_id=engine_build_id(),
+                build_id=build_identity.build_id,
                 source_identity_digest=source_identity_digest,
                 fiscal_year=fiscal_year,
             )
@@ -3130,6 +3158,7 @@ def _company_cache_save(
     report: Report,
     fiscal_year: Optional[int],
     source_identity_digest: str,
+    build_identity: Any,
 ) -> None:
     """신규 회사분석 보고서를 옛 직무 캐시와 격리해 저장한다."""
     if not corp_id:
@@ -3140,6 +3169,7 @@ def _company_cache_save(
                 conn,
                 corp_id=corp_id,
                 report=report,
+                build_id=build_identity.build_id,
                 source_identity_digest=source_identity_digest,
                 fiscal_year=fiscal_year,
             )
@@ -3331,6 +3361,12 @@ def _run_v2_composer(
     ★ v2 보고서는 v1과 열쇠가 다른 전용 1층 캐시에만 저장한다. 배포 revision과
       생성기 지문이 달라지면 자동 미적중이라 옛 결과가 새 코드 결과로 나오지 않는다.
     """
+    if build_identity is None:
+        from src.features.composer.build_id import (  # noqa: PLC0415
+            capture_engine_build_identity,
+        )
+
+        build_identity = capture_engine_build_identity()
     # composer는 v2 전용이라 지연 import한다 — v1 경로의 module 적재 비용·의존을
     # 바꾸지 않기 위해서다 (pipeline→composer 방향은 계획이 허용한 연결이다).
     from src.features.composer import pipeline as composer_pipeline  # noqa: PLC0415
@@ -3536,7 +3572,7 @@ def _run_v2_composer(
     #   미적중이므로 옛 결과가 새 결과인 척 나올 수 없다.
     # ★ 저장 실패는 삼킨다 — 보고서는 이미 만들어졌고, 저장이 안 됐다고
     #   사용자에게 실패를 돌려주면 돈만 쓰고 결과를 못 받는다.
-    cache_eligible, missing_sections, content_shortfall_reasons = (
+    content_eligible, missing_sections, content_shortfall_reasons = (
         _generation_cache_eligibility(
             report,
             sources=sources,
@@ -3544,12 +3580,18 @@ def _run_v2_composer(
             filing=filing,
         )
     )
+    cache_eligible = bool(
+        build_identity is not None
+        and build_identity.cache_usable
+        and content_eligible
+    )
     if cache_eligible:
         _v2_cache_save(
             corp_id=corp_id,
             report=report,
             fiscal_year=current_fiscal_year,
             source_identity_digest=source_identity_digest,
+            build_identity=build_identity,
         )
     else:
         logger.info(

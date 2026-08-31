@@ -65,6 +65,20 @@ def test_한_deployment_snapshot에서_revision과_build_id를_함께_만든다(
     assert identity.cache_usable
 
 
+def test_EngineBuildIdentity는_revision과_다른_build를_허용하지_않는다() -> None:
+    with pytest.raises(ValueError, match="결속"):
+        build_id.EngineBuildIdentity(
+            deployment_revision=_FULL_COMMIT_A,
+            build_id=f"{build_id.ENGINE_BUILD_ID_CONTRACT_VERSION}:{_FULL_COMMIT_B}",
+        )
+
+    with pytest.raises(ValueError, match="unknown"):
+        build_id.EngineBuildIdentity(
+            deployment_revision="",
+            build_id=f"{build_id.ENGINE_BUILD_ID_CONTRACT_VERSION}:{_FULL_COMMIT_A}",
+        )
+
+
 def test_대문자_full_commit은_보정하지_않고_UNKNOWN이다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

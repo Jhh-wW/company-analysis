@@ -214,6 +214,7 @@ def test_v2_캐시에_저장한_것을_v1이_못_꺼낸다():
         v1적중 = cache_store.get_company_report_hit(
             conn,
             corp_id=CORP_ID,
+            build_id=BUILD_A,
             source_identity_digest=SOURCE_IDENTITY_DIGEST,
             current_fiscal_year=FISCAL_YEAR,
             today=dt.date(2026, 8, 24),

@@ -35,6 +35,7 @@ from src.features.budget.sharing import (
 )
 from src.features.business_candidate.constants import CANDIDATE_ATTEMPT_TTL_SEC
 from src.features.cost_tracking import store as cost_store
+from src.features.composer import build_id as composer_build_id
 from src.features.observability import constants as obs
 from src.features.observability import lifecycle
 from src.features.pipeline.demo import available_companies
@@ -171,6 +172,9 @@ class Job:
     paid_cap_krw: float | None = None
     #: 웹 adapter가 소유하는 lease·waiter·지연 phase 상태. 영속 정보는 DB에 있다.
     generation_session: Any = None
+    #: scheduler가 생성 시작 전에 한 번 고정한 배포·빌드 신원. 저장 시 다시
+    #: 환경에서 만들지 않으며 unknown도 이 Job이 끝날 때까지 그대로다.
+    engine_build_identity: composer_build_id.EngineBuildIdentity | None = None
     generation_abandoned: bool = False
     #: scheduler가 자리를 넘긴 단조 시각. worker 시작이 밀려도 전체 한 시간이
     #: 새로 시작되지 않게 single-flight와 실행 supervisor가 함께 쓴다.
@@ -636,6 +640,8 @@ def _install_job_paid_phase(job: Job, ticket: PaidPhase) -> None:
 def _prepare_generation_session(job: Job) -> None:
     """배경 task 시작 전에 취소 신호를 받을 요청 로컬 세션을 만든다."""
 
+    if job.engine_build_identity is None:
+        job.engine_build_identity = composer_build_id.capture_engine_build_identity()
     if (
         not job.is_paid
         or job.paid_phase is not None
@@ -653,6 +659,7 @@ def _prepare_generation_session(job: Job) -> None:
         ),
         cap_krw=job.paid_cap_krw,
         on_paid_phase=lambda ticket: _install_job_paid_phase(job, ticket),
+        build_identity=job.engine_build_identity,
     )
 
 
@@ -1157,6 +1164,31 @@ def _ensure_link_job_closed(job: Job) -> None:
         logger.exception("LINK 생성 이력을 확인하지 못했습니다 job_id=%s", job.job_id)
 
 
+def _frozen_job_build_identity(job: Job) -> composer_build_id.EngineBuildIdentity:
+    """Job과 세션이 함께 운반한 생성 시작 신원을 한 벌로 확인한다."""
+
+    job_identity = job.engine_build_identity
+    session_identity = getattr(
+        job.generation_session,
+        "engine_build_identity",
+        None,
+    )
+    if (
+        job_identity is not None
+        and session_identity is not None
+        and job_identity != session_identity
+    ):
+        raise RuntimeError("Job과 생성 세션의 엔진 빌드 신원이 다릅니다")
+    identity = session_identity or job_identity
+    if identity is None:
+        # scheduler를 통하지 않는 호환 호출도 이 경계에서 한 번만 고정한다.
+        identity = composer_build_id.capture_engine_build_identity()
+        job.engine_build_identity = identity
+    if not isinstance(identity, composer_build_id.EngineBuildIdentity):
+        raise RuntimeError("Job의 엔진 빌드 신원 형식이 올바르지 않습니다")
+    return identity
+
+
 def _finalize_report_delivery(job: Job) -> bool:
     """보고서 생성 worker 안에서만 최초 승인 PDF와 delivery를 확정한다."""
 
@@ -1207,6 +1239,12 @@ def _finalize_report_delivery(job: Job) -> bool:
         public_access_run_id=(
             job.job_id if job.requires_public_report_grant else ""
         ),
+        engine_build_identity=_frozen_job_build_identity(job),
+        reuse_singleflight_key=(
+            generation_session.completed_reuse_key
+            if generation_session is not None
+            else None
+        ),
     )
     job.delivery_content_id = public_delivery.content.content_id
     if public_delivery.artifact is None:
@@ -1234,6 +1272,11 @@ def _require_report_delivery(job: Job) -> bool:
         raise report_delivery_adapter.DeliveryAdapterError(
             "보고서 완료 경계 시각에는 시간대가 필요합니다"
         )
+    # raw 보고서 저장도 delivery보다 먼저 일어나므로 여기서 배포 연속성을 먼저
+    # 확인한다. A에서 만든 본문을 B/unknown DB에 잠깐이라도 쓰지 않는다.
+    report_delivery_adapter._assert_frozen_identity_is_current(
+        _frozen_job_build_identity(job)
+    )
     report_delivery_adapter.require_public_delivery(
         job.job_id,
         required_at=required_at,

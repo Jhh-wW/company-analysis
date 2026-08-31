@@ -68,6 +68,13 @@ FISCAL_YEARS = [2025, 2024]
 FILING_YEAR = 2025
 
 
+@pytest.fixture(autouse=True)
+def _검증된_배포에서_캐시를_시험한다(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in deployment_identity.COMMIT_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "a" * 40)
+
+
 def test_생성cache_namespace는_교대하는_raw환경도_한_snapshot만_쓴다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2464,6 +2471,28 @@ def test_캐시_적중은_할당량을_안_깎는다(engine: FakeEngine) -> None
     assert second.charged is False
 
 
+def test_v1은_배포commit을_모르면_1층캐시를_읽지도_쓰지도_않는다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in deployment_identity.COMMIT_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+
+    first = _run()
+    calls_after_first = engine.generate_ai_calls
+    second = _run()
+
+    assert first.generation_cache_eligible is False
+    assert second.generation_cache_eligible is False
+    assert second.charged is True
+    assert engine.generate_ai_calls > calls_after_first
+    with real.storage_db.connect() as conn:
+        rows = conn.execute(
+            f"SELECT COUNT(*) FROM {real.cache_store.TABLE_LAYER1_CACHE}"
+        ).fetchone()[0]
+    assert rows == 0
+
+
 def test_캐시_적중이면_저장된_결과라고_밝힌다(engine: FakeEngine) -> None:
     """사용자가 「방금 새로 조사한 것」으로 오해하면 안 된다 (P-63 교훈)."""
     first = _run()
@@ -3047,8 +3076,11 @@ def test_v2를_켜면_1층_캐시_적중을_무시하고_v2로_간다(
     assert v2결과.message == _V2_도달_표식, "v2 분기까지 도달하지 못했습니다"
 
 
-def test_v2를_끄면_1층_캐시는_예전처럼_그대로_먹는다(engine: FakeEngine) -> None:
-    """v1 경로의 동작은 하나도 바뀌지 않는다 (04장 «v1 무변» 원칙)."""
+def test_v2를_꺼도_v1캐시는_같은배포에서만_재사용한다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v1 롤백은 살리되 다른 배포의 결과를 현재 결과로 속이지 않는다."""
     first = _run()
     assert first.outcome is Outcome.REPORT
     호출수 = engine.generate_ai_calls
@@ -3057,3 +3089,9 @@ def test_v2를_끄면_1층_캐시는_예전처럼_그대로_먹는다(engine: Fa
 
     assert second.cache_hit
     assert engine.generate_ai_calls == 호출수, "v1 캐시가 생성 AI를 못 막았습니다"
+
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "b" * 40)
+    third = _run()
+
+    assert not third.cache_hit
+    assert engine.generate_ai_calls > 호출수, "다른 배포가 v1 캐시를 재사용했습니다"

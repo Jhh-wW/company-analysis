@@ -68,3 +68,25 @@ def test_snapshot은_환경이_뒤에_바뀌어도_처음_raw값을_유지한다
 
     assert deployment_identity.deployed_commit(snapshot) == first
     assert deployment_identity.short_deployed_commit(snapshot) == first[:7]
+
+
+def test_snapshot_commit은_raw값과_독립적으로_위조할_수_없다() -> None:
+    with pytest.raises(TypeError):
+        deployment_identity.DeploymentIdentitySnapshot(
+            raw_values=(("RENDER_GIT_COMMIT", ""), ("APP_GIT_COMMIT", "")),
+            commit="a" * 40,
+        )
+
+
+@pytest.mark.parametrize(
+    "raw_values",
+    (
+        (("APP_GIT_COMMIT", "a" * 40), ("RENDER_GIT_COMMIT", "")),
+        (("RENDER_GIT_COMMIT", ""), ("RENDER_GIT_COMMIT", "a" * 40)),
+        (("RENDER_GIT_COMMIT", "a" * 40),),
+        (("RENDER_GIT_COMMIT", "a" * 40), ("EXTRA_COMMIT", "")),
+    ),
+)
+def test_snapshot은_환경이름_순서_중복_계약을_강제한다(raw_values) -> None:
+    with pytest.raises(ValueError, match="이름·순서·중복"):
+        deployment_identity.DeploymentIdentitySnapshot(raw_values=raw_values)

@@ -21,10 +21,12 @@ from typing import Any
 import pytest
 
 import src.features.composer.pipeline as composer_pipeline
+from src.core import deployment_identity
 from src.core.provider_gateway import attempt_context
 from src.core.provider_gateway.attempt_context import ProviderAttemptCallbacks
 from src.features.budget import provider_budget
 from src.features.composer.port import AskFatalError
+from src.features.composer import build_id as composer_build_id
 from src.features.composer.constants import GRADE_CONFIRMED, SECTION_IDS
 from src.features.composer.validate import V2ValidationError
 from src.features.pipeline import real
@@ -53,6 +55,13 @@ from src.shared.report_evidence.constants import ReleaseMode
 
 _V2_SENTINEL_MESSAGE = "v2-분기-표식"
 _DATE = dt.date(2026, 8, 24)
+
+
+@pytest.fixture(autouse=True)
+def _검증된_배포에서_v2를_시험한다(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in deployment_identity.COMMIT_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "a" * 40)
 
 
 @pytest.fixture
@@ -379,6 +388,68 @@ def test_v2의_완전한수집결과는_수집신원과함께_장기캐시에_�
     assert result.generation_cache_eligible is True
     assert len(cache_saves) == 1
     assert cache_saves[0]["report"].sources == source_statuses
+
+
+def test_v2도_배포commit을_모르면_cache_eligible과_저장을_모두_끈다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeEngine()
+    engine, client, frags, financials, _filing = _branch_ingredients(fake)
+    section_ids = real.REQUIRED_SECTION_IDS | real.OPTIONAL_BASIC_SECTION_IDS
+    report = Report(
+        company="가나다전자",
+        job="",
+        corp_type="상장사",
+        grade=Grade.COMPLETE,
+        sections=[
+            real.ReportSection(cell=section_id, title=section_id)
+            for section_id in sorted(section_ids)
+        ],
+    )
+    monkeypatch.setattr(
+        composer_pipeline,
+        "run_v2",
+        lambda *_args, **_kwargs: composer_pipeline.V2RunOutput(
+            report=report,
+            composed_sentences=21,
+            verified_sentences=18,
+        ),
+    )
+    cache_saves: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        real,
+        "_v2_cache_save",
+        lambda **kwargs: cache_saves.append(kwargs),
+    )
+
+    result = real._run_v2_composer(
+        engine=engine,
+        client=client,
+        company_name="가나다전자",
+        corp_type="상장사",
+        frags=frags,
+        financials=financials,
+        filing=None,
+        revenue_tables=[],
+        sources=[real.SourceStatus("회사 공식 IR", "none", "자료 없음")],
+        business_date=_DATE,
+        model="가짜모델",
+        steps=[
+            {"step": "6_수집_홈페이지", "후보범위완전": True},
+            {"step": "6_수집_공식IR", "후보범위완전": True},
+        ],
+        corp_id=CORP_ID,
+        current_fiscal_year=2025,
+        source_identity_digest="d" * 64,
+        build_identity=composer_build_id.EngineBuildIdentity(
+            deployment_revision="",
+            build_id=composer_build_id.UNKNOWN_BUILD_ID,
+        ),
+    )
+
+    assert result.outcome is Outcome.REPORT
+    assert result.generation_cache_eligible is False
+    assert cache_saves == []
 
 
 def test_v2_분기는_AskFatalError_원인을_그대로_다시_던진다(

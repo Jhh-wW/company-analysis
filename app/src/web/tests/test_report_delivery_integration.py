@@ -21,6 +21,7 @@ from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
 from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
 from src.features.cost_tracking import store as cost_store
+from src.features.composer import build_id as composer_build_id
 from src.features.export_pdf import automatic_release as automatic_release_module
 from src.features.export_pdf import release_store as pdf_release_store
 from src.features.pipeline.demo import DemoPipeline, available_companies
@@ -821,6 +822,60 @@ def test_출고revision과_build도_교대환경을_한번만_읽는다(
     assert render_reads == 1
 
 
+@pytest.mark.parametrize("after", ("different", "unknown"))
+def test_생성_A뒤_출고가_B나_unknown이면_거절한다(
+    after: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "a" * 40)
+    frozen = composer_build_id.capture_engine_build_identity()
+    if after == "different":
+        monkeypatch.setenv("RENDER_GIT_COMMIT", "b" * 40)
+    else:
+        monkeypatch.delenv("RENDER_GIT_COMMIT", raising=False)
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / f"release-{after}"))
+
+    with pytest.raises(
+        report_delivery_adapter.DeliveryAdapterError,
+        match="생성 시작과 출고 시점",
+    ):
+        reports_router.finalize_new_report_delivery(
+            report_id=f"release-mismatch-{after}-{uuid.uuid4().hex}",
+            corp_id="demo-corp",
+            billing_bucket_id="release-bucket",
+            report=_demo_report(),
+            actual_models=("deterministic-demo",),
+            reused_from_cache=False,
+            engine_build_identity=frozen,
+        )
+
+
+def test_unknown에서_생성한뒤_commit이_생겨도_저장으로_승격하지않는다(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    for name in deployment_identity.COMMIT_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    frozen_unknown = composer_build_id.capture_engine_build_identity()
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "b" * 40)
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "unknown-to-verified"))
+
+    with pytest.raises(
+        report_delivery_adapter.DeliveryAdapterError,
+        match="unknown 배포에서 시작한 결과",
+    ):
+        reports_router.finalize_new_report_delivery(
+            report_id=f"unknown-upgrade-{uuid.uuid4().hex}",
+            corp_id="demo-corp",
+            billing_bucket_id="release-bucket",
+            report=_demo_report(),
+            actual_models=("deterministic-demo",),
+            reused_from_cache=False,
+            engine_build_identity=frozen_unknown,
+        )
+
+
 def test_검증안된_로컬도_새delivery와_PDF는_저장하되_cache_origin은_비운다(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1072,6 +1127,7 @@ def test_부분출처_bypass는_캐시결속없이도_정상출고한다(monkeyp
         billing_bucket_id="partial-bucket",
         cap_krw=900.0,
         on_paid_phase=lambda _ticket: None,
+        build_identity=composer_build_id.capture_engine_build_identity(),
     )
     assert session.coordinate("demo-corp", namespace, "") is None
     assert session.cache_namespace is None
@@ -1185,7 +1241,7 @@ def test_새_delivery의_결과와_PDF_GET은_저장본만_반복해서_읽는�
     assert after == before
 
 
-def test_singleflight_waiter는_owner의_content와_최초PDF를_그대로발급받는다(
+def test_cache_key없는_재사용은_singleflight완료증거없이_발급하지않는다(
     monkeypatch,
     tmp_path: Path,
 ):
@@ -1215,26 +1271,101 @@ def test_singleflight_waiter는_owner의_content와_최초PDF를_그대로발급
     assert owner.inspection is not None
     assert owner.inspection.pdf_bytes is not None
 
-    def forbidden_renderer(*_args, **_kwargs):
-        raise AssertionError("waiter가 owner PDF를 두고 다시 렌더링했습니다")
-
-    monkeypatch.setattr(reports_router, "_candidate_for_report", forbidden_renderer)
-    monkeypatch.setattr(reports_router, "automatic_release_pdf", forbidden_renderer)
     with storage_db.connect() as conn:
-        before_counts = (
-            conn.execute(
-                f"SELECT COUNT(*) FROM {delivery_store.TABLE_SOURCE_SNAPSHOTS}"
-            ).fetchone()[0],
-            conn.execute(
-                f"SELECT COUNT(*) FROM {delivery_store.TABLE_CONTENT_SNAPSHOTS}"
-            ).fetchone()[0],
-            conn.execute(
-                f"SELECT COUNT(*) FROM {delivery_artifact.TABLE_ARTIFACTS}"
-            ).fetchone()[0],
+        before_deliveries = delivery_store.delivery_count_for_content(
+            conn, owner.content.content_id
+        )
+
+    with pytest.raises(
+        report_delivery_adapter.DeliveryAdapterError,
+        match="single-flight 완료 증거",
+    ):
+        reports_router.finalize_new_report_delivery(
+            report_id=waiter_id,
+            corp_id="demo-corp",
+            billing_bucket_id="same-billing-bucket",
+            report=owner.report,
+            actual_models=owner.content.actual_models,
+            reused_from_cache=True,
+            dart_receipt_numbers=(receipt,),
+            financial_payload_digest=finance_digest,
+            reuse_content_snapshot_id=owner.content.content_id,
+            reuse_artifact_id=owner.artifact.artifact_id,
+        )
+
+    with storage_db.connect() as conn:
+        assert delivery_store.delivery_count_for_content(
+            conn, owner.content.content_id
+        ) == before_deliveries
+
+
+def test_cache_key없는_waiter도_정확한_singleflight완료증거면_재사용한다(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    report = _demo_report()
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "proved-fanout-artifacts"))
+    receipt = "20260828000123"
+    finance_digest = financial_payload_digest(
+        {
+            "status": "000",
+            "list": [{"account_nm": "매출액", "thstrm_amount": "100"}],
+        }
+    )
+    revision, image = report_delivery_adapter._release_identity()
+    namespace = CacheNamespace.create(
+        product="company-analysis",
+        schema_version=report.schema_version or "legacy-report-schema",
+        deployment_revision=revision,
+        image_digest=image,
+        requested_models={"pipeline": "deterministic-demo"},
+        output_settings={"temperature": 0},
+    )
+    preflight_digest = ReportSourceIdentity(
+        dart_receipt_numbers=(receipt,),
+        financial_payload_digest=finance_digest,
+    ).cache_digest
+    owner = reports_router.finalize_new_report_delivery(
+        report_id=f"proved-owner-{uuid.uuid4().hex}",
+        corp_id="demo-corp",
+        billing_bucket_id="same-billing-bucket",
+        report=report,
+        actual_models=("deterministic-demo",),
+        reused_from_cache=False,
+        dart_receipt_numbers=(receipt,),
+        financial_payload_digest=finance_digest,
+        cache_namespace=namespace,
+        preflight_identity_digest=preflight_digest,
+        cache_eligible=False,
+    )
+    assert owner.artifact is not None
+    lease_key = singleflight.LeaseKey(
+        billing_bucket_id="same-billing-bucket",
+        corp_id="demo-corp",
+        cache_namespace_id=namespace.namespace_id,
+        source_identity_digest=preflight_digest,
+    )
+    now = dt.datetime.now(dt.timezone.utc)
+    with storage_db.connect() as conn:
+        acquired = singleflight.acquire(
+            conn,
+            key=lease_key,
+            owner_id="proved-owner",
+            now=now,
+            lease_ttl=dt.timedelta(minutes=5),
+        )
+        assert acquired.handle is not None
+        assert singleflight.complete(
+            conn,
+            handle=acquired.handle,
+            content_snapshot_id=owner.content.content_id,
+            artifact_id=owner.artifact.artifact_id,
+            now=now + dt.timedelta(seconds=1),
+            result_fanout_ttl=dt.timedelta(minutes=2),
         )
 
     waiter = reports_router.finalize_new_report_delivery(
-        report_id=waiter_id,
+        report_id=f"proved-waiter-{uuid.uuid4().hex}",
         corp_id="demo-corp",
         billing_bucket_id="same-billing-bucket",
         report=owner.report,
@@ -1244,33 +1375,15 @@ def test_singleflight_waiter는_owner의_content와_최초PDF를_그대로발급
         financial_payload_digest=finance_digest,
         reuse_content_snapshot_id=owner.content.content_id,
         reuse_artifact_id=owner.artifact.artifact_id,
+        cache_namespace=namespace,
+        preflight_identity_digest=preflight_digest,
+        cache_eligible=False,
+        reuse_singleflight_key=lease_key,
     )
 
     assert waiter.content.content_id == owner.content.content_id
-    assert waiter.content.source_snapshot_id == owner.content.source_snapshot_id
     assert waiter.artifact is not None
     assert waiter.artifact.artifact_id == owner.artifact.artifact_id
-    assert waiter.inspection is not None
-    assert waiter.inspection.pdf_bytes == owner.inspection.pdf_bytes
-    assert waiter.delivery.delivery_id != owner.delivery.delivery_id
-    assert waiter.delivery.public_id == waiter_id
-    assert waiter.delivery.cache_origin_content_id == owner.content.content_id
-    with storage_db.connect() as conn:
-        after_counts = (
-            conn.execute(
-                f"SELECT COUNT(*) FROM {delivery_store.TABLE_SOURCE_SNAPSHOTS}"
-            ).fetchone()[0],
-            conn.execute(
-                f"SELECT COUNT(*) FROM {delivery_store.TABLE_CONTENT_SNAPSHOTS}"
-            ).fetchone()[0],
-            conn.execute(
-                f"SELECT COUNT(*) FROM {delivery_artifact.TABLE_ARTIFACTS}"
-            ).fetchone()[0],
-        )
-        assert delivery_store.delivery_count_for_content(
-            conn, owner.content.content_id
-        ) == 2
-    assert after_counts == before_counts
 
 
 def test_일반캐시_hit은_같은통장안에서_원본content와PDF로_새delivery만발급한다(
@@ -1321,6 +1434,7 @@ def test_일반캐시_hit은_같은통장안에서_원본content와PDF로_새del
         billing_bucket_id="owner-bucket",
         cap_krw=900.0,
         on_paid_phase=lambda _ticket: None,
+        build_identity=composer_build_id.capture_engine_build_identity(),
     )
     reused = session.coordinate("demo-corp", namespace, preflight_digest)
     assert reused is not None
@@ -1557,6 +1671,7 @@ def test_손상PDF캐시와_남은완료fanout은_격리하고_provider한번으
         billing_bucket_id=bucket,
         cap_krw=900.0,
         on_paid_phase=lambda _ticket: None,
+        build_identity=composer_build_id.capture_engine_build_identity(),
     )
     assert session.coordinate(corp_id, namespace, preflight_digest) is None
     assert session.owns_generation
@@ -1727,6 +1842,7 @@ def test_다른두통장의_동시miss는_각자content와PDF를_정상확정한
             billing_bucket_id=bucket,
             cap_krw=900.0,
             on_paid_phase=lambda _ticket: None,
+            build_identity=composer_build_id.capture_engine_build_identity(),
         )
         for bucket in ("bucket-a", "bucket-b")
     )

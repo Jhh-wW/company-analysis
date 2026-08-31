@@ -23,6 +23,7 @@ from src.features.pipeline.port import Report
 from src.features.provenance.sources import Source, SourceKind
 from src.features.report_delivery import artifact as delivery_artifact
 from src.features.report_delivery import retention as delivery_retention
+from src.features.report_delivery import singleflight as delivery_singleflight
 from src.features.report_delivery import store as delivery_store
 from src.features.report_delivery.cache_identity import CacheLookupKey, CacheNamespace
 from src.features.report_delivery.models import (
@@ -190,8 +191,10 @@ def reconcile_configured_artifact_blob_intents(
         )
 
 
-def _release_identity() -> tuple[str, str]:
-    identity = composer_build_id.capture_engine_build_identity()
+def _release_identity(
+    identity: composer_build_id.EngineBuildIdentity | None = None,
+) -> tuple[str, str]:
+    identity = identity or composer_build_id.capture_engine_build_identity()
     if identity.cache_usable:
         # 한 raw snapshot에서 revision과 contract-version build ID를 함께 만든다.
         return (
@@ -202,6 +205,28 @@ def _release_identity() -> tuple[str, str]:
     # 이 값은 composer build id로 usable하지 않고, 정식 cache_namespace가 없는
     # 출고는 cache entry를 결속하지 않으므로 로컬 캐시 권위가 되지 않는다.
     return "", _UNCACHEABLE_LOCAL_RELEASE_ID
+
+
+def _assert_frozen_identity_is_current(
+    identity: composer_build_id.EngineBuildIdentity,
+) -> None:
+    """정상 배포에서 시작한 생성이 다른 배포에서 출고되지 않게 막는다.
+
+    unknown은 정상 commit으로 승격하지 않는다. 해당 Job의 release는 계속 로컬
+    sentinel이고 캐시 결속·재사용이 금지된다.
+    """
+
+    if not isinstance(identity, composer_build_id.EngineBuildIdentity):
+        raise DeliveryAdapterError("생성 시작 때 고정한 엔진 빌드 신원이 없습니다")
+    current = composer_build_id.capture_engine_build_identity()
+    if identity.cache_usable and current != identity:
+        raise DeliveryAdapterError(
+            "생성 시작과 출고 시점의 검증된 배포 신원이 다릅니다"
+        )
+    if not identity.cache_usable and current.cache_usable:
+        raise DeliveryAdapterError(
+            "unknown 배포에서 시작한 결과를 뒤늦게 나타난 정상 배포에 저장할 수 없습니다"
+        )
 
 
 def _is_unverified_local_release(release: tuple[str, str]) -> bool:
@@ -325,6 +350,7 @@ def persist_approved_delivery(
     cache_namespace: CacheNamespace | None = None,
     preflight_identity_digest: str = "",
     bind_cache_entry: bool,
+    engine_build_identity: composer_build_id.EngineBuildIdentity | None = None,
 ) -> PublicDelivery:
     """자동검사가 승인한 본문·delivery·PDF를 한 DB 거래에 결속한다.
 
@@ -334,7 +360,23 @@ def persist_approved_delivery(
 
     if not str(corp_id).strip():
         raise DeliveryAdapterError("회사 고유번호가 없어 출처 신원을 확정할 수 없습니다")
-    release = _release_identity()
+    cache_action = bool(
+        cache_namespace is not None
+        or str(preflight_identity_digest).strip()
+        or bind_cache_entry
+        or reused_from_cache
+    )
+    if engine_build_identity is None and cache_action:
+        raise DeliveryAdapterError(
+            "캐시 출고에는 생성 시작 때 고정한 엔진 빌드 신원이 필요합니다"
+        )
+    frozen_identity = (
+        engine_build_identity
+        or composer_build_id.capture_engine_build_identity()
+    )
+    if engine_build_identity is not None:
+        _assert_frozen_identity_is_current(frozen_identity)
+    release = _release_identity(frozen_identity)
     unverified_local = _is_unverified_local_release(release)
     if unverified_local and (
         cache_namespace is not None
@@ -520,6 +562,7 @@ def persist_reused_delivery(
     backend: delivery_artifact.ArtifactBlobBackend,
     *,
     public_id: str,
+    corp_id: str,
     billing_bucket_id: str,
     report: Report,
     completed_at: dt.datetime,
@@ -528,6 +571,8 @@ def persist_reused_delivery(
     dart_receipt_numbers: tuple[str, ...],
     financial_payload_digest: str,
     cache_key: CacheLookupKey | None = None,
+    reuse_singleflight_key: delivery_singleflight.LeaseKey | None = None,
+    engine_build_identity: composer_build_id.EngineBuildIdentity | None = None,
 ) -> tuple[PublicDelivery, AutomaticReleaseRecord]:
     """owner의 불변 본문·최초 PDF를 검증하고 새 Delivery만 발급한다.
 
@@ -536,7 +581,12 @@ def persist_reused_delivery(
     기존 Delivery가 이 artifact를 실제로 소유하는지도 함께 확인한다.
     """
 
-    release = _release_identity()
+    if engine_build_identity is None:
+        raise DeliveryAdapterError(
+            "재사용 출고에는 생성 시작 때 고정한 엔진 빌드 신원이 필요합니다"
+        )
+    _assert_frozen_identity_is_current(engine_build_identity)
+    release = _release_identity(engine_build_identity)
     if _is_unverified_local_release(release):
         raise DeliveryAdapterError(
             "검증되지 않은 로컬 출고 결과는 새 요청에 재사용할 수 없습니다"
@@ -544,7 +594,13 @@ def persist_reused_delivery(
     clean_content_id = str(content_snapshot_id).strip()
     clean_artifact_id = str(artifact_id).strip()
     clean_bucket = str(billing_bucket_id).strip()
-    if not clean_content_id or not clean_artifact_id or not clean_bucket:
+    clean_corp = str(corp_id).strip()
+    if (
+        not clean_content_id
+        or not clean_artifact_id
+        or not clean_bucket
+        or not clean_corp
+    ):
         raise DeliveryAdapterError(
             "재사용 출고에는 content·artifact·비용 통장 신원이 필요합니다"
         )
@@ -602,7 +658,26 @@ def persist_reused_delivery(
         content_max_age=dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS),
         public_link_lifetime=dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS),
     )
-    if cache_key is not None:
+    if cache_key is None:
+        proof = reuse_singleflight_key
+        if (
+            not isinstance(proof, delivery_singleflight.LeaseKey)
+            or proof.billing_bucket_id != clean_bucket
+            or proof.corp_id != clean_corp
+            or proof.cache_namespace_id != content.cache_namespace_id
+            or proof.source_identity_digest != expected_source.cache_digest
+            or not delivery_singleflight.completed_result_matches(
+                conn,
+                key=proof,
+                content_snapshot_id=content.content_id,
+                artifact_id=metadata.artifact_id,
+                now=completed_at,
+            )
+        ):
+            raise DeliveryAdapterError(
+                "정식 캐시 결속이나 정확한 single-flight 완료 증거가 없습니다"
+            )
+    else:
         if cache_key.billing_bucket_id != clean_bucket:
             raise DeliveryAdapterError(
                 "정식 캐시 열쇠와 새 Delivery의 비용 통장이 다릅니다"

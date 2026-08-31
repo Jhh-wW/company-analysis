@@ -426,6 +426,39 @@ def expire_completed_result(
     return cursor.rowcount == 1
 
 
+def completed_result_matches(
+    conn: sqlite3.Connection,
+    *,
+    key: LeaseKey,
+    content_snapshot_id: str,
+    artifact_id: str,
+    now: dt.datetime,
+) -> bool:
+    """아직 유효한 완료행이 정확한 content·PDF를 가리키는지 읽기만 한다.
+
+    정식 장기 캐시 결속이 없는 waiter fan-out은 이 증거가 있을 때만 재사용한다.
+    owner Delivery가 같은 통장에 있다는 사실만으로는 «이번 요청이 그 완료행을
+    기다렸다»는 증명이 되지 않으므로 대체할 수 없다.
+    """
+
+    ensure_lease_schema(conn)
+    row = _select_row(conn, key)
+    if row is None:
+        return False
+    try:
+        state = LeaseState(str(row[0]))
+        expires_at = datetime_from_utc_text(row[6], label="완료 fan-out 만료")
+    except ValueError as exc:
+        raise LeaseError("single-flight 완료 증거가 손상됐습니다") from exc
+    current = require_aware(now, label="완료 fan-out 확인")
+    return bool(
+        state is LeaseState.COMPLETED
+        and expires_at > current
+        and str(row[7]) == str(content_snapshot_id).strip()
+        and str(row[8]) == str(artifact_id).strip()
+    )
+
+
 def fail(
     conn: sqlite3.Connection,
     *,

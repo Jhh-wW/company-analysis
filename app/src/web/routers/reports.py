@@ -56,6 +56,7 @@ from src.features.pipeline.port import (
     RunResult,
     UserInput,
 )
+from src.features.composer import build_id as composer_build_id
 from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
 from src.features.composer.validate import (
     V2ValidationError,
@@ -66,6 +67,7 @@ from src.features.report_standard import PublishBlockedError, build_published_re
 from src.features.report_delivery.artifact import ArtifactInspectionStatus
 from src.features.report_delivery.cache_identity import CacheLookupKey
 from src.features.report_delivery.models import Delivery
+from src.features.report_delivery.singleflight import LeaseKey
 from src.features.report_delivery import store as delivery_store
 from src.features.report_access import store as report_access_store
 from src.features.report_access.models import ReportAudience, ReportBindingResult
@@ -1220,6 +1222,8 @@ def finalize_new_report_delivery(
     cache_eligible: bool = False,
     completed_at: dt.datetime | None = None,
     public_access_run_id: str = "",
+    engine_build_identity: composer_build_id.EngineBuildIdentity | None = None,
+    reuse_singleflight_key: LeaseKey | None = None,
 ) -> report_delivery_adapter.PublicDelivery:
     """새 보고서 완료 경계에서 자동승인·과금·artifact를 한번만 확정한다.
 
@@ -1252,6 +1256,15 @@ def finalize_new_report_delivery(
             raise report_access_store.PublicGrantBindingUnavailable(
                 "PUBLIC 실행의 report 결속을 최종 출고에서 확인하지 못했습니다"
             )
+
+    frozen_build_identity = (
+        engine_build_identity
+        or composer_build_id.capture_engine_build_identity()
+    )
+    if engine_build_identity is not None:
+        report_delivery_adapter._assert_frozen_identity_is_current(
+            frozen_build_identity
+        )
     if bool(str(reuse_content_snapshot_id).strip()) != bool(
         str(reuse_artifact_id).strip()
     ):
@@ -1333,6 +1346,7 @@ def finalize_new_report_delivery(
                         conn,
                         backend,
                         public_id=report_id,
+                        corp_id=corp_id,
                         billing_bucket_id=billing_bucket_id,
                         report=output_report,
                         completed_at=completed_at,
@@ -1341,6 +1355,8 @@ def finalize_new_report_delivery(
                         dart_receipt_numbers=dart_receipt_numbers,
                         financial_payload_digest=financial_payload_digest,
                         cache_key=cache_key,
+                        reuse_singleflight_key=reuse_singleflight_key,
+                        engine_build_identity=frozen_build_identity,
                     )
                 )
                 inspection = public_delivery.inspection
@@ -1425,6 +1441,7 @@ def finalize_new_report_delivery(
                 cache_namespace=cache_namespace,
                 preflight_identity_digest=preflight_identity_digest,
                 bind_cache_entry=cache_eligible,
+                engine_build_identity=frozen_build_identity,
             )
             link_run = share_store.load_run_by_report_id(conn, report_id)
             charge = cost_store.mark_automatic_release(

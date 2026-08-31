@@ -26,21 +26,47 @@ _FULL_COMMIT_PATTERN: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}\Z")
 
 @dataclass(frozen=True)
 class DeploymentIdentitySnapshot:
-    """한 시점에 환경변수별 raw 값을 정확히 한 번 읽은 결과."""
+    """한 시점에 환경변수별 raw 값을 정확히 한 번 읽은 결과.
+
+    ``commit``은 입력 필드가 아니다. 호출자가 raw 환경과 무관한 정상 commit을
+    끼워 넣지 못하도록, 고정된 이름·순서의 raw 값에서 매번 결정적으로 파생한다.
+    """
 
     raw_values: tuple[tuple[str, str], ...]
-    commit: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.raw_values, tuple):
+            raise ValueError("배포 신원 raw 값은 고정된 tuple이어야 합니다")
+        names: list[str] = []
+        for item in self.raw_values:
+            if not isinstance(item, tuple) or len(item) != 2:
+                raise ValueError("배포 신원 raw 항목의 모양이 올바르지 않습니다")
+            name, raw = item
+            if not isinstance(name, str) or not isinstance(raw, str):
+                raise ValueError("배포 신원 환경 이름과 값은 문자열이어야 합니다")
+            names.append(name)
+        if tuple(names) != COMMIT_ENV_NAMES or len(set(names)) != len(names):
+            raise ValueError("배포 신원 환경 이름·순서·중복 계약이 다릅니다")
+
+    @property
+    def commit(self) -> str:
+        """고정 raw 순서에서 처음 만나는 exact lowercase full commit."""
+
+        return next(
+            (
+                raw
+                for _name, raw in self.raw_values
+                if _FULL_COMMIT_PATTERN.fullmatch(raw)
+            ),
+            "",
+        )
 
 
 def capture_deployment_identity() -> DeploymentIdentitySnapshot:
     """보정하지 않은 raw 환경변수를 한 번씩 읽어 exact commit을 고른다."""
 
     raw_values = tuple((name, os.environ.get(name, "")) for name in COMMIT_ENV_NAMES)
-    commit = next(
-        (raw for _name, raw in raw_values if _FULL_COMMIT_PATTERN.fullmatch(raw)),
-        "",
-    )
-    return DeploymentIdentitySnapshot(raw_values=raw_values, commit=commit)
+    return DeploymentIdentitySnapshot(raw_values=raw_values)
 
 
 def deployed_commit(snapshot: DeploymentIdentitySnapshot | None = None) -> str:

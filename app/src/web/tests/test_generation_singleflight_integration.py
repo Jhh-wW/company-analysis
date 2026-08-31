@@ -10,8 +10,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.core import deployment_identity
 from src.core.constants import MAX_AI_CALLS_PER_REQUEST
 from src.features.budget.constants import PAID_PHASE_LEASE_SEC
+from src.features.composer import build_id as composer_build_id
 from src.features.export_pdf import release_store as pdf_release_store
 from src.features.pipeline.constants import ANTHROPIC_TIMEOUT_SEC
 from src.features.pipeline.port import (
@@ -37,14 +39,29 @@ from src.web import generation_singleflight, job_runtime, paid_runtime, runtime
 
 _RECEIPT = "20260828000123"
 _FINANCIAL_DIGEST = "b" * 64
+_COMMIT = "a" * 40
+_BUILD_IDENTITY = composer_build_id.EngineBuildIdentity(
+    deployment_revision=_COMMIT,
+    build_id=f"{composer_build_id.ENGINE_BUILD_ID_CONTRACT_VERSION}:{_COMMIT}",
+)
 _NAMESPACE = CacheNamespace.create(
     product="company-analysis",
     schema_version="company-report-v2-composer",
-    deployment_revision="05dfb49",
+    deployment_revision=_COMMIT,
+    image_digest=f"generator-build:{_BUILD_IDENTITY.build_id}",
     requested_models={"pipeline": "claude-test"},
     output_settings={"temperature": 0},
 )
 _NAMESPACE_ID = _NAMESPACE.namespace_id
+
+
+@pytest.fixture(autouse=True)
+def _고정배포신원으로_singleflight를_시험한다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in deployment_identity.COMMIT_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("RENDER_GIT_COMMIT", _COMMIT)
 
 
 def _report() -> Report:
@@ -79,6 +96,7 @@ def _session(
         billing_bucket_id=bucket,
         cap_krw=900.0,
         on_paid_phase=on_paid_phase,
+        build_identity=_BUILD_IDENTITY,
     )
 
 

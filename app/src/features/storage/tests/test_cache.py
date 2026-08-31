@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from src.core import persisted_json
+from src.features.composer.build_id import ENGINE_BUILD_ID_CONTRACT_VERSION
 from src.features.pipeline.port import Grade, Report
 from src.features.pipeline.canonical_demo import build_demo_report
 from src.features.provenance.sources import Source, SourceKind
@@ -20,6 +21,8 @@ from src.features.report_standard.publish import PublishBlockedError
 from src.features.storage import cache, db
 
 SOURCE_IDENTITY_DIGEST = "a" * 64
+BUILD_A = f"{ENGINE_BUILD_ID_CONTRACT_VERSION}:{'a' * 40}"
+BUILD_B = f"{ENGINE_BUILD_ID_CONTRACT_VERSION}:{'b' * 40}"
 
 
 def _report(company: str = "가나다전자", grade: Grade = Grade.COMPLETE) -> Report:
@@ -167,6 +170,7 @@ def test_옛_빈직무_빈공고_항목은_회사분석_캐시에_적중하지_�
         hit = cache.get_company_report_hit(
             conn,
             corp_id="CORP-001",
+            build_id=BUILD_A,
             source_identity_digest=SOURCE_IDENTITY_DIGEST,
             current_fiscal_year=2025,
         )
@@ -181,17 +185,80 @@ def test_회사분석_캐시는_직무와_공고_없이_전용_namespace로_왕�
             conn,
             corp_id="CORP-001",
             report=report,
+            build_id=BUILD_A,
             source_identity_digest=SOURCE_IDENTITY_DIGEST,
             fiscal_year=2025,
         )
         hit = cache.get_company_report_hit(
             conn,
             corp_id="CORP-001",
+            build_id=BUILD_A,
             source_identity_digest=SOURCE_IDENTITY_DIGEST,
             current_fiscal_year=2025,
         )
 
     assert hit == report
+
+
+def test_v1_회사분석_캐시는_배포_A_결과를_배포_B에_주지_않는다(
+    tmp_path: Path,
+) -> None:
+    report = _company_report()
+    with db.connect(tmp_path / "storage.db") as conn:
+        saved = cache.save_company_report(
+            conn,
+            corp_id="CORP-001",
+            report=report,
+            build_id=BUILD_A,
+            source_identity_digest=SOURCE_IDENTITY_DIGEST,
+            fiscal_year=2025,
+        )
+        hit_a = cache.get_company_report_hit(
+            conn,
+            corp_id="CORP-001",
+            build_id=BUILD_A,
+            source_identity_digest=SOURCE_IDENTITY_DIGEST,
+            current_fiscal_year=2025,
+        )
+        hit_b = cache.get_company_report_hit(
+            conn,
+            corp_id="CORP-001",
+            build_id=BUILD_B,
+            source_identity_digest=SOURCE_IDENTITY_DIGEST,
+            current_fiscal_year=2025,
+        )
+
+    assert saved is not None
+    assert hit_a == report
+    assert hit_b is None
+
+
+def test_v1_회사분석_캐시는_배포commit을_모르면_읽지도_쓰지도_않는다(
+    tmp_path: Path,
+) -> None:
+    with db.connect(tmp_path / "storage.db") as conn:
+        saved = cache.save_company_report(
+            conn,
+            corp_id="CORP-001",
+            report=_company_report(),
+            build_id="unknown",
+            source_identity_digest=SOURCE_IDENTITY_DIGEST,
+            fiscal_year=2025,
+        )
+        hit = cache.get_company_report_hit(
+            conn,
+            corp_id="CORP-001",
+            build_id="unknown",
+            source_identity_digest=SOURCE_IDENTITY_DIGEST,
+            current_fiscal_year=2025,
+        )
+        rows = conn.execute(
+            f"SELECT COUNT(*) FROM {cache.TABLE_LAYER1_CACHE}"
+        ).fetchone()[0]
+
+    assert saved is None
+    assert hit is None
+    assert rows == 0
 
 
 def test_회사분석_캐시는_DART_출처가_바뀌면_옛_보고서를_내주지_않는다(
@@ -203,12 +270,14 @@ def test_회사분석_캐시는_DART_출처가_바뀌면_옛_보고서를_내주
             conn,
             corp_id="CORP-001",
             report=report,
+            build_id=BUILD_A,
             source_identity_digest="a" * 64,
             fiscal_year=2025,
         )
         hit = cache.get_company_report_hit(
             conn,
             corp_id="CORP-001",
+            build_id=BUILD_A,
             source_identity_digest="b" * 64,
             current_fiscal_year=2025,
         )
@@ -224,12 +293,14 @@ def test_회사분석_캐시는_출처를_모르면_읽지도_쓰지도_않는�
             conn,
             corp_id="CORP-001",
             report=_company_report(),
+            build_id=BUILD_A,
             source_identity_digest="",
             fiscal_year=2025,
         )
         hit = cache.get_company_report_hit(
             conn,
             corp_id="CORP-001",
+            build_id=BUILD_A,
             source_identity_digest="",
             current_fiscal_year=2025,
         )
@@ -247,6 +318,7 @@ def test_출고_불가한_canonical_보고서는_캐시에_저장하지_않는�
                 conn,
                 corp_id="CORP-001",
                 report=invalid,
+                build_id=BUILD_A,
                 source_identity_digest=SOURCE_IDENTITY_DIGEST,
                 fiscal_year=2025,
             )
@@ -260,6 +332,7 @@ def test_회사분석_schema_version이_바뀌면_옛_캐시는_미적중한다(
             conn,
             corp_id="CORP-001",
             report=_company_report(),
+            build_id=BUILD_A,
             source_identity_digest=SOURCE_IDENTITY_DIGEST,
             fiscal_year=2025,
         )
@@ -271,6 +344,7 @@ def test_회사분석_schema_version이_바뀌면_옛_캐시는_미적중한다(
         hit = cache.get_company_report_hit(
             conn,
             corp_id="CORP-001",
+            build_id=BUILD_A,
             source_identity_digest=SOURCE_IDENTITY_DIGEST,
             current_fiscal_year=2025,
         )
@@ -294,6 +368,7 @@ def test_v2_회사분석_payload는_v3_캐시에_적중하지_않는다(tmp_path
         hit = cache.get_company_report_hit(
             conn,
             corp_id="CORP-001",
+            build_id=BUILD_A,
             source_identity_digest=SOURCE_IDENTITY_DIGEST,
             current_fiscal_year=2025,
         )
