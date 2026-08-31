@@ -1046,6 +1046,68 @@ def compose_sections(
     )
 
 
+def compose_selected_sections(
+    company_name: str,
+    performance_table: Optional[PerformanceTable],
+    ask: AskFn,
+    *,
+    section_evidence_packets: SectionEvidencePacketSet,
+    section_ids: tuple[str, ...],
+) -> ComposedReport:
+    """승인된 FULL 장만 각자의 기존 typed packet으로 한 번씩 다시 쓴다.
+
+    전체 packet set은 회사·generation·아홉 장 결속을 다시 검증하는 데만 쓰고,
+    실제 작가 prompt에는 해당 장 packet 외의 조각이나 기존 보고서 본문을 넣지
+    않는다. 반환값에도 승인 장만 들어 있으므로 호출자가 기존 보고서에 명시적으로
+    병합해야 하며, 비대상 장을 우연히 재생성할 통로가 없다.
+    """
+
+    if type(section_evidence_packets) is not SectionEvidencePacketSet:
+        raise TypeError("보충 작성에는 정확한 typed section packet set이 필요합니다")
+    if type(section_ids) is not tuple or any(
+        type(section_id) is not str for section_id in section_ids
+    ):
+        raise TypeError("보충 장은 정책 순서의 문자열 tuple이어야 합니다")
+    if not section_ids or len(section_ids) != len(set(section_ids)):
+        raise ValueError("보충 장은 중복 없는 한 개 이상의 장이어야 합니다")
+    selected = set(section_ids)
+    if tuple(section_id for section_id in SECTION_IDS if section_id in selected) != (
+        section_ids
+    ):
+        raise ValueError("보충 장은 SECTION_IDS의 부분집합을 정책 순서로 담아야 합니다")
+
+    prepared = _prepare_section_evidence_packets(section_evidence_packets)
+    _validate_table_citations_for_section(
+        (performance_table,) if performance_table is not None else (),
+        section_id="past_changes",
+        allowed_fragment_ids=prepared.allowed_fragment_ids_by_section[
+            "past_changes"
+        ],
+        table_label="실적",
+        require_cite=True,
+    )
+    sections: list[ComposedSection] = []
+    for section_id in section_ids:
+        section = _compose_one_section(
+            section_id,
+            build_section_prompt(
+                company_name,
+                section_id,
+                prepared.packets[section_id],
+                performance_table if section_id == "past_changes" else None,
+                (),
+            ),
+            ask,
+            reject_inline_citation_markers=True,
+            parse_retry_limit=0,
+        )
+        sections.append(section)
+    return _sanitize_report_to_section_evidence(
+        ComposedReport(sections=tuple(sections), summary=()),
+        prepared.allowed_fragment_ids_by_section,
+    )
+
+
 # ══════════════════════════════════════════════════════════
 # 핵심 요약 (소단계 3-3) — 본문 완성 «후» 새로 쓴다 (기준문서 3절)
 # ══════════════════════════════════════════════════════════

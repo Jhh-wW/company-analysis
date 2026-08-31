@@ -1110,11 +1110,11 @@ def _semantic_review_grouped(
                     flow_row=row,
                 )
             )
-    # 검수할 draft가 0개면 reviewer를 부를 근거도 후보도 없다. writer 아홉
-    # 응답이 전부 파싱 실패한 실행은 실제 장부 9/0으로 끝내며, 성공 생산
-    # 증거도 만들지 않는다. 일부 문장/flow라도 있을 때만 아래 단 한 번의
-    # bundled reviewer 호출을 수행한다.
+    # FULL 묶음은 후보가 비었어도 reviewer 1회를 실제로 호출한다. 9 writer의
+    # 파싱 실패를 reviewer 0회로 축약하면 기본 영수증 9+1 계약과 provider 비용
+    # 장부가 갈라진다. 빈 묶음은 어떤 항목도 되살리지 못하며, 응답도 버린다.
     if not items:
+        _ask_grouped_verdicts(ask, (), frag_by_id, table)
         return (
             [list(group) for group in groups],
             {section_id: () for section_id in flow_rows_by_section},

@@ -536,7 +536,9 @@ def test_v2_요청전역_장애는_출고검증실패_아니라_v1과_같은_FAI
     """run() 전체를 통해 확인 — «검증 실패»로 오표기되지 않는다."""
     monkeypatch.setenv(real.ENGINE_V2_ENV_NAME, real.ENGINE_V2_ENV_ON)
 
-    def failing_run_v2(*_args: Any, **_kwargs: Any):
+    def failing_run_v2(*_args: Any, **kwargs: Any):
+        # 실패 앞의 실제 provider 응답 비용은 소비자 차감과 별개로 남아야 한다.
+        kwargs["writer_ask"]("비민감 선행 작성 호출")
         raise AskFatalError(
             provider_budget.ProviderBudgetExceeded("이번 단계 예약 잔액을 넘었습니다")
         )
@@ -546,19 +548,37 @@ def test_v2_요청전역_장애는_출고검증실패_아니라_v1과_같은_FAI
     result = _run()
 
     assert result.outcome is Outcome.FAILED
+    assert result.charged is False
+    assert result.cost_krw > 0
+    assert result.ai_cost_events
     assert result.final_gate_reason == ""  # publish_blocked 사유로 오표기되지 않는다
 
 
-def test_v2_출고검증_실패는_GATE_STOPPED로_끝난다(
+@pytest.mark.parametrize(
+    "closed_problem",
+    (
+        "핵심 요약이 부족합니다",
+        "report_recovery:post_supplement_quality_failed",
+    ),
+)
+def test_v2_출고검증과_회복실패는_닫힌사유의_GATE_STOPPED로_끝난다(
     monkeypatch: pytest.MonkeyPatch,
+    closed_problem: str,
 ) -> None:
     fake = FakeEngine()
     engine, client, frags, financials, filing = _branch_ingredients(fake)
 
-    def failing_run_v2(*_args: Any, **_kwargs: Any):
-        raise V2ValidationError(("핵심 요약이 부족합니다",))
+    def failing_run_v2(*_args: Any, **kwargs: Any):
+        kwargs["writer_ask"]("비민감 품질 중단 전 작성 호출")
+        raise V2ValidationError((closed_problem,))
 
     monkeypatch.setattr(composer_pipeline, "run_v2", failing_run_v2)
+    cache_saves: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        real,
+        "_v2_cache_save",
+        lambda **kwargs: cache_saves.append(kwargs),
+    )
     steps: list[dict[str, Any]] = []
 
     result = real._run_v2_composer(
@@ -581,10 +601,13 @@ def test_v2_출고검증_실패는_GATE_STOPPED로_끝난다(
     assert result.outcome is Outcome.GATE_STOPPED
     assert result.report is None
     assert result.charged is False  # 보고서가 안 나가면 차감하지 않는다
+    assert result.cost_krw > 0  # 내부 provider 실비는 실제 호출만큼 보존한다
+    assert fake.client.messages.calls == 1
     assert result.final_gate_reason == FINAL_GATE_REASON_PUBLISH_BLOCKED
     assert "엔진 v2" in result.message
     assert steps[-1]["step"] == "v2_출고검증_차단"
-    assert steps[-1]["사유"] == ["핵심 요약이 부족합니다"]
+    assert steps[-1]["사유"] == [closed_problem]
+    assert cache_saves == []
 
 
 def test_운영_FULL은_typed_packet과_실제_9_writer_1_bundled_reviewer를_운반한다(
@@ -706,6 +729,7 @@ def test_운영_FULL은_typed_packet과_실제_9_writer_1_bundled_reviewer를_�
     )
 
     assert result.outcome is Outcome.REPORT
+    assert result.charged is True
     assert result.report is not None
     assert result.report.release_mode == ReleaseMode.FULL.value
     assert result.generation_evidence is result.report.generation_evidence

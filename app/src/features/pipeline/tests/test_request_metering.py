@@ -820,6 +820,7 @@ def test_provider_예외는_앞선_확정비용을_남기고_과금불확실을_
     )
 
     assert result.outcome is Outcome.FAILED
+    assert result.charged is False
     assert result.cost_krw > 0
     assert result.billing_uncertain is True
 

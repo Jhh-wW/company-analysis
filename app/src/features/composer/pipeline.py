@@ -51,6 +51,7 @@ from src.features.composer.logic import (
     # 요약 보충 규칙(본문 «확인» 문장 재사용·서로 다른 장 우선)은 3-3이 정의한
     # 단일 구현을 그대로 쓴다 — 같은 feature 내부 재사용이라 별도 복제를 두지 않는다.
     _supplement_summary,
+    compose_selected_sections,
     compose_sections,
     compose_summary,
 )
@@ -83,6 +84,11 @@ from src.shared.report_generation.models import (
 from src.shared.generation_validation_receipt import (
     GenerationValidationReceipt,
     ValidationRound,
+)
+from src.shared.report_recovery import (
+    RecoveryAction,
+    SupplementAuthorization,
+    decide_post_validation,
 )
 from src.shared.report_generation.canonical import (
     assert_report_matches_generation_evidence,
@@ -135,17 +141,33 @@ class _CallLedgerRecorder:
 
     def __init__(self) -> None:
         self._records: list[GenerationCallRecord] = []
-        self._role_counts = {"writer": 0, "reviewer": 0}
+        self._role_counts: dict[tuple[ValidationRound, str], int] = {}
 
-    def wrap(self, ask: AskFn, *, role: str) -> AskFn:
+    def wrap(
+        self,
+        ask: AskFn,
+        *,
+        role: str,
+        validation_round: ValidationRound,
+        section_ids: tuple[str, ...],
+    ) -> AskFn:
+        if type(validation_round) is not ValidationRound:
+            raise TypeError("AI 호출 장부에는 닫힌 validation round가 필요합니다")
+        if type(section_ids) is not tuple or not section_ids or any(
+            type(section_id) is not str or not section_id.strip()
+            for section_id in section_ids
+        ):
+            raise ValueError("AI 호출 장부에는 명시적 소유 장 tuple이 필요합니다")
+
         def tracked(prompt: str) -> str:
-            self._role_counts[role] += 1
-            role_index = self._role_counts[role]
-            section_id = (
-                SECTION_IDS[role_index - 1]
-                if role == "writer" and role_index <= len(SECTION_IDS)
-                else "bundled" if role == "reviewer" else "unexpected"
-            )
+            key = (validation_round, role)
+            role_index = self._role_counts.get(key, 0) + 1
+            if role_index > len(section_ids):
+                raise RuntimeError(
+                    "승인한 validation round·role의 AI 호출 수를 넘었습니다"
+                )
+            self._role_counts[key] = role_index
+            section_id = section_ids[role_index - 1]
             sequence = len(self._records) + 1
             try:
                 response = ask(prompt)
@@ -159,6 +181,7 @@ class _CallLedgerRecorder:
                         prompt_sha256=exact_text_sha256(prompt),
                         response_sha256="",
                         outcome="failed",
+                        validation_round=validation_round,
                         error_kind=type(error).__name__,
                     )
                 )
@@ -173,6 +196,7 @@ class _CallLedgerRecorder:
                     prompt_sha256=exact_text_sha256(prompt),
                     response_sha256=exact_text_sha256(text),
                     outcome="returned",
+                    validation_round=validation_round,
                 )
             )
             return text
@@ -181,6 +205,12 @@ class _CallLedgerRecorder:
 
     def freeze(self) -> GenerationCallLedger:
         return GenerationCallLedger(tuple(self._records))
+
+    def calls_for(self, validation_round: ValidationRound, *, role: str) -> int:
+        return sum(
+            record.validation_round is validation_round and record.role == role
+            for record in self._records
+        )
 
 
 def _total_sentences(report: ComposedReport) -> int:
@@ -412,6 +442,32 @@ def _legacy_summary_stage(
     )
 
 
+def _merge_selected_sections(
+    base: ComposedReport,
+    replacements: ComposedReport,
+    section_ids: tuple[str, ...],
+) -> ComposedReport:
+    """정책 순서의 승인 장만 교체하고 나머지 객체를 그대로 보존한다."""
+
+    if tuple(section.section_id for section in base.sections) != SECTION_IDS:
+        raise V2ValidationError(("report_recovery:base_section_order_invalid",))
+    if tuple(section.section_id for section in replacements.sections) != section_ids:
+        raise V2ValidationError(("report_recovery:replacement_section_order_invalid",))
+    by_id = {section.section_id: section for section in replacements.sections}
+    return ComposedReport(
+        sections=tuple(
+            by_id.get(section.section_id, section) for section in base.sections
+        ),
+        summary=(),
+    )
+
+
+def _raise_recovery_stop(reason_code: str) -> None:
+    """사람 원문 없이 닫힌 회복 사유만 운영 경계로 보낸다."""
+
+    raise V2ValidationError((f"report_recovery:{reason_code}",))
+
+
 def run_v2(
     company_name: str,
     fragments: FragmentsInput,
@@ -512,8 +568,18 @@ def run_v2(
         except ValueError as error:
             raise V2ValidationError((str(error),)) from error
         call_recorder = _CallLedgerRecorder()
-        writer_for_run = call_recorder.wrap(writer_ask, role="writer")
-        reviewer_for_run = call_recorder.wrap(reviewer_ask, role="reviewer")
+        writer_for_run = call_recorder.wrap(
+            writer_ask,
+            role="writer",
+            validation_round=ValidationRound.PRIMARY,
+            section_ids=SECTION_IDS,
+        )
+        reviewer_for_run = call_recorder.wrap(
+            reviewer_ask,
+            role="reviewer",
+            validation_round=ValidationRound.PRIMARY,
+            section_ids=("bundled",),
+        )
 
     # packet 계약은 첫 유료 호출 전에 닫는다. 작성에는 장별 packet만,
     # 검증·부록에는 충돌 검사를 마친 결정론적 union만 전달한다.
@@ -521,31 +587,49 @@ def run_v2(
     packet_union_ids: frozenset[str] = frozenset()
     verification_fragments: FragmentsInput = fragments
     if section_evidence_packets is not None:
-        prepared_evidence = _prepare_section_evidence_packets(
-            section_evidence_packets
-        )
+        try:
+            prepared_evidence = _prepare_section_evidence_packets(
+                section_evidence_packets
+            )
+        except (TypeError, ValueError) as error:
+            if release_mode is ReleaseMode.FULL:
+                raise V2ValidationError(
+                    ("report_recovery:preflight_packet_invalid",)
+                ) from error
+            raise
         verification_fragments = prepared_evidence.flat_union
         packet_union_ids = frozenset(
             fragment.fragment_id for fragment in prepared_evidence.flat_union
         )
-        _validate_table_citations_for_section(
-            (performance_table,) if performance_table is not None else (),
-            section_id="past_changes",
-            allowed_fragment_ids=prepared_evidence.allowed_fragment_ids_by_section[
-                "past_changes"
-            ],
-            table_label="실적",
-            require_cite=True,
-        )
-        _validate_table_citations_for_section(
-            composition_tables,
-            section_id="business_model",
-            allowed_fragment_ids=prepared_evidence.allowed_fragment_ids_by_section[
-                "business_model"
-            ],
-            table_label="구성",
-            require_cite=True,
-        )
+        try:
+            _validate_table_citations_for_section(
+                (performance_table,) if performance_table is not None else (),
+                section_id="past_changes",
+                allowed_fragment_ids=(
+                    prepared_evidence.allowed_fragment_ids_by_section[
+                        "past_changes"
+                    ]
+                ),
+                table_label="실적",
+                require_cite=True,
+            )
+            _validate_table_citations_for_section(
+                composition_tables,
+                section_id="business_model",
+                allowed_fragment_ids=(
+                    prepared_evidence.allowed_fragment_ids_by_section[
+                        "business_model"
+                    ]
+                ),
+                table_label="구성",
+                require_cite=True,
+            )
+        except (TypeError, ValueError) as error:
+            if release_mode is ReleaseMode.FULL:
+                raise V2ValidationError(
+                    ("report_recovery:preflight_table_evidence_invalid",)
+                ) from error
+            raise
 
     # ① 본문 9장 작성 (작가)
     draft = compose_sections(
@@ -734,7 +818,14 @@ def run_v2(
             release_mode=release_mode.value,
         )
         extractive = select_extractive_summary(verified, body_rendered.fact_records)
-        if not extractive.release_ready:
+        # FULL은 이 시점의 결과가 아직 ``primary`` 후보일 뿐이다. 요약이
+        # 부족하더라도 먼저 품질 영수증을 만들고 복구 정책이 보충/중단을
+        # 결정해야 한다. STOP이면 아래 출고 검증까지 도달하지 않으며,
+        # RUN_SUPPLEMENTS이면 병합 뒤 요약을 새로 계산한다.
+        if (
+            not extractive.release_ready
+            and release_mode is not ReleaseMode.FULL
+        ):
             raise V2ValidationError(
                 (
                     "엄격 출고용 핵심 요약에 서로 다른 장의 검증 사실이 "
@@ -833,7 +924,270 @@ def run_v2(
             quality_observation.quality_grade,
             quality_observation.safety_decision,
         )
-    if release_mode is not ReleaseMode.SHADOW and (
+    candidate_sha256 = ""
+    validation_receipts: tuple[GenerationValidationReceipt, ...] = ()
+    if release_mode is ReleaseMode.FULL:
+        if (
+            public_structure_seal is None
+            or prepared_evidence is None
+            or call_recorder is None
+        ):
+            raise V2ValidationError(("FULL 생산 증거 재료가 누락됐습니다",))
+        candidate_sha256 = canonical_sha256(quality_candidate)
+        try:
+            primary_receipt = GenerationValidationReceipt(
+                company_id=prepared_evidence.company_id,
+                candidate_sha256=candidate_sha256,
+                assessment=generation_assessment,
+                round=ValidationRound.PRIMARY,
+                writer_calls=call_recorder.calls_for(
+                    ValidationRound.PRIMARY,
+                    role="writer",
+                ),
+                reviewer_calls=call_recorder.calls_for(
+                    ValidationRound.PRIMARY,
+                    role="reviewer",
+                ),
+                section_sha256s=public_structure_seal.section_sha256s,
+                evidence_packet_sha256s=prepared_evidence.packet_sha256s,
+            )
+            recovery_decision = decide_post_validation(primary_receipt)
+        except (TypeError, ValueError) as error:
+            raise V2ValidationError(
+                ("report_recovery:primary_receipt_invalid",)
+            ) from error
+
+        if recovery_decision.action is RecoveryAction.RUN_SUPPLEMENTS:
+            authorization = recovery_decision.supplement_authorization
+            if type(authorization) is not SupplementAuthorization:
+                raise V2ValidationError(
+                    ("report_recovery:supplement_authorization_missing",)
+                )
+            targets = authorization.section_ids
+            supplement_writer = call_recorder.wrap(
+                writer_ask,
+                role="writer",
+                validation_round=ValidationRound.SUPPLEMENT,
+                section_ids=targets,
+            )
+            supplement_reviewer = call_recorder.wrap(
+                reviewer_ask,
+                role="reviewer",
+                validation_round=ValidationRound.SUPPLEMENT,
+                section_ids=("bundled",),
+            )
+
+            # 승인 장만 자기 typed packet으로 다시 쓴다. 이 단계의 report에는
+            # 대상 밖 장이 아예 없으므로 writer가 그 장을 바꿀 통로도 없다.
+            supplement_draft = compose_selected_sections(
+                company_name,
+                performance_table,
+                supplement_writer,
+                section_evidence_packets=section_evidence_packets,
+                section_ids=targets,
+            )
+            draft_body_count += _total_sentences(supplement_draft)
+            supplement_draft, supplement_diagram_problems = check_diagram_numbers(
+                supplement_draft,
+                _normalize_fragments(verification_fragments),
+            )
+            for problem in supplement_diagram_problems:
+                logger.warning("보충 도식 검증에서 뺀 경로 — %s", problem)
+            supplement_verified = verify_report(
+                supplement_draft,
+                verification_fragments,
+                performance_table,
+                supplement_reviewer,
+                allowed_fragment_ids_by_section=(
+                    prepared_evidence.allowed_fragment_ids_by_section
+                ),
+            )
+            supplement_verified, supplement_moved = drop_cross_section_duplicates(
+                supplement_verified
+            )
+            if supplement_moved:
+                logger.info(
+                    "보충 대상 장 사이 중복 %d문장을 소유 장으로 모았습니다",
+                    supplement_moved,
+                )
+            supplement_verified = append_past_changes_numeric_claims(
+                supplement_verified,
+                performance_table,
+                verification_fragments,
+                filing_meta,
+            )
+            supplement_verified, supplement_numeric_filtering = (
+                enforce_public_numeric_safety(supplement_verified)
+            )
+
+            base_body = verified
+            merged_body = _merge_selected_sections(
+                base_body,
+                supplement_verified,
+                targets,
+            )
+            # 병합 뒤 전역 수치 안전을 다시 계산한다. 비대상 장은 값뿐 아니라
+            # ComposedSection 전체(본문·도식·structured fact)가 exact 동일해야 한다.
+            merged_body, merged_numeric_filtering = enforce_public_numeric_safety(
+                merged_body
+            )
+            base_by_id = {
+                section.section_id: section for section in base_body.sections
+            }
+            merged_by_id = {
+                section.section_id: section for section in merged_body.sections
+            }
+            target_set = set(targets)
+            if any(
+                merged_by_id[section_id] != base_by_id[section_id]
+                for section_id in SECTION_IDS
+                if section_id not in target_set
+            ):
+                _raise_recovery_stop("non_target_section_mutated")
+            _assert_composed_report_evidence_invariant(
+                merged_body,
+                prepared_evidence.allowed_fragment_ids_by_section,
+                packet_union_ids,
+                stage="supplement-merged-numeric-safety",
+            )
+            verified = merged_body
+            numeric_filtering = numeric_filtering.merged(
+                supplement_numeric_filtering
+            ).merged(merged_numeric_filtering)
+
+            # 요약·manifest·render·quality candidate/assessment는 보충 병합본에서
+            # 모두 새로 만든다. 첫 후보의 전역 파생물을 재사용하지 않는다.
+            body_rendered = render_report(
+                company_name,
+                verified,
+                verification_fragments,
+                performance_table,
+                corp_type=corp_type,
+                grade=grade,
+                generated_at=generated_at,
+                as_of_date=as_of_date,
+                analysis_period=analysis_period,
+                latest_performance_period=latest_performance_period,
+                table_presentation=table_presentation,
+                filing_meta=filing_meta,
+                composition_tables=composition_tables,
+                citation_style=citation_style,
+                company_id=prepared_evidence.company_id,
+                release_mode=release_mode.value,
+            )
+            extractive = select_extractive_summary(
+                verified,
+                body_rendered.fact_records,
+            )
+            supplement_summary_release_ready = extractive.release_ready
+            final = ComposedReport(
+                sections=verified.sections,
+                summary=extractive.bound_sentences,
+            )
+            summary_draft_count = 0
+            _assert_composed_report_evidence_invariant(
+                final,
+                prepared_evidence.allowed_fragment_ids_by_section,
+                packet_union_ids,
+                stage="supplement-pre-render",
+            )
+            public_structure_seal = build_public_structure_seal(
+                final,
+                verification_fragments,
+                performance_table,
+                filing_meta=filing_meta,
+                composition_tables=composition_tables,
+                table_presentation=table_presentation,
+                company_id=prepared_evidence.company_id,
+                evidence_generation_sha256=(
+                    prepared_evidence.evidence_generation_sha256
+                ),
+                evidence_packet_sha256s=prepared_evidence.packet_sha256s,
+                company_name=company_name,
+                corp_type=corp_type,
+                generated_at=generated_at,
+                as_of_date=as_of_date,
+                analysis_period=analysis_period,
+                latest_performance_period=latest_performance_period,
+                citation_style=citation_style,
+            )
+            rendered = render_report(
+                company_name,
+                final,
+                verification_fragments,
+                performance_table,
+                corp_type=corp_type,
+                grade=grade,
+                generated_at=generated_at,
+                as_of_date=as_of_date,
+                analysis_period=analysis_period,
+                latest_performance_period=latest_performance_period,
+                table_presentation=table_presentation,
+                filing_meta=filing_meta,
+                composition_tables=composition_tables,
+                citation_style=citation_style,
+                company_id=prepared_evidence.company_id,
+                release_mode=release_mode.value,
+                public_structure_seal=public_structure_seal,
+            )
+            assert_report_matches_public_structure(
+                rendered,
+                public_structure_seal,
+            )
+            quality_candidate = build_generation_quality_candidate(
+                rendered,
+                final,
+            )
+            generation_assessment, quality_observation = (
+                assess_and_observe_generation(
+                    quality_candidate,
+                    contract_version=STRICT_QUALITY_CONTRACT_VERSION,
+                )
+            )
+            candidate_sha256 = canonical_sha256(quality_candidate)
+            try:
+                supplement_receipt = GenerationValidationReceipt(
+                    company_id=prepared_evidence.company_id,
+                    candidate_sha256=candidate_sha256,
+                    assessment=generation_assessment,
+                    round=ValidationRound.SUPPLEMENT,
+                    writer_calls=call_recorder.calls_for(
+                        ValidationRound.SUPPLEMENT,
+                        role="writer",
+                    ),
+                    reviewer_calls=call_recorder.calls_for(
+                        ValidationRound.SUPPLEMENT,
+                        role="reviewer",
+                    ),
+                    section_sha256s=public_structure_seal.section_sha256s,
+                    evidence_packet_sha256s=prepared_evidence.packet_sha256s,
+                    base_receipt_sha256=primary_receipt.receipt_sha256,
+                    supplemented_section_ids=targets,
+                )
+                recovery_decision = decide_post_validation(
+                    primary_receipt,
+                    supplement_authorization=authorization,
+                    supplement_receipt=supplement_receipt,
+                )
+            except (TypeError, ValueError) as error:
+                raise V2ValidationError(
+                    ("report_recovery:supplement_receipt_invalid",)
+                ) from error
+            if recovery_decision.action is not RecoveryAction.RELEASE_COMPLETE:
+                _raise_recovery_stop(recovery_decision.reason_code)
+            if not supplement_summary_release_ready:
+                # 두 번째 후보의 manifest·render·품질 평가·receipt·정책 결정을
+                # 모두 다시 만든 뒤에야 닫는다. 조기 예외로 파생물 재계산을
+                # 건너뛰거나 세 번째 보충으로 흐르지 않는다.
+                _raise_recovery_stop("supplement_summary_insufficient")
+            validation_receipts = (primary_receipt, supplement_receipt)
+        elif recovery_decision.action is RecoveryAction.RELEASE_COMPLETE:
+            validation_receipts = (primary_receipt,)
+        elif recovery_decision.action is RecoveryAction.STOP_NO_CHARGE:
+            _raise_recovery_stop(recovery_decision.reason_code)
+        else:
+            _raise_recovery_stop("unexpected_primary_decision")
+    elif release_mode is not ReleaseMode.SHADOW and (
         quality_observation.quality_grade != "완성"
         or quality_observation.publication_grade != "완성"
         or not quality_observation.release_allowed
@@ -911,25 +1265,20 @@ def run_v2(
         ),
     )
 
+    # 성공 생산 증거는 최종 가시 출고 검증까지 통과한 뒤에만 만든다. 두 번째
+    # 품질 실패나 validate_v2 실패에서는 부분 후보·영수증을 외부로 운반하지 않는다.
+    _log_duplicate_findings(rendered)
+    validate_v2(rendered)
+
     generation_evidence: GenerationProducerEvidence | None = None
     if release_mode is ReleaseMode.FULL:
         if (
             public_structure_seal is None
             or prepared_evidence is None
             or call_recorder is None
+            or not validation_receipts
         ):
             raise V2ValidationError(("FULL 생산 증거 재료가 누락됐습니다",))
-        candidate_sha256 = canonical_sha256(quality_candidate)
-        primary_receipt = GenerationValidationReceipt(
-            company_id=prepared_evidence.company_id,
-            candidate_sha256=candidate_sha256,
-            assessment=generation_assessment,
-            round=ValidationRound.PRIMARY,
-            writer_calls=call_recorder.freeze().writer_calls,
-            reviewer_calls=call_recorder.freeze().reviewer_calls,
-            section_sha256s=public_structure_seal.section_sha256s,
-            evidence_packet_sha256s=prepared_evidence.packet_sha256s,
-        )
         generation_evidence = GenerationProducerEvidence(
             company_id=prepared_evidence.company_id,
             evidence_generation_sha256=(
@@ -946,7 +1295,7 @@ def run_v2(
             ),
             section_sha256s=public_structure_seal.section_sha256s,
             evidence_packet_sha256s=prepared_evidence.packet_sha256s,
-            validation_receipts=(primary_receipt,),
+            validation_receipts=validation_receipts,
             call_ledger=call_recorder.freeze(),
         )
         rendered = replace(
@@ -958,13 +1307,6 @@ def run_v2(
             generation_evidence,
             manifest_bytes=rendered.public_structure_manifest.encode("utf-8"),
         )
-
-    # ⑤-b 중복 검출 경고 — «찾아서 로그만 남긴다», 출고는 막지 않는다.
-    #     validate_v2 «안»에 넣지 않은 이유는 위 모듈 docstring 참고.
-    _log_duplicate_findings(rendered)
-
-    # ⑥ 출고 검증 — 실패하면 V2ValidationError (사유는 예외 problems에 전부)
-    validate_v2(rendered)
 
     return V2RunOutput(
         report=rendered,

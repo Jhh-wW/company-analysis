@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -172,6 +174,56 @@ class _CompletePacketWriter:
         )
 
 
+class _RecoveringPacketWriter:
+    """첫 묶음의 지정 장만 얇게 쓰고, 승인받은 재호출에서만 보충한다."""
+
+    def __init__(
+        self,
+        targets: tuple[str, ...],
+        *,
+        remain_thin: bool = False,
+    ) -> None:
+        self.targets = targets
+        self.remain_thin = remain_thin
+        self.prompts: list[str] = []
+        self.section_calls: dict[str, int] = {}
+
+    def __call__(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        fragment_ids = re.findall(r"\[조각 (\d+)\] \(", prompt)
+        assert len(fragment_ids) == 1
+        section_id = SECTION_IDS[int(fragment_ids[0]) - 1]
+        section_call = self.section_calls.get(section_id, 0) + 1
+        self.section_calls[section_id] = section_call
+        mark = _MARKS[int(fragment_ids[0]) - 1]
+        slots = CLAIM_SLOTS_BY_SECTION[section_id]
+        if section_id in self.targets and (
+            section_call == 1 or self.remain_thin
+        ):
+            # 두 번째도 얇게 두는 시험에서는 원문 안의 다른 문장으로 바꿔
+            # section/candidate가 실제로 달라진 뒤 quality 실패를 보게 한다.
+            endings = (_ENDINGS[min(section_call - 1, 1)],)
+        else:
+            endings = _ENDINGS
+        return json.dumps(
+            {
+                "문장들": [
+                    {
+                        "글": (
+                            f"{mark} 회사 사업 고객 제품 전략 운영 문화 경쟁 과제 "
+                            f"대응 협력 실적 {ending} 공식 자료에서 확인했다."
+                        ),
+                        "인용": fragment_ids,
+                        "등급": GRADE_CONFIRMED,
+                        "주장슬롯": slots[index % len(slots)],
+                    }
+                    for index, ending in enumerate(endings)
+                ]
+            },
+            ensure_ascii=False,
+        )
+
+
 class _BoundGroupedReviewer:
     def __init__(self) -> None:
         self.prompts: list[str] = []
@@ -238,6 +290,29 @@ def _run_full(
     return output, writer, reviewer, diagram
 
 
+def _run_recovering_full(
+    targets: tuple[str, ...],
+    *,
+    remain_thin: bool = False,
+    packets=None,
+):
+    writer = _RecoveringPacketWriter(targets, remain_thin=remain_thin)
+    reviewer = _BoundGroupedReviewer()
+    output = run_v2(
+        "가나다전자",
+        (),
+        None,
+        writer_ask=writer,
+        reviewer_ask=reviewer,
+        diagram_ask=_NoDiagram(),
+        release_mode=ReleaseMode.FULL,
+        section_evidence_packets=packets or _packets(),
+        company_id="00123456",
+        build_identity_sha256="b" * 64,
+    )
+    return output, writer, reviewer
+
+
 def _valid_composition_table() -> PerformanceTable:
     return PerformanceTable(
         caption="제품군 구성",
@@ -298,6 +373,346 @@ def test_full_packet은_작성9_묶음검수1_요약0_도식0이다():
     assert evidence.validation_receipts[0].writer_calls == 9
     assert evidence.validation_receipts[0].reviewer_calls == 1
     assert output.generation_metrics == output.report.generation_metrics
+
+
+@pytest.mark.parametrize(
+    ("targets", "expected_calls"),
+    (
+        (("identity",), 12),
+        (("identity", "business_model"), 13),
+    ),
+)
+def test_FULL은_승인장_한두개만_한번_보충하고_round장부를_잇는다(
+    targets,
+    expected_calls,
+):
+    output, writer, reviewer = _run_recovering_full(targets)
+    evidence = output.generation_evidence
+    assert evidence is not None
+    assert len(writer.prompts) == 9 + len(targets)
+    assert len(reviewer.prompts) == 2
+    assert len(evidence.call_ledger.records) == expected_calls
+    assert len(evidence.validation_receipts) == 2
+    primary, supplement = evidence.validation_receipts
+    assert supplement.supplemented_section_ids == targets
+    assert supplement.base_receipt_sha256 == primary.receipt_sha256
+    assert tuple(record.sequence for record in evidence.call_ledger.records) == tuple(
+        range(1, expected_calls + 1)
+    )
+    supplement_records = evidence.call_ledger.records[10:]
+    assert tuple(record.validation_round.value for record in supplement_records) == (
+        ("SUPPLEMENT",) * (len(targets) + 1)
+    )
+    assert tuple(
+        record.role_index
+        for record in supplement_records
+        if record.role == "writer"
+    ) == tuple(range(1, len(targets) + 1))
+    assert supplement_records[-1].role == "reviewer"
+    assert supplement_records[-1].role_index == 1
+    assert supplement_records[-1].section_id == "bundled"
+    base_hashes = dict(primary.section_sha256s)
+    final_hashes = dict(supplement.section_sha256s)
+    for section_id in SECTION_IDS:
+        assert (base_hashes[section_id] != final_hashes[section_id]) == (
+            section_id in targets
+        )
+    for target, prompt in zip(targets, writer.prompts[-len(targets) :]):
+        expected_fragment = str(SECTION_IDS.index(target) + 1)
+        assert re.findall(r"\[조각 (\d+)\] \(", prompt) == [expected_fragment]
+
+
+def test_보충병합뒤_비대상본문도식fact와_section_hash는_exact불변이다(
+    monkeypatch,
+):
+    snapshots = []
+    original = pipeline_module.build_generation_quality_candidate
+
+    def capture(rendered, composed):
+        snapshots.append(
+            (
+                composed,
+                tuple(rendered.sections),
+                tuple(rendered.fact_records),
+            )
+        )
+        return original(rendered, composed)
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "build_generation_quality_candidate",
+        capture,
+    )
+    output, _writer, _reviewer = _run_recovering_full(("identity",))
+
+    assert len(snapshots) == 2
+    primary_report, primary_rendered_sections, primary_facts = snapshots[0]
+    final_report, final_rendered_sections, final_facts = snapshots[1]
+    primary_sections = {
+        section.section_id: section for section in primary_report.sections
+    }
+    final_sections = {section.section_id: section for section in final_report.sections}
+    primary_rendered = {
+        section.cell: section for section in primary_rendered_sections
+    }
+    final_rendered = {
+        section.cell: section for section in final_rendered_sections
+    }
+    for section_id in SECTION_IDS[1:]:
+        assert final_sections[section_id] == primary_sections[section_id]
+        # 웹·PDF가 소비하는 표시 문단·표·도식까지 같은 dataclass bytes
+        # projection을 유지하며, 아래 section SHA도 exact 동일해야 한다.
+        assert final_rendered[section_id] == primary_rendered[section_id]
+        assert tuple(
+            fact for fact in final_facts if fact.section_owner == section_id
+        ) == tuple(fact for fact in primary_facts if fact.section_owner == section_id)
+    evidence = output.generation_evidence
+    assert evidence is not None
+    primary, supplement = evidence.validation_receipts
+    assert dict(primary.section_sha256s)["identity"] != dict(
+        supplement.section_sha256s
+    )["identity"]
+    assert primary.section_sha256s[1:] == supplement.section_sha256s[1:]
+
+
+def test_보충병합본에서_전역파생물과_평가를_모두다시계산한다(monkeypatch):
+    names = (
+        "enforce_public_numeric_safety",
+        "select_extractive_summary",
+        "build_public_structure_seal",
+        "render_report",
+        "build_generation_quality_candidate",
+        "assess_and_observe_generation",
+    )
+    originals = {name: getattr(pipeline_module, name) for name in names}
+    counts = {name: 0 for name in names}
+
+    def counted(name):
+        def wrapper(*args, **kwargs):
+            counts[name] += 1
+            return originals[name](*args, **kwargs)
+
+        return wrapper
+
+    for name in names:
+        monkeypatch.setattr(pipeline_module, name, counted(name))
+
+    _run_recovering_full(("identity",))
+
+    assert counts == {
+        "enforce_public_numeric_safety": 3,
+        "select_extractive_summary": 2,
+        "build_public_structure_seal": 2,
+        "render_report": 4,
+        "build_generation_quality_candidate": 2,
+        "assess_and_observe_generation": 2,
+    }
+
+
+def test_보충뒤에도_얇으면_세번째호출없이_닫힌사유로_끝난다():
+    writer = _RecoveringPacketWriter(("identity",), remain_thin=True)
+    reviewer = _BoundGroupedReviewer()
+
+    with pytest.raises(
+        V2ValidationError,
+        match="report_recovery:post_supplement_quality_failed",
+    ):
+        run_v2(
+            "가나다전자",
+            (),
+            None,
+            writer_ask=writer,
+            reviewer_ask=reviewer,
+            release_mode=ReleaseMode.FULL,
+            section_evidence_packets=_packets(),
+            company_id="00123456",
+            build_identity_sha256="b" * 64,
+        )
+
+    assert len(writer.prompts) == 10
+    assert len(reviewer.prompts) == 2
+    assert writer.section_calls["identity"] == 2
+
+
+def test_보충검수에서_안전실패하면_세번째회차없이_즉시중단한다():
+    class SecondRoundSafetyBlockedReviewer(_BoundGroupedReviewer):
+        def __call__(self, prompt: str) -> str:
+            payload = json.loads(super().__call__(prompt))
+            if len(self.prompts) == 2:
+                for verdict in payload["판정"]:
+                    verdict["결과"] = "애매"
+            return json.dumps(payload, ensure_ascii=False)
+
+    writer = _RecoveringPacketWriter(("identity",))
+    reviewer = SecondRoundSafetyBlockedReviewer()
+    with pytest.raises(
+        V2ValidationError,
+        match="report_recovery:post_supplement_safety_blocked",
+    ):
+        run_v2(
+            "가나다전자",
+            (),
+            None,
+            writer_ask=writer,
+            reviewer_ask=reviewer,
+            release_mode=ReleaseMode.FULL,
+            section_evidence_packets=_packets(),
+            company_id="00123456",
+            build_identity_sha256="b" * 64,
+        )
+
+    assert len(writer.prompts) == 10
+    assert len(reviewer.prompts) == 2
+    assert writer.section_calls["identity"] == 2
+
+
+def test_보충후보지문이_같으면_재보충없이_중단한다(monkeypatch):
+    monkeypatch.setattr(
+        pipeline_module,
+        "canonical_sha256",
+        lambda _value: "c" * 64,
+    )
+    writer = _RecoveringPacketWriter(("identity",))
+    reviewer = _BoundGroupedReviewer()
+
+    with pytest.raises(
+        V2ValidationError,
+        match="report_recovery:supplement_candidate_unchanged",
+    ):
+        run_v2(
+            "가나다전자",
+            (),
+            None,
+            writer_ask=writer,
+            reviewer_ask=reviewer,
+            release_mode=ReleaseMode.FULL,
+            section_evidence_packets=_packets(),
+            company_id="00123456",
+            build_identity_sha256="b" * 64,
+        )
+
+    assert len(writer.prompts) == 10
+    assert len(reviewer.prompts) == 2
+
+
+def test_얇은장이_세개면_primary10회뒤_보충하지않는다():
+    targets = ("identity", "business_model", "portfolio")
+    writer = _RecoveringPacketWriter(targets)
+    reviewer = _BoundGroupedReviewer()
+
+    with pytest.raises(
+        V2ValidationError,
+        match="report_recovery:too_many_underfilled_sections",
+    ):
+        run_v2(
+            "가나다전자",
+            (),
+            None,
+            writer_ask=writer,
+            reviewer_ask=reviewer,
+            release_mode=ReleaseMode.FULL,
+            section_evidence_packets=_packets(),
+            company_id="00123456",
+            build_identity_sha256="b" * 64,
+        )
+
+    assert len(writer.prompts) == 9
+    assert len(reviewer.prompts) == 1
+
+
+def test_안전실패는_primary10회뒤_보충없이_즉시중단한다():
+    class SafetyBlockedReviewer(_BoundGroupedReviewer):
+        def __call__(self, prompt: str) -> str:
+            payload = json.loads(super().__call__(prompt))
+            for verdict in payload["판정"]:
+                verdict["결과"] = "애매"
+            return json.dumps(payload, ensure_ascii=False)
+
+    writer = _CompletePacketWriter()
+    reviewer = SafetyBlockedReviewer()
+    with pytest.raises(
+        V2ValidationError,
+        match="report_recovery:post_validation_safety_blocked",
+    ):
+        run_v2(
+            "가나다전자",
+            (),
+            None,
+            writer_ask=writer,
+            reviewer_ask=reviewer,
+            release_mode=ReleaseMode.FULL,
+            section_evidence_packets=_packets(),
+            company_id="00123456",
+            build_identity_sha256="b" * 64,
+        )
+
+    assert len(writer.prompts) == 9
+    assert len(reviewer.prompts) == 1
+
+
+def test_독립문서수가_부족하면_primary10회뒤_보충하지않는다():
+    original = _packets()
+    shared_url = "https://manifest.example/same-document"
+    shared_identity = document_identity_from_parts(url=shared_url)
+    shared_text = " ".join(_fragment_text(mark) for mark in _MARKS)
+    packets = replace(
+        original,
+        packets=tuple(
+            replace(
+                packet,
+                fragments=tuple(
+                    replace(
+                        fragment,
+                        text=shared_text,
+                        source_url=shared_url,
+                        document_identity=shared_identity,
+                    )
+                    for fragment in packet.fragments
+                ),
+            )
+            for packet in original.packets
+        ),
+    )
+    writer = _CompletePacketWriter()
+    reviewer = _BoundGroupedReviewer()
+
+    with pytest.raises(
+        V2ValidationError,
+        match="report_recovery:post_validation_nonrecoverable_quality",
+    ):
+        run_v2(
+            "가나다전자",
+            (),
+            None,
+            writer_ask=writer,
+            reviewer_ask=reviewer,
+            release_mode=ReleaseMode.FULL,
+            section_evidence_packets=packets,
+            company_id="00123456",
+            build_identity_sha256="b" * 64,
+        )
+
+    assert len(writer.prompts) == 9
+    assert len(reviewer.prompts) == 1
+
+
+def test_production_composer가_shared정본_decide_post_validation을_실제호출한다():
+    tree = ast.parse(Path(pipeline_module.__file__).read_text(encoding="utf-8"))
+    imports = [node for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
+    assert any(
+        node.module == "src.shared.report_recovery"
+        and "decide_post_validation" in {alias.name for alias in node.names}
+        for node in imports
+    )
+    assert not any(
+        node.module == "src.features.report_recovery" for node in imports
+    )
+    assert any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "decide_post_validation"
+        for node in ast.walk(tree)
+    )
 
 
 @pytest.mark.parametrize("damage", ("section", "evidence"))
@@ -366,7 +781,7 @@ def test_packet_작성응답이_깨져도_재호출하지_않아_writer는_정�
     assert all(not section.sentences and section.notice for section in report.sections)
 
 
-def test_FULL_packet_작성응답이_전부_깨지면_묶음검수는_0회다():
+def test_FULL_packet_작성응답이_전부_깨져도_기본묶음검수는_정확히_1회다():
     class BrokenWriter:
         def __init__(self) -> None:
             self.calls = 0
@@ -401,7 +816,7 @@ def test_FULL_packet_작성응답이_전부_깨지면_묶음검수는_0회다():
         )
 
     assert writer.calls == 9
-    assert reviewer.calls == 0
+    assert reviewer.calls == 1
     assert diagram.calls == 0
 
 
@@ -441,6 +856,82 @@ def test_FULL_cross_company_packet은_AI_호출전_0_0으로_차단한다():
         )
     assert writer.prompts == []
     assert reviewer.prompts == []
+
+
+def test_FULL_packet간_fragment충돌도_AI호출전_닫힌사유로_차단한다():
+    original = _packets()
+    second = original.packets[1]
+    conflicting = replace(
+        original,
+        packets=(
+            original.packets[0],
+            replace(
+                second,
+                fragments=(
+                    replace(second.fragments[0], fragment_id="1"),
+                ),
+            ),
+            *original.packets[2:],
+        ),
+    )
+    writer = _CompletePacketWriter()
+    reviewer = _BoundGroupedReviewer()
+    with pytest.raises(
+        V2ValidationError,
+        match="report_recovery:preflight_packet_invalid",
+    ):
+        run_v2(
+            "가나다전자",
+            (),
+            None,
+            writer_ask=writer,
+            reviewer_ask=reviewer,
+            release_mode=ReleaseMode.FULL,
+            section_evidence_packets=conflicting,
+            company_id="00123456",
+            build_identity_sha256="b" * 64,
+        )
+
+    assert writer.prompts == []
+    assert reviewer.prompts == []
+
+
+def test_최종출고검증이_실패하면_ProducerEvidence를_만들지않는다(
+    monkeypatch,
+):
+    created = []
+
+    def fail_validation(_report):
+        raise V2ValidationError(("시험용 최종 출고 실패",))
+
+    def forbidden_evidence(**kwargs):
+        created.append(kwargs)
+        raise AssertionError("최종 출고 검증 전에 생산 증거를 만들면 안 됩니다")
+
+    monkeypatch.setattr(pipeline_module, "validate_v2", fail_validation)
+    monkeypatch.setattr(
+        pipeline_module,
+        "GenerationProducerEvidence",
+        forbidden_evidence,
+    )
+    writer = _CompletePacketWriter()
+    reviewer = _BoundGroupedReviewer()
+    with pytest.raises(V2ValidationError, match="시험용 최종 출고 실패"):
+        run_v2(
+            "가나다전자",
+            (),
+            None,
+            writer_ask=writer,
+            reviewer_ask=reviewer,
+            release_mode=ReleaseMode.FULL,
+            section_evidence_packets=_packets(),
+            company_id="00123456",
+            build_identity_sha256="b" * 64,
+        )
+
+    assert created == []
+    assert len(writer.prompts) == 9
+    assert len(reviewer.prompts) == 1
 
 
 def test_packet_묶음검수응답이_깨져도_reviewer는_정확히_1회다():
