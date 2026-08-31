@@ -17,6 +17,13 @@
   fragment의 text_sha256이 자기 문서 목록에 없으면 거절하므로, **scored
   fragment가 하나도 없는 문서는 애초에 documents 출력에서 뺀다**(조회
   사실 자체는 attempt로 남아 있으니 손실이 아니다).
+★ 계약 generation=8 ``company_id``(fragments·attempts): fragment·attempt
+  각각이 **생성 시점에** 스스로 실은 값을 그대로 pass-through만 한다 —
+  이 변환 함수가 document.company_id로 채워 넣거나 호출 인자로 덮어쓰지
+  않는다. 그렇게 하면 소유권 검증이 무의미해지므로(같은 document_id·슬롯의
+  다른 회사 조회 결과가 섞여도 조용히 통과할 수 있다), 값의 원천은 항상
+  ``wide_collect._CollectionState.add_attempt``·``wide_fragments.build_fragments``
+  호출자다.
 """
 
 from __future__ import annotations
@@ -123,6 +130,9 @@ def _document_mapping(
 
 def _fragment_mapping(fragment: WideFragment) -> dict[str, object]:
     return {
+        # 계약 generation=8 — fragment 자신이 생성 시점에 실은 값을 그대로
+        # 내보낸다(document.company_id로 채워 넣거나 덮어쓰지 않는다).
+        "company_id": fragment.company_id,
         "fragment_id": fragment.fragment_id,
         "document_id": fragment.document_id,
         "location": fragment.location,
@@ -137,6 +147,9 @@ def _fragment_mapping(fragment: WideFragment) -> dict[str, object]:
 
 def _attempt_mapping(attempt: WideCollectionAttempt) -> dict[str, object]:
     return {
+        # 계약 generation=8 — attempt 자신이 생성 시점에 실은 값을 그대로
+        # 내보낸다(document.company_id로 채워 넣거나 덮어쓰지 않는다).
+        "company_id": attempt.company_id,
         "attempt_id": attempt.attempt_id,
         "source_kind": attempt.source_kind,
         "requirement": attempt.requirement,

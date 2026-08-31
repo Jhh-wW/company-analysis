@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.features.homepage.constants import WIDE_REQUIRED_SLOT_IDS
 from src.features.homepage.wide_fragments import build_fragments
 from src.features.homepage.wide_types import WideDocumentIdentity
 
 _SHA = "a" * 64
 _FORBIDDEN_SLOT_PREFIXES = ("comparison_", "limitation", "historical_performance")
+_COMPANY_ID = "c1"
 
 
 def _document(canonical_url: str, usable_ranges: tuple[str, ...]) -> WideDocumentIdentity:
@@ -34,14 +37,14 @@ def test_채용_페이지는_culture_슬롯만_받는다():
     document = _document(
         "https://company.example/careers", ("우리 팀에 합류하세요.",)
     )
-    fragments = build_fragments(document)
+    fragments = build_fragments(document, company_id=_COMPANY_ID)
     assert fragments
     assert {f.slot_id for f in fragments} == {"culture:work_principle", "culture:verified_case"}
 
 
 def test_회사소개_페이지는_identity와_competitive_position_슬롯을_받는다():
     document = _document("https://company.example/about", ("회사 소개 문구입니다.",))
-    fragments = build_fragments(document)
+    fragments = build_fragments(document, company_id=_COMPANY_ID)
     slot_ids = {f.slot_id for f in fragments}
     assert slot_ids == {
         "identity:corporate_identity",
@@ -52,7 +55,7 @@ def test_회사소개_페이지는_identity와_competitive_position_슬롯을_�
 
 def test_페이지_유형을_모르면_조각을_만들지_않는다():
     document = _document("https://company.example/random-page", ("아무 내용.",))
-    assert build_fragments(document) == ()
+    assert build_fragments(document, company_id=_COMPANY_ID) == ()
 
 
 def test_본문_키워드가_있으면_그_슬롯만_매긴다():
@@ -62,7 +65,7 @@ def test_본문_키워드가_있으면_그_슬롯만_매긴다():
         "https://company.example/about",
         ("우리 회사의 강점은 빠른 기술력입니다.",),
     )
-    fragments = build_fragments(document)
+    fragments = build_fragments(document, company_id=_COMPANY_ID)
     assert {f.slot_id for f in fragments} == {"competitive_position:self_context"}
     assert fragments[0].score_millis == 700
     assert "body_keyword_match" in fragments[0].reason_codes
@@ -73,7 +76,7 @@ def test_본문_키워드가_없으면_후보_전체로_매긴다():
         "https://company.example/about",
         ("특별한 신호 키워드 없이 그냥 소개하는 문장입니다.",),
     )
-    fragments = build_fragments(document)
+    fragments = build_fragments(document, company_id=_COMPANY_ID)
     assert {f.slot_id for f in fragments} == {
         "identity:corporate_identity",
         "identity:business_definition",
@@ -88,7 +91,7 @@ def test_location은_문서_canonical_url과_구간_index를_가리킨다():
         "https://company.example/careers",
         ("첫 번째 구간입니다.", "두 번째 구간입니다."),
     )
-    fragments = build_fragments(document)
+    fragments = build_fragments(document, company_id=_COMPANY_ID)
     locations = {f.location for f in fragments}
     assert "https://company.example/careers#0" in locations
     assert "https://company.example/careers#1" in locations
@@ -96,7 +99,7 @@ def test_location은_문서_canonical_url과_구간_index를_가리킨다():
 
 def test_fragment_text는_원본_usable_range와_같다():
     document = _document("https://company.example/careers", ("정확히 이 텍스트입니다.",))
-    fragments = build_fragments(document)
+    fragments = build_fragments(document, company_id=_COMPANY_ID)
     assert all(f.text == "정확히 이 텍스트입니다." for f in fragments)
 
 
@@ -109,7 +112,7 @@ def test_comparison_limitation_historical_performance_슬롯은_0건이다():
         _document("https://company.example/news", ("뉴스룸 소식입니다.",)),
         _document("https://company.example/partners", ("파트너사 소개입니다.",)),
     ]
-    all_fragments = [frag for doc in documents for frag in build_fragments(doc)]
+    all_fragments = [frag for doc in documents for frag in build_fragments(doc, company_id=_COMPANY_ID)]
     assert all_fragments  # 실제로 조각이 만들어졌는지 확인(공허한 통과 방지)
     for fragment in all_fragments:
         assert fragment.slot_id in WIDE_REQUIRED_SLOT_IDS
@@ -120,6 +123,38 @@ def test_comparison_limitation_historical_performance_슬롯은_0건이다():
 
 def test_fragment_id는_결정론적이다():
     document = _document("https://company.example/careers", ("같은 입력입니다.",))
-    first = build_fragments(document)
-    second = build_fragments(document)
+    first = build_fragments(document, company_id=_COMPANY_ID)
+    second = build_fragments(document, company_id=_COMPANY_ID)
     assert [f.fragment_id for f in first] == [f.fragment_id for f in second]
+
+
+# ── 계약 generation=8: company_id ────────────────────────
+
+
+def test_fragment는_인자로_받은_company_id를_그대로_싣는다():
+    document = _document("https://company.example/careers", ("채용 문구입니다.",))
+    fragments = build_fragments(document, company_id="target-co")
+    assert fragments
+    assert all(f.company_id == "target-co" for f in fragments)
+
+
+def test_company_id는_document의_값으로_자동_대체되지_않는다():
+    """공격 시험 — document.company_id("c1")와 다른 값을 넘기면, build_fragments가
+    조용히 document 값으로 바꿔치기하지 않고 «넘긴 값 그대로»를 실어야 한다.
+    이게 성립하지 않으면 다른 회사 조회 결과가 섞여도 겉으로는 안 들킨다."""
+    document = _document("https://company.example/careers", ("채용 문구입니다.",))
+    assert document.company_id == "c1"
+
+    fragments = build_fragments(document, company_id="other-co")
+
+    assert fragments
+    assert all(f.company_id == "other-co" for f in fragments)
+    assert not any(f.company_id == document.company_id for f in fragments)
+
+
+def test_company_id를_생략하면_TypeError():
+    """필수 키워드 인자다 — 빠뜨리면 즉시 TypeError로 걸린다(호출자가
+    깜빡해도 빈 값이 조용히 흘러가지 않는다)."""
+    document = _document("https://company.example/careers", ("채용 문구입니다.",))
+    with pytest.raises(TypeError):
+        build_fragments(document)  # type: ignore[call-arg]

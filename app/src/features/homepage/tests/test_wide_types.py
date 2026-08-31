@@ -41,6 +41,7 @@ def _document(**overrides: object) -> WideDocumentIdentity:
 def _fragment(**overrides: object) -> WideFragment:
     text = "우리는 좋은 회사입니다."
     fields = dict(
+        company_id="c1",
         fragment_id="frag-1",
         document_id="d1",
         location="https://company.example/about#0",
@@ -57,6 +58,7 @@ def _fragment(**overrides: object) -> WideFragment:
 
 def _attempt(**overrides: object) -> WideCollectionAttempt:
     fields = dict(
+        company_id="c1",
         attempt_id="page-0001",
         source_kind="official_web_page",
         requirement="REQUIRED",
@@ -124,6 +126,13 @@ def test_published_on은_빈_문자열을_허용한다():
 def test_정상_attempt는_생성된다():
     attempt = _attempt()
     assert attempt.state == "OK"
+    assert attempt.company_id == "c1"
+
+
+def test_attempt_빈_company_id는_ValueError():
+    """계약 generation=8: company_id는 필수 — 비우면 즉시 거절한다."""
+    with pytest.raises(ValueError):
+        _attempt(company_id="")
 
 
 def test_attempt_state가_잘못되면_ValueError():
@@ -162,6 +171,13 @@ def test_attempt_slot_ids가_빈_튜플이면_ValueError():
 def test_정상_fragment는_생성된다():
     fragment = _fragment()
     assert fragment.slot_id == "identity:corporate_identity"
+    assert fragment.company_id == "c1"
+
+
+def test_fragment_빈_company_id는_ValueError():
+    """계약 generation=8: company_id는 필수 — 비우면 즉시 거절한다."""
+    with pytest.raises(ValueError):
+        _fragment(company_id="")
 
 
 def test_fragment_text_sha256이_text와_불일치하면_ValueError():

@@ -139,6 +139,10 @@ class _CollectionState:
     ) -> None:
         self.attempts.append(
             WideCollectionAttempt(
+                # 계약 generation=8: 이 상태 객체가 이 수집 실행 시작부터
+                # 들고 있는 실제 대상 회사 값을 그 자리에서 직접 싣는다 —
+                # document의 company_id로 나중에 채워 넣지 않는다.
+                company_id=self.company_id,
                 attempt_id=self.next_attempt_id(kind),
                 source_kind=source_kind,
                 requirement=requirement,

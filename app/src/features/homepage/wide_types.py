@@ -128,8 +128,17 @@ class WideDocumentIdentity:
 
 @dataclass(frozen=True)
 class WideCollectionAttempt:
-    """조회 경로 하나의 시도 기록."""
+    """조회 경로 하나의 시도 기록.
 
+    ★ 계약 generation=8: ``company_id``는 이 attempt가 실제로 조회를 시도한
+      대상 회사를 그 자리(``wide_collect._CollectionState.add_attempt``)에서
+      직접 싣는다 — document의 company_id에서 나중에 채워 넣거나, 변환 단계
+      (``wide_evidence_mapping``)에서 호출 인자로 덮어쓰지 않는다. 같은
+      document_id·슬롯이라도 다른 회사 조회 결과가 섞이면 안 되므로, 앱
+      계약은 대상 회사와 다른 값이면 생성 즉시 거절한다.
+    """
+
+    company_id: str
     attempt_id: str
     source_kind: str
     requirement: str
@@ -141,6 +150,7 @@ class WideCollectionAttempt:
     documents_seen: int
 
     def __post_init__(self) -> None:
+        _require_nonblank(self.company_id, "company_id")
         _require_nonblank(self.attempt_id, "attempt_id")
         if not _ATTEMPT_ID.match(self.attempt_id):
             raise ValueError("attempt_id 형식이 올바르지 않습니다")
@@ -190,8 +200,15 @@ class WideFragment:
       `app/src/shared/report_evidence/policy.py`)만 허용한다.
       comparison_*·limitation·historical_performance는 이 어휘에 없으므로
       만들 수 없다.
+    ★ 계약 generation=8: ``company_id``는 이 조각이 실제로 나온 조회가
+      대상으로 한 회사를 조각 생성 자리(``wide_fragments.build_fragments``
+      호출자)에서 직접 실어야 한다 — ``document.company_id``에서 나중에
+      채워 넣거나 변환 단계에서 덮어쓰지 않는다. 같은 document_id·슬롯이라도
+      다른 회사 조회 결과가 섞이면 안 되므로, 앱 계약은 대상 회사와 다른
+      값이면 생성 즉시 거절한다.
     """
 
+    company_id: str
     fragment_id: str
     document_id: str
     location: str
@@ -203,7 +220,15 @@ class WideFragment:
     reason_codes: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        for name in ("fragment_id", "document_id", "location", "text", "section_id", "slot_id"):
+        for name in (
+            "company_id",
+            "fragment_id",
+            "document_id",
+            "location",
+            "text",
+            "section_id",
+            "slot_id",
+        ):
             _require_nonblank(getattr(self, name), name)
         if "#" not in self.location:
             raise ValueError("location은 'canonical_url#조각index' 형식이어야 합니다")

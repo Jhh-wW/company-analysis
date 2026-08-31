@@ -44,6 +44,7 @@ def _document(usable_ranges: tuple[str, ...], **overrides: object) -> WideDocume
 
 def _attempt(**overrides: object) -> WideCollectionAttempt:
     fields = dict(
+        company_id="c1",
         attempt_id="page-0001",
         source_kind="official_web_page",
         requirement="REQUIRED",
@@ -89,7 +90,7 @@ def test_offset은_정렬되고_겹치지_않는다():
 
 def test_document_mapping은_계약_필드_이름을_그대로_쓴다():
     document = _document(("채용 관련 본문입니다.",))  # canonical_url이 /careers라 슬롯이 잡힌다
-    fragments = build_fragments(document)
+    fragments = build_fragments(document, company_id="c1")
     assert fragments  # 이 시험이 exact_evidence_hashes를 검증하려면 fragment가 있어야 한다
     result = to_evidence_mappings(documents=(document,), fragments=fragments, attempts=())
 
@@ -109,7 +110,7 @@ def test_document_mapping은_계약_필드_이름을_그대로_쓴다():
 
 def test_fragment_mapping은_평범한_dict_list다():
     document = _document(("채용 문구입니다.",))
-    fragments = build_fragments(document)
+    fragments = build_fragments(document, company_id="c1")
     result = to_evidence_mappings(documents=(document,), fragments=fragments, attempts=())
 
     assert len(result["fragments"]) == len(fragments)
@@ -118,7 +119,7 @@ def test_fragment_mapping은_평범한_dict_list다():
         assert isinstance(mapping["reason_codes"], list)
         assert isinstance(mapping["score_millis"], int)
         assert set(mapping.keys()) == {
-            "fragment_id", "document_id", "location", "text_sha256", "text",
+            "company_id", "fragment_id", "document_id", "location", "text_sha256", "text",
             "section_id", "slot_id", "score_millis", "reason_codes",
         }
 
@@ -128,11 +129,12 @@ def test_attempt_mapping은_slot_ids를_list로_바꾼다():
     mapping = result["attempts"][0]
     assert isinstance(mapping["slot_ids"], list)
     assert mapping["slot_ids"] == ["culture:work_principle"]
+    assert mapping["company_id"] == "c1"
 
 
 def test_출력값_안에_tuple가_없다():
     document = _document(("본문 구간 하나입니다.",))
-    fragments = build_fragments(document)
+    fragments = build_fragments(document, company_id="c1")
     result = to_evidence_mappings(documents=(document,), fragments=fragments, attempts=(_attempt(),))
 
     def _assert_no_tuple(value: object) -> None:
@@ -154,7 +156,7 @@ def test_exact_evidence_hashes는_문서의_fragment_해시_전체를_정렬해_
     """왕복 시험 — 목록에 있는 해시는 정확히 이 문서의 fragment에서 나온 것들이다."""
     ranges = ("핵심가치 중심의 채용 문화입니다.", "합격자 인터뷰 사례를 소개합니다.")
     document = _document(ranges)
-    fragments = build_fragments(document)
+    fragments = build_fragments(document, company_id="c1")
     assert len(fragments) == 2  # 구간마다 신호 키워드가 달라 서로 다른 슬롯 1개씩만 매긴다
 
     result = to_evidence_mappings(documents=(document,), fragments=fragments, attempts=())
@@ -170,7 +172,7 @@ def test_exact_evidence_hashes는_중복_해시를_하나로_합친다():
     개수만큼 복제한다(culture:work_principle·culture:verified_case 둘 다) —
     내용이 같으니 exact_evidence_hashes는 1개로 합쳐져야 한다."""
     document = _document(("평범한 채용 안내 문단입니다.",))
-    fragments = build_fragments(document)
+    fragments = build_fragments(document, company_id="c1")
     assert len(fragments) == 2  # 같은 텍스트, slot_id만 다른 fragment 2개
     assert len({fragment.text_sha256 for fragment in fragments}) == 1
 
@@ -189,7 +191,7 @@ def test_fragment가_없는_문서는_documents에서_빠진다():
         document_id="d-unmatched",
         canonical_url="https://company.example/xyz-unrelated",
     )
-    fragments = build_fragments(document)
+    fragments = build_fragments(document, company_id="c1")
     assert fragments == ()  # 알 수 없는 페이지 유형 — 조각을 만들지 않는다
 
     result = to_evidence_mappings(documents=(document,), fragments=fragments, attempts=())
@@ -204,7 +206,7 @@ def test_일부_문서만_fragment가_있으면_그_문서만_남는다():
         document_id="d-unmatched",
         canonical_url="https://company.example/xyz-unrelated",
     )
-    fragments = build_fragments(matched) + build_fragments(unmatched)
+    fragments = build_fragments(matched, company_id="c1") + build_fragments(unmatched, company_id="c1")
 
     result = to_evidence_mappings(documents=(matched, unmatched), fragments=fragments, attempts=())
 
@@ -214,7 +216,7 @@ def test_일부_문서만_fragment가_있으면_그_문서만_남는다():
 
 def test_exact_evidence_hashes_형식은_소문자_64자리_16진수():
     document = _document(("채용 관련 본문입니다.",))
-    fragments = build_fragments(document)
+    fragments = build_fragments(document, company_id="c1")
     result = to_evidence_mappings(documents=(document,), fragments=fragments, attempts=())
 
     for value in result["documents"][0]["exact_evidence_hashes"]:
@@ -222,6 +224,49 @@ def test_exact_evidence_hashes_형식은_소문자_64자리_16진수():
         assert len(value) == 64
         assert value == value.lower()
         int(value, 16)  # 16진수가 아니면 ValueError
+
+
+# ── 계약 generation=8: fragments·attempts의 company_id ────────
+
+
+def test_fragment_mapping의_company_id는_fragment_자신의_값을_그대로_담는다():
+    document = _document(("채용 문구입니다.",))
+    fragments = build_fragments(document, company_id="target-co")
+    result = to_evidence_mappings(documents=(document,), fragments=fragments, attempts=())
+
+    assert result["fragments"]
+    assert all(mapping["company_id"] == "target-co" for mapping in result["fragments"])
+
+
+def test_attempt_mapping의_company_id는_attempt_자신의_값을_그대로_담는다():
+    attempt = _attempt(company_id="target-co")
+    result = to_evidence_mappings(documents=(), fragments=(), attempts=(attempt,))
+
+    assert result["attempts"][0]["company_id"] == "target-co"
+
+
+def test_변환_단계는_document의_company_id로_fragment_company_id를_채우지_않는다():
+    """공격 시험 — document.company_id("c1")와 fragment.company_id("other-co")가
+    서로 다를 때, to_evidence_mappings가 document 값으로 몰래 덮어쓰면 안 된다.
+    변환 단계는 pass-through만 해야 소유권 검증이 의미를 가진다."""
+    document = _document(("채용 문구입니다.",), company_id="c1")
+    fragments = build_fragments(document, company_id="other-co")
+
+    result = to_evidence_mappings(documents=(document,), fragments=fragments, attempts=())
+
+    assert result["documents"][0]["company_id"] == "c1"
+    assert all(mapping["company_id"] == "other-co" for mapping in result["fragments"])
+
+
+def test_변환_단계는_document의_company_id로_attempt_company_id를_채우지_않는다():
+    document = _document(("채용 문구입니다.",), company_id="c1")
+    fragments = build_fragments(document, company_id="c1")
+    attempt = _attempt(company_id="other-co")
+
+    result = to_evidence_mappings(documents=(document,), fragments=fragments, attempts=(attempt,))
+
+    assert result["documents"][0]["company_id"] == "c1"
+    assert result["attempts"][0]["company_id"] == "other-co"
 
 
 def test_report_evidence는_import하지_않는다():

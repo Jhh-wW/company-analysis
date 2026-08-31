@@ -17,7 +17,9 @@ from src.features.homepage.constants import (
 )
 from src.features.homepage.ir_pdf import OfficialIrCollectResult
 from src.features.homepage.wide_collect import collect_official_web_documents
+from src.features.homepage.wide_evidence_mapping import to_evidence_mappings
 from src.features.homepage.wide_fetch import WideRawResponse, WideTransportError
+from src.features.homepage.wide_fragments import build_fragments
 
 ROBOTS_ALLOW_ALL = "User-agent: *\nAllow: /\n"
 
@@ -724,6 +726,78 @@ def test_company_id는_문서에_그대로_전달된다():
 
     assert result.documents
     assert all(doc.company_id == "dart-00012345" for doc in result.documents)
+
+
+# ── 계약 generation=8: 모든 attempt·fragment가 대상 회사 company_id를 갖는다 ──
+
+
+def test_모든_attempt는_대상_회사_company_id를_갖는다():
+    """robots·sitemap·페이지 attempt 전부가 이 수집 실행이 대상으로 한
+    회사 값을 실어야 한다 — 문서가 하나도 안 만들어져도(예: robots 차단)
+    attempt 자체는 남으므로 그 attempt에도 대상 회사가 찍혀야 한다."""
+    links = "".join(f'<a href="/page{i}">페이지{i}</a>' for i in range(3))
+    pages = {
+        "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
+        "https://company.example/sitemap.xml": _missing("https://company.example/sitemap.xml"),
+        "https://company.example/": _page(_body("루트 페이지 본문") + links, "https://company.example/"),
+    }
+    for i in range(3):
+        url = f"https://company.example/page{i}"
+        pages[url] = _page(_body(f"페이지{i} 본문"), url)
+    site = _FakeWideSite(pages)
+
+    result = _collect(site, company_id="dart-00012345")
+
+    assert result.attempts  # 최소 robots·sitemap·페이지 attempt가 있다
+    assert all(a.company_id == "dart-00012345" for a in result.attempts)
+
+
+def test_robots_차단으로_문서가_0건이어도_attempt의_company_id는_대상_회사다():
+    site = _FakeWideSite({"https://company.example/": _page(_body("루트 페이지"), "https://company.example/")})
+
+    result = _collect(site, company_id="dart-99999999")
+
+    assert result.documents == ()
+    assert result.attempts
+    assert all(a.company_id == "dart-99999999" for a in result.attempts)
+
+
+def test_전체_파이프라인_fragment와_attempt_모두_대상_회사_company_id를_갖는다():
+    """수집(wide_collect) → 조각화(build_fragments) → 변환(to_evidence_mappings)
+    전체를 실제로 이어 돌려, 최종 산출의 documents·fragments·attempts 전부가
+    같은 대상 회사 company_id를 갖는지 왕복으로 고정한다."""
+    target_company_id = "target-co"
+    pages = {
+        "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
+        "https://company.example/sitemap.xml": _missing("https://company.example/sitemap.xml"),
+        "https://company.example/": _page(
+            _body("루트 페이지 본문") + '<a href="/careers">채용</a>', "https://company.example/"
+        ),
+        "https://company.example/careers": _page(_body("채용 페이지 본문"), "https://company.example/careers"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(site, company_id=target_company_id)
+    assert result.documents  # 실제로 문서가 만들어졌는지 확인(공허한 통과 방지)
+
+    # 호출자는 문서마다 build_fragments를 불러 이어붙인다(브리핑·docstring 명시 패턴) —
+    # company_id는 document.company_id를 베끼는 게 아니라 이 수집이 대상으로 한
+    # target_company_id를 매번 명시적으로 넘긴다.
+    fragments = tuple(
+        fragment
+        for document in result.documents
+        for fragment in build_fragments(document, company_id=target_company_id)
+    )
+    assert fragments  # 실제로 조각이 만들어졌는지 확인(공허한 통과 방지)
+
+    mapped = to_evidence_mappings(documents=result.documents, fragments=fragments, attempts=result.attempts)
+
+    assert mapped["documents"]
+    assert all(doc["company_id"] == target_company_id for doc in mapped["documents"])
+    assert mapped["fragments"]
+    assert all(frag["company_id"] == target_company_id for frag in mapped["fragments"])
+    assert mapped["attempts"]
+    assert all(att["company_id"] == target_company_id for att in mapped["attempts"])
 
 
 def test_홈페이지_주소가_비어있으면_빈_결과():

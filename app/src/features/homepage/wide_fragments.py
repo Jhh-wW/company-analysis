@@ -13,6 +13,12 @@
   `app/src/shared/report_evidence/policy.py`)만 나온다. comparison_*·
   limitation·historical_performance는 이 어휘에 없으므로 이 모듈에서
   «절대» 만들어지지 않는다(시험으로 0건을 고정한다).
+★ 계약 generation=8: ``build_fragments``는 ``company_id``를 **필수
+  키워드 인자**로 받는다 — ``document.company_id``에서 자동으로 채워
+  넣지 않는다. 호출자(문서마다 이 함수를 부르는 다음 담당자)가 «지금
+  이 조회가 실제로 어느 회사를 대상으로 했는지»를 매번 직접 넘겨야
+  한다. document의 company_id와 자동으로 같다고 가정하면 다른 회사
+  조회 결과가 섞여도 조용히 통과할 수 있어, 그 가정 자체를 없앴다.
 """
 
 from __future__ import annotations
@@ -33,11 +39,16 @@ _REASON_PAGE_TYPE_SIGNAL = "page_type_signal"
 _REASON_BODY_KEYWORD_MATCH = "body_keyword_match"
 
 
-def build_fragments(document: WideDocumentIdentity) -> tuple[WideFragment, ...]:
+def build_fragments(document: WideDocumentIdentity, *, company_id: str) -> tuple[WideFragment, ...]:
     """문서 하나의 usable_ranges 전부에서 슬롯 태그된 fragment를 만든다.
 
     Args:
         document: 이미 검증을 통과한 ``WideDocumentIdentity``.
+        company_id: 이 조회가 실제로 대상으로 한 회사 식별자(필수 — 계약
+            generation=8). ``document.company_id``와 다르게 넘겨도 이
+            함수는 막지 않는다(그 판정은 앱 계약의 몫이다) — 호출자가
+            «생각 없이 document 값을 그대로 베끼는» 습관을 없애기 위해
+            의도적으로 독립된 인자로 뒀다.
 
     Returns:
         슬롯이 태그된 ``WideFragment`` 튜플. 페이지 유형을 못 알아낸
@@ -65,6 +76,7 @@ def build_fragments(document: WideDocumentIdentity) -> tuple[WideFragment, ...]:
             section_id = slot_id.split(":", 1)[0]
             fragments.append(
                 WideFragment(
+                    company_id=company_id,
                     fragment_id=_fragment_id(document.document_id, index, slot_id),
                     document_id=document.document_id,
                     location=location,
