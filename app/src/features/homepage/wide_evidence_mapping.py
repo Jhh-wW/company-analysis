@@ -11,6 +11,12 @@
   ``{"start": int, "end": int}`` 오프셋 목록이다(구간 사이 "\\n" 1자
   반영, 정렬·비겹침). ``WideFragment.location``의 조각index는 이 목록의
   같은 인덱스를 가리킨다.
+★ P0-3(계약 generation=7) ``exact_evidence_hashes``: document Mapping마다
+  그 document_id로 실제 내보내는 fragment들의 ``text_sha256`` 전체를
+  결정론(정렬) 순서로, 중복 없이 담는다. 앱 계약은 이 값이 비어 있거나
+  fragment의 text_sha256이 자기 문서 목록에 없으면 거절하므로, **scored
+  fragment가 하나도 없는 문서는 애초에 documents 출력에서 뺀다**(조회
+  사실 자체는 attempt로 남아 있으니 손실이 아니다).
 """
 
 from __future__ import annotations
@@ -40,12 +46,32 @@ def to_evidence_mappings(
         ``{"documents": [...], "fragments": [...], "attempts": [...]}``.
         중첩 값은 전부 ``dict``·``list``·``str``·``int``만 쓴다(``tuple``도
         ``frozenset``도 없다) — 계약 쪽 (역)직렬화가 그대로 받을 수 있게.
+        ``fragments``가 하나도 가리키지 않는(scored fragment가 0개인) 문서는
+        ``documents``에서 빠진다 — ``exact_evidence_hashes``가 빈 값이 되어
+        앱 계약에 거절당하는 대신, 애초에 내보내지 않는다(P0-3).
     """
+    hashes_by_document = _exact_hashes_by_document(fragments)
     return {
-        "documents": [_document_mapping(document) for document in documents],
+        "documents": [
+            _document_mapping(document, hashes_by_document[document.document_id])
+            for document in documents
+            if hashes_by_document.get(document.document_id)
+        ],
         "fragments": [_fragment_mapping(fragment) for fragment in fragments],
         "attempts": [_attempt_mapping(attempt) for attempt in attempts],
     }
+
+
+def _exact_hashes_by_document(fragments: tuple[WideFragment, ...]) -> dict[str, list[str]]:
+    """document_id별로 실제 내보내는 fragment의 text_sha256을 결정론·중복없이 모은다.
+
+    정렬(사전식) 순서를 쓴다 — 호출자가 넘긴 fragments의 나열 순서에
+    의존하지 않아도 항상 같은 출력을 보장한다(왕복·재현성).
+    """
+    grouped: dict[str, set[str]] = {}
+    for fragment in fragments:
+        grouped.setdefault(fragment.document_id, set()).add(fragment.text_sha256)
+    return {document_id: sorted(hashes) for document_id, hashes in grouped.items()}
 
 
 def canonical_text_of(document: WideDocumentIdentity) -> str:
@@ -69,7 +95,9 @@ def range_offsets_of(document: WideDocumentIdentity) -> list[dict[str, int]]:
     return offsets
 
 
-def _document_mapping(document: WideDocumentIdentity) -> dict[str, object]:
+def _document_mapping(
+    document: WideDocumentIdentity, exact_evidence_hashes: list[str]
+) -> dict[str, object]:
     return {
         "company_id": document.company_id,
         "document_id": document.document_id,
@@ -86,6 +114,10 @@ def _document_mapping(document: WideDocumentIdentity) -> dict[str, object]:
         "parser_version": document.parser_version,
         "requirement": document.requirement,
         "source_tier": document.source_tier,
+        #: P0-3(계약 generation=7) — 이 문서로 실제 내보내는 fragment의
+        #: text_sha256 전체(정렬·중복없음). 호출 시점에 이미 1개 이상임이
+        #: 보장된다(``to_evidence_mappings``가 0개인 문서는 애초에 뺀다).
+        "exact_evidence_hashes": exact_evidence_hashes,
     }
 
 

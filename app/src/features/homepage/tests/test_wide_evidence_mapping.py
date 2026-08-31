@@ -88,8 +88,10 @@ def test_offset은_정렬되고_겹치지_않는다():
 
 
 def test_document_mapping은_계약_필드_이름을_그대로_쓴다():
-    document = _document(("본문 구간입니다.",))
-    result = to_evidence_mappings(documents=(document,), fragments=(), attempts=())
+    document = _document(("채용 관련 본문입니다.",))  # canonical_url이 /careers라 슬롯이 잡힌다
+    fragments = build_fragments(document)
+    assert fragments  # 이 시험이 exact_evidence_hashes를 검증하려면 fragment가 있어야 한다
+    result = to_evidence_mappings(documents=(document,), fragments=fragments, attempts=())
 
     assert len(result["documents"]) == 1
     mapping = result["documents"][0]
@@ -97,10 +99,12 @@ def test_document_mapping은_계약_필드_이름을_그대로_쓴다():
         "company_id", "document_id", "canonical_url", "source_kind", "publisher",
         "title", "published_on", "collected_at", "content_sha256", "identity_binding",
         "usable_ranges", "collector_version", "parser_version", "requirement", "source_tier",
+        "exact_evidence_hashes",
     }
     assert mapping["document_id"] == "d1"
     assert isinstance(mapping["usable_ranges"], list)
-    assert mapping["usable_ranges"][0] == {"start": 0, "end": len("본문 구간입니다.")}
+    assert mapping["usable_ranges"][0] == {"start": 0, "end": len("채용 관련 본문입니다.")}
+    assert mapping["exact_evidence_hashes"] == sorted({f.text_sha256 for f in fragments})
 
 
 def test_fragment_mapping은_평범한_dict_list다():
@@ -141,6 +145,83 @@ def test_출력값_안에_tuple가_없다():
                 _assert_no_tuple(item)
 
     _assert_no_tuple(result)
+
+
+# ── P0-3(계약 generation=7): exact_evidence_hashes ──────────
+
+
+def test_exact_evidence_hashes는_문서의_fragment_해시_전체를_정렬해_담는다():
+    """왕복 시험 — 목록에 있는 해시는 정확히 이 문서의 fragment에서 나온 것들이다."""
+    ranges = ("핵심가치 중심의 채용 문화입니다.", "합격자 인터뷰 사례를 소개합니다.")
+    document = _document(ranges)
+    fragments = build_fragments(document)
+    assert len(fragments) == 2  # 구간마다 신호 키워드가 달라 서로 다른 슬롯 1개씩만 매긴다
+
+    result = to_evidence_mappings(documents=(document,), fragments=fragments, attempts=())
+
+    mapping = result["documents"][0]
+    fragment_hashes = {fragment.text_sha256 for fragment in fragments}
+    assert len(fragment_hashes) == 2  # 두 구간의 실제 텍스트가 달라 해시도 다르다
+    assert mapping["exact_evidence_hashes"] == sorted(fragment_hashes)
+
+
+def test_exact_evidence_hashes는_중복_해시를_하나로_합친다():
+    """본문에 슬롯별 신호 키워드가 없으면 build_fragments가 같은 텍스트를 슬롯
+    개수만큼 복제한다(culture:work_principle·culture:verified_case 둘 다) —
+    내용이 같으니 exact_evidence_hashes는 1개로 합쳐져야 한다."""
+    document = _document(("평범한 채용 안내 문단입니다.",))
+    fragments = build_fragments(document)
+    assert len(fragments) == 2  # 같은 텍스트, slot_id만 다른 fragment 2개
+    assert len({fragment.text_sha256 for fragment in fragments}) == 1
+
+    result = to_evidence_mappings(documents=(document,), fragments=fragments, attempts=())
+
+    mapping = result["documents"][0]
+    assert mapping["exact_evidence_hashes"] == [fragments[0].text_sha256]
+
+
+def test_fragment가_없는_문서는_documents에서_빠진다():
+    """P0-3: 페이지 유형을 못 알아내 scored fragment가 0개인 문서는
+    exact_evidence_hashes가 빈 값으로 나가는 대신(앱 계약이 거절) 애초에
+    documents 출력에서 빠진다 — 조회 사실 자체는 attempt로 따로 남는다."""
+    document = _document(
+        ("아무 키워드도 없는 본문입니다.",),
+        document_id="d-unmatched",
+        canonical_url="https://company.example/xyz-unrelated",
+    )
+    fragments = build_fragments(document)
+    assert fragments == ()  # 알 수 없는 페이지 유형 — 조각을 만들지 않는다
+
+    result = to_evidence_mappings(documents=(document,), fragments=fragments, attempts=())
+
+    assert result["documents"] == []
+
+
+def test_일부_문서만_fragment가_있으면_그_문서만_남는다():
+    matched = _document(("채용 관련 본문입니다.",), document_id="d-matched")
+    unmatched = _document(
+        ("전혀 관련 없는 본문입니다.",),
+        document_id="d-unmatched",
+        canonical_url="https://company.example/xyz-unrelated",
+    )
+    fragments = build_fragments(matched) + build_fragments(unmatched)
+
+    result = to_evidence_mappings(documents=(matched, unmatched), fragments=fragments, attempts=())
+
+    document_ids = {mapping["document_id"] for mapping in result["documents"]}
+    assert document_ids == {"d-matched"}
+
+
+def test_exact_evidence_hashes_형식은_소문자_64자리_16진수():
+    document = _document(("채용 관련 본문입니다.",))
+    fragments = build_fragments(document)
+    result = to_evidence_mappings(documents=(document,), fragments=fragments, attempts=())
+
+    for value in result["documents"][0]["exact_evidence_hashes"]:
+        assert isinstance(value, str)
+        assert len(value) == 64
+        assert value == value.lower()
+        int(value, 16)  # 16진수가 아니면 ValueError
 
 
 def test_report_evidence는_import하지_않는다():
