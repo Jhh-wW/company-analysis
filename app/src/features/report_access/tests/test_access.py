@@ -4,12 +4,14 @@ import concurrent.futures
 import datetime as dt
 import hashlib
 import sqlite3
+import threading
 import time
 
 import pytest
 from starlette.requests import Request
 
 from src.core import clock
+from src.core.constants import REPORT_GENERATION_EXECUTION_MAX_SEC
 from src.features.admin_dashboard import store as dashboard_store
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
@@ -179,8 +181,7 @@ def test_PUBLIC_token은_DB에_원문이_없고_만료와_철회가_즉시_닫�
         )
 
 
-def test_PUBLIC_grant는_최대작업뒤_시작하는_보고서60일보다_commit여유만큼_길다():
-    from src.core.constants import REPORT_GENERATION_EXECUTION_MAX_SEC
+def test_PUBLIC_grant는_스케줄러인계와_최대작업뒤_보고서60일과_commit여유를_각각보장한다():
     from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
 
     issued_at = 1_800_000_000.0
@@ -191,8 +192,12 @@ def test_PUBLIC_grant는_최대작업뒤_시작하는_보고서60일보다_commi
         issued_at + REPORT_GENERATION_EXECUTION_MAX_SEC + report_lifetime_sec
     )
     expected_expiry = (
-        latest_delivery_expiry + constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
+        latest_delivery_expiry
+        + constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
+        + constants.PUBLIC_GRANT_ADMISSION_MARGIN_SEC
     )
+    assert constants.PUBLIC_GRANT_ADMISSION_MARGIN_SEC > 0
+    assert constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC > 0
     assert grant.expires_at == expected_expiry
     with storage_db.connect() as conn:
         # 실제 보고서는 별도 Delivery 판정이 60일에 먼저 닫는다. grant가 이
@@ -209,6 +214,163 @@ def test_PUBLIC_grant는_최대작업뒤_시작하는_보고서60일보다_commi
             locator=report_id,
             now=expected_expiry,
         )
+
+
+def test_PUBLIC_1초인계와_3599점5초실행뒤_60일Delivery결속이_정상성공한다():
+    from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
+
+    issued_at = 1_800_000_000.0
+    completed_at = issued_at + 1.0 + 3599.5
+    delivery_expires_at = (
+        completed_at + REPORT_LINK_MAX_AGE_DAYS * 24 * 60 * 60
+    )
+    conn = sqlite3.connect(":memory:")
+    try:
+        store.ensure_schema(conn)
+        grant = store.issue_and_bind(
+            conn,
+            existing_token="",
+            run_id="09" * 16,
+            now=issued_at,
+        )
+        conn.commit()
+
+        assert store.bind_report(
+            conn,
+            run_id="09" * 16,
+            report_id="19" * 16,
+            delivery_expires_at=delivery_expires_at,
+            now=completed_at,
+        )
+        assert grant.expires_at > (
+            delivery_expires_at + constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
+        )
+        assert grant.expires_at - (
+            delivery_expires_at + constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
+        ) == pytest.approx(
+            constants.PUBLIC_GRANT_ADMISSION_MARGIN_SEC
+            - (1.0 + 3599.5 - REPORT_GENERATION_EXECUTION_MAX_SEC)
+        )
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    ("elapsed_from_issue", "allowed"),
+    (
+        (
+            REPORT_GENERATION_EXECUTION_MAX_SEC
+            + constants.PUBLIC_GRANT_ADMISSION_MARGIN_SEC
+            - 0.001,
+            True,
+        ),
+        (
+            REPORT_GENERATION_EXECUTION_MAX_SEC
+            + constants.PUBLIC_GRANT_ADMISSION_MARGIN_SEC,
+            False,
+        ),
+    ),
+)
+def test_PUBLIC_scheduler인계여유는_끝직전까지만_유한하게보장한다(
+    elapsed_from_issue: float,
+    allowed: bool,
+):
+    from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
+
+    issued_at = 1_800_000_000.0
+    completed_at = issued_at + elapsed_from_issue
+    delivery_expires_at = (
+        completed_at + REPORT_LINK_MAX_AGE_DAYS * 24 * 60 * 60
+    )
+    conn = sqlite3.connect(":memory:")
+    try:
+        store.ensure_schema(conn)
+        store.issue_and_bind(
+            conn,
+            existing_token="",
+            run_id="29" * 16,
+            now=issued_at,
+        )
+        conn.commit()
+        if allowed:
+            assert store.bind_report(
+                conn,
+                run_id="29" * 16,
+                report_id="39" * 16,
+                delivery_expires_at=delivery_expires_at,
+                now=completed_at,
+            )
+        else:
+            with pytest.raises(store.PublicGrantBindingUnavailable):
+                store.bind_report(
+                    conn,
+                    run_id="29" * 16,
+                    report_id="39" * 16,
+                    delivery_expires_at=delivery_expires_at,
+                    now=completed_at,
+                )
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("preopened_deferred", (False, True))
+def test_PUBLIC_production_now는_SQLite_writer_lock을_얻은뒤에만_읽는다(
+    tmp_path,
+    monkeypatch,
+    preopened_deferred: bool,
+):
+    db_path = tmp_path / "writer-clock.db"
+    with sqlite3.connect(db_path) as seed:
+        store.ensure_schema(seed)
+        first = store.issue_and_bind(
+            seed,
+            existing_token="",
+            run_id="30" * 16,
+            now=1_800_000_000.0,
+        )
+        seed.commit()
+
+    clock_read = threading.Event()
+    worker_started = threading.Event()
+
+    def ordered_time() -> float:
+        clock_read.set()
+        return first.expires_at + 1.0
+
+    monkeypatch.setattr(store.time, "time", ordered_time)
+    blocker = sqlite3.connect(db_path, timeout=5.0)
+    blocker.execute("BEGIN IMMEDIATE")
+
+    def issue_after_lock():
+        with sqlite3.connect(db_path, timeout=5.0) as conn:
+            if preopened_deferred:
+                # 상위 caller가 거래만 먼저 연 경로도 dummy write가 실제 writer
+                # 자리를 얻은 뒤에만 production clock으로 넘어가야 한다.
+                conn.execute("BEGIN DEFERRED")
+            worker_started.set()
+            granted = store.issue_and_bind(
+                conn,
+                existing_token=first.token,
+                run_id="31" * 16,
+            )
+            conn.commit()
+            return granted
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(issue_after_lock)
+            assert worker_started.wait(timeout=2)
+            # 다른 연결이 writer를 쥔 동안 production clock을 먼저 읽으면 이
+            # 사건이 켜진다. writer 순서가 먼저라면 아직 꺼져 있어야 한다.
+            assert not clock_read.wait(timeout=0.2)
+            blocker.commit()
+            renewed = future.result(timeout=5)
+    finally:
+        blocker.close()
+
+    assert clock_read.is_set()
+    assert renewed.reused is True
+    assert renewed.token == first.token
 
 
 def test_PUBLIC_만료직전_동시시작은_같은grant를연장해_두run과기존보고서를보존한다():
@@ -269,6 +431,183 @@ def test_PUBLIC_만료직전_동시시작은_같은grant를연장해_두run과�
                     locator=locator,
                     now=boundary_at + 1,
                 )
+    finally:
+        conn.close()
+
+
+def test_PUBLIC_만료직후_서로다른연결의_lock순서와_응답순서가뒤집혀도_한token이다(
+    tmp_path,
+):
+    db_path = tmp_path / "stale-response-order.db"
+    issued_at = 1_800_000_000.0
+    old_run = "40" * 16
+    old_report = "41" * 16
+    with sqlite3.connect(db_path) as seed:
+        store.ensure_schema(seed)
+        first = store.issue_and_bind(
+            seed,
+            existing_token="",
+            run_id=old_run,
+            now=issued_at,
+        )
+        assert store.bind_report(
+            seed,
+            run_id=old_run,
+            report_id=old_report,
+            delivery_expires_at=issued_at + 100,
+            now=issued_at + 1,
+        )
+        seed.commit()
+
+    request_a_arrived = threading.Event()
+    let_a_enter_store = threading.Event()
+    request_a_calling = threading.Event()
+    request_b_staged = threading.Event()
+    let_b_commit = threading.Event()
+    let_b_respond = threading.Event()
+
+    def request_a():
+        request_a_arrived.set()
+        assert let_a_enter_store.wait(timeout=5)
+        request_a_calling.set()
+        with sqlite3.connect(db_path, timeout=5.0) as conn:
+            response = store.issue_and_bind(
+                conn,
+                existing_token=first.token,
+                run_id="42" * 16,
+                now=first.expires_at + 2.0,
+            )
+            conn.commit()
+            return response
+
+    def request_b():
+        with sqlite3.connect(db_path, timeout=5.0) as conn:
+            # A가 먼저 도착했어도 OS 스케줄링으로 B가 writer를 먼저 얻는 공격.
+            conn.execute("BEGIN IMMEDIATE")
+            response = store.issue_and_bind(
+                conn,
+                existing_token=first.token,
+                run_id="43" * 16,
+                now=first.expires_at + 1.0,
+            )
+            request_b_staged.set()
+            assert let_b_commit.wait(timeout=5)
+            conn.commit()
+            # DB 순서는 B→A이지만 HTTP 응답은 A→B로 뒤집는다.
+            assert let_b_respond.wait(timeout=5)
+            return response
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        future_a = pool.submit(request_a)
+        assert request_a_arrived.wait(timeout=2)
+        future_b = pool.submit(request_b)
+        assert request_b_staged.wait(timeout=2)
+        let_a_enter_store.set()
+        assert request_a_calling.wait(timeout=2)
+        assert not future_a.done()
+        let_b_commit.set()
+        response_a = future_a.result(timeout=5)
+        assert not future_b.done()
+        let_b_respond.set()
+        response_b = future_b.result(timeout=5)
+
+    assert response_a.reused is True
+    assert response_b.reused is True
+    assert response_a.token == response_b.token == first.token
+    # 마지막 HTTP 응답(B)의 cookie도 B→A DB 순서에서 생긴 모든 자원을 연다.
+    with sqlite3.connect(db_path) as check:
+        for locator in (old_report, "42" * 16, "43" * 16):
+            assert store.public_grant_allows(
+                check,
+                raw_token=response_b.token,
+                locator=locator,
+                now=first.expires_at + 3.0,
+            )
+
+
+def test_PUBLIC_stale유예_정확한끝경계와_그뒤에는_옛결속을_물려주지않는다():
+    conn = sqlite3.connect(":memory:")
+    try:
+        store.ensure_schema(conn)
+        first = store.issue_and_bind(
+            conn,
+            existing_token="",
+            run_id="50" * 16,
+            now=1_800_000_000.0,
+        )
+        conn.commit()
+        outside_at = (
+            first.expires_at + constants.PUBLIC_GRANT_STALE_RENEWAL_GRACE_SEC
+        )
+        replacement = store.issue_and_bind(
+            conn,
+            existing_token=first.token,
+            run_id="51" * 16,
+            now=outside_at,
+        )
+        conn.commit()
+
+        assert replacement.reused is False
+        assert replacement.token != first.token
+        assert not store.public_grant_allows(
+            conn,
+            raw_token=first.token,
+            locator="50" * 16,
+            now=outside_at,
+        )
+        assert not store.public_grant_allows(
+            conn,
+            raw_token=replacement.token,
+            locator="50" * 16,
+            now=outside_at,
+        )
+        assert store.public_grant_allows(
+            conn,
+            raw_token=replacement.token,
+            locator="51" * 16,
+            now=outside_at,
+        )
+    finally:
+        conn.close()
+
+
+def test_PUBLIC_다른token의_발급이_유예중인_stale행과_옛결속을_먼저지우지않는다():
+    conn = sqlite3.connect(":memory:")
+    try:
+        store.ensure_schema(conn)
+        first = store.issue_and_bind(
+            conn,
+            existing_token="",
+            run_id="52" * 16,
+            now=1_800_000_000.0,
+        )
+        conn.commit()
+
+        unrelated = store.issue_and_bind(
+            conn,
+            existing_token="",
+            run_id="53" * 16,
+            now=first.expires_at + 1.0,
+        )
+        conn.commit()
+        renewed = store.issue_and_bind(
+            conn,
+            existing_token=first.token,
+            run_id="54" * 16,
+            now=first.expires_at + 2.0,
+        )
+        conn.commit()
+
+        assert unrelated.token != first.token
+        assert renewed.reused is True
+        assert renewed.token == first.token
+        for locator in ("52" * 16, "54" * 16):
+            assert store.public_grant_allows(
+                conn,
+                raw_token=first.token,
+                locator=locator,
+                now=first.expires_at + 3.0,
+            )
     finally:
         conn.close()
 
@@ -1128,7 +1467,7 @@ def test_같은_PUBLIC_grant의_동시_run결속은_모두_보존된다():
         )
 
 
-def test_만료grant와binding은_FK가_꺼져도_발급transaction에서_같이_정리된다():
+def test_stale유예가끝난grant와binding은_FK가_꺼져도_발급transaction에서_같이정리된다():
     conn = sqlite3.connect(":memory:")
     try:
         store.ensure_schema(conn)
@@ -1146,7 +1485,10 @@ def test_만료grant와binding은_FK가_꺼져도_발급transaction에서_같이
         conn.commit()
 
         issued = store.issue_and_bind(
-            conn, existing_token="", run_id="d" * 32, now=20
+            conn,
+            existing_token="",
+            run_id="d" * 32,
+            now=20 + constants.PUBLIC_GRANT_STALE_RENEWAL_GRACE_SEC,
         )
         assert issued.token
         assert conn.execute(

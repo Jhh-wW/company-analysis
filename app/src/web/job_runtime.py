@@ -191,7 +191,8 @@ class Job:
     #: 작업 입장 때 확정한 열람 권한 종류. 완료 시 share track이나 비용 상태를
     #: 다시 추측하면 PUBLIC 저장 실패를 LINK/ADMIN 성공으로 잘못 통과시킬 수 있다.
     requires_public_report_grant: bool = False
-    #: 응답에 실은 PUBLIC cookie와 DB grant가 함께 끝나는 서버 기준 절대 시각.
+    #: 입장 응답 당시 관측한 PUBLIC grant 만료. 최종 권한 판정에는 쓰지 않는다.
+    #: 같은 token을 다른 탭이 연장할 수 있으므로 정본은 마지막 DB 거래의 행이다.
     public_grant_expires_at: float = 0.0
     #: 한 번 고정한 Delivery 발급/만료 시각. 저장과 최종 출고가 같은 값을 써야
     #: 60일 권한 보장을 현재시각 추정으로 대신하지 않는다.
@@ -1238,14 +1239,6 @@ def stage_report_storage(conn: sqlite3.Connection, job: Job) -> None:
                 "PUBLIC 저장 전에 Delivery 만료 시각이 고정되지 않았습니다"
             )
         delivery_expires_at = job.delivery_expires_at.timestamp()
-        required_cookie_expiry = (
-            delivery_expires_at
-            + report_access_constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
-        )
-        if job.public_grant_expires_at <= required_cookie_expiry:
-            raise report_access_store.PublicGrantBindingUnavailable(
-                "PUBLIC cookie가 Delivery 만료와 저장 여유보다 먼저 끝납니다"
-            )
     if not report_store.insert_new(
         conn,
         report_id=job.job_id,
@@ -1271,6 +1264,8 @@ def stage_report_storage(conn: sqlite3.Connection, job: Job) -> None:
         raise report_access_store.PublicGrantBindingUnavailable(
             "PUBLIC 실행에 결속된 브라우저 grant가 없습니다"
         )
+    if job.member_email and not report_bound:
+        raise RuntimeError("MEMBER 실행에 결속된 불변 계정 소유권이 없습니다")
     job_interruptions.delete(conn, job.job_id)
     if job.share_link_hash and not share_store.finish_run(
         conn,

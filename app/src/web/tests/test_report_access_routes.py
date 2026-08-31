@@ -71,6 +71,7 @@ def test_새_PUBLIC_demo는_별도_cookie로_완주하고_ID만_아는_브라우
             REPORT_LINK_MAX_AGE_DAYS * 24 * 60 * 60
             + REPORT_GENERATION_EXECUTION_MAX_SEC
             + constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
+            + constants.PUBLIC_GRANT_ADMISSION_MARGIN_SEC
         )
         assert f"Max-Age={constants.PUBLIC_GRANT_MAX_AGE_SEC}" in set_cookie
         raw_grant = owner.cookies.get(constants.PUBLIC_GRANT_COOKIE_NAME)

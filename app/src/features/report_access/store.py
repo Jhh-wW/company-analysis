@@ -539,13 +539,62 @@ def issue_and_bind(
         char not in "0123456789abcdef" for char in clean_run
     ):
         raise ValueError("공개 grant에는 정확한 32자리 run ID가 필요합니다")
-    issued_at = float(time.time() if now is None else now)
     if not conn.in_transaction:
         conn.execute("BEGIN IMMEDIATE")
+    else:
+        # caller가 SELECT로 연 deferred transaction이어도 wall-clock을 읽기 전에
+        # 실제 writer 자리를 얻는다. WHERE 0은 행을 바꾸지 않지만 SQLite의 write
+        # transaction 경계를 지나므로 다른 프로세스의 발급과 순서를 고정한다.
+        conn.execute(
+            f"UPDATE {TABLE_GRANTS} SET expires_at = expires_at WHERE 0"
+        )
+    # 요청 도착 시각이 아니라 DB writer 순서가 권위다. 잠금 전에 시각을 잡으면
+    # 만료 전 요청 A가 멈춘 사이 만료 후 B가 먼저 회전하고, A가 또 다른 token을
+    # 만들어 같은 브라우저의 두 보고서를 갈라놓을 수 있다.
+    issued_at = float(time.time() if now is None else now)
+    if not math.isfinite(issued_at) or issued_at < 0:
+        raise ValueError("PUBLIC grant 발급 시각은 유한한 음이 아닌 값이어야 합니다")
+
+    presented_digest = (
+        token_hash(existing_token) if token_has_valid_shape(existing_token) else ""
+    )
+    presented_row = (
+        conn.execute(
+            f"""
+            SELECT created_at, expires_at, revoked_at
+              FROM {TABLE_GRANTS}
+             WHERE grant_hash = ?
+            """,
+            (presented_digest,),
+        ).fetchone()
+        if presented_digest
+        else None
+    )
+    reusable_digest = ""
+    if presented_row is not None:
+        created_at = float(presented_row[0])
+        expires_at = float(presented_row[1])
+        revoked_at = float(presented_row[2])
+        active = revoked_at == 0 and created_at <= issued_at < expires_at
+        stale_within_grace = bool(
+            revoked_at == 0
+            and created_at <= issued_at
+            and expires_at <= issued_at
+            and issued_at
+            < expires_at + constants.PUBLIC_GRANT_STALE_RENEWAL_GRACE_SEC
+        )
+        if active or stale_within_grace:
+            reusable_digest = presented_digest
 
     # 공격자가 익명 시작을 오래 반복해도 만료 tombstone이 DB를 무한히 키우지
     # 않는다. FK cascade가 결속을 먼저 안전하게 지우며 같은 writer transaction
     # 안에서 정리→상한 확인→발급까지 이어져 동시 요청도 상한을 넘지 못한다.
+    # 단, cookie와 서버 만료의 짧은 차이 안인 모든 행은 보존한다. 다른 token을
+    # 가진 요청이 먼저 왔다고 아직 유예 중인 stale token을 지워 버리면, 뒤의 두
+    # 탭이 다시 서로 다른 grant로 갈라진다. 철회 행은 유예 없이 즉시 지운다.
+    stale_cleanup_before = (
+        issued_at - constants.PUBLIC_GRANT_STALE_RENEWAL_GRACE_SEC
+    )
     conn.execute(
         f"""
         DELETE FROM {TABLE_BINDINGS}
@@ -554,37 +603,47 @@ def issue_and_bind(
               WHERE revoked_at > 0 OR expires_at <= ?
          )
         """,
-        (issued_at,),
+        (stale_cleanup_before,),
     )
     conn.execute(
-        f"DELETE FROM {TABLE_GRANTS} WHERE revoked_at > 0 OR expires_at <= ?",
-        (issued_at,),
+        f"""
+        DELETE FROM {TABLE_GRANTS}
+         WHERE revoked_at > 0 OR expires_at <= ?
+        """,
+        (stale_cleanup_before,),
     )
 
-    active = _active_hash(
-        conn,
-        existing_token,
-        now=issued_at,
-    )
-    if active:
+    if reusable_digest:
         # 이 브라우저가 새 보고서를 만들면 그 보고서의 완료 후 60일까지 같은
         # token이 살아야 한다. GET은 수명을 늘리지 않고, 새 run 입장 때만 새
-        # grant와 같은 절대 만료시각으로 갱신한다.
+        # grant와 같은 절대 만료시각으로 갱신한다. 만료 직후 유예 안의 token도
+        # 같은 hash를 쓰므로 동시 응답 순서가 바뀌어도 새 run을 잃지 않는다.
         renewed_expiry = issued_at + constants.PUBLIC_GRANT_MAX_AGE_SEC
-        conn.execute(
+        renewed = conn.execute(
             f"""
             UPDATE {TABLE_GRANTS}
                SET expires_at = MAX(expires_at, ?)
              WHERE grant_hash = ? AND revoked_at = 0
+               AND created_at <= ?
+               AND expires_at > ?
             """,
-            (renewed_expiry, active),
+            (
+                renewed_expiry,
+                reusable_digest,
+                issued_at,
+                issued_at - constants.PUBLIC_GRANT_STALE_RENEWAL_GRACE_SEC,
+            ),
         )
+        if renewed.rowcount <= 0:  # pragma: no cover - 같은 writer 거래의 방어선
+            raise RuntimeError("PUBLIC grant 갱신 경계가 거래 중 바뀌었습니다")
         row = conn.execute(
             f"SELECT expires_at FROM {TABLE_GRANTS} WHERE grant_hash = ?",
-            (active,),
+            (reusable_digest,),
         ).fetchone()
+        if row is None:  # pragma: no cover - 같은 writer 거래의 방어선
+            raise RuntimeError("갱신한 PUBLIC grant를 다시 읽을 수 없습니다")
         token = str(existing_token)
-        digest = active
+        digest = reusable_digest
         expires_at = float(row[0])
         reused = True
     else:

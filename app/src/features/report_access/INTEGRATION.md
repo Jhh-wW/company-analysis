@@ -7,12 +7,17 @@
 ## 작업 시작
 
 스케줄러에 넘기기 전에 `issue_and_bind()`를 같은 DB 쓰기 거래에서 호출한다.
-기존 token이 아직 유효하면 writer lock 안에서 같은 grant의 만료를 갱신한 뒤 새
-run을 붙인다. 만료 직전 두 탭이 같은 옛 cookie로 동시에 시작해도 서로 다른
-후속 token을 만들지 않으므로 어느 응답이 마지막에 와도 두 run과 기존 보고서를
-함께 연다. 만료·철회된 token만 새 grant로 대체하며 옛 결속은 부활시키지 않는다.
-`PUBLIC_GRANT_MAX_AGE_SEC`은 보고서 60일에 최대 실행시간과 commit 여유를 더한
-값이며, `/run` 응답 쿠키의 `Max-Age`도 이 값을 사용한다.
+`issue_and_bind()`는 production 시계를 읽기 전에 SQLite writer lock부터 잡는다.
+기존 token이 유효하거나, 철회되지 않았고 서버 만료 뒤
+`PUBLIC_GRANT_STALE_RENEWAL_GRACE_SEC` 안이면 같은 grant의 만료를 갱신한 뒤 새
+run을 붙인다. 이 유한 유예는 DB 만료와 브라우저가 응답을 받은 뒤 세기 시작한
+cookie 만료의 짧은 차이만 흡수한다. 만료 직후 두 탭의 lock 순서와 응답 순서가
+서로 뒤집혀도 어느 응답이 마지막에 와도 두 run과 기존 보고서를 함께 연다.
+유예 경계부터는 새 grant로 교체하고 옛 결속을 넘기지 않으며, 철회 token은 유예
+안이어도 절대 부활시키지 않는다.
+`PUBLIC_GRANT_MAX_AGE_SEC`은 보고서 60일에 최대 실행시간, 발급→scheduler 인계
+여유(`PUBLIC_GRANT_ADMISSION_MARGIN_SEC`), 최종 commit 여유를 각각 더한 값이다.
+`/run` 응답 쿠키의 `Max-Age`도 이 값을 사용한다.
 실제 서버 권한의 정본은 언제나 `IssuedGrant.expires_at`과 DB 행이다.
 
 ## 보고서 저장
@@ -45,10 +50,13 @@ Delivery·cache·charge와 같은 transaction에서 호출한다. `_save_report(
 
 MEMBER는 PUBLIC 시간 정책을 사용하지 않는다. 기존 `bind_member_run()`의 OAuth
 subject 결속과 `bind_report(delivery_expires_at=None)`의 MEMBER 갱신 흐름은 그대로
-유지한다. LINK·ADMIN처럼 report_access 표가 소유하지 않는 저장에서 나오는
-`False`도 정상이다.
+유지한다. Job이 MEMBER라고 확정했는데 `bind_report()`가 `False`이면 소유자 없는
+보고서를 만들지 않도록 staging 전체를 rollback한다. LINK·ADMIN처럼
+report_access 표가 소유하지 않는 저장에서 나오는 `False`만 정상이다.
 
 `job_runtime.Job.requires_public_report_grant`는 작업 입장 때 한 번 확정한다. 완료
 시점의 비용 통장·share key·로그인 상태로 PUBLIC 여부를 다시 추측하지 않는다.
-같은 입장 응답에 실은 cookie의 서버 기준 만료(`public_grant_expires_at`)도 Job에
-동결하고, 고정한 Delivery 만료+commit 여유보다 먼저 끝나면 DB 쓰기 전에 닫는다.
+입장 응답에 실은 cookie의 서버 기준 만료(`public_grant_expires_at`)는 관측용
+복사본일 뿐이다. 같은 token을 다른 탭이 연장할 수 있으므로 최종 판정은
+`stage_report_storage()`와 같은 writer transaction에서 `bind_report()`가 다시 읽은
+DB grant 행만 정본으로 삼는다.

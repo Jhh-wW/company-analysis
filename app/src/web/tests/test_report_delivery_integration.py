@@ -188,27 +188,89 @@ def test_PUBLIC_보고서staging은_caller연결을_commit하지않고_rollback�
         ).fetchone()[0] == ""
 
 
-def test_PUBLIC_cookie가_Delivery보다먼저끝나면_DB쓰기전_거절한다(monkeypatch):
+def test_PUBLIC_다른탭이_DB_grant를연장하면_Job의옛만료복사본과무관하게_저장한다():
     report = _demo_report()
     report_id = uuid.uuid4().hex
     job = _public_job_for_save(report, report_id=report_id)
     assert job.delivery_expires_at is not None
-    job.public_grant_expires_at = (
+    stale_job_expiry = (
         job.delivery_expires_at.timestamp()
         + report_access_constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
     )
-    binding_calls = 0
+    job.public_grant_expires_at = stale_job_expiry
+    assert job.delivery_issued_at is not None
+    with storage_db.connect() as conn:
+        grant = report_access_store.issue_and_bind(
+            conn,
+            existing_token="",
+            run_id=report_id,
+            now=job.delivery_issued_at.timestamp(),
+        )
+        # 입장 응답 당시 Job에 복사된 값은 이제 최종 60일을 못 지키는 옛 값이다.
+        conn.execute(
+            f"UPDATE {report_access_store.TABLE_GRANTS} SET expires_at=? "
+            "WHERE grant_hash=?",
+            (stale_job_expiry, grant.grant_hash),
+        )
+        conn.commit()
 
-    def should_not_bind(*_args, **_kwargs):
-        nonlocal binding_calls
-        binding_calls += 1
-        return True
+    # 다른 탭이 같은 브라우저 token으로 새 run을 시작하며 DB 정본만 연장한다.
+    with storage_db.connect() as conn:
+        extended = report_access_store.issue_and_bind(
+            conn,
+            existing_token=grant.token,
+            run_id=uuid.uuid4().hex,
+            now=job.delivery_issued_at.timestamp() + 1,
+        )
+        conn.commit()
+    assert extended.reused is True
+    assert extended.expires_at > stale_job_expiry
 
-    monkeypatch.setattr(report_access_store, "bind_report", should_not_bind)
+    assert job_runtime._save_report(job) is True
+    with storage_db.connect() as conn:
+        assert report_store.load(conn, report_id) is not None
+        assert report_access_store.public_grant_allows(
+            conn,
+            raw_token=grant.token,
+            locator=report_id,
+        )
+
+
+@pytest.mark.parametrize("binding_state", ("missing", "deleted"))
+def test_MEMBER_소유권결속이_없거나삭제되면_보고서와projection을_모두rollback한다(
+    binding_state: str,
+):
+    report = _demo_report()
+    report_id = uuid.uuid4().hex
+    job = _public_job_for_save(report, report_id=report_id)
+    job.requires_public_report_grant = False
+    job.public_grant_expires_at = 0.0
+    job.member_email = "member@example.com"
+    if binding_state == "deleted":
+        with storage_db.connect() as conn:
+            assert report_access_store.bind_member_run(
+                conn,
+                run_id=report_id,
+                identity_subject="google:deleted-member",
+            )
+            conn.execute(
+                f"DELETE FROM {report_access_store.TABLE_MEMBER_BINDINGS} "
+                "WHERE run_id=?",
+                (report_id,),
+            )
+            conn.commit()
+
     assert job_runtime._save_report(job) is False
-    assert binding_calls == 0
+    assert job.report_persisted is False
     with storage_db.connect() as conn:
         assert report_store.load(conn, report_id) is None
+        job_runtime.dashboard_store.ensure_schema(conn)
+        assert conn.execute(
+            f"SELECT COUNT(*) FROM "
+            f"{job_runtime.dashboard_store.TABLE_REPORT_VERSIONS} "
+            "WHERE report_id=?",
+            (report_id,),
+        ).fetchone()[0] == 0
 
 
 def test_PUBLIC_저장실패는_메모리성공과_출고호출과_차감을_모두닫는다(
@@ -282,9 +344,10 @@ def test_worker는_한번잡은_완료시각으로_모든권한종류를_실제�
         ),
         requires_public_report_grant=track == "PUBLIC",
         member_email=("member@example.com" if track == "MEMBER" else ""),
-        share_link_hash=("link-history-hash" if track == "LINK" else ""),
     )
     public_token = ""
+    link_key = f"worker-link-{report_id}"
+    member_day = clock.today_kst().isoformat()
     with storage_db.connect() as conn:
         if track == "PUBLIC":
             grant = report_access_store.issue_and_bind(
@@ -295,11 +358,37 @@ def test_worker는_한번잡은_완료시각으로_모든권한종류를_실제�
             public_token = grant.token
             job.public_grant_expires_at = grant.expires_at
         elif track == "MEMBER":
+            assert job_runtime.dashboard_store.reserve_member_run(
+                conn,
+                run_id=report_id,
+                actor_email=job.member_email,
+                day=member_day,
+                now_iso=clock.iso_now_kst(),
+            )
             assert report_access_store.bind_member_run(
                 conn,
                 run_id=report_id,
                 identity_subject="google:worker-time-member",
             )
+        elif track == "LINK":
+            assert job_runtime.share_store.insert_new(
+                conn,
+                key=link_key,
+                company=report.company,
+                job=report.job,
+                now_iso=clock.iso_now_kst(),
+            )
+            assert job_runtime.share_store.start_run(
+                conn,
+                key=link_key,
+                run_id=report_id,
+                started_at=clock.iso_now_kst(),
+                input_company=report.company,
+                confirmed_company=report.company,
+                company_id="worker-time-corp",
+            )
+            job.share_key = link_key
+            job.share_link_hash = job_runtime.share_store.key_hash_of(link_key)
 
     monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "art"))
     monkeypatch.setattr(runtime, "_PIPELINE", _ReportPipeline())
@@ -311,13 +400,6 @@ def test_worker는_한번잡은_완료시각으로_모든권한종류를_실제�
     )
     monkeypatch.setattr(job_runtime, "record_run", lambda *_a, **_k: None)
     monkeypatch.setattr(job_runtime, "_release_run_slot", lambda _bucket: None)
-    monkeypatch.setattr(job_runtime, "_ensure_link_job_closed", lambda _job: None)
-    monkeypatch.setattr(job_runtime.share_store, "finish_run", lambda *_a, **_k: True)
-    monkeypatch.setattr(
-        job_runtime.dashboard_store,
-        "settle_member_run",
-        lambda *_a, **_k: True,
-    )
 
     asyncio.run(job_runtime._run_job(job))
 
@@ -348,6 +430,17 @@ def test_worker는_한번잡은_완료시각으로_모든권한종류를_실제�
                 identity_subject="google:worker-time-member",
                 locator=report_id,
             )
+            assert job_runtime.dashboard_store.member_usage_today(
+                conn,
+                actor_email=job.member_email,
+                day=member_day,
+            ) == (1, 0)
+        elif track == "LINK":
+            link_run = job_runtime.share_store.load_run(conn, report_id)
+            assert link_run is not None
+            assert link_run.status == job_runtime.share_store.RUN_STATUS_COMPLETED
+            assert link_run.report_id == report_id
+            assert link_run.release_sha256
 
 
 def test_PUBLIC_최종출고는_실제60일만료보다_grant가짧으면_청구까지rollback한다(
