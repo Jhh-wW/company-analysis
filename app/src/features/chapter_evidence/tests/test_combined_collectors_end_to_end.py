@@ -1,0 +1,362 @@
+"""공시 수집기·공식 웹 수집기·장별 생산부를 «실제로» 이어 붙인 결합 종단시험.
+
+왜 이 시험이 필요한가
+---------------------
+세 계층은 각자 자기 워크트리에서 자기 시험만 통과했다. 그런데 통합 검토에서
+드러난 차단 결함은 전부 «각자는 초록불인데 서로 맞물리는 자리에서 계약이
+깨지는» 종류였다(무신호 조각의 빈 section_id, 빈 slot_ids, 본문 없는 문서,
+회사 소유권 누락). 각 계층의 단위시험으로는 절대 잡히지 않는다.
+
+그래서 이 시험은 가짜 응답만 쓰되 **생산 경로 그대로** 다음을 이어 돌린다.
+
+    엔진 공시 수집 ─┐
+                    ├→ 장별 근거 후보 생산 → 계약 최종 판정 → 생성 게이트
+    공식 웹 수집 ───┘
+
+★ feature 간 직접 import 금지 규칙과의 관계
+    이 파일은 의도적으로 다른 feature(``homepage``)와 엔진 패키지를 import한다.
+    그 규칙은 «생산 코드»가 서로 얽히는 것을 막기 위한 것이고, 여기서 얽히는
+    것은 시험뿐이다. 생산 코드는 여전히 서로를 모르며, 결합점은 계약 Mapping
+    하나다. 통합 담당이 다른 위치를 원하면 파일째 옮겨도 내용은 그대로 쓴다.
+
+★ 실제 네트워크·실제 AI 호출은 0건이다. 전송 계층과 공시 조회기를 전부 가짜로
+    주입한다.
+"""
+
+from __future__ import annotations
+
+import pathlib
+import sys
+
+import pytest
+
+from src.features.chapter_evidence.constants import CompanyType
+from src.features.chapter_evidence.produce import produce_chapter_evidence_candidates
+from src.features.homepage.wide_evidence_mapping import to_evidence_mappings
+from src.features.homepage.wide_fetch import WideRawResponse, WideTransportError
+from src.features.homepage.wide_fragments import build_fragments_for_collection
+from src.features.homepage.wide_collect import collect_official_web_documents
+from src.shared.report_evidence.constants import (
+    EvidenceReadiness,
+    GenerationGateStatus,
+)
+from src.shared.report_evidence.logic import assess_generation_gate, build_section_bundle
+from src.shared.report_evidence.models import InjectedSlotFacts
+from src.shared.report_evidence.policy import (
+    REQUIRED_EVIDENCE_SECTION_IDS,
+    injected_slots_for,
+    required_slots_for,
+)
+
+#: 엔진 수집기는 app 패키지가 아니라 ``analysis_engine/src`` 아래에 산다.
+#: 통합 트리에서만 존재하므로 경로를 직접 얹고, 없으면 소리 나게 건너뛴다.
+_ENGINE_SRC = pathlib.Path(__file__).resolve().parents[4].parent / "analysis_engine" / "src"
+_ENGINE_FEATURE = _ENGINE_SRC / "features" / "evidence_collection"
+
+pytestmark = pytest.mark.skipif(
+    not _ENGINE_FEATURE.is_dir(),
+    reason=f"엔진 수집기가 이 트리에 없습니다(통합 트리 전용): {_ENGINE_FEATURE}",
+)
+
+if _ENGINE_FEATURE.is_dir() and str(_ENGINE_SRC) not in sys.path:
+    sys.path.insert(0, str(_ENGINE_SRC))
+
+
+TARGET_COMPANY_ID = "00126380"
+ROOT_HOST = "company.example"
+ROBOTS_ALLOW_ALL = "User-agent: *\nAllow: /\n"
+
+#: 어느 슬롯 키워드에도 걸리지 않는 문단 — 계약이 빈 section_id·slot_id를
+#: 거절하므로, 이런 문단이 최종 Mapping으로 새어 나가면 통합이 통째로 죽는다.
+#: 통합 검토가 P0로 지목한 경로를 이 시험이 실제로 재현한다.
+NO_SIGNAL_PARAGRAPH = (
+    "\n\nX. 기타 참고사항\n"
+    "본 항목은 별도로 기재할 내용이 없으며 관련 자료는 첨부를 참조한다.\n"
+)
+
+
+def _html(text: str, extra: str = "") -> str:
+    return "<html><body><main><p>" + (text + " ") * 10 + "</p>" + extra + "</main></body></html>"
+
+
+class _FakeSite:
+    """가짜 전송 계층 — 미리 정한 URL만 응답하고 나머지는 접속 실패로 본다."""
+
+    def __init__(self, pages: dict[str, WideRawResponse]) -> None:
+        self._pages = pages
+
+    def __call__(self, url: str, url_allowed):  # noqa: ANN001 - 전송 계약 그대로
+        if url not in self._pages:
+            raise WideTransportError(f"가짜 접속 실패: {url}")
+        response = self._pages[url]
+        if url_allowed is not None and not url_allowed(response.effective_url):
+            raise WideTransportError(f"가짜 정책 차단: {url}")
+        return response
+
+
+def _page(text: str, url: str, content_type: str = "text/html") -> WideRawResponse:
+    return WideRawResponse(status=200, text=text, effective_url=url, content_type=content_type)
+
+
+def _absent(url: str) -> WideRawResponse:
+    return WideRawResponse(status=404, text="", effective_url=url, content_type="")
+
+
+def _ir_html_without_links(url: str, *_args, **_kwargs):
+    """IR 탐색용 홈페이지는 정상으로 읽히지만 IR 링크가 없는 회사.
+
+    대부분의 중소기업이 이 모양이다(홈페이지는 있고 IR 페이지는 없음).
+    이때 IR 수집 결과는 «실패»가 아니라 «부재»여야 한다.
+    """
+
+    from src.features.homepage.ir_pdf import FetchedIrHtml
+
+    return FetchedIrHtml("<html><body><p>회사 소개 페이지</p></body></html>", url)
+
+
+def _ir_html_unreachable(url: str, *_args, **_kwargs):
+    """IR 탐색용 홈페이지 접속 자체가 실패하는 회사(일시 장애 흉내)."""
+
+    from src.features.homepage.ir_pdf import OfficialIrFetchError
+
+    raise OfficialIrFetchError("가짜 IR 홈페이지 접속 실패")
+
+
+def _ir_pdf_unused(*_args, **_kwargs):
+    from src.features.homepage.ir_pdf import OfficialIrFetchError
+
+    raise OfficialIrFetchError("가짜 IR PDF 없음")
+
+
+def _collect_dart(*, document_state: str = "OK", with_no_signal: bool = True):
+    """엔진 공시 수집을 가짜 조회기로 실제 실행한다."""
+
+    from features.evidence_collection import collect  # noqa: PLC0415 - 경로 주입 뒤 import
+    from features.evidence_collection.filing_select import RawFilingRow
+    from features.evidence_collection.tests.fixtures import (  # noqa: PLC0415
+        fake_fetcher,
+        synthetic_documents,
+    )
+
+    text = synthetic_documents.LISTED_BUSINESS_REPORT_TEXT
+    if with_no_signal:
+        text += NO_SIGNAL_PARAGRAPH
+    rows = (
+        RawFilingRow(
+            rcept_no="20250315000001",
+            report_nm="사업보고서 (2024.12)",
+            rcept_dt="20250315",
+        ),
+    )
+    fetcher = fake_fetcher.FakeFetcher(
+        list_responses_by_pblntf_ty={
+            "A": fake_fetcher.FilingListResult(state="OK", rows=rows),
+            "F": fake_fetcher.FilingListResult(state="OK", rows=()),
+        },
+        document_responses_by_rcept_no={
+            "20250315000001": fake_fetcher.DocumentFetchResult(
+                state=document_state,
+                text=text if document_state == "OK" else "",
+            )
+        },
+    )
+    return collect.collect_dart_evidence(
+        fetcher=fetcher,
+        company_id=TARGET_COMPANY_ID,
+        now="2026-08-31T00:00:00Z",
+        deadline_seconds=30,
+    )
+
+
+def _dart_mapping(**kwargs) -> dict[str, object]:
+    from features.evidence_collection import serialize  # noqa: PLC0415
+
+    return serialize.harvest_to_mapping(_collect_dart(**kwargs))
+
+
+def _web_mapping(*, ir_html_fetch=_ir_html_without_links) -> dict[str, list[dict[str, object]]]:
+    """공식 웹 수집을 가짜 사이트로 실제 실행하고 계약 Mapping으로 바꾼다."""
+
+    base = f"https://{ROOT_HOST}"
+    pages = {
+        f"{base}/robots.txt": _page(ROBOTS_ALLOW_ALL, f"{base}/robots.txt", "text/plain"),
+        f"{base}/sitemap.xml": _absent(f"{base}/sitemap.xml"),
+        f"{base}/": _page(
+            _html("회사 소개와 우리의 강점"),
+            f"{base}/",
+        ),
+        f"{base}/careers": _page(_html("채용과 일하는 방식"), f"{base}/careers"),
+    }
+    pages[f"{base}/"] = _page(
+        _html("회사 소개와 우리의 강점", '<a href="/careers">채용</a>'),
+        f"{base}/",
+    )
+    result = collect_official_web_documents(
+        company_id=TARGET_COMPANY_ID,
+        company_name="예시 전자",
+        root_homepage_url=ROOT_HOST,
+        collected_at="2026-08-31T00:00:00+00:00",
+        transport=_FakeSite(pages),
+        ir_html_fetch=ir_html_fetch,
+        ir_pdf_fetch=_ir_pdf_unused,
+    )
+    fragments = build_fragments_for_collection(result)
+    return to_evidence_mappings(
+        documents=result.documents,
+        fragments=fragments,
+        attempts=result.attempts,
+    )
+
+
+def _produce(*, ir_html_fetch=_ir_html_without_links, **dart_kwargs):
+    """두 수집기의 산출을 합쳐 아홉 장 후보를 실제로 만든다."""
+
+    dart = _dart_mapping(**dart_kwargs)
+    web = _web_mapping(ir_html_fetch=ir_html_fetch)
+    return produce_chapter_evidence_candidates(
+        company_id=TARGET_COMPANY_ID,
+        company_type=CompanyType.LISTED,
+        documents=[*dart["documents"], *web["documents"]],
+        fragments=[*dart["fragments"], *web["fragments"]],
+        attempts=[*dart["attempts"], *web["attempts"]],
+    )
+
+
+def _bundles(candidates):
+    """Codex 소유 주입 칸을 채운 뒤 계약 최종 판정을 그대로 태운다."""
+
+    bundles = []
+    for candidate in candidates:
+        injected = tuple(
+            InjectedSlotFacts(slot_id=slot_id, fact_ids=(f"fact:{slot_id}",))
+            for slot_id in injected_slots_for(candidate.section_id)
+        )
+        bundles.append(
+            build_section_bundle(
+                candidate,
+                required_slot_ids=required_slots_for(candidate.section_id),
+                injected_slot_facts=injected,
+            )
+        )
+    return tuple(bundles)
+
+
+def test_두_수집기_산출이_계약_경계를_예외_없이_통과한다() -> None:
+    """무관 문단·본문 없는 문서·기반시설 조회가 섞여도 통합이 죽지 않는다."""
+
+    candidates = _produce()
+
+    assert len(candidates) == len(REQUIRED_EVIDENCE_SECTION_IDS)
+    assert tuple(c.section_id for c in candidates) == REQUIRED_EVIDENCE_SECTION_IDS
+    # 공허한 통과 방지 — 두 수집기가 실제로 근거를 냈는지 먼저 확인한다.
+    assert any(candidate.fragments for candidate in candidates)
+    assert any(candidate.documents for candidate in candidates)
+    assert any(candidate.attempts for candidate in candidates)
+
+
+def test_아홉_장이_같은_원문_묶음을_그대로_복사받지_않는다() -> None:
+    """현행 결함(모든 장에 같은 조각을 통째로 전달)이 재발하지 않게 고정한다."""
+
+    candidates = _produce()
+    fragment_sets = [
+        frozenset(fragment.fragment_id for fragment in candidate.fragments)
+        for candidate in candidates
+        if candidate.fragments
+    ]
+
+    assert len(fragment_sets) >= 2
+    assert len(set(fragment_sets)) > 1
+
+
+def test_다른_회사_값은_한_건도_섞이지_않는다() -> None:
+    candidates = _produce()
+
+    for candidate in candidates:
+        assert candidate.company_id == TARGET_COMPANY_ID
+        for document in candidate.documents:
+            assert document.company_id == TARGET_COMPANY_ID
+        for fragment in candidate.fragments:
+            assert fragment.company_id == TARGET_COMPANY_ID
+        for attempt in candidate.attempts:
+            assert attempt.company_id == TARGET_COMPANY_ID
+
+
+def test_모든_조각이_원본_문서의_허용_해시에_결속된다() -> None:
+    """계약 generation=7 — 문서 A의 조각을 문서 B에 붙이는 실수를 막는다."""
+
+    candidates = _produce()
+    checked = 0
+    for candidate in candidates:
+        allowed = {
+            document.document_id: set(document.exact_evidence_hashes)
+            for document in candidate.documents
+        }
+        for fragment in candidate.fragments:
+            assert fragment.text_sha256 in allowed[fragment.document_id]
+            checked += 1
+
+    assert checked > 0
+
+
+def test_정상_수집은_빈_칸을_확인_못_함이_아니라_자료_부족으로_판정한다() -> None:
+    """거짓 미확인 방향 — 전문을 다 읽었는데 «일시 장애»가 되면 안 된다."""
+
+    bundles = _bundles(_produce(document_state="OK"))
+    decision = assess_generation_gate(
+        company_id=TARGET_COMPANY_ID,
+        bundles=bundles,
+        required_section_ids=REQUIRED_EVIDENCE_SECTION_IDS,
+    )
+
+    unobserved = [
+        reason for reason in decision.reason_codes if "required_path_unobserved" in reason
+    ]
+    assert unobserved == []
+    assert decision.status is not GenerationGateStatus.STOP_TRANSIENT_FAILURE
+    for bundle in bundles:
+        assert bundle.readiness is not EvidenceReadiness.UNKNOWN
+
+
+def test_공시_조회_실패는_자료_부족이_아니라_확인_못_함으로_판정한다() -> None:
+    """거짓 확인 방향 — 수집 장애를 «자료 없음»으로 단정하면 안 된다."""
+
+    bundles = _bundles(_produce(document_state="FAILED"))
+    decision = assess_generation_gate(
+        company_id=TARGET_COMPANY_ID,
+        bundles=bundles,
+        required_section_ids=REQUIRED_EVIDENCE_SECTION_IDS,
+    )
+
+    assert decision.status is GenerationGateStatus.STOP_TRANSIENT_FAILURE
+    assert decision.unknown_section_ids
+    assert decision.can_call_ai is False
+
+
+def test_보조_출처_한_곳의_실패가_보고서_전체를_일시_장애로_만들지_않는다() -> None:
+    """실행계획 31장 §3-5 — 유일한 REQUIRED 경로가 아닌 실패는 진단에만 남는다.
+
+    IR 자료 조회만 실패하고 공시·공식 웹 페이지는 정상인 상황이다. 이때
+    9개 장 전부가 «확인 못 함»이 되면, 사용자는 멀쩡한 회사에 대해 일시
+    장애 중단을 받는다. 통합 결합시험이 실제로 잡아낸 회귀라 여기서 고정한다.
+    """
+
+    bundles = _bundles(_produce(ir_html_fetch=_ir_html_unreachable))
+    decision = assess_generation_gate(
+        company_id=TARGET_COMPANY_ID,
+        bundles=bundles,
+        required_section_ids=REQUIRED_EVIDENCE_SECTION_IDS,
+    )
+
+    assert decision.status is not GenerationGateStatus.STOP_TRANSIENT_FAILURE
+    assert decision.unknown_section_ids == ()
+
+
+def test_무신호_문단은_최종_Mapping으로_새어_나가지_않는다() -> None:
+    """계약은 빈 section_id·slot_id를 거절한다 — 관측은 남기되 조각은 안 낸다."""
+
+    mapping = _dart_mapping(with_no_signal=True)
+
+    assert mapping["fragments"]
+    for fragment in mapping["fragments"]:
+        assert fragment["section_id"]
+        assert fragment["slot_id"]
