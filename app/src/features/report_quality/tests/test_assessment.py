@@ -183,6 +183,30 @@ def test_같은_claim_slot의_서로_다른_원자사실은_허용한다() -> No
     assert result.safety.decision is ReleaseDecision.RELEASE_ALLOWED
 
 
+def test_문장이_여러개여도_한가지_의미범주뿐이면_complete가_아니다() -> None:
+    candidate = _candidate()
+    identity_slot = CLAIM_SLOTS_BY_SECTION["identity"][0]
+    shallow = replace(
+        candidate,
+        facts=tuple(
+            replace(fact, claim_slot=identity_slot)
+            if fact.section_owner == "identity"
+            else fact
+            for fact in candidate.facts
+        ),
+    )
+
+    result = assess_generation(shallow)
+
+    assert result.quality.substantive_claims == 40
+    assert result.quality.grade is QualityGrade.PARTIAL
+    assert result.safety.decision is ReleaseDecision.RELEASE_ALLOWED
+    assert any(
+        "서로 다른 의미 claim 범주" in reason
+        for reason in result.quality.shortfall_reasons
+    )
+
+
 def test_같은_원자claim을_다른_fact_id로_부풀리면_통과하지_못한다() -> None:
     candidate = _candidate()
     first, second = candidate.facts[:2]

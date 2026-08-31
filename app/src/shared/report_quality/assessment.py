@@ -433,6 +433,16 @@ def assess_quality(
         shortfalls.append(
             "실질 claim이 한 건뿐인 장이 있습니다: " + ", ".join(one_claim)
         )
+    low_semantic_coverage = [
+        section_id
+        for section_id, count in section_counts
+        if 0 < count < contract.min_claims_per_covered_section
+    ]
+    if low_semantic_coverage:
+        shortfalls.append(
+            "서로 다른 의미 claim 범주가 부족한 장이 있습니다: "
+            + ", ".join(low_semantic_coverage)
+        )
     low_coverage = [
         section_id
         for section_id, count in public_sentence_counts
