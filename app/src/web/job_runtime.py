@@ -1183,13 +1183,27 @@ def _finalize_report_delivery(job: Job) -> bool:
 
 
 def _require_report_delivery(job: Job) -> bool:
-    """구형 보고서 저장 전에 새 delivery 의무를 별도 거래로 확정한다."""
+    """한 번 고정한 완료 경계 시각으로 새 delivery 의무를 확정한다.
+
+    worker가 ``delivery_issued_at``을 잡은 뒤 여기서 시계를 다시 읽으면 의무
+    시작이 Delivery 완료보다 몇 μs 늦어져 정상 출고를 손상으로 오인한다. 이
+    함수는 새 시각을 만들지 않고 저장·Delivery·grant fence가 공유할 값만 쓴다.
+    """
 
     from src.web import report_delivery_adapter  # noqa: PLC0415
 
+    required_at = job.delivery_issued_at
+    if (
+        required_at is None
+        or required_at.tzinfo is None
+        or required_at.utcoffset() is None
+    ):
+        raise report_delivery_adapter.DeliveryAdapterError(
+            "보고서 완료 경계 시각에는 시간대가 필요합니다"
+        )
     report_delivery_adapter.require_public_delivery(
         job.job_id,
-        required_at=clock.now_kst(),
+        required_at=required_at,
     )
     return True
 

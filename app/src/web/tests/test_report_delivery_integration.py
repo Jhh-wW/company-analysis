@@ -206,6 +206,103 @@ def test_PUBLIC_저장실패는_메모리성공과_출고호출과_차감을_모
     assert job.delivery_persisted is False
 
 
+@pytest.mark.parametrize("track", ("PUBLIC", "MEMBER", "LINK", "ADMIN"))
+def test_worker는_한번잡은_완료시각으로_모든권한종류를_실제출고한다(
+    monkeypatch,
+    tmp_path: Path,
+    track: str,
+):
+    """단위 함수가 아니라 실제 worker 합성 순서의 μs 시각 역전을 막는다."""
+
+    report = _demo_report()
+    report_id = uuid.uuid4().hex
+
+    class _ReportPipeline:
+        @staticmethod
+        def run(*_args, **_kwargs):
+            return RunResult(outcome=Outcome.REPORT, report=report)
+
+    job = job_runtime.Job(
+        job_id=report_id,
+        user_input=UserInput(company=report.company, job=report.job, region=""),
+        card=CompanyCard(
+            legal_name=report.company,
+            typed_name=report.company,
+            address="",
+            ceo="",
+            founded="",
+            ref="worker-time-corp",
+        ),
+        requires_public_report_grant=track == "PUBLIC",
+        member_email=("member@example.com" if track == "MEMBER" else ""),
+        share_link_hash=("link-history-hash" if track == "LINK" else ""),
+    )
+    public_token = ""
+    with storage_db.connect() as conn:
+        if track == "PUBLIC":
+            grant = report_access_store.issue_and_bind(
+                conn,
+                existing_token="",
+                run_id=report_id,
+            )
+            public_token = grant.token
+            job.public_grant_expires_at = grant.expires_at
+        elif track == "MEMBER":
+            assert report_access_store.bind_member_run(
+                conn,
+                run_id=report_id,
+                identity_subject="google:worker-time-member",
+            )
+
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "art"))
+    monkeypatch.setattr(runtime, "_PIPELINE", _ReportPipeline())
+    # 공통 web fixture의 값싼 가짜 완료를 이 합성 시험에서만 실제 경계로 되돌린다.
+    monkeypatch.setattr(
+        job_runtime,
+        "_finalize_report_delivery",
+        _REAL_FINALIZE_REPORT_DELIVERY,
+    )
+    monkeypatch.setattr(job_runtime, "record_run", lambda *_a, **_k: None)
+    monkeypatch.setattr(job_runtime, "_release_run_slot", lambda _bucket: None)
+    monkeypatch.setattr(job_runtime, "_ensure_link_job_closed", lambda _job: None)
+    monkeypatch.setattr(job_runtime.share_store, "finish_run", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        job_runtime.dashboard_store,
+        "settle_member_run",
+        lambda *_a, **_k: True,
+    )
+
+    asyncio.run(job_runtime._run_job(job))
+
+    assert job.result is not None
+    assert job.result.outcome is Outcome.REPORT
+    assert job.report_persisted is True
+    assert job.delivery_persisted is True
+    assert job.delivery_issued_at is not None
+    stored = report_delivery_adapter.load_public_delivery(report_id)
+    intent = report_delivery_adapter.load_public_delivery_intent(report_id)
+    assert stored is not None
+    assert intent is not None
+    assert intent.state == delivery_store.DELIVERY_INTENT_COMPLETE
+    assert intent.required_at == stored.delivery.delivered_at
+    assert stored.delivery.delivered_at == job.delivery_issued_at
+
+    with storage_db.connect_readonly_existing() as conn:
+        assert conn is not None
+        if track == "PUBLIC":
+            assert report_access_store.public_grant_allows(
+                conn,
+                raw_token=public_token,
+                locator=report_id,
+            )
+        elif track == "MEMBER":
+            assert report_access_store.member_subject_allows(
+                conn,
+                identity_subject="google:worker-time-member",
+                locator=report_id,
+            )
+
+
 def test_PUBLIC_최종출고는_실제60일만료보다_grant가짧으면_청구까지rollback한다(
     monkeypatch,
     tmp_path: Path,
