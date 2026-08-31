@@ -112,7 +112,7 @@ def _internal_key_problems(report: Report) -> list[str]:
 
 
 def _cited_numbers_in_body(report: Report) -> set[int]:
-    """본문·요약·표가 실제로 표시하는 인용 번호 전부."""
+    """본문·요약 표시 번호와 표가 구조로 보존한 전체 출처 번호."""
     numbers: set[int] = set()
     for section in report.sections:
         for text, cite in section.prose_lines:
@@ -124,6 +124,17 @@ def _cited_numbers_in_body(report: Report) -> set[int]:
             cite_number = citation_number(table.cite)
             if cite_number:
                 numbers.add(int(cite_number))
+            seen_source_cites: set[int] = set()
+            for raw_cite in table.source_cites:
+                source_number = citation_number(raw_cite)
+                if (
+                    not source_number
+                    or raw_cite != f"[{source_number}]"
+                    or int(source_number) in seen_source_cites
+                ):
+                    continue
+                seen_source_cites.add(int(source_number))
+                numbers.add(int(source_number))
     for item in report.summary_items:
         numbers.update(int(value) for value in CITATION_MARKER_RE.findall(item.text))
     return numbers
@@ -131,6 +142,25 @@ def _cited_numbers_in_body(report: Report) -> set[int]:
 
 def _citation_mapping_problems(report: Report) -> list[str]:
     problems: list[str] = []
+    for section in report.sections:
+        for index, table in enumerate(section.tables, start=1):
+            seen: set[int] = set()
+            for raw_cite in table.source_cites:
+                number = citation_number(raw_cite)
+                if not number or raw_cite != f"[{number}]":
+                    problems.append(
+                        f"{section.cell} 표 {index}번의 전체 출처 번호가 "
+                        f"정본 형식이 아닙니다: {raw_cite!r}"
+                    )
+                    continue
+                parsed = int(number)
+                if parsed in seen:
+                    problems.append(
+                        f"{section.cell} 표 {index}번의 전체 출처 번호 "
+                        f"[{parsed}]가 중복됐습니다"
+                    )
+                    continue
+                seen.add(parsed)
     body_numbers = _cited_numbers_in_body(report)
     appendix_numbers: list[int] = [
         source.number for source in visible_citations(report.citations)

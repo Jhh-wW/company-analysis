@@ -39,7 +39,12 @@ from src.shared.report_quality.contract import contract_for_generation
 from src.features.composer.logic import (
     AskFn,
     FragmentsInput,
+    SectionEvidencePackets,
+    _assert_composed_report_evidence_invariant,
     _normalize_fragments,
+    _prepare_section_evidence_packets,
+    _sanitize_report_to_section_evidence,
+    _validate_table_citations_for_section,
     SUMMARY_MAX_SENTENCES,
     SUMMARY_MIN_SENTENCES,
     # 요약 보충 규칙(본문 «확인» 문장 재사용·서로 다른 장 우선)은 3-3이 정의한
@@ -50,7 +55,7 @@ from src.features.composer.logic import (
 )
 from src.features.composer.constants import DEFAULT_CITATION_STYLE, SECTION_TITLES
 from src.features.composer.dedupe import drop_cross_section_duplicates
-from src.features.composer.diagram_check import check_diagrams
+from src.features.composer.diagram_check import check_diagram_numbers, check_diagrams
 from src.features.composer.dup_detect import CONFIDENCE_CONFIRMED, find_numeric_duplicates
 from src.features.composer.extractive_summary import select_extractive_summary
 from src.features.composer.port import (
@@ -62,6 +67,11 @@ from src.features.composer.port import (
 )
 from src.features.composer.quality_projection import (
     build_generation_quality_candidate,
+)
+from src.features.composer.public_manifest import (
+    PublicStructureSeal,
+    assert_report_matches_public_structure,
+    build_public_structure_seal,
 )
 from src.features.composer.render import render_report
 from src.features.composer.structured_claims import (
@@ -339,6 +349,7 @@ def run_v2(
     composition_tables: tuple[PerformanceTable, ...] = (),
     citation_style: str = DEFAULT_CITATION_STYLE,
     release_mode: ReleaseMode = ReleaseMode.SHADOW,
+    section_evidence_packets: Optional[SectionEvidencePackets] = None,
 ) -> V2RunOutput:
     """엔진 v2 전체 흐름을 한 번 돌려 최종 보고서를 만든다 (04장 3-4절).
 
@@ -389,12 +400,94 @@ def run_v2(
     if not isinstance(release_mode, ReleaseMode):
         raise TypeError("release_mode는 ReleaseMode 값이어야 합니다")
 
+    # packet 계약은 첫 유료 호출 전에 닫는다. 작성에는 장별 packet만,
+    # 검증·부록에는 충돌 검사를 마친 결정론적 union만 전달한다.
+    prepared_evidence = None
+    packet_union_ids: frozenset[str] = frozenset()
+    verification_fragments: FragmentsInput = fragments
+    if section_evidence_packets is not None:
+        prepared_evidence = _prepare_section_evidence_packets(
+            section_evidence_packets
+        )
+        verification_fragments = prepared_evidence.flat_union
+        packet_union_ids = frozenset(
+            fragment.fragment_id for fragment in prepared_evidence.flat_union
+        )
+        _validate_table_citations_for_section(
+            (performance_table,) if performance_table is not None else (),
+            section_id="past_changes",
+            allowed_fragment_ids=prepared_evidence.allowed_fragment_ids_by_section[
+                "past_changes"
+            ],
+            table_label="실적",
+            require_cite=True,
+        )
+        _validate_table_citations_for_section(
+            composition_tables,
+            section_id="business_model",
+            allowed_fragment_ids=prepared_evidence.allowed_fragment_ids_by_section[
+                "business_model"
+            ],
+            table_label="구성",
+            require_cite=True,
+        )
+
     # ① 본문 9장 작성 (작가)
-    draft = compose_sections(company_name, fragments, performance_table, writer_ask)
+    draft = compose_sections(
+        company_name,
+        fragments,
+        performance_table,
+        writer_ask,
+        section_evidence_packets=(
+            prepared_evidence.packets if prepared_evidence is not None else None
+        ),
+    )
+    if prepared_evidence is not None:
+        draft = _sanitize_report_to_section_evidence(
+            draft, prepared_evidence.allowed_fragment_ids_by_section
+        )
+        _assert_composed_report_evidence_invariant(
+            draft,
+            prepared_evidence.allowed_fragment_ids_by_section,
+            packet_union_ids,
+            stage="draft-pre-review",
+        )
+        # flow 숫자는 기존 canonical 검사로 먼저 재검산한다. 관계 의미는
+        # 바로 다음 bundled reviewer 한 번에 본문과 함께 판정한다.
+        draft, diagram_problems = check_diagram_numbers(
+            draft, _normalize_fragments(verification_fragments)
+        )
+        _assert_composed_report_evidence_invariant(
+            draft,
+            prepared_evidence.allowed_fragment_ids_by_section,
+            packet_union_ids,
+            stage="diagram-numeric-pre-review",
+        )
+    else:
+        diagram_problems = ()
     draft_body_count = _total_sentences(draft)  # 이 시점 summary는 빈 튜플이다
 
     # ② 본문 검증 (검수 — 문장 단위 제거/강등만, 장 삭제 없음)
-    verified = verify_report(draft, fragments, performance_table, reviewer_ask)
+    if prepared_evidence is None:
+        verified = verify_report(
+            draft, verification_fragments, performance_table, reviewer_ask
+        )
+    else:
+        verified = verify_report(
+            draft,
+            verification_fragments,
+            performance_table,
+            reviewer_ask,
+            allowed_fragment_ids_by_section=(
+                prepared_evidence.allowed_fragment_ids_by_section
+            ),
+        )
+        _assert_composed_report_evidence_invariant(
+            verified,
+            prepared_evidence.allowed_fragment_ids_by_section,
+            packet_union_ids,
+            stage="post-verify",
+        )
 
     # ②-b 사실 단일 소유 강제 — 여러 장에 반복된 같은 사실을 소유 장 하나만
     #     남기고 뺀다. 요약 «앞»에 둔다 — 곧 사라질 문장을 요약 재료로 고르면
@@ -402,6 +495,13 @@ def run_v2(
     verified, moved_sentences = drop_cross_section_duplicates(verified)
     if moved_sentences:
         logger.info("장 간 중복 %d문장을 소유 장으로 모았습니다", moved_sentences)
+    if prepared_evidence is not None:
+        _assert_composed_report_evidence_invariant(
+            verified,
+            prepared_evidence.allowed_fragment_ids_by_section,
+            packet_union_ids,
+            stage="post-verify-dedupe",
+        )
 
     # ②-c 도식 검증 — 관계 도식의 각 줄이 «근거에 맞는가».
     #     적대 검증에서 결함이 전부 관계 도식에서만 나왔다(수치 0 / 관계 7).
@@ -412,9 +512,19 @@ def run_v2(
     #       검수용(8000토큰)을 그대로 쓰면 예약만으로 예산의 21.7%를 먹어
     #       비싼 회사에서 보고서 «전체»가 예산 초과로 실패한다(실측).
     #     근거 없는 줄만 빼며, 줄이 다 빠지면 도식을 안 그릴 뿐 장은 남는다.
-    verified, diagram_problems = check_diagrams(
-        verified, _normalize_fragments(fragments), diagram_ask or reviewer_ask
-    )
+    if prepared_evidence is None:
+        verified, diagram_problems = check_diagrams(
+            verified,
+            _normalize_fragments(verification_fragments),
+            diagram_ask or reviewer_ask,
+        )
+    else:
+        _assert_composed_report_evidence_invariant(
+            verified,
+            prepared_evidence.allowed_fragment_ids_by_section,
+            packet_union_ids,
+            stage="diagram",
+        )
 
     for problem in diagram_problems:
         logger.warning("도식 검증에서 뺀 경로 — %s", problem)
@@ -425,14 +535,28 @@ def run_v2(
     verified = append_past_changes_numeric_claims(
         verified,
         performance_table,
-        fragments,
+        verification_fragments,
         filing_meta,
     )
+    if prepared_evidence is not None:
+        _assert_composed_report_evidence_invariant(
+            verified,
+            prepared_evidence.allowed_fragment_ids_by_section,
+            packet_union_ids,
+            stage="numeric-append",
+        )
     # ②-e 새 생성 수치 안전 경계. AI 산문에 숫자·날짜·백분율이 있으면
     # 의미가 결속된 StructuredClaim/NumericBinding 없이는 공개 후보에서 뺀다.
     # 산문을 역추출해 가짜 fact로 통과시키지 않는다. 프로그램이 만든 위 누적
     # 증감률은 동일한 versioned 결속을 재검산한 뒤 그대로 남는다.
     verified, body_numeric_filtering = enforce_public_numeric_safety(verified)
+    if prepared_evidence is not None:
+        _assert_composed_report_evidence_invariant(
+            verified,
+            prepared_evidence.allowed_fragment_ids_by_section,
+            packet_union_ids,
+            stage="numeric-safety",
+        )
     # ★ 2026-08-29 — 이 삭제는 보고서 «안»에만 적히고 서버 로그엔 흔적이 없었다.
     #   실측: 현대카드에서 최소 16문장이 여기서 사라졌는데 로그로는 안 보였다.
     if body_numeric_filtering.removed_section_counts:
@@ -450,7 +574,7 @@ def run_v2(
     if release_mode is ReleaseMode.SHADOW:
         final, summary_draft_count, numeric_filtering = _legacy_summary_stage(
             verified,
-            fragments,
+            verification_fragments,
             performance_table,
             writer_ask=writer_ask,
             reviewer_ask=reviewer_ask,
@@ -460,7 +584,7 @@ def run_v2(
         body_rendered = render_report(
             company_name,
             verified,
-            fragments,
+            verification_fragments,
             performance_table,
             corp_type=corp_type,
             grade=grade,
@@ -488,11 +612,37 @@ def run_v2(
         summary_draft_count = 0
         numeric_filtering = body_numeric_filtering
 
+    if prepared_evidence is not None:
+        _assert_composed_report_evidence_invariant(
+            final,
+            prepared_evidence.allowed_fragment_ids_by_section,
+            packet_union_ids,
+            stage="pre-render",
+        )
+
+    # FULL 공개 구조는 renderer를 부르기 전에 별도 canonicalizer로 봉인한다.
+    # SHADOW는 이 객체를 만들지도 전달하지도 않아 기존 호출·문자를 보존한다.
+    public_structure_seal: Optional[PublicStructureSeal] = None
+    if release_mode is ReleaseMode.FULL:
+        public_structure_seal = build_public_structure_seal(
+            final,
+            verification_fragments,
+            performance_table,
+            filing_meta=filing_meta,
+            composition_tables=composition_tables,
+            table_presentation=table_presentation,
+        )
+
     # ⑤ 렌더 — 웹·PDF가 이미 소비하는 공용 구조로
+    seal_render_kwargs = (
+        {}
+        if public_structure_seal is None
+        else {"public_structure_seal": public_structure_seal}
+    )
     rendered = render_report(
         company_name,
         final,
-        fragments,
+        verification_fragments,
         performance_table,
         corp_type=corp_type,
         grade=grade,
@@ -504,7 +654,10 @@ def run_v2(
         filing_meta=filing_meta,
         composition_tables=composition_tables,
         citation_style=citation_style,
+        **seal_render_kwargs,
     )
+    if public_structure_seal is not None:
+        assert_report_matches_public_structure(rendered, public_structure_seal)
 
     # ⑤-a 품질·공개 안전 shadow 판정 — 생성 시점에만 한 번 실행한다.
     # past_changes의 프로그램 생성 누적 증감률은 원자 fact_id·claim slot·원문
@@ -563,6 +716,8 @@ def run_v2(
             safety_decision=quality_observation.safety_decision,
             publication_policy=PublicationPolicy.STRUCTURED_SAFETY.value,
         )
+        if public_structure_seal is not None:
+            assert_report_matches_public_structure(rendered, public_structure_seal)
 
     # ⑤-b 중복 검출 경고 — «찾아서 로그만 남긴다», 출고는 막지 않는다.
     #     validate_v2 «안»에 넣지 않은 이유는 위 모듈 docstring 참고.

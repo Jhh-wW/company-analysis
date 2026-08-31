@@ -239,6 +239,21 @@ def build_generation_quality_candidate(
     """렌더 결과와 본문을 원자 사실 ID 기준으로 품질 평가기에 투영한다."""
 
     by_id, by_key = _valid_fact_registries(rendered.fact_records)
+    structures_manifest_bound = False
+    if rendered.public_structure_manifest:
+        # 순환 import를 피하면서 FULL pipeline의 독립 manifest 검증 결과를
+        # 품질 투영에도 반영한다. digest·표 ref·행 근거가 모두 남아야 한다.
+        from src.features.composer.public_manifest import (  # noqa: PLC0415
+            PublicManifestError,
+            assert_stored_strict_manifest,
+        )
+
+        try:
+            assert_stored_strict_manifest(rendered)
+        except PublicManifestError:
+            structures_manifest_bound = False
+        else:
+            structures_manifest_bound = True
     rendered_sections = {section.cell: section for section in rendered.sections}
     sections: list[ReportSectionCandidate] = []
     for section in composed.sections:
@@ -265,11 +280,14 @@ def build_generation_quality_candidate(
         # 전역 40건 하한만 부풀릴 수 있다. 구조 행 계약 전에는 공개 문장과
         # 장부 ID 집합이 정확히 같아야 하며 여분·누락 어느 쪽도 허용하지 않는다.
         has_fact_mapping_mismatch = bound_fact_ids != public_sentence_fact_ids
-        # 표·도식은 셀/행 fact_id 계약이 추가되기 전까지 결속됐다고 꾸미지
-        # 않는다. 이 모듈이 나중에 그 자료형을 읽는 단일 확장점이다.
-        has_unbound_structures = bool(
+        # FULL 표·도식은 pre-render manifest가 행별 원문 지문과 실제 셀을
+        # 완전 비교한 경우에만 결속으로 인정한다. SHADOW·옛 저장본은 그대로다.
+        has_public_structures = bool(
             section.flow_rows
             or (rendered_section is not None and rendered_section.tables)
+        )
+        has_unbound_structures = (
+            has_public_structures and not structures_manifest_bound
         )
         sections.append(
             ReportSectionCandidate(

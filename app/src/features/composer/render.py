@@ -53,6 +53,7 @@ from src.features.composer.port import (
     FilingMeta,
     PerformanceTable,
 )
+from src.features.composer.public_manifest import PublicStructureSeal
 from src.features.composer.prose_facts import ProseEvidence, build_verified_prose_fact
 from src.features.composer.quality_projection import bound_summary_fact_id
 from src.features.pipeline.port import (
@@ -195,6 +196,7 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
             source_url=str(getattr(fragment, "source_url", "") or ""),
             document_title=str(getattr(fragment, "document_title", "") or ""),
             location=str(getattr(fragment, "location", "") or ""),
+            document_date=str(getattr(fragment, "document_date", "") or ""),
             from_filing=not str(getattr(fragment, "source_url", "") or ""),
             from_financial_api=str(getattr(fragment, "text", "") or "").startswith(
                 DART_FINANCIAL_API_PREFIX
@@ -733,6 +735,7 @@ def render_report(
     filing_meta: Optional[FilingMeta] = None,
     composition_tables: tuple[PerformanceTable, ...] = (),
     citation_style: str = DEFAULT_CITATION_STYLE,
+    public_structure_seal: Optional[PublicStructureSeal] = None,
 ) -> Report:
     """검증 끝난 ComposedReport를 웹·PDF 공용 pipeline Report로 바꾼다.
 
@@ -951,6 +954,40 @@ def render_report(
                 )
             tables.append(converted)
 
+        # FULL에서는 renderer가 구조를 결정한 뒤, 독립 canonicalizer가 미리
+        # 만든 행 근거·전체 출처·manifest 참조를 같은 table index에 붙인다.
+        # helper가 행이나 셀을 위조해도 뒤의 actual 비교가 ref 불일치로 막는다.
+        if public_structure_seal is not None:
+            sealed_tables: list[ReportTable] = []
+            for table_index, table in enumerate(tables):
+                entry = public_structure_seal.table_entry(
+                    section.section_id, table_index
+                )
+                if not entry:
+                    sealed_tables.append(table)
+                    continue
+                sealed = replace(
+                    table,
+                    evidence_rows=[
+                        str(value) for value in entry.get("evidence_rows", [])
+                    ],
+                    source_cites=[
+                        str(value) for value in entry.get("source_cites", [])
+                    ],
+                    manifest_ref=str(entry.get("manifest_ref") or ""),
+                    row_fact_ids=[
+                        str(value) for value in entry.get("row_fact_ids", [])
+                    ],
+                )
+                for raw_cite in sealed.source_cites:
+                    source_number = citation_number(raw_cite)
+                    if source_number and int(source_number) in meta_by_number:
+                        owners = used_sections.setdefault(int(source_number), [])
+                        if section.section_id not in owners:
+                            owners.append(section.section_id)
+                sealed_tables.append(sealed)
+            tables = sealed_tables
+
         sections.append(
             ReportSection(
                 cell=section.section_id,
@@ -1092,4 +1129,9 @@ def render_report(
             for section in report.sections
             for fact in structured_facts_by_section.get(section.section_id, [])
         ],
+        public_structure_manifest=(
+            public_structure_seal.canonical_json
+            if public_structure_seal is not None
+            else ""
+        ),
     )
