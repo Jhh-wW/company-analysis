@@ -254,6 +254,8 @@ def test_문장이_여러개여도_한가지_의미범주뿐이면_complete가_�
 
     assert result.quality.substantive_claims == 40
     assert result.quality.grade is QualityGrade.PARTIAL
+    assert result.quality.semantic_underfilled_sections == ("identity",)
+    assert QualityProblemCode.LOW_SEMANTIC_COVERAGE in result.quality.problem_codes
     assert result.safety.decision is ReleaseDecision.RELEASE_ALLOWED
     assert any(
         "서로 다른 의미 claim 범주" in reason

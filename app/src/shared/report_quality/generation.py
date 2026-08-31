@@ -66,6 +66,7 @@ class GenerationQualityObservation:
     section_public_sentence_counts: tuple[tuple[str, int], ...] = ()
     underfilled_sections: tuple[str, ...] = ()
     notice_only_sections: tuple[str, ...] = ()
+    semantic_underfilled_sections: tuple[str, ...] = ()
     # 사람이 읽는 문구와 행동 계약을 분리한 닫힌 품질 코드.
     quality_problem_codes: tuple[str, ...] = ()
 
@@ -136,6 +137,9 @@ def observe_generation(
         ),
         underfilled_sections=assessment.quality.underfilled_sections,
         notice_only_sections=assessment.quality.notice_only_sections,
+        semantic_underfilled_sections=(
+            assessment.quality.semantic_underfilled_sections
+        ),
         quality_problem_codes=tuple(
             code.value for code in assessment.quality.problem_codes
         ),

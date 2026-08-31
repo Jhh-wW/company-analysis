@@ -4,11 +4,20 @@ from src.features.report_recovery.logic import (
     decide_post_validation,
     decide_preflight,
 )
-from src.features.report_recovery.models import RecoveryAction, RecoveryDecision
+from src.features.report_recovery.models import (
+    GenerationValidationReceipt,
+    RecoveryAction,
+    RecoveryDecision,
+    SupplementAuthorization,
+    ValidationRound,
+)
 
 __all__ = [
+    "GenerationValidationReceipt",
     "RecoveryAction",
     "RecoveryDecision",
+    "SupplementAuthorization",
+    "ValidationRound",
     "decide_post_validation",
     "decide_preflight",
 ]

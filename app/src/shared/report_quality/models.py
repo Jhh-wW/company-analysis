@@ -105,6 +105,7 @@ class QualityAssessment:
     # 원자 fact 수(``section_claim_counts``)와 섞지 않는다.
     section_public_sentence_counts: tuple[tuple[str, int], ...] = ()
     underfilled_sections: tuple[str, ...] = ()
+    semantic_underfilled_sections: tuple[str, ...] = ()
     # 회복·출고 상태기계는 사람이 읽는 ``shortfall_reasons`` 문자열을 해석하지
     # 않고 이 닫힌 코드만 읽는다. 문구가 바뀌어도 행동이 달라지지 않는다.
     problem_codes: tuple[QualityProblemCode, ...] = ()

@@ -505,6 +505,7 @@ def assess_quality(
         shortfall_reasons=tuple(shortfalls),
         section_public_sentence_counts=tuple(public_sentence_counts),
         underfilled_sections=tuple(low_coverage),
+        semantic_underfilled_sections=tuple(low_semantic_coverage),
         problem_codes=tuple(dict.fromkeys(problem_codes)),
     )
 
