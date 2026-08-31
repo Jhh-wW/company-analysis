@@ -51,10 +51,11 @@ def _fact(section_id: str, sentence: ComposedSentence) -> FactRecord:
         source_host="example.com",
         source_url=f"https://example.com/{section_id}",
         source_document_id=f"document-{section_id}",
-        state_evidence="정확한 원문 지문",
+        state_evidence=f"{sentence.text} 정확한 원문 지문",
         status="verified",
         fact_status="actual",
         verification_status="verified",
+        evidence_support_terms=["검증된", "사실"],
         claim_slot=sentence.planned_claim_slot,
     )
     return replace(fact, evidence_binding=fact_evidence_binding(fact))
@@ -110,6 +111,19 @@ def test_근거지문이_손상되거나_미검증인_문장은_요약재료가_
 
     assert facts[0].fact_id not in selected.fact_ids
     assert facts[1].fact_id not in selected.fact_ids
+
+
+def test_공통근거어가_두개_미만인_일반산문은_요약재료가_아니다() -> None:
+    report, facts = _report(tuple(_SLOTS))
+    unsupported = replace(facts[0], evidence_support_terms=["검증된"])
+    unsupported = replace(
+        unsupported,
+        evidence_binding=fact_evidence_binding(unsupported),
+    )
+
+    selected = select_extractive_summary(report, (unsupported, *facts[1:]))
+
+    assert unsupported.fact_id not in selected.fact_ids
 
 
 def test_세_장보다_적으면_한_장_문장으로_길이만_채우지_않는다() -> None:

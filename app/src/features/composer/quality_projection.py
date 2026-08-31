@@ -20,6 +20,7 @@ from src.shared.report_quality.dto import (
     SourceDocument,
 )
 from src.shared.report_quality.fact_binding import fact_evidence_binding
+from src.shared.report_quality.evidence_support import prose_evidence_support_ready
 from src.shared.report_quality.source_identity import (
     document_identity,
     document_identity_from_parts,
@@ -56,6 +57,9 @@ def _valid_fact_registries(
             not fact_id
             or not all(key)
             or (fact.verification_status or fact.status) != "verified"
+            or not prose_evidence_support_ready(
+                fact.claim_type, fact.evidence_support_terms
+            )
             or not fact.evidence_binding
             or fact.evidence_binding != fact_evidence_binding(fact)
         ):

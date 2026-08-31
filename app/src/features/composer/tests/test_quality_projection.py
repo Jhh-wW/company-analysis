@@ -81,6 +81,7 @@ def _fact(sentence: ComposedSentence, source: Source) -> FactRecord:
         status="verified",
         fact_status="actual",
         verification_status="verified",
+        evidence_support_terms=["공식", "제품"],
         claim_slot=sentence.planned_claim_slot,
         supporting_source_ids=[source.source_id],
         supporting_source_identities=["document:example.com:sales-page"],
@@ -131,6 +132,22 @@ def test_일반산문과_추출식요약을_같은_사실ID에_결속한다() ->
 def test_사실지문이_손상되면_본문과_요약을_결속됐다고_세지_않는다() -> None:
     _sentence_value, _source_value, fact, composed, rendered = _inputs()
     rendered.fact_records[:] = [replace(fact, evidence_binding="0" * 64)]
+
+    candidate = build_generation_quality_candidate(rendered, composed)
+
+    assert candidate.sections[0].has_unbound_public_content
+    assert candidate.summary_fact_ids == ()
+    assert candidate.has_unbound_summary_content
+
+
+def test_일반산문_근거어가_두개_미만이면_결속됐다고_세지_않는다() -> None:
+    _sentence_value, _source_value, fact, composed, rendered = _inputs()
+    unsupported = replace(fact, evidence_support_terms=["공식"])
+    unsupported = replace(
+        unsupported,
+        evidence_binding=fact_evidence_binding(unsupported),
+    )
+    rendered.fact_records[:] = [unsupported]
 
     candidate = build_generation_quality_candidate(rendered, composed)
 

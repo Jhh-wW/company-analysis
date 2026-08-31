@@ -19,6 +19,7 @@ from src.features.composer.port import ComposedSentence
 from src.features.pipeline.port import FactRecord
 from src.features.provenance.sources import Source, exact_evidence_text_hash
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
+from src.shared.report_quality.evidence_support import prose_evidence_support_ready
 from src.shared.report_quality.fact_binding import fact_evidence_binding
 from src.shared.report_quality.source_identity import document_identity
 
@@ -140,6 +141,17 @@ def build_verified_prose_fact(
             }
         )
 
+    support_terms = _support_terms(claim, evidence)
+    if not prose_evidence_support_ready(
+        (
+            "verified_prose"
+            if sentence.grade == GRADE_CONFIRMED
+            else "evidence_based_interpretation"
+        ),
+        support_terms,
+    ):
+        return None
+
     primary = evidence[0].source
     fact = FactRecord(
         fact_id=_fact_id(
@@ -185,7 +197,7 @@ def build_verified_prose_fact(
         source_date=(
             primary.published_at or primary.disclosed_at or primary.collected_at
         ),
-        evidence_support_terms=_support_terms(claim, evidence),
+        evidence_support_terms=support_terms,
         claim_slot=claim_slot,
         supporting_source_ids=source_ids,
         supporting_source_identities=source_identities,

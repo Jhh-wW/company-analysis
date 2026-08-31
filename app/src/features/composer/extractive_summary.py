@@ -14,6 +14,7 @@ from src.features.composer.constants import GRADE_CONFIRMED, GRADE_INTERPRETED
 from src.features.composer.port import ComposedReport, ComposedSentence
 from src.features.pipeline.port import FactRecord
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
+from src.shared.report_quality.evidence_support import prose_evidence_support_ready
 from src.shared.report_quality.fact_binding import fact_evidence_binding
 
 
@@ -114,6 +115,9 @@ def _verified_fact_registry(
             or claim_slot not in CLAIM_SLOTS_BY_SECTION[section_id]
             or not key[1]
             or (fact.verification_status or fact.status) != "verified"
+            or not prose_evidence_support_ready(
+                fact.claim_type, fact.evidence_support_terms
+            )
             or not fact.evidence_binding
             or fact.evidence_binding != fact_evidence_binding(fact)
         ):

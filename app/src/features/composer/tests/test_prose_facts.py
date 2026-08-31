@@ -131,6 +131,24 @@ def test_미검증_또는_계획밖_문장은_사실장부를_만들지않는다
         )
 
 
+def test_검수표식만_참이고_원문과_무관한_문장은_사실이_되지않는다() -> None:
+    unrelated = replace(
+        _sentence(),
+        text="화성 탐사선의 착륙 방식은 대기 밀도에 따라 달라진다.",
+    )
+
+    assert (
+        build_verified_prose_fact(
+            unrelated,
+            section_id="business_model",
+            company_name="예시회사",
+            as_of_date="2026-08-31",
+            evidence=_evidence(),
+        )
+        is None
+    )
+
+
 def test_품질안전검사는_두번째_출처까지_따로_대조한다() -> None:
     evidence = _evidence()
     fact = build_verified_prose_fact(
