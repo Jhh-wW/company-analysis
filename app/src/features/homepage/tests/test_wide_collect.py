@@ -986,6 +986,21 @@ def test_robots_차단으로_문서가_0건이어도_attempt의_company_id는_�
     assert result.documents == ()
     assert result.attempts
     assert all(a.company_id == "dart-99999999" for a in result.attempts)
+    # 계약 gen=8 마지막 고리 — 문서가 0건이라 company_id를 역산할 곳이 없어도
+    # 결과 자신은 대상 회사를 잃지 않는다.
+    assert result.company_id == "dart-99999999"
+
+
+def test_홈페이지_주소가_비어있어도_결과는_대상_회사를_싣는다():
+    """documents·attempts가 둘 다 0건인 가장 극단적인 경우도 결과 자신의
+    company_id는 남아야 한다."""
+    site = _FakeWideSite({})
+
+    result = _collect(site, root_homepage_url="", company_id="dart-88888888")
+
+    assert result.documents == ()
+    assert result.attempts == ()
+    assert result.company_id == "dart-88888888"
 
 
 def test_전체_파이프라인_fragment와_attempt_모두_대상_회사_company_id를_갖는다():

@@ -240,14 +240,16 @@ def test_fragment_location_형식이_잘못되면_ValueError():
 
 
 def test_result은_documents와_attempts를_묶는다():
-    result = WideCollectionResult(documents=(_document(),), attempts=(_attempt(),))
+    result = WideCollectionResult(company_id="c1", documents=(_document(),), attempts=(_attempt(),))
     assert len(result.documents) == 1
     assert len(result.attempts) == 1
+    assert result.company_id == "c1"
 
 
 def test_document_id_중복이면_ValueError():
     with pytest.raises(ValueError):
         WideCollectionResult(
+            company_id="c1",
             documents=(_document(document_id="dup"), _document(document_id="dup")),
             attempts=(),
         )
@@ -256,6 +258,44 @@ def test_document_id_중복이면_ValueError():
 def test_attempt_id_중복이면_ValueError():
     with pytest.raises(ValueError):
         WideCollectionResult(
+            company_id="c1",
             documents=(),
             attempts=(_attempt(attempt_id="a1"), _attempt(attempt_id="a1")),
+        )
+
+
+# ── 계약 generation=8 마지막 고리: 결과 자신의 company_id ────
+
+
+def test_result_빈_company_id는_ValueError():
+    with pytest.raises(ValueError):
+        WideCollectionResult(company_id="", documents=(), attempts=())
+
+
+def test_result은_문서가_0건이어도_company_id를_싣는다():
+    """robots 전면 차단 등으로 문서가 하나도 안 만들어져도, 결과 자신은
+    대상 회사를 잃지 않아야 한다(documents에서 역산하면 0건일 때 정본을
+    잃는다 — 그래서 결과 자신이 독립된 정본이다)."""
+    result = WideCollectionResult(company_id="dart-00012345", documents=(), attempts=())
+    assert result.company_id == "dart-00012345"
+
+
+def test_document_company_id가_결과와_다르면_ValueError():
+    """공격 시험 — 문서 생성부 버그로 문서가 다른 회사 값을 가지면, 문서들
+    끼리는 서로 일치해도(예: 문서 1개뿐) 결과의 정본 company_id와 대조해
+    걸려야 한다."""
+    with pytest.raises(ValueError):
+        WideCollectionResult(
+            company_id="target-co",
+            documents=(_document(company_id="other-co"),),
+            attempts=(),
+        )
+
+
+def test_attempt_company_id가_결과와_다르면_ValueError():
+    with pytest.raises(ValueError):
+        WideCollectionResult(
+            company_id="target-co",
+            documents=(),
+            attempts=(_attempt(company_id="other-co"),),
         )

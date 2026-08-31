@@ -260,12 +260,22 @@ class WideFragment:
 
 @dataclass(frozen=True)
 class WideCollectionResult:
-    """수집 한 번의 전체 결과 — 문서 목록과 시도 기록 목록."""
+    """수집 한 번의 전체 결과 — 대상 회사·문서 목록·시도 기록 목록.
 
+    ★ 계약 generation=8 마지막 고리(팀 리드 2026-08-31): ``company_id``는
+      ``collect_official_web_documents(company_id=...)``가 호출 인자로
+      받은 값을 그대로 싣는 **정본**이다. documents·attempts에서
+      역산하지 않는다 — 문서 생성부에 버그가 생겨 문서들이 일제히 엉뚱한
+      회사 값을 가져도 서로는 일치하므로, 역산 방식은 그 오류를 못
+      잡는다. 이 필드가 독립된 정본이라야 대조가 의미를 갖는다.
+    """
+
+    company_id: str
     documents: tuple[WideDocumentIdentity, ...]
     attempts: tuple[WideCollectionAttempt, ...]
 
     def __post_init__(self) -> None:
+        _require_nonblank(self.company_id, "company_id")
         if not isinstance(self.documents, tuple):
             raise ValueError("documents는 tuple[WideDocumentIdentity, ...]이어야 합니다")
         if not isinstance(self.attempts, tuple):
@@ -277,6 +287,13 @@ class WideCollectionResult:
             if document.document_id in seen_document_ids:
                 raise ValueError(f"document_id가 중복되었습니다: {document.document_id}")
             seen_document_ids.add(document.document_id)
+            if document.company_id != self.company_id:
+                # 내부 모순 — 조용히 하나를 골라 감추지 않는다(팀 리드 승인 정책).
+                raise ValueError(
+                    "document.company_id가 결과의 company_id와 다릅니다(내부 불일치): "
+                    f"document_id={document.document_id} document.company_id={document.company_id!r} "
+                    f"result.company_id={self.company_id!r}"
+                )
         seen_attempt_ids: set[str] = set()
         for attempt in self.attempts:
             if not isinstance(attempt, WideCollectionAttempt):
@@ -284,3 +301,9 @@ class WideCollectionResult:
             if attempt.attempt_id in seen_attempt_ids:
                 raise ValueError(f"attempt_id가 중복되었습니다: {attempt.attempt_id}")
             seen_attempt_ids.add(attempt.attempt_id)
+            if attempt.company_id != self.company_id:
+                raise ValueError(
+                    "attempt.company_id가 결과의 company_id와 다릅니다(내부 불일치): "
+                    f"attempt_id={attempt.attempt_id} attempt.company_id={attempt.company_id!r} "
+                    f"result.company_id={self.company_id!r}"
+                )

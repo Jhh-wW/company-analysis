@@ -105,11 +105,18 @@ def build_fragments(document: WideDocumentIdentity, *, company_id: str) -> tuple
 def build_fragments_for_collection(result: WideCollectionResult) -> tuple[WideFragment, ...]:
     """수집 결과의 모든 문서에서 fragment를 한 번에 만드는 얇은 편의 함수.
 
-    ★ 계약 generation=8 — **운영 호출부는 이 함수를 쓴다**(팀 리드
-      2026-08-31 지시: ``build_fragments``에 지역 거부를 추가하는 대신
-      구조로 막는다). company_id를 수집 결과 자신(documents)에서 한 번만
-      꺼내 모든 문서에 그대로 실으므로, 호출 지점에서 문서마다 값을 따로
-      옮겨 적다 실수로 다른 회사 값을 넣을 방법이 없다.
+    ★ 계약 generation=8 마지막 고리(팀 리드 2026-08-31) — **운영 호출부는
+      이 함수를 쓴다**(``build_fragments``에 지역 거부를 추가하는 대신
+      구조로 막는다). ``result.company_id``를 정본으로 모든 문서에 그대로
+      싣는다 — **documents에서 역산하지 않는다.** documents에서 역산하면
+      문서 생성부에 버그가 생겨 문서들이 일제히 엉뚱한 회사 값을 갖게 될
+      때 서로는 일치하므로 대조할 정본이 없어 아무도 못 잡는다.
+      ``result.company_id``는 ``collect_official_web_documents(company_id=...)``
+      가 호출 인자로 받은 값이라 documents와 독립된 정본이고,
+      ``WideCollectionResult.__post_init__``이 이미 모든 document·attempt의
+      company_id가 이 값과 같은지 생성 시점에 확인해 뒀다(다르면 그
+      시점에 ValueError로 걸린다) — 그래서 여기서는 다시 검증하지 않고
+      곧바로 신뢰해 쓴다.
 
     Args:
         result: ``collect_official_web_documents``가 돌려준 수집 결과.
@@ -117,25 +124,11 @@ def build_fragments_for_collection(result: WideCollectionResult) -> tuple[WideFr
     Returns:
         모든 문서의 fragment를 이어붙인 튜플(결정론 순서 — documents
         순서·문서 내 구간 순서를 그대로 따른다). 문서가 0건이면 빈 튜플.
-
-    Raises:
-        ValueError: 문서들의 company_id가 서로 다르면 — 있어서는 안 되는
-            내부 불일치(한 번의 수집 실행은 회사 하나만 대상으로 한다)를
-            조용히 아무 값이나 골라 감추지 않는다.
     """
-    if not result.documents:
-        return ()
-    company_ids = {document.company_id for document in result.documents}
-    if len(company_ids) > 1:
-        raise ValueError(
-            "수집 결과의 문서들이 서로 다른 company_id를 갖고 있습니다"
-            f"(내부 불일치): {sorted(company_ids)!r}"
-        )
-    (company_id,) = company_ids
     return tuple(
         fragment
         for document in result.documents
-        for fragment in build_fragments(document, company_id=company_id)
+        for fragment in build_fragments(document, company_id=result.company_id)
     )
 
 

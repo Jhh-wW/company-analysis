@@ -176,7 +176,7 @@ def test_수집결과의_모든_문서에서_조각을_만든다():
     about = _document(
         "https://company.example/about", ("회사 소개입니다.",), document_id="d-about"
     )
-    result = WideCollectionResult(documents=(careers, about), attempts=())
+    result = WideCollectionResult(company_id="c1", documents=(careers, about), attempts=())
 
     fragments = build_fragments_for_collection(result)
 
@@ -185,13 +185,16 @@ def test_수집결과의_모든_문서에서_조각을_만든다():
 
 
 def test_수집결과_company_id를_모든_fragment에_싣는다():
-    """공격 시험 — document.company_id를 그대로 베끼는 게 아니라 수집 결과
-    자신에서 한 번만 꺼낸 값을 싣는지 확인한다(값은 같지만 출처가 다르다는
-    것을 왕복으로 증명)."""
+    """공격 시험 — document.company_id를 역산하는 게 아니라 result.company_id
+    (호출 인자로 받은 정본)를 싣는지 확인한다. 문서도 같은 값을 가져야
+    WideCollectionResult 생성이 통과하므로 값 자체는 같지만, 출처가
+    documents가 아니라 result.company_id임은 아래 «결과 자신에서 역산하지
+    않는다» 계열 시험(wide_types.py)에서 결과 생성 시점 검증으로 이미
+    증명된다 — 여기서는 그 정본이 fragment까지 그대로 흐르는지 확인한다."""
     document = _document(
         "https://company.example/careers", ("채용 문구입니다.",), company_id="target-co"
     )
-    result = WideCollectionResult(documents=(document,), attempts=())
+    result = WideCollectionResult(company_id="target-co", documents=(document,), attempts=())
 
     fragments = build_fragments_for_collection(result)
 
@@ -201,38 +204,32 @@ def test_수집결과_company_id를_모든_fragment에_싣는다():
 
 def test_문서가_0건이면_빈_튜플():
     """robots 차단 등으로 문서가 하나도 안 만들어진 수집 결과도 예외 없이
-    빈 튜플을 돌려줘야 한다(문서가 없으니 company_id를 꺼낼 곳도 없다)."""
-    result = WideCollectionResult(documents=(), attempts=())
+    빈 튜플을 돌려줘야 한다. company_id는 documents가 아니라 결과 자신이
+    정본으로 들고 있으므로, 문서가 0건이어도 정본을 잃지 않는다(그래서
+    company_id 없이도 문제없이 빈 튜플을 낸다)."""
+    result = WideCollectionResult(company_id="c1", documents=(), attempts=())
     assert build_fragments_for_collection(result) == ()
 
 
-def test_문서들의_company_id가_다르면_ValueError():
+def test_문서_company_id가_결과와_다르면_결과_생성_시점에_ValueError():
     """공격 시험 — 한 번의 수집 실행은 회사 하나만 대상으로 해야 정상이다.
-    내부 불일치(서로 다른 company_id가 섞인 documents)를 조용히 아무
-    값이나 골라 감추지 않고 즉시 ValueError로 막는다."""
-    doc_a = _document(
-        "https://company.example/careers",
-        ("채용 문구입니다.",),
-        document_id="d-a",
-        company_id="company-a",
+    내부 불일치(document.company_id가 result.company_id와 다름)는
+    ``build_fragments_for_collection`` 호출 이전, ``WideCollectionResult``
+    «생성 시점»에 이미 막힌다(정본이 result 자신이라 documents끼리
+    서로 일치하는지가 아니라 정본과 일치하는지를 본다 — 그래서 문서가
+    1개뿐이라 «서로 일치»해도 정본과 다르면 걸린다)."""
+    document = _document(
+        "https://company.example/careers", ("채용 문구입니다.",), company_id="other-co"
     )
-    doc_b = _document(
-        "https://company.example/about",
-        ("회사 소개입니다.",),
-        document_id="d-b",
-        company_id="company-b",
-    )
-    result = WideCollectionResult(documents=(doc_a, doc_b), attempts=())
-
     with pytest.raises(ValueError):
-        build_fragments_for_collection(result)
+        WideCollectionResult(company_id="target-co", documents=(document,), attempts=())
 
 
 def test_수집결과_경로와_저수준_경로는_같은_fragment를_만든다():
     """왕복 — build_fragments_for_collection이 문서마다 build_fragments를
     같은 company_id로 부르는 것과 동일한 결과를 내는지 확인한다."""
     document = _document("https://company.example/careers", ("채용 문구입니다.",))
-    result = WideCollectionResult(documents=(document,), attempts=())
+    result = WideCollectionResult(company_id="c1", documents=(document,), attempts=())
 
     via_collection = build_fragments_for_collection(result)
     via_low_level = build_fragments(document, company_id=document.company_id)

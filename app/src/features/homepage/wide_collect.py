@@ -241,7 +241,10 @@ def collect_official_web_documents(
     root_scheme, root_host = _normalize_root(root_homepage_url)
     state = _CollectionState(company_id=company_id, collected_at=collected_at, clock=clock)
     if not root_host:
-        return WideCollectionResult(documents=(), attempts=())
+        # 계약 gen=8 마지막 고리: 문서·attempt가 0건이어도 결과 자신은 항상
+        # 대상 회사를 싣는다(documents에서 역산하지 않는다 — 역산하면 0건일 때
+        # 정본을 잃는다).
+        return WideCollectionResult(company_id=state.company_id, documents=(), attempts=())
 
     try:
         with request_deadline_scope(WIDE_COLLECTION_TIMEOUT_SEC) as deadline:
@@ -264,7 +267,11 @@ def collect_official_web_documents(
     except HomepageResponseError:
         state.record_truncation(WIDE_SOURCE_KIND_WEB_PAGE, "truncated_time_cap")
 
-    return WideCollectionResult(documents=tuple(state.documents), attempts=tuple(state.attempts))
+    return WideCollectionResult(
+        company_id=state.company_id,
+        documents=tuple(state.documents),
+        attempts=tuple(state.attempts),
+    )
 
 
 # ══════════════════════════════════════════════════════════
