@@ -212,6 +212,14 @@ def test_primary_9_writer_1_bundled_reviewer가_exact_wire로_왕복한다():
     assert evidence.reviewer_calls == 1
 
 
+def test_빈_호출장부는_AI를_부르기_전_상태로_허용한다():
+    ledger = GenerationCallLedger(())
+
+    assert ledger.records == ()
+    assert ledger.writer_calls == 0
+    assert ledger.reviewer_calls == 0
+
+
 def test_COMPLETE_이름만_붙인_모순된_평가는_성공_영수증을_못_만든다():
     forged = replace(
         _complete_assessment(),
