@@ -8,6 +8,8 @@ IR PDF 위임은 이미 `test_ir_pdf.py`가 그 내부 로직을 검증하므로
 
 from __future__ import annotations
 
+import pytest
+
 from src.features.homepage import wide_collect
 from src.features.homepage.constants import (
     WIDE_MAX_PAGES,
@@ -180,12 +182,24 @@ def test_robots가_403이면_본문을_긁지_않는다():
     assert "https://company.example/" not in site.calls
 
 
-def test_robots가_429면_일반_page_fetch가_0회다():
-    """P1(통합 담당 지시): 429(속도 제한)를 «robots 없음」으로 읽어 본문을
-    긁으면 안 된다 — 호출 카운터로 일반 페이지 fetch가 정말 0회인지 확인한다."""
+@pytest.mark.parametrize(
+    ("status", "expected_reason_code"),
+    [
+        (407, "robots_denied"),
+        (408, "robots_transient"),
+        (409, "robots_transient"),
+        (429, "robots_transient"),
+    ],
+)
+def test_robots_거부_일시장애_상태는_일반_전송_호출이_0회다(status, expected_reason_code):
+    """P1(통합 담당 지시, 2026-08-31 확장): robots_decision의 단위 분류
+    (407·408·409·429 전부 blocked)를 상태마다 실제 수집 전체로 증명한다.
+    「robots가 아닌」 전송 호출 수를 세어 정말 0인지 확인한다 — 특정 URL
+    문자열이 calls 안에 없다는 것만으로는 다른 형태의 우회 호출을 놓칠 수
+    있어, 통합 담당이 407·429 두 상태만으로는 증명이 불완전하다고 지적했다."""
     pages = {
         "https://company.example/robots.txt": WideRawResponse(
-            status=429, text="", effective_url="https://company.example/robots.txt", content_type=""
+            status=status, text="", effective_url="https://company.example/robots.txt", content_type=""
         ),
         "https://company.example/": _page(_body("루트 페이지 본문입니다"), "https://company.example/"),
     }
@@ -194,27 +208,10 @@ def test_robots가_429면_일반_page_fetch가_0회다():
     result = _collect(site)
 
     assert result.documents == ()
-    page_calls = [c for c in site.calls if not c.endswith("robots.txt") and not c.endswith("sitemap.xml")]
-    assert page_calls == []
+    non_robots_calls = [c for c in site.calls if not c.endswith("robots.txt")]
+    assert non_robots_calls == [], f"status={status}: robots 아닌 전송 호출이 있었다: {non_robots_calls}"
     robots_attempt = next(a for a in result.attempts if a.source_kind == "robots_txt")
-    assert robots_attempt.reason_code == "robots_transient"
-
-
-def test_robots가_407이면_본문을_긁지_않는다():
-    pages = {
-        "https://company.example/robots.txt": WideRawResponse(
-            status=407, text="", effective_url="https://company.example/robots.txt", content_type=""
-        ),
-        "https://company.example/": _page(_body("루트 페이지 본문입니다"), "https://company.example/"),
-    }
-    site = _FakeWideSite(pages)
-
-    result = _collect(site)
-
-    assert result.documents == ()
-    assert "https://company.example/" not in site.calls
-    robots_attempt = next(a for a in result.attempts if a.source_kind == "robots_txt")
-    assert robots_attempt.reason_code == "robots_denied"
+    assert robots_attempt.reason_code == expected_reason_code, f"status={status}"
 
 
 def test_robots가_그밖의_4xx면_본문을_긁지_않는다():
