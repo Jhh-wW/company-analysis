@@ -57,7 +57,7 @@ def test_render가_값을_안_주면_우리가_넣은_이름을_쓴다(
     그때 render.yaml 에서 APP_GIT_COMMIT 으로 직접 넣을 수 있어야 한다.
     """
     _clear_commit_env(monkeypatch)
-    monkeypatch.setenv("APP_GIT_COMMIT", "abc1234")
+    monkeypatch.setenv("APP_GIT_COMMIT", "abc1234" + "0" * 33)
 
     assert client.get("/healthz").json()["commit"] == "abc1234"
 
@@ -89,6 +89,9 @@ def test_커밋을_몰라도_상태는_ok다(
         "커밋",
         "  ",
         "zzzzzzz",
+        "ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+        " 8541a53fedcba9876543210fedcba98765432100",
+        "8541a53fedcba9876543210fedcba98765432100 ",
     ],
 )
 def test_환경변수가_오염돼도_그대로_흘리지_않는다(

@@ -58,6 +58,13 @@ from src.shared.report_source_identity import (
 _REAL_FINALIZE_REPORT_DELIVERY = job_runtime._finalize_report_delivery
 
 
+@pytest.fixture(autouse=True)
+def _검증된_배포에서_통합시험한다(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in deployment_identity.COMMIT_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "a" * 40)
+
+
 def _authorize_current_admin(client: TestClient) -> None:
     """Delivery 내용 시험을 공개 ID bearer가 아닌 현재 관리자 권한으로 연다."""
 
@@ -767,13 +774,172 @@ def test_출고배포신원도_full_commit만_권위로_쓴다(
         monkeypatch.delenv(name, raising=False)
     full_commit = "a" * deployment_identity.COMMIT_FULL_LEN
     monkeypatch.setenv("RENDER_GIT_COMMIT", full_commit)
-    assert report_delivery_adapter._release_identity() == (full_commit, "")
+    revision, image = report_delivery_adapter._release_identity()
+    assert revision == full_commit
+    assert image == (
+        "generator-build:"
+        f"{report_delivery_adapter.composer_build_id.ENGINE_BUILD_ID_CONTRACT_VERSION}:"
+        f"{full_commit}"
+    )
 
     monkeypatch.setenv("RENDER_GIT_COMMIT", "abc1234")
     assert report_delivery_adapter._release_identity() == (
         "",
         report_delivery_adapter._UNCACHEABLE_LOCAL_RELEASE_ID,
     )
+
+
+def test_출고revision과_build도_교대환경을_한번만_읽는다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = "1" * deployment_identity.COMMIT_FULL_LEN
+    second = "2" * deployment_identity.COMMIT_FULL_LEN
+    original_environment = deployment_identity.os.environ
+    render_reads = 0
+
+    class AlternatingRawEnvironment:
+        def get(self, name: str, default: str = "") -> str:
+            nonlocal render_reads
+            if name == "RENDER_GIT_COMMIT":
+                render_reads += 1
+                return first if render_reads % 2 else second
+            if name == "APP_GIT_COMMIT":
+                return ""
+            return original_environment.get(name, default)
+
+    monkeypatch.setattr(
+        deployment_identity,
+        "os",
+        SimpleNamespace(environ=AlternatingRawEnvironment()),
+    )
+
+    revision, image = report_delivery_adapter._release_identity()
+
+    assert revision == first
+    assert image.endswith(first)
+    assert second not in image
+    assert render_reads == 1
+
+
+def test_검증안된_로컬도_새delivery와_PDF는_저장하되_cache_origin은_비운다(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    for name in deployment_identity.COMMIT_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "local-artifacts"))
+
+    persisted = reports_router.finalize_new_report_delivery(
+        report_id=f"local-new-{uuid.uuid4().hex}",
+        corp_id="demo-corp",
+        billing_bucket_id="local-bucket",
+        report=_demo_report(),
+        actual_models=("deterministic-demo",),
+        reused_from_cache=False,
+    )
+
+    assert persisted.delivery.cache_origin_content_id == ""
+    assert persisted.inspection is not None
+    assert persisted.inspection.pdf_bytes is not None
+    with storage_db.connect() as conn:
+        assert (
+            conn.execute(
+                f"SELECT COUNT(*) FROM {delivery_store.TABLE_CACHE_ENTRIES}"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+@pytest.mark.parametrize("attack", ("reuse", "bind", "sentinel_namespace"))
+def test_검증안된_로컬은_호출자flag로_캐시행동을_켤수없다(
+    attack: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    for name in deployment_identity.COMMIT_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / f"local-{attack}"))
+    report = _demo_report()
+    arguments: dict[str, object] = {
+        "report_id": f"local-attack-{attack}-{uuid.uuid4().hex}",
+        "corp_id": "demo-corp",
+        "billing_bucket_id": "local-bucket",
+        "report": report,
+        "actual_models": ("deterministic-demo",),
+        "reused_from_cache": attack == "reuse",
+        "cache_eligible": attack == "bind",
+    }
+    if attack == "sentinel_namespace":
+        revision, image = report_delivery_adapter._release_identity()
+        arguments.update(
+            cache_namespace=CacheNamespace.create(
+                product="company-analysis",
+                schema_version=report.schema_version or "legacy-report-schema",
+                deployment_revision=revision,
+                image_digest=image,
+                requested_models={"pipeline": "deterministic-demo"},
+                output_settings={"temperature": 0},
+            ),
+            preflight_identity_digest="a" * 64,
+            cache_eligible=True,
+        )
+
+    with pytest.raises(
+        report_delivery_adapter.DeliveryAdapterError,
+        match="로컬 출고는 캐시 결속·재사용",
+    ):
+        reports_router.finalize_new_report_delivery(**arguments)
+
+
+@pytest.mark.parametrize("current_release", ("local", "verified"))
+def test_검증안된_로컬의_기존content와_PDF는_새delivery로_재사용하지않는다(
+    current_release: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    for name in deployment_identity.COMMIT_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "local-reuse"))
+    report = _demo_report()
+    receipt = "20260828000123"
+    finance_digest = financial_payload_digest(
+        {"status": "000", "list": [{"account_nm": "매출액", "thstrm_amount": "1"}]}
+    )
+    owner = reports_router.finalize_new_report_delivery(
+        report_id=f"local-owner-{uuid.uuid4().hex}",
+        corp_id="demo-corp",
+        billing_bucket_id="local-bucket",
+        report=report,
+        actual_models=("deterministic-demo",),
+        reused_from_cache=False,
+        dart_receipt_numbers=(receipt,),
+        financial_payload_digest=finance_digest,
+    )
+    assert owner.artifact is not None
+
+    # 나중에 정식 배포 commit이 생겨도, 로컬 sentinel로 저장한 옛 결과를
+    # 현재 배포가 만든 캐시 원본처럼 승격해서는 안 된다.
+    expected_error = "로컬 출고 결과는 새 요청에 재사용"
+    if current_release == "verified":
+        monkeypatch.setenv("RENDER_GIT_COMMIT", "b" * 40)
+        expected_error = "현재 검증된 배포의 캐시 원본이 아닙니다"
+
+    with pytest.raises(
+        report_delivery_adapter.DeliveryAdapterError,
+        match=expected_error,
+    ):
+        reports_router.finalize_new_report_delivery(
+            report_id=f"local-waiter-{uuid.uuid4().hex}",
+            corp_id="demo-corp",
+            billing_bucket_id="local-bucket",
+            report=report,
+            actual_models=("deterministic-demo",),
+            reused_from_cache=True,
+            dart_receipt_numbers=(receipt,),
+            financial_payload_digest=finance_digest,
+            reuse_content_snapshot_id=owner.content.content_id,
+            reuse_artifact_id=owner.artifact.artifact_id,
+        )
 
 
 def test_신선한배포의_공개GET은_DB와artifact폴더를_만들지않는다(

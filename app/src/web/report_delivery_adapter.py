@@ -191,15 +191,37 @@ def reconcile_configured_artifact_blob_intents(
 
 
 def _release_identity() -> tuple[str, str]:
-    build = composer_build_id.engine_build_id()
-    if composer_build_id.build_id_is_usable(build):
-        # build id 계약이 이미 canonical full commit을 검증했다. 환경변수를 다시
-        # 읽어 두 호출 사이 값이 달라지는 race를 만들지 않고 namespace에서 꺼낸다.
-        return build.rsplit(":", 1)[-1], ""
+    identity = composer_build_id.capture_engine_build_identity()
+    if identity.cache_usable:
+        # 한 raw snapshot에서 revision과 contract-version build ID를 함께 만든다.
+        return (
+            identity.deployment_revision,
+            f"generator-build:{identity.build_id}",
+        )
     # full commit이 없어도 새 보고서와 PDF 자체는 저장할 수 있어야 한다.
     # 이 값은 composer build id로 usable하지 않고, 정식 cache_namespace가 없는
     # 출고는 cache entry를 결속하지 않으므로 로컬 캐시 권위가 되지 않는다.
     return "", _UNCACHEABLE_LOCAL_RELEASE_ID
+
+
+def _is_unverified_local_release(release: tuple[str, str]) -> bool:
+    revision, image = release
+    return not revision and image == _UNCACHEABLE_LOCAL_RELEASE_ID
+
+
+def _namespace_matches_release(
+    namespace: CacheNamespace,
+    release: tuple[str, str],
+) -> bool:
+    """호출자가 준 namespace가 adapter가 직접 읽은 배포와 정확히 같은가."""
+
+    revision, image = release
+    return bool(
+        revision
+        and image != _UNCACHEABLE_LOCAL_RELEASE_ID
+        and namespace.deployment_revision == revision
+        and namespace.image_digest == image
+    )
 
 
 def _model_mapping(actual_models: tuple[str, ...]) -> dict[str, str]:
@@ -280,8 +302,8 @@ def _font_bundle_version() -> str:
     return "sha256:" + digest.hexdigest()
 
 
-def _renderer_version() -> str:
-    revision, build = _release_identity()
+def _renderer_version(release: tuple[str, str] | None = None) -> str:
+    revision, build = release or _release_identity()
     return f"deployment:{revision}" if revision else build
 
 
@@ -312,6 +334,24 @@ def persist_approved_delivery(
 
     if not str(corp_id).strip():
         raise DeliveryAdapterError("회사 고유번호가 없어 출처 신원을 확정할 수 없습니다")
+    release = _release_identity()
+    unverified_local = _is_unverified_local_release(release)
+    if unverified_local and (
+        cache_namespace is not None
+        or bool(str(preflight_identity_digest).strip())
+        or bind_cache_entry
+        or reused_from_cache
+    ):
+        raise DeliveryAdapterError(
+            "검증되지 않은 로컬 출고는 캐시 결속·재사용을 허용하지 않습니다"
+        )
+    if cache_namespace is not None and not _namespace_matches_release(
+        cache_namespace,
+        release,
+    ):
+        raise DeliveryAdapterError(
+            "캐시 namespace가 현재 검증된 배포 신원과 다릅니다"
+        )
     if bool(cache_namespace) != bool(str(preflight_identity_digest).strip()):
         raise DeliveryAdapterError(
             "정식 캐시에는 생성기 namespace와 사전 출처 지문이 함께 필요합니다"
@@ -324,9 +364,13 @@ def persist_approved_delivery(
         )
         if content is None or content.payload != payload:
             raise DeliveryAdapterError("공개 ID의 기존 본문과 새 승인 본문이 다릅니다")
+        if unverified_local and existing.cache_origin_content_id:
+            raise DeliveryAdapterError(
+                "검증되지 않은 로컬 출고에 캐시 출처가 기록돼 있습니다"
+            )
         delivery = existing
     else:
-        revision, image = _release_identity()
+        revision, image = release
         models = _model_mapping(actual_models)
         namespace = cache_namespace or CacheNamespace.create(
             product="company-analysis",
@@ -398,7 +442,7 @@ def persist_approved_delivery(
         content_snapshot_id=content.content_id,
         pdf_bytes=pdf_bytes,
         version=delivery_artifact.ArtifactVersion(
-            renderer_version=_renderer_version(),
+            renderer_version=_renderer_version(release),
             font_bundle_version=_font_bundle_version(),
             checker_version=AUTOMATIC_CHECKER_VERSION,
         ),
@@ -492,6 +536,11 @@ def persist_reused_delivery(
     기존 Delivery가 이 artifact를 실제로 소유하는지도 함께 확인한다.
     """
 
+    release = _release_identity()
+    if _is_unverified_local_release(release):
+        raise DeliveryAdapterError(
+            "검증되지 않은 로컬 출고 결과는 새 요청에 재사용할 수 없습니다"
+        )
     clean_content_id = str(content_snapshot_id).strip()
     clean_artifact_id = str(artifact_id).strip()
     clean_bucket = str(billing_bucket_id).strip()
@@ -502,6 +551,17 @@ def persist_reused_delivery(
     content = delivery_store.load_content_snapshot(conn, clean_content_id)
     if content is None:
         raise DeliveryAdapterError("재사용할 보고서 원본이 없습니다")
+    origin_namespace = delivery_store.load_cache_namespace(
+        conn,
+        content.cache_namespace_id,
+    )
+    if origin_namespace is None or not _namespace_matches_release(
+        origin_namespace,
+        release,
+    ):
+        raise DeliveryAdapterError(
+            "재사용할 보고서가 현재 검증된 배포의 캐시 원본이 아닙니다"
+        )
     payload = report_store.report_to_json(report).encode("utf-8")
     if content.payload != payload:
         raise DeliveryAdapterError("재사용 보고서 값이 불변 원본과 다릅니다")

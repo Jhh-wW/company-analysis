@@ -14,6 +14,7 @@ requirements는 직접·전이 의존성을 고정한다. 따라서 같은 contr
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Final
 
 from src.core import deployment_identity
@@ -27,15 +28,16 @@ _SEPARATOR: Final[str] = ":"
 _LOWER_HEX: Final[frozenset[str]] = frozenset("0123456789abcdef")
 
 
-def _validated_full_commit() -> str:
-    """정확한 canonical 40자리 commit만 돌려준다."""
+@dataclass(frozen=True)
+class EngineBuildIdentity:
+    """한 raw deployment snapshot에서 함께 파생한 revision과 build ID."""
 
-    commit = deployment_identity.deployed_commit()
-    if len(commit) != deployment_identity.COMMIT_FULL_LEN:
-        return ""
-    if commit != commit.lower() or any(letter not in _LOWER_HEX for letter in commit):
-        return ""
-    return commit
+    deployment_revision: str
+    build_id: str
+
+    @property
+    def cache_usable(self) -> bool:
+        return build_id_is_usable(self.build_id)
 
 
 def _namespace(full_commit: str) -> str:
@@ -44,7 +46,20 @@ def _namespace(full_commit: str) -> str:
     return f"{ENGINE_BUILD_ID_CONTRACT_VERSION}{_SEPARATOR}{full_commit}"
 
 
-def engine_build_id() -> str:
+def capture_engine_build_identity(
+    snapshot: deployment_identity.DeploymentIdentitySnapshot | None = None,
+) -> EngineBuildIdentity:
+    """한 번 읽은 raw snapshot으로 revision과 build ID를 함께 확정한다."""
+
+    identity = snapshot or deployment_identity.capture_deployment_identity()
+    full_commit = identity.commit
+    build = _namespace(full_commit) if full_commit else UNKNOWN_BUILD_ID
+    return EngineBuildIdentity(full_commit, build)
+
+
+def engine_build_id(
+    snapshot: deployment_identity.DeploymentIdentitySnapshot | None = None,
+) -> str:
     """검증된 배포 namespace 또는 ``unknown``을 돌려준다.
 
     이 함수는 파일을 읽거나 결과를 장기 기억하지 않는다. full commit이 없는
@@ -52,10 +67,7 @@ def engine_build_id() -> str:
     캐시 읽기·쓰기를 모두 차단한다.
     """
 
-    full_commit = _validated_full_commit()
-    if not full_commit:
-        return UNKNOWN_BUILD_ID
-    return _namespace(full_commit)
+    return capture_engine_build_identity(snapshot).build_id
 
 
 def build_id_is_usable(build_id: str) -> bool:

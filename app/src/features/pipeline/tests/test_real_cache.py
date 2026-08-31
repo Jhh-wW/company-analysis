@@ -25,6 +25,7 @@ from typing import Any, Optional
 
 import pytest
 
+from src.core import deployment_identity
 from src.core.constants import GENERATION_MODEL
 from src.core.provider_gateway import attempt_context
 from src.core.provider_gateway.attempt_context import ProviderAttemptCallbacks
@@ -65,6 +66,65 @@ FISCAL_YEARS = [2025, 2024]
 #: 최신 공시 이름에 찍히는 결산 연도 — 「사업보고서 (2025.12)」의 2025.
 #: (1판 실측 116건 전부 이 모양이었다 — `analysis_engine/data/pilot/runs*.jsonl`)
 FILING_YEAR = 2025
+
+
+def test_생성cache_namespace는_교대하는_raw환경도_한_snapshot만_쓴다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """revision=A, build=B로 찢어지는 두 번 읽기 TOCTOU를 재현해 막는다."""
+
+    first = "1" * deployment_identity.COMMIT_FULL_LEN
+    second = "2" * deployment_identity.COMMIT_FULL_LEN
+    monkeypatch.setenv(real.ENGINE_V2_ENV_NAME, real.ENGINE_V2_ENV_ON)
+    original_environment = deployment_identity.os.environ
+    commit_reads = 0
+
+    class AlternatingRawEnvironment:
+        def get(self, name: str, default: str = "") -> str:
+            nonlocal commit_reads
+            if name == "RENDER_GIT_COMMIT":
+                commit_reads += 1
+                return first if commit_reads % 2 else second
+            if name == "APP_GIT_COMMIT":
+                return ""
+            return original_environment.get(name, default)
+
+    # 전역 ``os.environ`` 자체를 갈아 끼우면 pytest 등 같은 프로세스의 다른
+    # 소비자까지 공격용 mapping을 보게 된다. 대상 모듈의 os binding만 격리한다.
+    monkeypatch.setattr(
+        deployment_identity,
+        "os",
+        SimpleNamespace(environ=AlternatingRawEnvironment()),
+    )
+
+    namespace = real._generation_cache_namespace(
+        SimpleNamespace(MODEL="snapshot-test-model")
+    )
+
+    assert namespace is not None
+    assert namespace.deployment_revision == first
+    assert namespace.image_digest.endswith(first)
+    assert second not in namespace.image_digest
+    assert commit_reads == 1
+
+
+def test_v1_롤백namespace도_같은_배포build_contract를_쓴다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """운영 v2를 끈 순간 adapter와 v1 namespace가 갈라져 출고가 막히지 않는다."""
+
+    commit = "3" * deployment_identity.COMMIT_FULL_LEN
+    monkeypatch.delenv(real.ENGINE_V2_ENV_NAME, raising=False)
+    monkeypatch.setenv("RENDER_GIT_COMMIT", commit)
+
+    namespace = real._generation_cache_namespace(
+        SimpleNamespace(MODEL="rollback-test-model")
+    )
+
+    assert namespace is not None
+    assert namespace.schema_version == real.CANONICAL_SCHEMA_VERSION
+    assert namespace.deployment_revision == commit
+    assert namespace.image_digest.endswith(commit)
 
 
 class _FakeCounter:

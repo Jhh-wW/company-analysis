@@ -237,28 +237,28 @@ def _generation_cache_namespace(engine: Any) -> GenerationCacheNamespace | None:
         return None
     from src.core import deployment_identity  # noqa: PLC0415
 
-    revision = deployment_identity.deployed_commit()
-    image_digest = ""
+    # revision과 build ID가 환경변수를 따로 읽으면 두 읽기 사이 값이 바뀌어
+    # 서로 다른 배포를 한 namespace로 묶을 수 있다. raw snapshot은 한 번만 뜬다.
+    deployment_snapshot = deployment_identity.capture_deployment_identity()
+    from src.features.composer.build_id import (  # noqa: PLC0415
+        capture_engine_build_identity,
+    )
+
+    build_identity = capture_engine_build_identity(deployment_snapshot)
+    if not build_identity.cache_usable:
+        return None
+    revision = build_identity.deployment_revision
+    # v1은 운영 장애 때의 롤백 경로다. v2만 contract를 넣으면 롤백 순간
+    # adapter와 namespace가 갈라져 보고서 출고가 실패하므로 두 경로 모두 같은
+    # immutable deployment contract를 쓴다.
+    image_digest = f"generator-build:{build_identity.build_id}"
     if _engine_v2_enabled():
-        from src.features.composer.build_id import (  # noqa: PLC0415
-            build_id_is_usable,
-            engine_build_id,
-        )
         from src.features.composer.render import (  # noqa: PLC0415
             ENGINE_V2_SCHEMA_VERSION,
         )
 
-        build_id = engine_build_id()
-        if not build_id_is_usable(build_id):
-            return None
         schema_version = ENGINE_V2_SCHEMA_VERSION
-        if not revision:
-            # 로컬에는 배포 commit/image digest가 없으므로 결과 코드 지문임을
-            # 접두어로 명시한다. 운영은 실제 배포 commit을 우선한다.
-            image_digest = f"generator-build:{build_id}"
     else:
-        if not revision:
-            return None
         schema_version = CANONICAL_SCHEMA_VERSION
     return GenerationCacheNamespace.create(
         product="company-analysis",

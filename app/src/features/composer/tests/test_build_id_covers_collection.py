@@ -10,11 +10,15 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from importlib import metadata
 import os
 from pathlib import Path, PurePosixPath
 import re
 
 import pytest
+from packaging.markers import default_environment
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 from src.core import deployment_identity, paths
 from src.features.composer import build_id
@@ -47,13 +51,27 @@ def test_full_commit과_contract_version을_손실없이_namespace로_쓴다(
     assert build_id.build_id_is_usable(actual)
 
 
-def test_대문자_full_commit은_공용배포신원규칙대로_canonicalize한다(
+def test_한_deployment_snapshot에서_revision과_build_id를_함께_만든다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_full_commit(monkeypatch, _FULL_COMMIT_A)
+    snapshot = deployment_identity.capture_deployment_identity()
+
+    monkeypatch.setenv("RENDER_GIT_COMMIT", _FULL_COMMIT_B)
+    identity = build_id.capture_engine_build_identity(snapshot)
+
+    assert identity.deployment_revision == _FULL_COMMIT_A
+    assert identity.build_id.endswith(_FULL_COMMIT_A)
+    assert identity.cache_usable
+
+
+def test_대문자_full_commit은_보정하지_않고_UNKNOWN이다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     commit = "ABCDEF0123456789ABCDEF0123456789ABCDEF01"
     _set_full_commit(monkeypatch, commit)
 
-    assert build_id.engine_build_id().endswith(commit.lower())
+    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
 
 
 @pytest.mark.parametrize(
@@ -65,6 +83,8 @@ def test_대문자_full_commit은_공용배포신원규칙대로_canonicalize한
         "g" * 40,
         "a" * 40 + "-dirty",
         "abcdef0;polluted",
+        " " + "a" * 40,
+        "a" * 40 + " ",
     ),
 )
 def test_짧거나_오염된_revision은_UNKNOWN이다(
@@ -235,46 +255,64 @@ def test_Docker_production_tree는_root가_만들고_appuser는_읽기만한다(
     )
 
 
-def test_requirements의_모든_직접전이항목은_exact_pin이다() -> None:
-    requirements = (paths.PROJECT_ROOT / "app/requirements.txt").read_text(
-        encoding="utf-8"
-    )
-    entries = [
-        line.strip()
-        for line in requirements.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
-    names: list[str] = []
-
-    for entry in entries:
-        if " @ " in entry:
-            name, url = entry.split(" @ ", 1)
-            assert re.fullmatch(r"[A-Za-z0-9_.-]+", name)
-            assert re.search(r"#sha256=[0-9a-f]{64}$", url)
-            names.append(name.casefold())
+def _locked_requirements() -> dict[str, Requirement]:
+    raw = (paths.PROJECT_ROOT / "app/requirements.txt").read_text(encoding="utf-8")
+    locked: dict[str, Requirement] = {}
+    for line in raw.splitlines():
+        entry = line.strip()
+        if not entry or entry.startswith("#"):
             continue
-        requirement, _separator, _marker = entry.partition(";")
-        match = re.fullmatch(
-            r"([A-Za-z0-9_.-]+)(?:\[[A-Za-z0-9_,.-]+\])?==[^\s]+",
-            requirement.strip(),
-        )
-        assert match is not None, f"exact pin이 아닌 requirement: {entry}"
-        names.append(match.group(1).casefold())
+        requirement = Requirement(entry)
+        name = canonicalize_name(requirement.name)
+        assert name not in locked, f"requirement가 중복됐습니다: {name}"
+        locked[name] = requirement
+    return locked
 
-    assert len(names) == len(set(names))
-    # 직접 항목과 그 핵심 전이 의존성이 같은 lock 목록에 함께 있어야 한다.
-    assert {
-        "fastapi",
-        "starlette",
-        "pydantic",
-        "pydantic-core",
-        "anthropic",
-        "httpx",
-        "httpcore",
-        "boto3",
-        "botocore",
-        "s3transfer",
-        "spacy",
-        "thinc",
-        "numpy",
-    }.issubset(set(names))
+
+def test_requirements의_모든_직접전이항목은_exact_pin이다() -> None:
+    locked = _locked_requirements()
+
+    for name, requirement in locked.items():
+        if requirement.url:
+            assert re.search(r"#sha256=[0-9a-f]{64}$", requirement.url), name
+            continue
+        specifiers = tuple(requirement.specifier)
+        assert len(specifiers) == 1, f"exact pin이 아닌 requirement: {requirement}"
+        specifier = specifiers[0]
+        assert specifier.operator == "==" and "*" not in specifier.version, (
+            f"exact pin이 아닌 requirement: {requirement}"
+        )
+
+    assert "et-xmlfile" in locked, "openpyxl의 전이 의존성이 lock에서 빠졌습니다"
+
+
+def test_requirements는_설치된_metadata의_현재환경_의존성에_닫혀있다() -> None:
+    """실제 wheel metadata의 적용되는 Requires-Dist가 lock에서 빠지지 않았는지 본다."""
+
+    locked = _locked_requirements()
+    environment = default_environment()
+
+    for parent_name, parent in locked.items():
+        if parent.marker is not None and not parent.marker.evaluate(environment):
+            continue
+        distribution = metadata.distribution(parent.name)
+        if parent.url is None:
+            specifier = next(iter(parent.specifier))
+            assert distribution.version == specifier.version, (
+                f"설치 metadata와 lock 버전이 다릅니다: {parent_name} "
+                f"{distribution.version} != {specifier.version}"
+            )
+
+        enabled_extras = {"", *parent.extras}
+        for dependency_text in distribution.requires or ():
+            dependency = Requirement(dependency_text)
+            applies = dependency.marker is None or any(
+                dependency.marker.evaluate({**environment, "extra": extra})
+                for extra in enabled_extras
+            )
+            if not applies:
+                continue
+            dependency_name = canonicalize_name(dependency.name)
+            assert dependency_name in locked, (
+                f"{parent_name} metadata 의존성 {dependency_name}이 lock에 없습니다"
+            )
