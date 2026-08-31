@@ -14,7 +14,7 @@ import shutil
 import stat
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pytest
@@ -101,6 +101,57 @@ def test_활성_product_root_세곳만_고정한다() -> None:
         "analysis_engine/tools",
         "app/src",
     )
+
+
+def test_Docker와_paths가_requirements를_같은_배포위치에_보존한다() -> None:
+    dockerfile = (paths.PROJECT_ROOT / "app/Dockerfile").read_text(encoding="utf-8")
+
+    assert paths.PROJECT_ROOT == paths.APP_ROOT.parent
+    assert "WORKDIR /srv/app" in dockerfile
+    assert "COPY app/requirements.txt /tmp/requirements.txt" in dockerfile
+    assert "--requirement /tmp/requirements.txt" in dockerfile
+    assert "COPY app/requirements.txt /srv/app/requirements.txt" in dockerfile
+    assert "rm /srv/app/requirements.txt" not in dockerfile
+    assert "COPY app/src/ /srv/app/src/" in dockerfile
+    assert "COPY analysis_engine/src/ /srv/analysis_engine/src/" in dockerfile
+    for tool in (
+        "run_pilot.py",
+        "survey_audit_reports.py",
+        "build_goldenset_answer.py",
+    ):
+        assert (
+            f"COPY analysis_engine/tools/{tool} "
+            f"/srv/analysis_engine/tools/{tool}"
+        ) in dockerfile
+    container_app_root = PurePosixPath("/srv/app")
+    assert container_app_root.parent / "app/requirements.txt" == PurePosixPath(
+        "/srv/app/requirements.txt"
+    )
+
+
+def test_Docker_배포모양에서_필수content를_모두찾아_지문을_만든다(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """컨테이너의 PROJECT_ROOT=/srv 모양을 임시 경로 아래 그대로 재현한다."""
+
+    image_project_root = tmp_path / "srv"
+    for root_name in build_id._PRODUCTION_ROOTS:
+        (image_project_root / root_name).mkdir(parents=True)
+    for root_name in build_id._RUNTIME_RESOURCE_ROOTS:
+        (image_project_root / root_name).mkdir(parents=True, exist_ok=True)
+    for relative in build_id._REQUIRED_RUNTIME_FILES:
+        target = image_project_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"docker-runtime-resource\n")
+    _production_file(image_project_root, "app/src/runtime.py")
+    _production_file(image_project_root, "analysis_engine/src/runtime.py")
+    _production_file(image_project_root, "analysis_engine/tools/runtime.py")
+    _use_project(monkeypatch, image_project_root)
+
+    contents = build_id._content_modules(image_project_root)
+    assert "app/requirements.txt" in contents
+    assert build_id.engine_build_id() != build_id.UNKNOWN_BUILD_ID
 
 
 def test_실제_runtime_resource가_자동발견_목록에_있다() -> None:
@@ -351,21 +402,110 @@ def test_파일읽기_오류는_UNKNOWN이고_다음시도에_회복한다(
 
     target = _production_file(가짜프로젝트, "app/src/runtime.py")
     _use_project(monkeypatch, 가짜프로젝트)
-    original_read = build_id._read_stable_file
+    original_read = build_id._read_stable_content
     failed = False
 
-    def flaky_read(path: Path) -> bytes:
+    def flaky_read(path: Path):
         nonlocal failed
         if path == target and not failed:
             failed = True
             raise OSError("일시 파일 읽기 실패")
         return original_read(path)
 
-    monkeypatch.setattr(build_id, "_read_stable_file", flaky_read)
+    monkeypatch.setattr(build_id, "_read_stable_content", flaky_read)
 
     assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
     assert build_id._cached_build_id is None
     assert build_id.engine_build_id() != build_id.UNKNOWN_BUILD_ID
+
+
+@pytest.mark.parametrize(
+    "added",
+    (
+        "app/src/features/new_after_snapshot/logic.py",
+        "analysis_engine/src/features/public_org/data/new_after_snapshot.json",
+        "app/src/web/static/new_after_snapshot.css",
+    ),
+)
+def test_첫목록뒤_Python_JSON_static추가는_UNKNOWN이다(
+    added: str,
+    가짜프로젝트: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _use_project(monkeypatch, 가짜프로젝트)
+    original_collect = build_id._content_modules
+    collections = 0
+
+    def add_after_first(project_root: Path):
+        nonlocal collections
+        collected = original_collect(project_root)
+        collections += 1
+        if collections == 1:
+            _production_file(project_root, added, "새 production content\n")
+        return collected
+
+    monkeypatch.setattr(build_id, "_content_modules", add_after_first)
+
+    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
+    assert build_id._cached_build_id is None
+    assert collections == 2
+
+
+@pytest.mark.parametrize(
+    "removed",
+    (
+        "app/src/remove_after_snapshot.py",
+        "analysis_engine/src/features/public_org/data/remove_after_snapshot.json",
+        "app/src/web/static/remove_after_snapshot.css",
+    ),
+)
+def test_첫목록뒤_Python_JSON_static삭제는_UNKNOWN이다(
+    removed: str,
+    가짜프로젝트: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = _production_file(가짜프로젝트, removed)
+    _use_project(monkeypatch, 가짜프로젝트)
+    original_read = build_id._read_stable_content
+    deleted = False
+
+    def remove_after_read(path: Path):
+        nonlocal deleted
+        result = original_read(path)
+        if path == target and not deleted:
+            target.unlink()
+            deleted = True
+        return result
+
+    monkeypatch.setattr(build_id, "_read_stable_content", remove_after_read)
+
+    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
+    assert build_id._cached_build_id is None
+    assert deleted
+
+
+def test_파일을_읽은뒤_같은경로_bytes가_바뀌면_UNKNOWN이다(
+    가짜프로젝트: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = _production_file(가짜프로젝트, "app/src/change_after_read.py")
+    _use_project(monkeypatch, 가짜프로젝트)
+    original_read = build_id._read_stable_content
+    changed = False
+
+    def change_after_read(path: Path):
+        nonlocal changed
+        result = original_read(path)
+        if path == target and not changed:
+            target.write_bytes(target.read_bytes() + b"# changed after read\n")
+            changed = True
+        return result
+
+    monkeypatch.setattr(build_id, "_read_stable_content", change_after_read)
+
+    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
+    assert build_id._cached_build_id is None
+    assert changed
 
 
 @pytest.mark.parametrize("kind", ("symlink", "windows-reparse"))

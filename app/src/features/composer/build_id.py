@@ -257,13 +257,22 @@ _generation_results: dict[int, str] = {}
 _generation_waiters: dict[int, int] = {}
 
 
-def _stable_file_metadata(status: os.stat_result) -> tuple[int, int, int]:
-    """읽는 동안 바뀌면 안 되는 최소 파일 metadata."""
+_FileSnapshot = tuple[int, int, int, int, int]
+
+
+def _file_snapshot(status: os.stat_result) -> _FileSnapshot:
+    """읽기 뒤에도 같아야 하는 파일 신원·최소 metadata."""
 
     modified_ns = int(
         getattr(status, "st_mtime_ns", int(float(status.st_mtime) * 1_000_000_000))
     )
-    return (stat.S_IFMT(status.st_mode), int(status.st_size), modified_ns)
+    return (
+        int(status.st_dev),
+        int(status.st_ino),
+        stat.S_IFMT(status.st_mode),
+        int(status.st_size),
+        modified_ns,
+    )
 
 
 def _check_parent_directories(file_path: Path) -> None:
@@ -281,7 +290,7 @@ def _check_parent_directories(file_path: Path) -> None:
         _checked_directory_status(current)
 
 
-def _read_stable_file(file_path: Path) -> bytes:
+def _read_stable_content(file_path: Path) -> tuple[bytes, _FileSnapshot]:
     """링크 교체와 읽는 중 변경을 감지하며 일반 파일 bytes를 읽는다.
 
     ``scandir`` 뒤 실제 ``open`` 사이에는 시간이 있으므로 open 직전 lstat,
@@ -305,8 +314,7 @@ def _read_stable_file(file_path: Path) -> bytes:
             _is_link_or_reparse(opened_before)
             or not stat.S_ISREG(opened_before.st_mode)
             or not _same_file(before_path, opened_before)
-            or _stable_file_metadata(before_path)
-            != _stable_file_metadata(opened_before)
+            or _file_snapshot(before_path) != _file_snapshot(opened_before)
         ):
             raise OSError("production 파일이 open 직전에 교체되었습니다")
 
@@ -323,15 +331,20 @@ def _read_stable_file(file_path: Path) -> bytes:
         if (
             not _same_file(opened_before, opened_after)
             or not _same_file(opened_after, after_path)
-            or _stable_file_metadata(opened_before)
-            != _stable_file_metadata(opened_after)
-            or _stable_file_metadata(opened_after)
-            != _stable_file_metadata(after_path)
+            or _file_snapshot(opened_before) != _file_snapshot(opened_after)
+            or _file_snapshot(opened_after) != _file_snapshot(after_path)
         ):
             raise OSError("production 파일이 읽는 동안 교체·변경되었습니다")
-        return b"".join(chunks)
+        return b"".join(chunks), _file_snapshot(opened_after)
     finally:
         os.close(descriptor)
+
+
+def _read_stable_file(file_path: Path) -> bytes:
+    """시험·진단 호환용 bytes reader. 실제 계산은 snapshot도 함께 보존한다."""
+
+    content, _snapshot = _read_stable_content(file_path)
+    return content
 
 
 def _digest_entry(digest: "hashlib._Hash", name: str, content: bytes) -> None:
@@ -358,8 +371,25 @@ def _compute_engine_build_id() -> str:
     release_commit = deployment_identity.deployed_commit()
     if release_commit:
         _digest_entry(digest, "deployment-commit", release_commit.encode("ascii"))
+    snapshots: dict[str, _FileSnapshot] = {}
     for name in content_files:
-        _digest_entry(digest, name, _read_stable_file(project_root / name))
+        content, snapshot = _read_stable_content(project_root / name)
+        _digest_entry(digest, name, content)
+        snapshots[name] = snapshot
+
+    # 첫 목록을 읽는 동안 새 생산 파일이 추가·삭제되면 일부 snapshot을 정상
+    # 지문으로 꾸미지 않는다. 같은 정책으로 완전 수집을 다시 해 정확히 비교한다.
+    after_files = _content_modules(project_root)
+    if after_files != content_files:
+        raise OSError("production content 목록이 지문 계산 중 바뀌었습니다")
+
+    # 먼저 읽은 파일이 뒤 파일을 읽는 동안 바뀐 경우도 잡는다. 각 reader의
+    # 직후 검사만으로는 「읽고 난 뒤 변경」을 놓치므로 전체 목록 뒤 다시 본다.
+    for name in content_files:
+        file_path = project_root / name
+        _check_parent_directories(file_path)
+        if _file_snapshot(_checked_regular_status(file_path)) != snapshots[name]:
+            raise OSError("production 파일이 지문 계산 뒤 바뀌었습니다")
     return digest.hexdigest()[:_DIGEST_CHARS]
 
 

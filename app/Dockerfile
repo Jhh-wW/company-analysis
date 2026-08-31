@@ -34,6 +34,10 @@ COPY app/requirements.txt /tmp/requirements.txt
 RUN python -m pip install --requirement /tmp/requirements.txt \
     && rm /tmp/requirements.txt
 
+# 캐시 build id도 이 파일 bytes를 읽는다. 설치용 /tmp 복사본을 지운 뒤에도
+# paths.PROJECT_ROOT(/srv) 기준 `app/requirements.txt` 자리에 보존한다.
+COPY app/requirements.txt /srv/app/requirements.txt
+
 # 실행에 필요한 파일만 복사한다. analysis_engine/.env와 로컬 DB는 이미지에 넣지 않는다.
 COPY app/src/ /srv/app/src/
 COPY app/tools/__init__.py /srv/app/tools/__init__.py
