@@ -43,6 +43,8 @@ PRODUCTION_BACKUP_MANIFEST_BLOCKER = (
 BOOLEAN_TRUE = frozenset({"1", "true", "yes", "on"})
 BOOLEAN_FALSE = frozenset({"0", "false", "no", "off"})
 LOG_LEVELS = frozenset({"trace", "debug", "info", "warning", "error", "critical"})
+REPORT_RELEASE_MODE_ENV_NAME = "REPORT_RELEASE_MODE"
+REPORT_RELEASE_MODES = frozenset({"SHADOW", "ENFORCE_NO_PARTIAL", "FULL"})
 SCOPES = ("web", "backup-trigger", "maintenance-trigger", "generic")
 DEPLOYMENT_EXPOSURES = frozenset({"local", "public"})
 DEPLOYMENT_PLATFORMS = frozenset({"local", "render", "kubernetes"})
@@ -690,6 +692,18 @@ def validate(
     engine_v2 = environment.get("ENGINE_V2")
     if engine_v2 is not None and engine_v2 not in {"1", "0"}:
         errors.append('ENGINE_V2: "1"(v2) 또는 "0"(v1)만 허용합니다')
+
+    # ★ v2 실제 경로는 이 값이 빠지면 AI 호출 전 fail-closed로 멈춘다.
+    #   배포 화면에서 사람이 따로 기억해 넣는 규칙으로 두지 않고, 시작할 때
+    #   manifest와 같은 정확한 세 값만 받는다. 소문자·공백을 고쳐 읽지 않는 것은
+    #   애플리케이션의 parse_release_mode 계약과 같다.
+    release_mode = environment.get(REPORT_RELEASE_MODE_ENV_NAME)
+    if release_mode is not None and release_mode not in REPORT_RELEASE_MODES:
+        errors.append(
+            "REPORT_RELEASE_MODE: SHADOW, ENFORCE_NO_PARTIAL 또는 FULL만 허용합니다"
+        )
+    elif pipeline == "real" and engine_v2 == "1" and release_mode is None:
+        errors.append("REPORT_RELEASE_MODE: 엔진 v2 실제 분석에는 값이 필요합니다")
 
     port_error = _integer_error("PORT", environment.get("PORT", ""), 1, 65535)
     if port_error:

@@ -179,6 +179,23 @@ def test_render_admin_real_requests_provider_secrets_but_defers_backup_and_notio
     )
 
 
+def test_render_v2_declares_safe_release_mode_in_blueprint() -> None:
+    """배포 화면에서 별도 환경값을 손으로 넣지 않아도 v2가 시작돼야 한다."""
+
+    blueprint = yaml.load(
+        (REPOSITORY_ROOT / "render.yaml").read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
+    )
+    web = blueprint["services"][0]
+    values = {item["key"]: item for item in web["envVars"]}
+
+    assert values["ENGINE_V2"] == {"key": "ENGINE_V2", "value": "1"}
+    assert values["REPORT_RELEASE_MODE"] == {
+        "key": "REPORT_RELEASE_MODE",
+        "value": "SHADOW",
+    }
+
+
 def test_command_override_still_passes_through_validating_non_root_entrypoint() -> None:
     dockerfile = (APP_ROOT / "Dockerfile").read_text(encoding="utf-8")
     entrypoint = (

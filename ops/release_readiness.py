@@ -831,10 +831,13 @@ def _load_runtime_payload_consumers() -> RuntimePayloadConsumers:
             app_root / "src" / "features" / "storage" / "reports.py",
             ("load", "report_from_json", "report_to_dict"),
         ),
+        # 보고서 행의 회사분석 product job 결속 상수만 읽는다. 신원 없는
+        # 옛 2층 캐시의 get_layer2는 이미 제품에서 금지됐으므로 복구 검사가
+        # 다시 소비자 계약으로 요구하거나 호출하지 않는다.
         "cache": (
             "src.features.storage.cache",
             app_root / "src" / "features" / "storage" / "cache.py",
-            ("get_layer2",),
+            (),
         ),
         "dashboard": (
             "src.features.admin_dashboard.store",
@@ -1243,55 +1246,26 @@ def _assert_reports_payloads(
 def _assert_layer2_payloads(
     connection: sqlite3.Connection,
     *,
-    consumers: RuntimePayloadConsumers,
     budget: PayloadValidationBudget,
 ) -> None:
-    cursor = connection.execute(
-        "SELECT corp_id, fragments_json, filing_json, cell_judgments_json "
-        "FROM layer2_cache ORDER BY corp_id"
-    )
-    while rows := cursor.fetchmany(JSON_PAYLOAD_FETCH_ROWS):
-        for row in rows:
-            budget.check_deadline()
-            try:
-                cached = getattr(consumers.cache, "get_layer2")(connection, str(row[0]))
-                if cached is None:
-                    raise ValueError("missing layer2")
-                fragments_data = json.loads(str(row[1]))
-                if not isinstance(fragments_data, list):
-                    raise TypeError("fragments root")
-                fragment_ids: set[int] = set()
-                for item in fragments_data:
-                    if not isinstance(item, list) or len(item) != 2:
-                        raise TypeError("fragment pair")
-                    fragment_id, value = item
-                    if type(fragment_id) is not int or fragment_id in fragment_ids:
-                        raise TypeError("fragment id")
-                    fragment_ids.add(fragment_id)
-                    if not isinstance(value, dict) or any(
-                        not isinstance(key, str) or not isinstance(text, str)
-                        for key, text in value.items()
-                    ):
-                        raise TypeError("fragment value")
-                if not isinstance(cached.fragments, dict):
-                    raise TypeError("fragments consumer")
-                if row[2] is not None:
-                    filing = json.loads(str(row[2]))
-                    if not isinstance(filing, dict) or not isinstance(cached.filing, dict):
-                        raise TypeError("filing")
-                if row[3] is not None:
-                    judgments = json.loads(str(row[3]))
-                    if not isinstance(judgments, dict) or any(
-                        not isinstance(key, str) or type(value) is not bool
-                        for key, value in judgments.items()
-                    ):
-                        raise TypeError("cell judgments")
-                    if not isinstance(cached.cell_judgments, dict):
-                        raise TypeError("cell judgments consumer")
-            except Exception as exc:  # noqa: BLE001 — payload/회사 ID를 노출하지 않는다
-                raise ReadinessError(
-                    "layer2_cache JSON을 현재 storage.cache.get_layer2 계약으로 읽지 못했습니다."
-                ) from exc
+    """신원 없는 옛 2층 캐시가 복구본에 남아 있으면 출고를 닫는다.
+
+    ``storage.cache``는 corp_id 하나뿐인 2층 캐시의 읽기·쓰기를 이미 모두
+    차단한다. 그런데 복구 검사가 그 죽은 ``get_layer2``를 다시 소비자로
+    불러 시험하면, 빈 표만 통과하고 행이 하나라도 있는 순간 예외 문구에
+    기대어 우연히 닫히는 구조가 된다. 여기서는 제품 계약을 직접 검사한다:
+    build/source 신원이 없는 옛 행은 내용이 정상이어도 새 배포로 복구할 수
+    없다. JSON 바이트·구조 상한은 이 함수보다 먼저 공통 검사에서 확인한다.
+    """
+
+    budget.check_deadline()
+    row = connection.execute(
+        "SELECT EXISTS(SELECT 1 FROM layer2_cache LIMIT 1)"
+    ).fetchone()
+    if row is not None and bool(row[0]):
+        raise ReadinessError(
+            "신원 없는 옛 layer2_cache 행이 남아 있어 복구를 중단했습니다."
+        )
 
 
 def _assert_dashboard_payloads(
@@ -1489,7 +1463,7 @@ def _assert_runtime_payload_contracts(
                 budget=budget,
                 type_hints_cache=type_hints_cache,
             )
-            _assert_layer2_payloads(connection, consumers=consumers, budget=budget)
+            _assert_layer2_payloads(connection, budget=budget)
             _assert_dashboard_payloads(
                 connection,
                 consumers=consumers,

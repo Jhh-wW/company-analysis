@@ -97,6 +97,26 @@ def _insert_report(database: Path, payload: str, *, report_id: str = "report-1")
         )
 
 
+def _insert_legacy_layer2(
+    database: Path,
+    *,
+    fragments_json: str = '[[1,{"종류":"공시","원문":"x","출처":"s"}]]',
+    filing_json: str | None = '{"name":"filing"}',
+    cell_judgments_json: str | None = '{"section":true}',
+) -> None:
+    """현재 제품 API가 금지한 corp-only 옛 행을 복구 공격 fixture로만 만든다."""
+
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO layer2_cache "
+            "(corp_id, fragments_json, filing_json, cell_judgments_json, "
+            "fiscal_year, collected_at, updated_at) "
+            "VALUES ('corp-1', ?, ?, ?, 2025, "
+            "'2026-08-23T00:00:00+00:00', '2026-08-23T00:00:00+00:00')",
+            (fragments_json, filing_json, cell_judgments_json),
+        )
+
+
 @pytest.mark.parametrize(
     "payload",
     (
@@ -364,26 +384,19 @@ def test_large_layer2_container_is_rejected_before_cache_consumer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = _create_runtime_database(tmp_path / "source" / "storage.sqlite3")
-    consumers = readiness._load_runtime_payload_consumers()  # noqa: SLF001
-    with _storage_db_module().connect(database) as connection:
-        consumers.cache.save_layer2(
-            connection,
-            corp_id="corp-1",
-            fragments={},
-            filing=None,
-            cell_judgments=None,
-        )
-        connection.execute(
-            "UPDATE layer2_cache SET fragments_json = ? WHERE corp_id = 'corp-1'",
-            (json.dumps([{} for _ in range(readiness.MAX_JSON_CONTAINER_ITEMS + 1)]),),
-        )
+    _insert_legacy_layer2(
+        database,
+        fragments_json=json.dumps(
+            [{} for _ in range(readiness.MAX_JSON_CONTAINER_ITEMS + 1)]
+        ),
+    )
     calls: list[str] = []
 
-    def forbidden_cache(*_args: object, **_kwargs: object) -> object:
-        calls.append("get_layer2")
-        raise AssertionError("구조 상한 뒤 get_layer2를 호출하면 안 됩니다")
+    def forbidden_layer2_gate(*_args: object, **_kwargs: object) -> object:
+        calls.append("layer2_gate")
+        raise AssertionError("구조 상한 뒤 옛 2층 행 판정을 호출하면 안 됩니다")
 
-    monkeypatch.setattr(consumers.cache, "get_layer2", forbidden_cache)
+    monkeypatch.setattr(readiness, "_assert_layer2_payloads", forbidden_layer2_gate)
     temp_parent = tmp_path / "restore-temp"
     temp_parent.mkdir()
 
@@ -503,21 +516,14 @@ def test_loadable_nonempty_legacy_version_is_not_treated_as_current_canonical(
         ("cell_judgments_json", '{"section": 1}'),
     ),
 )
-def test_layer2_writer_shape_is_enforced_through_actual_consumer(
+def test_deprecated_layer2_payload_variants_are_all_rejected(
     tmp_path: Path,
     column: str,
     payload: str,
 ) -> None:
     database = _create_runtime_database(tmp_path / column / "source" / "storage.sqlite3")
-    consumers = readiness._load_runtime_payload_consumers()  # noqa: SLF001
-    with _storage_db_module().connect(database) as connection:
-        consumers.cache.save_layer2(
-            connection,
-            corp_id="corp-1",
-            fragments={1: {"종류": "공시", "원문": "x", "출처": "s"}},
-            filing={"name": "filing"},
-            cell_judgments={"section": True},
-        )
+    _insert_legacy_layer2(database)
+    with sqlite3.connect(database) as connection:
         connection.execute(f'UPDATE layer2_cache SET "{column}" = ?', (payload,))
     temp_parent = tmp_path / column / "restore-temp"
     temp_parent.mkdir(parents=True)
@@ -688,6 +694,29 @@ def test_other_canonical_json_text_column_is_scanned(tmp_path: Path) -> None:
     temp_parent.mkdir()
 
     _reject_without_mutation(database, temp_parent)
+
+
+def test_valid_legacy_layer2_row_is_rejected_without_dead_runtime_consumer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = _create_runtime_database(tmp_path / "source" / "storage.sqlite3")
+    _insert_legacy_layer2(database)
+    consumers = readiness._load_runtime_payload_consumers()  # noqa: SLF001
+    calls: list[str] = []
+
+    def forbidden_cache(*_args: object, **_kwargs: object) -> object:
+        calls.append("get_layer2")
+        raise AssertionError("폐기된 get_layer2를 복구 검사가 호출하면 안 됩니다")
+
+    monkeypatch.setattr(consumers.cache, "get_layer2", forbidden_cache)
+    temp_parent = tmp_path / "restore-temp"
+    temp_parent.mkdir()
+
+    with pytest.raises(readiness.ReadinessError, match="신원 없는 옛 layer2_cache"):
+        _restore(database, temp_parent)
+    assert calls == []
+    assert list(temp_parent.iterdir()) == []
 
 
 @pytest.mark.parametrize(

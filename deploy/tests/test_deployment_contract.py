@@ -390,14 +390,44 @@ def test_render_blueprint_turns_engine_v2_on_while_image_default_stays_v1() -> N
         "따옴표 없는 1은 YAML 정수로 읽힙니다 — value: \"1\"로 적어야 합니다"
     )
     assert render_values["ENGINE_V2"] == "1"
+    assert render_values["REPORT_RELEASE_MODE"] == "SHADOW", (
+        "실제 모델 표본을 검증하기 전에는 새 품질 규칙을 관찰만 해야 합니다"
+    )
 
     # render.yaml의 이름·값이 실제 분기 상수와 계속 같은지 함께 묶는다.
     # 코드에서 이름이 바뀌면 blueprint에 죽은 키만 남고 배포는 조용히 v1이 된다.
     switch_source = (
-        REPOSITORY_ROOT / "app" / "src" / "features" / "pipeline" / "real.py"
+        REPOSITORY_ROOT
+        / "app"
+        / "src"
+        / "features"
+        / "pipeline"
+        / "engine_mode.py"
     ).read_text(encoding="utf-8")
     assert 'ENGINE_V2_ENV_NAME: Final[str] = "ENGINE_V2"' in switch_source
     assert 'ENGINE_V2_ENV_ON: Final[str] = "1"' in switch_source
+
+    release_mode_source = (
+        REPOSITORY_ROOT
+        / "app"
+        / "src"
+        / "shared"
+        / "report_evidence"
+        / "release_mode.py"
+    ).read_text(encoding="utf-8")
+    release_constants_source = (
+        REPOSITORY_ROOT
+        / "app"
+        / "src"
+        / "shared"
+        / "report_evidence"
+        / "constants.py"
+    ).read_text(encoding="utf-8")
+    assert 'REPORT_RELEASE_MODE_ENV_NAME: Final[str] = "REPORT_RELEASE_MODE"' in (
+        release_mode_source
+    )
+    for exact_mode in ("SHADOW", "ENFORCE_NO_PARTIAL", "FULL"):
+        assert f'{exact_mode} = "{exact_mode}"' in release_constants_source
 
     # 이미지 기본값은 PIPELINE=demo와 같은 성격이다. Dockerfile은 비용이 들지
     # 않는 안전한 기본만 담고, v2로 갈지는 배포 manifest 한 곳에서만 정한다.
@@ -570,3 +600,62 @@ def test_engine_v2_error_never_leaks_the_value() -> None:
     errors = validator.validate(environment, "web")
 
     assert all("비밀처럼보이는값" not in error for error in errors)
+
+
+def test_real_engine_v2_requires_an_explicit_report_release_mode() -> None:
+    """운영 v2가 AI 호출 전에 조용히 멈추는 설정 누락을 시작 시점에 잡는다."""
+
+    environment = _base_environment()
+    environment.update({"PIPELINE": "real", "ENGINE_V2": "1"})
+
+    errors = validator.validate(environment, "web")
+
+    assert any("REPORT_RELEASE_MODE" in error for error in errors)
+
+    # demo나 v1은 이 설정을 쓰지 않으므로 기존 실행을 억지로 막지 않는다.
+    for pipeline, engine_v2 in (("demo", "1"), ("real", "0")):
+        environment = _base_environment()
+        environment.update({"PIPELINE": pipeline, "ENGINE_V2": engine_v2})
+        errors = validator.validate(environment, "web")
+        assert not any("REPORT_RELEASE_MODE" in error for error in errors)
+
+
+def test_report_release_mode_accepts_only_the_three_exact_application_values() -> None:
+    """배포 검사와 애플리케이션 분기가 서로 다른 철자를 받지 못하게 한다."""
+
+    for value in ("SHADOW", "ENFORCE_NO_PARTIAL", "FULL"):
+        environment = _base_environment()
+        environment.update(
+            {
+                "PIPELINE": "real",
+                "ENGINE_V2": "1",
+                "REPORT_RELEASE_MODE": value,
+            }
+        )
+        errors = validator.validate(environment, "web")
+        assert not any("REPORT_RELEASE_MODE" in error for error in errors), value
+
+    for value in ("", "shadow", " FULL", "FULL ", "ENFORCE", "비밀처럼보이는값"):
+        environment = _base_environment()
+        environment.update(
+            {
+                "PIPELINE": "real",
+                "ENGINE_V2": "1",
+                "REPORT_RELEASE_MODE": value,
+            }
+        )
+        errors = validator.validate(environment, "web")
+        assert any("REPORT_RELEASE_MODE" in error for error in errors), value
+
+    secret_value = "이값은오류문구에나오면안됨"
+    environment = _base_environment()
+    environment.update(
+        {
+            "PIPELINE": "real",
+            "ENGINE_V2": "1",
+            "REPORT_RELEASE_MODE": secret_value,
+        }
+    )
+    assert all(
+        secret_value not in error for error in validator.validate(environment, "web")
+    )

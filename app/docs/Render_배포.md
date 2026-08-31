@@ -99,7 +99,8 @@ Notion, 공유 링크, real provider, 외부 백업과 cron 시험은 무료 dem
    비밀 환경변수로 직접 입력한다. 값을 저장소·문서·채팅에 붙이지 않는다.
 5. `PROVENANCE_SEAL_SECRET`이 32바이트 이상이며 기존 실행 기록을 유지해야 할 때 같은 값으로
    보존되는지 확인한다. Blueprint가 새 값을 다시 만들도록 기존 값을 삭제하지 않는다.
-6. `PIPELINE=real`, `BETA_ADMIN_ONLY=1`,
+6. `PIPELINE=real`, `BETA_ADMIN_ONLY=1`, `ENGINE_V2=1`,
+   `REPORT_RELEASE_MODE=SHADOW`,
    `DEPLOYMENT_RUNTIME_CONTRACT=render-admin-real-no-forwarded-v1`, 빈
    `FORWARDED_ALLOW_IPS`, `GRACEFUL_SHUTDOWN_SECONDS=20`, Render 종료 유예 300초,
    `/var/data` 1GB disk mount를 확인한다.
@@ -139,6 +140,7 @@ Notion, 공유 링크, real provider, 외부 백업과 cron 시험은 무료 dem
 | `BACKUP_DATA_AUTHORITY_ID` | DB/sidecar 쓰기 주체의 불변 식별자. 실제 값은 환경에만 주입 |
 | `BACKUP_MANIFEST_MIN_RETENTION_DAYS` | 독립 manifest 최소 보존일. DB 백업 보존일 이상으로 명시 |
 | `ENGINE_V2` | **`1`. 배포하면 composer(v2) 경로로 간다.** 정확히 `1`일 때만 v2다. → 아래 «엔진 v2 스위치» 참고 |
+| `REPORT_RELEASE_MODE` | **`SHADOW`.** 실제 모델 제한 실측 전에는 새 품질 판정을 기록만 하고 출고를 바꾸지 않음. `ENFORCE_NO_PARTIAL`·`FULL` 전환은 별도 승인 |
 
 ### 엔진 v2 스위치 (`ENGINE_V2`)
 
@@ -175,6 +177,12 @@ Notion, 공유 링크, real provider, 외부 백업과 cron 시험은 무료 dem
   아니라 실제 DART 접수번호와 정규화한 재무 응답 지문까지 모두 같을 때만
   재사용한다. 코드·사업연도·공시·재무값 중 하나라도 바뀌면 옛 결과를 내지 않고
   새로 조사하며, 모두 같으면 캐시 적중으로 본조사 비용을 다시 쓰지 않는다.
+- **품질 운영모드는 따로 명시한다.** 실제 분석에서 v2를 켰는데
+  `REPORT_RELEASE_MODE`가 빠지면 앱은 AI를 부르기 전에 시작을 거부한다. 현재
+  `render.yaml`은 안전한 관찰 모드인 `SHADOW`를 명시하며, 시작 검증은 정확한
+  `SHADOW`·`ENFORCE_NO_PARTIAL`·`FULL` 외의 오타와 공백을 거부한다. 실제 모델을
+  부르는 제한 실측 없이 `FULL`로 바꾸지 않는다. `SHADOW`는 새 품질 규칙의
+  제품 적용이 끝났다는 뜻이 아니다.
 - **로컬에서 켜 보기** — 두 실행기가 `ENGINE_V2`를 자식에게 넘긴다.
   - `app/실시간성능시험켜기.ps1 -EngineV2` — 로그인 게이트를 «끈» 채
     조사 흐름만 본다. 관리자 화면은 못 본다.

@@ -41,6 +41,8 @@ backup_sqlite = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = backup_sqlite
 SPEC.loader.exec_module(backup_sqlite)
 
+TEST_ENGINE_EPOCH_DIGEST = "e" * 64
+
 
 def _make_database(path: Path, value: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
@@ -77,8 +79,10 @@ def _make_database_with_artifact(
         source_snapshot=source,
         cache_namespace=namespace,
         content_generated_at=now,
+        engine_epoch_digest=TEST_ENGINE_EPOCH_DIGEST,
         actual_models=("offline-test",),
     )
+    assert content.engine_epoch_digest == TEST_ENGINE_EPOCH_DIGEST
     backend = FilesystemArtifactBlobBackend(artifact_root)
     with sqlite3.connect(path) as conn:
         conn.execute("PRAGMA foreign_keys=ON")
