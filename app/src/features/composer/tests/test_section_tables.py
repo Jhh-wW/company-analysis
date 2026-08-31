@@ -201,6 +201,22 @@ def test_9장_지침이_순위_주장에만_근거를_요구한다():
     assert "그냥 써도 된다" in 지침
 
 
+def test_9장_근거부족_지침이_출고품질계약과_같은_경계를_말한다():
+    """작가는 한두 문장 폴백을 내는데 FULL 검사가 항상 막는 모순을 되살리지 않는다."""
+    from src.features.composer.constants import SECTION_GUIDES
+    from src.shared.report_quality.constants import MIN_CLAIMS_PER_COVERED_SECTION
+    from src.shared.report_quality.evidence_support import (
+        MIN_PROSE_EVIDENCE_SUPPORT_TERMS,
+    )
+
+    지침 = SECTION_GUIDES["competitive_position"]
+    assert f"{MIN_CLAIMS_PER_COVERED_SECTION}개의 서로 다른 주장슬롯" in 지침
+    assert f"근거어를 최소 {MIN_PROSE_EVIDENCE_SUPPORT_TERMS}개" in 지침
+    assert "competitive_position:self_context" in 지침
+    assert "competitive_position:limitation" in 지침
+    assert "출고 검증이 부족한 보고서를 막게 한다" in 지침
+
+
 # ══════════════════════════════════════════════════════════
 # ③ 프롬프트 계약 — 장이 늘어도 깨지지 않는다
 # ══════════════════════════════════════════════════════════
