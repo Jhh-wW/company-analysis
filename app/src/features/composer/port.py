@@ -148,6 +148,9 @@ class CollectedFragment:
     source_url: str = ""
     document_title: str = ""
     location: str = ""
+    #: packet raw Mapping이 가진 문서 기준일. legacy ``fragments_from_raw``는
+    #: byte 호환을 위해 채우지 않고 packet 준비 경계에서만 보존한다.
+    document_date: str = ""
 
 
 def fragments_from_raw(
@@ -197,6 +200,9 @@ class PerformanceTable:
     entity_scope: str = ""
     raw_unit: str = ""
     unit_dimension: str = ""
+    #: 행이 원문 직접 결속 대신 이미 검증된 프로그램 사실을 주입할 때 쓰는 ID.
+    #: 있으면 rows와 같은 길이여야 하며 manifest canonicalizer가 검증한다.
+    row_fact_ids: tuple[str, ...] = ()
 
 
 def performance_table_from_report_table(table: Any) -> PerformanceTable:
@@ -222,6 +228,9 @@ def performance_table_from_report_table(table: Any) -> PerformanceTable:
         entity_scope=str(getattr(table, "entity_scope", "") or ""),
         raw_unit=str(getattr(table, "raw_unit", "") or ""),
         unit_dimension=str(getattr(table, "unit_dimension", "") or ""),
+        row_fact_ids=tuple(
+            str(value) for value in (getattr(table, "row_fact_ids", None) or ())
+        ),
     )
 
 

@@ -15,9 +15,12 @@ from __future__ import annotations
 import json
 import logging
 import re
+import unicodedata
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Callable, Final, Optional, Union
 
+from src.core.citations import citation_number
 from src.features.composer.constants import (
     ALREADY_WRITTEN_GUIDE,
     ALREADY_WRITTEN_HEAD,
@@ -79,6 +82,27 @@ AskFn = Callable[[str], str]
 FragmentsInput = Union[
     Mapping[int, Mapping[str, Any]], Sequence[CollectedFragment]
 ]
+
+#: 장별 근거 묶음 입력. 키는 SECTION_IDS 아홉 개와 정확히 같아야 한다.
+#: 값은 기존 flat fragments와 같은 두 입력 모양을 그대로 재사용한다.
+SectionEvidencePackets = Mapping[str, FragmentsInput]
+
+#: 실서비스 raw fragments의 dict[int, ...] 계약과 같은 공개 조각 번호.
+_CANONICAL_FRAGMENT_ID_RE: Final[re.Pattern[str]] = re.compile(r"[1-9][0-9]*")
+
+
+@dataclass(frozen=True)
+class _PreparedSectionEvidencePackets:
+    """검증을 끝낸 장별 근거 계약과 기존 검증기용 합집합."""
+
+    packets: Mapping[str, tuple[CollectedFragment, ...]]
+    allowed_fragment_ids_by_section: Mapping[str, frozenset[str]]
+    flat_union: tuple[CollectedFragment, ...]
+
+
+_NOTICE_OUTSIDE_PACKET_CITATIONS: Final[str] = (
+    "이 장에 배정되지 않은 근거를 사용한 문장을 제외했습니다."
+)
 
 
 # ══════════════════════════════════════════════════════════
@@ -193,9 +217,55 @@ _INLINE_CITATION_MARKER_RE: Final[re.Pattern[str]] = re.compile(
     r"\[(?:\d+|인용\s*:[^\]]*|조각[^\]]*)\]"
 )
 
+#: packet 모드의 구조 citations 우회를 찾는 더 넓은 규칙. legacy flat 응답은
+#: 위 정리 규칙을 그대로 써야 하므로 별도 정규식으로 둔다.
+_PACKET_INLINE_CITATION_MARKER_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:\[\s*(?:\d{1,3}(?:\s*[,，、]\s*\d{1,3})*|인용\s*[:：][^\]]*|조각[^\]]*)\s*\]"
+    r"|[〔【〖〚]\s*(?:\d{1,3}(?:\s*[,，、]\s*\d{1,3})*|인용\s*[:：][^〕】〗〛]*|조각[^〕】〗〛]*)"
+    r"\s*[〕】〗〛])"
+)
+
+
+def contains_inline_citation_marker(text: str) -> bool:
+    """NFKC 뒤 모든 Ps/Pe 혼합 괄호의 1~3자리 인용 흉내를 찾는다.
+
+    괄호 쌍의 종류를 닫힌 목록으로 두지 않는다. 여는 문자가 Unicode Ps이고
+    닫는 문자가 Pe이면 서로 다른 괄호를 섞은 경우도 막는다. 네 자리 숫자는
+    연도일 수 있으므로 이 일반 규칙에서는 의도적으로 제외한다.
+    """
+
+    normalized = unicodedata.normalize("NFKC", str(text or ""))
+    if _PACKET_INLINE_CITATION_MARKER_RE.search(normalized) is not None:
+        return True
+    for index, char in enumerate(normalized):
+        if unicodedata.category(char) != "Ps":
+            continue
+        cursor = index + 1
+        parsed_group = False
+        while cursor < len(normalized):
+            while cursor < len(normalized) and normalized[cursor].isspace():
+                cursor += 1
+            start = cursor
+            while cursor < len(normalized) and normalized[cursor].isdecimal():
+                cursor += 1
+            if not 1 <= cursor - start <= 3:
+                break
+            parsed_group = True
+            while cursor < len(normalized) and normalized[cursor].isspace():
+                cursor += 1
+            if (
+                cursor < len(normalized)
+                and unicodedata.category(normalized[cursor]) == "Pe"
+            ):
+                return parsed_group
+            if cursor >= len(normalized) or normalized[cursor] not in ",，、":
+                break
+            cursor += 1
+    return False
+
 
 def _strip_inline_citation_markers(text: str) -> str:
-    """문장 텍스트 속 흉내낸 인용 대괄호를 걷어내고 공백을 정리한다."""
+    """legacy 문장에서 흉내낸 인용 표기를 걷어내고 공백을 정리한다."""
     cleaned = _INLINE_CITATION_MARKER_RE.sub(" ", text)
     return " ".join(cleaned.split())
 
@@ -245,7 +315,10 @@ def extract_json_payload(raw: str) -> Optional[Any]:
 
 
 def _sentence_from_item(
-    item: Any, section_id: str = ""
+    item: Any,
+    section_id: str = "",
+    *,
+    reject_inline_citation_markers: bool = False,
 ) -> Optional[ComposedSentence]:
     """항목 하나를 문장으로 바꾼다. 계약(글·인용·등급)이 안 맞으면 None.
 
@@ -258,6 +331,8 @@ def _sentence_from_item(
         return None
     text = str(item.get(RESPONSE_TEXT_KEY) or "").strip()
     if not text:
+        return None
+    if reject_inline_citation_markers and contains_inline_citation_marker(text):
         return None
     text = _strip_inline_citation_markers(text)
     if not text:
@@ -288,7 +363,10 @@ def _sentence_from_item(
 
 
 def parse_section_response(
-    raw: str, section_id: str = ""
+    raw: str,
+    section_id: str = "",
+    *,
+    reject_inline_citation_markers: bool = False,
 ) -> Optional[tuple[ComposedSentence, ...]]:
     """작가 응답을 문장 튜플로 바꾼다.
 
@@ -308,14 +386,30 @@ def parse_section_response(
         return None
     if not items:
         return ()
+    inline_rejected = reject_inline_citation_markers and any(
+        isinstance(item, Mapping)
+        and contains_inline_citation_marker(
+            str(item.get(RESPONSE_TEXT_KEY) or "")
+        )
+        for item in items
+    )
     sentences = tuple(
         sentence
-        for sentence in (_sentence_from_item(item, section_id) for item in items)
+        for sentence in (
+            _sentence_from_item(
+                item,
+                section_id,
+                reject_inline_citation_markers=reject_inline_citation_markers,
+            )
+            for item in items
+        )
         if sentence is not None
     )
     # 항목이 있었는데 하나도 못 살렸다면 응답 형식이 통째로 어긋난 것 — 재요청 대상
     if not sentences:
-        return None
+        # packet 모드의 inline 표기는 형식이 아니라 해당 항목만의 위반이다.
+        # 모두 위반이어도 재호출하지 않고 빈 결과로 확정한다.
+        return () if inline_rejected else None
     return sentences
 
 
@@ -324,7 +418,12 @@ def parse_section_response(
 # ══════════════════════════════════════════════════════════
 
 
-def _flow_row_from_item(item: Any, cell_count: int) -> Optional[FlowRow]:
+def _flow_row_from_item(
+    item: Any,
+    cell_count: int,
+    *,
+    reject_inline_citation_markers: bool = False,
+) -> Optional[FlowRow]:
     """경로표 한 줄을 계약대로 읽는다. 모양이 어긋나면 그 줄만 버린다.
 
     ★ «모양»만 본다 — 칸 개수, 빈 칸 여부, 길이, 근거 유무. 내용이 좋은지
@@ -338,6 +437,10 @@ def _flow_row_from_item(item: Any, cell_count: int) -> Optional[FlowRow]:
     if not isinstance(cells_raw, list):
         return None
     cells = tuple(" ".join(str(cell).split()) for cell in cells_raw)
+    if reject_inline_citation_markers and any(
+        contains_inline_citation_marker(cell) for cell in cells
+    ):
+        return None
     if len(cells) != cell_count:
         return None
     # ★ 빈 칸을 허용한다 (사용자 결정 2026-08-24). 예전에는 한 칸이라도
@@ -364,7 +467,12 @@ def _flow_row_from_item(item: Any, cell_count: int) -> Optional[FlowRow]:
     return FlowRow(cells=cells, citations=citations)
 
 
-def parse_flow_rows(raw: str, section_id: str = OPERATIONS_FLOW_SECTION_ID) -> tuple[FlowRow, ...]:
+def parse_flow_rows(
+    raw: str,
+    section_id: str = OPERATIONS_FLOW_SECTION_ID,
+    *,
+    reject_inline_citation_markers: bool = False,
+) -> tuple[FlowRow, ...]:
     """작가 응답에서 흐름표를 읽는다. 없거나 못 읽으면 빈 튜플(도식 없음).
 
     ★ 장마다 칸 수가 다르다 — 7장은 3칸(투입→하는 일→도달), 5장은 2칸
@@ -381,14 +489,25 @@ def parse_flow_rows(raw: str, section_id: str = OPERATIONS_FLOW_SECTION_ID) -> t
         return ()
     rows = tuple(
         row
-        for row in (_flow_row_from_item(item, len(headers)) for item in items)
+        for row in (
+            _flow_row_from_item(
+                item,
+                len(headers),
+                reject_inline_citation_markers=reject_inline_citation_markers,
+            )
+            for item in items
+        )
         if row is not None
     )
     return rows[:OPERATIONS_FLOW_MAX_ROWS]
 
 
 def _ask_and_parse(
-    ask: AskFn, prompt: str, section_id: str = ""
+    ask: AskFn,
+    prompt: str,
+    section_id: str = "",
+    *,
+    reject_inline_citation_markers: bool = False,
 ) -> tuple[Optional[tuple[ComposedSentence, ...]], str]:
     """AI를 부르고 파싱까지. 호출 자체가 죽어도 None으로 삼킨다(전체 중단 금지).
 
@@ -417,22 +536,52 @@ def _ask_and_parse(
         )
         return None, ""
     text = str(raw)
-    return parse_section_response(text, section_id), text
+    return (
+        parse_section_response(
+            text,
+            section_id,
+            reject_inline_citation_markers=reject_inline_citation_markers,
+        ),
+        text,
+    )
 
 
 def _compose_one_section(
-    section_id: str, prompt: str, ask: AskFn
+    section_id: str,
+    prompt: str,
+    ask: AskFn,
+    *,
+    reject_inline_citation_markers: bool = False,
+    parse_retry_limit: int = PARSE_RETRY_LIMIT,
 ) -> ComposedSection:
     """장 하나를 쓴다. 실패 시 재요청 1회, 그래도 실패면 정직한 안내문으로 남긴다."""
-    sentences, raw = _ask_and_parse(ask, prompt, section_id)
+    sentences, raw = _ask_and_parse(
+        ask,
+        prompt,
+        section_id,
+        reject_inline_citation_markers=reject_inline_citation_markers,
+    )
     retries = 0
-    while sentences is None and retries < PARSE_RETRY_LIMIT:
+    while sentences is None and retries < parse_retry_limit:
         retries += 1
-        sentences, raw = _ask_and_parse(ask, prompt + RETRY_REMINDER, section_id)
+        sentences, raw = _ask_and_parse(
+            ask,
+            prompt + RETRY_REMINDER,
+            section_id,
+            reject_inline_citation_markers=reject_inline_citation_markers,
+        )
     # 흐름표는 정해진 장(5장 대응표·7장 경로표)에서만 읽는다.
     # 같은 응답에서 꺼내므로 추가 AI 호출이 «0회»다.
     wants_flow = section_id in FLOW_HEADERS_BY_SECTION
-    flow_rows = parse_flow_rows(raw, section_id) if wants_flow and raw else ()
+    flow_rows = (
+        parse_flow_rows(
+            raw,
+            section_id,
+            reject_inline_citation_markers=reject_inline_citation_markers,
+        )
+        if wants_flow and raw
+        else ()
+    )
     if wants_flow and not flow_rows:
         # ★ 진단 — 도식이 안 나올 때 «작가가 안 냈는지» «우리가 걸렀는지»를
         #   구분하지 못하면 엉뚱한 데를 고치게 된다(실측에서 두 번 헛짚었다).
@@ -472,11 +621,323 @@ def _normalize_fragments(
     return tuple(fragments)
 
 
+def _fragment_id_sort_key(fragment_id: str) -> tuple[int, int, str]:
+    """flat union의 조각 순서를 id 기준으로 언제나 같게 만든다."""
+
+    normalized = str(fragment_id)
+    if normalized.isdecimal():
+        # ``1``과 ``01``처럼 숫자값은 같아도 id 문자열은 다른 경우까지
+        # 순서를 고정해야 입력 시퀀스의 우연한 순서에 흔들리지 않는다.
+        return (0, int(normalized), normalized)
+    return (1, 0, normalized)
+
+
+def _assert_public_number_mapping_injective(
+    fragments: Sequence[CollectedFragment],
+) -> None:
+    """서로 다른 조각 id가 같은 공개 번호가 되는 매핑을 선차단한다."""
+
+    fragment_by_public_number: dict[str, str] = {}
+    for fragment in fragments:
+        fragment_id = str(fragment.fragment_id)
+        public_number = citation_number(fragment_id)
+        if (
+            not isinstance(public_number, str)
+            or _CANONICAL_FRAGMENT_ID_RE.fullmatch(public_number) is None
+        ):
+            raise ValueError(
+                f"fragment_id를 공개 번호로 바꿀 수 없습니다: {fragment_id!r}"
+            )
+        previous = fragment_by_public_number.get(public_number)
+        if previous is not None and previous != fragment_id:
+            raise ValueError(
+                "서로 다른 fragment_id가 같은 공개 번호로 충돌합니다: "
+                f"{previous!r}, {fragment_id!r} -> {public_number}"
+            )
+        fragment_by_public_number[public_number] = fragment_id
+
+
+def _normalize_packet_fragments(
+    raw_packet: FragmentsInput,
+) -> tuple[CollectedFragment, ...]:
+    """packet raw Mapping의 문서일만 추가 보존하고 legacy 변환은 바꾸지 않는다."""
+
+    normalized = _normalize_fragments(raw_packet)
+    if not isinstance(raw_packet, Mapping):
+        return normalized
+    document_dates = {
+        str(fragment_id): str(fragment.get("문서일") or "").strip()
+        for fragment_id, fragment in raw_packet.items()
+        if isinstance(fragment, Mapping)
+    }
+    return tuple(
+        CollectedFragment(
+            fragment_id=fragment.fragment_id,
+            kind=fragment.kind,
+            text=fragment.text,
+            source_url=fragment.source_url,
+            document_title=fragment.document_title,
+            location=fragment.location,
+            document_date=document_dates.get(fragment.fragment_id, ""),
+        )
+        for fragment in normalized
+    )
+
+
+def _prepare_section_evidence_packets(
+    packets: SectionEvidencePackets,
+) -> _PreparedSectionEvidencePackets:
+    """장별 묶음을 검증하고 검증기용 flat union을 한 번에 만든다.
+
+    키·조각 충돌 검사는 작가를 부르기 전에 끝나야 한다. 같은 조각이 여러
+    장에 정당하게 배정될 수 있으므로 내용까지 같은 중복은 허용하되, 장별
+    프롬프트와 flat union에서는 각각 한 번만 남긴다.
+    """
+
+    expected = set(SECTION_IDS)
+    actual = set(packets)
+    if actual != expected:
+        missing = [section_id for section_id in SECTION_IDS if section_id not in actual]
+        extra = sorted(str(section_id) for section_id in actual - expected)
+        details: list[str] = []
+        if missing:
+            details.append("누락=" + ",".join(missing))
+        if extra:
+            details.append("여분=" + ",".join(extra))
+        raise ValueError(
+            "장별 evidence packet 키는 SECTION_IDS와 정확히 같아야 합니다"
+            + (": " + " · ".join(details) if details else "")
+        )
+
+    by_id: dict[str, CollectedFragment] = {}
+    normalized_packets: dict[str, tuple[CollectedFragment, ...]] = {}
+    allowed_fragment_ids_by_section: dict[str, frozenset[str]] = {}
+    empty_sections: list[str] = []
+    for section_id in SECTION_IDS:
+        raw_packet = packets[section_id]
+        if isinstance(raw_packet, Mapping):
+            # ``fragments_from_raw``는 legacy 호환 때문에 빈 원문을 조용히
+            # 제외한다. packet 모드는 그 전에 원시 항목을 검사해, 유효 조각
+            # 옆에 섞인 빈 자료도 숨지 못하게 한다.
+            has_nonempty_raw_text = any(
+                isinstance(raw_fragment, Mapping)
+                and isinstance(raw_fragment.get("원문"), str)
+                and bool(raw_fragment.get("원문").strip())
+                for raw_fragment in raw_packet.values()
+            )
+            for raw_fragment_id, raw_fragment in raw_packet.items():
+                fragment_id = str(raw_fragment_id)
+                if _CANONICAL_FRAGMENT_ID_RE.fullmatch(fragment_id) is None:
+                    raise ValueError(
+                        "packet fragment_id는 앞자리 0 없는 양의 ASCII "
+                        f"십진수여야 합니다: {fragment_id!r}"
+                    )
+                if not isinstance(raw_fragment, Mapping):
+                    raise ValueError(
+                        f"packet fragment {fragment_id}의 원시 자료 형식이 "
+                        "Mapping이 아닙니다"
+                    )
+                raw_text = raw_fragment.get("원문")
+                if not isinstance(raw_text, str) or (
+                    not raw_text.strip() and has_nonempty_raw_text
+                ):
+                    raise ValueError(
+                        f"packet fragment {fragment_id}의 text가 비어 있습니다"
+                    )
+        unique_by_id: dict[str, CollectedFragment] = {}
+        for fragment in _normalize_packet_fragments(raw_packet):
+            fragment_id = str(fragment.fragment_id)
+            if _CANONICAL_FRAGMENT_ID_RE.fullmatch(fragment_id) is None:
+                raise ValueError(
+                    "packet fragment_id는 앞자리 0 없는 양의 ASCII 십진수여야 "
+                    f"합니다: {fragment_id!r}"
+                )
+            if not isinstance(fragment.text, str) or not fragment.text.strip():
+                raise ValueError(
+                    f"packet fragment {fragment_id}의 text가 비어 있습니다"
+                )
+            previous = by_id.get(fragment_id)
+            if previous is not None and previous != fragment:
+                raise ValueError(
+                    "장별 evidence packet에서 같은 fragment_id의 내용이 "
+                    f"충돌합니다: {fragment_id}"
+                )
+            if previous is None:
+                by_id[fragment_id] = fragment
+            unique_by_id.setdefault(fragment_id, fragment)
+        if not unique_by_id:
+            empty_sections.append(section_id)
+        ordered_ids = sorted(unique_by_id, key=_fragment_id_sort_key)
+        normalized_packets[section_id] = tuple(
+            unique_by_id[fragment_id] for fragment_id in ordered_ids
+        )
+        allowed_fragment_ids_by_section[section_id] = frozenset(ordered_ids)
+
+    if empty_sections:
+        raise ValueError(
+            "장별 evidence packet은 비어 있을 수 없습니다: "
+            + ",".join(empty_sections)
+        )
+
+    flat_union = tuple(
+        by_id[fragment_id]
+        for fragment_id in sorted(by_id, key=_fragment_id_sort_key)
+    )
+    _assert_public_number_mapping_injective(flat_union)
+    return _PreparedSectionEvidencePackets(
+        packets=normalized_packets,
+        allowed_fragment_ids_by_section=allowed_fragment_ids_by_section,
+        flat_union=flat_union,
+    )
+
+
+def _sanitize_report_to_section_evidence(
+    report: ComposedReport,
+    allowed_fragment_ids_by_section: Mapping[str, frozenset[str]],
+) -> ComposedReport:
+    """장 밖 조각을 인용한 본문·도식 줄을 검수 AI 전에 제외한다.
+
+    해석 문장의 빈 인용은 빈 집합이므로 허용한다. 요약은 장별 경계가 아니라
+    전체 보고서의 합집합을 쓰므로 이 함수에서 건드리지 않는다.
+    """
+
+    sections: list[ComposedSection] = []
+    for section in report.sections:
+        allowed = allowed_fragment_ids_by_section.get(
+            section.section_id, frozenset()
+        )
+        sentences = tuple(
+            sentence
+            for sentence in section.sentences
+            if set(sentence.citations).issubset(allowed)
+            and not contains_inline_citation_marker(sentence.text)
+        )
+        flow_rows = tuple(
+            row
+            for row in section.flow_rows
+            if set(row.citations).issubset(allowed)
+            and not any(contains_inline_citation_marker(cell) for cell in row.cells)
+        )
+        notice = section.notice
+        if section.sentences and not sentences and not notice:
+            notice = _NOTICE_OUTSIDE_PACKET_CITATIONS
+        sections.append(
+            ComposedSection(
+                section_id=section.section_id,
+                sentences=sentences,
+                notice=notice,
+                flow_rows=flow_rows,
+            )
+        )
+    return ComposedReport(sections=tuple(sections), summary=report.summary)
+
+
+def _validate_table_citations_for_section(
+    tables: Sequence[PerformanceTable],
+    *,
+    section_id: str,
+    allowed_fragment_ids: frozenset[str],
+    table_label: str,
+    require_cite: bool = False,
+) -> None:
+    """프로그램 표의 표현형 cite를 정본 번호로 읽어 장 소유권을 선검사한다."""
+
+    for index, table in enumerate(tables, start=1):
+        raw_cite = str(table.cite or "").strip()
+        # legacy flat에서는 cite가 없는 기존 표를 그대로 허용한다. 반면 packet
+        # 엄격 모드는 표도 공개 주장이라 장 소유 근거 없이는 내보내지 않는다.
+        if not raw_cite:
+            if require_cite and table.rows:
+                raise ValueError(
+                    f"{table_label} {index}번 표의 cite가 비어 있습니다"
+                )
+            continue
+        fragment_id = citation_number(raw_cite)
+        if not fragment_id:
+            raise ValueError(
+                f"{table_label} {index}번 표의 cite를 조각 번호로 해석할 수 없습니다"
+            )
+        if fragment_id not in allowed_fragment_ids:
+            raise ValueError(
+                f"{table_label} {index}번 표의 cite {fragment_id}는 "
+                f"{section_id} evidence packet에 없습니다"
+            )
+
+
+def _assert_composed_report_evidence_invariant(
+    report: ComposedReport,
+    allowed_fragment_ids_by_section: Mapping[str, frozenset[str]],
+    union_fragment_ids: frozenset[str],
+    *,
+    stage: str,
+) -> None:
+    """프로그램 단계가 장별 근거 소유권을 다시 깨지 않았는지 강제한다."""
+
+    problems: list[str] = []
+    section_ids = tuple(section.section_id for section in report.sections)
+    if section_ids != SECTION_IDS:
+        problems.append(f"장 id·순서={section_ids!r} (SECTION_IDS와 다름)")
+    for section in report.sections:
+        allowed = allowed_fragment_ids_by_section.get(section.section_id)
+        if allowed is None:
+            problems.append(f"알 수 없는 장 {section.section_id}")
+            continue
+        for index, sentence in enumerate(section.sentences, start=1):
+            if contains_inline_citation_marker(sentence.text):
+                problems.append(f"{section.section_id} 본문 {index}번 inline cite")
+            outside = sorted(
+                {
+                    str(citation).strip()
+                    for citation in sentence.citations
+                    if str(citation).strip() not in allowed
+                },
+                key=_fragment_id_sort_key,
+            )
+            if outside:
+                problems.append(
+                    f"{section.section_id} 본문 {index}번=" + ",".join(outside)
+                )
+        for index, row in enumerate(section.flow_rows, start=1):
+            if any(contains_inline_citation_marker(cell) for cell in row.cells):
+                problems.append(f"{section.section_id} 도식 {index}번 inline cite")
+            outside = sorted(
+                {
+                    str(citation).strip()
+                    for citation in row.citations
+                    if str(citation).strip() not in allowed
+                },
+                key=_fragment_id_sort_key,
+            )
+            if outside:
+                problems.append(
+                    f"{section.section_id} 도식 {index}번=" + ",".join(outside)
+                )
+    for index, sentence in enumerate(report.summary, start=1):
+        if contains_inline_citation_marker(sentence.text):
+            problems.append(f"summary {index}번 inline cite")
+        outside = sorted(
+            {
+                str(citation).strip()
+                for citation in sentence.citations
+                if str(citation).strip() not in union_fragment_ids
+            },
+            key=_fragment_id_sort_key,
+        )
+        if outside:
+            problems.append(f"summary {index}번=" + ",".join(outside))
+    if problems:
+        raise ValueError(
+            f"장별 evidence invariant 위반({stage}): " + " · ".join(problems)
+        )
+
+
 def compose_sections(
     company_name: str,
     fragments: FragmentsInput,
     performance_table: Optional[PerformanceTable],
     ask: AskFn,
+    *,
+    section_evidence_packets: Optional[SectionEvidencePackets] = None,
 ) -> ComposedReport:
     """9개 장 전부를 작가 AI로 쓴다 — 장마다 1회 호출(파싱 실패 시 +1회).
 
@@ -486,33 +947,76 @@ def compose_sections(
             또는 `CollectedFragment` 시퀀스.
         performance_table: 프로그램이 검증해 만든 3개년 실적표. 없으면 None.
         ask: 프롬프트 문자열 → 응답 문자열 주입 함수 (시험은 가짜 함수 사용).
+        section_evidence_packets: 장마다 허용할 근거 조각 묶음. 지정하면 아홉
+            장 키를 먼저 검증하고, 각 작가에게 자기 장 묶음만 보여 준다.
+            미지정이면 기존 flat fragments 프롬프트를 그대로 유지한다.
 
     Returns:
         9개 장이 «전부» 들어 있는 ComposedReport. 실패한 장도 삭제하지 않고
         빈 문장 + 안내문으로 남는다. summary는 빈 튜플(소단계 3-3이 채운다).
 
-    ★ 장은 «순서대로» 쓴다. 앞 장이 쓴 문장을 뒤 장 프롬프트에 넘겨 같은
-      사실이 여러 장에 반복되는 것을 막기 위해서다 (실측 결함 — 한 사실이
-      최대 7개 장에 등장했다). 병렬로 돌리면 이 정보가 흐르지 못한다.
+    Raises:
+        ValueError: packet 키·내용·비어 있음 또는 실적표 cite의 장 소유권이
+            계약과 다를 때. 작가를 호출하기 전에 발생한다.
+
+    ★ legacy flat 모드는 장을 «순서대로» 쓰며 앞 장 문장을 뒤 장에 보여 준다.
+      packet 모드는 생성문 자체가 다른 장의 근거 경계를 넘지 않도록 이 블록을
+      전달하지 않고, 중복은 뒤의 single-owner/dedupe 단계에 맡긴다.
     """
-    normalized = _normalize_fragments(fragments)
+    prepared: Optional[_PreparedSectionEvidencePackets] = None
+    if section_evidence_packets is None:
+        normalized = _normalize_fragments(fragments)
+    else:
+        prepared = _prepare_section_evidence_packets(
+            section_evidence_packets
+        )
+        _validate_table_citations_for_section(
+            (performance_table,) if performance_table is not None else (),
+            section_id="past_changes",
+            allowed_fragment_ids=prepared.allowed_fragment_ids_by_section[
+                "past_changes"
+            ],
+            table_label="실적",
+            require_cite=True,
+        )
+        # packet 모드에서는 flat 입력을 작가 프롬프트에 섞지 않는다.
+        normalized = ()
     sections: list[ComposedSection] = []
     already_written: list[str] = []
     for section_id in SECTION_IDS:
+        section_fragments = (
+            normalized if prepared is None else prepared.packets[section_id]
+        )
+        section_table = (
+            performance_table
+            if prepared is None or section_id == "past_changes"
+            else None
+        )
+        prompt_already_written = already_written if prepared is None else ()
         section = _compose_one_section(
             section_id,
             build_section_prompt(
                 company_name,
                 section_id,
-                normalized,
-                performance_table,
-                already_written,
+                section_fragments,
+                section_table,
+                prompt_already_written,
             ),
             ask,
+            reject_inline_citation_markers=prepared is not None,
+            # packet/FULL 호출 계약은 장마다 정확히 한 번이다. 형식 오류를
+            # 재호출로 감추지 않고 해당 장을 fail-closed 안내문으로 남긴다.
+            parse_retry_limit=(0 if prepared is not None else PARSE_RETRY_LIMIT),
         )
         sections.append(section)
-        already_written.extend(sentence.text for sentence in section.sentences)
-    return ComposedReport(sections=tuple(sections), summary=())
+        if prepared is None:
+            already_written.extend(sentence.text for sentence in section.sentences)
+    report = ComposedReport(sections=tuple(sections), summary=())
+    if prepared is None:
+        return report
+    return _sanitize_report_to_section_evidence(
+        report, prepared.allowed_fragment_ids_by_section
+    )
 
 
 # ══════════════════════════════════════════════════════════
@@ -674,7 +1178,12 @@ def _supplement_summary(
     return tuple(chosen)
 
 
-def compose_summary(report: ComposedReport, ask: AskFn) -> ComposedReport:
+def compose_summary(
+    report: ComposedReport,
+    ask: AskFn,
+    *,
+    reject_inline_citation_markers: bool = False,
+) -> ComposedReport:
     """본문 완성 후 핵심 요약 3~5문장을 새로 써서 채운 보고서를 돌려준다.
 
     흐름(계획 04장 3-3):
@@ -697,18 +1206,28 @@ def compose_summary(report: ComposedReport, ask: AskFn) -> ComposedReport:
         return ComposedReport(sections=report.sections, summary=())
     prompt = build_summary_prompt(report)
     # 요약에는 경로표가 없다 — 응답 원문은 버린다.
-    sentences, _raw = _ask_and_parse(ask, prompt)
+    sentences, _raw = _ask_and_parse(
+        ask,
+        prompt,
+        reject_inline_citation_markers=reject_inline_citation_markers,
+    )
     retries = 0
     while sentences is None and retries < PARSE_RETRY_LIMIT:
         retries += 1
-        sentences, _raw = _ask_and_parse(ask, prompt + RETRY_REMINDER)
+        sentences, _raw = _ask_and_parse(
+            ask,
+            prompt + RETRY_REMINDER,
+            reject_inline_citation_markers=reject_inline_citation_markers,
+        )
     if sentences is None:
         sentences = ()
     kept, had_duplicate = _split_out_duplicates(sentences, body_keys)
     if had_duplicate:
         # 재탕 검출 → 1회 재요청. 실패하거나 또 전부 재탕이면 1차 생존 문장 유지.
         retry_sentences, _retry_raw = _ask_and_parse(
-            ask, prompt + SUMMARY_DUPLICATE_REMINDER
+            ask,
+            prompt + SUMMARY_DUPLICATE_REMINDER,
+            reject_inline_citation_markers=reject_inline_citation_markers,
         )
         if retry_sentences:
             retry_kept, _ = _split_out_duplicates(retry_sentences, body_keys)

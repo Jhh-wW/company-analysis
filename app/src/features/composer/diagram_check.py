@@ -37,6 +37,8 @@
   ② 의미 검수 (AI 1회) — 「이 경로가 인용 원문에 근거하는가」를 묻는다.
      관계가 맞는지는 글자로 알 수 없다. 이 엔진이 문장에 대해 이미
      하고 있는 일(`verify._semantic_review`)을 도식에도 똑같이 한다.
+     legacy flat은 이 파일에서 별도 1회, packet 엄격 경로는
+     verify의 장별 bundled reviewer 한 번에 본문과 함께 판정한다.
 
 ★ 검수를 «못 했을» 때는 관계 줄을 공개하지 않는다.
   근거 조각이 실존한다고 해서, 그 조각과 화살표의 관계가 맞는 것은
@@ -181,7 +183,7 @@ def _drop_invented_numbers(
 # ══════════════════════════════════════════════════════════
 
 
-def _labelled_cells(section_id: str, row: FlowRow) -> list[str]:
+def labelled_flow_cells(section_id: str, row: FlowRow) -> list[str]:
     """칸 이름을 붙이고 «값이 있는 칸»만 남긴다.
 
     ★ 왜 빈 칸을 빼나 (2026-08-29 실측) — 1·3·6·8장은 «카드»로 그려져
@@ -205,6 +207,12 @@ def _labelled_cells(section_id: str, row: FlowRow) -> list[str]:
         header = headers[index] if index < len(headers) else ""
         labelled.append(f"{header}: {value}" if header else value)
     return labelled
+
+
+def _labelled_cells(section_id: str, row: FlowRow) -> list[str]:
+    """기존 private 호출 호환 — 정본 구현은 ``labelled_flow_cells`` 한 벌이다."""
+
+    return labelled_flow_cells(section_id, row)
 
 
 def _review_prompt(items: Sequence[tuple[int, str, FlowRow, str]]) -> str:
@@ -388,6 +396,41 @@ def _review_rows(
 # ══════════════════════════════════════════════════════════
 
 
+def check_diagram_numbers(
+    report: ComposedReport,
+    fragments: Sequence[CollectedFragment],
+) -> tuple[ComposedReport, tuple[str, ...]]:
+    """도식 수치가 인용 원문에 있는지만 AI 없이 검사한다.
+
+    strict bundled reviewer와 legacy ``check_diagrams``가 이 한 구현을 함께
+    쓴다. 숫자 검산을 strict용으로 복제하면 두 경로의 처분이 다시 갈라진다.
+    """
+
+    texts = _fragment_texts(fragments)
+    problems: list[str] = []
+    rebuilt: list[ComposedSection] = []
+    for section in report.sections:
+        if not section.flow_rows:
+            rebuilt.append(section)
+            continue
+        kept, dropped = _drop_invented_numbers(section.flow_rows, texts)
+        problems.extend(f"[{section.section_id}] {reason}" for reason in dropped)
+        rebuilt.append(
+            ComposedSection(
+                section_id=section.section_id,
+                sentences=section.sentences,
+                notice=section.notice,
+                flow_rows=kept,
+            )
+        )
+    if not problems:
+        return report, ()
+    return (
+        ComposedReport(sections=tuple(rebuilt), summary=report.summary),
+        tuple(problems),
+    )
+
+
 def check_diagrams(
     report: ComposedReport,
     fragments: Sequence[CollectedFragment],
@@ -408,16 +451,15 @@ def check_diagrams(
     ★ 장을 지우지 않는다. 도식이 사라져도 본문 문장은 그대로다.
     """
     texts = _fragment_texts(fragments)
-    problems: list[str] = []
+    number_checked, number_problems = check_diagram_numbers(report, fragments)
+    problems: list[str] = list(number_problems)
 
-    # ① 숫자 검사 — 지어낸 수를 먼저 걷어낸다 (AI에 보낼 것도 줄어든다)
-    after_numbers: list[tuple[str, tuple[FlowRow, ...]]] = []
-    for section in report.sections:
-        if not section.flow_rows:
-            continue
-        kept, dropped = _drop_invented_numbers(section.flow_rows, texts)
-        problems.extend(f"[{section.section_id}] {reason}" for reason in dropped)
-        after_numbers.append((section.section_id, kept))
+    # ① 숫자 검사 결과 — 위 공용 helper가 지어낸 수를 이미 걷어냈다.
+    after_numbers: list[tuple[str, tuple[FlowRow, ...]]] = [
+        (section.section_id, section.flow_rows)
+        for section in number_checked.sections
+        if section.flow_rows
+    ]
 
     # ② 의미 검수 — 관계는 글자로 알 수 없다
     if ask is not None and any(rows for _sid, rows in after_numbers):
@@ -432,7 +474,7 @@ def check_diagrams(
             )
 
     if not problems:
-        return report, ()
+        return number_checked, ()
 
     rebuilt = tuple(
         ComposedSection(
@@ -441,10 +483,10 @@ def check_diagrams(
             notice=section.notice,
             flow_rows=reviewed.get(section.section_id, section.flow_rows),
         )
-        for section in report.sections
+        for section in number_checked.sections
     )
     logger.info("도식 검증: 근거에 맞지 않는 경로 %d줄을 뺐습니다", len(problems))
     return (
-        ComposedReport(sections=rebuilt, summary=report.summary),
+        ComposedReport(sections=rebuilt, summary=number_checked.summary),
         tuple(problems),
     )

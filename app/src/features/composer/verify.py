@@ -52,6 +52,7 @@ from src.features.composer.port import (
     ComposedReport,
     ComposedSection,
     ComposedSentence,
+    FlowRow,
     PerformanceTable,
     fragments_from_raw,
 )
@@ -74,6 +75,24 @@ VALID_VERDICTS: Final[frozenset[str]] = frozenset(
 REVIEW_VERDICTS_KEY: Final[str] = "판정"
 REVIEW_NUMBER_KEY: Final[str] = "번호"
 REVIEW_RESULT_KEY: Final[str] = "결과"
+REVIEW_SECTION_KEY: Final[str] = "장"
+REVIEW_EVIDENCE_IDS_KEY: Final[str] = "근거"
+REVIEW_KIND_SENTENCE: Final[str] = "문장"
+REVIEW_KIND_FLOW: Final[str] = "도식"
+REVIEW_SUMMARY_GROUP: Final[str] = "summary"
+
+
+def _review_labelled_flow_cells(section_id: str, row: FlowRow) -> list[str]:
+    """순환 import 없이 legacy 도식 검수의 칸 이름 구현을 그대로 쓴다."""
+
+    # diagram_check는 수치 검산을 위해 verify의 숫자 helper를 import한다.
+    # 모듈 최상단에서 역방향 import하면 순환하므로 실제 bundled 검수 시점에만
+    # 읽는다. 결과 구현은 여전히 diagram_check 한 벌이다.
+    from src.features.composer.diagram_check import (  # noqa: PLC0415
+        labelled_flow_cells,
+    )
+
+    return labelled_flow_cells(section_id, row)
 
 #: 장의 해석 비율 경고 문턱 — 기준문서 4-2 「해석 비율이 50%를 넘는 장은 로그 경고만」
 INTERPRETED_RATIO_WARN_LIMIT: Final[float] = 0.5
@@ -485,6 +504,176 @@ class _ReviewItem:
     sentence: ComposedSentence
 
 
+@dataclass(frozen=True)
+class _GroupedReviewItem:
+    """packet 엄격 검수 항목 — 번호와 장 소유권을 함께 잠근다."""
+
+    number: int
+    section_id: str
+    kind: str
+    citations: tuple[str, ...]
+    sentence: Optional[ComposedSentence] = None
+    flow_row: Optional[FlowRow] = None
+
+
+def _build_grouped_review_prompt(
+    items: Sequence[_GroupedReviewItem],
+    frag_by_id: Mapping[str, CollectedFragment],
+    table: Optional[PerformanceTable],
+) -> str:
+    """장별 후보와 그 장이 실제 인용한 원문만 한 블록에 묶는다.
+
+    비용을 한 번으로 고정하려고 여러 장 블록을 한 AI 문맥에 함께 싣는다.
+    따라서 모델이 기술적으로 다른 블록을 볼 수 있다는 잔여 한계는 있다.
+    대신 각 항목의 장을 응답에 되돌려 받으며, 결과 적용 시 원래 소유 장과
+    다르면 폐기해 다른 장의 판정으로 바꿔치기되는 경계를 막는다.
+    """
+
+    parts = [
+        REVIEW_PROMPT_HEADER,
+        REVIEW_PROMPT_RULES,
+        (
+            "아래 자료는 장별 블록으로 격리했다. 각 후보는 반드시 같은 블록의 "
+            "근거만으로 판정하고 다른 장 블록의 근거를 빌리지 마라.\n"
+            "도식은 칸 이름과 값을 함께 준다. 원문이 그 관계를 실제로 "
+            "뒷받침할 때만 참이다.\n"
+        ),
+        (
+            '형식: 설명 없이 {"판정": [{"번호": 1, "장": "identity", '
+            '"근거": ["1"], "결과": "참"}]} JSON만 출력한다. 번호·장·'
+            "후보가 인용한 근거 id를 입력 그대로 되돌려라.\n"
+        ),
+    ]
+    section_order: list[str] = []
+    for item in items:
+        if item.section_id not in section_order:
+            section_order.append(item.section_id)
+    table_evidence = _render_table_evidence(table)
+    for section_id in section_order:
+        section_items = [item for item in items if item.section_id == section_id]
+        cited_ids: list[str] = []
+        for item in section_items:
+            for citation in item.citations:
+                if citation in frag_by_id and citation not in cited_ids:
+                    cited_ids.append(citation)
+        parts.append(
+            "\n===== 장별 검수 블록 시작: "
+            + json.dumps(section_id, ensure_ascii=False)
+            + " =====\n"
+        )
+        if section_id == "past_changes" and table_evidence:
+            parts.append(table_evidence)
+        parts.append(REVIEW_EVIDENCE_HEAD)
+        for fragment_id in cited_ids:
+            evidence = json.dumps(
+                frag_by_id[fragment_id].text, ensure_ascii=False
+            )
+            parts.append(
+                f"[조각 {fragment_id}] 원문(JSON 문자열): {evidence}\n"
+            )
+        parts.append(REVIEW_LIST_HEAD)
+        for item in section_items:
+            citation_label = (
+                ", ".join(f"조각 {citation}" for citation in item.citations)
+                or "(없음)"
+            )
+            parts.append(
+                f"\n[{item.number}] (장: {section_id}, 종류: {item.kind}, "
+                f"인용: {citation_label})\n"
+            )
+            if item.sentence is not None:
+                parts.append(
+                    f"  등급: {item.sentence.grade}\n"
+                    "  문장(JSON 문자열): "
+                    f"{json.dumps(item.sentence.text, ensure_ascii=False)}\n"
+                )
+            elif item.flow_row is not None:
+                parts.append(
+                    "  도식 칸(JSON 배열): "
+                    + json.dumps(
+                        _review_labelled_flow_cells(section_id, item.flow_row),
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+        parts.append("===== 장별 검수 블록 끝 =====\n")
+    parts.append(REVIEW_TRUSTED_TAIL)
+    return "".join(parts)
+
+
+def _parse_grouped_verdicts(
+    raw: Optional[str],
+    owners: Mapping[int, str],
+    evidence_ids_by_number: Mapping[int, frozenset[str]],
+) -> Optional[dict[int, str]]:
+    """번호뿐 아니라 입력 장과 같은 판정만 받아 장 경계를 잠근다."""
+
+    if raw is None:
+        return None
+    payload = extract_json_payload(raw)
+    if not isinstance(payload, Mapping):
+        return None
+    entries = payload.get(REVIEW_VERDICTS_KEY)
+    if not isinstance(entries, list):
+        return None
+    out: dict[int, str] = {}
+    invalid_numbers: set[int] = set()
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        number = entry.get(REVIEW_NUMBER_KEY)
+        if isinstance(number, bool) or not isinstance(number, int):
+            continue
+        result = str(entry.get(REVIEW_RESULT_KEY) or "").strip()
+        section_id = str(entry.get(REVIEW_SECTION_KEY) or "").strip()
+        raw_evidence_ids = entry.get(REVIEW_EVIDENCE_IDS_KEY)
+        evidence_ids = (
+            [str(value).strip() for value in raw_evidence_ids]
+            if isinstance(raw_evidence_ids, list)
+            else []
+        )
+        expected_evidence_ids = evidence_ids_by_number.get(number, frozenset())
+        if (
+            result not in VALID_VERDICTS
+            or owners.get(number) != section_id
+            or not evidence_ids
+            or len(evidence_ids) != len(set(evidence_ids))
+            or frozenset(evidence_ids) != expected_evidence_ids
+        ):
+            invalid_numbers.add(number)
+            out.pop(number, None)
+            continue
+        if number in out and out[number] != result:
+            invalid_numbers.add(number)
+            out.pop(number, None)
+            continue
+        if number not in invalid_numbers:
+            out[number] = result
+    return out or None
+
+
+def _ask_grouped_verdicts(
+    ask: AskFn,
+    items: Sequence[_GroupedReviewItem],
+    frag_by_id: Mapping[str, CollectedFragment],
+    table: Optional[PerformanceTable],
+) -> Optional[dict[int, str]]:
+    """packet 본문·도식을 정확히 한 번에 검수한다.
+
+    엄격 packet의 호출 계약은 reviewer 1회 고정이다. 형식 오류·누락을 두 번째
+    호출로 복구하지 않고 ``None``으로 돌려 공개 후보를 fail-closed 처리한다.
+    """
+
+    prompt = _build_grouped_review_prompt(items, frag_by_id, table)
+    owners = {item.number: item.section_id for item in items}
+    evidence_ids_by_number = {
+        item.number: frozenset(item.citations) for item in items
+    }
+    return _parse_grouped_verdicts(
+        _safe_ask(ask, prompt), owners, evidence_ids_by_number
+    )
+
+
 def _render_table_evidence(table: Optional[PerformanceTable]) -> str:
     """검수 프롬프트에 싣는 실적표 — 표 수치를 근거로 쓴 문장을 살리기 위함."""
     if table is None or not table.rows:
@@ -850,6 +1039,139 @@ def _semantic_review(
     return rebuilt
 
 
+def _semantic_review_grouped(
+    groups: Sequence[Sequence[ComposedSentence]],
+    group_ids: Sequence[str],
+    flow_rows_by_section: Mapping[str, Sequence[FlowRow]],
+    allowed_fragment_ids_by_section: Mapping[str, frozenset[str]],
+    frag_by_id: Mapping[str, CollectedFragment],
+    table: Optional[PerformanceTable],
+    ask: AskFn,
+) -> tuple[list[list[ComposedSentence]], dict[str, tuple[FlowRow, ...]]]:
+    """packet 문장과 도식을 장별 근거 블록으로 묶어 AI 1회 검수한다.
+
+    legacy의 거짓 문장 재작성은 문장마다 호출을 늘린다. 엄격 경로는 비용 계약
+    (본문+도식 bundled reviewer 1회)을 지키며, 거짓·장 불일치·판정 누락은
+    되살리지 않고 그 항목만 제거한다.
+    """
+
+    if len(groups) != len(group_ids):
+        raise ValueError("검수 문장 묶음과 장 id 개수가 다릅니다")
+    items: list[_GroupedReviewItem] = []
+    sentence_positions: dict[tuple[int, int], int] = {}
+    rejected_sentence_positions: set[tuple[int, int]] = set()
+    flow_positions: dict[tuple[str, int], int] = {}
+    number = 0
+    for group_index, (section_id, group) in enumerate(zip(group_ids, groups)):
+        allowed = allowed_fragment_ids_by_section.get(section_id)
+        if allowed is None:
+            raise ValueError(f"검수 허용 근거가 없는 장입니다: {section_id}")
+        for sentence_index, sentence in enumerate(group):
+            if sentence.grade not in (GRADE_CONFIRMED, GRADE_INTERPRETED):
+                continue
+            if not sentence.citations:
+                continue
+            if not set(sentence.citations).issubset(allowed):
+                rejected_sentence_positions.add(
+                    (group_index, sentence_index)
+                )
+                continue
+            number += 1
+            sentence_positions[(group_index, sentence_index)] = number
+            items.append(
+                _GroupedReviewItem(
+                    number=number,
+                    section_id=section_id,
+                    kind=REVIEW_KIND_SENTENCE,
+                    citations=tuple(sentence.citations),
+                    sentence=sentence,
+                )
+            )
+    for section_id, rows in flow_rows_by_section.items():
+        allowed = allowed_fragment_ids_by_section.get(section_id)
+        if allowed is None:
+            raise ValueError(f"검수 허용 근거가 없는 도식 장입니다: {section_id}")
+        for row_index, row in enumerate(rows):
+            # 값·근거가 없는 관계를 검수 AI가 참으로 만들어서는 안 된다.
+            if (
+                not row.citations
+                or not _review_labelled_flow_cells(section_id, row)
+                or not set(row.citations).issubset(allowed)
+            ):
+                continue
+            number += 1
+            flow_positions[(section_id, row_index)] = number
+            items.append(
+                _GroupedReviewItem(
+                    number=number,
+                    section_id=section_id,
+                    kind=REVIEW_KIND_FLOW,
+                    citations=tuple(row.citations),
+                    flow_row=row,
+                )
+            )
+    if not items:
+        return (
+            [list(group) for group in groups],
+            {section_id: () for section_id in flow_rows_by_section},
+        )
+
+    verdicts = _ask_grouped_verdicts(ask, items, frag_by_id, table)
+    sentence_by_number: dict[int, Optional[ComposedSentence]] = {}
+    flow_kept_numbers: set[int] = set()
+    for item in items:
+        verdict = None if verdicts is None else verdicts.get(item.number)
+        if item.sentence is not None:
+            if verdict == VERDICT_TRUE:
+                sentence_by_number[item.number] = replace(
+                    item.sentence, verification_state="verified"
+                )
+            elif verdict == VERDICT_UNCLEAR:
+                sentence_by_number[item.number] = (
+                    _demoted(item.sentence)
+                    if item.sentence.grade == GRADE_CONFIRMED
+                    else replace(item.sentence, verification_state="unverified")
+                )
+            else:
+                sentence_by_number[item.number] = None
+        elif item.flow_row is not None and verdict == VERDICT_TRUE:
+            flow_kept_numbers.add(item.number)
+
+    rebuilt_groups: list[list[ComposedSentence]] = []
+    for group_index, group in enumerate(groups):
+        rebuilt: list[ComposedSentence] = []
+        for sentence_index, sentence in enumerate(group):
+            if (group_index, sentence_index) in rejected_sentence_positions:
+                continue
+            item_number = sentence_positions.get((group_index, sentence_index))
+            if item_number is None:
+                # 인용 없는 해석 등 legacy에서도 의미 검수 대상이 아닌 문장은
+                # 그대로 유지한다. 장 밖 인용은 앞선 packet invariant가 막는다.
+                rebuilt.append(sentence)
+                continue
+            reviewed = sentence_by_number.get(item_number)
+            if reviewed is not None:
+                rebuilt.append(reviewed)
+        rebuilt_groups.append(rebuilt)
+
+    rebuilt_flows: dict[str, tuple[FlowRow, ...]] = {}
+    for section_id, rows in flow_rows_by_section.items():
+        rebuilt_flows[section_id] = tuple(
+            row
+            for row_index, row in enumerate(rows)
+            if flow_positions.get((section_id, row_index)) in flow_kept_numbers
+        )
+    total_flow_rows = sum(len(rows) for rows in flow_rows_by_section.values())
+    kept_flow_rows = sum(len(rows) for rows in rebuilt_flows.values())
+    if total_flow_rows != kept_flow_rows:
+        logger.info(
+            "packet bundled 검수: 관계 도식 %d줄 중 %d줄 공개 유지",
+            total_flow_rows,
+            kept_flow_rows,
+        )
+    return rebuilt_groups, rebuilt_flows
+
+
 # ══════════════════════════════════════════════════════════
 # ④-b 해석 비율 경고 + 진입 함수
 # ══════════════════════════════════════════════════════════
@@ -872,7 +1194,11 @@ def _warn_if_interpretation_heavy(
         )
 
 
-def _fail_closed_report(report: ComposedReport) -> ComposedReport:
+def _fail_closed_report(
+    report: ComposedReport,
+    *,
+    preserve_flow_rows: bool = True,
+) -> ComposedReport:
     """검증기 자체 결함 시 AI 문장을 공개하지 않는 안전한 부분 결과."""
 
     sections = tuple(
@@ -884,11 +1210,12 @@ def _fail_closed_report(report: ComposedReport) -> ComposedReport:
                 if section.sentences
                 else section.notice
             ),
-            # ★ 도식 재료를 «반드시» 함께 넘긴다. 안 넘기면 기본값 ()로
-            #   떨어져 7장 경로표가 검증 단계에서 통째로 사라진다 —
+            # ★ legacy에서는 도식 재료를 «반드시» 함께 넘긴다. 안 넘기면
+            #   기본값 ()로 떨어져 7장 경로표가 검증 단계에서 사라진다 —
             #   작가가 정상적으로 냈는데도 화면에 흐름도가 안 나온
-            #   진짜 원인이었다. 문장을 판정하는 단계가 도식을 지우면 안 된다.
-            flow_rows=section.flow_rows,
+            #   진짜 원인이었다. packet 엄격 경로는 같은 bundled 검수 자체가
+            #   실패한 경우라 관계도 안전 미확인이고, 그때만 행을 비운다.
+            flow_rows=section.flow_rows if preserve_flow_rows else (),
         )
         for section in report.sections
     )
@@ -900,6 +1227,10 @@ def _verify_report_inner(
     fragments: FragmentsInput,
     performance_table: Optional[PerformanceTable],
     ask: AskFn,
+    *,
+    allowed_fragment_ids_by_section: Optional[
+        Mapping[str, frozenset[str]]
+    ] = None,
 ) -> ComposedReport:
     frag_by_id = {
         fragment.fragment_id: fragment
@@ -909,15 +1240,49 @@ def _verify_report_inner(
 
     # 1) 기계 검증 (출처 실존 → 라벨 정합 → 수치) — 장·요약 전부 문장 단위
     checked_groups = [
-        _machine_check(section.sentences, frag_by_id, table_texts)
+        _machine_check(
+            section.sentences,
+            frag_by_id,
+            (
+                table_texts
+                if allowed_fragment_ids_by_section is None
+                or section.section_id == "past_changes"
+                else ()
+            ),
+        )
         for section in report.sections
     ]
     checked_groups.append(_machine_check(report.summary, frag_by_id, table_texts))
 
-    # 2) 의미 검수 — 남은 «확인»·«해석» 문장을 전체 한 묶음으로 대조
-    reviewed_groups = _semantic_review(
-        checked_groups, frag_by_id, table_texts, performance_table, ask
-    )
+    # 2) 의미 검수 — legacy는 기존 flat prompt/재작성 계약을 글자 그대로
+    # 유지한다. packet 엄격 모드만 문장+도식을 장별 블록으로 한 번에 본다.
+    reviewed_flow_rows: Optional[dict[str, tuple[FlowRow, ...]]] = None
+    if allowed_fragment_ids_by_section is None:
+        reviewed_groups = _semantic_review(
+            checked_groups, frag_by_id, table_texts, performance_table, ask
+        )
+    else:
+        allowed_for_review = dict(allowed_fragment_ids_by_section)
+        allowed_for_review[REVIEW_SUMMARY_GROUP] = frozenset(
+            fragment_id
+            for fragment_ids in allowed_fragment_ids_by_section.values()
+            for fragment_id in fragment_ids
+        )
+        group_ids = [section.section_id for section in report.sections]
+        group_ids.append(REVIEW_SUMMARY_GROUP)
+        reviewed_groups, reviewed_flow_rows = _semantic_review_grouped(
+            checked_groups,
+            group_ids,
+            {
+                section.section_id: section.flow_rows
+                for section in report.sections
+                if section.flow_rows
+            },
+            allowed_for_review,
+            frag_by_id,
+            performance_table,
+            ask,
+        )
     reviewed_summary = reviewed_groups.pop()
 
     # 3) 재조립 + 해석 비율 경고 + 비워진 장의 정직한 안내문
@@ -933,8 +1298,13 @@ def _verify_report_inner(
                 section_id=section.section_id,
                 sentences=tuple(kept),
                 notice=notice,
-                # ★ 위와 같은 이유 — 검증이 도식 재료를 지우면 안 된다.
-                flow_rows=section.flow_rows,
+                # legacy 문장 검수는 도식을 건드리지 않는다. packet 엄격
+                # 경로에서는 같은 bundled 판정에서 참인 행만 남긴다.
+                flow_rows=(
+                    section.flow_rows
+                    if reviewed_flow_rows is None
+                    else reviewed_flow_rows.get(section.section_id, ())
+                ),
             )
         )
     return ComposedReport(
@@ -947,6 +1317,10 @@ def verify_report(
     fragments: FragmentsInput,
     performance_table: Optional[PerformanceTable],
     ask: AskFn,
+    *,
+    allowed_fragment_ids_by_section: Optional[
+        Mapping[str, frozenset[str]]
+    ] = None,
 ) -> ComposedReport:
     """진입 함수 — 규칙 ①~④를 보고서 전체에 문장 단위로 적용한다.
 
@@ -962,7 +1336,18 @@ def verify_report(
         장 개수·순서는 입력 그대로다 (장 삭제 없음).
     """
     try:
-        return _verify_report_inner(report, fragments, performance_table, ask)
+        if allowed_fragment_ids_by_section is None:
+            # legacy 호출 모양과 monkeypatch 경계를 그대로 보존한다.
+            return _verify_report_inner(
+                report, fragments, performance_table, ask
+            )
+        return _verify_report_inner(
+            report,
+            fragments,
+            performance_table,
+            ask,
+            allowed_fragment_ids_by_section=allowed_fragment_ids_by_section,
+        )
     except AskFatalError:
         # 요청 전역 장애 — «검증기 내부 오류»로 위장하지 않고 그대로 재전파한다.
         raise
@@ -971,7 +1356,10 @@ def verify_report(
             "검증기 내부 오류 — 안전을 확인하지 못한 AI 문장을 공개 후보에서 제외한다"
         )
         try:
-            return _fail_closed_report(report)
+            return _fail_closed_report(
+                report,
+                preserve_flow_rows=allowed_fragment_ids_by_section is None,
+            )
         except Exception:  # noqa: BLE001 - 마지막 방어도 원입력을 되살리지 않는다
             return ComposedReport(sections=(), summary=())
 
