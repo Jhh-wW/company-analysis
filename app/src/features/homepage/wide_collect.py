@@ -101,7 +101,36 @@ _RECRUIT_MARKERS: tuple[str, ...] = ("recruit", "career", "jobs", "채용")
 #: slot」이라는 뜻으로 허용 어휘 17개 전체를 쓴다(``_CollectionState.add_attempt``
 #: 참조 — 모든 attempt 생성이 이 한 곳을 거치므로 호출부마다 따로 챙기지 않아도
 #: 절대 빈 slot_ids가 새 나가지 않는다).
+#:
+#: ★ 정정 1(팀 리드 2026-08-31, P0): 이 광역 17-slot fallback을
+#: ``REQUIREMENT_REQUIRED`` + ``ATTEMPT_STATE_OK``/``ATTEMPT_STATE_MISSING``
+#: 조합과 함께 내보내면 안 된다. 소비 계약은 「빈 슬롯을 대상으로 한 REQUIRED
+#: attempt가 전부 OK/MISSING이면 정상 확인했는데 근거가 없다(INSUFFICIENT)」로
+#: 읽는다 — robots.txt를 성공적으로 읽었다는 사실이 「이 회사는 인재상·제품·
+#: 전략 근거를 공개하지 않는다」는 사실 주장으로 둔갑한다. 그래서 광역
+#: fallback은 다음 둘 중 하나일 때만 REQUIRED와 같이 나간다:
+#:   (a) state가 FAILED 또는 TRUNCATED — 「이것 때문에 확인 못 했다」는
+#:       정확한 뜻이라 소비측에서 UNKNOWN으로 안전하게 이어진다.
+#:   (b) requirement가 OPTIONAL — 판정에 쓰이지 않으므로 무해하다.
+#: robots·sitemap·IR처럼 «성공/부재해도 특정 슬롯 근거를 스스로 좁히지 못하는»
+#: attempt는 ``_infra_attempt_requirement``로 OK/MISSING일 때 OPTIONAL로
+#: 낮춘다. 일반 페이지는 ``_visit_page``에서 URL로 유형을 못 알아냈을 때만
+#: (= build_fragments도 조각을 하나도 만들지 않을 URL) 같은 방식으로 낮춘다.
 _ALL_SLOT_IDS_FALLBACK: tuple[str, ...] = WIDE_REQUIRED_SLOT_IDS
+
+
+def _infra_attempt_requirement(*, is_high_confidence: bool, state: str) -> str:
+    """robots·sitemap·IR처럼 특정 slot을 스스로 좁히지 못하는 attempt의 requirement.
+
+    성공(OK)·부재(MISSING)는 「이 결과가 특정 slot 근거의 유무를 말해주지
+    않는다」는 뜻이라 광역 17-slot fallback과 REQUIRED를 같이 내보내면
+    소비 계약이 오판한다(정정 1). 이때는 무조건 OPTIONAL로 낮춘다.
+    실패(FAILED)·상한(TRUNCATED)만 「이것 때문에 확인 못 했다」는 정확한
+    뜻이라, 호스트가 고신뢰(REQUIRED 문서 경로)일 때 REQUIRED를 유지한다.
+    """
+    if state in (ATTEMPT_STATE_OK, ATTEMPT_STATE_MISSING):
+        return REQUIREMENT_OPTIONAL
+    return REQUIREMENT_REQUIRED if is_high_confidence else REQUIREMENT_OPTIONAL
 
 
 @dataclass
@@ -387,10 +416,22 @@ def _visit_page(
         else:
             reason_code = "duplicate_content_or_empty"
 
+    # 정정 1: URL로 페이지 유형을 못 알아낸(slot_ids가 원래 비어 있던) 페이지가
+    # 성공(OK)·부재(MISSING)로 확인되면, build_fragments도 같은 URL 판정
+    # 함수(slot_ids_for_url)를 쓰므로 이 문서는 조각을 하나도 만들지 않는다
+    # — 즉 이 attempt는 어떤 slot의 REQUIRED 근거 경로도 아니었다. 광역
+    # 17-slot fallback과 결합해 REQUIRED로 나가면 소비 계약이 「확인했지만
+    # 근거 없음(INSUFFICIENT)」으로 오판한다. document 자체의 requirement
+    # (등록 하위도메인 여부에 따른 REQUIRED/OPTIONAL)는 건드리지 않는다 —
+    # attempt 전용 판단이라 별도 변수로 둔다.
+    attempt_requirement = requirement
+    if not slot_ids and page_state in (ATTEMPT_STATE_OK, ATTEMPT_STATE_MISSING):
+        attempt_requirement = REQUIREMENT_OPTIONAL
+
     state.add_attempt(
         kind="page",
         source_kind=source_kind,
-        requirement=requirement,
+        requirement=attempt_requirement,
         state=page_state,
         slot_ids=slot_ids,
         reason_code=reason_code,
@@ -456,14 +497,19 @@ def _ensure_host_policy(
     policy = load_robots_policy(scheme=scheme, host=host, fetch=transport)
     elapsed_ms = int((state.clock() - started) * 1000)
     binding = state.bound_hosts.get(host)
-    requirement = (
-        REQUIREMENT_REQUIRED if binding is not None and binding.is_high_confidence else REQUIREMENT_OPTIONAL
+    robots_state = ATTEMPT_STATE_FAILED if policy.blocked else ATTEMPT_STATE_OK
+    # 정정 1: robots 조회 성공(OK)은 어떤 slot의 근거 유무도 말해주지 않는다 —
+    # 실패(FAILED)했을 때만 「그 호스트의 모든 slot을 못 봤다」는 REQUIRED+
+    # 광역이 정확하다.
+    requirement = _infra_attempt_requirement(
+        is_high_confidence=binding is not None and binding.is_high_confidence,
+        state=robots_state,
     )
     state.add_attempt(
         kind="robots",
         source_kind="robots_txt",
         requirement=requirement,
-        state=ATTEMPT_STATE_FAILED if policy.blocked else ATTEMPT_STATE_OK,
+        state=robots_state,
         slot_ids=(),
         reason_code=policy.reason_code,
         elapsed_ms=elapsed_ms,
@@ -506,8 +552,12 @@ def _discover_sitemap(
         outcome_state = ATTEMPT_STATE_FAILED
 
     binding = state.bound_hosts.get(host)
-    requirement = (
-        REQUIREMENT_REQUIRED if binding is not None and binding.is_high_confidence else REQUIREMENT_OPTIONAL
+    # 정정 1: sitemap 조회 성공(OK)·부재(MISSING)는 어떤 slot의 근거 유무도
+    # 말해주지 않는다 — 실패(FAILED)·상한(TRUNCATED)일 때만 REQUIRED+광역이
+    # 정확하다.
+    requirement = _infra_attempt_requirement(
+        is_high_confidence=binding is not None and binding.is_high_confidence,
+        state=outcome_state,
     )
     for candidate in urls:
         candidate_host = (urllib.parse.urlsplit(candidate).hostname or "").casefold()
@@ -600,11 +650,16 @@ def _run_ir_pdf_phase(
 
         state_map = {"ok": ATTEMPT_STATE_OK, "none": ATTEMPT_STATE_MISSING, "failed": ATTEMPT_STATE_FAILED}
         reason_map = {"ok": "ir_pdf_ok", "none": "ir_pdf_none", "failed": "ir_pdf_failed"}
+        ir_attempt_state = state_map.get(result.state, ATTEMPT_STATE_FAILED)
+        # 정정 1: IR PDF 조회 성공(OK)·부재(MISSING)는 특정 slot 근거의
+        # 유무를 attempt 단계에서 스스로 말해주지 않는다(그 조각화는
+        # build_fragments가 문서별로 나중에 한다) — 실패(FAILED)했을 때만
+        # REQUIRED+광역이 정확하다.
         state.add_attempt(
             kind="ir",
             source_kind=WIDE_SOURCE_KIND_IR_PDF,
-            requirement=REQUIREMENT_REQUIRED,
-            state=state_map.get(result.state, ATTEMPT_STATE_FAILED),
+            requirement=_infra_attempt_requirement(is_high_confidence=True, state=ir_attempt_state),
+            state=ir_attempt_state,
             slot_ids=(),
             reason_code=reason_map.get(result.state, "ir_pdf_failed"),
             elapsed_ms=elapsed_ms,
