@@ -119,7 +119,10 @@ def test_robots_조회_실패시_본문을_긁지_않는다():
 
     assert result.documents == ()
     robots_attempts = [a for a in result.attempts if a.source_kind == "robots_txt"]
-    assert len(robots_attempts) == 1
+    # APEX-WWW-OFFICIAL-ROOT-GAP 이후 primary(company.example)와 apex/www
+    # 짝(www.company.example)이 각각 robots를 따로 확인하므로 2건이다.
+    # attempt는 생성 순서를 그대로 보존하므로 [0]이 항상 primary다.
+    assert len(robots_attempts) == 2
     assert robots_attempts[0].state == "FAILED"
     assert robots_attempts[0].reason_code == "robots_unreachable"
     assert "https://company.example/" not in site.calls  # 본문은 시도조차 하지 않는다
@@ -153,7 +156,10 @@ def test_robots가_401이면_본문을_긁지_않는다():
 
     assert result.documents == ()
     robots_attempts = [a for a in result.attempts if a.source_kind == "robots_txt"]
-    assert len(robots_attempts) == 1
+    # apex/www 짝(www.company.example)도 별도로 robots를 확인하므로 2건이다
+    # (그 짝은 pages에 없어 접속 자체가 실패 — robots_unreachable). [0]은
+    # 생성 순서상 항상 primary(company.example)다.
+    assert len(robots_attempts) == 2
     assert robots_attempts[0].state == "FAILED"
     assert robots_attempts[0].reason_code == "robots_denied"
     assert "https://company.example/" not in site.calls
@@ -375,6 +381,91 @@ def test_sitemap의_다른_TLD_URL은_등록도메인_밖이라_따라가지_않
 
     assert not any("company.net" in call for call in site.calls)
     assert not any("company.net" in doc.canonical_url for doc in result.documents)
+
+
+# ── APEX-WWW-OFFICIAL-ROOT-GAP(통합 담당 지시, 2026-08-31) ────────
+
+
+def test_apex가_사실상_www로만_운영되어도_www가_직접_방문되어_문서를_만든다():
+    """DART가 apex(company.example)를 줬지만 실제 운영은 www.company.example
+    뿐이면(apex 쪽은 접속 자체가 실패), redirect를 따라가는 대신 www를
+    독립 후보로 직접 방문해 문서를 만들어야 한다 — 예전엔 apex 첫 페이지
+    자체가 막혀 수집이 0건이었다."""
+    pages = {
+        # apex(company.example) 쪽은 robots.txt조차 pages에 없어 접속 자체가 실패한다.
+        "https://www.company.example/robots.txt": _page(
+            ROBOTS_ALLOW_ALL, "https://www.company.example/robots.txt", "text/plain"
+        ),
+        "https://www.company.example/sitemap.xml": _missing("https://www.company.example/sitemap.xml"),
+        "https://www.company.example/": _page(_body("www 루트 페이지 본문"), "https://www.company.example/"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(site, root_homepage_url="company.example")
+
+    assert result.documents  # 실제로 문서가 만들어졌는지 확인(공허한 통과 방지)
+    www_doc = next(doc for doc in result.documents if doc.canonical_url == "https://www.company.example/")
+    assert www_doc.requirement == "REQUIRED"
+
+
+def test_www가_사실상_apex로만_운영되어도_apex가_직접_방문되어_문서를_만든다():
+    """반대 방향 — DART가 www.company.example을 줬지만 실제 운영은
+    apex(company.example)뿐이다."""
+    pages = {
+        "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
+        "https://company.example/sitemap.xml": _missing("https://company.example/sitemap.xml"),
+        "https://company.example/": _page(_body("apex 루트 페이지 본문"), "https://company.example/"),
+        # www 쪽은 robots.txt조차 pages에 없어 접속 자체가 실패한다.
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(site, root_homepage_url="www.company.example")
+
+    assert result.documents
+    apex_doc = next(doc for doc in result.documents if doc.canonical_url == "https://company.example/")
+    assert apex_doc.requirement == "REQUIRED"
+
+
+def test_apex_www_짝중_하나만_robots가_거부해도_다른_하나는_독립적으로_수집된다():
+    """apex는 정상, www 짝은 robots가 거부(403) — www만 차단되고 apex는
+    영향받지 않아야 한다(하나가 막혀도 다른 하나는 독립적으로 진행된다)."""
+    pages = {
+        "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
+        "https://company.example/sitemap.xml": _missing("https://company.example/sitemap.xml"),
+        "https://company.example/": _page(_body("apex 루트 페이지 본문"), "https://company.example/"),
+        "https://www.company.example/robots.txt": WideRawResponse(
+            status=403, text="", effective_url="https://www.company.example/robots.txt", content_type=""
+        ),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(site)
+
+    assert any(doc.canonical_url == "https://company.example/" for doc in result.documents)
+    assert not any("www.company.example" in doc.canonical_url for doc in result.documents)
+    assert "https://www.company.example/" not in site.calls
+
+
+def test_apex에서_다른_등록도메인으로의_redirect는_apex_www_짝이_있어도_차단된다():
+    """apex/www 짝 결속이 함께 있어도, 페이지 안에서 아예 다른 등록
+    도메인으로 redirect되면 여전히 차단돼야 한다 — 앞서 고친 eTLD+1
+    결함 수정이 이 기능으로 되돌아가면 안 된다(팀 리드가 명시적으로
+    경계한 사항)."""
+    pages = {
+        "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
+        "https://company.example/sitemap.xml": _missing("https://company.example/sitemap.xml"),
+        "https://company.example/": _page(
+            _body("루트 페이지 본문") + '<a href="/redir">이동</a>', "https://company.example/"
+        ),
+        "https://company.example/redir": _page(_body("가짜 본문"), "https://evil.com/"),
+        "https://www.company.example/robots.txt": _missing("https://www.company.example/robots.txt"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(site)
+
+    assert not any("evil.com" in doc.canonical_url for doc in result.documents)
+    assert "https://evil.com/" not in site.calls
 
 
 # ── sitemap ───────────────────────────────────────────────
@@ -1014,8 +1105,12 @@ def test_ir_pdf는_3건_상한을_넘지_않는다(monkeypatch):
 
 
 def test_ir_pdf_none과_failed는_MISSING과_FAILED로_분리된다(monkeypatch):
+    """apex/www 짝(APEX-WWW-OFFICIAL-ROOT-GAP) 덕분에 IR 후보 호스트가
+    company.example·www.company.example 둘이 된다 — 정확히 일치하는
+    호스트만 «none」, 나머지는 「failed」로 갈라 두 상태가 실제로 각각
+    다른 attempt에 남는지 확인한다."""
     def fake_collect_ir(homepage_url, **_kwargs):
-        if "company.example" in homepage_url:
+        if homepage_url == "https://company.example/":
             return OfficialIrCollectResult(state="none", fragments=[], downloaded_pdf_bytes=0)
         return OfficialIrCollectResult(state="failed", fragments=[], downloaded_pdf_bytes=0)
 
@@ -1025,14 +1120,22 @@ def test_ir_pdf_none과_failed는_MISSING과_FAILED로_분리된다(monkeypatch)
         "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
         "https://company.example/sitemap.xml": _missing("https://company.example/sitemap.xml"),
         "https://company.example/": _page(_body("루트 페이지 본문"), "https://company.example/"),
+        "https://www.company.example/robots.txt": _page(
+            ROBOTS_ALLOW_ALL, "https://www.company.example/robots.txt", "text/plain"
+        ),
+        "https://www.company.example/sitemap.xml": _missing("https://www.company.example/sitemap.xml"),
+        "https://www.company.example/": _missing("https://www.company.example/"),
     }
     site = _FakeWideSite(pages)
 
     result = _collect(site)
 
     ir_attempts = [a for a in result.attempts if a.source_kind == "official_ir_pdf"]
-    assert len(ir_attempts) == 1
+    # candidate_hosts는 root(primary)를 항상 먼저 두고 나머지는 알파벳순으로
+    # 정렬한다(_run_ir_pdf_phase) — company.example이 [0], www...가 [1]이다.
+    assert len(ir_attempts) == 2
     assert ir_attempts[0].state == "MISSING"
+    assert ir_attempts[1].state == "FAILED"
 
 
 # ── company_id 전달 ──────────────────────────────────────

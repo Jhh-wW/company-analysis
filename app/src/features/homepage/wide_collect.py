@@ -53,6 +53,7 @@ from src.features.homepage.wide_domain import (
     bind_linked_host,
     bind_registered_subdomain,
     bind_root_host,
+    bind_www_apex_alternate,
     canonicalize_url,
     is_registered_subdomain,
     slot_ids_for_url,
@@ -276,6 +277,49 @@ def collect_official_web_documents(
 # ══════════════════════════════════════════════════════════
 
 
+def _seed_host_root(
+    state: _CollectionState,
+    *,
+    scheme: str,
+    host: str,
+    binding: BoundHost,
+    transport: RawWideTransport,
+    queue: list[_QueueItem],
+    seen_canonical: set[str],
+    root_host: str,
+) -> None:
+    """호스트 하나를 결속하고, 그 호스트 전용 robots·sitemap을 확인한 뒤
+    루트 URL을 초기 큐에 심는다.
+
+    robots가 이 호스트를 막으면 이 호스트의 루트 URL은 큐에 들어가지
+    않지만(``policy.blocked`` — attempt 자체는 ``_ensure_host_policy``가
+    이미 남겼다), 그렇다고 전체 크롤을 중단하지 않는다 — 호출자가 다른
+    호스트(예: apex/www 짝)를 이어서 독립적으로 시도할 수 있다.
+    """
+    state.bound_hosts[host] = binding
+    policy = _ensure_host_policy(state, scheme=scheme, host=host, transport=transport)
+    if policy.blocked:
+        return
+
+    _discover_sitemap(
+        state,
+        scheme=scheme,
+        host=host,
+        transport=transport,
+        policy=policy,
+        queue=queue,
+        seen_canonical=seen_canonical,
+        root_host=root_host,
+    )
+
+    root_url = f"{scheme}://{host}/"
+    canonical = canonicalize_url(root_url)
+    if canonical in seen_canonical:
+        return
+    seen_canonical.add(canonical)
+    queue.append(_QueueItem(url=root_url, source_page_url=root_url))
+
+
 def _run_web_crawl(
     state: _CollectionState,
     *,
@@ -284,28 +328,40 @@ def _run_web_crawl(
     transport: RawWideTransport,
     deadline: object,
 ) -> None:
-    state.bound_hosts[root_host] = bind_root_host(root_host)
-    policy = _ensure_host_policy(state, scheme=root_scheme, host=root_host, transport=transport)
-    if policy.blocked:
-        return
-
     queue: list[_QueueItem] = []
     seen_canonical: set[str] = set()
 
-    _discover_sitemap(
+    # APEX-WWW-OFFICIAL-ROOT-GAP(통합 담당 지시, 2026-08-31): DART가 준 호스트
+    # («primary»)와 그 apex/www 짝을 각각 독립된 후보로 미리 심는다 — redirect를
+    # 따라가는 방식이 아니라 «둘 다 직접 방문」하는 방식이라, 정확히 같은
+    # host만 허용하는 redirect fail-closed 정책(앞서 고친 eTLD+1 결함 수정과
+    # 같은 맥락, 여기서 완화하지 않는다)과 부딪히지 않는다. primary가 apex→www
+    # (또는 반대) redirect 하나 때문에 robots·본문을 전혀 못 읽어도, 짝 호스트가
+    # 각자 robots부터 따로 확인하며 독립적으로 시도되므로 수집이 0건이 되지
+    # 않는다.
+    _seed_host_root(
         state,
         scheme=root_scheme,
         host=root_host,
+        binding=bind_root_host(root_host),
         transport=transport,
-        policy=policy,
         queue=queue,
         seen_canonical=seen_canonical,
         root_host=root_host,
     )
 
-    root_url = f"{root_scheme}://{root_host}/"
-    seen_canonical.add(canonicalize_url(root_url))
-    queue.append(_QueueItem(url=root_url, source_page_url=root_url))
+    alternate_binding = bind_www_apex_alternate(root_host)
+    if alternate_binding is not None:
+        _seed_host_root(
+            state,
+            scheme=root_scheme,
+            host=alternate_binding.host,
+            binding=alternate_binding,
+            transport=transport,
+            queue=queue,
+            seen_canonical=seen_canonical,
+            root_host=root_host,
+        )
 
     while queue:
         try:

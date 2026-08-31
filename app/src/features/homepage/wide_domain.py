@@ -130,6 +130,61 @@ def bind_registered_subdomain(root_host: str, candidate_host: str) -> BoundHost 
     )
 
 
+def www_apex_alternate(host: str) -> str | None:
+    """host의 apex/www 짝 하나를 계산한다 — ``www.`` 접두사 유무만 다룬다.
+
+    ``www.company.com`` ↔ ``company.com`` 같은 정확히 한 짝만 다룬다.
+    등록 도메인(eTLD+1) 자체를 바꾸지 않는 변형이라 서로 같은 회사를
+    가리킬 가능성이 매우 높다 — 그 밖의 하위 도메인 변형(예:
+    ``recruit.company.com``)은 여기서 다루지 않는다(공식 페이지에서
+    링크로 발견되는 등 다른 경로로만 결속한다, ``bind_linked_host``).
+
+    Args:
+        host: 포트·스킴이 없는 순수 호스트 이름.
+
+    Returns:
+        계산된 대안 호스트(소문자). ``host``가 빈 문자열이면 ``None``.
+    """
+    normalized = (host or "").lower().rstrip(".")
+    if not normalized:
+        return None
+    if normalized.startswith("www."):
+        return normalized[len("www.") :]
+    return f"www.{normalized}"
+
+
+def bind_www_apex_alternate(root_host: str) -> BoundHost | None:
+    """root_host의 apex/www 짝을 고신뢰(REQUIRED) 후보로 결속한다.
+
+    ★ APEX-WWW-OFFICIAL-ROOT-GAP(통합 담당 지시, 2026-08-31): DART가 준
+      호스트 하나(예: ``company.com``)가 실제로는 다른 짝
+      (``www.company.com``)으로 운영되는 경우가 흔하다. redirect
+      판정은 정확히 같은 host만 허용하므로(SSRF 방어이자 eTLD+1
+      결함 수정과 같은 맥락 — 여기서 완화하지 않는다), root 페이지
+      자체가 apex↔www redirect라면 그 redirect 자체가 막혀 수집이
+      0건이 될 수 있었다. 그래서 redirect를 따라가는 대신 **apex·www
+      짝을 각각 독립된 후보로 미리 결속**해, 호출자가 두 호스트를
+      각자 robots부터 따로 확인하며 직접 방문하게 한다.
+    ★ 등록 도메인(eTLD+1)이 실제로 같은지 ``is_registered_subdomain``으로
+      다시 확인한다 — root_host의 접미사가 공개 접미사 목록 밖(fail-closed)
+      이면 ``registrable_core_name``이 ``""``을 돌려주므로 여기서도
+      자동으로 판정 불가(``None``)가 된다. 등록 도메인 전체를 폭넓게
+      허용하는 방향이 아니라, www. 접두사 유무라는 좁은 변형 하나만
+      다룬다는 뜻을 이 재확인으로 코드에도 남긴다.
+
+    Returns:
+        결속 정보, 또는 판정 불가면 ``None``.
+    """
+    alternate = www_apex_alternate(root_host)
+    if alternate is None or not is_registered_subdomain(root_host, alternate):
+        return None
+    return BoundHost(
+        host=alternate.casefold(),
+        identity_binding=f"DART root({root_host})의 apex/www 짝: {alternate}",
+        is_high_confidence=True,
+    )
+
+
 def bind_linked_host(
     *, source_page_url: str, discovered_url: str, candidate_host: str
 ) -> BoundHost | None:

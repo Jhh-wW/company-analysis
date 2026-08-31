@@ -5,11 +5,13 @@ from __future__ import annotations
 from src.features.homepage.wide_domain import (
     bind_linked_host,
     bind_registered_subdomain,
+    bind_www_apex_alternate,
     canonicalize_url,
     is_excluded_linked_host,
     is_registered_subdomain,
     registrable_core_name,
     slot_ids_for_url,
+    www_apex_alternate,
 )
 from src.features.homepage.wide_extract import (
     extract_inline_spa_ranges,
@@ -134,6 +136,41 @@ def test_등록_하위도메인_결속은_결속근거를_남긴다():
 
 def test_다른_등록도메인은_결속되지_않는다():
     assert bind_registered_subdomain("company.com", "otherbrand.com") is None
+
+
+# ── APEX-WWW-OFFICIAL-ROOT-GAP(통합 담당 지시, 2026-08-31) ────────
+
+
+def test_www_apex_alternate은_www_접두사를_붙이거나_뗀다():
+    assert www_apex_alternate("company.example") == "www.company.example"
+    assert www_apex_alternate("www.company.example") == "company.example"
+
+
+def test_www_apex_alternate은_등록도메인을_넘지_않는다():
+    """다른 등록 도메인으로 새지 않는다 — «www. 접두사 유무」라는 좁은
+    변형만 다룬다. 등록 도메인 전체를 폭넓게 허용하는 방향이 아니다."""
+    for host in ("company.example", "www.company.example"):
+        alternate = www_apex_alternate(host)
+        assert registrable_core_name(alternate) == registrable_core_name(host)
+
+
+def test_www_apex_alternate은_빈_문자열이면_None():
+    assert www_apex_alternate("") is None
+
+
+def test_bind_www_apex_alternate은_고신뢰_후보를_결속한다():
+    bound = bind_www_apex_alternate("company.example")
+    assert bound is not None
+    assert bound.host == "www.company.example"
+    assert bound.is_high_confidence is True
+    assert "company.example" in bound.identity_binding
+
+
+def test_bind_www_apex_alternate은_공개접미사_밖_TLD면_None():
+    """fail-closed — root_host 자체의 등록 도메인을 판정할 수 없으면
+    apex/www 짝도 만들지 않는다(등록 도메인 전체를 폭넓게 허용하지 않는다는
+    원칙과 같은 맥락)."""
+    assert bind_www_apex_alternate("company.zzzunknowntld") is None
 
 
 def test_소셜호스트는_링크_후보_결속에서_제외된다():
