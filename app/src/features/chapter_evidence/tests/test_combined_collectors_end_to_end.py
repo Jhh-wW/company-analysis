@@ -201,11 +201,7 @@ def _web_mapping(*, ir_html_fetch=_ir_html_without_links) -> dict[str, list[dict
         ir_pdf_fetch=_ir_pdf_unused,
     )
     fragments = build_fragments_for_collection(result)
-    return to_evidence_mappings(
-        documents=result.documents,
-        fragments=fragments,
-        attempts=result.attempts,
-    )
+    return to_evidence_mappings(result=result, fragments=fragments)
 
 
 def _produce(*, ir_html_fetch=_ir_html_without_links, **dart_kwargs):
