@@ -11,6 +11,9 @@ from enum import Enum
 from typing import Any
 
 from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
+from src.shared.report_quality.integrity import (
+    assert_complete_generation_assessment,
+)
 from src.shared.report_quality.models import (
     GenerationAssessment,
     QualityGrade,
@@ -148,6 +151,12 @@ class GenerationValidationReceipt:
         )
         if self.assessment.publication_grade is not expected_publication_grade:
             raise ValueError("공개 등급이 실제 품질·안전 판정과 다릅니다")
+        if (
+            self.assessment.quality.grade is QualityGrade.COMPLETE
+            and self.assessment.publication_grade is QualityGrade.COMPLETE
+            and self.assessment.safety.decision is ReleaseDecision.RELEASE_ALLOWED
+        ):
+            assert_complete_generation_assessment(self.assessment)
         if bool(self.assessment.quality.shortfall_reasons) != bool(
             self.assessment.quality.problem_codes
         ):

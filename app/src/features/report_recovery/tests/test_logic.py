@@ -36,9 +36,10 @@ from src.shared.report_quality.models import (
     ReleaseDecision,
     SafetyAssessment,
 )
+from src.shared.report_quality.constants import STRICT_QUALITY_CONTRACT_VERSION
 
 
-_CONTRACT_VERSION = "quality-v-test"
+_CONTRACT_VERSION = STRICT_QUALITY_CONTRACT_VERSION
 
 
 def _sha256(label: str) -> str:
@@ -92,7 +93,7 @@ def _assessment(
         substantive_claims=35 if problem_codes else 45,
         verified_claims=35 if problem_codes else 45,
         verified_ratio=Decimal("1"),
-        document_sources=3,
+        document_sources=8,
         notice_only_sections=notice_only,
         one_claim_sections=one_claim,
         section_claim_counts=tuple(
@@ -113,7 +114,10 @@ def _assessment(
             if safety_blocked
             else ReleaseDecision.RELEASE_ALLOWED
         ),
-        verified_fact_ids=("fact-1",),
+        verified_fact_ids=tuple(
+            f"fact-{index}"
+            for index in range(1, quality.verified_claims + 1)
+        ),
         unverified_fact_ids=(),
         rejected_fact_ids=(),
         problems=("수치 근거 불일치",) if safety_blocked else (),
