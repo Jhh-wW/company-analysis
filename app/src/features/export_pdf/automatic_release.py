@@ -161,8 +161,9 @@ def run_automatic_checks(
             # 보고서만..." 사유가 아니라 "canonical 보고서만..." 사유로 막힘).
             # 그래서 v2는 Notion 렌더 성공을 채널 동등성 증거로 쓰지 않고,
             # PDF 후보와 실제 보고서 내용(인용 장부)이 같은 재료로 만들어졌는지만
-            # 확인한다 — web·PDF는 같은 report 객체를 쓰고 그 결속은 ④(해시
-            # 재검사)가 report_sha256으로 이미 강제한다.
+            # 확인한다. 같은 report 객체라는 사실만으로 표시 동등성이 생기지는
+            # 않는다. 웹·PDF 각각이 산문+표 공개 projection만 쓰는 행동 시험과,
+            # 여기의 내용 manifest·④ 해시 재검사가 함께 그 경계를 지킨다.
             try:
                 published_fact_ids = report_fact_id_ledger(published)
                 if not published_fact_ids:

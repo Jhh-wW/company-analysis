@@ -1342,7 +1342,15 @@ def _add_section(
         story.extend(heading_flowables)
         return
 
-    detail_blocks = section_content_blocks(report, section)
+    # v2의 FactRecord와 fact_ids는 검증·감사용 장부다. 웹 v2는 공개 산문과
+    # 표·도식만 표시하는데 PDF가 이 장부를 v1 카드로 다시 투영하면, 같은
+    # 보고서가 채널마다 다른 글자를 보여 주고 public digest에서 제외한 내부
+    # 값이 PDF에 새어 나온다. v2는 웹과 같은 공개 projection만 소비한다.
+    detail_blocks = (
+        ()
+        if report.schema_version == ENGINE_V2_SCHEMA_VERSION
+        else section_content_blocks(report, section)
+    )
     if detail_blocks:
         first_content: list[Flowable] = []
         _add_section_content_block(

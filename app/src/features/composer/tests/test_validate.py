@@ -180,6 +180,53 @@ def test_본문_한_줄이_내부_키_전체일치면_잡는다():
     assert any("revenue_model" in p for p in problems)
 
 
+def test_웹PDF에_보이는_문단의_내부_키도_잡는다():
+    rendered = _rendered()
+    broken_sections = list(rendered.sections)
+    section = broken_sections[0]
+    broken_sections[0] = replace(
+        section,
+        prose_paragraphs=["revenue_model", *section.prose_paragraphs[1:]],
+    )
+    broken = replace(rendered, sections=broken_sections)
+
+    problems = v2_validation_problems(broken)
+
+    assert any("표시 문단" in p and "revenue_model" in p for p in problems)
+    assert any("검증 문장과 화면 문단" in p for p in problems)
+
+
+def test_검증문장과_화면문단의_글자가_다르면_출고를_막는다():
+    rendered = _rendered()
+    broken_sections = list(rendered.sections)
+    section = broken_sections[0]
+    paragraphs = list(section.prose_paragraphs)
+    paragraphs[0] = "검사를 받지 않은 다른 문장이다."
+    broken_sections[0] = replace(section, prose_paragraphs=paragraphs)
+    broken = replace(rendered, sections=broken_sections)
+
+    with pytest.raises(V2ValidationError) as caught:
+        validate_v2(broken)
+
+    assert any(
+        "검증 문장과 화면 문단" in problem for problem in caught.value.problems
+    )
+
+
+def test_옛저장본의_빈_화면문단은_검증문장_표시로_호환한다():
+    rendered = _rendered()
+    sections = [
+        replace(section, prose_paragraphs=[])
+        for section in rendered.sections
+    ]
+
+    assert not [
+        problem
+        for problem in v2_validation_problems(replace(rendered, sections=sections))
+        if "검증 문장과 화면 문단" in problem
+    ]
+
+
 def test_부록_라벨의_내부_키도_잡는다():
     rendered = _rendered()
     broken_citations = list(rendered.citations)
