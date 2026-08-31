@@ -71,6 +71,7 @@ from src.shared.report_quality.constants import MIN_CLAIMS_PER_COVERED_SECTION
 from src.shared.report_quality.numeric_validation import (
     validate_versioned_numeric_record,
 )
+from src.shared.report_evidence.constants import ReleaseMode
 
 # ── 리허설 고정값 ─────────────────────────────────────────
 COMPANY_NAME = "제이와이피엔터테인먼트"
@@ -339,6 +340,10 @@ def engine(monkeypatch: pytest.MonkeyPatch) -> _JypFakeEngine:
         lambda: ((CORP_ID, COMPANY_NAME, "", "000001", "20260819"),),
     )
     monkeypatch.setenv(real.ENGINE_V2_ENV_NAME, real.ENGINE_V2_ENV_ON)
+    monkeypatch.setenv(
+        real.REPORT_RELEASE_MODE_ENV_NAME,
+        ReleaseMode.SHADOW.value,
+    )
     return fake
 
 

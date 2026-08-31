@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
+import re
 from typing import Any
 
 import pytest
@@ -23,6 +25,7 @@ from src.core.provider_gateway import attempt_context
 from src.core.provider_gateway.attempt_context import ProviderAttemptCallbacks
 from src.features.budget import provider_budget
 from src.features.composer.port import AskFatalError
+from src.features.composer.constants import GRADE_CONFIRMED, SECTION_IDS
 from src.features.composer.validate import V2ValidationError
 from src.features.pipeline import real
 from src.features.pipeline.port import (
@@ -40,7 +43,13 @@ from src.features.pipeline.tests.test_real_cache import (
     FakeEngine,
 )
 from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
+from src.shared.engine_build_identity import (
+    ENGINE_BUILD_ID_CONTRACT_VERSION,
+    EngineBuildIdentity,
+)
 from src.shared.final_gate_diagnostics import FINAL_GATE_REASON_PUBLISH_BLOCKED
+from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
+from src.shared.report_evidence.constants import ReleaseMode
 
 _V2_SENTINEL_MESSAGE = "v2-분기-표식"
 _DATE = dt.date(2026, 8, 24)
@@ -63,8 +72,9 @@ def engine(monkeypatch: pytest.MonkeyPatch) -> FakeEngine:
 
 
 @pytest.fixture(autouse=True)
-def _paid_provider_budget_context():
+def _paid_provider_budget_context(monkeypatch: pytest.MonkeyPatch):
     """직접 RealPipeline 시험도 웹 worker와 같은 유료 문맥에서 실행한다."""
+    monkeypatch.setenv(real.REPORT_RELEASE_MODE_ENV_NAME, ReleaseMode.SHADOW.value)
     callbacks = ProviderAttemptCallbacks(
         lambda _provider, _operation, _reserved: object(),
         lambda _token: None,
@@ -456,6 +466,275 @@ def test_v2_출고검증_실패는_GATE_STOPPED로_끝난다(
     assert "엔진 v2" in result.message
     assert steps[-1]["step"] == "v2_출고검증_차단"
     assert steps[-1]["사유"] == ["핵심 요약이 부족합니다"]
+
+
+def test_운영_FULL은_typed_packet과_실제_9_writer_1_bundled_reviewer를_운반한다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """real 배선 자체를 fake AI로 끝까지 합성해 호출 장부와 transport를 잰다."""
+
+    marks = "가나다라마바사아자"
+    endings = ("첫째", "둘째", "셋째", "넷째", "다섯째")
+    frags = {
+        index: {
+            "종류": "공식 IR",
+            "원문": " ".join(
+                f"{mark} 회사 사업 고객 제품 전략 운영 문화 경쟁 과제 대응 "
+                f"협력 실적 {ending} 공식 자료에서 확인했다."
+                for ending in endings
+            ),
+            "출처": f"https://full.example/document/{index}",
+            "문서명": f"FULL 공식 자료 {index}",
+            "문서일": "2026-08-24",
+        }
+        for index, mark in enumerate(marks, start=1)
+    }
+
+    class Writer:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        def __call__(self, prompt: str) -> str:
+            self.prompts.append(prompt)
+            section_index = len(self.prompts) - 1
+            section_id = SECTION_IDS[section_index]
+            mark = marks[section_index]
+            slots = CLAIM_SLOTS_BY_SECTION[section_id]
+            return json.dumps(
+                {
+                    "문장들": [
+                        {
+                            "글": (
+                                f"{mark} 회사 사업 고객 제품 전략 운영 문화 경쟁 "
+                                f"과제 대응 협력 실적 {ending} 공식 자료에서 확인했다."
+                            ),
+                            "인용": [str(section_index + 1)],
+                            "등급": GRADE_CONFIRMED,
+                            "주장슬롯": slots[index % len(slots)],
+                        }
+                        for index, ending in enumerate(endings)
+                    ]
+                },
+                ensure_ascii=False,
+            )
+
+    class Reviewer:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        def __call__(self, prompt: str) -> str:
+            self.prompts.append(prompt)
+            matches = re.findall(
+                r"\[(\d+)\] \(장: ([^,]+), 종류: ([^,]+), 인용: ([^)]+)\)",
+                prompt,
+            )
+            assert matches
+            return json.dumps(
+                {
+                    "판정": [
+                        {
+                            "번호": int(number),
+                            "장": section_id,
+                            "근거": re.findall(r"조각 (\d+)", citations),
+                            "결과": "참",
+                        }
+                        for number, section_id, _kind, citations in matches
+                    ]
+                },
+                ensure_ascii=False,
+            )
+
+    writer = Writer()
+    reviewer = Reviewer()
+    diagram_calls: list[str] = []
+
+    def fake_ask_factory(_engine, _client, *, stage: str, max_tokens: int):
+        assert max_tokens > 0
+        if stage == "v2_compose":
+            return writer
+        if stage == "v2_review":
+            return reviewer
+
+        def diagram(_prompt: str) -> str:
+            diagram_calls.append(stage)
+            raise AssertionError("FULL은 별도 도식 AI를 부르면 안 됩니다")
+
+        return diagram
+
+    monkeypatch.setenv(real.REPORT_RELEASE_MODE_ENV_NAME, ReleaseMode.FULL.value)
+    monkeypatch.setattr(real, "_v2_ask_via_provider", fake_ask_factory)
+    monkeypatch.setattr(real, "_v2_cache_save", lambda **_kwargs: None)
+    metered = real._MeteredEngine(engine)
+    result = real._run_v2_composer(
+        engine=metered,
+        client=object(),
+        company_name="가나다전자",
+        corp_type="상장사",
+        frags=frags,
+        financials=None,
+        filing=None,
+        revenue_tables=[],
+        sources=[],
+        business_date=_DATE,
+        model="가짜모델",
+        steps=[],
+        corp_id="00123456",
+        current_fiscal_year=2025,
+        source_identity_digest="a" * 64,
+        build_identity=_strict_build_identity(),
+    )
+
+
+def _strict_build_identity() -> EngineBuildIdentity:
+    revision = "1" * 40
+    return EngineBuildIdentity(
+        revision,
+        f"{ENGINE_BUILD_ID_CONTRACT_VERSION}:{revision}",
+    )
+
+    assert result.outcome is Outcome.REPORT
+    assert result.report is not None
+    assert result.report.release_mode == ReleaseMode.FULL.value
+    assert result.generation_evidence is result.report.generation_evidence
+    assert result.generation_metrics is result.report.generation_metrics
+    assert result.quality_observation is result.report.quality_observation
+    assert result.generation_evidence is not None
+    assert result.generation_evidence.writer_calls == 9
+    assert result.generation_evidence.reviewer_calls == 1
+    assert (
+        result.generation_evidence.build_identity_sha256
+        == _strict_build_identity().epoch_digest
+    )
+    assert [record.section_id for record in result.generation_evidence.call_ledger.records[:9]] == list(SECTION_IDS)
+    assert result.generation_evidence.call_ledger.records[-1].section_id == "bundled"
+    assert len(writer.prompts) == 9
+    assert len(reviewer.prompts) == 1
+    assert diagram_calls == []
+    assert (
+        len(writer.prompts) + len(reviewer.prompts) + len(diagram_calls)
+        == len(result.generation_evidence.call_ledger.records)
+        == result.generation_evidence.writer_calls
+        + result.generation_evidence.reviewer_calls
+        == 10
+    )
+
+    # 같은 Report가 storage/cache 경계에서 돌아오면 네 지표·producer·관측을
+    # 원 실행값 그대로 RunResult에 다시 싣는다. 0으로 꾸미거나 문자열 등급에서
+    # 평가를 재구성하지 않는다.
+    monkeypatch.setattr(real.generation_coordination, "coordinate", lambda **_kwargs: None)
+    monkeypatch.setattr(real.generation_coordination, "is_active", lambda: False)
+    monkeypatch.setenv(real.ENGINE_V2_ENV_NAME, real.ENGINE_V2_ENV_ON)
+    monkeypatch.setattr(real, "_v2_cache_lookup", lambda **_kwargs: result.report)
+    monkeypatch.setattr(
+        real,
+        "_run_v2_composer",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("v2 cache hit 뒤에 생성기를 다시 부르면 안 됩니다")
+        ),
+    )
+    cached = _run()
+    assert cached.cache_hit
+    assert cached.generation_evidence is result.generation_evidence
+    assert cached.generation_metrics is result.generation_metrics
+    assert cached.quality_observation is result.quality_observation
+    assert cached.fragments_collected == result.generation_metrics.fragments_collected
+    assert cached.fragments_cited == result.generation_metrics.fragments_cited
+    assert cached.sentences_made == result.generation_metrics.sentences_made
+    assert cached.sentences_passed == result.generation_metrics.sentences_passed
+
+
+def test_운영_FULL_packet_입력이_불완전하면_provider와_composer_모두_0회다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeEngine()
+    engine = real._MeteredEngine(fake)
+    client = real._metered_client(engine, fake._client())
+    _engine, _client, frags, financials, filing = _branch_ingredients(fake)
+    monkeypatch.setenv(real.REPORT_RELEASE_MODE_ENV_NAME, ReleaseMode.FULL.value)
+    monkeypatch.setattr(
+        real,
+        "_v2_ask_via_provider",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("FULL 입력 차단 전에 ask closure를 만들면 안 됩니다")
+        ),
+    )
+    monkeypatch.setattr(
+        composer_pipeline,
+        "run_v2",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("불완전 packet으로 composer를 부르면 안 됩니다")
+        ),
+    )
+
+    result = real._run_v2_composer(
+        engine=engine,
+        client=client,
+        company_name="가나다전자",
+        corp_type="상장사",
+        frags=frags,
+        financials=financials,
+        filing=filing,
+        revenue_tables=[],
+        sources=[],
+        business_date=_DATE,
+        model="가짜모델",
+        steps=[],
+        corp_id="",  # gen8 누락 — packet 생성 경계에서 즉시 차단
+        current_fiscal_year=2025,
+        source_identity_digest="a" * 64,
+        build_identity=_strict_build_identity(),
+    )
+
+    assert result.outcome is Outcome.GATE_STOPPED
+    assert fake.client.messages.calls == 0
+    assert result.charged is False
+
+
+def test_운영_v2_release_mode_누락은_provider와_composer_전에_차단한다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeEngine()
+    engine = real._MeteredEngine(fake)
+    client = real._metered_client(engine, fake._client())
+    _engine, _client, frags, financials, filing = _branch_ingredients(fake)
+    monkeypatch.delenv(real.REPORT_RELEASE_MODE_ENV_NAME, raising=False)
+    monkeypatch.setattr(
+        real,
+        "_v2_ask_via_provider",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("release mode 차단 전에 ask closure를 만들면 안 됩니다")
+        ),
+    )
+    monkeypatch.setattr(
+        composer_pipeline,
+        "run_v2",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("release mode 누락으로 composer를 부르면 안 됩니다")
+        ),
+    )
+
+    result = real._run_v2_composer(
+        engine=engine,
+        client=client,
+        company_name="가나다전자",
+        corp_type="상장사",
+        frags=frags,
+        financials=financials,
+        filing=filing,
+        revenue_tables=[],
+        sources=[],
+        business_date=_DATE,
+        model="가짜모델",
+        steps=[],
+        corp_id=CORP_ID,
+        current_fiscal_year=2025,
+        source_identity_digest="a" * 64,
+    )
+
+    assert result.outcome is Outcome.GATE_STOPPED
+    assert fake.client.messages.calls == 0
+    assert result.charged is False
 
 
 # ══════════════════════════════════════════════════════════

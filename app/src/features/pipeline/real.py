@@ -106,9 +106,15 @@ from src.features.spanselect.constants import (
     USAGE_MODEL_KEY,
 )
 from src.shared.official_ir import verified_official_ir_fragment_is_usable
-from src.shared import generation_coordination
+from src.shared import engine_build_identity, generation_coordination
 from src.shared.generation_cache_identity import GenerationCacheNamespace
 from src.shared.report_source_identity import ReportSourceIdentity
+from src.shared.report_generation.constants import ENGINE_V2_SCHEMA_VERSION
+from src.shared.report_evidence.constants import ReleaseMode
+from src.shared.report_evidence.release_mode import (
+    REPORT_RELEASE_MODE_ENV_NAME,
+    parse_release_mode,
+)
 from src.features.filingclean import extra as filing_extra
 from src.features.filingclean import logic as filing_clean
 from src.features.filingclean import relationships as filing_relationships
@@ -1980,6 +1986,22 @@ class RealPipeline:
                 raise generation_coordination.GenerationCoordinationError(
                     "재사용 보고서의 생성기 schema가 현재 요청과 다릅니다"
                 )
+            metrics = reused_report.generation_metrics
+            if expected_schema == ENGINE_V2_SCHEMA_VERSION and metrics is None:
+                raise generation_coordination.GenerationCoordinationError(
+                    "재사용 보고서에 생성 당시의 실제 지표가 없습니다"
+                )
+            if (
+                reused_report.release_mode
+                in {
+                    ReleaseMode.ENFORCE_NO_PARTIAL.value,
+                    ReleaseMode.FULL.value,
+                }
+                and reused_report.quality_observation is None
+            ):
+                raise generation_coordination.GenerationCoordinationError(
+                    "엄격 재사용 보고서에 생성 당시의 품질 관측이 없습니다"
+                )
             tell("output")
             return RunResult(
                 outcome=Outcome.REPORT,
@@ -1992,6 +2014,14 @@ class RealPipeline:
                 sources=list(reused_report.sources),
                 charged=False,
                 corp_type=reused_report.corp_type or judgment.corp_type,
+                fragments_collected=(
+                    metrics.fragments_collected if metrics is not None else 0
+                ),
+                fragments_cited=(metrics.fragments_cited if metrics is not None else 0),
+                sentences_made=(metrics.sentences_made if metrics is not None else 0),
+                sentences_passed=(
+                    metrics.sentences_passed if metrics is not None else 0
+                ),
                 cost_krw=_request_spent_krw(engine),
                 model=(
                     MODEL_LABEL_SEPARATOR.join(reused_generation.actual_models)
@@ -2005,6 +2035,9 @@ class RealPipeline:
                 generation_cache_eligible=(
                     reused_generation.generation_cache_eligible
                 ),
+                generation_evidence=reused_report.generation_evidence,
+                generation_metrics=metrics,
+                quality_observation=reused_report.quality_observation,
             )
         # ★ v1 캐시와 v2 캐시는 «열쇠가 다르다» — 서로의 보고서를 못 꺼낸다.
         #   v2를 켠 요청에 v1 보고서를 돌려주는 것은 조용한 거짓말이고,
@@ -2030,6 +2063,26 @@ class RealPipeline:
                 )
             )
         if cached is not None:
+            if _engine_v2_enabled() and cached.generation_metrics is None:
+                logger.warning(
+                    "생성 지표가 없는 옛 v2 cache는 0으로 꾸미지 않고 다시 생성합니다"
+                )
+                cached = None
+            elif (
+                _engine_v2_enabled()
+                and cached.release_mode
+                in {
+                    ReleaseMode.ENFORCE_NO_PARTIAL.value,
+                    ReleaseMode.FULL.value,
+                }
+                and cached.quality_observation is None
+            ):
+                logger.warning(
+                    "품질 관측이 없는 엄격 v2 cache는 다시 생성합니다"
+                )
+                cached = None
+        if cached is not None:
+            metrics = cached.generation_metrics
             tell("output")   # 6~10을 통째로 건너뛴다
             return RunResult(
                 outcome=Outcome.REPORT,
@@ -2043,6 +2096,14 @@ class RealPipeline:
                 # 정본 00_공통/2_규칙/04_할당량.md — 캐시 반환은 0 차감·무제한.
                 charged=False,
                 corp_type=cached.corp_type or judgment.corp_type,
+                fragments_collected=(
+                    metrics.fragments_collected if metrics is not None else 0
+                ),
+                fragments_cited=(metrics.fragments_cited if metrics is not None else 0),
+                sentences_made=(metrics.sentences_made if metrics is not None else 0),
+                sentences_passed=(
+                    metrics.sentences_passed if metrics is not None else 0
+                ),
                 # 이번 요청에서 실제로 쓴 돈 — 신선도 확인을 위한 조회분만 남는다.
                 cost_krw=_request_spent_krw(engine),
                 model=model,
@@ -2052,6 +2113,9 @@ class RealPipeline:
                 dart_receipt_numbers=source_identity.dart_receipt_numbers,
                 financial_payload_digest=source_identity.financial_payload_digest,
                 generation_cache_eligible=True,
+                generation_evidence=cached.generation_evidence,
+                generation_metrics=metrics,
+                quality_observation=cached.quality_observation,
             )
 
         # ── 6 수집 (AI 0회) ──────────────────────────────
@@ -3135,6 +3199,108 @@ def _v2_ask_via_provider(
     return ask
 
 
+def _full_section_evidence_packets(
+    *,
+    corp_id: str,
+    source_identity_digest: str,
+    frags: dict[int, dict[str, str]],
+    filing_meta: Any,
+) -> Any:
+    """운영 수집물을 gen8·evidence generation에 묶인 typed 아홉 장으로 만든다.
+
+    URL 없는 전자공시 조각은 선택 공시의 실제 문서 신원이 있어야 한다. 임의
+    ``embedded:`` identity는 만들지 않으며 어느 장이 비면 생성기 호출 전에
+    packet 생성 자체가 실패한다.
+    """
+
+    from src.features.composer.constants import (  # noqa: PLC0415
+        DART_DOCUMENT_HOST,
+        DART_DOCUMENT_URL_TEMPLATE,
+        DART_FINANCIAL_API_DOCUMENT_ID,
+        DART_FINANCIAL_API_HOST,
+        DART_FINANCIAL_API_PREFIX,
+        DART_FINANCIAL_API_URL,
+        SECTION_IDS,
+    )
+    from src.features.composer.port import (  # noqa: PLC0415
+        CollectedFragment,
+        SectionEvidencePacket,
+        SectionEvidencePacketSet,
+    )
+    from src.shared.report_quality.source_identity import (  # noqa: PLC0415
+        document_identity_from_parts,
+    )
+
+    # 닫힌 의미 장을 운영 수집 종류에 연결한다. 같은 공식 조각이 서로 다른
+    # 질문의 근거가 될 수는 있지만, 각 writer는 아래 허용 packet 밖의 조각을
+    # 볼 수 없다.
+    allowed_tokens: dict[str, tuple[str, ...]] = {
+        "identity": ("사업", "홈페이지", "공식 IR"),
+        "business_model": ("사업", "재무", "공식 IR"),
+        "portfolio": ("사업", "공식 IR"),
+        "past_changes": ("재무", "MD&A", "사업", "공식 IR"),
+        "current_challenges": ("MD&A", "신규사업", "뉴스", "공식 IR"),
+        "future_strategy": ("신규사업", "MD&A", "공식 IR"),
+        "operations_partners": ("사업", "공식 IR"),
+        "culture": ("홈페이지", "공식 IR", "사업"),
+        "competitive_position": ("사업", "재무", "뉴스", "공식 IR"),
+    }
+    normalized: list[CollectedFragment] = []
+    for number in sorted(frags):
+        raw = frags[number]
+        text = str(raw.get("원문") or "").strip()
+        if not text:
+            continue
+        source_url = str(raw.get("출처") or "").strip()
+        if text.startswith(DART_FINANCIAL_API_PREFIX):
+            identity = document_identity_from_parts(
+                document_id=DART_FINANCIAL_API_DOCUMENT_ID,
+                host=DART_FINANCIAL_API_HOST,
+                url=DART_FINANCIAL_API_URL,
+            )
+        elif source_url:
+            identity = document_identity_from_parts(url=source_url)
+        elif filing_meta is not None and getattr(filing_meta, "document_id", ""):
+            document_id = str(filing_meta.document_id)
+            identity = document_identity_from_parts(
+                document_id=document_id,
+                host=DART_DOCUMENT_HOST,
+                url=DART_DOCUMENT_URL_TEMPLATE.format(document_id=document_id),
+            )
+        else:
+            identity = ""
+        normalized.append(
+            CollectedFragment(
+                fragment_id=str(number),
+                kind=str(raw.get("종류") or "").strip(),
+                text=text,
+                source_url=source_url,
+                document_title=str(raw.get("문서명") or "").strip(),
+                location=str(raw.get("원문위치") or "").strip(),
+                document_date=str(raw.get("문서일") or "").strip(),
+                document_identity=identity,
+            )
+        )
+    packets = tuple(
+        SectionEvidencePacket(
+            company_id=corp_id,
+            evidence_generation_sha256=source_identity_digest,
+            section_id=section_id,
+            fragments=tuple(
+                fragment
+                for fragment in normalized
+                if any(token in fragment.kind for token in allowed_tokens[section_id])
+            ),
+        )
+        for section_id in SECTION_IDS
+    )
+    return SectionEvidencePacketSet(
+        company_id=corp_id,
+        evidence_generation_sha256=source_identity_digest,
+        packets=packets,
+    )
+
+
 def _run_v2_composer(
     *,
     engine: _MeteredEngine,
@@ -3154,6 +3320,7 @@ def _run_v2_composer(
     corp_id: str = "",
     current_fiscal_year: Optional[int] = None,
     source_identity_digest: str = "",
+    build_identity: engine_build_identity.EngineBuildIdentity | None = None,
 ) -> RunResult:
     """엔진 v2: composer 경로로 보고서를 만든다.
 
@@ -3174,6 +3341,51 @@ def _run_v2_composer(
         performance_table_from_report_table,
     )
     from src.features.composer.validate import V2ValidationError  # noqa: PLC0415
+
+    filing_identity = filing_meta_from_raw(filing)
+    try:
+        raw_release_mode = os.environ.get(REPORT_RELEASE_MODE_ENV_NAME)
+        if raw_release_mode is None or raw_release_mode == "":
+            raise ValueError(
+                "엔진 v2 운영 경로는 보고서 release mode를 명시해야 합니다"
+            )
+        release_mode = parse_release_mode(raw_release_mode)
+        section_evidence_packets = None
+        build_identity_sha256 = ""
+        if release_mode is ReleaseMode.FULL:
+            frozen_build_identity = (
+                engine_build_identity.process_engine_build_identity()
+                if build_identity is None
+                else engine_build_identity.require_exact_engine_build_identity(
+                    build_identity
+                )
+            )
+            if not frozen_build_identity.cache_usable:
+                raise ValueError("FULL 생성 build identity를 확정할 수 없습니다")
+            build_identity_sha256 = frozen_build_identity.epoch_digest
+            section_evidence_packets = _full_section_evidence_packets(
+                corp_id=corp_id,
+                source_identity_digest=source_identity_digest,
+                frags=frags,
+                filing_meta=filing_identity,
+            )
+    except ValueError as exc:
+        logger.warning("엔진 v2 FULL 입력 계약 차단: %s", str(exc))
+        steps.append({"step": "v2_FULL_입력계약_차단", "사유": str(exc)})
+        return RunResult(
+            outcome=Outcome.GATE_STOPPED,
+            message=(
+                "엄격 생성에 필요한 회사별 근거 묶음을 완전히 확인하지 못해 "
+                "AI 작성 전에 멈췄습니다."
+                + _stop_reason_note(FINAL_GATE_REASON_PUBLISH_BLOCKED)
+            ),
+            sources=sources,
+            corp_type=corp_type,
+            fragments_collected=len(frags),
+            cost_krw=_request_spent_krw(engine),
+            model=model,
+            final_gate_reason=FINAL_GATE_REASON_PUBLISH_BLOCKED,
+        )
 
     # 실적표 — v1과 같은 생성부(재사용). 없으면 None으로 계속 간다 (차단 아님).
     financial_cite = _first_fragment_cite(
@@ -3220,9 +3432,68 @@ def _run_v2_composer(
             ),
             # 전자공시 조각에는 조각 자체에 주소가 없다. 주소를 가진 것은
             # «떠 온 문서»이므로 그 신원을 함께 넘겨 부록에 원문 주소를 싣는다.
-            filing_meta=filing_meta_from_raw(filing),
+            filing_meta=filing_identity,
             composition_tables=composition_tables_from_raw(revenue_tables),
+            release_mode=release_mode,
+            section_evidence_packets=section_evidence_packets,
+            company_id=(corp_id if release_mode is ReleaseMode.FULL else ""),
+            build_identity_sha256=build_identity_sha256,
         )
+        if release_mode is not ReleaseMode.SHADOW:
+            from src.shared.report_generation.models import (  # noqa: PLC0415
+                GenerationProducerEvidence,
+                GenerationRunMetrics,
+                assert_canonical_producer_evidence,
+            )
+            from src.shared.report_quality.generation import (  # noqa: PLC0415
+                GenerationQualityObservation,
+                assert_observation_matches_assessment,
+            )
+
+            if (
+                type(output.generation_metrics) is not GenerationRunMetrics
+                or output.report.generation_metrics is not output.generation_metrics
+                or type(output.quality_observation)
+                is not GenerationQualityObservation
+                or output.report.quality_observation
+                is not output.quality_observation
+                or output.report.release_mode != release_mode.value
+            ):
+                raise V2ValidationError(
+                    ("엄격 생성 결과의 실제 지표·품질 관측 transport가 누락됐습니다",)
+                )
+            if release_mode is ReleaseMode.FULL:
+                from src.shared.report_generation.canonical import (  # noqa: PLC0415
+                    assert_report_matches_generation_evidence,
+                    report_verification_payload,
+                )
+
+                evidence = output.generation_evidence
+                if (
+                    type(evidence) is not GenerationProducerEvidence
+                    or output.report.generation_evidence is not evidence
+                    or output.report.company_id != corp_id
+                ):
+                    raise V2ValidationError(
+                        ("FULL 생성 결과의 생산 증거 transport가 누락됐습니다",)
+                    )
+                try:
+                    assert_canonical_producer_evidence(evidence)
+                    assert_observation_matches_assessment(
+                        output.quality_observation,
+                        evidence.assessment,
+                    )
+                    assert_report_matches_generation_evidence(
+                        report_verification_payload(output.report),
+                        evidence,
+                        manifest_bytes=(
+                            output.report.public_structure_manifest.encode("utf-8")
+                        ),
+                    )
+                except (TypeError, ValueError) as error:
+                    raise V2ValidationError(
+                        ("FULL 생성 생산 증거와 최종 보고서 결속이 깨졌습니다",)
+                    ) from error
     except AskFatalError as exc:
         # 예산 소진·billing-uncertain 같은 요청 전역 장애 — «출고 검증 실패»로
         # 오표기하지 않는다. 원인 예외를 그대로 다시 던져 v1과 같은 경로로
@@ -3301,6 +3572,9 @@ def _run_v2_composer(
         cost_krw=_request_spent_krw(engine),
         model=model,
         generation_cache_eligible=cache_eligible,
+        generation_evidence=output.generation_evidence,
+        generation_metrics=output.generation_metrics,
+        quality_observation=output.quality_observation,
     )
 
 
