@@ -510,7 +510,6 @@ def _active_hash(
     raw_token: object,
     *,
     now: float,
-    min_remaining_sec: float = 0.0,
 ) -> str:
     if not token_has_valid_shape(raw_token):
         return ""
@@ -521,7 +520,7 @@ def _active_hash(
          WHERE grant_hash = ? AND revoked_at = 0
            AND created_at <= ? AND expires_at > ?
         """,
-        (digest, float(now), float(now) + float(min_remaining_sec)),
+        (digest, float(now), float(now)),
     ).fetchone()
     return digest if row is not None else ""
 
@@ -533,7 +532,7 @@ def issue_and_bind(
     run_id: str,
     now: float | None = None,
 ) -> IssuedGrant:
-    """브라우저 grant를 갱신·회전하거나 새로 발급해 run에 결속한다."""
+    """살아 있는 브라우저 grant를 갱신하거나 새로 발급해 run에 결속한다."""
 
     clean_run = str(run_id or "").strip().lower()
     if len(clean_run) != constants.REPORT_ID_HEX_CHARS or any(
@@ -562,18 +561,11 @@ def issue_and_bind(
         (issued_at,),
     )
 
-    currently_active = _active_hash(
-        conn,
-        existing_token,
-        now=issued_at,
-    )
     active = _active_hash(
         conn,
         existing_token,
         now=issued_at,
-        min_remaining_sec=constants.PUBLIC_GRANT_REUSE_MIN_REMAINING_SEC,
     )
-    rotated_from = currently_active if currently_active and not active else ""
     if active:
         # 이 브라우저가 새 보고서를 만들면 그 보고서의 완료 후 60일까지 같은
         # token이 살아야 한다. GET은 수명을 늘리지 않고, 새 run 입장 때만 새
@@ -637,21 +629,6 @@ def issue_and_bind(
             raise RuntimeError("공개 보고서 열람 grant를 발급할 수 없습니다")
 
     try:
-        if rotated_from:
-            # 만료 직전 token을 새 token으로 회전해도 같은 브라우저의 아직 살아
-            # 있는 과거 보고서가 갑자기 닫히지 않게 결속을 복제한다. 옛 token은
-            # 짧은 남은 수명 동안만 병행해 진행 중인 다른 탭을 깨뜨리지 않는다.
-            conn.execute(
-                f"""
-                INSERT INTO {TABLE_BINDINGS}
-                    (grant_hash, run_id, report_id, created_at)
-                SELECT ?, run_id, report_id, created_at
-                  FROM {TABLE_BINDINGS}
-                 WHERE grant_hash = ?
-                ON CONFLICT(grant_hash, run_id) DO NOTHING
-                """,
-                (digest, rotated_from),
-            )
         conn.execute(
             f"""
             INSERT INTO {TABLE_BINDINGS}

@@ -24,13 +24,6 @@ PUBLIC_GRANT_MAX_AGE_SEC: Final[int] = (
 PUBLIC_GRANT_ALLOCATION_ATTEMPTS: Final[int] = 8
 REPORT_ID_HEX_CHARS: Final[int] = 32
 
-# 작업 시작 때 간신히 살아 있는 기존 쿠키를 재사용하면, 정상 최대 실행시간 뒤
-# 완성본을 DB에 묶을 때 이미 만료될 수 있다. 새 run은 전체 실행 상한과 마지막
-# SQLite commit 여유를 모두 넘겨 남은 grant만 재사용한다.
-PUBLIC_GRANT_REUSE_MIN_REMAINING_SEC: Final[int] = (
-    REPORT_GENERATION_EXECUTION_MAX_SEC + PUBLIC_GRANT_COMMIT_MARGIN_SEC
-)
-
 # PUBLIC은 전역 5회/10분 입장 제한 때문에 이론상 하루 최대 720회다. 전체
 # grant 수명을 무제한으로 쌓지 않고, 정상 동시 사용의 두 배가 넘는 2,048개에서
 # 새 grant를 fail-closed한다. 만료·철회 행은 같은 write transaction에서 먼저

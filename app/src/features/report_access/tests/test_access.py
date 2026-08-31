@@ -211,12 +211,7 @@ def test_PUBLIC_grant는_최대작업뒤_시작하는_보고서60일보다_commi
         )
 
 
-def test_PUBLIC_기존grant는_최대작업시간과_commit여유가_남을때만_재사용한다():
-    from src.features.budget.constants import PAID_PHASE_LEASE_SEC
-
-    assert constants.PUBLIC_GRANT_REUSE_MIN_REMAINING_SEC == (
-        PAID_PHASE_LEASE_SEC + constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
-    )
+def test_PUBLIC_만료직전_동시시작은_같은grant를연장해_두run과기존보고서를보존한다():
     conn = sqlite3.connect(":memory:")
     try:
         store.ensure_schema(conn)
@@ -227,63 +222,102 @@ def test_PUBLIC_기존grant는_최대작업시간과_commit여유가_남을때�
             run_id="10" * 16,
             now=issued_at,
         )
+        assert store.bind_report(
+            conn,
+            run_id="10" * 16,
+            report_id="12" * 16,
+            delivery_expires_at=issued_at + 100,
+            now=issued_at + 1,
+        )
         conn.commit()
 
-        enough_at = (
-            first.expires_at
-            - constants.PUBLIC_GRANT_REUSE_MIN_REMAINING_SEC
-            - 0.001
-        )
-        reused = store.issue_and_bind(
+        # 두 HTTP 요청이 첫 Set-Cookie를 받기 전에 같은 옛 cookie를 들고 왔다.
+        # SQLite writer는 직렬화되지만 두 호출의 입력 token은 의도적으로 같다.
+        boundary_at = first.expires_at - 0.001
+        response_a = store.issue_and_bind(
             conn,
             existing_token=first.token,
             run_id="11" * 16,
-            now=enough_at,
+            now=boundary_at,
         )
         conn.commit()
-        assert reused.reused is True
-        assert reused.token == first.token
-        assert reused.expires_at == (
-            enough_at + constants.PUBLIC_GRANT_MAX_AGE_SEC
-        )
-
-        # 경계와 같으면 ``commit 여유보다 더 많이`` 남았다는 보장이 없으므로
-        # 기존 token을 억지로 연장하지 않고 새 PUBLIC grant를 발급한다. 이때
-        # 같은 브라우저의 과거 결속은 새 token에도 복제한다.
-        near = store.issue_and_bind(
+        response_b = store.issue_and_bind(
             conn,
-            existing_token="",
-            run_id="12" * 16,
-            now=enough_at + 1,
-        )
-        conn.commit()
-        boundary_at = (
-            near.expires_at
-            - constants.PUBLIC_GRANT_REUSE_MIN_REMAINING_SEC
-        )
-        replaced = store.issue_and_bind(
-            conn,
-            existing_token=near.token,
+            existing_token=first.token,
             run_id="13" * 16,
             now=boundary_at,
         )
-        assert replaced.reused is False
-        assert replaced.token != near.token
-        assert replaced.expires_at == (
+        conn.commit()
+
+        assert response_a.reused is True
+        assert response_b.reused is True
+        assert response_a.token == response_b.token == first.token
+        assert response_b.expires_at == (
             boundary_at + constants.PUBLIC_GRANT_MAX_AGE_SEC
         )
-        conn.commit()
-        assert store.public_grant_allows(
+        # 응답 A/B 중 어느 Set-Cookie가 마지막에 도착해도 같은 token이며, 두
+        # 새 run과 회전 전 기존 report를 모두 열 수 있다.
+        for response_order in (
+            (response_a, response_b),
+            (response_b, response_a),
+        ):
+            final_token = response_order[-1].token
+            for locator in ("11" * 16, "13" * 16, "12" * 16):
+                assert store.public_grant_allows(
+                    conn,
+                    raw_token=final_token,
+                    locator=locator,
+                    now=boundary_at + 1,
+                )
+    finally:
+        conn.close()
+
+
+def test_PUBLIC_철회된token은_새run에서_연장되거나_옛결속을부활시키지않는다():
+    conn = sqlite3.connect(":memory:")
+    try:
+        store.ensure_schema(conn)
+        issued_at = 1_800_000_000.0
+        revoked = store.issue_and_bind(
             conn,
-            raw_token=replaced.token,
-            locator="12" * 16,
-            now=boundary_at,
+            existing_token="",
+            run_id="20" * 16,
+            now=issued_at,
+        )
+        assert store.revoke_grant(
+            conn,
+            grant_hash=revoked.grant_hash,
+            revoked_at=issued_at + 1,
+        )
+        conn.commit()
+
+        replacement = store.issue_and_bind(
+            conn,
+            existing_token=revoked.token,
+            run_id="21" * 16,
+            now=issued_at + 2,
+        )
+        conn.commit()
+
+        assert replacement.reused is False
+        assert replacement.token != revoked.token
+        assert not store.public_grant_allows(
+            conn,
+            raw_token=revoked.token,
+            locator="20" * 16,
+            now=issued_at + 3,
+        )
+        assert not store.public_grant_allows(
+            conn,
+            raw_token=replacement.token,
+            locator="20" * 16,
+            now=issued_at + 3,
         )
         assert store.public_grant_allows(
             conn,
-            raw_token=replaced.token,
-            locator="13" * 16,
-            now=boundary_at,
+            raw_token=replacement.token,
+            locator="21" * 16,
+            now=issued_at + 3,
         )
     finally:
         conn.close()

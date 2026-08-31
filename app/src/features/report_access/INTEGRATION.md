@@ -7,11 +7,12 @@
 ## 작업 시작
 
 스케줄러에 넘기기 전에 `issue_and_bind()`를 같은 DB 쓰기 거래에서 호출한다.
-기존 token은 보고서 최대 실행시간과 마지막 commit 여유가 모두 남았을 때만
-재사용되고, 새 run의 완료 후 60일까지 열 수 있게 만료시각을 갱신한다. 여유가
-부족하면 새 token으로 회전하되 과거 결속을 복제해 같은 브라우저의 보고서를
-갑자기 닫지 않는다. `PUBLIC_GRANT_MAX_AGE_SEC`은 보고서 60일에 최대 실행시간과
-commit 여유를 더한 값이며, `/run` 응답 쿠키의 `Max-Age`도 이 값을 사용한다.
+기존 token이 아직 유효하면 writer lock 안에서 같은 grant의 만료를 갱신한 뒤 새
+run을 붙인다. 만료 직전 두 탭이 같은 옛 cookie로 동시에 시작해도 서로 다른
+후속 token을 만들지 않으므로 어느 응답이 마지막에 와도 두 run과 기존 보고서를
+함께 연다. 만료·철회된 token만 새 grant로 대체하며 옛 결속은 부활시키지 않는다.
+`PUBLIC_GRANT_MAX_AGE_SEC`은 보고서 60일에 최대 실행시간과 commit 여유를 더한
+값이며, `/run` 응답 쿠키의 `Max-Age`도 이 값을 사용한다.
 실제 서버 권한의 정본은 언제나 `IssuedGrant.expires_at`과 DB 행이다.
 
 ## 보고서 저장
