@@ -123,16 +123,70 @@ def test_같은_원문_해시는_최고점만_남긴다() -> None:
     text = "같은 원문 내용입니다."
     low = _fragment(fragment_id="f-low", text=text, score_millis=300)
     high = _fragment(fragment_id="f-high", text=text, score_millis=900)
+    document = _document(exact_evidence_hashes=(low.text_sha256,))
 
     selection = select_section_fragments(
         section_id="business_model",
         company_id="corp-1",
-        documents=(_document(),),
+        documents=(document,),
         fragments=(low, high),
     )
 
     assert [fragment.fragment_id for fragment in selection.fragments] == ["f-high"]
     assert "duplicate_fragments_removed:1" in selection.reason_codes
+
+
+def test_다른_슬롯의_같은_원문은_각각_남는다() -> None:
+    # 같은 문장이 서로 다른 두 슬롯을 정당하게 채우는 경우(예: 「구독형 SaaS를
+    # B2B 고객에게 판매한다」가 revenue_model·customer_type을 동시에 채움),
+    # 슬롯 단위로만 중복을 제거해야 한 슬롯의 유일한 근거가 소멸하지 않는다.
+    text = "구독형 SaaS를 B2B 고객에게 판매합니다."
+    revenue_fragment = _fragment(
+        fragment_id="f-revenue",
+        slot_id="business_model:revenue_model",
+        text=text,
+        score_millis=800,
+    )
+    customer_fragment = _fragment(
+        fragment_id="f-customer",
+        slot_id="business_model:customer_type",
+        text=text,
+        score_millis=800,
+    )
+    document = _document(exact_evidence_hashes=(revenue_fragment.text_sha256,))
+
+    selection = select_section_fragments(
+        section_id="business_model",
+        company_id="corp-1",
+        documents=(document,),
+        fragments=(revenue_fragment, customer_fragment),
+    )
+
+    included_ids = {fragment.fragment_id for fragment in selection.fragments}
+    assert included_ids == {"f-revenue", "f-customer"}
+    assert not any(
+        code.startswith("duplicate_fragments_removed:") for code in selection.reason_codes
+    )
+
+
+def test_문서에_결속되지_않은_조각은_사유코드와_함께_제외된다() -> None:
+    # 조각의 text_sha256이 원본 문서의 exact_evidence_hashes 목록에 없으면
+    # ChapterEvidenceCandidates 계약이 예외로 죽기 전에 선별 단계가 먼저
+    # fail-closed로 걸러낸다.
+    fragment = _fragment(fragment_id="f1", text="문서가 내보내지 않은 원문.")
+    document = _document(
+        exact_evidence_hashes=(hashlib.sha256(b"other-text").hexdigest(),)
+    )
+
+    selection = select_section_fragments(
+        section_id="business_model",
+        company_id="corp-1",
+        documents=(document,),
+        fragments=(fragment,),
+    )
+
+    assert selection.fragments == ()
+    assert "fragment_not_bound_to_document:1" in selection.reason_codes
 
 
 def test_슬롯_커버리지가_점수보다_우선한다() -> None:
@@ -157,11 +211,18 @@ def test_슬롯_커버리지가_점수보다_우선한다() -> None:
         text="customer 슬롯 여분 조각 텍스트 조금 더 길게.",
         score_millis=940,
     )
+    document = _document(
+        exact_evidence_hashes=(
+            revenue.text_sha256,
+            customer_best.text_sha256,
+            customer_extra.text_sha256,
+        )
+    )
 
     selection = select_section_fragments(
         section_id="business_model",
         company_id="corp-1",
-        documents=(_document(),),
+        documents=(document,),
         fragments=(customer_best, customer_extra, revenue),
         max_chars=10_000,
         max_estimated_tokens=10_000,
@@ -191,11 +252,18 @@ def test_예산이_빠듯하면_남는_예산은_점수_내림차순으로_버�
         text="다" * 100,
         score_millis=100,
     )
+    document = _document(
+        exact_evidence_hashes=(
+            revenue.text_sha256,
+            value_exchange.text_sha256,
+            low_score_extra.text_sha256,
+        )
+    )
 
     selection = select_section_fragments(
         section_id="business_model",
         company_id="corp-1",
-        documents=(_document(),),
+        documents=(document,),
         fragments=(revenue, value_exchange, low_score_extra),
         max_chars=200,
         max_estimated_tokens=1000,
@@ -213,11 +281,12 @@ def test_단독으로_예산을_넘는_조각은_슬롯미달_사유를_남기�
         text="가" * 500,
         score_millis=900,
     )
+    document = _document(exact_evidence_hashes=(oversized.text_sha256,))
 
     selection = select_section_fragments(
         section_id="business_model",
         company_id="corp-1",
-        documents=(_document(),),
+        documents=(document,),
         fragments=(oversized,),
         max_chars=100,
         max_estimated_tokens=1000,
@@ -234,11 +303,12 @@ def test_단독으로_예산을_넘는_조각은_슬롯미달_사유를_남기�
 def test_추정토큰은_문자수_비율로_결정론적으로_계산된다() -> None:
     text = "가" * 220
     fragment = _fragment(fragment_id="f1", text=text, score_millis=900)
+    document = _document(exact_evidence_hashes=(fragment.text_sha256,))
 
     selection = select_section_fragments(
         section_id="business_model",
         company_id="corp-1",
-        documents=(_document(),),
+        documents=(document,),
         fragments=(fragment,),
         max_chars=1000,
         max_estimated_tokens=1000,
@@ -250,11 +320,12 @@ def test_추정토큰은_문자수_비율로_결정론적으로_계산된다() -
 def test_최종_조각_순서는_fragment_id로_결정론적이다() -> None:
     a = _fragment(fragment_id="f-b", slot_id="business_model:revenue_model", text="A")
     b = _fragment(fragment_id="f-a", slot_id="business_model:customer_type", text="B")
+    document = _document(exact_evidence_hashes=(a.text_sha256, b.text_sha256))
 
     selection = select_section_fragments(
         section_id="business_model",
         company_id="corp-1",
-        documents=(_document(),),
+        documents=(document,),
         fragments=(a, b),
     )
 

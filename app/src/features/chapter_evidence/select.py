@@ -42,18 +42,26 @@ def _estimated_tokens(char_count: int) -> int:
     return math.ceil(char_count / CHARS_PER_ESTIMATED_TOKEN)
 
 
-def _dedupe_by_text_hash(
+def _dedupe_by_slot_and_text_hash(
     fragments: Iterable[EvidenceFragment],
 ) -> tuple[list[EvidenceFragment], int]:
-    """같은 원문(text_sha256)을 가진 조각 중 최고점 하나만 남긴다."""
+    """같은 슬롯 안에서 같은 원문(text_sha256)을 가진 조각 중 최고점 하나만 남긴다.
 
-    by_hash: dict[str, list[EvidenceFragment]] = defaultdict(list)
+    키를 슬롯 없이 text_sha256만으로 잡으면, 같은 원문 한 문장이 서로 다른 두
+    슬롯을 정당하게 채우는 입력(예: 「구독형 SaaS를 B2B 고객에게 판매한다」가
+    revenue_model·customer_type 슬롯을 동시에 채움)에서 한 슬롯의 유일한
+    조각이 소멸해 그 장이 오판(INSUFFICIENT)될 수 있다. (slot_id, text_sha256)
+    쌍으로 키를 잡아 슬롯 간 진짜 중복만 제거하고 슬롯을 넘나드는 정당한 재사용은
+    보존한다.
+    """
+
+    by_slot_and_hash: dict[tuple[str, str], list[EvidenceFragment]] = defaultdict(list)
     for fragment in fragments:
-        by_hash[fragment.text_sha256].append(fragment)
+        by_slot_and_hash[(fragment.slot_id, fragment.text_sha256)].append(fragment)
 
     kept: list[EvidenceFragment] = []
     duplicate_count = 0
-    for items in by_hash.values():
+    for items in by_slot_and_hash.values():
         items.sort(key=lambda fragment: (-fragment.score_millis, fragment.fragment_id))
         kept.append(items[0])
         duplicate_count += len(items) - 1
@@ -71,23 +79,35 @@ def select_section_fragments(
 ) -> SectionFragmentSelection:
     """이 장·이 회사에 쓸 근거 조각을 골라 예산 안으로 자른다."""
 
-    own_document_ids = {
-        document.document_id
+    own_documents_by_id = {
+        document.document_id: document
         for document in documents
         if document.company_id == company_id
     }
     collector_slot_order = collector_slots_for(section_id)
     collector_slot_set = set(collector_slot_order)
 
-    eligible = [
-        fragment
-        for fragment in fragments
-        if fragment.section_id == section_id
-        and fragment.slot_id in collector_slot_set
-        and fragment.document_id in own_document_ids
-    ]
+    eligible: list[EvidenceFragment] = []
+    unbound_count = 0
+    for fragment in fragments:
+        if fragment.section_id != section_id:
+            continue
+        if fragment.slot_id not in collector_slot_set:
+            continue
+        document = own_documents_by_id.get(fragment.document_id)
+        if document is None:
+            continue
+        # generation=7 계약 결속 방어(fail-closed) — 조각의 text_sha256이 원본
+        # 문서의 exact_evidence_hashes 허용 목록에 없으면 여기서 먼저 걸러낸다.
+        # 안 그러면 ChapterEvidenceCandidates 생성 시 계약이 예외를 던져 이
+        # 회사 전체 생산이 죽는다. document_id가 다른 회사와 우연히 겹쳐도
+        # (수집기 버그) 이 결속 확인이 남의 원문이 조용히 섞이는 것을 막는다.
+        if fragment.text_sha256 not in document.exact_evidence_hashes:
+            unbound_count += 1
+            continue
+        eligible.append(fragment)
 
-    deduped, duplicate_count = _dedupe_by_text_hash(eligible)
+    deduped, duplicate_count = _dedupe_by_slot_and_text_hash(eligible)
 
     by_slot: dict[str, list[EvidenceFragment]] = defaultdict(list)
     for fragment in deduped:
@@ -163,6 +183,8 @@ def select_section_fragments(
     reason_codes: list[str] = []
     if duplicate_count:
         reason_codes.append(f"duplicate_fragments_removed:{duplicate_count}")
+    if unbound_count:
+        reason_codes.append(f"fragment_not_bound_to_document:{unbound_count}")
     for slot_id in oversized_slots:
         reason_codes.append(f"fragment_exceeds_budget:{slot_id}")
     if dropped_for_budget:
