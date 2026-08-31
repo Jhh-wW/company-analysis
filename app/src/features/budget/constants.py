@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Final
 
+from src.core.constants import REPORT_GENERATION_EXECUTION_MAX_SEC
+
 #: 예산이 다 됐을 때 사용자에게 보여줄 말.
 #: ★ 「고장」이 아니라 «오늘 몫을 다 썼다»는 뜻임을 분명히 한다 —
 #:   고장으로 오해하면 이 도구가 못 쓰는 물건으로 보인다.
@@ -125,4 +127,4 @@ PAID_PHASE_PROVIDER_BUDGET_KRW: Final[dict[str, float]] = {
 #: 않도록 1시간으로 둔다. 각 provider 전송 직전에 heartbeat로 다시 연장한다.
 #: 서버가 죽어도 이 시간이 지나면 ACTIVE 예약은 자동으로 확정비용이 아니라
 #: ``전송 의도가 남은 attempt의 보수부채``로만 축소된다.
-PAID_PHASE_LEASE_SEC: Final[int] = 3600
+PAID_PHASE_LEASE_SEC: Final[int] = REPORT_GENERATION_EXECUTION_MAX_SEC

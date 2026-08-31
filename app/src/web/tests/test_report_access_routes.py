@@ -6,6 +6,8 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
+from src.core.constants import REPORT_GENERATION_EXECUTION_MAX_SEC
+from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
 from src.features.auth import constants as auth_constants
 from src.features.auth import google as auth_google
 from src.features.auth import logic as auth_logic
@@ -65,6 +67,11 @@ def test_새_PUBLIC_demo는_별도_cookie로_완주하고_ID만_아는_브라우
         assert "Secure" in set_cookie
         assert "SameSite=lax" in set_cookie
         assert "Path=/" in set_cookie
+        assert constants.PUBLIC_GRANT_MAX_AGE_SEC == (
+            REPORT_LINK_MAX_AGE_DAYS * 24 * 60 * 60
+            + REPORT_GENERATION_EXECUTION_MAX_SEC
+            + constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
+        )
         assert f"Max-Age={constants.PUBLIC_GRANT_MAX_AGE_SEC}" in set_cookie
         raw_grant = owner.cookies.get(constants.PUBLIC_GRANT_COOKIE_NAME)
         assert raw_grant

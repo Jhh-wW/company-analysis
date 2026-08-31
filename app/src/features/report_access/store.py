@@ -157,6 +157,18 @@ class LegacyAccess:
     expires_at: float
 
 
+class PublicGrantBindingUnavailable(RuntimeError):
+    """완성본을 묶을 만큼 유효한 PUBLIC grant가 더는 없음."""
+
+
+class ReportBindingConflict(RuntimeError):
+    """같은 PUBLIC run을 서로 다른 보고서로 바꾸려는 시도."""
+
+
+class MixedReportOwnershipConflict(RuntimeError):
+    """같은 run을 PUBLIC과 MEMBER가 동시에 소유한다고 주장함."""
+
+
 def _object_type(conn: sqlite3.Connection, name: str) -> str:
     row = conn.execute(
         "SELECT type FROM sqlite_master WHERE name = ?", (name,)
@@ -493,7 +505,11 @@ def token_has_valid_shape(token: object) -> bool:
 
 
 def _active_hash(
-    conn: sqlite3.Connection, raw_token: object, *, now: float
+    conn: sqlite3.Connection,
+    raw_token: object,
+    *,
+    now: float,
+    min_remaining_sec: float = 0.0,
 ) -> str:
     if not token_has_valid_shape(raw_token):
         return ""
@@ -504,7 +520,7 @@ def _active_hash(
          WHERE grant_hash = ? AND revoked_at = 0
            AND created_at <= ? AND expires_at > ?
         """,
-        (digest, float(now), float(now)),
+        (digest, float(now), float(now) + float(min_remaining_sec)),
     ).fetchone()
     return digest if row is not None else ""
 
@@ -516,7 +532,7 @@ def issue_and_bind(
     run_id: str,
     now: float | None = None,
 ) -> IssuedGrant:
-    """살아 있는 브라우저 grant를 재사용하거나 새로 발급해 run에 결속한다."""
+    """브라우저 grant를 갱신·회전하거나 새로 발급해 run에 결속한다."""
 
     clean_run = str(run_id or "").strip().lower()
     if len(clean_run) != constants.REPORT_ID_HEX_CHARS or any(
@@ -545,8 +561,31 @@ def issue_and_bind(
         (issued_at,),
     )
 
-    active = _active_hash(conn, existing_token, now=issued_at)
+    currently_active = _active_hash(
+        conn,
+        existing_token,
+        now=issued_at,
+    )
+    active = _active_hash(
+        conn,
+        existing_token,
+        now=issued_at,
+        min_remaining_sec=constants.PUBLIC_GRANT_REUSE_MIN_REMAINING_SEC,
+    )
+    rotated_from = currently_active if currently_active and not active else ""
     if active:
+        # 이 브라우저가 새 보고서를 만들면 그 보고서의 완료 후 60일까지 같은
+        # token이 살아야 한다. GET은 수명을 늘리지 않고, 새 run 입장 때만 새
+        # grant와 같은 절대 만료시각으로 갱신한다.
+        renewed_expiry = issued_at + constants.PUBLIC_GRANT_MAX_AGE_SEC
+        conn.execute(
+            f"""
+            UPDATE {TABLE_GRANTS}
+               SET expires_at = MAX(expires_at, ?)
+             WHERE grant_hash = ? AND revoked_at = 0
+            """,
+            (renewed_expiry, active),
+        )
         row = conn.execute(
             f"SELECT expires_at FROM {TABLE_GRANTS} WHERE grant_hash = ?",
             (active,),
@@ -597,6 +636,21 @@ def issue_and_bind(
             raise RuntimeError("공개 보고서 열람 grant를 발급할 수 없습니다")
 
     try:
+        if rotated_from:
+            # 만료 직전 token을 새 token으로 회전해도 같은 브라우저의 아직 살아
+            # 있는 과거 보고서가 갑자기 닫히지 않게 결속을 복제한다. 옛 token은
+            # 짧은 남은 수명 동안만 병행해 진행 중인 다른 탭을 깨뜨리지 않는다.
+            conn.execute(
+                f"""
+                INSERT INTO {TABLE_BINDINGS}
+                    (grant_hash, run_id, report_id, created_at)
+                SELECT ?, run_id, report_id, created_at
+                  FROM {TABLE_BINDINGS}
+                 WHERE grant_hash = ?
+                ON CONFLICT(grant_hash, run_id) DO NOTHING
+                """,
+                (digest, rotated_from),
+            )
         conn.execute(
             f"""
             INSERT INTO {TABLE_BINDINGS}
@@ -655,31 +709,103 @@ def bind_member_run(
 
 
 def bind_report(
-    conn: sqlite3.Connection, *, run_id: str, report_id: str
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    report_id: str,
+    now: float | None = None,
 ) -> bool:
-    """보고서 저장 transaction 안에서 기존 run 결속에 정확한 report를 붙인다."""
+    """저장 transaction 안에서 기존 run에 정확한 report를 붙인다.
+
+    PUBLIC은 쓰기 잠금을 잡은 뒤 철회·생성시각·만료와 commit 여유를 다시
+    확인한다. 해당 run의 PUBLIC 행이 있는데 이 검증을 통과하지 못하면 ``False``로
+    조용히 넘기지 않고 :class:`PublicGrantBindingUnavailable`을 던진다. 호출자는
+    이를 저장 실패로 취급해 같은 transaction을 rollback하고, 이 함수를 마지막
+    쓰기 경계 가까이에서 호출한 뒤 즉시 commit해야 한다.
+
+    MEMBER는 grant 수명과 무관하며 기존 subject 결속 갱신 계약을 그대로 쓴다.
+    """
 
     clean_run = str(run_id or "").strip().lower()
     clean_report = str(report_id or "").strip().lower()
     if not clean_run or not clean_report:
         raise ValueError("run/report ID가 필요합니다")
+    if not conn.in_transaction:
+        # SELECT 뒤 다른 연결이 revoke하는 검사-사용 틈을 닫는다. 이미 보고서 저장
+        # transaction 안이면 그 writer lock을 그대로 사용한다.
+        conn.execute("BEGIN IMMEDIATE")
+    checked_at = float(time.time() if now is None else now)
+
+    public_rows = conn.execute(
+        f"""
+        SELECT binding.report_id, grant.created_at,
+               grant.expires_at, grant.revoked_at
+          FROM {TABLE_BINDINGS} AS binding
+          LEFT JOIN {TABLE_GRANTS} AS grant
+            ON grant.grant_hash = binding.grant_hash
+         WHERE binding.run_id = ?
+        """,
+        (clean_run,),
+    ).fetchall()
+    member_row = conn.execute(
+        f"SELECT report_id FROM {TABLE_MEMBER_BINDINGS} WHERE run_id = ?",
+        (clean_run,),
+    ).fetchone()
+
+    # 먼저 어느 소유 표의 run인지 고정한다. 예전 순서는 MEMBER를 UPDATE한 뒤
+    # invalid PUBLIC을 발견해, 예외를 잘못 잡는 호출자에서 부분 갱신이 남거나
+    # 정상 MEMBER 저장까지 막을 수 있었다.
+    if public_rows and member_row is not None:
+        raise MixedReportOwnershipConflict(
+            "같은 run에 PUBLIC과 MEMBER 소유권이 동시에 존재합니다"
+        )
+    if member_row is not None:
+        member_cursor = conn.execute(
+            f"""
+            UPDATE {TABLE_MEMBER_BINDINGS}
+               SET report_id = ?
+             WHERE run_id = ? AND (report_id = '' OR report_id = ?)
+            """,
+            (clean_report, clean_run, clean_report),
+        )
+        return member_cursor.rowcount > 0
+    if not public_rows:
+        return False
+
+    if any(
+        str(row[0]) not in ("", clean_report)
+        for row in public_rows
+    ):
+        raise ReportBindingConflict(
+            "같은 PUBLIC run은 서로 다른 두 보고서에 결속할 수 없습니다"
+        )
+
+    valid_until = checked_at + constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
     public_cursor = conn.execute(
         f"""
         UPDATE {TABLE_BINDINGS}
            SET report_id = ?
          WHERE run_id = ? AND (report_id = '' OR report_id = ?)
+           AND grant_hash IN (
+               SELECT grant_hash FROM {TABLE_GRANTS}
+                WHERE revoked_at = 0
+                  AND created_at <= ?
+                  AND expires_at > ?
+           )
         """,
-        (clean_report, clean_run, clean_report),
+        (
+            clean_report,
+            clean_run,
+            clean_report,
+            checked_at,
+            valid_until,
+        ),
     )
-    member_cursor = conn.execute(
-        f"""
-        UPDATE {TABLE_MEMBER_BINDINGS}
-           SET report_id = ?
-         WHERE run_id = ? AND (report_id = '' OR report_id = ?)
-        """,
-        (clean_report, clean_run, clean_report),
-    )
-    return public_cursor.rowcount > 0 or member_cursor.rowcount > 0
+    if public_cursor.rowcount <= 0:
+        raise PublicGrantBindingUnavailable(
+            "PUBLIC grant가 철회·만료됐거나 안전한 저장 여유가 남지 않았습니다"
+        )
+    return True
 
 
 def member_subject_allows(

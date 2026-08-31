@@ -179,20 +179,29 @@ def test_PUBLIC_token은_DB에_원문이_없고_만료와_철회가_즉시_닫�
         )
 
 
-def test_PUBLIC_grant수명은_보고서60일_정본과_정확히_같다():
+def test_PUBLIC_grant는_최대작업뒤_시작하는_보고서60일보다_commit여유만큼_길다():
+    from src.core.constants import REPORT_GENERATION_EXECUTION_MAX_SEC
     from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
 
     issued_at = 1_800_000_000.0
     report_id = "0" * 32
     grant = _grant(report_id, now=issued_at)
-    expected_expiry = issued_at + REPORT_LINK_MAX_AGE_DAYS * 24 * 60 * 60
+    report_lifetime_sec = REPORT_LINK_MAX_AGE_DAYS * 24 * 60 * 60
+    latest_delivery_expiry = (
+        issued_at + REPORT_GENERATION_EXECUTION_MAX_SEC + report_lifetime_sec
+    )
+    expected_expiry = (
+        latest_delivery_expiry + constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
+    )
     assert grant.expires_at == expected_expiry
     with storage_db.connect() as conn:
+        # 실제 보고서는 별도 Delivery 판정이 60일에 먼저 닫는다. grant가 이
+        # 경계보다 조금 더 사는 것은 작업 시작/완료 시각 차이를 보완할 뿐이다.
         assert store.public_grant_allows(
             conn,
             raw_token=grant.token,
             locator=report_id,
-            now=expected_expiry - 0.001,
+            now=latest_delivery_expiry,
         )
         assert not store.public_grant_allows(
             conn,
@@ -200,6 +209,325 @@ def test_PUBLIC_grant수명은_보고서60일_정본과_정확히_같다():
             locator=report_id,
             now=expected_expiry,
         )
+
+
+def test_PUBLIC_기존grant는_최대작업시간과_commit여유가_남을때만_재사용한다():
+    from src.features.budget.constants import PAID_PHASE_LEASE_SEC
+
+    assert constants.PUBLIC_GRANT_REUSE_MIN_REMAINING_SEC == (
+        PAID_PHASE_LEASE_SEC + constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
+    )
+    conn = sqlite3.connect(":memory:")
+    try:
+        store.ensure_schema(conn)
+        issued_at = 1_800_000_000.0
+        first = store.issue_and_bind(
+            conn,
+            existing_token="",
+            run_id="10" * 16,
+            now=issued_at,
+        )
+        conn.commit()
+
+        enough_at = (
+            first.expires_at
+            - constants.PUBLIC_GRANT_REUSE_MIN_REMAINING_SEC
+            - 0.001
+        )
+        reused = store.issue_and_bind(
+            conn,
+            existing_token=first.token,
+            run_id="11" * 16,
+            now=enough_at,
+        )
+        conn.commit()
+        assert reused.reused is True
+        assert reused.token == first.token
+        assert reused.expires_at == (
+            enough_at + constants.PUBLIC_GRANT_MAX_AGE_SEC
+        )
+
+        # 경계와 같으면 ``commit 여유보다 더 많이`` 남았다는 보장이 없으므로
+        # 기존 token을 억지로 연장하지 않고 새 PUBLIC grant를 발급한다. 이때
+        # 같은 브라우저의 과거 결속은 새 token에도 복제한다.
+        near = store.issue_and_bind(
+            conn,
+            existing_token="",
+            run_id="12" * 16,
+            now=enough_at + 1,
+        )
+        conn.commit()
+        boundary_at = (
+            near.expires_at
+            - constants.PUBLIC_GRANT_REUSE_MIN_REMAINING_SEC
+        )
+        replaced = store.issue_and_bind(
+            conn,
+            existing_token=near.token,
+            run_id="13" * 16,
+            now=boundary_at,
+        )
+        assert replaced.reused is False
+        assert replaced.token != near.token
+        assert replaced.expires_at == (
+            boundary_at + constants.PUBLIC_GRANT_MAX_AGE_SEC
+        )
+        conn.commit()
+        assert store.public_grant_allows(
+            conn,
+            raw_token=replaced.token,
+            locator="12" * 16,
+            now=boundary_at,
+        )
+        assert store.public_grant_allows(
+            conn,
+            raw_token=replaced.token,
+            locator="13" * 16,
+            now=boundary_at,
+        )
+    finally:
+        conn.close()
+
+
+def test_PUBLIC_완성결속은_commit여유가_남은grant만_받는다():
+    conn = sqlite3.connect(":memory:")
+    try:
+        store.ensure_schema(conn)
+        checked_at = 1_800_000_100.0
+        grant = store.issue_and_bind(
+            conn,
+            existing_token="",
+            run_id="20" * 16,
+            now=checked_at - 100,
+        )
+        conn.execute(
+            f"UPDATE {store.TABLE_GRANTS} SET expires_at = ? "
+            "WHERE grant_hash = ?",
+            (
+                checked_at + constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC,
+                grant.grant_hash,
+            ),
+        )
+        conn.commit()
+
+        with pytest.raises(store.PublicGrantBindingUnavailable, match="저장 여유"):
+            store.bind_report(
+                conn,
+                run_id="20" * 16,
+                report_id="21" * 16,
+                now=checked_at,
+            )
+        conn.rollback()
+        row = conn.execute(
+            f"SELECT report_id FROM {store.TABLE_BINDINGS} WHERE run_id = ?",
+            ("20" * 16,),
+        ).fetchone()
+        assert row is not None and str(row[0]) == ""
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    "grant_state",
+    ("expired", "revoked", "created_in_future"),
+)
+def test_PUBLIC_시간이모순되거나_철회된grant는_완성결속에서_다시거절한다(
+    grant_state: str,
+):
+    conn = sqlite3.connect(":memory:")
+    try:
+        store.ensure_schema(conn)
+        issued_at = 1_800_001_000.0
+        checked_at = issued_at + 100
+        grant = store.issue_and_bind(
+            conn,
+            existing_token="",
+            run_id="30" * 16,
+            now=issued_at,
+        )
+        if grant_state == "expired":
+            conn.execute(
+                f"UPDATE {store.TABLE_GRANTS} SET expires_at = ? "
+                "WHERE grant_hash = ?",
+                (checked_at, grant.grant_hash),
+            )
+        elif grant_state == "revoked":
+            assert store.revoke_grant(
+                conn,
+                grant_hash=grant.grant_hash,
+                revoked_at=checked_at - 1,
+            )
+        else:
+            conn.execute(
+                f"UPDATE {store.TABLE_GRANTS} SET created_at = ? "
+                "WHERE grant_hash = ?",
+                (checked_at + 1, grant.grant_hash),
+            )
+        conn.commit()
+
+        with pytest.raises(store.PublicGrantBindingUnavailable):
+            store.bind_report(
+                conn,
+                run_id="30" * 16,
+                report_id="31" * 16,
+                now=checked_at,
+            )
+        conn.rollback()
+        assert conn.execute(
+            f"SELECT report_id FROM {store.TABLE_BINDINGS} WHERE run_id = ?",
+            ("30" * 16,),
+        ).fetchone()[0] == ""
+    finally:
+        conn.close()
+
+
+def test_PUBLIC_검사직후_만료될grant도_commit전에_결속하지않는다(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    try:
+        store.ensure_schema(conn)
+        checked_at = 1_800_002_000.0
+        grant = store.issue_and_bind(
+            conn,
+            existing_token="",
+            run_id="40" * 16,
+            now=checked_at - 100,
+        )
+        # 예전의 단순 ``expires_at > now`` 검사라면 통과하지만, 저장 commit
+        # 여유 안에 만료되는 행이다. bind_report가 호출 시각을 직접 다시 읽어
+        # 이 검사-사용 경합을 닫는지 확인한다.
+        conn.execute(
+            f"UPDATE {store.TABLE_GRANTS} SET expires_at = ? "
+            "WHERE grant_hash = ?",
+            (
+                checked_at + constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC / 2,
+                grant.grant_hash,
+            ),
+        )
+        conn.commit()
+        monkeypatch.setattr(store.time, "time", lambda: checked_at)
+
+        with pytest.raises(store.PublicGrantBindingUnavailable):
+            store.bind_report(
+                conn,
+                run_id="40" * 16,
+                report_id="41" * 16,
+            )
+        conn.rollback()
+        assert conn.execute(
+            f"SELECT report_id FROM {store.TABLE_BINDINGS} WHERE run_id = ?",
+            ("40" * 16,),
+        ).fetchone()[0] == ""
+    finally:
+        conn.close()
+
+
+def test_PUBLIC_같은run은_첫보고서에서_다른보고서로_바꿀수없다():
+    conn = sqlite3.connect(":memory:")
+    try:
+        store.ensure_schema(conn)
+        issued_at = 1_800_003_000.0
+        store.issue_and_bind(
+            conn,
+            existing_token="",
+            run_id="50" * 16,
+            now=issued_at,
+        )
+        assert store.bind_report(
+            conn,
+            run_id="50" * 16,
+            report_id="51" * 16,
+            now=issued_at + 1,
+        )
+        conn.commit()
+
+        with pytest.raises(store.ReportBindingConflict, match="두 보고서"):
+            store.bind_report(
+                conn,
+                run_id="50" * 16,
+                report_id="52" * 16,
+                now=issued_at + 2,
+            )
+        conn.rollback()
+        assert conn.execute(
+            f"SELECT report_id FROM {store.TABLE_BINDINGS} WHERE run_id = ?",
+            ("50" * 16,),
+        ).fetchone()[0] == "51" * 16
+    finally:
+        conn.close()
+
+
+def test_MEMBER_완성결속은_PUBLIC_grant시간정책의_영향을받지않는다():
+    conn = sqlite3.connect(":memory:")
+    try:
+        store.ensure_schema(conn)
+        run_id = "60" * 16
+        report_id = "61" * 16
+        assert store.bind_member_run(
+            conn,
+            run_id=run_id,
+            identity_subject="google:member-public-time-boundary",
+            now=100,
+        )
+        conn.commit()
+
+        assert store.bind_report(
+            conn,
+            run_id=run_id,
+            report_id=report_id,
+            now=10**15,
+        )
+        assert store.member_subject_allows(
+            conn,
+            identity_subject="google:member-public-time-boundary",
+            locator=report_id,
+        )
+    finally:
+        conn.close()
+
+
+def test_같은run의_MEMBER와_PUBLIC_혼합소유는_아무행도_고치지않고_거절한다():
+    conn = sqlite3.connect(":memory:")
+    try:
+        store.ensure_schema(conn)
+        run_id = "70" * 16
+        issued_at = 1_800_004_000.0
+        public_grant = store.issue_and_bind(
+            conn,
+            existing_token="",
+            run_id=run_id,
+            now=issued_at,
+        )
+        assert store.bind_member_run(
+            conn,
+            run_id=run_id,
+            identity_subject="google:mixed-owner-attack",
+            now=issued_at,
+        )
+        assert store.revoke_grant(
+            conn,
+            grant_hash=public_grant.grant_hash,
+            revoked_at=issued_at + 1,
+        )
+        conn.commit()
+
+        with pytest.raises(store.MixedReportOwnershipConflict, match="동시에"):
+            store.bind_report(
+                conn,
+                run_id=run_id,
+                report_id="71" * 16,
+                now=issued_at + 2,
+            )
+        conn.rollback()
+        assert conn.execute(
+            f"SELECT report_id FROM {store.TABLE_BINDINGS} WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()[0] == ""
+        assert conn.execute(
+            f"SELECT report_id FROM {store.TABLE_MEMBER_BINDINGS} WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()[0] == ""
+    finally:
+        conn.close()
 
 
 def test_cutover전_PUBLIC만_원래60일_경계까지_ID호환하고_GET은_쓰지않는다(

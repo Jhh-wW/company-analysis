@@ -300,6 +300,13 @@ MAX_AI_CALLS_PER_REQUEST: Final[int] = 18
 #: 새로 만들 때 걸리는 시간 상한(초). 넘으면 진행 화면이 안내를 바꾼다.
 MAX_RESPONSE_SEC: Final[int] = 300
 
+#: 보고서 한 건이 작업 슬롯을 소유할 수 있는 절대 상한.
+#:
+#: 유료 phase lease·single-flight owner·PUBLIC 접근권한이 같은 시간을 기준으로
+#: 삼아야 한다. 각 feature에 ``3600``을 따로 쓰면 한쪽만 바뀐 배포에서 작업은
+#: 아직 실행 중인데 접근권한이 먼저 만료될 수 있으므로 중립 core가 정본을 가진다.
+REPORT_GENERATION_EXECUTION_MAX_SEC: Final[int] = 3600
+
 #: 저장된 보고서를 돌려줄 때 상한(초)
 MAX_CACHE_RESPONSE_SEC: Final[int] = 5
 
