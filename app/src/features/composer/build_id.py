@@ -18,10 +18,10 @@
   사람이 「이번엔 캐시를 비워야지」를 기억할 필요가 없다. 기억에 의존하는
   안전장치는 반드시 잊힌다 — 이 프로젝트가 이미 네 번 증명했다.
 
-★ 어떤 파일을 보나 — «출력물의 모양을 바꾸는» 것만 본다.
-  프롬프트(constants) · 작성(logic) · 검증(verify) · 중복제거(dedupe) ·
-  도식검증(diagram_check) · 조립(render) · 출고검증(validate) · 배선(pipeline).
-  시험 파일과 이 파일 자신은 뺀다 — 바뀌어도 보고서 모양이 안 바뀐다.
+★ 어떤 파일을 보나 — 보고서 생산 런타임 세 뿌리의 production Python 전부다.
+  `app/src` · `analysis_engine/src` · `analysis_engine/tools` 아래를 자동으로 훑는다.
+  시험·Python 임시 캐시만 뺀다. 배포 commit은 원래 모든 코드 변경에서 캐시를
+  가르므로, 로컬 지문도 좁은 손목록보다 넓고 안전한 쪽을 택한다.
 """
 
 from __future__ import annotations
@@ -41,125 +41,84 @@ from src.shared.report_generation.build_identity import (
 
 logger = logging.getLogger(__name__)
 
-#: 보고서 «모양»을 정하는 composer 파일들. 사람이 목록에 새 모듈을 넣는
-#: 것을 기억하게 하지 않고 디렉터리에서 계산한다. 시험·패키지 표식·지문기
-#: 자신만 제외하며 이름 정렬로 같은 코드의 순서를 고정한다.
-_SHAPING_MODULES: Final[tuple[str, ...]] = tuple(
-    path.name
-    for path in sorted(Path(__file__).resolve().parent.glob("*.py"))
-    if path.name not in {"__init__.py", "build_id.py"}
+#: 보고서 생성·검증·출고·캐시 신원을 실행하는 활성 production 뿌리다.
+#: 선택 feature 목록으로 돌아가면 새 생산자가 또 빠지므로 이 세 경계만 고정한다.
+_PRODUCTION_ROOTS: Final[tuple[str, ...]] = (
+    "analysis_engine/src",
+    "analysis_engine/tools",
+    "app/src",
 )
 
-#: 패키지 밖에 있어 자동 발견할 수 없는 필수 생산 파일. 이 파일은 하나라도
-#: 없거나 읽을 수 없으면 지문을 ``unknown``으로 만들어 캐시를 닫는다.
-_REQUIRED_CONTENT_MODULES: Final[tuple[str, ...]] = (
-    "analysis_engine/tools/run_pilot.py",
-    # 운영 v2가 생성 전 source digest와 생성기 namespace를 만들고, delivery가
-    # 생성 후 실제 공식 문서 snapshot을 봉인할 때 쓰는 단일 정본들이다.
-    "app/src/features/report_delivery/source_identity.py",
-    "app/src/features/pipeline/real.py",
-    "app/src/shared/generation_cache_identity.py",
-    "app/src/shared/official_ir.py",
-    "app/src/shared/report_source_identity.py",
-)
-
-#: 보고서의 원문·표·근거·공개 모양을 생산하는 feature/package 뿌리.
-#:
-#: ★ 왜 파일 목록이 아니라 패키지 뿌리인가 (2026-08-31)
-#:   홈페이지와 매출 구성 모듈이 실제 수집 경로에 들어왔는데도 사람이 이 파일의
-#:   목록을 고치지 않아 지문에서 빠졌다. 같은 방식이면 새 evidence_collection,
-#:   report_evidence, chapter_evidence도 또 빠진다. 여기에는 책임 경계인 패키지
-#:   뿌리만 고정하고, 그 아래 production ``.py``는 실행 때 전부 자동 발견한다.
-#:
-#: 아직 생기지 않은 신규 패키지 뿌리는 건너뛴다. 그 패키지가 추가되는 순간부터
-#: 별도 지문 목록 수정 없이 안의 production 모듈이 자동으로 들어간다.
-_CONTENT_PACKAGE_ROOTS: Final[tuple[str, ...]] = (
-    "analysis_engine/src/features/evidence_collection",
-    "app/src/features/chapter_evidence",
-    # 비교 후보·자사 고유성은 현재 v1 경로의 공개 문장을 만들며, v2 장별 근거
-    # 통합 대상으로 고정돼 있다. 통합 파일만 지문에 넣고 생산자를 빼면 같은
-    # 코드 namespace가 서로 다른 경쟁력 내용을 가리키게 된다.
-    "app/src/features/company_comparison",
-    "app/src/features/company_performance",
-    "app/src/features/company_specificity",
-    "app/src/features/filingclean",
-    "app/src/features/homepage",
-    "app/src/features/newspick",
-    # provenance는 인용 장부와 공식 출처 사용 가능 여부, spanselect는 실제
-    # 원문에서 공개 주장 후보를 고르는 규칙을 소유한다.
-    "app/src/features/provenance",
-    "app/src/features/report_standard",
-    "app/src/features/revenuemix",
-    "app/src/features/spanselect",
-    "app/src/shared/report_evidence",
-    "app/src/shared/report_quality",
-)
-
-_IGNORED_CONTENT_DIRECTORIES: Final[frozenset[str]] = frozenset(
-    {"tests", "__pycache__"}
-)
-_IGNORED_CONTENT_FILENAMES: Final[frozenset[str]] = frozenset(
-    {"__init__.py", "conftest.py"}
+_IGNORED_DIRECTORIES: Final[frozenset[str]] = frozenset({"tests", "__pycache__"})
+_IGNORED_FILENAMES: Final[frozenset[str]] = frozenset({"conftest.py"})
+_WINDOWS_REPARSE_POINT: Final[int] = int(
+    getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
 )
 
 
-def _raise_walk_error(error: OSError) -> None:
-    """``os.walk``가 접근 실패를 조용히 삼키지 않게 한다."""
+def _is_link_or_reparse(file_status: os.stat_result) -> bool:
+    """심볼릭 링크와 Windows junction/reparse point를 같은 위험으로 본다."""
 
-    raise error
+    attributes = int(getattr(file_status, "st_file_attributes", 0))
+    return stat.S_ISLNK(file_status.st_mode) or bool(
+        attributes & _WINDOWS_REPARSE_POINT
+    )
 
 
-def _production_python_modules(
-    project_root: Path, package_root_name: str
-) -> tuple[str, ...]:
-    """한 content package 아래 production Python 모듈을 결정론적으로 찾는다.
+def _is_production_python(filename: str) -> bool:
+    """시험 전용 이름만 제외한다. ``__init__.py``는 실행 코드라 포함한다."""
 
-    존재하지 않는 뿌리는 아직 합쳐지지 않은 신규 feature일 수 있으므로 빈 결과다.
-    반면 존재하지만 디렉터리가 아니거나 읽을 수 없으면 ``OSError``를 올린다.
-    호출자는 이를 «지문을 모름»으로 바꿔 캐시를 fail-closed 한다.
-    """
+    lowered = filename.lower()
+    return bool(
+        lowered.endswith(".py")
+        and lowered not in _IGNORED_FILENAMES
+        and not lowered.startswith("test_")
+        and not lowered.endswith("_test.py")
+    )
 
-    package_root = project_root / package_root_name
-    try:
-        mode = package_root.stat().st_mode
-    except FileNotFoundError:
-        return ()
-    if not stat.S_ISDIR(mode):
-        raise OSError(f"content package 뿌리가 디렉터리가 아닙니다: {package_root_name}")
 
-    found: list[str] = []
-    for current, directories, filenames in os.walk(
-        package_root,
-        topdown=True,
-        onerror=_raise_walk_error,
-        followlinks=False,
-    ):
-        directories[:] = sorted(
-            name
-            for name in directories
-            if name not in _IGNORED_CONTENT_DIRECTORIES
-        )
-        current_path = Path(current)
-        for filename in sorted(filenames):
-            if (
-                not filename.endswith(".py")
-                or filename in _IGNORED_CONTENT_FILENAMES
-                or filename.startswith("test_")
-                or filename.endswith("_test.py")
-            ):
+def _scan_production_directory(
+    project_root: Path,
+    directory: Path,
+    found: list[str],
+) -> None:
+    """한 디렉터리를 링크 없이 전부 순회한다. 어느 오류도 부분 목록으로 삼키지 않는다."""
+
+    with os.scandir(directory) as iterator:
+        entries = sorted(iterator, key=lambda item: item.name.lower())
+    for entry in entries:
+        status = entry.stat(follow_symlinks=False)
+        if _is_link_or_reparse(status):
+            raise OSError("production 뿌리 안의 링크·reparse point는 허용하지 않습니다")
+        if stat.S_ISDIR(status.st_mode):
+            if entry.name.lower() in _IGNORED_DIRECTORIES:
                 continue
-            relative = (current_path / filename).relative_to(project_root)
-            found.append(relative.as_posix())
-    return tuple(found)
+            _scan_production_directory(project_root, Path(entry.path), found)
+            continue
+        if stat.S_ISREG(status.st_mode):
+            if _is_production_python(entry.name):
+                relative = Path(entry.path).relative_to(project_root)
+                found.append(relative.as_posix())
+            continue
+        if _is_production_python(entry.name):
+            raise OSError("production Python 경로가 일반 파일이 아닙니다")
 
 
 def _content_modules(project_root: Path) -> tuple[str, ...]:
-    """필수 단일 파일과 package 생산 모듈을 중복 없이 이름순으로 돌려준다."""
+    """세 필수 production 뿌리의 Python 모듈을 중복 없이 이름순으로 찾는다.
 
-    found = set(_REQUIRED_CONTENT_MODULES)
-    for package_root_name in _CONTENT_PACKAGE_ROOTS:
-        found.update(_production_python_modules(project_root, package_root_name))
-    return tuple(sorted(found))
+    뿌리 누락·비디렉터리·접근 실패·링크/reparse point 중 하나라도 있으면
+    완전한 목록이 아니므로 ``OSError``를 올린다. 호출자가 캐시를 닫는다.
+    """
+
+    found: list[str] = []
+    for root_name in _PRODUCTION_ROOTS:
+        production_root = project_root / root_name
+        status = production_root.lstat()
+        if _is_link_or_reparse(status) or not stat.S_ISDIR(status.st_mode):
+            raise OSError(f"필수 production 뿌리가 안전한 디렉터리가 아닙니다: {root_name}")
+        _scan_production_directory(project_root, production_root, found)
+    return tuple(sorted(set(found)))
 
 
 #: 지문 길이. 충돌 확률보다 로그 가독성을 우선한 값이다 — 16자리 16진수는
@@ -177,16 +136,14 @@ def engine_build_id() -> str:
     Returns:
         16자리 16진수. 파일을 하나라도 못 읽으면 ``UNKNOWN_BUILD_ID``.
 
-    ★ 한 번 계산하고 기억한다. 한 요청 안에서 파일이 바뀌는 일은 없고,
-      매번 읽으면 조사마다 디스크를 여러 번 두드리게 된다.
+    ★ 성공한 지문만 기억한다. ``unknown``은 일시적인 파일 접근 실패일 수 있어
+      기억하지 않는다. 다음 요청에서 파일이 정상화되면 실제 지문으로 회복한다.
     """
     global _cached_build_id
     if _cached_build_id is not None:
         return _cached_build_id
 
-    here = Path(__file__).resolve().parent
     뿌리 = paths.PROJECT_ROOT
-    읽을것: list[tuple[str, Path]] = [(이름, here / 이름) for 이름 in _SHAPING_MODULES]
     try:
         content_modules = _content_modules(뿌리)
     except OSError as error:
@@ -197,9 +154,8 @@ def engine_build_id() -> str:
             "이번 실행에서는 캐시를 쓰지 않습니다.",
             type(error).__name__,
         )
-        _cached_build_id = UNKNOWN_BUILD_ID
-        return _cached_build_id
-    읽을것 += [(이름, 뿌리 / 이름) for 이름 in content_modules]
+        return UNKNOWN_BUILD_ID
+    읽을것 = [(이름, 뿌리 / 이름) for 이름 in content_modules]
     digest = hashlib.sha256()
     # 배포 commit은 자동 발견 뿌리 바깥의 변경까지 덮는 마지막 안전망이다.
     # 로컬처럼 commit을 모르는 환경에서는 기존 파일 지문만 사용한다.
@@ -220,8 +176,7 @@ def engine_build_id() -> str:
                 "이번 실행에서는 캐시를 쓰지 않습니다.",
                 name,
             )
-            _cached_build_id = UNKNOWN_BUILD_ID
-            return _cached_build_id
+            return UNKNOWN_BUILD_ID
 
     _cached_build_id = digest.hexdigest()[:_DIGEST_CHARS]
     return _cached_build_id

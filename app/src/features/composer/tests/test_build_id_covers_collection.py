@@ -1,28 +1,17 @@
 # -*- coding: utf-8 -*-
-"""엔진 지문이 «원문을 모으는 코드»까지 보는지 못 박는다.
+"""보고서 생산 런타임 전체가 캐시 지문에 들어가는지 못 박는다.
 
-★ 왜 이 파일이 생겼나 (2026-08-28)
-  ─────────────────────────────────────────────────────────
-  v2 캐시 열쇠에는 「지금 코드의 지문」이 들어간다. `real.py` 주석이 그 이유를
-  이렇게 적어 두었다:
-
-    「코드가 그대로면 적중해 900원을 아끼고, **한 글자라도 바뀌면 저절로
-      불일치라 옛 결과가 절대 안 나온다 — 「고쳤는데 화면이 그대로」를 막는다.**」
-
-  **그 약속이 깨져 있었다.** 지문은 `composer/` 9개 파일만 봤는데, 원문을
-  «모으는» 코드는 그 밖에 있다.
-
-  실제로 커밋 `3f28b58`(v2-90)이 `analysis_engine/tools/run_pilot.py` 를 고쳐
-  비상장 회사의 공시 원문을 **0자 → 369,310자**로 늘렸는데,
-  지문이 안 바뀌어 **옛 껍데기 보고서가 계속 나왔다.**
-  사용자가 재배포하고 다시 눌러도 화면이 그대로였다 — 「이거 예전 캐시 아니야?」
-
-★ 이 시험이 지키는 것
-  ① 수집 코드가 바뀌면 지문도 «반드시» 바뀐다 (옛 보고서가 안 나온다)
-  ② 목록에 적힌 파일이 실제로 존재한다 (없으면 캐시가 영영 꺼진다)
+파일·feature 이름을 손목록으로 관리하면 새 수집기나 근거 계약이 생길 때마다
+누락된다. 지문은 활성 production 뿌리 세 곳을 전부 순회하고, 불완전하게 읽은
+목록은 절대 정상 지문으로 쓰지 않아야 한다.
 """
 
 from __future__ import annotations
+
+import os
+import stat
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -30,285 +19,305 @@ from src.core import paths
 from src.features.composer import build_id
 
 
+_REVIEW_MISSING_PRODUCERS = (
+    "app/src/features/company_comparison/logic.py",
+    "app/src/features/company_specificity/logic.py",
+    "app/src/features/spanselect/logic.py",
+    "app/src/features/provenance/citations.py",
+    "app/src/shared/official_ir.py",
+    "app/src/shared/report_source_identity.py",
+    "app/src/shared/generation_cache_identity.py",
+    "app/src/features/report_delivery/source_identity.py",
+)
+
+
 @pytest.fixture(autouse=True)
 def _지문_기억을_지운다():
-    """`engine_build_id()` 는 한 번 계산하고 기억한다 — 시험마다 비운다."""
+    """성공 지문 memoization이 시험 사이에 섞이지 않게 한다."""
+
     build_id._cached_build_id = None
     yield
     build_id._cached_build_id = None
 
 
-def _생산모듈을_가짜뿌리로_복사한다(가짜뿌리) -> None:
-    """현재 자동 발견된 content 모듈을 임시 프로젝트에 같은 구조로 복사한다."""
+@pytest.fixture
+def 가짜프로젝트(tmp_path: Path) -> Path:
+    """세 필수 production 뿌리만 갖춘 최소 프로젝트."""
 
-    for 이름 in build_id._content_modules(paths.PROJECT_ROOT):
-        원본 = paths.PROJECT_ROOT / 이름
-        사본 = 가짜뿌리 / 이름
-        사본.parent.mkdir(parents=True, exist_ok=True)
-        사본.write_bytes(원본.read_bytes())
-
-
-# ══════════════════════════════════════════════════════════
-# ① 수집 코드가 바뀌면 지문이 바뀌는가  ← 이게 핵심이다
-# ══════════════════════════════════════════════════════════
+    project_root = tmp_path / "repo"
+    for root_name in build_id._PRODUCTION_ROOTS:
+        (project_root / root_name).mkdir(parents=True)
+    return project_root
 
 
-def test_원문_수집_코드가_바뀌면_지문도_바뀐다(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    """★ 이 시험이 2026-08-28 수정의 «이유»다.
+def _production_file(project_root: Path, relative: str, text: str = "VALUE = 1\n") -> Path:
+    target = project_root / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    return target
 
-    되돌리면 「고쳐도 옛 보고서가 그대로 나오는」 상태로 돌아간다.
-    """
-    원래 = build_id.engine_build_id()
-    assert 원래 != build_id.UNKNOWN_BUILD_ID, "준비 실패 — 파일을 못 읽고 있다"
 
-    # 1판 엔진 파일이 «한 글자» 바뀐 상황을 만든다.
-    가짜뿌리 = tmp_path / "repo"
-    _생산모듈을_가짜뿌리로_복사한다(가짜뿌리)
-
-    바뀐파일 = 가짜뿌리 / "analysis_engine/tools/run_pilot.py"
-    바뀐파일.write_bytes(바뀐파일.read_bytes() + b"\n# v2-90\n")
-
-    monkeypatch.setattr(paths, "PROJECT_ROOT", 가짜뿌리)
+def _use_project(monkeypatch: pytest.MonkeyPatch, project_root: Path) -> None:
+    monkeypatch.setattr(paths, "PROJECT_ROOT", project_root)
     build_id._cached_build_id = None
 
-    바뀐뒤 = build_id.engine_build_id()
 
-    assert 바뀐뒤 != 원래, (
-        "★ 수집 코드를 고쳤는데 지문이 그대로다 — 옛 껍데기 보고서가 계속 나온다"
+def test_활성_product_root_세곳만_고정한다() -> None:
+    """선택 feature 목록을 다시 만들지 않고 넓은 실행 경계만 고정한다."""
+
+    assert build_id._PRODUCTION_ROOTS == (
+        "analysis_engine/src",
+        "analysis_engine/tools",
+        "app/src",
     )
 
 
-def test_1판_엔진이_지문에_들어간다() -> None:
-    """★ 이 파일을 목록에서 빼면 v2-90 과 «똑같은» 사고가 다시 난다."""
-    assert "analysis_engine/tools/run_pilot.py" in build_id._REQUIRED_CONTENT_MODULES
+@pytest.mark.parametrize("producer", _REVIEW_MISSING_PRODUCERS)
+def test_리뷰에서_찾은_내용과_출처신원_생산자가_실제_지문목록에_있다(
+    producer: str,
+) -> None:
+    """경쟁력·고유성·근거 선택·인용·캐시 source identity 누락을 막는다."""
+
+    assert producer in build_id._content_modules(paths.PROJECT_ROOT)
 
 
-def test_수집_흐름_파일도_들어간다() -> None:
-    """`real.py` 는 어느 공시를 쓸지·조각을 어떻게 붙일지를 정한다."""
-    모듈 = build_id._content_modules(paths.PROJECT_ROOT)
-    assert "app/src/features/pipeline/real.py" in 모듈
-    for 조각모듈 in ("logic.py", "extra.py", "relationships.py"):
-        assert f"app/src/features/filingclean/{조각모듈}" in 모듈
+@pytest.mark.parametrize("producer", _REVIEW_MISSING_PRODUCERS)
+def test_리뷰에서_찾은_생산자_각각의_변경이_지문을_바꾼다(
+    producer: str,
+    가짜프로젝트: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """목록 포함 주장에 그치지 않고 실제 파일 bytes가 지문에 결속됨을 증명한다."""
+
+    target = _production_file(가짜프로젝트, producer)
+    _use_project(monkeypatch, 가짜프로젝트)
+    before = build_id.engine_build_id()
+
+    target.write_bytes(target.read_bytes() + b"# changed\n")
+    build_id._cached_build_id = None
+
+    assert build_id.engine_build_id() != before
 
 
-def test_생산패키지의_현재모듈은_손목록없이_지문에_들어간다() -> None:
-    모듈 = build_id._content_modules(paths.PROJECT_ROOT)
-    assert "structured_claims.py" in build_id._SHAPING_MODULES
-    assert "app/src/features/company_performance/logic.py" in 모듈
-    assert "app/src/features/homepage/logic.py" in 모듈
-    assert "app/src/features/revenuemix/logic.py" in 모듈
-    assert "app/src/shared/report_evidence/logic.py" in 모듈
-    assert "app/src/shared/report_quality/fact_binding.py" in 모듈
-    assert "app/src/shared/report_quality/numeric.py" in 모듈
+def test_run_pilot_변경도_지문을_바꾼다(
+    가짜프로젝트: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = _production_file(
+        가짜프로젝트,
+        "analysis_engine/tools/run_pilot.py",
+    )
+    _use_project(monkeypatch, 가짜프로젝트)
+    before = build_id.engine_build_id()
+
+    target.write_bytes(target.read_bytes() + b"# collector changed\n")
+    build_id._cached_build_id = None
+
+    assert build_id.engine_build_id() != before
+
+
+def test_임의의_새_feature_py도_목록수정없이_지문에_들어간다(
+    가짜프로젝트: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """아직 이름조차 모르는 다음 feature도 app/src 경계 안이면 자동 포함한다."""
+
+    _use_project(monkeypatch, 가짜프로젝트)
+    before = build_id.engine_build_id()
+
+    _production_file(
+        가짜프로젝트,
+        "app/src/features/not_yet_planned/logic.py",
+    )
+    build_id._cached_build_id = None
+
+    assert build_id.engine_build_id() != before
+
+
+def test_init_py는_실행코드이므로_변경하면_지문도_바뀐다(
+    가짜프로젝트: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = _production_file(
+        가짜프로젝트,
+        "app/src/features/new_feature/__init__.py",
+        "ENABLED = False\n",
+    )
+    _use_project(monkeypatch, 가짜프로젝트)
+    before = build_id.engine_build_id()
+
+    target.write_text("ENABLED = True\n", encoding="utf-8")
+    build_id._cached_build_id = None
+
+    assert build_id.engine_build_id() != before
 
 
 @pytest.mark.parametrize(
-    "새모듈",
+    "irrelevant",
     (
-        "app/src/features/homepage/new_official_source.py",
-        "app/src/features/revenuemix/new_table_source.py",
-        "analysis_engine/src/features/evidence_collection/new_collector.py",
-        "app/src/features/chapter_evidence/new_adapter.py",
-        "app/src/features/company_comparison/new_comparator.py",
-        "app/src/features/company_specificity/new_filter.py",
-        "app/src/features/provenance/new_ledger.py",
-        "app/src/features/spanselect/new_selector.py",
-        "app/src/shared/report_evidence/new_contract.py",
+        "app/src/features/sample/tests/helper.py",
+        "app/src/features/sample/__pycache__/generated.py",
+        "app/src/features/sample/conftest.py",
+        "app/src/features/sample/test_logic.py",
+        "app/src/features/sample/logic_test.py",
+        "app/src/features/sample/readme.txt",
     ),
 )
-def test_생산패키지에_새_py가_생기면_목록수정없이_지문이_바뀐다(
-    새모듈: str, monkeypatch: pytest.MonkeyPatch, tmp_path
+def test_시험과_임시파일은_지문에_영향을_주지_않는다(
+    irrelevant: str,
+    가짜프로젝트: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """새 feature가 병합돼도 사람이 지문 파일 목록을 고칠 필요가 없다."""
+    _use_project(monkeypatch, 가짜프로젝트)
+    before = build_id.engine_build_id()
 
-    가짜뿌리 = tmp_path / "repo"
-    _생산모듈을_가짜뿌리로_복사한다(가짜뿌리)
-    monkeypatch.setattr(paths, "PROJECT_ROOT", 가짜뿌리)
-
-    추가전 = build_id.engine_build_id()
-    assert 추가전 != build_id.UNKNOWN_BUILD_ID
-
-    추가파일 = 가짜뿌리 / 새모듈
-    추가파일.parent.mkdir(parents=True, exist_ok=True)
-    추가파일.write_text("OUTPUT_RULE = '새 근거 규칙'\n", encoding="utf-8")
+    _production_file(가짜프로젝트, irrelevant, "시험 전용\n")
     build_id._cached_build_id = None
 
-    assert build_id.engine_build_id() != 추가전
-
-
-@pytest.mark.parametrize(
-    "무관파일",
-    (
-        "app/src/features/homepage/tests/test_new_source.py",
-        "app/src/features/homepage/__pycache__/generated.py",
-        "app/src/features/homepage/__init__.py",
-        "app/src/features/homepage/conftest.py",
-        "app/src/features/homepage/test_accidental.py",
-        "app/src/features/homepage/readme.txt",
-    ),
-)
-def test_시험과_패키지표식은_추가돼도_지문이_바뀌지_않는다(
-    무관파일: str, monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    가짜뿌리 = tmp_path / "repo"
-    _생산모듈을_가짜뿌리로_복사한다(가짜뿌리)
-    monkeypatch.setattr(paths, "PROJECT_ROOT", 가짜뿌리)
-
-    추가전 = build_id.engine_build_id()
-    추가파일 = 가짜뿌리 / 무관파일
-    추가파일.parent.mkdir(parents=True, exist_ok=True)
-    추가파일.write_text("시험 또는 패키지 표식\n", encoding="utf-8")
-    build_id._cached_build_id = None
-
-    assert build_id.engine_build_id() == 추가전
+    assert build_id.engine_build_id() == before
 
 
 def test_자동발견_결과는_중복없이_이름순이다() -> None:
-    모듈 = build_id._content_modules(paths.PROJECT_ROOT)
+    modules = build_id._content_modules(paths.PROJECT_ROOT)
 
-    assert 모듈 == tuple(sorted(set(모듈)))
-
-
-def test_비교와_회사고유성_내용생산자는_지문에_들어간다() -> None:
-    """경쟁력 장과 일반론 제거 규칙이 바뀌면 같은 내용 캐시를 재사용하지 않는다."""
-
-    모듈 = build_id._content_modules(paths.PROJECT_ROOT)
-
-    assert "app/src/features/company_comparison/logic.py" in 모듈
-    assert "app/src/features/company_comparison/official_sources.py" in 모듈
-    assert "app/src/features/company_specificity/logic.py" in 모듈
+    assert modules == tuple(sorted(set(modules)))
 
 
-def test_근거선별과_출처장부_내용생산자는_지문에_들어간다() -> None:
-    """선택된 원문과 공개 인용 장부가 달라지면 새 보고서로 생성해야 한다."""
-
-    모듈 = build_id._content_modules(paths.PROJECT_ROOT)
-
-    assert "app/src/features/spanselect/canonical.py" in 모듈
-    assert "app/src/features/spanselect/logic.py" in 모듈
-    assert "app/src/features/provenance/citations.py" in 모듈
-    assert "app/src/features/provenance/sources.py" in 모듈
-
-
-def test_공식IR과_캐시_출처신원_정본은_필수파일이다() -> None:
-    """공식 문서 판정·사전 source digest·사후 snapshot은 캐시 신원의 일부다."""
-
-    필수 = set(build_id._REQUIRED_CONTENT_MODULES)
-
-    assert "app/src/shared/official_ir.py" in 필수
-    assert "app/src/shared/report_source_identity.py" in 필수
-    assert "app/src/shared/generation_cache_identity.py" in 필수
-    assert "app/src/features/report_delivery/source_identity.py" in 필수
-
-
-@pytest.mark.parametrize(
-    "내용생산자",
-    (
-        "app/src/features/company_comparison/logic.py",
-        "app/src/features/company_specificity/logic.py",
-        "app/src/features/spanselect/logic.py",
-        "app/src/features/provenance/citations.py",
-        "app/src/shared/official_ir.py",
-        "app/src/shared/report_source_identity.py",
-        "app/src/shared/generation_cache_identity.py",
-        "app/src/features/report_delivery/source_identity.py",
-    ),
-)
-def test_내용과_캐시신원_생산자_변경은_지문을_바꾼다(
-    내용생산자: str, monkeypatch: pytest.MonkeyPatch, tmp_path
+@pytest.mark.parametrize("root_name", build_id._PRODUCTION_ROOTS)
+def test_필수_root가_하나라도_없으면_UNKNOWN이다(
+    root_name: str,
+    가짜프로젝트: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """경로가 포함됐다는 주장 대신 실제 파일 변경→지문 변경을 끝까지 증명한다."""
-
-    가짜뿌리 = tmp_path / "repo"
-    _생산모듈을_가짜뿌리로_복사한다(가짜뿌리)
-    monkeypatch.setattr(paths, "PROJECT_ROOT", 가짜뿌리)
-
-    변경전 = build_id.engine_build_id()
-    변경파일 = 가짜뿌리 / 내용생산자
-    변경파일.write_bytes(변경파일.read_bytes() + b"\n# fingerprint-regression\n")
-    build_id._cached_build_id = None
-
-    assert build_id.engine_build_id() != 변경전
-
-
-# ══════════════════════════════════════════════════════════
-# ② 목록이 «실제로 있는» 파일을 가리키는가
-# ══════════════════════════════════════════════════════════
-
-
-def test_자동발견한_파일이_전부_존재한다() -> None:
-    """★ 하나라도 없으면 지문이 UNKNOWN 이 되어 캐시가 «영영» 꺼진다.
-
-    그러면 같은 회사를 볼 때마다 900원이 다시 나간다 — 조용히 돈이 샌다.
-    """
-    없는것 = [
-        이름 for 이름 in build_id._content_modules(paths.PROJECT_ROOT)
-        if not (paths.PROJECT_ROOT / 이름).is_file()
-    ]
-
-    assert not 없는것, f"★ 목록에 있는데 파일이 없다: {없는것}"
-
-
-def test_파일을_못_읽으면_캐시를_끈다(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    """★ 「모르는 상태」를 캐시 적중으로 바꾸지 않는다 — fail-closed."""
-    monkeypatch.setattr(paths, "PROJECT_ROOT", tmp_path / "없는폴더")
-    build_id._cached_build_id = None
+    (가짜프로젝트 / root_name).rmdir()
+    _use_project(monkeypatch, 가짜프로젝트)
 
     assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
+    assert build_id._cached_build_id is None
 
 
-def test_필수_단일파일_하나가_없어도_캐시를_끈다(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
+@pytest.mark.parametrize("root_name", build_id._PRODUCTION_ROOTS)
+def test_필수_root가_디렉터리가_아니면_UNKNOWN이다(
+    root_name: str,
+    가짜프로젝트: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    가짜뿌리 = tmp_path / "repo"
-    _생산모듈을_가짜뿌리로_복사한다(가짜뿌리)
-    (가짜뿌리 / "analysis_engine/tools/run_pilot.py").unlink()
-    monkeypatch.setattr(paths, "PROJECT_ROOT", 가짜뿌리)
+    root = 가짜프로젝트 / root_name
+    root.rmdir()
+    root.write_text("디렉터리가 아님", encoding="utf-8")
+    _use_project(monkeypatch, 가짜프로젝트)
 
     assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
+    assert build_id._cached_build_id is None
+
+
+def test_순회오류는_UNKNOWN이고_다음시도에_회복한다(
+    가짜프로젝트: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """일시적인 scandir 오류를 프로세스 수명 동안 영구 캐시하지 않는다."""
+
+    _production_file(가짜프로젝트, "app/src/runtime.py")
+    _use_project(monkeypatch, 가짜프로젝트)
+    original_scandir = os.scandir
+    failed = False
+
+    def flaky_scandir(path):
+        nonlocal failed
+        if Path(path) == 가짜프로젝트 / "app/src" and not failed:
+            failed = True
+            raise OSError("일시 순회 실패")
+        return original_scandir(path)
+
+    monkeypatch.setattr(build_id.os, "scandir", flaky_scandir)
+
+    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
+    assert build_id._cached_build_id is None
+    assert build_id.engine_build_id() != build_id.UNKNOWN_BUILD_ID
+
+
+def test_파일읽기_오류는_UNKNOWN이고_다음시도에_회복한다(
+    가짜프로젝트: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """첫 read_bytes 실패 뒤 정상 파일을 다시 읽어 실제 지문을 만든다."""
+
+    target = _production_file(가짜프로젝트, "app/src/runtime.py")
+    _use_project(monkeypatch, 가짜프로젝트)
+    original_read_bytes = Path.read_bytes
+    failed = False
+
+    def flaky_read_bytes(path: Path) -> bytes:
+        nonlocal failed
+        if path == target and not failed:
+            failed = True
+            raise OSError("일시 파일 읽기 실패")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", flaky_read_bytes)
+
+    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
+    assert build_id._cached_build_id is None
+    assert build_id.engine_build_id() != build_id.UNKNOWN_BUILD_ID
+
+
+@pytest.mark.parametrize("kind", ("symlink", "windows-reparse"))
+def test_link나_junction_root는_조용히_건너뛰지_않고_UNKNOWN이다(
+    kind: str,
+    가짜프로젝트: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows 권한 없이도 lstat/reparse 판정 계약을 직접 검증한다."""
+
+    target = 가짜프로젝트 / "app/src"
+    original_lstat = Path.lstat
+
+    def fake_lstat(path: Path):
+        if path != target:
+            return original_lstat(path)
+        if kind == "symlink":
+            return SimpleNamespace(st_mode=stat.S_IFLNK, st_file_attributes=0)
+        return SimpleNamespace(
+            st_mode=stat.S_IFDIR,
+            st_file_attributes=build_id._WINDOWS_REPARSE_POINT,
+        )
+
+    monkeypatch.setattr(Path, "lstat", fake_lstat)
+    _use_project(monkeypatch, 가짜프로젝트)
+
+    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
+    assert build_id._cached_build_id is None
 
 
 def test_지문은_같은_코드에서_늘_같다() -> None:
-    """★ 흔들리면 캐시가 영영 안 맞아 매번 900원을 쓴다."""
-    첫번째 = build_id.engine_build_id()
+    first = build_id.engine_build_id()
     build_id._cached_build_id = None
-    두번째 = build_id.engine_build_id()
+    second = build_id.engine_build_id()
 
-    assert 첫번째 == 두번째
-    assert len(첫번째) == build_id._DIGEST_CHARS
+    assert first == second
+    assert first != build_id.UNKNOWN_BUILD_ID
+    assert len(first) == build_id._DIGEST_CHARS
 
 
-def test_배포_커밋이_바뀌면_손목록밖_변경이어도_지문이_바뀐다(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """배포 revision은 손으로 적은 파일 목록의 마지막 안전망이다.
+def test_배포_커밋이_바뀌면_지문도_바뀐다(monkeypatch: pytest.MonkeyPatch) -> None:
+    """운영은 원래 모든 배포 변경에서 cache namespace를 가른다."""
 
-    새 품질·claim 모듈을 목록에 넣는 것을 사람이 잊어도, 다른 커밋으로 배포되면
-    이전 생성기의 캐시를 새 생성 결과처럼 꺼내면 안 된다.
-    """
     monkeypatch.setenv(
         "RENDER_GIT_COMMIT", "1111111111111111111111111111111111111111"
     )
-    처음 = build_id.engine_build_id()
+    first = build_id.engine_build_id()
 
     monkeypatch.setenv(
         "RENDER_GIT_COMMIT", "2222222222222222222222222222222222222222"
     )
     build_id._cached_build_id = None
-    바뀐뒤 = build_id.engine_build_id()
 
-    assert 처음 != 바뀐뒤
+    assert build_id.engine_build_id() != first
 
 
 def test_오염된_배포_커밋은_지문_재료로_신뢰하지_않는다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("RENDER_GIT_COMMIT", "1234567-not-a-commit")
-
-    오염값 = build_id.engine_build_id()
+    contaminated = build_id.engine_build_id()
     build_id._cached_build_id = None
     monkeypatch.delenv("RENDER_GIT_COMMIT")
 
-    assert build_id.engine_build_id() == 오염값
+    assert build_id.engine_build_id() == contaminated
