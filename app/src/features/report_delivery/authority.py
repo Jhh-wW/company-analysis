@@ -276,15 +276,28 @@ class ReleaseAuthority:
     ) -> "ReleaseAuthority":
         if type(origin) is not ReleaseAuthority:
             raise TypeError("재사용에는 검증된 원본 출고 권위가 필요합니다")
+        if origin.kind is not ReleaseAuthorityKind.OWNER:
+            raise ValueError("재사용 권위는 최초 생성 owner 권위만 상속할 수 있습니다")
+        clean_bucket = _required_text(
+            billing_bucket_id,
+            label="billing_bucket_id",
+        )
+        if clean_bucket != origin.billing_bucket_id:
+            raise ValueError("재사용 권위의 비용 통장이 원본 권위와 다릅니다")
+        reuse_issued_at = require_aware(issued_at, label="출고 권위 발급")
+        if reuse_issued_at < origin.issued_at:
+            raise ValueError("재사용 권위가 원본 권위보다 먼저 발급될 수 없습니다")
+        if (
+            str(public_id).strip() == origin.public_id
+            or str(delivery_id).strip() == origin.delivery_id
+        ):
+            raise ValueError("재사용 권위에는 새 공개 ID와 delivery가 필요합니다")
         values = {
             "kind": ReleaseAuthorityKind.REUSE,
             "public_id": _required_text(public_id, label="public_id"),
             "delivery_id": _required_text(delivery_id, label="delivery_id"),
             "company_id": origin.company_id,
-            "billing_bucket_id": _required_text(
-                billing_bucket_id,
-                label="billing_bucket_id",
-            ),
+            "billing_bucket_id": clean_bucket,
             "content_snapshot_id": origin.content_snapshot_id,
             "artifact_id": origin.artifact_id,
             "report_payload_sha256": origin.report_payload_sha256,
@@ -299,7 +312,7 @@ class ReleaseAuthority:
                 label="automatic_release_sha256",
             ),
             "origin_authority_id": origin.authority_id,
-            "issued_at": require_aware(issued_at, label="출고 권위 발급"),
+            "issued_at": reuse_issued_at,
         }
         return cls(
             authority_id="authority_" + canonical_digest(
@@ -384,7 +397,9 @@ _SCHEMA: Final[tuple[str, ...]] = (
         SELECT 1
         FROM {TABLE_RELEASE_AUTHORITIES} AS origin
         WHERE origin.authority_id = NEW.origin_authority_id
+          AND origin.kind = 'owner'
           AND origin.company_id = NEW.company_id
+          AND origin.billing_bucket_id = NEW.billing_bucket_id
           AND origin.content_snapshot_id = NEW.content_snapshot_id
           AND origin.artifact_id = NEW.artifact_id
           AND origin.report_payload_sha256 = NEW.report_payload_sha256
@@ -578,6 +593,7 @@ def _assert_storage_binding(
             getattr(origin, field) != getattr(authority, field)
             for field in (
                 "company_id",
+                "billing_bucket_id",
                 "content_snapshot_id",
                 "artifact_id",
                 "report_payload_sha256",

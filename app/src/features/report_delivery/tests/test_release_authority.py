@@ -300,8 +300,15 @@ def test_원본_권위가_없는_재사용은_거절한다(
         delivery_id=delivery.delivery_id,
         artifact_id=artifact.artifact_id,
     )
+    imaginary_delivery = _delivery(
+        public_id="authority-imaginary-origin",
+        bucket=delivery.billing_bucket_id,
+        content=content,
+        now=now,
+        reused=False,
+    )
     imaginary_origin = _owner(
-        delivery=delivery,
+        delivery=imaginary_delivery,
         artifact_id=artifact.artifact_id,
         content=content,
         now=now,
@@ -317,6 +324,49 @@ def test_원본_권위가_없는_재사용은_거절한다(
 
     with pytest.raises(ReleaseAuthorityConflict, match="결속"):
         save_release_authority(conn, reused)
+
+
+def test_다른_비용통장은_승인된_원본을_가져다_재사용할_수_없다(
+    conn: sqlite3.Connection,
+    content,
+    now: dt.datetime,
+    tmp_path: Path,
+) -> None:
+    delivery = _delivery(
+        public_id="authority-bucket-origin",
+        bucket="bucket-owner-only",
+        content=content,
+        now=now,
+        reused=False,
+    )
+    save_delivery(conn, delivery)
+    artifact = _stored_pdf(
+        conn,
+        content=content,
+        now=now,
+        root=tmp_path / "blobs",
+    )
+    bind_artifact_to_delivery(
+        conn,
+        delivery_id=delivery.delivery_id,
+        artifact_id=artifact.artifact_id,
+    )
+    owner = _owner(
+        delivery=delivery,
+        artifact_id=artifact.artifact_id,
+        content=content,
+        now=now,
+    )
+
+    with pytest.raises(ValueError, match="비용 통장"):
+        ReleaseAuthority.issue_reuse(
+            origin=owner,
+            public_id="authority-other-bucket",
+            delivery_id="delivery-other-bucket",
+            billing_bucket_id="bucket-attacker",
+            automatic_release_sha256=_digest("2"),
+            issued_at=now + dt.timedelta(seconds=1),
+        )
 
 
 def test_저장된_권위는_update_delete할_수_없다(
