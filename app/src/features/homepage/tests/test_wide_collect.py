@@ -19,7 +19,7 @@ from src.features.homepage.ir_pdf import OfficialIrCollectResult
 from src.features.homepage.wide_collect import collect_official_web_documents
 from src.features.homepage.wide_evidence_mapping import to_evidence_mappings
 from src.features.homepage.wide_fetch import WideRawResponse, WideTransportError
-from src.features.homepage.wide_fragments import build_fragments
+from src.features.homepage.wide_fragments import build_fragments, build_fragments_for_collection
 
 ROBOTS_ALLOW_ALL = "User-agent: *\nAllow: /\n"
 
@@ -989,9 +989,10 @@ def test_robots_차단으로_문서가_0건이어도_attempt의_company_id는_�
 
 
 def test_전체_파이프라인_fragment와_attempt_모두_대상_회사_company_id를_갖는다():
-    """수집(wide_collect) → 조각화(build_fragments) → 변환(to_evidence_mappings)
-    전체를 실제로 이어 돌려, 최종 산출의 documents·fragments·attempts 전부가
-    같은 대상 회사 company_id를 갖는지 왕복으로 고정한다."""
+    """수집(wide_collect) → 조각화(build_fragments_for_collection) →
+    변환(to_evidence_mappings) 전체를 실제로 이어 돌려, 최종 산출의
+    documents·fragments·attempts 전부가 같은 대상 회사 company_id를
+    갖는지 왕복으로 고정한다."""
     target_company_id = "target-co"
     pages = {
         "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
@@ -1006,15 +1007,18 @@ def test_전체_파이프라인_fragment와_attempt_모두_대상_회사_company
     result = _collect(site, company_id=target_company_id)
     assert result.documents  # 실제로 문서가 만들어졌는지 확인(공허한 통과 방지)
 
-    # 호출자는 문서마다 build_fragments를 불러 이어붙인다(브리핑·docstring 명시 패턴) —
-    # company_id는 document.company_id를 베끼는 게 아니라 이 수집이 대상으로 한
-    # target_company_id를 매번 명시적으로 넘긴다.
-    fragments = tuple(
+    # 운영 호출부 패턴(팀 리드 2026-08-31 지시) — 문서마다 company_id를 손으로
+    # 옮겨 적지 않고, 수집 결과 자신에서 한 번만 꺼내는 편의 함수를 쓴다.
+    fragments = build_fragments_for_collection(result)
+    assert fragments  # 실제로 조각이 만들어졌는지 확인(공허한 통과 방지)
+
+    # 왕복 — 저수준 build_fragments를 문서마다 같은 company_id로 부른 것과 동일하다.
+    manual_fragments = tuple(
         fragment
         for document in result.documents
         for fragment in build_fragments(document, company_id=target_company_id)
     )
-    assert fragments  # 실제로 조각이 만들어졌는지 확인(공허한 통과 방지)
+    assert fragments == manual_fragments
 
     mapped = to_evidence_mappings(documents=result.documents, fragments=fragments, attempts=result.attempts)
 

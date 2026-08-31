@@ -19,6 +19,13 @@
   이 조회가 실제로 어느 회사를 대상으로 했는지»를 매번 직접 넘겨야
   한다. document의 company_id와 자동으로 같다고 가정하면 다른 회사
   조회 결과가 섞여도 조용히 통과할 수 있어, 그 가정 자체를 없앴다.
+  ``build_fragments``는 이 명시 인자를 **공격 시험 전용**으로 유지한다
+  — 「호출자가 일부러 다른 값을 넘기는 정당한 운영 시나리오」는 없다
+  (팀 리드 2026-08-31). **운영 호출부는 대신 아래
+  ``build_fragments_for_collection``을 쓴다** — 수집 결과 자신에서
+  company_id를 한 번만 꺼내 모든 문서에 그대로 실으므로, 호출 지점에서
+  값을 잘못 넘길 방법이 구조적으로 없다(``build_fragments``를 직접
+  호출하며 손으로 company_id를 옮겨 적지 않는다).
 """
 
 from __future__ import annotations
@@ -27,7 +34,11 @@ import hashlib
 
 from src.features.homepage.constants import WIDE_SLOT_BODY_KEYWORDS
 from src.features.homepage.wide_domain import slot_ids_for_url
-from src.features.homepage.wide_types import WideDocumentIdentity, WideFragment
+from src.features.homepage.wide_types import (
+    WideCollectionResult,
+    WideDocumentIdentity,
+    WideFragment,
+)
 
 #: 구간 본문에 후보 슬롯의 신호 키워드가 «있을 때»의 점수.
 _SCORE_BODY_KEYWORD_MATCH = 700
@@ -89,6 +100,43 @@ def build_fragments(document: WideDocumentIdentity, *, company_id: str) -> tuple
                 )
             )
     return tuple(fragments)
+
+
+def build_fragments_for_collection(result: WideCollectionResult) -> tuple[WideFragment, ...]:
+    """수집 결과의 모든 문서에서 fragment를 한 번에 만드는 얇은 편의 함수.
+
+    ★ 계약 generation=8 — **운영 호출부는 이 함수를 쓴다**(팀 리드
+      2026-08-31 지시: ``build_fragments``에 지역 거부를 추가하는 대신
+      구조로 막는다). company_id를 수집 결과 자신(documents)에서 한 번만
+      꺼내 모든 문서에 그대로 실으므로, 호출 지점에서 문서마다 값을 따로
+      옮겨 적다 실수로 다른 회사 값을 넣을 방법이 없다.
+
+    Args:
+        result: ``collect_official_web_documents``가 돌려준 수집 결과.
+
+    Returns:
+        모든 문서의 fragment를 이어붙인 튜플(결정론 순서 — documents
+        순서·문서 내 구간 순서를 그대로 따른다). 문서가 0건이면 빈 튜플.
+
+    Raises:
+        ValueError: 문서들의 company_id가 서로 다르면 — 있어서는 안 되는
+            내부 불일치(한 번의 수집 실행은 회사 하나만 대상으로 한다)를
+            조용히 아무 값이나 골라 감추지 않는다.
+    """
+    if not result.documents:
+        return ()
+    company_ids = {document.company_id for document in result.documents}
+    if len(company_ids) > 1:
+        raise ValueError(
+            "수집 결과의 문서들이 서로 다른 company_id를 갖고 있습니다"
+            f"(내부 불일치): {sorted(company_ids)!r}"
+        )
+    (company_id,) = company_ids
+    return tuple(
+        fragment
+        for document in result.documents
+        for fragment in build_fragments(document, company_id=company_id)
+    )
 
 
 def _matched_body_slots(text: str, candidate_slots: tuple[str, ...]) -> tuple[str, ...]:

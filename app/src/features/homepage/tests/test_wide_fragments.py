@@ -5,16 +5,18 @@ from __future__ import annotations
 import pytest
 
 from src.features.homepage.constants import WIDE_REQUIRED_SLOT_IDS
-from src.features.homepage.wide_fragments import build_fragments
-from src.features.homepage.wide_types import WideDocumentIdentity
+from src.features.homepage.wide_fragments import build_fragments, build_fragments_for_collection
+from src.features.homepage.wide_types import WideCollectionResult, WideDocumentIdentity
 
 _SHA = "a" * 64
 _FORBIDDEN_SLOT_PREFIXES = ("comparison_", "limitation", "historical_performance")
 _COMPANY_ID = "c1"
 
 
-def _document(canonical_url: str, usable_ranges: tuple[str, ...]) -> WideDocumentIdentity:
-    return WideDocumentIdentity(
+def _document(
+    canonical_url: str, usable_ranges: tuple[str, ...], **overrides: object
+) -> WideDocumentIdentity:
+    fields = dict(
         company_id="c1",
         document_id="d1",
         canonical_url=canonical_url,
@@ -31,6 +33,8 @@ def _document(canonical_url: str, usable_ranges: tuple[str, ...]) -> WideDocumen
         requirement="REQUIRED",
         source_tier="TIER_1_OFFICIAL",
     )
+    fields.update(overrides)
+    return WideDocumentIdentity(**fields)
 
 
 def test_채용_페이지는_culture_슬롯만_받는다():
@@ -158,3 +162,79 @@ def test_company_id를_생략하면_TypeError():
     document = _document("https://company.example/careers", ("채용 문구입니다.",))
     with pytest.raises(TypeError):
         build_fragments(document)  # type: ignore[call-arg]
+
+
+# ── build_fragments_for_collection: 운영 호출부 전용 편의 함수 ──────
+
+
+def test_수집결과의_모든_문서에서_조각을_만든다():
+    """운영 호출부 경로 — 문서마다 build_fragments를 손으로 부르지 않아도
+    수집 결과 하나로 모든 문서의 fragment를 한 번에 얻는다."""
+    careers = _document(
+        "https://company.example/careers", ("채용 문구입니다.",), document_id="d-careers"
+    )
+    about = _document(
+        "https://company.example/about", ("회사 소개입니다.",), document_id="d-about"
+    )
+    result = WideCollectionResult(documents=(careers, about), attempts=())
+
+    fragments = build_fragments_for_collection(result)
+
+    assert fragments
+    assert {f.document_id for f in fragments} == {"d-careers", "d-about"}
+
+
+def test_수집결과_company_id를_모든_fragment에_싣는다():
+    """공격 시험 — document.company_id를 그대로 베끼는 게 아니라 수집 결과
+    자신에서 한 번만 꺼낸 값을 싣는지 확인한다(값은 같지만 출처가 다르다는
+    것을 왕복으로 증명)."""
+    document = _document(
+        "https://company.example/careers", ("채용 문구입니다.",), company_id="target-co"
+    )
+    result = WideCollectionResult(documents=(document,), attempts=())
+
+    fragments = build_fragments_for_collection(result)
+
+    assert fragments
+    assert all(f.company_id == "target-co" for f in fragments)
+
+
+def test_문서가_0건이면_빈_튜플():
+    """robots 차단 등으로 문서가 하나도 안 만들어진 수집 결과도 예외 없이
+    빈 튜플을 돌려줘야 한다(문서가 없으니 company_id를 꺼낼 곳도 없다)."""
+    result = WideCollectionResult(documents=(), attempts=())
+    assert build_fragments_for_collection(result) == ()
+
+
+def test_문서들의_company_id가_다르면_ValueError():
+    """공격 시험 — 한 번의 수집 실행은 회사 하나만 대상으로 해야 정상이다.
+    내부 불일치(서로 다른 company_id가 섞인 documents)를 조용히 아무
+    값이나 골라 감추지 않고 즉시 ValueError로 막는다."""
+    doc_a = _document(
+        "https://company.example/careers",
+        ("채용 문구입니다.",),
+        document_id="d-a",
+        company_id="company-a",
+    )
+    doc_b = _document(
+        "https://company.example/about",
+        ("회사 소개입니다.",),
+        document_id="d-b",
+        company_id="company-b",
+    )
+    result = WideCollectionResult(documents=(doc_a, doc_b), attempts=())
+
+    with pytest.raises(ValueError):
+        build_fragments_for_collection(result)
+
+
+def test_수집결과_경로와_저수준_경로는_같은_fragment를_만든다():
+    """왕복 — build_fragments_for_collection이 문서마다 build_fragments를
+    같은 company_id로 부르는 것과 동일한 결과를 내는지 확인한다."""
+    document = _document("https://company.example/careers", ("채용 문구입니다.",))
+    result = WideCollectionResult(documents=(document,), attempts=())
+
+    via_collection = build_fragments_for_collection(result)
+    via_low_level = build_fragments(document, company_id=document.company_id)
+
+    assert via_collection == via_low_level
