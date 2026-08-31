@@ -103,6 +103,9 @@ def to_document(
             published_on=_coerce_str(value["published_on"], label="발행일"),
             collected_at=_coerce_str(value["collected_at"], label="수집 시각"),
             content_sha256=_coerce_str(value["content_sha256"], label="문서 내용 해시"),
+            exact_evidence_hashes=_coerce_str_tuple(
+                value["exact_evidence_hashes"], label="문서의 정확한 근거 조각 해시"
+            ),
             identity_binding=_coerce_str(
                 value["identity_binding"], label="회사 결속 근거"
             ),

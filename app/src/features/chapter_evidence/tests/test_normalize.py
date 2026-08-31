@@ -77,6 +77,40 @@ def test_알수없는_출처등급_문자열은_거부한다() -> None:
         to_document(mapping)
 
 
+def test_문서의_정확한_근거_해시_목록이_계약형으로_전달된다() -> None:
+    expected_hashes = (sha256_of("첫 번째 근거 원문"), sha256_of("두 번째 근거 원문"))
+    mapping = make_document(
+        company_id="corp-1",
+        document_id="doc-1",
+        source_kind="dart_business_report",
+        exact_evidence_hashes=expected_hashes,
+    )
+
+    document = to_document(mapping)
+
+    assert document.exact_evidence_hashes == expected_hashes
+
+
+def test_문서에_정확한_근거_해시가_빠지면_한국어_예외를_낸다() -> None:
+    mapping = make_document(
+        company_id="corp-1", document_id="doc-1", source_kind="dart_business_report"
+    )
+    del mapping["exact_evidence_hashes"]
+
+    with pytest.raises(ValueError, match="필수 항목이 빠졌습니다"):
+        to_document(mapping)
+
+
+def test_문서의_정확한_근거_해시_형식이_잘못되면_거부한다() -> None:
+    mapping = make_document(
+        company_id="corp-1", document_id="doc-1", source_kind="dart_business_report"
+    )
+    mapping["exact_evidence_hashes"] = "not-a-list"
+
+    with pytest.raises(ValueError, match="목록 형식이 올바르지 않습니다"):
+        to_document(mapping)
+
+
 def test_매핑_조각을_계약형으로_바꾼다() -> None:
     mapping = make_fragment(
         fragment_id="frag-1",

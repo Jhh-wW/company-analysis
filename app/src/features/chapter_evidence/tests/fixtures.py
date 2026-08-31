@@ -33,7 +33,17 @@ def make_document(
     title: str = "예시 문서",
     source_tier: str = SourceTier.TIER_1_OFFICIAL.value,
     requirement: str = SourceRequirement.REQUIRED.value,
+    exact_evidence_hashes: tuple[str, ...] | None = None,
 ) -> dict[str, object]:
+    """generation=7 문서를 만든다.
+
+    ``exact_evidence_hashes``를 안 주면 이 문서 자체만으로도 유효하도록
+    자리표시자 해시 하나를 채운다. 실제 조각과 결속시키려면
+    ``_bind_exact_evidence_hashes``로 이 문서가 속한 fixture의 fragments를
+    역산해 덮어써야 한다 — build_*_fixture 함수들이 마지막 단계에서 이를
+    수행한다.
+    """
+
     return {
         "company_id": company_id,
         "document_id": document_id,
@@ -45,12 +55,53 @@ def make_document(
         "published_on": "2026-03-01",
         "collected_at": "2026-08-31T00:00:00+00:00",
         "content_sha256": sha256_of(f"content:{document_id}"),
+        "exact_evidence_hashes": (
+            exact_evidence_hashes
+            if exact_evidence_hashes is not None
+            else (sha256_of(f"placeholder-evidence:{document_id}"),)
+        ),
         "identity_binding": f"binding:{document_id}",
         "usable_ranges": [{"start": 0, "end": 800}],
         "collector_version": "collector-v1",
         "parser_version": "parser-v1",
         "requirement": requirement,
     }
+
+
+def _bind_exact_evidence_hashes(
+    documents: list[dict[str, object]], fragments: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    """문서가 실제로 내보내는 조각 해시 목록을 조각들로부터 역산해 채운다.
+
+    generation=7 계약은 문서마다 자신이 내보내는 조각의 text_sha256 전체를
+    ``exact_evidence_hashes``로 선언하게 하고, 그 목록에 없는 해시를 가진
+    조각은 (select.py의 결속 확인에서) 후보에서 제외된다. fixture는 문서를
+    먼저 만들고 조각을 나중에 만들거나 나중에 조각을 바꿔치기하는 경우가
+    있어, 매번 손으로 해시를 맞추는 대신 마지막에 한 번 역산해 붙인다.
+    이 문서를 참조하는 조각이 하나도 없으면(=계약이 빈 목록을 거부하는
+    상황) fixture 자체가 잘못됐다는 뜻이므로 조용히 넘어가지 않고 즉시
+    실패시킨다.
+    """
+
+    hashes_by_document: dict[str, list[str]] = {}
+    for fragment in fragments:
+        document_id = str(fragment["document_id"])
+        text_sha256 = str(fragment["text_sha256"])
+        bucket = hashes_by_document.setdefault(document_id, [])
+        if text_sha256 not in bucket:
+            bucket.append(text_sha256)
+
+    bound_documents: list[dict[str, object]] = []
+    for document in documents:
+        document_id = str(document["document_id"])
+        hashes = hashes_by_document.get(document_id)
+        if not hashes:
+            raise AssertionError(
+                f"fixture 문서 {document_id} 를 참조하는 조각이 없어 "
+                "exact_evidence_hashes를 채울 수 없습니다"
+            )
+        bound_documents.append({**document, "exact_evidence_hashes": tuple(hashes)})
+    return bound_documents
 
 
 def make_fragment(
@@ -194,7 +245,11 @@ def build_listed_fixture(*, company_id: str = "corp-listed") -> dict[str, list]:
         )
         fragments.extend(section_fragments)
         attempts.extend(section_attempts)
-    return {"documents": documents, "fragments": fragments, "attempts": attempts}
+    return {
+        "documents": _bind_exact_evidence_hashes(documents, fragments),
+        "fragments": fragments,
+        "attempts": attempts,
+    }
 
 
 def build_financial_fixture(*, company_id: str = "corp-financial") -> dict[str, list]:
@@ -222,6 +277,12 @@ def build_financial_fixture(*, company_id: str = "corp-financial") -> dict[str, 
             and fragment["slot_id"] == completed_execution_slot
         )
     ] + [replacement_fragment]
+    # 조각을 바꿔치기했으므로 문서의 exact_evidence_hashes도 다시 역산한다 —
+    # 안 그러면 새 replacement_fragment의 해시가 문서 허용 목록에 없어
+    # select.py의 결속 확인에서 조용히 걸러진다.
+    fixture["documents"] = _bind_exact_evidence_hashes(
+        fixture["documents"], fixture["fragments"]
+    )
     return fixture
 
 
@@ -282,7 +343,11 @@ def build_wisely_type_fixture(*, company_id: str = "corp-wisely") -> dict[str, l
         fragments.extend(section_fragments)
         attempts.extend(section_attempts)
 
-    return {"documents": documents, "fragments": fragments, "attempts": attempts}
+    return {
+        "documents": _bind_exact_evidence_hashes(documents, fragments),
+        "fragments": fragments,
+        "attempts": attempts,
+    }
 
 
 def build_no_homepage_fixture(*, company_id: str = "corp-no-homepage") -> dict[str, list]:
@@ -316,7 +381,11 @@ def build_no_homepage_fixture(*, company_id: str = "corp-no-homepage") -> dict[s
                 reason_code="official_homepage_dns_not_found",
             )
         )
-    return {"documents": documents, "fragments": fragments, "attempts": attempts}
+    return {
+        "documents": _bind_exact_evidence_hashes(documents, fragments),
+        "fragments": fragments,
+        "attempts": attempts,
+    }
 
 
 def build_javascript_render_failure_fixture(

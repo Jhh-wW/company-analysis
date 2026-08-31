@@ -13,7 +13,24 @@ from src.shared.report_evidence.models import (
 )
 
 
-def _document(*, company_id: str = "corp-1", document_id: str = "doc-1") -> CollectedEvidenceDocument:
+def _document(
+    *,
+    company_id: str = "corp-1",
+    document_id: str = "doc-1",
+    exact_evidence_hashes: tuple[str, ...] | None = None,
+) -> CollectedEvidenceDocument:
+    """generation=7 문서를 만든다.
+
+    ``exact_evidence_hashes``를 안 주면(이 시험에서 문서-조각 결속 자체를
+    검증하지 않는 경우) 자리표시자 해시 하나로 유효성만 채운다. 결속을
+    검증하는 시험은 실제로 쓸 조각들의 text_sha256을 명시적으로 넘긴다.
+    """
+
+    hashes = (
+        exact_evidence_hashes
+        if exact_evidence_hashes is not None
+        else (hashlib.sha256(f"placeholder:{document_id}".encode()).hexdigest(),)
+    )
     return CollectedEvidenceDocument(
         company_id=company_id,
         document_id=document_id,
@@ -25,6 +42,7 @@ def _document(*, company_id: str = "corp-1", document_id: str = "doc-1") -> Coll
         published_on="2026-03-01",
         collected_at="2026-08-31T00:00:00+00:00",
         content_sha256="a" * 64,
+        exact_evidence_hashes=hashes,
         identity_binding="binding",
         usable_ranges=(DocumentTextRange(0, 500),),
         collector_version="collector-v1",
