@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import sqlite3
 import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Optional, TypeVar
@@ -1220,8 +1221,70 @@ def _fail_report_delivery(job: Job) -> None:
     )
 
 
+def stage_report_storage(conn: sqlite3.Connection, job: Job) -> None:
+    """caller 소유 transaction에 보고서·projection·권한 결속을 준비한다.
+
+    연결을 열거나 commit/rollback하지 않는다. 최종 불변 출고 경계는 이 함수를
+    Delivery·artifact metadata·cache·charge와 같은 연결에서 호출할 수 있다.
+    현재 독립 저장 호환 경로는 아래 ``_save_report`` wrapper만 사용한다.
+    """
+
+    if job.result is None or job.result.report is None:
+        raise ValueError("저장할 보고서가 없습니다")
+    delivery_expires_at: float | None = None
+    if job.requires_public_report_grant:
+        if job.delivery_expires_at is None:
+            raise report_access_store.PublicGrantBindingUnavailable(
+                "PUBLIC 저장 전에 Delivery 만료 시각이 고정되지 않았습니다"
+            )
+        delivery_expires_at = job.delivery_expires_at.timestamp()
+        required_cookie_expiry = (
+            delivery_expires_at
+            + report_access_constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
+        )
+        if job.public_grant_expires_at <= required_cookie_expiry:
+            raise report_access_store.PublicGrantBindingUnavailable(
+                "PUBLIC cookie가 Delivery 만료와 저장 여유보다 먼저 끝납니다"
+            )
+    if not report_store.insert_new(
+        conn,
+        report_id=job.job_id,
+        corp_id=job.card.ref or job.card.legal_name,
+        job=job.user_input.job,
+        report=job.result.report,
+    ):
+        raise RuntimeError("공개 보고서 ID가 이미 사용 중입니다")
+    dashboard_store.register_report(
+        conn,
+        report_id=job.job_id,
+        corp_type=job.result.report.corp_type,
+        now_iso=clock.iso_now_kst(),
+        payload_json=report_store.report_to_json(job.result.report),
+    )
+    report_bound = report_access_store.bind_report(
+        conn,
+        run_id=job.job_id,
+        report_id=job.job_id,
+        delivery_expires_at=delivery_expires_at,
+    )
+    if job.requires_public_report_grant and not report_bound:
+        raise report_access_store.PublicGrantBindingUnavailable(
+            "PUBLIC 실행에 결속된 브라우저 grant가 없습니다"
+        )
+    job_interruptions.delete(conn, job.job_id)
+    if job.share_link_hash and not share_store.finish_run(
+        conn,
+        run_id=job.job_id,
+        status=share_store.RUN_STATUS_AWAITING_RELEASE,
+        finished_at=clock.iso_now_kst(),
+        report_id=job.job_id,
+        internal_ai_cost_krw=job.result.cost_krw,
+    ):
+        raise RuntimeError("LINK 보고서 생성 이력을 연결하지 못했습니다")
+
+
 def _save_report(job: Job) -> bool:
-    """만든 보고서를 파일 저장소에 남긴다.
+    """기존 호출자를 위해 staging을 독립 transaction으로 확정한다.
 
     ★ 이게 없으면 **서버를 끄는 순간 보고서가 사라진다** (메모리에만 있었다).
     ★ LINK·ADMIN의 임시 미리보기는 저장 실패 경고와 함께 메모리에 남을 수 있다.
@@ -1231,61 +1294,10 @@ def _save_report(job: Job) -> bool:
     if job.result is None or job.result.report is None:
         return False
     try:
-        delivery_expires_at: float | None = None
-        if job.requires_public_report_grant:
-            if job.delivery_expires_at is None:
-                raise report_access_store.PublicGrantBindingUnavailable(
-                    "PUBLIC 저장 전에 Delivery 만료 시각이 고정되지 않았습니다"
-                )
-            delivery_expires_at = job.delivery_expires_at.timestamp()
-            required_cookie_expiry = (
-                delivery_expires_at
-                + report_access_constants.PUBLIC_GRANT_COMMIT_MARGIN_SEC
-            )
-            if job.public_grant_expires_at <= required_cookie_expiry:
-                raise report_access_store.PublicGrantBindingUnavailable(
-                    "PUBLIC cookie가 Delivery 만료와 저장 여유보다 먼저 끝납니다"
-                )
         with storage_db.connect() as conn:
-            if not report_store.insert_new(
-                conn,
-                report_id=job.job_id,
-                corp_id=job.card.ref or job.card.legal_name,
-                job=job.user_input.job,
-                report=job.result.report,
-            ):
-                raise RuntimeError("공개 보고서 ID가 이미 사용 중입니다")
-            dashboard_store.register_report(
-                conn,
-                report_id=job.job_id,
-                corp_type=job.result.report.corp_type,
-                now_iso=clock.iso_now_kst(),
-                payload_json=report_store.report_to_json(job.result.report),
-            )
-            # PUBLIC 데모 권한은 run 주소와 별개다. 같은 저장 transaction에서
-            # report 결속까지 붙여 재시작 직후에도 그 브라우저만 열 수 있게 한다.
-            report_bound = report_access_store.bind_report(
-                conn,
-                run_id=job.job_id,
-                report_id=job.job_id,
-                delivery_expires_at=delivery_expires_at,
-            )
-            if job.requires_public_report_grant and not report_bound:
-                raise report_access_store.PublicGrantBindingUnavailable(
-                    "PUBLIC 실행에 결속된 브라우저 grant가 없습니다"
-                )
-            job_interruptions.delete(conn, job.job_id)
-            if job.share_link_hash and not share_store.finish_run(
-                conn,
-                run_id=job.job_id,
-                status=share_store.RUN_STATUS_AWAITING_RELEASE,
-                finished_at=clock.iso_now_kst(),
-                report_id=job.job_id,
-                internal_ai_cost_krw=job.result.cost_krw,
-            ):
-                raise RuntimeError("LINK 보고서 생성 이력을 연결하지 못했습니다")
-            # bind_report가 잡은 writer lock을 다른 쓰기 뒤까지 유지한 채 여기서
-            # 직접 확정한다. 검사와 commit 사이에 revoke가 끼어들 수 없다.
+            stage_report_storage(conn, job)
+            # 호환 wrapper만 독립 commit한다. 최종izer는 같은 staging 함수를
+            # caller-owned transaction 안에서 사용해 전체 출고와 함께 확정한다.
             conn.commit()
         job.report_persisted = True
         job.persistence_warning = ""

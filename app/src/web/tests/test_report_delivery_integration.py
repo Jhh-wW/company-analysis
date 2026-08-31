@@ -141,6 +141,53 @@ def test_LINK와ADMIN저장은_grant결속False가_정상이고_MEMBER계약도_
         assert report_store.load(conn, report_id) is not None
 
 
+def test_PUBLIC_보고서staging은_caller연결을_commit하지않고_rollback된다():
+    report = _demo_report()
+    report_id = uuid.uuid4().hex
+    job = _public_job_for_save(report, report_id=report_id)
+    with storage_db.connect() as conn:
+        grant = report_access_store.issue_and_bind(
+            conn,
+            existing_token="",
+            run_id=report_id,
+        )
+    job.public_grant_expires_at = grant.expires_at
+
+    with storage_db.connect() as conn:
+        job_runtime.stage_report_storage(conn, job)
+        assert conn.in_transaction
+        assert job.report_persisted is None
+        assert report_store.load(conn, report_id) is not None
+        assert conn.execute(
+            f"SELECT COUNT(*) FROM "
+            f"{job_runtime.dashboard_store.TABLE_REPORT_VERSIONS} "
+            "WHERE report_id=?",
+            (report_id,),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            f"SELECT report_id FROM {report_access_store.TABLE_BINDINGS} "
+            "WHERE run_id=?",
+            (report_id,),
+        ).fetchone()[0] == report_id
+        conn.rollback()
+
+    with storage_db.connect() as conn:
+        assert report_store.load(conn, report_id) is None
+        job_runtime.dashboard_store.ensure_schema(conn)
+        assert conn.execute(
+            f"SELECT COUNT(*) FROM "
+            f"{job_runtime.dashboard_store.TABLE_REPORT_VERSIONS} "
+            "WHERE report_id=?",
+            (report_id,),
+        ).fetchone()[0] == 0
+        # 작업 시작 때 이미 commit한 run 결속은 남지만 report 승격만 되돌아간다.
+        assert conn.execute(
+            f"SELECT report_id FROM {report_access_store.TABLE_BINDINGS} "
+            "WHERE run_id=?",
+            (report_id,),
+        ).fetchone()[0] == ""
+
+
 def test_PUBLIC_cookie가_Delivery보다먼저끝나면_DB쓰기전_거절한다(monkeypatch):
     report = _demo_report()
     report_id = uuid.uuid4().hex

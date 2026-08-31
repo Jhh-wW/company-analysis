@@ -33,6 +33,11 @@ commit 여유를 더해 grant가 **보고서의 60일 전체보다 오래 사는
    뒤 명시적으로 commit한다. new·cache·single-flight waiter가 모두 이 경계를 쓰며,
    실패하면 Delivery·자동출고 승인·고객 청구가 함께 rollback된다.
 
+`job_runtime.stage_report_storage(conn, job)`은 report·dashboard snapshot·권한 결속을
+caller 소유 연결에 쓰되 commit/rollback하지 않는다. 최종 출고 통합자는 이 staging을
+Delivery·cache·charge와 같은 transaction에서 호출한다. `_save_report(job)`은 아직
+독립 저장을 요구하는 기존 호출자를 위한 호환 wrapper이며 그 wrapper만 직접 commit한다.
+
 같은 run이 PUBLIC과 MEMBER 표에 동시에 있으면
 `MixedReportOwnershipConflict`로 어느 행도 바꾸기 전에 거절한다. 호출자가 한쪽을
 임의로 우선해 고치면 다른 소유자에게 보고서를 노출할 수 있으므로 자동 복구하지
