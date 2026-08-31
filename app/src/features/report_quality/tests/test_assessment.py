@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from decimal import Decimal
 
 from src.features.report_quality.assessment import (
     assess_generation,
@@ -37,6 +38,10 @@ _ITEM_WORDS = (
     "아",
     "자",
     "차",
+    "카",
+    "타",
+    "파",
+    "하",
 )
 
 
@@ -118,6 +123,108 @@ def test_실질claim이_하한_미만이면_TOO_FEW_SUBSTANTIVE_CLAIMS다() -> N
     assert result.quality.underfilled_sections == ()
     assert result.safety.decision is ReleaseDecision.RELEASE_ALLOWED
     assert result.publication_grade is QualityGrade.PARTIAL
+
+
+# ══════════════════════════════════════════════════════════
+# ★ 2026-09-01 — 값 비교가 아니라 «경계 행동»을 재는 시험.
+# 위 시험들은 특정 조합이 어느 등급으로 떨어지는지를 보지만, 여기 세 개는
+# 하한 바로 아래/바로 위에서 게이트가 실제로 막고/여는지를 짝으로 확인한다.
+# 39·49·7은 시험이 직접 정한 «독립 오라클»이다(생산 상수 import 아님) —
+# 누군가 생산 상수를 몰래 낮춰도(예: 40→17) 이 경계 자체는 그대로 39에서
+# 막히고 40에서 열려야 하므로, 그 변경이 이 시험을 정직하게 깨뜨린다.
+# ══════════════════════════════════════════════════════════
+
+
+def test_실질claim_39건은_막히고_40건은_통과한다() -> None:
+    passed_counts = {section_id: 5 for section_id in REQUIRED_QUALITY_SECTION_IDS}
+    blocked_counts = dict(passed_counts)
+    blocked_counts["identity"] = 4  # 8*5 - 1 = 39건. 장별 coverage(4개 slot)는
+    # 여전히 하한(2) 이상이라 다른 게이트는 안 걸린다.
+
+    passed = assess_generation(_candidate(passed_counts))
+    blocked = assess_generation(_candidate(blocked_counts))
+
+    assert passed.quality.substantive_claims == 40
+    assert (
+        QualityProblemCode.TOO_FEW_SUBSTANTIVE_CLAIMS
+        not in passed.quality.problem_codes
+    )
+    assert passed.quality.grade is QualityGrade.COMPLETE
+
+    assert blocked.quality.substantive_claims == 39
+    assert (
+        QualityProblemCode.TOO_FEW_SUBSTANTIVE_CLAIMS in blocked.quality.problem_codes
+    )
+    assert blocked.quality.grade is QualityGrade.PARTIAL
+
+
+def test_검증비율_49퍼센트는_막히고_50퍼센트는_통과한다() -> None:
+    # 8개 장에 총 100건(장별 12~13건)을 만든다. 실제 쓰이는 claim_slot은
+    # 장마다 5종류뿐이라 장별 coverage·안내문 게이트는 여유 있게 통과하고,
+    # 검증 비율만 정확히 49%/50%로 딱 떨어지도록 총량을 100으로 골랐다.
+    counts = {
+        "identity": 13,
+        "business_model": 13,
+        "portfolio": 13,
+        "past_changes": 13,
+        "current_challenges": 12,
+        "future_strategy": 12,
+        "operations_partners": 12,
+        "culture": 12,
+    }
+    base = _candidate(counts)
+    assert len(base.facts) == 100
+
+    def with_verified_count(verified_count: int) -> ReportCandidate:
+        facts = tuple(
+            fact
+            if index < verified_count
+            else replace(fact, verification_state=VerificationState.UNVERIFIED.value)
+            for index, fact in enumerate(base.facts)
+        )
+        return replace(base, facts=facts)
+
+    passed = assess_generation(with_verified_count(50))
+    blocked = assess_generation(with_verified_count(49))
+
+    assert passed.quality.verified_ratio == Decimal("0.50")
+    assert QualityProblemCode.LOW_VERIFIED_RATIO not in passed.quality.problem_codes
+    assert passed.quality.grade is QualityGrade.COMPLETE
+
+    assert blocked.quality.verified_ratio == Decimal("0.49")
+    assert QualityProblemCode.LOW_VERIFIED_RATIO in blocked.quality.problem_codes
+    assert blocked.quality.grade is QualityGrade.PARTIAL
+
+
+def test_독립문서_7건은_막히고_8건은_통과한다() -> None:
+    passed = _candidate()  # 기본값: 8개 장이 각각 다른 문서 → 8건
+    merge_target_identity = passed.sources[0].document_identity
+    second_source_id = passed.sources[1].source_id
+    merged_sources = tuple(
+        replace(source, document_identity=merge_target_identity)
+        if source.source_id == second_source_id
+        else source
+        for source in passed.sources
+    )
+    blocked = replace(passed, sources=merged_sources)  # 두 번째 장의 문서를
+    # 첫 번째 장과 같은 문서로 합쳐 독립 문서를 7건으로 줄인다.
+
+    passed_result = assess_generation(passed)
+    blocked_result = assess_generation(blocked)
+
+    assert passed_result.quality.document_sources == 8
+    assert (
+        QualityProblemCode.TOO_FEW_DOCUMENT_SOURCES
+        not in passed_result.quality.problem_codes
+    )
+    assert passed_result.quality.grade is QualityGrade.COMPLETE
+
+    assert blocked_result.quality.document_sources == 7
+    assert (
+        QualityProblemCode.TOO_FEW_DOCUMENT_SOURCES
+        in blocked_result.quality.problem_codes
+    )
+    assert blocked_result.quality.grade is QualityGrade.PARTIAL
 
 
 def test_FULL계약은_주소만있고_정확한원문조각결속이없으면_공개하지않는다() -> None:

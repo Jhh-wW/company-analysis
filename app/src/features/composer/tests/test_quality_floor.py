@@ -46,11 +46,6 @@ from src.features.composer.verify import (
 from src.features.pipeline.port import Report, ReportSection
 from src.features.provenance.sources import visible_citations
 from src.shared.report_quality.assessment import has_public_numeric_token
-from src.shared.report_quality.constants import (
-    MIN_DOCUMENT_SOURCES,
-    MIN_SUBSTANTIVE_CLAIMS,
-    MIN_VERIFIED_RATIO,
-)
 
 COMPANY_NAME: Final[str] = "제이와이피엔터테인먼트"
 
@@ -62,15 +57,21 @@ _RESPONSES_FIXTURE: Final[dict[str, Any]] = json.loads(
     (_FIXTURE_DIR / "jyp_ask_responses.json").read_text(encoding="utf-8")
 )
 
-# ── 완성 하한 값 — 기준문서 03장 6절(G4). 로컬 상수로 다시 선언하지 않고
-#    생산 상수를 직접 import한다(아래) — 생산 상수가 바뀌면 이 시험도 같이
-#    깨져야 «품질 하한 시험»이라는 이름이 거짓이 되지 않는다.
-#: «확인» 등급 비율 하한은 Decimal이다. 0.50은 이진 부동소수점에서 오차 없이
-#: 표현되므로(정확히 1/2) float()로 바꿔도 값이 흔들리지 않는다 — 임계값을
-#: 낮추거나 올리는 변환이 아니라 타입만 맞추는 변환이다.
-MIN_SUBSTANTIVE_SENTENCES: Final[int] = MIN_SUBSTANTIVE_CLAIMS
-MIN_CONFIRMED_RATIO: Final[float] = float(MIN_VERIFIED_RATIO)
-MIN_CITED_SOURCES: Final[int] = MIN_DOCUMENT_SOURCES
+# ── 완성 하한 값 — 기준문서 03장 6절(G4)을 숫자 그대로 옮긴 것.
+#    ★ 2026-09-01 — 한 번은 이 숫자를 생산 상수 import로 바꿨다가 되돌렸다.
+#    이유: 시험을 생산 상수에 묶으면 «생산 상수가 바뀌면 시험도 같이
+#    깨진다»는 안전선이 성립하는 것처럼 보이지만, 실제로는 «값이 낮아지는»
+#    방향은 못 잡는다 — 누가 40을 17로 낮춰도 import한 시험은 여전히
+#    통과한다(순환 검증). 여기 숫자는 구현에서 도출한 매직 넘버가 아니라
+#    시험이 독립적으로 못 박는 «제품 약속»이다. 이 시험의 존재 이유가
+#    바로 «구현이 이 약속에서 벗어났는지 재는 것»이므로, 일반적인
+#    매직 넘버 금지 규칙(rules/general.md)의 의도된 예외다.
+#: 실질 문장 40개 이상
+MIN_SUBSTANTIVE_SENTENCES: Final[int] = 40
+#: «확인» 등급이 전체의 50% 이상
+MIN_CONFIRMED_RATIO: Final[float] = 0.5
+#: 출처 8건 이상 인용
+MIN_CITED_SOURCES: Final[int] = 8
 #: 안내문만 있는 장 ≤ 1개
 MAX_NOTICE_ONLY_SECTIONS: Final[int] = 1
 #: 1~8장은 반드시 실질 내용이 있어야 한다 (9장은 성립 시에만)
