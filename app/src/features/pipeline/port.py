@@ -18,6 +18,11 @@ else:
     AiCostEvent = Any
 
 from src.core.constants import COUNTED_CELLS
+from src.shared.report_generation.models import (
+    GenerationProducerEvidence,
+    GenerationRunMetrics,
+)
+from src.shared.report_quality.generation import GenerationQualityObservation
 from src.shared.span_selection_diagnostics import SpanSelectionRoundDiagnostic
 
 #: 진행 상황을 알리는 함수. 단계 키 하나를 받아 「이 단계를 시작했다」를 뜻한다.
@@ -222,6 +227,21 @@ class ReportTable:
     entity_scope: str = ""
     raw_unit: str = ""
     unit_dimension: str = ""
+    #: 대표 cite와 별도로 표의 모든 행이 실제로 사용한 공개 출처 번호.
+    #: flow처럼 행마다 출처가 다른 구조에서 부분 집합 누락을 막는다.
+    source_cites: list[str] = field(default_factory=list)
+    #: 검증된 pre-render manifest 안의 이 표 항목을 가리키는 SHA-256 참조.
+    #: FULL 새 생성물은 비어 있으면 출고·재로드 모두 fail-closed 된다.
+    manifest_ref: str = ""
+    #: 원문 직접 결속 대신 검증된 프로그램 사실로 주입된 행의 fact id.
+    #: 비어 있으면 각 행은 evidence_rows와 source_cites로 직접 결속돼야 한다.
+    row_fact_ids: list[str] = field(default_factory=list)
+    #: 저장·cache에는 원문 evidence_rows 대신 이 행별 exact hash만 남긴다.
+    row_evidence_refs: list[str] = field(default_factory=list)
+    #: manifest의 typed 행 결속을 가리키는 행별 canonical SHA-256.
+    row_binding_refs: list[str] = field(default_factory=list)
+    #: 머리글·열 위치·자료형·원값 필드까지 잠근 셀별 canonical SHA-256.
+    cell_binding_refs: list[list[str]] = field(default_factory=list)
 
     @property
     def is_valid(self) -> bool:
@@ -528,6 +548,21 @@ class Report:
     #: 안전 판정과 실제 공개 행동을 분리한 정책 ID. ``legacy-shadow-exception``은
     #: 안전 통과를 뜻하지 않으며 화면·PDF가 그 사실을 반드시 알려야 한다.
     publication_policy: str = ""
+    #: FULL 새 생성물의 공개 section/table/row/cell 구조를 pre-render 입력에
+    #: 봉인한 canonical JSON. SHADOW·과거 저장본은 빈 문자열을 유지한다.
+    public_structure_manifest: str = ""
+    #: 표시 이름이 아닌 DART gen8 법인 식별자. FULL 생성물만 필수다.
+    company_id: str = ""
+    #: 새 생성 운영 모드. 빈 값은 이 필드가 생기기 전 SHADOW/과거 결과다.
+    release_mode: str = ""
+    #: 실제 평가·packet·content·AI ledger를 운반하는 비권위 생산 증거.
+    #: 공개·차감 권한은 없으며 shared release receipt가 이 값을 소비한다.
+    generation_evidence: GenerationProducerEvidence | None = None
+    #: cache·재시작 뒤에도 생성 지표를 0으로 꾸미지 않기 위한 원 실행값.
+    generation_metrics: GenerationRunMetrics | None = None
+    #: 엄격 생성 당시 평가의 표시 projection. 권위는 generation_evidence 안의
+    #: exact GenerationAssessment이며 이 값에서 평가를 역으로 꾸미지 않는다.
+    quality_observation: GenerationQualityObservation | None = None
 
     @property
     def fact_ledger(self) -> list[FactRecord]:
@@ -623,6 +658,12 @@ class RunResult:
     #: 현재 사용자의 불변 링크·PDF 저장이나 같은 순간 waiter의 짧은 fan-out과는
     #: 별개다. 파이프라인이 명시적으로 증명하지 않으면 fail-closed로 끈다.
     generation_cache_eligible: bool = False
+    #: V2RunOutput→Report/storage→RunResult에서 손실 없이 나르는 생산 증거.
+    generation_evidence: GenerationProducerEvidence | None = None
+    #: 생성 당시 정확한 지표. cache hit은 Report에 봉인된 이 값만 재사용한다.
+    generation_metrics: GenerationRunMetrics | None = None
+    #: 새 생성 경로의 관측값. 문자열에서 평가를 재구성하는 권위는 아니다.
+    quality_observation: GenerationQualityObservation | None = None
 
 
 class Pipeline(Protocol):

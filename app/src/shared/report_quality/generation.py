@@ -12,11 +12,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
+from typing import Any, Mapping
 
 from src.shared.report_quality.assessment import assess_generation
 from src.shared.report_quality.contract import resolve_contract
 from src.shared.report_quality.dto import ReportCandidate, ReportSectionCandidate
-from src.shared.report_quality.models import ContractUse
+from src.shared.report_quality.models import ContractUse, GenerationAssessment
 from src.shared.report_quality.models import PublicationPolicy
 
 
@@ -71,6 +73,189 @@ class GenerationQualityObservation:
     quality_problem_codes: tuple[str, ...] = ()
 
 
+_OBSERVATION_WIRE_KEYS = frozenset(
+    {
+        "mode",
+        "contract_version",
+        "quality_grade",
+        "safety_decision",
+        "publication_grade",
+        "release_allowed",
+        "quality_shortfalls",
+        "safety_problems",
+        "substantive_claims",
+        "verified_claims",
+        "verified_ratio",
+        "document_sources",
+        "section_public_sentence_counts",
+        "underfilled_sections",
+        "semantic_underfilled_sections",
+        "notice_only_sections",
+        "quality_problem_codes",
+    }
+)
+
+
+def generation_quality_observation_to_dict(
+    value: GenerationQualityObservation,
+) -> dict[str, object]:
+    """표시 관측값을 느슨한 문자열 재구성 없이 exact wire로 바꾼다."""
+
+    if type(value) is not GenerationQualityObservation:
+        raise TypeError("정확한 GenerationQualityObservation이 필요합니다")
+    return {
+        "mode": value.mode,
+        "contract_version": value.contract_version,
+        "quality_grade": value.quality_grade,
+        "safety_decision": value.safety_decision,
+        "publication_grade": value.publication_grade,
+        "release_allowed": value.release_allowed,
+        "quality_shortfalls": list(value.quality_shortfalls),
+        "safety_problems": list(value.safety_problems),
+        "substantive_claims": value.substantive_claims,
+        "verified_claims": value.verified_claims,
+        "verified_ratio": value.verified_ratio,
+        "document_sources": value.document_sources,
+        "section_public_sentence_counts": [
+            list(item) for item in value.section_public_sentence_counts
+        ],
+        "underfilled_sections": list(value.underfilled_sections),
+        "semantic_underfilled_sections": list(
+            value.semantic_underfilled_sections
+        ),
+        "notice_only_sections": list(value.notice_only_sections),
+        "quality_problem_codes": list(value.quality_problem_codes),
+    }
+
+
+def _observation_strings(value: object, *, label: str) -> tuple[str, ...]:
+    if type(value) is not list or any(
+        type(item) is not str or item != item.strip() or not item
+        for item in value
+    ):
+        raise ValueError(f"{label}은 공백 없는 문자열 JSON 배열이어야 합니다")
+    return tuple(value)
+
+
+def generation_quality_observation_from_dict(
+    data: Mapping[str, Any],
+) -> GenerationQualityObservation:
+    """unknown/missing key와 bool→int 변환을 거절하고 관측 원본을 복원한다."""
+
+    if type(data) is not dict or set(data) != _OBSERVATION_WIRE_KEYS:
+        raise ValueError("GenerationQualityObservation key 또는 객체 형식이 다릅니다")
+    for key in (
+        "mode",
+        "contract_version",
+        "quality_grade",
+        "safety_decision",
+        "publication_grade",
+        "verified_ratio",
+    ):
+        value = data[key]
+        if type(value) is not str or value != value.strip() or not value:
+            raise ValueError(f"GenerationQualityObservation {key}가 손상됐습니다")
+    if type(data["release_allowed"]) is not bool:
+        raise ValueError("GenerationQualityObservation release_allowed는 bool이어야 합니다")
+    for key in ("substantive_claims", "verified_claims", "document_sources"):
+        value = data[key]
+        if type(value) is not int or value < 0:
+            raise ValueError(f"GenerationQualityObservation {key}는 0 이상의 정수여야 합니다")
+    ratio = Decimal(data["verified_ratio"])
+    if not ratio.is_finite() or format(ratio, "f") != data["verified_ratio"]:
+        raise ValueError("GenerationQualityObservation verified_ratio가 canonical이 아닙니다")
+    raw_counts = data["section_public_sentence_counts"]
+    if type(raw_counts) is not list or any(
+        type(item) is not list
+        or len(item) != 2
+        or type(item[0]) is not str
+        or item[0] != item[0].strip()
+        or not item[0]
+        or type(item[1]) is not int
+        or item[1] < 0
+        for item in raw_counts
+    ):
+        raise ValueError("GenerationQualityObservation 장별 공개 문장 수가 손상됐습니다")
+    value = GenerationQualityObservation(
+        mode=data["mode"],
+        contract_version=data["contract_version"],
+        quality_grade=data["quality_grade"],
+        safety_decision=data["safety_decision"],
+        publication_grade=data["publication_grade"],
+        release_allowed=data["release_allowed"],
+        quality_shortfalls=_observation_strings(
+            data["quality_shortfalls"], label="품질 부족 사유"
+        ),
+        safety_problems=_observation_strings(
+            data["safety_problems"], label="안전 문제"
+        ),
+        substantive_claims=data["substantive_claims"],
+        verified_claims=data["verified_claims"],
+        verified_ratio=data["verified_ratio"],
+        document_sources=data["document_sources"],
+        section_public_sentence_counts=tuple(
+            (item[0], item[1]) for item in raw_counts
+        ),
+        underfilled_sections=_observation_strings(
+            data["underfilled_sections"], label="공개 문장 부족 장"
+        ),
+        semantic_underfilled_sections=_observation_strings(
+            data["semantic_underfilled_sections"], label="의미 부족 장"
+        ),
+        notice_only_sections=_observation_strings(
+            data["notice_only_sections"], label="안내문 장"
+        ),
+        quality_problem_codes=_observation_strings(
+            data["quality_problem_codes"], label="품질 문제 코드"
+        ),
+    )
+    if generation_quality_observation_to_dict(value) != data:
+        raise ValueError("GenerationQualityObservation canonical 왕복이 다릅니다")
+    return value
+
+
+def assert_observation_matches_assessment(
+    observation: GenerationQualityObservation,
+    assessment: GenerationAssessment,
+) -> None:
+    """관측 문자열을 권위로 쓰지 않고 같은 평가 원본의 projection인지 확인한다."""
+
+    if type(observation) is not GenerationQualityObservation:
+        raise TypeError("정확한 GenerationQualityObservation이 필요합니다")
+    if type(assessment) is not GenerationAssessment:
+        raise TypeError("정확한 GenerationAssessment가 필요합니다")
+    expected = {
+        "contract_version": assessment.contract_version,
+        "quality_grade": assessment.quality.grade.value,
+        "safety_decision": assessment.safety.decision.value,
+        "publication_grade": assessment.publication_grade.value,
+        "release_allowed": assessment.release_allowed,
+        "quality_shortfalls": assessment.quality.shortfall_reasons,
+        "safety_problems": assessment.safety.problems,
+        "substantive_claims": assessment.quality.substantive_claims,
+        "verified_claims": assessment.quality.verified_claims,
+        "verified_ratio": str(assessment.quality.verified_ratio),
+        "document_sources": assessment.quality.document_sources,
+        "section_public_sentence_counts": (
+            assessment.quality.section_public_sentence_counts
+        ),
+        "underfilled_sections": assessment.quality.underfilled_sections,
+        "semantic_underfilled_sections": (
+            assessment.quality.semantic_underfilled_sections
+        ),
+        "notice_only_sections": assessment.quality.notice_only_sections,
+        "quality_problem_codes": tuple(
+            code.value for code in assessment.quality.problem_codes
+        ),
+    }
+    actual = {
+        key: getattr(observation, key)
+        for key in expected
+    }
+    if actual != expected:
+        raise ValueError("GenerationQualityObservation이 실제 평가 원본과 다릅니다")
+
+
 def observe_unbound_generation(
     sections: tuple[UnboundGenerationSection, ...],
     *,
@@ -108,6 +293,25 @@ def observe_generation(
 ) -> GenerationQualityObservation:
     """구조화된 새 생성 후보를 versioned assessor로 한 번만 측정한다."""
 
+    _assessment, observation = assess_and_observe_generation(
+        candidate,
+        contract_version=contract_version,
+    )
+    return observation
+
+
+def assess_and_observe_generation(
+    candidate: ReportCandidate,
+    *,
+    contract_version: str = "",
+) -> tuple[GenerationAssessment, GenerationQualityObservation]:
+    """같은 후보를 정확히 한 번 평가하고 원본 평가와 표시 관측을 함께 준다.
+
+    strict producer transport는 문자열 관측에서 평가를 재구성하지 않고 첫 반환값을
+    그대로 운반한다. 기존 SHADOW 호출자는 두 번째 값만 쓰는
+    :func:`observe_generation` 계약을 계속 유지한다.
+    """
+
     resolution = resolve_contract(
         contract_version,
         use=ContractUse.GENERATION,
@@ -119,7 +323,7 @@ def observe_generation(
         candidate,
         contract_version=resolution.resolved_version,
     )
-    return GenerationQualityObservation(
+    observation = GenerationQualityObservation(
         mode=SHADOW_ASSESSMENT_MODE,
         contract_version=assessment.contract_version,
         quality_grade=assessment.quality.grade.value,
@@ -144,3 +348,18 @@ def observe_generation(
             code.value for code in assessment.quality.problem_codes
         ),
     )
+    return assessment, observation
+
+
+__all__ = [
+    "GenerationQualityObservation",
+    "LEGACY_SHADOW_PUBLICATION_REASON",
+    "SHADOW_ASSESSMENT_MODE",
+    "UnboundGenerationSection",
+    "assert_observation_matches_assessment",
+    "assess_and_observe_generation",
+    "generation_quality_observation_from_dict",
+    "generation_quality_observation_to_dict",
+    "observe_generation",
+    "observe_unbound_generation",
+]

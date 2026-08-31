@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass, field, fields, is_dataclass
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Any, Mapping
 
 from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
 from src.shared.report_quality.integrity import (
@@ -271,9 +271,325 @@ class GenerationValidationReceipt:
         return self.writer_calls + self.reviewer_calls
 
 
+_ASSESSMENT_KEYS = frozenset(
+    {"contract_version", "quality", "safety", "publication_grade"}
+)
+_QUALITY_KEYS = frozenset(
+    {
+        "contract_version",
+        "grade",
+        "substantive_claims",
+        "verified_claims",
+        "verified_ratio",
+        "document_sources",
+        "notice_only_sections",
+        "one_claim_sections",
+        "section_claim_counts",
+        "shortfall_reasons",
+        "section_public_sentence_counts",
+        "underfilled_sections",
+        "semantic_underfilled_sections",
+        "problem_codes",
+    }
+)
+_SAFETY_KEYS = frozenset(
+    {
+        "contract_version",
+        "decision",
+        "verified_fact_ids",
+        "unverified_fact_ids",
+        "rejected_fact_ids",
+        "problems",
+    }
+)
+_RECEIPT_WIRE_KEYS = frozenset(
+    {
+        "version",
+        "company_id",
+        "candidate_sha256",
+        "assessment",
+        "round",
+        "writer_calls",
+        "reviewer_calls",
+        "section_sha256s",
+        "evidence_packet_sha256s",
+        "base_receipt_sha256",
+        "supplemented_section_ids",
+        "assessment_sha256",
+        "receipt_sha256",
+    }
+)
+
+
+def _require_exact_dict(
+    value: object,
+    *,
+    keys: frozenset[str],
+    label: str,
+) -> dict[str, Any]:
+    if type(value) is not dict or set(value) != keys:
+        raise ValueError(f"{label}의 키 또는 객체 형식이 계약과 다릅니다")
+    return value
+
+
+def _wire_strings(value: object, *, label: str) -> tuple[str, ...]:
+    if type(value) is not list or any(
+        type(item) is not str or item != item.strip() or not item
+        for item in value
+    ):
+        raise ValueError(f"{label}은 공백 없는 문자열 JSON 배열이어야 합니다")
+    return tuple(value)
+
+
+def _wire_pairs(
+    value: object,
+    *,
+    label: str,
+    integer_value: bool,
+) -> tuple[tuple[str, Any], ...]:
+    if type(value) is not list:
+        raise ValueError(f"{label}은 JSON 배열이어야 합니다")
+    out: list[tuple[str, Any]] = []
+    for item in value:
+        if (
+            type(item) is not list
+            or len(item) != 2
+            or type(item[0]) is not str
+            or item[0] != item[0].strip()
+            or not item[0]
+        ):
+            raise ValueError(f"{label} pair 저장 형식이 손상됐습니다")
+        if integer_value:
+            if type(item[1]) is not int or item[1] < 0:
+                raise ValueError(f"{label} count는 0 이상의 정수여야 합니다")
+            pair_value: Any = item[1]
+        else:
+            if type(item[1]) is not str:
+                raise ValueError(f"{label} digest는 문자열이어야 합니다")
+            pair_value = item[1]
+        out.append((item[0], pair_value))
+    return tuple(out)
+
+
+def generation_assessment_to_dict(value: GenerationAssessment) -> dict[str, Any]:
+    """정확한 평가 객체를 문자열 등급 재구성 없이 canonical wire로 바꾼다."""
+
+    if (
+        type(value) is not GenerationAssessment
+        or type(value.quality) is not QualityAssessment
+        or type(value.safety) is not SafetyAssessment
+    ):
+        raise TypeError("정확한 GenerationAssessment·QualityAssessment·SafetyAssessment가 필요합니다")
+    payload = _canonical_value(value)
+    if type(payload) is not dict:  # pragma: no cover - dataclass 계약 방어
+        raise TypeError("GenerationAssessment를 JSON 객체로 바꿀 수 없습니다")
+    return payload
+
+
+def generation_assessment_from_dict(data: Mapping[str, Any]) -> GenerationAssessment:
+    """unknown/missing key와 느슨한 scalar 변환 없이 평가 원본을 복원한다."""
+
+    raw = _require_exact_dict(data, keys=_ASSESSMENT_KEYS, label="GenerationAssessment")
+    quality_raw = _require_exact_dict(
+        raw["quality"],
+        keys=_QUALITY_KEYS,
+        label="QualityAssessment",
+    )
+    safety_raw = _require_exact_dict(
+        raw["safety"],
+        keys=_SAFETY_KEYS,
+        label="SafetyAssessment",
+    )
+    for value, label in (
+        (raw["contract_version"], "GenerationAssessment contract"),
+        (quality_raw["contract_version"], "QualityAssessment contract"),
+        (safety_raw["contract_version"], "SafetyAssessment contract"),
+    ):
+        if type(value) is not str or value != value.strip() or not value:
+            raise ValueError(f"{label} 형식이 손상됐습니다")
+    for key in ("substantive_claims", "verified_claims", "document_sources"):
+        if type(quality_raw[key]) is not int or quality_raw[key] < 0:
+            raise ValueError(f"QualityAssessment {key}는 0 이상의 정수여야 합니다")
+    for value, label in (
+        (quality_raw["grade"], "품질 등급"),
+        (raw["publication_grade"], "공개 등급"),
+        (safety_raw["decision"], "안전 판정"),
+    ):
+        if type(value) is not str or value != value.strip() or not value:
+            raise ValueError(f"{label} enum 문자열 형식이 손상됐습니다")
+    if type(quality_raw["verified_ratio"]) is not str:
+        raise ValueError("QualityAssessment verified_ratio는 canonical 문자열이어야 합니다")
+    ratio = Decimal(quality_raw["verified_ratio"])
+    if not ratio.is_finite() or format(ratio, "f") != quality_raw["verified_ratio"]:
+        raise ValueError("QualityAssessment verified_ratio가 canonical Decimal이 아닙니다")
+    problem_codes_raw = quality_raw["problem_codes"]
+    if type(problem_codes_raw) is not list or any(
+        type(value) is not str or value != value.strip() or not value
+        for value in problem_codes_raw
+    ):
+        raise ValueError("QualityAssessment 문제 코드가 JSON 문자열 배열이 아닙니다")
+    quality = QualityAssessment(
+        contract_version=quality_raw["contract_version"],
+        grade=QualityGrade(quality_raw["grade"]),
+        substantive_claims=quality_raw["substantive_claims"],
+        verified_claims=quality_raw["verified_claims"],
+        verified_ratio=ratio,
+        document_sources=quality_raw["document_sources"],
+        notice_only_sections=_wire_strings(
+            quality_raw["notice_only_sections"], label="안내문 장"
+        ),
+        one_claim_sections=_wire_strings(
+            quality_raw["one_claim_sections"], label="한 claim 장"
+        ),
+        section_claim_counts=_wire_pairs(
+            quality_raw["section_claim_counts"],
+            label="장별 의미 claim 수",
+            integer_value=True,
+        ),
+        shortfall_reasons=_wire_strings(
+            quality_raw["shortfall_reasons"], label="품질 부족 사유"
+        ),
+        section_public_sentence_counts=_wire_pairs(
+            quality_raw["section_public_sentence_counts"],
+            label="장별 공개 문장 수",
+            integer_value=True,
+        ),
+        underfilled_sections=_wire_strings(
+            quality_raw["underfilled_sections"], label="공개 문장 부족 장"
+        ),
+        semantic_underfilled_sections=_wire_strings(
+            quality_raw["semantic_underfilled_sections"], label="의미 부족 장"
+        ),
+        problem_codes=tuple(QualityProblemCode(value) for value in problem_codes_raw),
+    )
+    safety = SafetyAssessment(
+        contract_version=safety_raw["contract_version"],
+        decision=ReleaseDecision(safety_raw["decision"]),
+        verified_fact_ids=_wire_strings(
+            safety_raw["verified_fact_ids"], label="검증 fact"
+        ),
+        unverified_fact_ids=_wire_strings(
+            safety_raw["unverified_fact_ids"], label="미검증 fact"
+        ),
+        rejected_fact_ids=_wire_strings(
+            safety_raw["rejected_fact_ids"], label="거절 fact"
+        ),
+        problems=_wire_strings(safety_raw["problems"], label="안전 문제"),
+    )
+    value = GenerationAssessment(
+        contract_version=raw["contract_version"],
+        quality=quality,
+        safety=safety,
+        publication_grade=QualityGrade(raw["publication_grade"]),
+    )
+    if generation_assessment_to_dict(value) != raw:
+        raise ValueError("GenerationAssessment가 canonical wire 왕복과 다릅니다")
+    return value
+
+
+def receipt_to_dict(value: GenerationValidationReceipt) -> dict[str, Any]:
+    if type(value) is not GenerationValidationReceipt:
+        raise TypeError("정확한 GenerationValidationReceipt가 필요합니다")
+    return {
+        "version": 1,
+        "company_id": value.company_id,
+        "candidate_sha256": value.candidate_sha256,
+        "assessment": generation_assessment_to_dict(value.assessment),
+        "round": value.round.value,
+        "writer_calls": value.writer_calls,
+        "reviewer_calls": value.reviewer_calls,
+        "section_sha256s": [list(item) for item in value.section_sha256s],
+        "evidence_packet_sha256s": [
+            list(item) for item in value.evidence_packet_sha256s
+        ],
+        "base_receipt_sha256": value.base_receipt_sha256,
+        "supplemented_section_ids": list(value.supplemented_section_ids),
+        "assessment_sha256": value.assessment_sha256,
+        "receipt_sha256": value.receipt_sha256,
+    }
+
+
+def receipt_from_dict(data: Mapping[str, Any]) -> GenerationValidationReceipt:
+    raw = _require_exact_dict(
+        data,
+        keys=_RECEIPT_WIRE_KEYS,
+        label="GenerationValidationReceipt",
+    )
+    if type(raw["version"]) is not int or raw["version"] != 1:
+        raise ValueError("지원하지 않는 검증 영수증 wire 버전입니다")
+    if type(raw["round"]) is not str:
+        raise ValueError("검증 영수증 round는 닫힌 enum 문자열이어야 합니다")
+    for key in ("writer_calls", "reviewer_calls"):
+        if type(raw[key]) is not int or raw[key] < 0:
+            raise ValueError(f"검증 영수증 {key}는 0 이상의 정수여야 합니다")
+    assessment = generation_assessment_from_dict(raw["assessment"])
+    value = GenerationValidationReceipt(
+        company_id=raw["company_id"],
+        candidate_sha256=raw["candidate_sha256"],
+        assessment=assessment,
+        round=ValidationRound(raw["round"]),
+        writer_calls=raw["writer_calls"],
+        reviewer_calls=raw["reviewer_calls"],
+        section_sha256s=_wire_pairs(
+            raw["section_sha256s"], label="장 지문", integer_value=False
+        ),
+        evidence_packet_sha256s=_wire_pairs(
+            raw["evidence_packet_sha256s"],
+            label="근거 꾸러미 지문",
+            integer_value=False,
+        ),
+        base_receipt_sha256=raw["base_receipt_sha256"],
+        supplemented_section_ids=_wire_strings(
+            raw["supplemented_section_ids"], label="보충 장"
+        ),
+    )
+    if (
+        type(raw["assessment_sha256"]) is not str
+        or type(raw["receipt_sha256"]) is not str
+        or raw["assessment_sha256"] != value.assessment_sha256
+        or raw["receipt_sha256"] != value.receipt_sha256
+        or receipt_to_dict(value) != raw
+    ):
+        raise ValueError("검증 영수증 지문 또는 canonical wire가 원본 필드와 다릅니다")
+    return value
+
+
+def receipt_to_json(value: GenerationValidationReceipt) -> str:
+    return json.dumps(
+        receipt_to_dict(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def receipt_from_json(value: bytes | str) -> GenerationValidationReceipt:
+    if type(value) is bytes:
+        try:
+            raw_text = value.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("검증 영수증 bytes가 UTF-8이 아닙니다") from error
+    elif type(value) is str:
+        raw_text = value
+    else:
+        raise TypeError("검증 영수증 canonical bytes 또는 문자열이 필요합니다")
+    try:
+        data = json.loads(raw_text)
+    except json.JSONDecodeError as error:
+        raise ValueError("검증 영수증 JSON을 읽을 수 없습니다") from error
+    receipt = receipt_from_dict(data)
+    if receipt_to_json(receipt) != raw_text:
+        raise ValueError("검증 영수증 JSON bytes가 canonical 표현이 아닙니다")
+    return receipt
 __all__ = [
     "GenerationValidationReceipt",
     "ValidationRound",
     "canonical_sha256",
+    "generation_assessment_from_dict",
+    "generation_assessment_to_dict",
+    "receipt_from_dict",
+    "receipt_from_json",
+    "receipt_to_dict",
+    "receipt_to_json",
     "require_sha256",
 ]
