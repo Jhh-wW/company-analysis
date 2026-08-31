@@ -1050,7 +1050,7 @@ def test_시험공개여도_로그인과_상태확인은_열려있다(client, mo
     # ★ 키 목록까지 본다 — 「예상 밖의 값이 liveness 응답에 섞이지 않는다」가
     #   원래 이 단언의 뜻이었다. commit 값 자체는 환경에 따라 달라지므로 보지 않는다.
     assert health.json()["status"] == "ok"
-    assert set(health.json()) == {"status", "commit"}
+    assert set(health.json()) == {"status", "commit", "engine_mode"}
     assert ready.status_code == 200
     assert ready.json() == {"status": "ready"}
     assert read_checks == [True]
@@ -1068,7 +1068,7 @@ def test_상태확인은_SQLite를_읽을수없으면_실패한다(client, monke
 
     assert health.status_code == 200
     assert health.json()["status"] == "ok"
-    assert set(health.json()) == {"status", "commit"}
+    assert set(health.json()) == {"status", "commit", "engine_mode"}
     assert ready.status_code == 503
     assert ready.json() == {"status": "unready", "failed_checks": ["storage"]}
 

@@ -18,6 +18,11 @@ from src.shared.engine_build_identity import epoch_digest_is_valid
 
 
 TABLE_SINGLEFLIGHT_LEASES: Final[str] = "report_delivery_singleflight_leases"
+INDEX_ONE_ACTIVE_GENERATION: Final[str] = (
+    "uq_report_delivery_singleflight_one_active_generation"
+)
+EXPIRED_LEASE_FAILURE_CODE: Final[str] = "LEASE_EXPIRED"
+MIGRATED_DUPLICATE_FAILURE_CODE: Final[str] = "DUPLICATE_ACTIVE_MIGRATED"
 
 
 class LeaseError(RuntimeError):
@@ -119,6 +124,14 @@ CREATE TABLE IF NOT EXISTS {TABLE_SINGLEFLIGHT_LEASES} (
 )
 """
 
+_CREATE_ONE_ACTIVE_INDEX_SQL: Final[str] = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS {INDEX_ONE_ACTIVE_GENERATION}
+ON {TABLE_SINGLEFLIGHT_LEASES} (
+    billing_bucket_id, corp_id, source_identity_digest
+)
+WHERE state = 'active'
+"""
+
 
 def _primary_key(conn: sqlite3.Connection) -> tuple[str, ...]:
     """현재 표의 선언 순서 PRIMARY KEY 열을 돌려준다."""
@@ -205,6 +218,85 @@ def _rebuild_epoch_scoped_table(conn: sqlite3.Connection) -> None:
     conn.execute(f"DROP TABLE {legacy_table}")
 
 
+def _one_active_generation_constraint_is_exact(conn: sqlite3.Connection) -> bool:
+    rows = conn.execute(
+        f'PRAGMA index_list("{TABLE_SINGLEFLIGHT_LEASES}")'
+    ).fetchall()
+    matching = tuple(
+        row for row in rows if str(row[1]) == INDEX_ONE_ACTIVE_GENERATION
+    )
+    if (
+        len(matching) != 1
+        or int(matching[0][2]) != 1
+        or int(matching[0][4]) != 1
+    ):
+        return False
+    columns = tuple(
+        str(row[2])
+        for row in conn.execute(
+            f'PRAGMA index_info("{INDEX_ONE_ACTIVE_GENERATION}")'
+        ).fetchall()
+    )
+    if columns != ("billing_bucket_id", "corp_id", "source_identity_digest"):
+        return False
+    sql_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+        (INDEX_ONE_ACTIVE_GENERATION,),
+    ).fetchone()
+    raw_sql = "" if sql_row is None or sql_row[0] is None else str(sql_row[0])
+    normalized_sql = "".join(raw_sql.split()).lower()
+    return normalized_sql.endswith("wherestate='active'")
+
+
+def _install_one_active_generation_constraint(conn: sqlite3.Connection) -> None:
+    """옛 신·구 코드가 함께 써도 비용 범위마다 ACTIVE 하나만 허용한다.
+
+    Python 조회는 예전 바이너리의 INSERT를 통제할 수 없다. SQLite partial
+    unique index가 namespace·epoch를 열쇠에서 일부러 빼, 구 바이너리가 빈
+    epoch 기본값으로 직접 INSERT해도 살아 있는 provider와 겹치지 못하게 한다.
+
+    이미 결함 버전이 ACTIVE 중복을 남긴 DB에는 가장 늦게 만료되는 한 행만
+    장벽으로 보존하고 나머지는 실패 이력으로 닫은 뒤 제약을 건다. 실제 만료
+    판정은 caller의 ``now``를 써야 하므로 여기서 벽시계를 추측하지 않는다.
+    """
+
+    if _one_active_generation_constraint_is_exact(conn):
+        return
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    conn.execute(f"DROP INDEX IF EXISTS {INDEX_ONE_ACTIVE_GENERATION}")
+    conn.execute(
+        f"""
+        UPDATE {TABLE_SINGLEFLIGHT_LEASES} AS duplicate
+        SET state = ?, completed_content_id = '', completed_artifact_id = '',
+            failure_code = ?
+        WHERE duplicate.state = ?
+          AND EXISTS (
+              SELECT 1
+              FROM {TABLE_SINGLEFLIGHT_LEASES} AS keeper
+              WHERE keeper.billing_bucket_id = duplicate.billing_bucket_id
+                AND keeper.corp_id = duplicate.corp_id
+                AND keeper.source_identity_digest = duplicate.source_identity_digest
+                AND keeper.state = ?
+                AND (
+                    keeper.expires_at > duplicate.expires_at
+                    OR (
+                        keeper.expires_at = duplicate.expires_at
+                        AND keeper.rowid < duplicate.rowid
+                    )
+                )
+          )
+        """,
+        (
+            LeaseState.FAILED.value,
+            MIGRATED_DUPLICATE_FAILURE_CODE,
+            LeaseState.ACTIVE.value,
+            LeaseState.ACTIVE.value,
+        ),
+    )
+    conn.execute(_CREATE_ONE_ACTIVE_INDEX_SQL)
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     """영속 schema registry용 표준 bootstrap."""
 
@@ -242,6 +334,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         )
     # 새 5열 API는 빈 epoch를 만들지 않는다. 빈 값은 구 process의 진행 중
     # provider가 끝날 때까지만 쓰는 이관 장벽이며 결과로 재사용하지 않는다.
+    _install_one_active_generation_constraint(conn)
 
 
 def ensure_lease_schema(conn: sqlite3.Connection) -> None:
@@ -315,6 +408,34 @@ def _select_foreign_active_row(
     return None if row is None else tuple(row)
 
 
+def _close_expired_active_rows(
+    conn: sqlite3.Connection,
+    key: LeaseKey,
+    *,
+    current_text: str,
+) -> None:
+    """같은 비용·회사·출처의 만료 장벽을 현재 write transaction에서 닫는다."""
+
+    conn.execute(
+        f"""
+        UPDATE {TABLE_SINGLEFLIGHT_LEASES}
+        SET state = ?, completed_content_id = '', completed_artifact_id = '',
+            failure_code = ?
+        WHERE billing_bucket_id = ? AND corp_id = ?
+          AND source_identity_digest = ? AND state = ? AND expires_at <= ?
+        """,
+        (
+            LeaseState.FAILED.value,
+            EXPIRED_LEASE_FAILURE_CODE,
+            key.billing_bucket_id,
+            key.corp_id,
+            key.source_identity_digest,
+            LeaseState.ACTIVE.value,
+            current_text,
+        ),
+    )
+
+
 def _handle_from_row(key: LeaseKey, row: tuple[object, ...]) -> LeaseHandle:
     return LeaseHandle(
         key=key,
@@ -378,6 +499,9 @@ def acquire(
     ttl = _duration(lease_ttl, label="lease TTL")
     current_text = utc_text(current, label="lease 획득")
     expires_text = utc_text(current + ttl, label="lease 만료")
+    # partial unique index가 구 바이너리의 raw INSERT까지 막는다. 그 제약을
+    # 풀 수 있는 만료 전이와 새 owner 획득은 반드시 같은 write transaction이다.
+    _close_expired_active_rows(conn, key, current_text=current_text)
     foreign_active = _select_foreign_active_row(
         conn,
         key,

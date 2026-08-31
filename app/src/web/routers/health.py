@@ -109,7 +109,13 @@ async def healthz():
     ``commit`` 은 «무엇이 배포됐는지» 확인용이고 liveness 판정에는 쓰지 않는다 —
     이 값이 unknown 이어도 상태는 여전히 ok 다.
     """
-    return JSONResponse({"status": "ok", "commit": _deployed_commit()})
+    return JSONResponse(
+        {
+            "status": "ok",
+            "commit": _deployed_commit(),
+            "engine_mode": runtime.frozen_engine_mode_value(),
+        }
+    )
 
 
 @router.get("/readyz", include_in_schema=False)

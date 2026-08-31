@@ -37,4 +37,4 @@ def test_조사_슬롯_다섯_개가_차도_healthz는_응답한다(monkeypatch)
 
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
-    assert set(response.json()) == {"status", "commit"}
+    assert set(response.json()) == {"status", "commit", "engine_mode"}

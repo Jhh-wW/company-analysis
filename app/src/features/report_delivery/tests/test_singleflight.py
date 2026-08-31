@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import datetime as dt
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+
+import pytest
 
 from src.features.report_delivery.canonical import utc_text
 from src.features.report_delivery.singleflight import (
     AcquireDisposition,
+    INDEX_ONE_ACTIVE_GENERATION,
     LeaseKey,
     TABLE_SINGLEFLIGHT_LEASES,
     acquire,
@@ -26,6 +32,93 @@ def _key(bucket: str = "bucket-hash-a") -> LeaseKey:
         source_identity_digest="source-digest-a",
         engine_epoch_digest="a" * 64,
     )
+
+
+def _legacy_ensure_schema(conn: sqlite3.Connection) -> None:
+    """d00e538 바이너리의 epoch 없는 4열 PK schema를 그대로 모사한다."""
+
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {TABLE_SINGLEFLIGHT_LEASES} (
+            billing_bucket_id TEXT NOT NULL,
+            corp_id TEXT NOT NULL,
+            cache_namespace_id TEXT NOT NULL,
+            source_identity_digest TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('active', 'completed', 'failed')),
+            owner_id TEXT NOT NULL,
+            lease_token TEXT NOT NULL,
+            fencing_token INTEGER NOT NULL,
+            acquired_at TEXT NOT NULL,
+            heartbeat_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            completed_content_id TEXT NOT NULL,
+            completed_artifact_id TEXT NOT NULL,
+            failure_code TEXT NOT NULL,
+            PRIMARY KEY (
+                billing_bucket_id, corp_id, cache_namespace_id,
+                source_identity_digest
+            )
+        )
+        """
+    )
+
+
+def _legacy_insert_active(
+    conn: sqlite3.Connection,
+    *,
+    namespace_id: str,
+    owner_id: str,
+    now: dt.datetime,
+    expires_at: dt.datetime,
+    or_ignore: bool = True,
+) -> sqlite3.Cursor:
+    """d00e538 acquire의 engine_epoch_digest 없는 INSERT를 실행한다."""
+
+    _legacy_ensure_schema(conn)
+    ignore = " OR IGNORE" if or_ignore else ""
+    now_text = utc_text(now, label="구 lease 시작")
+    expires_text = utc_text(expires_at, label="구 lease 만료")
+    return conn.execute(
+        f"""
+        INSERT{ignore} INTO {TABLE_SINGLEFLIGHT_LEASES} (
+            billing_bucket_id, corp_id, cache_namespace_id,
+            source_identity_digest, state, owner_id, lease_token,
+            fencing_token, acquired_at, heartbeat_at, expires_at,
+            completed_content_id, completed_artifact_id, failure_code
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "bucket-hash-a",
+            "00126380",
+            namespace_id,
+            "source-digest-a",
+            "active",
+            owner_id,
+            f"{owner_id}-token",
+            1,
+            now_text,
+            now_text,
+            expires_text,
+            "",
+            "",
+            "",
+        ),
+    )
+
+
+@contextmanager
+def _file_connection(path: Path) -> Iterator[sqlite3.Connection]:
+    connection = sqlite3.connect(str(path), timeout=1.0)
+    connection.execute("PRAGMA foreign_keys=ON")
+    try:
+        yield connection
+        connection.commit()
+    except BaseException:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def test_same_bucket_and_generation_waits_for_one_owner(
@@ -258,6 +351,274 @@ def test_옛4열PK_singleflight표는_활성행을_격리하고_5열epoch표로_
     assert waiting.disposition is AcquireDisposition.WAIT
     assert waiting.handle is None
     assert acquired.disposition is AcquireDisposition.ACQUIRED
+
+
+def test_구바이너리가_먼저잡은_실제SQLite를_신바이너리가_기다린다(
+    tmp_path: Path,
+    now: dt.datetime,
+) -> None:
+    database = tmp_path / "legacy-first.sqlite3"
+    with _file_connection(database) as legacy_conn:
+        inserted = _legacy_insert_active(
+            legacy_conn,
+            namespace_id="cache-namespace-legacy",
+            owner_id="legacy-worker",
+            now=now,
+            expires_at=now + dt.timedelta(seconds=30),
+        )
+        assert inserted.rowcount == 1
+
+    current_key = LeaseKey(
+        billing_bucket_id="bucket-hash-a",
+        corp_id="00126380",
+        cache_namespace_id="cache-namespace-current",
+        source_identity_digest="source-digest-a",
+        engine_epoch_digest="b" * 64,
+    )
+    with _file_connection(database) as current_conn:
+        waiting = acquire(
+            current_conn,
+            key=current_key,
+            owner_id="current-worker",
+            now=now + dt.timedelta(seconds=1),
+            lease_ttl=dt.timedelta(seconds=30),
+        )
+        indexes = {
+            str(row[1])
+            for row in current_conn.execute(
+                f'PRAGMA index_list("{TABLE_SINGLEFLIGHT_LEASES}")'
+            ).fetchall()
+        }
+        active_count = current_conn.execute(
+            f"SELECT COUNT(*) FROM {TABLE_SINGLEFLIGHT_LEASES} "
+            "WHERE state = 'active'"
+        ).fetchone()[0]
+
+    assert waiting.disposition is AcquireDisposition.WAIT
+    assert waiting.handle is None
+    assert INDEX_ONE_ACTIVE_GENERATION in indexes
+    assert active_count == 1
+
+
+def test_신바이너리가_먼저잡으면_구바이너리의_빈epoch_INSERT도_DB가_거절한다(
+    tmp_path: Path,
+    now: dt.datetime,
+) -> None:
+    database = tmp_path / "current-first.sqlite3"
+    current_key = LeaseKey(
+        billing_bucket_id="bucket-hash-a",
+        corp_id="00126380",
+        cache_namespace_id="cache-namespace-current",
+        source_identity_digest="source-digest-a",
+        engine_epoch_digest="b" * 64,
+    )
+    with _file_connection(database) as current_conn:
+        current = acquire(
+            current_conn,
+            key=current_key,
+            owner_id="current-worker",
+            now=now,
+            lease_ttl=dt.timedelta(seconds=30),
+        )
+        assert current.disposition is AcquireDisposition.ACQUIRED
+
+    with _file_connection(database) as legacy_conn:
+        ignored = _legacy_insert_active(
+            legacy_conn,
+            namespace_id="cache-namespace-legacy",
+            owner_id="legacy-worker",
+            now=now + dt.timedelta(seconds=1),
+            expires_at=now + dt.timedelta(seconds=31),
+        )
+        assert ignored.rowcount == 0
+        with pytest.raises(sqlite3.IntegrityError):
+            _legacy_insert_active(
+                legacy_conn,
+                namespace_id="cache-namespace-legacy",
+                owner_id="legacy-worker-direct",
+                now=now + dt.timedelta(seconds=1),
+                expires_at=now + dt.timedelta(seconds=31),
+                or_ignore=False,
+            )
+        active_rows = legacy_conn.execute(
+            f"""
+            SELECT cache_namespace_id, engine_epoch_digest, owner_id
+            FROM {TABLE_SINGLEFLIGHT_LEASES}
+            WHERE state = 'active'
+            """
+        ).fetchall()
+
+    assert active_rows == [
+        ("cache-namespace-current", "b" * 64, "current-worker")
+    ]
+
+
+def test_만료시각과_정확히_같은_takeover는_정리와_획득을_한거래에서_끝낸다(
+    tmp_path: Path,
+    now: dt.datetime,
+) -> None:
+    database = tmp_path / "takeover-boundary.sqlite3"
+    with _file_connection(database) as first_conn:
+        first = acquire(
+            first_conn,
+            key=_key(),
+            owner_id="worker-expiring",
+            now=now,
+            lease_ttl=dt.timedelta(seconds=30),
+        )
+        assert first.handle is not None
+
+    with _file_connection(database) as takeover_conn:
+        takeover = acquire(
+            takeover_conn,
+            key=_key(),
+            owner_id="worker-boundary",
+            now=now + dt.timedelta(seconds=30),
+            lease_ttl=dt.timedelta(seconds=30),
+        )
+        active_count = takeover_conn.execute(
+            f"SELECT COUNT(*) FROM {TABLE_SINGLEFLIGHT_LEASES} "
+            "WHERE state = 'active'"
+        ).fetchone()[0]
+
+    assert takeover.disposition is AcquireDisposition.TAKEOVER
+    assert takeover.handle is not None
+    assert takeover.handle.fencing_token == first.handle.fencing_token + 1
+    assert active_count == 1
+
+
+def test_만료시각과_같은_foreign행은_닫고_새epoch하나만_획득한다(
+    tmp_path: Path,
+    now: dt.datetime,
+) -> None:
+    database = tmp_path / "foreign-boundary.sqlite3"
+    with _file_connection(database) as first_conn:
+        first = acquire(
+            first_conn,
+            key=_key(),
+            owner_id="worker-old-epoch",
+            now=now,
+            lease_ttl=dt.timedelta(seconds=30),
+        )
+        assert first.disposition is AcquireDisposition.ACQUIRED
+
+    new_key = LeaseKey(
+        billing_bucket_id="bucket-hash-a",
+        corp_id="00126380",
+        cache_namespace_id="cache-namespace-b",
+        source_identity_digest="source-digest-a",
+        engine_epoch_digest="b" * 64,
+    )
+    with _file_connection(database) as second_conn:
+        second = acquire(
+            second_conn,
+            key=new_key,
+            owner_id="worker-new-epoch",
+            now=now + dt.timedelta(seconds=30),
+            lease_ttl=dt.timedelta(seconds=30),
+        )
+        rows = second_conn.execute(
+            f"""
+            SELECT cache_namespace_id, engine_epoch_digest, state, failure_code
+            FROM {TABLE_SINGLEFLIGHT_LEASES}
+            ORDER BY cache_namespace_id
+            """
+        ).fetchall()
+
+    assert second.disposition is AcquireDisposition.ACQUIRED
+    assert rows == [
+        ("cache-namespace-a", "a" * 64, "failed", "LEASE_EXPIRED"),
+        ("cache-namespace-b", "b" * 64, "active", ""),
+    ]
+
+
+def test_foreign_epoch의_완료ID는_재사용하지않고_새owner를_얻는다(
+    tmp_path: Path,
+    now: dt.datetime,
+) -> None:
+    database = tmp_path / "foreign-completed.sqlite3"
+    with _file_connection(database) as first_conn:
+        first = acquire(
+            first_conn,
+            key=_key(),
+            owner_id="worker-old-epoch",
+            now=now,
+            lease_ttl=dt.timedelta(seconds=30),
+        )
+        assert first.handle is not None
+        assert complete(
+            first_conn,
+            handle=first.handle,
+            content_snapshot_id="foreign-content",
+            artifact_id="foreign-artifact",
+            now=now + dt.timedelta(seconds=1),
+            result_fanout_ttl=dt.timedelta(seconds=30),
+        )
+
+    new_key = LeaseKey(
+        billing_bucket_id="bucket-hash-a",
+        corp_id="00126380",
+        cache_namespace_id="cache-namespace-b",
+        source_identity_digest="source-digest-a",
+        engine_epoch_digest="b" * 64,
+    )
+    with _file_connection(database) as second_conn:
+        second = acquire(
+            second_conn,
+            key=new_key,
+            owner_id="worker-new-epoch",
+            now=now + dt.timedelta(seconds=2),
+            lease_ttl=dt.timedelta(seconds=30),
+        )
+
+    assert second.disposition is AcquireDisposition.ACQUIRED
+    assert second.handle is not None
+    assert second.completed_content_id == ""
+    assert second.completed_artifact_id == ""
+
+
+def test_중복ACTIVE가_남은결함DB는_하나만_장벽으로_보존하고_제약을_건다(
+    tmp_path: Path,
+    now: dt.datetime,
+) -> None:
+    database = tmp_path / "duplicate-active-migration.sqlite3"
+    with _file_connection(database) as broken_conn:
+        _legacy_insert_active(
+            broken_conn,
+            namespace_id="cache-namespace-a",
+            owner_id="worker-a",
+            now=now,
+            expires_at=now + dt.timedelta(seconds=20),
+        )
+        _legacy_insert_active(
+            broken_conn,
+            namespace_id="cache-namespace-b",
+            owner_id="worker-b",
+            now=now,
+            expires_at=now + dt.timedelta(seconds=30),
+        )
+
+    with _file_connection(database) as migrated_conn:
+        ensure_schema(migrated_conn)
+        rows = migrated_conn.execute(
+            f"""
+            SELECT cache_namespace_id, state, failure_code
+            FROM {TABLE_SINGLEFLIGHT_LEASES}
+            ORDER BY cache_namespace_id
+            """
+        ).fetchall()
+        indexes = {
+            str(row[1])
+            for row in migrated_conn.execute(
+                f'PRAGMA index_list("{TABLE_SINGLEFLIGHT_LEASES}")'
+            ).fetchall()
+        }
+
+    assert rows == [
+        ("cache-namespace-a", "failed", "DUPLICATE_ACTIVE_MIGRATED"),
+        ("cache-namespace-b", "active", ""),
+    ]
+    assert INDEX_ONE_ACTIVE_GENERATION in indexes
 
 
 def test_crashed_owner_is_taken_over_with_higher_fencing_token(

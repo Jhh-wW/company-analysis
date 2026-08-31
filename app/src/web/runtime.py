@@ -55,6 +55,12 @@ def make_pipeline() -> object:
 _PIPELINE = make_pipeline()
 
 
+def frozen_engine_mode_value() -> str:
+    """시작 때 동결한 exact 엔진 모드를 공개 상태용 문자열로 돌려준다."""
+
+    return engine_mode.process_engine_mode().value
+
+
 def _current_model() -> str:
     """현재 서비스가 쓰는 AI 모델 이름."""
     if isinstance(_PIPELINE, DemoPipeline):

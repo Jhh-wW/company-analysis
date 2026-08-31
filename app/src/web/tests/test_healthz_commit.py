@@ -19,6 +19,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
+from src.features.pipeline import engine_mode
 from src.shared import engine_build_identity
 from src.web import main
 from src.web.routers import health
@@ -82,6 +83,20 @@ def test_healthz는_process가_실제로_동결한_commit만_표시한다(
     assert engine_build_identity.process_engine_build_identity() is frozen
 
 
+def test_healthz는_process가_실제로_동결한_engine_mode만_표시한다(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(engine_mode.ENGINE_V2_ENV_NAME, engine_mode.ENGINE_V2_ENV_ON)
+    frozen = engine_mode.process_engine_mode()
+
+    monkeypatch.setenv(engine_mode.ENGINE_V2_ENV_NAME, "0")
+    payload = client.get("/healthz").json()
+
+    assert frozen is engine_mode.EngineMode.V2
+    assert payload["engine_mode"] == "v2"
+    assert engine_mode.process_engine_mode() is frozen
+
+
 def test_커밋을_몰라도_상태는_ok다(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -90,11 +105,16 @@ def test_커밋을_몰라도_상태는_ok다(
     여기서 503이 되면 Render 가 살아 있는 서버를 재시작 루프로 죽인다.
     """
     _clear_commit_env(monkeypatch)
+    monkeypatch.delenv(engine_mode.ENGINE_V2_ENV_NAME, raising=False)
 
     response = client.get("/healthz")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "commit": "unknown"}, (
+    assert response.json() == {
+        "status": "ok",
+        "commit": "unknown",
+        "engine_mode": "v1",
+    }, (
         "커밋을 모를 때 키를 «빼면» 「옛 코드가 돈다」와 「환경변수가 안 들어왔다」를 "
         "구분할 수 없습니다"
     )
