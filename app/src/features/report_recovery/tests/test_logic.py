@@ -37,9 +37,16 @@ from src.shared.report_quality.models import (
     SafetyAssessment,
 )
 from src.shared.report_quality.constants import STRICT_QUALITY_CONTRACT_VERSION
+from src.shared.report_recovery import (
+    decide_post_validation as shared_decide_post_validation,
+)
 
 
 _CONTRACT_VERSION = STRICT_QUALITY_CONTRACT_VERSION
+
+
+def test_기존feature경로는_shared정본을_그대로재export한다() -> None:
+    assert decide_post_validation is shared_decide_post_validation
 
 
 def _sha256(label: str) -> str:
@@ -294,21 +301,30 @@ def test_얇은장이_세개면_비싼보충을_시작하지않는다() -> None:
     assert decision.projected_total_ai_calls == 10
 
 
-def test_안전실패나_출처수부족은_즉시_무차감으로끝낸다() -> None:
+@pytest.mark.parametrize(
+    "problem_code",
+    (
+        QualityProblemCode.TOO_FEW_DOCUMENT_SOURCES,
+        QualityProblemCode.LOW_VERIFIED_RATIO,
+    ),
+)
+def test_안전실패나_비회복품질은_즉시_무차감으로끝낸다(
+    problem_code: QualityProblemCode,
+) -> None:
     safety = decide_post_validation(_primary(_assessment(safety_blocked=True)))
-    source_shortage = decide_post_validation(
+    nonrecoverable = decide_post_validation(
         _primary(
             _assessment(
-                problem_codes=(QualityProblemCode.TOO_FEW_DOCUMENT_SOURCES,),
+                problem_codes=(problem_code,),
                 underfilled=("identity",),
             )
         )
     )
 
     assert safety.action is RecoveryAction.STOP_NO_CHARGE
-    assert source_shortage.action is RecoveryAction.STOP_NO_CHARGE
+    assert nonrecoverable.action is RecoveryAction.STOP_NO_CHARGE
     assert safety.projected_total_ai_calls == 10
-    assert source_shortage.projected_total_ai_calls == 10
+    assert nonrecoverable.projected_total_ai_calls == 10
 
 
 def test_완성평가영수증만_공개와_정상차감을_함께허용한다() -> None:
