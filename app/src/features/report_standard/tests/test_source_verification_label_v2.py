@@ -132,8 +132,8 @@ def test_v2_부록에_없는_source_id도_본문_사실_없음으로_표시한�
     )
 
 
-def test_v1_fact_records가_있으면_v2_문장_모양과_무관하게_기존_카드_로직을_쓴다() -> None:
-    """분기가 fact_records 유무로 정확히 갈리는지 — v2 모양 prose_lines를
+def test_v1_schema의_fact_records는_문장_모양과_무관하게_기존_카드_로직을_쓴다() -> None:
+    """분기가 schema로 정확히 갈리는지 — v2 모양 prose_lines를
 
     붙여도(«[1]» 마커·«— 해석» 표지) fact_records가 있으면 그건 안 보고
     카드만 본다는 것을 증명한다. 카드가 하나도 이 source_id를 안 가리키므로
@@ -156,9 +156,32 @@ def test_v1_fact_records가_있으면_v2_문장_모양과_무관하게_기존_�
             citations=[source],
         ),
         fact_records=[fact],
+        schema_version="company-report-v4-canonical",
     )
 
     assert source_verification_label(report, source.source_id) == "본문 사실 없음"
+
+
+def test_v2에_fact_records가_생겨도_해석문장_표시는_부분검증이다() -> None:
+    fact = FactRecord(
+        fact_id="v2-fact-1",
+        source_id="v2-frag-bound",
+        status="verified",
+        verification_status="verified",
+    )
+    source = _source(1, "v2-frag-bound")
+    report = replace(
+        _v2_report(
+            prose_lines_by_section={
+                "business_model": [("공식 자료를 종합하면 채널 다변화로 볼 수 있다. [1] — 해석", "")]
+            },
+            citations=[source],
+        ),
+        fact_records=[fact],
+        source_grades={"1": ["해석"]},
+    )
+
+    assert source_verification_label(report, source.source_id) == "부분 검증"
 
 
 def test_해석_표지_상수가_composer_원본과_같다() -> None:

@@ -628,6 +628,10 @@ _V2_INTERPRETATION_MARKER = " — 해석"
 #:  와 짝인 등급 상수 시험).
 _V2_INTERPRETED_GRADE = "해석"
 
+# FactRecord 유무는 엔진 종류가 아니다. 새 v2는 검증 문장도 사실 장부에
+# 결속하므로, 자료 구조가 풍부해졌다는 이유로 v1 카드 판정으로 바뀌면 안 된다.
+_V2_REPORT_SCHEMA_VERSION = "company-report-v2-composer"
+
 #: 본문 표시 문장에 박힌 인용 번호 ``[1]`` ``[12]`` 같은 것을 읽는다.
 _CITATION_NUMBER_PATTERN = re.compile(r"\[(\d+)\]")
 
@@ -672,6 +676,8 @@ def source_verification_label(report: Report, source_id: str) -> str:
       명시적으로 분기해 v1 동작은 손대지 않고, v2에서는 문장 단위로 다시 센다.
     """
 
+    if report.schema_version == _V2_REPORT_SCHEMA_VERSION:
+        return _source_verification_label_v2(report, source_id)
     if report.fact_records:
         return _source_verification_label_v1(report, source_id)
     return _source_verification_label_v2(report, source_id)

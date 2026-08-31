@@ -455,6 +455,15 @@ class FactRecord:
     unit: str = ""
     unit_dimension: str = ""
     formula: str = ""
+    #: 한 문장을 함께 뒷받침한 모든 조각 출처. 첫 항목은 ``source_id``와
+    #: 같아야 한다. 여러 자료를 본 문장을 첫 자료 하나에만 묶어 나머지
+    #: 근거가 바뀌어도 검사를 통과하는 일을 막는 additive v2 계약이다.
+    supporting_source_ids: list[str] = field(default_factory=list)
+    #: ``supporting_source_ids``와 같은 순서의 독립 문서 identity.
+    supporting_source_identities: list[str] = field(default_factory=list)
+    #: 같은 순서의 정확한 원문 조각 SHA-256. 문서 주소만 같고 실제 인용
+    #: 범위가 바뀐 경우도 결속 지문이 달라지게 한다.
+    supporting_evidence_hashes: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

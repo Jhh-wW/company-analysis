@@ -23,6 +23,12 @@ _OPTIONAL_STRUCTURED_FIELDS: Final[tuple[str, ...]] = (
     "formula",
 )
 
+_OPTIONAL_STRUCTURED_SEQUENCE_FIELDS: Final[tuple[str, ...]] = (
+    "supporting_source_ids",
+    "supporting_source_identities",
+    "supporting_evidence_hashes",
+)
+
 
 def _binding_digest(payload: object) -> str:
     encoded = json.dumps(
@@ -111,4 +117,8 @@ def fact_evidence_binding(fact: Any) -> str:
         value = getattr(fact, name, "")
         if value not in ("", None):
             payload[name] = value
+    for name in _OPTIONAL_STRUCTURED_SEQUENCE_FIELDS:
+        value = getattr(fact, name, ())
+        if value:
+            payload[name] = list(value)
     return _binding_digest(payload)

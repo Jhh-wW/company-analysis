@@ -7,7 +7,7 @@ from decimal import Decimal
 
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_quality.contract import contract_for_generation
-from src.shared.report_quality.dto import ClaimFact, ReportCandidate
+from src.shared.report_quality.dto import ClaimFact, ReportCandidate, SourceDocument
 from src.shared.report_quality.models import (
     GenerationAssessment,
     QualityAssessment,
@@ -116,8 +116,10 @@ def _fact_registry(candidate: ReportCandidate) -> tuple[dict[str, ClaimFact], li
     return registry, problems
 
 
-def _source_registry(candidate: ReportCandidate) -> tuple[dict[str, str], list[str]]:
-    registry: dict[str, str] = {}
+def _source_registry(
+    candidate: ReportCandidate,
+) -> tuple[dict[str, SourceDocument], list[str]]:
+    registry: dict[str, SourceDocument] = {}
     problems: list[str] = []
     for source in candidate.sources:
         source_id = source.source_id.strip()
@@ -127,7 +129,12 @@ def _source_registry(candidate: ReportCandidate) -> tuple[dict[str, str], list[s
         elif source_id in registry:
             problems.append(f"source_id {source_id}가 중복됐습니다")
         else:
-            registry[source_id] = identity
+            hashes = tuple(value.strip() for value in source.exact_evidence_hashes)
+            if len(hashes) != len(set(hashes)) or any(
+                re.fullmatch(r"[0-9a-f]{64}", value) is None for value in hashes
+            ):
+                problems.append(f"source_id {source_id}의 원문 조각 해시가 손상됐습니다")
+            registry[source_id] = source
     return registry, problems
 
 
@@ -255,11 +262,46 @@ def assess_safety(
         else:
             unverified.append(fact_id)
 
-        source_identity = sources.get(fact.source_id)
-        if source_identity is None:
+        source = sources.get(fact.source_id)
+        if source is None:
             problems.append(f"{fact_id}가 존재하지 않는 source_id를 참조합니다")
-        elif source_identity != fact.source_identity:
+        elif source.document_identity != fact.source_identity:
             problems.append(f"{fact_id}의 독립 문서 identity가 출처 장부와 다릅니다")
+
+        supporting = (
+            fact.supporting_source_ids,
+            fact.supporting_source_identities,
+            fact.supporting_evidence_hashes,
+        )
+        if any(supporting):
+            lengths = {len(values) for values in supporting}
+            if lengths != {len(fact.supporting_source_ids)} or not fact.supporting_source_ids:
+                problems.append(f"{fact_id}의 다중 출처 결속 열 길이가 다릅니다")
+            elif len(fact.supporting_source_ids) != len(
+                set(fact.supporting_source_ids)
+            ):
+                problems.append(f"{fact_id}의 다중 출처 source_id가 중복됐습니다")
+            else:
+                if (
+                    fact.supporting_source_ids[0] != fact.source_id
+                    or fact.supporting_source_identities[0] != fact.source_identity
+                ):
+                    problems.append(f"{fact_id}의 대표 출처가 다중 출처 첫 항목과 다릅니다")
+                for source_id, identity, evidence_hash in zip(*supporting):
+                    bound_source = sources.get(source_id)
+                    if bound_source is None:
+                        problems.append(
+                            f"{fact_id}가 존재하지 않는 보조 source_id {source_id}를 참조합니다"
+                        )
+                        continue
+                    if bound_source.document_identity != identity:
+                        problems.append(
+                            f"{fact_id}의 보조 출처 {source_id} 문서 identity가 다릅니다"
+                        )
+                    if evidence_hash not in bound_source.exact_evidence_hashes:
+                        problems.append(
+                            f"{fact_id}의 보조 출처 {source_id} 원문 조각 해시가 다릅니다"
+                        )
 
         if _has_numeric_payload(fact):
             numeric_labels = (
@@ -357,12 +399,14 @@ def assess_quality(
         if substantive
         else Decimal(0)
     )
-    document_identities = {
-        sources[facts[fact_id].source_id]
-        for fact_id in unique_public_ids
-        if facts[fact_id].source_id in sources
-        and sources[facts[fact_id].source_id]
-    }
+    document_identities: set[str] = set()
+    for fact_id in unique_public_ids:
+        fact = facts[fact_id]
+        source_ids = fact.supporting_source_ids or (fact.source_id,)
+        for source_id in source_ids:
+            source = sources.get(source_id)
+            if source is not None and source.document_identity:
+                document_identities.add(source.document_identity)
 
     shortfalls: list[str] = []
     if len(notice_only) > contract.max_notice_only_sections:

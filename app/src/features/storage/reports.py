@@ -324,6 +324,9 @@ _OPTIONAL_STRUCTURED_FACT_FIELDS = frozenset(
         "unit",
         "unit_dimension",
         "formula",
+        "supporting_source_ids",
+        "supporting_source_identities",
+        "supporting_evidence_hashes",
     }
 )
 

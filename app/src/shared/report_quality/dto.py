@@ -16,6 +16,7 @@ class SourceDocument:
 
     source_id: str
     document_identity: str
+    exact_evidence_hashes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,9 @@ class ClaimFact:
     unit: str = ""
     unit_dimension: str = ""
     formula: str = ""
+    supporting_source_ids: tuple[str, ...] = ()
+    supporting_source_identities: tuple[str, ...] = ()
+    supporting_evidence_hashes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -53,6 +53,7 @@ from src.features.composer.port import (
     FilingMeta,
     PerformanceTable,
 )
+from src.features.composer.prose_facts import ProseEvidence, build_verified_prose_fact
 from src.features.pipeline.port import (
     FactRecord,
     Grade,
@@ -61,7 +62,12 @@ from src.features.pipeline.port import (
     ReportTable,
     SummaryItem,
 )
-from src.features.provenance.sources import Source, SourceKind
+from src.features.provenance.sources import (
+    Source,
+    SourceKind,
+    evidence_text_hash,
+    exact_evidence_text_hash,
+)
 from src.shared.report_quality.fact_binding import fact_evidence_binding
 from src.shared.report_quality.numeric_validation import (
     validate_versioned_numeric_record,
@@ -129,6 +135,9 @@ class _FragmentMeta:
 
     fragment_id: str
     kind: str
+    #: 검수에 실제로 건넨 조각 바이트. 공개 부록에는 싣지 않고 정확한
+    #: 증거 해시와 일반 산문 FactRecord를 만들 때만 쓴다.
+    text: str = ""
     source_url: str = ""
     document_title: str = ""
     location: str = ""
@@ -163,6 +172,7 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
                 _FragmentMeta(
                     fragment_id=str(number),
                     kind=str(item.get("종류") or "").strip(),
+                    text=text,
                     source_url=source_url,
                     document_title=str(item.get("문서명") or "").strip(),
                     location=str(item.get("원문위치") or "").strip(),
@@ -176,6 +186,7 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
         _FragmentMeta(
             fragment_id=str(fragment.fragment_id),
             kind=str(getattr(fragment, "kind", "") or ""),
+            text=str(getattr(fragment, "text", "") or ""),
             source_url=str(getattr(fragment, "source_url", "") or ""),
             document_title=str(getattr(fragment, "document_title", "") or ""),
             location=str(getattr(fragment, "location", "") or ""),
@@ -540,6 +551,10 @@ def _build_source(
       독자가 부록에서 원문을 바로 열 수 있게 한다. filing_meta가 없으면
       예전처럼 주소 없이 나가며 그 사실이 화면에 그대로 보인다.
     """
+    normalized_evidence_hash = evidence_text_hash(meta.text)
+    exact_evidence_hash = exact_evidence_text_hash(meta.text)
+    evidence_hashes = [normalized_evidence_hash] if normalized_evidence_hash else []
+    exact_evidence_hashes = [exact_evidence_hash] if exact_evidence_hash else []
     if meta.from_financial_api:
         return Source(
             number=number,
@@ -556,6 +571,8 @@ def _build_source(
             source_type="공식 재무 API",
             fact_status="공시 실제값",
             used_in=list(used_in),
+            evidence_hashes=evidence_hashes,
+            exact_evidence_hashes=exact_evidence_hashes,
         )
     if not meta.from_filing:
         return Source(
@@ -569,6 +586,8 @@ def _build_source(
             url=meta.source_url,
             location=meta.location,
             used_in=list(used_in),
+            evidence_hashes=evidence_hashes,
+            exact_evidence_hashes=exact_evidence_hashes,
         )
     document_id = filing_meta.document_id if filing_meta is not None else ""
     return Source(
@@ -590,6 +609,8 @@ def _build_source(
         # 어느 절에서 떠 왔는지가 원문 안에서 찾아갈 위치다.
         location=meta.location or meta.kind,
         used_in=list(used_in),
+        evidence_hashes=evidence_hashes,
+        exact_evidence_hashes=exact_evidence_hashes,
     )
 
 
@@ -754,6 +775,41 @@ def render_report(
                 numbers=numbers,
                 filing_meta=filing_meta,
             )
+            if fact is None:
+                citation_ids = tuple(
+                    dict.fromkeys(
+                        str(value).strip()
+                        for value in sentence.citations
+                        if str(value).strip()
+                    )
+                )
+                prose_evidence: list[ProseEvidence] = []
+                for fragment_id in citation_ids:
+                    meta = metas_by_fragment.get(fragment_id)
+                    number = numbers.get(fragment_id)
+                    if meta is None or number is None:
+                        prose_evidence = []
+                        break
+                    prose_evidence.append(
+                        ProseEvidence(
+                            fragment_id=fragment_id,
+                            source=_build_source(
+                                meta,
+                                number,
+                                company_name,
+                                (composed_section.section_id,),
+                                filing_meta,
+                            ),
+                            exact_text=meta.text,
+                        )
+                    )
+                fact = build_verified_prose_fact(
+                    sentence,
+                    section_id=composed_section.section_id,
+                    company_name=company_name,
+                    as_of_date=as_of_date,
+                    evidence=prose_evidence,
+                )
             if fact is None or fact.fact_id in seen_fact_ids:
                 continue
             seen_fact_ids.add(fact.fact_id)
