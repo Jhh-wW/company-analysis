@@ -184,12 +184,16 @@ def _attempt_for_list_query(
 ) -> tuple[CollectionAttempt, list[RawFilingRow], int]:
     """목록 조회 attempt 1건을 만든다. FAILED가 아니면 identity_mismatch_count도 함께 돌려준다.
 
-    ★ item 2(불변식, 2026-08-31 team-lead 통보) — 목록 조회는 문서 내용을
-    한 번도 보지 않았으므로 REQUIRED+OK/MISSING로 slot_ids(source_kind
-    전체 범위)를 «확인했다»고 주장하면 안 된다(넓은 slot 집합 + REQUIRED +
-    OK/MISSING 조합 금지). FAILED일 때만 REQUIRED를 유지하고(P1-1의
-    필수 목록 조회 실패 판정이 이 값에 의존한다), 그 밖(OK/MISSING)은
-    OPTIONAL로 내려 광역 slot_ids를 써도 불변식을 어기지 않게 한다.
+    ★ item 2 재정의(2026-08-31 team-lead 재확정) — 기준은 «그 조회가
+    실제로 슬롯을 들여다봤는가»다.
+    - FAILED·TRUNCATED: 「이것 때문에 그 슬롯들을 확인 못 했다」는 정확한
+      뜻이라 REQUIRED+광역이 안전하다(UNKNOWN으로 이어진다). 그대로 둔다.
+    - MISSING(행이 아예 없었든, 있었지만 전부 걸러졌든): 「그 공시가
+      실제로 없다」는 참인 확인이라 자료 부족 방향이 맞다. REQUIRED+광역을
+      유지한다.
+    - OK: 목록에서 «찾았다»는 사실은 어떤 슬롯도 들여다본 게 아니다. 근거
+      유무 판정은 뒤따르는 문서 attempt(collect.py)가 진다. OPTIONAL로
+      내려 목록 발견 자체가 「확인했는데 근거가 없다」로 읽히지 않게 한다.
     """
     if result.state == c.ATTEMPT_STATE_FAILED:
         attempt = CollectionAttempt(
@@ -210,20 +214,25 @@ def _attempt_for_list_query(
     if filtered:
         state = c.ATTEMPT_STATE_OK
         reason = c.REASON_LIST_QUERY_OK
+        requirement = c.REQUIREMENT_OPTIONAL  # 위 docstring 참고 — 발견 단계일 뿐이다
     elif result.rows:
         # item 4 — 행은 있었지만(대상 회사가 그 공시유형을 낸 적은 있지만)
         # 이름 키워드·연결/정정 제외·corp_code 불일치로 전부 걸러졌다.
         # 「행이 아예 없었다」와 원인이 다르므로 다른 사유 코드로 남긴다.
+        # 두 경우 모두 「그 공시가 실제로 없다」는 참인 확인이므로 requirement는
+        # spec 그대로 둔다(item 2 재정의).
         state = c.ATTEMPT_STATE_MISSING
         reason = c.REASON_LIST_ROWS_ALL_FILTERED
+        requirement = spec.requirement
     else:
         state = c.ATTEMPT_STATE_MISSING
         reason = c.REASON_LIST_QUERY_MISSING
+        requirement = spec.requirement
     attempt = CollectionAttempt(
         company_id=company_id,
         attempt_id=f"list:{spec.source_kind}",
         source_kind=spec.source_kind,
-        requirement=c.REQUIREMENT_OPTIONAL,  # item 2 — 위 docstring 참고
+        requirement=requirement,
         state=state,
         slot_ids=c.SOURCE_KIND_SLOT_SCOPE[spec.source_kind],
         reason_code=reason,

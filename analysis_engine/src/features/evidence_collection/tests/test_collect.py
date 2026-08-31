@@ -571,27 +571,27 @@ def test_gen8_회사_A_수집_산출의_모든_fragment_attempt는_A의_company_
 
 
 # ══════════════════════════════════════════════════════════
-# generation=8 후속 item 2 — 광역 slot_ids와 「필수 + 성공」 조합 금지
+# generation=8 후속 item 2 재정의(2026-08-31 team-lead 재확정) — 기준은
+# 「그 조회가 실제로 슬롯을 들여다봤는가」다. 문서 fetch·분할·채점을 실제로
+# 거친 attempt(OK)는 광역 slot_ids + REQUIRED가 «정직하다»(그대로 둔다).
+# 문제는 목록 조회뿐이다 — 「찾았다」(OK)는 사실만으로는 슬롯을 들여다본
+# 게 아니므로 OPTIONAL로 내린다. MISSING(공시가 실제로 없다는 확인)은
+# 목록·문서 어느 단계든 참인 확인이라 REQUIRED+광역을 유지한다.
 # ══════════════════════════════════════════════════════════
 
 
-def _assert_no_wide_required_success_violations(attempts) -> None:
-    """team-lead 통보(2026-08-31, item 2) — REQUIRED + OK/MISSING 조합에
-    source_kind의 «전체» slot scope를 그대로 붙이면 안 된다(조회 성공
-    사실이 «이 회사는 그 자료를 공개하지 않는다»는 사실 주장으로 둔갑한다).
-    """
-    for attempt in attempts:
-        if attempt.requirement != c.REQUIREMENT_REQUIRED:
-            continue
-        if attempt.state not in (c.ATTEMPT_STATE_OK, c.ATTEMPT_STATE_MISSING):
-            continue
-        full_scope = set(c.SOURCE_KIND_SLOT_SCOPE.get(attempt.source_kind, ()))
-        assert set(attempt.slot_ids) != full_scope, (
-            f"{attempt.attempt_id}가 REQUIRED+{attempt.state}인데 광역 slot_ids를 그대로 씁니다"
-        )
+def _count_list_ok_required(attempts) -> int:
+    """team-lead 지시 — 「목록 조회 + OK + REQUIRED」가 0건임을 세는 시험용."""
+    return sum(
+        1 for a in attempts
+        if a.attempt_id.startswith("list:")
+        and a.state == c.ATTEMPT_STATE_OK
+        and a.requirement == c.REQUIREMENT_REQUIRED
+    )
 
 
-def test_item2_문서_fetch_ok는_실제로_채점된_슬롯만_slot_ids에_담고_REQUIRED를_유지한다() -> None:
+def test_item2_문서_fetch_ok는_광역_slot_ids와_REQUIRED를_그대로_유지한다() -> None:
+    """fetch·분할·채점을 실제로 거쳤으므로(전문을 훑었다) 좁히지 않는다."""
     row = RawFilingRow("20250315000001", "사업보고서 (2025.03)", "20250315")
     fetcher = _fetcher("A", row, LISTED_BUSINESS_REPORT_TEXT)
 
@@ -601,25 +601,25 @@ def test_item2_문서_fetch_ok는_실제로_채점된_슬롯만_slot_ids에_담�
         a for a in harvest.attempts
         if a.attempt_id.startswith("document:") and a.reason_code == c.REASON_DOCUMENT_FETCH_OK
     ][0]
-    assert fetch_ok_attempt.requirement == c.REQUIREMENT_REQUIRED  # 실제로 확인했으므로 유지
-    confirmed_slot_ids = {f.slot_id for f in harvest.fragments}
-    assert set(fetch_ok_attempt.slot_ids) == confirmed_slot_ids
-    assert set(fetch_ok_attempt.slot_ids) != set(c.SOURCE_KIND_SLOT_SCOPE[c.SOURCE_KIND_BUSINESS_REPORT])
+    assert fetch_ok_attempt.requirement == c.REQUIREMENT_REQUIRED
+    assert set(fetch_ok_attempt.slot_ids) == set(c.SOURCE_KIND_SLOT_SCOPE[c.SOURCE_KIND_BUSINESS_REPORT])
 
 
-def test_item2_no_scored_evidence_duplicate_missing_fetch는_OPTIONAL로_내려간다() -> None:
-    """세 가지 상황 모두 문서 내용을 실제로 확인하지 못했으므로(또는 처음부터
-    안 봤으므로) 광역 slot_ids를 REQUIRED로 확정하지 않아야 한다.
+def test_item2_no_scored_evidence와_missing_fetch는_REQUIRED_광역을_유지하고_duplicate만_OPTIONAL이다() -> None:
+    """team-lead 재정의 — 「참인 확인」(문서를 다 읽었지만 없음 / 문서가
+    실제로 없음)은 REQUIRED+광역을 유지한다. duplicate만 fetch·분할·채점을
+    아예 건너뛰므로 여전히 OPTIONAL이다.
     """
-    # 1) no scored evidence
+    # 1) no scored evidence — 문서를 다 읽었지만 어떤 슬롯도 못 찾음(참인 확인)
     row1 = RawFilingRow("20250401000001", "감사보고서", "20250401")
     harvest1 = collect_dart_evidence(_fetcher("F", row1, _NO_SCORED_EVIDENCE_TEXT), "00164788", now=_NOW)
     no_evidence_attempt = [
         a for a in harvest1.attempts if a.reason_code == c.REASON_DOCUMENT_NO_SCORED_EVIDENCE
     ][0]
-    assert no_evidence_attempt.requirement == c.REQUIREMENT_OPTIONAL
+    assert no_evidence_attempt.requirement == c.REQUIREMENT_REQUIRED
+    assert set(no_evidence_attempt.slot_ids) == set(c.SOURCE_KIND_SLOT_SCOPE[c.SOURCE_KIND_AUDIT_REPORT])
 
-    # 2) duplicate
+    # 2) duplicate — 분할·채점을 아예 건너뛰므로 여전히 OPTIONAL
     business_row = RawFilingRow("20250315000001", "사업보고서 (2025.03)", "20250315")
     semiannual_row = RawFilingRow("20250815000002", "반기보고서 (2025.06)", "20250815")
     dup_fetcher = FakeFetcher(
@@ -635,7 +635,7 @@ def test_item2_no_scored_evidence_duplicate_missing_fetch는_OPTIONAL로_내려�
     duplicate_attempt = [a for a in harvest2.attempts if a.reason_code == c.REASON_DOCUMENT_DUPLICATE][0]
     assert duplicate_attempt.requirement == c.REQUIREMENT_OPTIONAL
 
-    # 3) missing document fetch
+    # 3) missing document fetch — 「그 문서가 실제로 없다」는 참인 확인
     row3 = RawFilingRow("20250315000001", "사업보고서", "20250315")
     missing_fetcher = FakeFetcher(
         list_responses_by_pblntf_ty={"A": FilingListResult(state="OK", rows=(row3,))},
@@ -643,15 +643,13 @@ def test_item2_no_scored_evidence_duplicate_missing_fetch는_OPTIONAL로_내려�
     )
     harvest3 = collect_dart_evidence(missing_fetcher, "00126380", now=_NOW)
     missing_attempt = [a for a in harvest3.attempts if a.reason_code == c.REASON_DOCUMENT_FETCH_MISSING][0]
-    assert missing_attempt.requirement == c.REQUIREMENT_OPTIONAL
-
-    for harvest in (harvest1, harvest2, harvest3):
-        _assert_no_wide_required_success_violations(harvest.attempts)
+    assert missing_attempt.requirement == c.REQUIREMENT_REQUIRED
+    assert set(missing_attempt.slot_ids) == set(c.SOURCE_KIND_SLOT_SCOPE[c.SOURCE_KIND_BUSINESS_REPORT])
 
 
-def test_item2_여러_시나리오에_걸쳐_위반_0건이다() -> None:
-    """team-lead 지시 — 「위반 0건을 세는 시험을 넣어라」. 상장·감사·금융·
-    무신호·목차 등 대표 시나리오를 전부 실제로 돌려 확인한다.
+def test_item2_여러_시나리오에_걸쳐_목록_OK_REQUIRED_위반_0건이다() -> None:
+    """team-lead 지시 — 「목록 조회 + OK + REQUIRED」가 0건임을 세는 시험.
+    상장·감사·금융·무신호·목차 등 대표 시나리오를 전부 실제로 돌려 확인한다.
     """
     scenarios: list[tuple[str, str, str, str]] = [
         ("A", "사업보고서 (2025.03)", "00126380", LISTED_BUSINESS_REPORT_TEXT),
@@ -664,4 +662,39 @@ def test_item2_여러_시나리오에_걸쳐_위반_0건이다() -> None:
         row = RawFilingRow("20250315000001", report_nm, "20250315")
         harvest = collect_dart_evidence(_fetcher(pblntf_ty, row, text), company_id, now=_NOW)
         assert harvest.attempts  # 시나리오가 실제로 뭔가를 만들어냈는지(공허 통과 방지)
-        _assert_no_wide_required_success_violations(harvest.attempts)
+        assert _count_list_ok_required(harvest.attempts) == 0
+
+
+def test_item2_목록_OK인데_문서_fetch가_FAILED면_그_source_kind에는_확인된_REQUIRED가_없다() -> None:
+    """team-lead 지시 — 목록 OK 뒤 문서 fetch가 FAILED면 최종 판정 방향이
+    UNKNOWN 쪽이어야 한다. 내 엔진 안에서 이를 대신 증명하는 방법: 이
+    source_kind에 REQUIRED+OK/MISSING인 attempt가 «하나도» 없고, REQUIRED+
+    FAILED인 attempt가 있어야 한다 — 소비 계약의 「REQUIRED가 전부
+    OK/MISSING이면 자료부족」 조건을 깨서 UNKNOWN 쪽으로 이어지게 한다.
+    """
+    row = RawFilingRow("20250315000001", "사업보고서 (2025.03)", "20250315")
+    fetcher = FakeFetcher(
+        list_responses_by_pblntf_ty={"A": FilingListResult(state="OK", rows=(row,))},
+        document_responses_by_rcept_no={},  # 응답 없음 → FakeFetcher 기본값 FAILED
+    )
+
+    harvest = collect_dart_evidence(fetcher, "00126380", now=_NOW)
+
+    business_report_attempts = [
+        a for a in harvest.attempts if a.source_kind == c.SOURCE_KIND_BUSINESS_REPORT
+    ]
+    assert business_report_attempts  # 실제로 attempt가 만들어졌는지
+    confirmed_absent = [
+        a for a in business_report_attempts
+        if a.requirement == c.REQUIREMENT_REQUIRED and a.state in (c.ATTEMPT_STATE_OK, c.ATTEMPT_STATE_MISSING)
+    ]
+    assert confirmed_absent == []  # 「확인했는데 근거가 없다」로 읽힐 REQUIRED attempt가 없다
+    blocking = [
+        a for a in business_report_attempts
+        if a.requirement == c.REQUIREMENT_REQUIRED and a.state == c.ATTEMPT_STATE_FAILED
+    ]
+    assert blocking  # 대신 REQUIRED+FAILED가 있어 UNKNOWN 쪽으로 이어진다
+    # 목록 조회 자체는 OK였다(찾았다) — OPTIONAL로 내려가 있어야 위 결론이 성립한다.
+    list_attempt = [a for a in business_report_attempts if a.attempt_id.startswith("list:")][0]
+    assert list_attempt.state == c.ATTEMPT_STATE_OK
+    assert list_attempt.requirement == c.REQUIREMENT_OPTIONAL

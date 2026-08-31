@@ -71,14 +71,14 @@ def _unscored_fragments_attempt(
 ) -> CollectionAttempt:
     """무신호 문단 개수를 관측치로만 남긴다(P0-1) — 조각 자체는 harvest에 넣지 않는다.
 
-    이 attempt는 어떤 슬롯도 확인/불확인하지 않는다(순수 관측) — item 2
-    불변식에 맞춰 requirement를 OPTIONAL로 둔다.
+    fetch·분할·채점을 실제로 거친 뒤 나오는 attempt이므로(item 2 정정,
+    2026-08-31) requirement는 filing.requirement(REQUIRED) 그대로 둔다.
     """
     return CollectionAttempt(
         company_id=company_id,
         attempt_id=f"fragments:{filing.source_kind}:{filing.rcept_no}",
         source_kind=filing.source_kind,
-        requirement=c.REQUIREMENT_OPTIONAL,
+        requirement=filing.requirement,
         state=c.ATTEMPT_STATE_OK,
         slot_ids=c.SOURCE_KIND_SLOT_SCOPE[filing.source_kind],
         reason_code=c.REASON_NO_SIGNAL,
@@ -164,12 +164,13 @@ def collect_dart_evidence(
         fetch_result = _safe_fetch_document(fetcher, filing.rcept_no)
 
         if fetch_result.state == c.ATTEMPT_STATE_MISSING:
-            # 확인된 부재(P0-2) — 전송 장애(FAILED)와 분리해서 남긴다. 문서
-            # 내용을 한 번도 못 봤으므로 광역 slot_ids를 REQUIRED로 확정하지
-            # 않는다(item 2 불변식).
+            # 확인된 부재(P0-2) — 전송 장애(FAILED)와 분리해서 남긴다.
+            # ★ item 2 정정(2026-08-31 team-lead 재정의) — fetcher가 「이
+            # 문서는 원래 없다」고 확인한 것은 목록 단계 MISSING과 같은
+            # 성격의 «참인 확인»이다. REQUIRED+광역을 유지한다(다운그레이드
+            # 하지 않는다).
             attempts.append(_document_attempt(
                 company_id, filing, c.ATTEMPT_STATE_MISSING, c.REASON_DOCUMENT_FETCH_MISSING, fetch_result,
-                requirement=c.REQUIREMENT_OPTIONAL,
             ))
             continue
         if fetch_result.state != c.ATTEMPT_STATE_OK:
@@ -201,9 +202,10 @@ def collect_dart_evidence(
             # 중복이면 total_bytes에 가산하지 않는다(P1-5) — 가산 후 중복
             # 판정을 하면 실제로 쓰이지 않는 바이트가 예산을 유령처럼
             # 소비해 무관한 다음 문서가 부당하게 TRUNCATED될 수 있었다.
-            # 이 문서는 분할·채점을 아예 건너뛰므로(원본 문서의 attempt가
-            # 이미 실제로 확인한 슬롯을 담고 있다) 광역 slot_ids를 REQUIRED로
-            # 확정하지 않는다(item 2 불변식).
+            # ★ item 2 정정 — 이 문서는 분할·채점을 «아예 건너뛴다»(원본
+            # 문서만 실제로 훑었다). team-lead의 재정의는 「fetch·분할·채점을
+            # 실제로 거친 OK」만 광역+REQUIRED가 정직하다고 못박았고, 이
+            # 경로는 그 파이프라인을 안 거치므로 여전히 OPTIONAL로 낮춘다.
             attempts.append(_document_attempt(
                 company_id, filing, c.ATTEMPT_STATE_OK, c.REASON_DOCUMENT_DUPLICATE, fetch_result,
                 requirement=c.REQUIREMENT_OPTIONAL,
@@ -241,14 +243,13 @@ def collect_dart_evidence(
         if not scored:
             # 채점 가능한 근거가 하나도 없다 — 문서 자체를 최종 산출에서
             # 뺀다(P0-3). 조회는 성공했다는 사실만 attempt로 남긴다.
-            # 「실제로 확인한 슬롯」이 0개이므로(문서를 다 훑었지만 어떤
-            # 슬롯도 채점하지 못했다) 광역 slot_ids를 REQUIRED로 확정하지
-            # 않는다(item 2 불변식) — v1 키워드 휴리스틱이 놓쳤을 수도 있어
-            # 「모든 슬롯이 확인된 부재」라고 단정하면 안 된다.
+            # ★ item 2 정정(2026-08-31 team-lead 재정의) — fetch·분할·채점을
+            # 실제로 다 거쳤다(문서 전문을 훑었다) — 「이 공시를 다 읽었는데
+            # 그 슬롯 근거가 없었다」는 참인 진술이므로 광역 slot_ids +
+            # REQUIRED를 그대로 둔다(다운그레이드하지 않는다).
             attempts.append(_document_attempt(
                 company_id, filing, c.ATTEMPT_STATE_OK, c.REASON_DOCUMENT_NO_SCORED_EVIDENCE, fetch_result,
                 documents_seen=len(candidates),
-                requirement=c.REQUIREMENT_OPTIONAL,
             ))
             continue
 
@@ -298,15 +299,17 @@ def collect_dart_evidence(
 
         documents.append(document)
         fragments.extend(new_fragments)
-        # item 2 불변식 — REQUIRED+OK를 유지하되(이 값은 실제로 확인한
-        # 슬롯이므로 정당하다), slot_ids는 source_kind 전체가 아니라 이
-        # 문서에서 실제로 조각을 만들어 낸 슬롯만 담는다.
-        confirmed_slot_ids = tuple(sorted({slot_score.slot_id for _, slot_score in scored}))
+        # ★ item 2 정정(2026-08-31 team-lead 재정의) — 「REQUIRED+OK+광역
+        # slot_ids」 조합 자체가 문제가 아니라, «그 조회가 실제로 문서
+        # 전문을 훑었는가»가 기준이다. 이 attempt는 fetch·분할·채점을
+        # 전부 거쳤으므로 광역 slot_ids를 그대로 쓰는 게 정직하다(「이
+        # 공시를 다 읽었는데 그 슬롯 근거가 없었다」는 참). 좁히지 않는다.
         attempts.append(_document_attempt(
             company_id, filing, c.ATTEMPT_STATE_OK, c.REASON_DOCUMENT_FETCH_OK, fetch_result,
-            slot_ids=confirmed_slot_ids,
         ))
         if unscored_count:
+            # 이 attempt도 같은 fetch·분할·채점 파이프라인을 거쳤으므로
+            # 광역+REQUIRED가 정직하다(위와 같은 이유) — 다운그레이드하지 않는다.
             attempts.append(_unscored_fragments_attempt(company_id, filing, unscored_count))
 
     company_type = classify.classify_company_type(documents, classify_probe_texts, attempts=attempts)
