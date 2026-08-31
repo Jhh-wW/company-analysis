@@ -20,7 +20,12 @@ SLOT_KEYWORDS: dict[str, tuple[str, ...]] = {
     "identity:official_location": ("본점", "소재지", "주소"),
     "identity:self_positioning": ("선도", "대표하는", "자리매김"),
 
-    "business_model:revenue_model": ("매출", "수익", "판매", "과금", "수수료"),
+    # ★ 「매출」·「수익」 단독 키워드는 뺐다 — 「매출액은 2023년...」처럼 실적
+    #   수치를 나열하는 문장(past_changes 몫)까지 전부 걸려, 수집기 1차
+    #   표적 우선순위(아래 score_fragment_text) 때문에 실제로는 더 적합한
+    #   보조 슬롯을 가리는 부작용이 있었다(실측, 2026-08-31). 「어떻게 돈을
+    #   버는가」를 설명하는 구체적 표현만 남긴다.
+    "business_model:revenue_model": ("판매에서 발생", "수익원", "과금", "수수료", "매출 구조"),
     "business_model:customer_type": ("고객사", "거래처", "수요처"),
     "business_model:sales_channel": ("유통", "채널", "직판", "대리점"),
     "business_model:regional_mix": ("내수", "수출", "해외", "지역별"),
@@ -32,7 +37,9 @@ SLOT_KEYWORDS: dict[str, tuple[str, ...]] = {
     "portfolio:revenue_link": ("매출 기여", "매출 비중"),
     "portfolio:lifecycle_stage": ("출시", "단종", "성장기", "도입기"),
 
-    "past_changes:historical_performance": ("매출액", "영업이익", "당기순이익"),
+    # ★ 2026-08-31 team-lead 통보 — past_changes:historical_performance는
+    #   여기 없다. Codex 구조화 실적기가 재무 API 수치로 직접 채운다
+    #   (constants.COLLECTOR_SLOTS_BY_SECTION 주석 참고).
     "past_changes:completed_execution": ("완료", "준공", "출시했다", "확대했다"),
     "past_changes:cumulative_change": ("증가", "감소", "전년 대비", "누적"),
     "past_changes:change_context": ("배경", "이유", "요인"),
@@ -62,11 +69,13 @@ SLOT_KEYWORDS: dict[str, tuple[str, ...]] = {
     "culture:organization_change": ("조직개편", "신설", "통합"),
     "culture:verified_case": ("수상", "인증받았다", "사례"),
 
-    "competitive_position:comparison_target": ("동종업계", "경쟁사", "업계는"),
-    "competitive_position:comparison_metric": ("점유율", "순위", "규모"),
-    "competitive_position:comparison_basis": ("공시 기준", "근거로"),
-    "competitive_position:comparison_judgment": ("경쟁력", "강점", "우위"),
-    "competitive_position:limitation": ("확인되지 않는다", "한계", "제약"),
+    # ★ 2026-08-31 team-lead 통보 — 비교 대상·지표·근거·판단 4종(comparison_*·
+    #   limitation)은 여기 없다. Codex가 채운다. 수집기는 «자사가 스스로
+    #   서술한 시장 내 위치·강점»만 self_context로 담는다(상대 이름·순위 비교
+    #   없이 자사 서술만 — composer 45개 어휘에 없던 새 슬롯).
+    "competitive_position:self_context": (
+        "경쟁력을 갖추고", "강점으로", "차별화된", "보유하고 있다", "자사의 강점",
+    ),
 }
 
 #: 장별 구조 신호(제목 줄에 등장하면 가산점). SLOT_KEYWORDS와 같은 v1 한계.
@@ -94,8 +103,17 @@ class SlotScore:
 def score_fragment_text(text: str, section_heading: str = "") -> SlotScore | None:
     """조각 원문 하나에 가장 잘 맞는 (장, 슬롯)을 고른다. 신호가 없으면 None.
 
-    동점이면 SLOT_KEYWORDS 선언 순서(=장·슬롯 어휘 정본 순서)의 앞선 슬롯이
-    이긴다 — dict 순회는 삽입 순서를 보존하므로 결정론이 유지된다.
+    전체 SLOT_KEYWORDS(수집기 필수 슬롯 + 보조 태그로 허용된 나머지 composer
+    슬롯)를 한 번에 채점해 순수 점수가 가장 높은 슬롯을 쓴다.
+    historical_performance·비교 4종은 SLOT_KEYWORDS에 아예 없으므로(다른
+    엔진이 채움) 애초에 후보가 되지 않는다.
+
+    ★ 동점일 때만 COLLECTOR_SLOTS_BY_SECTION(수집기 1차 표적, 2026-08-31
+    team-lead 통보)을 우선한다 — «항상» 수집기 슬롯을 이기게 하면 다른
+    장의 약한 우연 일치(예: 실적 문단에 스친 「고객사」 한 단어)가 그
+    장의 훨씬 강한 진짜 신호를 밀어낸다(실측, 2026-08-31 — 아래
+    tests/test_relevance.py에 회귀 시험으로 고정). 순수 점수 비교가
+    먼저이고, 동점에서만 수집기 슬롯이 이긴다.
     """
     best: SlotScore | None = None
     for slot_id, keywords in SLOT_KEYWORDS.items():
@@ -116,4 +134,9 @@ def score_fragment_text(text: str, section_heading: str = "") -> SlotScore | Non
         )
         if best is None or candidate.score_millis > best.score_millis:
             best = candidate
+        elif candidate.score_millis == best.score_millis:
+            candidate_is_collector = candidate.slot_id in c.COLLECTOR_SLOT_IDS
+            best_is_collector = best.slot_id in c.COLLECTOR_SLOT_IDS
+            if candidate_is_collector and not best_is_collector:
+                best = candidate
     return best

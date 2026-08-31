@@ -81,14 +81,73 @@ CLAIM_SLOTS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
     ),
 }
 
+#: ══════════════════════════════════════════════════════════
+#: 수집기 필수 슬롯 — composer 45개 중 «수집기가 원문 후보를 채워야 하는»
+#: 부분집합(2026-08-31 team-lead 통보).
+#: ★ 정본: app/src/shared/report_evidence/policy.py — 이 워크트리 기준
+#:   커밋(6e1f819)에는 아직 없다. 정본이 생기면 이 dict를 그 값과 대조해야
+#:   한다(엔진은 app을 import할 수 없으므로 여기서도 값 복사).
+#: ★ past_changes:historical_performance는 «뺐다» — Codex 구조화 실적기가
+#:   재무 API 수치로 직접 채운다. 수집기의 키워드 채점이 이 슬롯에 문단을
+#:   배정하면 같은 슬롯에 권위가 다른 두 값(원문 인용 vs 정확한 재무 수치)이
+#:   겹쳐 어느 쪽을 믿을지 모호해진다 — relevance.py가 이 슬롯을 아예
+#:   채점 대상에서 뺀 이유다.
+#: ★ competitive_position은 self_context 하나뿐 — 비교 대상·지표·근거·
+#:   판단 4개는 Codex가 채운다. self_context는 composer 45개 어휘에 «없던»
+#:   새 슬롯이다(「자사가 스스로 서술한 시장 내 위치·강점」). 아래
+#:   ALL_SLOT_IDS·SLOT_SECTION_OF에 합쳐 이 엔진이 인식하는 slot_id로 만든다.
+COLLECTOR_SLOTS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
+    "identity": (
+        "identity:corporate_identity", "identity:business_definition",
+    ),
+    "business_model": (
+        "business_model:revenue_model", "business_model:customer_type",
+        "business_model:value_exchange",
+    ),
+    "portfolio": (
+        "portfolio:product_role", "portfolio:revenue_link",
+    ),
+    "past_changes": (
+        "past_changes:completed_execution",
+    ),
+    "current_challenges": (
+        "current_challenges:issue", "current_challenges:response",
+    ),
+    "future_strategy": (
+        "future_strategy:stated_plan", "future_strategy:plan_status",
+    ),
+    "operations_partners": (
+        "operations_partners:value_chain", "operations_partners:operating_role",
+    ),
+    "culture": (
+        "culture:work_principle", "culture:verified_case",
+    ),
+    "competitive_position": (
+        "competitive_position:self_context",
+    ),
+}
+
+COLLECTOR_SLOT_IDS: Final[frozenset[str]] = frozenset(
+    slot_id for slots in COLLECTOR_SLOTS_BY_SECTION.values() for slot_id in slots
+)
+
+#: 이 엔진이 인식하는 전체 slot_id — composer 45개 어휘 ∪ 수집기 전용 신규
+#: 슬롯(self_context). EvidenceFragment·CollectionAttempt 검증은 이 합집합
+#: 기준이다(보조 태그로 composer 슬롯을 붙이는 것도 허용하므로 45개를
+#: 빼지 않는다 — historical_performance·비교 4종도 «유효한 slot_id»이긴
+#: 하다, 다만 relevance.py가 스스로 배정하지 않을 뿐이다).
 ALL_SLOT_IDS: Final[frozenset[str]] = frozenset(
     slot_id for slots in CLAIM_SLOTS_BY_SECTION.values() for slot_id in slots
-)
+) | COLLECTOR_SLOT_IDS
 
 #: 슬롯 id → 소속 장 id. 조각의 slot_id·section_id 정합성 검사에 쓴다.
 SLOT_SECTION_OF: Final[dict[str, str]] = {
     slot_id: section_id
     for section_id, slots in CLAIM_SLOTS_BY_SECTION.items()
+    for slot_id in slots
+} | {
+    slot_id: section_id
+    for section_id, slots in COLLECTOR_SLOTS_BY_SECTION.items()
     for slot_id in slots
 }
 
@@ -178,15 +237,19 @@ MAX_RELATED_FILINGS: Final[int] = 3
 #:   여기서는 «이 공시 종류가 대체로 어떤 장을 채우는가»만 굵게 표시한다.
 #:   사업/감사보고서는 전문(全文)이라 9개 장 전체에 걸치고, 반기·분기보고서는
 #:   최근 실적·진행 상황 보충이라 4장·5장에 걸친다고 본다.
-_ALL_SLOTS_SORTED: Final[tuple[str, ...]] = tuple(sorted(ALL_SLOT_IDS))
+#: ★ 2026-08-31 team-lead 통보 — attempts.slot_ids도 COLLECTOR_SLOTS_BY_SECTION
+#:   (수집기 1차 표적)에서만 고른다. composer 45개 전체가 아니다 — 수집기가
+#:   채우지 않기로 한 슬롯(historical_performance·비교 4종)을 「이 공시가
+#:   영향을 준다」고 기록하면 다른 담당자가 잘못된 커버리지 기대를 갖는다.
+_COLLECTOR_SLOTS_SORTED: Final[tuple[str, ...]] = tuple(sorted(COLLECTOR_SLOT_IDS))
 SOURCE_KIND_SLOT_SCOPE: Final[dict[str, tuple[str, ...]]] = {
-    SOURCE_KIND_BUSINESS_REPORT: _ALL_SLOTS_SORTED,
-    SOURCE_KIND_AUDIT_REPORT: _ALL_SLOTS_SORTED,
+    SOURCE_KIND_BUSINESS_REPORT: _COLLECTOR_SLOTS_SORTED,
+    SOURCE_KIND_AUDIT_REPORT: _COLLECTOR_SLOTS_SORTED,
     SOURCE_KIND_SEMIANNUAL_REPORT: (
-        CLAIM_SLOTS_BY_SECTION["past_changes"] + CLAIM_SLOTS_BY_SECTION["current_challenges"]
+        COLLECTOR_SLOTS_BY_SECTION["past_changes"] + COLLECTOR_SLOTS_BY_SECTION["current_challenges"]
     ),
     SOURCE_KIND_QUARTERLY_REPORT: (
-        CLAIM_SLOTS_BY_SECTION["past_changes"] + CLAIM_SLOTS_BY_SECTION["current_challenges"]
+        COLLECTOR_SLOTS_BY_SECTION["past_changes"] + COLLECTOR_SLOTS_BY_SECTION["current_challenges"]
     ),
 }
 

@@ -44,6 +44,62 @@ def test_제목_힌트가_맞으면_가산점을_받는다() -> None:
     assert any(code.startswith("heading_match:") for code in with_hint.reason_codes)
 
 
+def test_동점이면_수집기_1차_표적_슬롯이_이긴다() -> None:
+    """team-lead 규칙 1 — 순수 점수가 같으면 COLLECTOR_SLOT_IDS가 우선한다.
+
+    「해외」(business_model:regional_mix, 보조)와 「제공한다」
+    (business_model:value_exchange, 수집기 1차 표적)가 똑같이 1건씩 걸려
+    동점(250)이 되는 문장. SLOT_KEYWORDS 선언 순서는 regional_mix가
+    value_exchange보다 앞서므로, 순서만으로 고르면 regional_mix가 이겨야
+    하지만 수집기 우선 규칙이 이를 뒤집어야 한다.
+    """
+    score = score_fragment_text("매출은 해외에서 발생하며 서비스를 제공한다.")
+    assert score is not None
+    assert score.slot_id == "business_model:value_exchange"
+    assert score.slot_id in c.COLLECTOR_SLOT_IDS
+
+
+def test_강한_보조_신호는_약한_수집기_신호에_밀리지_않는다() -> None:
+    """수집기 슬롯이 «항상» 이기면 안 된다 — 순수 점수가 더 센 보조 슬롯이
+    이겨야 한다(실측 회귀 — 이전 버전은 실적 문단이 우연히 스친 「고객사」
+    한 단어 때문에 business_model:customer_type으로 잘못 배정됐었다).
+    """
+    text = (
+        "최근 3개년 매출액은 2023년 1,000억원, 2024년 1,200억원, "
+        "2025년 1,500억원으로 매년 증가했다.\n"
+        "이 증가는 신규 고객사 확보가 배경이다."
+    )
+    score = score_fragment_text(text, section_heading="1. 요약재무정보")
+    assert score is not None
+    assert score.slot_id == "past_changes:cumulative_change"
+    assert score.slot_id not in c.COLLECTOR_SLOT_IDS
+
+
+def test_다른_엔진_소유_슬롯은_어떤_입력에도_생성되지_않는다() -> None:
+    """historical_performance·비교 4종은 Codex가 채운다 — 텍스트 채점이
+    옛 키워드(매출액·영업이익·동종업계·점유율 등)를 봐도 이 슬롯들을
+    돌려주면 안 된다(SLOT_KEYWORDS에서 아예 뺐는지 확인하는 회귀 시험).
+    """
+    excluded_slot_ids = {
+        "past_changes:historical_performance",
+        "competitive_position:comparison_target",
+        "competitive_position:comparison_metric",
+        "competitive_position:comparison_basis",
+        "competitive_position:comparison_judgment",
+        "competitive_position:limitation",
+    }
+    probe_texts = (
+        "최근 3개년 매출액과 영업이익, 당기순이익은 아래와 같다.",
+        "동종업계 경쟁사 대비 업계는 과점 구조다.",
+        "점유율과 순위, 규모는 공시 기준 근거로 확인된다.",
+        "이 경쟁력과 강점, 우위는 확인되지 않는다, 한계와 제약이 있다.",
+    )
+    for text in probe_texts:
+        score = score_fragment_text(text)
+        if score is not None:
+            assert score.slot_id not in excluded_slot_ids
+
+
 def test_실제_문서를_분할해서_채점하면_서로_다른_장에_서로_다른_조각이_배정된다() -> None:
     """전체 원문을 통째로 복사하는 게 아니라 장마다 다른 문단이 배정되는지."""
     candidates = segment_document(LISTED_BUSINESS_REPORT_TEXT)
