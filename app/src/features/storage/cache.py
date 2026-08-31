@@ -64,8 +64,8 @@ from src.features.provenance.sources import (
     SourceKind,
     official_web_currentness_is_usable,
 )
-from src.features.composer.build_id import build_id_is_usable
-from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
+from src.shared.report_generation.build_identity import build_id_is_usable
+from src.shared.report_generation.constants import ENGINE_V2_SCHEMA_VERSION
 from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
 from src.features.report_standard.publish import PublishBlockedError, validate_publishable
 from src.features.storage import reports as reports_store

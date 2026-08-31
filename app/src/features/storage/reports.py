@@ -24,7 +24,6 @@ from typing import Any, Optional
 
 from src.core.constants import COUNTED_CELLS, HIDDEN_CELLS
 from src.core.persisted_json import validate_persisted_json_text
-from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
 from src.features.grading.logic import grade_of
 from src.features.pipeline.port import (
     FactRecord,
@@ -39,6 +38,23 @@ from src.features.provenance.sources import Source, SourceKind
 from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
 from src.features.storage.constants import TABLE_REPORTS
 from src.shared.report_quality.constants import STRICT_QUALITY_CONTRACT_VERSION
+from src.shared.report_quality.generation import (
+    assert_observation_matches_assessment,
+    generation_quality_observation_from_dict,
+    generation_quality_observation_to_dict,
+)
+from src.shared.report_generation.constants import ENGINE_V2_SCHEMA_VERSION
+from src.shared.report_generation.canonical import (
+    PublicManifestError,
+    assert_report_matches_generation_evidence,
+)
+from src.shared.report_generation.models import (
+    generation_metrics_from_dict,
+    generation_metrics_to_dict,
+    producer_evidence_from_dict,
+    producer_evidence_to_dict,
+)
+from src.shared.report_evidence.constants import ReleaseMode
 
 # ══════════════════════════════════════════════════════════
 # 직렬화 — dataclass ↔ dict (JSON에 바로 쓸 수 있는 모양)
@@ -57,15 +73,19 @@ def _table_to_dict(table: ReportTable) -> dict[str, Any]:
         "scale_places": table.scale_places,
         "display_unit": table.display_unit,
     }
-    # FULL 구조 manifest는 행 원자료·전체 출처·표 참조가 모두 저장돼야
-    # 재로드 뒤에도 같은 공개 구조를 다시 검증할 수 있다.
+    # FULL 구조 manifest는 원문 자체가 아니라 행/셀 typed ref·전체 출처·표
+    # 참조만 저장한다. 원문 evidence_rows는 수집 경계 밖 장기 저장물이 아니다.
     if table.manifest_ref:
         # manifest가 없는 SHADOW/과거 표는 이 키들이 없던 저장 bytes를 그대로
         # 유지한다. strict 표만 네 필드를 한 묶음으로 왕복한다.
-        payload["evidence_rows"] = list(table.evidence_rows)
         payload["source_cites"] = list(table.source_cites)
         payload["manifest_ref"] = table.manifest_ref
         payload["row_fact_ids"] = list(table.row_fact_ids)
+        payload["row_evidence_refs"] = list(table.row_evidence_refs)
+        payload["row_binding_refs"] = list(table.row_binding_refs)
+        payload["cell_binding_refs"] = [
+            list(row) for row in table.cell_binding_refs
+        ]
     # 옛 payload의 암묵적 기본값은 그대로 직렬화해야 기존 보고서 hash·자동출고
     # 승인이 이유 없이 바뀌지 않는다. 실제 시각화 힌트가 있을 때만 새 키를 저장한다.
     if table.presentation != "table":
@@ -88,7 +108,8 @@ def _table_from_dict(data: dict[str, Any]) -> ReportTable:
         scale_divisor=str(data.get("scale_divisor", "")),
         scale_places=int(data.get("scale_places", 0)),
         display_unit=str(data.get("display_unit", "")),
-        evidence_rows=[str(value) for value in data.get("evidence_rows", [])],
+        # strict 저장에는 원문 행을 넣지 않는다. manifest/typed refs가 검증한다.
+        evidence_rows=[],
         presentation=str(data.get("presentation", "table")),
         entity_scope=str(data.get("entity_scope", "")),
         raw_unit=str(data.get("raw_unit", "")),
@@ -96,6 +117,16 @@ def _table_from_dict(data: dict[str, Any]) -> ReportTable:
         source_cites=[str(value) for value in data.get("source_cites", [])],
         manifest_ref=str(data.get("manifest_ref", "")),
         row_fact_ids=[str(value) for value in data.get("row_fact_ids", [])],
+        row_evidence_refs=[
+            str(value) for value in data.get("row_evidence_refs", [])
+        ],
+        row_binding_refs=[
+            str(value) for value in data.get("row_binding_refs", [])
+        ],
+        cell_binding_refs=[
+            [str(value) for value in row]
+            for row in data.get("cell_binding_refs", [])
+        ],
     )
 
 
@@ -402,6 +433,22 @@ def report_to_dict(report: Report) -> dict[str, Any]:
         payload["publication_policy"] = report.publication_policy
     if report.public_structure_manifest:
         payload["public_structure_manifest"] = report.public_structure_manifest
+    if report.company_id:
+        payload["company_id"] = report.company_id
+    if report.release_mode:
+        payload["release_mode"] = report.release_mode
+    if report.generation_evidence is not None:
+        payload["generation_evidence"] = producer_evidence_to_dict(
+            report.generation_evidence
+        )
+    if report.generation_metrics is not None:
+        payload["generation_metrics"] = generation_metrics_to_dict(
+            report.generation_metrics
+        )
+    if report.quality_observation is not None:
+        payload["quality_observation"] = generation_quality_observation_to_dict(
+            report.quality_observation
+        )
     return payload
 
 
@@ -409,33 +456,91 @@ def report_from_dict(data: dict[str, Any]) -> Report:
     """dict → `Report`. `report_to_dict`의 역함수 — 왕복해도 같아야 한다."""
     schema_version = str(data.get("schema_version", ""))
     is_v2 = schema_version == ENGINE_V2_SCHEMA_VERSION
-    strict_reload = (
-        str(data.get("quality_contract_version", ""))
-        == STRICT_QUALITY_CONTRACT_VERSION
-    )
-    if strict_reload and not str(data.get("public_structure_manifest", "")).strip():
-        raise ValueError("엄격 보고서의 공개 구조 manifest가 누락됐습니다")
-    if strict_reload:
+    release_mode = str(data.get("release_mode", ""))
+    allowed_release_modes = {
+        "",
+        ReleaseMode.SHADOW.value,
+        ReleaseMode.ENFORCE_NO_PARTIAL.value,
+        ReleaseMode.FULL.value,
+    }
+    if release_mode not in allowed_release_modes:
+        raise ValueError(f"알 수 없는 저장 release_mode입니다: {release_mode!r}")
+    strict_reload = release_mode in {
+        ReleaseMode.ENFORCE_NO_PARTIAL.value,
+        ReleaseMode.FULL.value,
+    }
+    if strict_reload and (
+        schema_version != ENGINE_V2_SCHEMA_VERSION
+        or str(data.get("quality_contract_version", ""))
+        != STRICT_QUALITY_CONTRACT_VERSION
+    ):
+        raise ValueError("엄격 보고서의 schema 또는 품질 contract_version이 바뀌었습니다")
+    if (
+        not strict_reload
+        and (
+            data.get("generation_evidence") is not None
+            or data.get("quality_observation") is not None
+            or str(data.get("public_structure_manifest", "")).strip()
+            or str(data.get("quality_contract_version", ""))
+            == STRICT_QUALITY_CONTRACT_VERSION
+        )
+    ):
+        raise ValueError("엄격 보고서의 release_mode가 누락되거나 낮아졌습니다")
+
+    generation_evidence = None
+    generation_metrics = None
+    quality_observation = None
+    if data.get("generation_metrics") is not None:
+        if type(data["generation_metrics"]) is not dict:
+            raise ValueError("저장된 생성 지표 형식이 깨졌습니다")
+        generation_metrics = generation_metrics_from_dict(
+            data["generation_metrics"]
+        )
+    if data.get("quality_observation") is not None:
+        if type(data["quality_observation"]) is not dict:
+            raise ValueError("저장된 생성 품질 관측 형식이 깨졌습니다")
+        quality_observation = generation_quality_observation_from_dict(
+            data["quality_observation"]
+        )
+    if strict_reload and quality_observation is None:
+        raise ValueError("엄격 보고서의 생성 품질 관측이 누락됐습니다")
+    if release_mode == ReleaseMode.FULL.value:
+        if not str(data.get("public_structure_manifest", "")).strip():
+            raise ValueError("FULL 보고서의 공개 구조 manifest가 누락됐습니다")
+        evidence_raw = data.get("generation_evidence")
+        if type(evidence_raw) is not dict:
+            raise ValueError("FULL 보고서의 generation evidence가 누락됐습니다")
+        generation_evidence = producer_evidence_from_dict(evidence_raw)
+        assert_observation_matches_assessment(
+            quality_observation,
+            generation_evidence.assessment,
+        )
         for section in data.get("sections", []):
             for table in section.get("tables", []):
                 rows = table.get("rows", [])
-                evidence_rows = table.get("evidence_rows", [])
-                row_fact_ids = table.get("row_fact_ids", [])
-                has_evidence = (
-                    len(evidence_rows) == len(rows)
-                    and all(str(value).strip() for value in evidence_rows)
-                )
-                has_facts = (
-                    len(row_fact_ids) == len(rows)
-                    and all(str(value).strip() for value in row_fact_ids)
-                )
+                headers = table.get("headers", [])
+                row_evidence_refs = table.get("row_evidence_refs", [])
+                row_binding_refs = table.get("row_binding_refs", [])
+                cell_binding_refs = table.get("cell_binding_refs", [])
                 if (
-                    not str(table.get("manifest_ref", "")).strip()
-                    or not (has_evidence or has_facts)
+                    "evidence_rows" in table
+                    or not str(table.get("manifest_ref", "")).strip()
+                    or not table.get("source_cites")
+                    or len(row_evidence_refs) != len(rows)
+                    or len(row_binding_refs) != len(rows)
+                    or not all(str(value).strip() for value in row_binding_refs)
+                    or len(cell_binding_refs) != len(rows)
+                    or any(
+                        len(cell_refs) != len(headers)
+                        or not all(str(value).strip() for value in cell_refs)
+                        for cell_refs in cell_binding_refs
+                    )
                 ):
                     raise ValueError(
-                        "엄격 보고서 표의 manifest 참조 또는 행 근거가 누락됐습니다"
+                        "FULL 보고서 표의 manifest/typed 행·셀 근거가 누락됐습니다"
                     )
+    elif data.get("generation_evidence") is not None:
+        raise ValueError("FULL이 아닌 보고서에 generation evidence가 있습니다")
     report = Report(
         company=data["company"],
         job=data["job"],
@@ -468,6 +573,11 @@ def report_from_dict(data: dict[str, Any]) -> Report:
         safety_decision=str(data.get("safety_decision", "")),
         publication_policy=str(data.get("publication_policy", "")),
         public_structure_manifest=str(data.get("public_structure_manifest", "")),
+        company_id=str(data.get("company_id", "")),
+        release_mode=release_mode,
+        generation_evidence=generation_evidence,
+        generation_metrics=generation_metrics,
+        quality_observation=quality_observation,
         # 옛 저장본(이 키가 없는 v1·초기 v2)은 빈 사전으로 읽는다 — 그러면
         # 부록이 예전처럼 화면 글자에서 등급을 되짚는 폴백으로 떨어진다.
         source_grades={
@@ -476,13 +586,14 @@ def report_from_dict(data: dict[str, Any]) -> Report:
             if isinstance(grades, list)
         },
     )
-    if strict_reload:
-        # import cycle을 피하려고 실제 strict 재로드 시점에만 manifest 검증기를 읽는다.
-        from src.features.composer.public_manifest import (  # noqa: PLC0415
-            assert_stored_strict_manifest,
+    if release_mode == ReleaseMode.FULL.value:
+        if generation_evidence is None:  # pragma: no cover - 위 경계 방어
+            raise ValueError("FULL generation evidence 복원이 실패했습니다")
+        assert_report_matches_generation_evidence(
+            data,
+            generation_evidence,
+            manifest_bytes=str(data["public_structure_manifest"]).encode("utf-8"),
         )
-
-        assert_stored_strict_manifest(report)
     return report
 
 
