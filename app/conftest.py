@@ -23,14 +23,17 @@ from src.features.storage import constants as storage_constants
 
 
 @pytest.fixture(autouse=True)
-def _fresh_process_engine_build_identity():
-    """시험끼리 process epoch가 새지 않게 하되 시험 중에는 재동결하지 않는다."""
+def _fresh_process_generation_identity():
+    """시험끼리 process epoch·엔진 모드가 새지 않게 격리한다."""
 
+    from src.features.pipeline import engine_mode  # noqa: PLC0415
     from src.shared import engine_build_identity  # noqa: PLC0415
 
+    engine_mode._reset_process_engine_mode_for_tests()  # noqa: SLF001
     engine_build_identity._reset_process_engine_build_identity_for_tests()  # noqa: SLF001
     yield
     engine_build_identity._reset_process_engine_build_identity_for_tests()  # noqa: SLF001
+    engine_mode._reset_process_engine_mode_for_tests()  # noqa: SLF001
 
 
 @pytest.fixture(autouse=True)

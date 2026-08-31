@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from src.core import deployment_identity
 from src.core.provider_gateway import attempt_context
 from src.core.provider_gateway.attempt_context import ProviderAttemptCallbacks
 from src.core.provider_gateway.types import ProviderObservation
@@ -14,6 +15,7 @@ from src.features.budget import provider_budget
 from src.features.pipeline import real
 from src.features.pipeline.port import Outcome
 from src.features.pipeline.tests.test_real_cache import CORP_ID, FakeEngine, _run
+from src.shared import engine_build_identity as build_identity_contract
 from src.shared.final_gate_diagnostics import (
     FINAL_GATE_REASON_MISSING_REVENUE,
 )
@@ -78,6 +80,11 @@ def jyp_free_pipeline(
             ("00999999", "베타전자", "", "999999", "20260819"),
         ),
     )
+    for name in deployment_identity.COMMIT_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "a" * 40)
+    build_identity_contract.freeze_process_engine_build_identity()
+    real.engine_mode.freeze_process_engine_mode(real.engine_mode.EngineMode.V1)
     # 이 시험은 ``test_real_cache``의 실행 함수만 재사용한다. 그 파일의
     # autouse fixture는 다른 시험 모듈까지 따라오지 않으므로, 직접 실행하는
     # 유료 경계도 운영 worker와 똑같이 budget과 영속 attempt 문맥을 함께 연다.

@@ -17,6 +17,7 @@ from src.features.provider_health import constants as provider_health_constants
 from src.features.provider_health import store as provider_health_store
 from src.features.storage import constants as storage_constants
 from src.features.storage import db as storage_db
+from src.shared import engine_build_identity
 from src.web import paid_runtime, runtime
 
 
@@ -95,7 +96,10 @@ def _deployed_commit() -> str:
       통과한다.** 진짜 RENDER_GIT_COMMIT 은 언제나 깨끗한 16진수이므로, 전체가
       16진수가 아니면 «커밋을 안다»고 말하지 않는 편이 정직하다.
     """
-    return deployment_identity.short_deployed_commit()
+    identity = engine_build_identity.process_engine_build_identity()
+    if not identity.cache_usable:
+        return _COMMIT_UNKNOWN
+    return identity.deployment_revision[:_COMMIT_SHORT_LEN]
 
 
 @router.get("/healthz", include_in_schema=False)

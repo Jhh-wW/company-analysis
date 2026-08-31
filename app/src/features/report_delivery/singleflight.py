@@ -81,6 +81,13 @@ class LeaseHandle:
 
 @dataclass(frozen=True)
 class AcquireResult:
+    """획득 결과.
+
+    ``WAIT``가 같은 exact key의 owner를 가리킬 때만 ``handle``이 있다. 다른
+    namespace/epoch의 provider는 중복 과금 방지용 장벽일 뿐 그 결과나 lease를
+    제어할 권리가 없으므로 ``handle=None``을 돌려준다.
+    """
+
     disposition: AcquireDisposition
     handle: LeaseHandle | None = None
     completed_content_id: str = ""
@@ -379,7 +386,7 @@ def acquire(
     if foreign_active is not None:
         return AcquireResult(
             disposition=AcquireDisposition.WAIT,
-            handle=_handle_from_row(key, foreign_active),
+            handle=None,
         )
     token = uuid.uuid4().hex
     insert_payload = (

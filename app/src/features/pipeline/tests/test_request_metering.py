@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.core import deployment_identity
 from src.core.constants import (
     MAX_AI_CALLS_PER_REQUEST,
     MODEL_PRICES_USD_PER_MTOK,
@@ -22,6 +23,7 @@ from src.core.provider_gateway.types import BillingDisposition, ProviderObservat
 from src.features.budget import provider_budget
 from src.features.pipeline import real
 from src.features.pipeline.port import CompanyCard, Outcome, UserInput
+from src.shared import engine_build_identity as build_identity_contract
 from src.features.spanselect.canonical import answer_schema
 
 _HAIKU = "claude-haiku-4-5"
@@ -62,6 +64,16 @@ def _paid_provider_budget_context():
         recorder.callbacks()
     ):
         yield recorder
+
+
+@pytest.fixture(autouse=True)
+def _verified_process_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RealPipeline 직접 시험도 정상 process build 영수증을 명시적으로 연다."""
+
+    for name in deployment_identity.COMMIT_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "a" * 40)
+    build_identity_contract.freeze_process_engine_build_identity()
 
 
 class FakeMessages:
@@ -745,7 +757,18 @@ def test_응답뒤_후속코드가_터져도_그_요청비용으로_FAILED를_�
     raw = FakeRawEngine(messages)
     monkeypatch.setattr(real, "_engine", lambda: raw)
 
-    def broken(_self, _user_input, _card, _on_step, *, engine):
+    def broken(
+        _self,
+        _user_input,
+        _card,
+        _on_step,
+        *,
+        engine,
+        build_identity,
+        generation_mode,
+    ):
+        assert build_identity.cache_usable
+        assert generation_mode is real.engine_mode.EngineMode.V1
         _client(engine).messages.create(model=_HAIKU, max_tokens=700)
         raise RuntimeError("응답 뒤 후속 코드 실패")
 
@@ -770,7 +793,18 @@ def test_provider_예외는_앞선_확정비용을_남기고_과금불확실을_
     raw = FakeRawEngine(messages)
     monkeypatch.setattr(real, "_engine", lambda: raw)
 
-    def timeout(_self, _user_input, _card, _on_step, *, engine):
+    def timeout(
+        _self,
+        _user_input,
+        _card,
+        _on_step,
+        *,
+        engine,
+        build_identity,
+        generation_mode,
+    ):
+        assert build_identity.cache_usable
+        assert generation_mode is real.engine_mode.EngineMode.V1
         client = _client(engine)
         client.messages.create(model=_HAIKU, max_tokens=700)
         client.messages.create(model=_HAIKU, max_tokens=700)

@@ -114,6 +114,7 @@ def test_다른engine_epoch는_활성provider만_기다리고_그결과는_재�
 
     assert owner_a.disposition is AcquireDisposition.ACQUIRED
     assert waiting_b.disposition is AcquireDisposition.WAIT
+    assert waiting_b.handle is None
     assert owner_b.disposition is AcquireDisposition.ACQUIRED
     assert owner_a.handle is not None and owner_b.handle is not None
     assert owner_a.handle.lease_token != owner_b.handle.lease_token
@@ -156,6 +157,7 @@ def test_교대배포로_namespace와epoch가_둘다달라도_활성provider를_
 
     assert owner_a.disposition is AcquireDisposition.ACQUIRED
     assert waiting_b.disposition is AcquireDisposition.WAIT
+    assert waiting_b.handle is None
     assert owner_b.disposition is AcquireDisposition.ACQUIRED
 
 
@@ -254,6 +256,7 @@ def test_옛4열PK_singleflight표는_활성행을_격리하고_5열epoch표로_
         lease_ttl=dt.timedelta(seconds=30),
     )
     assert waiting.disposition is AcquireDisposition.WAIT
+    assert waiting.handle is None
     assert acquired.disposition is AcquireDisposition.ACQUIRED
 
 

@@ -127,6 +127,7 @@ from src.features.writer import verify as writer_verify
 from src.features.grading.logic import is_accounting_policy, is_table_dump
 from src.features.cost_tracking.store import AiCostEvent
 from src.features.pipeline.constants import ANTHROPIC_TIMEOUT_SEC, DART_SUCCESS_STATUS
+from src.features.pipeline import engine_mode
 from src.features.pipeline.port import (
     CompanyCard,
     CompanyLookupResult,
@@ -209,24 +210,14 @@ _FINAL_GATE_REASON_KO: Final[dict[str, str]] = {
 
 #: 엔진 v2 스위치 — 환경변수 이름과 켜짐 값. 정확히 "1"일 때만 v2 경로다
 #: (04장: 기본(미설정)은 v1 그대로 — 바이트 단위 무변).
-ENGINE_V2_ENV_NAME: Final[str] = "ENGINE_V2"
-ENGINE_V2_ENV_ON: Final[str] = "1"
-
-
-def _engine_v2_enabled() -> bool:
-    """지금 요청이 v2 경로로 가는가 — 판단을 한 곳에만 둔다.
-
-    ★ 왜 함수로 빼는가 (실측 사고) — 1층 캐시 조회가 v2 분기«보다 앞»에 있어서
-      ENGINE_V2=1을 켜도 그 회사의 v1 저장본이 살아 있으면 v1 보고서가 그대로
-      반환됐다. 화면에는 「이전에 조사한 결과입니다」만 뜨므로 사용자는 v2가
-      안 고쳐진 줄로 읽는다. 두 곳이 같은 답을 보게 묶어 둔다.
-    """
-    return os.environ.get(ENGINE_V2_ENV_NAME) == ENGINE_V2_ENV_ON
+ENGINE_V2_ENV_NAME: Final[str] = engine_mode.ENGINE_V2_ENV_NAME
+ENGINE_V2_ENV_ON: Final[str] = engine_mode.ENGINE_V2_ENV_ON
 
 
 def _generation_cache_namespace(
     engine: Any,
     build_identity: Any,
+    generation_mode: engine_mode.EngineMode,
 ) -> GenerationCacheNamespace | None:
     """캐시와 single-flight가 함께 쓰는 사전 생성기 신원을 만든다.
 
@@ -241,6 +232,7 @@ def _generation_cache_namespace(
     build_identity = engine_build_identity.require_exact_engine_build_identity(
         build_identity
     )
+    generation_mode = engine_mode.require_exact_engine_mode(generation_mode)
     if not build_identity.cache_usable:
         return None
     revision = build_identity.deployment_revision
@@ -248,7 +240,7 @@ def _generation_cache_namespace(
     # adapter와 namespace가 갈라져 보고서 출고가 실패하므로 두 경로 모두 같은
     # immutable deployment contract를 쓴다.
     image_digest = f"generator-build:{build_identity.build_id}"
-    if _engine_v2_enabled():
+    if generation_mode is engine_mode.EngineMode.V2:
         from src.features.composer.render import (  # noqa: PLC0415
             ENGINE_V2_SCHEMA_VERSION,
         )
@@ -1785,6 +1777,9 @@ class RealPipeline:
         on_step: Optional[StepReporter] = None,
     ) -> RunResult:
         """5 판정부터 13 출력까지 돌리고 예외 때도 이미 쓴 비용을 보존한다."""
+        # lifespan을 거치지 않는 CLI·단위시험도 요청을 시작하는 이 자리에서
+        # exact 모드를 한 번만 동결한다. 아래 캐시·분기에는 이 값만 운반한다.
+        generation_mode = engine_mode.process_engine_mode()
         engine = _MeteredEngine(_engine())
         frozen_identity = generation_coordination.frozen_engine_build_identity()
         if frozen_identity is None:
@@ -1810,6 +1805,7 @@ class RealPipeline:
                 on_step,
                 engine=engine,
                 build_identity=build_identity,
+                generation_mode=generation_mode,
             )
         except Exception:  # noqa: BLE001 — AI 뒤 후속 코드가 터져도 쓴 돈은 0원이 아니다
             logger.exception("본조사 중 예기치 않은 실패가 발생했습니다")
@@ -1835,12 +1831,15 @@ class RealPipeline:
         *,
         engine: _MeteredEngine,
         build_identity: Any,
+        generation_mode: engine_mode.EngineMode,
     ) -> RunResult:
         """본조사 본체. `_MeteredEngine`이 이 요청의 AI 사용량만 모은다.
 
         ★ 식별(2)은 다시 하지 않는다. `card.ref`에 이미 답이 있다.
           다시 하면 AI 5회가 통째로 또 나간다.
         """
+        generation_mode = engine_mode.assert_engine_mode_current(generation_mode)
+
         def tell(key: str) -> None:
             _set_meter_stage(engine, key)
             if on_step is not None:
@@ -1985,7 +1984,11 @@ class RealPipeline:
         # 실제 paid 경로에서 현재 namespace 결과로 «승격»하지 않는다. 그렇게
         # 하면 옛 본문을 현재 코드가 만든 것처럼 거짓 표기하게 된다. 한 번
         # 명시적 miss로 새로 만들고, 그때부터 정확한 불변 원본을 재사용한다.
-        generation_namespace = _generation_cache_namespace(engine, build_identity)
+        generation_namespace = _generation_cache_namespace(
+            engine,
+            build_identity,
+            generation_mode,
+        )
         reused_generation = generation_coordination.coordinate(
             corp_id=corp_code,
             cache_namespace=generation_namespace,
@@ -2076,7 +2079,7 @@ class RealPipeline:
                     source_identity_digest=source_identity.cache_digest,
                     build_identity=build_identity,
                 )
-                if _engine_v2_enabled()
+                if generation_mode is engine_mode.EngineMode.V2
                 else _company_cache_lookup(
                     corp_id=corp_code,
                     current_fiscal_year=current_fiscal_year,
@@ -2085,13 +2088,16 @@ class RealPipeline:
                 )
             )
         if cached is not None:
-            if _engine_v2_enabled() and cached.generation_metrics is None:
+            if (
+                generation_mode is engine_mode.EngineMode.V2
+                and cached.generation_metrics is None
+            ):
                 logger.warning(
                     "생성 지표가 없는 옛 v2 cache는 0으로 꾸미지 않고 다시 생성합니다"
                 )
                 cached = None
             elif (
-                _engine_v2_enabled()
+                generation_mode is engine_mode.EngineMode.V2
                 and cached.release_mode
                 in {
                     ReleaseMode.ENFORCE_NO_PARTIAL.value,
@@ -2171,7 +2177,7 @@ class RealPipeline:
         # ── 엔진 v2 분기 (유일한 분기 지점) ──────────────
         # 수집(6)·법인 판정(5)이 끝났고 실적표 재료(financials)가 확보된 지점이다.
         # ENGINE_V2=1일 때만 composer 경로로 간다. 미설정이면 아래 v1 경로 그대로다.
-        if _engine_v2_enabled():
+        if generation_mode is engine_mode.EngineMode.V2:
             # waiter는 위에서 이미 돌아갔다. owner(또는 부분 지문으로
             # 공유를 포기한 요청)만 첫 provider 전에 phase를 연다.
             generation_coordination.ensure_paid_phase()
@@ -2195,6 +2201,7 @@ class RealPipeline:
                 current_fiscal_year=current_fiscal_year,
                 source_identity_digest=source_identity.cache_digest,
                 build_identity=build_identity,
+                generation_mode=generation_mode,
             )
             return replace(
                 v2_result,
@@ -2817,6 +2824,10 @@ class RealPipeline:
                 corp_code,
             )
         else:
+            if generation_mode is not engine_mode.EngineMode.V1:
+                raise generation_coordination.GenerationCoordinationError(
+                    "v1 캐시 저장에 v1 엔진 모드 영수증이 필요합니다"
+                )
             _company_cache_save(
                 corp_id=corp_code,
                 report=report,
@@ -3358,6 +3369,7 @@ def _run_v2_composer(
     current_fiscal_year: Optional[int] = None,
     source_identity_digest: str = "",
     build_identity: engine_build_identity.EngineBuildIdentity,
+    generation_mode: engine_mode.EngineMode,
 ) -> RunResult:
     """엔진 v2: composer 경로로 보고서를 만든다.
 
@@ -3371,6 +3383,11 @@ def _run_v2_composer(
     build_identity = engine_build_identity.require_exact_engine_build_identity(
         build_identity
     )
+    generation_mode = engine_mode.assert_engine_mode_current(generation_mode)
+    if generation_mode is not engine_mode.EngineMode.V2:
+        raise generation_coordination.GenerationCoordinationError(
+            "v2 composer에는 v2 엔진 모드 영수증이 필요합니다"
+        )
     engine_build_identity.assert_engine_build_identity_current(build_identity)
     if not build_identity.cache_usable:
         raise generation_coordination.GenerationCoordinationError(
@@ -3399,9 +3416,7 @@ def _run_v2_composer(
         build_identity_sha256 = ""
         if release_mode is ReleaseMode.FULL:
             frozen_build_identity = (
-                engine_build_identity.process_engine_build_identity()
-                if build_identity is None
-                else engine_build_identity.require_exact_engine_build_identity(
+                engine_build_identity.require_exact_engine_build_identity(
                     build_identity
                 )
             )

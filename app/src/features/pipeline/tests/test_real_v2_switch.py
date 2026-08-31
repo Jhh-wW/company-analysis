@@ -117,6 +117,14 @@ def _build_identity() -> build_identity_contract.EngineBuildIdentity:
     return build_identity_contract.process_engine_build_identity()
 
 
+def _frozen_v2_mode() -> real.engine_mode.EngineMode:
+    """직접 분기 시험도 process 시작 계약을 명시적으로 연다."""
+
+    return real.engine_mode.freeze_process_engine_mode(
+        real.engine_mode.EngineMode.V2
+    )
+
+
 def _v2_branch_recorder(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     """_run_v2_composer 호출을 기록만 하고 표식 결과를 돌려주는 가짜."""
     calls: list[dict[str, Any]] = []
@@ -187,6 +195,32 @@ def test_1이_아닌_값은_v1_경로다(
     assert result.report.schema_version == CANONICAL_SCHEMA_VERSION
 
 
+def test_요청중_raw스위치가_바뀌어도_namespace와분기는_동결된_v2를_쓴다(
+    engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """namespace 뒤 raw 재포착으로 v1 lookup/branch가 섞이는 TOCTOU를 막는다."""
+
+    monkeypatch.setenv(real.ENGINE_V2_ENV_NAME, real.ENGINE_V2_ENV_ON)
+    calls = _v2_branch_recorder(monkeypatch)
+    seen_modes: list[real.engine_mode.EngineMode] = []
+    original_namespace = real._generation_cache_namespace
+
+    def namespace_then_flip_raw(engine_arg, build_identity, generation_mode):
+        seen_modes.append(generation_mode)
+        monkeypatch.setenv(real.ENGINE_V2_ENV_NAME, "0")
+        return original_namespace(engine_arg, build_identity, generation_mode)
+
+    monkeypatch.setattr(real, "_generation_cache_namespace", namespace_then_flip_raw)
+
+    result = _run()
+
+    assert seen_modes == [real.engine_mode.EngineMode.V2]
+    assert len(calls) == 1
+    assert calls[0]["generation_mode"] is real.engine_mode.EngineMode.V2
+    assert result.message == _V2_SENTINEL_MESSAGE
+    assert real.engine_mode.process_engine_mode() is real.engine_mode.EngineMode.V2
+
+
 # ══════════════════════════════════════════════════════════
 # ③④ 분기 함수 — run_v2 연결과 RunResult 매핑
 # ══════════════════════════════════════════════════════════
@@ -246,6 +280,7 @@ def test_분기_함수는_v1_자산을_재사용해_run_v2에_넘긴다(
         model="가짜모델",
         steps=steps,
         build_identity=_build_identity(),
+        generation_mode=_frozen_v2_mode(),
     )
 
     # run_v2 입력 — 조각 원본 그대로 + 프로그램 실적표 + 기간 라벨 재사용
@@ -327,6 +362,7 @@ def test_v2도_일시적수집실패_보고서를_장기캐시에_저장하지�
         current_fiscal_year=2025,
         source_identity_digest="d" * 64,
         build_identity=_build_identity(),
+        generation_mode=_frozen_v2_mode(),
     )
 
     assert result.outcome is Outcome.REPORT
@@ -389,6 +425,7 @@ def test_v2의_완전한수집결과는_수집신원과함께_장기캐시에_�
         current_fiscal_year=2025,
         source_identity_digest="d" * 64,
         build_identity=_build_identity(),
+        generation_mode=_frozen_v2_mode(),
     )
 
     assert result.outcome is Outcome.REPORT
@@ -457,6 +494,7 @@ def test_v2도_배포commit을_모르면_provider진입부터_막는다(
             current_fiscal_year=2025,
             source_identity_digest="d" * 64,
             build_identity=unknown_identity,
+            generation_mode=_frozen_v2_mode(),
         )
 
     assert cache_saves == []
@@ -492,6 +530,7 @@ def test_v2_분기는_AskFatalError_원인을_그대로_다시_던진다(
             model="가짜모델",
             steps=steps,
             build_identity=_build_identity(),
+            generation_mode=_frozen_v2_mode(),
         )
 
 
@@ -540,6 +579,7 @@ def test_v2_출고검증_실패는_GATE_STOPPED로_끝난다(
         model="가짜모델",
         steps=steps,
         build_identity=_build_identity(),
+        generation_mode=_frozen_v2_mode(),
     )
 
     assert result.outcome is Outcome.GATE_STOPPED

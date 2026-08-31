@@ -111,9 +111,11 @@ def test_생성cache_namespace는_교대하는_raw환경도_한_snapshot만_쓴�
     )
 
     identity = build_identity_contract.process_engine_build_identity()
+    generation_mode = real.engine_mode.freeze_process_engine_mode()
     namespace = real._generation_cache_namespace(
         SimpleNamespace(MODEL="snapshot-test-model"),
         identity,
+        generation_mode,
     )
 
     assert namespace is not None
@@ -134,9 +136,11 @@ def test_v1_롤백namespace도_같은_배포build_contract를_쓴다(
     monkeypatch.setenv("RENDER_GIT_COMMIT", commit)
 
     identity = build_identity_contract.process_engine_build_identity()
+    generation_mode = real.engine_mode.freeze_process_engine_mode()
     namespace = real._generation_cache_namespace(
         SimpleNamespace(MODEL="rollback-test-model"),
         identity,
+        generation_mode,
     )
 
     assert namespace is not None
@@ -3129,6 +3133,7 @@ def test_v2를_켜면_1층_캐시_적중을_무시하고_v2로_간다(
         lambda **kwargs: RunResult(outcome=Outcome.REPORT, message=_V2_도달_표식),
     )
     monkeypatch.setenv(real.ENGINE_V2_ENV_NAME, real.ENGINE_V2_ENV_ON)
+    real.engine_mode._reset_process_engine_mode_for_tests()
 
     v2결과 = _run()
 

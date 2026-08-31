@@ -15,6 +15,7 @@ from src.features.budget import spend_store, state_machine as budget_state_machi
 from src.features.admin_dashboard import store as dashboard_store
 from src.features.observability import constants as obs
 from src.features.pipeline.demo import DemoPipeline
+from src.features.pipeline import engine_mode
 from src.features.provenance import sources as provenance_sources
 from src.features.report_delivery import artifact as delivery_artifact
 from src.features.report_delivery import store as delivery_store
@@ -295,6 +296,7 @@ async def _lifespan(_app: FastAPI):
     """시작 상태를 복구하고 종료 시 실행 중 조사를 안전하게 마감한다."""
     # 요청·provider·SQLite보다 먼저 이 프로세스가 쓸 생성 epoch를 한 번만
     # 동결한다. 이후 환경변수가 바뀌어도 실행 중 요청의 신원은 바뀌지 않는다.
+    engine_mode.freeze_process_engine_mode()
     engine_build_identity.freeze_process_engine_build_identity()
     # 실행기를 거치지 않고 환경변수 일부만 흉내 내도 유료 호출이 열리지 않게 한다.
     # 이 검사는 저장소를 만들거나 provider에 접속하기 전에 실패한다.

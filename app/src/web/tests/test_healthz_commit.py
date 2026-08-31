@@ -19,6 +19,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
+from src.shared import engine_build_identity
 from src.web import main
 from src.web.routers import health
 
@@ -60,6 +61,25 @@ def test_render가_값을_안_주면_우리가_넣은_이름을_쓴다(
     monkeypatch.setenv("APP_GIT_COMMIT", "abc1234" + "0" * 33)
 
     assert client.get("/healthz").json()["commit"] == "abc1234"
+
+
+def test_healthz는_process가_실제로_동결한_commit만_표시한다(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """표시만 raw B로 바뀌어 실제 생성 epoch A와 갈라지는 거짓 상태를 막는다."""
+
+    _clear_commit_env(monkeypatch)
+    commit_a = "a" * 40
+    commit_b = "b" * 40
+    monkeypatch.setenv("RENDER_GIT_COMMIT", commit_a)
+    frozen = engine_build_identity.process_engine_build_identity()
+
+    monkeypatch.setenv("RENDER_GIT_COMMIT", commit_b)
+    payload = client.get("/healthz").json()
+
+    assert frozen.deployment_revision == commit_a
+    assert payload["commit"] == commit_a[: health._COMMIT_SHORT_LEN]
+    assert engine_build_identity.process_engine_build_identity() is frozen
 
 
 def test_커밋을_몰라도_상태는_ok다(
