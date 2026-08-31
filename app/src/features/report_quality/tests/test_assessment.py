@@ -18,6 +18,21 @@ from src.features.report_quality.models import (
     ReleaseDecision,
     VerificationState,
 )
+from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
+
+
+_ITEM_WORDS = (
+    "가",
+    "나",
+    "다",
+    "라",
+    "마",
+    "바",
+    "사",
+    "아",
+    "자",
+    "차",
+)
 
 
 def _candidate(
@@ -38,6 +53,7 @@ def _candidate(
         )
         sources.append(SourceDocument(source_id, identity))
         section_fact_ids: list[str] = []
+        slots = CLAIM_SLOTS_BY_SECTION[section_id]
         for item_number in range(requested[section_id]):
             fact_id = f"{section_id}-fact-{item_number}"
             section_fact_ids.append(fact_id)
@@ -48,9 +64,12 @@ def _candidate(
                     source_id=source_id,
                     source_identity=identity,
                     verification_state=VerificationState.VERIFIED.value,
-                    claim_slot=f"{section_id}:{item_number}",
+                    claim_slot=slots[item_number % len(slots)],
                     evidence_binding_valid=True,
-                    claim="공식 원문과 결속된 회사 고유 사실이다.",
+                    claim=(
+                        f"{section_id} 장의 {_ITEM_WORDS[item_number]} 사실은 "
+                        "공식 원문과 결속됐다."
+                    ),
                     subject_scope="연결",
                 )
             )
@@ -130,10 +149,10 @@ def test_숫자날짜퍼센트와_영문에_붙은_숫자도_결속대상이다(
     assert not has_public_numeric_token("이 회사의 사업 구조를 설명합니다.")
 
 
-def test_같은_claim_slot을_문장수로_부풀리면_안전검사를_통과하지_못한다() -> None:
+def test_같은_claim_slot의_서로_다른_원자사실은_허용한다() -> None:
     candidate = _candidate()
     first, second = candidate.facts[:2]
-    padded = replace(
+    categorized = replace(
         candidate,
         facts=(
             first,
@@ -142,10 +161,51 @@ def test_같은_claim_slot을_문장수로_부풀리면_안전검사를_통과�
         ),
     )
 
+    result = assess_generation(categorized)
+
+    assert result.safety.decision is ReleaseDecision.RELEASE_ALLOWED
+
+
+def test_같은_원자claim을_다른_fact_id로_부풀리면_통과하지_못한다() -> None:
+    candidate = _candidate()
+    first, second = candidate.facts[:2]
+    padded = replace(
+        candidate,
+        facts=(
+            first,
+            replace(
+                second,
+                claim_slot=first.claim_slot,
+                claim=f"  {first.claim.upper()}  ",
+            ),
+            *candidate.facts[2:],
+        ),
+    )
+
     result = assess_generation(padded)
 
     assert result.safety.decision is ReleaseDecision.BLOCKED
-    assert any("claim slot" in problem for problem in result.safety.problems)
+    assert any("같은 원자 claim" in problem for problem in result.safety.problems)
+
+
+def test_다른_장의_claim_slot을_섞으면_통과하지_못한다() -> None:
+    candidate = _candidate()
+    first = candidate.facts[0]
+    broken = replace(
+        candidate,
+        facts=(
+            replace(
+                first,
+                claim_slot=CLAIM_SLOTS_BY_SECTION["business_model"][0],
+            ),
+            *candidate.facts[1:],
+        ),
+    )
+
+    result = assess_generation(broken)
+
+    assert result.safety.decision is ReleaseDecision.BLOCKED
+    assert any("장 정책" in problem for problem in result.safety.problems)
 
 
 def test_원문결속지문이_유효하지_않으면_공개하지_않는다() -> None:

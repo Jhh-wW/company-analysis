@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from decimal import Decimal
 
+from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_quality.contract import contract_for_generation
 from src.shared.report_quality.dto import ClaimFact, ReportCandidate
 from src.shared.report_quality.models import (
@@ -190,7 +191,7 @@ def assess_safety(
     verified: list[str] = []
     unverified: list[str] = []
     rejected: list[str] = []
-    claim_slot_owners: dict[tuple[str, str], str] = {}
+    claim_owners: dict[tuple[str, str], str] = {}
     public_set = set(public_ids)
     if candidate.has_unbound_summary_content:
         problems.append("요약에 본문 fact_id와 결속되지 않은 공개 내용이 있습니다")
@@ -217,16 +218,28 @@ def assess_safety(
         claim_slot = fact.claim_slot.strip()
         if not claim_slot:
             problems.append(f"{fact_id}의 계획된 claim slot이 비었습니다")
+        elif claim_slot not in CLAIM_SLOTS_BY_SECTION.get(fact.section_owner, ()):
+            problems.append(
+                f"{fact_id}의 claim slot이 {fact.section_owner}장 정책에 없습니다"
+            )
         else:
-            slot_key = (fact.section_owner, claim_slot)
-            previous = claim_slot_owners.get(slot_key)
+            # claim_slot은 고유 번호가 아니라 범주다. 8~12문장 장이 5개 범주를
+            # 쓰므로 같은 범주의 서로 다른 원자 사실을 거절하면 생성 계약과
+            # 품질 계약을 동시에 만족할 수 없다. 대신 같은 장에서 같은 주장을
+            # 공백·대소문자만 바꿔 여러 fact_id로 부풀리는 일을 막는다.
+            normalized_claim = " ".join(fact.claim.split()).casefold()
+            if not normalized_claim:
+                problems.append(f"{fact_id}의 공개 claim이 비었습니다")
+                normalized_claim = f"__empty__:{fact_id}"
+            claim_key = (fact.section_owner, normalized_claim)
+            previous = claim_owners.get(claim_key)
             if previous is not None and previous != fact_id:
                 problems.append(
-                    f"{fact.section_owner}장의 claim slot {claim_slot}을 "
-                    f"{previous}와 {fact_id}가 중복 사용했습니다"
+                    f"{fact.section_owner}장의 같은 원자 claim을 "
+                    f"{previous}와 {fact_id}가 중복 공개했습니다"
                 )
             else:
-                claim_slot_owners[slot_key] = fact_id
+                claim_owners[claim_key] = fact_id
         if not fact.evidence_binding_valid:
             problems.append(f"{fact_id}의 원문·주장 결속 지문이 유효하지 않습니다")
 

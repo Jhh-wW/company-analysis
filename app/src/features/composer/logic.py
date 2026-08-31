@@ -143,8 +143,10 @@ def build_section_prompt(
     claim_slots = CLAIM_SLOTS_BY_SECTION.get(section_id, ())
     claim_slot_guide = (
         "\n원자 주장 계획 — 각 문장은 가장 알맞은 id를 «주장슬롯»에 넣고, "
-        "같은 id를 두 번 쓰지 않는다. 어느 자리에도 맞지 않으면 빈 문자열로 "
-        "두며 새 id를 만들지 않는다:\n- " + "\n- ".join(claim_slots) + "\n"
+        "id는 고유 번호가 아니라 사실의 종류다. 같은 종류의 서로 다른 원자 "
+        "사실에는 같은 id를 다시 써도 되지만, 같은 사실을 말만 바꿔 반복하지 "
+        "않는다. 어느 자리에도 맞지 않으면 빈 문자열로 두며 새 id를 만들지 "
+        "않는다:\n- " + "\n- ".join(claim_slots) + "\n"
         if claim_slots
         else ""
     )

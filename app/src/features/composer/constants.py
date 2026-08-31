@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Final
 
+from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
+
 # ══════════════════════════════════════════════════════════
 # 등급 라벨 (기준문서 3절)
 # ══════════════════════════════════════════════════════════
@@ -50,52 +52,8 @@ SECTION_TITLES: Final[dict[str, str]] = {
     "competitive_position": "동종업계에서의 경쟁우위",
 }
 
-#: 작가가 문장을 어떤 원자 주장 계획에 놓았는지 명시하는 닫힌 자리 목록.
-#: 목록 밖 값과 누락은 추측해 채우지 않고 빈칸으로 남겨 품질 평가가 잡는다.
-CLAIM_SLOTS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
-    "identity": (
-        "identity:corporate_identity", "identity:business_definition",
-        "identity:legal_scope", "identity:official_location", "identity:self_positioning",
-    ),
-    "business_model": (
-        "business_model:revenue_model", "business_model:customer_type",
-        "business_model:sales_channel", "business_model:regional_mix",
-        "business_model:value_exchange",
-    ),
-    "portfolio": (
-        "portfolio:product_role", "portfolio:portfolio_priority",
-        "portfolio:customer_fit", "portfolio:revenue_link", "portfolio:lifecycle_stage",
-    ),
-    "past_changes": (
-        "past_changes:historical_performance", "past_changes:completed_execution",
-        "past_changes:cumulative_change", "past_changes:change_context",
-        "past_changes:change_limit",
-    ),
-    "current_challenges": (
-        "current_challenges:issue", "current_challenges:response",
-        "current_challenges:initial_signal", "current_challenges:unresolved_gap",
-        "current_challenges:next_check",
-    ),
-    "future_strategy": (
-        "future_strategy:stated_plan", "future_strategy:plan_status",
-        "future_strategy:plan_timing", "future_strategy:plan_condition",
-        "future_strategy:execution_signal",
-    ),
-    "operations_partners": (
-        "operations_partners:value_chain", "operations_partners:operating_role",
-        "operations_partners:supply_relation", "operations_partners:distribution_relation",
-        "operations_partners:partnership",
-    ),
-    "culture": (
-        "culture:leadership", "culture:work_principle", "culture:decision_process",
-        "culture:organization_change", "culture:verified_case",
-    ),
-    "competitive_position": (
-        "competitive_position:comparison_target", "competitive_position:comparison_metric",
-        "competitive_position:comparison_basis", "competitive_position:comparison_judgment",
-        "competitive_position:limitation",
-    ),
-}
+#: 작가와 품질 평가기가 함께 쓰는 닫힌 범주 목록. 같은 범주의 서로 다른
+#: 원자 사실은 여러 개일 수 있다. 목록 밖 값과 누락은 추측해 채우지 않는다.
 
 #: 장별 작성 지침 — 그 장이 «무엇을 말하는 자리»인지 작가에게 알려 준다.
 SECTION_GUIDES: Final[dict[str, str]] = {
