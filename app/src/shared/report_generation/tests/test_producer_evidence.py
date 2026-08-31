@@ -394,6 +394,69 @@ def test_PRIMARY_9대1과_SUPPLEMENT_2대1은_각자_1부터_세고_전체는_1�
     assert evidence.reviewer_calls == 2
 
 
+def test_PRIMARY_reviewer보다_SUPPLEMENT_writer가_먼저오면_거절한다() -> None:
+    primary_writers = _primary_ledger().records[:-1]
+    records = (
+        *primary_writers,
+        _record(
+            10,
+            role="writer",
+            role_index=1,
+            section_id="identity",
+            validation_round=ValidationRound.SUPPLEMENT,
+        ),
+        _record(
+            11,
+            role="reviewer",
+            role_index=1,
+            section_id="bundled",
+            validation_round=ValidationRound.PRIMARY,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="SUPPLEMENT.*PRIMARY"):
+        GenerationCallLedger(records)
+
+
+def test_PRIMARY없이_SUPPLEMENT호출만_있는_장부는_거절한다() -> None:
+    records = (
+        _record(
+            1,
+            role="writer",
+            role_index=1,
+            section_id="identity",
+            validation_round=ValidationRound.SUPPLEMENT,
+        ),
+        _record(
+            2,
+            role="reviewer",
+            role_index=1,
+            section_id="bundled",
+            validation_round=ValidationRound.SUPPLEMENT,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="PRIMARY.*시작"):
+        GenerationCallLedger(records)
+
+
+def test_PRIMARY_SUPPLEMENT_PRIMARY_회차재진입은_거절한다() -> None:
+    records = (
+        _record(1, role="writer", role_index=1, section_id="identity"),
+        _record(
+            2,
+            role="writer",
+            role_index=1,
+            section_id="identity",
+            validation_round=ValidationRound.SUPPLEMENT,
+        ),
+        _record(3, role="writer", role_index=2, section_id="business_model"),
+    )
+
+    with pytest.raises(ValueError, match="SUPPLEMENT.*PRIMARY"):
+        GenerationCallLedger(records)
+
+
 def test_SUPPLEMENT가_비대상장을_바꾸면_성공_evidence를_못_만든다():
     base_sections = _digests(1)
     primary = _primary_receipt(

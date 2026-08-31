@@ -195,6 +195,19 @@ class GenerationCallLedger:
             range(1, len(self.records) + 1)
         ):
             raise ValueError("AI 호출 장부의 전체 순번이 연속적이지 않습니다")
+        round_projection = tuple(
+            record.validation_round for record in self.records
+        )
+        if round_projection and round_projection[0] is not ValidationRound.PRIMARY:
+            raise ValueError("AI 호출 장부는 PRIMARY 검증 회차부터 시작해야 합니다")
+        supplement_started = False
+        for validation_round in round_projection:
+            if validation_round is ValidationRound.SUPPLEMENT:
+                supplement_started = True
+            elif supplement_started:
+                raise ValueError(
+                    "SUPPLEMENT 검증 회차가 시작된 뒤 PRIMARY로 돌아갈 수 없습니다"
+                )
         # role_index는 전체 실행 누적 번호가 아니라 «그 검증 회차 안에서의
         # 역할 순번»이다. PRIMARY writer 1..9 뒤 SUPPLEMENT writer 1..N이
         # 다시 시작하며, 전체 실행 순서는 위 sequence만 1..13으로 잇는다.
