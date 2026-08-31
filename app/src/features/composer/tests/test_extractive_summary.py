@@ -89,6 +89,13 @@ def test_지원동기에_필요한_서로_다른_다섯_장에서_글자그대�
     assert all(
         item.sentence is body_by_section[item.section_id] for item in selected.items
     )
+    assert tuple(sentence.text for sentence in selected.bound_sentences) == tuple(
+        sentence.text for sentence in selected.sentences
+    )
+    assert tuple(
+        sentence.verified_fact_id for sentence in selected.bound_sentences
+    ) == selected.fact_ids
+    assert all(not sentence.verified_fact_id for sentence in selected.sentences)
 
 
 def test_근거지문이_손상되거나_미검증인_문장은_요약재료가_아니다() -> None:

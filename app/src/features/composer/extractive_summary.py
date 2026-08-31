@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final, Sequence
 
 from src.features.composer.constants import GRADE_CONFIRMED, GRADE_INTERPRETED
@@ -58,6 +58,15 @@ class ExtractiveSummary:
     @property
     def fact_ids(self) -> tuple[str, ...]:
         return tuple(item.fact_id for item in self.items)
+
+    @property
+    def bound_sentences(self) -> tuple[ComposedSentence, ...]:
+        """공개 글자는 그대로 두고 검증 사실 ID만 프로그램이 덧붙인다."""
+
+        return tuple(
+            replace(item.sentence, verified_fact_id=item.fact_id)
+            for item in self.items
+        )
 
     @property
     def section_ids(self) -> tuple[str, ...]:

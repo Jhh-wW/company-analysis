@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Optional
 
 from src.features.composer.constants import (
@@ -35,6 +36,7 @@ from src.features.composer.render import (
 )
 from src.features.pipeline.port import Grade
 from src.features.provenance.sources import Source, SourceKind
+from src.shared.report_quality.summary_binding import summary_verification_binding
 
 
 # ══════════════════════════════════════════════════════════
@@ -184,6 +186,74 @@ def test_요약도_같은_인용_표기로_실린다():
     texts = [item.text for item in report.summary_items]
     assert texts[0] == "반도체 검사 장비 중심의 사업 구조다. [1]"
     assert len(texts) == 3
+
+
+def test_검증본문을_글자그대로_고른_요약은_같은_사실과_결속된다():
+    sentence = ComposedSentence(
+        text="고객의 성공이 최우선 가치다.",
+        citations=("2",),
+        grade=GRADE_CONFIRMED,
+        planned_claim_slot="culture:work_principle",
+        verification_state="verified",
+    )
+    body = ComposedReport(
+        sections=(ComposedSection("culture", (sentence,)),),
+    )
+    first = render_report("가나다전자", body, _raw_fragments(), None)
+    assert len(first.fact_records) == 1
+    fact = first.fact_records[0]
+
+    bound_summary = replace(sentence, verified_fact_id=fact.fact_id)
+    final = render_report(
+        "가나다전자",
+        replace(body, summary=(bound_summary,)),
+        _raw_fragments(),
+        None,
+        citation_style=CITATION_STYLE_INLINE,
+    )
+
+    item = final.summary_items[0]
+    assert item.section_id == "culture"
+    assert item.fact_ids == [fact.fact_id]
+    assert item.evidence_text == f"{fact.fact_id}: {fact.claim}"
+    assert item.verification_status == "verified"
+    assert item.verification_binding == summary_verification_binding(
+        item.text,
+        item.section_id,
+        item.fact_ids,
+        item.evidence_text,
+        item.verification_status,
+        item.support_terms,
+    )
+
+
+def test_요약에_붙인_사실_ID와_문장이_다르면_결속을_거부한다():
+    sentence = ComposedSentence(
+        text="고객의 성공이 최우선 가치다.",
+        citations=("2",),
+        grade=GRADE_CONFIRMED,
+        planned_claim_slot="culture:work_principle",
+        verification_state="verified",
+    )
+    body = ComposedReport(
+        sections=(ComposedSection("culture", (sentence,)),),
+    )
+    first = render_report("가나다전자", body, _raw_fragments(), None)
+    forged = replace(
+        sentence,
+        text="원래 본문과 다른 요약이다.",
+        verified_fact_id=first.fact_records[0].fact_id,
+    )
+
+    final = render_report(
+        "가나다전자",
+        replace(body, summary=(forged,)),
+        _raw_fragments(),
+        None,
+    )
+
+    assert final.summary_items[0].fact_ids == []
+    assert final.summary_items[0].verification_binding == ""
 
 
 # ══════════════════════════════════════════════════════════

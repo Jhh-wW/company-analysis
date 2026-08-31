@@ -175,6 +175,19 @@ def _summary_sentence_fact_id(
 ) -> str:
     """본문 소유 장이 하나로 확정되는 추출식 요약만 사실 ID에 잇는다."""
 
+    explicit_fact_id = sentence.verified_fact_id.strip()
+    if explicit_fact_id:
+        explicit_fact = by_id.get(explicit_fact_id)
+        if explicit_fact is None:
+            return ""
+        matched = _sentence_fact_id(
+            explicit_fact.section_owner,
+            sentence,
+            by_id=by_id,
+            by_key=by_key,
+        )
+        return explicit_fact_id if matched == explicit_fact_id else ""
+
     structured = sentence.structured_claim
     if structured is not None:
         return _sentence_fact_id(
@@ -195,6 +208,20 @@ def _summary_sentence_fact_id(
     section_id, _fact = matches[0]
     return _sentence_fact_id(
         section_id,
+        sentence,
+        by_id=by_id,
+        by_key=by_key,
+    )
+
+
+def bound_summary_fact_id(
+    sentence: ComposedSentence,
+    facts: Sequence[FactRecord],
+) -> str:
+    """요약 한 문장이 정확히 재사용한 검증 본문 사실 ID를 돌려준다."""
+
+    by_id, by_key = _valid_fact_registries(facts)
+    return _summary_sentence_fact_id(
         sentence,
         by_id=by_id,
         by_key=by_key,

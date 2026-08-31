@@ -54,6 +54,7 @@ from src.features.composer.port import (
     PerformanceTable,
 )
 from src.features.composer.prose_facts import ProseEvidence, build_verified_prose_fact
+from src.features.composer.quality_projection import bound_summary_fact_id
 from src.features.pipeline.port import (
     FactRecord,
     Grade,
@@ -73,6 +74,10 @@ from src.shared.report_quality.numeric_validation import (
     validate_versioned_numeric_record,
 )
 from src.shared.report_quality.source_identity import document_identity
+from src.shared.report_quality.summary_binding import (
+    summary_evidence_text,
+    summary_verification_binding,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -983,26 +988,58 @@ def render_report(
     }
     summary_items: list[SummaryItem] = []
     for index, sentence in enumerate(report.summary):
-        structured = sentence.structured_claim
-        summary_fact_ids = (
-            [structured.fact_id]
-            if structured is not None and structured.fact_id in facts_by_id
+        summary_fact_id = bound_summary_fact_id(
+            sentence,
+            tuple(facts_by_id.values()),
+        )
+        summary_fact = facts_by_id.get(summary_fact_id)
+        summary_fact_ids = [summary_fact_id] if summary_fact is not None else []
+        display_text = sentence_display_text(
+            sentence, numbers, show_markers=summary_shows[index]
+        )
+        summary_section_id = (
+            summary_fact.section_owner
+            if summary_fact is not None
+            else _summary_source_section(sentence, numbers, section_citations)
+        )
+        evidence_text = (
+            summary_evidence_text(summary_fact_ids, facts_by_id)
+            if summary_fact_ids
+            else ""
+        )
+        verification_status = (
+            summary_fact.verification_status or summary_fact.status
+            if summary_fact is not None
+            else ""
+        )
+        support_terms = (
+            list(dict.fromkeys(summary_fact.evidence_support_terms))
+            if summary_fact is not None
             else []
+        )
+        verification_binding = (
+            summary_verification_binding(
+                display_text,
+                summary_section_id,
+                summary_fact_ids,
+                evidence_text,
+                verification_status,
+                support_terms,
+            )
+            if summary_fact_ids and verification_status == "verified"
+            else ""
         )
         summary_items.append(
             SummaryItem(
-                text=sentence_display_text(
-                    sentence, numbers, show_markers=summary_shows[index]
-                ),
-                section_id=_summary_source_section(
-                    sentence, numbers, section_citations
-                ),
+                text=display_text,
+                section_id=summary_section_id,
                 # 요약은 새 사실을 소유하지 않는다. 본문에서 검증·렌더된
-                # 구조화 claim을 글자 그대로 보충한 경우에만 그 fact_id를 잇는다.
+                # claim을 글자 그대로 고른 경우에만 그 fact_id를 잇는다.
                 fact_ids=summary_fact_ids,
-                verification_status=(
-                    sentence.verification_state if summary_fact_ids else ""
-                ),
+                evidence_text=evidence_text,
+                verification_status=verification_status,
+                verification_binding=verification_binding,
+                support_terms=support_terms,
             )
         )
         for cited in _sentence_citation_numbers(sentence, numbers):

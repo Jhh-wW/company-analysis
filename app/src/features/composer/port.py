@@ -60,6 +60,9 @@ class ComposedSentence:
     verification_state: str = "unverified"
     #: 프로그램이 구조화 원자료로 만든 claim만 갖는 손실 없는 결속 DTO.
     structured_claim: Optional["StructuredClaim"] = None
+    #: 렌더가 만든 검증 FactRecord를 본문에서 글자 그대로 고른 요약에만
+    #: 프로그램이 붙이는 ID. 작가 응답에서는 이 값을 읽지 않는다.
+    verified_fact_id: str = ""
 
 
 @dataclass(frozen=True)
