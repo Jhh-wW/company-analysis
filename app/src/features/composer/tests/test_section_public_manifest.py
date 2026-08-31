@@ -319,6 +319,43 @@ def test_packet_작성응답이_깨져도_재호출하지_않아_writer는_정�
     assert all(not section.sentences and section.notice for section in report.sections)
 
 
+def test_FULL_packet_작성응답이_전부_깨져도_묶음검수는_정확히_1회다():
+    class BrokenWriter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, _prompt: str) -> str:
+            self.calls += 1
+            return "{깨진 JSON"
+
+    class EmptyReviewer:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, _prompt: str) -> str:
+            self.calls += 1
+            return json.dumps({"판정": []}, ensure_ascii=False)
+
+    writer = BrokenWriter()
+    reviewer = EmptyReviewer()
+    diagram = _NoDiagram()
+    with pytest.raises(V2ValidationError):
+        run_v2(
+            "가나다전자",
+            (),
+            None,
+            writer_ask=writer,
+            reviewer_ask=reviewer,
+            diagram_ask=diagram,
+            release_mode=ReleaseMode.FULL,
+            section_evidence_packets=_packets(),
+        )
+
+    assert writer.calls == 9
+    assert reviewer.calls == 1
+    assert diagram.calls == 0
+
+
 def test_packet_묶음검수응답이_깨져도_reviewer는_정확히_1회다():
     writer = _CompletePacketWriter(flow=True)
 
