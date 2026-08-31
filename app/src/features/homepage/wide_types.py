@@ -153,6 +153,14 @@ class WideCollectionAttempt:
             )
         if not isinstance(self.slot_ids, tuple):
             raise ValueError("slot_ids는 tuple[str, ...]이어야 합니다")
+        if not self.slot_ids:
+            # P0-2: 빈 slot_ids는 앱 계약(CollectionAttempt)이 생성 즉시 거절한다.
+            # 특정 슬롯을 좁혀낼 수 없는 attempt(robots·sitemap·전체 truncation
+            # 등)도 「영향받은 닫힌 collector slot 집합」을 항상 명시해야 한다 —
+            # 좁혀낼 수 없으면 허용 어휘 전체를 쓴다(호출자 책임, wide_collect.py
+            # `_ALL_SLOT_IDS_FALLBACK` 참조). 여기서 빈 값을 조용히 통과시키면
+            # 잘못된 데이터가 다음 모듈까지 흘러가 통합 경계에서야 걸린다.
+            raise ValueError("slot_ids가 비어 있습니다(허용 어휘 중 최소 1개는 명시해야 합니다)")
         for item in self.slot_ids:
             if not isinstance(item, str) or not item.strip():
                 raise ValueError("slot_ids 안에 비어 있는 값이 있습니다")

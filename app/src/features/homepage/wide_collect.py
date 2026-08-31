@@ -35,6 +35,7 @@ from src.features.homepage.constants import (
     WIDE_MAX_USABLE_RANGES_PER_DOCUMENT,
     WIDE_PARSER_VERSION,
     WIDE_PRIORITY_HOST_KEYWORDS,
+    WIDE_REQUIRED_SLOT_IDS,
     WIDE_SOURCE_KIND_IR_PDF,
     WIDE_SOURCE_KIND_RECRUIT_PAGE,
     WIDE_SOURCE_KIND_WEB_PAGE,
@@ -91,6 +92,17 @@ _PRIORITY_KEYWORDS: tuple[str, ...] = WIDE_PRIORITY_HOST_KEYWORDS + PRIORITY_PAT
 #: url 안에 있으면 «채용 페이지」로 분류하는 키워드.
 _RECRUIT_MARKERS: tuple[str, ...] = ("recruit", "career", "jobs", "채용")
 
+#: P0-2: robots·sitemap·전체 truncation·IR처럼 «호스트/수집 전체」에 걸린
+#: attempt이거나, 일반 페이지인데 URL로 페이지 유형을 못 알아낸 attempt에
+#: 붙이는 fallback slot 집합. 앱 계약(CollectionAttempt)은 빈 slot_ids를
+#: 생성 즉시 거절하므로(``WideCollectionAttempt.__post_init__``도 동일하게
+#: 막는다) 특정 slot을 좁혀낼 수 없을 때도 항상 비어 있지 않은 집합을
+#: 명시해야 한다 — 「이 결과 때문에 확인하지 못한(혹은 확인한) 모든 후보
+#: slot」이라는 뜻으로 허용 어휘 17개 전체를 쓴다(``_CollectionState.add_attempt``
+#: 참조 — 모든 attempt 생성이 이 한 곳을 거치므로 호출부마다 따로 챙기지 않아도
+#: 절대 빈 slot_ids가 새 나가지 않는다).
+_ALL_SLOT_IDS_FALLBACK: tuple[str, ...] = WIDE_REQUIRED_SLOT_IDS
+
 
 @dataclass
 class _CollectionState:
@@ -131,7 +143,9 @@ class _CollectionState:
                 source_kind=source_kind,
                 requirement=requirement,
                 state=state,
-                slot_ids=slot_ids,
+                # P0-2: 빈 slot_ids는 절대 내보내지 않는다 — 좁혀낼 slot이 없으면
+                # 허용 어휘 17개 전체로 대체한다(_ALL_SLOT_IDS_FALLBACK).
+                slot_ids=slot_ids or _ALL_SLOT_IDS_FALLBACK,
                 reason_code=reason_code,
                 elapsed_ms=max(0, elapsed_ms),
                 bytes_downloaded=max(0, bytes_downloaded),

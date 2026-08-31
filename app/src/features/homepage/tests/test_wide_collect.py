@@ -12,6 +12,7 @@ from src.features.homepage import wide_collect
 from src.features.homepage.constants import (
     WIDE_MAX_PAGES,
     WIDE_MAX_SITEMAP_ENTRIES,
+    WIDE_REQUIRED_SLOT_IDS,
     WIDE_REQUIRED_SLOT_IDS_BY_SECTION,
 )
 from src.features.homepage.ir_pdf import OfficialIrCollectResult
@@ -480,12 +481,16 @@ def test_제품_페이지는_portfolio와_business_model_슬롯을_받는다():
 
     result = _collect(site)
 
-    products_attempt = next(
-        a for a in result.attempts if a.state == "OK" and "portfolio:product_role" in a.slot_ids
-    )
-    assert set(products_attempt.slot_ids) == set(
+    # ★ P0-2 이후 루트("/") attempt도 fallback으로 slot_ids 17개 전체를 받으므로
+    #   "in" 느슨한 대조 대신 «정확히 이 페이지 유형의 슬롯 집합과 같다»로
+    #   고른다 — 루트 attempt(전체 17개)와 절대 같을 수 없어 혼동되지 않는다.
+    expected_slots = set(
         WIDE_REQUIRED_SLOT_IDS_BY_SECTION["portfolio"] + WIDE_REQUIRED_SLOT_IDS_BY_SECTION["business_model"]
     )
+    products_attempt = next(
+        a for a in result.attempts if a.state == "OK" and set(a.slot_ids) == expected_slots
+    )
+    assert set(products_attempt.slot_ids) == expected_slots
 
 
 def test_뉴스룸_페이지는_future_strategy와_past_changes_슬롯을_받는다():
@@ -501,13 +506,116 @@ def test_뉴스룸_페이지는_future_strategy와_past_changes_슬롯을_받는
 
     result = _collect(site)
 
+    # ★ P0-2 이후 루트("/") attempt도 fallback으로 slot_ids 17개 전체를 받으므로
+    #   "in" 느슨한 대조 대신 «정확히 이 페이지 유형의 슬롯 집합과 같다»로 고른다.
+    expected_slots = set(
+        WIDE_REQUIRED_SLOT_IDS_BY_SECTION["future_strategy"] + WIDE_REQUIRED_SLOT_IDS_BY_SECTION["past_changes"]
+    )
     news_attempt = next(
-        a for a in result.attempts if a.state == "OK" and "past_changes:completed_execution" in a.slot_ids
+        a for a in result.attempts if a.state == "OK" and set(a.slot_ids) == expected_slots
     )
-    assert set(news_attempt.slot_ids) == set(
-        WIDE_REQUIRED_SLOT_IDS_BY_SECTION["future_strategy"]
-        + WIDE_REQUIRED_SLOT_IDS_BY_SECTION["past_changes"]
+    assert set(news_attempt.slot_ids) == expected_slots
+
+
+# ── P0-2: 어떤 attempt도 slot_ids가 비어 있으면 안 된다 ─────
+
+
+def test_어떤_attempt도_slot_ids가_비어있지_않다_정상수집():
+    """정상적인 최소 수집 한 번만 돌려도 robots·sitemap·루트페이지(‘/’는
+    페이지 유형 키워드에 안 걸린다) attempt가 전부 생긴다 — 전부 비어
+    있으면 안 된다."""
+    pages = {
+        "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
+        "https://company.example/sitemap.xml": _missing("https://company.example/sitemap.xml"),
+        "https://company.example/": _page(_body("루트 페이지 본문"), "https://company.example/"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(site)
+
+    assert result.attempts  # 최소한 robots·sitemap·root 페이지 attempt가 있다
+    for attempt in result.attempts:
+        assert attempt.slot_ids, f"{attempt.attempt_id}({attempt.source_kind})의 slot_ids가 비어 있다"
+
+
+def test_URL로_페이지유형을_못알아낸_루트페이지는_fallback_전체슬롯을_받는다():
+    pages = {
+        "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
+        "https://company.example/sitemap.xml": _missing("https://company.example/sitemap.xml"),
+        "https://company.example/": _page(_body("루트 페이지 본문"), "https://company.example/"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(site)
+
+    root_attempt = next(
+        a for a in result.attempts if a.source_kind == "official_web_page" and a.state == "OK"
     )
+    assert set(root_attempt.slot_ids) == set(WIDE_REQUIRED_SLOT_IDS)
+
+
+def test_robots_실패_attempt는_전체슬롯_fallback을_받는다():
+    pages = {
+        "https://company.example/": _page(_body("루트 페이지"), "https://company.example/"),
+    }
+    site = _FakeWideSite(pages)  # robots.txt 자체가 없어 조회 실패(FAILED)
+
+    result = _collect(site)
+
+    robots_attempt = next(a for a in result.attempts if a.source_kind == "robots_txt")
+    assert robots_attempt.state == "FAILED"
+    assert set(robots_attempt.slot_ids) == set(WIDE_REQUIRED_SLOT_IDS)
+
+
+def test_sitemap_없음_attempt도_전체슬롯_fallback을_받는다():
+    pages = {
+        "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
+        "https://company.example/sitemap.xml": _missing("https://company.example/sitemap.xml"),
+        "https://company.example/": _page(_body("루트 페이지 본문"), "https://company.example/"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(site)
+
+    sitemap_attempt = next(a for a in result.attempts if a.reason_code.startswith("sitemap_missing"))
+    assert set(sitemap_attempt.slot_ids) == set(WIDE_REQUIRED_SLOT_IDS)
+
+
+def test_페이지수_상한_truncation도_전체슬롯_fallback을_받는다():
+    links = "".join(f'<a href="/page{i}">페이지{i}</a>' for i in range(WIDE_MAX_PAGES + 10))
+    pages = {
+        "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
+        "https://company.example/sitemap.xml": _missing("https://company.example/sitemap.xml"),
+        "https://company.example/": _page(_body("루트 페이지 본문") + links, "https://company.example/"),
+    }
+    for i in range(WIDE_MAX_PAGES + 10):
+        url = f"https://company.example/page{i}"
+        pages[url] = _page(_body(f"페이지{i} 본문"), url)
+    site = _FakeWideSite(pages)
+
+    result = _collect(site)
+
+    truncated = next(a for a in result.attempts if a.reason_code == "truncated_page_cap")
+    assert set(truncated.slot_ids) == set(WIDE_REQUIRED_SLOT_IDS)
+
+
+def test_ir_attempt도_전체슬롯_fallback을_받는다(monkeypatch):
+    def fake_collect_ir(homepage_url, **_kwargs):
+        return OfficialIrCollectResult(state="none", fragments=[], downloaded_pdf_bytes=0)
+
+    monkeypatch.setattr(wide_collect, "collect_official_ir_fragments", fake_collect_ir)
+
+    pages = {
+        "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
+        "https://company.example/sitemap.xml": _missing("https://company.example/sitemap.xml"),
+        "https://company.example/": _page(_body("루트 페이지 본문"), "https://company.example/"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(site)
+
+    ir_attempt = next(a for a in result.attempts if a.source_kind == "official_ir_pdf")
+    assert set(ir_attempt.slot_ids) == set(WIDE_REQUIRED_SLOT_IDS)
 
 
 # ── IR PDF 위임 ───────────────────────────────────────────
