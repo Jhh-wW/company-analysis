@@ -79,6 +79,7 @@ class CollectedEvidenceDocument:
     published_on: str
     collected_at: str
     content_sha256: str
+    exact_evidence_hashes: tuple[str, ...]
     identity_binding: str
     usable_ranges: tuple[DocumentTextRange, ...]
     collector_version: str
@@ -100,6 +101,13 @@ class CollectedEvidenceDocument:
         ):
             _require_text(value, label=label)
         _require_sha256(self.content_sha256, label="문서 내용")
+        exact_hashes = _require_unique_texts(
+            self.exact_evidence_hashes, label="문서의 정확한 근거 조각 해시"
+        )
+        if not exact_hashes:
+            raise ValueError("수집 문서에는 정확한 근거 조각 해시가 한 개 이상 필요합니다")
+        for evidence_hash in exact_hashes:
+            _require_sha256(evidence_hash, label="문서의 정확한 근거 조각")
         if not self.usable_ranges:
             raise ValueError("수집 문서에는 실제로 사용할 수 있는 본문 구간이 필요합니다")
         ordered = tuple(sorted(self.usable_ranges, key=lambda item: (item.start, item.end)))
@@ -219,6 +227,20 @@ class ChapterEvidenceCandidates:
                 "근거 조각의 원본 문서가 후보 문서 목록에 없습니다: "
                 + ", ".join(unknown_documents)
             )
+        documents_by_id = {
+            document.document_id: document for document in self.documents
+        }
+        unbound_fragments = sorted(
+            fragment.fragment_id
+            for fragment in self.fragments
+            if fragment.text_sha256
+            not in documents_by_id[fragment.document_id].exact_evidence_hashes
+        )
+        if unbound_fragments:
+            raise ValueError(
+                "근거 조각 해시가 원본 문서의 허용 목록에 없습니다: "
+                + ", ".join(unbound_fragments)
+            )
         attempt_ids = tuple(attempt.attempt_id for attempt in self.attempts)
         _require_unique_texts(attempt_ids, label="수집 시도 식별자")
         if sum(len(fragment.text) for fragment in self.fragments) > self.max_chars:
@@ -313,6 +335,20 @@ class SectionEvidenceBundle:
             raise ValueError(
                 "최종 근거 조각의 원본 문서가 문서 목록에 없습니다: "
                 + ", ".join(unknown_documents)
+            )
+        documents_by_id = {
+            document.document_id: document for document in self.documents
+        }
+        unbound_fragments = sorted(
+            fragment.fragment_id
+            for fragment in self.fragments
+            if fragment.text_sha256
+            not in documents_by_id[fragment.document_id].exact_evidence_hashes
+        )
+        if unbound_fragments:
+            raise ValueError(
+                "최종 근거 조각 해시가 원본 문서의 허용 목록에 없습니다: "
+                + ", ".join(unbound_fragments)
             )
         injected_slot_ids = tuple(item.slot_id for item in self.injected_slot_facts)
         _require_unique_texts(injected_slot_ids, label="주입 의미 칸")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -27,7 +28,16 @@ from src.shared.report_evidence.models import (
 )
 
 
-def _document(*, company_id: str = "corp-1", document_id: str = "doc-1") -> CollectedEvidenceDocument:
+_FRAGMENT_TEXT = "회사는 공식 제품을 고객에게 직접 판매해 수익을 얻습니다."
+_FRAGMENT_SHA256 = hashlib.sha256(_FRAGMENT_TEXT.encode("utf-8")).hexdigest()
+
+
+def _document(
+    *,
+    company_id: str = "corp-1",
+    document_id: str = "doc-1",
+    exact_evidence_hashes: tuple[str, ...] = (_FRAGMENT_SHA256,),
+) -> CollectedEvidenceDocument:
     return CollectedEvidenceDocument(
         company_id=company_id,
         document_id=document_id,
@@ -39,6 +49,7 @@ def _document(*, company_id: str = "corp-1", document_id: str = "doc-1") -> Coll
         published_on="2026-08-01",
         collected_at="2026-08-31T00:00:00+00:00",
         content_sha256="a" * 64,
+        exact_evidence_hashes=exact_evidence_hashes,
         identity_binding="dart-homepage-link:001",
         usable_ranges=(DocumentTextRange(0, 100),),
         collector_version="collector-v1",
@@ -48,7 +59,7 @@ def _document(*, company_id: str = "corp-1", document_id: str = "doc-1") -> Coll
 
 
 def _fragment(*, slot_id: str = "business_model", document_id: str = "doc-1") -> EvidenceFragment:
-    text = "회사는 공식 제품을 고객에게 직접 판매해 수익을 얻습니다."
+    text = _FRAGMENT_TEXT
     return EvidenceFragment(
         fragment_id=f"fragment-{slot_id}",
         document_id=document_id,
@@ -80,6 +91,7 @@ def _attempt(
 
 def _candidate(
     *,
+    documents: tuple[CollectedEvidenceDocument, ...] | None = None,
     fragments: tuple[EvidenceFragment, ...] = (),
     attempts: tuple[CollectionAttempt, ...] = (),
     readiness: EvidenceReadiness = EvidenceReadiness.UNKNOWN,
@@ -87,7 +99,7 @@ def _candidate(
     return ChapterEvidenceCandidates(
         company_id="corp-1",
         section_id="business_model",
-        documents=(_document(),),
+        documents=documents if documents is not None else (_document(),),
         fragments=fragments,
         attempts=attempts,
         candidate_readiness=readiness,
@@ -294,6 +306,38 @@ def test_문서와_조각의_회사_및_원본_결속을_강제한다() -> None:
             estimated_tokens=0,
             max_chars=100,
             max_estimated_tokens=100,
+        )
+
+
+def test_조각의_정확한_원문해시가_원본문서_허용목록에_없으면_거절한다() -> None:
+    with pytest.raises(ValueError, match="원본 문서의 허용 목록"):
+        _candidate(
+            fragments=(_fragment(),),
+            documents=(_document(exact_evidence_hashes=("b" * 64,)),),
+        )
+
+
+@pytest.mark.parametrize(
+    "exact_hashes",
+    ((), ("A" * 64,), ("a" * 64, "a" * 64)),
+)
+def test_문서의_정확한_근거해시_목록은_비어있거나_손상되거나_중복될수없다(
+    exact_hashes: tuple[str, ...],
+) -> None:
+    with pytest.raises(ValueError, match="정확한 근거 조각"):
+        _document(exact_evidence_hashes=exact_hashes)
+
+
+def test_최종묶음도_원본문서가_허용하지_않은_조각해시를_거절한다() -> None:
+    bundle = build_section_bundle(
+        _candidate(fragments=(_fragment(),), readiness=EvidenceReadiness.READY),
+        required_slot_ids=("business_model",),
+    )
+
+    with pytest.raises(ValueError, match="최종 근거 조각 해시"):
+        replace(
+            bundle,
+            documents=(_document(exact_evidence_hashes=("b" * 64,)),),
         )
 
 
