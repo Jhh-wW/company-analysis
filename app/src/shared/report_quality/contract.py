@@ -11,6 +11,9 @@ from src.shared.report_quality.constants import (
     MIN_VERIFIED_RATIO,
     QUALITY_CONTRACT_VERSION,
     REQUIRED_QUALITY_SECTION_IDS,
+    STRICT_MAX_NOTICE_ONLY_SECTIONS,
+    STRICT_QUALITY_CONTRACT_VERSION,
+    STRICT_REQUIRED_QUALITY_SECTION_IDS,
 )
 from src.shared.report_quality.models import (
     ContractResolution,
@@ -31,8 +34,22 @@ CURRENT_CONTRACT = QualityContract(
     historical_read_policy=HistoricalReadPolicy.PRESERVE_ISSUED,
 )
 
+# v1 하한을 새 출력에 맞춰 낮추지 않는다. FULL 계약은 그 하한을 그대로
+# 유지하면서 누락됐던 9장과 안내문 없는 완성 조건만 더 엄격히 요구한다.
+STRICT_CONTRACT = QualityContract(
+    version=STRICT_QUALITY_CONTRACT_VERSION,
+    required_section_ids=STRICT_REQUIRED_QUALITY_SECTION_IDS,
+    min_claims_per_covered_section=MIN_CLAIMS_PER_COVERED_SECTION,
+    min_substantive_claims=MIN_SUBSTANTIVE_CLAIMS,
+    min_verified_ratio=MIN_VERIFIED_RATIO,
+    min_document_sources=MIN_DOCUMENT_SOURCES,
+    max_notice_only_sections=STRICT_MAX_NOTICE_ONLY_SECTIONS,
+    historical_read_policy=HistoricalReadPolicy.PRESERVE_ISSUED,
+)
+
 _GENERATION_CONTRACTS: dict[str, QualityContract] = {
     CURRENT_CONTRACT.version: CURRENT_CONTRACT,
+    STRICT_CONTRACT.version: STRICT_CONTRACT,
 }
 
 

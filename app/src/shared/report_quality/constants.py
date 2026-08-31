@@ -6,6 +6,10 @@ from decimal import Decimal
 from typing import Final
 
 QUALITY_CONTRACT_VERSION: Final[str] = "report-quality-v1"
+# 기존 v1 기본값을 바꾸지 않는다. 새 계약은 FULL 후보가 9장 모두를 실제로
+# 채웠는지 명시적으로 평가할 때만 이름으로 선택한다. 과거 보고서와 현재
+# SHADOW 결과를 새 규칙으로 소급 재판정하지 않기 위한 별도 버전이다.
+STRICT_QUALITY_CONTRACT_VERSION: Final[str] = "report-quality-v2-full"
 LEGACY_UNVERSIONED_CONTRACT: Final[str] = "legacy-unversioned"
 NUMERIC_BINDING_VERSION: Final[str] = "numeric-binding-v1"
 NUMERIC_CHECK_PREFIX: Final[str] = f"{NUMERIC_BINDING_VERSION}:"
@@ -29,6 +33,11 @@ REQUIRED_QUALITY_SECTION_IDS: Final[tuple[str, ...]] = (
     "operations_partners",
     "culture",
 )
+STRICT_REQUIRED_QUALITY_SECTION_IDS: Final[tuple[str, ...]] = (
+    *REQUIRED_QUALITY_SECTION_IDS,
+    "competitive_position",
+)
+STRICT_MAX_NOTICE_ONLY_SECTIONS: Final[int] = 0
 
 ROUNDING_MODE: Final[str] = "ROUND_HALF_UP"
 # 공식 재계산 과정의 Decimal 정밀도 차이만 허용한다. 이보다 큰 값은 틀린
