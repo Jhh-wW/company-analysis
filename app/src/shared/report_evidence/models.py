@@ -290,6 +290,18 @@ class SectionEvidenceBundle:
         _require_unique_texts(fragment_ids, label="근거 조각 식별자")
         if any(fragment.section_id != self.section_id for fragment in self.fragments):
             raise ValueError("다른 장의 근거 조각을 최종 근거 묶음에 섞을 수 없습니다")
+        unknown_fragment_slots = sorted(
+            {
+                fragment.slot_id
+                for fragment in self.fragments
+                if fragment.slot_id not in set(required)
+            }
+        )
+        if unknown_fragment_slots:
+            raise ValueError(
+                "필수 정책에 없는 의미 칸의 근거 조각을 최종 묶음에 넣을 수 없습니다: "
+                + ", ".join(unknown_fragment_slots)
+            )
         unknown_documents = sorted(
             {
                 fragment.document_id

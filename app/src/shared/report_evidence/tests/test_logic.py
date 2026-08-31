@@ -118,6 +118,19 @@ def test_근거가_찬_필수칸은_선택형_출처_실패가_있어도_ready�
     assert bundle.missing_slot_ids == ()
 
 
+def test_필수칸이_다_차도_정책밖_근거조각은_작성묶음에_들어갈_수_없다() -> None:
+    candidate = _candidate(
+        fragments=(
+            _fragment(),
+            _fragment(slot_id="other_section:foreign_slot"),
+        ),
+        readiness=EvidenceReadiness.READY,
+    )
+
+    with pytest.raises(ValueError, match="필수 정책에 없는 의미 칸의 근거 조각"):
+        build_section_bundle(candidate, required_slot_ids=("business_model",))
+
+
 def test_정상적으로_확인한_뒤_빈_필수칸만_insufficient다() -> None:
     candidate = _candidate(
         attempts=(
