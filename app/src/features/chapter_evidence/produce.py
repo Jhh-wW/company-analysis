@@ -47,10 +47,20 @@ def produce_chapter_evidence_candidates(
     """회사 한 곳의 수집 결과에서 아홉 장 근거 후보를 정책 순서로 만든다.
 
     Args:
-        company_id: 대상 회사 식별자. 다른 회사의 문서·조각은 여기서 걸러진다.
-        company_type: ``"listed"``·``"audit_only"``·``"financial"`` 중 하나
-            (또는 같은 값의 ``CompanyType``). 슬롯 요구 자체는 바꾸지 않고,
-            그 슬롯을 정상 확인하는 조회 경로 기대값만 바꾼다.
+        company_id: 대상 회사 식별자. 문서는 ``company_id``로 직접 걸러진다.
+            조각(fragment)은 그 자체로 회사 식별자를 갖지 않는다 —
+            ``document_id``로 자신이 속한 문서를 찾고, 그 문서가 실제로
+            내보내는 ``exact_evidence_hashes`` 허용 목록에 자기
+            ``text_sha256``이 있어야만(select.py의 결속 확인) 후보에 남는다.
+            ``document_id``가 다른 회사와 우연히 겹쳐도(수집기 버그) 이
+            결속 확인이 남의 원문이 조용히 섞이는 것을 막는 방어선이다 —
+            다만 서로 다른 회사에 같은 ``document_id``를 발급하지 않는 것이
+            수집기 쪽의 원칙이고, 이 결속 확인은 그 원칙이 깨졌을 때만 작동한다.
+        company_type: ``"listed"``·``"audit_only"``·``"financial"``·
+            ``"undecided"`` 중 하나(또는 같은 값의 ``CompanyType``). 슬롯
+            요구 자체는 바꾸지 않고, 그 슬롯을 정상 확인하는 조회 경로
+            기대값만 바꾼다. ``"undecided"``는 기대 경로를 «모름»으로 다뤄
+            진단이 계약과 완전히 같은 판정만 내도록 한다.
         documents: 계약 ``CollectedEvidenceDocument`` 인스턴스이거나 같은
             필드 이름의 매핑 시퀀스.
         fragments: 계약 ``EvidenceFragment`` 인스턴스이거나 같은 필드 이름의

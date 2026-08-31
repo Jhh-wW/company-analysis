@@ -134,6 +134,43 @@ def test_완전한_수집결과는_모든_장이_ready다() -> None:
     )
 
 
+def test_문서식별자가_충돌해도_타사_조각은_결속확인으로_걸러진다() -> None:
+    # 조각(fragment) 자체는 company_id를 갖지 않는다 — document_id로만 자기
+    # 문서를 찾는다. 수집기 버그로 서로 다른 회사가 같은 document_id를
+    # 발급했다고 가정해도, 우리 문서의 exact_evidence_hashes에는 남의 조각
+    # 해시가 없으므로 select.py의 결속 확인이 그 조각을 걸러내야 한다.
+    fixture = build_listed_fixture(company_id="corp-listed")
+    collided_document_id = fixture["documents"][0]["document_id"]
+    foreign_fragment = make_fragment(
+        fragment_id="frag-collided",
+        document_id=collided_document_id,
+        section_id="business_model",
+        slot_id="business_model:revenue_model",
+        text="충돌한 document_id로 섞이려는 다른 회사의 원문.",
+        score_millis=999,
+    )
+    fragments = [*fixture["fragments"], foreign_fragment]
+
+    candidates = produce_chapter_evidence_candidates(
+        company_id="corp-listed",
+        company_type="listed",
+        documents=fixture["documents"],
+        fragments=fragments,
+        attempts=fixture["attempts"],
+    )
+
+    business_model = next(
+        candidate for candidate in candidates if candidate.section_id == "business_model"
+    )
+    assert "frag-collided" not in {
+        fragment.fragment_id for fragment in business_model.fragments
+    }
+    assert any(
+        code.startswith("fragment_not_bound_to_document:")
+        for code in business_model.reason_codes
+    )
+
+
 def test_잘못된_형식의_문서_입력은_한국어_예외로_남는다() -> None:
     fixture = build_listed_fixture()
     broken_documents = [{**fixture["documents"][0], "source_tier": "TIER_9_UNKNOWN"}]
