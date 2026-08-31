@@ -75,6 +75,35 @@ def test_짧은_잔여물은_MIN_FRAGMENT_CHARS_미만이면_버린다() -> None
     assert candidates == []
 
 
+def test_P2_공백_섞인_목_차_마커도_제외된다() -> None:
+    text = "1. 목 차\n이 사업보고서는 회사의 개요, 사업의 내용 순서로 구성되어 있다.\n\nI. 회사의 개요\n당사는 전자부품을 제조하는 주식회사이며 법인이다.\n"
+    candidates = segment_document(text)
+
+    assert not any("회사의 개요, 사업의 내용 순서로 구성" in c.text for c in candidates)
+    assert any("당사는 전자부품을 제조하는 주식회사이며 법인이다" in c.text for c in candidates)
+
+
+def test_P2_점_leader와_쪽번호로_끝나는_목차_항목_줄은_표제로_오인되지_않는다() -> None:
+    text = (
+        "1. 목차\n"
+        "I. 회사의 개요 ............ 3\n"
+        "II. 사업의 내용 ............ 5\n"
+        "\n"
+        "I. 회사의 개요\n"
+        "당사는 전자부품을 제조하는 주식회사이며 법인이다.\n"
+        "\n"
+        "II. 사업의 내용\n"
+        "당사의 매출은 판매에서 발생한다.\n"
+    )
+    candidates = segment_document(text)
+
+    # 목차 항목 줄 자체가 조각으로 새지 않는다(점 leader·쪽번호 포함 원문 그대로는 없어야 함).
+    assert not any("............ 3" in c.text or "............ 5" in c.text for c in candidates)
+    # 진짜 본문 표제 아래 문단은 그대로 잡힌다.
+    assert any("당사는 전자부품을 제조하는 주식회사이며 법인이다" in c.text for c in candidates)
+    assert any("당사의 매출은 판매에서 발생한다" in c.text for c in candidates)
+
+
 def test_각_후보의_start_end는_실제_원문과_일치한다() -> None:
     candidates = segment_document(LISTED_BUSINESS_REPORT_TEXT)
     for candidate in candidates:

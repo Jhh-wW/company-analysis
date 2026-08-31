@@ -55,9 +55,21 @@ def _is_heading(line: str) -> bool:
     return bool(_HEADING_PATTERN.match(line.strip()))
 
 
+#: 목차 «항목» 줄(예: 「I. 회사의 개요 ...... 3」) — 점·가운뎃점 leader가 2개
+#: 이상 이어지다 쪽 번호로 끝나는 형태를 목차 항목으로 본다(P2 v1 휴리스틱 —
+#: 모든 DART 공시의 목차 표기를 전수 조사하지 않았다. 확인 못 함). 이 줄은
+#: _HEADING_PATTERN에도 걸려 진짜 표제로 오인되던 결함이 있었다 — 표제
+#: 패턴과 겹치는 번호 매김(로마숫자 등)을 그대로 쓰기 때문이다.
+_TOC_ENTRY_LEADER_PATTERN = re.compile(r"[.·]{2,}\s*\d{1,4}\s*$")
+
+
 def _is_toc_heading(line: str) -> bool:
     stripped = line.strip()
-    return any(marker in stripped for marker in c.TOC_HEADING_MARKERS)
+    # 「목 차」처럼 마커 안에 공백이 섞여도 잡도록 공백을 모두 지우고 비교한다.
+    collapsed = re.sub(r"\s+", "", stripped)
+    if any(marker in collapsed for marker in c.TOC_HEADING_MARKERS):
+        return True
+    return bool(_TOC_ENTRY_LEADER_PATTERN.search(stripped))
 
 
 def segment_sections(text: str) -> list[TextSegment]:
