@@ -45,10 +45,6 @@ from src.features.pipeline.tests.test_real_cache import (
     FakeEngine,
 )
 from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
-from src.shared.engine_build_identity import (
-    ENGINE_BUILD_ID_CONTRACT_VERSION,
-    EngineBuildIdentity,
-)
 from src.shared import generation_coordination
 from src.shared.final_gate_diagnostics import FINAL_GATE_REASON_PUBLISH_BLOCKED
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
@@ -705,15 +701,8 @@ def test_운영_FULL은_typed_packet과_실제_9_writer_1_bundled_reviewer를_�
         corp_id="00123456",
         current_fiscal_year=2025,
         source_identity_digest="a" * 64,
-        build_identity=_strict_build_identity(),
-    )
-
-
-def _strict_build_identity() -> EngineBuildIdentity:
-    revision = "1" * 40
-    return EngineBuildIdentity(
-        revision,
-        f"{ENGINE_BUILD_ID_CONTRACT_VERSION}:{revision}",
+        build_identity=_build_identity(),
+        generation_mode=_frozen_v2_mode(),
     )
 
     assert result.outcome is Outcome.REPORT
@@ -727,7 +716,7 @@ def _strict_build_identity() -> EngineBuildIdentity:
     assert result.generation_evidence.reviewer_calls == 1
     assert (
         result.generation_evidence.build_identity_sha256
-        == _strict_build_identity().epoch_digest
+        == _build_identity().epoch_digest
     )
     assert [record.section_id for record in result.generation_evidence.call_ledger.records[:9]] == list(SECTION_IDS)
     assert result.generation_evidence.call_ledger.records[-1].section_id == "bundled"
@@ -806,7 +795,8 @@ def test_운영_FULL_packet_입력이_불완전하면_provider와_composer_모�
         corp_id="",  # gen8 누락 — packet 생성 경계에서 즉시 차단
         current_fiscal_year=2025,
         source_identity_digest="a" * 64,
-        build_identity=_strict_build_identity(),
+        build_identity=_build_identity(),
+        generation_mode=_frozen_v2_mode(),
     )
 
     assert result.outcome is Outcome.GATE_STOPPED
@@ -853,6 +843,8 @@ def test_운영_v2_release_mode_누락은_provider와_composer_전에_차단한�
         corp_id=CORP_ID,
         current_fiscal_year=2025,
         source_identity_digest="a" * 64,
+        build_identity=_build_identity(),
+        generation_mode=_frozen_v2_mode(),
     )
 
     assert result.outcome is Outcome.GATE_STOPPED

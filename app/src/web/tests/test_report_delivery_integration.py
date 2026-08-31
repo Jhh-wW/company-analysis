@@ -718,15 +718,39 @@ def test_PUBLIC_waiter와cache도_최종grant결속False면_출고와청구를_r
         "bind_report",
         lambda *_a, **_k: False,
     )
-    extra = (
-        {
+    if reuse_kind == "cache":
+        extra = {
             "cache_namespace": namespace,
             "preflight_identity_digest": preflight_digest,
             "cache_eligible": True,
         }
-        if reuse_kind == "cache"
-        else {}
-    )
+    else:
+        lease_key = singleflight.LeaseKey(
+            billing_bucket_id="same-bucket",
+            corp_id="demo-corp",
+            cache_namespace_id=namespace.namespace_id,
+            source_identity_digest=preflight_digest,
+            engine_epoch_digest=_current_build_identity().epoch_digest,
+        )
+        now = dt.datetime.now(dt.timezone.utc)
+        with storage_db.connect() as conn:
+            acquired = singleflight.acquire(
+                conn,
+                key=lease_key,
+                owner_id="grant-rollback-owner",
+                now=now,
+                lease_ttl=dt.timedelta(minutes=5),
+            )
+            assert acquired.handle is not None
+            assert singleflight.complete(
+                conn,
+                handle=acquired.handle,
+                content_snapshot_id=owner.content.content_id,
+                artifact_id=owner.artifact.artifact_id,
+                now=now + dt.timedelta(seconds=1),
+                result_fanout_ttl=dt.timedelta(minutes=2),
+            )
+        extra = {"reuse_singleflight_key": lease_key}
 
     with pytest.raises(report_access_store.PublicGrantBindingUnavailable):
         reports_router.finalize_new_report_delivery(

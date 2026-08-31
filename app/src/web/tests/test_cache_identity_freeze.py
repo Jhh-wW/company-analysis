@@ -7,9 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.core import deployment_identity
+from src.core import clock, deployment_identity
 from src.features.pipeline.canonical_demo import build_demo_report
 from src.features.pipeline.port import CompanyCard, Outcome, RunResult, UserInput
+from src.features.report_access.models import ReportAudience
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
 from src.shared import engine_build_identity as build_identity_contract
@@ -36,6 +37,8 @@ def _paid_job(job_id: str) -> job_runtime.Job:
         is_paid=True,
         paid_cap_krw=900.0,
         slot_bucket_id="cache-identity-bucket",
+        report_audience=ReportAudience.ADMIN,
+        delivery_issued_at=clock.now_kst(),
     )
 
 
