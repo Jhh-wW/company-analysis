@@ -19,6 +19,9 @@ from src.features.chapter_evidence.tests.fixtures import (
     build_unfilled_channel,
     build_wisely_type_fixture,
     injected_facts_for,
+    make_attempt,
+    make_document,
+    make_fragment,
 )
 from src.shared.report_evidence.constants import (
     CollectionState,
@@ -30,6 +33,7 @@ from src.shared.report_evidence.logic import assess_generation_gate, build_secti
 from src.shared.report_evidence.models import GenerationGateDecision
 from src.shared.report_evidence.policy import (
     REQUIRED_EVIDENCE_SECTION_IDS,
+    collector_slots_for,
     required_slots_for,
 )
 
@@ -63,6 +67,7 @@ def _corrupt_single_section(fixture: dict, *, section_id: str, state: str, reaso
     ]
     attempts.extend(
         build_unfilled_channel(
+            company_id=fixture["documents"][0]["company_id"],
             section_id=section_id,
             source_kind="dart_business_report",
             state=state,

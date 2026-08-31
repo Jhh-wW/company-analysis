@@ -113,6 +113,7 @@ def test_문서의_정확한_근거_해시_형식이_잘못되면_거부한다()
 
 def test_매핑_조각을_계약형으로_바꾼다() -> None:
     mapping = make_fragment(
+        company_id="corp-1",
         fragment_id="frag-1",
         document_id="doc-1",
         section_id="identity",
@@ -123,12 +124,14 @@ def test_매핑_조각을_계약형으로_바꾼다() -> None:
     fragment = to_fragment(mapping)
 
     assert isinstance(fragment, EvidenceFragment)
+    assert fragment.company_id == "corp-1"
     assert fragment.text_sha256 == sha256_of(mapping["text"])
     assert fragment.period_start == ""
 
 
 def test_조각에_필수_항목이_빠지면_한국어_예외를_낸다() -> None:
     mapping = make_fragment(
+        company_id="corp-1",
         fragment_id="frag-1",
         document_id="doc-1",
         section_id="identity",
@@ -141,8 +144,26 @@ def test_조각에_필수_항목이_빠지면_한국어_예외를_낸다() -> No
         to_fragment(mapping)
 
 
+def test_조각에_회사_식별자가_빠지면_한국어_예외를_낸다() -> None:
+    # generation=8 필수 필드. 누락 시 대상 회사 값으로 조용히 보정하지
+    # 않고 한국어 예외로 남긴다(추측 금지).
+    mapping = make_fragment(
+        company_id="corp-1",
+        fragment_id="frag-1",
+        document_id="doc-1",
+        section_id="identity",
+        slot_id="identity:corporate_identity",
+        text="본문",
+    )
+    del mapping["company_id"]
+
+    with pytest.raises(ValueError, match="필수 항목이 빠졌습니다"):
+        to_fragment(mapping)
+
+
 def test_조각의_해시가_원문과_다르면_계약검증에서_거부된다() -> None:
     mapping = make_fragment(
+        company_id="corp-1",
         fragment_id="frag-1",
         document_id="doc-1",
         section_id="identity",
@@ -157,6 +178,7 @@ def test_조각의_해시가_원문과_다르면_계약검증에서_거부된다
 
 def test_매핑_시도를_계약형으로_바꾼다() -> None:
     mapping = make_attempt(
+        company_id="corp-1",
         attempt_id="attempt-1",
         source_kind="dart_business_report",
         slot_ids=("identity:corporate_identity",),
@@ -167,6 +189,7 @@ def test_매핑_시도를_계약형으로_바꾼다() -> None:
     attempt = to_attempt(mapping)
 
     assert isinstance(attempt, CollectionAttempt)
+    assert attempt.company_id == "corp-1"
     assert attempt.state is CollectionState.OK
     assert attempt.requirement is SourceRequirement.REQUIRED
     assert attempt.elapsed_ms == 0
@@ -174,6 +197,7 @@ def test_매핑_시도를_계약형으로_바꾼다() -> None:
 
 def test_시도에_필수_항목이_빠지면_한국어_예외를_낸다() -> None:
     mapping = make_attempt(
+        company_id="corp-1",
         attempt_id="attempt-1",
         source_kind="dart_business_report",
         slot_ids=("identity:corporate_identity",),
@@ -181,6 +205,21 @@ def test_시도에_필수_항목이_빠지면_한국어_예외를_낸다() -> No
         reason_code="dart_ok",
     )
     del mapping["state"]
+
+    with pytest.raises(ValueError, match="필수 항목이 빠졌습니다"):
+        to_attempt(mapping)
+
+
+def test_시도에_회사_식별자가_빠지면_한국어_예외를_낸다() -> None:
+    mapping = make_attempt(
+        company_id="corp-1",
+        attempt_id="attempt-1",
+        source_kind="dart_business_report",
+        slot_ids=("identity:corporate_identity",),
+        state=CollectionState.OK.value,
+        reason_code="dart_ok",
+    )
+    del mapping["company_id"]
 
     with pytest.raises(ValueError, match="필수 항목이 빠졌습니다"):
         to_attempt(mapping)

@@ -133,6 +133,7 @@ def to_fragment(
         raise ValueError("근거 조각은 계약 인스턴스이거나 매핑이어야 합니다")
     try:
         return EvidenceFragment(
+            company_id=_coerce_str(value["company_id"], label="회사 식별자"),
             fragment_id=_coerce_str(value["fragment_id"], label="근거 조각 식별자"),
             document_id=_coerce_str(value["document_id"], label="원본 문서 식별자"),
             location=_coerce_str(value["location"], label="원문 위치"),
@@ -168,6 +169,7 @@ def to_attempt(
         raise ValueError("수집 시도 기록은 계약 인스턴스이거나 매핑이어야 합니다")
     try:
         return CollectionAttempt(
+            company_id=_coerce_str(value["company_id"], label="회사 식별자"),
             attempt_id=_coerce_str(value["attempt_id"], label="수집 시도 식별자"),
             source_kind=_coerce_str(value["source_kind"], label="수집 출처 종류"),
             requirement=_coerce_enum(

@@ -14,13 +14,18 @@ from src.shared.report_evidence.models import CollectionAttempt
 
 def _attempt(
     *,
+    company_id: str = "corp-1",
     attempt_id: str,
     source_kind: str,
     slot_ids: tuple[str, ...],
     state: CollectionState,
     requirement: SourceRequirement = SourceRequirement.REQUIRED,
 ) -> CollectionAttempt:
+    # diagnose_candidate_readiness는 company_id를 스스로 확인하지 않는다
+    # (그건 produce.py의 몫이다) — 이 시험 helper의 기본값은 순수 자리
+    # 채우기용이다.
     return CollectionAttempt(
+        company_id=company_id,
         attempt_id=attempt_id,
         source_kind=source_kind,
         requirement=requirement,

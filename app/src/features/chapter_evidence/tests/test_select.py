@@ -53,6 +53,7 @@ def _document(
 
 def _fragment(
     *,
+    company_id: str = "corp-1",
     fragment_id: str,
     document_id: str = "doc-1",
     section_id: str = "business_model",
@@ -61,6 +62,7 @@ def _fragment(
     score_millis: int = 800,
 ) -> EvidenceFragment:
     return EvidenceFragment(
+        company_id=company_id,
         fragment_id=fragment_id,
         document_id=document_id,
         location="본문",

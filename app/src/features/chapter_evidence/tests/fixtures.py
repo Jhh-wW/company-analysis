@@ -106,6 +106,7 @@ def _bind_exact_evidence_hashes(
 
 def make_fragment(
     *,
+    company_id: str,
     fragment_id: str,
     document_id: str,
     section_id: str,
@@ -114,7 +115,15 @@ def make_fragment(
     score_millis: int = 800,
     reason_codes: tuple[str, ...] = ("official_direct_statement",),
 ) -> dict[str, object]:
+    """generation=8 조각을 만든다.
+
+    ``company_id``는 필수다(기본값 없음) — make_document와 마찬가지로
+    호출부가 명시하게 강제해, 대상 회사 값으로 조용히 «보정»하는 실수를
+    막는다.
+    """
+
     return {
+        "company_id": company_id,
         "fragment_id": fragment_id,
         "document_id": document_id,
         "location": "본문 1문단",
@@ -129,6 +138,7 @@ def make_fragment(
 
 def make_attempt(
     *,
+    company_id: str,
     attempt_id: str,
     source_kind: str,
     slot_ids: tuple[str, ...],
@@ -136,7 +146,10 @@ def make_attempt(
     reason_code: str,
     requirement: str = SourceRequirement.REQUIRED.value,
 ) -> dict[str, object]:
+    """generation=8 조회 기록을 만든다. ``company_id``는 필수다(기본값 없음)."""
+
     return {
+        "company_id": company_id,
         "attempt_id": attempt_id,
         "source_kind": source_kind,
         "requirement": requirement,
@@ -148,6 +161,7 @@ def make_attempt(
 
 def build_filled_channel(
     *,
+    company_id: str,
     section_id: str,
     source_kind: str,
     document_id: str,
@@ -160,6 +174,7 @@ def build_filled_channel(
     text_by_slot = text_by_slot or {}
     fragments = [
         make_fragment(
+            company_id=company_id,
             fragment_id=f"frag-{section_id}-{slot_id.split(':')[-1]}-{document_id}",
             document_id=document_id,
             section_id=section_id,
@@ -171,6 +186,7 @@ def build_filled_channel(
         for slot_id in slots
     ]
     attempt = make_attempt(
+        company_id=company_id,
         attempt_id=f"attempt-{section_id}-{document_id}",
         source_kind=source_kind,
         slot_ids=slots,
@@ -181,12 +197,13 @@ def build_filled_channel(
 
 
 def build_unfilled_channel(
-    *, section_id: str, source_kind: str, state: str, reason_code: str
+    *, company_id: str, section_id: str, source_kind: str, state: str, reason_code: str
 ) -> list[dict[str, object]]:
     """이 장의 수집 슬롯을 하나도 채우지 못한 조회 기록만 만든다(조각 없음)."""
 
     return [
         make_attempt(
+            company_id=company_id,
             attempt_id=f"attempt-{section_id}-unfilled-{state.lower()}",
             source_kind=source_kind,
             slot_ids=collector_slots_for(section_id),
@@ -239,6 +256,7 @@ def build_listed_fixture(*, company_id: str = "corp-listed") -> dict[str, list]:
     attempts: list[dict[str, object]] = []
     for section_id in REQUIRED_EVIDENCE_SECTION_IDS:
         section_fragments, section_attempts = build_filled_channel(
+            company_id=company_id,
             section_id=section_id,
             source_kind="dart_business_report",
             document_id=document_id,
@@ -263,6 +281,7 @@ def build_financial_fixture(*, company_id: str = "corp-financial") -> dict[str, 
     )
     completed_execution_slot = "past_changes:completed_execution"
     replacement_fragment = make_fragment(
+        company_id=company_id,
         fragment_id=f"frag-past_changes-completed_execution-{document_id}-financial",
         document_id=document_id,
         section_id="past_changes",
@@ -321,6 +340,7 @@ def build_wisely_type_fixture(*, company_id: str = "corp-wisely") -> dict[str, l
 
     for section_id in DART_SECTIONS:
         section_fragments, section_attempts = build_filled_channel(
+            company_id=company_id,
             section_id=section_id,
             source_kind="dart_audit_report",
             document_id=dart_document_id,
@@ -338,7 +358,10 @@ def build_wisely_type_fixture(*, company_id: str = "corp-wisely") -> dict[str, l
     for section_id in OFFICIAL_ONLY_SECTIONS:
         source_kind, document_id = official_channel_by_section[section_id]
         section_fragments, section_attempts = build_filled_channel(
-            section_id=section_id, source_kind=source_kind, document_id=document_id
+            company_id=company_id,
+            section_id=section_id,
+            source_kind=source_kind,
+            document_id=document_id,
         )
         fragments.extend(section_fragments)
         attempts.extend(section_attempts)
@@ -366,6 +389,7 @@ def build_no_homepage_fixture(*, company_id: str = "corp-no-homepage") -> dict[s
     attempts: list[dict[str, object]] = []
     for section_id in DART_SECTIONS:
         section_fragments, section_attempts = build_filled_channel(
+            company_id=company_id,
             section_id=section_id,
             source_kind="dart_audit_report",
             document_id=dart_document_id,
@@ -375,6 +399,7 @@ def build_no_homepage_fixture(*, company_id: str = "corp-no-homepage") -> dict[s
     for section_id in OFFICIAL_ONLY_SECTIONS:
         attempts.extend(
             build_unfilled_channel(
+                company_id=company_id,
                 section_id=section_id,
                 source_kind="official_homepage",
                 state=CollectionState.MISSING.value,
@@ -402,6 +427,7 @@ def build_javascript_render_failure_fixture(
     for section_id in OFFICIAL_ONLY_SECTIONS:
         fixture["attempts"].extend(
             build_unfilled_channel(
+                company_id=company_id,
                 section_id=section_id,
                 source_kind="official_homepage",
                 state=CollectionState.FAILED.value,
