@@ -809,6 +809,9 @@ async def _run_job(job: Job) -> None:
                     report=None,
                     message=PIPELINE_FAILED_MESSAGE,
                     charged=False,
+                    # 실제 게이트가 본 닫힌 사유는 지우지 않는다.
+                    # recording이 FAILED+billing_uncertain 조합으로
+                    # 생명주기 행과 부속 진단을 같이 남긴다.
                 )
             pipeline_cost = job.result.cost_krw
             if job.paid_phase is not None and not job.paid_phase_settled:

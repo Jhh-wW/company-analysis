@@ -79,8 +79,13 @@ def record_run(
       **사용자의 보고서를 못 보게 만들면 안 된다** — 기록은 부차적이다.
     """
     try:
-        if result.final_gate_reason and result.outcome is not Outcome.GATE_STOPPED:
-            raise ValueError("최종 게이트 사유는 게이트 중단 결과에만 기록할 수 있습니다")
+        gate_diagnostic_allowed = result.outcome is Outcome.GATE_STOPPED or (
+            result.outcome is Outcome.FAILED and result.billing_uncertain is True
+        )
+        if result.final_gate_reason and not gate_diagnostic_allowed:
+            raise ValueError(
+                "최종 게이트 사유는 게이트 중단 또는 비용 미확정 실패에만 기록할 수 있습니다"
+            )
         report = result.report
         cells_filled, cells_missing = _observed_cells(report)
         record = RunRecord(
