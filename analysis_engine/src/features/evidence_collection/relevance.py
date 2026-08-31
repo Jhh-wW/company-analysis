@@ -47,7 +47,9 @@ SLOT_KEYWORDS: dict[str, tuple[str, ...]] = {
 
     "current_challenges:issue": ("과제", "위험", "리스크", "규제"),
     "current_challenges:response": ("대응", "대책", "조치"),
-    "current_challenges:initial_signal": ("징후", "초기", "발생"),
+    # 「발생」 단독은 「매출이 판매에서 발생」 같은 수익모델 문장을 과제로
+    # 오복제한다. 문제의 시작을 직접 뜻하는 좁은 표현만 쓴다.
+    "current_challenges:initial_signal": ("징후", "초기", "문제가 발생", "위험이 발생"),
     "current_challenges:unresolved_gap": ("미해결", "지속되고", "여전히"),
     "current_challenges:next_check": ("점검", "모니터링", "확인 예정"),
 
@@ -121,8 +123,33 @@ def score_fragment_text(text: str, section_heading: str = "") -> SlotScore | Non
     tests/test_relevance.py에 회귀 시험으로 고정). 순수 점수 비교가
     먼저이고, 동점에서만 수집기 슬롯이 이긴다.
     """
-    best: SlotScore | None = None
-    for slot_id, keywords in SLOT_KEYWORDS.items():
+    scores = score_fragment_slots(text, section_heading)
+    return scores[0] if scores else None
+
+
+def score_fragment_slots(text: str, section_heading: str = "") -> tuple[SlotScore, ...]:
+    """원문에 직접 신호가 있는 한 장의 슬롯들을 결정론 순서로 돌려준다.
+
+    한 문단은 현실에서 여러 사실을 함께 말한다. 예를 들어 「주요 매출은
+    제품 판매에서 발생하며 고객사에 서비스를 제공한다」는 한 문단이지만
+    revenue_model·customer_type·value_exchange라는 서로 다른 세 질문에
+    각각 답한다. 예전의 단일 winner 방식은 나머지 두 근거를 버려 충분한
+    공시도 9장 게이트에서 막았다.
+
+    여기서는 **실제 키워드가 직접 맞은 슬롯만** 채점한 뒤, 가장 강한 슬롯의
+    장을 그 문단의 의미 경계로 고정한다. 따라서 한 문단이 여러 칸을 채울 수는
+    있어도, 「2025년」·「당사는」 같은 약한 우연 일치 때문에 여러 장으로
+    흩어지지는 않는다. 문장·절 분리는 다음 수집기 세대의 측정 과제로 남기고,
+    지금은 문단 provenance(원문 위치·해시)를 거짓으로 잘게 쪼개지 않는
+    보수적 경계를 택한다.
+
+    순서는 점수 내림차순 → 수집기 필수 슬롯 우선 → 정책 선언 순서라 실행마다
+    같다. 기존 단일 결과 API ``score_fragment_text``는 이 튜플의 첫 값을
+    돌려 이전 호출자와의 호환을 유지한다.
+    """
+
+    scored: list[tuple[int, SlotScore]] = []
+    for declaration_index, (slot_id, keywords) in enumerate(SLOT_KEYWORDS.items()):
         hits = [keyword for keyword in keywords if keyword in text]
         if not hits:
             continue
@@ -134,15 +161,24 @@ def score_fragment_text(text: str, section_heading: str = "") -> SlotScore | Non
                 score = min(c.RELEVANCE_MAX_SCORE_MILLIS, score + c.RELEVANCE_HEADING_BONUS_MILLIS)
                 reason_codes.append(f"heading_match:{section_id}")
                 break
-        candidate = SlotScore(
-            section_id=section_id, slot_id=slot_id, score_millis=score,
-            reason_codes=tuple(reason_codes),
-        )
-        if best is None or candidate.score_millis > best.score_millis:
-            best = candidate
-        elif candidate.score_millis == best.score_millis:
-            candidate_is_collector = candidate.slot_id in c.COLLECTOR_SLOT_IDS
-            best_is_collector = best.slot_id in c.COLLECTOR_SLOT_IDS
-            if candidate_is_collector and not best_is_collector:
-                best = candidate
-    return best
+        scored.append((
+            declaration_index,
+            SlotScore(
+                section_id=section_id,
+                slot_id=slot_id,
+                score_millis=score,
+                reason_codes=tuple(reason_codes),
+            ),
+        ))
+
+    scored.sort(key=lambda item: (
+        -item[1].score_millis,
+        0 if item[1].slot_id in c.COLLECTOR_SLOT_IDS else 1,
+        item[0],
+    ))
+    if not scored:
+        return ()
+    primary_section_id = scored[0][1].section_id
+    return tuple(
+        score for _index, score in scored if score.section_id == primary_section_id
+    )

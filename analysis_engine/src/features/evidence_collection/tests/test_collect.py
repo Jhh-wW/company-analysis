@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
+from core.dart_client import DartAuthenticationError, DartLimitReached
 from features.evidence_collection import collect as collect_module
 from features.evidence_collection import constants as c
 from features.evidence_collection.collect import collect_dart_evidence
@@ -215,7 +218,12 @@ def test_P0_1_무신호_조각은_harvest_fragments에도_직렬화_출력에도
     harvest = collect_dart_evidence(fetcher, "00126380", now=_NOW)
 
     assert len(harvest.documents) == 1
-    assert len(harvest.fragments) == 1  # 무신호 문단은 fragments에 없다
+    # 신호 문단은 가장 강한 회사정체성 장 안에서만 배정된다. 같은 문단의
+    # 「생산」 한 단어를 다른 장으로 복제하지 않으며, 무신호 문단도 여전히
+    # 하나도 fragments에 남지 않는다.
+    assert {fragment.slot_id for fragment in harvest.fragments} == {
+        "identity:corporate_identity",
+    }
     assert all(f.section_id and f.slot_id for f in harvest.fragments)
 
     mapping = harvest_to_mapping(harvest)
@@ -230,6 +238,28 @@ def test_P0_1_무신호_조각은_harvest_fragments에도_직렬화_출력에도
     assert len(observed) == 1
     assert observed[0].state == c.ATTEMPT_STATE_OK
     assert observed[0].documents_seen == 1  # 무신호 문단 관측 개수
+
+
+@pytest.mark.parametrize("fatal_error", [DartLimitReached("한도"), DartAuthenticationError("인증")])
+def test_문서조회_치명오류는_즉시_전파되어_다음_전송이_0회다(fatal_error) -> None:
+    rows = (
+        RawFilingRow("20250315000001", "사업보고서 (2025.03)", "20250315"),
+        RawFilingRow("20250815000002", "반기보고서 (2025.06)", "20250815"),
+    )
+
+    class FatalDocumentFetcher(FakeFetcher):
+        def fetch_document_text(self, rcept_no: str) -> DocumentFetchResult:
+            self.document_calls.append(rcept_no)
+            raise fatal_error
+
+    fetcher = FatalDocumentFetcher(
+        list_responses_by_pblntf_ty={"A": FilingListResult(state="OK", rows=rows)}
+    )
+
+    with pytest.raises(type(fatal_error)):
+        collect_dart_evidence(fetcher, "00126380", now=_NOW)
+
+    assert fetcher.document_calls == ["20250315000001"]
 
 
 # ══════════════════════════════════════════════════════════

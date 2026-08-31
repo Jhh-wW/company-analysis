@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
+from core.dart_client import DartAuthenticationError, DartLimitReached
 from features.evidence_collection import constants as c
 from features.evidence_collection.filing_select import (
     FilingListResult,
@@ -134,6 +137,24 @@ def test_fetcher가_예외를_던져도_FAILED로_흡수하고_죽지_않는다(
 
     assert all(a.state == c.ATTEMPT_STATE_FAILED for a in result.attempts)
     assert result.selected == ()
+
+
+@pytest.mark.parametrize("fatal_error", [DartLimitReached("한도"), DartAuthenticationError("인증")])
+def test_목록조회_치명오류는_즉시_전파되어_다음_전송이_0회다(fatal_error) -> None:
+    calls: list[str] = []
+
+    class FatalListFetcher:
+        def fetch_filing_list(self, company_id: str, pblntf_ty: str) -> FilingListResult:
+            calls.append(pblntf_ty)
+            raise fatal_error
+
+        def fetch_document_text(self, rcept_no: str):
+            raise AssertionError("목록 단계에서 중단되어야 합니다")
+
+    with pytest.raises(type(fatal_error)):
+        select_related_filings(FatalListFetcher(), "00126380")
+
+    assert calls == ["A"]
 
 
 # ══════════════════════════════════════════════════════════

@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass
 from typing import Protocol
 
+from core.dart_client import DartAuthenticationError, DartLimitReached
 from features.evidence_collection import constants as c
 from features.evidence_collection.models import CollectionAttempt
 
@@ -110,6 +111,12 @@ def _safe_fetch_list(fetcher: DartFetcher, company_id: str, pblntf_ty: str) -> F
     # 분리하는 요구사항(7번)을 지키려면 이 경계에서 반드시 잡아야 한다.
     try:
         return fetcher.fetch_filing_list(company_id, pblntf_ty)
+    except (DartLimitReached, DartAuthenticationError):
+        # 한도 소진·인증 거부는 회사 한 곳의 일시 실패가 아니다. 이를 일반
+        # FAILED로 삼키면 다음 공시종류(A→F)를 다시 호출하고, 상위 배치도
+        # 계속 진행해 같은 전역 장애를 회사마다 반복한다. 비용·운영 경계가
+        # 즉시 멈출 수 있도록 원래 예외를 보존한다.
+        raise
     except Exception:  # noqa: BLE001 - fetcher 경계 흡수(위 사유)
         return FilingListResult(state=c.ATTEMPT_STATE_FAILED)
 

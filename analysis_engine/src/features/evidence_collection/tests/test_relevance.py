@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from features.evidence_collection import constants as c
-from features.evidence_collection.relevance import score_fragment_text
+from features.evidence_collection.relevance import score_fragment_slots, score_fragment_text
 from features.evidence_collection.segment import segment_document
 from features.evidence_collection.tests.fixtures.synthetic_documents import (
     LISTED_BUSINESS_REPORT_TEXT,
@@ -57,6 +57,43 @@ def test_동점이면_수집기_1차_표적_슬롯이_이긴다() -> None:
     assert score is not None
     assert score.slot_id == "business_model:value_exchange"
     assert score.slot_id in c.COLLECTOR_SLOT_IDS
+
+
+def test_한_문단의_서로_다른_직접주장은_각_슬롯에_배정된다() -> None:
+    """한 근거를 모든 장에 복사하지 않고, 글자상 직접 확인되는 세 칸만 낸다."""
+
+    scores = score_fragment_slots(
+        "주요 매출은 제품 판매에서 발생하며 고객사에 서비스를 제공한다.",
+        section_heading="II. 사업의 내용",
+    )
+
+    slot_ids = {score.slot_id for score in scores}
+    assert {
+        "business_model:revenue_model",
+        "business_model:customer_type",
+        "business_model:value_exchange",
+    } <= slot_ids
+    assert all(score.section_id == "business_model" for score in scores)
+    assert "culture:verified_case" not in slot_ids
+
+
+def test_한_문단은_약한_우연일치로_여러_장에_복제되지_않는다() -> None:
+    scores = score_fragment_slots(
+        (
+            "최근 원자재 가격 상승이라는 위험에 대응해 공급업체 다변화 대책을 "
+            "시행했으며, 다음 점검은 2025년 하반기로 계획했다."
+        ),
+        section_heading="IV. 이사의 경영진단 및 분석의견",
+    )
+
+    assert scores
+    assert {score.section_id for score in scores} == {"current_challenges"}
+
+
+def test_실제형_공시의_각_문단도_한_장_경계_안에서만_배정된다() -> None:
+    for candidate in segment_document(LISTED_BUSINESS_REPORT_TEXT):
+        scores = score_fragment_slots(candidate.text, candidate.section_heading)
+        assert len({score.section_id for score in scores}) <= 1
 
 
 def test_강한_보조_신호는_약한_수집기_신호에_밀리지_않는다() -> None:

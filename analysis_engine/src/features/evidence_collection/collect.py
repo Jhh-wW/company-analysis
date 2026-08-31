@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import time
 
+from core.dart_client import DartAuthenticationError, DartLimitReached
 from features.evidence_collection import classify, constants as c, filing_select, relevance, segment
 from features.evidence_collection.filing_select import DartFetcher, DocumentFetchResult, SelectedFiling
 from features.evidence_collection.models import (
@@ -27,6 +28,10 @@ def _safe_fetch_document(fetcher: DartFetcher, rcept_no: str) -> DocumentFetchRe
     # 수집을 죽이지 않게 한다).
     try:
         return fetcher.fetch_document_text(rcept_no)
+    except (DartLimitReached, DartAuthenticationError):
+        # 전역 한도·인증 실패를 문서 한 건 실패로 축소하지 않는다. 호출자가
+        # 즉시 전체 실행을 멈춰 추가 DART 호출·후속 AI 비용을 막아야 한다.
+        raise
     except Exception:  # noqa: BLE001 - fetcher 경계 흡수(위 사유)
         return DocumentFetchResult(state=c.ATTEMPT_STATE_FAILED)
 
@@ -231,14 +236,18 @@ def collect_dart_evidence(
         candidates = segment.segment_document(fetch_result.text)
         classify_probe_texts.extend(candidate.text for candidate in candidates)
 
-        scored: list[tuple[segment.FragmentCandidate, relevance.SlotScore]] = []
+        scored: list[
+            tuple[segment.FragmentCandidate, tuple[relevance.SlotScore, ...]]
+        ] = []
         unscored_count = 0
         for candidate in candidates:
-            slot_score = relevance.score_fragment_text(candidate.text, candidate.section_heading)
-            if slot_score is None:
+            slot_scores = relevance.score_fragment_slots(
+                candidate.text, candidate.section_heading
+            )
+            if not slot_scores:
                 unscored_count += 1
             else:
-                scored.append((candidate, slot_score))
+                scored.append((candidate, slot_scores))
 
         if not scored:
             # 채점 가능한 근거가 하나도 없다 — 문서 자체를 최종 산출에서
@@ -253,7 +262,12 @@ def collect_dart_evidence(
             ))
             continue
 
-        usable_ranges = segment.usable_ranges_from_candidates([candidate for candidate, _ in scored])
+        # 한 문단이 여러 의미 칸을 직접 뒷받침해도 원문 구간은 문서에 한 번만
+        # 기록한다. 슬롯별 fragment는 아래에서 갈라지지만 provenance 구간을
+        # 복제해 겹치게 만들지는 않는다.
+        usable_ranges = segment.usable_ranges_from_candidates(
+            [candidate for candidate, _slot_scores in scored]
+        )
         identity_binding = _identity_binding(company_id, filing, fetch_result)
 
         try:
@@ -277,7 +291,7 @@ def collect_dart_evidence(
             new_fragments = [
                 EvidenceFragment(
                     company_id=company_id,
-                    fragment_id=f"{document_id}:frag{index}",
+                    fragment_id=f"{document_id}:frag{candidate_index}:slot{slot_index}",
                     document_id=document_id,
                     location=f"{candidate.start}-{candidate.end}",
                     text_sha256=hashlib.sha256(candidate.text.encode("utf-8")).hexdigest(),
@@ -287,7 +301,8 @@ def collect_dart_evidence(
                     score_millis=slot_score.score_millis,
                     reason_codes=slot_score.reason_codes,
                 )
-                for index, (candidate, slot_score) in enumerate(scored)
+                for candidate_index, (candidate, slot_scores) in enumerate(scored)
+                for slot_index, slot_score in enumerate(slot_scores)
             ]
         except EvidenceCollectionError:
             # 자료형 검증 실패 하나가 harvest 전체(이미 쌓인 attempts 포함)를
