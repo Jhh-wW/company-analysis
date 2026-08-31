@@ -18,10 +18,12 @@ from src.features.report_quality.dto import (
 )
 from src.features.report_quality.models import (
     QualityGrade,
+    QualityProblemCode,
     ReleaseDecision,
     VerificationState,
 )
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
+from src.shared.report_quality.generation import observe_generation
 
 
 _ITEM_WORDS = (
@@ -115,8 +117,44 @@ def test_전체40개여도_한문장인_장이_있으면_complete가_아니다()
     assert result.quality.substantive_claims == 40
     assert result.quality.one_claim_sections == ("identity",)
     assert result.quality.grade is QualityGrade.PARTIAL
+    assert QualityProblemCode.ONE_CLAIM_SECTIONS in result.quality.problem_codes
+    assert (
+        QualityProblemCode.LOW_PUBLIC_SENTENCE_COVERAGE
+        in result.quality.problem_codes
+    )
     assert result.safety.decision is ReleaseDecision.RELEASE_ALLOWED
     assert result.publication_grade is QualityGrade.PARTIAL
+
+
+def test_빈_장도_보충대상인_얇은_장으로_구조화한다() -> None:
+    counts = {section_id: 5 for section_id in REQUIRED_QUALITY_SECTION_IDS}
+    counts["identity"] = 0
+    counts["business_model"] = 10
+
+    result = assess_generation(_candidate(counts))
+
+    assert "identity" in result.quality.notice_only_sections
+    assert "identity" in result.quality.underfilled_sections
+    assert (
+        QualityProblemCode.LOW_PUBLIC_SENTENCE_COVERAGE
+        in result.quality.problem_codes
+    )
+
+
+def test_품질행동은_사람문구가_아닌_닫힌_문제코드를_받는다() -> None:
+    candidate = _candidate(one_document=True)
+    result = assess_generation(candidate)
+
+    assert result.quality.problem_codes == (
+        QualityProblemCode.TOO_FEW_DOCUMENT_SOURCES,
+    )
+    assert all(
+        isinstance(code, QualityProblemCode)
+        for code in result.quality.problem_codes
+    )
+    assert observe_generation(candidate).quality_problem_codes == (
+        QualityProblemCode.TOO_FEW_DOCUMENT_SOURCES.value,
+    )
 
 
 def test_조각8개가_같은문서면_출처는_한건으로_센다() -> None:

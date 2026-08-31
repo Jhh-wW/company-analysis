@@ -14,6 +14,7 @@ from src.shared.report_quality.models import (
     QualityAssessment,
     QualityContract,
     QualityGrade,
+    QualityProblemCode,
     ReleaseDecision,
     SafetyAssessment,
     VerificationState,
@@ -434,11 +435,14 @@ def assess_quality(
                 )
 
     shortfalls: list[str] = []
+    problem_codes: list[QualityProblemCode] = []
     if len(notice_only) > contract.max_notice_only_sections:
+        problem_codes.append(QualityProblemCode.TOO_MANY_NOTICE_ONLY_SECTIONS)
         shortfalls.append(
             f"안내문 전용 장이 {len(notice_only)}개로 허용 {contract.max_notice_only_sections}개를 넘었습니다"
         )
     if one_claim:
+        problem_codes.append(QualityProblemCode.ONE_CLAIM_SECTIONS)
         shortfalls.append(
             "실질 claim이 한 건뿐인 장이 있습니다: " + ", ".join(one_claim)
         )
@@ -448,6 +452,7 @@ def assess_quality(
         if 0 < count < contract.min_claims_per_covered_section
     ]
     if low_semantic_coverage:
+        problem_codes.append(QualityProblemCode.LOW_SEMANTIC_COVERAGE)
         shortfalls.append(
             "서로 다른 의미 claim 범주가 부족한 장이 있습니다: "
             + ", ".join(low_semantic_coverage)
@@ -455,22 +460,27 @@ def assess_quality(
     low_coverage = [
         section_id
         for section_id, count in public_sentence_counts
-        if 0 < count < contract.min_claims_per_covered_section
+        if count < contract.min_claims_per_covered_section
     ]
+    if low_coverage:
+        problem_codes.append(QualityProblemCode.LOW_PUBLIC_SENTENCE_COVERAGE)
     if low_coverage and not one_claim:
         shortfalls.append(
             "장별 최소 claim coverage를 충족하지 못했습니다: "
             + ", ".join(low_coverage)
         )
     if substantive < contract.min_substantive_claims:
+        problem_codes.append(QualityProblemCode.TOO_FEW_SUBSTANTIVE_CLAIMS)
         shortfalls.append(
             f"실질 claim이 {substantive}건으로 하한 {contract.min_substantive_claims}건보다 적습니다"
         )
     if ratio < contract.min_verified_ratio:
+        problem_codes.append(QualityProblemCode.LOW_VERIFIED_RATIO)
         shortfalls.append(
             f"검증 claim 비율이 {ratio:.2%}로 하한 {contract.min_verified_ratio:.0%}보다 낮습니다"
         )
     if len(document_evidence_keys) < contract.min_document_sources:
+        problem_codes.append(QualityProblemCode.TOO_FEW_DOCUMENT_SOURCES)
         shortfalls.append(
             f"독립 문서 출처가 {len(document_evidence_keys)}건으로 하한 {contract.min_document_sources}건보다 적습니다"
         )
@@ -495,6 +505,7 @@ def assess_quality(
         shortfall_reasons=tuple(shortfalls),
         section_public_sentence_counts=tuple(public_sentence_counts),
         underfilled_sections=tuple(low_coverage),
+        problem_codes=tuple(dict.fromkeys(problem_codes)),
     )
 
 

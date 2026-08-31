@@ -21,6 +21,18 @@ class QualityGrade(str, Enum):
     INCOMPLETE = "미완성"
 
 
+class QualityProblemCode(str, Enum):
+    """사람 문구를 다시 읽지 않고 회복 가능성을 판단하는 닫힌 코드."""
+
+    TOO_MANY_NOTICE_ONLY_SECTIONS = "too_many_notice_only_sections"
+    ONE_CLAIM_SECTIONS = "one_claim_sections"
+    LOW_SEMANTIC_COVERAGE = "low_semantic_coverage"
+    LOW_PUBLIC_SENTENCE_COVERAGE = "low_public_sentence_coverage"
+    TOO_FEW_SUBSTANTIVE_CLAIMS = "too_few_substantive_claims"
+    LOW_VERIFIED_RATIO = "low_verified_ratio"
+    TOO_FEW_DOCUMENT_SOURCES = "too_few_document_sources"
+
+
 class ContractUse(str, Enum):
     """같은 버전을 새 생성과 과거 조회에 섞지 않기 위한 호출 목적."""
 
@@ -93,6 +105,9 @@ class QualityAssessment:
     # 원자 fact 수(``section_claim_counts``)와 섞지 않는다.
     section_public_sentence_counts: tuple[tuple[str, int], ...] = ()
     underfilled_sections: tuple[str, ...] = ()
+    # 회복·출고 상태기계는 사람이 읽는 ``shortfall_reasons`` 문자열을 해석하지
+    # 않고 이 닫힌 코드만 읽는다. 문구가 바뀌어도 행동이 달라지지 않는다.
+    problem_codes: tuple[QualityProblemCode, ...] = ()
 
 
 @dataclass(frozen=True)
