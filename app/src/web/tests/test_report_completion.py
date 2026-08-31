@@ -7,12 +7,19 @@ from types import SimpleNamespace
 import pytest
 
 from src.features.cost_tracking import store as cost_store
+from src.features.export_pdf.automatic_release import report_sha256
+from src.features.export_pdf import release_store as pdf_release_store
+from src.features.pipeline.demo import DemoPipeline, available_companies
+from src.features.pipeline.port import Outcome, UserInput
 from src.features.report_delivery import authority as authority_store
+from src.features.storage import constants as storage_constants
+from src.features.storage import db as storage_db
 from src.shared.automatic_release_record import (
     AutomaticCheckResult,
     AutomaticReleaseRecord,
 )
 from src.web import report_completion
+from src.web.routers import reports as reports_router
 
 
 def _digest(character: str) -> str:
@@ -121,7 +128,7 @@ def _install_exact_loaders(monkeypatch, authority, *, charge=None):
     )
     monkeypatch.setattr(
         report_completion.pdf_release_store,
-        "load_automatic_release_record",
+        "load_automatic_release_record_by_digest",
         lambda _conn, **_kwargs: automatic,
     )
     monkeypatch.setattr(
@@ -343,3 +350,83 @@ def test_stage가_권위를_반환해도_commit전_검증실패는_복구하지_
         report_completion.commit_report_completion(lambda _conn: authority)
     assert readback_called is False
     assert write_conn.commits == 1
+
+
+def test_실제DB의_저장JSON지문과_자동검사지문이_달라도_완료영수증을_복구한다(
+    monkeypatch,
+    tmp_path,
+):
+    db_path = tmp_path / "completion.db"
+    monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(db_path))
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "artifacts"))
+    pipeline = DemoPipeline()
+    sample = next(item for item in available_companies() if item["is_report"])
+    user_input = UserInput(
+        company=sample["company"],
+        job=sample["job"],
+        region="",
+        posting_text="",
+    )
+    result = pipeline.run(user_input, pipeline.find_company(user_input))
+    assert result.outcome is Outcome.REPORT and result.report is not None
+
+    delivered = reports_router.finalize_new_report_delivery(
+        report_id="real-completion",
+        corp_id="00123456",
+        billing_bucket_id="bucket-real",
+        report=result.report,
+        actual_models=("deterministic-demo",),
+        reused_from_cache=False,
+    )
+    artifact = delivered.artifact
+    assert artifact is not None and artifact.blob_pointer is not None
+
+    with storage_db.connect() as conn:
+        automatic = pdf_release_store.load_automatic_release_record(
+            conn,
+            report_id="real-completion",
+            report_sha256=report_sha256(delivered.report),
+            pdf_sha256=artifact.blob_pointer.sha256,
+            checker_version=artifact.version.checker_version,
+        )
+        assert automatic is not None
+        # 두 저장소의 목적이 달라 공백 규칙도 다르다. 같다고 가정하면 정상 출고가
+        # commit 응답유실 복구에서 거절되는 회귀를 이 실제 DB 시험이 잡는다.
+        assert delivered.content.payload_sha256 != automatic.report_sha256
+        charge = cost_store.load_automatic_release_charge(
+            conn,
+            run_id="real-completion",
+            automatic_release_sha256=automatic.record_sha256,
+        )
+        assert charge is not None
+        authority = authority_store.ReleaseAuthority.issue_owner(
+            public_id="real-completion",
+            delivery_id=delivered.delivery.delivery_id,
+            company_id="00123456",
+            billing_bucket_id="bucket-real",
+            content_snapshot_id=delivered.content.content_id,
+            artifact_id=artifact.artifact_id,
+            report_payload_sha256=delivered.content.payload_sha256,
+            producer_evidence_sha256=_digest("3"),
+            assessment_sha256=_digest("4"),
+            public_content_sha256=_digest("5"),
+            public_manifest_sha256=_digest("6"),
+            evidence_generation_sha256=_digest("7"),
+            build_identity_sha256=_digest("8"),
+            automatic_release_sha256=automatic.record_sha256,
+            charge_run_id="real-completion",
+            charge_decision_sha256=cost_store.charge_decision_sha256(
+                run_id="real-completion",
+                automatic_release_sha256=automatic.record_sha256,
+                decision=charge,
+            ),
+            issued_at=delivered.delivery.delivered_at,
+        )
+        authority_store.save_release_authority(conn, authority)
+
+    with storage_db.connect_readonly_existing() as conn:
+        assert conn is not None
+        receipt = report_completion.assert_exact_report_completion(conn, authority)
+    assert receipt.authority == authority
+    assert receipt.automatic_release == automatic
+    assert receipt.charge == charge

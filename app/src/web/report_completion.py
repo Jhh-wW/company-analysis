@@ -90,16 +90,16 @@ def assert_exact_report_completion(
         or artifact.blob_pointer is None
     ):
         raise ReportCompletionError("최초 PDF 원본이 출고 권위와 결속되지 않았습니다")
-    automatic_release = pdf_release_store.load_automatic_release_record(
+    automatic_release = pdf_release_store.load_automatic_release_record_by_digest(
         conn,
         report_id=expected.public_id,
-        report_sha256=expected.report_payload_sha256,
-        pdf_sha256=artifact.blob_pointer.sha256,
-        checker_version=artifact.version.checker_version,
+        release_sha256=expected.automatic_release_sha256,
     )
     if (
         automatic_release is None
         or automatic_release.record_sha256 != expected.automatic_release_sha256
+        or automatic_release.pdf_sha256 != artifact.blob_pointer.sha256
+        or automatic_release.checker_version != artifact.version.checker_version
     ):
         raise ReportCompletionError("자동승인 기록이 출고 권위와 다릅니다")
 

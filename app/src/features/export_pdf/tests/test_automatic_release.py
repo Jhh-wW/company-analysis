@@ -147,6 +147,38 @@ def test_복구용_전수검증은_정상_자동출고_정본을_읽는다():
         conn.close()
 
 
+def test_출고권위는_저장본문_지문을_추측하지_않고_자동승인_지문으로_정본을_읽는다():
+    report = _report()
+    candidate = prepare_pdf_release(report)
+    released = automatic_release_pdf(report, candidate, released_at=_AT)
+    conn = _conn()
+    try:
+        stored = release_store.save_automatic_release(
+            conn,
+            report_id="authority-digest-readback",
+            released_pdf=released,
+        )
+
+        assert (
+            release_store.load_automatic_release_record_by_digest(
+                conn,
+                report_id="authority-digest-readback",
+                release_sha256=stored.record_sha256,
+            )
+            == stored
+        )
+        assert (
+            release_store.load_automatic_release_record_by_digest(
+                conn,
+                report_id="authority-digest-readback",
+                release_sha256="f" * 64,
+            )
+            is None
+        )
+    finally:
+        conn.close()
+
+
 def test_같은_report_hash여도_검수뒤_PDF_bytes가_바뀌면_기존자동출고를_덮어쓰지않는다():
     report = _report()
     candidate = prepare_pdf_release(report)

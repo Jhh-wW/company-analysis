@@ -1072,6 +1072,51 @@ def load_automatic_release_record(
     return record
 
 
+def load_automatic_release_record_by_digest(
+    conn: sqlite3.Connection,
+    *,
+    report_id: str,
+    release_sha256: str,
+) -> AutomaticReleaseRecord | None:
+    """출고 권위가 보관한 자동승인 지문으로 정확한 정본 한 건을 읽는다.
+
+    본문 snapshot은 실제 저장 JSON bytes를, 자동검사는 공백 없는 canonical JSON을
+    해시하므로 두 ``report_sha256``은 같다고 가정할 수 없다. 권위가 직접 결속한
+    ``release_sha256``으로 행을 찾은 뒤 기존 정본 검증기를 다시 통과시킨다.
+    """
+
+    clean_report_id = report_id if type(report_id) is str else ""
+    if not clean_report_id or clean_report_id != clean_report_id.strip():
+        raise PdfReleaseStoreError("자동출고 보고서 식별자가 올바르지 않습니다")
+    if not is_valid_sha256(release_sha256):
+        raise PdfReleaseStoreError("자동출고 기록 지문이 올바르지 않습니다")
+    _ensure_schema(conn)
+    rows = conn.execute(
+        f"""
+        SELECT report_sha256, pdf_sha256, checker_version
+          FROM {AUTOMATIC_TABLE_NAME}
+         WHERE report_id=? AND release_sha256=?
+         ORDER BY report_sha256, pdf_sha256, checker_version
+        """,
+        (clean_report_id, release_sha256),
+    ).fetchall()
+    if not rows:
+        return None
+    if len(rows) != 1 or any(type(value) is not str for value in rows[0]):
+        raise PdfReleaseStoreError("자동출고 기록 지문이 한 정본을 가리키지 않습니다")
+    report_sha256, pdf_sha256, checker_version = rows[0]
+    record = load_automatic_release_record(
+        conn,
+        report_id=clean_report_id,
+        report_sha256=report_sha256,
+        pdf_sha256=pdf_sha256,
+        checker_version=checker_version,
+    )
+    if record is None or record.record_sha256 != release_sha256:
+        raise PdfReleaseStoreError("자동출고 기록 지문과 정본이 일치하지 않습니다")
+    return record
+
+
 def save_automatic_release(
     conn: sqlite3.Connection,
     *,
