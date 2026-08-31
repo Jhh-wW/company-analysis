@@ -8,10 +8,13 @@ IR PDF 위임은 이미 `test_ir_pdf.py`가 그 내부 로직을 검증하므로
 
 from __future__ import annotations
 
+import urllib.parse
+
 import pytest
 
 from src.features.homepage import wide_collect
 from src.features.homepage.constants import (
+    WIDE_MAX_HOSTS,
     WIDE_MAX_PAGES,
     WIDE_MAX_SITEMAP_ENTRIES,
     WIDE_REQUIRED_SLOT_IDS,
@@ -307,6 +310,176 @@ def test_도메인군_밖으로의_리다이렉트는_차단된다():
 
     assert not any("evil.example" in doc.canonical_url for doc in result.documents)
     assert not any("evil.example" in doc.publisher for doc in result.documents)
+
+
+def test_DART_공유호스트의_port와_회사경로를_버리지_않는다():
+    base = "https://sites.example.com:8443"
+    pages = {
+        f"{base}/robots.txt": _page(ROBOTS_ALLOW_ALL, f"{base}/robots.txt", "text/plain"),
+        f"{base}/sitemap.xml": _missing(f"{base}/sitemap.xml"),
+        f"{base}/acme": _page(
+            _body("에이씨미 회사 사업 소개")
+            + '<a href="/acme/products">제품</a><a href="/other">다른 입주자</a>',
+            f"{base}/acme",
+        ),
+        f"{base}/acme/products": _page(_body("에이씨미 제품과 고객"), f"{base}/acme/products"),
+        f"{base}/other": _page(_body("다른 회사 본문"), f"{base}/other"),
+    }
+    site = _FakeWideSite(pages)
+    ir_calls: list[str] = []
+
+    def ir_html(url, *_args, **_kwargs):
+        ir_calls.append(url)
+        raise AssertionError("비기본 port를 HTTPS:443으로 바꿔 IR 호출하면 안 됩니다")
+
+    result = _collect(
+        site,
+        root_homepage_url=f"{base}/acme",
+        ir_html_fetch=ir_html,
+    )
+
+    assert f"{base}/acme" in site.calls
+    assert f"{base}/" not in site.calls
+    assert f"{base}/other" not in site.calls
+    assert f"{base}/acme/products" in site.calls
+    assert not any("www.sites.example.com" in url for url in site.calls)
+    assert ir_calls == []
+    assert {document.canonical_url for document in result.documents} == {
+        f"{base}/acme",
+        f"{base}/acme/products",
+    }
+
+
+def test_같은_host라도_scheme_port_path가_바뀐_redirect는_차단된다():
+    base = "https://company.example"
+    pages = {
+        f"{base}/robots.txt": _page(ROBOTS_ALLOW_ALL, f"{base}/robots.txt", "text/plain"),
+        f"{base}/sitemap.xml": _missing(f"{base}/sitemap.xml"),
+        f"{base}/tenant": _page(
+            _body("대상 회사 본문") + '<a href="/tenant/redir">이동</a>',
+            f"{base}/tenant",
+        ),
+        f"{base}/tenant/redir": _page(
+            _body("경계 밖 본문"), "http://company.example:8080/other"
+        ),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(site, root_homepage_url=f"{base}/tenant", company_name="")
+
+    assert f"{base}/tenant/redir" in site.calls
+    assert all(document.canonical_url != "http://company.example:8080/other" for document in result.documents)
+
+
+def test_IR_HTML도_DART_회사경로_밖은_delegate를_호출하지_않는다():
+    from src.features.homepage.ir_pdf import FetchedIrHtml
+
+    base = "https://sites.example.com"
+    pages = {
+        f"{base}/robots.txt": _page(ROBOTS_ALLOW_ALL, f"{base}/robots.txt", "text/plain"),
+        f"{base}/sitemap.xml": _missing(f"{base}/sitemap.xml"),
+        f"{base}/tenant": _page(_body("대상 회사 소개"), f"{base}/tenant"),
+    }
+    site = _FakeWideSite(pages)
+    ir_calls: list[str] = []
+
+    def ir_html(url, _expected_hostname, _url_allowed):
+        ir_calls.append(url)
+        if url.endswith("/robots.txt"):
+            return FetchedIrHtml(ROBOTS_ALLOW_ALL, url)
+        if url == f"{base}/tenant":
+            return FetchedIrHtml(
+                '<html><body><a href="/other/investors">IR 자료</a></body></html>',
+                url,
+            )
+        raise AssertionError("회사 경로 밖 IR HTML은 delegate 전에 막혀야 합니다")
+
+    result = _collect(
+        site,
+        root_homepage_url=f"{base}/tenant",
+        ir_html_fetch=ir_html,
+    )
+
+    assert ir_calls == [f"{base}/robots.txt", f"{base}/tenant"]
+    assert all("/other/" not in document.canonical_url for document in result.documents)
+
+
+def test_IR_PDF_redirect도_DART_회사경로_밖을_허용하지_않는다():
+    from src.features.homepage.ir_pdf import FetchedIrHtml, FetchedIrPdf
+
+    base = "https://sites.example.com"
+    pages = {
+        f"{base}/robots.txt": _page(ROBOTS_ALLOW_ALL, f"{base}/robots.txt", "text/plain"),
+        f"{base}/sitemap.xml": _missing(f"{base}/sitemap.xml"),
+        f"{base}/tenant": _page(_body("대상 회사 소개"), f"{base}/tenant"),
+    }
+    site = _FakeWideSite(pages)
+    pdf_calls: list[str] = []
+    outside_url = f"{base}/other/report.pdf"
+
+    def ir_html(url, _expected_hostname, _url_allowed):
+        if url.endswith("/robots.txt"):
+            return FetchedIrHtml(ROBOTS_ALLOW_ALL, url)
+        return FetchedIrHtml(
+            '<html><body><a href="/tenant/report.pdf">2025 IR 보고서</a></body></html>',
+            url,
+        )
+
+    def ir_pdf(url, _expected_hostname, _max_bytes, url_allowed):
+        pdf_calls.append(url)
+        assert url_allowed(url)
+        assert not url_allowed(outside_url)
+        return FetchedIrPdf(b"not-used", outside_url, "application/pdf")
+
+    result = _collect(
+        site,
+        root_homepage_url=f"{base}/tenant",
+        ir_html_fetch=ir_html,
+        ir_pdf_fetch=ir_pdf,
+    )
+
+    assert pdf_calls == [f"{base}/tenant/report.pdf"]
+    assert all("/other/" not in document.canonical_url for document in result.documents)
+
+
+def test_같은_등록도메인_하위host도_WIDE_MAX_HOSTS를_넘어_조회하지_않는다():
+    links = "".join(
+        f'<a href="https://h{index}.company.example/about">하위 {index}</a>'
+        for index in range(WIDE_MAX_HOSTS + 4)
+    )
+    pages = {
+        "https://company.example/robots.txt": _page(
+            ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"
+        ),
+        "https://company.example/sitemap.xml": _missing(
+            "https://company.example/sitemap.xml"
+        ),
+        "https://company.example/": _page(_body("회사 소개") + links, "https://company.example/"),
+        "https://www.company.example/robots.txt": _missing(
+            "https://www.company.example/robots.txt"
+        ),
+        "https://www.company.example/sitemap.xml": _missing(
+            "https://www.company.example/sitemap.xml"
+        ),
+        "https://www.company.example/": _missing("https://www.company.example/"),
+    }
+    for index in range(WIDE_MAX_HOSTS + 4):
+        host = f"h{index}.company.example"
+        pages[f"https://{host}/robots.txt"] = _page(
+            ROBOTS_ALLOW_ALL, f"https://{host}/robots.txt", "text/plain"
+        )
+        pages[f"https://{host}/sitemap.xml"] = _missing(f"https://{host}/sitemap.xml")
+        pages[f"https://{host}/about"] = _page(_body(f"하위 {index} 회사 소개"), f"https://{host}/about")
+    site = _FakeWideSite(pages)
+
+    _collect(site, company_name="")
+
+    robots_hosts = {
+        urllib.parse.urlsplit(url).hostname
+        for url in site.calls
+        if url.endswith("/robots.txt")
+    }
+    assert len(robots_hosts) == WIDE_MAX_HOSTS
 
 
 def test_소셜_링크는_결속되지_않는다():

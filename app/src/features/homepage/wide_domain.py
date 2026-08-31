@@ -1,7 +1,7 @@
 """공식 도메인군 계산 — «어느 호스트를 결속 근거와 함께 수집할지» 판정.
 
-★ ① 같은 등록 도메인(예: ``x.com``)의 하위 도메인(``recruit.x.com``·``ir.x.com``)은
-  자동으로 도메인군에 든다.
+★ ① DART root가 회사 전용 등록 도메인(예: ``x.com``·``www.x.com``)일 때만
+  그 하위 도메인(``recruit.x.com``·``ir.x.com``)을 자동으로 도메인군에 넣는다.
 ★ ② 공식 페이지 안에서 «명시적으로 링크된» 다른 호스트는 «후보»로만 들어온다.
   결속 근거(어느 공식 페이지의 어느 링크에서 발견됐는지)가 없는 호스트는
   절대 수집하지 않는다. 이 모듈은 등급을 매길 뿐 «공식 확정»을 선언하지
@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import posixpath
 import urllib.parse
 from dataclasses import dataclass
 
@@ -40,6 +41,189 @@ _SINGLE_LABEL_SUFFIXES_FOR_MATCHING: frozenset[str] = (
 #: 있어(예: company.example) 호스트 전체 문자열 대조에 넣지 않는다 — 이미
 #: `constants.py`의 PRIORITY_PATH_KEYWORDS 주석에 실측으로 남긴 함정과 같다.
 _HOST_SAFE_KEYWORDS: frozenset[str] = frozenset(WIDE_PRIORITY_HOST_KEYWORDS)
+
+_DEFAULT_PORT_BY_SCHEME = {"http": 80, "https": 443}
+_ALLOWED_WEB_PORTS = frozenset({80, 443, 8080, 8443})
+
+
+def _normalized_path(raw_path: str) -> str:
+    """URL 경로를 prefix 비교에 쓸 한 가지 절대경로 모양으로 만든다."""
+
+    decoded = urllib.parse.unquote(raw_path or "/")
+    if "\\" in decoded or any(ord(character) < 32 for character in decoded):
+        raise ValueError("공식 홈페이지 경로가 안전하지 않습니다")
+    normalized = posixpath.normpath("/" + decoded.lstrip("/"))
+    if decoded.endswith("/") and normalized != "/":
+        normalized += "/"
+    return urllib.parse.quote(normalized, safe="/%:@!$&'()*+,;=-._~")
+
+
+_KNOWN_PAGE_SUFFIXES = (".html", ".htm", ".php", ".asp", ".aspx", ".jsp", ".do")
+
+
+def _path_prefix(start_path: str, host: str) -> str:
+    if start_path == "/" or start_path.endswith("/"):
+        return start_path
+    last_segment = start_path.rsplit("/", 1)[-1]
+    if last_segment.casefold().endswith(_KNOWN_PAGE_SUFFIXES):
+        parent = start_path.rsplit("/", 1)[0]
+        parent_prefix = f"{parent}/" if parent else "/"
+        core = registrable_core_name(host)
+        dedicated_root = host in (core, f"www.{core}") if core else False
+        # 공유 host의 루트 파일(/acme.html)은 부모 /로 넓히면 다른 입주자까지
+        # 허용한다. 하위 디렉터리(/acme/index.html)는 /acme/까지만 허용한다.
+        if parent_prefix == "/" and not dedicated_root:
+            return f"{start_path}/"
+        return parent_prefix
+    return f"{start_path}/"
+
+
+@dataclass(frozen=True)
+class OfficialOrigin:
+    """DART 공식 주소의 origin과 회사 소유 경로를 함께 봉인한 값.
+
+    hostname만 보존하면 ``https://shared.example/acme``가
+    ``https://shared.example/``로 바뀌어 다른 입주자 자료를 자사 공식자료로
+    승격할 수 있다. 이 값은 scheme·host·effective port와 DART 시작 경로를
+    끝까지 함께 들고 다니며, 본문 redirect가 그 경계를 벗어나면 거절한다.
+    """
+
+    scheme: str
+    host: str
+    port: int
+    start_path: str
+    path_prefix: str
+    start_query: str = ""
+
+    @property
+    def authority(self) -> str:
+        default_port = _DEFAULT_PORT_BY_SCHEME[self.scheme]
+        display_host = f"[{self.host}]" if ":" in self.host else self.host
+        return display_host if self.port == default_port else f"{display_host}:{self.port}"
+
+    @property
+    def key(self) -> str:
+        return f"{self.scheme}://{self.host}:{self.port}{self.path_prefix}"
+
+    @property
+    def root_url(self) -> str:
+        return urllib.parse.urlunsplit(
+            (self.scheme, self.authority, self.start_path, self.start_query, "")
+        )
+
+    @property
+    def robots_url(self) -> str:
+        return urllib.parse.urlunsplit(
+            (self.scheme, self.authority, "/robots.txt", "", "")
+        )
+
+    @property
+    def sitemap_url(self) -> str:
+        return urllib.parse.urlunsplit(
+            (self.scheme, self.authority, "/sitemap.xml", "", "")
+        )
+
+    def _parsed_same_origin(self, value: str) -> urllib.parse.SplitResult | None:
+        try:
+            parsed = urllib.parse.urlsplit(value)
+            host = (parsed.hostname or "").rstrip(".").encode("idna").decode("ascii").casefold()
+            port = (
+                parsed.port
+                if parsed.port is not None
+                else _DEFAULT_PORT_BY_SCHEME.get(parsed.scheme.casefold())
+            )
+        except (TypeError, ValueError, UnicodeError):
+            return None
+        if (
+            parsed.scheme.casefold() != self.scheme
+            or host != self.host
+            or port != self.port
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            return None
+        return parsed
+
+    def allows_content_url(self, value: str) -> bool:
+        parsed = self._parsed_same_origin(value)
+        if parsed is None:
+            return False
+        try:
+            path = _normalized_path(parsed.path)
+        except ValueError:
+            return False
+        if path == self.start_path:
+            return True
+        # 공유 host의 루트 파일은 디렉터리가 아니다. ``/acme.html/other``를
+        # 자손 경로로 인정하면 일부 서버의 path-info 처리에서 다른 콘텐츠로
+        # 넓어질 수 있으므로 정확히 그 파일 하나만 허용한다.
+        exact_file_scope = (
+            self.path_prefix == f"{self.start_path}/"
+            and self.start_path.casefold().endswith(_KNOWN_PAGE_SUFFIXES)
+        )
+        return not exact_file_scope and path.startswith(self.path_prefix)
+
+    def allows_infrastructure_url(self, value: str) -> bool:
+        parsed = self._parsed_same_origin(value)
+        if parsed is None:
+            return False
+        try:
+            path = _normalized_path(parsed.path)
+        except ValueError:
+            return False
+        return path in ("/robots.txt", "/sitemap.xml")
+
+    def with_host(self, host: str) -> "OfficialOrigin":
+        normalized_host = host.rstrip(".").encode("idna").decode("ascii").casefold()
+        return OfficialOrigin(
+            scheme=self.scheme,
+            host=normalized_host,
+            port=self.port,
+            start_path=self.start_path,
+            path_prefix=self.path_prefix,
+            start_query=self.start_query,
+        )
+
+
+def parse_official_origin(raw: str) -> OfficialOrigin | None:
+    """DART URL을 회사 소유 origin+경로로 정규화한다. 추측 불가면 None."""
+
+    candidate = str(raw or "").strip()
+    if not candidate:
+        return None
+    if candidate.startswith("//"):
+        candidate = f"https:{candidate}"
+    if "://" not in candidate:
+        candidate = f"https://{candidate}"
+    try:
+        parsed = urllib.parse.urlsplit(candidate)
+        scheme = parsed.scheme.casefold()
+        host = (parsed.hostname or "").rstrip(".").encode("idna").decode("ascii").casefold()
+        port = (
+            parsed.port
+            if parsed.port is not None
+            else _DEFAULT_PORT_BY_SCHEME.get(scheme)
+        )
+        start_path = _normalized_path(parsed.path)
+    except (TypeError, ValueError, UnicodeError):
+        return None
+    if (
+        scheme not in _DEFAULT_PORT_BY_SCHEME
+        or not host
+        or port not in _ALLOWED_WEB_PORTS
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    query = urllib.parse.quote(parsed.query, safe="/%?:@!$&'()*+,;=-._~")
+    return OfficialOrigin(
+        scheme=scheme,
+        host=host,
+        port=int(port),
+        start_path=start_path,
+        path_prefix=_path_prefix(start_path, host),
+        start_query=query,
+    )
 
 
 def registrable_core_name(host: str) -> str:
@@ -118,7 +302,19 @@ def bind_root_host(root_host: str) -> BoundHost:
 
 
 def bind_registered_subdomain(root_host: str, candidate_host: str) -> BoundHost | None:
-    """candidate_host가 root_host와 같은 등록 도메인이면 자동 결속한다."""
+    """회사 전용 registrable root에서만 같은 도메인 하위호스트를 자동 결속한다.
+
+    ``sites.google.com/acme``처럼 DART 주소 자체가 공유 플랫폼 하위호스트인
+    경우, ``drive.google.com``까지 같은 google.com이라는 이유로 회사
+    공식 REQUIRED가 되어서는 안 된다. root가 eTLD+1 자체 또는 정확한 www
+    짝일 때만 회사가 그 등록 도메인을 소유한다고 볼 수 있다. 그 밖의 링크는
+    ``bind_linked_host``의 OPTIONAL 후보 경로를 거친다.
+    """
+
+    normalized_root = (root_host or "").casefold().rstrip(".")
+    root_core = registrable_core_name(normalized_root)
+    if not root_core or normalized_root not in (root_core, f"www.{root_core}"):
+        return None
     if not is_registered_subdomain(root_host, candidate_host):
         return None
     return BoundHost(
@@ -148,9 +344,16 @@ def www_apex_alternate(host: str) -> str | None:
     normalized = (host or "").lower().rstrip(".")
     if not normalized:
         return None
-    if normalized.startswith("www."):
-        return normalized[len("www.") :]
-    return f"www.{normalized}"
+    core = registrable_core_name(normalized)
+    if not core:
+        return None
+    if normalized == core:
+        return f"www.{core}"
+    if normalized == f"www.{core}":
+        return core
+    # recruit.company.com → www.recruit.company.com 같은 것은 apex/www 짝이
+    # 아니다. DART가 준 임의 하위도메인을 고신뢰 후보로 자동 확장하지 않는다.
+    return None
 
 
 def bind_www_apex_alternate(root_host: str) -> BoundHost | None:

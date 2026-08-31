@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.features.homepage.wide_domain import (
     bind_linked_host,
     bind_registered_subdomain,
@@ -9,6 +11,7 @@ from src.features.homepage.wide_domain import (
     canonicalize_url,
     is_excluded_linked_host,
     is_registered_subdomain,
+    parse_official_origin,
     registrable_core_name,
     slot_ids_for_url,
     www_apex_alternate,
@@ -138,6 +141,11 @@ def test_다른_등록도메인은_결속되지_않는다():
     assert bind_registered_subdomain("company.com", "otherbrand.com") is None
 
 
+def test_공유플랫폼_하위host는_같은_eTLD의_다른host를_회사소유로_승격하지_않는다():
+    assert bind_registered_subdomain("sites.google.com", "drive.google.com") is None
+    assert bind_registered_subdomain("blog.naver.com", "news.naver.com") is None
+
+
 # ── APEX-WWW-OFFICIAL-ROOT-GAP(통합 담당 지시, 2026-08-31) ────────
 
 
@@ -171,6 +179,78 @@ def test_bind_www_apex_alternate은_공개접미사_밖_TLD면_None():
     apex/www 짝도 만들지 않는다(등록 도메인 전체를 폭넓게 허용하지 않는다는
     원칙과 같은 맥락)."""
     assert bind_www_apex_alternate("company.zzzunknowntld") is None
+
+
+def test_www_apex는_등록도메인_루트와_정확한_www에만_허용된다():
+    assert www_apex_alternate("company.com") == "www.company.com"
+    assert www_apex_alternate("www.company.com") == "company.com"
+    assert www_apex_alternate("recruit.company.com") is None
+    assert bind_www_apex_alternate("recruit.company.com") is None
+
+
+def test_official_origin은_DART_scheme_port_path를_끝까지_보존한다():
+    origin = parse_official_origin("https://sites.example.com:8443/acme?lang=ko")
+
+    assert origin is not None
+    assert origin.root_url == "https://sites.example.com:8443/acme?lang=ko"
+    assert origin.robots_url == "https://sites.example.com:8443/robots.txt"
+    assert origin.sitemap_url == "https://sites.example.com:8443/sitemap.xml"
+    assert origin.allows_content_url("https://sites.example.com:8443/acme")
+    assert origin.allows_content_url("https://sites.example.com:8443/acme/products")
+    assert not origin.allows_content_url("https://sites.example.com:8443/other")
+    assert not origin.allows_content_url("http://sites.example.com:8080/acme")
+
+
+def test_official_origin은_0번_port를_기본_port로_둔갑시키지_않는다():
+    assert parse_official_origin("https://company.example:0/tenant") is None
+
+    origin = parse_official_origin("https://company.example/tenant")
+
+    assert origin is not None
+    assert not origin.allows_content_url("https://company.example:0/tenant")
+
+
+def test_공유host의_루트_파일은_host_전체로_권한을_넓히지_않는다():
+    origin = parse_official_origin("https://sites.example.com/acme.html")
+
+    assert origin is not None
+    assert origin.allows_content_url("https://sites.example.com/acme.html")
+    assert not origin.allows_content_url("https://sites.example.com/acme.html/other")
+    assert not origin.allows_content_url("https://sites.example.com/other.html")
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_reason"),
+    [
+        (404, "sitemap_missing_404"),
+        (410, "sitemap_missing_410"),
+        (407, "sitemap_denied_407"),
+        (408, "sitemap_transient_408"),
+        (409, "sitemap_transient_409"),
+        (429, "sitemap_transient_429"),
+        (500, "sitemap_failed_500"),
+    ],
+)
+def test_sitemap은_404_410만_missing이고_권한_일시장애_서버오류를_분리한다(
+    status, expected_reason
+):
+    response = WideRawResponse(
+        status=status,
+        text="",
+        effective_url="https://company.example/sitemap.xml",
+        content_type="",
+    )
+
+    text, reason = fetch_sitemap(
+        scheme="https",
+        host="company.example",
+        fetch=lambda _url, _allowed: response,
+        robots=_allow_all_robots_policy(),
+        max_bytes=1024,
+    )
+
+    assert text == ""
+    assert reason == expected_reason
 
 
 def test_소셜호스트는_링크_후보_결속에서_제외된다():

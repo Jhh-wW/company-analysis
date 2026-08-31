@@ -284,17 +284,19 @@ class WideRobotsPolicy:
 
 def load_robots_policy(
     *,
-    scheme: str,
+    robots_url: str,
     host: str,
     fetch: RawWideTransport,
+    url_allowed: UrlAllowPredicate,
 ) -> WideRobotsPolicy:
     """robots.txt를 fail-closed로 한 번 확인한다. 본문 조회보다 항상 먼저 부른다."""
 
-    robots_url = f"{scheme}://{host}/robots.txt"
     response: WideRawResponse | None = None
     error: WideTransportError | None = None
     try:
-        response = fetch(robots_url, None)
+        # robots 부트스트랩도 redirect가 공식 origin을 벗어나면 안 된다. 규칙
+        # 본문을 아직 못 읽었으므로 robots 경로 자체의 origin predicate만 쓴다.
+        response = fetch(robots_url, url_allowed)
     except WideTransportError as exc:
         error = exc
     outcome, reason_code = robots_decision(response, error)
@@ -311,26 +313,39 @@ def load_robots_policy(
 
 def fetch_sitemap(
     *,
-    scheme: str,
-    host: str,
     fetch: RawWideTransport,
     robots: WideRobotsPolicy,
     max_bytes: int,
+    sitemap_url: str = "",
+    url_allowed: UrlAllowPredicate | None = None,
+    scheme: str = "",
+    host: str = "",
 ) -> tuple[str, str]:
     """sitemap.xml 원문을 읽는다. robots가 막았거나 못 받으면 빈 문자열.
 
     Returns:
         (원문, reason_code). 원문이 빈 문자열이면 sitemap이 없거나 실패한 것.
     """
-    sitemap_url = f"{scheme}://{host}/sitemap.xml"
-    if not robots.can_fetch(sitemap_url):
+    if not sitemap_url:
+        sitemap_url = f"{scheme}://{host}/sitemap.xml"
+
+    def allowed(candidate: str) -> bool:
+        return (url_allowed is None or url_allowed(candidate)) and robots.can_fetch(candidate)
+
+    if not allowed(sitemap_url):
         return "", "robots_disallowed"
     try:
-        response = fetch(sitemap_url, robots.can_fetch)
+        response = fetch(sitemap_url, allowed)
     except WideTransportError:
         return "", "sitemap_failed"
-    if response.status != 200:
+    if response.status in (404, 410):
         return "", f"sitemap_missing_{response.status}"
+    if response.status in (401, 403, 407):
+        return "", f"sitemap_denied_{response.status}"
+    if response.status in (408, 409, 429):
+        return "", f"sitemap_transient_{response.status}"
+    if response.status != 200:
+        return "", f"sitemap_failed_{response.status}"
     text = _truncate_utf8_bytes(response.text, max_bytes)
     return text, "sitemap_ok"
 

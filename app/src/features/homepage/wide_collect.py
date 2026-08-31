@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import hashlib
-import re
 import time
 import urllib.parse
 from dataclasses import dataclass, field
@@ -43,6 +42,7 @@ from src.features.homepage.constants import (
 from src.features.homepage.ir_pdf import (
     IrHtmlFetcher,
     IrPdfFetcher,
+    OfficialIrFetchError,
     collect_official_ir_fragments,
     default_ir_html_fetch,
     default_ir_pdf_fetch,
@@ -50,12 +50,13 @@ from src.features.homepage.ir_pdf import (
 from src.features.homepage.safe_http import HomepageResponseError, request_deadline_scope
 from src.features.homepage.wide_domain import (
     BoundHost,
+    OfficialOrigin,
     bind_linked_host,
     bind_registered_subdomain,
     bind_root_host,
     bind_www_apex_alternate,
     canonicalize_url,
-    is_registered_subdomain,
+    parse_official_origin,
     slot_ids_for_url,
 )
 from src.features.homepage.wide_extract import (
@@ -141,6 +142,7 @@ class _CollectionState:
     documents: list[WideDocumentIdentity] = field(default_factory=list)
     attempts: list[WideCollectionAttempt] = field(default_factory=list)
     bound_hosts: dict[str, BoundHost] = field(default_factory=dict)
+    bound_origins: dict[str, OfficialOrigin] = field(default_factory=dict)
     robots_policies: dict[str, WideRobotsPolicy] = field(default_factory=dict)
     content_hashes: set[str] = field(default_factory=set)
     pages_fetched: int = 0
@@ -236,9 +238,9 @@ def collect_official_web_documents(
         문서·시도 기록을 담은 ``WideCollectionResult``. 상한 도달로 못 읽은
         부분은 문서를 지어내는 대신 ``TRUNCATED`` attempt로 남는다.
     """
-    root_scheme, root_host = _normalize_root(root_homepage_url)
+    root_origin = parse_official_origin(root_homepage_url)
     state = _CollectionState(company_id=company_id, collected_at=collected_at, clock=clock)
-    if not root_host:
+    if root_origin is None:
         # 계약 gen=8 마지막 고리: 문서·attempt가 0건이어도 결과 자신은 항상
         # 대상 회사를 싣는다(documents에서 역산하지 않는다 — 역산하면 0건일 때
         # 정본을 잃는다).
@@ -248,14 +250,13 @@ def collect_official_web_documents(
         with request_deadline_scope(WIDE_COLLECTION_TIMEOUT_SEC) as deadline:
             _run_web_crawl(
                 state,
-                root_scheme=root_scheme,
-                root_host=root_host,
+                root_origin=root_origin,
                 transport=transport,
                 deadline=deadline,
             )
             _run_ir_pdf_phase(
                 state,
-                root_host=root_host,
+                root_origin=root_origin,
                 company_name=company_name,
                 company_aliases=company_aliases,
                 ir_html_fetch=ir_html_fetch,
@@ -280,8 +281,7 @@ def collect_official_web_documents(
 def _seed_host_root(
     state: _CollectionState,
     *,
-    scheme: str,
-    host: str,
+    origin: OfficialOrigin,
     binding: BoundHost,
     transport: RawWideTransport,
     queue: list[_QueueItem],
@@ -296,15 +296,17 @@ def _seed_host_root(
     이미 남겼다), 그렇다고 전체 크롤을 중단하지 않는다 — 호출자가 다른
     호스트(예: apex/www 짝)를 이어서 독립적으로 시도할 수 있다.
     """
-    state.bound_hosts[host] = binding
-    policy = _ensure_host_policy(state, scheme=scheme, host=host, transport=transport)
+    if origin.host not in state.bound_hosts and len(state.bound_hosts) >= WIDE_MAX_HOSTS:
+        return
+    state.bound_hosts[origin.host] = binding
+    state.bound_origins[origin.host] = origin
+    policy = _ensure_host_policy(state, origin=origin, transport=transport)
     if policy.blocked:
         return
 
     _discover_sitemap(
         state,
-        scheme=scheme,
-        host=host,
+        origin=origin,
         transport=transport,
         policy=policy,
         queue=queue,
@@ -312,7 +314,7 @@ def _seed_host_root(
         root_host=root_host,
     )
 
-    root_url = f"{scheme}://{host}/"
+    root_url = origin.root_url
     canonical = canonicalize_url(root_url)
     if canonical in seen_canonical:
         return
@@ -323,8 +325,7 @@ def _seed_host_root(
 def _run_web_crawl(
     state: _CollectionState,
     *,
-    root_scheme: str,
-    root_host: str,
+    root_origin: OfficialOrigin,
     transport: RawWideTransport,
     deadline: object,
 ) -> None:
@@ -341,26 +342,24 @@ def _run_web_crawl(
     # 않는다.
     _seed_host_root(
         state,
-        scheme=root_scheme,
-        host=root_host,
-        binding=bind_root_host(root_host),
+        origin=root_origin,
+        binding=bind_root_host(root_origin.host),
         transport=transport,
         queue=queue,
         seen_canonical=seen_canonical,
-        root_host=root_host,
+        root_host=root_origin.host,
     )
 
-    alternate_binding = bind_www_apex_alternate(root_host)
+    alternate_binding = bind_www_apex_alternate(root_origin.host)
     if alternate_binding is not None:
         _seed_host_root(
             state,
-            scheme=root_scheme,
-            host=alternate_binding.host,
+            origin=root_origin.with_host(alternate_binding.host),
             binding=alternate_binding,
             transport=transport,
             queue=queue,
             seen_canonical=seen_canonical,
-            root_host=root_host,
+            root_host=root_origin.host,
         )
 
     while queue:
@@ -381,7 +380,7 @@ def _run_web_crawl(
         _visit_page(
             state,
             item=item,
-            root_host=root_host,
+            root_host=root_origin.host,
             transport=transport,
             queue=queue,
             seen_canonical=seen_canonical,
@@ -397,17 +396,19 @@ def _visit_page(
     queue: list[_QueueItem],
     seen_canonical: set[str],
 ) -> None:
-    parsed = urllib.parse.urlsplit(item.url)
-    host = (parsed.hostname or "").casefold()
-    if not host:
+    candidate_origin = parse_official_origin(item.url)
+    if candidate_origin is None:
         return
-
+    host = candidate_origin.host
     binding = state.bound_hosts.get(host)
+    origin = state.bound_origins.get(host)
     if binding is None:
+        # 모든 결속 경로에 같은 상한을 먼저 적용한다. 같은 등록 도메인의
+        # 하위호스트도 robots/DNS/본문 비용을 소비하므로 예외가 아니다.
+        if len(state.bound_hosts) >= WIDE_MAX_HOSTS:
+            return
         binding = bind_registered_subdomain(root_host, host)
         if binding is None:
-            if len(state.bound_hosts) >= WIDE_MAX_HOSTS:
-                return
             binding = bind_linked_host(
                 source_page_url=item.source_page_url,
                 discovered_url=item.url,
@@ -416,16 +417,22 @@ def _visit_page(
         if binding is None:
             return  # 제외 대상 호스트(소셜·광고 등) — 결속하지 않는다
         state.bound_hosts[host] = binding
+        state.bound_origins[host] = candidate_origin
+        origin = candidate_origin
+    elif origin is None or not origin.allows_content_url(item.url):
+        # 이미 결속한 host라도 DART/최초 링크의 회사 소유 path-prefix 밖으로
+        # 넓히지 않는다. 같은 hostname이라는 이유만으로 다른 입주자 경로를
+        # 공식자료로 승격해서는 안 된다.
+        return
 
     host_policy = state.robots_policies.get(host)
     if host_policy is None:
-        scheme = parsed.scheme or "https"
-        host_policy = _ensure_host_policy(state, scheme=scheme, host=host, transport=transport)
+        assert origin is not None
+        host_policy = _ensure_host_policy(state, origin=origin, transport=transport)
         if not host_policy.blocked:
             _discover_sitemap(
                 state,
-                scheme=scheme,
-                host=host,
+                origin=origin,
                 transport=transport,
                 policy=host_policy,
                 queue=queue,
@@ -435,8 +442,14 @@ def _visit_page(
     if host_policy.blocked or not host_policy.can_fetch(item.url):
         return  # robots 금지 — 절대 조회하지 않는다
 
-    def url_allowed(candidate: str, expected_host: str = host, policy: WideRobotsPolicy = host_policy) -> bool:
-        return _same_host(candidate, expected_host) and policy.can_fetch(candidate)
+    assert origin is not None
+
+    def url_allowed(
+        candidate: str,
+        expected_origin: OfficialOrigin = origin,
+        policy: WideRobotsPolicy = host_policy,
+    ) -> bool:
+        return expected_origin.allows_content_url(candidate) and policy.can_fetch(candidate)
 
     started = state.clock()
     response: WideRawResponse | None = None
@@ -460,6 +473,7 @@ def _visit_page(
         document = _build_web_document(
             state,
             response=response,
+            origin=origin,
             source_kind=source_kind,
             requirement=requirement,
             binding=binding,
@@ -507,10 +521,13 @@ def _build_web_document(
     state: _CollectionState,
     *,
     response: WideRawResponse,
+    origin: OfficialOrigin,
     source_kind: str,
     requirement: str,
     binding: BoundHost,
 ) -> WideDocumentIdentity | None:
+    if not origin.allows_content_url(response.effective_url):
+        return None
     body_ranges, title = extract_usable_ranges(response.text)
     ranges = body_ranges + extract_json_ld_ranges(response.text) + extract_inline_spa_ranges(response.text)
     ranges = tuple(dict.fromkeys(ranges))[:WIDE_MAX_USABLE_RANGES_PER_DOCUMENT]
@@ -548,15 +565,19 @@ def _build_web_document(
 def _ensure_host_policy(
     state: _CollectionState,
     *,
-    scheme: str,
-    host: str,
+    origin: OfficialOrigin,
     transport: RawWideTransport,
 ) -> WideRobotsPolicy:
-    cached = state.robots_policies.get(host)
+    cached = state.robots_policies.get(origin.host)
     if cached is not None:
         return cached
     started = state.clock()
-    policy = load_robots_policy(scheme=scheme, host=host, fetch=transport)
+    policy = load_robots_policy(
+        robots_url=origin.robots_url,
+        host=origin.host,
+        fetch=transport,
+        url_allowed=origin.allows_infrastructure_url,
+    )
     elapsed_ms = int((state.clock() - started) * 1000)
     robots_state = ATTEMPT_STATE_FAILED if policy.blocked else ATTEMPT_STATE_OK
     # robots는 슬롯을 스스로 좁히지 못해 광역(17개 전체)을 쓴다 — 웹은 그
@@ -573,15 +594,14 @@ def _ensure_host_policy(
         bytes_downloaded=0,
         documents_seen=0,
     )
-    state.robots_policies[host] = policy
+    state.robots_policies[origin.host] = policy
     return policy
 
 
 def _discover_sitemap(
     state: _CollectionState,
     *,
-    scheme: str,
-    host: str,
+    origin: OfficialOrigin,
     transport: RawWideTransport,
     policy: WideRobotsPolicy,
     queue: list[_QueueItem],
@@ -590,11 +610,11 @@ def _discover_sitemap(
 ) -> None:
     started = state.clock()
     text, reason_code = fetch_sitemap(
-        scheme=scheme,
-        host=host,
+        sitemap_url=origin.sitemap_url,
         fetch=transport,
         robots=policy,
         max_bytes=WIDE_MAX_SITEMAP_BYTES,
+        url_allowed=origin.allows_infrastructure_url,
     )
     elapsed_ms = int((state.clock() - started) * 1000)
     urls = parse_sitemap_urls(text) if text else ()
@@ -613,14 +633,17 @@ def _discover_sitemap(
     # 항상 OPTIONAL이다(_BROAD_SLOT_REQUIREMENT 참조).
     for candidate in urls:
         candidate_host = (urllib.parse.urlsplit(candidate).hostname or "").casefold()
-        if candidate_host != host and not is_registered_subdomain(root_host, candidate_host):
+        if candidate_host == origin.host:
+            if not origin.allows_content_url(candidate):
+                continue
+        elif bind_registered_subdomain(root_host, candidate_host) is None:
             continue  # sitemap이 도메인군 밖 URL을 적어도 따라가지 않는다
         canonical_candidate = canonicalize_url(candidate)
         if canonical_candidate in seen_canonical:
             continue
         seen_canonical.add(canonical_candidate)
         queue.append(
-            _QueueItem(url=candidate, source_page_url=f"{scheme}://{host}/sitemap.xml")
+            _QueueItem(url=candidate, source_page_url=origin.sitemap_url)
         )
 
     state.add_attempt(
@@ -644,7 +667,7 @@ def _discover_sitemap(
 def _run_ir_pdf_phase(
     state: _CollectionState,
     *,
-    root_host: str,
+    root_origin: OfficialOrigin,
     company_name: str,
     company_aliases: tuple[str, ...],
     ir_html_fetch: IrHtmlFetcher,
@@ -654,12 +677,16 @@ def _run_ir_pdf_phase(
     if not company_name.strip():
         return
 
-    candidate_hosts = sorted(
-        (host for host, binding in state.bound_hosts.items() if binding.is_high_confidence),
-        key=lambda host: (host != root_host, host),
+    candidate_origins = sorted(
+        (
+            (state.bound_origins[host], binding)
+            for host, binding in state.bound_hosts.items()
+            if binding.is_high_confidence and host in state.bound_origins
+        ),
+        key=lambda item: (item[0].host != root_origin.host, item[0].host),
     )
     total_ir_documents = 0
-    for host in candidate_hosts:
+    for origin, binding in candidate_origins:
         if total_ir_documents >= WIDE_MAX_IR_DOCUMENTS:
             return
         try:
@@ -668,13 +695,30 @@ def _run_ir_pdf_phase(
             state.record_truncation(WIDE_SOURCE_KIND_IR_PDF, "truncated_time_cap")
             return
 
+        # 기존 IR 파서는 HTTPS exact-host 경계다. HTTP나 비기본 포트를
+        # HTTPS:443으로 바꿔 접속하면 DART origin을 잃으므로, 지원하지 않는
+        # origin에서는 네트워크를 0회로 두고 정직하게 TRUNCATED로 남긴다.
+        if origin.scheme != "https" or origin.port != 443:
+            state.add_attempt(
+                kind="ir",
+                source_kind=WIDE_SOURCE_KIND_IR_PDF,
+                requirement=_BROAD_SLOT_REQUIREMENT,
+                state=ATTEMPT_STATE_TRUNCATED,
+                slot_ids=(),
+                reason_code="ir_origin_unsupported",
+                elapsed_ms=0,
+                bytes_downloaded=0,
+                documents_seen=0,
+            )
+            continue
+
         started = state.clock()
         result = collect_official_ir_fragments(
-            f"https://{host}/",
+            origin.root_url,
             company_name=company_name,
             company_aliases=company_aliases,
-            html_fetch=ir_html_fetch,
-            pdf_fetch=ir_pdf_fetch,
+            html_fetch=_origin_checked_ir_html_fetch(origin, ir_html_fetch),
+            pdf_fetch=_origin_checked_ir_pdf_fetch(origin, ir_pdf_fetch),
         )
         elapsed_ms = int((state.clock() - started) * 1000)
 
@@ -693,7 +737,12 @@ def _run_ir_pdf_phase(
         for doc_key in order:
             if total_ir_documents >= WIDE_MAX_IR_DOCUMENTS:
                 break
-            document = _build_ir_document(state, host=host, fragments=grouped[doc_key])
+            document = _build_ir_document(
+                state,
+                origin=origin,
+                binding=binding,
+                fragments=grouped[doc_key],
+            )
             if document is None:
                 continue
             state.documents.append(document)
@@ -724,10 +773,61 @@ def _run_ir_pdf_phase(
         )
 
 
+def _origin_checked_ir_html_fetch(
+    origin: OfficialOrigin,
+    delegate: IrHtmlFetcher,
+) -> IrHtmlFetcher:
+    """IR HTML 요청·redirect를 DART origin과 허용 경로 안에 가둔다."""
+
+    def checked(url: str, expected_hostname: str, url_allowed):
+        is_infrastructure = urllib.parse.urlsplit(url).path == "/robots.txt"
+        boundary = (
+            origin.allows_infrastructure_url
+            if is_infrastructure
+            else origin.allows_content_url
+        )
+        if expected_hostname.casefold() != origin.host or not boundary(url):
+            raise OfficialIrFetchError("공식 IR HTML이 DART origin·경로 밖입니다")
+
+        def combined(candidate: str) -> bool:
+            return boundary(candidate) and (
+                url_allowed is None or url_allowed(candidate)
+            )
+
+        fetched = delegate(url, expected_hostname, combined)
+        if not boundary(fetched.effective_url):
+            raise OfficialIrFetchError("공식 IR HTML redirect가 DART origin·경로 밖입니다")
+        return fetched
+
+    return checked
+
+
+def _origin_checked_ir_pdf_fetch(
+    origin: OfficialOrigin,
+    delegate: IrPdfFetcher,
+) -> IrPdfFetcher:
+    """IR PDF/CDN redirect도 같은 공식 origin·경로에서만 허용한다."""
+
+    def checked(url: str, expected_hostname: str, max_bytes: int, url_allowed):
+        if expected_hostname.casefold() != origin.host or not origin.allows_content_url(url):
+            raise OfficialIrFetchError("공식 IR PDF가 DART origin·경로 밖입니다")
+
+        def combined(candidate: str) -> bool:
+            return origin.allows_content_url(candidate) and url_allowed(candidate)
+
+        fetched = delegate(url, expected_hostname, max_bytes, combined)
+        if not origin.allows_content_url(fetched.effective_url):
+            raise OfficialIrFetchError("공식 IR PDF redirect가 DART origin·경로 밖입니다")
+        return fetched
+
+    return checked
+
+
 def _build_ir_document(
     state: _CollectionState,
     *,
-    host: str,
+    origin: OfficialOrigin,
+    binding: BoundHost,
     fragments: list[dict[str, str]],
 ) -> WideDocumentIdentity | None:
     ranges = tuple(
@@ -742,7 +842,7 @@ def _build_ir_document(
 
     first = fragments[0]
     source_url = str(first.get("출처") or "").strip()
-    if not source_url:
+    if not source_url or not origin.allows_content_url(source_url):
         return None
     canonical = canonicalize_url(source_url)
     content_sha256 = hashlib.sha256("\n".join(ranges).encode("utf-8")).hexdigest()
@@ -751,67 +851,25 @@ def _build_ir_document(
     state.content_hashes.add(content_sha256)
 
     document_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    title = str(first.get("문서명") or "").strip() or host
+    title = str(first.get("문서명") or "").strip() or origin.host
     published_on = str(first.get("문서일") or "").strip()
-    binding = state.bound_hosts.get(host)
-    identity_binding = (
-        binding.identity_binding if binding is not None else f"도메인군 호스트: {host}"
-    )
     return WideDocumentIdentity(
         company_id=state.company_id,
         document_id=document_id,
         canonical_url=canonical,
         source_kind=WIDE_SOURCE_KIND_IR_PDF,
-        publisher=host,
+        publisher=origin.host,
         title=title,
         published_on=published_on,
         collected_at=state.collected_at,
         content_sha256=content_sha256,
-        identity_binding=identity_binding,
+        identity_binding=binding.identity_binding,
         usable_ranges=ranges,
         collector_version=WIDE_COLLECTOR_VERSION,
         parser_version=WIDE_PARSER_VERSION,
         requirement=REQUIREMENT_REQUIRED,
         source_tier=SOURCE_TIER_1_OFFICIAL,
     )
-
-
-# ══════════════════════════════════════════════════════════
-# 작은 도우미
-# ══════════════════════════════════════════════════════════
-
-
-def _normalize_root(raw: str) -> tuple[str, str]:
-    """DART hm_url을 (스킴, 소문자 호스트)로 정규화한다. 판정 불가면 ("", "")."""
-    candidate = (raw or "").strip()
-    if not candidate:
-        return "", ""
-    if candidate.startswith("//"):
-        candidate = f"https:{candidate}"
-    try:
-        parsed = urllib.parse.urlsplit(candidate)
-    except ValueError:
-        return "", ""
-    if parsed.scheme and parsed.scheme.lower() not in ("http", "https"):
-        return "", ""
-    if not re.match(r"^https?://", candidate, re.IGNORECASE):
-        candidate = f"https://{candidate}"
-    try:
-        parsed = urllib.parse.urlsplit(candidate)
-    except ValueError:
-        return "", ""
-    host = (parsed.hostname or "").strip()
-    if not host:
-        return "", ""
-    return parsed.scheme.lower(), host.casefold()
-
-
-def _same_host(url: str, expected_host: str) -> bool:
-    try:
-        candidate_host = (urllib.parse.urlsplit(url).hostname or "").casefold()
-    except ValueError:
-        return False
-    return candidate_host == expected_host
 
 
 def _priority_key(url: str) -> tuple[int, str]:
