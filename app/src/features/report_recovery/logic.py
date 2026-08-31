@@ -7,6 +7,8 @@ from collections.abc import Iterable
 from src.features.report_recovery.constants import (
     MAX_SUPPLEMENT_SECTIONS,
     PRIMARY_AI_CALLS,
+    PRIMARY_REVIEW_CALLS,
+    PRIMARY_WRITER_CALLS,
     SUPPLEMENT_CALLS_PER_SECTION,
     SUPPLEMENT_REVIEW_CALLS,
 )
@@ -218,6 +220,12 @@ def _validate_supplement_binding(
         raise ValueError("보충 결과가 정확한 기본 평가 영수증에 결속되지 않았습니다")
     if supplement_receipt.supplemented_section_ids != authorization.section_ids:
         raise ValueError("실제 보충한 장이 승인한 장과 다릅니다")
+    if supplement_receipt.writer_calls != (
+        len(authorization.section_ids) * SUPPLEMENT_CALLS_PER_SECTION
+    ):
+        raise ValueError("보충 작성 호출 수가 승인한 장 수와 다릅니다")
+    if supplement_receipt.reviewer_calls != SUPPLEMENT_REVIEW_CALLS:
+        raise ValueError("보충 묶음의 실제 검수 1회가 없습니다")
     if (
         supplement_receipt.evidence_packet_sha256s
         != primary_receipt.evidence_packet_sha256s
@@ -296,6 +304,11 @@ def decide_post_validation(
         raise TypeError("첫 검증의 결속된 영수증이 필요합니다")
     if primary_receipt.round is not ValidationRound.PRIMARY:
         raise ValueError("첫 영수증은 기본 생성 회차여야 합니다")
+    if (
+        primary_receipt.writer_calls != PRIMARY_WRITER_CALLS
+        or primary_receipt.reviewer_calls != PRIMARY_REVIEW_CALLS
+    ):
+        raise ValueError("첫 영수증에는 실제 9회 작성·1회 검수가 필요합니다")
     if (supplement_authorization is None) != (supplement_receipt is None):
         raise ValueError("보충 승인과 실제 보충 영수증은 함께 필요합니다")
     if supplement_authorization is None or supplement_receipt is None:

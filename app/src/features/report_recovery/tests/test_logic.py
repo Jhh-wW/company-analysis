@@ -15,9 +15,11 @@ from src.features.report_recovery.logic import (
     decide_preflight,
 )
 from src.features.report_recovery.models import (
-    GenerationValidationReceipt,
     RecoveryAction,
     SupplementAuthorization,
+)
+from src.shared.generation_validation_receipt import (
+    GenerationValidationReceipt,
     ValidationRound,
 )
 from src.shared.report_evidence.constants import (
@@ -494,18 +496,23 @@ def test_다른기본영수증이나_실제호출수가_없는보충은_거절�
             supplement_receipt=wrong_base,
         )
 
+    unmetered = GenerationValidationReceipt(
+        company_id=primary.company_id,
+        candidate_sha256="b" * 64,
+        assessment=_assessment(),
+        round=ValidationRound.SUPPLEMENT,
+        writer_calls=0,
+        reviewer_calls=1,
+        section_sha256s=_section_sha256s("supplement-section"),
+        evidence_packet_sha256s=primary.evidence_packet_sha256s,
+        base_receipt_sha256=primary.receipt_sha256,
+        supplemented_section_ids=("identity",),
+    )
     with pytest.raises(ValueError, match="작성 호출 수"):
-        GenerationValidationReceipt(
-            company_id=primary.company_id,
-            candidate_sha256="b" * 64,
-            assessment=_assessment(),
-            round=ValidationRound.SUPPLEMENT,
-            writer_calls=0,
-            reviewer_calls=1,
-            section_sha256s=_section_sha256s("supplement-section"),
-            evidence_packet_sha256s=primary.evidence_packet_sha256s,
-            base_receipt_sha256=primary.receipt_sha256,
-            supplemented_section_ids=("identity",),
+        decide_post_validation(
+            primary,
+            supplement_authorization=first.supplement_authorization,
+            supplement_receipt=unmetered,
         )
 
 
