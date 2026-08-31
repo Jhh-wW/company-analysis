@@ -111,6 +111,10 @@ def test_생산패키지의_현재모듈은_손목록없이_지문에_들어간�
         "app/src/features/revenuemix/new_table_source.py",
         "analysis_engine/src/features/evidence_collection/new_collector.py",
         "app/src/features/chapter_evidence/new_adapter.py",
+        "app/src/features/company_comparison/new_comparator.py",
+        "app/src/features/company_specificity/new_filter.py",
+        "app/src/features/provenance/new_ledger.py",
+        "app/src/features/spanselect/new_selector.py",
         "app/src/shared/report_evidence/new_contract.py",
     ),
 )
@@ -165,6 +169,68 @@ def test_자동발견_결과는_중복없이_이름순이다() -> None:
     모듈 = build_id._content_modules(paths.PROJECT_ROOT)
 
     assert 모듈 == tuple(sorted(set(모듈)))
+
+
+def test_비교와_회사고유성_내용생산자는_지문에_들어간다() -> None:
+    """경쟁력 장과 일반론 제거 규칙이 바뀌면 같은 내용 캐시를 재사용하지 않는다."""
+
+    모듈 = build_id._content_modules(paths.PROJECT_ROOT)
+
+    assert "app/src/features/company_comparison/logic.py" in 모듈
+    assert "app/src/features/company_comparison/official_sources.py" in 모듈
+    assert "app/src/features/company_specificity/logic.py" in 모듈
+
+
+def test_근거선별과_출처장부_내용생산자는_지문에_들어간다() -> None:
+    """선택된 원문과 공개 인용 장부가 달라지면 새 보고서로 생성해야 한다."""
+
+    모듈 = build_id._content_modules(paths.PROJECT_ROOT)
+
+    assert "app/src/features/spanselect/canonical.py" in 모듈
+    assert "app/src/features/spanselect/logic.py" in 모듈
+    assert "app/src/features/provenance/citations.py" in 모듈
+    assert "app/src/features/provenance/sources.py" in 모듈
+
+
+def test_공식IR과_캐시_출처신원_정본은_필수파일이다() -> None:
+    """공식 문서 판정·사전 source digest·사후 snapshot은 캐시 신원의 일부다."""
+
+    필수 = set(build_id._REQUIRED_CONTENT_MODULES)
+
+    assert "app/src/shared/official_ir.py" in 필수
+    assert "app/src/shared/report_source_identity.py" in 필수
+    assert "app/src/shared/generation_cache_identity.py" in 필수
+    assert "app/src/features/report_delivery/source_identity.py" in 필수
+
+
+@pytest.mark.parametrize(
+    "내용생산자",
+    (
+        "app/src/features/company_comparison/logic.py",
+        "app/src/features/company_specificity/logic.py",
+        "app/src/features/spanselect/logic.py",
+        "app/src/features/provenance/citations.py",
+        "app/src/shared/official_ir.py",
+        "app/src/shared/report_source_identity.py",
+        "app/src/shared/generation_cache_identity.py",
+        "app/src/features/report_delivery/source_identity.py",
+    ),
+)
+def test_내용과_캐시신원_생산자_변경은_지문을_바꾼다(
+    내용생산자: str, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """경로가 포함됐다는 주장 대신 실제 파일 변경→지문 변경을 끝까지 증명한다."""
+
+    가짜뿌리 = tmp_path / "repo"
+    _생산모듈을_가짜뿌리로_복사한다(가짜뿌리)
+    monkeypatch.setattr(paths, "PROJECT_ROOT", 가짜뿌리)
+
+    변경전 = build_id.engine_build_id()
+    변경파일 = 가짜뿌리 / 내용생산자
+    변경파일.write_bytes(변경파일.read_bytes() + b"\n# fingerprint-regression\n")
+    build_id._cached_build_id = None
+
+    assert build_id.engine_build_id() != 변경전
 
 
 # ══════════════════════════════════════════════════════════

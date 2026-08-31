@@ -54,7 +54,13 @@ _SHAPING_MODULES: Final[tuple[str, ...]] = tuple(
 #: 없거나 읽을 수 없으면 지문을 ``unknown``으로 만들어 캐시를 닫는다.
 _REQUIRED_CONTENT_MODULES: Final[tuple[str, ...]] = (
     "analysis_engine/tools/run_pilot.py",
+    # 운영 v2가 생성 전 source digest와 생성기 namespace를 만들고, delivery가
+    # 생성 후 실제 공식 문서 snapshot을 봉인할 때 쓰는 단일 정본들이다.
+    "app/src/features/report_delivery/source_identity.py",
     "app/src/features/pipeline/real.py",
+    "app/src/shared/generation_cache_identity.py",
+    "app/src/shared/official_ir.py",
+    "app/src/shared/report_source_identity.py",
 )
 
 #: 보고서의 원문·표·근거·공개 모양을 생산하는 feature/package 뿌리.
@@ -70,12 +76,21 @@ _REQUIRED_CONTENT_MODULES: Final[tuple[str, ...]] = (
 _CONTENT_PACKAGE_ROOTS: Final[tuple[str, ...]] = (
     "analysis_engine/src/features/evidence_collection",
     "app/src/features/chapter_evidence",
+    # 비교 후보·자사 고유성은 현재 v1 경로의 공개 문장을 만들며, v2 장별 근거
+    # 통합 대상으로 고정돼 있다. 통합 파일만 지문에 넣고 생산자를 빼면 같은
+    # 코드 namespace가 서로 다른 경쟁력 내용을 가리키게 된다.
+    "app/src/features/company_comparison",
     "app/src/features/company_performance",
+    "app/src/features/company_specificity",
     "app/src/features/filingclean",
     "app/src/features/homepage",
     "app/src/features/newspick",
+    # provenance는 인용 장부와 공식 출처 사용 가능 여부, spanselect는 실제
+    # 원문에서 공개 주장 후보를 고르는 규칙을 소유한다.
+    "app/src/features/provenance",
     "app/src/features/report_standard",
     "app/src/features/revenuemix",
+    "app/src/features/spanselect",
     "app/src/shared/report_evidence",
     "app/src/shared/report_quality",
 )
