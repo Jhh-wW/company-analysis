@@ -22,6 +22,7 @@ from src.features.report_delivery.models import (
 )
 from src.features.report_delivery.source_identity import SourceSnapshot
 from src.features.sharelink import store as share_store
+from src.features.storage import constants as storage_constants
 from src.features.storage import db as storage_db
 from src.web import paid_runtime, report_delivery_adapter, runtime
 from src.web.main import app
@@ -159,7 +160,14 @@ def _store_restart_member_delivery(
 ) -> tuple[delivery_artifact.ArtifactMetadata, Path, str]:
     """실제 SQLite·filesystem에 완료 Delivery와 회원 예약을 함께 만든다."""
 
+    # 이 helper는 독립 검증 스크립트에서도 재사용된다. pytest의 autouse fixture에만
+    # DB 격리를 맡기면 helper를 직접 부른 순간 실제 ``app/data/storage.db``에
+    # 시험 예약·배송 이력이 들어간다. 파일 저장소와 SQLite를 같은 임시 뿌리에
+    # 명시적으로 묶어 어느 호출 경로에서도 사용자 데이터를 건드리지 않는다.
     monkeypatch.setenv("APP_DATA_ROOT", str(data_root))
+    isolated_db_path = data_root / "storage.db"
+    monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(isolated_db_path))
+    assert storage_db.default_db_path() == isolated_db_path
     now = dt.datetime(2026, 8, 31, 9, 0, tzinfo=dt.timezone(dt.timedelta(hours=9)))
     day = clock.today_kst().isoformat()
     source = SourceSnapshot.capture(
