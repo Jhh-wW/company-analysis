@@ -8,8 +8,12 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import os
+import shutil
 import stat
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -30,23 +34,50 @@ _REVIEW_MISSING_PRODUCERS = (
     "app/src/features/report_delivery/source_identity.py",
 )
 
+_RUNTIME_RESOURCES = (
+    "analysis_engine/src/features/public_org/data/public_org_registry_2026.json",
+    "app/src/features/export_pdf/fonts/Freesentation-Regular.ttf",
+    "app/src/web/templates/result.html",
+    "app/src/web/static/style.css",
+    "app/requirements.txt",
+)
+
+
+def _reset_build_id_state() -> None:
+    with build_id._build_id_condition:
+        assert not build_id._scan_in_progress
+        build_id._cached_build_id = None
+        build_id._scan_owner_thread_id = None
+        build_id._scan_generation = 0
+        build_id._last_failed_generation = None
+        build_id._scan_reentry_detected = False
+        build_id._scan_waiter_count = 0
+        build_id._generation_results.clear()
+        build_id._generation_waiters.clear()
+
 
 @pytest.fixture(autouse=True)
 def _지문_기억을_지운다():
     """성공 지문 memoization이 시험 사이에 섞이지 않게 한다."""
 
-    build_id._cached_build_id = None
+    _reset_build_id_state()
     yield
-    build_id._cached_build_id = None
+    _reset_build_id_state()
 
 
 @pytest.fixture
 def 가짜프로젝트(tmp_path: Path) -> Path:
-    """세 필수 production 뿌리만 갖춘 최소 프로젝트."""
+    """필수 production 코드·자원 뿌리를 갖춘 최소 프로젝트."""
 
     project_root = tmp_path / "repo"
     for root_name in build_id._PRODUCTION_ROOTS:
         (project_root / root_name).mkdir(parents=True)
+    for root_name in build_id._RUNTIME_RESOURCE_ROOTS:
+        (project_root / root_name).mkdir(parents=True, exist_ok=True)
+    for relative in build_id._REQUIRED_RUNTIME_FILES:
+        target = project_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"required-runtime-resource\n")
     return project_root
 
 
@@ -59,7 +90,7 @@ def _production_file(project_root: Path, relative: str, text: str = "VALUE = 1\n
 
 def _use_project(monkeypatch: pytest.MonkeyPatch, project_root: Path) -> None:
     monkeypatch.setattr(paths, "PROJECT_ROOT", project_root)
-    build_id._cached_build_id = None
+    _reset_build_id_state()
 
 
 def test_활성_product_root_세곳만_고정한다() -> None:
@@ -70,6 +101,32 @@ def test_활성_product_root_세곳만_고정한다() -> None:
         "analysis_engine/tools",
         "app/src",
     )
+
+
+def test_실제_runtime_resource가_자동발견_목록에_있다() -> None:
+    contents = build_id._content_modules(paths.PROJECT_ROOT)
+
+    for resource in _RUNTIME_RESOURCES:
+        assert resource in contents
+
+
+@pytest.mark.parametrize("resource", _RUNTIME_RESOURCES)
+def test_JSON_TTF_template_CSS_requirements_한_byte_변경도_지문을_바꾼다(
+    resource: str,
+    가짜프로젝트: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = 가짜프로젝트 / resource
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        target.write_bytes(b"runtime-resource\n")
+    _use_project(monkeypatch, 가짜프로젝트)
+    before = build_id.engine_build_id()
+
+    target.write_bytes(target.read_bytes() + b"x")
+    build_id._cached_build_id = None
+
+    assert build_id.engine_build_id() != before
 
 
 @pytest.mark.parametrize("producer", _REVIEW_MISSING_PRODUCERS)
@@ -158,6 +215,11 @@ def test_init_py는_실행코드이므로_변경하면_지문도_바뀐다(
         "app/src/features/sample/test_logic.py",
         "app/src/features/sample/logic_test.py",
         "app/src/features/sample/readme.txt",
+        "app/src/features/sample/fixtures/sample.json",
+        "app/src/web/static/fixtures/snapshot.css",
+        "app/src/web/static/.cache/generated.css",
+        "app/src/web/static/local-artifacts/generated.css",
+        "app/src/web/static/debug.tmp",
     ),
 )
 def test_시험과_임시파일은_지문에_영향을_주지_않는다(
@@ -186,7 +248,7 @@ def test_필수_root가_하나라도_없으면_UNKNOWN이다(
     가짜프로젝트: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    (가짜프로젝트 / root_name).rmdir()
+    shutil.rmtree(가짜프로젝트 / root_name)
     _use_project(monkeypatch, 가짜프로젝트)
 
     assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
@@ -200,8 +262,56 @@ def test_필수_root가_디렉터리가_아니면_UNKNOWN이다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = 가짜프로젝트 / root_name
-    root.rmdir()
+    shutil.rmtree(root)
     root.write_text("디렉터리가 아님", encoding="utf-8")
+    _use_project(monkeypatch, 가짜프로젝트)
+
+    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
+    assert build_id._cached_build_id is None
+
+
+@pytest.mark.parametrize("relative", build_id._REQUIRED_RUNTIME_FILES)
+def test_필수_runtime_resource가_없으면_UNKNOWN이다(
+    relative: str,
+    가짜프로젝트: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (가짜프로젝트 / relative).unlink()
+    _use_project(monkeypatch, 가짜프로젝트)
+
+    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
+    assert build_id._cached_build_id is None
+
+
+@pytest.mark.parametrize("root_name", build_id._RUNTIME_RESOURCE_ROOTS)
+def test_runtime_resource_root가_없으면_UNKNOWN이다(
+    root_name: str,
+    가짜프로젝트: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shutil.rmtree(가짜프로젝트 / root_name)
+    _use_project(monkeypatch, 가짜프로젝트)
+
+    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
+    assert build_id._cached_build_id is None
+
+
+def test_runtime_resource가_reparse면_UNKNOWN이다(
+    가짜프로젝트: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = 가짜프로젝트 / build_id._REQUIRED_RUNTIME_FILES[0]
+    original_lstat = Path.lstat
+
+    def fake_lstat(path: Path):
+        if path == target:
+            return SimpleNamespace(
+                st_mode=stat.S_IFREG,
+                st_file_attributes=build_id._WINDOWS_REPARSE_POINT,
+            )
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", fake_lstat)
     _use_project(monkeypatch, 가짜프로젝트)
 
     assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
@@ -241,17 +351,17 @@ def test_파일읽기_오류는_UNKNOWN이고_다음시도에_회복한다(
 
     target = _production_file(가짜프로젝트, "app/src/runtime.py")
     _use_project(monkeypatch, 가짜프로젝트)
-    original_read_bytes = Path.read_bytes
+    original_read = build_id._read_stable_file
     failed = False
 
-    def flaky_read_bytes(path: Path) -> bytes:
+    def flaky_read(path: Path) -> bytes:
         nonlocal failed
         if path == target and not failed:
             failed = True
             raise OSError("일시 파일 읽기 실패")
-        return original_read_bytes(path)
+        return original_read(path)
 
-    monkeypatch.setattr(Path, "read_bytes", flaky_read_bytes)
+    monkeypatch.setattr(build_id, "_read_stable_file", flaky_read)
 
     assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
     assert build_id._cached_build_id is None
@@ -284,6 +394,125 @@ def test_link나_junction_root는_조용히_건너뛰지_않고_UNKNOWN이다(
 
     assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
     assert build_id._cached_build_id is None
+
+
+def test_scan뒤_open중_link교체가_보이면_UNKNOWN이다(
+    가짜프로젝트: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """권한 없는 Windows 시험에서도 open 전/후 reparse 재확인을 재현한다."""
+
+    target = _production_file(가짜프로젝트, "app/src/runtime.py")
+    original_lstat = Path.lstat
+    target_lstat_calls = 0
+
+    def swapped_lstat(path: Path):
+        nonlocal target_lstat_calls
+        if path == target:
+            target_lstat_calls += 1
+            if target_lstat_calls >= 2:
+                return SimpleNamespace(
+                    st_mode=stat.S_IFREG,
+                    st_file_attributes=build_id._WINDOWS_REPARSE_POINT,
+                )
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", swapped_lstat)
+    _use_project(monkeypatch, 가짜프로젝트)
+
+    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
+    assert build_id._cached_build_id is None
+    assert target_lstat_calls >= 2
+
+
+def test_동시_cold_열여섯_호출은_scan을_한번만_한다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    calls_lock = threading.Lock()
+    start = threading.Barrier(16)
+    expected = "a" * build_id._DIGEST_CHARS
+
+    def one_scan() -> str:
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        return expected
+
+    def call() -> str:
+        start.wait(timeout=5)
+        return build_id.engine_build_id()
+
+    monkeypatch.setattr(build_id, "_compute_engine_build_id", one_scan)
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        results = list(executor.map(lambda _index: call(), range(16)))
+
+    assert results == [expected] * 16
+    assert calls == 1
+
+
+def test_동시_scan실패는_현재대기자와_UNKNOWN을_공유하고_다음호출이_회복한다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    calls_lock = threading.Lock()
+    first_scan_started = threading.Event()
+    release_first_scan = threading.Event()
+    recovered = "b" * build_id._DIGEST_CHARS
+
+    def fail_once() -> str:
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+            call_number = calls
+        if call_number == 1:
+            first_scan_started.set()
+            assert release_first_scan.wait(timeout=5)
+            raise OSError("동시 일시 실패")
+        return recovered
+
+    monkeypatch.setattr(build_id, "_compute_engine_build_id", fail_once)
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        futures = [executor.submit(build_id.engine_build_id) for _ in range(16)]
+        assert first_scan_started.wait(timeout=5)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            with build_id._build_id_condition:
+                if build_id._scan_waiter_count == 15:
+                    break
+            time.sleep(0.001)
+        with build_id._build_id_condition:
+            assert build_id._scan_waiter_count == 15
+        release_first_scan.set()
+        results = [future.result(timeout=5) for future in futures]
+
+    assert results == [build_id.UNKNOWN_BUILD_ID] * 16
+    assert calls == 1
+    assert build_id._cached_build_id is None
+
+    assert build_id.engine_build_id() == recovered
+    assert calls == 2
+
+
+def test_계산재진입은_deadlock대신_UNKNOWN이고_다음호출이_회복한다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    nested: list[str] = []
+
+    def reentrant_scan() -> str:
+        nested.append(build_id.engine_build_id())
+        return "c" * build_id._DIGEST_CHARS
+
+    monkeypatch.setattr(build_id, "_compute_engine_build_id", reentrant_scan)
+
+    assert build_id.engine_build_id() == build_id.UNKNOWN_BUILD_ID
+    assert nested == [build_id.UNKNOWN_BUILD_ID]
+    assert build_id._cached_build_id is None
+    assert not build_id._scan_in_progress
+
+    recovered = "d" * build_id._DIGEST_CHARS
+    monkeypatch.setattr(build_id, "_compute_engine_build_id", lambda: recovered)
+    assert build_id.engine_build_id() == recovered
 
 
 def test_지문은_같은_코드에서_늘_같다() -> None:
