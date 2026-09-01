@@ -206,10 +206,19 @@ def test_깊은_Windows경로에서도_임시명이_최종blob보다_길어지�
     # 고전 Windows MAX_PATH 바로 아래에 최종 내용주소를 둔다. 옛 64자 digest
     # 임시 prefix는 최종명보다 9자 길어 260을 넘었지만 짧은 임시명은 안전하다.
     desired_target_length = 252
-    while len(str(target)) + 11 <= desired_target_length:
+    # 조각 하나는 구분자를 포함해 «12»자를 더한다. 11로 재면 마지막 한 번이
+    # 목표를 넘겨 253자가 되고, 아래 보정이 음수 여유를 못 메워 실패한다.
+    while len(str(target)) + len("\\deep-part-x") <= desired_target_length:
         root /= "deep-part-x"
         target = root / "sha256" / digest[:2] / f"{digest}.blob"
     remaining = desired_target_length - len(str(target))
+    if remaining == 1:
+        # 남은 1자로는 «구분자 + 최소 한 글자»를 만들 수 없다. 시작 경로
+        # 길이에 따라 12자마다 한 번 걸리므로(basetemp 길이가 바뀌면 재현
+        # 여부가 뒤집힌다) 마지막 조각을 한 글자 늘려 흡수한다.
+        root = root.parent / (root.name + "x")
+        target = root / "sha256" / digest[:2] / f"{digest}.blob"
+        remaining = desired_target_length - len(str(target))
     if remaining >= 2:
         root /= "x" * (remaining - 1)
         target = root / "sha256" / digest[:2] / f"{digest}.blob"
