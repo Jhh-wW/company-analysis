@@ -4,7 +4,7 @@
   여기는 「골든 샘플 수준의 입력이 들어오면 보고서가 완성 하한(기준문서
   03장 6절)을 만족한 채 나오는가」를 본다. 시스템이 좋은 입력을 훼손하면
   이 시험이 깨진다.
-★ 입력은 골든 샘플(docs/골든샘플/build_jyp_report.py)에서 발췌해 만든 기존
+★ 입력은 골든 샘플 보고서에서 발췌해 만든 기존
   fixture(jyp_fragments.json·jyp_ask_responses.json)를 그대로 재사용한다.
 ★ test_e2e_offline.py와의 역할 구분 — 그쪽은 real.py 배선(수집→과금→PDF
   바이트)이 끝까지 이어지는지를 못 박고, 여기는 composer 진입 함수(run_v2)

@@ -555,10 +555,9 @@ def test_card_drops_blank_cells_and_titles_multi_row_tables_blank() -> None:
 #
 # ★ 왜 이 시험이 있나 (사용자 승인·2026-08-25) — 목업 카드는 거의 항상
 #   마지막 줄에 「공식 근거가 확인한 범위로 한정」 같은 절차적 사실
-#   서술이 있다. `docs/실행계획_엔진v2/11_결정_전수대조_04_범위한계_
-#   재현안.md` §2-1이 정리한 v1 폴백 문구를 그대로 옮긴다 — citations
-#   개수·section_id만으로 정하고, 가치 판단(좋다/나쁘다/위험 등)은 한
-#   글자도 안 쓴다(같은 문서 §5 — v1도 13건 전수에서 0건이었다).
+#   서술이 있다. 2026-08-25 전수대조로 정리한 v1 폴백 문구를 그대로
+#   옮긴다 — citations 개수·section_id만으로 정하고, 가치 판단
+#   (좋다/나쁘다/위험 등)은 한 글자도 안 쓴다(v1도 13건 전수에서 0건이었다).
 
 
 def test_culture_card_gets_the_v1_precedent_phrase() -> None:

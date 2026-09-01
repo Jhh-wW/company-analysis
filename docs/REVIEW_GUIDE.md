@@ -13,10 +13,10 @@
    [기능별 책임 지도](architecture/feature-map.md)
 5. [웹서비스 실행 안내](../app/README.md)와
    [분석 엔진 안내](../analysis_engine/README.md)
-6. [공식 자료 20개 정합성 검토](reviews/기업분석2_공식자료20개_정합성_검토_2026-08-22.md)
+6. [배포 교체 계약](architecture/deployment-contract.md)
 
-`docs/출력물 기준/`의 20개 문서가 내용·목차·PDF 품질의 정본이다. 날짜가 붙은
-`research/`와 `reviews/` 문서는 과거 스냅샷이며 현재 계약이나 시험 수를 덮어쓰지 않는다.
+`docs/출력물 기준/`의 20개 문서가 내용·목차·PDF 품질의 정본이다. 시험 건수처럼 변하는
+숫자는 문서에서 인용하지 말고 아래 명령으로 직접 세어 확인한다.
 
 ## 2. 현재 제품 계약
 

@@ -87,7 +87,7 @@
 원문과 재검증 산출물은 라이선스·용량 때문에 Git에 넣지 않는다. 권한 있는 로컬
 작업공간에서만 아래 비추적 경로를 사용한다.
 
-- 요약 원본: `research/reference_reports_50/_analysis/analysis_summary.md`
+- 요약 원본: 조사 당시 로컬 코퍼스(비추적). 저장소에는 이 정제 요약만 둔다
 - 요약 원본 SHA-256:
   `C18C1512FDF55898FDA461B270AAF50DE41C6E51F2FF991BDA78EE92C9BD6A27`
 - 같은 `_analysis/` 아래의 `master_manifest.csv`, `master_coding.csv`,

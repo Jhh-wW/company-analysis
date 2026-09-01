@@ -81,8 +81,9 @@ VISIBLE_ATTRIBUTES: tuple[str, ...] = (
     "summary",
 )
 
-#: 실측 2026-08-25 기준 화면 템플릿은 43개다. 「일부만 보고 전수」를 막는 하한선.
-MINIMUM_SCANNED_TEMPLATES = 40
+#: 실측 2026-09-01 기준 화면 템플릿은 38개다(고아 템플릿 5개를 지운 뒤).
+#: 「일부만 보고 전수」를 막는 하한선 — 실측치에서 3개 여유를 둔 값이다.
+MINIMUM_SCANNED_TEMPLATES = 35
 
 
 class _가짜진짜파이프라인:

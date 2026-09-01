@@ -4,37 +4,20 @@
 캐시를 붙여도 이력이 「없음」 고정이면 대시보드 ⑤는 영영 0건이고,
 화면에 안내가 없으면 사용자는 방금 새로 조사한 줄 안다.
 
-★ 여기서 세 곳을 한꺼번에 본다 — 하나만 고치면 나머지가 조용히 어긋난다.
-  ① `RunResult.cache_hit` → ② 이력 1행 → ③ 대시보드 ⑤ 집계
+★ 여기서 두 곳을 한꺼번에 본다 — 하나만 고치면 나머지가 조용히 어긋난다.
+  ① `RunResult.cache_hit` → ② 이력 1행 → ③ 결과 화면 안내
+
+  대시보드 ⑤ 집계 시험은 뺐다. 그 식이 살던 `dashboard.html` 은 어떤 라우트도
+  렌더하지 않아 지웠고, 남겨 두면 시험이 «자기가 복사해 둔 문자열을 자기가 렌더해
+  자기와 비교»하는 꼴이 되어 아무것도 못 지키면서 영원히 통과한다.
 """
 
 from __future__ import annotations
-
-from jinja2 import Environment
 
 from src.core.constants import CACHE_HIT_LAYER1, CACHE_HIT_MESSAGE
 from src.features.observability import constants as obs
 from src.features.pipeline.port import Outcome, RunResult, UserInput
 from src.web import recording
-
-#: 대시보드 ⑤가 「캐시 재사용 N건」을 세는 식. 템플릿과 «같은 문자열»이어야 한다.
-#: 여기만 고치고 dashboard.html을 안 고치면 이 시험은 통과하면서 화면은 계속 틀린다.
-_DASHBOARD_COUNT_EXPR = (
-    "{{ recent | rejectattr('cache_hit', 'equalto', '없음') | list | length }}"
-)
-
-
-class _가짜기록:
-    """대시보드 템플릿이 읽는 최소한의 모양."""
-
-    def __init__(self, cache_hit: str) -> None:
-        self.cache_hit = cache_hit
-
-
-def _기록수(recent: list[_가짜기록]) -> int:
-    template = Environment().from_string(_DASHBOARD_COUNT_EXPR)
-    return int(template.render(recent=recent))
-
 
 # ══════════════════════════════════════════════════════════
 # ① 이력 — 파이프라인이 실은 값이 그대로 실려야 한다
@@ -67,28 +50,7 @@ def test_새로_조사한_요청은_이력에_없음으로_남는다(tmp_path, m
 
 
 # ══════════════════════════════════════════════════════════
-# ② 대시보드 ⑤ — 「없음」을 재사용으로 세면 안 된다
-# ══════════════════════════════════════════════════════════
-
-
-def test_대시보드는_없음을_캐시_재사용으로_세지_않는다():
-    """예전 식(`selectattr('cache_hit')`)은 「없음」도 «값이 있다»고 세었다.
-
-    그래서 캐시가 한 건도 안 돌았는데 「20건 중 20건 재사용」으로 보였다.
-    """
-    recent = [_가짜기록(obs.CACHE_HIT_NONE)] * 3 + [_가짜기록(obs.CACHE_HIT_L1)]
-
-    assert _기록수(recent) == 1
-
-
-def test_캐시가_한_건도_없으면_0건으로_센다():
-    recent = [_가짜기록(obs.CACHE_HIT_NONE)] * 5
-
-    assert _기록수(recent) == 0
-
-
-# ══════════════════════════════════════════════════════════
-# ③ 결과 화면 — 「저장해 둔 것」이라고 말해야 한다
+# ② 결과 화면 — 「저장해 둔 것」이라고 말해야 한다
 # ══════════════════════════════════════════════════════════
 
 

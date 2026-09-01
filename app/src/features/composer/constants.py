@@ -1,8 +1,8 @@
-"""composer 상수 — 기준문서(docs/실행계획_엔진v2/03_단계2_기준문서.md) 3절을 코드로 옮긴 것.
+"""composer 상수 — 엔진 v2 기준문서 3절을 코드로 옮긴 것.
 
 ★ 여기 문구는 전부 «작가 AI에게 주는 지침»이다. 검증 게이트가 아니다.
   문장 내용을 어휘·마커·어미 패턴으로 거르는 닫힌 목록 검사를
-  이 feature에 만들지 않는다 (01_원칙과_금지.md).
+  이 feature에 만들지 않는다.
 ★ 장 id·제목은 v3 정본 목차(report_standard/constants.py의 SECTION_SPECS)와
   같은 값을 «복사»했다. composer→report_standard import 금지 규칙 때문에
   import 대신 상수로 둔다. 정본 목차가 바뀌면 여기도 같이 바꾼다.
@@ -546,8 +546,8 @@ IDENTITY_TABLE_HEADERS: Final[tuple[str, str, str]] = (
 IDENTITY_TABLE_CAPTION: Final[str] = "회사가 스스로를 어떻게 규정하나"
 
 STRATEGY_TABLE_SECTION_ID: Final[str] = "future_strategy"
-#: ★ 칸 순서 정정(2026-08-25, `docs/실행계획_엔진v2/11_결정_전수대조_05_6장_시점칸_원인.md`
-#:   조사 결론) — 원래 「시점 / 계획 / 공시된 내용」이었다. 흐름표를 쓰는
+#: ★ 칸 순서 정정(2026-08-25 전수대조 조사 결론) — 원래 「시점 / 계획 /
+#:   공시된 내용」이었다. 흐름표를 쓰는
 #:   6개 장 중 5개(1·2·5·7·8장)는 전부 «1번 칸 = 그 줄의 주제»인데 6장만
 #:   1번 칸이 시간 속성(시점)이라 주제를 담을 자리가 없었다 — 그래서 AI가
 #:   시점 칸에 주제를 밀어 넣고(1행) 나머지 줄은 비워 냈다(2행)는 것이

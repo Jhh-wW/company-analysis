@@ -254,6 +254,22 @@ $childEnvironment["STORAGE_DB_PATH"] = $storageDatabase
 $childEnvironment["OBSERVABILITY_RECORDS_PATH"] = $recordsPath
 $childEnvironment["TLDEXTRACT_CACHE"] = $tldextractCache
 
+# ★ 배포 신원(commit)이 없으면 출고 단계가 「캐시·출고에 쓸 수 없는 epoch」로 판정해
+#   보고서를 끝내 만들지 못한다(실측: RuntimeError, 화면은 「오류가 났습니다」).
+#   Render 는 RENDER_GIT_COMMIT 을 넣어 주지만 로컬에는 아무도 넣지 않는다.
+#   그래서 현재 커밋을 여기서 직접 채운다. git 이 없거나 형식이 다르면 넣지 않는다
+#   — 그때는 지금까지와 똑같이 동작한다(보고서 생성 불가).
+$repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $appRoot ".."))
+$repositoryCommit = ""
+try {
+    $repositoryCommit = (& git -C $repositoryRoot rev-parse HEAD 2>$null | Select-Object -First 1)
+} catch {
+    $repositoryCommit = ""
+}
+if (($repositoryCommit -is [string]) -and ($repositoryCommit -match '^[0-9a-f]{40}$')) {
+    $childEnvironment["APP_GIT_COMMIT"] = $repositoryCommit
+}
+
 $childEnvironment.Remove("GOOGLE_CLIENT_ID")
 $childEnvironment.Remove("GOOGLE_CLIENT_SECRET")
 $childEnvironment.Remove("GOOGLE_REDIRECT_URI")
@@ -278,7 +294,8 @@ $allowedChildEnvironmentNames = $safeChildOsEnvironmentNames + @(
     "APP_DATA_ROOT",
     "STORAGE_DB_PATH",
     "OBSERVABILITY_RECORDS_PATH",
-    "TLDEXTRACT_CACHE"
+    "TLDEXTRACT_CACHE",
+    "APP_GIT_COMMIT"
 )
 foreach ($name in @($childEnvironment.Keys)) {
     if ($allowedChildEnvironmentNames -notcontains [string]$name) {

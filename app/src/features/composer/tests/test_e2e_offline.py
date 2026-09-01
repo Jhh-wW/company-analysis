@@ -5,8 +5,8 @@
   수집 조각 → compose → verify → 요약 → render → validate_v2 → PDF 바이트까지
   실제 코드 경로가 끝까지 이어지는지 본다. AI·네트워크 호출은 0회다.
 
-★ 가짜 작가 응답(fixtures/jyp_ask_responses.json)은 골든 샘플
-  (docs/골든샘플/build_jyp_report.py)의 실제 문장에서 발췌했다 — 장별 6문장,
+★ 가짜 작가 응답(fixtures/jyp_ask_responses.json)은 골든 샘플 보고서의
+  실제 문장에서 발췌했다 — 장별 6문장,
   인용 조각 id와 확인/해석 등급 포함. 수집 조각(fixtures/jyp_fragments.json)은
   그 문장들의 숫자가 전부 원문에 존재하도록 같은 근거에서 발췌했다. 이는
   예전 3-2 «원문 문자열 대조»를 통과한 골든 입력이라는 뜻이지, 수치의 지표·

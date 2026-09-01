@@ -8,11 +8,10 @@ import yaml
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
-IMPLEMENTATION_HANDOFF = (
-    REPOSITORY_ROOT
-    / "docs"
-    / "실행계획_엔진v2"
-    / "30_근본결함_구현결과_2026-08-28.md"
+# ★ 배포 교체 순서는 날짜 인수인계가 아니라 «계약 문서»가 소유한다.
+#   문서를 옮겨도 이 시험이 계약 문장을 계속 붙잡는다.
+DEPLOYMENT_CONTRACT = (
+    REPOSITORY_ROOT / "docs" / "architecture" / "deployment-contract.md"
 )
 
 
@@ -39,7 +38,7 @@ def test_Render_cutover는_영속disk_단일instance라서_old_new_writer가_겹
 
 
 def test_cutover문서는_stop_drain_startup순서와_구성변경조건을_숨기지않는다():
-    handoff = IMPLEMENTATION_HANDOFF.read_text(encoding="utf-8")
+    handoff = DEPLOYMENT_CONTRACT.read_text(encoding="utf-8")
     normalized = " ".join(handoff.split())
 
     assert "기존 인스턴스를 완전히 멈춘 뒤 새 인스턴스를 시작" in normalized

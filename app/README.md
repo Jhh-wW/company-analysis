@@ -23,10 +23,10 @@ app/
 - 접근·비용·회사 입력: `auth`, `sharelink`, `budget`, `business_candidate`
 - 분석 총괄: `pipeline`
 - 자료 수집·정리: `homepage`, `filingclean`, `revenuemix`, `company_performance`, `company_specificity` (`newspick`은 구형 호출 호환용이며 canonical 런타임에서는 생략)
-- 보고서 작성·검증: `spanselect`, `writer`, `company_comparison`, `report_summary`, `grading`, `provenance`, `readable`, `report_standard`
+- 보고서 작성·검증: `spanselect`, `writer`, `company_comparison`, `report_summary`, `grading`, `provenance`, `report_standard`
 - 저장·운영·출력: `storage`, `backup`, `admin_dashboard`, `observability`, `cost_tracking`, `pilot_evaluation`, `export_pdf`, `export_notion`
 
-`posting_image`, `blocks678`, `company_use`와 채용 결합 필드는 구형
+`posting_image`와 채용 결합 필드는 구형
 호환 코드다. 신규 조사·캐시 적중·화면·PDF·Notion 내용을 구성할 수 없다.
 
 각 폴더의 입력·출력과 담당 범위는
