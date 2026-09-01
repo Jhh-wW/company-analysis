@@ -462,10 +462,22 @@ def _merge_selected_sections(
     )
 
 
-def _raise_recovery_stop(reason_code: str) -> None:
-    """사람 원문 없이 닫힌 회복 사유만 운영 경계로 보낸다."""
+def _raise_recovery_stop(
+    reason_code: str, quality_problem_codes: tuple[str, ...] = ()
+) -> None:
+    """사람 원문 없이 닫힌 회복 사유만 운영 경계로 보낸다.
 
-    raise V2ValidationError((f"report_recovery:{reason_code}",))
+    ``quality_problem_codes``는 회복 정책이 «품질» 때문에 닫았을 때만 실린다.
+    최종 게이트는 이 코드를 보고 «보고서 품질 최소 기준 미달»과 «출고 전 자동
+    검증 거절»을 구분해 사용자에게 말한다 — 뭉뚱그리면 재시도해야 할 일과
+    포기해야 할 일이 뒤바뀐다. 무엇이 품질 사유인지는 shared의 회복 정책이
+    단일 권위로 정한다(``QUALITY_DERIVED_STOP_REASON_CODES``).
+    """
+
+    raise V2ValidationError(
+        (f"report_recovery:{reason_code}",),
+        problem_codes=quality_problem_codes,
+    )
 
 
 def run_v2(
@@ -1174,7 +1186,10 @@ def run_v2(
                     ("report_recovery:supplement_receipt_invalid",)
                 ) from error
             if recovery_decision.action is not RecoveryAction.RELEASE_COMPLETE:
-                _raise_recovery_stop(recovery_decision.reason_code)
+                _raise_recovery_stop(
+                    recovery_decision.reason_code,
+                    recovery_decision.quality_problem_codes,
+                )
             if not supplement_summary_release_ready:
                 # 두 번째 후보의 manifest·render·품질 평가·receipt·정책 결정을
                 # 모두 다시 만든 뒤에야 닫는다. 조기 예외로 파생물 재계산을
@@ -1184,7 +1199,10 @@ def run_v2(
         elif recovery_decision.action is RecoveryAction.RELEASE_COMPLETE:
             validation_receipts = (primary_receipt,)
         elif recovery_decision.action is RecoveryAction.STOP_NO_CHARGE:
-            _raise_recovery_stop(recovery_decision.reason_code)
+            _raise_recovery_stop(
+                recovery_decision.reason_code,
+                recovery_decision.quality_problem_codes,
+            )
         else:
             _raise_recovery_stop("unexpected_primary_decision")
     elif release_mode is not ReleaseMode.SHADOW and (

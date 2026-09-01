@@ -47,6 +47,10 @@ from src.features.composer.port import FilingMeta, PerformanceTable
 from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
 from src.features.composer.validate import V2ValidationError
 from src.features.pipeline.port import Grade
+from src.shared.final_gate_diagnostics import (
+    FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR,
+    classify_v2_validation_final_gate_reason,
+)
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_evidence.constants import ReleaseMode
 from src.shared.report_quality.source_identity import document_identity_from_parts
@@ -436,13 +440,17 @@ def test_엄격모드는_AI요약을_부르지_않고_얇은_보고서를_막는
     assert caught.value.problems
     # 실질 claim 9건 < 하한 40건. 여기서 «어느 게이트가 사유를 소유하는가»를
     # 모드별로 못 박는다 — 이 순서가 뒤집히면 사용자에게 다른 이유가 나간다.
-    if expects_quality_codes:
-        # 엄격 경로만 숫자 하한 코드를 함께 싣는다(task 022).
-        assert "too_few_substantive_claims" in caught.value.problem_codes
-    else:
-        # FULL은 회복 정책이 먼저 닫는다. 품질 코드를 지어내지 않고,
-        # 사유는 사람 원문 없이 닫힌 report_recovery 코드 하나다.
-        assert caught.value.problem_codes == ()
+    # 두 경로 모두 숫자 하한 코드를 싣는다. 싣는 «주인»만 다르다 —
+    # 엄격 경로는 STRICT 게이트가, FULL은 회복 정책이 싣는다.
+    assert "too_few_substantive_claims" in caught.value.problem_codes
+    # 코드를 싣기만 하고 분류가 안 되면 사용자 화면은 그대로 «출고 전 자동
+    # 검증 거절»이다. 실제로 «보고서 품질 최소 기준 미달»로 갈라지는지까지 본다.
+    assert (
+        classify_v2_validation_final_gate_reason(caught.value.problem_codes)
+        == FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR
+    )
+    if not expects_quality_codes:
+        # FULL은 사람 원문 없이 닫힌 report_recovery 코드로 사유를 남긴다.
         assert all(
             problem.startswith("report_recovery:")
             for problem in caught.value.problems

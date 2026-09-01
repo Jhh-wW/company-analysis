@@ -16,6 +16,7 @@ from src.features.report_recovery.logic import (
 )
 from src.features.report_recovery.models import (
     RecoveryAction,
+    RecoveryDecision,
     SupplementAuthorization,
 )
 from src.shared.generation_validation_receipt import (
@@ -325,6 +326,53 @@ def test_안전실패나_비회복품질은_즉시_무차감으로끝낸다(
     assert nonrecoverable.action is RecoveryAction.STOP_NO_CHARGE
     assert safety.projected_total_ai_calls == 10
     assert nonrecoverable.projected_total_ai_calls == 10
+
+
+def test_품질때문에_닫은중단만_품질코드를_함께_싣는다() -> None:
+    """최종 게이트가 «품질 미달»과 «검증 거절»을 구분하려면 이 코드가 필요하다.
+
+    구조·안전 실패까지 품질 코드를 실으면 사용자에게 틀린 이유가 나가고,
+    재시도해야 할 일과 포기해야 할 일이 뒤바뀐다.
+    """
+
+    nonrecoverable = decide_post_validation(
+        _primary(
+            _assessment(
+                problem_codes=(QualityProblemCode.TOO_FEW_DOCUMENT_SOURCES,),
+                underfilled=("identity",),
+            )
+        )
+    )
+    too_many = decide_post_validation(
+        _primary(_recoverable("identity", "culture", "portfolio"))
+    )
+    safety = decide_post_validation(_primary(_assessment(safety_blocked=True)))
+
+    # 품질에서 비롯된 중단은 코드를 «값 문자열»로 싣는다 —
+    # str(enum)은 "QualityProblemCode.X"라서 최종 게이트 분류기와 안 맞는다.
+    assert nonrecoverable.reason_code == "post_validation_nonrecoverable_quality"
+    assert "too_few_document_sources" in nonrecoverable.quality_problem_codes
+    assert too_many.reason_code == "too_many_underfilled_sections"
+    assert too_many.quality_problem_codes
+    assert all(
+        isinstance(code, str) and not code.startswith("QualityProblemCode")
+        for code in too_many.quality_problem_codes
+    )
+    # 안전 실패는 품질 사유가 아니다 — 코드를 싣지 않는다.
+    assert safety.reason_code == "post_validation_safety_blocked"
+    assert safety.quality_problem_codes == ()
+
+
+def test_품질사유가_아닌_회복결정에는_품질코드를_실을수없다() -> None:
+    """규칙을 코드가 아니라 자료구조가 지키게 한다."""
+
+    with pytest.raises(ValueError):
+        RecoveryDecision(
+            action=RecoveryAction.STOP_NO_CHARGE,
+            reason_code="post_validation_safety_blocked",
+            observed_total_ai_calls=PRIMARY_AI_CALLS,
+            quality_problem_codes=("too_few_substantive_claims",),
+        )
 
 
 def test_완성평가영수증만_공개와_정상차감을_함께허용한다() -> None:

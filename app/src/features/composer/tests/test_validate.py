@@ -390,14 +390,31 @@ def test_V2ValidationError_problem_codes는_키워드로_전달하고_튜플로_
     assert error.problems == ("문제 있음",)
 
 
-def _v2_validation_error_call_sites(path: Path) -> list[tuple[int, int, list[str]]]:
+def _v2_validation_error_call_sites(
+    path: Path,
+) -> list[tuple[int, int, list[str], str]]:
     """``V2ValidationError(...)`` 호출을 실행하지 않고 코드로 직접 세어본다.
 
-    (줄번호, 위치인자 개수, 키워드인자 이름 목록)의 목록을 돌려준다.
+    (줄번호, 위치인자 개수, 키워드인자 이름 목록, 감싸는 함수 이름)의 목록을
+    돌려준다. 감싸는 함수 이름까지 보는 이유는 «몇 곳인가»보다 «어느 곳인가»가
+    지켜야 할 계약이기 때문이다 — 개수만 세면 새 운반자가 옛 운반자를 밀어내고
+    들어와도 통과한다.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"))
+    owner_of: dict[int, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Call):
+                    # 가장 «가까운» 함수가 주인이다 — 중첩이면 안쪽이 이긴다.
+                    owner_of[inner.lineno] = node.name
     return [
-        (node.lineno, len(node.args), [kw.arg for kw in node.keywords])
+        (
+            node.lineno,
+            len(node.args),
+            [kw.arg for kw in node.keywords],
+            owner_of.get(node.lineno, "<module>"),
+        )
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
@@ -426,13 +443,16 @@ def test_V2ValidationError_problem_codes_운반자는_한_권위_경로뿐이다
     ) + _v2_validation_error_call_sites(composer_dir / "validate.py")
 
     assert sites  # composer 안에 최소 한 곳은 있어야 한다(회귀 방지)
-    with_problem_codes = [s for s in sites if s[2] == ["problem_codes"]]
-    assert len(with_problem_codes) == 1  # STRICT 품질 게이트 한 곳뿐
-    # 그 한 곳을 뺀 나머지는 problem_codes 키워드를 아예 쓰지 않는다 —
+    carriers = {owner for _l, _a, kw, owner in sites if kw == ["problem_codes"]}
+    # 권위 있는 운반자는 «이름이 정해진» 둘뿐이다.
+    #   run_v2            — STRICT 품질 게이트(ENFORCE_NO_PARTIAL 경로)
+    #   _raise_recovery_stop — FULL 회복 정책이 품질 때문에 닫을 때 쓰는 유일한 깔때기
+    # 개수가 아니라 «누구인가»를 고정한다 — 셋째가 생기거나 둘 중 하나가
+    # 다른 함수로 옮겨 가면 이 시험이 깨지고, 옮긴 사람이 계약을 다시 쓰게 된다.
+    assert carriers == {"run_v2", "_raise_recovery_stop"}
+    # 그 둘을 뺀 나머지는 problem_codes 키워드를 아예 쓰지 않는다 —
     # 다른 raise 지점이 조용히 코드를 지어내 실어보내지 않는다.
-    assert all(
-        s[2] == [] for s in sites if s not in with_problem_codes
-    )
+    assert all(kw == [] for _l, _a, kw, owner in sites if owner not in carriers)
     # 모든 호출이 위치 인자(problems)를 정확히 하나만 넘긴다 — 두 번째
     # 위치 인자로 problem_codes를 몰래 넘기는 호출은 없다(키워드 전용 계약).
-    assert all(args == 1 for _lineno, args, _kw in sites)
+    assert all(args == 1 for _lineno, args, _kw, _owner in sites)

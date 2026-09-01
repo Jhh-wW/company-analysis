@@ -114,10 +114,20 @@ class RecoveryDecision:
     supplement_authorization: SupplementAuthorization | None = None
     publish_allowed: bool = False
     charge_allowed: bool = False
+    # 품질 때문에 닫은 중단만 이 코드를 싣는다. 최종 게이트가 «품질 하한
+    # 미달»을 다른 검증 실패와 구분해 사용자에게 말하려면 이 값이 필요하다.
+    quality_problem_codes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.reason_code.strip():
             raise ValueError("회복 결정에는 기계 사유 코드가 필요합니다")
+        if (
+            self.quality_problem_codes
+            and self.reason_code not in QUALITY_DERIVED_STOP_REASON_CODES
+        ):
+            raise ValueError(
+                "품질에서 비롯되지 않은 회복 사유에 품질 코드를 실을 수 없습니다"
+            )
         if (
             self.observed_total_ai_calls < 0
             or self.authorized_additional_ai_calls < 0
@@ -180,6 +190,28 @@ _NONRECOVERABLE_QUALITY_CODES = frozenset(
         QualityProblemCode.TOO_FEW_DOCUMENT_SOURCES,
     }
 )
+
+#: 회복 정책이 «품질» 때문에 닫은 중단 사유. 구조 결속·생산 증거·공개 안전
+#: 실패는 여기에 «없다» — 그쪽까지 품질 미달로 뭉뚱그리면 사용자에게 틀린
+#: 이유가 나가고, 재시도해야 할 일과 포기해야 할 일이 뒤바뀐다.
+QUALITY_DERIVED_STOP_REASON_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "too_many_underfilled_sections",
+        "post_validation_nonrecoverable_quality",
+        "post_supplement_quality_failed",
+    }
+)
+
+
+def _quality_codes_of(assessment: GenerationAssessment) -> tuple[str, ...]:
+    """평가가 남긴 품질 코드를 문자열 값으로 정규화한다.
+
+    ``QualityProblemCode``는 ``str`` Enum이지만 ``str(member)``는 값이 아니라
+    ``"QualityProblemCode.X"``를 준다. 최종 게이트 분류기는 ``.value`` 문자열
+    집합과 대조하므로 여기서 값으로 고정해 넘긴다.
+    """
+
+    return tuple(code.value for code in assessment.quality.problem_codes)
 
 
 def _unique_sections(values: Iterable[str], *, label: str) -> tuple[str, ...]:
@@ -316,6 +348,7 @@ def _decide_first_validation(
             action=RecoveryAction.STOP_NO_CHARGE,
             reason_code=reason_code,
             observed_total_ai_calls=observed,
+            quality_problem_codes=_quality_codes_of(assessment),
         )
 
     authorization = _authorization_for(receipt, targets)
@@ -411,14 +444,20 @@ def _decide_second_validation(
             publish_allowed=True,
             charge_allowed=True,
         )
+    supplement_safety_blocked = _is_safety_blocked(supplement_receipt.assessment)
     return RecoveryDecision(
         action=RecoveryAction.STOP_NO_CHARGE,
         reason_code=(
             "post_supplement_safety_blocked"
-            if _is_safety_blocked(supplement_receipt.assessment)
+            if supplement_safety_blocked
             else "post_supplement_quality_failed"
         ),
         observed_total_ai_calls=observed,
+        quality_problem_codes=(
+            ()
+            if supplement_safety_blocked
+            else _quality_codes_of(supplement_receipt.assessment)
+        ),
     )
 
 
@@ -458,6 +497,7 @@ def decide_post_validation(
 __all__ = [
     "GenerationValidationReceipt",
     "MAX_SUPPLEMENT_SECTIONS",
+    "QUALITY_DERIVED_STOP_REASON_CODES",
     "MAX_TOTAL_AI_CALLS",
     "PRIMARY_AI_CALLS",
     "PRIMARY_REVIEW_CALLS",
