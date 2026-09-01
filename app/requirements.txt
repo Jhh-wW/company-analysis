@@ -53,7 +53,7 @@ httptools==0.8.0
 httpx==0.28.1
 idna==3.18
 jiter==0.16.0
-lxml==6.1.1
+lxml==6.1.2
 markdown-it-py==4.2.0
 MarkupSafe==3.0.3
 mdurl==0.1.2
