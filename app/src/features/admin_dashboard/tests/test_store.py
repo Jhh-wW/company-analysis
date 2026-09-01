@@ -8,6 +8,15 @@ from src.features.admin_dashboard import store
 from src.features.storage import constants as storage_constants
 from src.features.storage import db
 
+# reports 표는 컬럼이 늘어난다 — engine_epoch_digest가 뒤에 붙었다. 컬럼 목록 없는
+# 위치 삽입은 스키마가 자랄 때마다 깨지므로, 이 시험이 실제로 쓰는 컬럼만 이름으로
+# 지정한다. 나머지 컬럼은 스키마의 DEFAULT를 그대로 받는다.
+_INSERT_REPORT_SQL = (
+    f"INSERT INTO {storage_constants.TABLE_REPORTS} "
+    "(report_id, corp_id, job, payload_json, generated_at, created_at) "
+    "VALUES (?, ?, ?, ?, ?, ?)"
+)
+
 
 def test_error_blocks_immediately_and_events_are_append_only(tmp_path):
     target = tmp_path / "dashboard.db"
@@ -98,7 +107,7 @@ def test_survey_answers_and_revisions_are_scoped_to_report_version(tmp_path):
     target = tmp_path / "dashboard.db"
     with db.connect(target) as conn:
         conn.execute(
-            f"INSERT INTO {storage_constants.TABLE_REPORTS} VALUES (?, ?, ?, ?, ?, ?)",
+            _INSERT_REPORT_SQL,
             (
                 "report-versioned", "CORP-VERSIONED", "직무",
                 '{"company":"버전1"}', "2026-08-22", "2026-08-22",
@@ -180,7 +189,7 @@ def test_member_feedback_displays_append_only_event_not_mutable_projection(tmp_p
     target = tmp_path / "dashboard.db"
     with db.connect(target) as conn:
         conn.execute(
-            f"INSERT INTO {storage_constants.TABLE_REPORTS} VALUES (?, ?, ?, ?, ?, ?)",
+            _INSERT_REPORT_SQL,
             (
                 "report-audit",
                 "CORP-AUDIT",
@@ -326,7 +335,7 @@ def test_recent_resolved_issue_and_error_snapshot_use_actual_resolution_event(tm
     target = tmp_path / "dashboard.db"
     with db.connect(target) as conn:
         conn.execute(
-            f"INSERT INTO {storage_constants.TABLE_REPORTS} VALUES (?, ?, ?, ?, ?, ?)",
+            _INSERT_REPORT_SQL,
             (
                 "report-resolved", "CORP-RESOLVED", "분석",
                 '{"company":"해결전자"}', "2026-08-22", "2026-08-22",
@@ -378,7 +387,7 @@ def test_member_feedback_and_summary_apply_the_same_period(tmp_path):
         ):
             payload_json = f'{{"company":"{company}"}}'
             conn.execute(
-                f"INSERT INTO {storage_constants.TABLE_REPORTS} VALUES (?, ?, ?, ?, ?, ?)",
+                _INSERT_REPORT_SQL,
                 (
                     report_id, corp_id, "직무", payload_json,
                     "2026-08-01", "2026-08-01",
@@ -421,7 +430,7 @@ def test_member_feedback_never_falls_back_to_current_report_when_snapshot_is_mis
     target = tmp_path / "dashboard.db"
     with db.connect(target) as conn:
         conn.execute(
-            f"INSERT INTO {storage_constants.TABLE_REPORTS} VALUES (?, ?, ?, ?, ?, ?)",
+            _INSERT_REPORT_SQL,
             (
                 "legacy-report", "CORP-LEGACY", "직무", '{"company":"현재회사"}',
                 "2026-08-01", "2026-08-01",

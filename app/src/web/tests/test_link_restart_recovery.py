@@ -192,6 +192,9 @@ def _store_restart_member_delivery(
         source_snapshot=source,
         cache_namespace=namespace,
         content_generated_at=now,
+        # 새 내용 원본은 정상 engine epoch 영수증을 반드시 받는다. 재시작 복구는
+        # epoch 울타리를 다시 계산하지 않으므로 fixture 값이면 충분하다.
+        engine_epoch_digest="a" * 64,
         actual_models=("offline-test",),
     )
     backend = report_delivery_adapter.configured_artifact_backend()
