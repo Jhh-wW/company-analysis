@@ -120,7 +120,7 @@ def test_fragment_reason_codes는_1개_이상이어야_한다() -> None:
 
 
 def test_gen8_fragment_company_id는_빈_문자열을_거부한다() -> None:
-    """generation=8(2026-08-31) — company_id는 EvidenceFragment의 필수 필드다."""
+    """generation=8 — company_id는 EvidenceFragment의 필수 필드다."""
     with pytest.raises(EvidenceCollectionError):
         _make_fragment(company_id="")
 

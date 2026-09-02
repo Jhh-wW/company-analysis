@@ -203,7 +203,7 @@ class FilingKindSpec(NamedTuple):
     requirement: str
 
 
-#: ★ 2026-08-31 — 기존 `analysis_engine/tools/survey_audit_reports.py`의
+#: ★ 기존 `analysis_engine/tools/survey_audit_reports.py`의
 #:   `FILING_LOOKUP_DEFAULT`(사업보고서 우선, 감사보고서 폴백) 안전선을 그대로
 #:   따른다. 상장 여부로 조회 순서를 가르지 않는다 — 이 feature는 그 구분을
 #:   미리 알지 못하고(그것이 오히려 이 feature의 산출인 company_type이다),

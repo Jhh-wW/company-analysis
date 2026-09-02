@@ -1,4 +1,4 @@
-"""W1~W4 테스트 — 기획서의 W3 예시 3종을 그대로 시험지로 쓴다."""
+"""W1~W4 테스트 — W3 예시 3종을 그대로 시험지로 쓴다."""
 from __future__ import annotations
 
 import sys

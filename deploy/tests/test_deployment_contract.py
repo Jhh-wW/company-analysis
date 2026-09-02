@@ -453,7 +453,7 @@ def test_render_blueprint_turns_engine_v2_on_while_image_default_stays_v1() -> N
 
 
 #: Render 가 디스크 서비스에 주는 종료 유예 기본값(초).
-#: Blueprint 로 늘릴 수 없다 — 늘리려 하면 동기화가 거부된다(2026-08-29 실측).
+#: Blueprint 로 늘릴 수 없다 — 늘리려 하면 동기화가 거부된다(실측).
 RENDER_DEFAULT_SHUTDOWN_SECONDS = 30
 
 
@@ -468,7 +468,7 @@ def test_render_shutdown_window_covers_serial_uvicorn_and_app_shutdown() -> None
     )
     render_values = {item["key"]: item.get("value") for item in web_service["envVars"]}
 
-    # ★ 2026-08-29 실측 — Render 는 «디스크가 붙은 서비스»에 이 값을 허용하지 않는다.
+    # ★ 실측 — Render 는 «디스크가 붙은 서비스»에 이 값을 허용하지 않는다.
     #   Blueprint 동기화가 이 오류로 거부됐다:
     #     services[0].maxShutdownDelaySeconds
     #     max shutdown delay is not supported for services with a disk
@@ -501,7 +501,7 @@ def test_render_shutdown_window_covers_serial_uvicorn_and_app_shutdown() -> None
     assert "Render 기본 30초" in runbook
     assert "Uvicorn HTTP 요청 정리 최대 20초" in runbook
     normalized_runbook = " ".join(runbook.split())
-    # ★ 2026-08-29 실측으로 «절차가 바뀌었다».
+    # ★ 실측으로 «절차가 바뀌었다».
     #   그날 배포는 Blueprint Sync 가 아니라 서비스 화면의 Manual Deploy 로 성공했다.
     #   오히려 Blueprint 는 «다른 브랜치»(master)를 보고 있어 Sync 하면 옛 render.yaml 이
     #   적용될 뻔했다. 그래서 런북은 이제 둘을 «구분»해야 한다.
@@ -552,7 +552,7 @@ def test_render_shutdown_window_covers_serial_uvicorn_and_app_shutdown() -> None
     ), "Manual Deploy → /healthz 확인 → Environment 탭 편집 순서를 지켜야 한다"
 
     # ★ 종료 유예가 «왜» 30초인지는 옛 안내 문서가 아니라 배포값이 정본이다
-    #   (2026-09-03, 작업 메모 성격의 문서를 지우면서 옮겼다).
+    #   (작업 메모 성격의 문서를 지우면서 옮겼다).
     #   디스크가 붙어 있는 것이 maxShutdownDelaySeconds 를 못 쓰는 «이유»이고,
     #   그 결과가 플랫폼 기본 30초다. 둘이 같이 있어야 위 단정이 뜻을 갖는다.
     assert web_service["disk"]["mountPath"] == "/var/data", (
@@ -701,7 +701,7 @@ def test_report_release_mode_accepts_only_the_three_exact_application_values() -
 
 
 # ══════════════════════════════════════════════════════════
-# 포트폴리오 링크 계약(render-portfolio-link-v1, G-S1)
+# 포트폴리오 링크 계약(render-portfolio-link-v1)
 # ══════════════════════════════════════════════════════════
 
 
@@ -740,7 +740,7 @@ def _render_portfolio_link_environment() -> dict[str, str]:
 
 
 def test_포트폴리오_계약은_허용_목록에_있고_안전조건은_옛_계약과_같다() -> None:
-    """G-S1 — admin.py를 고치지 않고 손님 입구를 여는 새 계약. RUNTIME_CONTRACTS에
+    """admin.py를 고치지 않고 손님 입구를 여는 새 계약. RUNTIME_CONTRACTS에
     등록돼 있어야 컨테이너가 뜨고, forwarded 비신뢰·고정 origin·관리자 로그인 벽은
     옛 관리자 실제 분석판과 같은 안전 조건이며, 엔진 v2·출고 모드는 이 계약에서만
     선택이 아니라 필수로 강해진다(조용히 v1이나 미정 상태로 손님을 맞지 않는다)."""

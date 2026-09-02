@@ -76,8 +76,8 @@ def _unscored_fragments_attempt(
 ) -> CollectionAttempt:
     """무신호 문단 개수를 관측치로만 남긴다(P0-1) — 조각 자체는 harvest에 넣지 않는다.
 
-    fetch·분할·채점을 실제로 거친 뒤 나오는 attempt이므로(item 2 정정,
-    2026-08-31) requirement는 filing.requirement(REQUIRED) 그대로 둔다.
+    fetch·분할·채점을 실제로 거친 뒤 나오는 attempt이므로(item 2 정정)
+    requirement는 filing.requirement(REQUIRED) 그대로 둔다.
     """
     return CollectionAttempt(
         company_id=company_id,
