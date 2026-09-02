@@ -183,6 +183,58 @@ def test_확인_토큰은_한_번만_쓴다(admin: TestClient):
     assert 400 <= 다시.status_code < 500, 다시.status_code
 
 
+def test_다른_관리자가_발급받은_확인_표로는_실행할_수_없다(
+    admin: TestClient, caplog
+):
+    """확인 표는 «그 표를 받은 사람»에게만 듣는다.
+
+    ★ 왜 필요한가 — 표가 사람에 묶이지 않으면, 한 관리자가 확인 화면을 열어 둔
+      사이에 다른 관리자가 그 표로 대신 실행할 수 있다. 그러면 감사 기록의
+      「누가 승인했나」가 실제로 화면을 본 사람과 어긋난다.
+    ★ 뒤쪽 대조가 중요하다 — 앞의 400이 「이 사람은 원래 못 한다」가 아니라
+      「이 표가 이 사람 것이 아니다」임을 보이려면, 같은 사람이 자기 표로는
+      해낸다는 것을 같은 시험에서 함께 봐야 한다.
+    """
+
+    갑_링크 = _발급한_링크(admin)
+    을_링크 = _발급한_링크(admin)
+    갑_표 = _확인표(admin.get(f"/admin/links/{갑_링크}/revoke").text)
+
+    # 여기서부터는 «다른 관리자»로 요청한다.
+    다른_세션 = auth_logic.create_session("관리자@example.com", True)
+    admin.cookies.set(auth_constants.SESSION_COOKIE_NAME, 다른_세션.token)
+    다른_csrf = auth_logic.csrf_token_for_session(다른_세션.token)
+
+    with caplog.at_level("INFO", logger="security.admin_audit"):
+        남의_표로 = admin.post(
+            "/admin/links/revoke",
+            data={"key": 갑_링크, "confirm_token": 갑_표, "csrf_token": 다른_csrf},
+            follow_redirects=False,
+        )
+
+    assert 400 <= 남의_표로.status_code < 500, 남의_표로.status_code
+    with storage_db.connect() as conn:
+        assert not share_store.load_by_hash(conn, 갑_링크).is_revoked
+    denied = [
+        event
+        for event in _감사사건(caplog)
+        if event["action"] == "admin.link.revoke" and event["outcome"] == "denied"
+    ]
+    assert denied, "남의 확인 표를 쓴 요청이 감사에 denied로 남지 않았습니다"
+
+    # ★ 대조 — 같은 사람이 «자기가 받은» 표로는 실제로 중단할 수 있다.
+    자기_표 = _확인표(admin.get(f"/admin/links/{을_링크}/revoke").text)
+    자기_표로 = admin.post(
+        "/admin/links/revoke",
+        data={"key": 을_링크, "confirm_token": 자기_표, "csrf_token": 다른_csrf},
+        follow_redirects=False,
+    )
+
+    assert 자기_표로.status_code == 303, 자기_표로.status_code
+    with storage_db.connect() as conn:
+        assert share_store.load_by_hash(conn, 을_링크).is_revoked
+
+
 def test_다른_링크의_확인_토큰으로는_철회할_수_없다(admin: TestClient):
     갑 = _발급한_링크(admin)
     을 = _발급한_링크(admin)

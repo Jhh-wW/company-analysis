@@ -605,11 +605,23 @@ def test_두_칸을_비우면_기본값으로_되돌린다(admin: TestClient):
 def test_범위_밖_값은_400이고_아무것도_저장되지_않는다(
     admin: TestClient, 건수: str, 금액: str
 ):
+    """★ 이유는 «규칙에 맞는» 글이어야 이 시험이 범위 검사를 잰다.
+
+    짧은 이유를 쓰면 이유 하한 검사(G-S9, 20자)가 범위 검사보다 앞에서 400을
+    돌려주고, 그러면 범위 조건을 통째로 무력화해도 이 시험이 그대로 초록이다
+    (reviewer-gs9 P1, 실측: `allowlist.py`의 성공 건수 범위 조건을 끄고도
+    5 passed). 막는 자리를 재려면 그 앞의 관문을 다 통과시켜야 한다.
+    """
+
     _초대한다(_친구)
 
     응답 = admin.post(
         _한도경로,
-        data={"daily_success_limit": 건수, "daily_budget_krw": 금액, "reason": "시험"},
+        data={
+            "daily_success_limit": 건수,
+            "daily_budget_krw": 금액,
+            "reason": _한도이유,
+        },
         follow_redirects=False,
     )
 
