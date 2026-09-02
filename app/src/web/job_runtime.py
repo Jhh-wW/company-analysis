@@ -68,6 +68,7 @@ from src.features.storage import job_interruptions
 from src.features.storage import reports as report_store
 from src.shared import engine_build_identity as build_identity_contract
 from src.shared import generation_coordination
+from src.shared.report_evidence.constants import ReleaseMode
 from src.web import (
     evaluation_mode,
     generation_singleflight,
@@ -761,6 +762,17 @@ def _run_pipeline_worker(job: Job) -> RunResult:
         session.close_provider_context()
 
 
+def _report_requires_atomic_completion(report: Report) -> bool:
+    """FULL 생성물만 저장·출고 실패에도 메모리 결과를 그대로 두지 않는다.
+
+    demo·v1·SHADOW·ENFORCE_NO_PARTIAL은 이 계약 밖이며 audience와 무관하게
+    기존 동작(저장 실패 뒤에도 LINK·ADMIN 임시 미리보기가 메모리에 남는 것)을
+    그대로 유지한다 — 32장 §4-3 「FULL 밖 demo/non-FULL 동작은 불변이다」.
+    """
+
+    return report.release_mode == ReleaseMode.FULL.value
+
+
 def _apply_reused_delivery_origin(job: Job, result: RunResult) -> None:
     """모든 worker 완료 경로에서 content·artifact 원본을 함께 인계한다."""
 
@@ -975,18 +987,28 @@ async def _run_job(job: Job) -> None:
                         "불변 보고서 delivery 의무 표식 실패 job_id=%s",
                         job.job_id,
                     )
+            # FULL 생성물은 audience와 무관하게 저장·출고 실패 뒤 메모리
+            # 결과를 그대로 남기지 않는다. release_mode를 여기서 먼저 캡처해
+            # 두는 이유는, 아래 저장·출고 실패 갈래가 job.result를 FAILED로
+            # 되돌리면 report가 사라져 이후에는 FULL 여부를 다시 읽을 수 없기
+            # 때문이다 (32장 §4-3, 34장 새발견 §3 「발견3」).
+            requires_full_cleanup = (
+                job.result.outcome is Outcome.REPORT
+                and job.result.report is not None
+                and _report_requires_atomic_completion(job.result.report)
+            )
             report_saved = (
                 _save_report(job)
                 if job.result.outcome is not Outcome.REPORT or delivery_required
                 else False
             )
             if (
-                job.requires_public_report_grant
-                and job.result.outcome is Outcome.REPORT
+                job.result.outcome is Outcome.REPORT
                 and not report_saved
+                and (job.requires_public_report_grant or requires_full_cleanup)
             ):
-                # PUBLIC은 메모리 보고서만 보여 주는 임시 성공이 될 수 없다.
-                # grant 결속 실패는 저장 transaction을 되돌렸으므로 최종 결과도
+                # PUBLIC과 FULL 생성물은 메모리 보고서만 보여 주는 임시 성공이
+                # 될 수 없다. 저장 transaction이 되돌아갔으므로 최종 결과도
                 # 실패·무차감으로 닫아 출고 adapter가 호출될 여지를 없앤다.
                 job.delivery_persisted = False
                 if delivery_required:
@@ -994,7 +1016,7 @@ async def _run_job(job: Job) -> None:
                         await asyncio.to_thread(_fail_report_delivery, job)
                     except Exception:  # noqa: BLE001 — required 표식만으로도 공개는 닫힌다
                         logger.exception(
-                            "PUBLIC 권한 저장 실패의 delivery 표식 마감 실패 job_id=%s",
+                            "보고서 저장 실패의 delivery 표식 마감 실패 job_id=%s",
                             job.job_id,
                         )
                 job.result = replace(
@@ -1028,6 +1050,18 @@ async def _run_job(job: Job) -> None:
                         logger.exception(
                             "불변 보고서 delivery 실패 표식 실패 job_id=%s",
                             job.job_id,
+                        )
+                    if requires_full_cleanup:
+                        # FULL 원자 출고는 content·delivery·artifact·자동승인·
+                        # charge·권한 결속이 한 거래로 rollback됐다. 화면·PDF·
+                        # single-flight가 그 실패를 REPORT 성공으로 잘못 읽지
+                        # 않도록 audience와 무관하게 결과를 닫는다.
+                        job.result = replace(
+                            job.result,
+                            outcome=Outcome.FAILED,
+                            report=None,
+                            message=PIPELINE_FAILED_MESSAGE,
+                            charged=False,
                         )
             elif job.result.outcome is Outcome.REPORT and delivery_required:
                 job.delivery_persisted = False
