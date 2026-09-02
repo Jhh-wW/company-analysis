@@ -11,6 +11,7 @@ from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
 from src.features.cost_tracking import store as cost_store
 from src.features.pipeline.port import Outcome
+from src.features.report_delivery import store as delivery_store
 from src.features.report_standard.publish import (
     PublishBlockedError,
     PublishValidation,
@@ -110,6 +111,50 @@ def test_publish_gate_출고시점에만_결속된_LINK_run을_막고_GET은_이
         assert run.stop_reason == "automatic_release_gate_stopped"
         assert run.finished_at
         assert run.internal_ai_cost_krw == 123.0
+
+
+def test_LINK는_finalize_단독호출의_미분류_예외에도_stopped로_닫힌다(monkeypatch):
+    """34장 챕터03 §4가 023에서 넘겨받으라고 못 박은 계약을 이 계층에 직접 못 박는다.
+
+    ``job_runtime._run_job``을 거치는 정상 생산 경로는 이 분기가 없어도
+    ``report_available=False``로 이미 안전하다
+    (``test_report_delivery_integration.py::test_LINK_알수없는_예외도_fail_closed로_닫힌다``).
+    이 시험은 ``finalize_new_report_delivery``를 그 밖에서 단독으로 부르는
+    경우(예: 관리자 재확인 경로)에도 사각지대가 없는지, 4개 알려진 출고차단이
+    아닌 순수 ``RuntimeError``로 직접 확인한다.
+    """
+
+    report_id = "77" * 16
+    raw_key = "88" * 16
+    _awaiting_link_run(raw_key=raw_key, report_id=report_id)
+
+    def unclassified_failure(_report):
+        raise RuntimeError("시험용 미분류 어댑터 오류 — 4개 알려진 출고차단이 아니다")
+
+    monkeypatch.setattr(reports_router, "_report_for_output", unclassified_failure)
+
+    with pytest.raises(RuntimeError):
+        reports_router.finalize_new_report_delivery(
+            report_id=report_id,
+            corp_id="corp-naver",
+            billing_bucket_id=raw_key,
+            report=object(),
+            actual_models=("test-model",),
+            reused_from_cache=False,
+            engine_build_identity=build_identity_contract.process_engine_build_identity(),
+        )
+
+    with storage_db.connect() as conn:
+        run = share_store.load_run(conn, report_id)
+        intent = delivery_store.load_delivery_intent(conn, report_id)
+    assert run is not None
+    assert run.status == share_store.RUN_STATUS_STOPPED
+    assert run.status != share_store.RUN_STATUS_AWAITING_RELEASE
+    assert run.stop_step == "delivery_finalization"
+    assert run.stop_reason == "delivery_finalization_failed"
+    assert intent is not None
+    assert intent.state == delivery_store.DELIVERY_INTENT_FAILED
+    assert intent.failure_code == "artifact_finalization_failed"
 
 
 def test_publish_gate_history_storage_failure_does_not_mask_original_failure_or_409(

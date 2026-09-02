@@ -1635,6 +1635,20 @@ def finalize_new_report_delivery(
                 report_id,
                 **_pdf_gate_stop_codes(exc),
             )
+        else:
+            # 알려진 출고 차단이 아닌 예외(어댑터·저장소 오류 등)도 이 함수를
+            # 단독으로 부른 살아있는 프로세스에서 LINK 실행을
+            # awaiting_release에 방치하지 않는다 — 재시작을 기다리지 않고
+            # 그 자리에서 중단으로 닫는다. 정상 생산 경로(job_runtime._run_job)
+            # 는 이 분기가 없어도 report_available=False 로 이미 안전하지만
+            # (test_LINK_알수없는_예외도_fail_closed로_닫힌다 참고), 이 함수를
+            # _run_job 밖에서 단독 호출하는 경로가 생겨도 사각지대가 없도록
+            # 이 계층 자체에도 방어선을 둔다.
+            _mark_link_release_gate_stopped(
+                report_id,
+                stop_step="delivery_finalization",
+                stop_reason="delivery_finalization_failed",
+            )
         raise
 
 
