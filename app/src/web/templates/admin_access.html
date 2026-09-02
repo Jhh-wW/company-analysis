@@ -248,6 +248,17 @@
              value="{{ link_form.job if link_form else '' }}">
     </div>
     <div class="field">
+      <label for="link_audience_label">표시 이름 <span class="muted">(선택)</span></label>
+      <input id="link_audience_label" name="audience_label"
+             placeholder="예: 하이브 인사팀"
+             maxlength="{{ company_max_chars }}"
+             value="{{ link_form.audience_label if link_form else '' }}">
+      <p class="muted" style="margin-top:5px">
+        링크가 많아졌을 때 관리 화면에서 알아보기 위한 이름입니다.
+        <strong>받는 사람에게는 보이지 않습니다.</strong>
+      </p>
+    </div>
+    <div class="field">
       <label for="link_note">메모</label>
       <input id="link_note" name="note" placeholder="예: 하반기 공채, 3/5 지원"
              maxlength="{{ note_max_chars }}"
@@ -290,6 +301,7 @@
       <td>
         <strong>{{ link.company }}</strong>
         {% if link.job %}<br>{{ link.job }}{% endif %}
+        {% if link.audience_label %}<br>{{ link.audience_label }}{% endif %}
         {% if link.note %}<br><span class="muted">{{ link.note }}</span>{% endif %}
         <br><span class="muted">발급 {{ link_created_at_labels.get(link.key_hash, "—") }}</span>
         <br><span class="muted">만료 {{ link_expiry_date_labels.get(link.key_hash, "—") }}</span>
