@@ -186,7 +186,7 @@ def test_삭제한_공유와_내려받기_설명이_화면에_없다(client: Tes
 
 
 def test_기간이_지난_링크는_안_열린다(client: TestClient, monkeypatch):
-    """★ 그 자체."""
+    """★ 기간이 지난 링크는 안 열린다."""
     job_id = _보고서를_만든다(client)
     지난뒤 = dt.date.today() + dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS + 1)
     monkeypatch.setattr(job_runtime.link_expiry, "is_expired", lambda *a, **k: True)

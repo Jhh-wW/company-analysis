@@ -894,7 +894,7 @@ def _초대한다(email: str) -> None:
 def test_로그인만_하고_초대_안_됐으면_진짜_조사를_못_한다(
     client: TestClient, monkeypatch
 ):
-    """★ 그 자체 — 인터넷의 아무나 로그인해서 돈 쓰는 것을 막는다."""
+    """★ 로그인만 하고 초대 안 됐으면 진짜 조사를 못 한다 — 인터넷의 아무나 로그인해서 돈 쓰는 것을 막는다."""
     monkeypatch.setattr(runtime, "_PIPELINE", object())          # 돈이 드는 것으로 본다
     _로그인시킨다(client, "stranger@gmail.com")
     form = {

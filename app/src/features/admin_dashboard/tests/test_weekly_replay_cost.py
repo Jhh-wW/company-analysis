@@ -84,7 +84,7 @@ def _member_channel_cost(workbook_blob: bytes) -> float:
 
 
 def test_한눈에_보기_비용_합계는_데모_리플레이_기록을_빼고_더한다(tmp_path):
-    """★ 그 자체 — MEMBER 채널 실제 기록 1200.0원 + 리플레이 999999.0원이면 1200.0."""
+    """★ 리플레이 기록은 합계에서 뺀다 — MEMBER 채널 실제 기록 1200.0원 + 리플레이 999999.0원이면 1200.0."""
     target = tmp_path / "weekly-replay.db"
     with db.connect(target) as conn:
         lifecycle.ensure_schema(conn)

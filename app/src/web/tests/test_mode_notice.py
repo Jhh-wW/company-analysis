@@ -41,7 +41,7 @@ def test_데모_모드에서는_데모라고_말한다(client: TestClient, monke
 
 
 def test_진짜_조사_모드에서는_데모라고_말하지_않는다(client: TestClient, monkeypatch):
-    """★ 그 자체. 돈이 나가는데 「데모」라고 하면 안 된다."""
+    """★ 진짜 조사 모드에서는 「데모」라고 말하지 않는다. 돈이 나가는데 「데모」라고 하면 안 된다."""
     monkeypatch.setattr(runtime, "_PIPELINE", _가짜진짜알맹이())
 
     html = _첫화면(client)

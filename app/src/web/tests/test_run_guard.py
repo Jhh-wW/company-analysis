@@ -167,7 +167,7 @@ class _가짜진짜알맹이:
 
 
 def test_예산을_다_쓰면_조사를_거절한다(client: TestClient, monkeypatch):
-    """★ 그 자체. 이게 없으면 배포하는 순간 돈이 무제한으로 샌다."""
+    """★ 예산을 다 쓰면 조사를 거절한다. 이게 없으면 배포하는 순간 돈이 무제한으로 샌다."""
     monkeypatch.setattr(runtime, "_PIPELINE", _가짜진짜알맹이())
     _열쇠로_들어온다(client)
     _예산을_다_쓴다(monkeypatch)

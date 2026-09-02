@@ -42,7 +42,7 @@ def _데모결과(회사: str):
 
 @pytest.mark.parametrize("회사", _표본)
 def test_데모는_돈이_안_든다(회사: str):
-    """★ 그 자체. `port.py`의 약속은 「**이 요청에** 쓴 AI 비용」이다."""
+    """★ 데모는 한 푼도 안 쓴다. `port.py`의 약속은 「**이 요청에** 쓴 AI 비용」이다."""
     result = _데모결과(회사)
 
     assert result.cost_krw == 0.0, (

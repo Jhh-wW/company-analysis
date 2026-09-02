@@ -29,7 +29,7 @@ from src.web.recording import records_path
 
 
 def test_시험_중에는_진짜_이력_파일을_안_쓴다():
-    """★ 그 자체. `conftest.py`의 autouse 픽스처가 걸려 있어야 통과한다."""
+    """★ 시험 중에는 진짜 이력 파일을 안 쓴다. `conftest.py`의 autouse 픽스처가 걸려 있어야 통과한다."""
     진짜 = paths.APP_ROOT / obs.DEFAULT_RECORDS_RELATIVE_PATH
 
     지금 = records_path()
