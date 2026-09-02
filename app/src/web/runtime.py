@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import os
 import sqlite3
@@ -18,6 +19,7 @@ from src.features.pipeline.demo import DemoPipeline
 from src.features.pipeline import engine_mode
 from src.features.provenance import sources as provenance_sources
 from src.features.report_delivery import artifact as delivery_artifact
+from src.features.report_delivery import constants as delivery_constants
 from src.features.report_delivery import store as delivery_store
 from src.features.sharelink import store as share_store
 from src.features.storage import db as storage_db
@@ -31,6 +33,12 @@ from src.web import (
 
 
 logger = logging.getLogger(__name__)
+
+#: 재시작 스윕이 정체된 delivery 의무의 LINK 이력을 닫을 때 남기는 단계·사유.
+#: ``mark_release_stopped``는 자유 문자열을 받으며, ``admin_link.html``의
+#: ``run_stop_reason_labels``가 이 값을 사람이 읽을 라벨로 보여준다.
+_STALE_DELIVERY_LINK_STOP_STEP = "server_restart_recovery"
+_STALE_DELIVERY_LINK_STOP_REASON = "server_restart_delivery_incomplete"
 
 
 def make_pipeline() -> object:
@@ -257,6 +265,70 @@ def _recover_member_run_history() -> None:
         )
 
 
+def _recover_stale_report_deliveries() -> None:
+    """저장은 됐지만 출고가 확정되지 못한 delivery 의무·LINK 이력을 함께 닫는다.
+
+    ``_save_report`` 성공 직후 ~ 최종 출고 확정(``_finalize_report_delivery``)
+    사이에 프로세스가 죽으면 ``delivery_intents``는 ``required``인 채 영구히
+    남는다(PUBLIC·MEMBER·ADMIN·LINK 4개 audience 공통). 같은 창에서 LINK는
+    ``share_link_run_history``도 ``awaiting_release``에 영구히 남는다 —
+    ``_recover_link_run_history``가 보는 ``list_running_runs``는 ``running``
+    상태만 보므로 이 상태를 모른다.
+
+    ★ 진짜 출고가 이미 끝난 보고서는 절대 건드리지 않는다.
+      ``list_stale_required_delivery_intents``가 delivery 존재 여부를 먼저
+      확인해 그런 report_id는 애초에 후보에서 뺀다 — 별도 출고 권위를 새로
+      만드는 것이 아니라 기존 delivery 유무만 읽어 판단한다.
+    """
+
+    with storage_db.connect() as conn:
+        stale = delivery_store.list_stale_required_delivery_intents(
+            conn,
+            older_than=clock.now_kst()
+            - dt.timedelta(minutes=delivery_constants.STALE_DELIVERY_INTENT_MINUTES),
+        )
+    if not stale:
+        return
+    closed_intents = 0
+    closed_link_runs = 0
+    for intent in stale:
+        try:
+            report_delivery_adapter.fail_public_delivery(
+                intent.public_id,
+                failure_code=delivery_constants.STALE_DELIVERY_INTENT_FAILURE_CODE,
+                failed_at=clock.now_kst(),
+            )
+        except Exception:  # noqa: BLE001 — 한 건의 실패가 나머지 스윕·시작을 막지 않는다
+            logger.exception(
+                "정체된 delivery 의무를 재시작 스윕에서 닫지 못했습니다 public_id=%s",
+                intent.public_id,
+            )
+            continue
+        closed_intents += 1
+        try:
+            with storage_db.connect() as conn:
+                if share_store.mark_release_stopped(
+                    conn,
+                    report_id=intent.public_id,
+                    stopped_at=clock.iso_now_kst(),
+                    stop_step=_STALE_DELIVERY_LINK_STOP_STEP,
+                    stop_reason=_STALE_DELIVERY_LINK_STOP_REASON,
+                ):
+                    closed_link_runs += 1
+        except Exception:  # noqa: BLE001 — LINK 이력 정리 실패가 재시작을 막지 않는다
+            logger.exception(
+                "정체된 delivery 의무의 LINK 이력을 닫지 못했습니다 public_id=%s",
+                intent.public_id,
+            )
+    if closed_intents:
+        logger.warning(
+            "서버 재시작으로 정체된 delivery 의무 %d건을 실패로 닫았습니다 "
+            "(그중 LINK 이력 %d건 함께 중단)",
+            closed_intents,
+            closed_link_runs,
+        )
+
+
 def _reconcile_artifact_blob_intents() -> None:
     """시작 전 유예 기간이 끝난 미결속 PDF blob만 보수적으로 정리한다."""
 
@@ -329,6 +401,7 @@ async def _lifespan(_app: FastAPI):
     paid_runtime._recover_observation_lifecycle()
     _recover_link_run_history()
     _recover_member_run_history()
+    _recover_stale_report_deliveries()
     # 순환 import를 피하려고 앱 조립이 끝나 실제 lifespan이 열릴 때 가져온다.
     from src.web import job_runtime  # noqa: PLC0415
 

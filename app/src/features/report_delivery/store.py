@@ -1071,6 +1071,21 @@ def load_delivery_by_public_id(
     return delivery
 
 
+def _delivery_intent_from_row(row: sqlite3.Row | tuple) -> DeliveryIntent:
+    """delivery 의무 한 행을 검증된 DTO로 바꾼다(조회 함수 여러 곳이 공유)."""
+
+    try:
+        return DeliveryIntent(
+            public_id=str(row[0]),
+            state=str(row[1]),
+            required_at=datetime_from_utc_text(row[2], label="delivery 의무 시작"),
+            updated_at=datetime_from_utc_text(row[3], label="delivery 의무 변경"),
+            failure_code=str(row[4]),
+        )
+    except (TypeError, ValueError) as exc:
+        raise LifecycleStoreCorrupt("delivery 의무 표식이 손상됐습니다") from exc
+
+
 def load_delivery_intent(
     conn: sqlite3.Connection,
     public_id: str,
@@ -1088,16 +1103,7 @@ def load_delivery_intent(
     ).fetchone()
     if row is None:
         return None
-    try:
-        intent = DeliveryIntent(
-            public_id=str(row[0]),
-            state=str(row[1]),
-            required_at=datetime_from_utc_text(row[2], label="delivery 의무 시작"),
-            updated_at=datetime_from_utc_text(row[3], label="delivery 의무 변경"),
-            failure_code=str(row[4]),
-        )
-    except (TypeError, ValueError) as exc:
-        raise LifecycleStoreCorrupt("delivery 의무 표식이 손상됐습니다") from exc
+    intent = _delivery_intent_from_row(row)
     if intent.public_id != clean_public_id:
         raise LifecycleStoreCorrupt("공개 ID와 delivery 의무 표식이 맞지 않습니다")
     if (
@@ -1106,6 +1112,43 @@ def load_delivery_intent(
     ):
         raise LifecycleStoreCorrupt("완료 delivery 의무에 실제 delivery가 없습니다")
     return intent
+
+
+def list_stale_required_delivery_intents(
+    conn: sqlite3.Connection,
+    *,
+    older_than: dt.datetime,
+) -> list[DeliveryIntent]:
+    """N분 넘게 ``required``로 정체된 delivery 의무만 재시작 스윕 대상으로 돌려준다.
+
+    ``_save_report`` 성공 직후 ~ 최종 출고 확정 사이에 프로세스가 죽으면 이
+    의무는 영원히 required로 남는다(§F1). 정상 진행 중인 요청까지 스윕이
+    건드리지 않도록 ``older_than``보다 새 의무는 제외한다. 같은 공개 ID에
+    실제 delivery가 이미 있으면(정상 경로라면 의무도 이미 complete여야
+    하지만 방어적으로 재확인) 절대 포함하지 않는다 — 실제 출고가 끝난
+    보고서를 스윕이 실패로 뒤집는 사고를 막기 위함이다.
+    """
+
+    ensure_schema(conn)
+    cutoff = require_aware(older_than, label="delivery 의무 정체 기준")
+    rows = conn.execute(
+        f"""
+        SELECT public_id, state, required_at, updated_at, failure_code
+        FROM {TABLE_DELIVERY_INTENTS}
+        WHERE state = ?
+        ORDER BY updated_at ASC, public_id ASC
+        """,
+        (DELIVERY_INTENT_REQUIRED,),
+    ).fetchall()
+    stale: list[DeliveryIntent] = []
+    for row in rows:
+        intent = _delivery_intent_from_row(row)
+        if intent.updated_at > cutoff:
+            continue
+        if load_delivery_by_public_id(conn, intent.public_id) is not None:
+            continue
+        stale.append(intent)
+    return stale
 
 
 def mark_delivery_required(
