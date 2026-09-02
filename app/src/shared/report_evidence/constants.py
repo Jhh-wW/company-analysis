@@ -8,6 +8,14 @@ from typing import Final
 
 EVIDENCE_CONTRACT_VERSION: Final[str] = "report-evidence-v1"
 
+# 여러 feature와 실서비스 adapter가 함께 쓰는 문서 source_kind 정본. 홈페이지
+# feature가 만든 값을 pipeline이 문자열 복사로 추측하지 않게 shared에 둔다.
+SOURCE_KIND_OFFICIAL_WEB_PAGE: Final[str] = "official_web_page"
+SOURCE_KIND_OFFICIAL_RECRUIT_PAGE: Final[str] = "official_recruit_page"
+OFFICIAL_WEB_SOURCE_KINDS: Final[frozenset[str]] = frozenset(
+    {SOURCE_KIND_OFFICIAL_WEB_PAGE, SOURCE_KIND_OFFICIAL_RECRUIT_PAGE}
+)
+
 
 class CollectionState(str, Enum):
     """외부 자료 한 경로를 확인한 결과."""
