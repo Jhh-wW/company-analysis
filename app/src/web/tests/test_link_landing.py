@@ -570,3 +570,63 @@ def test_랜딩_화면에는_열쇠_원문이_없다(client: TestClient):
     assert "하이브 보고서 보기" in 랜딩.text
     assert _열쇠 not in 랜딩.text
     assert _열쇠 not in str(랜딩.headers)
+
+
+# ══════════════════════════════════════════════════════════
+# ⑨ 카드는 «유효한 링크 쿠키»가 있으면 보인다 (root 결정 2026-09-02)
+# ══════════════════════════════════════════════════════════
+
+
+def test_링크_쿠키가_있는_관리자도_랜딩_카드를_본다(client: TestClient):
+    """★ 만든 사람이 자기 QR로 시연해야 한다 (root 결정 2026-09-02).
+
+    카드를 보이는 조건은 「비용 갈래가 LINK인가」가 아니라 «유효한 초대 링크
+    쿠키가 있는가»다. 관리자가 자기 링크를 찍었을 때 카드가 안 보이면
+    「받는 사람에게 무엇이 보이나」를 직접 확인할 방법이 없다.
+
+    ★ 돈이 나가는 통장은 그대로 관리자 몫이다 — 보이는 것과 세는 것은 다른 문제다.
+    """
+    report_id = _보고서를_저장한다("하이브")
+    _링크발급("하이브", report_id=report_id)
+    _로그인(client, "admin@example.com", is_admin=True)
+
+    열림 = client.get(f"/k/{_열쇠}", follow_redirects=False)
+    랜딩 = client.get("/")
+    본문 = visible_text(랜딩.text)
+
+    assert 열림.headers["location"] == "/"
+    assert "하이브 보고서 보기" in 본문
+    assert "다른 회사 분석해 보기" in 본문
+    assert f'href="/result/{report_id}"' in 랜딩.text
+    # 이 링크의 남은 한도를 그대로 보여 준다 — 보는 사람이 관리자여도 링크 값이다.
+    assert "남은 이용 한도: 오늘 3,000원 · 전체 3,000원" in 본문
+
+
+def test_쿠키_없는_관리자_화면은_그대로다(client: TestClient):
+    """★ 링크를 안 찍은 관리자에게는 카드가 한 장도 안 보인다.
+
+    카드를 여는 조건은 「관리자인가」가 아니라 「유효한 링크 쿠키가 있는가」다.
+    조건을 잘못 넓히면 아무 관계 없는 화면에 남의 회사 이름이 뜬다.
+    """
+    _링크발급("하이브", report_id=_보고서를_저장한다("하이브"))
+    _로그인(client, "admin@example.com", is_admin=True)
+
+    본문 = _글자줄만(visible_text(client.get("/").text))
+
+    assert "하이브 보고서 보기" not in "\n".join(본문)
+    assert "다른 회사 분석해 보기" not in "\n".join(본문)
+    assert 본문 == _스냅샷("admin")
+
+
+def test_철회된_링크_쿠키를_가진_관리자에게도_카드가_안_보인다(client: TestClient):
+    """★ 닫힌 링크는 누가 봐도 닫힌 것이다. 관리자라고 되살아나면 안 된다."""
+    _링크발급("하이브", report_id=_보고서를_저장한다("하이브"))
+    with storage_db.connect() as conn:
+        share_store.delete(conn, _열쇠, revoked_at="2026-09-02T10:00:00")
+    _로그인(client, "admin@example.com", is_admin=True)
+    client.cookies.set(KEY_COOKIE_NAME, _열쇠)
+
+    본문 = visible_text(client.get("/").text)
+
+    assert "하이브 보고서 보기" not in 본문
+    assert "남은 이용 한도" not in 본문

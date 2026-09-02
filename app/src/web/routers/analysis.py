@@ -414,13 +414,20 @@ def _landing_amount(krw: float) -> str:
     return f"{math.floor(max(0.0, krw)):,}"
 
 
-def _landing_budget_note(bucket: str, daily_cap: Optional[float]) -> str:
+def _landing_budget_note(bucket: str) -> str:
     """이 링크로 «얼마까지» 되는지 한 줄. 다 썼으면 그 사실을 대신 말한다.
+
+    Args:
+        bucket: 이 초대 링크의 열쇠. 보는 사람이 아니라 **링크**의 남은 한도다.
 
     ★ 하루 소진과 «수명 전체» 소진은 **다른 말**을 한다 — 하루 소진은 내일
       열리지만 누적 소진은 내일도 안 열린다. 같은 말을 하면 헛되이 기다리게 된다
       (2026-09-02 사람 결정 D-G1). 문구는 새로 짓지 않고 `/run`이 막을 때 쓰는
       것과 **같은 상수**를 쓴다 — 두 화면이 다른 말을 하면 손님이 헷갈린다.
+    ★ 상한은 보는 사람의 갈래가 아니라 **링크 갈래의 값**을 쓴다. 관리자가 자기
+      QR을 찍어도 화면에는 「받는 사람에게 남은 몫」이 보여야 시연이 된다
+      (2026-09-02 root 결정). 관리자가 실제로 쓰는 돈은 관리자 통장에서 나가고,
+      그 판정은 `request_helpers._guard_run`이 따로 한다.
     ★ 숫자를 못 읽으면 줄 자체를 빼고 «지어내지 않는다».
     """
     today = clock.today_kst()
@@ -433,10 +440,7 @@ def _landing_budget_note(bucket: str, daily_cap: Optional[float]) -> str:
     ):
         stored_bucket = bucket
     daily_left = share_logic.budget_left(
-        paid_runtime._LINK_SPEND,
-        stored_bucket,
-        today,
-        PER_LINK_DAILY_BUDGET_KRW if daily_cap is None else daily_cap,
+        paid_runtime._LINK_SPEND, stored_bucket, today, PER_LINK_DAILY_BUDGET_KRW
     )
     try:
         with storage_db.connect() as conn:
@@ -460,14 +464,18 @@ def _landing_budget_note(bucket: str, daily_cap: Optional[float]) -> str:
 
 
 def _link_landing(request: Request, link) -> Optional[_LinkLanding]:
-    """초대 링크 갈래로 들어온 사람에게만 랜딩 카드를 만든다.
+    """«유효한 초대 링크 쿠키»를 들고 온 사람에게 랜딩 카드를 만든다.
 
-    ★ 관리자·회원·모르는 손님의 첫 화면은 **한 글자도 바뀌지 않는다** —
-      여기서 ``None``을 돌려주면 화면 틀이 카드를 아예 그리지 않는다.
+    ★ 조건은 「비용 갈래가 LINK인가」가 **아니라** 「살아 있는 초대 링크 쿠키가
+      있는가」다 (2026-09-02 root 결정). 관리자도 자기 QR을 찍으면 받는 사람과
+      같은 화면을 봐야 시연이 된다. 돈이 나가는 통장과 차단 판정은 그대로
+      갈래대로다 — **보이는 것과 세는 것은 다른 문제다.**
+    ★ 링크 쿠키가 없거나 이미 닫힌 링크면 ``link``가 ``None``이라 호출부에서
+      걸러진다. 그래서 관계없는 손님의 첫 화면은 한 글자도 바뀌지 않는다.
+    ★ 열쇠는 쿠키에서 그대로 읽는다. 같은 요청에서 ``link``를 찾아낸 것이 바로 이
+      쿠키 값이므로(`request_helpers._current_share_link`) DB를 다시 열지 않는다.
     """
-    track, bucket, cap = request_helpers._track_of(request)
-    if track is not share_tracks.Track.LINK:
-        return None
+    bucket = (request.cookies.get(KEY_COOKIE_NAME) or "").strip().lower()
     report_url, made_on_note = _bound_report_view(link)
     return _LinkLanding(
         company=link.company,
@@ -482,7 +490,11 @@ def _link_landing(request: Request, link) -> Optional[_LinkLanding]:
         not_ready_hint=LANDING_REPORT_NOT_READY_NOTE,
         other_button=LANDING_OTHER_COMPANY_BUTTON,
         other_note=LANDING_OTHER_COMPANY_NOTE,
-        budget_note=_landing_budget_note(bucket, cap),
+        budget_note=(
+            _landing_budget_note(bucket)
+            if share_logic.is_valid_key(bucket)
+            else ""
+        ),
     )
 
 
