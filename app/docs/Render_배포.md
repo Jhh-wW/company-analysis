@@ -61,6 +61,47 @@ provider를 실제로 호출하고 영속 디스크에 결과를 보존하지만
 계약은 trusted ingress/canary verifier가 없어 BLOCKED이며, 독립 외부 백업도 adapter가 없어
 BLOCKED다. 영속 디스크는 재시작·재배포의 데이터 보존 수단이지 독립 백업이 아니다.
 
+## 포트폴리오 링크 계약(render-portfolio-link-v1) 범위
+
+`render-portfolio-link-v1`은 관리자 실분석 운영판과 같은 안전 조건(고정
+`PUBLIC_ORIGIN`, 빈 `FORWARDED_ALLOW_IPS`, `BETA_ADMIN_ONLY=1`, 같은
+`--no-proxy-headers` 실행 명령) 위에서 **초대 명단 회원에게만** 링크·초대·QR 입구를
+여는 계약이다. `app/src/web/routers/admin.py`·`app/src/web/routers/analysis.py`는
+바뀌지 않는다 — 두 계약이 갈리는 지점은 아래 표뿐이다.
+
+| 동작 | `render-admin-real-no-forwarded-v1`(현재) | `render-portfolio-link-v1` |
+|---|---|---|
+| 관리자 로그인·실제 분석 | 허용 | 허용 |
+| `/admin/link/new`(LINK 발급) | 차단(404) | 허용 |
+| `/admin/invite`(친구 초대) | 차단(409) | 허용 |
+| `/k/` 링크 입구 | 로그인 화면으로 이동 | 열림 |
+| 명단 밖 구글 로그인 | `/auth/not-admin` | `/auth/not-admin`(그대로) |
+| 명단 «회원»(allowlist 활성) 구글 로그인 | `/auth/not-admin` | 홈·조사 경로 통과, `/admin`은 그대로 차단 |
+| Host 고정·CSRF Origin 고정 | 켜짐 | 켜짐(그대로) |
+| `ENGINE_V2` | 배포자가 값 선택 | `1` 필수 |
+| `REPORT_RELEASE_MODE` | 배포자가 값 선택 | 필수(SHADOW/ENFORCE_NO_PARTIAL/FULL 중 하나) |
+
+★ 「명단 회원이 로그인 벽을 통과한다」는 `BETA_ADMIN_ONLY=1`인 모든 배포에 계약과
+무관하게 같이 적용된다 — 로그인 벽은 «누가 통과하는가»의 축이고, runtime contract는
+«어느 forwarded-header 신뢰 모델을 쓰는가»의 축이라 서로 다른 문제이기 때문이다.
+다만 LINK 발급·초대·`/k/` 입구는 이 계약에서만 열린다(위 표).
+
+옛 운영판에서 전환하는 절차:
+
+1. `render.yaml`의 `DEPLOYMENT_RUNTIME_CONTRACT` 값만
+   `render-admin-real-no-forwarded-v1`에서 `render-portfolio-link-v1`로 바꾼다.
+   플랜·디스크·`FORWARDED_ALLOW_IPS`·실행 명령 등 다른 값은 그대로 둔다.
+2. `ENGINE_V2=1`, `REPORT_RELEASE_MODE`가 SHADOW/ENFORCE_NO_PARTIAL/FULL 중 하나로
+   설정돼 있는지 확인한다 — 이 계약은 시작 검증에서 이 둘을 필수로 본다.
+3. Render Dashboard의 일반 `Deploy latest commit`이 아니라, 이 서비스를 관리하는
+   Blueprint에서 **Manual Sync / Deploy Blueprint**를 실행한다. 그래야 `render.yaml`의
+   설정 변경과 코드가 함께 반영된다.
+4. 배포 뒤 `/healthz`·`/readyz`, 관리자 로그인, 명단 밖 구글 로그인이 여전히
+   `/auth/not-admin`으로 가는지, LINK 발급·초대·`/k/` 입구가 실제로 열리는지를
+   확인한다.
+5. 되돌릴 때는 1번 값을 `render-admin-real-no-forwarded-v1`로 되돌리고 같은 Manual
+   Sync를 한 번 더 실행한다.
+
 ## 활성 제품 계약
 
 신규 분석 입력은 **회사명 필수 + 주소 힌트 선택**이다. 주소를 비워도 회사 후보 확인과
