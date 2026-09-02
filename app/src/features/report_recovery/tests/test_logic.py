@@ -301,6 +301,39 @@ def test_품질사유가_아닌_회복결정에는_품질코드를_실을수없�
         )
 
 
+def test_RUN_PRIMARY_결정은_관측0회와_기본10호출_승인만_허용한다() -> None:
+    """decide_preflight를 지우며 함께 지웠던 시험이 이 불변식도 지키고 있었다.
+
+    production 호출자는 없어졌지만 ``RecoveryAction.RUN_PRIMARY``와 그 불변식은
+    자료구조에 여전히 남아 있다 — 자료구조가 규칙을 지킨다는 사실은 함수가
+    아니라 이 dataclass 자체를 직접 구성해 확인한다.
+    """
+
+    decision = RecoveryDecision(
+        action=RecoveryAction.RUN_PRIMARY,
+        reason_code="preflight_all_sections_ready",
+        observed_total_ai_calls=0,
+        authorized_additional_ai_calls=PRIMARY_AI_CALLS,
+    )
+    assert decision.projected_total_ai_calls == PRIMARY_AI_CALLS
+
+    with pytest.raises(ValueError, match="관측된 AI 호출이 없어야"):
+        RecoveryDecision(
+            action=RecoveryAction.RUN_PRIMARY,
+            reason_code="preflight_all_sections_ready",
+            observed_total_ai_calls=1,
+            authorized_additional_ai_calls=PRIMARY_AI_CALLS,
+        )
+
+    with pytest.raises(ValueError, match="9회 작성·1회 검수만"):
+        RecoveryDecision(
+            action=RecoveryAction.RUN_PRIMARY,
+            reason_code="preflight_all_sections_ready",
+            observed_total_ai_calls=0,
+            authorized_additional_ai_calls=PRIMARY_AI_CALLS - 1,
+        )
+
+
 def test_완성평가영수증만_공개와_정상차감을_함께허용한다() -> None:
     primary = _primary(_assessment())
 
