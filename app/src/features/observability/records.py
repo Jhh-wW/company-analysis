@@ -48,7 +48,7 @@ class RecordsCapacityError(RuntimeError):
 
 @dataclass(frozen=True)
 class RunRecord:
-    """이력 1행. 정본 `08_관측/1_흐름/01_지표수집.md` 「13종」.
+    """이력 1행 — 정해진 「13종」.
 
     ★ 이 모양은 대시보드 화면 쪽과 합의된 고정값이다 — 필드를 늘리거나 줄이면
       화면 코드가 같이 깨진다. 바꿔야 한다면 화면 담당과 먼저 맞춘다.

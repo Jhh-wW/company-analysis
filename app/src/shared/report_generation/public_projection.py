@@ -11,7 +11,7 @@ composer가 렌더 후 한 번 만들어 저장하는 ``PublicSectionContentBloc
 ``models.py``의 ``canonical_value``·``canonical_json``·``canonical_sha256``
 세 함수만 쓴다 — 새 직렬화기·새 해시 함수를 만들지 않는다.
 
-불변식 I1~I8은 §02 설계 문서(``017_public_projection_design_02_설계.md``)
+불변식 I1~I8은 설계 문서의
 표를 따른다. 각 불변식은 생성 시(``__post_init__``)와 ``from_dict`` 복원
 시 모두 검사되며(복원은 생성자를 다시 부르므로 자동으로 같이 검사된다),
 실패는 예외 없이 전부 ``PublicProjectionError`` 로 닫힌다.

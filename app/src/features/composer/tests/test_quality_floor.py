@@ -65,7 +65,7 @@ _RESPONSES_FIXTURE: Final[dict[str, Any]] = json.loads(
 #    통과한다(순환 검증). 여기 숫자는 구현에서 도출한 매직 넘버가 아니라
 #    시험이 독립적으로 못 박는 «제품 약속»이다. 이 시험의 존재 이유가
 #    바로 «구현이 이 약속에서 벗어났는지 재는 것»이므로, 일반적인
-#    매직 넘버 금지 규칙(rules/general.md)의 의도된 예외다.
+#    매직 넘버 금지 규칙의 의도된 예외다.
 #: 실질 문장 40개 이상
 MIN_SUBSTANTIVE_SENTENCES: Final[int] = 40
 #: «확인» 등급이 전체의 50% 이상

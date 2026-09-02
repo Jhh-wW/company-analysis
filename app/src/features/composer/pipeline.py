@@ -5,7 +5,7 @@
     → render_report → (versioned 품질 shadow 판정) → (중복 검출 경고) → validate_v2
   각 단계의 규칙은 각 소유 파일(logic/verify/render/validate)에 있다.
 ★ AI 호출은 두 개의 주입 함수로만 한다 — 작가(writer_ask)와 검수(reviewer_ask)는
-  «다른 클로저»여야 한다 (Generator/Evaluator 분리, rules/harness.md).
+  «다른 클로저»여야 한다 (Generator/Evaluator 분리).
   provider 연결은 부르는 쪽(real.py)의 몫이다. 여기서 provider를 모른다.
 ★ 산문 정규식으로 값의 뜻을 추측하거나 FactRecord를 만들지 않는다. 다만 새
   공개 문장에 숫자가 있으면 구조화 의미 결속을 요구하고, 없으면 그 문장만 뺀다.

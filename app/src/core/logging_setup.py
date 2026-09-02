@@ -23,7 +23,7 @@
 
 ★ 이 모듈은 feature를 import하지 않는다
   필터가 무엇인지 모르고, 조립 지점(``src/web/main.py``)이 넣어 준다.
-  feature 간 직접 import 금지 규칙(``rules/feature-atomic.md``)을 지키기 위해서다.
+  feature 간 직접 import 금지 규칙을 지키기 위해서다.
 """
 
 from __future__ import annotations

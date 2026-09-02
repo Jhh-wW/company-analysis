@@ -1,16 +1,12 @@
 """`Report` → 노션 블록(JSON) 변환 — 순수 함수만 모은 곳.
 
 ★ 네트워크·시간·난수를 쓰지 않는다. 같은 `Report`를 넣으면 항상 같은 블록 목록이
-  나온다. 그래야 화면(result.html)과 「내용이 같은가」(P3 — 확정/07_출력/3_기준/
-  01_성공기준.md)를 코드로 비교할 수 있다.
+  나온다. 그래야 화면(result.html)과 「내용이 같은가」(P3)를
+  코드로 비교할 수 있다.
 
 ★ 배치 순서·문구는 `src/web/templates/result.html`을 그대로 옮겨 적었다.
   화면이 바뀌면 이 파일도 같이 고쳐야 한다 — 갈리면 화면이 이긴다
-  (확정/07_출력/1_흐름/01_세형태.md 「정본은 화면이다」).
-
-정본:
-  - 확정/07_출력/2_규칙/01_배치와근거표기.md
-  - 확정/07_출력/3_기준/01_성공기준.md (P3)
+  (「정본은 화면이다」).
 """
 
 from __future__ import annotations
@@ -556,11 +552,8 @@ def _v2_blocks(report: Report, projection: PublicReportProjection) -> list[Notio
 def build_page_title(report: Report) -> str:
     """노션 페이지 제목 — `회사명 분석 보고서 (YYYY-MM-DD)`.
 
-    정본: 확정/07_출력/2_규칙/01_배치와근거표기.md §파일명 규칙
-
     ★ 워드 파일명과 같은 근거로 `report.generated_at`을 쓴다(전송 시각이 아니다) —
       «다시 내보내기»를 해도 같은 제목이 나와야 한다
-      (확정/07_출력/1_흐름/01_세형태.md §다시 내보내기).
     """
     date_part = f" ({report.generated_at})" if report.generated_at else ""
     return f"{report.company} 분석 보고서{date_part}"

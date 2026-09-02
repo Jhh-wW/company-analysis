@@ -1219,7 +1219,7 @@ _SOURCE_STATE_FAILED = "failed"
 def _has_failed_source(sources: list[SourceStatus]) -> bool:
     """소스 중 하나라도 «우리 쪽 실패»(⚠️)가 있는가.
 
-    ★ 정본 03_수집/1_흐름/02_실패처리.md — 「⚠️ 못 가져옴 → ❌ 저장 안 함」.
+    ★ 「⚠️ 못 가져옴 → ❌ 저장 안 함」.
       「홈페이지가 그날만 죽었을 수 있다. 캐시하면 다음 사람도, 그다음 사람도
       영영 X를 본다. 그 회사가 「자료 없는 회사」로 굳어버린다.」
       ❌ 없음(회사의 사실)은 저장해도 된다 — 실패와 섞지 않는다.
@@ -2203,7 +2203,7 @@ class RealPipeline:
                 ),
                 # 수집 현황은 «그때 실제로 모은 것»을 그대로 보여준다.
                 sources=list(cached.sources),
-                # 정본 00_공통/2_규칙/04_할당량.md — 캐시 반환은 0 차감·무제한.
+                # 캐시 반환은 0 차감·무제한.
                 charged=False,
                 corp_type=cached.corp_type or judgment.corp_type,
                 fragments_collected=(

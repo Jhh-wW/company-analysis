@@ -223,7 +223,7 @@ def test_원문에_없는_문장은_W3로_걸린다():
 
 
 def test_요구역량은_배치_안_되면_5번에_되살아난다():
-    """정본 05_생성/1_흐름/01_문장스팬선택.md:123-132 — 조용한 누락 금지."""
+    """조용한 누락 금지."""
     kept, _deleted, steps, _engine = _돌린다({"items": [{"block": "1", "sid": "1-1"}]})
     복원된 = [i.sentence for i in kept if i.block == "5"]
     assert 복원된 == 요구역량

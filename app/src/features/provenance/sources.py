@@ -9,7 +9,6 @@
   canonical의 source_id·URL·발행처·원문 위치는 Markdown이 아니라 Report JSON
   등록부가 보존한다 — 시험(`tests/test_sources.py`, `storage/tests`)으로 각각 증명한다.
 
-정본: 확정/07_출력/2_규칙/01_배치와근거표기.md
 """
 
 from __future__ import annotations
