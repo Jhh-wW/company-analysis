@@ -1,12 +1,14 @@
 {% extends "base.html" %}
-{% block title %}LINK 사용 상태 확인 · 기업분석{% endblock %}
+{% block title %}초대 링크 사용 상태 · 기업분석{% endblock %}
 
 {% block content %}
 <section class="card" aria-labelledby="link-error-title">
   <div class="warn-line" role="alert">
     <span aria-hidden="true">⚠️</span>
     <div>
-      <h1 id="link-error-title" style="font-size:19px;margin-bottom:6px">LINK 사용 상태를 확인해 주세요</h1>
+      {# ★ 이 화면의 독자는 개발자가 아니다 — 내부 용어(LINK)를 쓰지 않는다
+         (설계 03장 §5·§3-7). 문구 자체는 request_helpers가 넘겨준다. #}
+      <h1 id="link-error-title" style="font-size:19px;margin-bottom:6px">초대 링크를 확인해 주세요</h1>
       <p>{{ scope_error }}</p>
     </div>
   </div>

@@ -768,3 +768,21 @@ def test_닫힌_링크_안내문구도_다음에_할_일을_알려준다():
 
     assert "사용이 중단되어" in 문구
     assert "연락처로 알려 주시면" in 문구
+
+
+def test_닫힌_링크_화면_전체에_내부용어가_없다():
+    """★ 문구만 고쳐서는 부족하다 — 화면 틀의 제목·머리글도 손님이 읽는다.
+
+    실측: 문구를 고쳐도 `share_scope_error.html`이 제목과 h1에서 「LINK」를
+    2번 더 썼다. 사람은 문구만 읽지 않는다. 응답 본문 전체를 본다.
+    """
+    본문 = _닫힌_링크로_조사를_시도한다()
+    글자 = visible_text(본문)
+
+    assert "LINK" not in 본문
+    assert "철회" not in 글자
+    assert "우리" not in 글자
+    for 용어 in _내부용어:
+        assert 용어.casefold() not in 글자.casefold(), 용어
+    # 화면이 무엇에 대한 것인지는 그대로 알 수 있어야 한다.
+    assert "초대 링크" in 글자
