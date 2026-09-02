@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 
 import pytest
 from fastapi.testclient import TestClient
@@ -420,6 +421,11 @@ def test_예약액_계약은_본조사_900원_그대로다():
 # ══════════════════════════════════════════════════════════
 
 _한도경로 = f"/admin/members/{_친구}/limit"
+#: 위험 동작의 이유는 20자 이상이어야 한다(G-S9 · 설계 05장 §4). 길이 규칙
+#: 자체는 `test_admin_dangerous_actions.py`가 보고, 여기서는 규칙에 맞는 글로
+#: «한도가 실제로 바뀌는지»만 본다.
+_한도이유 = "면접 준비 기간이라 하루 조사 건수를 늘려 달라는 요청"
+_되돌림이유 = "면접 준비 기간이 끝나 원래 기본값으로 되돌립니다"
 
 
 @pytest.fixture
@@ -427,6 +433,40 @@ def client():
     runtime._PIPELINE = DemoPipeline()
     with TestClient(main.app) as test_client:
         yield test_client
+
+
+
+# ══════════════════════════════════════════════════════════
+# 위험 동작 확인 단계(G-S9) — 시험이 실제 확인 화면을 거치게 한다
+# ══════════════════════════════════════════════════════════
+
+
+def _확인화면_경로(url: str, data: dict) -> str:
+    """이 POST 앞에 서 있는 확인 화면의 주소. 확인이 필요 없으면 빈 글자."""
+
+    if url == "/admin/links/revoke":
+        return f"/admin/links/{data.get('key', '')}/revoke"
+    if url == "/admin/revoke":
+        return f"/admin/members/{data.get('email', '')}/remove"
+    if url.endswith("/extend") or url.endswith("/limit"):
+        return url
+    return ""
+
+
+def _확인표(client: TestClient, url: str, data: dict) -> str:
+    """확인 화면을 «실제로 열어» 1회용 표를 받아 온다.
+
+    ★ 표를 지어내지 않는다 — 화면이 안 주면 빈 글자이고, 그 요청은 서버가
+      그대로 거절한다. 확인 단계 자체가 지켜지는지는 전용 시험
+      `test_admin_dangerous_actions.py`가 본다.
+    """
+
+    경로 = _확인화면_경로(url, data)
+    if not 경로:
+        return ""
+    화면 = client.get(경로)
+    찾음 = re.search(r'name="confirm_token" value="([0-9a-f]+)"', 화면.text)
+    return 찾음.group(1) if 찾음 else ""
 
 
 @pytest.fixture
@@ -440,6 +480,12 @@ def admin(client: TestClient) -> TestClient:
     def csrf가_붙은_post(url, *args, **kwargs):
         data = dict(kwargs.pop("data", {}) or {})
         data.setdefault("csrf_token", csrf)
+        # 위험 동작은 확인 화면을 거쳐야 실행된다(G-S9). 브라우저가 하는 것과
+        # 같은 두 단계를 여기서 그대로 밟는다.
+        if "confirm_token" not in data:
+            표 = _확인표(client, url, data)
+            if 표:
+                data["confirm_token"] = 표
         return 원래_post(url, *args, data=data, **kwargs)
 
     client.post = csrf가_붙은_post
@@ -477,14 +523,14 @@ def test_관리자가_한_친구의_한도만_바꾸고_감사행_하나를_남�
         data={
             "daily_success_limit": "7",
             "daily_budget_krw": "4500",
-            "reason": "면접 준비 기간",
+            "reason": _한도이유,
         },
         follow_redirects=False,
     )
 
     assert 응답.status_code == 303
     assert 응답.headers["location"] == "/admin/members"
-    assert _저장된_한도(_친구) == (7, 4500.0, "면접 준비 기간")
+    assert _저장된_한도(_친구) == (7, 4500.0, _한도이유)
     assert _저장된_한도(_다른친구) == (None, None, "")
     assert len(_한도_감사행()) == 1
     assert _한도_감사행()[0][1] == "limit_changed"
@@ -495,7 +541,11 @@ def test_기본한도_변경은_다음날도_유지된다(admin: TestClient):
     _초대한다(_친구)
     admin.post(
         _한도경로,
-        data={"daily_success_limit": "5", "daily_budget_krw": "4000", "reason": "상시"},
+        data={
+            "daily_success_limit": "5",
+            "daily_budget_krw": "4000",
+            "reason": _한도이유,
+        },
         follow_redirects=False,
     )
 
@@ -524,18 +574,26 @@ def test_두_칸을_비우면_기본값으로_되돌린다(admin: TestClient):
     _초대한다(_친구)
     admin.post(
         _한도경로,
-        data={"daily_success_limit": "9", "daily_budget_krw": "9000", "reason": "잠깐"},
+        data={
+            "daily_success_limit": "9",
+            "daily_budget_krw": "9000",
+            "reason": _한도이유,
+        },
         follow_redirects=False,
     )
 
     응답 = admin.post(
         _한도경로,
-        data={"daily_success_limit": "", "daily_budget_krw": "", "reason": "기간 끝"},
+        data={
+            "daily_success_limit": "",
+            "daily_budget_krw": "",
+            "reason": _되돌림이유,
+        },
         follow_redirects=False,
     )
 
     assert 응답.status_code == 303
-    assert _저장된_한도(_친구) == (None, None, "기간 끝")
+    assert _저장된_한도(_친구) == (None, None, _되돌림이유)
     _t, _b, cap = request_helpers._track_of(_친구로_들어온_요청(_친구))
     assert cap == 3000.0
 
@@ -576,7 +634,11 @@ def test_이유가_비면_400이고_한도가_안_바뀐다(admin: TestClient):
 def test_명단에_없는_사람의_한도는_바꿀_수_없다(admin: TestClient):
     응답 = admin.post(
         "/admin/members/ghost@example.com/limit",
-        data={"daily_success_limit": "5", "daily_budget_krw": "1000", "reason": "시험"},
+        data={
+            "daily_success_limit": "5",
+            "daily_budget_krw": "1000",
+            "reason": _한도이유,
+        },
         follow_redirects=False,
     )
 

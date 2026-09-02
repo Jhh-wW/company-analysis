@@ -49,6 +49,40 @@ def client():
         yield client
 
 
+
+# ══════════════════════════════════════════════════════════
+# 위험 동작 확인 단계(G-S9) — 시험이 실제 확인 화면을 거치게 한다
+# ══════════════════════════════════════════════════════════
+
+
+def _확인화면_경로(url: str, data: dict) -> str:
+    """이 POST 앞에 서 있는 확인 화면의 주소. 확인이 필요 없으면 빈 글자."""
+
+    if url == "/admin/links/revoke":
+        return f"/admin/links/{data.get('key', '')}/revoke"
+    if url == "/admin/revoke":
+        return f"/admin/members/{data.get('email', '')}/remove"
+    if url.endswith("/extend") or url.endswith("/limit"):
+        return url
+    return ""
+
+
+def _확인표(client: TestClient, url: str, data: dict) -> str:
+    """확인 화면을 «실제로 열어» 1회용 표를 받아 온다.
+
+    ★ 표를 지어내지 않는다 — 화면이 안 주면 빈 글자이고, 그 요청은 서버가
+      그대로 거절한다. 확인 단계 자체가 지켜지는지는 전용 시험
+      `test_admin_dangerous_actions.py`가 본다.
+    """
+
+    경로 = _확인화면_경로(url, data)
+    if not 경로:
+        return ""
+    화면 = client.get(경로)
+    찾음 = re.search(r'name="confirm_token" value="([0-9a-f]+)"', 화면.text)
+    return 찾음.group(1) if 찾음 else ""
+
+
 @pytest.fixture
 def admin(client: TestClient) -> TestClient:
     """관리자로 로그인한 손님."""
@@ -60,6 +94,12 @@ def admin(client: TestClient) -> TestClient:
     def post_with_csrf(url, *args, **kwargs):
         data = dict(kwargs.pop("data", {}) or {})
         data.setdefault("csrf_token", csrf)
+        # 위험 동작은 확인 화면을 거쳐야 실행된다(G-S9). 브라우저가 하는 것과
+        # 같은 두 단계를 여기서 그대로 밟는다.
+        if "confirm_token" not in data:
+            표 = _확인표(client, url, data)
+            if 표:
+                data["confirm_token"] = 표
         return original_post(url, *args, data=data, **kwargs)
 
     client.post = post_with_csrf

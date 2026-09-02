@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 
 import pytest
 from fastapi.testclient import TestClient
@@ -32,6 +33,10 @@ _발급 = "2026-09-02T09:00:00+09:00"
 
 #: 한 번에 미룰 수 있는 최대 날 수(리터럴). 상수 자체는 sharelink 시험이 본다.
 _최대연장일 = 90
+#: 위험 동작의 이유는 20자 이상이어야 한다(G-S9 · 설계 05장 §4). 길이 규칙
+#: 자체는 `test_admin_dangerous_actions.py`가 보고, 여기서는 규칙에 맞는 글로
+#: «미루기가 실제로 되는지»만 본다.
+_연장이유 = "서류 발표가 2주 밀려 링크를 더 열어 두기로 했습니다"
 
 
 @pytest.fixture
@@ -39,6 +44,40 @@ def client():
     runtime._PIPELINE = DemoPipeline()
     with TestClient(main.app) as test_client:
         yield test_client
+
+
+
+# ══════════════════════════════════════════════════════════
+# 위험 동작 확인 단계(G-S9) — 시험이 실제 확인 화면을 거치게 한다
+# ══════════════════════════════════════════════════════════
+
+
+def _확인화면_경로(url: str, data: dict) -> str:
+    """이 POST 앞에 서 있는 확인 화면의 주소. 확인이 필요 없으면 빈 글자."""
+
+    if url == "/admin/links/revoke":
+        return f"/admin/links/{data.get('key', '')}/revoke"
+    if url == "/admin/revoke":
+        return f"/admin/members/{data.get('email', '')}/remove"
+    if url.endswith("/extend") or url.endswith("/limit"):
+        return url
+    return ""
+
+
+def _확인표(client: TestClient, url: str, data: dict) -> str:
+    """확인 화면을 «실제로 열어» 1회용 표를 받아 온다.
+
+    ★ 표를 지어내지 않는다 — 화면이 안 주면 빈 글자이고, 그 요청은 서버가
+      그대로 거절한다. 확인 단계 자체가 지켜지는지는 전용 시험
+      `test_admin_dangerous_actions.py`가 본다.
+    """
+
+    경로 = _확인화면_경로(url, data)
+    if not 경로:
+        return ""
+    화면 = client.get(경로)
+    찾음 = re.search(r'name="confirm_token" value="([0-9a-f]+)"', 화면.text)
+    return 찾음.group(1) if 찾음 else ""
 
 
 @pytest.fixture
@@ -51,6 +90,12 @@ def admin(client: TestClient) -> TestClient:
     def post_with_csrf(url, *args, **kwargs):
         data = dict(kwargs.pop("data", {}) or {})
         data.setdefault("csrf_token", csrf)
+        # 위험 동작은 확인 화면을 거쳐야 실행된다(G-S9). 브라우저가 하는 것과
+        # 같은 두 단계를 여기서 그대로 밟는다.
+        if "confirm_token" not in data:
+            표 = _확인표(client, url, data)
+            if 표:
+                data["confirm_token"] = 표
         return original_post(url, *args, data=data, **kwargs)
 
     client.post = post_with_csrf
@@ -128,7 +173,7 @@ def test_연장은_확인화면과_이력행과_감사행을_함께_남긴다(ad
     새날 = _내일부터(40)
     응답 = admin.post(
         f"/admin/link/{key_hash}/extend",
-        data={"expires_on": 새날, "reason": "서류 발표가 2주 밀렸습니다"},
+        data={"expires_on": 새날, "reason": _연장이유},
         follow_redirects=False,
     )
 
@@ -141,14 +186,14 @@ def test_연장은_확인화면과_이력행과_감사행을_함께_남긴다(ad
     assert 이력[0].kind == "expires"
     assert 이력[0].new_value == 새날
     assert 이력[0].old_value == 이전
-    assert 이력[0].reason == "서류 발표가 2주 밀렸습니다"
+    assert 이력[0].reason == _연장이유
     assert 이력[0].actor_id
 
     성공행 = [행 for 행 in _감사행("admin.link.extend") if 행[1] == "success"]
     assert [행[2] for 행 in 성공행] == ["expiry_extended"]
 
     다시 = admin.get(f"/admin/link/{key_hash}/extend")
-    assert "서류 발표가 2주 밀렸습니다" in 다시.text
+    assert _연장이유 in 다시.text
     assert 새날 in 다시.text
 
 
@@ -215,7 +260,7 @@ def test_정확히_90일째는_받는다(admin: TestClient):
 
     응답 = admin.post(
         f"/admin/link/{key_hash}/extend",
-        data={"expires_on": 새날, "reason": "채용 일정 연기"},
+        data={"expires_on": 새날, "reason": "채용 일정이 한 달 뒤로 연기되었습니다"},
         follow_redirects=False,
     )
 
@@ -234,7 +279,7 @@ def test_방금_발급한_링크도_한_번은_미룰_수_있다(admin: TestClie
 
     응답 = admin.post(
         f"/admin/link/{key_hash}/extend",
-        data={"expires_on": 새날, "reason": "하루만 더"},
+        data={"expires_on": 새날, "reason": "마감 직전이라 하루만 더 열어 둡니다"},
         follow_redirects=False,
     )
 
@@ -360,7 +405,7 @@ def test_미룬_만료일은_링크_입구에서도_통한다(admin: TestClient,
 
     admin.post(
         f"/admin/link/{key_hash}/extend",
-        data={"expires_on": _내일부터(30), "reason": "다시 열기"},
+        data={"expires_on": _내일부터(30), "reason": "면접 일정이 잡혀 링크를 다시 엽니다"},
         follow_redirects=False,
     )
 
