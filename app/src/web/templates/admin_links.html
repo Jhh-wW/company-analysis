@@ -155,13 +155,12 @@
         {% else %}<span class="muted">아직 없음</span>{% endif %}
       </td>
       <td>
-        <form method="post" action="/admin/links/revoke" style="display:inline">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="key" value="{{ link.key_hash }}">
-          {% if link.key_hash not in revoked_link_keys %}
-          <button type="submit" class="btn ghost" aria-describedby="company-link-close-note">LINK 철회</button>
-          {% else %}<span class="muted">이력 보존 중</span>{% endif %}
-        </form>
+        {# ★ 여기서 바로 닫지 않는다 — 확인 화면에서 대상을 다시 보여 준 뒤에만
+           실행한다 (설계 05장 §2 원칙 3, G-S9). #}
+        {% if link.key_hash not in revoked_link_keys %}
+        <a class="btn ghost" href="/admin/links/{{ link.key_hash }}/revoke"
+           aria-describedby="company-link-close-note">LINK 철회</a>
+        {% else %}<span class="muted">이력 보존 중</span>{% endif %}
       </td>
     </tr>
     {% endfor %}

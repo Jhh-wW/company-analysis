@@ -5,7 +5,9 @@ import datetime as dt
 import logging
 import os
 import re
+import secrets
 import string
+from dataclasses import dataclass
 from urllib.parse import quote, urlencode
 
 from fastapi import APIRouter, Form, Request
@@ -250,6 +252,165 @@ def _audit_failed_change(
         )
     except Exception:  # noqa: BLE001 — 실패 응답은 유지하고 원문 예외는 기록하지 않는다
         logger.error("관리자 변경 실패 감사기록을 남기지 못했습니다")
+
+
+# ══════════════════════════════════════════════════════════
+# 위험 동작의 확인 단계 (G-S9 · 설계 05장 §2 원칙 3, §4)
+# ══════════════════════════════════════════════════════════
+
+#: 확인 화면이 준 «1회용 확인 표»가 살아 있는 시간(분).
+#: ★ 짧게 두는 이유 — 확인 화면을 열어 둔 채 잊었다가 한참 뒤에 누르면 그 사이에
+#:   대상이 달라졌을 수 있다. 표가 만료되면 화면을 다시 열어 대상을 다시 본다.
+CONFIRM_TOKEN_TTL_MINUTES = 10
+#: 이유를 받는 위험 동작에서 요구하는 최소 글자 수(설계 05장 §4 「이유(필수 20자 이상)」).
+DANGEROUS_ACTION_REASON_MIN_CHARS = 20
+#: 서버가 동시에 들고 있는 확인 표 상한. 넘치면 오래된 것부터 버려 메모리가
+#: 무한히 늘지 않게 한다. 비상 화면은 목록 줄마다 한 장씩 발급해 여유를 둔다.
+_CONFIRM_TOKEN_MAX_PENDING = 512
+#: 확인 표의 바이트 수. 16바이트면 hex로 32자리다.
+_CONFIRM_TOKEN_BYTES = 16
+#: 확인을 안 거친 요청을 감사에 남길 때 쓰는 사유 코드.
+#: ★ 감사행 `reason_code`는 ASCII만 받는다(F-GS5a). 한국어를 넣으면 그 요청의
+#:   감사 기록 자체가 실패한다.
+_CONFIRM_MISSING_REASON = "confirm_missing"
+#: 확인을 안 거친 요청에 돌려주는 화면 문구. 내부 용어를 쓰지 않는다.
+_CONFIRM_REQUIRED_MESSAGE = (
+    "확인 화면을 거친 뒤에만 실행할 수 있습니다. "
+    "무엇을 바꾸는지 다시 확인하도록 화면을 새로 열어 주세요. "
+    "이번 요청으로 바뀐 것은 없습니다."
+)
+
+
+@dataclass(frozen=True)
+class _PendingConfirmation:
+    """확인 화면이 발급한 표 한 장. 누가·무엇을·언제까지인지만 담는다."""
+
+    actor_id: str
+    action: str
+    target: str
+    expires_at: dt.datetime
+
+
+#: 발급했지만 아직 안 쓴 확인 표. 프로세스가 다시 뜨면 사라지는데, 그때는
+#: «막는» 쪽으로 틀린다(확인 화면을 다시 열게 된다) — 안전한 방향이다.
+#: 배포 계약이 worker 1·instance 1을 못 박아(I12) 표가 갈라지지 않는다.
+_CONFIRM_TOKENS: dict[str, _PendingConfirmation] = {}
+
+
+def _prune_confirm_tokens(now: dt.datetime) -> None:
+    """기한이 지난 표를 버리고, 그래도 많으면 오래 묵은 것부터 버린다."""
+
+    for token, pending in list(_CONFIRM_TOKENS.items()):
+        if pending.expires_at <= now:
+            del _CONFIRM_TOKENS[token]
+    while len(_CONFIRM_TOKENS) > _CONFIRM_TOKEN_MAX_PENDING:
+        _CONFIRM_TOKENS.pop(next(iter(_CONFIRM_TOKENS)))
+
+
+def issue_confirm_token(request: Request, *, action: str, target: str) -> str:
+    """확인 화면이 «이 사람·이 동작·이 대상»에만 쓸 수 있는 표를 발급한다."""
+
+    now = clock.now_kst()
+    _prune_confirm_tokens(now)
+    token = secrets.token_hex(_CONFIRM_TOKEN_BYTES)
+    _CONFIRM_TOKENS[token] = _PendingConfirmation(
+        actor_id=admin_audit.actor_id(request),
+        action=action,
+        target=target,
+        expires_at=now + dt.timedelta(minutes=CONFIRM_TOKEN_TTL_MINUTES),
+    )
+    return token
+
+
+def _confirmation_accepted(
+    request: Request, token: str, *, action: str, target: str
+) -> bool:
+    """확인 표를 «쓰고 버린다». 대상·동작·사람이 모두 맞을 때만 참이다.
+
+    ★ 맞지 않아도 표는 버린다 — 한 장으로 여러 대상을 시험해 볼 수 없게 한다.
+    """
+
+    now = clock.now_kst()
+    _prune_confirm_tokens(now)
+    pending = _CONFIRM_TOKENS.pop(str(token or "").strip(), None)
+    if pending is None:
+        return False
+    return (
+        pending.action == action
+        and pending.target == target
+        and pending.actor_id == admin_audit.actor_id(request)
+        and pending.expires_at > now
+    )
+
+
+def _audit_denied_change(
+    request: Request, *, action: str, target: str, reason: str
+) -> None:
+    """실행하지 «않은» 요청도 감사에 남긴다.
+
+    ★ 성공 정본 표는 `outcome='success'`만 받는다(`admin_audit_store.py`).
+      그래서 거절은 설계 05장 §4가 적은 대로 로그 미러로만 남는다.
+    """
+
+    try:
+        _audit_change(
+            request,
+            action=action,
+            target=target,
+            outcome="denied",
+            reason=reason,
+        )
+    except Exception:  # noqa: BLE001 — 거절 응답은 유지하고 원문 예외는 안 남긴다
+        logger.error("관리자 변경 거절 감사기록을 남기지 못했습니다")
+
+
+def _confirmation_required(
+    request: Request, *, action: str, target: str
+) -> HTMLResponse:
+    """확인을 안 거친 요청을 «실행 0»으로 되돌리고 그 사실을 감사에 남긴다."""
+
+    _audit_denied_change(
+        request, action=action, target=target, reason=_CONFIRM_MISSING_REASON
+    )
+    return _admin_response(
+        request, HTMLResponse(_CONFIRM_REQUIRED_MESSAGE, status_code=400)
+    )
+
+
+def _validated_action_reason(raw: str) -> tuple[str, str]:
+    """위험 동작의 이유를 다듬고, 너무 짧으면 왜 거절인지 함께 돌려준다.
+
+    Returns:
+        (다듬은 이유, 오류 문구). 오류가 있으면 이유는 빈 글자다.
+    """
+
+    reason = str(raw or "").strip()
+    if not reason:
+        return "", "왜 바꾸는지 적어주세요."
+    if len(reason) < DANGEROUS_ACTION_REASON_MIN_CHARS:
+        return "", (
+            f"왜 바꾸는지 {DANGEROUS_ACTION_REASON_MIN_CHARS}자 이상으로 적어주세요. "
+            "나중에 같은 판단을 다시 하려면 이유가 남아 있어야 합니다."
+        )
+    return reason, ""
+
+
+def _member_default_success_limit() -> int:
+    """한도를 따로 안 정한 친구가 쓰는 하루 성공 건수."""
+
+    return dashboard_store.MEMBER_DAILY_SUCCESS_LIMIT
+
+
+def _member_default_budget_krw() -> float:
+    """한도를 따로 안 정한 친구가 쓰는 하루 비용 상한(원)."""
+
+    return share_tracks.budget_of(share_tracks.Track.MEMBER)
+
+
+def _krw_label(amount_krw: float) -> str:
+    """확인 화면에 쓰는 금액 표기. 회원 화면과 같은 모양이어야 한다."""
+
+    return f"{amount_krw:,.0f}원"
 
 
 def _linked_report_state(conn, link: share_store.ShareLink) -> str:
@@ -543,6 +704,25 @@ def _access_page(
             revocation_data_available = True
         except Exception:  # noqa: BLE001 — 축소 화면도 추정값을 표시하지 않는다
             logger.error("비상 철회 목록을 확인하지 못했습니다")
+        # ★ 이 화면만 «한 단계»로 둔다 — 비용 원장이 막힌 상태에서 확인 화면을
+        #   한 번 더 요구하면, 새고 있는 링크를 못 닫는 쪽으로 틀린다. 대신 이
+        #   화면이 대상 목록을 그대로 다시 보여 주므로 확인 화면 역할을 겸한다.
+        revocation_link_tokens = {
+            link.key_hash: issue_confirm_token(
+                request,
+                action="admin.link.revoke",
+                target=admin_audit.target_id("link", link.key_hash),
+            )
+            for link in revocation_links
+        }
+        revocation_member_tokens = {
+            member.email: issue_confirm_token(
+                request,
+                action="admin.member.revoke",
+                target=admin_audit.target_id("member", member.email),
+            )
+            for member in revocation_members
+        }
         page_context = request_helpers._ctx(
             request,
             links=[],
@@ -566,6 +746,8 @@ def _access_page(
             revocation_data_available=revocation_data_available,
             revocation_links=revocation_links,
             revocation_members=revocation_members,
+            revocation_link_tokens=revocation_link_tokens,
+            revocation_member_tokens=revocation_member_tokens,
             unresolved_spend=축소_미확정,
             unresolved_spend_available=축소_미확정_읽었나,
             spend_phase_labels=budget_constants.SPEND_PHASE_LABELS,
@@ -1139,6 +1321,14 @@ def _link_detail_page(
             ),
             link_extension_disabled=deployment_mode.render_admin_no_forwarded(),
             report_share_days=REPORT_LINK_MAX_AGE_DAYS,
+            # 이 화면이 곧 만료 연장의 «확인 화면»이다(설계 05장 §4) — 지금
+            # 만료일과 남은 날짜를 보여 준 뒤 1회용 표를 함께 실어 보낸다.
+            confirm_token=issue_confirm_token(
+                request,
+                action="admin.link.extend",
+                target=admin_audit.target_id("link", link.key_hash),
+            ),
+            link_reason_min_chars=DANGEROUS_ACTION_REASON_MIN_CHARS,
         ),
         status_code=status_code,
     )
@@ -1269,6 +1459,7 @@ async def admin_link_extend(
     expires_on: str = Form("", max_length=REFERENCE_MAX_CHARS),
     reason: str = Form("", max_length=NOTE_MAX_CHARS),
     csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
+    confirm_token: str = Form("", max_length=REFERENCE_MAX_CHARS),
 ):
     """링크의 만료일을 뒤로 미룬다. 이유·이력행·감사행을 함께 남긴다 (D-G8).
 
@@ -1297,8 +1488,13 @@ async def admin_link_extend(
             request,
             HTMLResponse("올바르지 않은 LINK 식별자입니다.", status_code=404),
         )
+    if not _confirmation_accepted(
+        request, confirm_token, action=action, target=target
+    ):
+        return _confirmation_required(request, action=action, target=target)
 
-    reason_clean = str(reason or "").strip()[
+    reason_clean, reason_error = _validated_action_reason(reason)
+    reason_clean = reason_clean[
         : share_constants.LINK_ADJUSTMENT_REASON_MAX_CHARS
     ]
     validation_error = ""
@@ -1315,11 +1511,18 @@ async def admin_link_extend(
                 previous=previous,
                 created_at=link.created_at,
             )
-            if not reason_clean:
+            if not validation_error and reason_error:
                 # ★ 이유를 «필수»로 두는 이유 — 나중의 내가 왜 미뤘는지 알아야
                 #   같은 판단을 다시 할 수 있다. 이력만 남고 이유가 없으면
-                #   기록이 아니라 흔적이다.
-                validation_error = "연장하는 이유를 적어주세요."
+                #   기록이 아니라 흔적이다. 길이 하한은 설계 05장 §4가 정한
+                #   위험 동작 공통 규칙이다(F-GS4d가 G-S9로 미뤄 둔 자리).
+                # ★ 날짜가 이미 틀렸으면 그쪽을 먼저 말한다 — 폼 순서대로 한 번에
+                #   하나씩 알려야 관리자가 무엇을 고칠지 헷갈리지 않는다.
+                validation_error = (
+                    "연장하는 이유를 적어주세요."
+                    if not str(reason or "").strip()
+                    else reason_error
+                )
             if not validation_error and new_expiry is not None:
                 if not share_store.set_expires_at(
                     conn,
@@ -1549,13 +1752,76 @@ async def admin_link_report(
     )
 
 
+@router.get("/admin/links/{key_hash}/revoke", response_class=HTMLResponse)
+async def admin_link_revoke_confirm(request: Request, key_hash: str):
+    """초대 링크 사용 중단 «확인 화면» (설계 05장 §4).
+
+    ★ 목록에서 단추 하나로 바로 닫히면 잘못 눌렀을 때 되돌릴 길이 없다 —
+      이미 뿌린 주소가 죽고 새로 발급해 다시 나눠 줘야 한다. 그래서 무엇을
+      닫는지 다시 보여 주고, 이 화면에서 받은 1회용 표가 있어야 실행한다.
+    """
+
+    blocked = request_helpers.require_admin(request)
+    if blocked is not None:
+        return blocked
+    key_clean = str(key_hash or "").strip().lower()
+    if not share_store.is_key_hash(key_clean):
+        return _admin_response(
+            request,
+            HTMLResponse("찾을 수 없는 초대 링크입니다.", status_code=404),
+        )
+    try:
+        with storage_db.connect() as conn:
+            link = share_store.load_by_hash(conn, key_clean)
+    except Exception:  # noqa: BLE001 — 못 읽은 대상을 «있는 것»으로 보이지 않는다
+        logger.error("확인 화면에서 초대 링크를 읽지 못했습니다")
+        return _admin_response(
+            request,
+            HTMLResponse(
+                "지금은 이 초대 링크를 확인할 수 없습니다. 잠시 후 다시 "
+                "시도해주세요.",
+                status_code=503,
+            ),
+        )
+    if link is None:
+        return _admin_response(
+            request,
+            HTMLResponse("찾을 수 없는 초대 링크입니다.", status_code=404),
+        )
+    response = request_helpers.templates.TemplateResponse(
+        request=request,
+        name="admin_confirm_link_revoke.html",
+        context=request_helpers._ctx(
+            request,
+            link=link,
+            link_key_hash=link.key_hash,
+            link_created_at_label=_kst_timestamp_label(link.created_at),
+            link_expiry_date_label=_link_expiry_date_label(
+                link.created_at, expires_at=link.expires_at
+            ),
+            link_days_left=_link_days_left(
+                link.created_at, expires_at=link.expires_at
+            ),
+            link_revoked=link.is_revoked,
+            report_share_days=REPORT_LINK_MAX_AGE_DAYS,
+            confirm_token=issue_confirm_token(
+                request,
+                action="admin.link.revoke",
+                target=admin_audit.target_id("link", link.key_hash),
+            ),
+        ),
+    )
+    return _admin_response(request, response)
+
+
 @router.post("/admin/links/revoke")
 async def admin_link_delete(
     request: Request,
     key: str = Form(..., max_length=REFERENCE_MAX_CHARS),
     csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
+    confirm_token: str = Form("", max_length=REFERENCE_MAX_CHARS),
 ):
-    """링크를 닫는다."""
+    """링크를 닫는다. 확인 화면에서 받은 1회용 표가 있어야 실행한다 (G-S9)."""
     key_clean = key.strip().lower()
     key_is_hash = share_store.is_key_hash(key_clean)
     action = "admin.link.revoke"
@@ -1573,6 +1839,10 @@ async def admin_link_delete(
             request,
             HTMLResponse("올바르지 않은 LINK 식별자입니다.", status_code=400),
         )
+    if not _confirmation_accepted(
+        request, confirm_token, action=action, target=target
+    ):
+        return _confirmation_required(request, action=action, target=target)
     detail_key_hash = key_clean if key_is_hash else ""
     try:
         with storage_db.connect() as conn:
@@ -1966,13 +2236,56 @@ async def admin_invite(
     )
 
 
+@router.get("/admin/members/{email}/remove", response_class=HTMLResponse)
+async def admin_member_revoke_confirm(request: Request, email: str):
+    """친구를 명단에서 빼기 전 «확인 화면» (설계 05장 §4).
+
+    ★ 표를 «명단을 못 읽어도» 발급한다 — 여기서 404로 끊으면 뒤의 POST가
+      「확인을 안 거쳤다」로 뭉개져, 명단에 없는 사람인지 확인 단계를 건너뛴
+      것인지 구별할 수 없다. 못 읽었다는 사실은 화면이 그대로 말한다.
+    """
+
+    blocked = request_helpers.require_admin(request)
+    if blocked is not None:
+        return blocked
+    email_clean = share_allow.normalize(email)
+    member = None
+    member_available = False
+    try:
+        with storage_db.connect() as conn:
+            member = share_allow.load(conn, email_clean)
+        member_available = True
+    except Exception:  # noqa: BLE001 — 못 읽은 명단을 «없음»으로 보이지 않는다
+        logger.error("확인 화면에서 초대 명단을 읽지 못했습니다")
+    response = request_helpers.templates.TemplateResponse(
+        request=request,
+        name="admin_confirm_member_remove.html",
+        context=request_helpers._ctx(
+            request,
+            member=member,
+            member_email=email_clean,
+            member_available=member_available,
+            member_invited_at_label=(
+                _kst_timestamp_label(member.invited_at) if member else "—"
+            ),
+            confirm_token=issue_confirm_token(
+                request,
+                action="admin.member.revoke",
+                target=admin_audit.target_id("member", email_clean),
+            ),
+        ),
+    )
+    return _admin_response(request, response)
+
+
 @router.post("/admin/revoke")
 async def admin_revoke(
     request: Request,
     email: str = Form(..., max_length=EMAIL_MAX_CHARS),
     csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
+    confirm_token: str = Form("", max_length=REFERENCE_MAX_CHARS),
 ):
-    """친구를 초대 명단에서 뺀다."""
+    """친구를 초대 명단에서 뺀다. 확인 화면의 1회용 표가 있어야 한다 (G-S9)."""
     email_clean = share_allow.normalize(email)
     action = "admin.member.revoke"
     target = admin_audit.target_id("member", email_clean)
@@ -1981,6 +2294,10 @@ async def admin_revoke(
     )
     if blocked is not None:
         return blocked
+    if not _confirmation_accepted(
+        request, confirm_token, action=action, target=target
+    ):
+        return _confirmation_required(request, action=action, target=target)
     try:
         with storage_db.connect() as conn:
             # MEMBER 철회도 비용 원장과 무관한 비상 안전 동작이다. 권한 변경,
@@ -2054,6 +2371,106 @@ def _optional_member_limit_float(raw: str, *, label: str) -> float | None:
         raise ValueError(f"{label}은(는) 숫자로 적어 주세요.") from error
 
 
+@router.get("/admin/members/{email}/limit", response_class=HTMLResponse)
+async def admin_member_limit_confirm(
+    request: Request,
+    email: str,
+    daily_success_limit: str = "",
+    daily_budget_krw: str = "",
+    reason: str = "",
+):
+    """친구 한 명의 하루 한도를 바꾸기 전 «확인 화면» (설계 05장 §4).
+
+    회원 화면에서 적은 값을 여기서 **지금 값과 나란히** 다시 보여 준다. 숫자
+    하나를 잘못 적으면 그 친구가 하루에 쓸 수 있는 돈이 달라지므로, 바꾸기
+    전에 「무엇에서 무엇으로」를 눈으로 확인하게 한다.
+
+    ★ 빈 칸은 「기본값으로 되돌린다」는 뜻이라 그대로 기본값을 «후» 값으로 보인다.
+    """
+
+    blocked = request_helpers.require_admin(request)
+    if blocked is not None:
+        return blocked
+    email_clean = share_allow.normalize(email)
+    member = None
+    member_available = False
+    try:
+        with storage_db.connect() as conn:
+            member = share_allow.load(conn, email_clean)
+        member_available = True
+    except Exception:  # noqa: BLE001 — 못 읽은 값을 기본값처럼 보이지 않는다
+        logger.error("확인 화면에서 친구 한도를 읽지 못했습니다")
+
+    default_success = _member_default_success_limit()
+    default_budget = _member_default_budget_krw()
+    current_success = default_success
+    current_budget = default_budget
+    if member is not None:
+        if member.daily_success_limit is not None:
+            current_success = int(member.daily_success_limit)
+        if member.daily_budget_krw is not None:
+            current_budget = float(member.daily_budget_krw)
+
+    next_success, success_error = _optional_member_limit_preview(
+        daily_success_limit, label="하루 성공 건수", default=default_success
+    )
+    next_budget, budget_error = _optional_member_limit_preview(
+        daily_budget_krw, label="하루 비용 한도", default=default_budget, decimal=True
+    )
+    response = request_helpers.templates.TemplateResponse(
+        request=request,
+        name="admin_confirm_member_limit.html",
+        context=request_helpers._ctx(
+            request,
+            member=member,
+            member_email=email_clean,
+            member_available=member_available,
+            member_current_success_label=f"{current_success}건",
+            member_current_budget_label=_krw_label(current_budget),
+            member_next_success_label=(
+                "" if next_success is None else f"{int(next_success)}건"
+            ),
+            member_next_budget_label=(
+                "" if next_budget is None else _krw_label(float(next_budget))
+            ),
+            member_default_success_label=f"{default_success}건",
+            member_default_budget_label=_krw_label(default_budget),
+            member_limit_preview_error=success_error or budget_error,
+            member_limit_success_input=str(daily_success_limit or "").strip(),
+            member_limit_budget_input=str(daily_budget_krw or "").strip(),
+            member_limit_reason_input=str(reason or "").strip(),
+            member_limit_reason_min_chars=DANGEROUS_ACTION_REASON_MIN_CHARS,
+            member_limit_reason_max_chars=share_allow.LIMIT_REASON_MAX_CHARS,
+            confirm_token=issue_confirm_token(
+                request,
+                action="admin.member.limit",
+                target=admin_audit.target_id("member", email_clean),
+            ),
+        ),
+    )
+    return _admin_response(request, response)
+
+
+def _optional_member_limit_preview(
+    raw: str, *, label: str, default: float, decimal: bool = False
+) -> tuple[float | None, str]:
+    """확인 화면에 보일 «바꿀 값». 빈 칸은 기본값, 숫자가 아니면 오류 문구.
+
+    ★ 여기서는 «보여 주기»만 한다. 실제 범위 검사는 저장 경로가 정본이다 —
+      확인 화면이 통과시킨 값이라고 저장이 통과시키는 것은 아니다.
+    """
+
+    try:
+        parsed = (
+            _optional_member_limit_float(raw, label=label)
+            if decimal
+            else _optional_member_limit_int(raw, label=label)
+        )
+    except ValueError as error:
+        return None, str(error)
+    return (default if parsed is None else float(parsed)), ""
+
+
 @router.post("/admin/members/{email}/limit")
 async def admin_member_limit(
     request: Request,
@@ -2062,6 +2479,7 @@ async def admin_member_limit(
     daily_budget_krw: str = Form("", max_length=_MEMBER_LIMIT_FIELD_MAX_CHARS),
     reason: str = Form("", max_length=share_allow.LIMIT_REASON_MAX_CHARS),
     csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
+    confirm_token: str = Form("", max_length=REFERENCE_MAX_CHARS),
 ):
     """친구 «한 명»의 하루 한도를 바꾼다 (결정 D-G4 (a)).
 
@@ -2088,6 +2506,21 @@ async def admin_member_limit(
     )
     if blocked is not None:
         return blocked
+    if not _confirmation_accepted(
+        request, confirm_token, action=action, target=target
+    ):
+        return _confirmation_required(request, action=action, target=target)
+
+    reason_clean, reason_error = _validated_action_reason(reason)
+    if reason_error:
+        # ★ 이유 검사를 «저장 앞»으로 당긴다 — 명단 feature는 「비어 있지 않음」만
+        #   보고, 최소 길이는 위험 동작 공통 규칙(설계 05장 §4)이라 여기서 본다.
+        _audit_failed_change(
+            request, action=action, target=target, reason="invalid_input"
+        )
+        return _admin_response(
+            request, HTMLResponse(reason_error, status_code=400)
+        )
 
     try:
         success_limit = _optional_member_limit_int(
@@ -2114,7 +2547,7 @@ async def admin_member_limit(
                 email=email_clean,
                 daily_success_limit=success_limit,
                 daily_budget_krw=budget_krw,
-                reason=reason,
+                reason=reason_clean,
                 now_iso=clock.iso_now_kst(),
             )
             saved = share_allow.load(conn, email_clean)

@@ -80,20 +80,19 @@
     {% if dashboard_member_usage_available and limit %}<p><strong>오늘 성공 {{ dashboard_member_usage.get(member.email, [0, 0])[0] }} / {{ limit.success }}건</strong> · 진행 예약 {{ dashboard_member_usage.get(member.email, [0, 0])[1] }}건 · 하루 비용 한도 {{ limit.budget_label }}</p>{% else %}<p><strong>오늘 이용 확인 불가</strong></p>{% endif %}
     {% if limit and limit.reason %}<p class="muted">한도를 바꾼 이유: {{ limit.reason }}{% if limit.updated_at %} · {{ limit.updated_at }}{% endif %}</p>{% endif %}
     {% if limit %}
-    <form class="frame-inline-form" method="post" action="/admin/members/{{ member.email }}/limit">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {# ★ 여기서 바로 저장하지 않는다 — 적은 값을 확인 화면이 「지금 값 → 바꿀 값」
+       으로 다시 보여 주고, 이유도 거기서 한 번만 받는다 (설계 05장 §4, G-S9). #}
+    <form class="frame-inline-form" method="get" action="/admin/members/{{ member.email }}/limit">
       <label>하루 성공 건수 <input type="number" name="daily_success_limit" min="1" max="20" step="1" value="{{ limit.success }}"></label>
       <label>하루 비용 한도(원) <input type="number" name="daily_budget_krw" min="0" max="20000" step="100" value="{{ '%.0f'|format(limit.budget_krw) }}"></label>
-      <label>바꾸는 이유 <input type="text" name="reason" maxlength="200" required></label>
-      <button class="btn" type="submit">한도 저장</button>
+      <label>바꾸는 이유 <input type="text" name="reason" maxlength="200"></label>
+      <button class="btn" type="submit">바꾸기 전 확인하기</button>
       <p class="muted">바꾼 값은 다음 날에도 그대로 유지됩니다. 두 칸을 비우고 저장하면 기본값(하루 {{ dashboard_member_default_success }}건 · {{ dashboard_member_default_budget_label }})으로 되돌아갑니다.</p>
     </form>
     {% endif %}
-    <form method="post" action="/admin/revoke" style="margin-top:10px">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <input type="hidden" name="email" value="{{ member.email }}">
-      <button type="submit" class="btn ghost">빼기</button>
-    </form>
+    <p style="margin-top:10px">
+      <a class="btn ghost" href="/admin/members/{{ member.email }}/remove">빼기</a>
+    </p>
   </article>
   {% else %}<article class="card"><p>아직 초대한 사람이 없습니다.</p></article>{% endfor %}{% endif %}
 </section>

@@ -134,9 +134,16 @@
     </div>
     <div class="field">
       <label for="link_extend_reason">미루는 이유<span class="req">*</span></label>
+      {# 1회용 확인 표 — 이 화면을 거치지 않은 요청은 실행되지 않는다 (G-S9). #}
+      <input type="hidden" name="confirm_token" value="{{ confirm_token }}">
       <input id="link_extend_reason" name="reason" required
+             minlength="{{ link_reason_min_chars }}"
              maxlength="{{ link_reason_max_chars }}"
              placeholder="예: 서류 발표가 2주 밀렸습니다">
+      <p class="muted" style="margin-top:5px">
+        {{ link_reason_min_chars }}자 이상 적어주세요. 나중에 같은 판단을
+        다시 하려면 이유가 남아 있어야 합니다.
+      </p>
     </div>
     <button type="submit" class="btn">만료일 미루기</button>
   </form>

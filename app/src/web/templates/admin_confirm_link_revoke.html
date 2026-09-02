@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}초대 링크 사용 중단 확인 · 기업분석{% endblock %}
+{% block bodyclass %}admin-frame-page{% endblock %}
+{% block wrapclass %}wide admin-frame{% endblock %}
+
+{# 초대 링크 사용 중단 확인 화면 (설계 05장 §2 원칙 3 · §4, 티켓 G-S9).
+
+   ★ 왜 한 화면을 더 두나 — 목록에서 단추 하나로 닫히면 잘못 눌렀을 때 되돌릴
+     길이 없다. 이미 나눠 준 주소가 죽고 새로 만들어 다시 뿌려야 한다.
+   ★ 문구에 내부 자료 이름을 쓰지 않는다. 「초대 링크」·「사용 중단」처럼 쓴다.
+   ★ 권한 검사는 라우트가 이미 했다. 여기서 다시 안 본다. #}
+
+{% block content %}
+<header class="frame-heading">
+  <p class="frame-kicker">관리자 전용</p>
+  <h1>이 초대 링크를 정말 중단할까요?</h1>
+  <p class="lede">중단하면 이 주소로는 더 들어올 수 없습니다. 되돌리려면 새로 만들어 다시 나눠 줘야 합니다.</p>
+</header>
+{% set dashboard_nav = "links" %}{% include "_admin_nav.html" %}
+
+<div class="card frame-desktop-only">
+  <h2>무엇을 중단하나요</h2>
+  <dl class="frame-action-summary">
+    <div><dt>회사</dt><dd><strong>{{ link.company }}</strong></dd></div>
+    <div><dt>지원 맥락</dt><dd>{{ link.job or "적어 두지 않음" }}</dd></div>
+    {% if link.note %}<div><dt>메모</dt><dd>{{ link.note }}</dd></div>{% endif %}
+    <div><dt>만든 날</dt><dd>{{ link_created_at_label }}</dd></div>
+    <div><dt>원래 닫히는 날</dt><dd>{{ link_expiry_date_label }}{% if link_days_left is not none %} · {{ link_days_left }}일 남음{% endif %}</dd></div>
+    <div><dt>지금까지 열어 본 횟수</dt><dd>{% if link.opened_count %}{{ link.opened_count }}회{% else %}아직 없음{% endif %}</dd></div>
+    <div><dt>지금 상태</dt><dd>{% if link_revoked %}<strong>이미 중단됨</strong>{% else %}사용 가능{% endif %}</dd></div>
+  </dl>
+
+  <p class="muted" style="margin-top:16px">
+    이미 결과를 받아 간 사람이 따로 저장한 <strong>보고서 주소</strong>는 이 중단과
+    관계없이 기존 공개 정책대로 보고서를 만든 뒤 {{ report_share_days }}일까지 열릴 수 있습니다.
+  </p>
+
+  {% if link_revoked %}
+  <p class="warn-line" role="status" style="margin-top:16px">
+    <span>⚠️</span><span>이 초대 링크는 이미 중단되어 있습니다. 더 할 일이 없습니다.</span>
+  </p>
+  <div class="btn-row" style="margin-top:16px">
+    <a class="btn ghost" href="/admin/links">초대 링크 목록으로</a>
+  </div>
+  {% else %}
+  <div class="btn-row" style="margin-top:18px">
+    <form method="post" action="/admin/links/revoke">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="key" value="{{ link_key_hash }}">
+      {# 이 화면이 발급한 1회용 표. 없으면 서버가 실행하지 않는다. #}
+      <input type="hidden" name="confirm_token" value="{{ confirm_token }}">
+      <button type="submit" class="btn">네, 사용을 중단합니다</button>
+    </form>
+    <a class="btn ghost" href="/admin/links">아니요, 그대로 둡니다</a>
+  </div>
+  {% endif %}
+</div>
+
+<aside class="frame-mobile-notice"><strong>모바일 운영 범위</strong><span>이 화면의 변경 작업은 PC에서만 합니다.</span></aside>
+{% endblock %}

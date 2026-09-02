@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}회원 한도 변경 확인 · 기업분석{% endblock %}
+{% block bodyclass %}admin-frame-page{% endblock %}
+{% block wrapclass %}wide admin-frame{% endblock %}
+
+{# 회원 한도 변경 확인 화면 (설계 05장 §4, 티켓 G-S9).
+
+   ★ 여기서 「지금 값 → 바꿀 값」을 나란히 보여 준다. 숫자 하나를 잘못 적으면
+     그 사람이 하루에 쓸 수 있는 돈이 달라지는데, 목록 안 작은 칸에서는
+     무엇이 무엇으로 바뀌는지 눈에 안 들어온다.
+   ★ 이유는 이 화면에서 한 번만 받는다. 앞 화면에서 적어 왔으면 그 글을
+     그대로 채워 두고 고칠 수 있게 한다 — 같은 것을 두 번 적게 하지 않는다. #}
+
+{% block content %}
+<header class="frame-heading">
+  <p class="frame-kicker">관리자 전용</p>
+  <h1>이 회원의 하루 한도를 바꿀까요?</h1>
+  <p class="lede">바꾼 값은 다음 날에도 그대로 유지됩니다. 오늘만 쓰고 사라지는 값이 아닙니다.</p>
+</header>
+{% set dashboard_nav = "members" %}{% include "_admin_nav.html" %}
+
+<div class="card frame-desktop-only">
+  <h2>누구의 무엇을 바꾸나요</h2>
+  {% if not member_available %}
+  <p class="warn-line" role="alert">
+    <span>⚠️</span><span><strong>초대 명단을 지금 읽지 못했습니다.</strong>
+    지금 값을 확인하지 못한 채 바꾸지 마시고, 잠시 후 이 화면을 다시 열어주세요.</span>
+  </p>
+  {% elif member is none %}
+  <p class="warn-line" role="status">
+    <span>⚠️</span><span>이 주소는 지금 초대 명단에 없습니다. 명단에 있는 사람만 한도를 바꿀 수 있습니다.</span>
+  </p>
+  {% endif %}
+
+  <dl class="frame-action-summary">
+    <div><dt>이름</dt><dd><strong>{{ member.display_name or "이름 미등록" if member else "확인 불가" }}</strong></dd></div>
+    <div><dt>주소</dt><dd>{{ member_email }}</dd></div>
+  </dl>
+
+  {% if member_limit_preview_error %}
+  <p class="warn-line" role="alert" style="margin-top:16px">
+    <span>⚠️</span><span>{{ member_limit_preview_error }}</span>
+  </p>
+  {% endif %}
+
+  <h3 style="margin-top:18px">지금 값에서 바꿀 값으로</h3>
+  <div class="data-table-scroll" role="region" tabindex="0">
+  <table>
+    <thead><tr>
+      <th scope="col">항목</th><th scope="col">지금</th><th scope="col">바꿀 값</th>
+    </tr></thead>
+    <tbody>
+      <tr>
+        <td>하루 성공 보고서</td>
+        <td>{{ member_current_success_label }}</td>
+        <td><strong>{{ member_next_success_label or "확인 불가" }}</strong></td>
+      </tr>
+      <tr>
+        <td>하루 비용 한도</td>
+        <td>{{ member_current_budget_label }}</td>
+        <td><strong>{{ member_next_budget_label or "확인 불가" }}</strong></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="muted" style="margin-top:8px">
+    칸을 비우고 보내면 공통 기본값({{ member_default_success_label }} ·
+    {{ member_default_budget_label }})으로 되돌아갑니다.
+  </p>
+
+  <form method="post" action="/admin/members/{{ member_email }}/limit" style="margin-top:18px">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {# 이 화면이 발급한 1회용 표. 없으면 서버가 실행하지 않는다. #}
+    <input type="hidden" name="confirm_token" value="{{ confirm_token }}">
+    <input type="hidden" name="daily_success_limit" value="{{ member_limit_success_input }}">
+    <input type="hidden" name="daily_budget_krw" value="{{ member_limit_budget_input }}">
+    <div class="field">
+      <label for="member_limit_reason">바꾸는 이유<span class="req">*</span></label>
+      <input id="member_limit_reason" name="reason" required
+             minlength="{{ member_limit_reason_min_chars }}"
+             maxlength="{{ member_limit_reason_max_chars }}"
+             value="{{ member_limit_reason_input }}"
+             placeholder="예: 이번 주 채용 설명회 준비로 조사 건수를 늘려 달라는 요청">
+      <p class="muted" style="margin-top:5px">
+        {{ member_limit_reason_min_chars }}자 이상 적어주세요. 나중에 되돌릴지
+        판단하려면 왜 올렸는지가 남아 있어야 합니다.
+      </p>
+    </div>
+    <div class="btn-row">
+      <button type="submit" class="btn">네, 이 값으로 바꿉니다</button>
+      <a class="btn ghost" href="/admin/members">아니요, 그대로 둡니다</a>
+    </div>
+  </form>
+</div>
+
+<aside class="frame-mobile-notice"><strong>모바일 운영 범위</strong><span>이 화면의 변경 작업은 PC에서만 합니다.</span></aside>
+{% endblock %}
