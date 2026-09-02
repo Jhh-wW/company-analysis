@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 import uuid
 from dataclasses import replace
 
@@ -40,6 +41,10 @@ _총상한 = 365
 _1회상한 = 90
 
 _상한도달문구 = "이 링크는 더 미룰 수 없습니다. 새 링크를 발급해 주세요"
+#: 위험 동작의 이유는 20자 이상이어야 한다(G-S9 · 설계 05장 §4). 길이 규칙
+#: 자체는 `test_admin_dangerous_actions.py`가 보고, 여기서는 규칙에 맞는 글로
+#: «상한이 실제로 막는지»만 본다.
+_연장이유 = "채용 일정이 밀려 링크를 더 열어 두기로 했습니다"
 
 
 @pytest.fixture
@@ -47,6 +52,19 @@ def client():
     runtime._PIPELINE = DemoPipeline()
     with TestClient(main.app) as test_client:
         yield test_client
+
+
+def _확인표(client: TestClient, url: str) -> str:
+    """연장 화면(G-S9의 확인 화면)을 실제로 열어 1회용 표를 받아 온다.
+
+    ★ 표를 지어내지 않는다 — 총 수명 상한에 닿은 링크는 화면이 폼 자체를 안
+      보여 주므로 표도 없다. 그때는 빈 글자를 보내고, 서버가 「더 미룰 수
+      없습니다」로 막는 것이 맞다.
+    """
+
+    화면 = client.get(url)
+    찾음 = re.search(r'name="confirm_token" value="([0-9a-f]+)"', 화면.text)
+    return 찾음.group(1) if 찾음 else ""
 
 
 @pytest.fixture
@@ -59,6 +77,10 @@ def admin(client: TestClient) -> TestClient:
     def post_with_csrf(url, *args, **kwargs):
         data = dict(kwargs.pop("data", {}) or {})
         data.setdefault("csrf_token", csrf)
+        # 만료 연장은 확인 화면을 거쳐야 실행된다(G-S9). 브라우저가 하는 것과
+        # 같은 두 단계를 여기서 그대로 밟는다.
+        if url.endswith("/extend") and "confirm_token" not in data:
+            data["confirm_token"] = _확인표(client, url)
         return original_post(url, *args, data=data, **kwargs)
 
     client.post = post_with_csrf
@@ -107,7 +129,7 @@ def _발급후(days: int) -> str:
 def _미룬다(admin: TestClient, key_hash: str, 새날: str):
     return admin.post(
         f"/admin/link/{key_hash}/extend",
-        data={"expires_on": 새날, "reason": "채용 일정이 밀렸습니다"},
+        data={"expires_on": 새날, "reason": _연장이유},
         follow_redirects=False,
     )
 

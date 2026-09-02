@@ -1493,16 +1493,12 @@ async def admin_link_extend(
             request,
             HTMLResponse("올바르지 않은 LINK 식별자입니다.", status_code=404),
         )
-    if not _confirmation_accepted(
-        request, confirm_token, action=action, target=target
-    ):
-        return _confirmation_required(request, action=action, target=target)
-
     reason_clean, reason_error = _validated_action_reason(reason)
     reason_clean = reason_clean[
         : share_constants.LINK_ADJUSTMENT_REASON_MAX_CHARS
     ]
     validation_error = ""
+    confirmation_missing = False
     try:
         with storage_db.connect() as conn:
             link = share_store.load_by_hash(conn, key_clean)
@@ -1528,7 +1524,19 @@ async def admin_link_extend(
                     if not str(reason or "").strip()
                     else reason_error
                 )
-            if not validation_error and new_expiry is not None:
+            # ★ 확인 표는 «날짜·이유를 다 통과한 뒤»에 본다. 앞에 두면 총 수명
+            #   상한에 닿아 애초에 못 미루는 링크까지 「확인 화면을 거치세요」로
+            #   대답해, 진짜 막힌 이유(G-S4c 상한)를 가린다. 폼 오류로 표를
+            #   태우지 않는 이점도 있다 — 날짜를 고쳐 다시 보내면 그대로 통과한다.
+            confirmation_missing = (
+                not validation_error
+                and not _confirmation_accepted(
+                    request, confirm_token, action=action, target=target
+                )
+            )
+            if not validation_error and not confirmation_missing and (
+                new_expiry is not None
+            ):
                 if not share_store.set_expires_at(
                     conn,
                     key_hash=link.key_hash,
@@ -1569,6 +1577,8 @@ async def admin_link_extend(
             ),
             status_code=503,
         )
+    if confirmation_missing:
+        return _confirmation_required(request, action=action, target=target)
     if validation_error:
         try:
             _audit_change(
