@@ -85,7 +85,11 @@ def build_section_bundle(
             + ", ".join(unknown_injected)
         )
 
-    fragment_slots = {fragment.slot_id for fragment in candidate.fragments}
+    fragment_slots = {
+        slot_id
+        for fragment in candidate.fragments
+        for slot_id in fragment.covered_slot_ids
+    }
     filled_set = (fragment_slots | set(injected_slot_ids)) & set(required)
     filled = tuple(slot_id for slot_id in required if slot_id in filled_set)
     missing = tuple(slot_id for slot_id in required if slot_id not in filled_set)
