@@ -1546,6 +1546,147 @@ async def admin_revoke(
     )
 
 
+#: 한도 입력칸의 최대 글자 수. 숫자 하나가 들어오는 칸이라 길 이유가 없다.
+_MEMBER_LIMIT_FIELD_MAX_CHARS = 16
+
+
+def _optional_member_limit_int(raw: str, *, label: str) -> int | None:
+    """빈 칸은 «기본값으로 되돌린다»는 뜻이다. 숫자가 아니면 거절한다."""
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError as error:
+        raise ValueError(f"{label}은(는) 숫자로 적어 주세요.") from error
+
+
+def _optional_member_limit_float(raw: str, *, label: str) -> float | None:
+    """빈 칸은 «기본값으로 되돌린다»는 뜻이다. 숫자가 아니면 거절한다."""
+    text = str(raw or "").strip().replace(",", "")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError as error:
+        raise ValueError(f"{label}은(는) 숫자로 적어 주세요.") from error
+
+
+@router.post("/admin/members/{email}/limit")
+async def admin_member_limit(
+    request: Request,
+    email: str,
+    daily_success_limit: str = Form("", max_length=_MEMBER_LIMIT_FIELD_MAX_CHARS),
+    daily_budget_krw: str = Form("", max_length=_MEMBER_LIMIT_FIELD_MAX_CHARS),
+    reason: str = Form("", max_length=share_allow.LIMIT_REASON_MAX_CHARS),
+    csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
+):
+    """친구 «한 명»의 하루 한도를 바꾼다 (결정 D-G4 (a)).
+
+    바꾼 값은 **다음 날에도 그대로**인 영구 값이다. 두 칸을 비우면 그 친구는
+    다시 공통 기본값을 쓴다. 「오늘만 더」는 별도 표가 필요해 이번 범위 밖이다.
+
+    ★ 왜 상수를 안 고치나 — 공통 상수를 올리면 명단 전원의 몫이 같이 올라가고
+      최악의 하루 지출이 「1인 상한 × 인원」으로 곱해진다.
+    ★ 초대·철회와 같은 자리에 둔다 — 명단을 바꾸는 일이라 같은 권한·CSRF·감사
+      경로를 그대로 쓴다. 링크 관련 라우트는 이 요청과 아무 관계가 없다.
+    """
+    if deployment_mode.render_admin_no_forwarded():
+        return _admin_response(
+            request,
+            HTMLResponse(
+                "이 운영판에서는 친구 한도를 바꿀 수 없습니다.", status_code=409
+            ),
+        )
+    email_clean = share_allow.normalize(email)
+    action = "admin.member.limit"
+    target = admin_audit.target_id("member", email_clean)
+    blocked = request_helpers.require_admin_action(
+        request, csrf_token, action=action, target=target
+    )
+    if blocked is not None:
+        return blocked
+
+    try:
+        success_limit = _optional_member_limit_int(
+            daily_success_limit, label="하루 성공 건수"
+        )
+        budget_krw = _optional_member_limit_float(
+            daily_budget_krw, label="하루 비용 한도"
+        )
+    except ValueError as error:
+        _audit_failed_change(
+            request, action=action, target=target, reason="invalid_input"
+        )
+        return _admin_response(
+            request, HTMLResponse(str(error), status_code=400)
+        )
+
+    try:
+        with storage_db.connect() as conn:
+            _assert_access_write_ready(conn)
+            # 범위·이유 검사는 명단 feature가 정본이다. 화면에서만 막으면
+            # 폼을 우회한 요청이 그대로 통과한다.
+            changed = share_allow.set_limits(
+                conn,
+                email=email_clean,
+                daily_success_limit=success_limit,
+                daily_budget_krw=budget_krw,
+                reason=reason,
+                now_iso=clock.iso_now_kst(),
+            )
+            saved = share_allow.load(conn, email_clean)
+            if (
+                not changed
+                or saved is None
+                or saved.daily_success_limit != success_limit
+                or saved.daily_budget_krw != budget_krw
+            ):
+                raise _AdminStateUnchanged("limit_unconfirmed")
+            _queue_committed_change(
+                conn,
+                request,
+                action=action,
+                target=target,
+                reason="limit_changed",
+            )
+            _assert_budget_store_healthy()
+    except ValueError as error:
+        # 범위 밖 값·빈 이유는 사람이 고칠 수 있는 입력 문제다. 저장소 장애와
+        # 같은 응답으로 뭉개면 관리자가 무엇을 고쳐야 할지 알 수 없다.
+        _audit_failed_change(
+            request, action=action, target=target, reason="invalid_input"
+        )
+        return _admin_response(
+            request, HTMLResponse(str(error), status_code=400)
+        )
+    except Exception:  # noqa: BLE001
+        logger.error("친구 한도 저장 또는 변경 확인에 실패했습니다")
+        _audit_failed_change(
+            request,
+            action=action,
+            target=target,
+            reason="storage_unavailable",
+        )
+        return _admin_response(
+            request,
+            HTMLResponse(
+                "한도가 실제로 바뀌었는지 확인할 수 없어 성공으로 처리하지 "
+                "않았습니다. 잠시 후 다시 시도해주세요.",
+                status_code=503,
+            ),
+        )
+    _mirror_committed_change(
+        request,
+        action=action,
+        target=target,
+        reason="limit_changed",
+    )
+    return _admin_response(
+        request, RedirectResponse("/admin/members", status_code=303)
+    )
+
+
 # ══════════════════════════════════════════════════════════
 # 신고 관리 — feedback_report 원장의 관리자 화면
 # ══════════════════════════════════════════════════════════

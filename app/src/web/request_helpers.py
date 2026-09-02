@@ -458,16 +458,23 @@ def _track_of(request: Request) -> tuple[share_tracks.Track, str, float | None]:
     is_admin = bool(session is not None and session.is_admin)
 
     is_member = False
+    # ★ 관리자가 이 친구 «한 명»에게만 따로 정해 둔 하루 비용 상한 (결정 D-G4 (a)).
+    #   None이면 갈래 기본값(3,000원)을 쓴다. 명단을 못 읽었을 때도 None으로 남아
+    #   기본값 쪽으로 떨어진다 — 못 읽은 것이 상한을 «푸는» 근거가 되면 안 된다.
+    member_daily_budget_krw: float | None = None
     if email and not is_admin:
         try:
             if _request_uses_readonly_existing(request):
                 with storage_db.connect_readonly_existing() as conn:
-                    is_member = bool(
-                        conn is not None and share_allow.is_allowed(conn, email)
+                    profile = (
+                        None if conn is None else share_allow.load(conn, email)
                     )
             else:
                 with storage_db.connect() as conn:
-                    is_member = share_allow.is_allowed(conn, email)
+                    profile = share_allow.load(conn, email)
+            is_member = profile is not None
+            if profile is not None:
+                member_daily_budget_krw = profile.daily_budget_krw
         except Exception:  # noqa: BLE001 — 못 읽으면 «안 된 사람»으로 본다
             logger.exception("초대 명단을 못 읽었습니다 — 초대 안 된 것으로 봅니다")
 
@@ -476,7 +483,9 @@ def _track_of(request: Request) -> tuple[share_tracks.Track, str, float | None]:
         email=email, is_admin=is_admin, is_member=is_member, share_key=key
     )
     bucket = share_tracks.bucket_of(track, email=email, share_key=key)
-    return track, bucket, share_tracks.budget_of(track)
+    return track, bucket, share_tracks.budget_of(
+        track, member_daily_budget_krw=member_daily_budget_krw
+    )
 
 
 def require_active_share_link(
@@ -664,14 +673,22 @@ def _guard_run(
     )
     if track is share_tracks.Track.MEMBER:
         # MEMBER는 위에서 실패까지 포함한 비용 상한을 먼저 확인하고, 여기서는
-        # 성공 보고서 3건도 따로 확인한다. 빠른 사전 확인 뒤 Job 등록 직전의
+        # 성공 보고서 건수도 따로 확인한다. 빠른 사전 확인 뒤 Job 등록 직전의
         # SQLite reservation이 성공 건수의 동시 경쟁을 닫는다.
+        # ★ 건수는 «이 친구의 한도»다 — 관리자가 따로 안 정했으면 기존 3건이다
+        #   (결정 D-G4 (a)). 화면 문구도 같은 숫자를 써야 「3건이라더니 왜 막지」가
+        #   안 생긴다.
         try:
             with storage_db.connect() as conn:
+                member_email = bucket.removeprefix("user:")
+                member_success_limit = dashboard_store.member_success_limit(
+                    conn, actor_email=member_email
+                )
                 member_available = dashboard_store.member_can_start(
                     conn,
-                    actor_email=bucket.removeprefix("user:"),
+                    actor_email=member_email,
                     day=clock.today_kst().isoformat(),
+                    success_limit=member_success_limit,
                 )
         except Exception:
             logger.exception("MEMBER 성공 보고서 사용량을 읽지 못했습니다")
@@ -679,7 +696,8 @@ def _guard_run(
         if not member_available:
             return _throttled(
                 request,
-                "오늘 성공한 보고서 3건을 모두 사용했습니다. 내일 다시 시도해 주세요.",
+                f"오늘 성공한 보고서 {member_success_limit}건을 모두 사용했습니다. "
+                "내일 다시 시도해 주세요.",
                 "member-success-limit",
             )
     if count_start and not budget_logic.rate_ok(
