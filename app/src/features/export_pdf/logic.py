@@ -72,6 +72,7 @@ from src.features.report_standard.constants import SECTION_BY_ID, TIME_SECTION_I
 from src.features.report_standard.cover_metrics import CoverMetrics, cover_metrics
 from src.features.report_standard.section_content import (
     SectionContentBlock,
+    masthead_lines,
     section_content_blocks,
     source_verification_label,
     summary_topic,
@@ -857,6 +858,19 @@ def _styles() -> dict[str, ParagraphStyle]:
             leading=_COVER_METRIC_VALUE_LEADING_PT,
             alignment=TA_LEFT,
             textColor=ink,
+            wordWrap="CJK",
+        ),
+        # 표지 다음 첫 본문 페이지 맨 위 마스트헤드(D-S4a) 회사명 줄.
+        # cover_title(31pt)보다 작고 heading(17pt)보다 큰 좌측 정렬 밴드다.
+        "masthead_title": ParagraphStyle(
+            "MastheadTitle",
+            parent=base["Title"],
+            fontName=constants.FONT_SEMIBOLD,
+            fontSize=constants.MASTHEAD_TITLE_FONT_SIZE_PT,
+            leading=constants.MASTHEAD_TITLE_LEADING_PT,
+            alignment=TA_LEFT,
+            textColor=ink,
+            spaceAfter=3,
             wordWrap="CJK",
         ),
         "heading": ParagraphStyle(
@@ -1658,6 +1672,28 @@ def _summary_table(
     return table
 
 
+def _masthead_flowables(
+    report: Report,
+    styles: dict[str, ParagraphStyle],
+    width: float,
+) -> list[Flowable]:
+    """표지 다음 첫 본문 페이지 맨 위에 회사명 마스트헤드를 좌측 정렬 밴드로 그린다(D-S4a).
+
+    표지(``_CoverContent``)는 페이지 중앙께에 큰 제목·실적 띠·핵심 요약을
+    모아 두므로, 여기서는 같은 인상을 주지 않도록 두 줄 + 얇은 구분선짜리
+    작은 밴드로만 표시한다. 세 채널이 함께 쓰는 ``masthead_lines``의
+    문자열을 그대로 옮기고 새 문장을 짓지 않는다.
+    """
+
+    company_line, meta_line = masthead_lines(report)
+    return [
+        Paragraph(_escape(company_line), styles["masthead_title"]),
+        Paragraph(_escape(meta_line), styles["small"]),
+        _HorizontalRule(width),
+        Spacer(1, 12),
+    ]
+
+
 def _document_header(
     report: Report,
     styles: dict[str, ParagraphStyle],
@@ -1678,6 +1714,7 @@ def _document_header(
         ),
         PageBreak(),
         _OutlineAnchor("report-body", "분석 본문", level=0),
+        *_masthead_flowables(report, styles, width),
     ]
     if report.grade is Grade.PARTIAL:
         partial_title, partial_detail = _partial_publication_copy(

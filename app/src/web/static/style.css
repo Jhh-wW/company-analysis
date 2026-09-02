@@ -1390,6 +1390,32 @@ td.center { text-align: center; }
   border-bottom: 1px solid var(--line);
 }
 .result-page .report-title-block { width: 100%; }
+/* 표지 다음 첫 본문 페이지 마스트헤드(D-S4a) — 표지(.report-cover, 가운데
+   큰 제목·실적 띠·핵심 요약)와 느낌이 겹치지 않도록 좌측 정렬의 얇은
+   두 줄 밴드로만 둔다. PDF(_masthead_flowables)와 같은 자리·같은 순서다. */
+.result-page .report-masthead {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  margin: 0 0 32px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+.result-page .report-masthead-title {
+  margin: 0 0 4px;
+  color: var(--ink);
+  font-size: clamp(20px, 2.6vw, 26px);
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -.03em;
+  word-break: keep-all;
+}
+.result-page .report-masthead-meta {
+  margin: 0;
+  color: var(--ink-3);
+  font-size: 13px;
+  line-height: 1.5;
+}
 /* 표지 실적 띠 — 정본: 디자인과_PDF_QA.md 6-1절.
    기존 결과 화면 토큰(--ink/--ink-3/--line/--surface, 카드 모서리 24px)만 쓴다.
    새 색을 만들지 않는다 — 표지에 색을 하나 더하면 장마다 강조색이 생긴다. */

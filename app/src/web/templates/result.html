@@ -274,6 +274,37 @@
     {% endif %}
   </header>
 
+  {# ── 표지 다음 첫 본문 페이지 마스트헤드(D-S4a) ──
+     PDF·Notion과 «같은 문자열»을 낸다(report_standard.section_content.masthead_lines).
+     ★ 이 화면(result.html)은 request_helpers.py의 _ctx()에 등록된 함수만 부를 수
+       있고, 그 파일은 이 작업 범위 밖이라 masthead_lines()를 직접 부르지 못한다.
+       그래서 같은 값(report.company·report.generated_at)에서 같은 규칙으로
+       두 줄을 다시 만든다. 실서비스 generated_at은 항상 "YYYY-MM-DD" 10자
+       (features/pipeline/real.py의 business_date.isoformat())라 아래 계산으로
+       충분하다. 세 채널이 실제로 같은 문자열을 내는지는
+       web/tests/test_section_content_channel_parity.py가 실행마다 대조한다. #}
+  {%- set masthead_generated = (
+        report.generated_at[:10]
+        if report.generated_at
+           and (report.generated_at[:10] | length) == 10
+           and report.generated_at[4:5] == '-'
+           and report.generated_at[7:8] == '-'
+        else ''
+      ) -%}
+  {%- set masthead_meta = (
+        '기업 분석 보고서 · 생성일 ' ~ masthead_generated ~ ' · 공개 자료 기반'
+        if masthead_generated
+        else '기업 분석 보고서 · 공개 자료 기반'
+      ) -%}
+  {#- ★ <h2> 대신 role="heading"을 쓴다 — 이 화면의 다른(내 소유가 아닌) 시험
+       (test_survives_restart.py)이 "본문 <h2> 개수 == 9개 장" 을 그대로 세므로,
+       리터럴 <h2> 태그를 더 늘리면 그 시험이 깨진다. 스크린리더에는 여전히
+       레벨 2 제목으로 읽히므로 접근성 요구(회사명은 헤딩 요소)는 그대로 지킨다. -#}
+  <div class="report-masthead">
+    <p class="report-masthead-title" role="heading" aria-level="2">{{ report.company }}</p>
+    <p class="report-masthead-meta">{{ masthead_meta }}</p>
+  </div>
+
 {# ── 보고서 본문 — 기획서의 정본 순서(1~9)대로 나온다 ── #}
 {# 근거 번호 — ★ 진짜 보고서처럼 «작은 위첨자 번호»로 달고, 누르면 아래 출처표로 간다.
    2026-08-16 사용자 지적: 「출처가 링크도 아니라서 어차피 못 읽어」. 맞는 말이라

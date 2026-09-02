@@ -30,6 +30,7 @@ from src.features.pipeline.port import (
 from src.features.provenance.sources import Source, visible_citations
 from src.features.report_standard import SECTION_BY_ID, build_published_report
 from src.features.report_standard.section_content import (
+    masthead_lines,
     section_content_blocks,
     source_verification_label,
     summary_topic,
@@ -322,7 +323,16 @@ def build_blocks(report: Report, *, grade_note: str = "") -> list[NotionBlock]:
     # Notion도 화면·PDF와 같은 canonical 공개본만 표현한다.
     report = build_published_report(report)
 
-    blocks: list[NotionBlock] = [_heading_1(report.company), _heading_1("분석 보고서")]
+    # 표지 다음 첫 본문 페이지 맨 위 마스트헤드(D-S4a) — 웹·PDF와 같은
+    # masthead_lines() 문자열을 그대로 첫 두 블록으로 낸다. 새 사실을
+    # 만들지 않고, 아래 이어지는 회사명·보고서명 heading_1 쌍은 그대로 둔다.
+    masthead_company, masthead_meta = masthead_lines(report)
+    blocks: list[NotionBlock] = [
+        _heading_2(masthead_company),
+        _paragraph(masthead_meta),
+        _heading_1(report.company),
+        _heading_1("분석 보고서"),
+    ]
     if report.grade is Grade.PARTIAL:
         # ★ 2026-08-29 — 노션만 정책과 «무관하게» 「검증된 부분 보고서」라고 불렀다.
         #   같은 보고서를 웹·PDF 는 「안전 확인 중인 임시 부분 보고서」라고 부른다

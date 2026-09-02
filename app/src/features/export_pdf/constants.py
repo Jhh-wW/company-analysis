@@ -77,6 +77,11 @@ BODY_LEADING_PT: Final[float] = 14.1
 CARD_LEADING_PT: Final[float] = 11.8
 TABLE_LEADING_PT: Final[float] = 10.0
 META_FONT_SIZE_PT: Final[float] = 6.8
+# 표지 다음 첫 본문 페이지 맨 위 마스트헤드(D-S4a) — 표지 제목(31pt)보다
+# 한 단계 작고 장 제목(17pt)보다 커서, 표지와 겹치지 않으면서도 눈에 띄는
+# 좌측 정렬 밴드로 보이게 한다.
+MASTHEAD_TITLE_FONT_SIZE_PT: Final[float] = 20.0
+MASTHEAD_TITLE_LEADING_PT: Final[float] = 24.0
 PDF_AUTHOR: Final[str] = "기업분석2"
 
 # PDFium은 한 프로세스에서 동시에 문서/page를 닫을 때 Windows 네이티브

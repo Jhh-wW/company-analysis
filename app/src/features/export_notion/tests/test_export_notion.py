@@ -25,7 +25,10 @@ from src.features.pipeline.port import (
     ReportSection,
     ReportTable,
 )
-from src.features.report_standard.section_content import section_content_blocks
+from src.features.report_standard.section_content import (
+    masthead_lines,
+    section_content_blocks,
+)
 from src.features.report_standard.publish import PublishBlockedError
 
 _LEGACY_SECRET = "LEGACY-JOB-POSTING-SECRET"
@@ -113,19 +116,29 @@ def _legacy_partial_report() -> Report:
 
 
 class TestBuildBlocks:
-    def test_회사명과_보고서명이_각각_한_줄로_맨_앞에_온다(self):
-        blocks = logic.build_blocks(_make_report(), grade_note="자료가 부족해 일부만 채웠습니다")
-        assert blocks[0]["type"] == "heading_1"
-        assert _text_of(blocks[0]) == "(주)진영"
-        assert blocks[1]["type"] == "heading_1"
-        assert _text_of(blocks[1]) == "분석 보고서"
-        assert _text_of(blocks[2]) == (
+    def test_마스트헤드_다음에_회사명과_보고서명이_각각_한_줄로_온다(self):
+        """표지 다음 첫 본문 페이지 마스트헤드(D-S4a)가 맨 앞 두 블록,
+        그다음에 기존 회사명·보고서명 heading_1 쌍이 그대로 이어진다."""
+        report = _make_report()
+        expected_masthead_company, expected_masthead_meta = masthead_lines(report)
+
+        blocks = logic.build_blocks(report, grade_note="자료가 부족해 일부만 채웠습니다")
+        assert blocks[0]["type"] == "heading_2"
+        assert _text_of(blocks[0]) == expected_masthead_company
+        assert blocks[1]["type"] == "paragraph"
+        assert _text_of(blocks[1]) == expected_masthead_meta
+
+        assert blocks[2]["type"] == "heading_1"
+        assert _text_of(blocks[2]) == "(주)진영"
+        assert blocks[3]["type"] == "heading_1"
+        assert _text_of(blocks[3]) == "분석 보고서"
+        assert _text_of(blocks[4]) == (
             "상장사 · 2026-08-19 기준 · "
             "2023~2025 완료 사업연도(12월 결산·연결) / "
             "사건: 2023-08-19~2026-08-19 · "
             "최신 실적 2026년 반기 공식 공시"
         )
-        assert "생성" not in _text_of(blocks[2])
+        assert "생성" not in _text_of(blocks[4])
 
     def test_완성도와_내부_검증_문구를_최종_보고서에_내지_않는다(self):
         report = _make_report()

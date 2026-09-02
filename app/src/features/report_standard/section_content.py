@@ -9,10 +9,12 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import re
 from dataclasses import dataclass, replace
 from typing import Final, Iterable
 
+from src.core import clock
 from src.features.pipeline.port import FactRecord, Report, ReportSection
 from src.features.pipeline.section567_contract import (
     PLAN_STATUS_LABELS,
@@ -64,6 +66,59 @@ def summary_topic(section_id: str) -> str:
     """핵심요약 카드에 쓰는 2~6자 짧은 제목."""
 
     return SUMMARY_TOPICS.get(str(section_id or "").strip(), "핵심결론")
+
+
+#: ``report.generated_at``이 ISO 날짜(YYYY-MM-DD)로 시작할 때만 표시한다.
+#: ``export_pdf.logic._ISO_DATE_PREFIX``와 같은 모양의 검사다 — 두 곳이
+#: 각자 정규식을 두되 같은 필드·같은 판정 기준을 쓴다.
+_ISO_DATE_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}(?:$|T|\s)")
+
+
+def _generated_at_iso_date(report: Report) -> str:
+    """``report.generated_at``을 KST 기준 ``YYYY-MM-DD``로 옮긴다.
+
+    표지 메타(``export_pdf.logic._cover_metadata``)의 「내용 생성」 라벨이
+    읽는 것과 **같은 필드**(``generated_at``)·같은 KST 변환을 쓴다. 표지는
+    구분자로 마침표(``2026.08.19``)를 쓰지만, 이 마스트헤드는 대시(ISO
+    ``2026-08-19``)를 쓴다 — 날짜 값 자체는 항상 같고 구분자 모양만 다르다.
+    저장값이 ISO 날짜가 아니면(옛 저장본 등) 빈 문자열을 돌려준다.
+    """
+
+    raw = report.generated_at.strip()
+    if not raw or _ISO_DATE_PREFIX.match(raw) is None:
+        return ""
+    try:
+        if len(raw) == 10:
+            return dt.date.fromisoformat(raw).isoformat()
+        parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(clock.KST)
+        return parsed.date().isoformat()
+    except ValueError:
+        return ""
+
+
+def masthead_lines(report: Report) -> tuple[str, str]:
+    """표지 다음 첫 본문 페이지 맨 위에 놓는 마스트헤드 두 줄.
+
+    새 사실을 만들지 않는다 — 회사명(``report.company``)과 생성일
+    (``report.generated_at``)을 이미 검증된 값 그대로 옮긴다. 웹·PDF·Notion
+    세 채널이 각자 문장을 짓지 않고 이 함수 하나만 호출해 항상 같은 두 줄을
+    쓰게 한다(문구는 세 채널 동일성 시험 ``test_section_content_channel_parity.py``가
+    지킨다).
+
+    Returns:
+        ``(회사명, 메타줄)``. 생성일을 표시할 수 없으면(옛 저장본 등) 메타줄에서
+        그 부분만 빠진다 — 회사명은 항상 그대로 남는다.
+    """
+
+    generated = _generated_at_iso_date(report)
+    meta_line = (
+        f"기업 분석 보고서 · 생성일 {generated} · 공개 자료 기반"
+        if generated
+        else "기업 분석 보고서 · 공개 자료 기반"
+    )
+    return (report.company, meta_line)
 
 
 def _compact(value: object) -> str:
