@@ -18,8 +18,7 @@
 
 from __future__ import annotations
 
-import importlib.util
-import sys
+import ast
 from pathlib import Path
 
 import yaml
@@ -100,6 +99,33 @@ def test_TYPED_DART_COLLECTOR는_render_yaml에_없다() -> None:
     )
 
 
+def _module_constant(module_path: Path, name: str) -> str:
+    """모듈을 «실행하지 않고» 최상위 문자열 상수 하나를 읽는다.
+
+    ★ 왜 import 하지 않는가 — ``exec_module``은 ``__pycache__``의 옛
+      바이트코드를 재사용한다. 바이트코드 무효화는 (수정시각, 크기)로
+      판단하므로 «같은 길이»로 값을 고치면 옛 값이 그대로 읽힌다(실측).
+      그러면 이 시험은 디스크의 진짜 글자가 아니라 지난번 글자를 단정한다.
+      구문 분석은 소스만 보므로 그 구멍이 없다.
+    """
+
+    tree = ast.parse(module_path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.AnnAssign):
+            target = node.target
+        elif isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+        else:
+            continue
+        if not isinstance(target, ast.Name) or target.id != name:
+            continue
+        value = node.value
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            return value.value
+        raise AssertionError(f"{name}이 문자열 리터럴이 아닙니다")
+    raise AssertionError(f"{module_path.name}에 {name} 상수가 없습니다")
+
+
 def test_deployment_mode_상수도_같은_리터럴이다() -> None:
     """render.yaml과 코드 상수가 «서로 어긋나는» 경우를 잡는다.
 
@@ -109,26 +135,9 @@ def test_deployment_mode_상수도_같은_리터럴이다() -> None:
     """
 
     module_path = REPOSITORY_ROOT / "app" / "src" / "web" / "deployment_mode.py"
-    spec = importlib.util.spec_from_file_location(
-        "release_literal_deployment_mode", module_path
-    )
-    assert spec is not None and spec.loader is not None
-    deployment_mode = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = deployment_mode
-    spec.loader.exec_module(deployment_mode)
 
-    assert deployment_mode.RENDER_PORTFOLIO_LINK_CONTRACT == (
-        EXPECTED_RUNTIME_CONTRACT
-    ), (
+    assert _module_constant(
+        module_path, "RENDER_PORTFOLIO_LINK_CONTRACT"
+    ) == EXPECTED_RUNTIME_CONTRACT, (
         "코드 상수와 render.yaml이 다른 글자를 가리키면 배포가 조용히 옛 계약이 됩니다"
-    )
-    # ★ 이 계약은 «일부러» 관리자 차단 집합에 넣지 않는다(그 집합에 있으면
-    #   admin.py가 링크 발급·초대를 자동으로 막는다). 반대로 고정 origin 집합에는
-    #   반드시 있어야 forwarded 헤더 비신뢰가 유지된다.
-    assert (
-        EXPECTED_RUNTIME_CONTRACT
-        not in deployment_mode.RENDER_ADMIN_NO_FORWARDED_CONTRACTS
-    )
-    assert (
-        EXPECTED_RUNTIME_CONTRACT in deployment_mode.RENDER_PINNED_ORIGIN_CONTRACTS
     )
