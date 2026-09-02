@@ -613,6 +613,100 @@ def test_worker는_한번잡은_완료시각으로_모든권한종류를_실제�
             assert link_run.release_sha256
 
 
+def test_LINK_알수없는_예외도_fail_closed로_닫힌다(
+    monkeypatch,
+    tmp_path: Path,
+):
+    """finalize의 미분류 예외(어댑터·저장소 오류 등)도 LINK를 awaiting_release로 방치하지 않는다.
+
+    34장 챕터03 §4가 023에서 넘겨받으라고 못 박은 계약이다. ``reports.py``의
+    except 블록은 ``PublishBlockedError``·``PDFReleaseBlockedError`` 계열만
+    ``_mark_link_release_gate_stopped``를 부르고, 그 밖(RuntimeError 등)은
+    ``else`` 분기가 없어 그 계층만 보면 LINK를 닫지 않는다(실측 확인,
+    reports.py는 이 worktree 소유 밖이라 그 층은 고치지 않는다).
+
+    그러나 실제 생산 경로에서 ``finalize_new_report_delivery``를 부르는
+    곳은 ``job_runtime._finalize_report_delivery`` 하나뿐이고(grep 재확인),
+    그 호출부는 예외 종류와 무관하게 ``report_available=False``가 되면
+    audience와 무관하게 ``_finish_link_job(STOPPED)``을 부른다. 이 시험은
+    ``_run_job`` 전체를 실제로 돌려 그 방어선이 살아있는지 못 박는다.
+    """
+
+    report = _demo_report()
+    report_id = uuid.uuid4().hex
+    link_key = f"unknown-exc-link-{report_id}"
+
+    class _ReportPipeline:
+        @staticmethod
+        def run(*_args, **_kwargs):
+            return RunResult(outcome=Outcome.REPORT, report=report)
+
+    job = job_runtime.Job(
+        job_id=report_id,
+        user_input=UserInput(company=report.company, job=report.job, region=""),
+        card=CompanyCard(
+            legal_name=report.company,
+            typed_name=report.company,
+            address="",
+            ceo="",
+            founded="",
+            ref="unknown-exc-corp",
+        ),
+        report_audience=ReportAudience.LINK,
+    )
+    with storage_db.connect() as conn:
+        assert job_runtime.share_store.insert_new(
+            conn,
+            key=link_key,
+            company=report.company,
+            job=report.job,
+            now_iso=clock.iso_now_kst(),
+        )
+        assert job_runtime.share_store.start_run(
+            conn,
+            key=link_key,
+            run_id=report_id,
+            started_at=clock.iso_now_kst(),
+            input_company=report.company,
+            confirmed_company=report.company,
+            company_id="unknown-exc-corp",
+        )
+    job.share_key = link_key
+    job.share_link_hash = job_runtime.share_store.key_hash_of(link_key)
+
+    def _unclassified_adapter_failure(_report):
+        raise RuntimeError("시험용 미분류 어댑터 오류 — 4개 알려진 출고차단이 아니다")
+
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "art"))
+    monkeypatch.setattr(runtime, "_PIPELINE", _ReportPipeline())
+    monkeypatch.setattr(
+        job_runtime,
+        "_finalize_report_delivery",
+        _REAL_FINALIZE_REPORT_DELIVERY,
+    )
+    monkeypatch.setattr(
+        reports_router, "_report_for_output", _unclassified_adapter_failure
+    )
+    monkeypatch.setattr(job_runtime, "record_run", lambda *_a, **_k: None)
+    monkeypatch.setattr(job_runtime, "_release_run_slot", lambda _bucket: None)
+
+    asyncio.run(job_runtime._run_job(job))
+
+    assert job.result is not None
+    assert job.report_persisted is True
+    assert job.delivery_persisted is False
+
+    with storage_db.connect() as conn:
+        link_run = job_runtime.share_store.load_run(conn, report_id)
+        intent = delivery_store.load_delivery_intent(conn, report_id)
+    assert link_run is not None
+    assert link_run.status == job_runtime.share_store.RUN_STATUS_STOPPED
+    assert link_run.status != job_runtime.share_store.RUN_STATUS_AWAITING_RELEASE
+    assert intent is not None
+    assert intent.state == delivery_store.DELIVERY_INTENT_FAILED
+    assert intent.failure_code == "artifact_finalization_failed"
+
+
 def test_PUBLIC_최종출고는_실제60일만료보다_grant가짧으면_청구까지rollback한다(
     monkeypatch,
     tmp_path: Path,
