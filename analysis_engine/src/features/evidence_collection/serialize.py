@@ -1,8 +1,9 @@
 """DartEvidenceHarvest를 평범한 dict·list·str·int로 직렬화한다.
 
-app 쪽 adapter가 이 Mapping을 그대로 계약 자료형으로 변환한다(2026-08-31
-team-lead 통보). frozen dataclass·frozenset·tuple 같은 파이썬 전용 타입은
-하나도 새지 않는다 — JSON으로 그대로 dump할 수 있는 모양만 돌려준다.
+향후 app 쪽 adapter는 이 Mapping을 그대로 계약 자료형으로 변환해야 한다
+(2026-08-31 team-lead 통보). 현재 실서비스 adapter는 아직 없다. frozen
+dataclass·frozenset·tuple 같은 파이썬 전용 타입은 하나도 새지 않는다 —
+JSON으로 그대로 dump할 수 있는 모양만 돌려준다.
 
 ★ generation=7 계약(P0-5, 2026-08-31) — 각 document Mapping에는
 ``exact_evidence_hashes``가 있다: 그 document_id로 실제 내보내는 fragment들의
