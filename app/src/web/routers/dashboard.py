@@ -1214,6 +1214,11 @@ async def link_detail(request: Request, key_hash: str):
                     "generation_start_failed": "생성 시작 중 기술 오류",
                     "generation_not_started": "생성을 시작하지 못함",
                     "automatic_release_gate_stopped": "자동출고 검사를 통과하지 못함",
+                    # admin.py 사본과 «같이» 고쳐야 한다. 한쪽만 고치면 그 화면만
+                    # 조용히 원문 코드로 보인다(test_link_stop_reason_label_parity).
+                    "link_revoked": "초대 링크의 사용이 중단됨",
+                    "link_expired": "초대 링크의 기간이 지남",
+                    "link_state_unknown": "초대 링크 상태를 확인하지 못함",
                 },
             ),
         )

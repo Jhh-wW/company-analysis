@@ -1295,6 +1295,11 @@ def _link_detail_page(
                 "generation_start_failed": "생성 시작 중 기술 오류",
                 "generation_not_started": "생성을 시작하지 못함",
                 "automatic_release_gate_stopped": "자동출고 검사를 통과하지 못함",
+                # 조사 도중 초대 링크가 닫혀 멈춘 갈래(G-S11a). 사람 말로 적는다 —
+                # 「revoked」로는 무엇이 멈췄는지 읽는 사람이 알 수 없다.
+                "link_revoked": "초대 링크의 사용이 중단됨",
+                "link_expired": "초대 링크의 기간이 지남",
+                "link_state_unknown": "초대 링크 상태를 확인하지 못함",
             },
             reference_max_chars=REFERENCE_MAX_CHARS,
             is_deployed=False,
