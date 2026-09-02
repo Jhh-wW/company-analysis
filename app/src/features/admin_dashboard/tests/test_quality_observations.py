@@ -147,9 +147,15 @@ def test_관측값_없는_옛_보고서는_제외_건수로만_센다(tmp_path: 
 
 
 def test_기간_필터(tmp_path: Path) -> None:
+    """필터는 report.generated_at이 아니라 저장 행의 created_at 기준이다.
+
+    `report_store.list_report_ids()`(storage 공개 API)가 `created_at`으로
+    거르므로, 이 시험도 `save()`의 `created_at`을 직접 지정해 통제한다.
+    """
+
     db_path = tmp_path / "storage.db"
     with db.connect(db_path) as conn:
-        for report_id, generated_at in (
+        for report_id, created_at in (
             ("early", "2026-01-01T00:00:00"),
             ("middle", "2026-02-01T00:00:00"),
             ("late", "2026-03-01T00:00:00"),
@@ -160,10 +166,11 @@ def test_기간_필터(tmp_path: Path) -> None:
                 "CORP-005",
                 "",
                 _report_with_observation(
-                    generated_at=generated_at,
+                    generated_at=created_at,
                     company_id="CORP-005",
                     observation=_observation(),
                 ),
+                created_at=created_at,
             )
 
     with db.connect_readonly_existing(db_path) as conn:
