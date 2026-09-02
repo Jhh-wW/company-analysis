@@ -1137,7 +1137,7 @@ def _sections_from(
 ) -> tuple[list[ReportSection], list[str]]:
     """엔진이 고른 문장들을 항목별로 담는다.
 
-    ★ 표 덩어리는 여기서 버린다 (D12).
+    ★ 표 덩어리는 여기서 버린다.
       엔진을 고치지 않고 «화면에 내보내기 직전»에 거른다.
     ★ 회계기준 설명 문구도 여기서 버린다.
     ★ 알맹이 검사(①-b) 결과도 여기서 반영한다.
@@ -1161,7 +1161,7 @@ def _sections_from(
         if cite == "공고":
             requirements.append(item.sentence)
             continue
-        # ★ 재무·회계 수치는 «표 그대로» 낸다 (결정기록 D13). 버리지 않는다.
+        # ★ 재무·회계 수치는 «표 그대로» 낸다. 버리지 않는다.
         table = parse_financial_table(item.sentence)
         if table is not None:
             tables.setdefault(item.block, []).append(table)
@@ -2218,7 +2218,7 @@ class RealPipeline:
                 cost_krw=_request_spent_krw(engine),
                 model=model,
                 # 화면 배지와 대시보드 ⑤가 이 값을 읽는다. 안 실으면 캐시가
-                # 돌아도 「재사용 0건」으로 보인다 (P-63과 같은 사고).
+                # 돌아도 「재사용 0건」으로 보인다 — 화면이 옛말을 하는 사고다.
                 cache_hit=CACHE_HIT_LAYER1,
                 dart_receipt_numbers=source_identity.dart_receipt_numbers,
                 financial_payload_digest=source_identity.financial_payload_digest,
@@ -2879,7 +2879,7 @@ class RealPipeline:
         # ── 13 출력 ──────────────────────────────────────
         tell("output")
 
-        # ── 14 저장 — 1층 캐시 (정본 §3 저장 구간) ────────
+        # ── 14 저장 — 1층 캐시 (저장 구간) ────────
         # 회사분석 전용 버전 키로 저장해 옛 직무·공고 보고서와 섞이지 않는다.
         # ★ 우리 쪽 수집 실패(⚠️)가 낀 결과는 «저장하지 않는다» —
         #   그날만 죽은 소스 때문에 그 회사가 「자료 없는 회사」로 굳는다.
@@ -3133,7 +3133,7 @@ def _current_fiscal_year(
       그 회사들은 「사업연도를 모름」이 되어 **캐시가 영영 적중하지 않는다.**
     ★ 왜 «더 최신»인가 — 한쪽이 옛 연도에 멈춰 있어도(실측: 재무 API가
       2023에 멈춘 회사) 다른 쪽이 새 자료를 알아채면 캐시가 만료된다.
-      「작년 보고서가 계속 나가는」 구멍(정본 §2)을 막는 쪽으로 기운다.
+      「작년 보고서가 계속 나가는」 구멍(신선도 규칙)을 막는 쪽으로 기운다.
     ★ `dt.date.today().year - 1`로 **추측하지 않는다.** 사업보고서는 결산 뒤
       몇 달 지나야 올라오므로 1~3월에는 작년 자료가 없는 것이 정상이다.
       추측하면 그 기간 내내 오판해 캐시가 통째로 무효가 된다.
@@ -4412,7 +4412,7 @@ def _collect(
         }
     )
 
-    # 회사 홈페이지 — 2번(뭘 잘하나)이 만성적으로 비는 원인이었다 (D14-7).
+    # 회사 홈페이지 — 2번(뭘 잘하나)이 만성적으로 비는 원인이었다.
     # ★ 실패를 「없음」과 반드시 구분한다. 섞으면 「이 회사는 자료가 없다」로 잘못 읽힌다.
     with collection_cache_scope():
         homepage = collect_homepage_fragments(

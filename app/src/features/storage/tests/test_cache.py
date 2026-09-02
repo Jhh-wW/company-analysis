@@ -152,7 +152,7 @@ def test_layer1_has_candidates_before_fingerprint_known(tmp_path: Path) -> None:
 
 
 def test_layer1_miss_when_posting_fingerprint_differs(tmp_path: Path) -> None:
-    """같은 회사·직무여도 «다른 공고»면 미스 — 캐시 키에 지문이 들어간 이유(정본 §★)."""
+    """같은 회사·직무여도 «다른 공고»면 미스 — 캐시 키에 지문이 들어간 이유다."""
     with db.connect(tmp_path / "storage.db") as conn:
         cache.save_layer1(
             conn,
@@ -948,7 +948,7 @@ def test_alias_invalidate_removes_entry(tmp_path: Path) -> None:
 
 def test_save_layer1_signature_has_no_posting_text_parameter() -> None:
     """`save_layer1`은 `requirements`(요구역량 목록)만 받는다 — 공고 원문을
-    넘길 파라미터 자체가 없다(정본 §도구정의 4 — "요구역량 목록만 캐시").
+    넘길 파라미터 자체가 없다(도구정의 규칙 4 — "요구역량 목록만 캐시").
     """
     import inspect
 

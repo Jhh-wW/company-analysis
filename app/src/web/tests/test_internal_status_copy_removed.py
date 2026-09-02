@@ -114,7 +114,7 @@ def test_실제_조사_모드에서도_실제조사_배지를_따로_보여주�
     text = visible_text(response.text)
 
     assert "실제 조사" not in text
-    # 실제 조사인데 「샘플 모드」라고 잘못 말해서도 안 된다 (P-79와 같은 종류의 사고).
+    # 실제 조사인데 「샘플 모드」라고 잘못 말해서도 안 된다 — 화면이 사실과 다른 말을 하는 사고다.
     assert "샘플 모드" not in text
 
 

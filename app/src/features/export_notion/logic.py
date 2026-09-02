@@ -176,7 +176,7 @@ def _report_lede_text(report: Report) -> str:
 
 
 def _table_blocks(table: ReportTable) -> list[NotionBlock]:
-    """숫자·회계 표 하나. 문장으로 바꾸지 않고 «표 그대로» 낸다 (결정기록 D13)."""
+    """숫자·회계 표 하나. 문장으로 바꾸지 않고 «표 그대로» 낸다."""
     marker = citation_marker(table.cite)
     caption = f"{table.caption} {marker}" if marker else table.caption
     blocks: list[NotionBlock] = [_paragraph(caption)]

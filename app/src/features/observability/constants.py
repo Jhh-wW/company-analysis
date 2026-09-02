@@ -43,7 +43,7 @@ MAX_RECORDS_FILE_BYTES: Final[int] = 64 * 1024 * 1024
 MAX_RECORD_LINE_BYTES: Final[int] = 16 * 1024
 
 # ══════════════════════════════════════════════════════════
-# 이력 1행 — 항목별 허용값 (정본 §이력 1행 13종)
+# 이력 1행 — 항목별 허용값 (13종)
 # ══════════════════════════════════════════════════════════
 
 # ── 2. 회사 유형 ─────────────────────────────────────────
@@ -91,7 +91,7 @@ FUNNEL_STAGES: Final[tuple[tuple[str, str], ...]] = (
 #: 이력 1행의 `end_step`이 가질 수 있는 값 전체 (검증용).
 END_STEP_VALUES: Final[tuple[str, ...]] = tuple(key for key, _ in FUNNEL_STAGES)
 
-#: 「항상 결함. 0건이어야 함」인 종료 단계 — 정본 §③ 3단계 신호 🔴.
+#: 「항상 결함. 0건이어야 함」인 종료 단계 — 3단계 신호 🔴.
 #: ① 서비스 상태의 「오류 건수」는 이 두 단계로 끝난 요청 수다.
 ERROR_END_STEPS: Final[tuple[str, ...]] = (
     END_STEP_IDENTIFY_ERROR,
@@ -169,7 +169,7 @@ METRIC_CONTEXT_RECALL: Final[str] = "수집 완전성"       # Context Recall ·
 METRIC_JUDGE_AGREEMENT: Final[str] = "AI 판정 정합률"   # 사람 → 코드
 METRIC_JUDGE_STABILITY: Final[str] = "판정 재현성"      # 코드
 
-#: 화면에 이 순서 그대로 낸다 (정본 §②-b 표 순서).
+#: 화면에 이 순서 그대로 낸다 (정해진 표 순서).
 METRIC_ORDER: Final[tuple[str, ...]] = (
     METRIC_FAITHFULNESS,
     METRIC_ANSWER_RELEVANCY,
@@ -180,7 +180,7 @@ METRIC_ORDER: Final[tuple[str, ...]] = (
 )
 
 # ══════════════════════════════════════════════════════════
-# 표시 규칙 — % 소수점 자리 (정본 §① 표시 규칙 「소수점이 아니라 %로」)
+# 표시 규칙 — % 소수점 자리 (「소수점이 아니라 %로」)
 # ══════════════════════════════════════════════════════════
 
 #: % 값을 몇째 자리까지 반올림할지. 표본이 작을 때(첫 20건) 소수점이 있어야

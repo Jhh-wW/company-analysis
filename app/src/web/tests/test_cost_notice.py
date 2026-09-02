@@ -118,7 +118,7 @@ def test_실제로_잰_금액은_화면에_안_보인다(client: TestClient, mon
 
 
 def test_데모_모드에는_금액_안내가_없다(client: TestClient, monkeypatch):
-    """★ 공짜인데 돈 얘기를 하면 겁먹고 안 눌러본다 — P-79의 반대 방향."""
+    """★ 공짜인데 돈 얘기를 하면 겁먹고 안 눌러본다 — 반대 방향의 실수다."""
     monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
 
     shown = visible_text(client.get("/").text)

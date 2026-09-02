@@ -214,7 +214,7 @@ def test_P0_6_정정본만_있으면_그것을_쓰고_계보는_비운다() -> N
 
 
 def test_P0_6_select_related_filings_종단에서도_다른_연도_원공시가_이긴다() -> None:
-    """select_related_filings 전체 흐름에서도 P0-6이 실제로 적용되는지 확인."""
+    """select_related_filings 전체 흐름에서도 정정본 우선 규칙이 실제로 적용되는지 확인."""
     fetcher = FakeFetcher(list_responses_by_pblntf_ty={
         "A": FilingListResult(state="OK", rows=(
             _row("20240301000001", "[기재정정]사업보고서 (2023.12)"),

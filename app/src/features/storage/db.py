@@ -447,7 +447,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     """표가 없으면 만들고, 있으면 그대로 둔다.
 
     ★ 열쇠 링크 표는 그 feature가 자기 모양을 갖고 있다 (`sharelink/store.py`).
-      여기서 다시 적으면 «같은 정의가 두 곳»이 되어 한쪽만 고쳐진다 (P-83과 같은 함정).
+      여기서 다시 적으면 «같은 정의가 두 곳»이 되어 한쪽만 고쳐진다 — 같은 정의가 두 곳이 되는 함정이다.
     """
     from src.features.sharelink import allowlist as share_allow  # noqa: PLC0415
     from src.features.sharelink import store as share_store  # noqa: PLC0415

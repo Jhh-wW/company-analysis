@@ -801,7 +801,7 @@ def member_success_limit_message(limit: int) -> str:
       실행 시작 전 사전 확인(`_guard_run`)과 Job 등록 직전의 예약 커밋
       (`job_runtime._start_with_reserved_slot`)이다. 같은 문장을 두 곳에 따로
       적어 두면 한쪽만 고쳐져서, 한도를 7건으로 올린 친구가 경쟁에서 밀렸을 때
-      「3건 다 썼다」는 틀린 말을 본다 (P-83과 같은 함정).
+      「3건 다 썼다」는 틀린 말을 본다 — 같은 정의가 두 곳이 되는 함정이다.
     """
     return (
         f"오늘 성공한 보고서 {int(limit)}건을 모두 사용했습니다. "

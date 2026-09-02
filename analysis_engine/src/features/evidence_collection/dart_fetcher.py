@@ -40,7 +40,7 @@ from features.evidence_collection import constants as c
 from features.evidence_collection.filing_select import DocumentFetchResult, FilingListResult, RawFilingRow
 
 #: list.json 조회 창 — 최근 N년. survey_audit_reports.py·run_pilot.py의
-#: AUDIT_WINDOW_YEARS(3년, 「 잠정 3년」)와 같은 값을 그대로 따른다 —
+#: AUDIT_WINDOW_YEARS(3년, 「잠정 3년」)와 같은 값을 그대로 따른다 —
 #: 사업/감사보고서는 보통 1년 안에 갱신되지만, 조회 누락을 피하려 넉넉히
 #: 잡는다는 같은 근거다. 정확한 달력 계산(윤년) 대신 365일 근사를 쓴다 —
 #: 이 창은 «조회 누락을 피하는 여유값」이지 정밀한 경계 조건이 아니므로

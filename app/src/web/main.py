@@ -77,7 +77,7 @@ async def beta_admin_gate(request: Request, call_next):
         return await call_next(request)
     # 관리자 전용 로그인 벽이 켜져 있어도 «초대 명단(allowlist)에 활성 상태로
     # 있는 회원»은 관리자 화면만 빼고 통과한다 — 로그인만으로는 통과하지
-    # 않는다(P-95와 같은 원칙, `sharelink/tracks.py`의 MEMBER 갈래와 정합).
+    # 않는다(`sharelink/tracks.py`의 MEMBER 갈래와 정합).
     # ★ 계약과 무관하게 적용한다 — BETA_ADMIN_ONLY는 «로그인 벽을 켤지»를
     #   정할 뿐, 어느 forwarded-header 신뢰 모델을 쓰는지와는 다른 축이다.
     #   admin.py의 LINK 발급·초대 차단, 이 함수 아래의 `/k/`·LINK 쿠키 차단은

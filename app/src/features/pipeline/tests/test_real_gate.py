@@ -35,7 +35,7 @@ def _engine_cell_sources() -> dict[str, tuple[str, ...]]:
 
 
 def test_1판_대응표에는_홈페이지가_없다():
-    """★ P-72의 근거. 이게 깨지면 1판이 바뀐 것이니 아래 보정을 다시 볼 것."""
+    """★ 이 보정의 근거. 이게 깨지면 1판이 바뀐 것이니 아래 보정을 다시 볼 것."""
     sources = _engine_cell_sources()
 
     쓰이는_종류 = {kind for kinds in sources.values() for kind in kinds}

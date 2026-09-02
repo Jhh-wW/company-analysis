@@ -185,7 +185,7 @@ class CompanyLookupResult:
 class ReportTable:
     """숫자 표 하나.
 
-    ★ 재무·회계 수치는 «문장으로 바꾸지 않고 표 그대로» 낸다 (결정기록 D13).
+    ★ 재무·회계 수치는 «문장으로 바꾸지 않고 표 그대로» 낸다.
       숫자를 억지로 문장으로 만들면 읽기만 나빠진다.
     """
 
@@ -272,7 +272,7 @@ class ReportSection:
     lines: list[tuple[str, str]] = field(default_factory=list)
     #: 비었을 때 「왜 비었는지」. 프로그램이 붙인다 (AI 아님).
     empty_reason: str = ""
-    #: 숫자 표. 문장 대신 이걸로 채울 수 있다 (D13).
+    #: 숫자 표. 문장 대신 이걸로 채울 수 있다.
     tables: list[ReportTable] = field(default_factory=list)
     #: 작가와 독립 검토를 통과한 공개 문장 및 실제 출처 표기.
     #: canonical 렌더러는 이것과 표만 표시하며 원문 ``lines``로 대체하지 않는다.

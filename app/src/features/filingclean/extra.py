@@ -173,7 +173,7 @@ MIN_CHUNK_CHARS: Final[int] = 200
 MAX_OCCURRENCES: Final[int] = 20
 
 #: 표 신호 — 이만큼 이상이면 「문장이 아니라 표」로 보고 건너뛴다.
-#: ★ 새 절을 뜨는 김에 표까지 담아 오면 P-101에서 겪은 일이 되풀이된다.
+#: ★ 새 절을 뜨는 김에 표까지 담아 오면 예전에 겪은 일이 되풀이된다.
 _MONEY_RE: Final[re.Pattern[str]] = re.compile(r"\d{1,3}(?:,\d{3})+")
 _TABLE_NUMBER_MIN: Final[int] = 6
 
@@ -209,7 +209,7 @@ def find_section(
         본문 덩어리. 못 찾으면 빈 문자열.
 
     ★ 세 가지를 건너뛴다 — **목차 · 법적 면책 문구 · 표**.
-      P-101에서 겪은 것을 여기서 «처음부터» 막는다.
+      예전에 겪은 것을 여기서 «처음부터» 막는다.
       새 절을 뜨면서 같은 실수를 반복할 이유가 없다.
     """
     for head in heads:

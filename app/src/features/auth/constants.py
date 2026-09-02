@@ -80,7 +80,7 @@ BETA_SHARE_PATH_PREFIXES: Final[tuple[str, ...]] = (
 #: capability나 회원 세션으로 열리지 않는다 — 관리자 세션만 들어온다.
 ADMIN_PATH_PREFIX: Final[str] = "/admin"
 
-# ── 권한 판단 (D15 — 구글 로그인은 「누구인가」, 이 목록은 「관리자인가」) ─
+# ── 권한 판단 (구글 로그인은 「누구인가」, 이 목록은 「관리자인가」) ─
 #: 환경변수가 없으면 관리자는 0명이다. 배포에서 ENV_ADMIN_EMAILS를 반드시 넣는다.
 DEFAULT_ADMIN_EMAILS: Final[tuple[str, ...]] = ()
 

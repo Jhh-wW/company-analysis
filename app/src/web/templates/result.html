@@ -703,7 +703,7 @@
             {%- endfor -%}
           </p>
         {% endif %}
-        {# 숫자는 문장으로 바꾸지 않고 표 그대로 낸다 (결정기록 D13) #}
+        {# 숫자는 문장으로 바꾸지 않고 표 그대로 낸다 #}
         {% for t in s.tables %}
           {% set table_id = 'report-table-' ~ section_index ~ '-' ~ loop.index %}
           {{ report_table_block(t, table_id) }}
@@ -713,7 +713,7 @@
   {% endfor %}
 </div>
 
-{# ── 출처 목록 — 본문 문장 뒤 번호가 여기를 가리킨다 (D14-1) #}
+{# ── 출처 목록 — 본문 문장 뒤 번호가 여기를 가리킨다 #}
 {% if public_citations %}
   <section class="report-support" aria-labelledby="report-citations-title">
     <h2 id="report-citations-title"><span class="no">부록</span><span class="txt">출처와 검증 상태</span></h2>

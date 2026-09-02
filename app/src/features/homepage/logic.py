@@ -158,7 +158,7 @@ DartWwwRedirectProbe = Callable[[str, str], str]
 class HomepageCollectResult:
     """홈페이지 수집 결과 하나.
 
-    ★ 「자료 없음」과 「못 가져옴」을 반드시 구분한다 (정본 §「없다」와 「못 가져옴」은 다르다).
+    ★ 「자료 없음」과 「못 가져옴」을 반드시 구분한다 (「없다」와 「못 가져옴」은 다르다).
       state가 "failed"인 결과는 캐시하면 안 된다 — 그날만 사이트가 죽었을 수 있다.
     """
 

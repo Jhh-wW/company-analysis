@@ -821,7 +821,7 @@ def test_robots는_capability_경로를_경로단위로_제외한다(client: Tes
 
 
 def test_한_링크가_다_써도_다른_링크는_돈다(client: TestClient, monkeypatch):
-    """★ P-94의 핵심 — 「전체 하나」가 아니라 「링크당」을 고른 이유다."""
+    """★ 이 규칙의 핵심 — 「전체 하나」가 아니라 「링크당」을 고른 이유다."""
     _링크발급(_카카오열쇠, "카카오")
     _링크발급(_네이버열쇠, "카카오")
     오늘 = clock.today_kst()

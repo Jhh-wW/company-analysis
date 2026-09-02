@@ -415,7 +415,7 @@ class Source:
     """출처 목록 한 줄 — 문장 뒤 `[번호]`가 가리키는 실제 출처.
 
     ★ `number`는 **AI가 고른 조각 번호를 그대로 쓴다.** 여기서 새로 매기지
-      않는다 (정본 §근거 표기 — 번호).
+      않는다 (근거 표기 규칙 — 번호).
     """
 
     number: int
@@ -480,7 +480,7 @@ class Source:
 
     @property
     def is_valid(self) -> bool:
-        """뉴스는 보도일과 언론사 도메인이 반드시 있어야 한다 (정본 §근거 표기 — 뉴스)."""
+        """뉴스는 보도일과 언론사 도메인이 반드시 있어야 한다 (근거 표기 규칙 — 뉴스)."""
         if self.number <= 0 or not self.label.strip():
             return False
         if self.kind is SourceKind.NEWS:
@@ -932,7 +932,7 @@ def count_missing_dates(sources: list[Source]) -> int:
     """출처일·수집일이 하나라도 빠진 공시 자료 개수 (C3).
 
     맨 아래 목록에 날짜가 한곳에 모이는 «딸려 오는 효과»를 여기서 쓴다
-    (정본 §근거 표기 — 딸려 오는 효과).
+    (근거 표기 규칙 — 딸려 오는 효과).
 
     ⚠️ 알려진 한계 — 마크다운으로 한 번 왕복(render → parse)하면, 날짜가
       하나도 없던 공시 항목은 겉모양이 '기타'와 똑같아져 더 이상 공시로

@@ -70,7 +70,7 @@ def test_두_번_불러도_경고가_한_번만_붙는다():
 
 
 def test_표만_있어도_채워진_것으로_보고_경고를_붙인다():
-    """문장이 없어도 tables가 있으면 is_filled다 (D13) — 표에도 경고가 붙어야 한다."""
+    """문장이 없어도 tables가 있으면 is_filled다 — 표에도 경고가 붙어야 한다."""
     from src.features.pipeline.port import ReportTable
 
     표 = ReportTable(caption="c", headers=["a"], rows=[["1"]], cite="c")

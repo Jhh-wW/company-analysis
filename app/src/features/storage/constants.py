@@ -60,7 +60,7 @@ TABLE_LAYER2_CACHE: Final[str] = "layer2_cache"
 TABLE_ALIAS_CACHE: Final[str] = "alias_cache"
 TABLE_SESSIONS: Final[str] = "sessions"
 
-# ── 1층 캐시 보관 상한 (정본 §보관 상한) ─────────────────
+# ── 1층 캐시 보관 상한 ─────────────────
 #: 회사×직무당 최근 몇 건까지 남기나. 넘으면 지운다.
 #: 축출 순서는 `cache.py`의 `_evict_layer1_overflow` — 사업연도가 다른(신선도
 #: 만료로 보이는) 것을 먼저, 그다음 오래된 것부터.

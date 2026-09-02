@@ -570,7 +570,7 @@ def _seed_ledger() -> None:
     """서버가 뜰 때 «오늘 이미 쓴 돈»을 이력에서 읽어 장부에 채운다.
 
     ★ 이게 없으면 서버를 껐다 켜는 것만으로 하루 상한이 풀린다.
-    ★ 데모 기록은 빼고 센다 — 데모는 0원이다 (P-84와 같은 규칙).
+    ★ 데모 기록은 빼고 센다 — 데모는 0원이다.
     """
     global _LEDGER, _LINK_SPEND, _BUDGET_STORE_HEALTHY, _UNRESOLVED_BUCKETS
     today = clock.today_kst()

@@ -125,7 +125,7 @@ REQUIREMENTS_EMPTY_TEXT: Final[str] = (
 EMPTY_SECTION_PREFIX: Final[str] = "비어 있습니다 — "
 EMPTY_SECTION_FALLBACK: Final[str] = "해당 자료를 찾지 못했습니다"
 
-#: 소스별 수집 현황 상태 표시 (정본 §수집 현황 — ⭕/❌/⚠️ 셋을 섞으면 오거부다).
+#: 소스별 수집 현황 상태 표시 (수집 현황 규칙 — ⭕/❌/⚠️ 셋을 섞으면 오거부다).
 SOURCE_STATE_LABELS: Final[dict[str, str]] = {
     "ok": "⭕ 찾음",
     "none": "❌ 없음",

@@ -615,7 +615,7 @@ td.center { text-align: center; }
   font-weight: 600;
 }
 
-/* ── 숫자 표 (결정기록 D13) ────────────────────────────
+/* ── 숫자 표 ────────────────────────────
    재무·회계는 문장으로 바꾸지 않고 표 그대로 낸다.
    숫자가 많아 가로로 길어지므로 «표만» 가로로 밀리게 한다 — 페이지는 안 밀린다. */
 .numtable { margin: 10px 0 18px; }
@@ -797,7 +797,7 @@ td.center { text-align: center; }
 .dot.part { background: var(--part); }
 .dot.no { background: var(--no); }
 
-/* ── 칸별 채움률 (⑤, D11) — 세는 칸 6개가 각각 몇 %에서 채워지는지 ── */
+/* ── 칸별 채움률 — 세는 칸 6개가 각각 몇 %에서 채워지는지 ── */
 .fillbars { margin-top: 8px; }
 .fillbar-row { display: flex; align-items: center; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
 .fillbar-row:last-child { border-bottom: 0; }
