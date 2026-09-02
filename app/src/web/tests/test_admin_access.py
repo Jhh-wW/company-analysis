@@ -18,6 +18,7 @@ import logging
 import re
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -34,6 +35,7 @@ from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import store as share_store
 from src.features.sharelink.constants import KEY_HEX_CHARS
 from src.features.storage import db as storage_db
+from src.features.storage import reports as report_store
 from src.web import deployment_mode, main
 from src.web import job_runtime, runtime
 from src.web.routers import admin as admin_router
@@ -112,14 +114,20 @@ def _durable_audit_rows() -> list[dict[str, str]]:
 
 
 def _issued_link(response) -> tuple[str, str]:
-    """1회성 텍스트 응답에서 raw capability와 안전한 관리 식별자를 분리한다."""
+    """1회성 발급 «화면»에서 raw capability와 안전한 관리 식별자를 분리한다.
+
+    ★ 2026-09-02 기대값 이전 — 응답이 텍스트 파일 첨부에서 HTML 1장으로 바뀌었다.
+      전달 형태만 바뀌었고 「원문은 이 응답에만 있다」는 성질은 그대로다.
+      그래서 여기서 «화면에 딱 한 번만» 나온다는 것을 함께 못 박는다.
+    """
 
     assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/plain")
-    assert "attachment" in response.headers["content-disposition"]
-    found = re.search(r"/k/([0-9a-f]{32})(?:\s|$)", response.text)
+    assert response.headers["content-type"].startswith("text/html")
+    assert "content-disposition" not in response.headers
+    found = re.search(r"/k/([0-9a-f]{32})(?:[\s<\"]|$)", response.text)
     assert found is not None
     raw_key = found.group(1)
+    assert response.text.count(raw_key) == 1
     key_hash = response.headers["x-link-identifier"]
     assert key_hash == share_store.key_hash_of(raw_key)
     return raw_key, key_hash
@@ -480,7 +488,14 @@ def test_발급열쇠_충돌이_계속되면_기존링크를_보존하고_503으
     assert (links[0].company, links[0].job) == ("기존회사", "기존직무")
 
 
-def test_발급하면_raw주소를_딱한번_텍스트파일로_내려준다(admin: TestClient):
+def test_발급하면_raw주소를_딱한번_화면으로_보여준다(admin: TestClient):
+    """★ 2026-09-02 기대값 이전 — 텍스트 파일 첨부 → 주소·QR 화면 1장.
+
+    Referrer-Policy 기대값도 함께 옮긴다. HTML 응답은 공용 미들웨어가
+    `same-origin`으로 고정한다(`response_security.py`, form POST의 Origin이
+    `null`이 되는 것을 막기 위함). 이 문서의 주소 `/admin/links/new`에는
+    비밀이 없으므로 referer로 원문이 새지 않는다.
+    """
     response = admin.post(
         "/admin/link/new", data={"company": "카카오", "job": "마케팅"},
         follow_redirects=False,
@@ -489,7 +504,8 @@ def test_발급하면_raw주소를_딱한번_텍스트파일로_내려준다(adm
     raw_key, key_hash = _issued_link(response)
     assert f"/k/{raw_key}" in response.text
     assert raw_key not in key_hash
-    assert "no-referrer" == response.headers["referrer-policy"]
+    assert raw_key not in str(response.url)
+    assert "same-origin" == response.headers["referrer-policy"]
 
 
 def test_관리자_링크와_초대_생성시각은_offset포함_KST다(
@@ -1388,7 +1404,8 @@ def test_raw_LINK는_일회성응답외_DB_HTML_로그에_남지않는다(
     )
     issued_key, key_hash = _issued_link(created)
     assert issued_key == raw_key
-    assert created.text.strip() == f"https://demo.example/k/{raw_key}"
+    # ★ 기대값 이전 — 본문 전체가 주소이던 텍스트 응답에서 주소 칸 1개로.
+    assert _issued_url_from_screen(created) == f"https://demo.example/k/{raw_key}"
 
     listing = admin.get("/admin/access")
     detail = admin.get(f"/admin/link/{key_hash}")
@@ -1425,7 +1442,8 @@ def test_일회성_발급주소도_악성_Host보다_설정된_origin을_쓴다(
     raw_key, key_hash = _issued_link(created)
     detail = admin.get(f"/admin/link/{key_hash}", headers={"Host": "evil.example"})
 
-    assert created.text.strip() == f"https://demo.example/k/{raw_key}"
+    # ★ 기대값 이전 — 텍스트 본문 전체 비교 → 발급 화면의 주소 칸 비교.
+    assert _issued_url_from_screen(created) == f"https://demo.example/k/{raw_key}"
     assert "evil.example" not in created.text
     assert raw_key not in detail.text
     assert "evil.example" not in detail.text
@@ -1453,7 +1471,10 @@ def test_정본공개주소가_없거나_잘못되면_악성Host를_발급주소
     raw_key, key_hash = _issued_link(created)
     detail = admin.get(f"/admin/link/{key_hash}", headers={"Host": "evil.example"})
 
-    assert created.text.strip() == f"/k/{raw_key}"
+    # ★ 기대값 이전 — 텍스트 본문 전체 비교 → 발급 화면의 주소 칸 비교.
+    assert _issued_url_from_screen(created) == f"/k/{raw_key}"
+    # 공개 주소가 없으면 「이 컴퓨터에서만 열린다」고 화면에서 알린다.
+    assert "이 주소는 지금 이 컴퓨터에서만 열립니다" in created.text
     assert "evil.example" not in created.text
     assert raw_key not in detail.text
     assert "evil.example" not in detail.text
@@ -1650,3 +1671,110 @@ def test_만료된_연결보고서는_목록과_상세에서_사전에_표시한
     assert "재연결 필요" in listing.text
     assert "공유 기간 만료" in detail.text
     assert f'href="/result/{report_id}"' not in detail.text
+
+
+# ══════════════════════════════════════════════════════════
+# ⑤ 발급 결과는 주소와 QR을 한 화면에서 한 번만 보여준다
+# ══════════════════════════════════════════════════════════
+
+
+def _issued_url_from_screen(response) -> str:
+    """발급 결과 화면에서 «한 번만» 보이는 주소 칸의 글자를 꺼낸다."""
+    found = re.search(r'id="issued-link-url"[^>]*>([^<]+)<', response.text)
+    assert found is not None, "발급 결과 화면에 주소 칸이 없습니다"
+    return found.group(1).strip()
+
+
+def test_발급응답은_QR_SVG와_주소를_한번만_보여주고_no_store다(
+    admin: TestClient, monkeypatch
+):
+    """★ 텍스트 파일 첨부 대신 화면 1장 — 지금 저장하지 않으면 되찾을 수 없다.
+
+    열쇠 원문은 DB에 없으므로(`store.py`는 해시만 저장) QR은 «발급 순간»에만
+    만들 수 있다. 그래서 주소와 QR이 같은 응답에 함께 실려야 한다.
+    """
+    raw_key = "0123456789abcdef0123456789abcdef"
+    monkeypatch.setenv("SHARE_PUBLIC_BASE_URL", "https://demo.example")
+    monkeypatch.setattr(admin_router.share_issue, "new_key", lambda: raw_key)
+
+    created = admin.post(
+        "/admin/link/new",
+        data={"company": "카카오", "job": "마케팅"},
+        follow_redirects=False,
+    )
+
+    assert created.status_code == 200
+    assert created.headers["content-type"].startswith("text/html")
+    assert "content-disposition" not in created.headers
+    assert "no-store" in created.headers["cache-control"].split(", ")
+    assert created.headers["x-link-identifier"] == share_store.key_hash_of(raw_key)
+
+    issued_url = f"https://demo.example/k/{raw_key}"
+    assert _issued_url_from_screen(created) == issued_url
+    # 원문은 화면에 «한 번만» 나온다 — 회수 지점을 늘리면 지울 곳도 늘어난다.
+    assert created.text.count(raw_key) == 1
+    # QR은 그 주소 «그대로»를 담아야 한다. 다른 주소를 그리면 받은 사람이 못 연다.
+    assert admin_router.share_issue.qr_svg(issued_url) in created.text
+    assert "이 화면을 닫으면" in created.text
+
+
+def test_발급뒤_목록과_상세와_DB와_로그에_원문이_없다(
+    admin: TestClient, monkeypatch, caplog
+):
+    """★ 화면을 HTML로 바꿔도 「원문은 이 응답에만」이라는 성질은 그대로다."""
+    raw_key = "89abcdef0123456789abcdef01234567"
+    monkeypatch.setenv("SHARE_PUBLIC_BASE_URL", "https://demo.example")
+    monkeypatch.setattr(admin_router.share_issue, "new_key", lambda: raw_key)
+    caplog.set_level(logging.INFO)
+
+    created = admin.post(
+        "/admin/link/new",
+        data={"company": "카카오", "job": "마케팅"},
+        follow_redirects=False,
+    )
+    assert created.status_code == 200
+    assert created.headers["content-type"].startswith("text/html")
+    key_hash = share_store.key_hash_of(raw_key)
+
+    listing = admin.get("/admin/access")
+    detail = admin.get(f"/admin/link/{key_hash}")
+    with storage_db.connect() as conn:
+        database_dump = "\n".join(conn.iterdump())
+        stored = share_store.load_by_hash(conn, key_hash)
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+
+    assert stored is not None and stored.key_hash == key_hash
+    for 남은곳, 글자 in (
+        ("DB", database_dump),
+        ("목록", listing.text),
+        ("상세", detail.text),
+        ("로그", logs),
+    ):
+        assert raw_key not in 글자, f"{남은곳}에 링크 원문이 남았습니다"
+        assert f"/k/{raw_key}" not in 글자
+    # 원문이 없으니 QR도 되살아나지 않는다 — 관리 화면에는 그릴 재료가 없다.
+    assert "<svg" not in detail.text
+    assert "<svg" not in listing.text
+
+
+def test_옛_계약에서는_발급이_여전히_404다(admin: TestClient, monkeypatch):
+    """대조군 — 결과 화면을 바꿔도 좁은 운영판의 발급 차단은 그대로다."""
+    monkeypatch.setenv(
+        deployment_mode.ENV_DEPLOYMENT_RUNTIME_CONTRACT,
+        deployment_mode.RENDER_ADMIN_REAL_NO_FORWARDED_CONTRACT,
+    )
+    monkeypatch.setenv(deployment_mode.ENV_PUBLIC_ORIGIN, "https://demo.example")
+
+    blocked = admin.post(
+        "/admin/link/new",
+        data={"company": "카카오", "job": "마케팅"},
+        headers={"Host": "demo.example"},
+        follow_redirects=False,
+    )
+
+    assert blocked.status_code == 404
+    assert blocked.text == "찾을 수 없습니다."
+    assert "<svg" not in blocked.text
+    assert "/k/" not in blocked.text
+    with storage_db.connect() as conn:
+        assert share_store.list_all(conn) == []

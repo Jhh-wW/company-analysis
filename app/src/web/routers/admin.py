@@ -1,5 +1,6 @@
 """관리자 대시보드와 사용자·공유 링크 관리 경로."""
 
+import base64
 import datetime as dt
 import logging
 import os
@@ -57,6 +58,8 @@ logger = logging.getLogger(__name__)
 _KEY_ISSUE_ATTEMPTS = 5
 _ADMIN_AUDIT_TABLE = admin_audit_store.TABLE_ADMIN_AUDIT_EVENTS
 _AUDIT_SAFE_CHARS = frozenset(string.ascii_letters + string.digits + "_.:-")
+#: 발급 화면에서 QR 그림을 내려받을 때 쓰는 파일 이름.
+_ISSUED_QR_FILENAME = "company-analysis-link-qr.svg"
 
 
 class _AccessDataUnavailable(RuntimeError):
@@ -118,6 +121,17 @@ def _kst_timestamp_label(value: str) -> str:
     except (OverflowError, TypeError, ValueError):
         return "확인 불가"
     return f"{local:%Y-%m-%d %H:%M} (한국시간)"
+
+
+def _svg_data_url(svg_text: str) -> str:
+    """SVG 글자를 «내려받기 단추»에 바로 걸 수 있는 data 주소로 바꾼다.
+
+    ★ 서버에 따로 내려받기 경로를 두지 않는 이유 — 그 경로는 원문 열쇠를 한 번
+      더 받아야 하고, 그만큼 원문이 지나가는 자리가 늘어난다. 이미 이 화면에
+      그려 둔 그림을 그대로 파일로 저장하면 새로 노출되는 곳이 없다.
+    """
+    encoded = base64.b64encode(svg_text.encode("utf-8")).decode("ascii")
+    return f"data:image/svg+xml;base64,{encoded}"
 
 
 def _link_expiry_date_label(created_at: str) -> str:
@@ -627,16 +641,31 @@ async def admin_link_new(
     )
     base = _share_base_url(request)
     issued_url = share_issue.link_url(base, key) if base else share_issue.link_url("", key)
-    response = Response(
-        content=f"{issued_url}\n",
-        media_type="text/plain; charset=utf-8",
-        headers={
-            "Content-Disposition": 'attachment; filename="company-analysis-link.txt"',
-            "X-Link-Identifier": share_store.key_hash_of(key),
-            "Referrer-Policy": "no-referrer",
-        },
+    # 저장소에는 지문만 남으므로 QR은 «지금» 그리지 않으면 영영 만들 수 없다.
+    issued_qr_svg = share_issue.qr_svg(issued_url)
+    response = request_helpers.templates.TemplateResponse(
+        request=request,
+        name="admin_link_issued.html",
+        context=request_helpers._ctx(
+            request,
+            issued_url=issued_url,
+            issued_qr_svg=issued_qr_svg,
+            issued_qr_data_url=_svg_data_url(issued_qr_svg),
+            issued_qr_filename=_ISSUED_QR_FILENAME,
+            # 설정된 공개 HTTPS origin이 없으면 이 주소는 남에게 안 열린다.
+            issued_url_is_local=not issued_url.lower().startswith("https://"),
+            link_company=company_clean,
+            link_job=job_clean,
+            link_expiry_date_label=_link_expiry_date_label(clock.iso_now_kst()),
+        ),
+        status_code=200,
     )
-    # 원문 capability는 이 일회성 다운로드에만 실리고 DB·HTML·로그·관리 URL에는 없다.
+    # 관리 화면에서 링크를 되짚을 때 쓰는 안전한 식별자(지문)만 헤더로 내보낸다.
+    response.headers["X-Link-Identifier"] = share_store.key_hash_of(key)
+    # 원문 capability는 이 일회성 화면에만 실리고 DB·HTML·로그·관리 URL에는 없다.
+    # ★ Referrer-Policy는 여기서 정하지 않는다 — HTML 응답은 공용 미들웨어가
+    #   `same-origin`으로 고정한다(`response_security.py`). 이 문서의 주소
+    #   (`/admin/links/new`)에는 비밀이 없으므로 referer로 원문이 새지 않는다.
     return _admin_response(request, response)
 
 

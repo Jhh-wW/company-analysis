@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}초대 링크 발급 완료 · 기업분석{% endblock %}
+
+{# ★ 이 화면이 주소 원문이 존재하는 «유일한» 곳이다.
+   저장소에는 지문(SHA-256)만 남으므로 목록·상세·기록 어디에서도 다시 만들 수 없다.
+   그래서 주소는 화면에 한 번만 싣고, QR도 이 응답에서 바로 그린다. #}
+
+{% block content %}
+<div class="card">
+  <p class="muted" style="margin-bottom:4px">초대 링크 발급 완료</p>
+  <h1 style="font-size:19px;margin-bottom:4px">{{ link_company }}</h1>
+  <p style="margin-bottom:4px">
+    <strong>지원 직무</strong> · {{ link_job or "미입력" }}
+  </p>
+
+  <div class="warn-line" role="alert" style="margin-top:16px">
+    <span aria-hidden="true">⚠️</span>
+    <span>
+      <strong>이 화면을 닫으면 주소를 다시 볼 수 없습니다.</strong><br>
+      포트폴리오에 붙일 QR을 지금 저장하세요. 주소를 잃으면 이 링크를 닫고
+      새 링크를 발급해야 합니다.
+    </span>
+  </div>
+</div>
+
+<div class="card">
+  <h2>받은 사람에게 전달할 주소</h2>
+  <p class="muted" style="margin-top:6px">
+    아래 주소를 그대로 전달하세요. 받은 사람은 로그인 없이 열 수 있습니다.
+  </p>
+  {# 주소 글자는 문서 전체에서 «여기 한 곳»에만 있다. 복사 단추도 이 칸을 읽는다. #}
+  <p id="issued-link-url"
+     style="margin-top:10px;padding:12px;border-radius:8px;background:#0f172a;
+            color:#e2e8f0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+            font-size:14px;word-break:break-all;user-select:all">{{ issued_url }}</p>
+  <button type="button" class="btn" id="issued-link-copy"
+          data-copy-target="issued-link-url" style="margin-top:10px">
+    주소 복사
+  </button>
+  <span id="issued-link-copy-state" role="status" class="muted"
+        style="margin-left:10px"></span>
+  {% if issued_url_is_local %}
+  <div class="warn-line" style="margin-top:14px">
+    <span aria-hidden="true">ℹ️</span>
+    <span><strong>이 주소는 지금 이 컴퓨터에서만 열립니다.</strong><br>
+      포트폴리오에 그대로 붙이면 다른 사람에게는 열리지 않습니다. 공개 주소를
+      설정한 뒤 다시 발급하세요.</span>
+  </div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>포트폴리오용 QR</h2>
+  <p class="muted" style="margin-top:6px">
+    같은 주소를 담은 그림입니다. 화면을 사진으로 찍어도 되고, 아래에서 그림
+    파일로 내려받아 이력서·포트폴리오에 넣어도 됩니다.
+  </p>
+  <div style="margin-top:12px;display:inline-block;padding:12px;background:#fff;
+              border-radius:8px" role="img"
+       aria-label="{{ link_company }} 초대 링크 주소를 담은 QR 그림">
+    {{ issued_qr_svg|safe }}
+  </div>
+  <p style="margin-top:12px">
+    <a class="btn" download="{{ issued_qr_filename }}" href="{{ issued_qr_data_url }}">
+      QR 그림 내려받기
+    </a>
+  </p>
+</div>
+
+<div class="card">
+  <h2>이 링크가 닫히는 날</h2>
+  <p style="margin-top:6px">{{ link_expiry_date_label }}</p>
+  <p class="muted" style="margin-top:6px">
+    회사와 직무는 이 링크를 어느 지원 맥락에서 전달했는지 적어 둔 꼬리표입니다.
+    받은 사람은 다른 회사도 자유롭게 분석할 수 있고, 그 사용은 이 링크의 이력에
+    기록됩니다.
+  </p>
+  <p style="margin-top:14px">
+    <a class="btn" href="/admin/access">관리 화면으로 돌아가기</a>
+  </p>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(() => {
+  const button = document.getElementById("issued-link-copy");
+  const source = document.getElementById("issued-link-url");
+  const state = document.getElementById("issued-link-copy-state");
+  if (!button || !source) return;
+  button.addEventListener("click", async () => {
+    const text = source.textContent.trim();
+    try {
+      await navigator.clipboard.writeText(text);
+      if (state) state.textContent = "복사했습니다.";
+    } catch (error) {
+      // 클립보드를 쓸 수 없는 브라우저에서는 직접 고르게만 해 준다.
+      const range = document.createRange();
+      range.selectNodeContents(source);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      if (state) state.textContent = "주소를 골라 뒀습니다. Ctrl+C로 복사하세요.";
+    }
+  });
+})();
+</script>
+{% endblock %}

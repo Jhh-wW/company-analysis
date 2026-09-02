@@ -100,7 +100,11 @@ def test_포트폴리오_계약은_LINK_발급을_admin_py_수정없이_연다(
     )
 
     assert response.status_code == 200
-    assert "attachment" in response.headers["content-disposition"]
+    # ★ 2026-09-02 기대값 이전 — 발급 응답이 텍스트 파일 첨부에서 주소·QR 화면
+    #   1장으로 바뀌었다. 이 시험이 지키는 것은 「계약만 켜면 발급이 열린다」이지
+    #   전달 형태가 아니므로, 형태 단정을 새 화면 기준으로 옮긴다.
+    assert response.headers["content-type"].startswith("text/html")
+    assert "content-disposition" not in response.headers
     assert "/k/" in response.text
     with storage_db.connect() as conn:
         after = len(share_store.list_all(conn))
