@@ -15,7 +15,19 @@
   <p style="margin-bottom:4px">
     <strong>지원 직무</strong> · {{ link.job or "미입력" }}
   </p>
+  {# 표시용 이름은 관리자 화면에만 낸다. 받는 사람 화면에는 넣지 않는다. #}
+  {% if link.audience_label %}
+  <p style="margin-bottom:4px"><strong>표시 이름</strong> · {{ link.audience_label }}</p>
+  {% endif %}
   {% if link.note %}<p class="muted">메모 · {{ link.note }}</p>{% endif %}
+
+  {% if link_company_id_missing %}
+  <div class="warn-line" role="alert" style="margin-top:16px">
+    <span aria-hidden="true">⚠️</span>
+    <span>이 보고서에는 회사 고유번호가 없어 같은 이름의 다른 회사와 구분하지 못합니다.
+      <br>보고서를 다시 만들어 연결하면 이름이 같은 다른 회사가 잘못 연결되는 것을 막을 수 있습니다.</span>
+  </div>
+  {% endif %}
 
   <div class="warn-line" style="margin-top:16px">
     <span aria-hidden="true">ℹ️</span>
@@ -74,6 +86,72 @@
 </div>
 
 <div class="card">
+  <h2 id="link-extend-title">만료일 미루기</h2>
+  <p class="muted" style="margin-top:6px">
+    채용 일정이 늘어났을 때 이 링크가 닫히는 날을 뒤로 미룹니다.
+    한 번에 {{ link_extend_max_days }}일까지 미룰 수 있고, 여러 번 미룰 수 있습니다.
+    기간을 <strong>줄이려면</strong> 미루기 대신 링크를 철회하세요.
+    바꾼 내용과 이유는 아래 표에 그대로 남습니다.
+  </p>
+  {% if link_extension_disabled %}
+  <div class="warn-line" role="note" style="margin-top:14px">
+    <span aria-hidden="true">ℹ️</span>
+    <span><strong>이 운영판에서는 만료일을 바꿀 수 없습니다.</strong><br>
+      기존 링크는 아래 상태 표에서 확인하고 필요하면 철회할 수 있습니다.</span>
+  </div>
+  {% elif link_revoked %}
+  <p class="muted">철회한 링크는 만료일을 미뤄도 다시 열리지 않습니다.</p>
+  {% else %}
+  <form method="post" action="/admin/link/{{ link.key_hash }}/extend"
+        aria-labelledby="link-extend-title" style="margin-top:14px">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="field">
+      <label for="link_expires_on">새 만료일<span class="req">*</span></label>
+      <input id="link_expires_on" name="expires_on" type="date" required
+             min="{{ link_extend_min_date }}" max="{{ link_extend_max_date }}"
+             value="{{ link_extend_max_date }}">
+      <p class="muted" style="margin-top:5px">
+        {{ link_extend_min_date }} ~ {{ link_extend_max_date }} 사이의 날짜를 넣으세요.
+        그날 한국시간 00:00부터 링크가 닫힙니다.
+      </p>
+    </div>
+    <div class="field">
+      <label for="link_extend_reason">미루는 이유<span class="req">*</span></label>
+      <input id="link_extend_reason" name="reason" required
+             maxlength="{{ link_reason_max_chars }}"
+             placeholder="예: 서류 발표가 2주 밀렸습니다">
+    </div>
+    <button type="submit" class="btn">만료일 미루기</button>
+  </form>
+  {% endif %}
+
+  <h3 id="link-adjustments-title" style="margin-top:20px">만료·한도 변경 이력</h3>
+  {% if link_adjustments %}
+  <div class="data-table-scroll compact" role="region" tabindex="0"
+       aria-labelledby="link-adjustments-title">
+  <table aria-labelledby="link-adjustments-title">
+    <thead><tr>
+      <th scope="col">바꾼 때</th><th scope="col">무엇을</th>
+      <th scope="col">전 → 후</th><th scope="col">이유</th>
+    </tr></thead>
+    <tbody>
+    {% for item in link_adjustments %}
+    <tr>
+      <td>{{ link_adjustment_at_labels.get(item.id, "확인 불가") }}</td>
+      <td>{{ link_adjustment_kind_labels.get(item.kind, item.kind) }}</td>
+      <td>{{ item.old_value or "—" }} → <strong>{{ item.new_value }}</strong></td>
+      <td>{{ item.reason }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="muted">아직 만료일이나 한도를 바꾼 적이 없습니다.</p>
+  {% endif %}
+</div>
+
+<div class="card">
   <h2 id="link-status-title">이 링크 상태</h2>
   <div class="data-table-scroll compact" role="region" tabindex="0"
        aria-labelledby="link-status-title">
@@ -86,7 +164,10 @@
     <tr><th scope="row">발급 시각</th>
         <td>{{ link_created_at_label }}</td></tr>
     <tr><th scope="row">만료일</th>
-        <td>{{ link_expiry_date_label }}</td></tr>
+        <td>{{ link_expiry_date_label }}
+            <br>{% if link_days_left is none %}<span class="muted">남은 날짜를 계산할 수 없습니다</span>
+            {% elif link_days_left %}<span class="muted">{{ link_days_left }}일 남음</span>
+            {% else %}<strong>남은 날짜 없음</strong>{% endif %}</td></tr>
     <tr><th scope="row">상태</th>
         <td>{% if link_revoked %}<strong>철회</strong>
             {% elif link_expired %}<strong>만료</strong>
@@ -209,11 +290,12 @@
     이 LINK를 철회하면 <code>/k/…</code> 주소와 링크별 조사 권한은 즉시 막힙니다.
     접속 시각과 생성 이력은 관리자 검수를 위해 보존됩니다.
     이미 상대가 저장한 <code>/result/…</code> 보고서 주소는 별도 공개 주소이므로
-    보고서 생성 후 60일까지 열릴 수 있습니다.
+    보고서 생성 후 {{ report_share_days }}일까지 열릴 수 있습니다.
   </span>
 </div>
 
 <div class="btn-row">
   <a class="btn ghost" href="/admin/access">링크 목록으로</a>
+  <a class="btn ghost" href="/admin/links/{{ link.key_hash }}">접속·생성 이력</a>
 </div>
 {% endblock %}

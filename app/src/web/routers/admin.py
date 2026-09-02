@@ -19,6 +19,7 @@ from src.features.feedback_report import constants as feedback_constants
 from src.features.feedback_report import logic as feedback_logic
 from src.features.observability import admin_audit, admin_audit_store
 from src.features.budget import constants as budget_constants
+from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
 from src.features.budget import spend_store
 from src.features.budget import state_machine as budget_state_machine
 from src.features.pipeline.demo import DemoPipeline
@@ -61,6 +62,12 @@ _ADMIN_AUDIT_TABLE = admin_audit_store.TABLE_ADMIN_AUDIT_EVENTS
 _AUDIT_SAFE_CHARS = frozenset(string.ascii_letters + string.digits + "_.:-")
 #: 발급 화면에서 QR 그림을 내려받을 때 쓰는 파일 이름.
 _ISSUED_QR_FILENAME = "company-analysis-link-qr.svg"
+#: 링크 변경 이력에 적힌 종류를 관리자 화면 말로 바꾼다.
+_ADJUSTMENT_KIND_LABELS = {
+    share_store.ADJUSTMENT_KIND_EXPIRES: "만료일",
+    share_store.ADJUSTMENT_KIND_DAILY_BUDGET: "하루 한도",
+    share_store.ADJUSTMENT_KIND_TOTAL_BUDGET: "누적 한도",
+}
 #: 회사 이름 비교에서 떼어 내는 법인격 표기. 같은 회사를 다르게 적은 것뿐이다.
 _COMPANY_LEGAL_FORMS = (
     "주식회사",
@@ -157,17 +164,32 @@ def _svg_data_url(svg_text: str) -> str:
     return f"data:image/svg+xml;base64,{encoded}"
 
 
-def _link_expiry_date_label(created_at: str) -> str:
-    """발급 KST 날짜와 현재 LINK 수명 정책으로 만료 날짜를 표시한다."""
+def _link_expiry_date_label(created_at: str, *, expires_at: str = "") -> str:
+    """이 링크가 닫히는 날을 관리자 화면용으로 표시한다.
 
-    try:
-        issued = clock.business_date_from_iso(created_at)
-        expires = issued + dt.timedelta(
-            days=share_logic.link_max_age_days_from_env()
-        )
-    except (OverflowError, TypeError, ValueError):
+    Args:
+        created_at: 발급 시각.
+        expires_at: 저장된 만료일. **있으면 이 값이 우선**이다 — 관리자가
+            미룬 날짜를 화면이 안 보여 주면 연장이 됐는지 알 수 없다.
+    """
+
+    expires = share_logic.expiry_date_of(created_at, expires_at=expires_at)
+    if expires is None:
         return "확인 불가"
     return f"{expires:%Y-%m-%d} (한국시간 00:00부터 닫힘)"
+
+
+def _link_days_left(created_at: str, *, expires_at: str = "") -> int | None:
+    """오늘 기준 남은 날 수. 이미 닫혔으면 0, 계산 불가면 ``None``.
+
+    ★ 「며칠 남았나」를 안 보여 주면 관리자는 만료일 문자열을 보고 매번 날짜를
+      세야 한다. 연장 판단에 필요한 값이라 화면에 같이 낸다.
+    """
+
+    expires = share_logic.expiry_date_of(created_at, expires_at=expires_at)
+    if expires is None:
+        return None
+    return max(0, (expires - clock.today_kst()).days)
 
 
 def _queue_committed_change(
@@ -352,7 +374,7 @@ def _access_context(request: Request, *, today: dt.date, **kwargs) -> dict:
     expired_link_keys = {
         link.key
         for link in links
-        if share_logic.is_share_link_expired(link.created_at)
+        if share_logic.link_expired(link)
     }
     revoked_link_keys = {link.key for link in links if link.is_revoked}
     active_link_count = len(links) - len(expired_link_keys | revoked_link_keys)
@@ -366,7 +388,10 @@ def _access_context(request: Request, *, today: dt.date, **kwargs) -> dict:
         link.key: _kst_timestamp_label(link.last_opened_at) for link in links
     }
     link_expiry_date_labels = {
-        link.key: _link_expiry_date_label(link.created_at) for link in links
+        link.key: _link_expiry_date_label(
+            link.created_at, expires_at=link.expires_at
+        )
+        for link in links
     }
     member_invited_at_labels = {
         member.email: _kst_timestamp_label(member.invited_at)
@@ -622,10 +647,17 @@ async def admin_link_new(
     company: str = Form(..., max_length=COMPANY_MAX_CHARS),
     job: str = Form("", max_length=JOB_MAX_CHARS),
     note: str = Form("", max_length=NOTE_MAX_CHARS),
+    audience_label: str = Form("", max_length=COMPANY_MAX_CHARS),
     report_reference: str = Form("", max_length=REFERENCE_MAX_CHARS),
     csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
 ):
-    """지원 회사·직무 꼬리표가 붙은 LINK를 새로 발급한다."""
+    """지원 회사·직무 꼬리표가 붙은 LINK를 새로 발급한다.
+
+    Args:
+        audience_label: 관리 화면에서 이 링크를 알아보려고 붙이는 표시 이름
+            (예: 「하이브 인사팀」). **받는 사람 화면에는 쓰지 않는다** —
+            내부 메모(`note`)와 마찬가지로 우리 쪽 편의를 위한 값이다.
+    """
     if deployment_mode.render_admin_no_forwarded():
         return _admin_response(
             request,
@@ -644,10 +676,12 @@ async def admin_link_new(
     )
     if blocked is not None:
         return blocked
+    audience_label_clean = audience_label.strip()
     form_values = {
         "company": company_clean,
         "job": job_clean,
         "note": note.strip(),
+        "audience_label": audience_label_clean,
         "report_reference": report_reference.strip(),
     }
     if not company_clean:
@@ -675,6 +709,7 @@ async def admin_link_new(
 
     key = ""
     validation_error = ""
+    issued_expires_at = ""
     try:
         with storage_db.connect() as conn:
             _assert_access_write_ready(conn)
@@ -693,6 +728,7 @@ async def admin_link_new(
                         company=company_clean,
                         job=job_clean,
                         note=note.strip(),
+                        audience_label=audience_label_clean,
                         report_id=report_id,
                         now_iso=now_iso,
                     ):
@@ -705,9 +741,13 @@ async def admin_link_new(
                     inserted is None
                     or inserted.company != company_clean
                     or inserted.job != job_clean
+                    or inserted.audience_label != audience_label_clean
                     or inserted.report_id != report_id
                 ):
                     raise _AdminStateUnchanged("link_insert_unconfirmed")
+                # 만료일은 저장 순간에 굳는다. 화면 라벨도 «그 값»을 그대로
+                # 읽어야 자정을 넘겨 발급했을 때 하루 어긋나지 않는다.
+                issued_expires_at = inserted.expires_at
                 _queue_committed_change(
                     conn,
                     request,
@@ -775,7 +815,9 @@ async def admin_link_new(
             issued_url_is_local=not issued_url.lower().startswith("https://"),
             link_company=company_clean,
             link_job=job_clean,
-            link_expiry_date_label=_link_expiry_date_label(clock.iso_now_kst()),
+            link_expiry_date_label=_link_expiry_date_label(
+                clock.iso_now_kst(), expires_at=issued_expires_at
+            ),
         ),
         status_code=200,
     )
@@ -800,11 +842,20 @@ def _link_detail_page(
     open_events: list[share_store.ShareLinkOpenEvent] = []
     generated_runs: list[share_store.ShareLinkRun] = []
     run_report_states: dict[str, str] = {}
+    adjustments: list[share_store.ShareLinkAdjustment] = []
+    link_company_id_missing = False
     try:
         with storage_db.connect() as conn:
             link = share_store.load_by_hash(conn, key_hash)
             if link is not None:
                 report_state = _linked_report_state(conn, link)
+                # ★ 결속 보고서에 회사 고유번호가 없으면 이후 재결속은 «이름»만
+                #   대조하게 된다 — 같은 이름의 다른 회사가 통과한다 (G-S12b).
+                if report_state in ("active", "expired"):
+                    link_company_id_missing = _link_company_id(conn, link) == ""
+                adjustments = share_store.list_link_adjustments(
+                    conn, key_hash=link.key_hash
+                )
                 open_events = share_store.list_open_events_by_hash(conn, link.key_hash)
                 generated_runs = share_store.list_runs_by_hash(conn, link.key_hash)
                 for run in generated_runs:
@@ -828,6 +879,9 @@ def _link_detail_page(
             request, RedirectResponse("/admin/access", status_code=303)
         )
 
+    extension_bounds = _extension_bounds(
+        share_logic.expiry_date_of(link.created_at, expires_at=link.expires_at)
+    )
     open_event_labels = [
         _kst_timestamp_label(event.opened_at) for event in open_events
     ]
@@ -848,11 +902,16 @@ def _link_detail_page(
             path="",
             base_url="",
             secret_available=False,
-            link_expired=share_logic.is_share_link_expired(link.created_at),
+            link_expired=share_logic.link_expired(link),
             link_revoked=link.is_revoked,
             link_revoked_at_label=_kst_timestamp_label(link.revoked_at),
             link_created_at_label=_kst_timestamp_label(link.created_at),
-            link_expiry_date_label=_link_expiry_date_label(link.created_at),
+            link_expiry_date_label=_link_expiry_date_label(
+                link.created_at, expires_at=link.expires_at
+            ),
+            link_days_left=_link_days_left(
+                link.created_at, expires_at=link.expires_at
+            ),
             link_first_opened_at_label=_kst_timestamp_label(
                 link.first_opened_at
             ),
@@ -903,10 +962,225 @@ def _link_detail_page(
             is_deployed=False,
             qr_svg="",
             report_state=report_state,
+            link_company_id_missing=link_company_id_missing,
+            link_adjustments=adjustments,
+            link_adjustment_kind_labels=_ADJUSTMENT_KIND_LABELS,
+            link_adjustment_at_labels={
+                item.id: _kst_timestamp_label(item.created_at)
+                for item in adjustments
+            },
+            link_extend_min_date=extension_bounds[0].isoformat(),
+            link_extend_max_date=extension_bounds[1].isoformat(),
+            link_extend_max_days=share_constants.MAX_LINK_EXTENSION_DAYS,
+            link_reason_max_chars=(
+                share_constants.LINK_ADJUSTMENT_REASON_MAX_CHARS
+            ),
+            link_extension_disabled=deployment_mode.render_admin_no_forwarded(),
+            report_share_days=REPORT_LINK_MAX_AGE_DAYS,
         ),
         status_code=status_code,
     )
     return _admin_response(request, response)
+
+
+def _extension_bounds(previous: dt.date | None) -> tuple[dt.date, dt.date]:
+    """새 만료일로 받을 수 있는 «가장 이른 날»과 «가장 늦은 날».
+
+    Args:
+        previous: 지금 만료일. 읽을 수 없으면 ``None``.
+
+    Returns:
+        (최소, 최대). 둘 다 그날을 포함한다.
+
+    ★ 상한을 «오늘»이 아니라 «지금 만료일»에서 잰다. 오늘 기준으로 재면 방금
+      발급한 90일짜리 링크는 상한과 현재 만료일이 같은 날이 되어 **한 번도
+      못 미룬다**. 관리자가 원하는 것은 「지금보다 얼마나 더」이므로 그 폭을
+      묶는 편이 맞다.
+    ★ 이미 닫힌 링크는 오늘을 기준으로 잰다 — 과거 날짜에서 재면 미뤄도
+      여전히 닫힌 날이 나온다.
+    """
+
+    today = clock.today_kst()
+    base = previous if previous is not None and previous > today else today
+    return (
+        base + dt.timedelta(days=1),
+        base + dt.timedelta(days=share_constants.MAX_LINK_EXTENSION_DAYS),
+    )
+
+
+def _validated_new_expiry(
+    raw: str, *, previous: dt.date | None
+) -> tuple[dt.date | None, str]:
+    """관리자가 적은 새 만료일이 «미루는» 값인지 확인한다.
+
+    Args:
+        raw: 폼에 적힌 ``YYYY-MM-DD``.
+        previous: 지금 만료일. 읽을 수 없으면 ``None``.
+
+    Returns:
+        (새 만료일, 오류 문구). 오류가 있으면 날짜는 ``None``이다.
+
+    ★ 상한을 두는 이유 — 실수로 2099년을 넣으면 회수 불가능한 QR이 사실상
+      영구 링크가 된다. 연장은 여러 번 할 수 있으므로 한 번의 폭만 묶는다.
+    """
+
+    parsed = share_logic.expiry_date_from_value(raw)
+    if parsed is None:
+        return None, "새 만료일을 2026-12-31 같은 형식으로 입력해주세요."
+    today = clock.today_kst()
+    if parsed <= today:
+        return None, "오늘보다 뒤의 날짜만 넣을 수 있습니다."
+    if previous is not None and parsed <= previous:
+        return None, (
+            f"지금 만료일({previous:%Y-%m-%d})보다 뒤의 날짜만 넣을 수 있습니다. "
+            "기간을 줄이려면 링크를 철회하세요."
+        )
+    _minimum, maximum = _extension_bounds(previous)
+    if parsed > maximum:
+        return None, (
+            f"한 번에 {share_constants.MAX_LINK_EXTENSION_DAYS}일까지만 미룰 수 "
+            f"있습니다. {maximum:%Y-%m-%d} 이내로 넣어주세요."
+        )
+    return parsed, ""
+
+
+@router.get("/admin/link/{key_hash}/extend", response_class=HTMLResponse)
+async def admin_link_extend_page(request: Request, key_hash: str):
+    """만료일·남은 날짜·연장 폼·변경 이력이 함께 있는 링크 상세 화면.
+
+    ★ 목록 쪽 상세(`/admin/links/…`)는 접속·생성 이력을 본다. 만료를 «바꾸는»
+      일은 이유와 이력이 함께 남아야 하므로 폼과 이력표를 한 화면에 둔다.
+    """
+
+    blocked = request_helpers.require_admin(request)
+    if blocked is not None:
+        return blocked
+    return _link_detail_page(request, key_hash)
+
+
+@router.post("/admin/link/{key_hash}/extend")
+async def admin_link_extend(
+    request: Request,
+    key_hash: str,
+    expires_on: str = Form("", max_length=REFERENCE_MAX_CHARS),
+    reason: str = Form("", max_length=NOTE_MAX_CHARS),
+    csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
+):
+    """링크의 만료일을 뒤로 미룬다. 이유·이력행·감사행을 함께 남긴다 (D-G8).
+
+    ★ 「미루기」만 한다 — 앞당기기는 철회(`/admin/links/revoke`)가 이미 즉시
+      막아 준다. 두 길을 한 폼에 두면 실수로 링크를 조기에 닫는다.
+    """
+
+    if deployment_mode.render_admin_no_forwarded():
+        return _admin_response(
+            request,
+            HTMLResponse("찾을 수 없습니다.", status_code=404),
+        )
+    key_clean = str(key_hash or "").strip().lower()
+    action = "admin.link.extend"
+    target = admin_audit.target_id("link", key_clean)
+    blocked = request_helpers.require_admin_action(
+        request, csrf_token, action=action, target=target
+    )
+    if blocked is not None:
+        return blocked
+    if not share_store.is_key_hash(key_clean):
+        _audit_failed_change(
+            request, action=action, target=target, reason="invalid_target"
+        )
+        return _admin_response(
+            request,
+            HTMLResponse("올바르지 않은 LINK 식별자입니다.", status_code=404),
+        )
+
+    reason_clean = str(reason or "").strip()[
+        : share_constants.LINK_ADJUSTMENT_REASON_MAX_CHARS
+    ]
+    validation_error = ""
+    try:
+        with storage_db.connect() as conn:
+            link = share_store.load_by_hash(conn, key_clean)
+            if link is None:
+                raise _AdminStateUnchanged("link_missing")
+            previous = share_logic.expiry_date_of(
+                link.created_at, expires_at=link.expires_at
+            )
+            new_expiry, validation_error = _validated_new_expiry(
+                str(expires_on or ""), previous=previous
+            )
+            if not reason_clean:
+                # ★ 이유를 «필수»로 두는 이유 — 나중의 내가 왜 미뤘는지 알아야
+                #   같은 판단을 다시 할 수 있다. 이력만 남고 이유가 없으면
+                #   기록이 아니라 흔적이다.
+                validation_error = "연장하는 이유를 적어주세요."
+            if not validation_error and new_expiry is not None:
+                if not share_store.set_expires_at(
+                    conn,
+                    key_hash=link.key_hash,
+                    expires_at=new_expiry.isoformat(),
+                ):
+                    raise _AdminStateUnchanged("link_expiry_unconfirmed")
+                share_store.record_link_adjustment(
+                    conn,
+                    key_hash=link.key_hash,
+                    kind=share_store.ADJUSTMENT_KIND_EXPIRES,
+                    old_value="" if previous is None else previous.isoformat(),
+                    new_value=new_expiry.isoformat(),
+                    reason=reason_clean,
+                    actor_id=admin_audit.actor_id(request),
+                    created_at=clock.iso_now_kst(),
+                )
+                updated = share_store.load_by_hash(conn, link.key_hash)
+                if updated is None or updated.expires_at != new_expiry.isoformat():
+                    raise _AdminStateUnchanged("link_expiry_unconfirmed")
+                _queue_committed_change(
+                    conn,
+                    request,
+                    action=action,
+                    target=target,
+                    reason="expiry_extended",
+                )
+    except Exception:  # noqa: BLE001 — 확인 못 한 변경을 성공으로 보지 않는다
+        logger.error("링크 만료 연장 또는 변경 확인에 실패했습니다")
+        _audit_failed_change(
+            request, action=action, target=target, reason="storage_unavailable"
+        )
+        return _link_detail_page(
+            request,
+            key_clean,
+            link_error=(
+                "만료일을 저장하지 못했습니다. 바뀌었는지 확인할 수 없으니 "
+                "성공으로 보지 말고 잠시 후 다시 시도해주세요."
+            ),
+            status_code=503,
+        )
+    if validation_error:
+        try:
+            _audit_change(
+                request,
+                action=action,
+                target=target,
+                outcome="rejected",
+                reason="validation_failed",
+            )
+        except Exception:  # noqa: BLE001 — 감사 실패 시 관리자 작업을 계속하지 않는다
+            return _link_detail_page(
+                request,
+                key_clean,
+                link_error="요청 기록을 남기지 못했습니다. 잠시 후 다시 시도해주세요.",
+                status_code=503,
+            )
+        return _link_detail_page(
+            request, key_clean, link_error=validation_error, status_code=400
+        )
+    _mirror_committed_change(
+        request, action=action, target=target, reason="expiry_extended"
+    )
+    return _admin_response(
+        request,
+        RedirectResponse(f"/admin/link/{key_clean}/extend", status_code=303),
+    )
 
 
 @router.get("/admin/link/{key}", response_class=HTMLResponse)
