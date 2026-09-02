@@ -153,6 +153,10 @@ def to_fragment(
             company_scope=_coerce_str(
                 value.get("company_scope", ""), label="회사 범위"
             ),
+            covered_slot_ids=_coerce_str_tuple(
+                value.get("covered_slot_ids", (value["slot_id"],)),
+                label="근거 조각이 채우는 의미 칸",
+            ),
         )
     except KeyError as error:
         raise ValueError(f"근거 조각에 필수 항목이 빠졌습니다: {error}") from error

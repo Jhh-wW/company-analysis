@@ -138,10 +138,7 @@ def test_같은_원문_해시는_최고점만_남긴다() -> None:
     assert "duplicate_fragments_removed:1" in selection.reason_codes
 
 
-def test_다른_슬롯의_같은_원문은_각각_남는다() -> None:
-    # 같은 문장이 서로 다른 두 슬롯을 정당하게 채우는 경우(예: 「구독형 SaaS를
-    # B2B 고객에게 판매한다」가 revenue_model·customer_type을 동시에 채움),
-    # 슬롯 단위로만 중복을 제거해야 한 슬롯의 유일한 근거가 소멸하지 않는다.
+def test_다른_슬롯의_같은_원문은_ID_하나로_합치고_두_슬롯을_보존한다() -> None:
     text = "구독형 SaaS를 B2B 고객에게 판매합니다."
     revenue_fragment = _fragment(
         fragment_id="f-revenue",
@@ -164,11 +161,14 @@ def test_다른_슬롯의_같은_원문은_각각_남는다() -> None:
         fragments=(revenue_fragment, customer_fragment),
     )
 
-    included_ids = {fragment.fragment_id for fragment in selection.fragments}
-    assert included_ids == {"f-revenue", "f-customer"}
-    assert not any(
-        code.startswith("duplicate_fragments_removed:") for code in selection.reason_codes
+    assert len(selection.fragments) == 1
+    assert set(selection.fragments[0].covered_slot_ids) == {
+        "business_model:revenue_model", "business_model:customer_type"
+    }
+    assert selection.estimated_tokens == math.ceil(
+        len(text) / CHARS_PER_ESTIMATED_TOKEN
     )
+    assert "duplicate_fragments_removed:1" in selection.reason_codes
 
 
 def test_문서에_결속되지_않은_조각은_사유코드와_함께_제외된다() -> None:

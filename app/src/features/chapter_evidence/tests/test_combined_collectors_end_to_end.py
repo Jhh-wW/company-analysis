@@ -21,6 +21,11 @@
 
 ★ 실제 네트워크·실제 AI 호출은 0건이다. 전송 계층과 공시 조회기를 전부 가짜로
     주입한다.
+
+★ 이 파일의 ``InjectedSlotFacts``는 **생성 게이트의 9장 모양만** 시험하는
+  가짜 ID다. 실제 Fact payload·검산·운영 전달을 증명하지 않는다.
+  TODO(root 소관): typed Fact payload를 운영 결합부에서 이 계약으로 전달하고
+  별도 종단시험으로 증명한다.
 """
 
 from __future__ import annotations
@@ -56,7 +61,7 @@ _FROZEN_SECTION_IDS = (
     "competitive_position",
 )
 
-_FROZEN_INJECTED_SLOTS = {
+_GATE_SHAPE_ONLY_INJECTED_SLOTS = {
     "past_changes": ("past_changes:historical_performance",),
     "competitive_position": (
         "competitive_position:comparison_target",
@@ -79,6 +84,18 @@ pytestmark = pytest.mark.skipif(
 
 if _ENGINE_FEATURE.is_dir() and str(_ENGINE_SRC) not in sys.path:
     sys.path.insert(0, str(_ENGINE_SRC))
+if _ENGINE_FEATURE.is_dir():
+    # app/src/features가 일반 패키지라 analysis_engine/src/features namespace를
+    # 가린다. 시험에서만 검색 경로를 합쳐 두 수집기를 실제로 연결한다.
+    import features as _combined_features  # noqa: E402
+    import core as _combined_core  # noqa: E402
+
+    engine_feature_path = str(_ENGINE_SRC / "features")
+    if engine_feature_path not in _combined_features.__path__:
+        _combined_features.__path__.insert(0, engine_feature_path)
+    engine_core_path = str(_ENGINE_SRC / "core")
+    if engine_core_path not in _combined_core.__path__:
+        _combined_core.__path__.insert(0, engine_core_path)
 
 
 TARGET_COMPANY_ID = "00126380"
@@ -201,13 +218,18 @@ def _web_mapping(*, ir_html_fetch=_ir_html_without_links) -> dict[str, object]:
         f"{base}/robots.txt": _page(ROBOTS_ALLOW_ALL, f"{base}/robots.txt", "text/plain"),
         f"{base}/sitemap.xml": _absent(f"{base}/sitemap.xml"),
         f"{base}/": _page(
-            _html("회사 소개와 우리의 강점"),
+            _html("2010년에 설립한 법인이며 주요 사업을 영위합니다"),
             f"{base}/",
         ),
-        f"{base}/careers": _page(_html("채용과 일하는 방식"), f"{base}/careers"),
+        f"{base}/careers": _page(
+            _html("핵심가치와 일하는 방식"), f"{base}/careers"
+        ),
     }
     pages[f"{base}/"] = _page(
-        _html("회사 소개와 우리의 강점", '<a href="/careers">채용</a>'),
+        _html(
+            "2010년에 설립한 법인이며 주요 사업을 영위합니다",
+            '<a href="/careers">채용</a>',
+        ),
         f"{base}/",
     )
     result = collect_official_web_documents(
@@ -235,14 +257,22 @@ def _produce(*, ir_html_fetch=_ir_html_without_links, **dart_kwargs):
     )
 
 
-def _bundles(candidates):
-    """Codex 소유 주입 칸을 채운 뒤 계약 최종 판정을 그대로 태운다."""
+def _gate_shape_only_bundles(candidates):
+    """가짜 사실 ID로 9장 게이트의 슬롯 모양만 채운다.
+
+    실제 사실 본문이나 typed Fact payload의 존재를 뜻하지 않는다.
+    """
 
     bundles = []
     for candidate in candidates:
         injected = tuple(
-            InjectedSlotFacts(slot_id=slot_id, fact_ids=(f"fact:{slot_id}",))
-            for slot_id in _FROZEN_INJECTED_SLOTS.get(candidate.section_id, ())
+            InjectedSlotFacts(
+                slot_id=slot_id,
+                fact_ids=(f"gate-shape-only:{slot_id}",),
+            )
+            for slot_id in _GATE_SHAPE_ONLY_INJECTED_SLOTS.get(
+                candidate.section_id, ()
+            )
         )
         bundles.append(
             build_section_bundle(
@@ -339,10 +369,18 @@ def test_모든_조각이_원본_문서의_허용_해시에_결속된다() -> No
     assert checked > 0
 
 
-def test_정상_수집은_빈_칸을_확인_못_함이_아니라_자료_부족으로_판정한다() -> None:
-    """거짓 미확인 방향 — 전문을 다 읽었는데 «일시 장애»가 되면 안 된다."""
+def test_gate_shape_only_가짜ID로_정상수집의_9장_게이트_모양만_READY다() -> None:
+    """실제 payload 증명이 아니라, 빈 경로가 장애로 오인되지 않는지만 본다."""
 
-    bundles = _bundles(_produce(document_state="OK"))
+    bundles = _gate_shape_only_bundles(_produce(document_state="OK"))
+    injected_ids = {
+        fact_id
+        for bundle in bundles
+        for injected in bundle.injected_slot_facts
+        for fact_id in injected.fact_ids
+    }
+    assert injected_ids
+    assert all(fact_id.startswith("gate-shape-only:") for fact_id in injected_ids)
     decision = assess_generation_gate(
         company_id=TARGET_COMPANY_ID,
         bundles=bundles,
@@ -362,7 +400,7 @@ def test_정상_수집은_빈_칸을_확인_못_함이_아니라_자료_부족�
 def test_공시_조회_실패는_자료_부족이_아니라_확인_못_함으로_판정한다() -> None:
     """거짓 확인 방향 — 수집 장애를 «자료 없음»으로 단정하면 안 된다."""
 
-    bundles = _bundles(_produce(document_state="FAILED"))
+    bundles = _gate_shape_only_bundles(_produce(document_state="FAILED"))
     decision = assess_generation_gate(
         company_id=TARGET_COMPANY_ID,
         bundles=bundles,
@@ -382,7 +420,9 @@ def test_보조_출처_한_곳의_실패가_보고서_전체를_일시_장애로
     장애 중단을 받는다. 통합 결합시험이 실제로 잡아낸 회귀라 여기서 고정한다.
     """
 
-    bundles = _bundles(_produce(ir_html_fetch=_ir_html_unreachable))
+    bundles = _gate_shape_only_bundles(
+        _produce(ir_html_fetch=_ir_html_unreachable)
+    )
     decision = assess_generation_gate(
         company_id=TARGET_COMPANY_ID,
         bundles=bundles,

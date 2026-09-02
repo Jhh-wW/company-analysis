@@ -26,7 +26,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from src.features.chapter_evidence.constants import (
     CHARS_PER_ESTIMATED_TOKEN,
@@ -34,6 +34,7 @@ from src.features.chapter_evidence.constants import (
     DEFAULT_MAX_ESTIMATED_TOKENS_PER_SECTION,
 )
 from src.shared.report_evidence.models import CollectedEvidenceDocument, EvidenceFragment
+from src.shared.report_evidence.constants import SourceRequirement, SourceTier
 from src.shared.report_evidence.policy import collector_slots_for
 
 
@@ -50,28 +51,48 @@ def _estimated_tokens(char_count: int) -> int:
     return math.ceil(char_count / CHARS_PER_ESTIMATED_TOKEN)
 
 
-def _dedupe_by_slot_and_text_hash(
+def _dedupe_by_evidence_range(
     fragments: Iterable[EvidenceFragment],
 ) -> tuple[list[EvidenceFragment], int]:
-    """같은 슬롯 안에서 같은 원문(text_sha256)을 가진 조각 중 최고점 하나만 남긴다.
+    """같은 문서·원문 위치를 ID 하나로 합치고 슬롯 커버리지만 합집합한다.
 
-    키를 슬롯 없이 text_sha256만으로 잡으면, 같은 원문 한 문장이 서로 다른 두
-    슬롯을 정당하게 채우는 입력(예: 「구독형 SaaS를 B2B 고객에게 판매한다」가
-    revenue_model·customer_type 슬롯을 동시에 채움)에서 한 슬롯의 유일한
-    조각이 소멸해 그 장이 오판(INSUFFICIENT)될 수 있다. (slot_id, text_sha256)
-    쌍으로 키를 잡아 슬롯 간 진짜 중복만 제거하고 슬롯을 넘나드는 정당한 재사용은
-    보존한다.
+    같은 문단을 revenue_model·customer_type 슬롯마다 복제하면 AI 입력과
+    토큰 예산이 같은 원문을 여러 번 센다. 문서+location+원문 해시가 같은
+    조각은 최고점 ID 하나로 합치되 ``covered_slot_ids``를 보존한다.
     """
 
-    by_slot_and_hash: dict[tuple[str, str], list[EvidenceFragment]] = defaultdict(list)
+    by_evidence_range: dict[tuple[str, str, str], list[EvidenceFragment]] = defaultdict(list)
     for fragment in fragments:
-        by_slot_and_hash[(fragment.slot_id, fragment.text_sha256)].append(fragment)
+        by_evidence_range[
+            (fragment.document_id, fragment.location, fragment.text_sha256)
+        ].append(fragment)
 
     kept: list[EvidenceFragment] = []
     duplicate_count = 0
-    for items in by_slot_and_hash.values():
+    for items in by_evidence_range.values():
         items.sort(key=lambda fragment: (-fragment.score_millis, fragment.fragment_id))
-        kept.append(items[0])
+        primary = items[0]
+        covered_slot_ids = tuple(
+            dict.fromkeys(
+                slot_id
+                for item in items
+                for slot_id in item.covered_slot_ids
+            )
+        )
+        reason_codes = tuple(
+            dict.fromkeys(
+                reason_code
+                for item in items
+                for reason_code in item.reason_codes
+            )
+        )
+        kept.append(
+            replace(
+                primary,
+                covered_slot_ids=covered_slot_ids,
+                reason_codes=reason_codes,
+            )
+        )
         duplicate_count += len(items) - 1
     return kept, duplicate_count
 
@@ -98,10 +119,16 @@ def select_section_fragments(
     eligible: list[EvidenceFragment] = []
     company_mismatch_count = 0
     unbound_count = 0
+    low_trust_ir_count = 0
     for fragment in fragments:
         if fragment.section_id != section_id:
             continue
-        if fragment.slot_id not in collector_slot_set:
+        eligible_slot_ids = tuple(
+            slot_id
+            for slot_id in fragment.covered_slot_ids
+            if slot_id in collector_slot_set
+        )
+        if not eligible_slot_ids:
             continue
         # generation=8 결속 방어(fail-closed), 1층 — 조각 자신의 company_id가
         # 대상 회사와 다르면 document_id가 우연히 겹쳐도(수집기 버그) 여기서
@@ -113,6 +140,16 @@ def select_section_fragments(
         document = own_documents_by_id.get(fragment.document_id)
         if document is None:
             continue
+        if (
+            document.source_kind == "official_ir_pdf"
+            and document.requirement is SourceRequirement.OPTIONAL
+            and document.source_tier is SourceTier.TIER_3_TRUSTED
+        ):
+            # 공식 HTML exact-link 외부 첨부는 provenance 후보일 뿐이다.
+            # CDN 자료가 필수 슬롯을 채우는 근거로 승격되지 않게 통합
+            # 경계에서도 한 번 더 fail-closed 한다.
+            low_trust_ir_count += 1
+            continue
         # generation=7 결속 방어(fail-closed), 2층 — 조각의 text_sha256이
         # 원본 문서의 exact_evidence_hashes 허용 목록에 없으면 여기서
         # 걸러낸다. 안 그러면 ChapterEvidenceCandidates 생성 시 계약이
@@ -120,13 +157,25 @@ def select_section_fragments(
         if fragment.text_sha256 not in document.exact_evidence_hashes:
             unbound_count += 1
             continue
-        eligible.append(fragment)
+        eligible.append(
+            replace(
+                fragment,
+                slot_id=(
+                    fragment.slot_id
+                    if fragment.slot_id in eligible_slot_ids
+                    else eligible_slot_ids[0]
+                ),
+                covered_slot_ids=eligible_slot_ids,
+            )
+        )
 
-    deduped, duplicate_count = _dedupe_by_slot_and_text_hash(eligible)
+    deduped, duplicate_count = _dedupe_by_evidence_range(eligible)
 
     by_slot: dict[str, list[EvidenceFragment]] = defaultdict(list)
     for fragment in deduped:
-        by_slot[fragment.slot_id].append(fragment)
+        for slot_id in fragment.covered_slot_ids:
+            if slot_id in collector_slot_set:
+                by_slot[slot_id].append(fragment)
     for items in by_slot.values():
         items.sort(key=lambda fragment: (-fragment.score_millis, fragment.fragment_id))
 
@@ -147,6 +196,10 @@ def select_section_fragments(
         if not candidates:
             continue
         representative = candidates[0]
+        if representative.fragment_id in included_ids:
+            # 이미 앞 슬롯에서 같은 원문 ID를 넣었다. 현재 슬롯 커버리지는
+            # covered_slot_ids로 보존되므로 입력·예산에는 다시 더하지 않는다.
+            continue
         cost_chars = len(representative.text)
         cost_tokens = _estimated_tokens(cost_chars)
         if cost_chars > max_chars or cost_tokens > max_estimated_tokens:
@@ -202,6 +255,8 @@ def select_section_fragments(
         reason_codes.append(f"fragment_company_mismatch:{company_mismatch_count}")
     if unbound_count:
         reason_codes.append(f"fragment_not_bound_to_document:{unbound_count}")
+    if low_trust_ir_count:
+        reason_codes.append(f"low_trust_ir_fragment_ignored:{low_trust_ir_count}")
     for slot_id in oversized_slots:
         reason_codes.append(f"fragment_exceeds_budget:{slot_id}")
     if dropped_for_budget:

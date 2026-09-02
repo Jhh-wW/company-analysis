@@ -185,7 +185,9 @@ def produce_chapter_evidence_candidates(
             if document.document_id in used_document_ids
         )
         filled_slot_ids = frozenset(
-            fragment.slot_id for fragment in selection.fragments
+            slot_id
+            for fragment in selection.fragments
+            for slot_id in fragment.covered_slot_ids
         )
 
         # 이 장의 필수 슬롯(수집 슬롯 + 주입 슬롯) 전체와 조회 대상이 겹치는
