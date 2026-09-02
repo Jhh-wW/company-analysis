@@ -121,7 +121,7 @@ ERROR_EXTRACT_FAILED: Final[str] = "사진에서 글자를 못 읽었습니다. 
 #   (default_extract가 지연 참조한다 — logic.py 참고)
 ENV_ANTHROPIC_API_KEY: Final[str] = "ANTHROPIC_API_KEY"
 
-#: 기본 추출기가 쓰는 멀티모달 모델. 확정/01_식별 실측 비교에서 회사명 인식이
+#: 기본 추출기가 쓰는 멀티모달 모델. 실측 비교에서 회사명 인식이
 #: 가장 안정적이었던 모델(착수2 본측정 opus5)과 별개로, 비용 방어를 위해
 #: 우선 haiku급을 기본값으로 둔다. 실제 배선은 `pipeline/real.py`가 정한다.
 DEFAULT_EXTRACT_MODEL: Final[str] = "claude-haiku-4-5"

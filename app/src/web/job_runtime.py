@@ -1037,7 +1037,7 @@ async def _run_job(job: Job) -> None:
                 if key not in job.done_steps:
                     job.done_steps.append(key)
             job.current_step = ""
-            # 14. 이력 1행 — 성공·실패 무관하게 남긴다 (기획서 08 관측).
+            # 14. 이력 1행 — 성공·실패 무관하게 남긴다.
             if (
                 job.result.billing_uncertain
                 and job.result.outcome is not Outcome.REPORT

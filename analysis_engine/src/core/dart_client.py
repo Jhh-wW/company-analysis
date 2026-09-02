@@ -25,7 +25,7 @@ from core import credentialed_http, usage_store
 DAILY_LIMIT = 20_000          # 공식 한도 (오류 020)
 WARN_RATIO = 0.8              # 경보 문턱 — 80% 소진 시 경고
 BASE_URL = "https://opendart.fss.or.kr/api"
-TIMEOUT_LIGHT_SEC = 10        # 회사·목록 조회 (03_수집/01_흐름 §5)
+TIMEOUT_LIGHT_SEC = 10        # 회사·목록 조회
 JSON_RESPONSE_MAX_BYTES = 4 * 1024 * 1024
 COUNTER_FILENAME = "dart_usage.json"
 # 예전 코드가 가져다 쓸 수 있도록 남겨 둔 로컬 기본값이다.

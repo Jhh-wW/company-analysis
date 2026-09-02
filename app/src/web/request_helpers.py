@@ -943,7 +943,7 @@ def require_admin(
     """관리자가 아니면 되돌릴 응답, 관리자면 None.
 
     ★ **매 요청마다 서버에서 다시 판정한다.** 버튼을 숨기는 것은 권한이 아니다
-      (기획서 07_출력/4_근거 §4 · 성공기준 P4 「0건 고정」).
+      (성공기준 P4 「0건 고정」).
     """
     token = request.cookies.get(auth_constants.SESSION_COOKIE_NAME)
     allowed = auth_logic.is_admin_session(token)
