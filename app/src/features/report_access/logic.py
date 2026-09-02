@@ -63,7 +63,9 @@ def _link_owns(
     if (
         link is None
         or link.is_revoked
-        or share_logic.is_share_link_expired(link.created_at)
+        # ★ 저장된 만료일(``expires_at``)까지 함께 본다 — 발급일만 보면
+        #   관리자가 미룬 만료일과 옛 규칙으로 굳은 만료일을 둘 다 놓친다.
+        or share_logic.link_expired(link)
     ):
         return False
     if link.report_id == locator:

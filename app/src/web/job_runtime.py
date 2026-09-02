@@ -1974,8 +1974,10 @@ async def _start_with_reserved_slot(
                     link = share_store.load(conn, share_key)
                     active = (
                         link is not None
+                        # 저장된 만료일까지 본다. `start_run`도 같은 판정을
+                        # SQL로 한 번 더 거는 이중 방어다.
                         and not link.is_revoked
-                        and not share_logic.is_share_link_expired(link.created_at)
+                        and not share_logic.link_expired(link)
                     )
                     inserted = active and share_store.start_run(
                         conn,

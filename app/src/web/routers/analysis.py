@@ -568,7 +568,7 @@ async def open_share_link(request: Request, key: str):
                 return _share_redirect_without_cookie(request, "missing")
             if stored.is_revoked:
                 return _share_redirect_without_cookie(request, "revoked")
-            if share_logic.is_share_link_expired(stored.created_at):
+            if share_logic.link_expired(stored):
                 return _share_redirect_without_cookie(request, "expired")
 
             now_iso = clock.iso_now_kst()
@@ -583,7 +583,7 @@ async def open_share_link(request: Request, key: str):
                     return _share_redirect_without_cookie(request, "missing")
                 if latest.is_revoked:
                     return _share_redirect_without_cookie(request, "revoked")
-                if share_logic.is_share_link_expired(latest.created_at):
+                if share_logic.link_expired(latest):
                     return _share_redirect_without_cookie(request, "expired")
                 return _share_rate_limited()
             link = stored
