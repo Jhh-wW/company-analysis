@@ -62,7 +62,19 @@ _IMMEDIATE_MAINTENANCE_INCIDENTS: Final[frozenset[str]] = frozenset(
     {INCIDENT_SECURITY, INCIDENT_COST, INCIDENT_SOURCE_GLOBAL}
 )
 
+#: 관리자가 이 친구만의 한도를 따로 정하지 «않았을 때» 쓰는 하루 성공 보고서 상한.
+#: 회원별 값은 초대 명단(`sharelink/allowlist.py`)의 `daily_success_limit` 열이
+#: 정본이며, 비어 있으면(NULL) 이 값을 쓴다 (결정 D-G4 (a)).
 MEMBER_DAILY_SUCCESS_LIMIT: Final[int] = 3
+
+#: 초대 명단 표와 회원별 성공 건수 한도 열의 이름.
+#: ★ 왜 import가 아니라 이름만 두나 — `sharelink`는 다른 feature다. 파이썬
+#:   import로 묶으면 feature 경계를 넘고, 초대 명단이 없는 옛 DB에서도 이 모듈이
+#:   못 뜨게 된다. 같은 SQLite 파일 안의 표를 «읽기만» 하는 방식은 이미
+#:   `report_access/store.py`가 같은 표에 쓰고 있는 방법이다.
+#:   열의 뜻·범위·쓰기는 전적으로 `sharelink/allowlist.py`가 정한다.
+_ALLOWED_USERS_TABLE: Final[str] = "allowed_users"
+_ALLOWED_USERS_SUCCESS_LIMIT_COLUMN: Final[str] = "daily_success_limit"
 MEMBER_USAGE_RESERVED: Final[str] = "reserved"
 MEMBER_USAGE_USED: Final[str] = "used"
 MEMBER_USAGE_RETURNED: Final[str] = "returned"
@@ -1964,19 +1976,95 @@ def list_reserved_member_runs(
     )
 
 
-def member_can_start(conn: sqlite3.Connection, *, actor_email: str, day: str) -> bool:
+def member_success_limit(
+    conn: sqlite3.Connection, *, actor_email: str
+) -> int:
+    """이 친구의 «오늘 성공 보고서 몇 건까지»인가.
+
+    Args:
+        conn: 열린 DB 연결. 예약 transaction 안에서도 같은 연결로 부른다.
+        actor_email: 로그인한 친구의 이메일.
+
+    Returns:
+        관리자가 이 사람에게 따로 정해 둔 값. 없으면
+        :data:`MEMBER_DAILY_SUCCESS_LIMIT`.
+
+    ★ 못 읽으면 «기본값»으로 떨어진다 — 초대 명단이 아직 없는 옛 DB나 열이
+      안 생긴 DB에서 0으로 떨어지면 멀쩡한 친구가 전원 차단되고, 무제한으로
+      떨어지면 저장소 장애가 곧 무제한 지출이 된다. 둘 다 안 되므로 기존 계약
+      값으로 돌아간다.
+    """
+    fallback = MEMBER_DAILY_SUCCESS_LIMIT
+    actor = _actor(actor_email)
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+        (_ALLOWED_USERS_TABLE,),
+    ).fetchone()
+    if table is None:
+        return fallback
+    columns = {
+        str(row[1])
+        for row in conn.execute(f"PRAGMA table_info({_ALLOWED_USERS_TABLE})")
+    }
+    if _ALLOWED_USERS_SUCCESS_LIMIT_COLUMN not in columns:
+        return fallback
+    row = conn.execute(
+        f"SELECT {_ALLOWED_USERS_SUCCESS_LIMIT_COLUMN} "
+        f"FROM {_ALLOWED_USERS_TABLE} WHERE email = ? AND is_active = 1",
+        (actor,),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return fallback
+    try:
+        stored = int(row[0])
+    except (TypeError, ValueError):
+        return fallback
+    # 0 이하는 「빼기(revoke)」와 뜻이 겹치는 값이라 저장 쪽에서 이미 막는다.
+    # 그래도 손으로 고친 DB를 만나면 기존 계약으로 돌아간다.
+    return stored if stored > 0 else fallback
+
+
+def member_can_start(
+    conn: sqlite3.Connection,
+    *,
+    actor_email: str,
+    day: str,
+    success_limit: Optional[int] = None,
+) -> bool:
+    """오늘 이 친구가 성공 보고서를 하나 더 시작해도 되는가.
+
+    Args:
+        success_limit: 부르는 쪽이 이미 읽어 둔 이 사람의 한도. ``None``이면
+            초대 명단에서 직접 읽는다 (:func:`member_success_limit`).
+    """
+    limit = (
+        member_success_limit(conn, actor_email=actor_email)
+        if success_limit is None
+        else int(success_limit)
+    )
     used, reserved = member_usage_today(conn, actor_email=actor_email, day=day)
-    return used + reserved < MEMBER_DAILY_SUCCESS_LIMIT
+    return used + reserved < limit
 
 
 def reserve_member_run(
-    conn: sqlite3.Connection, *, run_id: str, actor_email: str, day: str, now_iso: str
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    actor_email: str,
+    day: str,
+    now_iso: str,
+    success_limit: Optional[int] = None,
 ) -> bool:
-    """성공 3건의 동시 경쟁을 닫는 진행 예약.
+    """성공 건수의 동시 경쟁을 닫는 진행 예약.
 
     새 보고서가 실제로 끝나기 전에는 ``reserved``라서 실패 시 반환할 수 있다.
     SQLite write transaction에서 현재 성공·예약을 같이 읽어, 탭 세 개가 동시에
-    네 번째 성공을 만들지 못하게 한다.
+    한도를 넘는 성공을 만들지 못하게 한다.
+
+    ★ **한도는 여기서 다시 읽는다.** 부르는 쪽의 사전 확인은 transaction 밖이라
+      동시 요청이 같은 옛 숫자를 공유한다. ``success_limit``을 안 주면 이 자리에서
+      초대 명단의 회원별 값을 읽으므로, 부르는 쪽이 한도를 모르더라도 옛 상수 3이
+      조용히 적용되는 일은 없다 (결정 D-G4 (a)).
     """
     clean_run = _clean(run_id, maximum=128)
     actor = _actor(actor_email)
@@ -1992,7 +2080,9 @@ def reserve_member_run(
         if str(existing["actor_email"]) != actor or str(existing["day"]) != clean_day:
             raise ValueError("같은 실행 ID의 MEMBER 사용자가 다릅니다")
         return str(existing["state"]) in {MEMBER_USAGE_RESERVED, MEMBER_USAGE_USED}
-    if not member_can_start(conn, actor_email=actor, day=clean_day):
+    if not member_can_start(
+        conn, actor_email=actor, day=clean_day, success_limit=success_limit
+    ):
         return False
     conn.execute(
         f"INSERT INTO {TABLE_MEMBER_USAGE} (run_id, actor_email, day, state, created_at) VALUES (?, ?, ?, ?, ?)",

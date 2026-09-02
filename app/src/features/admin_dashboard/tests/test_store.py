@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 from src.features.admin_dashboard import store
+from src.features.sharelink import allowlist
 from src.features.storage import constants as storage_constants
 from src.features.storage import db
 
@@ -254,29 +255,52 @@ def test_member_feedback_displays_append_only_event_not_mutable_projection(tmp_p
     assert projection_missing[0].snapshot_available is False
 
 
-def test_member_success_limit_reserves_concurrently_and_returns_failures(tmp_path):
+@pytest.mark.parametrize(
+    ("정해준_한도", "적용될_한도"), [(None, 3), (2, 2), (5, 5)]
+)
+def test_member_success_limit_reserves_concurrently_and_returns_failures(
+    tmp_path, 정해준_한도, 적용될_한도
+):
+    """예약·거절·반환의 경계가 «그 회원의 한도»를 따라간다.
+
+    원래 이 시험은 3을 리터럴로 단정했다. 한도가 회원마다 달라졌으므로(G-S5,
+    결정 D-G4 (a)) 그 단정을 파라미터로 옮긴다. 첫 줄 ``(None, 3)``이 옛 계약을
+    그대로 지킨다 — 한도를 한 번도 안 정한 친구는 여전히 하루 3건이다.
+    """
     target = tmp_path / "dashboard.db"
     with db.connect(target) as conn:
-        for number in range(3):
+        assert allowlist.invite(
+            conn, email="member@example.com", note="",
+            now_iso="2026-08-22T09:00:00+09:00",
+        )
+        if 정해준_한도 is not None:
+            assert allowlist.set_limits(
+                conn, email="member@example.com",
+                daily_success_limit=정해준_한도, daily_budget_krw=None,
+                reason="회원별 한도 시험", now_iso="2026-08-22T09:30:00+09:00",
+            )
+        for number in range(적용될_한도):
             assert store.reserve_member_run(
                 conn, run_id=f"run-{number}", actor_email="member@example.com",
                 day="2026-08-22", now_iso="2026-08-22T10:00:00+09:00",
             )
         assert not store.reserve_member_run(
-            conn, run_id="run-four", actor_email="member@example.com",
+            conn, run_id="run-over", actor_email="member@example.com",
             day="2026-08-22", now_iso="2026-08-22T10:00:00+09:00",
         )
         assert store.settle_member_run(
             conn, run_id="run-1", succeeded=False, report_id="", now_iso="2026-08-22T10:01:00+09:00"
         )
         assert store.reserve_member_run(
-            conn, run_id="run-four", actor_email="member@example.com",
+            conn, run_id="run-over", actor_email="member@example.com",
             day="2026-08-22", now_iso="2026-08-22T10:02:00+09:00",
         )
         assert store.settle_member_run(
             conn, run_id="run-0", succeeded=True, report_id="report-0", now_iso="2026-08-22T10:03:00+09:00"
         )
-        assert store.member_usage_today(conn, actor_email="member@example.com", day="2026-08-22") == (1, 2)
+        assert store.member_usage_today(
+            conn, actor_email="member@example.com", day="2026-08-22"
+        ) == (1, 적용될_한도 - 1)
 
 
 def test_member_restart_recovery_can_list_only_unsettled_reservations(tmp_path):
