@@ -66,6 +66,7 @@ from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
 from src.features.report_standard.cover_metrics import cover_metrics
 from src.features.report_standard.visualization import table_visualization
 from src.features.report_standard.section_content import (
+    masthead_lines,
     section_content_blocks,
     source_verification_label,
     summary_topic,
@@ -156,6 +157,9 @@ def _ctx(request: Request, **kwargs) -> dict:
         "section_content_blocks": section_content_blocks,
         "source_verification_label": source_verification_label,
         "summary_topic": summary_topic,
+        # 표지 다음 첫 본문 페이지 마스트헤드(D-S4a) 두 줄. PDF·Notion과
+        # «같은 함수»여야 회사명·생성일 표기가 세 채널에서 안 어긋난다.
+        "masthead_lines": masthead_lines,
         # 검증된 본문 아래의 근거 원문 문구 — 세 출력 형태가 core 값을 같이 쓴다(P-117).
         "raw_source_label": RAW_SOURCE_LABEL,
         "raw_source_note": RAW_SOURCE_NOTE,
