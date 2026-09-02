@@ -390,8 +390,12 @@ def test_render_blueprint_turns_engine_v2_on_while_image_default_stays_v1() -> N
         "따옴표 없는 1은 YAML 정수로 읽힙니다 — value: \"1\"로 적어야 합니다"
     )
     assert render_values["ENGINE_V2"] == "1"
-    assert render_values["REPORT_RELEASE_MODE"] == "SHADOW", (
-        "실제 모델 표본을 검증하기 전에는 새 품질 규칙을 관찰만 해야 합니다"
+    # ★ 2026-09-02 결정 D-A로 «계약이 바뀌었다» — 기대값 하향이 아니다.
+    #   연습 모드(SHADOW)는 품질 하한 미달 보고서를 그대로 내보내면서
+    #   사용자 쿼터까지 깎았다. 출시부터는 부족한 장을 한 번 보충하고,
+    #   그래도 미달이면 무출고·무차감으로 멈춘다.
+    assert render_values["REPORT_RELEASE_MODE"] == "FULL", (
+        "출시 배포는 품질 하한을 관찰만 하지 않고 실제로 지켜야 합니다"
     )
 
     # render.yaml의 이름·값이 실제 분기 상수와 계속 같은지 함께 묶는다.

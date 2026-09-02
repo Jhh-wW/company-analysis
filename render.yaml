@@ -47,11 +47,12 @@ services:
       - key: ENGINE_V2
         value: "1"
 
-      # 새 엄격 계약은 실제 모델 표본 검증 전에는 사용자 출고를 바꾸지 않는다.
+      # 품질 하한을 관찰만 하지 않고 실제로 지킨다. 부족한 장은 한 번 보충하고,
+      # 그래도 미달이면 보고서를 내지 않는다(차감도 없다).
       # 코드가 이 값의 누락을 fail-closed로 막으므로 Blueprint에도 반드시
-      # 명시한다. 제한 실측을 통과하기 전 FULL로 올리지 않는다.
+      # 명시한다.
       - key: REPORT_RELEASE_MODE
-        value: SHADOW
+        value: FULL
 
       # Render edge가 붙인 forwarded header는 전혀 신뢰하지 않는다. 앱은 고정된
       # 공개 HTTPS origin만 Host·CSRF·HSTS 판단에 사용한다.
@@ -60,7 +61,7 @@ services:
       - key: DEPLOYMENT_PLATFORM
         value: render
       - key: DEPLOYMENT_RUNTIME_CONTRACT
-        value: render-admin-real-no-forwarded-v1
+        value: render-portfolio-link-v1
       - key: PUBLIC_ORIGIN
         fromService:
           type: web
