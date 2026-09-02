@@ -961,15 +961,32 @@ async def _run_job(job: Job) -> None:
                         )
                 except Exception:  # noqa: BLE001 — 관측 누락이 보고서 저장을 막지 않는다
                     logger.exception("Anthropic 성공 관측을 저장하지 못했습니다")
-            record_run(
-                job.user_input,
-                job.result,
-                job.upfront_elapsed_sec + time.perf_counter() - started,
-                run_id=job.job_id,
-                expected_state=(
-                    lifecycle.STATE_RUNNING if _job_is_paid(job) else None
-                ),
+            # FULL 생성물은 파이프라인 완료 시점이 아니라 저장·출고 결과를
+            # 알고 난 뒤에만 lifecycle 최종 행을 남긴다. lifecycle의 final
+            # 상태는 되돌릴 수 없어서(lifecycle.finalize_once) 여기서 먼저
+            # 쓰면 이후 저장·출고가 깨져도 이력은 「완주」로 영구히 남는다
+            # (34장 새발견 §3). 이 판정은 지금 시점의 job.result만 보고
+            # 정한다 — 아래 실패 정리가 job.result를 FAILED로 되돌리면
+            # report가 사라져 이후에는 다시 판정할 수 없기 때문이다.
+            # ★ 내부 AI 원가 기록(cost_store.record_run_costs, 위)은 이
+            #   순서와 무관하게 그대로 파이프라인 직후에 남는다 — 「하면 안
+            #   되는 설계 1」(34장 §2)이 금지한 것은 원가 기록을 옮기는
+            #   것이지 lifecycle 기록을 옮기는 것이 아니다.
+            requires_full_completion = (
+                job.result.outcome is Outcome.REPORT
+                and job.result.report is not None
+                and _report_requires_atomic_completion(job.result.report)
             )
+            if not requires_full_completion:
+                record_run(
+                    job.user_input,
+                    job.result,
+                    job.upfront_elapsed_sec + time.perf_counter() - started,
+                    run_id=job.job_id,
+                    expected_state=(
+                        lifecycle.STATE_RUNNING if _job_is_paid(job) else None
+                    ),
+                )
             delivery_required = False
             if job.result.outcome is Outcome.REPORT and job.result.report is not None:
                 job.delivery_issued_at = clock.now_kst()
@@ -988,15 +1005,7 @@ async def _run_job(job: Job) -> None:
                         job.job_id,
                     )
             # FULL 생성물은 audience와 무관하게 저장·출고 실패 뒤 메모리
-            # 결과를 그대로 남기지 않는다. release_mode를 여기서 먼저 캡처해
-            # 두는 이유는, 아래 저장·출고 실패 갈래가 job.result를 FAILED로
-            # 되돌리면 report가 사라져 이후에는 FULL 여부를 다시 읽을 수 없기
-            # 때문이다 (32장 §4-3, 34장 새발견 §3 「발견3」).
-            requires_full_cleanup = (
-                job.result.outcome is Outcome.REPORT
-                and job.result.report is not None
-                and _report_requires_atomic_completion(job.result.report)
-            )
+            # 결과를 그대로 남기지 않는다.
             report_saved = (
                 _save_report(job)
                 if job.result.outcome is not Outcome.REPORT or delivery_required
@@ -1005,7 +1014,7 @@ async def _run_job(job: Job) -> None:
             if (
                 job.result.outcome is Outcome.REPORT
                 and not report_saved
-                and (job.requires_public_report_grant or requires_full_cleanup)
+                and (job.requires_public_report_grant or requires_full_completion)
             ):
                 # PUBLIC과 FULL 생성물은 메모리 보고서만 보여 주는 임시 성공이
                 # 될 수 없다. 저장 transaction이 되돌아갔으므로 최종 결과도
@@ -1051,7 +1060,7 @@ async def _run_job(job: Job) -> None:
                             "불변 보고서 delivery 실패 표식 실패 job_id=%s",
                             job.job_id,
                         )
-                    if requires_full_cleanup:
+                    if requires_full_completion:
                         # FULL 원자 출고는 content·delivery·artifact·자동승인·
                         # charge·권한 결속이 한 거래로 rollback됐다. 화면·PDF·
                         # single-flight가 그 실패를 REPORT 성공으로 잘못 읽지
@@ -1072,6 +1081,20 @@ async def _run_job(job: Job) -> None:
                         "보고서 저장 실패의 delivery 표식 마감 실패 job_id=%s",
                         job.job_id,
                     )
+            if requires_full_completion:
+                # 저장·출고 실패 정리가 위에서 이미 job.result를 FAILED로
+                # 되돌렸을 수 있다. lifecycle 최종 행은 이제야 실제 결과를
+                # 반영해 한 번만 쓴다 — 파이프라인 직후 값을 썼다가 나중에
+                # 다시 쓸 수는 없다(final 상태는 불변).
+                record_run(
+                    job.user_input,
+                    job.result,
+                    job.upfront_elapsed_sec + time.perf_counter() - started,
+                    run_id=job.job_id,
+                    expected_state=(
+                        lifecycle.STATE_RUNNING if _job_is_paid(job) else None
+                    ),
+                )
             if (
                 job.generation_session is not None
                 and not job.generation_abandoned
