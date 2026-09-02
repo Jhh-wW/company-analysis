@@ -248,6 +248,10 @@ def test_이상한_결과참조는_보고서_ID로_받지않는다(reference):
 
 
 def test_링크는_발급후_60일째부터_자동으로_닫힌다():
+    """★ 옛 규칙(60일) 그대로다. 기본값은 90일로 바뀌었지만(D-G8), 만료일이
+    이미 굳은 «기존 행»은 이 계산으로 닫힌다 — 저장소가 그 값을 표에 적어
+    두는지는 `tests/test_link_expiry.py`가 본다.
+    """
     assert not is_share_link_expired(
         "2026-01-01T10:00:00", today=dt.date(2026, 3, 1), max_age_days=60
     )
@@ -328,9 +332,15 @@ def test_올바르지_않은_수명은_링크를_닫는다(max_age_days):
 
 
 @pytest.mark.parametrize("value", ["", "0", "-1", "abc", "999999"])
-def test_링크수명_환경값이_이상하면_60일_기본값을_쓴다(monkeypatch, value):
+def test_링크수명_환경값이_이상하면_90일_기본값을_쓴다(monkeypatch, value):
+    """★ 기대값을 60에서 90으로 «옮긴» 시험이다 (2026-09-02 결정 D-G8).
+
+    지우지 않고 값을 바꾼 이유 — 확인해야 하는 성질은 「이상한 환경값은 무기한이
+    되지 않는다」이고, 그건 그대로다. 옛 60일이 지키던 「이미 뿌린 링크가 더
+    열리지 않는다」는 `tests/test_link_expiry.py`의 기존 행 시험이 이어받았다.
+    """
     monkeypatch.setenv("SHARE_LINK_MAX_AGE_DAYS", value)
-    assert link_max_age_days_from_env() == 60
+    assert link_max_age_days_from_env() == 90
 
 
 def test_링크수명은_환경변수로_바꿀수있다(monkeypatch):

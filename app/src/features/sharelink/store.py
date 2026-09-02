@@ -32,6 +32,11 @@ TABLE_OPEN_WINDOWS = "share_link_open_windows"
 TABLE_ACCESS_SUBJECTS = "share_link_access_subjects"
 TABLE_RUN_HISTORY = "share_link_run_history"
 TABLE_REPORT_VIEW_EVENTS = "share_link_report_view_events"
+#: 링크의 만료·한도를 «누가 언제 얼마에서 얼마로» 바꿨는지 남기는 표 (티켓 G-S4).
+#: ★ 관리자 감사 원장(`admin_audit_events`)은 사유 코드가 48자 영숫자라 금액·날짜를
+#:   담을 수 없다. 그래서 「무엇이 어떻게 바뀌었나」는 이 표가, 「누가 승인했나」는
+#:   감사 원장이 각각 맡는다. 두 곳에 같은 transaction으로 함께 쓴다.
+TABLE_BUDGET_ADJUSTMENTS = "share_link_budget_adjustments"
 INDEX_RUN_REPORT_ID = f"idx_{TABLE_RUN_HISTORY}_report_id_unique"
 INDEX_OPEN_WINDOWS_LINK_WINDOW = f"idx_{TABLE_OPEN_WINDOWS}_link_window_unique"
 INDEX_ACCESS_SUBJECT_WINDOW = f"idx_{TABLE_ACCESS_SUBJECTS}_window_subject_unique"
@@ -40,6 +45,19 @@ INDEX_REPORT_VIEW_EVENTS_LINK_TIME = (
 )
 INDEX_REPORT_VIEW_EVENTS_LINK_REPORT = (
     f"idx_{TABLE_REPORT_VIEW_EVENTS}_link_report_unique"
+)
+INDEX_BUDGET_ADJUSTMENTS_LINK_TIME = f"idx_{TABLE_BUDGET_ADJUSTMENTS}_link_time"
+
+#: 이력에 남길 변경 종류. 표 하나로 묶는 이유 — 화면이 한 곳이고 종류가 몇 안 된다.
+ADJUSTMENT_KIND_EXPIRES: Final[str] = "expires"
+ADJUSTMENT_KIND_DAILY_BUDGET: Final[str] = "daily_budget"
+ADJUSTMENT_KIND_TOTAL_BUDGET: Final[str] = "total_budget"
+ADJUSTMENT_KINDS: Final[frozenset[str]] = frozenset(
+    {
+        ADJUSTMENT_KIND_EXPIRES,
+        ADJUSTMENT_KIND_DAILY_BUDGET,
+        ADJUSTMENT_KIND_TOTAL_BUDGET,
+    }
 )
 
 RUN_STATUS_RUNNING: Final[str] = "running"
@@ -77,8 +95,47 @@ CREATE TABLE IF NOT EXISTS {TABLE_SHARE_LINKS} (
     --   전부) `constants.LINK_TOTAL_BUDGET_KRW` 기본값을 쓴다. 이미 뿌린 링크에
     --   값을 채워 넣지 않으려고 일부러 NULL 허용이다.
     total_budget_krw REAL DEFAULT NULL
-        CHECK (total_budget_krw IS NULL OR total_budget_krw >= 0)
+        CHECK (total_budget_krw IS NULL OR total_budget_krw >= 0),
+    -- ★ 이 링크가 닫히는 날(KST ``YYYY-MM-DD``). 그날 00:00부터 안 열린다.
+    --   비어 있으면 «만료 열이 생기기 전에 저장된 행»이라는 뜻이고, 저장소를
+    --   준비할 때 옛 규칙(60일)으로 계산해 채워 굳힌다. 기본값을 90일로 올려도
+    --   이미 뿌린 링크가 저절로 30일 더 열리지 않게 하려는 것이다 (D-G8).
+    expires_at      TEXT NOT NULL DEFAULT '',
+    -- ★ 관리자가 붙이는 표시용 이름(예: 「하이브 인사팀」). 내부 메모(`note`)와
+    --   달리 관리 화면에 그대로 보인다. 받는 사람 화면에는 쓰지 않는다.
+    audience_label  TEXT NOT NULL DEFAULT ''
 )
+"""
+CREATE_BUDGET_ADJUSTMENTS_SQL = f"""
+CREATE TABLE IF NOT EXISTS {TABLE_BUDGET_ADJUSTMENTS} (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    link_key_hash TEXT NOT NULL,
+    kind          TEXT NOT NULL,
+    old_value     TEXT NOT NULL,
+    new_value     TEXT NOT NULL,
+    reason        TEXT NOT NULL,
+    actor_id      TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    FOREIGN KEY (link_key_hash) REFERENCES {TABLE_SHARE_LINKS}(key_hash),
+    CHECK (kind IN ('{ADJUSTMENT_KIND_EXPIRES}',
+                    '{ADJUSTMENT_KIND_DAILY_BUDGET}',
+                    '{ADJUSTMENT_KIND_TOTAL_BUDGET}')),
+    CHECK (length(reason) > 0)
+)
+"""
+CREATE_BUDGET_ADJUSTMENTS_NO_UPDATE_SQL = f"""
+CREATE TRIGGER IF NOT EXISTS {TABLE_BUDGET_ADJUSTMENTS}_no_update
+BEFORE UPDATE ON {TABLE_BUDGET_ADJUSTMENTS}
+BEGIN SELECT RAISE(ABORT, 'share link adjustments are append-only'); END
+"""
+CREATE_BUDGET_ADJUSTMENTS_NO_DELETE_SQL = f"""
+CREATE TRIGGER IF NOT EXISTS {TABLE_BUDGET_ADJUSTMENTS}_no_delete
+BEFORE DELETE ON {TABLE_BUDGET_ADJUSTMENTS}
+BEGIN SELECT RAISE(ABORT, 'share link adjustments are append-only'); END
+"""
+CREATE_BUDGET_ADJUSTMENTS_INDEX_SQL = f"""
+CREATE INDEX IF NOT EXISTS {INDEX_BUDGET_ADJUSTMENTS_LINK_TIME}
+ON {TABLE_BUDGET_ADJUSTMENTS}(link_key_hash, id DESC)
 """
 CREATE_OPEN_EVENTS_SQL = f"""
 CREATE TABLE IF NOT EXISTS {TABLE_OPEN_EVENTS} (
@@ -227,6 +284,10 @@ class ShareLink:
     revoked_at: str
     #: 이 링크의 «수명 전체» 예산(원). ``None``이면 기본 상한을 쓴다.
     total_budget_krw: Optional[float] = None
+    #: 이 링크가 닫히는 날(KST ``YYYY-MM-DD``). 빈 값이면 발급일 + 기본 수명.
+    expires_at: str = ""
+    #: 관리자 화면에만 보이는 표시용 이름. 받는 사람에게는 안 보낸다.
+    audience_label: str = ""
 
     @property
     def effective_total_budget_krw(self) -> float:
@@ -292,6 +353,20 @@ class ShareLinkRun:
 
 
 @dataclass(frozen=True)
+class ShareLinkAdjustment:
+    """링크의 만료·한도를 바꾼 기록 한 줄. 열쇠 원문은 담지 않는다."""
+
+    id: int
+    link_key_hash: str
+    kind: str
+    old_value: str
+    new_value: str
+    reason: str
+    actor_id: str
+    created_at: str
+
+
+@dataclass(frozen=True)
 class ShareLinkReportViewEvent:
     """LINK로 기존 연결 보고서를 연 비식별 append-only 사건."""
 
@@ -314,13 +389,15 @@ def _row_to_link(row: sqlite3.Row | tuple) -> ShareLink:
         last_opened_at=row[8],
         revoked_at=row[9],
         total_budget_krw=None if row[10] is None else float(row[10]),
+        expires_at=str(row[11] or ""),
+        audience_label=str(row[12] or ""),
     )
 
 
 _COLUMNS = (
     "key_hash, company, job, report_id, note, created_at, "
     "opened_count, first_opened_at, last_opened_at, revoked_at, "
-    "total_budget_krw"
+    "total_budget_krw, expires_at, audience_label"
 )
 
 _RUN_COLUMNS = (
@@ -569,6 +646,43 @@ def _verify_access_subject_tombstone(conn: sqlite3.Connection) -> None:
         )
 
 
+def _freeze_legacy_expiry(conn: sqlite3.Connection) -> None:
+    """만료일이 아직 안 적힌 옛 행에 «그 행이 원래 닫히던 날»을 적어 굳힌다.
+
+    ★ 왜 필요한가 — 기본 수명이 60일에서 90일로 바뀌었다(D-G8). 만료일을
+      계산으로만 두면, 상수를 바꾼 순간 **이미 뿌려 둔 링크가 30일 더 열린다.**
+      아무도 결정한 적 없는 노출 연장이므로, 옛 행은 옛 규칙으로 계산해 표에
+      적어 둔다. 새 발급만 90일을 받는다.
+
+    ★ 날짜 계산을 SQL의 ``date()``로 하지 않는다 — SQLite는 시간대가 붙은
+      값을 UTC로 바꿔 버려서 KST 자정 근처 발급일이 하루 어긋난다. 대상 행은
+      수십 건이라 Python에서 정확히 계산하는 편이 싸고 맞다.
+
+    ★ 멱등이다 — ``WHERE expires_at = ''``이라 이미 굳은 행은 건드리지 않는다.
+      읽을 수 없는 발급 시각은 빈 값으로 남긴다. 그런 행은 판정이 «닫힘»이다.
+    """
+
+    rows = conn.execute(
+        f"SELECT key_hash, created_at FROM {TABLE_SHARE_LINKS} "
+        "WHERE expires_at = ''"
+    ).fetchall()
+    frozen: list[tuple[str, str]] = []
+    for row in rows:
+        expiry = logic.expiry_date_of(
+            str(row[1] or ""),
+            max_age_days=constants.LEGACY_LINK_MAX_AGE_DAYS,
+        )
+        if expiry is None:
+            continue
+        frozen.append((expiry.isoformat(), str(row[0])))
+    if frozen:
+        conn.executemany(
+            f"UPDATE {TABLE_SHARE_LINKS} SET expires_at = ? "
+            "WHERE key_hash = ? AND expires_at = ''",
+            frozen,
+        )
+
+
 def _copy_legacy_rows(conn: sqlite3.Connection) -> None:
     rows = conn.execute(
         f"""
@@ -626,6 +740,20 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
                 "ADD COLUMN revoked_at TEXT NOT NULL DEFAULT ''"
             )
             columns = set(_table_columns(conn, TABLE_SHARE_LINKS))
+        if "expires_at" not in columns:
+            # ★ NOT NULL DEFAULT ''로 붙인다 — 옛 행은 빈 값으로 들어오고,
+            #   바로 아래 `_freeze_legacy_expiry`가 옛 규칙(60일)으로 채운다.
+            conn.execute(
+                f"ALTER TABLE {TABLE_SHARE_LINKS} "
+                "ADD COLUMN expires_at TEXT NOT NULL DEFAULT ''"
+            )
+            columns = set(_table_columns(conn, TABLE_SHARE_LINKS))
+        if "audience_label" not in columns:
+            conn.execute(
+                f"ALTER TABLE {TABLE_SHARE_LINKS} "
+                "ADD COLUMN audience_label TEXT NOT NULL DEFAULT ''"
+            )
+            columns = set(_table_columns(conn, TABLE_SHARE_LINKS))
         if "total_budget_krw" not in columns:
             # ★ NULL 허용으로 붙인다 — 이미 뿌린 링크에 금액을 «채워 넣지» 않는다.
             #   비어 있으면 읽는 쪽이 기본 상한을 쓴다
@@ -648,9 +776,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             "last_opened_at",
             "revoked_at",
             "total_budget_krw",
+            "expires_at",
+            "audience_label",
         }
         if not required_link_columns.issubset(columns):
             raise RuntimeError("share_links 필수 열이 없습니다")
+        _freeze_legacy_expiry(conn)
 
         conn.execute(CREATE_OPEN_EVENTS_SQL)
         conn.execute(CREATE_OPEN_EVENTS_NO_UPDATE_SQL)
@@ -685,6 +816,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         _verify_access_subject_tombstone(conn)
         conn.execute(CREATE_RUN_HISTORY_SQL)
         conn.execute(CREATE_RUN_HISTORY_NO_DELETE_SQL)
+        conn.execute(CREATE_BUDGET_ADJUSTMENTS_SQL)
+        conn.execute(CREATE_BUDGET_ADJUSTMENTS_NO_UPDATE_SQL)
+        conn.execute(CREATE_BUDGET_ADJUSTMENTS_NO_DELETE_SQL)
+        conn.execute(CREATE_BUDGET_ADJUSTMENTS_INDEX_SQL)
         conn.execute(CREATE_REPORT_VIEW_EVENTS_SQL)
         conn.execute(CREATE_REPORT_VIEW_EVENTS_NO_UPDATE_SQL)
         conn.execute(CREATE_REPORT_VIEW_EVENTS_NO_DELETE_SQL)
@@ -749,6 +884,19 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             _table_columns(conn, TABLE_REPORT_VIEW_EVENTS)
         ):
             raise RuntimeError("share_link_report_view_events 스키마가 올바르지 않습니다")
+        if not {
+            "id",
+            "link_key_hash",
+            "kind",
+            "old_value",
+            "new_value",
+            "reason",
+            "actor_id",
+            "created_at",
+        }.issubset(_table_columns(conn, TABLE_BUDGET_ADJUSTMENTS)):
+            raise RuntimeError(
+                "share_link_budget_adjustments 스키마가 올바르지 않습니다"
+            )
     except BaseException:
         try:
             conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
@@ -767,23 +915,136 @@ def insert_new(
     job: str,
     report_id: str = "",
     note: str = "",
+    audience_label: str = "",
     now_iso: str,
 ) -> bool:
     """새 열쇠만 삽입한다. 충돌한 기존 링크는 절대 덮어쓰지 않는다.
 
+    Args:
+        audience_label: 관리 화면에만 보이는 표시용 이름(예: 「하이브 인사팀」).
+
     Returns:
         삽입했으면 ``True``, 같은 열쇠가 이미 있으면 ``False``.
+
+    ★ 만료일을 **발급 순간에 적어 굳힌다** (D-G8). 계산으로만 두면 나중에 기본
+      수명 상수를 바꿀 때 이미 뿌린 링크의 만료가 조용히 따라 움직인다.
     """
+    expiry = logic.expiry_date_of(now_iso)
     cursor = conn.execute(
         f"""
         INSERT INTO {TABLE_SHARE_LINKS}
-            (key_hash, company, job, report_id, note, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (key_hash, company, job, report_id, note, created_at,
+             expires_at, audience_label)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(key_hash) DO NOTHING
         """,
-        (key_hash_of(key), company, job, report_id, note, now_iso),
+        (
+            key_hash_of(key),
+            company,
+            job,
+            report_id,
+            note,
+            now_iso,
+            "" if expiry is None else expiry.isoformat(),
+            audience_label,
+        ),
     )
     return cursor.rowcount > 0
+
+
+def set_expires_at(
+    conn: sqlite3.Connection, *, key_hash: str, expires_at: str
+) -> bool:
+    """링크의 만료일을 새 날짜로 바꾼다. 판정은 부르는 쪽이 이미 마쳤다.
+
+    Args:
+        expires_at: KST ``YYYY-MM-DD``. 모양이 아니면 저장하지 않는다.
+
+    Returns:
+        바꿨으면 ``True``. 링크가 없거나 모양이 아니면 ``False``.
+    """
+
+    normalized = str(key_hash or "").strip().lower()
+    if not is_key_hash(normalized):
+        return False
+    if logic.expiry_date_from_value(expires_at) is None:
+        return False
+    cursor = conn.execute(
+        f"UPDATE {TABLE_SHARE_LINKS} SET expires_at = ? WHERE key_hash = ?",
+        (str(expires_at).strip(), normalized),
+    )
+    return cursor.rowcount > 0
+
+
+def record_link_adjustment(
+    conn: sqlite3.Connection,
+    *,
+    key_hash: str,
+    kind: str,
+    old_value: str,
+    new_value: str,
+    reason: str,
+    actor_id: str,
+    created_at: str,
+) -> None:
+    """만료·한도 변경 한 건을 append-only 이력에 남긴다.
+
+    ★ 열쇠 «원문»은 절대 넣지 않는다 — 지문(`key_hash`)만 받는다. 원문을 담으면
+      이 표 하나가 링크 유출 경로가 된다.
+    ★ 표의 CHECK가 모르는 종류·빈 사유를 거절한다. 잘못된 행을 조용히 남기느니
+      변경 transaction 전체를 실패시키는 편이 낫다.
+    """
+
+    conn.execute(
+        f"""
+        INSERT INTO {TABLE_BUDGET_ADJUSTMENTS}
+            (link_key_hash, kind, old_value, new_value, reason,
+             actor_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(key_hash or "").strip().lower(),
+            str(kind or ""),
+            str(old_value or ""),
+            str(new_value or ""),
+            str(reason or ""),
+            str(actor_id or ""),
+            str(created_at or ""),
+        ),
+    )
+
+
+def list_link_adjustments(
+    conn: sqlite3.Connection, *, key_hash: str
+) -> list[ShareLinkAdjustment]:
+    """이 링크의 만료·한도 변경 이력. 최근 것부터."""
+
+    normalized = str(key_hash or "").strip().lower()
+    if not is_key_hash(normalized):
+        return []
+    rows = conn.execute(
+        f"""
+        SELECT id, link_key_hash, kind, old_value, new_value, reason,
+               actor_id, created_at
+          FROM {TABLE_BUDGET_ADJUSTMENTS}
+         WHERE link_key_hash = ?
+         ORDER BY id DESC
+        """,
+        (normalized,),
+    ).fetchall()
+    return [
+        ShareLinkAdjustment(
+            id=int(row[0]),
+            link_key_hash=str(row[1]),
+            kind=str(row[2]),
+            old_value=str(row[3]),
+            new_value=str(row[4]),
+            reason=str(row[5]),
+            actor_id=str(row[6]),
+            created_at=str(row[7]),
+        )
+        for row in rows
+    ]
 
 
 def load(conn: sqlite3.Connection, key: str) -> Optional[ShareLink]:
@@ -851,14 +1112,18 @@ def mark_opened(
     conn.execute(f"SAVEPOINT {savepoint}")
     try:
         state = conn.execute(
-            f"SELECT created_at, revoked_at FROM {TABLE_SHARE_LINKS} "
+            f"SELECT created_at, revoked_at, expires_at FROM {TABLE_SHARE_LINKS} "
             "WHERE key_hash = ?",
             (key_hash,),
         ).fetchone()
         if (
             state is None
             or str(state[1] or "")
-            or logic.is_share_link_expired(str(state[0]), today=today)
+            # ★ 저장된 만료일을 «여기서» 본다 — 화면 쪽 검사만 믿으면 만료일을
+            #   미룬(또는 옛 규칙으로 굳은) 링크가 문 앞에서 어긋난다.
+            or logic.is_share_link_expired(
+                str(state[0]), today=today, expires_at=str(state[2] or "")
+            )
         ):
             _rollback_open_savepoint(conn, savepoint)
             return False
@@ -1199,6 +1464,12 @@ def start_run(
         )
     ):
         raise ValueError("run ID·시작 시각·입력/확정 회사·회사 식별값이 필요합니다")
+    # ★ 만료를 «돈이 나가기 직전»에 한 번 더 본다. 화면·요청 경로의 검사가
+    #   저장된 만료일을 못 읽어도, 닫힌 링크로 유료 실행이 시작되지 않게 한다.
+    try:
+        started_day = clock.business_date_from_iso(clean_started_at).isoformat()
+    except (OverflowError, TypeError, ValueError):
+        return False
     cursor = conn.execute(
         f"""
         INSERT INTO {TABLE_RUN_HISTORY} (
@@ -1208,6 +1479,7 @@ def start_run(
         SELECT ?, key_hash, ?, ?, ?, ?, ?
           FROM {TABLE_SHARE_LINKS}
          WHERE key_hash = ? AND revoked_at = ''
+           AND (expires_at = '' OR expires_at > ?)
         ON CONFLICT(run_id) DO NOTHING
         """,
         (
@@ -1218,6 +1490,7 @@ def start_run(
             clean_company_id,
             RUN_STATUS_RUNNING,
             key_hash_of(key),
+            started_day,
         ),
     )
     return cursor.rowcount > 0
