@@ -344,7 +344,9 @@ def _load_active_share_link(
     if (
         link is None
         or link.is_revoked
-        or share_logic.is_share_link_expired(link.created_at)
+        # 발급일만 보면 저장된 만료일(옛 규칙으로 굳은 값·관리자가 미룬 값)을
+        # 둘 다 놓친다. 행을 통째로 넘겨 그 값을 빠뜨릴 수 없게 한다.
+        or share_logic.link_expired(link)
     ):
         return None
     return link

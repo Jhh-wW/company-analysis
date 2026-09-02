@@ -585,24 +585,11 @@ def _report_company_id(conn, report_id: str, report=None) -> str | None:
       만들지 않기 위해서다. 바뀌는 것은 **대조에 쓰는 값**뿐이고, 「확인 못 하면
       거부」라는 경계는 그대로다.
     """
-    clean_report_id = str(report_id or "").strip()
-    if not clean_report_id:
-        return ""
     try:
-        column_value = report_store.load_corp_id(conn, clean_report_id)
-        current = (
-            report
-            if report is not None
-            else report_store.load(conn, clean_report_id)
-        )
+        return report_store.resolve_company_id(conn, report_id, report)
     except Exception:  # noqa: BLE001 — 확인 실패는 통과가 아니라 거부로 넘긴다
         logger.error("보고서의 회사 고유번호를 읽지 못했습니다")
         return None
-    if column_value:
-        return column_value
-    if current is None:
-        return ""
-    return str(getattr(current, "company_id", "") or "").strip()
 
 
 def _link_company_id(conn, link) -> str | None:

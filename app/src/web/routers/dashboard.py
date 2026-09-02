@@ -21,6 +21,7 @@ from src.features.admin_dashboard import maintenance as dashboard_maintenance
 from src.features.admin_dashboard import store as dashboard_store
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
+from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
 from src.features.report_access import logic as report_access_logic
 from src.features.backup import status as backup_status
 from src.features.sharelink import allowlist as share_allow
@@ -75,11 +76,15 @@ def _link_timestamp_label(value: str) -> str:
     return f"{local:%Y-%m-%d %H:%M} (한국시간)"
 
 
-def _link_expiry_label(created_at: str) -> str:
-    try:
-        issued = clock.business_date_from_iso(created_at)
-        expires = issued + dt.timedelta(days=share_logic.link_max_age_days_from_env())
-    except (OverflowError, TypeError, ValueError):
+def _link_expiry_label(created_at: str, *, expires_at: str = "") -> str:
+    """이 링크가 닫히는 날을 관리자 화면용으로 표시한다.
+
+    ★ 저장된 ``expires_at``이 있으면 그 값이 우선이다. 발급일 + 현재 수명으로만
+      계산하면 관리자가 미룬 날짜와 옛 규칙으로 굳은 날짜를 둘 다 못 보여 준다.
+    """
+
+    expires = share_logic.expiry_date_of(created_at, expires_at=expires_at)
+    if expires is None:
         return "확인 불가"
     return f"{expires:%Y-%m-%d} (한국시간 00:00부터 닫힘)"
 
@@ -91,6 +96,27 @@ def _dashboard_link_report_state(conn, link: share_store.ShareLink) -> str:
     if report is None:
         return "missing"
     return "expired" if job_runtime._link_expired(report) else "active"
+
+
+def _dashboard_link_company_id_missing(
+    conn, link: share_store.ShareLink, report_state: str
+) -> bool:
+    """결속 보고서에 회사 고유번호가 아예 없는가 (발견 F-GS2p1b).
+
+    ★ 없으면 이후 재결속이 «이름»만 대조하게 되어, 이름이 같은 다른 법인이
+      그대로 들어온다. 관리자가 그 사실을 알아야 보고서를 다시 만들 수 있다.
+    ★ 저장 표의 열과 본문 둘 다 비었을 때만 참이다 — 열만 차 있어도 대조는 된다.
+    ★ 읽기 실패는 「없다」로 뭉개지 않고 경고를 띄우지 않는다. 이 값은 안내일
+      뿐이고, 실제 결속 차단은 `routers/admin.py`가 fail-closed로 판정한다.
+    """
+
+    if report_state not in ("active", "expired"):
+        return False
+    try:
+        return not report_store.resolve_company_id(conn, link.report_id)
+    except Exception:  # noqa: BLE001 — 안내 한 줄 때문에 상세 화면을 깨지 않는다
+        logger.error("결속 보고서의 회사 고유번호를 읽지 못했습니다")
+        return False
 
 
 def _admin_response(request: Request, response: Response) -> Response:
@@ -1068,6 +1094,9 @@ async def link_detail(request: Request, key_hash: str):
             report_state = (
                 "none" if link is None else _dashboard_link_report_state(conn, link)
             )
+            link_company_id_missing = link is not None and (
+                _dashboard_link_company_id_missing(conn, link, report_state)
+            )
             run_report_states = {
                 run.run_id: (
                     "none"
@@ -1099,14 +1128,17 @@ async def link_detail(request: Request, key_hash: str):
                 dashboard_runs=runs,
                 dashboard_link_report_state=report_state,
                 dashboard_run_report_states=run_report_states,
-                dashboard_link_expired=share_logic.is_share_link_expired(
-                    link.created_at
-                ),
-                dashboard_result_share_days=share_logic.link_max_age_days_from_env(),
+                dashboard_link_expired=share_logic.link_expired(link),
+                dashboard_link_company_id_missing=link_company_id_missing,
+                # ★ 이 값은 «보고서 공개 기간»이지 LINK 수명이 아니다. 두 값이
+                #   60일로 같던 시절에는 LINK 수명을 넣어도 맞아 보였다.
+                dashboard_result_share_days=REPORT_LINK_MAX_AGE_DAYS,
                 dashboard_link_created_at_label=_link_timestamp_label(
                     link.created_at
                 ),
-                dashboard_link_expiry_label=_link_expiry_label(link.created_at),
+                dashboard_link_expiry_label=_link_expiry_label(
+                    link.created_at, expires_at=link.expires_at
+                ),
                 dashboard_link_first_opened_at_label=_link_timestamp_label(
                     link.first_opened_at
                 ),

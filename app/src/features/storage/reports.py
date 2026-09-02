@@ -1017,6 +1017,41 @@ def load_corp_id(conn: sqlite3.Connection, report_id: str) -> str:
     return str(row[0] or "").strip()
 
 
+def resolve_company_id(
+    conn: sqlite3.Connection,
+    report_id: str,
+    report: Optional[Report] = None,
+) -> str:
+    """이 보고서의 회사 고유번호를 «열 우선, 본문 폴백»으로 읽는다.
+
+    Args:
+        conn: `db.connect()`가 연 연결.
+        report_id: 볼 보고서 번호.
+        report: 이미 되살려 둔 본문이 있으면 다시 안 읽으려고 받는다.
+
+    Returns:
+        고유번호. 열도 본문도 비었으면 빈 문자열. **읽기 실패는 예외로 나간다** —
+        부르는 쪽이 「확인 못 했다」와 「없다」를 다르게 다뤄야 하기 때문이다.
+
+    ★ 열을 먼저 보는 이유 — 본문의 `company_id`는 출고 상태가 FULL일 때만
+      채워진다. 저장 표의 `corp_id` 열은 출고 상태와 무관하게 채워진다.
+    ★ 열에서 값을 얻어도 **본문 읽기를 건너뛰지 않는다.** 「대상을 못 읽으면
+      거부한다」는 호출부의 fail-closed 계약을 이 함수가 느슨하게 만들지
+      않기 위해서다.
+    """
+
+    clean_report_id = str(report_id or "").strip()
+    if not clean_report_id:
+        return ""
+    column_value = load_corp_id(conn, clean_report_id)
+    current = report if report is not None else load(conn, clean_report_id)
+    if column_value:
+        return column_value
+    if current is None:
+        return ""
+    return str(getattr(current, "company_id", "") or "").strip()
+
+
 def load(conn: sqlite3.Connection, report_id: str) -> Optional[Report]:
     """`report_id`로 보고서를 현재 표시 규칙으로 불러온다. 없으면 `None`."""
     row = conn.execute(
