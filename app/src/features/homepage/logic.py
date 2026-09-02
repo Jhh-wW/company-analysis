@@ -118,7 +118,7 @@ class HomepageSecurityPolicyError(HomepageFetchError):
 class HomepageCertNameMismatchError(HomepageFetchError):
     """SSL 인증서에 적힌 이름이 접속 주소와 다를 때(hostname mismatch) 던진다.
 
-    ★ C안(문제로그 P-46)의 시작점. 이 예외를 받으면 인증서의 진짜 이름이
+    ★ C안의 시작점. 이 예외를 받으면 인증서의 진짜 이름이
       「같은 회사」로 보일 때만 검증을 켠 채 그 이름으로 1번 재시도한다
       (`_attempt_cert_fallback` 참조). 만료·자체서명 등 다른 인증서 오류는
       이 예외가 아니라 `HomepageFetchError`로 오므로 자동으로 재시도 대상에서
@@ -368,7 +368,7 @@ def _collect_homepage_fragments_impl(
     회사·기술 소개 페이지(`PRIORITY_PATH_KEYWORDS`)를 우선해서 읽고,
     robots.txt로 금지된 경로는 건너뛰며, 페이지 수·글자 수 상한을 지킨다.
 
-    ★ 인증서 이름 불일치(C안, 문제로그 P-46): 루트 접속에서
+    ★ 인증서 이름 불일치(C안): 루트 접속에서
       `HomepageCertNameMismatchError`가 나면, 인증서에 적힌 이름 중 원래
       주소와 «같은 회사」로 보이는 것이 있을 때만 그 이름으로 검증을 켠 채
       1번 재시도한다 (`_attempt_cert_fallback`). 다르면 그대로 실패로 남긴다.
@@ -660,7 +660,6 @@ def _normalize_url(raw: str) -> str:
     ★ **`https://`를 먼저 붙인다.** 전자공시의 `hm_url`은 대부분 스킴이 없다.
       `http://`를 붙이면 **암호화 없이** 읽게 되고, 그러면 중간에서 내용을
       바꿔치기해도 알 수 없다 — 그 거짓이 그대로 보고서에 「사실」로 들어간다.
-      (문제로그 P-52)
     """
     candidate = raw.strip()
     if not candidate:

@@ -1,4 +1,4 @@
-"""화면·워드·노션이 함께 쓰는 출처 번호 해석 회귀시험(P-127)."""
+"""화면·워드·노션이 함께 쓰는 출처 번호 해석 회귀시험."""
 
 from src.core.citations import citation_marker, citation_number
 

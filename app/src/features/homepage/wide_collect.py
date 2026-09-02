@@ -97,7 +97,7 @@ _PRIORITY_KEYWORDS: tuple[str, ...] = WIDE_PRIORITY_HOST_KEYWORDS + PRIORITY_PAT
 #: url 안에 있으면 «채용 페이지」로 분류하는 키워드.
 _RECRUIT_MARKERS: tuple[str, ...] = ("recruit", "career", "jobs", "채용")
 
-#: P0-2: robots·sitemap·전체 truncation·IR처럼 «호스트/수집 전체」에 걸린
+#: : robots·sitemap·전체 truncation·IR처럼 «호스트/수집 전체」에 걸린
 #: attempt이거나, 일반 페이지인데 URL로 페이지 유형을 못 알아낸 attempt에
 #: 붙이는 fallback slot 집합. 앱 계약(CollectionAttempt)은 빈 slot_ids를
 #: 생성 즉시 거절하므로(``WideCollectionAttempt.__post_init__``도 동일하게
@@ -179,7 +179,7 @@ class _CollectionState:
                 source_kind=source_kind,
                 requirement=requirement,
                 state=state,
-                # P0-2: 빈 slot_ids는 절대 내보내지 않는다 — 좁혀낼 slot이 없으면
+                # : 빈 slot_ids는 절대 내보내지 않는다 — 좁혀낼 slot이 없으면
                 # 허용 어휘 17개 전체로 대체한다(_ALL_SLOT_IDS_FALLBACK).
                 slot_ids=slot_ids or _ALL_SLOT_IDS_FALLBACK,
                 reason_code=reason_code,

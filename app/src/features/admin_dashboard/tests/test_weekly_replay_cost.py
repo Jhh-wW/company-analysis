@@ -1,6 +1,6 @@
 """주간 파일 「한눈에 보기」 비용 합계가 데모 리플레이 기록을 실제 지출처럼 더하지 않는지 못 박는다.
 
-★ 문제로그 P-84 — 데모 리플레이는 저장된 결과를 되돌려 줄 뿐 AI를 안 부른다.
+★ 데모 리플레이는 저장된 결과를 되돌려 줄 뿐 AI를 안 부른다.
   «비용»은 반드시 0원처럼 다뤄야 한다. 이 보호는 원래
   ``features/observability/metrics.py``의 대시보드 집계에만 있었는데, 그 파일이
   참조 0으로 오인되어 지워지면서 살아 있는 소비자인 이 「한눈에 보기」 집계에는
@@ -84,7 +84,7 @@ def _member_channel_cost(workbook_blob: bytes) -> float:
 
 
 def test_한눈에_보기_비용_합계는_데모_리플레이_기록을_빼고_더한다(tmp_path):
-    """★ P-84 그 자체 — MEMBER 채널 실제 기록 1200.0원 + 리플레이 999999.0원이면 1200.0."""
+    """★ 그 자체 — MEMBER 채널 실제 기록 1200.0원 + 리플레이 999999.0원이면 1200.0."""
     target = tmp_path / "weekly-replay.db"
     with db.connect(target) as conn:
         lifecycle.ensure_schema(conn)

@@ -290,7 +290,7 @@ EXCLUDED_EXTENSIONS: Final[tuple[str, ...]] = (
     ".mp3",
 )
 
-# ── 인증서 이름 불일치 우회 (C안, 문제로그 P-46) ────────────
+# ── 인증서 이름 불일치 우회 (C안) ────────────
 #
 # 사용자 결정 C안: 인증서 검증은 절대 끄지 않는다. 대신 인증서에 적힌
 # 「진짜 이름」이 원래 주소와 «같은 회사」로 보일 때만 그 이름으로
@@ -347,7 +347,7 @@ SINGLE_LABEL_PUBLIC_SUFFIXES: Final[frozenset[str]] = frozenset(
 
 #: 오프라인 시험 픽스처 전용 TLD - 실제 등록 도메인 커버리지가 아니다.
 #: example 은 RFC 2606이 등록을 영구히 금지한 예약 TLD라 실제 회사가
-#: 등록해 쓸 수 없다(오탐 위험 0). P0-1 fail-closed 수정 후 fixture가
+#: 등록해 쓸 수 없다(오탐 위험 0). fail-closed 수정 후 fixture가
 #: company.example 같은 주소로 실제 코드 경로(등록 도메인 판정, 하위
 #: 도메인 자동결속)를 그대로 지나가게 하려고 별도 상수로 둔다(정정 2).
 #: SINGLE_LABEL_PUBLIC_SUFFIXES 와 절대 합치지

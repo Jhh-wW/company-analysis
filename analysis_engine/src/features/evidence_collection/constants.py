@@ -332,7 +332,7 @@ REASON_LIST_QUERY_FAILED: Final[str] = "list_query_failed"
 REASON_DOCUMENT_FETCH_OK: Final[str] = "document_fetch_ok"
 REASON_DOCUMENT_FETCH_FAILED: Final[str] = "document_fetch_failed"
 #: 조회는 정상 처리됐지만 fetcher가 「이 문서는 원래 없다」고 확인한 경우
-#: (P0-2) — 전송 장애(document_fetch_failed)와 다른 값이어야 필수 슬롯이
+#: — 전송 장애(document_fetch_failed)와 다른 값이어야 필수 슬롯이
 #: 일시 장애(FAILED)와 확인된 부재(MISSING)로 갈린다.
 REASON_DOCUMENT_FETCH_MISSING: Final[str] = "document_fetch_missing"
 REASON_DOCUMENT_TOO_LARGE: Final[str] = "document_too_large"
@@ -348,7 +348,7 @@ REASON_DOCUMENT_IDENTITY_MISMATCH: Final[str] = "document_identity_mismatch"
 #: harvest 전체를 무너뜨리지 않고 이 문서만 버린다.
 REASON_DOCUMENT_MODEL_INVALID: Final[str] = "document_model_invalid"
 #: 문서를 성공적으로 받았지만 채점 가능한(scored) 조각이 하나도 없어 최종
-#: documents/fragments에서 제외했을 때(P0-3) — 「조회했다」는 사실은 이 attempt로
+#: documents/fragments에서 제외했을 때 — 「조회했다」는 사실은 이 attempt로
 #: 보존한다.
 REASON_DOCUMENT_NO_SCORED_EVIDENCE: Final[str] = "document_no_scored_evidence"
 

@@ -166,7 +166,7 @@ def _ctx(request: Request, **kwargs) -> dict:
         "section_display_parts": section_display_parts,
         "canonical_schema_version": CANONICAL_SCHEMA_VERSION,
         "engine_v2_schema_version": ENGINE_V2_SCHEMA_VERSION,
-        # 내부 ``조각 N·종류``를 템플릿에서 직접 자르면 다른 출력과 다시 갈린다(P-127).
+        # 내부 ``조각 N·종류``를 템플릿에서 직접 자르면 다른 출력과 다시 갈린다.
         "citation_number": citation_number,
         # 본문에 박힌 [n]을 작은 위첨자 링크로 바꿔 인쇄하기 위한 분해기.
         # v1은 이미 .ref 위첨자를 쓰는데 v2만 평문 대괄호였다(사용자 신고).
@@ -185,7 +185,7 @@ def _ctx(request: Request, **kwargs) -> dict:
         # 표지 다음 첫 본문 페이지 마스트헤드 두 줄. PDF·Notion과
         # «같은 함수»여야 회사명·생성일 표기가 세 채널에서 안 어긋난다.
         "masthead_lines": masthead_lines,
-        # 검증된 본문 아래의 근거 원문 문구 — 세 출력 형태가 core 값을 같이 쓴다(P-117).
+        # 검증된 본문 아래의 근거 원문 문구 — 세 출력 형태가 core 값을 같이 쓴다.
         "raw_source_label": RAW_SOURCE_LABEL,
         "raw_source_note": RAW_SOURCE_NOTE,
         "max_retry": MAX_RETRY_INPUT,
@@ -375,7 +375,7 @@ def _load_active_share_link(
     return link
 
 def _current_share_link(request: Request):
-    """이 손님이 «어느 지원 맥락 LINK»로 들어왔는지 (P-94).
+    """이 손님이 «어느 지원 맥락 LINK»로 들어왔는지.
 
     Args:
         request: 들어온 요청.
@@ -460,7 +460,7 @@ def _track_of(request: Request) -> tuple[share_tracks.Track, str, float | None]:
     Returns:
         (갈래, 통장 이름, 하루 상한).
 
-    ★ **로그인만으로는 아무 권한도 안 준다** (P-95).
+    ★ **로그인만으로는 아무 권한도 안 준다**.
       구글 로그인은 「누구인가」만 알려준다. 「써도 되는가」는 **초대 명단**이 정한다.
       이걸 안 나누면 인터넷의 아무나 로그인해서 돈을 쓴다.
     ★ 명단을 못 읽으면 «초대 안 된 사람»으로 본다 — 안전한 쪽으로 틀린다.
@@ -632,7 +632,7 @@ def _guard_run(
             "evaluation-preview",
         )
 
-    # ★ 예산은 «링크마다» 센다 (P-94, 사용자 결정).
+    # ★ 예산은 «링크마다» 센다 (사용자 결정).
     #   전체 상한은 두지 않는다 — 대신 링크 하나가 하루에 쓸 수 있는 몫을 정했다.
     #   ⚠️ 그러므로 **최악의 하루 지출 = 링크당 상한 × 살아 있는 링크 수**다.
     #     링크를 몇 개 뿌렸는지가 곧 예산이다 (관리 화면에서 확인).

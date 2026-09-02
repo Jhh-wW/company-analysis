@@ -161,7 +161,7 @@ def test_attempt_slot_ids_안에_빈_문자열이_있으면_ValueError():
 
 
 def test_attempt_slot_ids가_빈_튜플이면_ValueError():
-    """P0-2: 앱 계약(CollectionAttempt)이 빈 slot_ids를 생성 즉시 거절하므로,
+    """: 앱 계약(CollectionAttempt)이 빈 slot_ids를 생성 즉시 거절하므로,
     이 로컬 계약도 같은 지점에서 먼저 막아야 잘못된 데이터가 다음 모듈까지
     조용히 흘러가지 않는다."""
     with pytest.raises(ValueError):

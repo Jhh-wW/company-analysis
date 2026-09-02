@@ -6,7 +6,7 @@
 {% block content %}
 {% macro ref(cite) %}
   {%- set n = citation_number(cite) -%}
-  {# 내부 이름은 title에도 넣지 않는다. 화면에는 아래 출처 목록을 가리키는 번호만 필요하다(P-127). #}
+  {# 내부 이름은 title에도 넣지 않는다. 화면에는 아래 출처 목록을 가리키는 번호만 필요하다. #}
   {%- if n -%}<a class="ref" href="#src{{ n }}" title="출처 {{ n }}번">{{ n }}</a>{%- endif -%}
 {% endmacro %}
 {# 본문 문자열에 박힌 [n]을 작은 위첨자 링크로 바꾼다. 본문 글자는 그대로 두고
@@ -696,7 +696,7 @@
           </div>
         {% elif s.prose_lines %}
           {# ★ 문자열 하나를 찍지 않는다. 검증을 통과한 문장마다 실제 출처 번호를
-             붙여야 어느 문장이 어느 원문에 기대는지 사용자가 대조할 수 있다(P-118). #}
+             붙여야 어느 문장이 어느 원문에 기대는지 사용자가 대조할 수 있다. #}
           <p class="prose">
             {%- for text, cite in s.prose_lines -%}
               {{ text }}{{ ref(cite) }}{% if not loop.last %} {% endif %}
@@ -713,7 +713,7 @@
   {% endfor %}
 </div>
 
-{# ── 출처 목록 — 본문 문장 뒤 번호가 여기를 가리킨다 (P-24 · D14-1) #}
+{# ── 출처 목록 — 본문 문장 뒤 번호가 여기를 가리킨다 (D14-1) #}
 {% if public_citations %}
   <section class="report-support" aria-labelledby="report-citations-title">
     <h2 id="report-citations-title"><span class="no">부록</span><span class="txt">출처와 검증 상태</span></h2>

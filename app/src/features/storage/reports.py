@@ -146,7 +146,7 @@ def _prose_lines_from_dict(
 
     ★ v1(canonical)은 옛 저장값에 이 필드가 없을 수 있다. 깨진 항목·출처
       없는 항목·옛 문자열 prose는 검증 여부를 증명할 수 없으므로 버리고,
-      근거 원문 보고서는 계속 연다(P-117·P-118) — v1은 줄마다 cite(부록
+      근거 원문 보고서는 계속 연다 — v1은 줄마다 cite(부록
       번호 표기)가 있어야 «검증된 표시용 글»로 본다.
     ★ v2(엔진 v2 composer)는 다르다: 인용 번호를 cite 필드가 아니라 문장
       텍스트 안 "[n]" 표기로 담고(render.sentence_display_text), «해석»
@@ -176,7 +176,7 @@ def _section_to_dict(section: ReportSection) -> dict[str, Any]:
         "cell": section.cell,
         "title": section.title,
         "lines": [[text, cite] for text, cite in section.lines],
-        # ★ 검증된 표시용 글도 저장해야 서버 재시작·워드·노션에서 화면과 같다(P-117).
+        # ★ 검증된 표시용 글도 저장해야 서버 재시작·워드·노션에서 화면과 같다.
         #   문장별 출처를 잃지 않도록 문자열 하나가 아니라 2열 목록으로 저장한다.
         "prose_lines": [[text, cite] for text, cite in section.prose_lines],
         # 회사 사실이 아닌 프로그램 제안 질문은 출처 문장과 별도 필드로 보존한다.

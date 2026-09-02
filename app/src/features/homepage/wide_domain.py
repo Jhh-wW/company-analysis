@@ -378,7 +378,7 @@ def parse_official_origin(raw: str) -> OfficialOrigin | None:
 def registrable_core_name(host: str) -> str:
     """호스트의 전체 등록 도메인(eTLD+1 — 공개 접미사 + 그 바로 앞 한 칸)을 돌려준다.
 
-    ★ P0-1 수정: 예전 구현은 접미사를 뗀 뒤 «핵심 이름 한 칸만»
+    ★ 수정: 예전 구현은 접미사를 뗀 뒤 «핵심 이름 한 칸만»
       돌려줘서 ``company.com``·``company.net``·``company.co.kr``이 전부 같은
       값(``"company"``)이 되어 서로 다른 등록 도메인이 같다고 오판했다(남의
       도메인이 REQUIRED 고신뢰 문서로 자동 승격됨). 이제 접미사를 **포함해서**

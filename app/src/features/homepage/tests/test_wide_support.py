@@ -45,7 +45,7 @@ def _allow_all_robots_policy(host: str = "company.example") -> WideRobotsPolicy:
 
 
 def test_등록도메인_핵심이름은_eTLD플러스1을_돌려준다():
-    """P0-1: 접미사를 뗀 핵심 이름 한 칸이 아니라 접미사를 포함한 전체
+    """: 접미사를 뗀 핵심 이름 한 칸이 아니라 접미사를 포함한 전체
     등록 도메인(eTLD+1)을 돌려줘야 서로 다른 TLD가 같다고 오판하지 않는다."""
     assert registrable_core_name("recruit.company.co.kr") == "company.co.kr"
     assert registrable_core_name("www.company.com") == "company.com"
@@ -61,7 +61,7 @@ def test_다른_등록도메인은_거짓():
     assert not is_registered_subdomain("company.com", "otherbrand.com")
 
 
-# ── P0-1 공격 시험: 등록 도메인 판정이 TLD를 무시하지 않는지 ──────────
+# ── 공격 시험: 등록 도메인 판정이 TLD를 무시하지 않는지 ──────────
 
 
 def test_같은_핵심이름_다른_TLD는_거짓():

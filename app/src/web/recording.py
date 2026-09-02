@@ -52,7 +52,7 @@ def records_path() -> Path:
     Returns:
         이력 파일(`runs.jsonl`)의 절대 경로.
 
-    ★ 환경변수 `OBSERVABILITY_RECORDS_PATH`가 있으면 그쪽을 쓴다 (문제로그 P-85).
+    ★ 환경변수 `OBSERVABILITY_RECORDS_PATH`가 있으면 그쪽을 쓴다.
       **시험이 진짜 이력을 더럽히지 않게 하려는 것**이다 — 이게 없던 동안
       시험을 돌릴 때마다 기록이 쌓여, 관리 화면이 «사용자가 한 적 없는 조사»를
       세고 있었다. 저장소(`STORAGE_DB_PATH`)는 이미 같은 방식으로 격리돼 있었다.
@@ -98,7 +98,7 @@ def record_run(
             end_step=end_step or _END_STEP.get(result.outcome, obs.END_STEP_GENERATE),
             # 파이프라인이 실은 값을 그대로 쓴다. 비어 있으면 「없음」.
             # ★ 예전에는 여기가 「없음」 고정이라 캐시를 붙여도 대시보드가
-            #   영영 0건이었다. 기능이 붙으면 이 줄도 같이 살아야 한다 (P-63).
+            #   영영 0건이었다. 기능이 붙으면 이 줄도 같이 살아야 한다.
             cache_hit=result.cache_hit or obs.CACHE_HIT_NONE,
             fragments_collected=result.fragments_collected,
             fragments_cited=result.fragments_cited,

@@ -47,7 +47,7 @@ def test_스크립트와_계정정보_로컬주소는_링크를_만들지_않는
     assert all(browser_url(url) == "" for url in unsafe)
 
 
-# ── 어느 스킴으로 여느냐 (문제로그 P-114 · 진영 자체서명 인증서) ──
+# ── 어느 스킴으로 여느냐 (진영 자체서명 인증서) ──
 #
 # 실제 접속은 하지 않는다. `link.safe_urlopen`을 가짜로 바꿔 끼워
 # 「https는 죽고 http는 산다」 같은 상황을 만들어 낸다.

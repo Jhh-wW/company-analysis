@@ -74,7 +74,7 @@ def _document_attempt(
 def _unscored_fragments_attempt(
     company_id: str, filing: SelectedFiling, unscored_count: int,
 ) -> CollectionAttempt:
-    """무신호 문단 개수를 관측치로만 남긴다(P0-1) — 조각 자체는 harvest에 넣지 않는다.
+    """무신호 문단 개수를 관측치로만 남긴다 — 조각 자체는 harvest에 넣지 않는다.
 
     fetch·분할·채점을 실제로 거친 뒤 나오는 attempt이므로(item 2 정정)
     requirement는 filing.requirement(REQUIRED) 그대로 둔다.
@@ -136,10 +136,10 @@ def collect_dart_evidence(
     않는다 — 시험이 시각을 고정할 수 있게).
 
     최종 ``fragments``에는 채점(scored)된 조각만 남는다(section_id·slot_id가
-    모두 채워진 것) — app 계약이 빈 값을 거절하기 때문이다(P0-1). 무신호
+    모두 채워진 것) — app 계약이 빈 값을 거절하기 때문이다. 무신호
     문단은 harvest 밖으로 사라지지 않고 ``attempts``에 개수·사유 코드로
     남는다. 같은 이유로 채점된 조각이 하나도 없는 문서는 ``documents``에도
-    올라가지 않는다(P0-3) — 「조회했다」는 사실 자체는 attempt로 보존한다.
+    올라가지 않는다 — 「조회했다」는 사실 자체는 attempt로 보존한다.
 
     ``documents``·``fragments``·``attempts`` 전부가 이 함수에 넘긴
     ``company_id``를 자기 필드로 직접 싣는다(generation=8) — 만드는
@@ -169,7 +169,7 @@ def collect_dart_evidence(
         fetch_result = _safe_fetch_document(fetcher, filing.rcept_no)
 
         if fetch_result.state == c.ATTEMPT_STATE_MISSING:
-            # 확인된 부재(P0-2) — 전송 장애(FAILED)와 분리해서 남긴다.
+            # 확인된 부재 — 전송 장애(FAILED)와 분리해서 남긴다.
             # ★ item 2 정정 — fetcher가 「이
             # 문서는 원래 없다」고 확인한 것은 목록 단계 MISSING과 같은
             # 성격의 «참인 확인»이다. REQUIRED+광역을 유지한다(다운그레이드
@@ -180,7 +180,7 @@ def collect_dart_evidence(
             continue
         if fetch_result.state != c.ATTEMPT_STATE_OK:
             # FAILED뿐 아니라 알 수 없는 state 문자열도 여기서 fail-closed로
-            # FAILED 처리한다(P0-2) — 「모르는 상태」를 「확인된 부재」로
+            # FAILED 처리한다 — 「모르는 상태」를 「확인된 부재」로
             # 착각하지 않는다.
             attempts.append(_document_attempt(
                 company_id, filing, c.ATTEMPT_STATE_FAILED, c.REASON_DOCUMENT_FETCH_FAILED, fetch_result,
@@ -251,7 +251,7 @@ def collect_dart_evidence(
 
         if not scored:
             # 채점 가능한 근거가 하나도 없다 — 문서 자체를 최종 산출에서
-            # 뺀다(P0-3). 조회는 성공했다는 사실만 attempt로 남긴다.
+            # 뺀다. 조회는 성공했다는 사실만 attempt로 남긴다.
             # ★ item 2 정정 — fetch·분할·채점을
             # 실제로 다 거쳤다(문서 전문을 훑었다) — 「이 공시를 다 읽었는데
             # 그 슬롯 근거가 없었다」는 참인 진술이므로 광역 slot_ids +

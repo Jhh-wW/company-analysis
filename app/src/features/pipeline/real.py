@@ -445,7 +445,7 @@ _DART_PROFILE_ENRICHMENT_LIMIT = 5
 
 #: 1판은 모듈 전역 `_spent_usd`에 비용을 더한다. 보통 `import run_pilot`은
 #: `sys.modules`의 같은 객체를 돌려주므로 서버가 살아 있는 내내 모든 요청이 그 값을
-#: 공유한다(P-144). 요청마다 다른 이름으로 원본 파일을 실행해 module namespace 자체를
+#: 공유한다. 요청마다 다른 이름으로 원본 파일을 실행해 module namespace 자체를
 #: 갈라 놓는다. 잠금은 짧은 이름 발급에만 쓰며 조사 본체를 직렬화하지 않는다.
 _ENGINE_INSTANCE_IDS = itertools.count(1)
 _ENGINE_INSTANCE_ID_LOCK = threading.Lock()
@@ -1024,7 +1024,7 @@ def _engine() -> Any:
     ★ 파일 맨 위에서 부르지 않는다. 엔진은 `anthropic`·`presidio` 같은
       무거운 프로그램을 요구하는데, 그게 안 깔려 있어도 **데모 화면은 떠야 한다.**
     ★ 평범한 `import run_pilot`을 쓰지 않는다. 그 방식은 서버 수명 동안 같은 module을
-      돌려줘 1판의 `_spent_usd`가 요청 사이에 누적된다(P-144).
+      돌려줘 1판의 `_spent_usd`가 요청 사이에 누적된다.
     """
     root = paths.PROJECT_ROOT / "analysis_engine"
     for extra in (root / "src", root / "tools"):
@@ -1137,10 +1137,10 @@ def _sections_from(
 ) -> tuple[list[ReportSection], list[str]]:
     """엔진이 고른 문장들을 항목별로 담는다.
 
-    ★ 표 덩어리는 여기서 버린다 (D12 · 문제로그 P-29).
+    ★ 표 덩어리는 여기서 버린다 (D12).
       엔진을 고치지 않고 «화면에 내보내기 직전»에 거른다.
-    ★ 회계기준 설명 문구도 여기서 버린다 (문제로그 P-40).
-    ★ 알맹이 검사(①-b) 결과도 여기서 반영한다 (문제로그 P-66).
+    ★ 회계기준 설명 문구도 여기서 버린다.
+    ★ 알맹이 검사(①-b) 결과도 여기서 반영한다.
       전에는 3회 다수결까지 내고 **결과를 통째로 버렸다.**
 
     Args:
@@ -1169,7 +1169,7 @@ def _sections_from(
         if is_table_dump(item.sentence):
             dumped.add(item.block)
             continue
-        # 회계기준 설명 문구는 회사 이름을 바꿔도 말이 된다 (문제로그 P-40).
+        # 회계기준 설명 문구는 회사 이름을 바꿔도 말이 된다.
         if is_accounting_policy(item.sentence):
             policy_dropped.add(item.block)
             continue
@@ -1270,7 +1270,7 @@ def _refresh_empty_reasons(
     news_step: dict[str, Any],
     specificity_rejected_cells: set[str] | None = None,
 ) -> list[ReportSection]:
-    """빈칸 사유를 «실제 수집 결과»로 다시 쓴다 (문제로그 P-67).
+    """빈칸 사유를 «실제 수집 결과»로 다시 쓴다.
 
     ★ 1판 엔진은 칸마다 고정 문구를 **조건 없이** 붙인다. 그래서 뉴스를 6건
       모아 놓고도 「채택된 기사 없음」이라고 말했다. 있는 것을 없다고 하면
@@ -3768,7 +3768,7 @@ def _write_prose(
     steps: list[dict[str, Any]],
     model: str,
 ) -> tuple[list[ReportSection], set[str]]:
-    """11 작성 — 근거를 «하나의 글»로 잇는다 (P-110). AI 2회.
+    """11 작성 — 근거를 «하나의 글»로 잇는다. AI 2회.
 
     Args:
         engine: 1판 엔진 (`_ask`를 빌려 쓴다).
@@ -3829,7 +3829,7 @@ def _write_prose(
         steps.append({"step": writer.WRITE_STEP, "오류": f"{type(exc).__name__}: {str(exc)[:80]}"})
         return sections, set()
 
-    # ★ 검증 뒤에도 문장별 근거를 버리지 않는다(P-118). 문자열 하나로 합치면
+    # ★ 검증 뒤에도 문장별 근거를 버리지 않는다. 문자열 하나로 합치면
     #   내부 sid와 실제 출처의 연결이 끊겨 화면에서 근거 번호를 못 붙인다.
     prose_lines_by_cell = {}
     for cell, sentences in passed.items():
@@ -3867,7 +3867,7 @@ def _collect_news(
     profile: dict[str, Any],
     steps: list[dict[str, Any]],
 ) -> list[dict[str, str]]:
-    """6 수집 — 뉴스. **AI가 번호를 고르고 프로그램이 원문을 복사한다** (P-108).
+    """6 수집 — 뉴스. **AI가 번호를 고르고 프로그램이 원문을 복사한다**.
 
     Args:
         engine: 1판 엔진 (`search_news`·`_ask`를 빌려 쓴다).
@@ -4329,7 +4329,7 @@ def _collect(
             보려고 `run()`이 «이미» 불렀다. 두 번 부르면 DART 일일 한도만 깎는다.
         fin_years: 그때 실제로 자료가 있던 사업연도 목록 (단계 기록용).
         filing: 최신 공시 1건(보고서 이름·접수번호). 이것도 `run()`이 이미 받았다.
-            **출처 목록을 만들 때 쓴다** (P-24). 공시를 못 찾았으면 None.
+            **출처 목록을 만들 때 쓴다**. 공시를 못 찾았으면 None.
         generation_mode: 이 요청이 운반한 엔진 모드. typed 공식 근거 수집을
             켤지 정하는 데만 쓴다. 기본값(None)이면 v1과 똑같이 동작한다 —
             기존 호출자·시험은 한 줄도 달라지지 않는다.
@@ -4353,7 +4353,7 @@ def _collect(
     frags = engine.make_fragments(filing_text, financials)
     # ★ 1판은 절 표제의 «첫 출현»만 본다. 그런데 사업보고서 첫 장이 «목차»라,
     #   「사업의 내용」의 첫 출현이 목차 줄이고 거기서 1,200자를 뜨면 통째로 목차가 된다.
-    #   실측 — 하이브 조각 9개 중 3개가 목차였고, 그래서 1·3·4번 칸이 비었다 (P-99).
+    #   실측 — 하이브 조각 9개 중 3개가 목차였고, 그래서 1·3·4번 칸이 비었다.
     #   1판은 안 고치고, 나온 조각 중 목차인 것만 «다음 출현»으로 다시 뜬다.
     # ⚠️ `getattr`로 받는다 — 1판이 이름을 바꾸거나 시험용 가짜 엔진을 끼울 때
     #   여기서 터지면 **조사 전체가 멈춘다.** 못 받으면 «고치지 않고» 넘어갈 뿐이다.
@@ -4366,7 +4366,7 @@ def _collect(
     if repaired:
         steps.append({"step": "6_수집_목차보정", "고친조각": repaired})
 
-    # ★ 1판이 «안 뜨는» 절을 더 모은다 (P-105) — 신규사업 전망·시장 특성·소송.
+    # ★ 1판이 «안 뜨는» 절을 더 모은다 — 신규사업 전망·시장 특성·소송.
     #   사용자 지적(「그냥 DART 뜯어온 거라 이럴 거면 DART를 직접 보지」)의 핵심 원인이
     #   **정작 필요한 절을 안 뜨던 것**이었다. 1판은 0줄 고치지 않고 «더할» 뿐이다.
     frags, added = filing_extra.add_to(
@@ -4412,7 +4412,7 @@ def _collect(
         }
     )
 
-    # 회사 홈페이지 — 2번(뭘 잘하나)이 만성적으로 비는 원인이었다 (문제로그 P-35 · D14-7).
+    # 회사 홈페이지 — 2번(뭘 잘하나)이 만성적으로 비는 원인이었다 (D14-7).
     # ★ 실패를 「없음」과 반드시 구분한다. 섞으면 「이 회사는 자료가 없다」로 잘못 읽힌다.
     with collection_cache_scope():
         homepage = collect_homepage_fragments(
@@ -4515,7 +4515,7 @@ def _collect(
                     }
                 )
 
-    # ★ 매출 구성 비중 표 (P-112) — 사용자가 리포트 11건에서 고른 항목 ①.
+    # ★ 매출 구성 비중 표 — 사용자가 리포트 11건에서 고른 항목 ①.
     #   **11건이 «전부» 실은 유일한 만장일치 항목**이다.
     #   ⚠️ 지어낼 자리가 없다 — 공시가 비중을 이미 계산해 놓았고 우리는 베낄 뿐이다.
     revenue_cite = _first_fragment_cite(frags, kind="매출수주") or REVENUE_CITE
@@ -4538,7 +4538,7 @@ def _collect(
 def _region_matches(typed: str, address: str) -> bool:
     """입력 지역이 주소와 같은 곳인가.
 
-    「강원 강릉시」와 「강원도 강릉시 …」는 같은 곳이다 (문제로그 P-26).
+    「강원 강릉시」와 「강원도 강릉시 …」는 같은 곳이다.
     데모와 같은 규칙이라 그쪽 함수를 그대로 쓴다 — 두 벌로 나뉘면 반드시 어긋난다.
     """
     from src.features.pipeline.demo import _region_matches as shared  # noqa: PLC0415

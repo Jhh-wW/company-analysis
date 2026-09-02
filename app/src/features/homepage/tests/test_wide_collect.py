@@ -726,7 +726,7 @@ def test_소셜_링크는_결속되지_않는다():
     assert "https://facebook.com/company" not in site.calls
 
 
-# ── P0-1: 등록 도메인 판정이 TLD를 무시하면 안 된다 ─────────
+# ──: 등록 도메인 판정이 TLD를 무시하면 안 된다 ─────────
 
 
 def test_같은_핵심이름_다른_TLD_링크는_REQUIRED로_자동승격되지_않는다():
@@ -1063,7 +1063,7 @@ def test_제품_페이지는_portfolio와_business_model_슬롯을_받는다():
 
     result = _collect(site)
 
-    # ★ P0-2 이후 루트("/") attempt도 fallback으로 slot_ids 17개 전체를 받으므로
+    # ★ 그 뒤로 루트("/") attempt도 fallback으로 slot_ids 17개 전체를 받으므로
     #   "in" 느슨한 대조 대신 «정확히 이 페이지 유형의 슬롯 집합과 같다»로
     #   고른다 — 루트 attempt(전체 17개)와 절대 같을 수 없어 혼동되지 않는다.
     expected_slots = set(
@@ -1088,7 +1088,7 @@ def test_뉴스룸_페이지는_future_strategy와_past_changes_슬롯을_받는
 
     result = _collect(site)
 
-    # ★ P0-2 이후 루트("/") attempt도 fallback으로 slot_ids 17개 전체를 받으므로
+    # ★ 그 뒤로 루트("/") attempt도 fallback으로 slot_ids 17개 전체를 받으므로
     #   "in" 느슨한 대조 대신 «정확히 이 페이지 유형의 슬롯 집합과 같다»로 고른다.
     expected_slots = set(
         WIDE_REQUIRED_SLOT_IDS_BY_SECTION["future_strategy"] + WIDE_REQUIRED_SLOT_IDS_BY_SECTION["past_changes"]
@@ -1099,7 +1099,7 @@ def test_뉴스룸_페이지는_future_strategy와_past_changes_슬롯을_받는
     assert set(news_attempt.slot_ids) == expected_slots
 
 
-# ── P0-2: 어떤 attempt도 slot_ids가 비어 있으면 안 된다 ─────
+# ──: 어떤 attempt도 slot_ids가 비어 있으면 안 된다 ─────
 
 
 def test_어떤_attempt도_slot_ids가_비어있지_않다_정상수집():

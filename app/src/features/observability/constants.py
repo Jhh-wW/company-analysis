@@ -26,7 +26,7 @@ from typing import Final
 #: 이 feature는 `core`를 import하지 않는다 (지시사항 — 저장 경로는 인자로 받는다).
 DEFAULT_RECORDS_RELATIVE_PATH: Final[str] = "data/observability/runs.jsonl"
 
-#: 이력 파일 위치를 바꾸는 환경변수. **시험에서 쓴다** (문제로그 P-85).
+#: 이력 파일 위치를 바꾸는 환경변수. **시험에서 쓴다**.
 #: ★ 왜 필요한가 — 이게 없어서 **시험을 돌릴 때마다 진짜 이력에 기록이 쌓였다.**
 #:   실측: 이력 813건 중 대부분이 시험 찌꺼기였고, 관리 화면의 「전체 처리 건수」가
 #:   사용자가 한 적 없는 조사를 세고 있었다. 저장소(`STORAGE_DB_PATH`)는 이미

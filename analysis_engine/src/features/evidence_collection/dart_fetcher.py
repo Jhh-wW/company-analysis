@@ -1,6 +1,6 @@
 """실제 DART 연동 — core.dart_client의 검증된 제한·상태 계약을 재사용한다.
 
-★ P0-4 — 이 슬라이스는 지금까지 주입 Protocol과
+★ 이 슬라이스는 지금까지 주입 Protocol과
 가짜 fetcher(tests/fixtures/fake_fetcher.py)만 있었고 실제 DART에 한 번도
 연결되지 않았다. 이 파일이 그 간극을 메운다: ``filing_select.DartFetcher``
 Protocol을 만족하는 실제 어댑터를 ``core/dart_client.py``의 함수 위에 얹는다
@@ -40,7 +40,7 @@ from features.evidence_collection import constants as c
 from features.evidence_collection.filing_select import DocumentFetchResult, FilingListResult, RawFilingRow
 
 #: list.json 조회 창 — 최근 N년. survey_audit_reports.py·run_pilot.py의
-#: AUDIT_WINDOW_YEARS(3년, 「P-07 잠정 3년」)와 같은 값을 그대로 따른다 —
+#: AUDIT_WINDOW_YEARS(3년, 「 잠정 3년」)와 같은 값을 그대로 따른다 —
 #: 사업/감사보고서는 보통 1년 안에 갱신되지만, 조회 누락을 피하려 넉넉히
 #: 잡는다는 같은 근거다. 정확한 달력 계산(윤년) 대신 365일 근사를 쓴다 —
 #: 이 창은 «조회 누락을 피하는 여유값」이지 정밀한 경계 조건이 아니므로

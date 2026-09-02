@@ -11,7 +11,7 @@
   ``{"start": int, "end": int}`` 오프셋 목록이다(구간 사이 "\\n" 1자
   반영, 정렬·비겹침). ``WideFragment.location``의 조각index는 이 목록의
   같은 인덱스를 가리킨다.
-★ P0-3(계약 generation=7) ``exact_evidence_hashes``: document Mapping마다
+★ (계약 generation=7) ``exact_evidence_hashes``: document Mapping마다
   그 document_id로 실제 내보내는 fragment들의 ``text_sha256`` 전체를
   결정론(정렬) 순서로, 중복 없이 담는다. 앱 계약은 이 값이 비어 있거나
   fragment의 text_sha256이 자기 문서 목록에 없으면 거절하므로, **scored
@@ -65,7 +65,7 @@ def to_evidence_mappings(
         쪽 (역)직렬화가 그대로 받을 수 있게. ``fragments``가 하나도
         가리키지 않는(scored fragment가 0개인) 문서는 ``documents``에서
         빠진다 — ``exact_evidence_hashes``가 빈 값이 되어 앱 계약에
-        거절당하는 대신, 애초에 내보내지 않는다(P0-3).
+        거절당하는 대신, 애초에 내보내지 않는다.
     """
     hashes_by_document = _exact_hashes_by_document(fragments)
     return {
@@ -132,7 +132,7 @@ def _document_mapping(
         "parser_version": document.parser_version,
         "requirement": document.requirement,
         "source_tier": document.source_tier,
-        #: P0-3(계약 generation=7) — 이 문서로 실제 내보내는 fragment의
+        #: (계약 generation=7) — 이 문서로 실제 내보내는 fragment의
         #: text_sha256 전체(정렬·중복없음). 호출 시점에 이미 1개 이상임이
         #: 보장된다(``to_evidence_mappings``가 0개인 문서는 애초에 뺀다).
         "exact_evidence_hashes": exact_evidence_hashes,

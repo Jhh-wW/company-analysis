@@ -165,7 +165,7 @@ def test_출력값_안에_tuple가_없다():
     _assert_no_tuple(mapped)
 
 
-# ── P0-3(계약 generation=7): exact_evidence_hashes ──────────
+# ── (계약 generation=7): exact_evidence_hashes ──────────
 
 
 def test_exact_evidence_hashes는_문서의_fragment_해시_전체를_정렬해_담는다():
@@ -205,7 +205,7 @@ def test_exact_evidence_hashes는_중복_해시를_하나로_합친다():
 
 
 def test_fragment가_없는_문서는_documents에서_빠진다():
-    """P0-3: 페이지 유형을 못 알아내 scored fragment가 0개인 문서는
+    """: 페이지 유형을 못 알아내 scored fragment가 0개인 문서는
     exact_evidence_hashes가 빈 값으로 나가는 대신(앱 계약이 거절) 애초에
     documents 출력에서 빠진다 — 조회 사실 자체는 attempt로 따로 남는다."""
     document = _document(

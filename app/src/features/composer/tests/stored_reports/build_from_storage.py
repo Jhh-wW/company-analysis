@@ -91,7 +91,7 @@ def _storage_paths(root: str) -> list[str]:
         paths += sorted(
             glob.glob(os.path.join(root, "app", run_dir, "*", "storage.db"))
         )
-    # ★ exists 가 아니라 isfile 이다 (적대 검수 D3)
+    # ★ exists 가 아니라 isfile 이다 (적대 검수)
     #   `storage.db` 라는 «폴더»가 있으면 exists 는 통과시키고, 그 뒤
     #   sqlite3 가 OperationalError 로 죽는다. 여기서 거르는 편이 낫다.
     return [path for path in paths if os.path.isfile(path)]

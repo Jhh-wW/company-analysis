@@ -738,7 +738,7 @@ def test_문서_확장자_링크는_따라가지_않는다():
     assert f"{ROOT}/brochure.pdf" not in calls
 
 
-# ── 인증서 이름 불일치 우회 (C안, 문제로그 P-46) ──────────
+# ── 인증서 이름 불일치 우회 (C안) ──────────
 #
 # 진짜 접속 없이, fetch·lookup_cert_names를 전부 가짜로 주입해 시험한다.
 

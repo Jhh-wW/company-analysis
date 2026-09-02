@@ -59,7 +59,7 @@ def news_ok(title: str, company: str, published: dt.date, today: dt.date,
 
     1~4: 제목에 회사명 · 3년 이내 · 타사 3개 미만.
     5 (나중에 더한 조건): **동명 법인이 2곳 이상이면** 기사 본문에 회사 고유 단서
-    (대표자·지역·제품 중 1개)가 확인돼야 채택 — 동명 타사 기사 차단 (문제로그 P-01).
+    (대표자·지역·제품 중 1개)가 확인돼야 채택 — 동명 타사 기사 차단.
     """
     fresh = (today - published).days <= NEWS_MAX_YEARS * 365
     base = (company in title) and fresh and (other_companies_in_title < NEWS_MAX_OTHER_COMPANIES)

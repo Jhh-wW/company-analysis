@@ -1,4 +1,4 @@
-"""보고서 링크가 «안전하게 공유되고, 두 달 뒤 닫히는지» 못 박는다 (문제로그 P-93).
+"""보고서 링크가 «안전하게 공유되고, 두 달 뒤 닫히는지» 못 박는다.
 
 ★ 결정 (사용자) — 링크는 **아는 사람 누구나** 본다.
   인사팀이 동료에게 링크를 넘기는 것이 오히려 원하는 일이고, 내용도
@@ -186,7 +186,7 @@ def test_삭제한_공유와_내려받기_설명이_화면에_없다(client: Tes
 
 
 def test_기간이_지난_링크는_안_열린다(client: TestClient, monkeypatch):
-    """★ P-93 그 자체."""
+    """★ 그 자체."""
     job_id = _보고서를_만든다(client)
     지난뒤 = dt.date.today() + dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS + 1)
     monkeypatch.setattr(job_runtime.link_expiry, "is_expired", lambda *a, **k: True)

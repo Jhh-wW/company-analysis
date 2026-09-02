@@ -70,7 +70,7 @@ from src.features.pipeline.canonical_demo import (
 _DEMO_STEP_DELAY_SEC = 0.45
 
 #: 데모의 「회사 홈페이지」 수집 현황에 적는 사유.
-#: ★ 「아직 연결되지 않음」이라고 쓰면 안 된다 — 기능은 이미 붙어 있고(P-35),
+#: ★ 「아직 연결되지 않음」이라고 쓰면 안 된다 — 기능은 이미 붙어 있고,
 #:   없는 것은 «이 저장 기록»이다. 둘을 섞으면 사용자가 도구의 한계를 오해한다.
 DEMO_HOMEPAGE_DETAIL = "이 데모 기록을 만들 때는 안 읽었습니다 — 진짜 조사에서는 읽습니다"
 
@@ -327,11 +327,11 @@ def _sources_of(record: dict) -> list[SourceStatus]:
         sources.append(SourceStatus("뉴스", "none", "여기까지 오지 못함"))
 
     # ★ 「아직 연결되지 않음」이라고 말하면 안 된다 — 홈페이지 수집은 **이미 붙어 있다**
-    #   (P-35 해소, `features/homepage/`). 없는 것은 «기능»이 아니라 이 저장 기록이다.
+    #   (해소, `features/homepage/`). 없는 것은 «기능»이 아니라 이 저장 기록이다.
     #   초기 조사 엔진이 이 기록을 만들 때는 홈페이지 수집이 없었을 뿐이다.
     #   기능이 붙었는데 화면이 옛말을 하면 사용자가 「이 도구는 홈페이지를 못 본다」고
-    #   잘못 안다 (P-49·P-63과 같은 사고).
-    # ★ ❌(없음)로 적지 않는 이유 — 회사에 홈페이지가 없다는 뜻이 되어 버린다 (P-45).
+    #   잘못 안다 (P-63과 같은 사고).
+    # ★ ❌(없음)로 적지 않는 이유 — 회사에 홈페이지가 없다는 뜻이 되어 버린다.
     sources.append(SourceStatus("회사 홈페이지", "failed", DEMO_HOMEPAGE_DETAIL))
     return sources
 
@@ -419,13 +419,13 @@ def _parse_report(text: str) -> tuple[list[ReportSection], list[str], str]:
             cur_tables.append(table)
             continue
 
-        # 그 밖의 표가 통째로 들어온 줄은 채우지 않는다 (문제로그 P-29).
+        # 그 밖의 표가 통째로 들어온 줄은 채우지 않는다.
         # 버린 사실을 사유로 남긴다 — 조용히 사라지면 왜 비었는지 알 수 없다.
         if is_table_dump(sentence):
             cur_reason = cur_reason or TABLE_DUMP_REASON
             continue
 
-        # 회계기준 설명 문구는 회사 이름을 바꿔도 말이 된다 (문제로그 P-40).
+        # 회계기준 설명 문구는 회사 이름을 바꿔도 말이 된다.
         # 자소서에 한 글자도 못 쓰므로 화면에 내보내기 직전에 버린다.
         if is_accounting_policy(sentence):
             cur_reason = cur_reason or ACCOUNTING_POLICY_REASON
@@ -472,7 +472,7 @@ def _news_citations(record: dict) -> dict[int, Source]:
 def _demo_citations(record: dict, sections: list[ReportSection]) -> list[Source]:
     """저장된 보고서에서 출처 목록을 «있는 것만» 만든다.
 
-    ★ 기존 조사 기록에는 **공시일이 없다** (문제로그 P-24·P-44).
+    ★ 기존 조사 기록에는 **공시일이 없다**.
       날짜를 지어내지 않는다 — 「어느 보고서 어느 절에서 왔나」만 정직하게 적는다.
       진짜 조사에서는 날짜까지 채워진다.
     ★ 뉴스는 예외다 — 보도일·언론사가 조각 원문에 남아 있어 그대로 옮긴다.
@@ -521,7 +521,7 @@ def _demo_citations(record: dict, sections: list[ReportSection]) -> list[Source]
 # ══════════════════════════════════════════════════════════
 # 4번(회사 상황) 재도출 — 저장된 뉴스 조각에서 «코드 규칙만으로» 고른다
 # ══════════════════════════════════════════════════════════
-# ★ 왜 필요한가 (문제로그 P-43)
+# ★ 왜 필요한가
 #   데모 15곳 중 13곳에서 4-1·4-2·4-3이 통째로 비었다. 그 탓에 8번 교차표가
 #   14곳에서 안 나온다. 자료가 없어서가 아니다 — 1판 프롬프트가 4축에 대해
 #   「회사가 직접 말한 문장만」이라고 지시해 **뉴스 후보 106문장을 한 번도
@@ -593,7 +593,7 @@ _ACTION_CELL = "4-2"
 _DIRECTION_CELL = "4-3"
 
 #: 재도출한 칸 맨 앞에 붙이는 안내. ★ 빼지 않는다.
-#: 데모가 «어떻게 채웠는지»를 숨겨 사고가 난 적이 있다 (문제로그 P-45·P-54).
+#: 데모가 «어떻게 채웠는지»를 숨겨 사고가 난 적이 있다.
 #: 진짜 조사는 AI가 고르므로 여기서 나온 배치와 **다른 문장이 나온다.**
 _REDRAWN_NOTICE = (
     "※ 이 칸은 데모가 저장된 뉴스 기사에서 다시 고른 것입니다 — "
@@ -719,12 +719,12 @@ def _news_sentences(text: str) -> list[str]:
 
     Returns:
         온전한 문장 목록. 뜻은 **다듬지 않는다** (정본 출력틀 규칙⑤).
-        ★ 앞머리의 «껍데기»(기사 말머리·목록 순번)만 뗀다 — 문제로그 P-74.
+        ★ 앞머리의 «껍데기»(기사 말머리·목록 순번)만 뗀다 —
           「[편집자주] 우리엔, 동물 전용 제품으로…」를 자소서에 그대로 못 쓴다.
           진짜 조사 경로(`spanselect`)와 **같은 함수**를 쓴다 — 규칙이 두 벌이 되면
           데모와 진짜 조사가 다른 문장을 내놓아 사용자가 헷갈린다.
 
-    ⚠️ **여기서 규칙을 새로 만들지 말 것 (문제로그 P-83).**
+    ⚠️ **여기서 규칙을 새로 만들지 말 것.**
       아래 종결형 검사는 데모만의 «두 번째 규칙»이었고, 실제로 새어나갔다 —
       「…수출 노선을 확보했다....」는 꼬리 점을 떼면 「다」로 끝나 통과해 버린다.
       그래서 **유료 조사에서는 걸러지는 문장이 무료 데모에는 그대로 실렸다.**
@@ -877,7 +877,7 @@ def _redraw_situation(
             remade.append(replace(section, lines=lines, empty_reason=""))
             continue
         # ★ 못 채운 칸의 사유를 «사실»로 바꾼다. 기사가 있는데 「기사 없음」이
-        #   남아 있으면 사용자가 그 회사를 포기한다 (문제로그 P-45·P-54).
+        #   남아 있으면 사용자가 그 회사를 포기한다.
         reason = (
             _PROBLEM_CELL_SKIPPED_REASON
             if section.cell == _PROBLEM_CELL
@@ -911,7 +911,7 @@ def _load_report(record: dict) -> Optional[Report]:
 
     sections, _legacy_requirements, generated_at = _parse_report(path.read_text(encoding="utf-8"))
     # ★ 4번(회사 상황)이 통째로 비었으면 저장된 뉴스 조각에서 «재도출»한다
-    #   (문제로그 P-43). AI를 부르지 않는다.
+    #   AI를 부르지 않는다.
     sections, redrawn_cells = _redraw_situation(record, sections)
 
     corp_type_raw = record.get("corp_type", "")
@@ -933,7 +933,7 @@ def _load_report(record: dict) -> Optional[Report]:
 
     # ★ 등급은 «화면에 실제로 보이는 것»으로 다시 센다.
     #   기록에 저장된 판정(final_cells)을 그대로 쓰면, 표 덩어리를 비운 칸이
-    #   여전히 「채워짐」으로 남아 화면과 등급이 어긋난다 (문제로그 P-29).
+    #   여전히 「채워짐」으로 남아 화면과 등급이 어긋난다.
     cells = {s.cell: s.is_filled for s in sections if s.cell in COUNTED_CELLS}
     grade, reasons = grade_of(cells)
 
@@ -983,7 +983,7 @@ def _metrics_of(record: dict, report: Optional[Report]) -> dict:
         "fragments_cited": cited,
         "sentences_made": kept + deleted,
         "sentences_passed": kept,
-        # ★ 데모는 «0원»이다 (문제로그 P-84).
+        # ★ 데모는 «0원»이다.
         #   port.py의 약속은 「**이 요청에** 쓴 AI 비용」이고, 데모는 저장된 것을
         #   그대로 보여줄 뿐 AI를 한 번도 부르지 않는다. 실제로 나간 돈은 0이다.
         #   예전에는 기존 기록에 담긴 비용(`cost_usd`)을 그대로 실었다. 그래서

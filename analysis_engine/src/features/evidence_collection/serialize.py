@@ -5,10 +5,10 @@
 dataclass·frozenset·tuple 같은 파이썬 전용 타입은 하나도 새지 않는다 —
 JSON으로 그대로 dump할 수 있는 모양만 돌려준다.
 
-★ generation=7 계약(P0-5) — 각 document Mapping에는
+★ generation=7 계약 — 각 document Mapping에는
 ``exact_evidence_hashes``가 있다: 그 document_id로 실제 내보내는 fragment들의
 ``text_sha256`` 전체를 결정론적 순서로, 중복 없이 담는다. ``harvest.fragments``는
-collect.py가 이미 scored fragment만 넣도록 보장하므로(P0-1·P0-3) 이 값은
+collect.py가 이미 scored fragment만 넣도록 보장하므로 이 값은
 documents에 실린 문서마다 절대 비지 않는다 — 두 보장이 같은 경계(scored
 fragment 존재 여부)에서 나온다.
 
@@ -95,7 +95,7 @@ def _attempt_to_mapping(attempt: CollectionAttempt) -> dict[str, object]:
 
 
 def _exact_evidence_hashes_by_document_id(harvest: DartEvidenceHarvest) -> dict[str, list[str]]:
-    """document_id별 fragment text_sha256을 정렬·중복 제거해 모은다(P0-5)."""
+    """document_id별 fragment text_sha256을 정렬·중복 제거해 모은다."""
     hashes_by_document_id: dict[str, set[str]] = {}
     for fragment in harvest.fragments:
         hashes_by_document_id.setdefault(fragment.document_id, set()).add(fragment.text_sha256)

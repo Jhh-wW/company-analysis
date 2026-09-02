@@ -1,4 +1,4 @@
-"""DartRuntimeFetcher(P0-4) — 실제 네트워크 없이 get_json/download_document를
+"""DartRuntimeFetcher — 실제 네트워크 없이 get_json/download_document를
 가짜 callable로 주입해 종단까지 검증한다.
 """
 
@@ -111,7 +111,7 @@ def test_document_xml_태그를_벗기고_평문으로_돌려주고_corp_code는
 
 
 def test_종단_가짜_client_주입으로_collect_dart_evidence까지_돌아간다(tmp_path: Path) -> None:
-    """P0-4 — 실제 네트워크 없이 get_json/download_document만 가짜로 갈아끼워
+    """실제 네트워크 없이 get_json/download_document만 가짜로 갈아끼워
     filing_select → collect까지 실제 어댑터로 종단 수집이 되는지 확인한다.
     """
     doc_path = tmp_path / "20250315000001.xml"

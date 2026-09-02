@@ -64,7 +64,7 @@ _신선도기한일 = 60
 
 @pytest.fixture
 def client():
-    """★ 반드시 `with` — 아니면 뒤에서 도는 조사가 취소된다 (P-92 교훈)."""
+    """★ 반드시 `with` — 아니면 뒤에서 도는 조사가 취소된다 (교훈)."""
     runtime._PIPELINE = DemoPipeline()
     with TestClient(main.app, base_url="https://testserver") as client:
         yield client

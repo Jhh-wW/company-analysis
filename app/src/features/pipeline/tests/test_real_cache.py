@@ -4,7 +4,7 @@
   바꿔 끼워, AI 호출 0회·0원으로 파이프라인 전체를 돌린다.
   (진짜로 돌리면 1건당 AI 최대 13회 = 실제 비용이 나간다.)
 
-★ 저장소는 `conftest.py`가 시험마다 임시 폴더로 바꿔 놓는다 (P-62) —
+★ 저장소는 `conftest.py`가 시험마다 임시 폴더로 바꿔 놓는다 —
   이 시험은 진짜 DB를 건드리지 않는다.
 
 이 시험이 잡는 것:
@@ -835,7 +835,7 @@ class FakeEngine:
     def search_news(
         self, query: str, display: int = 10, sort: str = "date"
     ) -> list[SimpleNamespace]:
-        """네이버 뉴스 검색 흉내 (P-108).
+        """네이버 뉴스 검색 흉내.
 
         ★ 1판 `collect_news`를 대신한다 — 이제 `real.py`가 «검색»과 «고르기»를
           나눠서 한다. 고르기는 AI가 하므로 여기서는 «검색 결과»만 준다.
@@ -849,7 +849,7 @@ class FakeEngine:
     def collect_news(
         self, company: str, profile: dict[str, Any], homonym: int, steps: list[dict[str, Any]]
     ) -> list[dict[str, str]]:
-        """1판 방식(제목 일치). ★ `real.py`는 더 이상 이걸 부르지 않는다 (P-108).
+        """1판 방식(제목 일치). ★ `real.py`는 더 이상 이걸 부르지 않는다.
 
         1판에 «아직 남아 있는» 함수라 모양만 유지한다.
         """
@@ -860,7 +860,7 @@ class FakeEngine:
     def establishment(self, rough: dict[str, bool]) -> tuple[bool, list[str]]:
         return True, []
 
-    # ★ 8·9 생성은 이제 `spanselect.select_spans`가 맡는다 (P-43). `real.py`는
+    # ★ 8·9 생성은 이제 `spanselect.select_spans`가 맡는다. `real.py`는
     #   `generate_and_check`를 더 이상 부르지 않는다. 아래 셋은 그 대체 경로가
     #   1판에서 «빌려 쓰는» 부품들이다 — 이름이 틀리면 실행 시점에 터진다.
     BLOCK_ORDER = ("1", "2", "3", "4-1", "4-2", "4-3", "5", "6", "7", "8", "9")
@@ -2565,7 +2565,7 @@ def test_v1은_배포commit을_모르면_provider전에_fail_closed한다(
 
 
 def test_캐시_적중이면_저장된_결과라고_밝힌다(engine: FakeEngine) -> None:
-    """사용자가 「방금 새로 조사한 것」으로 오해하면 안 된다 (P-63 교훈)."""
+    """사용자가 「방금 새로 조사한 것」으로 오해하면 안 된다 (교훈)."""
     first = _run()
     second = _run()
 

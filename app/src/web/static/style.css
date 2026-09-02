@@ -512,7 +512,7 @@ input:focus, textarea:focus, select:focus {
 tr:target > td { background: var(--paper-2); }
 tr:target > td:first-child { box-shadow: inset 3px 0 0 var(--ink-strong); }
 
-/* 작가 AI가 이어 쓴 글 (P-110) — 근거 대조 검증을 통과한 문장만 온다.
+/* 작가 AI가 이어 쓴 글 — 근거 대조 검증을 통과한 문장만 온다.
    ★ 읽는 글이라 목록보다 줄 간격을 넉넉히 준다. */
 .prose {
   margin: 4px 0 8px;

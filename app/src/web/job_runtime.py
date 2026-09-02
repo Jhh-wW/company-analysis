@@ -219,9 +219,9 @@ class Job:
     current_step: str = ""
     finished: bool = False
     result: Optional[RunResult] = None
-    #: 끝난 시각 (`time.monotonic()`). 메모리 청소에 쓴다 (P-92).
+    #: 끝난 시각 (`time.monotonic()`). 메모리 청소에 쓴다.
     finished_at: float = 0.0
-    #: 어느 «열쇠 링크»로 들어온 요청인가 (P-94).
+    #: 어느 «열쇠 링크»로 들어온 요청인가.
     #: ★ 시작할 때 적어 둔다 — 끝난 뒤에는 요청 정보가 없어서 못 알아낸다.
     share_key: str = PUBLIC_BUCKET
     #: MEMBER 성공 3건 예약을 소유한 계정. 빈 값이면 관리자·LINK·공개 요청이다.
@@ -642,7 +642,7 @@ async def _await_worker_before_execution_deadline(
     return worker.result()
 
 def _sweep_jobs(now: float) -> None:
-    """끝난 지 오래된 조사를 메모리에서 치운다 (P-92).
+    """끝난 지 오래된 조사를 메모리에서 치운다.
 
     Args:
         now: 지금 시각 (`time.monotonic()`).
@@ -1684,7 +1684,7 @@ def _save_report(job: Job) -> bool:
 
 
 def _shared(response: Response) -> Response:
-    """공유 링크 보호 헤더를 응답에 붙인다 (P-93).
+    """공유 링크 보호 헤더를 응답에 붙인다.
 
     Args:
         response: 이미 만들어진 응답.
@@ -1701,7 +1701,7 @@ def _shared(response: Response) -> Response:
     return response
 
 def _expired_screen(request: Request) -> HTMLResponse:
-    """기간이 지난 링크에 보여줄 화면 (P-93).
+    """기간이 지난 링크에 보여줄 화면.
 
     ★ 「없는 보고서」로 처리하지 않는다 — 있었는데 «기간이 지난» 것이고,
       그 둘은 사용자에게 완전히 다른 뜻이다.

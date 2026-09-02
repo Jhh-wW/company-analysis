@@ -204,7 +204,7 @@ def _section_blocks(report: Report, section: ReportSection) -> list[NotionBlock]
                 )
             )
     elif section.prose_lines:
-        # ★ 작가 내부 sid가 아니라 그 번호가 가리킨 실제 출처를 문장마다 표시한다(P-118).
+        # ★ 작가 내부 sid가 아니라 그 번호가 가리킨 실제 출처를 문장마다 표시한다.
         prose = " ".join(
             f"{text} {marker}" if (marker := citation_marker(cite)) else text
             for text, cite in section.prose_lines
