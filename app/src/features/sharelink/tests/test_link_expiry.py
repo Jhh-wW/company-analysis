@@ -271,3 +271,31 @@ def test_모르는_변경_종류는_이력에_남지_않는다(conn):
             actor_id="actor-1",
             created_at=_발급,
         )
+
+
+# ══════════════════════════════════════════════════════════
+# ⑥ 깨진 만료일은 열지 않는다
+# ══════════════════════════════════════════════════════════
+
+
+@pytest.mark.parametrize("깨진값", ["2026-13-45", "20261225", "곧", "2026-12"])
+def test_읽을수없는_만료일은_기본수명으로_되돌아가지_않고_닫는다(conn, 깨진값):
+    """★ 되돌아가면 표가 깨진 것만으로 옛 링크가 30일 더 열린다.
+
+    「못 읽었다」와 「아직 안 정했다」는 다른 값이다. 빈 값만 기본 수명을 쓰고,
+    적혀 있는데 못 읽는 값은 닫는 쪽으로 간다.
+    """
+
+    assert share_store.insert_new(
+        conn, key=_열쇠, company="카카오", job="", now_iso=_발급
+    )
+    conn.execute(
+        f"UPDATE {share_store.TABLE_SHARE_LINKS} SET expires_at = ? "
+        "WHERE key_hash = ?",
+        (깨진값, share_store.key_hash_of(_열쇠)),
+    )
+
+    링크 = share_store.load(conn, _열쇠)
+    assert share_logic.link_expired(링크, today=_발급일)
+    assert share_logic.expiry_date_of(_발급, expires_at=깨진값) is None
+    assert not share_store.mark_opened(conn, _열쇠, _발급)

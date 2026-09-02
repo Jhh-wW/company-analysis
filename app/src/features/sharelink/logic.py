@@ -154,6 +154,12 @@ def expiry_date_from_value(value: str) -> dt.date | None:
         return None
 
 
+def has_stored_expiry(expires_at: str) -> bool:
+    """만료일 열에 «무언가 적혀» 있는가. 모양이 맞는지는 따지지 않는다."""
+
+    return bool(str(expires_at or "").strip())
+
+
 def expiry_date_of(
     created_at: str,
     *,
@@ -164,10 +170,14 @@ def expiry_date_of(
 
     ★ 저장된 ``expires_at``이 있으면 **그 날짜가 우선**이다. 관리자가 미룬
       만료일이 전역 수명 설정에 덮이면 「연장」 단추가 거짓말이 된다.
+    ★ 적혀 있는데 «읽을 수 없으면» 기본 수명으로 되돌아가지 않는다. 되돌아가면
+      옛 규칙(60일)으로 굳은 링크가 표가 깨진 것만으로 30일 더 열린다.
     """
     stored = expiry_date_from_value(expires_at)
     if stored is not None:
         return stored
+    if has_stored_expiry(expires_at):
+        return None
     if not isinstance(created_at, str) or not _CREATED_AT_RE.match(
         created_at.strip()
     ):
@@ -241,6 +251,10 @@ def is_share_link_expired(
     if stored_expiry is not None:
         # 저장된 만료일이 발급일보다 앞이면 표가 깨진 것이다. 그때도 닫는다.
         return issued > current or current >= stored_expiry
+    if has_stored_expiry(expires_at):
+        # 적혀 있는데 못 읽는다. 기본 수명으로 되돌아가면 「그 링크가 원래
+        # 닫히던 날」을 잃어버린 채 더 오래 열린다. 그래서 닫는 쪽으로 간다.
+        return True
     lifetime = (
         link_max_age_days_from_env() if max_age_days is None else max_age_days
     )
