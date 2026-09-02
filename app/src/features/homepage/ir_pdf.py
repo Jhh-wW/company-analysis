@@ -61,6 +61,7 @@ from src.features.homepage.constants import (
     TIMEOUT_SEC,
     USER_AGENT,
 )
+from src.features.homepage.robots_cache import RobotsDecision, cached_robots_decision
 from src.features.homepage.safe_http import (
     HomepageResponseError,
     READ_CHUNK_BYTES,
@@ -895,27 +896,45 @@ def _load_robots(
     exact_hostname: str,
     html_fetch: IrHtmlFetcher,
 ) -> robotparser.RobotFileParser:
-    """같은 호스트의 robots.txt를 한 번 읽고, 없으면 빈 규칙으로 처리한다."""
+    """같은 호스트의 robots.txt를 읽고, 없으면 빈 규칙으로 처리한다.
 
-    parser = robotparser.RobotFileParser()
+    ★ 같은 조사(scope) 안에서 이미 다른 수집기(홈페이지·광역 웹)가 같은
+      host의 robots.txt를 확인했으면 새 네트워크 요청 없이 그 판정을
+      재사용한다(``robots_cache.cached_robots_decision`` — 티켓 B2: 최대 4회
+      중복 요청 실측). 특히 광역 웹 수집의 IR 위임(``wide_collect.
+      _run_ir_pdf_phase``)에서는 이 재사용이 그 host의 광역(더 엄격한
+      RFC 9309) 판정을 그대로 물려받는다 — 의도한 동작이다.
+    """
+
     robots_url = urllib.parse.urlunsplit(
         ("https", exact_hostname, "/robots.txt", "", "")
     )
-    try:
-        # robots.txt 자체를 받아야 규칙을 알 수 있으므로 부트스트랩 요청만 예외다.
-        page = html_fetch(robots_url, exact_hostname, None)
-        if not _validated_effective_url(page.effective_url, exact_hostname):
-            raise OfficialIrFetchError("robots.txt 최종 URL 검증 실패")
-        text = page.html if isinstance(page.html, str) else ""
-    except OfficialIrRobotsUnavailable:
-        text = ""
-    except (OfficialIrFetchError, AttributeError, TypeError, ValueError) as exc:
+    host = exact_hostname.casefold()
+
+    def loader() -> RobotsDecision:
+        parser = robotparser.RobotFileParser()
+        try:
+            # robots.txt 자체를 받아야 규칙을 알 수 있으므로 부트스트랩 요청만 예외다.
+            page = html_fetch(robots_url, exact_hostname, None)
+            if not _validated_effective_url(page.effective_url, exact_hostname):
+                raise OfficialIrFetchError("robots.txt 최종 URL 검증 실패")
+            text = page.html if isinstance(page.html, str) else ""
+        except OfficialIrRobotsUnavailable:
+            text = ""
+        except (OfficialIrFetchError, AttributeError, TypeError, ValueError):
+            return RobotsDecision(
+                host=host, parser=parser, blocked=True, reason_code="robots_unreachable"
+            )
+        parser.set_url(robots_url)
+        parser.parse(text.splitlines())
+        return RobotsDecision(host=host, parser=parser, blocked=False, reason_code="robots_ok")
+
+    decision = cached_robots_decision(host, loader)
+    if decision.blocked:
         raise OfficialIrRobotsUnreachable(
-            "robots.txt 서버·네트워크 상태를 확인할 수 없습니다"
-        ) from exc
-    parser.set_url(robots_url)
-    parser.parse(text.splitlines())
-    return parser
+            f"robots.txt 서버·네트워크 상태를 확인할 수 없습니다 (reason={decision.reason_code})"
+        )
+    return decision.parser
 
 
 def _extract_links(

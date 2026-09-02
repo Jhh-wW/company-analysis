@@ -68,6 +68,12 @@ class _DeadlineBudget:
     expires_at: float
     clock: Callable[[], float] = time.monotonic
     dns_cache: dict[tuple[str, int], tuple[tuple, ...]] = field(default_factory=dict)
+    #: 홈페이지·공식 IR PDF·광역 웹 세 수집기가 host별 robots.txt 판정을
+    #: 공유하는 캐시(티켓 B2). 값 타입은 ``homepage.robots_cache.RobotsDecision``
+    #: 이지만, 이 파일이 그 모듈을 import하면 순환 import가 되므로 여기서는
+    #: 느슨하게 ``object``로만 둔다 — dns_cache와 같은 «scope가 끝나면
+    #: 사라지는» 패턴이다(프로세스 전역 캐시가 아니다).
+    robots_cache: dict[str, object] = field(default_factory=dict)
 
     @classmethod
     def after(
@@ -113,6 +119,16 @@ def request_deadline_scope(
         yield budget
     finally:
         _ACTIVE_DEADLINE.reset(token)
+
+
+def active_deadline_budget() -> _DeadlineBudget | None:
+    """현재 ``request_deadline_scope`` 안이면 그 예산 객체, 밖이면 ``None``.
+
+    ``homepage.robots_cache``처럼 scope 수명에 얹혀 host별 조회를 공유하려는
+    보조 캐시가 이 함수로 «지금 공유할 scope가 있는가」만 확인한다.
+    """
+
+    return _ACTIVE_DEADLINE.get()
 
 
 def response_deadline(

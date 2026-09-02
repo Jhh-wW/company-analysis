@@ -743,6 +743,16 @@ def _run_ir_pdf_phase(
             state.record_truncation(WIDE_SOURCE_KIND_IR_PDF, "truncated_time_cap")
             return
 
+        # ★ 티켓 B2: 광역 웹 수집(_ensure_host_policy)이 이미 이 host의
+        #   robots.txt를 확인 못했거나 명시적으로 거부됐다고 판정했으면 IR PDF
+        #   시도 자체를 하지 않는다(요청 0) — ir_pdf._load_robots도 같은
+        #   scope 캐시를 재사용해 새 네트워크 요청은 어차피 나가지 않지만,
+        #   여기서 먼저 걸러야 그 host에 대한 불필요한 「ir」 attempt까지
+        #   남기지 않는다. 판정 자체는 이미 「robots」 attempt로 기록돼 있다.
+        cached_policy = state.robots_policies.get(origin.host)
+        if cached_policy is not None and cached_policy.blocked:
+            continue
+
         # 기존 IR 파서는 HTTPS exact-host 경계다. HTTP나 비기본 포트를
         # HTTPS:443으로 바꿔 접속하면 DART origin을 잃으므로, 지원하지 않는
         # origin에서는 네트워크를 0회로 두고 정직하게 TRUNCATED로 남긴다.

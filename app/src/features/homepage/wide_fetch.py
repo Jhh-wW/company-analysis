@@ -31,6 +31,7 @@ from typing import Callable, Final
 from urllib import robotparser
 
 from src.features.homepage.constants import TIMEOUT_SEC, USER_AGENT
+from src.features.homepage.robots_cache import RobotsDecision, cached_robots_decision
 from src.features.homepage.safe_http import (
     MAX_RESPONSE_BYTES,
     READ_CHUNK_BYTES,
@@ -289,25 +290,47 @@ def load_robots_policy(
     fetch: RawWideTransport,
     url_allowed: UrlAllowPredicate,
 ) -> WideRobotsPolicy:
-    """robots.txt를 fail-closed로 한 번 확인한다. 본문 조회보다 항상 먼저 부른다."""
+    """robots.txt를 fail-closed로 확인한다. 본문 조회보다 항상 먼저 부른다.
 
-    response: WideRawResponse | None = None
-    error: WideTransportError | None = None
-    try:
-        # robots 부트스트랩도 redirect가 공식 origin을 벗어나면 안 된다. 규칙
-        # 본문을 아직 못 읽었으므로 robots 경로 자체의 origin predicate만 쓴다.
-        response = fetch(robots_url, url_allowed)
-    except WideTransportError as exc:
-        error = exc
-    outcome, reason_code = robots_decision(response, error)
-    parser = robotparser.RobotFileParser()
-    text = response.text if (outcome == "proceed_parsed" and response is not None) else ""
-    parser.parse(text.splitlines())
+    ★ 같은 조사(scope) 안에서 이미 다른 수집기(홈페이지·공식 IR PDF)가 같은
+      host의 robots.txt를 확인했으면 새 네트워크 요청 없이 그 판정을
+      재사용한다(``robots_cache.cached_robots_decision`` — 티켓 B2). 재사용
+      시에는 ``proceed_parsed``/``proceed_empty_rules`` 구분을 두지 않는다
+      (``WideRobotsPolicy.blocked``만 실제로 쓰이므로 정보 손실이 없다).
+    """
+
+    cache_host = host.casefold()
+
+    def loader() -> RobotsDecision:
+        response: WideRawResponse | None = None
+        error: WideTransportError | None = None
+        try:
+            # robots 부트스트랩도 redirect가 공식 origin을 벗어나면 안 된다. 규칙
+            # 본문을 아직 못 읽었으므로 robots 경로 자체의 origin predicate만 쓴다.
+            response = fetch(robots_url, url_allowed)
+        except WideTransportError as exc:
+            error = exc
+        outcome, reason_code = robots_decision(response, error)
+        parser = robotparser.RobotFileParser()
+        text = (
+            response.text
+            if (outcome == "proceed_parsed" and response is not None)
+            else ""
+        )
+        parser.parse(text.splitlines())
+        return RobotsDecision(
+            host=cache_host,
+            parser=parser,
+            blocked=(outcome == "blocked"),
+            reason_code=reason_code,
+        )
+
+    decision = cached_robots_decision(cache_host, loader)
     return WideRobotsPolicy(
-        host=host.casefold(),
-        parser=parser,
-        outcome=outcome,
-        reason_code=reason_code,
+        host=cache_host,
+        parser=decision.parser,
+        outcome="blocked" if decision.blocked else "proceed_parsed",
+        reason_code=decision.reason_code,
     )
 
 

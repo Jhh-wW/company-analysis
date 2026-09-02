@@ -41,6 +41,7 @@ from src.features.homepage.constants import (
     TIMEOUT_SEC,
     USER_AGENT,
 )
+from src.features.homepage.robots_cache import RobotsDecision, cached_robots_decision
 from src.features.homepage.safe_http import (
     HomepageResponseError,
     UnsafeHomepageUrlError,
@@ -787,33 +788,51 @@ def _attempt_cert_fallback(
 
 
 def _load_robots(base_url: str, fetch: Fetcher) -> robotparser.RobotFileParser:
-    """RFC 9309 실패 의미론으로 robots.txt를 한 번 확인한다.
+    """RFC 9309 실패 의미론으로 robots.txt를 확인한다.
 
     HTTP 4xx는 robots가 이용 불가한 것으로 보아 빈 규칙으로 진행한다. 서버 오류,
     DNS·timeout·응답 검증 실패는 규칙을 확인할 수 없는 상태이므로 전면 허용으로
     바꾸지 않고 호출자까지 실패를 전달한다.
+
+    ★ 같은 조사(scope) 안에서 이미 다른 수집기(공식 IR PDF·광역 웹)가 같은
+      host의 robots.txt를 확인했으면 새 네트워크 요청 없이 그 판정을
+      재사용한다(``robots_cache.cached_robots_decision`` — 티켓 B2: 최대 4회
+      중복 요청 실측).
     """
-    parser = robotparser.RobotFileParser()
     robots_url = urllib.parse.urljoin(base_url, "/robots.txt")
-    try:
-        text, effective_url, _verified = _fetch_page(fetch, robots_url)
-        if not _same_origin(robots_url, effective_url):
-            raise HomepageRobotsUnreachable(
-                "robots.txt가 다른 origin으로 이동했습니다"
+    host = (urllib.parse.urlsplit(robots_url).hostname or "").casefold()
+
+    def loader() -> RobotsDecision:
+        parser = robotparser.RobotFileParser()
+        try:
+            text, effective_url, _verified = _fetch_page(fetch, robots_url)
+            if not _same_origin(robots_url, effective_url):
+                raise HomepageRobotsUnreachable(
+                    "robots.txt가 다른 origin으로 이동했습니다"
+                )
+        except HomepageCertNameMismatchError:
+            # ★ robots 판정이 아니라 「같은 회사의 다른 도메인」 재시도 신호다
+            #   (`_retry_alternate_host` 참조) — 캐시하지 않고 그대로 던진다.
+            raise
+        except HomepageRobotsUnavailable:
+            # ★ 주의: `RobotFileParser`는 `.parse()`를 한 번도 안 부르면 «미확인»
+            #   상태로 보고 `can_fetch()`가 오히려 «전부 금지»를 돌려준다
+            #   (표준 라이브러리 함정) — HTTP 4xx로 부재가 확인된 경우에만
+            #   빈 규칙으로 «확인 끝»을 표시한다.
+            text = ""
+        except (HomepageRobotsUnreachable, HomepageFetchError):
+            return RobotsDecision(
+                host=host, parser=parser, blocked=True, reason_code="robots_unreachable"
             )
-    except HomepageCertNameMismatchError:
-        raise
-    except HomepageRobotsUnavailable:
-        # ★ 주의: `RobotFileParser`는 `.parse()`를 한 번도 안 부르면 «미확인» 상태로
-        #   보고 `can_fetch()`가 오히려 «전부 금지»를 돌려준다 (표준 라이브러리 함정 —
-        #   HTTP 4xx로 부재가 확인된 경우에만 빈 규칙으로 «확인 끝»을 표시한다.
-        text = ""
-    except HomepageRobotsUnreachable:
-        raise
-    except HomepageFetchError as exc:
-        raise HomepageRobotsUnreachable(str(exc)) from exc
-    parser.parse(text.splitlines())  # 네트워크 접속 없이 주어진 글자만 해석한다
-    return parser
+        parser.parse(text.splitlines())  # 네트워크 접속 없이 주어진 글자만 해석한다
+        return RobotsDecision(host=host, parser=parser, blocked=False, reason_code="robots_ok")
+
+    decision = cached_robots_decision(host, loader)
+    if decision.blocked:
+        raise HomepageRobotsUnreachable(
+            f"robots.txt를 확인하지 못했습니다 (reason={decision.reason_code})"
+        )
+    return decision.parser
 
 
 def _load_origin_root(
