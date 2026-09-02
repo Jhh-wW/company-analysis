@@ -219,6 +219,28 @@ ENGINE_V2_ENV_NAME: Final[str] = engine_mode.ENGINE_V2_ENV_NAME
 ENGINE_V2_ENV_ON: Final[str] = engine_mode.ENGINE_V2_ENV_ON
 
 
+def _requested_release_mode(
+    generation_mode: engine_mode.EngineMode,
+) -> Optional[ReleaseMode]:
+    """지금 요청이 «어떤 릴리스 모드로» 보고서를 만들려는지 (C6 재사용 판정용).
+
+    ★ 「모르겠다」를 지어내지 않는다. v1 요청이거나 환경값이 없거나 계약 밖
+      문자열이면 `None`을 돌려주고, 재사용 판정은 예전 동작을 그대로 쓴다.
+      FULL 요청은 환경값이 반드시 있다 — 없으면 `_run_v2_composer`가 AI 호출
+      전에 입력 계약으로 막으므로, `None`을 관대하게 처리해도 FULL이 새는
+      구멍이 생기지 않는다.
+    """
+    if generation_mode is not engine_mode.EngineMode.V2:
+        return None
+    raw_release_mode = os.environ.get(REPORT_RELEASE_MODE_ENV_NAME)
+    if not raw_release_mode:
+        return None
+    try:
+        return parse_release_mode(raw_release_mode)
+    except ValueError:
+        return None
+
+
 def _generation_cache_namespace(
     engine: Any,
     build_identity: Any,
@@ -1983,6 +2005,10 @@ class RealPipeline:
             financial_payload=financials,
         )
         current_fiscal_year = _current_fiscal_year(fin_years, filing)
+        # 재사용 판정에 쓸 «지금 요청의 릴리스 모드». 두 재사용 겹(아래
+        # coordination과 옛 1층 캐시)이 같은 값을 봐야 한 겹만 막히는 일이
+        # 없다(C6).
+        requested_release_mode = _requested_release_mode(generation_mode)
         # 불변 content+PDF 캐시는 옛 layer1보다 먼저 본다. 새 계약의 hit이면
         # 최초 원본 ID를 그대로 운반하고, miss면 같은 열쇠로 owner lease를
         # 먼저 얻는다. 옛 layer1에는 생성 당시 배포·모델·설정 신원이 없으므로
@@ -1999,6 +2025,21 @@ class RealPipeline:
             cache_namespace=generation_namespace,
             preflight_identity_digest=source_identity.cache_digest,
         )
+        reused_release_mode = str(
+            getattr(getattr(reused_generation, "report", None), "release_mode", "")
+            or ""
+        )
+        if reused_generation is not None and not (
+            cache_store.reusable_for_requested_release_mode(
+                reused_release_mode, requested_release_mode
+            )
+        ):
+            # 계약 위반이 아니라 «이 요청에 쓸 수 없는 저장본»이다 — 오류로
+            # 끝내지 않고 미적중으로 닫아 새로 만든다(C6).
+            logger.warning(
+                "FULL 요청에는 FULL로 만든 저장본만 재사용합니다 — 새로 만듭니다"
+            )
+            reused_generation = None
         if reused_generation is not None:
             reused_report = reused_generation.report
             if not isinstance(reused_report, Report):
@@ -2112,6 +2153,13 @@ class RealPipeline:
             ):
                 logger.warning(
                     "품질 관측이 없는 엄격 v2 cache는 다시 생성합니다"
+                )
+                cached = None
+            elif not cache_store.reusable_for_requested_release_mode(
+                str(cached.release_mode or ""), requested_release_mode
+            ):
+                logger.warning(
+                    "FULL 요청에는 FULL로 만든 저장본만 재사용합니다 — 새로 만듭니다"
                 )
                 cached = None
         if cached is not None:

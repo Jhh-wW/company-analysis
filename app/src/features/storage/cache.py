@@ -71,6 +71,7 @@ from src.features.storage.constants import (
     TABLE_REPORTS,
 )
 from src.shared import engine_build_identity as build_identity_contract
+from src.shared.report_evidence.constants import ReleaseMode
 from src.shared.report_source_identity import (
     ReportSourceIdentityError,
     require_financial_payload_digest,
@@ -608,6 +609,42 @@ def _v2_requirements(build_id: str, source_identity_digest: str) -> list[str]:
         f"build:{build_id}",
         source_requirement,
     ]
+
+
+def reusable_for_requested_release_mode(
+    stored_release_mode: str,
+    requested_release_mode: Optional[ReleaseMode],
+) -> bool:
+    """저장본을 «지금 요청의 릴리스 모드»로 다시 내보내도 되는지 판정한다.
+
+    ★ 왜 필요한가 (C6)
+      v2 캐시 열쇠(`_v2_requirements`)에는 release_mode가 없다. 재료는
+      schema·build_id·출처 지문뿐이고 build_id는 배포 commit에서만 나온다.
+      그래서 **같은 배포에서 모드만 바꾸면 열쇠가 그대로**이고, SHADOW로 만든
+      보고서가 FULL 요청에 그대로 나갈 수 있다. FULL은 봉인·생산 증거·품질
+      게이트를 통과한 산출물이라는 뜻인데, 그 게이트를 한 번도 지나지 않은
+      SHADOW 저장본이 FULL인 척 나가면 거짓 표기다.
+
+    ★ 왜 열쇠를 안 바꾸고 «대조»로 막나
+      열쇠에 release_mode를 넣으면 기존 저장본이 전부 미적중이 되어 다음
+      조사마다 본조사 비용이 새로 나간다. 대조는 잘못된 재사용만 골라 막고
+      맞는 재사용은 그대로 살린다.
+
+    Args:
+        stored_release_mode: 저장본 `Report.release_mode` 문자열. SHADOW
+            저장본은 옛 바이트를 지키려고 빈 문자열이다.
+        requested_release_mode: 지금 요청이 만들려는 모드. **모르면 `None`**
+            (v1 요청이거나 환경값이 없거나 못 읽은 경우) — 그때는 예전
+            동작을 그대로 둔다.
+
+    Returns:
+        재사용해도 되면 True.
+    """
+    # FULL 요청만 좁힌다. 비FULL 요청의 재사용은 예전 그대로다 — 사용자
+    # 결과·차감을 바꾸지 않는다는 SHADOW 정의(I9)를 건드리지 않기 위해서다.
+    if requested_release_mode is not ReleaseMode.FULL:
+        return True
+    return str(stored_release_mode or "") == ReleaseMode.FULL.value
 
 
 def get_v2_report_hit(
