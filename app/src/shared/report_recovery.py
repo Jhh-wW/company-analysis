@@ -3,6 +3,11 @@
 ``composer``와 옛 ``features.report_recovery`` facade가 함께 쓰는 순수 계약이다.
 기능 간 직접 import를 만들지 않기 위해 정본을 shared에 두며, provider나 렌더러를
 알지 않고 결속된 평가 영수증만으로 다음 행동을 결정한다.
+
+AI 호출 전 사전 게이트(자료 부족·조회 장애로 아예 시작하지 않는 판단)는
+이 모듈이 아니라 ``pipeline/real.py``의 ``GATE_STOPPED`` 발화점이 맡는다.
+이 모듈은 생성이 **끝난 뒤**의 검증 결과에서 공개·보충·무차감을 결정하는
+회복 정책만 담는다.
 """
 
 from __future__ import annotations
@@ -18,8 +23,6 @@ from src.shared.generation_validation_receipt import (
     canonical_sha256,
     require_sha256,
 )
-from src.shared.report_evidence.constants import GenerationGateStatus
-from src.shared.report_evidence.models import GenerationGateDecision
 from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
 from src.shared.report_quality.models import (
     GenerationAssessment,
@@ -291,32 +294,6 @@ def _authorization_for(
     )
 
 
-def decide_preflight(gate: GenerationGateDecision) -> RecoveryDecision:
-    """9장 근거가 모두 READY일 때만 첫 유료 묶음을 허용한다."""
-
-    if gate.required_section_ids != REQUIRED_EVIDENCE_SECTION_IDS:
-        raise ValueError("사전검사에는 정책 순서의 필수 아홉 장이 모두 필요합니다")
-    if gate.status is GenerationGateStatus.STOP_TRANSIENT_FAILURE:
-        return RecoveryDecision(
-            action=RecoveryAction.STOP_NO_CHARGE,
-            reason_code="preflight_evidence_unknown",
-        )
-    if gate.status is GenerationGateStatus.STOP_INSUFFICIENT_EVIDENCE:
-        return RecoveryDecision(
-            action=RecoveryAction.STOP_NO_CHARGE,
-            reason_code="preflight_evidence_insufficient",
-        )
-    if gate.status is not GenerationGateStatus.READY_FOR_GENERATION:
-        raise ValueError("알 수 없는 생성 게이트 상태입니다")
-    if not gate.can_call_ai:
-        raise ValueError("AI 허용 표식과 생성 게이트 상태가 다릅니다")
-    return RecoveryDecision(
-        action=RecoveryAction.RUN_PRIMARY,
-        reason_code="preflight_all_sections_ready",
-        authorized_additional_ai_calls=PRIMARY_AI_CALLS,
-    )
-
-
 def _decide_first_validation(
     receipt: GenerationValidationReceipt,
 ) -> RecoveryDecision:
@@ -509,5 +486,4 @@ __all__ = [
     "SupplementAuthorization",
     "ValidationRound",
     "decide_post_validation",
-    "decide_preflight",
 ]

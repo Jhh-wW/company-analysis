@@ -10,10 +10,7 @@ from src.features.report_recovery.constants import (
     MAX_TOTAL_AI_CALLS,
     PRIMARY_AI_CALLS,
 )
-from src.features.report_recovery.logic import (
-    decide_post_validation,
-    decide_preflight,
-)
+from src.features.report_recovery.logic import decide_post_validation
 from src.features.report_recovery.models import (
     RecoveryAction,
     RecoveryDecision,
@@ -23,11 +20,6 @@ from src.shared.generation_validation_receipt import (
     GenerationValidationReceipt,
     ValidationRound,
 )
-from src.shared.report_evidence.constants import (
-    GenerationGateStatus,
-    ReportExecutionOutcome,
-)
-from src.shared.report_evidence.models import GenerationGateDecision
 from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
 from src.shared.report_quality.models import (
     GenerationAssessment,
@@ -58,29 +50,6 @@ def _section_sha256s(prefix: str) -> tuple[tuple[str, str], ...]:
     return tuple(
         (section_id, _sha256(f"{prefix}:{section_id}"))
         for section_id in REQUIRED_EVIDENCE_SECTION_IDS
-    )
-
-
-def _gate(status: GenerationGateStatus) -> GenerationGateDecision:
-    required = REQUIRED_EVIDENCE_SECTION_IDS
-    if status is GenerationGateStatus.READY_FOR_GENERATION:
-        ready, insufficient, unknown = required, (), ()
-        outcome = None
-    elif status is GenerationGateStatus.STOP_INSUFFICIENT_EVIDENCE:
-        ready, insufficient, unknown = required[:-1], required[-1:], ()
-        outcome = ReportExecutionOutcome.INSUFFICIENT_EVIDENCE
-    else:
-        ready, insufficient, unknown = required[:-1], (), required[-1:]
-        outcome = ReportExecutionOutcome.TRANSIENT_FAILURE
-    return GenerationGateDecision(
-        company_id="corp-1",
-        status=status,
-        outcome=outcome,
-        required_section_ids=required,
-        ready_section_ids=ready,
-        insufficient_section_ids=insufficient,
-        unknown_section_ids=unknown,
-        reason_codes=(),
     )
 
 
@@ -203,49 +172,6 @@ def _recoverable(*section_ids: str) -> GenerationAssessment:
         ),
         underfilled=tuple(section_ids),
     )
-
-
-@pytest.mark.parametrize(
-    "status",
-    (
-        GenerationGateStatus.STOP_INSUFFICIENT_EVIDENCE,
-        GenerationGateStatus.STOP_TRANSIENT_FAILURE,
-    ),
-)
-def test_자료부족이나_조회장애는_AI전에_무차감중단한다(
-    status: GenerationGateStatus,
-) -> None:
-    decision = decide_preflight(_gate(status))
-
-    assert decision.action is RecoveryAction.STOP_NO_CHARGE
-    assert decision.projected_total_ai_calls == 0
-    assert not decision.publish_allowed
-    assert not decision.charge_allowed
-
-
-def test_아홉장이_ready일때만_기본10호출을_허용한다() -> None:
-    decision = decide_preflight(_gate(GenerationGateStatus.READY_FOR_GENERATION))
-
-    assert decision.action is RecoveryAction.RUN_PRIMARY
-    assert decision.observed_total_ai_calls == 0
-    assert decision.authorized_additional_ai_calls == PRIMARY_AI_CALLS == 10
-    assert decision.projected_total_ai_calls == 10
-
-
-def test_일부장만_ready인_축소게이트로_유료호출을_열수없다() -> None:
-    shortened = GenerationGateDecision(
-        company_id="corp-1",
-        status=GenerationGateStatus.READY_FOR_GENERATION,
-        outcome=None,
-        required_section_ids=("identity",),
-        ready_section_ids=("identity",),
-        insufficient_section_ids=(),
-        unknown_section_ids=(),
-        reason_codes=(),
-    )
-
-    with pytest.raises(ValueError, match="필수 아홉 장"):
-        decide_preflight(shortened)
 
 
 @pytest.mark.parametrize(
