@@ -62,6 +62,57 @@ class SafeTarget:
 
 
 @dataclass
+class _CollectionCache:
+    """한 조사(collection) 전체가 공유하는 캐시 — 데드라인은 담지 않는다.
+
+    ``collection_cache_scope()``가 이 객체를 연다. 그 안에서 열리는 여러
+    ``request_deadline_scope(...)`` 호출은(예: 홈페이지 25초·공식 IR PDF
+    35초처럼 **서로 다른, 각자의** 절대 마감을 유지하면서도) 이 객체의
+    ``dns_cache``·``robots_cache`` 딕셔너리를 그대로 공유한다 — 딕셔너리
+    참조를 그대로 넘기지, 복사하지 않는다(``_DeadlineBudget.after`` 참조).
+    """
+
+    dns_cache: dict[tuple[str, int], tuple[tuple, ...]] = field(default_factory=dict)
+    #: 값 타입은 ``homepage.robots_cache.RobotsDecision``이지만, 이 파일이
+    #: 그 모듈을 import하면 순환 import가 되므로 느슨하게 ``object``로 둔다.
+    robots_cache: dict[str, object] = field(default_factory=dict)
+
+
+_ACTIVE_CACHE: ContextVar[_CollectionCache | None] = ContextVar(
+    "homepage_active_collection_cache",
+    default=None,
+)
+
+
+@contextmanager
+def collection_cache_scope() -> Iterator[_CollectionCache]:
+    """여러 ``request_deadline_scope`` 호출이 **각자의 데드라인은 그대로 둔 채**
+    DNS·robots 캐시만 공유하게 하는 바깥 scope(티켓 B2 P1).
+
+    ``request_deadline_scope``의 기존 재사용 규칙(부모 예산이 더 촉박하면
+    그 예산 자체를 재사용)은 **데드라인까지 하나로 합친다** — 홈페이지
+    25초·공식 IR PDF 35초처럼 서로 다른 계약을 가진 수집기를 그 방식으로
+    묶으면 한쪽 시간 예산이 다른 쪽에 새어 들어간다. 이 scope는 데드라인을
+    전혀 만들지 않고 캐시 딕셔너리만 담아, 안에서 열리는 각
+    ``request_deadline_scope``가 **자기 자신의 새 예산**을 만들되(기존
+    타임아웃 계약을 그대로 유지) 그 예산의 ``dns_cache``·``robots_cache``만
+    이 scope의 딕셔너리를 그대로 참조하게 한다.
+
+    호출자가 이 scope를 열지 않으면(기존 모든 단독 호출·단위시험) 아무
+    영향이 없다 — ``_DeadlineBudget.after``는 활성 캐시 scope가 없을 때
+    지금까지처럼 매번 새 빈 딕셔너리를 만든다.
+    """
+
+    parent = _ACTIVE_CACHE.get()
+    cache = parent if parent is not None else _CollectionCache()
+    token = _ACTIVE_CACHE.set(cache)
+    try:
+        yield cache
+    finally:
+        _ACTIVE_CACHE.reset(token)
+
+
+@dataclass
 class _DeadlineBudget:
     """DNS·redirect·연결·본문이 함께 소비하는 monotonic 절대 마감."""
 
@@ -84,6 +135,17 @@ class _DeadlineBudget:
     ) -> _DeadlineBudget:
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("timeout은 유한한 양수여야 합니다")
+        active_cache = _ACTIVE_CACHE.get()
+        if active_cache is not None:
+            # 바깥 collection_cache_scope()가 있으면 그 캐시 딕셔너리를 그대로
+            # 참조로 물려받는다 — 이 예산 자신의 데드라인(timeout)은 그대로
+            # 독립적으로 유지한다(P1: 홈페이지 25초·IR 35초 계약 불변).
+            return cls(
+                expires_at=clock() + timeout,
+                clock=clock,
+                dns_cache=active_cache.dns_cache,
+                robots_cache=active_cache.robots_cache,
+            )
         return cls(expires_at=clock() + timeout, clock=clock)
 
     def remaining(self) -> float:

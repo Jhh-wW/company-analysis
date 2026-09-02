@@ -96,6 +96,7 @@ from src.features.homepage.ir_pdf import (
     OFFICIAL_IR_FRAGMENT_KIND,
     collect_official_ir_fragments,
 )
+from src.features.homepage.safe_http import collection_cache_scope
 from src.features.provenance.citations import build_citations
 from src.features.provenance.sources import (
     Source,
@@ -4026,105 +4027,106 @@ def _collect(
 
     # 회사 홈페이지 — 2번(뭘 잘하나)이 만성적으로 비는 원인이었다 (문제로그 P-35 · D14-7).
     # ★ 실패를 「없음」과 반드시 구분한다. 섞으면 「이 회사는 자료가 없다」로 잘못 읽힌다.
-    homepage = collect_homepage_fragments(
-        _homepage_url_same_host_only(profile.get("hm_url", "")),
-        allow_dart_www_alias=True,
-    )
-    if homepage.state == "ok":
-        for frag in homepage.fragments:
-            # 최종 URL 검증 표식·문서 위치 등 수집기가 만든 provenance 메타데이터를
-            # 버리지 않는다. build_citations가 닫힌 Source 필드만 골라 쓴다.
-            frags[max(frags, default=0) + 1] = dict(frag)
-        steps.append(
-            {
-                "step": "6_수집_홈페이지",
-                "조각수": len(homepage.fragments),
-                "후보범위완전": homepage.candidate_scope_complete,
-            }
-        )
-    elif homepage.state == "failed":
-        steps.append(
-            {
-                "step": "6_수집_홈페이지",
-                "오류": homepage.detail,
-                "후보범위완전": False,
-            }
-        )
-    else:
-        steps.append(
-            {
-                "step": "6_수집_홈페이지",
-                "없음": homepage.detail,
-                "후보범위완전": homepage.candidate_scope_complete,
-            }
-        )
-
-    # DART 기업개황의 홈페이지와 정확히 같은 HTTPS host 안에서만 공식 IR
-    # PDF를 찾는다. PDF 파싱은 별도 프로세스·바이트/페이지/글자 상한 안에서
-    # 수행하며, 실패·상한 잘림은 "경쟁사 언급 없음"과 분리한다.
-    company_aliases = tuple(
-        dict.fromkeys(
-            value
-            for value in (
-                str(profile.get("corp_name_eng") or "").strip(),
-                str(profile.get("corp_eng_name") or "").strip(),
-                str(profile.get("stock_name") or "").strip(),
-            )
-            if value
-        )
-    )
-    try:
-        official_ir = collect_official_ir_fragments(
-            str(profile.get("hm_url") or ""),
-            company_name=str(profile.get("corp_name") or "").strip(),
-            company_aliases=company_aliases,
+    with collection_cache_scope():
+        homepage = collect_homepage_fragments(
+            _homepage_url_same_host_only(profile.get("hm_url", "")),
             allow_dart_www_alias=True,
         )
-    except Exception as exc:  # noqa: BLE001 - 수집기 결함도 자료 부재로 오인하지 않는다
-        steps.append(
-            {
-                "step": "6_수집_공식IR",
-                "오류": f"{type(exc).__name__}: {str(exc)[:120]}",
-                "후보범위완전": False,
-            }
-        )
-    else:
-        ir_scope_complete = bool(
-            getattr(official_ir, "candidate_scope_complete", False)
-        )
-        if official_ir.state == "ok":
-            for fragment in official_ir.fragments:
-                frags[max(frags, default=0) + 1] = dict(fragment)
+        if homepage.state == "ok":
+            for frag in homepage.fragments:
+                # 최종 URL 검증 표식·문서 위치 등 수집기가 만든 provenance 메타데이터를
+                # 버리지 않는다. build_citations가 닫힌 Source 필드만 골라 쓴다.
+                frags[max(frags, default=0) + 1] = dict(frag)
             steps.append(
                 {
-                    "step": "6_수집_공식IR",
-                    "조각수": len(official_ir.fragments),
-                    "문서시도": official_ir.attempted_documents,
-                    "PDF바이트": official_ir.downloaded_pdf_bytes,
-                    "상세": official_ir.detail,
-                    "후보범위완전": ir_scope_complete,
+                    "step": "6_수집_홈페이지",
+                    "조각수": len(homepage.fragments),
+                    "후보범위완전": homepage.candidate_scope_complete,
                 }
             )
-        elif official_ir.state == "failed":
+        elif homepage.state == "failed":
             steps.append(
                 {
-                    "step": "6_수집_공식IR",
-                    "오류": official_ir.detail,
-                    "문서시도": official_ir.attempted_documents,
-                    "PDF바이트": official_ir.downloaded_pdf_bytes,
+                    "step": "6_수집_홈페이지",
+                    "오류": homepage.detail,
                     "후보범위완전": False,
                 }
             )
         else:
             steps.append(
                 {
-                    "step": "6_수집_공식IR",
-                    "없음": official_ir.detail,
-                    "문서시도": official_ir.attempted_documents,
-                    "PDF바이트": official_ir.downloaded_pdf_bytes,
-                    "후보범위완전": ir_scope_complete,
+                    "step": "6_수집_홈페이지",
+                    "없음": homepage.detail,
+                    "후보범위완전": homepage.candidate_scope_complete,
                 }
             )
+
+        # DART 기업개황의 홈페이지와 정확히 같은 HTTPS host 안에서만 공식 IR
+        # PDF를 찾는다. PDF 파싱은 별도 프로세스·바이트/페이지/글자 상한 안에서
+        # 수행하며, 실패·상한 잘림은 "경쟁사 언급 없음"과 분리한다.
+        company_aliases = tuple(
+            dict.fromkeys(
+                value
+                for value in (
+                    str(profile.get("corp_name_eng") or "").strip(),
+                    str(profile.get("corp_eng_name") or "").strip(),
+                    str(profile.get("stock_name") or "").strip(),
+                )
+                if value
+            )
+        )
+        try:
+            official_ir = collect_official_ir_fragments(
+                str(profile.get("hm_url") or ""),
+                company_name=str(profile.get("corp_name") or "").strip(),
+                company_aliases=company_aliases,
+                allow_dart_www_alias=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - 수집기 결함도 자료 부재로 오인하지 않는다
+            steps.append(
+                {
+                    "step": "6_수집_공식IR",
+                    "오류": f"{type(exc).__name__}: {str(exc)[:120]}",
+                    "후보범위완전": False,
+                }
+            )
+        else:
+            ir_scope_complete = bool(
+                getattr(official_ir, "candidate_scope_complete", False)
+            )
+            if official_ir.state == "ok":
+                for fragment in official_ir.fragments:
+                    frags[max(frags, default=0) + 1] = dict(fragment)
+                steps.append(
+                    {
+                        "step": "6_수집_공식IR",
+                        "조각수": len(official_ir.fragments),
+                        "문서시도": official_ir.attempted_documents,
+                        "PDF바이트": official_ir.downloaded_pdf_bytes,
+                        "상세": official_ir.detail,
+                        "후보범위완전": ir_scope_complete,
+                    }
+                )
+            elif official_ir.state == "failed":
+                steps.append(
+                    {
+                        "step": "6_수집_공식IR",
+                        "오류": official_ir.detail,
+                        "문서시도": official_ir.attempted_documents,
+                        "PDF바이트": official_ir.downloaded_pdf_bytes,
+                        "후보범위완전": False,
+                    }
+                )
+            else:
+                steps.append(
+                    {
+                        "step": "6_수집_공식IR",
+                        "없음": official_ir.detail,
+                        "문서시도": official_ir.attempted_documents,
+                        "PDF바이트": official_ir.downloaded_pdf_bytes,
+                        "후보범위완전": ir_scope_complete,
+                    }
+                )
 
     # ★ 매출 구성 비중 표 (P-112) — 사용자가 리포트 11건에서 고른 항목 ①.
     #   **11건이 «전부» 실은 유일한 만장일치 항목**이다.
