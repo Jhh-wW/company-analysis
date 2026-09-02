@@ -113,6 +113,16 @@ from src.features.composer.structured_claims import (
 from src.features.composer.validate import V2ValidationError, validate_v2
 from src.features.composer.verify import verify_report, verify_sentences
 from src.features.pipeline.port import Grade, Report
+# ★ 경계 메모 — ``composer/render.py``·``port.py`` 머리말은 「composer는
+#   report_standard를 import 하지 않는다」고 적어 두었고, 그래서 그 두 파일은
+#   장 id·태그를 «복사»해 쓴다. 여기(pipeline.py)는 그 규칙의 예외다:
+#   공개 봉인 projection은 정의상 report_standard의 표시 순수 함수(도식·띠·
+#   검증 라벨)를 «한 번에 굳힌» 값이라, 값을 복사해 오면 두 벌이 갈라진다
+#   — 갈라지지 않게 하려고 만든 것이 이 봉인이므로 복사는 목적 자체를
+#   무너뜨린다. pipeline.py는 이미 ``features.pipeline.port``를 import하는
+#   조립 층이며, report_standard는 composer를 import하지 않아 순환도 없다.
+#   설계 017 §07 조각 S3가 이 호출 지점을 지정했다.
+from src.features.report_standard.public_projection import build_public_projection
 
 logger = logging.getLogger(__name__)
 
@@ -1262,6 +1272,25 @@ def run_v2(
                     "renderer actual 본문·문단·요약·표·출처·출고표시가 "
                     "pre-render 공개 content 봉인과 다릅니다"
                 )
+            # ⑤-b 공개 봉인 projection — 웹·PDF·Notion이 «그대로 배치만» 하면
+            # 되는 블록을 여기서 딱 한 번 만든다(설계 017 §07 조각 S3).
+            #
+            # ★ 왜 하필 이 자리인가 — 바로 위 ``replace``가 등급을 완성으로
+            #   다시 봉인한 «최종» 보고서라서다. 첫 seal 단정(렌더 직후) 자리에서
+            #   만들면 header에 입력 기본값 「부분」이 박히고 부분 보고서 고지
+            #   문구까지 딸려 들어가, 저장본은 완성인데 화면 블록만 부분이라고
+            #   말하는 보고서가 남는다. 보충 회복 경로도 이 자리로 합류하므로
+            #   두 경로가 한 번씩 봉인된다.
+            # ★ 왜 아직 생성 증거보다 앞인가 — 아래 GenerationProducerEvidence가
+            #   이 projection의 digest를 실어야 해서다. 반대로 두면 증거가
+            #   자기 자신을 해싱하는 순환이 된다.
+            # ★ 예외를 삼키지 않는다(I3) — 봉인이 안 되는 보고서는 공개하지
+            #   않는다. try/except로 감싸 projection 없이 내보내면 채널이
+            #   갈라진 채 출고된다.
+            rendered = replace(
+                rendered,
+                public_projection=build_public_projection(rendered),
+            )
 
     # ``sentences_made``는 AI 호출 수가 아니라 공개 후보 문장 단위의 분모다.
     # extractive summary는 추가 AI 0회지만 보고서에 실리는 후보 다섯 단위이므로
