@@ -110,9 +110,12 @@ Set-Location -LiteralPath $repo
 ```
 
 ⚠️ 위 세 묶음(`app/src`, `analysis_engine/src`, `deploy/tests ops/tests
-app/tools/tests`)은 **각각 따로** 실행해야 한다. 한 pytest 세션에 합쳐서 돌리면
-`tools` 모듈명이 겹쳐 무관한 시험 1건이 거짓 실패로 잡힌다 — 실패가 나오면 먼저
-세 묶음을 분리해서 실행했는지부터 확인한다.
+app/tools/tests`)은 **각각 따로** 실행해야 한다(2026-09-02 실측). `app/src`와
+`analysis_engine/src`를 한 pytest 세션에 같이 넣으면 같은 basename의 시험
+파일(`test_credentialed_http.py`, `test_logic.py`)이 서로 다른 폴더에 있는데
+`__init__.py`가 없어 `import file mismatch`로 **수집 자체가 중단**된다 — 실패가
+아니라 그 세션의 모든 시험이 아예 실행되지 않는다. 실패·오류가 이 형태로 나오면
+먼저 세 묶음을 분리해서 실행했는지부터 확인한다.
 
 대용량 로컬 자료까지 준비된 경우에만 app 폴더에서 아래 명령을 별도로 실행한다. 자료가
 없는데 marker를 선택하면 실패하는 것이 정상이며, 기본 회귀의 녹색으로 숨기지 않는다.
