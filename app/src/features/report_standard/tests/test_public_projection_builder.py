@@ -58,6 +58,7 @@ from src.shared.report_quality.models import PublicationPolicy
 from src.shared.report_generation.public_projection import (
     PUBLIC_PROJECTION_VERSION,
     PublicProjectionError,
+    PublicSummaryRow,
     build_report_digest,
 )
 
@@ -725,24 +726,56 @@ def test_builder는_report에_없는_문자열을_만들지_않는다() -> None:
             assert other.display.period_summary is None
 
 
-def test_인용_없는_요약_문장은_지금_봉인이_거부한다() -> None:
-    """★ 이건 «지금 그렇다»는 기록이지 «그래야 한다»는 주장이 아니다.
+def test_인용_없는_요약_문장도_장_없음으로_봉인한다() -> None:
+    """★ 뒤집힌 시험이다 — 원래는 「지금 봉인이 거부한다」였다.
 
-    render는 인용이 없는 요약 문장의 ``section_id``를 빈 글자로 둔다
-    (``_summary_source_section``: 틀린 장을 가리키느니 비운다). 그런데 S1
-    ``PublicSummaryRow``는 ``section_id``가 정본 아홉 장 «안»일 것을 요구한다.
-    그래서 그런 보고서는 지금 봉인 자체가 안 된다.
+    뒤집은 근거: 36장 발견 F-S1b + root 결정(2026-09-02, D-S3 추가조건 ①).
+    render는 인용이 없는 요약 문장의 ``section_id``를 «의도적으로» 빈 글자로
+    둔다(``composer/render.py`` ``_summary_source_section``: 틀린 장을
+    가리키느니 비운다). FULL에서도 흔한 모양이라 그대로 두면 정상 보고서가
+    봉인 자체를 못 해 공개가 막힌다. 그래서 빈 ``section_id``만 「장 없음」
+    으로 허용한다 — 정본 아홉 장 밖의 «다른» 문자열은 계속 거부한다
+    (아래 ``test_요약_행_section_id가_정본_밖_문자열이면_계속_거부한다``).
 
-    ★ S3에게 — 이 자리를 여는 결정(빈 장 허용)이 나면 이 시험을 「빈 장도
-      봉인된다」로 «뒤집어라». 조용히 지우지 마라. 지우면 어느 보고서가 봉인
-      안 되는지 아무도 모르게 된다.
+    「장 없음」 행의 표시값 계약:
+      · ``section_display_number``는 빈 글자(가리킬 장이 없으므로 번호도 없다)
+      · ``topic``은 ``summary_topic('')``의 기본값과 같다
     """
 
     report = _report(uncited_summary=True)
     assert any(not item.section_id for item in report.summary_items)
 
-    with pytest.raises(PublicProjectionError):
-        build_public_projection(report)
+    projection = build_public_projection(report)
+
+    rowless = [row for row in projection.summary if row.section_id == ""]
+    assert rowless, "장 없는 요약 행이 봉인 결과에 남아야 한다"
+    for row in rowless:
+        assert row.section_display_number == ""
+        assert row.topic == summary_topic("")
+        assert row.text
+    # 번호는 「장이 있는 행」을 건너뛰지 않고 1부터 이어져야 한다.
+    assert [row.ordinal for row in projection.summary] == [
+        f"{index:02d}" for index in range(1, len(report.summary_items) + 1)
+    ]
+
+
+def test_요약_행_section_id가_정본_밖_문자열이면_계속_거부한다() -> None:
+    """빈 글자만 열었지 «아무 문자열이나»를 연 것이 아니다.
+
+    허용 범위를 넓힐 때 옆문이 같이 열리는지 보는 음성 대조다. 오타·옛 장
+    id·공백만 있는 값이 들어오면 봉인이 그대로 닫혀야 한다. ``culture``는
+    정본 아홉 장 «안»이므로 여기 쓰지 않는다.
+    """
+
+    for bad in ("company_culture", "identity ", " ", "1", "identity,portfolio"):
+        with pytest.raises(PublicProjectionError):
+            PublicSummaryRow(
+                ordinal="01",
+                topic="핵심결론",
+                section_display_number="1",
+                text="가 회사를 확인했다.",
+                section_id=bad,
+            )
 
 
 def test_builder는_장_제목_태그_번호를_report에서_그대로_옮긴다() -> None:

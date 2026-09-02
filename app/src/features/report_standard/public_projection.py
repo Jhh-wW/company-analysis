@@ -258,7 +258,12 @@ def _summary_rows(report: Report) -> tuple[PublicSummaryRow, ...]:
     for position, item in enumerate(report.summary_items, start=1):
         section_id = str(item.section_id or "")
         spec = SECTION_BY_ID.get(section_id)
-        if spec is None:
+        # ★ 빈 section_id = 「장 없음」(F-S1b, root 결정 2026-09-02) — render의
+        #   ``_summary_source_section``이 인용 없는 요약 문장에 «틀린 장을
+        #   가리키느니 비운다»는 뜻으로 남기는 값이다. 가리킬 장이 없으니 장
+        #   번호도 비운다(지어내지 않는다). 빈 글자가 «아닌데» 정본 밖이면
+        #   그건 오타·옛 id라 그대로 닫는다.
+        if spec is None and section_id != "":
             raise PublicProjectionError(
                 f"요약 항목이 정본 장 목록 밖을 가리킵니다: {section_id!r}"
             )
@@ -266,7 +271,7 @@ def _summary_rows(report: Report) -> tuple[PublicSummaryRow, ...]:
             PublicSummaryRow(
                 ordinal=f"{position:0{_SUMMARY_ORDINAL_WIDTH}d}",
                 topic=summary_topic(section_id),
-                section_display_number=spec.display_number,
+                section_display_number="" if spec is None else spec.display_number,
                 text=str(item.text or ""),
                 section_id=section_id,
             )

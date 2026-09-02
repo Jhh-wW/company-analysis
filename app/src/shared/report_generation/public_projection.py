@@ -519,7 +519,15 @@ def public_cover_metrics_block_from_dict(
 
 @dataclass(frozen=True)
 class PublicSummaryRow:
-    """§4 #5 — 핵심 요약 표 한 행."""
+    """§4 #5 — 핵심 요약 표 한 행.
+
+    ``section_id``는 정본 아홉 장 중 하나이거나 **빈 글자**다. 빈 글자는
+    「장 없음」을 뜻한다 — 인용이 없는 요약 문장에 ``composer/render.py``의
+    ``_summary_source_section``이 «틀린 장을 가리키느니 비운다»는 뜻으로
+    의도적으로 남기는 값이다(36장 F-S1b, root 결정 2026-09-02). 이 자리를
+    닫아 두면 그런 문장이 하나만 있어도 정상 FULL 보고서가 봉인 자체를 못 해
+    공개가 막힌다. 빈 글자 «말고» 정본 밖 문자열은 계속 거부한다.
+    """
 
     ordinal: str
     topic: str
@@ -530,7 +538,7 @@ class PublicSummaryRow:
     def __post_init__(self) -> None:
         for name in ("ordinal", "topic", "section_display_number", "text", "section_id"):
             _require_str(getattr(self, name), label=f"요약 행 {name}")
-        if self.section_id not in SECTION_IDS:
+        if self.section_id != "" and self.section_id not in SECTION_IDS:
             raise PublicProjectionError("요약 행 section_id가 정본 장 목록 밖입니다")
 
 
