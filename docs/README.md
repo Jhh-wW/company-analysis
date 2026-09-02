@@ -1,7 +1,8 @@
 # 문서 지도
 
-이 폴더에는 **계속 유효한 문서만** 둔다. 날짜가 붙은 작업 기록·인수인계·검토 스냅샷은
-저장소에 남기지 않는다. 지금 무엇이 돌아가는지는 문서가 아니라 **코드와 시험**이 정본이다.
+제품이 무엇인지부터 보려면 [저장소 첫 화면](../README.md)을 먼저 읽는다.
+이 폴더에는 **계속 유효한 문서만** 둔다. 지금 무엇이 돌아가는지는 문서가 아니라
+**코드와 시험**이 정본이다.
 
 ## 읽는 순서
 
@@ -15,9 +16,9 @@
 | 6 | [배포 교체 계약](architecture/deployment-contract.md) | 새 버전으로 갈아끼울 때 지켜야 하는 조건 |
 | 7 | [ADR 0001](adr/0001-feature-oriented-structure.md) | 기능 중심 구조를 고른 이유 |
 | 8 | [검수 안내](REVIEW_GUIDE.md) | 환경·실행·시험·운영 한계 체크리스트 |
-| 9 | [참고 보고서 50개 분석 요약](evidence/reference-reports-50-analysis-summary.md) | 목차 10장을 그렇게 정한 조사 근거 |
+| 9 | [참고 보고서 50개 분석 요약](evidence/reference-reports-50-analysis-summary.md) | 목차를 그렇게 정한 조사 근거 |
 
-실행·배포는 [`app/README.md`](../app/README.md)와 `app/docs/`를,
+실행·배포는 [`app/README.md`](../app/README.md)와 [`deploy/README.md`](../deploy/README.md)를,
 분석 엔진 진입점과 동적 import 계약은 [`analysis_engine/README.md`](../analysis_engine/README.md)를 본다.
 
 ## 권위 순서
@@ -27,7 +28,7 @@
 1. `docs/출력물 기준/`의 20개 정본
 2. 그중 기계 판정 최소조건을 고정한 [런타임 출고 계약](출력물%20기준/90_공통_규칙/런타임_출고_계약.md)
 3. 활성 코드 계약과 회귀 시험
-4. 날짜 없는 현재 안내 — `REVIEW_GUIDE.md`, 각 폴더의 README, `app/docs/`
+4. 날짜 없는 현재 안내 — [검수 안내](REVIEW_GUIDE.md), 각 폴더의 README, `app/docs/`
 
 하위 문서가 정본을 바꾸지 않는다. **활성 코드가 정본과 다르면 코드가 새 정의가 된 것이
 아니라 출고 차단 결함**으로 기록한다. 정본을 바꾸려면 `출력물 기준/` 변경과
@@ -39,13 +40,13 @@
 |---|---|
 | 보고서 내용·목차·출고 규칙 | `출력물 기준/` + 관련 코드·시험 |
 | 기능 경계 | `architecture/feature-map.md` + 필요하면 ADR 추가 |
-| 배포·복구 | `architecture/deployment-contract.md` · `app/docs/Render_배포.md` · `.env.example` |
+| 배포·복구 | `architecture/deployment-contract.md` · `app/docs/Render_배포.md` · `app/.env.example` |
 | 검수 상태 | 날짜별 문서를 늘리지 말고 `REVIEW_GUIDE.md`를 갱신 |
 
 ## 이 폴더에 없는 것
 
-개발 과정의 임시 메모·QA 초안·세션 인수인계는 Git에 넣지 않는다(`.gitignore`가 막는다).
-사람 팀이라면 이슈 트래커나 위키에 둘 내용이다.
+개발 과정의 임시 메모와 작업 기록은 Git에 넣지 않는다(`.gitignore`가 막는다).
+이슈 트래커에 둘 내용이다.
 
-시험 건수처럼 **변하는 숫자는 문서에서 인용하지 말고** `REVIEW_GUIDE.md`의 명령으로
-직접 세어 확인한다.
+시험 건수처럼 **변하는 숫자는 문서에서 인용하지 말고** [검수 안내](REVIEW_GUIDE.md)의
+명령으로 직접 세어 확인한다.

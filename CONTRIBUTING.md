@@ -25,7 +25,7 @@ cd app
 ```
 
 시험은 반드시 `app/` 폴더에서 돌린다. 저장소 루트에서 돌리면 파일명 충돌로 수집이
-중단된다(사유는 `pytest.ini` 주석 참고).
+중단된다(사유는 저장소 루트 `pytest.ini`의 주석 참고).
 
 ```powershell
 cd app
@@ -53,17 +53,17 @@ cd app
 
 ```powershell
 cd app
-.\.venv\Scripts\python -m pytest -q src/features/report_standard/tests src/features/provenance/tests `
+..\.venv\Scripts\python -m pytest -q src/features/report_standard/tests src/features/provenance/tests `
   src/features/company_performance/tests src/features/company_comparison/tests `
   src/features/pipeline/tests src/features/storage/tests `
   -m "not local_integration" `
   --basetemp=.pytest_tmp_core_review
 
-.\.venv\Scripts\python -m pytest -q -m "not local_integration" `
+..\.venv\Scripts\python -m pytest -q -m "not local_integration" `
   --basetemp=.pytest_tmp_full_review
 cd ..
 $env:TLDEXTRACT_CACHE="$PWD\app\.cache\tldextract"
-.\app\.venv\Scripts\python -m pytest -q analysis_engine/src `
+.\.venv\Scripts\python -m pytest -q analysis_engine/src `
   --basetemp=app/.pytest_tmp_engine_review
 git diff --check
 ```
