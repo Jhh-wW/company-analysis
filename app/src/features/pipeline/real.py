@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib
 import importlib.util
 import itertools
@@ -3304,6 +3305,7 @@ def _full_section_evidence_packets(
         if not text:
             continue
         source_url = str(raw.get("출처") or "").strip()
+        fragment_rcept_no = str(raw.get("문서ID") or "").strip()
         if text.startswith(DART_FINANCIAL_API_PREFIX):
             identity = document_identity_from_parts(
                 document_id=DART_FINANCIAL_API_DOCUMENT_ID,
@@ -3312,6 +3314,17 @@ def _full_section_evidence_packets(
             )
         elif source_url:
             identity = document_identity_from_parts(url=source_url)
+        elif _RCEPT_NO_RE.fullmatch(fragment_rcept_no):
+            # 조각이 «자기 공시»의 접수번호를 실었으면 그 문서로 묶는다(P1-A).
+            # 최신 공시 1건의 문서ID를 빌려 주면 다른 공시에서 온 조각이
+            # 엉뚱한 문서를 근거로 가리킨다. 접수번호 모양(14자리)일 때만
+            # 쓴다 — IR PDF의 sha256 문서ID·재무 API 문서ID는 이 자리에서
+            # 예전과 똑같이 동작해야 한다.
+            identity = document_identity_from_parts(
+                document_id=fragment_rcept_no,
+                host=DART_DOCUMENT_HOST,
+                url=DART_DOCUMENT_URL_TEMPLATE.format(document_id=fragment_rcept_no),
+            )
         elif filing_meta is not None and getattr(filing_meta, "document_id", ""):
             document_id = str(filing_meta.document_id)
             identity = document_identity_from_parts(
@@ -3940,6 +3953,134 @@ def _homepage_url_for_display(raw: str) -> str:
         `https://…`/`http://…`, 또는 링크로 만들 수 없으면 `""`.
     """
     return homepage_link.browser_url(_homepage_url_same_host_only(raw))
+
+
+#: typed 수집기의 장(section_id) → v1 수집 조각 «종류».
+#: ★ 값은 v1이 이미 쓰는 종류만 골랐다. 새 이름을 만들면
+#:   `_full_section_evidence_packets`의 장 배정 표에도, composer 어휘에도
+#:   걸리지 않아 조각이 조용히 사라진다(작가가 못 본다).
+_TYPED_DART_SECTION_FRAGMENT_KIND: Final[dict[str, str]] = {
+    "identity": "사업내용",
+    "business_model": "사업내용",
+    "portfolio": "사업내용",
+    "past_changes": "MD&A",
+    "current_challenges": "MD&A",
+    "future_strategy": "신규사업전망",
+    "operations_partners": "사업내용",
+    "culture": "사업내용",
+    "competitive_position": "사업내용",
+}
+
+#: DART 접수번호(rcept_no)의 모양 — 14자리 숫자.
+#: typed 수집기의 문서ID는 `f"{source_kind}:{rcept_no}"`라 뒷부분만 접수번호다.
+_RCEPT_NO_RE: Final[re.Pattern[str]] = re.compile(r"\d{14}")
+
+
+def _normalized_fragment_text_key(text: str) -> str:
+    """조각 원문의 중복 판정 열쇠 — 공백·개행을 정규화한 뒤 SHA-256.
+
+    ★ 왜 `(원문, 문서ID)`가 아닌가 (P1-A) — v1 공시 조각(`make_fragments`)에는
+      `문서ID` 키 «자체»가 없다. 그 조합을 열쇠로 쓰면 legacy 쪽이 항상
+      `(원문, "")`이 되어 어떤 typed 문서ID와도 일치하지 못하고, **같은 공시
+      문단이 두 번 실린다.** 원문만으로 판정하면 그 구멍이 닫힌다.
+    """
+
+    return hashlib.sha256(" ".join(text.split()).encode("utf-8")).hexdigest()
+
+
+def _typed_dart_document_index(
+    mapping: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """typed 수집 Mapping의 문서 목록을 document_id로 찾을 수 있게 만든다."""
+
+    documents = mapping.get("documents")
+    if not isinstance(documents, list):
+        return {}
+    return {
+        str(document.get("document_id") or ""): document
+        for document in documents
+        if isinstance(document, dict)
+    }
+
+
+def _typed_dart_legacy_fragments(mapping: dict[str, Any]) -> list[dict[str, str]]:
+    """typed 수집 Mapping → v1 수집 조각 모양(`{"종류","원문",…}`) 목록.
+
+    ★ 문서 신원을 못 만드는 조각은 «버린다». 접수번호를 확인하지 못한 채
+      넣으면 `_full_section_evidence_packets`가 최신 공시 1건의 문서ID를
+      빌려 주어, 다른 공시에서 온 조각이 엉뚱한 문서를 근거로 가리킨다.
+    """
+
+    fragments = mapping.get("fragments")
+    if not isinstance(fragments, list):
+        return []
+    documents = _typed_dart_document_index(mapping)
+    made: list[dict[str, str]] = []
+    for raw in fragments:
+        if not isinstance(raw, dict):
+            continue
+        text = str(raw.get("text") or "").strip()
+        kind = _TYPED_DART_SECTION_FRAGMENT_KIND.get(
+            str(raw.get("section_id") or "")
+        )
+        if not text or not kind:
+            continue
+        document_id = str(raw.get("document_id") or "")
+        rcept_no = document_id.rpartition(":")[2]
+        if not _RCEPT_NO_RE.fullmatch(rcept_no):
+            logger.warning(
+                "typed 공시 조각의 접수번호를 확인할 수 없어 버립니다: %s",
+                document_id[:64],
+            )
+            continue
+        document = documents.get(document_id, {})
+        published_on = str(document.get("published_on") or "")
+        made.append(
+            {
+                "종류": kind,
+                "원문": text,
+                "문서ID": rcept_no,
+                "문서명": str(document.get("title") or ""),
+                "원문위치": str(raw.get("location") or ""),
+                "문서일": (
+                    f"{published_on[:4]}-{published_on[4:6]}-{published_on[6:8]}"
+                    if re.fullmatch(r"\d{8}", published_on)
+                    else ""
+                ),
+            }
+        )
+    return made
+
+
+def _merge_typed_dart_fragments(
+    frags: dict[int, dict[str, str]],
+    mapping: dict[str, Any],
+) -> tuple[dict[int, dict[str, str]], int]:
+    """typed 공시 조각을 v1 조각 묶음 «뒤에» 더한다. 기존 번호는 안 건드린다.
+
+    Args:
+        frags: v1 수집이 만든 조각 묶음. 번호는 작가가 인용하는 주소라
+            덮어쓰지 않는다.
+        mapping: `serialize.harvest_to_mapping()` 산출.
+
+    Returns:
+        합친 조각 묶음과 실제로 더한 개수.
+    """
+
+    seen = {
+        _normalized_fragment_text_key(str(fragment.get("원문") or ""))
+        for fragment in frags.values()
+    }
+    merged = dict(frags)
+    added = 0
+    for fragment in _typed_dart_legacy_fragments(mapping):
+        key = _normalized_fragment_text_key(fragment["원문"])
+        if key in seen:
+            continue
+        seen.add(key)
+        merged[max(merged, default=0) + 1] = fragment
+        added += 1
+    return merged, added
 
 
 def _collect(
