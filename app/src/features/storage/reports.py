@@ -820,7 +820,14 @@ def attach_public_projection(
     if projection is None:
         return report
     evidence = report.generation_evidence
-    if evidence is not None and (
+    # ★ 증거가 없으면 붙이지 않고 닫는다(S3e, 2026-09-02). 봉인의 진짜 권위는
+    #   생성 증거의 `public_projection_sha256`이다 — 증거가 없으면 「이 봉인이
+    #   이 보고서의 것」이라고 말해 주는 것이 아무것도 없고, 남는 검사는 봉인
+    #   스스로의 앞뒤가 맞는지뿐이라 DB에 직접 넣은 봉인도 통과한다.
+    #   정상 SHADOW·옛 저장본은 애초에 봉인 행이 없어 위에서 이미 돌아갔다.
+    if evidence is None:
+        raise ValueError("생성 증거가 없는 보고서에 저장된 공개 봉인이 있습니다")
+    if (
         build_report_digest(projection).content_sha256
         != evidence.public_projection_sha256
     ):

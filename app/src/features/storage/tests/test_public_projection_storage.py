@@ -31,7 +31,10 @@ import pytest
 from src.features.composer.tests.test_section_public_manifest import _run_full
 from src.features.pipeline.port import Report
 from src.features.storage import db, reports
-from src.features.storage.constants import TABLE_REPORT_PUBLIC_PROJECTIONS
+from src.features.storage.constants import (
+    TABLE_REPORT_PUBLIC_PROJECTIONS,
+    TABLE_REPORTS as TABLE_REPORTS_NAME,
+)
 from src.features.storage.reports import report_to_dict, report_to_json
 from src.shared.report_generation.public_projection import build_report_digest
 
@@ -412,3 +415,92 @@ def test_attach_public_projection도_증거_지문과_어긋나면_거부한다(
     with db.connect(path) as conn:
         with pytest.raises(ValueError):
             reports.attach_public_projection(conn, "r1", restored)
+
+
+# ══════════════════════════════════════════════════════════
+# ⑥ 증거가 없으면 봉인을 붙이지 않는다 (S3e)
+# ══════════════════════════════════════════════════════════
+
+
+def _strip_strict_fields(payload: dict) -> dict:
+    """FULL payload에서 엄격 생산 증거 흔적만 걷어낸 «약한» 저장본.
+
+    `report_from_dict`가 받아들이는 비-FULL 모양이어야 한다 — 그래야 이 위조가
+    저장층의 다른 검사에 먼저 걸리지 않고 봉인 부착 자리까지 도달한다.
+    """
+
+    weak = dict(payload)
+    for key in (
+        "release_mode",
+        "generation_evidence",
+        "public_structure_manifest",
+        "quality_contract_version",
+    ):
+        weak.pop(key, None)
+    return weak
+
+
+def test_생성_증거가_없는_저장본에_봉인_행이_있으면_로드가_거부된다(
+    tmp_path: Path,
+) -> None:
+    """봉인을 «자기 정합만 보고» 붙이면 아무도 지목하지 않은 봉인이 붙는다.
+
+    ★ 왜 위험한가 — 봉인의 진짜 권위는 생성 증거의
+      ``public_projection_sha256``이다. 증거가 없으면 「이 봉인이 이 보고서의
+      것」이라고 말해 주는 것이 아무것도 없고, 남는 검사는 봉인 스스로의 앞뒤가
+      맞는지뿐이다. 그건 DB에 직접 넣은 봉인도 통과한다. 그래서 붙이지 않고
+      닫는다(I3).
+
+    ★ 정상 SHADOW 저장본은 애초에 봉인 행이 없어 이 자리에 오지 않는다 —
+      아래 시험이 그 사실을 함께 못 박는다.
+    """
+
+    report = _full_report()
+    path = _saved(tmp_path, report)
+
+    with db.connect(path) as conn:
+        conn.execute(
+            f"UPDATE {TABLE_REPORTS_NAME} SET payload_json = ? WHERE report_id = ?",
+            (
+                json.dumps(
+                    _strip_strict_fields(report_to_dict(report)),
+                    ensure_ascii=False,
+                ),
+                "r1",
+            ),
+        )
+        # 위조가 성립하는지 먼저 확인한다 — 봉인 행은 그대로 남아 있고
+        # 자기 정합성도 유지된다.
+        assert reports.load_public_projection(conn, "r1") is not None
+
+    with db.connect(path) as conn:
+        with pytest.raises(ValueError):
+            reports.load(conn, "r1")
+
+
+def test_봉인_행이_없는_약한_저장본은_그대로_봉인_없음으로_읽힌다(
+    tmp_path: Path,
+) -> None:
+    """음성 대조 — 위 규칙이 정상 SHADOW 저장본을 막지 않는다."""
+
+    report = _full_report()
+    path = _saved(tmp_path, report)
+
+    with db.connect(path) as conn:
+        conn.execute(
+            f"UPDATE {TABLE_REPORTS_NAME} SET payload_json = ? WHERE report_id = ?",
+            (
+                json.dumps(
+                    _strip_strict_fields(report_to_dict(report)),
+                    ensure_ascii=False,
+                ),
+                "r1",
+            ),
+        )
+        conn.execute(f"DELETE FROM {TABLE_REPORT_PUBLIC_PROJECTIONS}")
+
+    with db.connect(path) as conn:
+        loaded = reports.load(conn, "r1")
+
+    assert loaded is not None
+    assert loaded.public_projection is None
