@@ -66,6 +66,7 @@ from src.features.report_standard import PublishBlockedError, build_published_re
 from src.features.report_delivery.artifact import ArtifactInspectionStatus
 from src.features.report_delivery import authority as authority_store
 from src.features.report_delivery.cache_identity import CacheLookupKey
+from src.features.report_delivery import constants as delivery_constants
 from src.features.report_delivery.models import Delivery
 from src.features.report_delivery.singleflight import LeaseKey
 from src.features.report_delivery import store as delivery_store
@@ -106,6 +107,15 @@ _DELIVERY_PUBLICATION_BLOCKED = "publication_contract_blocked"
 _DELIVERY_PDF_RENDER_BLOCKED = "pdf_render_contract_blocked"
 _DELIVERY_AUTOMATIC_GATE_BLOCKED = "automatic_release_gate_blocked"
 _DELIVERY_PDF_RELEASE_BLOCKED = "pdf_release_contract_blocked"
+#: 사용자 입력·보고서 내용이 아니라 서버 쪽 사정(재시작 스윕·관리자 대사)으로
+#: 닫힌 delivery 의무. 이 코드들은 「관리자에게 문의」가 아니라 재시도 안내를
+#: 낸다 — 36장 계획리빌딩 티켓 A2, F1·F2 참고.
+_DELIVERY_RETRY_AVAILABLE_FAILURE_CODES = frozenset(
+    {
+        delivery_constants.STALE_DELIVERY_INTENT_FAILURE_CODE,
+        delivery_constants.MANUAL_SETTLEMENT_FAILURE_CODE,
+    }
+)
 _PUBLIC_STORE_MISSING = "missing"
 _PUBLIC_STORE_INCOMPLETE = "incomplete"
 _PUBLIC_STORE_UNREADABLE = "unreadable"
@@ -834,6 +844,41 @@ def _delivery_unavailable_response(request: Request) -> Response:
     return job_runtime._retryable_response(response)
 
 
+def _delivery_retry_available_response(request: Request) -> Response:
+    """서버 쪽 사정으로 멈춘 새 보고서를 관리자 문의로 막다른 화면으로 만들지 않는다.
+
+    재시작 스윕·관리자 대사가 delivery 의무를 닫은 경우(36장 계획리빌딩 티켓
+    A2, F1·F2)는 사용자 입력이나 보고서 내용의 문제가 아니라, 저장은 됐지만
+    최종 출고를 확정하지 못한 채 서버가 멈춘 것이다. «재시작»·«대사»·기계
+    실패 코드 같은 운영 용어를 화면에 그대로 노출하지 않고, 이용 횟수가
+    차감되지 않았다는 사실과 같은 회사를 다시 조사할 수 있다는 안내만 낸다.
+    기본 버튼(``retry_url``·``retry_label`` 생략)은 처음 화면으로 보낸다 —
+    같은 report_id 주소를 다시 열어도 이 상태는 그대로이므로 새 조사가
+    진짜 다음 행동이다.
+    """
+
+    response = request_helpers.templates.TemplateResponse(
+        request=request,
+        name="progress_unavailable.html",
+        context=request_helpers._ctx(
+            request,
+            interruption_icon="↻",
+            interruption_title="이 조사는 저장 중 중단됐습니다",
+            interruption_message=(
+                "서버 쪽 사정으로 이 조사의 마지막 확인이 끝나지 못했습니다. "
+                "이용 횟수는 차감되지 않았습니다."
+            ),
+            interruption_hint="같은 회사를 다시 조사할 수 있습니다.",
+            gate_reasons=(),
+            feedback_report_allowed=False,
+        ),
+        status_code=409,
+    )
+    response.headers.update(SHARED_LINK_HEADERS)
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
 def _legacy_pdf_unavailable_response(request: Request) -> Response:
     """당시 bytes를 저장하지 않은 PDF를 오늘 renderer로 위조하지 않는다."""
 
@@ -901,6 +946,8 @@ def _delivery_intent_response(
             PDFReleaseBlockedError("PDF 출고 계약이 중단됐습니다"),
             job_id=public_id,
         )
+    if intent.failure_code in _DELIVERY_RETRY_AVAILABLE_FAILURE_CODES:
+        return _delivery_retry_available_response(request)
     return _delivery_unavailable_response(request)
 
 

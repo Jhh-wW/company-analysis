@@ -14,6 +14,8 @@ import datetime as dt
 from fastapi.testclient import TestClient
 
 from src.core import clock
+from src.features.auth import constants as auth_constants
+from src.features.auth import logic as auth_logic
 from src.features.report_delivery import constants as delivery_constants
 from src.features.report_delivery import store as delivery_store
 from src.features.report_delivery.cache_identity import CacheNamespace
@@ -204,3 +206,38 @@ def test_startup_keeps_completed_LINK_run() -> None:
     assert run.status == share_store.RUN_STATUS_COMPLETED
     assert intent is not None
     assert intent.state == delivery_store.DELIVERY_INTENT_COMPLETE
+
+
+def test_고아_URL은_스윕_뒤_재시도_안내로_바뀐다() -> None:
+    """스윕이 닫은 report_id URL은 「관리자에게 문의」가 아니라 재시도 안내여야 한다.
+
+    A2b: 스윕만으로는 intent.failure_code가 4개 알려진 출고차단 코드 어디에도
+    없어 화면이 그대로 「저장된 보고서를 확인할 수 없습니다 / 관리자에게
+    문의해 주세요」(503)로 떨어졌다. reports.py의
+    ``_DELIVERY_RETRY_AVAILABLE_FAILURE_CODES`` 분기가 이를 재시도 안내로 바꾼다.
+    """
+
+    report_id = "orphan-url-retry-" + "f" * 12
+    stale_at = clock.now_kst() - dt.timedelta(
+        minutes=delivery_constants.STALE_DELIVERY_INTENT_MINUTES + 15
+    )
+    with storage_db.connect() as conn:
+        delivery_store.mark_delivery_required(
+            conn, public_id=report_id, required_at=stale_at
+        )
+
+    with TestClient(app) as client:
+        session = auth_logic.create_session(
+            "admin@example.com", True, subject="google:orphan-retry-admin"
+        )
+        client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
+        response = client.get(f"/result/{report_id}", follow_redirects=False)
+
+    assert response.status_code == 409
+    assert "관리자에게 문의" not in response.text
+    assert "이 조사는 저장 중 중단됐습니다" in response.text
+    assert "이용 횟수는 차감되지 않았습니다" in response.text
+    assert "같은 회사를 다시 조사할 수 있습니다" in response.text
+    # 내부 운영 용어(재시작·스윕·기계 실패 코드)를 화면에 그대로 노출하지 않는다.
+    assert delivery_constants.STALE_DELIVERY_INTENT_FAILURE_CODE not in response.text
+    assert "재시작" not in response.text
