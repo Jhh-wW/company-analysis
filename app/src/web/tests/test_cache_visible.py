@@ -73,7 +73,7 @@ def test_결과화면_템플릿이_캐시일_때만_안내를_그린다():
     ).read_text(encoding="utf-8")
 
     assert "result.cache_hit" in template, (
-        "결과 화면이 캐시 여부를 안 읽습니다 — 캐시가 돌아도 사용자가 모릅니다 (P-63)"
+        "결과 화면이 캐시 여부를 안 읽습니다 — 캐시가 돌아도 사용자가 모릅니다"
     )
     assert "result.message" in template
 

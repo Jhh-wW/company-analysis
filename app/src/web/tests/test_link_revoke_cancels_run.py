@@ -181,7 +181,7 @@ def _회원손님(email: str) -> Iterator[TestClient]:
             share_allow.invite(
                 conn,
                 email=email,
-                note="G-S11 시험",
+                note="시험용 메모",
                 now_iso="2026-08-17T10:00:00",
             )
         subject = "google:test-" + hashlib.sha256(

@@ -150,7 +150,7 @@ def test_홈페이지를_읽었으면_그렇게_말한다():
     )
 
     assert EMPTY_REASON_HOMEPAGE["ok"] in 사유
-    assert "미연결" not in 사유, "붙여 놓고 「아직 안 붙였다」고 말하면 거짓이다 (P-49)"
+    assert "미연결" not in 사유, "붙여 놓고 「아직 안 붙였다」고 말하면 거짓이다"
 
 
 def test_홈페이지_조각을_모았으면_없다고_말하지_않는다():

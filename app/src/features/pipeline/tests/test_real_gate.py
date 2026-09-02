@@ -51,7 +51,7 @@ def test_홈페이지_조각만_있어도_게이트가_그_칸을_인정한다()
     kinds = {HOMEPAGE_KIND}
 
     rough = {c: any(k in kinds for k in srcs) for c, srcs in sources.items()}
-    assert not any(rough.values()), "보정 «전»에는 아무 칸도 안 세어져야 한다 (P-72 재현)"
+    assert not any(rough.values()), "보정 «전»에는 아무 칸도 안 세어져야 한다 — 이게 깨지면 1판이 바뀐 것이다"
 
     for cell in HOMEPAGE_GATE_CELLS:
         if cell in rough:
