@@ -14,7 +14,10 @@ from features.evidence_collection import constants as c
 
 #: 슬롯별 키워드 신호. 값은 예시 표현이며 전수 검증되지 않았다(알려진 한계).
 SLOT_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "identity:corporate_identity": ("당사는", "주식회사", "법인", "설립"),
+    # 「당사는」는 거의 모든 공시 문단에 붙는 문법상 주어일 뿐 회사 정체성
+    # 사실이 아니다. 이 약한 한 단어가 사업모델·고객·가치 문단을 identity로
+    # 납치한 실측 결함 때문에 직접 정체성 표현만 남긴다.
+    "identity:corporate_identity": ("주식회사", "법인", "설립"),
     "identity:business_definition": ("영위하는", "사업을 영위", "업종"),
     "identity:legal_scope": ("정관", "인가", "허가", "등록"),
     "identity:official_location": ("본점", "소재지", "주소"),
@@ -148,7 +151,7 @@ def score_fragment_slots(text: str, section_heading: str = "") -> tuple[SlotScor
     돌려 이전 호출자와의 호환을 유지한다.
     """
 
-    scored: list[tuple[int, SlotScore]] = []
+    scored: list[tuple[int, int, bool, SlotScore]] = []
     for declaration_index, (slot_id, keywords) in enumerate(SLOT_KEYWORDS.items()):
         hits = [keyword for keyword in keywords if keyword in text]
         if not hits:
@@ -163,6 +166,8 @@ def score_fragment_slots(text: str, section_heading: str = "") -> tuple[SlotScor
                 break
         scored.append((
             declaration_index,
+            len(hits),
+            any(code.startswith("heading_match:") for code in reason_codes),
             SlotScore(
                 section_id=section_id,
                 slot_id=slot_id,
@@ -171,14 +176,45 @@ def score_fragment_slots(text: str, section_heading: str = "") -> tuple[SlotScor
             ),
         ))
 
-    scored.sort(key=lambda item: (
-        -item[1].score_millis,
-        0 if item[1].slot_id in c.COLLECTOR_SLOT_IDS else 1,
-        item[0],
-    ))
     if not scored:
         return ()
-    primary_section_id = scored[0][1].section_id
+
+    # 문단의 장을 슬롯 선언 순서가 아니라 그 장에서 발견된 직접 신호의
+    # 합으로 고른다. 「당사는」 같은 한 신호와 고객·수익·가치 세 신호가
+    # 동점 슬롯로 나왔을 때 앞에 선언된 identity가 이기는 결함을 막는다.
+    # 제목 힌트는 직접 신호 총합·슬롯 수가 같은 경우에만 구조 근거로 쓴다.
+    section_declaration_index: dict[str, int] = {}
+    section_rank: dict[str, tuple[int, int, int, int, int]] = {}
+    for declaration_index, hit_count, heading_matched, slot_score in scored:
+        section_id = slot_score.section_id
+        section_declaration_index.setdefault(section_id, declaration_index)
+        previous = section_rank.get(section_id, (0, 0, 0, 0, 0))
+        section_rank[section_id] = (
+            previous[0] + hit_count,
+            previous[1] + 1,
+            max(previous[2], slot_score.score_millis),
+            previous[3] + int(heading_matched),
+            previous[4] + int(slot_score.slot_id in c.COLLECTOR_SLOT_IDS),
+        )
+    primary_section_id = min(
+        section_rank,
+        key=lambda section_id: (
+            -section_rank[section_id][0],
+            -section_rank[section_id][1],
+            -section_rank[section_id][2],
+            -section_rank[section_id][3],
+            -section_rank[section_id][4],
+            section_declaration_index[section_id],
+        ),
+    )
+
+    scored.sort(key=lambda item: (
+        -item[3].score_millis,
+        0 if item[3].slot_id in c.COLLECTOR_SLOT_IDS else 1,
+        item[0],
+    ))
     return tuple(
-        score for _index, score in scored if score.section_id == primary_section_id
+        score
+        for _index, _hit_count, _heading_matched, score in scored
+        if score.section_id == primary_section_id
     )

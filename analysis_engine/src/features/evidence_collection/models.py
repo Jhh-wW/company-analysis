@@ -139,6 +139,10 @@ class EvidenceFragment:
     slot_id: str = ""
     score_millis: int = 0
     reason_codes: tuple[str, ...] = ()
+    #: 같은 원문 범위가 직접 뒷받침하는 같은 장의 슬롯들. 원문을 슬롯마다
+    #: 복제하지 않고 ID 하나로 나르기 위한 계약이다. 빈 값은 레거시
+    #: 생성자를 위해 ``(slot_id,)``로 정규화한다.
+    covered_slot_ids: tuple[str, ...] = ()
     period_start: str = ""
     period_end: str = ""
     unit: str = ""
@@ -166,6 +170,23 @@ class EvidenceFragment:
                 raise EvidenceCollectionError("slot_id가 있으면 section_id도 있어야 합니다")
             if c.SLOT_SECTION_OF[self.slot_id] != self.section_id:
                 raise EvidenceCollectionError("slot_id가 가리키는 장이 section_id와 다릅니다")
+        covered_slot_ids = self.covered_slot_ids or (
+            (self.slot_id,) if self.slot_id else ()
+        )
+        if len(set(covered_slot_ids)) != len(covered_slot_ids):
+            raise EvidenceCollectionError("covered_slot_ids에 중복을 넣을 수 없습니다")
+        if self.slot_id and self.slot_id not in covered_slot_ids:
+            raise EvidenceCollectionError("covered_slot_ids는 대표 slot_id를 포함해야 합니다")
+        for covered_slot_id in covered_slot_ids:
+            if covered_slot_id not in c.ALL_SLOT_IDS:
+                raise EvidenceCollectionError(
+                    f"알 수 없는 covered_slot_id: {covered_slot_id!r}"
+                )
+            if c.SLOT_SECTION_OF[covered_slot_id] != self.section_id:
+                raise EvidenceCollectionError(
+                    "covered_slot_ids는 모두 section_id와 같은 장이어야 합니다"
+                )
+        object.__setattr__(self, "covered_slot_ids", tuple(covered_slot_ids))
         if not isinstance(self.score_millis, int) or isinstance(self.score_millis, bool) or not (
             0 <= self.score_millis <= 1000
         ):

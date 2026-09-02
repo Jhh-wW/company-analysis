@@ -157,8 +157,8 @@ def test_fragments_필드_이름과_값이_원본과_일치하고_reason_codes�
     serialized = mapping["fragments"][0]
 
     assert set(serialized.keys()) == {
-        "company_id", "fragment_id", "document_id", "location", "text_sha256", "text",
-        "section_id", "slot_id", "score_millis", "reason_codes",
+            "company_id", "fragment_id", "document_id", "location", "text_sha256", "text",
+            "section_id", "slot_id", "covered_slot_ids", "score_millis", "reason_codes",
         "period_start", "period_end", "unit", "company_scope",
     }
     assert serialized["fragment_id"] == original.fragment_id
@@ -166,6 +166,7 @@ def test_fragments_필드_이름과_값이_원본과_일치하고_reason_codes�
     assert serialized["score_millis"] == original.score_millis
     assert serialized["reason_codes"] == list(original.reason_codes)
     assert isinstance(serialized["reason_codes"], list)
+    assert serialized["covered_slot_ids"] == list(original.covered_slot_ids)
     assert serialized["company_id"] == original.company_id
 
 

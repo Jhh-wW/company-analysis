@@ -77,6 +77,23 @@ def test_한_문단의_서로_다른_직접주장은_각_슬롯에_배정된다(
     assert "culture:verified_case" not in slot_ids
 
 
+def test_당사는_정체성_근거가_아니며_복수_사업신호가_선언순서에_납치되지_않는다() -> None:
+    scores = score_fragment_slots(
+        "당사는 주요 고객사에 서비스를 제공한다. 구독 수수료를 받습니다.",
+        section_heading="II. 사업의 내용",
+    )
+
+    assert {score.section_id for score in scores} == {"business_model"}
+    assert {
+        "business_model:revenue_model",
+        "business_model:customer_type",
+        "business_model:value_exchange",
+    } <= {score.slot_id for score in scores}
+    assert "identity:corporate_identity" not in {
+        score.slot_id for score in scores
+    }
+
+
 def test_한_문단은_약한_우연일치로_여러_장에_복제되지_않는다() -> None:
     scores = score_fragment_slots(
         (

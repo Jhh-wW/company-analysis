@@ -288,22 +288,36 @@ def collect_dart_evidence(
                 parser_version=c.PARSER_VERSION,
                 requirement=filing.requirement,
             )
-            new_fragments = [
-                EvidenceFragment(
-                    company_id=company_id,
-                    fragment_id=f"{document_id}:frag{candidate_index}:slot{slot_index}",
-                    document_id=document_id,
-                    location=f"{candidate.start}-{candidate.end}",
-                    text_sha256=hashlib.sha256(candidate.text.encode("utf-8")).hexdigest(),
-                    text=candidate.text,
-                    section_id=slot_score.section_id,
-                    slot_id=slot_score.slot_id,
-                    score_millis=slot_score.score_millis,
-                    reason_codes=slot_score.reason_codes,
+            new_fragments = []
+            for candidate_index, (candidate, slot_scores) in enumerate(scored):
+                # 한 원문 범위가 여러 슬롯을 직접 뒷받침해도 원문·토큰을
+                # 슬롯 수만큼 복제하지 않는다. 가장 높은 점수 슬롯을 대표로
+                # 두고 같은 장의 전체 커버리지를 ID 하나에 함께 봉인한다.
+                primary_score = slot_scores[0]
+                reason_codes = tuple(
+                    dict.fromkeys(
+                        reason_code
+                        for slot_score in slot_scores
+                        for reason_code in slot_score.reason_codes
+                    )
                 )
-                for candidate_index, (candidate, slot_scores) in enumerate(scored)
-                for slot_index, slot_score in enumerate(slot_scores)
-            ]
+                new_fragments.append(
+                    EvidenceFragment(
+                        company_id=company_id,
+                        fragment_id=f"{document_id}:frag{candidate_index}",
+                        document_id=document_id,
+                        location=f"{candidate.start}-{candidate.end}",
+                        text_sha256=hashlib.sha256(candidate.text.encode("utf-8")).hexdigest(),
+                        text=candidate.text,
+                        section_id=primary_score.section_id,
+                        slot_id=primary_score.slot_id,
+                        score_millis=primary_score.score_millis,
+                        reason_codes=reason_codes,
+                        covered_slot_ids=tuple(
+                            slot_score.slot_id for slot_score in slot_scores
+                        ),
+                    )
+                )
         except EvidenceCollectionError:
             # 자료형 검증 실패 하나가 harvest 전체(이미 쌓인 attempts 포함)를
             # 무너뜨리지 않게 이 문서만 버리고 다음 문서로 넘어간다(P1-2).

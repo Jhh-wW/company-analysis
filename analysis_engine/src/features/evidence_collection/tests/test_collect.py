@@ -40,6 +40,11 @@ _NO_SCORED_EVIDENCE_TEXT = """\
 이 문단도 아무 키워드 신호 없이 그저 문장을 채우기 위한 이야기다.
 """
 
+_MULTI_SLOT_ONE_RANGE_TEXT = """\
+II. 사업의 내용
+주요 매출은 제품 판매에서 발생하며 주요 고객사에 서비스를 제공한다.
+"""
+
 #: Codex 소관 슬롯(historical_performance·비교 4종)의 «옛» 트리거 낱말과
 #: self_context 트리거 낱말을 한 문서에 일부러 섞은 시험 전용 원문
 #: (2026-08-31 team-lead 통보 — 「산출 fragment에 이 슬롯이 0건임을
@@ -106,6 +111,33 @@ def test_감사보고서형_수집() -> None:
 
     assert harvest.company_type == c.COMPANY_TYPE_AUDIT_ONLY
     assert harvest.documents[0].source_kind == c.SOURCE_KIND_AUDIT_REPORT
+    covered = {
+        slot_id
+        for fragment in harvest.fragments
+        for slot_id in fragment.covered_slot_ids
+    }
+    # 감사보고서의 「매출액 항목」 숫자 설명을 돈 버는 방식으로 오인하지 않는다.
+    assert not any(slot_id.startswith("business_model:") for slot_id in covered)
+
+
+def test_한_DART_원문범위의_복수슬롯은_fragment_ID와_원문을_한번만_싣는다() -> None:
+    row = RawFilingRow("20250315000011", "사업보고서 (2025.03)", "20250315")
+    fetcher = _fetcher("A", row, _MULTI_SLOT_ONE_RANGE_TEXT)
+
+    harvest = collect_dart_evidence(fetcher, "00126380", now=_NOW)
+
+    assert len(harvest.fragments) == 1
+    fragment = harvest.fragments[0]
+    assert set(fragment.covered_slot_ids) == {
+        "business_model:revenue_model",
+        "business_model:customer_type",
+        "business_model:value_exchange",
+    }
+    mapping = harvest_to_mapping(harvest)
+    assert len(mapping["fragments"]) == 1
+    assert set(mapping["fragments"][0]["covered_slot_ids"]) == set(
+        fragment.covered_slot_ids
+    )
 
 
 def test_금융형_수집() -> None:
@@ -201,7 +233,11 @@ def test_다른_엔진_소유_슬롯은_실제_수집_산출물에도_0건이다
 
     harvest = collect_dart_evidence(fetcher, "00126380", now=_NOW)
 
-    produced_slot_ids = {f.slot_id for f in harvest.fragments if f.slot_id}
+    produced_slot_ids = {
+        slot_id
+        for fragment in harvest.fragments
+        for slot_id in fragment.covered_slot_ids
+    }
     assert produced_slot_ids.isdisjoint(_EXCLUDED_SLOT_IDS)
     assert "competitive_position:self_context" in produced_slot_ids
 
