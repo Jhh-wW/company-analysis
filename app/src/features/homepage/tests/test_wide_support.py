@@ -205,6 +205,47 @@ def test_official_origin은_DART_scheme_port_path를_끝까지_보존한다():
     assert not origin.allows_content_url("http://sites.example.com:8080/acme")
 
 
+@pytest.mark.parametrize(
+    ("start_url", "candidate_url", "allowed"),
+    (
+        ("https://portal.example/view?ref=ALPHA", "https://portal.example/view/about?ref=BETA", False),
+        ("https://portal.example/view?ref=ALPHA", "https://portal.example/view/about", False),
+        (
+            "https://portal.example/view?ref=ALPHA",
+            "https://portal.example/view/about?ref=ALPHA&page=2",
+            True,
+        ),
+        (
+            "https://portal.example/view?tenant=ALPHA",
+            "https://portal.example/view/about?tenant=ALPHA&page=2&utm_source=x",
+            True,
+        ),
+        (
+            "https://portal.example/view?tenant=ALPHA",
+            "https://portal.example/view/about?tenant=ALPHA&tenant=BETA",
+            False,
+        ),
+        (
+            "https://portal.example/view?tenant=ALPHA",
+            "https://portal.example/view/about?tenant=ALPHA&company=BETA",
+            False,
+        ),
+        (
+            "https://portal.example/acme",
+            "https://portal.example/acme/about?tenant=BETA",
+            False,
+        ),
+    ),
+)
+def test_query_scope_red_cases는_시작값과_새키_allowlist를_엄격히_지킨다(
+    start_url, candidate_url, allowed
+):
+    origin = parse_official_origin(start_url)
+
+    assert origin is not None
+    assert origin.allows_content_url(candidate_url) is allowed
+
+
 def test_official_origin은_0번_port를_기본_port로_둔갑시키지_않는다():
     assert parse_official_origin("https://company.example:0/tenant") is None
 

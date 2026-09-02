@@ -103,6 +103,98 @@ def test_감사보고서형_작은회사의_숫자표는_사업모델을_지어�
     assert build_fragments(document, company_id=_COMPANY_ID) == ()
 
 
+@pytest.mark.parametrize(
+    "text",
+    (
+        "고객의 문제를 해결하는 맞춤형 솔루션을 제공합니다.",
+        "리스크 관리 솔루션을 제공합니다.",
+        "고객 경험을 개선한 프로젝트 사례입니다.",
+    ),
+)
+def test_고객용_광고문구는_회사의_당면과제나_대응이_아니다(text):
+    document = _document("https://company.example/", (text,))
+
+    covered = {
+        slot_id
+        for fragment in build_fragments(document, company_id=_COMPANY_ID)
+        for slot_id in fragment.covered_slot_ids
+    }
+
+    assert "current_challenges:issue" not in covered
+    assert "current_challenges:response" not in covered
+
+
+def test_구체적_부정영향은_issue만_채운다():
+    document = _document(
+        "https://company.example/",
+        ("원재료 가격 상승으로 제조원가 부담이 커졌습니다.",),
+    )
+
+    covered = {
+        slot_id
+        for fragment in build_fragments(document, company_id=_COMPANY_ID)
+        for slot_id in fragment.covered_slot_ids
+    }
+
+    assert "current_challenges:issue" in covered
+    assert "current_challenges:response" not in covered
+
+
+def test_회사행동만_있고_문제와_연결되지_않으면_response를_채우지_않는다():
+    document = _document(
+        "https://company.example/", ("공급처를 다변화했습니다.",)
+    )
+
+    covered = {
+        slot_id
+        for fragment in build_fragments(document, company_id=_COMPANY_ID)
+        for slot_id in fragment.covered_slot_ids
+    }
+
+    assert "current_challenges:response" not in covered
+
+
+def test_한_문단에서_문제_연결어_회사행동이_함께_있으면_issue와_response를_채운다():
+    document = _document(
+        "https://company.example/",
+        (
+            "원재료 가격 상승으로 부담이 커졌고, 이에 대응해 공급처를 "
+            "다변화했습니다.",
+        ),
+    )
+
+    covered = {
+        slot_id
+        for fragment in build_fragments(document, company_id=_COMPANY_ID)
+        for slot_id in fragment.covered_slot_ids
+    }
+
+    assert {"current_challenges:issue", "current_challenges:response"} <= covered
+
+
+def test_바로_앞_문단의_문제와_명시적으로_연결된_회사행동은_response를_채운다():
+    document = _document(
+        "https://company.example/",
+        (
+            "원재료 가격 상승으로 제조원가 부담이 커졌습니다.",
+            "이에 대응해 공급처를 다변화했습니다.",
+        ),
+    )
+
+    fragments = build_fragments(document, company_id=_COMPANY_ID)
+    covered = {
+        slot_id for fragment in fragments for slot_id in fragment.covered_slot_ids
+    }
+
+    assert {"current_challenges:issue", "current_challenges:response"} <= covered
+    response = next(
+        fragment
+        for fragment in fragments
+        if "current_challenges:response" in fragment.covered_slot_ids
+    )
+    assert response.location.endswith("#1")
+
+
 def test_검증사례는_사례_표지만으로_채우지_않고_행동이나_결과도_요구한다():
     title_only = _document(
         "https://company.example/careers", ("구성원 인터뷰 사례와 스토리",)

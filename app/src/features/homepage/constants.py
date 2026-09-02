@@ -407,8 +407,8 @@ WIDE_ATTEMPT_FAILED: Final[str] = "FAILED"
 WIDE_ATTEMPT_TRUNCATED: Final[str] = "TRUNCATED"
 
 #: 원문 위치·수집기 계약에 함께 봉인할 버전 문자열.
-WIDE_COLLECTOR_VERSION: Final[str] = "homepage-wide-collector/1"
-WIDE_PARSER_VERSION: Final[str] = "homepage-wide-parser/1"
+WIDE_COLLECTOR_VERSION: Final[str] = "homepage-wide-collector/2"
+WIDE_PARSER_VERSION: Final[str] = "homepage-wide-parser/2"
 
 #: 채용·IR·뉴스룸·블로그 호스트·경로를 먼저 살펴보게 하는 우선순위 키워드.
 WIDE_PRIORITY_HOST_KEYWORDS: Final[tuple[str, ...]] = (
@@ -547,8 +547,8 @@ WIDE_SLOT_BODY_KEYWORDS: Final[dict[str, tuple[str, ...]]] = {
     ),
     "portfolio:revenue_link": ("매출 비중", "주력", "핵심 제품", "라인업"),
     "past_changes:completed_execution": ("완료", "달성", "출시했", "런칭했", "성과"),
-    "current_challenges:issue": ("과제", "어려움", "리스크", "문제"),
-    "current_challenges:response": ("대응", "개선", "해결", "극복"),
+    # current_challenges의 issue/response는 낱말표로 판정하지 않는다.
+    # challenge_evidence.py가 부정 영향-회사 행동-연결어 관계를 함께 본다.
     "future_strategy:stated_plan": ("계획", "전략", "로드맵", "예정"),
     "future_strategy:plan_status": ("진행중", "진행 중", "추진", "착수", "실행 단계"),
     "operations_partners:value_chain": ("공급망", "밸류체인", "협력사", "원자재"),

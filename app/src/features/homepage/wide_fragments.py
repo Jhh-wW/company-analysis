@@ -30,6 +30,10 @@ from __future__ import annotations
 
 import hashlib
 
+from src.features.homepage.challenge_evidence import (
+    ChallengeEvidence,
+    classify_challenge_evidence,
+)
 from src.features.homepage.constants import (
     WIDE_REQUIRED_SLOT_IDS,
     WIDE_SLOT_BODY_KEYWORDS,
@@ -77,10 +81,16 @@ def build_fragments(document: WideDocumentIdentity, *, company_id: str) -> tuple
         return ()
 
     candidate_slots = page_slots or WIDE_REQUIRED_SLOT_IDS
+    challenge_evidence = classify_challenge_evidence(document.usable_ranges)
 
     fragments: list[WideFragment] = []
     for index, text in enumerate(document.usable_ranges):
-        slots_for_range = _matched_body_slots(text, candidate_slots)
+        slots_for_range = _matched_body_slots(
+            text,
+            candidate_slots,
+            range_index=index,
+            challenge_evidence=challenge_evidence,
+        )
         if not slots_for_range:
             continue
         score = _SCORE_BODY_KEYWORD_MATCH
@@ -144,17 +154,38 @@ def build_fragments_for_collection(result: WideCollectionResult) -> tuple[WideFr
     )
 
 
-def _matched_body_slots(text: str, candidate_slots: tuple[str, ...]) -> tuple[str, ...]:
+def _matched_body_slots(
+    text: str,
+    candidate_slots: tuple[str, ...],
+    *,
+    range_index: int,
+    challenge_evidence: ChallengeEvidence,
+) -> tuple[str, ...]:
     """후보 슬롯 중 구간 본문에 직접 신호가 있는 것만 고른다."""
     lowered = text.lower()
     return tuple(
         slot_id
         for slot_id in candidate_slots
-        if _has_slot_body_signal(slot_id, lowered)
+        if _has_slot_body_signal(
+            slot_id,
+            lowered,
+            range_index=range_index,
+            challenge_evidence=challenge_evidence,
+        )
     )
 
 
-def _has_slot_body_signal(slot_id: str, lowered_text: str) -> bool:
+def _has_slot_body_signal(
+    slot_id: str,
+    lowered_text: str,
+    *,
+    range_index: int,
+    challenge_evidence: ChallengeEvidence,
+) -> bool:
+    if slot_id == "current_challenges:issue":
+        return challenge_evidence.has_issue(range_index)
+    if slot_id == "current_challenges:response":
+        return challenge_evidence.has_response(range_index)
     if slot_id == "culture:verified_case":
         # 「사례」라는 메뉴/제목만으로 실제 사례가 존재한다고 주장하지 않는다.
         # 사례 표지와 실행·결과 중 하나가 함께 있어야 하며, 수상·인증은 그

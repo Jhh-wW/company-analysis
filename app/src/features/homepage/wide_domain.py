@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import posixpath
 import urllib.parse
 from dataclasses import dataclass
@@ -45,34 +46,61 @@ _HOST_SAFE_KEYWORDS: frozenset[str] = frozenset(WIDE_PRIORITY_HOST_KEYWORDS)
 _DEFAULT_PORT_BY_SCHEME = {"http": 80, "https": 443}
 _ALLOWED_WEB_PORTS = frozenset({80, 443, 8080, 8443})
 
-_TRACKING_PARAM_PREFIXES: tuple[str, ...] = ("utm_",)
-_TRACKING_PARAM_EXACT: frozenset[str] = frozenset(
-    {"gclid", "fbclid", "mc_cid", "mc_eid", "igshid", "ref", "ref_src", "spm", "yclid"}
+_AD_TRACKING_PARAM_PREFIXES: tuple[str, ...] = ("utm_",)
+_AD_TRACKING_PARAM_EXACT: frozenset[str] = frozenset(
+    {"gclid", "fbclid", "mc_cid", "mc_eid", "igshid", "spm", "yclid"}
+)
+_NAVIGATION_QUERY_KEYS: frozenset[str] = frozenset(
+    {"page", "p", "offset", "limit", "sort", "order", "lang", "locale"}
 )
 
 
-def _is_tracking_param(key: str) -> bool:
+def _is_ad_tracking_param(key: str) -> bool:
     lowered = key.casefold()
-    return lowered.startswith(_TRACKING_PARAM_PREFIXES) or lowered in _TRACKING_PARAM_EXACT
+    return (
+        lowered.startswith(_AD_TRACKING_PARAM_PREFIXES)
+        or lowered in _AD_TRACKING_PARAM_EXACT
+    )
 
 
-def _meaningful_query_pairs(raw_query: str) -> tuple[tuple[str, str], ...]:
-    """입주자 식별에 쓸 수 있는 쿼리만 순서와 무관한 exact 값으로 만든다.
+def _query_pairs(raw_query: str) -> tuple[tuple[str, str], ...]:
+    """쿼리 key/value 멀티셋을 순서와 무관한 exact 값으로 만든다.
 
-    추적 파라미터는 회사 경계가 아니므로 제외한다. 나머지 키와 값은 대소문자,
-    빈 값, 중복 횟수까지 그대로 보존한다. 따라서 ``company=ACME``로 시작한
-    공유 URL은 ``company=OTHER``나 ``company``가 빠진 URL로 넓어질 수 없다.
+    시작 URL에서는 ``ref``·``utm_*``도 입주자를 가르는 값일 수 있으므로
+    예외 없이 전부 보존한다. 대소문자·빈 값·중복 횟수도 exact 경계다.
     """
 
     return tuple(
         sorted(
-            (key, value)
-            for key, value in urllib.parse.parse_qsl(
-                raw_query, keep_blank_values=True
-            )
-            if not _is_tracking_param(key)
+            urllib.parse.parse_qsl(raw_query, keep_blank_values=True)
         )
     )
+
+
+def _query_scope_allows(start_query: str, candidate_query: str) -> bool:
+    """시작 쿼리를 고정하고, 좁은 탐색·광고 파라미터만 새로 허용한다."""
+
+    start_pairs = _query_pairs(start_query)
+    candidate_pairs = _query_pairs(candidate_query)
+    start_keys = {key for key, _value in start_pairs}
+
+    # 시작에 있던 각 key는 값·중복 횟수까지 같은 멀티셋이어야 한다.
+    for key in start_keys:
+        if tuple(pair for pair in candidate_pairs if pair[0] == key) != tuple(
+            pair for pair in start_pairs if pair[0] == key
+        ):
+            return False
+
+    # 시작에 없던 의미불명 key는 tenant 경계를 새로 만들 수 있으므로
+    # fail-closed 한다. 페이지 이동 allowlist와 명백한 광고 추적키만 예외다.
+    for key, _value in candidate_pairs:
+        if key in start_keys:
+            continue
+        lowered = key.casefold()
+        if lowered in _NAVIGATION_QUERY_KEYS or _is_ad_tracking_param(key):
+            continue
+        return False
+    return True
 
 
 def _normalized_path(raw_path: str) -> str:
@@ -135,6 +163,27 @@ class OfficialOrigin:
         return f"{self.scheme}://{self.host}:{self.port}{self.path_prefix}"
 
     @property
+    def scope_query_keys(self) -> tuple[str, ...]:
+        """문서 정규화에서도 반드시 보존할 시작 query key들."""
+
+        return tuple(dict.fromkeys(key for key, _value in _query_pairs(self.start_query)))
+
+    @property
+    def scope_digest(self) -> str:
+        """회사 path/query 경계를 버전 독립적으로 식별하는 SHA-256."""
+
+        scope = urllib.parse.urlunsplit(
+            (
+                self.scheme,
+                self.authority,
+                self.start_path,
+                urllib.parse.urlencode(_query_pairs(self.start_query)),
+                "",
+            )
+        )
+        return hashlib.sha256(scope.encode("utf-8")).hexdigest()
+
+    @property
     def root_url(self) -> str:
         return urllib.parse.urlunsplit(
             (self.scheme, self.authority, self.start_path, self.start_query, "")
@@ -177,12 +226,10 @@ class OfficialOrigin:
         parsed = self._parsed_same_origin(value)
         if parsed is None:
             return False
-        # DART 시작 URL의 쿼리가 공유 host/path에서 회사를 가르는 유일한
-        # 경계일 수 있다. 의미 있는 시작 쿼리가 있으면 후보에도 같은
-        # key/value 멀티셋이 정확히 있어야 한다. 시작 쿼리가 없거나 추적
-        # 파라미터뿐이면 기존처럼 경로 안을 탐색한다.
-        start_scope = _meaningful_query_pairs(self.start_query)
-        if start_scope and _meaningful_query_pairs(parsed.query) != start_scope:
+        # DART 시작 쿼리는 ref·utm까지 회사/입주자 경계일 수 있다. 시작의
+        # 모든 key/value 멀티셋을 exact 보존하고, 새 쿼리는 좁은 탐색·광고
+        # allowlist만 허용한다. 이 검사는 canonicalize 전에 수행해야 한다.
+        if not _query_scope_allows(self.start_query, parsed.query):
             return False
         try:
             path = _normalized_path(parsed.path)
@@ -198,6 +245,15 @@ class OfficialOrigin:
             and self.start_path.casefold().endswith(_KNOWN_PAGE_SUFFIXES)
         )
         return not exact_file_scope and path.startswith(self.path_prefix)
+
+    def allows_query_scope(self, value: str) -> bool:
+        """호스트·경로와 별개로 최상위 시작 query 경계만 확인한다."""
+
+        try:
+            candidate_query = urllib.parse.urlsplit(value).query
+        except (TypeError, ValueError):
+            return False
+        return _query_scope_allows(self.start_query, candidate_query)
 
     def allows_infrastructure_url(self, value: str) -> bool:
         parsed = self._parsed_same_origin(value)
@@ -218,6 +274,18 @@ class OfficialOrigin:
             start_path=self.start_path,
             path_prefix=self.path_prefix,
             start_query=self.start_query,
+        )
+
+    def with_query_scope(self, start_query: str) -> "OfficialOrigin":
+        """새 공식 하위호스트에도 최초 DART query 경계를 그대로 물린다."""
+
+        return OfficialOrigin(
+            scheme=self.scheme,
+            host=self.host,
+            port=self.port,
+            start_path=self.start_path,
+            path_prefix=self.path_prefix,
+            start_query=start_query,
         )
 
 
@@ -435,17 +503,21 @@ def bind_linked_host(
     return None
 
 
-def canonicalize_url(url: str) -> str:
-    """fragment를 없애고 추적 파라미터를 뺀 정규화 URL을 만든다.
+def canonicalize_url(
+    url: str, *, preserve_query_keys: tuple[str, ...] = ()
+) -> str:
+    """fragment를 없애고 비경계 광고 추적 파라미터를 뺀 정규화 URL을 만든다.
 
     스킴·호스트는 소문자로, 쿼리는 키 순서로 정렬해 같은 문서가 파라미터
-    순서차이만으로 다른 URL이 되지 않게 한다.
+    순서차이만으로 다른 URL이 되지 않게 한다. ``preserve_query_keys``는
+    시작 URL의 scope key(ref·utm 포함)를 문서 identity에 남길 때 쓴다.
     """
     parsed = urllib.parse.urlsplit(url)
+    preserve_keys = frozenset(preserve_query_keys)
     query_pairs = [
         (key, value)
         for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
-        if not _is_tracking_param(key)
+        if key in preserve_keys or not _is_ad_tracking_param(key)
     ]
     query = urllib.parse.urlencode(sorted(query_pairs))
     path = parsed.path or "/"

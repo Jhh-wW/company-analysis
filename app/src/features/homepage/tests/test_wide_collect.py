@@ -8,6 +8,7 @@ IR PDF 위임은 이미 `test_ir_pdf.py`가 그 내부 로직을 검증하므로
 
 from __future__ import annotations
 
+import hashlib
 import urllib.parse
 
 import pytest
@@ -17,6 +18,8 @@ from src.features.homepage.constants import (
     WIDE_MAX_HOSTS,
     WIDE_MAX_PAGES,
     WIDE_MAX_SITEMAP_ENTRIES,
+    WIDE_COLLECTOR_VERSION,
+    WIDE_PARSER_VERSION,
     WIDE_REQUIRED_SLOT_IDS,
     WIDE_REQUIRED_SLOT_IDS_BY_SECTION,
 )
@@ -352,8 +355,10 @@ def test_DART_공유호스트의_port와_회사경로를_버리지_않는다():
 def test_공유host_query_tenant는_시작값을_정확히_보존하고_다른입주자를_0회호출한다():
     base = "https://portal.example"
     target_root = f"{base}/view?tenant=ALPHA"
-    target_child = f"{base}/view/about?tenant=ALPHA"
+    target_child = f"{base}/view/about?tenant=ALPHA&page=2&utm_source=x"
     other_tenant = f"{base}/view/about?tenant=BETA"
+    duplicate_tenant = f"{base}/view/about?tenant=ALPHA&tenant=BETA"
+    injected_company = f"{base}/view/about?tenant=ALPHA&company=BETA"
     pages = {
         f"{base}/robots.txt": _page(
             ROBOTS_ALLOW_ALL, f"{base}/robots.txt", "text/plain"
@@ -362,11 +367,15 @@ def test_공유host_query_tenant는_시작값을_정확히_보존하고_다른�
         target_root: _page(
             _body("2010년에 설립한 법인")
             + f'<a href="{target_child}">대상 회사</a>'
-            + f'<a href="{other_tenant}">다른 입주자</a>',
+            + f'<a href="{other_tenant}">다른 입주자</a>'
+            + f'<a href="{duplicate_tenant}">중복 tenant</a>'
+            + f'<a href="{injected_company}">새 company</a>',
             target_root,
         ),
         target_child: _page(_body("주요 사업을 영위하는 전문기업"), target_child),
         other_tenant: _page(_body("다른 회사의 주요 사업"), other_tenant),
+        duplicate_tenant: _page(_body("다른 회사의 중복 tenant"), duplicate_tenant),
+        injected_company: _page(_body("다른 company 본문"), injected_company),
     }
     site = _FakeWideSite(pages)
 
@@ -378,7 +387,146 @@ def test_공유host_query_tenant는_시작값을_정확히_보존하고_다른�
 
     assert target_child in site.calls
     assert other_tenant not in site.calls
+    assert duplicate_tenant not in site.calls
+    assert injected_company not in site.calls
     assert all("tenant=BETA" not in document.canonical_url for document in result.documents)
+
+
+def test_ref_scope는_변경과_누락을_0회호출하고_page_탐색만_허용한다():
+    base = "https://portal.example"
+    root = f"{base}/view?ref=ALPHA"
+    allowed = f"{base}/view/about?ref=ALPHA&page=2"
+    changed = f"{base}/view/about?ref=BETA"
+    missing = f"{base}/view/about"
+    pages = {
+        f"{base}/robots.txt": _page(
+            ROBOTS_ALLOW_ALL, f"{base}/robots.txt", "text/plain"
+        ),
+        f"{base}/sitemap.xml": _missing(f"{base}/sitemap.xml"),
+        root: _page(
+            _body("2010년에 설립한 법인")
+            + f'<a href="{allowed}">다음 페이지</a>'
+            + f'<a href="{changed}">다른 ref</a>'
+            + f'<a href="{missing}">ref 누락</a>',
+            root,
+        ),
+        allowed: _page(_body("주요 사업을 영위하는 전문기업"), allowed),
+        changed: _page(_body("다른 회사 본문"), changed),
+        missing: _page(_body("경계가 사라진 본문"), missing),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(site, root_homepage_url=root, company_name="")
+
+    assert allowed in site.calls
+    assert changed not in site.calls
+    assert missing not in site.calls
+    assert any(
+        document.canonical_url == f"{base}/view/about?page=2&ref=ALPHA"
+        for document in result.documents
+    )
+
+
+def test_시작에_없던_tenant_query는_queue전_거절되어_0회호출된다():
+    base = "https://portal.example"
+    root = f"{base}/acme"
+    injected = f"{base}/acme/about?tenant=BETA"
+    pages = {
+        f"{base}/robots.txt": _page(
+            ROBOTS_ALLOW_ALL, f"{base}/robots.txt", "text/plain"
+        ),
+        f"{base}/sitemap.xml": _missing(f"{base}/sitemap.xml"),
+        root: _page(
+            _body("2010년에 설립한 법인")
+            + f'<a href="{injected}">입주자 주입</a>',
+            root,
+        ),
+        injected: _page(_body("다른 회사 본문"), injected),
+    }
+    site = _FakeWideSite(pages)
+
+    _collect(site, root_homepage_url=root, company_name="")
+
+    assert injected not in site.calls
+
+
+def test_등록_하위도메인도_최초_DART_query_scope를_우회하지_못한다():
+    base = "https://company.example"
+    injected = "https://recruit.company.example/about?tenant=BETA"
+    pages = {
+        f"{base}/robots.txt": _page(
+            ROBOTS_ALLOW_ALL, f"{base}/robots.txt", "text/plain"
+        ),
+        f"{base}/sitemap.xml": _missing(f"{base}/sitemap.xml"),
+        f"{base}/": _page(
+            _body("2010년에 설립한 법인")
+            + f'<a href="{injected}">하위호스트 tenant 주입</a>',
+            f"{base}/",
+        ),
+        injected: _page(_body("다른 입주자 본문"), injected),
+    }
+    site = _FakeWideSite(pages)
+
+    _collect(site, company_name="")
+
+    assert injected not in site.calls
+    assert not any("recruit.company.example" in url for url in site.calls)
+
+
+def test_ref가_다른_두_scope는_저장문서_ID와_scope_digest가_서로_다르다():
+    base = "https://portal.example"
+
+    def collect_ref(ref: str):
+        root = f"{base}/view?ref={ref}"
+        pages = {
+            f"{base}/robots.txt": _page(
+                ROBOTS_ALLOW_ALL, f"{base}/robots.txt", "text/plain"
+            ),
+            f"{base}/sitemap.xml": _missing(f"{base}/sitemap.xml"),
+            root: _page(_body("2010년에 설립한 법인"), root),
+        }
+        result = _collect(
+            _FakeWideSite(pages), root_homepage_url=root, company_name=""
+        )
+        return next(document for document in result.documents if "portal.example" in document.canonical_url)
+
+    alpha = collect_ref("ALPHA")
+    beta = collect_ref("BETA")
+
+    assert alpha.canonical_url.endswith("?ref=ALPHA")
+    assert beta.canonical_url.endswith("?ref=BETA")
+    assert alpha.document_id != beta.document_id
+    assert alpha.identity_binding != beta.identity_binding
+
+
+def test_v2_산출은_버전이_ID에_봉인되어_v1_따뜻한캐시와_섞이지_않는다():
+    base = "https://company.example"
+    pages = {
+        f"{base}/robots.txt": _page(
+            ROBOTS_ALLOW_ALL, f"{base}/robots.txt", "text/plain"
+        ),
+        f"{base}/sitemap.xml": _missing(f"{base}/sitemap.xml"),
+        f"{base}/": _page(_body("2010년에 설립한 법인"), f"{base}/"),
+    }
+
+    first = _collect(_FakeWideSite(pages), company_name="")
+    second = _collect(_FakeWideSite(pages), company_name="")
+    first_document = next(
+        document for document in first.documents if document.canonical_url == f"{base}/"
+    )
+    second_document = next(
+        document for document in second.documents if document.canonical_url == f"{base}/"
+    )
+    legacy_v1_id = hashlib.sha256(f"{base}/".encode("utf-8")).hexdigest()
+
+    assert WIDE_COLLECTOR_VERSION == "homepage-wide-collector/2"
+    assert WIDE_PARSER_VERSION == "homepage-wide-parser/2"
+    assert first_document.collector_version == WIDE_COLLECTOR_VERSION
+    assert first_document.parser_version == WIDE_PARSER_VERSION
+    assert first_document.document_id != legacy_v1_id
+    assert first_document.document_id == second_document.document_id
+
+
 
 
 def test_같은_host라도_scheme_port_path가_바뀐_redirect는_차단된다():

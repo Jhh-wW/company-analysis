@@ -210,6 +210,26 @@ class _QueueItem:
     source_page_url: str
 
 
+def _scoped_canonical_url(url: str, origin: OfficialOrigin) -> str:
+    """이미 scope 검사를 통과한 URL에서 시작 query key를 잃지 않는다."""
+
+    return canonicalize_url(url, preserve_query_keys=origin.scope_query_keys)
+
+
+def _wide_document_id(canonical_url: str, origin: OfficialOrigin) -> str:
+    """scope와 산출 모양 버전을 함께 봉인해 따뜻한 캐시 충돌을 막는다."""
+
+    material = "\0".join(
+        (
+            canonical_url,
+            origin.scope_digest,
+            WIDE_COLLECTOR_VERSION,
+            WIDE_PARSER_VERSION,
+        )
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def collect_official_web_documents(
     *,
     company_id: str,
@@ -317,7 +337,7 @@ def _seed_host_root(
     )
 
     root_url = origin.root_url
-    canonical = canonicalize_url(root_url)
+    canonical = _scoped_canonical_url(root_url, origin)
     if canonical in seen_canonical:
         return
     seen_canonical.add(canonical)
@@ -382,6 +402,7 @@ def _run_web_crawl(
         _visit_page(
             state,
             item=item,
+            root_origin=root_origin,
             root_host=root_origin.host,
             transport=transport,
             queue=queue,
@@ -393,14 +414,20 @@ def _visit_page(
     state: _CollectionState,
     *,
     item: _QueueItem,
+    root_origin: OfficialOrigin,
     root_host: str,
     transport: RawWideTransport,
     queue: list[_QueueItem],
     seen_canonical: set[str],
 ) -> None:
+    # 회사 query scope는 host가 바뀌어도 최초 DART 시작 URL이 정본이다.
+    # 이 검사는 candidate canonicalize·robots·본문 transport보다 먼저 한다.
+    if not root_origin.allows_query_scope(item.url):
+        return
     candidate_origin = parse_official_origin(item.url)
     if candidate_origin is None:
         return
+    candidate_origin = candidate_origin.with_query_scope(root_origin.start_query)
     host = candidate_origin.host
     binding = state.bound_hosts.get(host)
     origin = state.bound_origins.get(host)
@@ -482,7 +509,19 @@ def _visit_page(
             documents_seen = 1
             state.documents.append(document)
             for link in extract_links(response.text, response.effective_url):
-                canonical_link = canonicalize_url(link)
+                if not root_origin.allows_query_scope(link):
+                    continue
+                link_host = (
+                    urllib.parse.urlsplit(link).hostname or ""
+                ).casefold()
+                if link_host == origin.host:
+                    # scope 판정은 tracking 제거나 query 정렬보다 먼저 한다.
+                    # 거절 URL은 queue에도 넣지 않아 transport 0회를 보장한다.
+                    if not origin.allows_content_url(link):
+                        continue
+                    canonical_link = _scoped_canonical_url(link, origin)
+                else:
+                    canonical_link = canonicalize_url(link)
                 if canonical_link in seen_canonical:
                     continue
                 seen_canonical.add(canonical_link)
@@ -539,9 +578,9 @@ def _build_web_document(
         return None
     state.content_hashes.add(content_sha256)
 
-    canonical = canonicalize_url(response.effective_url)
+    canonical = _scoped_canonical_url(response.effective_url, origin)
     host = (urllib.parse.urlsplit(canonical).hostname or "").casefold()
-    document_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    document_id = _wide_document_id(canonical, origin)
     return WideDocumentIdentity(
         company_id=state.company_id,
         document_id=document_id,
@@ -552,7 +591,9 @@ def _build_web_document(
         published_on="",
         collected_at=state.collected_at,
         content_sha256=content_sha256,
-        identity_binding=binding.identity_binding,
+        identity_binding=(
+            f"{binding.identity_binding}; scope_sha256={origin.scope_digest}"
+        ),
         usable_ranges=ranges,
         collector_version=WIDE_COLLECTOR_VERSION,
         parser_version=WIDE_PARSER_VERSION,
@@ -632,13 +673,19 @@ def _discover_sitemap(
     # 그 17개 slot 전부의 유일한 확인 경로가 아니므로 상태와 무관하게
     # 항상 OPTIONAL이다(_BROAD_SLOT_REQUIREMENT 참조).
     for candidate in urls:
+        if not origin.allows_query_scope(candidate):
+            continue
         candidate_host = (urllib.parse.urlsplit(candidate).hostname or "").casefold()
         if candidate_host == origin.host:
             if not origin.allows_content_url(candidate):
                 continue
         elif bind_registered_subdomain(root_host, candidate_host) is None:
             continue  # sitemap이 도메인군 밖 URL을 적어도 따라가지 않는다
-        canonical_candidate = canonicalize_url(candidate)
+        canonical_candidate = (
+            _scoped_canonical_url(candidate, origin)
+            if candidate_host == origin.host
+            else canonicalize_url(candidate)
+        )
         if canonical_candidate in seen_canonical:
             continue
         seen_canonical.add(canonical_candidate)
@@ -881,15 +928,17 @@ def _build_ir_document(
         else ""
     )
     is_external_attachment = bool(attachment_host and attachment_host != origin.host)
-    canonical = canonicalize_url(
-        attachment_url if is_external_attachment else source_url
+    canonical = (
+        canonicalize_url(attachment_url)
+        if is_external_attachment
+        else _scoped_canonical_url(source_url, origin)
     )
     content_sha256 = hashlib.sha256("\n".join(ranges).encode("utf-8")).hexdigest()
     if content_sha256 in state.content_hashes:
         return None
     state.content_hashes.add(content_sha256)
 
-    document_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    document_id = _wide_document_id(canonical, origin)
     title = str(first.get("문서명") or "").strip() or origin.host
     published_on = str(first.get("문서일") or "").strip()
     return WideDocumentIdentity(
@@ -903,9 +952,10 @@ def _build_ir_document(
         collected_at=state.collected_at,
         content_sha256=content_sha256,
         identity_binding=(
-            f"{binding.identity_binding}; 공식 HTML exact-link 외부 IR 첨부: {attachment_url}"
+            f"{binding.identity_binding}; scope_sha256={origin.scope_digest}; "
+            f"공식 HTML exact-link 외부 IR 첨부: {attachment_url}"
             if is_external_attachment
-            else binding.identity_binding
+            else f"{binding.identity_binding}; scope_sha256={origin.scope_digest}"
         ),
         usable_ranges=ranges,
         collector_version=WIDE_COLLECTOR_VERSION,
