@@ -60,6 +60,8 @@ from src.features.sharelink import tracks as share_tracks
 from src.features.sharelink.constants import (
     KEY_COOKIE_NAME,
     LINK_BUDGET_EXHAUSTED_MESSAGE,
+    LINK_TOTAL_BUDGET_EXHAUSTED_MESSAGE,
+    LINK_TOTAL_BUDGET_KRW,
     PUBLIC_NOT_ALLOWED_MESSAGE,
 )
 from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
@@ -614,11 +616,50 @@ def _guard_run(
         ) > 0
     ):
         stored_bucket = bucket
+    # ★ LINK만 «수명 전체» 누적 상한을 하나 더 본다 (2026-09-02 사용자 결정 D-G1).
+    #   하루 상한은 자정마다 되살아난다. 링크는 기본 60일을 사니까 하루 상한만
+    #   두면 링크 하나의 최악 노출이 상한 × 60이었다. 누적 상한이 그 곱셈을 끊는다.
+    #   MEMBER·ADMIN·PUBLIC은 사람·전체 통장이라 「수명」 개념이 없어 보지 않는다.
+    link_total_spent: Optional[float] = None
+    link_total_cap: Optional[float] = None
+    if costs_money and track is share_tracks.Track.LINK:
+        try:
+            with storage_db.connect() as conn:
+                link_key_hash = share_store.key_hash_of(bucket)
+                link_row = share_store.load_by_hash(conn, link_key_hash)
+                link_total_spent = share_store.link_total_spent_krw(
+                    conn, key_hash=link_key_hash
+                )
+        except Exception:
+            # 누적을 못 읽는데 열어 주면 저장소 장애가 곧 무제한 지출이 된다.
+            logger.exception("링크 누적 사용액을 읽지 못했습니다")
+            return _throttled(
+                request, BUDGET_STORE_BLOCKED_MESSAGE, "budget-store"
+            )
+        # 링크가 사라졌으면 기본 상한으로 본다. 못 찾았다고 상한을 푸는 쪽으로
+        # 떨어지면 안 된다 (링크 자체의 유효성은 다른 검사가 따로 본다).
+        link_total_cap = (
+            link_row.effective_total_budget_krw
+            if link_row is not None
+            else LINK_TOTAL_BUDGET_KRW
+        )
+    link_total_exhausted = (
+        link_total_spent is not None
+        and link_total_cap is not None
+        and not share_logic.can_start_within_total_budget(
+            link_total_spent, link_total_cap
+        )
+    )
     budget_exhausted = (
         costs_money
         and cap is not None
         and not share_logic.can_start_new_run(
-            paid_runtime._LINK_SPEND, stored_bucket, clock.today_kst(), cap
+            paid_runtime._LINK_SPEND,
+            stored_bucket,
+            clock.today_kst(),
+            cap,
+            total_spent_krw=link_total_spent,
+            total_cap_krw=link_total_cap,
         )
     )
     if track is share_tracks.Track.MEMBER:
@@ -668,12 +709,21 @@ def _guard_run(
         #   막는 것은 «새로 AI를 부르는 일»뿐이다 (2026-08-16 사용자 결정).
         # ★ 모르는 손님(상한 0원)에게는 «다른 말»을 한다 — 「다 썼다」가 아니라
         #   「이 기능은 초대받은 분만」이다. 사실이 다르면 안내도 달라야 한다.
-        message = (
-            PUBLIC_NOT_ALLOWED_MESSAGE
-            if track is share_tracks.Track.PUBLIC
-            else LINK_BUDGET_EXHAUSTED_MESSAGE
+        # ★ 누적 소진도 «다른 말»이다 — 하루 소진은 「내일 다시 열립니다」가 사실이지만
+        #   누적 소진은 내일도 안 열린다. 같은 말을 하면 헛되이 기다리게 한다.
+        if track is share_tracks.Track.PUBLIC:
+            return _throttled(
+                request, PUBLIC_NOT_ALLOWED_MESSAGE, f"budget:{track.value}"
+            )
+        if link_total_exhausted:
+            return _throttled(
+                request,
+                LINK_TOTAL_BUDGET_EXHAUSTED_MESSAGE,
+                f"budget-total:{track.value}",
+            )
+        return _throttled(
+            request, LINK_BUDGET_EXHAUSTED_MESSAGE, f"budget:{track.value}"
         )
-        return _throttled(request, message, f"budget:{track.value}")
 
     # ★ 통과할 때만 횟수를 적는다 — 거절당한 요청까지 세면
     #   「돈도 안 썼는데 차단」이 된다 (budget/logic.py 참고).
