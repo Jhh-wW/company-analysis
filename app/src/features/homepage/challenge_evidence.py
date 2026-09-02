@@ -96,6 +96,25 @@ _NEGATIVE_STATE_IMPROVEMENT_PATTERN = re.compile(
     r".{0,10}?(?:감소|하락|완화|낮아|줄어|개선)"
 )
 
+# 신호 낱말 자체는 부정적이어도, 그 신호가 「않았다」·「없었다」처럼
+# 명시적으로 부정되거나 「해소」·「미발생」·「아니다」처럼 이미 끝난 일로
+# 서술되면 지금 회사가 겪는 당면과제가 아니다(P1-C). 부분 문자열
+# 매칭만으로는 이 부정·해소 서술을 볼 수 없어 별도로 확인한다.
+_NEGATION_OR_RESOLUTION_MARKERS: tuple[str, ...] = (
+    "않았",
+    "않는다",
+    "않습니다",
+    "않아",
+    "없었",
+    "없습니다",
+    "해소",
+    "미발생",
+    "아니었",
+    "아니다",
+    "아닌",
+    "아닙니다",
+)
+
 _THIRD_PARTY_OWNER_PATTERN = re.compile(
     r"(?:고객사|고객|협력사|공급업체|파트너사|경쟁사)(?:의|가|는|은|이|에서)?"
 )
@@ -181,6 +200,8 @@ def _has_concrete_issue(text: str) -> bool:
             continue
         if _belongs_to_third_party(text, start):
             continue
+        if _is_negated_or_resolved(text, end):
+            continue
         return True
     return False
 
@@ -261,3 +282,20 @@ def _belongs_to_third_party(text: str, signal_start: int) -> bool:
         return False
     last_owner_end = owners[-1].end()
     return _COMPANY_SUBJECT_PATTERN.search(prefix, last_owner_end) is None
+
+
+def _is_negated_or_resolved(text: str, signal_end: int) -> bool:
+    """부정 신호 뒤 같은 문장 끝까지 부정·해소 서술이 있는지 본다(P1-C).
+
+    ``차질``·``부족`` 같은 신호 낱말은 그 자체로는 방향을 모른다.
+    「차질이 발생하지 않았다」・「부족 문제는 없었다」・「압박이 해소됐다」・
+    「지연은 미발생했다」・「어려움은 사실이 아니다」처럼 신호 뒤에 명시적
+    부정·해소 서술이 뒤따르면 지금 겪는 당면과제가 아니라 «문제가 없다»는
+    선언이다. 신호 낱말 앞부분(예: 「해소」)까지 부정 마커로 오인하지
+    않도록 신호가 끝난 지점부터만 같은 문장 끝까지 검사한다.
+    """
+
+    sentence_end_match = _SENTENCE_BOUNDARY_PATTERN.search(text, signal_end)
+    sentence_end = sentence_end_match.start() if sentence_end_match else len(text)
+    remainder = text[signal_end:sentence_end]
+    return any(marker in remainder for marker in _NEGATION_OR_RESOLUTION_MARKERS)

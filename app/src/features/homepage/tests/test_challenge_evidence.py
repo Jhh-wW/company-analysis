@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.features.homepage.challenge_evidence import classify_challenge_evidence
 
 
@@ -88,3 +90,35 @@ def test_실적_지표_없이_하락_한_단어만으로는_issue가_아니다()
     evidence = classify_challenge_evidence(("금리가 하락했습니다.",))
 
     assert not evidence.has_issue(0)
+
+
+# ══════════════════════════════════════════════════════════
+# P1-C: 신호 낱말이 부정·해소 서술로 되돌려지면 issue가 아니다.
+# ``_has_concrete_issue``는 부분 문자열 매칭이라 방향을 모른다 —
+# 「차질이 발생하지 않았다」처럼 신호 뒤에 명시적 부정·해소가 있으면
+# 회사가 실제로 겪는 당면과제가 아니라 «문제가 없다»는 선언이다.
+# ══════════════════════════════════════════════════════════
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "차질이 발생하지 않았습니다.",
+        "공급망 부족 문제는 없었습니다.",
+        "원가 압박이 해소되었습니다.",
+        "생산 지연은 미발생했습니다.",
+        "자금 조달 어려움은 사실이 아닙니다.",
+    ],
+)
+def test_신호_낱말이_부정되거나_해소되면_issue가_아니다(text: str) -> None:
+    evidence = classify_challenge_evidence((text,))
+
+    assert not evidence.has_issue(0)
+
+
+def test_부정_마커가_다음_문장에_있으면_이_문장의_issue는_그대로_유지된다() -> None:
+    evidence = classify_challenge_evidence(
+        ("원가 부담이 커졌습니다. 다른 문제는 해소되었습니다.",)
+    )
+
+    assert evidence.has_issue(0)
