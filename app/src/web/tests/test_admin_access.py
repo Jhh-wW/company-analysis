@@ -688,33 +688,37 @@ def test_기존_링크에도_없는_보고서를_연결할수없다(admin: TestC
         assert share_store.load(conn, key).report_id == ""
 
 
-def test_시작보고서는_지원회사_꼬리표와_달라도_새링크와_기존링크에_연결된다(
+def test_지원회사_꼬리표는_받은사람의_분석_대상을_묶지_않는다(
     admin: TestClient,
 ):
-    report_id = _보고서를_만든다(admin)  # canonical 진영 보고서
+    """★ 2026-09-02 기대값 이전 — 앞선 시험은 「꼬리표와 다른 회사 보고서도
+    링크에 묶인다」를 지켰다. 사용자 결정(D-G3)으로 그 동작을 뒤집었다.
+    실수로 다른 회사 보고서를 고정하면 받은 사람이 엉뚱한 보고서를 보기 때문이다.
+
+    다만 원래 이 시험이 지키려던 «진짜» 성질은 따로 있다 — 회사·직무는 권한
+    범위가 아니라 전달 맥락 꼬리표라는 것. 그 성질은 링크를 연 사람이 다른
+    회사를 자유롭게 분석할 수 있다는 것으로 그대로 지킨다.
+    묶기 거부 쪽은 `test_다른_회사_보고서는_링크에_묶이지_않는다`가 이어받는다.
+    """
     created = admin.post(
         "/admin/link/new",
         data={"company": "카카오"},
         follow_redirects=False,
     )
-    key, key_hash = _issued_link(created)
+    key, _key_hash = _issued_link(created)
 
-    new_link = admin.post(
-        "/admin/link/new",
-        data={"company": "카카오", "report_reference": report_id},
-        follow_redirects=False,
-    )
-    existing_link = admin.post(
-        "/admin/link/report",
-        data={"key": key_hash, "report_reference": report_id},
-        follow_redirects=False,
-    )
+    opened = admin.get(f"/k/{key}", follow_redirects=False)
+    시작화면 = admin.get("/")
 
-    second_key, _second_hash = _issued_link(new_link)
-    assert existing_link.status_code == 303
+    # 꼬리표가 「카카오」여도 카카오 전용 화면으로 가두지 않는다 — 아무나 고를 수
+    # 있는 입력 화면으로 보낸다.
+    assert opened.status_code == 303
+    assert opened.headers["location"] == "/"
+    assert 시작화면.status_code == 200
+    assert 'name="company"' in 시작화면.text
+    assert 'value="카카오"' not in 시작화면.text
     with storage_db.connect() as conn:
-        assert share_store.load(conn, key).report_id == report_id
-        assert share_store.load(conn, second_key).report_id == report_id
+        assert share_store.load(conn, key).report_id == ""
 
 
 def test_기간이_지난_보고서는_새링크와_기존링크_어느쪽에도_연결할수없다(
@@ -1778,3 +1782,144 @@ def test_옛_계약에서는_발급이_여전히_404다(admin: TestClient, monke
     assert "/k/" not in blocked.text
     with storage_db.connect() as conn:
         assert share_store.list_all(conn) == []
+
+
+# ══════════════════════════════════════════════════════════
+# ⑥ 링크에 묶는 보고서는 그 링크의 회사와 같아야 한다
+# ══════════════════════════════════════════════════════════
+
+
+def _회사만_바꿔_보고서를_복사한다(
+    source_report_id: str,
+    *,
+    report_id: str,
+    company: str,
+    company_id: str = "",
+) -> str:
+    """이미 만든 데모 보고서를 복사해 «회사 표시명·고유번호만» 바꿔 저장한다.
+
+    ★ 동명 회사 상황은 실제 조사로는 만들 수 없어서(데모 회사는 하나뿐) 저장소에
+      직접 만든다. 본문은 건드리지 않으므로 판정에 쓰이는 값만 달라진다.
+    """
+    with storage_db.connect() as conn:
+        원본 = report_store.load(conn, source_report_id)
+        assert 원본 is not None
+        report_store.save(
+            conn,
+            report_id,
+            company_id,
+            "",
+            replace(원본, company=company, company_id=company_id),
+        )
+    return report_id
+
+
+def test_다른_회사_보고서는_링크에_묶이지_않는다(admin: TestClient):
+    """★ 「카카오 지원용 링크를 눌렀더니 다른 회사 보고서」를 서버가 막는다.
+
+    관리자가 회사명을 보고 눈으로 거르는 것은 방어가 아니다 — 실수 한 번이면
+    받은 사람이 엉뚱한 회사 보고서를 본다.
+    """
+    report_id = _보고서를_만든다(admin)  # (주)진영 보고서
+    created = admin.post(
+        "/admin/link/new", data={"company": "카카오"}, follow_redirects=False
+    )
+    key, key_hash = _issued_link(created)
+
+    새링크 = admin.post(
+        "/admin/link/new",
+        data={"company": "카카오", "report_reference": report_id},
+        follow_redirects=False,
+    )
+    기존링크 = admin.post(
+        "/admin/link/report",
+        data={"key": key_hash, "report_reference": report_id},
+        follow_redirects=False,
+    )
+
+    assert 새링크.status_code == 400
+    assert 기존링크.status_code == 400
+    for 응답 in (새링크, 기존링크):
+        assert "다른 회사" in 응답.text
+        assert CANONICAL_DEMO_COMPANY in 응답.text
+        assert 'role="alert"' in 응답.text
+    with storage_db.connect() as conn:
+        # 두 번째 발급은 저장 자체가 없었다 — 링크는 처음 것 하나뿐이다.
+        assert len(share_store.list_all(conn)) == 1
+        assert share_store.load(conn, key).report_id == ""
+
+
+def test_같은_회사는_묶인다(admin: TestClient):
+    """대조군 — 막는 것만 확인하면 「전부 막는 코드」와 구별되지 않는다.
+
+    법인격 표기 차이((주)·주식회사·공백)는 같은 회사로 본다.
+    """
+    report_id = _보고서를_만든다(admin)  # (주)진영 보고서
+
+    for 표기 in (CANONICAL_DEMO_COMPANY, "진영", "주식회사 진영"):
+        created = admin.post(
+            "/admin/link/new",
+            data={"company": 표기, "report_reference": report_id},
+            follow_redirects=False,
+        )
+        key, key_hash = _issued_link(created)
+        with storage_db.connect() as conn:
+            assert share_store.load(conn, key).report_id == report_id, 표기
+
+        떼었다 = admin.post(
+            "/admin/link/report",
+            data={"key": key_hash, "report_reference": ""},
+            follow_redirects=False,
+        )
+        다시_붙였다 = admin.post(
+            "/admin/link/report",
+            data={"key": key_hash, "report_reference": report_id},
+            follow_redirects=False,
+        )
+        assert 떼었다.status_code == 303
+        assert 다시_붙였다.status_code == 303, 표기
+        with storage_db.connect() as conn:
+            assert share_store.load(conn, key).report_id == report_id, 표기
+
+
+def test_동명_회사는_corp_id로_구분한다(admin: TestClient):
+    """이름이 같아도 고유번호가 다르면 다른 회사다.
+
+    링크 자체에는 고유번호 열이 없다. 그래서 「이 링크가 지금 가리키는 회사」의
+    고유번호는 이미 묶여 있는 보고서에서 읽는다.
+    """
+    base = _보고서를_만든다(admin)
+    법인_A = _회사만_바꿔_보고서를_복사한다(
+        base, report_id="a" * 31 + "1", company="한빛", company_id="00126380"
+    )
+    법인_B = _회사만_바꿔_보고서를_복사한다(
+        base, report_id="b" * 31 + "2", company="한빛", company_id="00999999"
+    )
+
+    created = admin.post(
+        "/admin/link/new",
+        data={"company": "한빛", "report_reference": 법인_A},
+        follow_redirects=False,
+    )
+    key, key_hash = _issued_link(created)
+    with storage_db.connect() as conn:
+        assert share_store.load(conn, key).report_id == 법인_A
+
+    다른법인 = admin.post(
+        "/admin/link/report",
+        data={"key": key_hash, "report_reference": 법인_B},
+        follow_redirects=False,
+    )
+    assert 다른법인.status_code == 400
+    assert "이름은 같지만" in 다른법인.text
+    with storage_db.connect() as conn:
+        assert share_store.load(conn, key).report_id == 법인_A
+
+    같은법인 = admin.post(
+        "/admin/link/report",
+        data={"key": key_hash, "report_reference": 법인_A},
+        follow_redirects=False,
+    )
+    assert 같은법인.status_code == 303
+    with storage_db.connect() as conn:
+        assert share_store.load(conn, key).report_id == 법인_A

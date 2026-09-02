@@ -53,7 +53,9 @@
   <p class="muted" style="margin-top:6px">
     결과 화면의 주소 또는 32자리 ID를 붙여 넣으세요. 저장된 보고서인지 확인한 뒤에만
     연결합니다. 입력을 비우고 저장하면 연결을 해제합니다.
-    <strong>동명 회사는 연결 전에 법인명과 주소를 다시 확인하세요.</strong>
+    <strong>이 링크의 회사와 다른 회사의 보고서는 연결되지 않습니다.</strong>
+    이름이 같은 다른 법인은 이미 연결된 보고서가 있을 때만 걸러낼 수 있으니,
+    처음 연결할 때는 법인명과 주소를 한 번 더 확인하세요.
   </p>
   <form method="post" action="/admin/links/report" style="margin-top:14px">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

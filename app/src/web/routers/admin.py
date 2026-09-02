@@ -60,6 +60,19 @@ _ADMIN_AUDIT_TABLE = admin_audit_store.TABLE_ADMIN_AUDIT_EVENTS
 _AUDIT_SAFE_CHARS = frozenset(string.ascii_letters + string.digits + "_.:-")
 #: 발급 화면에서 QR 그림을 내려받을 때 쓰는 파일 이름.
 _ISSUED_QR_FILENAME = "company-analysis-link-qr.svg"
+#: 회사 이름 비교에서 떼어 내는 법인격 표기. 같은 회사를 다르게 적은 것뿐이다.
+_COMPANY_LEGAL_FORMS = (
+    "주식회사",
+    "유한책임회사",
+    "유한회사",
+    "합자회사",
+    "합명회사",
+    "(주)",
+    "(유)",
+    # 한 글자로 합쳐 쓴 표기(U+321C·U+3232). casefold로는 안 풀려 따로 적는다.
+    "㈜",
+    "㈲",
+)
 
 
 class _AccessDataUnavailable(RuntimeError):
@@ -469,11 +482,85 @@ def _access_page(
     return _admin_response(request, response)
 
 
+def _normalized_company_name(value: str) -> str:
+    """회사 표시명을 비교용으로 다듬는다.
+
+    ★ 「(주)진영」과 「진영」은 같은 회사다. 폼에 손으로 적는 이름은 법인격
+      표기·띄어쓰기가 매번 달라서 글자 그대로 비교하면 «같은 회사인데 막히는»
+      쪽으로 자주 틀린다. 반대로 서로 다른 회사가 이 정리로 같아지지는 않는다.
+      이름이 정말 같은 «동명 회사»는 고유번호로 갈라낸다.
+    """
+    raw = "".join(str(value or "").split()).casefold()
+    if not raw:
+        return ""
+    stripped = raw
+    for legal_form in _COMPANY_LEGAL_FORMS:
+        stripped = stripped.replace(legal_form, "")
+    # 법인격 표기만으로 된 이름은 통째로 사라지므로 그때는 원래 글자를 쓴다.
+    return stripped or raw
+
+
+def _link_company_id(conn, link) -> str:
+    """이 링크가 지금 가리키는 회사의 고유번호. 연결된 보고서에서만 읽는다.
+
+    ★ `share_links` 표에는 고유번호 열이 없다 — 링크와 보고서 두 곳에 같은 값을
+      두면 결속을 바꿀 때 어긋나기 때문이다. 그래서 이미 묶여 있는 보고서의
+      값을 그 링크의 회사 신원으로 삼는다. 아직 아무것도 안 묶였으면 빈 값이다.
+    """
+    linked_report_id = str(getattr(link, "report_id", "") or "")
+    if not linked_report_id:
+        return ""
+    try:
+        current = report_store.load(conn, linked_report_id)
+    except Exception:  # noqa: BLE001 — 옛 결속이 깨졌다고 새 결속까지 막지 않는다
+        return ""
+    if current is None:
+        return ""
+    return str(getattr(current, "company_id", "") or "").strip()
+
+
+def _report_company_mismatch(
+    report, *, expected_company: str, expected_company_id: str
+) -> str:
+    """링크의 회사와 보고서의 회사가 다르면 화면에 보여줄 이유를 만든다.
+
+    빈 문자열이면 같은 회사라는 뜻이다. 링크에 회사 꼬리표가 없으면(빈 값)
+    비교할 기준이 없으므로 막지 않는다.
+    """
+    link_company = str(expected_company or "").strip()
+    if not link_company:
+        return ""
+    report_company = str(getattr(report, "company", "") or "").strip()
+    if _normalized_company_name(report_company) != _normalized_company_name(
+        link_company
+    ):
+        return (
+            f"이 보고서는 다른 회사({report_company})의 것입니다. "
+            f"이 링크는 {link_company} 지원용으로 발급됐습니다."
+        )
+    report_company_id = str(getattr(report, "company_id", "") or "").strip()
+    link_company_id = str(expected_company_id or "").strip()
+    if link_company_id and report_company_id and link_company_id != report_company_id:
+        return (
+            f"이름은 같지만 다른 법인의 보고서입니다"
+            f"({report_company}, 고유번호 {report_company_id}). "
+            f"이 링크에 연결된 회사의 고유번호는 {link_company_id}입니다."
+        )
+    return ""
+
+
 def _validated_report_id(
-    conn, reference: str, *, expected_company: str = ""
+    conn,
+    reference: str,
+    *,
+    expected_company: str = "",
+    expected_company_id: str = "",
 ) -> tuple[str, str]:
-    """공개 폼의 결과 참조가 실제로 저장돼 아직 열리는 보고서인지 확인한다."""
-    del expected_company
+    """결과 참조가 저장돼 있고 아직 열리는 «이 회사의» 보고서인지 확인한다.
+
+    ★ 회사 대조를 서버에서 하는 이유 — 관리자가 화면의 회사명을 눈으로 거르는
+      것은 방어가 아니다. 한 번만 틀려도 받은 사람은 엉뚱한 회사 보고서를 본다.
+    """
     if not reference.strip():
         return "", ""
     report_id = share_logic.report_id_from_reference(reference)
@@ -484,6 +571,13 @@ def _validated_report_id(
         return "", "이 데모 저장소에서 해당 보고서를 찾을 수 없습니다."
     if job_runtime._link_expired(report):
         return "", "공유 기간이 지난 보고서입니다. 새 보고서를 만든 뒤 연결해주세요."
+    company_mismatch = _report_company_mismatch(
+        report,
+        expected_company=expected_company,
+        expected_company_id=expected_company_id,
+    )
+    if company_mismatch:
+        return "", company_mismatch
     return report_id, ""
 
 
@@ -877,7 +971,10 @@ async def admin_link_report(
             else:
                 detail_key_hash = link.key_hash
                 report_id, validation_error = _validated_report_id(
-                    conn, report_reference, expected_company=link.company
+                    conn,
+                    report_reference,
+                    expected_company=link.company,
+                    expected_company_id=_link_company_id(conn, link),
                 )
                 if not validation_error:
                     changed = share_store.set_report_by_hash(
