@@ -53,7 +53,7 @@ provider 사건 0을 유지한다. 이 파일럿은 서비스 건별 승인이 �
 P01~P10 실행 증거에서 자동 결과·시간·원가와 정확한 출고 레코드·보고서·PDF 지문을
 파생하고, 사람은 사용자판정과 안전사건만 입력한다. 10건 전부 채워지기 전에는 고정
 합격선을 계산하지 않으며, 이 파일을 런타임 출고 코드가 읽지 않는다. 세부 입력 계약은
-`docs/G3.5_25건_파일럿_실행안.md`를 따른다.
+`tools/manage_pilot_quality.py --help`가 안내한다.
 
 현재 파일럿 증거 계약은 checkpoint·quality·SQLite binding `schema_version=4`와
 `pipeline_final_gate_diagnostics.schema_version=1`을 함께 검증한다. 중단 case는
