@@ -357,7 +357,7 @@ TEST_FIXTURE_ONLY_SINGLE_LABEL_SUFFIXES: Final[frozenset[str]] = frozenset({"exa
 # 트래픽으로 검증한 값이 아니라 «관측용 상한»이며, 이 값에 걸렸다고 해서
 # 정상 회사를 거절하는 근거로 쓰면 안 된다 — 상한 도달은 TRUNCATED로 남긴다.
 
-#: 도메인군 전체(root+하위도메인+결속된 후보 호스트 합계)에서 시도하는
+#: 도메인군 전체(root+apex/www 짝+같은 등록 도메인 하위호스트)에서 시도하는
 #: 최대 일반 웹 페이지 수(robots.txt·sitemap.xml 조회는 포함하지 않는다).
 WIDE_MAX_PAGES: Final[int] = 12
 
@@ -373,7 +373,7 @@ WIDE_COLLECTION_TIMEOUT_SEC: Final[int] = 45
 WIDE_MAX_TOTAL_BYTES: Final[int] = 6 * 1024 * 1024
 
 #: 결속 근거가 있어도 무한히 늘지 않도록 두는 호스트 수 상한
-#: (root 1개 + 하위도메인 + 링크로 발견된 후보 호스트 합계).
+#: (root 1개 + apex/www 짝 + 같은 등록 도메인 하위호스트 합계).
 WIDE_MAX_HOSTS: Final[int] = 8
 
 #: sitemap.xml 하나에서 읽는 최대 바이트.
@@ -520,26 +520,39 @@ WIDE_SLOT_KEYWORD_MAP: Final[tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]
     ),
 )
 
-#: 조각(fragment) 본문에서 후보 슬롯을 더 좁히는 «가벼운» 신호 키워드.
-#: 본격적인 분류기가 아니다 — 후보 슬롯 중 이 키워드가 본문에 있으면 그
-#: 슬롯만, 하나도 없으면 페이지 유형이 준 후보 전체를 매긴다
-#: (`wide_fragments.py` 참조). 다루지 않는 슬롯은 이 dict에서 빠져 있어도
-#: 되며, 그 경우 페이지 유형 신호로만 매겨진다.
+#: 조각(fragment) 본문에서 슬롯 근거를 확인하는 직접 신호 키워드.
+#: URL 경로는 검사 범위를 좁힐 뿐, 이 본문 신호가 없으면 조각을 만들지
+#: 않는다(`wide_fragments.py`). 그래서 감사보고서의 숫자 표나 빈 회사소개
+#: 페이지가 URL 이름만으로 사업모델·문화 슬롯을 채울 수 없다.
 WIDE_SLOT_BODY_KEYWORDS: Final[dict[str, tuple[str, ...]]] = {
     "identity:corporate_identity": ("설립", "연혁", "사명", "비전", "미션"),
-    "identity:business_definition": ("사업영역", "주요사업", "업종", "우리는"),
-    "business_model:revenue_model": ("매출", "수익", "판매", "가격", "요금"),
-    "business_model:customer_type": ("고객", "타겟", "대상", "이용자"),
-    "business_model:value_exchange": ("제공", "가치", "혜택", "구독"),
-    "portfolio:product_role": ("제품", "서비스", "기능", "솔루션"),
+    "identity:business_definition": (
+        "사업영역", "주요사업", "주요 사업", "사업을 영위", "전문기업",
+        "제조·판매", "제조 및 판매",
+    ),
+    "business_model:revenue_model": (
+        "매출 구조", "수익 모델", "수익모델", "판매에서 발생", "판매로 매출",
+        "구독료", "이용료", "수수료",
+    ),
+    "business_model:customer_type": (
+        "고객사", "주요 고객", "기업 고객", "개인 고객", "b2b", "b2c",
+        "수요처", "이용자에게",
+    ),
+    "business_model:value_exchange": (
+        "가치를 제공", "서비스를 제공", "솔루션을 제공", "혜택을 제공",
+        "문제를 해결", "구독 서비스",
+    ),
+    "portfolio:product_role": (
+        "주력 제품", "핵심 제품", "대표 제품", "제품군", "서비스 라인업", "솔루션",
+    ),
     "portfolio:revenue_link": ("매출 비중", "주력", "핵심 제품", "라인업"),
     "past_changes:completed_execution": ("완료", "달성", "출시했", "런칭했", "성과"),
     "current_challenges:issue": ("과제", "어려움", "리스크", "문제"),
     "current_challenges:response": ("대응", "개선", "해결", "극복"),
     "future_strategy:stated_plan": ("계획", "전략", "로드맵", "예정"),
-    "future_strategy:plan_status": ("진행중", "추진", "단계", "목표"),
+    "future_strategy:plan_status": ("진행중", "진행 중", "추진", "착수", "실행 단계"),
     "operations_partners:value_chain": ("공급망", "밸류체인", "협력사", "원자재"),
-    "operations_partners:operating_role": ("파트너", "제휴", "협업", "운영"),
+    "operations_partners:operating_role": ("직접 운영", "공동 운영", "제조", "생산"),
     "culture:work_principle": ("핵심가치", "인재상", "일하는 방식", "원칙"),
     "culture:verified_case": ("사례", "후기", "인터뷰", "스토리"),
     "competitive_position:self_context": ("강점", "차별화", "경쟁력", "1위", "선도"),

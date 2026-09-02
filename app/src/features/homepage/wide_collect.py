@@ -1,13 +1,14 @@
 """여러 공식 호스트에 흩어진 회사 공식 웹 문서를 결속 근거와 함께 모은다.
 
-★ DART가 준 홈페이지 주소(root)에서 시작해 ①같은 등록 도메인의 하위 도메인
-  ②공식 페이지 안에서 명시적으로 링크된 다른 호스트(«후보»)만 넓힌다.
-  결속 근거 없는 호스트는 절대 수집하지 않는다(``wide_domain.py``).
+★ DART가 준 홈페이지 주소(root)에서 시작해 같은 등록 도메인의 하위 도메인만
+  넓힌다. 공식 페이지가 일반 외부 사이트를 링크했다는 이유만으로 그 사이트를
+  회사 공식 자료로 승격하지 않는다. 공식 HTML이 정확히 가리킨 외부 IR PDF는
+  일반 웹 탐색과 분리된 낮은 신뢰 첨부 경로에서만 다룬다.
 ★ 본문 조회 전 항상 그 호스트의 robots.txt를 먼저 확인한다(fail-closed —
   robots 자체를 확인 못하면 그 호스트는 긁지 않는다, ``wide_fetch.py``).
-★ 이 모듈은 «공식 확정»을 선언하지 않는다 — root/하위도메인은 REQUIRED,
-  링크로 발견된 후보 호스트는 OPTIONAL로만 표시한다. 최종 확정은 다음
-  담당자(장별 근거 변환)의 몫이다.
+★ 이 모듈은 «공식 확정»을 선언하지 않는다. root/하위도메인은 REQUIRED,
+  exact 외부 IR 첨부는 OPTIONAL·낮은 출처 등급으로만 표시하며 필수 슬롯
+  조각을 만들지 않는다.
 ★ 공식 IR PDF는 기존에 이미 검증된 ``ir_pdf.collect_official_ir_fragments``에
   호스트별로 위임한다 — 이 모듈이 PDF 파싱·격리 워커를 다시 구현하지 않는다
   (재사용 결정, 최종 보고서 참조).
@@ -47,11 +48,11 @@ from src.features.homepage.ir_pdf import (
     default_ir_html_fetch,
     default_ir_pdf_fetch,
 )
+from src.shared.official_ir import IR_ATTACHMENT_URL_FIELD, safe_https_attachment_url
 from src.features.homepage.safe_http import HomepageResponseError, request_deadline_scope
 from src.features.homepage.wide_domain import (
     BoundHost,
     OfficialOrigin,
-    bind_linked_host,
     bind_registered_subdomain,
     bind_root_host,
     bind_www_apex_alternate,
@@ -84,6 +85,7 @@ from src.features.homepage.wide_types import (
     REQUIREMENT_OPTIONAL,
     REQUIREMENT_REQUIRED,
     SOURCE_TIER_1_OFFICIAL,
+    SOURCE_TIER_3_TRUSTED,
     WideCollectionAttempt,
     WideCollectionResult,
     WideDocumentIdentity,
@@ -409,13 +411,11 @@ def _visit_page(
             return
         binding = bind_registered_subdomain(root_host, host)
         if binding is None:
-            binding = bind_linked_host(
-                source_page_url=item.source_page_url,
-                discovered_url=item.url,
-                candidate_host=host,
-            )
-        if binding is None:
-            return  # 제외 대상 호스트(소셜·광고 등) — 결속하지 않는다
+            # 공식 페이지가 링크했다는 사실은 그 외부 host 전체가 회사
+            # 소유라는 증거가 아니다. vendor·언론·관계사 일반 페이지는
+            # 여기서 0회 호출한다. 외부 IR PDF exact-link는 아래 전용
+            # PDF 경로만 허용한다.
+            return
         state.bound_hosts[host] = binding
         state.bound_origins[host] = candidate_origin
         origin = candidate_origin
@@ -806,18 +806,46 @@ def _origin_checked_ir_pdf_fetch(
     origin: OfficialOrigin,
     delegate: IrPdfFetcher,
 ) -> IrPdfFetcher:
-    """IR PDF/CDN redirect도 같은 공식 origin·경로에서만 허용한다."""
+    """동일 origin PDF 또는 공식 HTML의 exact 외부 첨부 한 건만 허용한다.
+
+    외부 첨부는 host를 결속하거나 그 host의 다른 경로를 탐색하지 않는다.
+    발견된 HTTPS URL 하나만 요청하고 redirect도 허용하지 않는다.
+    """
 
     def checked(url: str, expected_hostname: str, max_bytes: int, url_allowed):
-        if expected_hostname.casefold() != origin.host or not origin.allows_content_url(url):
+        normalized_url = safe_https_attachment_url(url)
+        if not normalized_url:
+            raise OfficialIrFetchError("공식 IR PDF URL 형식이 안전하지 않습니다")
+        requested_host = (
+            urllib.parse.urlsplit(normalized_url).hostname or ""
+        ).casefold()
+        if expected_hostname.casefold() != requested_host:
+            raise OfficialIrFetchError("공식 IR PDF 요청 host 결속이 다릅니다")
+
+        same_origin = requested_host == origin.host
+        if same_origin and not origin.allows_content_url(normalized_url):
             raise OfficialIrFetchError("공식 IR PDF가 DART origin·경로 밖입니다")
 
         def combined(candidate: str) -> bool:
-            return origin.allows_content_url(candidate) and url_allowed(candidate)
+            normalized_candidate = safe_https_attachment_url(candidate)
+            if not normalized_candidate:
+                return False
+            boundary_ok = (
+                origin.allows_content_url(normalized_candidate)
+                if same_origin
+                else normalized_candidate == normalized_url
+            )
+            return boundary_ok and url_allowed(normalized_candidate)
 
-        fetched = delegate(url, expected_hostname, max_bytes, combined)
-        if not origin.allows_content_url(fetched.effective_url):
-            raise OfficialIrFetchError("공식 IR PDF redirect가 DART origin·경로 밖입니다")
+        fetched = delegate(normalized_url, requested_host, max_bytes, combined)
+        normalized_effective = safe_https_attachment_url(fetched.effective_url)
+        if not normalized_effective:
+            raise OfficialIrFetchError("공식 IR PDF 최종 URL 형식이 안전하지 않습니다")
+        if same_origin:
+            if not origin.allows_content_url(normalized_effective):
+                raise OfficialIrFetchError("공식 IR PDF redirect가 DART origin·경로 밖입니다")
+        elif normalized_effective != normalized_url:
+            raise OfficialIrFetchError("외부 IR PDF는 exact URL redirect만 허용합니다")
         return fetched
 
     return checked
@@ -844,7 +872,18 @@ def _build_ir_document(
     source_url = str(first.get("출처") or "").strip()
     if not source_url or not origin.allows_content_url(source_url):
         return None
-    canonical = canonicalize_url(source_url)
+    attachment_url = safe_https_attachment_url(
+        str(first.get(IR_ATTACHMENT_URL_FIELD) or "")
+    )
+    attachment_host = (
+        (urllib.parse.urlsplit(attachment_url).hostname or "").casefold()
+        if attachment_url
+        else ""
+    )
+    is_external_attachment = bool(attachment_host and attachment_host != origin.host)
+    canonical = canonicalize_url(
+        attachment_url if is_external_attachment else source_url
+    )
     content_sha256 = hashlib.sha256("\n".join(ranges).encode("utf-8")).hexdigest()
     if content_sha256 in state.content_hashes:
         return None
@@ -863,12 +902,23 @@ def _build_ir_document(
         published_on=published_on,
         collected_at=state.collected_at,
         content_sha256=content_sha256,
-        identity_binding=binding.identity_binding,
+        identity_binding=(
+            f"{binding.identity_binding}; 공식 HTML exact-link 외부 IR 첨부: {attachment_url}"
+            if is_external_attachment
+            else binding.identity_binding
+        ),
         usable_ranges=ranges,
         collector_version=WIDE_COLLECTOR_VERSION,
         parser_version=WIDE_PARSER_VERSION,
-        requirement=REQUIREMENT_REQUIRED,
-        source_tier=SOURCE_TIER_1_OFFICIAL,
+        # 외부 CDN 파일은 공식 HTML이 그 exact URL을 가리켰다는 provenance만
+        # 확인했다. CDN host 전체나 파일 발행자를 회사 공식이라고 승격하지
+        # 않으며 필수 슬롯을 채울 수 없는 낮은 신뢰 후보로 보존한다.
+        requirement=(
+            REQUIREMENT_OPTIONAL if is_external_attachment else REQUIREMENT_REQUIRED
+        ),
+        source_tier=(
+            SOURCE_TIER_3_TRUSTED if is_external_attachment else SOURCE_TIER_1_OFFICIAL
+        ),
     )
 
 

@@ -85,8 +85,9 @@ class WideDocumentIdentity:
     collector_version: str
     parser_version: str
     requirement: str
-    #: 출처 등급 — 이 수집기가 매기는 값은 항상 ``SOURCE_TIER_1_OFFICIAL``
-    #: «후보»뿐이다. 최종 확정은 통합 담당의 몫이다(브리핑 §1).
+    #: 출처 등급 — 결속된 공식 웹은 TIER_1, 공식 HTML의 exact 외부 IR
+    #: 첨부는 TIER_3 낮은 신뢰 provenance다. 후자는 OPTIONAL이며 필수
+    #: 슬롯 조각으로 승격하지 않는다.
     source_tier: str
 
     def __post_init__(self) -> None:
@@ -218,6 +219,7 @@ class WideFragment:
     slot_id: str
     score_millis: int
     reason_codes: tuple[str, ...]
+    covered_slot_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         for name in (
@@ -246,6 +248,16 @@ class WideFragment:
             raise ValueError(f"slot_id가 허용 어휘 밖입니다: {self.slot_id!r}")
         if self.section_id != self.slot_id.split(":", 1)[0]:
             raise ValueError("section_id가 slot_id의 장(section)과 일치하지 않습니다")
+        covered = self.covered_slot_ids or (self.slot_id,)
+        if len(set(covered)) != len(covered):
+            raise ValueError("covered_slot_ids에 중복을 넣을 수 없습니다")
+        if self.slot_id not in covered:
+            raise ValueError("covered_slot_ids는 대표 slot_id를 포함해야 합니다")
+        if any(slot_id not in _ALLOWED_SLOT_IDS for slot_id in covered):
+            raise ValueError("covered_slot_ids에 허용 어휘 밖 값이 있습니다")
+        if any(slot_id.split(":", 1)[0] != self.section_id for slot_id in covered):
+            raise ValueError("covered_slot_ids는 모두 같은 장이어야 합니다")
+        object.__setattr__(self, "covered_slot_ids", tuple(covered))
         if not (0 <= self.score_millis <= 1000):
             raise ValueError("score_millis는 0~1000 사이여야 합니다")
         if not isinstance(self.reason_codes, tuple) or not self.reason_codes:

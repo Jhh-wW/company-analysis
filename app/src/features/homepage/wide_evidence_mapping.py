@@ -151,6 +151,7 @@ def _fragment_mapping(fragment: WideFragment) -> dict[str, object]:
         "text": fragment.text,
         "section_id": fragment.section_id,
         "slot_id": fragment.slot_id,
+        "covered_slot_ids": list(fragment.covered_slot_ids),
         "score_millis": fragment.score_millis,
         "reason_codes": list(fragment.reason_codes),
     }

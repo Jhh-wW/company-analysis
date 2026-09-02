@@ -2,10 +2,10 @@
 
 ★ ① DART root가 회사 전용 등록 도메인(예: ``x.com``·``www.x.com``)일 때만
   그 하위 도메인(``recruit.x.com``·``ir.x.com``)을 자동으로 도메인군에 넣는다.
-★ ② 공식 페이지 안에서 «명시적으로 링크된» 다른 호스트는 «후보»로만 들어온다.
-  결속 근거(어느 공식 페이지의 어느 링크에서 발견됐는지)가 없는 호스트는
-  절대 수집하지 않는다. 이 모듈은 등급을 매길 뿐 «공식 확정»을 선언하지
-  않는다 — 최종 확정은 다른 담당자의 몫이다.
+★ ② 공식 페이지가 링크한 외부 host는 도메인군에 넣지 않는다. 링크는 회사
+  소유 증명이 아니며 vendor·언론·관계사 페이지를 자사 공식자료로 승격할 수
+  있기 때문이다. exact 외부 IR 첨부는 일반 host 결속이 아니라 전용 경로에서
+  URL 한 건만 낮은 신뢰로 다룬다.
 
 ``logic.py``의 인증서 이름 대체-host 판정(``_registrable_core_name``)과 같은
 알고리즘을 쓰지만, 그 모듈의 비공개 함수에 결합하지 않기 위해 상수만
@@ -44,6 +44,35 @@ _HOST_SAFE_KEYWORDS: frozenset[str] = frozenset(WIDE_PRIORITY_HOST_KEYWORDS)
 
 _DEFAULT_PORT_BY_SCHEME = {"http": 80, "https": 443}
 _ALLOWED_WEB_PORTS = frozenset({80, 443, 8080, 8443})
+
+_TRACKING_PARAM_PREFIXES: tuple[str, ...] = ("utm_",)
+_TRACKING_PARAM_EXACT: frozenset[str] = frozenset(
+    {"gclid", "fbclid", "mc_cid", "mc_eid", "igshid", "ref", "ref_src", "spm", "yclid"}
+)
+
+
+def _is_tracking_param(key: str) -> bool:
+    lowered = key.casefold()
+    return lowered.startswith(_TRACKING_PARAM_PREFIXES) or lowered in _TRACKING_PARAM_EXACT
+
+
+def _meaningful_query_pairs(raw_query: str) -> tuple[tuple[str, str], ...]:
+    """입주자 식별에 쓸 수 있는 쿼리만 순서와 무관한 exact 값으로 만든다.
+
+    추적 파라미터는 회사 경계가 아니므로 제외한다. 나머지 키와 값은 대소문자,
+    빈 값, 중복 횟수까지 그대로 보존한다. 따라서 ``company=ACME``로 시작한
+    공유 URL은 ``company=OTHER``나 ``company``가 빠진 URL로 넓어질 수 없다.
+    """
+
+    return tuple(
+        sorted(
+            (key, value)
+            for key, value in urllib.parse.parse_qsl(
+                raw_query, keep_blank_values=True
+            )
+            if not _is_tracking_param(key)
+        )
+    )
 
 
 def _normalized_path(raw_path: str) -> str:
@@ -147,6 +176,13 @@ class OfficialOrigin:
     def allows_content_url(self, value: str) -> bool:
         parsed = self._parsed_same_origin(value)
         if parsed is None:
+            return False
+        # DART 시작 URL의 쿼리가 공유 host/path에서 회사를 가르는 유일한
+        # 경계일 수 있다. 의미 있는 시작 쿼리가 있으면 후보에도 같은
+        # key/value 멀티셋이 정확히 있어야 한다. 시작 쿼리가 없거나 추적
+        # 파라미터뿐이면 기존처럼 경로 안을 탐색한다.
+        start_scope = _meaningful_query_pairs(self.start_query)
+        if start_scope and _meaningful_query_pairs(parsed.query) != start_scope:
             return False
         try:
             path = _normalized_path(parsed.path)
@@ -307,8 +343,8 @@ def bind_registered_subdomain(root_host: str, candidate_host: str) -> BoundHost 
     ``sites.google.com/acme``처럼 DART 주소 자체가 공유 플랫폼 하위호스트인
     경우, ``drive.google.com``까지 같은 google.com이라는 이유로 회사
     공식 REQUIRED가 되어서는 안 된다. root가 eTLD+1 자체 또는 정확한 www
-    짝일 때만 회사가 그 등록 도메인을 소유한다고 볼 수 있다. 그 밖의 링크는
-    ``bind_linked_host``의 OPTIONAL 후보 경로를 거친다.
+    짝일 때만 회사가 그 등록 도메인을 소유한다고 볼 수 있다. 그 밖의 외부
+    링크는 일반 웹 도메인군에 결속하지 않는다.
     """
 
     normalized_root = (root_host or "").casefold().rstrip(".")
@@ -332,8 +368,7 @@ def www_apex_alternate(host: str) -> str | None:
     ``www.company.com`` ↔ ``company.com`` 같은 정확히 한 짝만 다룬다.
     등록 도메인(eTLD+1) 자체를 바꾸지 않는 변형이라 서로 같은 회사를
     가리킬 가능성이 매우 높다 — 그 밖의 하위 도메인 변형(예:
-    ``recruit.company.com``)은 여기서 다루지 않는다(공식 페이지에서
-    링크로 발견되는 등 다른 경로로만 결속한다, ``bind_linked_host``).
+    ``recruit.company.com``)은 여기서 다루지 않는다.
 
     Args:
         host: 포트·스킴이 없는 순수 호스트 이름.
@@ -391,34 +426,13 @@ def bind_www_apex_alternate(root_host: str) -> BoundHost | None:
 def bind_linked_host(
     *, source_page_url: str, discovered_url: str, candidate_host: str
 ) -> BoundHost | None:
-    """공식 페이지 안에서 명시적으로 링크된 다른 호스트 — «후보»로만 결속한다.
+    """호환 API — 일반 외부 링크는 언제나 결속하지 않는다.
 
-    소셜·광고·분석 호스트는 결속하지 않는다(``is_excluded_linked_host``).
-
-    Returns:
-        결속 정보, 또는 제외 대상이면 ``None``.
+    exact 외부 IR 첨부는 이 host 결속과 분리된 URL 한 건 경계를 쓴다.
     """
-    if is_excluded_linked_host(candidate_host):
-        return None
-    return BoundHost(
-        host=candidate_host.casefold(),
-        identity_binding=(
-            f"공식 페이지 링크 후보 — 출처 페이지: {source_page_url}, "
-            f"발견된 링크: {discovered_url}"
-        ),
-        is_high_confidence=False,
-    )
-
-
-_TRACKING_PARAM_PREFIXES: tuple[str, ...] = ("utm_",)
-_TRACKING_PARAM_EXACT: frozenset[str] = frozenset(
-    {"gclid", "fbclid", "mc_cid", "mc_eid", "igshid", "ref", "ref_src", "spm", "yclid"}
-)
-
-
-def _is_tracking_param(key: str) -> bool:
-    lowered = key.casefold()
-    return lowered.startswith(_TRACKING_PARAM_PREFIXES) or lowered in _TRACKING_PARAM_EXACT
+    # 호환 API만 남긴다. 일반 외부 링크는 종류와 무관하게 회사 공식
+    # 도메인군에 결속하지 않는다. exact 외부 IR 첨부는 별도 URL 경계다.
+    return None
 
 
 def canonicalize_url(url: str) -> str:

@@ -267,7 +267,7 @@ def test_등록_하위도메인은_자동결속되어_REQUIRED_문서가_된다(
     assert recruit_docs[0].source_kind == "official_recruit_page"
 
 
-def test_링크로_발견된_후보_호스트는_OPTIONAL_문서가_된다():
+def test_공식페이지의_외부_vendor_링크는_문서로_승격하거나_호출하지_않는다():
     pages = {
         "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
         "https://company.example/sitemap.xml": _missing("https://company.example/sitemap.xml"),
@@ -286,9 +286,8 @@ def test_링크로_발견된_후보_호스트는_OPTIONAL_문서가_된다():
     result = _collect(site)
 
     brand_docs = [doc for doc in result.documents if "brand-site.example" in doc.canonical_url]
-    assert len(brand_docs) == 1
-    assert brand_docs[0].requirement == "OPTIONAL"
-    assert "https://company.example/" in brand_docs[0].identity_binding
+    assert brand_docs == []
+    assert not any("brand-site.example" in url for url in site.calls)
 
 
 def test_도메인군_밖으로의_리다이렉트는_차단된다():
@@ -348,6 +347,38 @@ def test_DART_공유호스트의_port와_회사경로를_버리지_않는다():
         f"{base}/acme",
         f"{base}/acme/products",
     }
+
+
+def test_공유host_query_tenant는_시작값을_정확히_보존하고_다른입주자를_0회호출한다():
+    base = "https://portal.example"
+    target_root = f"{base}/view?tenant=ALPHA"
+    target_child = f"{base}/view/about?tenant=ALPHA"
+    other_tenant = f"{base}/view/about?tenant=BETA"
+    pages = {
+        f"{base}/robots.txt": _page(
+            ROBOTS_ALLOW_ALL, f"{base}/robots.txt", "text/plain"
+        ),
+        f"{base}/sitemap.xml": _missing(f"{base}/sitemap.xml"),
+        target_root: _page(
+            _body("2010년에 설립한 법인")
+            + f'<a href="{target_child}">대상 회사</a>'
+            + f'<a href="{other_tenant}">다른 입주자</a>',
+            target_root,
+        ),
+        target_child: _page(_body("주요 사업을 영위하는 전문기업"), target_child),
+        other_tenant: _page(_body("다른 회사의 주요 사업"), other_tenant),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        root_homepage_url=target_root,
+        company_name="",
+    )
+
+    assert target_child in site.calls
+    assert other_tenant not in site.calls
+    assert all("tenant=BETA" not in document.canonical_url for document in result.documents)
 
 
 def test_같은_host라도_scheme_port_path가_바뀐_redirect는_차단된다():
@@ -524,9 +555,8 @@ def test_같은_핵심이름_다른_TLD_링크는_REQUIRED로_자동승격되지
     result = _collect(site)
 
     other_docs = [doc for doc in result.documents if "company.net" in doc.canonical_url]
-    assert len(other_docs) == 1
-    # 링크로만 발견된 후보이므로 OPTIONAL(«후보»)이어야 한다 — REQUIRED 자동승격 금지.
-    assert other_docs[0].requirement == "OPTIONAL"
+    assert other_docs == []
+    assert not any("company.net" in url for url in site.calls)
 
 
 def test_sitemap의_다른_TLD_URL은_등록도메인_밖이라_따라가지_않는다():
@@ -785,7 +815,9 @@ def test_채용_페이지는_culture_슬롯을_받는다():
         "https://company.example/": _page(
             _body("루트 페이지 본문") + '<a href="/careers">채용</a>', "https://company.example/"
         ),
-        "https://company.example/careers": _page(_body("채용 페이지 본문"), "https://company.example/careers"),
+        "https://company.example/careers": _page(
+            _body("핵심가치와 일하는 방식"), "https://company.example/careers"
+        ),
     }
     site = _FakeWideSite(pages)
 
@@ -1244,6 +1276,98 @@ def test_ir_failed도_OPTIONAL이다(monkeypatch):
 # ── IR PDF 위임 ───────────────────────────────────────────
 
 
+def test_공식_HTML_exact_외부_IR첨부는_낮은신뢰_provenance만_남기고_슬롯을_못채운다(
+    monkeypatch,
+):
+    from src.shared.official_ir import IR_ATTACHMENT_URL_FIELD
+
+    attachment_url = "https://cdn.vendor.example/reports/alpha-2026.pdf"
+
+    def fake_collect_ir(homepage_url, **_kwargs):
+        if homepage_url != "https://company.example/":
+            return OfficialIrCollectResult(
+                state="none", fragments=[], downloaded_pdf_bytes=0
+            )
+        return OfficialIrCollectResult(
+            state="ok",
+            fragments=[
+                {
+                    "종류": "공식 IR",
+                    "원문": "주요 고객사에 서비스를 제공하고 구독료로 수익을 얻습니다.",
+                    "출처": "https://company.example/ir/detail/1",
+                    IR_ATTACHMENT_URL_FIELD: attachment_url,
+                    "문서ID": "external-ir-1",
+                    "문서명": "2026년 IR 자료",
+                }
+            ],
+            downloaded_pdf_bytes=100,
+        )
+
+    monkeypatch.setattr(wide_collect, "collect_official_ir_fragments", fake_collect_ir)
+    pages = {
+        "https://company.example/robots.txt": _page(
+            ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"
+        ),
+        "https://company.example/sitemap.xml": _missing(
+            "https://company.example/sitemap.xml"
+        ),
+        "https://company.example/": _page(
+            _body("2010년에 설립한 법인"), "https://company.example/"
+        ),
+    }
+    result = _collect(_FakeWideSite(pages))
+
+    external_doc = next(
+        document for document in result.documents
+        if document.canonical_url == attachment_url
+    )
+    assert external_doc.requirement == "OPTIONAL"
+    assert external_doc.source_tier == "TIER_3_TRUSTED"
+    assert attachment_url in external_doc.identity_binding
+    assert build_fragments(external_doc, company_id="c1") == ()
+
+
+def test_외부_IR첨부_fetch는_발견된_exact_URL_한건만_허용하고_redirect를_거절한다():
+    from src.features.homepage.ir_pdf import FetchedIrPdf, OfficialIrFetchError
+    from src.features.homepage.wide_domain import parse_official_origin
+
+    attachment_url = "https://cdn.vendor.example/reports/alpha.pdf"
+    other_url = "https://cdn.vendor.example/reports/other.pdf"
+    origin = parse_official_origin("https://company.example/")
+    assert origin is not None
+
+    def exact_delegate(url, expected_hostname, max_bytes, url_allowed):
+        assert url == attachment_url
+        assert expected_hostname == "cdn.vendor.example"
+        assert max_bytes == 1024
+        assert url_allowed(attachment_url)
+        assert not url_allowed(other_url)
+        return FetchedIrPdf(b"pdf", attachment_url, "application/pdf")
+
+    checked = wide_collect._origin_checked_ir_pdf_fetch(origin, exact_delegate)
+    fetched = checked(
+        attachment_url,
+        "cdn.vendor.example",
+        1024,
+        lambda value: value == attachment_url,
+    )
+    assert fetched.effective_url == attachment_url
+
+    def redirect_delegate(url, expected_hostname, max_bytes, url_allowed):
+        return FetchedIrPdf(b"pdf", other_url, "application/pdf")
+
+    redirect_checked = wide_collect._origin_checked_ir_pdf_fetch(
+        origin, redirect_delegate
+    )
+    with pytest.raises(OfficialIrFetchError, match="exact URL"):
+        redirect_checked(
+            attachment_url,
+            "cdn.vendor.example",
+            1024,
+            lambda value: value == attachment_url,
+        )
+
+
 def test_ir_pdf는_3건_상한을_넘지_않는다(monkeypatch):
     def fake_collect_ir(homepage_url, **_kwargs):
         host = homepage_url.split("://", 1)[1].rstrip("/")
@@ -1386,7 +1510,9 @@ def test_전체_파이프라인_fragment와_attempt_모두_대상_회사_company
         "https://company.example/": _page(
             _body("루트 페이지 본문") + '<a href="/careers">채용</a>', "https://company.example/"
         ),
-        "https://company.example/careers": _page(_body("채용 페이지 본문"), "https://company.example/careers"),
+        "https://company.example/careers": _page(
+            _body("핵심가치와 일하는 방식"), "https://company.example/careers"
+        ),
     }
     site = _FakeWideSite(pages)
 

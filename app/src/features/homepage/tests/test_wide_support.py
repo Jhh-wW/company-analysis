@@ -195,8 +195,12 @@ def test_official_origin은_DART_scheme_port_path를_끝까지_보존한다():
     assert origin.root_url == "https://sites.example.com:8443/acme?lang=ko"
     assert origin.robots_url == "https://sites.example.com:8443/robots.txt"
     assert origin.sitemap_url == "https://sites.example.com:8443/sitemap.xml"
-    assert origin.allows_content_url("https://sites.example.com:8443/acme")
-    assert origin.allows_content_url("https://sites.example.com:8443/acme/products")
+    assert origin.allows_content_url("https://sites.example.com:8443/acme?lang=ko")
+    assert origin.allows_content_url(
+        "https://sites.example.com:8443/acme/products?lang=ko&utm_source=x"
+    )
+    assert not origin.allows_content_url("https://sites.example.com:8443/acme")
+    assert not origin.allows_content_url("https://sites.example.com:8443/acme?lang=en")
     assert not origin.allows_content_url("https://sites.example.com:8443/other")
     assert not origin.allows_content_url("http://sites.example.com:8080/acme")
 
@@ -263,16 +267,13 @@ def test_소셜호스트는_링크_후보_결속에서_제외된다():
     assert bound is None
 
 
-def test_링크_후보_결속은_출처_페이지와_링크를_함께_남긴다():
+def test_일반_외부_링크는_공식페이지가_가리켜도_후보host로_결속하지_않는다():
     bound = bind_linked_host(
         source_page_url="https://company.com/about",
         discovered_url="https://brand-site.example/",
         candidate_host="brand-site.example",
     )
-    assert bound is not None
-    assert bound.is_high_confidence is False
-    assert "https://company.com/about" in bound.identity_binding
-    assert "https://brand-site.example/" in bound.identity_binding
+    assert bound is None
 
 
 def test_canonicalize_url은_fragment를_없앤다():

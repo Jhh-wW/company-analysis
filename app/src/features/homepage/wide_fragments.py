@@ -1,14 +1,12 @@
 """문서의 usable_ranges 텍스트 구간을 슬롯 태그된 조각(fragment)으로 바꾼다.
 
-★ «후보 슬롯»은 페이지 유형(URL 키워드, ``wide_domain.slot_ids_for_url`` —
-  ``wide_collect.py``의 attempt.slot_ids와 같은 표 하나를 재사용한다)으로
-  먼저 정한다.
-★ 구간 본문에 그 후보 슬롯의 «가벼운» 신호 키워드가 있으면 그 슬롯(들)만,
-  하나도 없으면 후보 전체를 매긴다. 본격적인 분류기가 아니다 —
-  ``constants.WIDE_SLOT_BODY_KEYWORDS``에 없는 슬롯은 항상 후보 전체로
-  매겨진다.
-★ 페이지 유형을 못 알아낸 문서(빈 후보)는 조각을 만들지 않는다 — 근거
-  없이 슬롯을 지어내지 않는다.
+★ URL 페이지 유형은 검사할 슬롯 범위를 좁히는 힌트일 뿐이다. 본문에서 그
+  슬롯의 직접 신호가 실제로 확인될 때만 조각을 만든다. URL이 ``/careers``
+  라는 이유만으로 문화 사례가 있다고 주장하지 않는다.
+★ URL 유형을 못 알아낸 REQUIRED 공식 문서(특히 ``/`` 메인)는 본문을 전체
+  슬롯 어휘로 검사한다. 경로가 아니라 본문이 무엇을 증명하는지로 분류한다.
+★ 외부 exact-link IR 첨부는 provenance 문서로만 보존하며 필수 슬롯 조각을
+  만들지 않는다.
 ★ ``slot_id``는 ``WideFragment``가 강제하는 허용 어휘(정본은
   `app/src/shared/report_evidence/policy.py`)만 나온다. comparison_*·
   limitation·historical_performance는 이 어휘에 없으므로 이 모듈에서
@@ -32,7 +30,11 @@ from __future__ import annotations
 
 import hashlib
 
-from src.features.homepage.constants import WIDE_SLOT_BODY_KEYWORDS
+from src.features.homepage.constants import (
+    WIDE_REQUIRED_SLOT_IDS,
+    WIDE_SLOT_BODY_KEYWORDS,
+    WIDE_SOURCE_KIND_IR_PDF,
+)
 from src.features.homepage.wide_domain import slot_ids_for_url
 from src.features.homepage.wide_types import (
     WideCollectionResult,
@@ -40,14 +42,18 @@ from src.features.homepage.wide_types import (
     WideFragment,
 )
 
-#: 구간 본문에 후보 슬롯의 신호 키워드가 «있을 때»의 점수.
+#: 구간 본문에 후보 슬롯의 직접 신호 키워드가 있을 때의 점수.
 _SCORE_BODY_KEYWORD_MATCH = 700
-
-#: 신호 키워드가 «없어» 페이지 유형 후보 전체로 매길 때의 점수.
-_SCORE_PAGE_TYPE_ONLY = 400
 
 _REASON_PAGE_TYPE_SIGNAL = "page_type_signal"
 _REASON_BODY_KEYWORD_MATCH = "body_keyword_match"
+
+_VERIFIED_CASE_MARKERS: tuple[str, ...] = (
+    "사례", "후기", "인터뷰", "스토리", "프로젝트", "수상", "인증"
+)
+_VERIFIED_CASE_ACTIONS: tuple[str, ...] = (
+    "실행", "적용", "도입", "운영", "개선", "달성", "완료", "수상", "인증"
+)
 
 
 def build_fragments(document: WideDocumentIdentity, *, company_id: str) -> tuple[WideFragment, ...]:
@@ -62,41 +68,47 @@ def build_fragments(document: WideDocumentIdentity, *, company_id: str) -> tuple
             의도적으로 독립된 인자로 뒀다.
 
     Returns:
-        슬롯이 태그된 ``WideFragment`` 튜플. 페이지 유형을 못 알아낸
-        문서라면 빈 튜플(조각을 지어내지 않는다).
+        본문 신호가 확인된 슬롯의 ``WideFragment`` 튜플.
     """
     page_slots = slot_ids_for_url(document.canonical_url)
-    if not page_slots:
+    # 공식 HTML이 exact-link로 가리킨 외부 첨부는 낮은 신뢰 provenance만
+    # 보존한다. URL·본문이 그럴듯해도 필수 슬롯 조각으로 승격하지 않는다.
+    if document.source_kind == WIDE_SOURCE_KIND_IR_PDF and document.requirement == "OPTIONAL":
         return ()
+
+    candidate_slots = page_slots or WIDE_REQUIRED_SLOT_IDS
 
     fragments: list[WideFragment] = []
     for index, text in enumerate(document.usable_ranges):
-        matched_slots = _matched_body_slots(text, page_slots)
-        if matched_slots:
-            score = _SCORE_BODY_KEYWORD_MATCH
-            reason_codes = (_REASON_PAGE_TYPE_SIGNAL, _REASON_BODY_KEYWORD_MATCH)
-            slots_for_range = matched_slots
-        else:
-            score = _SCORE_PAGE_TYPE_ONLY
-            reason_codes = (_REASON_PAGE_TYPE_SIGNAL,)
-            slots_for_range = page_slots
+        slots_for_range = _matched_body_slots(text, candidate_slots)
+        if not slots_for_range:
+            continue
+        score = _SCORE_BODY_KEYWORD_MATCH
+        reason_codes = (
+            ((_REASON_PAGE_TYPE_SIGNAL,) if page_slots else ())
+            + (_REASON_BODY_KEYWORD_MATCH,)
+        )
 
         text_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
         location = f"{document.canonical_url}#{index}"
+        slots_by_section: dict[str, list[str]] = {}
         for slot_id in slots_for_range:
-            section_id = slot_id.split(":", 1)[0]
+            slots_by_section.setdefault(slot_id.split(":", 1)[0], []).append(slot_id)
+        for section_id, covered_slot_ids in slots_by_section.items():
+            primary_slot_id = covered_slot_ids[0]
             fragments.append(
                 WideFragment(
                     company_id=company_id,
-                    fragment_id=_fragment_id(document.document_id, index, slot_id),
+                    fragment_id=_fragment_id(document.document_id, index, section_id),
                     document_id=document.document_id,
                     location=location,
                     text_sha256=text_sha256,
                     text=text,
                     section_id=section_id,
-                    slot_id=slot_id,
+                    slot_id=primary_slot_id,
                     score_millis=score,
                     reason_codes=reason_codes,
+                    covered_slot_ids=tuple(covered_slot_ids),
                 )
             )
     return tuple(fragments)
@@ -133,19 +145,31 @@ def build_fragments_for_collection(result: WideCollectionResult) -> tuple[WideFr
 
 
 def _matched_body_slots(text: str, candidate_slots: tuple[str, ...]) -> tuple[str, ...]:
-    """후보 슬롯 중 구간 본문에 신호 키워드가 있는 것만 고른다."""
+    """후보 슬롯 중 구간 본문에 직접 신호가 있는 것만 고른다."""
     lowered = text.lower()
     return tuple(
         slot_id
         for slot_id in candidate_slots
-        if any(
-            keyword.lower() in lowered
-            for keyword in WIDE_SLOT_BODY_KEYWORDS.get(slot_id, ())
-        )
+        if _has_slot_body_signal(slot_id, lowered)
     )
 
 
-def _fragment_id(document_id: str, index: int, slot_id: str) -> str:
-    """문서ID·구간 위치·슬롯으로 결정론적 fragment_id를 만든다."""
-    digest = hashlib.sha256(f"{document_id}:{index}:{slot_id}".encode("utf-8")).hexdigest()
+def _has_slot_body_signal(slot_id: str, lowered_text: str) -> bool:
+    if slot_id == "culture:verified_case":
+        # 「사례」라는 메뉴/제목만으로 실제 사례가 존재한다고 주장하지 않는다.
+        # 사례 표지와 실행·결과 중 하나가 함께 있어야 하며, 수상·인증은 그
+        # 자체가 검증 가능한 행동·결과라 양쪽 신호를 동시에 충족한다.
+        return (
+            any(marker in lowered_text for marker in _VERIFIED_CASE_MARKERS)
+            and any(action in lowered_text for action in _VERIFIED_CASE_ACTIONS)
+        )
+    return any(
+        keyword.lower() in lowered_text
+        for keyword in WIDE_SLOT_BODY_KEYWORDS.get(slot_id, ())
+    )
+
+
+def _fragment_id(document_id: str, index: int, section_id: str) -> str:
+    """문서ID·구간 위치·장으로 결정론적 fragment_id를 만든다."""
+    digest = hashlib.sha256(f"{document_id}:{index}:{section_id}".encode("utf-8")).hexdigest()
     return f"frag-{digest[:24]}"
