@@ -2223,9 +2223,16 @@ async def _start_with_reserved_slot(
                         raise RuntimeError(
                             "MEMBER 실행의 불변 계정 subject를 확인할 수 없습니다"
                         )
-                    # ★ 한도는 «이 친구의 값»이다 (결정 D-G4 (a)). 막는 판단과
-                    #   화면 문구가 같은 transaction에서 읽은 같은 숫자를 쓰게
-                    #   여기서 한 번 읽어 둘 다에 넘긴다.
+                    # ★ 한도는 «이 친구의 값»이다 (결정 D-G4 (a)). 이 요청이 읽은
+                    #   값을 막는 판단과 화면 문구 둘 다에 넘겨, 「막는 숫자」와
+                    #   「말하는 숫자」가 어긋나지 않게 한다.
+                    # ⚠️ 이 읽기는 예약 transaction «직전»이지 그 «안»이 아니다 —
+                    #   sqlite3 기본 isolation_level('')은 SELECT 앞에 BEGIN을 열지
+                    #   않는다 (실측: 읽은 직후 conn.in_transaction == False).
+                    #   동시 요청의 직렬화는 reserve_member_run의 BEGIN IMMEDIATE가
+                    #   맡고, 오늘 사용량은 그 안에서 다시 센다. 읽은 뒤 관리자가
+                    #   한도를 바꾸면 이 요청만 «읽은 값»으로 판정되는데, 이는 매
+                    #   요청 현재 값으로 다시 판정한다는 기존 원칙 그대로다.
                     member_success_limit = dashboard_store.member_success_limit(
                         conn, actor_email=member_email
                     )
