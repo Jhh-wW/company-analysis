@@ -246,6 +246,35 @@ def _web_mapping(*, ir_html_fetch=_ir_html_without_links) -> dict[str, object]:
     return to_evidence_mappings(result=result, fragments=fragments)
 
 
+def _advertising_only_web_mapping() -> dict[str, object]:
+    """고객 문제 해결 광고 한 문단뿐인 공식 root를 실제 수집한다."""
+
+    base = f"https://{ROOT_HOST}"
+    pages = {
+        f"{base}/robots.txt": _page(
+            ROBOTS_ALLOW_ALL, f"{base}/robots.txt", "text/plain"
+        ),
+        f"{base}/sitemap.xml": _absent(f"{base}/sitemap.xml"),
+        f"{base}/": _page(
+            _html("고객의 문제를 해결하는 맞춤형 솔루션을 제공합니다."),
+            f"{base}/",
+        ),
+    }
+    result = collect_official_web_documents(
+        company_id=TARGET_COMPANY_ID,
+        company_name="예시 전자",
+        root_homepage_url=ROOT_HOST,
+        collected_at="2026-08-31T00:00:00+00:00",
+        transport=_FakeSite(pages),
+        ir_html_fetch=_ir_html_without_links,
+        ir_pdf_fetch=_ir_pdf_unused,
+    )
+    return to_evidence_mappings(
+        result=result,
+        fragments=build_fragments_for_collection(result),
+    )
+
+
 def _produce(*, ir_html_fetch=_ir_html_without_links, **dart_kwargs):
     """두 수집기의 산출을 합쳐 아홉 장 후보를 실제로 만든다."""
 
@@ -396,6 +425,22 @@ def test_gate_shape_only_가짜ID로_정상수집의_9장_게이트_모양만_RE
     assert decision.can_call_ai is True
     for bundle in bundles:
         assert bundle.readiness is EvidenceReadiness.READY
+
+
+def test_광고문구만_있는_공식_root는_당면과제_종단판정이_READY가_아니다() -> None:
+    candidates = produce_from_collection_envelopes(
+        company_id=TARGET_COMPANY_ID,
+        company_type=CompanyType.AUDIT_ONLY,
+        collection_envelopes=(_advertising_only_web_mapping(),),
+    )
+    challenge = next(
+        candidate
+        for candidate in candidates
+        if candidate.section_id == "current_challenges"
+    )
+
+    assert challenge.candidate_readiness is not EvidenceReadiness.READY
+    assert not challenge.fragments
 
 
 def test_공시_조회_실패는_자료_부족이_아니라_확인_못_함으로_판정한다() -> None:
