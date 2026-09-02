@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Optional
 
 from fastapi import APIRouter, Form, Request
@@ -52,6 +53,15 @@ from src.features.sharelink.constants import (
     KEY_COOKIE_MAX_AGE_SEC,
     KEY_COOKIE_NAME,
     KEY_PATH_PREFIX,
+    LANDING_INTRO,
+    LANDING_MADE_ON_DATE_TEMPLATE,
+    LANDING_OTHER_COMPANY_BUTTON,
+    LANDING_OTHER_COMPANY_NOTE,
+    LANDING_REPORT_BUTTON_TEMPLATE,
+    LANDING_REPORT_MADE_ON_TEMPLATE,
+    LANDING_REPORT_NOT_READY_NOTE,
+    LANDING_REPORT_NOT_READY_TEMPLATE,
+    LANDING_TITLE,
     PUBLIC_BUCKET,
 )
 from src.features.storage import db as storage_db
@@ -316,6 +326,101 @@ def _share_rate_limited() -> Response:
     )
 
 
+@dataclass(frozen=True)
+class _LinkLanding:
+    """초대 링크로 들어온 사람이 첫 화면에서 보는 카드 두 장 (사람 결정 D-G10).
+
+    ★ 왜 화면 틀이 아니라 여기서 문구를 만드는가 — 틀 안에서 회사 이름을 붙이면
+      같은 말이 화면마다 조금씩 달라진다. 문구는 `sharelink/constants.py`의
+      상수 한 곳에서만 만들고, 틀은 그대로 그리기만 한다.
+    ★ `report_url`이 비어 있으면 카드 A는 버튼 대신 「준비 중」만 보인다.
+    """
+
+    company: str
+    title: str
+    intro: str
+    report_url: str
+    report_button: str
+    made_on_note: str
+    not_ready_note: str
+    not_ready_hint: str
+    other_button: str
+    other_note: str
+
+
+def _landing_made_on(report) -> str:
+    """결속 보고서 생성일을 「2026년 8월 19일」로 옮긴다 (한국시간).
+
+    표지·마스트헤드가 읽는 것과 **같은 필드**(``report.generated_at``)를 쓴다.
+    날짜를 읽을 수 없는 옛 저장본이면 빈 글자를 돌려주고 그 줄만 빠진다 —
+    날짜를 지어내는 것보다 안 보이는 편이 낫다.
+    """
+    raw = str(getattr(report, "generated_at", "") or "").strip()
+    if not raw:
+        return ""
+    try:
+        made = clock.business_date_from_iso(raw)
+    except (OverflowError, TypeError, ValueError):
+        return ""
+    return LANDING_MADE_ON_DATE_TEMPLATE.format(
+        year=made.year, month=made.month, day=made.day
+    )
+
+
+def _bound_report_view(link) -> tuple[str, str]:
+    """결속 보고서를 «지금» 열 수 있으면 (결과 주소, 생성일 문구)를 돌려준다.
+
+    ★ 신선도 기한은 새로 만들지 않고 **기존 보고서 링크 수명**과 같은 기준을 쓴다
+      (`job_runtime._link_expired`, 기본 60일). 초대 링크 자체의 기본 수명
+      (`DEFAULT_LINK_MAX_AGE_DAYS`)도 60일이라 두 기준이 같은 값이다.
+    ★ 기한이 지났거나 보고서가 사라졌으면 «자동으로 다시 조사하지 않는다» —
+      사람 승인 없이 돈을 쓰는 일이다 (2026-09-02 사람 결정 D-G11).
+    """
+    if not link.report_id:
+        return "", ""
+    try:
+        with storage_db.connect() as conn:
+            if dashboard_store.report_is_trashed(conn, link.report_id):
+                return "", ""
+            report = report_store.load(conn, link.report_id)
+    except Exception:  # noqa: BLE001 — 못 읽으면 「준비 중」으로 닫는다
+        logger.exception("초대 링크에 묶인 보고서 상태를 읽지 못했습니다")
+        return "", ""
+    if report is None or job_runtime._link_expired(report):
+        return "", ""
+    made_on = _landing_made_on(report)
+    return (
+        f"/result/{link.report_id}",
+        LANDING_REPORT_MADE_ON_TEMPLATE.format(made_on=made_on) if made_on else "",
+    )
+
+
+def _link_landing(request: Request, link) -> Optional[_LinkLanding]:
+    """초대 링크 갈래로 들어온 사람에게만 랜딩 카드를 만든다.
+
+    ★ 관리자·회원·모르는 손님의 첫 화면은 **한 글자도 바뀌지 않는다** —
+      여기서 ``None``을 돌려주면 화면 틀이 카드를 아예 그리지 않는다.
+    """
+    track, _bucket, _cap = request_helpers._track_of(request)
+    if track is not share_tracks.Track.LINK:
+        return None
+    report_url, made_on_note = _bound_report_view(link)
+    return _LinkLanding(
+        company=link.company,
+        title=LANDING_TITLE,
+        intro=LANDING_INTRO,
+        report_url=report_url,
+        report_button=LANDING_REPORT_BUTTON_TEMPLATE.format(company=link.company),
+        made_on_note=made_on_note,
+        not_ready_note=LANDING_REPORT_NOT_READY_TEMPLATE.format(
+            company=link.company
+        ),
+        not_ready_hint=LANDING_REPORT_NOT_READY_NOTE,
+        other_button=LANDING_OTHER_COMPANY_BUTTON,
+        other_note=LANDING_OTHER_COMPANY_NOTE,
+    )
+
+
 @router.get("/", response_class=HTMLResponse)
 async def input_page(request: Request):
     """회사명·직무·주소·공고를 받는 첫 화면."""
@@ -345,6 +450,9 @@ async def input_page(request: Request):
             demo_companies=available_companies(),
             demo_available=paths.demo_data_available(),
             share_link=share_link,
+            link_landing=(
+                None if share_link is None else _link_landing(request, share_link)
+            ),
             prefill=prefill,
             share_notice=notices,
             evaluation_workflow_id=evaluation_mode.issue_workflow_id(),
@@ -397,8 +505,11 @@ async def open_share_link(request: Request, key: str):
                         target = "/?share_status=report-missing"
                     elif job_runtime._link_expired(report):
                         target = "/?share_status=report-expired"
-                    else:
-                        target = f"/result/{link.report_id}"
+                    # ★ 결속 보고서가 멀쩡해도 결과로 «직행»하지 않는다 —
+                    #   첫 화면의 두 버튼(「{회사명} 보고서 보기」·「다른 회사
+                    #   분석해 보기」)을 보여 준 뒤 사람이 고르게 한다
+                    #   (2026-09-02 사람 결정 D-G10). 직행하면 인사팀은
+                    #   「다른 회사도 된다」를 영영 못 본다. ``target``은 "/" 그대로다.
     except Exception:  # noqa: BLE001 — 인가 저장소 장애에서는 이전 권한도 정리한다
         logger.exception("LINK를 확인하거나 요청 기록을 저장하지 못했습니다")
         return _share_store_unavailable(request)

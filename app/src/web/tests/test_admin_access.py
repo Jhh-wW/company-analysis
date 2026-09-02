@@ -594,6 +594,12 @@ def _보고서를_만든다(admin: TestClient) -> str:
 def test_결과주소를_붙여_링크를_만들면_받은사람이_보고서로_바로간다(
     admin: TestClient,
 ):
+    """★ 기대값 이전(G-S6·D-G10) — 도착지가 결과에서 첫 화면(랜딩)으로 바뀌었다.
+
+    「받은 사람」은 관리자가 아니라 로그인하지 않은 인사팀이다. 그래서 도착지는
+    관리자 손님으로 확인하고, 실제로 보고서를 한 번에 여는지는 열쇠만 가진
+    별도 손님으로 확인한다.
+    """
     report_id = _보고서를_만든다(admin)
     created = admin.post(
         "/admin/link/new",
@@ -609,7 +615,13 @@ def test_결과주소를_붙여_링크를_만들면_받은사람이_보고서로
     with storage_db.connect() as conn:
         assert share_store.load(conn, key).report_id == report_id
     opened = admin.get(f"/k/{key}", follow_redirects=False)
-    assert opened.headers["location"] == f"/result/{report_id}"
+    assert opened.headers["location"] == "/"
+    # 공유 쿠키는 배포 기본값대로 Secure다 — 실제 브라우저처럼 HTTPS로 왕복시킨다.
+    with TestClient(main.app, base_url="https://testserver") as 받은사람:
+        받은사람.get(f"/k/{key}", follow_redirects=False)
+        랜딩 = 받은사람.get("/")
+    assert f'href="/result/{report_id}"' in 랜딩.text
+    assert f"{CANONICAL_DEMO_COMPANY} 보고서 보기" in 랜딩.text
 
 
 @pytest.mark.parametrize(
@@ -862,9 +874,9 @@ def test_회사링크를_닫아도_이미전달된_독립결과주소는_60일�
         follow_redirects=False,
     )
     key, key_hash = _issued_link(created)
-    assert admin.get(f"/k/{key}", follow_redirects=False).headers["location"] == (
-        f"/result/{report_id}"
-    )
+    # 기대값 이전(G-S6·D-G10): `/k/`는 이제 결과가 아니라 첫 화면으로 보낸다.
+    # 이 시험의 대상은 링크를 닫은 뒤에도 «독립 결과 주소»가 60일 정책을 따르는지다.
+    assert admin.get(f"/k/{key}", follow_redirects=False).headers["location"] == "/"
     detail_before_close = admin.get(f"/admin/link/{key_hash}")
     assert "보고서 생성 후 60일까지" in detail_before_close.text
 

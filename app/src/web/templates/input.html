@@ -15,6 +15,43 @@
 </div>
 {% endif %}
 
+{# ★ 초대 링크로 들어온 사람의 첫 화면 — 버튼 두 장 (사람 결정 D-G10).
+   예전에는 결속 보고서가 있으면 결과 화면으로 «직행»했다. 그러면 인사팀은
+   자기 회사 보고서만 보고 나가고 「다른 회사도 돌려 볼 수 있다」를 못 본다.
+   ★ 문구는 한 글자도 여기서 짓지 않는다 — 전부 sharelink/constants.py 상수다.
+   ★ link_landing 은 초대 링크 갈래에만 채워진다. 관리자·회원·모르는 손님의
+     첫 화면은 이 블록이 아예 안 그려져서 한 글자도 바뀌지 않는다. #}
+{% if link_landing %}
+<section class="card link-landing" id="link-landing"
+         aria-labelledby="link-landing-title">
+  <header class="form-header">
+    <h2 id="link-landing-title">{{ link_landing.title }}</h2>
+    <p>{{ link_landing.intro }}</p>
+  </header>
+
+  <div class="link-landing-choice">
+    {% if link_landing.report_url %}
+    <a class="btn wide" href="{{ link_landing.report_url }}"
+       aria-label="{{ link_landing.report_button }}">{{ link_landing.report_button }}</a>
+    {% if link_landing.made_on_note %}
+    <p class="link-landing-note">{{ link_landing.made_on_note }}</p>
+    {% endif %}
+    {% else %}
+    {# 만료·삭제·미결속은 사람에게 같은 뜻이다 — 자동 재조사는 하지 않는다 (D-G11). #}
+    <p class="link-landing-pending" role="status">
+      <strong>{{ link_landing.not_ready_note }}</strong><br>
+      {{ link_landing.not_ready_hint }}
+    </p>
+    {% endif %}
+  </div>
+
+  <div class="link-landing-choice">
+    <a class="btn wide secondary" href="#analysisForm">{{ link_landing.other_button }}</a>
+    <p class="link-landing-note">{{ link_landing.other_note }}</p>
+  </div>
+</section>
+{% endif %}
+
 {% if image_error %}
 <div class="warn-line crit" role="alert" style="margin-bottom:18px">
   <span aria-hidden="true">⚠️</span><span>{{ image_error }}</span>
@@ -60,7 +97,9 @@
   </section>
   {% endif %}
 
-  {% if share_link %}
+  {# 초대 링크 손님은 위 랜딩이 인사팀 눈높이 문구로 안내한다. 이 옛 배너는
+     내부 용어를 쓰므로 랜딩이 있는 화면에는 그리지 않는다 (설계 03장 §5). #}
+  {% if share_link and not link_landing %}
   <div class="warn-line" id="share-context-note" role="status" style="margin-bottom:16px">
     <span aria-hidden="true">🔗</span>
     <span>

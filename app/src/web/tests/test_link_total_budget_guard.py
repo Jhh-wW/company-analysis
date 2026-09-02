@@ -252,8 +252,11 @@ def test_링크_누적원가가_상한에_닿으면_새조사를_막고_결속�
     # ★ 하루 소진 문구를 대신 보여 주면 「내일 다시 열린다」는 거짓말이 된다.
     assert "내일 다시 열립니다" not in 막힘.text
     # ★ 준비된 보고서는 계속 열린다 (2026-09-02 사용자 결정).
+    # ★ 기대값 이전(G-S6·D-G10): 도착지가 결과에서 첫 화면(랜딩)으로 바뀌었다.
+    #   한도를 다 써도 랜딩의 보고서 버튼과 그 결과 화면은 그대로 열려야 한다.
     assert 열림.status_code == 303
-    assert 열림.headers["location"] == f"/result/{report_id}"
+    assert 열림.headers["location"] == "/"
+    assert f'href="/result/{report_id}"' in client.get("/").text
     assert 보고서.status_code == 200
 
 
