@@ -292,7 +292,7 @@ def _유료단계_관문만_확인한다(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_같은_빌드에서_SHADOW_저장본이_있는_회사를_FULL로_요청하면_새로_만들어_owner가_된다(
     monkeypatch: pytest.MonkeyPatch, bucket: str
 ) -> None:
-    """★ 이 티켓의 P0. 고치기 전에는 여기서 요청이 통째로 죽었다.
+    """★ 이 변경이 막는 첫째 결함. 고치기 전에는 여기서 요청이 통째로 죽었다.
 
     열쇠가 모드를 못 가르는 상황을 일부러 만든다 — SHADOW 본문을 **FULL 열쇠에**
     결속해 둔다. 조정자는 이 히트를 「미적중」으로 닫아야 하고, 그래야 상태가
@@ -403,7 +403,7 @@ def test_릴리스_모드가_다르면_캐시_열쇠도_다르다() -> None:
 def test_FULL_재생성_결과는_옛_SHADOW_항목과_충돌_없이_저장된다(
     monkeypatch: pytest.MonkeyPatch, bucket: str
 ) -> None:
-    """★ 이 티켓의 P1. 고치기 전에는 `ImmutableRecordConflict`가 났다.
+    """★ 이 변경이 막는 둘째 결함. 고치기 전에는 `ImmutableRecordConflict`가 났다.
 
     같은 회사·같은 출처·같은 배포에서 SHADOW 저장본이 이미 있고, 새로 만든
     FULL 결과를 저장한다. 열쇠에 모드가 없으면 두 내용이 같은 칸을 두고 다퉈
@@ -461,7 +461,7 @@ def test_FULL_요청은_SHADOW_열쇠의_저장본을_아예_보지_않는다(
 def test_두번째_FULL_요청은_FULL_저장본을_재사용한다(
     monkeypatch: pytest.MonkeyPatch, bucket: str
 ) -> None:
-    """★ 대조군 — 막느라 다 막았으면 이 티켓은 비용만 늘린 것이다."""
+    """★ 대조군 — 막느라 다 막았으면 이 변경은 비용만 늘린 것이다."""
     full_보고서 = _진짜_산출물(monkeypatch, ReleaseMode.FULL)
     full_namespace = _namespace(ReleaseMode.FULL)
     content, artifact_id = _저장본을_캐시에_넣는다(

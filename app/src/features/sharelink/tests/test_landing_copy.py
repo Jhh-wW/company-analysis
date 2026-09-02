@@ -73,7 +73,7 @@ def test_버튼B는_다른_회사_분석해_보기다():
 
 
 def test_생성일은_한국어_날짜로_쓴다():
-    """★ ISO는 개발자 표기다. 인사팀에게는 「8월 19일」이다."""
+    """★ ISO(2026-08-19)는 개발자 표기다. 인사팀에게는 「8월 19일」이다."""
     made_on = constants.LANDING_MADE_ON_DATE_TEMPLATE.format(
         year=2026, month=9, day=2
     )

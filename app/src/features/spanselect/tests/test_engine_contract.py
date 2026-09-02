@@ -277,7 +277,7 @@ def test_앞머리를_뗀_문장이_W3_원문대조를_통과한다():
     assert deleted == [], f"다듬은 문장이 버려졌습니다: {deleted}"
     assert len(kept) == 1
     assert "[편집자주]" not in kept[0].sentence
-    # ★ 출처 표기 「(보도 · www.edaily.co.kr) 」도 뗀다.
+    # ★ 출처 표기 「(2026-07-22 보도 · www.edaily.co.kr) 」도 뗀다.
     #   날짜·주소는 출처 목록에 이미 있다 — 문장에 남기면 자소서에 그대로 못 쓴다.
     #   ⚠️ 그래도 W3 원문대조는 통과해야 한다(위 `deleted == []`) — 그것이 이 시험의 핵심이다.
     assert "보도 ·" not in kept[0].sentence

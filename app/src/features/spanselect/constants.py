@@ -294,13 +294,13 @@ DELETED_REASON_PREVIEW: Final[int] = 6
 #   모델을 올린 뒤 실제로 이런 것들이 보고서에 실렸다:
 #     · 「…18개국에 수출 노선을 확보했다....」        ← 네이버가 자른 토막
 #     · 「Find a provider News About Us … AMPS」      ← 홈페이지 메뉴 글자
-#     · 「(보도 · domain) 제목.」           ← 앞에 붙은 출처 표기
+#     · 「(2026-07-16 보도 · domain) 제목.」  ← 앞에 붙은 출처 표기
 
 #: 잘린 자국 — 네이버 뉴스 API가 본문을 잘라 보낼 때 남긴다.
 #: **실측: 저장된 뉴스 후보 115문장 중 56개(49%)가 이 모양이다.**
 TRUNCATED_TAIL_RE: Final[re.Pattern[str]] = re.compile(r"(\.{3,}|…)\s*[\"')\]]*$")
 
-#: 뉴스 조각 맨 앞의 「(보도 · www.example.com) 」 표기.
+#: 뉴스 조각 맨 앞의 「(2026-07-16 보도 · www.example.com) 」 표기.
 #: ★ 버리지 않고 «앞머리만» 뗀다 — 뒤에 붙은 기사 제목은 온전한 문장이라 쓸 만하다.
 #:   날짜·주소는 출처 목록에 이미 있으므로 문장에 남길 이유가 없다.
 NEWS_SOURCE_PREFIX_RE: Final[re.Pattern[str]] = re.compile(

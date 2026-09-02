@@ -240,7 +240,7 @@ def test_FULL_요청은_SHADOW_저장본을_재사용하지_않는다(
 def test_조정자가_모드_다른_저장본을_히트로_주면_요청을_닫는다(
     engine: FakeEngine, monkeypatch: pytest.MonkeyPatch, 저장본_모드: ReleaseMode
 ) -> None:
-    """★ 조정 경로는 «버리기»가 아니라 «닫기»다. 이 티켓의 핵심 차이다.
+    """★ 조정 경로는 «버리기»가 아니라 «닫기»다. 이 변경의 핵심 차이다.
 
     조정자(`web/generation_singleflight.py`)는 요청 모드와 다른 저장본을 히트로
     돌려주지 않고 미적중으로 닫아 owner 선정으로 내려간다. 그 계약을 지키지
@@ -314,7 +314,7 @@ def test_비FULL_요청의_재사용은_그대로다(
 def test_FULL_저장본은_FULL_요청에_재사용된다(
     engine: FakeEngine, monkeypatch: pytest.MonkeyPatch, 겹: str
 ) -> None:
-    """★ 대조군 — 맞는 재사용까지 막았으면 이 티켓은 비용만 늘린 것이다."""
+    """★ 대조군 — 맞는 재사용까지 막았으면 이 변경은 비용만 늘린 것이다."""
     결과, 저장본, 새_생성 = _요청을_흘린다(
         engine,
         monkeypatch,

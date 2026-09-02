@@ -3,7 +3,7 @@
 Host 고정·CSRF Origin 고정 같은 보안판정은 옛 관리자 계약과 똑같이 켜져 있다는
 것을 함께 못 박는다.
 
-정본: 배포 계약 신설 티켓. ``routers/admin.py``·``routers/analysis.py``는
+배포 계약을 새로 만들면서 넣었다. ``routers/admin.py``·``routers/analysis.py``는
 이 작업의 소유권 밖이라 **읽기만** 했다 — 아래 시험은 그 두 파일을 한 글자도
 바꾸지 않고도 새 계약에서 다른 결과가 나온다는 것으로 그 사실을 증명한다.
 """

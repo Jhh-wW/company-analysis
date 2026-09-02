@@ -90,7 +90,7 @@ def _saved(tmp_path: Path, report: Report, *, report_id: str = "r1") -> Path:
 def test_report_payload는_projection을_싣지_않아_바이트가_기존과_같다() -> None:
     """같은 보고서를 봉인 «있는 채»와 «없는 채»로 직렬화해 바이트를 맞댄다.
 
-    이게 참이면 payload는 이 티켓 이전과 한 글자도 다르지 않다 — 이미 승인된
+    이게 참이면 payload는 봉인을 별도 표로 나누기 전과 한 글자도 다르지 않다 — 이미 승인된
     PDF 출고 기록의 ``report_sha256`` 입력이 바뀌지 않는다는 뜻이기도 하다.
     """
 

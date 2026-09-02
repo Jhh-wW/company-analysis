@@ -1,6 +1,6 @@
 """관리자 전용 로그인 벽에도 초대 명단(allowlist) 회원은 들어온다는 것을 못 박는다.
 
-정본: 배포 계약 신설 티켓(포트폴리오 링크). ``main.py``의 ``beta_admin_gate``에
+배포 계약(포트폴리오 링크)을 새로 만들면서 넣었다. ``main.py``의 ``beta_admin_gate``에
 넣은 MEMBER 예외는 **배포 계약과 무관하게** 적용한다 — ``BETA_ADMIN_ONLY``는 로그인
 벽을 켤지만 정할 뿐, 어느 forwarded-header 신뢰 모델을 쓰는지와는 다른 축이기
 때문이다(주석 근거: ``src/web/main.py``의 ``beta_admin_gate``). 이 시험은 계약을

@@ -43,7 +43,7 @@ RATE_MAX_SEARCHES: Final[int] = 6
 # 낮은 점수의 검색 잡음은 보여주지 않는다. 이 값을 넘겨도 자동 확정하지 않는다.
 MIN_CANDIDATE_SCORE: Final[float] = 0.25
 
-# websiteUri가 포함된 Text Search Enterprise 공개 정가(기준
-# USD 35/1,000) × 서비스의 보수적 환율 1,400원. 무료 구간이어도 예산 admission은
+# websiteUri가 포함된 Text Search Enterprise 공개 정가(USD 35/1,000
+# 기준) × 서비스의 보수적 환율 1,400원. 무료 구간이어도 예산 admission은
 # 최악값으로 잡는다. 청구서의 실제 할인·무료 사용량과 동일하다는 뜻은 아니다.
 GOOGLE_PLACES_ACCOUNTING_COST_KRW: Final[float] = 49.0

@@ -2,7 +2,7 @@
 판정 캐시가 scope 수명과 정확히 일치하고, scheme이 다르면 절대 섞이지
 않는지 확인한다.
 
-★ 이 모듈(``homepage/robots_cache.py``)은 이번 티켓에서 새로 만들었으므로
+★ 이 모듈(``homepage/robots_cache.py``)은 이 변경에서 새로 만들었으므로
   「원본 코드 대비 red」로 보일 이전 버전이 없다 — 결합 카운터 시험
   (``pipeline/tests/test_collect_transport_counts.py``)이 실제 3개 수집기
   경로에서의 red→green을 담당하고, 여기서는 이 모듈 자체의 계약(scope 안

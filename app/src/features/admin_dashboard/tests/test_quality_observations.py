@@ -40,7 +40,7 @@ def _report_with_observation(
     `report_from_dict` 왕복 검증(§`strict_reload`) 때문에 `quality_observation`이
     있는 보고서는 `ENFORCE_NO_PARTIAL`/`FULL`로만 저장할 수 있다(SHADOW·빈
     `release_mode`에 관측값을 실으면 storage가 그 자체를 거부한다 — 이 결함은
-    이 티켓 범위 밖이라 root에 별도 보고했다). 여기서는 storage가 실제로
+    이 변경의 범위 밖이라 따로 보고했다). 여기서는 storage가 실제로
     받아들이는 가장 가벼운 조합(`ENFORCE_NO_PARTIAL`)으로 관측값 있는 보고서를
     흉내 낸다.
     """

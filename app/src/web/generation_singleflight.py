@@ -502,7 +502,7 @@ class GenerationSession:
           이 값의 정본은 pipeline(`features/pipeline/real.py`)이 읽는 것과
           같은 환경값 한 곳이다. 인자로 받으려면 `generation_coordination`의
           callback 서명(shared)이나 세션 생성부(`web/job_runtime.py`)를 고쳐야
-          하는데 둘 다 이 티켓 소유가 아니다. 같은 환경값을 같은 파서로 읽으므로
+          하는데 둘 다 이 변경의 소유가 아니다. 같은 환경값을 같은 파서로 읽으므로
           두 곳이 갈릴 여지는 없다.
         ★ 모르면 «예전 동작». 값이 없거나 계약 밖 문자열이면 `None`이고,
           그때 아래 판정은 재사용을 그대로 허용한다. FULL 요청은 환경값이
