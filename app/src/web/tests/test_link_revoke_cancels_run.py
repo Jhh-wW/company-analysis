@@ -362,6 +362,36 @@ def test_링크_상태를_못_읽으면_유료단계에_들어가지_않되_닫�
     assert _링크이력(job_id).stop_reason == job_runtime.LINK_STOP_REASON_UNKNOWN
 
 
+def test_마감이_한번_실패해도_방어선이_같은_사유코드를_남긴다(monkeypatch) -> None:
+    """정상 마감이 실패하면 `_ensure_link_job_closed`가 이력을 대신 닫는다.
+
+    그 방어선이 파이프라인 종료값(`generation_failed`)을 쓰면, 관리자는 자기가
+    방금 닫은 링크 때문이라는 걸 이력에서 못 본다. 두 자리가 같은 헬퍼를 쓰는지
+    여기서 못 박는다.
+    """
+
+    원본_마감 = share_store.finish_run
+    남은_실패 = {"횟수": 1}
+
+    def 한번_실패하는_마감(conn, **kwargs):
+        if 남은_실패["횟수"] > 0:
+            남은_실패["횟수"] -= 1
+            raise sqlite3.OperationalError("시험용 마감 저장 실패")
+        return 원본_마감(conn, **kwargs)
+
+    pipeline = 링크단계가짜조사(단계전=_닫을_단계(1, _링크를_닫는다))
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    monkeypatch.setattr(share_store, "finish_run", 한번_실패하는_마감)
+
+    with _링크손님() as client:
+        job_id = _조사를_돌린다(client)
+
+    assert 남은_실패["횟수"] == 0, "정상 마감이 한 번도 시도되지 않았다"
+    이력 = _링크이력(job_id)
+    assert 이력.status == share_store.RUN_STATUS_STOPPED, "이력이 running으로 남았다"
+    assert 이력.stop_reason == job_runtime.LINK_STOP_REASON_REVOKED
+
+
 def test_링크_없는_job은_훅이_아무것도_하지_않는다(monkeypatch) -> None:
     읽기수 = _읽기_세는_대역(monkeypatch)
     pipeline = 링크단계가짜조사()
