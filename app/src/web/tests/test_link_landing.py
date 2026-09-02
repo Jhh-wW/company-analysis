@@ -328,13 +328,31 @@ def _로그인(client: TestClient, email: str, *, is_admin: bool) -> None:
     client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
 
 
+#: 랜딩 카드가 «그려졌는지»를 글자가 아니라 «구조»로 보는 표지.
+#: ★ 왜 글자 비교만으로 부족한가 — `{% if link_landing %}` 가드를 지우면
+#:   `link_landing`이 None이라 `{{ link_landing.title }}`이 전부 빈 글자로
+#:   렌더된다. 그래서 **빈 `<section>`이 그려져도 글자 줄은 그대로**이고
+#:   스냅샷 비교는 초록불을 유지한다 (2026-09-02 검토자 지적, 변이로 실측).
+#:   껍데기만 새는 것도 유출이므로 표지 자체가 없다고 단정한다.
+_랜딩_구조표지 = (
+    'id="link-landing"',
+    'class="card link-landing"',
+    "link-landing-choice",
+)
+
+
+def _랜딩_흔적(원본: str) -> tuple[str, ...]:
+    """응답 HTML에 남은 랜딩 구조 표지. 없어야 정상이다."""
+    return tuple(표지 for 표지 in _랜딩_구조표지 if 표지 in 원본)
+
+
 def test_PUBLIC_MEMBER_ADMIN_화면은_바뀌지_않는다(client: TestClient):
     """★ 초대 링크 손님만 바꾼다. 나머지 세 손님의 첫 화면은 그대로다.
 
     수정 전 코드로 찍은 글자와 «똑같아야» 통과한다. 랜딩 문구가 한 줄이라도
     다른 손님에게 새면 여기서 걸린다.
     """
-    공개 = _글자줄만(visible_text(client.get("/").text))
+    공개_원본 = client.get("/").text
 
     with storage_db.connect() as conn:
         share_allow.invite(
@@ -343,14 +361,18 @@ def test_PUBLIC_MEMBER_ADMIN_화면은_바뀌지_않는다(client: TestClient):
         )
         conn.commit()
     _로그인(client, "friend@example.com", is_admin=False)
-    회원 = _글자줄만(visible_text(client.get("/").text))
+    회원_원본 = client.get("/").text
 
     _로그인(client, "admin@example.com", is_admin=True)
-    관리자 = _글자줄만(visible_text(client.get("/").text))
+    관리자_원본 = client.get("/").text
 
-    assert 공개 == _스냅샷("public")
-    assert 회원 == _스냅샷("member")
-    assert 관리자 == _스냅샷("admin")
+    assert _글자줄만(visible_text(공개_원본)) == _스냅샷("public")
+    assert _글자줄만(visible_text(회원_원본)) == _스냅샷("member")
+    assert _글자줄만(visible_text(관리자_원본)) == _스냅샷("admin")
+    # ★ 글자뿐 아니라 «구조»도 본다 — 빈 껍데기가 그려지는 것도 유출이다.
+    assert _랜딩_흔적(공개_원본) == ()
+    assert _랜딩_흔적(회원_원본) == ()
+    assert _랜딩_흔적(관리자_원본) == ()
 
 
 # ══════════════════════════════════════════════════════════
@@ -611,11 +633,14 @@ def test_쿠키_없는_관리자_화면은_그대로다(client: TestClient):
     _링크발급("하이브", report_id=_보고서를_저장한다("하이브"))
     _로그인(client, "admin@example.com", is_admin=True)
 
-    본문 = _글자줄만(visible_text(client.get("/").text))
+    원본 = client.get("/").text
+    본문 = _글자줄만(visible_text(원본))
 
     assert "하이브 보고서 보기" not in "\n".join(본문)
     assert "다른 회사 분석해 보기" not in "\n".join(본문)
     assert 본문 == _스냅샷("admin")
+    # ★ 빈 카드 껍데기도 안 그려져야 한다 (글자 비교만으로는 못 잡는다).
+    assert _랜딩_흔적(원본) == ()
 
 
 def test_철회된_링크_쿠키를_가진_관리자에게도_카드가_안_보인다(client: TestClient):
