@@ -119,6 +119,29 @@ def build_section_bundle(
                     f"required_path_{state.value.lower()}:{slot_id}"
                 )
             continue
+        # required 경로는 전부 정상 확인됐다(OK/MISSING). 그러나 그것만으로
+        # «확인을 마쳤다»고 단정하지 않는다 — requirement(«이 경로가 유일한
+        # 확인 길인가»)와 outcome-kind(«막힌 것인가, 없는 것인가»)는 다른
+        # 질문이다. OPTIONAL로 낮춰진 광역 경로(예: robots 차단·IR 전송
+        # 실패)가 같은 슬롯을 겨냥했다가 막혔다면, required 경로 하나의
+        # 정상 확인만으로 전체를 다 살펴봤다고 볼 수 없다(P1-B). OPTIONAL
+        # 강등 자체(로그·재시도 판단상 있으나마나 한 경로 취급)는 그대로
+        # 유지한다 — required_attempts가 비었을 때(→ unobserved)나 이미
+        # failed_states가 있을 때(→ required_path_*)는 건드리지 않는다.
+        optional_failed_states = {
+            attempt.state
+            for attempt in candidate.attempts
+            if attempt.requirement is not SourceRequirement.REQUIRED
+            and slot_id in attempt.slot_ids
+            and attempt.state in {CollectionState.FAILED, CollectionState.TRUNCATED}
+        }
+        if optional_failed_states:
+            has_unknown = True
+            for state in sorted(optional_failed_states, key=lambda item: item.value):
+                generated_reasons.append(
+                    f"optional_path_{state.value.lower()}:{slot_id}"
+                )
+            continue
         generated_reasons.append(f"evidence_absent_after_check:{slot_id}")
 
     if not missing:

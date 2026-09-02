@@ -185,6 +185,86 @@ def test_필수_조회_실패와_절단은_자료부족이_아니라_unknown이�
     assert f"required_path_{state.value.lower()}:customer_market" in bundle.reason_codes
 
 
+def test_필수경로가_MISSING이어도_보조경로가_막혔으면_확인완료로_단정하지_않는다() -> None:
+    """P1-B — «robots Disallow: / + DART MISSING» 조합의 재현.
+
+    필수(REQUIRED) 조회 하나(예: DART)는 정상적으로 끝까지 확인해 MISSING을
+    돌려줬지만, 같은 슬롯을 겨냥한 OPTIONAL 광역 경로(예: robots 차단으로
+    본문을 아예 못 연 웹 수집)가 FAILED다. requirement(«유일한 확인
+    경로인가»)와 outcome-kind(«막힌 것인가, 없는 것인가»)는 다른 질문이므로
+    REQUIRED 경로 하나의 정상 확인만으로 «자료가 없다»고 단정하면 안 된다.
+    """
+
+    candidate = _candidate(
+        attempts=(
+            _attempt(slot_id="customer_market", state=CollectionState.MISSING),
+            _attempt(
+                slot_id="customer_market",
+                state=CollectionState.FAILED,
+                requirement=SourceRequirement.OPTIONAL,
+            ),
+        ),
+    )
+
+    bundle = build_section_bundle(
+        candidate, required_slot_ids=("customer_market",)
+    )
+
+    assert bundle.readiness is EvidenceReadiness.UNKNOWN
+    assert "optional_path_failed:customer_market" in bundle.reason_codes
+    assert "evidence_absent_after_check:customer_market" not in bundle.reason_codes
+
+
+def test_필수경로가_MISSING이고_보조경로도_정상이면_그대로_insufficient다() -> None:
+    """P1-B 회귀 방지 — 보조 경로가 «막힌» 게 아니라 정상 확인(OK/MISSING)이면
+    기존처럼 evidence_absent_after_check(확인 후 부재)를 유지한다."""
+
+    candidate = _candidate(
+        attempts=(
+            _attempt(slot_id="customer_market", state=CollectionState.MISSING),
+            _attempt(
+                slot_id="customer_market",
+                state=CollectionState.OK,
+                requirement=SourceRequirement.OPTIONAL,
+            ),
+        ),
+    )
+
+    bundle = build_section_bundle(
+        candidate, required_slot_ids=("customer_market",)
+    )
+
+    assert bundle.readiness is EvidenceReadiness.INSUFFICIENT
+    assert bundle.reason_codes == (
+        "evidence_absent_after_check:customer_market",
+        "producer_readiness_disagreed:unknown_to_insufficient",
+    )
+
+
+def test_필수경로_자체가_실패하면_보조경로_상태와_무관하게_required_path_사유를_유지한다() -> None:
+    """P1-B 회귀 방지 — required_attempts에 이미 FAILED가 있으면(기존 규칙)
+    optional 경로 확인 없이도 그대로 unknown이고, 사유 문구도 바뀌지 않는다."""
+
+    candidate = _candidate(
+        attempts=(
+            _attempt(slot_id="customer_market", state=CollectionState.FAILED),
+            _attempt(
+                slot_id="customer_market",
+                state=CollectionState.OK,
+                requirement=SourceRequirement.OPTIONAL,
+            ),
+        ),
+    )
+
+    bundle = build_section_bundle(
+        candidate, required_slot_ids=("customer_market",)
+    )
+
+    assert bundle.readiness is EvidenceReadiness.UNKNOWN
+    assert "required_path_failed:customer_market" in bundle.reason_codes
+    assert "optional_path_failed:customer_market" not in bundle.reason_codes
+
+
 def test_아예_확인하지_않은_필수칸은_unknown이다() -> None:
     bundle = build_section_bundle(
         _candidate(), required_slot_ids=("customer_market",)
