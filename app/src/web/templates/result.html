@@ -849,10 +849,12 @@
   {% endif %}
   {# ⚠️ 버튼을 숨기는 것은 «권한»이 아니다 — 진짜 차단은 서버가 매 요청마다 한다.
      여기 숨기는 것은 «관리자가 아닌 사람에게 못 쓸 버튼을 안 보여주는» 배려일 뿐이다.
-     엔진 v2는 Notion 채널이 아직 없다(04장 3-4절 4항 — PDF·웹 우선, Notion 후속:
-     export_notion.build_blocks가 v1 canonical 투영에 결합돼 있어 v2 보고서를
-     구조적으로 거부한다). 그래서 v2에서는 실패가 확실한 버튼을 아예 보여주지 않는다. #}
-  {% if not legacy_readonly and report.schema_version != engine_v2_schema_version %}
+     ★ 엔진 v2도 이제 봉인 블록이 있으면 노션으로 보낼 수 있다(D-S6). 예전에는
+       export_notion.build_blocks가 v1 canonical 투영에 결합돼 있어 v2를 구조적으로
+       거부했고, 그래서 v2에서는 실패가 확실한 버튼을 아예 안 보여줬다.
+     ★ 봉인이 «없는» v2 저장본은 노션이 그릴 블록도 없다 — 그건 계속 숨긴다.
+       조건을 schema_version 하나로 두면 그 둘을 갈라내지 못한다. #}
+  {% if not legacy_readonly and (report.schema_version != engine_v2_schema_version or projection) %}
   {% if auth_is_admin and notion_configured %}
     <form class="report-action-form" method="post" action="/notion/{{ job.job_id }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -866,7 +868,11 @@
   <a class="btn ghost" href="/">다른 회사 분석하기</a>
 </nav>
 
-{% if not legacy_readonly and report.schema_version != engine_v2_schema_version %}
+{# 위 버튼과 «같은» 조건이어야 한다 — 한쪽만 바꾸면 버튼 없는 화면에 설정 안내만
+   남거나, 버튼을 눌렀는데 왜 안 되는지 설명이 사라진다.
+   ⚠️ 닫는 붙임표(빼기 기호)로 이 주석의 줄바꿈을 스스로 삼킨다 — 안 그러면
+     v1 화면 끝에 빈 줄이 하나 늘어 바이트 대조가 깨진다(실측). -#}
+{% if not legacy_readonly and (report.schema_version != engine_v2_schema_version or projection) %}
 {% if auth_is_admin and not notion_configured %}
 <p class="muted result-admin-note" id="notion-setup-note">
   노션 연결 설정이 아직 없습니다. 연결을 설정한 뒤 이 보고서를 다시 열면 보낼 수 있습니다.

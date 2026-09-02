@@ -28,6 +28,7 @@ import re
 import uuid
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -61,6 +62,7 @@ from src.shared.report_generation.models import canonical_sha256
 from src.shared.report_generation.public_projection import build_report_digest
 from src.web import job_runtime, request_helpers
 from src.web import main as web_main
+from src.web.routers import reports as reports_router
 from src.web.tests.report_route_support import serve_legacy_report_snapshot
 from src.web.tests.test_release_authority_full_wiring import (
     _COMPANY_ID,
@@ -205,12 +207,12 @@ def _with_facts(report: Report, *, scope: str, relationship: str) -> Report:
     return replace(report, sections=sections, fact_records=facts)
 
 
-def _sealed_v2_report(
+def _unsealed_v2_report(
     *,
     scope: str = _장부_전용_범위,
     relationship: str = _장부_전용_관계,
 ) -> Report:
-    """봉인이 붙은 v2 보고서 — 도식 네 종류·3개년 띠·표지 띠·부록이 모두 있다."""
+    """봉인을 «아직 붙이지 않은» v2 보고서 — 옛 저장본과 같은 상태다."""
 
     rendered = render_report(
         "가나다전자",
@@ -226,6 +228,18 @@ def _sealed_v2_report(
     report = _with_facts(
         _fill_manifest_refs(rendered), scope=scope, relationship=relationship
     )
+    assert report.public_projection is None
+    return report
+
+
+def _sealed_v2_report(
+    *,
+    scope: str = _장부_전용_범위,
+    relationship: str = _장부_전용_관계,
+) -> Report:
+    """봉인이 붙은 v2 보고서 — 도식 네 종류·3개년 띠·표지 띠·부록이 모두 있다."""
+
+    report = _unsealed_v2_report(scope=scope, relationship=relationship)
     return replace(report, public_projection=build_public_projection(report))
 
 
@@ -535,3 +549,99 @@ def test_v1_결과페이지_HTML은_바이트_불변이다(monkeypatch: pytest.M
     rendered = _article(body).encode("utf-8")
     assert b"\r" not in rendered, "화면 결과에 CR가 생기면 golden 대조 전제가 깨진다"
     assert rendered == _golden_bytes()
+
+
+# ══════════════════════════════════════════════════════════
+# ⑥ 화면 장식 — 부분 보고서 고지와 노션 버튼
+# ══════════════════════════════════════════════════════════
+
+#: 관리자에게 보이는 노션 보내기 버튼의 글자와 그 form의 action 앞부분.
+_NOTION_BUTTON_LABEL = "노션으로 보내기"
+_NOTION_FORM_ACTION = 'action="/notion/'
+
+
+def _render_from_stored_delivery(
+    report: Report, monkeypatch: pytest.MonkeyPatch, *, report_id: str
+) -> str:
+    """영속 Delivery 갈래로 결과 화면을 그린다.
+
+    ★ 왜 위 ``_render``(legacy snapshot)를 못 쓰나 — legacy 갈래는 화면을
+      ``legacy_readonly=True``로 그린다. 그러면 부분 보고서 고지도, PDF·노션
+      버튼도 통째로 꺼진다. 그 자리를 보는 시험은 반드시 «지금 만든 보고서»가
+      가는 delivery 갈래로 그려야 한다.
+    ★ 이 도우미는 delivery «조회»만 흉내 낸다. 만료 판정은 별도 라우트 시험이
+      소유하므로 여기서는 만료 아님으로 고정한다.
+    """
+
+    stored = SimpleNamespace(delivery=SimpleNamespace(), report=report)
+    monkeypatch.setattr(
+        reports_router, "_stored_public_delivery", lambda _public_id: stored
+    )
+    monkeypatch.setattr(reports_router, "_delivery_is_expired", lambda _delivery: False)
+    monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
+    job_runtime._JOBS.pop(report_id, None)
+    session = auth_logic.create_session("admin@example.com", True)
+    with TestClient(web_main.app) as client:
+        response = client.get(
+            f"/result/{report_id}",
+            cookies={auth_constants.SESSION_COOKIE_NAME: session.token},
+        )
+    assert response.status_code == 200, response.text[:500]
+    assert "PDF 원본 확인 불가" not in response.text, "legacy 갈래로 샜다"
+    return response.text
+
+
+def test_봉인_있는_v2_부분보고서_고지는_봉인_문구를_쓴다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """세 채널이 각자 들고 있던 고지 사본 대신 봉인이 고른 문구를 쓴다."""
+
+    report = _sealed_v2_report()
+    projection = report.public_projection
+    assert projection is not None
+    title, detail = projection.grade_notice
+    assert title and detail, "재료가 잘못됐다 — 부분 보고서 고지가 비었다"
+
+    body = _render_from_stored_delivery(report, monkeypatch, report_id="s5-grade-notice")
+
+    assert f"<b>{title}</b>" in body
+    assert f"<p>{detail}</p>" in body
+
+
+def _render_as_notion_ready_admin(
+    report: Report, monkeypatch: pytest.MonkeyPatch, *, report_id: str
+) -> str:
+    """노션 연결이 «되어 있는» 관리자 화면을 그린다.
+
+    버튼이 안 보이는 이유가 「연결 설정이 없어서」가 아니라 「봉인이 없어서」임을
+    갈라내려면 연결 여부를 고정해야 한다.
+    """
+
+    monkeypatch.setattr(reports_router, "is_notion_configured", lambda: True)
+    return _render_from_stored_delivery(report, monkeypatch, report_id=report_id)
+
+
+def test_봉인_있는_v2_결과화면은_노션_버튼을_보인다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """노션 채널이 봉인 블록을 소비하게 됐으므로(D-S6) 더는 숨기지 않는다."""
+
+    report = _sealed_v2_report()
+    assert report.public_projection is not None
+
+    body = _render_as_notion_ready_admin(report, monkeypatch, report_id="s5-notion-on")
+
+    assert _NOTION_BUTTON_LABEL in body
+    assert _NOTION_FORM_ACTION in body
+
+
+def test_봉인_없는_v2는_노션_버튼을_숨긴다(monkeypatch: pytest.MonkeyPatch) -> None:
+    """봉인이 없으면 노션이 그릴 블록도 없다 — 실패가 확실한 버튼은 안 보여준다."""
+
+    report = _unsealed_v2_report()
+    assert report.public_projection is None
+
+    body = _render_as_notion_ready_admin(report, monkeypatch, report_id="s5-notion-off")
+
+    assert _NOTION_BUTTON_LABEL not in body
+    assert _NOTION_FORM_ACTION not in body
