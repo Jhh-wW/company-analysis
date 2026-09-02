@@ -93,7 +93,12 @@ class ResponseSecurityMiddleware:
             await send(message)
 
         if (
-            deployment_mode.render_admin_no_forwarded()
+            # ★ 옛 관리자 두 계약뿐 아니라 포트폴리오 링크 계약도 forwarded 헤더를
+            #   안 믿고 하나의 고정 PUBLIC_ORIGIN만 믿는 실행 모델이라, Host 고정은
+            #   render_admin_no_forwarded()(친구 입구 차단 여부)가 아니라 이 더
+            #   넓은 판정을 써야 한다 — 안 그러면 포트폴리오 계약은 Host 위조를
+            #   막을 방법이 없어진다.
+            deployment_mode.render_pinned_origin_no_forwarded()
             and str(scope.get("path", "")) not in HOST_INDEPENDENT_HEALTH_PATHS
         ):
             host_values = Headers(scope=scope).getlist("host")

@@ -22,6 +22,21 @@ RENDER_ADMIN_NO_FORWARDED_CONTRACTS: Final[frozenset[str]] = frozenset(
         RENDER_ADMIN_REAL_NO_FORWARDED_CONTRACT,
     }
 )
+#: 초대 명단 친구에게 링크·초대·QR 입구를 여는 Render 계약. ★ 일부러
+#: ``RENDER_ADMIN_NO_FORWARDED_CONTRACTS``에 넣지 않는다 — 그 집합에 있으면
+#: `/admin` 라우터의 LINK 발급·초대(`admin.py`)와 이 모듈의 `/k/`·LINK 쿠키
+#: 차단이 자동으로 걸린다. 이 계약은 그 차단을 걸지 «않는» 것이 목적이므로,
+#: admin.py를 고치지 않고 이 상수 하나로 손님 입구를 연다.
+RENDER_PORTFOLIO_LINK_CONTRACT: Final[str] = "render-portfolio-link-v1"
+#: forwarded 헤더를 안 믿고 **하나의 고정 HTTPS 출처**만 진실로 보는 모든 계약.
+#: ``RENDER_ADMIN_NO_FORWARDED_CONTRACTS``(친구 입구 차단)보다 «넓다» — 포트폴리오
+#: 링크 계약도 render.yaml의 같은 ``--no-proxy-headers`` 실행 모델을 그대로 쓰므로
+#: Host 고정·CSRF Origin 고정·HSTS 판정은 옛 관리자 계약과 똑같이 켜져 있어야 한다.
+#: ★ 두 집합을 하나로 합치면 admin.py의 «친구 입구 차단»까지 포트폴리오 계약에
+#: 다시 걸린다 — 그래서 일부러 나눴다.
+RENDER_PINNED_ORIGIN_CONTRACTS: Final[frozenset[str]] = (
+    RENDER_ADMIN_NO_FORWARDED_CONTRACTS | {RENDER_PORTFOLIO_LINK_CONTRACT}
+)
 
 HttpOrigin = tuple[str, str, int]
 
@@ -63,6 +78,29 @@ def render_admin_no_forwarded(
     return _runtime_contract(values) in RENDER_ADMIN_NO_FORWARDED_CONTRACTS
 
 
+def render_portfolio_link(
+    environment: Mapping[str, str] | None = None,
+) -> bool:
+    """초대 명단 친구에게 링크·초대·QR 입구를 여는 Render 계약인지 반환한다."""
+
+    values = _environment(environment)
+    return _runtime_contract(values) == RENDER_PORTFOLIO_LINK_CONTRACT
+
+
+def render_pinned_origin_no_forwarded(
+    environment: Mapping[str, str] | None = None,
+) -> bool:
+    """forwarded 헤더를 안 믿고 하나의 고정 HTTPS 출처만 믿는 계약인지 반환한다.
+
+    ``render_admin_no_forwarded()``보다 넓다 — 옛 관리자 두 계약에 포트폴리오
+    링크 계약까지 포함한다. Host 고정·CSRF Origin 고정처럼 «친구 입구를 여는가»와
+    무관하게 계속 켜져 있어야 하는 보안 판정에서만 쓴다.
+    """
+
+    values = _environment(environment)
+    return _runtime_contract(values) in RENDER_PINNED_ORIGIN_CONTRACTS
+
+
 def http_origin(
     raw: str,
     *,
@@ -101,7 +139,7 @@ def configured_public_origin(
     """좁은 계약의 고정 HTTPS ``PUBLIC_ORIGIN``을 반환하며 fallback하지 않는다."""
 
     values = _environment(environment)
-    if not render_admin_no_forwarded(values):
+    if not render_pinned_origin_no_forwarded(values):
         return None
     return http_origin(
         values.get(ENV_PUBLIC_ORIGIN, ""),

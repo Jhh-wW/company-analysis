@@ -84,6 +84,10 @@ RUNTIME_CONTRACT_LOCAL_WEB = "local-web-v1"
 RUNTIME_CONTRACT_RENDER_WEB = "render-public-web-v1"
 RUNTIME_CONTRACT_RENDER_ADMIN_DEMO = "render-admin-demo-no-forwarded-v1"
 RUNTIME_CONTRACT_RENDER_ADMIN_REAL = "render-admin-real-no-forwarded-v1"
+#: 초대 명단 친구에게 링크·초대·QR 입구를 여는 Render 계약(app/src/web/deployment_mode.py
+#: 의 RENDER_PORTFOLIO_LINK_CONTRACT와 같은 문자열). 실행 명령·forwarded 비신뢰는
+#: 관리자 두 계약과 같지만, 웹 층에서 친구 입구를 막지 않는다는 점만 다르다.
+RUNTIME_CONTRACT_RENDER_PORTFOLIO_LINK = "render-portfolio-link-v1"
 RUNTIME_CONTRACT_KUBERNETES_WEB = "kubernetes-public-web-v1"
 RUNTIME_CONTRACTS = frozenset(
     {
@@ -91,6 +95,7 @@ RUNTIME_CONTRACTS = frozenset(
         RUNTIME_CONTRACT_RENDER_WEB,
         RUNTIME_CONTRACT_RENDER_ADMIN_DEMO,
         RUNTIME_CONTRACT_RENDER_ADMIN_REAL,
+        RUNTIME_CONTRACT_RENDER_PORTFOLIO_LINK,
         RUNTIME_CONTRACT_KUBERNETES_WEB,
     }
 )
@@ -375,6 +380,62 @@ def _render_admin_real_errors(environment: Mapping[str, str]) -> list[str]:
     return errors
 
 
+def _render_portfolio_link_errors(environment: Mapping[str, str]) -> list[str]:
+    """초대 명단 친구에게 링크·초대·QR 입구를 여는 Render 계약만 허용한다.
+
+    forwarded header 비신뢰·고정 PUBLIC_ORIGIN·관리자 로그인 벽은 옛 관리자
+    실제 분석판과 같은 안전 조건을 그대로 둔다. 실제 손님에게 보여줄 화면이므로
+    엔진 v2 실제 분석(ENGINE_V2=1)과 명시적 REPORT_RELEASE_MODE를 이 계약에서는
+    선택이 아니라 필수로 강제한다 — 조용히 v1이나 미정 상태로 손님을 맞지 않는다.
+    """
+
+    errors: list[str] = []
+    if environment.get("PIPELINE", "").strip().lower() != "real":
+        errors.append("PIPELINE: 포트폴리오 링크 계약은 real만 허용합니다")
+    if environment.get("BETA_ADMIN_ONLY", "").strip().lower() not in BOOLEAN_TRUE:
+        errors.append(
+            "BETA_ADMIN_ONLY: 포트폴리오 링크 계약도 로그인 벽은 켜져 있어야 합니다"
+        )
+    if environment.get("FORWARDED_ALLOW_IPS", "").strip():
+        errors.append(
+            "FORWARDED_ALLOW_IPS: 포트폴리오 링크 계약은 forwarded header를 "
+            "신뢰하지 않아야 합니다"
+        )
+    if environment.get("ENGINE_V2", "").strip() != "1":
+        errors.append('ENGINE_V2: 포트폴리오 링크 계약은 "1"이 필수입니다')
+    release_mode = environment.get(REPORT_RELEASE_MODE_ENV_NAME, "").strip()
+    if release_mode not in REPORT_RELEASE_MODES:
+        errors.append(
+            "REPORT_RELEASE_MODE: 포트폴리오 링크 계약은 SHADOW, "
+            "ENFORCE_NO_PARTIAL 또는 FULL 중 하나가 필수입니다"
+        )
+
+    public_origin_raw = environment.get("PUBLIC_ORIGIN", "")
+    origin_error = _public_origin_error(public_origin_raw)
+    if origin_error:
+        errors.append(origin_error)
+        public_origin = None
+    else:
+        public_origin = _normalized_public_origin(public_origin_raw)
+
+    render_origin_raw = environment.get("RENDER_EXTERNAL_URL", "").strip()
+    if render_origin_raw and public_origin:
+        render_origin = _normalized_public_origin(render_origin_raw)
+        if render_origin is None or render_origin != public_origin:
+            errors.append(
+                "PUBLIC_ORIGIN: Render 기본 외부 URL과 정확히 같아야 합니다"
+            )
+
+    redirect_raw = environment.get("GOOGLE_REDIRECT_URI", "").strip()
+    if redirect_raw and public_origin:
+        if redirect_raw != f"{public_origin}/auth/callback":
+            errors.append(
+                "GOOGLE_REDIRECT_URI: PUBLIC_ORIGIN의 /auth/callback과 "
+                "정확히 같아야 합니다"
+            )
+    return errors
+
+
 def _render_admin_no_forwarded_command_errors(command: Sequence[str]) -> list[str]:
     """관리자 no-forwarded 계약의 실행 명령 우회를 차단한다."""
 
@@ -556,6 +617,7 @@ def _validate_forwarded_proxy_configuration(
         RUNTIME_CONTRACT_RENDER_WEB,
         RUNTIME_CONTRACT_RENDER_ADMIN_DEMO,
         RUNTIME_CONTRACT_RENDER_ADMIN_REAL,
+        RUNTIME_CONTRACT_RENDER_PORTFOLIO_LINK,
     }
     render_contract_detected = contract in render_contracts
     render_marker_detected = _render_web_marker(environment)
@@ -632,6 +694,9 @@ def _validate_forwarded_proxy_configuration(
         return errors
     if contract == RUNTIME_CONTRACT_RENDER_ADMIN_REAL:
         errors.extend(_render_admin_real_errors(environment))
+        return errors
+    if contract == RUNTIME_CONTRACT_RENDER_PORTFOLIO_LINK:
+        errors.extend(_render_portfolio_link_errors(environment))
         return errors
 
     forwarded_networks, network_errors = _proxy_networks(
@@ -723,6 +788,7 @@ def validate(
             RUNTIME_CONTRACT_RENDER_WEB,
             RUNTIME_CONTRACT_RENDER_ADMIN_DEMO,
             RUNTIME_CONTRACT_RENDER_ADMIN_REAL,
+            RUNTIME_CONTRACT_RENDER_PORTFOLIO_LINK,
         }
     )
     if (
@@ -802,6 +868,9 @@ def validate_command(
     if _runtime_contract(environment, runtime_contract) in {
         RUNTIME_CONTRACT_RENDER_ADMIN_DEMO,
         RUNTIME_CONTRACT_RENDER_ADMIN_REAL,
+        # 포트폴리오 링크 계약도 같은 고정 no-proxy-headers 실행 명령을 강제한다 —
+        # render.yaml 실행 명령은 두 관리자 계약과 바이트 하나 다르지 않다.
+        RUNTIME_CONTRACT_RENDER_PORTFOLIO_LINK,
     }:
         errors.extend(_render_admin_no_forwarded_command_errors(command))
     return scope, errors

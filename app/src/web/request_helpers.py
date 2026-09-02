@@ -877,7 +877,10 @@ def _effective_http_origin(
 def _csrf_origin_matches(request: Request) -> bool:
     """브라우저가 Origin을 보냈다면 요청의 전체 HTTP(S) 출처와 같아야 한다."""
     if (
-        deployment_mode.render_admin_no_forwarded()
+        # ★ 포트폴리오 링크 계약도 옛 관리자 계약과 같은 «forwarded 헤더 불신 +
+        #   고정 PUBLIC_ORIGIN 하나만 신뢰» 실행 모델이므로 render_admin_no_forwarded()
+        #   (친구 입구 차단 여부)가 아니라 이 더 넓은 판정으로 CSRF Origin을 고정한다.
+        deployment_mode.render_pinned_origin_no_forwarded()
         and request.method.upper() == "POST"
     ):
         # Render edge가 붙인 X-Forwarded-*는 읽지 않는다. 외부 HTTPS 출처는

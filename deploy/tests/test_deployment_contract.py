@@ -659,3 +659,127 @@ def test_report_release_mode_accepts_only_the_three_exact_application_values() -
     assert all(
         secret_value not in error for error in validator.validate(environment, "web")
     )
+
+
+# ══════════════════════════════════════════════════════════
+# 포트폴리오 링크 계약(render-portfolio-link-v1, G-S1)
+# ══════════════════════════════════════════════════════════
+
+
+def _render_portfolio_link_environment() -> dict[str, str]:
+    """옛 render-admin-real-no-forwarded-v1과 같은 안전 조건 위에 엔진 v2·출고
+    모드까지 명시한, 통과해야 정상인 최소 환경."""
+
+    return {
+        "PIPELINE": "real",
+        "BETA_ADMIN_ONLY": "1",
+        "PORT": "10000",
+        "LOG_LEVEL": "info",
+        "GRACEFUL_SHUTDOWN_SECONDS": "20",
+        "DEPLOYMENT_EXPOSURE": "public",
+        "DEPLOYMENT_PLATFORM": "render",
+        "DEPLOYMENT_RUNTIME_CONTRACT": validator.RUNTIME_CONTRACT_RENDER_PORTFOLIO_LINK,
+        "FORWARDED_ALLOW_IPS": "",
+        "APP_DATA_ROOT": "/var/data",
+        "STORAGE_DB_PATH": "/var/data/storage.db",
+        "OBSERVABILITY_RECORDS_PATH": "/var/data/observability/runs.jsonl",
+        "TLDEXTRACT_CACHE": "/var/data/cache/tldextract",
+        "PUBLIC_ORIGIN": "https://portfolio.example",
+        "RENDER_EXTERNAL_URL": "https://portfolio.example",
+        "ADMIN_EMAILS": "admin@example.com",
+        "GOOGLE_CLIENT_ID": "google-client-id",
+        "GOOGLE_CLIENT_SECRET": "google-client-secret",
+        "GOOGLE_REDIRECT_URI": "https://portfolio.example/auth/callback",
+        "ANTHROPIC_API_KEY": "test-anthropic-key",
+        "DART_API_KEY": "test-dart-key",
+        "NAVER_CLIENT_ID": "test-naver-client-id",
+        "NAVER_CLIENT_SECRET": "test-naver-client-secret",
+        "PROVENANCE_SEAL_SECRET": "x" * 32,
+        "ENGINE_V2": "1",
+        "REPORT_RELEASE_MODE": "FULL",
+    }
+
+
+def test_포트폴리오_계약은_허용_목록에_있고_안전조건은_옛_계약과_같다() -> None:
+    """G-S1 — admin.py를 고치지 않고 손님 입구를 여는 새 계약. RUNTIME_CONTRACTS에
+    등록돼 있어야 컨테이너가 뜨고, forwarded 비신뢰·고정 origin·관리자 로그인 벽은
+    옛 관리자 실제 분석판과 같은 안전 조건이며, 엔진 v2·출고 모드는 이 계약에서만
+    선택이 아니라 필수로 강해진다(조용히 v1이나 미정 상태로 손님을 맞지 않는다)."""
+
+    assert (
+        validator.RUNTIME_CONTRACT_RENDER_PORTFOLIO_LINK in validator.RUNTIME_CONTRACTS
+    )
+
+    environment = _render_portfolio_link_environment()
+    assert validator.validate(environment, "web") == []
+
+    # 옛 관리자 계약과 같은 안전 조건 — 하나라도 어긋나면 거부한다.
+    demo_pipeline = dict(environment, PIPELINE="demo")
+    assert any("PIPELINE" in error for error in validator.validate(demo_pipeline, "web"))
+
+    open_admin = dict(environment, BETA_ADMIN_ONLY="0")
+    assert any(
+        "BETA_ADMIN_ONLY" in error for error in validator.validate(open_admin, "web")
+    )
+
+    trusts_forwarded = dict(environment, FORWARDED_ALLOW_IPS="1.1.1.1/32")
+    assert any(
+        "FORWARDED_ALLOW_IPS" in error
+        for error in validator.validate(trusts_forwarded, "web")
+    )
+
+    no_origin = {k: v for k, v in environment.items() if k != "PUBLIC_ORIGIN"}
+    assert any(
+        "PUBLIC_ORIGIN" in error for error in validator.validate(no_origin, "web")
+    )
+
+    # ★ 이 계약만의 강화 — ENGINE_V2가 정확히 "1"이 아니면 거부한다.
+    for broken in (
+        dict(environment, ENGINE_V2="0"),
+        {k: v for k, v in environment.items() if k != "ENGINE_V2"},
+    ):
+        errors = "\n".join(validator.validate(broken, "web"))
+        assert "ENGINE_V2" in errors
+
+    # ★ REPORT_RELEASE_MODE가 없으면 거부한다(옛 계약은 이 값을 아예 안 본다).
+    no_release_mode = {
+        k: v for k, v in environment.items() if k != "REPORT_RELEASE_MODE"
+    }
+    errors = "\n".join(validator.validate(no_release_mode, "web"))
+    assert "REPORT_RELEASE_MODE" in errors
+
+
+def test_포트폴리오_계약도_고정_no_proxy_headers_실행명령을_강제한다() -> None:
+    """render.yaml 실행 명령은 두 관리자 계약과 바이트 하나 다르지 않아야 한다."""
+
+    environment = _render_portfolio_link_environment()
+    good_command = [
+        "python",
+        "-m",
+        "uvicorn",
+        "src.web.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "${PORT:-10000}",
+        "--workers",
+        "1",
+        "--no-proxy-headers",
+        "--limit-concurrency",
+        "20",
+        "--backlog",
+        "32",
+        "--timeout-keep-alive",
+        "5",
+        "--timeout-graceful-shutdown",
+        "${GRACEFUL_SHUTDOWN_SECONDS:-20}",
+        "--log-level",
+        "${LOG_LEVEL:-info}",
+    ]
+    scope, errors = validator.validate_command(environment, good_command)
+    assert scope == "web"
+    assert errors == []
+
+    bypass_command = ["python", "-m", "uvicorn", "src.web.main:app", "--proxy-headers"]
+    _, errors = validator.validate_command(environment, bypass_command)
+    assert any(error.startswith("DEPLOYMENT_COMMAND:") for error in errors)
