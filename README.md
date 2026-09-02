@@ -5,7 +5,7 @@
 [![quality-gate](https://github.com/Jhh-wW/company-analysis/actions/workflows/quality-gate.yml/badge.svg)](https://github.com/Jhh-wW/company-analysis/actions/workflows/quality-gate.yml)
 ![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
-<!-- D-LIC 결정 뒤 root가 라이선스 배지를 여기 추가 -->
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
 ## 이렇게 나옵니다
 
@@ -175,4 +175,4 @@ AI 호출과 입력 토큰만 늘려서 공식 경로에서는 검색 단계 자
 
 ## 라이선스
 
-<!-- D-LIC 결정 뒤 root가 채움 -->
+MIT 라이선스입니다. 전문은 [LICENSE](LICENSE)에 있습니다.
