@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}delivery 의무 대사 · 기업분석{% endblock %}
+
+{# 저장은 됐지만 출고가 확정되지 못한 delivery 의무를 관리자가 수동으로 닫는 화면
+   (36장 계획리빌딩 티켓 A2, F1·F2).
+
+   ★ 서버 시작 스윕(runtime._recover_stale_report_deliveries)이 일정 시간
+     이상 정체된 의무는 자동으로 닫는다. 이 화면은 그 기준보다 최근에
+     멈췄거나, 스윕 자체가 실패한 나머지를 사람이 직접 닫는 곳이다.
+   ★ 2026-08-28 admin_budget_settle의 선례를 그대로 따른다 — 「재시작해도
+     DB에서 다시 읽히므로 대사할 방법이 코드에 없으면 영원히 안 풀린다」. #}
+
+{% block content %}
+
+{% if settle_error %}
+<div class="warn-line" role="alert" style="margin-bottom:16px">
+  <span>⚠️</span><span><strong>대사하지 못했습니다.</strong><br>{{ settle_error }}</span>
+</div>
+{% endif %}
+
+<h1>delivery 의무 대사</h1>
+<p class="lede">
+  보고서 저장은 끝났지만 최종 출고가 확정되지 않은 채 남은 조사 목록입니다.
+  대사하면 그 조사의 delivery 의무가 <strong>실패</strong>로 닫히고,
+  같은 조사에 결속된 LINK 실행이 있으면 함께 중단으로 마감됩니다.
+  <strong>진짜 출고가 이미 끝난 조사는 목록에 나오지 않습니다</strong> —
+  대사가 실제 성공을 되돌리지 않습니다.
+</p>
+
+{% if pending_intents %}
+<div class="card">
+  <div class="data-table-scroll" role="region" tabindex="0" aria-labelledby="pending-intents-title">
+  <table aria-labelledby="pending-intents-title">
+    <thead><tr>
+      <th scope="col">보고서 ID</th><th scope="col">의무 시작</th>
+      <th scope="col">마지막 변경</th><th scope="col" aria-label="관리"></th>
+    </tr></thead>
+    <tbody>
+    {% for intent in pending_intents %}
+    <tr>
+      <td><code>{{ intent.public_id }}</code></td>
+      <td>{{ pending_intent_labels.get(intent.public_id, {}).get("required_at", "—") }}</td>
+      <td>{{ pending_intent_labels.get(intent.public_id, {}).get("updated_at", "—") }}</td>
+      <td>
+        <form method="post" action="/admin/delivery/settle" style="margin:0">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="report_id" value="{{ intent.public_id }}">
+          <button class="btn ghost" type="submit">이 건 대사하기</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% else %}
+<div class="card">
+  <p class="muted">지금은 대사할 delivery 의무가 없습니다.</p>
+</div>
+{% endif %}
+
+<div class="btn-row">
+  <a class="btn ghost" href="/admin">관리자 화면으로</a>
+</div>
+{% endblock %}

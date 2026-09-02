@@ -17,3 +17,7 @@ STALE_DELIVERY_INTENT_MINUTES: Final[int] = 30
 #: ``report_delivery_adapter.fail_public_delivery``의 ``failure_code``
 #: 정규식(``[a-z0-9_]{1,64}``)을 만족해야 한다.
 STALE_DELIVERY_INTENT_FAILURE_CODE: Final[str] = "server_restart_incomplete"
+
+#: 관리자가 ``/admin/delivery/settle``에서 수동으로 대사할 때 남기는 실패 코드.
+#: 자동 스윕 코드와 다른 값을 써서 감사 로그에서 자동/수동을 구분한다.
+MANUAL_SETTLEMENT_FAILURE_CODE: Final[str] = "admin_manual_settled"

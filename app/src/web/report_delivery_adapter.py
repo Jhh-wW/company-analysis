@@ -126,6 +126,20 @@ def load_public_delivery_intent(
         return delivery_store.load_delivery_intent(conn, public_id)
 
 
+def delivery_exists(public_id: str) -> bool:
+    """PDF artifact 검사 없이 이 공개 ID에 실제 delivery가 있는지만 본다.
+
+    관리자 수동 대사(``/admin/delivery/settle``)가 이미 끝난 출고를 실패로
+    뒤집지 않으려면, ``load_public_delivery``의 artifact I/O·역직렬화 없이도
+    「진짜 출고가 있었는가」만 빠르게 판정할 수 있어야 한다.
+    """
+
+    with storage_db.connect_readonly_existing() as conn:
+        if conn is None:
+            return False
+        return delivery_store.load_delivery_by_public_id(conn, public_id) is not None
+
+
 def configured_artifact_backend() -> delivery_artifact.FilesystemArtifactBlobBackend:
     """영속 데이터 루트 아래의 교체 가능한 파일 backend를 만든다."""
 

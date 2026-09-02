@@ -20,6 +20,8 @@ from src.features.budget import constants as budget_constants
 from src.features.budget import spend_store
 from src.features.budget import state_machine as budget_state_machine
 from src.features.pipeline.demo import DemoPipeline
+from src.features.report_delivery import constants as delivery_constants
+from src.features.report_delivery import store as delivery_store
 from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import constants as share_constants
 from src.features.sharelink import issue as share_issue
@@ -29,7 +31,14 @@ from src.features.sharelink import tracks as share_tracks
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
 from src.features.storage import sessions as session_store
-from src.web import deployment_mode, job_runtime, paid_runtime, request_helpers, runtime
+from src.web import (
+    deployment_mode,
+    job_runtime,
+    paid_runtime,
+    report_delivery_adapter,
+    request_helpers,
+    runtime,
+)
 from src.web.routers import feedback as feedback_router
 from src.web.security import (
     COMPANY_MAX_CHARS,
@@ -736,6 +745,8 @@ def _link_detail_page(
                 "server_shutdown": "서버 종료로 시작하지 못함",
                 "shutdown_timeout": "서버 종료 제한시간을 넘김",
                 "server_restart": "서버 재시작으로 작업을 이어갈 수 없음",
+                "server_restart_delivery_incomplete": "서버 재시작으로 자동출고 확인 전 중단됨",
+                "admin_manual_settled": "관리자가 수동으로 대사해 중단됨",
                 "generation_start_failed": "생성 시작 중 기술 오류",
                 "generation_not_started": "생성을 시작하지 못함",
                 "automatic_release_gate_stopped": "자동출고 검사를 통과하지 못함",
@@ -1128,6 +1139,128 @@ async def admin_budget_settle(
         ),
         access_error=notice,
     )
+
+
+def _delivery_settle_context(request: Request, *, error: str = "") -> dict:
+    """대사 화면과 대사 실패 재표시가 공유하는 목록 조회."""
+    with storage_db.connect() as conn:
+        pending = delivery_store.list_stale_required_delivery_intents(
+            conn, older_than=clock.now_kst()
+        )
+    return request_helpers._ctx(
+        request,
+        pending_intents=pending,
+        pending_intent_labels={
+            intent.public_id: {
+                "required_at": _kst_timestamp_label(intent.required_at.isoformat()),
+                "updated_at": _kst_timestamp_label(intent.updated_at.isoformat()),
+            }
+            for intent in pending
+        },
+        settle_error=error,
+    )
+
+
+@router.get("/admin/delivery/settle", response_class=HTMLResponse)
+async def admin_delivery_settle_list(request: Request):
+    """저장은 됐지만 출고가 확정되지 못한 delivery 의무 중 스윕이 못 잡은 나머지를 보여준다.
+
+    ``runtime._recover_stale_report_deliveries``가 서버 시작 때 N분 넘게
+    정체된 의무를 자동으로 닫지만, 서버를 재시작하지 않았거나 아직 그
+    기준에 못 미친 건은 이 화면에서 관리자가 직접 확인하고 닫는다.
+    """
+    blocked = request_helpers.require_admin(request)
+    if blocked is not None:
+        return blocked
+    response = request_helpers.templates.TemplateResponse(
+        request=request,
+        name="admin_delivery_settle.html",
+        context=_delivery_settle_context(request),
+    )
+    return _admin_response(request, response)
+
+
+@router.post("/admin/delivery/settle")
+async def admin_delivery_settle(
+    request: Request,
+    report_id: str = Form("", max_length=RUN_ID_MAX_CHARS),
+    csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
+):
+    """스윕이 못 잡은 required delivery 의무 한 건을 관리자가 직접 닫는다.
+
+    ★ 왜 이 경로가 생겼나(2026-09-02, ``admin_budget_settle``의 2026-08-28
+      선례를 그대로 본뜬다) — 부팅 스윕은 일정 시간 이상 정체된 의무만
+      자동으로 닫는다. 그보다 최근에 멈췄거나 스윕 자체가 실패한 건은
+      관리자가 직접 닫을 방법이 있어야 한다(재시작해도 DB에서 다시
+      읽히므로 자동 스윕 기준을 못 넘는 한 영원히 안 풀린다).
+
+    ★ **진짜 출고가 있는 보고서는 절대 실패로 뒤집지 않는다** —
+      ``report_delivery_adapter.delivery_exists``로 먼저 확인한다.
+    """
+    action = "admin.delivery.settle"
+    clean_report_id = str(report_id or "").strip()
+    target = admin_audit.target_id("delivery", clean_report_id or "missing")
+    blocked = request_helpers.require_admin_action(
+        request, csrf_token, action=action, target=target
+    )
+    if blocked is not None:
+        return blocked
+
+    error = ""
+    settled = False
+    if not clean_report_id:
+        error = "대사할 보고서 ID를 입력해 주세요."
+    else:
+        intent = report_delivery_adapter.load_public_delivery_intent(clean_report_id)
+        if intent is None:
+            error = "이 보고서에는 대사할 delivery 의무가 없습니다."
+        elif report_delivery_adapter.delivery_exists(clean_report_id):
+            error = "이미 출고가 끝난 보고서는 대사 대상이 아닙니다."
+        elif intent.state == delivery_store.DELIVERY_INTENT_COMPLETE:
+            error = "이미 완료로 표시된 보고서는 대사 대상이 아닙니다."
+        elif intent.state == delivery_store.DELIVERY_INTENT_FAILED:
+            # 이미 닫혀 있음 — 두 번째 제출을 오류로 막지 않고 그대로 성공 취급한다.
+            settled = True
+        else:
+            try:
+                report_delivery_adapter.fail_public_delivery(
+                    clean_report_id,
+                    failure_code=delivery_constants.MANUAL_SETTLEMENT_FAILURE_CODE,
+                    failed_at=clock.now_kst(),
+                )
+                with storage_db.connect() as conn:
+                    share_store.mark_release_stopped(
+                        conn,
+                        report_id=clean_report_id,
+                        stopped_at=clock.iso_now_kst(),
+                        stop_step="admin_manual_settle",
+                        stop_reason=delivery_constants.MANUAL_SETTLEMENT_FAILURE_CODE,
+                    )
+                settled = True
+            except Exception:  # noqa: BLE001 — 실패도 성공도 감사에 남긴다
+                logger.exception(
+                    "delivery 의무 수동 대사를 마치지 못했습니다 report_id=%s",
+                    clean_report_id,
+                )
+                error = "대사 처리 중 오류가 발생했습니다. 다시 시도해 주세요."
+
+    _mirror_committed_change(
+        request,
+        action=action,
+        target=target,
+        reason="settled" if settled else "rejected",
+    )
+    if settled:
+        return _admin_response(
+            request, RedirectResponse("/admin/delivery/settle", status_code=303)
+        )
+    response = request_helpers.templates.TemplateResponse(
+        request=request,
+        name="admin_delivery_settle.html",
+        context=_delivery_settle_context(request, error=error),
+        status_code=409,
+    )
+    return _admin_response(request, response)
 
 
 @router.post("/admin/invite")
