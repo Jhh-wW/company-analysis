@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -24,7 +25,8 @@ from src.features.pilot_evaluation.schema import (
 )
 from src.features.pilot_evaluation.shadow_store import (
     SHADOW_CASE_IDS,
-    SHADOW_OBSERVATION_TABLE,
+    SHADOW_STORE_FILENAME,
+    SHADOW_STORE_KIND,
     PilotShadowObservationStore,
     ShadowStoreError,
 )
@@ -41,6 +43,7 @@ from src.shared.report_quality.generation import (
 
 
 _RECORDED_AT = "2026-09-02T00:00:00Z"
+_PAID_SQLITE_FILENAME = "canonical-pilot25.sqlite3"
 
 
 def _observation(*, verified: bool) -> GenerationQualityObservation:
@@ -82,17 +85,10 @@ def _observation(*, verified: bool) -> GenerationQualityObservation:
     return observe_generation(candidate)
 
 
-def _binding_row(conn: sqlite3.Connection) -> tuple[object, ...] | None:
-    return conn.execute(
-        f"SELECT pilot_key, schema_version, binding_id, manifest_sha256, origin, "
-        f"server_instance_sha256, data_path_sha256, checkpoint_path_sha256, "
-        f"checkpoint_content_sha256, created_at FROM {PILOT_BINDING_TABLE}"
-    ).fetchone()
+def _seed_paid_artifacts(directory: Path) -> dict[Path, bytes]:
+    """유료 파일럿 저장물(SQLite 결속 원장 + 품질판정 JSON)을 같은 폴더에 둔다."""
 
-
-def _seed_paid_binding(db_path: Path) -> tuple[object, ...]:
-    """유료 파일럿 원장(P01~P10 결속)을 같은 DB 파일에 먼저 만들어 둔다."""
-
+    db_path = directory / _PAID_SQLITE_FILENAME
     with sqlite3.connect(db_path) as conn:
         ensure_schema(conn)
         conn.execute(
@@ -115,17 +111,20 @@ def _seed_paid_binding(db_path: Path) -> tuple[object, ...]:
             ),
         )
         conn.commit()
-        row = _binding_row(conn)
-    assert row is not None
-    return row
+
+    quality_path = directory / QUALITY_FILENAME
+    quality_path.write_text(
+        json.dumps({"schema_version": 4, "cases": []}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return {path: path.read_bytes() for path in (db_path, quality_path)}
 
 
 def test_shadow_store는_quality_store와_분리된다(tmp_path: Path) -> None:
-    db_path = tmp_path / "pilot.sqlite3"
-    before = _seed_paid_binding(db_path)
+    before = _seed_paid_artifacts(tmp_path)
 
-    store = PilotShadowObservationStore(db_path)
-    store.ensure_schema()
+    store = PilotShadowObservationStore(tmp_path)
+    store.ensure_store()
     store.record(
         case_id="P11",
         fixture_ref="synthetic-fixture-a",
@@ -139,39 +138,47 @@ def test_shadow_store는_quality_store와_분리된다(tmp_path: Path) -> None:
         observation=_observation(verified=False),
     )
 
-    assert SHADOW_OBSERVATION_TABLE != PILOT_BINDING_TABLE
-    with sqlite3.connect(db_path) as conn:
-        tables = {
-            str(row[0])
-            for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
-        }
-        # 유료 원장 행은 shadow 기록 뒤에도 한 글자도 바뀌지 않는다.
-        assert _binding_row(conn) == before
+    # 유료 저장물 두 개는 shadow 기록 뒤에도 한 바이트도 바뀌지 않는다.
+    assert {path: path.read_bytes() for path in before} == before
+    # 유료 결속 원장의 행도 그대로다.
+    with sqlite3.connect(tmp_path / _PAID_SQLITE_FILENAME) as conn:
         assert (
             conn.execute(f"SELECT COUNT(*) FROM {PILOT_BINDING_TABLE}").fetchone()[0]
             == 1
         )
-        # shadow 표에는 유료 결속 열이 없다.
-        shadow_columns = {
-            str(row[1])
-            for row in conn.execute(f"PRAGMA table_info({SHADOW_OBSERVATION_TABLE})")
-        }
-    assert {PILOT_BINDING_TABLE, SHADOW_OBSERVATION_TABLE} <= tables
-    assert "pilot_key" not in shadow_columns
-    assert "checkpoint_content_sha256" not in shadow_columns
-
-    # shadow 저장소는 유료 원장 행을 하나도 못 본다.
+    # shadow 저장 파일은 세 번째 파일이며 이름이 유료 저장물과 겹치지 않는다.
+    assert SHADOW_STORE_FILENAME != QUALITY_FILENAME
+    assert store.path == tmp_path / SHADOW_STORE_FILENAME
+    assert store.path.is_file()
+    payload = json.loads(store.path.read_text(encoding="utf-8"))
+    assert payload["store_kind"] == SHADOW_STORE_KIND
+    assert [case["case_id"] for case in payload["cases"]] == ["P11", "P12"]
+    # shadow 저장소는 유료 저장물의 내용을 하나도 못 본다.
     assert tuple(record.case_id for record in store.read_all()) == ("P11", "P12")
-    # 유료 품질판정 JSON을 만들지도 건드리지도 않는다.
-    assert list(tmp_path.glob(QUALITY_FILENAME)) == []
-    assert list(tmp_path.glob("*.lock")) == []
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
+        (_PAID_SQLITE_FILENAME, QUALITY_FILENAME, SHADOW_STORE_FILENAME)
+    )
+
+
+def test_shadow_store는_운영_영속_스키마를_만들지_않는다() -> None:
+    """운영 DB에 평가 전용 표가 생기지 않게 CREATE TABLE 자체를 두지 않는다.
+
+    `core/tests/test_persistent_schema.py`는 운영 코드의 모든 `CREATE TABLE`이
+    영속 schema registry에 등록돼 있기를 요구한다. 이 관찰 저장소는 운영 DB에
+    남으면 안 되므로 registry에 넣지 않고, 대신 표를 만들지 않는다.
+    """
+
+    source = (
+        Path(__file__).resolve().parents[1] / "shadow_store.py"
+    ).read_text(encoding="utf-8")
+
+    assert "CREATE TABLE" not in source
+    assert "sqlite3" not in source
 
 
 def test_P01_P10_id는_shadow_store가_거절한다(tmp_path: Path) -> None:
-    store = PilotShadowObservationStore(tmp_path / "shadow.sqlite3")
-    store.ensure_schema()
+    store = PilotShadowObservationStore(tmp_path)
+    store.ensure_store()
     observation = _observation(verified=True)
 
     for paid_case_id in sorted(APPROVED_PAID_CASE_IDS):
@@ -208,8 +215,7 @@ def test_shadow_후보_목록은_manifest에서_P01_P10을_뺀_나머지다() ->
 
 
 def test_저장한_관측값은_한_글자도_바뀌지_않고_돌아온다(tmp_path: Path) -> None:
-    store = PilotShadowObservationStore(tmp_path / "shadow.sqlite3")
-    store.ensure_schema()
+    store = PilotShadowObservationStore(tmp_path)
     observation = _observation(verified=False)
 
     store.record(
@@ -228,9 +234,16 @@ def test_저장한_관측값은_한_글자도_바뀌지_않고_돌아온다(tmp_
     assert record.category == "unlisted_disclosure"
 
 
+def test_저장_파일이_없으면_0건으로_센다(tmp_path: Path) -> None:
+    store = PilotShadowObservationStore(tmp_path / "아직없는폴더")
+
+    assert store.read_all() == ()
+    assert store.observed_case_ids() == frozenset()
+    assert not store.path.exists()
+
+
 def test_읽기_순서는_case_id_오름차순으로_결정론적이다(tmp_path: Path) -> None:
-    store = PilotShadowObservationStore(tmp_path / "shadow.sqlite3")
-    store.ensure_schema()
+    store = PilotShadowObservationStore(tmp_path)
     observation = _observation(verified=True)
     for case_id in ("P22", "P11", "P19"):
         store.record(
@@ -246,11 +259,20 @@ def test_읽기_순서는_case_id_오름차순으로_결정론적이다(tmp_path
         "P22",
     )
     assert store.observed_case_ids() == frozenset({"P11", "P19", "P22"})
+    # 저장 바이트도 순서에 무관하게 같다.
+    other = PilotShadowObservationStore(tmp_path / "other")
+    for case_id in ("P19", "P22", "P11"):
+        other.record(
+            case_id=case_id,
+            fixture_ref=f"fixture-{case_id}",
+            recorded_at=_RECORDED_AT,
+            observation=observation,
+        )
+    assert other.path.read_bytes() == store.path.read_bytes()
 
 
 def test_같은_후보를_두_번_기록하면_거절한다(tmp_path: Path) -> None:
-    store = PilotShadowObservationStore(tmp_path / "shadow.sqlite3")
-    store.ensure_schema()
+    store = PilotShadowObservationStore(tmp_path)
     observation = _observation(verified=True)
     store.record(
         case_id="P11",
@@ -284,8 +306,7 @@ def test_같은_후보를_두_번_기록하면_거절한다(tmp_path: Path) -> N
 def test_출처_표시와_기록시각이_없거나_형식이_다르면_거절한다(
     tmp_path: Path, fixture_ref: str, recorded_at: str
 ) -> None:
-    store = PilotShadowObservationStore(tmp_path / "shadow.sqlite3")
-    store.ensure_schema()
+    store = PilotShadowObservationStore(tmp_path)
 
     with pytest.raises(ShadowStoreError):
         store.record(
@@ -299,8 +320,7 @@ def test_출처_표시와_기록시각이_없거나_형식이_다르면_거절�
 
 
 def test_관측값이_아닌_값은_거절한다(tmp_path: Path) -> None:
-    store = PilotShadowObservationStore(tmp_path / "shadow.sqlite3")
-    store.ensure_schema()
+    store = PilotShadowObservationStore(tmp_path)
 
     with pytest.raises(ShadowStoreError):
         store.record(
@@ -314,22 +334,48 @@ def test_관측값이_아닌_값은_거절한다(tmp_path: Path) -> None:
 
 
 def test_저장된_회사유형이_manifest와_다르면_읽기에서_거절한다(tmp_path: Path) -> None:
-    db_path = tmp_path / "shadow.sqlite3"
-    store = PilotShadowObservationStore(db_path)
-    store.ensure_schema()
+    store = PilotShadowObservationStore(tmp_path)
     store.record(
         case_id="P11",
         fixture_ref="fixture",
         recorded_at=_RECORDED_AT,
         observation=_observation(verified=True),
     )
+    payload = json.loads(store.path.read_text(encoding="utf-8"))
+    payload["cases"][0]["category"] = "listed"
+    store.path.write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
 
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            f"UPDATE {SHADOW_OBSERVATION_TABLE} SET category=? WHERE case_id=?",
-            ("listed", "P11"),
-        )
-        conn.commit()
+    with pytest.raises(ShadowStoreError):
+        store.read_all()
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda payload: payload.__setitem__("store_kind", "다른-저장물"),
+        lambda payload: payload.__setitem__("schema_version", 2),
+        lambda payload: payload.__setitem__("cases", {}),
+        lambda payload: payload.pop("store_kind"),
+        lambda payload: payload.__setitem__("추가키", 1),
+    ],
+)
+def test_다른_저장물이거나_형식이_다르면_읽기에서_거절한다(
+    tmp_path: Path, mutate
+) -> None:
+    store = PilotShadowObservationStore(tmp_path)
+    store.record(
+        case_id="P11",
+        fixture_ref="fixture",
+        recorded_at=_RECORDED_AT,
+        observation=_observation(verified=True),
+    )
+    payload = json.loads(store.path.read_text(encoding="utf-8"))
+    mutate(payload)
+    store.path.write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
 
     with pytest.raises(ShadowStoreError):
         store.read_all()
