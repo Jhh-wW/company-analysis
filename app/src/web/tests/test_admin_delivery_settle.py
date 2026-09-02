@@ -1,6 +1,6 @@
 """관리자가 스윕이 못 잡은 정체된 delivery 의무를 수동으로 대사하는 경로.
 
-admin_budget_settle의 2026-08-28 선례와 같은 문제: 화면은 「관리자가 대사해야
+admin_budget_settle의 선례와 같은 문제: 화면은 「관리자가 대사해야
 다시 열립니다」라고 말할 수 있는데 대사할 방법이 코드에 없으면, 재시작해도
 DB에서 다시 읽히므로 영원히 안 풀린다. 이 시험은 ``/admin/delivery/settle``이
 실제로 존재하고, 진짜 관리자·CSRF 검사를 거치며, 이미 출고된 보고서는
@@ -191,7 +191,7 @@ def test_대사_목록_화면은_정체된_의무만_보여준다(admin: TestCli
 
 
 def test_관리자_설정_화면에_대사_링크가_있다(admin: TestClient) -> None:
-    """admin_home.html은 어느 라우트도 렌더하지 않는 고아 템플릿이라(G-S8 삭제
+    """admin_home.html은 어느 라우트도 렌더하지 않는 고아 템플릿이라(삭제
     예정, 실측 확인) 링크를 둬도 아무도 못 본다. 실제로 렌더되는
     ``/admin/settings``(admin_settings.html) 본문에 대사 화면 링크를 둔다.
     """

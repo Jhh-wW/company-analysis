@@ -1340,7 +1340,7 @@ def run_v2(
         quality_observation,
         generation_assessment,
     )
-    # ★ SHADOW도 관측값을 저장한다(C1b) — 예전에는 여기서 SHADOW만
+    # ★ SHADOW도 관측값을 저장한다 — 예전에는 여기서 SHADOW만
     #   None으로 비웠다. 그러면 「거짓 거절률」을 셀 대상 자체가 저장소에 하나도
     #   안 남아 O-F3(관측 안 됨)를 영구히 못 풀었다. 이 값은 여전히 «관측
     #   전용»이다 — release_allowed=False라도 SHADOW는 다음 줄들에서 여전히

@@ -3,11 +3,11 @@
 {% block bodyclass %}admin-frame-page{% endblock %}
 {% block wrapclass %}wide admin-frame{% endblock %}
 
-{# 회원 화면 (정보 구조 ③, 설계 05장 §3).
+{# 회원 화면 (정보 구조 ③).
 
-   ★ 2026-09-02 G-S8 — 초대 폼·명단·빼기는 `admin_access.html`에서 «글자 그대로»
+   ★ 초대 폼·명단·빼기는 `admin_access.html`에서 «글자 그대로»
      옮겼다. 앞서 명단이 이 화면과 `/admin/access` 두 곳에 나뉘어 있어서, 초대하려면
-     다른 화면으로 건너가야 했다(설계 05장 §2 원칙 2). 이제 한 곳이다.
+     다른 화면으로 건너가야 했다. 이제 한 곳이다.
    ★ 한 사람의 초대·한도·이용·설문을 같은 카드에서 본다. #}
 
 {% block content %}
@@ -38,7 +38,7 @@
     {% endif %}
   </p>
 
-  {# ★ 설계 05장 §2 원칙 1 — 꺼진 기능은 «눌리지 않는 버튼»이 아니라 안내 한 줄로만
+  {# ★ 꺼진 기능은 «눌리지 않는 버튼»이 아니라 안내 한 줄로만
      보인다. 회색 버튼은 「되는데 왜 안 되지」라는 오해만 남긴다. #}
   {% if narrow_admin_no_forwarded %}
   <div class="warn-line" role="note" style="margin-top:14px"><span>ℹ️</span><span><strong>이 운영판에서는 친구를 초대할 수 없습니다.</strong><br>이미 초대한 사람은 아래 목록에서 확인하고 뺄 수 있습니다.</span></div>
@@ -81,7 +81,7 @@
     {% if limit and limit.reason %}<p class="muted">한도를 바꾼 이유: {{ limit.reason }}{% if limit.updated_at %} · {{ limit.updated_at }}{% endif %}</p>{% endif %}
     {% if limit %}
     {# ★ 여기서 바로 저장하지 않는다 — 적은 값을 확인 화면이 「지금 값 → 바꿀 값」
-       으로 다시 보여 주고, 이유도 거기서 한 번만 받는다 (설계 05장 §4, G-S9). #}
+       으로 다시 보여 주고, 이유도 거기서 한 번만 받는다. #}
     <form class="frame-inline-form" method="get" action="/admin/members/{{ member.email }}/limit">
       <label>하루 성공 건수 <input type="number" name="daily_success_limit" min="1" max="20" step="1" value="{{ limit.success }}"></label>
       <label>하루 비용 한도(원) <input type="number" name="daily_budget_krw" min="0" max="20000" step="100" value="{{ '%.0f'|format(limit.budget_krw) }}"></label>

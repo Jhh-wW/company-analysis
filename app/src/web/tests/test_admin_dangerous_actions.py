@@ -1,7 +1,7 @@
-"""관리자 위험 동작이 «확인 화면»을 거친 뒤에만 실행되는지 못 박는다 (G-S9).
+"""관리자 위험 동작이 «확인 화면»을 거친 뒤에만 실행되는지 못 박는다.
 
-★ 왜 필요한가 — 설계 05장 §2 원칙 3은 「위험 동작은 두 단계」다. 지금은 초대 링크
-  철회와 회원 빼기가 목록 행의 단추 하나로 즉시 실행된다(설계 §2 표의 실측 칸).
+★ 왜 필요한가 — 원칙은 「위험 동작은 두 단계」다. 지금은 초대 링크
+  철회와 회원 빼기가 목록 행의 단추 하나로 즉시 실행된다.
   잘못 누르면 이미 뿌린 QR이 죽거나 친구의 로그인이 끊긴다. 되돌리는 길은 새로
   발급하고 다시 초대하는 것뿐이라 «누르기 전»에 대상을 다시 보여 줘야 한다.
 
@@ -118,7 +118,7 @@ def test_철회는_확인화면을_거쳐야_실행된다(admin: TestClient):
     # 대상을 다시 보여 준다 — 「무엇을 닫는지」 모른 채 누르지 않게.
     assert "카카오" in 확인화면.text
     assert "마케팅" in 확인화면.text
-    # 이미 받은 보고서 주소는 계속 열린다는 사실을 확인 화면에서 말한다(설계 §4).
+    # 이미 받은 보고서 주소는 계속 열린다는 사실을 확인 화면에서 말한다.
     assert "이미" in 확인화면.text and "보고서" in 확인화면.text
 
     실행 = admin.post(
@@ -157,7 +157,7 @@ def test_확인없는_POST는_거절되고_감사에_denied가_남는다(
         if event["action"] == "admin.link.revoke" and event["outcome"] == "denied"
     ]
     assert denied, "확인 없는 철회 요청이 감사에 denied로 남지 않았습니다"
-    # 감사행 사유코드는 ASCII만 허용된다(F-GS5a).
+    # 감사행 사유코드는 ASCII만 허용된다.
     assert denied[-1]["reason_code"].isascii()
     assert "confirm" in denied[-1]["reason_code"]
 
@@ -264,7 +264,7 @@ def test_회원_빼기도_확인화면을_거친다(admin: TestClient):
     assert 확인화면.status_code == 200
     assert "김민지" in 확인화면.text
     assert email in 확인화면.text
-    # 「지금 로그인 세션도 끊긴다」를 사람 말로 알린다(설계 §4).
+    # 「지금 로그인 세션도 끊긴다」를 사람 말로 알린다.
     assert "로그인" in 확인화면.text
 
     확인없이 = admin.post(

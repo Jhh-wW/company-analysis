@@ -51,7 +51,7 @@ def client():
 
 
 # ══════════════════════════════════════════════════════════
-# 위험 동작 확인 단계(G-S9) — 시험이 실제 확인 화면을 거치게 한다
+# 위험 동작 확인 단계 — 시험이 실제 확인 화면을 거치게 한다
 # ══════════════════════════════════════════════════════════
 
 
@@ -94,7 +94,7 @@ def admin(client: TestClient) -> TestClient:
     def post_with_csrf(url, *args, **kwargs):
         data = dict(kwargs.pop("data", {}) or {})
         data.setdefault("csrf_token", csrf)
-        # 위험 동작은 확인 화면을 거쳐야 실행된다(G-S9). 브라우저가 하는 것과
+        # 위험 동작은 확인 화면을 거쳐야 실행된다. 브라우저가 하는 것과
         # 같은 두 단계를 여기서 그대로 밟는다.
         if "confirm_token" not in data:
             표 = _확인표(client, url, data)
@@ -156,7 +156,7 @@ def _durable_audit_rows() -> list[dict[str, str]]:
 def _issued_link(response) -> tuple[str, str]:
     """1회성 발급 «화면»에서 raw capability와 안전한 관리 식별자를 분리한다.
 
-    ★ 2026-09-02 기대값 이전 — 응답이 텍스트 파일 첨부에서 HTML 1장으로 바뀌었다.
+    ★ 기대값 이전 — 응답이 텍스트 파일 첨부에서 HTML 1장으로 바뀌었다.
       전달 형태만 바뀌었고 「원문은 이 응답에만 있다」는 성질은 그대로다.
       그래서 여기서 «화면에 딱 한 번만» 나온다는 것을 함께 못 박는다.
     """
@@ -529,7 +529,7 @@ def test_발급열쇠_충돌이_계속되면_기존링크를_보존하고_503으
 
 
 def test_발급하면_raw주소를_딱한번_화면으로_보여준다(admin: TestClient):
-    """★ 2026-09-02 기대값 이전 — 텍스트 파일 첨부 → 주소·QR 화면 1장.
+    """★ 기대값 이전 — 텍스트 파일 첨부 → 주소·QR 화면 1장.
 
     Referrer-Policy 기대값도 함께 옮긴다. HTML 응답은 공용 미들웨어가
     `same-origin`으로 고정한다(`response_security.py`, form POST의 Origin이
@@ -596,7 +596,7 @@ def test_관리자_시각표시는_저장된_UTC를_KST로_바꾼다(admin: Test
             now_iso="2026-08-19T15:32:00Z",
         )
 
-    # ★ 2026-09-02 G-S8 기대값 이전 — 링크 목록은 `/admin/links`, 회원 명단은
+    # ★ 기대값 이전 — 링크 목록은 `/admin/links`, 회원 명단은
     #   `/admin/members`로 나뉘었다. 시각 표시 계약 자체는 그대로다.
     listing = admin.get("/admin/links")
     members_page = admin.get("/admin/members")
@@ -637,7 +637,7 @@ def _보고서를_만든다(admin: TestClient) -> str:
 def test_결과주소를_붙여_링크를_만들면_받은사람이_보고서로_바로간다(
     admin: TestClient,
 ):
-    """★ 기대값 이전(G-S6·D-G10) — 도착지가 결과에서 첫 화면(랜딩)으로 바뀌었다.
+    """★ 기대값 이전 — 도착지가 결과에서 첫 화면(랜딩)으로 바뀌었다.
 
     「받은 사람」은 관리자가 아니라 로그인하지 않은 인사팀이다. 그래서 도착지는
     관리자 손님으로 확인하고, 실제로 보고서를 한 번에 여는지는 열쇠만 가진
@@ -746,8 +746,8 @@ def test_기존_링크에도_없는_보고서를_연결할수없다(admin: TestC
 def test_지원회사_꼬리표는_받은사람의_분석_대상을_묶지_않는다(
     admin: TestClient,
 ):
-    """★ 2026-09-02 기대값 이전 — 앞선 시험은 「꼬리표와 다른 회사 보고서도
-    링크에 묶인다」를 지켰다. 사용자 결정(D-G3)으로 그 동작을 뒤집었다.
+    """★ 기대값 이전 — 앞선 시험은 「꼬리표와 다른 회사 보고서도
+    링크에 묶인다」를 지켰다. 사용자 결정으로 그 동작을 뒤집었다.
     실수로 다른 회사 보고서를 고정하면 받은 사람이 엉뚱한 보고서를 보기 때문이다.
 
     다만 원래 이 시험이 지키려던 «진짜» 성질은 따로 있다 — 회사·직무는 권한
@@ -917,7 +917,7 @@ def test_회사링크를_닫아도_이미전달된_독립결과주소는_60일�
         follow_redirects=False,
     )
     key, key_hash = _issued_link(created)
-    # 기대값 이전(G-S6·D-G10): `/k/`는 이제 결과가 아니라 첫 화면으로 보낸다.
+    # 기대값 이전: `/k/`는 이제 결과가 아니라 첫 화면으로 보낸다.
     # 이 시험의 대상은 링크를 닫은 뒤에도 «독립 결과 주소»가 60일 정책을 따르는지다.
     assert admin.get(f"/k/{key}", follow_redirects=False).headers["location"] == "/"
     detail_before_close = admin.get(f"/admin/link/{key_hash}")
@@ -1356,7 +1356,7 @@ def test_호출전_예상비용_차단기준을_실제청구_최댓값으로_과
     admin.post("/admin/links/new", data={"company": "카카오", "job": "마케팅"})
     admin.post("/admin/invite", data={"email": "f@g.com"})
 
-    # ★ 2026-09-02 G-S8 기대값 이전 — 비용 카드가 `/admin/costs`(정보 구조 ⑤)로
+    # ★ 기대값 이전 — 비용 카드가 `/admin/costs`(정보 구조 ⑤)로
     #   옮겨갔다. 보는 문장과 숫자는 그대로다.
     text = admin.get("/admin/costs").text
 
@@ -1385,7 +1385,7 @@ def test_비용카드는_요청에서_한번_캡처한_KST_원장기준일을_�
 
     monkeypatch.setattr(admin_router.clock, "today_kst", fixed_today)
 
-    # ★ 2026-09-02 G-S8 기대값 이전 — 비용 카드는 `/admin/costs`에 있다.
+    # ★ 기대값 이전 — 비용 카드는 `/admin/costs`에 있다.
     response = admin.get("/admin/costs")
     compact = " ".join(response.text.split())
 
@@ -1420,7 +1420,7 @@ def test_실제비용이_예상과_차단기준을_넘으면_금액과_overrun�
             created_at="2026-08-18T10:01:00+09:00",
         )
 
-    # ★ 2026-09-02 G-S8 기대값 이전 — 비용 카드는 `/admin/costs`에 있다.
+    # ★ 기대값 이전 — 비용 카드는 `/admin/costs`에 있다.
     response = admin.get("/admin/costs")
     compact = " ".join(response.text.split())
 
@@ -1445,7 +1445,7 @@ def test_관리자_첫화면은_승인된_운영대시보드로_연결된다(
 
 def test_전체_상한이_없다는_사실을_숨기지_않는다(admin: TestClient):
     """★ 위험을 «없앤» 게 아니라 본인이 감수하기로 한 것이다 — 계속 보여준다."""
-    # ★ 2026-09-02 G-S8 기대값 이전 — 이 경고는 `/admin/costs`로 옮겨갔다.
+    # ★ 기대값 이전 — 이 경고는 `/admin/costs`로 옮겨갔다.
     assert "전체 상한이 없습니다" in admin.get("/admin/costs").text
 
 

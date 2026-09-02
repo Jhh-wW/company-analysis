@@ -134,7 +134,7 @@
     </div>
     <div class="field">
       <label for="link_extend_reason">미루는 이유<span class="req">*</span></label>
-      {# 1회용 확인 표 — 이 화면을 거치지 않은 요청은 실행되지 않는다 (G-S9). #}
+      {# 1회용 확인 표 — 이 화면을 거치지 않은 요청은 실행되지 않는다. #}
       <input type="hidden" name="confirm_token" value="{{ confirm_token }}">
       <input id="link_extend_reason" name="reason" required
              minlength="{{ link_reason_min_chars }}"

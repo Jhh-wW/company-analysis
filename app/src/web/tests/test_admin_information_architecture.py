@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""관리자 화면의 정보 구조(G-S8) 계약.
+"""관리자 화면의 정보 구조 계약.
 
-★ 무엇을 지키나 — 결정 D-G6 (a)에 따른 「6묶음 재배치」의 사람이 보는 결과다.
+★ 무엇을 지키나 — 「6묶음 재배치」의 사람이 보는 결과다.
   ① 옛 통합 화면 주소는 지우지 않고 링크 화면으로 보낸다.
   ② 배포 계약이 끈 기능은 «눌리지 않는 회색 버튼»이 아니라 안내 한 줄로만 보인다.
   ③ 메뉴는 여섯이고, PC와 폰이 같은 여섯을 본다.
@@ -33,7 +33,7 @@ from src.web.tests._visible_text import visible_text
 TEMPLATES = Path(__file__).parents[1] / "templates"
 
 #: 메뉴에 있으면 안 되는 내부 용어와 그 이유.
-#: 「이름은 사람 말로」 — 설계 05장 §3, 티켓 G-S8 요구 1.
+#: 「이름은 사람 말로」 — 6묶음 정보 구조의 첫 요구다.
 MENU_BANNED_TERMS: dict[str, str] = {
     "LINK": "내부 자료 이름 — 사용자에게는 「초대 링크」다",
     "MEMBER": "내부 갈래 이름 — 사용자에게는 「회원」이다",
@@ -43,7 +43,7 @@ MENU_BANNED_TERMS: dict[str, str] = {
     "admin": "내부 경로 조각이 메뉴 «글자»로 새면 안 된다",
 }
 
-#: 6묶음 정보 구조(설계 05장 §3). (메뉴 글자, 주소).
+#: 6묶음 정보 구조. (메뉴 글자, 주소).
 EXPECTED_MENU: tuple[tuple[str, str], ...] = (
     ("오늘 상태", "/admin"),
     ("초대 링크", "/admin/links"),
@@ -91,7 +91,7 @@ def _shortcut_markup(page_text: str) -> str:
 
 
 def test_admin_access는_links로_303한다(admin_client: TestClient):
-    """이미 뿌린 주소를 지우지 않는다 — 결정 D-G6 (a)의 「35 URL 회귀 0」."""
+    """이미 뿌린 주소를 지우지 않는다 — 「35 URL 회귀 0」."""
 
     response = admin_client.get("/admin/access", follow_redirects=False)
 
@@ -117,7 +117,7 @@ def test_admin_access는_로그인_없이는_링크화면을_알려주지_않는
 
 
 def test_꺼진_기능은_버튼이_아니라_안내문으로_보인다(monkeypatch, tmp_path):
-    """설계 05장 §2 원칙 1.
+    """꺼진 기능은 «눌리지 않는 버튼»이 아니라 안내 한 줄이다.
 
     회색 「발급 불가」 버튼은 「되는데 왜 안 눌리지」라는 오해만 남긴다. 지금 이
     운영판에서 무엇을 할 수 있는지 한 줄로 말하고, 버튼 자체를 없앤다.
@@ -151,7 +151,7 @@ def test_꺼진_기능은_버튼이_아니라_안내문으로_보인다(monkeypa
 
 
 def test_기능이_켜져_있으면_안내문_대신_실제_폼이_보인다(admin_client: TestClient):
-    """음성 대조 — 위 시험이 「폼이 없으니 늘 초록」이 되지 않게 한다."""
+    """반대 경우 시험 — 위 시험이 「폼이 없으니 늘 초록」이 되지 않게 한다."""
 
     links = admin_client.get("/admin/links")
     members = admin_client.get("/admin/members")
@@ -168,7 +168,7 @@ def test_기능이_켜져_있으면_안내문_대신_실제_폼이_보인다(adm
 
 
 def test_메뉴는_6묶음이고_이름이_사람_말이다(admin_client: TestClient):
-    """설계 05장 §3의 여섯 묶음이 순서대로, 사람이 읽는 이름으로 있어야 한다."""
+    """여섯 묶음이 순서대로, 사람이 읽는 이름으로 있어야 한다."""
 
     menu = _menu_markup(admin_client.get("/admin").text)
 
@@ -210,7 +210,7 @@ def test_모바일_메뉴도_같은_6개다(admin_client: TestClient):
 
 
 def test_메뉴는_현재_위치를_한_곳만_표시한다(admin_client: TestClient):
-    """신고 관리는 「보고서」 묶음에 든다(설계 05장 §3 ④)."""
+    """신고 관리는 「보고서」 묶음에 든다."""
 
     보고서 = _menu_markup(admin_client.get("/admin/issues").text)
     신고 = _menu_markup(admin_client.get("/admin/feedback-reports").text)
@@ -226,7 +226,7 @@ def test_관리자_메뉴와_화면에_내부용어가_없다(admin_client: Test
     """메뉴 글자와 오늘 화면 바로가기에 내부 자료 이름이 새지 않는다.
 
     ★ 범위 — 이 시험이 보는 것은 «메뉴»와 «오늘 화면의 바로가기»다. 각 화면
-      본문에는 옮겨 온 문구가 글자 그대로 남아 있고(G-S5b 합계 문장 등), 그
+      본문에는 옮겨 온 문구가 글자 그대로 남아 있고(합계 문장 등), 그
       문구의 소유자는 이 작업이 아니다. 범위를 말없이 넓히지 않는다.
     """
 
@@ -242,7 +242,7 @@ def test_관리자_메뉴와_화면에_내부용어가_없다(admin_client: Test
 
 
 def test_바로가기는_여섯_묶음_중_오늘을_뺀_나머지로_간다(admin_client: TestClient):
-    """음성 대조 — 바로가기를 통째로 지워도 위 시험이 초록이 되지 않게 한다."""
+    """반대 경우 시험 — 바로가기를 통째로 지워도 위 시험이 초록이 되지 않게 한다."""
 
     바로가기 = _shortcut_markup(admin_client.get("/admin").text)
 
@@ -274,7 +274,7 @@ def test_메뉴_템플릿은_한_벌뿐이다():
 def test_admin_home_템플릿은_없다():
     """어느 라우트도 그리지 않는 화면 파일은 「있는 기능」처럼 보이는 거짓말이다.
 
-    ★ 실측(감사 2026-09-02, HEAD ddc4682) — `admin_home.html`을 렌더하는 곳이
+    ★ 실측(전수 감사, HEAD ddc4682) — `admin_home.html`을 렌더하는 곳이
       0곳이었다. 그 안의 「품질 대시보드」·「운영 대시보드(예시 화면)」 링크는
       전부 `/admin`으로 되돌아오는 죽은 안내였다.
     """
@@ -316,7 +316,7 @@ def test_어떤_화면_파일도_라우트_없이_남아_있지_않다():
 def test_구형_admin_link_경로는_제거됐다():
     """같은 일을 하는 주소가 둘이면 한쪽만 고쳐 놓고 다 고쳤다고 말하게 된다.
 
-    ★ 지운 것과 남긴 것을 구분한다 (설계 05장 §5, 결정 D-G6 (a)).
+    ★ 지운 것과 남긴 것을 구분한다.
       - 지운 것: 단수형 POST 별칭 3개. 화면 어디에서도 쓰지 않았고(실측),
         감사 목록 35개는 「레거시 별칭 제외」라 회귀가 아니다.
       - 남긴 것: 단수형 GET 2개. 이건 감사 35개에 들어 있는 «사람이 여는 주소»라
@@ -352,7 +352,7 @@ def test_지운_구형_경로는_화면_어디에도_없다():
 
 
 def test_구형_GET_주소는_지우지_않고_신형으로_보낸다(admin_client: TestClient):
-    """음성 대조 — 「구형은 다 없앴다」가 살아 있는 주소까지 죽이지 않았는지 본다."""
+    """반대 경우 시험 — 「구형은 다 없앴다」가 살아 있는 주소까지 죽이지 않았는지 본다."""
 
     from src.features.sharelink import store as share_store  # noqa: PLC0415
 
@@ -449,7 +449,7 @@ def test_링크_화면은_못_읽은_새_접속을_0건처럼_보이지_않는�
 def test_새_접속을_읽을_수_있으면_확인_불가라고_말하지_않는다(
     admin_client: TestClient
 ):
-    """음성 대조 — 위 시험이 「늘 확인 불가라고 적으면 통과」가 되지 않게 한다."""
+    """반대 경우 시험 — 위 시험이 「늘 확인 불가라고 적으면 통과」가 되지 않게 한다."""
 
     with storage_db.connect() as conn:
         share_store.insert_new(
@@ -470,7 +470,7 @@ def test_새_접속을_읽을_수_있으면_확인_불가라고_말하지_않는
 def test_비용_화면은_틀_실패와_무관하고_원장_실패에만_닫힌다(
     admin_client: TestClient, monkeypatch
 ):
-    """음성 대조 — 「전부 503으로 닫으면 통과」가 되지 않게 한다.
+    """반대 경우 시험 — 「전부 503으로 닫으면 통과」가 되지 않게 한다.
 
     비용 화면은 대시보드 틀을 아예 읽지 않는다(원장 기준일을 요청당 한 번만
     읽는 계약 때문이다). 그러니 틀이 깨져도 열려야 하고, **원장**이 깨질 때만

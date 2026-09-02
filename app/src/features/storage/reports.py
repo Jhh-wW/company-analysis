@@ -501,7 +501,7 @@ def report_from_dict(data: dict[str, Any]) -> Report:
         != STRICT_QUALITY_CONTRACT_VERSION
     ):
         raise ValueError("엄격 보고서의 schema 또는 품질 contract_version이 바뀌었습니다")
-    # ★ quality_observation은 이 「엄격 전용」 묶음에서 뺐다(C1b) —
+    # ★ quality_observation은 이 「엄격 전용」 묶음에서 뺐다 —
     #   SHADOW도 관측 전용으로 저장한다. generation_evidence·
     #   public_structure_manifest·STRICT contract_version은 여전히 FULL/
     #   ENFORCE 전용이다(그 셋은 실제로 strict 생산 증거·공개 봉인 절차를
@@ -820,7 +820,7 @@ def attach_public_projection(
     if projection is None:
         return report
     evidence = report.generation_evidence
-    # ★ 증거가 없으면 붙이지 않고 닫는다(S3e). 봉인의 진짜 권위는
+    # ★ 증거가 없으면 붙이지 않고 닫는다. 봉인의 진짜 권위는
     #   생성 증거의 `public_projection_sha256`이다 — 증거가 없으면 「이 봉인이
     #   이 보고서의 것」이라고 말해 주는 것이 아무것도 없고, 남는 검사는 봉인
     #   스스로의 앞뒤가 맞는지뿐이라 DB에 직접 넣은 봉인도 통과한다.

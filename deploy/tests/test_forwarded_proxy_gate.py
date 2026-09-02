@@ -418,7 +418,7 @@ def test_render_blueprint는_유료_관리자_실분석_한서비스만_좁게_�
     }
     assert values["DEPLOYMENT_EXPOSURE"]["value"] == "public"
     assert values["DEPLOYMENT_PLATFORM"]["value"] == "render"
-    # ★ 2026-09-02 결정 D-G2·D-G7로 «계약 이름이 바뀌었다».
+    # ★ 결정으로 «계약 이름이 바뀌었다».
     #   옛 관리자 계약은 링크 발급·초대·QR 입구를 전부 막는다. 출시는
     #   그 입구를 여는 새 계약을 쓰되, 아래 forwarded 비신뢰·고정 origin·
     #   관리자 로그인 벽은 옛 계약과 «똑같이» 켜져 있어야 한다.

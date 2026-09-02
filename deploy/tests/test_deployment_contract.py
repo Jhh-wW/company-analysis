@@ -390,7 +390,7 @@ def test_render_blueprint_turns_engine_v2_on_while_image_default_stays_v1() -> N
         "따옴표 없는 1은 YAML 정수로 읽힙니다 — value: \"1\"로 적어야 합니다"
     )
     assert render_values["ENGINE_V2"] == "1"
-    # ★ 2026-09-02 결정 D-A로 «계약이 바뀌었다» — 기대값 하향이 아니다.
+    # ★ 결정으로 «계약이 바뀌었다» — 기대값 하향이 아니다.
     #   연습 모드(SHADOW)는 품질 하한 미달 보고서를 그대로 내보내면서
     #   사용자 쿼터까지 깎았다. 출시부터는 부족한 장을 한 번 보충하고,
     #   그래도 미달이면 무출고·무차감으로 멈춘다.
@@ -520,7 +520,7 @@ def test_render_shutdown_window_covers_serial_uvicorn_and_app_shutdown() -> None
         REPOSITORY_ROOT / "app" / "docs" / "Render_배포.md"
     ).read_text(encoding="utf-8")
     normalized_render_guide = " ".join(render_guide.split())
-    # ★ 2026-09-03 절차 변경 — 이 서비스의 Blueprint 는 지금 저장소를 가리키지 않아
+    # ★ 절차 변경 — 이 서비스의 Blueprint 는 지금 저장소를 가리키지 않아
     #   Manual Sync 가 «실패한다». Blueprint Settings 에는 연결 저장소를 바꾸는 항목이
     #   없고, 새 Blueprint 를 만들면 기존 서비스를 넘겨받지 않고 접미사 붙은 복제
     #   서비스가 생긴다. 그래서 안내서는 Sync 를 «누르지 말라»고 해야 하고,

@@ -117,8 +117,8 @@ def test_list_renders_zero_inclusive_counts_rows_and_nav_entry(client: TestClien
     assert "상세 보기" in response.text
     assert f'href="/admin/feedback-reports/{open_id}"' in response.text
     # 관리자에게 신고 관리 진입점이 있다.
-    # ★ 2026-09-02 G-S8 기대값 이전 — 여섯 묶음 정보 구조에서 신고 관리는
-    #   「보고서」 묶음에 든다(설계 05장 §3 ④). 그래서 메뉴에는 자기 이름이 아니라
+    # ★ 기대값 이전 — 여섯 묶음 정보 구조에서 신고 관리는
+    #   「보고서」 묶음에 든다. 그래서 메뉴에는 자기 이름이 아니라
     #   「보고서」가 현재 위치로 표시되고, 진입점은 오늘 화면의 바로가기에 있다.
     #   「들어갈 길이 있다」는 보장 자체는 그대로 지킨다.
     menu = response.text.split('<nav class="frame-menu"', 1)[1].split("</nav>", 1)[0]

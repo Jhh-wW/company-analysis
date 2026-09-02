@@ -255,14 +255,14 @@ def _audit_failed_change(
 
 
 # ══════════════════════════════════════════════════════════
-# 위험 동작의 확인 단계 (G-S9 · 설계 05장 §2 원칙 3, §4)
+# 위험 동작의 확인 단계 — 지우거나 바꾸는 일은 두 걸음으로 나눈다
 # ══════════════════════════════════════════════════════════
 
 #: 확인 화면이 준 «1회용 확인 표»가 살아 있는 시간(분).
 #: ★ 짧게 두는 이유 — 확인 화면을 열어 둔 채 잊었다가 한참 뒤에 누르면 그 사이에
 #:   대상이 달라졌을 수 있다. 표가 만료되면 화면을 다시 열어 대상을 다시 본다.
 CONFIRM_TOKEN_TTL_MINUTES = 10
-#: 이유를 받는 위험 동작에서 요구하는 최소 글자 수(설계 05장 §4 「이유(필수 20자 이상)」).
+#: 이유를 받는 위험 동작에서 요구하는 최소 글자 수. 이유는 필수이고 20자 이상이다.
 DANGEROUS_ACTION_REASON_MIN_CHARS = 20
 #: 서버가 동시에 들고 있는 확인 표 상한. 넘치면 오래된 것부터 버려 메모리가
 #: 무한히 늘지 않게 한다. 비상 화면은 목록 줄마다 한 장씩 발급해 여유를 둔다.
@@ -270,7 +270,7 @@ _CONFIRM_TOKEN_MAX_PENDING = 512
 #: 확인 표의 바이트 수. 16바이트면 hex로 32자리다.
 _CONFIRM_TOKEN_BYTES = 16
 #: 확인을 안 거친 요청을 감사에 남길 때 쓰는 사유 코드.
-#: ★ 감사행 `reason_code`는 ASCII만 받는다(F-GS5a). 한국어를 넣으면 그 요청의
+#: ★ 감사행 `reason_code`는 ASCII만 받는다. 한국어를 넣으면 그 요청의
 #:   감사 기록 자체가 실패한다.
 _CONFIRM_MISSING_REASON = "confirm_missing"
 #: 확인을 안 거친 요청에 돌려주는 화면 문구. 내부 용어를 쓰지 않는다.
@@ -293,7 +293,7 @@ class _PendingConfirmation:
 
 #: 발급했지만 아직 안 쓴 확인 표. 프로세스가 다시 뜨면 사라지는데, 그때는
 #: «막는» 쪽으로 틀린다(확인 화면을 다시 열게 된다) — 안전한 방향이다.
-#: 배포 계약이 worker 1·instance 1을 못 박아(I12) 표가 갈라지지 않는다.
+#: 배포 계약이 worker 1·instance 1을 못 박아 표가 갈라지지 않는다.
 _CONFIRM_TOKENS: dict[str, _PendingConfirmation] = {}
 
 
@@ -349,7 +349,7 @@ def _audit_denied_change(
     """실행하지 «않은» 요청도 감사에 남긴다.
 
     ★ 성공 정본 표는 `outcome='success'`만 받는다(`admin_audit_store.py`).
-      그래서 거절은 설계 05장 §4가 적은 대로 로그 미러로만 남는다.
+      그래서 거절은 정해진 대로 로그 미러로만 남는다.
     """
 
     try:
@@ -564,7 +564,7 @@ def _access_context(request: Request, *, today: dt.date, **kwargs) -> dict:
     }
     # LINK·MEMBER는 각각 독립 통장이므로 활성 개수만큼 입장 상한이 생긴다.
     # MEMBER는 이 금액 제한에 더해 KST 성공 보고서 건수 제한도 함께 적용한다.
-    # ★ 친구마다 하루 한도가 다를 수 있다 (결정 D-G4 (a)). 「인원 × 기본값」으로
+    # ★ 친구마다 하루 한도가 다를 수 있다. 「인원 × 기본값」으로
     #   세면 한 명만 올려도 이 합계가 실제 비용 노출보다 «작게» 나온다. 이 숫자를
     #   보고 링크·친구를 더 늘려도 되는지 판단하므로, 작게 보이는 쪽이 위험하다.
     member_default_budget_krw = (
@@ -629,9 +629,9 @@ def _access_context(request: Request, *, today: dt.date, **kwargs) -> dict:
     )
 
 
-#: 정보 구조 재배치(G-S8) 뒤 초대·링크·회원·비용은 화면 셋으로 나뉜다.
+#: 정보 구조 재배치 뒤 초대·링크·회원·비용은 화면 셋으로 나뉜다.
 #: 같은 `_access_context`를 세 화면이 나눠 쓰고, 자료를 못 읽으면 셋 다 같은
-#: 축소 화면으로 떨어진다(설계 05장 §3).
+#: 축소 화면으로 떨어진다.
 ACCESS_LINKS_TEMPLATE = "admin_links.html"
 ACCESS_MEMBERS_TEMPLATE = "admin_members.html"
 ACCESS_COSTS_TEMPLATE = "admin_costs.html"
@@ -647,7 +647,7 @@ def _frame_base_context(request: Request, template: str) -> dict:
       실패축 자체가 없다.
 
     ★ 못 읽으면 «조용히 빈 값으로» 넘기지 않고 축소 화면으로 보낸다
-      (`_AccessDataUnavailable`). 2026-09-03 회귀 정정 —
+      (`_AccessDataUnavailable`). 회귀 정정 —
       앞 판은 `except Exception: return {}`로 삼켰는데,
       ① 회원 화면은 `dashboard_company_labels` 같은 값을 `is defined` 가드 없이
          써서 렌더가 `jinja2.exceptions.UndefinedError`로 **500**이 났고,
@@ -823,8 +823,8 @@ def _report_company_id(conn, report_id: str, report=None) -> str | None:
 
     ★ 열을 먼저 보는 이유 — 본문(`payload_json`)의 `company_id`는 출고 상태가
       FULL일 때만 채워진다(`pipeline/real.py:3519`). 안전 확인 중에 나간 옛
-      저장본은 본문이 비어 있어, 본문만 보면 **이름이 같은 다른 법인을 못 가른다**
-      (발견 F-GS2p1b). 저장 표의 `corp_id` 열은 출고 상태와 무관하게 저장 경로가
+      저장본은 본문이 비어 있어, 본문만 보면 **이름이 같은 다른 법인을 못 가른다**.
+      저장 표의 `corp_id` 열은 출고 상태와 무관하게 저장 경로가
       항상 채운다(`storage/cache.py:398`).
     ★ 본문 값은 폴백으로 남긴다 — 열이 없던 시절에 다른 길로 저장된 행이 있을 수
       있고, 값이 있는 쪽을 쓰는 편이 대조를 더 많이 해 준다.
@@ -948,9 +948,9 @@ def _validated_report_id(
 async def admin_access(request: Request):
     """초대·링크·비용이 한 화면에 섞여 있던 옛 주소의 호환 리다이렉트.
 
-    ★ 2026-09-02 G-S8 — 이 화면은 링크(`/admin/links`)·회원(`/admin/members`)·
-      비용(`/admin/costs`) 셋으로 나뉘었다. **주소는 지우지 않는다** — 결정 D-G6 (a)
-      대로 이미 뿌린 주소가 깨지지 않아야 한다. 도착지는 링크 화면이다.
+    ★ 이 화면은 링크(`/admin/links`)·회원(`/admin/members`)·
+      비용(`/admin/costs`) 셋으로 나뉘었다. **주소는 지우지 않는다** —
+      이미 뿌린 주소가 깨지지 않아야 한다. 도착지는 링크 화면이다.
     ★ 권한 판정을 건너뛰고 리다이렉트하지 않는다. 거절도 감사에 남아야 한다.
     """
     blocked = request_helpers.require_admin(request)
@@ -1179,9 +1179,9 @@ def _link_detail_page(
             if link is not None:
                 report_state = _linked_report_state(conn, link)
                 # ★ 결속 보고서에 회사 고유번호가 없으면 이후 재결속은 «이름»만
-                #   대조하게 된다 — 같은 이름의 다른 회사가 통과한다 (G-S12b).
+                #   대조하게 된다 — 같은 이름의 다른 회사가 통과한다.
                 # ★ 「없다」와 「못 읽었다」를 나눈다. 같은 침묵으로 두면 읽기가
-                #   깨진 동안 관리자는 아무 문제가 없다고 믿는다 (G-S4c).
+                #   깨진 동안 관리자는 아무 문제가 없다고 믿는다.
                 if report_state in ("active", "expired"):
                     resolved_company_id = _link_company_id(conn, link)
                     if resolved_company_id is None:
@@ -1295,7 +1295,7 @@ def _link_detail_page(
                 "generation_start_failed": "생성 시작 중 기술 오류",
                 "generation_not_started": "생성을 시작하지 못함",
                 "automatic_release_gate_stopped": "자동출고 검사를 통과하지 못함",
-                # 조사 도중 초대 링크가 닫혀 멈춘 갈래(G-S11a). 사람 말로 적는다 —
+                # 조사 도중 초대 링크가 닫혀 멈춘 갈래. 사람 말로 적는다 —
                 # 「revoked」로는 무엇이 멈췄는지 읽는 사람이 알 수 없다.
                 "link_revoked": "초대 링크의 사용이 중단됨",
                 "link_expired": "초대 링크의 기간이 지남",
@@ -1326,7 +1326,7 @@ def _link_detail_page(
             ),
             link_extension_disabled=deployment_mode.render_admin_no_forwarded(),
             report_share_days=REPORT_LINK_MAX_AGE_DAYS,
-            # 이 화면이 곧 만료 연장의 «확인 화면»이다(설계 05장 §4) — 지금
+            # 이 화면이 곧 만료 연장의 «확인 화면»이다 — 지금
             # 만료일과 남은 날짜를 보여 준 뒤 1회용 표를 함께 실어 보낸다.
             confirm_token=issue_confirm_token(
                 request,
@@ -1344,8 +1344,7 @@ def _link_total_age_limit(created_at: str) -> dt.date | None:
     """이 링크가 «발급일 기준»으로 살 수 있는 마지막 날. 못 읽으면 ``None``.
 
     ★ 미루기를 반복하면 링크는 영원히 산다. 1회 상한만으로는 그것을 못 막는다.
-      회수할 수 없는 QR을 뿌리는 일이므로 발급일에서 세는 천장을 따로 둔다
-      (결정 D-G8b).
+      회수할 수 없는 QR을 뿌리는 일이므로 발급일에서 세는 천장을 따로 둔다.
     """
 
     try:
@@ -1466,7 +1465,7 @@ async def admin_link_extend(
     csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
     confirm_token: str = Form("", max_length=REFERENCE_MAX_CHARS),
 ):
-    """링크의 만료일을 뒤로 미룬다. 이유·이력행·감사행을 함께 남긴다 (D-G8).
+    """링크의 만료일을 뒤로 미룬다. 이유·이력행·감사행을 함께 남긴다.
 
     ★ 「미루기」만 한다 — 앞당기기는 철회(`/admin/links/revoke`)가 이미 즉시
       막아 준다. 두 길을 한 폼에 두면 실수로 링크를 조기에 닫는다.
@@ -1515,8 +1514,8 @@ async def admin_link_extend(
             if not validation_error and reason_error:
                 # ★ 이유를 «필수»로 두는 이유 — 나중의 내가 왜 미뤘는지 알아야
                 #   같은 판단을 다시 할 수 있다. 이력만 남고 이유가 없으면
-                #   기록이 아니라 흔적이다. 길이 하한은 설계 05장 §4가 정한
-                #   위험 동작 공통 규칙이다(F-GS4d가 G-S9로 미뤄 둔 자리).
+                #   기록이 아니라 흔적이다. 길이 하한은 위험 동작에 공통으로 걸리는
+                #   규칙이다.
                 # ★ 날짜가 이미 틀렸으면 그쪽을 먼저 말한다 — 폼 순서대로 한 번에
                 #   하나씩 알려야 관리자가 무엇을 고칠지 헷갈리지 않는다.
                 validation_error = (
@@ -1526,7 +1525,7 @@ async def admin_link_extend(
                 )
             # ★ 확인 표는 «날짜·이유를 다 통과한 뒤»에 본다. 앞에 두면 총 수명
             #   상한에 닿아 애초에 못 미루는 링크까지 「확인 화면을 거치세요」로
-            #   대답해, 진짜 막힌 이유(G-S4c 상한)를 가린다. 폼 오류로 표를
+            #   대답해, 진짜 막힌 이유(상한)를 가린다. 폼 오류로 표를
             #   태우지 않는 이점도 있다 — 날짜를 고쳐 다시 보내면 그대로 통과한다.
             confirmation_missing = (
                 not validation_error
@@ -1769,7 +1768,7 @@ async def admin_link_report(
 
 @router.get("/admin/links/{key_hash}/revoke", response_class=HTMLResponse)
 async def admin_link_revoke_confirm(request: Request, key_hash: str):
-    """초대 링크 사용 중단 «확인 화면» (설계 05장 §4).
+    """초대 링크 사용 중단 «확인 화면».
 
     ★ 목록에서 단추 하나로 바로 닫히면 잘못 눌렀을 때 되돌릴 길이 없다 —
       이미 뿌린 주소가 죽고 새로 발급해 다시 나눠 줘야 한다. 그래서 무엇을
@@ -1836,7 +1835,7 @@ async def admin_link_delete(
     csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
     confirm_token: str = Form("", max_length=REFERENCE_MAX_CHARS),
 ):
-    """링크를 닫는다. 확인 화면에서 받은 1회용 표가 있어야 실행한다 (G-S9)."""
+    """링크를 닫는다. 확인 화면에서 받은 1회용 표가 있어야 실행한다."""
     key_clean = key.strip().lower()
     key_is_hash = share_store.is_key_hash(key_clean)
     action = "admin.link.revoke"
@@ -1911,7 +1910,7 @@ async def admin_budget_recheck(
 ):
     """비용 원장을 «다시 읽어» 유료 조사를 열 수 있는지 확인한다.
 
-    ★ 왜 이 경로가 생겼나 (2026-08-28) — 사용자 화면은
+    ★ 왜 이 경로가 생겼나 — 사용자 화면은
       「비용 기록을 확인할 수 없어 새 조사를 잠시 멈췄습니다. **관리자 확인이 끝나야
       다시 열립니다.**」라고 말하는데, 정작 **관리자가 「확인」을 실행할 방법이 없었다.**
       `_BUDGET_STORE_HEALTHY` 를 True 로 되돌리는 곳이 기동 시 한 곳뿐이라,
@@ -1939,7 +1938,7 @@ async def admin_budget_recheck(
     )
     # ★ 「원장은 살아났지만 미확정 통장이 남아 계속 막혀 있다」는 «부분 성공»이다.
     #   전에는 이때도 그냥 리다이렉트해서, 관리자 눈에는 **버튼이 아무 일도 안 한
-    #   것처럼** 보였다 (2026-08-28 사용자 신고: 「그냥 버튼만 있는 거 아니냐」).
+    #   것처럼** 보였다 (사용자 신고: 「그냥 버튼만 있는 거 아니냐」).
     막힌채, _사유 = paid_runtime.paid_research_block()
     if opened and not 막힌채:
         return _admin_response(
@@ -1970,7 +1969,7 @@ async def admin_budget_settle(
 ):
     """미확정 유료 단계 하나를 «대사 완료»로 마감한다.
 
-    ★ 왜 이 경로가 생겼나 (2026-08-28) — 화면은 「관리자가 미확정 비용을 대사해야
+    ★ 왜 이 경로가 생겼나 — 화면은 「관리자가 미확정 비용을 대사해야
       해당 통장이 다시 열립니다」라고 말하는데, **대사할 방법이 코드에 없었다.**
       `finish_inflight` 는 내부 정산에서만 불렸고 관리자 경로가 0개였다.
       그래서 「원장 다시 읽기」를 눌러도 미확정은 그대로 남아 계속 막혔다 —
@@ -2104,7 +2103,7 @@ async def admin_delivery_settle(
 ):
     """스윕이 못 잡은 required delivery 의무 한 건을 관리자가 직접 닫는다.
 
-    ★ 왜 이 경로가 생겼나(2026-09-02, ``admin_budget_settle``의 2026-08-28
+    ★ 왜 이 경로가 생겼나(``admin_budget_settle``의 앞선
       선례를 그대로 본뜬다) — 부팅 스윕은 일정 시간 이상 정체된 의무만
       자동으로 닫는다. 그보다 최근에 멈췄거나 스윕 자체가 실패한 건은
       관리자가 직접 닫을 방법이 있어야 한다(재시작해도 DB에서 다시
@@ -2253,7 +2252,7 @@ async def admin_invite(
 
 @router.get("/admin/members/{email}/remove", response_class=HTMLResponse)
 async def admin_member_revoke_confirm(request: Request, email: str):
-    """친구를 명단에서 빼기 전 «확인 화면» (설계 05장 §4).
+    """친구를 명단에서 빼기 전 «확인 화면».
 
     ★ 표를 «명단을 못 읽어도» 발급한다 — 여기서 404로 끊으면 뒤의 POST가
       「확인을 안 거쳤다」로 뭉개져, 명단에 없는 사람인지 확인 단계를 건너뛴
@@ -2300,7 +2299,7 @@ async def admin_revoke(
     csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
     confirm_token: str = Form("", max_length=REFERENCE_MAX_CHARS),
 ):
-    """친구를 초대 명단에서 뺀다. 확인 화면의 1회용 표가 있어야 한다 (G-S9)."""
+    """친구를 초대 명단에서 뺀다. 확인 화면의 1회용 표가 있어야 한다."""
     email_clean = share_allow.normalize(email)
     action = "admin.member.revoke"
     target = admin_audit.target_id("member", email_clean)
@@ -2394,7 +2393,7 @@ async def admin_member_limit_confirm(
     daily_budget_krw: str = "",
     reason: str = "",
 ):
-    """친구 한 명의 하루 한도를 바꾸기 전 «확인 화면» (설계 05장 §4).
+    """친구 한 명의 하루 한도를 바꾸기 전 «확인 화면».
 
     회원 화면에서 적은 값을 여기서 **지금 값과 나란히** 다시 보여 준다. 숫자
     하나를 잘못 적으면 그 친구가 하루에 쓸 수 있는 돈이 달라지므로, 바꾸기
@@ -2496,7 +2495,7 @@ async def admin_member_limit(
     csrf_token: str = Form("", max_length=CSRF_TOKEN_MAX_CHARS),
     confirm_token: str = Form("", max_length=REFERENCE_MAX_CHARS),
 ):
-    """친구 «한 명»의 하루 한도를 바꾼다 (결정 D-G4 (a)).
+    """친구 «한 명»의 하루 한도를 바꾼다.
 
     바꾼 값은 **다음 날에도 그대로**인 영구 값이다. 두 칸을 비우면 그 친구는
     다시 공통 기본값을 쓴다. 「오늘만 더」는 별도 표가 필요해 이번 범위 밖이다.
@@ -2529,7 +2528,7 @@ async def admin_member_limit(
     reason_clean, reason_error = _validated_action_reason(reason)
     if reason_error:
         # ★ 이유 검사를 «저장 앞»으로 당긴다 — 명단 feature는 「비어 있지 않음」만
-        #   보고, 최소 길이는 위험 동작 공통 규칙(설계 05장 §4)이라 여기서 본다.
+        #   보고, 최소 길이는 위험 동작 공통 규칙이라 여기서 본다.
         _audit_failed_change(
             request, action=action, target=target, reason="invalid_input"
         )

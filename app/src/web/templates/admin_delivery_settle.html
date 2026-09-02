@@ -2,12 +2,12 @@
 {% block title %}delivery 의무 대사 · 기업분석{% endblock %}
 
 {# 저장은 됐지만 출고가 확정되지 못한 delivery 의무를 관리자가 수동으로 닫는 화면
-   (36장 계획리빌딩 티켓 A2, F1·F2).
+   (재시작 스윕이 놓친 나머지를 사람이 닫는 자리).
 
    ★ 서버 시작 스윕(runtime._recover_stale_report_deliveries)이 일정 시간
      이상 정체된 의무는 자동으로 닫는다. 이 화면은 그 기준보다 최근에
      멈췄거나, 스윕 자체가 실패한 나머지를 사람이 직접 닫는 곳이다.
-   ★ 2026-08-28 admin_budget_settle의 선례를 그대로 따른다 — 「재시작해도
+   ★ admin_budget_settle의 선례를 그대로 따른다 — 「재시작해도
      DB에서 다시 읽히므로 대사할 방법이 코드에 없으면 영원히 안 풀린다」. #}
 
 {% block content %}

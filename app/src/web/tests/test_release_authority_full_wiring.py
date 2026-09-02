@@ -340,7 +340,7 @@ def test_epoch_불일치는_출고전체를_거절하고_아무것도_남기지_
 def _store_report_row(report_id: str, report: Report, frozen) -> None:
     """운영과 같은 순서로 보고서 본문(과 공개 봉인)을 먼저 저장한다.
 
-    ★ 왜 필요한가(S3f) — 운영에서 `_finalize_report_delivery`는
+    ★ 왜 필요한가 — 운영에서 `_finalize_report_delivery`는
       `report_saved`가 참일 때만 돈다. 즉 delivery를 확정할 때 `reports` 행과
       공개 봉인 행이 이미 있다. 이 시험들이 그 단계를 건너뛰면 「생성 증거는
       봉인을 가리키는데 봉인이 없다」는, 운영에는 없는 상태가 만들어져

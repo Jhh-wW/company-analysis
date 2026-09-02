@@ -115,7 +115,7 @@ def test_관리자_갈래도_한국어로_보인다(client: TestClient):
 def test_접두없는_옛_reporter_key는_목록과_상세_모두_알수없음으로_보인다(
     client: TestClient,
 ):
-    """★ 갈래 라벨 도입 전(2026-08-25 이전) 저장된 실제 운영 데이터 모양 —
+    """★ 갈래 라벨을 도입하기 전에 저장된 실제 운영 데이터 모양 —
     접두 없는 raw 64자리 SHA-256뿐이다. 예외 없이 화면이 떠야 한다.
     """
     legacy_id = _seed(reporter_key=_가짜지문_A)

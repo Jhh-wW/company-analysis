@@ -3,11 +3,11 @@
 {% block bodyclass %}admin-frame-page{% endblock %}
 {% block wrapclass %}wide admin-frame{% endblock %}
 
-{# 초대 링크 화면 (정보 구조 ②, 설계 05장 §3).
+{# 초대 링크 화면 (정보 구조 ②).
 
-   ★ 2026-09-02 G-S8 — 발급 폼·링크 목록은 `admin_access.html`에서 «글자 그대로»
+   ★ 발급 폼·링크 목록은 `admin_access.html`에서 «글자 그대로»
      옮겼다. 앞서 링크 목록이 이 화면과 `/admin/access` 두 곳에 있어서, 같은 대상을
-     보는 곳이 둘이었다(설계 05장 §2 원칙 2). 이제 한 곳이다.
+     보는 곳이 둘이었다. 이제 한 곳이다.
    ★ 권한 검사는 라우트(require_admin)가 이미 했다. 여기서 다시 안 본다.
    ★ 개인정보·IP·UA·기기·봇 판정·원문 키는 수집하지도 표시하지도 않는다. #}
 
@@ -50,7 +50,7 @@
     {% endif %}
   </p>
 
-  {# ★ 설계 05장 §2 원칙 1 — 꺼진 기능은 «눌리지 않는 버튼»이 아니라 안내 한 줄로만
+  {# ★ 꺼진 기능은 «눌리지 않는 버튼»이 아니라 안내 한 줄로만
      보인다. 회색 버튼은 「되는데 왜 안 되지」라는 오해만 남긴다. #}
   {% if narrow_admin_no_forwarded %}
   <div class="warn-line" role="note" style="margin-top:14px"><span>ℹ️</span><span><strong>이 운영판에서는 초대 링크를 발급할 수 없습니다.</strong><br>이미 발급한 링크는 아래 목록에서 상태를 확인하고 철회할 수 있습니다.</span></div>
@@ -156,7 +156,7 @@
       </td>
       <td>
         {# ★ 여기서 바로 닫지 않는다 — 확인 화면에서 대상을 다시 보여 준 뒤에만
-           실행한다 (설계 05장 §2 원칙 3, G-S9). #}
+           실행한다. #}
         {% if link.key_hash not in revoked_link_keys %}
         <a class="btn ghost" href="/admin/links/{{ link.key_hash }}/revoke"
            aria-describedby="company-link-close-note">LINK 철회</a>

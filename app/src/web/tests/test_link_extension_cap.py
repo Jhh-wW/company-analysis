@@ -1,4 +1,4 @@
-"""링크 총 수명 상한과 「확인 불가」 경고를 못 박는다 (티켓 G-S4c, 결정 D-G8b).
+"""링크 총 수명 상한과 「확인 불가」 경고를 못 박는다.
 
 ★ 왜 총 상한이 필요한가 — 한 번에 90일까지만 미룰 수 있어도, 미루기를 반복하면
   링크는 영원히 산다. QR은 한 번 뿌리면 회수할 수 없으므로 **발급일로부터 세는
@@ -41,7 +41,7 @@ _총상한 = 365
 _1회상한 = 90
 
 _상한도달문구 = "이 링크는 더 미룰 수 없습니다. 새 링크를 발급해 주세요"
-#: 위험 동작의 이유는 20자 이상이어야 한다(G-S9 · 설계 05장 §4). 길이 규칙
+#: 위험 동작의 이유는 20자 이상이어야 한다. 길이 규칙
 #: 자체는 `test_admin_dangerous_actions.py`가 보고, 여기서는 규칙에 맞는 글로
 #: «상한이 실제로 막는지»만 본다.
 _연장이유 = "채용 일정이 밀려 링크를 더 열어 두기로 했습니다"
@@ -77,7 +77,7 @@ def admin(client: TestClient) -> TestClient:
     def post_with_csrf(url, *args, **kwargs):
         data = dict(kwargs.pop("data", {}) or {})
         data.setdefault("csrf_token", csrf)
-        # 만료 연장은 확인 화면을 거쳐야 실행된다(G-S9). 브라우저가 하는 것과
+        # 만료 연장은 확인 화면을 거쳐야 실행된다. 브라우저가 하는 것과
         # 같은 두 단계를 여기서 그대로 밟는다.
         if url.endswith("/extend") and "confirm_token" not in data:
             data["confirm_token"] = _확인표(client, url)

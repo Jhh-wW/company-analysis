@@ -101,7 +101,7 @@ def _dashboard_link_report_state(conn, link: share_store.ShareLink) -> str:
 def _dashboard_link_company_id_state(
     conn, link: share_store.ShareLink, report_state: str
 ) -> str:
-    """결속 보고서의 회사 고유번호 상태 (발견 F-GS2p1b · 티켓 G-S4c).
+    """결속 보고서의 회사 고유번호 상태.
 
     Returns:
         ``"none"``(결속 없음) · ``"present"``(있음) · ``"missing"``(없음) ·
@@ -481,7 +481,7 @@ def _dashboard_context(request: Request) -> dict:
             for member in members
         },
     )
-    # ★ 회원별 하루 한도 (결정 D-G4 (a)) — 화면이 「전원 3건·3,000원」이라고 단정하면
+    # ★ 회원별 하루 한도 — 화면이 「전원 3건·3,000원」이라고 단정하면
     #   한 명만 올렸을 때 관리자가 틀린 숫자를 보고 또 올린다. 합계도 인원 곱셈이
     #   아니라 사람마다 다른 값의 «합»이어야 최악의 하루 지출을 바로 읽는다.
     #   ★ 기본값 해석을 «여기서» 하는 이유 — 성공 건수 기본값은 admin_dashboard가,
@@ -498,7 +498,7 @@ def _dashboard_context(request: Request) -> dict:
     operation_issues = sorted(
         operation_issues, key=lambda item: (str(item["created_at"]), str(item["operation_key"]))
     )
-    # ★ 유료 조사가 통째로 막혔는지 — 2026-08-28 까지 첫 화면이 이걸 «안 읽었다».
+    # ★ 유료 조사가 통째로 막혔는지 — 한동안 첫 화면이 이걸 «안 읽었다».
     #   모든 유료 조사가 닫힌 날에도 관리자 첫 화면은 「문제 없음」이었다.
     유료차단, 유료차단_사유 = paid_runtime.paid_research_block()
     service_dict = (
@@ -1019,7 +1019,7 @@ async def submit_error(
 def link_page_context(request: Request) -> dict:
     """초대 링크 화면(정보 구조 ②)이 쓰는 대시보드 쪽 값.
 
-    ★ 2026-09-02 G-S8 — 링크 목록 «본문»은 이제 `routers/admin.py`의 접근 문맥이
+    ★ 링크 목록 «본문»은 이제 `routers/admin.py`의 접근 문맥이
       정본이다. 여기서는 새 접속 건수처럼 대시보드만 아는 값을 얹는다.
     """
 
@@ -1078,7 +1078,7 @@ def member_page_context(request: Request) -> dict:
 async def members_page(request: Request):
     """회원 화면 — 초대·명단·한도·이용·설문을 한곳에서 본다(정보 구조 ③).
 
-    ★ 2026-09-02 G-S8 — 초대 폼과 명단은 `/admin/access`에 따로 있었다. 화면
+    ★ 초대 폼과 명단은 `/admin/access`에 따로 있었다. 화면
       본문은 `routers/admin.py`가 그리고, 이 라우트는 권한만 판정한다.
     """
 
@@ -1094,7 +1094,7 @@ async def members_page(request: Request):
 async def links_page(request: Request):
     """초대 링크 화면 — 발급·목록·상태·철회를 한곳에서 본다(정보 구조 ②).
 
-    ★ 2026-09-02 G-S8 — 발급 폼은 `/admin/access`에, 목록은 여기에 나뉘어 있었다.
+    ★ 발급 폼은 `/admin/access`에, 목록은 여기에 나뉘어 있었다.
       화면 본문은 `routers/admin.py`가 그리고, 이 라우트는 권한만 판정한다.
     """
 

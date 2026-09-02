@@ -5,7 +5,7 @@
 
 {# 초대 링크·회원·비용 세 화면이 «자료를 못 읽었을 때» 공통으로 쓰는 축소 화면.
 
-   ★ 2026-09-02 G-S8 — 앞 판은 `admin_access.html` 한 파일 안의 else 가지였다.
+   ★ 앞 판은 `admin_access.html` 한 파일 안의 else 가지였다.
      화면을 셋으로 나누면서 그 가지를 이 파일로 그대로 옮겼다. 문구는 글자 그대로다.
    ★ 읽지 못한 값을 0원·0개로 «추정해서» 보여주지 않는다.
    ★ 비용 원장이 나빠도 이미 준 권한을 «줄이는» 일은 열어 둔다. #}
@@ -55,7 +55,7 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <input type="hidden" name="key" value="{{ link.key_hash }}">
     {# 이 목록이 대상을 다시 보여 주므로 확인 화면을 겸한다 — 원장이 막힌 동안
-       확인 화면을 한 번 더 요구하면 새는 링크를 못 닫는다 (G-S9). #}
+       확인 화면을 한 번 더 요구하면 새는 링크를 못 닫는다. #}
     <input type="hidden" name="confirm_token" value="{{ revocation_link_tokens.get(link.key_hash, '') }}">
     <span>{{ link.company }} · {{ link.job or "직무 미지정" }}</span>
     <button type="submit" class="btn ghost">링크 철회</button>

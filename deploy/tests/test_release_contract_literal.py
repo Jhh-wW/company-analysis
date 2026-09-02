@@ -8,11 +8,11 @@
   잡는다. 값을 바꾸려면 이 리터럴을 손으로 고쳐야 하고, 그때 결정 근거를 남기게
   된다.
 
-근거 결정(2026-09-02):
-  - D-A   : 메인 병합 릴리스에서 SHADOW 종료 → ``REPORT_RELEASE_MODE=FULL``
-  - D-G2  : 링크·초대·QR 입구를 여는 배포 계약으로 전환
-  - D-G7  : 그 계약의 «이름»은 새 이름 ``render-portfolio-link-v1``
-  - F-B3c : typed DART 수집기는 실제 문서로 검증된 적이 없어 출시에서 끄고 간다
+근거:
+  - 메인 병합 릴리스에서 SHADOW 종료 → ``REPORT_RELEASE_MODE=FULL``
+  - 링크·초대·QR 입구를 여는 배포 계약으로 전환
+  - 그 계약의 «이름»은 새 이름 ``render-portfolio-link-v1``
+  - typed DART 수집기는 실제 문서로 검증된 적이 없어 출시에서 끄고 간다
             (환경변수를 아예 «선언하지 않는» 것이 off다)
 """
 
@@ -32,7 +32,7 @@ RENDER_BLUEPRINT = REPOSITORY_ROOT / "render.yaml"
 EXPECTED_RUNTIME_CONTRACT = "render-portfolio-link-v1"
 #: ``app/src/shared/report_evidence/constants.py``의 세 모드 중 출시 값.
 EXPECTED_RELEASE_MODE = "FULL"
-#: 출시에서 선언하지 않는 kill switch 이름(F-B3c).
+#: 출시에서 선언하지 않는 kill switch 이름.
 TYPED_COLLECTOR_ENV_NAME = "TYPED_DART_COLLECTOR"
 
 
@@ -51,7 +51,7 @@ def _render_web_service_env() -> dict[str, object]:
 
 
 def test_render_yaml의_계약_이름은_render_portfolio_link_v1_리터럴과_같다() -> None:
-    """D-G7 — 배포 계약 이름이 한 글자라도 다르면 손님 입구가 안 열린다.
+    """배포 계약 이름이 한 글자라도 다르면 손님 입구가 안 열린다.
 
     이름이 어긋나면 컨테이너는 시작 검증에서 거부되거나(허용 목록 밖),
     옛 관리자 계약으로 읽혀 링크 발급 404·초대 409가 «조용히» 되살아난다.
@@ -86,7 +86,7 @@ def test_render_yaml의_release_mode는_FULL_리터럴과_같다() -> None:
 
 
 def test_TYPED_DART_COLLECTOR는_render_yaml에_없다() -> None:
-    """F-B3c — 실제 DART 문서로 검증된 적 없는 수집기를 출시와 함께 켜지 않는다.
+    """실제 DART 문서로 검증된 적 없는 수집기를 출시와 함께 켜지 않는다.
 
     이 스위치는 «선언하지 않는 것»이 off다. 값을 "0"으로 적어 두는 것도 금지가
     아니지만, 키가 있으면 나중에 누가 "1"로 바꾸기가 너무 쉬워진다.
