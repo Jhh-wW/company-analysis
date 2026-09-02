@@ -15,11 +15,13 @@ from fastapi.staticfiles import StaticFiles
 from src.core import logging_setup, paths
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
+from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink.constants import KEY_COOKIE_NAME
 from src.features.sharelink.access_log import (
     CapabilityAccessLogFilter,
     install_uvicorn_access_log_filter,
 )
+from src.features.storage import db as storage_db
 from src.web import deployment_mode, request_helpers, runtime
 from src.web.response_security import ResponseSecurityMiddleware
 from src.web.routers import (
@@ -50,7 +52,7 @@ app.mount("/static", StaticFiles(directory=str(paths.STATIC_DIR)), name="static"
 
 @app.middleware("http")
 async def beta_admin_gate(request: Request, call_next):
-    """관리자 전용 배포에서는 로그인한 관리자만 사이트 본문에 들어오게 한다."""
+    """관리자 전용 배포에서는 로그인한 관리자와 초대 명단 회원만 본문에 들어오게 한다."""
     narrow_admin_no_forwarded = deployment_mode.render_admin_no_forwarded()
     if not auth_logic.beta_admin_only_from_env() and not narrow_admin_no_forwarded:
         return await call_next(request)
@@ -73,6 +75,28 @@ async def beta_admin_gate(request: Request, call_next):
 
     if session is not None and session.is_admin:
         return await call_next(request)
+    # 관리자 전용 로그인 벽이 켜져 있어도 «초대 명단(allowlist)에 활성 상태로
+    # 있는 회원»은 관리자 화면만 빼고 통과한다 — 로그인만으로는 통과하지
+    # 않는다(P-95와 같은 원칙, `sharelink/tracks.py`의 MEMBER 갈래와 정합).
+    # ★ 계약과 무관하게 적용한다 — BETA_ADMIN_ONLY는 «로그인 벽을 켤지»를
+    #   정할 뿐, 어느 forwarded-header 신뢰 모델을 쓰는지와는 다른 축이다.
+    #   admin.py의 LINK 발급·초대 차단, 이 함수 아래의 `/k/`·LINK 쿠키 차단은
+    #   여전히 `narrow_admin_no_forwarded` 값 그대로 옛 관리자 두 계약에서만
+    #   걸린다 — 이 예외는 그 둘을 바꾸지 않는다.
+    is_admin_path = path == auth_constants.ADMIN_PATH_PREFIX or path.startswith(
+        f"{auth_constants.ADMIN_PATH_PREFIX}/"
+    )
+    if session is not None and not is_admin_path:
+        try:
+            with storage_db.connect() as conn:
+                is_member = share_allow.is_allowed(conn, session.email)
+        except Exception:  # noqa: BLE001 — 못 읽으면 «초대 안 된 사람»으로 본다
+            logger.exception(
+                "초대 명단을 못 읽어 시험 공개 회원 통과를 보류했습니다"
+            )
+            is_member = False
+        if is_member:
+            return await call_next(request)
     # capability URL을 한 번 통과해 서버가 발급한 쿠키가 있고, 그 열쇠가 DB에서
     # 실제로 살아 있을 때만 결과·진행·PDF 경로를 연다. 관리자 경로는 capability로
     # 절대 열지 않으며, 쿠키가 없는 일반 요청에는 추가 DB 조회 비용을 만들지 않는다.

@@ -18,6 +18,7 @@ from src.features.auth import logic as auth_logic
 from src.features.auth import state_store as oauth_state_store
 from src.features.pipeline.demo import DemoPipeline
 from src.features.report_access import store as report_access_store
+from src.features.sharelink import allowlist as share_allow
 from src.features.storage import db as storage_db
 from src.web import request_helpers, runtime
 from src.web.security import CSRF_TOKEN_MAX_CHARS
@@ -445,9 +446,23 @@ async def auth_callback(
         # 화면 계약은 기존과 같이 홈으로 돌려보내되, 원장은 이미 1회 소비됐다.
         return _oauth_rejected_redirect(request)
 
-    response = RedirectResponse(
-        "/" if result.is_admin else "/auth/not-admin", status_code=303
-    )
+    # 관리자가 아니어도 초대 명단(allowlist) 회원이면 홈으로 보낸다 — beta gate가
+    # 회원을 통과시키게 된 뒤로, 여기서 계속 「관리자만」으로 판단하면 실제로는
+    # 들어갈 수 있는 회원이 로그인 직후 "관리자 전용" 화면부터 보게 된다.
+    # ★ 명단을 못 읽으면 「초대 안 된 사람」쪽으로 틀린다 — beta gate와 같은 원칙.
+    destination = "/auth/not-admin"
+    if result.is_admin:
+        destination = "/"
+    else:
+        try:
+            with storage_db.connect() as conn:
+                if share_allow.is_allowed(conn, result.email):
+                    destination = "/"
+        except Exception:  # noqa: BLE001 — 못 읽으면 관리자 전용 화면으로 보낸다
+            logger.exception(
+                "로그인 직후 초대 명단을 못 읽어 관리자 전용 화면으로 보냈습니다"
+            )
+    response = RedirectResponse(destination, status_code=303)
     _delete_oauth_state_cookie(response, request)
     _set_session_cookie(response, request, result.session.token)
     return response
