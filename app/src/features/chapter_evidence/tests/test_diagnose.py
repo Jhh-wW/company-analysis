@@ -130,6 +130,42 @@ def test_기대경로_조회_실패나_절단은_unknown이다(state: Collection
     assert f"required_path_{state.value.lower()}:identity:corporate_identity" in reasons
 
 
+def test_필수경로가_MISSING이어도_같은슬롯_optional실패가_있으면_unknown이다() -> None:
+    """P1-B — build_section_bundle과 같은 optional_path_* 분기.
+
+    REQUIRED 조회(DART)는 정상적으로 MISSING을 돌려줬지만, 같은 슬롯을
+    겨냥한 OPTIONAL 광역 경로(robots 차단 등)가 FAILED면 «확인을 마쳤다»고
+    단정하지 않는다. 진단이 계약보다 덜 조심하면 안 된다는 이 모듈의
+    불변식을 지키려면 build_section_bundle과 같은 조건에서 같은 방향
+    (UNKNOWN)으로 판정해야 한다.
+    """
+
+    required_attempt = _attempt(
+        attempt_id="a1",
+        source_kind="dart_business_report",
+        slot_ids=("identity:corporate_identity",),
+        state=CollectionState.MISSING,
+    )
+    optional_failed_attempt = _attempt(
+        attempt_id="a2",
+        source_kind="official_wide_broad",
+        slot_ids=("identity:corporate_identity",),
+        state=CollectionState.FAILED,
+        requirement=SourceRequirement.OPTIONAL,
+    )
+
+    readiness, reasons = diagnose_candidate_readiness(
+        section_id="identity",
+        company_type=CompanyType.LISTED,
+        filled_slot_ids=frozenset(),
+        attempts=(required_attempt, optional_failed_attempt),
+    )
+
+    assert readiness is EvidenceReadiness.UNKNOWN
+    assert "optional_path_failed:identity:corporate_identity" in reasons
+    assert "evidence_absent_after_check:identity:corporate_identity" not in reasons
+
+
 def test_optional_시도는_기대경로_확인으로_치지_않는다() -> None:
     optional_attempt = _attempt(
         attempt_id="a1",

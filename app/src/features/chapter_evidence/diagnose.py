@@ -3,28 +3,34 @@
 여기서 만드는 판정은 «진단값»일 뿐이다. 최종 판정은
 ``src.shared.report_evidence.logic.build_section_bundle``이 다시 한다
 (주입 슬롯까지 포함해서). 이 모듈은 그 최종 판정보다 «덜 조심»할 수 없도록,
-먼저 build_section_bundle과 완전히 같은 규칙(접두어 무관)으로 슬롯별 상태를
-계산하고, 그 위에 회사유형별 기대 경로 확인을 «더 조심하는 방향으로만»
-얹는다.
+먼저 build_section_bundle과 완전히 같은 규칙(접두어 무관, optional 경로
+실패 포함)으로 슬롯별 상태를 계산하고, 그 위에 회사유형별 기대 경로 확인을
+«더 조심하는 방향으로만» 얹는다.
 
 한 슬롯당 판정 순서:
 1) 그 슬롯을 대상으로 한 REQUIRED 조회 기록이 하나도 없다 → UNKNOWN
    (``required_path_unobserved``, build_section_bundle과 동일한 문구)
 2) REQUIRED 조회 기록 중 FAILED·TRUNCATED가 하나라도 있다 → UNKNOWN
    (``required_path_{state}``, build_section_bundle과 동일한 문구)
-3) 위 두 경우가 아니면(계약 기준 «정상 확인 후 부재») 회사유형이 기대하는
-   출처 접두어가 그 REQUIRED 조회 기록 중에 실제로 있었는지 한 겹 더 본다.
-   한 번도 관측되지 않았다면 → UNKNOWN(``expected_path_unobserved``) —
-   계약은 INSUFFICIENT 방향이지만 진단은 여기서 더 조심한다.
-   관측됐다면 → INSUFFICIENT(``evidence_absent_after_check``)
+3) 위 두 경우가 아니면 REQUIRED 경로는 전부 정상 확인(OK/MISSING)됐다는
+   뜻이다. 그러나 같은 슬롯을 겨냥한 OPTIONAL 조회 기록 중 FAILED·
+   TRUNCATED가 있으면 여전히 UNKNOWN이다(``optional_path_{state}``,
+   build_section_bundle과 동일한 문구 — P1-B, requirement와 outcome-kind
+   분리). robots 차단·IR 전송 실패처럼 광역 경로가 OPTIONAL로 낮춰져도,
+   그 실패 사실 자체를 진단에서 지우면 안 된다.
+4) 위 세 경우가 모두 아니면(계약 기준 «정상 확인 후 부재») 회사유형이
+   기대하는 출처 접두어가 그 REQUIRED 조회 기록 중에 실제로 있었는지 한
+   겹 더 본다. 한 번도 관측되지 않았다면 → UNKNOWN
+   (``expected_path_unobserved``) — 계약은 INSUFFICIENT 방향이지만 진단은
+   여기서 더 조심한다. 관측됐다면 → INSUFFICIENT(``evidence_absent_after_check``)
 
-회사유형을 아직 모르는(``CompanyType.UNDECIDED``) 경우 3)의 가산 확인을
+회사유형을 아직 모르는(``CompanyType.UNDECIDED``) 경우 4)의 가산 확인을
 아예 적용하지 않는다 — 기대할 접두어 자체가 없기 때문이다. 이 경우 슬롯별
-판정은 1)·2)만으로 build_section_bundle과 완전히 같은 결과를 낸다.
+판정은 1)·2)·3)만으로 build_section_bundle과 완전히 같은 결과를 낸다.
 
 이 순서 덕분에 「진단이 INSUFFICIENT인데 계약이 UNKNOWN」인 경우는 나오지
-않는다 — 계약이 UNKNOWN이라고 볼 조건(1·2)은 진단에서도 그대로 UNKNOWN을
-강제하고, 진단만의 추가 조건(3)은 UNKNOWN 쪽으로만 작동하기 때문이다.
+않는다 — 계약이 UNKNOWN이라고 볼 조건(1·2·3)은 진단에서도 그대로 UNKNOWN을
+강제하고, 진단만의 추가 조건(4)은 UNKNOWN 쪽으로만 작동하기 때문이다.
 """
 
 from __future__ import annotations
@@ -88,7 +94,22 @@ def diagnose_candidate_readiness(
                 reasons.append(f"required_path_{state.value.lower()}:{slot_id}")
             continue
 
-        # 3) — 계약 기준으로는 «정상 확인 후 부재». 회사유형별 기대 경로가
+        # 3) — REQUIRED는 전부 정상 확인됐지만, 같은 슬롯을 겨냥한 OPTIONAL
+        # 경로가 막혔으면(P1-B) «확인을 마쳤다»고 아직 단정하지 않는다.
+        optional_failed_states = {
+            attempt.state
+            for attempt in attempts
+            if attempt.requirement is not SourceRequirement.REQUIRED
+            and slot_id in attempt.slot_ids
+            and attempt.state in FAILURE_COLLECTION_STATES
+        }
+        if optional_failed_states:
+            any_unknown = True
+            for state in sorted(optional_failed_states, key=lambda item: item.value):
+                reasons.append(f"optional_path_{state.value.lower()}:{slot_id}")
+            continue
+
+        # 4) — 계약 기준으로는 «정상 확인 후 부재». 회사유형별 기대 경로가
         # 있다면 그 경로가 실제로 관측됐는지 한 겹 더 확인해 더 조심하는
         # 쪽으로만 튼다(진단이 계약보다 덜 조심하게 두지 않는다).
         if expected_prefix is not None and not any(
