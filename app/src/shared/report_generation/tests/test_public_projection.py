@@ -260,7 +260,7 @@ def _section_by_cell(projection: PublicReportProjection, cell: str) -> PublicSec
 
 
 # ══════════════════════════════════════════════════════════
-# S1 red 시험 6개 (017_public_projection_design_03_시험지도.md §1)
+# 먼저 빨간불부터 확인한 시험 6개
 # ══════════════════════════════════════════════════════════
 
 

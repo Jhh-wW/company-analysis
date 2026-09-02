@@ -484,7 +484,7 @@ def test_두번째_FULL_요청은_FULL_저장본을_재사용한다(
 def test_SHADOW_요청_경로는_바뀌지_않는다(
     monkeypatch: pytest.MonkeyPatch, bucket: str
 ) -> None:
-    """★ 대조군 — SHADOW는 사용자 결과·차감을 바꾸지 않는다(I9).
+    """★ 대조군 — SHADOW는 사용자 결과·차감을 바꾸지 않는다.
 
     SHADOW 요청은 예전처럼 자기 저장본을 그대로 재사용한다.
     """

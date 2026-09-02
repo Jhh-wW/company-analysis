@@ -98,7 +98,7 @@ def test_admin_dashboard_has_no_public_json_and_refresh_is_admin_only(monkeypatc
     assert csrf
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
-    # ★ 2026-09-02 G-S8 기대값 이전 — 메뉴 이름이 여섯 묶음으로 바뀌었다
+    # ★ 기대값 이전 — 메뉴 이름이 여섯 묶음으로 바뀌었다
     #   (「문제·보고서」 → 「보고서」). 화면이 HTML로 그려진다는 계약은 그대로다.
     assert "오늘 상태" in response.text and "보고서" in response.text
     assert fragment.status_code == 200 and fragment.headers["content-type"].startswith("text/html")
@@ -510,8 +510,8 @@ def test_narrow_free_admin_demo_disables_deferred_actions(monkeypatch, tmp_path)
 
     assert dashboard.status_code == 200
     assert links.status_code == 200 and members.status_code == 200
-    # ★ 2026-09-02 G-S8 — 꺼진 기능은 눌리지 않는 회색 버튼이 아니라
-    #   안내 한 줄로만 보인다(설계 05장 §2 원칙 1). 버튼이 없다는 것과
+    # ★ 꺼진 기능은 눌리지 않는 회색 버튼이 아니라
+    #   안내 한 줄로만 보인다. 버튼이 없다는 것과
     #   안내가 있다는 것을 함께 못 박는다.
     assert "이 운영판에서는 초대 링크를 발급할 수 없습니다." in links.text
     assert "이 운영판에서는 친구를 초대할 수 없습니다." in members.text
@@ -545,7 +545,7 @@ def test_admin_real_contract_is_admin_only_and_disables_deferred_actions(
     assert denied.headers["location"] == "/auth/login"
     assert dashboard.status_code == 200
     assert links.status_code == 200 and members.status_code == 200
-    # ★ 2026-09-02 G-S8 — 꺼진 기능은 회색 버튼이 아니라 안내 한 줄이다.
+    # ★ 꺼진 기능은 회색 버튼이 아니라 안내 한 줄이다.
     assert "이 운영판에서는 초대 링크를 발급할 수 없습니다." in links.text
     assert "이 운영판에서는 친구를 초대할 수 없습니다." in members.text
     assert "발급 불가" not in links.text and "초대 불가" not in members.text

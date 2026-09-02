@@ -2,8 +2,8 @@
 
 ``_save_report`` 성공 직후 ~ 최종 출고 확정(``_finalize_report_delivery``) 사이에
 프로세스가 죽으면 ``delivery_intents``는 ``required``인 채, LINK는
-``share_link_run_history``도 ``awaiting_release``인 채 영구히 남는다(F1·F2,
-36장 계획리빌딩 참고감사 money_lock_02). 이 시험은 그 스윕이 실제로 두 표를
+``share_link_run_history``도 ``awaiting_release``인 채 영구히 남는다.
+이 시험은 그 스윕이 실제로 두 표를
 함께 닫고, 정상 진행 중이거나 이미 완료된 행은 절대 건드리지 않는지 본다.
 """
 

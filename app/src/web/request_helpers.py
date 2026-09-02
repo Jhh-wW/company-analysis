@@ -100,7 +100,7 @@ templates.env.globals["composition_tone"] = composition_tone
 
 # ★ 4장 «3개년 변화 요약» — 표 안의 두 값만으로 증감을 만든다.
 #   PDF와 «같은 함수»를 써야 화면과 인쇄물의 숫자가 안 어긋난다.
-#   ⚠️ 이 함수는 «봉인 없는» v1·옛 v2 저장본 갈래 전용이다. 봉인(D-S5)이 있는
+#   ⚠️ 이 함수는 «봉인 없는» v1·옛 v2 저장본 갈래 전용이다. 봉인이 있는
 #      v2 화면은 이 함수를 부르지 않는다 — 띠는 이미 블록 안에 들어 있다.
 templates.env.globals["period_summary_from_table"] = period_summary_from_table
 
@@ -108,8 +108,8 @@ templates.env.globals["period_summary_from_table"] = period_summary_from_table
 def sealed_period_basis_text(item: tuple[str, ...]) -> str:
     """봉인된 3개년 띠 한 칸의 «계산 근거 한 줄»을 만든다.
 
-    봉인 블록은 띠 한 칸을 열 개의 표시 문자열로만 담는다(설계 §02-2
-    ``PublicPeriodSummaryBlock``). 근거 줄(「2023년 5,665 → 2025년 5,940」)은
+    봉인 블록은 띠 한 칸을 열 개의 표시 문자열로만 담는다
+    (``PublicPeriodSummaryBlock``). 근거 줄(「2023년 5,665 → 2025년 5,940」)은
     그 열 개에서 파생되는 값이라 블록에 따로 없다.
 
     ★ 그 «모양»을 화면이 새로 지어내면 PDF와 갈라진다. 그래서 같은 열 개로
@@ -182,7 +182,7 @@ def _ctx(request: Request, **kwargs) -> dict:
         "section_content_blocks": section_content_blocks,
         "source_verification_label": source_verification_label,
         "summary_topic": summary_topic,
-        # 표지 다음 첫 본문 페이지 마스트헤드(D-S4a) 두 줄. PDF·Notion과
+        # 표지 다음 첫 본문 페이지 마스트헤드 두 줄. PDF·Notion과
         # «같은 함수»여야 회사명·생성일 표기가 세 채널에서 안 어긋난다.
         "masthead_lines": masthead_lines,
         # 검증된 본문 아래의 근거 원문 문구 — 세 출력 형태가 core 값을 같이 쓴다(P-117).
@@ -483,7 +483,7 @@ def _track_of(request: Request) -> tuple[share_tracks.Track, str, float | None]:
     is_admin = bool(session is not None and session.is_admin)
 
     is_member = False
-    # ★ 관리자가 이 친구 «한 명»에게만 따로 정해 둔 하루 비용 상한 (결정 D-G4 (a)).
+    # ★ 관리자가 이 친구 «한 명»에게만 따로 정해 둔 하루 비용 상한.
     #   None이면 갈래 기본값(3,000원)을 쓴다. 명단을 못 읽었을 때도 None으로 남아
     #   기본값 쪽으로 떨어진다 — 못 읽은 것이 상한을 «푸는» 근거가 되면 안 된다.
     member_daily_budget_krw: float | None = None
@@ -539,7 +539,7 @@ def require_active_share_link(
                 request,
                 # ★ 「못 읽었다」와 「닫혔다」는 다르다 — 닫혔다고 단정하면
                 #   거짓말이 될 수 있다. 같은 화면을 쓰는 403 갈래와 어휘만
-                #   맞추고(「초대 링크」), 사실은 다르게 말한다 (설계 03장 §5).
+                #   맞추고(「초대 링크」), 사실은 다르게 말한다.
                 scope_error=(
                     "초대 링크 상태를 지금 확인할 수 없습니다. "
                     "잠시 뒤 같은 링크에서 다시 시도해 주세요."
@@ -555,7 +555,7 @@ def require_active_share_link(
                 request,
                 # ★ 이 문구는 인사팀이 읽는다 — 내부 용어(LINK)와 「철회」를
                 #   쓰지 않는다. 받는 사람에게 만료와 철회는 같은 뜻이라
-                #   첫 화면 안내와 **같은 말**을 쓴다 (설계 03장 §3-7).
+                #   첫 화면 안내와 **같은 말**을 쓴다.
                 scope_error=(
                     "이 초대 링크는 사용이 중단되어 더 이상 열리지 않습니다. "
                     "포트폴리오에 적힌 연락처로 알려 주시면 새 링크를 보내 드립니다."
@@ -632,7 +632,7 @@ def _guard_run(
             "evaluation-preview",
         )
 
-    # ★ 예산은 «링크마다» 센다 (P-94, 2026-08-16 사용자 결정).
+    # ★ 예산은 «링크마다» 센다 (P-94, 사용자 결정).
     #   전체 상한은 두지 않는다 — 대신 링크 하나가 하루에 쓸 수 있는 몫을 정했다.
     #   ⚠️ 그러므로 **최악의 하루 지출 = 링크당 상한 × 살아 있는 링크 수**다.
     #     링크를 몇 개 뿌렸는지가 곧 예산이다 (관리 화면에서 확인).
@@ -659,7 +659,7 @@ def _guard_run(
         ) > 0
     ):
         stored_bucket = bucket
-    # ★ LINK만 «수명 전체» 누적 상한을 하나 더 본다 (2026-09-02 사용자 결정 D-G1).
+    # ★ LINK만 «수명 전체» 누적 상한을 하나 더 본다.
     #   하루 상한은 자정마다 되살아난다. 링크는 기본 60일을 사니까 하루 상한만
     #   두면 링크 하나의 최악 노출이 상한 × 60이었다. 누적 상한이 그 곱셈을 끊는다.
     #   MEMBER·ADMIN·PUBLIC은 사람·전체 통장이라 「수명」 개념이 없어 보지 않는다.
@@ -709,8 +709,8 @@ def _guard_run(
         # MEMBER는 위에서 실패까지 포함한 비용 상한을 먼저 확인하고, 여기서는
         # 성공 보고서 건수도 따로 확인한다. 빠른 사전 확인 뒤 Job 등록 직전의
         # SQLite reservation이 성공 건수의 동시 경쟁을 닫는다.
-        # ★ 건수는 «이 친구의 한도»다 — 관리자가 따로 안 정했으면 기존 3건이다
-        #   (결정 D-G4 (a)). 화면 문구도 같은 숫자를 써야 「3건이라더니 왜 막지」가
+        # ★ 건수는 «이 친구의 한도»다 — 관리자가 따로 안 정했으면 기존 3건이다.
+        #   화면 문구도 같은 숫자를 써야 「3건이라더니 왜 막지」가
         #   안 생긴다.
         try:
             with storage_db.connect() as conn:
@@ -757,7 +757,7 @@ def _guard_run(
     if budget_exhausted:
         # ★ 예산이 다 돼도 **이미 만들어 둔 보고서는 계속 열린다** —
         #   그건 파이프라인을 안 거치고 저장소에서 바로 꺼내므로 0원이다.
-        #   막는 것은 «새로 AI를 부르는 일»뿐이다 (2026-08-16 사용자 결정).
+        #   막는 것은 «새로 AI를 부르는 일»뿐이다 (사용자 결정).
         # ★ 모르는 손님(상한 0원)에게는 «다른 말»을 한다 — 「다 썼다」가 아니라
         #   「이 기능은 초대받은 분만」이다. 사실이 다르면 안내도 달라야 한다.
         # ★ 누적 소진도 «다른 말»이다 — 하루 소진은 「내일 다시 열립니다」가 사실이지만
@@ -819,7 +819,7 @@ def _throttled(request: Request, message: str, kind: str) -> HTMLResponse:
 
     ★ 429는 대개 「지금은 안 된다」이지 「고장」이 아니다. 화면이 그걸 분명히 말한다.
 
-    ⚠️ 단, ``THROTTLE_FAULT_KINDS`` 는 진짜 고장이다 (2026-08-28).
+    ⚠️ 단, ``THROTTLE_FAULT_KINDS`` 는 진짜 고장이다.
       그때까지 이 화면은 **모든** 경우에 「고장이 아닙니다」라고 단언했고,
       비용 원장이 깨져 막힌 사용자도 그 말을 봤다 — 사실이 아니고,
       신고할 번호도 없어 관리자에게 알릴 길이 없었다.

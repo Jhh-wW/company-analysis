@@ -83,7 +83,7 @@ VISIBLE_ATTRIBUTES: tuple[str, ...] = (
     "summary",
 )
 
-#: 실측 2026-09-01 기준 화면 템플릿은 38개다(고아 템플릿 5개를 지운 뒤).
+#: 실측 기준 화면 템플릿은 38개다(고아 템플릿 5개를 지운 뒤).
 #: 「일부만 보고 전수」를 막는 하한선 — 실측치에서 3개 여유를 둔 값이다.
 MINIMUM_SCANNED_TEMPLATES = 35
 
@@ -310,7 +310,7 @@ def test_관리자_접근관리_화면에도_내부_사정_표현이_없다(monk
 
     with TestClient(main.app, base_url="https://pilot.example") as web_client:
         _session(web_client, email="admin@example.com", is_admin=True)
-        # ★ 2026-09-02 G-S8 — 한 화면이던 접근 관리가 링크·회원으로 나뉘었다.
+        # ★ 한 화면이던 접근 관리가 링크·회원으로 나뉘었다.
         #   둘 다 검사한다(한쪽만 보면 전수가 아니다).
         links = web_client.get("/admin/links")
         members = web_client.get("/admin/members")
@@ -321,6 +321,6 @@ def test_관리자_접근관리_화면에도_내부_사정_표현이_없다(monk
         for phrase in BANNED_EXPRESSIONS:
             assert phrase not in text, f"{화면이름} 화면에 「{phrase}」가 남아 있다"
     # 관리자가 실제로 할 수 있는 일(철회·해제)은 그대로 알려야 한다.
-    # 「LINK」는 내부 용어라 사람 말로 바꿨다(G-S8 요구 4).
+    # 「LINK」는 내부 용어라 사람 말로 바꿨다(요구 4).
     assert "이 운영판에서는 초대 링크를 발급할 수 없습니다." in visible_text(links.text)
     assert "이 운영판에서는 친구를 초대할 수 없습니다." in visible_text(members.text)

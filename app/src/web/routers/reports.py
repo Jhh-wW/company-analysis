@@ -118,7 +118,7 @@ _DELIVERY_AUTOMATIC_GATE_BLOCKED = "automatic_release_gate_blocked"
 _DELIVERY_PDF_RELEASE_BLOCKED = "pdf_release_contract_blocked"
 #: 사용자 입력·보고서 내용이 아니라 서버 쪽 사정(재시작 스윕·관리자 대사)으로
 #: 닫힌 delivery 의무. 이 코드들은 「관리자에게 문의」가 아니라 재시도 안내를
-#: 낸다 — 36장 계획리빌딩 티켓 A2, F1·F2 참고.
+#: 낸다.
 _DELIVERY_RETRY_AVAILABLE_FAILURE_CODES = frozenset(
     {
         delivery_constants.STALE_DELIVERY_INTENT_FAILURE_CODE,
@@ -216,8 +216,8 @@ def _approved_public_report(report_id: str, fallback: Report) -> Report | None:
         if not payload_json:
             return None
         report = report_store.report_from_json(payload_json)
-        # 공개 봉인은 payload가 아니라 별도 표에 있다(root 결정 C). 다시 붙이지
-        # 않으면 승인 snapshot 화면만 봉인 없이 그려져 채널이 갈라진다(I7).
+        # 공개 봉인은 payload가 아니라 별도 표에 있다. 다시 붙이지
+        # 않으면 승인 snapshot 화면만 봉인 없이 그려져 채널이 갈라진다.
         # 어긋나면 이 함수의 기존 방침대로 None으로 fail-closed 한다 —
         # 원본 보고서가 대신 공개되는 일을 막는 것이 이 함수의 계약이다.
         try:
@@ -248,11 +248,11 @@ def _blocked_report_response(request: Request) -> Response:
 def _notion_unsealed_v2_response(request: Request) -> Response:
     """노션 형식으로 옮길 수 없는 옛 v2 저장본을 «전송 실패로 가장하지» 않는다.
 
-    ★ 2026-09-02 — 이 자리에는 「엔진 v2는 노션을 지원하지 않는다」는 409가
-      있었다. 조각 S6이 v2 변환기를 만들었으므로 그 사유는 사라졌다(결정
-      D-6). 다만 변환기는 생성 시점에 붙은 공개 블록을 읽는데, 그 블록이
-      없던 시절에 저장된 v2 보고서에는 그것이 없다(설계 017 §02-6 — 옛
-      저장본은 백필하지 않는다, 결정 D1).
+    ★ 이 자리에는 「엔진 v2는 노션을 지원하지 않는다」는 409가
+      있었다. 조각 S6이 v2 변환기를 만들었으므로 그 사유는 사라졌다.
+      다만 변환기는 생성 시점에 붙은 공개 블록을 읽는데, 그 블록이
+      없던 시절에 저장된 v2 보고서에는 그것이 없다(옛
+      저장본은 백필하지 않는다).
     ★ 그 보고서를 그냥 통과시키면 옛 v1 변환기가 «출고 차단»으로 튕기고,
       작업자가 그 예외를 「전송 결과를 확인하지 못했습니다」로 바꿔 기록한다.
       한 번도 나간 적 없는 전송이 「결과 모름」으로 남는다 — 그래서 여기서
@@ -876,8 +876,8 @@ def _delivery_unavailable_response(request: Request) -> Response:
 def _delivery_retry_available_response(request: Request) -> Response:
     """서버 쪽 사정으로 멈춘 새 보고서를 관리자 문의로 막다른 화면으로 만들지 않는다.
 
-    재시작 스윕·관리자 대사가 delivery 의무를 닫은 경우(36장 계획리빌딩 티켓
-    A2, F1·F2)는 사용자 입력이나 보고서 내용의 문제가 아니라, 저장은 됐지만
+    재시작 스윕·관리자 대사가 delivery 의무를 닫은 경우는
+    사용자 입력이나 보고서 내용의 문제가 아니라, 저장은 됐지만
     최종 출고를 확정하지 못한 채 서버가 멈춘 것이다. «재시작»·«대사»·기계
     실패 코드 같은 운영 용어를 화면에 그대로 노출하지 않고, 이용 횟수가
     차감되지 않았다는 사실과 같은 회사를 다시 조사할 수 있다는 안내만 낸다.
@@ -1077,7 +1077,7 @@ def _pdf_review_pending_response(
     request_id = admin_audit.request_id(request)
     reasons = _gate_reasons(error)
     # ★ 「자동검사가 떨어진 것」과 「만들다가 실패한 것」은 다른 사건이다.
-    #   2026-08-28 우리은행 건에서 후자였는데 화면이 전자라고 말했다 —
+    #   우리은행 건에서 후자였는데 화면이 전자라고 말했다 —
     #   자동검사는 돌지도 않았다. 사용자도 관리자도 엉뚱한 곳을 보게 된다.
     # ★ 렌더 실패«만» 따로 말한다. 나머지 차단은 종전 문구를 그대로 둔다 —
     #   맨 예외를 싸잡아 「만들다 실패」라고 하면 그것 또한 틀린 말이 된다.
@@ -1718,7 +1718,7 @@ def _link_view_event_unavailable_response(request: Request) -> Response:
 
 @dataclass(frozen=True)
 class _LinkResultChrome:
-    """초대 링크 손님이 결과 화면 «표지 위»에서 보는 길 하나 (티켓 G-S7).
+    """초대 링크 손님이 결과 화면 «표지 위»에서 보는 길 하나.
 
     ★ 왜 라우터에서 만드는가 — 화면 틀 안에서 「결속 보고서인가」를 다시
       따지면 같은 판단이 두 곳에 생긴다. 판단은 여기서 한 번만 하고 틀은
@@ -1757,7 +1757,7 @@ def _link_freshness_note(report: Report) -> str:
     ★ 신선도 기한은 새로 만들지 않고 첫 화면 랜딩과 **같은 기준**
       (`job_runtime._link_expired`)을 쓴다 — 두 화면이 다른 날짜에 「오래됐다」고
       말하면 손님이 어느 쪽을 믿어야 할지 알 수 없다.
-    ★ 기한이 지나도 자동으로 다시 조사하지 않는다 (사람 결정 D-G11).
+    ★ 기한이 지나도 자동으로 다시 조사하지 않는다.
     """
     if job_runtime._link_expired(report):
         return RESULT_STALE_REPORT_NOTICE
@@ -1768,7 +1768,7 @@ def _link_freshness_note(report: Report) -> str:
 
 
 def _link_result_chrome(report: Report, *, bound_report: bool) -> _LinkResultChrome:
-    """결속 보고서인지에 따라 «다른 길»과 «다른 안내»를 준다 (사람 결정 D-G10).
+    """결속 보고서인지에 따라 «다른 길»과 «다른 안내»를 준다.
 
     Args:
         report: 지금 그리는 보고서.
@@ -2113,11 +2113,11 @@ async def send_to_notion(
     if delivery_expired:
         return job_runtime._expired_screen(request)
 
-    # ★ 2026-09-02 — 여기 있던 「엔진 v2는 노션을 지원하지 않는다」 409를
+    # ★ 여기 있던 「엔진 v2는 노션을 지원하지 않는다」 409를
     #   걷어냈다. 사유가 사라졌기 때문이다: v2 보고서는 이제 생성 시점에
     #   공개 봉인 블록(``report.public_projection``)을 싣고, 노션 변환기가 그
-    #   블록만 읽어 화면·PDF와 같은 글자를 낸다(설계 017 §07 조각 S6, 결정
-    #   D-6 — 409 해제는 S6 완료와 동시). 아래 승인·멱등성·어댑터 경계는
+    #   블록만 읽어 화면·PDF와 같은 글자를 낸다.
+    #   아래 승인·멱등성·어댑터 경계는
     #   v1과 «같은 것»을 그대로 탄다.
     #   ★ 다만 그 블록이 없던 시절의 v2 저장본은 여전히 옮길 수 없다. 조용히
     #   통과시키면 「전송 결과 모름」으로 기록되므로 사실대로 먼저 닫는다.

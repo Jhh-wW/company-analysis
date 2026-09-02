@@ -10,7 +10,7 @@
   지점을 가리지 않고 비운다
   (`docs/출력물 기준/90_공통_규칙/런타임_출고_계약.md` §6 출고 게이트).
 
-★ 음성 대조: demo/v1(비-FULL) 보고서는 이 정리 대상이 아니다.
+★ 반대 경우 시험: demo/v1(비-FULL) 보고서는 이 정리 대상이 아니다.
   「FULL 밖 demo/non-FULL 동작은 불변이다」를 지키기 위해 비-FULL LINK/ADMIN은
   기존처럼 메모리 결과가 남는 것을 그대로 확인한다. 정리 조건이 audience만으로
   넓어지면(FULL 여부를 무시하면) 이 시험이 깨진다.
@@ -173,7 +173,7 @@ def test_FULL_출고확정예외는_audience와_무관하게_메모리결과와_
 
 @pytest.mark.parametrize("audience", (ReportAudience.LINK, ReportAudience.ADMIN))
 def test_비FULL_출고확정예외는_기존대로_메모리결과를_남긴다(monkeypatch, audience):
-    """음성 대조 — FULL이 아니면 §4-3 「demo/non-FULL 동작 무변」을 지킨다.
+    """반대 경우 시험 — FULL이 아니면 「demo/non-FULL 동작 무변」을 지킨다.
 
     이 시험은 정리 조건이 ``release_mode``가 아니라 audience만으로 넓어지면
     깨진다. 그래야 「FULL에만 적용」이 실제로 스코프대로 좁혀졌다는 증거가 된다.

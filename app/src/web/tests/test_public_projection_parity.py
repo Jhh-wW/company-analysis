@@ -1,15 +1,15 @@
-"""웹 v2 결과 화면이 «봉인 블록만» 소비하는지 지킨다 (티켓 D-S5 · 설계 §7 S5).
+"""웹 v2 결과 화면이 «봉인 블록만» 소비하는지 지킨다.
 
 ★ 이 파일이 지키는 것
   ① v2 갈래(``report.public_projection`` 있음)는 화면을 그리는 동안 표시 파생
      순수 함수(``table_visualization``·``cover_metrics``·``section_content_blocks``·
      ``source_verification_label``·``period_summary_from_table``)를 **한 번도**
      부르지 않는다. 다섯 함수를 전부 예외로 바꿔도 페이지가 정상으로 나온다.
-  ② 부록에 「사실 검증」 열이 PDF와 «같은 라벨»로 나온다 (설계 §01-6 G4 해소).
+  ② 부록에 「사실 검증」 열이 PDF와 «같은 라벨»로 나온다.
   ③ 화면이 그린 글자는 저장된 봉인의 ``display_sha256``이 덮는 그 블록에서
      나왔다 — 저장층이 들고 있는 값과 대조한다.
   ④ 감사 장부(``ledger``)만 바꾼 저장본은 화면 HTML이 «바이트 동일»하다.
-     장부 원자료(``subject_scope`` 등)는 화면에 한 글자도 나오지 않는다(F-S2p2).
+     장부 원자료(``subject_scope`` 등)는 화면에 한 글자도 나오지 않는다.
   ⑤ v1·legacy 갈래의 HTML은 base 커밋과 바이트가 같다 — 봉인 도입이 옛 화면을
      한 글자도 바꾸지 않았음을 golden 파일로 못 박는다.
 
@@ -81,7 +81,7 @@ _원문_표용 = "회사는 스스로를 글로벌 콘텐츠 기업으로 규정
 _확인_문장 = "회사는 음악·영상 사업을 영위한다."
 _해석_문장 = "이는 업계 평균을 웃도는 성과로 해석된다."
 
-#: 장부에만 있고 화면에는 «절대» 나오면 안 되는 감사용 원자료(F-S2p2).
+#: 장부에만 있고 화면에는 «절대» 나오면 안 되는 감사용 원자료.
 _장부_전용_범위 = "내부 감사용 범위 — 공개 화면에 나오면 안 된다"
 _장부_전용_관계 = "내부 감사용 관계 — 공개 화면에 나오면 안 된다"
 
@@ -368,7 +368,7 @@ def _forbid_display_globals(monkeypatch: pytest.MonkeyPatch) -> None:
 
     ★ ``period_summary_from_table``만 ``templates.env.globals``에 import 시점에
       «값으로» 박혀 있다. 모듈 속성만 바꾸면 틀은 옛 함수를 계속 부르므로
-      두 자리를 모두 바꿔야 실제 음성 대조가 된다.
+      두 자리를 모두 바꿔야 실제 반대 경우 시험이 된다.
     """
 
     def boom(name: str):
@@ -581,7 +581,7 @@ def test_FactRecord만_바꾼_저장본은_웹_HTML_본문이_바이트_동일�
 
 
 def test_웹_v2는_ledger를_렌더하지_않는다(monkeypatch: pytest.MonkeyPatch) -> None:
-    """감사 장부 원자료가 화면에 한 글자도 새지 않는다 (F-S2p2)."""
+    """감사 장부 원자료가 화면에 한 글자도 새지 않는다."""
 
     report = _sealed_v2_report()
     body = _render(report, monkeypatch, report_id="s5-no-ledger")
@@ -699,7 +699,7 @@ def _render_as_notion_ready_admin(
 def test_봉인_있는_v2_결과화면은_노션_버튼을_보인다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """노션 채널이 봉인 블록을 소비하게 됐으므로(D-S6) 더는 숨기지 않는다."""
+    """노션 채널이 봉인 블록을 소비하게 됐으므로 더는 숨기지 않는다."""
 
     report = _sealed_v2_report()
     assert report.public_projection is not None

@@ -813,15 +813,15 @@ def load_public_delivery(public_id: str) -> PublicDelivery | None:
             raise DeliveryAdapterError(
                 "delivery 본문 snapshot을 읽지 못했습니다"
             ) from exc
-        # 공개 봉인은 payload가 아니라 별도 표에 있다(root 결정 C). 여기서 다시
-        # 붙이지 않으면 «봉인이 있는데도» 화면은 봉인 없음으로 그린다(I7).
+        # 공개 봉인은 payload가 아니라 별도 표에 있다. 여기서 다시
+        # 붙이지 않으면 «봉인이 있는데도» 화면은 봉인 없음으로 그린다.
         # 붙이면서 digest 재계산과 생성 증거 대조가 함께 돌고, 어긋나면
         # 보고서를 내주지 않는다(I3 fail-closed) — 이 경계에서 그리지 않는 것이
         # 위조된 봉인으로 그리는 것보다 안전하다.
         # ★ 봉인은 `report_id`로 저장된다. 여기 넘기는 `delivery.public_id`가
         #   그 값과 같다는 것은 발급 경로의 관례다 — `routers/reports.py`가
         #   `persist_reused_delivery`·`persist_approved_delivery`를 부를 때
-        #   언제나 `public_id=report_id`로 넣는다(2026-09-02 기준 1464·1546행).
+        #   언제나 `public_id=report_id`로 넣는다(현재 1464·1546행).
         try:
             report = report_store.attach_public_projection(
                 conn, delivery.public_id, report
@@ -830,11 +830,11 @@ def load_public_delivery(public_id: str) -> PublicDelivery | None:
             raise DeliveryAdapterError(
                 "delivery 본문의 공개 봉인이 저장본과 다릅니다"
             ) from exc
-        # ★ 조용한 「봉인 없음」을 금지한다(S3f). 위 관례가 깨져 공개 ID가
+        # ★ 조용한 「봉인 없음」을 금지한다. 위 관례가 깨져 공개 ID가
         #   report_id와 다르면 조회가 빈손으로 돌아오고, 그 결과는 「이 보고서에
         #   봉인이 없다」와 구별되지 않는다. 그런데 본문의 생성 증거는 「내 봉인의
         #   지문은 이것」이라고 말하고 있다. 말과 실제가 다르면 그리지 않고
-        #   닫는다(I3) — 화면이 봉인 없이 그리면 채널이 갈라진 채 나간다.
+        #   닫는다 — 화면이 봉인 없이 그리면 채널이 갈라진 채 나간다.
         evidence = report.generation_evidence
         if evidence is not None and report.public_projection is None:
             raise DeliveryAdapterError(

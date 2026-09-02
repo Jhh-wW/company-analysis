@@ -385,7 +385,7 @@ def _validate_supplement_binding(
             raise ValueError("승인된 보충 장의 내용 지문이 바뀌지 않았습니다")
         if section_id not in approved and changed:
             raise ValueError("승인하지 않은 장이 보충 중 바뀌었습니다")
-    # ★ 위 비교만으로는 부족하다(S3c, 2026-09-02). `section_sha256s`는
+    # ★ 위 비교만으로는 부족하다(S3c). `section_sha256s`는
     #   pre-render 공개 content 봉인(지문 A)에서 오고 지문 A는 «보이는 것»만
     #   덮는다. 그래서 보충 회차가 비대상 장의 글자는 그대로 두고 FactRecord나
     #   등급 기여만 바꾸면 여기를 그냥 통과했다. `section_block_sha256s`는

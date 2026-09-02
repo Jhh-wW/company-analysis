@@ -8,7 +8,7 @@
      사내망이 외부 CDN(jsdelivr 등)을 막으면 디자인이 통째로 깨진다.
      1MB를 안고 가는 편이 «열었더니 글꼴이 깨져 있는» 것보다 낫다.
    ⚠️ 라이선스 — Freesentation·Prata 모두 **SIL Open Font License**로
-     상업적 사용·재배포가 허용된다 (2026-08-16 확인). 유료 폰트를 쓰지 않는다.
+     상업적 사용·재배포가 허용된다 (라이선스 확인). 유료 폰트를 쓰지 않는다.
    ══════════════════════════════════════════════════════ */
 @font-face {
   font-family: "Freesentation";
@@ -489,7 +489,7 @@ input:focus, textarea:focus, select:focus {
   color: var(--ink-3);
   font-family: var(--mono);
 }
-/* 근거 번호 (2026-08-16 사용자 지적: 「링크도 아니라서 어차피 못 읽어」).
+/* 근거 번호 (사용자 지적: 「링크도 아니라서 어차피 못 읽어」).
    ★ 「조각 10·신규사업전망」이라는 **내부 이름을 감추고 번호만** 남긴다 —
      그 이름은 우리 안에서 쓰는 말이지 읽는 사람이 알 말이 아니다.
    ★ **누르면 아래 출처표로 간다.** 거기엔 보도일·매체·공시일이 적혀 있어
@@ -823,7 +823,7 @@ td.center { text-align: center; }
 .cell-chip.suspect { background: var(--part-bg); color: var(--part); }
 
 /* ══════════════════════════════════════════════════════════
-   홈페이지 — 2026-08-17 기업분석 UI 기준
+   홈페이지 — 기업분석 UI 기준
    ----------------------------------------------------------
    이 범위 밖의 결과·확인·관리자 화면은 기존 스타일을 그대로 쓴다.
    기준: 무채색, 24px 컨테이너, 18px 상호작용 요소, 오류/삭제만 빨강.
@@ -1412,7 +1412,7 @@ td.center { text-align: center; }
   border-bottom: 1px solid var(--line);
 }
 .result-page .report-title-block { width: 100%; }
-/* 표지 다음 첫 본문 페이지 마스트헤드(D-S4a) — 표지(.report-cover, 가운데
+/* 표지 다음 첫 본문 페이지 마스트헤드 — 표지(.report-cover, 가운데
    큰 제목·실적 띠·핵심 요약)와 느낌이 겹치지 않도록 좌측 정렬의 얇은
    두 줄 밴드로만 둔다. PDF(_masthead_flowables)와 같은 자리·같은 순서다. */
 .result-page .report-masthead {

@@ -162,8 +162,8 @@ def _attach_origin_public_projection(
 ) -> Any:
     """재사용하는 본문에 «원래 발급 Delivery»의 공개 봉인을 다시 붙인다.
 
-    봉인은 보고서 payload가 아니라 별도 표에 report_id로 저장된다(root 결정 C,
-    2026-09-02). 재사용 경로가 손에 쥔 것은 content snapshot 문자열뿐이라
+    봉인은 보고서 payload가 아니라 별도 표에 report_id로 저장한다.
+    재사용 경로가 손에 쥔 것은 content snapshot 문자열뿐이라
     report_id가 없다 — 그 artifact를 실제로 발급받은 Delivery의 공개 ID가
     그 자리다. 같은 통장·같은 내용 원본인 Delivery만 본다(다른 통장의 PDF를
     우회로 가져오지 못하게 하는 ``deliveries_for_artifact``의 경계와 동일).

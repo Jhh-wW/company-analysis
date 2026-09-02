@@ -63,7 +63,7 @@ def test_첫화면에만_새_디자인_범위가_붙는다(monkeypatch):
     # 「실제 조사」 배지는 화면에서 뺐다(정상 상태라 알릴 필요가 없다) — 남는 것은
     # 옛 카피가 다시 새지 않는지뿐이다. 배지 자체 부재는 test_internal_status_copy_removed.py가 지킨다.
     assert "실제 공시·뉴스를 조사합니다" not in base_template
-    # ★ 2026-09-02 G-S8 — `admin_home.html`은 어느 라우트도 렌더하지 않는 고아
+    # ★ `admin_home.html`은 어느 라우트도 렌더하지 않는 고아
     #   템플릿이라 지웠다. 이 시험이 읽던 문구는 «아무도 못 보는 글자»였다.
     #   실제로 관리자가 보는 첫 화면은 `/admin`이고, 그 화면의 계약은 아래
     #   `admin.status_code`·`<body class="">` 단정과 test_admin_frame.py가 지킨다.

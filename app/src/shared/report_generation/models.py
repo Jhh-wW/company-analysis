@@ -34,9 +34,9 @@ from src.shared.report_quality.integrity import (
 )
 
 
-#: v3(2026-09-02) — ``public_projection_sha256``이 늘었다. 필드가 늘면 wire의
+#: v3 — ``public_projection_sha256``이 늘었다. 필드가 늘면 wire의
 #: key 집합이 바뀌어 v2 저장본은 어차피 못 읽으므로, 버전을 올려 「왜 못 읽는지」
-#: 를 말해 준다(설계 017 §05).
+#: 를 말해 준다.
 GENERATION_PRODUCER_EVIDENCE_VERSION: Final[str] = (
     "generation-producer-evidence-v3"
 )
@@ -311,7 +311,7 @@ class GenerationProducerEvidence:
     글자뿐 아니라 그 장이 기여한 감사 장부(FactRecord·등급 기여)까지 덮는다.
     ``public_content_sha256``은 렌더 이전에 정한 기대값이라 renderer가 위조할
     수 없다는 성질을 갖고, 이 값은 최종 표시본과 장부를 한 덩어리로 못 박는다.
-    둘은 서로를 대신하지 못하므로 나란히 싣는다(설계 017 §05).
+    둘은 서로를 대신하지 못하므로 나란히 싣는다.
     """
 
     company_id: str

@@ -151,7 +151,7 @@ def _render_admin_and_stopped_pages() -> tuple[str, dict[str, str]]:
         session = auth_logic.create_session("admin@example.com", True)
         client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
 
-        # ★ 2026-09-02 G-S8 — 한 화면이던 초대·링크 관리가 링크·회원·비용 셋으로
+        # ★ 한 화면이던 초대·링크 관리가 링크·회원·비용 셋으로
         #   나뉘었다. 「비어 있어도 제목과 정직한 빈 상태가 뜬다」는 계약은 그대로다.
         empty_links = client.get("/admin/links")
         empty_members = client.get("/admin/members")

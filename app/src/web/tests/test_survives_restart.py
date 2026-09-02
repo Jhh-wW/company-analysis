@@ -154,7 +154,7 @@ def test_재시작_뒤에도_보고서_화면이_열린다(finished_job):
     # 본문 항목이 실제로 그려져야 한다 (껍데기만 뜨면 안 된다)
     # ★ 제목 «글자»도, 제목 «마크업»도 박지 않는다 — 상수를 보고, 태그는 벗겨서 본다.
     #   박아 두면 문구를 다듬거나 꾸밈 태그를 넣을 때마다 «기능은 멀쩡한데» 깨진다
-    #   (2026-08-16 하루에 두 번 깨졌다 — 보고서체로 바꿀 때, 번호를 span으로 뺄 때).
+    #   (하루에 두 번 깨졌다 — 보고서체로 바꿀 때, 번호를 span으로 뺄 때).
     heads = [
         re.sub(r"<[^>]+>", "", h).strip()
         for h in re.findall(r"<h2>(.*?)</h2>", response.text, re.S)
@@ -417,7 +417,7 @@ def test_공유링크와_보고서_안내가_동시에_있어도_둘다_표시�
         response = client.get("/?share_status=missing&report_status=unavailable")
 
     assert response.status_code == 200
-    # 기대값 이전(G-S6c): 안내문에서 내부 용어 LINK를 걷어냈다 (설계 03장 §3-7).
+    # 기대값 이전: 안내문에서 내부 용어 LINK를 걷어냈다.
     # 이 시험의 대상은 「두 안내가 동시에 나온다」이지 문구 자체가 아니다.
     assert "이 초대 링크를 찾을 수 없어" in response.text
     assert "요청한 보고서를 열 수 없어" in response.text

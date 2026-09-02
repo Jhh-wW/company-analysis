@@ -105,7 +105,7 @@ REPORTER_TRACK_LABELS_KO: Final[dict[str, str]] = {
     share_tracks.Track.PUBLIC.value: "비회원",
 }
 
-#: 갈래 라벨 도입(2026-08-25) 이전에 저장된 옛 reporter_key는 접두가 없는
+#: 갈래 라벨 도입 이전에 저장된 옛 reporter_key는 접두가 없는
 #: raw SHA-256 지문뿐이다 — 갈래를 알 방법이 없으므로 이 라벨로 고정한다.
 REPORTER_TRACK_UNKNOWN_LABEL: Final[str] = "알 수 없음"
 

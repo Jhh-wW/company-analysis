@@ -154,8 +154,8 @@ def issue_owner_release_authority(
         report_payload_sha256=content.payload_sha256,
         producer_evidence_sha256=producer_sha256,
         assessment_sha256=evidence.assessment_sha256,
-        # ★ 출고 권위가 가리키는 「공개본」은 공개 봉인 projection이다
-        #   (root 결정 D4-a, 2026-09-02 · 설계 017 §05). 필드 이름은 그대로 두고
+        # ★ 출고 권위가 가리키는 「공개본」은 공개 봉인 projection이다.
+        #   필드 이름은 그대로 두고
         #   «의미»만 정한다 — 여기 실리던 지문 A(`public_content_sha256`)는 렌더
         #   이전 기대값이라 감사 장부 바꿔치기를 못 본다. 지문 A는 생산 증거
         #   안에 그대로 남아 renderer 위조 차단 몫을 계속 한다.

@@ -195,7 +195,7 @@ def _evidence(
         assessment=final.assessment,
         public_manifest_sha256="d" * 64,
         public_content_sha256="e" * 64,
-        # ★ 공개 봉인 projection 지문(v3, 2026-09-02). 지문 A(public_content)와
+        # ★ 공개 봉인 projection 지문(v3). 지문 A(public_content)와
         #   «다른 값»으로 둔다 — 같은 값으로 두면 둘을 뒤바꿔 배선해도 시험이
         #   못 잡는다.
         public_projection_sha256="f" * 64,

@@ -124,9 +124,9 @@ _PERSISTENCE_WARNING = (
     "지금 PDF도 내려받아 보관해 주세요."
 )
 
-# ── 조사 도중 초대 링크가 닫혔을 때 (G-S11) ─────────────────────────────
+# ── 조사 도중 초대 링크가 닫혔을 때 ─────────────────────────────
 # 관리자 이력·감사행에 남기는 사유 코드. 감사행 CHECK가 ASCII만 받으므로
-# (F-GS5a) 여기에 한국어를 넣으면 그 transaction 전체가 실패한다.
+# 여기에 한국어를 넣으면 그 transaction 전체가 실패한다.
 LINK_STOP_REASON_REVOKED = "link_revoked"
 LINK_STOP_REASON_EXPIRED = "link_expired"
 LINK_STOP_REASON_UNKNOWN = "link_state_unknown"
@@ -191,7 +191,7 @@ class JobExecutionDeadlineExceeded(RuntimeError):
 
 
 class LinkAccessClosedDuringRun(RuntimeError):
-    """조사 도중 초대 링크가 닫혀 다음 유료 단계에 들어가지 않는다 (G-S11).
+    """조사 도중 초대 링크가 닫혀 다음 유료 단계에 들어가지 않는다.
 
     ★ 사용자에게 보일 짧은 안내와 관리자 이력에 남길 ASCII 사유 코드를 «함께»
       들고 다닌다. 둘을 따로 두면 화면에 코드가 새거나 감사행에 한국어가 들어간다.
@@ -228,7 +228,7 @@ class Job:
     member_email: str = ""
     #: LINK 실행 이력을 찾는 안전한 SHA-256 식별자. 원문 열쇠는 영속화하지 않는다.
     share_link_hash: str = ""
-    #: 초대 링크가 닫혀 멈춘 실행의 ASCII 사유 코드 (G-S11). 관리자 이력 전용.
+    #: 초대 링크가 닫혀 멈춘 실행의 ASCII 사유 코드. 관리자 이력 전용.
     link_stop_reason: str = ""
     #: 같은 멈춤을 사용자에게 알리는 짧은 안내. 내부 용어를 쓰지 않는다.
     link_stop_notice: str = ""
@@ -704,7 +704,7 @@ def _job_is_paid(job: Job) -> bool:
 
 
 def _link_run_stop_reason(job: Job) -> str:
-    """이 조사의 초대 링크가 «지금도» 열려 있는지 저장소에서 다시 읽는다 (G-S11).
+    """이 조사의 초대 링크가 «지금도» 열려 있는지 저장소에서 다시 읽는다.
 
     Returns:
         멈춰야 하면 ASCII 사유 코드, 계속해도 되면 빈 문자열.
@@ -758,7 +758,7 @@ def _link_guarded_callbacks(
     job: Job,
     callbacks: generation_coordination.GenerationCallbacks,
 ) -> generation_coordination.GenerationCallbacks:
-    """지연 유료 단계 진입마다 초대 링크 상태를 «먼저» 다시 본다 (G-S11).
+    """지연 유료 단계 진입마다 초대 링크 상태를 «먼저» 다시 본다.
 
     ★ 한도 원자 갱신(`PaidPhase.begin_phase`)보다 앞에 둔다. 닫힌 링크에 예약부터
       잡아 놓고 되돌리는 대신 아예 들어가지 않아야 차감이 남지 않는다.
@@ -827,7 +827,7 @@ def _run_pipeline_worker(job: Job) -> RunResult:
     if job.paid_phase is not None:
         # 이 갈래는 예약을 route에서 이미 잡았다. 그래도 provider를 부르기
         # 직전에 초대 링크를 다시 본다 — 예약과 호출 사이가 이 pipeline의
-        # 유일한 「다음 유료 단계」이기 때문이다 (G-S11).
+        # 유일한 「다음 유료 단계」이기 때문이다.
         _require_open_share_link(job)
         return _call_paid_provider(
             job.paid_phase,
@@ -845,7 +845,7 @@ def _run_pipeline_worker(job: Job) -> RunResult:
     if not bool(
         getattr(runtime._PIPELINE, "supports_deferred_paid_phase", False)
     ):
-        # 한도 원자 갱신(G-S3)이 일어나는 예약보다 «앞»에서 링크를 본다.
+        # 한도 원자 갱신이 일어나는 예약보다 «앞»에서 링크를 본다.
         _require_open_share_link(job)
         ticket = _begin_paid_phase(
             run_id=job.job_id,
@@ -989,7 +989,7 @@ async def _run_job(job: Job) -> None:
             )
         raise
     except LinkAccessClosedDuringRun as closed:
-        # 초대 링크가 조사 도중 닫혔다 (G-S11). 기술 실패가 아니므로 일반 오류
+        # 초대 링크가 조사 도중 닫혔다. 기술 실패가 아니므로 일반 오류
         # 문구로 뭉개지 않고, 사용자에게는 짧은 안내를 그대로 보여 준다.
         # 관리자 이력에는 아래 `_link_stop_reason_of`가 ASCII 사유 코드를 남긴다.
         job.link_stop_reason = closed.reason_code
@@ -1050,7 +1050,7 @@ async def _run_job(job: Job) -> None:
                     outcome=Outcome.FAILED,
                     report=None,
                     # 초대 링크가 닫혀 멈춘 것은 기술 실패가 아니다. 그 안내는
-                    # 이미 정직하고 짧으므로 일반 오류 문구로 덮지 않는다 (G-S11).
+                    # 이미 정직하고 짧으므로 일반 오류 문구로 덮지 않는다.
                     message=job.link_stop_notice or PIPELINE_FAILED_MESSAGE,
                     charged=False,
                     # 실제 게이트가 본 닫힌 사유는 지우지 않는다.
@@ -1326,7 +1326,7 @@ def _link_stop_step(outcome: Outcome) -> str:
 
 
 def _link_stop_reason_of(job: Job, outcome: Outcome) -> str:
-    """링크가 닫혀 멈춘 실행은 파이프라인 종료값 대신 그 사유를 남긴다 (G-S11).
+    """링크가 닫혀 멈춘 실행은 파이프라인 종료값 대신 그 사유를 남긴다.
 
     ★ 이 구분이 없으면 관리자 이력에 「생성 중 기술 오류」로 찍혀, 관리자가
       자기가 방금 닫은 링크 때문이라는 걸 알 수 없다.
@@ -1738,8 +1738,8 @@ def _load_saved_report(report_id: str) -> Optional[Report]:
                 )
                 if not approved_payload:
                     return None
-                # 공개 봉인은 payload가 아니라 별도 표에 있다(root 결정 C).
-                # 다시 붙이지 않으면 재시작 뒤 조회에서만 봉인이 사라진다(I7).
+                # 공개 봉인은 payload가 아니라 별도 표에 있다.
+                # 다시 붙이지 않으면 재시작 뒤 조회에서만 봉인이 사라진다.
                 # 어긋나면 아래 except가 ReportStoreUnavailable로 닫는다
                 # (I3 fail-closed — 이 함수의 기존 오류 처리 그대로다).
                 return report_store.attach_public_projection(
@@ -2373,7 +2373,7 @@ async def _start_with_reserved_slot(
                         raise RuntimeError(
                             "MEMBER 실행의 불변 계정 subject를 확인할 수 없습니다"
                         )
-                    # ★ 한도는 «이 친구의 값»이다 (결정 D-G4 (a)). 이 요청이 읽은
+                    # ★ 한도는 «이 친구의 값»이다. 이 요청이 읽은
                     #   값을 막는 판단과 화면 문구 둘 다에 넘겨, 「막는 숫자」와
                     #   「말하는 숫자」가 어긋나지 않게 한다.
                     # ⚠️ 이 읽기는 예약 transaction «직전»이지 그 «안»이 아니다 —

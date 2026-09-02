@@ -94,7 +94,7 @@ def _신고_폼값(*, report_id: str, company: str, **overrides) -> dict:
 
 
 def test_LINK_손님도_결과화면에서_오류신고_버튼이_보인다(client: TestClient):
-    """★ 기대값 이전(G-S6·D-G10) — `/k/`는 이제 결과가 아니라 첫 화면으로 보낸다.
+    """★ 기대값 이전 — `/k/`는 이제 결과가 아니라 첫 화면으로 보낸다.
 
     이 시험의 대상은 «결과 화면»의 오류 신고 버튼이므로, 첫 화면의 버튼을
     누른 것과 같게 보고서 주소를 직접 연다. 랜딩은 `test_link_landing.py`가 본다.

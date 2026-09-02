@@ -3,7 +3,7 @@
 Host 고정·CSRF Origin 고정 같은 보안판정은 옛 관리자 계약과 똑같이 켜져 있다는
 것을 함께 못 박는다.
 
-정본: G-S1 배포 계약 신설 티켓. ``routers/admin.py``·``routers/analysis.py``는
+정본: 배포 계약 신설 티켓. ``routers/admin.py``·``routers/analysis.py``는
 이 작업의 소유권 밖이라 **읽기만** 했다 — 아래 시험은 그 두 파일을 한 글자도
 바꾸지 않고도 새 계약에서 다른 결과가 나온다는 것으로 그 사실을 증명한다.
 """
@@ -100,7 +100,7 @@ def test_포트폴리오_계약은_LINK_발급을_admin_py_수정없이_연다(
     )
 
     assert response.status_code == 200
-    # ★ 2026-09-02 기대값 이전 — 발급 응답이 텍스트 파일 첨부에서 주소·QR 화면
+    # ★ 기대값 이전 — 발급 응답이 텍스트 파일 첨부에서 주소·QR 화면
     #   1장으로 바뀌었다. 이 시험이 지키는 것은 「계약만 켜면 발급이 열린다」이지
     #   전달 형태가 아니므로, 형태 단정을 새 화면 기준으로 옮긴다.
     assert response.headers["content-type"].startswith("text/html")
@@ -123,7 +123,7 @@ def test_포트폴리오_계약은_친구_초대를_admin_py_수정없이_연다
     )
 
     assert response.status_code == 303
-    # ★ 2026-09-02 G-S8 기대값 이전 — 초대 뒤 도착지가 회원 화면으로 나뉘었다.
+    # ★ 기대값 이전 — 초대 뒤 도착지가 회원 화면으로 나뉘었다.
     assert response.headers["location"] == "/admin/members"
     with storage_db.connect() as conn:
         member = share_allow.load(conn, "friend@example.com")

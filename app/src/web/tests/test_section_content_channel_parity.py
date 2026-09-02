@@ -160,7 +160,7 @@ def test_요약_출처검증_9장_복수출처가_세_채널에_함께_남는다
 def test_마스트헤드_문자열은_웹_PDF_Notion이_같다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """표지 다음 첫 본문 페이지 마스트헤드(D-S4a) 두 줄이 세 채널에서 같은 문자열이다.
+    """표지 다음 첫 본문 페이지 마스트헤드 두 줄이 세 채널에서 같은 문자열이다.
 
     ``as_of_date``를 ``generated_at``과 다른 날로 벌려 둔다. 마스트헤드
     둘째 줄은 표지 메타(``_cover_metadata``)의 「내용 생성」과 같은

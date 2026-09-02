@@ -1,4 +1,4 @@
-"""관리자 화면이 회원별 한도를 «그 친구의 값»으로 보여준다 (G-S5, D-G4 (a)).
+"""관리자 화면이 회원별 한도를 «그 친구의 값»으로 보여준다.
 
 ★ 이 시험이 막는 것 — 저장은 회원별로 되는데 화면만 「/ 3건」으로 박혀 있어
   관리자가 「7건으로 올렸는데 왜 3건이라고 쓰여 있지」를 겪는 것. 화면이 거짓말을
@@ -132,7 +132,7 @@ def test_오늘_합계는_회원별_값의_합이다(admin: TestClient):
 
 
 def test_한도를_아무도_안_바꿨으면_합계는_인원_곱하기_기본값이다(admin: TestClient):
-    """★ 음성 대조 — 회원별 값을 넣었다고 기존 숫자가 흔들리면 안 된다."""
+    """★ 반대 경우 시험 — 회원별 값을 넣었다고 기존 숫자가 흔들리면 안 된다."""
     _초대한다(_친구, 이름="김민지")
     _초대한다(_다른친구, 이름="이서준")
 
@@ -188,7 +188,7 @@ def test_접근_화면_합계는_회원별_한도의_합이다():
         runtime._PIPELINE = DemoPipeline()
         session = auth_logic.create_session("admin@example.com", True)
         client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
-        # ★ 2026-09-02 G-S8 기대값 이전 — 합계 문장은 `/admin/costs`로 옮겨갔다.
+        # ★ 기대값 이전 — 합계 문장은 `/admin/costs`로 옮겨갔다.
         화면 = client.get("/admin/costs")
 
     assert 화면.status_code == 200
@@ -201,7 +201,7 @@ def test_접근_화면_합계는_회원별_한도의_합이다():
 
 
 def test_아무도_한도를_안_바꿨으면_접근_화면_문구가_그대로다():
-    """★ 음성 대조 — 기존 문장을 지우지 않고 조건부로만 만든다.
+    """★ 반대 경우 시험 — 기존 문장을 지우지 않고 조건부로만 만든다.
 
     `test_admin_access.py`의 기존 회귀시험이 「친구 N명 × 3,000원」과
     「성공 보고서 3건」을 지켜 왔고, 그 파일은 이 작업의 소유 밖이다.
@@ -212,7 +212,7 @@ def test_아무도_한도를_안_바꿨으면_접근_화면_문구가_그대로�
         runtime._PIPELINE = DemoPipeline()
         session = auth_logic.create_session("admin@example.com", True)
         client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
-        # ★ 2026-09-02 G-S8 기대값 이전 — 합계 문장은 `/admin/costs`, 초대 안내는
+        # ★ 기대값 이전 — 합계 문장은 `/admin/costs`, 초대 안내는
         #   `/admin/members`로 나뉘었다. 문장 자체는 글자 그대로 옮겼다.
         화면 = client.get("/admin/costs")
         초대화면 = client.get("/admin/members")

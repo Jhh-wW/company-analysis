@@ -143,7 +143,7 @@ def test_기존계약에서는_고정공개출처모드를_켜지않는다() -> 
 
 
 # ══════════════════════════════════════════════════════════
-# 포트폴리오 링크 계약(render-portfolio-link-v1, G-S1)
+# 포트폴리오 링크 계약(render-portfolio-link-v1)
 # ══════════════════════════════════════════════════════════
 
 PORTFOLIO_CONTRACT = deployment_mode.RENDER_PORTFOLIO_LINK_CONTRACT
