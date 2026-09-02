@@ -255,10 +255,21 @@ def test_FULL_출고는_같은거래안에서_ReleaseAuthority를_발급하고_�
     assert authority.artifact_id == public_delivery.artifact.artifact_id
     assert authority.build_identity_sha256 == frozen.epoch_digest
     assert report.generation_evidence is not None
+    # ★ 뒤집힌 단정(2026-09-02, root 결정 D4-a) — 예전에는 pre-render 공개 content
+    #   봉인(지문 A)을 실었다. 출고 권위가 가리켜야 하는 것은 「사람이 실제로 받은
+    #   공개본」이고, 그건 화면 글자와 감사 장부를 함께 덮는 공개 봉인 projection의
+    #   지문이다. 지문 A는 렌더 이전 기대값이라 장부 바꿔치기를 못 본다.
     assert (
         authority.public_content_sha256
-        == report.generation_evidence.public_content_sha256
+        == report.generation_evidence.public_projection_sha256
     )
+    # 두 지문이 «다른 값»임을 함께 못 박는다 — 같아지면 이 시험이 아무것도
+    # 가르지 못하게 된다(둘 중 무엇을 실어도 통과한다).
+    assert (
+        report.generation_evidence.public_projection_sha256
+        != report.generation_evidence.public_content_sha256
+    )
+    assert report.public_projection is not None
 
 
 def test_회사ID_불일치는_출고전체를_거절하고_아무것도_남기지_않는다(
