@@ -15,7 +15,10 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
-from src.features.report_standard.period_summary import period_summary_from_table
+from src.features.report_standard.period_summary import (
+    PeriodSummaryItem,
+    period_summary_from_table,
+)
 from src.features.report_standard.visualization import composition_tone
 from src.features.report_access import logic as report_access_logic
 
@@ -97,7 +100,27 @@ templates.env.globals["composition_tone"] = composition_tone
 
 # ★ 4장 «3개년 변화 요약» — 표 안의 두 값만으로 증감을 만든다.
 #   PDF와 «같은 함수»를 써야 화면과 인쇄물의 숫자가 안 어긋난다.
+#   ⚠️ 이 함수는 «봉인 없는» v1·옛 v2 저장본 갈래 전용이다. 봉인(D-S5)이 있는
+#      v2 화면은 이 함수를 부르지 않는다 — 띠는 이미 블록 안에 들어 있다.
 templates.env.globals["period_summary_from_table"] = period_summary_from_table
+
+
+def sealed_period_basis_text(item: tuple[str, ...]) -> str:
+    """봉인된 3개년 띠 한 칸의 «계산 근거 한 줄»을 만든다.
+
+    봉인 블록은 띠 한 칸을 열 개의 표시 문자열로만 담는다(설계 §02-2
+    ``PublicPeriodSummaryBlock``). 근거 줄(「2023년 5,665 → 2025년 5,940」)은
+    그 열 개에서 파생되는 값이라 블록에 따로 없다.
+
+    ★ 그 «모양»을 화면이 새로 지어내면 PDF와 갈라진다. 그래서 같은 열 개로
+      ``PeriodSummaryItem``을 되살려 이미 있는 ``basis_text`` 한 곳에서만
+      만든다 — 웹에 새 문구 규칙을 두지 않는다.
+    """
+
+    return PeriodSummaryItem(*item).basis_text
+
+
+templates.env.globals["sealed_period_basis_text"] = sealed_period_basis_text
 
 
 def company_analysis_input(*, company: str, region: str) -> UserInput:

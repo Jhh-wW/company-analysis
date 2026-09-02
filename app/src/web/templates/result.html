@@ -159,6 +159,141 @@
   {% endif %}
 {% endmacro %}
 
+{# ── 봉인 블록 전용 표·도식 (티켓 D-S5 · 설계 017 §7 S5) ──
+   위 report_table_block과 «모양»은 같지만 값의 출처가 다르다. 저기는 화면이
+   table_visualization()을 «불러서» 도식을 만들고, 여기는 봉인이 이미 만들어
+   담아 둔 값을 «배치만» 한다. 렌더러는 문자열을 만들지 않는다(설계 §02-1).
+   ★ 그래서 두 매크로를 합치지 않는다 — 합치면 화면이 어느 쪽 값을 그렸는지
+     시험이 갈라낼 수 없다.
+   ★ 도식은 표를 «가리킨다»(visual.table_index). 표 하나에 도식은 최대 하나이고,
+     없으면 그냥 표로 낸다 — 빈 자리를 남기지 않는다(불변식 I5).
+   ⚠️ 아래 새 태그들은 «여백 제어 붙임표»로 자기 줄바꿈을 스스로 삼킨다 —
+     그래야 봉인이 없는 v1·legacy 화면의 HTML이 한 바이트도 안 바뀐다. -#}
+{% macro sealed_table_block(sec, table_index, table_id) %}
+  {%- set t = sec.tables[table_index] -%}
+  {%- set visual = sec.visuals | selectattr('table_index', 'equalto', table_index) | list | first -%}
+  {% if visual and visual.kind == 'composition' %}
+  <figure class="report-visual composition-chart" aria-labelledby="{{ table_id }}-caption">
+  <figcaption class="cap" id="{{ table_id }}-caption">
+  {{ t.caption }}{{ ref(t.cite) }}
+  </figcaption>
+  <div class="composition-track" role="img" aria-label="{{ t.caption }}">
+  {% for label, shown, ratio_text, below in visual.items %}
+  <span class="composition-segment tone-{{ composition_tone(loop.index0, visual.items|length) }}"
+  style="width: {{ ratio_text }}%"
+  title="{{ label }} {{ shown }}"></span>
+  {% endfor %}
+  </div>
+  <ul class="chart-legend" aria-label="구성 항목">
+  {% for label, shown, ratio_text, below in visual.items %}
+  <li><span class="legend-swatch tone-{{ composition_tone(loop.index0, visual.items|length) }}" aria-hidden="true"></span><span>{{ label }}</span><strong>{{ shown }}</strong></li>
+  {% endfor %}
+  </ul>
+  {% if visual.reading %}<p class="chart-reading">{{ visual.reading }}</p>{% endif %}
+  <p class="chart-note">자료{{ ref(t.cite) }} · {{ visual.note }}</p>
+  </figure>
+  {% elif visual and visual.kind == 'trend' %}
+  <figure class="report-visual trend-chart" aria-labelledby="{{ table_id }}-caption">
+  <figcaption class="cap" id="{{ table_id }}-caption">
+  {{ t.caption }}{{ ref(t.cite) }}
+  </figcaption>
+  {#- 3개년 «변화 요약» 띠도 봉인이 이미 골라 둔 값이다. 화면이 표에서 다시
+      뽑지 않는다 — 두 곳에서 뽑으면 PDF와 갈라진다. -#}
+  {%- set band = sec.period_summary -%}
+  {% if band and band.items %}
+  <ul class="period-summary" aria-label="{{ band.title }}">
+  {% for band_item in band.items %}
+  {%- set ps_label, ps_base_period, ps_base_value, ps_latest_period, ps_latest_value, ps_unit, ps_change, ps_change_kind, ps_direction, ps_note = band_item -%}
+  <li class="dir-{{ ps_direction }}">
+  <span class="ps-label">{{ ps_label }}</span>
+  <strong class="ps-change">{{ ps_change }}</strong>
+  <span class="ps-basis">{{ sealed_period_basis_text(band_item) }}</span>
+  {% if ps_note %}<span class="ps-note">{{ ps_note }}</span>{% endif %}
+  </li>
+  {% endfor %}
+  </ul>
+  {% endif %}
+  <div class="trend-panels">
+  {% for series_label, series_risk, points in visual.series %}
+  <section class="trend-panel{% if series_risk %} risk{% endif %}" aria-label="{{ series_label }}">
+  <h3>{{ series_label }}{% if visual.unit %} <span>({{ visual.unit }})</span>{% endif %}</h3>
+  <div class="trend-points">
+  {% for point in points %}
+  <div class="trend-point{% if point.below %} below{% endif %}">
+  <span class="trend-value">{{ point.display }}</span>
+  <span class="trend-bar-wrap" aria-hidden="true"><span class="trend-bar" style="height: {{ point.ratio_text }}%"></span></span>
+  <span class="trend-label">{{ point.label }}</span>
+  </div>
+  {% endfor %}
+  </div>
+  </section>
+  {% endfor %}
+  </div>
+  {% if visual.reading %}<p class="chart-reading">{{ visual.reading }}</p>{% endif %}
+  <p class="chart-note">자료{{ ref(t.cite) }} · {{ visual.note }}</p>
+  </figure>
+  {% elif visual and visual.kind == 'card' %}
+  <figure class="report-visual card-chart" aria-labelledby="{{ table_id }}-caption">
+  <figcaption class="cap" id="{{ table_id }}-caption">
+  {{ t.caption }}{{ ref(t.cite) }}
+  </figcaption>
+  <div class="card-rows">
+  {% for card_title, card in visual.cards %}
+  <article class="section-content-card">
+  {% if card_title %}<h3>{{ card_title }}</h3>{% endif %}
+  <dl>
+  {% for field_label, field_value in card['fields'] %}
+  <div><dt>{{ field_label }}</dt><dd>{{ field_value }}</dd></div>
+  {% endfor %}
+  </dl>
+  </article>
+  {% endfor %}
+  </div>
+  </figure>
+  {% elif visual and visual.kind == 'flow' %}
+  <figure class="report-visual flow-chart" aria-labelledby="{{ table_id }}-caption">
+  <figcaption class="cap" id="{{ table_id }}-caption">
+  {{ t.caption }}{{ ref(t.cite) }}
+  </figcaption>
+  <div class="flow-rows">
+  {% for flow in visual.flows %}
+  <ol class="flow-row">
+  {% for value in flow %}
+  <li><small>{{ t.headers[loop.index0] }}</small><span>{{ value }}</span></li>
+  {% endfor %}
+  </ol>
+  {% endfor %}
+  </div>
+  {% if visual.reading %}<p class="chart-reading">{{ visual.reading }}</p>{% endif %}
+  <p class="chart-note">자료{{ ref(t.cite) }}</p>
+  </figure>
+  {% else %}
+  <div class="numtable">
+  <div class="cap" id="{{ table_id }}-caption">
+  {{ t.caption }}{{ ref(t.cite) }}
+  </div>
+  <div class="scroll" tabindex="0" role="region" aria-labelledby="{{ table_id }}-caption">
+  <table class="{{ 'nums' if t.numeric else 'texts' }}" aria-labelledby="{{ table_id }}-caption">
+  <thead><tr>{% for h in t.headers %}<th scope="col">{{ h }}</th>{% endfor %}</tr></thead>
+  <tbody>
+  {% for row in t.rows %}
+  <tr>
+  {% for cell in row %}
+  <td{% if t.numeric and not loop.first %} class="num"{% endif %}>{{ cell }}</td>
+  {% endfor %}
+  </tr>
+  {% endfor %}
+  </tbody>
+  </table>
+  </div>
+  </div>
+  {% endif %}
+{% endmacro -%}
+{# ★ 공개 봉인 블록(D-S5). 있으면 화면은 «오직» 이 블록만 읽는다 — 문단·번호·
+   도식·띠·요약·부록 글자를 화면이 다시 만들지 않는다. 없으면(v1·legacy·봉인
+   이전 v2 저장본) 아래 예전 경로가 그대로 돈다. 「봉인 없음」이라는 내부 사정은
+   화면에 내지 않는다 — 그건 로드층이 닫을 문제다(S3 fail-closed). -#}
+{% set projection = report.public_projection -%}
 {% if legacy_readonly %}
 <section class="warn-line" role="status" aria-labelledby="legacy-readonly-title">
   <span aria-hidden="true">ℹ️</span>
@@ -313,10 +448,71 @@
    ★ 없애지는 않는다 — 「지어내지 않았다」를 사람이 직접 확인할 수 있어야 하고,
      정본 W5(출처 각주)가 요구하는 항목이다. #}
 {% if report.schema_version == engine_v2_schema_version %}
-{# ── 엔진 v2(composer) 본문 — prose_lines에 문장 끝 [n] 인용과 "— 해석" 표지가
-   이미 문자열로 찍혀 있다(render.py sentence_display_text). v1의 fact_records
-   기반 구조 카드·「사실 검증」 열은 v2에 없는 개념이라 쓰지 않는다
-   (실행계획 04장 3-4절 3항 — 미완 목록 ③). #}
+{% if projection %}
+{# ── 엔진 v2 «봉인» 본문 (티켓 D-S5) ──
+   화면은 여기서 아무것도 계산하지 않는다. 문단·문단 번호·도식·읽는 법·3개년
+   띠는 전부 봉인 블록(display) 안의 값이고, 화면은 그것을 «배치만» 한다.
+   ★ 장 순서는 봉인이 정본 아홉 장 순서로 이미 고정했다(불변식 I1) — 화면이
+     다시 정렬하지 않는다.
+   ★ 본문 속 [n]은 «작은 위첨자 링크»로 바꿔 인쇄한다. 번호를 새로 매기지
+     않고 모양만 바꾼다 — 부록과 1:1로 맞춰진 값이다.
+   ★ 문단 번호(1. 2. 3.)도 봉인 값이다. 예전에는 화면과 PDF가 각자 세어
+     「3-2 문단 보세요」가 어긋난 적이 있다(export_pdf ::_paragraph_number_markup). #}
+<div class="report">
+  {% for block in projection.sections %}
+    {% set sec = block.display %}
+    <section class="report-section" data-report-cell="{{ sec.cell }}">
+      <h2><span class="no">{{ sec.display_number or loop.index }}</span><span class="txt">{{ sec.title }}</span>{% if sec.tag %}<span class="section-tag">{{ sec.tag }}</span>{% endif %}</h2>
+      {% for ordinal, paragraph in sec.paragraphs %}
+      <p class="prose"><span class="pno" aria-hidden="true">{{ ordinal }}</span><span class="prose-text">{{ inline_refs(paragraph) }}</span></p>
+      {% endfor %}
+      {% for t in sec.tables %}
+        {{ sealed_table_block(sec, loop.index0, 'report-table-v2-' ~ loop.index0 ~ '-' ~ loop.index) }}
+      {% endfor %}
+    </section>
+  {% endfor %}
+</div>
+
+{# ── 부록 — 「사실 검증」 열을 PDF·Notion과 같은 라벨·같은 값으로 낸다(G4 해소).
+   행 글자는 전부 봉인 값이라 화면이 자료명·기준일·사용 장을 다시 조립하지 않는다.
+   같은 번호를 두 번 내지 않는 일도 봉인이 이미 끝냈다. #}
+{% if projection.citations %}
+  <section class="report-support" aria-labelledby="report-citations-title">
+    <h2 id="report-citations-title"><span class="no">부록</span><span class="txt">출처와 검증 상태</span></h2>
+    <p class="muted section-note">
+      본문 문장 끝의 번호가 아래 원문을 가리킵니다. 표시된 문장은 모두 인용 원문 대조와 수치 검증을 거쳤습니다.
+    </p>
+    <div class="scroll report-scroll" tabindex="0" role="region" aria-labelledby="report-citations-title">
+      <table class="texts" aria-labelledby="report-citations-title">
+        <thead><tr><th scope="col" style="width:56px">#</th><th scope="col">자료</th><th scope="col">기준일·자료 상태</th><th scope="col">사실 검증</th><th scope="col">원문 위치</th><th scope="col">본문 사용 장</th></tr></thead>
+        <tbody>
+          {% for c in projection.citations %}
+          <tr id="src{{ c.number }}">
+            <td>[{{ c.number }}]</td>
+            <td>
+              {%- if c.url and (c.url.startswith('https://') or c.url.startswith('http://')) -%}
+                <a class="source-link" href="{{ c.url }}" target="_blank" rel="noopener noreferrer">{{ c.label_display }}</a>
+              {%- else -%}
+                {{ c.label_display }}
+              {%- endif -%}
+            </td>
+            <td>{{ c.status_display }}</td>
+            <td>{{ c.verification_label }}</td>
+            <td>{{ c.location }}</td>
+            <td>{{ c.used_in_display }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endif %}
+{% else %}
+{# ── 엔진 v2(composer) 본문 — 봉인이 «없는» 저장본용 옛 경로.
+   prose_lines에 문장 끝 [n] 인용과 "— 해석" 표지가 이미 문자열로 찍혀 있다
+   (render.py sentence_display_text). v1의 fact_records 기반 구조 카드는 v2에
+   없는 개념이라 쓰지 않는다. 「사실 검증」 열은 봉인 갈래에서만 낸다 — 봉인
+   없이는 세 채널이 같은 라벨을 낸다고 말할 수 없기 때문이다. #}
 <div class="report">
   {% set v2_sections = report.sections|sort(attribute='display_number') %}
   {% for s in v2_sections %}
@@ -411,6 +607,7 @@
       </table>
     </div>
   </section>
+{% endif %}
 {% endif %}
 {% else %}
 <div class="report">
