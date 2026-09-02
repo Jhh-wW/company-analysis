@@ -34,7 +34,8 @@ from src.features.composer.tests.test_section_public_manifest import (
     _run_recovering_full,
 )
 from src.features.pipeline.port import Grade
-from src.features.storage.reports import report_from_dict, report_to_dict
+from src.features.storage import db, reports
+from src.features.storage.reports import report_to_dict
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_evidence.constants import ReleaseMode
 from src.features.report_standard.public_projection import build_public_projection
@@ -237,16 +238,28 @@ def test_projection_header는_최종_완성_등급을_싣는다() -> None:
 # ══════════════════════════════════════════════════════════
 
 
-def test_FULL_보고서의_projection은_저장_왕복에서_살아남는다() -> None:
+def test_FULL_완주_보고서는_저장_왕복_뒤에도_같은_봉인을_갖는다(tmp_path) -> None:
+    """진짜 SQLite에 넣었다 빼도 봉인이 그대로여야 한다(I11).
+
+    ★ 봉인은 보고서 payload가 아니라 별도 표에 저장된다(root 결정 C,
+      2026-09-02). 그래서 dict 왕복이 아니라 «실제 저장·로드»를 태운다.
+    """
+
     output, _writer, _reviewer, _diagram = _run_full()
+    path = tmp_path / "reports.sqlite3"
 
-    payload = report_to_dict(output.report)
-    restored = report_from_dict(json.loads(json.dumps(payload, ensure_ascii=False)))
+    with db.connect(path) as conn:
+        reports.save(conn, "r1", "00123456", "분석", output.report)
+    with db.connect(path) as conn:
+        loaded = reports.load(conn, "r1")
 
-    assert restored.public_projection == output.report.public_projection
-    assert build_report_digest(restored.public_projection) == build_report_digest(
+    assert loaded is not None
+    assert loaded.public_projection == output.report.public_projection
+    assert build_report_digest(loaded.public_projection) == build_report_digest(
         output.report.public_projection
     )
+    # payload에는 봉인이 한 글자도 없다 — 그 계약은 storage 시험이 못 박는다.
+    assert "public_projection" not in report_to_dict(output.report)
 
 
 # ══════════════════════════════════════════════════════════
@@ -308,35 +321,16 @@ def test_보충_회복_보고서의_증거도_최종_projection을_가리킨다(
     )
 
 
-def test_저장된_projection이_증거_digest와_다르면_로드가_거부된다() -> None:
-    """저장본을 열 때 「증거가 가리키는 그 공개본인가」를 다시 확인한다.
-
-    ★ 위조는 «저장층 자체 검사를 통과하는» 모양으로 만든다 — 다른 실행의
-      projection을 digest까지 통째로 갈아 끼운다. 그러면 projection 자체는
-      앞뒤가 맞아 저장층 재계산 대조를 통과하고, 오직 생산 증거와의 대조만이
-      바꿔치기를 잡을 수 있다.
-    """
-
-    victim, _w1, _r1, _d1 = _run_full()
-    other, _w2, _r2, _d2 = _run_full(flow=True)
-
-    payload = report_to_dict(victim.report)
-    forged = json.loads(json.dumps(payload, ensure_ascii=False))
-    forged["public_projection"] = report_to_dict(other.report)["public_projection"]
-    assert forged["public_projection"] != payload["public_projection"]
-
-    with pytest.raises(ValueError):
-        report_from_dict(forged)
-
-
-def test_FULL_저장본에_projection이_없으면_로드가_거부된다() -> None:
-    output, _writer, _reviewer, _diagram = _run_full()
-
-    forged = json.loads(json.dumps(report_to_dict(output.report), ensure_ascii=False))
-    del forged["public_projection"]
-
-    with pytest.raises(ValueError):
-        report_from_dict(forged)
+# ★ 아래 두 시험은 storage 층으로 옮겼다(root 결정 C, 2026-09-02) — 봉인이
+#   payload가 아니라 별도 표에 저장되므로 위조도 그 표에서 해야 실제 경로를 탄다.
+#     · 「다른 실행 봉인 바꿔치기」 →
+#       storage/tests/test_public_projection_storage.py::
+#       test_저장된_projection이_생성_증거의_지문과_다르면_로드가_거부된다
+#     · 「FULL인데 봉인이 없음」 → 같은 파일::
+#       test_FULL인데_projection_행이_없으면_봉인_없음_상태로_읽힌다
+#       ★ 이건 «뒤집혔다». 예전에는 거부였는데, 봉인 없음을 예외로 만들면 옛
+#         저장본이 화면에서 통째로 안 열린다. 이제는 정의된 상태로 두고 화면이
+#         판단한다.
 
 
 # ══════════════════════════════════════════════════════════

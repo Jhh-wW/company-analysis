@@ -36,7 +36,10 @@ from src.features.pipeline.port import (
 )
 from src.features.provenance.sources import Source, SourceKind
 from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
-from src.features.storage.constants import TABLE_REPORTS
+from src.features.storage.constants import (
+    TABLE_REPORT_PUBLIC_PROJECTIONS,
+    TABLE_REPORTS,
+)
 from src.shared.report_quality.constants import STRICT_QUALITY_CONTRACT_VERSION
 from src.shared.report_quality.generation import (
     assert_observation_matches_assessment,
@@ -58,8 +61,6 @@ from src.shared.report_evidence.constants import ReleaseMode
 from src.shared.report_generation.public_projection import (
     PublicReportProjection,
     build_report_digest,
-    public_report_digest_from_dict,
-    public_report_digest_to_dict,
     public_report_projection_from_dict,
     public_report_projection_to_dict,
 )
@@ -396,46 +397,16 @@ def _fact_from_dict(data: dict[str, Any]) -> FactRecord:
     return FactRecord(**{name: data[name] for name in _FACT_FIELDS if name in data})
 
 
-#: 저장 payload 안 ``public_projection`` 값의 칸 두 개. projection 본문과 그
-#: digest를 «나란히» 싣고, 로드할 때 digest를 다시 계산해 대조한다. 칸이
-#: 늘거나 줄면 스키마가 조용히 표류한 것이므로 닫는다.
-_PUBLIC_PROJECTION_WIRE_KEYS: frozenset[str] = frozenset({"projection", "digest"})
+def public_projection_payload(projection: PublicReportProjection) -> dict[str, Any]:
+    """공개 봉인 projection을 저장 열에 넣을 JSON 객체로 만든다.
 
-
-def _public_projection_to_dict(projection: PublicReportProjection) -> dict[str, Any]:
-    """공개 봉인 projection과 그 digest를 저장 wire 모양으로 만든다."""
-
-    return {
-        "projection": public_report_projection_to_dict(projection),
-        "digest": public_report_digest_to_dict(build_report_digest(projection)),
-    }
-
-
-def _public_projection_from_dict(data: object) -> PublicReportProjection:
-    """저장된 projection을 되살리고 digest를 «재계산해» 대조한다.
-
-    저장된 digest를 그대로 믿지 않는 이유는 ``canonical.py``의 봉인 원칙과
-    같다 — 자기 자신만 검사하는 checksum은 본문과 digest를 «함께» 바꾼
-    위조를 못 막는다. 여기서 다시 계산해 대조하면 저장 뒤에 손댄 흔적이
-    로드에서 닫힌다(I3: 봉인이 깨진 보고서는 공개하지 않는다).
-
-    Raises:
-        ValueError: wire 모양이 계약과 다르거나 digest가 재계산 값과 다를 때.
-            (``PublicProjectionError``도 ``ValueError``의 하위형이라 저장층
-            호출자는 한 갈래로 잡을 수 있다.)
+    ★ 이 값은 보고서 payload에 «들어가지 않는다»(root 결정 C, 2026-09-02).
+      별도 표 ``report_public_projections``의 ``projection_json`` 열에만 들어간다.
+      두 문서를 나눠야 각자 저장 자원 상한 아래에 머무르고, 이미 승인된 PDF
+      출고 기록이 입력으로 쓰는 보고서 payload 바이트가 한 글자도 안 바뀐다.
     """
 
-    if type(data) is not dict or set(data) != _PUBLIC_PROJECTION_WIRE_KEYS:
-        raise ValueError("저장된 공개 projection의 key 또는 객체 형식이 계약과 다릅니다")
-    projection_raw = data["projection"]
-    digest_raw = data["digest"]
-    if type(projection_raw) is not dict or type(digest_raw) is not dict:
-        raise ValueError("저장된 공개 projection 또는 digest가 객체가 아닙니다")
-    projection = public_report_projection_from_dict(projection_raw)
-    stored_digest = public_report_digest_from_dict(digest_raw)
-    if stored_digest != build_report_digest(projection):
-        raise ValueError("저장된 공개 projection digest가 재계산 값과 다릅니다")
-    return projection
+    return public_report_projection_to_dict(projection)
 
 
 def report_to_dict(report: Report) -> dict[str, Any]:
@@ -499,10 +470,11 @@ def report_to_dict(report: Report) -> dict[str, Any]:
         payload["quality_observation"] = generation_quality_observation_to_dict(
             report.quality_observation
         )
-    if report.public_projection is not None:
-        payload["public_projection"] = _public_projection_to_dict(
-            report.public_projection
-        )
+    # ★ ``public_projection``은 «일부러» 여기 넣지 않는다(root 결정 C,
+    #   2026-09-02). 봉인은 별도 표에 저장한다 — payload 바이트·노드 수를
+    #   이 티켓 이전과 똑같이 두려는 것이고, 그 동일성은
+    #   ``test_report_payload는_projection을_싣지_않아_바이트가_기존과_같다``가
+    #   지킨다.
     return payload
 
 
@@ -550,9 +522,6 @@ def report_from_dict(data: dict[str, Any]) -> Report:
     generation_evidence = None
     generation_metrics = None
     quality_observation = None
-    public_projection = None
-    if data.get("public_projection") is not None:
-        public_projection = _public_projection_from_dict(data["public_projection"])
     if data.get("generation_metrics") is not None:
         if type(data["generation_metrics"]) is not dict:
             raise ValueError("저장된 생성 지표 형식이 깨졌습니다")
@@ -578,17 +547,6 @@ def report_from_dict(data: dict[str, Any]) -> Report:
             quality_observation,
             generation_evidence.assessment,
         )
-        # 저장된 공개 봉인이 «생산 증거가 가리키는 바로 그 공개본»인지 확인한다.
-        # 위 `_public_projection_from_dict`는 projection 자체의 앞뒤만 본다 —
-        # 다른 실행의 projection을 digest까지 통째로 갈아 끼우면 그 검사는
-        # 통과하고, 오직 이 대조만이 바꿔치기를 잡는다(설계 017 §05).
-        if public_projection is None:
-            raise ValueError("FULL 보고서의 공개 봉인 projection이 누락됐습니다")
-        if (
-            build_report_digest(public_projection).content_sha256
-            != generation_evidence.public_projection_sha256
-        ):
-            raise ValueError("저장된 공개 projection이 생성 증거의 지문과 다릅니다")
         for section in data.get("sections", []):
             for table in section.get("tables", []):
                 rows = table.get("rows", [])
@@ -652,7 +610,6 @@ def report_from_dict(data: dict[str, Any]) -> Report:
         generation_evidence=generation_evidence,
         generation_metrics=generation_metrics,
         quality_observation=quality_observation,
-        public_projection=public_projection,
         # 옛 저장본(이 키가 없는 v1·초기 v2)은 빈 사전으로 읽는다 — 그러면
         # 부록이 예전처럼 화면 글자에서 등급을 되짚는 폴백으로 떨어진다.
         source_grades={
@@ -736,6 +693,127 @@ def _normalize_legacy_report(report: Report) -> Report:
 # ══════════════════════════════════════════════════════════
 
 
+# ══════════════════════════════════════════════════════════
+# 공개 봉인 projection — 보고서 payload와 «다른 표»
+# ══════════════════════════════════════════════════════════
+
+
+def save_public_projection(
+    conn: sqlite3.Connection,
+    report_id: str,
+    projection: Optional[PublicReportProjection],
+    *,
+    created_at: str,
+) -> None:
+    """보고서 하나의 공개 봉인을 전용 표에 쓴다(없으면 지운다).
+
+    ★ 반드시 보고서 본문과 «같은 거래»에서 불러야 한다(I11). 이 함수는 commit을
+      하지 않는다 — 호출부(``save``·``insert_new``)가 이미 열려 있는 거래에
+      얹으므로, 이 쓰기가 실패하면 본문 행도 함께 되돌아간다.
+
+    ★ 봉인이 ``None``이면 옛 행을 «지운다». 남겨 두면 새로 덮어쓴 본문에 옛
+      봉인이 붙어, 화면이 지금 본문과 다른 글자를 그리게 된다.
+    """
+
+    if projection is None:
+        conn.execute(
+            f"DELETE FROM {TABLE_REPORT_PUBLIC_PROJECTIONS} WHERE report_id = ?",
+            (report_id,),
+        )
+        return
+    digest = build_report_digest(projection)
+    payload = json.dumps(
+        public_projection_payload(projection), ensure_ascii=False
+    )
+    validate_persisted_json_text(payload)
+    conn.execute(
+        f"""
+        INSERT INTO {TABLE_REPORT_PUBLIC_PROJECTIONS}
+            (report_id, projection_json, content_sha256, display_sha256, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(report_id) DO UPDATE SET
+            projection_json=excluded.projection_json,
+            content_sha256=excluded.content_sha256,
+            display_sha256=excluded.display_sha256,
+            created_at=excluded.created_at
+        """,
+        (
+            report_id,
+            payload,
+            digest.content_sha256,
+            digest.display_sha256,
+            created_at,
+        ),
+    )
+
+
+def load_public_projection(
+    conn: sqlite3.Connection, report_id: str
+) -> Optional[PublicReportProjection]:
+    """저장된 봉인을 되살리고 digest를 «재계산해» 대조한다.
+
+    저장된 digest를 그대로 믿지 않는 이유는 ``canonical.py``의 봉인 원칙과
+    같다 — 자기 자신만 검사하는 checksum은 본문과 digest를 «함께» 바꾼 위조를
+    못 막는다. 여기서 다시 계산해 열 값과 맞대면 저장 뒤에 손댄 흔적이
+    로드에서 닫힌다(I3).
+
+    Returns:
+        봉인이 있으면 그 값, 없으면 ``None``. ``None``은 오류가 아니라
+        「이 보고서에는 봉인이 없다」는 **정의된 상태**다 — 이 표가 생기기 전
+        저장본과 SHADOW 보고서가 그렇다. 화면이 그 사실을 보고 판단한다.
+
+    Raises:
+        ValueError: 저장된 봉인이 구조·digest 대조를 통과하지 못할 때.
+    """
+
+    try:
+        row = conn.execute(
+            f"""SELECT projection_json, content_sha256, display_sha256
+            FROM {TABLE_REPORT_PUBLIC_PROJECTIONS} WHERE report_id = ?""",
+            (report_id,),
+        ).fetchone()
+    except sqlite3.OperationalError as error:
+        # 이 표가 생기기 전 만들어진 DB를 읽기 전용으로 여는 경우다. 읽기
+        # 전용 연결은 schema bootstrap을 하지 않으므로 표가 없을 수 있다.
+        # 그건 「봉인 없음」이지 오류가 아니다.
+        if "no such table" in str(error).lower():
+            return None
+        raise
+    if row is None:
+        return None
+    projection = public_report_projection_from_dict(
+        json.loads(str(row["projection_json"]))
+    )
+    digest = build_report_digest(projection)
+    if str(row["content_sha256"]) != digest.content_sha256:
+        raise ValueError("저장된 공개 봉인의 content 지문이 재계산 값과 다릅니다")
+    if str(row["display_sha256"]) != digest.display_sha256:
+        raise ValueError("저장된 공개 봉인의 display 지문이 재계산 값과 다릅니다")
+    return projection
+
+
+def _attach_public_projection(
+    conn: sqlite3.Connection, report_id: str, report: Report
+) -> Report:
+    """로드한 보고서에 봉인을 붙이고 생성 증거와 맞대본다.
+
+    ★ 왜 증거와도 맞대나 — 위 ``load_public_projection``은 봉인 «자체»의
+      앞뒤만 본다. 다른 실행의 봉인을 digest 열까지 통째로 갈아 끼우면 그
+      검사는 통과한다. 생성 증거가 지목하는 지문과 맞대야 바꿔치기가 잡힌다.
+    """
+
+    projection = load_public_projection(conn, report_id)
+    if projection is None:
+        return report
+    evidence = report.generation_evidence
+    if evidence is not None and (
+        build_report_digest(projection).content_sha256
+        != evidence.public_projection_sha256
+    ):
+        raise ValueError("저장된 공개 봉인이 생성 증거의 지문과 다릅니다")
+    return replace(report, public_projection=projection)
+
+
 def save(
     conn: sqlite3.Connection,
     report_id: str,
@@ -787,6 +865,10 @@ def save(
             engine_epoch_digest,
         ),
     )
+    # 같은 거래 — 봉인 쓰기가 실패하면 위 본문 행도 함께 되돌아간다(I11).
+    save_public_projection(
+        conn, report_id, report.public_projection, created_at=stamp
+    )
 
 
 def insert_new(
@@ -822,7 +904,14 @@ def insert_new(
             engine_epoch_digest,
         ),
     )
-    return cursor.rowcount == 1
+    if cursor.rowcount != 1:
+        # 이미 있는 공개 보고서는 본문도 봉인도 덮지 않는다(append-only).
+        return False
+    # 같은 거래 — 봉인 쓰기가 실패하면 위 본문 행도 함께 되돌아간다(I11).
+    save_public_projection(
+        conn, report_id, report.public_projection, created_at=stamp
+    )
+    return True
 
 
 def exists(conn: sqlite3.Connection, report_id: str) -> bool:
@@ -892,4 +981,5 @@ def load(conn: sqlite3.Connection, report_id: str) -> Optional[Report]:
     ).fetchone()
     if row is None:
         return None
-    return _normalize_legacy_report(report_from_json(row["payload_json"]))
+    report = _normalize_legacy_report(report_from_json(row["payload_json"]))
+    return _attach_public_projection(conn, report_id, report)

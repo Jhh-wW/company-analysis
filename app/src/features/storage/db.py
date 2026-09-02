@@ -190,6 +190,16 @@ _SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
     )
     """,
     f"""
+    CREATE TABLE IF NOT EXISTS {constants.TABLE_REPORT_PUBLIC_PROJECTIONS} (
+        report_id       TEXT PRIMARY KEY
+                        REFERENCES {constants.TABLE_REPORTS}(report_id),
+        projection_json TEXT NOT NULL,
+        content_sha256  TEXT NOT NULL,
+        display_sha256  TEXT NOT NULL,
+        created_at      TEXT NOT NULL
+    )
+    """,
+    f"""
     CREATE TABLE IF NOT EXISTS {constants.TABLE_LAYER1_CACHE} (
         id                  INTEGER PRIMARY KEY AUTOINCREMENT,
         corp_id             TEXT NOT NULL,
