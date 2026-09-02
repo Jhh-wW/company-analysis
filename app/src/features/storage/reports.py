@@ -768,6 +768,48 @@ def engine_epoch_digest(conn: sqlite3.Connection, report_id: str) -> str:
     return "" if row is None else str(row["engine_epoch_digest"])
 
 
+def list_report_ids(
+    conn: sqlite3.Connection, *, since: str = "", until: str = ""
+) -> list[tuple[str, str]]:
+    """`payload_json`을 전혀 읽지 않고 `(report_id, created_at)` 목록만 돌려준다.
+
+    관측·집계용 도구가 「이 DB에 어떤 report_id들이 있는가」를 알아야 할 때 쓰는
+    최소 열거 공개 API다(2026-09-02 추가 — `admin_dashboard`가 이 표를 직접
+    SQL로 열거하지 않도록 하기 위함).
+
+    ★ 필터·정렬 기준은 `created_at`(이 행이 저장된 시각)이다. `generated_at`
+      (보고서 자신이 담은 표시용 시각)이 아니다 — `created_at`은 `save()`가
+      항상 채우는 단조 증가 값이라 열거 순서가 안정적이다.
+    ★ 날짜만(``YYYY-MM-DD``) 받는다고 가정해 `substr(created_at, 1, 10)`로
+      비교한다. 그래야 시각까지 붙은 `created_at`이 같은 날짜의 날짜만 있는
+      `until`보다 사전식으로 «커서» 그날 하루가 통째로 빠지는 함정을 피한다.
+
+    Args:
+        conn: 이미 연결된 SQLite 연결(읽기 전용 연결도 가능).
+        since: `created_at` 날짜 하한(포함). 빈 문자열이면 제한 없음.
+        until: `created_at` 날짜 상한(포함). 빈 문자열이면 제한 없음.
+
+    Returns:
+        `(report_id, created_at)` 쌍의 목록. `created_at` 오름차순, 같으면
+        `report_id` 오름차순 — 입력 저장 순서와 무관하게 결정론적이다.
+    """
+
+    query = f"SELECT report_id, created_at FROM {TABLE_REPORTS}"
+    clauses: list[str] = []
+    params: list[str] = []
+    if since:
+        clauses.append("substr(created_at, 1, 10) >= ?")
+        params.append(since)
+    if until:
+        clauses.append("substr(created_at, 1, 10) <= ?")
+        params.append(until)
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY created_at, report_id"
+    rows = conn.execute(query, tuple(params)).fetchall()
+    return [(str(row[0]), str(row[1])) for row in rows]
+
+
 def load(conn: sqlite3.Connection, report_id: str) -> Optional[Report]:
     """`report_id`로 보고서를 현재 표시 규칙으로 불러온다. 없으면 `None`."""
     row = conn.execute(
