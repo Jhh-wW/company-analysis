@@ -24,8 +24,9 @@ cd app
 .\로컬데모켜기.ps1
 ```
 
-시험은 반드시 `app/` 폴더에서 돌린다. 저장소 루트에서 돌리면 파일명 충돌로 수집이
-중단된다(사유는 저장소 루트 `pytest.ini`의 주석 참고).
+시험은 반드시 `app/` 폴더에서 돌린다. `app/src`와 `analysis_engine/src`에 같은 이름의 시험
+파일(예: `test_constants.py`, `test_logic.py`)이 있어서, 저장소 루트에서 한 번에 모으면 pytest가
+`import file mismatch`로 수집 자체를 중단한다. 시험이 실패하는 게 아니라 한 개도 실행되지 않는다.
 
 ```powershell
 cd app
