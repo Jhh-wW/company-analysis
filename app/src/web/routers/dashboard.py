@@ -26,6 +26,7 @@ from src.features.backup import status as backup_status
 from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import logic as share_logic
 from src.features.sharelink import store as share_store
+from src.features.sharelink import tracks as share_tracks
 from src.features.storage import constants as storage_constants
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
@@ -339,6 +340,59 @@ def _dashboard_read(label: str, fallback, reader):
         return fallback, False
 
 
+def _member_default_success_limit() -> int:
+    """한도를 따로 안 정한 친구가 쓰는 하루 성공 보고서 건수."""
+    return dashboard_store.MEMBER_DAILY_SUCCESS_LIMIT
+
+
+def _member_default_budget_krw() -> float:
+    """한도를 따로 안 정한 친구가 쓰는 하루 비용 상한(원)."""
+    return share_tracks.budget_of(share_tracks.Track.MEMBER)
+
+
+def _budget_label(amount_krw: float) -> str:
+    """화면에 쓰는 금액 표기. 천 단위 쉼표 + 「원」."""
+    return f"{amount_krw:,.0f}원"
+
+
+def _member_limit_rows(
+    members, *, available: bool
+) -> tuple[dict[str, dict[str, object]], bool]:
+    """친구별 «실제로 적용되는» 한도를 화면용으로 편다.
+
+    명단을 못 읽었으면 빈 표와 False를 돌려준다 — 못 읽은 명단을 「0명·0원」으로
+    보여주면 관리자가 노출이 없다고 오해한다.
+    """
+    if not available:
+        return {}, False
+    default_success = _member_default_success_limit()
+    default_budget = _member_default_budget_krw()
+    rows: dict[str, dict[str, object]] = {}
+    for member in members:
+        success = (
+            default_success
+            if member.daily_success_limit is None
+            else int(member.daily_success_limit)
+        )
+        budget_krw = (
+            default_budget
+            if member.daily_budget_krw is None
+            else float(member.daily_budget_krw)
+        )
+        rows[member.email] = {
+            "success": success,
+            "budget_krw": budget_krw,
+            "budget_label": _budget_label(budget_krw),
+            "reason": member.limit_reason,
+            "updated_at": member.limit_updated_at,
+            "customized": (
+                member.daily_success_limit is not None
+                or member.daily_budget_krw is not None
+            ),
+        }
+    return rows, True
+
+
 def _dashboard_context(request: Request) -> dict:
     """오늘 화면과 조각 새로고침이 같은 정본을 사용한다."""
     service, service_available = _dashboard_read(
@@ -395,6 +449,19 @@ def _dashboard_context(request: Request) -> dict:
             for member in members
         },
     )
+    # ★ 회원별 하루 한도 (결정 D-G4 (a)) — 화면이 「전원 3건·3,000원」이라고 단정하면
+    #   한 명만 올렸을 때 관리자가 틀린 숫자를 보고 또 올린다. 합계도 인원 곱셈이
+    #   아니라 사람마다 다른 값의 «합»이어야 최악의 하루 지출을 바로 읽는다.
+    #   ★ 기본값 해석을 «여기서» 하는 이유 — 성공 건수 기본값은 admin_dashboard가,
+    #     비용 기본값은 sharelink가 각자 정본이다. 두 feature를 모두 아는 곳은
+    #     화면을 만드는 이 자리뿐이고, 명단 표는 「덮어쓴 값이 있나」만 기억한다.
+    member_limits, member_limits_available = _member_limit_rows(
+        members, available=members_available
+    )
+    member_budget_total_krw = sum(
+        float(item["budget_krw"]) for item in member_limits.values()
+    )
+    member_success_total = sum(int(item["success"]) for item in member_limits.values())
     incidents = sorted(incidents, key=lambda item: (str(item["created_at"]), int(item["id"])))
     operation_issues = sorted(
         operation_issues, key=lambda item: (str(item["created_at"]), str(item["operation_key"]))
@@ -500,6 +567,14 @@ def _dashboard_context(request: Request) -> dict:
         dashboard_link_unseen=link_unseen,
         dashboard_member_usage=member_usage,
         dashboard_member_usage_available=member_usage_available,
+        dashboard_member_limits=member_limits,
+        dashboard_member_limits_available=member_limits_available,
+        dashboard_member_budget_total_label=_budget_label(member_budget_total_krw),
+        dashboard_member_success_total_label=f"{member_success_total}건",
+        dashboard_member_default_success=_member_default_success_limit(),
+        dashboard_member_default_budget_label=_budget_label(
+            _member_default_budget_krw()
+        ),
         dashboard_company_counts=member_company_counts,
         dashboard_company_counts_available=member_company_counts_available,
         dashboard_satisfaction=satisfaction,

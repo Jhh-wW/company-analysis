@@ -3,13 +3,33 @@
 {% block bodyclass %}admin-frame-page{% endblock %}
 {% block wrapclass %}wide admin-frame{% endblock %}
 {% block content %}
-<header class="frame-heading"><p class="frame-kicker">관리자 전용</p><h1>친구</h1><p class="lede">MEMBER는 KST 하루 기준 성공한 보고서 3건을 이용합니다. 실패·취소·외부 오류는 사용 횟수로 확정하지 않습니다.</p></header>
+<header class="frame-heading"><p class="frame-kicker">관리자 전용</p><h1>친구</h1><p class="lede">MEMBER는 KST 하루 기준으로 <strong>그 친구에게 정해 둔</strong> 성공 보고서 건수와 비용 한도 안에서 이용합니다. 따로 정하지 않으면 하루 {{ dashboard_member_default_success }}건 · {{ dashboard_member_default_budget_label }}입니다. 실패·취소·외부 오류는 사용 횟수로 확정하지 않습니다.</p></header>
 {% set dashboard_nav = "members" %}{% include "_admin_nav.html" %}
 <section class="frame-section frame-desktop-only"><p class="frame-eyebrow">이용 기간</p><p><a class="btn {% if dashboard_member_period == 'all' %}ghost{% endif %}" href="/admin/members?period=all">전체</a> <a class="btn {% if dashboard_member_period == '7d' %}ghost{% endif %}" href="/admin/members?period=7d">최근 7일</a> <a class="btn {% if dashboard_member_period == '30d' %}ghost{% endif %}" href="/admin/members?period=30d">최근 30일</a></p><div class="frame-grid frame-grid-three">{% for company_type in ['listed', 'audited', 'undecided'] %}<article class="card"><h2>{{ dashboard_company_labels[company_type] }}</h2><p>성공 {{ dashboard_member_statistics.by_company[company_type].success }}건 · 실패 {{ dashboard_member_statistics.by_company[company_type].failed }}건</p></article>{% endfor %}</div></section>
 <section class="frame-section frame-desktop-only"><p class="frame-eyebrow">예약·정산과 비용</p><article class="card"><h2>실행 정산</h2><p>성공 확정 {{ dashboard_member_statistics.settled.used }}건 · 반환 {{ dashboard_member_statistics.settled.returned }}건 · 진행 예약 {{ dashboard_member_statistics.settled.reserved }}건</p><p>확정 내부 AI 비용 {{ '%.0f'|format(dashboard_member_statistics.confirmed_cost_krw) }}원 · 미확정 비용 실행 {{ dashboard_member_statistics.uncertain_cost_events }}건</p>{% if dashboard_member_statistics.recorded_runs == 0 %}<p class="muted">이 기간의 상세 실행 요약은 확인 불가입니다. 새 운영 이력부터 유형·결과·비용을 함께 보존합니다.</p>{% endif %}</article></section>
 <section class="frame-section frame-desktop-only">
   <div class="frame-section-heading"><div><p class="frame-eyebrow">초대 MEMBER</p><h2>친구 이름·이메일</h2></div><a class="btn ghost" href="/admin/access#invited-members-title">친구 초대 관리</a></div>
-  {% if not dashboard_members_available %}<article class="card"><h3>친구 명단 확인 불가</h3><p>읽지 못한 명단을 0명으로 표시하지 않습니다.</p></article>{% else %}{% for member in dashboard_members %}<article class="card"><h3>{{ member.display_name or "이름 미등록" }}</h3><p>{{ member.email }} · 초대 {{ member.invited_at }}</p>{% if member.note %}<p class="muted">{{ member.note }}</p>{% endif %}{% if dashboard_member_usage_available %}<p><strong>오늘 성공 {{ dashboard_member_usage.get(member.email, [0, 0])[0] }} / 3건</strong> · 진행 예약 {{ dashboard_member_usage.get(member.email, [0, 0])[1] }}건</p>{% else %}<p><strong>오늘 이용 확인 불가</strong></p>{% endif %}</article>{% else %}<article class="card"><p>아직 초대한 MEMBER가 없습니다.</p><a class="btn ghost" href="/admin/access#invited-members-title">친구 초대하기</a></article>{% endfor %}{% endif %}
+  {% if not dashboard_members_available %}<article class="card"><h3>친구 명단 확인 불가</h3><p>읽지 못한 명단을 0명으로 표시하지 않습니다.</p></article>{% else %}
+  {% for member in dashboard_members %}
+  {% set limit = dashboard_member_limits.get(member.email) %}
+  <article class="card">
+    <h3>{{ member.display_name or "이름 미등록" }}</h3>
+    <p>{{ member.email }} · 초대 {{ member.invited_at }}</p>
+    {% if member.note %}<p class="muted">{{ member.note }}</p>{% endif %}
+    {% if dashboard_member_usage_available and limit %}<p><strong>오늘 성공 {{ dashboard_member_usage.get(member.email, [0, 0])[0] }} / {{ limit.success }}건</strong> · 진행 예약 {{ dashboard_member_usage.get(member.email, [0, 0])[1] }}건 · 하루 비용 한도 {{ limit.budget_label }}</p>{% else %}<p><strong>오늘 이용 확인 불가</strong></p>{% endif %}
+    {% if limit and limit.reason %}<p class="muted">한도를 바꾼 이유: {{ limit.reason }}{% if limit.updated_at %} · {{ limit.updated_at }}{% endif %}</p>{% endif %}
+    {% if limit %}
+    <form class="frame-inline-form" method="post" action="/admin/members/{{ member.email }}/limit">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>하루 성공 건수 <input type="number" name="daily_success_limit" min="1" max="20" step="1" value="{{ limit.success }}"></label>
+      <label>하루 비용 한도(원) <input type="number" name="daily_budget_krw" min="0" max="20000" step="100" value="{{ '%.0f'|format(limit.budget_krw) }}"></label>
+      <label>바꾸는 이유 <input type="text" name="reason" maxlength="200" required></label>
+      <button class="btn" type="submit">한도 저장</button>
+      <p class="muted">바꾼 값은 다음 날에도 그대로 유지됩니다. 두 칸을 비우고 저장하면 기본값(하루 {{ dashboard_member_default_success }}건 · {{ dashboard_member_default_budget_label }})으로 되돌아갑니다.</p>
+    </form>
+    {% endif %}
+  </article>
+  {% else %}<article class="card"><p>아직 초대한 MEMBER가 없습니다.</p><a class="btn ghost" href="/admin/access#invited-members-title">친구 초대하기</a></article>{% endfor %}{% endif %}
 </section>
 <section class="frame-section frame-desktop-only"><p class="frame-eyebrow">피드백</p><div class="frame-grid frame-grid-two"><article class="card"><h2>{{ dashboard_satisfaction }}</h2><p>별점 4~5점 / 목표 80% / 응답 {% if dashboard_survey_available %}{{ dashboard_survey_total }}건{% else %}확인 불가{% endif %}</p><p class="muted">5건 미만이면 비율 대신 자료 모으는 중으로 표시합니다. 개인 접속 정보는 보고서 검토 화면에서 관리자만 봅니다.</p></article><article class="card"><h2>{{ dashboard_three_minute_response }}</h2><p>3분 내 구분점 응답 / 측정 {% if dashboard_kpi_available %}{{ dashboard_kpi_measured }}건{% else %}확인 불가{% endif %}</p><p class="muted">결과 첫 열람부터 첫 설문 제출까지의 시간입니다. 답변의 근거 정확성은 관리자 검토가 필요합니다.</p></article></div></section>
 <section class="frame-section frame-desktop-only">
