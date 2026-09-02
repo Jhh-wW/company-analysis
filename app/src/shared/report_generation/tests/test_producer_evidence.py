@@ -195,6 +195,10 @@ def _evidence(
         assessment=final.assessment,
         public_manifest_sha256="d" * 64,
         public_content_sha256="e" * 64,
+        # ★ 공개 봉인 projection 지문(v3, 2026-09-02). 지문 A(public_content)와
+        #   «다른 값»으로 둔다 — 같은 값으로 두면 둘을 뒤바꿔 배선해도 시험이
+        #   못 잡는다.
+        public_projection_sha256="f" * 64,
         section_sha256s=final.section_sha256s,
         evidence_packet_sha256s=final.evidence_packet_sha256s,
         validation_receipts=chain,
@@ -679,6 +683,7 @@ def test_receipt와_producer_subclass는_release_wire에서_거절한다():
         assessment=evidence.assessment,
         public_manifest_sha256=evidence.public_manifest_sha256,
         public_content_sha256=evidence.public_content_sha256,
+        public_projection_sha256=evidence.public_projection_sha256,
         section_sha256s=evidence.section_sha256s,
         evidence_packet_sha256s=evidence.evidence_packet_sha256s,
         validation_receipts=evidence.validation_receipts,

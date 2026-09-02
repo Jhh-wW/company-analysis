@@ -243,3 +243,93 @@ def test_FULL_보고서의_projection은_저장_왕복에서_살아남는다() -
     assert build_report_digest(restored.public_projection) == build_report_digest(
         output.report.public_projection
     )
+
+
+# ══════════════════════════════════════════════════════════
+# ⑤ 생산 증거 결속 (I11) — 증거가 이 봉인의 지문을 들고 있어야 한다
+# ══════════════════════════════════════════════════════════
+
+
+def test_생성_증거의_projection_digest는_봉인된_projection과_같다() -> None:
+    """증거가 「어떤 공개본을 냈는지」를 지문으로 지목한다.
+
+    지문이 없으면 저장된 보고서의 블록을 나중에 갈아 끼워도 생산 증거가
+    아무 말을 못 한다. ``content_sha256``은 화면(display)뿐 아니라 감사
+    장부(ledger)까지 덮으므로, 장부만 바꾼 위조도 이 지문 하나로 드러난다.
+    """
+
+    output, _writer, _reviewer, _diagram = _run_full()
+
+    evidence = output.generation_evidence
+    projection = output.report.public_projection
+    assert evidence is not None
+    assert projection is not None
+    assert (
+        evidence.public_projection_sha256
+        == build_report_digest(projection).content_sha256
+    )
+    assert output.report.generation_evidence is evidence
+    # 지문 A(pre-render 공개 content 봉인)와는 «다른 값»이다 — 하나는 렌더
+    # 이전 기대값, 다른 하나는 장부까지 덮는 최종 봉인이라 서로를 대신하지
+    # 못한다. 같은 값이면 둘 중 하나가 의미를 잃은 것이다.
+    assert evidence.public_projection_sha256 != evidence.public_content_sha256
+
+
+def test_projection_내용이_바뀌면_증거_digest도_함께_바뀐다() -> None:
+    """digest가 내용에 «실제로» 반응하는지 본다(상수 비교가 아님)."""
+
+    plain, _w1, _r1, _d1 = _run_full()
+    with_flow, _w2, _r2, _d2 = _run_full(flow=True)
+
+    assert plain.report.public_projection != with_flow.report.public_projection
+    assert (
+        plain.generation_evidence.public_projection_sha256
+        != with_flow.generation_evidence.public_projection_sha256
+    )
+    for output in (plain, with_flow):
+        assert (
+            output.generation_evidence.public_projection_sha256
+            == build_report_digest(output.report.public_projection).content_sha256
+        )
+
+
+def test_보충_회복_보고서의_증거도_최종_projection을_가리킨다() -> None:
+    output, _writer, _reviewer = _run_recovering_full(("identity",))
+
+    evidence = output.generation_evidence
+    assert evidence is not None
+    assert (
+        evidence.public_projection_sha256
+        == build_report_digest(output.report.public_projection).content_sha256
+    )
+
+
+def test_저장된_projection이_증거_digest와_다르면_로드가_거부된다() -> None:
+    """저장본을 열 때 「증거가 가리키는 그 공개본인가」를 다시 확인한다.
+
+    ★ 위조는 «저장층 자체 검사를 통과하는» 모양으로 만든다 — 다른 실행의
+      projection을 digest까지 통째로 갈아 끼운다. 그러면 projection 자체는
+      앞뒤가 맞아 저장층 재계산 대조를 통과하고, 오직 생산 증거와의 대조만이
+      바꿔치기를 잡을 수 있다.
+    """
+
+    victim, _w1, _r1, _d1 = _run_full()
+    other, _w2, _r2, _d2 = _run_full(flow=True)
+
+    payload = report_to_dict(victim.report)
+    forged = json.loads(json.dumps(payload, ensure_ascii=False))
+    forged["public_projection"] = report_to_dict(other.report)["public_projection"]
+    assert forged["public_projection"] != payload["public_projection"]
+
+    with pytest.raises(ValueError):
+        report_from_dict(forged)
+
+
+def test_FULL_저장본에_projection이_없으면_로드가_거부된다() -> None:
+    output, _writer, _reviewer, _diagram = _run_full()
+
+    forged = json.loads(json.dumps(report_to_dict(output.report), ensure_ascii=False))
+    del forged["public_projection"]
+
+    with pytest.raises(ValueError):
+        report_from_dict(forged)

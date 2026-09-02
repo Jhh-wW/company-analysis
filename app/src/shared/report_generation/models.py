@@ -34,8 +34,11 @@ from src.shared.report_quality.integrity import (
 )
 
 
+#: v3(2026-09-02) — ``public_projection_sha256``이 늘었다. 필드가 늘면 wire의
+#: key 집합이 바뀌어 v2 저장본은 어차피 못 읽으므로, 버전을 올려 「왜 못 읽는지」
+#: 를 말해 준다(설계 017 §05).
 GENERATION_PRODUCER_EVIDENCE_VERSION: Final[str] = (
-    "generation-producer-evidence-v2"
+    "generation-producer-evidence-v3"
 )
 _SHA256_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 _COMPANY_ID_RE: Final[re.Pattern[str]] = re.compile(r"[0-9]{8}")
@@ -302,6 +305,13 @@ class GenerationProducerEvidence:
 
     ``public_content_sha256``은 이 객체와 manifest를 제외한 명시적 공개 projection
     지문이다. 따라서 Report가 자기 자신을 포함해 순환 해시하는 구조가 아니다.
+
+    ``public_projection_sha256``은 «다른 것»이다 — 웹·PDF·Notion이 실제로 읽는
+    공개 봉인 블록(``Report.public_projection``) 전체의 지문이고, 화면에 보이는
+    글자뿐 아니라 그 장이 기여한 감사 장부(FactRecord·등급 기여)까지 덮는다.
+    ``public_content_sha256``은 렌더 이전에 정한 기대값이라 renderer가 위조할
+    수 없다는 성질을 갖고, 이 값은 최종 표시본과 장부를 한 덩어리로 못 박는다.
+    둘은 서로를 대신하지 못하므로 나란히 싣는다(설계 017 §05).
     """
 
     company_id: str
@@ -311,6 +321,7 @@ class GenerationProducerEvidence:
     assessment: GenerationAssessment
     public_manifest_sha256: str
     public_content_sha256: str
+    public_projection_sha256: str
     section_sha256s: tuple[tuple[str, str], ...]
     evidence_packet_sha256s: tuple[tuple[str, str], ...]
     validation_receipts: tuple[GenerationValidationReceipt, ...]
@@ -344,6 +355,7 @@ class GenerationProducerEvidence:
             ("candidate_sha256", "평가 후보 지문"),
             ("public_manifest_sha256", "공개 manifest bytes 지문"),
             ("public_content_sha256", "최종 공개 content 지문"),
+            ("public_projection_sha256", "공개 봉인 projection 지문"),
         ):
             object.__setattr__(
                 self,
@@ -535,6 +547,7 @@ def producer_evidence_from_dict(data: Mapping[str, Any]) -> GenerationProducerEv
         "assessment",
         "public_manifest_sha256",
         "public_content_sha256",
+        "public_projection_sha256",
         "section_sha256s",
         "evidence_packet_sha256s",
         "validation_receipts",
@@ -595,6 +608,7 @@ def producer_evidence_from_dict(data: Mapping[str, Any]) -> GenerationProducerEv
         assessment=generation_assessment_from_dict(assessment_raw),
         public_manifest_sha256=data["public_manifest_sha256"],
         public_content_sha256=data["public_content_sha256"],
+        public_projection_sha256=data["public_projection_sha256"],
         section_sha256s=_tuple_pairs(section_values, integer_value=False),
         evidence_packet_sha256s=_tuple_pairs(packet_values, integer_value=False),
         validation_receipts=tuple(

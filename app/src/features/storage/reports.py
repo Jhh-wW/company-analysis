@@ -578,6 +578,17 @@ def report_from_dict(data: dict[str, Any]) -> Report:
             quality_observation,
             generation_evidence.assessment,
         )
+        # 저장된 공개 봉인이 «생산 증거가 가리키는 바로 그 공개본»인지 확인한다.
+        # 위 `_public_projection_from_dict`는 projection 자체의 앞뒤만 본다 —
+        # 다른 실행의 projection을 digest까지 통째로 갈아 끼우면 그 검사는
+        # 통과하고, 오직 이 대조만이 바꿔치기를 잡는다(설계 017 §05).
+        if public_projection is None:
+            raise ValueError("FULL 보고서의 공개 봉인 projection이 누락됐습니다")
+        if (
+            build_report_digest(public_projection).content_sha256
+            != generation_evidence.public_projection_sha256
+        ):
+            raise ValueError("저장된 공개 projection이 생성 증거의 지문과 다릅니다")
         for section in data.get("sections", []):
             for table in section.get("tables", []):
                 rows = table.get("rows", [])

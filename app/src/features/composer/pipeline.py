@@ -90,6 +90,7 @@ from src.shared.report_recovery import (
     SupplementAuthorization,
     decide_post_validation,
 )
+from src.shared.report_generation.public_projection import build_report_digest
 from src.shared.report_generation.canonical import (
     assert_report_matches_generation_evidence,
     public_content_digests,
@@ -1344,6 +1345,10 @@ def run_v2(
             or prepared_evidence is None
             or call_recorder is None
             or not validation_receipts
+            # 공개 봉인 projection이 없으면 증거가 「어떤 공개본을 냈는지」를
+            # 지목할 수 없다 — 지목 못 하는 증거로는 나중에 블록을 갈아 끼운
+            # 것을 잡지 못하므로 여기서 닫는다(I3).
+            or rendered.public_projection is None
         ):
             raise V2ValidationError(("FULL 생산 증거 재료가 누락됐습니다",))
         generation_evidence = GenerationProducerEvidence(
@@ -1360,6 +1365,11 @@ def run_v2(
             public_content_sha256=(
                 public_structure_seal.public_content_sha256
             ),
+            # 이 값은 화면(display)뿐 아니라 그 장이 기여한 감사 장부까지
+            # 덮는다 — 장부만 바꾼 위조도 이 지문 하나로 드러난다.
+            public_projection_sha256=build_report_digest(
+                rendered.public_projection
+            ).content_sha256,
             section_sha256s=public_structure_seal.section_sha256s,
             evidence_packet_sha256s=prepared_evidence.packet_sha256s,
             validation_receipts=validation_receipts,
