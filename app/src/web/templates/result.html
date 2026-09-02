@@ -215,6 +215,23 @@
   </div>
 {% endif %}
 
+{# ── 초대 링크 손님이 갈 수 있는 길 (티켓 G-S7 · 사람 결정 D-G10) ──
+   ★ 표지 «밖»에 둔다 — 보고서 내용이 아니라 화면 장식이다. `ui-only`라
+     인쇄·PDF에는 나오지 않는다 (세 채널 내용 동일 · 불변식 I7).
+   ★ 이 주석과 아래 endif의 여백 제어 붙임표(빼기 기호)를 «일부러» 쓴다 —
+     초대 링크가 아닌 세 갈래의 결과 화면이 «빈 줄 하나»도 달라지지 않게 하려는
+     것이다. 여백 제어 없이 조건 블록만 넣으면 아무것도 안 그려져도 줄 수가 늘어
+     바이트 대조(test_result_back_link.py)가 깨진다.
+   ⚠️ 이 주석에 여백 제어 기호를 «글자 그대로» 적지 않는다 — 적으면 주석이
+     그 자리에서 닫혀 나머지 설명이 화면에 그대로 새어 나온다 (실측 결함). -#}
+{% if link_result_chrome %}
+{% if link_result_chrome.freshness_note %}
+<p class="muted ui-only link-result-made-on" role="status">{{ link_result_chrome.freshness_note }}</p>
+{% endif %}
+<nav class="btn-row ui-only link-result-bar" aria-label="초대 링크 안내">
+  <a class="btn ghost" href="{{ link_result_chrome.button_href }}">{{ link_result_chrome.button_label }}</a>
+</nav>
+{% endif -%}
 <article class="report-paper">
   <header class="report-cover">
     <div class="report-title-block">

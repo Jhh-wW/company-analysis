@@ -75,6 +75,15 @@ from src.features.report_access.models import ReportAudience, ReportBindingResul
 from src.features.sharelink import store as share_store
 from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import tracks as share_tracks
+from src.features.sharelink.constants import (
+    LANDING_MADE_ON_DATE_TEMPLATE,
+    LANDING_OTHER_COMPANY_BUTTON,
+    LANDING_REPORT_MADE_ON_TEMPLATE,
+    RESULT_BACK_TO_LANDING_BUTTON,
+    RESULT_BACK_TO_LANDING_HREF,
+    RESULT_OTHER_COMPANY_HREF,
+    RESULT_STALE_REPORT_NOTICE,
+)
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
 from src.shared import engine_build_identity as build_identity_contract
@@ -1696,6 +1705,83 @@ def _link_view_event_unavailable_response(request: Request) -> Response:
     return response
 
 
+@dataclass(frozen=True)
+class _LinkResultChrome:
+    """초대 링크 손님이 결과 화면 «표지 위»에서 보는 길 하나 (티켓 G-S7).
+
+    ★ 왜 라우터에서 만드는가 — 화면 틀 안에서 「결속 보고서인가」를 다시
+      따지면 같은 판단이 두 곳에 생긴다. 판단은 여기서 한 번만 하고 틀은
+      받은 글자를 그리기만 한다.
+    ★ 문구는 지어내지 않고 `sharelink/constants.py` 한 곳에서만 가져온다 —
+      랜딩과 결과 화면이 다른 말을 하면 같은 곳으로 가는 길인지 알 수 없다.
+    """
+
+    button_label: str
+    button_href: str
+    freshness_note: str
+
+
+def _link_report_made_on(report: Report) -> str:
+    """보고서 생성일을 「2026년 8월 19일」로 옮긴다 (한국시간).
+
+    ★ 표지·마스트헤드가 읽는 것과 **같은 필드**(``report.generated_at``)를 쓴다.
+    ★ 날짜를 읽을 수 없는 옛 저장본이면 빈 글자를 돌려주고 그 줄만 빠진다 —
+      날짜를 지어내는 것보다 안 보이는 편이 낫다.
+    """
+    raw = str(getattr(report, "generated_at", "") or "").strip()
+    if not raw:
+        return ""
+    try:
+        made = clock.business_date_from_iso(raw)
+    except (OverflowError, TypeError, ValueError):
+        return ""
+    return LANDING_MADE_ON_DATE_TEMPLATE.format(
+        year=made.year, month=made.month, day=made.day
+    )
+
+
+def _link_freshness_note(report: Report) -> str:
+    """결속 보고서가 «언제 자료인지», 아니면 오래됐는지 한 줄로 말한다.
+
+    ★ 신선도 기한은 새로 만들지 않고 첫 화면 랜딩과 **같은 기준**
+      (`job_runtime._link_expired`)을 쓴다 — 두 화면이 다른 날짜에 「오래됐다」고
+      말하면 손님이 어느 쪽을 믿어야 할지 알 수 없다.
+    ★ 기한이 지나도 자동으로 다시 조사하지 않는다 (사람 결정 D-G11).
+    """
+    if job_runtime._link_expired(report):
+        return RESULT_STALE_REPORT_NOTICE
+    made_on = _link_report_made_on(report)
+    if not made_on:
+        return ""
+    return LANDING_REPORT_MADE_ON_TEMPLATE.format(made_on=made_on)
+
+
+def _link_result_chrome(report: Report, *, bound_report: bool) -> _LinkResultChrome:
+    """결속 보고서인지에 따라 «다른 길»과 «다른 안내»를 준다 (사람 결정 D-G10).
+
+    Args:
+        report: 지금 그리는 보고서.
+        bound_report: 그 보고서가 이 링크에 원래 묶여 있던 것인가.
+
+    Returns:
+        결과 화면 표지 위에 그릴 안내 한 줄과 버튼 한 개.
+    """
+    if bound_report:
+        # 방금 온 곳으로 되돌아가는 버튼은 손님을 같은 자리에서 맴돌게 한다.
+        # 신선도 띠도 여기서만 단다 — 손님이 방금 직접 돌린 보고서에까지
+        # 「언제 만든 것인지 확인하라」고 말하면 군더더기다.
+        return _LinkResultChrome(
+            button_label=LANDING_OTHER_COMPANY_BUTTON,
+            button_href=RESULT_OTHER_COMPANY_HREF,
+            freshness_note=_link_freshness_note(report),
+        )
+    return _LinkResultChrome(
+        button_label=RESULT_BACK_TO_LANDING_BUTTON,
+        button_href=RESULT_BACK_TO_LANDING_HREF,
+        freshness_note="",
+    )
+
+
 def _render_result_page(
     request: Request,
     *,
@@ -1709,10 +1795,16 @@ def _render_result_page(
     legacy_stored_at: str = "",
 ) -> Response:
     resolved_track = request_helpers._track_of(request)
+    # 초대 링크 손님에게만 «돌아갈 길»을 준다. 나머지 세 갈래의 결과 화면은
+    # 여기서 None이 되어 화면 틀이 아무것도 그리지 않는다 (바이트 불변).
+    link_result_chrome: _LinkResultChrome | None = None
     if resolved_track[0] is share_tracks.Track.LINK:
         current_link = request_helpers._current_share_link(request)
         if current_link is None:
             return _link_view_event_unavailable_response(request)
+        link_result_chrome = _link_result_chrome(
+            report, bound_report=current_link.report_id == job.job_id
+        )
         # LINK에서 새로 생성한 보고서는 run history만 생성 사건으로
         # 남긴다. 최초 연결 보고서를 연 경우에만 별도 조회 사건이다.
         if not pure_delivery_read and current_link.report_id == job.job_id:
@@ -1792,6 +1884,7 @@ def _render_result_page(
                 legacy_readonly=legacy_readonly,
                 legacy_generated_at=legacy_generated_at,
                 legacy_stored_at=legacy_stored_at,
+                link_result_chrome=link_result_chrome,
             ),
         )
     )
