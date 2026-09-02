@@ -3,9 +3,9 @@
 여기서 만드는 판정은 «진단값»일 뿐이다. 최종 판정은
 ``src.shared.report_evidence.logic.build_section_bundle``이 다시 한다
 (주입 슬롯까지 포함해서). 이 모듈은 그 최종 판정보다 «덜 조심»할 수 없도록,
-먼저 build_section_bundle과 완전히 같은 규칙(접두어 무관, optional 경로
-실패 포함)으로 슬롯별 상태를 계산하고, 그 위에 회사유형별 기대 경로 확인을
-«더 조심하는 방향으로만» 얹는다.
+먼저 build_section_bundle과 완전히 같은 규칙(접두어 무관, site-probe
+게이트 실패 포함)으로 슬롯별 상태를 계산하고, 그 위에 회사유형별 기대
+경로 확인을 «더 조심하는 방향으로만» 얹는다.
 
 한 슬롯당 판정 순서:
 1) 그 슬롯을 대상으로 한 REQUIRED 조회 기록이 하나도 없다 → UNKNOWN
@@ -13,11 +13,14 @@
 2) REQUIRED 조회 기록 중 FAILED·TRUNCATED가 하나라도 있다 → UNKNOWN
    (``required_path_{state}``, build_section_bundle과 동일한 문구)
 3) 위 두 경우가 아니면 REQUIRED 경로는 전부 정상 확인(OK/MISSING)됐다는
-   뜻이다. 그러나 같은 슬롯을 겨냥한 OPTIONAL 조회 기록 중 FAILED·
-   TRUNCATED가 있으면 여전히 UNKNOWN이다(``optional_path_{state}``,
+   뜻이다. 그러나 같은 슬롯을 겨냥한 site-probe 게이트(robots.txt 등,
+   SITE_PROBE_GATE_SOURCE_KINDS) 조회 기록이 하나 이상 있고 그 전부가
+   FAILED·TRUNCATED면(단 하나라도 정상 확인됐다면 이 조건은 성립하지
+   않는다) 여전히 UNKNOWN이다(``site_probe_gate_{state}``,
    build_section_bundle과 동일한 문구 — P1-B, requirement와 outcome-kind
-   분리). robots 차단·IR 전송 실패처럼 광역 경로가 OPTIONAL로 낮춰져도,
-   그 실패 사실 자체를 진단에서 지우면 안 된다.
+   분리). 그 출처를 아예 열어보지 못했다는 뜻이라 근거가 없다고 단정할
+   수 없다. IR PDF 없음처럼 site-probe 게이트가 아닌 흔한 개별 경로
+   실패는 이 조건에 들어가지 않는다(P0 회귀 방지).
 4) 위 세 경우가 모두 아니면(계약 기준 «정상 확인 후 부재») 회사유형이
    기대하는 출처 접두어가 그 REQUIRED 조회 기록 중에 실제로 있었는지 한
    겹 더 본다. 한 번도 관측되지 않았다면 → UNKNOWN
@@ -40,7 +43,11 @@ from src.features.chapter_evidence.constants import (
     CompanyType,
     expected_required_path_prefix,
 )
-from src.shared.report_evidence.constants import EvidenceReadiness, SourceRequirement
+from src.shared.report_evidence.constants import (
+    SITE_PROBE_GATE_SOURCE_KINDS,
+    EvidenceReadiness,
+    SourceRequirement,
+)
 from src.shared.report_evidence.models import CollectionAttempt
 from src.shared.report_evidence.policy import collector_slots_for
 
@@ -94,19 +101,31 @@ def diagnose_candidate_readiness(
                 reasons.append(f"required_path_{state.value.lower()}:{slot_id}")
             continue
 
-        # 3) — REQUIRED는 전부 정상 확인됐지만, 같은 슬롯을 겨냥한 OPTIONAL
-        # 경로가 막혔으면(P1-B) «확인을 마쳤다»고 아직 단정하지 않는다.
-        optional_failed_states = {
-            attempt.state
+        # 3) — REQUIRED는 전부 정상 확인됐지만, 같은 슬롯을 겨냥한
+        # site-probe 게이트(robots.txt 등)가 «전부» 막혔으면(P1-B) «확인을
+        # 마쳤다»고 아직 단정하지 않는다. 게이트가 여러 host(예: www/apex
+        # 대체)에 걸쳐 여러 번 시도됐을 수 있으므로, 하나라도 정상
+        # 확인됐다면(그 출처를 실제로 열어본 것이므로) 단정을 막지 않는다.
+        site_probe_attempts = tuple(
+            attempt
             for attempt in attempts
             if attempt.requirement is not SourceRequirement.REQUIRED
+            and attempt.source_kind in SITE_PROBE_GATE_SOURCE_KINDS
             and slot_id in attempt.slot_ids
-            and attempt.state in FAILURE_COLLECTION_STATES
+        )
+        site_probe_ever_succeeded = any(
+            attempt.state not in FAILURE_COLLECTION_STATES
+            for attempt in site_probe_attempts
+        )
+        site_probe_failed_states = {
+            attempt.state
+            for attempt in site_probe_attempts
+            if attempt.state in FAILURE_COLLECTION_STATES
         }
-        if optional_failed_states:
+        if site_probe_failed_states and not site_probe_ever_succeeded:
             any_unknown = True
-            for state in sorted(optional_failed_states, key=lambda item: item.value):
-                reasons.append(f"optional_path_{state.value.lower()}:{slot_id}")
+            for state in sorted(site_probe_failed_states, key=lambda item: item.value):
+                reasons.append(f"site_probe_gate_{state.value.lower()}:{slot_id}")
             continue
 
         # 4) — 계약 기준으로는 «정상 확인 후 부재». 회사유형별 기대 경로가

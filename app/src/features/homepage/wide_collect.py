@@ -49,6 +49,7 @@ from src.features.homepage.ir_pdf import (
     default_ir_pdf_fetch,
 )
 from src.shared.official_ir import IR_ATTACHMENT_URL_FIELD, safe_https_attachment_url
+from src.shared.report_evidence.constants import SOURCE_KIND_ROBOTS_TXT
 from src.features.homepage.safe_http import HomepageResponseError, request_deadline_scope
 from src.features.homepage.wide_domain import (
     BoundHost,
@@ -626,7 +627,7 @@ def _ensure_host_policy(
     # OPTIONAL이다(_BROAD_SLOT_REQUIREMENT 참조).
     state.add_attempt(
         kind="robots",
-        source_kind="robots_txt",
+        source_kind=SOURCE_KIND_ROBOTS_TXT,
         requirement=_BROAD_SLOT_REQUIREMENT,
         state=robots_state,
         slot_ids=(),

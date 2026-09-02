@@ -11,6 +11,7 @@ from src.shared.report_evidence.constants import (
     EvidenceReadiness,
     GenerationGateStatus,
     ReportExecutionOutcome,
+    SITE_PROBE_GATE_SOURCE_KINDS,
     SourceRequirement,
 )
 
@@ -122,24 +123,47 @@ def build_section_bundle(
         # required 경로는 전부 정상 확인됐다(OK/MISSING). 그러나 그것만으로
         # «확인을 마쳤다»고 단정하지 않는다 — requirement(«이 경로가 유일한
         # 확인 길인가»)와 outcome-kind(«막힌 것인가, 없는 것인가»)는 다른
-        # 질문이다. OPTIONAL로 낮춰진 광역 경로(예: robots 차단·IR 전송
-        # 실패)가 같은 슬롯을 겨냥했다가 막혔다면, required 경로 하나의
-        # 정상 확인만으로 전체를 다 살펴봤다고 볼 수 없다(P1-B). OPTIONAL
-        # 강등 자체(로그·재시도 판단상 있으나마나 한 경로 취급)는 그대로
-        # 유지한다 — required_attempts가 비었을 때(→ unobserved)나 이미
-        # failed_states가 있을 때(→ required_path_*)는 건드리지 않는다.
-        optional_failed_states = {
-            attempt.state
+        # 질문이다. site-probe 게이트(robots.txt 등, SITE_PROBE_GATE_
+        # SOURCE_KINDS)가 이 슬롯이 걸린 출처 전부에서 막혔다면 그 출처를
+        # 아예 못 열어본 것이라, 같은 슬롯의 required 경로 하나가 정상
+        # 확인됐다고 해도 다른 잠재적 근거(그 출처의 다른 페이지들)까지 다
+        # 살펴봤다고 볼 수 없다(P1-B).
+        #
+        # ⚠️ 이 확인은 두 겹으로 좁힌다 — 그러지 않으면 OPTIONAL 강등이
+        # 막았던 「IR 1건 실패가 9장을 다 죽이던 P0」가 되살아난다(결합
+        # 종단시험 test_combined_collectors_end_to_end.py가 이 경계를
+        # 잠근다).
+        #   1) source_kind가 site-probe 게이트로 좁다 — 흔한 개별 후보
+        #      페이지 실패(IR PDF 없음·특정 후보 URL 404 등, 정상 운영에서도
+        #      자주 있는 일)는 포함하지 않는다.
+        #   2) 같은 게이트가 «전부 막혔을 때»만 — www/apex 대체 호스트처럼
+        #      게이트가 여러 host에 걸쳐 여러 번 시도됐을 수 있다. 그중
+        #      하나라도 정상 확인(OK)됐다면 그 출처는 실제로 열어봤다는
+        #      뜻이므로 단정을 막을 이유가 없다.
+        # OPTIONAL 강등 자체는 건드리지 않는다 — required_attempts가
+        # 비었을 때(→ unobserved)나 이미 failed_states가 있을 때
+        # (→ required_path_*)는 그대로다.
+        site_probe_attempts = tuple(
+            attempt
             for attempt in candidate.attempts
             if attempt.requirement is not SourceRequirement.REQUIRED
+            and attempt.source_kind in SITE_PROBE_GATE_SOURCE_KINDS
             and slot_id in attempt.slot_ids
-            and attempt.state in {CollectionState.FAILED, CollectionState.TRUNCATED}
+        )
+        site_probe_ever_succeeded = any(
+            attempt.state not in {CollectionState.FAILED, CollectionState.TRUNCATED}
+            for attempt in site_probe_attempts
+        )
+        site_probe_failed_states = {
+            attempt.state
+            for attempt in site_probe_attempts
+            if attempt.state in {CollectionState.FAILED, CollectionState.TRUNCATED}
         }
-        if optional_failed_states:
+        if site_probe_failed_states and not site_probe_ever_succeeded:
             has_unknown = True
-            for state in sorted(optional_failed_states, key=lambda item: item.value):
+            for state in sorted(site_probe_failed_states, key=lambda item: item.value):
                 generated_reasons.append(
-                    f"optional_path_{state.value.lower()}:{slot_id}"
+                    f"site_probe_gate_{state.value.lower()}:{slot_id}"
                 )
             continue
         generated_reasons.append(f"evidence_absent_after_check:{slot_id}")
