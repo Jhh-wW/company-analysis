@@ -537,6 +537,51 @@ def _normalized_company_name(value: str) -> str:
     return stripped or raw
 
 
+def _report_company_id(conn, report_id: str, report=None) -> str | None:
+    """이 보고서의 회사 고유번호. **저장 표의 열을 먼저** 읽는다.
+
+    Args:
+        conn: 열린 DB 연결.
+        report_id: 볼 보고서 번호.
+        report: 이미 되살려 둔 본문이 있으면 다시 안 읽으려고 받는다.
+
+    Returns:
+        고유번호. 열도 본문도 비었으면 빈 문자열.
+        **읽지 못했으면 `None`** — 「확인 못 했다」와 「없다」는 다른 값이다.
+
+    ★ 열을 먼저 보는 이유 — 본문(`payload_json`)의 `company_id`는 출고 상태가
+      FULL일 때만 채워진다(`pipeline/real.py:3519`). 안전 확인 중에 나간 옛
+      저장본은 본문이 비어 있어, 본문만 보면 **이름이 같은 다른 법인을 못 가른다**
+      (발견 F-GS2p1b). 저장 표의 `corp_id` 열은 출고 상태와 무관하게 저장 경로가
+      항상 채운다(`storage/cache.py:398`).
+    ★ 본문 값은 폴백으로 남긴다 — 열이 없던 시절에 다른 길로 저장된 행이 있을 수
+      있고, 값이 있는 쪽을 쓰는 편이 대조를 더 많이 해 준다.
+    ★ 열에서 값을 얻었더라도 **본문 읽기를 건너뛰지 않는다.** 「결속 보고서를 읽지
+      못하면 연결하지 않는다」는 기존 계약(`test_admin_access.py`
+      `test_결속_보고서를_읽지_못하면_연결을_거부한다`)을 이 변경으로 느슨하게
+      만들지 않기 위해서다. 바뀌는 것은 **대조에 쓰는 값**뿐이고, 「확인 못 하면
+      거부」라는 경계는 그대로다.
+    """
+    clean_report_id = str(report_id or "").strip()
+    if not clean_report_id:
+        return ""
+    try:
+        column_value = report_store.load_corp_id(conn, clean_report_id)
+        current = (
+            report
+            if report is not None
+            else report_store.load(conn, clean_report_id)
+        )
+    except Exception:  # noqa: BLE001 — 확인 실패는 통과가 아니라 거부로 넘긴다
+        logger.error("보고서의 회사 고유번호를 읽지 못했습니다")
+        return None
+    if column_value:
+        return column_value
+    if current is None:
+        return ""
+    return str(getattr(current, "company_id", "") or "").strip()
+
+
 def _link_company_id(conn, link) -> str | None:
     """이 링크가 지금 가리키는 회사의 고유번호. 연결된 보고서에서만 읽는다.
 
@@ -549,28 +594,27 @@ def _link_company_id(conn, link) -> str | None:
         **읽지 못했으면 `None`** — 「확인 못 했다」와 「없다」는 다른 값이다.
         같은 값으로 뭉개면 읽기 실패가 조용히 «검사 통과»가 된다(fail-open).
     """
-    linked_report_id = str(getattr(link, "report_id", "") or "")
-    if not linked_report_id:
-        return ""
-    try:
-        current = report_store.load(conn, linked_report_id)
-    except Exception:  # noqa: BLE001 — 확인 실패는 통과가 아니라 거부로 넘긴다
-        logger.error("링크에 연결된 보고서를 읽지 못했습니다")
-        return None
-    if current is None:
-        return ""
-    return str(getattr(current, "company_id", "") or "").strip()
+    return _report_company_id(conn, str(getattr(link, "report_id", "") or ""))
 
 
 def _report_company_mismatch(
-    report, *, expected_company: str, expected_company_id: str | None
+    report,
+    *,
+    expected_company: str,
+    expected_company_id: str | None,
+    report_company_id: str | None = None,
 ) -> str:
     """링크의 회사와 보고서의 회사가 다르면 화면에 보여줄 이유를 만든다.
 
     빈 문자열이면 같은 회사라는 뜻이다. 링크에 회사 꼬리표가 없으면(빈 값)
     비교할 기준이 없으므로 막지 않는다.
+
+    Args:
+        report_company_id: 묶으려는 보고서의 고유번호. 본문이 아니라 저장 표의
+            열을 먼저 읽은 값이다(`_report_company_id`). 생략하면 본문 값을 쓴다 —
+            **옛 저장본은 본문이 비어 있어 대조가 헐거워지므로 되도록 넘긴다.**
     """
-    if expected_company_id is None:
+    if expected_company_id is None or report_company_id is None:
         # ★ 대조에 쓸 값을 못 읽었으면 «통과»가 아니라 거부다. 여기서 이름
         #   검사로만 되돌아가면 동명 다른 법인이 그대로 들어온다.
         return "보고서 정보를 확인할 수 없어 연결하지 않았습니다."
@@ -585,12 +629,21 @@ def _report_company_mismatch(
             f"이 보고서는 다른 회사({report_company})의 것입니다. "
             f"이 링크는 {link_company} 지원용으로 발급됐습니다."
         )
-    report_company_id = str(getattr(report, "company_id", "") or "").strip()
+    candidate_company_id = str(
+        report_company_id
+        if report_company_id is not None
+        else getattr(report, "company_id", "")
+        or ""
+    ).strip()
     link_company_id = str(expected_company_id or "").strip()
-    if link_company_id and report_company_id and link_company_id != report_company_id:
+    if (
+        link_company_id
+        and candidate_company_id
+        and link_company_id != candidate_company_id
+    ):
         return (
             f"이름은 같지만 다른 법인의 보고서입니다"
-            f"({report_company}, 고유번호 {report_company_id}). "
+            f"({report_company}, 고유번호 {candidate_company_id}). "
             f"이 링크에 연결된 회사의 고유번호는 {link_company_id}입니다."
         )
     return ""
@@ -625,6 +678,7 @@ def _validated_report_id(
         report,
         expected_company=expected_company,
         expected_company_id=expected_company_id,
+        report_company_id=_report_company_id(conn, report_id, report),
     )
     if company_mismatch:
         return "", company_mismatch

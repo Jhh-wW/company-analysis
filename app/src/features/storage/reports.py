@@ -988,6 +988,35 @@ def list_report_ids(
     return [(str(row[0]), str(row[1])) for row in rows]
 
 
+def load_corp_id(conn: sqlite3.Connection, report_id: str) -> str:
+    """이 보고서가 «어느 회사 것으로 저장됐는지»를 표의 열에서 직접 읽는다.
+
+    Args:
+        conn: `db.connect()`가 연 연결.
+        report_id: 찾을 보고서 번호.
+
+    Returns:
+        저장할 때 받은 회사 고유번호. 보고서가 없거나 그때 값이 비어 있었으면
+        빈 문자열.
+
+    ★ 왜 `load()`로 안 되나 — `load()`는 `payload_json`만 읽어 되살리고, 본문의
+      `company_id`는 출고 상태가 FULL일 때만 채워진다(`pipeline/real.py:3519`).
+      반면 이 열은 **출고 상태와 무관하게** 저장 경로가 항상 채운다
+      (`cache.save_layer1()` → `save()`의 `corp_id` 인자). 그래서 옛 저장본에서도
+      회사를 가르려면 본문이 아니라 이 열을 봐야 한다.
+    ★ 읽기 실패(예외)는 삼키지 않는다 — 부르는 쪽이 「확인 못 했다」를 「없다」와
+      다르게 다뤄야 하기 때문이다.
+    """
+
+    row = conn.execute(
+        f"SELECT corp_id FROM {TABLE_REPORTS} WHERE report_id = ?",
+        (str(report_id or "").strip(),),
+    ).fetchone()
+    if row is None:
+        return ""
+    return str(row[0] or "").strip()
+
+
 def load(conn: sqlite3.Connection, report_id: str) -> Optional[Report]:
     """`report_id`로 보고서를 현재 표시 규칙으로 불러온다. 없으면 `None`."""
     row = conn.execute(
