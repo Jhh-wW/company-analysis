@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import html as html_lib
 import json
 import re
 import uuid
@@ -243,6 +244,28 @@ def _sealed_v2_report(
     return replace(report, public_projection=build_public_projection(report))
 
 
+def _sealed_v2_report_with_reordered_summary() -> Report:
+    """봉인 요약을 v1 계산과 «다른 순서»로 바꾼 보고서.
+
+    ★ 왜 이런 재료가 필요한가 — 이 시험 재료에서는 봉인 요약과 v1 계산
+      (``report.summary_items`` + ``summary_topic`` 전역)이 «같은 글자»를 낸다.
+      그러면 화면이 어느 쪽을 읽든 HTML이 똑같아서, 요약 블록만 옛 갈래로
+      되돌려도 시험이 전부 통과해 버린다(적대 검수 실측). 봉인 쪽 순서를 뒤집어
+      두 갈래가 반드시 «다른» 화면을 내게 만든다.
+    ★ 순서를 뒤집는 것은 봉인 자료형이 허용하는 값이다 —
+      ``PublicReportProjection``은 요약 «순서»를 제약하지 않는다(장 순서 I1과
+      달리). 그래서 이 재료는 계약을 깨지 않고도 두 갈래를 갈라낸다.
+    """
+
+    report = _sealed_v2_report()
+    projection = report.public_projection
+    assert projection is not None
+    assert len(projection.summary) >= 2, "재료가 잘못됐다 — 뒤집을 요약이 없다"
+    reordered = replace(projection, summary=tuple(reversed(projection.summary)))
+    assert reordered.summary != projection.summary
+    return replace(report, public_projection=reordered)
+
+
 # ══════════════════════════════════════════════════════════
 # 화면 — 실제 공개 GET 계약을 그대로 탄다
 # ══════════════════════════════════════════════════════════
@@ -277,6 +300,25 @@ def _visible(body: str) -> str:
 
 #: 화면에 찍힌 문단 번호(`.pno`)를 순서대로 뽑는다 — `result.html`의 span 그대로다.
 _PNO_RE = re.compile(r'<span class="pno" aria-hidden="true">([^<]*)</span>')
+
+#: 「핵심 요약」 한 항목의 네 칸. v1 갈래와 봉인 갈래가 «같은» class를 쓰므로
+#: 이 그물은 어느 쪽이 그렸든 읽어 낸다 — 그래서 둘을 «값으로» 갈라낼 수 있다.
+_SUMMARY_ITEM_RE = re.compile(
+    r'<span class="summary-number">(.*?)</span>\s*'
+    r'<span class="summary-topic">(.*?)</span>\s*'
+    r'<span class="summary-text">(.*?)</span>\s*'
+    r'<span class="summary-section">\s*(.*?)\s*</span>',
+    re.S,
+)
+
+
+def _summary_rows_on_screen(article: str) -> list[tuple[str, str, str, str]]:
+    """화면의 요약 항목을 «나온 순서 그대로» 네 칸씩 읽는다."""
+
+    return [
+        tuple(html_lib.unescape(cell.strip()) for cell in match)
+        for match in _SUMMARY_ITEM_RE.findall(article)
+    ]
 
 
 def _prose_fragments(text: str) -> list[str]:
@@ -315,6 +357,9 @@ _FORBIDDEN_GLOBALS = (
     "section_content_blocks",
     "source_verification_label",
     "period_summary_from_table",
+    # 요약 주제어도 봉인 값이다. 이 이름이 빠져 있으면 요약 블록만 옛 갈래로
+    # 되돌려도 아무 시험이 안 깨진다(적대 검수 실측 — S4가 겪은 것과 같은 구멍).
+    "summary_topic",
 )
 
 
@@ -377,6 +422,36 @@ def test_웹_v2_결과페이지는_전역_순수함수를_호출하지_않는다
     for visual in 도식:
         if visual.reading:
             assert _visible(visual.reading) in visible
+
+
+def test_웹_v2_핵심요약은_봉인_summary_순서와_문장_그대로다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """요약 항목 «목록 전체»를 통째로 대조한다 — 부분 문자열 검사가 아니다.
+
+    ★ 왜 통째로 보나 — 「그 글자가 화면 어딘가에 있다」는 검사는 화면이 v1
+      계산으로 되돌아가도 통과한다. 두 갈래가 같은 글자를 다른 «순서»로 낼 수
+      있기 때문이다. 순서·번호·주제어·문장·장 번호를 리스트로 한 번에 비교해야
+      「봉인을 읽었다」가 실제로 지켜진다.
+    ★ 재료의 봉인 요약은 v1 계산과 순서가 다르다(위 fixture 주석 참조).
+    """
+
+    report = _sealed_v2_report_with_reordered_summary()
+    projection = report.public_projection
+    assert projection is not None
+
+    article = _article(_render(report, monkeypatch, report_id="s5-summary-order"))
+
+    expected = [
+        (
+            row.ordinal,
+            row.topic,
+            row.text,
+            f"{row.section_display_number}장" if row.section_display_number else "",
+        )
+        for row in projection.summary
+    ]
+    assert _summary_rows_on_screen(article) == expected
 
 
 # ══════════════════════════════════════════════════════════
