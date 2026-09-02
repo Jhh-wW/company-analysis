@@ -324,6 +324,68 @@ def test_display_digest는_ledger만_바꾸면_불변이다() -> None:
     assert digest2.content_sha256 != baseline.content_sha256
 
 
+def test_block_sha256은_ledger를_덮고_display_sha256은_안_덮는다() -> None:
+    """§02-1 원칙 2 — block_sha256은 {version,display,ledger}를 덮어야 한다.
+
+    ``test_display_digest는_ledger만_바꾸면_불변이다``는 보고서 전체
+    digest(content_sha256/display_sha256)만 봐서, ``block_sha256`` 계산에서
+    ledger를 통째로 빼도(§02-2 설계의 ``block_sha256`` 정의 위반) content_sha256이
+    ``PublicReportProjection`` 전체를 canonical_sha256으로 덮는 한 여전히
+    바뀌어 보여 그 결함을 못 잡는다(root 검토에서 실측). 이 시험은 장 블록
+    자신의 ``block_sha256``·``display_sha256``과 다른 장의 불변, 그리고
+    ``PublicReportDigest.section_sha256s`` 항목 단위 변화까지 직접 본다.
+    """
+
+    projection = _full_projection()
+    baseline_block = _section_by_cell(projection, "identity")
+    baseline_other = _section_by_cell(projection, "business_model")
+    baseline_digest = build_report_digest(projection)
+    baseline_sections = dict(baseline_digest.section_sha256s)
+
+    changed = _replace_section(
+        projection,
+        "identity",
+        ledger_overrides={
+            "fact_ids": ("fact-identity-2",),
+            "fact_records": ({"fact_id": "fact-identity-2", "text": "다른 근거"},),
+            "source_grade_contribution": (("1", ("확인", "해석")),),
+        },
+    )
+    changed_block = _section_by_cell(changed, "identity")
+    changed_other = _section_by_cell(changed, "business_model")
+    changed_digest = build_report_digest(changed)
+    changed_sections = dict(changed_digest.section_sha256s)
+
+    # block_sha256은 ledger를 덮어야 하므로 바뀐다.
+    assert changed_block.block_sha256 != baseline_block.block_sha256
+    # display_sha256은 ledger를 안 덮어야 하므로 그대로다.
+    assert changed_block.display_sha256 == baseline_block.display_sha256
+    # 손대지 않은 다른 장의 block_sha256·display_sha256은 둘 다 불변.
+    assert changed_other.block_sha256 == baseline_other.block_sha256
+    assert changed_other.display_sha256 == baseline_other.display_sha256
+    # 보고서 digest의 section_sha256s는 identity 항목만 바뀐다.
+    assert changed_sections["identity"] != baseline_sections["identity"]
+    for cell in SECTION_IDS:
+        if cell == "identity":
+            continue
+        assert changed_sections[cell] == baseline_sections[cell]
+
+
+def test_PUBLIC_CITATION_SOURCE_FIELDS는_canonical_Source_projection_키와_같다() -> None:
+    """부록 행 source 키 계약이 canonical.py의 실제 Source projection과 갈리지 않게 감시한다.
+
+    ``_PUBLIC_CITATION_SOURCE_FIELDS``는 private 함수(``_source_public_projection``,
+    ``canonical.py`` ``__all__`` 밖)의 키 목록을 손으로 복제한 상수라, 원본이
+    필드를 추가·삭제해도 이 파일은 조용히 낡을 수 있다. 시험에서만 그 private
+    함수를 직접 불러 두 키 집합이 여전히 같은지 매 실행마다 확인한다.
+    """
+
+    from src.shared.report_generation import canonical as canonical_module
+
+    produced_keys = set(canonical_module._source_public_projection({}))
+    assert produced_keys == public_projection._PUBLIC_CITATION_SOURCE_FIELDS
+
+
 def test_표시_파생_블록을_하나_빼면_content와_display_digest가_모두_바뀐다() -> None:
     projection = _full_projection(
         section_overrides={
