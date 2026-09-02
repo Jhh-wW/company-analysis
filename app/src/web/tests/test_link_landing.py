@@ -710,13 +710,9 @@ def test_안내문은_다음에_할_일을_알려준다(client: TestClient):
 # ══════════════════════════════════════════════════════════
 
 
-def _닫힌_링크로_조사를_시도한다() -> str:
-    """살아 있는 줄 알고 눌렀는데 그 사이 링크가 닫힌 경우의 응답 본문.
-
-    `_track_of`가 갈래를 정한 뒤 실행 경계가 한 번 더 확인하는 자리다. 그
-    사이에 링크가 닫히면 여기서 403 화면이 나온다.
-    """
-    요청 = Request(
+def _닫힌_링크_요청() -> Request:
+    """실행 경계에 바로 넘길 최소 요청 하나."""
+    return Request(
         {
             "type": "http",
             "http_version": "1.1",
@@ -730,8 +726,16 @@ def _닫힌_링크로_조사를_시도한다() -> str:
             "client": ("127.0.0.1", 50123),
         }
     )
+
+
+def _닫힌_링크로_조사를_시도한다() -> str:
+    """살아 있는 줄 알고 눌렀는데 그 사이 링크가 닫힌 경우의 응답 본문.
+
+    `_track_of`가 갈래를 정한 뒤 실행 경계가 한 번 더 확인하는 자리다. 그
+    사이에 링크가 닫히면 여기서 403 화면이 나온다.
+    """
     막힘 = request_helpers.require_active_share_link(
-        요청,
+        _닫힌_링크_요청(),
         resolved_track=(share_tracks.Track.LINK, _열쇠, 3000.0),
     )
     assert 막힘 is not None
@@ -786,3 +790,81 @@ def test_닫힌_링크_화면_전체에_내부용어가_없다():
         assert 용어.casefold() not in 글자.casefold(), 용어
     # 화면이 무엇에 대한 것인지는 그대로 알 수 있어야 한다.
     assert "초대 링크" in 글자
+
+
+def _저장소를_못_읽을_때의_화면(monkeypatch) -> str:
+    """링크 상태를 «확인조차 못 했을» 때 나오는 503 화면의 응답 본문.
+
+    닫힌 것과 다르다 — 닫혔다고 단정하면 안 되고, 열어 줘서도 안 된다.
+    """
+    def 못_읽는다(*_args, **_kwargs):
+        raise OSError("DB unavailable")
+
+    monkeypatch.setattr(request_helpers, "_load_active_share_link", 못_읽는다)
+    막힘 = request_helpers.require_active_share_link(
+        _닫힌_링크_요청(),
+        resolved_track=(share_tracks.Track.LINK, _열쇠, 3000.0),
+    )
+    assert 막힘 is not None
+    assert 막힘.status_code == 503
+    return 막힘.body.decode("utf-8")
+
+
+def test_링크상태를_못_읽었을_때의_화면도_내부용어를_쓰지_않는다(monkeypatch):
+    """★ 같은 화면 틀을 쓰는 두 갈래가 서로 다른 어휘를 쓰면 안 된다.
+
+    403(닫힘)은 이미 「초대 링크」로 말하는데 503(확인 실패)만 「LINK」로 말하면,
+    같은 화면이 상황에 따라 다른 나라 말을 하는 셈이다.
+    """
+    본문 = _저장소를_못_읽을_때의_화면(monkeypatch)
+    글자 = visible_text(본문)
+
+    assert "LINK" not in 본문
+    for 용어 in _내부용어:
+        assert 용어.casefold() not in 글자.casefold(), 용어
+    assert "우리" not in 글자
+
+
+def test_링크상태를_못_읽었을_때는_닫혔다고_단정하지_않는다(monkeypatch):
+    """★ 못 읽은 것과 닫힌 것은 다르다. 닫혔다고 말하면 거짓말이 될 수 있다."""
+    글자 = visible_text(_저장소를_못_읽을_때의_화면(monkeypatch))
+
+    assert "초대 링크 상태를 지금 확인할 수 없습니다" in 글자
+    assert "잠시" in 글자
+    # 403 화면의 「사용이 중단되어」를 여기서 쓰면 안 된다.
+    assert "사용이 중단되어" not in 글자
+
+
+def test_링크_쿠키가_있는_회원도_랜딩_카드를_본다(client: TestClient):
+    """★ 회원 갈래도 «직접 돌려서» 확인한다 (2026-09-02 검토자 관찰).
+
+    관리자 케이스만 시험이 있었고 회원은 코드를 읽어 추론했을 뿐이었다.
+    카드를 여는 조건은 갈래가 아니라 「살아 있는 초대 링크 쿠키」이므로
+    초대받은 친구가 링크를 찍어도 받는 사람과 같은 화면을 봐야 한다.
+    """
+    report_id = _보고서를_저장한다("하이브")
+    _링크발급("하이브", report_id=report_id)
+    with storage_db.connect() as conn:
+        share_allow.invite(
+            conn, email="friend@example.com", note="시험",
+            now_iso="2026-08-16T10:00:00",
+        )
+        conn.commit()
+    _로그인(client, "friend@example.com", is_admin=False)
+
+    열림 = client.get(f"/k/{_열쇠}", follow_redirects=False)
+    랜딩 = client.get("/")
+    본문 = visible_text(랜딩.text)
+
+    # 이 손님은 «회원»이다 — 링크 갈래여서 카드가 보이는 것이 아니다.
+    assert share_tracks.decide_track(
+        email="friend@example.com",
+        is_admin=False,
+        is_member=True,
+        share_key=_열쇠,
+    ) is share_tracks.Track.MEMBER
+    assert 열림.headers["location"] == "/"
+    assert "하이브 보고서 보기" in 본문
+    assert "다른 회사 분석해 보기" in 본문
+    assert f'href="/result/{report_id}"' in 랜딩.text
+    assert "남은 이용 한도: 오늘 3,000원 · 전체 3,000원" in 본문
