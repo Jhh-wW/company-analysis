@@ -638,7 +638,7 @@ def test_2장에_구성표_2개가_있어도_v2_출고_게이트를_통과해_PD
     engine: _JypFakeEngine,
 ) -> None:
     """★★ 과제 2 — 「지역별 표를 2장에 붙이면 중복 검사 게이트가 걸려 PDF 출고가
-    막힌다」는 우려를 «추론»이 아니라 «실행 결과»로 확인한다 (team-lead 요구).
+    막힌다」는 우려를 «추론»이 아니라 «실행 결과»로 확인한다.
 
     ★ 중복 검사 게이트의 실체 — `report_standard/publish.py:2900
     validate_publishable()`(그 안의 `_semantic_duplicate_key` 등 `[duplicate]`

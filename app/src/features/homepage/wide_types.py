@@ -12,8 +12,7 @@
   그래서 이 필드를 «경계를 뺀 실제 본문 텍스트 조각들의 튜플»로 구현한다
   (문자 오프셋 쌍이 아니라 텍스트 그 자체). 숫자 오프셋 쌍으로 두면 원문을
   같이 들고 다녀야 해서 계약이 하나 더 늘고, 다음 모듈(장별 근거 변환)이
-  바로 쓸 수 있는 형태가 아니다. 이 해석은 팀 리드에게 최종 보고에서
-  명시적으로 알린다.
+  바로 쓸 수 있는 형태가 아니다.
 """
 
 from __future__ import annotations
@@ -46,8 +45,8 @@ SOURCE_TIER_2_PUBLIC = "TIER_2_PUBLIC"
 SOURCE_TIER_3_TRUSTED = "TIER_3_TRUSTED"
 _SOURCE_TIERS = frozenset({SOURCE_TIER_1_OFFICIAL, SOURCE_TIER_2_PUBLIC, SOURCE_TIER_3_TRUSTED})
 
-#: fragment.slot_id에 허용하는 어휘 — 이 collector 전용(팀 리드 2026-08-31 통보,
-#: 정본은 `app/src/shared/report_evidence/policy.py`). comparison_*·limitation·
+#: fragment.slot_id에 허용하는 어휘 — 이 collector 전용
+#: (정본은 `app/src/shared/report_evidence/policy.py`). comparison_*·limitation·
 #: historical_performance는 이 집합에 없으므로 애초에 만들어질 수 없다.
 _ALLOWED_SLOT_IDS: frozenset[str] = frozenset(WIDE_REQUIRED_SLOT_IDS)
 
@@ -274,7 +273,7 @@ class WideFragment:
 class WideCollectionResult:
     """수집 한 번의 전체 결과 — 대상 회사·문서 목록·시도 기록 목록.
 
-    ★ 계약 generation=8 마지막 고리(팀 리드 2026-08-31): ``company_id``는
+    ★ 계약 generation=8 마지막 고리: ``company_id``는
       ``collect_official_web_documents(company_id=...)``가 호출 인자로
       받은 값을 그대로 싣는 **정본**이다. documents·attempts에서
       역산하지 않는다 — 문서 생성부에 버그가 생겨 문서들이 일제히 엉뚱한
@@ -300,7 +299,7 @@ class WideCollectionResult:
                 raise ValueError(f"document_id가 중복되었습니다: {document.document_id}")
             seen_document_ids.add(document.document_id)
             if document.company_id != self.company_id:
-                # 내부 모순 — 조용히 하나를 골라 감추지 않는다(팀 리드 승인 정책).
+                # 내부 모순 — 조용히 하나를 골라 감추지 않는다.
                 raise ValueError(
                     "document.company_id가 결과의 company_id와 다릅니다(내부 불일치): "
                     f"document_id={document.document_id} document.company_id={document.company_id!r} "

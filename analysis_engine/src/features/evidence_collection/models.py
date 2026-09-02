@@ -121,7 +121,7 @@ class CollectedDocument:
 class EvidenceFragment:
     """문서 안의 의미 조각 — 장·슬롯 채점 결과까지 실은 최종 단위.
 
-    ★ generation=8(2026-08-31 team-lead 통보) — ``company_id``는 이 조각을
+    ★ generation=8 — ``company_id``는 이 조각을
     만든 «조회가 실제로 대상으로 한 회사»를 직접 싣는다. harvest의
     company_id에서 나중에 채워 넣는 값이 아니다 — 수집 시점(collect.py)에
     실제 대상 값을 넣어야 하고, DartEvidenceHarvest가 이 값과 harvest 전체의

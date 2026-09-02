@@ -1,11 +1,11 @@
 """실제 DART 연동 — core.dart_client의 검증된 제한·상태 계약을 재사용한다.
 
-★ P0-4(2026-08-31 team-lead 통보) — 이 슬라이스는 지금까지 주입 Protocol과
+★ P0-4 — 이 슬라이스는 지금까지 주입 Protocol과
 가짜 fetcher(tests/fixtures/fake_fetcher.py)만 있었고 실제 DART에 한 번도
 연결되지 않았다. 이 파일이 그 간극을 메운다: ``filing_select.DartFetcher``
 Protocol을 만족하는 실제 어댑터를 ``core/dart_client.py``의 함수 위에 얹는다
-(그 파일 자체는 고치지 않고 import만 한다 — 소유자 지침 「기존
-core/dart_client.py의 상한·상태 처리 패턴을 재사용하라」).
+(그 파일 자체는 고치지 않고 import만 한다 — core/dart_client.py의
+상한·상태 처리 패턴을 그대로 재사용한다).
 
 ★ 이 슬라이스의 범위 — 여기까지다. 파이프라인 배선(운영 경로에서 실제로
 이 클래스를 만들어 ``collect_dart_evidence``에 주입하는 일)은 다른 담당
@@ -161,7 +161,7 @@ class DartRuntimeFetcher:
                 rcept_no=str(row.get("rcept_no") or ""),
                 report_nm=str(row.get("report_nm") or ""),
                 rcept_dt=str(row.get("rcept_dt") or ""),
-                # item 3(2026-08-31 team-lead 통보) — corp_code·corp_name이
+                # item 3 — corp_code·corp_name이
                 # 실려 오면 방어적으로(.get) 읽어 filing_select.py의 행
                 # 수준 혼입 방어에 쓴다. 실제 list.json 응답에 이 필드가
                 # 오는지는 실측하지 못했다(확인 못 함 — live smoke 필요) —

@@ -263,7 +263,7 @@ def test_P1_3_deadline이_없으면_예전과_같이_전부_조회한다() -> No
 
 
 # ══════════════════════════════════════════════════════════
-# generation=8 후속 item 2 재정의(2026-08-31 team-lead 재확정) — 기준은
+# generation=8 후속 item 2 재정의 — 기준은
 # 「그 조회가 실제로 슬롯을 들여다봤는가」다. 목록 조회는 «찾았다»는
 # 사실만으로는 어떤 슬롯도 들여다본 게 아니므로 OK만 OPTIONAL로 내린다.
 # MISSING(그 공시가 실제로 없다는 확인)·FAILED(확인 자체를 못 함)는 참인
@@ -272,7 +272,7 @@ def test_P1_3_deadline이_없으면_예전과_같이_전부_조회한다() -> No
 
 
 def _count_list_ok_required(attempts) -> int:
-    """team-lead 지시 — 「목록 조회 + OK + REQUIRED」가 0건임을 세는 시험용."""
+    """「목록 조회 + OK + REQUIRED」가 0건임을 세는 시험용."""
     return sum(
         1 for a in attempts
         if a.attempt_id.startswith("list:")
@@ -298,7 +298,7 @@ def test_item2_목록_조회_OK는_REQUIRED가_아니라_OPTIONAL로_내려간�
 
 
 def test_item2_목록_조회_MISSING은_REQUIRED_광역을_그대로_유지한다() -> None:
-    """team-lead 재정의 — 「그 공시가 실제로 없다」는 참인 확인이므로
+    """「그 공시가 실제로 없다」는 참인 확인이므로
     자료 부족 방향(REQUIRED+광역)이 맞다. 다운그레이드하지 않는다.
     """
     fetcher = FakeFetcher(list_responses_by_pblntf_ty={

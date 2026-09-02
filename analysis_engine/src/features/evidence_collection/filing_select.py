@@ -22,7 +22,7 @@ from features.evidence_collection.models import CollectionAttempt
 class RawFilingRow:
     """list.json 응답 행 하나 — 이 feature가 실제로 쓰는 필드만 남긴다.
 
-    ★ item 3(2026-08-31 team-lead 통보) — ``corp_code``·``corp_name``은
+    ★ item 3 — ``corp_code``·``corp_name``은
     fetcher가 방어적으로(``.get``) 읽어 실어 주면 요청 회사와 대조하는 데
     쓴다. 필드가 실제로 list.json 응답에 오는지는 실측하지 못했다(확인 못
     함 — live smoke 필요) — 그래서 기본값은 빈 문자열이고, 비어 있으면
@@ -191,7 +191,7 @@ def _attempt_for_list_query(
 ) -> tuple[CollectionAttempt, list[RawFilingRow], int]:
     """목록 조회 attempt 1건을 만든다. FAILED가 아니면 identity_mismatch_count도 함께 돌려준다.
 
-    ★ item 2 재정의(2026-08-31 team-lead 재확정) — 기준은 «그 조회가
+    ★ item 2 재정의 — 기준은 «그 조회가
     실제로 슬롯을 들여다봤는가»다.
     - FAILED·TRUNCATED: 「이것 때문에 그 슬롯들을 확인 못 했다」는 정확한
       뜻이라 REQUIRED+광역이 안전하다(UNKNOWN으로 이어진다). 그대로 둔다.

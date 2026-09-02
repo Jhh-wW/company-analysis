@@ -175,8 +175,7 @@ COMPANY_TYPE_LISTED: Final[str] = "listed"
 COMPANY_TYPE_AUDIT_ONLY: Final[str] = "audit_only"
 COMPANY_TYPE_FINANCIAL: Final[str] = "financial"
 #: 판정 근거가 될 문서를 하나도 확보하지 못했거나 필수 목록 조회 자체가
-#: FAILED였을 때 쓴다(P1-1, 2026-08-31 team-lead 통보) — 「모르면 audit_only로
-#: 지어내지 않는다」. 소비자에게는 team-lead가 별도로 통보했다.
+#: FAILED였을 때 쓴다(P1-1) — 「모르면 audit_only로 지어내지 않는다」.
 COMPANY_TYPE_UNDECIDED: Final[str] = "undecided"
 VALID_COMPANY_TYPES: Final[frozenset[str]] = frozenset({
     COMPANY_TYPE_LISTED, COMPANY_TYPE_AUDIT_ONLY, COMPANY_TYPE_FINANCIAL, COMPANY_TYPE_UNDECIDED,
@@ -242,7 +241,7 @@ MAX_RELATED_FILINGS: Final[int] = 3
 #:   여기서는 «이 공시 종류가 대체로 어떤 장을 채우는가»만 굵게 표시한다.
 #:   사업/감사보고서는 전문(全文)이라 9개 장 전체에 걸치고, 반기·분기보고서는
 #:   최근 실적·진행 상황 보충이라 4장·5장에 걸친다고 본다.
-#: ★ 2026-08-31 team-lead 통보 — attempts.slot_ids도 COLLECTOR_SLOTS_BY_SECTION
+#: ★ attempts.slot_ids도 COLLECTOR_SLOTS_BY_SECTION
 #:   (수집기 1차 표적)에서만 고른다. composer 45개 전체가 아니다 — 수집기가
 #:   채우지 않기로 한 슬롯(historical_performance·비교 4종)을 「이 공시가
 #:   영향을 준다」고 기록하면 다른 담당자가 잘못된 커버리지 기대를 갖는다.
@@ -360,7 +359,7 @@ IDENTITY_CHECK_VERIFIED: Final[str] = "verified_match"
 IDENTITY_CHECK_UNVERIFIED: Final[str] = "unverifiable_no_fetcher_metadata"
 
 # ══════════════════════════════════════════════════════════
-# generation=8 후속 (2026-08-31 team-lead 통보) — 목록 행 수준 혼입 방어·
+# generation=8 후속 — 목록 행 수준 혼입 방어·
 # 필터 제외/행 없음 구분
 # ══════════════════════════════════════════════════════════
 

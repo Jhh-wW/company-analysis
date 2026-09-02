@@ -18,8 +18,8 @@
   한다. document의 company_id와 자동으로 같다고 가정하면 다른 회사
   조회 결과가 섞여도 조용히 통과할 수 있어, 그 가정 자체를 없앴다.
   ``build_fragments``는 이 명시 인자를 **공격 시험 전용**으로 유지한다
-  — 「호출자가 일부러 다른 값을 넘기는 정당한 운영 시나리오」는 없다
-  (팀 리드 2026-08-31). 향후 운영 결합부도 아래
+  — 「호출자가 일부러 다른 값을 넘기는 정당한 운영 시나리오」는 없다.
+  향후 운영 결합부도 아래
   ``build_fragments_for_collection``을 써야 한다 — 수집 결과 자신에서
   company_id를 한 번만 꺼내 모든 문서에 그대로 실으므로, 호출 지점에서
   값을 잘못 넘길 방법이 구조적으로 없다(``build_fragments``를 직접
@@ -129,7 +129,7 @@ def build_fragments(document: WideDocumentIdentity, *, company_id: str) -> tuple
 def build_fragments_for_collection(result: WideCollectionResult) -> tuple[WideFragment, ...]:
     """수집 결과의 모든 문서에서 fragment를 한 번에 만드는 얇은 편의 함수.
 
-    ★ 계약 generation=8 마지막 고리(팀 리드 2026-08-31) — 향후 운영 결합부는
+    ★ 계약 generation=8 마지막 고리 — 향후 운영 결합부는
       이 함수를 써야 한다(``build_fragments``에 지역 거부를 추가하는 대신
       구조로 막는다). ``result.company_id``를 정본으로 모든 문서에 그대로
       싣는다 — **documents에서 역산하지 않는다.** documents에서 역산하면

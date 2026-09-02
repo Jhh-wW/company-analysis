@@ -601,7 +601,7 @@ def test_P1_5_중복_문서는_누적_바이트에_가산되지_않는다(monkey
 
 
 def test_gen8_회사_A_수집_산출의_모든_fragment_attempt는_A의_company_id를_갖는다() -> None:
-    """team-lead 통보(2026-08-31) — 회사 A 대상 수집 산출의 모든 fragment·
+    """회사 A 대상 수집 산출의 모든 fragment·
     attempt가 A의 company_id를 갖는지 고정한다. list 단계 attempts·문서
     단계 attempts·scored fragments를 전부 만들어내도록 사업보고서+반기보고서
     두 건을 함께 수집한다(list attempt 여러 종류 + document attempt +
@@ -636,7 +636,7 @@ def test_gen8_회사_A_수집_산출의_모든_fragment_attempt는_A의_company_
 
 
 # ══════════════════════════════════════════════════════════
-# generation=8 후속 item 2 재정의(2026-08-31 team-lead 재확정) — 기준은
+# generation=8 후속 item 2 재정의 — 기준은
 # 「그 조회가 실제로 슬롯을 들여다봤는가」다. 문서 fetch·분할·채점을 실제로
 # 거친 attempt(OK)는 광역 slot_ids + REQUIRED가 «정직하다»(그대로 둔다).
 # 문제는 목록 조회뿐이다 — 「찾았다」(OK)는 사실만으로는 슬롯을 들여다본
@@ -646,7 +646,7 @@ def test_gen8_회사_A_수집_산출의_모든_fragment_attempt는_A의_company_
 
 
 def _count_list_ok_required(attempts) -> int:
-    """team-lead 지시 — 「목록 조회 + OK + REQUIRED」가 0건임을 세는 시험용."""
+    """「목록 조회 + OK + REQUIRED」가 0건임을 세는 시험용."""
     return sum(
         1 for a in attempts
         if a.attempt_id.startswith("list:")
@@ -671,7 +671,7 @@ def test_item2_문서_fetch_ok는_광역_slot_ids와_REQUIRED를_그대로_유�
 
 
 def test_item2_no_scored_evidence와_missing_fetch는_REQUIRED_광역을_유지하고_duplicate만_OPTIONAL이다() -> None:
-    """team-lead 재정의 — 「참인 확인」(문서를 다 읽었지만 없음 / 문서가
+    """「참인 확인」(문서를 다 읽었지만 없음 / 문서가
     실제로 없음)은 REQUIRED+광역을 유지한다. duplicate만 fetch·분할·채점을
     아예 건너뛰므로 여전히 OPTIONAL이다.
     """
@@ -713,7 +713,7 @@ def test_item2_no_scored_evidence와_missing_fetch는_REQUIRED_광역을_유지�
 
 
 def test_item2_여러_시나리오에_걸쳐_목록_OK_REQUIRED_위반_0건이다() -> None:
-    """team-lead 지시 — 「목록 조회 + OK + REQUIRED」가 0건임을 세는 시험.
+    """「목록 조회 + OK + REQUIRED」가 0건임을 세는 시험.
     상장·감사·금융·무신호·목차 등 대표 시나리오를 전부 실제로 돌려 확인한다.
     """
     scenarios: list[tuple[str, str, str, str]] = [
@@ -731,7 +731,7 @@ def test_item2_여러_시나리오에_걸쳐_목록_OK_REQUIRED_위반_0건이�
 
 
 def test_item2_목록_OK인데_문서_fetch가_FAILED면_그_source_kind에는_확인된_REQUIRED가_없다() -> None:
-    """team-lead 지시 — 목록 OK 뒤 문서 fetch가 FAILED면 최종 판정 방향이
+    """목록 OK 뒤 문서 fetch가 FAILED면 최종 판정 방향이
     UNKNOWN 쪽이어야 한다. 내 엔진 안에서 이를 대신 증명하는 방법: 이
     source_kind에 REQUIRED+OK/MISSING인 attempt가 «하나도» 없고, REQUIRED+
     FAILED인 attempt가 있어야 한다 — 소비 계약의 「REQUIRED가 전부
@@ -766,7 +766,7 @@ def test_item2_목록_OK인데_문서_fetch가_FAILED면_그_source_kind에는_�
 
 
 # ══════════════════════════════════════════════════════════
-# team-lead 재확인(2026-08-31) — item2가 과잉 교정되면(광역 slot_ids를
+# item2가 과잉 교정되면(광역 slot_ids를
 # 실제 확인된 슬롯으로 좁히면) 빈 슬롯을 덮는 REQUIRED 경로가 사라져
 # 모든 회사가 UNKNOWN(TRANSIENT_FAILURE)으로 오판정될 수 있었다. 「위반
 # 0건」 시험은 거짓 확인(false positive) 방향만 봤으므로, 반대 방향

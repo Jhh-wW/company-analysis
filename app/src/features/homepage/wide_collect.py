@@ -107,7 +107,7 @@ _RECRUIT_MARKERS: tuple[str, ...] = ("recruit", "career", "jobs", "채용")
 #: 참조 — 모든 attempt 생성이 이 한 곳을 거치므로 호출부마다 따로 챙기지 않아도
 #: 절대 빈 slot_ids가 새 나가지 않는다).
 #:
-#: ★ 정정 1의 최종판(팀 리드 2026-08-31, P0 — 결합 종단시험에서 실측):
+#: ★ 정정 1의 최종판(P0 — 결합 종단시험에서 실측):
 #: 처음엔 「FAILED·TRUNCATED면 광역 REQUIRED가 정확하다」로 정정했으나,
 #: 그건 **그 경로가 그 slot의 유일한 확인 경로일 때만** 참이다. 웹
 #: 수집기는 17개 slot 전부의 유일한 경로가 아니다 — 공시 문서 수집이
@@ -536,8 +536,8 @@ def _visit_page(
     # 않는다는 뜻이라, 이 attempt는 어떤 slot의 실제 근거 경로도 아니다.
     # 웹은 17개 slot 전부의 유일한 확인 경로가 아니므로(공시 문서 수집·
     # 페이지 유형이 좁힌 다른 경로가 따로 있다) 상태(OK/MISSING/FAILED)와
-    # 무관하게 항상 OPTIONAL이다 — FAILED도 예외가 아니다(팀 리드가 IR
-    # FAILED 사례로 결합 종단시험에서 실측한 P0와 같은 원인, 2026-08-31).
+    # 무관하게 항상 OPTIONAL이다 — FAILED도 예외가 아니다(IR FAILED 사례로
+    # 결합 종단시험에서 실측한 P0와 같은 원인).
     # document 자체의 requirement(등록 하위도메인 여부)는 건드리지 않는다
     # — attempt 전용 판단이라 별도 변수로 둔다.
     attempt_requirement = requirement
@@ -814,7 +814,7 @@ def _run_ir_pdf_phase(
         # 조각화는 build_fragments가 문서별로 나중에 한다) — 웹은 그 17개
         # slot 전부의 유일한 확인 경로가 아니므로(공시 문서 수집·페이지
         # 유형이 좁힌 경로가 따로 있다) 상태와 무관하게 항상 OPTIONAL이다.
-        # ★ 팀 리드가 결합 종단시험에서 실측한 P0(2026-08-31): IR FAILED
+        # ★ 결합 종단시험에서 실측한 P0: IR FAILED
         # attempt 하나가 REQUIRED+광역으로 나가면, 다른 소스가 채운 근거
         # 까지 UNKNOWN으로 끌어내려 최종 게이트가 STOP_TRANSIENT_FAILURE로
         # 떨어졌다 — 이 상수(_BROAD_SLOT_REQUIREMENT)가 그걸 막는다.

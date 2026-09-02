@@ -1,18 +1,18 @@
 """DartEvidenceHarvest를 평범한 dict·list·str·int로 직렬화한다.
 
-향후 app 쪽 adapter는 이 Mapping을 그대로 계약 자료형으로 변환해야 한다
-(2026-08-31 team-lead 통보). 현재 실서비스 adapter는 아직 없다. frozen
+향후 app 쪽 adapter는 이 Mapping을 그대로 계약 자료형으로 변환해야 한다.
+현재 실서비스 adapter는 아직 없다. frozen
 dataclass·frozenset·tuple 같은 파이썬 전용 타입은 하나도 새지 않는다 —
 JSON으로 그대로 dump할 수 있는 모양만 돌려준다.
 
-★ generation=7 계약(P0-5, 2026-08-31) — 각 document Mapping에는
+★ generation=7 계약(P0-5) — 각 document Mapping에는
 ``exact_evidence_hashes``가 있다: 그 document_id로 실제 내보내는 fragment들의
 ``text_sha256`` 전체를 결정론적 순서로, 중복 없이 담는다. ``harvest.fragments``는
 collect.py가 이미 scored fragment만 넣도록 보장하므로(P0-1·P0-3) 이 값은
 documents에 실린 문서마다 절대 비지 않는다 — 두 보장이 같은 경계(scored
 fragment 존재 여부)에서 나온다.
 
-★ generation=8 계약(2026-08-31 team-lead 통보) — fragments·attempts 각
+★ generation=8 계약 — fragments·attempts 각
 항목에도 ``company_id``가 있다. **이 값은 harvest.company_id에서 채워
 넣거나 호출 인자로 덮어쓰지 않는다** — fragment.company_id·attempt.company_id를
 있는 그대로 옮길 뿐이다(아래 ``_fragment_to_mapping``·``_attempt_to_mapping``은

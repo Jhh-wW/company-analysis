@@ -49,7 +49,7 @@ def _document_attempt(
 ) -> CollectionAttempt:
     """문서 단계 attempt 1건을 만든다.
 
-    ★ item 2 불변식(2026-08-31 team-lead 통보) — ``slot_ids``를 지정하지
+    ★ item 2 불변식 — ``slot_ids``를 지정하지
     않으면 source_kind의 전체 범위(광역)를 쓴다. 이건 REQUIRED+OK/MISSING
     조합에서는 금지된 조합이므로(광역 slot 집합 = «이 자료가 없다»는 사실
     주장이 되어 버린다), 그 조합으로 호출하는 자리는 반드시 ``slot_ids``에
@@ -142,8 +142,8 @@ def collect_dart_evidence(
     올라가지 않는다(P0-3) — 「조회했다」는 사실 자체는 attempt로 보존한다.
 
     ``documents``·``fragments``·``attempts`` 전부가 이 함수에 넘긴
-    ``company_id``를 자기 필드로 직접 싣는다(generation=8, 2026-08-31
-    team-lead 통보) — 만드는 자리에서 실제 대상 회사 값을 넣고,
+    ``company_id``를 자기 필드로 직접 싣는다(generation=8) — 만드는
+    자리에서 실제 대상 회사 값을 넣고,
     DartEvidenceHarvest 생성 시 하나라도 다르면 즉시 거절된다. 「회사별로
     따로 수집하니 섞일 리 없다」는 호출자 기억에 기대지 않는다.
     """
@@ -170,7 +170,7 @@ def collect_dart_evidence(
 
         if fetch_result.state == c.ATTEMPT_STATE_MISSING:
             # 확인된 부재(P0-2) — 전송 장애(FAILED)와 분리해서 남긴다.
-            # ★ item 2 정정(2026-08-31 team-lead 재정의) — fetcher가 「이
+            # ★ item 2 정정 — fetcher가 「이
             # 문서는 원래 없다」고 확인한 것은 목록 단계 MISSING과 같은
             # 성격의 «참인 확인»이다. REQUIRED+광역을 유지한다(다운그레이드
             # 하지 않는다).
@@ -208,8 +208,8 @@ def collect_dart_evidence(
             # 판정을 하면 실제로 쓰이지 않는 바이트가 예산을 유령처럼
             # 소비해 무관한 다음 문서가 부당하게 TRUNCATED될 수 있었다.
             # ★ item 2 정정 — 이 문서는 분할·채점을 «아예 건너뛴다»(원본
-            # 문서만 실제로 훑었다). team-lead의 재정의는 「fetch·분할·채점을
-            # 실제로 거친 OK」만 광역+REQUIRED가 정직하다고 못박았고, 이
+            # 문서만 실제로 훑었다). 「fetch·분할·채점을 실제로 거친 OK」만
+            # 광역+REQUIRED가 정직하다는 것이 기준이고, 이
             # 경로는 그 파이프라인을 안 거치므로 여전히 OPTIONAL로 낮춘다.
             attempts.append(_document_attempt(
                 company_id, filing, c.ATTEMPT_STATE_OK, c.REASON_DOCUMENT_DUPLICATE, fetch_result,
@@ -252,7 +252,7 @@ def collect_dart_evidence(
         if not scored:
             # 채점 가능한 근거가 하나도 없다 — 문서 자체를 최종 산출에서
             # 뺀다(P0-3). 조회는 성공했다는 사실만 attempt로 남긴다.
-            # ★ item 2 정정(2026-08-31 team-lead 재정의) — fetch·분할·채점을
+            # ★ item 2 정정 — fetch·분할·채점을
             # 실제로 다 거쳤다(문서 전문을 훑었다) — 「이 공시를 다 읽었는데
             # 그 슬롯 근거가 없었다」는 참인 진술이므로 광역 slot_ids +
             # REQUIRED를 그대로 둔다(다운그레이드하지 않는다).
@@ -328,7 +328,7 @@ def collect_dart_evidence(
 
         documents.append(document)
         fragments.extend(new_fragments)
-        # ★ item 2 정정(2026-08-31 team-lead 재정의) — 「REQUIRED+OK+광역
+        # ★ item 2 정정 — 「REQUIRED+OK+광역
         # slot_ids」 조합 자체가 문제가 아니라, «그 조회가 실제로 문서
         # 전문을 훑었는가»가 기준이다. 이 attempt는 fetch·분할·채점을
         # 전부 거쳤으므로 광역 slot_ids를 그대로 쓰는 게 정직하다(「이

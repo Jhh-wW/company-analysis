@@ -845,8 +845,7 @@ def test_apex_www_짝중_하나만_robots가_거부해도_다른_하나는_독�
 def test_apex에서_다른_등록도메인으로의_redirect는_apex_www_짝이_있어도_차단된다():
     """apex/www 짝 결속이 함께 있어도, 페이지 안에서 아예 다른 등록
     도메인으로 redirect되면 여전히 차단돼야 한다 — 앞서 고친 eTLD+1
-    결함 수정이 이 기능으로 되돌아가면 안 된다(팀 리드가 명시적으로
-    경계한 사항)."""
+    결함 수정이 이 기능으로 되돌아가면 안 된다."""
     pages = {
         "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
         "https://company.example/sitemap.xml": _missing("https://company.example/sitemap.xml"),
@@ -1215,7 +1214,7 @@ def _assert_no_broad_required_slot_claim(attempts) -> None:
     slot 전부의 유일한 경로가 아니다(공시 문서 수집·페이지 유형이 좁힌
     경로가 따로 있다) — REQUIRED+광역으로 나가면 attempt 하나(예: IR PDF
     조회 FAILED)의 실패가 다른 소스가 채운 근거까지 UNKNOWN으로 끌어내린다
-    (팀 리드가 결합 종단시험에서 실측한 P0: IR FAILED attempt 하나 때문에
+    (결합 종단시험에서 실측한 P0: IR FAILED attempt 하나 때문에
     9개 장 중 8개가 UNKNOWN, 최종 게이트 STOP_TRANSIENT_FAILURE로 떨어짐).
     """
     all_slots = set(WIDE_REQUIRED_SLOT_IDS)
@@ -1244,7 +1243,7 @@ def test_불변식_광역slot은_REQUIRED가_0건이다_정상수집():
 
 def test_불변식_광역slot은_REQUIRED가_0건이다_robots차단():
     """robots 조회 자체가 실패(FAILED)해도 광역 attempt는 REQUIRED가 아니다
-    — 이 사례가 바로 팀 리드가 결합 종단시험에서 실측한 P0(IR FAILED)와
+    — 이 사례가 바로 결합 종단시험에서 실측한 P0(IR FAILED)와
     같은 원인이다."""
     site = _FakeWideSite({"https://company.example/": _page(_body("루트 페이지"), "https://company.example/")})
     result = _collect(site)
@@ -1287,7 +1286,7 @@ def test_불변식_광역slot은_REQUIRED가_0건이다_sitemap_상한():
 
 
 def test_불변식_광역slot은_REQUIRED가_0건이다_ir_none_failed(monkeypatch):
-    """★ 팀 리드가 결합 종단시험에서 실측한 P0를 웹 수집기 단위에서 직접
+    """★ 결합 종단시험에서 실측한 P0를 웹 수집기 단위에서 직접
     재현·고정한다 — IR PDF 조회 FAILED가 REQUIRED+광역으로 나가면 안 된다."""
     def fake_collect_ir(homepage_url, **_kwargs):
         if "company.example" in homepage_url:
@@ -1447,7 +1446,7 @@ def test_ir_none은_OPTIONAL로_낮아진다(monkeypatch):
 
 
 def test_ir_failed도_OPTIONAL이다(monkeypatch):
-    """★ 팀 리드가 결합 종단시험에서 실측한 P0의 원인 그 자체 — IR PDF 조회가
+    """★ 결합 종단시험에서 실측한 P0의 원인 그 자체 — IR PDF 조회가
     FAILED(일시 장애)로 실패했다고 REQUIRED+광역으로 나가면, 공시·페이지
     유형이 채운 다른 근거까지 소비 계약에서 UNKNOWN으로 끌려 내려간다.
     IR은 그 17개 slot 전부의 유일한 확인 경로가 아니므로 OPTIONAL이 맞다
@@ -1744,7 +1743,7 @@ def test_전체_파이프라인_fragment와_attempt_모두_대상_회사_company
     result = _collect(site, company_id=target_company_id)
     assert result.documents  # 실제로 문서가 만들어졌는지 확인(공허한 통과 방지)
 
-    # 향후 결합부 권장 패턴(팀 리드 2026-08-31 지시) — 문서마다 company_id를 손으로
+    # 향후 결합부 권장 패턴 — 문서마다 company_id를 손으로
     # 옮겨 적지 않고, 수집 결과 자신에서 한 번만 꺼내는 편의 함수를 쓴다.
     fragments = build_fragments_for_collection(result)
     assert fragments  # 실제로 조각이 만들어졌는지 확인(공허한 통과 방지)

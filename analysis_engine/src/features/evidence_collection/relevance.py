@@ -118,10 +118,10 @@ def score_fragment_text(text: str, section_heading: str = "") -> SlotScore | Non
     historical_performance·비교 4종은 SLOT_KEYWORDS에 아예 없으므로(다른
     엔진이 채움) 애초에 후보가 되지 않는다.
 
-    ★ 동점일 때만 COLLECTOR_SLOTS_BY_SECTION(수집기 1차 표적, 2026-08-31
-    team-lead 통보)을 우선한다 — «항상» 수집기 슬롯을 이기게 하면 다른
+    ★ 동점일 때만 COLLECTOR_SLOTS_BY_SECTION(수집기 1차 표적)을
+    우선한다 — «항상» 수집기 슬롯을 이기게 하면 다른
     장의 약한 우연 일치(예: 실적 문단에 스친 「고객사」 한 단어)가 그
-    장의 훨씬 강한 진짜 신호를 밀어낸다(실측, 2026-08-31 — 아래
+    장의 훨씬 강한 진짜 신호를 밀어낸다(실측 — 아래
     tests/test_relevance.py에 회귀 시험으로 고정). 순수 점수 비교가
     먼저이고, 동점에서만 수집기 슬롯이 이긴다.
     """

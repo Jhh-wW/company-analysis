@@ -74,7 +74,7 @@ def _list_attempt(source_kind: str, state: str, requirement: str = c.REQUIREMENT
 
 
 def test_P1_1_문서가_없으면_audit_only로_지어내지_않고_undecided를_돌려준다() -> None:
-    """team-lead 통보(2026-08-31) — audit_only는 긍정적 사실 주장이라 근거 없이 쓰면 안 된다."""
+    """audit_only는 긍정적 사실 주장이라 근거 없이 쓰면 안 된다."""
     assert classify_company_type([], []) == c.COMPANY_TYPE_UNDECIDED
 
 

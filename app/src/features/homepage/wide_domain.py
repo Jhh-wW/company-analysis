@@ -30,7 +30,7 @@ from src.features.homepage.constants import (
 )
 
 #: 판정 시점에만 두 집합을 함께 본다 — 정본 SINGLE_LABEL_PUBLIC_SUFFIXES 자체는
-#: 절대 합치지 않는다(팀 리드 정정 2). 오프라인 시험 픽스처(``.example`` 등)가
+#: 절대 합치지 않는다(정정 2). 오프라인 시험 픽스처(``.example`` 등)가
 #: 실제 코드 경로를 그대로 지나가게 하되, 정본 상수를 읽는 다른 코드나 사람이
 #: 「.example도 실제 커버리지 TLD」라고 오해하지 않게 분리해 둔다.
 _SINGLE_LABEL_SUFFIXES_FOR_MATCHING: frozenset[str] = (
