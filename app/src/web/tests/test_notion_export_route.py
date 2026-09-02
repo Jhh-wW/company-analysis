@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import uuid
+from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,11 +13,25 @@ from starlette.requests import Request
 
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
+from src.features.composer.constants import (
+    GRADE_CONFIRMED,
+    GRADE_INTERPRETED,
+    NOTICE_INSUFFICIENT_EVIDENCE,
+    SECTION_IDS,
+)
+from src.features.composer.port import (
+    ComposedReport,
+    ComposedSection,
+    ComposedSentence,
+)
+from src.features.composer.render import render_report
 from src.features.export_pdf.release import PDFReleaseBlockedError
+from src.features.export_notion import logic as notion_logic
 from src.features.export_notion import store as notion_store
 from src.features.export_notion.notion import NotionExportResult
 from src.features.pipeline.demo import DemoPipeline, available_companies
 from src.features.pipeline.port import Outcome, UserInput
+from src.features.report_standard.public_projection import build_public_projection
 from src.features.storage import db as storage_db
 from src.web import job_runtime
 from src.web.main import app
@@ -444,3 +459,165 @@ def test_claim_commit직후_요청취소도_supervisor가_adapter와_finish를_�
     assert record is not None
     assert record.state == notion_store.STATE_SUCCEEDED
     assert record.page_id == "page-after-claim-cancel"
+
+
+# ══════════════════════════════════════════════════════════
+# 엔진 v2 — 봉인 블록이 생겼으니 409를 푼다 (설계 017 결정 D-6)
+# ══════════════════════════════════════════════════════════
+
+
+def _sealed_v2_report():
+    """공개 봉인 블록(``public_projection``)을 실은 엔진 v2 보고서.
+
+    ★ 손으로 지은 ``Report``가 아니라 ``render_report()``를 «실제로» 통과시킨
+      보고서를 쓴다 — 인용 번호를 언제 숨기는지 같은 진짜 규칙이 재현되지
+      않으면 그 규칙 때문에 생긴 결함을 그물이 통과한다.
+    """
+
+    fragments = {
+        1: {"종류": "사업내용", "원문": "가나다전자는 반도체 검사 장비 전문기업이다."}
+    }
+    sections = []
+    for section_id in SECTION_IDS:
+        if section_id == "identity":
+            sections.append(
+                ComposedSection(
+                    section_id=section_id,
+                    sentences=(
+                        ComposedSentence(
+                            text="반도체 검사 장비를 주력으로 한다.",
+                            citations=("1",),
+                            grade=GRADE_CONFIRMED,
+                        ),
+                        ComposedSentence(
+                            text="검사 장비 수요는 앞으로도 이어질 것으로 보인다.",
+                            citations=("1",),
+                            grade=GRADE_INTERPRETED,
+                        ),
+                    ),
+                )
+            )
+        else:
+            sections.append(
+                ComposedSection(
+                    section_id=section_id,
+                    sentences=(),
+                    notice=NOTICE_INSUFFICIENT_EVIDENCE,
+                )
+            )
+    summary = tuple(
+        ComposedSentence(text=text, citations=("1",), grade=GRADE_CONFIRMED)
+        for text in ("요약 하나다.", "요약 둘이다.", "요약 셋이다.")
+    )
+    report = render_report(
+        "가나다전자",
+        ComposedReport(sections=tuple(sections), summary=summary),
+        fragments,
+        None,
+    )
+    return replace(report, public_projection=build_public_projection(report))
+
+
+def _paragraph_texts(blocks):
+    return [
+        "".join(part["text"]["content"] for part in block["paragraph"]["rich_text"])
+        for block in blocks
+        if block["type"] == "paragraph"
+    ]
+
+
+def test_v2_Notion_POST는_409가_아니라_블록으로_전송한다(monkeypatch):
+    """결정 D-6 — 「노션용 변환기가 없다」는 409를 조각 S6 완료와 동시에 푼다.
+
+    ★ 설계 017 §02-6과 §03 결정표 D6은 이 409를 「슬라이스 6 전까지 유지」로
+      못 박아 두었다. 이유는 «변환기가 없다»였다. 이제 v2 보고서가 공개 봉인
+      블록을 들고 오고 ``build_blocks``가 그 블록만 읽으므로 그 전제가
+      사라졌다. 그래서 이 시험은 예전 409 고정 시험을 뒤집는다
+      (``test_reports_v2_output.py``의 같은 자리도 함께 뒤집었다).
+    ★ 권한·CSRF·만료 판정은 그대로다 — 그 경계는 옆 시험들이 지킨다.
+    """
+
+    report = _sealed_v2_report()
+    job_id = f"notion-v2-sealed-{uuid.uuid4().hex}"
+    job_runtime._JOBS.pop(job_id, None)
+    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
+    monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
+    sent = []
+
+    def capture(target, *_args, **_kwargs):
+        sent.append(target)
+        return NotionExportResult(
+            success=True,
+            page_id="v2-sealed-page",
+            page_url="https://notion.example/v2-sealed-page",
+        )
+
+    monkeypatch.setattr(reports_router, "send_report_to_notion", capture)
+    session = auth_logic.create_session("admin@example.com", True)
+    csrf = auth_logic.csrf_token_for_session(session.token)
+
+    with TestClient(app) as client:
+        client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
+        response = client.post(f"/notion/{job_id}", data={"csrf_token": csrf})
+
+    assert response.status_code == 200
+    assert response.headers.get("X-Notion-Export-Status") != "unsupported-engine-v2"
+    assert "노션 내보내기를 지원하지 않습니다" not in response.text
+    assert len(sent) == 1, "v2 보고서가 외부 어댑터까지 가지 않았습니다"
+
+    # 「보냈다」로 끝내지 않는다 — 실제로 «봉인 블록»이 나가는지 본다.
+    exported = sent[0]
+    assert exported.public_projection is not None
+    sealed_texts = [
+        text
+        for block in exported.public_projection.sections
+        for _ordinal, text in block.display.paragraphs
+    ]
+    assert sealed_texts, "봉인된 문단이 없으면 이 시험은 아무것도 안 지킨다"
+    나간_문단 = set(_paragraph_texts(notion_logic.build_blocks(exported)))
+    assert set(sealed_texts) <= 나간_문단
+
+    with storage_db.connect() as conn:
+        record = notion_store.load(
+            conn, job_id, notion_store.report_digest(exported)
+        )
+    assert record is not None
+    assert record.state == notion_store.STATE_SUCCEEDED
+    assert record.page_id == "v2-sealed-page"
+
+
+def test_공개블록이_없는_옛_v2_저장본은_전송결과모름_대신_사실대로_닫힌다(
+    monkeypatch,
+):
+    """409를 «전부» 푸는 것이 아니다 — 옮길 수 없는 저장본은 그렇다고 말한다.
+
+    ★ 왜 필요한가(실측) — 공개 블록이 없는 v2 보고서를 그냥 통과시키면 옛
+      v1 변환기가 출고 차단 예외를 내고, 작업자가 그 예외를 삼켜
+      「노션 전송 결과를 확인하지 못했습니다」로 기록한다. 한 번도 나간 적
+      없는 전송이 «결과 모름»으로 남는다 — 409보다 나쁜 거짓말이다.
+    """
+
+    report = replace(_sealed_v2_report(), public_projection=None)
+    job_id = f"notion-v2-unsealed-{uuid.uuid4().hex}"
+    job_runtime._JOBS.pop(job_id, None)
+    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
+    monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("옮길 수 없는 보고서를 어댑터까지 보냈습니다")
+
+    monkeypatch.setattr(reports_router, "send_report_to_notion", forbidden)
+    monkeypatch.setattr(reports_router.notion_store, "report_digest", forbidden)
+    session = auth_logic.create_session("admin@example.com", True)
+    csrf = auth_logic.csrf_token_for_session(session.token)
+
+    with TestClient(app) as client:
+        client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
+        response = client.post(f"/notion/{job_id}", data={"csrf_token": csrf})
+
+    assert response.status_code == 409
+    assert "이 보고서는 노션으로 보낼 수 없습니다" in response.text
+    assert "전송 결과를 확인하지 못했습니다" not in response.text
+    # 화면에 내부 용어가 새지 않는다.
+    for 내부_용어 in ("public_projection", "projection", "봉인", "schema"):
+        assert 내부_용어 not in response.text

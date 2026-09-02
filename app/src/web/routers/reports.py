@@ -245,8 +245,19 @@ def _blocked_report_response(request: Request) -> Response:
     return response
 
 
-def _notion_v2_unsupported_response(request: Request) -> Response:
-    """아직 변환기가 없는 엔진 v2를 외부 전송 실패로 가장하지 않는다."""
+def _notion_unsealed_v2_response(request: Request) -> Response:
+    """노션 형식으로 옮길 수 없는 옛 v2 저장본을 «전송 실패로 가장하지» 않는다.
+
+    ★ 2026-09-02 — 이 자리에는 「엔진 v2는 노션을 지원하지 않는다」는 409가
+      있었다. 조각 S6이 v2 변환기를 만들었으므로 그 사유는 사라졌다(결정
+      D-6). 다만 변환기는 생성 시점에 붙은 공개 블록을 읽는데, 그 블록이
+      없던 시절에 저장된 v2 보고서에는 그것이 없다(설계 017 §02-6 — 옛
+      저장본은 백필하지 않는다, 결정 D1).
+    ★ 그 보고서를 그냥 통과시키면 옛 v1 변환기가 «출고 차단»으로 튕기고,
+      작업자가 그 예외를 「전송 결과를 확인하지 못했습니다」로 바꿔 기록한다.
+      한 번도 나간 적 없는 전송이 「결과 모름」으로 남는다 — 그래서 여기서
+      먼저, 사실대로 닫는다.
+    """
 
     response = request_helpers.templates.TemplateResponse(
         request=request,
@@ -254,13 +265,13 @@ def _notion_v2_unsupported_response(request: Request) -> Response:
         context=request_helpers._ctx(
             request,
             interruption_icon="ℹ️",
-            interruption_title="노션 내보내기를 지원하지 않습니다",
+            interruption_title="이 보고서는 노션으로 보낼 수 없습니다",
             interruption_message=(
-                "엔진 v2 보고서는 현재 웹 화면과 PDF 파일로만 제공합니다."
+                "예전 방식으로 만들어 둔 보고서라 노션 형식으로 옮길 수 없습니다."
             ),
             interruption_hint=(
-                "노션 연결이나 입력의 문제가 아닙니다. 노션용 변환기가 준비될 때까지 "
-                "웹 화면이나 PDF를 사용해 주세요."
+                "노션 연결이나 입력의 문제가 아닙니다. 이 보고서는 웹 화면과 PDF "
+                "파일로 보실 수 있고, 새로 만든 보고서는 노션으로 보낼 수 있습니다."
             ),
             retry_url=_ADMIN_DASHBOARD_URL,
             retry_label=_ADMIN_DASHBOARD_LABEL,
@@ -271,7 +282,7 @@ def _notion_v2_unsupported_response(request: Request) -> Response:
         status_code=409,
     )
     response.headers.update(SHARED_LINK_HEADERS)
-    response.headers["X-Notion-Export-Status"] = "unsupported-engine-v2"
+    response.headers["X-Notion-Export-Status"] = "unsupported-unsealed-report"
     return response
 
 
@@ -2102,11 +2113,19 @@ async def send_to_notion(
     if delivery_expired:
         return job_runtime._expired_screen(request)
 
-    # 결과 화면에서 버튼을 숨기는 것만으로는 직접 POST를 막지 못한다. v2는
-    # 현재 Notion 변환기가 없으므로 PDF 후보 생성·승인 원장·멱등성 claim·외부
-    # adapter 중 어느 것도 건드리지 않고 제품 계약을 명시적으로 알린다.
-    if getattr(report, "schema_version", "") == ENGINE_V2_SCHEMA_VERSION:
-        return _notion_v2_unsupported_response(request)
+    # ★ 2026-09-02 — 여기 있던 「엔진 v2는 노션을 지원하지 않는다」 409를
+    #   걷어냈다. 사유가 사라졌기 때문이다: v2 보고서는 이제 생성 시점에
+    #   공개 봉인 블록(``report.public_projection``)을 싣고, 노션 변환기가 그
+    #   블록만 읽어 화면·PDF와 같은 글자를 낸다(설계 017 §07 조각 S6, 결정
+    #   D-6 — 409 해제는 S6 완료와 동시). 아래 승인·멱등성·어댑터 경계는
+    #   v1과 «같은 것»을 그대로 탄다.
+    #   ★ 다만 그 블록이 없던 시절의 v2 저장본은 여전히 옮길 수 없다. 조용히
+    #   통과시키면 「전송 결과 모름」으로 기록되므로 사실대로 먼저 닫는다.
+    if (
+        getattr(report, "schema_version", "") == ENGINE_V2_SCHEMA_VERSION
+        and getattr(report, "public_projection", None) is None
+    ):
+        return _notion_unsealed_v2_response(request)
 
     if stored_delivery is None:
         # Delivery 이전 보고서만 과거 동적 승인 호환 경로를 쓴다. 새 Delivery는
