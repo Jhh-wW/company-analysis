@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 import json
 import logging
 from typing import Any
@@ -25,11 +26,23 @@ from src.features.pipeline.port import (
     ReportSection,
     ReportTable,
 )
+from src.features.report_standard import cover_metrics as cover_metrics_module
+from src.features.report_standard import period_summary as period_summary_module
+from src.features.report_standard import visualization as visualization_module
+from src.features.report_standard.public_projection import build_public_projection
 from src.features.report_standard.section_content import (
     masthead_lines,
     section_content_blocks,
 )
 from src.features.report_standard.publish import PublishBlockedError
+from src.shared.report_generation.canonical import table_public_projection
+from src.shared.report_generation.models import canonical_sha256
+from src.shared.report_generation.public_projection import (
+    PublicCoverMetricsBlock,
+    PublicPeriodSummaryBlock,
+    PublicSectionDisplay,
+    PublicSectionLedger,
+)
 
 _LEGACY_SECRET = "LEGACY-JOB-POSTING-SECRET"
 
@@ -110,6 +123,126 @@ def _legacy_partial_report() -> Report:
     )
 
 
+def _partial_v1_report() -> Report:
+    """8장을 통째로 뺀 canonical 부분 보고서 — v1 등급 고지 갈래의 표본."""
+
+    report = _make_report()
+    missing = "culture"
+    removed_fact_ids = {
+        fact.fact_id for fact in report.fact_records if fact.section_owner == missing
+    }
+    return replace(
+        report,
+        sections=[section for section in report.sections if section.cell != missing],
+        fact_records=[
+            fact
+            for fact in report.fact_records
+            if fact.fact_id not in removed_fact_ids
+        ],
+        summary_items=[
+            item for item in report.summary_items if item.section_id != missing
+        ],
+    )
+
+
+def _blocks_sha256(blocks: list[dict[str, Any]]) -> str:
+    """블록 목록 전체를 한 값으로 굳힌다 — 한 글자만 달라져도 값이 바뀐다."""
+
+    return hashlib.sha256(
+        json.dumps(
+            blocks, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+# ══════════════════════════════════════════════════════════
+# v2 봉인 블록 표본 — Notion v2 갈래가 읽는 «유일한» 입력
+# ══════════════════════════════════════════════════════════
+
+
+def _sealed_v2_report(report: Report | None = None) -> Report:
+    """봉인 블록(``public_projection``)을 실은 보고서.
+
+    ★ 갈래는 ``schema_version``이 아니라 «봉인이 있는가»로 갈린다
+      (설계 017 §02-6 — projection 없는 저장본은 전부 옛 경로). 그래서 이
+      표본은 봉인만 붙여 v2 갈래를 부른다.
+    ★ ``manifest_ref``는 FULL 실행의 공개 구조 seal이 붙이는 값이라 여기서는
+      그 «모양»만 흉내 낸다 — 표 글자는 한 자도 바꾸지 않는다
+      (``report_standard/tests/test_public_projection_builder.py::_sealed``와
+      같은 이유).
+    """
+
+    base = _make_report() if report is None else report
+    sections = [
+        replace(
+            section,
+            tables=[
+                replace(
+                    table,
+                    manifest_ref=canonical_sha256(table_public_projection(table)),
+                )
+                for table in section.tables
+            ],
+        )
+        for section in base.sections
+    ]
+    sealed = replace(base, sections=sections)
+    return replace(sealed, public_projection=build_public_projection(sealed))
+
+
+def _two_paragraph_report() -> Report:
+    """2장 본문을 «문장마다 한 문단»으로 나눈 봉인 보고서.
+
+    ★ 시연 보고서는 장마다 문단이 하나뿐이라 「문단 «단위»로 낸다」가 시험되지
+      않는다. 문장 글자는 그대로 두고 묶는 단위만 둘로 나눈다 — 이어붙인
+      글자가 같아야 봉인이 성립한다(불변식 I2).
+    """
+
+    report = _make_report()
+    sections = [
+        (
+            replace(
+                section,
+                prose_paragraphs=[text for text, _cite in section.prose_lines],
+            )
+            if section.cell == "business_model"
+            else section
+        )
+        for section in report.sections
+    ]
+    return _sealed_v2_report(replace(report, sections=sections))
+
+
+def _display_of(report: Report, cell: str) -> PublicSectionDisplay:
+    projection = report.public_projection
+    assert projection is not None, "봉인 없는 보고서로 v2 갈래를 시험할 수 없습니다"
+    return next(
+        block.display for block in projection.sections if block.display.cell == cell
+    )
+
+
+def _section_slice(
+    blocks: list[dict[str, Any]], display: PublicSectionDisplay
+) -> list[dict[str, Any]]:
+    """한 장의 heading_2부터 다음 heading_2 직전까지를 잘라 온다."""
+
+    prefix = f"{display.display_number}. {display.title}"
+    start = next(
+        index
+        for index, block in enumerate(blocks)
+        if block["type"] == "heading_2" and _text_of(block).startswith(prefix)
+    )
+    end = next(
+        (
+            index
+            for index in range(start + 1, len(blocks))
+            if blocks[index]["type"] == "heading_2"
+        ),
+        len(blocks),
+    )
+    return blocks[start:end]
+
+
 # ══════════════════════════════════════════════════════════
 # logic.build_blocks — 블록 변환 정확성
 # ══════════════════════════════════════════════════════════
@@ -150,29 +283,7 @@ class TestBuildBlocks:
         assert not any(block["type"] == "callout" for block in blocks)
 
     def test_canonical_부분보고서는_등급과_미제공사유를_표시한다(self):
-        report = _make_report()
-        missing = "culture"
-        removed_fact_ids = {
-            fact.fact_id
-            for fact in report.fact_records
-            if fact.section_owner == missing
-        }
-        partial_draft = replace(
-            report,
-            sections=[
-                section for section in report.sections if section.cell != missing
-            ],
-            fact_records=[
-                fact
-                for fact in report.fact_records
-                if fact.fact_id not in removed_fact_ids
-            ],
-            summary_items=[
-                item for item in report.summary_items if item.section_id != missing
-            ],
-        )
-
-        blocks = logic.build_blocks(partial_draft)
+        blocks = logic.build_blocks(_partial_v1_report())
         all_text = "\n".join(
             _text_of(block)
             for block in blocks
@@ -391,6 +502,280 @@ class TestBuildPageTitle:
     def test_생성일이_없으면_괄호를_안_붙인다(self):
         report = _make_report(generated_at="")
         assert logic.build_page_title(report) == "(주)진영 분석 보고서"
+
+
+# ══════════════════════════════════════════════════════════
+# logic.build_blocks — v2 갈래는 봉인 블록«만» 읽는다 (설계 017 §07 조각 S6)
+# ══════════════════════════════════════════════════════════
+
+
+class TestBuildBlocksV2:
+    """공개 봉인 블록(``report.public_projection``)에서만 노션 블록을 만든다.
+
+    ★ 지금까지 노션은 화면·PDF와 «각자» 계산했다. 그래서 같은 보고서인데
+      노션만 본문을 사실 카드 표로 냈고(설계 §01-6 G1), 도식은 아예 없었고
+      (G2), 공개본 투영을 한 번 더 돌렸다(G9). 이 갈래는 그 셋을 없앤다.
+    """
+
+    def test_v2_Notion은_같은_블록의_paragraphs를_문단_단위로_낸다(self) -> None:
+        """G1 — 본문은 사실 카드 표가 아니라 봉인된 문단 그대로 나간다."""
+
+        report = _two_paragraph_report()
+        display = _display_of(report, "business_model")
+        assert len(display.paragraphs) == 2, "재료가 두 문단이어야 «단위»를 볼 수 있다"
+
+        blocks = logic.build_blocks(report)
+        section_blocks = _section_slice(blocks, display)
+        paragraphs = [
+            _text_of(block)
+            for block in section_blocks
+            if block["type"] == "paragraph"
+        ]
+
+        assert paragraphs[:2] == [text for _ordinal, text in display.paragraphs]
+        assert not any(
+            block["type"] == "table"
+            and _table_matrix(block)[0] == ["항목", "확인 내용"]
+            for block in blocks
+        ), "v2 갈래에 v1 사실 카드 표가 남아 있습니다"
+
+    def test_v2_Notion_도식은_표와_reading_문단으로_낸다(self) -> None:
+        """G2 — 모양은 채널마다 달라도 되지만 «글자»는 봉인 값 그대로다."""
+
+        report = _sealed_v2_report()
+        display = _display_of(report, "business_model")
+        visual = display.visuals[0]
+        table = display.tables[visual.table_index]
+        assert visual.reading, "재료에 읽는 법이 있어야 이 시험이 뜻을 가진다"
+
+        section_blocks = _section_slice(logic.build_blocks(report), display)
+        expected_matrix = [list(table.headers)] + [list(row) for row in table.rows]
+        table_index = next(
+            index
+            for index, block in enumerate(section_blocks)
+            if block["type"] == "table" and _table_matrix(block) == expected_matrix
+        )
+        reading = section_blocks[table_index + 1]
+
+        assert reading["type"] == "paragraph"
+        assert _text_of(reading) == visual.reading
+
+    def test_v2_Notion은_build_published_report를_부르지_않는다(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """G9 — 봉인 뒤에 렌더가 문자열을 다시 «만들면» 채널이 또 갈라진다.
+
+        전역 순수 함수를 전부 예외로 바꿔도 v2 블록이 나와야 한다. 마스트헤드
+        두 줄(``masthead_lines``)만 예외다 — 세 채널이 같은 두 줄을 쓰라고
+        D-S4a가 일부러 공유시킨 함수이고, 봉인 블록에는 그 자리가 없다.
+        """
+
+        report = _sealed_v2_report()
+        called: list[str] = []
+
+        def forbidden(name: str):
+            def _fail(*_args: Any, **_kwargs: Any):
+                called.append(name)
+                raise AssertionError(f"v2 갈래가 {name}을(를) 불렀습니다")
+
+            return _fail
+
+        for module, attribute in (
+            (logic, "build_published_report"),
+            (logic, "section_content_blocks"),
+            (logic, "source_verification_label"),
+            (logic, "summary_topic"),
+            (logic, "visible_citations"),
+            (visualization_module, "table_visualization"),
+            (period_summary_module, "period_summary_from_table"),
+            (cover_metrics_module, "cover_metrics"),
+        ):
+            monkeypatch.setattr(module, attribute, forbidden(attribute))
+
+        blocks = logic.build_blocks(report)
+
+        assert called == []
+        assert blocks, "봉인 블록만으로는 노션 블록을 만들지 못했습니다"
+
+    def test_v2_Notion_글자는_display_paragraphs와_같다(self) -> None:
+        """렌더러는 «배치»만 한다 — 번호·꼬리표를 덧붙이지 않는다."""
+
+        report = _two_paragraph_report()
+        projection = report.public_projection
+        assert projection is not None
+        sealed_texts = [
+            text
+            for block in projection.sections
+            for _ordinal, text in block.display.paragraphs
+        ]
+        paragraph_texts = [
+            _text_of(block)
+            for block in logic.build_blocks(report)
+            if block["type"] == "paragraph"
+        ]
+
+        assert sealed_texts, "봉인된 문단이 하나도 없으면 이 시험은 아무것도 안 지킨다"
+        for text in sealed_texts:
+            assert text in paragraph_texts, "봉인된 문단이 그대로 나오지 않았습니다"
+            assert not any(
+                other != text and text in other for other in paragraph_texts
+            ), "봉인된 문단에 렌더러가 글자를 덧붙였습니다"
+
+    def test_v2_Notion은_봉인된_3개년_띠를_표로_낸다(self) -> None:
+        """웹만 그리던 변화 요약 띠를 노션도 «같은 글자»로 낸다(설계 §04 #17).
+
+        ★ 시연 보고서의 실적표는 띠 판정기가 받는 열 이름이 아니라 띠가 비어
+          있다. 그래서 봉인 블록에 띠를 «직접» 넣어 배치만 확인한다 — 띠를
+          만드는 규칙은 ``report_standard``가 소유하고 그쪽 시험이 지킨다.
+        """
+
+        report = _sealed_v2_report()
+        projection = report.public_projection
+        assert projection is not None
+        band = PublicPeriodSummaryBlock(
+            title="3개년 변화 요약",
+            cite="[2]",
+            items=(
+                (
+                    "매출액",
+                    "2023",
+                    "309.0",
+                    "2025",
+                    "324.2",
+                    "억원",
+                    "+4.9%",
+                    "ratio",
+                    "up",
+                    "표의 첫 행과 마지막 행으로만 계산",
+                ),
+            ),
+        )
+        sections = tuple(
+            (
+                replace(block, display=replace(block.display, period_summary=band))
+                if block.display.cell == "past_changes"
+                else block
+            )
+            for block in projection.sections
+        )
+        banded = replace(
+            report, public_projection=replace(projection, sections=sections)
+        )
+
+        display = _display_of(banded, "past_changes")
+        section_blocks = _section_slice(logic.build_blocks(banded), display)
+        matrices = [
+            _table_matrix(block)
+            for block in section_blocks
+            if block["type"] == "table"
+        ]
+
+        assert matrices[0] == [
+            list(constants.PERIOD_SUMMARY_TABLE_HEADERS),
+            [
+                "매출액",
+                "2023",
+                "309.0",
+                "2025",
+                "324.2",
+                "억원",
+                "+4.9%",
+                "표의 첫 행과 마지막 행으로만 계산",
+            ],
+        ], "3개년 띠가 그 장의 표보다 먼저 오지 않았습니다"
+        assert "3개년 변화 요약 〔2〕" in [
+            _text_of(block)
+            for block in section_blocks
+            if block["type"] == "paragraph"
+        ]
+
+    def test_v2_Notion은_봉인된_표지_실적_띠를_표로_낸다(self) -> None:
+        """표지 실적 띠도 채널 공통 필드다(설계 §04 #3)."""
+
+        report = _sealed_v2_report()
+        projection = report.public_projection
+        assert projection is not None
+        assert projection.cover_metrics is None, "시연 표본은 표지 띠가 없어야 한다"
+
+        metrics = PublicCoverMetricsBlock(
+            title="최근 실적",
+            cite="[2]",
+            items=(("매출액", "324.2", "억원"), ("영업이익", "-26.6", "억원")),
+        )
+        covered = replace(
+            report,
+            public_projection=replace(projection, cover_metrics=metrics),
+        )
+
+        blocks = logic.build_blocks(covered)
+        summary_index = next(
+            index
+            for index, block in enumerate(blocks)
+            if block["type"] == "heading_2"
+            and _text_of(block) == constants.SUMMARY_HEADING
+        )
+        head = blocks[:summary_index]
+
+        assert "최근 실적 〔2〕" in [
+            _text_of(block) for block in head if block["type"] == "paragraph"
+        ]
+        assert [
+            _table_matrix(block) for block in head if block["type"] == "table"
+        ] == [
+            [
+                list(constants.COVER_METRICS_TABLE_HEADERS),
+                ["매출액", "324.2", "억원"],
+                ["영업이익", "-26.6", "억원"],
+            ]
+        ]
+
+    def test_v2_Notion은_감사장부만_바꾸면_같은_블록을_낸다(self) -> None:
+        """``.ledger``는 화면에 쓰이지 않는다 — 장부를 비워도 블록이 같아야 한다."""
+
+        report = _sealed_v2_report()
+        projection = report.public_projection
+        assert projection is not None
+        assert any(
+            block.ledger.fact_ids for block in projection.sections
+        ), "장부가 처음부터 비어 있으면 이 시험은 아무것도 안 지킨다"
+
+        emptied = replace(
+            projection,
+            sections=tuple(
+                replace(
+                    block,
+                    ledger=PublicSectionLedger(
+                        fact_ids=(), fact_records=(), source_grade_contribution=()
+                    ),
+                )
+                for block in projection.sections
+            ),
+            summary_source_grade_contribution=(),
+        )
+
+        assert _blocks_sha256(logic.build_blocks(report)) == _blocks_sha256(
+            logic.build_blocks(replace(report, public_projection=emptied))
+        )
+
+
+def test_v1_Notion_블록은_불변이다() -> None:
+    """봉인이 없는 보고서(v1)는 base와 «한 글자도 다르지 않은» 블록을 낸다.
+
+    ★ 기준값은 base 커밋 ``5b525ee``에서 이 표본으로 실제 뽑은 SHA-256이다.
+      생산 상수·생산 함수에 묶지 않고 리터럴로 적는다 — 생산이 바뀌면 기준값도
+      같이 바뀌어 회귀를 못 잡는 순환 검증이 되기 때문이다.
+    """
+
+    full = _make_report()
+    partial = _partial_v1_report()
+    assert full.public_projection is None and partial.public_projection is None
+
+    assert _blocks_sha256(logic.build_blocks(full, grade_note="무시되는 문구")) == (
+        "e85efced9c3b2dd92698286129313f13f87acce01d4ec8daf267f0b314d59041"
+    )
+    assert _blocks_sha256(logic.build_blocks(partial)) == (
+        "9f1cba6c679e6287dbcc9e23bd144c617e52d531657d22346367daf271a11ea1"
+    )
 
 
 # ══════════════════════════════════════════════════════════

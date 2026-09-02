@@ -76,6 +76,41 @@ GRADE_ICON_INCOMPLETE: Final[str] = "▫️"
 SOURCES_HEADING: Final[str] = "부록. 출처와 검증 상태"
 SOURCES_SUBTITLE: Final[str] = "본문의 번호가 아래 원문을 가리킵니다."
 COLLECTION_HEADING: Final[str] = "어디서 가져왔나"
+SUMMARY_HEADING: Final[str] = "핵심 요약"
+
+# ══════════════════════════════════════════════════════════
+# 노션 표의 «열 이름»
+# ══════════════════════════════════════════════════════════
+# ★ 이 값들은 보고서 내용이 아니라 표의 머리글이다. 그래서 공개 봉인 블록에
+#   들어 있지 않고 여기서 이름을 붙인다 — 칸에 들어가는 «값»은 v2 갈래에서
+#   전부 봉인 블록에서 그대로 온다.
+# ★ v1·v2 갈래가 «같은 이 값»을 쓴다. 한쪽만 고치면 같은 보고서의 두 갈래가
+#   서로 다른 열 이름을 내게 된다.
+
+SUMMARY_TABLE_HEADERS: Final[tuple[str, ...]] = ("#", "짧은 제목", "요약", "관련 장")
+CITATION_TABLE_HEADERS: Final[tuple[str, ...]] = (
+    "#",
+    "자료",
+    "기준일·자료 상태",
+    "사실 검증",
+    "원문 위치",
+    "본문 사용 장",
+)
+#: 표지 실적 띠(``PublicCoverMetricsBlock``)를 표로 낼 때의 열 이름.
+COVER_METRICS_TABLE_HEADERS: Final[tuple[str, ...]] = ("지표", "값", "단위")
+#: 3개년 변화 요약 띠(``PublicPeriodSummaryBlock``)를 표로 낼 때의 열 이름.
+#: 봉인된 10개 필드 중 ``change_kind``·``direction``은 화면 «강조 방식»을 고르는
+#: 표식이라 노션에는 대응하는 자리가 없어 싣지 않는다(글자가 아니다).
+PERIOD_SUMMARY_TABLE_HEADERS: Final[tuple[str, ...]] = (
+    "항목",
+    "기준 시점",
+    "기준 값",
+    "최근 시점",
+    "최근 값",
+    "단위",
+    "변화",
+    "비고",
+)
 
 #: 요구역량(5번 칸)은 공고 원문 목록이라 다른 칸과 다르게 다룬다 (result.html requirements_block()).
 REQUIREMENTS_CELL: Final[str] = "5"
