@@ -1469,6 +1469,35 @@ def test_ir_failed도_OPTIONAL이다(monkeypatch):
     assert ir_attempt.requirement == "OPTIONAL"
 
 
+def test_blocked_호스트는_IR_시도_0회(monkeypatch):
+    """티켓 B2: 웹 크롤 단계가 이미 이 host의 robots.txt를 확인 못했거나
+    거부됐다고 판정했으면(``state.robots_policies[host].blocked``), IR PDF는
+    같은 host를 다시 확인하지 않는다 — html_fetch/pdf_fetch가 그 host로 단
+    한 번도 불리지 않는다. robots.txt 자체가 pages에 없어(가짜 접속 실패)
+    두 후보 host(primary·www 별칭) 모두 웹 크롤 단계에서 blocked가 된다."""
+    from src.features.homepage.ir_pdf import OfficialIrFetchError
+    from src.shared.report_evidence.constants import SOURCE_KIND_ROBOTS_TXT
+
+    ir_calls: list[str] = []
+
+    def counting_ir_html(url: str, *_args, **_kwargs):
+        ir_calls.append(url)
+        raise OfficialIrFetchError("이 시험에서는 절대 불리면 안 됩니다")
+
+    def counting_ir_pdf(*_args, **_kwargs):
+        ir_calls.append("pdf")
+        raise OfficialIrFetchError("이 시험에서는 절대 불리면 안 됩니다")
+
+    site = _FakeWideSite({})  # robots.txt조차 없다 — 웹 크롤 robots 조회가 blocked로 끝난다
+    result = _collect(site, ir_html_fetch=counting_ir_html, ir_pdf_fetch=counting_ir_pdf)
+
+    assert ir_calls == []
+    assert not [a for a in result.attempts if a.source_kind == "official_ir_pdf"]
+    robots_attempts = [a for a in result.attempts if a.source_kind == SOURCE_KIND_ROBOTS_TXT]
+    assert robots_attempts  # robots 판정 자체는 웹 크롤 단계 attempt로 남아 있다
+    assert all(a.state == "FAILED" for a in robots_attempts)
+
+
 # ── IR PDF 위임 ───────────────────────────────────────────
 
 
