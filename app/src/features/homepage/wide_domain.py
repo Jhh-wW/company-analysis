@@ -53,6 +53,7 @@ _AD_TRACKING_PARAM_EXACT: frozenset[str] = frozenset(
 _NAVIGATION_QUERY_KEYS: frozenset[str] = frozenset(
     {"page", "p", "offset", "limit", "sort", "order", "lang", "locale"}
 )
+_HEX_DIGITS: frozenset[str] = frozenset("0123456789abcdefABCDEF")
 
 
 def _is_ad_tracking_param(key: str) -> bool:
@@ -70,18 +71,57 @@ def _query_pairs(raw_query: str) -> tuple[tuple[str, str], ...]:
     예외 없이 전부 보존한다. 대소문자·빈 값·중복 횟수도 exact 경계다.
     """
 
+    _validate_raw_query(raw_query)
     return tuple(
         sorted(
-            urllib.parse.parse_qsl(raw_query, keep_blank_values=True)
+            urllib.parse.parse_qsl(
+                raw_query,
+                keep_blank_values=True,
+                encoding="utf-8",
+                errors="strict",
+                separator="&",
+            )
         )
     )
+
+
+def _validate_raw_query(raw_query: str) -> None:
+    """percent 문법·UTF-8·구분자를 해석 전에 검증한다.
+
+    ``parse_qsl``의 기본 ``errors="replace"``는 ``%FF``와 ``%FE``를 같은
+    U+FFFD로 바꿔 tenant 값과 scope digest를 충돌시킨다. 또한 raw ``;``는
+    서버/프레임워크에 따라 두 번째 구분자로 해석될 수 있으므로 이 경계에서는
+    값인지 구분자인지 추측하지 않는다. 값의 세미콜론은 ``%3B``로 명시해야 한다.
+    """
+
+    if ";" in raw_query:
+        raise ValueError("공식 홈페이지 쿼리에 모호한 세미콜론이 있습니다")
+    index = 0
+    while index < len(raw_query):
+        if raw_query[index] != "%":
+            index += 1
+            continue
+        if (
+            index + 2 >= len(raw_query)
+            or raw_query[index + 1] not in _HEX_DIGITS
+            or raw_query[index + 2] not in _HEX_DIGITS
+        ):
+            raise ValueError("공식 홈페이지 쿼리의 percent escape가 올바르지 않습니다")
+        index += 3
+    try:
+        urllib.parse.unquote_to_bytes(raw_query).decode("utf-8", errors="strict")
+    except UnicodeError as exc:
+        raise ValueError("공식 홈페이지 쿼리가 올바른 UTF-8이 아닙니다") from exc
 
 
 def _query_scope_allows(start_query: str, candidate_query: str) -> bool:
     """시작 쿼리를 고정하고, 좁은 탐색·광고 파라미터만 새로 허용한다."""
 
-    start_pairs = _query_pairs(start_query)
-    candidate_pairs = _query_pairs(candidate_query)
+    try:
+        start_pairs = _query_pairs(start_query)
+        candidate_pairs = _query_pairs(candidate_query)
+    except (TypeError, ValueError, UnicodeError):
+        return False
     start_keys = {key for key, _value in start_pairs}
 
     # 시작에 있던 각 key는 값·중복 횟수까지 같은 멀티셋이어야 한다.
@@ -259,6 +299,10 @@ class OfficialOrigin:
         parsed = self._parsed_same_origin(value)
         if parsed is None:
             return False
+        # robots/sitemap canonical URL에는 query가 없다. redirect가 query를
+        # 붙이면 그 의미를 추측하지 않고 본문 전송 계층 앞에서 거절한다.
+        if parsed.query:
+            return False
         try:
             path = _normalized_path(parsed.path)
         except ValueError:
@@ -309,6 +353,7 @@ def parse_official_origin(raw: str) -> OfficialOrigin | None:
             else _DEFAULT_PORT_BY_SCHEME.get(scheme)
         )
         start_path = _normalized_path(parsed.path)
+        _query_pairs(parsed.query)
     except (TypeError, ValueError, UnicodeError):
         return None
     if (
@@ -516,7 +561,7 @@ def canonicalize_url(
     preserve_keys = frozenset(preserve_query_keys)
     query_pairs = [
         (key, value)
-        for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        for key, value in _query_pairs(parsed.query)
         if key in preserve_keys or not _is_ad_tracking_param(key)
     ]
     query = urllib.parse.urlencode(sorted(query_pairs))

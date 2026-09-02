@@ -473,6 +473,54 @@ def test_등록_하위도메인도_최초_DART_query_scope를_우회하지_못�
     assert not any("recruit.company.example" in url for url in site.calls)
 
 
+@pytest.mark.parametrize("attack_query", ("page=%FF", "page=%FE", "page=A;sort=x"))
+def test_invalid_query는_canonicalize_robots_transport보다_먼저_거절된다(
+    monkeypatch,
+    attack_query,
+):
+    base = "https://company.example"
+    injected = f"https://recruit.company.example/about?{attack_query}"
+    pages = {
+        f"{base}/robots.txt": _page(
+            ROBOTS_ALLOW_ALL, f"{base}/robots.txt", "text/plain"
+        ),
+        f"{base}/sitemap.xml": _missing(f"{base}/sitemap.xml"),
+        f"{base}/": _page(
+            _body("2010년에 설립한 법인")
+            + f'<a href="{injected}">공격 링크</a>',
+            f"{base}/",
+        ),
+    }
+    site = _FakeWideSite(pages)
+    real_canonicalize = wide_collect.canonicalize_url
+
+    def guarded_canonicalize(url, **kwargs):
+        assert url != injected, "query 검사 전에 canonicalize_url이 호출됐습니다"
+        return real_canonicalize(url, **kwargs)
+
+    monkeypatch.setattr(wide_collect, "canonicalize_url", guarded_canonicalize)
+
+    _collect(site, company_name="")
+
+    assert injected not in site.calls
+    assert not any("recruit.company.example" in url for url in site.calls)
+
+
+@pytest.mark.parametrize("attack_query", ("tenant=%FF", "tenant=%FE", "tenant=A;page=2"))
+def test_DART_시작_URL의_invalid_query는_robots와_본문을_0회호출한다(attack_query):
+    site = _FakeWideSite({})
+
+    result = _collect(
+        site,
+        root_homepage_url=f"https://portal.example/view?{attack_query}",
+        company_name="",
+    )
+
+    assert result.documents == ()
+    assert result.attempts == ()
+    assert site.calls == []
+
+
 def test_ref가_다른_두_scope는_저장문서_ID와_scope_digest가_서로_다르다():
     base = "https://portal.example"
 
@@ -1667,7 +1715,7 @@ def test_전체_파이프라인_fragment와_attempt_모두_대상_회사_company
     result = _collect(site, company_id=target_company_id)
     assert result.documents  # 실제로 문서가 만들어졌는지 확인(공허한 통과 방지)
 
-    # 운영 호출부 패턴(팀 리드 2026-08-31 지시) — 문서마다 company_id를 손으로
+    # 향후 결합부 권장 패턴(팀 리드 2026-08-31 지시) — 문서마다 company_id를 손으로
     # 옮겨 적지 않고, 수집 결과 자신에서 한 번만 꺼내는 편의 함수를 쓴다.
     fragments = build_fragments_for_collection(result)
     assert fragments  # 실제로 조각이 만들어졌는지 확인(공허한 통과 방지)

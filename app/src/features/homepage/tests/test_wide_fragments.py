@@ -195,6 +195,64 @@ def test_바로_앞_문단의_문제와_명시적으로_연결된_회사행동�
     assert response.location.endswith("#1")
 
 
+@pytest.mark.parametrize(
+    "text",
+    (
+        "고객사의 매출 하락이 이어졌습니다. 분석 플랫폼을 자동화했습니다.",
+        "원재료 가격이 상승했습니다. 한편 사옥 보안을 강화했습니다.",
+        "협력사 공급에 차질이 생겼습니다. 협력사가 설비에 투자했습니다.",
+        "금리 하락으로 금융비용 부담이 감소했습니다. 회사가 설비에 투자했습니다.",
+    ),
+)
+def test_같은_범위의_무관한_부정어와_행동어는_당면과제_관계를_만들지_않는다(text):
+    document = _document("https://company.example/", (text,))
+
+    covered = {
+        slot_id
+        for fragment in build_fragments(document, company_id=_COMPANY_ID)
+        for slot_id in fragment.covered_slot_ids
+    }
+
+    assert "current_challenges:response" not in covered
+
+
+def test_같은_범위에서도_회사_부정영향과_인과_대응행동이_있으면_둘_다_채운다():
+    document = _document(
+        "https://company.example/",
+        (
+            "원재료 가격이 급등해 원가율이 높아졌습니다. "
+            "이에 대응해 신규 공급업체를 발굴했습니다.",
+        ),
+    )
+
+    covered = {
+        slot_id
+        for fragment in build_fragments(document, company_id=_COMPANY_ID)
+        for slot_id in fragment.covered_slot_ids
+    }
+
+    assert {"current_challenges:issue", "current_challenges:response"} <= covered
+
+
+def test_연결어가_있어도_행동_주체가_협력사면_response를_채우지_않는다():
+    document = _document(
+        "https://company.example/",
+        (
+            "원재료 가격 상승으로 제조원가 부담이 커졌습니다. "
+            "이에 대응해 협력사가 설비에 투자했습니다.",
+        ),
+    )
+
+    covered = {
+        slot_id
+        for fragment in build_fragments(document, company_id=_COMPANY_ID)
+        for slot_id in fragment.covered_slot_ids
+    }
+
+    assert "current_challenges:issue" in covered
+    assert "current_challenges:response" not in covered
+
+
 def test_검증사례는_사례_표지만으로_채우지_않고_행동이나_결과도_요구한다():
     title_only = _document(
         "https://company.example/careers", ("구성원 인터뷰 사례와 스토리",)
@@ -307,11 +365,11 @@ def test_company_id를_생략하면_TypeError():
         build_fragments(document)  # type: ignore[call-arg]
 
 
-# ── build_fragments_for_collection: 운영 호출부 전용 편의 함수 ──────
+# ── build_fragments_for_collection: 수집 결과 전용 편의 함수 ──────
 
 
 def test_수집결과의_모든_문서에서_조각을_만든다():
-    """운영 호출부 경로 — 문서마다 build_fragments를 손으로 부르지 않아도
+    """권장 결합 경로 — 문서마다 build_fragments를 손으로 부르지 않아도
     수집 결과 하나로 모든 문서의 fragment를 한 번에 얻는다."""
     careers = _document(
         "https://company.example/careers", ("핵심가치 채용 문구입니다.",), document_id="d-careers"

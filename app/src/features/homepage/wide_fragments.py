@@ -19,11 +19,13 @@
   조회 결과가 섞여도 조용히 통과할 수 있어, 그 가정 자체를 없앴다.
   ``build_fragments``는 이 명시 인자를 **공격 시험 전용**으로 유지한다
   — 「호출자가 일부러 다른 값을 넘기는 정당한 운영 시나리오」는 없다
-  (팀 리드 2026-08-31). **운영 호출부는 대신 아래
-  ``build_fragments_for_collection``을 쓴다** — 수집 결과 자신에서
+  (팀 리드 2026-08-31). 향후 운영 결합부도 아래
+  ``build_fragments_for_collection``을 써야 한다 — 수집 결과 자신에서
   company_id를 한 번만 꺼내 모든 문서에 그대로 실으므로, 호출 지점에서
   값을 잘못 넘길 방법이 구조적으로 없다(``build_fragments``를 직접
-  호출하며 손으로 company_id를 옮겨 적지 않는다).
+  호출하며 손으로 company_id를 옮겨 적지 않는다). 현재 실서비스
+  ``features.pipeline.real``에는 이 넓은 수집 경로가 아직 연결되지 않았다
+  (정확한 결합 지도는 ``docs/official_evidence_runtime_integration.md``).
 """
 
 from __future__ import annotations
@@ -127,8 +129,8 @@ def build_fragments(document: WideDocumentIdentity, *, company_id: str) -> tuple
 def build_fragments_for_collection(result: WideCollectionResult) -> tuple[WideFragment, ...]:
     """수집 결과의 모든 문서에서 fragment를 한 번에 만드는 얇은 편의 함수.
 
-    ★ 계약 generation=8 마지막 고리(팀 리드 2026-08-31) — **운영 호출부는
-      이 함수를 쓴다**(``build_fragments``에 지역 거부를 추가하는 대신
+    ★ 계약 generation=8 마지막 고리(팀 리드 2026-08-31) — 향후 운영 결합부는
+      이 함수를 써야 한다(``build_fragments``에 지역 거부를 추가하는 대신
       구조로 막는다). ``result.company_id``를 정본으로 모든 문서에 그대로
       싣는다 — **documents에서 역산하지 않는다.** documents에서 역산하면
       문서 생성부에 버그가 생겨 문서들이 일제히 엉뚱한 회사 값을 갖게 될
@@ -139,6 +141,9 @@ def build_fragments_for_collection(result: WideCollectionResult) -> tuple[WideFr
       company_id가 이 값과 같은지 생성 시점에 확인해 뒀다(다르면 그
       시점에 ValueError로 걸린다) — 그래서 여기서는 다시 검증하지 않고
       곧바로 신뢰해 쓴다.
+
+      현재 이 함수의 호출은 시험에만 있으며 실서비스 배선은 아직 없다.
+      이를 운영 호출이라고 표현하지 않는다.
 
     Args:
         result: ``collect_official_web_documents``가 돌려준 수집 결과.

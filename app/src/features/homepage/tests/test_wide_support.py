@@ -246,6 +246,45 @@ def test_query_scope_red_cases는_시작값과_새키_allowlist를_엄격히_지
     assert origin.allows_content_url(candidate_url) is allowed
 
 
+@pytest.mark.parametrize(
+    "url",
+    (
+        "https://portal.example/view?tenant=%FF",
+        "https://portal.example/view?tenant=%FE",
+        "https://portal.example/view?tenant=%",
+        "https://portal.example/view?tenant=%G0",
+        "https://portal.example/view?tenant=ALPHA;page=2",
+    ),
+)
+def test_official_origin은_모호하거나_UTF8이_아닌_query를_fail_closed한다(url):
+    assert parse_official_origin(url) is None
+
+
+def test_query_scope는_서로_다른_invalid_UTF8을_대체문자로_축약하지_않는다():
+    origin = parse_official_origin(
+        "https://portal.example/view?tenant=%EF%BF%BD"
+    )
+
+    assert origin is not None
+    assert not origin.allows_content_url(
+        "https://portal.example/view/about?tenant=%FF"
+    )
+    assert not origin.allows_content_url(
+        "https://portal.example/view/about?tenant=%FE"
+    )
+
+
+def test_percent_encoding한_세미콜론은_값으로_명확하므로_허용한다():
+    origin = parse_official_origin(
+        "https://portal.example/view?tenant=ALPHA%3BBETA"
+    )
+
+    assert origin is not None
+    assert origin.allows_content_url(
+        "https://portal.example/view/about?tenant=ALPHA%3BBETA&page=2"
+    )
+
+
 def test_official_origin은_0번_port를_기본_port로_둔갑시키지_않는다():
     assert parse_official_origin("https://company.example:0/tenant") is None
 
@@ -330,6 +369,19 @@ def test_canonicalize_url은_쿼리_순서를_정렬한다():
     left = canonicalize_url("https://company.com/about?b=2&a=1")
     right = canonicalize_url("https://company.com/about?a=1&b=2")
     assert left == right
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "https://company.example/about?tenant=%FF",
+        "https://company.example/about?tenant=%FE",
+        "https://company.example/about?tenant=A;page=2",
+    ),
+)
+def test_canonicalize_url은_모호하거나_UTF8이_아닌_query를_거절한다(url):
+    with pytest.raises(ValueError):
+        canonicalize_url(url)
 
 
 def test_slot_ids_for_url은_경로_키워드로_매칭한다():
