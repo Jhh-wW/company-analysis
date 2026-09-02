@@ -3516,7 +3516,13 @@ def _run_v2_composer(
             composition_tables=composition_tables_from_raw(revenue_tables),
             release_mode=release_mode,
             section_evidence_packets=section_evidence_packets,
-            company_id=(corp_id if release_mode is ReleaseMode.FULL else ""),
+            # 회사 신원은 릴리스 정책과 무관한 사실이다 — 이미 확인한 고유번호를
+            # 모드 때문에 버리지 않는다(F-GS2p1b). 이 값이 비면 초대 링크에
+            # 보고서를 다시 묶을 때 회사 일치 검증이 이름 비교만 남아, 이름이
+            # 같고 고유번호가 다른 회사의 보고서가 그대로 묶인다
+            # (`web/routers/admin.py`의 `_link_company_id`가 묶인 보고서에서
+            # 이 값을 읽는다). corp_id를 확인하지 못했으면 예전처럼 빈 값이다.
+            company_id=corp_id,
             build_identity_sha256=build_identity_sha256,
         )
         if release_mode is not ReleaseMode.SHADOW:
