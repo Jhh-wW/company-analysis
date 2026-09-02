@@ -1588,7 +1588,15 @@ def _load_saved_report(report_id: str) -> Optional[Report]:
                 )
                 if not approved_payload:
                     return None
-                return report_store.report_from_json(approved_payload)
+                # 공개 봉인은 payload가 아니라 별도 표에 있다(root 결정 C).
+                # 다시 붙이지 않으면 재시작 뒤 조회에서만 봉인이 사라진다(I7).
+                # 어긋나면 아래 except가 ReportStoreUnavailable로 닫는다
+                # (I3 fail-closed — 이 함수의 기존 오류 처리 그대로다).
+                return report_store.attach_public_projection(
+                    conn,
+                    report_id,
+                    report_store.report_from_json(approved_payload),
+                )
             return report_store.load(conn, report_id)
     except Exception as exc:  # noqa: BLE001
         logger.exception("보고서 불러오기 실패")

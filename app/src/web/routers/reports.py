@@ -204,9 +204,18 @@ def _approved_public_report(report_id: str, fallback: Report) -> Report | None:
         if not state.updated_at:
             return fallback
         payload_json = dashboard_store.approved_report_payload(conn, report_id=report_id)
-    if not payload_json:
-        return None
-    return report_store.report_from_json(payload_json)
+        if not payload_json:
+            return None
+        report = report_store.report_from_json(payload_json)
+        # 공개 봉인은 payload가 아니라 별도 표에 있다(root 결정 C). 다시 붙이지
+        # 않으면 승인 snapshot 화면만 봉인 없이 그려져 채널이 갈라진다(I7).
+        # 어긋나면 이 함수의 기존 방침대로 None으로 fail-closed 한다 —
+        # 원본 보고서가 대신 공개되는 일을 막는 것이 이 함수의 계약이다.
+        try:
+            return report_store.attach_public_projection(conn, report_id, report)
+        except ValueError:
+            logger.exception("승인 snapshot의 공개 봉인이 저장본과 다릅니다")
+            return None
 
 
 def _blocked_report_response(request: Request) -> Response:

@@ -807,10 +807,25 @@ def load_public_delivery(public_id: str) -> PublicDelivery | None:
             if metadata is not None
             else None
         )
-    try:
-        report = report_store.report_from_json(content.payload.decode("utf-8"))
-    except (UnicodeDecodeError, TypeError, ValueError) as exc:
-        raise DeliveryAdapterError("delivery 본문 snapshot을 읽지 못했습니다") from exc
+        try:
+            report = report_store.report_from_json(content.payload.decode("utf-8"))
+        except (UnicodeDecodeError, TypeError, ValueError) as exc:
+            raise DeliveryAdapterError(
+                "delivery 본문 snapshot을 읽지 못했습니다"
+            ) from exc
+        # 공개 봉인은 payload가 아니라 별도 표에 있다(root 결정 C). 여기서 다시
+        # 붙이지 않으면 «봉인이 있는데도» 화면은 봉인 없음으로 그린다(I7).
+        # 붙이면서 digest 재계산과 생성 증거 대조가 함께 돌고, 어긋나면
+        # 보고서를 내주지 않는다(I3 fail-closed) — 이 경계에서 그리지 않는 것이
+        # 위조된 봉인으로 그리는 것보다 안전하다.
+        try:
+            report = report_store.attach_public_projection(
+                conn, delivery.public_id, report
+            )
+        except ValueError as exc:
+            raise DeliveryAdapterError(
+                "delivery 본문의 공개 봉인이 저장본과 다릅니다"
+            ) from exc
     return PublicDelivery(
         delivery=delivery,
         content=content,

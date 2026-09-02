@@ -145,6 +145,39 @@ if MAX_AI_CALLS_PER_REQUEST * ANTHROPIC_TIMEOUT_SEC > (
     raise RuntimeError("provider 최악 대기보다 single-flight owner 상한이 짧습니다")
 
 
+def _attach_origin_public_projection(
+    conn: Any,
+    *,
+    artifact_id: str,
+    content_id: str,
+    billing_bucket_id: str,
+    report: Any,
+) -> Any:
+    """재사용하는 본문에 «원래 발급 Delivery»의 공개 봉인을 다시 붙인다.
+
+    봉인은 보고서 payload가 아니라 별도 표에 report_id로 저장된다(root 결정 C,
+    2026-09-02). 재사용 경로가 손에 쥔 것은 content snapshot 문자열뿐이라
+    report_id가 없다 — 그 artifact를 실제로 발급받은 Delivery의 공개 ID가
+    그 자리다. 같은 통장·같은 내용 원본인 Delivery만 본다(다른 통장의 PDF를
+    우회로 가져오지 못하게 하는 ``deliveries_for_artifact``의 경계와 동일).
+
+    맞는 Delivery가 없으면 봉인을 붙이지 않고 그대로 돌려준다 — 그건 오류가
+    아니라 「봉인 없음」이라는 정의된 상태다. 봉인이 «있는데» 저장본과 어긋나면
+    ``attach_public_projection``이 ValueError를 올리고, 호출부가 그 경로의
+    기존 방식대로 닫는다(I3 fail-closed).
+    """
+
+    for origin in delivery_artifact.deliveries_for_artifact(
+        conn, artifact_id=artifact_id
+    ):
+        if origin.billing_bucket_id != billing_bucket_id:
+            continue
+        if origin.content_snapshot_id != content_id:
+            continue
+        return report_store.attach_public_projection(conn, origin.public_id, report)
+    return report
+
+
 class GenerationSingleflightUnavailable(
     generation_coordination.GenerationCoordinationError
 ):
@@ -422,6 +455,18 @@ class GenerationSession:
             raise GenerationSingleflightUnavailable(
                 "완료된 보고서 내용을 읽지 못했습니다"
             ) from exc
+        try:
+            report = _attach_origin_public_projection(
+                conn,
+                artifact_id=artifact.artifact_id,
+                content_id=content.content_id,
+                billing_bucket_id=key.billing_bucket_id,
+                report=report,
+            )
+        except ValueError as exc:
+            raise GenerationSingleflightUnavailable(
+                "완료된 보고서의 공개 봉인이 저장본과 다릅니다"
+            ) from exc
         cache_key = CacheLookupKey(
             billing_bucket_id=key.billing_bucket_id,
             corp_id=key.corp_id,
@@ -560,6 +605,17 @@ class GenerationSession:
             return None
         if not approval_found:
             invalidate("approval_record_missing")
+            return None
+        try:
+            report = _attach_origin_public_projection(
+                conn,
+                artifact_id=metadata.artifact_id,
+                content_id=cached.content.content_id,
+                billing_bucket_id=key.billing_bucket_id,
+                report=report,
+            )
+        except ValueError:
+            invalidate("public_projection_mismatch")
             return None
         return generation_coordination.ReusedGeneration(
             content_snapshot_id=cached.content.content_id,
