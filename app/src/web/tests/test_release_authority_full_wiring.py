@@ -1,0 +1,363 @@
+"""ReleaseAuthority를 FULL 완료 거래 안에 실제로 배선한다 (P1-1·P1-2·생산 배선).
+
+★ 지키는 것: FULL(release_mode=FULL) 출고는 raw content·delivery·PDF
+  artifact·자동승인·charge·LINK/PUBLIC binding과 같은 SQLite 거래 안에서
+  ReleaseAuthority를 발급·저장한다. ``report_completion.py``(구 원자 완료
+  모듈)는 프로덕션 호출자가 0개라 저장소 정리 커밋(ddc4682)에서 삭제됐다
+  (34_실측정정_인수인계_2026-09-01_02_새발견.md 발견4). 발급 전에 회사 ID
+  3자(정규화 corp_id·output_report.company_id·evidence.company_id)를 exact
+  비교하고, epoch는 evidence.build_identity_sha256과
+  frozen_build_identity.epoch_digest를 blob 생성 전에, 그리고 저장된
+  Content.engine_epoch_digest까지 포함해 발급 직전에 다시 exact 비교한다
+  (32_Claude_Code_전체총괄_인수인계_2026-09-01.md §4-3, 34장 챕터03 P1-1·P1-2).
+
+★ 이 시험의 FULL Report는 ``composer.pipeline.run_v2``를 ``release_mode=FULL``로
+  실제로 돌려 만든다. company_id·evidence 해시를 손으로 지어내면
+  ``assert_report_matches_generation_evidence``가 판정하는 실제 결속을
+  시험하지 못한다 — 예측식이 아니라 실제 판정 로직으로 검증한다.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import uuid
+from pathlib import Path
+
+import pytest
+
+from src.features.composer.constants import GRADE_CONFIRMED, SECTION_IDS
+from src.features.composer.pipeline import run_v2
+from src.features.composer.port import (
+    CollectedFragment,
+    SectionEvidencePacket,
+    SectionEvidencePacketSet,
+)
+from src.features.pipeline.port import Report
+from src.features.report_delivery import authority as authority_store
+from src.features.storage import db as storage_db
+from src.shared import engine_build_identity as build_identity_contract
+from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
+from src.shared.report_evidence.constants import ReleaseMode
+from src.shared.report_quality.source_identity import document_identity_from_parts
+from src.web import report_delivery_adapter
+from src.web.routers import reports as reports_router
+
+_COMPANY_ID = "00123456"
+_BUILD_IDENTITY_SHA256 = "b" * 64
+
+
+def _strict_fragments() -> dict[int, dict[str, str]]:
+    document_marks = ("가람", "나래", "다솜", "라온", "마루", "바다", "사랑", "아람")
+    return {
+        number: {
+            "종류": "공식 홈페이지",
+            "원문": (
+                "가나다전자는 공식 자료에서 회사 사업 고객 제품 전략 운영 문화 "
+                f"경쟁 과제 대응 협력 실적을 설명한다. 문서 표지는 {document_marks[number - 1]}이다."
+            ),
+            "출처": f"https://www.ganada.example/document/{number}",
+            "문서명": f"공식 자료 {number}",
+        }
+        for number in range(1, 9)
+    }
+
+
+def _strict_packet_set(*, evidence_texts: tuple[str, ...] = ()) -> SectionEvidencePacketSet:
+    """composer/tests/test_pipeline.py의 FULL 고정 입력을 그대로 재현한다."""
+
+    fragments = tuple(
+        CollectedFragment(
+            fragment_id=str(number),
+            kind=str(raw["종류"]),
+            text=" ".join((str(raw["원문"]), *evidence_texts)).strip(),
+            source_url=str(raw["출처"]),
+            document_title=str(raw["문서명"]),
+            document_identity=document_identity_from_parts(url=str(raw["출처"])),
+        )
+        for number, raw in _strict_fragments().items()
+    )
+    generation = "a" * 64
+    return SectionEvidencePacketSet(
+        company_id=_COMPANY_ID,
+        evidence_generation_sha256=generation,
+        packets=tuple(
+            SectionEvidencePacket(
+                company_id=_COMPANY_ID,
+                evidence_generation_sha256=generation,
+                section_id=section_id,
+                fragments=fragments,
+            )
+            for section_id in SECTION_IDS
+        ),
+    )
+
+
+class _CompleteWriter:
+    """9개 장 모두 5문장씩 검증 가능한 confirmed 문장으로 채우는 가짜 작가."""
+
+    _TOPICS = (
+        "법인 정체성과 설립 목적 및 공식 사업 범위",
+        "고객 유형별 수익 방식과 판매 채널 및 가치 교환",
+        "제품 묶음별 역할과 고객 적합성 및 사업 연결",
+        "과거 완료 실행과 실적 변화 및 확인할 한계",
+        "현재 해결 과제와 대응 행동 및 남은 점검 항목",
+        "향후 발표 전략과 실행 시점 및 필요한 선행 조건",
+        "공급 생산 유통 협력 관계와 회사의 운영 역할",
+        "리더십 업무 원칙 의사결정 방식과 검증 사례",
+        "비교 대상 지표 기준 범위와 경쟁 판단의 한계",
+    )
+    _ENDINGS = (
+        "첫째 의미를 공식 자료에서 확인했다.",
+        "둘째 대상을 공식 자료에서 확인했다.",
+        "셋째 경로를 공식 자료에서 확인했다.",
+        "넷째 범위를 공식 자료에서 확인했다.",
+        "다섯째 근거를 공식 자료에서 확인했다.",
+    )
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+        self.section_calls = 0
+
+    @property
+    def expected_sentences(self) -> tuple[str, ...]:
+        return tuple(
+            f"가나다전자는 {topic}의 {ending}"
+            for topic in self._TOPICS
+            for ending in self._ENDINGS
+        )
+
+    def __call__(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        section_index = self.section_calls
+        section_id = SECTION_IDS[section_index]
+        self.section_calls += 1
+        slots = CLAIM_SLOTS_BY_SECTION[section_id]
+        return json.dumps(
+            {
+                "문장들": [
+                    {
+                        "글": f"가나다전자는 {self._TOPICS[section_index]}의 {ending}",
+                        "인용": [str((section_index * 5 + index) % 8 + 1)],
+                        "등급": GRADE_CONFIRMED,
+                        "주장슬롯": slots[index],
+                    }
+                    for index, ending in enumerate(self._ENDINGS)
+                ]
+            },
+            ensure_ascii=False,
+        )
+
+
+class _FakeReviewer:
+    """판정 프롬프트의 문장 번호 전부를 「참」으로 돌려주는 가짜 검수."""
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    def __call__(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        grouped = re.findall(
+            r"\[(\d+)\] \(장: ([^,]+), 종류: ([^,]+), 인용: ([^)]+)\)",
+            prompt,
+        )
+        return json.dumps(
+            {
+                "판정": [
+                    {
+                        "번호": int(number),
+                        "장": section_id,
+                        "근거": re.findall(r"조각 (\d+)", citations),
+                        "결과": "참",
+                    }
+                    for number, section_id, _kind, citations in grouped
+                ]
+            },
+            ensure_ascii=False,
+        )
+
+
+def _build_full_report(
+    *, company_id: str = _COMPANY_ID, build_identity_sha256: str = _BUILD_IDENTITY_SHA256
+) -> Report:
+    """FULL producer evidence를 실제로 계산해 붙인 Report 한 벌을 만든다."""
+
+    writer = _CompleteWriter()
+    reviewer = _FakeReviewer()
+    output = run_v2(
+        "가나다전자",
+        _strict_fragments(),
+        None,
+        writer_ask=writer,
+        reviewer_ask=reviewer,
+        release_mode=ReleaseMode.FULL,
+        section_evidence_packets=_strict_packet_set(
+            evidence_texts=writer.expected_sentences
+        ),
+        company_id=company_id,
+        build_identity_sha256=build_identity_sha256,
+    )
+    assert output.report.release_mode == ReleaseMode.FULL.value
+    assert output.report.generation_evidence is not None
+    return output.report
+
+
+def test_고정입력은_실제로_FULL_생산증거를_가진_보고서를_만든다():
+    """구현 착수 전 전제 확인 — 이 fixture 자체가 실제 판정 로직을 통과하는지."""
+
+    report = _build_full_report()
+    evidence = report.generation_evidence
+    assert evidence is not None
+    assert evidence.company_id == _COMPANY_ID
+    assert evidence.build_identity_sha256 == _BUILD_IDENTITY_SHA256
+    assert report.company_id == _COMPANY_ID
+    assert report.grade.value == "완성"
+
+
+def _frozen_identity() -> build_identity_contract.EngineBuildIdentity:
+    return build_identity_contract.process_engine_build_identity()
+
+
+def test_FULL_출고는_같은거래안에서_ReleaseAuthority를_발급하고_저장한다(
+    monkeypatch, tmp_path: Path
+):
+    frozen = _frozen_identity()
+    report = _build_full_report(build_identity_sha256=frozen.epoch_digest)
+    report_id = uuid.uuid4().hex
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "art"))
+
+    public_delivery = reports_router.finalize_new_report_delivery(
+        report_id=report_id,
+        corp_id=_COMPANY_ID,
+        billing_bucket_id="release-wiring-bucket",
+        report=report,
+        actual_models=("deterministic-full-wiring",),
+        reused_from_cache=False,
+        engine_build_identity=frozen,
+    )
+
+    assert public_delivery.artifact is not None
+    with storage_db.connect_readonly_existing() as conn:
+        assert conn is not None
+        authority = authority_store.load_release_authority_by_public_id(
+            conn, report_id
+        )
+    assert authority is not None
+    assert authority.kind is authority_store.ReleaseAuthorityKind.OWNER
+    assert authority.public_id == report_id
+    assert authority.company_id == _COMPANY_ID
+    assert authority.content_snapshot_id == public_delivery.content.content_id
+    assert authority.artifact_id == public_delivery.artifact.artifact_id
+    assert authority.build_identity_sha256 == frozen.epoch_digest
+    assert report.generation_evidence is not None
+    assert (
+        authority.public_content_sha256
+        == report.generation_evidence.public_content_sha256
+    )
+
+
+def test_회사ID_불일치는_출고전체를_거절하고_아무것도_남기지_않는다(
+    monkeypatch, tmp_path: Path
+):
+    """P1-2 — corp_id가 evidence·본문의 company_id와 다르면 blob도 만들지 않는다."""
+
+    frozen = _frozen_identity()
+    report = _build_full_report(build_identity_sha256=frozen.epoch_digest)
+    report_id = uuid.uuid4().hex
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "art"))
+
+    with pytest.raises(Exception, match="회사 ID"):
+        reports_router.finalize_new_report_delivery(
+            report_id=report_id,
+            corp_id="99999999",  # evidence.company_id("00123456")와 다름
+            billing_bucket_id="release-wiring-bucket",
+            report=report,
+            actual_models=("deterministic-full-wiring",),
+            reused_from_cache=False,
+            engine_build_identity=frozen,
+        )
+
+    assert report_delivery_adapter.load_public_delivery(report_id) is None
+    with storage_db.connect_readonly_existing() as conn:
+        assert conn is not None
+        assert (
+            authority_store.load_release_authority_by_public_id(conn, report_id)
+            is None
+        )
+
+
+def test_epoch_불일치는_출고전체를_거절하고_아무것도_남기지_않는다(
+    monkeypatch, tmp_path: Path
+):
+    """P1-1 — evidence의 build_identity_sha256이 현재 완료 engine epoch와 다르면 닫는다."""
+
+    frozen = _frozen_identity()
+    # 실제 완료 epoch와 다른 값을 evidence에 심는다 — 다른 배포·다른 세대의
+    # 내용이 이번 완료의 authority로 발급되려는 상황을 흉내낸다.
+    mismatched_epoch = "f" * 64
+    assert mismatched_epoch != frozen.epoch_digest
+    report = _build_full_report(build_identity_sha256=mismatched_epoch)
+    report_id = uuid.uuid4().hex
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "art"))
+
+    with pytest.raises(Exception, match="epoch"):
+        reports_router.finalize_new_report_delivery(
+            report_id=report_id,
+            corp_id=_COMPANY_ID,
+            billing_bucket_id="release-wiring-bucket",
+            report=report,
+            actual_models=("deterministic-full-wiring",),
+            reused_from_cache=False,
+            engine_build_identity=frozen,
+        )
+
+    assert report_delivery_adapter.load_public_delivery(report_id) is None
+    with storage_db.connect_readonly_existing() as conn:
+        assert conn is not None
+        assert (
+            authority_store.load_release_authority_by_public_id(conn, report_id)
+            is None
+        )
+
+
+def test_COMPLETE_재시도는_저장된_ReleaseAuthority를_다시검증한다(
+    monkeypatch, tmp_path: Path
+):
+    """P1-2 — 응답 유실 뒤 재시도도 저장된 권위를 exact 재확인하고 같은 값을 돌려준다."""
+
+    frozen = _frozen_identity()
+    report = _build_full_report(build_identity_sha256=frozen.epoch_digest)
+    report_id = uuid.uuid4().hex
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "art"))
+
+    first = reports_router.finalize_new_report_delivery(
+        report_id=report_id,
+        corp_id=_COMPANY_ID,
+        billing_bucket_id="release-wiring-bucket",
+        report=report,
+        actual_models=("deterministic-full-wiring",),
+        reused_from_cache=False,
+        engine_build_identity=frozen,
+    )
+
+    # 응답만 잃은 재시도 — 같은 인자로 다시 부른다. intent가 이미 COMPLETE다.
+    second = reports_router.finalize_new_report_delivery(
+        report_id=report_id,
+        corp_id=_COMPANY_ID,
+        billing_bucket_id="release-wiring-bucket",
+        report=report,
+        actual_models=("deterministic-full-wiring",),
+        reused_from_cache=False,
+        engine_build_identity=frozen,
+    )
+
+    assert second.content.content_id == first.content.content_id
+    assert second.artifact is not None and first.artifact is not None
+    assert second.artifact.artifact_id == first.artifact.artifact_id
+    with storage_db.connect_readonly_existing() as conn:
+        assert conn is not None
+        authority = authority_store.load_release_authority_by_public_id(
+            conn, report_id
+        )
+    assert authority is not None
+    assert authority.content_snapshot_id == first.content.content_id

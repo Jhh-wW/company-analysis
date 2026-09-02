@@ -64,6 +64,7 @@ from src.features.composer.validate import (
 )
 from src.features.report_standard import PublishBlockedError, build_published_report
 from src.features.report_delivery.artifact import ArtifactInspectionStatus
+from src.features.report_delivery import authority as authority_store
 from src.features.report_delivery.cache_identity import CacheLookupKey
 from src.features.report_delivery.models import Delivery
 from src.features.report_delivery.singleflight import LeaseKey
@@ -77,7 +78,8 @@ from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
 from src.shared import engine_build_identity as build_identity_contract
 from src.shared.generation_cache_identity import GenerationCacheNamespace
-from src.web import job_runtime, report_delivery_adapter, request_helpers
+from src.shared.report_evidence.constants import ReleaseMode
+from src.web import job_runtime, report_completion, report_delivery_adapter, request_helpers
 from src.web.security import CSRF_TOKEN_MAX_CHARS
 
 
@@ -1302,6 +1304,26 @@ def finalize_new_report_delivery(
     )
     try:
         output_report = _report_for_output(report)
+        # FULL(release_mode=FULL)만 출고 권위(ReleaseAuthority)를 발급한다.
+        # demo·v1·SHADOW·ENFORCE_NO_PARTIAL은 release_evidence가 None으로
+        # 남아 아래 모든 발급·재검증 분기를 그대로 건너뛴다 — 32장 §4-3
+        # 「FULL 밖 동작은 불변이다」.
+        release_evidence = None
+        if output_report.release_mode == ReleaseMode.FULL.value:
+            release_evidence = report_completion.require_release_evidence(
+                output_report
+            )
+            # blob intent를 만들기 전에 회사 ID·epoch 결속을 먼저 닫는다
+            # (34장 챕터03 P1-1·P1-2 — 「blob intent 전에 exact 비교」).
+            report_completion.assert_release_company_identity(
+                corp_id=corp_id,
+                output_report=output_report,
+                evidence=release_evidence,
+            )
+            report_completion.assert_release_build_identity(
+                evidence=release_evidence,
+                frozen_build_identity=frozen_build_identity,
+            )
         if intent.state == delivery_store.DELIVERY_INTENT_COMPLETE:
             existing = report_delivery_adapter.load_public_delivery(report_id)
             if (
@@ -1341,6 +1363,34 @@ def finalize_new_report_delivery(
                         raise report_delivery_adapter.DeliveryAdapterError(
                             "완료 delivery와 재시도의 정식 캐시 신원이 다릅니다"
                         )
+            if release_evidence is not None:
+                # COMPLETE 재시도도 cache_key 유무와 무관하게 회사·세대·
+                # content·artifact 결속을 다시 검사한다 — 응답만 잃은
+                # 재시도가 훼손된 결속을 그냥 통과시키지 않는다(P1-2).
+                with storage_db.connect_readonly_existing() as conn:
+                    if conn is None:
+                        raise report_delivery_adapter.DeliveryAdapterError(
+                            "완료 delivery의 출고 권위를 재확인할 저장소가 없습니다"
+                        )
+                    stored_authority = (
+                        authority_store.load_release_authority_by_public_id(
+                            conn, report_id
+                        )
+                    )
+                if (
+                    stored_authority is None
+                    or stored_authority.company_id != release_evidence.company_id
+                    or stored_authority.content_snapshot_id
+                    != existing.content.content_id
+                    or stored_authority.artifact_id != existing_artifact_id
+                    or stored_authority.billing_bucket_id
+                    != str(billing_bucket_id).strip()
+                    or stored_authority.build_identity_sha256
+                    != release_evidence.build_identity_sha256
+                ):
+                    raise report_delivery_adapter.DeliveryAdapterError(
+                        "완료 delivery의 저장된 출고 권위가 생성 증거와 다릅니다"
+                    )
             if public_access_run_id:
                 with storage_db.connect() as conn:
                     bind_public_access(conn, existing)
@@ -1454,9 +1504,10 @@ def finalize_new_report_delivery(
                 engine_build_identity=frozen_build_identity,
             )
             link_run = share_store.load_run_by_report_id(conn, report_id)
+            charge_run_id = link_run.run_id if link_run is not None else report_id
             charge = cost_store.mark_automatic_release(
                 conn,
-                run_id=(link_run.run_id if link_run is not None else report_id),
+                run_id=charge_run_id,
                 automatic_release_sha256=stored_record.record_sha256,
             )
             if link_run is not None:
@@ -1477,6 +1528,35 @@ def finalize_new_report_delivery(
                 ):
                     raise RuntimeError("LINK 자동출고 이력을 확정하지 못했습니다")
             bind_public_access(conn, public_delivery)
+            if release_evidence is not None:
+                # Content·Delivery·Artifact·자동승인·charge·LINK/PUBLIC
+                # binding까지 같은 거래에 쓴 뒤에만 출고 권위를 발급한다.
+                # 발급 직전에 epoch 3자(evidence·완료·저장된 Content)를
+                # 다시 확인한다 — 계약의 「epoch fence」다.
+                report_completion.assert_release_content_identity(
+                    evidence=release_evidence,
+                    frozen_build_identity=frozen_build_identity,
+                    content=public_delivery.content,
+                )
+                if public_delivery.artifact is None:
+                    raise report_delivery_adapter.DeliveryAdapterError(
+                        "FULL 출고 권위에 결속할 PDF artifact가 없습니다"
+                    )
+                authority = report_completion.issue_owner_release_authority(
+                    evidence=release_evidence,
+                    delivery=public_delivery.delivery,
+                    content=public_delivery.content,
+                    artifact_id=public_delivery.artifact.artifact_id,
+                    automatic_release=stored_record,
+                    charge_run_id=charge_run_id,
+                    charge_decision_sha256=cost_store.charge_decision_sha256(
+                        run_id=charge_run_id,
+                        automatic_release_sha256=stored_record.record_sha256,
+                        decision=charge,
+                    ),
+                    issued_at=completed_at,
+                )
+                authority_store.save_release_authority(conn, authority)
             conn.commit()
         return public_delivery
     except Exception as exc:
