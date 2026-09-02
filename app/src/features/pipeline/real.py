@@ -32,7 +32,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Final, Iterable, Optional
 
-from src.core import paths
+from src.core import paths, typed_collector_switch
 from src.core.clock import subtract_years, today_kst
 from src.core.provider_gateway import attempt_context, gateway
 from src.core.provider_gateway.anthropic_adapter import AnthropicAdapter
@@ -2158,6 +2158,9 @@ class RealPipeline:
         frags, revenue_tables, filing_text = _collect(
             engine, client, profile, user_input, counter, steps,
             financials=financials, fin_years=fin_years, filing=filing,
+            # typed 공식 근거 수집은 v2·FULL·kill switch가 «전부» 켜졌을 때만
+            # 돈다. 판정은 `_typed_dart_collection_enabled`가 한다.
+            generation_mode=generation_mode, corp_code=corp_code,
         )
         sources = _sources_from(steps)
 
@@ -3975,6 +3978,139 @@ _TYPED_DART_SECTION_FRAGMENT_KIND: Final[dict[str, str]] = {
 #: typed 수집기의 문서ID는 `f"{source_kind}:{rcept_no}"`라 뒷부분만 접수번호다.
 _RCEPT_NO_RE: Final[re.Pattern[str]] = re.compile(r"\d{14}")
 
+#: typed 공식 근거 수집 결과를 남기는 단계 이름.
+#: ★ `_sources_from`이 읽는 이름들과 겹치지 않게 새로 만든다 — 겹치면 화면의
+#:   소스별 현황이 typed 결과로 덮인다.
+TYPED_DART_COLLECT_STEP: Final[str] = "6_수집_typed공시"
+
+
+def _typed_dart_collection_enabled(
+    generation_mode: Optional[engine_mode.EngineMode],
+) -> bool:
+    """typed 공식 근거 수집을 이번 요청에서 돌릴 것인가.
+
+    ★ 검사 «순서»가 계약이다.
+      1) v1이면 첫 줄에서 나간다 — v1 경로는 release mode도
+         `TYPED_DART_COLLECTOR`도 **읽지 않는다**(읽지 않으면 스위치가 동결도
+         되지 않아 「안 봤다」를 시험이 기계적으로 확인할 수 있다).
+      2) FULL이 아니면 나간다 — SHADOW·ENFORCE는 사용자 결과가 불변이어야
+         한다(I9). release mode가 없거나 모르는 값이면 «FULL로 치지 않는다»;
+         그 계약 위반은 v2 composer가 GATE_STOPPED로 다룬다.
+      3) 그다음에야 kill switch를 본다.
+    """
+
+    if generation_mode is not engine_mode.EngineMode.V2:
+        return False
+    raw_release_mode = os.environ.get(REPORT_RELEASE_MODE_ENV_NAME)
+    if not raw_release_mode:
+        return False
+    try:
+        release_mode = parse_release_mode(raw_release_mode)
+    except ValueError:
+        return False
+    if release_mode is not ReleaseMode.FULL:
+        return False
+    return typed_collector_switch.typed_dart_collector_enabled()
+
+
+def _typed_dart_collector_modules() -> tuple[Any, Any, Any]:
+    """엔진 패키지의 typed 수집기 module 셋을 불러온다.
+
+    typed 수집기는 app이 아니라 ``analysis_engine/src`` 아래에 산다. `_engine()`이
+    이미 하는 것과 같은 방식으로 검색 경로를 얹되, **실제로 그 트리에서 온
+    module인지 파일 경로로 확인한다** — app의 `features` 패키지가 이름을 가리면
+    조용히 다른 코드를 부르는 대신 소리 나게 실패해야 한다(부르는 쪽이 강등으로
+    흡수한다).
+    """
+
+    engine_src = (paths.PROJECT_ROOT / "analysis_engine" / "src").resolve()
+    if str(engine_src) not in sys.path:
+        sys.path.insert(0, str(engine_src))
+    modules = tuple(
+        importlib.import_module(f"features.evidence_collection.{name}")
+        for name in ("collect", "dart_fetcher", "serialize")
+    )
+    for module in modules:
+        module_path = Path(getattr(module, "__file__", "") or "").resolve()
+        if engine_src not in module_path.parents:
+            raise ImportError(
+                "typed 수집기가 엔진 트리 밖에서 잡혔습니다: "
+                f"{module.__name__} -> {module_path}"
+            )
+    return modules
+
+
+def _typed_dart_harvest_mapping(
+    engine: Any,
+    counter: Any,
+    corp_code: str,
+    *,
+    collected_at: str,
+) -> dict[str, Any]:
+    """typed 공식 근거 수집을 실행하고 계약 Mapping으로 돌려준다.
+
+    DART 조회는 이 요청의 1판 엔진 함수(`get_json`·`download_document`)를 그대로
+    쓴다 — 별도 HTTP 경로를 새로 열지 않아 일일 한도·사용량 계수가 한 곳에 모인다.
+    """
+
+    collect_module, fetcher_module, serialize_module = _typed_dart_collector_modules()
+    fetcher = fetcher_module.DartRuntimeFetcher(
+        document_cache_dir=Path(str(engine.RAW_DIR)),
+        counter=counter,
+        get_json_fn=engine.get_json,
+        download_document_fn=engine.download_document,
+    )
+    harvest = collect_module.collect_dart_evidence(
+        fetcher, corp_code, now=collected_at
+    )
+    return serialize_module.harvest_to_mapping(harvest)
+
+
+def _collect_typed_dart(
+    engine: Any,
+    counter: Any,
+    corp_code: str,
+    frags: dict[int, dict[str, str]],
+    steps: list[dict[str, Any]],
+    *,
+    collected_at: str,
+) -> dict[int, dict[str, str]]:
+    """typed 공식 근거를 모아 v1 조각 묶음에 더한다. 실패는 강등으로 흡수한다.
+
+    ★ 예외 경계는 공식 IR 호출부(아래 `collect_official_ir_fragments` 감싸기)를
+      그대로 복사했다 — 미검증(LIVE_COLLECTION_UNVERIFIED) 수집기의 결함이
+      보고서를 강등 없이 `Outcome.FAILED`로 떨어뜨리면 안 되기 때문이다.
+      «자료 없음»이 아니라 «오류»로 적어 화면에서 둘이 섞이지 않게 한다.
+
+    ⚠️ 알려진 절충 — DART 일일 한도(`DartLimitReached`)도 여기서 흡수된다.
+      legacy `_collect`가 공시 원문 다운로드 실패를 이미 같은 방식으로 강등하고
+      있어(같은 함수 위쪽 `except (RuntimeError, OSError)`) 계약을 맞춘 것이다.
+      이 지점 뒤로 새 DART 호출은 없다.
+    """
+
+    try:
+        mapping = _typed_dart_harvest_mapping(
+            engine, counter, corp_code, collected_at=collected_at
+        )
+        merged, added = _merge_typed_dart_fragments(frags, mapping)
+    except Exception as exc:  # noqa: BLE001 - 수집기 결함도 자료 부재로 오인하지 않는다
+        steps.append(
+            {
+                "step": TYPED_DART_COLLECT_STEP,
+                "오류": f"{type(exc).__name__}: {str(exc)[:120]}",
+            }
+        )
+        return frags
+    steps.append(
+        {
+            "step": TYPED_DART_COLLECT_STEP,
+            "조각수": added,
+            "문서수": len(mapping.get("documents") or []),
+            "조회기록": len(mapping.get("attempts") or []),
+        }
+    )
+    return merged
+
 
 def _normalized_fragment_text_key(text: str) -> str:
     """조각 원문의 중복 판정 열쇠 — 공백·개행을 정규화한 뒤 SHA-256.
@@ -4094,6 +4230,8 @@ def _collect(
     financials: Optional[dict[str, Any]],
     fin_years: list[int],
     filing: Optional[dict[str, Any]],
+    generation_mode: Optional[engine_mode.EngineMode] = None,
+    corp_code: str = "",
 ) -> tuple[dict[int, dict[str, str]], list[dict], str]:
     """6 수집 — 공시 원문 + 재무 API + 홈페이지를 조각으로 만든다. AI 0회.
 
@@ -4103,6 +4241,12 @@ def _collect(
         fin_years: 그때 실제로 자료가 있던 사업연도 목록 (단계 기록용).
         filing: 최신 공시 1건(보고서 이름·접수번호). 이것도 `run()`이 이미 받았다.
             **출처 목록을 만들 때 쓴다** (P-24). 공시를 못 찾았으면 None.
+        generation_mode: 이 요청이 운반한 엔진 모드. typed 공식 근거 수집을
+            켤지 정하는 데만 쓴다. 기본값(None)이면 v1과 똑같이 동작한다 —
+            기존 호출자·시험은 한 줄도 달라지지 않는다.
+        corp_code: 사용자가 확정한 8자리 DART 법인코드(`card.ref`). typed 수집은
+            회사별이라 이 값이 없으면 시작하지 않는다. `profile`에서 다시 읽지
+            않는다 — 회사 식별자는 한 곳에서만 온다.
 
     Returns:
         조각 목록, 구조화 표, 실제로 내려받은 자사 공식 원문. 마지막 값은
@@ -4148,6 +4292,19 @@ def _collect(
     if relationship_added:
         steps.append(
             {"step": "6_수집_파트너관계", "더한조각": relationship_added}
+        )
+
+    # ── typed 공식 근거 수집 (FULL + kill switch 둘 다 켜졌을 때만) ──
+    # ★ 아래 한 줄이 kill switch다. 꺼져 있거나 v1·비FULL이면 여기서 그대로
+    #   빠져나가고, 이 함수의 나머지 legacy 경로는 바이트 하나 달라지지 않는다.
+    if _typed_dart_collection_enabled(generation_mode) and corp_code.strip():
+        frags = _collect_typed_dart(
+            engine,
+            counter,
+            corp_code.strip(),
+            frags,
+            steps,
+            collected_at=today_kst().isoformat(),
         )
 
     # 홈페이지를 붙이기 전 개수다. 출처 현황에서 이 값을 쓰지 않으면
