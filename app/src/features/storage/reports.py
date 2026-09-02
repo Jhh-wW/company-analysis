@@ -792,14 +792,28 @@ def load_public_projection(
     return projection
 
 
-def _attach_public_projection(
+def attach_public_projection(
     conn: sqlite3.Connection, report_id: str, report: Report
 ) -> Report:
-    """로드한 보고서에 봉인을 붙이고 생성 증거와 맞대본다.
+    """보고서에 저장된 봉인을 붙이고 생성 증거와 맞대본다.
 
     ★ 왜 증거와도 맞대나 — 위 ``load_public_projection``은 봉인 «자체»의
       앞뒤만 본다. 다른 실행의 봉인을 digest 열까지 통째로 갈아 끼우면 그
       검사는 통과한다. 생성 증거가 지목하는 지문과 맞대야 바꿔치기가 잡힌다.
+
+    ★ ``load()``만 이걸 부르는 게 아니다. 봉인은 payload가 아니라 별도 표에
+      있으므로, **payload 문자열에서 Report를 다시 만드는 경로**(공개 결과
+      화면이 읽는 delivery content snapshot, 관리자 승인 snapshot, 캐시 재사용)는
+      이 함수를 «명시적으로» 불러야 봉인이 붙는다. 안 부르면 봉인이 있는데도
+      화면은 「봉인 없음」으로 그린다. 자세한 경로 목록은
+      ``storage/tests/test_public_projection_storage.py``의
+      ``test_payload_문자열에서_되살린_보고서에는_봉인이_붙지_않는다`` docstring에 있다.
+
+    Returns:
+        봉인이 있으면 붙인 새 ``Report``, 없으면 받은 값 그대로.
+
+    Raises:
+        ValueError: 저장된 봉인이 구조·digest·생성 증거 대조를 통과하지 못할 때.
     """
 
     projection = load_public_projection(conn, report_id)
@@ -982,4 +996,4 @@ def load(conn: sqlite3.Connection, report_id: str) -> Optional[Report]:
     if row is None:
         return None
     report = _normalize_legacy_report(report_from_json(row["payload_json"]))
-    return _attach_public_projection(conn, report_id, report)
+    return attach_public_projection(conn, report_id, report)

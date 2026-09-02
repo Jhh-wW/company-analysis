@@ -331,3 +331,84 @@ def test_projection_저장_실패는_보고서_저장을_되돌린다(tmp_path: 
     with db.connect(path) as conn:
         assert reports.exists(conn, "r1") is False
         assert reports.load(conn, "r1") is None
+
+
+# ══════════════════════════════════════════════════════════
+# ⑤ 봉인을 «누가» 붙이는가 — S4~S6이 먼저 읽어야 할 계약
+# ══════════════════════════════════════════════════════════
+
+
+def test_payload_문자열에서_되살린_보고서에는_봉인이_붙지_않는다() -> None:
+    """봉인은 표에 있으므로 payload만으로는 절대 되살아나지 않는다.
+
+    ★ 이건 결함이 아니라 root 결정 C의 «직접적인 결과»다. 그런데 그 결과가
+      화면까지 이어지면 「봉인이 있는데도 없다고 그리는」 보고서가 생긴다.
+      payload 문자열에서 Report를 다시 만드는 생산 경로가 실제로 있다
+      (2026-09-02 실측, 전부 web 계층):
+
+        · ``web/report_delivery_adapter.py`` ``load_public_delivery`` —
+          공개 결과 화면이 그리는 본문이 여기서 온다
+          (``routers/reports.py`` ``_stored_public_delivery`` →
+          ``_render_result_page(report=stored_delivery.report)``).
+        · ``web/routers/reports.py`` ``_approved_report`` 와
+          ``web/job_runtime.py`` 의 관리자 승인 snapshot 갈래.
+        · ``web/generation_singleflight.py`` 의 캐시 재사용 갈래.
+
+      그 경로들은 ``attach_public_projection(conn, report_id, report)``을
+      명시적으로 불러야 한다. 저장층이 대신 해 줄 수 없다 — payload 문자열만
+      가진 쪽은 ``report_id``와 연결을 함께 들고 있는 호출부뿐이다.
+    """
+
+    report = _full_report()
+    assert report.public_projection is not None
+
+    restored = reports.report_from_json(report_to_json(report))
+
+    assert restored.public_projection is None
+
+
+def test_attach_public_projection이_봉인을_붙이고_digest를_대조한다(
+    tmp_path: Path,
+) -> None:
+    """payload에서 되살린 보고서에 봉인을 다시 붙이는 공용 입구."""
+
+    report = _full_report()
+    path = _saved(tmp_path, report)
+    restored = reports.report_from_json(report_to_json(report))
+
+    with db.connect(path) as conn:
+        attached = reports.attach_public_projection(conn, "r1", restored)
+
+    assert attached.public_projection == report.public_projection
+
+
+def test_attach_public_projection도_증거_지문과_어긋나면_거부한다(
+    tmp_path: Path,
+) -> None:
+    """봉인을 붙이는 입구가 하나면 검사도 한 곳에서 끝난다."""
+
+    victim = _full_report()
+    other, _w, _r, _d = _run_full(flow=True)
+    path = _saved(tmp_path, victim)
+    other_digest = build_report_digest(other.report.public_projection)
+
+    with db.connect(path) as conn:
+        conn.execute(
+            f"""UPDATE {TABLE_REPORT_PUBLIC_PROJECTIONS}
+            SET projection_json = ?, content_sha256 = ?, display_sha256 = ?""",
+            (
+                json.dumps(
+                    reports.public_projection_payload(
+                        other.report.public_projection
+                    ),
+                    ensure_ascii=False,
+                ),
+                other_digest.content_sha256,
+                other_digest.display_sha256,
+            ),
+        )
+
+    restored = reports.report_from_json(report_to_json(victim))
+    with db.connect(path) as conn:
+        with pytest.raises(ValueError):
+            reports.attach_public_projection(conn, "r1", restored)

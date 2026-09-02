@@ -566,9 +566,19 @@ class Report:
     quality_observation: GenerationQualityObservation | None = None
     #: 웹·PDF·Notion이 «그대로 배치만» 하면 되는 공개 봉인 블록(설계 017).
     #: 생성 시점에 딱 한 번 만들어 여기 실린다 — 렌더러가 문자열을 새로
-    #: 만들지 않게 하려는 것이다. FULL 새 생성물만 채우고(SHADOW·
-    #: ENFORCE_NO_PARTIAL·옛 저장본은 ``None``), 저장 payload에도 값이
-    #: 있을 때만 키가 생긴다.
+    #: 만들지 않게 하려는 것이다. FULL 새 생성물만 채운다(SHADOW·
+    #: ENFORCE_NO_PARTIAL·옛 저장본은 ``None``).
+    #:
+    #: ★ 이 값은 보고서 payload에 **직렬화되지 않는다**(root 결정 C,
+    #:   2026-09-02 — payload 노드 수가 두 배가 되어 저장 자원 상한 여유를
+    #:   반으로 깎았다). 저장 자리는 별도 표이고, 채워지는 경로는 둘뿐이다:
+    #:     ① composer가 방금 만든 결과
+    #:     ② ``storage.reports.load()`` 또는
+    #:        ``storage.reports.attach_public_projection()``
+    #:   payload 문자열에서 되살린 ``Report``(delivery content snapshot·관리자
+    #:   승인 snapshot·캐시 재사용)는 ``None``이다. 그 경로에서 화면을 그리려면
+    #:   ②를 먼저 불러야 한다. ``None``은 「봉인 없음」이라는 정의된 상태이지
+    #:   오류가 아니다.
     public_projection: PublicReportProjection | None = None
 
     @property
