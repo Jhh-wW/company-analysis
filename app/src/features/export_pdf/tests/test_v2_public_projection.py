@@ -4,8 +4,8 @@
     - v2 FULL(``report.public_projection`` 있음) PDF는 **봉인 블록만** 배치한다.
       문단·문단 번호·도식·읽는 법·3개년 띠·표지 띠·핵심 요약·부록 행을 렌더
       시점에 다시 «계산»하지 않는다. 그래서 ``table_visualization`` ·
-      ``cover_metrics`` · ``source_verification_label`` · ``section_content_blocks``
-      네 전역을 예외로 바꿔도 PDF가 정상으로 나와야 한다.
+      ``cover_metrics`` · ``source_verification_label`` · ``section_content_blocks`` ·
+      ``summary_topic`` 다섯 전역을 예외로 바꿔도 PDF가 정상으로 나와야 한다.
     - PDF 메타 지문은 옛 ``content_manifest``가 아니라
       ``PublicReportDigest.content_sha256``이다(설계 §5의 지문 C 교체).
     - ``.ledger``(감사 장부)는 어디에도 그리지 않는다 — 장부만 바꾸면 글자와
@@ -336,6 +336,10 @@ def test_v2_PDF는_블록_밖_문자열을_만들지_않는다(monkeypatch):
         "cover_metrics",
         "source_verification_label",
         "section_content_blocks",
+        # ★ 다섯째는 음성 대조가 찾아낸 구멍이다 — 핵심 요약을 봉인 대신 다시
+        #   계산해도(주제어를 여기서 고르면) 위 넷만으로는 아무 시험도 깨지지
+        #   않았다. 요약 주제어는 이 함수만 만들 수 있으므로 같이 막는다.
+        "summary_topic",
     ):
         monkeypatch.setattr(pdf_logic, name, _forbid(name))
 
