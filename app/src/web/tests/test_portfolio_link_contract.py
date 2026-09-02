@@ -94,7 +94,7 @@ def test_포트폴리오_계약은_LINK_발급을_admin_py_수정없이_연다(
         before = len(share_store.list_all(conn))
 
     response = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={"company": "카카오", "job": "마케팅"},
         follow_redirects=False,
     )
@@ -142,7 +142,7 @@ def test_같은_시험을_옛_관리자_실제분석_계약에서_돌리면_여�
     monkeypatch.setenv(auth_constants.ENV_BETA_ADMIN_ONLY, "1")
 
     link_response = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={"company": "카카오", "job": "마케팅"},
         follow_redirects=False,
     )

@@ -260,3 +260,100 @@ def test_메뉴_템플릿은_한_벌뿐이다():
     ]
 
     assert 나온곳 == ["_admin_nav.html"], 나온곳
+
+
+# ══════════════════════════════════════════════════════════
+# ④ 고아 템플릿과 구형 경로
+# ══════════════════════════════════════════════════════════
+
+
+def test_admin_home_템플릿은_없다():
+    """어느 라우트도 그리지 않는 화면 파일은 「있는 기능」처럼 보이는 거짓말이다.
+
+    ★ 실측(감사 2026-09-02, HEAD ddc4682) — `admin_home.html`을 렌더하는 곳이
+      0곳이었다. 그 안의 「품질 대시보드」·「운영 대시보드(예시 화면)」 링크는
+      전부 `/admin`으로 되돌아오는 죽은 안내였다.
+    """
+
+    assert not (TEMPLATES / "admin_home.html").exists()
+
+
+def test_어떤_화면_파일도_라우트_없이_남아_있지_않다():
+    """고아를 하나 지우고 「정리했다」고 말하지 않게, 전수로 센다.
+
+    ★ 조각(`_`로 시작)은 다른 화면이 include 하므로 대상이 아니다.
+      base.html도 다른 화면이 extends 한다.
+    ★ 그리는 곳은 라우터만이 아니다 — 오류·만료 화면은 `request_helpers.py`와
+      `job_runtime.py`가 그린다(실측). 그래서 `src/web`의 파이썬 전부를 본다.
+      시험 파일은 세지 않는다. 시험만 읽는 화면은 «아무도 못 보는 화면»이다.
+    """
+
+    생산코드 = [
+        경로
+        for 경로 in TEMPLATES.parent.rglob("*.py")
+        if "tests" not in 경로.parts
+    ]
+    쓰인글자 = "\n".join(경로.read_text(encoding="utf-8") for 경로 in 생산코드)
+    쓰인글자 += "\n".join(
+        경로.read_text(encoding="utf-8") for 경로 in TEMPLATES.glob("*.html")
+    )
+
+    고아 = [
+        경로.name
+        for 경로 in sorted(TEMPLATES.glob("*.html"))
+        if not 경로.name.startswith("_")
+        and 경로.name != "base.html"
+        and 경로.name not in 쓰인글자
+    ]
+
+    assert 고아 == [], f"라우트도 include도 없는 화면 파일: {고아}"
+
+
+def test_구형_admin_link_경로는_제거됐다():
+    """같은 일을 하는 주소가 둘이면 한쪽만 고쳐 놓고 다 고쳤다고 말하게 된다.
+
+    ★ 지운 것과 남긴 것을 구분한다 (설계 05장 §5, 결정 D-G6 (a)).
+      - 지운 것: 단수형 POST 별칭 3개. 화면 어디에서도 쓰지 않았고(실측),
+        감사 목록 35개는 「레거시 별칭 제외」라 회귀가 아니다.
+      - 남긴 것: 단수형 GET 2개. 이건 감사 35개에 들어 있는 «사람이 여는 주소»라
+        지우지 않고 신형으로 303 한다.
+    """
+
+    from src.web.routers import admin as admin_router  # noqa: PLC0415
+
+    등록된것 = {
+        (route.path, method)
+        for route in admin_router.router.routes
+        for method in getattr(route, "methods", set()) or set()
+    }
+
+    for 지운경로 in ("/admin/link/new", "/admin/link/report", "/admin/link/delete"):
+        assert ("POST", 지운경로) not in 등록된것 and (
+            (지운경로, "POST") not in 등록된것
+        ), f"구형 단수형 별칭 {지운경로}가 아직 등록돼 있다"
+
+    남긴것 = {path for path, method in 등록된것 if method == "GET"}
+    assert "/admin/link/{key}" in 남긴것
+    assert "/admin/link/report/{report_id}" in 남긴것
+
+
+def test_지운_구형_경로는_화면_어디에도_없다():
+    """라우트만 지우고 화면에 링크가 남으면 404를 사용자가 밟는다."""
+
+    for 화면 in TEMPLATES.glob("*.html"):
+        글자 = 화면.read_text(encoding="utf-8")
+        for 지운경로 in ("/admin/link/new", "/admin/link/delete"):
+            assert 지운경로 not in 글자, f"{화면.name}에 {지운경로}가 남아 있다"
+        assert 'action="/admin/link/report"' not in 글자, 화면.name
+
+
+def test_구형_GET_주소는_지우지_않고_신형으로_보낸다(admin_client: TestClient):
+    """음성 대조 — 「구형은 다 없앴다」가 살아 있는 주소까지 죽이지 않았는지 본다."""
+
+    from src.features.sharelink import store as share_store  # noqa: PLC0415
+
+    key_hash = share_store.key_hash_of("a" * 32)
+    응답 = admin_client.get(f"/admin/link/{key_hash}", follow_redirects=False)
+
+    assert 응답.status_code == 303
+    assert 응답.headers["location"] == f"/admin/links/{key_hash}"

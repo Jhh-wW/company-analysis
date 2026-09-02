@@ -774,7 +774,6 @@ async def admin_costs(request: Request):
     return _access_page(request, template=ACCESS_COSTS_TEMPLATE)
 
 
-@router.post("/admin/link/new", include_in_schema=False)
 @router.post("/admin/links/new")
 async def admin_link_new(
     request: Request,
@@ -1423,7 +1422,6 @@ async def admin_link_generated_report(request: Request, report_id: str):
     )
 
 
-@router.post("/admin/link/report", include_in_schema=False)
 @router.post("/admin/links/report")
 async def admin_link_report(
     request: Request,
@@ -1537,7 +1535,6 @@ async def admin_link_report(
     )
 
 
-@router.post("/admin/link/delete", include_in_schema=False)
 @router.post("/admin/links/revoke")
 async def admin_link_delete(
     request: Request,

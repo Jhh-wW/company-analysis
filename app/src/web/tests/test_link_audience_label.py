@@ -59,7 +59,7 @@ def admin(client: TestClient) -> TestClient:
 def _발급요청(admin: TestClient, **extra) -> tuple[str, str]:
     data = {"company": "하이브", "job": "인사", "audience_label": _표시이름}
     data.update(extra)
-    response = admin.post("/admin/link/new", data=data, follow_redirects=False)
+    response = admin.post("/admin/links/new", data=data, follow_redirects=False)
     assert response.status_code == 200
     found = re.search(r"/k/([0-9a-f]{32})", response.text)
     assert found is not None

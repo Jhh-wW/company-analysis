@@ -80,7 +80,7 @@ def _assert_access_unknown(response, *, revocation_available: bool = False) -> N
     assert "오늘 실제 지출" not in response.text
     assert "최악의 하루 지출" not in response.text
     assert "구성상 차단 기준 합계" not in response.text
-    assert 'action="/admin/link/new"' not in response.text
+    assert 'action="/admin/links/new"' not in response.text
     assert 'action="/admin/invite"' not in response.text
     if revocation_available:
         assert 'action="/admin/revoke"' in response.text
@@ -150,9 +150,9 @@ def test_로그인_안_하면_관리_화면을_못_본다(client: TestClient, �
 @pytest.mark.parametrize(
     "경로",
     [
-        "/admin/link/new",
-        "/admin/link/report",
-        "/admin/link/delete",
+        "/admin/links/new",
+        "/admin/links/report",
+        "/admin/links/revoke",
         "/admin/invite",
         "/admin/revoke",
     ],
@@ -174,11 +174,11 @@ def test_관리자는_들어온다(admin: TestClient):
 
 def test_관리자라도_CSRF토큰이_없거나_다른_출처면_변경을_막는다(admin: TestClient):
     missing = admin.request(
-        "POST", "/admin/link/new", data={"company": "x", "job": "y"}
+        "POST", "/admin/links/new", data={"company": "x", "job": "y"}
     )
     wrong_origin = admin.request(
         "POST",
-        "/admin/link/new",
+        "/admin/links/new",
         data={
             "company": "x",
             "job": "y",
@@ -188,7 +188,7 @@ def test_관리자라도_CSRF토큰이_없거나_다른_출처면_변경을_막�
     )
     null_origin = admin.request(
         "POST",
-        "/admin/link/new",
+        "/admin/links/new",
         data={
             "company": "x",
             "job": "y",
@@ -389,7 +389,7 @@ def test_좁은Render관리자운영판은_링크와_MEMBER를_발급하지않�
         before = len(share_store.list_all(conn))
 
     link_response = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={"company": "카카오", "job": "마케팅"},
         headers={"Host": "demo.example"},
         follow_redirects=False,
@@ -414,7 +414,7 @@ def test_좁은Render관리자운영판은_링크와_MEMBER를_발급하지않�
 
 def test_링크를_발급하면_저장된다(admin: TestClient):
     response = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={"company": "카카오", "job": "마케팅", "note": "하반기 공채"},
         follow_redirects=False,
     )
@@ -445,7 +445,7 @@ def test_발급열쇠가_충돌하면_기존링크를_덮지않고_새열쇠로_
     monkeypatch.setattr(admin_router.share_issue, "new_key", lambda: next(keys))
 
     response = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={"company": "새회사", "job": "새직무"},
         follow_redirects=False,
     )
@@ -475,7 +475,7 @@ def test_발급열쇠_충돌이_계속되면_기존링크를_보존하고_503으
     monkeypatch.setattr(admin_router.share_issue, "new_key", lambda: collision)
 
     response = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={"company": "새회사", "job": "새직무"},
         follow_redirects=False,
     )
@@ -497,7 +497,7 @@ def test_발급하면_raw주소를_딱한번_화면으로_보여준다(admin: Te
     비밀이 없으므로 referer로 원문이 새지 않는다.
     """
     response = admin.post(
-        "/admin/link/new", data={"company": "카카오", "job": "마케팅"},
+        "/admin/links/new", data={"company": "카카오", "job": "마케팅"},
         follow_redirects=False,
     )
 
@@ -516,7 +516,7 @@ def test_관리자_링크와_초대_생성시각은_offset포함_KST다(
     monkeypatch.setattr(admin_router.clock, "iso_now_kst", lambda: fixed)
 
     created = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={"company": "KST 회사", "note": "자정 뒤"},
         follow_redirects=False,
     )
@@ -605,7 +605,7 @@ def test_결과주소를_붙여_링크를_만들면_받은사람이_보고서로
     """
     report_id = _보고서를_만든다(admin)
     created = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={
             "company": CANONICAL_DEMO_COMPANY,
             "job": "",
@@ -638,7 +638,7 @@ def test_이상하거나_없는_보고서는_링크에_연결하지않고_이유
     admin: TestClient, reference: str, message: str
 ):
     response = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={
             "company": CANONICAL_DEMO_COMPANY,
             "job": "",
@@ -657,14 +657,14 @@ def test_이상하거나_없는_보고서는_링크에_연결하지않고_이유
 def test_기존_링크에도_보고서를_연결하고_다시_해제할수있다(admin: TestClient):
     report_id = _보고서를_만든다(admin)
     created = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={"company": CANONICAL_DEMO_COMPANY, "job": ""},
         follow_redirects=False,
     )
     key, key_hash = _issued_link(created)
 
     attached = admin.post(
-        "/admin/link/report",
+        "/admin/links/report",
         data={"key": key_hash, "report_reference": f"/result/{report_id}"},
         follow_redirects=False,
     )
@@ -674,7 +674,7 @@ def test_기존_링크에도_보고서를_연결하고_다시_해제할수있다
         assert share_store.load(conn, key).report_id == report_id
 
     detached = admin.post(
-        "/admin/link/report",
+        "/admin/links/report",
         data={"key": key_hash, "report_reference": ""},
         follow_redirects=False,
     )
@@ -685,14 +685,14 @@ def test_기존_링크에도_보고서를_연결하고_다시_해제할수있다
 
 def test_기존_링크에도_없는_보고서를_연결할수없다(admin: TestClient):
     created = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={"company": CANONICAL_DEMO_COMPANY, "job": ""},
         follow_redirects=False,
     )
     key, key_hash = _issued_link(created)
 
     response = admin.post(
-        "/admin/link/report",
+        "/admin/links/report",
         data={"key": key_hash, "report_reference": "a" * 32},
         follow_redirects=False,
     )
@@ -716,7 +716,7 @@ def test_지원회사_꼬리표는_받은사람의_분석_대상을_묶지_않�
     묶기 거부 쪽은 `test_다른_회사_보고서는_링크에_묶이지_않는다`가 이어받는다.
     """
     created = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={"company": "카카오"},
         follow_redirects=False,
     )
@@ -741,7 +741,7 @@ def test_기간이_지난_보고서는_새링크와_기존링크_어느쪽에도
 ):
     report_id = _보고서를_만든다(admin)
     created = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={"company": CANONICAL_DEMO_COMPANY, "job": ""},
         follow_redirects=False,
     )
@@ -749,7 +749,7 @@ def test_기간이_지난_보고서는_새링크와_기존링크_어느쪽에도
     monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: True)
 
     new_link = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={
             "company": CANONICAL_DEMO_COMPANY,
             "job": "",
@@ -758,7 +758,7 @@ def test_기간이_지난_보고서는_새링크와_기존링크_어느쪽에도
         follow_redirects=False,
     )
     existing_link = admin.post(
-        "/admin/link/report",
+        "/admin/links/report",
         data={"key": key_hash, "report_reference": report_id},
         follow_redirects=False,
     )
@@ -774,7 +774,7 @@ def test_기간이_지난_보고서는_새링크와_기존링크_어느쪽에도
 
 def test_공백뿐인_회사로는_링크를_만들지않는다(admin: TestClient):
     response = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={"company": "   "},
         follow_redirects=False,
     )
@@ -788,7 +788,7 @@ def test_공백뿐인_회사로는_링크를_만들지않는다(admin: TestClien
 def test_링크를_닫을_수_있다(admin: TestClient):
     """철회는 권한만 닫고 링크·접속·생성 이력을 물리 삭제하지 않는다."""
     created = admin.post(
-        "/admin/link/new", data={"company": "카카오", "job": "마케팅"},
+        "/admin/links/new", data={"company": "카카오", "job": "마케팅"},
         follow_redirects=False,
     )
     key, key_hash = _issued_link(created)
@@ -817,7 +817,7 @@ def test_링크를_닫을_수_있다(admin: TestClient):
         )
 
     closed = admin.post(
-        "/admin/link/delete", data={"key": key_hash}, follow_redirects=False
+        "/admin/links/revoke", data={"key": key_hash}, follow_redirects=False
     )
 
     with storage_db.connect() as conn:
@@ -837,7 +837,7 @@ def test_링크철회를_확인할수없으면_성공으로_리디렉션하지�
     admin: TestClient, monkeypatch, failure: str
 ):
     created = admin.post(
-        "/admin/link/new", data={"company": "카카오", "job": "마케팅"},
+        "/admin/links/new", data={"company": "카카오", "job": "마케팅"},
         follow_redirects=False,
     )
     key, key_hash = _issued_link(created)
@@ -853,7 +853,7 @@ def test_링크철회를_확인할수없으면_성공으로_리디렉션하지�
         )
 
     response = admin.post(
-        "/admin/link/delete", data={"key": key_hash}, follow_redirects=False
+        "/admin/links/revoke", data={"key": key_hash}, follow_redirects=False
     )
 
     assert response.status_code == 503
@@ -868,7 +868,7 @@ def test_회사링크를_닫아도_이미전달된_독립결과주소는_60일�
 ):
     report_id = _보고서를_만든다(admin)
     created = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={
             "company": CANONICAL_DEMO_COMPANY,
             "job": "",
@@ -884,7 +884,7 @@ def test_회사링크를_닫아도_이미전달된_독립결과주소는_60일�
     assert "보고서 생성 후 60일까지" in detail_before_close.text
 
     closed = admin.post(
-        "/admin/link/delete", data={"key": key_hash}, follow_redirects=False
+        "/admin/links/revoke", data={"key": key_hash}, follow_redirects=False
     )
 
     assert closed.status_code == 303
@@ -937,7 +937,7 @@ def test_비용원장장애에도_비상화면에서_LINK와_MEMBER를_원자철
     admin: TestClient, monkeypatch, failure: str
 ):
     created = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={"company": "카카오", "job": "마케팅"},
         follow_redirects=False,
     )
@@ -965,7 +965,7 @@ def test_비용원장장애에도_비상화면에서_LINK와_MEMBER를_원자철
     _assert_access_unknown(emergency, revocation_available=True)
     assert 'action="/admin/links/revoke"' in emergency.text
     assert 'name="key" value="' + key_hash + '"' in emergency.text
-    assert 'action="/admin/link/new"' not in emergency.text
+    assert 'action="/admin/links/new"' not in emergency.text
     assert 'action="/admin/invite"' not in emergency.text
 
     revoked_member = admin.post(
@@ -974,7 +974,7 @@ def test_비용원장장애에도_비상화면에서_LINK와_MEMBER를_원자철
         follow_redirects=False,
     )
     revoked_link = admin.post(
-        "/admin/link/delete",
+        "/admin/links/revoke",
         data={"key": key_hash},
         follow_redirects=False,
     )
@@ -995,7 +995,7 @@ def test_철회_감사정본실패는_LINK와_MEMBER권한_세션을_함께_roll
     admin: TestClient, monkeypatch
 ):
     created = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={"company": "카카오", "job": "마케팅"},
         follow_redirects=False,
     )
@@ -1017,7 +1017,7 @@ def test_철회_감사정본실패는_LINK와_MEMBER권한_세션을_함께_roll
         follow_redirects=False,
     )
     revoked_link = admin.post(
-        "/admin/link/delete",
+        "/admin/links/revoke",
         data={"key": key_hash},
         follow_redirects=False,
     )
@@ -1121,14 +1121,14 @@ def test_관리자_변경은_같은_transaction의_append_only_감사행과_함�
     report_id = _보고서를_만든다(admin)
 
     created = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={"company": CANONICAL_DEMO_COMPANY},
         headers={"X-Request-ID": "audit/workflow 01"},
         follow_redirects=False,
     )
     key, key_hash = _issued_link(created)
     attached = admin.post(
-        "/admin/link/report",
+        "/admin/links/report",
         data={"key": key_hash, "report_reference": report_id},
         follow_redirects=False,
     )
@@ -1146,7 +1146,7 @@ def test_관리자_변경은_같은_transaction의_append_only_감사행과_함�
         follow_redirects=False,
     )
     revoked_link = admin.post(
-        "/admin/link/delete", data={"key": key_hash}, follow_redirects=False
+        "/admin/links/revoke", data={"key": key_hash}, follow_redirects=False
     )
 
     assert created.status_code == 200
@@ -1313,7 +1313,7 @@ def test_외부감사_mirror장애에도_원자commit된_정본감사행은_남�
 def test_호출전_예상비용_차단기준을_실제청구_최댓값으로_과장하지않는다(
     admin: TestClient,
 ):
-    admin.post("/admin/link/new", data={"company": "카카오", "job": "마케팅"})
+    admin.post("/admin/links/new", data={"company": "카카오", "job": "마케팅"})
     admin.post("/admin/invite", data={"email": "f@g.com"})
 
     # ★ 2026-09-02 G-S8 기대값 이전 — 비용 카드가 `/admin/costs`(정보 구조 ⑤)로
@@ -1423,7 +1423,7 @@ def test_raw_LINK는_일회성응답외_DB_HTML_로그에_남지않는다(
     caplog.set_level(logging.INFO)
 
     created = admin.post(
-        "/admin/link/new", data={"company": "카카오", "job": "마케팅"},
+        "/admin/links/new", data={"company": "카카오", "job": "마케팅"},
         follow_redirects=False,
     )
     issued_key, key_hash = _issued_link(created)
@@ -1459,7 +1459,7 @@ def test_일회성_발급주소도_악성_Host보다_설정된_origin을_쓴다(
 ):
     monkeypatch.setenv("SHARE_PUBLIC_BASE_URL", "https://demo.example")
     created = admin.post(
-        "/admin/link/new", data={"company": "카카오", "job": "마케팅"},
+        "/admin/links/new", data={"company": "카카오", "job": "마케팅"},
         headers={"Host": "evil.example", "X-Forwarded-Host": "also-evil.example"},
         follow_redirects=False,
     )
@@ -1487,7 +1487,7 @@ def test_정본공개주소가_없거나_잘못되면_악성Host를_발급주소
         monkeypatch.delenv("SHARE_PUBLIC_BASE_URL", raising=False)
         monkeypatch.delenv("RENDER_EXTERNAL_URL", raising=False)
     created = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={"company": "카카오", "job": "마케팅"},
         headers={"Host": "evil.example"},
         follow_redirects=False,
@@ -1578,7 +1578,7 @@ def test_raw_LINK는_신형_보고서연결과_철회_POST에서도_거절한다
 def test_관리화면은_누구를_봤다고_과장하지않고_요청지표만_말한다(
     admin: TestClient,
 ):
-    admin.post("/admin/link/new", data={"company": "카카오", "job": "마케팅"})
+    admin.post("/admin/links/new", data={"company": "카카오", "job": "마케팅"})
 
     text = admin.get("/admin/access").text
 
@@ -1677,7 +1677,7 @@ def test_만료된_연결보고서는_목록과_상세에서_사전에_표시한
 ):
     report_id = _보고서를_만든다(admin)
     created = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={
             "company": CANONICAL_DEMO_COMPANY,
             "job": "",
@@ -1722,7 +1722,7 @@ def test_발급응답은_QR_SVG와_주소를_한번만_보여주고_no_store다(
     monkeypatch.setattr(admin_router.share_issue, "new_key", lambda: raw_key)
 
     created = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={"company": "카카오", "job": "마케팅"},
         follow_redirects=False,
     )
@@ -1752,7 +1752,7 @@ def test_발급뒤_목록과_상세와_DB와_로그에_원문이_없다(
     caplog.set_level(logging.INFO)
 
     created = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={"company": "카카오", "job": "마케팅"},
         follow_redirects=False,
     )
@@ -1799,7 +1799,7 @@ def test_실제_발급화면을_릴리스_수락시험_파서가_읽는다(
     monkeypatch.setattr(admin_router.share_issue, "new_key", lambda: raw_key)
 
     created = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={"company": "카카오", "job": "마케팅"},
         follow_redirects=False,
     )
@@ -1820,7 +1820,7 @@ def test_옛_계약에서는_발급이_여전히_404다(admin: TestClient, monke
     monkeypatch.setenv(deployment_mode.ENV_PUBLIC_ORIGIN, "https://demo.example")
 
     blocked = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={"company": "카카오", "job": "마케팅"},
         headers={"Host": "demo.example"},
         follow_redirects=False,
@@ -1872,17 +1872,17 @@ def test_다른_회사_보고서는_링크에_묶이지_않는다(admin: TestCli
     """
     report_id = _보고서를_만든다(admin)  # (주)진영 보고서
     created = admin.post(
-        "/admin/link/new", data={"company": "카카오"}, follow_redirects=False
+        "/admin/links/new", data={"company": "카카오"}, follow_redirects=False
     )
     key, key_hash = _issued_link(created)
 
     새링크 = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={"company": "카카오", "report_reference": report_id},
         follow_redirects=False,
     )
     기존링크 = admin.post(
-        "/admin/link/report",
+        "/admin/links/report",
         data={"key": key_hash, "report_reference": report_id},
         follow_redirects=False,
     )
@@ -1908,7 +1908,7 @@ def test_같은_회사는_묶인다(admin: TestClient):
 
     for 표기 in (CANONICAL_DEMO_COMPANY, "진영", "주식회사 진영"):
         created = admin.post(
-            "/admin/link/new",
+            "/admin/links/new",
             data={"company": 표기, "report_reference": report_id},
             follow_redirects=False,
         )
@@ -1917,12 +1917,12 @@ def test_같은_회사는_묶인다(admin: TestClient):
             assert share_store.load(conn, key).report_id == report_id, 표기
 
         떼었다 = admin.post(
-            "/admin/link/report",
+            "/admin/links/report",
             data={"key": key_hash, "report_reference": ""},
             follow_redirects=False,
         )
         다시_붙였다 = admin.post(
-            "/admin/link/report",
+            "/admin/links/report",
             data={"key": key_hash, "report_reference": report_id},
             follow_redirects=False,
         )
@@ -1944,7 +1944,7 @@ def test_법인격_토큰이_이름_중간에_끼어도_다른_회사로_본다(
     )
 
     새링크 = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={"company": "질원", "report_reference": 질주식회사원},
         follow_redirects=False,
     )
@@ -1965,7 +1965,7 @@ def test_앞뒤_법인격_표기만_벗긴다(admin: TestClient):
 
     for 같은회사 in ("하이브", "하이브(주)", "㈜하이브", "하이브 주식회사", "(주) 하이브"):
         created = admin.post(
-            "/admin/link/new",
+            "/admin/links/new",
             data={"company": 같은회사, "report_reference": 하이브},
             follow_redirects=False,
         )
@@ -1975,7 +1975,7 @@ def test_앞뒤_법인격_표기만_벗긴다(admin: TestClient):
 
     for 다른회사 in ("하이브미디어", "하이", "질원"):
         거부 = admin.post(
-            "/admin/link/new",
+            "/admin/links/new",
             data={"company": 다른회사, "report_reference": 하이브},
             follow_redirects=False,
         )
@@ -1993,7 +1993,7 @@ def test_결속_보고서를_읽지_못하면_연결을_거부한다(
     """
     report_id = _보고서를_만든다(admin)
     created = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={
             "company": CANONICAL_DEMO_COMPANY,
             "report_reference": report_id,
@@ -2021,7 +2021,7 @@ def test_결속_보고서를_읽지_못하면_연결을_거부한다(
     )
 
     거부 = admin.post(
-        "/admin/link/report",
+        "/admin/links/report",
         data={"key": key_hash, "report_reference": 바꿀보고서},
         follow_redirects=False,
     )
@@ -2048,7 +2048,7 @@ def test_동명_회사는_corp_id로_구분한다(admin: TestClient):
     )
 
     created = admin.post(
-        "/admin/link/new",
+        "/admin/links/new",
         data={"company": "한빛", "report_reference": 법인_A},
         follow_redirects=False,
     )
@@ -2057,7 +2057,7 @@ def test_동명_회사는_corp_id로_구분한다(admin: TestClient):
         assert share_store.load(conn, key).report_id == 법인_A
 
     다른법인 = admin.post(
-        "/admin/link/report",
+        "/admin/links/report",
         data={"key": key_hash, "report_reference": 법인_B},
         follow_redirects=False,
     )
@@ -2067,7 +2067,7 @@ def test_동명_회사는_corp_id로_구분한다(admin: TestClient):
         assert share_store.load(conn, key).report_id == 법인_A
 
     같은법인 = admin.post(
-        "/admin/link/report",
+        "/admin/links/report",
         data={"key": key_hash, "report_reference": 법인_A},
         follow_redirects=False,
     )
