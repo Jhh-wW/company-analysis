@@ -1,12 +1,11 @@
 """수집 엔진(analysis_engine)의 슬롯 어휘와 정책 어휘가 갈라지지 않았는지.
 
-엔진 모듈을 import하면 이 워크트리에 없는 무거운 의존성까지 끌려온다. import
-대신 파일 경로를 ast로 파싱해 ``COLLECTOR_SLOTS_BY_SECTION`` 딕셔너리
-리터럴만 꺼낸다. 엔진의 ``evidence_collection`` 모듈 자체가 아직 이
-워크트리에 병합되지 않았을 수 있으므로, 그 경우에만 소리 나게 건너뛴다
-(조용히 통과시키지 않는다). 모듈 폴더는 있는데 constants.py가 없거나,
-있어도 이 딕셔너리를 못 찾거나 값이 다르면 — 그건 진짜 어휘가 갈라진
-것이므로 건너뛰지 않고 반드시 실패해야 한다.
+엔진 모듈을 import하면 무거운 의존성까지 함께 끌려온다. import 대신 파일
+경로를 ast로 파싱해 ``COLLECTOR_SLOTS_BY_SECTION`` 딕셔너리 리터럴만
+꺼낸다. 엔진 소스가 함께 있지 않은 배치(app만 떼어 낸 경우)도 있으므로 그
+때만 소리 나게 건너뛴다(조용히 통과시키지 않는다). 모듈 폴더는 있는데
+constants.py가 없거나, 있어도 이 딕셔너리를 못 찾거나 값이 다르면 — 그건
+진짜 어휘가 갈라진 것이므로 건너뛰지 않고 반드시 실패해야 한다.
 """
 
 from __future__ import annotations
@@ -23,14 +22,14 @@ from src.shared.report_evidence.policy import (
 
 
 def _engine_module_dir() -> Path:
-    # 이 시험 파일 위치 기준: <워크트리 루트>/analysis_engine/src/features/
+    # 이 시험 파일 위치 기준: <저장소 루트>/analysis_engine/src/features/
     #   evidence_collection/
     # app/src/features/chapter_evidence/tests/test_vocabulary_equivalence.py
     #   parents[0]=tests, [1]=chapter_evidence, [2]=features, [3]=src, [4]=app,
-    #   [5]=워크트리 루트
-    worktree_root = Path(__file__).resolve().parents[5]
+    #   [5]=저장소 루트
+    repo_root = Path(__file__).resolve().parents[5]
     return (
-        worktree_root
+        repo_root
         / "analysis_engine"
         / "src"
         / "features"
@@ -71,8 +70,8 @@ def test_엔진의_수집_슬롯_어휘가_정책과_같다() -> None:
     engine_module_dir = _engine_module_dir()
     if not engine_module_dir.exists():
         pytest.skip(
-            "엔진 evidence_collection 모듈 자체가 없음 — 별도 워크트리에서 "
-            "아직 병합되지 않음"
+            "엔진 evidence_collection 소스가 이 저장소에 없음 — "
+            "app만 떼어 낸 배치"
         )
 
     engine_path = _engine_constants_path()
