@@ -8,6 +8,11 @@ from __future__ import annotations
 
 from typing import Final
 
+from src.shared.report_evidence.constants import (
+    SOURCE_KIND_OFFICIAL_RECRUIT_PAGE,
+    SOURCE_KIND_OFFICIAL_WEB_PAGE,
+)
+
 # ── 접속 ─────────────────────────────────────────────────
 
 #: 접속 시간 제한(초). 회사 홈페이지는 트래픽이 적어 느릴 수 있어
@@ -392,9 +397,9 @@ WIDE_MAX_CHARS_PER_RANGE: Final[int] = 1_500
 WIDE_MIN_CHARS_PER_RANGE: Final[int] = 40
 
 #: 문서 identity의 source_kind 값.
-WIDE_SOURCE_KIND_WEB_PAGE: Final[str] = "official_web_page"
+WIDE_SOURCE_KIND_WEB_PAGE: Final[str] = SOURCE_KIND_OFFICIAL_WEB_PAGE
 WIDE_SOURCE_KIND_IR_PDF: Final[str] = "official_ir_pdf"
-WIDE_SOURCE_KIND_RECRUIT_PAGE: Final[str] = "official_recruit_page"
+WIDE_SOURCE_KIND_RECRUIT_PAGE: Final[str] = SOURCE_KIND_OFFICIAL_RECRUIT_PAGE
 
 #: 문서·attempt의 requirement 값.
 WIDE_REQUIREMENT_REQUIRED: Final[str] = "REQUIRED"
