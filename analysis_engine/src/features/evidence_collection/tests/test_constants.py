@@ -1,9 +1,8 @@
 """수집기 필수 슬롯(COLLECTOR_SLOTS_BY_SECTION) 계약 잠금 시험.
 
-2026-08-31 team-lead 통보 — 정본은 app/src/shared/report_evidence/policy.py
-(이 워크트리 기준 커밋에는 아직 없음). 다른 담당(chapter_evidence)이 이
-파일 경로·상수 이름으로 정본과의 동등성 시험을 만들 예정이라, 값이 실수로
-바뀌지 않게 여기서도 리터럴로 고정해 둔다.
+정본은 app/src/shared/report_evidence/policy.py다. 엔진은 app을 import할 수
+없어 값을 복사해 두므로, 그 사본이 실수로 바뀌지 않게 여기서 리터럴로
+고정해 둔다.
 """
 
 from __future__ import annotations
@@ -50,13 +49,13 @@ def test_self_context는_composer_45개_어휘에_없던_신규_슬롯이다() -
 
 
 def test_past_changes_historical_performance는_수집기_슬롯이_아니다() -> None:
-    """Codex 구조화 실적기가 채운다 — 수집기 1차 표적에서 뺐다."""
+    """구조화 실적기가 채운다 — 수집기 1차 표적에서 뺐다."""
     assert "past_changes:historical_performance" not in c.COLLECTOR_SLOT_IDS
     assert "past_changes:historical_performance" not in c.COLLECTOR_SLOTS_BY_SECTION["past_changes"]
 
 
 def test_competitive_position_비교_4종은_수집기_슬롯이_아니다() -> None:
-    """비교 대상·지표·근거·판단은 Codex가 채운다 — 수집기는 self_context 하나뿐."""
+    """비교 대상·지표·근거·판단은 구조화 검증기가 채운다 — 수집기는 self_context 하나뿐."""
     excluded = {
         "competitive_position:comparison_target",
         "competitive_position:comparison_metric",
@@ -71,7 +70,7 @@ def test_competitive_position_비교_4종은_수집기_슬롯이_아니다() -> 
 
 
 def test_source_kind_slot_scope는_전부_수집기_슬롯에서만_고른다() -> None:
-    """attempts.slot_ids도 COLLECTOR_SLOT_IDS에서만 고른다(team-lead 규칙 1)."""
+    """attempts.slot_ids도 COLLECTOR_SLOT_IDS에서만 고른다(수집기 슬롯 우선 규칙)."""
     for source_kind, slot_ids in c.SOURCE_KIND_SLOT_SCOPE.items():
         assert slot_ids, f"{source_kind}의 slot_ids가 비어 있습니다"
         assert set(slot_ids) <= c.COLLECTOR_SLOT_IDS, f"{source_kind}가 수집기 슬롯 밖 값을 씁니다"

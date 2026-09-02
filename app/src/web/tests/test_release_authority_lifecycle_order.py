@@ -5,13 +5,13 @@
   (``src.features.observability.lifecycle.finalize_once``). 그런데 기존 코드는
   파이프라인이 REPORT를 돌려주자마자(저장·출고 확정 전에) 이 최종 행을 썼다.
   그래서 FULL 생성물이 파이프라인 이후 저장·출고에서 실패해도 이력에는
-  ``end_step="완주"``·``grade="완성"``으로 영구히 남았다(34장 새발견 §3 실측 —
-  PUBLIC delivery 확정 실패를 주입해도 lifecycle은 「완주」였다).
+  ``end_step="완주"``·``grade="완성"``으로 영구히 남았다(실측 — PUBLIC delivery
+  확정 실패를 주입해도 lifecycle은 「완주」였다).
 
   FULL 생성물만 저장·출고 결과를 알고 난 뒤에 lifecycle 최종 행을 쓴다. 실제
   내부 AI 원가 기록(``cost_store.record_run_costs``)은 이 순서와 무관하게
-  그대로 파이프라인 직후에 남는다 — 「하면 안 되는 설계 1」(34장 §2)이 금지한
-  것은 원가 기록을 옮기는 것이지 lifecycle 기록을 옮기는 것이 아니다.
+  그대로 파이프라인 직후에 남는다 — 옮기면 안 되는 것은 원가 기록이지
+  lifecycle 기록이 아니다.
 
 ★ 음성 대조: demo/v1(비-FULL)은 여전히 파이프라인 직후 즉시 기록한다 —
   기존 lifecycle 시험(test_job_runtime_lifecycle.py)이 이미 그 순서를

@@ -1353,7 +1353,7 @@ def finalize_new_report_delivery(
         output_report = _report_for_output(report)
         # FULL(release_mode=FULL)만 출고 권위(ReleaseAuthority)를 발급한다.
         # demo·v1·SHADOW·ENFORCE_NO_PARTIAL은 release_evidence가 None으로
-        # 남아 아래 모든 발급·재검증 분기를 그대로 건너뛴다 — 32장 §4-3
+        # 남아 아래 모든 발급·재검증 분기를 그대로 건너뛴다 —
         # 「FULL 밖 동작은 불변이다」.
         release_evidence = None
         if output_report.release_mode == ReleaseMode.FULL.value:
@@ -1361,7 +1361,8 @@ def finalize_new_report_delivery(
                 output_report
             )
             # blob intent를 만들기 전에 회사 ID·epoch 결속을 먼저 닫는다
-            # (34장 챕터03 P1-1·P1-2 — 「blob intent 전에 exact 비교」).
+            # (「blob intent 전에 exact 비교」 — 뒤로 미루면 어긋난 회사·epoch로
+            #  만든 blob이 이미 생긴 뒤에야 걸린다).
             report_completion.assert_release_company_identity(
                 corp_id=corp_id,
                 output_report=output_report,

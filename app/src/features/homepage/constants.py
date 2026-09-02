@@ -454,15 +454,13 @@ WIDE_EXCLUDED_LINKED_HOST_SUFFIXES: Final[tuple[str, ...]] = (
 
 #: 넓은 공식 웹 수집기가 attempt.slot_ids·조각 태그에 쓰는 «수집기 필수 슬롯»
 #: 목록의 «사본»이다(장별).
-#: ★ 정본은 `app/src/shared/report_evidence/policy.py`의
-#:   `CLAIM_SLOTS_BY_SECTION`이다(계약 담당 Codex가 2026-08-31 확정). 이
-#:   워크트리의 기준 커밋에는 아직 그 파일이 없어 팀 리드가 전달한 값을
-#:   그대로 사본으로 둔다 — 정본 파일이 이 워크트리에 들어오면(다른
-#:   워크트리가 병합된 뒤) 이 사본도 다시 대조해야 한다.
+#: ★ 정본은 `app/src/shared/report_evidence/policy.py`다. 이 사본은 그 파일의
+#:   `REQUIRED_EVIDENCE_SLOTS_BY_SECTION`에서 `INJECTED_EVIDENCE_SLOTS_BY_SECTION`
+#:   을 뺀 값과 정확히 같다(실측). 정본이 바뀌면 이 사본도 다시 대조해야 한다.
 #: ★ `composer/constants.py`의 `CLAIM_SLOTS_BY_SECTION`과는 다른 목록이다.
 #:   `competitive_position:self_context`는 composer 목록에 없는 새 슬롯으로,
 #:   자사 강점·시장 내 위치를 회사 스스로 서술한 페이지 전용이다 — 비교
-#:   슬롯 5개는 이 수집기가 만들지 않는다(다른 소스에서 Codex가 별도 주입).
+#:   슬롯 5개는 이 수집기가 만들지 않는다(구조화 검증기가 다른 소스에서 별도 주입).
 WIDE_REQUIRED_SLOT_IDS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
     "identity": ("identity:corporate_identity", "identity:business_definition"),
     "business_model": (

@@ -269,7 +269,7 @@ def build_unfilled_channel(
 
 
 def injected_facts_for(section_id: str) -> tuple[InjectedSlotFacts, ...]:
-    """Codex 구조화 검증기가 채웠을 주입 사실을 가짜로 만든다(시험 전용)."""
+    """구조화 검증기가 채웠을 주입 사실을 가짜로 만든다(시험 전용)."""
 
     return tuple(
         InjectedSlotFacts(slot_id=slot_id, fact_ids=(f"fact-{slot_id}",))

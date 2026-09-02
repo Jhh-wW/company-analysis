@@ -767,7 +767,7 @@ def _report_requires_atomic_completion(report: Report) -> bool:
 
     demo·v1·SHADOW·ENFORCE_NO_PARTIAL은 이 계약 밖이며 audience와 무관하게
     기존 동작(저장 실패 뒤에도 LINK·ADMIN 임시 미리보기가 메모리에 남는 것)을
-    그대로 유지한다 — 32장 §4-3 「FULL 밖 demo/non-FULL 동작은 불변이다」.
+    그대로 유지한다 — 「FULL 밖 demo/non-FULL 동작은 불변이다」.
     """
 
     return report.release_mode == ReleaseMode.FULL.value
@@ -964,14 +964,13 @@ async def _run_job(job: Job) -> None:
             # FULL 생성물은 파이프라인 완료 시점이 아니라 저장·출고 결과를
             # 알고 난 뒤에만 lifecycle 최종 행을 남긴다. lifecycle의 final
             # 상태는 되돌릴 수 없어서(lifecycle.finalize_once) 여기서 먼저
-            # 쓰면 이후 저장·출고가 깨져도 이력은 「완주」로 영구히 남는다
-            # (34장 새발견 §3). 이 판정은 지금 시점의 job.result만 보고
+            # 쓰면 이후 저장·출고가 깨져도 이력은 「완주」로 영구히 남는다.
+            # 이 판정은 지금 시점의 job.result만 보고
             # 정한다 — 아래 실패 정리가 job.result를 FAILED로 되돌리면
             # report가 사라져 이후에는 다시 판정할 수 없기 때문이다.
             # ★ 내부 AI 원가 기록(cost_store.record_run_costs, 위)은 이
-            #   순서와 무관하게 그대로 파이프라인 직후에 남는다 — 「하면 안
-            #   되는 설계 1」(34장 §2)이 금지한 것은 원가 기록을 옮기는
-            #   것이지 lifecycle 기록을 옮기는 것이 아니다.
+            #   순서와 무관하게 그대로 파이프라인 직후에 남는다 — 옮기면 안
+            #   되는 것은 원가 기록이지 lifecycle 기록이 아니다.
             requires_full_completion = (
                 job.result.outcome is Outcome.REPORT
                 and job.result.report is not None

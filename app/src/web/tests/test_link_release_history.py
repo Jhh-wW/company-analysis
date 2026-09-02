@@ -114,7 +114,7 @@ def test_publish_gate_출고시점에만_결속된_LINK_run을_막고_GET은_이
 
 
 def test_LINK는_finalize_단독호출의_미분류_예외에도_stopped로_닫힌다(monkeypatch):
-    """34장 챕터03 §4가 023에서 넘겨받으라고 못 박은 계약을 이 계층에 직접 못 박는다.
+    """LINK 실행을 ``awaiting_release``로 방치하지 않는 계약을 이 계층에 직접 못 박는다.
 
     ``job_runtime._run_job``을 거치는 정상 생산 경로는 이 분기가 없어도
     ``report_available=False``로 이미 안전하다

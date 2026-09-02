@@ -40,8 +40,8 @@ SLOT_KEYWORDS: dict[str, tuple[str, ...]] = {
     "portfolio:revenue_link": ("매출 기여", "매출 비중"),
     "portfolio:lifecycle_stage": ("출시", "단종", "성장기", "도입기"),
 
-    # ★ 2026-08-31 team-lead 통보 — past_changes:historical_performance는
-    #   여기 없다. Codex 구조화 실적기가 재무 API 수치로 직접 채운다
+    # ★ past_changes:historical_performance는 여기 없다. 구조화 실적기가
+    #   재무 API 수치로 직접 채운다
     #   (constants.COLLECTOR_SLOTS_BY_SECTION 주석 참고).
     "past_changes:completed_execution": ("완료", "준공", "출시했다", "확대했다"),
     "past_changes:cumulative_change": ("증가", "감소", "전년 대비", "누적"),
@@ -74,12 +74,11 @@ SLOT_KEYWORDS: dict[str, tuple[str, ...]] = {
     "culture:organization_change": ("조직개편", "신설", "통합"),
     "culture:verified_case": ("수상", "인증받았다", "사례"),
 
-    # ★ 2026-08-31 team-lead 통보 — 비교 대상·지표·근거·판단 4종(comparison_*·
-    #   limitation)은 여기 없다. Codex가 채운다. 수집기는 «자사가 스스로
+    # ★ 비교 대상·지표·근거·판단 4종(comparison_*·
+    #   limitation)은 여기 없다. 구조화 검증기가 채운다. 수집기는 «자사가 스스로
     #   서술한 시장 내 위치·강점»만 self_context로 담는다(상대 이름·순위 비교
     #   없이 자사 서술만 — composer 45개 어휘에 없던 새 슬롯).
-    # ★ 2026-08-31 team-lead 통보 — 「시장점유율」·「선도」는 team-lead가
-    #   직접 예시로 든 낱말이다. 「선도」는 identity:self_positioning과도
+    # ★ 「선도」는 identity:self_positioning과도
     #   겹친다(둘 다 composer 45개 어휘의 자기규정 개념과 인접) — 알려진
     #   중복이며, 실제 배정은 점수·표제 힌트로 갈린다(동점이면 아래 채점
     #   함수가 수집기 슬롯을 우선한다).

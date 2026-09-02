@@ -5,7 +5,7 @@
   코드는 이 표들을 UPDATE하지 않는다. 그런데 raw SQL(버그 있는 마이그레이션,
   직접 DB 조작)은 여전히 UPDATE할 수 있었다. ReleaseAuthority가 이미 그
   content·delivery·artifact를 «출고 완료」로 서명한 뒤에는, DB trigger가
-  그 raw SQL 우회조차 막는다(32장 §4-3 「Python 검사만 두지 않는다」).
+  그 raw SQL 우회조차 막는다 — 「Python 검사만 두지 않는다」.
 
 ★ 음성 대조: authority가 **아직 없는** 행은 이 트리거의 대상이 아니다 —
   기존 손상 재현 시험(test_delivery_store.py·test_artifact_store.py)이

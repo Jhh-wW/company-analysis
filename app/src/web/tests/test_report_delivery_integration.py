@@ -619,11 +619,10 @@ def test_LINK_알수없는_예외도_fail_closed로_닫힌다(
 ):
     """finalize의 미분류 예외(어댑터·저장소 오류 등)도 LINK를 awaiting_release로 방치하지 않는다.
 
-    34장 챕터03 §4가 023에서 넘겨받으라고 못 박은 계약이다. ``reports.py``의
-    except 블록은 ``PublishBlockedError``·``PDFReleaseBlockedError`` 계열만
-    ``_mark_link_release_gate_stopped``를 부르고, 그 밖(RuntimeError 등)은
-    ``else`` 분기가 없어 그 계층만 보면 LINK를 닫지 않는다(실측 확인,
-    reports.py는 이 worktree 소유 밖이라 그 층은 고치지 않는다).
+    LINK 실행을 ``awaiting_release``로 방치하지 않는 계약이다. ``reports.py``의
+    except 블록은 ``PublishBlockedError``·``PDFReleaseBlockedError`` 계열을 각각
+    분류하고, 그 밖(RuntimeError 등)도 ``else`` 분기가
+    ``_mark_link_release_gate_stopped``를 불러 그 계층 자체에서 닫는다.
 
     그러나 실제 생산 경로에서 ``finalize_new_report_delivery``를 부르는
     곳은 ``job_runtime._finalize_report_delivery`` 하나뿐이고(grep 재확인),

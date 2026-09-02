@@ -89,7 +89,7 @@ def test_다른_장의_조각은_제외한다() -> None:
 
 
 def test_수집슬롯이_아닌_슬롯의_조각은_제외한다() -> None:
-    # competitive_position 의 비교 5칸은 Codex 주입 몫이라 수집 슬롯이 아니다.
+    # competitive_position 의 비교 5칸은 구조화 검증기 주입 몫이라 수집 슬롯이 아니다.
     fragment = _fragment(
         fragment_id="f1",
         section_id="competitive_position",

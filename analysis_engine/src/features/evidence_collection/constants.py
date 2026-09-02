@@ -83,18 +83,19 @@ CLAIM_SLOTS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
 
 #: ══════════════════════════════════════════════════════════
 #: 수집기 필수 슬롯 — composer 45개 중 «수집기가 원문 후보를 채워야 하는»
-#: 부분집합(2026-08-31 team-lead 통보).
-#: ★ 정본: app/src/shared/report_evidence/policy.py — 이 워크트리 기준
-#:   커밋(6e1f819)에는 아직 없다. 정본이 생기면 이 dict를 그 값과 대조해야
-#:   한다(엔진은 app을 import할 수 없으므로 여기서도 값 복사).
-#: ★ past_changes:historical_performance는 «뺐다» — Codex 구조화 실적기가
+#: 부분집합.
+#: ★ 정본: app/src/shared/report_evidence/policy.py. 이 dict는 그 파일의
+#:   REQUIRED_EVIDENCE_SLOTS_BY_SECTION에서 INJECTED_EVIDENCE_SLOTS_BY_SECTION을
+#:   뺀 값과 정확히 같다(실측). 엔진은 app을 import할 수 없어 값을 복사해 두므로
+#:   정본이 바뀌면 이 dict도 다시 대조해야 한다.
+#: ★ past_changes:historical_performance는 «뺐다» — 구조화 실적기가
 #:   재무 API 수치로 직접 채운다. 수집기의 키워드 채점이 이 슬롯에 문단을
 #:   배정하면 같은 슬롯에 권위가 다른 두 값(원문 인용 vs 정확한 재무 수치)이
 #:   겹쳐 어느 쪽을 믿을지 모호해진다 — relevance.py가 이 슬롯을 아예
 #:   채점 대상에서 뺀 이유다.
 #: ★ competitive_position은 self_context 하나뿐 — 비교 대상·지표·근거·
-#:   판단 4개는 Codex가 채운다. self_context는 composer 45개 어휘에 «없던»
-#:   새 슬롯이다(「자사가 스스로 서술한 시장 내 위치·강점」). 아래
+#:   판단 4개는 구조화 검증기가 채운다. self_context는 composer 45개 어휘에
+#:   «없던» 새 슬롯이다(「자사가 스스로 서술한 시장 내 위치·강점」). 아래
 #:   ALL_SLOT_IDS·SLOT_SECTION_OF에 합쳐 이 엔진이 인식하는 slot_id로 만든다.
 COLLECTOR_SLOTS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
     "identity": (

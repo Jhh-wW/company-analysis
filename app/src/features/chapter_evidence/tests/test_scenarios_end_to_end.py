@@ -1,9 +1,9 @@
-"""오프라인 5종 시나리오 — 생산부 출력이 Codex 최종 게이트까지 그대로 통과하는지.
+"""오프라인 5종 시나리오 — 생산부 출력이 최종 생성 게이트까지 그대로 통과하는지.
 
 여기서 검증하는 것은 candidate_readiness(진단값)가 아니라, 그 candidate를
-``build_section_bundle`` + ``assess_generation_gate``(계약 로직, Codex가
-그대로 쓸 함수)에 실제로 흘려서 나오는 «최종» 판정이다. 진단이 최종 로직과
-다른 방향이면 여기서 드러난다.
+``build_section_bundle`` + ``assess_generation_gate``(계약 로직)에 실제로
+흘려서 나오는 «최종» 판정이다. 진단이 최종 로직과 다른 방향이면 여기서
+드러난다.
 """
 
 from __future__ import annotations

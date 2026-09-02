@@ -45,7 +45,7 @@ def test_제목_힌트가_맞으면_가산점을_받는다() -> None:
 
 
 def test_동점이면_수집기_1차_표적_슬롯이_이긴다() -> None:
-    """team-lead 규칙 1 — 순수 점수가 같으면 COLLECTOR_SLOT_IDS가 우선한다.
+    """수집기 슬롯 우선 규칙 — 순수 점수가 같으면 COLLECTOR_SLOT_IDS가 우선한다.
 
     「해외」(business_model:regional_mix, 보조)와 「제공한다」
     (business_model:value_exchange, 수집기 1차 표적)가 똑같이 1건씩 걸려
@@ -130,7 +130,7 @@ def test_강한_보조_신호는_약한_수집기_신호에_밀리지_않는다(
 
 
 def test_다른_엔진_소유_슬롯은_어떤_입력에도_생성되지_않는다() -> None:
-    """historical_performance·비교 4종은 Codex가 채운다 — 텍스트 채점이
+    """historical_performance·비교 4종은 구조화 검증기가 채운다 — 텍스트 채점이
     옛 키워드(매출액·영업이익·동종업계·점유율 등)를 봐도 이 슬롯들을
     돌려주면 안 된다(SLOT_KEYWORDS에서 아예 뺐는지 확인하는 회귀 시험).
     """
