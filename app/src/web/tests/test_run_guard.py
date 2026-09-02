@@ -326,17 +326,42 @@ def test_서로_다른_로그인_사용자_다섯명까지_자리를_잡는다()
     assert paid_runtime._RUNNING_BY_BUCKET == {}
 
 
-def test_같은_초대링크는_세명까지_자리를_잡는다():
-    자리 = [
-        paid_runtime._reserve_run_slot(share_tracks.Track.LINK, _열쇠)
-        for _ in range(MAX_CONCURRENT_PER_LINK)
-    ]
+def test_링크_동시_실행_상한은_리터럴_1이다():
+    """★ D-G9(2026-09-02) — 초대 링크 하나가 동시에 쥐는 자리는 «한 자리»다.
 
-    assert all(자리)
+    누적 3,000원짜리 통장에 900원 본조사를 세 건 동시에 여는 것은 의미가 없다.
+    리터럴 1로 못 박는다 — 상한을 다른 상수와 견주면 값이 조용히 3으로
+    되돌아가도 시험이 그대로 통과한다.
+    """
+    assert MAX_CONCURRENT_PER_LINK == 1
+
+
+def test_같은_초대링크는_한_자리만_잡고_두번째부터_거절한다():
+    """★ 상한 경계 그 자체 — 1번째는 잡히고 2번째는 거절된다.
+
+    D-G9(2026-09-02)로 기대값을 3→1로 이전했다.
+    이전 이름: `test_같은_초대링크는_세명까지_자리를_잡는다`.
+    """
+    첫자리 = paid_runtime._reserve_run_slot(share_tracks.Track.LINK, _열쇠)
+
+    assert 첫자리
     assert paid_runtime._reserve_run_slot(share_tracks.Track.LINK, _열쇠) is None
 
-    for bucket_id in 자리:
-        paid_runtime._release_run_slot(bucket_id or "")
+    paid_runtime._release_run_slot(첫자리 or "")
+    assert paid_runtime._RUNNING == 0
+    assert paid_runtime._RUNNING_BY_BUCKET == {}
+
+
+def test_자리를_돌려주면_같은_링크가_다시_한_자리를_잡는다():
+    """★ 음성 대조 — 1로 줄인 것이 «영구 잠금»이 되면 그건 고장이다."""
+    첫자리 = paid_runtime._reserve_run_slot(share_tracks.Track.LINK, _열쇠)
+    assert 첫자리
+    paid_runtime._release_run_slot(첫자리 or "")
+
+    다음자리 = paid_runtime._reserve_run_slot(share_tracks.Track.LINK, _열쇠)
+    assert 다음자리
+
+    paid_runtime._release_run_slot(다음자리 or "")
     assert paid_runtime._RUNNING == 0
     assert paid_runtime._RUNNING_BY_BUCKET == {}
 

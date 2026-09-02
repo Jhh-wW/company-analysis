@@ -38,14 +38,26 @@ _누적상한 = 3000.0
 _하루상한 = 3000.0
 _본조사예약 = 900.0
 
+#: ★ 동시성 시험의 스레드 수는 슬롯 상한과 «무관한 리터럴 3»으로 고정한다 (D-G9).
+#:   링크 동시 실행 상한이 3→1로 내려가도 «같은 순간에 여러 요청이 몰리는 경쟁»
+#:   자체는 그대로 재현해야 한다. 상한을 스레드 수로 쓰면 상한이 내려갈 때 시험이
+#:   1스레드가 되어 경쟁이 사라지고, 이 파일이 지키던 P1(누적 초과 예약)이 무방비가 된다.
+_동시스레드 = 3
+
 _DAY = dt.date(2026, 9, 2)
 _LEASE_EXPIRES_AT = "2026-09-02T10:00:00+09:00"
 
 
 def test_본조사_예약액_전제가_그대로다() -> None:
-    """★ 이 시험의 산수(잔여 1원 vs 900원)가 서 있는 바닥을 먼저 확인한다."""
+    """★ 이 시험의 산수(잔여 1원 vs 900원)가 서 있는 바닥을 먼저 확인한다.
+
+    D-G9(2026-09-02)로 링크 동시 실행 상한이 3→1로 내려갔다(기대값 이전).
+    이 파일의 «동시»는 상한이 아니라 `_동시스레드`(리터럴 3)로 재현하므로
+    잔여 1원에 900원 세 건이 몰리는 산수는 그대로 성립한다.
+    """
     assert PAID_PHASE_PROVIDER_BUDGET_KRW[SPEND_PHASE_PIPELINE] == 900.0
-    assert MAX_CONCURRENT_PER_LINK == 3
+    assert MAX_CONCURRENT_PER_LINK == 1
+    assert _동시스레드 == 3
 
 
 def _링크와_지난_원가를_둔다(원가: float, *, key: str = _열쇠) -> str:
@@ -144,7 +156,7 @@ def test_같은_링크_동시_요청_3개는_누적_상한을_넘겨_예약하�
     _링크와_지난_원가를_둔다(2999.0)
     _cutover()
 
-    표 = _동시에_예약한다(MAX_CONCURRENT_PER_LINK)
+    표 = _동시에_예약한다(_동시스레드)
     최종누적 = _누적()
 
     assert 최종누적 <= _누적상한, f"누적 상한을 넘겨 예약됐다: {최종누적}원"
@@ -160,7 +172,7 @@ def test_동시_요청_중_남은_몫에_들어가는_한_건만_예약된다() 
     _링크와_지난_원가를_둔다(2100.0)
     _cutover()
 
-    표 = _동시에_예약한다(MAX_CONCURRENT_PER_LINK)
+    표 = _동시에_예약한다(_동시스레드)
     성공 = [t for t in 표 if t is not None]
 
     assert len(성공) == 1, f"들어간 예약 수가 1이 아니다: {len(성공)}"
@@ -172,7 +184,7 @@ def test_누적이_넉넉하면_동시_세건이_모두_들어간다() -> None:
     _링크와_지난_원가를_둔다(0.0)
     _cutover()
 
-    표 = _동시에_예약한다(MAX_CONCURRENT_PER_LINK)
+    표 = _동시에_예약한다(_동시스레드)
 
     assert len([t for t in 표 if t is not None]) == 3
     assert _누적() == 2700.0
@@ -204,7 +216,7 @@ def test_누적_재확인은_예약_트랜잭션_안에서_동시_스레드를_�
     """
     준비 = _새_원장(tmp_path)
     준비.close()
-    개수 = MAX_CONCURRENT_PER_LINK
+    개수 = _동시스레드
     barrier = threading.Barrier(개수)
 
     def 예약(index: int) -> bool:
@@ -250,7 +262,7 @@ def test_프로세스_락_없이도_남은_몫_한_건만_예약된다(tmp_path)
     """
     준비 = _새_원장(tmp_path)
     준비.close()
-    개수 = MAX_CONCURRENT_PER_LINK
+    개수 = _동시스레드
     barrier = threading.Barrier(개수)
 
     def 예약(index: int) -> bool:

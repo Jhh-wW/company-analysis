@@ -26,7 +26,6 @@ from src.core import clock
 from src.features.budget import logic as budget_logic
 from src.features.budget import spend_store
 from src.features.budget.constants import (
-    MAX_CONCURRENT_PER_LINK,
     MAX_CONCURRENT_RUNS,
     PAID_PHASE_PROVIDER_BUDGET_KRW,
     SPEND_PHASE_IDENTIFY,
@@ -108,6 +107,13 @@ class FakePaidPipeline:
             cost_krw=self.pipeline_cost,
             model="pipeline-model",
         )
+
+
+#: ★ «같은 링크에 유료 단계가 여러 개 동시에 떠 있는» 상황을 재현하는 수.
+#:   링크 동시 실행 상한(D-G9로 1)과 «일부러 분리한 리터럴»이다. 상한을 그대로
+#:   쓰면 상한이 내려갈 때 이 시험들이 1스레드가 되어 경쟁 자체가 사라지고,
+#:   «정상 진행을 장애로 오인하지 않는다»는 불변식이 무방비가 된다.
+_동시_유료단계 = 3
 
 
 class BlockingLookupPipeline(FakePaidPipeline):
@@ -326,8 +332,14 @@ def test_같은_로그인계정의_두번째_식별은_provider전에_기다린�
     assert paid_runtime._RUNNING_BY_BUCKET == {}
 
 
-def test_같은_초대링크는_세명까지_식별하고_네번째는_기다린다(monkeypatch):
-    target = MAX_CONCURRENT_PER_LINK
+def test_같은_초대링크는_한_명만_식별하고_두번째는_기다린다(monkeypatch):
+    """★ D-G9(2026-09-02) 링크 동시 실행 3→1 — 기대값을 이전했다.
+
+    이전 이름: `test_같은_초대링크는_세명까지_식별하고_네번째는_기다린다`.
+    슬롯 상한과 같은 값이라도 «리터럴 1»로 적는다 — 생산 상수를 그대로
+    끌어다 쓰면 상한이 조용히 바뀌어도 시험이 통과하는 순환 검증이 된다.
+    """
+    target = 1
     pipeline = BlockingLookupPipeline(target=target)
     monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
     monkeypatch.setattr(request_helpers, "RATE_MAX_RUNS", 100)
@@ -340,9 +352,9 @@ def test_같은_초대링크는_세명까지_식별하고_네번째는_기다린
             futures = [pool.submit(_confirm, client) for client in clients[:target]]
             assert pipeline.all_entered.wait(timeout=10)
 
-            fourth = _confirm(clients[-1])
-            assert fourth.status_code == 429
-            assert "진행 중" in fourth.text
+            다음사람 = _confirm(clients[-1])
+            assert 다음사람.status_code == 429
+            assert "진행 중" in 다음사람.text
             assert pipeline.lookup_calls == target
 
             pipeline.release.set()
@@ -803,6 +815,9 @@ def test_식별_API예외는_알려진비용을_남기고_현재통장만_즉시
 
 
 def test_같은링크의_정상진행_세건은_장애표식으로_오인하지_않는다():
+    """★ 건수는 `_동시_유료단계`(리터럴 3) — 링크 동시 실행 상한(D-G9로 1)과
+    분리한다. 이 시험이 지키는 것은 자리 수가 아니라 «여러 inflight가 남아도
+    이 프로세스가 정상 실행 중이면 통장을 닫지 않는다»는 판정이다."""
     tickets = [
         paid_runtime._begin_paid_phase(
             run_id=f"healthy-{index}",
@@ -810,10 +825,10 @@ def test_같은링크의_정상진행_세건은_장애표식으로_오인하지_
             share_key=_LINK_A,
             cap_krw=PER_LINK_DAILY_BUDGET_KRW,
         )
-        for index in range(MAX_CONCURRENT_PER_LINK)
+        for index in range(_동시_유료단계)
     ]
     assert all(tickets)
-    assert len(paid_runtime._ACTIVE_PAID_PHASES) == MAX_CONCURRENT_PER_LINK
+    assert len(paid_runtime._ACTIVE_PAID_PHASES) == _동시_유료단계
     assert paid_runtime._UNRESOLVED_BUCKETS == set()
 
     first, *rest = tickets
@@ -823,7 +838,7 @@ def test_같은링크의_정상진행_세건은_장애표식으로_오인하지_
     # DB에는 두 inflight가 남아도 둘 다 이 프로세스가 정상 실행 중이므로
     # 재시작·API 예외와 같은 «결과 모름»으로 통장을 닫으면 안 된다.
     assert paid_runtime._UNRESOLVED_BUCKETS == set()
-    assert len(paid_runtime._ACTIVE_PAID_PHASES) == MAX_CONCURRENT_PER_LINK - 1
+    assert len(paid_runtime._ACTIVE_PAID_PHASES) == _동시_유료단계 - 1
 
     for ticket in rest:
         assert ticket is not None
@@ -833,6 +848,8 @@ def test_같은링크의_정상진행_세건은_장애표식으로_오인하지_
 
 
 def test_같은링크_세건을_다른스레드에서_함께마감해도_거짓미확정이_생기지않는다():
+    """★ 스레드 수는 `_동시_유료단계`(리터럴 3) — 링크 동시 실행 상한(D-G9로 1)을
+    쓰면 Barrier(1)이 되어 «동시 마감 경쟁»이 통째로 사라진다."""
     tickets = [
         paid_runtime._begin_paid_phase(
             run_id=f"concurrent-settle-{index}",
@@ -840,16 +857,16 @@ def test_같은링크_세건을_다른스레드에서_함께마감해도_거짓�
             share_key=_LINK_A,
             cap_krw=PER_LINK_DAILY_BUDGET_KRW,
         )
-        for index in range(MAX_CONCURRENT_PER_LINK)
+        for index in range(_동시_유료단계)
     ]
     assert all(tickets)
-    barrier = threading.Barrier(MAX_CONCURRENT_PER_LINK)
+    barrier = threading.Barrier(_동시_유료단계)
 
     def settle(ticket):
         barrier.wait(timeout=10)
         paid_runtime._settle_paid_phase(ticket, amount_krw=10.0, billing_uncertain=False)
 
-    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_PER_LINK) as pool:
+    with ThreadPoolExecutor(max_workers=_동시_유료단계) as pool:
         futures = [pool.submit(settle, ticket) for ticket in tickets]
         for future in futures:
             future.result(timeout=10)
