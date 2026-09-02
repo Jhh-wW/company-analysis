@@ -223,6 +223,58 @@ def test_철회한_친구는_한도가_남아_있어도_회원이_아니다():
     assert cap == 0.0
 
 
+def _막힌_화면_글자(email: str) -> str:
+    """실행 시작 전 사전 확인(_guard_run)이 돌려준 화면의 글자."""
+    막힌화면 = request_helpers._guard_run(_친구로_들어온_요청(email))
+    assert 막힌화면 is not None
+    return 막힌화면.body.decode("utf-8")
+
+
+def _성공을_다_쓴다(email: str, 건수: int) -> None:
+    오늘 = clock.today_kst().isoformat()
+    with storage_db.connect() as conn:
+        for number in range(건수):
+            assert dashboard_store.reserve_member_run(
+                conn, run_id=f"{email}-{number}", actor_email=email,
+                day=오늘, now_iso=_시각,
+            )
+
+
+def test_한도를_다_쓴_친구는_사전_확인에서_자기_한도로_안내받는다():
+    """★ 사전 확인 겹을 «따로» 지킨다.
+
+    예약 자리(reserve_member_run)만 고치면 이 겹의 안내 문구가 옛 3건으로 남아
+    한도를 7건으로 올린 친구가 「3건 다 썼다」는 틀린 말을 본다.
+    """
+    _초대한다(_친구)
+    _한도를_정한다(_친구, 건수=7, 금액=None)
+    _성공을_다_쓴다(_친구, 7)
+
+    글자 = _막힌_화면_글자(_친구)
+
+    assert "오늘 성공한 보고서 7건을 모두 사용했습니다" in 글자
+    assert "3건을 모두 사용했습니다" not in 글자
+
+
+def test_한도를_안_정한_친구는_사전_확인에서_기존_3건으로_안내받는다():
+    """★ 음성 대조 — 회원별 한도를 넣었다고 기존 안내가 바뀌면 안 된다."""
+    _초대한다(_친구)
+    _성공을_다_쓴다(_친구, 3)
+
+    글자 = _막힌_화면_글자(_친구)
+
+    assert "오늘 성공한 보고서 3건을 모두 사용했습니다" in 글자
+
+
+def test_한도가_남은_친구는_사전_확인을_통과한다():
+    """막는 겹이 «항상» 막으면 시험이 초록이어도 기능이 죽은 것이다."""
+    _초대한다(_친구)
+    _한도를_정한다(_친구, 건수=7, 금액=None)
+    _성공을_다_쓴다(_친구, 6)
+
+    assert request_helpers._guard_run(_친구로_들어온_요청(_친구)) is None
+
+
 def test_예약액_계약은_본조사_900원_그대로다():
     """상한 경계 시험이 기대는 값이 바뀌면 위 시험들의 뜻도 바뀐다."""
     from src.features.budget.constants import PAID_PHASE_PROVIDER_BUDGET_KRW
