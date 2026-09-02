@@ -37,6 +37,7 @@ from src.features.pipeline.port import Report
 from src.features.report_delivery import authority as authority_store
 from src.features.report_delivery.cache_identity import CacheNamespace
 from src.features.storage import db as storage_db
+from src.features.storage import reports as report_store
 from src.shared import engine_build_identity as build_identity_contract
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_evidence.constants import ReleaseMode
@@ -336,6 +337,27 @@ def test_epoch_불일치는_출고전체를_거절하고_아무것도_남기지_
         )
 
 
+def _store_report_row(report_id: str, report: Report, frozen) -> None:
+    """운영과 같은 순서로 보고서 본문(과 공개 봉인)을 먼저 저장한다.
+
+    ★ 왜 필요한가(S3f, 2026-09-02) — 운영에서 `_finalize_report_delivery`는
+      `report_saved`가 참일 때만 돈다. 즉 delivery를 확정할 때 `reports` 행과
+      공개 봉인 행이 이미 있다. 이 시험들이 그 단계를 건너뛰면 「생성 증거는
+      봉인을 가리키는데 봉인이 없다」는, 운영에는 없는 상태가 만들어져
+      `load_public_delivery`가 fail-closed로 닫는다.
+    """
+
+    with storage_db.connect() as conn:
+        assert report_store.insert_new(
+            conn,
+            report_id,
+            _COMPANY_ID,
+            "분석",
+            report,
+            engine_epoch_digest=frozen.epoch_digest,
+        )
+
+
 def test_COMPLETE_재시도는_저장된_ReleaseAuthority를_다시검증한다(
     monkeypatch, tmp_path: Path
 ):
@@ -345,6 +367,7 @@ def test_COMPLETE_재시도는_저장된_ReleaseAuthority를_다시검증한다(
     report = _build_full_report(build_identity_sha256=frozen.epoch_digest)
     report_id = uuid.uuid4().hex
     monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "art"))
+    _store_report_row(report_id, report, frozen)
 
     first = reports_router.finalize_new_report_delivery(
         report_id=report_id,
@@ -392,6 +415,8 @@ def test_FULL_재사용출고의_COMPLETE_재시도는_owner_authority가_없어
     owner_report_id = uuid.uuid4().hex
     waiter_report_id = uuid.uuid4().hex
     monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "art"))
+    _store_report_row(owner_report_id, report, frozen)
+    _store_report_row(waiter_report_id, report, frozen)
     # 재사용 경로(persist_reused_delivery)는 owner·waiter가 같은 DART 출처와
     # 같은 정식 캐시 namespace/preflight 지문을 대야 한다(cache_key 재사용
     # 경로) — 이 시험의 목적(authority 없는 재시도)과는 무관한 별도

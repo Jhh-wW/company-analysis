@@ -42,6 +42,7 @@ from src.web import job_runtime, report_delivery_adapter
 from src.web.routers import reports as reports_router
 from src.web.tests.test_generation_singleflight_integration import (
     _BUILD_IDENTITY,
+    _report as _plain_report,
     _COMMIT,
     _NAMESPACE_ID,
     _persist_shared_content,
@@ -345,9 +346,20 @@ def test_singleflight_재사용도_봉인이_어긋나면_닫는다(monkeypatch,
 # ══════════════════════════════════════════════════════════
 
 
-def test_봉인_행이_없으면_공개_결과는_봉인_없음으로_열린다(
+def test_봉인을_주장하는_보고서의_봉인_행이_사라지면_공개_결과가_닫힌다(
     monkeypatch, tmp_path
 ) -> None:
+    """★ 뒤집힌 시험이다 — S3d에서는 「봉인 없음으로 열린다」였다.
+
+    뒤집은 근거: root 결정 S3f(2026-09-02). 두 규칙은 층이 달라 서로 어긋나지
+    않는다.
+      · 저장층(``reports.load``)은 봉인 행이 없으면 ``None``을 그대로 돌려준다.
+        그건 「봉인 없음」이라는 정의된 상태다(S3b 결정, 그 시험은 지금도 초록).
+      · 공개 결과 경로는 다르다. 여기서 그리는 본문의 생성 증거가 「내 봉인의
+        지문은 이것」이라고 «말하고» 있는데 그 봉인을 못 찾았다면, 말과 실제가
+        다른 것이라 그리지 않고 닫는다(I3).
+    """
+
     report_id = uuid.uuid4().hex
     _finalized(report_id, monkeypatch, tmp_path)
     with storage_db.connect() as conn:
@@ -356,7 +368,106 @@ def test_봉인_행이_없으면_공개_결과는_봉인_없음으로_열린다(
             (report_id,),
         )
 
-    loaded = report_delivery_adapter.load_public_delivery(report_id)
+    with pytest.raises(report_delivery_adapter.DeliveryAdapterError):
+        report_delivery_adapter.load_public_delivery(report_id)
+
+
+# ══════════════════════════════════════════════════════════
+# ⑤ public_id != report_id — 조용한 「봉인 없음」 금지 (S3f)
+# ══════════════════════════════════════════════════════════
+
+
+def _delivery_under_other_public_id(
+    report, *, public_id: str, artifact_root
+) -> None:
+    """봉인이 저장된 report_id와 «다른» 공개 ID로 Delivery를 하나 만든다.
+
+    운영 발급 경로 두 곳은 언제나 ``public_id=report_id``로 넣는다. 이 모양은
+    그 관례가 깨진 상태를 흉내 낸 것이다.
+    """
+
+    content, artifact = _persist_shared_content(report, artifact_root=artifact_root)
+    with storage_db.connect() as conn:
+        delivery = Delivery.issue(
+            public_id=public_id,
+            billing_bucket_id=_BUCKET,
+            content=content,
+            delivered_at=content.content_generated_at + dt.timedelta(hours=1),
+            policy=DeliveryPolicy(
+                content_max_age=dt.timedelta(days=60),
+                public_link_lifetime=dt.timedelta(days=60),
+            ),
+            reused_from_cache=False,
+        )
+        delivery_store.save_delivery(conn, delivery)
+        delivery_artifact.bind_artifact_to_delivery(
+            conn,
+            delivery_id=delivery.delivery_id,
+            artifact_id=artifact.artifact_id,
+        )
+
+
+def test_공개ID가_보고서ID와_다르면_봉인_없음으로_조용히_넘어가지_않는다(
+    monkeypatch, tmp_path
+) -> None:
+    """★ 조용한 실패가 가장 나쁘다.
+
+    봉인은 ``report_id``로 저장된다. Delivery의 공개 ID가 그것과 다르면 조회가
+    빈손으로 돌아오고, 그 결과는 「이 보고서에는 봉인이 없다」와 **구별되지
+    않는다**. 그런데 본문에 실린 생성 증거는 「내 봉인의 지문은 이것」이라고
+    말하고 있다. 말과 실제가 다르면 그리지 않고 닫는다(I3).
+
+    발급 경로 두 곳(``routers/reports.py``의 ``persist_reused_delivery``·
+    ``persist_approved_delivery`` 호출, 2026-09-02 기준 1464·1546행)은 언제나
+    ``public_id=report_id``로 넣는다. 이 시험은 그 관례가 깨졌을 때 조용히
+    지나가지 않는다는 약속이다.
+    """
+
+    _freeze_build_identity(monkeypatch)
+    report_id = uuid.uuid4().hex
+    other_public_id = uuid.uuid4().hex
+    report = _build_full_report(build_identity_sha256=_BUILD_IDENTITY.epoch_digest)
+    assert report.public_projection is not None
+    with storage_db.connect() as conn:
+        assert report_store.insert_new(
+            conn,
+            report_id,
+            _COMPANY_ID,
+            "분석",
+            report,
+            engine_epoch_digest=_BUILD_IDENTITY.epoch_digest,
+        )
+    _delivery_under_other_public_id(
+        report,
+        public_id=other_public_id,
+        artifact_root=tmp_path / "mismatched-artifacts",
+    )
+
+    with pytest.raises(report_delivery_adapter.DeliveryAdapterError):
+        report_delivery_adapter.load_public_delivery(other_public_id)
+
+
+def test_증거가_봉인을_말하지_않는_보고서는_봉인_없이도_열린다(
+    monkeypatch, tmp_path
+) -> None:
+    """음성 대조 — 위 규칙이 봉인을 «주장하지 않는» 보고서를 막지 않는다.
+
+    v1·SHADOW 저장본은 생성 증거 자체가 없어 「봉인이 있다」고 말하지 않는다.
+    그런 보고서는 봉인 행이 없어도 그대로 열려야 한다. 이게 깨지면 옛 보고서가
+    화면에서 통째로 안 열린다.
+    """
+
+    _freeze_build_identity(monkeypatch)
+    public_id = uuid.uuid4().hex
+    plain = _plain_report()
+    assert plain.generation_evidence is None
+    _delivery_under_other_public_id(
+        plain,
+        public_id=public_id,
+        artifact_root=tmp_path / "plain-artifacts",
+    )
+
+    loaded = report_delivery_adapter.load_public_delivery(public_id)
 
     assert loaded is not None
     assert loaded.report.public_projection is None
