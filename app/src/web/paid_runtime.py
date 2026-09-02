@@ -38,7 +38,9 @@ from src.features.observability.records import read_records
 from src.features.provider_health import constants as provider_health_constants
 from src.features.provider_health import store as provider_health_store
 from src.features.sharelink import logic as share_logic
+from src.features.sharelink import store as share_store
 from src.features.sharelink import tracks as share_tracks
+from src.features.sharelink.constants import LINK_TOTAL_BUDGET_KRW
 from src.features.storage import db as storage_db
 from src.web import evaluation_mode
 from src.web.recording import (
@@ -762,6 +764,38 @@ def reap_expired_paid_phases() -> bool:
             _BUDGET_STORE_HEALTHY = False
             return False
 
+def _link_total_budget_inputs(
+    conn: sqlite3.Connection, share_key: str
+) -> tuple[Optional[float], float]:
+    """LINK 통장이면 «수명 전체» 상한과 이미 끝낸 실행의 실측 원가를 돌려준다.
+
+    Args:
+        conn: 예약을 커밋할 연결. 같은 연결로 읽어 다른 저장소를 섞지 않는다.
+        share_key: 통장 원문.
+
+    Returns:
+        ``(수명 전체 상한, 지난 실측 원가)``. LINK가 아니면 ``(None, 0.0)``.
+
+    ★ LINK 갈래에서만 값을 준다 — MEMBER·ADMIN·PUBLIC은 사람 통장이거나 전체
+      통장이라 「링크 수명」이라는 개념 자체가 없다 (2026-09-02 사용자 결정 D-G1).
+      갈래를 가르는 것은 열쇠 모양(32자리 16진수)이다. 사람 통장에는 `user:`
+      접두어가 붙어 열쇠와 절대 겹치지 않는다 (`sharelink/constants.py` 참고).
+    ★ 진행 중 예약은 여기서 세지 않는다 — 그건 예약을 커밋하는 transaction 안에서
+      `begin_phase`가 다시 센다. 여기서 같이 세면 동시 요청이 옛 숫자를 공유한다.
+    """
+    if not share_logic.is_valid_key(share_key):
+        return None, 0.0
+    key_hash = share_store.key_hash_of(share_key)
+    link = share_store.load_by_hash(conn, key_hash)
+    prior_cost = share_store.link_run_cost_sum_krw(conn, key_hash=key_hash)
+    limit = (
+        link.effective_total_budget_krw
+        if link is not None
+        else LINK_TOTAL_BUDGET_KRW
+    )
+    return limit, prior_cost
+
+
 def _begin_paid_phase_locked(
     *,
     run_id: str,
@@ -805,6 +839,11 @@ def _begin_paid_phase_locked(
                     reserved_krw=requested,
                     lease_owner_id=_LEASE_OWNER_ID,
                 )
+                # LINK만 «수명 전체» 상한을 하나 더 받는다. 값이 None이면
+                # begin_phase가 누적 검사를 아예 건너뛴다 (다른 갈래의 동작 불변).
+                link_total_limit, link_prior_cost = _link_total_budget_inputs(
+                    conn, share_key
+                )
                 state_machine.begin_phase(
                     conn,
                     run_id=run_id,
@@ -818,6 +857,8 @@ def _begin_paid_phase_locked(
                         if evaluation_mode.enabled()
                         else None
                     ),
+                    bucket_total_limit_krw=link_total_limit,
+                    bucket_prior_cost_krw=link_prior_cost,
                     lease_owner_id=ticket.lease_owner_id,
                     lease_expires_at=_phase_lease_expires_at(),
                     started_at=started_at,

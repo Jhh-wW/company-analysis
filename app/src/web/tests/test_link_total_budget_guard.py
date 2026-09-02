@@ -383,6 +383,27 @@ def test_하루_상한은_그대로_작동한다(client: TestClient, monkeypatch
     assert _누적소진문구 not in 막힘.text
 
 
+def test_하루와_누적이_함께_소진되면_누적_문구를_보여준다(
+    client: TestClient, monkeypatch
+):
+    """★ 둘 다 막혔을 때 「내일 다시 열립니다」는 거짓말이다.
+
+    하루치는 자정에 되살아나지만 누적은 안 되살아난다. 둘 다 소진이면
+    사실이 더 강한 쪽(누적)을 말해야 손님이 헛되이 기다리지 않는다.
+    """
+    _링크발급()
+    _끝난조사를_넣는다(run_id="run-1", 원가=_누적상한)   # 누적 소진
+    _하루를_다_쓴다()                                     # 하루도 소진
+    monkeypatch.setattr(runtime, "_PIPELINE", _돈이드는가짜파이프라인())
+    client.cookies.set(KEY_COOKIE_NAME, _열쇠)
+
+    막힘 = _조사시작(client)
+
+    assert 막힘.status_code == 429
+    assert _누적소진문구 in 막힘.text
+    assert "내일 다시 열립니다" not in 막힘.text
+
+
 # ══════════════════════════════════════════════════════════
 # ⑤ 다른 갈래는 누적 상한을 보지 않는다
 # ══════════════════════════════════════════════════════════

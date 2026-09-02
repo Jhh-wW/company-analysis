@@ -825,6 +825,29 @@ def _load_exposure_where(
     )
 
 
+def _load_bucket_lifetime_reservation(
+    conn: sqlite3.Connection, stored_bucket: str
+) -> float:
+    """한 통장이 «모든 날짜»에 걸쳐 지금 잡고 있는 ACTIVE 예약액 합(원).
+
+    ★ 날짜 조건이 없다는 것이 `_load_exposure_where`의 하루 집계와 다른 점이다.
+      「수명 전체」 상한은 어제 잡아 둔 예약도 같이 세야 한다.
+    ★ 확정비용·보수부채는 여기서 세지 않는다. 그 몫은 호출부가 넘겨주는
+      ``bucket_prior_cost_krw``(종결된 실행의 실측 원가)가 이미 담고 있어,
+      둘을 다 더하면 같은 돈을 두 번 세게 된다.
+    """
+    row = conn.execute(
+        f"""
+        SELECT COALESCE(SUM(reservation_krw), 0)
+          FROM {spend_store.TABLE_BUDGET_PHASES}
+         WHERE bucket_id = ? AND state = ?
+        """,
+        (stored_bucket, PhaseState.ACTIVE.value),
+    ).fetchone()
+    value = float(row[0]) if row is not None else 0.0
+    return _amount(value, label="통장 수명 전체 진행 예약")
+
+
 def load_exposure(
     conn: sqlite3.Connection, *, day: dt.date, bucket_id: str
 ) -> ExposureSnapshot:
@@ -898,8 +921,25 @@ def begin_phase(
     lease_owner_id: str,
     lease_expires_at: str,
     started_at: str,
+    bucket_total_limit_krw: float | None = None,
+    bucket_prior_cost_krw: float = 0.0,
 ) -> PhaseAccount:
-    """provider 전 phase 예약과 DB lease를 하나의 write transaction에서 연다."""
+    """provider 전 phase 예약과 DB lease를 하나의 write transaction에서 연다.
+
+    Args:
+        bucket_limit_krw: 이 통장의 **하루** 입장 기준. 없으면 하루 검사를 건너뛴다.
+        run_limit_krw: 이 요청 하나의 입장 기준.
+        bucket_total_limit_krw: 이 통장의 **수명 전체** 입장 기준. 초대 링크에만
+            의미가 있어 LINK 갈래 호출부만 값을 준다. 없으면 누적 검사를 건너뛴다.
+        bucket_prior_cost_krw: 이 통장이 «이미 끝낸» 실행들의 실측 원가 합.
+            누적 판단의 바닥값이다. 진행 중 예약은 이 transaction 안에서 다시 센다.
+
+    ★ 누적 검사가 왜 여기에 있나 — 요청을 받자마자 하는 사전 검사만으로는
+      같은 링크의 동시 요청을 못 막는다. 셋이 같은 옛 숫자를 읽고 셋 다 통과한
+      뒤 각자 예약해 버린다 (실측: 잔여 1원에서 3동시 → 5,699원).
+      하루 상한이 이미 이 자리에서 원자적으로 재확인하므로, 누적도 **같은 자리에서
+      같은 비교 규칙·같은 실패 종류**로 확인한다.
+    """
     spend_store.ensure_schema(conn)
     _require_cutover(conn)
     clean_run = _identifier(run_id, label="요청 번호", maximum=128)
@@ -914,6 +954,14 @@ def begin_phase(
         None
         if run_limit_krw is None
         else _amount(run_limit_krw, label="요청 입장 기준")
+    )
+    bucket_total_limit = (
+        None
+        if bucket_total_limit_krw is None
+        else _amount(bucket_total_limit_krw, label="통장 수명 전체 입장 기준")
+    )
+    prior_cost = _amount(
+        bucket_prior_cost_krw, label="통장 수명 전체 지난 실측 원가"
     )
     owner = _identifier(lease_owner_id, label="lease 소유자", maximum=80)
     started = _timestamp(started_at, label="phase 시작 시각")
@@ -969,6 +1017,17 @@ def begin_phase(
         raise AdmissionLimitExceeded(
             "확정 비용·보수부채·진행 예약과 새 예약을 합치면 통장 입장 기준을 넘습니다"
         )
+    if bucket_total_limit is not None:
+        # 하루 검사와 «같은 transaction·같은 비교 규칙»이다. 다른 점은 날짜 조건이
+        # 없다는 것뿐 — 「수명 전체」이므로 어제 잡아 둔 예약도 함께 센다.
+        lifetime_reservation = _load_bucket_lifetime_reservation(
+            conn, stored_bucket
+        )
+        if prior_cost + lifetime_reservation + reservation > bucket_total_limit:
+            raise AdmissionLimitExceeded(
+                "종결된 실행의 실측 원가·진행 예약과 새 예약을 합치면 "
+                "통장의 수명 전체 입장 기준을 넘습니다"
+            )
     run_exposure = _load_exposure_where(
         conn,
         where_sql="p.run_id = ?",
