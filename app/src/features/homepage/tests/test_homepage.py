@@ -194,7 +194,7 @@ def test_루트_접속_실패는_failed로_돌아온다():
 
 # ── HTTPS 전면 실패 → HTTP 재시도 (P0: robots 캐시는 scheme까지 구분해야 한다) ──
 #
-# 독립 검토 2026-09-02 실측: robots 캐시 키를 host만으로 두면, 이 HTTP 재시도가
+# 독립 검토 실측: robots 캐시 키를 host만으로 두면, 이 HTTP 재시도가
 # 같은 collect_homepage_fragments scope 안에서 돌기 때문에 HTTPS robots(허용)
 # 판정을 그대로 물려받아 HTTP robots.txt(전면 차단)를 다시 확인하지 않는다 —
 # 차단된 사이트를 평문으로 읽어버리는 사고다.
@@ -910,7 +910,7 @@ if __name__ == "__main__":
 
 # ── 8장「인재상과 일하는 방식」재료 우선순위 ────────────────
 #
-# 실측 배경(2026-08-25): (주)진영의 경영철학은 `/company/overview.php`에 있는데
+# 실측 배경: (주)진영의 경영철학은 `/company/overview.php`에 있는데
 # `company`로만 걸려 후보 42개 중 18번째였고 6쪽 예산 밖으로 밀렸다.
 # 아래 두 시험은 그 순서를 못 박는다 — 하나는 「들어와야 한다」, 하나는
 # 「그렇다고 아무 overview나 올리면 안 된다」는 반대쪽 못이다.
@@ -964,7 +964,7 @@ def test_경영철학_페이지를_연혁_조직도보다_먼저_읽는다():
 def test_회사와_무관한_overview는_회사소개보다_앞서지_않는다():
     """맨몸 `overview`를 맨 앞에 두면 안 된다는 반대쪽 못.
 
-    ★ 삼성전자 실측 반례(2026-08-25): `overview`를 1순위로 올렸더니
+    ★ 삼성전자 실측 반례: `overview`를 1순위로 올렸더니
       `/sustainability/accessibility/overview/`가 예산을 다 먹고, 경영이념
       (인재제일·최고지향·변화선도·정도경영·상생추구)이 실린
       `/about-us/brand-identity/brand-story/`를 놓쳤다.

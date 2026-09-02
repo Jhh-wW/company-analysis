@@ -1,5 +1,5 @@
 """홈페이지·공식 IR PDF·광역 웹 세 수집기가 한 조사(scope) 안에서 host별
-robots.txt 조회를 정확히 한 번만 하도록 공유하는 캐시(티켓 B2).
+robots.txt 조회를 정확히 한 번만 하도록 공유하는 캐시.
 
 실측 결함: `real.py`가 홈페이지 수집(`logic.collect_homepage_fragments`)과
 공식 IR 수집(`ir_pdf.collect_official_ir_fragments`)을 각각 호출하면 둘 다
@@ -16,7 +16,7 @@ robots.txt 조회를 정확히 한 번만 하도록 공유하는 캐시(티켓 B
   캐시가 아예 동작하지 않는다 — 매번 `loader`를 그대로 실행해 기존 단독
   호출 동작을 그대로 유지한다.
 ★ 캐시 키는 RFC 9309 origin(scheme+host+port)이다 — **host 문자열만
-  쓰면 안 된다.** (독립 검토 2026-09-02 P0 실측): `logic.py`의 「HTTPS
+  쓰면 안 된다.** (독립 검토 P0 실측): `logic.py`의 「HTTPS
   전면 실패 → HTTP로 재시도」 경로(`_http_variant`)가 같은
   `collect_homepage_fragments` scope 안에서 돌기 때문에, host만으로
   캐시하면 HTTPS robots.txt(허용)가 캐시된 뒤 HTTP 재시도가 실제 HTTP

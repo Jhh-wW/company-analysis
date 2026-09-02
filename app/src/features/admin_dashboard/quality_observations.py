@@ -4,8 +4,8 @@
   다시 판정하지 않는다 — `src.shared.report_quality.observation_summary`가
   이미 내려진 판정을 셀 뿐이다.
 
-★ 열거 기준 — `report_store.list_report_ids()`(storage 공개 API, 2026-09-02
-  추가)로 `reports` 표 «전체»를 스캔한다. `admin_dashboard`가 자신의 사용
+★ 열거 기준 — `report_store.list_report_ids()`(storage 공개 API)로
+  `reports` 표 «전체»를 스캔한다. `admin_dashboard`가 자신의 사용
   이벤트 표(회원이 실제로 「사용」한 것만 기록됨)에서 report_id를 뽑는 방식은
   쓰지 않는다 — 그러면 이벤트가 안 남은 SHADOW 생성분을 조용히 빠뜨려 거절
   후보 집계 자체가 과소평가된다.

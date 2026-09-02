@@ -6,7 +6,7 @@
   진짜 규칙이 재현되지 않아, 바로 그 규칙 때문에 생긴 결함을 그물이 통과했다.
   여기서도 ``render_report()``를 실제로 통과시킨 v2 보고서만 쓴다.
 
-★ 이 파일이 지키는 것 (설계 §02-3 불변식)
+★ 이 파일이 지키는 것
     I2 — 문단을 이어붙인 글자 == 문장을 이어붙인 글자, 문단 번호는 1부터
     I3 — 모든 FactRecord가 «정확히 한 장»의 ledger에 속한다
     I4 — 장별 등급 기여 ∪ 요약 기여 == ``report.source_grades``
@@ -661,7 +661,7 @@ def test_builder는_report에_없는_문자열을_만들지_않는다() -> None:
         assert projection.header[key] == content[key]
     assert projection.header["release_mode"] == report.release_mode
 
-    # ② 표 7필드 — 지문 A의 table_public_projection과 canonical 동일(I7).
+    # ② 표 7필드 — 지문 A의 table_public_projection과 canonical 동일.
     for section in report.sections:
         block = _section_of(projection, section.cell)
         assert len(block.display.tables) == len(section.tables)
@@ -729,7 +729,7 @@ def test_builder는_report에_없는_문자열을_만들지_않는다() -> None:
 def test_인용_없는_요약_문장도_장_없음으로_봉인한다() -> None:
     """★ 뒤집힌 시험이다 — 원래는 「지금 봉인이 거부한다」였다.
 
-    뒤집은 근거: 36장 발견 F-S1b + root 결정(2026-09-02, D-S3 추가조건 ①).
+    뒤집은 근거: 인용이 없는 요약 문장은 장이 없어 봉인이 거부되던 문제다.
     render는 인용이 없는 요약 문장의 ``section_id``를 «의도적으로» 빈 글자로
     둔다(``composer/render.py`` ``_summary_source_section``: 틀린 장을
     가리키느니 비운다). FULL에서도 흔한 모양이라 그대로 두면 정상 보고서가
@@ -762,7 +762,7 @@ def test_인용_없는_요약_문장도_장_없음으로_봉인한다() -> None:
 def test_요약_행_section_id가_정본_밖_문자열이면_계속_거부한다() -> None:
     """빈 글자만 열었지 «아무 문자열이나»를 연 것이 아니다.
 
-    허용 범위를 넓힐 때 옆문이 같이 열리는지 보는 음성 대조다. 오타·옛 장
+    허용 범위를 넓힐 때 옆문이 같이 열리는지 보는 반대 경우 시험이다. 오타·옛 장
     id·공백만 있는 값이 들어오면 봉인이 그대로 닫혀야 한다. ``culture``는
     정본 아홉 장 «안»이므로 여기 쓰지 않는다.
     """

@@ -1506,7 +1506,7 @@ def test_renderer가_최종_공개본문_문단_요약을_위조하면_content_d
 
     monkeypatch.setattr(pipeline_module, "render_report", forge_public_content)
     # ★ 지키는 것은 그대로다 — 위조된 공개 본문은 «어느 경우에도 출고되지
-    #   않는다». 막는 «자리»만 두 가지다(S3c, 2026-09-02 실측):
+    #   않는다». 막는 «자리»만 두 가지다(S3c, 실측):
     #     · summary 위조 → 최종 공개 content digest 대조(PublicManifestError)
     #     · prose·paragraph 위조 → 그보다 앞선 공개 봉인 builder의 I2
     #       (「문단과 문장을 이어붙인 글자가 다릅니다」, PublicProjectionError)

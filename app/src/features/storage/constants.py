@@ -49,8 +49,8 @@ SQLITE_SYNCHRONOUS_LEVEL: Final[int] = 3
 
 # ── 표 이름 ──────────────────────────────────────────────
 TABLE_REPORTS: Final[str] = "reports"
-#: 공개 봉인 projection은 보고서 payload와 «다른 표»에 둔다(root 결정 C,
-#: 2026-09-02). payload 안에 넣었더니 저장 JSON 노드 수가 1.98배가 되어
+#: 공개 봉인 projection은 보고서 payload와 «다른 표»에 둔다.
+#: payload 안에 넣었더니 저장 JSON 노드 수가 1.98배가 되어
 #: `core/persisted_json.py`의 `MAX_DOCUMENT_NODES` 여유가 절반으로 줄고 관리자
 #: 수정 폼 상한(250,000자)을 넘었다. 나눠 두면 두 문서가 각자 상한 아래에 있고
 #: 옛 payload 바이트도 한 글자도 안 바뀐다.

@@ -186,7 +186,7 @@ def _drop_invented_numbers(
 def labelled_flow_cells(section_id: str, row: FlowRow) -> list[str]:
     """칸 이름을 붙이고 «값이 있는 칸»만 남긴다.
 
-    ★ 왜 빈 칸을 빼나 (2026-08-29 실측) — 1·3·6·8장은 «카드»로 그려져
+    ★ 왜 빈 칸을 빼나 (실측) — 1·3·6·8장은 «카드»로 그려져
       빈 칸을 아예 인쇄하지 않는다(`constants.FLOW_HEADERS_BY_SECTION` 주석,
       `report_standard/visualization.py::_CARD_HEADER_SETS`). 그런데 검수
       프롬프트는 빈 칸을 «빈 문자열»로 그대로 넘겨 «A →  → C» 같은 줄을
@@ -265,7 +265,7 @@ def _safe_ask(ask: Callable[[str], str], prompt: str) -> str:
     try:
         return ask(prompt) or ""
     except AskFatalError as error:
-        # ★ 2026-08-29 — «호출 횟수 상한»은 예외의 예외다. 도식 검수는
+        # ★ «호출 횟수 상한»은 예외의 예외다. 도식 검수는
         #   못 하면 «관계 줄만» 빠지고 장·문장은 그대로 남는(이미 이 파일의
         #   설계) 단계라, 여기서 요청 전체를 죽일 이유가 없다. 빈 응답으로
         #   돌려 «검수 불능» 경로를 타면 미확인 화살표만 빠진다.
@@ -284,7 +284,7 @@ def _safe_ask(ask: Callable[[str], str], prompt: str) -> str:
 
 def _parse_verdicts(raw: str) -> dict[int, str]:
     """검수 응답을 «번호 → 결과»로 읽는다. 못 읽으면 빈 사전(=검수 불능)."""
-    # ★ 같은 JSON 꺼내기 규칙이 composer 안에 세 벌 있었다(3-strikes, 2026-08-25).
+    # ★ 같은 JSON 꺼내기 규칙이 composer 안에 세 벌 있었다(3-strikes).
     #   여기에 있던 것만 «맨 앞의 json.loads 시도»를 빼먹은 채였다 — 응답이
     #   최상위 배열이면 배열 «안»의 객체 하나가 잘려 나와 정상 응답으로
     #   오인될 수 있었다. logic의 공개 함수 한 벌로 모으면서 그 구멍도 막힌다.

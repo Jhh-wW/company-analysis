@@ -12,7 +12,7 @@
      없음). 잡히면 WARNING 로그로만 남는다. `find_numeric_duplicates`를
      실제 보고서로 다시 만들지 않고 monkeypatch로 대체한다 — compose→
      verify→dedupe 각 단계가 저마다 문장을 걸러내 실제 중복을 살아남게
-     만들기 어렵고(2026-08-25 실측), 이 시험이 지켜야 할 것은 «잡히면
+     만들기 어렵고(실측), 이 시험이 지켜야 할 것은 «잡히면
      막지 않는다»는 배선이지 dup_detect 판정 정확도(그건 test_dup_detect.py
      몫)가 아니기 때문이다.
 """
@@ -265,7 +265,7 @@ def test_정상_흐름이면_검증된_v2_Report가_나온다():
     assert report.quality_contract_version == output.quality_observation.contract_version
     assert report.safety_decision == "공개 차단"
     assert report.publication_policy == "legacy-shadow-exception-v1"
-    # ★ 2026-08-29 — 이 줄의 문구를 바꿨다. 옛 문구는 「«새 안전 검사»에서 …
+    # ★ 이 줄의 문구를 바꿨다. 옛 문구는 「«새 안전 검사»에서 …
     #   «새 구조로» 검증하는 작업은 아직 끝나지 않았습니다」로, 우리가 검증
     #   방식을 바꾸는 중이라는 «우리 사정»이었고 바로 위 제목 줄과 겹쳤다.
     #   지금은 제목이 말하지 않는 것 — «독자가 무엇을 하면 되는지» — 를 담는다.
@@ -647,7 +647,7 @@ def test_초안과_생존_문장_수를_그대로_센다():
 
 
 def test_요약이_호출상한이면_본문을_버리지_않고_보고서를_낸다():
-    """★ 2026-08-29 실측 — 요약 호출 하나가 완성된 9개 장을 통째로 버렸다.
+    """★ 실측 — 요약 호출 하나가 완성된 9개 장을 통째로 버렸다.
 
     요약은 «이미 검증된» 본문 확인 문장으로 채울 길이 있고 그 길은 AI 를
     한 번도 부르지 않는다. 그러니 본문을 버릴 이유가 없다.

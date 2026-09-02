@@ -1,13 +1,13 @@
 """엔진 v2의 웹·PDF 공개 본문과 내부 감사 장부를 분리한다.
 
-★ 이 파일이 지키는 것 (설계 017 §7 S4 · 티켓 D-S4)
+★ 이 파일이 지키는 것
     - v2 FULL(``report.public_projection`` 있음) PDF는 **봉인 블록만** 배치한다.
       문단·문단 번호·도식·읽는 법·3개년 띠·표지 띠·핵심 요약·부록 행을 렌더
       시점에 다시 «계산»하지 않는다. 그래서 ``table_visualization`` ·
       ``cover_metrics`` · ``source_verification_label`` · ``section_content_blocks`` ·
       ``summary_topic`` 다섯 전역을 예외로 바꿔도 PDF가 정상으로 나와야 한다.
     - PDF 메타 지문은 옛 ``content_manifest``가 아니라
-      ``PublicReportDigest.content_sha256``이다(설계 §5의 지문 C 교체).
+      ``PublicReportDigest.content_sha256``이다(옛 지문 C를 대체한다).
     - ``.ledger``(감사 장부)는 어디에도 그리지 않는다 — 장부만 바꾸면 글자와
       ``display_sha256``은 그대로이고 ``content_sha256``만 달라져야 한다.
     - v1(canonical) PDF는 **한 바이트도** 바뀌지 않는다.
@@ -336,7 +336,7 @@ def test_v2_PDF는_블록_밖_문자열을_만들지_않는다(monkeypatch):
         "cover_metrics",
         "source_verification_label",
         "section_content_blocks",
-        # ★ 다섯째는 음성 대조가 찾아낸 구멍이다 — 핵심 요약을 봉인 대신 다시
+        # ★ 다섯째는 반대 경우 시험이 찾아낸 구멍이다 — 핵심 요약을 봉인 대신 다시
         #   계산해도(주제어를 여기서 고르면) 위 넷만으로는 아무 시험도 깨지지
         #   않았다. 요약 주제어는 이 함수만 만들 수 있으므로 같이 막는다.
         "summary_topic",
@@ -364,7 +364,7 @@ _PDF_ONLY_COVER_COPY = "공식 근거로 확인된 항목만 수록했습니다.
 def test_v2_부분보고서_고지는_표지와_본문이_같은_봉인_문구를_쓴다():
     """표지·본문·(웹) 세 곳의 사본을 봉인 `grade_notice` 하나로 모았는지 본다.
 
-    ★ 음성 대조에서 이 겹이 비어 있었다 — 고지를 봉인 대신 PDF 사본으로
+    ★ 반대 경우 시험에서 이 겹이 비어 있었다 — 고지를 봉인 대신 PDF 사본으로
       되돌려도 시험이 하나도 깨지지 않았다(실측 178 passed). 그래서 넣는다.
     """
 
@@ -518,7 +518,7 @@ def test_v1_PDF는_바이트_불변이다():
 
     assert len(pdf) == _V1_DEMO_PDF_LENGTH
     assert hashlib.sha256(pdf).hexdigest() == _V1_DEMO_PDF_SHA256
-    # v1은 옛 지문을 그대로 쓴다(설계 §6 — legacy 경로 무변).
+    # v1은 옛 지문을 그대로 쓴다(옛 경로는 그대로 둔다).
     metadata = PdfReader(io.BytesIO(pdf)).metadata or {}
     assert str(metadata.get(PDF_MANIFEST_SHA256_KEY)) == public_content_manifest_sha256(
         report

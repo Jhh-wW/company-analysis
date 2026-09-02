@@ -778,7 +778,7 @@ def resolve_candidates(
             provider_name=provider_name,
         )
     except Exception as error:  # noqa: BLE001 — 공급자 원문/예외 본문은 로그에 남기지 않는다
-        # ★ 2026-08-29 — 예외를 통째로 삼켜서 화면도 로그도 원인을 못 말했다.
+        # ★ 예외를 통째로 삼켜서 화면도 로그도 원인을 못 말했다.
         #   «클래스 이름과 발생 위치»만 남긴다. 응답 본문·예외 메시지는 남기지 않는다
         #   (그 안에 공급자 원문이 섞일 수 있다 — 원래 주석의 의도를 지킨다).
         _마지막 = traceback.extract_tb(error.__traceback__)[-1:] or None

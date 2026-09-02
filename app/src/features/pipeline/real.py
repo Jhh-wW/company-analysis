@@ -260,7 +260,7 @@ def _generation_cache_namespace(
       열쇠에 없으면 같은 배포에서 모드만 바뀔 때 SHADOW 저장본과 FULL
       저장본이 «같은 칸»을 놓고 다툰다 — FULL 요청이 SHADOW 결과를 물어
       오거나(거짓 표기), 새로 만든 FULL을 옛 SHADOW 항목 열쇠에 결속하려다
-      `ImmutableRecordConflict`로 하드 실패한다(reviewer 재현).
+      `ImmutableRecordConflict`로 하드 실패한다(검토에서 재현).
       namespace_id는 `settings_sha256`을 포함해 계산되고, single-flight
       `LeaseKey`와 캐시 `CacheLookupKey`가 **둘 다** 이 namespace_id를
       운반한다. 그래서 여기 한 곳에 넣으면 두 열쇠가 함께 갈라진다.
@@ -559,7 +559,7 @@ class _MeteredEngine:
             if self._provider_call_count >= MAX_AI_CALLS_PER_REQUEST:
                 # ★ 돈이 아니라 «횟수»다 — 전용 타입으로 구분해 던진다.
                 #   composer 의 «선택적 다듬기»는 이 구분을 보고 포기하고
-                #   지금까지 만든 보고서로 끝낸다(2026-08-29 실측 근거는
+                #   지금까지 만든 보고서로 끝낸다(실측 근거는
                 #   composer/port.py::AskFatalError 주석 참조).
                 raise provider_budget.RequestCallLimitReached(
                     "한 요청의 AI 호출 횟수 상한을 넘었습니다"
@@ -871,7 +871,7 @@ class _MeteredMessages:
                     _log_billing_uncertain(stage, "settle_invariant_on_failure", invariant)
                     self._metered._billing_uncertain = True
                 raise error
-            # ★ 2026-08-29 — 여기서 «모든» 실패를 미확정으로 접으면, 타임아웃 한 번에
+            # ★ 여기서 «모든» 실패를 미확정으로 접으면, 타임아웃 한 번에
             #   보고서 전체가 날아간다(실측: 현대카드 본조사가 1초 만에 죽었다).
             #   provider 가 요청을 «받아들이지 않은» 것이 확실한 거절(400·401·403·404)은
             #   토큰을 만들지 않았으므로 0원으로 «확정» 마감한다. 그러면 같은 요청의
@@ -950,7 +950,7 @@ def _is_determinate_zero_cost(error: BaseException) -> bool:
 def _log_billing_uncertain(stage: str, reason: str, error: BaseException | None) -> None:
     """미확정으로 «왜» 접었는지 남긴다.
 
-    ★ 2026-08-29 이전에는 이 자리에 로그가 «하나도» 없어서, 조사가 통째로 죽어도
+    ★ 이전에는 이 자리에 로그가 «하나도» 없어서, 조사가 통째로 죽어도
       서버 로그에 흔적이 없었다(27장 결함 D).
     ⚠️ 예외 «메시지»는 남기지 않는다 — provider 응답 본문이 섞일 수 있다.
       클래스 이름과 상태코드만 남긴다.
@@ -1003,7 +1003,7 @@ _OUTCOME_MAP: dict[str, Outcome] = {
 def _reject_outcome(status: str) -> Outcome:
     """판정 status 를 «화면 종류»로 옮긴다 — 데모와 «같은 규칙»(앞부분 맞추기).
 
-    ★ 왜 정확일치가 아닌가 (2026-08-27 실측 — 운영 결함이었다)
+    ★ 왜 정확일치가 아닌가 (실측 — 운영 결함이었다)
       `_OUTCOME_MAP` 의 열쇠는 run_pilot 의 `fin(...)` 이름인 「거부_거부A」인데,
       판정이 내놓는 값은 「거부A_공공기관」이라 열쇠가 「거부_거부A_공공기관」이 된다.
       정확일치로 찾으면 **둘 다 표에 없어** 기본값으로 떨어졌고, 그래서
@@ -1956,13 +1956,13 @@ class RealPipeline:
         has_audit = any(
             "감사보고서" in (row.get("report_nm") or "") for row in audit_rows
         )
-        # ── 조건 2-b: 공개된 재무제표가 «실제로» 있나 (2026-08-27) ─────
+        # ── 조건 2-b: 공개된 재무제표가 «실제로» 있나 ─────
         #
         # ★ 왜 판정 «전»으로 올렸나 — 「감사보고서라는 이름의 공시가 없다」는
         #   「분석할 자료가 없다」가 아니다. 사업보고서를 내는 회사는 감사보고서를
         #   그 «안에» 첨부하므로 별도 공시가 안 생긴다(외부감사법 23조① 단서 —
         #   첨부해 내면 감사인이 제출한 것으로 «본다»).
-        #   실측 2026-08-27: 현대카드·우리은행·현대캐피탈·SC제일은행·토스·야놀자가
+        #   실측: 현대카드·우리은행·현대캐피탈·SC제일은행·토스·야놀자가
         #   그래서 거부됐는데, 재무 API 는 20~38개 계정을 정상으로 준다.
         #   이름난 비상장사 13곳을 재보니 7곳이 이 갈래로 되살아난다.
         #   → 물어야 할 것은 「감사보고서가 있나」가 아니라
@@ -3598,7 +3598,7 @@ def _run_v2_composer(
             release_mode=release_mode,
             section_evidence_packets=section_evidence_packets,
             # 회사 신원은 릴리스 정책과 무관한 사실이다 — 이미 확인한 고유번호를
-            # 모드 때문에 버리지 않는다(F-GS2p1b). 이 값이 비면 초대 링크에
+            # 모드 때문에 버리지 않는다. 이 값이 비면 초대 링크에
             # 보고서를 다시 묶을 때 회사 일치 검증이 이름 비교만 남아, 이름이
             # 같고 고유번호가 다른 회사의 보고서가 그대로 묶인다
             # (`web/routers/admin.py`의 `_link_company_id`가 묶인 보고서에서
@@ -3978,13 +3978,13 @@ def _homepage_url_same_host_only(raw: str) -> str:
     ★ 이름에 「수집기」가 없는 이유 — 조각 수집만 잠그면 소용이 없다. 화면(후보 목록·
       회사 확인 카드)도 같은 `workable_url()`을 부르므로, 한쪽만 잠그면 **사용자가
       보는 화면에 남의 회사 주소가 인쇄된 채로** 회사를 고르게 된다
-      (적대 검수 2026-08-25에 실제로 발견됐다). 네 곳이 이 하나를 공유한다.
+      (적대 검수에서 실제로 발견됐다). 네 곳이 이 하나를 공유한다.
 
     `workable_url()`은 실제로 열어 보고 «열리는 주소»를 준다. 자체서명 인증서
     때문에 https가 통째로 죽은 회사((주)진영 실측)에서 조각이 0개가 되는 것을
     막아 준다. 그런데 **리다이렉트를 따라가므로 다른 회사 host가 올 수 있다.**
 
-    ★ 실측(2026-08-25, 대기업 표본에서 3건) —
+    ★ 실측(대기업 표본에서 3건) —
         www.hyundai.co.kr → https://www.hyundaimotorgroup.com/ko/main/mainRecommend
         www.hyosung.co.kr → https://www.hyosung.com/kr/index
         www.hanjin.co.kr  → https://www.hanjin.com:443/kor/Main.do
@@ -4015,7 +4015,7 @@ def _homepage_url_same_host_only(raw: str) -> str:
     # 화면에서 이미 부른 주소면 «보통은» 재접속하지 않는다.
     # ⚠️ 「안 한다」가 아니라 「보통은 안 한다」다 — ①캐시가 256곳을 넘기면 밀려나고
     #   ②확인 화면을 거치지 않고 바로 본조사가 도는 경로가 있는지는 확정하지 못했다
-    #   (검수 2026-08-25). 빗나가도 접속 1회가 더 늘 뿐 안전성 문제는 아니다.
+    #   (검수). 빗나가도 접속 1회가 더 늘 뿐 안전성 문제는 아니다.
     candidate = homepage_link.workable_url(raw)
     if not candidate or _homepage_compare_host(candidate) != raw_host:
         return raw
@@ -4083,7 +4083,7 @@ def _typed_dart_collection_enabled(
          `TYPED_DART_COLLECTOR`도 **읽지 않는다**(읽지 않으면 스위치가 동결도
          되지 않아 「안 봤다」를 시험이 기계적으로 확인할 수 있다).
       2) FULL이 아니면 나간다 — SHADOW·ENFORCE는 사용자 결과가 불변이어야
-         한다(I9). release mode가 없거나 모르는 값이면 «FULL로 치지 않는다»;
+         한다. release mode가 없거나 모르는 값이면 «FULL로 치지 않는다»;
          그 계약 위반은 v2 composer가 GATE_STOPPED로 다룬다.
       3) 그다음에야 kill switch를 본다.
     """

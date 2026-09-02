@@ -55,7 +55,7 @@ def _run_gate(candidates, *, company_id: str) -> GenerationGateDecision:
 
 
 def _corrupt_single_section(fixture: dict, *, section_id: str, state: str, reason_code: str) -> dict:
-    """listed 정상 fixture에서 한 장만 골라 조회 실패/부재로 바꾼다(음성 대조)."""
+    """listed 정상 fixture에서 한 장만 골라 조회 실패/부재로 바꾼다(반대 경우 시험)."""
 
     fragments = [
         fragment for fragment in fixture["fragments"] if fragment["section_id"] != section_id

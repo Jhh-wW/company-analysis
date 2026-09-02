@@ -7,7 +7,7 @@
   content·delivery·artifact를 «출고 완료」로 서명한 뒤에는, DB trigger가
   그 raw SQL 우회조차 막는다 — 「Python 검사만 두지 않는다」.
 
-★ 음성 대조: authority가 **아직 없는** 행은 이 트리거의 대상이 아니다 —
+★ 반대 경우 시험: authority가 **아직 없는** 행은 이 트리거의 대상이 아니다 —
   기존 손상 재현 시험(test_delivery_store.py·test_artifact_store.py)이
   같은 표를 raw UPDATE로 그대로 오염시킬 수 있어야 그 시험들의 read-time
   검증(``LifecycleStoreCorrupt`` 등)이 계속 실제로 시험된다. 이 파일의
@@ -114,7 +114,7 @@ def test_authority_발급전에는_content_delivery_artifact를_그대로_UPDATE
     now: dt.datetime,
     tmp_path: Path,
 ) -> None:
-    """음성 대조 — authority가 없으면 손상 재현 시험의 raw UPDATE가 여전히 통과한다."""
+    """반대 경우 시험 — authority가 없으면 손상 재현 시험의 raw UPDATE가 여전히 통과한다."""
 
     backend = FilesystemArtifactBlobBackend(tmp_path / "artifact-blobs")
     delivery = Delivery.issue(

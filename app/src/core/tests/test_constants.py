@@ -7,7 +7,7 @@ from src.core import constants as C
 
 def test_비용과판정_안전상수가_승인된값이다():
     assert C.MAX_RETRY_INPUT == 3
-    # ★ 2026-08-29 — 숫자를 박지 않는다. «왜 그 숫자인지»를 지킨다.
+    # ★ 숫자를 박지 않는다. «왜 그 숫자인지»를 지킨다.
     #   상한은 시간 규약이 정하는 천장을 넘을 수 없다(generation_singleflight.py:64).
     #   그리고 v2 가 한 보고서를 끝내는 데 필요한 최소 횟수보다 커야 한다.
     from src.features.budget.constants import PAID_PHASE_LEASE_SEC

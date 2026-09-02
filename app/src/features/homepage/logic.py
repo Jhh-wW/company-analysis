@@ -801,11 +801,11 @@ def _load_robots(base_url: str, fetch: Fetcher) -> robotparser.RobotFileParser:
     ★ 같은 조사(scope) 안에서 이미 다른 수집기(공식 IR PDF·광역 웹)가 같은
       **origin**(scheme+host+port)의 robots.txt를 확인했으면 새 네트워크
       요청 없이 그 판정을 재사용한다(``robots_cache.cached_robots_decision``
-      — 티켓 B2: 최대 4회 중복 요청 실측). 캐시 키는 host가 아니라 origin
+      — 최대 4회 중복 요청 실측). 캐시 키는 host가 아니라 origin
       이다 — HTTPS 전면 실패 뒤 `_http_variant`로 HTTP 재시도할 때, HTTPS
       robots 판정을 그대로 물려받으면 실제 HTTP robots.txt(예: 전면 차단)를
       다시 확인하지 않아 차단된 사이트를 평문으로 읽어버린다(독립 검토
-      2026-09-02 P0 실측 — ``robots_cache.py`` 모듈 docstring 참조).
+      P0 실측 — ``robots_cache.py`` 모듈 docstring 참조).
     """
     robots_url = urllib.parse.urljoin(base_url, "/robots.txt")
     host = (urllib.parse.urlsplit(robots_url).hostname or "").casefold()

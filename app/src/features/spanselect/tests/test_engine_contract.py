@@ -277,7 +277,7 @@ def test_앞머리를_뗀_문장이_W3_원문대조를_통과한다():
     assert deleted == [], f"다듬은 문장이 버려졌습니다: {deleted}"
     assert len(kept) == 1
     assert "[편집자주]" not in kept[0].sentence
-    # ★ 출처 표기 「(2026-07-22 보도 · www.edaily.co.kr) 」도 뗀다 (문제로그 P-81).
+    # ★ 출처 표기 「(보도 · www.edaily.co.kr) 」도 뗀다 (문제로그 P-81).
     #   날짜·주소는 출처 목록에 이미 있다 — 문장에 남기면 자소서에 그대로 못 쓴다.
     #   ⚠️ 그래도 W3 원문대조는 통과해야 한다(위 `deleted == []`) — 그것이 이 시험의 핵심이다.
     assert "보도 ·" not in kept[0].sentence
@@ -290,7 +290,7 @@ def test_저장된_조각_전수에서_다듬은_문장이_전부_원문대조�
 
     1판이 실제로 돌려 남긴 조각(`analysis_engine/data/pilot/fragments/`)을 전부
     문장으로 쪼개고, 앞머리를 뗀 것마다 1판 W3 대조를 돌린다.
-    실측(2026-08-16): 문장 1,519개 중 34개가 다듬어졌고 **대조 실패 0건**.
+    실측: 문장 1,519개 중 34개가 다듬어졌고 **대조 실패 0건**.
     """
     fragments_dir = paths.PILOT_DIR / "fragments"
     if not fragments_dir.is_dir():

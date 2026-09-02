@@ -87,7 +87,7 @@ _ACTIVE_CACHE: ContextVar[_CollectionCache | None] = ContextVar(
 @contextmanager
 def collection_cache_scope() -> Iterator[_CollectionCache]:
     """여러 ``request_deadline_scope`` 호출이 **각자의 데드라인은 그대로 둔 채**
-    DNS·robots 캐시만 공유하게 하는 바깥 scope(티켓 B2 P1).
+    DNS·robots 캐시만 공유하게 하는 바깥 scope.
 
     ``request_deadline_scope``의 기존 재사용 규칙(부모 예산이 더 촉박하면
     그 예산 자체를 재사용)은 **데드라인까지 하나로 합친다** — 홈페이지
@@ -120,7 +120,7 @@ class _DeadlineBudget:
     clock: Callable[[], float] = time.monotonic
     dns_cache: dict[tuple[str, int], tuple[tuple, ...]] = field(default_factory=dict)
     #: 홈페이지·공식 IR PDF·광역 웹 세 수집기가 host별 robots.txt 판정을
-    #: 공유하는 캐시(티켓 B2). 값 타입은 ``homepage.robots_cache.RobotsDecision``
+    #: 공유하는 캐시. 값 타입은 ``homepage.robots_cache.RobotsDecision``
     #: 이지만, 이 파일이 그 모듈을 import하면 순환 import가 되므로 여기서는
     #: 느슨하게 ``object``로만 둔다 — dns_cache와 같은 «scope가 끝나면
     #: 사라지는» 패턴이다(프로세스 전역 캐시가 아니다).

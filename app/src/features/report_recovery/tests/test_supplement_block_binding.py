@@ -7,7 +7,7 @@
 
 ``section_block_sha256s``는 공개 봉인 블록의 ``block_sha256``, 즉 display와
 ledger를 «함께» 덮는 지문이다. 이걸 같이 비교하면 장부만 바꾼 표류가 생산
-실행 중에 fail-closed로 막힌다(I3).
+실행 중에 fail-closed로 막힌다.
 
 ★ 재료는 옆 파일 ``test_logic.py``의 영수증 도구를 그대로 빌려 쓴다. 거기가
   이 판정의 정본 시험이라 두 벌로 갈라지면 안 된다.
@@ -61,7 +61,7 @@ def _decide(primary, authorization, supplement):
 
 
 def test_정상_보충은_대상_장의_블록만_바뀌어_통과한다() -> None:
-    """음성 대조 — 아래 시험이 «무엇이든» 막는 그물이 아님을 보인다."""
+    """반대 경우 시험 — 아래 시험이 «무엇이든» 막는 그물이 아님을 보인다."""
 
     primary, authorization = _authorized_primary()
     unchanged = dict(primary.section_block_sha256s)

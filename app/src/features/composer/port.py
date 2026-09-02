@@ -30,7 +30,7 @@ class AskFatalError(Exception):
       한다 — 그래야 real.py가 v1과 같은 FAILED로 정직하게 끝낼 수 있다
       (전역 장애를 «검증 실패»로 오표기하지 않기 위함).
 
-    ★ 예외의 예외 — «호출 «횟수» 상한»만은 다르다 (2026-08-29 실측).
+    ★ 예외의 예외 — «호출 «횟수» 상한»만은 다르다 (실측).
       돈이 떨어진 것이 아니라 «이 요청에 허락된 AI 호출 수»를 다 쓴 것이다.
       그때는 이미 만들어 둔 장·문장이 멀쩡히 손에 있는데도 보고서 전체가
       버려졌다(현대카드·우리은행 실측 — 완성된 9개 장이 통째로 사라지고
@@ -496,7 +496,7 @@ def composition_tables_from_raw(tables: Any) -> tuple[PerformanceTable, ...]:
       (`pipeline/real.py`의 tables_by_section["business_model"]),
       v2 호출부가 넘기지 않아 «표도 도식도» 통째로 빠져 있었다.
       9개 장 중 4장 하나만 표를 받는 상태였다.
-    ★ 왜 여러 개인가 (실측 결함 ②, 설계 변경 2026-08-25) — 예전에는 «첫 표만»
+    ★ 왜 여러 개인가 (실측 결함 ②, 설계 변경) — 예전에는 «첫 표만»
       썼다. revenuemix는 제품별·지역별 두 표를 낼 수 있는데, 첫 표만 쓰면
       지역별 표가 통째로 사라진다. v1은 이미 둘 다 2장에 붙이고
       (`ReportTable(**table) for table in revenue_tables`), 정본

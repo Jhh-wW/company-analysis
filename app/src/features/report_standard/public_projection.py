@@ -103,7 +103,7 @@ _HEADER_META_KEYS: Final[tuple[str, ...]] = (
 
 #: 도식 비율의 표시 자릿수. 화면이 쓰는 ``'%.4f'|format(item.ratio)``
 #: (``web/templates/result.html``)와 «같은 자릿수»다. float를 그대로 실으면
-#: canonical이 거부하므로(I8) 여기서 십진 문자열로 굳힌다.
+#: canonical이 거부하므로 여기서 십진 문자열로 굳힌다.
 _RATIO_FORMAT: Final[str] = ".4f"
 
 #: 추이 도식 계열의 «위험(손실)» 표식. S1 자료형이 이 자리를 문자열로
@@ -135,7 +135,7 @@ _COLLECTED_SUFFIX: Final[str] = " 확인"
 _SECTION_LABEL_SUFFIX: Final[str] = "장"
 
 #: 부분 보고서 고지 — 지금 웹·PDF·Notion 세 곳이 각자 들고 있는 문구를 한
-#: 곳으로 모은 것이다(설계 §01-4 #4). 값은 PDF
+#: 곳으로 모은 것이다. 값은 PDF
 #: ``_partial_publication_copy(detailed=True)``에서 글자 그대로 옮겼다.
 #: S4·S5·S6이 각 채널의 사본을 지우고 이 블록을 읽게 된다.
 _LEGACY_SHADOW_NOTICE: Final[tuple[str, str]] = (
@@ -214,7 +214,7 @@ def build_public_projection(report: Report) -> PublicReportProjection:
 
 
 def _require_canonical_sections(report: Report) -> None:
-    """장 순서·id가 정본 아홉 장과 같은지 먼저 닫는다(I1).
+    """장 순서·id가 정본 아홉 장과 같은지 먼저 닫는다.
 
     S1도 같은 검사를 하지만, 여기서 먼저 닫아야 «어느 장이 빠졌는지»를
     말할 수 있다 — S1은 프로젝션이 다 만들어진 뒤에야 본다.
@@ -258,7 +258,7 @@ def _summary_rows(report: Report) -> tuple[PublicSummaryRow, ...]:
     for position, item in enumerate(report.summary_items, start=1):
         section_id = str(item.section_id or "")
         spec = SECTION_BY_ID.get(section_id)
-        # ★ 빈 section_id = 「장 없음」(F-S1b, root 결정 2026-09-02) — render의
+        # ★ 빈 section_id = 「장 없음」 — render의
         #   ``_summary_source_section``이 인용 없는 요약 문장에 «틀린 장을
         #   가리키느니 비운다»는 뜻으로 남기는 값이다. 가리킬 장이 없으니 장
         #   번호도 비운다(지어내지 않는다). 빈 글자가 «아닌데» 정본 밖이면
@@ -345,7 +345,7 @@ def _paragraphs(section: ReportSection) -> tuple[tuple[str, str], ...]:
 
 
 def _table_block(table: ReportTable) -> PublicTableBlock:
-    """표 7필드 + 지문 B 참조. 7필드는 지문 A와 «같은 함수»에서 나온다(I7)."""
+    """표 7필드 + 지문 B 참조. 7필드는 지문 A와 «같은 함수»에서 나온다."""
 
     projected = table_public_projection(table)
     manifest_ref = str(getattr(table, "manifest_ref", "") or "")
@@ -371,7 +371,7 @@ def _table_block(table: ReportTable) -> PublicTableBlock:
 
 
 def _ratio_text(value: float) -> str:
-    """도식 비율을 화면과 «같은 자릿수»의 십진 문자열로 굳힌다(I8)."""
+    """도식 비율을 화면과 «같은 자릿수»의 십진 문자열로 굳힌다."""
 
     return format(value, _RATIO_FORMAT)
 
@@ -466,7 +466,7 @@ def _source_label_display(source: Source) -> str:
 def _source_status_display(source: Source) -> str:
     """기준일과 자료 상태. 지금 PDF 부록이 쓰는 조립 규칙 그대로다.
 
-    ★ 웹 v2는 ``fact_status``를 빼고 그린다(설계 §01-6 G6이 지목한 갈림).
+    ★ 웹 v2는 ``fact_status``를 빼고 그린다(채널이 갈라지던 자리다).
       봉인은 «더 많이 말하는» PDF 쪽을 정본으로 삼는다 — 다운로드본이 정본이고,
       빼는 것은 사실을 감추는 방향이라 되돌리기 어렵다.
     """
@@ -522,7 +522,7 @@ def _citation_rows(report: Report) -> tuple[PublicCitationRow, ...]:
                 url=str(source.url or ""),
                 status_display=_source_status_display(source),
                 # I6 — 순수 함수 결과를 그대로 봉인한다. 렌더 시점에 다시
-                # 세면 채널마다 다른 라벨이 나올 수 있다(설계 §01-6 G4).
+                # 세면 채널마다 다른 라벨이 나올 수 있다.
                 verification_label=source_verification_label(report, source.source_id),
                 location=str(source.location or "").strip() or _APPENDIX_EMPTY,
                 used_in_display=_source_used_in_display(source),

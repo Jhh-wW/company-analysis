@@ -146,7 +146,7 @@ def test_공유플랫폼_하위host는_같은_eTLD의_다른host를_회사소유
     assert bind_registered_subdomain("blog.naver.com", "news.naver.com") is None
 
 
-# ── APEX-WWW-OFFICIAL-ROOT-GAP(통합 담당 지시, 2026-08-31) ────────
+# ── APEX-WWW-OFFICIAL-ROOT-GAP(통합 담당 지시) ────────
 
 
 def test_www_apex_alternate은_www_접두사를_붙이거나_뗀다():
@@ -583,7 +583,7 @@ def test_robots_전송실패는_차단된다():
     assert outcome == "blocked"
 
 
-# ── P1(통합 담당 지시, 2026-08-31): robots 상태 계약을 정확히 좁힌다 ──
+# ── P1(통합 담당 지시): robots 상태 계약을 정확히 좁힌다 ──
 # 「명시적 부재」는 404·410만 인정한다. 그 밖의 4xx는 원인별로
 # blocked(robots_denied/robots_transient/robots_unreachable)로 나눈다.
 

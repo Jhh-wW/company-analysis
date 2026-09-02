@@ -322,12 +322,11 @@ def _source_used_sections(source: Source) -> str:
 
 
 # ══════════════════════════════════════════════════════════
-# v2 — 공개 봉인 블록«만» 읽는 갈래 (설계 017 §07 조각 S6)
+# v2 — 공개 봉인 블록«만» 읽는 갈래
 # ══════════════════════════════════════════════════════════
 # ★ 아래 함수들은 ``report``를 «인수로 받지 않는다». 봉인 블록만 받는다.
 #   그래야 노션이 화면·PDF와 다른 값을 스스로 계산할 방법이 구조적으로
 #   없어진다 — 지금까지 갈라진 원인이 바로 그 「각자 계산」이었다
-#   (설계 §01-6 G1·G2·G9).
 # ★ 이 갈래는 «글자를 만들지 않는다». 블록 값을 그대로 배치하고, 표의 열
 #   이름처럼 보고서 내용이 아닌 라벨만 ``constants``에서 가져온다.
 
@@ -499,7 +498,7 @@ def _v2_grade_notice_blocks(
 ) -> list[NotionBlock]:
     """부분 보고서 고지 — 채널마다 다른 이름으로 부르지 않게 블록에서 읽는다.
 
-    ★ 2026-08-29에 노션만 같은 보고서를 더 후하게 불렀던 사고가 있었다. 이제
+    ★ 예전에 노션만 같은 보고서를 더 후하게 불렀던 사고가 있었다. 이제
       제목·설명 두 줄이 봉인에 들어 있어 세 채널이 같은 글자를 쓴다.
     """
 
@@ -518,7 +517,7 @@ def _v2_blocks(report: Report, projection: PublicReportProjection) -> list[Notio
     """봉인 블록 하나만 읽어 노션 페이지 블록을 만든다.
 
     ``report``는 마스트헤드 두 줄에만 쓴다 — ``masthead_lines()``는 웹·PDF·
-    노션이 «같은 두 줄»을 쓰라고 D-S4a가 일부러 공유시킨 함수이고, 봉인
+    노션이 «같은 두 줄»을 쓰라고 일부러 공유시킨 함수이고, 봉인
     블록에는 아직 그 자리가 없다. 나머지 글자는 전부 ``projection``에서 온다.
     """
 
@@ -582,7 +581,7 @@ def build_blocks(report: Report, *, grade_note: str = "") -> list[NotionBlock]:
         노션 API가 받는 block object 목록. 100개를 넘으면 부르는 쪽(`notion.py`)이
         나눠 보낸다 — 이 함수는 나누지 않는다(순수 변환만 한다).
     """
-    # ★ 갈래는 «공개 봉인 블록이 있는가»로 나뉜다(설계 017 §07 조각 S6).
+    # ★ 갈래는 «공개 봉인 블록이 있는가»로 나뉜다.
     #   봉인이 있으면 그 블록«만» 읽는다 — 노션이 화면·PDF와 따로 계산할 여지를
     #   없앤다. 봉인이 없는 저장본(v1·옛 v2)은 지금 경로 그대로다(§02-6).
     projection = report.public_projection
@@ -592,7 +591,7 @@ def build_blocks(report: Report, *, grade_note: str = "") -> list[NotionBlock]:
     # Notion도 화면·PDF와 같은 canonical 공개본만 표현한다.
     report = build_published_report(report)
 
-    # 표지 다음 첫 본문 페이지 맨 위 마스트헤드(D-S4a) — 웹·PDF와 같은
+    # 표지 다음 첫 본문 페이지 맨 위 마스트헤드 — 웹·PDF와 같은
     # masthead_lines() 문자열을 그대로 첫 두 블록으로 낸다. 새 사실을
     # 만들지 않고, 아래 이어지는 회사명·보고서명 heading_1 쌍은 그대로 둔다.
     masthead_company, masthead_meta = masthead_lines(report)
@@ -603,7 +602,7 @@ def build_blocks(report: Report, *, grade_note: str = "") -> list[NotionBlock]:
         _heading_1("분석 보고서"),
     ]
     if report.grade is Grade.PARTIAL:
-        # ★ 2026-08-29 — 노션만 정책과 «무관하게» 「검증된 부분 보고서」라고 불렀다.
+        # ★ 노션만 정책과 «무관하게» 「검증된 부분 보고서」라고 불렀다.
         #   같은 보고서를 웹·PDF 는 「안전 확인 중인 임시 부분 보고서」라고 부른다
         #   (`web/routers/reports.py::_report_grade_note`). 한 보고서가 채널마다
         #   다른 이름으로 불리면, 그중 하나는 반드시 사실보다 후하게 말하는 것이다.

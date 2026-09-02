@@ -692,7 +692,7 @@ _CITATION_NUMBER_PATTERN = re.compile(r"\[(\d+)\]")
 
 #: 부록 「사실 검증」 칸 — «문장이 아니라 표·도식이» 근거로 쓴 자료에 붙는 값.
 #:
-#: ★ 왜 새로 만들었나 (2026-08-25, 적대 검수가 render_report로 재현) — 흐름표·
+#: ★ 왜 새로 만들었나 (적대 검수가 render_report로 재현) — 흐름표·
 #:   실적표 캡션의 〔n〕도 본문 인용이라 `render.py` 가 그 조각을
 #:   ``Source.used_in`` 에 넣는다. 그런데 표에는 «문장 등급»이라는 것이 아예
 #:   없어서 ``source_grades`` 에는 안 들어간다. 그 상태로 「본문 사실 없음」을
@@ -721,7 +721,7 @@ def _source_used_in(report: Report, source_id: str) -> tuple[str, ...]:
 def source_verification_label(report: Report, source_id: str) -> str:
     """부록에서 자료 상태와 별도로 사실 검증 상태를 표시한다.
 
-    ★ v1/v2 분기(2026-08-25, 실측 결함 수정) — v1은 사실을
+    ★ v1/v2 분기(실측 결함 수정) — v1은 사실을
       ``report.fact_records``(사실 카드)로 쪼개 카드마다 검증 상태를 붙이지만,
       엔진 v2는 카드를 만들지 않고 문장 뒤에 «확인/해석» 등급만 붙인다
       (``fact_records``가 v2 보고서에서는 항상 빈 리스트). 그래서 이 함수가
@@ -789,7 +789,7 @@ def _source_verification_label_v2(report: Report, source_id: str) -> str:
       ② 그 값이 없으면(이 필드가 생기기 «전»에 저장된 보고서) 예전처럼 본문
          표시 문자열의 ``[번호]``와 문장 끝 «— 해석» 표지로 되짚는다.
 
-    ★ 왜 ②만으로는 부족한가 (2026-08-25 적대 검수가 «재현»한 결함) —
+    ★ 왜 ②만으로는 부족한가 (적대 검수가 «재현»한 결함) —
       render.py의 절충안 인용 규칙은 «해석» 문장의 ``[n]`` 을 숨긴다. 그 번호가
       어디에도 안 보이면 ``_ensure_no_orphan_markers`` 가 한 곳을 되살리지만,
       같은 번호를 «확인» 문장이 이미 보여주고 있으면 되살릴 필요가 없어

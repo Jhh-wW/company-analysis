@@ -1,4 +1,4 @@
-"""robots_cache 모듈 단위시험(티켓 B2) — scope 예산에 얹은 origin별 robots
+"""robots_cache 모듈 단위시험 — scope 예산에 얹은 origin별 robots
 판정 캐시가 scope 수명과 정확히 일치하고, scheme이 다르면 절대 섞이지
 않는지 확인한다.
 
@@ -9,7 +9,7 @@
   재사용·scope 밖 무동작·scope 간 격리·차단 판정 유지·origin 키 분리)만
   고정한다.
 
-★ P0(독립 검토 2026-09-02): 최초 구현은 캐시 키로 host 문자열만 썼다.
+★ P0(독립 검토): 최초 구현은 캐시 키로 host 문자열만 썼다.
   ``logic.py``의 HTTPS 전면 실패 → HTTP 재시도 경로가 같은
   ``collect_homepage_fragments`` scope 안에서 돌기 때문에, host만으로
   캐시하면 HTTPS robots(허용)가 캐시된 뒤 HTTP 재시도가 실제 HTTP
@@ -117,7 +117,7 @@ def test_같은_scope라도_다른_host는_각자_loader를_실행한다() -> No
     assert calls == ["a.example", "b.example"]
 
 
-# ── P0(독립 검토 2026-09-02): scheme이 다르면 다른 origin이다 ─────────────
+# ── P0(독립 검토): scheme이 다르면 다른 origin이다 ─────────────
 
 
 def test_robots_cache_key는_scheme이_다르면_다른_키를_돌려준다() -> None:

@@ -189,7 +189,7 @@ def _section_texts(report: Report, section_id: str) -> list[str]:
 def _safe_section_count(sections: dict[str, Any], section_id: str) -> int:
     """새 생성 안전 경계 뒤 남아야 할 문장 수를 fixture만 보고 예측한다.
 
-    ★ 2026-08-29, 사용자 결정 ③ — v2-98의 예측식(「숫자 토큰이 없는 문장만
+    ★ 사용자 결정 ③ — v2-98의 예측식(「숫자 토큰이 없는 문장만
       남는다」)은 옛 규칙을 그대로 베낀 것이라 새 규칙에서는 틀린다. 새 규칙은
       숫자 문장이라도 (검수 통과 + 확인 등급 + 인용 있음) 셋을 다 채우면
       살린다(`structured_claims.is_release_ready_numeric_sentence`). 이

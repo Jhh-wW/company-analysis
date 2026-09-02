@@ -45,7 +45,7 @@ class ProviderBudgetExceeded(RuntimeError):
 class RequestCallLimitReached(ProviderBudgetExceeded):
     """돈이 아니라 «한 요청에 허락된 AI 호출 «횟수»»를 다 썼다.
 
-    ★ 왜 따로 두나 (2026-08-29 실측) — 이 둘은 뜻이 다르다.
+    ★ 왜 따로 두나 (실측) — 이 둘은 뜻이 다르다.
       · 예산 초과 : 더 부르면 «돈»이 넘는다 → 요청 전체를 멈추는 게 맞다.
       · 횟수 상한 : 이미 만들어 둔 장·문장이 손에 있는데 «선택적 다듬기»를
         한 번 더 못 부를 뿐이다. 그때까지 만든 보고서를 버릴 이유가 없다.

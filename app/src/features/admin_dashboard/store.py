@@ -64,7 +64,7 @@ _IMMEDIATE_MAINTENANCE_INCIDENTS: Final[frozenset[str]] = frozenset(
 
 #: 관리자가 이 친구만의 한도를 따로 정하지 «않았을 때» 쓰는 하루 성공 보고서 상한.
 #: 회원별 값은 초대 명단(`sharelink/allowlist.py`)의 `daily_success_limit` 열이
-#: 정본이며, 비어 있으면(NULL) 이 값을 쓴다 (결정 D-G4 (a)).
+#: 정본이며, 비어 있으면(NULL) 이 값을 쓴다.
 MEMBER_DAILY_SUCCESS_LIMIT: Final[int] = 3
 
 #: 초대 명단 표와 회원별 성공 건수 한도 열의 이름.
@@ -2064,7 +2064,7 @@ def reserve_member_run(
     ★ **한도는 여기서 다시 읽는다.** 부르는 쪽의 사전 확인은 transaction 밖이라
       동시 요청이 같은 옛 숫자를 공유한다. ``success_limit``을 안 주면 이 자리에서
       초대 명단의 회원별 값을 읽으므로, 부르는 쪽이 한도를 모르더라도 옛 상수 3이
-      조용히 적용되는 일은 없다 (결정 D-G4 (a)).
+      조용히 적용되는 일은 없다.
     """
     clean_run = _clean(run_id, maximum=128)
     actor = _actor(actor_email)

@@ -1,5 +1,5 @@
 """홈페이지·공식 IR PDF·광역 웹 세 수집기가 한 조사(scope) 안에서 host별
-robots.txt 요청을 정확히 한 번만 하는지 확인하는 결합 카운터 시험(티켓 B2).
+robots.txt 요청을 정확히 한 번만 하는지 확인하는 결합 카운터 시험.
 
 실측 결함: 세 수집기를 같은 회사 조사에서 차례로 불러도 각자 독립적으로
 robots.txt를 확인했다 — 홈페이지+IR만 겹쳐도 apex·www 별칭까지 최대 4회,
@@ -153,7 +153,7 @@ def test_공유_scope_안에서_host별_robots_요청은_정확히_1회다() -> 
     광역 세 곳이 합쳐 1회여야 한다(캐시 메커니즘 자체의 계약).
 
     수정 전 코드는 홈페이지·IR·광역 web-crawl·광역 IR위임이 각자 독립적으로
-    robots.txt를 확인해 4회가 나왔다(티켓 B2 실측치).
+    robots.txt를 확인해 4회가 나왔다(실측치).
     """
     pages = {
         ROBOTS_URL: ROBOTS_ALLOW_ALL,
@@ -202,7 +202,7 @@ def test_공유_scope_안에서_robots가_차단하면_세_수집기_모두_본�
 
 
 # ══════════════════════════════════════════════════════════
-# P1(독립 검토 2026-09-02 실측): real.py의 실제 호출부가 진짜로 캐시를
+# P1(독립 검토 실측): real.py의 실제 호출부가 진짜로 캐시를
 # 공유하는가 — 위 시험들은 시험이 직접 만든 «인위로 공유한」 scope였다.
 # 여기서는 real._collect를 실제로 돌려서 확인한다.
 # ══════════════════════════════════════════════════════════
@@ -212,7 +212,7 @@ def test_real_collect는_홈페이지와_IR을_공유_캐시_scope로_묶는다(
     engine: FakeEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """티켓 B2 P1: ``real.py``는 ``request_deadline_scope``를 한 번도 열지
+    """``real.py``는 ``request_deadline_scope``를 한 번도 열지
     않았다 — ``real._collect``가 실제로 부르는 홈페이지·공식 IR 두 호출이
     각자 독립 scope로 돌아 robots 캐시를 공유하지 못했다(카운터 시험들이
     증명한 「1회」는 시험이 직접 만든 공유 scope에서만 성립했다).

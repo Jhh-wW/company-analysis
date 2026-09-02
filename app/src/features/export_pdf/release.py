@@ -93,7 +93,7 @@ class PDFReleaseBlockedError(RuntimeError):
 class PdfRenderBlockedError(PDFReleaseBlockedError):
     """「PDF 후보 만들기」 자체가 실패했다 — 자동검사(4종)는 돌지도 않았다.
 
-    ★ 왜 «전용» 예외인가 (2026-08-28)
+    ★ 왜 «전용» 예외인가
       맨 ``PDFReleaseBlockedError`` 를 던지는 자리가 이 모듈에만 12곳이고
       대부분은 렌더 실패가 아니다(출고 승인 없음·장부 무결성 등).
       「사유가 없으면 렌더 실패」로 뭉뚱그리면 **화면이 또 틀린 말을 한다.**
@@ -106,7 +106,7 @@ class PdfRenderBlockedError(PDFReleaseBlockedError):
 def _render_blocked() -> PdfRenderBlockedError:
     """「PDF 만들기」 실패를 «사유 있는» 차단으로 바꾼다.
 
-    ★ 왜 필요한가 (2026-08-28 실측)
+    ★ 왜 필요한가 (실측)
       이 자리에서 던지던 맨 예외에는 ``reasons``가 없어서, 화면이
       「자동 출고 승인을 확인하지 못했습니다」라는 «다른 단계» 문구로 떨어졌다.
       자동검사(4종)는 돌지도 않았는데 자동검사가 막은 것처럼 보였다.
@@ -121,7 +121,7 @@ def _render_blocked() -> PdfRenderBlockedError:
 def _blocked(reason: str) -> PdfRenderBlockedError:
     """「PDF 후보 만들기」 구조 검사 실패 — «어느 검사»였는지를 로그에 남긴다.
 
-    ★ 왜 나눴나 (2026-08-28)
+    ★ 왜 나눴나
       이 검사들은 사유 없이 던져서, 화면도 로그도 「자동 출고 승인을
       확인하지 못했습니다」 한 줄뿐이었다 — **관리자가 원인을 찾을 수 없었다.**
 

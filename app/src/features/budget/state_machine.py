@@ -353,7 +353,7 @@ def _legacy_observation_adjustments(
         known_total = sum(known[key][2] for key in keys if key in known)
         delta = round(observed - known_total, 6)
         if delta <= 0.01:
-            # ★ 2026-08-29 — 여기서 «중단»하지 마라. 서버가 아예 못 뜬다.
+            # ★ 여기서 «중단»하지 마라. 서버가 아예 못 뜬다.
             #   운영 실측: 기동이 `Exited with status 3` 으로 죽었고, 원인은
             #   「legacy DB 확정 비용이 관측 최종 비용보다 큽니다」였다.
             #

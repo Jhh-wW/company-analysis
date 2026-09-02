@@ -93,10 +93,10 @@ def content_manifest_matches(report: Report, candidate: PdfReleaseCandidate) -> 
     ★ 공개 봉인(``report.public_projection``)이 있으면 그 봉인의
       ``PublicReportDigest.content_sha256``과 맞대 본다. 이 지문은 공개 본문뿐
       아니라 감사 장부(FactRecord·fact_id·등급 기여)까지 덮으므로, 글자만 같고
-      장부가 다른 PDF를 같은 공개물로 승인하지 못한다(설계 017 §5 — 옛 PDF 전용
+      장부가 다른 PDF를 같은 공개물로 승인하지 못한다(옛 PDF 전용
       지문 C를 대체).
     ★ 봉인이 없는 보고서(v1·옛 v2 저장본)는 옛 지문 그대로다. 그 경로에는
-      맞댈 봉인 자체가 없다(설계 §6 — legacy 무변).
+      맞댈 봉인 자체가 없다(옛 경로는 그대로 둔다).
     ★ 버전이 다르면 지문이 우연히 같아도 거짓이다 — 어느 규칙으로 만든 값인지
       모르는 지문을 «맞다»고 하지 않는다.
     """

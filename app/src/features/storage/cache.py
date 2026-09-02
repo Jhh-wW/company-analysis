@@ -229,7 +229,7 @@ def _is_layer1_fresh(
     if cached_fiscal_year != current_fiscal_year:
         return False
 
-    # ★ 「오늘」은 반드시 KST 다 (2026-08-27 실측으로 찾은 결함).
+    # ★ 「오늘」은 반드시 KST 다 (실측으로 찾은 결함).
     #   수집일(`collected_at`)은 저장할 때 KST 로 적는다(`real.py` 의 `today_kst()`).
     #   그런데 여기서 «서버 로컬 날짜»로 재면 서버가 UTC 일 때 하루가 어긋나,
     #   방금 저장한 자료가 «미래에 수집된 것»(age_days = -1)이 되어 캐시가 통째로 거절된다.
@@ -653,7 +653,7 @@ def reusable_for_requested_release_mode(
         재사용해도 되면 True.
     """
     # FULL 요청만 좁힌다. 비FULL 요청의 재사용은 예전 그대로다 — 사용자
-    # 결과·차감을 바꾸지 않는다는 SHADOW 정의(I9)를 건드리지 않기 위해서다.
+    # 결과·차감을 바꾸지 않는다는 SHADOW 정의를 건드리지 않기 위해서다.
     if requested_release_mode is not ReleaseMode.FULL:
         return True
     return str(stored_release_mode or "") == ReleaseMode.FULL.value

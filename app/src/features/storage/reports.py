@@ -400,7 +400,7 @@ def _fact_from_dict(data: dict[str, Any]) -> FactRecord:
 def public_projection_payload(projection: PublicReportProjection) -> dict[str, Any]:
     """공개 봉인 projection을 저장 열에 넣을 JSON 객체로 만든다.
 
-    ★ 이 값은 보고서 payload에 «들어가지 않는다»(root 결정 C, 2026-09-02).
+    ★ 이 값은 보고서 payload에 «들어가지 않는다».
       별도 표 ``report_public_projections``의 ``projection_json`` 열에만 들어간다.
       두 문서를 나눠야 각자 저장 자원 상한 아래에 머무르고, 이미 승인된 PDF
       출고 기록이 입력으로 쓰는 보고서 payload 바이트가 한 글자도 안 바뀐다.
@@ -412,7 +412,7 @@ def public_projection_payload(projection: PublicReportProjection) -> dict[str, A
 def report_to_dict(report: Report) -> dict[str, Any]:
     """`Report` → JSON에 바로 쓸 수 있는 dict.
 
-    ★ 새 키를 «있을 때만» 넣는 이유 (2026-08-25) — 이 payload의 바이트가
+    ★ 새 키를 «있을 때만» 넣는 이유 — 이 payload의 바이트가
       `export_pdf.automatic_release.report_sha256` 의 입력이고, 그 해시가
       **이미 승인된 PDF 출고 기록**(`pdf_release_records`)에 박혀 있다.
       키를 무조건 넣으면 옛 보고서의 해시가 통째로 달라져 지난 승인이 전부
@@ -470,9 +470,9 @@ def report_to_dict(report: Report) -> dict[str, Any]:
         payload["quality_observation"] = generation_quality_observation_to_dict(
             report.quality_observation
         )
-    # ★ ``public_projection``은 «일부러» 여기 넣지 않는다(root 결정 C,
-    #   2026-09-02). 봉인은 별도 표에 저장한다 — payload 바이트·노드 수를
-    #   이 티켓 이전과 똑같이 두려는 것이고, 그 동일성은
+    # ★ ``public_projection``은 «일부러» 여기 넣지 않는다.
+    #   봉인은 별도 표에 저장한다 — payload 바이트·노드 수를
+    #   예전과 똑같이 두려는 것이고, 그 동일성은
     #   ``test_report_payload는_projection을_싣지_않아_바이트가_기존과_같다``가
     #   지킨다.
     return payload
@@ -501,7 +501,7 @@ def report_from_dict(data: dict[str, Any]) -> Report:
         != STRICT_QUALITY_CONTRACT_VERSION
     ):
         raise ValueError("엄격 보고서의 schema 또는 품질 contract_version이 바뀌었습니다")
-    # ★ quality_observation은 이 「엄격 전용」 묶음에서 뺐다(C1b, 2026-09-02) —
+    # ★ quality_observation은 이 「엄격 전용」 묶음에서 뺐다(C1b) —
     #   SHADOW도 관측 전용으로 저장한다. generation_evidence·
     #   public_structure_manifest·STRICT contract_version은 여전히 FULL/
     #   ENFORCE 전용이다(그 셋은 실제로 strict 생산 증거·공개 봉인 절차를
@@ -707,7 +707,7 @@ def save_public_projection(
 ) -> None:
     """보고서 하나의 공개 봉인을 전용 표에 쓴다(없으면 지운다).
 
-    ★ 반드시 보고서 본문과 «같은 거래»에서 불러야 한다(I11). 이 함수는 commit을
+    ★ 반드시 보고서 본문과 «같은 거래»에서 불러야 한다. 이 함수는 commit을
       하지 않는다 — 호출부(``save``·``insert_new``)가 이미 열려 있는 거래에
       얹으므로, 이 쓰기가 실패하면 본문 행도 함께 되돌아간다.
 
@@ -755,7 +755,7 @@ def load_public_projection(
     저장된 digest를 그대로 믿지 않는 이유는 ``canonical.py``의 봉인 원칙과
     같다 — 자기 자신만 검사하는 checksum은 본문과 digest를 «함께» 바꾼 위조를
     못 막는다. 여기서 다시 계산해 열 값과 맞대면 저장 뒤에 손댄 흔적이
-    로드에서 닫힌다(I3).
+    로드에서 닫힌다.
 
     Returns:
         봉인이 있으면 그 값, 없으면 ``None``. ``None``은 오류가 아니라
@@ -820,7 +820,7 @@ def attach_public_projection(
     if projection is None:
         return report
     evidence = report.generation_evidence
-    # ★ 증거가 없으면 붙이지 않고 닫는다(S3e, 2026-09-02). 봉인의 진짜 권위는
+    # ★ 증거가 없으면 붙이지 않고 닫는다(S3e). 봉인의 진짜 권위는
     #   생성 증거의 `public_projection_sha256`이다 — 증거가 없으면 「이 봉인이
     #   이 보고서의 것」이라고 말해 주는 것이 아무것도 없고, 남는 검사는 봉인
     #   스스로의 앞뒤가 맞는지뿐이라 DB에 직접 넣은 봉인도 통과한다.
@@ -886,7 +886,7 @@ def save(
             engine_epoch_digest,
         ),
     )
-    # 같은 거래 — 봉인 쓰기가 실패하면 위 본문 행도 함께 되돌아간다(I11).
+    # 같은 거래 — 봉인 쓰기가 실패하면 위 본문 행도 함께 되돌아간다.
     save_public_projection(
         conn, report_id, report.public_projection, created_at=stamp
     )
@@ -928,7 +928,7 @@ def insert_new(
     if cursor.rowcount != 1:
         # 이미 있는 공개 보고서는 본문도 봉인도 덮지 않는다(append-only).
         return False
-    # 같은 거래 — 봉인 쓰기가 실패하면 위 본문 행도 함께 되돌아간다(I11).
+    # 같은 거래 — 봉인 쓰기가 실패하면 위 본문 행도 함께 되돌아간다.
     save_public_projection(
         conn, report_id, report.public_projection, created_at=stamp
     )
@@ -959,7 +959,7 @@ def list_report_ids(
     """`payload_json`을 전혀 읽지 않고 `(report_id, created_at)` 목록만 돌려준다.
 
     관측·집계용 도구가 「이 DB에 어떤 report_id들이 있는가」를 알아야 할 때 쓰는
-    최소 열거 공개 API다(2026-09-02 추가 — `admin_dashboard`가 이 표를 직접
+    최소 열거 공개 API다(`admin_dashboard`가 이 표를 직접
     SQL로 열거하지 않도록 하기 위함).
 
     ★ 필터·정렬 기준은 `created_at`(이 행이 저장된 시각)이다. `generated_at`

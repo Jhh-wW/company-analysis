@@ -355,7 +355,7 @@ def _run_web_crawl(
     queue: list[_QueueItem] = []
     seen_canonical: set[str] = set()
 
-    # APEX-WWW-OFFICIAL-ROOT-GAP(통합 담당 지시, 2026-08-31): DART가 준 호스트
+    # APEX-WWW-OFFICIAL-ROOT-GAP(통합 담당 지시): DART가 준 호스트
     # («primary»)와 그 apex/www 짝을 각각 독립된 후보로 미리 심는다 — redirect를
     # 따라가는 방식이 아니라 «둘 다 직접 방문」하는 방식이라, 정확히 같은
     # host만 허용하는 redirect fail-closed 정책(앞서 고친 eTLD+1 결함 수정과
@@ -743,7 +743,7 @@ def _run_ir_pdf_phase(
             state.record_truncation(WIDE_SOURCE_KIND_IR_PDF, "truncated_time_cap")
             return
 
-        # ★ 티켓 B2: 광역 웹 수집(_ensure_host_policy)이 이미 이 host의
+        # ★ 광역 웹 수집(_ensure_host_policy)이 이미 이 host의
         #   robots.txt를 확인 못했거나 명시적으로 거부됐다고 판정했으면 IR PDF
         #   시도 자체를 하지 않는다(요청 0) — ir_pdf._load_robots도 같은
         #   scope 캐시를 재사용해 새 네트워크 요청은 어차피 나가지 않지만,

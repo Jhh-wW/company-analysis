@@ -58,7 +58,7 @@ _RESPONSES_FIXTURE: Final[dict[str, Any]] = json.loads(
 )
 
 # ── 완성 하한 값 — 기준문서 03장 6절(G4)을 숫자 그대로 옮긴 것.
-#    ★ 2026-09-01 — 한 번은 이 숫자를 생산 상수 import로 바꿨다가 되돌렸다.
+#    ★ 한 번은 이 숫자를 생산 상수 import로 바꿨다가 되돌렸다.
 #    이유: 시험을 생산 상수에 묶으면 «생산 상수가 바뀌면 시험도 같이
 #    깨진다»는 안전선이 성립하는 것처럼 보이지만, 실제로는 «값이 낮아지는»
 #    방향은 못 잡는다 — 누가 40을 17로 낮춰도 import한 시험은 여전히
@@ -395,7 +395,7 @@ def test_기준문서_하한은_낮추지_않고_미결속_수치를_제외한_�
     assert len(fixture_body) >= MIN_SUBSTANTIVE_SENTENCES
     assert fixture_confirmed / len(fixture_all) >= MIN_CONFIRMED_RATIO
 
-    # ② 숫자가 없는 문장은 전부 보존한다. 2026-08-29 사용자 결정 ③ 이후에는
+    # ② 숫자가 없는 문장은 전부 보존한다. 사용자 결정 ③ 이후에는
     #    «검사를 이미 두 번 통과한» 수치 문장(등급 확인 + 인용 있음 + 검수 AI가
     #    참으로 판정해 verified)까지 살아남는다 — 구조화 근거(NumericBinding)를
     #    요구하는 옛 규칙은 «해석» 등급 수치 문장에만 남는다(해석은 사실
@@ -441,7 +441,7 @@ def test_기준문서_하한은_낮추지_않고_미결속_수치를_제외한_�
     assert reviewer.rewrite_prompts == []
 
     # ③ 하한 자체(본문 40문장·확인 비율 50%)는 낮추지 않는다 — 안전선.
-    #    2026-08-29 사용자 결정 ③ 이후 이 fixture는 «회복»해 두 지표 모두
+    #    사용자 결정 ③ 이후 이 fixture는 «회복»해 두 지표 모두
     #    하한을 넘긴다. 그런데도 등급은 여전히 PARTIAL이다 — 이유는 이 시험이
     #    다루는 게이트(수치 문장 결속)가 아니라 «구조화 사실(FactRecord) 하한»
     #    이라는 별도 게이트다. 이 시험은 실적표(table=None)를 일부러 안 주므로
@@ -457,7 +457,7 @@ def test_기준문서_하한은_낮추지_않고_미결속_수치를_제외한_�
     assert any("숫자·날짜 문장" in reason for reason in report.shortfall_reasons)
     report_facts = output.quality_observation.substantive_claims
     report_sources = output.quality_observation.document_sources
-    # ★ 2026-08-29 — 머리말에서 «내부 임계값»(40개·8개)을 뺐다. 그 숫자는 화면
+    # ★ 머리말에서 «내부 임계값»(40개·8개)을 뺐다. 그 숫자는 화면
     #   어디에도 설명이 없어 「40점 만점에 3점」으로 오독되고, 독자가 할 수 있는
     #   일도 없다. 대신 «실제 개수»는 그대로 싣는다 — 그게 신뢰도 판단의 근거다.
     #   ⚠️ 여기서 지키는 것은 「임계값이 보이나」가 아니라 「사실이 남았나」다.

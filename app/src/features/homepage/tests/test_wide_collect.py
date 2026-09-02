@@ -198,7 +198,7 @@ def test_robots가_403이면_본문을_긁지_않는다():
     ],
 )
 def test_robots_거부_일시장애_상태는_일반_전송_호출이_0회다(status, expected_reason_code):
-    """P1(통합 담당 지시, 2026-08-31 확장): robots_decision의 단위 분류
+    """P1(통합 담당 지시, 확장): robots_decision의 단위 분류
     (407·408·409·429 전부 blocked)를 상태마다 실제 수집 전체로 증명한다.
     「robots가 아닌」 전송 호출 수를 세어 정말 0인지 확인한다 — 특정 URL
     문자열이 calls 안에 없다는 것만으로는 다른 형태의 우회 호출을 놓칠 수
@@ -779,7 +779,7 @@ def test_sitemap의_다른_TLD_URL은_등록도메인_밖이라_따라가지_않
     assert not any("company.net" in doc.canonical_url for doc in result.documents)
 
 
-# ── APEX-WWW-OFFICIAL-ROOT-GAP(통합 담당 지시, 2026-08-31) ────────
+# ── APEX-WWW-OFFICIAL-ROOT-GAP(통합 담당 지시) ────────
 
 
 def test_apex가_사실상_www로만_운영되어도_www가_직접_방문되어_문서를_만든다():
@@ -1469,7 +1469,7 @@ def test_ir_failed도_OPTIONAL이다(monkeypatch):
 
 
 def test_blocked_호스트는_IR_시도_0회(monkeypatch):
-    """티켓 B2: 웹 크롤 단계가 이미 이 host의 robots.txt를 확인 못했거나
+    """웹 크롤 단계가 이미 이 host의 robots.txt를 확인 못했거나
     거부됐다고 판정했으면(``state.robots_policies[host].blocked``), IR PDF는
     같은 host를 다시 확인하지 않는다 — html_fetch/pdf_fetch가 그 host로 단
     한 번도 불리지 않는다. robots.txt 자체가 pages에 없어(가짜 접속 실패)

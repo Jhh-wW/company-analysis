@@ -295,13 +295,13 @@ DELETED_REASON_PREVIEW: Final[int] = 6
 #   모델을 올린 뒤 실제로 이런 것들이 보고서에 실렸다:
 #     · 「…18개국에 수출 노선을 확보했다....」        ← 네이버가 자른 토막
 #     · 「Find a provider News About Us … AMPS」      ← 홈페이지 메뉴 글자
-#     · 「(2026-07-16 보도 · domain) 제목.」           ← 앞에 붙은 출처 표기
+#     · 「(보도 · domain) 제목.」           ← 앞에 붙은 출처 표기
 
 #: 잘린 자국 — 네이버 뉴스 API가 본문을 잘라 보낼 때 남긴다.
 #: **실측: 저장된 뉴스 후보 115문장 중 56개(49%)가 이 모양이다.**
 TRUNCATED_TAIL_RE: Final[re.Pattern[str]] = re.compile(r"(\.{3,}|…)\s*[\"')\]]*$")
 
-#: 뉴스 조각 맨 앞의 「(2026-07-16 보도 · www.example.com) 」 표기.
+#: 뉴스 조각 맨 앞의 「(보도 · www.example.com) 」 표기.
 #: ★ 버리지 않고 «앞머리만» 뗀다 — 뒤에 붙은 기사 제목은 온전한 문장이라 쓸 만하다.
 #:   날짜·주소는 출처 목록에 이미 있으므로 문장에 남길 이유가 없다.
 NEWS_SOURCE_PREFIX_RE: Final[re.Pattern[str]] = re.compile(
@@ -319,7 +319,7 @@ HANGUL_RE: Final[re.Pattern[str]] = re.compile(r"[가-힣]")
 #:   바로잡으려면 토큰 수만으로는 부족하고 «모델 이름»이 있어야 한다.
 USAGE_MODEL_KEY: Final[str] = "model"
 
-#: canonical 선택은 항목마다 닫힌 의미 필드를 함께 반환한다. 2026-08-21 파일럿에서
+#: canonical 선택은 항목마다 닫힌 의미 필드를 함께 반환한다. 파일럿에서
 #: 전역 3,000 token 상한을 21/21회 모두 소진했으므로 이 호출에만 두 배 상한을 둔다.
 #: 전역 ``GEN_MAX_TOKENS``는 다른 저비용 호출의 계약이라 바꾸지 않는다.
 CANONICAL_SELECTION_MAX_TOKENS: Final[int] = 6_000

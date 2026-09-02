@@ -124,7 +124,7 @@ def _primary(
         reviewer_calls=1,
         section_sha256s=_section_sha256s("primary-section"),
         evidence_packet_sha256s=_section_sha256s("evidence-packet"),
-        # 장별 봉인 블록 지문(S3c) — 보충 결속이 장부까지 비교하므로 정상
+        # 장별 봉인 블록 지문 — 보충 결속이 장부까지 비교하므로 정상
         # 영수증에는 언제나 들어 있다.
         section_block_sha256s=_section_sha256s("primary-block"),
     )

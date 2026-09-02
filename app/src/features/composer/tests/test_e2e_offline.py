@@ -137,7 +137,7 @@ def _fixture_unbound_numeric_summary() -> tuple[str, ...]:
 
 
 def _fixture_unbound_numeric_grades_by_section() -> dict[str, dict[str, str]]:
-    """장별 «미결속 수치 문장 텍스트 → 등급» 맵 (2026-08-29 사용자 결정 ③).
+    """장별 «미결속 수치 문장 텍스트 → 등급» 맵 (사용자 결정 ③).
 
     구조화 근거(NumericBinding) 없이 숫자만 든 문장 중, «확인» 등급 +
     인용 있음은 검수 AI가 참으로 판정하면(이 fixture는 전부 참) 이제
@@ -439,7 +439,7 @@ def test_ENGINE_V2_전체_흐름이_검증된_v2_보고서를_만든다(
         for section_id in SECTION_IDS
     }
     # 최종 장별 수는 «6문장 하한을 낮춘 값»이 아니라 원래 6 - «실제로 제외된»
-    # 수치 문장 - 기존 중복 이동 + 검증된 프로그램 claim이다. 2026-08-29
+    # 수치 문장 - 기존 중복 이동 + 검증된 프로그램 claim이다.
     # 사용자 결정 ③ 이후 «실제로 제외된» 수는 unbound_by_section 전체가
     # 아니라 그중 «해석» 등급뿐이다(아래서 등급별로 갈라 실측으로 확인한다).
     grades_by_section = _fixture_unbound_numeric_grades_by_section()
@@ -464,7 +464,7 @@ def test_ENGINE_V2_전체_흐름이_검증된_v2_보고서를_만든다(
     ]
     # «해석» 등급 수치 문장은 여전히 구조화 근거가 없어 빠진다. «확인» 등급
     # 수치 문장(인용 있음, 검수 AI가 참으로 판정)은 이제 살아남는다 — 이게
-    # 2026-08-29 사용자 결정 ③의 «회복»이다. 두 방향을 각각 실측으로 잠근다.
+    # 사용자 결정 ③의 «회복»이다. 두 방향을 각각 실측으로 잠근다.
     for grades in grades_by_section.values():
         for text, grade in grades.items():
             appears = any(text in visible for visible in all_prose)
@@ -483,7 +483,7 @@ def test_ENGINE_V2_전체_흐름이_검증된_v2_보고서를_만든다(
     # 해석 표지와 [n] 인용이 본문에 실제로 찍힌다
     assert any(INTERPRETATION_MARKER in text for text in all_prose)
     assert any(re.search(r"\[\d+\]", text) for text in all_prose)
-    # 2026-08-29 사용자 결정 ③ 이전에는 «원문에 값이 있었다는 이유만으로
+    # 사용자 결정 ③ 이전에는 «원문에 값이 있었다는 이유만으로
     # 8,219억 AI 문장을 공개하지 않는다»였다. 그 문장(등급 확인 + 인용
     # ["2"])은 이제 두 검사(수치 대조·검수 AI)를 통과해 살아남는다 — 구조화
     # 실적표의 원값(아래 "8,219")과 나란히 실린다. 위 grades_by_section
@@ -540,7 +540,7 @@ def test_ENGINE_V2_전체_흐름이_검증된_v2_보고서를_만든다(
         - len(unbound_summary)
     )
     summary_supplements = len(report.summary_items) - safe_summary_before_supplement
-    # 2026-08-29 사용자 결정 ③ 이후 본문에서 실제로 빠지는 수치 문장은
+    # 사용자 결정 ③ 이후 본문에서 실제로 빠지는 수치 문장은
     # unbound_by_section 전체가 아니라 «해석» 등급뿐이다(위 루프와 같은 근거).
     interpreted_removed_total = sum(interpreted_counts_by_section.values())
     expected_passed = (
@@ -841,7 +841,7 @@ def test_이음매_2장_구성_도식과_4장_추이_도식도_화면까지_간�
     """7장만 지키면 나머지가 조용히 끊긴다 — 세 도식을 한 시험에서 함께 본다.
 
     ⚠️ 이름과 다르게 **지금 실제로 검증하는 것은 4장 추이표 + 7장 흐름표뿐**이다
-    (2026-08-25 확인). 「2장 구성 도식」은 이름에만 있고 아래 단정 어디에도
+    (직접 확인). 「2장 구성 도식」은 이름에만 있고 아래 단정 어디에도
     없다 — JYP 리허설 fixture의 `read_filing_text()`가 한 줄짜리 원문이라
     revenuemix가 매출 구성표를 못 뽑아 business_model 장이 이 시험에서는
     표를 0개 받기 때문이다(과제 2 버그가 있던 시절부터 있던 gap, 내가 만든

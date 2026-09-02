@@ -24,8 +24,8 @@
   다른 회사 조회 결과가 섞여도 조용히 통과할 수 있다), 값의 원천은 항상
   ``wide_collect._CollectionState.add_attempt``·``wide_fragments.build_fragments``
   호출자다.
-★ 계약 gen=8 마지막 고리의 top-level company_id(통합 담당 지시,
-  2026-08-31): 산출 dict의 **최상위** ``company_id``는 ``result.company_id``
+★ 계약 gen=8 마지막 고리의 top-level company_id(통합 담당 지시):
+  산출 dict의 **최상위** ``company_id``는 ``result.company_id``
   (``WideCollectionResult`` 자신이 정본으로 든 값)에서만 만든다 — 첫
   문서에서 꺼내거나 별도 호출 인자로 받지 않는다. 그래야 documents가
   0건이어도 수집 주체를 잃지 않고, documents가 일제히 틀린 값이어도

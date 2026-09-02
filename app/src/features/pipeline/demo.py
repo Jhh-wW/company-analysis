@@ -106,7 +106,7 @@ _OUTCOME_MESSAGE: dict[Outcome, str] = {
         "공공기관·공기업은 채용 방식과 공개되는 자료의 성격이 달라 "
         "지금은 다루지 않고 있습니다."
     ),
-    # ★ 2026-08-27 정정 — 예전 문구는 「감사보고서를 낸 기록이 없습니다」였다.
+    # ★ 정정 — 예전 문구는 「감사보고서를 낸 기록이 없습니다」였다.
     #   그건 우리가 «찾은 방법»이지 사용자가 알아야 할 사실이 아니었고,
     #   더구나 틀렸다 — 사업보고서에 첨부해 내는 회사는 별도 감사보고서가 없다.
     #   지금은 감사보고서와 재무제표를 «둘 다» 확인하므로 결과만 말한다.
@@ -193,7 +193,7 @@ def _in_report_order(sections: list[ReportSection]) -> list[ReportSection]:
 def _outcome_of(raw: str) -> Outcome:
     """기존 조사 기록의 종료 문자열을 종료 종류로 옮긴다.
 
-    ★ 옮기는 «규칙»은 `port.outcome_for` 한 곳에 있다 (2026-08-27).
+    ★ 옮기는 «규칙»은 `port.outcome_for` 한 곳에 있다.
       예전에는 이 4줄을 진짜 파이프라인이 «다른 방법»으로 따로 갖고 있었고,
       그 차이가 운영 결함이 됐다. 표(`_OUTCOME_MAP`)는 데모 것이 따로 맞다.
     """
@@ -446,7 +446,7 @@ _CITE_PARTS = re.compile(r"^조각\s*(?P<number>\d+)\s*·\s*(?P<kind>.+)$")
 def _news_citations(record: dict) -> dict[int, Source]:
     """뉴스 조각의 보도일·언론사를 조각 원문에서 읽어 둔다.
 
-    ★ 뉴스 조각 원문은 「(2026-07-15 보도 · domain) 제목. 본문」 꼴이라
+    ★ 뉴스 조각 원문은 「(보도 · domain) 제목. 본문」 꼴이라
       **날짜와 언론사가 조각 안에 들어 있다.** 이미 그 파싱을 하는 함수가 있으므로
       그것을 그대로 쓴다 (`provenance.citations`) — 새로 만들면 두 벌이 어긋난다.
     ★ 공시 보고서 이름을 뉴스에 갖다 붙이지 않는다. 「감사보고서 (2025.12) · 뉴스」는
@@ -920,7 +920,7 @@ def _load_report(record: dict) -> Optional[Report]:
     corp_type_raw = record.get("corp_type", "")
     corp_type = "비상장 외감" if "비상장" in corp_type_raw else "상장사"
 
-    # ★ 附(참고 숫자 — 1인평균급여액·평균근속연수)는 2026-08-27에 걷어냈다.
+    # ★ 附(참고 숫자 — 1인평균급여액·평균근속연수)는 걷어냈다.
     #   이 보고서는 「지원동기를 합격 퀄리티로 만드는 정보」만 담는다(사용자 지시).
     #   옛 기록에 附이 남아 있어도 화면에 올리지 않는다.
     sections = [s for s in sections if s.cell in COMPANY_FACT_CELLS and s.cell != "附"]
@@ -929,7 +929,7 @@ def _load_report(record: dict) -> Optional[Report]:
     #   안내 줄이 교차표의 재료로 섞이면 근거 없는 행이 생긴다.
     sections = [_note_redrawn(s) if s.cell in redrawn_cells else s for s in sections]
 
-    # 4-3에 날짜·변경 경고 (W6 · D14-5)
+    # 4-3에 날짜·변경 경고
     sections = [append_direction_warning(s) if s.cell == "4-3" else s for s in sections]
 
     sections.append(build_company_use_section(sections))

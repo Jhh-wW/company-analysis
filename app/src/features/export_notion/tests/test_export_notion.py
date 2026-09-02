@@ -164,7 +164,7 @@ def _sealed_v2_report(report: Report | None = None) -> Report:
     """봉인 블록(``public_projection``)을 실은 보고서.
 
     ★ 갈래는 ``schema_version``이 아니라 «봉인이 있는가»로 갈린다
-      (설계 017 §02-6 — projection 없는 저장본은 전부 옛 경로). 그래서 이
+      (projection 없는 저장본은 전부 옛 경로). 그래서 이
       표본은 봉인만 붙여 v2 갈래를 부른다.
     ★ ``manifest_ref``는 FULL 실행의 공개 구조 seal이 붙이는 값이라 여기서는
       그 «모양»만 흉내 낸다 — 표 글자는 한 자도 바꾸지 않는다
@@ -250,7 +250,7 @@ def _section_slice(
 
 class TestBuildBlocks:
     def test_마스트헤드_다음에_회사명과_보고서명이_각각_한_줄로_온다(self):
-        """표지 다음 첫 본문 페이지 마스트헤드(D-S4a)가 맨 앞 두 블록,
+        """표지 다음 첫 본문 페이지 마스트헤드가 맨 앞 두 블록,
         그다음에 기존 회사명·보고서명 heading_1 쌍이 그대로 이어진다."""
         report = _make_report()
         expected_masthead_company, expected_masthead_meta = masthead_lines(report)
@@ -505,7 +505,7 @@ class TestBuildPageTitle:
 
 
 # ══════════════════════════════════════════════════════════
-# logic.build_blocks — v2 갈래는 봉인 블록«만» 읽는다 (설계 017 §07 조각 S6)
+# logic.build_blocks — v2 갈래는 봉인 블록«만» 읽는다
 # ══════════════════════════════════════════════════════════
 
 
@@ -513,12 +513,12 @@ class TestBuildBlocksV2:
     """공개 봉인 블록(``report.public_projection``)에서만 노션 블록을 만든다.
 
     ★ 지금까지 노션은 화면·PDF와 «각자» 계산했다. 그래서 같은 보고서인데
-      노션만 본문을 사실 카드 표로 냈고(설계 §01-6 G1), 도식은 아예 없었고
+      노션만 본문을 사실 카드 표로 냈고, 도식은 아예 없었고
       (G2), 공개본 투영을 한 번 더 돌렸다(G9). 이 갈래는 그 셋을 없앤다.
     """
 
     def test_v2_Notion은_같은_블록의_paragraphs를_문단_단위로_낸다(self) -> None:
-        """G1 — 본문은 사실 카드 표가 아니라 봉인된 문단 그대로 나간다."""
+        """본문은 사실 카드 표가 아니라 봉인된 문단 그대로 나간다."""
 
         report = _two_paragraph_report()
         display = _display_of(report, "business_model")
@@ -540,7 +540,7 @@ class TestBuildBlocksV2:
         ), "v2 갈래에 v1 사실 카드 표가 남아 있습니다"
 
     def test_v2_Notion_도식은_표와_reading_문단으로_낸다(self) -> None:
-        """G2 — 모양은 채널마다 달라도 되지만 «글자»는 봉인 값 그대로다."""
+        """모양은 채널마다 달라도 되지만 «글자»는 봉인 값 그대로다."""
 
         report = _sealed_v2_report()
         display = _display_of(report, "business_model")
@@ -563,11 +563,11 @@ class TestBuildBlocksV2:
     def test_v2_Notion은_build_published_report를_부르지_않는다(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """G9 — 봉인 뒤에 렌더가 문자열을 다시 «만들면» 채널이 또 갈라진다.
+        """봉인 뒤에 렌더가 문자열을 다시 «만들면» 채널이 또 갈라진다.
 
         전역 순수 함수를 전부 예외로 바꿔도 v2 블록이 나와야 한다. 마스트헤드
         두 줄(``masthead_lines``)만 예외다 — 세 채널이 같은 두 줄을 쓰라고
-        D-S4a가 일부러 공유시킨 함수이고, 봉인 블록에는 그 자리가 없다.
+        일부러 공유시킨 함수이고, 봉인 블록에는 그 자리가 없다.
         """
 
         report = _sealed_v2_report()
@@ -622,7 +622,7 @@ class TestBuildBlocksV2:
             ), "봉인된 문단에 렌더러가 글자를 덧붙였습니다"
 
     def test_v2_Notion은_봉인된_3개년_띠를_표로_낸다(self) -> None:
-        """웹만 그리던 변화 요약 띠를 노션도 «같은 글자»로 낸다(설계 §04 #17).
+        """웹만 그리던 변화 요약 띠를 노션도 «같은 글자»로 낸다.
 
         ★ 시연 보고서의 실적표는 띠 판정기가 받는 열 이름이 아니라 띠가 비어
           있다. 그래서 봉인 블록에 띠를 «직접» 넣어 배치만 확인한다 — 띠를
@@ -690,7 +690,7 @@ class TestBuildBlocksV2:
         ]
 
     def test_v2_Notion은_봉인된_표지_실적_띠를_표로_낸다(self) -> None:
-        """표지 실적 띠도 채널 공통 필드다(설계 §04 #3)."""
+        """표지 실적 띠도 채널 공통 필드다."""
 
         report = _sealed_v2_report()
         projection = report.public_projection

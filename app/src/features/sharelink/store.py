@@ -32,7 +32,7 @@ TABLE_OPEN_WINDOWS = "share_link_open_windows"
 TABLE_ACCESS_SUBJECTS = "share_link_access_subjects"
 TABLE_RUN_HISTORY = "share_link_run_history"
 TABLE_REPORT_VIEW_EVENTS = "share_link_report_view_events"
-#: 링크의 만료·한도를 «누가 언제 얼마에서 얼마로» 바꿨는지 남기는 표 (티켓 G-S4).
+#: 링크의 만료·한도를 «누가 언제 얼마에서 얼마로» 바꿨는지 남기는 표.
 #: ★ 관리자 감사 원장(`admin_audit_events`)은 사유 코드가 48자 영숫자라 금액·날짜를
 #:   담을 수 없다. 그래서 「무엇이 어떻게 바뀌었나」는 이 표가, 「누가 승인했나」는
 #:   감사 원장이 각각 맡는다. 두 곳에 같은 transaction으로 함께 쓴다.
@@ -649,7 +649,7 @@ def _verify_access_subject_tombstone(conn: sqlite3.Connection) -> None:
 def _freeze_legacy_expiry(conn: sqlite3.Connection) -> None:
     """만료일이 아직 안 적힌 옛 행에 «그 행이 원래 닫히던 날»을 적어 굳힌다.
 
-    ★ 왜 필요한가 — 기본 수명이 60일에서 90일로 바뀌었다(D-G8). 만료일을
+    ★ 왜 필요한가 — 기본 수명이 60일에서 90일로 바뀌었다. 만료일을
       계산으로만 두면, 상수를 바꾼 순간 **이미 뿌려 둔 링크가 30일 더 열린다.**
       아무도 결정한 적 없는 노출 연장이므로, 옛 행은 옛 규칙으로 계산해 표에
       적어 둔다. 새 발급만 90일을 받는다.
@@ -926,7 +926,7 @@ def insert_new(
     Returns:
         삽입했으면 ``True``, 같은 열쇠가 이미 있으면 ``False``.
 
-    ★ 만료일을 **발급 순간에 적어 굳힌다** (D-G8). 계산으로만 두면 나중에 기본
+    ★ 만료일을 **발급 순간에 적어 굳힌다**. 계산으로만 두면 나중에 기본
       수명 상수를 바꿀 때 이미 뿌린 링크의 만료가 조용히 따라 움직인다.
     """
     expiry = logic.expiry_date_of(now_iso)

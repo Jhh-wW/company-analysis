@@ -151,7 +151,7 @@ def _grade_notice(
     ★ 봉인이 있으면 ``grade_notice`` 한 벌을 표지와 본문이 «똑같이» 쓴다.
       지금까지 웹·PDF·Notion이 각자 사본을 들고 있었고 PDF 안에서도 표지와
       본문이 다른 문장을 썼다 — 같은 정책을 서로 다른 말로 꾸미지 않도록
-      봉인 값 하나로 모은다(설계 §01-4 #4). 그래서 이 갈래에서는 ``detailed``가
+      봉인 값 하나로 모은다. 그래서 이 갈래에서는 ``detailed``가
       문구를 바꾸지 않는다.
     """
 
@@ -191,9 +191,9 @@ def _public_projection(report: Report) -> PublicReportProjection | None:
     ★ v2 FULL 보고서에는 composer가 렌더 뒤 한 번 만든 공개 봉인
       (``report.public_projection``)이 붙어 있다. 붙어 있으면 PDF는 그 블록만
       배치하고 파생 문구를 다시 계산하지 않는다 — 채널마다 다른 글자가 나오던
-      원인을 없앤다(설계 017 §7 S4).
+      원인을 없앤다.
     ★ 봉인이 없으면(``None``) v1 canonical·옛 v2 저장본이다. 그 갈래는 한
-      글자도 건드리지 않는다(설계 §6 — legacy 무변).
+      글자도 건드리지 않는다(옛 경로는 그대로 둔다).
     """
 
     if report.schema_version != ENGINE_V2_SCHEMA_VERSION:
@@ -379,7 +379,7 @@ class _CompositionGraphic(Flowable):
     ★ 높이를 «항목 수로 계산»한다. 예전에는 31mm 고정이라 범례가 두 줄
       (항목 4개)까지만 들어갔다 — 6개가 되면 마지막 줄이 도식 밖으로 나가
       다음 문단과 겹친다.
-    ★ 범례 «한 줄»도 내용 길이에 맞춰 늘어난다(2026-08-25, 팀장 실측 —
+    ★ 범례 «한 줄»도 내용 길이에 맞춰 늘어난다(팀장 실측 —
       하이브 「MD 및 라이선싱 공식 상품(MD), IP 라이선싱 등」처럼 긴
       이름이 고정폭 한 줄(``canvas.drawString``)로 찍혀 옆 칸 글자와
       겹쳤다). 최소 높이는 예전 5.2mm 그대로라 짧은 이름의 모양은 안
@@ -577,7 +577,7 @@ _FLOW_ROW_PADDING_PT: Final[float] = 10.0
 class _FlowGraphic(Flowable):
     """표의 각 행을 3~4단계 왼쪽→오른쪽 흐름으로 표시한다.
 
-    ★ 줄 높이를 «내용 길이에 맞춰» 계산한다(2026-08-25, 카드 도입과 함께
+    ★ 줄 높이를 «내용 길이에 맞춰» 계산한다(카드 도입과 함께
       고침). 예전엔 18mm 고정이라 값이 길면 글자가 상자 밖으로 겹쳐
       나갔다 — 카드로 뺀 1·6·8장뿐 아니라 «진짜 흐름»으로 남긴 2·5·7장도
       AI가 긴 문장을 넣으면 같은 위험이 있었다. 최소 높이는 예전 18mm를
@@ -1038,7 +1038,7 @@ def _styles() -> dict[str, ParagraphStyle]:
             textColor=ink,
             wordWrap="CJK",
         ),
-        # 표지 다음 첫 본문 페이지 맨 위 마스트헤드(D-S4a) 회사명 줄.
+        # 표지 다음 첫 본문 페이지 맨 위 마스트헤드 회사명 줄.
         # cover_title(31pt)보다 작고 heading(17pt)보다 큰 좌측 정렬 밴드다.
         "masthead_title": ParagraphStyle(
             "MastheadTitle",
@@ -1498,7 +1498,7 @@ def _paragraph_number_markup(position: int | str) -> str:
       붙이면 ``_escape(text)``가 받는 문장은 한 글자도 안 바뀐다.
     ★ PDF가 «다운로드 정본»이다 — 웹에만 있고 PDF에 없으면 「3번 문단
       보세요」가 성립하지 않는다(팀장 실측: 웹 25개 · PDF 0개).
-    ★ 2026-08-25에 «장번호-문단번호»(예: 2-1)에서 «문단번호만»으로 바꿨다.
+    ★ 예전 «장번호-문단번호»(예: 2-1)에서 «문단번호만»으로 바꿨다.
       이유(사용자): 이미 「2. 사업 구조와 수익 모델」이라는 장 제목 아래에
       있으므로 장 번호를 문단마다 되풀이할 이유가 없다.
       부수 효과로 옛 quirk가 사라진다 — 전에는 ``display_number``가 비면
@@ -2207,7 +2207,7 @@ def _masthead_flowables(
     styles: dict[str, ParagraphStyle],
     width: float,
 ) -> list[Flowable]:
-    """표지 다음 첫 본문 페이지 맨 위에 회사명 마스트헤드를 좌측 정렬 밴드로 그린다(D-S4a).
+    """표지 다음 첫 본문 페이지 맨 위에 회사명 마스트헤드를 좌측 정렬 밴드로 그린다.
 
     표지(``_CoverContent``)는 페이지 중앙께에 큰 제목·실적 띠·핵심 요약을
     모아 두므로, 여기서는 같은 인상을 주지 않도록 두 줄 + 얇은 구분선짜리
@@ -2325,10 +2325,10 @@ def _content_manifest_metadata(
     ★ 봉인이 있으면 ``PublicReportDigest.content_sha256``이다. 이 지문은 공개
       본문뿐 아니라 감사 장부(FactRecord·fact_id·등급 기여)까지 덮으므로,
       「글자는 같은데 장부가 다른」 PDF를 같은 공개물로 승인하지 못한다
-      (설계 017 §5 — PDF 전용 별도 직렬화기였던 옛 지문 C를 대체).
+      (PDF 전용 별도 직렬화기였던 옛 지문 C를 대체한다).
     ★ 봉인이 없는 v1·옛 v2 저장본은 옛 지문을 그대로 쓴다. 그 경로에는 대체할
       봉인 자체가 없고, 값을 바꾸면 이미 나간 PDF의 bytes와 승인 해시가
-      달라진다(설계 §6 — legacy 무변).
+      달라진다(옛 경로는 그대로 둔다).
     """
 
     if projection is not None:

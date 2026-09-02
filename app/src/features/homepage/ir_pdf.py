@@ -907,7 +907,7 @@ def _load_robots(
       실질적으로 host만 있어도 되지만, 캐시 키 형식을 홈페이지/광역과
       맞춰야 서로 다른 수집기끼리 실제로 같은 캐시 항목을 공유한다)의
       robots.txt를 확인했으면 새 네트워크 요청 없이 그 판정을 재사용한다
-      (``robots_cache.cached_robots_decision`` — 티켓 B2: 최대 4회 중복
+      (``robots_cache.cached_robots_decision`` — 최대 4회 중복
       요청 실측). 특히 광역 웹 수집의 IR 위임(``wide_collect.
       _run_ir_pdf_phase``)에서는 이 재사용이 그 host의 광역(더 엄격한
       RFC 9309) 판정을 그대로 물려받는다 — 의도한 동작이다.

@@ -1,4 +1,4 @@
-"""친구(MEMBER)마다 하루 한도를 «따로» 준다 (결정 D-G4 (a), 티켓 G-S5).
+"""친구(MEMBER)마다 하루 한도를 «따로» 준다.
 
 ★ 이 시험이 막는 것 — 「저 친구 한 명만 더 쓰게 해 달라」를 상수 하나로 고쳐서
   **명단 전원의 하루 상한이 같이 올라가는 것.** 비용 노출은 인원 수만큼 곱해지므로
@@ -142,7 +142,7 @@ def test_한도를_비우면_다시_기본값을_쓰라는_뜻으로_돌아간�
 
 
 def test_다른_회원의_한도는_다른_회원에_영향_없다():
-    """★ G-S5의 핵심. 한 명을 올려도 옆 사람은 그대로여야 한다."""
+    """★ 이 기능의 핵심. 한 명을 올려도 옆 사람은 그대로여야 한다."""
     with _새표() as conn:
         assert share_allow.invite(conn, email=_친구, note="", now_iso=_초대일)
         assert share_allow.invite(conn, email=_다른친구, note="", now_iso=_초대일)
@@ -281,6 +281,6 @@ def test_회원_비용_상한이_비어_있으면_기존_3000원을_쓴다():
     [(Track.ADMIN, 5000.0), (Track.LINK, 3000.0), (Track.PUBLIC, 0.0)],
 )
 def test_회원값은_다른_갈래의_상한을_건드리지_않는다(갈래: Track, 기존값: float):
-    """★ 음성 대조 — 회원 한도 인자를 줘도 LINK·ADMIN·PUBLIC은 그대로다."""
+    """★ 반대 경우 시험 — 회원 한도 인자를 줘도 LINK·ADMIN·PUBLIC은 그대로다."""
     assert budget_of(갈래, member_daily_budget_krw=900.0) == 기존값
     assert budget_of(갈래) == 기존값

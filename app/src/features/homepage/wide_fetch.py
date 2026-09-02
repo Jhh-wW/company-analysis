@@ -244,7 +244,7 @@ def robots_decision(
         긁지 않는다(``WideRobotsPolicy.blocked``가 상위 호출자의 본문 fetch를
         전부 건너뛴다).
 
-    ★ P1 수정(2026-08-31, 통합 담당 지시): 예전 구현은 401·403만 따로 빼고
+    ★ P1 수정(통합 담당 지시): 예전 구현은 401·403만 따로 빼고
       «나머지 4xx 전체»(400·402·405·406·407·408·409·429 등)를 「명시적
       부재 → 빈 규칙」으로 해석했다. 그래서 407(프록시 인증)·408(시간초과)·
       429(속도 제한)까지 「robots가 없다」로 둔갑해 본문을 긁었고, 같은
@@ -300,7 +300,7 @@ def load_robots_policy(
       **origin**(scheme+host+port, ``robots_url``에서 뽑는다 — host만 쓰면
       scheme이 다른 재시도가 다른 origin의 판정을 잘못 물려받는다, 독립
       검토 P0)의 robots.txt를 확인했으면 새 네트워크 요청 없이 그 판정을
-      재사용한다(``robots_cache.cached_robots_decision`` — 티켓 B2). 재사용
+      재사용한다(``robots_cache.cached_robots_decision``). 재사용
       시에는 ``proceed_parsed``/``proceed_empty_rules`` 구분을 두지 않는다
       (``WideRobotsPolicy.blocked``만 실제로 쓰이므로 정보 손실이 없다).
     """
@@ -383,7 +383,7 @@ def fetch_sitemap(
 def _truncate_utf8_bytes(text: str, max_bytes: int) -> str:
     """UTF-8 «바이트」 기준으로 text를 max_bytes 이하로 자른다.
 
-    ★ P1-2 수정(2026-08-31, SITEMAP-BYTE-CAP-IS-CHAR-CAP): 예전엔 ``text[:max_bytes]``로
+    ★ P1-2 수정(SITEMAP-BYTE-CAP-IS-CHAR-CAP): 예전엔 ``text[:max_bytes]``로
       «문자 수»를 잘랐다. 한글 등 멀티바이트 문자는 UTF-8에서 문자당 최대
       3바이트라, 한글 sitemap이면 선언한 바이트 상한을 최대 3배 넘을 수 있었다.
     ★ 바이트 경계에서 멀티바이트 시퀀스 중간이 잘려도 예외를 던지지 않는다 —

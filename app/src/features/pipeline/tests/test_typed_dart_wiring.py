@@ -1,6 +1,6 @@
 """typed 공식 근거 수집기의 운영 배선 — FULL + kill switch 둘 다일 때만 돈다.
 
-★ 무엇을 막는가 (34장 ch04 §3 「하면 안 되는 설계 1·2」 실측)
+★ 무엇을 막는가 (「하면 안 되는 설계 1·2」 실측)
   브랜치 판 배선은 엔진모드·릴리즈모드·kill switch 없이 꽂혀 **v1(기본값)
   실행까지** 새 수집기의 더 좁은 판정에 걸리게 만들었다. 그리고 호출부에
   예외 경계가 없어 미검증 수집기의 결함 하나가 보고서를 강등 없이 통째로
@@ -223,7 +223,7 @@ def test_switch_off이면_v2도_legacy_collect만_탄다(
 def test_비FULL에서는_typed_경로가_0회다(
     mode: str, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """SHADOW·ENFORCE는 사용자 결과가 불변이어야 한다(I9) — 새 수집도 0회다.
+    """SHADOW·ENFORCE는 사용자 결과가 불변이어야 한다 — 새 수집도 0회다.
 
     스위치가 켜져 있어도 release mode를 «먼저» 보므로 스위치 동결조차 하지
     않는다 — 비FULL 프로세스는 이 값을 아예 안 읽는다.

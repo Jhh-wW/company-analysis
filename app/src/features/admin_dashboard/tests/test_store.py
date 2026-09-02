@@ -263,8 +263,8 @@ def test_member_success_limit_reserves_concurrently_and_returns_failures(
 ):
     """예약·거절·반환의 경계가 «그 회원의 한도»를 따라간다.
 
-    원래 이 시험은 3을 리터럴로 단정했다. 한도가 회원마다 달라졌으므로(G-S5,
-    결정 D-G4 (a)) 그 단정을 파라미터로 옮긴다. 첫 줄 ``(None, 3)``이 옛 계약을
+    원래 이 시험은 3을 리터럴로 단정했다. 한도가 회원마다 달라졌으므로
+    그 단정을 파라미터로 옮긴다. 첫 줄 ``(None, 3)``이 옛 계약을
     그대로 지킨다 — 한도를 한 번도 안 정한 친구는 여전히 하루 3건이다.
     """
     target = tmp_path / "dashboard.db"
