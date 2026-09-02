@@ -29,9 +29,6 @@ TABLE_CACHE_ENTRIES: Final[str] = "report_delivery_cache_entries"
 TABLE_CACHE_INVALIDATIONS: Final[str] = "report_delivery_cache_invalidations"
 TABLE_DELIVERY_INTENTS: Final[str] = "report_delivery_intents"
 _TABLE_ARTIFACTS: Final[str] = "report_delivery_artifacts"
-#: authority.py의 TABLE_RELEASE_AUTHORITIES와 같은 값. 순환 import를 피해
-#: 문자열만 복사한다(_TABLE_ARTIFACTS와 같은 기존 관행).
-_TABLE_RELEASE_AUTHORITIES: Final[str] = "report_delivery_release_authorities"
 _CACHE_PREFLIGHT_INDEX: Final[str] = "uq_report_delivery_cache_bucket_preflight"
 _OBSOLETE_CACHE_PREFLIGHT_INDEX: Final[str] = "uq_report_delivery_cache_preflight"
 
@@ -165,7 +162,14 @@ _SCHEMA: Final[tuple[str, ...]] = (
                                  REFERENCES {TABLE_CACHE_NAMESPACES}(namespace_id),
         content_generated_at     TEXT NOT NULL,
         actual_models_json       TEXT NOT NULL,
-        engine_epoch_digest      TEXT NOT NULL DEFAULT ''
+        engine_epoch_digest      TEXT NOT NULL DEFAULT '',
+        -- ReleaseAuthority.save_release_authority가 발급 직후 정확히 한 번
+        -- 0->1로만 뒤집는다(authority.py 소유). 이후 이 표 자체의 트리거가
+        -- 모든 UPDATE를 막는다 -- 다른 표를 참조하지 않는 자기완결 결속이라
+        -- authority.py·artifact.py가 아직 부팅되지 않은 단독 시험·부분
+        -- 마이그레이션에서도 안전하다.
+        release_locked            INTEGER NOT NULL DEFAULT 0
+                                 CHECK(release_locked IN (0, 1))
     )
     """,
     f"""
@@ -181,7 +185,9 @@ _SCHEMA: Final[tuple[str, ...]] = (
         billing_bucket_id        TEXT NOT NULL,
         delivered_at             TEXT NOT NULL,
         expires_at               TEXT NOT NULL,
-        cache_origin_content_id  TEXT NOT NULL
+        cache_origin_content_id  TEXT NOT NULL,
+        release_locked            INTEGER NOT NULL DEFAULT 0
+                                 CHECK(release_locked IN (0, 1))
     )
     """,
     f"""
@@ -221,13 +227,19 @@ _SCHEMA: Final[tuple[str, ...]] = (
     # 발급된 뒤에는 그 raw SQL 우회조차 막는다. authority가 아직 없는 행은
     # 기존 손상 재현 시험(test_delivery_store.py)이 그대로 UPDATE할 수
     # 있게 둔다 — 이 트리거는 발급 "뒤"에만 적용된다.
+    #
+    # ★ 다른 표를 참조하지 않는다(자기 컬럼 release_locked만 본다). 처음에는
+    #   report_delivery_release_authorities를 EXISTS로 조회하는 트리거를
+    #   시도했는데, SQLite는 ALTER TABLE RENAME 때 스키마 전체 트리거
+    #   본문이 가리키는 표 이름을 다시 검증한다 — authority.py가 아직
+    #   부팅되지 않은 단독 호출(예: 이 표만 쓰는 시험, 부분 마이그레이션)에서
+    #   이 표들과 무관한 RENAME(_rebuild_bucket_scoped_cache_table)까지
+    #   "no such table"로 죽는 걸 실측으로 확인했다. 자기완결 컬럼이면 이
+    #   문제 자체가 생기지 않는다.
     f"""
     CREATE TRIGGER IF NOT EXISTS report_delivery_content_snapshots_no_mutation_after_release
     BEFORE UPDATE ON {TABLE_CONTENT_SNAPSHOTS}
-    WHEN EXISTS (
-        SELECT 1 FROM {_TABLE_RELEASE_AUTHORITIES}
-        WHERE content_snapshot_id = OLD.content_id
-    )
+    WHEN OLD.release_locked = 1
     BEGIN
         SELECT RAISE(ABORT, 'content snapshot is bound to an issued release authority');
     END
@@ -235,10 +247,7 @@ _SCHEMA: Final[tuple[str, ...]] = (
     f"""
     CREATE TRIGGER IF NOT EXISTS report_delivery_deliveries_no_mutation_after_release
     BEFORE UPDATE ON {TABLE_DELIVERIES}
-    WHEN EXISTS (
-        SELECT 1 FROM {_TABLE_RELEASE_AUTHORITIES}
-        WHERE delivery_id = OLD.delivery_id
-    )
+    WHEN OLD.release_locked = 1
     BEGIN
         SELECT RAISE(ABORT, 'delivery is bound to an issued release authority');
     END
@@ -333,22 +342,6 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     bucket 없는 옛 행은 감사 원장에 격리하고 캐시 hit으로 인정하지 않는다.
     """
 
-    # 아래 트리거(...no_mutation_after_release)와 authority.py 자신의
-    # 결속 트리거가 참조하는 report_delivery_artifacts·
-    # report_delivery_delivery_artifacts·report_delivery_release_authorities
-    # 표를 이 표들보다, 특히 아래 _rebuild_bucket_scoped_cache_table의
-    # ALTER TABLE RENAME보다 먼저 만든다. SQLite는 RENAME 때 스키마 전체의
-    # 트리거 본문이 가리키는 표 이름을 다시 검증하므로, 이 시점에 다른
-    # 모듈의 표가 하나라도 없으면 이 표들과 무관한 RENAME까지 실패한다
-    # (실측: report_release_authorities_valid_binding이 artifact.py의
-    # delivery_artifacts를 아직 못 찾아 "ALTER TABLE ... RENAME" 자체가
-    # OperationalError로 죽었다). artifact.ensure_schema가 내부에서
-    # authority.ensure_schema까지 함께 부르므로 한 번만 호출한다.
-    # authority.py가 store.py를 모듈 최상단에서 import하므로 여기서는
-    # 함수 안에서 지연 import해 순환을 피한다.
-    from src.features.report_delivery import artifact as artifact_store  # noqa: PLC0415
-
-    artifact_store.ensure_schema(conn)
     for statement in _SCHEMA:
         conn.execute(statement)
     content_columns = {
@@ -361,6 +354,22 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             f"ALTER TABLE {TABLE_CONTENT_SNAPSHOTS} "
             "ADD COLUMN engine_epoch_digest TEXT NOT NULL DEFAULT ''"
+        )
+    if "release_locked" not in content_columns:
+        conn.execute(
+            f"ALTER TABLE {TABLE_CONTENT_SNAPSHOTS} "
+            "ADD COLUMN release_locked INTEGER NOT NULL DEFAULT 0"
+        )
+    delivery_columns = {
+        str(row[1])
+        for row in conn.execute(
+            f'PRAGMA table_info("{TABLE_DELIVERIES}")'
+        ).fetchall()
+    }
+    if "release_locked" not in delivery_columns:
+        conn.execute(
+            f"ALTER TABLE {TABLE_DELIVERIES} "
+            "ADD COLUMN release_locked INTEGER NOT NULL DEFAULT 0"
         )
     expected_pk = (
         "billing_bucket_id",

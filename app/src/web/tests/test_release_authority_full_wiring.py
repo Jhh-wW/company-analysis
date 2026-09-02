@@ -35,11 +35,16 @@ from src.features.composer.port import (
 )
 from src.features.pipeline.port import Report
 from src.features.report_delivery import authority as authority_store
+from src.features.report_delivery.cache_identity import CacheNamespace
 from src.features.storage import db as storage_db
 from src.shared import engine_build_identity as build_identity_contract
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_evidence.constants import ReleaseMode
 from src.shared.report_quality.source_identity import document_identity_from_parts
+from src.shared.report_source_identity import (
+    ReportSourceIdentity,
+    financial_payload_digest,
+)
 from src.web import report_delivery_adapter
 from src.web.routers import reports as reports_router
 
@@ -361,3 +366,92 @@ def test_COMPLETE_재시도는_저장된_ReleaseAuthority를_다시검증한다(
         )
     assert authority is not None
     assert authority.content_snapshot_id == first.content.content_id
+
+
+def test_FULL_재사용출고의_COMPLETE_재시도는_owner_authority가_없어도_성공한다(
+    monkeypatch, tmp_path: Path
+):
+    """single-flight waiter/캐시 재사용 delivery는 자기 자신의 authority가
+    없다(owner만 발급한다, 이번 커밋의 명시적 스코프). 그 재사용 delivery의
+    COMPLETE 재시도가 "저장된 출고 권위가 없다"며 깨지면 안 된다 — 이건
+    owner 완료 재시도(위 시험)와는 다른 시나리오다."""
+
+    frozen = _frozen_identity()
+    report = _build_full_report(build_identity_sha256=frozen.epoch_digest)
+    owner_report_id = uuid.uuid4().hex
+    waiter_report_id = uuid.uuid4().hex
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "art"))
+    # 재사용 경로(persist_reused_delivery)는 owner·waiter가 같은 DART 출처와
+    # 같은 정식 캐시 namespace/preflight 지문을 대야 한다(cache_key 재사용
+    # 경로) — 이 시험의 목적(authority 없는 재시도)과는 무관한 별도
+    # 검증이라 test_일반캐시_hit은...(test_report_delivery_integration.py)와
+    # 같은 방식으로 owner·waiter 양쪽에 같은 값을 그대로 맞춘다.
+    receipt = "20260828000123"
+    finance_digest = financial_payload_digest(
+        {"status": "000", "list": [{"account_nm": "매출액", "thstrm_amount": "100"}]}
+    )
+    revision, image = report_delivery_adapter._release_identity(frozen)
+    namespace = CacheNamespace.create(
+        product="company-analysis",
+        schema_version=report.schema_version or "legacy-report-schema",
+        deployment_revision=revision,
+        image_digest=image,
+        requested_models={"pipeline": "deterministic-full-wiring"},
+        output_settings={"temperature": 0},
+    )
+    preflight_digest = ReportSourceIdentity(
+        dart_receipt_numbers=(receipt,),
+        financial_payload_digest=finance_digest,
+    ).cache_digest
+
+    owner = reports_router.finalize_new_report_delivery(
+        report_id=owner_report_id,
+        corp_id=_COMPANY_ID,
+        billing_bucket_id="release-wiring-owner-bucket",
+        report=report,
+        actual_models=("deterministic-full-wiring",),
+        reused_from_cache=False,
+        engine_build_identity=frozen,
+        dart_receipt_numbers=(receipt,),
+        financial_payload_digest=finance_digest,
+        cache_namespace=namespace,
+        preflight_identity_digest=preflight_digest,
+        cache_eligible=True,
+    )
+    assert owner.artifact is not None
+
+    reuse_kwargs = dict(
+        report_id=waiter_report_id,
+        corp_id=_COMPANY_ID,
+        billing_bucket_id="release-wiring-owner-bucket",
+        report=report,
+        actual_models=("deterministic-full-wiring",),
+        reused_from_cache=True,
+        reuse_content_snapshot_id=owner.content.content_id,
+        reuse_artifact_id=owner.artifact.artifact_id,
+        engine_build_identity=frozen,
+        dart_receipt_numbers=(receipt,),
+        financial_payload_digest=finance_digest,
+        cache_namespace=namespace,
+        preflight_identity_digest=preflight_digest,
+        cache_eligible=True,
+    )
+    first_waiter = reports_router.finalize_new_report_delivery(**reuse_kwargs)
+    assert first_waiter.content.content_id == owner.content.content_id
+
+    # 응답만 잃은 재시도 — 같은 waiter report_id로 다시 부른다.
+    second_waiter = reports_router.finalize_new_report_delivery(**reuse_kwargs)
+
+    assert second_waiter.content.content_id == owner.content.content_id
+    with storage_db.connect_readonly_existing() as conn:
+        assert conn is not None
+        waiter_authority = authority_store.load_release_authority_by_public_id(
+            conn, waiter_report_id
+        )
+        owner_authority = authority_store.load_release_authority_by_public_id(
+            conn, owner_report_id
+        )
+    # 명시적 스코프: owner만 authority를 갖는다. waiter는 아직 없다(따라온
+    # 다음 커밋 몫) — 그렇더라도 재시도 자체는 깨지지 않아야 한다.
+    assert waiter_authority is None
+    assert owner_authority is not None

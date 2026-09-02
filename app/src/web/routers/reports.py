@@ -1363,10 +1363,13 @@ def finalize_new_report_delivery(
                         raise report_delivery_adapter.DeliveryAdapterError(
                             "완료 delivery와 재시도의 정식 캐시 신원이 다릅니다"
                         )
-            if release_evidence is not None:
+            if release_evidence is not None and not existing.delivery.cache_origin_content_id:
                 # COMPLETE 재시도도 cache_key 유무와 무관하게 회사·세대·
                 # content·artifact 결속을 다시 검사한다 — 응답만 잃은
                 # 재시도가 훼손된 결속을 그냥 통과시키지 않는다(P1-2).
+                # cache_origin_content_id가 있는(=재사용) delivery는 대상이
+                # 아니다 — REUSE 권위 발급은 이번 스코프 밖이라(owner만
+                # 발급한다) 재사용 delivery는 애초에 자기 authority가 없다.
                 with storage_db.connect_readonly_existing() as conn:
                     if conn is None:
                         raise report_delivery_adapter.DeliveryAdapterError(
