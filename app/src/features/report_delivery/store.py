@@ -29,6 +29,9 @@ TABLE_CACHE_ENTRIES: Final[str] = "report_delivery_cache_entries"
 TABLE_CACHE_INVALIDATIONS: Final[str] = "report_delivery_cache_invalidations"
 TABLE_DELIVERY_INTENTS: Final[str] = "report_delivery_intents"
 _TABLE_ARTIFACTS: Final[str] = "report_delivery_artifacts"
+#: authority.py의 TABLE_RELEASE_AUTHORITIES와 같은 값. 순환 import를 피해
+#: 문자열만 복사한다(_TABLE_ARTIFACTS와 같은 기존 관행).
+_TABLE_RELEASE_AUTHORITIES: Final[str] = "report_delivery_release_authorities"
 _CACHE_PREFLIGHT_INDEX: Final[str] = "uq_report_delivery_cache_bucket_preflight"
 _OBSOLETE_CACHE_PREFLIGHT_INDEX: Final[str] = "uq_report_delivery_cache_preflight"
 
@@ -212,6 +215,34 @@ _SCHEMA: Final[tuple[str, ...]] = (
         invalidated_at            TEXT NOT NULL
     )
     """,
+    # 두 표 모두 완전히 content-addressed다(각 PK는 나머지 모든 컬럼의
+    # canonical hash). 정상 코드는 이 표들을 UPDATE하지 않으며(같은 표의
+    # 손상 재현 시험만 raw SQL로 직접 UPDATE한다), ReleaseAuthority가
+    # 발급된 뒤에는 그 raw SQL 우회조차 막는다. authority가 아직 없는 행은
+    # 기존 손상 재현 시험(test_delivery_store.py)이 그대로 UPDATE할 수
+    # 있게 둔다 — 이 트리거는 발급 "뒤"에만 적용된다.
+    f"""
+    CREATE TRIGGER IF NOT EXISTS report_delivery_content_snapshots_no_mutation_after_release
+    BEFORE UPDATE ON {TABLE_CONTENT_SNAPSHOTS}
+    WHEN EXISTS (
+        SELECT 1 FROM {_TABLE_RELEASE_AUTHORITIES}
+        WHERE content_snapshot_id = OLD.content_id
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'content snapshot is bound to an issued release authority');
+    END
+    """,
+    f"""
+    CREATE TRIGGER IF NOT EXISTS report_delivery_deliveries_no_mutation_after_release
+    BEFORE UPDATE ON {TABLE_DELIVERIES}
+    WHEN EXISTS (
+        SELECT 1 FROM {_TABLE_RELEASE_AUTHORITIES}
+        WHERE delivery_id = OLD.delivery_id
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'delivery is bound to an issued release authority');
+    END
+    """,
 )
 
 
@@ -302,6 +333,22 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     bucket 없는 옛 행은 감사 원장에 격리하고 캐시 hit으로 인정하지 않는다.
     """
 
+    # 아래 트리거(...no_mutation_after_release)와 authority.py 자신의
+    # 결속 트리거가 참조하는 report_delivery_artifacts·
+    # report_delivery_delivery_artifacts·report_delivery_release_authorities
+    # 표를 이 표들보다, 특히 아래 _rebuild_bucket_scoped_cache_table의
+    # ALTER TABLE RENAME보다 먼저 만든다. SQLite는 RENAME 때 스키마 전체의
+    # 트리거 본문이 가리키는 표 이름을 다시 검증하므로, 이 시점에 다른
+    # 모듈의 표가 하나라도 없으면 이 표들과 무관한 RENAME까지 실패한다
+    # (실측: report_release_authorities_valid_binding이 artifact.py의
+    # delivery_artifacts를 아직 못 찾아 "ALTER TABLE ... RENAME" 자체가
+    # OperationalError로 죽었다). artifact.ensure_schema가 내부에서
+    # authority.ensure_schema까지 함께 부르므로 한 번만 호출한다.
+    # authority.py가 store.py를 모듈 최상단에서 import하므로 여기서는
+    # 함수 안에서 지연 import해 순환을 피한다.
+    from src.features.report_delivery import artifact as artifact_store  # noqa: PLC0415
+
+    artifact_store.ensure_schema(conn)
     for statement in _SCHEMA:
         conn.execute(statement)
     content_columns = {

@@ -35,6 +35,9 @@ TABLE_ARTIFACTS: Final[str] = "report_delivery_artifacts"
 TABLE_DELIVERY_ARTIFACTS: Final[str] = "report_delivery_delivery_artifacts"
 TABLE_BLOB_INTENTS: Final[str] = "artifact_blob_intents"
 TABLE_BLOB_INTENT_EVENTS: Final[str] = "artifact_blob_intent_events"
+#: authority.py의 TABLE_RELEASE_AUTHORITIES와 같은 값. 순환 import를 피해
+#: 문자열만 복사한다(store.py의 같은 관행과 동일).
+_TABLE_RELEASE_AUTHORITIES: Final[str] = "report_delivery_release_authorities"
 
 # 배포 교체 중 이전 프로세스의 쓰기가 아직 끝나지 않았을 수 있다.
 # 시작 정리는 오래된 intent만 다루고, 새 intent는 살아 있는 writer로 보존한다.
@@ -674,6 +677,22 @@ _ARTIFACT_SCHEMA: Final[tuple[str, ...]] = (
         PRIMARY KEY (delivery_id, channel)
     )
     """,
+    # artifact 메타데이터도 완전히 content-addressed다(artifact_id는
+    # bytes_sha256·blob_key 등 나머지 컬럼의 canonical hash). 정상 코드는
+    # 이 표를 UPDATE하지 않으며, ReleaseAuthority가 발급된 뒤에는 raw SQL
+    # 우회도 막는다. authority가 아직 없는 행은 손상 재현 시험이 그대로
+    # UPDATE할 수 있게 둔다 — store.py의 같은 계약과 동일한 경계다.
+    f"""
+    CREATE TRIGGER IF NOT EXISTS report_delivery_artifacts_no_mutation_after_release
+    BEFORE UPDATE ON {TABLE_ARTIFACTS}
+    WHEN EXISTS (
+        SELECT 1 FROM {_TABLE_RELEASE_AUTHORITIES}
+        WHERE artifact_id = OLD.artifact_id
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'artifact metadata is bound to an issued release authority');
+    END
+    """,
     f"""
     CREATE TABLE IF NOT EXISTS {TABLE_BLOB_INTENTS} (
         intent_id          TEXT PRIMARY KEY,
@@ -791,8 +810,17 @@ _ARTIFACT_SCHEMA: Final[tuple[str, ...]] = (
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    """영속 schema registry가 이 모듈 소유 표만 준비하는 진입점."""
+    """영속 schema registry가 이 모듈 소유 표만 준비하는 진입점.
 
+    이 모듈의 no_mutation_after_release 트리거가 참조하는
+    report_delivery_release_authorities 표를 먼저 만든다. authority.py가
+    이 모듈을 최상단에서 import하므로 여기서는 함수 안에서 지연
+    import해 순환을 피한다(store.ensure_schema와 같은 관행).
+    """
+
+    from src.features.report_delivery import authority as authority_store  # noqa: PLC0415
+
+    authority_store.ensure_schema(conn)
     for statement in _ARTIFACT_SCHEMA:
         conn.execute(statement)
 
