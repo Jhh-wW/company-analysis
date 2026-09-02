@@ -31,11 +31,14 @@ cd app
 
 ```powershell
 $env:TLDEXTRACT_CACHE = "$PWD\.cache\tldextract"
-.\.venv\Scripts\python -m pytest app/src app/tools/tests -q -m "not local_integration"
-.\.venv\Scripts\python -m pytest analysis_engine/src -q
-.\.venv\Scripts\python -m pytest deploy/tests -q
-.\.venv\Scripts\python -m pytest ops -q
+python -m pytest app/src app/tools/tests -q -m "not local_integration" --basetemp .pytest_tmp_ci_app
+python -m pytest analysis_engine/src -q --basetemp .pytest_tmp_ci_engine
+python -m pytest deploy/tests -q --basetemp .pytest_tmp_ci_deploy
+python -m pytest ops -q --basetemp .pytest_tmp_ci_ops
 ```
+
+`python`은 저장소 루트 가상환경의 것이어야 한다. 활성화하지 않았으면 네 줄의 `python`을
+`.\.venv\Scripts\python`으로 바꿔 쓴다.
 
 로컬 데모는 외부 유료 API를 호출하지 않는다. 실제 조사 모드는 사용자 승인과 별도
 비밀 설정 없이 실행하지 않는다. `.env`, DB, 로그, 다운로드 원문과 검수 산출물을
