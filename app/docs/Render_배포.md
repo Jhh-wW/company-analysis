@@ -29,9 +29,9 @@
 Blueprint 파일 경로뿐이고 연결 저장소를 바꾸는 항목이 없다. 새 저장소로 Blueprint를
 새로 만들면 기존 서비스를 넘겨받지 않고 이름에 접미사가 붙은 **복제 서비스**가 생긴다.
 
-→ 이 서비스는 Blueprint에서 **Manual Sync / Deploy Blueprint**를 실행하지 않는다.
-환경변수는 서비스의 **Environment 탭에서 직접 편집**한다. Sync가 돌지 않으므로
-대시보드에서 고친 값이 Blueprint 파일 값에 덮여 쓰이지 않는다.
+→ **Blueprint Manual Sync / Deploy Blueprint를 실행하지 않는다.** 환경변수는 서비스의
+**Environment 탭에서 직접 편집**한다. Sync가 돌지 않으므로 대시보드에서 고친 값이
+Blueprint 파일 값에 덮여 쓰이지 않는다.
 
 `render.yaml`은 Blueprint가 되살아났을 때 어긋나지 않도록 대시보드와 **같은 값**으로
 유지한다. 배포 계약 시험(`deploy/tests/test_deployment_contract.py`)이 이 파일을 직접 읽어
@@ -51,7 +51,7 @@ DART 문서로 검증된 적이 없어 이번 출시에서는 켜지 않는다. 
 ### 순서 (①과 ②를 바꾸지 않는다)
 
 1. **Manual Deploy로 새 커밋을 먼저 올린다.** 이 시점의 환경변수는 아직 `SHADOW`다.
-2. `/healthz`의 `commit` 값이 방금 올린 SHA인지 확인한다.
+2. `/healthz` 응답의 commit 값이 방금 올린 SHA인지 확인한다.
 3. **그 다음에** Environment 탭에서 위 두 값을 편집한다. 저장하면 서비스가 재시작한다.
 4. `/healthz`·`/readyz`를 다시 확인하고, 초대 링크를 하나 발급해 주소·QR 흐름을 눈으로 본다.
 

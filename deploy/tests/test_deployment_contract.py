@@ -520,16 +520,51 @@ def test_render_shutdown_window_covers_serial_uvicorn_and_app_shutdown() -> None
         REPOSITORY_ROOT / "app" / "docs" / "Render_배포.md"
     ).read_text(encoding="utf-8")
     normalized_render_guide = " ".join(render_guide.split())
+    # ★ 2026-09-03 절차 변경 — 이 서비스의 Blueprint 는 지금 저장소를 가리키지 않아
+    #   Manual Sync 가 «실패한다». Blueprint Settings 에는 연결 저장소를 바꾸는 항목이
+    #   없고, 새 Blueprint 를 만들면 기존 서비스를 넘겨받지 않고 접미사 붙은 복제
+    #   서비스가 생긴다. 그래서 안내서는 Sync 를 «누르지 말라»고 해야 하고,
+    #   환경변수는 서비스 Environment 탭에서 직접 고친다.
     assert (
-        "Blueprint에서 **Manual Sync / Deploy Blueprint**"
+        "Blueprint Manual Sync / Deploy Blueprint를 실행하지 않는다"
         in normalized_render_guide
-    )
+    ), "Blueprint Sync 는 실패하므로 안내서가 누르지 말라고 해야 한다"
+    assert "Environment 탭에서 직접 편집" in normalized_render_guide
+    assert "출시 릴리스에서 바꾸는 값 두 개" in normalized_render_guide
+    # 옛 지시(Blueprint 에서 Sync 를 실행하라)가 되살아나면 배포가 다시 막힌다.
+    assert "Deploy Blueprint**를 실행한다" not in normalized_render_guide
+    assert "Deploy Blueprint**를 한 번 실행한다" not in normalized_render_guide
+    # ★ ①②의 «순서»가 계약이다. 값을 먼저 FULL 로 올리면 «옛 코드»가 FULL 로 돌면서
+    #   연습 모드에서 만든 캐시를 재사용할 수 있다. 문장이 있는지가 아니라
+    #   «어느 것이 먼저 나오는지»를 본다.
+    for 순서_문장 in (
+        "Manual Deploy로 새 커밋을 먼저 올린다",
+        "응답의 commit 값이 방금 올린 SHA인지 확인한다",
+        "Environment 탭에서 위 두 값을 편집한다",
+    ):
+        assert 순서_문장 in normalized_render_guide, (
+            f"출시 순서 문장이 안내서에서 사라졌다: {순서_문장}"
+        )
+    assert (
+        normalized_render_guide.index("Manual Deploy로 새 커밋을 먼저 올린다")
+        < normalized_render_guide.index("응답의 commit 값이 방금 올린 SHA인지 확인한다")
+        < normalized_render_guide.index("Environment 탭에서 위 두 값을 편집한다")
+    ), "Manual Deploy → /healthz 확인 → Environment 탭 편집 순서를 지켜야 한다"
 
-    historical_directive = (
-        REPOSITORY_ROOT / "app" / "docs" / "출시전_수정_지시서.md"
-    ).read_text(encoding="utf-8")
-    # ★ 2026-08-28 의 「정정」은 «틀렸다». Render 가 2026-08-29 에 실측으로 뒤집었다.
-    assert "종료 계약 재정정(2026-08-29)" in historical_directive
+    # ★ 종료 유예가 «왜» 30초인지는 옛 안내 문서가 아니라 배포값이 정본이다
+    #   (2026-09-03, 작업 메모 성격의 문서를 지우면서 옮겼다).
+    #   디스크가 붙어 있는 것이 maxShutdownDelaySeconds 를 못 쓰는 «이유»이고,
+    #   그 결과가 플랫폼 기본 30초다. 둘이 같이 있어야 위 단정이 뜻을 갖는다.
+    assert web_service["disk"]["mountPath"] == "/var/data", (
+        "디스크를 떼면 maxShutdownDelaySeconds 금지 이유가 사라진다 — 함께 재검토하라"
+    )
+    assert RENDER_DEFAULT_SHUTDOWN_SECONDS == 30, (
+        "플랫폼 기본값을 바꿔 이 시험을 통과시키지 마라"
+    )
+    blueprint_text = (REPOSITORY_ROOT / "render.yaml").read_text(encoding="utf-8")
+    assert "종료 유예는 Render 기본값(30초)이다" in blueprint_text, (
+        "배포자가 읽는 경고를 render.yaml 에서 지우지 마라"
+    )
 
 
 def test_render_reserves_only_half_the_persistent_disk_for_immutable_pdf_artifacts() -> None:
