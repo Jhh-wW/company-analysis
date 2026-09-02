@@ -128,6 +128,28 @@ from src.features.report_standard.public_projection import build_public_projecti
 logger = logging.getLogger(__name__)
 
 
+def _section_block_sha256s(rendered: Report) -> tuple[tuple[str, str], ...]:
+    """이 회차 렌더 결과의 장별 공개 봉인 블록 지문(정본 아홉 장 순서).
+
+    ★ 왜 영수증에 이 값을 싣나(S3c) — 보충 결속 검사가 쓰던
+      ``public_structure_seal.section_sha256s``는 pre-render 공개 content
+      봉인(지문 A)에서 오고 지문 A는 «보이는 것»만 덮는다. 그래서 보충 회차가
+      비대상 장의 글자는 그대로 두고 FactRecord나 등급 기여만 바꾸면 그 검사를
+      통과했다. ``block_sha256``은 display와 감사 장부를 함께 덮어 그 구멍을
+      닫는다.
+
+    ★ 여기서 만드는 projection은 «지문 계산용»이고 보고서에 싣지 않는다.
+      보고서에 실리는 봉인은 최종 등급까지 확정된 뒤 한 번만 만든다 — header가
+      달라도 장 블록은 같은 값이라 두 값이 어긋나지 않는다(그 동치는
+      ``test_영수증의_장별_블록_지문은_저장된_봉인과_같다``가 지킨다).
+    """
+
+    projection = build_public_projection(rendered)
+    return tuple(
+        (block.display.cell, block.block_sha256) for block in projection.sections
+    )
+
+
 @dataclass(frozen=True)
 class V2RunOutput:
     """run_v2의 결과 묶음 — 보고서 + 관측 지표용 문장 수."""
@@ -922,8 +944,13 @@ def run_v2(
         release_mode=("" if release_mode is ReleaseMode.SHADOW else release_mode.value),
         **seal_render_kwargs,
     )
+    primary_block_sha256s: tuple[tuple[str, str], ...] = ()
     if public_structure_seal is not None:
         assert_report_matches_public_structure(rendered, public_structure_seal)
+        # ★ 영수증 try 블록 «밖»에서 계산한다 — 안에서 하면 봉인 실패가
+        #   `except (TypeError, ValueError)`에 걸려 「영수증이 잘못됐다」는
+        #   엉뚱한 사유로 바뀐다. 봉인 실패는 봉인 실패로 드러나야 한다(I3).
+        primary_block_sha256s = _section_block_sha256s(rendered)
 
     # ⑤-a 품질·공개 안전 shadow 판정 — 생성 시점에만 한 번 실행한다.
     # past_changes의 프로그램 생성 누적 증감률은 원자 fact_id·claim slot·원문
@@ -973,6 +1000,7 @@ def run_v2(
                 ),
                 section_sha256s=public_structure_seal.section_sha256s,
                 evidence_packet_sha256s=prepared_evidence.packet_sha256s,
+                section_block_sha256s=primary_block_sha256s,
             )
             recovery_decision = decide_post_validation(primary_receipt)
         except (TypeError, ValueError) as error:
@@ -1157,6 +1185,8 @@ def run_v2(
                 rendered,
                 public_structure_seal,
             )
+            # 기본 경로와 같은 이유로 영수증 try 밖에서 계산한다.
+            supplement_block_sha256s = _section_block_sha256s(rendered)
             quality_candidate = build_generation_quality_candidate(
                 rendered,
                 final,
@@ -1186,6 +1216,7 @@ def run_v2(
                     evidence_packet_sha256s=prepared_evidence.packet_sha256s,
                     base_receipt_sha256=primary_receipt.receipt_sha256,
                     supplemented_section_ids=targets,
+                    section_block_sha256s=supplement_block_sha256s,
                 )
                 recovery_decision = decide_post_validation(
                     primary_receipt,

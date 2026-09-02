@@ -124,6 +124,9 @@ def _primary(
         reviewer_calls=1,
         section_sha256s=_section_sha256s("primary-section"),
         evidence_packet_sha256s=_section_sha256s("evidence-packet"),
+        # 장별 봉인 블록 지문(S3c) — 보충 결속이 장부까지 비교하므로 정상
+        # 영수증에는 언제나 들어 있다.
+        section_block_sha256s=_section_sha256s("primary-block"),
     )
 
 
@@ -138,6 +141,7 @@ def _supplement(
     section_ids: tuple[str, ...] | None = None,
     section_sha256s: tuple[tuple[str, str], ...] | None = None,
     evidence_packet_sha256s: tuple[tuple[str, str], ...] | None = None,
+    section_block_sha256s: tuple[tuple[str, str], ...] | None = None,
 ) -> GenerationValidationReceipt:
     completed = section_ids or authorization.section_ids
     if section_sha256s is None:
@@ -146,6 +150,14 @@ def _supplement(
             result_sections[section_id] = _sha256(f"supplement:{section_id}")
         section_sha256s = tuple(
             (section_id, result_sections[section_id])
+            for section_id in REQUIRED_EVIDENCE_SECTION_IDS
+        )
+    if section_block_sha256s is None:
+        result_blocks = dict(primary.section_block_sha256s)
+        for section_id in completed:
+            result_blocks[section_id] = _sha256(f"supplement-block:{section_id}")
+        section_block_sha256s = tuple(
+            (section_id, result_blocks[section_id])
             for section_id in REQUIRED_EVIDENCE_SECTION_IDS
         )
     return GenerationValidationReceipt(
@@ -161,6 +173,7 @@ def _supplement(
         ),
         base_receipt_sha256=(base_receipt_sha256 or primary.receipt_sha256),
         supplemented_section_ids=completed,
+        section_block_sha256s=section_block_sha256s,
     )
 
 

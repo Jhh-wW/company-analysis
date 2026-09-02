@@ -127,6 +127,13 @@ class GenerationValidationReceipt:
     evidence_packet_sha256s: tuple[tuple[str, str], ...]
     base_receipt_sha256: str = ""
     supplemented_section_ids: tuple[str, ...] = ()
+    #: 장별 공개 봉인 블록 지문(``PublicSectionContentBlock.block_sha256``).
+    #: ``section_sha256s``와 «다른 것»이다 — 저건 pre-render 공개 content
+    #: 봉인(지문 A)에서 와 «보이는 것»만 덮고, 이건 display와 감사 장부를 함께
+    #: 덮는다. 보충 회차가 승인하지 않은 장의 FactRecord·등급 기여를 조용히
+    #: 바꾸는 표류는 이 값으로만 잡힌다(``report_recovery`` 결속 검사).
+    #: 빈 값은 이 필드가 생기기 전 영수증이며, 보충 결속은 빈 값을 거부한다.
+    section_block_sha256s: tuple[tuple[str, str], ...] = ()
     assessment_sha256: str = field(init=False)
     receipt_sha256: str = field(init=False)
 
@@ -204,6 +211,13 @@ class GenerationValidationReceipt:
             self.evidence_packet_sha256s,
             label="근거 꾸러미 지문",
         )
+        if self.section_block_sha256s == ():
+            section_block_sha256s: tuple[tuple[str, str], ...] = ()
+        else:
+            section_block_sha256s = _section_sha256s(
+                self.section_block_sha256s,
+                label="장별 봉인 블록 지문",
+            )
         if type(self.supplemented_section_ids) is not tuple or any(
             type(item) is not str
             or item != item.strip()
@@ -238,7 +252,10 @@ class GenerationValidationReceipt:
         )
         receipt_sha256 = canonical_sha256(
             {
-                "version": 1,
+                # v2 — section_block_sha256s가 지문 입력에 들어갔다. 이 값이
+                # 지문 밖에 있으면 장부 지문만 바꿔치기해도 영수증 사슬이
+                # 그대로라 보충 결속 검사를 우회할 수 있다.
+                "version": 2,
                 "company_id": company_id,
                 "candidate_sha256": candidate_sha256,
                 "assessment_sha256": assessment_sha256,
@@ -251,6 +268,9 @@ class GenerationValidationReceipt:
                 ],
                 "base_receipt_sha256": base_receipt_sha256,
                 "supplemented_section_ids": list(section_ids),
+                "section_block_sha256s": [
+                    list(item) for item in section_block_sha256s
+                ],
             }
         )
         object.__setattr__(self, "company_id", company_id)
@@ -263,6 +283,9 @@ class GenerationValidationReceipt:
         )
         object.__setattr__(self, "base_receipt_sha256", base_receipt_sha256)
         object.__setattr__(self, "supplemented_section_ids", section_ids)
+        object.__setattr__(
+            self, "section_block_sha256s", section_block_sha256s
+        )
         object.__setattr__(self, "assessment_sha256", assessment_sha256)
         object.__setattr__(self, "receipt_sha256", receipt_sha256)
 
@@ -315,6 +338,7 @@ _RECEIPT_WIRE_KEYS = frozenset(
         "evidence_packet_sha256s",
         "base_receipt_sha256",
         "supplemented_section_ids",
+        "section_block_sha256s",
         "assessment_sha256",
         "receipt_sha256",
     }
@@ -491,7 +515,7 @@ def receipt_to_dict(value: GenerationValidationReceipt) -> dict[str, Any]:
     if type(value) is not GenerationValidationReceipt:
         raise TypeError("정확한 GenerationValidationReceipt가 필요합니다")
     return {
-        "version": 1,
+        "version": 2,
         "company_id": value.company_id,
         "candidate_sha256": value.candidate_sha256,
         "assessment": generation_assessment_to_dict(value.assessment),
@@ -504,6 +528,9 @@ def receipt_to_dict(value: GenerationValidationReceipt) -> dict[str, Any]:
         ],
         "base_receipt_sha256": value.base_receipt_sha256,
         "supplemented_section_ids": list(value.supplemented_section_ids),
+        "section_block_sha256s": [
+            list(item) for item in value.section_block_sha256s
+        ],
         "assessment_sha256": value.assessment_sha256,
         "receipt_sha256": value.receipt_sha256,
     }
@@ -515,7 +542,7 @@ def receipt_from_dict(data: Mapping[str, Any]) -> GenerationValidationReceipt:
         keys=_RECEIPT_WIRE_KEYS,
         label="GenerationValidationReceipt",
     )
-    if type(raw["version"]) is not int or raw["version"] != 1:
+    if type(raw["version"]) is not int or raw["version"] != 2:
         raise ValueError("지원하지 않는 검증 영수증 wire 버전입니다")
     if type(raw["round"]) is not str:
         raise ValueError("검증 영수증 round는 닫힌 enum 문자열이어야 합니다")
@@ -541,6 +568,11 @@ def receipt_from_dict(data: Mapping[str, Any]) -> GenerationValidationReceipt:
         base_receipt_sha256=raw["base_receipt_sha256"],
         supplemented_section_ids=_wire_strings(
             raw["supplemented_section_ids"], label="보충 장"
+        ),
+        section_block_sha256s=_wire_pairs(
+            raw["section_block_sha256s"],
+            label="장별 봉인 블록 지문",
+            integer_value=False,
         ),
     )
     if (

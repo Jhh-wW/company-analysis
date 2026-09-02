@@ -430,3 +430,52 @@ def test_보충_비대상_장의_장부를_건드리면_block_digest가_빨개�
 
     assert forged_block.display_sha256 == victim.display_sha256
     assert forged_block.block_sha256 != victim.block_sha256
+
+
+# ══════════════════════════════════════════════════════════
+# ⑦ 영수증의 장별 블록 지문 (S3c)
+# ══════════════════════════════════════════════════════════
+
+
+def test_영수증의_장별_블록_지문은_저장된_봉인과_같다() -> None:
+    """지문 계산용 projection과 저장되는 봉인이 갈라지지 않았음을 못 박는다.
+
+    ★ 왜 갈라질 수 있나 — 영수증용 지문은 렌더 직후에, 저장되는 봉인은 등급을
+      완성으로 다시 봉인한 «뒤»에 만든다. 두 시점의 header는 다르지만 장
+      블록(display+ledger)은 같아야 한다. 이게 깨지면 영수증이 가리키는 장과
+      화면에 나가는 장이 다른 보고서가 된다.
+    """
+
+    output, _writer, _reviewer, _diagram = _run_full()
+
+    projection = output.report.public_projection
+    assert projection is not None
+    stored = tuple(
+        (block.display.cell, block.block_sha256) for block in projection.sections
+    )
+    evidence = output.generation_evidence
+    assert evidence is not None
+    for receipt in evidence.validation_receipts:
+        assert receipt.section_block_sha256s
+    assert evidence.validation_receipts[-1].section_block_sha256s == stored
+
+
+def test_보충_영수증의_블록_지문도_최종_봉인과_같다() -> None:
+    output, _writer, _reviewer = _run_recovering_full(("identity",))
+
+    projection = output.report.public_projection
+    assert projection is not None
+    stored = tuple(
+        (block.display.cell, block.block_sha256) for block in projection.sections
+    )
+    evidence = output.generation_evidence
+    assert evidence is not None
+    primary, supplement = evidence.validation_receipts
+    assert supplement.section_block_sha256s == stored
+    # 보충한 장만 달라지고 나머지는 그대로 — 생산 영수증에서도 같은 이야기다.
+    base = dict(primary.section_block_sha256s)
+    result = dict(supplement.section_block_sha256s)
+    assert base["identity"] != result["identity"]
+    assert {k: v for k, v in base.items() if k != "identity"} == {
+        k: v for k, v in result.items() if k != "identity"
+    }

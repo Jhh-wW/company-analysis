@@ -385,6 +385,29 @@ def _validate_supplement_binding(
             raise ValueError("승인된 보충 장의 내용 지문이 바뀌지 않았습니다")
         if section_id not in approved and changed:
             raise ValueError("승인하지 않은 장이 보충 중 바뀌었습니다")
+    # ★ 위 비교만으로는 부족하다(S3c, 2026-09-02). `section_sha256s`는
+    #   pre-render 공개 content 봉인(지문 A)에서 오고 지문 A는 «보이는 것»만
+    #   덮는다. 그래서 보충 회차가 비대상 장의 글자는 그대로 두고 FactRecord나
+    #   등급 기여만 바꾸면 여기를 그냥 통과했다. `section_block_sha256s`는
+    #   display와 감사 장부를 함께 덮으므로 그 표류를 같은 규칙으로 닫는다.
+    # ★ 빈 값을 «통과»로 두지 않는다 — 그러면 다음 변경이 이 필드를 안 채우는
+    #   순간 보호가 조용히 사라진다.
+    if not primary_receipt.section_block_sha256s or not (
+        supplement_receipt.section_block_sha256s
+    ):
+        raise ValueError("보충 결속에는 두 회차의 장별 봉인 블록 지문이 필요합니다")
+    base_blocks = dict(primary_receipt.section_block_sha256s)
+    result_blocks = dict(supplement_receipt.section_block_sha256s)
+    for section_id in REQUIRED_EVIDENCE_SECTION_IDS:
+        changed = base_blocks[section_id] != result_blocks[section_id]
+        if section_id in approved and not changed:
+            raise ValueError(
+                "승인된 보충 장의 봉인 블록 지문이 바뀌지 않았습니다"
+            )
+        if section_id not in approved and changed:
+            raise ValueError(
+                "승인하지 않은 장의 봉인 블록이 보충 중 바뀌었습니다"
+            )
     if (
         supplement_receipt.assessment.contract_version
         != primary_receipt.assessment.contract_version
