@@ -188,7 +188,8 @@ def test_접근_화면_합계는_회원별_한도의_합이다():
         runtime._PIPELINE = DemoPipeline()
         session = auth_logic.create_session("admin@example.com", True)
         client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
-        화면 = client.get("/admin/access")
+        # ★ 2026-09-02 G-S8 기대값 이전 — 합계 문장은 `/admin/costs`로 옮겨갔다.
+        화면 = client.get("/admin/costs")
 
     assert 화면.status_code == 200
     # 6,000 + 3,000 = 9,000원. 여기에 관리자 5,000원을 더해 14,000원.
@@ -211,11 +212,14 @@ def test_아무도_한도를_안_바꿨으면_접근_화면_문구가_그대로�
         runtime._PIPELINE = DemoPipeline()
         session = auth_logic.create_session("admin@example.com", True)
         client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
-        화면 = client.get("/admin/access")
+        # ★ 2026-09-02 G-S8 기대값 이전 — 합계 문장은 `/admin/costs`, 초대 안내는
+        #   `/admin/members`로 나뉘었다. 문장 자체는 글자 그대로 옮겼다.
+        화면 = client.get("/admin/costs")
+        초대화면 = client.get("/admin/members")
 
     assert "초대한 친구 1명 × 3,000원" in 화면.text
     assert "성공 보고서 3건" in 화면.text
-    assert "비용 입장 상한 3,000원" in 화면.text
+    assert "비용 입장 상한 3,000원" in 초대화면.text
     # 링크 0개 + 친구 3,000 + 관리자 5,000 = 8,000원
     assert "8,000원" in 화면.text
     assert "합계" in 화면.text  # 「차단 기준 합계」 문장 자체는 그대로 있다

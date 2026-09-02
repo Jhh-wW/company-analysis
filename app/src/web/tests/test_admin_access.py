@@ -556,13 +556,16 @@ def test_관리자_시각표시는_저장된_UTC를_KST로_바꾼다(admin: Test
             now_iso="2026-08-19T15:32:00Z",
         )
 
-    listing = admin.get("/admin/access")
+    # ★ 2026-09-02 G-S8 기대값 이전 — 링크 목록은 `/admin/links`, 회원 명단은
+    #   `/admin/members`로 나뉘었다. 시각 표시 계약 자체는 그대로다.
+    listing = admin.get("/admin/links")
+    members_page = admin.get("/admin/members")
     detail = admin.get(f"/admin/link/{share_store.key_hash_of(key)}")
 
     assert "발급 2026-08-20 00:30 (한국시간)" in listing.text
     assert "최초 2026-08-20 00:31 (한국시간)" in listing.text
     assert "최근 2026-08-20 00:31 (한국시간)" in listing.text
-    assert "2026-08-20 00:32 (한국시간)" in listing.text
+    assert "2026-08-20 00:32 (한국시간)" in members_page.text
     assert "2026-08-20 00:30 (한국시간)" in detail.text
     assert detail.text.count("2026-08-20 00:31 (한국시간)") == 3
 
@@ -1313,7 +1316,9 @@ def test_호출전_예상비용_차단기준을_실제청구_최댓값으로_과
     admin.post("/admin/link/new", data={"company": "카카오", "job": "마케팅"})
     admin.post("/admin/invite", data={"email": "f@g.com"})
 
-    text = admin.get("/admin/access").text
+    # ★ 2026-09-02 G-S8 기대값 이전 — 비용 카드가 `/admin/costs`(정보 구조 ⑤)로
+    #   옮겨갔다. 보는 문장과 숫자는 그대로다.
+    text = admin.get("/admin/costs").text
 
     # 링크 1개(3,000) + MEMBER 1명(3,000) + 관리자(5,000) = 11,000원.
     # MEMBER에는 이 금액 상한과 성공 3건 제한이 함께 적용된다.
@@ -1340,7 +1345,8 @@ def test_비용카드는_요청에서_한번_캡처한_KST_원장기준일을_�
 
     monkeypatch.setattr(admin_router.clock, "today_kst", fixed_today)
 
-    response = admin.get("/admin/access")
+    # ★ 2026-09-02 G-S8 기대값 이전 — 비용 카드는 `/admin/costs`에 있다.
+    response = admin.get("/admin/costs")
     compact = " ".join(response.text.split())
 
     assert response.status_code == 200
@@ -1374,7 +1380,8 @@ def test_실제비용이_예상과_차단기준을_넘으면_금액과_overrun�
             created_at="2026-08-18T10:01:00+09:00",
         )
 
-    response = admin.get("/admin/access")
+    # ★ 2026-09-02 G-S8 기대값 이전 — 비용 카드는 `/admin/costs`에 있다.
+    response = admin.get("/admin/costs")
     compact = " ".join(response.text.split())
 
     assert response.status_code == 200
@@ -1398,7 +1405,8 @@ def test_관리자_첫화면은_승인된_운영대시보드로_연결된다(
 
 def test_전체_상한이_없다는_사실을_숨기지_않는다(admin: TestClient):
     """★ 위험을 «없앤» 게 아니라 본인이 감수하기로 한 것이다 — 계속 보여준다."""
-    assert "전체 상한이 없습니다" in admin.get("/admin/access").text
+    # ★ 2026-09-02 G-S8 기대값 이전 — 이 경고는 `/admin/costs`로 옮겨갔다.
+    assert "전체 상한이 없습니다" in admin.get("/admin/costs").text
 
 
 # ══════════════════════════════════════════════════════════

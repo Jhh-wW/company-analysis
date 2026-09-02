@@ -151,8 +151,12 @@ def _render_admin_and_stopped_pages() -> tuple[str, dict[str, str]]:
         session = auth_logic.create_session("admin@example.com", True)
         client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
 
-        empty_access = client.get("/admin/access")
-        assert empty_access.status_code == 200
+        # ★ 2026-09-02 G-S8 — 한 화면이던 초대·링크 관리가 링크·회원·비용 셋으로
+        #   나뉘었다. 「비어 있어도 제목과 정직한 빈 상태가 뜬다」는 계약은 그대로다.
+        empty_links = client.get("/admin/links")
+        empty_members = client.get("/admin/members")
+        assert empty_links.status_code == 200
+        assert empty_members.status_code == 200
 
         with storage_db.connect() as conn:
             share_store.insert_new(
@@ -184,7 +188,9 @@ def _render_admin_and_stopped_pages() -> tuple[str, dict[str, str]]:
 
         responses = {
             "admin-home": client.get("/admin"),
-            "admin-access": client.get("/admin/access"),
+            "admin-links": client.get("/admin/links"),
+            "admin-members": client.get("/admin/members"),
+            "admin-costs": client.get("/admin/costs"),
             "admin-link": client.get(
                 f"/admin/links/{share_store.key_hash_of(link_key)}"
             ),
@@ -193,22 +199,29 @@ def _render_admin_and_stopped_pages() -> tuple[str, dict[str, str]]:
         }
 
     assert all(response.status_code == 200 for response in responses.values())
-    return empty_access.text, {name: response.text for name, response in responses.items()}
+    return (
+        (empty_links.text, empty_members.text),
+        {name: response.text for name, response in responses.items()},
+    )
 
 
 def test_관리표는_이름_머리글_scope_키보드_scroll영역을_가진다():
-    empty_access, pages = _render_admin_and_stopped_pages()
+    (empty_links, empty_members), pages = _render_admin_and_stopped_pages()
 
     # 조건부 표가 없을 때도 두 영역의 제목과 정직한 빈 상태가 렌더된다.
-    empty_dom = _RenderedDOM(empty_access)
-    assert empty_dom.all("table") == []
-    assert empty_dom.by_id("company-links-title") is not None
-    assert empty_dom.by_id("invited-members-title") is not None
-    assert "아직 만든 링크가 없습니다" in empty_dom.root.text
-    assert "아직 초대한 사람이 없습니다" in empty_dom.root.text
+    empty_link_dom = _RenderedDOM(empty_links)
+    empty_member_dom = _RenderedDOM(empty_members)
+    assert empty_link_dom.all("table") == []
+    assert empty_member_dom.all("table") == []
+    assert empty_link_dom.by_id("company-links-title") is not None
+    assert empty_member_dom.by_id("invited-members-title") is not None
+    assert "아직 만든 링크가 없습니다" in empty_link_dom.root.text
+    assert "아직 초대한 사람이 없습니다" in empty_member_dom.root.text
 
     expected_table_counts = {
-        "admin-access": 2,
+        "admin-links": 1,
+        "admin-members": 0,
+        "admin-costs": 0,
         "admin-link": 0,
         "admin-dashboard": 0,
         "stopped": 1,
@@ -240,10 +253,12 @@ def test_관리표는_이름_머리글_scope_키보드_scroll영역을_가진다
 
 
 def test_관리화면은_페이지목적_h1_하나와_연속_heading계층을_가진다():
-    _empty_access, pages = _render_admin_and_stopped_pages()
+    _empty, pages = _render_admin_and_stopped_pages()
     expected_h1 = {
-            "admin-home": "운영 대시보드",
-        "admin-access": "초대·LINK 관리",
+        "admin-home": "운영 대시보드",
+        "admin-links": "초대 링크",
+        "admin-members": "회원",
+        "admin-costs": "비용",
         "admin-link": "카카오",
             "admin-dashboard": "운영 대시보드",
     }

@@ -123,7 +123,8 @@ def test_포트폴리오_계약은_친구_초대를_admin_py_수정없이_연다
     )
 
     assert response.status_code == 303
-    assert response.headers["location"] == "/admin/access"
+    # ★ 2026-09-02 G-S8 기대값 이전 — 초대 뒤 도착지가 회원 화면으로 나뉘었다.
+    assert response.headers["location"] == "/admin/members"
     with storage_db.connect() as conn:
         member = share_allow.load(conn, "friend@example.com")
     assert member is not None

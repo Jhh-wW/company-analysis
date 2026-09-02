@@ -165,7 +165,9 @@ def test_화면에_다시_읽는_버튼이_있다() -> None:
     from src.core import paths
 
     화면 = (
-        paths.APP_ROOT / "src" / "web" / "templates" / "admin_access.html"
+        # ★ 2026-09-02 G-S8 — 차단 배너가 비용 화면과 축소 화면이 함께 쓰는
+        #   조각으로 빠져나갔다. 버튼이 있는 곳은 이제 이 파일이다.
+        paths.APP_ROOT / "src" / "web" / "templates" / "_admin_spend_banners.html"
     ).read_text(encoding="utf-8")
 
     assert 'action="/admin/budget/recheck"' in 화면

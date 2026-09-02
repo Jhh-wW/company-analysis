@@ -468,14 +468,49 @@ def _access_context(request: Request, *, today: dt.date, **kwargs) -> dict:
     )
 
 
+#: 정보 구조 재배치(G-S8) 뒤 초대·링크·회원·비용은 화면 셋으로 나뉜다.
+#: 같은 `_access_context`를 세 화면이 나눠 쓰고, 자료를 못 읽으면 셋 다 같은
+#: 축소 화면으로 떨어진다(설계 05장 §3).
+ACCESS_LINKS_TEMPLATE = "admin_links.html"
+ACCESS_MEMBERS_TEMPLATE = "admin_members.html"
+ACCESS_COSTS_TEMPLATE = "admin_costs.html"
+ACCESS_UNAVAILABLE_TEMPLATE = "admin_access_unavailable.html"
+
+
+def _frame_base_context(request: Request, template: str) -> dict:
+    """화면 틀(메뉴·목록·통계)이 쓰는 대시보드 쪽 값.
+
+    ★ 비용 화면은 일부러 비운다 — 그 화면의 계약은 「원장 기준일을 요청당 한 번만
+      읽는다」이고(`test_비용카드는_요청에서_한번_캡처한_KST_원장기준일을_명시한다`),
+      대시보드 문맥은 `clock.today_kst()`를 더 부른다.
+    ★ 여기서 실패해도 본문은 보여야 한다. 못 읽은 값은 화면이 「확인 불가」로 말한다.
+    """
+
+    from src.web.routers import dashboard  # noqa: PLC0415
+
+    try:
+        if template == ACCESS_LINKS_TEMPLATE:
+            return dashboard.link_page_context(request)
+        if template == ACCESS_MEMBERS_TEMPLATE:
+            return dashboard.member_page_context(request)
+    except Exception:  # noqa: BLE001 — 틀을 못 읽어도 본문 자료는 보여준다
+        logger.error("관리자 화면 틀 정보를 읽지 못했습니다")
+    return {}
+
+
 def _access_page(
-    request: Request, *, status_code: int = 200, **context
+    request: Request,
+    *,
+    status_code: int = 200,
+    template: str = ACCESS_LINKS_TEMPLATE,
+    **context,
 ) -> HTMLResponse:
     today = clock.today_kst()
     try:
         page_context = _access_context(request, today=today, **context)
     except _AccessDataUnavailable:
         status_code = 503
+        template = ACCESS_UNAVAILABLE_TEMPLATE
         # ★ 원장을 못 읽어도 «무엇이 걸렸는지»는 따로 읽어 보여 준다 —
         #   대사하라면서 대사할 대상을 안 보여 주면 관리자는 아무것도 못 한다.
         축소_미확정, 축소_미확정_읽었나 = paid_runtime.list_unresolved_spend(today)
@@ -535,13 +570,27 @@ def _access_page(
                 "접근 목록과 비용 원장을 확인한 뒤 다시 시도해주세요.",
             ),
         )
+    merged = _frame_base_context(request, template)
+    merged.update(page_context)
     response = request_helpers.templates.TemplateResponse(
         request=request,
-        name="admin_access.html",
-        context=page_context,
+        name=template,
+        context=merged,
         status_code=status_code,
     )
     return _admin_response(request, response)
+
+
+def render_link_admin_page(request: Request) -> HTMLResponse:
+    """초대 링크 화면(정보 구조 ②). `/admin/links` 라우트가 부른다."""
+
+    return _access_page(request, template=ACCESS_LINKS_TEMPLATE)
+
+
+def render_member_admin_page(request: Request) -> HTMLResponse:
+    """회원 화면(정보 구조 ③). `/admin/members` 라우트가 부른다."""
+
+    return _access_page(request, template=ACCESS_MEMBERS_TEMPLATE)
 
 
 def _normalized_company_name(value: str) -> str:
@@ -701,11 +750,28 @@ def _validated_report_id(
 
 @router.get("/admin/access", response_class=HTMLResponse)
 async def admin_access(request: Request):
-    """초대한 친구와 지원 맥락 LINK를 관리하는 화면."""
+    """초대·링크·비용이 한 화면에 섞여 있던 옛 주소의 호환 리다이렉트.
+
+    ★ 2026-09-02 G-S8 — 이 화면은 링크(`/admin/links`)·회원(`/admin/members`)·
+      비용(`/admin/costs`) 셋으로 나뉘었다. **주소는 지우지 않는다** — 결정 D-G6 (a)
+      대로 이미 뿌린 주소가 깨지지 않아야 한다. 도착지는 링크 화면이다.
+    ★ 권한 판정을 건너뛰고 리다이렉트하지 않는다. 거절도 감사에 남아야 한다.
+    """
     blocked = request_helpers.require_admin(request)
     if blocked is not None:
         return blocked
-    return _access_page(request)
+    return _admin_response(
+        request, RedirectResponse("/admin/links", status_code=303)
+    )
+
+
+@router.get("/admin/costs", response_class=HTMLResponse)
+async def admin_costs(request: Request):
+    """비용·예산 화면(정보 구조 ⑤). 오늘 지출·차단 기준·미확정 대사."""
+    blocked = request_helpers.require_admin(request)
+    if blocked is not None:
+        return blocked
+    return _access_page(request, template=ACCESS_COSTS_TEMPLATE)
 
 
 @router.post("/admin/link/new", include_in_schema=False)
@@ -1336,7 +1402,7 @@ async def admin_link_generated_report(request: Request, report_id: str):
     clean_report_id = share_logic.report_id_from_reference(report_id)
     if not clean_report_id:
         return _admin_response(
-            request, RedirectResponse("/admin/access", status_code=303)
+            request, RedirectResponse("/admin/links", status_code=303)
         )
     try:
         with storage_db.connect() as conn:
@@ -1349,7 +1415,7 @@ async def admin_link_generated_report(request: Request, report_id: str):
         )
     if not linked:
         return _admin_response(
-            request, RedirectResponse("/admin/access", status_code=303)
+            request, RedirectResponse("/admin/links", status_code=303)
         )
     return _admin_response(
         request,
@@ -1581,10 +1647,11 @@ async def admin_budget_recheck(
     막힌채, _사유 = paid_runtime.paid_research_block()
     if opened and not 막힌채:
         return _admin_response(
-            request, RedirectResponse("/admin/access", status_code=303)
+            request, RedirectResponse("/admin/costs", status_code=303)
         )
     return _access_page(
         request,
+        template=ACCESS_COSTS_TEMPLATE,
         status_code=503,
         access_error_title=(
             "아직 유료 조사가 닫혀 있습니다."
@@ -1679,10 +1746,11 @@ async def admin_budget_settle(
     막힌채, _사유 = paid_runtime.paid_research_block()
     if 마감했나 and not 막힌채:
         return _admin_response(
-            request, RedirectResponse("/admin/access", status_code=303)
+            request, RedirectResponse("/admin/costs", status_code=303)
         )
     return _access_page(
         request,
+        template=ACCESS_COSTS_TEMPLATE,
         status_code=503,
         access_error_title=(
             "한 건을 마감했지만 아직 닫혀 있습니다."
@@ -1868,6 +1936,7 @@ async def admin_invite(
         )
         return _access_page(
             request,
+            template=ACCESS_MEMBERS_TEMPLATE,
             status_code=503,
             access_error_title="친구를 초대하지 못했습니다.",
             access_error=(
@@ -1882,7 +1951,7 @@ async def admin_invite(
         reason="invited",
     )
     return _admin_response(
-        request, RedirectResponse("/admin/access", status_code=303)
+        request, RedirectResponse("/admin/members", status_code=303)
     )
 
 
@@ -1929,6 +1998,7 @@ async def admin_revoke(
         )
         return _access_page(
             request,
+            template=ACCESS_MEMBERS_TEMPLATE,
             status_code=503,
             access_error_title="친구 초대를 철회하지 못했습니다.",
             access_error=(
@@ -1943,7 +2013,7 @@ async def admin_revoke(
         reason="revoked",
     )
     return _admin_response(
-        request, RedirectResponse("/admin/access", status_code=303)
+        request, RedirectResponse("/admin/members", status_code=303)
     )
 
 

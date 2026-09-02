@@ -1016,69 +1016,94 @@ async def submit_error(
     return RedirectResponse(f"/result/{report_id}", status_code=303)
 
 
+def link_page_context(request: Request) -> dict:
+    """초대 링크 화면(정보 구조 ②)이 쓰는 대시보드 쪽 값.
+
+    ★ 2026-09-02 G-S8 — 링크 목록 «본문»은 이제 `routers/admin.py`의 접근 문맥이
+      정본이다. 여기서는 새 접속 건수처럼 대시보드만 아는 값을 얹는다.
+    """
+
+    return _dashboard_context(request)
+
+
+def member_page_context(request: Request) -> dict:
+    """회원 화면(정보 구조 ③)이 쓰는 대시보드 쪽 값 — 기간 통계·한도·설문."""
+
+    context = _dashboard_context(request)
+    period, start_day = _member_period(request)
+    with storage_db.connect() as conn:
+        member_statistics = dashboard_store.member_run_statistics(
+            conn, start_day=start_day
+        )
+        member_feedback = dashboard_store.list_member_feedback(
+            conn, start_day=start_day
+        )
+        period_survey_total, period_helpful = dashboard_store.survey_summary(
+            conn, start_day=start_day
+        )
+        period_kpi = dashboard_kpi.summary(conn, start_day=start_day)
+        member_profiles = share_allow.list_profiles(conn)
+    member_names = {
+        member.email: (member.display_name.strip() or "이름 미등록")
+        for member in member_profiles
+    }
+    feedback_rows = []
+    for item in member_feedback:
+        row = asdict(item)
+        row["display_name"] = member_names.get(item.actor_email, "이름 미등록")
+        feedback_rows.append(row)
+    context.update(
+        dashboard_member_period=period,
+        dashboard_member_statistics=member_statistics,
+        dashboard_member_feedback=feedback_rows,
+        dashboard_survey_total=period_survey_total,
+        dashboard_satisfaction=(
+            "자료 모으는 중"
+            if period_survey_total < 5
+            else f"{round(period_helpful * 100 / period_survey_total)}% "
+            f"({period_helpful}/{period_survey_total})"
+        ),
+        dashboard_kpi_measured=period_kpi.measured_responses,
+        dashboard_three_minute_response=(
+            "자료 모으는 중"
+            if period_kpi.measured_responses < 5
+            else f"{round(period_kpi.within_target * 100 / period_kpi.measured_responses)}% "
+            f"({period_kpi.within_target}/{period_kpi.measured_responses})"
+        ),
+    )
+    return context
+
+
 @router.get("/admin/members", response_class=HTMLResponse)
 async def members_page(request: Request):
+    """회원 화면 — 초대·명단·한도·이용·설문을 한곳에서 본다(정보 구조 ③).
+
+    ★ 2026-09-02 G-S8 — 초대 폼과 명단은 `/admin/access`에 따로 있었다. 화면
+      본문은 `routers/admin.py`가 그리고, 이 라우트는 권한만 판정한다.
+    """
+
     blocked = request_helpers.require_admin(request)
     if blocked is not None:
         return blocked
-    try:
-        context = _dashboard_context(request)
-        period, start_day = _member_period(request)
-        with storage_db.connect() as conn:
-            member_statistics = dashboard_store.member_run_statistics(conn, start_day=start_day)
-            member_feedback = dashboard_store.list_member_feedback(
-                conn, start_day=start_day
-            )
-            period_survey_total, period_helpful = dashboard_store.survey_summary(
-                conn, start_day=start_day
-            )
-            period_kpi = dashboard_kpi.summary(conn, start_day=start_day)
-            member_profiles = share_allow.list_profiles(conn)
-        member_names = {
-            member.email: (member.display_name.strip() or "이름 미등록")
-            for member in member_profiles
-        }
-        feedback_rows = []
-        for item in member_feedback:
-            row = asdict(item)
-            row["display_name"] = member_names.get(item.actor_email, "이름 미등록")
-            feedback_rows.append(row)
-        context.update(
-            dashboard_member_period=period,
-            dashboard_member_statistics=member_statistics,
-            dashboard_member_feedback=feedback_rows,
-            dashboard_survey_total=period_survey_total,
-            dashboard_satisfaction=(
-                "자료 모으는 중"
-                if period_survey_total < 5
-                else f"{round(period_helpful * 100 / period_survey_total)}% "
-                f"({period_helpful}/{period_survey_total})"
-            ),
-            dashboard_kpi_measured=period_kpi.measured_responses,
-            dashboard_three_minute_response=(
-                "자료 모으는 중"
-                if period_kpi.measured_responses < 5
-                else f"{round(period_kpi.within_target * 100 / period_kpi.measured_responses)}% "
-                f"({period_kpi.within_target}/{period_kpi.measured_responses})"
-            ),
-        )
-        response = request_helpers.templates.TemplateResponse(request=request, name="admin_members.html", context=context)
-    except Exception:
-        response = HTMLResponse("친구 이용 정보를 안전하게 읽지 못했습니다.", status_code=503)
-    return _admin_response(request, response)
+    from src.web.routers import admin as admin_router  # noqa: PLC0415
+
+    return admin_router.render_member_admin_page(request)
 
 
 @router.get("/admin/links", response_class=HTMLResponse)
 async def links_page(request: Request):
+    """초대 링크 화면 — 발급·목록·상태·철회를 한곳에서 본다(정보 구조 ②).
+
+    ★ 2026-09-02 G-S8 — 발급 폼은 `/admin/access`에, 목록은 여기에 나뉘어 있었다.
+      화면 본문은 `routers/admin.py`가 그리고, 이 라우트는 권한만 판정한다.
+    """
+
     blocked = request_helpers.require_admin(request)
     if blocked is not None:
         return blocked
-    try:
-        context = _dashboard_context(request)
-        response = request_helpers.templates.TemplateResponse(request=request, name="admin_links.html", context=context)
-    except Exception:
-        response = HTMLResponse("LINK 목록을 안전하게 읽지 못했습니다.", status_code=503)
-    return _admin_response(request, response)
+    from src.web.routers import admin as admin_router  # noqa: PLC0415
+
+    return admin_router.render_link_admin_page(request)
 
 
 @router.get("/admin/links/{key_hash}", response_class=HTMLResponse)

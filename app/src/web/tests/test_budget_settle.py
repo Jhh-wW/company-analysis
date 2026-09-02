@@ -238,7 +238,8 @@ def test_화면에_걸린_항목이_실제로_그려진다(_관리자) -> None:
     _미확정을_심는다(run_id="run-보이나")
     paid_runtime._seed_ledger()
 
-    화면 = _관리자.get("/admin/access").text
+    # ★ 2026-09-02 G-S8 기대값 이전 — 차단 배너는 비용 화면으로 옮겨갔다.
+    화면 = _관리자.get("/admin/costs").text
 
     assert "마감해야 다시 열립니다" in 전체화면()
     assert "run-보이나"[:12] in 화면
@@ -262,7 +263,8 @@ def test_마감_버튼을_누르면_실제로_열린다(_관리자) -> None:
     )
 
     assert 응답.status_code == 303, f"열렸어야 한다: {응답.status_code}"
-    assert 응답.headers["location"] == "/admin/access"
+    # ★ 2026-09-02 G-S8 기대값 이전 — 마감 뒤 도착지가 비용 화면으로 나뉘었다.
+    assert 응답.headers["location"] == "/admin/costs"
     assert paid_runtime.paid_research_block() == (False, "")
 
 
@@ -276,7 +278,8 @@ def test_원장이_깨진_축소화면에도_걸린_항목이_보인다(_관리�
     # 원장 검사만 실패시킨다 — 미확정 목록 읽기는 살아 있어야 한다.
     monkeypatch.setattr(paid_runtime, "_BUDGET_STORE_HEALTHY", False)
 
-    응답 = _관리자.get("/admin/access")
+    # ★ 2026-09-02 G-S8 기대값 이전 — 미확정 목록은 비용 화면에서 본다.
+    응답 = _관리자.get("/admin/costs")
 
     assert 응답.status_code == 503
     assert "확인 불가" in 응답.text, "축소 화면이 맞는지 확인"
@@ -302,7 +305,7 @@ def 전체화면() -> str:
     from src.core import paths
 
     return (
-        paths.APP_ROOT / "src" / "web" / "templates" / "admin_access.html"
+        paths.APP_ROOT / "src" / "web" / "templates" / "_admin_spend_banners.html"
     ).read_text(encoding="utf-8")
 
 
@@ -315,7 +318,7 @@ def _배너화면() -> str:
     from src.core import paths
 
     화면 = (
-        paths.APP_ROOT / "src" / "web" / "templates" / "admin_access.html"
+        paths.APP_ROOT / "src" / "web" / "templates" / "_admin_spend_banners.html"
     ).read_text(encoding="utf-8")
     시작 = 화면.index("{# ──────── 차단 배너 시작 ──────── #}")
     끝 = 화면.index("{# ──────── 차단 배너 끝 ──────── #}")

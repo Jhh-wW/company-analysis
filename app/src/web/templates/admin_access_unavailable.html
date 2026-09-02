@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}확인 불가 · 기업분석{% endblock %}
+{% block bodyclass %}admin-frame-page{% endblock %}
+{% block wrapclass %}wide admin-frame{% endblock %}
+
+{# 초대 링크·회원·비용 세 화면이 «자료를 못 읽었을 때» 공통으로 쓰는 축소 화면.
+
+   ★ 2026-09-02 G-S8 — 앞 판은 `admin_access.html` 한 파일 안의 else 가지였다.
+     화면을 셋으로 나누면서 그 가지를 이 파일로 그대로 옮겼다. 문구는 글자 그대로다.
+   ★ 읽지 못한 값을 0원·0개로 «추정해서» 보여주지 않는다.
+   ★ 비용 원장이 나빠도 이미 준 권한을 «줄이는» 일은 열어 둔다. #}
+
+{% block content %}
+<header class="frame-heading">
+  <p class="frame-kicker">관리자 전용</p>
+  <h1>확인 불가</h1>
+  <p class="lede">읽지 못한 값을 0으로 보여주지 않습니다.</p>
+</header>
+{% include "_admin_nav.html" %}
+
+{# ★ 원장을 못 읽어도 «무엇이 걸렸는지»는 그대로 보여 준다.
+   대사하라면서 대사할 대상을 안 보여 주면 관리자는 아무것도 못 한다. #}
+{% include "_admin_spend_banners.html" %}
+
+{% if access_error %}
+<div class="warn-line" role="alert" style="margin-bottom:16px">
+  <span>⚠️</span><span><strong>{{ access_error_title or "링크를 만들지 못했습니다." }}</strong><br>{{ access_error }}</span>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>현재 상태</h2>
+  <p class="lede"><strong>확인 불가</strong></p>
+  <p class="muted">
+    {% if revocation_data_available %}
+    비용 원장을 확인할 수 없어 금액과 권한을 늘리는 변경 양식을 표시하지 않았습니다.
+    {% else %}
+    저장된 링크·회원 목록 또는 비용 원장을 확인할 수 없어 수치와 변경 양식을
+    표시하지 않았습니다.
+    {% endif %}
+    저장소 상태를 확인한 뒤 이 화면을 다시 열어주세요.
+  </p>
+</div>
+{% if revocation_data_available %}
+<div class="card" aria-labelledby="emergency-revocation-title">
+  <h2 id="emergency-revocation-title">비상 철회만 가능</h2>
+  <p class="muted">
+    비용 원장 장애와 무관하게 이미 준 링크·회원 권한은 즉시 줄일 수 있습니다.
+    새 링크 발급과 회원 초대는 원장이 정상일 때만 다시 열립니다.
+  </p>
+  {% if revocation_links %}
+  <h3 style="margin-top:18px">살아 있는 링크</h3>
+  {% for link in revocation_links %}
+  <form method="post" action="/admin/links/revoke" class="btn-row">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="key" value="{{ link.key_hash }}">
+    <span>{{ link.company }} · {{ link.job or "직무 미지정" }}</span>
+    <button type="submit" class="btn ghost">링크 철회</button>
+  </form>
+  {% endfor %}
+  {% endif %}
+  {% if revocation_members %}
+  <h3 style="margin-top:18px">초대한 회원</h3>
+  {% for member in revocation_members %}
+  <form method="post" action="/admin/revoke" class="btn-row">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="email" value="{{ member.email }}">
+    <span>{{ member.display_name or member.email }}</span>
+    <button type="submit" class="btn ghost">회원 권한 철회</button>
+  </form>
+  {% endfor %}
+  {% endif %}
+  {% if not revocation_links and not revocation_members %}
+  <p class="muted" style="margin-top:16px">지금 철회할 링크나 회원이 없습니다.</p>
+  {% endif %}
+</div>
+{% endif %}
+<aside class="frame-mobile-notice"><strong>모바일 운영 범위</strong><span>이 화면의 변경 작업은 PC에서만 합니다.</span></aside>
+{% endblock %}
