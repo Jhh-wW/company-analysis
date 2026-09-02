@@ -245,12 +245,30 @@ def _generation_cache_namespace(
     engine: Any,
     build_identity: Any,
     generation_mode: engine_mode.EngineMode,
+    *,
+    release_mode: Optional[ReleaseMode],
 ) -> GenerationCacheNamespace | None:
     """캐시와 single-flight가 함께 쓰는 사전 생성기 신원을 만든다.
 
     배포 revision·모델·출력 설정은 provider 호출 전에 모두 확정된다.
     pipeline과 delivery가 서로 다른 문자열 해시를 만들지 않고 shared의
     ``GenerationCacheNamespace`` 한 벌을 ContentSnapshot까지 운반한다.
+
+    ★ release_mode도 신원의 일부다 (C6 · F-CACHE)
+      릴리스 모드는 «무엇을 만드는가»를 바꾸는 입력이다. FULL은 봉인·생산
+      증거·엄격 품질 게이트를 지난 산출물이고 SHADOW는 아니다. 모드가
+      열쇠에 없으면 같은 배포에서 모드만 바뀔 때 SHADOW 저장본과 FULL
+      저장본이 «같은 칸»을 놓고 다툰다 — FULL 요청이 SHADOW 결과를 물어
+      오거나(거짓 표기), 새로 만든 FULL을 옛 SHADOW 항목 열쇠에 결속하려다
+      `ImmutableRecordConflict`로 하드 실패한다(reviewer 재현).
+      namespace_id는 `settings_sha256`을 포함해 계산되고, single-flight
+      `LeaseKey`와 캐시 `CacheLookupKey`가 **둘 다** 이 namespace_id를
+      운반한다. 그래서 여기 한 곳에 넣으면 두 열쇠가 함께 갈라진다.
+      모드를 모르면(v1 요청·환경값 없음) 예전 열쇠 그대로 두어 기존
+      저장본을 계속 재사용한다.
+
+    Args:
+        release_mode: 지금 요청이 만들려는 릴리스 모드. 모르면 ``None``.
     """
 
     model = str(getattr(engine, "MODEL", "") or GENERATION_MODEL).strip()
@@ -275,13 +293,18 @@ def _generation_cache_namespace(
         schema_version = ENGINE_V2_SCHEMA_VERSION
     else:
         schema_version = CANONICAL_SCHEMA_VERSION
+    settings: dict[str, Any] = {"temperature": 0}
+    if release_mode is not None:
+        # 모르는 경우에만 키를 빼서 옛 저장본의 열쇠를 그대로 둔다. 값을
+        # 지어내 넣으면 v1 요청까지 전부 미적중이 된다.
+        settings["release_mode"] = release_mode.value
     return GenerationCacheNamespace.create(
         product="company-analysis",
         schema_version=schema_version,
         deployment_revision=revision,
         image_digest=image_digest,
         requested_models={"pipeline": model},
-        output_settings={"temperature": 0},
+        output_settings=settings,
     )
 
 #: v2 작가·검수 호출의 출력 token 상한. 작가는 장 하나(6~12문장 JSON)를 돌려준다.
@@ -2019,6 +2042,7 @@ class RealPipeline:
             engine,
             build_identity,
             generation_mode,
+            release_mode=requested_release_mode,
         )
         reused_generation = generation_coordination.coordinate(
             corp_id=corp_code,
@@ -2034,12 +2058,16 @@ class RealPipeline:
                 reused_release_mode, requested_release_mode
             )
         ):
-            # 계약 위반이 아니라 «이 요청에 쓸 수 없는 저장본»이다 — 오류로
-            # 끝내지 않고 미적중으로 닫아 새로 만든다(C6).
-            logger.warning(
-                "FULL 요청에는 FULL로 만든 저장본만 재사용합니다 — 새로 만듭니다"
+            # ★ 여기까지 오면 안 된다 (C6). 조정자는 요청 모드와 다른 저장본을
+            #   히트로 돌려주지 않고 미적중으로 닫아 owner 선정으로 내려간다
+            #   (`web/generation_singleflight.py`의 coordinate). 그런데도 여기
+            #   걸렸다면 조정자와 이 판정이 갈라진 것이다.
+            # ★ 값만 버리면 안 된다 — 조정자는 이미 「캐시 재사용」 상태로
+            #   굳었고, 그 상태에서는 유료 단계를 열 수 없어 요청이 뒤늦게
+            #   통째로 실패한다. 조용히 버리는 대신 닫고 끝낸다.
+            raise generation_coordination.GenerationCoordinationError(
+                "재사용 보고서가 이번 요청의 공개 기준으로 만들어지지 않았습니다"
             )
-            reused_generation = None
         if reused_generation is not None:
             reused_report = reused_generation.report
             if not isinstance(reused_report, Report):
@@ -2124,6 +2152,7 @@ class RealPipeline:
                     current_fiscal_year=current_fiscal_year,
                     source_identity_digest=source_identity.cache_digest,
                     build_identity=build_identity,
+                    release_mode=requested_release_mode,
                 )
                 if generation_mode is engine_mode.EngineMode.V2
                 else _company_cache_lookup(
@@ -3165,6 +3194,7 @@ def _v2_cache_lookup(
     current_fiscal_year: Optional[int],
     source_identity_digest: str,
     build_identity: Any,
+    release_mode: Optional[ReleaseMode] = None,
 ) -> Optional[Report]:
     """엔진 v2 보고서 캐시를 조회한다 (지금 코드 지문이 같을 때만)."""
     if not corp_id:
@@ -3177,6 +3207,7 @@ def _v2_cache_lookup(
                 corp_id=corp_id,
                 build_identity=build_identity,
                 source_identity_digest=source_identity_digest,
+                release_mode=release_mode,
                 current_fiscal_year=current_fiscal_year,
             )
     except Exception:  # noqa: BLE001 — 캐시 실패가 조사를 막으면 안 된다
@@ -3205,6 +3236,7 @@ def _v2_cache_save(
     fiscal_year: Optional[int],
     source_identity_digest: str,
     build_identity: Any,
+    release_mode: Optional[ReleaseMode] = None,
 ) -> None:
     """v2 보고서를 «그 코드 지문»과 함께 저장한다.
 
@@ -3220,6 +3252,7 @@ def _v2_cache_save(
                 report=report,
                 build_identity=build_identity,
                 source_identity_digest=source_identity_digest,
+                release_mode=release_mode,
                 fiscal_year=fiscal_year,
             )
     except Exception:  # noqa: BLE001 — 저장 실패가 사용자를 막으면 안 된다
@@ -3692,6 +3725,8 @@ def _run_v2_composer(
             fiscal_year=current_fiscal_year,
             source_identity_digest=source_identity_digest,
             build_identity=build_identity,
+            # 조회와 «같은 열쇠»로 저장해야 다음 조사에서 적중한다(C6).
+            release_mode=release_mode,
         )
     elif not cache_eligible:
         logger.info(

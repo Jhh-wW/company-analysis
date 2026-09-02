@@ -588,8 +588,12 @@ def _company_requirements(build_id: str, source_identity_digest: str) -> list[st
     ]
 
 
-def _v2_requirements(build_id: str, source_identity_digest: str) -> list[str]:
-    """v2 캐시 namespace — 스키마 + 코드 지문 + 실제 출처 지문.
+def _v2_requirements(
+    build_id: str,
+    source_identity_digest: str,
+    release_mode: Optional[ReleaseMode] = None,
+) -> list[str]:
+    """v2 캐시 namespace — 스키마 + 코드 지문 + 실제 출처 지문 + 릴리스 모드.
 
     ★ 코드 지문을 열쇠에 넣는 이유 (오늘 실측으로 당한 사고)
       캐시가 옛 보고서를 물고 오면 「엔진을 고쳐도 화면이 그대로」가 된다.
@@ -604,11 +608,19 @@ def _v2_requirements(build_id: str, source_identity_digest: str) -> list[str]:
     source_requirement = _source_identity_requirement(source_identity_digest)
     if source_requirement is None:
         return []
-    return [
+    requirements = [
         f"schema:{ENGINE_V2_SCHEMA_VERSION}",
         f"build:{build_id}",
         source_requirement,
     ]
+    if release_mode is not None:
+        # ★ 릴리스 모드도 열쇠다 (C6 · F-CACHE). 모드는 «무엇을 만드는가»를
+        #   바꾸는 입력이라 schema·build 옆에 놓는다. 이게 없으면 같은 배포에서
+        #   모드만 바뀔 때 SHADOW 저장본과 FULL 저장본이 같은 칸을 놓고 다툰다.
+        #   모르는 경우(v1 요청·환경값 없음)에만 항목을 빼서 옛 저장본의 열쇠를
+        #   그대로 둔다 — 값을 지어내면 기존 캐시가 전부 미적중이 된다.
+        requirements.append(f"release_mode:{release_mode.value}")
+    return requirements
 
 
 def reusable_for_requested_release_mode(
@@ -653,6 +665,7 @@ def get_v2_report_hit(
     corp_id: str,
     build_identity: build_identity_contract.EngineBuildIdentity,
     source_identity_digest: str,
+    release_mode: Optional[ReleaseMode] = None,
     current_fiscal_year: Optional[int] = None,
     today: Optional[dt.date] = None,
 ) -> Optional[Report]:
@@ -668,7 +681,9 @@ def get_v2_report_hit(
         )
     except (TypeError, ValueError):
         return None
-    requirements = _v2_requirements(identity.build_id, source_identity_digest)
+    requirements = _v2_requirements(
+        identity.build_id, source_identity_digest, release_mode
+    )
     if not identity.cache_usable or not requirements:
         return None
     report = get_layer1_hit(
@@ -694,6 +709,7 @@ def save_v2_report(
     report: Report,
     build_identity: build_identity_contract.EngineBuildIdentity,
     source_identity_digest: str,
+    release_mode: Optional[ReleaseMode] = None,
     fiscal_year: Optional[int] = None,
     now: Optional[dt.datetime] = None,
 ) -> Optional[str]:
@@ -711,7 +727,9 @@ def save_v2_report(
     build_identity = build_identity_contract.require_exact_engine_build_identity(
         build_identity
     )
-    requirements = _v2_requirements(build_identity.build_id, source_identity_digest)
+    requirements = _v2_requirements(
+        build_identity.build_id, source_identity_digest, release_mode
+    )
     if not build_identity.cache_usable or not requirements:
         return None
     if report.schema_version != ENGINE_V2_SCHEMA_VERSION:

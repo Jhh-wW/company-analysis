@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -26,11 +27,17 @@ from src.features.report_delivery import singleflight
 from src.features.report_delivery import store as delivery_store
 from src.features.report_delivery.cache_identity import CacheLookupKey
 from src.features.report_delivery.models import DeliveryPolicy
+from src.features.storage import cache as cache_store
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
 from src.shared import engine_build_identity as build_identity_contract
 from src.shared import generation_coordination
 from src.shared.generation_cache_identity import GenerationCacheNamespace
+from src.shared.report_evidence.constants import ReleaseMode
+from src.shared.report_evidence.release_mode import (
+    REPORT_RELEASE_MODE_ENV_NAME,
+    parse_release_mode,
+)
 from src.shared.report_source_identity import ReportSourceIdentity
 from src.web import paid_runtime
 
@@ -488,6 +495,27 @@ class GenerationSession:
             generation_cache_eligible=cache_eligible,
         )
 
+    def _requested_release_mode(self) -> ReleaseMode | None:
+        """지금 요청이 «어떤 릴리스 모드로» 만들려는지. 모르면 ``None``.
+
+        ★ 왜 세션이 직접 읽나
+          이 값의 정본은 pipeline(`features/pipeline/real.py`)이 읽는 것과
+          같은 환경값 한 곳이다. 인자로 받으려면 `generation_coordination`의
+          callback 서명(shared)이나 세션 생성부(`web/job_runtime.py`)를 고쳐야
+          하는데 둘 다 이 티켓 소유가 아니다. 같은 환경값을 같은 파서로 읽으므로
+          두 곳이 갈릴 여지는 없다.
+        ★ 모르면 «예전 동작». 값이 없거나 계약 밖 문자열이면 `None`이고,
+          그때 아래 판정은 재사용을 그대로 허용한다. FULL 요청은 환경값이
+          반드시 있다(없거나 오타면 pipeline이 AI 호출 전에 막는다).
+        """
+        raw = os.environ.get(REPORT_RELEASE_MODE_ENV_NAME)
+        if not raw:
+            return None
+        try:
+            return parse_release_mode(raw)
+        except ValueError:
+            return None
+
     def _read_cached_release(
         self,
         conn: Any,
@@ -717,6 +745,25 @@ class GenerationSession:
                     conn.execute("BEGIN IMMEDIATE")
                     delivery_store.save_cache_namespace(conn, cache_namespace)
                     cached = self._read_cached_release(conn, key=cache_key)
+                    if cached is not None and not (
+                        cache_store.reusable_for_requested_release_mode(
+                            str(
+                                getattr(cached.report, "release_mode", "") or ""
+                            ),
+                            self._requested_release_mode(),
+                        )
+                    ):
+                        # ★ 여기서 «히트»로 인정하면 상태가 cache_reused로 굳고,
+                        #   그 뒤 호출자가 이 결과를 버려도 ensure_paid_phase()가
+                        #   owner/bypass가 아니라며 막아 요청이 통째로 실패한다.
+                        #   캐시 항목은 남아 있어 재시도도 같은 이유로 계속
+                        #   실패한다. 그래서 «버리기»가 아니라 «처음부터 미적중»
+                        #   으로 다뤄 그대로 owner 선정으로 내려간다(C6).
+                        logger.info(
+                            "요청 릴리스 모드와 다른 저장본이라 재사용하지 않고 "
+                            "새로 만듭니다"
+                        )
+                        cached = None
                     if cached is not None:
                         with self._lock:
                             self._key = key

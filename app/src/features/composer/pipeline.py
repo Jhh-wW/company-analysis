@@ -859,7 +859,7 @@ def run_v2(
             filing_meta=filing_meta,
             composition_tables=composition_tables,
             citation_style=citation_style,
-            company_id=str(company_id).strip(),
+            company_id=(str(company_id).strip() if release_mode is ReleaseMode.FULL else ""),
             release_mode=release_mode.value,
         )
         extractive = select_extractive_summary(verified, body_rendered.fact_records)

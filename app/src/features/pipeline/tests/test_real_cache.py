@@ -116,6 +116,9 @@ def test_생성cache_namespace는_교대하는_raw환경도_한_snapshot만_쓴�
         SimpleNamespace(MODEL="snapshot-test-model"),
         identity,
         generation_mode,
+        # 이 시험이 보는 것은 배포 신원뿐이다. 모드를 모르는 경우(None)는
+        # 옛 열쇠 구성을 그대로 쓰므로 여기 단정이 흔들리지 않는다.
+        release_mode=None,
     )
 
     assert namespace is not None
@@ -141,6 +144,7 @@ def test_v1_롤백namespace도_같은_배포build_contract를_쓴다(
         SimpleNamespace(MODEL="rollback-test-model"),
         identity,
         generation_mode,
+        release_mode=None,
     )
 
     assert namespace is not None

@@ -51,6 +51,8 @@ from src.features.pipeline.tests.test_report_company_id_release_mode import (
     _보고서를_만든다,
 )
 from src.features.storage import cache as cache_store
+from src.features.storage import db as storage_db
+from src.shared import engine_build_identity as build_identity_contract
 from src.shared import generation_coordination
 from src.shared.report_evidence.constants import ReleaseMode
 
@@ -201,43 +203,65 @@ def _요청을_흘린다(
 # ══════════════════════════════════════════════════════════
 
 
-@pytest.mark.parametrize("겹", _재사용_겹)
+@pytest.mark.parametrize(
+    "저장본_모드",
+    [ReleaseMode.SHADOW, ReleaseMode.ENFORCE_NO_PARTIAL],
+    ids=["shadow저장본", "enforce저장본"],
+)
 def test_FULL_요청은_SHADOW_저장본을_재사용하지_않는다(
-    engine: FakeEngine, monkeypatch: pytest.MonkeyPatch, 겹: str
+    engine: FakeEngine, monkeypatch: pytest.MonkeyPatch, 저장본_모드: ReleaseMode
 ) -> None:
     """FULL의 봉인·증거·품질 게이트를 지나지 않은 산출물이 FULL인 척 나가면 안 된다.
 
-    막는 방식은 오류가 아니라 «미적중»이다 — 사용자는 새로 만든 결과를 받는다.
+    옛 1층 캐시 겹에서는 «미적중»으로 닫는다 — 여기엔 되돌려야 할 조정 상태가
+    없어서 조용히 새로 만드는 것이 맞다. 사용자는 새로 만든 결과를 받는다.
+    ENFORCE_NO_PARTIAL 저장본도 마찬가지다 — FULL 게이트를 지나지 않았다.
+    조정 겹의 계약은 아래 `test_조정자가_모드_다른_저장본을_히트로_주면_요청을_닫는다`
+    와 `web/tests/test_release_mode_cache_isolation.py`가 따로 지킨다.
     """
     결과, 저장본, 새_생성 = _요청을_흘린다(
         engine,
         monkeypatch,
-        저장본_모드=ReleaseMode.SHADOW,
+        저장본_모드=저장본_모드,
         요청_모드=ReleaseMode.FULL,
-        겹=겹,
+        겹=_겹_옛캐시,
     )
 
-    assert 결과.report is not 저장본, f"{겹} 겹이 SHADOW 저장본을 FULL 요청에 내보냈습니다"
+    assert 결과.report is not 저장본, "옛 1층 캐시가 비FULL 저장본을 FULL 요청에 내보냈습니다"
     assert 결과.message == _새로_만들었다
     assert len(새_생성) == 1, "재사용을 막았으면 새로 만들어야 한다 (오류로 끝내지 않는다)"
 
 
-@pytest.mark.parametrize("겹", _재사용_겹)
-def test_FULL_요청은_ENFORCE_저장본도_재사용하지_않는다(
-    engine: FakeEngine, monkeypatch: pytest.MonkeyPatch, 겹: str
+@pytest.mark.parametrize(
+    "저장본_모드",
+    [ReleaseMode.SHADOW, ReleaseMode.ENFORCE_NO_PARTIAL],
+    ids=["shadow저장본", "enforce저장본"],
+)
+def test_조정자가_모드_다른_저장본을_히트로_주면_요청을_닫는다(
+    engine: FakeEngine, monkeypatch: pytest.MonkeyPatch, 저장본_모드: ReleaseMode
 ) -> None:
-    """SHADOW만이 아니다 — ENFORCE_NO_PARTIAL도 FULL 게이트를 지나지 않았다."""
-    결과, 저장본, 새_생성 = _요청을_흘린다(
-        engine,
-        monkeypatch,
-        저장본_모드=ReleaseMode.ENFORCE_NO_PARTIAL,
-        요청_모드=ReleaseMode.FULL,
-        겹=겹,
-    )
+    """★ 조정 경로는 «버리기»가 아니라 «닫기»다. 이 티켓의 핵심 차이다.
 
+    조정자(`web/generation_singleflight.py`)는 요청 모드와 다른 저장본을 히트로
+    돌려주지 않고 미적중으로 닫아 owner 선정으로 내려간다. 그 계약을 지키지
+    않는 조정자가 히트를 주면 pipeline이 값만 조용히 버려서는 안 된다 —
+    조정자는 이미 「캐시 재사용」 상태로 굳었고, 그 상태에서는 유료 단계를 열
+    수 없어 요청이 뒤늦게 통째로 실패하기 때문이다. 그래서 그 자리에서 닫는다.
+    이 시험은 계약을 어긴 조정자를 흉내 내 그 방어를 고정한다.
+    """
+    저장본 = _보고서를_만든다(engine, monkeypatch, release_mode=저장본_모드)
+    monkeypatch.setenv(real.ENGINE_V2_ENV_NAME, real.ENGINE_V2_ENV_ON)
+    monkeypatch.setenv(real.REPORT_RELEASE_MODE_ENV_NAME, ReleaseMode.FULL.value)
+    _저장본을_끼운다(monkeypatch, 겹=_겹_조정, 저장본=저장본)
+    새_생성 = _생성기를_표식으로_바꾼다(monkeypatch)
+
+    결과 = _조사한다()
+
+    assert 결과.outcome is Outcome.FAILED, (
+        "계약을 어긴 조정 히트를 조용히 버리면 나중에 유료 단계에서 터진다"
+    )
     assert 결과.report is not 저장본
-    assert 결과.message == _새로_만들었다
-    assert len(새_생성) == 1
+    assert 새_생성 == [], "닫고 끝내는 경로다 — 생성기를 새로 부르지 않는다"
 
 
 # ══════════════════════════════════════════════════════════
@@ -367,3 +391,54 @@ def test_모드를_모르면_예전_동작이라_FULL이_새지_않는다() -> N
             os.environ.pop(real.REPORT_RELEASE_MODE_ENV_NAME, None)
         else:
             os.environ[real.REPORT_RELEASE_MODE_ENV_NAME] = 이전
+
+
+# ══════════════════════════════════════════════════════════
+# ⑤ 옛 1층 캐시도 열쇠 자체가 갈라진다 (판정 이전에)
+# ══════════════════════════════════════════════════════════
+
+
+def test_옛_1층_캐시도_릴리스_모드마다_열쇠가_다르다(
+    engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 진짜 저장·조회를 왕복해 열쇠가 실제로 갈라지는지 본다.
+
+    조정자를 쓰지 않는 demo·단위 경로는 이 옛 1층 캐시를 그대로 쓴다. 여기
+    열쇠에도 모드가 들어가야 SHADOW 저장본이 FULL 조회에 안 잡힌다 — 판정이
+    걸리기 «전»에 이미 다른 칸이라, 두 겹 중 첫 겹이 여기서 선다.
+
+    시험 DB는 conftest가 시험마다 임시 폴더로 격리한다(진짜 저장소 안 건드림).
+    """
+    저장본 = _보고서를_만든다(engine, monkeypatch, release_mode=ReleaseMode.SHADOW)
+    신원 = build_identity_contract.process_engine_build_identity()
+    지문 = "a" * 64
+    연도 = 2025
+
+    with storage_db.connect_explicit_commit() as conn:
+        저장_id = cache_store.save_v2_report(
+            conn,
+            corp_id=CORP_ID,
+            report=저장본,
+            build_identity=신원,
+            source_identity_digest=지문,
+            release_mode=ReleaseMode.SHADOW,
+            fiscal_year=연도,
+        )
+    assert 저장_id, "저장 자체가 안 되면 이 시험은 아무것도 증명하지 못한다"
+
+    def 조회(release_mode):
+        with storage_db.connect() as conn:
+            return cache_store.get_v2_report_hit(
+                conn,
+                corp_id=CORP_ID,
+                build_identity=신원,
+                source_identity_digest=지문,
+                release_mode=release_mode,
+                current_fiscal_year=연도,
+            )
+
+    assert 조회(ReleaseMode.SHADOW) is not None, "같은 모드 조회는 적중해야 한다"
+    assert 조회(ReleaseMode.FULL) is None, "SHADOW 저장본이 FULL 열쇠에 잡혔습니다"
+    assert 조회(ReleaseMode.ENFORCE_NO_PARTIAL) is None
+    # 모드를 모르는 조회는 옛 열쇠를 쓴다 — 모드가 실린 저장본과 다른 칸이다.
+    assert 조회(None) is None
