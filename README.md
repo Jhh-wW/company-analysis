@@ -2,9 +2,52 @@
 
 **회사 이름 하나만 넣으면, 공시와 회사 공식 자료에서 근거를 모아 취업준비생용 기업분석 보고서를 만들어 줍니다.**
 
-[![quality-gate](https://github.com/Jhh-wW/company-analysis/actions/workflows/quality-gate.yml/badge.svg)](https://github.com/Jhh-wW/company-analysis/actions/workflows/quality-gate.yml)
-![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+[![quality-gate](https://github.com/Jhh-wW/company-analysis/actions/workflows/quality-gate.yml/badge.svg)](https://github.com/Jhh-wW/company-analysis/actions/workflows/quality-gate.yml) ![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+
+뉴스 검색과 AI의 자유 서술은 설계 단계에서 뺐습니다. 문장마다 어느 공식 원문에서 왔는지 각주가 붙고, 검사를 전부 통과한 보고서만 웹 · PDF · Notion 세 곳에 똑같이 나갑니다.
+
+## 빠른 시작
+
+Python 3.13이 필요합니다. 로컬 데모는 외부 API를 한 번도 부르지 않아 비용이 0원입니다.
+
+```powershell
+git clone https://github.com/Jhh-wW/company-analysis.git
+cd company-analysis
+py -3.13 -m venv .venv                    # 가상환경은 ★저장소 루트★에 만든다
+.\.venv\Scripts\python -m pip install -r app\requirements.txt
+cd app
+.\로컬데모켜기.ps1                          # http://127.0.0.1:8000 (포트 변경 -Port 8010)
+```
+
+컨테이너는 `docker build --file app/Dockerfile --tag company-analysis .`로 만들고, 빌드 컨텍스트는 **저장소 루트**입니다(`app/`으로 좁히면 조사 엔진 복사가 깨집니다). 실행에 필요한 환경변수는 [`deploy/runtime-config.example`](deploy/runtime-config.example)에 있습니다.
+
+## 구조
+
+```text
+app/                운영 웹서비스(FastAPI) — 화면·로그인·비용·저장·PDF·Notion
+analysis_engine/    조사 엔진 — DART 공시와 회사 공식 웹사이트 수집
+deploy/ · ops/      컨테이너·배포 계약, 운영 절차와 그 절차를 지키는 시험
+docs/               보고서 정본 기준 · 아키텍처 · ADR
+.github/workflows/  자동 시험과 컨테이너 스모크
+```
+
+## 시험
+
+```powershell
+.\.venv\Scripts\python -m pip install -r .github\requirements-ci.txt
+.\.venv\Scripts\python -m pytest app/src app/tools/tests -q -m "not local_integration"
+.\.venv\Scripts\python -m pytest analysis_engine/src -q
+.\.venv\Scripts\python -m pytest deploy/tests -q
+.\.venv\Scripts\python -m pytest ops -q
+```
+
+네 묶음은 각각 따로 실행합니다. `app/src`와 `analysis_engine/src`를 한 세션에 모으면 같은 이름의 시험 파일이 겹쳐 수집이 중단됩니다. 시험 건수처럼 변하는 숫자는 문서에 적지 않습니다 — 위 배지와 이 명령으로 직접 확인합니다.
+
+## 라이선스
+
+열람용으로 공개한 저장소입니다. 코드와 문서의 복제·수정·재배포·상업적 이용에는 저작권자의 허락이 필요합니다. 자세한 내용은 [LICENSE](LICENSE)에 있습니다.
+
+---
 
 ## 이렇게 나옵니다
 
@@ -24,8 +67,7 @@
 어디부터가 기사나 블로그의 해석인지 구분이 안 된다**는 점입니다.
 
 이 서비스는 그 구분을 자동으로 합니다. DART(금융감독원 전자공시)와 회사 공식 웹사이트에서
-**원문 그대로** 근거를 모으고, 원문에 없는 문장은 보고서에 넣지 않습니다. 뉴스 검색과
-AI의 자유 서술은 설계 단계에서 뺐습니다.
+**원문 그대로** 근거를 모으고, 원문에 없는 문장은 보고서에 넣지 않습니다.
 
 ## 어떻게 동작하나
 
@@ -45,8 +87,6 @@ AI의 자유 서술은 설계 단계에서 뺐습니다.
 **4. 검사를 다 통과해야 내보냅니다.** 목차·출처·수치·중복·금지 문구와 PDF 전 페이지 렌더를
 검사합니다. **하나라도 걸리면 일부만 보여주지 않고 보고서 전체를 막습니다**(`GATE_STOPPED`).
 반쯤 검증된 보고서는 읽는 사람에게 검증된 것처럼 보이기 때문입니다.
-
-통과한 보고서는 같은 내용을 **웹 · PDF · Notion** 세 곳에 똑같이 내보냅니다.
 
 ## 보고서 목차
 
@@ -74,53 +114,14 @@ AI의 자유 서술은 설계 단계에서 뺐습니다.
 - **웹 · PDF · Notion 동등 출력** — 같은 보고서 객체를 채널만 바꿔 렌더합니다. PDF는 전 페이지를
   이미지로 떠서 구조·시각 검사까지 통과해야 다운로드가 열립니다.
 - **비용 상한과 동시 실행 제한** — 조사 1건마다 단계별 비용을 기록하고 상한에서 끊습니다.
-- **초대와 이용 한도** — 관리자 화면에서 회원 명단과 회원별 하루 한도를 관리합니다. 초대 링크를
-  발급하면 주소와 QR을 한 번 보여 주고, 링크마다 하루·누적 이용 한도가 있습니다. 한도를 다 쓰면
-  새 조사는 막히고, 미리 준비된 회사 보고서는 계속 볼 수 있습니다.
-
-## 빠른 시작
-
-Python 3.13이 필요합니다. **로컬 데모는 외부 API를 한 번도 부르지 않아 비용이 0원**이고,
-서버를 내 컴퓨터에서만 엽니다.
-
-```powershell
-git clone https://github.com/Jhh-wW/company-analysis.git
-cd company-analysis
-
-# 가상환경은 ★저장소 루트★에 만든다 (app/ 안이 아니다)
-py -3.13 -m venv .venv
-.\.venv\Scripts\python -m pip install -r app\requirements.txt
-
-cd app
-.\로컬데모켜기.ps1
-```
-
-브라우저에서 `http://127.0.0.1:8000`을 열면 위 홈 화면이 뜹니다. 포트를 바꾸려면
-`.\로컬데모켜기.ps1 -Port 8010`. 데모 기록은 `app/.local_demo/`에 격리되고, 관리자 화면은
-실행 창에 찍힌 **로컬 전용 주소**로만 들어갑니다.
-
-컨테이너로 빌드하려면:
-
-```bash
-docker build --file app/Dockerfile --tag company-analysis .
-```
-
-빌드 컨텍스트는 **저장소 루트**입니다. `app/`으로 좁히면 조사 엔진 복사가 깨집니다.
-실행에 필요한 환경변수는 [`deploy/runtime-config.example`](deploy/runtime-config.example)에 있습니다.
-
-## 구조
-
-```text
-├── app/                  운영 웹서비스 (FastAPI)
-│   ├── src/features/     기능별 로직·상수·시험 — 버그는 여기서 폴더 하나만 연다
-│   ├── src/core/         여러 기능이 실제로 공유하는 형식·경로
-│   └── src/web/          HTTP·화면·라우팅·기능 조립
-├── analysis_engine/      실제 조사 엔진 (DART·홈페이지 수집)
-├── deploy/               컨테이너·배포 검증과 릴리스 계약
-├── ops/                  배포·운영 절차와 그 절차를 지키는 시험
-├── docs/                 보고서 정본 기준 · 아키텍처 · ADR
-└── .github/workflows/    자동 시험과 컨테이너 스모크
-```
+- **초대 링크** — 관리자가 회사별 링크를 발급하면 주소와 QR을 한 번만 보여 줍니다. 링크로
+  들어온 사람은 로그인 없이 그 회사 보고서를 보고 다른 회사도 이어서 조사할 수 있습니다.
+  링크마다 하루·누적 이용 한도와 만료일이 있고, 한도를 다 쓰면 새 조사는 막히지만 미리
+  만들어 둔 보고서는 계속 열립니다.
+- **회원 명단** — 구글 로그인만으로는 아무 권한도 생기지 않습니다. 관리자가 초대 명단에
+  넣은 계정만 로그인 벽을 통과하고, 사람마다 하루 성공 보고서 건수와 비용 한도를 따로 줍니다.
+- **관리자 화면** — 오늘 상태 · 초대 링크 · 회원 · 보고서 · 비용 · 운영 여섯 묶음입니다.
+  링크 철회·회원 한도 변경 같은 되돌리기 어려운 동작은 이유를 적고 한 번 더 확인해야 실행됩니다.
 
 ## 만들면서 내린 선택
 
@@ -132,13 +133,13 @@ AI 호출과 입력 토큰만 늘려서 공식 경로에서는 검색 단계 자
 사라지고 읽는 사람은 남은 내용을 «검증된 것»으로 받아들입니다. 그래서 검사 하나만 실패해도
 보고서 전체를 막습니다.
 
-**SQLite + 단일 인스턴스** — 동시 사용자가 적은 관리자 베타에서는 운영 비용보다 단순함이
+**SQLite + 단일 인스턴스** — 동시 사용자가 적은 베타에서는 운영 비용보다 단순함이
 이득이라고 봤습니다. 대신 그 전제를 **말이 아니라 시험으로** 못 박았습니다. `render.yaml`의
 `numInstances: 1`과 영속 disk 설정을 시험이 직접 읽어 검사하고, 이 전제를 깨려면 무엇을 먼저
 만들어야 하는지를 [배포 교체 계약](docs/architecture/deployment-contract.md)에 남겼습니다.
 
 **레이어가 아니라 기능 단위로 나눴다** — `models/ services/ routers/`로 나누면 기능 하나를 고칠 때
-폴더 세 개를 오갑니다. 그래서 `src/features/<기능>/` 안에 그 기능의 로직·상수·시험을 같이 뒀습니다.
+폴더 세 개를 오갑니다. 그래서 `app/src/features/<기능>/` 안에 그 기능의 로직·상수·시험을 같이 뒀습니다.
 버그가 생기면 **폴더 하나만 열면 됩니다.** ([ADR 0001](docs/adr/0001-feature-oriented-structure.md))
 
 **기본값을 안전한 쪽에 뒀다** — 외부 AI를 실제로 부르는 `real` 모드는 코드 기본값이 아닙니다.
@@ -147,7 +148,8 @@ AI 호출과 입력 토큰만 늘려서 공식 경로에서는 검색 단계 자
 
 ## 지금의 한계
 
-- **일반 공개가 아닙니다.** `BETA_ADMIN_ONLY=1`로 관리자 계정만 들어갈 수 있는 베타입니다.
+- **아무나 쓸 수 있는 서비스가 아닙니다.** `BETA_ADMIN_ONLY=1`이라 관리자와 초대 명단에
+  있는 회원, 그리고 초대 링크로 들어온 사람만 조사를 시작할 수 있습니다.
 - **자동 배포를 꺼 뒀습니다.** 커밋을 올려도 사람이 직접 배포를 누르기 전에는 반영되지 않습니다
   (`render.yaml`의 `autoDeployTrigger: off`). 보고서 품질이 걸린 서비스라 의도한 설정입니다.
 - **정기 작업(cron)이 아직 붙지 않았습니다.** 외부 백업·주간 리포트·휴지통 정리는 코드와 인증
@@ -162,17 +164,9 @@ AI 호출과 입력 토큰만 늘려서 공식 경로에서는 검색 단계 자
 - [검수 안내](docs/REVIEW_GUIDE.md) — 직접 돌려 보고 시험까지 확인하는 절차
 - [기여 안내](CONTRIBUTING.md) · [취약점 신고](SECURITY.md)
 
-시험 건수처럼 **변하는 숫자는 문서에 적지 않습니다.** 현재 상태는 위 배지와
-[검수 안내](docs/REVIEW_GUIDE.md)의 명령으로 직접 확인합니다.
-
 ## 만든 사람 · 데이터 출처
 
 1인 개발. 기획·설계·구현·배포·문서를 혼자 했습니다.
 
 데모용 표본은 **DART(금융감독원 전자공시시스템)에 공시된 공개 자료**에서 가져왔습니다.
 실제 API 키·OAuth 비밀값·데이터베이스·로그는 저장소에 넣지 않으며 환경변수로만 주입합니다.
-
-## 라이선스
-
-열람용으로 공개한 저장소입니다. 코드와 문서의 복제·수정·재배포에는 저작권자의 허락이 필요합니다.
-자세한 내용은 [LICENSE](LICENSE)에 있습니다.
