@@ -1286,6 +1286,17 @@ def run_v2(
     #   전용»이다 — release_allowed=False라도 SHADOW는 다음 줄들에서 여전히
     #   REPORT로 나가고 차감도 그대로다(게이트는 C4가 별도 사람 결정 뒤에만
     #   만든다). 이 필드가 채워진다고 판정 로직이 하나라도 바뀌지 않는다.
+    # ★ report_sha256 정정(2026-09-02, 독립 검토가 잡음) — 이 필드가 늘어나면
+    #   `export_pdf.automatic_release.report_sha256`(report_to_dict 전체 해시)은
+    #   «실제로 바뀐다». 그 해시를 비교하는 `web/routers/reports.py:_release_state`·
+    #   `generation_singleflight.py`·`report_delivery_adapter.py`는 release_mode로
+    #   안 걸러져 SHADOW도 그 경로를 탄다 — "SHADOW는 자동 PDF 출고가 없어 무관하다"는
+    #   448d10b 커밋 메시지의 근거는 틀렸다. 안전한 진짜 이유는 따로 있다: 저장된
+    #   보고서는 payload가 다시 안 바뀌므로 report_sha256(report)은 그 report_id의
+    #   평생 동안 항상 같은 값이다(자기일관적) — 「이 코드 이전 해시」와 「이후 해시」를
+    #   비교하는 경로가 아니다. 그래도 불일치가 나면 `_release_state`는
+    #   already_completed 저장값을 정본으로 흡수하고, singleflight/delivery adapter는
+    #   재사용을 포기(fail-safe)할 뿐 잘못된 값을 내보내지 않는다(fail-open 아님).
     rendered = replace(
         rendered,
         generation_metrics=generation_metrics,
