@@ -2,11 +2,10 @@
 
 FULL(``release_mode == "FULL"``) 생성물만 이 모듈을 거친다. demo·v1·SHADOW·
 ENFORCE_NO_PARTIAL은 ``routers.reports.finalize_new_report_delivery``가
-``release_mode``로 미리 갈라 이 모듈 근처에도 오지 않는다 — 32장 §4-3
+``release_mode``로 미리 갈라 이 모듈 근처에도 오지 않는다 —
 「FULL 밖 demo/non-FULL 동작은 불변이다」.
 
-★ 여기서 하지 않는 것 (설계 경계, 34_실측정정_인수인계 챕터03 「하면 안 되는
-  설계」 참조):
+★ 여기서 하지 않는 것 (설계 경계):
   - 원자 SQLite 거래를 새로 열지 않는다. ``reports.finalize_new_report_delivery``가
     이미 열어 둔 connection에 이 모듈의 순수 함수들을 끼워 쓴다.
   - ``cost_store.record_run_costs``(내부 AI 원가)를 건드리지 않는다 — 그건

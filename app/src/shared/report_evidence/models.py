@@ -267,7 +267,7 @@ class ChapterEvidenceCandidates:
 
 @dataclass(frozen=True)
 class InjectedSlotFacts:
-    """Codex의 구조화 검증기가 한 의미 칸에 주입한 사실 ID."""
+    """구조화 검증기가 한 의미 칸에 주입한 사실 ID."""
 
     slot_id: str
     fact_ids: tuple[str, ...]
@@ -281,7 +281,7 @@ class InjectedSlotFacts:
 
 @dataclass(frozen=True)
 class SectionEvidenceBundle:
-    """Codex가 최종 판정한 한 장의 작성 입력."""
+    """구조화 검증기가 최종 판정한 한 장의 작성 입력."""
 
     company_id: str
     section_id: str

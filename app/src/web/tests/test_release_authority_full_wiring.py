@@ -2,14 +2,14 @@
 
 ★ 지키는 것: FULL(release_mode=FULL) 출고는 raw content·delivery·PDF
   artifact·자동승인·charge·LINK/PUBLIC binding과 같은 SQLite 거래 안에서
-  ReleaseAuthority를 발급·저장한다. ``report_completion.py``(구 원자 완료
-  모듈)는 프로덕션 호출자가 0개라 저장소 정리 커밋(ddc4682)에서 삭제됐다
-  (34_실측정정_인수인계_2026-09-01_02_새발견.md 발견4). 발급 전에 회사 ID
+  ReleaseAuthority를 발급·저장한다. 거래를 여는 쪽은
+  ``routers.reports.finalize_new_report_delivery``이고, ``report_completion``
+  모듈은 그 거래 안에서 쓰이는 순수 지문 대조 함수만 제공한다. 발급 전에 회사 ID
   3자(정규화 corp_id·output_report.company_id·evidence.company_id)를 exact
   비교하고, epoch는 evidence.build_identity_sha256과
   frozen_build_identity.epoch_digest를 blob 생성 전에, 그리고 저장된
   Content.engine_epoch_digest까지 포함해 발급 직전에 다시 exact 비교한다
-  (32_Claude_Code_전체총괄_인수인계_2026-09-01.md §4-3, 34장 챕터03 P1-1·P1-2).
+  (`docs/출력물 기준/90_공통_규칙/런타임_출고_계약.md` §6 출고 게이트).
 
 ★ 이 시험의 FULL Report는 ``composer.pipeline.run_v2``를 ``release_mode=FULL``로
   실제로 돌려 만든다. company_id·evidence 해시를 손으로 지어내면
