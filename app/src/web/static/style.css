@@ -1812,6 +1812,8 @@ td.center { text-align: center; }
 /* 3개년 «변화 요약» 줄 — 막대 위. 목업의 4장 요약 숫자와 같은 자리.
    ★ 값은 바로 아래 표의 첫 행·마지막 행에서만 나온다 — 독자가 눈으로
       재검산할 수 있게 근거(basis)를 값 옆에 같이 둔다. */
+/* 띠 제목 — 표지 띠 제목(.cover-metrics-title)과 같은 크기·색으로 맞춘다. */
+.result-page .ps-title { margin: 0 0 8px; color: var(--ink-3); font-size: 12.5px; letter-spacing: -.01em; }
 .result-page .period-summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));

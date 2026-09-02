@@ -201,6 +201,14 @@
       뽑지 않는다 — 두 곳에서 뽑으면 PDF와 갈라진다. -#}
   {%- set band = sec.period_summary -%}
   {% if band and band.items %}
+  {#- 띠 제목은 «눈에 보이는 글자»로 그린다. PDF와 노션은 이 제목을 굵은 글씨로
+      찍는데 화면만 aria-label 속성에 담아 두면 세 채널의 글자가 갈린다(I7).
+      ★ aria-label은 지우지 않는다 — 목록 자체의 이름표라 보조기기가 이 묶음이
+        무엇인지 아는 근거다. 제목 줄은 그 이름표의 «사본»이 아니라 봉인 값을
+        그대로 다시 배치한 것이다(화면이 글자를 새로 만들지 않는다).
+      ★ 출처 번호는 표 설명·표지 띠와 같은 ref() 위첨자로 붙인다 — 보이는 글자를
+        바꾸지 않는 채널 고유 표기다(D-PUB4). -#}
+  <p class="ps-title">{{ band.title }}{{ ref(band.cite) }}</p>
   <ul class="period-summary" aria-label="{{ band.title }}">
   {% for band_item in band.items %}
   {%- set ps_label, ps_base_period, ps_base_value, ps_latest_period, ps_latest_value, ps_unit, ps_change, ps_change_kind, ps_direction, ps_note = band_item -%}
