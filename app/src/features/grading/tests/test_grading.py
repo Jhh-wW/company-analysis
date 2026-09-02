@@ -8,7 +8,9 @@
 
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 
 import pytest
 
@@ -328,7 +330,7 @@ _QUOTED_LINE = re.compile(r"^-\s*(?P<text>.+?)\s*〔(?P<cite>[^〕]+)〕\s*$")
 #: 걸린 문장을 짧게 적어 두는 길이. 전문을 다 적으면 시험이 못 읽게 길어진다.
 _SNAPSHOT_LEN = 40
 
-#: 실측 보고서 21개에서 이 규칙에 걸리는 «전부». (파일명, 문장 앞 40자)
+#: 실측 보고서 10개에서 이 규칙에 걸리는 «전부». (파일명, 문장 앞 40자)
 #: ⚠️ 여기에 줄이 늘면 그 문장이 «진짜 회계 문구인지» 먼저 눈으로 확인할 것.
 회계문구_적중_실측: frozenset[tuple[str, str]] = frozenset(
     {
@@ -341,7 +343,10 @@ _SNAPSHOT_LEN = 40
 
 #: 실측 보고서에서 뽑히는 인용 문장 개수의 바닥선.
 #: 파일이 깨져 0문장이 되면 시험이 «조용히 통과»한다 — 그걸 막는다.
-_MIN_PILOT_SENTENCES = 200
+#: 사용자 결정 D-P(b)(2026-09-02)로 fixture가 21→10개로 줄어 실측 126에서
+#: 가장 작은 파일(6문장)을 뺀 값. 어느 파일 1개가 안 읽혀도 걸린다.
+#: 기준값 하향이 아니라 fixture 크기 재도출이다.
+_MIN_PILOT_SENTENCES = 120
 
 
 def _파일럿_인용_문장() -> list[tuple[str, str]]:
@@ -363,6 +368,14 @@ def test_전수회귀_실측_보고서에_오탐이_없다():
     문장들 = _파일럿_인용_문장()
     assert len(문장들) >= _MIN_PILOT_SENTENCES, (
         f"인용 문장이 {len(문장들)}개뿐입니다 — 보고서를 못 읽었을 가능성이 큽니다"
+    )
+
+    # ★ 합계만 보면 «한 파일이 통째로 안 읽힌 것»을 놓친다. 파일마다 최소 1줄을 요구한다.
+    문장_있는_파일 = {파일명 for 파일명, _ in 문장들}
+    빈_보고서 = {p.name for p in paths.PILOT_REPORTS_DIR.glob("*.md")} - 문장_있는_파일
+    assert not 빈_보고서, (
+        f"인용 문장이 한 줄도 없는 보고서: {sorted(빈_보고서)} — "
+        "파일을 못 읽었을 가능성이 큽니다"
     )
 
     # 표 덩어리는 이 규칙이 오기 «전에» 이미 걸러진다 (파이프라인 순서: 재무표 → 표 → 회계).
@@ -395,3 +408,52 @@ def test_전수회귀_실적_문장은_한_건도_안_걸린다():
         and is_accounting_policy(문장)
     ]
     assert 걸린_실적문장 == [], f"실적 문장이 걸렸습니다: {걸린_실적문장[:2]}"
+
+
+# ── ★ 파일럿 fixture 정합 — 「되짚을 수 있는 파일만 읽는다」 ──
+#
+# 위 전수 회귀는 `PILOT_REPORTS_DIR`의 md를 **전부** 읽어 스냅샷과 맞춘다.
+# 그래서 원본 조각(fragments)이 없는 «고아 보고서»가 폴더에 남으면,
+# 걸린 문장을 원본으로 되짚어 확인할 수 없는데도 스냅샷에 섞여 든다.
+# 보고서·조각·실행기록 세 곳의 이름이 «같은 집합»임을 여기서 못 박는다.
+
+#: 원본 조각이 놓인 폴더 이름. `demo.py`가 뉴스 조각을 읽을 때와 같은 곳이다.
+_FRAGMENTS_DIRNAME = "fragments"
+
+
+def _파일이름집합(폴더: Path, 확장자: str) -> set[str]:
+    """폴더 안 파일의 «확장자를 뗀 이름» 집합."""
+    return {p.stem for p in 폴더.glob(f"*{확장자}")}
+
+
+def _실행기록_id집합() -> set[str]:
+    """`runs.jsonl`에 실제로 남은 실행 id 집합."""
+    ids: set[str] = set()
+    with paths.PILOT_RUNS_FILE.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                ids.add(json.loads(line)["id"])
+    return ids
+
+
+def test_파일럿_보고서는_조각과_실행기록이_있는_것만_남는다():
+    """★ 고아 보고서 금지 — 전수 회귀가 되짚을 수 없는 파일을 읽지 않게 한다.
+
+    셋 중 하나만 지우면 나머지 둘이 어긋난 채 남는다. 그 어긋남을 여기서 잡는다.
+    """
+    if not paths.demo_data_available():
+        pytest.skip("파일럿 자료가 없습니다 (analysis_engine 미배치)")
+
+    보고서 = _파일이름집합(paths.PILOT_REPORTS_DIR, ".md")
+    조각 = _파일이름집합(paths.PILOT_DIR / _FRAGMENTS_DIRNAME, ".json")
+    실행기록 = _실행기록_id집합()
+
+    assert 보고서 == 조각, (
+        f"조각 없는 보고서: {sorted(보고서 - 조각)} / "
+        f"보고서 없는 조각: {sorted(조각 - 보고서)}"
+    )
+    assert 보고서 == 실행기록, (
+        f"기록 없는 보고서: {sorted(보고서 - 실행기록)} / "
+        f"보고서 없는 기록: {sorted(실행기록 - 보고서)}"
+    )
