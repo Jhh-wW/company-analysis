@@ -514,3 +514,42 @@ def test_보고서_버튼은_스크린리더에도_회사명을_읽어준다(cli
     본문 = client.get("/").text
 
     assert 'aria-label="하이브 보고서 보기"' in 본문
+
+
+# ══════════════════════════════════════════════════════════
+# ⑧ 안내문은 «지금 보이는 화면»을 설명해야 한다
+# ══════════════════════════════════════════════════════════
+
+
+@pytest.mark.parametrize(
+    ("report_id", "상태", "안내조각"),
+    [
+        ("a" * 32, "report-missing", "기존 보고서를 찾을 수 없어"),
+        ("실제보고서", "report-expired", "기존 보고서의 공유 기간이 지나"),
+    ],
+)
+def test_보고서_안내문은_없어진_배너를_설명하지_않는다(
+    client: TestClient, monkeypatch, report_id: str, 상태: str, 안내조각: str
+):
+    """★ 안내문이 화면에 없는 것을 설명하면 손님은 없는 것을 찾는다.
+
+    G-S6 전에는 이 안내문이 「지원 맥락이 표시된 입력 화면」을 열었다고 말했고
+    실제로 그 배너가 있었다. 이제 초대 링크 손님에게는 그 배너 대신 랜딩이
+    보이므로, 안내문도 지금 보이는 화면을 말해야 한다.
+    """
+    if report_id == "실제보고서":
+        report_id = _보고서를_저장한다("하이브")
+        monkeypatch.setattr(
+            "src.web.job_runtime._link_expired", lambda _report: True
+        )
+    _링크발급("하이브", report_id=report_id)
+
+    열림 = client.get(f"/k/{_열쇠}", follow_redirects=False)
+    본문 = visible_text(client.get(열림.headers["location"]).text)
+
+    assert 열림.headers["location"] == f"/?share_status={상태}"
+    assert 안내조각 in 본문
+    assert "지원 맥락" not in 본문
+    # 같은 화면이 무엇을 할 수 있는지도 말한다.
+    assert "하이브 보고서는 준비 중입니다" in 본문
+    assert "다른 회사 분석해 보기" in 본문
