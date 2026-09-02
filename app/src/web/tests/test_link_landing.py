@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import dataclasses
 import pathlib
+import re
 import uuid
 
 import pytest
@@ -471,3 +472,45 @@ def test_남은_한도_문구도_내부용어를_쓰지않는다(client: TestCli
         assert 용어.casefold() not in 본문.casefold(), 용어
     for 용어 in _대문자_내부용어:
         assert 용어 not in 랜딩.text, 용어
+
+
+# ══════════════════════════════════════════════════════════
+# ⑦ 폰에서 보는 화면 — QR은 폰으로 찍는다 (설계 03장 §4)
+# ══════════════════════════════════════════════════════════
+
+
+def test_랜딩_버튼은_이_사이트의_전체너비_버튼_모양을_쓴다(client: TestClient):
+    """★ QR은 폰으로 찍는다. 버튼 둘이 세로로 쌓여 엄지로 눌려야 한다.
+
+    ★ 이 화면만의 새 버튼 모양을 만들지 않는다 — `static/style.css`에 없는 class를
+      적으면 화면에서는 아무 일도 안 일어나고, 「했다」는 착각만 남는다.
+      실측: 첫 화면에서 쓰는 전체너비 버튼 class는 `btn wide`다.
+    """
+    _링크발급("하이브", report_id=_보고서를_저장한다("하이브"))
+    client.cookies.set(KEY_COOKIE_NAME, _열쇠)
+
+    본문 = client.get("/").text
+    버튼 = re.findall(r'<a class="([^"]*)" href="([^"]*)"', 본문)
+    랜딩버튼 = [
+        (클래스, 주소)
+        for 클래스, 주소 in 버튼
+        if "보고서 보기" in 본문 or 주소 == "#analysisForm"
+    ]
+
+    assert ("btn wide", "#analysisForm") in 랜딩버튼
+    assert any(
+        클래스 == "btn wide" and 주소.startswith("/result/")
+        for 클래스, 주소 in 랜딩버튼
+    )
+    # 카드는 각각 자기 상자 안에 있어야 세로로 쌓인다.
+    assert 본문.count('class="link-landing-choice"') == 2
+
+
+def test_보고서_버튼은_스크린리더에도_회사명을_읽어준다(client: TestClient):
+    """★ 「보고서 보기」만 읽으면 어느 회사인지 모른다 (설계 03장 §4)."""
+    _링크발급("하이브", report_id=_보고서를_저장한다("하이브"))
+    client.cookies.set(KEY_COOKIE_NAME, _열쇠)
+
+    본문 = client.get("/").text
+
+    assert 'aria-label="하이브 보고서 보기"' in 본문
