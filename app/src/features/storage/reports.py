@@ -55,6 +55,14 @@ from src.shared.report_generation.models import (
     producer_evidence_to_dict,
 )
 from src.shared.report_evidence.constants import ReleaseMode
+from src.shared.report_generation.public_projection import (
+    PublicReportProjection,
+    build_report_digest,
+    public_report_digest_from_dict,
+    public_report_digest_to_dict,
+    public_report_projection_from_dict,
+    public_report_projection_to_dict,
+)
 
 # ══════════════════════════════════════════════════════════
 # 직렬화 — dataclass ↔ dict (JSON에 바로 쓸 수 있는 모양)
@@ -388,6 +396,48 @@ def _fact_from_dict(data: dict[str, Any]) -> FactRecord:
     return FactRecord(**{name: data[name] for name in _FACT_FIELDS if name in data})
 
 
+#: 저장 payload 안 ``public_projection`` 값의 칸 두 개. projection 본문과 그
+#: digest를 «나란히» 싣고, 로드할 때 digest를 다시 계산해 대조한다. 칸이
+#: 늘거나 줄면 스키마가 조용히 표류한 것이므로 닫는다.
+_PUBLIC_PROJECTION_WIRE_KEYS: frozenset[str] = frozenset({"projection", "digest"})
+
+
+def _public_projection_to_dict(projection: PublicReportProjection) -> dict[str, Any]:
+    """공개 봉인 projection과 그 digest를 저장 wire 모양으로 만든다."""
+
+    return {
+        "projection": public_report_projection_to_dict(projection),
+        "digest": public_report_digest_to_dict(build_report_digest(projection)),
+    }
+
+
+def _public_projection_from_dict(data: object) -> PublicReportProjection:
+    """저장된 projection을 되살리고 digest를 «재계산해» 대조한다.
+
+    저장된 digest를 그대로 믿지 않는 이유는 ``canonical.py``의 봉인 원칙과
+    같다 — 자기 자신만 검사하는 checksum은 본문과 digest를 «함께» 바꾼
+    위조를 못 막는다. 여기서 다시 계산해 대조하면 저장 뒤에 손댄 흔적이
+    로드에서 닫힌다(I3: 봉인이 깨진 보고서는 공개하지 않는다).
+
+    Raises:
+        ValueError: wire 모양이 계약과 다르거나 digest가 재계산 값과 다를 때.
+            (``PublicProjectionError``도 ``ValueError``의 하위형이라 저장층
+            호출자는 한 갈래로 잡을 수 있다.)
+    """
+
+    if type(data) is not dict or set(data) != _PUBLIC_PROJECTION_WIRE_KEYS:
+        raise ValueError("저장된 공개 projection의 key 또는 객체 형식이 계약과 다릅니다")
+    projection_raw = data["projection"]
+    digest_raw = data["digest"]
+    if type(projection_raw) is not dict or type(digest_raw) is not dict:
+        raise ValueError("저장된 공개 projection 또는 digest가 객체가 아닙니다")
+    projection = public_report_projection_from_dict(projection_raw)
+    stored_digest = public_report_digest_from_dict(digest_raw)
+    if stored_digest != build_report_digest(projection):
+        raise ValueError("저장된 공개 projection digest가 재계산 값과 다릅니다")
+    return projection
+
+
 def report_to_dict(report: Report) -> dict[str, Any]:
     """`Report` → JSON에 바로 쓸 수 있는 dict.
 
@@ -449,6 +499,10 @@ def report_to_dict(report: Report) -> dict[str, Any]:
         payload["quality_observation"] = generation_quality_observation_to_dict(
             report.quality_observation
         )
+    if report.public_projection is not None:
+        payload["public_projection"] = _public_projection_to_dict(
+            report.public_projection
+        )
     return payload
 
 
@@ -496,6 +550,9 @@ def report_from_dict(data: dict[str, Any]) -> Report:
     generation_evidence = None
     generation_metrics = None
     quality_observation = None
+    public_projection = None
+    if data.get("public_projection") is not None:
+        public_projection = _public_projection_from_dict(data["public_projection"])
     if data.get("generation_metrics") is not None:
         if type(data["generation_metrics"]) is not dict:
             raise ValueError("저장된 생성 지표 형식이 깨졌습니다")
@@ -584,6 +641,7 @@ def report_from_dict(data: dict[str, Any]) -> Report:
         generation_evidence=generation_evidence,
         generation_metrics=generation_metrics,
         quality_observation=quality_observation,
+        public_projection=public_projection,
         # 옛 저장본(이 키가 없는 v1·초기 v2)은 빈 사전으로 읽는다 — 그러면
         # 부록이 예전처럼 화면 글자에서 등급을 되짚는 폴백으로 떨어진다.
         source_grades={

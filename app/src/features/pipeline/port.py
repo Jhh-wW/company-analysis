@@ -22,6 +22,7 @@ from src.shared.report_generation.models import (
     GenerationProducerEvidence,
     GenerationRunMetrics,
 )
+from src.shared.report_generation.public_projection import PublicReportProjection
 from src.shared.report_quality.generation import GenerationQualityObservation
 from src.shared.span_selection_diagnostics import SpanSelectionRoundDiagnostic
 
@@ -563,6 +564,12 @@ class Report:
     #: 엄격 생성 당시 평가의 표시 projection. 권위는 generation_evidence 안의
     #: exact GenerationAssessment이며 이 값에서 평가를 역으로 꾸미지 않는다.
     quality_observation: GenerationQualityObservation | None = None
+    #: 웹·PDF·Notion이 «그대로 배치만» 하면 되는 공개 봉인 블록(설계 017).
+    #: 생성 시점에 딱 한 번 만들어 여기 실린다 — 렌더러가 문자열을 새로
+    #: 만들지 않게 하려는 것이다. FULL 새 생성물만 채우고(SHADOW·
+    #: ENFORCE_NO_PARTIAL·옛 저장본은 ``None``), 저장 payload에도 값이
+    #: 있을 때만 키가 생긴다.
+    public_projection: PublicReportProjection | None = None
 
     @property
     def fact_ledger(self) -> list[FactRecord]:
