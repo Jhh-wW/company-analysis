@@ -1912,6 +1912,107 @@ def test_같은_회사는_묶인다(admin: TestClient):
             assert share_store.load(conn, key).report_id == report_id, 표기
 
 
+def test_법인격_토큰이_이름_중간에_끼어도_다른_회사로_본다(admin: TestClient):
+    """★ 「질원」과 「질주식회사원」은 고유번호가 다른 별개 회사다.
+
+    법인격 표기를 «단어 경계 없이» 지우면 두 이름이 같은 값이 되어 통과한다.
+    첫 결속에는 대조할 고유번호가 없어 이 이름 검사가 유일한 방어선이다.
+    """
+    base = _보고서를_만든다(admin)
+    질주식회사원 = _회사만_바꿔_보고서를_복사한다(
+        base, report_id="c" * 31 + "3", company="질주식회사원", company_id="00111111"
+    )
+
+    새링크 = admin.post(
+        "/admin/link/new",
+        data={"company": "질원", "report_reference": 질주식회사원},
+        follow_redirects=False,
+    )
+
+    assert 새링크.status_code == 400
+    assert "다른 회사" in 새링크.text
+    assert "질주식회사원" in 새링크.text
+    with storage_db.connect() as conn:
+        assert share_store.list_all(conn) == []
+
+
+def test_앞뒤_법인격_표기만_벗긴다(admin: TestClient):
+    """대조군 — 「같은 회사인데 막힌다」로 기울지 않는다는 것도 같이 지킨다."""
+    base = _보고서를_만든다(admin)
+    하이브 = _회사만_바꿔_보고서를_복사한다(
+        base, report_id="d" * 31 + "4", company="주식회사 하이브"
+    )
+
+    for 같은회사 in ("하이브", "하이브(주)", "㈜하이브", "하이브 주식회사", "(주) 하이브"):
+        created = admin.post(
+            "/admin/link/new",
+            data={"company": 같은회사, "report_reference": 하이브},
+            follow_redirects=False,
+        )
+        key, _key_hash = _issued_link(created)
+        with storage_db.connect() as conn:
+            assert share_store.load(conn, key).report_id == 하이브, 같은회사
+
+    for 다른회사 in ("하이브미디어", "하이", "질원"):
+        거부 = admin.post(
+            "/admin/link/new",
+            data={"company": 다른회사, "report_reference": 하이브},
+            follow_redirects=False,
+        )
+        assert 거부.status_code == 400, 다른회사
+        assert "다른 회사" in 거부.text, 다른회사
+
+
+def test_결속_보고서를_읽지_못하면_연결을_거부한다(
+    admin: TestClient, monkeypatch
+):
+    """★ 「확인 못 했다」는 「같은 회사다」가 아니다.
+
+    링크에 이미 묶인 보고서를 못 읽으면 고유번호를 대조할 수 없다. 그때 조용히
+    이름 검사로 되돌아가면(fail-open) 동명 다른 법인이 그대로 들어온다.
+    """
+    report_id = _보고서를_만든다(admin)
+    created = admin.post(
+        "/admin/link/new",
+        data={
+            "company": CANONICAL_DEMO_COMPANY,
+            "report_reference": report_id,
+        },
+        follow_redirects=False,
+    )
+    key, key_hash = _issued_link(created)
+    바꿀보고서 = _회사만_바꿔_보고서를_복사한다(
+        report_id, report_id="e" * 31 + "5", company=CANONICAL_DEMO_COMPANY
+    )
+
+    원래_load = admin_router.report_store.load
+    남은_실패 = [1]
+
+    def 결속보고서_읽기가_한번_실패한다(conn, 찾는_id):
+        # 결속 보고서의 첫 조회만 깨뜨린다 — 거부 화면 자체는 그려져야
+        # 「저장소 장애 503」이 아니라 「연결 거부 400」임을 볼 수 있다.
+        if 찾는_id == report_id and 남은_실패[0]:
+            남은_실패[0] -= 1
+            raise sqlite3.DatabaseError("결속 보고서를 읽지 못했습니다")
+        return 원래_load(conn, 찾는_id)
+
+    monkeypatch.setattr(
+        admin_router.report_store, "load", 결속보고서_읽기가_한번_실패한다
+    )
+
+    거부 = admin.post(
+        "/admin/link/report",
+        data={"key": key_hash, "report_reference": 바꿀보고서},
+        follow_redirects=False,
+    )
+
+    assert 거부.status_code == 400
+    assert "보고서 정보를 확인할 수 없어 연결하지 않았습니다" in 거부.text
+    assert 남은_실패[0] == 0, "결속 보고서를 읽으려는 시도 자체가 없었습니다"
+    with storage_db.connect() as conn:
+        assert share_store.load(conn, key).report_id == report_id
+
+
 def test_동명_회사는_corp_id로_구분한다(admin: TestClient):
     """이름이 같아도 고유번호가 다르면 다른 회사다.
 

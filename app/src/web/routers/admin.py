@@ -4,6 +4,7 @@ import base64
 import datetime as dt
 import logging
 import os
+import re
 import string
 from urllib.parse import quote, urlencode
 
@@ -73,6 +74,15 @@ _COMPANY_LEGAL_FORMS = (
     "㈜",
     "㈲",
 )
+_COMPANY_LEGAL_FORM_PATTERN = "|".join(
+    re.escape(legal_form) for legal_form in _COMPANY_LEGAL_FORMS
+)
+#: ★ 법인격 표기는 «이름의 맨 앞이나 맨 뒤»에 붙을 때만 떼어 낸다.
+#: 경계 없이 지우면 「질주식회사원」이 「질원」이 되어 고유번호가 다른 별개
+#: 회사가 같은 이름으로 통과한다. 첫 결속에는 대조할 고유번호가 없어서
+#: 이 이름 검사가 유일한 방어선이다.
+_COMPANY_LEGAL_PREFIX_RE = re.compile(rf"^(?:{_COMPANY_LEGAL_FORM_PATTERN})+")
+_COMPANY_LEGAL_SUFFIX_RE = re.compile(rf"(?:{_COMPANY_LEGAL_FORM_PATTERN})+$")
 
 
 class _AccessDataUnavailable(RuntimeError):
@@ -487,46 +497,58 @@ def _normalized_company_name(value: str) -> str:
 
     ★ 「(주)진영」과 「진영」은 같은 회사다. 폼에 손으로 적는 이름은 법인격
       표기·띄어쓰기가 매번 달라서 글자 그대로 비교하면 «같은 회사인데 막히는»
-      쪽으로 자주 틀린다. 반대로 서로 다른 회사가 이 정리로 같아지지는 않는다.
-      이름이 정말 같은 «동명 회사»는 고유번호로 갈라낸다.
+      쪽으로 자주 틀린다. 이름이 정말 같은 «동명 회사»는 고유번호로 갈라낸다.
+
+    ★ 법인격 표기는 **맨 앞·맨 뒤에서만** 뗀다. 이름 가운데 우연히 같은 글자가
+      들어간 상호(예: 「질주식회사원」)를 다른 이름(「질원」)으로 바꿔 버리면
+      별개 회사가 서로 통과한다.
     """
     raw = "".join(str(value or "").split()).casefold()
     if not raw:
         return ""
-    stripped = raw
-    for legal_form in _COMPANY_LEGAL_FORMS:
-        stripped = stripped.replace(legal_form, "")
+    stripped = _COMPANY_LEGAL_PREFIX_RE.sub("", raw)
+    stripped = _COMPANY_LEGAL_SUFFIX_RE.sub("", stripped)
     # 법인격 표기만으로 된 이름은 통째로 사라지므로 그때는 원래 글자를 쓴다.
     return stripped or raw
 
 
-def _link_company_id(conn, link) -> str:
+def _link_company_id(conn, link) -> str | None:
     """이 링크가 지금 가리키는 회사의 고유번호. 연결된 보고서에서만 읽는다.
 
     ★ `share_links` 표에는 고유번호 열이 없다 — 링크와 보고서 두 곳에 같은 값을
       두면 결속을 바꿀 때 어긋나기 때문이다. 그래서 이미 묶여 있는 보고서의
-      값을 그 링크의 회사 신원으로 삼는다. 아직 아무것도 안 묶였으면 빈 값이다.
+      값을 그 링크의 회사 신원으로 삼는다.
+
+    Returns:
+        고유번호. 묶인 보고서가 없거나 그 보고서에 고유번호가 없으면 빈 문자열.
+        **읽지 못했으면 `None`** — 「확인 못 했다」와 「없다」는 다른 값이다.
+        같은 값으로 뭉개면 읽기 실패가 조용히 «검사 통과»가 된다(fail-open).
     """
     linked_report_id = str(getattr(link, "report_id", "") or "")
     if not linked_report_id:
         return ""
     try:
         current = report_store.load(conn, linked_report_id)
-    except Exception:  # noqa: BLE001 — 옛 결속이 깨졌다고 새 결속까지 막지 않는다
-        return ""
+    except Exception:  # noqa: BLE001 — 확인 실패는 통과가 아니라 거부로 넘긴다
+        logger.error("링크에 연결된 보고서를 읽지 못했습니다")
+        return None
     if current is None:
         return ""
     return str(getattr(current, "company_id", "") or "").strip()
 
 
 def _report_company_mismatch(
-    report, *, expected_company: str, expected_company_id: str
+    report, *, expected_company: str, expected_company_id: str | None
 ) -> str:
     """링크의 회사와 보고서의 회사가 다르면 화면에 보여줄 이유를 만든다.
 
     빈 문자열이면 같은 회사라는 뜻이다. 링크에 회사 꼬리표가 없으면(빈 값)
     비교할 기준이 없으므로 막지 않는다.
     """
+    if expected_company_id is None:
+        # ★ 대조에 쓸 값을 못 읽었으면 «통과»가 아니라 거부다. 여기서 이름
+        #   검사로만 되돌아가면 동명 다른 법인이 그대로 들어온다.
+        return "보고서 정보를 확인할 수 없어 연결하지 않았습니다."
     link_company = str(expected_company or "").strip()
     if not link_company:
         return ""
@@ -554,12 +576,15 @@ def _validated_report_id(
     reference: str,
     *,
     expected_company: str = "",
-    expected_company_id: str = "",
+    expected_company_id: str | None = "",
 ) -> tuple[str, str]:
     """결과 참조가 저장돼 있고 아직 열리는 «이 회사의» 보고서인지 확인한다.
 
     ★ 회사 대조를 서버에서 하는 이유 — 관리자가 화면의 회사명을 눈으로 거르는
       것은 방어가 아니다. 한 번만 틀려도 받은 사람은 엉뚱한 회사 보고서를 본다.
+
+    ★ 참조가 비어 있으면(연결 해제) 대조 없이 통과시킨다. 연결을 «푸는» 쪽은
+      안전한 방향이라 확인 실패로 막을 이유가 없다.
     """
     if not reference.strip():
         return "", ""
