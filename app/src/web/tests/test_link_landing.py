@@ -22,6 +22,7 @@ import re
 import uuid
 
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 
 from src.core import clock
@@ -37,7 +38,8 @@ from src.features.sharelink import store as share_store
 from src.features.sharelink.constants import KEY_COOKIE_NAME
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
-from src.web import main, paid_runtime, runtime
+from src.features.sharelink import tracks as share_tracks
+from src.web import main, paid_runtime, request_helpers, runtime
 from src.web.tests._visible_text import visible_text
 
 _열쇠 = "b7c1d2e3f4a5b6c7b7c1d2e3f4a5b6c7"
@@ -701,3 +703,68 @@ def test_안내문은_다음에_할_일을_알려준다(client: TestClient):
 
     assert "다시 확인해" in 없음
     assert "다시 확인해" in 잘못된주소
+
+
+# ══════════════════════════════════════════════════════════
+# ⑪ 조사 도중 링크가 닫혔을 때의 화면 (설계 03장 §3-7)
+# ══════════════════════════════════════════════════════════
+
+
+def _닫힌_링크로_조사를_시도한다() -> str:
+    """살아 있는 줄 알고 눌렀는데 그 사이 링크가 닫힌 경우의 응답 본문.
+
+    `_track_of`가 갈래를 정한 뒤 실행 경계가 한 번 더 확인하는 자리다. 그
+    사이에 링크가 닫히면 여기서 403 화면이 나온다.
+    """
+    요청 = Request(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "scheme": "http",
+            "method": "POST",
+            "path": "/run",
+            "raw_path": b"/run",
+            "query_string": b"",
+            "headers": [(b"host", b"127.0.0.1:8020")],
+            "server": ("127.0.0.1", 8020),
+            "client": ("127.0.0.1", 50123),
+        }
+    )
+    막힘 = request_helpers.require_active_share_link(
+        요청,
+        resolved_track=(share_tracks.Track.LINK, _열쇠, 3000.0),
+    )
+    assert 막힘 is not None
+    assert 막힘.status_code == 403
+    return 막힘.body.decode("utf-8")
+
+
+def _닫힌_링크_안내문구(본문: str) -> str:
+    """그 화면이 사람에게 «말하는 한 문장». 화면 틀이 아니라 문구만 본다."""
+    문단 = re.findall(r"<p>([^<]*)</p>", 본문)
+    assert len(문단) == 1, 문단
+    return 문단[0].strip()
+
+
+def test_닫힌_링크_안내문구는_내부용어를_쓰지_않는다():
+    """★ 이 화면도 인사팀이 읽는다. 「LINK」·「철회」는 여기서도 쓰지 않는다.
+
+    ★ 「철회」는 「누가 나를 잘랐나」로 읽힌다 — 받는 사람에게 만료와 철회는
+      같은 뜻이므로 첫 화면 안내와 **같은 말**을 쓴다 (설계 03장 §3-7).
+    """
+    문구 = _닫힌_링크_안내문구(_닫힌_링크로_조사를_시도한다())
+
+    assert "초대 링크" in 문구
+    assert "LINK" not in 문구
+    assert "철회" not in 문구
+    assert "우리" not in 문구
+    for 용어 in _내부용어:
+        assert 용어.casefold() not in 문구.casefold(), 용어
+
+
+def test_닫힌_링크_안내문구도_다음에_할_일을_알려준다():
+    """★ 「안 됩니다」로 끝내지 않는다. 첫 화면 안내와 같은 다음 걸음을 말한다."""
+    문구 = _닫힌_링크_안내문구(_닫힌_링크로_조사를_시도한다())
+
+    assert "사용이 중단되어" in 문구
+    assert "연락처로 알려 주시면" in 문구

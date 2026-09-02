@@ -525,7 +525,13 @@ def require_active_share_link(
             name="share_scope_error.html",
             context=_ctx(
                 request,
-                scope_error="이 LINK는 만료됐거나 철회되어 더 이상 사용할 수 없습니다.",
+                # ★ 이 문구는 인사팀이 읽는다 — 내부 용어(LINK)와 「철회」를
+                #   쓰지 않는다. 받는 사람에게 만료와 철회는 같은 뜻이라
+                #   첫 화면 안내와 **같은 말**을 쓴다 (설계 03장 §3-7).
+                scope_error=(
+                    "이 초대 링크는 사용이 중단되어 더 이상 열리지 않습니다. "
+                    "포트폴리오에 적힌 연락처로 알려 주시면 새 링크를 보내 드립니다."
+                ),
             ),
             status_code=403,
         )
