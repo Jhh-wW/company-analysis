@@ -98,17 +98,21 @@ deselected 수는 최종 통합 회귀 뒤 작성하는 리뷰 반영결과 문�
 명시적으로 제외되며, 해당 marker를 선택했는데 로컬 자료가 없으면 시험은 실패한다.
 
 ```powershell
-# app 폴더
-$env:TLDEXTRACT_CACHE="$PWD\.cache\tldextract"
-.\.venv\Scripts\python -m pytest src tools/tests -q `
-  -m "not local_integration" `
-  --basetemp=.pytest_tmp_handoff_app
-
-# 저장소 루트
-cd ..
-.\app\.venv\Scripts\python -m pytest analysis_engine/src -q `
-  --basetemp=app/.pytest_tmp_handoff_engine
+$repo = '<저장소를 받은 폴더>'
+$py = Join-Path $repo '.venv\Scripts\python.exe'
+$env:ANALYSIS_ENGINE_DISABLE_DOTENV = '1'
+$env:TLDEXTRACT_CACHE = Join-Path $repo 'app\.cache\tldextract'
+Set-Location -LiteralPath (Join-Path $repo 'app')
+& $py -m pytest src -q -p no:cacheprovider --basetemp='C:\pt_app'
+Set-Location -LiteralPath $repo
+& $py -m pytest analysis_engine/src -q -p no:cacheprovider --basetemp='C:\pt_eng'
+& $py -m pytest deploy/tests ops/tests app/tools/tests -q -p no:cacheprovider --basetemp='C:\pt_ops'
 ```
+
+⚠️ 위 세 묶음(`app/src`, `analysis_engine/src`, `deploy/tests ops/tests
+app/tools/tests`)은 **각각 따로** 실행해야 한다. 한 pytest 세션에 합쳐서 돌리면
+`tools` 모듈명이 겹쳐 무관한 시험 1건이 거짓 실패로 잡힌다 — 실패가 나오면 먼저
+세 묶음을 분리해서 실행했는지부터 확인한다.
 
 대용량 로컬 자료까지 준비된 경우에만 app 폴더에서 아래 명령을 별도로 실행한다. 자료가
 없는데 marker를 선택하면 실패하는 것이 정상이며, 기본 회귀의 녹색으로 숨기지 않는다.

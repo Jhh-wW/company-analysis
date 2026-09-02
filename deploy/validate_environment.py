@@ -732,7 +732,7 @@ def validate(
     ):
         errors.append(
             "GRACEFUL_SHUTDOWN_SECONDS: Uvicorn HTTP 정리 뒤 앱 240초 정리가 "
-            "직렬 실행되므로 Render 플랫폼 300초 안에 끝나도록 20이어야 합니다"
+            "직렬 실행되므로 Render 플랫폼 30초 안에 끝나도록 20이어야 합니다"
         )
     errors.extend(_validate_persistence_paths(environment))
 
