@@ -630,3 +630,49 @@ def test_철회된_링크_쿠키를_가진_관리자에게도_카드가_안_보�
 
     assert "하이브 보고서 보기" not in 본문
     assert "남은 이용 한도" not in 본문
+
+
+# ══════════════════════════════════════════════════════════
+# ⑩ 링크가 안 열릴 때의 안내문 (설계 03장 §3-7)
+# ══════════════════════════════════════════════════════════
+
+
+@pytest.mark.parametrize(
+    "상태", ["invalid", "missing", "expired", "revoked"]
+)
+def test_초대링크_안내문은_내부용어를_쓰지_않는다(client: TestClient, 상태: str):
+    """★ 링크가 안 열린 사람이 처음 읽는 글이다. 코드 용어부터 보면 안 된다.
+
+    ★ 특히 「철회」는 쓰지 않는다 — 받는 사람에게 만료와 철회는 같은 뜻이고,
+      「누가 나를 잘랐나」로 읽힌다. 구분은 관리자 화면에서만 한다 (설계 03장 §3-7).
+    """
+    본문 = visible_text(client.get(f"/?share_status={상태}").text)
+
+    assert "초대 링크" in 본문 or "주소가 올바르지" in 본문
+    for 용어 in _내부용어:
+        assert 용어.casefold() not in 본문.casefold(), 용어
+    for 용어 in _대문자_내부용어:
+        assert 용어 not in client.get(f"/?share_status={상태}").text, 용어
+    assert "우리" not in 본문
+
+
+def test_사용기간_끝남과_중단은_받는_사람에게_같은_말이다(client: TestClient):
+    """★ 두 안내가 다르면 받는 사람은 「내가 잘렸나」를 추측하게 된다.
+
+    할 일은 둘 다 같다 — 연락해서 새 링크를 받는 것이다 (설계 03장 §3-7).
+    """
+    끝남 = visible_text(client.get("/?share_status=expired").text)
+    중단 = visible_text(client.get("/?share_status=revoked").text)
+
+    assert "사용이 중단되어" in 끝남
+    assert 끝남 == 중단
+    assert "연락처로 알려 주시면" in 끝남
+
+
+def test_안내문은_다음에_할_일을_알려준다(client: TestClient):
+    """★ 「안 됩니다」로 끝내지 않는다. 지금 할 수 있는 일을 말한다."""
+    없음 = visible_text(client.get("/?share_status=missing").text)
+    잘못된주소 = visible_text(client.get("/?share_status=invalid").text)
+
+    assert "다시 확인해" in 없음
+    assert "다시 확인해" in 잘못된주소

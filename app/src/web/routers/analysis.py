@@ -260,11 +260,26 @@ def _observe_candidate_resolution(
 def _was_interrupted(job_id: str) -> bool:
     with storage_db.connect() as conn:
         return job_interruptions.exists(conn, job_id)
+#: 링크가 안 열린 사람이 «처음 읽는 글»이다. 코드 용어(LINK·철회)부터 보면
+#: 「고장 났나」로 읽힌다 (설계 03장 §3-7, 2026-09-02 root 결정 ⑥).
+#: ★ 「철회」는 특히 쓰지 않는다 — 받는 사람에게 만료와 철회는 같은 뜻이고,
+#:   「누가 나를 잘랐나」로 읽힌다. 그래서 두 경우에 **같은 말**을 한다.
+#:   구분은 관리자 화면에서만 한다.
+_LINK_CLOSED_NOTICE = (
+    "이 초대 링크는 사용이 중단되어 첫 화면을 열었습니다. "
+    "포트폴리오에 적힌 연락처로 알려 주시면 새 링크를 보내 드립니다."
+)
 _SHARE_NOTICE_BY_CODE = {
-    "invalid": "LINK가 올바르지 않아 일반 첫 화면을 열었습니다.",
-    "missing": "이 LINK는 닫혔거나 존재하지 않아 일반 첫 화면을 열었습니다.",
-    "expired": "이 LINK의 사용 기간이 지나 일반 첫 화면을 열었습니다.",
-    "revoked": "이 LINK가 철회되어 일반 첫 화면을 열었습니다.",
+    "invalid": (
+        "받으신 주소가 올바르지 않아 첫 화면을 열었습니다. "
+        "초대 링크를 다시 확인해 주세요."
+    ),
+    "missing": (
+        "이 초대 링크를 찾을 수 없어 첫 화면을 열었습니다. "
+        "받으신 링크를 다시 확인해 주세요."
+    ),
+    "expired": _LINK_CLOSED_NOTICE,
+    "revoked": _LINK_CLOSED_NOTICE,
     # ★ 「지원 맥락이 표시된 입력 화면」이라고 말하지 않는다 — 초대 링크 손님에게는
     #   그 배너 대신 랜딩이 보인다(G-S6). 화면에 없는 것을 설명하면 손님은
     #   없는 것을 찾는다.

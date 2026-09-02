@@ -417,7 +417,9 @@ def test_공유링크와_보고서_안내가_동시에_있어도_둘다_표시�
         response = client.get("/?share_status=missing&report_status=unavailable")
 
     assert response.status_code == 200
-    assert "이 LINK는 닫혔거나 존재하지 않아" in response.text
+    # 기대값 이전(G-S6c): 안내문에서 내부 용어 LINK를 걷어냈다 (설계 03장 §3-7).
+    # 이 시험의 대상은 「두 안내가 동시에 나온다」이지 문구 자체가 아니다.
+    assert "이 초대 링크를 찾을 수 없어" in response.text
     assert "요청한 보고서를 열 수 없어" in response.text
 
 
