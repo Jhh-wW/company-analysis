@@ -188,3 +188,15 @@ def test_대사_목록_화면은_정체된_의무만_보여준다(admin: TestCli
     assert response.status_code == 200
     assert pending_id in response.text
     assert delivered_id not in response.text
+
+
+def test_관리자_설정_화면에_대사_링크가_있다(admin: TestClient) -> None:
+    """admin_home.html은 어느 라우트도 렌더하지 않는 고아 템플릿이라(G-S8 삭제
+    예정, 실측 확인) 링크를 둬도 아무도 못 본다. 실제로 렌더되는
+    ``/admin/settings``(admin_settings.html) 본문에 대사 화면 링크를 둔다.
+    """
+
+    response = admin.get("/admin/settings")
+
+    assert response.status_code == 200
+    assert 'href="/admin/delivery/settle"' in response.text
