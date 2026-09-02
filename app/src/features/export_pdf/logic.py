@@ -92,7 +92,6 @@ from src.shared.report_generation.public_projection import (
     PublicCoverMetricsBlock,
     PublicPeriodSummaryBlock,
     PublicReportProjection,
-    PublicSectionContentBlock,
     PublicSectionDisplay,
     PublicTableBlock,
     PublicVisualBlock,
