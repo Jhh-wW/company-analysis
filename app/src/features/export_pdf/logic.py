@@ -2318,6 +2318,25 @@ def _page_furniture(canvas: Canvas, doc: SimpleDocTemplate) -> None:
     canvas.restoreState()
 
 
+def _content_manifest_metadata(
+    report: Report, *, projection: PublicReportProjection | None
+) -> tuple[str, str]:
+    """PDF 메타에 실을 (지문 버전, 지문) 한 쌍.
+
+    ★ 봉인이 있으면 ``PublicReportDigest.content_sha256``이다. 이 지문은 공개
+      본문뿐 아니라 감사 장부(FactRecord·fact_id·등급 기여)까지 덮으므로,
+      「글자는 같은데 장부가 다른」 PDF를 같은 공개물로 승인하지 못한다
+      (설계 017 §5 — PDF 전용 별도 직렬화기였던 옛 지문 C를 대체).
+    ★ 봉인이 없는 v1·옛 v2 저장본은 옛 지문을 그대로 쓴다. 그 경로에는 대체할
+      봉인 자체가 없고, 값을 바꾸면 이미 나간 PDF의 bytes와 승인 해시가
+      달라진다(설계 §6 — legacy 무변).
+    """
+
+    if projection is not None:
+        return PUBLIC_PROJECTION_VERSION, build_report_digest(projection).content_sha256
+    return CONTENT_MANIFEST_VERSION, public_content_manifest_sha256(report)
+
+
 def _add_accessibility_metadata(
     raw_pdf: bytes,
     title: str,
@@ -2482,13 +2501,16 @@ def _build_pdf(report: Report) -> bytes:
         onLaterPages=_page_furniture,
         canvasmaker=_BrandedCanvas,
     )
+    manifest_version, manifest_sha256 = _content_manifest_metadata(
+        report, projection=projection
+    )
     return _add_accessibility_metadata(
         buffer.getvalue(),
         title,
         author=author,
         subject=subject,
-        content_manifest_version=CONTENT_MANIFEST_VERSION,
-        content_manifest_sha256=public_content_manifest_sha256(report),
+        content_manifest_version=manifest_version,
+        content_manifest_sha256=manifest_sha256,
     )
 
 

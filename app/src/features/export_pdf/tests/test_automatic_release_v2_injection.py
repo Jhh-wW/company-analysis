@@ -356,3 +356,60 @@ def test_봉인이_있으면_내용지문_대조가_projection_digest를_본다(
     assert not content_manifest_matches(
         sealed, _manifest_candidate(CONTENT_MANIFEST_VERSION, digest.content_sha256)
     )
+
+
+@pytest.fixture(scope="module")
+def sealed_v2_report(cited_v2_report):
+    """봉인이 붙은 v2 보고서 — PDF도 이 봉인에서 그려진다."""
+
+    return replace(
+        cited_v2_report, public_projection=build_public_projection(cited_v2_report)
+    )
+
+
+@pytest.fixture(scope="module")
+def sealed_v2_candidate(sealed_v2_report):
+    # PDF 렌더는 비싸다 — 아래 시험들이 같은 후보를 나눠 쓴다 (읽기 전용).
+    return prepare_pdf_release(sealed_v2_report)
+
+
+def test_자동출고는_후보_digest를_projection_digest와_대조한다(
+    cited_v2_report, sealed_v2_report, sealed_v2_candidate
+):
+    """봉인된 보고서의 PDF는 봉인 digest를 싣고, 그 값으로 출고가 판정된다.
+
+    ★ 음성 대조 — 같은 PDF를 «봉인이 없는» 보고서로 출고하려 하면 막혀야 한다.
+      막히지 않으면 지문 대조가 실은 아무것도 안 보고 있다는 뜻이다.
+    """
+
+    assert sealed_v2_report.public_projection is not None
+    digest = build_report_digest(sealed_v2_report.public_projection)
+
+    assert sealed_v2_candidate.content_manifest_version == PUBLIC_PROJECTION_VERSION
+    assert sealed_v2_candidate.content_manifest_sha256 == digest.content_sha256
+    assert sealed_v2_candidate.content_manifest_sha256 != public_content_manifest_sha256(
+        sealed_v2_report
+    )
+
+    checks, reasons = run_automatic_checks(
+        sealed_v2_report,
+        sealed_v2_candidate,
+        content_validator=lambda _report: (),
+    )
+    assert [check.passed for check in checks] == [True] * 4
+    assert reasons == ()
+
+    blocked_checks, blocked_reasons = run_automatic_checks(
+        cited_v2_report,
+        sealed_v2_candidate,
+        content_validator=lambda _report: (),
+    )
+    assert blocked_checks[2].passed is False
+    assert any("PDF 공개 내용" in reason for reason in blocked_reasons)
+    with pytest.raises(AutomaticGateStopped, match="PDF 공개 내용"):
+        automatic_release_pdf(
+            cited_v2_report,
+            sealed_v2_candidate,
+            released_at=_AT,
+            content_validator=lambda _report: (),
+        )

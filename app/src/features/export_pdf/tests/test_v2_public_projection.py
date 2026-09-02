@@ -6,6 +6,8 @@
       시점에 다시 «계산»하지 않는다. 그래서 ``table_visualization`` ·
       ``cover_metrics`` · ``source_verification_label`` · ``section_content_blocks``
       네 전역을 예외로 바꿔도 PDF가 정상으로 나와야 한다.
+    - PDF 메타 지문은 옛 ``content_manifest``가 아니라
+      ``PublicReportDigest.content_sha256``이다(설계 §5의 지문 C 교체).
     - ``.ledger``(감사 장부)는 어디에도 그리지 않는다 — 장부만 바꾸면 글자와
       ``display_sha256``은 그대로이고 ``content_sha256``만 달라져야 한다.
     - v1(canonical) PDF는 **한 바이트도** 바뀌지 않는다.
@@ -45,6 +47,7 @@ from src.features.composer.render import (
 from src.features.export_pdf import logic as pdf_logic
 from src.features.export_pdf.content_manifest import (
     PDF_MANIFEST_SHA256_KEY,
+    PDF_MANIFEST_VERSION_KEY,
     public_content_manifest_sha256,
 )
 from src.features.pipeline.canonical_demo import build_demo_report
@@ -61,7 +64,10 @@ from src.shared.report_generation.canonical import (
     table_public_projection,
 )
 from src.shared.report_generation.models import canonical_sha256
-from src.shared.report_generation.public_projection import build_report_digest
+from src.shared.report_generation.public_projection import (
+    PUBLIC_PROJECTION_VERSION,
+    build_report_digest,
+)
 
 
 _PUBLIC_SENTENCE = "공식 자료로 확인한 공개 본문 문장이다."
@@ -345,7 +351,27 @@ def test_v2_PDF는_블록_밖_문자열을_만들지_않는다(monkeypatch):
 
 
 # ══════════════════════════════════════════════════════════
-# ② 장부만 바꾼 보고서 — 글자·display는 같고 content 지문만 다르다
+# ② 메타 지문 — 옛 content_manifest가 아니라 새 digest
+# ══════════════════════════════════════════════════════════
+
+
+def test_v2_PDF_메타키는_PublicReportDigest_content_sha256이다():
+    report = _v2_full_report()
+    assert report.public_projection is not None
+    digest = build_report_digest(report.public_projection)
+
+    metadata = PdfReader(io.BytesIO(pdf_logic.build_pdf(report))).metadata or {}
+
+    assert str(metadata.get(PDF_MANIFEST_VERSION_KEY)) == PUBLIC_PROJECTION_VERSION
+    assert str(metadata.get(PDF_MANIFEST_SHA256_KEY)) == digest.content_sha256
+    # 옛 지문(PDF 전용 별도 직렬화기)이 남아 있으면 교체가 안 된 것이다.
+    assert str(
+        metadata.get(PDF_MANIFEST_SHA256_KEY)
+    ) != public_content_manifest_sha256(report)
+
+
+# ══════════════════════════════════════════════════════════
+# ③ 장부만 바꾼 보고서 — 글자·display는 같고 content 지문만 다르다
 # ══════════════════════════════════════════════════════════
 
 
@@ -372,7 +398,7 @@ def test_v2_감사장부와_fact_id가_바뀌어도_공개PDF_글자는_같다()
 
 
 # ══════════════════════════════════════════════════════════
-# ③ 읽는 법·3개년 띠 — 웹에만 있던 두 가지를 PDF도 블록에서 그린다(D5)
+# ④ 읽는 법·3개년 띠 — 웹에만 있던 두 가지를 PDF도 블록에서 그린다(D5)
 # ══════════════════════════════════════════════════════════
 
 
@@ -408,7 +434,7 @@ def test_v2_PDF는_reading과_3개년띠를_블록에서_그린다():
 
 
 # ══════════════════════════════════════════════════════════
-# ④ 본문 글자 — 봉인된 문단과 «글자 단위»로 같다
+# ⑤ 본문 글자 — 봉인된 문단과 «글자 단위»로 같다
 # ══════════════════════════════════════════════════════════
 
 
@@ -433,7 +459,7 @@ def test_v2_PDF_텍스트는_display_paragraphs와_글자_단위로_같다():
 
 
 # ══════════════════════════════════════════════════════════
-# ⑤ v1(canonical) PDF는 한 바이트도 바뀌지 않는다
+# ⑥ v1(canonical) PDF는 한 바이트도 바뀌지 않는다
 # ══════════════════════════════════════════════════════════
 
 #: base 커밋 ``5b525ee``에서 실측한 v1 데모 보고서 PDF의 SHA-256과 길이다.
