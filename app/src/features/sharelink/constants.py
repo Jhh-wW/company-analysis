@@ -38,6 +38,13 @@ MAX_LINK_MAX_AGE_DAYS: Final[int] = 3650
 #:   할 수 있으므로, 한 번의 폭을 기본 수명과 같게 묶어 두는 편이 안전하다.
 MAX_LINK_EXTENSION_DAYS: Final[int] = DEFAULT_LINK_MAX_AGE_DAYS
 
+#: 발급일부터 세는 링크의 **총 수명 상한**(일). 미루기를 몇 번 하든 이 날을 넘지
+#: 못한다 (2026-09-02 결정 D-G8b).
+#: ★ 1회 상한(``MAX_LINK_EXTENSION_DAYS``)과 막는 위험이 다르다 —
+#:   1회 상한은 「실수로 2099년을 넣는 것」을, 총 상한은 「조금씩 계속 미뤄
+#:   사실상 영구 링크가 되는 것」을 막는다. QR은 한 번 뿌리면 회수할 수 없다.
+MAX_LINK_TOTAL_AGE_DAYS: Final[int] = 365
+
 #: 연장 사유로 받을 글자 수 상한. 사유는 «나중의 나»를 위한 기록이라 필수다.
 LINK_ADJUSTMENT_REASON_MAX_CHARS: Final[int] = 200
 

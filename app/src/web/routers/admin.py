@@ -62,6 +62,10 @@ _ADMIN_AUDIT_TABLE = admin_audit_store.TABLE_ADMIN_AUDIT_EVENTS
 _AUDIT_SAFE_CHARS = frozenset(string.ascii_letters + string.digits + "_.:-")
 #: 발급 화면에서 QR 그림을 내려받을 때 쓰는 파일 이름.
 _ISSUED_QR_FILENAME = "company-analysis-link-qr.svg"
+#: 총 수명 상한에 닿아 더 미룰 수 없을 때 보여줄 말. 내부 용어를 쓰지 않는다.
+_LINK_EXTENSION_CAP_MESSAGE = (
+    "이 링크는 더 미룰 수 없습니다. 새 링크를 발급해 주세요."
+)
 #: 링크 변경 이력에 적힌 종류를 관리자 화면 말로 바꾼다.
 _ADJUSTMENT_KIND_LABELS = {
     share_store.ADJUSTMENT_KIND_EXPIRES: "만료일",
@@ -907,7 +911,7 @@ def _link_detail_page(
     generated_runs: list[share_store.ShareLinkRun] = []
     run_report_states: dict[str, str] = {}
     adjustments: list[share_store.ShareLinkAdjustment] = []
-    link_company_id_missing = False
+    link_company_id_state = "none"
     try:
         with storage_db.connect() as conn:
             link = share_store.load_by_hash(conn, key_hash)
@@ -915,8 +919,16 @@ def _link_detail_page(
                 report_state = _linked_report_state(conn, link)
                 # ★ 결속 보고서에 회사 고유번호가 없으면 이후 재결속은 «이름»만
                 #   대조하게 된다 — 같은 이름의 다른 회사가 통과한다 (G-S12b).
+                # ★ 「없다」와 「못 읽었다」를 나눈다. 같은 침묵으로 두면 읽기가
+                #   깨진 동안 관리자는 아무 문제가 없다고 믿는다 (G-S4c).
                 if report_state in ("active", "expired"):
-                    link_company_id_missing = _link_company_id(conn, link) == ""
+                    resolved_company_id = _link_company_id(conn, link)
+                    if resolved_company_id is None:
+                        link_company_id_state = "unknown"
+                    elif resolved_company_id:
+                        link_company_id_state = "present"
+                    else:
+                        link_company_id_state = "missing"
                 adjustments = share_store.list_link_adjustments(
                     conn, key_hash=link.key_hash
                 )
@@ -944,7 +956,8 @@ def _link_detail_page(
         )
 
     extension_bounds = _extension_bounds(
-        share_logic.expiry_date_of(link.created_at, expires_at=link.expires_at)
+        share_logic.expiry_date_of(link.created_at, expires_at=link.expires_at),
+        created_at=link.created_at,
     )
     open_event_labels = [
         _kst_timestamp_label(event.opened_at) for event in open_events
@@ -1026,7 +1039,7 @@ def _link_detail_page(
             is_deployed=False,
             qr_svg="",
             report_state=report_state,
-            link_company_id_missing=link_company_id_missing,
+            link_company_id_state=link_company_id_state,
             link_adjustments=adjustments,
             link_adjustment_kind_labels=_ADJUSTMENT_KIND_LABELS,
             link_adjustment_at_labels={
@@ -1034,7 +1047,13 @@ def _link_detail_page(
                 for item in adjustments
             },
             link_extend_min_date=extension_bounds[0].isoformat(),
-            link_extend_max_date=extension_bounds[1].isoformat(),
+            link_extend_max_date=(
+                "" if extension_bounds[1] is None
+                else extension_bounds[1].isoformat()
+            ),
+            link_extension_capped=extension_bounds[1] is None,
+            link_extension_cap_message=_LINK_EXTENSION_CAP_MESSAGE,
+            link_total_age_days=share_constants.MAX_LINK_TOTAL_AGE_DAYS,
             link_extend_max_days=share_constants.MAX_LINK_EXTENSION_DAYS,
             link_reason_max_chars=(
                 share_constants.LINK_ADJUSTMENT_REASON_MAX_CHARS
@@ -1047,45 +1066,78 @@ def _link_detail_page(
     return _admin_response(request, response)
 
 
-def _extension_bounds(previous: dt.date | None) -> tuple[dt.date, dt.date]:
+def _link_total_age_limit(created_at: str) -> dt.date | None:
+    """이 링크가 «발급일 기준»으로 살 수 있는 마지막 날. 못 읽으면 ``None``.
+
+    ★ 미루기를 반복하면 링크는 영원히 산다. 1회 상한만으로는 그것을 못 막는다.
+      회수할 수 없는 QR을 뿌리는 일이므로 발급일에서 세는 천장을 따로 둔다
+      (결정 D-G8b).
+    """
+
+    try:
+        issued = clock.business_date_from_iso(created_at)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    try:
+        return issued + dt.timedelta(
+            days=share_constants.MAX_LINK_TOTAL_AGE_DAYS
+        )
+    except (OverflowError, ValueError):
+        return None
+
+
+def _extension_bounds(
+    previous: dt.date | None, *, created_at: str
+) -> tuple[dt.date, dt.date | None]:
     """새 만료일로 받을 수 있는 «가장 이른 날»과 «가장 늦은 날».
 
     Args:
         previous: 지금 만료일. 읽을 수 없으면 ``None``.
+        created_at: 발급 시각. 총 수명 상한을 여기서 센다.
 
     Returns:
-        (최소, 최대). 둘 다 그날을 포함한다.
+        (최소, 최대). 둘 다 그날을 포함한다. **더 미룰 여지가 없으면 최대가
+        ``None``**이다 — 발급일을 못 읽는 경우도 여기에 들어간다.
 
-    ★ 상한을 «오늘»이 아니라 «지금 만료일»에서 잰다. 오늘 기준으로 재면 방금
+    ★ 1회 폭은 «오늘»이 아니라 «지금 만료일»에서 잰다. 오늘 기준으로 재면 방금
       발급한 90일짜리 링크는 상한과 현재 만료일이 같은 날이 되어 **한 번도
       못 미룬다**. 관리자가 원하는 것은 「지금보다 얼마나 더」이므로 그 폭을
       묶는 편이 맞다.
     ★ 이미 닫힌 링크는 오늘을 기준으로 잰다 — 과거 날짜에서 재면 미뤄도
       여전히 닫힌 날이 나온다.
+    ★ 두 상한 중 **먼저 걸리는 쪽**이 최대다. 총 상한이 더 가까우면 1회 90일을
+      다 못 쓴다.
     """
 
     today = clock.today_kst()
     base = previous if previous is not None and previous > today else today
-    return (
-        base + dt.timedelta(days=1),
-        base + dt.timedelta(days=share_constants.MAX_LINK_EXTENSION_DAYS),
+    action_limit = base + dt.timedelta(
+        days=share_constants.MAX_LINK_EXTENSION_DAYS
     )
+    total_limit = _link_total_age_limit(created_at)
+    if total_limit is None:
+        return base + dt.timedelta(days=1), None
+    maximum = min(action_limit, total_limit)
+    if maximum <= base:
+        return base + dt.timedelta(days=1), None
+    return base + dt.timedelta(days=1), maximum
 
 
 def _validated_new_expiry(
-    raw: str, *, previous: dt.date | None
+    raw: str, *, previous: dt.date | None, created_at: str
 ) -> tuple[dt.date | None, str]:
     """관리자가 적은 새 만료일이 «미루는» 값인지 확인한다.
 
     Args:
         raw: 폼에 적힌 ``YYYY-MM-DD``.
         previous: 지금 만료일. 읽을 수 없으면 ``None``.
+        created_at: 발급 시각. 총 수명 상한을 여기서 센다.
 
     Returns:
         (새 만료일, 오류 문구). 오류가 있으면 날짜는 ``None``이다.
 
-    ★ 상한을 두는 이유 — 실수로 2099년을 넣으면 회수 불가능한 QR이 사실상
-      영구 링크가 된다. 연장은 여러 번 할 수 있으므로 한 번의 폭만 묶는다.
+    ★ 상한이 둘인 이유 — 1회 상한은 「실수로 2099년」을, 총 상한은 「조금씩 계속
+      미뤄 사실상 영구 링크가 되는 것」을 막는다. 서로 다른 위험이라 둘 다 둔다.
     """
 
     parsed = share_logic.expiry_date_from_value(raw)
@@ -1099,8 +1151,17 @@ def _validated_new_expiry(
             f"지금 만료일({previous:%Y-%m-%d})보다 뒤의 날짜만 넣을 수 있습니다. "
             "기간을 줄이려면 링크를 철회하세요."
         )
-    _minimum, maximum = _extension_bounds(previous)
+    _minimum, maximum = _extension_bounds(previous, created_at=created_at)
+    if maximum is None:
+        return None, _LINK_EXTENSION_CAP_MESSAGE
     if parsed > maximum:
+        total_limit = _link_total_age_limit(created_at)
+        if total_limit is not None and maximum == total_limit:
+            return None, (
+                f"이 링크는 {maximum:%Y-%m-%d}까지만 미룰 수 있습니다. "
+                f"발급 후 {share_constants.MAX_LINK_TOTAL_AGE_DAYS}일이 한 링크의 "
+                "최대 기간입니다. 더 필요하면 새 링크를 발급해 주세요."
+            )
         return None, (
             f"한 번에 {share_constants.MAX_LINK_EXTENSION_DAYS}일까지만 미룰 수 "
             f"있습니다. {maximum:%Y-%m-%d} 이내로 넣어주세요."
@@ -1171,7 +1232,9 @@ async def admin_link_extend(
                 link.created_at, expires_at=link.expires_at
             )
             new_expiry, validation_error = _validated_new_expiry(
-                str(expires_on or ""), previous=previous
+                str(expires_on or ""),
+                previous=previous,
+                created_at=link.created_at,
             )
             if not reason_clean:
                 # ★ 이유를 «필수»로 두는 이유 — 나중의 내가 왜 미뤘는지 알아야

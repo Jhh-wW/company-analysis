@@ -21,11 +21,19 @@
   {% endif %}
   {% if link.note %}<p class="muted">메모 · {{ link.note }}</p>{% endif %}
 
-  {% if link_company_id_missing %}
+  {% if link_company_id_state == "missing" %}
   <div class="warn-line" role="alert" style="margin-top:16px">
     <span aria-hidden="true">⚠️</span>
     <span>이 보고서에는 회사 고유번호가 없어 같은 이름의 다른 회사와 구분하지 못합니다.
       <br>보고서를 다시 만들어 연결하면 이름이 같은 다른 회사가 잘못 연결되는 것을 막을 수 있습니다.</span>
+  </div>
+  {% elif link_company_id_state == "unknown" %}
+  {# 「없다」와 「못 읽었다」를 나눠 말한다 — 읽기가 깨진 동안 아무 문제가 없다고
+     믿게 두면 안 된다. 이 상태에서는 보고서 교체 자체가 막힌다. #}
+  <div class="warn-line" role="alert" style="margin-top:16px">
+    <span aria-hidden="true">⚠️</span>
+    <span>이 보고서의 회사 고유번호를 확인하지 못했습니다.
+      <br>확인될 때까지는 연결된 보고서를 바꿀 수 없습니다. 잠시 후 다시 확인해 주세요.</span>
   </div>
   {% endif %}
 
@@ -90,6 +98,8 @@
   <p class="muted" style="margin-top:6px">
     채용 일정이 늘어났을 때 이 링크가 닫히는 날을 뒤로 미룹니다.
     한 번에 {{ link_extend_max_days }}일까지 미룰 수 있고, 여러 번 미룰 수 있습니다.
+    다만 한 링크를 쓸 수 있는 기간은 발급한 날부터 모두 합쳐
+    {{ link_total_age_days }}일까지입니다.
     기간을 <strong>줄이려면</strong> 미루기 대신 링크를 철회하세요.
     바꾼 내용과 이유는 아래 표에 그대로 남습니다.
   </p>
@@ -101,6 +111,13 @@
   </div>
   {% elif link_revoked %}
   <p class="muted">철회한 링크는 만료일을 미뤄도 다시 열리지 않습니다.</p>
+  {% elif link_extension_capped %}
+  <div class="warn-line" role="note" style="margin-top:14px">
+    <span aria-hidden="true">ℹ️</span>
+    <span><strong>{{ link_extension_cap_message }}</strong><br>
+      한 링크는 발급한 날부터 {{ link_total_age_days }}일까지만 쓸 수 있습니다.
+      아래 이력은 그대로 남습니다.</span>
+  </div>
   {% else %}
   <form method="post" action="/admin/link/{{ link.key_hash }}/extend"
         aria-labelledby="link-extend-title" style="margin-top:14px">
