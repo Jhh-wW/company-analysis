@@ -1761,6 +1761,36 @@ def test_발급뒤_목록과_상세와_DB와_로그에_원문이_없다(
     assert "<svg" not in listing.text
 
 
+def test_실제_발급화면을_릴리스_수락시험_파서가_읽는다(
+    admin: TestClient, monkeypatch
+):
+    """★ 두 파일이 같은 앵커 이름을 쓰는지 «실제 렌더 결과»로 못 박는다.
+
+    릴리스 수락시험(`release_acceptance/logic.py`)은 실서버를 띄우는 별도 러너라
+    이 화면이 바뀌어도 pytest 가 알려주지 않는다. 그래서 여기서 이어 붙인다.
+    앵커 id를 한쪽에서만 바꾸면 이 시험이 깨진다.
+    """
+    from src.features.release_acceptance import (  # noqa: PLC0415
+        logic as acceptance_logic,
+    )
+
+    raw_key = "fedcba9876543210fedcba9876543210"
+    monkeypatch.setenv("SHARE_PUBLIC_BASE_URL", "https://demo.example")
+    monkeypatch.setattr(admin_router.share_issue, "new_key", lambda: raw_key)
+
+    created = admin.post(
+        "/admin/link/new",
+        data={"company": "카카오", "job": "마케팅"},
+        follow_redirects=False,
+    )
+
+    assert created.status_code == 200
+    읽은주소 = acceptance_logic.extract_issued_share_url(created.text)
+    assert 읽은주소 == f"https://demo.example/k/{raw_key}"
+    assert 읽은주소 == _issued_url_from_screen(created)
+    assert acceptance_logic.ISSUED_SHARE_URL_ANCHOR_ID == "issued-link-url"
+
+
 def test_옛_계약에서는_발급이_여전히_404다(admin: TestClient, monkeypatch):
     """대조군 — 결과 화면을 바꿔도 좁은 운영판의 발급 차단은 그대로다."""
     monkeypatch.setenv(
