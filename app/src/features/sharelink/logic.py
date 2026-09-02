@@ -208,16 +208,67 @@ def budget_left(
     return max(0.0, cap_krw - spent_for(spend, key, today))
 
 
+def total_budget_left(total_spent_krw: float, total_cap_krw: float) -> float:
+    """이 링크에 «수명 전체»로 남은 예산(원). 0 밑으로 안 내려간다.
+
+    Args:
+        total_spent_krw: 지금까지 이 링크가 쓴 돈(종결 실행 실측 + 진행 중 예약).
+        total_cap_krw: 이 링크의 수명 전체 상한.
+
+    Returns:
+        남은 돈. 이미 넘었으면 0.0.
+
+    ★ 하루 예산(`budget_left`)과 달리 **날이 바뀌어도 되살아나지 않는다.**
+      그게 「하루 상한」과 「누적 상한」을 둘 다 두는 이유다.
+    """
+    return max(0.0, total_cap_krw - total_spent_krw)
+
+
+def can_start_within_total_budget(
+    total_spent_krw: float, total_cap_krw: float
+) -> bool:
+    """«수명 전체» 예산만 놓고 볼 때 새 조사를 시작해도 되는가.
+
+    ★ 숫자가 깨져 NaN이 들어오면 `max`가 0.0을 돌려주므로 **막는 쪽**으로 떨어진다.
+      깨진 장부로 돈을 쓰는 것보다 링크 하나가 멈추는 편이 낫다.
+    """
+    return total_budget_left(total_spent_krw, total_cap_krw) > 0
+
+
 def can_start_new_run(
-    spend: DailySpend, key: str, today: dt.date, cap_krw: float
+    spend: DailySpend,
+    key: str,
+    today: dt.date,
+    cap_krw: float,
+    *,
+    total_spent_krw: float | None = None,
+    total_cap_krw: float | None = None,
 ) -> bool:
     """이 열쇠로 «새 조사»를 시작해도 되는가.
+
+    Args:
+        spend: 오늘 장부.
+        key: 열쇠 (열쇠 없는 손님은 `PUBLIC_BUCKET`).
+        today: 오늘 날짜.
+        cap_krw: 이 갈래의 **하루** 상한.
+        total_spent_krw: 이 링크가 수명 전체에 쓴 돈. LINK 갈래에만 준다.
+        total_cap_krw: 이 링크의 수명 전체 상한. LINK 갈래에만 준다.
+
+    Returns:
+        하루 상한과 누적 상한을 **둘 다** 통과하면 True.
 
     ★ 이것은 **새로 AI를 부르는 일**에만 건다.
       **이미 만들어 둔 보고서를 여는 것은 여기를 안 거친다** — 그건 0원이고,
       예산이 다 됐어도 계속 열려야 한다 (2026-08-16 사용자 결정).
+    ★ 누적 두 인자는 LINK 갈래에만 의미가 있다. MEMBER·ADMIN·PUBLIC은 링크가
+      아니라 사람·전체 통장이라 「수명」이라는 개념이 없어 그대로 생략한다
+      (2026-09-02 사용자 결정 D-G1).
     """
-    return budget_left(spend, key, today, cap_krw) > 0
+    if budget_left(spend, key, today, cap_krw) <= 0:
+        return False
+    if total_spent_krw is None or total_cap_krw is None:
+        return True
+    return can_start_within_total_budget(total_spent_krw, total_cap_krw)
 
 
 def total_spent(spend: DailySpend, today: dt.date) -> float:

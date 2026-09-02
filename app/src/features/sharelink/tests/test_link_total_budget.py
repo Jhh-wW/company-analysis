@@ -233,6 +233,43 @@ def test_링크에_직접_적어_둔_누적상한이_기본값을_이긴다(
     assert 링크.effective_total_budget_krw == 1500.0
 
 
+def test_음수_누적상한은_표가_먼저_막는다(conn: sqlite3.Connection) -> None:
+    """★ 깨진 금액이 저장되는 길 자체를 DB가 닫는다."""
+    key_hash = _링크를_만든다(conn)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "UPDATE share_links SET total_budget_krw = -1 WHERE key_hash = ?",
+            (key_hash,),
+        )
+
+
+def test_그래도_음수가_들어오면_링크를_열지_않고_닫는다() -> None:
+    """★ 표를 통과해 버린 깨진 값은 기본값으로 «되살리지» 않는다.
+
+    NULL과 음수는 다른 사건이다. NULL은 「아직 정한 적 없다」라서 기본값이 맞고,
+    음수는 「저장이 깨졌다」라서 돈을 더 쓰면 안 된다.
+    """
+    깨진_링크 = share_store.ShareLink(
+        key_hash="0" * 64,
+        company="카카오",
+        job="백엔드 개발",
+        report_id="",
+        note="",
+        created_at=_시각,
+        opened_count=0,
+        first_opened_at="",
+        last_opened_at="",
+        revoked_at="",
+        total_budget_krw=-1.0,
+    )
+
+    assert 깨진_링크.effective_total_budget_krw == 0.0
+    assert not share_logic.can_start_within_total_budget(
+        0.0, 깨진_링크.effective_total_budget_krw
+    )
+
+
 # ══════════════════════════════════════════════════════════
 # ③ 누적 사용액 = 종결 실행의 실측 원가 + 진행 중 예약
 # ══════════════════════════════════════════════════════════

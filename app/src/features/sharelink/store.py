@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from typing import Final, Optional
 
 from src.core import clock
+from src.features.budget import spend_store as budget_spend_store
+from src.features.budget import state_machine as budget_state_machine
 from src.features.sharelink import constants, logic
 
 #: 발급한 링크를 담는 표.
@@ -70,7 +72,12 @@ CREATE TABLE IF NOT EXISTS {TABLE_SHARE_LINKS} (
     first_opened_at TEXT NOT NULL DEFAULT '',
     last_opened_at  TEXT NOT NULL DEFAULT '',
     -- 삭제하지 않고 권한만 닫아 과거 접속·생성 이력을 보존한다.
-    revoked_at      TEXT NOT NULL DEFAULT ''
+    revoked_at      TEXT NOT NULL DEFAULT '',
+    -- ★ 이 링크가 «수명 전체»에 쓸 수 있는 AI 비용(원). 비어 있으면(기존 링크
+    --   전부) `constants.LINK_TOTAL_BUDGET_KRW` 기본값을 쓴다. 이미 뿌린 링크에
+    --   값을 채워 넣지 않으려고 일부러 NULL 허용이다.
+    total_budget_krw REAL DEFAULT NULL
+        CHECK (total_budget_krw IS NULL OR total_budget_krw >= 0)
 )
 """
 CREATE_OPEN_EVENTS_SQL = f"""
@@ -218,6 +225,25 @@ class ShareLink:
     first_opened_at: str
     last_opened_at: str
     revoked_at: str
+    #: 이 링크의 «수명 전체» 예산(원). ``None``이면 기본 상한을 쓴다.
+    total_budget_krw: Optional[float] = None
+
+    @property
+    def effective_total_budget_krw(self) -> float:
+        """이 링크가 수명 전체에 쓸 수 있는 돈(원).
+
+        ★ 비어 있으면 기본 상한(`constants.LINK_TOTAL_BUDGET_KRW`)이다 —
+          이미 뿌린 링크에 값을 채워 넣지 않으려고 NULL을 그대로 둔다.
+        ★ 저장이 깨져 음수·NaN이 들어오면 **기본값으로 되살리지 않고 0원으로 닫는다.**
+          깨진 숫자로 돈을 쓰는 것보다 링크 하나가 멈추는 편이 낫다.
+          정상 경로에서는 표의 CHECK가 음수를 애초에 막는다.
+        """
+        value = self.total_budget_krw
+        if value is None:
+            return constants.LINK_TOTAL_BUDGET_KRW
+        if not math.isfinite(value) or value < 0:
+            return 0.0
+        return float(value)
 
     @property
     def is_baked(self) -> bool:
@@ -287,12 +313,14 @@ def _row_to_link(row: sqlite3.Row | tuple) -> ShareLink:
         first_opened_at=row[7],
         last_opened_at=row[8],
         revoked_at=row[9],
+        total_budget_krw=None if row[10] is None else float(row[10]),
     )
 
 
 _COLUMNS = (
     "key_hash, company, job, report_id, note, created_at, "
-    "opened_count, first_opened_at, last_opened_at, revoked_at"
+    "opened_count, first_opened_at, last_opened_at, revoked_at, "
+    "total_budget_krw"
 )
 
 _RUN_COLUMNS = (
@@ -598,6 +626,16 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
                 "ADD COLUMN revoked_at TEXT NOT NULL DEFAULT ''"
             )
             columns = set(_table_columns(conn, TABLE_SHARE_LINKS))
+        if "total_budget_krw" not in columns:
+            # ★ NULL 허용으로 붙인다 — 이미 뿌린 링크에 금액을 «채워 넣지» 않는다.
+            #   비어 있으면 읽는 쪽이 기본 상한을 쓴다
+            #   (`ShareLink.effective_total_budget_krw`).
+            conn.execute(
+                f"ALTER TABLE {TABLE_SHARE_LINKS} "
+                "ADD COLUMN total_budget_krw REAL DEFAULT NULL "
+                "CHECK (total_budget_krw IS NULL OR total_budget_krw >= 0)"
+            )
+            columns = set(_table_columns(conn, TABLE_SHARE_LINKS))
         required_link_columns = {
             "key_hash",
             "company",
@@ -609,6 +647,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             "first_opened_at",
             "last_opened_at",
             "revoked_at",
+            "total_budget_krw",
         }
         if not required_link_columns.issubset(columns):
             raise RuntimeError("share_links 필수 열이 없습니다")
@@ -1461,6 +1500,104 @@ def interrupt_running_runs(
         )
         updated += max(0, cursor.rowcount)
     return updated
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    """그 표가 이 DB에 있는가."""
+
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def link_run_cost_sum_krw(conn: sqlite3.Connection, *, key_hash: str) -> float:
+    """이 링크로 «끝난» 실행들의 실측 AI 원가 합(원).
+
+    Args:
+        conn: 열린 DB 연결.
+        key_hash: 링크의 비밀 아닌 지문.
+
+    Returns:
+        `internal_ai_cost_krw`의 합. 실행이 없으면 0.0.
+
+    ★ 고객 청구액(`customer_charge_krw`)이 아니라 **내부 AI 원가**를 센다.
+      청구는 자동출고 뒤 1회라 새 조사를 허용할지 판단하는 데 쓸 수 없다.
+    ★ 진행 중인 실행은 아직 원가가 0으로 남아 있다 —
+      그 몫은 `link_active_reservation_krw`가 따로 센다.
+    """
+
+    clean_hash = str(key_hash or "").strip()
+    if not clean_hash:
+        return 0.0
+    row = conn.execute(
+        f"""
+        SELECT COALESCE(SUM(internal_ai_cost_krw), 0)
+          FROM {TABLE_RUN_HISTORY}
+         WHERE link_key_hash = ?
+        """,
+        (clean_hash,),
+    ).fetchone()
+    return float(row[0]) if row is not None else 0.0
+
+
+def link_active_reservation_krw(
+    conn: sqlite3.Connection, *, key_hash: str
+) -> float:
+    """이 링크의 «지금 진행 중인» 실행이 잡아 둔 예약액 합(원).
+
+    Args:
+        conn: 열린 DB 연결.
+        key_hash: 링크의 비밀 아닌 지문.
+
+    Returns:
+        비용 원장에서 ACTIVE 상태인 단계의 예약액 합. 없으면 0.0.
+
+    ★ 왜 이게 필요한가 — 진행 중 실행은 끝나기 전까지 실측 원가가 0이다.
+      예약을 안 세면 900원짜리 조사가 도는 «동안» 새 조사가 계속 통과해
+      누적 천장을 넘어 버린다.
+    ★ 비용 원장 전환(cutover) 전 DB에는 이 표가 아직 없다. 그때는 0원으로
+      본다 — 진행 중 예약이라는 개념 자체가 없던 시기다.
+    """
+
+    clean_hash = str(key_hash or "").strip()
+    if not clean_hash:
+        return 0.0
+    phases = budget_spend_store.TABLE_BUDGET_PHASES
+    if not _table_exists(conn, phases):
+        return 0.0
+    row = conn.execute(
+        f"""
+        SELECT COALESCE(SUM(phase.reservation_krw), 0)
+          FROM {phases} AS phase
+          JOIN {TABLE_RUN_HISTORY} AS run
+            ON run.run_id = phase.run_id
+         WHERE run.link_key_hash = ? AND phase.state = ?
+        """,
+        (clean_hash, budget_state_machine.PhaseState.ACTIVE.value),
+    ).fetchone()
+    return float(row[0]) if row is not None else 0.0
+
+
+def link_total_spent_krw(conn: sqlite3.Connection, *, key_hash: str) -> float:
+    """이 링크가 «수명 전체»에 쓴 돈(원).
+
+    Args:
+        conn: 열린 DB 연결.
+        key_hash: 링크의 비밀 아닌 지문.
+
+    Returns:
+        종결된 실행의 실측 원가 합 + 진행 중 예약액.
+
+    ★ 두 값을 더해도 같은 돈을 두 번 세지 않는다 — 단계가 끝나면 비용 원장의
+      예약액이 0이 되고(표의 CHECK가 강제한다), 그 실행의 실측 원가는 그때
+      `finish_run`이 생성 이력에 적기 때문이다.
+    """
+
+    return link_run_cost_sum_krw(conn, key_hash=key_hash) + (
+        link_active_reservation_krw(conn, key_hash=key_hash)
+    )
 
 
 def is_linked_report(conn: sqlite3.Connection, report_id: str) -> bool:
