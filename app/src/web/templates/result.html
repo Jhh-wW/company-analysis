@@ -340,7 +340,15 @@
 {% if not legacy_readonly and report.grade.value != '완성' %}
   <div class="grade ui-only {% if report.grade.value == '부분 완성' %}partial{% else %}incomplete{% endif %}">
     <div>
+      {#- 부분 보고서 고지도 봉인이 고른 문구를 쓴다 — 지금까지 웹·PDF·Notion이
+          각자 사본을 들고 있어 한쪽만 고치면 조용히 갈라졌다(설계 §01-4 #4).
+          봉인이 「고지 없음」(빈 제목)이면 예전 안내를 그대로 쓴다. -#}
+      {%- if projection and projection.grade_notice[0] %}
+      <b>{{ projection.grade_notice[0] }}</b>
+      <p>{{ projection.grade_notice[1] }}</p>
+      {%- else %}
       <b>{{ grade_note }}</b>
+      {%- endif %}
       {% if report.shortfall_reasons %}
         <ul>
           {% for r in report.shortfall_reasons %}<li>{{ r }}</li>{% endfor %}
@@ -393,6 +401,44 @@
     {# ★ `is defined` 방어를 «일부러» 두지 않는다 — 등록을 빠뜨리면 띠가 조용히
        사라지는 대신 화면이 바로 깨져야 한다. 등록 자체는 시험이 지킨다
        (report_standard/tests/test_cover_metrics_contract.py). #}
+    {#- ★ 봉인이 있으면 «고르는 일»은 이미 끝나 있다. 화면이 cover_metrics()를
+        다시 부르면 PDF·Notion과 다른 시점의 값을 고를 수 있다 — 그래서 봉인
+        갈래는 순수 함수를 아예 부르지 않는다(설계 §7 S5). -#}
+    {%- if projection %}
+    {% set cover = projection.cover_metrics %}
+    {% if cover %}
+    <section class="cover-metrics" aria-labelledby="cover-metrics-title">
+      <p class="cover-metrics-title" id="cover-metrics-title">{{ cover.title }}{{ ref(cover.cite) }}</p>
+      <dl class="cover-metrics-list">
+        {% for label, value, unit in cover.items %}
+        <div class="cover-metric">
+          <dt>{{ label }}</dt>
+          <dd><span class="cover-metric-value">{{ value }}</span><span class="cover-metric-unit">{{ unit }}</span></dd>
+        </div>
+        {% endfor %}
+      </dl>
+    </section>
+    {% endif %}
+    {#- 핵심 요약도 봉인 값 그대로다 — 번호(01·02)·주제어·장 번호를 화면이 다시
+        매기지 않는다. 세 채널이 각자 매기면 「3번 요약 보세요」가 어긋난다. -#}
+    {% if projection.summary %}
+    <section class="report-summary" aria-labelledby="report-summary-title">
+      <h2 id="report-summary-title">핵심 요약</h2>
+      <ol>
+        {% for row in projection.summary %}
+        <li>
+          <span class="summary-number">{{ row.ordinal }}</span>
+          <span class="summary-topic">{{ row.topic }}</span>
+          <span class="summary-text">{{ row.text }}</span>
+          <span class="summary-section">
+            {% if row.section_display_number %}{{ row.section_display_number }}장{% endif %}
+          </span>
+        </li>
+        {% endfor %}
+      </ol>
+    </section>
+    {% endif %}
+    {%- else %}
     {% set cover = cover_metrics(report) %}
     {% if cover %}
     <section class="cover-metrics" aria-labelledby="cover-metrics-title">
@@ -424,6 +470,7 @@
       </ol>
     </section>
     {% endif %}
+    {%- endif %}
   </header>
 
   {# ── 표지 다음 첫 본문 페이지 마스트헤드(D-S4a) ──

@@ -1,12 +1,16 @@
 """웹 v2 결과 화면이 «봉인 블록만» 소비하는지 지킨다 (티켓 D-S5 · 설계 §7 S5).
 
 ★ 이 파일이 지키는 것
-  ① 부록에 「사실 검증」 열이 PDF와 «같은 라벨»로 나온다 (설계 §01-6 G4 해소).
-  ② 화면이 그린 글자는 저장된 봉인의 ``display_sha256``이 덮는 그 블록에서
+  ① v2 갈래(``report.public_projection`` 있음)는 화면을 그리는 동안 표시 파생
+     순수 함수(``table_visualization``·``cover_metrics``·``section_content_blocks``·
+     ``source_verification_label``·``period_summary_from_table``)를 **한 번도**
+     부르지 않는다. 다섯 함수를 전부 예외로 바꿔도 페이지가 정상으로 나온다.
+  ② 부록에 「사실 검증」 열이 PDF와 «같은 라벨»로 나온다 (설계 §01-6 G4 해소).
+  ③ 화면이 그린 글자는 저장된 봉인의 ``display_sha256``이 덮는 그 블록에서
      나왔다 — 저장층이 들고 있는 값과 대조한다.
-  ③ 감사 장부(``ledger``)만 바꾼 저장본은 화면 HTML이 «바이트 동일»하다.
+  ④ 감사 장부(``ledger``)만 바꾼 저장본은 화면 HTML이 «바이트 동일»하다.
      장부 원자료(``subject_scope`` 등)는 화면에 한 글자도 나오지 않는다(F-S2p2).
-  ④ v1·legacy 갈래의 HTML은 base 커밋과 바이트가 같다 — 봉인 도입이 옛 화면을
+  ⑤ v1·legacy 갈래의 HTML은 base 커밋과 바이트가 같다 — 봉인 도입이 옛 화면을
      한 글자도 바꾸지 않았음을 golden 파일로 못 박는다.
 
 ★ 왜 손으로 지은 ``Report``를 쓰지 않나 — ``render_report()``가 「인용 번호를
@@ -55,7 +59,7 @@ from src.shared import engine_build_identity as build_identity_contract
 from src.shared.report_generation.canonical import table_public_projection
 from src.shared.report_generation.models import canonical_sha256
 from src.shared.report_generation.public_projection import build_report_digest
-from src.web import job_runtime
+from src.web import job_runtime, request_helpers
 from src.web import main as web_main
 from src.web.tests.report_route_support import serve_legacy_report_snapshot
 from src.web.tests.test_release_authority_full_wiring import (
@@ -287,7 +291,82 @@ def _assert_sealed_prose_on_screen(article: str, display) -> None:
 
 
 # ══════════════════════════════════════════════════════════
-# ① 부록 「사실 검증」 열 — PDF와 같은 라벨 (G4)
+# ① v2 화면은 표시 파생 순수 함수를 한 번도 부르지 않는다
+# ══════════════════════════════════════════════════════════
+
+#: 봉인 뒤에는 화면이 부르면 «안 되는» 표시 파생 순수 함수들.
+_FORBIDDEN_GLOBALS = (
+    "table_visualization",
+    "cover_metrics",
+    "section_content_blocks",
+    "source_verification_label",
+    "period_summary_from_table",
+)
+
+
+def _forbid_display_globals(monkeypatch: pytest.MonkeyPatch) -> None:
+    """다섯 순수 함수를 전부 «부르면 터지는» 함수로 바꾼다.
+
+    ★ ``period_summary_from_table``만 ``templates.env.globals``에 import 시점에
+      «값으로» 박혀 있다. 모듈 속성만 바꾸면 틀은 옛 함수를 계속 부르므로
+      두 자리를 모두 바꿔야 실제 음성 대조가 된다.
+    """
+
+    def boom(name: str):
+        def _raise(*_args, **_kwargs):
+            raise AssertionError(f"v2 화면이 봉인 밖 순수 함수를 불렀습니다: {name}")
+
+        return _raise
+
+    for name in _FORBIDDEN_GLOBALS:
+        monkeypatch.setattr(request_helpers, name, boom(name))
+    monkeypatch.setitem(
+        request_helpers.templates.env.globals,
+        "period_summary_from_table",
+        boom("period_summary_from_table(env.globals)"),
+    )
+
+
+def test_웹_v2_결과페이지는_전역_순수함수를_호출하지_않는다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _sealed_v2_report()
+    projection = report.public_projection
+    assert projection is not None
+
+    _forbid_display_globals(monkeypatch)
+    body = _render(report, monkeypatch, report_id="s5-globals-forbidden")
+
+    article = _article(body)
+    visible = _visible(article)
+    # 본문·도식·표지 띠·요약·부록이 «실제로» 그려졌는지 함께 확인한다.
+    # 그러지 않으면 「아무것도 안 그려서 안 불렀다」도 통과해 버린다.
+    첫장 = projection.sections[0].display
+    assert 첫장.paragraphs, "재료가 잘못됐다 — 봉인에 문단이 없다"
+    _assert_sealed_prose_on_screen(article, 첫장)
+    # 문단 번호도 봉인 값 그대로여야 한다 — 화면이 다시 세면 PDF와 어긋난다.
+    assert _PNO_RE.findall(article) == [
+        ordinal
+        for block in projection.sections
+        for ordinal, _text in block.display.paragraphs
+    ]
+    실적장 = next(
+        block.display for block in projection.sections if block.display.period_summary
+    )
+    assert _visible(실적장.period_summary.items[0][0]) in visible
+    assert projection.cover_metrics is not None
+    assert _visible(projection.cover_metrics.title) in visible
+    assert _visible(projection.summary[0].text) in visible
+    assert _visible(projection.citations[0].label_display) in visible
+    도식 = [visual for block in projection.sections for visual in block.display.visuals]
+    assert {visual.kind for visual in 도식} >= {"composition", "trend", "flow", "card"}
+    for visual in 도식:
+        if visual.reading:
+            assert _visible(visual.reading) in visible
+
+
+# ══════════════════════════════════════════════════════════
+# ② 부록 「사실 검증」 열 — PDF와 같은 라벨 (G4)
 # ══════════════════════════════════════════════════════════
 
 #: PDF 부록 머리글(``export_pdf/logic.py`` ``_source_rows``)이 쓰는 그 글자.
@@ -316,7 +395,7 @@ def test_웹_v2_부록에_사실검증_열이_PDF와_같은_라벨로_나온다(
 
 
 # ══════════════════════════════════════════════════════════
-# ② 화면은 저장된 봉인의 display_sha256이 덮는 블록에서 나왔다
+# ③ 화면은 저장된 봉인의 display_sha256이 덮는 블록에서 나왔다
 # ══════════════════════════════════════════════════════════
 
 
@@ -380,7 +459,7 @@ def test_웹과_PDF는_같은_display_sha256의_블록에서_나왔다(
 
 
 # ══════════════════════════════════════════════════════════
-# ③ 장부만 바꾼 저장본은 화면 HTML이 바이트 동일
+# ④ 장부만 바꾼 저장본은 화면 HTML이 바이트 동일
 # ══════════════════════════════════════════════════════════
 
 
@@ -429,7 +508,7 @@ def test_웹_v2는_ledger를_렌더하지_않는다(monkeypatch: pytest.MonkeyPa
 
 
 # ══════════════════════════════════════════════════════════
-# ④ v1 화면은 바이트 불변
+# ⑤ v1 화면은 바이트 불변
 # ══════════════════════════════════════════════════════════
 
 #: base 커밋(0acf798)의 템플릿이 그린 v1 보고서 본문. 봉인 도입이 옛 화면을
