@@ -482,8 +482,17 @@ def _frame_base_context(request: Request, template: str) -> dict:
 
     ★ 비용 화면은 일부러 비운다 — 그 화면의 계약은 「원장 기준일을 요청당 한 번만
       읽는다」이고(`test_비용카드는_요청에서_한번_캡처한_KST_원장기준일을_명시한다`),
-      대시보드 문맥은 `clock.today_kst()`를 더 부른다.
-    ★ 여기서 실패해도 본문은 보여야 한다. 못 읽은 값은 화면이 「확인 불가」로 말한다.
+      대시보드 문맥은 `clock.today_kst()`를 더 부른다. 그래서 비용 화면은 이
+      실패축 자체가 없다.
+
+    ★ 못 읽으면 «조용히 빈 값으로» 넘기지 않고 축소 화면으로 보낸다
+      (`_AccessDataUnavailable`). 2026-09-03 회귀 정정 —
+      앞 판은 `except Exception: return {}`로 삼켰는데,
+      ① 회원 화면은 `dashboard_company_labels` 같은 값을 `is defined` 가드 없이
+         써서 렌더가 `jinja2.exceptions.UndefinedError`로 **500**이 났고,
+      ② 링크 화면은 그려지긴 해서 못 읽은 「새 접속」이 0건처럼 보였다.
+      base(0acf798)의 옛 `members_page`·`links_page`는 둘 다 503으로 닫았다.
+      템플릿에 가드를 다는 것은 고침이 아니다 — 실패를 빈 화면으로 숨긴다.
     """
 
     from src.web.routers import dashboard  # noqa: PLC0415
@@ -493,8 +502,9 @@ def _frame_base_context(request: Request, template: str) -> dict:
             return dashboard.link_page_context(request)
         if template == ACCESS_MEMBERS_TEMPLATE:
             return dashboard.member_page_context(request)
-    except Exception:  # noqa: BLE001 — 틀을 못 읽어도 본문 자료는 보여준다
+    except Exception as error:  # noqa: BLE001 — 저장소 속사정은 화면에 내지 않는다
         logger.error("관리자 화면 틀 정보를 읽지 못했습니다")
+        raise _AccessDataUnavailable("frame_context") from error
     return {}
 
 
@@ -508,9 +518,14 @@ def _access_page(
     today = clock.today_kst()
     try:
         page_context = _access_context(request, today=today, **context)
+        # ★ 틀 읽기도 «같은 try 안»에 둔다. 밖에 두면 여기서 난 실패가
+        #   축소 화면을 못 거치고 그대로 렌더로 흘러가 500이 된다.
+        merged = _frame_base_context(request, template)
     except _AccessDataUnavailable:
         status_code = 503
         template = ACCESS_UNAVAILABLE_TEMPLATE
+        # 축소 화면은 대시보드 틀 값을 하나도 쓰지 않는다.
+        merged = {}
         # ★ 원장을 못 읽어도 «무엇이 걸렸는지»는 따로 읽어 보여 준다 —
         #   대사하라면서 대사할 대상을 안 보여 주면 관리자는 아무것도 못 한다.
         축소_미확정, 축소_미확정_읽었나 = paid_runtime.list_unresolved_spend(today)
@@ -570,7 +585,6 @@ def _access_page(
                 "접근 목록과 비용 원장을 확인한 뒤 다시 시도해주세요.",
             ),
         )
-    merged = _frame_base_context(request, template)
     merged.update(page_context)
     response = request_helpers.templates.TemplateResponse(
         request=request,

@@ -139,6 +139,12 @@
         {% else %}
           <span class="muted">요청 없음</span>
         {% endif %}
+        {# ★ 접속 «횟수»는 이 표의 정본에서 오지만, 「관리자가 아직 안 본 새 접속」은
+           대시보드 쪽 읽기에서 온다. 그쪽을 못 읽었으면 조용히 빈칸으로 두지 않는다 —
+           빈칸은 「새 접속 0건」으로 읽힌다. #}
+        {% if dashboard_links_available is defined and not dashboard_links_available %}
+          <br><span class="muted"><strong>새 접속 확인 불가</strong></span>
+        {% endif %}
       </td>
       <td>
         {% set report_state = report_states.get(link.key_hash, "unavailable") %}

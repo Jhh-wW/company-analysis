@@ -13,16 +13,20 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from src.features.admin_dashboard import store as dashboard_store
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
 from src.features.pipeline.demo import DemoPipeline
+from src.features.sharelink import store as share_store
 from src.features.storage import constants as storage_constants
-from src.web import deployment_mode, main, runtime
+from src.features.storage import db as storage_db
+from src.web import deployment_mode, main, paid_runtime, runtime
 from src.web.tests._visible_text import visible_text
 
 
@@ -357,3 +361,134 @@ def test_구형_GET_주소는_지우지_않고_신형으로_보낸다(admin_clie
 
     assert 응답.status_code == 303
     assert 응답.headers["location"] == f"/admin/links/{key_hash}"
+
+
+# ══════════════════════════════════════════════════════════
+# ⑤ 자료를 못 읽었을 때 — 세 화면이 «같은 축소 화면»으로 떨어진다
+# ══════════════════════════════════════════════════════════
+
+#: 축소 화면이 맞는지 보는 표지. 원장 실패축이 이미 쓰는 것과 같은 문구다.
+_축소화면_표지 = ("확인 불가", 'role="alert"')
+
+
+def _축소화면인가(응답) -> None:
+    assert 응답.status_code == 503, 응답.status_code
+    for 표지 in _축소화면_표지:
+        assert 표지 in 응답.text, 표지
+    # 읽지 못한 값을 0으로 꾸며 보여주지 않는다.
+    assert "오늘 실제 지출" not in 응답.text
+    assert "구성상 차단 기준 합계" not in 응답.text
+
+
+def test_회원_통계_읽기가_실패해도_축소화면_503이다(
+    admin_client: TestClient, monkeypatch
+):
+    """★ 회귀 방지 — 통계 읽기 실패가 500으로 새던 자리다.
+
+    화면 틀(기간 통계·설문)을 못 읽으면 `admin_members.html`이 쓰는
+    `dashboard_company_labels` 같은 값이 통째로 비는데, 그 템플릿에는
+    `is defined` 가드가 없다. 앞 판은 그 실패를 `except Exception: return {}`로
+    삼킨 뒤 그대로 렌더해서 `jinja2.exceptions.UndefinedError`로 **500**이 났다.
+    500은 관리자에게 「무엇이 잘못됐는지」를 하나도 알려주지 않는다.
+
+    ⚠️ 가드를 템플릿에 다는 것으로는 못 고친다 — 그러면 실패가 «빈 화면»으로
+      조용히 숨는다. 읽지 못했다는 사실 자체를 화면이 말해야 한다.
+    """
+
+    def 못_읽는다(*_args, **_kwargs):
+        raise sqlite3.OperationalError("member statistics unavailable")
+
+    monkeypatch.setattr(
+        dashboard_store, "member_run_statistics", 못_읽는다
+    )
+
+    응답 = admin_client.get("/admin/members")
+
+    _축소화면인가(응답)
+    # 저장소 속사정은 화면으로 새지 않는다.
+    assert "member statistics unavailable" not in 응답.text
+    assert "OperationalError" not in 응답.text
+
+
+def test_링크_화면은_못_읽은_새_접속을_0건처럼_보이지_않는다(
+    admin_client: TestClient, monkeypatch
+):
+    """링크 화면의 「새 접속」은 틀에서 오는 값이라 실패 모양이 다르다.
+
+    ★ 실측 — `_dashboard_context`는 조각마다 따로 읽어서(`_dashboard_read`)
+      한 조각이 깨져도 **예외를 올리지 않고** `…_available=False`로 내려준다.
+      그래서 이 축은 503이 아니라 「확인 불가」로 말하는 것이 옳다.
+      링크 목록 자체는 접근 정본에서 오므로 화면은 열려 있어야 한다.
+    ⚠️ 조용히 빈칸으로 두면 안 된다 — 빈칸은 「새 접속 0건」으로 읽힌다.
+    """
+
+    with storage_db.connect() as conn:
+        share_store.insert_new(
+            conn,
+            key="b" * 32,
+            company="카카오",
+            job="마케팅",
+            now_iso="2026-08-18T10:00:00+09:00",
+        )
+        share_store.mark_opened(conn, "b" * 32, "2026-08-18T11:00:00+09:00")
+
+    def 못_읽는다(*_args, **_kwargs):
+        raise sqlite3.OperationalError("link open seen id unavailable")
+
+    monkeypatch.setattr(dashboard_store, "link_open_seen_id", 못_읽는다)
+
+    응답 = admin_client.get("/admin/links")
+
+    assert 응답.status_code == 200
+    assert "카카오" in 응답.text, "목록 자체는 접근 정본에서 오므로 살아 있어야 한다"
+    assert "새 접속 확인 불가" in 응답.text
+    assert "새 접속 0건" not in 응답.text
+    assert "link open seen id unavailable" not in 응답.text
+
+
+def test_새_접속을_읽을_수_있으면_확인_불가라고_말하지_않는다(
+    admin_client: TestClient
+):
+    """음성 대조 — 위 시험이 「늘 확인 불가라고 적으면 통과」가 되지 않게 한다."""
+
+    with storage_db.connect() as conn:
+        share_store.insert_new(
+            conn,
+            key="c" * 32,
+            company="카카오",
+            job="마케팅",
+            now_iso="2026-08-18T10:00:00+09:00",
+        )
+
+    응답 = admin_client.get("/admin/links")
+
+    assert 응답.status_code == 200
+    assert "카카오" in 응답.text
+    assert "새 접속 확인 불가" not in 응답.text
+
+
+def test_비용_화면은_틀_실패와_무관하고_원장_실패에만_닫힌다(
+    admin_client: TestClient, monkeypatch
+):
+    """음성 대조 — 「전부 503으로 닫으면 통과」가 되지 않게 한다.
+
+    비용 화면은 대시보드 틀을 아예 읽지 않는다(원장 기준일을 요청당 한 번만
+    읽는 계약 때문이다). 그러니 틀이 깨져도 열려야 하고, **원장**이 깨질 때만
+    닫혀야 한다. 두 실패축이 뒤섞이면 관리자는 무엇이 고장 났는지 못 읽는다.
+    """
+
+    def 못_읽는다(*_args, **_kwargs):
+        raise sqlite3.OperationalError("dashboard frame unavailable")
+
+    monkeypatch.setattr(dashboard_store, "member_run_statistics", 못_읽는다)
+    monkeypatch.setattr(dashboard_store, "get_service_state", 못_읽는다)
+
+    열린다 = admin_client.get("/admin/costs")
+
+    assert 열린다.status_code == 200
+    assert "오늘 나간 돈" in 열린다.text
+
+    monkeypatch.setattr(paid_runtime, "_BUDGET_STORE_HEALTHY", False)
+    닫힌다 = admin_client.get("/admin/costs")
+
+    _축소화면인가(닫힌다)
