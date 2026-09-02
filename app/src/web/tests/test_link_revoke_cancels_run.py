@@ -28,6 +28,7 @@ from src.core import clock
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
 from src.features.budget import spend_store
+from src.features.budget.constants import SPEND_PHASE_PIPELINE
 from src.features.pipeline.port import (
     CompanyCard,
     CompanyLookupResult,
@@ -473,3 +474,95 @@ def test_관리자_이력_사유코드는_ASCII다() -> None:
     ):
         assert 코드.isascii(), f"감사행 CHECK는 ASCII만 받는다: {코드!r}"
         assert re.fullmatch(r"[A-Za-z0-9_.:-]+", 코드), 코드
+
+
+# ── 교체 pipeline(지연 유료 단계를 모르는 갈래)의 훅 두 자리 ──────────────
+# 이 두 갈래는 `_run_pipeline_worker`를 직접 돌려 본다. 라우트로 돌리면 배경 조사가
+# 요청 이벤트루프 종료와 경합해(실측) 판정과 무관한 이유로 빨간불이 난다.
+
+
+class 교체가짜조사:
+    """지연 유료 단계 계약을 모르는 pipeline. 유료 단계를 통째로 하나만 쓴다."""
+
+    def __init__(self) -> None:
+        self.run_calls = 0
+
+    def run(self, user_input, card, tell) -> RunResult:
+        del user_input, card, tell
+        self.run_calls += 1
+        return RunResult(
+            outcome=Outcome.GATE_STOPPED,
+            cost_krw=_단계비용,
+            model="pipeline-model",
+        )
+
+
+def _닫힌_링크_job(*, 유료단계_미리예약: bool) -> job_runtime.Job:
+    """이미 철회된 링크로 시작된 조사 하나를 만든다."""
+
+    with storage_db.connect() as conn:
+        assert share_store.insert_new(
+            conn,
+            key=_LINK,
+            company="가나다전자",
+            job="영업",
+            now_iso="2026-08-17T10:00:00",
+        )
+    key_hash = share_store.key_hash_of(_LINK)
+    run_id = "b" * 32
+    ticket = None
+    if 유료단계_미리예약:
+        # 라우트가 하는 그대로 «닫히기 전»에 진짜 예약을 잡는다.
+        ticket = job_runtime._begin_paid_phase(
+            run_id=run_id,
+            phase=SPEND_PHASE_PIPELINE,
+            share_key=_LINK,
+            cap_krw=3000.0,
+        )
+        assert ticket is not None
+    _링크를_닫는다()
+    return job_runtime.Job(
+        job_id=run_id,
+        user_input=UserInput(company="가나다전자", job="영업", region="서울"),
+        card=CompanyCard(
+            legal_name="가나다전자",
+            typed_name="가나다전자",
+            address="서울",
+            ceo="대표",
+            founded="20200101",
+            ref="corp-001",
+        ),
+        share_key=_LINK,
+        share_link_hash=key_hash,
+        paid_phase=ticket,
+        is_paid=True,
+        paid_cap_krw=3000.0,
+        slot_bucket_id=spend_store.bucket_id(_LINK),
+    )
+
+
+def test_라우트가_미리_예약한_갈래도_provider_직전에_멈춘다(monkeypatch) -> None:
+    pipeline = 교체가짜조사()
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    job = _닫힌_링크_job(유료단계_미리예약=True)
+
+    with pytest.raises(job_runtime.LinkAccessClosedDuringRun) as 멈춤:
+        job_runtime._run_pipeline_worker(job)
+
+    assert 멈춤.value.reason_code == job_runtime.LINK_STOP_REASON_REVOKED
+    assert pipeline.run_calls == 0
+
+
+def test_교체_pipeline은_예약보다_먼저_멈춰_한도를_차감하지_않는다(monkeypatch) -> None:
+    pipeline = 교체가짜조사()
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    job = _닫힌_링크_job(유료단계_미리예약=False)
+
+    with pytest.raises(job_runtime.LinkAccessClosedDuringRun) as 멈춤:
+        job_runtime._run_pipeline_worker(job)
+
+    assert 멈춤.value.reason_code == job_runtime.LINK_STOP_REASON_REVOKED
+    assert pipeline.run_calls == 0
+    with storage_db.connect() as conn:
+        snapshot = spend_store.load_day(conn, clock.today_kst())
+    assert job.job_id not in snapshot.by_run, "닫힌 링크에 유료 단계를 예약했다"
