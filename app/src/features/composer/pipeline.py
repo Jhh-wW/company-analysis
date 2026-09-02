@@ -1280,14 +1280,16 @@ def run_v2(
         quality_observation,
         generation_assessment,
     )
+    # ★ SHADOW도 관측값을 저장한다(C1b, 2026-09-02) — 예전에는 여기서 SHADOW만
+    #   None으로 비웠다. 그러면 「거짓 거절률」을 셀 대상 자체가 저장소에 하나도
+    #   안 남아 O-F3(관측 안 됨)를 영구히 못 풀었다. 이 값은 여전히 «관측
+    #   전용»이다 — release_allowed=False라도 SHADOW는 다음 줄들에서 여전히
+    #   REPORT로 나가고 차감도 그대로다(게이트는 C4가 별도 사람 결정 뒤에만
+    #   만든다). 이 필드가 채워진다고 판정 로직이 하나라도 바뀌지 않는다.
     rendered = replace(
         rendered,
         generation_metrics=generation_metrics,
-        quality_observation=(
-            quality_observation
-            if release_mode is not ReleaseMode.SHADOW
-            else None
-        ),
+        quality_observation=quality_observation,
     )
 
     # 성공 생산 증거는 최종 가시 출고 검증까지 통과한 뒤에만 만든다. 두 번째

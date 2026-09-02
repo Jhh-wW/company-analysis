@@ -286,6 +286,54 @@ def test_정상_흐름이면_검증된_v2_Report가_나온다():
     assert sorted(source.number for source in report.citations) == [1, 2]
 
 
+def test_SHADOW에서_release_allowed_False여도_Outcome·차감·화면은_불변이다():
+    """C1b — `report.quality_observation`을 채워도 실제 판정 결과는 그대로다.
+
+    이 시험이 쓰는 fixture는 위 `test_정상_흐름이면_검증된_v2_Report가_나온다`와
+    같은 입력으로 `release_allowed=False`를 낸다. `pipeline/real.py`의
+    Outcome·차감(`charged`) 결정은 이 시험의 소유 밖이지만, 그 두 결정을
+    감시하는 검사(`real.py:2021-2026`·`:2102-2109`)가 둘 다
+    `release_mode in {ENFORCE_NO_PARTIAL, FULL}`로만 게이트돼 있어 SHADOW는
+    애초에 `quality_observation` 유무를 보지 않는다(정적 확인, C1b 소유 밖이라
+    real.py에는 새 시험을 만들지 않았다). 이 시험은 composer 경계에서
+    증명 가능한 것만 본다 — `quality_observation`이 채워져도 v2 정본 판정
+    (grade·safety_decision·publication_policy·본문)은 이 필드가 비어 있던
+    예전 동작과 완전히 같은 값이라는 것.
+    """
+    writer = _FakeWriter()
+    reviewer = _FakeReviewer()
+
+    output = run_v2(
+        "가나다전자",
+        _raw_fragments(),
+        None,
+        writer_ask=writer,
+        reviewer_ask=reviewer,
+        corp_type="상장사",
+        as_of_date="2026-08-24",
+    )
+
+    # 이 fixture는 품질 하한 미달로 release_allowed=False를 낸다 — 그런데도
+    # REPORT 자체는 여전히 나온다(예외 없음, 게이트로 안 막힘).
+    assert output.quality_observation.release_allowed is False
+    assert output.report.grade is Grade.PARTIAL
+    assert output.report.sections  # 본문이 비지 않았다
+
+    # C1b가 새로 채우는 필드: report.quality_observation은 새로 판정한 값이
+    # 아니라 V2RunOutput이 이미 계산해 둔 것과 «완전히 같은» 값이다.
+    assert output.report.quality_observation == output.quality_observation
+    assert output.report.quality_observation.release_allowed is False
+
+    # release_allowed=False가 판정 자체를 바꾸지 않는다는 증거: 다른 판정
+    # 필드는 quality_observation이 채워지기 전과 여전히 같은 값이다.
+    assert output.report.safety_decision == "공개 차단"
+    assert output.report.publication_policy == "legacy-shadow-exception-v1"
+    assert (
+        output.report.quality_contract_version
+        == output.quality_observation.contract_version
+    )
+
+
 def _structured_financial_table() -> PerformanceTable:
     payload = {
         "status": "000",

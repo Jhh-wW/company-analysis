@@ -475,11 +475,17 @@ def report_from_dict(data: dict[str, Any]) -> Report:
         != STRICT_QUALITY_CONTRACT_VERSION
     ):
         raise ValueError("엄격 보고서의 schema 또는 품질 contract_version이 바뀌었습니다")
+    # ★ quality_observation은 이 「엄격 전용」 묶음에서 뺐다(C1b, 2026-09-02) —
+    #   SHADOW도 관측 전용으로 저장한다. generation_evidence·
+    #   public_structure_manifest·STRICT contract_version은 여전히 FULL/
+    #   ENFORCE 전용이다(그 셋은 실제로 strict 생산 증거·공개 봉인 절차를
+    #   거쳐야만 만들어질 수 있는 값이라 강등된 release_mode로 들어오면
+    #   신뢰할 수 없다. quality_observation은 SHADOW 생성 경로도 항상 스스로
+    #   계산하므로 같은 위험이 없다).
     if (
         not strict_reload
         and (
             data.get("generation_evidence") is not None
-            or data.get("quality_observation") is not None
             or str(data.get("public_structure_manifest", "")).strip()
             or str(data.get("quality_contract_version", ""))
             == STRICT_QUALITY_CONTRACT_VERSION

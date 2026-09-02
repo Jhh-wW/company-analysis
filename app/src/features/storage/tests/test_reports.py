@@ -32,6 +32,8 @@ from src.shared.comparison_candidate_basis import (
     encode_comparison_basis_v1,
     parse_comparison_basis_v1,
 )
+from src.shared.report_quality.constants import QUALITY_CONTRACT_VERSION
+from src.shared.report_quality.generation import GenerationQualityObservation
 
 
 def _full_report() -> Report:
@@ -277,6 +279,51 @@ def test_v2_보고서는_save_load_DB_왕복에서도_그대로_보존된다(tmp
         restored = reports.load(conn, "v2-roundtrip")
 
     assert restored == original
+
+
+def test_SHADOW_생성_보고서도_quality_observation을_저장한다(tmp_path: Path) -> None:
+    """C1b — SHADOW(빈 release_mode)도 이제 quality_observation을 저장·왕복한다.
+
+    이전에는 `report_from_dict`가 「엄격 보고서의 release_mode가 누락되거나
+    낮아졌습니다」로 거부했다(quality_observation이 ENFORCE_NO_PARTIAL·FULL
+    전용 묶음 안에 있었기 때문). SHADOW는 여전히 관측 «전용»이다 —
+    `release_allowed=False`인 관측값도 저장 자체를 막지 않는다는 사실만
+    본다(공개 차단 여부 판정은 이 시험의 관심사가 아니다).
+    """
+    observation = GenerationQualityObservation(
+        mode="generation-shadow",
+        contract_version=QUALITY_CONTRACT_VERSION,
+        quality_grade="미완성",
+        safety_decision="공개 차단",
+        publication_grade="미완성",
+        release_allowed=False,
+        quality_shortfalls=("사실이 부족합니다",),
+        safety_problems=(),
+        substantive_claims=3,
+        verified_claims=1,
+        verified_ratio="0.3333333333333333333333333333",
+        document_sources=1,
+    )
+    original = Report(
+        company="가나다전자",
+        job="",
+        corp_type="상장사",
+        grade=Grade.PARTIAL,
+        sections=[],
+        release_mode="",
+        quality_observation=observation,
+    )
+    target = tmp_path / "storage-shadow-observation.db"
+
+    with db.connect(target) as conn:
+        reports.save(conn, "shadow-obs-1", "CORP-SHADOW", "", original)
+
+    with db.connect(target) as conn:
+        restored = reports.load(conn, "shadow-obs-1")
+
+    assert restored is not None
+    assert restored.quality_observation == observation
+    assert restored.release_mode == ""
 
 
 def test_v1_보고서는_cite_없는_표시용글을_여전히_버린다() -> None:
