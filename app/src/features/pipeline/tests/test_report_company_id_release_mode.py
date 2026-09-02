@@ -7,18 +7,19 @@
   검증에 이름 비교만 남아, 이름이 같고 고유번호가 다른 회사의 보고서가 그대로
   묶인다(F-GS2p1b 재현: 동명·다른 corp_id 보고서가 303으로 통과).
 
-★ 여기서 지키는 것:
-  ① `real.py`의 v2 연결부가 릴리스 모드와 무관하게 `run_v2`에 corp_id를
-     넘긴다. 비FULL이라고 신원을 버리지 않는다.
-  ② FULL 산출물의 company_id는 예전 그대로 corp_id다 (회귀 방지 대조군).
+★ 값을 지우던 곳은 «세 군데»였다:
+  같은 `release_mode is FULL` 조건이 `pipeline/real.py`의 run_v2 호출 한 곳과
+  `composer/pipeline.py`의 렌더 호출 두 곳(중간 렌더·최종 렌더)에 있었다.
+  저장되는 값을 정하는 것은 그중 **최종 렌더**다. 그래서 한 겹만 고치면
+  최종 company_id는 여전히 빈 값이다 — 아래 ①과 ③을 «따로» 두는 이유가
+  이것이다.
 
-★ 아직 못 지키는 것 (F-GS2p1b가 완전히 닫히지 않은 이유):
-  저장되는 `Report.company_id`는 `composer/pipeline.py`의 렌더 호출 두 곳이
-  같은 `release_mode is FULL` 조건으로 한 번 더 지운다. 그래서 real.py를
-  고쳐도 **비FULL 산출물의 최종 company_id는 여전히 빈 값**이다. 그 파일은
-  다른 티켓(D-S3) 소유라 이 커밋에서 건드리지 않았다. 그 두 줄이 고쳐지면
-  최종 산출물까지 보는 end-to-end 시험을 이 파일에 더해야 한다 — 아래 ①
-  시험만으로는 「real.py가 안 지웠다」까지만 증명된다.
+★ 여기서 지키는 것:
+  ① SHADOW·ENFORCE_NO_PARTIAL 산출물의 최종 `Report.company_id`가 확인된
+     corp_id다. 저장되는 값 자체를 본다 (F-GS2p1b가 닫혔다는 증거).
+  ② FULL 산출물의 company_id는 예전 그대로 corp_id다 (회귀 방지 대조군).
+  ③ `real.py`의 v2 연결부가 릴리스 모드와 무관하게 `run_v2`에 corp_id를
+     넘긴다. ①이 빨간불일 때 «어느 겹이 지웠는지»를 이 시험이 갈라 준다.
 
 ★ 진짜 엔진·AI·네트워크는 부르지 않는다 — `test_real_cache`의 FakeEngine과
   `test_real_v2_switch`가 쓰는 것과 같은 가짜 작가·검수 클로저만 쓴다.
@@ -253,7 +254,42 @@ def _보고서를_만든다(
 
 
 # ══════════════════════════════════════════════════════════
-# ① real.py 연결부는 모드와 무관하게 고유번호를 넘긴다 (F-GS2p1b)
+# ① 비FULL 산출물도 고유번호를 싣는다 (F-GS2p1b 본체)
+# ══════════════════════════════════════════════════════════
+
+
+@pytest.mark.parametrize(
+    "release_mode",
+    [ReleaseMode.SHADOW, ReleaseMode.ENFORCE_NO_PARTIAL],
+    ids=["shadow", "enforce_no_partial"],
+)
+def test_비FULL_산출물도_company_id에_확인된_corp_id를_싣는다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    release_mode: ReleaseMode,
+) -> None:
+    """고유번호를 이미 확인했는데도 릴리스 모드 때문에 버리면 안 된다.
+
+    이 값이 비면 링크 재결속이 이름 비교만 남아 동명·다른 회사를 못 가른다
+    (F-GS2p1b). 회사 신원은 릴리스 정책과 무관한 사실이다. 여기서 보는 것은
+    «저장되는 최종 보고서»라 세 겹을 다 고쳐야 초록이 된다.
+    """
+    report = _보고서를_만든다(engine, monkeypatch, release_mode=release_mode)
+
+    # SHADOW는 옛 저장본과 바이트를 맞추려고 release_mode 표기를 비워 둔다
+    # (`composer/pipeline.py`의 렌더 호출). 이 시험의 관심사가 아니므로
+    # 그 기존 동작을 그대로 못 박고 지나간다.
+    assert report.release_mode == (
+        "" if release_mode is ReleaseMode.SHADOW else release_mode.value
+    )
+    assert report.company_id == _EXPECTED_CORP_ID, (
+        f"{release_mode.value} 산출물이 확인된 고유번호를 버렸습니다 "
+        f"(실제: {report.company_id!r})"
+    )
+
+
+# ══════════════════════════════════════════════════════════
+# ③ real.py 연결부만 따로 — 겹을 가르는 진단용
 # ══════════════════════════════════════════════════════════
 
 
@@ -269,11 +305,10 @@ def test_real_연결부는_모드와_무관하게_run_v2에_corp_id를_넘긴다
 ) -> None:
     """아래 계층이 무엇을 하든, real.py가 회사 신원을 지우지 않는 것만 본다.
 
-    ★ 이 시험이 보는 것은 «real.py가 composer에 넘긴 값» 하나다. 저장되는
-      최종 `Report.company_id`까지는 보지 않는다 — 그 값은 아직
-      `composer/pipeline.py`가 같은 조건으로 한 번 더 지우기 때문이다
-      (모듈 docstring의 「아직 못 지키는 것」 참고). 그 두 줄이 고쳐지면
-      최종 산출물을 보는 시험을 여기에 더해야 이 결함이 완전히 닫힌다.
+    ★ 이 시험이 보는 것은 «real.py가 composer에 넘긴 값» 하나다. 최종
+      산출물은 ① 시험이 본다. 둘을 갈라 두는 이유는 값을 지우던 곳이 세
+      군데였기 때문이다 — ①이 빨간불인데 이 시험이 초록이면 지운 곳은
+      real.py가 아니라 composer 계층이다. 진단이 시험 이름만으로 끝난다.
     """
     monkeypatch.setenv(real.REPORT_RELEASE_MODE_ENV_NAME, release_mode.value)
     _가짜_ask를_끼운다(monkeypatch)
