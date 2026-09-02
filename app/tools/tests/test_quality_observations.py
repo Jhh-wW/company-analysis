@@ -160,4 +160,4 @@ def test_표_출력은_JSON_없이도_0건일때_안내문을_보여준다(tmp_p
     assert exit_code == 0
     out = capsys.readouterr().out
     assert "quality_observation 있는 보고서(아래 집계 대상): 0건" in out
-    assert "SHADOW 저장 경로 자체가 관측값을 담지 않기 때문" in out
+    assert "이 CLI의 결함이 아닙니다" in out

@@ -100,10 +100,10 @@ def _print_table(
     print(f"- quality_observation 있는 보고서(아래 집계 대상): {summary.total_count}건")
     if summary.total_count == 0:
         print(
-            "  → 0건입니다. 지금 운영 SHADOW 저장 경로는 quality_observation을 "
-            "저장 직전에 비웁니다(composer/pipeline.py의 replace() 호출, "
-            "release_mode가 SHADOW면 quality_observation=None). 이 CLI의 결함이 "
-            "아니라 SHADOW 저장 경로 자체가 관측값을 담지 않기 때문입니다."
+            "  → 0건입니다. 2026-09-02 수정(C1b) 이전에 SHADOW로 저장된 보고서는 "
+            "quality_observation을 저장 직전에 비웠습니다(composer/pipeline.py). "
+            "그 수정 전에 저장된 보고서만 있거나, 그 뒤로 새 SHADOW 생성이 "
+            "아직 없으면 0건이 정상입니다. 이 CLI의 결함이 아닙니다."
         )
         return
     ratio_text = f" (비율 {summary.release_blocked_ratio})" if summary.release_blocked_ratio else ""
