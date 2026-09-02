@@ -553,3 +553,20 @@ def test_보고서_안내문은_없어진_배너를_설명하지_않는다(
     # 같은 화면이 무엇을 할 수 있는지도 말한다.
     assert "하이브 보고서는 준비 중입니다" in 본문
     assert "다른 회사 분석해 보기" in 본문
+
+
+def test_랜딩_화면에는_열쇠_원문이_없다(client: TestClient):
+    """★ 열쇠는 그 자체가 권한이다. 화면에 한 번 찍히면 어깨너머·스크린샷으로 샌다.
+
+    랜딩은 회사명·보고서 주소·남은 한도만 그린다. 열쇠는 HttpOnly 쿠키로만
+    오간다. 이 시험은 나중에 「편하니까」 주소나 숨은 입력칸에 열쇠를 넣는 변경을
+    막는다 (설계 07장 §3 완료 기준: 열쇠 원문이 DB·로그·HTML에 없을 것).
+    """
+    _링크발급("하이브", report_id=_보고서를_저장한다("하이브"))
+    client.cookies.set(KEY_COOKIE_NAME, _열쇠)
+
+    랜딩 = client.get("/")
+
+    assert "하이브 보고서 보기" in 랜딩.text
+    assert _열쇠 not in 랜딩.text
+    assert _열쇠 not in str(랜딩.headers)
