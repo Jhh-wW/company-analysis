@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 import uuid
 from dataclasses import dataclass
@@ -53,6 +54,7 @@ from src.features.sharelink.constants import (
     KEY_COOKIE_MAX_AGE_SEC,
     KEY_COOKIE_NAME,
     KEY_PATH_PREFIX,
+    LANDING_BUDGET_LEFT_TEMPLATE,
     LANDING_INTRO,
     LANDING_MADE_ON_DATE_TEMPLATE,
     LANDING_OTHER_COMPANY_BUTTON,
@@ -62,6 +64,10 @@ from src.features.sharelink.constants import (
     LANDING_REPORT_NOT_READY_NOTE,
     LANDING_REPORT_NOT_READY_TEMPLATE,
     LANDING_TITLE,
+    LINK_BUDGET_EXHAUSTED_MESSAGE,
+    LINK_TOTAL_BUDGET_EXHAUSTED_MESSAGE,
+    LINK_TOTAL_BUDGET_KRW,
+    PER_LINK_DAILY_BUDGET_KRW,
     PUBLIC_BUCKET,
 )
 from src.features.storage import db as storage_db
@@ -346,6 +352,7 @@ class _LinkLanding:
     not_ready_hint: str
     other_button: str
     other_note: str
+    budget_note: str
 
 
 def _landing_made_on(report) -> str:
@@ -395,13 +402,67 @@ def _bound_report_view(link) -> tuple[str, str]:
     )
 
 
+def _landing_amount(krw: float) -> str:
+    """남은 돈을 「2,999」처럼 쓴다.
+
+    ★ 반올림하지 않고 «버린다» — 실제보다 많이 남은 것처럼 보이면
+      「된다더니 안 된다」가 된다. 모자라게 보이는 쪽으로 틀린다.
+    """
+    return f"{math.floor(max(0.0, krw)):,}"
+
+
+def _landing_budget_note(bucket: str, daily_cap: Optional[float]) -> str:
+    """이 링크로 «얼마까지» 되는지 한 줄. 다 썼으면 그 사실을 대신 말한다.
+
+    ★ 하루 소진과 «수명 전체» 소진은 **다른 말**을 한다 — 하루 소진은 내일
+      열리지만 누적 소진은 내일도 안 열린다. 같은 말을 하면 헛되이 기다리게 된다
+      (2026-09-02 사람 결정 D-G1). 문구는 새로 짓지 않고 `/run`이 막을 때 쓰는
+      것과 **같은 상수**를 쓴다 — 두 화면이 다른 말을 하면 손님이 헷갈린다.
+    ★ 숫자를 못 읽으면 줄 자체를 빼고 «지어내지 않는다».
+    """
+    today = clock.today_kst()
+    # 제품이 실제로 세는 통장과 «같은 키»를 본다. 표시와 판정이 다른 키를 쓰면
+    # 화면 숫자와 실제 차단이 어긋난다 (`request_helpers._guard_run` 같은 규칙).
+    stored_bucket = spend_store.bucket_id(bucket)
+    if (
+        share_logic.spent_for(paid_runtime._LINK_SPEND, stored_bucket, today) <= 0
+        and share_logic.spent_for(paid_runtime._LINK_SPEND, bucket, today) > 0
+    ):
+        stored_bucket = bucket
+    daily_left = share_logic.budget_left(
+        paid_runtime._LINK_SPEND,
+        stored_bucket,
+        today,
+        PER_LINK_DAILY_BUDGET_KRW if daily_cap is None else daily_cap,
+    )
+    try:
+        with storage_db.connect() as conn:
+            key_hash = share_store.key_hash_of(bucket)
+            row = share_store.load_by_hash(conn, key_hash)
+            total_spent = share_store.link_total_spent_krw(conn, key_hash=key_hash)
+    except Exception:  # noqa: BLE001 — 못 읽으면 숫자를 지어내지 않고 줄을 뺀다
+        logger.exception("초대 링크의 남은 이용 한도를 읽지 못했습니다")
+        return ""
+    total_left = share_logic.total_budget_left(
+        total_spent,
+        row.effective_total_budget_krw if row is not None else LINK_TOTAL_BUDGET_KRW,
+    )
+    if total_left <= 0:
+        return LINK_TOTAL_BUDGET_EXHAUSTED_MESSAGE
+    if daily_left <= 0:
+        return LINK_BUDGET_EXHAUSTED_MESSAGE
+    return LANDING_BUDGET_LEFT_TEMPLATE.format(
+        daily=_landing_amount(daily_left), total=_landing_amount(total_left)
+    )
+
+
 def _link_landing(request: Request, link) -> Optional[_LinkLanding]:
     """초대 링크 갈래로 들어온 사람에게만 랜딩 카드를 만든다.
 
     ★ 관리자·회원·모르는 손님의 첫 화면은 **한 글자도 바뀌지 않는다** —
       여기서 ``None``을 돌려주면 화면 틀이 카드를 아예 그리지 않는다.
     """
-    track, _bucket, _cap = request_helpers._track_of(request)
+    track, bucket, cap = request_helpers._track_of(request)
     if track is not share_tracks.Track.LINK:
         return None
     report_url, made_on_note = _bound_report_view(link)
@@ -418,6 +479,7 @@ def _link_landing(request: Request, link) -> Optional[_LinkLanding]:
         not_ready_hint=LANDING_REPORT_NOT_READY_NOTE,
         other_button=LANDING_OTHER_COMPANY_BUTTON,
         other_note=LANDING_OTHER_COMPANY_NOTE,
+        budget_note=_landing_budget_note(bucket, cap),
     )
 
 

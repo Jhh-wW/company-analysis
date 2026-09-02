@@ -48,6 +48,11 @@
   <div class="link-landing-choice">
     <a class="btn wide secondary" href="#analysisForm">{{ link_landing.other_button }}</a>
     <p class="link-landing-note">{{ link_landing.other_note }}</p>
+    {# 얼마까지 되는지 첫 화면에서 말한다. 다 썼으면 같은 자리에서 그 사실을
+       말한다 — 눌러 보고 나서야 알게 하면 안 된다 (설계 03장 §1·§3-6). #}
+    {% if link_landing.budget_note %}
+    <p class="link-landing-note">{{ link_landing.budget_note }}</p>
+    {% endif %}
   </div>
 </section>
 {% endif %}

@@ -23,17 +23,20 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 
+from src.core import clock
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
+from src.features.budget import spend_store
 from src.features.pipeline.canonical_demo import build_demo_report
 from src.features.pipeline.demo import DemoPipeline
 from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import constants as share_constants
+from src.features.sharelink import logic as share_logic
 from src.features.sharelink import store as share_store
 from src.features.sharelink.constants import KEY_COOKIE_NAME
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
-from src.web import main, runtime
+from src.web import main, paid_runtime, runtime
 from src.web.tests._visible_text import visible_text
 
 _열쇠 = "b7c1d2e3f4a5b6c7b7c1d2e3f4a5b6c7"
@@ -347,3 +350,124 @@ def test_PUBLIC_MEMBER_ADMIN_화면은_바뀌지_않는다(client: TestClient):
     assert 공개 == _스냅샷("public")
     assert 회원 == _스냅샷("member")
     assert 관리자 == _스냅샷("admin")
+
+
+# ══════════════════════════════════════════════════════════
+# ⑥ 남은 이용 한도 — 얼마까지 되는지 첫 화면에서 말한다
+# ══════════════════════════════════════════════════════════
+
+#: 링크 한 개의 하루 상한과 수명 전체 상한. ★ 생산 상수를 import해 비교하면
+#:  값이 몰래 낮아져도 시험이 통과한다. 여기서는 리터럴로 못 박는다.
+_하루상한 = 3000.0
+_누적상한 = 3000.0
+_시각 = "2026-09-02T09:00:00+09:00"
+
+_하루소진문구 = (
+    "오늘 이 링크로 돌릴 수 있는 새 조사를 모두 사용했습니다. "
+    "내일 다시 열립니다. "
+    "이미 만들어 둔 보고서는 지금도 그대로 보실 수 있습니다."
+)
+_누적소진문구 = (
+    "이 링크의 이용 한도를 모두 사용했습니다. "
+    "미리 준비된 회사 보고서는 계속 볼 수 있습니다."
+)
+
+
+def _오늘_쓴다(금액: float) -> None:
+    """오늘 장부에 이 링크가 쓴 돈을 넣는다 (제품과 같은 통장 지문 키)."""
+    오늘 = clock.today_kst()
+    paid_runtime._LINK_SPEND = share_logic.add_spend(
+        share_logic.DailySpend(day=오늘),
+        spend_store.bucket_id(_열쇠),
+        오늘,
+        금액,
+    )
+
+
+def _수명동안_쓴다(금액: float, *, run_id: str = "run-1") -> None:
+    """실측 원가가 확정된 종결 실행 한 건을 이 링크 앞으로 넣는다."""
+    with storage_db.connect() as conn:
+        assert share_store.start_run(
+            conn,
+            key=_열쇠,
+            run_id=run_id,
+            started_at=_시각,
+            input_company="하이브",
+            confirmed_company="하이브",
+            company_id="corp-1",
+        )
+        assert share_store.finish_run(
+            conn,
+            run_id=run_id,
+            status=share_store.RUN_STATUS_AWAITING_RELEASE,
+            finished_at=_시각,
+            report_id=run_id,
+            internal_ai_cost_krw=금액,
+        )
+
+
+def test_랜딩은_남은_한도를_보여준다(client: TestClient):
+    """★ 「얼마까지 되는지」를 첫 화면에서 말한다 (설계 03장 §1)."""
+    _링크발급("하이브", report_id=_보고서를_저장한다("하이브"))
+
+    본문 = _랜딩(client)
+
+    assert "남은 이용 한도: 오늘 3,000원 · 전체 3,000원" in 본문
+
+
+def test_랜딩의_남은_한도는_쓴만큼_줄어든다(client: TestClient):
+    """★ 경계 2,999/3,000 — 1원만 써도 화면 숫자가 따라 내려가야 한다."""
+    _링크발급("하이브", report_id=_보고서를_저장한다("하이브"))
+    _오늘_쓴다(1.0)
+    _수명동안_쓴다(2999.0)
+
+    본문 = _랜딩(client)
+
+    # 하루는 3,000-1=2,999원, 수명 전체는 3,000-2,999=1원 남는다.
+    assert "남은 이용 한도: 오늘 2,999원 · 전체 1원" in 본문
+    assert _하루소진문구 not in 본문
+    assert _누적소진문구 not in 본문
+
+
+def test_랜딩은_누적_소진이면_누적_소진문구를_보인다(client: TestClient):
+    """★ 누적 소진은 «내일도» 안 열린다. 하루 소진 문구를 쓰면 거짓말이 된다."""
+    report_id = _보고서를_저장한다("하이브")
+    _링크발급("하이브", report_id=report_id)
+    _수명동안_쓴다(_누적상한)
+
+    본문 = _랜딩(client)
+
+    assert _누적소진문구 in 본문
+    assert "내일 다시 열립니다" not in 본문
+    assert "남은 이용 한도" not in 본문
+    # ★ 한도를 다 써도 미리 준비된 보고서는 계속 열린다 (2026-09-02 사용자 결정).
+    assert "하이브 보고서 보기" in 본문
+
+
+def test_랜딩은_하루_소진이면_하루_소진문구를_보인다(client: TestClient):
+    """★ 하루 소진은 내일 열린다. 누적 소진과 «다른 말»을 해야 한다."""
+    _링크발급("하이브", report_id=_보고서를_저장한다("하이브"))
+    _오늘_쓴다(_하루상한)
+
+    본문 = _랜딩(client)
+
+    assert _하루소진문구 in 본문
+    assert _누적소진문구 not in 본문
+    assert "남은 이용 한도" not in 본문
+
+
+def test_남은_한도_문구도_내부용어를_쓰지않는다(client: TestClient):
+    """★ 돈 이야기에서 코드 용어(통장·원장·KRW)가 가장 새기 쉽다."""
+    _링크발급("하이브", report_id=_보고서를_저장한다("하이브"))
+    _오늘_쓴다(1.0)
+    _수명동안_쓴다(1.0)
+    client.cookies.set(KEY_COOKIE_NAME, _열쇠)
+
+    랜딩 = client.get("/")
+    본문 = visible_text(랜딩.text)
+
+    assert "남은 이용 한도" in 본문
+    for 용어 in _내부용어:
+        assert 용어.casefold() not in 본문.casefold(), 용어
+    for 용어 in _대문자_내부용어:
+        assert 용어 not in 랜딩.text, 용어
