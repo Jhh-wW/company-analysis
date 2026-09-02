@@ -37,6 +37,7 @@ from src.features.export_pdf.content_manifest import (
     PDF_MANIFEST_SHA256_KEY,
     PDF_MANIFEST_VERSION_KEY,
 )
+from src.shared.report_generation.public_projection import PUBLIC_PROJECTION_VERSION
 from src.features.export_pdf.logic import PDFGenerationError, build_pdf
 from src.features.pipeline.port import Report
 from src.features.provenance.sources import visible_citations
@@ -48,6 +49,18 @@ logger = logging.getLogger(__name__)
 #: ★ 보고서 값을 절대 섞지 않는다 — 이 문구는 공개 화면에 그려진다.
 RENDER_BLOCKED_REASON: Final[str] = "PDF 파일을 만드는 단계에서 멈췄습니다"
 RENDER_BLOCKED_MESSAGE: Final[str] = "PDF 전 페이지 검수 재료를 만들지 못했습니다"
+
+#: PDF 메타에 실릴 수 있는 «공개 내용 지문»의 버전 두 가지.
+#:
+#: ★ 봉인(``PublicReportProjection``)이 붙은 v2 FULL 보고서는
+#:   ``PUBLIC_PROJECTION_VERSION``, 봉인이 없는 v1·옛 v2 저장본은
+#:   ``CONTENT_MANIFEST_VERSION``을 싣는다. 여기서는 «아는 버전인가»만 본다 —
+#:   어느 쪽이 맞는 값인지는 보고서를 들고 있는 자동출고 검사
+#:   (``automatic_release.content_manifest_matches``)가 판정한다. 이 함수는
+#:   보고서 없이 PDF bytes와 후보만 맞대는 자리라 그 판정을 할 수 없다.
+KNOWN_CONTENT_MANIFEST_VERSIONS: Final[frozenset[str]] = frozenset(
+    {CONTENT_MANIFEST_VERSION, PUBLIC_PROJECTION_VERSION}
+)
 
 PNG_MAGIC: Final[bytes] = b"\x89PNG\r\n\x1a\n"
 SHA256_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
@@ -765,7 +778,7 @@ def _candidate_integrity_problems(
                     candidate_manifest_sha256,
                 )
             ):
-                if actual_manifest_version != CONTENT_MANIFEST_VERSION:
+                if actual_manifest_version not in KNOWN_CONTENT_MANIFEST_VERSIONS:
                     problems.append("최종 PDF 공개 내용 지문 버전이 올바르지 않습니다")
                 if not is_valid_sha256(actual_manifest_sha256):
                     problems.append("최종 PDF 공개 내용 지문 형식이 올바르지 않습니다")

@@ -24,6 +24,10 @@ from src.features.export_pdf.content_manifest import (
     CONTENT_MANIFEST_VERSION,
     public_content_manifest_sha256,
 )
+from src.shared.report_generation.public_projection import (
+    PUBLIC_PROJECTION_VERSION,
+    build_report_digest,
+)
 from src.shared.automatic_release_record import (
     AUTOMATIC_CHECKER_VERSION,
     REQUIRED_AUTOMATIC_CHECKS,
@@ -81,6 +85,33 @@ def report_sha256(report: Report) -> str:
 
 def _evidence_sha256(name: str, *values: object) -> str:
     return _sha256(_canonical_json({"check": name, "values": values}))
+
+
+def content_manifest_matches(report: Report, candidate: PdfReleaseCandidate) -> bool:
+    """PDF 후보가 «이 보고서의» 공개 내용에 결속돼 있는지 본다.
+
+    ★ 공개 봉인(``report.public_projection``)이 있으면 그 봉인의
+      ``PublicReportDigest.content_sha256``과 맞대 본다. 이 지문은 공개 본문뿐
+      아니라 감사 장부(FactRecord·fact_id·등급 기여)까지 덮으므로, 글자만 같고
+      장부가 다른 PDF를 같은 공개물로 승인하지 못한다(설계 017 §5 — 옛 PDF 전용
+      지문 C를 대체).
+    ★ 봉인이 없는 보고서(v1·옛 v2 저장본)는 옛 지문 그대로다. 그 경로에는
+      맞댈 봉인 자체가 없다(설계 §6 — legacy 무변).
+    ★ 버전이 다르면 지문이 우연히 같아도 거짓이다 — 어느 규칙으로 만든 값인지
+      모르는 지문을 «맞다»고 하지 않는다.
+    """
+
+    projection = report.public_projection
+    if projection is not None:
+        return (
+            candidate.content_manifest_version == PUBLIC_PROJECTION_VERSION
+            and candidate.content_manifest_sha256
+            == build_report_digest(projection).content_sha256
+        )
+    return (
+        candidate.content_manifest_version == CONTENT_MANIFEST_VERSION
+        and candidate.content_manifest_sha256 == public_content_manifest_sha256(report)
+    )
 
 
 def run_automatic_checks(
@@ -174,12 +205,7 @@ def run_automatic_checks(
                     channel_reason = "인용된 출처가 없어 PDF 자동 출고를 보류했습니다"
                     channel_ok = False
                 else:
-                    manifest_ok = (
-                        candidate.content_manifest_version
-                        == CONTENT_MANIFEST_VERSION
-                        and candidate.content_manifest_sha256
-                        == public_content_manifest_sha256(published)
-                    )
+                    manifest_ok = content_manifest_matches(published, candidate)
                     channel_ok = (
                         candidate.expected_fact_ids == published_fact_ids
                         and manifest_ok
