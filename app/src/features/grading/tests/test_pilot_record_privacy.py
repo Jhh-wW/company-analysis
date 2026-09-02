@@ -25,6 +25,16 @@ _MASKED = "(비공개)"
 #: 한국 사람 이름꼴(한글 2~4자). 실명이 다시 들어오면 여기에 걸린다.
 _KOREAN_NAME = re.compile(r"^[가-힣]{2,4}$")
 
+#: 기사 본문에서 대표자 이름이 나오는 두 가지 꼴.
+#: ★ 실명을 리터럴로 적지 않는다 — 시험 파일에 적으면 지운 이름이 저장소에
+#:   그대로 되돌아온다. 대신 «이름이 놓이는 자리»를 본다. 그래서 이 시험은
+#:   지운 3명뿐 아니라 앞으로 들어올 어떤 대표자 이름도 잡는다.
+#: 「대표이사」는 직함이지 이름이 아니므로 뺀다.
+_CEO_NAME_SHAPES = (
+    ("「대표 ○○○」꼴", re.compile(r"대표\s+[가-힣]{2,4}")),
+    ("「○○○ 대표」꼴", re.compile(r"[가-힣]{2,4}\s+대표(?!이사)")),
+)
+
 
 def _실행기록() -> list[dict]:
     """`runs.jsonl`을 줄마다 읽는다."""
@@ -76,3 +86,32 @@ def test_시범_실행기록에_대표자_실명이_없다():
         if _KOREAN_NAME.match(값)
     ]
     assert not 이름꼴, f"대표자 칸에 사람 이름꼴이 남아 있습니다: {이름꼴}"
+
+
+def _시범_자료_파일() -> list:
+    """조각(JSON)과 보고서(md) 전부."""
+    조각 = sorted((paths.PILOT_DIR / "fragments").glob("*.json"))
+    보고서 = sorted(paths.PILOT_REPORTS_DIR.glob("*.md"))
+    return 조각 + 보고서
+
+
+def test_시범_조각과_보고서에_대표자_실명이_없다():
+    """★ 기사 본문에 실린 대표자 이름도 공개 저장소에 올리지 않는다.
+
+    `runs.jsonl`의 구조화 필드만 가리면 기사 본문에 남은 이름을 놓친다.
+    """
+    if not paths.demo_data_available():
+        pytest.skip("파일럿 자료가 없습니다 (analysis_engine 미배치)")
+
+    파일들 = _시범_자료_파일()
+    assert 파일들, "시범 자료를 한 개도 못 찾았습니다 — 시험이 조용히 통과할 뻔했습니다"
+
+    걸린것: list[str] = []
+    for path in 파일들:
+        본문 = path.read_text(encoding="utf-8")
+        for 꼴이름, 꼴 in _CEO_NAME_SHAPES:
+            for m in 꼴.finditer(본문):
+                걸린것.append(f"{path.name} {꼴이름}: {m.group(0)}")
+    assert not 걸린것, (
+        "대표자 이름이 남아 있습니다 — 고정 표기로 가리세요: " + str(걸린것[:5])
+    )
