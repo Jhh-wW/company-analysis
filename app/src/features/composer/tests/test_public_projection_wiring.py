@@ -21,6 +21,8 @@ import re
 
 import pytest
 
+from dataclasses import replace
+
 from src.features.composer import pipeline as pipeline_module
 from src.features.composer.constants import GRADE_CONFIRMED, SECTION_IDS
 from src.features.composer.pipeline import run_v2
@@ -35,9 +37,11 @@ from src.features.pipeline.port import Grade
 from src.features.storage.reports import report_from_dict, report_to_dict
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_evidence.constants import ReleaseMode
+from src.features.report_standard.public_projection import build_public_projection
 from src.shared.report_generation.public_projection import (
     PUBLIC_PROJECTION_VERSION,
     PublicProjectionError,
+    PublicSectionContentBlock,
     build_report_digest,
 )
 
@@ -333,3 +337,102 @@ def test_FULL_저장본에_projection이_없으면_로드가_거부된다() -> N
 
     with pytest.raises(ValueError):
         report_from_dict(forged)
+
+
+# ══════════════════════════════════════════════════════════
+# ⑥ 보충 불변식 — 바뀐 장 «만» 바뀐다 (장부 포함)
+# ══════════════════════════════════════════════════════════
+
+
+def test_보충뒤_바뀐_장만_block_digest가_바뀐다(monkeypatch) -> None:
+    """보충(1회) 뒤 비대상 장은 «감사 장부까지» 한 글자도 안 바뀐다.
+
+    ★ 기존 receipt의 ``section_sha256s``로는 이걸 다 말할 수 없다 — 그 값은
+      pre-render 공개 content 봉인(지문 A)에서 오고 지문 A는 «보이는 것»만
+      덮는다. 보충 회차에서 비대상 장의 FactRecord나 등급 기여가 조용히
+      바뀌어도 지문 A는 그대로다. ``block_sha256``은 display와 ledger를 함께
+      덮으므로 그 구멍을 닫는다(설계 017 §05 「보충 불변식」 행).
+
+    ★ 왜 primary 시점 보고서를 가로채나 — 최종 결과만으로는 「보충 전에는
+      어땠는지」를 알 수 없다. 품질 후보를 만들 때 넘어오는 렌더 결과가 그
+      회차의 완성된 보고서라 그 자리에서 붙잡는다.
+    """
+
+    target = "identity"
+    captured: list[object] = []
+    original = pipeline_module.build_generation_quality_candidate
+
+    def capture(rendered, composed):
+        captured.append(rendered)
+        return original(rendered, composed)
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "build_generation_quality_candidate",
+        capture,
+    )
+
+    output, _writer, _reviewer = _run_recovering_full((target,))
+
+    assert len(captured) == 2, "보충은 정확히 한 번, 즉 회차는 두 번이다"
+    primary_projection = build_public_projection(captured[0])
+    final_projection = output.report.public_projection
+    assert final_projection is not None
+
+    primary_blocks = {
+        block.display.cell: block for block in primary_projection.sections
+    }
+    final_blocks = {block.display.cell: block for block in final_projection.sections}
+
+    assert (
+        primary_blocks[target].block_sha256 != final_blocks[target].block_sha256
+    ), "보충한 장은 실제로 바뀌어야 한다"
+
+    for cell in SECTION_IDS:
+        if cell == target:
+            continue
+        assert primary_blocks[cell].block_sha256 == final_blocks[cell].block_sha256
+        assert primary_blocks[cell].display_sha256 == final_blocks[cell].display_sha256
+        # dataclass 동치까지 본다 — 지문이 같아도 내용이 다르면(충돌) 여기서
+        # 갈린다. 장부는 화면에 안 보이므로 «따로» 못 박는다.
+        assert primary_blocks[cell].ledger == final_blocks[cell].ledger
+        assert primary_blocks[cell].display == final_blocks[cell].display
+
+    # digest의 장별 목록도 같은 이야기를 해야 한다.
+    primary_digest = dict(build_report_digest(primary_projection).section_sha256s)
+    final_digest = dict(build_report_digest(final_projection).section_sha256s)
+    assert primary_digest[target] != final_digest[target]
+    assert {
+        cell: digest for cell, digest in primary_digest.items() if cell != target
+    } == {cell: digest for cell, digest in final_digest.items() if cell != target}
+
+
+def test_보충_비대상_장의_장부를_건드리면_block_digest가_빨개진다() -> None:
+    """위 시험이 «지켜 준다»는 말이 참인지 보는 음성 대조.
+
+    비대상 장의 장부만 한 칸 바꾼 projection을 만들어, 그 장의
+    ``block_sha256``이 실제로 달라지는지 확인한다. 안 달라지면 위 시험은
+    아무것도 안 지키는 것이다.
+    """
+
+    output, _writer, _reviewer, _diagram = _run_full()
+    projection = output.report.public_projection
+    assert projection is not None
+
+    victim = projection.sections[1]
+    contribution = victim.ledger.source_grade_contribution
+    assert contribution, "장부 위조를 하려면 등급 기여가 있어야 한다"
+    number, grades = contribution[0]
+    swapped = "해석" if grades[0] != "해석" else "확인"
+    forged_ledger = replace(
+        victim.ledger,
+        source_grade_contribution=((number, (swapped,)),) + contribution[1:],
+    )
+    forged_block = PublicSectionContentBlock(
+        version=victim.version,
+        display=victim.display,
+        ledger=forged_ledger,
+    )
+
+    assert forged_block.display_sha256 == victim.display_sha256
+    assert forged_block.block_sha256 != victim.block_sha256
