@@ -42,7 +42,8 @@ analysis_engine/
 
 ## 환경과 실행 자료
 
-- Python·라이브러리 의존성은 `app/requirements.txt`에서 함께 설치한다.
+- Python·라이브러리 의존성은 `app/requirements.txt`에서 함께 설치한다. 시험까지 돌리려면
+  `.github/requirements-ci.txt`도 같이 설치한다.
 - 기본 개발 실행은 `analysis_engine/.env`를 읽을 수 있지만 값이나 파일 내용을
   출력해서는 안 된다.
 - `ANALYSIS_ENGINE_DISABLE_DOTENV=1`이면 `.env` 존재 여부를 확인하기 전 즉시
@@ -57,23 +58,26 @@ analysis_engine/
 
 ## 시험
 
-저장소 루트에서 app 가상환경으로 엔진 단위 시험을 실행한다.
+저장소 루트의 가상환경으로 엔진 단위 시험을 실행한다.
 
 ```powershell
-$env:TLDEXTRACT_CACHE="$PWD\app\.cache\tldextract"
-.\app\.venv\Scripts\python -m pytest analysis_engine/src -q `
-  --basetemp=app/.pytest_tmp_engine_readme
+$env:TLDEXTRACT_CACHE = "$PWD\.cache\tldextract"
+.\.venv\Scripts\python -m pytest analysis_engine/src -q `
+  --basetemp=.pytest_tmp_engine_readme
 ```
 
-동적 연결과 활성 v3 계약은 app 시험도 함께 확인한다.
+동적 연결과 활성 v3 계약은 app 시험도 함께 확인한다. 두 묶음을 한 pytest 세션에
+합치면 같은 이름의 시험 파일이 겹쳐 수집이 중단되므로 따로 실행한다.
 
 ```powershell
 cd app
-$env:TLDEXTRACT_CACHE="$PWD\.cache\tldextract"
-.\.venv\Scripts\python -m pytest src tools/tests -q `
+$env:TLDEXTRACT_CACHE = "$PWD\.cache\tldextract"
+..\.venv\Scripts\python -m pytest src tools/tests -q `
+  -m "not local_integration" `
   --basetemp=.pytest_tmp_engine_integration
 ```
 
 특히 `src/features/pipeline/tests/test_real_contract.py`와 real pipeline 관련 시험은
 동적 엔진 파일, 금지된 구형 입력, provider 경계의 회귀를 감시한다. GitHub Actions
-`quality-gate`는 두 시험 묶음 뒤 Docker 이미지를 만들고 `/healthz`를 확인한다.
+`quality-gate`는 app·엔진·배포·운영 네 시험 묶음이 통과한 뒤 Docker 이미지를 만들고
+컨테이너의 `/readyz`를 확인한다.

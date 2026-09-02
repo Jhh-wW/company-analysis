@@ -29,9 +29,9 @@
 Blueprint 파일 경로뿐이고 연결 저장소를 바꾸는 항목이 없다. 새 저장소로 Blueprint를
 새로 만들면 기존 서비스를 넘겨받지 않고 이름에 접미사가 붙은 **복제 서비스**가 생긴다.
 
-→ **Blueprint Manual Sync / Deploy Blueprint를 누르지 않는다.** 환경변수는 서비스의
-**Environment 탭에서 직접 편집**한다. Sync가 돌지 않으므로 대시보드에서 고친 값이
-Blueprint 파일 값에 덮여 쓰이지 않는다.
+→ 이 서비스는 Blueprint에서 **Manual Sync / Deploy Blueprint**를 실행하지 않는다.
+환경변수는 서비스의 **Environment 탭에서 직접 편집**한다. Sync가 돌지 않으므로
+대시보드에서 고친 값이 Blueprint 파일 값에 덮여 쓰이지 않는다.
 
 `render.yaml`은 Blueprint가 되살아났을 때 어긋나지 않도록 대시보드와 **같은 값**으로
 유지한다. 배포 계약 시험(`deploy/tests/test_deployment_contract.py`)이 이 파일을 직접 읽어
@@ -124,9 +124,11 @@ DART 문서로 검증된 적이 없어 이번 출시에서는 켜지 않는다. 
 검증(`deploy/validate_environment.py`)이 `1`과 `0` 외의 값을 거부해 컨테이너가 뜨지 않는다.
 값을 아예 넣지 않는 것은 오류가 아니다(v1을 쓰겠다는 정상적인 선택이다).
 
-켜면 보고서 본문을 composer가 쓰고 2·4·7장에 도식이 실린다. v2 전용 캐시는 배포
-revision·생성기 지문·사업연도·실제 DART 접수번호·정규화한 재무 응답 지문이 **모두** 같을
-때만 재사용한다. 하나라도 다르면 새로 조사한다.
+켜면 보고서 본문을 composer가 쓰고 2·4·7장에 도식이 실린다.
+v2 전용 1층 캐시는 배포 revision·생성기 코드 지문·최신 사업연도뿐 아니라
+실제 DART 접수번호와 정규화한 재무 응답 지문까지 모두 같을 때만 재사용한다.
+코드·사업연도·공시·재무값 중 하나라도 바뀌면 옛 결과를 내지 않고 새로 조사하며,
+모두 같으면 캐시 적중으로 본조사 비용을 다시 쓰지 않는다.
 
 ## 주소와 Google OAuth 연결
 
@@ -156,16 +158,22 @@ report_standard 통과
 
 영속 디스크는 재시작·재배포를 견디는 보존 수단이지 **독립 백업이 아니다.** 외부 백업과
 정기 작업은 코드와 인증 경로까지만 있고 `render.yaml`에 cron으로 선언돼 있지 않다.
-`BackupManifestAppender` 운영 구현·독립 sink/signer·최신 checkpoint 공급 경로가 없어
-**외부 백업 배포는 막혀 있다.** 배포 버튼만 눌러서는 재해 복구가 생기지 않는다.
+
+**현재 외부 백업 배포는 BLOCKED다.** 저장소에는 recovery-generation object set을 지원하는
+`BackupManifestAppender` 운영 구현, signer, 독립 sink, 앱 시작 시
+`install_manifest_appender_provider(...)` 호출, 최신 checkpoint 공급 경로가 없다. S3 변수
+세트만 채우면 되는 상태가 아니며, `deploy/validate_environment.py`도 `BACKUP_S3_BUCKET`이
+설정된 배포를 fail-closed한다. 즉, **최초 승인 PDF 원본의 외부 백업은 아직 확인하지
+못했다.** 배포 버튼만 눌러서는 재해 복구가 생기지 않는다.
 
 모든 쓰기 연결은 `synchronous=EXTRA`를 강제한다. 비용·출고 원장의 마지막 commit이 전원
 중단 직후 되돌아가지 않게 하는 계약이므로 성능을 이유로 낮추지 않는다. 실행 중 DB 파일이
 사라지면 빈 DB를 자동으로 만들지 않고 서비스가 닫힌다.
 
-최초 승인 PDF 원본에는 `REPORT_ARTIFACT_CAPACITY_BYTES`가 512MiB를 배정한다. 한도를 넘으면
-과거 원본을 지우지 않고 **새 출고를 닫는다.** 설정값을 새 결과에 맞춰 늘리는 것을 장애
-해결로 삼지 않는다.
+최초 승인 PDF 원본에는 `REPORT_ARTIFACT_CAPACITY_BYTES`가 512MiB를 배정한다. 원본
+저장소는 용량이 부족해도 **자동으로 과거 원본을 지우지 않는다.** 상한을 넘으면 이미
+승인된 원본은 그대로 두고 **새 보고서 출고를 닫는다.** 설정값을 새 결과에 맞춰 늘리는
+것을 장애 해결로 삼지 않는다.
 
 외부 백업 adapter를 구현한 뒤 처음 한 번 설정할 값과 조건, 복구 세대 검증 절차, 비밀 복구
 묶음은 [장기 휴면 백업·복구](장기_휴면_백업.md)와

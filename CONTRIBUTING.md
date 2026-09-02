@@ -24,13 +24,17 @@ cd app
 .\로컬데모켜기.ps1
 ```
 
-시험은 반드시 `app/` 폴더에서 돌린다. `app/src`와 `analysis_engine/src`에 같은 이름의 시험
-파일(예: `test_constants.py`, `test_logic.py`)이 있어서, 저장소 루트에서 한 번에 모으면 pytest가
-`import file mismatch`로 수집 자체를 중단한다. 시험이 실패하는 게 아니라 한 개도 실행되지 않는다.
+`app/src`와 `analysis_engine/src`에 같은 이름의 시험 파일(예: `test_constants.py`,
+`test_logic.py`)이 있어서 한 pytest 세션에 같이 모으면 `import file mismatch`로 수집
+자체가 중단된다. 시험이 실패하는 게 아니라 한 개도 실행되지 않는다. 그래서 아래 네
+묶음을 각각 따로 돌린다. `.github/workflows/quality-gate.yml`이 CI에서 쓰는 명령과 같다.
 
 ```powershell
-cd app
-..\.venv\Scripts\python -m pytest -q -p no:cacheprovider
+$env:TLDEXTRACT_CACHE = "$PWD\.cache\tldextract"
+.\.venv\Scripts\python -m pytest app/src app/tools/tests -q -m "not local_integration"
+.\.venv\Scripts\python -m pytest analysis_engine/src -q
+.\.venv\Scripts\python -m pytest deploy/tests -q
+.\.venv\Scripts\python -m pytest ops -q
 ```
 
 로컬 데모는 외부 유료 API를 호출하지 않는다. 실제 조사 모드는 사용자 승인과 별도
@@ -50,7 +54,8 @@ cd app
 
 ## 시험
 
-테스트 임시 파일은 저장소 안의 명시적 basetemp에 둔다.
+테스트 임시 파일은 저장소 안의 명시적 basetemp에 둔다. 정본에 가까운 곳을 고쳤으면
+전체를 돌리기 전에 아래 핵심 묶음을 먼저 본다.
 
 ```powershell
 cd app
@@ -59,19 +64,13 @@ cd app
   src/features/pipeline/tests src/features/storage/tests `
   -m "not local_integration" `
   --basetemp=.pytest_tmp_core_review
-
-..\.venv\Scripts\python -m pytest -q -m "not local_integration" `
-  --basetemp=.pytest_tmp_full_review
 cd ..
-$env:TLDEXTRACT_CACHE="$PWD\app\.cache\tldextract"
-.\.venv\Scripts\python -m pytest -q analysis_engine/src `
-  --basetemp=app/.pytest_tmp_engine_review
 git diff --check
 ```
 
-저장소 밖의 과거 데모 15건·DART 전체 목록·검증된 공시 원문까지 준비한 환경에서만
-`python -m pytest -m local_integration`을 별도로 실행한다. 이 marker를 명시적으로
-선택했는데 자료가 없으면 통합 시험은 실패한다.
+전체는 「로컬 준비」의 네 묶음을 돌린다. 저장소 밖의 대용량 로컬 자료까지 준비한
+환경에서만 `-m local_integration`을 별도로 실행한다. 이 marker를 명시적으로 선택했는데
+자료가 없으면 통합 시험은 실패하며, 기본 회귀의 녹색으로 덮지 않는다.
 
 PDF 변경은 실제 canonical 보고서를 생성하고 모든 페이지 PNG를 직접 확인한다. PDF
 승인·다운로드 변경은 rollback, race, DB tamper, 실제 PDF/PNG 재해시 회귀도 실행한다.
