@@ -200,9 +200,9 @@
     <span>
       <b>전체 상한이 없습니다.</b>
       지금 구성의 <strong>호출 전 예상비용 차단 기준 합계는 {{ "{:,.0f}".format(configured_stop_threshold_krw) }}원</strong>입니다
-      — 살아 있는 링크 {{ active_link_count }}개 × 3,000원 + 초대한 친구 {{ members|length }}명 × 3,000원 + 관리자 5,000원입니다.
+      — 살아 있는 링크 {{ active_link_count }}개 × 3,000원 + {% if member_budget_customized %}초대한 친구 {{ members|length }}명 합계 {{ "{:,.0f}".format(member_budget_total_krw) }}원{% else %}초대한 친구 {{ members|length }}명 × {{ member_default_budget_label }}{% endif %} + 관리자 5,000원입니다.
       유료 호출 전에 예상비용을 예약하고 각 통장 기준에 닿으면 새 호출을 차단합니다.
-      MEMBER는 이 금액 제한에 더해 한국시간 기준 성공 보고서 3건으로도 제한합니다.
+      MEMBER는 이 금액 제한에 더해 한국시간 기준 성공 보고서 건수로도 제한하며, 따로 정하지 않은 친구는 성공 보고서 {{ member_default_success_limit }}건입니다.
       다만 이 값은 실제 청구의 최댓값이 아닙니다. 실제 provider 토큰 집계와 가격·환율 차이로
       확정 청구액이 예상 예약액이나 이 합계를 넘을 수 있습니다.
       <br>줄이려면 <strong>안 쓰는 링크를 닫으세요.</strong>
@@ -356,7 +356,8 @@
     외부 계정에는 새 MEMBER 권한을 만들 수 없습니다.
     {% else %}
     <strong>여기 있는 사람만</strong> 구글 로그인 후 실제 조사를 할 수 있습니다
-    (한국시간 기준 비용 입장 상한 3,000원 + 성공 보고서 3건).
+    (따로 정하지 않은 친구는 한국시간 기준 비용 입장 상한 {{ member_default_budget_label }} + 성공 보고서 {{ member_default_success_limit }}건).
+    한도는 <a href="/admin/members">친구 화면</a>에서 사람마다 따로 바꿀 수 있습니다.
     <br>명단에 없으면 로그인해도 <strong>데모만</strong> 보입니다.
     {% endif %}
   </p>

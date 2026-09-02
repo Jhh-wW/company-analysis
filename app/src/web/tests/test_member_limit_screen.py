@@ -170,6 +170,58 @@ def test_오늘_화면은_기본값을_전원_규칙이_아니라_기본값이�
 
 
 # ══════════════════════════════════════════════════════════
+# ②-2 접근 화면 — 「인원 × 기본값」이 아니라 회원별 값의 합
+# ══════════════════════════════════════════════════════════
+
+
+def test_접근_화면_합계는_회원별_한도의_합이다():
+    """★ 한 명만 올려도 「N명 × 3,000원」은 실제 노출보다 작아진다.
+
+    비용 노출 규모를 읽으려고 보는 숫자라, 작게 보이면 관리자가 링크·친구를
+    더 늘려도 된다고 판단한다.
+    """
+    _초대한다(_친구, 이름="김민지")
+    _초대한다(_다른친구, 이름="이서준")
+    _한도를_정한다(_친구, 건수=3, 금액=6000.0)
+
+    with TestClient(main.app) as client:
+        runtime._PIPELINE = DemoPipeline()
+        session = auth_logic.create_session("admin@example.com", True)
+        client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
+        화면 = client.get("/admin/access")
+
+    assert 화면.status_code == 200
+    # 6,000 + 3,000 = 9,000원. 여기에 관리자 5,000원을 더해 14,000원.
+    assert "초대한 친구 2명 합계 9,000원" in 화면.text
+    assert "14,000원" in 화면.text
+    # 한 명이라도 다르면 「N명 × 3,000원」은 거짓이므로 쓰지 않는다.
+    assert "명 × 3,000원" not in 화면.text
+    assert "11,000원" not in 화면.text
+
+
+def test_아무도_한도를_안_바꿨으면_접근_화면_문구가_그대로다():
+    """★ 음성 대조 — 기존 문장을 지우지 않고 조건부로만 만든다.
+
+    `test_admin_access.py`의 기존 회귀시험이 「친구 N명 × 3,000원」과
+    「성공 보고서 3건」을 지켜 왔고, 그 파일은 이 작업의 소유 밖이다.
+    """
+    _초대한다(_친구, 이름="김민지")
+
+    with TestClient(main.app) as client:
+        runtime._PIPELINE = DemoPipeline()
+        session = auth_logic.create_session("admin@example.com", True)
+        client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
+        화면 = client.get("/admin/access")
+
+    assert "초대한 친구 1명 × 3,000원" in 화면.text
+    assert "성공 보고서 3건" in 화면.text
+    assert "비용 입장 상한 3,000원" in 화면.text
+    # 링크 0개 + 친구 3,000 + 관리자 5,000 = 8,000원
+    assert "8,000원" in 화면.text
+    assert "합계" in 화면.text  # 「차단 기준 합계」 문장 자체는 그대로 있다
+
+
+# ══════════════════════════════════════════════════════════
 # ③ 친구 본인 화면 — 남의 정보도, 내부 열 이름도 안 보인다
 # ══════════════════════════════════════════════════════════
 

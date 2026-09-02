@@ -696,8 +696,7 @@ def _guard_run(
         if not member_available:
             return _throttled(
                 request,
-                f"오늘 성공한 보고서 {member_success_limit}건을 모두 사용했습니다. "
-                "내일 다시 시도해 주세요.",
+                member_success_limit_message(member_success_limit),
                 "member-success-limit",
             )
     if count_start and not budget_logic.rate_ok(
@@ -756,6 +755,24 @@ def _guard_run(
 THROTTLE_FAULT_KINDS: Final[frozenset[str]] = frozenset(
     {"budget-store", "budget-unresolved", "member-usage-store"}
 )
+
+
+def member_success_limit_message(limit: int) -> str:
+    """오늘 성공 보고서 건수를 다 쓴 친구에게 보여줄 말.
+
+    Args:
+        limit: **그 친구의** 하루 성공 보고서 한도.
+
+    ★ 왜 함수로 빼는가 — 이 문장은 «막는 자리»가 두 곳이라 두 번 나온다.
+      실행 시작 전 사전 확인(`_guard_run`)과 Job 등록 직전의 예약 커밋
+      (`job_runtime._start_with_reserved_slot`)이다. 같은 문장을 두 곳에 따로
+      적어 두면 한쪽만 고쳐져서, 한도를 7건으로 올린 친구가 경쟁에서 밀렸을 때
+      「3건 다 썼다」는 틀린 말을 본다 (P-83과 같은 함정).
+    """
+    return (
+        f"오늘 성공한 보고서 {int(limit)}건을 모두 사용했습니다. "
+        "내일 다시 시도해 주세요."
+    )
 
 
 def _throttled(request: Request, message: str, kind: str) -> HTMLResponse:

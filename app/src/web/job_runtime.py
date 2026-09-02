@@ -2198,6 +2198,7 @@ async def _start_with_reserved_slot(
             )
 
         member_email = ""
+        member_success_limit = dashboard_store.MEMBER_DAILY_SUCCESS_LIMIT
         try:
             with storage_db.connect() as conn:
                 if dashboard_store.get_service_state(conn).status == dashboard_store.SERVICE_MAINTENANCE:
@@ -2222,12 +2223,19 @@ async def _start_with_reserved_slot(
                         raise RuntimeError(
                             "MEMBER 실행의 불변 계정 subject를 확인할 수 없습니다"
                         )
+                    # ★ 한도는 «이 친구의 값»이다 (결정 D-G4 (a)). 막는 판단과
+                    #   화면 문구가 같은 transaction에서 읽은 같은 숫자를 쓰게
+                    #   여기서 한 번 읽어 둘 다에 넘긴다.
+                    member_success_limit = dashboard_store.member_success_limit(
+                        conn, actor_email=member_email
+                    )
                     member_usage_reserved = dashboard_store.reserve_member_run(
                         conn,
                         run_id=run_id,
                         actor_email=member_email,
                         day=clock.today_kst().isoformat(),
                         now_iso=clock.iso_now_kst(),
+                        success_limit=member_success_limit,
                     )
                     if member_usage_reserved and not report_access_store.bind_member_run(
                         conn,
@@ -2242,7 +2250,9 @@ async def _start_with_reserved_slot(
             if not member_usage_reserved:
                 return request_helpers._throttled(
                     request,
-                    "오늘 성공한 보고서 3건을 모두 사용했습니다. 내일 다시 시도해 주세요.",
+                    request_helpers.member_success_limit_message(
+                        member_success_limit
+                    ),
                     "member-success-limit",
                 )
 

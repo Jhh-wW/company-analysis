@@ -398,10 +398,29 @@ def _access_context(request: Request, *, today: dt.date, **kwargs) -> dict:
         for member in members
     }
     # LINK·MEMBER는 각각 독립 통장이므로 활성 개수만큼 입장 상한이 생긴다.
-    # MEMBER는 이 금액 제한에 더해 KST 성공 보고서 3건 제한도 함께 적용한다.
+    # MEMBER는 이 금액 제한에 더해 KST 성공 보고서 건수 제한도 함께 적용한다.
+    # ★ 친구마다 하루 한도가 다를 수 있다 (결정 D-G4 (a)). 「인원 × 기본값」으로
+    #   세면 한 명만 올려도 이 합계가 실제 비용 노출보다 «작게» 나온다. 이 숫자를
+    #   보고 링크·친구를 더 늘려도 되는지 판단하므로, 작게 보이는 쪽이 위험하다.
+    member_default_budget_krw = (
+        share_tracks.budget_of(share_tracks.Track.MEMBER) or 0.0
+    )
+    member_budget_total_krw = sum(
+        (
+            member_default_budget_krw
+            if member.daily_budget_krw is None
+            else float(member.daily_budget_krw)
+        )
+        for member in members
+    )
+    # 아무도 안 바꿨으면 「N명 × 기본값」이 여전히 참이고 읽기도 쉽다.
+    # 한 명이라도 다르면 그 곱셈은 거짓이 되므로 합계로만 말한다.
+    member_budget_customized = any(
+        member.daily_budget_krw is not None for member in members
+    )
     configured_stop_threshold = (
         active_link_count * (share_tracks.budget_of(share_tracks.Track.LINK) or 0.0)
-        + len(members) * (share_tracks.budget_of(share_tracks.Track.MEMBER) or 0.0)
+        + member_budget_total_krw
         + (share_tracks.budget_of(share_tracks.Track.ADMIN) or 0.0)
     )
     paid_research_closed, paid_research_closed_reason = _paid_research_status()
@@ -418,6 +437,10 @@ def _access_context(request: Request, *, today: dt.date, **kwargs) -> dict:
         link_expiry_date_labels=link_expiry_date_labels,
         members=members,
         member_invited_at_labels=member_invited_at_labels,
+        member_budget_total_krw=member_budget_total_krw,
+        member_budget_customized=member_budget_customized,
+        member_default_budget_label=f"{member_default_budget_krw:,.0f}원",
+        member_default_success_limit=dashboard_store.MEMBER_DAILY_SUCCESS_LIMIT,
         spent_today=spent_today,
         liability_today=liability_today,
         reservation_today=reservation_today,

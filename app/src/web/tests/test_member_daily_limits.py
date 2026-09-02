@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 
 import pytest
@@ -28,10 +29,18 @@ from src.features.auth import logic as auth_logic
 from src.features.budget.constants import SPEND_PHASE_PIPELINE
 from src.features.observability import admin_audit_store
 from src.features.pipeline.demo import DemoPipeline
+from src.features.pipeline.port import CompanyCard, UserInput
 from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import tracks as share_tracks
 from src.features.storage import db as storage_db
-from src.web import deployment_mode, main, paid_runtime, request_helpers, runtime
+from src.web import (
+    deployment_mode,
+    job_runtime,
+    main,
+    paid_runtime,
+    request_helpers,
+    runtime,
+)
 
 _친구 = "friend@example.com"
 _다른친구 = "other@example.com"
@@ -273,6 +282,130 @@ def test_한도가_남은_친구는_사전_확인을_통과한다():
     _성공을_다_쓴다(_친구, 6)
 
     assert request_helpers._guard_run(_친구로_들어온_요청(_친구)) is None
+
+
+def _실행번호(꼬리: str) -> str:
+    """실행 번호는 32자리 16진수여야 한다 — `bind_member_run`이 그 모양만 받는다."""
+    return f"{꼬리 * 31}f"
+
+
+def _회원_실행_요청(email: str) -> Request:
+    """실제 `/run` 경계가 받는 모양 그대로, 그 친구의 로그인 쿠키를 실은 요청."""
+    session = auth_logic.create_session(email, False, subject=_주체(email))
+    쿠키 = f"{auth_constants.SESSION_COOKIE_NAME}={session.token}".encode()
+    return Request(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/run",
+            "raw_path": b"/run",
+            "query_string": b"",
+            "headers": [(b"cookie", 쿠키)],
+            "client": ("testclient", 50000),
+            "server": ("testserver", 80),
+        }
+    )
+
+
+def _예약_커밋까지_가는_실행(email: str, *, run_id: str):
+    """예약 커밋 지점(reserve_member_run)을 실제로 지나는 실행 시작 경계.
+
+    사전 확인(_guard_run)이 아니라 **Job 등록 직전의 예약 자리**가 거절할 때
+    무슨 화면이 나오는지를 본다. 두 자리는 서로 다른 함수라 문구도 따로 박혀 있었다.
+    """
+
+    async def 시나리오():
+        job_runtime._start_job_runtime()
+        return await job_runtime._start_with_reserved_slot(
+            request=_회원_실행_요청(email),
+            original_input=UserInput(company="회사", job="직무", region="서울"),
+            card=CompanyCard(
+                legal_name="회사",
+                typed_name="회사",
+                address="서울",
+                ceo="대표",
+                founded="20200101",
+                ref="demo-ref",
+            ),
+            posting_images=[],
+            posting_image_consent=False,
+            is_paid=False,
+            resolved_track=(share_tracks.Track.MEMBER, f"user:{email}", 3000.0),
+            run_id=run_id,
+            upfront_cost=0.0,
+            upfront_models=(),
+            upfront_elapsed=0.0,
+            slot_bucket_id="reserved-slot",
+        )
+
+    try:
+        return asyncio.run(시나리오())
+    finally:
+        job_runtime._start_job_runtime()
+
+
+def test_한도_초과_안내문은_회원값을_말한다():
+    """★ 예약 자리의 안내문도 그 친구의 한도를 말해야 한다.
+
+    사전 확인은 이미 회원값을 쓰지만(위 시험), 예약 자리의 문구가 옛 3건으로
+    남아 있으면 한도를 7건으로 올린 친구가 경쟁에서 밀렸을 때 「3건 다 썼다」는
+    틀린 말을 본다. 관리자는 화면대로 또 올리게 된다.
+    """
+    _초대한다(_친구)
+    _한도를_정한다(_친구, 건수=7, 금액=None)
+    _성공을_다_쓴다(_친구, 7)
+
+    응답 = _예약_커밋까지_가는_실행(_친구, run_id=_실행번호("1"))
+    글자 = 응답.body.decode("utf-8")
+
+    assert "오늘 성공한 보고서 7건을 모두 사용했습니다" in 글자
+    assert "3건을 모두 사용했습니다" not in 글자
+
+
+def test_한도를_안_정한_친구는_예약_자리에서도_기존_3건으로_안내받는다():
+    """★ 음성 대조 — 회원별 한도를 넣었다고 기존 안내가 바뀌면 안 된다."""
+    _초대한다(_친구)
+    _성공을_다_쓴다(_친구, 3)
+
+    응답 = _예약_커밋까지_가는_실행(_친구, run_id=_실행번호("2"))
+
+    assert "오늘 성공한 보고서 3건을 모두 사용했습니다" in 응답.body.decode("utf-8")
+
+
+def test_한도가_남은_친구는_예약_자리를_통과한다():
+    """막는 자리가 «항상» 막으면 시험이 초록이어도 기능이 죽은 것이다."""
+    _초대한다(_친구)
+    _한도를_정한다(_친구, 건수=7, 금액=None)
+    _성공을_다_쓴다(_친구, 6)
+
+    실행번호 = _실행번호("3")
+    응답 = _예약_커밋까지_가는_실행(_친구, run_id=실행번호)
+
+    assert "모두 사용했습니다" not in 응답.body.decode("utf-8")
+    # 예약 자리를 실제로 지났는지는 append-only 사건으로 본다. 최종 상태로 보면
+    # 배경 조사가 실패해 반환(returned)되는 시점에 따라 값이 달라진다.
+    with storage_db.connect() as conn:
+        상태들 = [
+            str(row[0])
+            for row in conn.execute(
+                f"SELECT state FROM {dashboard_store.TABLE_MEMBER_USAGE_EVENTS} "
+                "WHERE run_id = ? ORDER BY id",
+                (실행번호,),
+            )
+        ]
+    assert 상태들[:1] == [dashboard_store.MEMBER_USAGE_RESERVED]
+
+
+def test_막는_자리와_말하는_자리는_같은_문장을_쓴다():
+    """두 자리에 같은 문장이 따로 박혀 있으면 한쪽만 고쳐진다 (P-83과 같은 함정)."""
+    assert (
+        request_helpers.member_success_limit_message(7)
+        == "오늘 성공한 보고서 7건을 모두 사용했습니다. 내일 다시 시도해 주세요."
+    )
+    assert "3건" in request_helpers.member_success_limit_message(3)
+    assert "20건" in request_helpers.member_success_limit_message(20)
 
 
 def test_예약액_계약은_본조사_900원_그대로다():
