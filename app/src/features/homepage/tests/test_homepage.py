@@ -192,6 +192,52 @@ def test_루트_접속_실패는_failed로_돌아온다():
     assert result.candidate_scope_complete is False
 
 
+# ── HTTPS 전면 실패 → HTTP 재시도 (P0: robots 캐시는 scheme까지 구분해야 한다) ──
+#
+# 독립 검토 2026-09-02 실측: robots 캐시 키를 host만으로 두면, 이 HTTP 재시도가
+# 같은 collect_homepage_fragments scope 안에서 돌기 때문에 HTTPS robots(허용)
+# 판정을 그대로 물려받아 HTTP robots.txt(전면 차단)를 다시 확인하지 않는다 —
+# 차단된 사이트를 평문으로 읽어버리는 사고다.
+
+
+def test_https_전면실패후_http_재시도는_http_robots를_다시_조회하고_차단을_지킨다():
+    """HTTPS robots는 허용, HTTPS 루트 페이지는 접속 실패, HTTP robots는 전면
+    차단인 사이트 — HTTP 재시도가 HTTPS의 「허용」 판정을 캐시로 물려받지 않고
+    HTTP robots.txt를 실제로 다시 조회해서 차단을 지켜야 한다."""
+    https_root = "https://company.example"
+    http_root = "http://company.example"
+    calls: list[str] = []
+
+    def fetch(url: str) -> str:
+        calls.append(url)
+        if url == f"{https_root}/robots.txt":
+            return "User-agent: *\nAllow: /\n"
+        if url == https_root:
+            raise HomepageFetchError("가짜 접속 실패: 루트")
+        if url == f"{http_root}/robots.txt":
+            return "User-agent: *\nDisallow: /\n"
+        if url == http_root:
+            return (
+                "<html><body><p>"
+                + ("읽으면 안 되는 차단된 본문입니다. " * 10)
+                + "</p></body></html>"
+            )
+        raise AssertionError(f"예상하지 않은 주소: {url}")
+
+    result = collect_homepage_fragments(https_root, fetch=fetch)
+
+    assert calls.count(f"{https_root}/robots.txt") == 1
+    assert calls.count(f"{http_root}/robots.txt") == 1, (
+        "HTTP robots.txt를 다시 조회하지 않았다 — HTTPS의 「허용」 판정이 HTTP로 "
+        f"샜다(P0). 실제 호출 순서: {calls}"
+    )
+    assert result.state == "failed", (
+        f"HTTP robots.txt가 전면 차단인데 state={result.state}로 성공 처리됨 "
+        f"(detail={result.detail!r}) — robots 차단을 지키지 못했다(P0)."
+    )
+    assert http_root not in calls  # robots가 막았으니 본문은 요청되지 않아야 한다
+
+
 def test_DART_apex의_실제_www이동만_재수집하고_조각에_검증표식을_붙인다():
     apex = "https://jype.com"
     alias = "https://www.jype.com/"

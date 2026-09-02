@@ -41,7 +41,11 @@ from src.features.homepage.constants import (
     TIMEOUT_SEC,
     USER_AGENT,
 )
-from src.features.homepage.robots_cache import RobotsDecision, cached_robots_decision
+from src.features.homepage.robots_cache import (
+    RobotsDecision,
+    cached_robots_decision,
+    robots_cache_key,
+)
 from src.features.homepage.safe_http import (
     HomepageResponseError,
     UnsafeHomepageUrlError,
@@ -795,12 +799,17 @@ def _load_robots(base_url: str, fetch: Fetcher) -> robotparser.RobotFileParser:
     바꾸지 않고 호출자까지 실패를 전달한다.
 
     ★ 같은 조사(scope) 안에서 이미 다른 수집기(공식 IR PDF·광역 웹)가 같은
-      host의 robots.txt를 확인했으면 새 네트워크 요청 없이 그 판정을
-      재사용한다(``robots_cache.cached_robots_decision`` — 티켓 B2: 최대 4회
-      중복 요청 실측).
+      **origin**(scheme+host+port)의 robots.txt를 확인했으면 새 네트워크
+      요청 없이 그 판정을 재사용한다(``robots_cache.cached_robots_decision``
+      — 티켓 B2: 최대 4회 중복 요청 실측). 캐시 키는 host가 아니라 origin
+      이다 — HTTPS 전면 실패 뒤 `_http_variant`로 HTTP 재시도할 때, HTTPS
+      robots 판정을 그대로 물려받으면 실제 HTTP robots.txt(예: 전면 차단)를
+      다시 확인하지 않아 차단된 사이트를 평문으로 읽어버린다(독립 검토
+      2026-09-02 P0 실측 — ``robots_cache.py`` 모듈 docstring 참조).
     """
     robots_url = urllib.parse.urljoin(base_url, "/robots.txt")
     host = (urllib.parse.urlsplit(robots_url).hostname or "").casefold()
+    cache_key = robots_cache_key(robots_url)
 
     def loader() -> RobotsDecision:
         parser = robotparser.RobotFileParser()
@@ -820,17 +829,22 @@ def _load_robots(base_url: str, fetch: Fetcher) -> robotparser.RobotFileParser:
             #   (표준 라이브러리 함정) — HTTP 4xx로 부재가 확인된 경우에만
             #   빈 규칙으로 «확인 끝»을 표시한다.
             text = ""
-        except (HomepageRobotsUnreachable, HomepageFetchError):
+        except (HomepageRobotsUnreachable, HomepageFetchError) as exc:
             return RobotsDecision(
-                host=host, parser=parser, blocked=True, reason_code="robots_unreachable"
+                host=host,
+                parser=parser,
+                blocked=True,
+                reason_code="robots_unreachable",
+                detail=str(exc),
             )
         parser.parse(text.splitlines())  # 네트워크 접속 없이 주어진 글자만 해석한다
         return RobotsDecision(host=host, parser=parser, blocked=False, reason_code="robots_ok")
 
-    decision = cached_robots_decision(host, loader)
+    decision = cached_robots_decision(cache_key, loader)
     if decision.blocked:
+        detail_suffix = f": {decision.detail}" if decision.detail else ""
         raise HomepageRobotsUnreachable(
-            f"robots.txt를 확인하지 못했습니다 (reason={decision.reason_code})"
+            f"robots.txt를 확인하지 못했습니다 (reason={decision.reason_code}){detail_suffix}"
         )
     return decision.parser
 

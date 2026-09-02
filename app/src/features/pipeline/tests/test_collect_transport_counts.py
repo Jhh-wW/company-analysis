@@ -101,7 +101,17 @@ def _robots_hits_by_host(calls: list[str]) -> dict[str, int]:
 
 
 def _run_all_three(site: _SharedFakeSite, *, company_name: str = "Example Company"):
-    """홈페이지 → 공식 IR → 광역 웹 순서로, 같은 scope 안에서 세 수집기를 부른다."""
+    """홈페이지 → 공식 IR → 광역 웹 순서로, **인위로 공유한** scope 안에서
+    세 수집기를 부른다.
+
+    ★ 정직한 표기: 이 헬퍼가 여는 ``with request_deadline_scope(5.0):``는
+    시험이 직접 만든 공유 scope다 — 오늘 운영 배선(``real.py``)이 실제로
+    세 수집기를 이렇게 묶어 부른다는 뜻이 아니다(독립 검토 P1 실측: 지금
+    real.py는 홈페이지·IR 두 호출을 각자 독립 scope로 부른다). 이 시험은
+    "공유 scope가 주어지면 캐시 메커니즘 자체가 올바르게 동작하는가"만
+    증명한다. 운영에서 실제로 공유되는지는
+    ``test_real_collect는_홈페이지와_IR을_공유_캐시_scope로_묶는다``가 맡는다.
+    """
 
     with request_deadline_scope(5.0):
         homepage_result = collect_homepage_fragments(ROOT, fetch=site.homepage_fetch)
@@ -123,11 +133,12 @@ def _run_all_three(site: _SharedFakeSite, *, company_name: str = "Example Compan
     return homepage_result, ir_result, wide_result
 
 
-def test_한_scope_안에서_host별_robots_요청은_정확히_1회다() -> None:
-    """정상 경로(robots 허용) — 홈페이지+IR+광역 세 곳이 합쳐 1회여야 한다.
+def test_공유_scope_안에서_host별_robots_요청은_정확히_1회다() -> None:
+    """정상 경로(robots 허용) — **인위로 공유한** scope 안에서 홈페이지+IR+
+    광역 세 곳이 합쳐 1회여야 한다(캐시 메커니즘 자체의 계약).
 
-    지금 코드는 홈페이지·IR·광역 web-crawl·광역 IR위임이 각자 독립적으로
-    robots.txt를 확인해 4회가 나온다(티켓 B2 실측 최대치).
+    수정 전 코드는 홈페이지·IR·광역 web-crawl·광역 IR위임이 각자 독립적으로
+    robots.txt를 확인해 4회가 나왔다(티켓 B2 실측치).
     """
     pages = {
         ROBOTS_URL: ROBOTS_ALLOW_ALL,
@@ -149,8 +160,9 @@ def test_한_scope_안에서_host별_robots_요청은_정확히_1회다() -> Non
     )
 
 
-def test_robots가_차단하면_세_수집기_모두_본문을_요청하지_않는다() -> None:
-    """robots 전체 차단 경로에서도 host별 robots 요청은 1회, 본문 요청은 0회."""
+def test_공유_scope_안에서_robots가_차단하면_세_수집기_모두_본문을_요청하지_않는다() -> None:
+    """**인위로 공유한** scope 안에서도 robots 전체 차단 경로는 host별 robots
+    요청 1회, 본문 요청 0회를 지킨다."""
     pages = {ROBOTS_URL: ROBOTS_DENY_ALL}
     site = _SharedFakeSite(pages)
 

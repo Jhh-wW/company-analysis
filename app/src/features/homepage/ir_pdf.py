@@ -61,7 +61,11 @@ from src.features.homepage.constants import (
     TIMEOUT_SEC,
     USER_AGENT,
 )
-from src.features.homepage.robots_cache import RobotsDecision, cached_robots_decision
+from src.features.homepage.robots_cache import (
+    RobotsDecision,
+    cached_robots_decision,
+    robots_cache_key,
+)
 from src.features.homepage.safe_http import (
     HomepageResponseError,
     READ_CHUNK_BYTES,
@@ -899,9 +903,12 @@ def _load_robots(
     """같은 호스트의 robots.txt를 읽고, 없으면 빈 규칙으로 처리한다.
 
     ★ 같은 조사(scope) 안에서 이미 다른 수집기(홈페이지·광역 웹)가 같은
-      host의 robots.txt를 확인했으면 새 네트워크 요청 없이 그 판정을
-      재사용한다(``robots_cache.cached_robots_decision`` — 티켓 B2: 최대 4회
-      중복 요청 실측). 특히 광역 웹 수집의 IR 위임(``wide_collect.
+      **origin**(scheme+host+port — IR PDF는 항상 https:443 고정이므로
+      실질적으로 host만 있어도 되지만, 캐시 키 형식을 홈페이지/광역과
+      맞춰야 서로 다른 수집기끼리 실제로 같은 캐시 항목을 공유한다)의
+      robots.txt를 확인했으면 새 네트워크 요청 없이 그 판정을 재사용한다
+      (``robots_cache.cached_robots_decision`` — 티켓 B2: 최대 4회 중복
+      요청 실측). 특히 광역 웹 수집의 IR 위임(``wide_collect.
       _run_ir_pdf_phase``)에서는 이 재사용이 그 host의 광역(더 엄격한
       RFC 9309) 판정을 그대로 물려받는다 — 의도한 동작이다.
     """
@@ -910,6 +917,7 @@ def _load_robots(
         ("https", exact_hostname, "/robots.txt", "", "")
     )
     host = exact_hostname.casefold()
+    cache_key = robots_cache_key(robots_url)
 
     def loader() -> RobotsDecision:
         parser = robotparser.RobotFileParser()
@@ -921,18 +929,23 @@ def _load_robots(
             text = page.html if isinstance(page.html, str) else ""
         except OfficialIrRobotsUnavailable:
             text = ""
-        except (OfficialIrFetchError, AttributeError, TypeError, ValueError):
+        except (OfficialIrFetchError, AttributeError, TypeError, ValueError) as exc:
             return RobotsDecision(
-                host=host, parser=parser, blocked=True, reason_code="robots_unreachable"
+                host=host,
+                parser=parser,
+                blocked=True,
+                reason_code="robots_unreachable",
+                detail=str(exc),
             )
         parser.set_url(robots_url)
         parser.parse(text.splitlines())
         return RobotsDecision(host=host, parser=parser, blocked=False, reason_code="robots_ok")
 
-    decision = cached_robots_decision(host, loader)
+    decision = cached_robots_decision(cache_key, loader)
     if decision.blocked:
+        detail_suffix = f": {decision.detail}" if decision.detail else ""
         raise OfficialIrRobotsUnreachable(
-            f"robots.txt 서버·네트워크 상태를 확인할 수 없습니다 (reason={decision.reason_code})"
+            f"robots.txt 서버·네트워크 상태를 확인할 수 없습니다 (reason={decision.reason_code}){detail_suffix}"
         )
     return decision.parser
 

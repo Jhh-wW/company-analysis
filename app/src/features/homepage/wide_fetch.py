@@ -31,7 +31,11 @@ from typing import Callable, Final
 from urllib import robotparser
 
 from src.features.homepage.constants import TIMEOUT_SEC, USER_AGENT
-from src.features.homepage.robots_cache import RobotsDecision, cached_robots_decision
+from src.features.homepage.robots_cache import (
+    RobotsDecision,
+    cached_robots_decision,
+    robots_cache_key,
+)
 from src.features.homepage.safe_http import (
     MAX_RESPONSE_BYTES,
     READ_CHUNK_BYTES,
@@ -293,13 +297,16 @@ def load_robots_policy(
     """robots.txt를 fail-closed로 확인한다. 본문 조회보다 항상 먼저 부른다.
 
     ★ 같은 조사(scope) 안에서 이미 다른 수집기(홈페이지·공식 IR PDF)가 같은
-      host의 robots.txt를 확인했으면 새 네트워크 요청 없이 그 판정을
+      **origin**(scheme+host+port, ``robots_url``에서 뽑는다 — host만 쓰면
+      scheme이 다른 재시도가 다른 origin의 판정을 잘못 물려받는다, 독립
+      검토 P0)의 robots.txt를 확인했으면 새 네트워크 요청 없이 그 판정을
       재사용한다(``robots_cache.cached_robots_decision`` — 티켓 B2). 재사용
       시에는 ``proceed_parsed``/``proceed_empty_rules`` 구분을 두지 않는다
       (``WideRobotsPolicy.blocked``만 실제로 쓰이므로 정보 손실이 없다).
     """
 
     cache_host = host.casefold()
+    cache_key = robots_cache_key(robots_url)
 
     def loader() -> RobotsDecision:
         response: WideRawResponse | None = None
@@ -325,7 +332,7 @@ def load_robots_policy(
             reason_code=reason_code,
         )
 
-    decision = cached_robots_decision(cache_host, loader)
+    decision = cached_robots_decision(cache_key, loader)
     return WideRobotsPolicy(
         host=cache_host,
         parser=decision.parser,
