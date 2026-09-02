@@ -1045,9 +1045,11 @@ td.center { text-align: center; }
 }
 .home-page .row2 { gap: 16px; }
 
+/* ★ 44px 이상 — 폰 엄지로 누르는 크기다 (설계 「사용자 화면흐름」 4절).
+   초대 링크 QR은 폰으로 찍으므로 첫 화면 버튼이 곧 랜딩 버튼이다. */
 .home-page .btn {
   display: inline-flex;
-  min-height: 42px;
+  min-height: 44px;
   align-items: center;
   justify-content: center;
   padding: 9px 16px;
@@ -1283,6 +1285,26 @@ td.center { text-align: center; }
   .home-page textarea,
   .home-page select,
   .home-page .btn { transition: none; }
+}
+
+/* ── 초대 링크 첫 화면(랜딩)의 카드 B — 「다른 회사 분석해 보기」 ──
+   ★ 왜 필요한가 — 카드 A(자기 회사 보고서)와 카드 B가 «똑같은 까만 버튼»이면
+     둘 중 무엇이 원래 보러 온 것인지 눈으로 구분되지 않는다. B는 덧붙는
+     선택지이므로 테두리만 있는 모양으로 낮춘다 (설계 「사용자 화면흐름」 4절).
+   ★ 왜 class가 아니라 «순서»로 고르는가 — 화면 틀(`input.html`)의 카드 B에는
+     그 카드만 가리키는 class가 없다(실측). 틀은 이 티켓의 소유가 아니므로
+     「두 번째 선택지 묶음」이라는 문서 구조로 고른다. 카드 A가 「준비 중」이라
+     버튼 없이 그려질 때도 묶음 자체는 두 개라 이 규칙은 그대로 맞는다.
+   ★ `.home-page .btn`보다 «뒤»에, 그리고 class를 더 겹쳐 특이도를 높인다 —
+     앞에 두거나 특이도가 낮으면 기본 버튼 규칙에 그대로 덮인다. */
+.home-page .link-landing .link-landing-choice + .link-landing-choice .btn {
+  border-color: var(--line);
+  background: #fff;
+  color: var(--ink);
+}
+.home-page .link-landing .link-landing-choice + .link-landing-choice .btn:hover {
+  border-color: var(--ink);
+  background: var(--paper-2);
 }
 
 /* ══════════════════════════════════════════════════════════

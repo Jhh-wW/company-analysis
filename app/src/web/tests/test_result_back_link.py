@@ -401,3 +401,41 @@ def test_PUBLIC_MEMBER_ADMIN_결과화면은_바뀌지_않는다(
         assert "link-result" not in 화면, 이름
         assert _돌아가기 not in 화면, 이름
         assert _다른회사 not in 화면, 이름
+
+
+# ══════════════════════════════════════════════════════════
+# ⑤ 랜딩 버튼 모양 — 카드 B 구분과 손가락 크기 (F-GS6d)
+# ══════════════════════════════════════════════════════════
+
+_스타일 = pathlib.Path(__file__).parents[1] / "static" / "style.css"
+
+#: 설계 03장 §4 「버튼 A/B … 높이 44px 이상」. ★ 폰 엄지로 누르는 버튼이다.
+_최소높이 = "min-height: 44px;"
+
+#: 카드 B 버튼을 고르는 선택자. GS6가 남긴 화면 틀에는 카드 B만 가리키는
+#: class가 없어(실측), «두 번째 선택지 묶음»이라는 순서로 고른다.
+_카드B선택자 = (
+    ".home-page .link-landing .link-landing-choice + .link-landing-choice .btn"
+)
+
+
+def test_랜딩_버튼_CSS_규칙이_있고_44px이다():
+    """★ 화면 틀에 class만 적고 규칙이 없으면 화면에서는 아무 일도 안 일어난다."""
+    css = _스타일.read_text(encoding="utf-8")
+
+    # (a) 카드 B가 카드 A와 다르게 보인다.
+    assert _카드B선택자 in css
+    # (b) 첫 화면(=랜딩이 얹히는 화면) 버튼이 손가락 크기다.
+    앞 = css.index(".home-page .btn {")
+    뒤 = css.index("}", 앞)
+    assert _최소높이 in css[앞:뒤], css[앞:뒤]
+
+
+def test_카드B_규칙은_첫화면_기본_버튼보다_뒤에_있다():
+    """★ 같은 자리를 다투는 규칙은 «뒤»에 있어야 이긴다.
+
+    `.home-page .btn`이 뒤에 오면 카드 B 규칙이 통째로 묻혀 화면이 안 바뀐다.
+    """
+    css = _스타일.read_text(encoding="utf-8")
+
+    assert css.index(_카드B선택자) > css.index(".home-page .btn {")
