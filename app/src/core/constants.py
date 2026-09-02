@@ -78,8 +78,9 @@ MODEL_LABEL_SEPARATOR: Final[str] = " + "
 
 #: 데모가 «저장된 기록을 되돌려 준 것»임을 모델 이름에 붙이는 꼬리표 (문제로그 P-84).
 #: ★ 왜 상수인가 — 데모를 만드는 곳(`pipeline/demo.py`)과 비용을 세는 곳
-#:   (`observability/metrics.py`)이 **서로 다른 feature**다. 글자를 양쪽에 적어 두면
-#:   한쪽만 바뀌는 순간 대시보드가 조용히 틀린 돈을 세기 시작한다 (P-83과 같은 함정).
+#:   (`web/paid_runtime.py`, `admin_dashboard/weekly.py`)이 **서로 다른 feature**다.
+#:   글자를 양쪽에 적어 두면 한쪽만 바뀌는 순간 대시보드가 조용히 틀린 돈을 세기
+#:   시작한다 (P-83과 같은 함정).
 REPLAY_MODEL_MARK: Final[str] = "(데모 기록)"
 
 #: 진짜 조사 1건에 실제로 든 돈(원). 재 본 만큼만 적는다 — 늘리거나 줄이지 않는다.
