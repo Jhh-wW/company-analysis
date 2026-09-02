@@ -23,6 +23,7 @@ from src.features.auth import logic as auth_logic
 from src.features.pipeline.demo import DemoPipeline
 from src.features.storage import constants as storage_constants
 from src.web import deployment_mode, main, runtime
+from src.web.tests._visible_text import visible_text
 
 
 TEMPLATES = Path(__file__).parents[1] / "templates"
@@ -72,6 +73,12 @@ def admin_client():
 def _menu_markup(page_text: str) -> str:
     assert '<nav class="frame-menu"' in page_text, "메뉴가 없는 화면이다"
     return page_text.split('<nav class="frame-menu"', 1)[1].split("</nav>", 1)[0]
+
+
+def _shortcut_markup(page_text: str) -> str:
+    표지 = '<p class="frame-eyebrow">바로가기</p>'
+    assert 표지 in page_text, "오늘 화면에 바로가기가 없다"
+    return page_text.split(표지, 1)[1].split("</section>", 1)[0]
 
 
 # ══════════════════════════════════════════════════════════
@@ -149,3 +156,107 @@ def test_기능이_켜져_있으면_안내문_대신_실제_폼이_보인다(adm
     assert 'action="/admin/invite"' in members.text
     assert "이 운영판에서는 초대 링크를 발급할 수 없습니다." not in links.text
     assert "이 운영판에서는 친구를 초대할 수 없습니다." not in members.text
+
+
+# ══════════════════════════════════════════════════════════
+# ③ 메뉴 여섯 · PC와 폰이 같다
+# ══════════════════════════════════════════════════════════
+
+
+def test_메뉴는_6묶음이고_이름이_사람_말이다(admin_client: TestClient):
+    """설계 05장 §3의 여섯 묶음이 순서대로, 사람이 읽는 이름으로 있어야 한다."""
+
+    menu = _menu_markup(admin_client.get("/admin").text)
+
+    assert menu.count("<a ") == len(EXPECTED_MENU)
+    자리 = -1
+    for 이름, 주소 in EXPECTED_MENU:
+        표시 = f">{이름}</a>"
+        assert 표시 in menu, f"메뉴에 「{이름}」이 없다"
+        assert f'href="{주소}"' in menu, f"「{이름}」이 {주소}로 가지 않는다"
+        다음자리 = menu.index(표시)
+        assert 다음자리 > 자리, f"「{이름}」의 차례가 어긋났다"
+        자리 = 다음자리
+
+
+def test_모바일_메뉴도_같은_6개다(admin_client: TestClient):
+    """폰에서 여섯 중 둘만 보이면 「갈 수 있는 곳이 둘뿐」으로 읽힌다.
+
+    ★ 메뉴는 서버가 한 벌만 그린다. 폰에서 줄어들던 이유는 넷에 붙어 있던
+      `frame-desktop-link`(CSS로 숨기는 표시)였다. 그 표시를 뺐다.
+    ★ 폰에서 «바꾸는» 일을 막는 것은 메뉴가 아니라 폼을 숨기는 규칙이라,
+      화면마다 「PC에서만 합니다」 안내가 함께 있어야 한다.
+    """
+
+    for 주소 in MENU_BEARING_PAGES:
+        응답 = admin_client.get(주소)
+        assert 응답.status_code == 200, 주소
+        menu = _menu_markup(응답.text)
+        assert menu.count("<a ") == len(EXPECTED_MENU), 주소
+        assert "frame-desktop-link" not in menu, f"{주소}: 폰에서 숨는 메뉴가 남았다"
+        for 이름, _주소 in EXPECTED_MENU:
+            assert f">{이름}</a>" in menu, (주소, 이름)
+        # 폰 범위 안내는 두 가지 방식이 있다 — 화면에 적힌 안내(`frame-mobile-notice`)
+        # 와 CSS가 붙여 주는 안내(`dashboard-mobile-restricted`). 둘 중 하나면 된다.
+        폰안내 = (
+            "frame-mobile-notice" in 응답.text
+            or "dashboard-mobile-restricted" in 응답.text
+        )
+        assert 폰안내, f"{주소}: 폰 범위 안내가 없다"
+
+
+def test_메뉴는_현재_위치를_한_곳만_표시한다(admin_client: TestClient):
+    """신고 관리는 「보고서」 묶음에 든다(설계 05장 §3 ④)."""
+
+    보고서 = _menu_markup(admin_client.get("/admin/issues").text)
+    신고 = _menu_markup(admin_client.get("/admin/feedback-reports").text)
+
+    assert 보고서.count('aria-current="page"') == 1
+    assert 신고.count('aria-current="page"') == 1
+    for menu in (보고서, 신고):
+        현재 = menu.split('aria-current="page"', 1)[1].split("</a>", 1)[0]
+        assert "보고서" in 현재
+
+
+def test_관리자_메뉴와_화면에_내부용어가_없다(admin_client: TestClient):
+    """메뉴 글자와 오늘 화면 바로가기에 내부 자료 이름이 새지 않는다.
+
+    ★ 범위 — 이 시험이 보는 것은 «메뉴»와 «오늘 화면의 바로가기»다. 각 화면
+      본문에는 옮겨 온 문구가 글자 그대로 남아 있고(G-S5b 합계 문장 등), 그
+      문구의 소유자는 이 작업이 아니다. 범위를 말없이 넓히지 않는다.
+    """
+
+    for 주소 in MENU_BEARING_PAGES:
+        # 주소(href)가 아니라 «사람이 읽는 글자»만 본다 — 경로에는 admin이 들어간다.
+        표시글자 = visible_text(_menu_markup(admin_client.get(주소).text))
+        for 용어 in MENU_BANNED_TERMS:
+            assert 용어 not in 표시글자, f"{주소} 메뉴에 「{용어}」가 남아 있다"
+
+    바로가기 = visible_text(_shortcut_markup(admin_client.get("/admin").text))
+    for 용어 in MENU_BANNED_TERMS:
+        assert 용어 not in 바로가기, f"오늘 화면 바로가기에 「{용어}」가 남아 있다"
+
+
+def test_바로가기는_여섯_묶음_중_오늘을_뺀_나머지로_간다(admin_client: TestClient):
+    """음성 대조 — 바로가기를 통째로 지워도 위 시험이 초록이 되지 않게 한다."""
+
+    바로가기 = _shortcut_markup(admin_client.get("/admin").text)
+
+    for _이름, 주소 in EXPECTED_MENU:
+        if 주소 == "/admin":
+            continue
+        assert f'href="{주소}"' in 바로가기, f"바로가기에 {주소}가 없다"
+    # 신고 관리는 메뉴에 자기 자리가 없으므로 여기서 갈 수 있어야 한다.
+    assert 'href="/admin/feedback-reports"' in 바로가기
+
+
+def test_메뉴_템플릿은_한_벌뿐이다():
+    """메뉴가 두 벌이 되면 한쪽만 고쳐 놓고 「다 고쳤다」고 말하게 된다."""
+
+    나온곳 = [
+        경로.name
+        for 경로 in TEMPLATES.glob("*.html")
+        if '<nav class="frame-menu"' in 경로.read_text(encoding="utf-8")
+    ]
+
+    assert 나온곳 == ["_admin_nav.html"], 나온곳

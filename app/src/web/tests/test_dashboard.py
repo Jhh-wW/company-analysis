@@ -98,7 +98,9 @@ def test_admin_dashboard_has_no_public_json_and_refresh_is_admin_only(monkeypatc
     assert csrf
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
-    assert "오늘" in response.text and "문제·보고서" in response.text
+    # ★ 2026-09-02 G-S8 기대값 이전 — 메뉴 이름이 여섯 묶음으로 바뀌었다
+    #   (「문제·보고서」 → 「보고서」). 화면이 HTML로 그려진다는 계약은 그대로다.
+    assert "오늘 상태" in response.text and "보고서" in response.text
     assert fragment.status_code == 200 and fragment.headers["content-type"].startswith("text/html")
     assert settings.status_code == 200
 

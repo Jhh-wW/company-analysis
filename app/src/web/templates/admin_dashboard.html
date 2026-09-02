@@ -6,7 +6,7 @@
 <header class="frame-heading"><p class="frame-kicker">관리자 전용 · 운영 데이터</p><h1>운영 대시보드</h1><p class="lede">문제·상태·친구 이용을 같은 정본에서 확인합니다. 외부 연결을 이 화면에서 시험 호출하지 않습니다.</p><p class="muted">관리자로 로그인하셨습니다.</p></header>
 {% set dashboard_nav = "today" %}{% include "_admin_nav.html" %}
 {% include "_admin_today.html" %}
-<section class="frame-section frame-desktop-only"><p class="frame-eyebrow">바로가기</p><div class="frame-grid frame-grid-three"><a class="card" href="/admin/issues"><h3>문제·보고서</h3><p>신고, 상태 전이, 관리자 원본 검토</p></a><a class="card" href="/admin/members"><h3>친구</h3><p>MEMBER 이용과 설문</p></a><a class="card" href="/admin/links"><h3>지원 LINK</h3><p>접속·생성 이력, 원문 키 미표시</p></a></div></section>
+<section class="frame-section frame-desktop-only"><p class="frame-eyebrow">바로가기</p><div class="frame-grid frame-grid-three"><a class="card" href="/admin/links"><h3>초대 링크</h3><p>발급, 접속 기록, 철회</p></a><a class="card" href="/admin/members"><h3>회원</h3><p>초대, 하루 한도, 이용과 설문</p></a><a class="card" href="/admin/issues"><h3>보고서</h3><p>상태 전이와 원본 검토</p></a><a class="card" href="/admin/feedback-reports"><h3>신고 관리</h3><p>접수한 오류 신고 처리</p></a><a class="card" href="/admin/costs"><h3>비용</h3><p>오늘 지출과 새 조사를 막는 기준</p></a><a class="card" href="/admin/settings"><h3>운영</h3><p>서비스 상태, 백업, 휴지통, 주간 파일</p></a></div></section>
 {% if dashboard_service.status == 'normal' %}
 <section class="card frame-mobile-emergency" aria-labelledby="mobile-emergency-title">
   <h2 id="mobile-emergency-title">긴급 중단</h2>
