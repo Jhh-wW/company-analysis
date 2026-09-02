@@ -124,6 +124,26 @@ _PERSISTENCE_WARNING = (
     "지금 PDF도 내려받아 보관해 주세요."
 )
 
+# ── 조사 도중 초대 링크가 닫혔을 때 (G-S11) ─────────────────────────────
+# 관리자 이력·감사행에 남기는 사유 코드. 감사행 CHECK가 ASCII만 받으므로
+# (F-GS5a) 여기에 한국어를 넣으면 그 transaction 전체가 실패한다.
+LINK_STOP_REASON_REVOKED = "link_revoked"
+LINK_STOP_REASON_EXPIRED = "link_expired"
+LINK_STOP_REASON_UNKNOWN = "link_state_unknown"
+
+# 사용자 화면 안내. 우리 쪽 사정·내부 용어를 쓰지 않고 짧게만 말한다.
+LINK_REVOKED_RUN_STOPPED_MESSAGE = "이 링크의 사용이 중단되어 조사를 멈췄습니다."
+LINK_EXPIRED_RUN_STOPPED_MESSAGE = "이 링크의 기간이 지나 조사를 멈췄습니다."
+LINK_STATE_UNKNOWN_RUN_STOPPED_MESSAGE = (
+    "초대 링크 상태를 지금 확인할 수 없어 조사를 멈췄습니다. "
+    "잠시 후 다시 시도해 주세요."
+)
+_LINK_STOP_NOTICE_BY_REASON = {
+    LINK_STOP_REASON_REVOKED: LINK_REVOKED_RUN_STOPPED_MESSAGE,
+    LINK_STOP_REASON_EXPIRED: LINK_EXPIRED_RUN_STOPPED_MESSAGE,
+    LINK_STOP_REASON_UNKNOWN: LINK_STATE_UNKNOWN_RUN_STOPPED_MESSAGE,
+}
+
 
 def _commit_report_connection(conn: Any) -> None:
     """legacy 보고서 fence 직후 commit하며 시험은 실패를 이 seam에 주입한다."""
@@ -170,6 +190,22 @@ class JobExecutionDeadlineExceeded(RuntimeError):
     """한 작업이 전체 실행 절대 마감을 넘겨 더는 슬롯을 소유할 수 없음."""
 
 
+class LinkAccessClosedDuringRun(RuntimeError):
+    """조사 도중 초대 링크가 닫혀 다음 유료 단계에 들어가지 않는다 (G-S11).
+
+    ★ 사용자에게 보일 짧은 안내와 관리자 이력에 남길 ASCII 사유 코드를 «함께»
+      들고 다닌다. 둘을 따로 두면 화면에 코드가 새거나 감사행에 한국어가 들어간다.
+    """
+
+    def __init__(self, reason_code: str) -> None:
+        notice = _LINK_STOP_NOTICE_BY_REASON.get(reason_code)
+        if notice is None:
+            raise ValueError(f"모르는 초대 링크 중단 사유입니다: {reason_code!r}")
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+        self.notice = notice
+
+
 @dataclass
 class Job:
     """돌아가는 중인 요청 하나."""
@@ -192,6 +228,10 @@ class Job:
     member_email: str = ""
     #: LINK 실행 이력을 찾는 안전한 SHA-256 식별자. 원문 열쇠는 영속화하지 않는다.
     share_link_hash: str = ""
+    #: 초대 링크가 닫혀 멈춘 실행의 ASCII 사유 코드 (G-S11). 관리자 이력 전용.
+    link_stop_reason: str = ""
+    #: 같은 멈춤을 사용자에게 알리는 짧은 안내. 내부 용어를 쓰지 않는다.
+    link_stop_notice: str = ""
     #: 확인 카드·이미지 OCR에서 먼저 쓴 돈. 본조사 결과 비용과 마지막에 합친다.
     upfront_cost_krw: float = 0.0
     upfront_models: tuple[str, ...] = ()
@@ -663,6 +703,79 @@ def _job_is_paid(job: Job) -> bool:
     return bool(job.is_paid or job.paid_phase is not None)
 
 
+def _link_run_stop_reason(job: Job) -> str:
+    """이 조사의 초대 링크가 «지금도» 열려 있는지 저장소에서 다시 읽는다 (G-S11).
+
+    Returns:
+        멈춰야 하면 ASCII 사유 코드, 계속해도 되면 빈 문자열.
+
+    ★ 요청 시작 때 한 판정을 재사용하지 않는다 — 그게 이 검사의 존재 이유다.
+      유료 단계 수만큼 SELECT 한 번씩이라 캐시를 두지 않는다.
+    ★ 링크가 없는 회원·관리자·공개 조사에는 «아무 일도 하지 않는다» (빈 문자열).
+    ★ 읽기 전용 연결을 쓴다 (`report_access` 판정과 같은 방식). 판정 한 번이
+      journal 전환·schema bootstrap·commit을 끌고 오면, 매 유료 호출 앞에 붙는
+      이 검사가 조사 전체를 눈에 띄게 느리게 만든다 (실측: 기존 배경 조사
+      시험 4건이 그 지연만으로 취소 경합에 걸렸다).
+    """
+
+    if not job.share_link_hash:
+        return ""
+    try:
+        with storage_db.connect_readonly_existing() as conn:
+            link = (
+                None
+                if conn is None
+                else share_store.load_by_hash(conn, job.share_link_hash)
+            )
+    except Exception:  # noqa: BLE001 — 상태를 모르면 유료 단계에 들어가지 않는다
+        logger.exception(
+            "초대 링크 상태를 확인하지 못했습니다 job_id=%s", job.job_id
+        )
+        return LINK_STOP_REASON_UNKNOWN
+    if link is None:
+        # 철회는 행을 지우지 않고 표시만 남긴다(`share_store.delete`). 행 자체가
+        # 없다면 「닫혔다」가 아니라 「확인할 수 없다」이므로 단정하지 않는다.
+        logger.error(
+            "초대 링크 행을 찾지 못해 조사를 멈춥니다 job_id=%s", job.job_id
+        )
+        return LINK_STOP_REASON_UNKNOWN
+    if link.is_revoked:
+        return LINK_STOP_REASON_REVOKED
+    if share_logic.link_expired(link):
+        return LINK_STOP_REASON_EXPIRED
+    return ""
+
+
+def _require_open_share_link(job: Job) -> None:
+    """유료 단계에 들어가기 «직전» 훅. 닫혔으면 그 단계를 시작하지 않는다."""
+
+    reason = _link_run_stop_reason(job)
+    if reason:
+        raise LinkAccessClosedDuringRun(reason)
+
+
+def _link_guarded_callbacks(
+    job: Job,
+    callbacks: generation_coordination.GenerationCallbacks,
+) -> generation_coordination.GenerationCallbacks:
+    """지연 유료 단계 진입마다 초대 링크 상태를 «먼저» 다시 본다 (G-S11).
+
+    ★ 한도 원자 갱신(`PaidPhase.begin_phase`)보다 앞에 둔다. 닫힌 링크에 예약부터
+      잡아 놓고 되돌리는 대신 아예 들어가지 않아야 차감이 남지 않는다.
+    ★ 링크 없는 조사는 원래 callback을 «그대로» 돌려준다 — 회원·관리자·공개
+      갈래의 실행 경로는 한 바이트도 달라지지 않는다.
+    """
+
+    if not job.share_link_hash:
+        return callbacks
+
+    def guarded_ensure_paid_phase() -> None:
+        _require_open_share_link(job)
+        callbacks.ensure_paid_phase()
+
+    return replace(callbacks, ensure_paid_phase=guarded_ensure_paid_phase)
+
+
 def _install_job_paid_phase(job: Job, ticket: PaidPhase) -> None:
     """single-flight owner가 얻은 phase를 마감 주체인 Job에 즉시 인계한다."""
 
@@ -712,6 +825,10 @@ def _run_pipeline_worker(job: Job) -> RunResult:
 
     # 기존 단위시험·즉시 예약 호출자는 엣 경계를 그대로 통과한다.
     if job.paid_phase is not None:
+        # 이 갈래는 예약을 route에서 이미 잡았다. 그래도 provider를 부르기
+        # 직전에 초대 링크를 다시 본다 — 예약과 호출 사이가 이 pipeline의
+        # 유일한 「다음 유료 단계」이기 때문이다 (G-S11).
+        _require_open_share_link(job)
         return _call_paid_provider(
             job.paid_phase,
             runtime._PIPELINE.run,
@@ -728,6 +845,8 @@ def _run_pipeline_worker(job: Job) -> RunResult:
     if not bool(
         getattr(runtime._PIPELINE, "supports_deferred_paid_phase", False)
     ):
+        # 한도 원자 갱신(G-S3)이 일어나는 예약보다 «앞»에서 링크를 본다.
+        _require_open_share_link(job)
         ticket = _begin_paid_phase(
             run_id=job.job_id,
             phase=SPEND_PHASE_PIPELINE,
@@ -751,7 +870,9 @@ def _run_pipeline_worker(job: Job) -> RunResult:
     if session is None:  # pragma: no cover - capability 방어선
         raise RuntimeError("지연 본조사 조정 세션이 없습니다")
     try:
-        with generation_coordination.activate(session.callbacks):
+        with generation_coordination.activate(
+            _link_guarded_callbacks(job, session.callbacks)
+        ):
             return runtime._PIPELINE.run(
                 job.user_input,
                 job.card,
@@ -867,6 +988,23 @@ async def _run_job(job: Job) -> None:
                 billing_uncertain=job.paid_phase is not None,
             )
         raise
+    except LinkAccessClosedDuringRun as closed:
+        # 초대 링크가 조사 도중 닫혔다 (G-S11). 기술 실패가 아니므로 일반 오류
+        # 문구로 뭉개지 않고, 사용자에게는 짧은 안내를 그대로 보여 준다.
+        # 관리자 이력에는 아래 `_link_stop_reason_of`가 ASCII 사유 코드를 남긴다.
+        job.link_stop_reason = closed.reason_code
+        job.link_stop_notice = closed.notice
+        logger.info(
+            "초대 링크가 닫혀 조사를 멈췄습니다 job_id=%s reason=%s",
+            job.job_id,
+            closed.reason_code,
+        )
+        job.result = RunResult(
+            outcome=Outcome.FAILED,
+            message=closed.notice,
+            # 이미 연 유료 단계가 있으면 그 비용을 0원으로 지우지 않는다.
+            billing_uncertain=job.paid_phase is not None,
+        )
     except Exception as exc:  # noqa: BLE001 — 어떤 실패든 화면은 살아 있어야 한다
         # ★ 사용자에게 내부 오류 내용을 보여주지 않는다 (경로·스택 노출 금지).
         logger.exception("파이프라인 실패 job_id=%s", job.job_id)
@@ -911,7 +1049,9 @@ async def _run_job(job: Job) -> None:
                     job.result,
                     outcome=Outcome.FAILED,
                     report=None,
-                    message=PIPELINE_FAILED_MESSAGE,
+                    # 초대 링크가 닫혀 멈춘 것은 기술 실패가 아니다. 그 안내는
+                    # 이미 정직하고 짧으므로 일반 오류 문구로 덮지 않는다 (G-S11).
+                    message=job.link_stop_notice or PIPELINE_FAILED_MESSAGE,
                     charged=False,
                     # 실제 게이트가 본 닫힌 사유는 지우지 않는다.
                     # recording이 FAILED+billing_uncertain 조합으로
@@ -1149,7 +1289,7 @@ async def _run_job(job: Job) -> None:
                     job,
                     status=share_store.RUN_STATUS_STOPPED,
                     stop_step=_link_stop_step(job.result.outcome),
-                    stop_reason=_link_stop_reason(job.result.outcome),
+                    stop_reason=_link_stop_reason_of(job, job.result.outcome),
                 )
         finally:
             # 비용 마감과 이력 정리를 시도한 뒤에만 자리를 돌려준다. 중간에 어떤
@@ -1183,6 +1323,16 @@ def _link_stop_step(outcome: Outcome) -> str:
         Outcome.GATE_STOPPED: obs.END_STEP_GATE,
         Outcome.FAILED: obs.END_STEP_GENERATE,
     }.get(outcome, obs.END_STEP_GENERATE)
+
+
+def _link_stop_reason_of(job: Job, outcome: Outcome) -> str:
+    """링크가 닫혀 멈춘 실행은 파이프라인 종료값 대신 그 사유를 남긴다 (G-S11).
+
+    ★ 이 구분이 없으면 관리자 이력에 「생성 중 기술 오류」로 찍혀, 관리자가
+      자기가 방금 닫은 링크 때문이라는 걸 알 수 없다.
+    """
+
+    return job.link_stop_reason or _link_stop_reason(outcome)
 
 
 def _link_stop_reason(outcome: Outcome) -> str:
@@ -1250,7 +1400,7 @@ def _ensure_link_job_closed(job: Job) -> None:
                 status=share_store.RUN_STATUS_STOPPED,
                 finished_at=clock.iso_now_kst(),
                 stop_step=_link_stop_step(outcome),
-                stop_reason=_link_stop_reason(outcome),
+                stop_reason=_link_stop_reason_of(job, outcome),
                 internal_ai_cost_krw=(
                     job.result.cost_krw
                     if isinstance(job.result, RunResult)
