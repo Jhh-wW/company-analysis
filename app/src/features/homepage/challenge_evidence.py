@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -60,6 +61,7 @@ _COMPANY_ACTION_SIGNALS: tuple[str, ...] = (
     "절감",
     "자동화",
     "변경",
+    "발굴",
 )
 
 _RELATION_CONNECTORS: tuple[str, ...] = (
@@ -74,6 +76,36 @@ _RELATION_CONNECTORS: tuple[str, ...] = (
     "문제를 줄이기 위해",
 )
 _NEARBY_RANGE_DISTANCE = 1
+
+# ``하락``·``감소``는 금리·부담처럼 낮아지는 편이 유리한 대상에도 쓰인다.
+# 방향어 하나가 아니라 회사 성과/운영 지표와 나쁜 방향이 함께 있어야 한다.
+_NEGATIVE_DIRECTIONAL_IMPACT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"(?:매출|영업이익|순이익|수익성|이익률|마진|점유율|판매량|수주|"
+        r"생산량|가동률).{0,12}?(?:하락|감소|낮아|악화|축소)"
+    ),
+    re.compile(
+        r"(?:원가율|제조원가|원가|비용|부담|압박|손실|적자|리스크|위험)"
+        r".{0,12}?(?:상승|증가|높아|커졌|가중|악화|확대)"
+    ),
+)
+
+# 부정 명사가 실제로 줄었다는 문장은 당면 문제가 아니라 개선 결과다.
+_NEGATIVE_STATE_IMPROVEMENT_PATTERN = re.compile(
+    r"(?:부담|압박|손실|적자|리스크|위험|불확실성?|원가율?|비용)"
+    r".{0,10}?(?:감소|하락|완화|낮아|줄어|개선)"
+)
+
+_THIRD_PARTY_OWNER_PATTERN = re.compile(
+    r"(?:고객사|고객|협력사|공급업체|파트너사|경쟁사)(?:의|가|는|은|이|에서)?"
+)
+_THIRD_PARTY_ACTION_SUBJECT_PATTERN = re.compile(
+    r"(?:고객사|고객|협력사|공급업체|파트너사|경쟁사)(?:가|는|은|이)"
+)
+_COMPANY_SUBJECT_PATTERN = re.compile(
+    r"(?:당사|자사|우리\s*회사|회사가|회사는|회사의|회사를)"
+)
+_SENTENCE_BOUNDARY_PATTERN = re.compile(r"[.!?。！？\n]")
 
 
 @dataclass(frozen=True)
@@ -91,7 +123,7 @@ class ChallengeEvidence:
 
 
 def classify_challenge_evidence(ranges: tuple[str, ...]) -> ChallengeEvidence:
-    """같은 범위 또는 바로 앞 범위에 연결된 당면과제만 판정한다."""
+    """회사 부정 영향과 인과 연결된 회사 행동만 당면과제로 판정한다."""
 
     lowered_ranges = tuple(text.casefold() for text in ranges)
     issue_indexes = tuple(
@@ -103,13 +135,10 @@ def classify_challenge_evidence(ranges: tuple[str, ...]) -> ChallengeEvidence:
     response_indexes: list[int] = []
 
     for index, text in enumerate(lowered_ranges):
-        if not _has_company_action(text):
-            continue
-        # 한 범위 안에서 문제와 행동이 함께 나오면 그 자체가 직접 관계다.
-        # 범위를 넘길 때만 「이에 대응해」 같은 명시적 연결어를 요구한다.
-        if index in issue_set or (
-            index - _NEARBY_RANGE_DISTANCE in issue_set
-            and _has_relation_connector(text)
+        previous_has_issue = index - _NEARBY_RANGE_DISTANCE in issue_set
+        if _has_causally_linked_company_action(
+            text,
+            previous_has_issue=previous_has_issue,
         ):
             response_indexes.append(index)
 
@@ -122,14 +151,113 @@ def classify_challenge_evidence(ranges: tuple[str, ...]) -> ChallengeEvidence:
 def _has_concrete_issue(text: str) -> bool:
     if any(phrase in text for phrase in _MARKETING_EXCLUSIONS):
         return False
-    return any(signal in text for signal in _CONCRETE_NEGATIVE_SIGNALS)
+
+    improvement_spans = tuple(
+        match.span() for match in _NEGATIVE_STATE_IMPROVEMENT_PATTERN.finditer(text)
+    )
+    candidates: list[tuple[int, int]] = []
+    for signal in _CONCRETE_NEGATIVE_SIGNALS:
+        start = 0
+        while True:
+            found = text.find(signal, start)
+            if found < 0:
+                break
+            candidates.append((found, found + len(signal)))
+            start = found + len(signal)
+    for pattern in _NEGATIVE_DIRECTIONAL_IMPACT_PATTERNS:
+        candidates.extend(match.span() for match in pattern.finditer(text))
+
+    for start, end in sorted(candidates):
+        if any(
+            span_start <= start and end <= span_end
+            for span_start, span_end in improvement_spans
+        ):
+            continue
+        candidate_text = text[start:end]
+        if ("하락" in candidate_text or "감소" in candidate_text) and not any(
+            pattern.search(candidate_text)
+            for pattern in _NEGATIVE_DIRECTIONAL_IMPACT_PATTERNS
+        ):
+            continue
+        if _belongs_to_third_party(text, start):
+            continue
+        return True
+    return False
 
 
-def _has_company_action(text: str) -> bool:
+def _company_action_positions(text: str) -> tuple[int, ...]:
+    """구체 행동 낱말의 시작 위치를 중복 없이 돌려준다."""
+
     if any(phrase in text for phrase in _MARKETING_EXCLUSIONS):
+        return ()
+    positions: set[int] = set()
+    for signal in _COMPANY_ACTION_SIGNALS:
+        start = 0
+        while True:
+            found = text.find(signal, start)
+            if found < 0:
+                break
+            positions.add(found)
+            start = found + len(signal)
+    return tuple(sorted(positions))
+
+
+def _has_causally_linked_company_action(
+    text: str,
+    *,
+    previous_has_issue: bool,
+) -> bool:
+    """연결어 앞의 문제와 연결어 뒤 회사 행동이 같은 인과 단위인지 본다."""
+
+    for connector in _RELATION_CONNECTORS:
+        search_from = 0
+        while True:
+            connector_start = text.find(connector, search_from)
+            if connector_start < 0:
+                break
+            connector_end = connector_start + len(connector)
+            same_range_issue = _has_concrete_issue(text[:connector_start])
+            if (
+                (same_range_issue or previous_has_issue)
+                and _has_company_action_after(text, connector_end)
+            ):
+                return True
+            search_from = connector_end
+    return False
+
+
+def _has_company_action_after(text: str, connector_end: int) -> bool:
+    """연결어 뒤 행동의 주체가 제3자가 아닌 회사 자신인지 확인한다."""
+
+    sentence_end_match = _SENTENCE_BOUNDARY_PATTERN.search(text, connector_end)
+    sentence_end = sentence_end_match.start() if sentence_end_match else len(text)
+    action_text = text[connector_end:sentence_end]
+    sentence_start = 0
+    for boundary in _SENTENCE_BOUNDARY_PATTERN.finditer(text, 0, connector_end):
+        sentence_start = boundary.end()
+    for relative_action_start in _company_action_positions(action_text):
+        action_start = connector_end + relative_action_start
+        subject_context = text[sentence_start:action_start]
+        third_party_subjects = tuple(
+            _THIRD_PARTY_ACTION_SUBJECT_PATTERN.finditer(subject_context)
+        )
+        company_subjects = tuple(_COMPANY_SUBJECT_PATTERN.finditer(subject_context))
+        if not third_party_subjects:
+            return True
+        if company_subjects and company_subjects[-1].start() > third_party_subjects[-1].start():
+            return True
+    return False
+
+
+def _belongs_to_third_party(text: str, signal_start: int) -> bool:
+    """부정 영향 신호 바로 앞 문장 주체가 고객사·협력사인지 판정한다."""
+
+    sentence_start = 0
+    for boundary in _SENTENCE_BOUNDARY_PATTERN.finditer(text, 0, signal_start):
+        sentence_start = boundary.end()
+    prefix = text[sentence_start:signal_start]
+    owners = tuple(_THIRD_PARTY_OWNER_PATTERN.finditer(prefix))
+    if not owners:
         return False
-    return any(signal in text for signal in _COMPANY_ACTION_SIGNALS)
-
-
-def _has_relation_connector(text: str) -> bool:
-    return any(connector in text for connector in _RELATION_CONNECTORS)
+    last_owner_end = owners[-1].end()
+    return _COMPANY_SUBJECT_PATTERN.search(prefix, last_owner_end) is None

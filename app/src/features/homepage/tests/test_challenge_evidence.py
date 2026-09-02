@@ -25,9 +25,9 @@ def test_고객_문제_해결_광고는_issue도_response도_아니다() -> None
     assert not evidence.has_response(0)
 
 
-def test_같은_범위에_문제와_회사행동이_함께_있으면_직접_관계다() -> None:
+def test_같은_범위에_문제와_연결어로_이어진_회사행동이_있으면_직접_관계다() -> None:
     evidence = classify_challenge_evidence(
-        ("원가 부담을 줄이기 위해 공급처를 다변화했습니다.",)
+        ("원자재 가격 상승으로 원가 부담이 커졌고, 이를 해결하기 위해 공급처를 다변화했습니다.",)
     )
 
     assert evidence.has_issue(0)
@@ -64,3 +64,27 @@ def test_문제_신호_없이_행동만_있으면_response로_인정하지_않�
 
     assert not evidence.has_issue(0)
     assert not evidence.has_response(0)
+
+
+def test_고객사의_부담은_회사_자신의_issue가_아니다() -> None:
+    evidence = classify_challenge_evidence(("고객사의 원가 부담이 커졌습니다.",))
+
+    assert not evidence.has_issue(0)
+
+
+def test_부담이_줄었다는_문장은_issue가_아니라_개선이다() -> None:
+    evidence = classify_challenge_evidence(("원가 부담이 완화되었습니다.",))
+
+    assert not evidence.has_issue(0)
+
+
+def test_실적_지표와_함께_있는_하락만_issue다() -> None:
+    evidence = classify_challenge_evidence(("영업이익이 하락했습니다.",))
+
+    assert evidence.has_issue(0)
+
+
+def test_실적_지표_없이_하락_한_단어만으로는_issue가_아니다() -> None:
+    evidence = classify_challenge_evidence(("금리가 하락했습니다.",))
+
+    assert not evidence.has_issue(0)
