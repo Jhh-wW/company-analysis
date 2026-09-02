@@ -571,55 +571,55 @@ def test_레거시_이미지의_OCR_provider는_호출하지_않는다(monkeypat
 
     monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
     monkeypatch.setattr(job_runtime, "default_extract", timeout)
-    client = TestClient(main.app)
-    _발급(client)
-    token, ref = _확인값(_confirm(client).text)
+    with TestClient(main.app) as client:
+        _발급(client)
+        token, ref = _확인값(_confirm(client).text)
 
-    response = client.post(
-        "/run",
-        data=_run_form(token, ref),
-        files={"posting_images": ("posting.png", _VALID_PNG)},
-        follow_redirects=False,
-    )
+        response = client.post(
+            "/run",
+            data=_run_form(token, ref),
+            files={"posting_images": ("posting.png", _VALID_PNG)},
+            follow_redirects=False,
+        )
 
-    _기다린다(client, response)
+        _기다린다(client, response)
 
-    assert response.status_code == 303
-    assert paid_runtime._RUNNING == 0
-    assert pipeline.run_calls == 1
-    assert calls == 0
-    with storage_db.connect() as conn:
-        unresolved = spend_store.load_unresolved_day(conn, clock.today_kst())
-    assert spend_store.bucket_id(_LINK_A) not in unresolved
+        assert response.status_code == 303
+        assert paid_runtime._RUNNING == 0
+        assert pipeline.run_calls == 1
+        assert calls == 0
+        with storage_db.connect() as conn:
+            unresolved = spend_store.load_unresolved_day(conn, clock.today_kst())
+        assert spend_store.bucket_id(_LINK_A) not in unresolved
 
 
 def test_레거시_이미지의_OCR_계약은_회사분석_실행에_관여하지_않는다(monkeypatch):
     pipeline = FakePaidPipeline()
     monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
     monkeypatch.setattr(job_runtime, "default_extract", lambda _images: None)
-    client = TestClient(main.app, raise_server_exceptions=False)
-    _발급(client)
-    token, ref = _확인값(_confirm(client).text)
+    with TestClient(main.app, raise_server_exceptions=False) as client:
+        _발급(client)
+        token, ref = _확인값(_confirm(client).text)
 
-    response = client.post(
-        "/run",
-        data=_run_form(token, ref),
-        files={"posting_images": ("posting.png", _VALID_PNG)},
-        follow_redirects=False,
-    )
+        response = client.post(
+            "/run",
+            data=_run_form(token, ref),
+            files={"posting_images": ("posting.png", _VALID_PNG)},
+            follow_redirects=False,
+        )
 
-    _기다린다(client, response)
+        _기다린다(client, response)
 
-    assert response.status_code == 303
-    assert pipeline.run_calls == 1
-    assert paid_runtime._RUNNING == 0
-    assert paid_runtime._ACTIVE_PAID_PHASES == set()
-    assert (clock.today_kst().isoformat(), spend_store.bucket_id(_LINK_A)) not in (
-        paid_runtime._UNRESOLVED_BUCKETS
-    )
-    with storage_db.connect() as conn:
-        rows = spend_store.list_inflight_day(conn, clock.today_kst())
-    assert [(row.phase, row.bucket_id) for row in rows] == []
+        assert response.status_code == 303
+        assert pipeline.run_calls == 1
+        assert paid_runtime._RUNNING == 0
+        assert paid_runtime._ACTIVE_PAID_PHASES == set()
+        assert (clock.today_kst().isoformat(), spend_store.bucket_id(_LINK_A)) not in (
+            paid_runtime._UNRESOLVED_BUCKETS
+        )
+        with storage_db.connect() as conn:
+            rows = spend_store.list_inflight_day(conn, clock.today_kst())
+        assert [(row.phase, row.bucket_id) for row in rows] == []
 
 
 def test_본조사_provider예외는_알려진비용과_미확정표식을_함께_남긴다(monkeypatch):
@@ -637,23 +637,23 @@ def test_본조사_provider예외는_알려진비용과_미확정표식을_함�
 
     pipeline = UncertainPipeline()
     monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
-    client = TestClient(main.app)
-    _발급(client)
-    token, ref = _확인값(_confirm(client).text)
+    with TestClient(main.app) as client:
+        _발급(client)
+        token, ref = _확인값(_confirm(client).text)
 
-    job_id = _기다린다(
-        client,
-        client.post("/run", data=_run_form(token, ref), follow_redirects=False),
-    )
+        job_id = _기다린다(
+            client,
+            client.post("/run", data=_run_form(token, ref), follow_redirects=False),
+        )
 
-    assert job_runtime._JOBS[job_id].result.outcome is Outcome.FAILED
-    assert job_runtime._JOBS[job_id].result.cost_krw == 40.0
-    assert _confirm(client).status_code == 429
-    with storage_db.connect() as conn:
-        snapshot = spend_store.load_day(conn, clock.today_kst())
-        unresolved = spend_store.load_unresolved_day(conn, clock.today_kst())
-    assert snapshot.by_run[job_id] == 40.0
-    assert spend_store.bucket_id(_LINK_A) in unresolved
+        assert job_runtime._JOBS[job_id].result.outcome is Outcome.FAILED
+        assert job_runtime._JOBS[job_id].result.cost_krw == 40.0
+        assert _confirm(client).status_code == 429
+        with storage_db.connect() as conn:
+            snapshot = spend_store.load_day(conn, clock.today_kst())
+            unresolved = spend_store.load_unresolved_day(conn, clock.today_kst())
+        assert snapshot.by_run[job_id] == 40.0
+        assert spend_store.bucket_id(_LINK_A) in unresolved
 
 
 def test_비용원장_쓰기실패뒤에는_다음_AI호출을_닫는다(monkeypatch):

@@ -1343,12 +1343,11 @@ def test_카카오_LINK로_네이버와_YG를_차례로_검색확정생성해도
             now_iso="2026-08-21T10:00:00+09:00",
         )
 
-    client = TestClient(
+    with TestClient(
         main.app,
         base_url="https://testserver",
         headers={"Origin": "https://testserver"},
-    )
-    try:
+    ) as client:
         opened = client.get(f"/k/{raw_key}", follow_redirects=False)
         assert opened.status_code == 303
         assert client.cookies.get(KEY_COOKIE_NAME) == raw_key
@@ -1416,8 +1415,6 @@ def test_카카오_LINK로_네이버와_YG를_차례로_검색확정생성해도
             ("네이버", "NAVER"),
             ("YG", "와이지엔터테인먼트"),
         ]
-    finally:
-        client.close()
 
 
 def test_무료_DART_후보보강_응답오류는_외부상태만남기고_전역점검으로_번지지않는다(
