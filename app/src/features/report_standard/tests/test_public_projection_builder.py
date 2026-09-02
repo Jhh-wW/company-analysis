@@ -24,6 +24,7 @@ from decimal import Decimal
 import pytest
 
 from src.features.composer.constants import (
+    CITATION_STYLE_INLINE,
     GRADE_CONFIRMED,
     GRADE_INTERPRETED,
     IDENTITY_TABLE_SECTION_ID,
@@ -37,7 +38,7 @@ from src.features.composer.port import (
     PerformanceTable,
 )
 from src.features.composer.render import COMPOSITION_TABLE_SECTION_ID, render_report
-from src.features.pipeline.port import FactRecord, Report
+from src.features.pipeline.port import FactRecord, Grade, Report
 from src.features.provenance.sources import visible_citations
 from src.features.report_standard.constants import SECTION_BY_ID
 from src.features.report_standard.cover_metrics import cover_metrics
@@ -53,6 +54,7 @@ from src.shared.report_generation.canonical import (
     table_public_projection,
 )
 from src.shared.report_generation.models import canonical_sha256, canonical_value
+from src.shared.report_quality.models import PublicationPolicy
 from src.shared.report_generation.public_projection import (
     PUBLIC_PROJECTION_VERSION,
     PublicProjectionError,
@@ -459,6 +461,119 @@ def test_builder의_source_grade_기여를_합치면_report_source_grades와_같
     assert any(len(grades) > 1 for grades in expected.values())
 
 
+def _mixed_grade_report() -> Report:
+    """한 장 안에 「확인」 문장과 「해석」 문장이 «서로 다른 자료»를 인용하는 보고서.
+
+    ★ 왜 ``inline`` 표기인가 — 기본값 ``merged``는 해석 문장의 인용 번호를
+      지운다(``composer/constants.py``의 표기 방식 주석). 번호가 지워지면 봉인은
+      「그 해석이 어느 자료를 썼는지」를 화면 글자로 «짚을 수 없고», 그때는
+      ``Source.used_in``으로 넓게 배정한다. 두 갈래 중 «짚을 수 있는» 쪽을
+      확인하려면 번호가 보이는 표기여야 한다. ``inline``은 지어낸 값이 아니라
+      이 엔진이 지원하는 두 표기 방식 중 하나다(``VALID_CITATION_STYLES``).
+
+    구성 — identity: 확인[1] + 해석[2] / business_model: 확인[2] / 나머지: 확인[1].
+    같은 자료 [2]를 한 장은 «해석»으로, 다른 장은 «확인»으로 쓰는 배치라
+    「장별로 갈라 적었는가」와 「뭉뚱그렸는가」가 눈에 띄게 갈린다.
+    """
+
+    sections = []
+    for section_id in SECTION_IDS:
+        if section_id == "identity":
+            sentences = (
+                ComposedSentence(
+                    text="회사는 2024년에 매출 100억원을 기록했다.",
+                    citations=("1",),
+                    grade=GRADE_CONFIRMED,
+                ),
+                ComposedSentence(
+                    text="회사는 스스로를 글로벌 콘텐츠 기업으로 규정한다고 읽힌다.",
+                    citations=("2",),
+                    grade=GRADE_INTERPRETED,
+                ),
+            )
+        elif section_id == "business_model":
+            sentences = (
+                ComposedSentence(
+                    text="회사는 음악·영상 사업을 영위한다.",
+                    citations=("2",),
+                    grade=GRADE_CONFIRMED,
+                ),
+            )
+        else:
+            sentences = (
+                ComposedSentence(
+                    text="회사는 직전 회계연도보다 매출이 늘었다.",
+                    citations=("1",),
+                    grade=GRADE_CONFIRMED,
+                ),
+            )
+        sections.append(ComposedSection(section_id=section_id, sentences=sentences))
+
+    composed = ComposedReport(
+        sections=tuple(sections),
+        summary=(
+            ComposedSentence(
+                text="매출이 늘었다.", citations=("1",), grade=GRADE_CONFIRMED
+            ),
+        ),
+    )
+    # 표가 없으므로 manifest_ref를 채울 일도 없다(_sealed 불필요).
+    return render_report(
+        "가나다전자",
+        composed,
+        _fragments(),
+        None,
+        citation_style=CITATION_STYLE_INLINE,
+    )
+
+
+def _contribution_of(block, number: str) -> tuple[str, ...]:
+    for entry_number, grades in block.ledger.source_grade_contribution:
+        if entry_number == number:
+            return grades
+    return ()
+
+
+def test_한_장_안에서_확인_문장과_해석_문장의_등급이_따로_귀속된다() -> None:
+    """★ 합계가 아니라 «개별 귀속»을 단정한다.
+
+    합계만 보는 시험은 「전부 확인으로 읽고 나머지는 넓게 뿌리기」로도 통과한다
+    (잔여 배정이 빈자리를 메꾼다). 그래서 여기서는 장마다 «어느 번호에 어느
+    등급이 붙었는지»를 하나씩 확인한다.
+    """
+
+    report = _mixed_grade_report()
+    projection = build_public_projection(report)
+
+    identity = _section_of(projection, "identity")
+    business = _section_of(projection, "business_model")
+
+    # 재료 확인 — 화면 글자에 두 번호가 «보여야» 이 시험이 짚는 길을 탄다.
+    identity_text = " ".join(text for text, _cite in report.sections[0].prose_lines)
+    assert "[1]" in identity_text
+    assert "[2]" in identity_text
+    assert report.source_grades["2"] == ["해석", "확인"]
+
+    # 1장 — 확인 문장은 [1]에, 해석 문장은 [2]에. 서로 섞이지 않는다.
+    assert _contribution_of(identity, "1") == ("확인",)
+    assert _contribution_of(identity, "2") == ("해석",)
+
+    # 2장 — 같은 자료 [2]를 확인으로 썼다. 1장의 «해석»이 넘어오면 안 된다.
+    assert _contribution_of(business, "2") == ("확인",)
+    assert _contribution_of(business, "1") == ()
+
+    # 합계도 여전히 맞는다(개별 귀속을 정확히 해도 I4가 깨지면 안 된다).
+    merged: dict[str, set[str]] = {}
+    for block in projection.sections:
+        for number, grades in block.ledger.source_grade_contribution:
+            merged.setdefault(number, set()).update(grades)
+    for number, grades in projection.summary_source_grade_contribution:
+        merged.setdefault(number, set()).update(grades)
+    assert merged == {
+        number: set(grades) for number, grades in report.source_grades.items()
+    }
+
+
 def test_builder는_등급이_가리키는_출처가_부록에_없으면_닫는다() -> None:
     """부록에 없는 번호에 등급이 달려 있으면 「어디서 왔는지」를 말할 수 없다."""
 
@@ -642,6 +757,64 @@ def test_builder는_장_제목_태그_번호를_report에서_그대로_옮긴다
         assert block.display.empty_reason == section.empty_reason
         assert block.display.guidance_lines == tuple(section.guidance_lines)
         assert block.version == PUBLIC_PROJECTION_VERSION
+
+
+# ══════════════════════════════════════════════════════════
+# ⑦ 부분 보고서 고지 — 정책마다 «어느 문구»인지 글자로 못 박는다
+# ══════════════════════════════════════════════════════════
+#
+# ★ 기대값을 리터럴로 적는다. 생산 상수를 import해 같은 값끼리 비교하면 문구가
+#   바뀌어도 시험이 따라 바뀌어 아무것도 안 지킨다. 아래 두 문구는 PDF
+#   ``_partial_publication_copy(detailed=True)``가 지금 내는 글자 그대로다 —
+#   S4가 PDF 사본을 지우고 이 블록을 읽을 때 글자가 바뀌면 여기서 걸린다.
+
+_LEGACY_SHADOW_NOTICE_TEXT = (
+    "안전 확인 중인 임시 부분 보고서",
+    "확인되지 않은 숫자 문장은 제외했지만 모든 문장·표·도식의 새 "
+    "검증은 아직 끝나지 않았습니다. 아래에 남은 이유를 표시합니다.",
+)
+_PARTIAL_NOTICE_TEXT = (
+    "검증된 부분 보고서(부분 완성)",
+    "공식 근거로 확인된 항목만 제공합니다. 아래 미제공 사유는 "
+    "해당 사실이 없다는 판정이 아닙니다.",
+)
+
+
+def test_legacy_shadow_정책이면_고지는_안전_확인_중_문구다() -> None:
+    report = replace(
+        _report(),
+        publication_policy=PublicationPolicy.LEGACY_SHADOW_EXCEPTION.value,
+    )
+
+    notice = build_public_projection(report).grade_notice
+
+    assert notice == _LEGACY_SHADOW_NOTICE_TEXT
+    # 다른 갈래의 문구가 새어 들어오면 안 된다.
+    assert notice != _PARTIAL_NOTICE_TEXT
+    # 화면 문구에 «우리 사정»을 적지 않는다 — 독자가 알아야 할 것만 남긴다.
+    assert all("우리" not in part for part in notice)
+
+
+def test_보통_부분_보고서면_고지는_검증된_부분_보고서_문구다() -> None:
+    report = _report()
+    assert report.grade is Grade.PARTIAL
+    assert report.publication_policy != (
+        PublicationPolicy.LEGACY_SHADOW_EXCEPTION.value
+    )
+
+    notice = build_public_projection(report).grade_notice
+
+    assert notice == _PARTIAL_NOTICE_TEXT
+    assert notice != _LEGACY_SHADOW_NOTICE_TEXT
+    assert all("우리" not in part for part in notice)
+
+
+def test_완성_보고서면_부분_보고서_고지를_붙이지_않는다() -> None:
+    """빈 고지는 「할 말이 없다」는 뜻이다 — 없는 경고를 지어내지 않는다."""
+
+    report = replace(_report(), grade=Grade.COMPLETE)
+
+    assert build_public_projection(report).grade_notice == ("", "")
 
 
 def test_장부만_바꾸면_display_digest는_불변이고_content만_바뀐다() -> None:
