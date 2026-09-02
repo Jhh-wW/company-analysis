@@ -354,6 +354,35 @@ def test_v2_PDF는_블록_밖_문자열을_만들지_않는다(monkeypatch):
         assert _squeezed(label) in text
 
 
+#: PDF가 «표지에서만» 쓰던 짧은 사본이다. 봉인을 쓰기 시작하면 이 문장은
+#: 어디에도 나오면 안 된다 — 같은 정책을 표지와 본문이 다른 말로 꾸미던 자리다.
+#: ★ 생산 상수를 import하지 않고 글자를 그대로 적는다. import로 묶으면 사본이
+#:   되살아나도 시험이 같이 따라가 아무것도 못 잡는다.
+_PDF_ONLY_COVER_COPY = "공식 근거로 확인된 항목만 수록했습니다."
+
+
+def test_v2_부분보고서_고지는_표지와_본문이_같은_봉인_문구를_쓴다():
+    """표지·본문·(웹) 세 곳의 사본을 봉인 `grade_notice` 하나로 모았는지 본다.
+
+    ★ 음성 대조에서 이 겹이 비어 있었다 — 고지를 봉인 대신 PDF 사본으로
+      되돌려도 시험이 하나도 깨지지 않았다(실측 178 passed). 그래서 넣는다.
+    """
+
+    report = _v2_full_report()
+    projection = report.public_projection
+    assert projection is not None
+    notice_title, notice_detail = projection.grade_notice
+    assert notice_title and notice_detail, "재료가 부분 보고서가 아니다 — 시험이 무의미해진다"
+
+    text = _squeezed(_visible_text(pdf_logic.build_pdf(report)))
+
+    # 표지와 본문이 «같은» 문장을 쓴다(각 1회 = 2회).
+    assert text.count(_squeezed(notice_title)) >= 2
+    assert text.count(_squeezed(notice_detail)) >= 2
+    # PDF 표지 전용 사본은 사라졌다.
+    assert _squeezed(_PDF_ONLY_COVER_COPY) not in text
+
+
 # ══════════════════════════════════════════════════════════
 # ② 메타 지문 — 옛 content_manifest가 아니라 새 digest
 # ══════════════════════════════════════════════════════════
