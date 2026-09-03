@@ -3,7 +3,7 @@
 이 실행기가 지켜야 하는 것은 두 가지다.
 1. 배포(render.yaml)와 같은 곳: PIPELINE=real, BETA_ADMIN_ONLY=1, 관리자 로그인 게이트.
 2. 로컬이라 다를 수밖에 없는 곳: 127.0.0.1 loopback, http 쿠키 예외, 로컬 배포 계약.
-   배포의 ``render-admin-real-no-forwarded-v1``을 로컬에 그대로 쓰면 모든 POST가
+   배포의 ``render-portfolio-link-v1``을 로컬에 그대로 쓰면 모든 POST가
    Origin 불일치로 거부된다(src/web/request_helpers.py:727-741).
 
 그리고 어느 쪽이든 «비밀값을 화면·파일에 남기지 않는» 경계는 동일하다.
@@ -84,8 +84,11 @@ def test_launcher_uses_local_contract_not_the_render_narrow_contract() -> None:
     로컬 브라우저는 http://127.0.0.1:<포트>를 보내므로 절대 같아질 수 없다.
     """
     assert '$childEnvironment["DEPLOYMENT_RUNTIME_CONTRACT"] = "local-web-v1"' in SCRIPT
-    assert "render-admin-real-no-forwarded-v1" not in SCRIPT_CODE
-    assert "render-admin-demo-no-forwarded-v1" not in SCRIPT_CODE
+    # 주석까지 본다 — 「배포는 이걸 쓴다」고 적어 둔 이름이 낡으면 읽는 사람이
+    # 지금 배포와 다른 계약을 기준으로 판단하게 된다.
+    assert "render-admin-real-no-forwarded-v1" not in SCRIPT
+    assert "render-admin-demo-no-forwarded-v1" not in SCRIPT
+    assert "render-portfolio-link-v1" in SCRIPT, "배포가 지금 쓰는 계약 이름"
     assert '$childEnvironment["DEPLOYMENT_EXPOSURE"] = "local"' in SCRIPT
     assert '$childEnvironment["DEPLOYMENT_PLATFORM"] = "local"' in SCRIPT
 
@@ -699,6 +702,8 @@ def test_documentation_exists_and_hides_real_values() -> None:
     assert "-ConfirmRealSpending" in text
     assert "-AdminEmails" in text
     assert "-ReleaseMode" in text, "출시 모드를 고르는 법이 문서에 없다"
+    assert "render-portfolio-link-v1" in text, "배포가 지금 쓰는 계약 이름"
+    assert "render-admin-real-no-forwarded-v1" not in text
     assert re.search(r"GOCSPX-[A-Za-z0-9_\-]{5,}", text) is None
     assert re.search(r"sk-ant-[A-Za-z0-9_\-]{5,}", text) is None
     assert (

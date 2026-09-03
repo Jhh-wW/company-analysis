@@ -50,7 +50,7 @@ $ErrorActionPreference = "Stop"
 #      AUTH_COOKIE_INSECURE=1을 켠다. 앱은 이 값만으로 쿠키를 약하게 만들지 않고
 #      요청·서버·클라이언트 소켓이 모두 loopback일 때만 예외를 준다
 #      (src/web/request_helpers.py:574-605).
-#   2) DEPLOYMENT_RUNTIME_CONTRACT: 배포의 render-admin-real-no-forwarded-v1을
+#   2) DEPLOYMENT_RUNTIME_CONTRACT: 배포의 render-portfolio-link-v1을
 #      로컬에 그대로 쓰면 «모든 POST가 거부»된다. 그 계약에서는 POST의 Origin이
 #      고정 «https» PUBLIC_ORIGIN과 정확히 같아야 하는데
 #      (src/web/request_helpers.py:727-741, src/web/deployment_mode.py:98-110),
