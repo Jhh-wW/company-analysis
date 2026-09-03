@@ -30,6 +30,7 @@ from src.features.provenance.sources import (
     parse_sources,
     render_sources,
     seal_collected_source,
+    stored_sources_seal_problem,
     visible_citations,
 )
 
@@ -562,6 +563,106 @@ def test_provenance_seal_rejects_coordinated_source_and_attestation_tampering():
             forged_website, [forged_filing, forged_website]
         )
         is False
+    )
+
+
+def test_다른_값은_그대로고_도장만_어긋나도_공식_원문_판정이_내려간다() -> None:
+    """도장 «자체»가 최종 판정을 지키는지 홀로 확인한다.
+
+    ★ 왜 따로 필요한가 — 위 시험은 host·원문 조각을 함께 바꾼다. 그러면 도메인
+      증명 검사가 먼저 걸려서, 최종 판정에서 도장 검사 한 줄을 통째로 빼도
+      시험이 그대로 통과한다(실측). 여기서는 다른 값을 전부 그대로 두고 도장
+      글자 하나만 어긋나게 해, 도장 검사만이 판정을 뒤집게 만든다.
+    """
+
+    evidence = "annual filing homepage https://company.example"
+    filing = seal_collected_source(
+        Source(
+            number=1,
+            kind=SourceKind.FILING,
+            label="Annual filing",
+            disclosed_at="2026-03-18",
+            source_id="src-filing-seal-only",
+            title="Annual filing",
+            publisher="Example Corp",
+            host="dart.fss.or.kr",
+            url="https://dart.fss.or.kr/dsaf001/main.do?rcpNo=202603180099",
+            document_id="202603180099",
+            location="Company overview",
+            source_type="공식 공시",
+            fact_status="실제",
+            evidence_hashes=[evidence_text_hash(evidence)],
+        )
+    )
+    website = seal_collected_source(
+        Source(
+            number=2,
+            kind=SourceKind.OTHER,
+            label="Official website",
+            collected_at="2026-08-20",
+            source_id="src-web-seal-only",
+            title="Official website",
+            publisher="Example Corp",
+            host="company.example",
+            url="https://company.example/about",
+            document_id="about",
+            location="About",
+            source_type="회사 공식 웹",
+            fact_status="현재",
+            evidence_hashes=[evidence_text_hash("Example Corp overview")],
+            domain_attestation_source_id=filing.source_id,
+            domain_attestation_evidence=evidence,
+        )
+    )
+    assert is_canonical_official_with_registry(website, [filing, website]) is True
+
+    head = website.provenance_seal
+    tampered = replace(
+        website,
+        provenance_seal=("b" if head[0] == "a" else "a") + head[1:],
+    )
+
+    # 도장 밖의 값은 한 글자도 건드리지 않았다 — 다른 검사는 전부 그대로 통과한다.
+    assert tampered.is_canonical_official is True
+    assert official_domain_attestation_problem(tampered, [filing, tampered]) == ""
+    assert has_valid_provenance_seal(tampered) is False
+    assert is_canonical_official_with_registry(tampered, [filing, tampered]) is False
+
+
+def test_도장이_없거나_어긋난_저장본_출처는_한_줄_사유로_걸러진다() -> None:
+    """읽는 경계가 쓰는 도장 점검 — 「전부 비었으면 통과, 하나라도 있으면 전부」."""
+
+    plain = Source(
+        number=1,
+        kind=SourceKind.FILING,
+        label="사업보고서",
+        disclosed_at="2026-03-15",
+        source_id="stored-1",
+        title="사업보고서",
+        publisher="가나다 주식회사",
+        host="dart.fss.or.kr",
+        url="https://dart.fss.or.kr/dsaf001/main.do?rcpNo=202603150001",
+        document_id="202603150001",
+        location="II. 사업의 내용",
+        source_type="공식 공시",
+        fact_status="실제",
+    )
+    other = replace(plain, number=2, source_id="stored-2")
+
+    # 도장 칸이 처음부터 빈 옛 저장본은 문제로 세지 않는다.
+    assert stored_sources_seal_problem([plain, other]) == ""
+
+    sealed = seal_collected_source(plain)
+    sealed_other = seal_collected_source(other)
+    assert stored_sources_seal_problem([sealed, sealed_other]) == ""
+
+    # 저장된 뒤 값이 바뀌면 사유가 나온다.
+    assert "2번" in stored_sources_seal_problem(
+        [sealed, replace(sealed_other, host="news.example")]
+    )
+    # 한 줄만 도장을 지워 검사를 피해 가는 길도 막는다.
+    assert "2번" in stored_sources_seal_problem(
+        [sealed, replace(sealed_other, provenance_seal="")]
     )
 
 

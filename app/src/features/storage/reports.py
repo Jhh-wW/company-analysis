@@ -34,7 +34,11 @@ from src.features.pipeline.port import (
     SourceStatus,
     SummaryItem,
 )
-from src.features.provenance.sources import Source, SourceKind
+from src.features.provenance.sources import (
+    Source,
+    SourceKind,
+    stored_sources_seal_problem,
+)
 from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
 from src.features.storage.constants import (
     TABLE_REPORT_PUBLIC_PROJECTIONS,
@@ -832,6 +836,15 @@ def attach_public_projection(
         != evidence.public_projection_sha256
     ):
         raise ValueError("저장된 공개 봉인이 생성 증거의 지문과 다릅니다")
+    # ★ 여기까지의 검사는 전부 «열쇠 없는» 해시다 — 저장소에 직접 쓸 수 있는
+    #   쪽은 출처를 고친 뒤 지문을 다시 계산해 통과시킬 수 있다. 수집 도장만
+    #   저장소 밖 열쇠로 찍혀 있으므로, 읽는 경계에서 그 도장을 한 번 더 본다.
+    #   출처가 바뀐 본문은 그리지 않고 닫는다.
+    problem = stored_sources_seal_problem(
+        _citation_from_dict(dict(row.source)) for row in projection.citations
+    )
+    if problem:
+        raise ValueError(f"저장된 공개 봉인의 출처를 믿을 수 없습니다: {problem}")
     return replace(report, public_projection=projection)
 
 

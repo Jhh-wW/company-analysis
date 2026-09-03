@@ -30,6 +30,7 @@ import pytest
 
 from src.features.composer.tests.test_section_public_manifest import _run_full
 from src.features.pipeline.port import Report
+from src.features.provenance.sources import seal_collected_source
 from src.features.storage import db, reports
 from src.features.storage.constants import (
     TABLE_REPORT_PUBLIC_PROJECTIONS,
@@ -415,6 +416,107 @@ def test_attach_public_projection도_증거_지문과_어긋나면_거부한다(
     with db.connect(path) as conn:
         with pytest.raises(ValueError):
             reports.attach_public_projection(conn, "r1", restored)
+
+
+# ══════════════════════════════════════════════════════════
+# ⑤-2 봉인 안 출처의 수집 도장도 읽을 때 다시 본다
+# ══════════════════════════════════════════════════════════
+
+
+def _with_projection(report: Report, projection) -> Report:
+    """봉인을 갈아 끼우고 생성 증거의 지문도 함께 맞춘 저장본 재료.
+
+    저장소에 직접 쓸 수 있는 쪽이 실제로 만들 수 있는 상태다 — 열쇠 없는
+    해시는 전부 다시 계산해 앞뒤가 맞는다.
+    """
+
+    evidence = replace(
+        report.generation_evidence,
+        public_projection_sha256=build_report_digest(projection).content_sha256,
+    )
+    return replace(report, public_projection=projection, generation_evidence=evidence)
+
+
+def _sealed_citation_report() -> Report:
+    """부록 행마다 «실제 수집 도장»이 찍힌 FULL 저장본.
+
+    시험 재료를 만드는 조립기는 도장 없이 부록을 만든다. 운영 수집 경계는
+    모든 출처에 도장을 찍으므로, 읽는 경계의 도장 점검을 확인하려면 재료
+    쪽을 운영과 같은 상태로 올려 둬야 한다.
+    """
+
+    report = _full_report()
+    projection = report.public_projection
+    rows = []
+    for row in projection.citations:
+        source = reports._citation_from_dict(dict(row.source))  # noqa: SLF001
+        rows.append(
+            replace(
+                row,
+                source={
+                    **dict(row.source),
+                    "provenance_seal": seal_collected_source(source).provenance_seal,
+                },
+            )
+        )
+    return _with_projection(report, replace(projection, citations=tuple(rows)))
+
+
+def _tampered_first_citation(report: Report, **changes: str) -> Report:
+    first = report.public_projection.citations[0]
+    rows = (
+        replace(first, source={**dict(first.source), **changes}),
+        *report.public_projection.citations[1:],
+    )
+    return _with_projection(
+        report, replace(report.public_projection, citations=rows)
+    )
+
+
+def test_도장이_찍힌_봉인은_그대로_붙는다(tmp_path: Path) -> None:
+    """반대 경우 시험 — 새 점검이 정상 저장본을 막지 않는다."""
+
+    report = _sealed_citation_report()
+    path = _saved(tmp_path, report)
+    restored = reports.report_from_json(report_to_json(report))
+
+    with db.connect(path) as conn:
+        attached = reports.attach_public_projection(conn, "r1", restored)
+
+    assert attached.public_projection == report.public_projection
+
+
+def test_봉인_속_출처를_고치면_지문을_다시_계산해도_붙이지_않는다(
+    tmp_path: Path,
+) -> None:
+    """★ 왜 필요한가 — 여기까지의 검사는 전부 열쇠 없는 해시라, 저장소에 직접
+    쓸 수 있는 쪽은 출처를 고친 뒤 지문 세 개를 다시 계산해 통과시킬 수 있다.
+    수집 도장만 저장소 밖 열쇠로 찍혀 있으므로 읽을 때 그 도장을 다시 본다.
+    """
+
+    forged = _tampered_first_citation(
+        _sealed_citation_report(), host="news.example"
+    )
+    path = _saved(tmp_path, forged, report_id="forged")
+    restored = reports.report_from_json(report_to_json(forged))
+
+    with db.connect(path) as conn:
+        # 위조가 성립하는지 먼저 확인한다 — 봉인 자체의 앞뒤는 맞는다.
+        assert reports.load_public_projection(conn, "forged") is not None
+        with pytest.raises(ValueError):
+            reports.attach_public_projection(conn, "forged", restored)
+
+
+def test_봉인_속_출처의_도장만_지워도_붙이지_않는다(tmp_path: Path) -> None:
+    """한 줄만 도장을 비워 점검을 피해 가는 길도 함께 막는다."""
+
+    forged = _tampered_first_citation(_sealed_citation_report(), provenance_seal="")
+    path = _saved(tmp_path, forged, report_id="blanked")
+    restored = reports.report_from_json(report_to_json(forged))
+
+    with db.connect(path) as conn:
+        with pytest.raises(ValueError):
+            reports.attach_public_projection(conn, "blanked", restored)
 
 
 # ══════════════════════════════════════════════════════════

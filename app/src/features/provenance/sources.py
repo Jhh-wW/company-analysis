@@ -632,6 +632,32 @@ def has_valid_provenance_seal(source: Source) -> bool:
     return hmac.compare_digest(received, expected)
 
 
+def stored_sources_seal_problem(sources: Iterable[Source]) -> str:
+    """저장본에서 되살린 출처 목록의 수집 도장 상태를 한 줄로 알려준다.
+
+    ★ 왜 「하나도 없으면 통과」인가 — 도장이 생기기 전에 저장된 본문과
+      간이 실행 결과에는 도장 칸이 처음부터 비어 있다. 그건 변조가 아니라
+      정해진 상태이므로 문제로 세지 않는다.
+
+    ★ 왜 「하나라도 있으면 전부」인가 — 한 줄만 도장을 지워 검사를 피해 가는
+      길을 막기 위해서다. 도장을 쓰기 시작한 본문은 모든 줄이 도장을 갖는다.
+
+    Returns:
+        문제가 없으면 빈 문자열, 있으면 사람이 읽을 수 있는 한 줄 사유.
+    """
+
+    rows = list(sources)
+    if not any(str(item.provenance_seal or "").strip() for item in rows):
+        return ""
+    for item in rows:
+        if not has_valid_provenance_seal(item):
+            return (
+                f"{item.number}번 출처의 수집 도장이 없거나 "
+                "저장된 뒤 값이 바뀌었습니다"
+            )
+    return ""
+
+
 def official_domain_attestation_problem(
     source: Source, sources: list[Source] | tuple[Source, ...]
 ) -> str:
