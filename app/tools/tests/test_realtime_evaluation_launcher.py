@@ -156,6 +156,8 @@ payload = {
     "billing_ack": os.environ.get("GOOGLE_PLACES_BILLING_ACK"),
     "terms_ack": os.environ.get("GOOGLE_PLACES_TERMS_ACK"),
     "pipeline": os.environ.get("PIPELINE"),
+    "engine_v2": os.environ.get("ENGINE_V2"),
+    "release_mode": os.environ.get("REPORT_RELEASE_MODE"),
     "dotenv_disabled": os.environ.get("ANALYSIS_ENGINE_DISABLE_DOTENV"),
     "loopback_flags": all(value in sys.argv for value in (
         "--host", "127.0.0.1", "--workers", "1", "--no-access-log",
@@ -191,11 +193,17 @@ def _run_fake(
     *,
     paid: bool,
     provider_env_file: Path | None = None,
+    engine_v2: bool = False,
+    release_mode: str | None = None,
     delete_data_on_exit: bool = False,
 ) -> tuple[subprocess.CompletedProcess[bytes], list[Path]]:
     assert WINDOWS_POWERSHELL is not None
     launcher = app_copy / LAUNCHER.name
     switch = " -EnablePaidProviders" if paid else ""
+    if engine_v2:
+        switch += " -EngineV2"
+    if release_mode is not None:
+        switch += f" -ReleaseMode {_ps_literal(release_mode)}"
     if provider_env_file is not None:
         switch += f" -ProviderEnvFile {_ps_literal(provider_env_file)}"
     if delete_data_on_exit:
@@ -377,3 +385,60 @@ def test_launcher_can_turn_on_engine_v2() -> None:
     assert '"ENGINE_V2"' in SCRIPT.split("$allowedChildEnvironmentNames")[1], (
         "ENGINE_V2가 자식 환경 허용 목록에 없습니다 — 실행기가 시작을 거부합니다"
     )
+
+
+def test_engine_v2_child_always_gets_the_report_release_mode() -> None:
+    """v2를 켜면서 출시 모드를 안 넘기면 조사가 AI 호출 전에 전부 멈춘다.
+
+    근거: 값이 비면 ``src/features/pipeline/real.py:3510-3514``가 ValueError를
+    던지고 그 갈래는 ``GATE_STOPPED``로 끝난다 — 성능을 잴 구간까지 못 간다.
+    """
+    assert '[ValidateSet("FULL", "ENFORCE_NO_PARTIAL", "SHADOW", IgnoreCase = $false)]' in SCRIPT, (
+        "허용 값은 ReleaseMode 계약"
+        "(src/shared/report_evidence/constants.py:81-87)과 같아야 한다"
+    )
+    assert '[string]$ReleaseMode = "FULL"' in SCRIPT
+    v2_branch = SCRIPT.split('$childEnvironment["ENGINE_V2"] = "1"')[1]
+    assert '$childEnvironment["REPORT_RELEASE_MODE"] = $ReleaseMode' in v2_branch, (
+        "ENGINE_V2=1을 켜는 갈래가 REPORT_RELEASE_MODE를 함께 넘겨야 한다"
+    )
+    child_allowlist = SCRIPT.split("$allowedChildEnvironmentNames")[1]
+    assert '"REPORT_RELEASE_MODE"' in child_allowlist, (
+        "자식 환경 허용 목록에 없으면 실행기가 시작을 거부합니다"
+    )
+
+
+@pytest.mark.skipif(
+    WINDOWS_POWERSHELL is None,
+    reason="Windows PowerShell 5.1 실제 자식 환경 시험",
+)
+def test_engine_v2_switch_carries_release_mode_to_the_child(tmp_path: Path) -> None:
+    """-EngineV2로 켠 자식이 ENGINE_V2와 출시 모드를 함께 받는다."""
+    app_copy = _copy_fake_app(tmp_path)
+    environment = _environment(tmp_path)
+
+    result, records = _run_fake(app_copy, environment, paid=False, engine_v2=True)
+
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert len(records) == 1
+    payload = json.loads(records[0].read_text(encoding="utf-8"))
+    assert payload["engine_v2"] == "1"
+    assert payload["release_mode"] == "FULL"
+
+
+@pytest.mark.skipif(
+    WINDOWS_POWERSHELL is None,
+    reason="Windows PowerShell 5.1 실제 자식 환경 시험",
+)
+def test_engine_v1_child_gets_no_release_mode(tmp_path: Path) -> None:
+    """v1 경로는 이 값을 읽지 않으므로 넘기지도 않는다."""
+    app_copy = _copy_fake_app(tmp_path)
+    environment = _environment(tmp_path)
+
+    result, records = _run_fake(app_copy, environment, paid=False)
+
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert len(records) == 1
+    payload = json.loads(records[0].read_text(encoding="utf-8"))
+    assert payload["engine_v2"] is None
+    assert payload["release_mode"] is None

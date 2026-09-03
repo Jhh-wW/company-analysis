@@ -22,6 +22,15 @@ param(
     # 엔진 v2를 끄고 v1 경로로 리허설한다. 기본은 v2 켬.
     [switch]$DisableEngineV2,
 
+    # 엔진 v2가 보고서를 «어느 출시 모드로» 만들지. 이 값이 비면 v2 경로는
+    # AI를 부르기 전에 입력 계약으로 멈추므로(src/features/pipeline/real.py:
+    # 3510-3514) 기본을 배포와 같은 FULL로 둔다. 허용 값은 ReleaseMode 계약
+    # 그대로만 받는다 (src/shared/report_evidence/constants.py:81-87).
+    # ★ IgnoreCase = $false — 앱의 출시 모드 해석기는 소문자를 고쳐 읽지 않는다.
+    #   여기서 "full"을 받아 주면 사람은 켰다고 믿는데 자식이 입력 계약으로 멈춘다.
+    [ValidateSet("FULL", "ENFORCE_NO_PARTIAL", "SHADOW", IgnoreCase = $false)]
+    [string]$ReleaseMode = "FULL",
+
     [switch]$DeleteDataOnExit
 )
 
@@ -505,6 +514,10 @@ if ($DisableEngineV2) {
 }
 else {
     $childEnvironment["ENGINE_V2"] = "1"
+    # ★ v2 경로는 이 값이 없으면 조사를 시작해도 AI 호출 전에 멈추고 후보·확정
+    #   단계 원가만 쓴다. 부모 환경 값은 위 허용 목록 초기화에서 이미 지워졌으므로
+    #   이 줄이 자식이 받는 유일한 출처다 — 부모가 몰래 다른 모드로 바꿀 수 없다.
+    $childEnvironment["REPORT_RELEASE_MODE"] = $ReleaseMode
 }
 
 $allowedChildEnvironmentNames = $allowedParentNames + @(
@@ -514,7 +527,8 @@ $allowedChildEnvironmentNames = $allowedParentNames + @(
     "OBSERVABILITY_RECORDS_PATH", "TLDEXTRACT_CACHE",
     "DEPLOYMENT_EXPOSURE", "DEPLOYMENT_PLATFORM", "DEPLOYMENT_RUNTIME_CONTRACT",
     "FORWARDED_ALLOW_IPS", "PROVENANCE_SEAL_SECRET",
-    "ANALYSIS_ENGINE_DISABLE_DOTENV", "BUSINESS_CANDIDATE_PROVIDER", "ENGINE_V2"
+    "ANALYSIS_ENGINE_DISABLE_DOTENV", "BUSINESS_CANDIDATE_PROVIDER", "ENGINE_V2",
+    "REPORT_RELEASE_MODE"
 )
 foreach ($name in @($childEnvironment.Keys)) {
     if ($allowedChildEnvironmentNames -notcontains [string]$name) {
@@ -552,7 +566,7 @@ try {
         Write-Host "엔진: v1 (-DisableEngineV2)"
     }
     else {
-        Write-Host "엔진: v2 (ENGINE_V2=1)"
+        Write-Host ("엔진: v2 (ENGINE_V2=1) · 보고서 출시 모드: {0}" -f $ReleaseMode)
     }
     Write-Host ""
     Write-Host "★ 들어가는 방법" -ForegroundColor Cyan
