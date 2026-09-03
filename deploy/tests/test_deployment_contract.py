@@ -501,18 +501,38 @@ def test_render_shutdown_window_covers_serial_uvicorn_and_app_shutdown() -> None
     assert "Render 기본 30초" in runbook
     assert "Uvicorn HTTP 요청 정리 최대 20초" in runbook
     normalized_runbook = " ".join(runbook.split())
-    # ★ 실측으로 «절차가 바뀌었다».
-    #   그날 배포는 Blueprint Sync 가 아니라 서비스 화면의 Manual Deploy 로 성공했다.
-    #   오히려 Blueprint 는 «다른 브랜치»(master)를 보고 있어 Sync 하면 옛 render.yaml 이
-    #   적용될 뻔했다. 그래서 런북은 이제 둘을 «구분»해야 한다.
-    assert "Manual Deploy" in normalized_runbook, "코드만 바뀐 경우의 절차가 있어야 한다"
-    assert "render.yaml` 이 바뀐 경우에만" in normalized_runbook, (
-        "Blueprint Sync 를 언제 쓰는지 구분해야 한다"
+    # ★ 배포 수단은 서비스 화면의 Manual Deploy «하나»다. 이 서비스의 Blueprint 는
+    #   지금 저장소를 가리키지 않아 Sync 가 «실패»하고, 새로 만들면 기존 서비스를
+    #   넘겨받지 않고 접미사 붙은 복제 서비스가 생긴다. 런북이 다시 Sync 를 지시하면
+    #   출시 당일 배포가 막히므로 두 문장을 함께 못 박는다.
+    assert "Manual Deploy → Deploy latest commit" in normalized_runbook, (
+        "배포 수단이 서비스 화면의 Manual Deploy 라는 것이 적혀 있어야 한다"
     )
-    assert "Blueprint 화면의 브랜치를 «반드시» 확인" in normalized_runbook, (
-        "★ 브랜치가 어긋나 있었다 — 이 경고가 사라지면 같은 사고가 다시 난다"
-    )
-    # 자동 배포가 켜졌다는 사실과 그 전제(push = 배포)도 런북에 있어야 한다.
+    assert (
+        "Blueprint 의 Manual Sync / Deploy Blueprint 는 실행하지 않는다"
+        in normalized_runbook
+    ), "Blueprint Sync 는 실패하므로 런북이 누르지 말라고 해야 한다"
+    # ★ 순서가 계약이다. 값을 먼저 올리면 «옛 코드»가 새 판정으로 도는 창이 생기고
+    #   연습 모드에서 만든 캐시를 재사용할 수 있다. 문장이 있는지가 아니라
+    #   «어느 것이 먼저 나오는지»를 본다.
+    for 순서_문장 in (
+        "새 커밋을 올린다",
+        "commit 값이 방금 올린 커밋인지 확인한다",
+        "Environment 탭",
+    ):
+        assert 순서_문장 in normalized_runbook, (
+            f"배포 순서 문장이 런북에서 사라졌다: {순서_문장}"
+        )
+    assert (
+        normalized_runbook.index("새 커밋을 올린다")
+        < normalized_runbook.index("commit 값이 방금 올린 커밋인지 확인한다")
+        < normalized_runbook.index("Environment 탭")
+    ), "Manual Deploy → /healthz 확인 → Environment 탭 편집 순서를 지켜야 한다"
+    # 출시에서 «무엇을» 편집하는지도 런북에 있어야 한다 — 이름이 빠지면 배포자가
+    # 대시보드에서 어느 값을 고쳐야 하는지 알 수 없다.
+    assert "REPORT_RELEASE_MODE=FULL" in normalized_runbook
+    assert "DEPLOYMENT_RUNTIME_CONTRACT=render-portfolio-link-v1" in normalized_runbook
+    # 자동 배포를 사람이 확인한다는 전제(push = 배포)도 런북에 있어야 한다.
     assert "Auto-Deploy" in normalized_runbook
     assert "push 는 「배포해도 되는 상태」일 때만" in normalized_runbook
 
