@@ -25,11 +25,9 @@
 
 from __future__ import annotations
 
-import io
 import re
 from dataclasses import replace
 
-import pdfplumber
 import pytest
 
 from src.features.composer.constants import (
@@ -56,6 +54,8 @@ from src.features.export_pdf.tests.test_v2_public_projection import (
     _fragments,
     _performance_table,
     _sealed,
+    _squeezed,
+    _visible_text,
     _with_facts,
 )
 from src.features.pipeline.port import Report
@@ -193,7 +193,7 @@ _INTERPRETATION_MARK_ON_SCREEN = " 해석"
 def channel_neutral(text: str) -> str:
     """채널 «모양» 차이를 걷어내고 «글자»만 남긴다.
 
-    ★ 정규화 규칙(D-PUB4)
+    ★ 정규화 규칙
       - 인용 표식 ``[1]``과 문장 끝 ``— 해석``은 **글자의 일부**다. 통째로
         사라지면 이 시험이 깨져야 한다 — 그래서 지우지 않고 «모양만» 맞춘다.
       - 채널 고유 스타일은 허용한다. 화면은 ``[1]``을 위첨자 링크 ``1``로,
@@ -207,21 +207,6 @@ def channel_neutral(text: str) -> str:
         _INTERPRETATION_MARK_IN_TEXT, _INTERPRETATION_MARK_ON_SCREEN
     )
     return re.sub(r"\s+", " ", unmarked).strip()
-
-
-def _squeezed(value: str) -> str:
-    """줄바꿈·자간 공백을 지운 글자만 남긴다.
-
-    PDF 글자 추출은 줄 끝에서 문장을 자르고 표 칸 사이에 공백을 넣는다. 봉인된
-    문단이 «글자 단위로» 그대로 나왔는지 보려면 공백을 걷어내고 비교해야 한다.
-    """
-
-    return re.sub(r"\s+", "", value)
-
-
-def _extracted_text(pdf_bytes: bytes) -> str:
-    with pdfplumber.open(io.BytesIO(pdf_bytes)) as document:
-        return "\n".join(page.extract_text() or "" for page in document.pages)
 
 
 # ══════════════════════════════════════════════════════════
@@ -280,7 +265,7 @@ def test_PDF_글자에서_한_장의_문단들은_봉인_순서대로_붙어_나
     assert projection is not None
     assert_two_paragraphs_per_section(projection)
 
-    printed = _squeezed(_extracted_text(pdf_logic.build_pdf(report)))
+    printed = _squeezed(_visible_text(pdf_logic.build_pdf(report)))
 
     cursor = 0
     for block in projection.sections:
