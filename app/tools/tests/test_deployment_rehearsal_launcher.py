@@ -128,7 +128,7 @@ def test_launcher_enforces_the_child_environment_allowlist() -> None:
 def test_launcher_never_reads_or_prints_secret_files() -> None:
     """비밀 파일을 «몰래» 읽지 않고, 비밀값을 화면·파일에 남기지 않는다.
 
-    ★ 적대 검수가 잡은 «가짜 잣대» — 예전 이 시험은 `Get-Content`가
+    ★ 예전 이 시험은 «가짜 잣대»였다 — `Get-Content`가
       없다는 것만 봤다. 그런데 이 실행기는 파일을 `[System.IO.File]::
       ReadAllLines`로 읽으므로 그 단언은 «항상 참»이었다. 지키는 것이
       하나도 없는 시험이었다.
@@ -193,10 +193,17 @@ def test_engine_v2_child_always_gets_the_report_release_mode() -> None:
     던지고 그 갈래는 ``GATE_STOPPED``로 끝난다. 컨테이너 검증기도 같은 조합
     (real + ENGINE_V2=1 + 값 없음)을 부팅 거부한다.
     """
-    assert '[ValidateSet("FULL", "ENFORCE_NO_PARTIAL", "SHADOW", IgnoreCase = $false)]' in SCRIPT, (
+    assert '$allowedReleaseModes = @("SHADOW", "ENFORCE_NO_PARTIAL", "FULL")' in SCRIPT, (
         "허용 값은 ReleaseMode 계약"
         "(src/shared/report_evidence/constants.py:81-87)과 같아야 한다"
     )
+    # 앱의 해석기는 소문자를 고쳐 읽지 않는다 — 대소문자를 관용하면 사람은 켰다고
+    # 믿는데 자식이 입력 계약으로 멈춘다. -cnotcontains가 그 «c»(대소문자 구분)다.
+    assert "$allowedReleaseModes -cnotcontains $ReleaseMode" in SCRIPT, (
+        "출시 모드는 대소문자까지 계약과 같은지 봐야 한다"
+    )
+    # 거부는 «0이 아닌» 종료 코드로 끝나야 부르는 쪽이 실패를 알아챈다.
+    assert "exit 2" in SCRIPT, "계약 밖 값을 거부하고도 성공으로 끝나면 안 된다"
     assert '[string]$ReleaseMode = "FULL"' in SCRIPT, (
         "기본값이 배포와 같은 FULL이 아니면 리허설이 배포가 아니게 된다"
     )
@@ -629,6 +636,8 @@ def test_unknown_release_mode_stops_before_child(tmp_path: Path) -> None:
         app_copy, environment, port=_available_port(), release_mode="full"
     )
 
+    # 자식이 안 떴다는 것만 보면 «어떤» 실패든 통과한다 — 0이 아닌 종료 코드까지 본다.
+    assert result.returncode != 0, "계약 밖 값인데 실행기가 성공으로 끝났다"
     assert records == []
     assert not (app_copy / ".local_deployment_rehearsal_runs").exists()
 

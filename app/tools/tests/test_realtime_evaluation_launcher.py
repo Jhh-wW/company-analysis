@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import shutil
@@ -15,7 +16,7 @@ import pytest
 
 APP_ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER = APP_ROOT / "실시간성능시험켜기.ps1"
-SCRIPT = LAUNCHER.read_text(encoding="utf-8")
+SCRIPT = LAUNCHER.read_text(encoding="utf-8-sig")
 WINDOWS_POWERSHELL = shutil.which("powershell.exe") if os.name == "nt" else None
 PAID_PROVIDER_NAMES = (
     "DART_API_KEY",
@@ -393,10 +394,17 @@ def test_engine_v2_child_always_gets_the_report_release_mode() -> None:
     근거: 값이 비면 ``src/features/pipeline/real.py:3510-3514``가 ValueError를
     던지고 그 갈래는 ``GATE_STOPPED``로 끝난다 — 성능을 잴 구간까지 못 간다.
     """
-    assert '[ValidateSet("FULL", "ENFORCE_NO_PARTIAL", "SHADOW", IgnoreCase = $false)]' in SCRIPT, (
+    assert '$allowedReleaseModes = @("SHADOW", "ENFORCE_NO_PARTIAL", "FULL")' in SCRIPT, (
         "허용 값은 ReleaseMode 계약"
         "(src/shared/report_evidence/constants.py:81-87)과 같아야 한다"
     )
+    # 앱의 해석기는 소문자를 고쳐 읽지 않는다 — 대소문자를 관용하면 사람은 켰다고
+    # 믿는데 자식이 입력 계약으로 멈춘다. -cnotcontains가 그 «c»(대소문자 구분)다.
+    assert "$allowedReleaseModes -cnotcontains $ReleaseMode" in SCRIPT, (
+        "출시 모드는 대소문자까지 계약과 같은지 봐야 한다"
+    )
+    # 거부는 «0이 아닌» 종료 코드로 끝나야 부르는 쪽이 실패를 알아챈다.
+    assert "exit 2" in SCRIPT, "계약 밖 값을 거부하고도 성공으로 끝나면 안 된다"
     assert '[string]$ReleaseMode = "FULL"' in SCRIPT
     v2_branch = SCRIPT.split('$childEnvironment["ENGINE_V2"] = "1"')[1]
     assert '$childEnvironment["REPORT_RELEASE_MODE"] = $ReleaseMode' in v2_branch, (
@@ -442,3 +450,11 @@ def test_engine_v1_child_gets_no_release_mode(tmp_path: Path) -> None:
     payload = json.loads(records[0].read_text(encoding="utf-8"))
     assert payload["engine_v2"] is None
     assert payload["release_mode"] is None
+
+
+def test_launcher_is_utf8_with_bom_so_powershell_5_1_shows_korean() -> None:
+    """PowerShell 5.1은 BOM이 없으면 .ps1을 ANSI로 읽어 한국어 안내가 깨진다.
+
+    깨진 안내는 틀린 안내보다 나쁘다 — 사람이 무엇을 잘못했는지조차 알 수 없다.
+    """
+    assert LAUNCHER.read_bytes().startswith(codecs.BOM_UTF8)

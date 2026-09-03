@@ -26,9 +26,9 @@ param(
     # AI를 부르기 전에 입력 계약으로 멈추므로(src/features/pipeline/real.py:
     # 3510-3514) 기본을 배포와 같은 FULL로 둔다. 허용 값은 ReleaseMode 계약
     # 그대로만 받는다 (src/shared/report_evidence/constants.py:81-87).
-    # ★ IgnoreCase = $false — 앱의 출시 모드 해석기는 소문자를 고쳐 읽지 않는다.
-    #   여기서 "full"을 받아 주면 사람은 켰다고 믿는데 자식이 입력 계약으로 멈춘다.
-    [ValidateSet("FULL", "ENFORCE_NO_PARTIAL", "SHADOW", IgnoreCase = $false)]
+    # ★ 값 검사는 [ValidateSet]이 아니라 아래 본문에서 «대소문자까지» 한다.
+    #   ValidateSet은 어긴 값을 막아 주긴 해도 종료 코드 0으로 끝나서, 이 실행기를
+    #   부르는 쪽에서는 거부당한 실행이 «성공»으로 보인다.
     [string]$ReleaseMode = "FULL",
 
     [switch]$DeleteDataOnExit
@@ -36,6 +36,18 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+# ★ 출시 모드는 «대소문자까지» 계약과 같아야 한다 — 앱의 해석기는 소문자를 고쳐
+#   읽지 않으므로, "full"을 받아 주면 사람은 켰다고 믿는데 자식이 입력 계약으로 멈춘다.
+#   계약 밖 값이면 아무것도 시작하지 않고 0이 아닌 종료 코드로 끝낸다.
+$allowedReleaseModes = @("SHADOW", "ENFORCE_NO_PARTIAL", "FULL")
+if ($allowedReleaseModes -cnotcontains $ReleaseMode) {
+    Write-Host ""
+    Write-Host "-ReleaseMode 값을 쓸 수 없습니다: $ReleaseMode" -ForegroundColor Red
+    Write-Host ("쓸 수 있는 값은 {0} 입니다. 대문자 그대로 적습니다." -f ($allowedReleaseModes -join " · "))
+    Write-Host ""
+    exit 2
+}
 
 # ══════════════════════════════════════════════════════════════════
 # 이 실행기가 재현하는 것 — 「배포될 것과 똑같은 조건」
