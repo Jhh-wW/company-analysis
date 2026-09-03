@@ -355,7 +355,7 @@ def _run_web_crawl(
     queue: list[_QueueItem] = []
     seen_canonical: set[str] = set()
 
-    # APEX-WWW-OFFICIAL-ROOT-GAP(통합 담당 지시): DART가 준 호스트
+    # apex·www 짝 결속: DART가 준 호스트
     # («primary»)와 그 apex/www 짝을 각각 독립된 후보로 미리 심는다 — redirect를
     # 따라가는 방식이 아니라 «둘 다 직접 방문」하는 방식이라, 정확히 같은
     # host만 허용하는 redirect fail-closed 정책(앞서 고친 eTLD+1 결함 수정과
@@ -599,7 +599,7 @@ def _build_web_document(
         collector_version=WIDE_COLLECTOR_VERSION,
         parser_version=WIDE_PARSER_VERSION,
         requirement=requirement,
-        #: 결속 확인된 공식 웹 문서 «후보» 등급. 최종 확정은 통합 담당의 몫이다.
+        #: 결속 확인된 공식 웹 문서 «후보» 등급. 최종 확정은 장별 근거 생산부가 한다.
         source_tier=SOURCE_TIER_1_OFFICIAL,
     )
 

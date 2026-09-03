@@ -187,7 +187,7 @@ def test_필수_조회_실패와_절단은_자료부족이_아니라_unknown이�
 
 
 def test_필수경로가_MISSING이어도_site_probe_게이트가_막혔으면_확인완료로_단정하지_않는다() -> None:
-    """P1-B — «robots Disallow: / + DART MISSING» 조합의 재현.
+    """«robots Disallow: / + DART MISSING» 조합의 재현.
 
     필수(REQUIRED) 조회 하나(예: DART)는 정상적으로 끝까지 확인해 MISSING을
     돌려줬지만, 같은 슬롯을 겨냥한 site-probe 게이트(robots.txt)가 FAILED다
@@ -219,7 +219,7 @@ def test_필수경로가_MISSING이어도_site_probe_게이트가_막혔으면_�
 
 
 def test_필수경로가_MISSING이고_site_probe_게이트도_정상이면_그대로_insufficient다() -> None:
-    """P1-B 회귀 방지 — site-probe 게이트가 «막힌» 게 아니라 정상 확인
+    """회귀 방지 — site-probe 게이트가 «막힌» 게 아니라 정상 확인
     (OK/MISSING)이면 기존처럼 evidence_absent_after_check(확인 후 부재)를
     유지한다."""
 
@@ -280,7 +280,7 @@ def test_site_probe_게이트가_아닌_보조경로_실패는_확인완료_부�
 
 
 def test_필수경로_자체가_실패하면_site_probe_상태와_무관하게_required_path_사유를_유지한다() -> None:
-    """P1-B 회귀 방지 — required_attempts에 이미 FAILED가 있으면(기존 규칙)
+    """회귀 방지 — required_attempts에 이미 FAILED가 있으면(기존 규칙)
     site-probe 게이트 확인 없이도 그대로 unknown이고, 사유 문구도 바뀌지
     않는다."""
 
@@ -314,7 +314,7 @@ def test_아예_확인하지_않은_필수칸은_unknown이다() -> None:
     assert "required_path_unobserved:customer_market" in bundle.reason_codes
 
 
-def test_codex의_검증된_사실은_정확한_의미칸만_채운다() -> None:
+def test_주입된_검증사실은_정확한_의미칸만_채운다() -> None:
     bundle = build_section_bundle(
         _candidate(),
         required_slot_ids=("historical_performance",),

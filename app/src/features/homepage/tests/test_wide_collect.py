@@ -127,7 +127,7 @@ def test_robots_조회_실패시_본문을_긁지_않는다():
 
     assert result.documents == ()
     robots_attempts = [a for a in result.attempts if a.source_kind == "robots_txt"]
-    # APEX-WWW-OFFICIAL-ROOT-GAP 이후 primary(company.example)와 apex/www
+    # apex/www 짝 결속 이후 primary(company.example)와 apex/www
     # 짝(www.company.example)이 각각 robots를 따로 확인하므로 2건이다.
     # attempt는 생성 순서를 그대로 보존하므로 [0]이 항상 primary다.
     assert len(robots_attempts) == 2
@@ -150,8 +150,8 @@ def test_robots가_4xx면_빈_규칙으로_진행한다():
 
 
 def test_robots가_401이면_본문을_긁지_않는다():
-    """P1-1(ROBOTS-EXPLICIT-DENIAL): 401은 인증 요구 — 빈 규칙으로 진행하면
-    안 된다(전체 오케스트레이션 수준 회귀)."""
+    """robots 401은 인증 요구다 — 빈 규칙으로 진행하면 안 된다
+    (수집 흐름 전체를 통과시키는 회귀 방지)."""
     pages = {
         "https://company.example/robots.txt": WideRawResponse(
             status=401, text="", effective_url="https://company.example/robots.txt", content_type=""
@@ -198,11 +198,11 @@ def test_robots가_403이면_본문을_긁지_않는다():
     ],
 )
 def test_robots_거부_일시장애_상태는_일반_전송_호출이_0회다(status, expected_reason_code):
-    """P1(통합 담당 지시, 확장): robots_decision의 단위 분류
-    (407·408·409·429 전부 blocked)를 상태마다 실제 수집 전체로 증명한다.
+    """robots_decision의 단위 분류(407·408·409·429 전부 blocked)를
+    상태마다 실제 수집 전체로 증명한다.
     「robots가 아닌」 전송 호출 수를 세어 정말 0인지 확인한다 — 특정 URL
     문자열이 calls 안에 없다는 것만으로는 다른 형태의 우회 호출을 놓칠 수
-    있어, 통합 담당이 407·429 두 상태만으로는 증명이 불완전하다고 지적했다."""
+    있어, 407·429 두 상태만으로는 증명이 불완전하다."""
     pages = {
         "https://company.example/robots.txt": WideRawResponse(
             status=status, text="", effective_url="https://company.example/robots.txt", content_type=""
@@ -779,7 +779,7 @@ def test_sitemap의_다른_TLD_URL은_등록도메인_밖이라_따라가지_않
     assert not any("company.net" in doc.canonical_url for doc in result.documents)
 
 
-# ── APEX-WWW-OFFICIAL-ROOT-GAP(통합 담당 지시) ────────
+# ── apex·www 짝 결속 ──────────────────────────────
 
 
 def test_apex가_사실상_www로만_운영되어도_www가_직접_방문되어_문서를_만든다():
@@ -1623,7 +1623,7 @@ def test_ir_pdf는_3건_상한을_넘지_않는다(monkeypatch):
 
 
 def test_ir_pdf_none과_failed는_MISSING과_FAILED로_분리된다(monkeypatch):
-    """apex/www 짝(APEX-WWW-OFFICIAL-ROOT-GAP) 덕분에 IR 후보 호스트가
+    """apex/www 짝 결속 덕분에 IR 후보 호스트가
     company.example·www.company.example 둘이 된다 — 정확히 일치하는
     호스트만 «none」, 나머지는 「failed」로 갈라 두 상태가 실제로 각각
     다른 attempt에 남는지 확인한다."""

@@ -146,7 +146,7 @@ def test_공유플랫폼_하위host는_같은_eTLD의_다른host를_회사소유
     assert bind_registered_subdomain("blog.naver.com", "news.naver.com") is None
 
 
-# ── APEX-WWW-OFFICIAL-ROOT-GAP(통합 담당 지시) ────────
+# ── apex·www 짝 결속 ──────────────────────────────
 
 
 def test_www_apex_alternate은_www_접두사를_붙이거나_뗀다():
@@ -545,11 +545,11 @@ def test_robots_404는_빈_규칙으로_진행한다():
     assert outcome == "proceed_empty_rules"
 
 
-# ── P1-1 공격 시험: robots 401/403은 명시적 거부이지 「없음」이 아니다 ──
+# ── robots 401/403은 명시적 거부이지 「없음」이 아니다 ──────────
 
 
 def test_robots_401은_차단된다():
-    """ROBOTS-EXPLICIT-DENIAL: 401은 인증 요구 — «robots가 없다»가 아니다."""
+    """401은 인증 요구 — «robots가 없다»가 아니다."""
     outcome, reason = robots_decision(_response(401), None)
     assert outcome == "blocked"
     assert reason == "robots_denied"
@@ -583,7 +583,7 @@ def test_robots_전송실패는_차단된다():
     assert outcome == "blocked"
 
 
-# ── P1(통합 담당 지시): robots 상태 계약을 정확히 좁힌다 ──
+# ── robots 상태 계약을 정확히 좁힌다 ────────────────
 # 「명시적 부재」는 404·410만 인정한다. 그 밖의 4xx는 원인별로
 # blocked(robots_denied/robots_transient/robots_unreachable)로 나눈다.
 
@@ -625,7 +625,7 @@ def test_robots_그밖의_4xx는_도달불가로_차단된다():
         assert reason == "robots_unreachable", f"status={status}"
 
 
-# ── P1-2 공격 시험: sitemap 바이트 상한이 문자 상한이면 안 된다 ──────
+# ── sitemap 바이트 상한이 문자 상한이면 안 된다 ────────────────
 
 
 def _sitemap_response(text: str, host: str = "company.example") -> WideRawResponse:

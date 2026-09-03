@@ -39,7 +39,7 @@ _ATTEMPT_STATES = frozenset(
     {ATTEMPT_STATE_OK, ATTEMPT_STATE_MISSING, ATTEMPT_STATE_FAILED, ATTEMPT_STATE_TRUNCATED}
 )
 
-#: 출처 등급 — «후보»일 뿐이며 최종 확정은 통합 담당의 몫이다(브리핑 §1).
+#: 출처 등급 — 이 수집기는 «후보»까지만 매긴다. 최종 확정은 장별 근거 생산부가 한다.
 SOURCE_TIER_1_OFFICIAL = "TIER_1_OFFICIAL"
 SOURCE_TIER_2_PUBLIC = "TIER_2_PUBLIC"
 SOURCE_TIER_3_TRUSTED = "TIER_3_TRUSTED"

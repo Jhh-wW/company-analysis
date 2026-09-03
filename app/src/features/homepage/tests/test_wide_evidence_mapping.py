@@ -296,7 +296,7 @@ def test_document와_attempt의_company_id_불일치는_결과_생성_시점에_
         WideCollectionResult(company_id="c1", documents=(document,), attempts=(attempt,))
 
 
-# ── 통합 담당 지시: 최상위 company_id ────────────
+# ── 최상위 company_id ───────────────────────────
 
 
 def test_최상위_company_id는_result에서만_나온다():

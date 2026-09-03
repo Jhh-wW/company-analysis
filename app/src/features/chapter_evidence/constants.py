@@ -60,8 +60,9 @@ class CompanyType(str, Enum):
     UNDECIDED = "undecided"
 
 
-# CollectionAttempt.source_kind 접두어 — 실제 접두어는 수집기(claude-a-dart,
-# claude-b-web) 쪽 상수가 정본이다. 여기서는 그 접두어«패턴»만 참조한다.
+# CollectionAttempt.source_kind 접두어 — 실제 접두어는 수집기(공시 수집기
+# ``evidence_collection``, 공식 웹 수집기 ``homepage.wide_collect``) 쪽
+# 상수가 정본이다. 여기서는 그 접두어«패턴»만 참조한다.
 DART_SOURCE_KIND_PREFIX: Final[str] = "dart_"
 OFFICIAL_SOURCE_KIND_PREFIX: Final[str] = "official_"
 

@@ -507,7 +507,7 @@ def www_apex_alternate(host: str) -> str | None:
 def bind_www_apex_alternate(root_host: str) -> BoundHost | None:
     """root_host의 apex/www 짝을 고신뢰(REQUIRED) 후보로 결속한다.
 
-    ★ APEX-WWW-OFFICIAL-ROOT-GAP(통합 담당 지시): DART가 준
+    ★ apex·www 짝 결속이 필요한 이유: DART가 준
       호스트 하나(예: ``company.com``)가 실제로는 다른 짝
       (``www.company.com``)으로 운영되는 경우가 흔하다. redirect
       판정은 정확히 같은 host만 허용하므로(SSRF 방어이자 eTLD+1
