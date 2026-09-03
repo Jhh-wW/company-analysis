@@ -176,7 +176,7 @@ def test_예산을_다_쓰면_조사를_거절한다(client: TestClient, monkeyp
 
     assert response.status_code == 429
     assert "이 링크로 돌릴 수 있는 새 조사를 모두 사용" in response.text
-    # ★ 「이미 만든 보고서는 계속 열린다」를 «반드시» 같이 알린다 (사용자 결정).
+    # ★ 「이미 만든 보고서는 계속 열린다」를 «반드시» 같이 알린다 (제품 결정).
     #   안 알리면 그냥 막힌 줄 알고, 포트폴리오의 핵심을 못 본 채 떠난다.
     assert "이미 만들어 둔 보고서는" in response.text
 

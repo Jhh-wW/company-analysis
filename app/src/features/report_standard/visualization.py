@@ -492,7 +492,7 @@ def _flow(table: ReportTable) -> TableVisualization | None:
         if len(row) != len(table.headers):
             return None
         values = tuple(str(value).strip() for value in row)
-        # ★ 빈 칸을 허용한다 (사용자 결정). 8장 「확인된 사례」처럼
+        # ★ 빈 칸을 허용한다 (제품 결정). 8장 「확인된 사례」처럼
         #   «없을 수 있는» 칸 때문에 표 전체가 사라지던 것을 막는다.
         #   전부 빈 줄만 버린다 — 그런 줄은 아무 말도 하지 않는다.
         if not any(values):

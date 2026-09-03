@@ -43,7 +43,7 @@ def clean_name(raw: str) -> str:
     name = re.sub(r"20\d{2}\s*년|제\s*\d+\s*기|\(\s*(?:당|전|전 전)\s*기\s*\)", " ", name)
     name = re.sub(r"[·\-–—]+\s*$", "", name)
     name = re.sub(r"\s+", " ", name).strip(" ,.()")
-    # ★ 여기서 자르지 않는다 (사용자 결정) — 화면·PDF가 줄바꿈으로 흘려 받는다.
+    # ★ 여기서 자르지 않는다 (제품 결정) — 화면·PDF가 줄바꿈으로 흘려 받는다.
     #   ROW_RE 캡처 그룹이 이미 원본을 40자로 묶어 두므로 별도 상한이 없어도
     #   이름이 무한정 길어지지 않는다 (constants.MAX_NAME_CHARS 자리의 주석 참조).
     return name

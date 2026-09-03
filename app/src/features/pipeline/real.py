@@ -4415,7 +4415,7 @@ def _collect(
         steps.append({"step": "6_수집_목차보정", "고친조각": repaired})
 
     # ★ 1판이 «안 뜨는» 절을 더 모은다 — 신규사업 전망·시장 특성·소송.
-    #   사용자 지적(「그냥 DART 뜯어온 거라 이럴 거면 DART를 직접 보지」)의 핵심 원인이
+    #   결과가 전자공시 원문을 그대로 옮긴 것처럼 보이던 핵심 원인이
     #   **정작 필요한 절을 안 뜨던 것**이었다. 1판은 0줄 고치지 않고 «더할» 뿐이다.
     frags, added = filing_extra.add_to(
         frags, filing_text, getattr(engine, "FRAG_CHARS", filing_extra.DEFAULT_FRAG_CHARS)

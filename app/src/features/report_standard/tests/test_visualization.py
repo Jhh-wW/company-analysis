@@ -120,7 +120,7 @@ def test_composition_tone_always_ends_pale_and_never_repeats() -> None:
     """★ 색 규칙을 못 박는다 — 웹 틀과 PDF가 «이 함수 하나»를 함께 쓴다.
 
     항목이 3개든 7개든 「가장 진한 것 → 가장 옅은 것」으로 끝나야 회사가 달라도
-    같은 장의 도식 인상이 같다(사용자 요구). 그리고 한 도식 안에서 같은 색이
+    같은 장의 도식 인상이 같다(제품 요구사항). 그리고 한 도식 안에서 같은 색이
     두 번 나오면 두 부문이 한 덩어리로 보인다.
     """
     for count in range(COMPOSITION_MIN_ITEMS, COMPOSITION_MAX_ITEMS + 1):
@@ -254,7 +254,7 @@ def test_flow_preserves_each_complete_left_to_right_row() -> None:
 
 
 def test_flow_keeps_rows_with_a_blank_cell() -> None:
-    """★ 사용자 결정 — 한 칸이 비었다고 표를 버리지 않는다.
+    """★ 제품 결정 — 한 칸이 비었다고 표를 버리지 않는다.
 
     8장 「확인된 사례」처럼 «없을 수 있는» 칸 때문에 표 전체가 사라졌다.
     비었다는 것도 정보다 — 지어낸 값보다 훨씬 낫다.
@@ -579,7 +579,7 @@ def test_culture_card_gets_the_v1_precedent_phrase() -> None:
 
 def test_limitation_phrase_stays_neutral_when_a_column_is_blank() -> None:
     """★ 실측(하이브) — 6장 「시점」 칸이 두 행 다 비었다.
-    이건 정상이다(사용자 결정: 안 적혀 있으면 칸을 비우고 줄은 살린다).
+    이건 정상이다(제품 결정: 안 적혀 있으면 칸을 비우고 줄은 살린다).
     「범위·한계」 문구가 그걸 보고 «자료 부족」류로 바뀌면 안 된다 — 빈
     칸은 정직한 결과지 결함이 아니다. 이 문구는 «장 종류»만 보고 정하지
     «어느 칸이 비었는지»는 아예 안 본다 — 이 시험이 그걸 못 박는다.

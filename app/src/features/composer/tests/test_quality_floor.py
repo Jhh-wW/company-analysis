@@ -395,7 +395,7 @@ def test_기준문서_하한은_낮추지_않고_미결속_수치를_제외한_�
     assert len(fixture_body) >= MIN_SUBSTANTIVE_SENTENCES
     assert fixture_confirmed / len(fixture_all) >= MIN_CONFIRMED_RATIO
 
-    # ② 숫자가 없는 문장은 전부 보존한다. 사용자 결정 ③ 이후에는
+    # ② 숫자가 없는 문장은 전부 보존한다. 제품 결정 ③ 이후에는
     #    «검사를 이미 두 번 통과한» 수치 문장(등급 확인 + 인용 있음 + 검수 AI가
     #    참으로 판정해 verified)까지 살아남는다 — 구조화 근거(NumericBinding)를
     #    요구하는 옛 규칙은 «해석» 등급 수치 문장에만 남는다(해석은 사실
@@ -441,7 +441,7 @@ def test_기준문서_하한은_낮추지_않고_미결속_수치를_제외한_�
     assert reviewer.rewrite_prompts == []
 
     # ③ 하한 자체(본문 40문장·확인 비율 50%)는 낮추지 않는다 — 안전선.
-    #    사용자 결정 ③ 이후 이 fixture는 «회복»해 두 지표 모두
+    #    제품 결정 ③ 이후 이 fixture는 «회복»해 두 지표 모두
     #    하한을 넘긴다. 그런데도 등급은 여전히 PARTIAL이다 — 이유는 이 시험이
     #    다루는 게이트(수치 문장 결속)가 아니라 «구조화 사실(FactRecord) 하한»
     #    이라는 별도 게이트다. 이 시험은 실적표(table=None)를 일부러 안 주므로

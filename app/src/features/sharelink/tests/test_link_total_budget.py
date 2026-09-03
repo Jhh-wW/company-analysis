@@ -131,7 +131,7 @@ def test_LINK_누적_예산은_리터럴_3000원이다() -> None:
 
 
 def test_소진_문구는_정확히_이_문장이다() -> None:
-    """★ 사용자 결정 문장 그대로여야 한다."""
+    """★ 정해진 문장 그대로여야 한다."""
     assert constants.LINK_TOTAL_BUDGET_EXHAUSTED_MESSAGE == (
         "이 링크의 이용 한도를 모두 사용했습니다. "
         "미리 준비된 회사 보고서는 계속 볼 수 있습니다."
@@ -139,7 +139,7 @@ def test_소진_문구는_정확히_이_문장이다() -> None:
 
 
 def test_소진_문구는_우리_내_같은_사정을_말하지_않는다() -> None:
-    """★ 화면 문구에 만든 쪽 사정을 넣지 않는다 (사용자 지시)."""
+    """★ 화면 문구에 만든 쪽 사정을 넣지 않는다 (제품 결정)."""
     문구 = constants.LINK_TOTAL_BUDGET_EXHAUSTED_MESSAGE
     assert "우리" not in 문구
     assert "내" not in 문구

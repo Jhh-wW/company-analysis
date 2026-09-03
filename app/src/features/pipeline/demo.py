@@ -917,7 +917,7 @@ def _load_report(record: dict) -> Optional[Report]:
     corp_type = "비상장 외감" if "비상장" in corp_type_raw else "상장사"
 
     # ★ 附(참고 숫자 — 1인평균급여액·평균근속연수)는 걷어냈다.
-    #   이 보고서는 「지원동기를 합격 퀄리티로 만드는 정보」만 담는다(사용자 지시).
+    #   이 보고서는 「지원동기를 합격 퀄리티로 만드는 정보」만 담는다(제품 결정).
     #   옛 기록에 附이 남아 있어도 화면에 올리지 않는다.
     sections = [s for s in sections if s.cell in COMPANY_FACT_CELLS and s.cell != "附"]
 
