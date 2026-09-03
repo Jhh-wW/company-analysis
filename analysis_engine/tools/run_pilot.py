@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""야간 파일럿 — 기획서 15단계 뼈대 그대로의 경량 일괄 실행 (2026-08-15 사용자 지시).
+"""야간 파일럿 — 15단계 뼈대 그대로의 경량 일괄 실행.
 
 목적: 현재 확정 기획서대로 프로그램을 실제로 돌려 「어디가 걸리는지」를 찾는다.
       결과·문제는 아침에 사용자가 기획서를 고치는 재료가 된다. 50건 이상.
 
-뼈대 (00_공통/05_파이프라인15단계.md) — 단계 번호를 그대로 로그에 남긴다:
+뼈대 — 단계 번호를 그대로 로그에 남긴다:
   1 계정·할당량      → 배치 모드 생략 (기록만 — UI·계정 없음)
   1.5 입력           → 텍스트 경로 (파일럿 1단계 기본과 일치) · 주소는 「모름」
   2 식별 3층         → 층1 코드(corpCode) → 층2 AI 5회 상한(+DART 실재 대조) → 층3 주소
@@ -15,7 +15,7 @@
   5.5 공고 판별 3층   → 1층 AI(개정 정본 질문) → 2층 코드 → 3층 지우개(검출=삭제 후 진행)
                        → 요구역량 추출(AI) · 공고 원문은 저장하지 않는다 (S2 — 목록·지문만)
   6 수집             → DART 재무 API + 공시 원본(사업/감사보고서) 조각화.
-                       ⚠️ 뉴스·홈페이지 소스 미보유 → 비상장 4-1·4-2·4-3 빈칸+사유 (실측 P-10·무명뉴스)
+                       ⚠️ 뉴스·홈페이지 소스 미보유 → 비상장 4-1·4-2·4-3 빈칸+사유 (실측 — 무명 회사는 검색되는 뉴스가 없다)
   7 사전 게이트       → 칸 재료 개략 + 신선도 → 미달 즉시 중단 (생성 0원)
   8·9 생성 (AI 1회)   → 원문 문장 그대로 + 조각 번호 + 블록. 자유 문장 금지
   10 검증            → 코드 W1~W4 대조 + 7칸 판정 + ①-b 알맹이 AI 1회 (보고서 문장만 제공)
@@ -90,14 +90,14 @@ PAID_EXECUTION_DISABLED_MESSAGE = (
 )
 AI_NAME_RETRY_MAX = 5               # 층2 재시도 상한 (OWASP LLM06 가드레일)
 ANTHROPIC_TIMEOUT_SEC = 180.0        # 단일 provider 호출 worker 점유 상한
-AUDIT_WINDOW_YEARS = 3              # 조건 2 창 (P-07 잠정 3년)
+AUDIT_WINDOW_YEARS = 3              # 조건 2 창 — 잠정 3년
 FRAG_CHARS = 1200                   # 조각 길이 상한
 MAX_FRAGS = 14                      # 생성 입력 조각 수 상한 (비용·맥락 관리)
 GEN_MAX_TOKENS = 3000
 
-# 실캡처 5건의 회사명 — 정본은 검증/09_착수2_OCR비교_02_공고별상세.md의 확인 결과.
-# 1차 실행은 3건(원티드-01·02, 잡코리아-01)을 기억으로 잘못 적어 감시(파일럿 감시 A)에
-# 적발됐다 → 착수 2 문서 기준으로 정정·재실행 (2026-08-15 · P-17)
+# 실캡처 5건의 회사명 — 정본은 OCR 비교 실측 기록의 확인 결과다.
+# 1차 실행은 3건(원티드-01·02, 잡코리아-01)을 기억으로 잘못 적어 감시에
+# 적발됐다 → 실측 기록 기준으로 정정·재실행.
 OCR_INPUTS = {
     "원티드-01": ("에이블리코퍼레이션", "데이터분석가"),
     "원티드-02": ("아티언스", "AI서비스기획자"),
@@ -129,8 +129,8 @@ SECTION_HEADS: dict[str, tuple[str, ...]] = {
     "판관비": ("판매비와관리비", "판매비및관리비", "영업비용"),
     "매출수주": ("매출 및 수주", "수주상황", "매출에 관한 사항"),
 }
-# 칸 ← 조각 종류 매핑 (05_생성/01_출력틀 유형별 소스 매핑을 코드로)
-# 2026-08-15 네이버 뉴스 연결 (14_결정선택지7 결정 3=A): 뉴스가 소스인 칸(2·4축)에 「뉴스」 추가
+# 칸 ← 조각 종류 매핑
+# 네이버 뉴스 연결: 뉴스가 소스인 칸(2·4축)에 「뉴스」 추가
 CELL_SOURCES: dict[str, tuple[str, ...]] = {
     "1": ("사업내용", "수익인식"),
     "2": ("사업내용", "연구개발", "뉴스"),
@@ -144,7 +144,7 @@ CELL_SOURCES: dict[str, tuple[str, ...]] = {
     "9": ("사업내용", "연구개발", "매출수주", "특수관계자"),
 }
 MAX_NEWS_FRAGS = 6                  # 뉴스 조각 상한 (채택 조건 통과분만)
-VOTE_ROUNDS = 3                     # 판정 반복 횟수 (2026-08-16 결정 1=A · P-23)
+VOTE_ROUNDS = 3                     # 판정 반복 횟수 — 같은 자료로 반복 후 다수결
 VOTE_MIN = 2                        # 이 횟수 이상 채워진 칸만 인정 (다수결)
 OTHER_CORP_MAX = 3                  # 제목·본문의 다른 회사명 이 수 이상이면 종목 나열 기사로 보고 버림
 BLOCK_ORDER = ("1", "2", "3", "4-1", "4-2", "4-3", "5", "6", "7", "8", "9")
@@ -219,7 +219,7 @@ def identify(client: anthropic.Anthropic, company: str, address: str,
              steps: list[dict[str, Any]]) -> Optional[str]:
     """층1 → (0건이면) 층2 AI 5회 → 동명이면 층3 주소 좁힘. 반환 = corp_code 1개.
 
-    층3 (01_식별/01_흐름_03): 후보 **전부** DART 기업개황 조회 → 입력 주소(시/도+구/군)로
+    층3: 후보 **전부** DART 기업개황 조회 → 입력 주소(시/도+구/군)로
     좁힌다. 모름이면 동명 2곳+에서 재요구 — 배치는 재요구 불가라 중단 기록.
     좁혀서 정확히 1곳이면 확정. 0곳(불일치)은 정본상 「차단 안 함 + 1개 제시 경고」지만
     배치는 사람 확인이 없어 오확정 위험 → 중단 기록 (배치 제약, 아침 보고).
@@ -227,7 +227,7 @@ def identify(client: anthropic.Anthropic, company: str, address: str,
     stage, hits = match_layer1(company, index)
     steps.append({"step": "2_식별_층1", "걸린변형": stage, "후보수": len(hits)})
     if not hits:
-        # 2026-08-15 결정 4=B: 웹(뉴스) 검색 보강 — 기사에서 법인명 표기를 뽑아 DART 대조.
+        # 웹(뉴스) 검색 보강 — 기사에서 법인명 표기를 뽑아 DART 대조.
         # 사명 변경(한글과컴퓨터→한컴)·브랜드명 문제의 1차 방어. 실패하면 AI 5회로.
         try:
             news = search_news(company, display=10)
@@ -235,7 +235,7 @@ def identify(client: anthropic.Anthropic, company: str, address: str,
             news = []
         name_re = re.compile(r"(?:㈜|\(주\)|주식회사)\s*([가-힣A-Za-z0-9&]{2,15})"
                              r"|([가-힣A-Za-z0-9&]{2,15})\s*(?:㈜|\(주\))")
-        # 가드레일 (2026-08-15 오식별 실측 — 네오와이즈→네오펄스): ① 입력 회사명을 실제로
+        # 가드레일 (오식별 실측 — 네오와이즈→네오펄스): ① 입력 회사명을 실제로
         # 언급한 기사만 본다 ② 서로 다른 기사 2건 이상에 등장한 표기만 후보 (한 기사에 스친
         # 무관 법인명 배제). 그래도 사람 확인 카드가 최종 방어선이다 — 배치는 자동이라 한계.
         cand_counts: dict[str, int] = {}
@@ -296,7 +296,7 @@ def identify(client: anthropic.Anthropic, company: str, address: str,
             return None
     if len(hits) > 1:
         if address == "모름":
-            # 동명 2곳+ & 주소 모름 → 재요구 (2026-08-14 결정 4) — 배치는 불가 → 중단
+            # 동명 2곳+ & 주소 모름 → 재요구 — 배치는 불가 → 중단
             steps.append({"step": "2_식별_층3", "결과": "동명 재요구 필요",
                           "후보수": len(hits), "주소": "모름",
                           "안내": "주소 재요구 필요 — 배치라 불가, 중단 기록"})
@@ -323,17 +323,17 @@ def identify(client: anthropic.Anthropic, company: str, address: str,
 
 #: 원문으로 쓸 공시를 «어떤 순서»로 찾을지. (공시유형 코드, 보고서 이름).
 #:
-#: ★ 2026-08-28 — 비상장에 「사업보고서」를 «먼저» 넣었다. 실측 근거:
+#: ★ 비상장은 「사업보고서」를 «먼저» 찾는다. 실측 근거:
 #:   현대카드(비상장)는 `pblntf_ty="F"`(외부감사관련)에 **0건**(status 013)인데
 #:   `pblntf_ty="A"`(정기공시)에는 **사업보고서가 3건** 있다.
 #:   대형 비상장사는 감사보고서를 «따로 내지 않고» 사업보고서에 첨부해 낸다
 #:   (외부감사법 23조① 단서 — 첨부해 내면 감사인이 제출한 것으로 «본다»).
 #:
-#: ⚠️ 고치기 전에 무슨 일이 났나 — 「감사보고서」만 찾다 못 찾으면 이 함수가 None 을
+#: ⚠️ 이 순서를 안 지키면 무슨 일이 나나 — 「감사보고서」만 찾다 못 찾으면 이 함수가 None 을
 #:   돌려주고, 원문이 «빈 문자열»이 되고, 조각이 **0개**가 된다. 그러면 재무 API
 #:   숫자만으로 보고서가 쓰여 **각 장이 한 문장씩**인 껍데기가 나온다.
-#:   2026-08-27 에 «판정»만 고치고(재무 자료가 있으면 대상) 이 «수집»을 안 고쳐서,
-#:   문은 열어 주고 안에는 아무것도 안 넣어 주는 상태였다.
+#:   «판정»만 고치고(재무 자료가 있으면 대상) 이 «수집»을 안 고치면,
+#:   문은 열어 주고 안에는 아무것도 안 넣어 주는 상태가 된다.
 #:
 #: ★ 감사보고서 폴백을 «지운 것이 아니다». 사업보고서를 안 내는 비상장 중소기업은
 #:   감사보고서가 유일한 원문이다. 순서만 바꿨다.
@@ -427,7 +427,7 @@ def _latest_of_kind(
 #: 재무 조회에서 «정상»으로 볼 상태값. 그 밖은 기술 실패다.
 #: 000 = 정상 · 013 = 조회 범위에 자료 없음(빈 결과이지 오류가 아니다).
 #: 인증(010~012·901)·한도(020)는 dart_client.get_json 이 «이미» 예외로 터뜨린다
-#: — 그래서 여기까지 오지 않는다. 901(키 만료)은 2026-08-27에 인증 쪽으로 옮겼다.
+#: — 그래서 여기까지 오지 않는다. 901(키 만료)도 인증 쪽에서 먼저 잡는다.
 FINANCIALS_OK_STATUSES: Final[frozenset[str]] = frozenset({"000", "013"})
 
 
@@ -439,7 +439,7 @@ def fetch_financials(
 ) -> tuple[Optional[dict], list[int]]:
     """단일회사 주요계정 — 최근 3개 사업연도 시도. (첫 성공 payload, 성공 연도들).
 
-    ★ 왜 오류를 «터뜨리나» (2026-08-27 추가)
+    ★ 왜 오류를 «터뜨리나»
       예전에는 status 가 000 이 아니면 «전부» 조용히 건너뛰고 빈 결과를 돌려줬다.
       그래서 DART 시스템 점검(800)·정의되지 않은 오류(900)·부적절한 값(100)·
       부적절한 접근(101)·조회 가능 회사 수 초과(021) 같은
@@ -493,7 +493,7 @@ def collect_news(company: str, profile: dict[str, Any], homonym_count: int,
                  business_date: Optional[dt.date] = None) -> list[dict[str, str]]:
     """6번 뉴스 수집 — 채택 조건(소스정책: 제목 회사명·3년·동명 시 본문 단서) 통과분만.
 
-    동명 단서는 기업개황의 대표자·주소 토큰과 대조한다(P-15 조치의 실구현).
+    동명 단서는 기업개황의 대표자·주소 토큰과 대조한다.
     한계(기록): 조건 「타사 3개 미만」은 제목 내 타사 수를 셀 방법이 없어 미적용.
     """
     try:
@@ -504,7 +504,7 @@ def collect_news(company: str, profile: dict[str, Any], homonym_count: int,
     today = business_date or today_kst()
     ceo = (profile.get("ceo_nm") or "").strip().split(",")[0].strip()
     adres_tokens = [t for t in (profile.get("adres") or "").split()[:2] if len(t) >= 2]
-    # 2026-08-16 결정 2=A: 동명 단서를 대표자·주소에 더해 업종·제품·계열까지 인정한다.
+    # 동명 단서를 대표자·주소에 더해 업종·제품·계열까지 인정한다.
     # 유명 회사일수록 기사에 주소를 안 적어 과차단됐다(카카오 20건 중 1건 채택 실측).
     industry = [t for t in (profile.get("induty_code_nm") or "").replace("및", " ").split()
                 if len(t) >= 2][:3]
@@ -515,7 +515,7 @@ def collect_news(company: str, profile: dict[str, Any], homonym_count: int,
     for it in items:
         if it.pub_date is None:
             continue
-        # 결정 2=A: 종목 나열 기사 차단 — 제목·본문의 「다른」 회사명 표기 수를 센다
+        # 종목 나열 기사 차단 — 제목·본문의 「다른」 회사명 표기 수를 센다
         blob = f"{it.title} {it.description}"
         others = {n for m in _OTHER_CORP_RE.findall(blob) for n in m if n and n not in company}
         if len(others) >= OTHER_CORP_MAX:
@@ -539,7 +539,7 @@ def collect_news(company: str, profile: dict[str, Any], homonym_count: int,
 
 
 # ── 8·9 생성 + 10 검증 ────────────────────────────────────────────────────
-# 2026-08-15 사용자 결정 (14_결정선택지7 결정 1 = A · P-18): AI가 문장을 「쓰지」 않는다.
+# 생성 계약: AI가 문장을 「쓰지」 않는다.
 # 조각을 문장 단위로 쪼개 번호를 붙이고, AI는 번호만 고른다 — 원문 복사는 프로그램이 한다.
 # 파일럿 실측에서 AI가 온도 0·강한 지시로도 원문을 바꿔 써 W3가 절반을 지웠기 때문(성립 0건).
 # W1~W4 검사는 안전망으로 그대로 돌린다.
@@ -620,7 +620,7 @@ def generate_and_check(client: anthropic.Anthropic, frags: dict[int, dict[str, s
 
 
 def cell_pattern_ok(kept: list[DraftItem]) -> dict[str, bool]:
-    """05_칸판정코드의 형태 검사를 칸 판정에 건다 (P-22 — 9번에 목적사업 나열이 실리던 문제).
+    """칸 판정에 형태 검사를 건다 — 9번에 목적사업 나열이 실리던 문제를 막는다.
 
     한계: 표기 없는 영문 거래처명(MRF 등)은 못 센다 — 미달 방향(안전)이라 감수하고 기록.
     """
@@ -789,7 +789,7 @@ def run_one(item: dict[str, str], ctx: dict[str, Any]) -> dict[str, Any]:
                   "사유": l2.reason})
     if not l2.passed:
         return fin("폐기_공고아님_2층")
-    erased = erase(posting, run_id=RUN_ID)          # 3층 — 검출=삭제 후 진행 (P-05)
+    erased = erase(posting, run_id=RUN_ID)          # 3층 — 검출=삭제 후 진행
     steps.append({"step": "5.5_3층지우개", "검출건수": erased.counts,
                   "비고": "S1 — 유형·건수만 기록"})
     schema_req = {"type": "object", "properties": {"requirements": {
@@ -856,8 +856,8 @@ def run_one(item: dict[str, str], ctx: dict[str, Any]) -> dict[str, Any]:
     if not ok:
         return fin("중단_게이트미달", gate_reasons=reasons)
 
-    # 8·9 생성 + 10 검증 — 2026-08-16 결정 1=A: 같은 자료로 3회 반복 후 다수결.
-    # 판정이 문턱(4/7) 근처에서 실행마다 흔들리던 문제(P-23) 대응. 채택 = 2회 이상 채워진 칸.
+    # 8·9 생성 + 10 검증 — 같은 자료로 3회 반복 후 다수결.
+    # 판정이 문턱(4/7) 근처에서 실행마다 흔들리던 문제 대응. 채택 = 2회 이상 채워진 칸.
     rounds: list[dict[str, bool]] = []
     kept: list[DraftItem] = []
     deleted: list = []

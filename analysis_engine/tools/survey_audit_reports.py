@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""착수 4 — 감사보고서 표본 20~30곳 조사 (M1 · M3 · 판관비 명세, 한 표본으로 같이).
+"""감사보고서 표본 20~30곳 조사 (M1 · M3 · 판관비 명세, 한 표본으로 같이).
 
-정본 질문 (99_기준/04_비용과미결 §9):
+확인하려는 질문:
   ① M1  영업부문 주석이 있나 — 1번 블록이 숫자로 채워지는 비율 (의무 아님 → 회사마다 갈림)
   ② M3  특수관계자 주석에 거래처가 실명으로 나오나 — 9번 블록의 값어치
   ③ 판관비 명세 주석이 있나 — 존재율 미확정 항목
@@ -35,8 +35,8 @@ from core.dart_client import UsageCounter, download_document, get_json  # noqa: 
 OUT_DIR = PROJECT_ROOT / "data" / "audit_sample"
 RAW_DIR = OUT_DIR / "raw"
 CHECKPOINT_PATH = OUT_DIR / "survey.jsonl"
-RESULT_MD = PROJECT_ROOT.parent / "기획서.ver1" / "검증" / "11_착수4_감사보고서표본.md"
-RUN_ID = "착수4_감사보고서표본"
+RESULT_MD = PROJECT_ROOT / "local_output" / "감사보고서표본.md"
+RUN_ID = "감사보고서표본조사"
 
 SEED = 20260815               # 재현 가능한 무작위 표본 (시드 고정)
 SAMPLE_SIZE = 30
@@ -248,7 +248,7 @@ def aggregate() -> None:
     sga = sum(1 for r in ok if r["판관비_명세"])
 
     lines = [
-        "# 착수 4 — 감사보고서 표본 조사 (M1 · M3 · 판관비) (2026-08-15)",
+        "# 감사보고서 표본 조사 (M1 · M3 · 판관비)",
         "",
         f"> 도구: `analysis_engine/tools/survey_audit_reports.py` · 표본: DART 비상장(기타법인) 감사보고서",
         f"> 접수 {WINDOW[0]}~{WINDOW[1]} · 연결 제외 · **고정 시드({SEED}) 무작위 {len(rows)}곳** (성공 {n} · 실패 {len(fail)})",
@@ -288,7 +288,7 @@ def aggregate() -> None:
         "   부문감사인) — 추출·판정 고장이 아니라 실제로 부문 주석이 없는 것 (일반기업회계기준에 부문 챕터",
         "   부재라는 M1 가설과 정합).",
         "",
-        "관련: 99_기준/04_비용과미결 §9 M1·M3 · 99_기준/01_성공기준 G1 · 05_생성(1번·9번 블록)",
+        "관련 블록: 1번(M1 부문 주석) · 9번(M3 특수관계자)",
     ]
     RESULT_MD.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines[:16]), flush=True)
