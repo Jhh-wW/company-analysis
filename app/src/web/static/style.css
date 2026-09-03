@@ -4,8 +4,8 @@
 
 /* ══════════════════════════════════════════════════════
    폰트 — ★ CDN이 아니라 «직접 얹는다»
-   ⚠️ 왜 자체 호스팅인가 — 이 링크는 **회사 인사팀이 연다.**
-     사내망이 외부 CDN(jsdelivr 등)을 막으면 디자인이 통째로 깨진다.
+   ⚠️ 왜 자체 호스팅인가 — 사내망에서 외부 CDN(jsdelivr 등)이 차단돼도
+     화면이 깨지지 않게 글꼴을 직접 얹는다.
      1MB를 안고 가는 편이 «열었더니 글꼴이 깨져 있는» 것보다 낫다.
    ⚠️ 라이선스 — Freesentation·Prata 모두 **SIL Open Font License**로
      상업적 사용·재배포가 허용된다 (라이선스 확인). 유료 폰트를 쓰지 않는다.
@@ -2175,7 +2175,7 @@ td.center { text-align: center; }
   .result-page .btn { transition: none; }
 }
 
-/* PDF 전 페이지 내부 검수 — 공개 보고서와 구분되는 단색 운영 화면 */
+/* PDF 전 페이지 미리보기 화면 — 공개 보고서와 구분되는 단색 운영 화면 */
 .review-page { background: #f5f5f5; color: #171717; }
 .review-page .review-wrap { max-width: 1100px; padding: 48px 24px 96px; }
 .pdf-review {
@@ -2247,7 +2247,7 @@ td.center { text-align: center; }
 }
 .google-maps-content-attribution .GMP-attribution { white-space: nowrap; }
 
-/* 승인 전 관리자 운영 대시보드 검수 프레임: 기존 공통 간격·글꼴·색상만 사용한다. */
+/* 관리자 운영 대시보드 화면 틀: 기존 공통 간격·글꼴·색상만 사용한다. */
 .admin-frame-page { background: var(--surface-2); }
 .admin-frame .frame-heading { margin-bottom: 26px; }
 .admin-frame .frame-kicker,
