@@ -1853,6 +1853,38 @@ def link_active_reservation_krw(
     return float(row[0]) if row is not None else 0.0
 
 
+def _link_ledger_lifetime_krw(conn: sqlite3.Connection, *, key_hash: str) -> float:
+    """비용 원장이 이 링크 통장 앞으로 «모든 날짜»에 걸쳐 잡아 둔 돈(원).
+
+    Args:
+        conn: 열린 DB 연결.
+        key_hash: 링크의 비밀 아닌 지문.
+
+    Returns:
+        확정 원가 + 보수부채 + 진행 중 예약액. 원장이 없으면 0.0.
+
+    ★ 왜 생성 이력만으로는 모자란가 — 회사 확인 단계는 생성 이력 행을 만들지
+      않는다. 이력만 세면 확인 비용이 누적에서 통째로 빠진다.
+    ★ 링크의 통장 지문은 열쇠 지문과 같은 값이다. 둘 다 열쇠 원문을 소문자로
+      맞춰 SHA-256으로 접으므로, 지문 하나로 원장을 바로 볼 수 있다.
+    ★ 비용 원장 전환 전 DB에는 원장 자체가 없다 — 그때는 0원으로 본다.
+    """
+
+    clean_hash = str(key_hash or "").strip().lower()
+    if not is_key_hash(clean_hash):
+        return 0.0
+    if not budget_state_machine.cutover_applied(conn):
+        return 0.0
+    exposure = budget_state_machine.load_bucket_lifetime_exposure(
+        conn, bucket_id=clean_hash
+    )
+    return (
+        exposure.known_cost_krw
+        + exposure.liability_krw
+        + exposure.reservation_krw
+    )
+
+
 def link_total_spent_krw(conn: sqlite3.Connection, *, key_hash: str) -> float:
     """이 링크가 «수명 전체»에 쓴 돈(원).
 
@@ -1861,16 +1893,22 @@ def link_total_spent_krw(conn: sqlite3.Connection, *, key_hash: str) -> float:
         key_hash: 링크의 비밀 아닌 지문.
 
     Returns:
-        종결된 실행의 실측 원가 합 + 진행 중 예약액.
+        생성 이력 기준 합과 비용 원장 기준 합 중 큰 쪽.
 
-    ★ 두 값을 더해도 같은 돈을 두 번 세지 않는다 — 단계가 끝나면 비용 원장의
-      예약액이 0이 되고(표의 CHECK가 강제한다), 그 실행의 실측 원가는 그때
-      `finish_run`이 생성 이력에 적기 때문이다.
+    ★ 생성 이력 쪽에서 두 값을 더해도 같은 돈을 두 번 세지 않는다 — 단계가
+      끝나면 비용 원장의 예약액이 0이 되고(표의 CHECK가 강제한다), 그 실행의
+      실측 원가는 그때 `finish_run`이 생성 이력에 적기 때문이다.
+    ★ 이력 합과 원장 합은 «더하지 않고 큰 쪽»을 고른다 — 같은 조사가 양쪽에
+      적히므로 더하면 두 번 센다. 확인 비용은 원장에만, 전환 전 옛 조사는
+      이력에만 있어서, 큰 쪽을 고르면 어느 쪽도 놓치지 않는다.
+    ★ 이 값은 화면 안내와 사전 검사가 함께 쓴다. 예약을 커밋하는 자리의
+      최종 판단도 같은 바닥값을 보므로 안내 숫자와 실제 차단이 어긋나지 않는다.
     """
 
-    return link_run_cost_sum_krw(conn, key_hash=key_hash) + (
+    from_history = link_run_cost_sum_krw(conn, key_hash=key_hash) + (
         link_active_reservation_krw(conn, key_hash=key_hash)
     )
+    return max(from_history, _link_ledger_lifetime_krw(conn, key_hash=key_hash))
 
 
 def is_linked_report(conn: sqlite3.Connection, report_id: str) -> bool:

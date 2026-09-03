@@ -860,6 +860,32 @@ def load_exposure(
     )
 
 
+def load_bucket_lifetime_exposure(
+    conn: sqlite3.Connection, *, bucket_id: str
+) -> ExposureSnapshot:
+    """한 통장이 «모든 날짜»에 걸쳐 낸 확정액+보수부채+진행 예약을 읽는다.
+
+    Args:
+        conn: 열린 DB 연결.
+        bucket_id: 통장 지문.
+
+    Returns:
+        날짜를 가리지 않은 세 금액과 진행 중 단계 수.
+
+    ★ `load_exposure`와 다른 점은 날짜 조건이 없다는 것뿐이다. 초대 링크의
+      「수명 전체」 상한은 어제 쓴 돈도 오늘 판단에 넣어야 한다.
+    ★ 이 원장은 «단계 단위»라 회사 확인처럼 조사 이력을 남기지 않는 단계도
+      빠짐없이 들어 있다. 이력만 세면 그 몫이 통째로 누락된다.
+    """
+    _require_cutover(conn)
+    stored_bucket = _identifier(bucket_id, label="통장 지문", maximum=64)
+    return _load_exposure_where(
+        conn,
+        where_sql="p.bucket_id = ?",
+        params=(stored_bucket,),
+    )
+
+
 def load_run_exposure(
     conn: sqlite3.Connection, *, run_id: str
 ) -> ExposureSnapshot:

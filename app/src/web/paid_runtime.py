@@ -767,7 +767,7 @@ def reap_expired_paid_phases() -> bool:
 def _link_total_budget_inputs(
     conn: sqlite3.Connection, share_key: str
 ) -> tuple[Optional[float], float]:
-    """LINK 통장이면 «수명 전체» 상한과 이미 끝낸 실행의 실측 원가를 돌려준다.
+    """LINK 통장이면 «수명 전체» 상한과 이미 쓴 실측 원가를 돌려준다.
 
     Args:
         conn: 예약을 커밋할 연결. 같은 연결로 읽어 다른 저장소를 섞지 않는다.
@@ -780,6 +780,12 @@ def _link_total_budget_inputs(
       통장이라 「링크 수명」이라는 개념 자체가 없다.
       갈래를 가르는 것은 열쇠 모양(32자리 16진수)이다. 사람 통장에는 `user:`
       접두어가 붙어 열쇠와 절대 겹치지 않는다 (`sharelink/constants.py` 참고).
+    ★ 바닥값은 비용 원장의 «단계 단위» 합을 함께 본다 — 회사 확인 단계는 조사
+      이력 행을 만들지 않아서, 생성 이력만 세면 확인 비용이 누적에서 통째로
+      빠진다. 하루 상한은 자정마다 되살아나므로 그 구멍은 링크 수명만큼 커진다.
+    ★ 두 값을 더하지 않고 «큰 쪽»을 쓴다 — 같은 조사가 원장과 생성 이력 양쪽에
+      적히므로 더하면 같은 돈을 두 번 센다. 전환 전에 끝난 옛 조사는 원장에는
+      없고 이력에만 있으므로, 큰 쪽을 고르면 어느 시기의 기록도 놓치지 않는다.
     ★ 진행 중 예약은 여기서 세지 않는다 — 그건 예약을 커밋하는 transaction 안에서
       `begin_phase`가 다시 센다. 여기서 같이 세면 동시 요청이 옛 숫자를 공유한다.
     """
@@ -787,7 +793,13 @@ def _link_total_budget_inputs(
         return None, 0.0
     key_hash = share_store.key_hash_of(share_key)
     link = share_store.load_by_hash(conn, key_hash)
-    prior_cost = share_store.link_run_cost_sum_krw(conn, key_hash=key_hash)
+    history_cost = share_store.link_run_cost_sum_krw(conn, key_hash=key_hash)
+    ledger = state_machine.load_bucket_lifetime_exposure(
+        conn, bucket_id=spend_store.bucket_id(share_key)
+    )
+    prior_cost = max(
+        history_cost, ledger.known_cost_krw + ledger.liability_krw
+    )
     limit = (
         link.effective_total_budget_krw
         if link is not None
