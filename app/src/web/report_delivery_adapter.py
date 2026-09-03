@@ -19,7 +19,11 @@ from src.features.export_pdf.automatic_release import report_sha256
 from src.features.export_pdf import constants as pdf_constants
 from src.features.export_pdf import release_store as pdf_release_store
 from src.features.pipeline.port import Report
-from src.features.provenance.sources import Source, SourceKind
+from src.features.provenance.sources import (
+    Source,
+    SourceKind,
+    stored_sources_seal_problem,
+)
 from src.features.report_delivery import artifact as delivery_artifact
 from src.features.report_delivery import retention as delivery_retention
 from src.features.report_delivery import singleflight as delivery_singleflight
@@ -883,6 +887,20 @@ def load_legacy_public_report(public_id: str) -> LegacyPublicReport | None:
         report = report_store.report_from_json(payload_json)
     except (KeyError, TypeError, ValueError) as exc:
         raise DeliveryAdapterError("과거 보고서 본문을 읽지 못했습니다") from exc
+    # ★ 격하 통로를 막는다 — 이 화면은 오늘의 검사와 화면 조립을 한 번도
+    #   부르지 않는 «과거 저장본 전용» 갈래다. 공개 봉인을 가진 본문이 여기로 내려오는
+    #   경우는 하나뿐이다: 정상 출고 기록이 사라졌을 때. 그건 옛 보고서가 아니라
+    #   손상이므로 과거 화면으로 대신 그리지 않고 닫는다.
+    evidence = report.generation_evidence
+    if evidence is not None and str(evidence.public_projection_sha256 or "").strip():
+        raise DeliveryAdapterError(
+            "공개 봉인을 가진 본문은 과거 저장본 화면으로 열지 않습니다"
+        )
+    # ★ 수집 도장이 찍힌 본문은 도장이 맞을 때만 연다. 도장 칸이 처음부터 빈
+    #   옛 저장본은 지금까지처럼 「읽기 전용」 고지와 함께 그대로 보여 준다.
+    problem = stored_sources_seal_problem(report.citations)
+    if problem:
+        raise DeliveryAdapterError(f"과거 보고서 본문을 믿을 수 없습니다: {problem}")
     return LegacyPublicReport(
         report=report,
         payload_json=payload_json,

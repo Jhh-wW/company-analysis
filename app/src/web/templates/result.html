@@ -614,8 +614,11 @@
 {% if public_citations %}
   <section class="report-support" aria-labelledby="report-citations-title">
     <h2 id="report-citations-title"><span class="no">부록</span><span class="txt">출처와 검증 상태</span></h2>
+    {# 과거 저장본 갈래에서는 「모두 검증을 거쳤다」고 말하지 않는다 — 이 화면은
+       저장 당시 본문을 그대로 보여 줄 뿐 오늘의 검사를 다시 돌리지 않으므로,
+       같은 화면의 읽기 전용 고지와 서로 어긋나는 단언이 된다. #}
     <p class="muted section-note">
-      본문 문장 끝의 번호가 아래 원문을 가리킵니다. 표시된 문장은 모두 인용 원문 대조와 수치 검증을 거쳤습니다.
+      본문 문장 끝의 번호가 아래 원문을 가리킵니다. {% if legacy_readonly %}당시 검증 상태는 확인할 수 없습니다.{% else %}표시된 문장은 모두 인용 원문 대조와 수치 검증을 거쳤습니다.{% endif %}
     </p>
     <div class="scroll report-scroll" tabindex="0" role="region" aria-labelledby="report-citations-title">
       <table class="texts" aria-labelledby="report-citations-title">
