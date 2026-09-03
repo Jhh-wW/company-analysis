@@ -25,6 +25,7 @@ from fastapi.testclient import TestClient
 
 from src.core import clock
 from src.features.auth import constants as auth_constants
+from src.features.auth import logic as auth_logic
 from src.features.pipeline.demo import DemoPipeline
 from src.features.sharelink import store as share_store
 from src.features.sharelink.constants import KEY_COOKIE_NAME
@@ -42,6 +43,9 @@ _금지어 = ("link", "member", "capability", "revoke", "share_key", "철회")
 
 #: 이 화면의 존재 이유. 손님이 여기서 갈 수 있는 유일한 길이다.
 _연락안내 = "포트폴리오에 적힌 연락처"
+
+#: 첫 화면으로 가는 버튼의 글자. 로그인 벽 너머라 손님에게는 열리지 않는다.
+_첫화면_버튼 = "첫 화면으로 돌아가기"
 
 
 @pytest.fixture
@@ -204,3 +208,37 @@ def test_다른_조사_번호에는_링크_상태를_알려주지_않는다(clie
 
     assert 남의조사.status_code == 303
     assert 남의조사.headers["location"] == "/auth/login"
+
+
+def test_안내_화면에_로그인으로_튕기는_첫_화면_버튼이_없다(client: TestClient) -> None:
+    """★ 이 손님에게 첫 화면은 로그인 뒤에 있다 — 눌러도 들어가지 못한다.
+
+    열리지 않는 버튼을 그리면 손님은 안내를 읽는 대신 그 버튼을 눌러 구글 계정
+    선택 화면으로 가고, 이 화면이 없애려던 막다른 길을 그대로 다시 만난다.
+    """
+
+    _링크를_만든다()
+    _링크를_닫는다()
+
+    열림 = client.get(f"/k/{_LINK}", follow_redirects=False)
+
+    _안내_화면인지_본다(열림)
+    assert '<a class="btn" href="/">' not in 열림.text, 열림.text
+    assert _첫화면_버튼 not in visible_text(열림.text)
+
+
+def test_첫_화면에_들어갈_수_있는_관리자에게는_그_버튼을_남긴다(
+    client: TestClient,
+) -> None:
+    """★ 반대 경우 — 실제로 열리는 사람에게서까지 길을 뺏지 않았는지 본다."""
+
+    _링크를_만든다()
+    _링크를_닫는다()
+    관리자 = auth_logic.create_session("admin@example.com", True)
+    client.cookies.set(auth_constants.SESSION_COOKIE_NAME, 관리자.token)
+
+    열림 = client.get(f"/k/{_LINK}", follow_redirects=False)
+
+    assert 열림.status_code == 410, 열림.text
+    assert '<a class="btn" href="/">' in 열림.text
+    assert _첫화면_버튼 in visible_text(열림.text)

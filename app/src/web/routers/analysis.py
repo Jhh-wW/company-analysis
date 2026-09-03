@@ -48,6 +48,7 @@ from src.features.pipeline.port import (
 from src.features.provider_health import constants as provider_health_constants
 from src.features.provider_health import store as provider_health_store
 from src.features.sharelink import access_control as share_access
+from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import logic as share_logic
 from src.features.sharelink import store as share_store
 from src.features.sharelink import tracks as share_tracks
@@ -358,13 +359,53 @@ def _first_screen_needs_login() -> bool:
     )
 
 
-def _link_closed_screen(request: Request, status: str) -> Response:
+def _viewer_passes_login_wall(request: Request) -> bool:
+    """이 사람이 로그인 벽 너머 첫 화면까지 실제로 갈 수 있는지.
+
+    Args:
+        request: 닫힌 링크 안내를 받게 될 요청.
+
+    Returns:
+        첫 화면이 열리면 ``True``. 확인하지 못하면 ``False``(길을 주지 않는 쪽).
+
+    ★ 로그인 벽(`main.beta_admin_gate`)과 **같은 기준**으로 본다 — 관리자 세션이거나
+      초대 명단에 있는 회원이라야 첫 화면이 열린다. 여기서 따로 판단하면 화면은
+      「첫 화면으로 돌아가기」를 주는데 눌러 보면 구글 로그인으로 가는 일이 생긴다.
+    """
+
+    token = request.cookies.get(auth_constants.SESSION_COOKIE_NAME)
+    try:
+        session = auth_logic.get_session(token)
+    except Exception:  # noqa: BLE001 — 못 읽으면 «열리지 않는 사람»으로 본다
+        logger.exception("첫 화면을 열 수 있는지 확인하지 못했습니다")
+        return False
+    if session is None:
+        return False
+    if session.is_admin:
+        return True
+    try:
+        with storage_db.connect() as conn:
+            return share_allow.is_allowed(conn, session.email)
+    except Exception:  # noqa: BLE001 — 못 읽으면 초대 안 된 사람으로 본다
+        logger.exception("초대 명단을 못 읽어 첫 화면 안내를 보류했습니다")
+        return False
+
+
+def _link_closed_screen(
+    request: Request, status: str, *, offer_first_screen: bool
+) -> Response:
     """닫힌 초대 링크 손님에게 연락 안내가 있는 화면을 «직접» 그린다.
 
     첫 화면이 로그인 뒤에 있는 배포에서 `/?share_status=…`로 되돌려보내면 손님은
     구글 계정 선택 화면에 도착한다. 로그인해도 들어올 수 없는 계정이라 그대로
     막다른 길이고, 연락처 안내에도 닿지 못한다. 그래서 되돌려보내지 않고
     여기서 끝낸다.
+
+    Args:
+        request: 닫힌 링크로 들어온 요청.
+        status: 왜 닫혔는지(`missing` | `expired` | `revoked`). 문구를 고른다.
+        offer_first_screen: 첫 화면으로 가는 버튼을 그릴지. 열리지 않는 사람에게
+            주면 막다른 길이 하나 늘 뿐이라 부르는 쪽이 실측해 넘긴다.
 
     ★ 권한 쿠키는 여기서 건드리지 않는다 — 지울지는 부르는 쪽이 정한다.
     """
@@ -377,6 +418,7 @@ def _link_closed_screen(request: Request, status: str) -> Response:
             scope_error=_LINK_CLOSED_SCREEN_NOTICE_BY_CODE.get(
                 status, _LINK_CLOSED_SCREEN_NOTICE
             ),
+            offer_first_screen=offer_first_screen,
         ),
         status_code=410,
     )
@@ -387,7 +429,9 @@ def _share_link_closed_response(request: Request, status: str) -> Response:
 
     if not _first_screen_needs_login():
         return _share_redirect_without_cookie(request, status)
-    response = _link_closed_screen(request, status)
+    response = _link_closed_screen(
+        request, status, offer_first_screen=_viewer_passes_login_wall(request)
+    )
     # 열리지 않는 주소를 한 번 더 눌러도 이전 권한은 되살아나지 않는다.
     _clear_share_cookie(response, request)
     return response
@@ -452,8 +496,12 @@ def closed_link_guest_response(request: Request) -> Optional[Response]:
             if not link.is_revoked and not share_logic.link_expired(link):
                 return None
             if not is_progress_api:
+                # 로그인 벽이 이 요청을 이미 「관리자도 회원도 아니다」로 판정한
+                # 뒤에만 여기까지 온다 — 첫 화면은 이 사람에게 열리지 않는다.
                 return _link_closed_screen(
-                    request, "revoked" if link.is_revoked else "expired"
+                    request,
+                    "revoked" if link.is_revoked else "expired",
+                    offer_first_screen=False,
                 )
             job_id = path[len(_PROGRESS_API_PATH_PREFIX) :].strip("/")
             run = share_store.load_run(conn, job_id) if job_id else None
