@@ -61,6 +61,17 @@ def test_진행_단계는_회사분석_흐름_7단계다():
     assert "posting" not in keys
 
 
+def test_진행_단계_이름은_모으는_자료를_사실대로_말한다():
+    """뉴스 검색은 설계 단계에서 뺐다 — 단계 이름이 하지 않는 일을 말하면 안 된다."""
+    labels = [label for _key, label in C.PROGRESS_STEPS]
+
+    for label in labels:
+        for removed in C.REMOVED_PROGRESS_COPY_MARKERS:
+            assert removed not in label, f"단계 이름 「{label}」에 「{removed}」가 남아 있습니다"
+
+    assert dict(C.PROGRESS_STEPS)["collect"] == "공시·공식 자료 모으는 중"
+
+
 def test_모든_세는_칸에_이름이_있다():
     for cell in C.COUNTED_CELLS:
         assert cell in C.CELL_LABELS, f"{cell}번 칸의 이름이 없습니다"
