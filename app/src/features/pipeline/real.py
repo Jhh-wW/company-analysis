@@ -1867,39 +1867,36 @@ class RealPipeline:
                 # 이 pipeline 안에서 직접 올리는 기본형 예외는 재사용 저장본 계약
                 # 위반 같은 fail-closed 조건이다. 요청 전역 중단(초대 링크 닫힘·
                 # lease 상실·대기 취소 — 전부 하위 클래스)과 달리 실행기에 넘길
-                # 전용 분기가 없으므로, 예전 계약대로 실패 결과로 닫고 끝낸다.
-                logger.warning("본조사를 계약 위반으로 닫습니다 — %s", stopped)
+                # 전용 분기가 없으므로, 예전 계약대로 실패 결과로 닫는다. 비용은
+                # 아래 단일 출구가 싣는다(여기서 따로 return 하지 않는다).
+                logger.warning(
+                    "본조사를 계약 위반으로 닫습니다 — %s", stopped, exc_info=True
+                )
                 result = RunResult(
                     outcome=Outcome.FAILED,
                     message=_message(Outcome.FAILED),
                 )
-                return replace(
-                    result,
-                    cost_krw=_request_spent_krw(engine),
-                    model=_request_model_label(engine),
-                    billing_uncertain=_request_billing_uncertain(engine),
-                    ai_cost_events=_request_cost_events(engine),
+            else:
+                # 초대 링크 중단·lease 상실·대기 취소는 조사가 «못 한» 것이지
+                # 「품질이 모자란」 것이 아니다. 여기서 FAILED 결과로 바꾸면 실행기의
+                # 전용 중단 분기에 닿지 못해 이력 사유와 화면 문구가 뒤바뀐다.
+                # 그때까지 실제로 쓴 값만 예외에 실어 그대로 다시 던진다.
+                logger.info(
+                    "본조사를 요청 전역 사유로 중단했습니다 — %s",
+                    type(stopped).__name__,
                 )
-            # 초대 링크 중단·lease 상실·대기 취소는 조사가 «못 한» 것이지
-            # 「품질이 모자란」 것이 아니다. 여기서 FAILED 결과로 바꾸면 실행기의
-            # 전용 중단 분기에 닿지 못해 이력 사유와 화면 문구가 뒤바뀐다.
-            # 그때까지 실제로 쓴 값만 예외에 실어 그대로 다시 던진다.
-            logger.info(
-                "본조사를 요청 전역 사유로 중단했습니다 — %s",
-                type(stopped).__name__,
-            )
-            setattr(
-                stopped,
-                STOPPED_RUN_USAGE_ATTR,
-                RunResult(
-                    outcome=Outcome.FAILED,
-                    cost_krw=_request_spent_krw(engine),
-                    model=_request_model_label(engine),
-                    billing_uncertain=_request_billing_uncertain(engine),
-                    ai_cost_events=_request_cost_events(engine),
-                ),
-            )
-            raise
+                setattr(
+                    stopped,
+                    STOPPED_RUN_USAGE_ATTR,
+                    RunResult(
+                        outcome=Outcome.FAILED,
+                        cost_krw=_request_spent_krw(engine),
+                        model=_request_model_label(engine),
+                        billing_uncertain=_request_billing_uncertain(engine),
+                        ai_cost_events=_request_cost_events(engine),
+                    ),
+                )
+                raise
         except Exception:  # noqa: BLE001 — AI 뒤 후속 코드가 터져도 쓴 돈은 0원이 아니다
             logger.exception("본조사 중 예기치 않은 실패가 발생했습니다")
             result = RunResult(
