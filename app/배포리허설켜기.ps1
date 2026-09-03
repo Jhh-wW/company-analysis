@@ -27,8 +27,11 @@ param(
     # 3510-3514) 기본을 배포와 같은 FULL로 둔다. 허용 값은 ReleaseMode 계약
     # 그대로만 받는다 (src/shared/report_evidence/constants.py:81-87).
     # ★ 값 검사는 [ValidateSet]이 아니라 아래 본문에서 «대소문자까지» 한다.
-    #   ValidateSet은 어긴 값을 막아 주긴 해도 종료 코드 0으로 끝나서, 이 실행기를
-    #   부르는 쪽에서는 거부당한 실행이 «성공»으로 보인다.
+    #   ValidateSet 위반은 «종료 오류»다. -File로 평범하게 켜면 실패(코드 1)로 끝나기는
+    #   하지만 화면에는 PowerShell 바인더의 오류 덩어리만 남고, 이 실행기를 try/catch로
+    #   감싸 부르는 쪽에서는 그 오류가 삼켜져 거부가 «성공»(코드 0)으로 보인다.
+    #   본문 검사는 어느 쪽으로 부르든 읽을 수 있는 안내를 남기고 0이 아닌 코드로
+    #   끝낸다. 대신 -ReleaseMode의 탭 자동완성을 잃는 것과 맞바꿨다.
     [string]$ReleaseMode = "FULL",
 
     [switch]$DeleteDataOnExit

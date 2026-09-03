@@ -18,6 +18,10 @@ APP_ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER = APP_ROOT / "실시간성능시험켜기.ps1"
 SCRIPT = LAUNCHER.read_text(encoding="utf-8-sig")
 WINDOWS_POWERSHELL = shutil.which("powershell.exe") if os.name == "nt" else None
+#: 계약 밖 -ReleaseMode를 만났을 때 실행기가 «스스로» 끝내는 코드. 파라미터 특성만으로
+#: 막았을 때 PowerShell 바인더가 대신 내는 1과 달라야, 부르는 쪽이 「실행기가 판단해서
+#: 막았다」와 「값을 넘기다 실패했다」를 구분할 수 있다.
+REFUSED_RELEASE_MODE_EXIT_CODE = 2
 PAID_PROVIDER_NAMES = (
     "DART_API_KEY",
     "ANTHROPIC_API_KEY",
@@ -458,3 +462,53 @@ def test_launcher_is_utf8_with_bom_so_powershell_5_1_shows_korean() -> None:
     깨진 안내는 틀린 안내보다 나쁘다 — 사람이 무엇을 잘못했는지조차 알 수 없다.
     """
     assert LAUNCHER.read_bytes().startswith(codecs.BOM_UTF8)
+
+
+@pytest.mark.skipif(
+    WINDOWS_POWERSHELL is None,
+    reason="Windows PowerShell 5.1 실제 종료 코드 시험",
+)
+def test_unknown_release_mode_is_refused_readably_when_started_by_file(
+    tmp_path: Path,
+) -> None:
+    """-File로 평범하게 켠 사람도 «왜 거부됐는지»를 화면에서 읽을 수 있어야 한다.
+
+    값을 파라미터 특성만으로 막으면 PowerShell 바인더가 대신 끝낸다. 그때 사람에게
+    남는 것은 오류 덩어리뿐이고 종료 코드도 실행기가 정한 값이 아니다. 본문에서
+    검사해야 쓸 수 있는 값 안내와 «실행기가 정한» 종료 코드가 같이 나온다.
+    """
+    app_copy = _copy_fake_app(tmp_path)
+    environment = _environment(tmp_path)
+    launcher = app_copy / LAUNCHER.name
+
+    result = subprocess.run(
+        [
+            WINDOWS_POWERSHELL,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(launcher),
+            "-Port",
+            str(_available_port()),
+            "-EngineV2",
+            "-ReleaseMode",
+            "full",
+        ],
+        cwd=app_copy,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+
+    assert result.returncode == REFUSED_RELEASE_MODE_EXIT_CODE, (
+        "실행기가 스스로 거부하지 않았다 (바인더가 대신 끝냈거나 그냥 진행했다): "
+        f"종료 코드 {result.returncode}"
+    )
+    # 안내는 «사람이 보는 쪽»에 나와야 한다. 바인더 오류는 stderr로만 흘러간다.
+    for allowed in (b"SHADOW", b"ENFORCE_NO_PARTIAL", b"FULL"):
+        assert allowed in result.stdout, f"쓸 수 있는 값 {allowed!r}이 안내에 없다"
+    assert list(app_copy.rglob("child-environment.json")) == []
