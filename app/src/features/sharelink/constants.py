@@ -318,3 +318,10 @@ RESULT_OTHER_COMPANY_HREF: Final[str] = "/#analysisForm"
 RESULT_STALE_REPORT_NOTICE: Final[str] = (
     "오래된 보고서입니다 — 준비 중인 새 보고서를 기다려 주세요"
 )
+
+#: 같은 회사를 이미 조사해 둔 보고서를 그대로 다시 보여줄 때.
+#: ★ 없으면 손님이 «방금 오늘 자료로 새로 조사한 것»으로 읽는다. 숫자의 나이를
+#:   잘못 알면 자소서·면접 준비가 통째로 어긋난다.
+#: ★ 만든 쪽 사정(어떻게 아꼈는지·왜 다시 안 만드는지)은 쓰지 않는다 —
+#:   손님에게 필요한 것은 「언제 만든 것인가」 한 가지뿐이다.
+RESULT_REUSED_REPORT_NOTICE: Final[str] = "{made_on}에 만든 보고서를 다시 보여드립니다"

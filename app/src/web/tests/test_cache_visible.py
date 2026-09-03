@@ -14,10 +14,23 @@
 
 from __future__ import annotations
 
+import contextlib
+import datetime as dt
+
 from src.core.constants import CACHE_HIT_LAYER1, CACHE_HIT_MESSAGE
 from src.features.observability import constants as obs
-from src.features.pipeline.port import Outcome, RunResult, UserInput
+from src.features.pipeline.port import Grade, Outcome, Report, RunResult, UserInput
+from src.features.report_delivery.cache_identity import CacheNamespace
+from src.features.report_delivery.models import (
+    ContentSnapshot,
+    Delivery,
+    DeliveryPolicy,
+)
+from src.features.report_delivery.source_identity import SourceSnapshot
+from src.features.sharelink.constants import RESULT_REUSED_REPORT_NOTICE
+from src.shared import engine_build_identity as build_identity_contract
 from src.web import recording
+from src.web.routers import reports as reports_router
 
 # ══════════════════════════════════════════════════════════
 # ① 이력 — 파이프라인이 실은 값이 그대로 실려야 한다
@@ -88,3 +101,114 @@ def test_결과화면_출처표는_공통_공개citation_목록만_순회한다(
     assert "{% if public_citations %}" in template
     assert "{% for c in public_citations %}" in template
     assert "{% for c in report.citations %}" not in template
+
+
+# ══════════════════════════════════════════════════════════
+# ③ 결과 화면 — 다시 보여주는 보고서는 «만든 날짜»를 말해야 한다
+# ══════════════════════════════════════════════════════════
+
+
+def _저장된_전달기록(*, 다시_보여주는가: bool) -> Delivery:
+    """실제 발급 규칙을 그대로 태워 만든 전달 기록 한 벌."""
+
+    commit = "c" * 40
+    identity = build_identity_contract.EngineBuildIdentity(
+        deployment_revision=commit,
+        build_id=f"{build_identity_contract.ENGINE_BUILD_ID_CONTRACT_VERSION}:{commit}",
+    )
+    made = dt.datetime(2026, 8, 15, 10, 0, tzinfo=dt.timezone(dt.timedelta(hours=9)))
+    source = SourceSnapshot.capture(
+        dart_receipt_nos=("20260815000123",),
+        financial_payload=None,
+        financial_payload_sha256="d" * 64,
+        captured_at=made,
+        source_as_of=made.date(),
+        adapter_versions={"report_delivery": "test-v1"},
+    )
+    namespace = CacheNamespace.create(
+        product="company-analysis",
+        schema_version="company-report-v2-composer",
+        deployment_revision=commit,
+        image_digest=f"generator-build:{identity.build_id}",
+        requested_models={"pipeline": "claude-test"},
+        output_settings={"temperature": 0},
+    )
+    content = ContentSnapshot.create(
+        payload=b"reused-report-payload",
+        source_snapshot=source,
+        cache_namespace=namespace,
+        content_generated_at=made,
+        engine_epoch_digest=identity.epoch_digest,
+        actual_models=("claude-test",),
+    )
+    return Delivery.issue(
+        public_id="report-1",
+        billing_bucket_id="bucket-a",
+        content=content,
+        delivered_at=made + dt.timedelta(days=3),
+        policy=DeliveryPolicy(dt.timedelta(days=60), dt.timedelta(days=60)),
+        reused_from_cache=다시_보여주는가,
+    )
+
+
+def _저장기록을_대신_읽게_한다(monkeypatch, delivery: Delivery) -> None:
+    monkeypatch.setattr(
+        reports_router.storage_db,
+        "connect_readonly_existing",
+        lambda: contextlib.nullcontext(object()),
+    )
+    monkeypatch.setattr(
+        reports_router.delivery_store,
+        "load_delivery_by_public_id",
+        lambda _conn, _public_id: delivery,
+    )
+
+
+def _보고서(generated_at: str = "2026-08-15") -> Report:
+    return Report(
+        company="가나다전자",
+        job="",
+        corp_type="상장사",
+        grade=Grade.PARTIAL,
+        sections=[],
+        generated_at=generated_at,
+        schema_version="company-report-v2-composer",
+        as_of_date=generated_at,
+    )
+
+
+def test_다시_보여주는_보고서에는_원본을_만든_날짜가_붙는다(monkeypatch):
+    """안내가 없으면 손님은 «오늘 새로 조사한 것»으로 읽는다.
+
+    두 달 전 숫자로 자소서를 쓰면 통째로 어긋난다 — 날짜는 손님이 판단할 몫이다.
+    """
+    _저장기록을_대신_읽게_한다(monkeypatch, _저장된_전달기록(다시_보여주는가=True))
+
+    chrome = reports_router._link_result_chrome(
+        _보고서(),
+        bound_report=False,
+        public_id="report-1",
+    )
+
+    assert chrome.freshness_note == RESULT_REUSED_REPORT_NOTICE.format(
+        made_on="2026년 8월 15일"
+    )
+
+
+def test_새로_만든_보고서에는_다시_보여준다는_안내를_붙이지_않는다(monkeypatch):
+    """조건을 빼먹으면 방금 조사한 보고서에도 「다시 보여드립니다」가 붙는다."""
+    _저장기록을_대신_읽게_한다(monkeypatch, _저장된_전달기록(다시_보여주는가=False))
+
+    chrome = reports_router._link_result_chrome(
+        _보고서(),
+        bound_report=False,
+        public_id="report-1",
+    )
+
+    assert chrome.freshness_note == ""
+
+
+def test_다시_보여준다는_안내는_내부_용어를_쓰지_않는다():
+    """손님 화면에 만든 쪽 낱말이 새면 무슨 말인지 알 수 없다."""
+    for 내부어 in ("캐시", "cache", "delivery", "LINK", "MEMBER", "재사용"):
+        assert 내부어 not in RESULT_REUSED_REPORT_NOTICE

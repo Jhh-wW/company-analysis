@@ -82,6 +82,7 @@ from src.features.sharelink.constants import (
     RESULT_BACK_TO_LANDING_BUTTON,
     RESULT_BACK_TO_LANDING_HREF,
     RESULT_OTHER_COMPANY_HREF,
+    RESULT_REUSED_REPORT_NOTICE,
     RESULT_STALE_REPORT_NOTICE,
 )
 from src.features.storage import db as storage_db
@@ -1773,12 +1774,55 @@ def _link_freshness_note(report: Report) -> str:
     return LANDING_REPORT_MADE_ON_TEMPLATE.format(made_on=made_on)
 
 
-def _link_result_chrome(report: Report, *, bound_report: bool) -> _LinkResultChrome:
+def _delivery_reuses_stored_report(public_id: str) -> bool:
+    """이 주소가 «이미 만들어 둔 보고서를 다시 보여주는» 것인지 본다.
+
+    ★ 판단 근거는 화면 값이 아니라 저장된 전달 기록의 출처 칸이다. 그 칸이
+      채워진 주소만 다시 보여주는 주소다.
+    ★ 읽지 못하면 «아니다»로 답한다 — 확실하지 않은 안내를 붙여 손님에게
+      틀린 날짜를 말하는 것보다 한 줄이 빠지는 편이 낫다.
+    """
+    clean = str(public_id).strip()
+    if not clean:
+        return False
+    try:
+        with storage_db.connect_readonly_existing() as conn:
+            if conn is None:
+                return False
+            stored = delivery_store.load_delivery_by_public_id(conn, clean)
+    except Exception:  # noqa: BLE001 - 안내 한 줄 때문에 결과 화면을 막지 않는다
+        logger.exception("보고서 전달 기록을 읽지 못했습니다 report_id=%s", clean)
+        return False
+    return stored is not None and bool(stored.cache_origin_content_id)
+
+
+def _reused_report_note(report: Report, *, public_id: str) -> str:
+    """다시 보여주는 보고서에만 «언제 만든 것인지» 한 줄을 붙인다.
+
+    ★ 날짜는 표지·마스트헤드가 읽는 것과 같은 필드에서 가져온다 — 화면마다
+      다른 날짜가 보이면 손님이 어느 쪽을 믿어야 할지 알 수 없다.
+    """
+    if not _delivery_reuses_stored_report(public_id):
+        return ""
+    made_on = _link_report_made_on(report)
+    if not made_on:
+        return ""
+    return RESULT_REUSED_REPORT_NOTICE.format(made_on=made_on)
+
+
+def _link_result_chrome(
+    report: Report,
+    *,
+    bound_report: bool,
+    public_id: str = "",
+) -> _LinkResultChrome:
     """결속 보고서인지에 따라 «다른 길»과 «다른 안내»를 준다.
 
     Args:
         report: 지금 그리는 보고서.
         bound_report: 그 보고서가 이 링크에 원래 묶여 있던 것인가.
+        public_id: 지금 열고 있는 보고서 주소. 비결속 가지에서 «다시 보여주는
+            보고서인지»를 저장 기록으로 확인하는 데 쓴다.
 
     Returns:
         결과 화면 표지 위에 그릴 안내 한 줄과 버튼 한 개.
@@ -1792,10 +1836,12 @@ def _link_result_chrome(report: Report, *, bound_report: bool) -> _LinkResultChr
             button_href=RESULT_OTHER_COMPANY_HREF,
             freshness_note=_link_freshness_note(report),
         )
+    # 링크에 묶이지 않은 보고서는 손님이 방금 돌린 것이 아닐 수 있다.
+    # 그중 «이미 있던 것을 다시 보여주는» 경우에만 만든 날짜를 알린다.
     return _LinkResultChrome(
         button_label=RESULT_BACK_TO_LANDING_BUTTON,
         button_href=RESULT_BACK_TO_LANDING_HREF,
-        freshness_note="",
+        freshness_note=_reused_report_note(report, public_id=public_id),
     )
 
 
@@ -1820,7 +1866,9 @@ def _render_result_page(
         if current_link is None:
             return _link_view_event_unavailable_response(request)
         link_result_chrome = _link_result_chrome(
-            report, bound_report=current_link.report_id == job.job_id
+            report,
+            bound_report=current_link.report_id == job.job_id,
+            public_id=job.job_id,
         )
         # LINK에서 새로 생성한 보고서는 run history만 생성 사건으로
         # 남긴다. 최초 연결 보고서를 연 경우에만 별도 조회 사건이다.
