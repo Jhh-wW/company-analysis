@@ -172,9 +172,9 @@ $env:TLDEXTRACT_CACHE="$PWD\.cache\tldextract"
 조사 엔진·배포 계약·운영 절차 시험과 Docker 실행 검사는 루트의 GitHub Actions가
 함께 돌립니다. 명령은 [검수 안내](../docs/REVIEW_GUIDE.md) §5에 모아 두었습니다.
 
-정본 변경은 `Report.schema_version=company-report-v4-canonical`, 필수 1~8장·조건부 9장,
-사실 원장과 단일 소유, 4·5·6장 시간 상태, 공개 9장의 양사 근거, 구형 섹션·직무 맞춤
-차단과 PDF QA를 함께 검증해야 합니다.
+정본 변경은 `Report.schema_version=company-report-v4-canonical`, 출시 모드에서 모두
+필수인 1~9장, 사실 원장과 단일 소유, 4·5·6장 시간 상태, 공개 9장의 업계 근거,
+구형 섹션·직무 맞춤 차단과 PDF QA를 함께 검증해야 합니다.
 
 ## 운영 문서
 
