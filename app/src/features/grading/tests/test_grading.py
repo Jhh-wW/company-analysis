@@ -145,7 +145,7 @@ def test_미완성_문구는_직접_확인하라고_안내한다():
 
 @pytest.mark.parametrize("grade", list(Grade))
 def test_어느_등급이든_폐기라는_말은_쓰지_않는다(grade):
-    """미달이어도 보고서는 나간다 — 결정기록 D1."""
+    """미달이어도 보고서는 나간다 — 등급은 표시만 하고 출고를 막지 않는다."""
     assert "폐기" not in grade_message(grade, 0)
 
 
