@@ -130,7 +130,7 @@ class _ScriptedReviewer:
             self.rewrite_prompts.append(prompt)
             return self._rewrite_text
         if FLOW_REVIEW_PROMPT_HEADER in prompt:
-            # ★ 도식 검수(v2-27)는 같은 검수 클로저를 쓰지만 «다른» 물음이다.
+            # ★ 도식 쪽은 같은 검수 클로저를 쓰지만 «다른» 물음이다.
             #   이 시험들은 문장 판정 경계를 소유하므로, 도식은 모두
             #   «참»으로 대답해 문장 시험의 변수가 되지 않게 한다.
             self.flow_review_prompts.append(prompt)
@@ -189,7 +189,7 @@ def _section_texts(report: Report, section_id: str) -> list[str]:
 def _safe_section_count(sections: dict[str, Any], section_id: str) -> int:
     """새 생성 안전 경계 뒤 남아야 할 문장 수를 fixture만 보고 예측한다.
 
-    ★ 제품 결정 ③ — v2-98의 예측식(「숫자 토큰이 없는 문장만
+    ★ 제품 결정 ③ — 수치 안전 필터의 예측식(「숫자 토큰이 없는 문장만
       남는다」)은 옛 규칙을 그대로 베낀 것이라 새 규칙에서는 틀린다. 새 규칙은
       숫자 문장이라도 (검수 통과 + 확인 등급 + 인용 있음) 셋을 다 채우면
       살린다(`structured_claims.is_release_ready_numeric_sentence`). 이

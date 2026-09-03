@@ -282,7 +282,7 @@ def test_v2_보고서는_save_load_DB_왕복에서도_그대로_보존된다(tmp
 
 
 def test_SHADOW_생성_보고서도_quality_observation을_저장한다(tmp_path: Path) -> None:
-    """C1b — SHADOW(빈 release_mode)도 이제 quality_observation을 저장·왕복한다.
+    """SHADOW(빈 release_mode)도 quality_observation을 저장·왕복한다.
 
     이전에는 `report_from_dict`가 「엄격 보고서의 release_mode가 누락되거나
     낮아졌습니다」로 거부했다(quality_observation이 ENFORCE_NO_PARTIAL·FULL

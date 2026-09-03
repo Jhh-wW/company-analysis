@@ -21,7 +21,7 @@ services:
     # ⚠️ 결과: 종료 유예는 Render 기본값(30초)이다. 그런데 앱은
     #   HTTP 정리 20초 + 조사 drain 240초 + 취소 1초 를 «직렬»로 기대한다.
     #   즉 배포·재시작 중이던 조사는 정리를 끝내기 전에 잘릴 수 있다.
-    #   이건 v2-98 이 만든 문제가 아니라 master 배포본이 내내 있던 상태다.
+    #   이건 특정 변경이 만든 문제가 아니라 master 배포본이 내내 있던 상태다.
     #   근본 해결은 docs/architecture/deployment-contract.md 의 종료·교체 순서에 있다.
     # 첫 관리자 베타는 비용과 외부 변경을 통제하도록 수동 배포만 허용한다.
     autoDeployTrigger: off

@@ -373,12 +373,12 @@ def test_delete_data_on_exit_removes_only_the_generated_run_directory(
 def test_launcher_can_turn_on_engine_v2() -> None:
     """★ v2를 켜는 «유일한» 경로를 못 박는다.
 
-    실측(v2-28 시점): 이 세 줄을 지워도 깨지는 시험이 없었다 —
+    실측: 이 세 줄을 지워도 깨지는 시험이 없었다 —
     ENGINE_V2를 자식에게 넘기는 «유일한» 실행기인데 무방비였다.
 
     ★ 이 시험은 «로컬에서 v2를 켤 수 있는가»만 본다.
       «배포에서 v2가 켜지는가»는 render.yaml이 소유하고
-      deploy/tests/test_deployment_contract.py가 따로 지킨다(v2-29에서 추가).
+      deploy/tests/test_deployment_contract.py가 따로 지킨다.
       두 시험이 각자 자기 경로를 지킨다 — 한 시험이 둘 다 지키면
       한쪽을 고칠 때 다른 쪽이 조용히 풀린다.
     """

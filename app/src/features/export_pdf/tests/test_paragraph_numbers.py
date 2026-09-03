@@ -103,7 +103,7 @@ def test_prose_paragraphs_get_plain_paragraph_number() -> None:
 
 
 def test_paragraph_text_itself_is_unchanged_by_numbering() -> None:
-    """번호가 «본문 글자»에 섞여 들어가지 않는지 — v2-32의 핵심 약속."""
+    """번호가 «본문 글자»에 섞여 들어가지 않는지 — 문단 번호의 핵심 약속."""
     section = ReportSection(
         cell="portfolio",
         title="핵심 제품",
@@ -144,7 +144,7 @@ def test_missing_display_number_no_longer_changes_the_number() -> None:
 
 
 def test_prose_lines_only_sections_stay_unnumbered_like_the_web() -> None:
-    """v2-32는 ``prose_paragraphs``만 번호를 붙였다 — ``prose_lines``만
+    """문단 번호는 ``prose_paragraphs``에만 붙는다 — ``prose_lines``만
     있는(문단 분리가 안 된) 장은 웹도 번호가 없다. PDF도 같아야 한다."""
     section = ReportSection(
         cell="identity",

@@ -1,4 +1,4 @@
-"""3층 지우개 검출 시험 — 카나리아 3종 전부 검출이 착수 1-b의 통과 조건.
+"""3층 지우개 검출 시험 — 카나리아 3종을 전부 검출해야 통과다.
 
 카나리아 3종:
   이름 카나리아7742 · 전화 010-0000-7742 · 주민등록번호 999999-9997742
@@ -303,7 +303,7 @@ def test_detect_반환에_원문값_없음():
 
 
 def test_로그에는_건수만_값은_없다():
-    run_id = "착수1b_카나리아검출시험"
+    run_id = "카나리아검출시험"
     erase(가짜_이력서, run_id=run_id)
     last = (LOG_DIR / f"{run_id}.jsonl").read_text(encoding="utf-8").strip().splitlines()[-1]
     row = json.loads(last)

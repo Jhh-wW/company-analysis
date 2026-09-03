@@ -1492,7 +1492,7 @@ _PARAGRAPH_NUMBER_GAP_PT: Final[float] = 5.0
 def _paragraph_number_markup(position: int | str) -> str:
     """웹(result.html의 ``.pno``)과 «같은 계산식»으로 문단 앞에 «1.» «2.»를 붙인다.
 
-    ★ 왜 코드가 붙이나 — v2-32와 같은 이유. 번호는 «표시 방식»이지
+    ★ 왜 코드가 붙이나 — 웹 문단 번호와 같은 이유. 번호는 «표시 방식»이지
       «사실»이 아니다. AI에게 시키면 번호가 본문 글자로 들어가 인용
       추적·중복 검사·부록 1:1 검사가 그 번호를 사실로 오인한다. 여기서
       붙이면 ``_escape(text)``가 받는 문장은 한 글자도 안 바뀐다.
