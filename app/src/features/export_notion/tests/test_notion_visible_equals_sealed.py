@@ -7,13 +7,17 @@
 
 ★ 그래서 여기서는 «정확히 같음»을 본다
   장 제목(heading_2)과 다음 장 제목 사이가 그 장의 구역이다. 그 구역에 있는
-  문단 블록 전부를 순서대로 모아, 봉인이 그 장에 준 글자 목록과 «길이까지»
+  글자 블록 전부를 순서대로 모아, 봉인이 그 장에 준 글자 목록과 «길이까지»
   맞댄다. 한 줄이라도 더 넣으면 목록 길이가 달라져 깨진다.
 
-★ 구역에 있어도 되는 문단은 셋뿐이고 전부 봉인 값이다
+★ 구역에 있어도 되는 글자는 셋뿐이고 전부 봉인 값이다
   ① 본문 문단 ② 3개년 띠·표의 설명 줄 ③ 도식을 글로 옮긴 「읽는 법」.
   노션에는 막대 그림을 그릴 자리가 없어 ②③이 문단으로 나가지만, 글자는 전부
   봉인 값이고 시험이 새로 짓는 것은 «설명 줄에 인용 번호를 붙이는 자리» 하나뿐이다.
+
+★ 문단 블록만 세지 않는다
+  구역 안의 «글자를 싣는 블록 전부»를 센다. 문단만 세면 제목 블록으로 한 줄을
+  넣는 길이 열려 있어, 「한 줄이라도 더 넣으면 깨진다」가 참이 아니게 된다.
 
 ★ 재료는 다른 봉인 시험이 지어 둔 것을 그대로 쓴다. 재료가 갈라지면 「같은
   봉인에서 같은 글자가 나왔다」를 말할 수 없다.
@@ -101,10 +105,13 @@ def test_노션_장별_문단_목록은_봉인_값과_정확히_같다() -> None
     for block in projection.sections:
         display = block.display
         region, cursor = _section_region(blocks, display, cursor)
+        # ★ 문단 블록만 세지 않는다 — 제목 블록으로 한 줄을 넣으면 문단만 세는
+        #   그물을 통째로 빠져나간다. 구역을 가르는 장 제목(heading_2)은 구역 «밖»이라
+        #   여기 들어오지 않는다.
         printed = [
             channel_neutral(_block_text(item))
             for item in region
-            if item["type"] == "paragraph"
+            if item["type"] in _TEXT_BLOCK_TYPES
         ]
         expected = [channel_neutral(text) for text in _expected_paragraphs(display)]
         assert printed == expected, f"{display.cell} 구역 문단이 봉인 값과 다르다"
