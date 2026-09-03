@@ -110,6 +110,12 @@ async def beta_admin_gate(request: Request, call_next):
         and request_helpers._raw_share_key(request)
     ):
         return await call_next(request)
+    # 초대 링크가 «도중에» 닫힌 손님은 로그인 화면으로 보내지 않는다 — 로그인해도
+    # 들어올 수 없는 계정이라 구글 계정 선택 화면이 막다른 길이 된다. 이유를 아는
+    # 손님에게만 이유와 연락 안내를 돌려준다.
+    closed_link = analysis.closed_link_guest_response(request)
+    if closed_link is not None:
+        return closed_link
     target = "/auth/not-admin" if session is not None else "/auth/login"
     return RedirectResponse(target, status_code=303)
 

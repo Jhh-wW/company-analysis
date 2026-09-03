@@ -22,6 +22,8 @@ from fastapi.responses import (
 from src.core import clock, paths
 from src.core.constants import MAX_RETRY_INPUT, PROGRESS_STEPS
 from src.features.admin_dashboard import store as dashboard_store
+from src.features.auth import constants as auth_constants
+from src.features.auth import logic as auth_logic
 from src.features.budget import spend_store
 from src.features.budget.constants import (
     BUDGET_STORE_BLOCKED_MESSAGE,
@@ -74,6 +76,7 @@ from src.features.storage import db as storage_db
 from src.features.storage import job_interruptions
 from src.features.storage import reports as report_store
 from src.web import (
+    deployment_mode,
     evaluation_mode,
     job_runtime,
     paid_runtime,
@@ -260,14 +263,17 @@ def _observe_candidate_resolution(
 def _was_interrupted(job_id: str) -> bool:
     with storage_db.connect() as conn:
         return job_interruptions.exists(conn, job_id)
+
+
+#: 링크가 닫힌 사람이 갈 수 있는 유일한 길. 아래 안내 문구는 모두 이 줄로 끝난다.
+_LINK_CONTACT_NOTICE = "포트폴리오에 적힌 연락처로 알려 주시면 새 링크를 보내 드립니다."
 #: 링크가 안 열린 사람이 «처음 읽는 글»이다. 코드 용어(LINK·철회)부터 보면
 #: 「고장 났나」로 읽힌다.
 #: ★ 「철회」는 특히 쓰지 않는다 — 받는 사람에게 만료와 철회는 같은 뜻이고,
 #:   「누가 나를 잘랐나」로 읽힌다. 그래서 두 경우에 **같은 말**을 한다.
 #:   구분은 관리자 화면에서만 한다.
 _LINK_CLOSED_NOTICE = (
-    "이 초대 링크는 사용이 중단되어 첫 화면을 열었습니다. "
-    "포트폴리오에 적힌 연락처로 알려 주시면 새 링크를 보내 드립니다."
+    "이 초대 링크는 사용이 중단되어 첫 화면을 열었습니다. " + _LINK_CONTACT_NOTICE
 )
 _SHARE_NOTICE_BY_CODE = {
     "invalid": (
@@ -297,6 +303,31 @@ _REPORT_NOTICE_BY_CODE = {
     ),
 }
 
+#: 닫힌 초대 링크 손님에게 «직접» 보여 주는 안내 본문. 첫 화면으로 되돌려보내는
+#: 문구(`_SHARE_NOTICE_BY_CODE`)와 달리 이 화면이 종착지다.
+#: ★ 연락처 한 줄이 이 화면의 존재 이유다 — 손님이 갈 수 있는 다른 길이 없다.
+#: ★ 만료와 사용 중단은 받는 사람에게 같은 뜻이라 같은 말을 쓴다.
+_LINK_CLOSED_SCREEN_NOTICE = (
+    "이 초대 링크는 사용이 중단되어 더 이상 열리지 않습니다. " + _LINK_CONTACT_NOTICE
+)
+_LINK_MISSING_SCREEN_NOTICE = (
+    "이 초대 링크를 찾을 수 없습니다. 받으신 주소를 다시 확인해 주시고, "
+    + _LINK_CONTACT_NOTICE
+)
+_LINK_CLOSED_SCREEN_NOTICE_BY_CODE = {
+    "missing": _LINK_MISSING_SCREEN_NOTICE,
+    "expired": _LINK_CLOSED_SCREEN_NOTICE,
+    "revoked": _LINK_CLOSED_SCREEN_NOTICE,
+}
+#: 조사가 도는 중에 링크가 닫힌 사람이 진행 화면에서 읽는 문장.
+_LINK_CLOSED_PROGRESS_NOTICE = (
+    "이 초대 링크의 사용이 중단되어 조사를 멈췄습니다. " + _LINK_CONTACT_NOTICE
+)
+#: 진행 화면이 상태를 물어보는 경로. 안내를 화면이 아니라 JSON으로 줘야 하는
+#: 유일한 손님 경로다.
+_PROGRESS_API_PATH_PREFIX = "/api/progress/"
+_LINK_CLOSED_PROGRESS_CODE = "link_closed"
+
 
 def _clear_share_cookie(response, request: Request) -> None:
     """이전 LINK capability가 있을 때만 같은 범위의 만료 쿠키로 지운다."""
@@ -316,6 +347,122 @@ def _share_redirect_without_cookie(request: Request, status: str):
     response.headers["Referrer-Policy"] = "no-referrer"
     _clear_share_cookie(response, request)
     return response
+
+
+def _first_screen_needs_login() -> bool:
+    """이 배포에서 첫 화면이 로그인 뒤에 있는지."""
+
+    return (
+        auth_logic.beta_admin_only_from_env()
+        or deployment_mode.render_admin_no_forwarded()
+    )
+
+
+def _link_closed_screen(request: Request, status: str) -> Response:
+    """닫힌 초대 링크 손님에게 연락 안내가 있는 화면을 «직접» 그린다.
+
+    첫 화면이 로그인 뒤에 있는 배포에서 `/?share_status=…`로 되돌려보내면 손님은
+    구글 계정 선택 화면에 도착한다. 로그인해도 들어올 수 없는 계정이라 그대로
+    막다른 길이고, 연락처 안내에도 닿지 못한다. 그래서 되돌려보내지 않고
+    여기서 끝낸다.
+
+    ★ 권한 쿠키는 여기서 건드리지 않는다 — 지울지는 부르는 쪽이 정한다.
+    """
+
+    return request_helpers.templates.TemplateResponse(
+        request=request,
+        name="share_scope_error.html",
+        context=request_helpers._ctx(
+            request,
+            scope_error=_LINK_CLOSED_SCREEN_NOTICE_BY_CODE.get(
+                status, _LINK_CLOSED_SCREEN_NOTICE
+            ),
+        ),
+        status_code=410,
+    )
+
+
+def _share_link_closed_response(request: Request, status: str) -> Response:
+    """닫힌 링크 갈래 하나를 이 배포에서 손님이 실제로 볼 수 있는 응답으로."""
+
+    if not _first_screen_needs_login():
+        return _share_redirect_without_cookie(request, status)
+    response = _link_closed_screen(request, status)
+    # 열리지 않는 주소를 한 번 더 눌러도 이전 권한은 되살아나지 않는다.
+    _clear_share_cookie(response, request)
+    return response
+
+
+def _link_closed_progress_response() -> Response:
+    """진행 화면이 해석할 수 있는 모양으로 같은 안내를 돌려준다.
+
+    로그인 화면 HTML을 돌려주면 진행 화면은 JSON 해석에 실패해 「네트워크 문제」로
+    보여 준다. 이름(`error`·`retry_url`·`retryable`)은 `progress.html`의 poll이
+    읽는 것 그대로다.
+    """
+
+    return JSONResponse(
+        {
+            "error": _LINK_CLOSED_PROGRESS_NOTICE,
+            "code": _LINK_CLOSED_PROGRESS_CODE,
+            "retry_url": "/",
+            "retryable": False,
+        },
+        status_code=410,
+    )
+
+
+def closed_link_guest_response(request: Request) -> Optional[Response]:
+    """초대 링크가 도중에 닫힌 손님에게 로그인 화면 대신 안내를 돌려준다.
+
+    로그인 벽이 켜진 배포에서 링크가 닫히면, 권한 쿠키를 가진 손님의 모든 화면이
+    구글 로그인으로 튕긴다(``main.beta_admin_gate``). 이 함수는 그 마지막 갈림길
+    직전에 불려, 이유를 아는 손님에게만 이유를 말해 준다.
+
+    Args:
+        request: 로그인 벽에서 통과하지 못한 요청.
+
+    Returns:
+        보여 줄 안내 응답. 해당하지 않으면 ``None``(기존 로그인 안내 그대로).
+
+    ★ 발급된 적 없는 쿠키에는 아무 말도 하지 않는다 — 열쇠를 바꿔 가며 넣는 쪽에
+      링크의 있고 없음을 알려주지 않기 위해서다. 진행 상태도 그 링크로 시작한
+      조사일 때만 답한다.
+    ★ 닫힌 쿠키를 지우지 않는다. 그 쿠키는 아무 권한도 주지 않으면서
+      (`request_helpers._raw_share_key`) 왜 막혔는지 아는 유일한 단서다. 지우면
+      새로고침 한 번에 다시 구글 로그인으로 간다.
+    """
+
+    path = request.url.path
+    is_progress_api = path.startswith(_PROGRESS_API_PATH_PREFIX)
+    if not (
+        is_progress_api
+        or path in auth_constants.BETA_SHARE_PATHS
+        or path.startswith(auth_constants.BETA_SHARE_PATH_PREFIXES)
+    ):
+        return None
+    key = (request.cookies.get(KEY_COOKIE_NAME) or "").strip().lower()
+    if not share_logic.is_valid_key(key):
+        return None
+    try:
+        with storage_db.connect() as conn:
+            link = share_store.load(conn, key)
+            if link is None:
+                return None
+            if not link.is_revoked and not share_logic.link_expired(link):
+                return None
+            if not is_progress_api:
+                return _link_closed_screen(
+                    request, "revoked" if link.is_revoked else "expired"
+                )
+            job_id = path[len(_PROGRESS_API_PATH_PREFIX) :].strip("/")
+            run = share_store.load_run(conn, job_id) if job_id else None
+            if run is None or run.link_key_hash != link.key_hash:
+                return None
+            return _link_closed_progress_response()
+    except Exception:  # noqa: BLE001 — 못 읽으면 기존 로그인 안내를 그대로 둔다
+        logger.exception("닫힌 초대 링크 안내를 준비하지 못했습니다")
+        return None
 
 
 def _invalid_share_key_response(request: Request) -> Response:
@@ -565,11 +712,11 @@ async def open_share_link(request: Request, key: str):
         with storage_db.connect() as conn:
             stored = share_store.load(conn, clean)
             if stored is None:
-                return _share_redirect_without_cookie(request, "missing")
+                return _share_link_closed_response(request, "missing")
             if stored.is_revoked:
-                return _share_redirect_without_cookie(request, "revoked")
+                return _share_link_closed_response(request, "revoked")
             if share_logic.link_expired(stored):
-                return _share_redirect_without_cookie(request, "expired")
+                return _share_link_closed_response(request, "expired")
 
             now_iso = clock.iso_now_kst()
             if not share_access.allow_request(clean, now_iso):
@@ -580,11 +727,11 @@ async def open_share_link(request: Request, key: str):
                 # 의미하므로 429를 돌려준다.
                 latest = share_store.load(conn, clean)
                 if latest is None:
-                    return _share_redirect_without_cookie(request, "missing")
+                    return _share_link_closed_response(request, "missing")
                 if latest.is_revoked:
-                    return _share_redirect_without_cookie(request, "revoked")
+                    return _share_link_closed_response(request, "revoked")
                 if share_logic.link_expired(latest):
-                    return _share_redirect_without_cookie(request, "expired")
+                    return _share_link_closed_response(request, "expired")
                 return _share_rate_limited()
             link = stored
 
@@ -607,7 +754,7 @@ async def open_share_link(request: Request, key: str):
         return _share_store_unavailable(request)
 
     if link is None:
-        return _share_redirect_without_cookie(request, "missing")
+        return _share_link_closed_response(request, "missing")
 
     response = RedirectResponse(target, status_code=303)
     response.headers["Referrer-Policy"] = "no-referrer"
