@@ -16,15 +16,14 @@
      「관리자가 확인해야 다시 열립니다」가 두 번, 「저장된 보고서는 보실 수
      있습니다」도 두 번. 게다가 제목이 「잠시 기다려 주세요」인데 본문은
      «기다려도 안 풀린다»고 말했다.
-   → 왜 막혔는지 «한 줄»만 남기고 나머지를 지운다. #}
+   → 왜 막혔는지 «한 줄»만 남기고 나머지를 지운다.
+
+   ★ 제목·그림 글자·설명은 이 틀이 정하지 않고 **막은 쪽이 갈래에 맞게 넘겨준다**
+     (`request_helpers._throttle_screen`). 여기서 다시 갈래를 따지면 같은 판단이
+     두 곳에 생기고, 한쪽만 고쳐졌을 때 화면이 사실과 다른 말을 한다. #}
 <div class="card">
-  {% if throttle_is_fault %}
-  <div class="stopped-icon">⛔</div>
-  <h1>새 조사가 멈췄습니다</h1>
-  {% else %}
-  <div class="stopped-icon">⏳</div>
-  <h1>잠시 기다려 주세요</h1>
-  {% endif %}
+  <div class="stopped-icon" aria-hidden="true">{{ throttle_icon|default('⏳', true) }}</div>
+  <h1>{{ throttle_title|default('잠시 기다려 주세요', true) }}</h1>
 
   {# 왜 막혔는지 — 이 한 줄이 전부다. 여기서 되풀이하지 마라. #}
   <p class="lede">{{ throttle_message }}</p>
@@ -34,15 +33,34 @@
     <p class="muted" style="margin-top:12px">문의 번호 <code>{{ support_reference }}</code></p>
     {% endif %}
   {% else %}
+  {# 「고장이 아니다」는 막은 이유가 무엇이든 참이다 — 오류로 보이면 손님은 이 도구를
+     못 쓰는 물건으로 판단하고 떠난다.
+     ★ 뒤에 붙는 하루 상한 설명은 «하루 상한에 걸렸을 때만» 사실이다. 자리가 없어
+       밀렸거나 한도를 통째로 다 썼거나 초대가 없어 막힌 손님에게 말하면 틀린
+       이유를 알려주는 셈이 된다. #}
   <p class="muted" style="margin-top:14px">
     <strong>고장이 아닙니다.</strong>
+    {%- if throttle_explains_daily_cap %}
     이 도구는 조사할 때마다 실제 비용이 들어서,
     하루에 돌릴 수 있는 양을 미리 정해 두었습니다.
+    {%- endif %}
   </p>
   {% endif %}
 
+  {# 기다려도 안 열리는 갈래에는 «사람에게 닿는 길»을 준다. 없으면 막다른 길이다. #}
+  {% if throttle_contact_note %}
+  <p class="muted" style="margin-top:14px">{{ throttle_contact_note }}</p>
+  {% endif %}
+
   <div class="btn-row" style="margin-top:18px">
+    {# 이 손님의 초대 링크에 묶인 회사 보고서는 저장본이라 막힌 뒤에도 그대로
+       열린다. 열 수 있을 때만 첫 번째 길로 준다. #}
+    {% if throttle_bound_report_url %}
+    <a class="btn" href="{{ throttle_bound_report_url }}" style="line-height:1.6">{{ throttle_bound_report_label }}</a>
+    <a class="btn ghost" href="/" style="line-height:1.6">다른 회사 둘러보기</a>
+    {% else %}
     <a class="btn" href="/" style="line-height:1.6">다른 회사 둘러보기</a>
+    {% endif %}
   </div>
 
   {# ★ 실측 — 앞 판은 「첫 화면의 회사 버튼을 눌러보세요」라고 했는데

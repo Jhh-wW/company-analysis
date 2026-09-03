@@ -8,6 +8,7 @@ import logging
 import os
 import sqlite3
 import time
+from dataclasses import dataclass
 from typing import Final, Optional
 from urllib.parse import urlsplit
 
@@ -62,8 +63,11 @@ from src.features.sharelink import store as share_store
 from src.features.sharelink import tracks as share_tracks
 from src.features.sharelink.constants import (
     KEY_COOKIE_NAME,
+    LANDING_REPORT_BUTTON_TEMPLATE,
     LINK_BUDGET_EXHAUSTED_MESSAGE,
+    LINK_TOTAL_BUDGET_EXHAUSTED_CONTACT,
     LINK_TOTAL_BUDGET_EXHAUSTED_MESSAGE,
+    LINK_TOTAL_BUDGET_EXHAUSTED_TITLE,
     LINK_TOTAL_BUDGET_KRW,
     PUBLIC_NOT_ALLOWED_MESSAGE,
 )
@@ -219,6 +223,74 @@ def mark_public_get_readonly_existing(request: Request) -> None:
     setattr(request.state, _READONLY_EXISTING_REQUEST_STATE, True)
 
 
+#: 권한이 없어 못 여는 보고서 화면의 제목. 세 갈래(404·403·409)가 같은 제목을 쓴다 —
+#: 왜 못 여는지는 갈래마다 다르지만, 손님이 겪은 일은 「이 보고서가 안 열린다」 하나다.
+REPORT_ACCESS_DENIED_TITLE: Final[str] = "보고서를 열 수 없습니다"
+
+#: 그 화면에서 손님이 «지금 할 수 있는 일». 결과 주소는 가장 자주 공유되는 주소라,
+#: 남에게 열릴 때 여기서 길을 못 주면 그대로 막다른 길이 된다.
+REPORT_ACCESS_REOPEN_HINT: Final[str] = (
+    "받으신 초대 링크(QR)를 다시 열면 됩니다. "
+    "잘 안 되면 링크를 보내 주신 담당자에게 문의해 주세요."
+)
+
+#: 신고로 잠시 멈춘 보고서의 안내. 다시 열어도 결과가 같으므로 «다시 시도»가 아니라
+#: 언제 열리는지와 물어볼 곳을 알려 준다.
+REPORT_ACCESS_REVOKED_HINT: Final[str] = (
+    "확인이 끝나면 같은 주소로 다시 열립니다. "
+    "급하시면 링크를 보내 주신 담당자에게 문의해 주세요."
+)
+
+
+def _report_access_denied_screen(
+    request: Request, *, revoked: bool, status_code: int
+) -> Response:
+    """보고서 접근을 거절할 때 «틀을 갖춘» 안내 화면을 그린다.
+
+    Args:
+        request: 들어온 요청.
+        revoked: 신고 접수로 잠시 멈춘 보고서인가.
+        status_code: 그대로 내보낼 상태 코드(404·403·409).
+
+    ★ 앞서는 ``<h1><p>`` 두 줄짜리 조각이었다. 서체·상단바·돌아갈 길·물어볼 곳이
+      한 개도 없어, 남에게 공유된 결과 주소를 연 사람은 «고장 난 페이지»를 봤다.
+      같은 파일의 다른 거절 화면과 **같은 틀**을 쓴다.
+    ★ ↻(다시 하면 된다)를 쓰지 않는다 — 같은 주소를 다시 열어도 결과가 같다.
+    """
+
+    from src.web import job_runtime  # noqa: PLC0415
+
+    if revoked:
+        message = (
+            "오류 신고가 접수되어 결과·다운로드·공유를 잠시 멈췄습니다. "
+            "관리자가 원본과 출처를 확인한 뒤 직접 다시 공개합니다."
+        )
+        hint = REPORT_ACCESS_REVOKED_HINT
+        icon = "⛔"
+    else:
+        message = (
+            "보고서 번호만으로는 열람 권한이 되지 않습니다. "
+            "조사를 시작한 브라우저에서 열면 그대로 보실 수 있습니다."
+        )
+        hint = REPORT_ACCESS_REOPEN_HINT
+        icon = "ℹ️"
+    return templates.TemplateResponse(
+        request=request,
+        name="progress_unavailable.html",
+        context=_ctx(
+            request,
+            interruption_icon=icon,
+            interruption_title=REPORT_ACCESS_DENIED_TITLE,
+            interruption_message=message,
+            interruption_hint=hint,
+            retry_url=job_runtime.DEFAULT_EXIT_URL,
+            retry_label=job_runtime.DEFAULT_EXIT_LABEL,
+            retry_same_page=False,
+        ),
+        status_code=status_code,
+    )
+
+
 def require_report_access(
     request: Request, locator: str, *, api: bool = False
 ) -> Response | None:
@@ -262,20 +334,11 @@ def require_report_access(
             status_code=status_code,
         )
     else:
-        if decision.reason == "resource_revoked":
-            response = HTMLResponse(
-                "<h1>보고서를 열 수 없습니다</h1>"
-                "<p>오류 신고가 접수되어 결과·다운로드·공유를 잠시 멈췄습니다. "
-                "관리자가 원본과 출처를 확인한 뒤 직접 다시 공개합니다.</p>",
-                status_code=status_code,
-            )
-        else:
-            response = HTMLResponse(
-                "<h1>보고서를 열 수 없습니다</h1>"
-                "<p>보고서 번호만으로는 열람 권한이 되지 않습니다. "
-                "조사를 시작한 브라우저나 현재 초대 계정·링크로 다시 열어 주세요.</p>",
-                status_code=status_code,
-            )
+        response = _report_access_denied_screen(
+            request,
+            revoked=decision.reason == "resource_revoked",
+            status_code=status_code,
+        )
     response.headers["Cache-Control"] = "private, no-store"
     store_status = {
         "store_missing": "missing",
@@ -785,10 +848,101 @@ def _guard_run(
     return None
 
 #: 이 이유로 막힌 것은 «정상 동작이 아니라 고장»이다 — 화면이 그렇게 말해야 한다.
-#: 사람이 원장을 확인해야 풀리므로, 사용자에게 문의 번호를 줘야 신고가 닿는다.
+#: 사람이 비용 기록을 확인해야 풀리므로, 사용자에게 문의 번호를 줘야 신고가 닿는다.
 THROTTLE_FAULT_KINDS: Final[frozenset[str]] = frozenset(
     {"budget-store", "budget-unresolved", "member-usage-store"}
 )
+
+#: 기다리면 풀리는 차단의 제목. 「잠시 기다려 주세요」는 **정말 기다리면 열릴 때만**
+#: 참이다.
+THROTTLE_WAIT_TITLE: Final[str] = "잠시 기다려 주세요"
+
+#: 고장으로 막았을 때의 제목.
+THROTTLE_FAULT_TITLE: Final[str] = "새 조사가 멈췄습니다"
+
+#: 초대 없이 들어온 손님을 막았을 때의 제목. 기다린다고 열리는 것이 아니므로
+#: 「잠시 기다려 주세요」를 쓰지 않는다.
+THROTTLE_NOT_INVITED_TITLE: Final[str] = "새 조사를 시작할 수 없습니다"
+
+#: 누적 소진 갈래의 ``kind`` 앞머리. ``_guard_run``이 붙이는 값과 같아야 한다.
+THROTTLE_TOTAL_EXHAUSTED_PREFIX: Final[str] = "budget-total:"
+
+#: 하루 상한 갈래의 ``kind`` 앞머리.
+THROTTLE_DAILY_BUDGET_PREFIX: Final[str] = "budget:"
+
+#: 초대 없는 손님 갈래의 ``kind``.
+THROTTLE_NOT_INVITED_KIND: Final[str] = (
+    f"{THROTTLE_DAILY_BUDGET_PREFIX}{share_tracks.Track.PUBLIC.value}"
+)
+
+
+@dataclass(frozen=True)
+class _ThrottleScreen:
+    """왜 막았는지에 따라 달라지는 화면 조각.
+
+    ★ 왜 필요한가 — 막는 이유가 넷인데 화면은 하나였다. 그래서 「내일이면
+      열린다」가 참인 하루 상한의 틀에 «내일도 안 열리는» 누적 소진과
+      «초대가 있어야 열리는» 차단까지 실려, 화면이 사실과 다른 말을 했다.
+    """
+
+    #: 화면 제목.
+    title: str
+    #: 제목 옆 그림 글자. ⏳는 «기다리면 된다»는 뜻이라 아무 데나 쓰지 않는다.
+    icon: str = "⏳"
+    #: 「하루에 돌릴 수 있는 양을 미리 정해 두었습니다」를 붙일지.
+    #: 하루 상한에 걸렸을 때만 참이다.
+    explains_daily_cap: bool = False
+    #: 기다려도 안 열리는 갈래에 주는 «사람에게 닿는 길».
+    contact_note: str = ""
+
+
+def _throttle_screen(kind: str) -> _ThrottleScreen:
+    """막은 이유(``kind``)에 맞는 제목·설명을 고른다."""
+
+    if kind in THROTTLE_FAULT_KINDS:
+        return _ThrottleScreen(title=THROTTLE_FAULT_TITLE, icon="⛔")
+    if kind.startswith(THROTTLE_TOTAL_EXHAUSTED_PREFIX):
+        # 제목은 본문 첫 문장을 그대로 앞세운다 — 「기다려도 열리지 않는다」는 사실이
+        # 제목에서 먼저 보여야 하고, 본문은 「그래도 볼 수 있는 것」까지 한 번에
+        # 말해야 손님이 두 사실을 따로 찾지 않는다.
+        return _ThrottleScreen(
+            title=LINK_TOTAL_BUDGET_EXHAUSTED_TITLE,
+            icon="ℹ️",
+            contact_note=LINK_TOTAL_BUDGET_EXHAUSTED_CONTACT,
+        )
+    if kind == THROTTLE_NOT_INVITED_KIND:
+        return _ThrottleScreen(title=THROTTLE_NOT_INVITED_TITLE, icon="ℹ️")
+    if kind.startswith(THROTTLE_DAILY_BUDGET_PREFIX):
+        # 남은 예산 갈래는 하루 상한뿐이다 — 여기서만 그 설명이 사실이다.
+        return _ThrottleScreen(title=THROTTLE_WAIT_TITLE, explains_daily_cap=True)
+    return _ThrottleScreen(title=THROTTLE_WAIT_TITLE)
+
+
+def _throttle_bound_report(request: Request) -> tuple[str, str]:
+    """이 손님의 초대 링크에 묶인 회사 보고서를 «지금» 열 수 있으면 그 길을 준다.
+
+    Args:
+        request: 들어온 요청.
+
+    Returns:
+        (버튼 글자, 보고서 주소). 열 수 없으면 빈 글자 두 개.
+
+    ★ 「열 수 있는가」를 여기서 새로 판단하지 않는다 — 첫 화면 랜딩과 **같은
+      함수**를 부른다. 두 곳이 따로 판단하면 한 화면에서만 버튼이 사라진다.
+    ★ 못 읽어도 조용히 빈 값을 준다. 부르는 쪽은 이미 «막는 중»이라 여기서 또
+      실패하면 화면 자체가 안 뜬다.
+    """
+
+    link = _current_share_link(request)
+    company = str(getattr(link, "company", "") or "").strip() if link else ""
+    if not company:
+        return "", ""
+    from src.web.routers import analysis as analysis_router  # noqa: PLC0415
+
+    report_url, _made_on = analysis_router._bound_report_view(link)
+    if not report_url:
+        return "", ""
+    return LANDING_REPORT_BUTTON_TEMPLATE.format(company=company), report_url
 
 
 def member_success_limit_message(limit: int) -> str:
@@ -821,11 +975,16 @@ def _throttled(request: Request, message: str, kind: str) -> HTMLResponse:
 
     ⚠️ 단, ``THROTTLE_FAULT_KINDS`` 는 진짜 고장이다.
       그때까지 이 화면은 **모든** 경우에 「고장이 아닙니다」라고 단언했고,
-      비용 원장이 깨져 막힌 사용자도 그 말을 봤다 — 사실이 아니고,
+      비용 기록이 깨져 막힌 사용자도 그 말을 봤다 — 사실이 아니고,
       신고할 번호도 없어 관리자에게 알릴 길이 없었다.
+
+    ⚠️ 제목·설명도 갈래마다 다르다(``_throttle_screen``). 하나로 두면 내일도
+      안 열리는 차단이 「잠시 기다려 주세요」 밑에 실려 손님을 헛되이 기다리게 한다.
     """
     logger.info("조사를 막았습니다: %s", kind)
     고장이다 = kind in THROTTLE_FAULT_KINDS
+    screen = _throttle_screen(kind)
+    bound_report_label, bound_report_url = _throttle_bound_report(request)
     response = templates.TemplateResponse(
         request=request,
         name="throttled.html",
@@ -834,6 +993,12 @@ def _throttled(request: Request, message: str, kind: str) -> HTMLResponse:
             throttle_message=message,
             throttle_kind=kind,
             throttle_is_fault=고장이다,
+            throttle_title=screen.title,
+            throttle_icon=screen.icon,
+            throttle_explains_daily_cap=screen.explains_daily_cap,
+            throttle_contact_note=screen.contact_note,
+            throttle_bound_report_label=bound_report_label,
+            throttle_bound_report_url=bound_report_url,
             # 고장일 때만 문의 번호를 준다 — 정상 차단에는 필요 없는 잡음이다.
             support_reference=admin_audit.request_id(request) if 고장이다 else "",
         ),
