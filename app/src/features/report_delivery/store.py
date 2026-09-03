@@ -17,6 +17,7 @@ from src.features.report_delivery.canonical import (
     utc_text,
 )
 from src.features.report_delivery.models import ContentSnapshot, Delivery, DeliveryPolicy
+from src.features.report_delivery.policy import CacheMissReason
 from src.features.report_delivery.source_identity import SourceSnapshot
 from src.shared.engine_build_identity import epoch_digest_is_valid
 
@@ -95,6 +96,21 @@ class CachedRelease:
             char not in "0123456789abcdef" for char in digest
         ):
             raise ValueError("캐시 결과의 사전 출처 신원이 손상됐습니다")
+
+
+@dataclass(frozen=True)
+class CacheLookup:
+    """캐시 조회 한 번의 «결과 또는 이유».
+
+    적중이면 `hit`만 채워지고, 미적중이면 `miss_reason`이 왜인지 말한다.
+    나이를 지나 못 쓴 경우에는 그 열쇠가 가리키던 두 원본 ID도 함께 준다 —
+    부른 쪽이 같은 열쇠를 지우려면 정확한 대상을 알아야 하기 때문이다.
+    """
+
+    hit: CachedRelease | None = None
+    miss_reason: CacheMissReason | None = None
+    expired_content_snapshot_id: str = ""
+    expired_artifact_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -749,7 +765,33 @@ def load_cache_hit(
     policy: DeliveryPolicy,
     delivered_at: dt.datetime,
 ) -> CachedRelease | None:
-    """사전 신원·나이·본문·최초 승인 PDF가 모두 맞을 때만 돌려준다."""
+    """사전 신원·나이·본문·최초 승인 PDF가 모두 맞을 때만 돌려준다.
+
+    미적중 이유가 필요하면 `load_cache_lookup`을 쓴다.
+    """
+
+    return load_cache_lookup(
+        conn,
+        key=key,
+        policy=policy,
+        delivered_at=delivered_at,
+    ).hit
+
+
+def load_cache_lookup(
+    conn: sqlite3.Connection,
+    *,
+    key: CacheLookupKey,
+    policy: DeliveryPolicy,
+    delivered_at: dt.datetime,
+) -> CacheLookup:
+    """캐시를 읽고, 못 쓰면 «왜 못 쓰는지»까지 돌려준다.
+
+    ★ 나이를 지난 열쇠를 조용히 `None`으로 닫으면 그 행이 옛 본문을 계속
+      가리킨 채 남는다. 그 뒤 새로 만든 보고서를 같은 열쇠에 결속할 때
+      `bind_cache_entry`가 「다른 내용을 덮어쓸 수 없다」로 막아 재생성이
+      반복해서 실패한다. 그래서 이유를 감추지 않고 위로 올린다.
+    """
 
     ensure_schema(conn)
     row = conn.execute(
@@ -770,7 +812,7 @@ def load_cache_hit(
         ),
     ).fetchone()
     if row is None:
-        return None
+        return CacheLookup(miss_reason=CacheMissReason.NOT_FOUND)
     content = load_content_snapshot(conn, str(row[1]))
     if content is None:
         raise LifecycleStoreCorrupt("캐시가 존재하지 않는 내용 원본을 가리킵니다")
@@ -780,15 +822,24 @@ def load_cache_hit(
         or content.engine_epoch_digest != str(row[3])
     ):
         raise LifecycleStoreCorrupt("캐시와 내용 원본의 생성기·전체 출처 신원이 다릅니다")
-    if not policy.content_is_reusable(content, delivered_at=delivered_at):
-        return None
     artifact_id = str(row[2]).strip()
+    if not policy.content_is_reusable(content, delivered_at=delivered_at):
+        # 손상 판정이 아니라 나이 판정이다. 여기서 행을 지우지 않는다 —
+        # 지우는 일은 원장에 사유를 남길 수 있는 `invalidate_cache_entry`의
+        # 몫이고, 이 함수는 읽기만 한다.
+        return CacheLookup(
+            miss_reason=CacheMissReason.CONTENT_EXPIRED,
+            expired_content_snapshot_id=content.content_id,
+            expired_artifact_id=artifact_id,
+        )
     if not artifact_id:
         raise LifecycleStoreCorrupt("캐시에 최초 승인 PDF artifact가 없습니다")
-    return CachedRelease(
-        content=content,
-        artifact_id=artifact_id,
-        preflight_identity_digest=key.preflight_identity_digest,
+    return CacheLookup(
+        hit=CachedRelease(
+            content=content,
+            artifact_id=artifact_id,
+            preflight_identity_digest=key.preflight_identity_digest,
+        )
     )
 
 

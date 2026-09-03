@@ -27,6 +27,7 @@ from src.features.report_delivery import singleflight
 from src.features.report_delivery import store as delivery_store
 from src.features.report_delivery.cache_identity import CacheLookupKey
 from src.features.report_delivery.models import DeliveryPolicy
+from src.features.report_delivery.policy import CacheMissReason
 from src.features.storage import cache as cache_store
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
@@ -528,14 +529,12 @@ class GenerationSession:
             content_max_age=dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS),
             public_link_lifetime=dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS),
         )
-        cached = delivery_store.load_cache_hit(
+        lookup = delivery_store.load_cache_lookup(
             conn,
             key=key,
             policy=policy,
             delivered_at=clock.now_kst(),
         )
-        if cached is None:
-            return None
         lease_key = singleflight.LeaseKey(
             billing_bucket_id=key.billing_bucket_id,
             corp_id=key.corp_id,
@@ -544,13 +543,17 @@ class GenerationSession:
             engine_epoch_digest=key.engine_epoch_digest,
         )
 
-        def invalidate(reason_code: str) -> None:
+        def drop_cache_entry(
+            content_snapshot_id: str,
+            artifact_id: str,
+            reason_code: str,
+        ) -> None:
             invalidated_at = clock.now_kst()
             removed = delivery_store.invalidate_cache_entry(
                 conn,
                 key=key,
-                expected_content_snapshot_id=cached.content.content_id,
-                expected_artifact_id=cached.artifact_id,
+                expected_content_snapshot_id=content_snapshot_id,
+                expected_artifact_id=artifact_id,
                 reason_code=reason_code,
                 invalidated_at=invalidated_at,
             )
@@ -558,10 +561,36 @@ class GenerationSession:
                 singleflight.expire_completed_result(
                     conn,
                     key=lease_key,
-                    content_snapshot_id=cached.content.content_id,
-                    artifact_id=cached.artifact_id,
+                    content_snapshot_id=content_snapshot_id,
+                    artifact_id=artifact_id,
                     now=invalidated_at,
                 )
+
+        cached = lookup.hit
+        if cached is None:
+            if (
+                lookup.miss_reason is CacheMissReason.CONTENT_EXPIRED
+                and lookup.expired_content_snapshot_id
+                and lookup.expired_artifact_id
+            ):
+                # ★ 재사용 한도 나이를 지난 열쇠는 «읽지 않는 것»으로 끝내면
+                #   안 된다. 행이 남아 옛 본문을 계속 가리키면, 새로 만든
+                #   보고서를 같은 열쇠에 결속하는 마지막 단계에서 막혀
+                #   재조사가 몇 번을 다시 해도 같은 자리에서 실패한다.
+                #   여기서 사유를 남기고 지운 뒤 미적중으로 내려간다.
+                drop_cache_entry(
+                    lookup.expired_content_snapshot_id,
+                    lookup.expired_artifact_id,
+                    CacheMissReason.CONTENT_EXPIRED.value,
+                )
+            return None
+
+        def invalidate(reason_code: str) -> None:
+            drop_cache_entry(
+                cached.content.content_id,
+                cached.artifact_id,
+                reason_code,
+            )
 
         try:
             metadata = delivery_artifact.load_artifact_metadata(
