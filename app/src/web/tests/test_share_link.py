@@ -179,7 +179,7 @@ def test_LINK결과는_조회사건연결을_다시확인하지못하면_열지�
 
     assert opened.headers["location"] == "/"
     assert result.status_code == 503
-    assert "LINK 보고서를 확인할 수 없습니다" in result.text
+    assert "초대 링크 보고서를 확인할 수 없습니다" in result.text
     with storage_db.connect() as conn:
         assert share_store.list_report_view_events_by_hash(
             conn, share_store.key_hash_of(_카카오열쇠)

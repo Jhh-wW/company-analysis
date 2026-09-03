@@ -771,10 +771,12 @@ def _dashboard_publication_block(request: Request, report_id: str) -> Response |
 
 
 def _revoked_member_response(request: Request, *, unavailable: bool) -> Response:
+    # 화면 글자에는 코드 용어를 쓰지 않는다 — 손님이 겪은 일은 「초대받은 계정으로
+    # 들어왔다」이지 ``MEMBER``라는 갈래 이름이 아니다.
     message = (
-        "현재 MEMBER 권한이 없어 저장된 결과와 다운로드를 열 수 없습니다."
+        "현재 초대받은 계정이 아니어서 저장된 결과와 다운로드를 열 수 없습니다."
         if not unavailable
-        else "MEMBER 권한 상태를 확인할 수 없어 결과와 다운로드를 잠시 열지 않습니다."
+        else "초대받은 계정인지 확인할 수 없어 결과와 다운로드를 잠시 열지 않습니다."
     )
     # 권한 «상태를 못 읽은» 경우에만 같은 화면 재확인이 진짜 재시도다.
     # 권한이 없는 것이 확정된 경우는 다시 열어도 결과가 같으므로 홈으로 보낸다.
@@ -791,7 +793,7 @@ def _revoked_member_response(request: Request, *, unavailable: bool) -> Response
         name="progress_unavailable.html",
         context=request_helpers._ctx(
             request,
-            interruption_title="MEMBER 권한을 확인해 주세요",
+            interruption_title="초대받은 계정인지 확인해 주세요",
             interruption_message=message,
             interruption_hint="관리자에게 초대 상태를 문의해 주세요.",
             **retry_context,
@@ -1693,20 +1695,24 @@ def _is_admin_request(request: Request) -> bool:
 
 
 def _link_view_event_unavailable_response(request: Request) -> Response:
-    """정상 조회 사건을 확정하지 못하면 LINK 보고서를 fail-closed한다."""
+    """정상 조회 사건을 확정하지 못하면 초대 링크 보고서를 fail-closed한다.
+
+    ★ 화면 글자에는 코드 용어를 쓰지 않는다 — 손님은 받은 것을 「초대 링크」로
+      알고 있지 ``LINK``라는 갈래 이름을 모른다.
+    """
 
     response = request_helpers.templates.TemplateResponse(
         request=request,
         name="progress_unavailable.html",
         context=request_helpers._ctx(
             request,
-            interruption_title="LINK 보고서를 확인할 수 없습니다",
+            interruption_title="초대 링크 보고서를 확인할 수 없습니다",
             interruption_message=(
-                "이 LINK와 보고서의 연결 상태를 안전하게 확인하지 못해 "
+                "이 초대 링크와 보고서의 연결 상태를 안전하게 확인하지 못해 "
                 "현재는 결과를 열지 않습니다."
             ),
-            interruption_hint="잠시 후 같은 LINK로 다시 시도해 주세요.",
-            # 안내가 「같은 LINK로 다시 시도」이므로 재요청이 진짜 재시도다.
+            interruption_hint="잠시 후 같은 초대 링크로 다시 시도해 주세요.",
+            # 안내가 「같은 초대 링크로 다시 시도」이므로 재요청이 진짜 재시도다.
             **job_runtime.retry_or_exit(request, retry_label="다시 확인"),
         ),
         status_code=503,
