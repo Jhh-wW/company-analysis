@@ -388,7 +388,7 @@ def assess_quality(
         elif public_count == 1:
             one_claim.append(section_id)
 
-    # 조건부 9장이 있으면 전체 실질 claim·검증 비율에는 포함하되, 미존재 자체는
+    # 연습 모드 계약에서 필수가 아닌 9장이 있으면 전체 실질 claim·검증 비율에는 포함하되, 미존재 자체는
     # COMPLETE 하한 위반으로 세지 않는다.
     for section in candidate.sections:
         if section.section_id in contract.required_section_ids:
