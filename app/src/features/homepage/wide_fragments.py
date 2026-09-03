@@ -25,7 +25,8 @@
   값을 잘못 넘길 방법이 구조적으로 없다(``build_fragments``를 직접
   호출하며 손으로 company_id를 옮겨 적지 않는다). 현재 실서비스
   ``features.pipeline.real``에는 이 넓은 수집 경로가 아직 연결되지 않았다
-  (정확한 결합 지도는 ``docs/official_evidence_runtime_integration.md``).
+  — 공시 수집만 ``TYPED_DART_COLLECTOR`` kill switch
+  (``real._typed_dart_collection_enabled``) 뒤에서 배선돼 있다.
 """
 
 from __future__ import annotations

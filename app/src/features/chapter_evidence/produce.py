@@ -49,8 +49,10 @@ def produce_from_collection_envelopes(
     내부 배열만 이어 붙이면, 잘못 라우팅된 수집 결과도 중첩 값이 우연히
     맞는 순간 조용히 통과한다. 향후 운영 결합부는 이 함수를 유일한 merge
     경계로 사용해야 하고, 저수준 ``produce_chapter_evidence_candidates``는
-    이미 검증된 배열을 장별로 나누는 일만 맡는다. 현재 실서비스에는 이
-    결합부가 아직 없다(``docs/official_evidence_runtime_integration.md``).
+    이미 검증된 배열을 장별로 나누는 일만 맡는다. 운영 경로에는 공시
+    수집만 ``TYPED_DART_COLLECTOR`` kill switch
+    (``features.pipeline.real._typed_dart_collection_enabled``) 뒤에서
+    배선돼 있고, 이 merge 경계는 아직 그 뒤에 연결되지 않았다.
     """
 
     clean_company_id = _require_company_id(company_id)
