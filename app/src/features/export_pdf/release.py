@@ -363,7 +363,6 @@ def report_fact_id_ledger(report: Report) -> tuple[str, ...]:
     때문이다. 그래서 v2에서는 본문·요약이 실제로 표시하는 인용 번호 집합을
     장부로 삼는다: 인용이 바뀌면(추가·삭제·번호 변경) 이 장부도 바뀌어 해시
     결속이 깨진다 — v1의 fact_id 결속과 같은 역할을 하는 대체 결속이다.
-    실행계획 04장 3-4절 2항.
     """
 
     if report.schema_version == ENGINE_V2_SCHEMA_VERSION:
@@ -380,7 +379,7 @@ def prepare_pdf_release(report: Report, *, render_scale: float = 1.5) -> PdfRele
     v2(엔진 v2 composer) 보고서는 v1 canonical 게이트(``build_published_report``)
     를 건너뛰고 composer 자체 3검사(``validate_v2``)만 다시 확인한 뒤 검증된
     Report를 그대로 조립에 태운다. 사실 장부는 ``report_fact_id_ledger``가
-    만드는 인용 번호 기반 대체 결속을 쓴다 (실행계획 04장 3-4절 2항).
+    만드는 인용 번호 기반 대체 결속을 쓴다.
     """
 
     try:

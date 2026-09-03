@@ -185,7 +185,7 @@ def _report_for_output(report: Report) -> Report:
 
     엔진 v2(composer) 보고서는 canonical 게이트 대상이 아니다 — v2 3검사
     (내부 키·인용-부록 1:1·요약 존재)만 통과하면 별도 공개본 투영 없이 정본
-    그대로 공개한다 (실행계획 04장 3-4절 2항). v1 경로는 기존 동작 그대로다.
+    그대로 공개한다. v1 경로는 기존 동작 그대로다.
     """
 
     if report.schema_version == ENGINE_V2_SCHEMA_VERSION:

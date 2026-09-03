@@ -349,7 +349,7 @@ def test_옛_시그니처로_부르면_TypeError():
 
 
 def test_report_evidence는_import하지_않는다():
-    """실행계획 §4-2 — 앱 공용 계약 스키마 직접 사용은 chapter_evidence만의 몫이다."""
+    """앱 공용 계약 스키마 직접 사용은 chapter_evidence만의 몫이다."""
     module_path = Path(__file__).resolve().parents[1] / "wide_evidence_mapping.py"
     source = module_path.read_text(encoding="utf-8")
     for line in source.splitlines():

@@ -2175,7 +2175,7 @@ async def _start_with_reserved_slot(
                     "LINK 생성 시작 이력을 저장하지 못했습니다 job_id=%s", run_id
                 )
                 return _storage_unavailable_response(request)
-        # 사진으로 올린 공고는 «여기서 처음» 서버에 들어온다 (기획서 D2 — 판정 통과 후).
+        # 사진으로 올린 공고는 «여기서 처음» 서버에 들어온다 (판정 통과 후).
         # ★ 원본 바이트를 파일·로그·결과 어디에도 남기지 않는다 (S2).
         posting_body = original_input.posting_text
         image_error = ""

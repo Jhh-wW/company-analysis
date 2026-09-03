@@ -2437,8 +2437,8 @@ def _build_pdf(report: Report) -> bytes:
         # v2(엔진 v2 composer): v1 canonical 투영(build_published_report)은
         # v2 구조(빈 fact_records·다른 검증 방식)와 맞지 않아 태우지 않는다.
         # composer 자체 3검사(validate_v2)만 다시 확인하고 검증된 Report를
-        # 그대로 조립한다 (실행계획 04장 3-4절 2항 — v1 경로는 무변, 분기는
-        # schema_version 비교로만 나눈다).
+        # 그대로 조립한다 (v1 경로는 무변, 분기는 schema_version 비교로만
+        # 나눈다).
         validate_v2(report)
         projection = _public_projection(report)
     else:

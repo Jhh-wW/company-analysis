@@ -1,4 +1,4 @@
-"""층1 이름 대조 테스트 — 기획서 실측 사례를 정답으로 쓴다."""
+"""층1 이름 대조 테스트 — 정본 기준의 실측 사례를 정답으로 쓴다."""
 from __future__ import annotations
 
 import sys

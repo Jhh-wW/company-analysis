@@ -96,7 +96,7 @@ _OUTCOME_MAP: dict[str, Outcome] = {
     "생성실패": Outcome.FAILED,
 }
 
-# 실패했을 때 사용자에게 보여줄 말 (뜻은 기획서, 문장은 여기)
+# 실패했을 때 사용자에게 보여줄 말 (뜻은 정본 기준, 문장은 여기)
 _OUTCOME_MESSAGE: dict[Outcome, str] = {
     Outcome.NOT_FOUND: (
         "입력하신 이름으로 회사를 찾지 못했습니다. "
@@ -177,7 +177,7 @@ def _region_matches(typed: str, address: str) -> bool:
 
 
 def _in_report_order(sections: list[ReportSection]) -> list[ReportSection]:
-    """항목을 기획서의 정본 순서로 맞춘다.
+    """항목을 정본 순서로 맞춘다.
 
     기록 파일에 5번이 뒤에 붙어 있는 등 순서가 흐트러진 경우가 있어 화면에서 바로잡는다.
     정본에 없는 번호는 뒤에 원래 순서대로 붙인다 (버리지 않는다).

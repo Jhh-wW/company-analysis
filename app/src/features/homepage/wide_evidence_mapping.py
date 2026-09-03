@@ -1,8 +1,8 @@
 """documents/fragments/attempts를 앱 공용 계약 필드 이름의 평범한 자료형으로 바꾼다.
 
 ★ ``src.shared.report_evidence``는 여기서 **import하지 않는다** — 앱 공용
-  계약 스키마 객체를 직접 쓰는 것은 ``chapter_evidence``의 몫이다(실행계획
-  §4-2). 이 모듈은 필드 «이름»만 계약과 맞춘 dict·list·str·int를 만들 뿐,
+  계약 스키마 객체를 직접 쓰는 것은 ``chapter_evidence``의 몫이다.
+  이 모듈은 필드 «이름»만 계약과 맞춘 dict·list·str·int를 만들 뿐,
   계약 스키마 자체를 검증하거나 가져오지 않는다.
 ★ 문서의 canonical 본문 문자열은 ``"\\n".join(document.usable_ranges)``로
   정의한다 — ``WideDocumentIdentity.content_sha256``이 이미 이 문자열의
