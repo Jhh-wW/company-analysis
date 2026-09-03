@@ -8,3 +8,10 @@ This repository is published for portfolio viewing only.
 You may read the source code and documents, but copying, modifying,
 redistributing, or using them commercially requires prior written
 permission from the copyright holder.
+
+번들 글꼴(Prata·Freesentation)은 SIL Open Font License 1.1을 따르며, 사본은
+app/src/web/static/fonts/OFL.txt와 app/src/features/export_pdf/fonts/OFL.txt에
+있습니다.
+The bundled fonts (Prata, Freesentation) are licensed under the SIL Open
+Font License 1.1; copies are at app/src/web/static/fonts/OFL.txt and
+app/src/features/export_pdf/fonts/OFL.txt.
