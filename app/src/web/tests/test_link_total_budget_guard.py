@@ -36,6 +36,7 @@ from src.features.storage import reports as report_store
 from src.shared import engine_build_identity as build_identity_contract
 from src.web import job_runtime, main, paid_runtime, request_helpers, runtime
 from src.web.routers import reports as reports_router
+from src.web.tests._visible_text import visible_text
 
 _열쇠 = "b1b2c3d4e5f60718b1b2c3d4e5f60718"
 _시각 = "2026-09-02T09:00:00+09:00"
@@ -45,10 +46,20 @@ _시각 = "2026-09-02T09:00:00+09:00"
 _누적상한 = 3000.0
 _상한직전 = 2999.0
 
-_누적소진문구 = (
-    "이 링크의 이용 한도를 모두 사용했습니다. "
-    "미리 준비된 회사 보고서는 계속 볼 수 있습니다."
-)
+#: 누적 소진 화면이 반드시 말하는 두 가지. 화면은 앞 문장을 제목으로, 뒤 문장을
+#: 본문으로 «나눠» 그린다 — 이어 붙인 한 문장으로 찾으면 화면이 맞아도 못 찾는다.
+_누적소진_제목 = "이 링크의 이용 한도를 모두 사용했습니다"
+_누적소진_안내 = "미리 준비된 회사 보고서는 계속 볼 수 있습니다."
+
+
+def _누적소진화면인가(응답본문: str) -> bool:
+    """제목이 «한 번만» 나오고 「그래도 볼 수 있는 것」 안내가 같이 있는가.
+
+    ★ 제목 1회를 못 박는 이유 — 제목과 본문이 같은 문장을 되풀이하면 손님은
+      위아래로 같은 말을 두 번 읽고 그 아래의 안내를 놓친다.
+    """
+    보이는_글 = visible_text(응답본문)
+    return 보이는_글.count(_누적소진_제목) == 1 and _누적소진_안내 in 보이는_글
 
 
 class _돈이드는가짜파이프라인:
@@ -248,7 +259,7 @@ def test_링크_누적원가가_상한에_닿으면_새조사를_막고_결속�
     보고서 = client.get(f"/result/{report_id}", follow_redirects=False)
 
     assert 막힘.status_code == 429
-    assert _누적소진문구 in 막힘.text
+    assert _누적소진화면인가(막힘.text)
     # ★ 하루 소진 문구를 대신 보여 주면 「내일 다시 열린다」는 거짓말이 된다.
     assert "내일 다시 열립니다" not in 막힘.text
     # ★ 준비된 보고서는 계속 열린다 (사용자 결정).
@@ -321,7 +332,7 @@ def test_누적이_정확히_상한이면_막는다(monkeypatch):
 
     assert 막힘 is not None
     assert 막힘.status_code == 429
-    assert _누적소진문구 in 막힘.body.decode("utf-8")
+    assert _누적소진화면인가(막힘.body.decode("utf-8"))
 
 
 # ══════════════════════════════════════════════════════════
@@ -341,7 +352,7 @@ def test_진행중_예약을_더해_상한에_닿으면_새조사를_막는다(m
     )
 
     assert 막힘 is not None
-    assert _누적소진문구 in 막힘.body.decode("utf-8")
+    assert _누적소진화면인가(막힘.body.decode("utf-8"))
 
 
 def test_끝난_단계의_예약은_누적에_두번_세지_않는다(monkeypatch):
@@ -383,7 +394,7 @@ def test_하루_상한은_그대로_작동한다(client: TestClient, monkeypatch
     # 하루 소진은 «내일 열린다»가 사실이므로 문구가 달라야 한다.
     assert "이 링크로 돌릴 수 있는 새 조사를 모두 사용" in 막힘.text
     assert "내일 다시 열립니다" in 막힘.text
-    assert _누적소진문구 not in 막힘.text
+    assert _누적소진_제목 not in visible_text(막힘.text)
 
 
 def test_하루와_누적이_함께_소진되면_누적_문구를_보여준다(
@@ -403,7 +414,7 @@ def test_하루와_누적이_함께_소진되면_누적_문구를_보여준다(
     막힘 = _조사시작(client)
 
     assert 막힘.status_code == 429
-    assert _누적소진문구 in 막힘.text
+    assert _누적소진화면인가(막힘.text)
     assert "내일 다시 열립니다" not in 막힘.text
 
 
@@ -452,7 +463,7 @@ def test_MEMBER_ADMIN_PUBLIC_갈래는_누적_상한을_보지_않는다(monkeyp
     assert 손님 is not None
     본문 = 손님.body.decode("utf-8")
     assert "초대 링크로 들어오신 분만" in 본문
-    assert _누적소진문구 not in 본문
+    assert _누적소진_제목 not in visible_text(본문)
 
 
 # ══════════════════════════════════════════════════════════

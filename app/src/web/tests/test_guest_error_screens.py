@@ -27,6 +27,7 @@ from src.features.sharelink.constants import (
     KEY_COOKIE_NAME,
     LINK_BUDGET_EXHAUSTED_MESSAGE,
     LINK_TOTAL_BUDGET_EXHAUSTED_CONTACT,
+    LINK_TOTAL_BUDGET_EXHAUSTED_DETAIL,
     LINK_TOTAL_BUDGET_EXHAUSTED_MESSAGE,
     LINK_TOTAL_BUDGET_EXHAUSTED_TITLE,
     PUBLIC_NOT_ALLOWED_MESSAGE,
@@ -224,3 +225,22 @@ def test_보고서_접근_거절_화면에도_돌아갈_길이_있다(monkeypatc
     assert job_runtime.DEFAULT_EXIT_LABEL in visible_text(response.text)
     # ↻는 «다시 하면 된다»는 뜻이라 결과가 달라지지 않는 이 화면에는 쓰지 않는다.
     assert "↻" not in response.text
+
+
+def test_누적_한도_소진_화면은_같은_문장을_두_번_보여주지_않는다():
+    """★ 제목이 본문 첫 문장을 그대로 앞세우는 갈래다.
+
+    제목과 본문을 그대로 이어 그리면 손님은 같은 문장을 위아래로 두 번 읽는다.
+    제목으로 이미 말한 문장은 본문에서 빼고, 「그래도 볼 수 있는 것」만 남긴다.
+    """
+    text = visible_text(
+        _throttled_html(
+            LINK_TOTAL_BUDGET_EXHAUSTED_MESSAGE,
+            f"budget-total:{share_tracks.Track.LINK.value}",
+        )
+    )
+
+    assert text.count(LINK_TOTAL_BUDGET_EXHAUSTED_TITLE) == 1, text
+    # 제목만 남기고 나머지 안내까지 지우면 손님은 「그럼 뭘 볼 수 있나」를 모른다.
+    assert LINK_TOTAL_BUDGET_EXHAUSTED_DETAIL in text
+    assert LINK_TOTAL_BUDGET_EXHAUSTED_CONTACT in text

@@ -21,12 +21,20 @@
    ★ 제목·그림 글자·설명은 이 틀이 정하지 않고 **막은 쪽이 갈래에 맞게 넘겨준다**
      (`request_helpers._throttle_screen`). 여기서 다시 갈래를 따지면 같은 판단이
      두 곳에 생기고, 한쪽만 고쳐졌을 때 화면이 사실과 다른 말을 한다. #}
+{# ★ 제목이 본문 첫 문장을 그대로 앞세우는 갈래가 있다(누적 한도 소진). 넘어온 대로
+     그리면 손님은 같은 문장을 위아래로 두 번 읽고, 두 번째 줄에야 나오는 「그래도
+     볼 수 있는 것」을 놓친다.
+   → 제목으로 이미 말한 문장은 본문에서 뺀다. «갈래»를 따지지 않고 글자가 겹칠
+     때만 떼므로, 막는 쪽이 문구를 바꿔도 이 틀은 그대로 맞는다. #}
+{% set 제목 = throttle_title|default('잠시 기다려 주세요', true) %}
+{% set 본문 = throttle_message|default('', true) %}
+{% if 제목 and 본문.startswith(제목) %}{% set 본문 = 본문[제목|length:].lstrip('. ') %}{% endif %}
 <div class="card">
   <div class="stopped-icon" aria-hidden="true">{{ throttle_icon|default('⏳', true) }}</div>
-  <h1>{{ throttle_title|default('잠시 기다려 주세요', true) }}</h1>
+  <h1>{{ 제목 }}</h1>
 
   {# 왜 막혔는지 — 이 한 줄이 전부다. 여기서 되풀이하지 마라. #}
-  <p class="lede">{{ throttle_message }}</p>
+  {% if 본문 %}<p class="lede">{{ 본문 }}</p>{% endif %}
 
   {% if throttle_is_fault %}
     {% if support_reference %}
