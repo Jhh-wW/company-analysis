@@ -11,8 +11,12 @@ Compose와 Kubernetes에서 같은 비-root 계정, 상태 확인 경로, 영속
   영속 볼륨 아래에 둔다. 새 비용 원장 전환 뒤 관측·비용 검증은 SQLite만 읽는다.
 - 앱의 작업 드레인 상한은 240초다. Uvicorn은 HTTP task를 먼저 기다린 뒤
   lifespan 종료를 부르므로 이 두 시간은 겹치지 않고 더해진다. 모든 배포에서
-  Uvicorn HTTP 정리는 20초로 고정하고, Compose·Kubernetes 330초 또는 Render
-  300초 안에 앱 정리 240초·취소 1초·프로세스 종료 여유까지 남긴다.
+  Uvicorn HTTP 정리는 20초로 고정하므로 앱이 기대하는 종료 시간은
+  20초·240초·취소 1초를 더한 261초다. Compose와 Kubernetes는 330초를 주므로 그 안에
+  끝난다. Render는 영속 디스크가 붙은 서비스에 `maxShutdownDelaySeconds`를 쓸 수
+  없어 종료 유예가 플랫폼 기본 30초이며, 배포·재시작 중이던 조사는 정리를 끝내기
+  전에 잘릴 수 있다. 디스크를 떼면 이 제약도 사라지지만 SQLite·보고서·감사 기록을
+  잃으므로 디스크 쪽을 남긴다.
 - 애플리케이션·Uvicorn 로그는 stdout/stderr로만 보낸다. Compose의 로컬 로그 회전은
   10MB × 5개이며, 운영 플랫폼에서는 표준 출력 수집기를 연결한다.
 - 컨테이너 루트 파일시스템은 읽기 전용으로 쓸 수 있다. 쓰기 경로는 `/var/data`와
@@ -20,12 +24,30 @@ Compose와 Kubernetes에서 같은 비-root 계정, 상태 확인 경로, 영속
 - SQLite 단일 writer 계약 때문에 replica와 worker는 각각 1개다. Kubernetes 갱신 전략은
   `Recreate`다.
 
-## 관리자 전용 Render 배포 계약
+## Render 배포 계약 세 가지
 
-Render에는 forwarded client IP를 신뢰하지 않는 관리자 전용 계약이 두 개 있다. 둘 다
+Render에는 forwarded client IP를 신뢰하지 않는 좁은 계약이 세 개 있다. 셋 다
 `BETA_ADMIN_ONLY=1`, web service/instance/worker 각각 1개, 고정 `PUBLIC_ORIGIN`, 빈
-`FORWARDED_ALLOW_IPS`를 강제한다. MEMBER 초대와 LINK 공유는 차단되며 관리자 본인의
-로그인·분석만 허용한다. 따라서 이 계약들은 일반 사용자에게 공개한 정식 서비스가 아니다.
+`FORWARDED_ALLOW_IPS`를 강제한다. 갈리는 것은 초대 링크 발급·회원 초대·`/k/` 입구를
+여는지다. 앞의 두 계약은 이 셋을 모두 닫아 관리자 본인의 로그인·분석만 허용하고,
+세 번째 계약만 초대받은 사람이 링크·QR로 보고서를 여는 입구를 연다.
+
+| 동작 | `render-admin-demo-no-forwarded-v1` | `render-admin-real-no-forwarded-v1` | `render-portfolio-link-v1` |
+|---|---|---|---|
+| `PIPELINE` | `demo`(외부 provider 호출 없음) | `real` | `real` 필수 |
+| 관리자 로그인·분석 | 허용 | 허용 | 허용 |
+| `/admin/links/new`(초대 링크 발급) | 차단(404) | 차단(404) | 허용 |
+| `/admin/invite`(회원 초대) | 차단(409) | 차단(409) | 허용 |
+| `/admin/members/{email}/limit`(회원 한도) | 차단(409) | 차단(409) | 허용 |
+| `/k/` 링크 입구 | 로그인 화면으로 이동 | 로그인 화면으로 이동 | 열림 |
+| `ENGINE_V2` | 배포자가 값 선택 | 배포자가 값 선택 | `1` 필수 |
+| `REPORT_RELEASE_MODE` | 배포자가 값 선택 | 배포자가 값 선택 | `SHADOW`·`ENFORCE_NO_PARTIAL`·`FULL` 중 하나 필수 |
+| 고정 HTTPS origin·forwarded 비신뢰 | 강제 | 강제 | 강제 |
+
+★ 「초대 명단에 있는 회원이 로그인 벽을 통과한다」는 `BETA_ADMIN_ONLY=1`인 모든 배포에
+계약과 무관하게 적용된다. 로그인 벽은 «누가 통과하는가»의 축이고 runtime contract는
+«어느 forwarded-header 신뢰 모델을 쓰는가»의 축이라 서로 다른 문제이기 때문이다. 초대 링크
+발급·회원 초대·`/k/` 입구만 계약에 따라 갈린다.
 
 ### 무료 관리자 demo
 
@@ -34,12 +56,12 @@ Render에는 forwarded client IP를 신뢰하지 않는 관리자 전용 계약�
 - `PIPELINE=demo`이며 외부 조사 provider를 호출하지 않는다.
 - 무료 인스턴스의 `/var/data`는 영속 저장소가 아니다. 잠듦·재시작·재배포 때 SQLite와
   실행 이력이 사라질 수 있다.
-- 공유 링크, MEMBER 초대, 실제 provider, Notion, S3 외부 백업과 cron을 활성화하지 않는다.
+- 초대 링크, 회원 초대, 실제 provider, Notion, S3 외부 백업과 cron을 활성화하지 않는다.
 
-### 관리자 실제 분석 운영판
+### 실제 분석 운영판 두 계약의 공통 요구
 
-현재 `render.yaml`은 `render-admin-real-no-forwarded-v1` 계약을 준비한다. 여러 회사의 실제
-분석 결과를 관리자가 비교하기 위한 유료 운영 파일럿이며, demo가 아니다.
+`render-admin-real-no-forwarded-v1`과 `render-portfolio-link-v1`은 둘 다 실제 provider를
+부르는 유료 운영판이며 아래 요구를 그대로 공유한다. demo가 아니다.
 
 - Render `standard` web plan과 `/var/data`에 붙는 1GB 영속 디스크를 사용한다. 실제
   DART 118,747사 후보 색인이 Starter의 512MB를 넘어 `/confirm` 중 인스턴스가
@@ -58,11 +80,22 @@ Render에는 forwarded client IP를 신뢰하지 않는 관리자 전용 계약�
 - 영속 디스크는 재시작·재배포 뒤 데이터를 보존하지만 독립 외부 백업은 아니다. 현재 S3
   외부 백업 adapter와 cron은 BLOCKED이므로 관련 변수를 설정하지 않는다.
 
-두 좁은 계약은 forwarded client IP를 사용하지 않고 외부 사용자의 공유 기능도 닫기 때문에
-아래 일반 공개 reverse proxy gate의 승인 증거를 요구하지 않는다. 조건 하나라도 달라지면
-예외가 아니며 fail-closed한다. 관리자 실제 분석 운영판도 일반 공개 승인이나 독립 백업
-완료를 뜻하지 않는다. 영속 디스크 동작과 제한은
-[Render 영속 디스크 문서](https://render.com/docs/disks)를 따른다.
+### 초대 링크 공개판 — 현재 `render.yaml` 값
+
+현재 `render.yaml`의 `DEPLOYMENT_RUNTIME_CONTRACT`는 `render-portfolio-link-v1`이다. 위
+공통 요구를 그대로 지키면서 초대 링크 발급·회원 초대·`/k/` 입구만 추가로 연다.
+
+- `PIPELINE=real`, `BETA_ADMIN_ONLY=1`, 빈 `FORWARDED_ALLOW_IPS`를 이 계약에서도 강제한다.
+- `ENGINE_V2`가 정확히 `"1"`이어야 하고 `REPORT_RELEASE_MODE`가 세 값 중 하나로 명시돼야
+  한다. 둘 중 하나라도 빠지면 시작 검증이 컨테이너를 거절한다. 손님이 실제로 보는 화면이라
+  조용히 옛 엔진이나 미정 상태로 열리지 않게 한다.
+- `PUBLIC_ORIGIN`은 Render가 주는 외부 URL과 정확히 같아야 하고 `GOOGLE_REDIRECT_URI`는
+  그 origin의 `/auth/callback`이어야 한다.
+
+세 좁은 계약은 forwarded client IP를 사용하지 않기 때문에 아래 일반 공개 reverse proxy
+gate의 승인 증거를 요구하지 않는다. 조건 하나라도 달라지면 예외가 아니며 fail-closed한다.
+실제 분석 운영판 두 계약도 일반 공개 승인이나 독립 백업 완료를 뜻하지 않는다. 영속 디스크
+동작과 제한은 [Render 영속 디스크 문서](https://render.com/docs/disks)를 따른다.
 
 ## 공개 reverse proxy gate
 
@@ -71,8 +104,8 @@ Render에는 forwarded client IP를 신뢰하지 않는 관리자 전용 계약�
 공개 배포는 `public`을 명시해야 하며 다음 증거가 없으면 entrypoint가 웹 시작을 차단한다.
 환경의 SHA-256은 canary artifact 식별자일 뿐 신뢰 증명이 아니다. 서명 artifact 원문과
 고정 policy를 검증할 운영 adapter가 아직 없으므로
-`PRODUCTION_FORWARDED_EVIDENCE_VERIFIER_AVAILABLE=False`이고 위 두 관리자 전용
-no-forwarded 계약을 제외한 일반 public 설정은 값을 전부 채워도 BLOCKED다.
+`PRODUCTION_FORWARDED_EVIDENCE_VERIFIER_AVAILABLE=False`이고 위 세 no-forwarded 계약을
+제외한 일반 public 설정은 값을 전부 채워도 BLOCKED다.
 
 - 공통: 실제 공개 HTTPS origin에서 CSRF 보호 POST 성공·타 origin 거부 canary와,
   서로 다른 외부 주소가 앱에서 서로 다른 client IP로 관측되는 canary
@@ -87,9 +120,9 @@ BLOCKED다. `FORWARDED_ALLOW_IPS=*`, loopback·예약 주소, IPv4 `/24`보다 �
 넓은 범위는 공개 모드에서 거부한다. `kubernetes/base.yaml`의 TEST-NET 값과 빈 증거는
 의도적인 fail-closed placeholder이므로 실제 ingress 값과 증거로 교체해야 한다.
 
-공유 링크의 requester 한도는 링크별 IP에 대해 12회/분이다. forwarded 신뢰가 빠지면
-모든 사용자가 edge proxy IP 하나로 합쳐져 정상 사용자도 함께 429가 될 수 있고, 반대로
-신뢰 범위가 넓거나 XFF가 정화되지 않으면 공격자가 IP 통장을 바꿔 한도를 우회할 수 있다.
+초대 링크의 요청 제한은 요청자를 식별하지 않고 링크 하나마다 60초에 60회다. 요청자 IP를
+수집·집계하지 않으므로 forwarded 신뢰 여부가 이 한도의 정확도를 바꾸지 않는다. 대신
+같은 링크를 여러 사람이 동시에 열면 그 60회를 함께 쓴다.
 
 이 Render 판정은 [Render 환경변수 문서](https://render.com/docs/environment-variables)의
 Docker/All runtimes 범위와 [Uvicorn proxy 설정](https://www.uvicorn.org/settings/)의
@@ -110,17 +143,18 @@ service-account marker가 보이면 같은 방식으로 `kubernetes`/`public`을
 Render의 명시적 runtime contract, `RENDER=true`, 실제 web marker,
 `render`/`public` 선언이 모두 일치하는데 Kubernetes marker도 보이는 경우에만 그 흔적을
 Render 내부 substrate로 취급한다. 하나라도 빠지거나 Kubernetes contract와 충돌하면 기존처럼
-fail-closed한다. 이 예외는 플랫폼 판정에만 적용되며 두 관리자 전용 계약의 고정 HTTPS
+fail-closed한다. 이 예외는 플랫폼 판정에만 적용되며 세 no-forwarded 계약의 고정 HTTPS
 origin, 기본 실행 명령, forwarded header 비신뢰 검증을 생략하지 않는다.
 
 entrypoint는 사용자 CMD의 문자열보다 manifest가 직접 고정한 runtime contract와 플랫폼
 marker를 먼저 판정한다. Compose는 `local-web-v1`, 무료 관리자 demo는
 `render-admin-demo-no-forwarded-v1`, 관리자 실제 분석 운영판은
-`render-admin-real-no-forwarded-v1`, 일반 Render web은 `render-public-web-v1`, Kubernetes
-Deployment는 `kubernetes-public-web-v1`을 사용한다.
+`render-admin-real-no-forwarded-v1`, 초대 링크 공개판은 `render-portfolio-link-v1`,
+일반 Render web은 `render-public-web-v1`, Kubernetes Deployment는
+`kubernetes-public-web-v1`을 사용한다.
 따라서 CMD가 `src.web.main:app`을 포함하지 않거나 trigger처럼 꾸며져도 contract에 맞는
 검증을 거친다. 알 수 없는 contract와 contract 없는 generic command는 exit 78로 닫힌다.
-두 관리자 전용 no-forwarded 예외가 아닌 public contract는 독립 canary verifier 부재
+세 no-forwarded 예외가 아닌 public contract는 독립 canary verifier 부재
 상태에서 계속 BLOCKED다.
 
 Kubernetes base는 `enableServiceLinks=false`와
@@ -191,8 +225,8 @@ evidence/policy와 다시 대조한다. artifact나 parser가 없거나 결과�
 ```
 
 현재 저장소에는 실제 policy·verifier·scanner·SBOM·provenance·서명 검증 결과가 없으므로
-정식 공개 release 판정은 정직하게 BLOCKED다. 무료 demo와 관리자 실제 분석 운영판 어느
-쪽도 정식 공개 release 승인으로 해석하지 않는다. validator와 fixture 시험은 Docker나
+정식 공개 release 판정은 정직하게 BLOCKED다. 무료 demo·관리자 실제 분석 운영판·초대 링크
+공개판 어느 쪽도 정식 공개 release 승인으로 해석하지 않는다. validator와 fixture 시험은 Docker나
 외부 registry를 호출하지 않는다.
 
 기본 `BETA_ADMIN_ONLY=1`이면 `ADMIN_EMAILS`, `GOOGLE_CLIENT_ID`,

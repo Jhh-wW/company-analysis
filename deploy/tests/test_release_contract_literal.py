@@ -99,6 +99,21 @@ def test_TYPED_DART_COLLECTOR는_render_yaml에_없다() -> None:
     )
 
 
+def test_deploy_readme가_출시_계약_이름을_적어_둔다() -> None:
+    """배포 안내 문서가 «지금 배포되는 계약»을 이름으로 적고 있는지 본다.
+
+    이 문서는 저장소에서 배포를 설명하는 입구다. 계약 이름이 없으면 옛 관리자
+    계약 설명만 남아, 링크·초대·QR 입구가 열린 배포를 읽는 사람이 닫힌 배포로
+    오해한다. 값이 바뀌면 문서도 같은 커밋에서 바뀌게 만든다.
+    """
+
+    readme = (REPOSITORY_ROOT / "deploy" / "README.md").read_text(encoding="utf-8")
+
+    assert EXPECTED_RUNTIME_CONTRACT in readme, (
+        "deploy/README.md에 출시 배포 계약 이름이 없습니다 — 문서가 옛 계약만 설명합니다"
+    )
+
+
 def _module_constant(module_path: Path, name: str) -> str:
     """모듈을 «실행하지 않고» 최상위 문자열 상수 하나를 읽는다.
 
