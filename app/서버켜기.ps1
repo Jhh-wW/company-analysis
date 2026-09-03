@@ -236,13 +236,13 @@ $useLogin = $(if ($googleReady) { "y" } else { "n" })
 # 켜진 채로 남아, 구글 로그인을 안 켠 사람은 첫 화면부터 아무것도 열지 못한다.
 if ($googleReady) {
     $env:BETA_ADMIN_ONLY = "1"
-    Write-Host "로그인 벽: 켬 — 관리자 이메일로 넣은 계정만 들어갑니다." -ForegroundColor DarkGray
+    Write-Host "로그인 벽: 켬 · 관리자 이메일로 넣은 계정만 들어갑니다." -ForegroundColor DarkGray
 } else {
     # 이 실행기는 내 컴퓨터(127.0.0.1)에서만 듣는 서버를 켠다. 로그인을 안 켠다면
     # 벽도 같이 꺼야 「조사 화면만 씁니다」가 사실이 된다.
     $env:BETA_ADMIN_ONLY = "0"
     Remove-Item Env:\ADMIN_EMAILS -ErrorAction SilentlyContinue
-    Write-Host "로그인 벽: 끔 — 로그인 없이 조사 화면만 씁니다." -ForegroundColor DarkGray
+    Write-Host "로그인 벽: 끔 · 로그인 없이 조사 화면만 씁니다." -ForegroundColor DarkGray
 }
 
 
@@ -345,7 +345,7 @@ if ($mode -eq "2") {
     }
     if ($sealBytes -lt 32) {
         Write-Host ""
-        Write-Host "진짜 조사로는 켤 수 없습니다 — 아래 값이 먼저 있어야 합니다." -ForegroundColor Red
+        Write-Host "진짜 조사로는 켤 수 없습니다. 아래 값이 먼저 있어야 합니다." -ForegroundColor Red
         Write-Host "  · PROVENANCE_SEAL_SECRET : 32바이트 이상의 아무 문자열. 없으면 서버가 시작되지 않습니다."
         Write-Host "  · DART_API_KEY · ANTHROPIC_API_KEY : 공시 조회와 AI 호출에 필요합니다."
         Write-Host ""
@@ -356,10 +356,10 @@ if ($mode -eq "2") {
         exit 1
     }
     $env:PIPELINE = "real"
-    Write-Host "★ 진짜 조사 모드 — 조사할 때마다 요금이 발생합니다." -ForegroundColor Red
+    Write-Host "★ 진짜 조사 모드 · 조사할 때마다 요금이 발생합니다." -ForegroundColor Red
 } else {
     Remove-Item Env:\PIPELINE -ErrorAction SilentlyContinue
-    Write-Host "데모 모드 — 비용이 들지 않습니다." -ForegroundColor Green
+    Write-Host "데모 모드 · 비용이 들지 않습니다." -ForegroundColor Green
 }
 
 # ── 켠다 ────────────────────────────────────────────────
