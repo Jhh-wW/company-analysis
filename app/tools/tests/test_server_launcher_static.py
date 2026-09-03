@@ -11,11 +11,13 @@
    로그인에 성공해도 관리 화면·노션 보내기에 닿지 못한다.
 3. 저장소 가상환경의 파이썬을 먼저 찾는다.
 4. 지금은 사실이 아닌 안내 문구가 남아 있지 않다.
+5. 기억해 두는 값을 세거나 나열한 안내가 실제 목록과 어긋나지 않는다.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -151,3 +153,36 @@ def test_launcher_parses_under_windows_powershell(tmp_path: Path) -> None:
         timeout=60,
     )
     assert b"PARSE OK" in result.stdout, result.stdout + result.stderr
+
+
+def _saved_value_names() -> list[str]:
+    """실행기가 «기억·질문·삭제» 대상으로 다루는 값 이름을 파일에서 읽어 온다.
+
+    안내 문구가 사실인지 재려면 기준이 사람 기억이 아니라 실행기 자신이어야 한다.
+    """
+    names: list[str] = []
+    for group in re.findall(r"\$(?:googleKeys|notionKeys)\s*=\s*@\(([^)]*)\)", SCRIPT):
+        names.extend(re.findall(r'"([A-Z0-9_]+)"', group))
+    assert names, "기억해 두는 값 목록을 실행기에서 찾지 못했다"
+    return names
+
+
+def test_saved_value_count_claim_matches_the_real_list() -> None:
+    """개수를 못 박은 안내는 값이 하나 늘어난 날 조용히 거짓이 된다.
+
+    개수를 아예 안 적는 편이 안전하고, 적었다면 실제 목록과 같아야 한다.
+    """
+    real = len(_saved_value_names())
+    for claimed in re.findall(r"값이\s*(\d+)\s*개", SCRIPT):
+        assert int(claimed) == real, (
+            f"실행기가 기억하는 값은 {real}개인데 안내에는 {claimed}개라고 적혀 있다"
+        )
+
+
+def test_manual_clear_comment_lists_every_saved_value() -> None:
+    """손으로 지우는 방법에서 빠진 값은 지운 줄 알고 이 컴퓨터에 그대로 남는다."""
+    manual = SCRIPT.split("저장한 값 지우기")[-1]
+    listed = set(re.findall(r'SetEnvironmentVariable\("([A-Z0-9_]+)"', manual))
+    assert listed == set(_saved_value_names()), (
+        "「저장한 값 지우기」 목록이 실제로 기억하는 값과 다르다"
+    )
