@@ -29,6 +29,7 @@ from src.features.report_delivery import retention as delivery_retention
 from src.features.report_delivery import singleflight as delivery_singleflight
 from src.features.report_delivery import store as delivery_store
 from src.features.report_delivery.cache_identity import CacheLookupKey, CacheNamespace
+from src.features.report_delivery.canonical import require_aware
 from src.features.report_delivery.models import (
     ContentSnapshot,
     Delivery,
@@ -306,6 +307,33 @@ def _content_generated_at(
     return parsed
 
 
+def _reused_link_lifetime(
+    content: ContentSnapshot,
+    *,
+    completed_at: dt.datetime,
+) -> dt.timedelta:
+    """다시 보여주는 주소에는 «본문을 만든 날»부터 세어 남은 기간만 준다.
+
+    새 주소마다 전체 기간을 새로 주면 같은 본문이 원래 기한을 훌쩍 넘겨
+    계속 열린다. 원본 주소는 닫혔는데 새 주소만 열려 있는 상태를 막는다.
+    """
+
+    try:
+        delivered = require_aware(completed_at, label="보고서 전달")
+        generated = require_aware(content.content_generated_at, label="내용 생성")
+    except ValueError as exc:
+        raise DeliveryAdapterError(
+            "다시 보여주는 출고의 시각에는 시간대가 필요합니다"
+        ) from exc
+    # DeliveryPolicy가 0 이하를 거부하므로 policy를 만들기 «전에» 판정한다.
+    remaining = dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS) - (delivered - generated)
+    if remaining <= dt.timedelta(0):
+        raise DeliveryAdapterError(
+            "보고서를 만든 날부터 센 공개 기간이 이미 끝나 다시 보여줄 수 없습니다"
+        )
+    return remaining
+
+
 def _source_ids(report: Report) -> tuple[tuple[str, ...], tuple[str, ...]]:
     receipts: set[str] = set()
     documents: set[str] = set()
@@ -476,7 +504,11 @@ def persist_approved_delivery(
         )
         policy = DeliveryPolicy(
             content_max_age=dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS),
-            public_link_lifetime=dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS),
+            public_link_lifetime=(
+                _reused_link_lifetime(content, completed_at=completed_at)
+                if reused_from_cache
+                else dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS)
+            ),
         )
         delivery = Delivery.issue(
             public_id=public_id,
@@ -683,6 +715,15 @@ def persist_reused_delivery(
         content_max_age=dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS),
         public_link_lifetime=dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS),
     )
+    # 새 주소의 만료는 원본 보고서를 만든 날에서 이어받는다. 조회용 policy와
+    # 나누어 두어야 캐시 적중 판정의 나이 기준은 그대로 유지된다.
+    reused_policy = DeliveryPolicy(
+        content_max_age=dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS),
+        public_link_lifetime=_reused_link_lifetime(
+            content,
+            completed_at=completed_at,
+        ),
+    )
     if cache_key is None:
         proof = reuse_singleflight_key
         if (
@@ -762,7 +803,7 @@ def persist_reused_delivery(
             billing_bucket_id=clean_bucket,
             content=content,
             delivered_at=completed_at,
-            policy=policy,
+            policy=reused_policy,
             reused_from_cache=True,
         )
         delivery_store.save_delivery(conn, delivery)

@@ -17,7 +17,10 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 
+import pytest
+
 from src.core.constants import CACHE_HIT_LAYER1, CACHE_HIT_MESSAGE
+from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
 from src.features.observability import constants as obs
 from src.features.pipeline.port import Grade, Outcome, Report, RunResult, UserInput
 from src.features.report_delivery.cache_identity import CacheNamespace
@@ -30,6 +33,7 @@ from src.features.report_delivery.source_identity import SourceSnapshot
 from src.features.sharelink.constants import RESULT_REUSED_REPORT_NOTICE
 from src.shared import engine_build_identity as build_identity_contract
 from src.web import recording
+from src.web import report_delivery_adapter
 from src.web.routers import reports as reports_router
 
 # ══════════════════════════════════════════════════════════
@@ -212,3 +216,70 @@ def test_다시_보여준다는_안내는_내부_용어를_쓰지_않는다():
     """손님 화면에 만든 쪽 낱말이 새면 무슨 말인지 알 수 없다."""
     for 내부어 in ("캐시", "cache", "delivery", "LINK", "MEMBER", "재사용"):
         assert 내부어 not in RESULT_REUSED_REPORT_NOTICE
+
+
+# ══════════════════════════════════════════════════════════
+# ④ 다시 보여주는 주소는 «원본을 만든 날»에서 남은 기간만 이어받는다
+# ══════════════════════════════════════════════════════════
+
+
+def _만든날이_지난_본문(지난_기간: dt.timedelta) -> ContentSnapshot:
+    """전달 시각보다 ``지난_기간``만큼 앞서 만들어진 본문 한 벌."""
+
+    delivery = _저장된_전달기록(다시_보여주는가=True)
+    made = delivery.delivered_at - 지난_기간
+    return ContentSnapshot.create(
+        payload=b"reused-report-payload",
+        source_snapshot=SourceSnapshot.capture(
+            dart_receipt_nos=("20260815000123",),
+            financial_payload=None,
+            financial_payload_sha256="d" * 64,
+            captured_at=made,
+            source_as_of=made.date(),
+            adapter_versions={"report_delivery": "test-v1"},
+        ),
+        cache_namespace=CacheNamespace.create(
+            product="company-analysis",
+            schema_version="company-report-v2-composer",
+            deployment_revision="c" * 40,
+            image_digest="generator-build:test",
+            requested_models={"pipeline": "claude-test"},
+            output_settings={"temperature": 0},
+        ),
+        content_generated_at=made,
+        engine_epoch_digest=build_identity_contract.EngineBuildIdentity(
+            deployment_revision="c" * 40,
+            build_id=(
+                f"{build_identity_contract.ENGINE_BUILD_ID_CONTRACT_VERSION}:"
+                + "c" * 40
+            ),
+        ).epoch_digest,
+        actual_models=("claude-test",),
+    )
+
+
+def test_다시_보여주는_주소는_남은_기간만_받는다():
+    """전체 기간을 새로 주면 같은 보고서가 두 배까지 열려 있게 된다."""
+
+    지난_기간 = dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS - 1)
+    content = _만든날이_지난_본문(지난_기간)
+
+    남은_기간 = report_delivery_adapter._reused_link_lifetime(
+        content,
+        completed_at=content.content_generated_at + 지난_기간,
+    )
+
+    assert 남은_기간 == dt.timedelta(days=1)
+
+
+def test_공개_기간을_다_쓴_본문은_새_주소를_받지_못한다():
+    """0일짜리 주소를 만들어 두면 «열리자마자 닫힌 주소»가 남는다."""
+
+    지난_기간 = dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS)
+    content = _만든날이_지난_본문(지난_기간)
+
+    with pytest.raises(report_delivery_adapter.DeliveryAdapterError):
+        report_delivery_adapter._reused_link_lifetime(
+            content,
+            completed_at=content.content_generated_at + 지난_기간,
+        )

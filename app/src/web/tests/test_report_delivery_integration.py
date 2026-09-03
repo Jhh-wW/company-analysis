@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import datetime as dt
 import hashlib
 import sqlite3
@@ -2463,3 +2464,219 @@ def test_PDF후보생성과_자동검사차단은_서로다른_영속코드로_�
         pdf = client.get(f"/download/pdf/{report_id}", follow_redirects=False)
 
     assert result.status_code == pdf.status_code == 409
+
+
+# ══════════════════════════════════════════════════════════
+# 다시 보여주는 주소의 기한은 «원본을 만든 날»에서 이어받는다
+#
+# 이어받지 않으면 같은 본문이 새 주소를 받을 때마다 기한을 통째로 새로
+# 얻는다. 59일 된 보고서를 다시 보여주면 총 119일까지 열리고, 원본 주소는
+# 닫혔는데 새 주소만 열려 있는 상태가 된다.
+# ══════════════════════════════════════════════════════════
+
+
+_만료시험_접수번호 = "20260828000123"
+
+
+def _만료시험_재무지문() -> str:
+    return financial_payload_digest(
+        {
+            "status": "000",
+            "list": [{"account_nm": "매출액", "thstrm_amount": "100"}],
+        }
+    )
+
+
+def _만든날을_고정한_보고서(made_on: dt.date):
+    """본문 생성일을 시험이 정한 날짜로 못 박은 보고서 한 벌."""
+
+    # 자료 기준일(as_of_date)은 건드리지 않는다. 뒤로 밀면 본문 출처가
+    # 「기준일 뒤 자료」로 판정돼 출고 자체가 막힌다.
+    return dataclasses.replace(_demo_report(), generated_at=made_on.isoformat())
+
+
+def _만료시험_namespace(report) -> tuple[CacheNamespace, str]:
+    revision, image = _current_release_identity()
+    namespace = CacheNamespace.create(
+        product="company-analysis",
+        schema_version=report.schema_version or "legacy-report-schema",
+        deployment_revision=revision,
+        image_digest=image,
+        requested_models={"pipeline": "deterministic-demo"},
+        output_settings={"temperature": 0},
+    )
+    preflight_digest = ReportSourceIdentity(
+        dart_receipt_numbers=(_만료시험_접수번호,),
+        financial_payload_digest=_만료시험_재무지문(),
+    ).cache_digest
+    return namespace, preflight_digest
+
+
+def _원본을_출고한다(report, *, 통장: str, 완료시각: dt.datetime):
+    namespace, preflight_digest = _만료시험_namespace(report)
+    owner = reports_router.finalize_new_report_delivery(
+        report_id=f"expiry-owner-{uuid.uuid4().hex}",
+        corp_id="demo-corp",
+        billing_bucket_id=통장,
+        report=report,
+        actual_models=("deterministic-demo",),
+        reused_from_cache=False,
+        engine_build_identity=_current_build_identity(),
+        dart_receipt_numbers=(_만료시험_접수번호,),
+        financial_payload_digest=_만료시험_재무지문(),
+        cache_namespace=namespace,
+        preflight_identity_digest=preflight_digest,
+        cache_eligible=True,
+        completed_at=완료시각,
+    )
+    assert owner.artifact is not None
+    return owner, namespace, preflight_digest
+
+
+def _다시_보여준다(
+    report,
+    owner,
+    namespace,
+    preflight_digest,
+    *,
+    통장: str,
+    완료시각: dt.datetime,
+    public_id: str,
+):
+    return reports_router.finalize_new_report_delivery(
+        report_id=public_id,
+        corp_id="demo-corp",
+        billing_bucket_id=통장,
+        report=report,
+        actual_models=("deterministic-demo",),
+        reused_from_cache=True,
+        engine_build_identity=_current_build_identity(),
+        dart_receipt_numbers=(_만료시험_접수번호,),
+        financial_payload_digest=_만료시험_재무지문(),
+        reuse_content_snapshot_id=owner.content.content_id,
+        reuse_artifact_id=owner.artifact.artifact_id,
+        cache_namespace=namespace,
+        preflight_identity_digest=preflight_digest,
+        cache_eligible=True,
+        completed_at=완료시각,
+    )
+
+
+def test_다시_보여주는_주소는_원본과_같은_날_닫힌다(monkeypatch, tmp_path: Path):
+    """59일 된 본문을 다시 보여줘도 기한이 늘어나면 안 된다."""
+
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "expiry-inherit"))
+    made_on = dt.date(2026, 6, 1)
+    made_at = dt.datetime.combine(made_on, dt.time.min, tzinfo=clock.KST)
+    report = _만든날을_고정한_보고서(made_on)
+    owner, namespace, preflight_digest = _원본을_출고한다(
+        report, 통장="expiry-bucket", 완료시각=made_at
+    )
+    assert owner.content.content_generated_at == made_at
+
+    reused = _다시_보여준다(
+        report,
+        owner,
+        namespace,
+        preflight_digest,
+        통장="expiry-bucket",
+        완료시각=made_at + dt.timedelta(days=59),
+        public_id=f"expiry-reuse-{uuid.uuid4().hex}",
+    )
+
+    기한 = made_at + dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS)
+    assert owner.delivery.expires_at == 기한
+    assert reused.delivery.expires_at == 기한
+    assert reused.content.content_id == owner.content.content_id
+
+
+def test_새로_만든_주소의_기한은_발급일부터_그대로_센다(monkeypatch, tmp_path: Path):
+    """이어받기가 새 보고서까지 번지면 방금 만든 주소가 일찍 닫힌다."""
+
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "expiry-fresh"))
+    made_on = dt.date(2026, 6, 1)
+    made_at = dt.datetime.combine(made_on, dt.time.min, tzinfo=clock.KST)
+    발급시각 = made_at + dt.timedelta(days=3)
+    report = _만든날을_고정한_보고서(made_on)
+
+    owner, _namespace, _digest = _원본을_출고한다(
+        report, 통장="fresh-bucket", 완료시각=발급시각
+    )
+
+    assert owner.delivery.expires_at == 발급시각 + dt.timedelta(
+        days=REPORT_LINK_MAX_AGE_DAYS
+    )
+
+
+def test_공개기간이_끝난_본문은_새_주소를_받지_못한다(monkeypatch, tmp_path: Path):
+    """남은 기간이 0이면 «즉시 닫힌 주소»를 만들지 않고 그 자리에서 막는다."""
+
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "expiry-exhausted"))
+    made_on = dt.date(2026, 6, 1)
+    made_at = dt.datetime.combine(made_on, dt.time.min, tzinfo=clock.KST)
+    report = _만든날을_고정한_보고서(made_on)
+    owner, namespace, preflight_digest = _원본을_출고한다(
+        report, 통장="exhausted-bucket", 완료시각=made_at
+    )
+    재사용_id = f"expiry-exhausted-{uuid.uuid4().hex}"
+
+    def 캐시조회_금지(*_args, **_kwargs):
+        raise AssertionError(
+            "공개 기간이 끝난 본문인데 캐시 조회까지 갔습니다 — 그 자리에서 막아야 합니다"
+        )
+
+    monkeypatch.setattr(
+        report_delivery_adapter.delivery_store, "load_cache_hit", 캐시조회_금지
+    )
+
+    with pytest.raises(report_delivery_adapter.DeliveryAdapterError):
+        _다시_보여준다(
+            report,
+            owner,
+            namespace,
+            preflight_digest,
+            통장="exhausted-bucket",
+            완료시각=made_at + dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS),
+            public_id=재사용_id,
+        )
+
+    with storage_db.connect() as conn:
+        assert delivery_store.load_delivery_by_public_id(conn, 재사용_id) is None
+
+
+def test_기한이_지나면_원본과_재사용_주소가_함께_닫힌다(monkeypatch, tmp_path: Path):
+    """새 주소만 열려 있으면 닫은 보고서가 계속 돌아다닌다."""
+
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "expiry-both-closed"))
+    오늘 = clock.now_kst().date()
+    made_on = 오늘 - dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS + 1)
+    made_at = dt.datetime.combine(made_on, dt.time.min, tzinfo=clock.KST)
+    report = _만든날을_고정한_보고서(made_on)
+    owner, namespace, preflight_digest = _원본을_출고한다(
+        report, 통장="both-closed-bucket", 완료시각=made_at
+    )
+    재사용_id = f"expiry-closed-{uuid.uuid4().hex}"
+    reused = _다시_보여준다(
+        report,
+        owner,
+        namespace,
+        preflight_digest,
+        통장="both-closed-bucket",
+        완료시각=made_at + dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS - 1),
+        public_id=재사용_id,
+    )
+    assert reused.delivery.expires_at == owner.delivery.expires_at
+
+    job_runtime._JOBS.clear()
+    with TestClient(app, base_url="https://testserver") as client:
+        _authorize_current_admin(client)
+        상태 = [
+            client.get(f"/result/{owner.delivery.public_id}", follow_redirects=False),
+            client.get(
+                f"/download/pdf/{owner.delivery.public_id}", follow_redirects=False
+            ),
+            client.get(f"/result/{재사용_id}", follow_redirects=False),
+            client.get(f"/download/pdf/{재사용_id}", follow_redirects=False),
+        ]
+
+    assert [response.status_code for response in 상태] == [410, 410, 410, 410]
