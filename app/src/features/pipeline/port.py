@@ -97,8 +97,9 @@ def outcome_for(raw: str, table: Mapping[str, Outcome]) -> Outcome:
 class Grade(str, Enum):
     """보고서를 얼마나 채웠는가.
 
-    과거 저장본 호환을 위해 세 값을 유지한다. canonical(v4)는 검증된 1~8장과
-    조건부 9장까지 있으면 ``COMPLETE``, 9장만 빠지면 ``PARTIAL``로 출고한다.
+    과거 저장본 호환을 위해 세 값을 유지한다. 출시 모드
+    (``REPORT_RELEASE_MODE=FULL``)는 1~9장을 모두 갖춘 보고서만 ``COMPLETE``로
+    출고하고, 9장이 빠진 ``PARTIAL``은 연습 모드(``SHADOW``)에서만 만든다.
     """
 
     COMPLETE = "완성"
