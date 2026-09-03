@@ -1863,6 +1863,23 @@ class RealPipeline:
                 generation_mode=generation_mode,
             )
         except generation_coordination.GenerationCoordinationError as stopped:
+            if type(stopped) is generation_coordination.GenerationCoordinationError:
+                # 이 pipeline 안에서 직접 올리는 기본형 예외는 재사용 저장본 계약
+                # 위반 같은 fail-closed 조건이다. 요청 전역 중단(초대 링크 닫힘·
+                # lease 상실·대기 취소 — 전부 하위 클래스)과 달리 실행기에 넘길
+                # 전용 분기가 없으므로, 예전 계약대로 실패 결과로 닫고 끝낸다.
+                logger.warning("본조사를 계약 위반으로 닫습니다 — %s", stopped)
+                result = RunResult(
+                    outcome=Outcome.FAILED,
+                    message=_message(Outcome.FAILED),
+                )
+                return replace(
+                    result,
+                    cost_krw=_request_spent_krw(engine),
+                    model=_request_model_label(engine),
+                    billing_uncertain=_request_billing_uncertain(engine),
+                    ai_cost_events=_request_cost_events(engine),
+                )
             # 초대 링크 중단·lease 상실·대기 취소는 조사가 «못 한» 것이지
             # 「품질이 모자란」 것이 아니다. 여기서 FAILED 결과로 바꾸면 실행기의
             # 전용 중단 분기에 닿지 못해 이력 사유와 화면 문구가 뒤바뀐다.
