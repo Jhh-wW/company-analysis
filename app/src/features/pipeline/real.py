@@ -218,6 +218,11 @@ _FINAL_GATE_REASON_KO: Final[dict[str, str]] = {
 ENGINE_V2_ENV_NAME: Final[str] = engine_mode.ENGINE_V2_ENV_NAME
 ENGINE_V2_ENV_ON: Final[str] = engine_mode.ENGINE_V2_ENV_ON
 
+#: 요청 전역 중단 예외에 실어 보내는 「그때까지 실제로 쓴 값」의 속성 이름.
+#: 중단은 결과를 돌려주지 않고 예외로 나가므로, 이 값을 같이 싣지 않으면 이미
+#: 나간 AI 원가가 원가 기록에서 0원으로 사라진다. 실행기가 같은 이름으로 읽는다.
+STOPPED_RUN_USAGE_ATTR: Final[str] = "stopped_run_usage"
+
 
 def _requested_release_mode(
     generation_mode: engine_mode.EngineMode,
@@ -1857,6 +1862,27 @@ class RealPipeline:
                 build_identity=build_identity,
                 generation_mode=generation_mode,
             )
+        except generation_coordination.GenerationCoordinationError as stopped:
+            # 초대 링크 중단·lease 상실·대기 취소는 조사가 «못 한» 것이지
+            # 「품질이 모자란」 것이 아니다. 여기서 FAILED 결과로 바꾸면 실행기의
+            # 전용 중단 분기에 닿지 못해 이력 사유와 화면 문구가 뒤바뀐다.
+            # 그때까지 실제로 쓴 값만 예외에 실어 그대로 다시 던진다.
+            logger.info(
+                "본조사를 요청 전역 사유로 중단했습니다 — %s",
+                type(stopped).__name__,
+            )
+            setattr(
+                stopped,
+                STOPPED_RUN_USAGE_ATTR,
+                RunResult(
+                    outcome=Outcome.FAILED,
+                    cost_krw=_request_spent_krw(engine),
+                    model=_request_model_label(engine),
+                    billing_uncertain=_request_billing_uncertain(engine),
+                    ai_cost_events=_request_cost_events(engine),
+                ),
+            )
+            raise
         except Exception:  # noqa: BLE001 — AI 뒤 후속 코드가 터져도 쓴 돈은 0원이 아니다
             logger.exception("본조사 중 예기치 않은 실패가 발생했습니다")
             result = RunResult(
@@ -3330,6 +3356,14 @@ def _v2_ask_via_provider(
                     error, provider_budget.RequestCallLimitReached
                 ),
             ) from error
+        except generation_coordination.GenerationCoordinationError as error:
+            # 초대 링크 중단·lease 상실·대기 취소·유료 단계 예약 실패는 «이
+            # 요청 전역» 중단이다. 여기서 감싸지 않으면 composer의 문장 단위
+            # 삼킴이 이를 「이 장을 못 썼다」로 바꿔, 조사는 남은 장과 확인 단계를
+            # 돌고 사유가 「품질 미달」로 뒤바뀐다(실측 결함).
+            # 호출 «횟수» 상한이 아니라 요청 자체를 더 진행할 수 없는 상태이므로
+            # 선택적 단계를 건너뛰고 이어가지 않는다.
+            raise AskFatalError(error, call_limit=False) from error
         blocks = getattr(response, "content", None) or []
         return "".join(str(getattr(block, "text", "") or "") for block in blocks)
 

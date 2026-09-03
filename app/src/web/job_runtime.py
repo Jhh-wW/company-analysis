@@ -190,11 +190,18 @@ class JobExecutionDeadlineExceeded(RuntimeError):
     """한 작업이 전체 실행 절대 마감을 넘겨 더는 슬롯을 소유할 수 없음."""
 
 
-class LinkAccessClosedDuringRun(RuntimeError):
+class LinkAccessClosedDuringRun(
+    generation_coordination.GenerationCoordinationError
+):
     """조사 도중 초대 링크가 닫혀 다음 유료 단계에 들어가지 않는다.
 
     ★ 사용자에게 보일 짧은 안내와 관리자 이력에 남길 ASCII 사유 코드를 «함께»
       들고 다닌다. 둘을 따로 두면 화면에 코드가 새거나 감사행에 한국어가 들어간다.
+    ★ 조정 계약 예외를 상속한다. 이 중단은 유료 단계 진입 callback 안에서
+      일어나므로 lease 상실·취소와 «같은 종류»의 요청 전역 중단이고, 조사
+      본체(pipeline)는 웹 계층을 import하지 않고도 한 이름으로 알아볼 수 있어야
+      한다. 평범한 RuntimeError로 두면 장 하나의 실패로 삼켜져 조사가 끝까지
+      돌고 이력 사유가 「품질 미달」로 바뀐다(실측 결함).
     """
 
     def __init__(self, reason_code: str) -> None:
@@ -907,6 +914,37 @@ def _apply_reused_delivery_origin(job: Job, result: RunResult) -> None:
     job.delivery_origin_artifact_id = origin_ids[1]
 
 
+def _stopped_run_result(
+    job: Job,
+    stopped: BaseException,
+    *,
+    message: str,
+) -> RunResult:
+    """중단된 조사의 결과 1건. 이미 나간 AI 원가를 0원으로 지우지 않는다.
+
+    조사가 결과 대신 예외로 끝나면 그때까지 쓴 값은 예외에 실려 온다
+    (`features/pipeline/real.py`가 같은 이름으로 붙인다). 실어 오지 않았거나
+    계약 밖 값이면 아무것도 지어내지 않고 0원으로 둔다.
+    """
+
+    used = getattr(stopped, "stopped_run_usage", None)
+    if not isinstance(used, RunResult):
+        return RunResult(
+            outcome=Outcome.FAILED,
+            message=message,
+            # 이미 연 유료 단계가 있으면 그 비용을 0원으로 지우지 않는다.
+            billing_uncertain=job.paid_phase is not None,
+        )
+    return RunResult(
+        outcome=Outcome.FAILED,
+        message=message,
+        cost_krw=used.cost_krw,
+        model=used.model,
+        ai_cost_events=used.ai_cost_events,
+        billing_uncertain=used.billing_uncertain or job.paid_phase is not None,
+    )
+
+
 async def _run_job(job: Job) -> None:
     """뒤에서 파이프라인을 돌리며 진행 상황을 갱신한다.
 
@@ -999,21 +1037,11 @@ async def _run_job(job: Job) -> None:
             job.job_id,
             closed.reason_code,
         )
-        job.result = RunResult(
-            outcome=Outcome.FAILED,
-            message=closed.notice,
-            # 이미 연 유료 단계가 있으면 그 비용을 0원으로 지우지 않는다.
-            billing_uncertain=job.paid_phase is not None,
-        )
+        job.result = _stopped_run_result(job, closed, message=closed.notice)
     except Exception as exc:  # noqa: BLE001 — 어떤 실패든 화면은 살아 있어야 한다
         # ★ 사용자에게 내부 오류 내용을 보여주지 않는다 (경로·스택 노출 금지).
         logger.exception("파이프라인 실패 job_id=%s", job.job_id)
-        job.result = RunResult(
-            outcome=Outcome.FAILED,
-            message=PIPELINE_FAILED_MESSAGE,
-            # 진짜 알맹이가 계약 밖 예외를 냈다면 provider 호출 뒤였을 수 있다.
-            billing_uncertain=job.paid_phase is not None,
-        )
+        job.result = _stopped_run_result(job, exc, message=PIPELINE_FAILED_MESSAGE)
         del exc
     finally:
         if shutdown_cleanup_only:
