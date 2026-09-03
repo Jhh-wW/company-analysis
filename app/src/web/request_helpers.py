@@ -945,6 +945,17 @@ def _throttle_bound_report(request: Request) -> tuple[str, str]:
     return LANDING_REPORT_BUTTON_TEMPLATE.format(company=company), report_url
 
 
+#: 한도 안내에 반드시 함께 나가는 «저장본도 오늘 몫을 쓴다»는 사실.
+#: ★ 왜 미리 말하는가 — 같은 회사를 다시 조사하면 새로 만들지 않고 저장본을 그대로
+#:   보여 주는데, 그래도 오늘 몫 1건은 줄어든다. 말하지 않으면 손님은 「보여만
+#:   줬는데 왜 줄지」로 읽고 남은 건수를 실제보다 많게 센 채 하루를 쓴다.
+#: ★ 순서를 지어낼 수 없다 — 자리는 조사를 시작할 때 잡고, 저장본을 보여 줄지는
+#:   그 뒤에 정해진다. 그래서 저장본이라고 몫을 돌려줄 수 없다.
+MEMBER_SUCCESS_REUSE_NOTICE: Final[str] = (
+    "같은 회사를 다시 조사하면 저장본을 보여 드리지만 오늘 몫 1건은 사용됩니다."
+)
+
+
 def member_success_limit_message(limit: int) -> str:
     """오늘 성공 보고서 건수를 다 쓴 친구에게 보여줄 말.
 
@@ -956,10 +967,15 @@ def member_success_limit_message(limit: int) -> str:
       (`job_runtime._start_with_reserved_slot`)이다. 같은 문장을 두 곳에 따로
       적어 두면 한쪽만 고쳐져서, 한도를 7건으로 올린 친구가 경쟁에서 밀렸을 때
       「3건 다 썼다」는 틀린 말을 본다 — 같은 정의가 두 곳이 되는 함정이다.
+
+    ★ 저장본 안내를 여기 함께 붙이는 이유 — 회원이 자기 하루 한도를 보는 화면은
+      이 문장이 실리는 차단 화면뿐이다. 남은 건수를 미리 보여 주는 화면이 없으니,
+      「저장본도 몫을 쓴다」를 말할 자리도 여기밖에 없다.
     """
     return (
         f"오늘 성공한 보고서 {int(limit)}건을 모두 사용했습니다. "
-        "내일 다시 시도해 주세요."
+        "내일 다시 시도해 주세요. "
+        f"{MEMBER_SUCCESS_REUSE_NOTICE}"
     )
 
 

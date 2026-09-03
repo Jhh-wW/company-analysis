@@ -51,6 +51,10 @@ _시각 = "2026-09-02T10:00:00+09:00"
 #: 리터럴로 적는다 — 상수를 import해 비교하면 그 값이 바뀌어도 시험이 조용히 따라간다.
 _본조사_예약액 = 900.0
 
+#: 한도 안내에 반드시 함께 나와야 하는 문장. 생산 상수를 가져오지 않고 리터럴로
+#: 적는다 — 상수를 import해 비교하면 문장이 사라져도 시험이 조용히 따라간다.
+_저장본_안내 = "같은 회사를 다시 조사하면 저장본을 보여 드리지만 오늘 몫 1건은 사용됩니다."
+
 
 def _주체(email: str) -> str:
     digest = hashlib.sha256(email.lower().encode("utf-8")).hexdigest()[:24]
@@ -403,10 +407,68 @@ def test_막는_자리와_말하는_자리는_같은_문장을_쓴다():
     """두 자리에 같은 문장이 따로 박혀 있으면 한쪽만 고쳐진다 — 같은 정의가 두 곳이 되는 함정이다."""
     assert (
         request_helpers.member_success_limit_message(7)
-        == "오늘 성공한 보고서 7건을 모두 사용했습니다. 내일 다시 시도해 주세요."
+        == "오늘 성공한 보고서 7건을 모두 사용했습니다. 내일 다시 시도해 주세요. "
+        + _저장본_안내
     )
     assert "3건" in request_helpers.member_success_limit_message(3)
     assert "20건" in request_helpers.member_success_limit_message(20)
+
+
+def test_한도_안내는_저장본_재사용도_오늘_몫을_쓴다고_미리_말한다():
+    """★ 안내가 말하지 않으면 손님은 남은 건수를 잘못 센다.
+
+    같은 회사를 다시 조사하면 새로 만들지 않고 저장본을 그대로 보여 준다. 그런데
+    오늘 몫 1건은 그대로 줄어든다. 이 사실이 안내에 없으면 손님은 「보여만 줬는데
+    왜 줄지」로 읽고, 남은 건수를 실제보다 많게 계산한 채 하루를 쓴다.
+    """
+    assert _저장본_안내 in request_helpers.member_success_limit_message(3)
+    assert _저장본_안내 in request_helpers.member_success_limit_message(7)
+
+
+def test_한도를_다_쓴_친구의_화면에도_저장본_안내가_그려진다():
+    """문장을 만들어 두고 화면이 안 그리면 아무도 못 본다 — 실제 화면 글자로 본다."""
+    _초대한다(_친구)
+    _성공을_다_쓴다(_친구, 3)
+
+    assert _저장본_안내 in _막힌_화면_글자(_친구)
+
+
+def test_저장본을_다시_보여_준_실행도_오늘_몫_1건을_쓴다():
+    """★ 안내가 말한 그대로 «실제로» 1건이 줄어드는지 못 박는다.
+
+    자리를 잡는 시점은 조사를 시작할 때이고, 저장본을 보여 줄지 새로 만들지는
+    그 뒤에 정해진다. 그래서 저장본을 그대로 보여 준 실행도 확정 자리에서
+    성공 1건으로 닫히고, 오늘 몫이 하나 줄어든다.
+    """
+    _초대한다(_친구)
+    _한도를_정한다(_친구, 건수=1, 금액=None)
+    오늘 = clock.today_kst().isoformat()
+    실행 = _실행번호("4")
+
+    with storage_db.connect() as conn:
+        assert dashboard_store.reserve_member_run(
+            conn, run_id=실행, actor_email=_친구, day=오늘, now_iso=_시각,
+        )
+        # 저장본을 그대로 보여 준 실행도 「보고서가 나왔다」로 닫힌다 —
+        # 확정 자리는 새로 만들었는지 저장본인지 묻지 않는다.
+        assert dashboard_store.settle_member_run(
+            conn, run_id=실행, succeeded=True, report_id=실행, now_iso=_시각,
+        )
+        상태들 = [
+            str(row[0])
+            for row in conn.execute(
+                f"SELECT state FROM {dashboard_store.TABLE_MEMBER_USAGE} "
+                "WHERE run_id = ?",
+                (실행,),
+            )
+        ]
+        assert 상태들 == [dashboard_store.MEMBER_USAGE_USED]
+        assert dashboard_store.member_usage_today(
+            conn, actor_email=_친구, day=오늘
+        ) == (1, 0)
+
+    # 1건짜리 한도가 저장본 하나로 다 찼다 — 그래서 다음 요청은 막힌다.
+    assert _저장본_안내 in _막힌_화면_글자(_친구)
 
 
 def test_예약액_계약은_본조사_900원_그대로다():
