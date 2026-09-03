@@ -27,6 +27,7 @@ cd app
 app/                운영 웹서비스(FastAPI) — 화면·로그인·비용·저장·PDF·Notion
 analysis_engine/    조사 엔진 — DART 공시와 회사 공식 웹사이트 수집
 deploy/ · ops/      컨테이너·배포 계약, 운영 절차와 그 절차를 지키는 시험
+scripts/deploy/     컨테이너 빌드·스모크·릴리스 증거 검증 스크립트
 docs/               보고서 정본 기준 · 아키텍처 · ADR
 .github/workflows/  자동 시험과 컨테이너 스모크
 ```
@@ -46,6 +47,8 @@ docs/               보고서 정본 기준 · 아키텍처 · ADR
 ## 라이선스
 
 열람용으로 공개한 저장소입니다. 코드와 문서의 복제·수정·재배포·상업적 이용에는 저작권자의 허락이 필요합니다. 자세한 내용은 [LICENSE](LICENSE)에 있습니다.
+
+함께 담은 글꼴 Prata·Freesentation은 SIL Open Font License 1.1을 따릅니다. 사본은 [`app/src/web/static/fonts/OFL.txt`](app/src/web/static/fonts/OFL.txt)와 [`app/src/features/export_pdf/fonts/OFL.txt`](app/src/features/export_pdf/fonts/OFL.txt)에 있습니다.
 
 ---
 
@@ -98,7 +101,7 @@ docs/               보고서 정본 기준 · 아키텍처 · ADR
 | 1 | 기업 정체성 | 6 | 성장 전략 `#미래` |
 | 2 | 사업 구조와 수익 모델 | 7 | 사업 운영과 파트너 구조 |
 | 3 | 핵심 제품·서비스 | 8 | 인재상과 일하는 방식 |
-| 4 | 3개년 주요 변화와 실행 `#과거` | 9 | 동종업계에서의 경쟁우위 |
+| 4 | 3개년 주요 변화와 실행 `#과거` | 9 | 동종업계 비교 결과 |
 | | | 부록 | 출처와 검증 상태 |
 
 1~9장이 모두 필수입니다. 9장은 다른 회사와 숫자를 맞대는 비교표가 아니라, 회사가 공식
