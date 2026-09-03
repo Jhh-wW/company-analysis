@@ -56,7 +56,7 @@ ENV_NOTION_PARENT_PAGE_ID: Final[str] = "NOTION_PARENT_PAGE_ID"
 # ══════════════════════════════════════════════════════════
 
 #: 한 번의 요청(페이지 생성·children 추가)에 담을 수 있는 최상위 블록 개수 상한.
-#: 넘으면 나눠 보낸다 (팀장 지시 §4).
+#: 넘으면 여러 요청으로 나눠 보낸다.
 MAX_BLOCKS_PER_REQUEST: Final[int] = 100
 #: rich_text 항목 하나(content)에 담을 수 있는 글자 수 상한. 넘으면 나눠 담는다.
 MAX_RICH_TEXT_LENGTH: Final[int] = 2000

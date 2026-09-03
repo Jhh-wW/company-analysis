@@ -1,7 +1,9 @@
 """노션 전송 기능 시험 — 블록 변환(logic) + 전송 흐름(notion)을 함께 본다.
 
-★ 진짜 노션 서버에 접속하지 않는다. `notion.send_report_to_notion`에는 항상 가짜
-  `send` 함수를 주입한다 (팀장 지시 §2 「실제 노션에 접속하지 마라」).
+★ 진짜 노션 서버에 접속하지 않는다 — 실제 노션 호출 금지 원칙: 시험이 바깥
+  서비스를 부르면 결과가 네트워크·계정 상태에 좌우되고 남의 워크스페이스에
+  페이지가 남는다. `notion.send_report_to_notion`에는 항상 가짜 `send` 함수를
+  주입한다.
 """
 
 from __future__ import annotations

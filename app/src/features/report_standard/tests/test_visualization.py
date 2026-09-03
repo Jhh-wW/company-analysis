@@ -362,7 +362,7 @@ def test_strategy_and_culture_headers_also_become_cards(headers: list[str]) -> N
 
 
 def test_old_column_order_from_stored_reports_still_becomes_a_card() -> None:
-    """★ 회귀 시험 (팀장 실측) — 저장된 보고서 31건은 6장 칸이
+    """★ 회귀 시험 (실측) — 저장된 보고서 31건은 6장 칸이
     옛 순서(「시점, 계획, 공시된 내용」)다. composer가 «값은 그대로 두고
     순서만» 「계획, 시점, 공시된 내용」으로 바꿨는데, tuple 완전일치로
     판정하면 그 31건의 6장이 배포 즉시 «카드 → 화살표»로 되돌아간다 —
@@ -399,7 +399,7 @@ def test_old_column_order_from_stored_reports_still_becomes_a_card() -> None:
 # ⑦-3 3장 핵심 제품·서비스 — 4칸 + «제목 칸이 있는» 유일한 카드
 # ══════════════════════════════════════════════════════════
 #
-# ★ 왜 다른가 (팀장 지시) — composer.constants.PORTFOLIO_TABLE_HEADERS는
+# ★ 왜 다른가 — composer.constants.PORTFOLIO_TABLE_HEADERS는
 #   4칸이고, 1번 칸(제품·서비스명)이 «그 줄의 주제»다. 목업 3장도 제품마다
 #   카드 1장(제목=제품명)씩 나온다. 1·6·8장은 표 자신이 주제 칸을 안
 #   알려줘 제목을 비워 뒀지만, 3장은 «제품·서비스명»이라는 이름으로 주제
@@ -578,7 +578,7 @@ def test_culture_card_gets_the_v1_precedent_phrase() -> None:
 
 
 def test_limitation_phrase_stays_neutral_when_a_column_is_blank() -> None:
-    """★ 실측(팀장, 하이브) — 6장 「시점」 칸이 두 행 다 비었다.
+    """★ 실측(하이브) — 6장 「시점」 칸이 두 행 다 비었다.
     이건 정상이다(사용자 결정: 안 적혀 있으면 칸을 비우고 줄은 살린다).
     「범위·한계」 문구가 그걸 보고 «자료 부족」류로 바뀌면 안 된다 — 빈
     칸은 정직한 결과지 결함이 아니다. 이 문구는 «장 종류»만 보고 정하지
