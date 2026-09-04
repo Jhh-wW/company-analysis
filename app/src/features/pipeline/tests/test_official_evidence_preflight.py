@@ -270,6 +270,88 @@ def test_정상확인후_자료부족과_조회실패를_다르게_분류한다(
     )
 
 
+def test_DART핵심장이_있으면_홈페이지장애는_부분보고서로_전환한다() -> None:
+    observed = _result()
+    candidates = list(observed.candidates)
+    target_index = next(
+        index
+        for index, candidate in enumerate(candidates)
+        if candidate.section_id == "culture"
+    )
+    target = candidates[target_index]
+    candidates[target_index] = replace(
+        target,
+        documents=(),
+        fragments=(),
+        attempts=(
+            CollectionAttempt(
+                company_id=_COMPANY_ID,
+                attempt_id="homepage:culture",
+                source_kind=SOURCE_KIND_OFFICIAL_WEB_PAGE,
+                requirement=SourceRequirement.REQUIRED,
+                state=CollectionState.FAILED,
+                slot_ids=collector_slots_for("culture"),
+                reason_code="document_fetch_failed",
+            ),
+        ),
+        candidate_readiness=EvidenceReadiness.UNKNOWN,
+    )
+
+    preflight = assess_official_evidence(
+        OfficialEvidenceCollectionResult(
+            company_id=observed.company_id,
+            candidates=tuple(candidates),
+        )
+    )
+
+    assert preflight.decision.status is GenerationGateStatus.STOP_TRANSIENT_FAILURE
+    assert preflight.dart_partial_fallback is True
+    assert preflight.can_call_ai is True
+    assert preflight.detail_code == ""
+
+
+def test_DART핵심장이_비면_홈페이지장애라도_전체중단한다() -> None:
+    observed = _result()
+    candidates = list(observed.candidates)
+    target_index = next(
+        index
+        for index, candidate in enumerate(candidates)
+        if candidate.section_id == "business_model"
+    )
+    target = candidates[target_index]
+    candidates[target_index] = replace(
+        target,
+        documents=(),
+        fragments=(),
+        attempts=(
+            CollectionAttempt(
+                company_id=_COMPANY_ID,
+                attempt_id="homepage:business-model",
+                source_kind=SOURCE_KIND_OFFICIAL_WEB_PAGE,
+                requirement=SourceRequirement.REQUIRED,
+                state=CollectionState.FAILED,
+                slot_ids=collector_slots_for("business_model"),
+                reason_code="document_fetch_failed",
+            ),
+        ),
+        candidate_readiness=EvidenceReadiness.UNKNOWN,
+    )
+
+    preflight = assess_official_evidence(
+        OfficialEvidenceCollectionResult(
+            company_id=observed.company_id,
+            candidates=tuple(candidates),
+        )
+    )
+
+    assert preflight.dart_partial_fallback is False
+    assert preflight.can_call_ai is False
+    assert (
+        preflight.detail_code
+        == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_TRANSIENT
+    )
+
+
 def test_읽은원문을_분류못했으면_회사의_자료부족이_아니라_내부범위결함이다() -> None:
     insufficient = _result(first_state=CollectionState.MISSING)
     observation = UnclassifiedEvidenceObservation(

@@ -26,11 +26,13 @@ from src.shared.final_gate_diagnostics import (
 from src.shared.report_evidence.constants import (
     CollectionState,
     GenerationGateStatus,
+    OFFICIAL_WEB_SOURCE_KINDS,
     SOURCE_KIND_DART_AUDIT_REPORT,
     SOURCE_KIND_DART_BUSINESS_REPORT,
     SOURCE_KIND_DART_QUARTERLY_REPORT,
     SOURCE_KIND_DART_SEMIANNUAL_REPORT,
     SourceRequirement,
+    SOURCE_KIND_ROBOTS_TXT,
 )
 from src.shared.report_evidence.logic import assess_generation_gate, build_section_bundle
 from src.shared.report_evidence.models import GenerationGateDecision
@@ -74,6 +76,14 @@ _DART_DOCUMENT_SOURCE_KINDS = frozenset(
 _INCOMPLETE_COLLECTION_STATES = frozenset(
     {CollectionState.FAILED, CollectionState.TRUNCATED}
 )
+# 부분 보고서도 반드시 갖춰야 하는 뼈대다. 이 세 장은 DART 사업보고서와
+# 재무 API만으로도 확인할 수 있으므로 회사 웹사이트 장애의 영향을 받지 않는다.
+_DART_PARTIAL_CORE_SECTION_IDS = frozenset(
+    {"identity", "business_model", "past_changes"}
+)
+_WEB_FAILURE_SOURCE_KINDS = frozenset(
+    {*OFFICIAL_WEB_SOURCE_KINDS, SOURCE_KIND_ROBOTS_TXT}
+)
 
 
 def _is_stable_legacy_document_identity(identity: str) -> bool:
@@ -93,10 +103,13 @@ class OfficialEvidencePreflight:
     decision: GenerationGateDecision
     independent_document_count: int
     detail_code: str = ""
+    dart_partial_fallback: bool = False
 
     @property
     def can_call_ai(self) -> bool:
-        return not self.detail_code and self.decision.can_call_ai
+        return self.dart_partial_fallback or (
+            not self.detail_code and self.decision.can_call_ai
+        )
 
 
 @dataclass(frozen=True)
@@ -154,10 +167,30 @@ def assess_official_evidence(
         for candidate in result.candidates
         for attempt in candidate.attempts
     )
+    incomplete_required_attempts = tuple(
+        attempt
+        for candidate in result.candidates
+        for attempt in candidate.attempts
+        if attempt.requirement is SourceRequirement.REQUIRED
+        and attempt.state in _INCOMPLETE_COLLECTION_STATES
+    )
+    dart_partial_fallback = (
+        not integrity_is_broken
+        and not required_dart_collection_incomplete
+        and decision.status is GenerationGateStatus.STOP_TRANSIENT_FAILURE
+        and bool(incomplete_required_attempts)
+        and all(
+            attempt.source_kind in _WEB_FAILURE_SOURCE_KINDS
+            for attempt in incomplete_required_attempts
+        )
+        and _DART_PARTIAL_CORE_SECTION_IDS.issubset(decision.ready_section_ids)
+    )
     if integrity_is_broken:
         detail_code = FINAL_GATE_DETAIL_PREFLIGHT_PACKET_INVALID
     elif required_dart_collection_incomplete:
         detail_code = FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_TRANSIENT
+    elif dart_partial_fallback:
+        detail_code = ""
     elif decision.status is GenerationGateStatus.STOP_TRANSIENT_FAILURE:
         detail_code = FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_TRANSIENT
     elif decision.status is GenerationGateStatus.STOP_INSUFFICIENT_EVIDENCE:
@@ -178,6 +211,7 @@ def assess_official_evidence(
         decision=decision,
         independent_document_count=result.independent_document_count,
         detail_code=detail_code,
+        dart_partial_fallback=dart_partial_fallback,
     )
 
 
