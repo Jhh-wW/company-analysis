@@ -129,7 +129,12 @@ def score_fragment_text(text: str, section_heading: str = "") -> SlotScore | Non
     return scores[0] if scores else None
 
 
-def score_fragment_slots(text: str, section_heading: str = "") -> tuple[SlotScore, ...]:
+def score_fragment_slots(
+    text: str,
+    section_heading: str = "",
+    *,
+    allowed_slot_ids: frozenset[str] | None = None,
+) -> tuple[SlotScore, ...]:
     """원문에 직접 신호가 있는 한 장의 슬롯들을 결정론 순서로 돌려준다.
 
     한 문단은 현실에서 여러 사실을 함께 말한다. 예를 들어 「주요 매출은
@@ -148,12 +153,41 @@ def score_fragment_slots(text: str, section_heading: str = "") -> tuple[SlotScor
     순서는 점수 내림차순 → 수집기 필수 슬롯 우선 → 정책 선언 순서라 실행마다
     같다. 기존 단일 결과 API ``score_fragment_text``는 이 튜플의 첫 값을
     돌려 이전 호출자와의 호환을 유지한다.
+
+    ``allowed_slot_ids``가 주어지면 자료 종류가 실제로 소유한 슬롯만 처음부터
+    순위 계산에 넣는다. 최종 결과에서만 교집합하면, 허용하지 않은 장이 먼저
+    이긴 문단에 실제 허용 신호도 함께 있었을 때 그 신호까지 잃는다.
+    """
+
+    scores, _has_any_direct_signal = score_fragment_slots_with_signal(
+        text,
+        section_heading,
+        allowed_slot_ids=allowed_slot_ids,
+    )
+    return scores
+
+
+def score_fragment_slots_with_signal(
+    text: str,
+    section_heading: str = "",
+    *,
+    allowed_slot_ids: frozenset[str] | None = None,
+) -> tuple[tuple[SlotScore, ...], bool]:
+    """허용 범위 채점 결과와 전체 직접 신호 존재 여부를 한 번에 돌려준다.
+
+    반기·분기처럼 자료 종류가 소유한 슬롯이 좁을 때도 모든 키워드는 한 번만
+    훑는다. 소유 범위 밖 신호만 있는 문단은 Writer 근거가 아니지만, 분류기가
+    뜻을 전혀 못 알아본 문단도 아니므로 두 번째 반환값은 ``True``다.
     """
 
     scored: list[tuple[int, int, bool, SlotScore]] = []
+    has_any_direct_signal = False
     for declaration_index, (slot_id, keywords) in enumerate(SLOT_KEYWORDS.items()):
         hits = [keyword for keyword in keywords if keyword in text]
         if not hits:
+            continue
+        has_any_direct_signal = True
+        if allowed_slot_ids is not None and slot_id not in allowed_slot_ids:
             continue
         section_id = c.SLOT_SECTION_OF[slot_id]
         score = min(c.RELEVANCE_MAX_SCORE_MILLIS, len(hits) * c.RELEVANCE_KEYWORD_HIT_SCORE_MILLIS)
@@ -176,7 +210,7 @@ def score_fragment_slots(text: str, section_heading: str = "") -> tuple[SlotScor
         ))
 
     if not scored:
-        return ()
+        return (), has_any_direct_signal
 
     # 문단의 장을 슬롯 선언 순서가 아니라 그 장에서 발견된 직접 신호의
     # 합으로 고른다. 「당사는」 같은 한 신호와 고객·수익·가치 세 신호가
@@ -212,8 +246,11 @@ def score_fragment_slots(text: str, section_heading: str = "") -> tuple[SlotScor
         0 if item[3].slot_id in c.COLLECTOR_SLOT_IDS else 1,
         item[0],
     ))
-    return tuple(
-        score
-        for _index, _hit_count, _heading_matched, score in scored
-        if score.section_id == primary_section_id
+    return (
+        tuple(
+            score
+            for _index, _hit_count, _heading_matched, score in scored
+            if score.section_id == primary_section_id
+        ),
+        has_any_direct_signal,
     )

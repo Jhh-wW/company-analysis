@@ -695,7 +695,14 @@ class FakeEngine:
             "reprt_code": "11011",
         }
 
-    def download_document(self, rcept_no: str, raw_dir: Any, counter: Any) -> str:
+    def download_document(
+        self,
+        rcept_no: str,
+        raw_dir: Any,
+        counter: Any,
+        *,
+        require_official_url_sidecar: bool = False,
+    ) -> str:
         return "(가짜 경로)"
 
     def read_filing_text(self, path: str) -> str:
@@ -1031,7 +1038,14 @@ def test_로컬통합_삼성전자_저장원문은_가짜AI로_생성이후까�
                 "reprt_code": "11011",
             }
 
-        def download_document(self, rcept_no: str, raw_dir: Any, counter: Any) -> str:
+        def download_document(
+            self,
+            rcept_no: str,
+            raw_dir: Any,
+            counter: Any,
+            *,
+            require_official_url_sidecar: bool = False,
+        ) -> str:
             assert rcept_no == "20260310002820"
             return str(raw_path)
 

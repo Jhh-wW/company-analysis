@@ -100,7 +100,8 @@ def test_publish_gate_출고시점에만_결속된_LINK_run을_막고_GET은_이
         blocked = client.get(f"/result/{report_id}", follow_redirects=False)
 
     assert blocked.status_code == 409
-    assert "현재 보고서 기준을 통과한 근거가 충분하지 않아" in blocked.text
+    assert "안전 검사를 통과하지 못해 보고서를 내보내지 않았습니다" in blocked.text
+    assert "회사 자료 문제인지 시스템 문제인지 정확히 나눌 수 없습니다" in blocked.text
     # 공개 GET은 현재 validator를 다시 불러 상태나 판정을 바꾸지 않는다.
     assert validation_calls == ["called"]
     with storage_db.connect() as conn:
@@ -191,17 +192,17 @@ def test_publish_gate_history_storage_failure_does_not_mask_original_failure_or_
         blocked = client.get(f"/result/{report_id}", follow_redirects=False)
 
     assert blocked.status_code == 409
-    assert "현재 보고서 기준을 통과한 근거가 충분하지 않아" in blocked.text
+    assert "안전 검사를 통과하지 못해 보고서를 내보내지 않았습니다" in blocked.text
+    assert "회사 자료 문제인지 시스템 문제인지 정확히 나눌 수 없습니다" in blocked.text
 
 
 def test_direct_notion_publish_gate_stops_bound_link_without_calling_notion(
     monkeypatch,
 ):
     report_id = "66" * 16
-    _awaiting_link_run(raw_key="77" * 16, report_id=report_id)
+    raw_key = "77" * 16
+    _awaiting_link_run(raw_key=raw_key, report_id=report_id)
     session = auth_logic.create_session("admin@example.com", True)
-    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: object())
-    monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
     monkeypatch.setattr(reports_router, "_report_for_output", _publish_blocked)
     monkeypatch.setattr(
         reports_router,
@@ -210,6 +211,22 @@ def test_direct_notion_publish_gate_stops_bound_link_without_calling_notion(
             AssertionError("publish gate 뒤 Notion을 호출했습니다")
         ),
     )
+
+    # 출고 시점의 생산 경계가 검사 실패를 불변 intent와 LINK 중단 이력에 먼저
+    # 기록한다. Notion POST가 폐기된 raw/메모리 보고서를 다시 검사해 상태를
+    # 만들게 하면 결과·PDF와 판정 시점이 갈라진다.
+    with pytest.raises(PublishBlockedError):
+        reports_router.finalize_new_report_delivery(
+            report_id=report_id,
+            corp_id="corp-naver",
+            billing_bucket_id=raw_key,
+            report=object(),
+            actual_models=("test-model",),
+            reused_from_cache=False,
+            engine_build_identity=(
+                build_identity_contract.process_engine_build_identity()
+            ),
+        )
 
     with TestClient(app) as client:
         client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
@@ -220,7 +237,8 @@ def test_direct_notion_publish_gate_stops_bound_link_without_calling_notion(
         )
 
     assert blocked.status_code == 409
-    assert "현재 보고서 기준을 통과한 근거가 충분하지 않아" in blocked.text
+    assert "안전 검사를 통과하지 못해 보고서를 내보내지 않았습니다" in blocked.text
+    assert "회사 자료 문제인지 시스템 문제인지 정확히 나눌 수 없습니다" in blocked.text
     with storage_db.connect() as conn:
         run = share_store.load_run(conn, report_id)
     assert run is not None

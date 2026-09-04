@@ -85,6 +85,14 @@ class CollectedEvidenceDocument:
     collector_version: str
     parser_version: str
     requirement: SourceRequirement
+    domain_attestation_source_id: str = ""
+    domain_attestation_evidence: str = ""
+    reporting_period: str = ""
+    attachment_url: str = ""
+    ir_metadata_verification: str = ""
+    domain_redirect_verification: str = ""
+    domain_redirect_from_host: str = ""
+    domain_redirect_to_host: str = ""
 
     def __post_init__(self) -> None:
         for label, value in (
@@ -101,6 +109,22 @@ class CollectedEvidenceDocument:
         ):
             _require_text(value, label=label)
         _require_sha256(self.content_sha256, label="문서 내용")
+        for label, value in (
+            ("도메인 attestation Source ID", self.domain_attestation_source_id),
+            ("도메인 attestation exact 원문", self.domain_attestation_evidence),
+            ("IR 보고기간", self.reporting_period),
+            ("IR 첨부 URL", self.attachment_url),
+            ("IR 메타데이터 검증", self.ir_metadata_verification),
+            ("도메인 redirect 검증", self.domain_redirect_verification),
+            ("도메인 redirect 원본 host", self.domain_redirect_from_host),
+            ("도메인 redirect 최종 host", self.domain_redirect_to_host),
+        ):
+            if not isinstance(value, str):
+                raise ValueError(f"{label}은 문자열이어야 합니다")
+        if bool(self.domain_attestation_source_id.strip()) != bool(
+            self.domain_attestation_evidence.strip()
+        ):
+            raise ValueError("도메인 attestation Source ID와 exact 원문은 함께 있어야 합니다")
         exact_hashes = _require_unique_texts(
             self.exact_evidence_hashes, label="문서의 정확한 근거 조각 해시"
         )

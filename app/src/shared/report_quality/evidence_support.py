@@ -12,11 +12,24 @@ import unicodedata
 from collections.abc import Iterable
 from typing import Final
 
+from src.shared.report_quality.constants import (
+    INTERPRETATION_CLAIM_TYPE,
+    VERIFIED_PROSE_CLAIM_TYPE,
+)
+
 
 MIN_PROSE_EVIDENCE_SUPPORT_TERMS: Final[int] = 2
 PROSE_CLAIM_TYPES: Final[frozenset[str]] = frozenset(
-    {"verified_prose", "evidence_based_interpretation"}
+    {VERIFIED_PROSE_CLAIM_TYPE, INTERPRETATION_CLAIM_TYPE}
 )
+
+
+def normalized_evidence_support_text(value: object) -> str:
+    """claim·원문·근거어가 함께 쓰는 Unicode/공백 정본."""
+
+    return " ".join(
+        unicodedata.normalize("NFKC", str(value or "")).split()
+    ).casefold()
 
 
 def normalized_support_terms(values: Iterable[object]) -> tuple[str, ...]:
@@ -24,13 +37,34 @@ def normalized_support_terms(values: Iterable[object]) -> tuple[str, ...]:
 
     normalized: list[str] = []
     for value in values:
-        term = " ".join(
-            unicodedata.normalize("NFKC", str(value or "")).split()
-        ).casefold()
+        term = normalized_evidence_support_text(value)
         if len(term.replace(" ", "")) < 2 or term in normalized:
             continue
         normalized.append(term)
     return tuple(normalized)
+
+
+def evidence_support_term_mismatches(
+    claim: object,
+    evidence: object,
+    support_terms: Iterable[object],
+) -> tuple[str, ...]:
+    """claim과 실제 원문 양쪽에 그대로 없는 정규화 근거어를 돌려준다.
+
+    작성기·프로그램 근거·최종 출고가 이 교집합 규칙을 따로 구현하면 한 경로만
+    ``evidence_binding``을 다시 계산해 근거 없는 문장을 자기서명할 수 있다.
+    최소 개수 정책은 수치 결속 예외가 있는 호출자가 정하고, 여기서는 동일한
+    문자열 의미 검산만 단일화한다.
+    """
+
+    terms = normalized_support_terms(support_terms)
+    normalized_claim = normalized_evidence_support_text(claim)
+    normalized_evidence = normalized_evidence_support_text(evidence)
+    return tuple(
+        term
+        for term in terms
+        if term not in normalized_claim or term not in normalized_evidence
+    )
 
 
 def prose_evidence_support_ready(
@@ -50,6 +84,8 @@ def prose_evidence_support_ready(
 __all__ = [
     "MIN_PROSE_EVIDENCE_SUPPORT_TERMS",
     "PROSE_CLAIM_TYPES",
+    "evidence_support_term_mismatches",
+    "normalized_evidence_support_text",
     "normalized_support_terms",
     "prose_evidence_support_ready",
 ]

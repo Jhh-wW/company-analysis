@@ -29,7 +29,7 @@ from pathlib import Path
 import pytest
 
 from src.features.composer.tests.test_section_public_manifest import _run_full
-from src.features.pipeline.port import Report
+from src.features.pipeline.port import Grade, Report
 from src.features.provenance.sources import seal_collected_source
 from src.features.storage import db, reports
 from src.features.storage.constants import (
@@ -37,7 +37,13 @@ from src.features.storage.constants import (
     TABLE_REPORTS as TABLE_REPORTS_NAME,
 )
 from src.features.storage.reports import report_to_dict, report_to_json
+from src.shared.report_evidence.constants import ReleaseMode
 from src.shared.report_generation.public_projection import build_report_digest
+from src.shared.report_quality.constants import (
+    LEGACY_STRICT_QUALITY_CONTRACT_VERSION,
+    QUALITY_CONTRACT_VERSION,
+    STRICT_QUALITY_CONTRACT_VERSION,
+)
 
 
 #: ``core/persisted_json.py``의 ``MAX_DOCUMENT_NODES``는 20,000이다. 그 절반을
@@ -81,6 +87,55 @@ def _saved(tmp_path: Path, report: Report, *, report_id: str = "r1") -> Path:
     with db.connect(path) as conn:
         reports.save(conn, report_id, _CORP_ID, "분석", report)
     return path
+
+
+def _enforce_report_from_full(report: Report) -> Report:
+    """같은 생산 결과를 ENFORCE가 실제 저장하는 strict v2 모양으로 낮춘다."""
+
+    assert report.quality_observation is not None
+    return replace(
+        report,
+        release_mode=ReleaseMode.ENFORCE_NO_PARTIAL.value,
+        quality_contract_version=LEGACY_STRICT_QUALITY_CONTRACT_VERSION,
+        quality_observation=replace(
+            report.quality_observation,
+            contract_version=LEGACY_STRICT_QUALITY_CONTRACT_VERSION,
+        ),
+        generation_evidence=None,
+        public_structure_manifest="",
+        public_projection=None,
+    )
+
+
+def _write_report(
+    writer: str,
+    conn: sqlite3.Connection,
+    *,
+    report_id: str,
+    report: Report,
+) -> None:
+    if writer == "save":
+        reports.save(conn, report_id, _CORP_ID, "분석", report)
+        return
+    assert writer == "insert_new"
+    assert reports.insert_new(
+        conn,
+        report_id,
+        _CORP_ID,
+        "분석",
+        report,
+        engine_epoch_digest="a" * 64,
+    )
+
+
+def _stored_row_counts(conn: sqlite3.Connection) -> tuple[int, int]:
+    reports_count = conn.execute(
+        f"SELECT COUNT(*) FROM {TABLE_REPORTS_NAME}"
+    ).fetchone()[0]
+    projections_count = conn.execute(
+        f"SELECT COUNT(*) FROM {TABLE_REPORT_PUBLIC_PROJECTIONS}"
+    ).fetchone()[0]
+    return int(reports_count), int(projections_count)
 
 
 # ══════════════════════════════════════════════════════════
@@ -167,6 +222,144 @@ def test_insert_new도_projection을_같은_거래에_저장한다(tmp_path: Pat
         loaded = reports.load(conn, "r1")
     assert loaded is not None
     assert loaded.public_projection == report.public_projection
+
+
+@pytest.mark.parametrize("writer", ("save", "insert_new"))
+def test_쓰기경계는_재로드할수없는_엄격보고서를_SQL전에_거부한다(
+    tmp_path: Path,
+    writer: str,
+) -> None:
+    """저장은 성공하지만 다음 ``load``가 실패하는 독성 행을 만들 수 없다.
+
+    ENFORCE는 보존된 strict v2만 받을 수 있고, FULL은 v2/v3 계약이라도 생성
+    증거가 필요하다. 직렬화 가능하다는 이유만으로 이 세 객체를 넣으면 같은
+    공개 ID를 다시 쓸 수 없는 append-only 경로까지 망가진다.
+    """
+
+    full = _full_report()
+    enforce = _enforce_report_from_full(full)
+    assert enforce.quality_observation is not None
+    invalid_reports = (
+        (
+            "enforce-v1",
+            replace(
+                enforce,
+                quality_contract_version=QUALITY_CONTRACT_VERSION,
+                quality_observation=replace(
+                    enforce.quality_observation,
+                    contract_version=QUALITY_CONTRACT_VERSION,
+                ),
+            ),
+        ),
+        (
+            "enforce-v3",
+            replace(
+                enforce,
+                quality_contract_version=STRICT_QUALITY_CONTRACT_VERSION,
+                quality_observation=replace(
+                    enforce.quality_observation,
+                    contract_version=STRICT_QUALITY_CONTRACT_VERSION,
+                ),
+            ),
+        ),
+        ("full-without-generation-evidence", replace(full, generation_evidence=None)),
+    )
+
+    for label, invalid in invalid_reports:
+        path = tmp_path / f"{writer}-{label}.sqlite3"
+        with db.connect(path) as conn:
+            with pytest.raises(ValueError):
+                _write_report(
+                    writer,
+                    conn,
+                    report_id=f"{writer}-{label}",
+                    report=invalid,
+                )
+            assert _stored_row_counts(conn) == (0, 0)
+
+
+@pytest.mark.parametrize("writer", ("save", "insert_new"))
+def test_쓰기전_재로드검증은_과거와_현재의_정상모드를_그대로_보존한다(
+    tmp_path: Path,
+    writer: str,
+) -> None:
+    """새 write 검증이 legacy·SHADOW·ENFORCE·과거 FULL을 소급 차단하지 않는다."""
+
+    full = _full_report()
+    enforce = _enforce_report_from_full(full)
+    assert enforce.quality_observation is not None
+    shadow = replace(
+        enforce,
+        release_mode="",
+        quality_contract_version=QUALITY_CONTRACT_VERSION,
+        quality_observation=replace(
+            enforce.quality_observation,
+            contract_version=QUALITY_CONTRACT_VERSION,
+        ),
+    )
+    legacy = Report(
+        company="과거기업",
+        job="",
+        corp_type="상장사",
+        grade=Grade.PARTIAL,
+        sections=[],
+    )
+    # projection 별도 표 도입 전에 저장된 FULL은 generation evidence 안의
+    # 지문을 보존하되 projection 행 자체는 없을 수 있다는 기존 읽기 정책이다.
+    full_without_projection = replace(full, public_projection=None)
+    valid_reports = (
+        ("legacy", legacy),
+        ("shadow", shadow),
+        ("enforce-v2", enforce),
+        ("full-without-projection", full_without_projection),
+    )
+
+    for label, candidate in valid_reports:
+        path = tmp_path / f"{writer}-{label}.sqlite3"
+        report_id = f"{writer}-{label}"
+        with db.connect(path) as conn:
+            _write_report(
+                writer,
+                conn,
+                report_id=report_id,
+                report=candidate,
+            )
+            restored = reports.load(conn, report_id)
+        assert restored == candidate
+
+
+@pytest.mark.parametrize("writer", ("save", "insert_new"))
+def test_쓰기경계는_JSON을_한번만_만들어_그_문자열을_그대로_저장한다(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    writer: str,
+) -> None:
+    candidate = Report(
+        company="직렬화확인기업",
+        job="",
+        corp_type="상장사",
+        grade=Grade.PARTIAL,
+        sections=[],
+    )
+    expected = report_to_json(candidate)
+    original = reports.report_to_json
+    calls: list[Report] = []
+
+    def counted(report: Report) -> str:
+        calls.append(report)
+        return original(report)
+
+    monkeypatch.setattr(reports, "report_to_json", counted)
+    path = tmp_path / f"{writer}-single-json.sqlite3"
+    with db.connect(path) as conn:
+        _write_report(writer, conn, report_id="single-json", report=candidate)
+        stored = conn.execute(
+            f"SELECT payload_json FROM {TABLE_REPORTS_NAME} WHERE report_id = ?",
+            ("single-json",),
+        ).fetchone()[0]
+
+    assert calls == [candidate]
+    assert stored == expected
 
 
 def test_저장된_projection_행의_display_digest를_바꾸면_로드가_거부된다(
@@ -505,6 +698,28 @@ def test_봉인_속_출처를_고치면_지문을_다시_계산해도_붙이지_
         assert reports.load_public_projection(conn, "forged") is not None
         with pytest.raises(ValueError):
             reports.attach_public_projection(conn, "forged", restored)
+
+
+def test_봉인_속_전체문서지문을_추가변조해도_공개봉인을_붙이지_않는다(
+    tmp_path: Path,
+) -> None:
+    """공개 projection digest를 다시 맞춰도 수집 때 없던 문서 지문은 못 만든다."""
+
+    forged = _tampered_first_citation(
+        _sealed_citation_report(),
+        document_content_sha256="e" * 64,
+    )
+    path = _saved(tmp_path, forged, report_id="forged-document-hash")
+    restored = reports.report_from_json(report_to_json(forged))
+
+    with db.connect(path) as conn:
+        assert reports.load_public_projection(conn, "forged-document-hash") is not None
+        with pytest.raises(ValueError):
+            reports.attach_public_projection(
+                conn,
+                "forged-document-hash",
+                restored,
+            )
 
 
 def test_봉인_속_출처의_도장만_지워도_붙이지_않는다(tmp_path: Path) -> None:

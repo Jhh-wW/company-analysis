@@ -260,12 +260,18 @@ def test_없는_진행번호의_410은_번호나_내부정보를_반사하지않
 def test_보고서_DB조회장애는_없는_job_410과_구분해_503_no_store로_응답한다(
     monkeypatch,
 ):
-    def broken_load(*_args, **_kwargs):
+    def broken_publication_lookup(*_args, **_kwargs):
         raise OSError("시험용 DB 조회 장애")
 
     job_runtime._JOBS.clear()
     with _admin_client() as client:
-        monkeypatch.setattr(job_runtime.report_store, "load", broken_load)
+        # 저장 복구는 공개 가능성 판정을 먼저 읽는다. 존재하지 않는 행은 이제
+        # 그 경계에서 정상 410으로 닫히므로, DB 장애는 실제 첫 조회 경계에 둔다.
+        monkeypatch.setattr(
+            job_runtime.report_publication,
+            "report_is_published_or_legacy",
+            broken_publication_lookup,
+        )
         page = client.get("/progress/db-outage", follow_redirects=False)
         state = client.get("/api/progress/db-outage")
 
@@ -327,24 +333,10 @@ def test_워드_다운로드는_재시작_뒤에도_410으로_닫혀_있다(fini
     assert "no-store" in response.headers["cache-control"]
 
 
-def test_재시작_뒤에도_PDF로_내려받을_수_있다(
-    finished_job, approved_pdf_route
-):
-    # 이 파일의 공통 fixture는 unrelated 웹 시험을 빠르게 하려고 완료 adapter를
-    # 값싼 성공으로 바꾼다. PDF 재시작 계약만큼은 실제 불변 delivery를 먼저
-    # 확정해, 원본 없는 legacy를 오늘 renderer로 만드는 옛 동작에 기대지 않는다.
-    with db.connect() as conn:
-        saved = reports.load(conn, finished_job)
-    assert saved is not None
-    reports_router.finalize_new_report_delivery(
-        report_id=finished_job,
-        corp_id="restart-pdf-corp",
-        billing_bucket_id="public",
-        report=saved,
-        actual_models=("deterministic-demo",),
-        reused_from_cache=False,
-        engine_build_identity=build_identity_contract.process_engine_build_identity(),
-    )
+def test_재시작_뒤에도_PDF로_내려받을_수_있다(finished_job):
+    # 공통 웹 fixture도 이제 상태만 normal로 꾸미지 않고 생산 완료 함수를 거쳐
+    # 실제 불변 Delivery를 만든다. 따라서 여기서 두 번째 출고를 손으로 보충하지
+    # 않고 worker가 만든 최초 PDF를 그대로 읽어야 한다.
     with _owner_client(finished_job) as client:
         response = client.get(
             f"/download/pdf/{finished_job}", follow_redirects=False

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.shared.report_source_identity import (
+    ReportSourceIdentity,
     financial_payload_digest,
     normalize_dart_receipt_numbers,
     normalize_financial_payload,
@@ -39,15 +40,20 @@ def _identity_digest(
     financial_payload_sha256: str,
     official_document_ids: tuple[str, ...],
     adapter_versions: tuple[tuple[str, str], ...],
+    preflight_identity_digest: str,
 ) -> str:
-    return canonical_digest(
-        {
-            "dart_receipt_nos": dart_receipt_nos,
-            "financial_payload_sha256": financial_payload_sha256,
-            "official_document_ids": official_document_ids,
-            "adapter_versions": adapter_versions,
-        }
-    )
+    payload: dict[str, object] = {
+        "dart_receipt_nos": dart_receipt_nos,
+        "financial_payload_sha256": financial_payload_sha256,
+        "official_document_ids": official_document_ids,
+        "adapter_versions": adapter_versions,
+    }
+    # 옛 snapshot은 이 열쇠 자체가 없었다. 빈 값을 payload에 새로 넣으면
+    # 기존 불변 ID를 전부 바꾸므로, 새 FULL 경로의 정확한 사전 지문이 있을
+    # 때만 확장한다. 그러면 옛 행은 읽되 새 cache 권위로 승격하지 않는다.
+    if preflight_identity_digest:
+        payload["preflight_identity_digest"] = preflight_identity_digest
+    return canonical_digest(payload)
 
 
 def _snapshot_id(
@@ -86,6 +92,9 @@ class SourceSnapshot:
     official_document_ids: tuple[str, ...]
     adapter_versions: tuple[tuple[str, str], ...]
     cache_usable: bool
+    #: pipeline이 cache 조회·single-flight owner 선정에 실제로 쓴 정확한 지문.
+    #: FULL에서는 DART·재무뿐 아니라 공식 웹/IR snapshot까지 결합된 값이다.
+    preflight_identity_digest: str = ""
 
     def __post_init__(self) -> None:
         require_aware(self.captured_at, label="출처 확인")
@@ -111,11 +120,19 @@ class SourceSnapshot:
             label="재무 응답",
             allow_empty=True,
         )
+        preflight_digest = require_sha256_hex(
+            self.preflight_identity_digest,
+            label="생성 전 출처",
+            allow_empty=True,
+        )
+        if preflight_digest and not (self.dart_receipt_nos and finance_digest):
+            raise ValueError("완전한 DART·재무 신원 없이 생성 전 출처 지문을 저장할 수 없습니다")
         expected_identity = _identity_digest(
             dart_receipt_nos=self.dart_receipt_nos,
             financial_payload_sha256=finance_digest,
             official_document_ids=self.official_document_ids,
             adapter_versions=self.adapter_versions,
+            preflight_identity_digest=preflight_digest,
         )
         if self.identity_digest != expected_identity:
             raise ValueError("저장된 출처 신원 지문이 자료와 맞지 않습니다")
@@ -141,6 +158,7 @@ class SourceSnapshot:
         source_as_of: dt.date,
         official_document_ids: Sequence[str] = (),
         adapter_versions: Mapping[str, str] | None = None,
+        preflight_identity_digest: str = "",
     ) -> "SourceSnapshot":
         captured = require_aware(captured_at, label="출처 확인")
         if not isinstance(source_as_of, dt.date):
@@ -168,11 +186,26 @@ class SourceSnapshot:
             if financial_payload is not None
             else supplied_digest
         )
+        raw_preflight_digest = str(preflight_identity_digest).strip()
+        preflight_digest = require_sha256_hex(
+            (
+                raw_preflight_digest
+                or ReportSourceIdentity(
+                    dart_receipt_numbers=receipts,
+                    financial_payload_digest=finance_digest,
+                ).cache_digest
+            ),
+            label="생성 전 출처",
+            allow_empty=True,
+        )
+        if preflight_digest and not (receipts and finance_digest):
+            raise ValueError("완전한 DART·재무 신원 없이 생성 전 출처 지문을 저장할 수 없습니다")
         identity_digest = _identity_digest(
             dart_receipt_nos=receipts,
             financial_payload_sha256=finance_digest,
             official_document_ids=documents,
             adapter_versions=versions,
+            preflight_identity_digest=preflight_digest,
         )
         snapshot_id = _snapshot_id(
             identity_digest=identity_digest,
@@ -191,17 +224,19 @@ class SourceSnapshot:
             financial_payload_sha256=finance_digest,
             official_document_ids=documents,
             adapter_versions=versions,
+            preflight_identity_digest=preflight_digest,
             cache_usable=cache_usable,
         )
 
     def identity_json(self) -> bytes:
         """감사·저장 비교에 쓸 원문 없는 신원 JSON."""
 
-        return canonical_json_bytes(
-            {
-                "dart_receipt_nos": self.dart_receipt_nos,
-                "financial_payload_sha256": self.financial_payload_sha256,
-                "official_document_ids": self.official_document_ids,
-                "adapter_versions": self.adapter_versions,
-            }
-        )
+        payload: dict[str, object] = {
+            "dart_receipt_nos": self.dart_receipt_nos,
+            "financial_payload_sha256": self.financial_payload_sha256,
+            "official_document_ids": self.official_document_ids,
+            "adapter_versions": self.adapter_versions,
+        }
+        if self.preflight_identity_digest:
+            payload["preflight_identity_digest"] = self.preflight_identity_digest
+        return canonical_json_bytes(payload)

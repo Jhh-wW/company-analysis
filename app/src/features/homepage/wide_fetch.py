@@ -12,11 +12,11 @@
 
 ★ MISSING과 FAILED 분리:
   - MISSING: HTTP 404/410처럼 «이 자원이 없다»가 명확히 확인된 경우.
-  - FAILED: 시간초과·5xx·연결거부처럼 «있는지 없는지 증명하지 못한» 경우.
-  DNS 실패(NXDOMAIN)는 safe_http가 다른 보안 사유(사설 IP 등)와 같은
-  예외 클래스로 뭉뚱그리므로, 이 판정은 safe_http의 내부 오류 메시지
-  문자열 대조에 의존한다 — 알려진 한계이며 실제 네트워크로 검증하지
-  못했다(LIVE_COLLECTION_UNVERIFIED, 최종 보고서 참조).
+  - FAILED: 시간초과·DNS·5xx·연결거부처럼 «있는지 없는지 증명하지 못한» 경우.
+  ``safe_http``는 권위 NXDOMAIN·임시 resolver 오류·DNS 자식 프로세스
+  실패를 같은 예외 문장으로 합친다. 따라서 이 계층은 문자열을 보고
+  «없는 도메인»이라고 추측하지 않는다. 구분 신호가 생기기 전까지 DNS는
+  모두 FAILED가 정직한 fail-closed 판정이다.
 """
 
 from __future__ import annotations
@@ -56,10 +56,6 @@ WIDE_ALLOWED_CONTENT_TYPES: Final[frozenset[str]] = frozenset(
         "text/xml",
     }
 )
-
-#: safe_http DNS 실패 메시지 — NXDOMAIN류를 MISSING으로 분류하는 데 쓴다.
-#: ★ 알려진 한계: safe_http.py의 문자열이 바뀌면 이 판정도 깨진다.
-_DNS_NOT_FOUND_MARKER: Final[str] = "호스트 이름을 찾지 못했습니다"
 
 UrlAllowPredicate = Callable[[str], bool]
 
@@ -206,8 +202,6 @@ def classify_general_outcome(
     상위 오케스트레이션이 상한 도달 시 별도로 매긴다).
     """
     if error is not None:
-        if _DNS_NOT_FOUND_MARKER in str(error):
-            return "MISSING", "dns_missing"
         return "FAILED", "network_failed"
     if response is None:
         return "FAILED", "network_failed"

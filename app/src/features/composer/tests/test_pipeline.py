@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -46,7 +47,8 @@ from src.features.composer.pipeline import V2RunOutput, run_v2
 from src.features.composer.port import FilingMeta, PerformanceTable
 from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
 from src.features.composer.validate import V2ValidationError
-from src.features.pipeline.port import Grade
+from src.features.pipeline.port import Grade, Report
+from src.features.provenance.sources import Source, SourceKind
 from src.shared.final_gate_diagnostics import (
     FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR,
     classify_v2_validation_final_gate_reason,
@@ -109,17 +111,32 @@ def _strict_packet_set(
 ) -> SectionEvidencePacketSet:
     """옛 FULL 시험 입력을 현재 typed 아홉 장 계약으로 고정한다."""
 
-    fragments = tuple(
-        CollectedFragment(
-            fragment_id=str(number),
-            kind=str(raw["종류"]),
-            text=" ".join((str(raw["원문"]), *evidence_texts)).strip(),
-            source_url=str(raw["출처"]),
-            document_title=str(raw["문서명"]),
-            document_identity=document_identity_from_parts(url=str(raw["출처"])),
-        )
-        for number, raw in _strict_fragments().items()
+    all_claim_slots = tuple(
+        slot_id
+        for section_id in SECTION_IDS
+        for slot_id in CLAIM_SLOTS_BY_SECTION[section_id]
     )
+    fragments: list[CollectedFragment] = []
+    for number, raw in _strict_fragments().items():
+        # 이 fixture의 조각 하나가 곧 문서 전체다. 생산 수집기처럼 실제 원문
+        # 바이트에서 문서 지문을 만들며 URL·번호를 hash 대용으로 쓰지 않는다.
+        text = " ".join((str(raw["원문"]), *evidence_texts)).strip()
+        fragments.append(
+            CollectedFragment(
+                fragment_id=str(number),
+                kind=str(raw["종류"]),
+                text=text,
+                source_url=str(raw["출처"]),
+                document_title=str(raw["문서명"]),
+                document_identity=document_identity_from_parts(
+                    url=str(raw["출처"])
+                ),
+                document_content_sha256=hashlib.sha256(
+                    text.encode("utf-8")
+                ).hexdigest(),
+                supported_claim_slots=all_claim_slots,
+            )
+        )
     generation = "a" * 64
     return SectionEvidencePacketSet(
         company_id="00123456",
@@ -129,7 +146,7 @@ def _strict_packet_set(
                 company_id="00123456",
                 evidence_generation_sha256=generation,
                 section_id=section_id,
-                fragments=fragments,
+                fragments=tuple(fragments),
             )
             for section_id in SECTION_IDS
         ),
@@ -525,6 +542,7 @@ def test_엄격모드는_충분한_검증사실만_완성으로_봉인한다():
         "셋째 경로를 공식 자료에서 확인했다.",
         "넷째 범위를 공식 자료에서 확인했다.",
         "다섯째 근거를 공식 자료에서 확인했다.",
+        "여섯째 한계를 공식 자료에서 확인했다.",
     )
 
     class CompleteWriter(_FakeWriter):
@@ -539,9 +557,9 @@ def test_엄격모드는_충분한_검증사실만_완성으로_봉인한다():
                     "문장들": [
                         {
                             "글": f"가나다전자는 {topics[section_index]}의 {ending}",
-                            "인용": [str((section_index * 5 + index) % 8 + 1)],
+                            "인용": [str((section_index * 6 + index) % 8 + 1)],
                             "등급": GRADE_CONFIRMED,
-                            "주장슬롯": slots[index],
+                            "주장슬롯": slots[index % len(slots)],
                         }
                         for index, ending in enumerate(endings)
                     ]
@@ -576,7 +594,7 @@ def test_엄격모드는_충분한_검증사실만_완성으로_봉인한다():
     assert output.quality_observation.quality_grade == "완성"
     assert output.quality_observation.safety_decision == "공개 가능"
     assert output.quality_observation.release_allowed is True
-    assert len(output.report.fact_records) == 45
+    assert len(output.report.fact_records) == 54
     assert len(output.report.summary_items) == 5
     assert len(writer.prompts) == 9
     assert len(reviewer.prompts) == 1
@@ -939,7 +957,52 @@ def test_한문장_장이_있으면_COMPLETE가_아니라_PARTIAL과_이유가_�
 
     assert output.report.grade is Grade.PARTIAL
     assert "identity" in output.quality_observation.underfilled_sections
+    assert "low_public_sentence_coverage" in (
+        output.quality_observation.quality_problem_codes
+    )
+    # 작가는 한 문장을 만들었지만 이 SHADOW fixture에는 원자 FactRecord와
+    # 원문 결속이 없다. 이를 «확인된 1문장»으로 세는 것이 기존 결함이므로,
+    # 공개 문장 하한은 0건으로 정직하게 표시한다. 임계값을 낮춘 변경이 아니다.
+    identity = next(
+        section for section in output.report.sections if section.cell == "identity"
+    )
+    assert len(identity.prose_lines) == 1
     assert any(
-        "확인된 문장이 1개뿐이라 내용이 얇습니다" in reason
+        "확인된 문장이 0개뿐이라 내용이 얇습니다" in reason
         for reason in output.report.shortfall_reasons
     )
+
+
+def test_생성지표는_등록부전용_source가_아니라_실제_인용조각만_센다() -> None:
+    fragments = (
+        CollectedFragment(fragment_id="1", kind="공시", text="첫 번째 원문"),
+        CollectedFragment(fragment_id="2", kind="공시", text="두 번째 원문"),
+    )
+    rendered = Report(
+        company="가나다전자",
+        job="",
+        corp_type="상장사",
+        grade=Grade.COMPLETE,
+        sections=[],
+        citations=[
+            Source(number=1, kind=SourceKind.FILING, label="첫 문서"),
+            Source(number=2, kind=SourceKind.FILING, label="둘째 문서"),
+            # 공식 웹 소유권 증명 Source는 최종 등록부에는 필요하지만 인용
+            # 조각이 아니다. 이 한 건 때문에 fragments_cited가 분모보다
+            # 커지던 비교 bridge 회귀를 직접 고정한다.
+            Source(
+                number=99,
+                kind=SourceKind.FILING,
+                label="법인 소유권 증명",
+                provenance_role="attestation_only",
+            ),
+            # 프로그램 등록부에만 남은 미사용 citation Source도 조각이 없으면
+            # 인용 수에 들어갈 수 없다.
+            Source(number=100, kind=SourceKind.FILING, label="미사용 후보"),
+        ],
+    )
+
+    assert pipeline_module._generation_fragment_counts(  # noqa: SLF001
+        fragments,
+        rendered,
+    ) == (2, 2)

@@ -9,28 +9,30 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
+from src.features.revenuemix.constants import KNOWN_TABLE_HEADS
 from src.features.revenuemix.logic import build, clean_name, find_block, parse_rows
-
-#: ★ 하이브 사업보고서 실제 원문 (공백만 눌렀다)
-제품별 = (
-    "제품별 매출액 (단위 : 백만원) 구 분 품 목 "
-    "2025년 제21기 (당 기) 2024년 제20기 (전 기) 2023년 제19기 (전 전 기) "
-    "매 출 액 비 중 매 출 액 비 중 매 출 액 비 중 "
-    "음반/음원 음반, 음원 등 772,960 29.17% 860,962 38.17% 970,463 44.56% "
-    "공연 콘서트, 팬미팅 등 763,949 28.83% 450,865 19.99% 359,111 16.49% "
-    "MD 및 라이선싱 공식 상품(MD), IP 라이선싱 등 570,571 21.53% 420,229 18.63% 325,563 14.95% "
-    "합계 2,649,870 100.00% 2,255,649 100.00% 2,178,088 100.00% "
-    "(주1) 연결재무제표 기준입니다. "
-    "(2) 지역별 매출액 (단위: 백만원, 연결재무제표 기준) 구 분 매 출 지 역 "
-    "2025년 제21기 (당 기) 2024년 제20기 (전 기) "
-    "매 출 액 비 중 매 출 액 비 중 "
-    "고객과의 계약에서 생기는 수익 국내 722,780 27.28% 759,144 33.66% "
-    "아시아 1,076,445 40.62% 836,498 37.08% "
-    "소계 2,639,424 99.61% 2,253,239 99.89% "
-    "합계 2,649,870 100.00% 2,255,649 100.00%"
+from src.shared.revenue_table_provenance import (
+    canonical_json,
+    revenue_row_evidence_matches,
+    revenue_table_axis_matches,
+    revenue_table_source_excerpt,
 )
+
+#: ★ 저장소에 보관된 하이브 2025 사업보고서 실제 수집 조각을 그대로 쓴다.
+_FIXTURE_PATH = (
+    Path(__file__).resolve().parents[5]
+    / "analysis_engine"
+    / "data"
+    / "pilot"
+    / "fragments"
+    / "실캡처-자사홈페이지-03.json"
+)
+제품별 = str(json.loads(_FIXTURE_PATH.read_text(encoding="utf-8"))["8"]["원문"])
 
 
 # ══════════════════════════════════════════════════════════
@@ -148,7 +150,87 @@ def test_비중을_우리가_계산하지_않는다():
     표들 = build(제품별)
     비중들 = [r[2] for r in 표들[0]["rows"]]
 
-    assert 비중들 == ["29.17%", "28.83%", "21.53%", "100.00%"]
+    assert 비중들 == [
+        "29.17%",
+        "28.83%",
+        "5.55%",
+        "21.53%",
+        "9.77%",
+        "5.15%",
+        "100.00%",
+    ]
+
+
+def test_실제_원문의_각_행에_손실없는_범위와_해시를_붙인다():
+    표 = build(제품별, cite="[8]")[0]
+
+    assert len(표["evidence_rows"]) == len(표["rows"])
+    assert 표["raw_rows"] == 표["rows"]
+    assert revenue_table_source_excerpt(표["evidence_rows"]) in 제품별
+    first = json.loads(표["evidence_rows"][0])
+    source = first["source"]
+    assert 제품별[source["start"] : source["end"]] == source["excerpt"]
+    assert first["table"]["header"]["text"].startswith("제품별 매출액")
+    assert first["extractor"] == {"name": "revenuemix.regex", "version": "3"}
+    assert first["table"]["axis"] == "product"
+    assert first["row"]["selection"] == "first-current-period-pair"
+    assert first["row"]["raw_fields"]["amount"]["value"] == "772,960"
+    for row, raw_row, evidence in zip(
+        표["rows"], 표["raw_rows"], 표["evidence_rows"]
+    ):
+        assert revenue_row_evidence_matches(
+            evidence,
+            cited_source_text=제품별,
+            headers=표["headers"],
+            public_row=row,
+            raw_row=raw_row,
+        )
+
+
+@pytest.mark.parametrize("이름", ("기계장비", "회계 서비스", "설계 용역"))
+def test_계가_들어간_보통_이름을_합계로_오인하지_않는다(이름: str):
+    원문 = (
+        "제품별 매출액 구 분 2025년 제1기 매 출 액 비 중 "
+        f"{이름} 4,000 40.00% 일반 서비스 3,000 30.00% "
+        "기타 3,000 30.00% 합계 10,000 100.00%"
+    )
+
+    표 = build(원문)[0]
+
+    assert 표["rows"][0][0] == 이름
+    assert len(표["rows"]) == 4
+
+
+def test_MAX_ROWS를_넘겨_잘린_표는_완성표로_내보내지_않는다():
+    행들 = " ".join(
+        f"품목{chr(44032 + index)} 1,000 {100 / 13:.2f}%" for index in range(13)
+    )
+    원문 = (
+        "제품별 매출액 구 분 2025년 제1기 매 출 액 비 중 "
+        f"{행들} 합계 13,000 100.00%"
+    )
+
+    assert build(원문) == []
+
+
+def test_합계가_SCAN범위_안에_없으면_부분표를_내보내지_않는다():
+    원문 = (
+        "제품별 매출액 구 분 2025년 제1기 매 출 액 비 중 "
+        "제품가 6,000 60.00% 제품나 4,000 40.00% " + "설명 " * 600
+        + "합계 10,000 100.00%"
+    )
+
+    assert build(원문) == []
+
+
+def test_합계행만_100이고_구성행이_빠진_표는_내보내지_않는다():
+    원문 = (
+        "제품별 매출액 구 분 2025년 제1기 매 출 액 비 중 "
+        "제품가 4,000 40.00% 제품나 3,000 30.00% 제품다 2,000 20.00% "
+        "합계 10,000 100.00%"
+    )
+
+    assert build(원문) == []
 
 
 @pytest.mark.parametrize("원문", ["", "매출 이야기가 전혀 없는 글", "제품별 매출액 표가 없음"])
@@ -162,3 +244,149 @@ def test_한_줄짜리는_구성이_아니다():
             "전체 전부 100,000 100.00%")
 
     assert build(한줄) == []
+
+
+# ══════════════════════════════════════════════════════════
+# ④ 표 경계와 typed 축 — 제품 caption에 지역 행을 붙였던 실측 결함
+# ══════════════════════════════════════════════════════════
+
+
+_COMPACT_PRODUCT = (
+    "제품별 매출액 구 분 2025년 제1기 매 출 액 비 중 "
+    "제품가 6,000 60.00% 제품나 4,000 40.00% 합계 10,000 100.00%"
+)
+_COMPACT_REGION = (
+    "지역별 매출액 구 분 2025년 제1기 매 출 액 비 중 "
+    "국내 7,000 70.00% 해외 3,000 30.00% 합계 10,000 100.00%"
+)
+
+
+def _rows_by_axis(text: str) -> dict[str, list[list[str]]]:
+    return {str(table["axis"]): table["rows"] for table in build(text)}
+
+
+def test_연속_제품지역표의_caption과_exact행을_서로_바꾸지_않는다():
+    """★★ 기존 코드는 두 번째 ``비중``을 제품표 머리말 끝으로 골랐다."""
+
+    tables = build(f"{_COMPACT_PRODUCT} {_COMPACT_REGION}")
+
+    assert [table["axis"] for table in tables] == ["product", "region"]
+    assert _rows_by_axis(f"{_COMPACT_PRODUCT} {_COMPACT_REGION}") == {
+        "product": [
+            ["제품가", "6,000", "60.00%"],
+            ["제품나", "4,000", "40.00%"],
+            ["합계", "10,000", "100.00%"],
+        ],
+        "region": [
+            ["국내", "7,000", "70.00%"],
+            ["해외", "3,000", "30.00%"],
+            ["합계", "10,000", "100.00%"],
+        ],
+    }
+    for table in tables:
+        assert revenue_table_axis_matches(
+            axis=table["axis"],
+            caption=table["caption"],
+            evidence_rows=table["evidence_rows"],
+            cited_source_text=revenue_table_source_excerpt(table["evidence_rows"]),
+        )
+
+
+@pytest.mark.parametrize("gap", (1, 319))
+def test_다음_표제가_가깝거나_319자_뒤여도_현재표_첫합계에서_닫힌다(gap: int):
+    text = f"{_COMPACT_PRODUCT}{' ' * gap}{_COMPACT_REGION}"
+
+    rows = _rows_by_axis(text)
+
+    assert [row[0] for row in rows["product"]] == ["제품가", "제품나", "합계"]
+    assert [row[0] for row in rows["region"]] == ["국내", "해외", "합계"]
+
+
+@pytest.mark.parametrize("next_head", KNOWN_TABLE_HEADS)
+def test_모든_알려진_표제를_다음표_경계로_쓴다(next_head: str):
+    next_table = (
+        f"{next_head} 구 분 2025년 제1기 매 출 액 비 중 "
+        "다음가 8,000 80.00% 다음나 2,000 20.00% 합계 10,000 100.00%"
+    )
+
+    product = next(
+        table
+        for table in build(f"{_COMPACT_PRODUCT} {next_table}")
+        if table["axis"] == "product"
+    )
+
+    assert [row[0] for row in product["rows"]] == ["제품가", "제품나", "합계"]
+    assert "다음가" not in revenue_table_source_excerpt(product["evidence_rows"])
+
+
+def test_다년도_비중이_반복돼도_당기행과_축만_고른다():
+    text = (
+        "제품별 매출액 구 분 2025년 제1기 2024년 제0기 "
+        "매 출 액 비 중 매 출 액 비 중 "
+        "제품가 6,000 60.00% 5,500 55.00% "
+        "제품나 4,000 40.00% 4,500 45.00% "
+        "합계 10,000 100.00% 10,000 100.00% "
+        + _COMPACT_REGION
+    )
+
+    rows = _rows_by_axis(text)
+
+    assert rows["product"][:2] == [
+        ["제품가", "6,000", "60.00%"],
+        ["제품나", "4,000", "40.00%"],
+    ]
+    assert rows["region"][:2] == [
+        ["국내", "7,000", "70.00%"],
+        ["해외", "3,000", "30.00%"],
+    ]
+
+
+def test_목차의_선출현_표제를_건너뛰고_실제표를_찾는다():
+    text = (
+        "목차 2. 제품별 매출액 3. 지역별 매출액 본문 설명 "
+        f"{_COMPACT_PRODUCT} {_COMPACT_REGION}"
+    )
+
+    assert _rows_by_axis(text) == _rows_by_axis(
+        f"{_COMPACT_PRODUCT} {_COMPACT_REGION}"
+    )
+
+
+def test_지역표가_먼저_나와도_각축의_exact행을_보존한다():
+    rows = _rows_by_axis(f"{_COMPACT_REGION} {_COMPACT_PRODUCT}")
+
+    assert [row[0] for row in rows["product"]] == ["제품가", "제품나", "합계"]
+    assert [row[0] for row in rows["region"]] == ["국내", "해외", "합계"]
+
+
+@pytest.mark.parametrize(
+    "corruption", ("axis", "caption", "evidence_axis", "excerpt")
+)
+def test_typed축_caption_header_excerpt가_하나라도_다르면_거절한다(
+    corruption: str,
+):
+    table = build(f"{_COMPACT_PRODUCT} {_COMPACT_REGION}")[0]
+    axis = table["axis"]
+    caption = table["caption"]
+    evidence_rows = list(table["evidence_rows"])
+    if corruption == "axis":
+        axis = "region"
+    elif corruption == "caption":
+        caption = "어디서 번 돈인가 — 지역별 매출 비중 (2025년)"
+    elif corruption == "excerpt":
+        evidence_rows = build(f"{_COMPACT_PRODUCT} {_COMPACT_REGION}")[1][
+            "evidence_rows"
+        ]
+    else:
+        changed: list[str] = []
+        for evidence in evidence_rows:
+            payload = json.loads(evidence)
+            payload["table"]["axis"] = "region"
+            changed.append(canonical_json(payload))
+        evidence_rows = changed
+
+    assert not revenue_table_axis_matches(
+        axis=axis,
+        caption=caption,
+        evidence_rows=evidence_rows,
+    )

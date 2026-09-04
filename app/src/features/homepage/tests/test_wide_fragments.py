@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from src.features.homepage.constants import WIDE_REQUIRED_SLOT_IDS
+from src.features.homepage.wide_domain import classify_official_page_url
 from src.features.homepage.wide_fragments import build_fragments, build_fragments_for_collection
 from src.features.homepage.wide_types import WideCollectionResult, WideDocumentIdentity
 
@@ -20,7 +21,7 @@ def _document(
         company_id="c1",
         document_id="d1",
         canonical_url=canonical_url,
-        source_kind="official_web_page",
+        source_kind=classify_official_page_url(canonical_url).source_kind,
         publisher="company.example",
         title="제목",
         published_on="",

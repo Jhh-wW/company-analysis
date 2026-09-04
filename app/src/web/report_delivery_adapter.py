@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from src.features.admin_dashboard import store as dashboard_store
 from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
 from src.features.export_pdf.automatic_release import report_sha256
 from src.features.export_pdf import constants as pdf_constants
@@ -45,6 +46,7 @@ from src.shared.report_source_identity import (
     ReportSourceIdentity,
     normalize_dart_receipt_numbers,
 )
+from src.web import report_publication
 
 
 _ADAPTER_VERSION: Final[str] = "web-completion-v1"
@@ -490,6 +492,10 @@ def persist_approved_delivery(
             source_as_of=_source_date(report, fallback=completed_at.date()),
             official_document_ids=document_ids,
             adapter_versions={"report_delivery": _ADAPTER_VERSION},
+            # pipeline이 실제 cache 조회·owner 선정에 쓴 바로 그 값을
+            # post-generation 출처 snapshot에도 봉인한다. FULL에서는
+            # DART·재무+공식 웹/IR 결합 지문이며 base digest로 재계산하지 않는다.
+            preflight_identity_digest=str(preflight_identity_digest).strip(),
         )
         content = ContentSnapshot.create(
             payload=payload,
@@ -564,16 +570,13 @@ def persist_approved_delivery(
         )
         if stored_source is None:
             raise DeliveryAdapterError("정식 캐시 보고서의 출처 snapshot이 없습니다")
-        expected_preflight = ReportSourceIdentity(
-            dart_receipt_numbers=stored_source.dart_receipt_nos,
-            financial_payload_digest=stored_source.financial_payload_sha256,
-        )
         if (
-            not expected_preflight.cache_usable
-            or expected_preflight.cache_digest != preflight_identity_digest
+            not stored_source.cache_usable
+            or stored_source.preflight_identity_digest
+            != str(preflight_identity_digest).strip()
         ):
             raise DeliveryAdapterError(
-                "정식 캐시의 사전 출처 지문이 실제 DART 원본과 다릅니다"
+                "정식 캐시의 생성 전 출처 지문이 최초 pipeline 판정과 다릅니다"
             )
         if bind_cache_entry:
             delivery_store.bind_cache_entry(
@@ -693,6 +696,8 @@ def persist_reused_delivery(
         stored_source.cache_digest != expected_source.cache_digest
     ):
         raise DeliveryAdapterError("재사용 보고서의 DART 출처 신원이 다릅니다")
+    if not source.preflight_identity_digest:
+        raise DeliveryAdapterError("재사용 보고서에 생성 전 출처 지문이 없습니다")
 
     metadata = delivery_artifact.load_artifact_metadata(conn, clean_artifact_id)
     if metadata is None or metadata.content_snapshot_id != content.content_id:
@@ -731,7 +736,7 @@ def persist_reused_delivery(
             or proof.billing_bucket_id != clean_bucket
             or proof.corp_id != clean_corp
             or proof.cache_namespace_id != content.cache_namespace_id
-            or proof.source_identity_digest != expected_source.cache_digest
+            or proof.source_identity_digest != source.preflight_identity_digest
             or proof.engine_epoch_digest != engine_build_identity.epoch_digest
             or not delivery_singleflight.completed_result_matches(
                 conn,
@@ -751,6 +756,8 @@ def persist_reused_delivery(
             )
         if cache_key.engine_epoch_digest != engine_build_identity.epoch_digest:
             raise DeliveryAdapterError("정식 캐시 열쇠와 현재 engine epoch가 다릅니다")
+        if cache_key.preflight_identity_digest != source.preflight_identity_digest:
+            raise DeliveryAdapterError("정식 캐시 열쇠와 생성 전 출처 신원이 다릅니다")
         cached = delivery_store.load_cache_hit(
             conn,
             key=cache_key,
@@ -911,6 +918,22 @@ def load_legacy_public_report(public_id: str) -> LegacyPublicReport | None:
         if conn is None:
             raise DeliveryAdapterError("공개 보고서 저장소가 없습니다")
         try:
+            # 외부 라우트의 사전 검사를 믿지 않는다. 검사 직후 raw staging이
+            # commit되는 경쟁에서도 이 연결의 한 snapshot 안에서 생명주기·의무·
+            # Delivery 부재와 reports 원문을 함께 읽어야 새 본문이 legacy로
+            # 격하되지 않는다.
+            conn.execute("BEGIN")
+            lifecycle = dashboard_store.report_publication_lifecycle(
+                conn, clean_public_id
+            )
+            intent = delivery_store.load_delivery_intent(conn, clean_public_id)
+            delivery = delivery_store.load_delivery_by_public_id(
+                conn, clean_public_id
+            )
+            if lifecycle or intent is not None or delivery is not None:
+                raise DeliveryAdapterError(
+                    "새 출고 생명주기가 있는 본문은 legacy로 열지 않습니다"
+                )
             row = conn.execute(
                 f"""
                 SELECT payload_json, generated_at, created_at
@@ -919,24 +942,23 @@ def load_legacy_public_report(public_id: str) -> LegacyPublicReport | None:
                 """,
                 (clean_public_id,),
             ).fetchone()
+            if row is None:
+                return None
+            payload_json = str(row[0])
+            try:
+                report = report_store.report_from_json(payload_json)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise DeliveryAdapterError(
+                    "과거 보고서 본문을 읽지 못했습니다"
+                ) from exc
+            # ★ 격하 통로를 막는다 — 공개 봉인 지문이 찍힌 신규 FULL raw는
+            # 보조행이 유실돼도 옛 보고서가 아니다.
+            if not report_publication.report_payload_is_true_legacy(report):
+                raise DeliveryAdapterError(
+                    "공개 봉인을 가진 본문은 과거 저장본 화면으로 열지 않습니다"
+                )
         except sqlite3.DatabaseError as exc:
             raise DeliveryAdapterError("공개 보고서 저장소를 읽지 못했습니다") from exc
-    if row is None:
-        return None
-    payload_json = str(row[0])
-    try:
-        report = report_store.report_from_json(payload_json)
-    except (KeyError, TypeError, ValueError) as exc:
-        raise DeliveryAdapterError("과거 보고서 본문을 읽지 못했습니다") from exc
-    # ★ 격하 통로를 막는다 — 이 화면은 오늘의 검사와 화면 조립을 한 번도
-    #   부르지 않는 «과거 저장본 전용» 갈래다. 공개 봉인을 가진 본문이 여기로 내려오는
-    #   경우는 하나뿐이다: 정상 출고 기록이 사라졌을 때. 그건 옛 보고서가 아니라
-    #   손상이므로 과거 화면으로 대신 그리지 않고 닫는다.
-    evidence = report.generation_evidence
-    if evidence is not None and str(evidence.public_projection_sha256 or "").strip():
-        raise DeliveryAdapterError(
-            "공개 봉인을 가진 본문은 과거 저장본 화면으로 열지 않습니다"
-        )
     # ★ 수집 도장이 찍힌 본문은 도장이 맞을 때만 연다. 도장 칸이 처음부터 빈
     #   옛 저장본은 지금까지처럼 「읽기 전용」 고지와 함께 그대로 보여 준다.
     problem = stored_sources_seal_problem(report.citations)

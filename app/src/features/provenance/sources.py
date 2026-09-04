@@ -29,10 +29,25 @@ from enum import Enum
 
 from src.features.provenance.constants import OTHER_DATE_PREFIX, SOURCES_HEADER
 from src.shared.official_ir import (
+    IR_METADATA_VERIFICATION_VALUE,
     dart_www_redirect_is_valid,
     official_ir_time_is_usable,
     safe_https_attachment_url,
 )
+from src.shared.report_evidence.identity_verified_web import (
+    verified_dart_filing_binding_allows_public_source,
+)
+from src.shared.report_evidence.profile_domain_attestation import (
+    dart_profile_attestation_allows_source_url,
+    dart_profile_attestation_matches_company,
+    parse_dart_profile_domain_attestation,
+)
+from src.shared.report_evidence.constants import (
+    FORMAL_DOCUMENT_SOURCE_KINDS,
+    OFFICIAL_WEB_SOURCE_KINDS,
+    SOURCE_KIND_OFFICIAL_IR_PDF,
+)
+from src.shared.report_quality.source_identity import document_identity
 
 
 def evidence_text_hash(text: str) -> str:
@@ -47,6 +62,15 @@ def exact_evidence_text_hash(text: str) -> str:
 
     raw = str(text or "")
     return hashlib.sha256(raw.encode("utf-8")).hexdigest() if raw else ""
+
+
+def source_has_evidence_text(source: object, text: object) -> bool:
+    """Source의 수집 원문 등록부가 이 정규화 원문을 실제로 보존했는가."""
+
+    digest = evidence_text_hash(str(text or ""))
+    return bool(digest) and digest in tuple(
+        str(value) for value in getattr(source, "evidence_hashes", ())
+    )
 
 
 _KNOWN_FILING_HOSTS = frozenset(
@@ -470,6 +494,8 @@ class Source:
     #: 공식 IR에 표시된 닫힌 보고기간(YYYY-Qn/Hn/FY 또는 ISO 범위).
     #: 끝에 둔다. 이전 코드의 positional Source 생성자 순서를 바꾸지 않는다.
     reporting_period: str = ""
+    #: 공식 IR anchor에서 날짜와 보고기간을 함께 읽었다는 typed 수집 표식.
+    ir_metadata_verification: str = ""
     #: 공식 상세페이지가 직접 건 PDF를 실제 다운로드한 최종 HTTPS URL.
     #: 끝에 둬 이전 positional Source 생성자 순서를 보존한다.
     attachment_url: str = ""
@@ -477,6 +503,15 @@ class Source:
     domain_redirect_verification: str = ""
     domain_redirect_from_host: str = ""
     domain_redirect_to_host: str = ""
+    #: typed 공식 수집기의 닫힌 자료종류와 회사 결속 proof. legacy Source는
+    #: 둘 다 빈 값을 유지한다. 새 값은 provenance seal·저장 JSON에 포함된다.
+    formal_source_kind: str = ""
+    identity_binding: str = ""
+    #: typed 수집 문서 전체 원문의 SHA-256. 조각 해시와 달리 URL만 다른 동일
+    #: 문서를 독립 문서 여러 건으로 세지 않게 한다. legacy Source는 이 필드가
+    #: 생기기 전 자료이므로 빈 값을 허용하되, 새 formal Source는 반드시 싣는다.
+    #: positional 생성자 호환을 위해 항상 맨 끝에 추가한다.
+    document_content_sha256: str = ""
 
     @property
     def is_valid(self) -> bool:
@@ -523,6 +558,13 @@ class Source:
                 ),
                 len(self.exact_evidence_hashes)
                 == len(set(self.exact_evidence_hashes)),
+                (
+                    not self.formal_source_kind.strip()
+                    or re.fullmatch(
+                        r"[0-9a-f]{64}", self.document_content_sha256
+                    )
+                    is not None
+                ),
             )
         )
 
@@ -545,9 +587,17 @@ class Source:
             # Source 하나만 보고 OTHER 도메인의 소유자를 확정할 수는 없다. 다만
             # 독립 공시 결속 필드조차 없으면 후보로도 올리지 않아 조립 단계부터
             # fail-closed 한다. 실제 결속은 아래 registry 함수가 검증한다.
+            strict_typed_binding = verified_dart_filing_binding_allows_public_source(
+                self.identity_binding,
+                company_name=self.publisher,
+                source_url=self.url,
+            )
             return declared_official and bool(
-                self.domain_attestation_source_id.strip()
-                and self.domain_attestation_evidence.strip()
+                strict_typed_binding
+                or (
+                    self.domain_attestation_source_id.strip()
+                    and self.domain_attestation_evidence.strip()
+                )
             )
         return declared_official
 
@@ -586,6 +636,8 @@ def _source_provenance_payload(source: Source) -> bytes:
     # 기간 필드 도입 전에 저장된 Source의 HMAC payload는 그대로 유지한다.
     if source.reporting_period:
         payload["reporting_period"] = source.reporting_period
+    if source.ir_metadata_verification:
+        payload["ir_metadata_verification"] = source.ir_metadata_verification
     # 공식 IR PDF의 실제 바이트 출처도 상세페이지 URL과 함께 seal에 결속한다.
     if source.attachment_url:
         payload["attachment_url"] = source.attachment_url
@@ -595,6 +647,14 @@ def _source_provenance_payload(source: Source) -> bytes:
         payload["domain_redirect_from_host"] = source.domain_redirect_from_host
     if source.domain_redirect_to_host:
         payload["domain_redirect_to_host"] = source.domain_redirect_to_host
+    if source.formal_source_kind:
+        payload["formal_source_kind"] = source.formal_source_kind
+    if source.identity_binding:
+        payload["identity_binding"] = source.identity_binding
+    # 기존 Source는 이 필드가 없었으므로 빈 값은 옛 HMAC payload와 byte 호환을
+    # 유지한다. 새 typed formal Source만 수집기가 준 전체 문서 지문을 봉인한다.
+    if source.document_content_sha256:
+        payload["document_content_sha256"] = source.document_content_sha256
     # 기존 저장 Source의 HMAC payload에는 role 필드가 없었다. 기본 citation은
     # byte-for-byte 호환을 유지하고, 새 내부 attester 역할일 때만 seal에 포함한다.
     if source.provenance_role != "citation":
@@ -618,6 +678,23 @@ def seal_collected_source(source: Source) -> Source:
     return replace(source, provenance_seal=digest)
 
 
+def bind_document_content_sha256(source: Source, content_sha256: str) -> Source:
+    """수집기가 만든 문서 전체 지문을 Source에 한 번만 투영한다.
+
+    Source 종류별 생성 분기가 이 필드를 제각각 복사하면 새 종류가 추가될 때
+    한 분기만 빠져 독립 문서 수가 0건으로 보인다. 모든 분기가 Source의 나머지
+    필드를 만든 뒤 이 함수를 거쳐 봉인하도록 경계를 하나로 모은다. 원문에서
+    지문을 다시 계산하지 않으며, 필드가 없던 legacy 입력의 빈 값은 보존한다.
+    """
+
+    if type(source) is not Source or type(content_sha256) is not str:
+        raise TypeError("Source와 문자열 문서 전체 지문이 필요합니다")
+    value = content_sha256.strip()
+    if value and re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise ValueError("문서 전체 SHA-256 형식이 올바르지 않습니다")
+    return replace(source, document_content_sha256=value)
+
+
 def has_valid_provenance_seal(source: Source) -> bool:
     """저장·전달 뒤 Source 신원이나 원문 hash가 바뀌지 않았는지 검증한다."""
 
@@ -630,6 +707,126 @@ def has_valid_provenance_seal(source: Source) -> bool:
         hashlib.sha256,
     ).hexdigest()
     return hmac.compare_digest(received, expected)
+
+
+def build_dart_profile_attester_source(
+    *,
+    number: int,
+    source_id: str,
+    evidence: str,
+    company_name: str,
+    collected_on: str,
+) -> Source:
+    """typed 공식 웹이 참조한 DART 기업개황 attester를 같은 계약으로 만든다.
+
+    하위도메인 영수증은 후보 host를 덧붙인 파생 proof지만, attester가 실제로
+    봉인해야 하는 원문은 DART 기업개황의 exact subset이다. 따라서 파싱된
+    ``base_evidence``만 Source 해시에 넣고 회사명·고유번호·수집일을 다시
+    검산한다. 시험이나 호출부가 가짜 attester를 손으로 꾸밀 필요가 없다.
+    """
+
+    profile = parse_dart_profile_domain_attestation(evidence)
+    expected_id = (
+        f"dart-company-profile-{profile.corp_code}" if profile is not None else ""
+    )
+    if (
+        type(number) is not int
+        or number <= 0
+        or profile is None
+        or source_id.strip() != expected_id
+        or _publisher_key(profile.corp_name) != _publisher_key(company_name)
+        or not _valid_iso_date(collected_on)
+    ):
+        raise ValueError("DART 기업개황 attester의 회사·고유번호·수집일이 다릅니다")
+    source = seal_collected_source(
+        Source(
+            number=number,
+            kind=SourceKind.FILING,
+            label=f"{profile.corp_name} OpenDART 기업개황",
+            collected_at=collected_on,
+            source_id=expected_id,
+            title="OpenDART 기업개황",
+            publisher=profile.corp_name,
+            host="opendart.fss.or.kr",
+            url=(
+                "https://opendart.fss.or.kr/api/company.json?corp_code="
+                f"{profile.corp_code}"
+            ),
+            document_id=profile.corp_code,
+            location="기업개황 API · corp_code/corp_name/hm_url",
+            source_type="규제기관 공식 자료",
+            fact_status="기준일 현재 확인",
+            evidence_hashes=[evidence_text_hash(profile.base_evidence)],
+            domain_attestation_evidence=profile.base_evidence,
+            provenance_role="attestation_only",
+        )
+    )
+    if not source.is_canonical_official or not has_valid_provenance_seal(source):
+        raise ValueError("DART 기업개황 attester의 canonical provenance가 불완전합니다")
+    return source
+
+
+def ensure_dart_profile_attesters(
+    sources: Iterable[Source],
+    *,
+    company_name: str,
+) -> tuple[Source, ...]:
+    """FULL typed 등록부에 빠진 DART 기업개황 의존성을 정확히 한 번 보탠다.
+
+    자식 Source가 운반한 봉인 material만 사용한다. 같은 source_id가 서로 다른
+    기업개황 원문이나 수집일을 가리키면 하나를 임의로 고르지 않고 닫힌다.
+    이미 프로그램 등록부가 attester를 실어 온 경로는 그대로 보존한다.
+    """
+
+    copied = list(sources)
+    positions_by_id: dict[str, list[Source]] = {}
+    for source in copied:
+        if type(source) is not Source or not source.source_id.strip():
+            raise ValueError("FULL Source 등록부에 형식이 잘못된 항목이 있습니다")
+        positions_by_id.setdefault(source.source_id.strip(), []).append(source)
+    if any(len(matches) != 1 for matches in positions_by_id.values()):
+        raise ValueError("FULL Source 등록부에 중복 source_id가 있습니다")
+
+    requirements: dict[str, tuple[str, str]] = {}
+    for source in copied:
+        attestation_id = source.domain_attestation_source_id.strip()
+        if (
+            not attestation_id
+            or source.formal_source_kind not in OFFICIAL_WEB_SOURCE_KINDS
+        ):
+            continue
+        profile = parse_dart_profile_domain_attestation(
+            source.domain_attestation_evidence
+        )
+        if (
+            profile is None
+            or attestation_id != f"dart-company-profile-{profile.corp_code}"
+            or _publisher_key(profile.corp_name) != _publisher_key(company_name)
+            or _publisher_key(source.publisher) != _publisher_key(company_name)
+            or not _valid_iso_date(source.collected_at)
+        ):
+            raise ValueError("typed 공식 웹의 DART 기업개황 의존성이 손상됐습니다")
+        requirement = (profile.base_evidence, source.collected_at)
+        previous = requirements.setdefault(attestation_id, requirement)
+        if previous != requirement:
+            raise ValueError("같은 DART attester ID가 서로 다른 원문을 가리킵니다")
+
+    next_number = max((source.number for source in copied), default=0) + 1
+    for source_id in sorted(requirements):
+        if source_id in positions_by_id:
+            continue
+        evidence, collected_on = requirements[source_id]
+        copied.append(
+            build_dart_profile_attester_source(
+                number=next_number,
+                source_id=source_id,
+                evidence=evidence,
+                company_name=company_name,
+                collected_on=collected_on,
+            )
+        )
+        next_number += 1
+    return tuple(copied)
 
 
 def stored_sources_seal_problem(sources: Iterable[Source]) -> str:
@@ -676,6 +873,16 @@ def official_domain_attestation_problem(
     if not source.is_canonical_official:
         return "공식 OTHER 원문의 필수 메타데이터 또는 독립 도메인 근거가 없습니다"
 
+    # DART 첨부 원문 계보+법인명+등록번호+same-origin을 함께 확인한 typed
+    # proof는 별도 가짜 attester Source를 만들지 않는다. proof 자체가 Source
+    # 도장에 포함되고 URL·발행 법인 중 하나가 바뀌면 위 판정에서 즉시 닫힌다.
+    if verified_dart_filing_binding_allows_public_source(
+        source.identity_binding,
+        company_name=source.publisher,
+        source_url=source.url,
+    ):
+        return ""
+
     attestation_id = source.domain_attestation_source_id.strip()
     matches = [item for item in sources if item.source_id.strip() == attestation_id]
     if len(matches) != 1:
@@ -691,21 +898,43 @@ def official_domain_attestation_problem(
         return "도메인 근거 공시의 발행 법인이 회사 웹 원문의 발행 법인과 다릅니다"
 
     evidence = source.domain_attestation_evidence.strip()
-    if evidence_text_hash(evidence) not in attester.evidence_hashes:
+    profile_attestation = parse_dart_profile_domain_attestation(evidence)
+    attester_evidence = (
+        profile_attestation.base_evidence
+        if profile_attestation is not None
+        else evidence
+    )
+    if evidence_text_hash(attester_evidence) not in attester.evidence_hashes:
         return "도메인 근거 원문 조각의 해시가 공시 Source에 보존되지 않았습니다"
+    if profile_attestation is not None:
+        if (
+            attestation_id
+            != f"dart-company-profile-{profile_attestation.corp_code}"
+            or not dart_profile_attestation_matches_company(
+                evidence,
+                corp_code=profile_attestation.corp_code,
+                company_name=source.publisher,
+            )
+            or not dart_profile_attestation_allows_source_url(
+                evidence,
+                source_url=source.url,
+                redirect_verification=source.domain_redirect_verification,
+                redirect_from_host=source.domain_redirect_from_host,
+                redirect_to_host=source.domain_redirect_to_host,
+            )
+        ):
+            return "DART 기업개황 도메인 proof가 회사·공개 URL과 다릅니다"
+        return ""
     evidence_hosts = _hosts_in_domain_attestation_evidence(evidence)
     source_host = _host_key(source.host)
     if source_host not in evidence_hosts:
         dart_host = next(iter(evidence_hosts)) if len(evidence_hosts) == 1 else ""
-        if not (
-            source_type_is_official_ir(source.source_type)
-            and dart_www_redirect_is_valid(
-                verification=source.domain_redirect_verification,
-                from_host=source.domain_redirect_from_host,
-                to_host=source.domain_redirect_to_host,
-                dart_host=dart_host,
-                source_host=source_host,
-            )
+        if not dart_www_redirect_is_valid(
+            verification=source.domain_redirect_verification,
+            from_host=source.domain_redirect_from_host,
+            to_host=source.domain_redirect_to_host,
+            dart_host=dart_host,
+            source_host=source_host,
         ):
             return "공시 원문 조각에 회사 웹 원문의 정확한 host URL이 없습니다"
     return ""
@@ -728,23 +957,35 @@ def official_ir_source_is_usable(source: Source, *, reference_date: str) -> bool
 
     if not source_type_is_official_ir(source.source_type):
         return True
-    evidence_hosts = _hosts_in_domain_attestation_evidence(
-        source.domain_attestation_evidence
-    )
-    source_host = _host_key(source.host)
-    if source_host not in evidence_hosts:
-        dart_host = next(iter(evidence_hosts)) if len(evidence_hosts) == 1 else ""
-        if not dart_www_redirect_is_valid(
-            verification=source.domain_redirect_verification,
-            from_host=source.domain_redirect_from_host,
-            to_host=source.domain_redirect_to_host,
-            dart_host=dart_host,
-            source_host=source_host,
+    evidence = source.domain_attestation_evidence.strip()
+    profile_attestation = parse_dart_profile_domain_attestation(evidence)
+    if profile_attestation is not None:
+        if not dart_profile_attestation_allows_source_url(
+            evidence,
+            source_url=source.url,
+            redirect_verification=source.domain_redirect_verification,
+            redirect_from_host=source.domain_redirect_from_host,
+            redirect_to_host=source.domain_redirect_to_host,
         ):
             return False
+    else:
+        evidence_hosts = _hosts_in_domain_attestation_evidence(evidence)
+        source_host = _host_key(source.host)
+        if source_host not in evidence_hosts:
+            dart_host = next(iter(evidence_hosts)) if len(evidence_hosts) == 1 else ""
+            if not dart_www_redirect_is_valid(
+                verification=source.domain_redirect_verification,
+                from_host=source.domain_redirect_from_host,
+                to_host=source.domain_redirect_to_host,
+                dart_host=dart_host,
+                source_host=source_host,
+            ):
+                return False
     return bool(
         source.domain_attestation_source_id.strip()
         and source.domain_attestation_evidence.strip()
+        and source.ir_metadata_verification.strip()
+        == IR_METADATA_VERIFICATION_VALUE
         and safe_https_attachment_url(source.attachment_url)
         == source.attachment_url.strip()
         and official_ir_time_is_usable(
@@ -754,6 +995,70 @@ def official_ir_source_is_usable(source: Source, *, reference_date: str) -> bool
             max_age_days=OFFICIAL_WEB_CURRENT_MAX_AGE_DAYS,
         )
     )
+
+
+def full_typed_source_registry_problem(
+    source: Source,
+    sources: list[Source] | tuple[Source, ...],
+    *,
+    reference_date: str,
+) -> str:
+    """FULL typed Source 한 줄과 완성 등록부의 공통 최종 계약."""
+
+    source_kind = source.formal_source_kind.strip()
+    if not source_kind:
+        return ""
+    if source_kind not in FORMAL_DOCUMENT_SOURCE_KINDS:
+        return "등록되지 않은 typed 공식 자료종류입니다"
+    if (
+        not source.identity_binding.strip()
+        or not source.is_canonical_valid
+        or not has_valid_provenance_seal(source)
+        or not document_identity(source)
+    ):
+        return "typed 공식 출처의 신원·필수 필드·provenance 도장이 불완전합니다"
+    if source_kind in OFFICIAL_WEB_SOURCE_KINDS:
+        expected_type = (
+            "회사 공식 IR"
+            if source_kind == SOURCE_KIND_OFFICIAL_IR_PDF
+            else "회사 공식 웹"
+        )
+        if source.kind is not SourceKind.OTHER or source.source_type != expected_type:
+            return "typed 공식 웹 종류와 공개 Source 분류가 다릅니다"
+        if not is_canonical_official_with_registry(source, sources):
+            return "typed 공식 웹의 회사·도메인 proof가 완성 출처 장부와 다릅니다"
+        if source_kind == SOURCE_KIND_OFFICIAL_IR_PDF:
+            if not official_ir_source_is_usable(source, reference_date=reference_date):
+                return "typed 공식 IR의 발행일·기간·첨부·도메인 proof가 불완전합니다"
+        elif any(
+            value.strip()
+            for value in (
+                source.reporting_period,
+                source.attachment_url,
+                source.ir_metadata_verification,
+            )
+        ):
+            return "IR이 아닌 typed 공식 웹에 IR 전용 메타데이터가 섞였습니다"
+        return ""
+    if source.kind is not SourceKind.FILING or source.source_type != "공식 공시":
+        return "typed DART 자료종류와 공개 Source 분류가 다릅니다"
+    if any(
+        value.strip()
+        for value in (
+            source.domain_attestation_source_id,
+            source.domain_attestation_evidence,
+            source.reporting_period,
+            source.attachment_url,
+            source.ir_metadata_verification,
+            source.domain_redirect_verification,
+            source.domain_redirect_from_host,
+            source.domain_redirect_to_host,
+        )
+    ):
+        return "typed DART 공시에 웹·IR 전용 provenance가 섞였습니다"
+    if not is_canonical_official_with_registry(source, sources):
+        return "typed DART 공시의 공식 출처 계약이 불완전합니다"
+    return ""
 
 
 # ══════════════════════════════════════════════════════════

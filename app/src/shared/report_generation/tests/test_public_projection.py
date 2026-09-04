@@ -132,10 +132,14 @@ def _source_dict(*, number: int = 1, **overrides) -> dict[str, object]:
         "provenance_seal": "",
         "provenance_role": "citation",
         "reporting_period": "2025",
+        "ir_metadata_verification": "",
         "attachment_url": "",
         "domain_redirect_verification": "",
         "domain_redirect_from_host": "",
         "domain_redirect_to_host": "",
+        "formal_source_kind": "",
+        "identity_binding": "",
+        "document_content_sha256": "",
     }
     base.update(overrides)
     return base

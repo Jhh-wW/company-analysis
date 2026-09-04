@@ -187,6 +187,36 @@ class ReportSourceIdentity:
         }
         return hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
 
+    def cache_digest_with_official_snapshot(
+        self,
+        official_snapshot_sha256: str,
+    ) -> str:
+        """DART 기본 신원과 이번 공식 자료 전체를 묶은 생성 캐시 신원.
+
+        예전 캐시 열쇠는 최신 공시 접수번호와 재무 API 응답만 보았다. 회사
+        홈페이지·공식 IR·typed DART 보조 문서가 바뀌어도 최대 캐시 수명 동안
+        옛 보고서를 돌려줄 수 있었다. FULL 생성은 실제로 작가에게 건넨 공식
+        자료 snapshot까지 같은 열쇠에 넣어야 한다.
+
+        둘 중 하나라도 확정할 수 없으면 빈 문자열을 돌려 캐시 재사용을 막는다.
+        부분 신원을 완전한 신원처럼 쓰는 것보다 다시 만드는 편이 안전하다.
+        """
+
+        base_digest = self.cache_digest
+        clean_snapshot = str(official_snapshot_sha256 or "").strip()
+        try:
+            require_financial_payload_digest(clean_snapshot, allow_empty=False)
+        except ReportSourceIdentityError:
+            return ""
+        if not base_digest:
+            return ""
+        payload = {
+            "version": 1,
+            "dart_financial_snapshot_sha256": base_digest,
+            "official_evidence_snapshot_sha256": clean_snapshot,
+        }
+        return hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
+
     @classmethod
     def capture(
         cls,

@@ -17,7 +17,10 @@ from src.shared.generation_validation_receipt import (
     receipt_to_dict,
     receipt_to_json,
 )
-from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
+from src.shared.report_evidence.policy import (
+    REQUIRED_EVIDENCE_SECTION_IDS,
+    required_slots_for,
+)
 from src.shared.report_generation.models import (
     GenerationCallLedger,
     GenerationCallRecord,
@@ -54,22 +57,36 @@ def _digests(seed: int) -> tuple[tuple[str, str], ...]:
 
 
 def _complete_assessment() -> GenerationAssessment:
-    counts = tuple((section_id, 5) for section_id in REQUIRED_EVIDENCE_SECTION_IDS)
-    fact_ids = tuple(f"fact-{index}" for index in range(45))
+    semantic_counts = tuple(
+        (section_id, len(required_slots_for(section_id)))
+        for section_id in REQUIRED_EVIDENCE_SECTION_IDS
+    )
+    # 실제 기준 보고서(진영)의 54문장 분량으로 완성 영수증을 만든다.
+    # 9장 필수 의미칸 중 가장 많은 9장(6칸)도 가짜 5문장 숫자로 숨기지 않는다.
+    public_counts = tuple(
+        (section_id, 6) for section_id in REQUIRED_EVIDENCE_SECTION_IDS
+    )
+    fact_ids = tuple(f"fact-{index}" for index in range(54))
     return GenerationAssessment(
         contract_version=STRICT_QUALITY_CONTRACT_VERSION,
         quality=QualityAssessment(
             contract_version=STRICT_QUALITY_CONTRACT_VERSION,
             grade=QualityGrade.COMPLETE,
-            substantive_claims=45,
-            verified_claims=45,
+            substantive_claims=54,
+            verified_claims=54,
             verified_ratio=Decimal("1"),
             document_sources=9,
             notice_only_sections=(),
             one_claim_sections=(),
-            section_claim_counts=counts,
+            section_claim_counts=semantic_counts,
             shortfall_reasons=(),
-            section_public_sentence_counts=counts,
+            section_public_sentence_counts=public_counts,
+            # v3 COMPLETE 영수증은 장별 해석 개수를 함께 봉인한다. 이 기준
+            # fixture는 54문장 모두 원문으로 검증된 사실이므로 각 장 0개다.
+            section_interpretation_counts=tuple(
+                (section_id, 0)
+                for section_id in REQUIRED_EVIDENCE_SECTION_IDS
+            ),
             underfilled_sections=(),
             semantic_underfilled_sections=(),
             problem_codes=(),
@@ -87,8 +104,22 @@ def _complete_assessment() -> GenerationAssessment:
 
 
 def _partial_assessment() -> GenerationAssessment:
-    counts = tuple(
-        (section_id, 1 if section_id == "identity" else 5)
+    semantic_counts = tuple(
+        (
+            section_id,
+            1 if section_id == "identity" else len(required_slots_for(section_id)),
+        )
+        for section_id in REQUIRED_EVIDENCE_SECTION_IDS
+    )
+    public_counts = tuple(
+        (
+            section_id,
+            1
+            if section_id == "identity"
+            else 6
+            if section_id == "competitive_position"
+            else 5,
+        )
         for section_id in REQUIRED_EVIDENCE_SECTION_IDS
     )
     return GenerationAssessment(
@@ -96,27 +127,27 @@ def _partial_assessment() -> GenerationAssessment:
         quality=QualityAssessment(
             contract_version=STRICT_QUALITY_CONTRACT_VERSION,
             grade=QualityGrade.PARTIAL,
-            substantive_claims=41,
-            verified_claims=41,
+            substantive_claims=42,
+            verified_claims=42,
             verified_ratio=Decimal("1"),
             document_sources=9,
             notice_only_sections=(),
             one_claim_sections=("identity",),
-            section_claim_counts=counts,
+            section_claim_counts=semantic_counts,
             shortfall_reasons=("identity 장의 의미와 공개 문장이 부족합니다",),
-            section_public_sentence_counts=counts,
+            section_public_sentence_counts=public_counts,
             underfilled_sections=("identity",),
             semantic_underfilled_sections=("identity",),
             problem_codes=(
                 QualityProblemCode.ONE_CLAIM_SECTIONS,
-                QualityProblemCode.LOW_SEMANTIC_COVERAGE,
+                QualityProblemCode.MISSING_REQUIRED_PUBLIC_CLAIM_SLOTS,
                 QualityProblemCode.LOW_PUBLIC_SENTENCE_COVERAGE,
             ),
         ),
         safety=SafetyAssessment(
             contract_version=STRICT_QUALITY_CONTRACT_VERSION,
             decision=ReleaseDecision.RELEASE_ALLOWED,
-            verified_fact_ids=tuple(f"base-fact-{index}" for index in range(41)),
+            verified_fact_ids=tuple(f"base-fact-{index}" for index in range(42)),
             unverified_fact_ids=(),
             rejected_fact_ids=(),
             problems=(),

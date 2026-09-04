@@ -11,6 +11,7 @@ from features.evidence_collection.models import (
     DartEvidenceHarvest,
     DocumentTextRange,
     EvidenceFragment,
+    OfficialUrlCandidate,
 )
 from features.evidence_collection.serialize import (
     _attempt_to_mapping,
@@ -44,7 +45,7 @@ def _document(document_id: str, company_id: str = _COMPANY_ID) -> CollectedDocum
         source_kind=c.SOURCE_KIND_BUSINESS_REPORT,
         publisher=c.DART_PUBLISHER_NAME,
         title="사업보고서",
-        published_on="20250315",
+        published_on="2025-03-15",
         collected_at="2026-08-31T00:00:00+09:00",
         content_sha256="a" * 64,
         identity_binding=f"corp_code={company_id};rcept_no=20250315000001",
@@ -110,7 +111,48 @@ def test_최상위_필드_이름은_계약_그대로다() -> None:
     mapping = harvest_to_mapping(_harvest())
     assert set(mapping.keys()) == {
         "company_id", "company_type", "documents", "fragments", "attempts",
+        "unclassified_documents", "unclassified_fragments",
+        "official_url_candidates",
     }
+    assert mapping["unclassified_documents"] == []
+    assert mapping["unclassified_fragments"] == []
+
+
+def test_DART전문_URL후보는_receipt_location_hash만_JSON으로_직렬화한다() -> None:
+    base = _harvest()
+    candidate = OfficialUrlCandidate(
+        company_id=_COMPANY_ID,
+        url="https://official.example/company",
+        source_document_id="dart_business_report:20250315000001",
+        source_receipt_no="20250315000001",
+        source_member_name="document.xml",
+        source_location="raw_xml_chars:100-132",
+        source_document_sha256="a" * 64,
+        source_payload_sha256="b" * 64,
+    )
+    harvest = DartEvidenceHarvest(
+        company_id=base.company_id,
+        company_type=base.company_type,
+        documents=base.documents,
+        fragments=base.fragments,
+        attempts=base.attempts,
+        official_url_candidates=(candidate,),
+    )
+
+    serialized = harvest_to_mapping(harvest)["official_url_candidates"]
+
+    assert serialized == [
+        {
+            "company_id": _COMPANY_ID,
+            "url": "https://official.example/company",
+            "source_document_id": "dart_business_report:20250315000001",
+            "source_receipt_no": "20250315000001",
+            "source_member_name": "document.xml",
+            "source_location": "raw_xml_chars:100-132",
+            "source_document_sha256": "a" * 64,
+            "source_payload_sha256": "b" * 64,
+        }
+    ]
 
 
 def test_company_id_company_type은_원본과_일치한다() -> None:
@@ -130,11 +172,17 @@ def test_documents_필드_이름과_값이_원본과_일치한다() -> None:
         "company_id", "document_id", "canonical_url", "source_tier", "source_kind",
         "publisher", "title", "published_on", "collected_at", "content_sha256",
         "identity_binding", "usable_ranges", "collector_version", "parser_version",
-        "requirement", "exact_evidence_hashes",
+        "requirement", "exact_evidence_hashes", "exact_evidence_bindings",
     }
     assert serialized["document_id"] == original.document_id
     assert serialized["content_sha256"] == original.content_sha256
     assert serialized["requirement"] == original.requirement
+    assert serialized["exact_evidence_bindings"] == [
+        {
+            "location": mapping["fragments"][0]["location"],
+            "text_sha256": mapping["fragments"][0]["text_sha256"],
+        }
+    ]
 
 
 def test_usable_ranges는_start_end_dict_리스트로_바뀐다() -> None:

@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Optional
 
 import pytest
@@ -48,6 +49,7 @@ from src.features.pipeline.tests.test_real_cache import (
     FakeEngine,
 )
 from src.features.pipeline.tests.test_report_company_id_release_mode import (
+    _production_full_result,
     _보고서를_만든다,
 )
 from src.features.storage import cache as cache_store
@@ -89,9 +91,10 @@ def _유료_문맥에서_시험한다(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture
-def engine(monkeypatch: pytest.MonkeyPatch) -> FakeEngine:
+def engine(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeEngine:
     """진짜 엔진 대신 가짜를 끼운다 — 이 시험에서 돈이 나갈 길이 없다."""
     fake = FakeEngine()
+    fake._production_fixture_root = tmp_path  # type: ignore[attr-defined]
     monkeypatch.setattr(real, "_engine", lambda: fake)
     monkeypatch.setattr(
         real,
@@ -101,8 +104,19 @@ def engine(monkeypatch: pytest.MonkeyPatch) -> FakeEngine:
     return fake
 
 
-def _조사한다() -> RunResult:
+def _조사한다(engine: FakeEngine, monkeypatch: pytest.MonkeyPatch) -> RunResult:
     """사용자 요청 하나를 처음부터 끝까지 흘린다 (재사용 판정을 포함해서)."""
+    if (
+        real._requested_release_mode(real.engine_mode.EngineMode.V2)
+        is ReleaseMode.FULL
+    ):
+        # FULL은 production collector→매출표→비교 생산 경계를 실제로 지난다.
+        # 캐시/조정 monkeypatch는 바깥 시험의 관심사이므로 이 helper가 덮지 않는다.
+        return _production_full_result(
+            monkeypatch,
+            getattr(engine, "_production_fixture_root"),
+            isolate_generation_cache=False,
+        )
     user_input = UserInput(
         company="가나다전자", job=JOB, region="서울 강남구", posting_text=POSTING
     )
@@ -195,7 +209,7 @@ def _요청을_흘린다(
     monkeypatch.setenv(real.REPORT_RELEASE_MODE_ENV_NAME, 요청_모드.value)
     _저장본을_끼운다(monkeypatch, 겹=겹, 저장본=저장본)
     새_생성 = _생성기를_표식으로_바꾼다(monkeypatch)
-    return _조사한다(), 저장본, 새_생성
+    return _조사한다(engine, monkeypatch), 저장본, 새_생성
 
 
 # ══════════════════════════════════════════════════════════
@@ -255,7 +269,7 @@ def test_조정자가_모드_다른_저장본을_히트로_주면_요청을_닫�
     _저장본을_끼운다(monkeypatch, 겹=_겹_조정, 저장본=저장본)
     새_생성 = _생성기를_표식으로_바꾼다(monkeypatch)
 
-    결과 = _조사한다()
+    결과 = _조사한다(engine, monkeypatch)
 
     assert 결과.outcome is Outcome.FAILED, (
         "계약을 어긴 조정 히트를 조용히 버리면 나중에 유료 단계에서 터진다"

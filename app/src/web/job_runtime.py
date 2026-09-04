@@ -73,6 +73,7 @@ from src.web import (
     evaluation_mode,
     generation_singleflight,
     public_ids,
+    report_publication,
     request_helpers,
     runtime,
 )
@@ -1621,7 +1622,10 @@ def stage_report_storage(conn: sqlite3.Connection, job: Job) -> None:
         engine_epoch_digest=frozen_identity.epoch_digest,
     ):
         raise RuntimeError("공개 보고서 ID가 이미 사용 중입니다")
-    dashboard_store.register_report(
+    # 본문 저장은 아직 출고 성공이 아니다. 자동 PDF·Delivery·권한·청구가
+    # 같은 거래에서 모두 확정될 때 reports.finalize_new_report_delivery가
+    # 이 staging을 ``normal``로 승격한다. 중간 장애·재시작에는 차단 상태로 남는다.
+    dashboard_store.stage_report(
         conn,
         report_id=job.job_id,
         corp_type=job.result.report.corp_type,
@@ -1757,7 +1761,19 @@ def _load_saved_report(report_id: str) -> Optional[Report]:
     """서버를 껐다 켠 뒤에도 옛 보고서를 다시 볼 수 있게 한다."""
     try:
         with storage_db.connect() as conn:
+            # publication 판정과 뒤 raw/snapshot 조회를 한 SQLite snapshot에
+            # 묶는다. 그 사이 staging이 commit돼도 다음 재조회 때 차단할 뿐,
+            # 이번 조회가 새 raw를 legacy로 오인해 완료 주소를 만들지 않는다.
+            if not conn.in_transaction:
+                conn.execute("BEGIN")
             if dashboard_store.report_is_trashed(conn, report_id):
+                return None
+            # progress 복구도 결과·PDF·Notion과 같은 출고 경계를 쓴다. 상태 열만
+            # normal로 손상돼도 마지막 생명주기가 STAGED인 raw를 완료 보고서로
+            # 오인해 ``finished/next_url``을 내보내면 안 된다.
+            if not report_publication.report_is_published_or_legacy(
+                conn, report_id
+            ):
                 return None
             state = dashboard_store.get_report_state(conn, report_id)
             if state.updated_at:

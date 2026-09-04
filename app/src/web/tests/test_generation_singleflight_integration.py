@@ -107,6 +107,7 @@ def _persist_shared_content(
     *,
     artifact_root,
     pdf_bytes: bytes = b"%PDF-1.4\n% single-flight immutable test\n",
+    preflight_identity_digest: str = "",
 ) -> tuple[ContentSnapshot, delivery_artifact.ArtifactMetadata]:
     captured = dt.datetime(2026, 8, 28, 12, 0, tzinfo=dt.timezone(dt.timedelta(hours=9)))
     source = SourceSnapshot.capture(
@@ -116,6 +117,7 @@ def _persist_shared_content(
         captured_at=captured,
         source_as_of=captured.date(),
         adapter_versions={"report_delivery": "test-v1"},
+        preflight_identity_digest=preflight_identity_digest,
     )
     content = ContentSnapshot.create(
         payload=report_store.report_to_json(report).encode("utf-8"),
@@ -154,6 +156,35 @@ def _persist_shared_content(
             ),
         )
     return content, artifact
+
+
+def test_공식자료결합지문은_owner완료와_waiter재사용에서_base로축소되지않는다(
+    tmp_path,
+) -> None:
+    identity = ReportSourceIdentity(
+        dart_receipt_numbers=(_RECEIPT,),
+        financial_payload_digest=_FINANCIAL_DIGEST,
+    )
+    combined_digest = identity.cache_digest_with_official_snapshot("c" * 64)
+    changed_digest = identity.cache_digest_with_official_snapshot("d" * 64)
+    content, artifact = _persist_shared_content(
+        _report(),
+        artifact_root=tmp_path / "combined-singleflight-artifacts",
+        preflight_identity_digest=combined_digest,
+    )
+    owner = _session("combined-owner", "bucket-combined")
+    assert owner.coordinate("00126380", _NAMESPACE, combined_digest) is None
+    owner.complete(content.content_id, artifact.artifact_id, cache_eligible=False)
+
+    waiter = _session("combined-waiter", "bucket-combined")
+    reused = waiter.coordinate("00126380", _NAMESPACE, combined_digest)
+    assert reused is not None
+    assert reused.content_snapshot_id == content.content_id
+
+    changed = _session("changed-owner", "bucket-combined")
+    assert changed.coordinate("00126380", _NAMESPACE, changed_digest) is None
+    assert changed.owns_generation
+    changed.abandon()
 
 
 def test_같은통장의_동시job은_provider한번만_쓰고_각자delivery를_받는다(

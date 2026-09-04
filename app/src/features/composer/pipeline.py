@@ -28,7 +28,14 @@ from decimal import Decimal
 from typing import Optional
 
 from src.shared.report_evidence.constants import ReleaseMode
-from src.shared.report_quality.constants import STRICT_QUALITY_CONTRACT_VERSION
+from src.shared.final_gate_diagnostics import (
+    FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INSUFFICIENT,
+)
+from src.shared.report_quality.constants import (
+    LEGACY_STRICT_QUALITY_CONTRACT_VERSION,
+    STRICT_QUALITY_CONTRACT_VERSION,
+)
+from src.shared.report_evidence.policy import required_slots_for
 from src.shared.report_quality.generation import (
     GenerationQualityObservation,
     LEGACY_SHADOW_PUBLICATION_REASON,
@@ -105,10 +112,14 @@ from src.features.composer.public_manifest import (
     assert_report_matches_public_structure,
     build_public_structure_seal,
 )
-from src.features.composer.render import render_report
+from src.features.composer.render import (
+    citation_numbers_for_fragments,
+    render_report,
+)
 from src.features.composer.structured_claims import (
     NumericSafetyFiltering,
     append_past_changes_numeric_claims,
+    build_past_changes_numeric_claims,
     enforce_public_numeric_safety,
 )
 from src.features.composer.validate import V2ValidationError, validate_v2
@@ -494,6 +505,66 @@ def _merge_selected_sections(
     )
 
 
+def _generation_fragment_counts(
+    fragments: FragmentsInput,
+    rendered: Report,
+) -> tuple[int, int]:
+    """수집 조각과 그중 실제 공개 인용된 조각을 같은 번호 정본으로 센다.
+
+    ``rendered.citations``는 사용자 인용뿐 아니라 공식 웹 소유권을 증명하는
+    ``attestation_only`` Source와 프로그램 등록부 보조 Source도 보존한다.
+    따라서 그 배열 길이는 「인용 조각 수」가 아니다. 렌더러가 실제 조각에
+    부여한 공개 번호와 출처 등록부 번호의 교집합만 세면 프로그램 비교 근거도
+    분모·분자에 들어가고, 조각 없는 증명 Source는 정확히 빠진다.
+    """
+
+    normalized = _normalize_fragments(fragments)
+    collected_numbers = frozenset(
+        citation_numbers_for_fragments(normalized).values()
+    )
+    cited_numbers = {
+        number
+        for source in rendered.citations
+        if type(number := getattr(source, "number", None)) is int and number > 0
+    }
+    return len(normalized), len(collected_numbers & cited_numbers)
+
+
+def _append_verified_program_sentences(
+    report: ComposedReport,
+    prepared_evidence: object | None,
+) -> ComposedReport:
+    """packet에 봉인된 프로그램 문장을 AI 검수 뒤 정확히 한 번 붙인다."""
+
+    by_section = getattr(prepared_evidence, "program_evidence_by_section", {})
+    if not by_section:
+        return report
+    program_ids = {
+        sentence.verified_fact_id
+        for evidence in by_section.values()
+        for sentence in evidence.sentences
+    }
+    return replace(
+        report,
+        sections=tuple(
+            replace(
+                section,
+                sentences=tuple(
+                    sentence
+                    for sentence in section.sentences
+                    if sentence.verified_fact_id not in program_ids
+                )
+                + tuple(
+                    by_section[section.section_id].sentences
+                    if section.section_id in by_section
+                    else ()
+                ),
+            )
+            for section in report.sections
+        ),
+    )
+
+
 def _raise_recovery_stop(
     reason_code: str, quality_problem_codes: tuple[str, ...] = ()
 ) -> None:
@@ -675,21 +746,89 @@ def run_v2(
                 ) from error
             raise
 
+        if release_mode is ReleaseMode.FULL:
+            # 작가가 쓸 수 있는 의미 칸과 프로그램이 실제 원자료에서 만들 수
+            # 있는 구조화 claim을 AI 호출 전에 합친다. 장별 서로 다른 의미 칸
+            # 하한에 애초에 도달할 수 없다면 보충 작가를 불러도 결과는 같으므로
+            # 유료 9장+재작성 뒤 실패시키지 않는다.
+            reachable_slots_by_section = {
+                section_id: {
+                    slot_id
+                    for fragment in prepared_evidence.packets[section_id]
+                    for slot_id in fragment.supported_claim_slots
+                    if slot_id.startswith(f"{section_id}:")
+                }
+                for section_id in SECTION_IDS
+            }
+            precomputed_claims = build_past_changes_numeric_claims(
+                performance_table,
+                verification_fragments,
+                filing_meta,
+            )
+            for claim in precomputed_claims:
+                if claim.structured_claim is None:
+                    continue
+                reachable_slots_by_section[
+                    claim.structured_claim.section_owner
+                ].add(claim.structured_claim.claim_slot)
+            # 비교 슬롯은 정책에 ``injected``라고 적혀 있다는 이유로 열지
+            # 않는다. 실제 공식 양사 생산기가 FactRecord를 만든 경우만 도달
+            # 가능한 슬롯으로 센다.
+            for fact in prepared_evidence.program_facts:
+                section_owner = str(getattr(fact, "section_owner", "") or "")
+                claim_slot = str(getattr(fact, "claim_slot", "") or "")
+                if section_owner in reachable_slots_by_section and claim_slot:
+                    reachable_slots_by_section[section_owner].add(claim_slot)
+            unreachable_slots_by_section = {
+                section_id: tuple(
+                    slot_id
+                    for slot_id in required_slots_for(section_id)
+                    if slot_id not in reachable_slots_by_section[section_id]
+                )
+                for section_id in SECTION_IDS
+            }
+            unreachable_slots_by_section = {
+                section_id: slot_ids
+                for section_id, slot_ids in unreachable_slots_by_section.items()
+                if slot_ids
+            }
+            if unreachable_slots_by_section:
+                # 외부 사용자에게는 닫힌 사유 코드만 보내되, 운영 로그에는
+                # 정확히 어느 정책 칸이 비었는지 남긴다. 그렇지 않으면 회사
+                # 자료 부족과 수집기 배선 누락을 같은 증상으로만 보게 된다.
+                logger.warning(
+                    "FULL 사전 필수 의미칸 미달: %s",
+                    unreachable_slots_by_section,
+                )
+                raise V2ValidationError(
+                    (
+                        "report_recovery:"
+                        + FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INSUFFICIENT,
+                    )
+                )
+
     # ① 본문 9장 작성 (작가)
     draft = compose_sections(
         company_name,
         fragments,
         performance_table,
         writer_for_run,
-        section_evidence_packets=(
-            prepared_evidence.packets if prepared_evidence is not None else None
-        ),
+        # 준비 결과의 plain Mapping으로 낮추면 원본 typed PacketSet이라는 사실과
+        # claim-slot 소유권 강제 플래그가 사라진다. 검증한 정본 입력을 그대로
+        # 넘겨 작성 경계도 같은 계약을 보게 한다.
+        section_evidence_packets=section_evidence_packets,
     )
     if release_mode is not ReleaseMode.SHADOW:
         if prepared_evidence is not None:
             draft = _sanitize_report_to_section_evidence(
                 draft,
                 prepared_evidence.allowed_fragment_ids_by_section,
+                supported_claim_slots_by_fragment_id=(
+                    prepared_evidence.supported_claim_slots_by_fragment_id
+                ),
+                enforce_claim_slot_support=(
+                    prepared_evidence.enforce_claim_slot_support
+                ),
             )
             _assert_composed_report_evidence_invariant(
                 draft,
@@ -812,6 +951,10 @@ def run_v2(
     # 산문을 역추출해 가짜 fact로 통과시키지 않는다. 프로그램이 만든 위 누적
     # 증감률은 동일한 versioned 결속을 재검산한 뒤 그대로 남는다.
     verified, body_numeric_filtering = enforce_public_numeric_safety(verified)
+    # 공식 양사 비교는 AI 산문이 아니라 별도 다중 출처 수치 검산기가 만든다.
+    # AI 수치 필터를 우회시키는 것이 아니라 그 필터가 끝난 뒤 packet에 이미
+    # 봉인된 문장만 추가하고, 아래 품질 평가에서 다시 공식 재계산한다.
+    verified = _append_verified_program_sentences(verified, prepared_evidence)
     if prepared_evidence is not None:
         _assert_composed_report_evidence_invariant(
             verified,
@@ -860,6 +1003,16 @@ def run_v2(
             citation_style=citation_style,
             company_id=(str(company_id).strip() if release_mode is ReleaseMode.FULL else ""),
             release_mode=release_mode.value,
+            verified_program_facts=(
+                prepared_evidence.program_facts
+                if prepared_evidence is not None
+                else ()
+            ),
+            program_registry_sources=(
+                prepared_evidence.program_sources
+                if prepared_evidence is not None
+                else ()
+            ),
         )
         extractive = select_extractive_summary(verified, body_rendered.fact_records)
         # FULL은 이 시점의 결과가 아직 ``primary`` 후보일 뿐이다. 요약이
@@ -916,6 +1069,7 @@ def run_v2(
             analysis_period=analysis_period,
             latest_performance_period=latest_performance_period,
             citation_style=citation_style,
+            program_registry_sources=prepared_evidence.program_sources,
         )
 
     # ⑤ 렌더 — 웹·PDF가 이미 소비하는 공용 구조로
@@ -941,6 +1095,16 @@ def run_v2(
         citation_style=citation_style,
         company_id=str(company_id).strip(),
         release_mode=("" if release_mode is ReleaseMode.SHADOW else release_mode.value),
+        verified_program_facts=(
+            prepared_evidence.program_facts
+            if prepared_evidence is not None
+            else ()
+        ),
+        program_registry_sources=(
+            prepared_evidence.program_sources
+            if prepared_evidence is not None
+            else ()
+        ),
         **seal_render_kwargs,
     )
     primary_block_sha256s: tuple[tuple[str, str], ...] = ()
@@ -961,17 +1125,22 @@ def run_v2(
     generation_assessment, quality_observation = assess_and_observe_generation(
         quality_candidate,
         contract_version=(
-            ""
-            if release_mode is ReleaseMode.SHADOW
-            else STRICT_QUALITY_CONTRACT_VERSION
+            STRICT_QUALITY_CONTRACT_VERSION
+            if release_mode is ReleaseMode.FULL
+            else (
+                LEGACY_STRICT_QUALITY_CONTRACT_VERSION
+                if release_mode is ReleaseMode.ENFORCE_NO_PARTIAL
+                else ""
+            )
         ),
     )
     if not quality_observation.release_allowed:
         logger.warning(
-            "v2 생성 품질 판정(전체 안전은 관측 전용): 계약=%s · 품질=%s · 안전=%s",
+            "v2 생성 품질 판정(전체 안전은 관측 전용): 계약=%s · 품질=%s · 안전=%s · 문제=%s",
             quality_observation.contract_version,
             quality_observation.quality_grade,
             quality_observation.safety_decision,
+            quality_observation.safety_problems,
         )
     candidate_sha256 = ""
     validation_receipts: tuple[GenerationValidationReceipt, ...] = ()
@@ -1081,6 +1250,9 @@ def run_v2(
             merged_body, merged_numeric_filtering = enforce_public_numeric_safety(
                 merged_body
             )
+            merged_body = _append_verified_program_sentences(
+                merged_body, prepared_evidence
+            )
             base_by_id = {
                 section.section_id: section for section in base_body.sections
             }
@@ -1124,6 +1296,8 @@ def run_v2(
                 citation_style=citation_style,
                 company_id=prepared_evidence.company_id,
                 release_mode=release_mode.value,
+                verified_program_facts=prepared_evidence.program_facts,
+                program_registry_sources=prepared_evidence.program_sources,
             )
             extractive = select_extractive_summary(
                 verified,
@@ -1160,6 +1334,7 @@ def run_v2(
                 analysis_period=analysis_period,
                 latest_performance_period=latest_performance_period,
                 citation_style=citation_style,
+                program_registry_sources=prepared_evidence.program_sources,
             )
             rendered = render_report(
                 company_name,
@@ -1179,6 +1354,8 @@ def run_v2(
                 company_id=prepared_evidence.company_id,
                 release_mode=release_mode.value,
                 public_structure_seal=public_structure_seal,
+                verified_program_facts=prepared_evidence.program_facts,
+                program_registry_sources=prepared_evidence.program_sources,
             )
             assert_report_matches_public_structure(
                 rendered,
@@ -1223,6 +1400,7 @@ def run_v2(
                     supplement_receipt=supplement_receipt,
                 )
             except (TypeError, ValueError) as error:
+                logger.warning("FULL 보충 검증 영수증 결속 실패", exc_info=True)
                 raise V2ValidationError(
                     ("report_recovery:supplement_receipt_invalid",)
                 ) from error
@@ -1330,9 +1508,13 @@ def run_v2(
         draft_body_count + summary_draft_count,
         _total_sentences(final),
     )
+    fragments_collected, fragments_cited = _generation_fragment_counts(
+        verification_fragments,
+        rendered,
+    )
     generation_metrics = GenerationRunMetrics(
-        fragments_collected=len(_normalize_fragments(verification_fragments)),
-        fragments_cited=len(rendered.citations),
+        fragments_collected=fragments_collected,
+        fragments_cited=fragments_cited,
         sentences_made=composed_item_count,
         sentences_passed=_total_sentences(final),
     )

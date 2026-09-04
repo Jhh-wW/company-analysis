@@ -11,10 +11,9 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Final
-from urllib.parse import urlsplit
 
 from src.core.citations import citation_number
 from src.features.composer.constants import (
@@ -49,8 +48,20 @@ from src.features.pipeline.port import Report, ReportTable
 from src.features.provenance.sources import (
     Source,
     SourceKind,
+    bind_document_content_sha256,
+    ensure_dart_profile_attesters,
     evidence_text_hash,
     exact_evidence_text_hash,
+    full_typed_source_registry_problem,
+    has_valid_provenance_seal,
+    is_canonical_official_with_registry,
+    seal_collected_source,
+)
+from src.shared.report_evidence.constants import (
+    SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE,
+)
+from src.shared.report_evidence.source_kind_policy import (
+    formal_web_public_source_metadata,
 )
 from src.shared.dart_financial_provenance import dart_payload_matches_table
 from src.shared.report_generation.canonical import (
@@ -68,8 +79,15 @@ from src.shared.report_quality.models import (
     ReleaseDecision,
 )
 from src.shared.report_quality.source_identity import (
+    bind_declared_document_identity_to_url,
     document_identity,
+    document_identity_components,
     document_identity_from_parts,
+)
+from src.shared.revenue_table_provenance import (
+    is_revenue_total_name,
+    revenue_row_evidence_matches,
+    revenue_table_evidence_identity,
 )
 
 
@@ -174,12 +192,12 @@ def _fragment_binding(
             url=DART_FINANCIAL_API_URL,
         )
     elif fragment.source_url:
-        try:
-            host = (urlsplit(fragment.source_url).hostname or "").casefold()
-        except ValueError:
-            host = ""
-        derived_identity = document_identity_from_parts(
-            host=host, url=fragment.source_url
+        # formal 공식 웹은 canonical URL, DART는 URL 안 접수번호와 결속된
+        # document identity가 정본이다. 생산자가 선언한 문자열을 그대로
+        # 믿지 않고 사용자가 실제 여는 URL에서 같은 shared 규칙으로 재계산한다.
+        derived_identity = bind_declared_document_identity_to_url(
+            declared_identity,
+            fragment.source_url,
         )
     elif filing_meta is not None and filing_meta.document_id:
         derived_identity = document_identity_from_parts(
@@ -368,17 +386,42 @@ def _validate_composition_total(table: PerformanceTable) -> None:
     for index, header in enumerate(table.headers):
         if "%" not in str(header) and "비중" not in str(header):
             continue
-        values = tuple(
-            _decimal(row[index])
+        raw_values = tuple(
+            str(row[index]).strip().replace(",", "").removesuffix("%")
             for row in table.rows
-            if len(row) > index and "합계" not in str(row[0])
+            if len(row) > index
+            and not is_revenue_total_name(row[0])
+            and re.sub(r"\s+", "", str(row[0])) != "소계"
         )
-        if values and all(value is not None for value in values):
-            total = sum((value for value in values if value is not None), Decimal(0))
-            if total != Decimal(100):
-                raise PublicManifestError(
-                    f"구성 표의 공개 비중 합계가 100%가 아닙니다: {total}"
+        values = tuple(_decimal(value) for value in raw_values)
+        if not values or any(value is None for value in values):
+            raise PublicManifestError(
+                "구성 표의 공개 비중 합계를 숫자로 재검산할 수 없습니다"
+            )
+        concrete = tuple(value for value in values if value is not None)
+        if any(value < 0 or value > 100 for value in concrete):
+            raise PublicManifestError(
+                "구성 표의 공개 비중 합계 항목이 0~100 범위를 벗어났습니다"
+            )
+        # 공개된 마지막 자리에서 각 행은 최대 반 단위만 반올림될 수 있다.
+        # 행별 허용치를 합친 범위 안에서만 99.99/100.01 같은 표시 오차를 받는다.
+        tolerance = sum(
+            (
+                Decimal(1).scaleb(
+                    -len(value.partition(".")[2]) if "." in value else 0
                 )
+                / Decimal(2)
+                for value in raw_values
+            ),
+            Decimal(0),
+        )
+        total = sum(concrete, Decimal(0))
+        difference = abs(total - Decimal(100))
+        if difference != 0 and difference >= tolerance:
+            raise PublicManifestError(
+                "구성 표의 공개 비중 합계가 표시 자릿수의 반올림 범위를 "
+                f"벗어났습니다: {total} (허용 {tolerance})"
+            )
 
 
 def _claim_supports_row(
@@ -594,6 +637,9 @@ def _validated_program_bindings(
     table: PerformanceTable,
     fragments: Mapping[str, _FragmentBinding],
     verified_claims: Mapping[str, StructuredClaim],
+    *,
+    fragment_texts: Mapping[str, str],
+    require_source_row_provenance: bool = False,
 ) -> tuple[dict[str, object], ...]:
     width = len(table.headers)
     normalized_headers = tuple(_normalized_header(value) for value in table.headers)
@@ -630,6 +676,14 @@ def _validated_program_bindings(
     _validate_composition_total(table)
 
     bindings: list[dict[str, object]] = []
+    strict_table_identity = ""
+    strict_row_count = sum(
+        1
+        for row in table.rows
+        if row
+        and not is_revenue_total_name(row[0])
+        and re.sub(r"\s+", "", str(row[0])) != "소계"
+    )
     for index, row in enumerate(table.rows):
         fact_id = fact_ids[index]
         evidence = evidence_rows[index]
@@ -651,16 +705,37 @@ def _validated_program_bindings(
                 raise PublicManifestError(
                     f"프로그램 표 {index + 1}번 행의 evidence_rows가 비었습니다"
                 )
-            if not is_dart_table and not _generic_evidence_matches_row(
-                table.headers,
-                row,
-                table.raw_rows[index] if table.raw_rows else None,
-                evidence,
-                scale_divisor=table.scale_divisor,
-                scale_places=table.scale_places,
-            ):
+            raw_row = table.raw_rows[index] if table.raw_rows else None
+            if require_source_row_provenance:
+                evidence_matches = revenue_row_evidence_matches(
+                    evidence,
+                    cited_source_text=fragment_texts.get(source.fragment_id, ""),
+                    headers=table.headers,
+                    public_row=row,
+                    raw_row=raw_row,
+                    expected_selected_index=index,
+                    expected_row_count=strict_row_count,
+                )
+                table_identity = revenue_table_evidence_identity(evidence)
+                if not strict_table_identity:
+                    strict_table_identity = table_identity
+                evidence_matches = bool(
+                    evidence_matches
+                    and table_identity
+                    and table_identity == strict_table_identity
+                )
+            else:
+                evidence_matches = is_dart_table or _generic_evidence_matches_row(
+                    table.headers,
+                    row,
+                    raw_row,
+                    evidence,
+                    scale_divisor=table.scale_divisor,
+                    scale_places=table.scale_places,
+                )
+            if not evidence_matches:
                 raise PublicManifestError(
-                    f"프로그램 표 {index + 1}번 행을 원자료로 재검산할 수 없습니다"
+                    f"프로그램 표 {index + 1}번 행을 인용 원문으로 재검산할 수 없습니다"
                 )
             typed_cells = _evidence_typed_cells(
                 table.headers,
@@ -915,15 +990,86 @@ def _expected_source(
     exact_hash = exact_evidence_text_hash(fragment.text)
     evidence_hashes = [normalized_hash] if normalized_hash else []
     exact_hashes = [exact_hash] if exact_hash else []
-    if fragment.text.startswith(DART_FINANCIAL_API_PREFIX):
-        return Source(
+    if fragment.bound_source is not None:
+        source = fragment.bound_source
+        if (
+            type(source) is not Source
+            or not has_valid_provenance_seal(source)
+            or source.number != number
+            or str(source.number) != fragment.fragment_id
+            or exact_hash not in source.exact_evidence_hashes
+            or document_identity(source) != fragment.document_identity
+            or (
+                bool(fragment.document_content_sha256)
+                and source.document_content_sha256
+                != fragment.document_content_sha256
+            )
+        ):
+            raise PublicManifestError(
+                "프로그램 비교 조각과 봉인 Source 결속이 깨졌습니다"
+            )
+        # used_in은 FactRecord에서 나중에 계산하는 출고 투영이며
+        # 수집 봉인 payload가 아니다. 그 필드만의 변경은 재봉인하지 않는다.
+        return replace(source, used_in=list(dict.fromkeys(used_in)))
+    # renderer와 같은 shared identity 규칙으로 formal DART 문서를 먼저
+    # 판별한다. URL 유무만 보면 DART도 일반 웹 Source로 바뀌어 pre-render
+    # 봉인과 실제 공개 부록의 문서 신원이 갈라진다.
+    bound_identity = bind_declared_document_identity_to_url(
+        fragment.document_identity,
+        fragment.source_url,
+    )
+    identity_host, identity_document_id = document_identity_components(
+        bound_identity
+    )
+    formal_web = formal_web_public_source_metadata(
+        source_kind=fragment.formal_source_kind,
+        source_url=fragment.source_url,
+        company_name=company_name,
+        identity_binding=fragment.identity_binding,
+        domain_attestation_source_id=fragment.domain_attestation_source_id,
+        domain_attestation_evidence=fragment.domain_attestation_evidence,
+        reporting_period=fragment.reporting_period,
+        attachment_url=fragment.attachment_url,
+        ir_metadata_verification=fragment.ir_metadata_verification,
+        domain_redirect_verification=fragment.domain_redirect_verification,
+        domain_redirect_from_host=fragment.domain_redirect_from_host,
+        domain_redirect_to_host=fragment.domain_redirect_to_host,
+    )
+    if identity_host and identity_document_id:
+        source = Source(
+            number=number,
+            kind=SourceKind.FILING,
+            label=_expected_source_label(fragment, filing_meta),
+            disclosed_at=fragment.document_date,
+            collected_at=fragment.source_collected_on,
+            source_id=f"{_SOURCE_ID_PREFIX}{fragment.fragment_id}",
+            title=fragment.document_title,
+            # 공시 내용에 책임지는 발행자는 분석 대상 법인이고 DART는
+            # 공개 위치(host)다. typed 수집 문서가 보존한 원자료 발행처와
+            # 독자에게 보여 주는 Source의 책임 주체를 섞지 않는다.
+            publisher=company_name,
+            host=identity_host,
+            url=fragment.source_url,
+            document_id=identity_document_id,
+            location=fragment.location or fragment.kind,
+            source_type="공식 공시",
+            fact_status="공시 실제값",
+            used_in=list(used_in),
+            evidence_hashes=evidence_hashes,
+            exact_evidence_hashes=exact_hashes,
+            formal_source_kind=fragment.formal_source_kind,
+            identity_binding=fragment.identity_binding,
+        )
+    elif fragment.text.startswith(DART_FINANCIAL_API_PREFIX):
+        source = Source(
             number=number,
             kind=SourceKind.FILING,
             label=DART_FINANCIAL_API_LABEL,
             collected_at=fragment.document_date,
             source_id=f"{_SOURCE_ID_PREFIX}{fragment.fragment_id}",
             title=DART_FINANCIAL_API_LABEL,
-            publisher="금융감독원",
+            # API 운영 주체가 아니라 이 재무 수치를 공시한 법인을 표시한다.
+            publisher=company_name,
             host=DART_FINANCIAL_API_HOST,
             url=DART_FINANCIAL_API_URL,
             document_id=DART_FINANCIAL_API_DOCUMENT_ID,
@@ -934,8 +1080,47 @@ def _expected_source(
             evidence_hashes=evidence_hashes,
             exact_evidence_hashes=exact_hashes,
         )
-    if fragment.source_url:
-        return Source(
+    elif formal_web is not None:
+        source = Source(
+            number=number,
+            kind=SourceKind.OTHER,
+            label=_expected_source_label(fragment, filing_meta),
+            collected_at=fragment.source_collected_on,
+            published_at=fragment.document_date,
+            source_id=f"{_SOURCE_ID_PREFIX}{fragment.fragment_id}",
+            title=fragment.document_title,
+            publisher=company_name,
+            host=formal_web.host,
+            url=fragment.source_url,
+            document_id=fragment.source_document_id,
+            location=fragment.location,
+            source_type=formal_web.source_type,
+            fact_status=(
+                "공식 발행일·보고기간 확정"
+                if formal_web.source_type == "회사 공식 IR"
+                and fragment.document_date
+                else "기준일 현재 확인"
+            ),
+            used_in=list(used_in),
+            evidence_hashes=evidence_hashes,
+            exact_evidence_hashes=exact_hashes,
+            formal_source_kind=formal_web.formal_source_kind,
+            identity_binding=formal_web.identity_binding,
+            domain_attestation_source_id=formal_web.domain_attestation_source_id,
+            domain_attestation_evidence=formal_web.domain_attestation_evidence,
+            reporting_period=formal_web.reporting_period,
+            attachment_url=formal_web.attachment_url,
+            ir_metadata_verification=formal_web.ir_metadata_verification,
+            domain_redirect_verification=formal_web.domain_redirect_verification,
+            domain_redirect_from_host=formal_web.domain_redirect_from_host,
+            domain_redirect_to_host=formal_web.domain_redirect_to_host,
+        )
+    elif fragment.formal_source_kind:
+        raise PublicManifestError(
+            "typed 공식 웹의 자료종류·URL·회사 proof가 일치하지 않습니다"
+        )
+    elif fragment.source_url:
+        source = Source(
             number=number,
             kind=SourceKind.OTHER,
             label=_expected_source_label(fragment, filing_meta),
@@ -949,28 +1134,57 @@ def _expected_source(
             evidence_hashes=evidence_hashes,
             exact_evidence_hashes=exact_hashes,
         )
-    document_id = filing_meta.document_id if filing_meta is not None else ""
-    return Source(
-        number=number,
-        kind=SourceKind.FILING,
-        label=_expected_source_label(fragment, filing_meta),
-        disclosed_at=filing_meta.disclosed_at if filing_meta is not None else "",
-        collected_at=fragment.document_date,
-        source_id=f"{_SOURCE_ID_PREFIX}{fragment.fragment_id}",
-        title=filing_meta.title if filing_meta is not None else "",
-        publisher=company_name,
-        host=DART_DOCUMENT_HOST if document_id else "",
-        url=(
-            DART_DOCUMENT_URL_TEMPLATE.format(document_id=document_id)
-            if document_id
-            else ""
-        ),
-        document_id=document_id,
-        location=fragment.location or fragment.kind,
-        used_in=list(used_in),
-        evidence_hashes=evidence_hashes,
-        exact_evidence_hashes=exact_hashes,
+    else:
+        document_id = filing_meta.document_id if filing_meta is not None else ""
+        source = Source(
+            number=number,
+            kind=SourceKind.FILING,
+            label=_expected_source_label(fragment, filing_meta),
+            disclosed_at=filing_meta.disclosed_at if filing_meta is not None else "",
+            collected_at=fragment.document_date,
+            source_id=f"{_SOURCE_ID_PREFIX}{fragment.fragment_id}",
+            title=filing_meta.title if filing_meta is not None else "",
+            publisher=company_name,
+            host=DART_DOCUMENT_HOST if document_id else "",
+            url=(
+                DART_DOCUMENT_URL_TEMPLATE.format(document_id=document_id)
+                if document_id
+                else ""
+            ),
+            document_id=document_id,
+            location=fragment.location or fragment.kind,
+            used_in=list(used_in),
+            evidence_hashes=evidence_hashes,
+            exact_evidence_hashes=exact_hashes,
+        )
+    # renderer와 독립적으로 예상 출처를 만들되, 두 경로 모두
+    # 최종 공개 Source를 같은 불변 봉인 규칙에 넣어야 저장 후 검사가
+    # 특정 종류의 출처만 누락된 혼합 보고서를 막을 수 있다.
+    # renderer와 같은 단일 projection을 써야 예상 manifest와 실제 공개 Source가
+    # 출처 종류가 늘어난 뒤에도 문서 전체 지문에서 갈라지지 않는다.
+    source = bind_document_content_sha256(
+        source,
+        fragment.document_content_sha256,
     )
+    sealed = seal_collected_source(source)
+    if fragment.formal_source_kind:
+        if (
+            not sealed.is_canonical_valid
+            or not has_valid_provenance_seal(sealed)
+            or document_identity(sealed) != fragment.document_identity
+        ):
+            raise PublicManifestError(
+                "FULL typed 출처의 공개 신원·필수 필드·도장이 손상됐습니다"
+            )
+        if (
+            fragment.formal_source_kind
+            == SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE
+            and not is_canonical_official_with_registry(sealed, [sealed])
+        ):
+            raise PublicManifestError(
+                "DART sidecar 공식 웹 출처의 공식성 proof가 손상됐습니다"
+            )
+    return sealed
 
 
 def _public_table_from_manifest(table: Mapping[str, object]) -> dict[str, object]:
@@ -1001,6 +1215,7 @@ def _expected_public_content_projection(
     latest_performance_period: str,
     citation_style: str,
     filing_meta: FilingMeta | None,
+    program_registry_sources: Sequence[Source] = (),
 ) -> dict[str, object]:
     numbers = _citation_numbers_for_fragments(fragments)
     groups = [
@@ -1114,6 +1329,39 @@ def _expected_public_content_projection(
         for number in sorted(used_sections)
         if number in fragment_by_number
     ]
+    citations_by_id = {source.source_id: source for source in citations}
+    used_numbers = {source.number for source in citations}
+    for source in program_registry_sources:
+        if type(source) is not Source or not source.source_id:
+            raise PublicManifestError("프로그램 Source 등록부 형식이 올바르지 않습니다")
+        previous = citations_by_id.get(source.source_id)
+        if previous is not None:
+            if previous != source:
+                raise PublicManifestError("공개 비교 Source가 packet 등록부와 다릅니다")
+            continue
+        if source.number in used_numbers:
+            raise PublicManifestError("프로그램 Source 번호가 공개 부록과 충돌합니다")
+        citations.append(source)
+        citations_by_id[source.source_id] = source
+        used_numbers.add(source.number)
+    try:
+        complete_registry = ensure_dart_profile_attesters(
+            citations,
+            company_name=company_name,
+        )
+    except ValueError as exc:
+        raise PublicManifestError(str(exc)) from exc
+    citations = sorted(complete_registry, key=lambda source: source.number)
+    complete_registry = tuple(citations)
+    for source in complete_registry:
+        if problem := full_typed_source_registry_problem(
+            source,
+            complete_registry,
+            reference_date=as_of_date,
+        ):
+            raise PublicManifestError(
+                f"FULL typed 공개 출처 계약 위반: {problem}"
+            )
     from src.shared.report_generation.models import canonical_value  # noqa: PLC0415
 
     return {
@@ -1156,12 +1404,17 @@ def build_public_structure_seal(
     analysis_period: str,
     latest_performance_period: str,
     citation_style: str,
+    program_registry_sources: Sequence[Source] = (),
 ) -> PublicStructureSeal:
     """검증된 pre-render 입력만으로 공개 표·flow 정본을 만든다."""
 
+    normalized_fragments = _normalize_fragments(fragments)
     fragment_bindings = {
         fragment.fragment_id: _fragment_binding(fragment, filing_meta)
-        for fragment in _normalize_fragments(fragments)
+        for fragment in normalized_fragments
+    }
+    fragment_texts = {
+        fragment.fragment_id: str(fragment.text) for fragment in normalized_fragments
     }
     verified_claims: dict[str, StructuredClaim] = {}
     for section in report.sections:
@@ -1244,7 +1497,13 @@ def build_public_structure_seal(
             )
         for table, presentation in program_slots:
             row_bindings = _validated_program_bindings(
-                table, fragment_bindings, verified_claims
+                table,
+                fragment_bindings,
+                verified_claims,
+                fragment_texts=fragment_texts,
+                require_source_row_provenance=(
+                    presentation == _COMPOSITION_PRESENTATION
+                ),
             )
             fragment_id = citation_number(table.cite)
             source_cites = _normalized_source_cites((fragment_id,))
@@ -1324,6 +1583,7 @@ def build_public_structure_seal(
         latest_performance_period=latest_performance_period,
         citation_style=citation_style,
         filing_meta=filing_meta,
+        program_registry_sources=program_registry_sources,
     )
     public_sections = public_content["sections"]
     section_sha256s = tuple(

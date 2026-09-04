@@ -32,7 +32,13 @@ from src.features.storage import constants as storage_constants
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
 from src.features.report_standard import PublishBlockedError, build_published_report
-from src.web import job_runtime, paid_runtime, report_retention_adapter, request_helpers
+from src.web import (
+    job_runtime,
+    paid_runtime,
+    report_publication,
+    report_retention_adapter,
+    request_helpers,
+)
 from src.web.security import CSRF_TOKEN_MAX_CHARS, REFERENCE_MAX_CHARS
 
 
@@ -89,11 +95,25 @@ def _link_expiry_label(created_at: str, *, expires_at: str = "") -> str:
     return f"{expires:%Y-%m-%d} (한국시간 00:00부터 닫힘)"
 
 
-def _dashboard_link_report_state(conn, link: share_store.ShareLink) -> str:
-    if not link.report_id:
+def _dashboard_stored_report_state(conn, report_id: str) -> str:
+    """저장 행과 출고 의무를 함께 본 관리자용 열람 가능 상태."""
+
+    if not report_id:
         return "none"
-    report = report_store.load(conn, link.report_id)
+    report = report_store.load(conn, report_id)
     if report is None:
+        return "missing"
+    if not report_publication.report_is_published_or_legacy(conn, report_id):
+        return "unavailable"
+    return "available"
+
+
+def _dashboard_link_report_state(conn, link: share_store.ShareLink) -> str:
+    availability = _dashboard_stored_report_state(conn, link.report_id)
+    if availability != "available":
+        return availability
+    report = report_store.load(conn, link.report_id)
+    if report is None:  # pragma: no cover - 위 helper와 같은 transaction의 방어선
         return "missing"
     return "expired" if job_runtime._link_expired(report) else "active"
 
@@ -689,6 +709,17 @@ async def admin_report_detail(request: Request, report_id: str):
     try:
         with storage_db.connect() as conn:
             report = report_store.load(conn, report_id)
+            if (
+                report is not None
+                and not report_publication.report_is_published_or_legacy(
+                    conn, report_id
+                )
+            ):
+                response = HTMLResponse(
+                    "출고가 완료되지 않은 임시 보고서는 정상 보고서로 검토할 수 없습니다.",
+                    status_code=409,
+                )
+                return _admin_response(request, response)
             state = _report_state_for_dashboard(conn, report_id, report=report)
             snapshot_row = conn.execute(
                 f"""SELECT payload_json FROM {dashboard_store.TABLE_REPORT_VERSIONS}
@@ -765,6 +796,13 @@ async def admin_report_snapshot(
         )
     try:
         with storage_db.connect() as conn:
+            availability = _dashboard_stored_report_state(conn, report_id)
+            if availability == "unavailable":
+                response = HTMLResponse(
+                    "출고가 완료되지 않은 임시 보고서 스냅샷은 검토할 수 없습니다.",
+                    status_code=409,
+                )
+                return _admin_response(request, response)
             snapshot = dashboard_store.get_report_snapshot(
                 conn, report_id=report_id, version=version
             )
@@ -817,6 +855,10 @@ async def change_report_state(
         with storage_db.connect() as conn:
             if not report_store.exists(conn, report_id):
                 return HTMLResponse("존재하지 않는 보고서입니다.", status_code=404)
+            if not report_publication.report_is_published_or_legacy(conn, report_id):
+                raise ValueError(
+                    "자동출고가 완료되지 않은 임시 보고서의 상태는 변경할 수 없습니다."
+                )
             current = dashboard_store.get_report_state(conn, report_id)
             if (
                 status == dashboard_store.REPORT_STATUS_NORMAL
@@ -858,6 +900,10 @@ async def register_corrected_report_payload(
         with storage_db.connect() as conn:
             if not report_store.exists(conn, report_id):
                 return HTMLResponse("존재하지 않는 보고서입니다.", status_code=404)
+            if not report_publication.report_is_published_or_legacy(conn, report_id):
+                raise ValueError(
+                    "자동출고가 완료되지 않은 임시 보고서에는 수정본을 등록할 수 없습니다."
+                )
             state = dashboard_store.get_report_state(conn, report_id)
             if state.status != dashboard_store.REPORT_STATUS_RECHECKING:
                 raise ValueError("수정본은 재검사 중인 보고서에만 등록할 수 있습니다.")
@@ -949,6 +995,11 @@ async def submit_survey(
             report = report_store.load(conn, report_id)
             if report is None:
                 return HTMLResponse("존재하지 않는 보고서입니다.", status_code=404)
+            if not report_publication.report_is_published_or_legacy(conn, report_id):
+                return HTMLResponse(
+                    "출고가 완료되지 않은 임시 보고서에는 설문을 남길 수 없습니다.",
+                    status_code=409,
+                )
             report_state = dashboard_store.get_report_state(conn, report_id)
             if not report_state.updated_at:
                 report_state = dashboard_store.register_report(
@@ -1005,6 +1056,11 @@ async def submit_error(
         with storage_db.connect() as conn:
             if not report_store.exists(conn, report_id):
                 return HTMLResponse("존재하지 않는 보고서입니다.", status_code=404)
+            if not report_publication.report_is_published_or_legacy(conn, report_id):
+                return HTMLResponse(
+                    "출고가 완료되지 않은 임시 보고서에는 오류를 신고할 수 없습니다.",
+                    status_code=409,
+                )
             dashboard_store.record_error(
                 conn, report_id=report_id, actor_email=email, area=area, reason=reason,
                 now_iso=clock.iso_now_kst(),
@@ -1132,13 +1188,7 @@ async def link_detail(request: Request, key_hash: str):
             )
             run_report_states = {
                 run.run_id: (
-                    "none"
-                    if not run.report_id
-                    else (
-                        "available"
-                        if report_store.load(conn, run.report_id) is not None
-                        else "missing"
-                    )
+                    _dashboard_stored_report_state(conn, run.report_id)
                 )
                 for run in runs
             }

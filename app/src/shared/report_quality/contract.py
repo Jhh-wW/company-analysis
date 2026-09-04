@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from src.shared.report_quality.constants import (
+    LEGACY_STRICT_QUALITY_CONTRACT_VERSION,
     LEGACY_UNVERSIONED_CONTRACT,
+    MAX_INTERPRETED_CLAIMS,
+    MAX_INTERPRETED_CLAIMS_PER_SECTION,
+    MAX_INTERPRETED_RATIO,
+    MIN_FULL_PUBLIC_SENTENCES_PER_SECTION,
     MAX_NOTICE_ONLY_SECTIONS,
     MIN_CLAIMS_PER_COVERED_SECTION,
     MIN_DOCUMENT_SOURCES,
@@ -15,6 +20,7 @@ from src.shared.report_quality.constants import (
     STRICT_QUALITY_CONTRACT_VERSION,
     STRICT_REQUIRED_QUALITY_SECTION_IDS,
 )
+from src.shared.report_evidence.policy import EVIDENCE_SLOT_POLICY_VERSION
 from src.shared.report_quality.models import (
     ContractResolution,
     ContractUse,
@@ -34,10 +40,11 @@ CURRENT_CONTRACT = QualityContract(
     historical_read_policy=HistoricalReadPolicy.PRESERVE_ISSUED,
 )
 
-# v1 하한을 새 출력에 맞춰 낮추지 않는다. FULL 계약은 그 하한을 그대로
-# 유지하면서 누락됐던 9장과 안내문 없는 완성 조건만 더 엄격히 요구한다.
-STRICT_CONTRACT = QualityContract(
-    version=STRICT_QUALITY_CONTRACT_VERSION,
+# v2는 ENFORCE_NO_PARTIAL의 현행 엄격 계약이자 과거 FULL 영수증의 계약이다.
+# 숫자와 뜻을 그대로 보존하고, 어느 공개 모드가 이를 발급할지는 composer의
+# 단일 release-mode 라우터가 결정한다(FULL 신규 발급에는 v3만 허용).
+LEGACY_STRICT_CONTRACT = QualityContract(
+    version=LEGACY_STRICT_QUALITY_CONTRACT_VERSION,
     required_section_ids=STRICT_REQUIRED_QUALITY_SECTION_IDS,
     min_claims_per_covered_section=MIN_CLAIMS_PER_COVERED_SECTION,
     min_substantive_claims=MIN_SUBSTANTIVE_CLAIMS,
@@ -47,9 +54,33 @@ STRICT_CONTRACT = QualityContract(
     historical_read_policy=HistoricalReadPolicy.PRESERVE_ISSUED,
 )
 
+# v1 하한을 새 출력에 맞춰 낮추지 않는다. 새 FULL 계약은 그 하한을 그대로
+# 유지하면서 9장·안내문 없음·해석 문장 천장을 함께 요구한다.
+STRICT_CONTRACT = QualityContract(
+    version=STRICT_QUALITY_CONTRACT_VERSION,
+    required_section_ids=STRICT_REQUIRED_QUALITY_SECTION_IDS,
+    # 새 FULL은 임의 claim 범주 2종으로 의미 충족을 대신하지 않는다.
+    # 아래 versioned 필수 의미칸 정책을 정확히 대조한다.
+    min_claims_per_covered_section=0,
+    min_substantive_claims=MIN_SUBSTANTIVE_CLAIMS,
+    min_verified_ratio=MIN_VERIFIED_RATIO,
+    min_document_sources=MIN_DOCUMENT_SOURCES,
+    max_notice_only_sections=STRICT_MAX_NOTICE_ONLY_SECTIONS,
+    historical_read_policy=HistoricalReadPolicy.PRESERVE_ISSUED,
+    max_interpreted_claims_per_section=MAX_INTERPRETED_CLAIMS_PER_SECTION,
+    max_interpreted_claims=MAX_INTERPRETED_CLAIMS,
+    max_interpreted_ratio=MAX_INTERPRETED_RATIO,
+    min_public_sentences_per_section=MIN_FULL_PUBLIC_SENTENCES_PER_SECTION,
+    required_public_claim_slot_policy_version=EVIDENCE_SLOT_POLICY_VERSION,
+)
+
 _GENERATION_CONTRACTS: dict[str, QualityContract] = {
     CURRENT_CONTRACT.version: CURRENT_CONTRACT,
+    LEGACY_STRICT_CONTRACT.version: LEGACY_STRICT_CONTRACT,
     STRICT_CONTRACT.version: STRICT_CONTRACT,
+}
+_STORED_ASSESSMENT_CONTRACTS: dict[str, QualityContract] = {
+    **_GENERATION_CONTRACTS,
 }
 
 
@@ -65,6 +96,22 @@ def contract_for_generation(version: str = "") -> QualityContract:
         return _GENERATION_CONTRACTS[selected]
     except KeyError as error:
         raise ValueError(f"알 수 없는 보고서 품질 계약 버전입니다: {selected}") from error
+
+
+def contract_for_stored_assessment(version: str) -> QualityContract:
+    """발급 당시 평가 영수증을 그 당시 계약으로만 재검산한다.
+
+    생성 시점 평가 API와 조회 시점 재검산 API를 분리한다. v2는 ENFORCE에서
+    계속 생성하지만 FULL 신규 발급은 composer 라우터가 v3로 고정한다. 과거
+    v2 FULL 영수증도 뜻을 바꾸지 않고 읽으며, 알 수 없는 미래·오타 버전은
+    현재 규칙으로 몰래 승격하지 않는다.
+    """
+
+    selected = str(version or "").strip()
+    try:
+        return _STORED_ASSESSMENT_CONTRACTS[selected]
+    except KeyError as error:
+        raise ValueError(f"알 수 없는 저장 품질 계약 버전입니다: {selected}") from error
 
 
 def resolve_contract(

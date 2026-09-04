@@ -58,9 +58,10 @@ def test_새_PUBLIC_demo는_별도_cookie로_완주하고_ID만_아는_브라우
     monkeypatch,
 ):
     monkeypatch.setattr(runtime, "_PIPELINE", DemoPipeline())
-    owner = TestClient(main.app, base_url="https://testserver")
-    stranger = TestClient(main.app, base_url="https://testserver")
-    try:
+    # 실제 출고 완료는 /run 응답 뒤 background task다. TestClient를 lifespan 없이
+    # 요청마다 열면 그 event loop가 닫히며 task가 PDF/Delivery 사이에서 취소될 수
+    # 있다. 운영 서버와 같은 살아 있는 lifespan 안에서 먼저 완주한다.
+    with TestClient(main.app, base_url="https://testserver") as owner:
         report_id, started = _start_public_demo(owner)
         set_cookie = started.headers["set-cookie"]
         assert constants.PUBLIC_GRANT_COOKIE_NAME in set_cookie
@@ -84,22 +85,20 @@ def test_새_PUBLIC_demo는_별도_cookie로_완주하고_ID만_아는_브라우
         _wait_finished(owner, report_id)
         assert owner.get(f"/result/{report_id}").status_code == 200
 
-        for path in (
-            f"/result/{report_id}",
-            f"/download/pdf/{report_id}",
-            f"/progress/{report_id}",
-            f"/api/progress/{report_id}",
-        ):
-            assert stranger.get(path, follow_redirects=False).status_code == 404
+        with TestClient(main.app, base_url="https://testserver") as stranger:
+            for path in (
+                f"/result/{report_id}",
+                f"/download/pdf/{report_id}",
+                f"/progress/{report_id}",
+                f"/api/progress/{report_id}",
+            ):
+                assert stranger.get(path, follow_redirects=False).status_code == 404
 
         # 메모리 Job이 사라진 재시작 모양에서도 DB grant가 결과 복구를 허용한다.
         job_runtime._JOBS.pop(report_id, None)
         recovered = owner.get(f"/result/{report_id}")
         assert recovered.status_code == 200
         assert CANONICAL_DEMO_COMPANY in recovered.text
-    finally:
-        owner.close()
-        stranger.close()
 
 
 def test_cutover후_무grant_PUBLIC과_email_only_MEMBER는_자동승격하지않는다():

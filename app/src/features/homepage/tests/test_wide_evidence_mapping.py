@@ -112,7 +112,11 @@ def test_document_mapping은_계약_필드_이름을_그대로_쓴다():
         "company_id", "document_id", "canonical_url", "source_kind", "publisher",
         "title", "published_on", "collected_at", "content_sha256", "identity_binding",
         "usable_ranges", "collector_version", "parser_version", "requirement", "source_tier",
-        "exact_evidence_hashes",
+        "exact_evidence_hashes", "exact_evidence_bindings",
+        "domain_attestation_source_id", "domain_attestation_evidence",
+        "reporting_period", "attachment_url", "ir_metadata_verification",
+        "domain_redirect_verification", "domain_redirect_from_host",
+        "domain_redirect_to_host",
     }
     assert mapping["document_id"] == "d1"
     assert isinstance(mapping["usable_ranges"], list)
@@ -120,6 +124,12 @@ def test_document_mapping은_계약_필드_이름을_그대로_쓴다():
         "start": 0, "end": len("핵심가치에 따른 채용 관련 본문입니다.")
     }
     assert mapping["exact_evidence_hashes"] == sorted({f.text_sha256 for f in fragments})
+    assert mapping["exact_evidence_bindings"] == [
+        {"location": location, "text_sha256": text_sha256}
+        for location, text_sha256 in sorted(
+            {(fragment.location, fragment.text_sha256) for fragment in fragments}
+        )
+    ]
 
 
 def test_fragment_mapping은_평범한_dict_list다():
@@ -219,6 +229,67 @@ def test_fragment가_없는_문서는_documents에서_빠진다():
     mapped = to_evidence_mappings(result=_result(documents=(document,)), fragments=fragments)
 
     assert mapped["documents"] == []
+    # Writer 자격 자체는 있어도 exact 근거가 없으면 작성 입력이 아니라
+    # provenance-only 감사 차선에 이유와 함께 남는다.
+    assert mapped["provenance_documents"][0]["document_id"] == "d-unmatched"
+    assert mapped["provenance_documents"][0]["exclusion_reason"] == (
+        "no_exact_evidence"
+    )
+
+
+def test_Writer자격없는_외부IR은_exact메타를_provenance차선에_보존한다():
+    attachment_url = "https://cdn.vendor.example/reports/alpha.pdf"
+    document = _document(
+        ("고객에게 구독 서비스를 제공하고 매출을 얻습니다.",),
+        document_id="external-ir-1",
+        canonical_url=attachment_url,
+        source_kind="official_ir_pdf",
+        publisher="company.example",
+        title="IR 자료",
+        requirement="OPTIONAL",
+        source_tier="TIER_3_TRUSTED",
+        identity_binding="official exact-link attachment",
+        attachment_url=attachment_url,
+    )
+
+    fragments = build_fragments(document, company_id="c1")
+    mapped = to_evidence_mappings(
+        result=_result(documents=(document,)),
+        fragments=fragments,
+    )
+
+    assert fragments == ()
+    assert mapped["documents"] == []
+    assert mapped["fragments"] == []
+    assert mapped["provenance_documents"] == [
+        {
+            "company_id": "c1",
+            "document_id": "external-ir-1",
+            "canonical_url": attachment_url,
+            "source_kind": "official_ir_pdf",
+            "publisher": "company.example",
+            "title": "IR 자료",
+            "published_on": "",
+            "collected_at": "2026-08-31T00:00:00+00:00",
+            "content_sha256": document.content_sha256,
+            "identity_binding": "official exact-link attachment",
+            "collector_version": "v1",
+            "parser_version": "v1",
+            "requirement": "OPTIONAL",
+            "source_tier": "TIER_3_TRUSTED",
+            "exclusion_reason": (
+                "writer_ineligible:official_ir_writer_metadata_incomplete"
+            ),
+            "domain_attestation_source_id": "",
+            "domain_attestation_evidence": "",
+            "reporting_period": "",
+            "attachment_url": attachment_url,
+            "ir_metadata_verification": "",
+            "domain_redirect_verification": "",
+            "domain_redirect_from_host": "",
+            "domain_redirect_to_host": "",
+        }
+    ]
 
 
 def test_일부_문서만_fragment가_있으면_그_문서만_남는다():
@@ -336,9 +407,15 @@ def test_최상위_company_id는_documents_attempts_모두_0건이어도_보존�
     assert mapped["attempts"] == []
 
 
-def test_최상위_키는_넷뿐이다():
+def test_최상위_키는_Writer와_provenance차선을_분리한다():
     mapped = to_evidence_mappings(result=_result(), fragments=())
-    assert set(mapped.keys()) == {"company_id", "documents", "fragments", "attempts"}
+    assert set(mapped.keys()) == {
+        "company_id",
+        "documents",
+        "fragments",
+        "attempts",
+        "provenance_documents",
+    }
 
 
 def test_옛_시그니처로_부르면_TypeError():
@@ -348,11 +425,14 @@ def test_옛_시그니처로_부르면_TypeError():
         to_evidence_mappings(documents=(), fragments=(), attempts=())  # type: ignore[call-arg]
 
 
-def test_report_evidence는_import하지_않는다():
-    """앱 공용 계약 스키마 직접 사용은 chapter_evidence만의 몫이다."""
+def test_report_evidence_스키마는_import하지_않고_정본정책만_공유한다():
+    """앱 공용 DTO는 만들지 않고 Writer 자격 정본만 공유한다."""
     module_path = Path(__file__).resolve().parents[1] / "wide_evidence_mapping.py"
     source = module_path.read_text(encoding="utf-8")
     for line in source.splitlines():
         stripped = line.strip()
         assert not stripped.startswith("import src.shared.report_evidence")
-        assert not stripped.startswith("from src.shared.report_evidence")
+        if stripped.startswith("from src.shared.report_evidence"):
+            assert stripped.startswith(
+                "from src.shared.report_evidence.source_kind_policy import"
+            )

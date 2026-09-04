@@ -8,12 +8,41 @@ from typing import Final
 
 EVIDENCE_CONTRACT_VERSION: Final[str] = "report-evidence-v1"
 
-# 여러 feature와 실서비스 adapter가 함께 쓰는 문서 source_kind 정본. 홈페이지
-# feature가 만든 값을 pipeline이 문자열 복사로 추측하지 않게 shared에 둔다.
+# 여러 feature와 실서비스 adapter가 함께 쓰는 source_kind 정본. 생산자별
+# 문자열을 소비자가 접두어로 추측하지 않게 공식 수집 경계의 닫힌 어휘를
+# 전부 여기 둔다. analysis_engine은 app을 import할 수 없으므로 DART 네 값의
+# 사본을 가지며, 별도 완전성 시험이 두 목록의 일치를 강제한다.
+SOURCE_KIND_DART_BUSINESS_REPORT: Final[str] = "dart_business_report"
+SOURCE_KIND_DART_AUDIT_REPORT: Final[str] = "dart_audit_report"
+SOURCE_KIND_DART_SEMIANNUAL_REPORT: Final[str] = "dart_semiannual_report"
+SOURCE_KIND_DART_QUARTERLY_REPORT: Final[str] = "dart_quarterly_report"
 SOURCE_KIND_OFFICIAL_WEB_PAGE: Final[str] = "official_web_page"
 SOURCE_KIND_OFFICIAL_RECRUIT_PAGE: Final[str] = "official_recruit_page"
+SOURCE_KIND_OFFICIAL_IR_PDF: Final[str] = "official_ir_pdf"
+#: DART root와 다른 등록 도메인이지만, 실제 HTML에서 DART 법인명과
+#: 사업자/법인등록번호를 함께 재검증한 보조 공식 페이지. 기존
+#: ``official_web_page``(DART root 계열 REQUIRED)와 타입을 나눠
+#: OPTIONAL 의미가 조용히 섞이지 않게 한다.
+SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE: Final[str] = (
+    "official_identity_verified_web_page"
+)
 OFFICIAL_WEB_SOURCE_KINDS: Final[frozenset[str]] = frozenset(
-    {SOURCE_KIND_OFFICIAL_WEB_PAGE, SOURCE_KIND_OFFICIAL_RECRUIT_PAGE}
+    {
+        SOURCE_KIND_OFFICIAL_WEB_PAGE,
+        SOURCE_KIND_OFFICIAL_RECRUIT_PAGE,
+        SOURCE_KIND_OFFICIAL_IR_PDF,
+        SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE,
+    }
+)
+
+FORMAL_DOCUMENT_SOURCE_KINDS: Final[frozenset[str]] = frozenset(
+    {
+        SOURCE_KIND_DART_BUSINESS_REPORT,
+        SOURCE_KIND_DART_AUDIT_REPORT,
+        SOURCE_KIND_DART_SEMIANNUAL_REPORT,
+        SOURCE_KIND_DART_QUARTERLY_REPORT,
+        *OFFICIAL_WEB_SOURCE_KINDS,
+    }
 )
 
 # 「그 출처 전체를 아예 확인할 수 없었다」는 site-probe 게이트 시도의
@@ -27,6 +56,9 @@ OFFICIAL_WEB_SOURCE_KINDS: Final[frozenset[str]] = frozenset(
 # 되살아난다.
 SOURCE_KIND_ROBOTS_TXT: Final[str] = "robots_txt"
 SITE_PROBE_GATE_SOURCE_KINDS: Final[frozenset[str]] = frozenset({SOURCE_KIND_ROBOTS_TXT})
+FORMAL_ATTEMPT_SOURCE_KINDS: Final[frozenset[str]] = frozenset(
+    {*FORMAL_DOCUMENT_SOURCE_KINDS, *SITE_PROBE_GATE_SOURCE_KINDS}
+)
 
 
 class CollectionState(str, Enum):

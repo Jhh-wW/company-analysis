@@ -82,6 +82,7 @@ from src.web import (
     job_runtime,
     paid_runtime,
     public_ids,
+    report_publication,
     request_helpers,
     runtime,
 )
@@ -119,6 +120,10 @@ _PROGRESS_UNAVAILABLE_MESSAGE = (
 _PROGRESS_INTERRUPTED_MESSAGE = (
     "서버 종료 제한시간 안에 조사를 마치지 못해 작업이 중단되었습니다. "
     "입력 오류가 아니며, 서버가 다시 열린 뒤 처음 화면에서 다시 시도해 주세요."
+)
+_PROGRESS_REPORT_UNPUBLISHED_MESSAGE = (
+    "보고서 저장의 마지막 확인이 끝나지 않아 결과를 열지 않습니다. "
+    "이용 횟수는 차감되지 않았습니다."
 )
 
 _CANDIDATE_PROVIDER_HEALTH_KEYS = {
@@ -603,10 +608,17 @@ def _bound_report_view(link) -> tuple[str, str]:
             if dashboard_store.report_is_trashed(conn, link.report_id):
                 return "", ""
             report = report_store.load(conn, link.report_id)
+            published_or_legacy = report_publication.report_is_published_or_legacy(
+                conn, link.report_id
+            )
     except Exception:  # noqa: BLE001 — 못 읽으면 「준비 중」으로 닫는다
         logger.exception("초대 링크에 묶인 보고서 상태를 읽지 못했습니다")
         return "", ""
-    if report is None or job_runtime._link_expired(report):
+    if (
+        report is None
+        or not published_or_legacy
+        or job_runtime._link_expired(report)
+    ):
         return "", ""
     made_on = _landing_made_on(report)
     return (
@@ -1987,6 +1999,44 @@ async def progress_api(request: Request, job_id: str):
             },
             status_code=410,
         )
+    # worker 메모리에는 raw 보고서가 남아도 Delivery/PDF 확정이 실패할 수 있다.
+    # ``job.finished``만 보고 결과 주소를 주면 브라우저는 성공으로 오인해 곧바로
+    # 차단 화면으로 이동한다. 재시작 복구와 같은 영속 publication 판정을 거쳐,
+    # 응답을 잃었지만 실제 commit은 끝난 경우만 성공으로 복구한다.
+    live_result = getattr(job, "result", None)
+    if (
+        job.finished
+        and isinstance(live_result, RunResult)
+        and live_result.outcome is Outcome.REPORT
+        and live_result.report is not None
+    ):
+        try:
+            published = job_runtime._load_saved_report(job_id)
+        except job_runtime.ReportStoreUnavailable:
+            return job_runtime._retryable_response(
+                JSONResponse(
+                    {
+                        "error": (
+                            "저장된 진행 상태를 잠시 확인할 수 없습니다. "
+                            "새 조사를 시작하지 말고 잠시 후 다시 확인해 주세요."
+                        ),
+                        "code": "progress_store_unavailable",
+                        "retry_url": "",
+                        "retryable": True,
+                    },
+                    status_code=503,
+                )
+            )
+        if published is None:
+            return JSONResponse(
+                {
+                    "error": _PROGRESS_REPORT_UNPUBLISHED_MESSAGE,
+                    "code": "report_not_published",
+                    "retry_url": "/",
+                },
+                status_code=409,
+            )
+
     return JSONResponse(
         {
             "done": [

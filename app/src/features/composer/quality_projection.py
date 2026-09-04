@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from dataclasses import replace
 
+from src.features.composer.constants import GRADE_CONFIRMED, GRADE_INTERPRETED
 from src.features.composer.port import ComposedReport, ComposedSentence
 from src.features.pipeline.port import FactRecord, Report
 from src.features.provenance.sources import Source
@@ -23,7 +25,14 @@ from src.shared.report_quality.fact_binding import fact_evidence_binding
 from src.shared.report_quality.evidence_support import prose_evidence_support_ready
 from src.shared.report_quality.source_identity import (
     document_identity,
-    document_identity_from_parts,
+    fact_document_identity,
+)
+from src.shared.report_quality.constants import (
+    COMPETITIVE_COMPARISON_CLAIM_TYPE,
+    COMPETITIVE_COMPARISON_CONTEXT_CLAIM_TYPE,
+    HISTORICAL_PERFORMANCE_RATE_CLAIM_TYPE,
+    INTERPRETATION_CLAIM_TYPE,
+    VERIFIED_PROSE_CLAIM_TYPE,
 )
 
 
@@ -108,6 +117,34 @@ def _sentence_fact_id(
     )
     if fact is None:
         return ""
+    # 문장 등급과 FactRecord 종류는 같은 판단의 양쪽 표현이다. 둘 중 한쪽만
+    # 재봉인해 «해석»을 검증 사실로 바꾸면 해석 상한을 우회하므로, 투영 전에
+    # 독립적으로 맞춰 본다. 구조화 실적·비교 사실도 확인 등급이어야 한다.
+    if (
+        sentence.grade == GRADE_INTERPRETED
+        and fact.claim_type != INTERPRETATION_CLAIM_TYPE
+    ) or (
+        sentence.grade == GRADE_CONFIRMED
+        and fact.claim_type == INTERPRETATION_CLAIM_TYPE
+    ):
+        return ""
+    if sentence.grade not in {GRADE_CONFIRMED, GRADE_INTERPRETED}:
+        return ""
+    if (
+        fact.claim_type == HISTORICAL_PERFORMANCE_RATE_CLAIM_TYPE
+        and structured is None
+    ):
+        return ""
+    if fact.claim_type in {
+        COMPETITIVE_COMPARISON_CLAIM_TYPE,
+        COMPETITIVE_COMPARISON_CONTEXT_CLAIM_TYPE,
+    } and sentence.verified_fact_id.strip() != fact.fact_id:
+        return ""
+    if fact.claim_type in {
+        VERIFIED_PROSE_CLAIM_TYPE,
+        INTERPRETATION_CLAIM_TYPE,
+    } and (structured is not None or sentence.verified_fact_id.strip()):
+        return ""
     fact_key = _fact_key(
         section_id=fact.section_owner,
         claim=fact.claim,
@@ -122,7 +159,10 @@ def _sentence_fact_id(
             or citations != (structured.source_fragment_id.strip(),)
         ):
             return ""
-    elif fact.claim_type in {"verified_prose", "evidence_based_interpretation"}:
+    elif fact.claim_type in {
+        VERIFIED_PROSE_CLAIM_TYPE,
+        INTERPRETATION_CLAIM_TYPE,
+    }:
         try:
             manifest = json.loads(fact.state_evidence)
             bound_citations = tuple(
@@ -142,11 +182,7 @@ def _claim_fact(fact: FactRecord) -> ClaimFact:
         fact_id=fact.fact_id,
         section_owner=fact.section_owner,
         source_id=fact.source_id,
-        source_identity=document_identity_from_parts(
-            document_id=fact.source_document_id,
-            host=fact.source_host,
-            url=fact.source_url,
-        ),
+        source_identity=fact_document_identity(fact),
         verification_state=fact.verification_status or fact.status,
         claim_slot=fact.claim_slot,
         evidence_binding_valid=bool(fact.evidence_binding)
@@ -168,6 +204,20 @@ def _claim_fact(fact: FactRecord) -> ClaimFact:
         supporting_source_ids=tuple(fact.supporting_source_ids),
         supporting_source_identities=tuple(fact.supporting_source_identities),
         supporting_evidence_hashes=tuple(fact.supporting_evidence_hashes),
+        claim_type=fact.claim_type,
+        legal_entity=fact.legal_entity,
+        state_evidence=fact.state_evidence,
+        evidence_support_terms=tuple(fact.evidence_support_terms),
+        comparison_target=fact.comparison_target,
+        comparison_metric=fact.comparison_metric,
+        comparison_definition=fact.comparison_definition,
+        comparison_basis=fact.comparison_basis,
+        comparison_period=fact.comparison_period,
+        comparison_scope=fact.comparison_scope,
+        comparison_judgment=fact.comparison_judgment,
+        comparator_source_id=fact.comparator_source_id,
+        comparator_state_evidence=fact.comparator_state_evidence,
+        comparison_conditions=dict(fact.comparison_conditions),
     )
 
 
@@ -184,9 +234,19 @@ def _summary_sentence_fact_id(
         explicit_fact = by_id.get(explicit_fact_id)
         if explicit_fact is None:
             return ""
+        validation_sentence = sentence
+        if explicit_fact.claim_type in {
+            VERIFIED_PROSE_CLAIM_TYPE,
+            INTERPRETATION_CLAIM_TYPE,
+        }:
+            # extractive summary만 본문 FactRecord ID를 덧붙인다. 본문 투영의
+            # verified_fact_id 금지는 그대로 두되, 이 summary 전용 private
+            # 경계에서만 ID를 잠시 떼고 문장·slot·citation·state manifest를
+            # 본문과 동일한 규칙으로 다시 맞춘다. 호출자가 켤 boolean은 없다.
+            validation_sentence = replace(sentence, verified_fact_id="")
         matched = _sentence_fact_id(
             explicit_fact.section_owner,
-            sentence,
+            validation_sentence,
             by_id=by_id,
             by_key=by_key,
         )
@@ -272,6 +332,9 @@ def build_generation_quality_candidate(
         public_sentence_fact_ids = {
             fact_id for fact_id in sentence_fact_ids if fact_id
         }
+        mapped_sentence_fact_ids = tuple(
+            fact_id for fact_id in sentence_fact_ids if fact_id
+        )
         has_unbound_sentences = any(
             not fact_id or fact_id not in bound_fact_ids
             for fact_id in sentence_fact_ids
@@ -279,7 +342,10 @@ def build_generation_quality_candidate(
         # 숨은 FactRecord를 section.fact_ids에만 덧붙이면 문장은 그대로인데
         # 전역 40건 하한만 부풀릴 수 있다. 구조 행 계약 전에는 공개 문장과
         # 장부 ID 집합이 정확히 같아야 하며 여분·누락 어느 쪽도 허용하지 않는다.
-        has_fact_mapping_mismatch = bound_fact_ids != public_sentence_fact_ids
+        has_fact_mapping_mismatch = (
+            bound_fact_ids != public_sentence_fact_ids
+            or len(mapped_sentence_fact_ids) != len(public_sentence_fact_ids)
+        )
         # FULL 표·도식은 pre-render manifest가 행별 원문 지문과 실제 셀을
         # 완전 비교한 경우에만 결속으로 인정한다. SHADOW·옛 저장본은 그대로다.
         has_public_structures = bool(
@@ -299,7 +365,10 @@ def build_generation_quality_candidate(
                     or has_fact_mapping_mismatch
                     or has_unbound_structures
                 ),
-                public_sentence_count=len(section.sentences),
+                # 같은 원자 사실 문장을 여러 번 복제해 장별 3문장 하한을
+                # 부풀릴 수 없다. 위 mismatch가 공개 안전을 막고, 품질 수치도
+                # 실제 고유 결속 문장만 센다.
+                public_sentence_count=len(public_sentence_fact_ids),
             )
         )
 
@@ -308,6 +377,11 @@ def build_generation_quality_candidate(
             source_id=source.source_id,
             document_identity=document_identity(source),
             exact_evidence_hashes=tuple(source.exact_evidence_hashes),
+            # 조각에서 다시 계산하지 않는다. 수집→봉인 Source가 운반한 문서
+            # 전체 지문을 그대로 품질 평가기에 넘겨 URL 복제로 출처 수를
+            # 부풀리지 못하게 한다.
+            document_content_sha256=source.document_content_sha256,
+            publisher=source.publisher,
         )
         for source in rendered.citations
         if isinstance(source, Source)

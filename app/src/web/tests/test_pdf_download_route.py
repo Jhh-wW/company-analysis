@@ -28,6 +28,7 @@ from src.shared import engine_build_identity as build_identity_contract
 
 
 _REAL_RELEASE_STATE = reports_router._release_state
+_REAL_CANDIDATE_FOR_REPORT = reports_router._candidate_for_report
 
 
 def _use_current_admin(client: TestClient) -> auth_logic.Session:
@@ -49,6 +50,13 @@ def _fake_candidate():
 
 
 def test_PDF후보캐시는_같은내용만_재사용하고_내용변경은_다시만든다(monkeypatch):
+    # 공통 웹 fixture는 느린 PDF 렌더만 가볍게 바꾼다. 이 시험은 그 fixture가
+    # 아니라 실제 캐시 구현 자체를 검증하므로 생산 함수를 명시적으로 복구한다.
+    monkeypatch.setattr(
+        reports_router,
+        "_candidate_for_report",
+        _REAL_CANDIDATE_FOR_REPORT,
+    )
     reports_router._PDF_CANDIDATE_CACHE.clear()
     reports_router._PDF_CANDIDATE_CACHE_BYTES = 0
     calls: list[str] = []
@@ -313,9 +321,19 @@ def test_PDF_generator_오류는_원문없는_generic_503이다(
         raise AssertionError("생성 실패 뒤 파일명을 만들면 안 됩니다")
 
     job_runtime._JOBS.clear()
-    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
+    monkeypatch.setattr(
+        reports_router.report_delivery_adapter,
+        "load_legacy_public_report",
+        lambda _job_id: SimpleNamespace(report=report),
+    )
     monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
     monkeypatch.setattr(reports_router, "_release_state", _REAL_RELEASE_STATE)
+    # 공통 fixture의 가벼운 후보 생성기가 아래 실패 주입을 가리지 않게 한다.
+    monkeypatch.setattr(
+        reports_router,
+        "_candidate_for_report",
+        _REAL_CANDIDATE_FOR_REPORT,
+    )
     monkeypatch.setattr(reports_router, "prepare_pdf_release", failed_generator)
     monkeypatch.setattr(
         reports_router,
@@ -444,7 +462,11 @@ def test_자동검사하나실패하면_웹PDFNotion을_모두차단한다(monke
     def forbidden_legacy_path(*_args, **_kwargs):
         raise AssertionError("실패한 새 Delivery가 옛 동적 출고 경로로 우회했습니다")
 
-    monkeypatch.setattr(job_runtime, "_load_saved_report", forbidden_legacy_path)
+    monkeypatch.setattr(
+        reports_router.report_delivery_adapter,
+        "load_legacy_public_report",
+        forbidden_legacy_path,
+    )
     monkeypatch.setattr(reports_router, "_release_state", forbidden_legacy_path)
     with TestClient(app, base_url="https://testserver") as client:
         client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)

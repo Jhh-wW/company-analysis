@@ -86,6 +86,7 @@ def test_새로_추가된_reason_code_상수는_형식_규정을_지킨다() -> 
         c.REASON_DOCUMENT_FETCH_MISSING,
         c.REASON_DOCUMENT_IDENTITY_MISMATCH,
         c.REASON_DOCUMENT_MODEL_INVALID,
+        c.REASON_FILING_RECEIPT_DATE_INVALID,
         c.REASON_DOCUMENT_NO_SCORED_EVIDENCE,
     )
     for code in new_reason_codes:

@@ -9,14 +9,23 @@ from __future__ import annotations
 
 from src.shared.report_evidence.constants import (
     OFFICIAL_WEB_SOURCE_KINDS,
+    SOURCE_KIND_OFFICIAL_IR_PDF,
+    SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE,
     SOURCE_KIND_OFFICIAL_RECRUIT_PAGE,
     SOURCE_KIND_OFFICIAL_WEB_PAGE,
 )
 
 
-def test_공식_웹_source_kind_정본은_두_값만_담는다() -> None:
+def test_공식_웹_source_kind_정본은_실제_네_생산종류를_담는다() -> None:
     assert OFFICIAL_WEB_SOURCE_KINDS == frozenset(
-        {"official_web_page", "official_recruit_page"}
+        {
+            "official_web_page",
+            "official_recruit_page",
+            "official_ir_pdf",
+            "official_identity_verified_web_page",
+        }
     )
     assert SOURCE_KIND_OFFICIAL_WEB_PAGE in OFFICIAL_WEB_SOURCE_KINDS
     assert SOURCE_KIND_OFFICIAL_RECRUIT_PAGE in OFFICIAL_WEB_SOURCE_KINDS
+    assert SOURCE_KIND_OFFICIAL_IR_PDF in OFFICIAL_WEB_SOURCE_KINDS
+    assert SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE in OFFICIAL_WEB_SOURCE_KINDS

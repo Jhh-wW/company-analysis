@@ -191,6 +191,20 @@ def test_문서에_결속되지_않은_조각은_사유코드와_함께_제외�
     assert "fragment_not_bound_to_document:1" in selection.reason_codes
 
 
+def test_원본문서가_전달되지_않은_조각은_자료부족으로_조용히_사라지지_않는다() -> None:
+    fragment = _fragment(fragment_id="f-missing-document")
+
+    selection = select_section_fragments(
+        section_id="business_model",
+        company_id="corp-1",
+        documents=(),
+        fragments=(fragment,),
+    )
+
+    assert selection.fragments == ()
+    assert "fragment_document_missing:1" in selection.reason_codes
+
+
 def test_다른_회사_조각은_해시가_결속돼도_회사_결속으로_제외된다() -> None:
     # 겹마다 따로 확인한다 — text_sha256 결속(2층)이 뚫려도(우연히 같은 원문)
     # company_id 결속(1층)이 혼자서 이 조각을 잡아야 한다. 두 층을 한꺼번에

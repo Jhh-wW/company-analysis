@@ -71,8 +71,10 @@ from src.features.composer.port import (
     FlowRow,
     PerformanceTable,
     SectionEvidencePacketSet,
+    VerifiedProgramEvidence,
     fragments_from_raw,
 )
+from src.shared.report_evidence.policy import required_slots_for
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +102,13 @@ class _PreparedSectionEvidencePackets:
 
     packets: Mapping[str, tuple[CollectedFragment, ...]]
     allowed_fragment_ids_by_section: Mapping[str, frozenset[str]]
+    supported_claim_slots_by_fragment_id: Mapping[str, frozenset[str]]
     flat_union: tuple[CollectedFragment, ...]
+    program_evidence_by_section: Mapping[str, VerifiedProgramEvidence]
+    program_facts: tuple[object, ...] = ()
+    program_sources: tuple[object, ...] = ()
+    program_sentences: tuple[ComposedSentence, ...] = ()
+    enforce_claim_slot_support: bool = False
     company_id: str = ""
     evidence_generation_sha256: str = ""
     packet_sha256s: tuple[tuple[str, str], ...] = ()
@@ -109,6 +117,113 @@ class _PreparedSectionEvidencePackets:
 _NOTICE_OUTSIDE_PACKET_CITATIONS: Final[str] = (
     "이 장에 배정되지 않은 근거를 사용한 문장을 제외했습니다."
 )
+_NOTICE_UNSUPPORTED_CLAIM_SLOTS: Final[str] = (
+    "이 장의 근거가 지원하지 않는 주장을 제외했습니다."
+)
+
+#: FULL AI 표의 각 칸이 주장하는 의미와 typed 근거 slot의 닫힌 결속.
+#:
+#: FlowRow에는 문장처럼 작가가 고르는 claim slot 필드가 없다. 따라서 헤더가
+#: 이미 고정한 칸의 뜻을 코드가 소유한다. 각 비어 있지 않은 칸은 같은 행이
+#: 인용한 조각들 가운데 아래 slot 중 하나의 지원을 받아야 한다. 이 표 없이
+#: 장 안 citation만 검사하면 5장의 «과제» 원문으로 가짜 «대응»을 쓰거나,
+#: 7장의 관계 원문으로 회사가 하지 않는 운영 역할을 만들 수 있다.
+_FLOW_CELL_SUPPORTED_SLOTS_BY_SECTION: Final[
+    dict[str, tuple[frozenset[str], ...]]
+] = {
+    "identity": (
+        frozenset({"identity:corporate_identity"}),
+        frozenset({"identity:business_definition", "identity:legal_scope"}),
+        frozenset(
+            {
+                "identity:corporate_identity",
+                "identity:business_definition",
+                "identity:self_positioning",
+            }
+        ),
+    ),
+    "business_model": (
+        frozenset({"business_model:value_exchange", "business_model:revenue_model"}),
+        frozenset({"business_model:value_exchange", "business_model:revenue_model"}),
+        frozenset(
+            {
+                "business_model:customer_type",
+                "business_model:sales_channel",
+                "business_model:value_exchange",
+            }
+        ),
+        frozenset({"business_model:revenue_model", "business_model:value_exchange"}),
+    ),
+    "portfolio": (
+        frozenset({"portfolio:product_role"}),
+        frozenset({"portfolio:product_role", "portfolio:customer_fit"}),
+        frozenset(
+            {
+                "portfolio:portfolio_priority",
+                "portfolio:product_role",
+                "portfolio:revenue_link",
+            }
+        ),
+        frozenset({"portfolio:product_role", "portfolio:revenue_link"}),
+    ),
+    "current_challenges": (
+        frozenset({"current_challenges:issue"}),
+        frozenset({"current_challenges:response"}),
+    ),
+    "future_strategy": (
+        frozenset({"future_strategy:stated_plan"}),
+        frozenset(
+            {
+                "future_strategy:plan_timing",
+                "future_strategy:plan_status",
+            }
+        ),
+        frozenset(
+            {
+                "future_strategy:stated_plan",
+                "future_strategy:plan_status",
+                "future_strategy:plan_condition",
+                "future_strategy:execution_signal",
+            }
+        ),
+    ),
+    "operations_partners": (
+        frozenset(
+            {
+                "operations_partners:value_chain",
+                "operations_partners:supply_relation",
+            }
+        ),
+        frozenset({"operations_partners:operating_role"}),
+        frozenset(
+            {
+                "operations_partners:value_chain",
+                "operations_partners:distribution_relation",
+                "operations_partners:partnership",
+            }
+        ),
+    ),
+    "culture": (
+        frozenset({"culture:work_principle", "culture:leadership"}),
+        frozenset({"culture:work_principle", "culture:decision_process"}),
+        frozenset({"culture:verified_case", "culture:organization_change"}),
+    ),
+}
+
+if set(_FLOW_CELL_SUPPORTED_SLOTS_BY_SECTION) != set(FLOW_HEADERS_BY_SECTION):
+    raise RuntimeError("FULL 표 칸과 claim-slot 결속 정책의 장 목록이 다릅니다")
+if any(
+    len(_FLOW_CELL_SUPPORTED_SLOTS_BY_SECTION[section_id]) != len(headers)
+    for section_id, headers in FLOW_HEADERS_BY_SECTION.items()
+):
+    raise RuntimeError("FULL 표 칸과 claim-slot 결속 정책의 칸 수가 다릅니다")
+if any(
+    not allowed_slots
+    or not allowed_slots <= set(CLAIM_SLOTS_BY_SECTION[section_id])
+    for section_id, cell_requirements in _FLOW_CELL_SUPPORTED_SLOTS_BY_SECTION.items()
+    for allowed_slots in cell_requirements
+):
+    raise RuntimeError("FULL 표 칸이 현재 장 밖의 claim slot을 허용합니다")
 
 
 # ══════════════════════════════════════════════════════════
@@ -116,13 +231,20 @@ _NOTICE_OUTSIDE_PACKET_CITATIONS: Final[str] = (
 # ══════════════════════════════════════════════════════════
 
 
-def _render_fragments(fragments: Sequence[CollectedFragment]) -> str:
+def _render_fragments(
+    fragments: Sequence[CollectedFragment],
+    *,
+    show_supported_claim_slots: bool = False,
+) -> str:
     """조각 전체를 id·종류와 함께 나열한다 — 작가가 이 id로 인용한다."""
     lines: list[str] = [PROMPT_FRAGMENTS_HEAD]
     for fragment in fragments:
         label = fragment.kind or "자료"
         if fragment.document_title:
             label = f"{label}·{fragment.document_title}"
+        if show_supported_claim_slots:
+            supported = ", ".join(fragment.supported_claim_slots) or "없음"
+            label = f"{label} · 지원 주장슬롯: {supported}"
         lines.append(f"[조각 {fragment.fragment_id}] ({label}) {fragment.text}\n")
     return "".join(lines)
 
@@ -162,6 +284,8 @@ def build_section_prompt(
     fragments: Sequence[CollectedFragment],
     performance_table: Optional[PerformanceTable],
     already_written: Sequence[str] = (),
+    *,
+    show_supported_claim_slots: bool = False,
 ) -> str:
     """장 하나를 쓰게 하는 지시문 — 지침 + 조각 전체 + 실적표 + JSON 강제.
 
@@ -180,6 +304,33 @@ def build_section_prompt(
         if claim_slots
         else ""
     )
+    if show_supported_claim_slots:
+        required_claim_slots = required_slots_for(section_id)
+        claim_slot_guide += (
+            "\nFULL 근거 결속 규칙 — 모든 산문 문장은 «확인»·«해석» 등급과 "
+            "관계없이 이 장에 허용된 주장슬롯을 정확히 하나 선택한다. 빈 문자열이나 "
+            "목록 밖 id는 허용되지 않는다. 또한 «인용»에 넣은 조각 중 적어도 하나의 "
+            "«지원 주장슬롯» 목록에 선택한 id가 있어야 한다. 지원하지 않는 조각으로 "
+            "빈자리를 채우지 말고, 맞는 근거가 없으면 그 문장을 내지 않는다.\n"
+            "FULL 필수 의미칸 — 아래 칸은 자료 패킷에 존재하는 데서 끝나지 않고, "
+            "각 칸을 뒷받침하는 근거를 인용한 공개 문장으로 모두 다뤄야 한다:\n- "
+            + "\n- ".join(required_claim_slots)
+            + "\n"
+        )
+        flow_requirements = _FLOW_CELL_SUPPORTED_SLOTS_BY_SECTION.get(section_id)
+        if flow_requirements is not None:
+            claim_slot_guide += (
+                "FULL 표 근거 결속 규칙 — 표의 각 비어 있지 않은 칸도 같은 행의 "
+                "인용 조각이 아래 의미 중 하나를 지원해야 한다:\n"
+                + "".join(
+                    f"- {header}: {', '.join(sorted(slots))}\n"
+                    for header, slots in zip(
+                        FLOW_HEADERS_BY_SECTION[section_id],
+                        flow_requirements,
+                        strict=True,
+                    )
+                )
+            )
     parts = [
         PROMPT_HEADER.format(company=company_name),
         "\n",
@@ -202,7 +353,10 @@ def build_section_prompt(
         FLOW_PROMPT_BY_SECTION.get(section_id, JSON_SCHEMA_GUIDE),
         _render_table(performance_table),
         _render_already_written(already_written),
-        _render_fragments(fragments),
+        _render_fragments(
+            fragments,
+            show_supported_claim_slots=show_supported_claim_slots,
+        ),
     ]
     return "".join(parts)
 
@@ -686,6 +840,22 @@ def _normalize_packet_fragments(
             location=fragment.location,
             document_date=document_dates.get(fragment.fragment_id, ""),
             document_identity=fragment.document_identity,
+            document_content_sha256=fragment.document_content_sha256,
+            supported_claim_slots=fragment.supported_claim_slots,
+            formal_source_kind=fragment.formal_source_kind,
+            source_document_id=fragment.source_document_id,
+            source_publisher=fragment.source_publisher,
+            identity_binding=fragment.identity_binding,
+            source_collected_on=fragment.source_collected_on,
+            domain_attestation_source_id=fragment.domain_attestation_source_id,
+            domain_attestation_evidence=fragment.domain_attestation_evidence,
+            reporting_period=fragment.reporting_period,
+            attachment_url=fragment.attachment_url,
+            ir_metadata_verification=fragment.ir_metadata_verification,
+            domain_redirect_verification=fragment.domain_redirect_verification,
+            domain_redirect_from_host=fragment.domain_redirect_from_host,
+            domain_redirect_to_host=fragment.domain_redirect_to_host,
+            bound_source=fragment.bound_source,
         )
         for fragment in normalized
     )
@@ -802,10 +972,60 @@ def _prepare_section_evidence_packets(
         for fragment_id in sorted(by_id, key=_fragment_id_sort_key)
     )
     _assert_public_number_mapping_injective(flat_union)
+    program_evidence_by_section = {
+        packet.section_id: packet.program_evidence
+        for packet in typed_packets.packets
+        if packet.program_evidence is not None
+    } if typed_packets is not None else {}
+    program_facts = tuple(
+        fact
+        for section_id in SECTION_IDS
+        for fact in (
+            program_evidence_by_section[section_id].facts
+            if section_id in program_evidence_by_section
+            else ()
+        )
+    )
+    program_sources_by_id: dict[str, object] = {}
+    for section_id in SECTION_IDS:
+        evidence = program_evidence_by_section.get(section_id)
+        if evidence is None:
+            continue
+        for source in evidence.registry_sources:
+            source_id = str(getattr(source, "source_id", "") or "")
+            previous = program_sources_by_id.get(source_id)
+            if previous is not None and previous != source:
+                raise ValueError("프로그램 Source ID가 서로 다른 출처를 가리킵니다")
+            program_sources_by_id[source_id] = source
+    program_sentences = tuple(
+        sentence
+        for section_id in SECTION_IDS
+        for sentence in (
+            program_evidence_by_section[section_id].sentences
+            if section_id in program_evidence_by_section
+            else ()
+        )
+    )
     return _PreparedSectionEvidencePackets(
         packets=normalized_packets,
         allowed_fragment_ids_by_section=allowed_fragment_ids_by_section,
+        supported_claim_slots_by_fragment_id={
+            fragment.fragment_id: frozenset(fragment.supported_claim_slots)
+            for fragment in flat_union
+        },
         flat_union=flat_union,
+        program_evidence_by_section=program_evidence_by_section,
+        program_facts=program_facts,
+        program_sources=tuple(program_sources_by_id.values()),
+        program_sentences=program_sentences,
+        # Mapping packet과 slot 메타데이터가 생기기 전의 legacy PacketSet은
+        # exact 의미 칸을 알 수 없다. 빈 집합을 종류 이름으로 추측하지 않고
+        # 호환 동작을 유지한다. formal typed slot이 실제로 하나라도 들어온 새
+        # FULL 계약에서만 전체 산문·표 결속을 강제한다.
+        enforce_claim_slot_support=(
+            typed_packets is not None
+            and any(fragment.supported_claim_slots for fragment in flat_union)
+        ),
         company_id=typed_packets.company_id if typed_packets is not None else "",
         evidence_generation_sha256=(
             typed_packets.evidence_generation_sha256
@@ -821,12 +1041,49 @@ def _prepare_section_evidence_packets(
 def _sanitize_report_to_section_evidence(
     report: ComposedReport,
     allowed_fragment_ids_by_section: Mapping[str, frozenset[str]],
+    *,
+    supported_claim_slots_by_fragment_id: Mapping[str, frozenset[str]] | None = None,
+    enforce_claim_slot_support: bool = False,
 ) -> ComposedReport:
     """장 밖 조각을 인용한 본문·도식 줄을 검수 AI 전에 제외한다.
 
     해석 문장의 빈 인용은 빈 집합이므로 허용한다. 요약은 장별 경계가 아니라
     전체 보고서의 합집합을 쓰므로 이 함수에서 건드리지 않는다.
     """
+
+    supported_by_id = supported_claim_slots_by_fragment_id or {}
+
+    def claim_slot_is_supported(
+        sentence: ComposedSentence, *, section_id: str
+    ) -> bool:
+        # 프로그램이 만든 structured claim은 별도 raw evidence 계약으로 이미
+        # 결속된다. 여기서는 AI가 계획한 산문 claim만 조각의 typed slot과 맞춘다.
+        if sentence.structured_claim is not None:
+            return True
+        # FULL에서는 «확인»뿐 아니라 공식 근거에서 의미를 읽는 «해석»도 어느
+        # 의미 칸의 어느 조각에 기대는지 밝혀야 한다. 파서가 누락·미등록 id를
+        # 빈칸으로 정규화하므로, 빈칸을 허용하면 두 경우 모두 이 검사를 우회한다.
+        if sentence.planned_claim_slot not in CLAIM_SLOTS_BY_SECTION.get(
+            section_id, ()
+        ):
+            return False
+        return any(
+            sentence.planned_claim_slot in supported_by_id.get(citation, frozenset())
+            for citation in sentence.citations
+        )
+
+    def flow_row_is_supported(*, section_id: str, row: FlowRow) -> bool:
+        requirements = _FLOW_CELL_SUPPORTED_SLOTS_BY_SECTION.get(section_id)
+        if requirements is None:
+            # 새 AI 표를 정책에 등록하지 않고 FULL로 공개하지 않는다.
+            return False
+        cited_slots = frozenset().union(
+            *(supported_by_id.get(citation, frozenset()) for citation in row.citations)
+        )
+        return all(
+            not cell or bool(required_slots & cited_slots)
+            for cell, required_slots in zip(row.cells, requirements, strict=True)
+        )
 
     sections: list[ComposedSection] = []
     for section in report.sections:
@@ -838,16 +1095,36 @@ def _sanitize_report_to_section_evidence(
             for sentence in section.sentences
             if set(sentence.citations).issubset(allowed)
             and not contains_inline_citation_marker(sentence.text)
+            and (
+                not enforce_claim_slot_support
+                or claim_slot_is_supported(sentence, section_id=section.section_id)
+            )
         )
         flow_rows = tuple(
             row
             for row in section.flow_rows
             if set(row.citations).issubset(allowed)
             and not any(contains_inline_citation_marker(cell) for cell in row.cells)
+            and (
+                not enforce_claim_slot_support
+                or flow_row_is_supported(section_id=section.section_id, row=row)
+            )
         )
         notice = section.notice
         if section.sentences and not sentences and not notice:
-            notice = _NOTICE_OUTSIDE_PACKET_CITATIONS
+            slot_rejected = enforce_claim_slot_support and any(
+                set(sentence.citations).issubset(allowed)
+                and not contains_inline_citation_marker(sentence.text)
+                and not claim_slot_is_supported(
+                    sentence, section_id=section.section_id
+                )
+                for sentence in section.sentences
+            )
+            notice = (
+                _NOTICE_UNSUPPORTED_CLAIM_SLOTS
+                if slot_rejected
+                else _NOTICE_OUTSIDE_PACKET_CITATIONS
+            )
         sections.append(
             ComposedSection(
                 section_id=section.section_id,
@@ -1028,6 +1305,10 @@ def compose_sections(
                 section_fragments,
                 section_table,
                 prompt_already_written,
+                show_supported_claim_slots=(
+                    prepared is not None
+                    and prepared.enforce_claim_slot_support
+                ),
             ),
             ask,
             reject_inline_citation_markers=prepared is not None,
@@ -1042,7 +1323,12 @@ def compose_sections(
     if prepared is None:
         return report
     return _sanitize_report_to_section_evidence(
-        report, prepared.allowed_fragment_ids_by_section
+        report,
+        prepared.allowed_fragment_ids_by_section,
+        supported_claim_slots_by_fragment_id=(
+            prepared.supported_claim_slots_by_fragment_id
+        ),
+        enforce_claim_slot_support=prepared.enforce_claim_slot_support,
     )
 
 
@@ -1096,6 +1382,7 @@ def compose_selected_sections(
                 prepared.packets[section_id],
                 performance_table if section_id == "past_changes" else None,
                 (),
+                show_supported_claim_slots=prepared.enforce_claim_slot_support,
             ),
             ask,
             reject_inline_citation_markers=True,
@@ -1105,6 +1392,10 @@ def compose_selected_sections(
     return _sanitize_report_to_section_evidence(
         ComposedReport(sections=tuple(sections), summary=()),
         prepared.allowed_fragment_ids_by_section,
+        supported_claim_slots_by_fragment_id=(
+            prepared.supported_claim_slots_by_fragment_id
+        ),
+        enforce_claim_slot_support=prepared.enforce_claim_slot_support,
     )
 
 

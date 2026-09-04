@@ -343,7 +343,7 @@ def test_active_cache_protects_shared_original_but_tombstone_blocks_old_url_revi
         billing_bucket_id="bucket-retention",
         corp_id="CORP-RETENTION",
         namespace=_namespace(),
-        preflight_identity_digest="a" * 64,
+        preflight_identity_digest=_source().preflight_identity_digest,
         preflight_cache_usable=True,
         engine_epoch_digest=stored.content.engine_epoch_digest,
     )

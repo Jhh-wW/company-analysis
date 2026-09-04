@@ -33,6 +33,14 @@ from typing import Any, Final
 
 from src.core.docshape import is_table_of_contents
 from src.features.filingclean.logic import starts_with_boilerplate
+from src.shared.report_evidence.legacy_fragment_kinds import (
+    LEGACY_KIND_AUDITOR_FINDING,
+    LEGACY_KIND_INTELLECTUAL_PROPERTY,
+    LEGACY_KIND_LITIGATION,
+    LEGACY_KIND_MARKET_SHARE,
+    LEGACY_KIND_NEW_BUSINESS_OUTLOOK,
+    LEGACY_KIND_RISK_FACTOR,
+)
 
 #: 새로 뜰 절 — {조각 종류: (찾을 표제들…)}.
 #: ★ 표제는 «여러 개» 둔다. 회사마다 표기가 다르다.
@@ -40,7 +48,7 @@ from src.features.filingclean.logic import starts_with_boilerplate
 #:   표제만 맞고 내용이 표·목차면 아무 값어치가 없다.
 EXTRA_SECTION_HEADS: Final[dict[str, tuple[str, ...]]] = {
     # 4-3(앞으로 어디로 가나)의 «주 재료». 증권사 리포트 8/9가 별도 섹션으로 다룬다.
-    "신규사업전망": (
+    LEGACY_KIND_NEW_BUSINESS_OUTLOOK: (
         "신규사업 등의 내용 및 전망",
         "신규사업등의 내용 및 전망",
         "신규사업의 내용 및 전망",
@@ -54,7 +62,7 @@ EXTRA_SECTION_HEADS: Final[dict[str, tuple[str, ...]]] = {
     #   실제 합격 자소서가 「전략 선언」을 근거로 쓴다는 조사 결과는 유효하므로,
     #   그 재료는 **홈페이지(vision·ir 페이지)**에서 가져오는 것이 맞다.
     # 산업 맥락 — 「이 회사가 업계 어디쯤인가」.
-    "시장점유율": (
+    LEGACY_KIND_MARKET_SHARE: (
         "시장점유율",
         "시장 점유율",
         "시장의 특성",
@@ -62,7 +70,7 @@ EXTRA_SECTION_HEADS: Final[dict[str, tuple[str, ...]]] = {
         "경쟁 요소",
     ),
     # 4-1(지금 뭐가 문제인가)의 재료. 취업 가이드가 「꼭 볼 절」로 지목.
-    "소송·분쟁": (
+    LEGACY_KIND_LITIGATION: (
         "계류 중인 소송사건",
         "계류중인 소송사건",
         "제재현황",
@@ -97,7 +105,7 @@ EXTRA_SECTION_HEADS: Final[dict[str, tuple[str, ...]]] = {
     # ⚠️ 「회계감사인의 명칭 및 감사의견」은 **일부러 안 넣었다** — 그 표제는 곧바로
     #   감사인·의견 표로 이어져 `_looks_like_table()`에 걸리거나, 걸리지 않아도
     #   「한미회계법인 적정의견」만 남아 지원동기에 쓸 것이 없다.
-    "감사인지적": (
+    LEGACY_KIND_AUDITOR_FINDING: (
         "핵심감사사항",
         "핵심감사사항(Key Audit Matters)",
         "핵심감사사항(Key audit matters)",
@@ -129,7 +137,7 @@ EXTRA_SECTION_HEADS: Final[dict[str, tuple[str, ...]]] = {
     #   이 재료에 기대는 칸은 «있을 때만 뜨는» 설계여야 한다.
     #   쓸 만하게 뜬 곳: 카카오·셀트리온·한화에어로·하이브·삼성바이오·로보스타·야놀자·㈜진영
     #   (로보스타는 「총출원 건수 / 총등록 건수 / **미등록 건수** / 미등록사유」까지 준다)
-    "지적재산권": (
+    LEGACY_KIND_INTELLECTUAL_PROPERTY: (
         "주요 지적재산권 보유 현황",
         "지적재산권 보유 현황",
         "지적재산권 보유현황",
@@ -137,7 +145,7 @@ EXTRA_SECTION_HEADS: Final[dict[str, tuple[str, ...]]] = {
         "지적재산권 보유",
         "지적재산권",
     ),
-    "위험요인": (
+    LEGACY_KIND_RISK_FACTOR: (
         "사업위험",
         "사업 위험",
         "회사위험",

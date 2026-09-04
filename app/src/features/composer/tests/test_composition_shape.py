@@ -18,7 +18,9 @@ from __future__ import annotations
 
 from src.features.composer.port import composition_tables_from_raw
 from src.features.pipeline.port import ReportTable
+from src.features.revenuemix.logic import build as build_revenue_mix
 from src.features.report_standard.visualization import table_visualization
+from src.shared.revenue_table_provenance import revenue_row_evidence_matches
 
 #: 진영 실측에서 실제로 나온 표 (지역별 매출 비중).
 _실측표 = [
@@ -73,6 +75,50 @@ def test_값을_바꾸지_않는다():
         ("인도", "4.99%"),
         ("기타", "1.19%"),
     )
+
+
+def test_3열을_2열로_줄일_때_같은_행의_원문근거도_함께_보존한다():
+    원문 = (
+        "제품별 매출액 구 분 2025년 제1기 매 출 액 비 중 "
+        "제품가 5,000 50.00% 제품나 3,000 30.00% 제품다 2,000 20.00% "
+        "합계 10,000 100.00%"
+    )
+    생산표 = build_revenue_mix(원문, cite="[2]")
+
+    표 = composition_tables_from_raw(생산표)[0]
+
+    assert 표.headers == ("구분", "비중")
+    assert 표.rows == (("제품가", "50.00%"), ("제품나", "30.00%"), ("제품다", "20.00%"))
+    assert 표.raw_rows == 표.rows
+    assert len(표.evidence_rows) == 3
+    assert all(
+        revenue_row_evidence_matches(
+            evidence,
+            cited_source_text=원문,
+            headers=표.headers,
+            public_row=row,
+            raw_row=raw_row,
+        )
+        for row, raw_row, evidence in zip(표.rows, 표.raw_rows, 표.evidence_rows)
+    )
+
+
+def test_기계_회계_설계_행을_합계로_오인해_도식에서_빼지_않는다():
+    원표 = [
+        {
+            "headers": ["구분", "매출액", "비중"],
+            "rows": [
+                ["기계", "6,000", "60.00%"],
+                ["회계", "2,000", "20.00%"],
+                ["설계", "2,000", "20.00%"],
+                ["합계", "10,000", "100.00%"],
+            ],
+        }
+    ]
+
+    표 = composition_tables_from_raw(원표)[0]
+
+    assert [row[0] for row in 표.rows] == ["기계", "회계", "설계"]
 
 
 def test_비중_열이_없으면_원표를_그대로_둔다():

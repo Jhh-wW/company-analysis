@@ -41,6 +41,7 @@ from src.web import (
     job_runtime,
     paid_runtime,
     report_delivery_adapter,
+    report_publication,
     request_helpers,
     runtime,
 )
@@ -420,6 +421,8 @@ def _linked_report_state(conn, link: share_store.ShareLink) -> str:
     report = report_store.load(conn, link.report_id)
     if report is None:
         return "missing"
+    if not report_publication.report_is_published_or_legacy(conn, link.report_id):
+        return "unavailable"
     return "expired" if job_runtime._link_expired(report) else "active"
 
 
@@ -931,6 +934,8 @@ def _validated_report_id(
     report = report_store.load(conn, report_id)
     if report is None:
         return "", "이 데모 저장소에서 해당 보고서를 찾을 수 없습니다."
+    if not report_publication.report_is_published_or_legacy(conn, report_id):
+        return "", "자동출고가 완료되지 않은 임시 보고서는 연결할 수 없습니다."
     if job_runtime._link_expired(report):
         return "", "공유 기간이 지난 보고서입니다. 새 보고서를 만든 뒤 연결해주세요."
     company_mismatch = _report_company_mismatch(
@@ -1201,7 +1206,15 @@ def _link_detail_page(
                     else:
                         report = report_store.load(conn, run.report_id)
                         run_report_states[run.run_id] = (
-                            "missing" if report is None else "available"
+                            "missing"
+                            if report is None
+                            else (
+                                "available"
+                                if report_publication.report_is_published_or_legacy(
+                                    conn, run.report_id
+                                )
+                                else "unavailable"
+                            )
                         )
     except Exception:  # noqa: BLE001
         logger.error("링크를 읽지 못했습니다")

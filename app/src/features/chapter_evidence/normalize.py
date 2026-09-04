@@ -8,13 +8,21 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from dataclasses import replace
 from typing import TypeVar
 
 from src.features.chapter_evidence.constants import CompanyType
 from src.shared.report_evidence.constants import (
     CollectionState,
+    SOURCE_KIND_DART_AUDIT_REPORT,
+    SOURCE_KIND_DART_BUSINESS_REPORT,
+    SOURCE_KIND_DART_QUARTERLY_REPORT,
+    SOURCE_KIND_DART_SEMIANNUAL_REPORT,
     SourceRequirement,
     SourceTier,
+)
+from src.shared.report_evidence.date_normalization import (
+    normalize_official_source_date,
 )
 from src.shared.report_evidence.models import (
     CollectedEvidenceDocument,
@@ -25,6 +33,15 @@ from src.shared.report_evidence.models import (
 
 
 _EnumT = TypeVar("_EnumT")
+
+_DART_DOCUMENT_SOURCE_KINDS = frozenset(
+    {
+        SOURCE_KIND_DART_AUDIT_REPORT,
+        SOURCE_KIND_DART_BUSINESS_REPORT,
+        SOURCE_KIND_DART_QUARTERLY_REPORT,
+        SOURCE_KIND_DART_SEMIANNUAL_REPORT,
+    }
+)
 
 
 def _coerce_enum(enum_cls: type[_EnumT], value: object, *, label: str) -> _EnumT:
@@ -86,10 +103,21 @@ def to_document(
     """계약 인스턴스이거나 같은 필드 이름의 매핑인 문서를 계약형으로 바꾼다."""
 
     if isinstance(value, CollectedEvidenceDocument):
-        return value
+        if value.source_kind not in _DART_DOCUMENT_SOURCE_KINDS:
+            return value
+        normalized_date = normalize_official_source_date(value.published_on)
+        return (
+            value
+            if normalized_date == value.published_on
+            else replace(value, published_on=normalized_date)
+        )
     if not isinstance(value, Mapping):
         raise ValueError("수집 문서는 계약 인스턴스이거나 매핑이어야 합니다")
     try:
+        source_kind = _coerce_str(value["source_kind"], label="출처 종류")
+        published_on = _coerce_str(value["published_on"], label="발행일")
+        if source_kind in _DART_DOCUMENT_SOURCE_KINDS:
+            published_on = normalize_official_source_date(published_on)
         return CollectedEvidenceDocument(
             company_id=_coerce_str(value["company_id"], label="회사 식별자"),
             document_id=_coerce_str(value["document_id"], label="문서 식별자"),
@@ -97,10 +125,10 @@ def to_document(
             source_tier=_coerce_enum(
                 SourceTier, value["source_tier"], label="문서 출처 등급"
             ),
-            source_kind=_coerce_str(value["source_kind"], label="출처 종류"),
+            source_kind=source_kind,
             publisher=_coerce_str(value["publisher"], label="발행자"),
             title=_coerce_str(value["title"], label="문서 제목"),
-            published_on=_coerce_str(value["published_on"], label="발행일"),
+            published_on=published_on,
             collected_at=_coerce_str(value["collected_at"], label="수집 시각"),
             content_sha256=_coerce_str(value["content_sha256"], label="문서 내용 해시"),
             exact_evidence_hashes=_coerce_str_tuple(
@@ -116,6 +144,36 @@ def to_document(
             parser_version=_coerce_str(value["parser_version"], label="파서 버전"),
             requirement=_coerce_enum(
                 SourceRequirement, value["requirement"], label="문서 필수 등급"
+            ),
+            domain_attestation_source_id=_coerce_str(
+                value.get("domain_attestation_source_id", ""),
+                label="도메인 attestation Source ID",
+            ),
+            domain_attestation_evidence=_coerce_str(
+                value.get("domain_attestation_evidence", ""),
+                label="도메인 attestation exact 원문",
+            ),
+            reporting_period=_coerce_str(
+                value.get("reporting_period", ""), label="IR 보고기간"
+            ),
+            attachment_url=_coerce_str(
+                value.get("attachment_url", ""), label="IR 첨부 URL"
+            ),
+            ir_metadata_verification=_coerce_str(
+                value.get("ir_metadata_verification", ""),
+                label="IR 메타데이터 검증",
+            ),
+            domain_redirect_verification=_coerce_str(
+                value.get("domain_redirect_verification", ""),
+                label="도메인 redirect 검증",
+            ),
+            domain_redirect_from_host=_coerce_str(
+                value.get("domain_redirect_from_host", ""),
+                label="도메인 redirect 원본 host",
+            ),
+            domain_redirect_to_host=_coerce_str(
+                value.get("domain_redirect_to_host", ""),
+                label="도메인 redirect 최종 host",
             ),
         )
     except KeyError as error:

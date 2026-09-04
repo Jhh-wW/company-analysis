@@ -49,6 +49,7 @@ from src.shared.comparison_candidate_basis import (
     comparison_evidence_sentences as _evidence_sentences,
     comparison_overlap_dimension as _overlap_dimension,
     comparison_source_basis_is_allowed,
+    comparison_source_candidate_support_terms,
     comparison_source_overlap_dimension,
     comparison_source_sentence_has_self_subject,
     comparison_source_sentence_has_marker,
@@ -56,6 +57,12 @@ from src.shared.comparison_candidate_basis import (
     encode_comparison_basis_v1,
     encode_comparison_source_basis_v2,
 )
+from src.shared.report_quality.constants import COMPETITIVE_COMPARISON_CLAIM_TYPE
+from src.shared.report_quality.comparison_claims import (
+    comparison_profitability_claim,
+    comparison_scale_claim,
+)
+from src.shared.report_quality.comparison_evidence import comparison_shared_context
 
 
 COMPETITIVE_SECTION_ID = "competitive_position"
@@ -69,6 +76,8 @@ _CANDIDATE_SECTION_IDS = frozenset(SECTION_BY_ID) - {COMPETITIVE_SECTION_ID}
 _PERIOD_NUMBER = re.compile(r"20\d{2}|\d{1,2}")
 _INTEGER = re.compile(r"^-?[\d,]+$")
 _ANNUAL_REPORT_CODE = "11011"
+_SELECTED_REPORT_PERIOD_KIND_KEY = "engine_selected_report_period_kind"
+_SELECTED_REPORT_PERIOD_KIND_ANNUAL = "annual"
 _WON_CURRENCIES = frozenset({"KRW", "WON", "원"})
 _CANDIDATE_ALIAS_INDEX_LOCK = threading.Lock()
 
@@ -90,6 +99,33 @@ class ComparisonBlockedError(ValueError):
         super().__init__("; ".join(self.reasons) or "경쟁사 비교 근거가 부족합니다")
 
 
+class ComparisonSourceTransientError(RuntimeError):
+    """비교사 공식 원문 공급자가 일시 실패했음을 보존하는 경계 표지.
+
+    후보 하나의 자료가 없다는 뜻과 DART 요청 자체가 실패했다는 뜻은 다르다.
+    후자를 이 표지 없이 일반 ``Exception``으로 삼키면 마지막에는
+    ``ComparisonBlockedError``가 되어 회사의 자료 부족으로 잘못 안내된다.
+    원래 예외 문자열은 URL·응답 원문을 포함할 수 있으므로 이 객체에는 싣지
+    않고 예외 체인으로만 남긴다.
+    """
+
+
+class ComparisonSourceConfigurationError(RuntimeError):
+    """비교사 공식 원문 공급자의 인증·권한 설정 오류를 보존하는 표지.
+
+    재시도로 회복될 수 있는 429·전송 장애와 달리 운영 설정을 고쳐야 한다.
+    비밀이 섞일 수 있는 원래 예외문은 싣지 않고 예외 체인으로만 남긴다.
+    """
+
+
+class ComparisonSourceInternalError(RuntimeError):
+    """비교사 공식 원문 콜백의 내부 계약 오류를 보존하는 표지.
+
+    후보 한 곳의 자료 부족으로 접어 다음 후보를 시도하면 정상 회사가 자료가
+    없는 것처럼 보인다. 따라서 provider 호출 전에 요청 전체를 닫는다.
+    """
+
+
 @dataclass(frozen=True)
 class CandidateEvidence:
     """확정된 1~8장 사실이 직접 지목한 비교 후보와 근거 결속."""
@@ -109,6 +145,11 @@ class CandidateEvidence:
     self_corp_code: str = ""
     self_attestation_source_id: str = ""
     self_attestation_evidence: str = ""
+    document_identity: str = ""
+    document_content_sha256: str = ""
+    #: 후보 판별기가 실제 원문에서 이미 확인한 alias와 원문 문장. V2 bridge는
+    #: 이를 다시 어휘 추출하지 않고 target 맥락 Fact에 그대로 운반한다.
+    evidence_support_terms: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -173,97 +214,18 @@ def _normalized(value: object) -> str:
     return " ".join(unicodedata.normalize("NFKC", str(value or "")).casefold().split())
 
 
-_CONTEXT_MARKERS: Mapping[str, tuple[str, ...]] = {
-    "customer": ("고객", "수요처", "납품처", "발주처"),
-    "product": ("제품", "서비스", "품목", "브랜드", "장비", "소재"),
-    "market": ("시장", "산업", "지역"),
-}
-_CONTEXT_STOP = frozenset(
-    {
-        "회사는",
-        "회사의",
-        "회사",
-        "공식",
-        "사업보고서",
-        "연결재무제표",
-        "별도재무제표",
-        "대상",
-        "대상으로",
-        "기반",
-        "고객",
-        "수요처",
-        "납품처",
-        "발주처",
-        "제품",
-        "서비스",
-        "품목",
-        "브랜드",
-        "장비",
-        "소재",
-        "시장",
-        "산업",
-        "지역",
-        "공급",
-        "공급한다",
-        "판매",
-        "판매한다",
-        "제공",
-        "제공한다",
-        "공시",
-        "공시한다",
-    }
-)
-
-
-def _context_lexeme(token: str) -> str:
-    """조사만 다른 같은 범위어를 맞추고 일반 축 표지는 버릴 수 있게 한다."""
-
-    clean = token.casefold()
-    for suffix in ("으로", "에서", "에게", "부터", "까지", "과", "와", "을", "를", "은", "는", "이", "가", "의", "에"):
-        if len(clean) >= len(suffix) + 2 and clean.endswith(suffix):
-            clean = clean[: -len(suffix)]
-            break
-    return clean
-
-
-def _axis_terms(text: str, markers: tuple[str, ...]) -> set[str]:
-    """축 표지가 있는 문장 안에서 실제 범위어만 결정론적으로 뽑는다."""
-
-    clauses = re.split(r"[.!?\n]", _normalized(text))
-    relevant = [clause for clause in clauses if any(marker in clause for marker in markers)]
-    terms: set[str] = set()
-    for clause in relevant:
-        for token in re.findall(r"[가-힣A-Za-z]{2,}", clause):
-            lexeme = _context_lexeme(token)
-            if lexeme and lexeme not in _CONTEXT_STOP:
-                terms.add(lexeme)
-    return terms
-
-
 def _shared_context(
     self_bundle: OfficialCompanyBundle,
     comparator_bundle: OfficialCompanyBundle,
 ) -> dict[str, str]:
     """양사 원문에 모두 직접 나타나는 고객·제품·시장 범위를 구조화한다."""
 
-    context: dict[str, str] = {}
-    company_terms = {
-        token
-        for name in (self_bundle.company_name, comparator_bundle.company_name)
-        for token in re.findall(r"[가-힣A-Za-z]{2,}", _normalized(name))
-    }
-    for axis, markers in _CONTEXT_MARKERS.items():
-        common = (
-            _axis_terms(self_bundle.official_text, markers)
-            & _axis_terms(comparator_bundle.official_text, markers)
-        ) - company_terms
-        # 표지 자체 하나만 같다고 동일 범위로 보지 않는다. 서로 다른 공통어 두 개가
-        # 있어야 고객/제품/시장 범위를 임의로 지어내지 않고 고정할 수 있다.
-        chosen = sorted(term for term in common if len(term) >= 2)
-        if len(chosen) < 2:
-            return {}
-        context[axis] = "·".join(chosen[:6])
-    return context
+    return comparison_shared_context(
+        self_company=self_bundle.company_name,
+        self_text=self_bundle.official_text,
+        comparator_company=comparator_bundle.company_name,
+        comparator_text=comparator_bundle.official_text,
+    )
 
 
 def _bundle_evidence(bundle: OfficialCompanyBundle) -> str:
@@ -718,6 +680,10 @@ def discover_candidates(
                 candidate_name=str(record.corp_name or "").strip(),
                 filing_document_id=source.document_id,
                 evidence_sha256=evidence_hash,
+                evidence_support_terms=comparison_source_candidate_support_terms(
+                    sentence,
+                    str(record.corp_name or "").strip(),
+                ),
             )
             seen_codes.add(corp_code)
             found.append(evidence)
@@ -838,6 +804,12 @@ def discover_official_source_candidates(
                 self_corp_code=self_code,
                 self_attestation_source_id=identity_attester.source_id,
                 self_attestation_evidence=identity_attester.domain_attestation_evidence,
+                document_identity=item.document_identity,
+                document_content_sha256=item.document_content_sha256,
+                evidence_support_terms=comparison_source_candidate_support_terms(
+                    sentence,
+                    str(record.corp_name or "").strip(),
+                ),
             )
             seen_codes.add(corp_code)
             found.append(evidence)
@@ -957,13 +929,21 @@ def _filing_is_annual_for_period(bundle: OfficialCompanyBundle, period: str) -> 
         filing.get("rcept_no") or filing.get("rceptNo") or ""
     ).strip()
     report_code = str(filing.get("reprt_code") or "").strip()
+    selected_period_kind = str(
+        filing.get(_SELECTED_REPORT_PERIOD_KIND_KEY) or ""
+    ).strip()
     return (
         bool(bundle.official_text.strip())
         and is_annual
         and bool(receipt_number)
         and bool(_source_date(filing.get("rcept_dt")))
         and _filing_year(filing) == _period_year(period)
-        and report_code == _ANNUAL_REPORT_CODE
+        # 실제 list.json에는 reprt_code가 없다. 새 엔진은 annual 선택 경계를
+        # 별도 내부 필드로 운반하고, 옛 저장/fixture만 재무 API 코드를 쓴다.
+        and (
+            selected_period_kind == _SELECTED_REPORT_PERIOD_KIND_ANNUAL
+            or report_code == _ANNUAL_REPORT_CODE
+        )
     )
 
 
@@ -1014,6 +994,9 @@ def _financial_source(
         fact_status="공시 실제값",
         used_in=[COMPETITIVE_SECTION_ID],
         evidence_hashes=[evidence_text_hash(evidence)],
+        # V2 FULL은 같은 URL만으로 원문을 승인하지 않는다. 양사 비교에 실제로
+        # 넣은 결정론적 DART bundle 바이트를 Source seal에 함께 잠근다.
+        exact_evidence_hashes=[exact_evidence_text_hash(evidence)],
     ))
 
 
@@ -1202,9 +1185,11 @@ def build_competitive_position(
         source = candidate_registry_by_id.get(source_id)
         if source is None or source_id in sources_by_id or source_id in report_source_ids:
             continue
-        sources_by_id[source_id] = replace(
-            source,
-            used_in=sorted({*source.used_in, COMPETITIVE_SECTION_ID}),
+        sources_by_id[source_id] = seal_collected_source(
+            replace(
+                source,
+                used_in=sorted({*source.used_in, COMPETITIVE_SECTION_ID}),
+            )
         )
         attester_id = source.domain_attestation_source_id.strip()
         if attester_id:
@@ -1247,11 +1232,21 @@ def build_competitive_position(
     for candidate in candidates:
         try:
             comparator = fetch_comparator(candidate.record)
-        except Exception as exc:  # 공급자 실패도 근거 없음과 섞지 않고 내부 사유에 남긴다.
-            failure_reasons.append(
-                f"{candidate.record.corp_name}: 공식 원문 수집 실패({type(exc).__name__})"
-            )
-            continue
+        except (
+            ComparisonSourceTransientError,
+            ComparisonSourceConfigurationError,
+            ComparisonSourceInternalError,
+        ):
+            # DART 운영 장애·설정 오류·내부 계약 오류를 후보별 「자료 없음」으로
+            # 접지 않는다. 복구 방식이 서로 다르므로 타입을 그대로 올려 보낸다.
+            raise
+        except Exception as exc:
+            # callback 포트는 복구 가능한 외부 상태를 위의 닫힌 세 타입으로
+            # 번역할 책임이 있다. 그 밖의 예외는 TypeError 같은 우리 배선 결함일
+            # 수 있으므로 후보 하나의 「자료 없음」으로 삼키지 않는다.
+            raise ComparisonSourceInternalError(
+                "비교사 공식 자료 수집기가 닫힌 오류 계약을 지키지 못했습니다"
+            ) from exc
         if comparator is None or not comparator.official_text.strip():
             failure_reasons.append(f"{candidate.record.corp_name}: 비교사 공식 원문이 없습니다")
             continue
@@ -1334,9 +1329,10 @@ def build_competitive_position(
                         role="comparator",
                         evidence=comparator_evidence,
                     )
-                    claim = (
-                        f"{scope_label}(CFS) 매출액과 영업이익으로 계산한 영업이익률은 "
-                        f"{comparator.company_name}보다 {difference:.1f}%p {direction}."
+                    claim = comparison_profitability_claim(
+                        comparison_target=comparator.company_name,
+                        difference=f"{difference:.1f}",
+                        direction=direction,
                     )
                     display_value = (
                         f"자사 {self_margin:.1f}%; 비교사 {comparator_margin:.1f}%; "
@@ -1360,7 +1356,7 @@ def build_competitive_position(
                         subject_scope=f"영업이익률·{period}·{scope} 동일조건 비교",
                         relationship_or_action="수익성 차이 비교",
                         claim=claim,
-                        claim_type="competitive_comparison",
+                        claim_type=COMPETITIVE_COMPARISON_CLAIM_TYPE,
                         section_owner=COMPETITIVE_SECTION_ID,
                         time_state="standing",
                         as_of=period.split("~", 1)[-1],
@@ -1470,9 +1466,10 @@ def build_competitive_position(
             )
             ratio = _ratio(self_row.value, comparator_row.value)
             ratio_text = f"{ratio:.1f}배"
-            claim = (
-                f"{scope_label}({self_row.scope_code}) 매출액 규모는 {comparator.company_name} 대비 "
-                f"{ratio_text}였다. 이는 규모 차이이며 경쟁우위 판정이 아니다."
+            claim = comparison_scale_claim(
+                comparison_scope=scope,
+                comparison_target=comparator.company_name,
+                ratio_text=ratio_text,
             )
             definition = _definition(self_row)
             if definition != _definition(comparator_row):
@@ -1489,7 +1486,7 @@ def build_competitive_position(
                 subject_scope=f"매출 규모·{self_row.period}·{scope} 동일조건 비교",
                 relationship_or_action="매출 규모 차이 비교",
                 claim=claim,
-                claim_type="competitive_comparison",
+                claim_type=COMPETITIVE_COMPARISON_CLAIM_TYPE,
                 section_owner=COMPETITIVE_SECTION_ID,
                 time_state="standing",
                 as_of=self_row.period.split("~", 1)[-1],

@@ -12,8 +12,11 @@ from __future__ import annotations
 
 from typing import Final
 
+from src.shared.report_quality.constants import (
+    MAX_INTERPRETED_CLAIMS_PER_SECTION,
+)
+
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
-from src.shared.report_quality.constants import MIN_CLAIMS_PER_COVERED_SECTION
 from src.shared.report_quality.evidence_support import (
     MIN_PROSE_EVIDENCE_SUPPORT_TERMS,
 )
@@ -132,10 +135,9 @@ SECTION_GUIDES: Final[dict[str, str]] = {
         "말»은 근거가 있으면 그냥 써도 된다.\n"
         "이 장이 소유하지 않는 것: 자사 실적·파트너십의 재출력. 자사 내용이 "
         "필요하면 값을 옮기지 말고 «자사 수익 구조는 2장 참조»처럼 가리킨다.\n"
-        "업계·경쟁 관련 근거가 얇아 짧게 쓸 때도, 공개 문장은 최소 "
-        f"{MIN_CLAIMS_PER_COVERED_SECTION}개의 서로 다른 주장슬롯(예: "
-        "competitive_position:self_context와 competitive_position:limitation)에 "
-        "나눠 쓴다. 각 문장은 인용한 근거 조각과 겹치는 구체적인 근거어를 최소 "
+        "업계·경쟁 관련 근거가 얇아 짧게 쓸 때도, FULL 필수 의미칸은 공식 "
+        "근거가 있는 공개 문장으로 모두 다룬다. 각 문장은 인용한 근거 조각과 "
+        "겹치는 구체적인 근거어를 최소 "
         f"{MIN_PROSE_EVIDENCE_SUPPORT_TERMS}개 그대로 살려 쓴다. 이 조건을 만족할 "
         "근거가 없으면 빈자리를 자사 이야기나 추측으로 채우지 말고 문장을 내지 "
         "않는다 — 출고 검증이 부족한 보고서를 막게 한다."
@@ -213,7 +215,9 @@ FORBIDDEN_TOPICS_GUIDE: Final[str] = (
 #: ★ 왜 2인가 — 기준 보고서 실측 해석 비율은 진영 17.7% · 하이브 12.0%이고
 #:   장당 5~6문장이므로 장당 «해석»은 0.6~1.1문장이다. 2는 그보다 넉넉해
 #:   정상 작성을 막지 않으면서 폭주만 막는다.
-MAX_INTERPRETED_SENTENCES_PER_SECTION: Final[int] = 2
+MAX_INTERPRETED_SENTENCES_PER_SECTION: Final[int] = (
+    MAX_INTERPRETED_CLAIMS_PER_SECTION
+)
 
 SENTENCE_RANGE_GUIDE: Final[str] = (
     "목표 분량: {minimum}~{maximum}문장.\n"

@@ -30,6 +30,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -41,11 +42,23 @@ from src.core.provider_gateway.attempt_context import ProviderAttemptCallbacks
 from src.features.budget import provider_budget
 from src.features.composer.constants import GRADE_CONFIRMED, SECTION_IDS
 from src.features.pipeline import real
-from src.features.pipeline.port import Grade, Outcome, Report
+from src.features.pipeline.port import CompanyCard, Grade, Outcome, Report, RunResult, UserInput
 from src.features.pipeline.tests.test_real_cache import CORP_ID, FakeEngine
+from src.features.storage import reports as report_storage
 from src.shared import engine_build_identity as build_identity_contract
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_evidence.constants import ReleaseMode
+from src.shared.report_quality.constants import (
+    LEGACY_STRICT_QUALITY_CONTRACT_VERSION,
+    QUALITY_CONTRACT_VERSION,
+    STRICT_QUALITY_CONTRACT_VERSION,
+)
+from src.web.official_evidence_adapter import ProductionOfficialEvidenceCollector
+from src.web.tests.test_public_boundary_full_evidence_e2e import (
+    _install_actual_official_collector_with_fake_http,
+    _install_production_engine_with_fake_external_services,
+    _isolated_company_catalog_state,
+)
 
 _DATE = dt.date(2026, 8, 24)
 
@@ -56,6 +69,12 @@ _SENTENCE_ENDINGS = ("첫째", "둘째", "셋째", "넷째", "다섯째")
 #: 가짜 회사 목록이 쓰는 것과 같은 gen8 고유번호. FULL 경로는 이 값으로
 #: section packet을 만들므로 8자리가 아니면 입력 계약에서 먼저 걸린다.
 _EXPECTED_CORP_ID = CORP_ID
+
+# ``engine`` fixture가 fake로 바꾸기 전에 실제 production factory를 붙잡는다.
+# FULL 성공 fixture는 이 factory와 production collector를 실제로 지나며, 시험이
+# Source·attester·hash·행 근거를 손으로 조립하지 않는다.
+_ACTUAL_ENGINE_FACTORY = real._engine
+_ACTUAL_COMPANY_CATALOG = real._company_catalog
 
 
 @pytest.fixture(autouse=True)
@@ -81,8 +100,9 @@ def _유료_문맥에서_시험한다(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture
-def engine(monkeypatch: pytest.MonkeyPatch) -> FakeEngine:
+def engine(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeEngine:
     fake = FakeEngine()
+    fake._production_fixture_root = tmp_path  # type: ignore[attr-defined]
     monkeypatch.setattr(real, "_engine", lambda: fake)
     return fake
 
@@ -111,6 +131,67 @@ def _frags() -> dict[int, dict[str, str]]:
         }
         for index, mark in enumerate(_SECTION_MARKS, start=1)
     }
+
+
+def _production_full_result(
+    monkeypatch: pytest.MonkeyPatch,
+    fixture_root: Path,
+    *,
+    run_v2_override: Any = None,
+    isolate_generation_cache: bool = True,
+) -> RunResult:
+    """외부 I/O만 가짜로 두고 실제 FULL 생산 경계를 끝까지 지난다.
+
+    공식 DART·웹 원문, 매출표, 양사 비교, Source, attester와 모든 hash는
+    production collector/builder가 만든다. 이 helper는 결과에 근거를 더하거나
+    바꾸지 않는다. 회사 ID 운반 시험이 생산 배선 단절을 손보충으로 숨기지
+    않게 하는 공용 성공 fixture다.
+    """
+
+    with monkeypatch.context() as patch:
+        # 이 helper를 불러오는 캐시 시험은 의도적으로 회사목록 함수를 fake로
+        # 바꾼다. FULL production fixture 안에서만 실제 cache 함수로 복원해야
+        # 비교 생산기가 실제 CORPCODE 자료를 읽을 수 있다.
+        patch.setattr(real, "_company_catalog", _ACTUAL_COMPANY_CATALOG)
+        # production E2E의 catalog 격리를 그대로 재사용한다. pytest fixture
+        # wrapper를 직접 호출하지 않고 원래 generator를 열어 전역 cache를
+        # 정확히 되돌린다.
+        catalog_scope = _isolated_company_catalog_state.__wrapped__()
+        next(catalog_scope)
+        try:
+            patch.setenv(real.ENGINE_V2_ENV_NAME, real.ENGINE_V2_ENV_ON)
+            patch.setenv(real.REPORT_RELEASE_MODE_ENV_NAME, ReleaseMode.FULL.value)
+            patch.setenv("APP_DATA_ROOT", str(fixture_root / "production-artifacts"))
+            patch.setattr(real, "_engine", _ACTUAL_ENGINE_FACTORY)
+            _production_engine, _external_services = (
+                _install_production_engine_with_fake_external_services(
+                    patch,
+                    fixture_root,
+                )
+            )
+            _install_actual_official_collector_with_fake_http(patch)
+            if isolate_generation_cache:
+                patch.setattr(real.generation_coordination, "is_active", lambda: False)
+                patch.setattr(real, "_v2_cache_lookup", lambda **_kwargs: None)
+                patch.setattr(real, "_v2_cache_save", lambda **_kwargs: None)
+            if run_v2_override is not None:
+                patch.setattr(composer_pipeline, "run_v2", run_v2_override)
+            return real.RealPipeline(
+                official_evidence_collector=ProductionOfficialEvidenceCollector()
+            ).run(
+                UserInput(company="가나다전자", job="", region=""),
+                CompanyCard(
+                    legal_name="가나다전자",
+                    typed_name="가나다전자",
+                    address="서울특별시 강남구 테헤란로",
+                    ceo="홍길동",
+                    founded="20000101",
+                    ref=_EXPECTED_CORP_ID,
+                ),
+            )
+        finally:
+            with pytest.raises(StopIteration):
+                next(catalog_scope)
 
 
 class _가짜작가:
@@ -194,10 +275,15 @@ class _가짜검수:
         return json.dumps({"판정": 판정}, ensure_ascii=False)
 
 
-def _가짜_ask를_끼운다(monkeypatch: pytest.MonkeyPatch):
+def _가짜_ask를_끼운다(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    writer: Any = None,
+    reviewer: Any = None,
+):
     """작가·검수·도식 ask를 전부 가짜로 바꾼다 — 진짜 AI 호출 경로가 없다."""
-    writer = _가짜작가()
-    reviewer = _가짜검수()
+    writer = writer or _가짜작가()
+    reviewer = reviewer or _가짜검수()
 
     def fake_ask_factory(_engine, _client, *, stage: str, max_tokens: int):
         assert max_tokens > 0
@@ -221,29 +307,45 @@ def _보고서를_만든다(
     monkeypatch: pytest.MonkeyPatch,
     *,
     release_mode: ReleaseMode,
+    source_identity_digest: str = "a" * 64,
 ) -> Report:
     """주어진 릴리스 모드로 v2 분기를 끝까지 돌려 산출 보고서를 돌려준다."""
     monkeypatch.setenv(real.REPORT_RELEASE_MODE_ENV_NAME, release_mode.value)
-    writer, reviewer = _가짜_ask를_끼운다(monkeypatch)
+    if release_mode is ReleaseMode.FULL:
+        fixture_root = getattr(engine, "_production_fixture_root")
+        result = _production_full_result(monkeypatch, fixture_root)
+        assert result.outcome is Outcome.REPORT, (
+            "production collector/builder를 지난 FULL fixture가 보고서를 "
+            f"만들지 못했습니다: {result.final_gate_reason} / {result.message}"
+        )
+        assert result.report is not None
+        return result.report
+
     steps: list[dict[str, Any]] = []
+    fragments = _frags()
+    financials = None
+    filing = None
+    revenue_tables = []
+    writer, reviewer = _가짜_ask를_끼운다(monkeypatch)
     result = real._run_v2_composer(
         engine=real._MeteredEngine(engine),
         client=object(),
         company_name="가나다전자",
         corp_type="상장사",
-        frags=_frags(),
-        financials=None,
-        filing=None,
-        revenue_tables=[],
+        frags=fragments,
+        financials=financials,
+        filing=filing,
+        revenue_tables=revenue_tables,
         sources=[],
         business_date=_DATE,
         model="가짜모델",
         steps=steps,
         corp_id=_EXPECTED_CORP_ID,
         current_fiscal_year=2025,
-        source_identity_digest="a" * 64,
+        source_identity_digest=source_identity_digest,
         build_identity=_build_identity(),
         generation_mode=_frozen_v2_mode(),
+        comparison_result=None,
     )
     assert result.outcome is Outcome.REPORT, (
         f"{release_mode.value} 모드에서 보고서가 나오지 않았습니다: {steps} "
@@ -286,6 +388,66 @@ def test_비FULL_산출물도_company_id에_확인된_corp_id를_싣는다(
         f"{release_mode.value} 산출물이 확인된 고유번호를 버렸습니다 "
         f"(실제: {report.company_id!r})"
     )
+
+
+@pytest.mark.parametrize(
+    ("release_mode", "expected_contract_version"),
+    (
+        (ReleaseMode.SHADOW, QUALITY_CONTRACT_VERSION),
+        (
+            ReleaseMode.ENFORCE_NO_PARTIAL,
+            LEGACY_STRICT_QUALITY_CONTRACT_VERSION,
+        ),
+        (ReleaseMode.FULL, STRICT_QUALITY_CONTRACT_VERSION),
+    ),
+    ids=("shadow-v1", "enforce-v2", "full-v3"),
+)
+def test_릴리스_모드마다_설계된_품질계약을_쓴다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    release_mode: ReleaseMode,
+    expected_contract_version: str,
+) -> None:
+    """각 공개 모드가 자신이 실제로 생산할 수 있는 계약만 선택한다.
+
+    검사 숫자를 낮추는 시험이 아니다. FULL은 production collector를 실제로
+    지나 현재 v3를 쓰고, ENFORCE는 기존 엄격 v2 하한을, SHADOW는 관측 v1을
+    그대로 쓴다는 모드→계약 연결 자체를 고정한다.
+    """
+
+    report = _보고서를_만든다(engine, monkeypatch, release_mode=release_mode)
+
+    assert report.quality_contract_version == expected_contract_version
+    assert report.quality_observation is not None
+    assert report.quality_observation.contract_version == expected_contract_version
+    restored = report_storage.report_from_dict(report_storage.report_to_dict(report))
+    assert restored.quality_contract_version == expected_contract_version
+    assert restored.quality_observation is not None
+    assert restored.quality_observation.contract_version == expected_contract_version
+
+
+@pytest.mark.parametrize(
+    "forged_contract_version",
+    (QUALITY_CONTRACT_VERSION, STRICT_QUALITY_CONTRACT_VERSION),
+    ids=("v1위장", "v3위장"),
+)
+def test_ENFORCE_저장본은_현행_v2가_아닌_계약으로_바꿔치기할수없다(
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    forged_contract_version: str,
+) -> None:
+    """ENFORCE의 엄격 v2를 느슨한 v1이나 FULL v3라는 표지만으로 바꾸지 못한다."""
+
+    report = _보고서를_만든다(
+        engine,
+        monkeypatch,
+        release_mode=ReleaseMode.ENFORCE_NO_PARTIAL,
+    )
+    payload = report_storage.report_to_dict(report)
+    payload["quality_contract_version"] = forged_contract_version
+
+    with pytest.raises(ValueError, match="ENFORCE_NO_PARTIAL"):
+        report_storage.report_from_dict(payload)
 
 
 # ══════════════════════════════════════════════════════════
@@ -331,27 +493,34 @@ def test_real_연결부는_모드와_무관하게_run_v2에_corp_id를_넘긴다
             verified_sentences=0,
         )
 
-    monkeypatch.setattr(composer_pipeline, "run_v2", fake_run_v2)
-
-    real._run_v2_composer(
-        engine=real._MeteredEngine(engine),
-        client=object(),
-        company_name="가나다전자",
-        corp_type="상장사",
-        frags=_frags(),
-        financials=None,
-        filing=None,
-        revenue_tables=[],
-        sources=[],
-        business_date=_DATE,
-        model="가짜모델",
-        steps=[],
-        corp_id=_EXPECTED_CORP_ID,
-        current_fiscal_year=2025,
-        source_identity_digest="a" * 64,
-        build_identity=_build_identity(),
-        generation_mode=_frozen_v2_mode(),
-    )
+    if release_mode is ReleaseMode.FULL:
+        _production_full_result(
+            monkeypatch,
+            getattr(engine, "_production_fixture_root"),
+            run_v2_override=fake_run_v2,
+        )
+    else:
+        monkeypatch.setattr(composer_pipeline, "run_v2", fake_run_v2)
+        real._run_v2_composer(
+            engine=real._MeteredEngine(engine),
+            client=object(),
+            company_name="가나다전자",
+            corp_type="상장사",
+            frags=_frags(),
+            financials=None,
+            filing=None,
+            revenue_tables=[],
+            sources=[],
+            business_date=_DATE,
+            model="가짜모델",
+            steps=[],
+            corp_id=_EXPECTED_CORP_ID,
+            current_fiscal_year=2025,
+            source_identity_digest="a" * 64,
+            build_identity=_build_identity(),
+            generation_mode=_frozen_v2_mode(),
+            comparison_result=None,
+        )
 
     assert captured.get("company_id") == _EXPECTED_CORP_ID, (
         f"{release_mode.value}에서 real.py가 회사 고유번호를 지웠습니다 "

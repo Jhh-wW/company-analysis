@@ -19,7 +19,7 @@ from __future__ import annotations
 import hashlib
 import time
 import urllib.parse
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable
 
 from src.features.homepage.constants import (
@@ -27,8 +27,11 @@ from src.features.homepage.constants import (
     WIDE_COLLECTION_TIMEOUT_SEC,
     WIDE_COLLECTOR_VERSION,
     WIDE_MAX_HOSTS,
+    WIDE_MAX_IDENTITY_CANDIDATES_PER_HOST,
     WIDE_MAX_IR_DOCUMENTS,
     WIDE_MAX_PAGES,
+    WIDE_MAX_ROOT_IDENTITY_SUPPLEMENT_BYTES,
+    WIDE_MAX_ROOT_IDENTITY_SUPPLEMENT_PAGES,
     WIDE_MAX_SITEMAP_BYTES,
     WIDE_MAX_SITEMAP_ENTRIES,
     WIDE_MAX_TOTAL_BYTES,
@@ -36,6 +39,8 @@ from src.features.homepage.constants import (
     WIDE_PARSER_VERSION,
     WIDE_PRIORITY_HOST_KEYWORDS,
     WIDE_REQUIRED_SLOT_IDS,
+    WIDE_ROOT_IDENTITY_SUPPLEMENT_PATH_MARKERS,
+    WIDE_SOURCE_KIND_IDENTITY_VERIFIED_WEB_PAGE,
     WIDE_SOURCE_KIND_IR_PDF,
     WIDE_SOURCE_KIND_RECRUIT_PAGE,
     WIDE_SOURCE_KIND_WEB_PAGE,
@@ -48,8 +53,39 @@ from src.features.homepage.ir_pdf import (
     default_ir_html_fetch,
     default_ir_pdf_fetch,
 )
-from src.shared.official_ir import IR_ATTACHMENT_URL_FIELD, safe_https_attachment_url
+from src.features.homepage.official_identity import (
+    OfficialCompanyIdentity,
+    OfficialIdentityMatch,
+    verify_official_company_identity,
+    verify_official_company_identity_pages,
+)
+from src.shared.official_ir import (
+    IR_ATTACHMENT_URL_FIELD,
+    IR_DART_WWW_REDIRECT_FIELD,
+    IR_DART_WWW_REDIRECT_FROM_FIELD,
+    IR_DART_WWW_REDIRECT_TO_FIELD,
+    IR_METADATA_VERIFICATION_FIELD,
+    IR_REPORTING_PERIOD_FIELD,
+    dart_homepage_exact_host,
+    dart_www_redirect_is_valid,
+    safe_https_attachment_url,
+)
 from src.shared.report_evidence.constants import SOURCE_KIND_ROBOTS_TXT
+from src.shared.report_evidence.identity_verified_web import (
+    build_verified_dart_filing_official_web_binding,
+    build_verified_dart_filing_subdomain_binding,
+    identity_binding_with_scope,
+    parse_dart_filing_url_provenance,
+    parse_verified_dart_filing_official_web_binding,
+    provenance_digest,
+)
+from src.shared.report_evidence.profile_domain_attestation import (
+    build_registered_subdomain_profile_attestation,
+    parse_dart_profile_domain_attestation,
+)
+from src.shared.report_evidence.source_kind_policy import (
+    formal_document_writer_ineligibility_reason,
+)
 from src.features.homepage.safe_http import HomepageResponseError, request_deadline_scope
 from src.features.homepage.wide_domain import (
     BoundHost,
@@ -58,8 +94,9 @@ from src.features.homepage.wide_domain import (
     bind_root_host,
     bind_www_apex_alternate,
     canonicalize_url,
+    classify_official_page_url,
+    is_excluded_linked_host,
     parse_official_origin,
-    slot_ids_for_url,
 )
 from src.features.homepage.wide_extract import (
     extract_inline_spa_ranges,
@@ -94,9 +131,8 @@ from src.features.homepage.wide_types import (
 
 _PRIORITY_KEYWORDS: tuple[str, ...] = WIDE_PRIORITY_HOST_KEYWORDS + PRIORITY_PATH_KEYWORDS
 
-#: url 안에 있으면 «채용 페이지」로 분류하는 키워드.
-_RECRUIT_MARKERS: tuple[str, ...] = ("recruit", "career", "jobs", "채용")
-
+_DART_HOMEPAGE_DISCOVERY = "DART company.json hm_url"
+_DART_IR_DISCOVERY = "DART company.json ir_url"
 #: : robots·sitemap·전체 truncation·IR처럼 «호스트/수집 전체」에 걸린
 #: attempt이거나, 일반 페이지인데 URL로 페이지 유형을 못 알아낸 attempt에
 #: 붙이는 fallback slot 집합. 앱 계약(CollectionAttempt)은 빈 slot_ids를
@@ -142,6 +178,8 @@ class _CollectionState:
     company_id: str
     collected_at: str
     clock: Callable[[], float]
+    domain_attestation_source_id: str = ""
+    domain_attestation_evidence: str = ""
     documents: list[WideDocumentIdentity] = field(default_factory=list)
     attempts: list[WideCollectionAttempt] = field(default_factory=list)
     bound_hosts: dict[str, BoundHost] = field(default_factory=dict)
@@ -151,6 +189,14 @@ class _CollectionState:
     pages_fetched: int = 0
     total_bytes: int = 0
     attempt_counter: int = 0
+    # DART root(또는 그 고신뢰 하위호스트)의 실제 HTML이 직접 가리킨
+    # 다른 등록 도메인 exact URL. 링크 사실만으로는 절대 문서가 되지 않고,
+    # 수집 후 official_identity의 법인명+등록번호 이중 검증을 다시 거친다.
+    cross_domain_candidates: dict[str, str] = field(default_factory=dict)
+    # 외부 exact 링크의 계보를 주장할 수 있는 실제 고신뢰 페이지 URL.
+    # DART root 신원 검증을 통과한 origin에서 이번 실행 중 성공적으로 읽은
+    # 페이지만 들어간다. 호출자가 넘긴 URL 문자열만으로는 채우지 않는다.
+    official_link_source_urls: set[str] = field(default_factory=set)
 
     def next_attempt_id(self, kind: str) -> str:
         self.attempt_counter += 1
@@ -202,6 +248,50 @@ class _CollectionState:
             documents_seen=0,
         )
 
+    def add_cross_domain_candidate(self, *, url: str, source_page_url: str) -> None:
+        """host와 exact URL 상한 안에서 신원검증 전 후보를 보관한다.
+
+        같은 host의 첫 랜딩 페이지에 등록번호가 없더라도 공시가 직접 적은
+        회사소개 URL에는 있을 수 있다. 그래서 host 전체를 첫 실패 하나로
+        닫지는 않되, host별 후보 수도 제한한다.
+        """
+
+        normalized_url = _identity_candidate_https_url(url)
+        if not normalized_url:
+            return
+        host = (
+            urllib.parse.urlsplit(normalized_url).hostname or ""
+        ).casefold().rstrip(".")
+        if not host or is_excluded_linked_host(host):
+            return
+        existing_hosts = {
+            (urllib.parse.urlsplit(candidate).hostname or "").casefold().rstrip(".")
+            for candidate in self.cross_domain_candidates
+        }
+        if normalized_url in self.cross_domain_candidates:
+            # 같은 URL을 profile 후보가 먼저 넣고 DART 원문 provenance가 뒤에
+            # 도착할 수 있다. 기존 출처가 비어 있을 때만 더 강한 발견 영수증을
+            # 보존하며, 서로 다른 출처끼리 임의로 덮어쓰지는 않는다.
+            if (
+                not self.cross_domain_candidates[normalized_url]
+                and str(source_page_url or "").strip()
+            ):
+                self.cross_domain_candidates[normalized_url] = str(
+                    source_page_url
+                ).strip()
+            return
+        if host not in existing_hosts and len(existing_hosts) >= WIDE_MAX_HOSTS:
+            return
+        same_host_count = sum(
+            1
+            for candidate in self.cross_domain_candidates
+            if (urllib.parse.urlsplit(candidate).hostname or "").casefold().rstrip(".")
+            == host
+        )
+        if same_host_count >= WIDE_MAX_IDENTITY_CANDIDATES_PER_HOST:
+            return
+        self.cross_domain_candidates[normalized_url] = source_page_url
+
 
 @dataclass(frozen=True)
 class _QueueItem:
@@ -211,10 +301,85 @@ class _QueueItem:
     source_page_url: str
 
 
+def _identity_candidate_https_url(raw: str) -> str:
+    """공식 후보의 host·path·query를 보존해 HTTPS exact URL로 만든다.
+
+    DART에는 오래전에 등록한 ``http://`` URL이 남아 있을 수 있다. 그 문자열을
+    그대로 버리면 강한 회사 신원값이 있어도 실제 공식 페이지를 한 번도 확인할
+    수 없다. HTTP 응답을 읽는 대신 같은 host·path·query의 HTTPS(기본 443)만
+    시도한다. 사용자정보·비표준 포트·다른 프로토콜은 추측하지 않고 거절하며,
+    이후 redirect도 ``OfficialOrigin.allows_content_url``의 같은 origin 경계를
+    그대로 통과해야 한다.
+    """
+
+    candidate = str(raw or "").strip()
+    if not candidate:
+        return ""
+    if candidate.startswith("//"):
+        candidate = f"https:{candidate}"
+    elif "://" not in candidate:
+        candidate = f"https://{candidate}"
+    try:
+        parsed = urllib.parse.urlsplit(candidate)
+        scheme = parsed.scheme.casefold()
+        port = parsed.port
+    except (TypeError, ValueError, UnicodeError):
+        return ""
+    if (
+        scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return ""
+    if scheme == "http":
+        if port not in (None, 80):
+            return ""
+        display_host = (
+            f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+        )
+        candidate = urllib.parse.urlunsplit(
+            ("https", display_host, parsed.path, parsed.query, "")
+        )
+    origin = parse_official_origin(candidate)
+    if origin is None or origin.scheme != "https" or origin.port != 443:
+        return ""
+    return origin.root_url
+
+
 def _scoped_canonical_url(url: str, origin: OfficialOrigin) -> str:
     """이미 scope 검사를 통과한 URL에서 시작 query key를 잃지 않는다."""
 
     return canonicalize_url(url, preserve_query_keys=origin.scope_query_keys)
+
+
+def _has_official_discovery_lineage(
+    state: _CollectionState,
+    *,
+    candidate_url: str,
+    source_page_url: str,
+    promote_verified_root: bool,
+) -> bool:
+    """신원 복사만으로 외부 페이지가 공식 경로가 되지 않게 계보를 확인한다."""
+
+    if promote_verified_root:
+        return True
+    source = str(source_page_url or "").strip()
+    if source == _DART_IR_DISCOVERY:
+        return True
+    provenance = parse_dart_filing_url_provenance(source)
+    if provenance is not None:
+        return bool(
+            provenance.company_id == state.company_id
+            and _identity_candidate_https_url(provenance.url) == candidate_url
+        )
+    try:
+        canonical_source = canonicalize_url(source)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        canonical_source and canonical_source in state.official_link_source_urls
+    )
 
 
 def _wide_document_id(canonical_url: str, origin: OfficialOrigin) -> str:
@@ -231,6 +396,53 @@ def _wide_document_id(canonical_url: str, origin: OfficialOrigin) -> str:
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def _profile_attestation_for_url(
+    state: _CollectionState,
+    source_url: str,
+) -> tuple[str, str, str, str, str]:
+    """현재 URL에 정확히 결속되는 DART 기업개황 provenance만 돌려준다."""
+
+    source_id = state.domain_attestation_source_id.strip()
+    evidence = state.domain_attestation_evidence.strip()
+    if not source_id or not evidence:
+        return "", "", "", "", ""
+    profile = parse_dart_profile_domain_attestation(evidence)
+    if (
+        profile is None
+        or profile.is_registered_subdomain
+        or profile.corp_code != state.company_id
+        or source_id != f"dart-company-profile-{state.company_id}"
+    ):
+        return "", "", "", "", ""
+    dart_host = profile.root_host
+    try:
+        source_host = (
+            urllib.parse.urlsplit(str(source_url or "")).hostname or ""
+        ).casefold().rstrip(".")
+    except ValueError:
+        return "", "", "", "", ""
+    if not dart_host or not source_host:
+        return "", "", "", "", ""
+    if source_host == dart_host:
+        return source_id, evidence, "", "", ""
+    subdomain_evidence = build_registered_subdomain_profile_attestation(
+        evidence,
+        source_url=source_url,
+    )
+    if subdomain_evidence:
+        return source_id, subdomain_evidence, "", "", ""
+    verification = "https_apex_to_www_redirect"
+    if not dart_www_redirect_is_valid(
+        verification=verification,
+        from_host=dart_host,
+        to_host=source_host,
+        dart_host=dart_host,
+        source_host=source_host,
+    ):
+        return "", "", "", "", ""
+    return source_id, evidence, verification, dart_host, source_host
+
+
 def collect_official_web_documents(
     *,
     company_id: str,
@@ -238,6 +450,12 @@ def collect_official_web_documents(
     root_homepage_url: str,
     collected_at: str,
     company_aliases: tuple[str, ...] = (),
+    company_registration_numbers: tuple[str, ...] = (),
+    official_candidate_urls: tuple[str, ...] = (),
+    official_candidate_provenance: tuple[tuple[str, str], ...] = (),
+    domain_attestation_source_id: str = "",
+    domain_attestation_evidence: str = "",
+    root_identity_verification_required: bool = True,
     transport: RawWideTransport = default_wide_transport,
     ir_html_fetch: IrHtmlFetcher = default_ir_html_fetch,
     ir_pdf_fetch: IrPdfFetcher = default_ir_pdf_fetch,
@@ -251,7 +469,23 @@ def collect_official_web_documents(
         root_homepage_url: DART 기업개황의 홈페이지 주소(``hm_url``).
         collected_at: 이 수집 실행의 ISO 시각. 호출자가 명시적으로 넘긴다
             (이 모듈은 벽시계를 직접 읽지 않는다 — 결정론적 시험을 위해).
-        company_aliases: IR PDF 신원 대조에 함께 쓰는 공식 별칭.
+        company_aliases: IR PDF·교차 도메인 신원 대조에 함께 쓰는 DART 공식 별칭.
+        company_registration_numbers: DART 기업개황의 사업자등록번호·법인등록번호.
+            다른 등록 도메인은 이 안정 식별번호와 법인명이 실제 HTML에 함께
+            확인될 때만 수집한다. 정식 운영 경로에서 번호가 없으면 공식 웹
+            신원을 확인할 수 없으므로 fail-closed한다.
+        official_candidate_urls: 상위의 출처 있는 무료 발견 경로가 확인한 exact
+            공식 URL 후보(DART ``ir_url`` 등). 사용자 자유입력이나 검색 snippet을
+            넣는 자리가 아니다. DART ``hm_url``이 비어 있어도 후보 본문에서 위
+            이중 신원 검증을 통과하면 수집할 수 있다.
+        official_candidate_provenance: ``(후보 URL, 발견 provenance)`` 묶음.
+            DART 공시 전문에서 찾은 URL처럼 receipt/location/hash를 보존해야
+            하는 후보용이다. provenance는 최종 identity_binding에 함께 봉인된다.
+        root_identity_verification_required: DART ``hm_url``도 재할당된 낡은
+            도메인일 수 있으므로, 정식 운영 경로에서는 법인명+등록번호를 실제
+            HTML에서 확인한 뒤에만 REQUIRED 공식 root로 승격한다. 등록번호가
+            없으면 웹은 fail-closed하고 DART 공시만 남긴다. ``False``는 기존
+            단위 호환 시험용이며 production adapter는 항상 ``True``를 쓴다.
         transport: 실제 네트워크 접속 함수. 시험에서는 가짜로 바꿔 끼운다.
         ir_html_fetch, ir_pdf_fetch: 공식 IR PDF 수집기(``ir_pdf.py``)에
             그대로 위임하는 접속 함수. 시험에서는 가짜로 바꿔 끼운다.
@@ -262,30 +496,151 @@ def collect_official_web_documents(
         부분은 문서를 지어내는 대신 ``TRUNCATED`` attempt로 남는다.
     """
     root_origin = parse_official_origin(root_homepage_url)
-    state = _CollectionState(company_id=company_id, collected_at=collected_at, clock=clock)
-    if root_origin is None:
+    state = _CollectionState(
+        company_id=company_id,
+        collected_at=collected_at,
+        clock=clock,
+        domain_attestation_source_id=str(domain_attestation_source_id or "").strip(),
+        domain_attestation_evidence=str(domain_attestation_evidence or "").strip(),
+    )
+    identity = (
+        OfficialCompanyIdentity(
+            legal_name=company_name,
+            aliases=company_aliases,
+            registration_numbers=company_registration_numbers,
+        )
+        if str(company_name or "").strip()
+        else None
+    )
+    candidate_urls = tuple(
+        dict.fromkeys(
+            clean
+            for value in official_candidate_urls
+            if (clean := str(value or "").strip())
+        )
+    )
+    verified_root_urls: list[str] = []
+    if root_origin is not None and root_identity_verification_required:
+        for candidate_origin in (
+            root_origin,
+            (
+                root_origin.with_host(alternate.host)
+                if (alternate := bind_www_apex_alternate(root_origin.host)) is not None
+                else None
+            ),
+        ):
+            if candidate_origin is None:
+                continue
+            normalized = _identity_candidate_https_url(candidate_origin.root_url)
+            if normalized and normalized not in verified_root_urls:
+                verified_root_urls.append(normalized)
+
+    # DART hm_url은 가장 먼저 자리를 잡는다. ir_url 등 출처가 이미 있는 exact
+    # 후보를 그다음, 일반 HTML의 외부 링크보다 먼저 넣는다. 광고·협력사 링크가
+    # 상한을 먼저 차지해 공식 후보가 아예 검증되지 못하는 순서 의존을 막는다.
+    if (
+        verified_root_urls
+        and identity is not None
+        and identity.can_verify_cross_domain
+    ):
+        for root_candidate_url in verified_root_urls:
+            state.add_cross_domain_candidate(
+                url=root_candidate_url,
+                source_page_url=_DART_HOMEPAGE_DISCOVERY,
+            )
+    if identity is not None and identity.can_verify_cross_domain:
+        for candidate_url in candidate_urls:
+            state.add_cross_domain_candidate(
+                url=candidate_url,
+                source_page_url=_DART_IR_DISCOVERY,
+            )
+        for candidate in official_candidate_provenance:
+            if not isinstance(candidate, tuple) or len(candidate) != 2:
+                continue
+            candidate_url, provenance = candidate
+            if not str(provenance or "").strip():
+                continue
+            state.add_cross_domain_candidate(
+                url=str(candidate_url or ""),
+                source_page_url=str(provenance).strip(),
+            )
+    if root_origin is None and not (
+        identity is not None
+        and identity.can_verify_cross_domain
+        and (candidate_urls or official_candidate_provenance)
+    ):
         # 계약 gen=8 마지막 고리: 문서·attempt가 0건이어도 결과 자신은 항상
         # 대상 회사를 싣는다(documents에서 역산하지 않는다 — 역산하면 0건일 때
         # 정본을 잃는다).
         return WideCollectionResult(company_id=state.company_id, documents=(), attempts=())
 
+    if (
+        root_origin is not None
+        and root_identity_verification_required
+        and not (
+            verified_root_urls
+            and identity is not None
+            and identity.can_verify_cross_domain
+        )
+    ):
+        # 등록번호가 없으면 낡은 hm_url을 다른 회사의 REQUIRED 자료로 믿는
+        # 것보다 웹 근거를 쓰지 않는 편이 안전하다. 네트워크도 0회다.
+        state.add_attempt(
+            kind="root-identity",
+            source_kind=WIDE_SOURCE_KIND_WEB_PAGE,
+            requirement=REQUIREMENT_OPTIONAL,
+            state=ATTEMPT_STATE_MISSING,
+            slot_ids=(),
+            reason_code="root_identity_unverifiable",
+            elapsed_ms=0,
+            bytes_downloaded=0,
+            documents_seen=0,
+        )
+
     try:
         with request_deadline_scope(WIDE_COLLECTION_TIMEOUT_SEC) as deadline:
-            _run_web_crawl(
-                state,
-                root_origin=root_origin,
-                transport=transport,
-                deadline=deadline,
-            )
-            _run_ir_pdf_phase(
-                state,
-                root_origin=root_origin,
-                company_name=company_name,
-                company_aliases=company_aliases,
-                ir_html_fetch=ir_html_fetch,
-                ir_pdf_fetch=ir_pdf_fetch,
-                deadline=deadline,
-            )
+            if root_origin is not None and not root_identity_verification_required:
+                _run_web_crawl(
+                    state,
+                    root_origin=root_origin,
+                    transport=transport,
+                    deadline=deadline,
+                )
+            if identity is not None and identity.can_verify_cross_domain:
+                _run_cross_domain_identity_phase(
+                    state,
+                    identity=identity,
+                    explicit_candidate_urls=candidate_urls,
+                    verified_root_urls=tuple(verified_root_urls),
+                    transport=transport,
+                    deadline=deadline,
+                )
+            if root_origin is not None and root_identity_verification_required:
+                verified_ir_origin = next(
+                    (
+                        state.bound_origins.get(
+                            (urllib.parse.urlsplit(candidate).hostname or "").casefold()
+                        )
+                        for candidate in verified_root_urls
+                        if state.bound_origins.get(
+                            (urllib.parse.urlsplit(candidate).hostname or "").casefold()
+                        )
+                        is not None
+                    ),
+                    None,
+                )
+            else:
+                verified_ir_origin = root_origin
+            if verified_ir_origin is not None:
+                _run_ir_pdf_phase(
+                    state,
+                    root_origin=verified_ir_origin,
+                    company_name=company_name,
+                    company_aliases=company_aliases,
+                    ir_html_fetch=ir_html_fetch,
+                    ir_pdf_fetch=ir_pdf_fetch,
+                    deadline=deadline,
+                )
     except HomepageResponseError:
         state.record_truncation(WIDE_SOURCE_KIND_WEB_PAGE, "truncated_time_cap")
 
@@ -411,6 +766,508 @@ def _run_web_crawl(
         )
 
 
+# ══════════════════════════════════════════════════════════
+# 다른 등록 도메인 — DART 법인명+등록번호 이중 검증
+# ══════════════════════════════════════════════════════════
+
+
+def _run_cross_domain_identity_phase(
+    state: _CollectionState,
+    *,
+    identity: OfficialCompanyIdentity,
+    explicit_candidate_urls: tuple[str, ...],
+    verified_root_urls: tuple[str, ...],
+    transport: RawWideTransport,
+    deadline: object,
+) -> None:
+    """출처 있는 exact 후보를 격리 조회하고 신원 일치 때만 수집한다.
+
+    일반 외부 링크를 곧바로 공식 도메인군에 넣지 않는다. 먼저 exact URL
+    한 건만 robots·SSRF 경계 안에서 읽고, 실제 HTML footer/JSON-LD에서
+    DART 법인명과 등록번호를 함께 확인한다. 확인된 호스트도 보조
+    ``OPTIONAL`` 경로다. 이 보조 경로의 일시 장애가 공시 등 다른 근거까지
+    막지 않으며, 성공한 본문 조각은 부족한 장을 채울 수 있다.
+    """
+
+    # 명시 후보는 collect 진입 직후 먼저 state에 넣어 두었다. 이 인자를
+    # 여기서도 받아 계약상 같은 후보 묶음을 처리 중임을 드러내고, 호출자가
+    # 실수로 다른 state를 넘긴 경우에만 보완한다.
+    for candidate_url in explicit_candidate_urls:
+        if candidate_url not in state.cross_domain_candidates:
+            state.add_cross_domain_candidate(url=candidate_url, source_page_url="")
+
+    processed_urls: set[str] = set()
+    while True:
+        candidates = sorted(
+            (
+                item
+                for item in state.cross_domain_candidates.items()
+                if item[0] not in processed_urls
+            ),
+            key=lambda item: (
+                (
+                    verified_root_urls.index(item[0])
+                    if item[0] in verified_root_urls
+                    else len(verified_root_urls)
+                ),
+                _priority_key(item[0]),
+            ),
+        )
+        if not candidates:
+            break
+        candidate_url, source_page_url = candidates[0]
+        processed_urls.add(candidate_url)
+        try:
+            deadline.remaining()  # type: ignore[attr-defined]
+        except HomepageResponseError:
+            state.record_truncation(WIDE_SOURCE_KIND_WEB_PAGE, "truncated_time_cap")
+            return
+        if state.pages_fetched >= WIDE_MAX_PAGES:
+            state.record_truncation(WIDE_SOURCE_KIND_WEB_PAGE, "truncated_page_cap")
+            return
+        if state.total_bytes >= WIDE_MAX_TOTAL_BYTES:
+            state.record_truncation(WIDE_SOURCE_KIND_WEB_PAGE, "truncated_byte_cap")
+            return
+        _collect_identity_verified_candidate(
+            state,
+            candidate_url=candidate_url,
+            source_page_url=source_page_url,
+            identity=identity,
+            promote_verified_root=candidate_url in verified_root_urls,
+            transport=transport,
+            deadline=deadline,
+        )
+
+
+def _root_identity_supplement_urls(
+    response: WideRawResponse,
+    *,
+    origin: OfficialOrigin,
+    policy: WideRobotsPolicy,
+) -> tuple[str, ...]:
+    """첫 화면 exact 링크 중 닫힌 신원 경로만 same-origin 후보로 고른다."""
+
+    ranked: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for link in extract_links(response.text, response.effective_url):
+        if not origin.allows_content_url(link) or not policy.can_fetch(link):
+            continue
+        try:
+            parsed = urllib.parse.urlsplit(link)
+            decoded_path = urllib.parse.unquote(parsed.path).casefold()
+        except (TypeError, ValueError, UnicodeError):
+            continue
+        ranks = [
+            index
+            for index, marker in enumerate(
+                WIDE_ROOT_IDENTITY_SUPPLEMENT_PATH_MARKERS
+            )
+            if marker.casefold() in decoded_path
+        ]
+        if not ranks:
+            continue
+        canonical = _scoped_canonical_url(link, origin)
+        if not canonical or canonical in seen:
+            continue
+        seen.add(canonical)
+        ranked.append((min(ranks), canonical))
+    ranked.sort(key=lambda item: (item[0], item[1]))
+    return tuple(
+        url
+        for _rank, url in ranked[:WIDE_MAX_ROOT_IDENTITY_SUPPLEMENT_PAGES]
+    )
+
+
+def _fetch_root_identity_supplements(
+    state: _CollectionState,
+    *,
+    root_response: WideRawResponse,
+    origin: OfficialOrigin,
+    policy: WideRobotsPolicy,
+    transport: RawWideTransport,
+    deadline: object,
+) -> tuple[tuple[WideRawResponse, ...], int, bool]:
+    """root 신원 분리 확인용 same-origin 페이지를 비재귀·bounded 조회한다."""
+
+    responses: list[WideRawResponse] = []
+    total_bytes = 0
+    had_failure = False
+    for candidate_url in _root_identity_supplement_urls(
+        root_response,
+        origin=origin,
+        policy=policy,
+    ):
+        deadline.remaining()  # type: ignore[attr-defined]
+        if (
+            state.pages_fetched >= WIDE_MAX_PAGES
+            or state.total_bytes >= WIDE_MAX_TOTAL_BYTES
+            or total_bytes >= WIDE_MAX_ROOT_IDENTITY_SUPPLEMENT_BYTES
+        ):
+            state.record_truncation(
+                WIDE_SOURCE_KIND_WEB_PAGE,
+                "truncated_root_identity_supplement_cap",
+            )
+            break
+
+        def url_allowed(candidate: str) -> bool:
+            return origin.allows_content_url(candidate) and policy.can_fetch(candidate)
+
+        response: WideRawResponse | None = None
+        error: WideTransportError | None = None
+        try:
+            response = transport(candidate_url, url_allowed)
+        except WideTransportError as exc:
+            error = exc
+        state.pages_fetched += 1
+        page_state, _reason_code = classify_general_outcome(response, error)
+        response_bytes = len(
+            (response.text if response else "").encode("utf-8", errors="ignore")
+        )
+        state.total_bytes += response_bytes
+        total_bytes += response_bytes
+        if total_bytes > WIDE_MAX_ROOT_IDENTITY_SUPPLEMENT_BYTES:
+            state.record_truncation(
+                WIDE_SOURCE_KIND_WEB_PAGE,
+                "truncated_root_identity_supplement_bytes",
+            )
+            break
+        if page_state != ATTEMPT_STATE_OK or response is None:
+            had_failure = True
+            continue
+        if (
+            not origin.allows_content_url(response.effective_url)
+            or not policy.can_fetch(response.effective_url)
+        ):
+            had_failure = True
+            continue
+        responses.append(response)
+    return tuple(responses), total_bytes, had_failure
+
+
+def _enqueue_verified_identity_link(
+    state: _CollectionState,
+    *,
+    link: str,
+    source_page_url: str,
+    origin: OfficialOrigin,
+    promote_verified_root: bool,
+    queue: list[_QueueItem],
+    seen_canonical: set[str],
+) -> None:
+    """신원이 확인된 페이지 링크를 같은-origin 큐/외부 격리 후보로 나눈다."""
+
+    try:
+        link_host = (
+            urllib.parse.urlsplit(link).hostname or ""
+        ).casefold().rstrip(".")
+    except (TypeError, ValueError):
+        return
+    if link_host == origin.host:
+        if not origin.allows_content_url(link):
+            return
+        canonical_link = _scoped_canonical_url(link, origin)
+    elif bind_registered_subdomain(origin.host, link_host) is not None:
+        canonical_link = canonicalize_url(link)
+    else:
+        if promote_verified_root:
+            state.add_cross_domain_candidate(
+                url=link,
+                source_page_url=source_page_url,
+            )
+        return
+    if canonical_link in seen_canonical:
+        return
+    seen_canonical.add(canonical_link)
+    queue.append(_QueueItem(url=link, source_page_url=source_page_url))
+
+
+def _collect_identity_verified_candidate(
+    state: _CollectionState,
+    *,
+    candidate_url: str,
+    source_page_url: str,
+    identity: OfficialCompanyIdentity,
+    promote_verified_root: bool,
+    transport: RawWideTransport,
+    deadline: object,
+) -> None:
+    """교차 도메인 exact 페이지 하나를 검증하고 같은 host 내부만 넓힌다."""
+
+    origin = parse_official_origin(candidate_url)
+    if origin is None or origin.scheme != "https":
+        return
+    host = origin.host
+    if not _has_official_discovery_lineage(
+        state,
+        candidate_url=candidate_url,
+        source_page_url=source_page_url,
+        promote_verified_root=promote_verified_root,
+    ):
+        # 법인명·번호는 공개 정보라 디렉터리/광고 페이지가 그대로 복사할 수
+        # 있다. DART profile·공시 또는 이번 실행의 검증된 root exact 링크
+        # 계보가 없으면 네트워크도 호출하지 않고 관측 실패만 남긴다.
+        page_classification = classify_official_page_url(candidate_url)
+        state.add_attempt(
+            kind="cross-domain-lineage",
+            source_kind=WIDE_SOURCE_KIND_IDENTITY_VERIFIED_WEB_PAGE,
+            requirement=REQUIREMENT_OPTIONAL,
+            state=ATTEMPT_STATE_MISSING,
+            slot_ids=page_classification.slot_ids,
+            reason_code="cross_domain_official_lineage_missing",
+            elapsed_ms=0,
+            bytes_downloaded=0,
+            documents_seen=0,
+        )
+        return
+    if is_excluded_linked_host(host) or host in state.bound_hosts:
+        return
+    if len(state.bound_hosts) >= WIDE_MAX_HOSTS:
+        return
+
+    policy = _ensure_host_policy(state, origin=origin, transport=transport)
+    if policy.blocked or not policy.can_fetch(origin.root_url):
+        return
+
+    started = state.clock()
+    response: WideRawResponse | None = None
+    error: WideTransportError | None = None
+    try:
+        response = transport(origin.root_url, origin.allows_content_url)
+    except WideTransportError as exc:
+        error = exc
+    elapsed_ms = int((state.clock() - started) * 1000)
+    state.pages_fetched += 1
+
+    page_state, reason_code = classify_general_outcome(response, error)
+    response_bytes = len(
+        (response.text if response else "").encode("utf-8", errors="ignore")
+    )
+    state.total_bytes += response_bytes
+    documents_seen = 0
+    binding: BoundHost | None = None
+
+    match: OfficialIdentityMatch | None = None
+    identity_responses: tuple[WideRawResponse, ...] = ()
+    if page_state == ATTEMPT_STATE_OK and response is not None:
+        # 실제 전송 구현은 매 redirect마다 같은 origin/path/query를 검사한다.
+        # 그래도 이 조립 경계가 transport의 선행 검사를 믿기만 하면, 시험 대역
+        # 또는 향후 구현이 predicate를 빠뜨린 순간 범위 밖 본문에 복사된 회사명·
+        # 등록번호가 원래 host를 공식으로 결속한다. 최종 URL을 신원 확인보다
+        # 먼저 독립 재검사한다.
+        if not origin.allows_content_url(response.effective_url):
+            page_state = ATTEMPT_STATE_FAILED
+            reason_code = "redirect_scope_mismatch"
+        else:
+            identity_responses = (response,)
+            match = verify_official_company_identity(response.text, identity)
+            if match is None and promote_verified_root:
+                supplements, supplement_bytes, supplement_failed = (
+                    _fetch_root_identity_supplements(
+                        state,
+                        root_response=response,
+                        origin=origin,
+                        policy=policy,
+                        transport=transport,
+                        deadline=deadline,
+                    )
+                )
+                response_bytes += supplement_bytes
+                identity_responses = (response, *supplements)
+                if supplements:
+                    match = verify_official_company_identity_pages(
+                        tuple(item.text for item in identity_responses),
+                        identity,
+                    )
+                if match is None and supplement_failed:
+                    page_state = ATTEMPT_STATE_FAILED
+                    reason_code = "root_identity_supplement_failed"
+        if page_state == ATTEMPT_STATE_OK and match is None:
+            page_state = ATTEMPT_STATE_MISSING
+            reason_code = (
+                "root_identity_mismatch"
+                if promote_verified_root
+                else "cross_domain_identity_mismatch"
+            )
+
+    if match is not None and response is not None:
+        filing_provenance = parse_dart_filing_url_provenance(source_page_url)
+        verified_filing_binding = build_verified_dart_filing_official_web_binding(
+            provenance_value=source_page_url,
+            company_id=state.company_id,
+            company_name=identity.legal_name,
+            company_registration_numbers=identity.registration_numbers,
+            candidate_url=candidate_url,
+            effective_urls=tuple(item.effective_url for item in identity_responses),
+            scope_sha256=origin.scope_digest,
+            scope_allows=origin.allows_content_url,
+            identity_evidence_sha256=match.evidence_sha256,
+            matched_name_sha256=match.matched_name_sha256,
+            registration_number_sha256=match.registration_number_sha256,
+        )
+        source_binding = (
+            _DART_HOMEPAGE_DISCOVERY
+            if promote_verified_root
+            else (
+                "DART 공시 URL 후보"
+                if filing_provenance is not None
+                else (
+                    "DART company.json ir_url"
+                    if source_page_url == _DART_IR_DISCOVERY
+                    else "검증된 DART root 문서의 exact 링크"
+                )
+            )
+        )
+        source_digest = provenance_digest(source_page_url or candidate_url)
+        is_high_confidence = bool(promote_verified_root or verified_filing_binding)
+        binding = BoundHost(
+            host=host,
+            identity_binding=(
+                verified_filing_binding
+                or (
+                    "DART 법인명+등록번호 이중 검증 공식 웹; "
+                    f"discovery={source_binding}; "
+                    f"discovery_sha256={source_digest}; "
+                    f"identity_evidence_sha256={match.evidence_sha256}"
+                )
+            ),
+            # DART hm_url 및 exact 공시문서+첨부 hash 계보와 실제 법인명+
+            # 등록번호·landing scope를 모두 확인한 root만 REQUIRED가 된다.
+            is_high_confidence=is_high_confidence,
+        )
+        state.bound_hosts[host] = binding
+        state.bound_origins[host] = origin
+        if binding.is_high_confidence:
+            state.official_link_source_urls.update(
+                _scoped_canonical_url(item.effective_url, origin)
+                for item in identity_responses
+            )
+        for identity_response in identity_responses:
+            response_classification = classify_official_page_url(
+                identity_response.effective_url
+            )
+            document = _build_web_document(
+                state,
+                response=identity_response,
+                origin=origin,
+                source_kind=(
+                    response_classification.source_kind
+                    if promote_verified_root
+                    else WIDE_SOURCE_KIND_IDENTITY_VERIFIED_WEB_PAGE
+                ),
+                requirement=(
+                    REQUIREMENT_REQUIRED
+                    if binding.is_high_confidence
+                    else REQUIREMENT_OPTIONAL
+                ),
+                binding=binding,
+            )
+            if document is not None:
+                state.documents.append(document)
+                documents_seen += 1
+        reason_code = (
+            "root_identity_verified"
+            if promote_verified_root
+            else (
+                "dart_filing_identity_verified"
+                if verified_filing_binding
+                else "cross_domain_identity_verified"
+            )
+        )
+
+        # 신원이 확인된 exact origin 안에서만 일반 페이지를 더 읽는다. 다른
+        # 등록 도메인과 하위호스트는 이 보조 후보에서 연쇄 승격하지 않는다.
+        queue: list[_QueueItem] = []
+        seen_canonical = {
+            _scoped_canonical_url(item.effective_url, origin)
+            for item in identity_responses
+        }
+        if binding.is_high_confidence:
+            _discover_sitemap(
+                state,
+                origin=origin,
+                transport=transport,
+                policy=policy,
+                queue=queue,
+                seen_canonical=seen_canonical,
+                root_host=origin.host,
+            )
+
+        for source_response in identity_responses:
+            for link in extract_links(
+                source_response.text,
+                source_response.effective_url,
+            ):
+                _enqueue_verified_identity_link(
+                    state,
+                    link=link,
+                    source_page_url=source_response.effective_url,
+                    origin=origin,
+                    promote_verified_root=binding.is_high_confidence,
+                    queue=queue,
+                    seen_canonical=seen_canonical,
+                )
+
+        while queue:
+            try:
+                deadline.remaining()  # type: ignore[attr-defined]
+            except HomepageResponseError:
+                state.record_truncation(
+                    WIDE_SOURCE_KIND_WEB_PAGE, "truncated_time_cap"
+                )
+                break
+            if state.pages_fetched >= WIDE_MAX_PAGES:
+                state.record_truncation(
+                    WIDE_SOURCE_KIND_WEB_PAGE, "truncated_page_cap"
+                )
+                break
+            if state.total_bytes >= WIDE_MAX_TOTAL_BYTES:
+                state.record_truncation(
+                    WIDE_SOURCE_KIND_WEB_PAGE, "truncated_byte_cap"
+                )
+                break
+            queue.sort(key=lambda queued: _priority_key(queued.url))
+            item = queue.pop(0)
+            _visit_page(
+                state,
+                item=item,
+                root_origin=origin,
+                root_host=origin.host,
+                transport=transport,
+                queue=queue,
+                seen_canonical=seen_canonical,
+            )
+
+    # 성공한 문서·attempt·조각은 모두 실제 landing URL 하나로 분류한다.
+    # 실패했을 때만 최종 URL을 믿을 수 없으므로 요청 URL로 진단한다.
+    attempt_classification = classify_official_page_url(
+        response.effective_url
+        if page_state == ATTEMPT_STATE_OK and response is not None
+        else candidate_url
+    )
+    source_kind = (
+        attempt_classification.source_kind
+        if promote_verified_root
+        else WIDE_SOURCE_KIND_IDENTITY_VERIFIED_WEB_PAGE
+    )
+    slot_ids = attempt_classification.slot_ids
+    attempt_requirement = (
+        REQUIREMENT_REQUIRED
+        if binding is not None and binding.is_high_confidence and slot_ids
+        else REQUIREMENT_OPTIONAL
+    )
+    state.add_attempt(
+        kind="cross-domain-page",
+        source_kind=source_kind,
+        requirement=attempt_requirement,
+        state=page_state,
+        slot_ids=slot_ids,
+        reason_code=reason_code,
+        elapsed_ms=elapsed_ms,
+        bytes_downloaded=response_bytes,
+        documents_seen=documents_seen,
+    )
+
+
 def _visit_page(
     state: _CollectionState,
     *,
@@ -444,6 +1301,41 @@ def _visit_page(
             # 여기서 0회 호출한다. 외부 IR PDF exact-link는 아래 전용
             # PDF 경로만 허용한다.
             return
+        root_binding = state.bound_hosts.get(root_host)
+        strict_root_proof = (
+            parse_verified_dart_filing_official_web_binding(
+                root_binding.identity_binding
+            )
+            if root_binding is not None
+            else None
+        )
+        if strict_root_proof is not None:
+            derived_binding = build_verified_dart_filing_subdomain_binding(
+                root_identity_binding=root_binding.identity_binding,
+                source_url=item.url,
+                scope_sha256=candidate_origin.scope_digest,
+            )
+            if not derived_binding:
+                # strict root의 접수·첨부·이중신원 proof를 자손 URL에 정확히
+                # 재결속할 수 없으면 설명 문자열로 고신뢰를 가장하지 않는다.
+                return
+            binding = BoundHost(
+                host=binding.host,
+                identity_binding=derived_binding,
+                is_high_confidence=True,
+            )
+        elif root_binding is not None and not root_binding.is_high_confidence:
+            # 법인명+등록번호로 확인한 교차 도메인은 OPTIONAL 보조 경로다.
+            # 그 하위호스트가 같은 eTLD+1이라는 이유만으로 다시 REQUIRED로
+            # 강해지면 보조 채용/제품 host 장애가 전체 조사를 막게 된다.
+            binding = BoundHost(
+                host=binding.host,
+                identity_binding=(
+                    f"{root_binding.identity_binding}; "
+                    f"같은 등록 도메인의 하위 도메인({host})"
+                ),
+                is_high_confidence=False,
+            )
         state.bound_hosts[host] = binding
         state.bound_origins[host] = candidate_origin
         origin = candidate_origin
@@ -491,13 +1383,34 @@ def _visit_page(
 
     page_state, reason_code = classify_general_outcome(response, error)
     requirement = REQUIREMENT_REQUIRED if binding.is_high_confidence else REQUIREMENT_OPTIONAL
-    source_kind = _source_kind_for(item.url)
-    slot_ids = slot_ids_for_url(item.url)
+    # 성공 응답은 요청 주소가 아니라 redirect 뒤 실제 문서 주소 하나로
+    # 종류·슬롯을 함께 판정한다. 오류에는 effective URL이 없으므로 그때만
+    # 요청 주소를 진단용으로 쓴다.
+    classification_url = (
+        response.effective_url
+        if page_state == ATTEMPT_STATE_OK and response is not None
+        else item.url
+    )
+    page_classification = classify_official_page_url(classification_url)
+    source_kind = (
+        page_classification.source_kind
+        if binding.is_high_confidence
+        else WIDE_SOURCE_KIND_IDENTITY_VERIFIED_WEB_PAGE
+    )
+    slot_ids = page_classification.slot_ids
     response_bytes = len((response.text if response else "").encode("utf-8", errors="ignore"))
     state.total_bytes += response_bytes
 
     documents_seen = 0
     if page_state == ATTEMPT_STATE_OK and response is not None:
+        if (
+            binding.is_high_confidence
+            and origin.allows_content_url(response.effective_url)
+            and host_policy.can_fetch(response.effective_url)
+        ):
+            state.official_link_source_urls.add(
+                _scoped_canonical_url(response.effective_url, origin)
+            )
         document = _build_web_document(
             state,
             response=response,
@@ -522,6 +1435,21 @@ def _visit_page(
                         continue
                     canonical_link = _scoped_canonical_url(link, origin)
                 else:
+                    # 같은 등록 도메인이 아닌 exact 링크는 일반 queue에 넣어
+                    # 나중에 조용히 버리지 않는다. 다만 현재 문서 자체가 DART
+                    # root 계열 고신뢰 문서일 때만 «검증 전 후보»로 기록한다.
+                    # 실제 호출·승격은 별도 단계에서 법인명+등록번호를 모두
+                    # 확인한 뒤에만 일어난다. OPTIONAL로 검증돼 들어온 외부
+                    # 도메인이 다시 다른 도메인을 연쇄 추천할 수는 없다.
+                    if (
+                        bind_registered_subdomain(root_host, link_host) is None
+                        and binding.is_high_confidence
+                    ):
+                        state.add_cross_domain_candidate(
+                            url=link,
+                            source_page_url=response.effective_url,
+                        )
+                        continue
                     canonical_link = canonicalize_url(link)
                 if canonical_link in seen_canonical:
                     continue
@@ -582,6 +1510,13 @@ def _build_web_document(
     canonical = _scoped_canonical_url(response.effective_url, origin)
     host = (urllib.parse.urlsplit(canonical).hostname or "").casefold()
     document_id = _wide_document_id(canonical, origin)
+    (
+        attestation_source_id,
+        attestation_evidence,
+        redirect_verification,
+        redirect_from_host,
+        redirect_to_host,
+    ) = _profile_attestation_for_url(state, canonical)
     return WideDocumentIdentity(
         company_id=state.company_id,
         document_id=document_id,
@@ -592,15 +1527,26 @@ def _build_web_document(
         published_on="",
         collected_at=state.collected_at,
         content_sha256=content_sha256,
-        identity_binding=(
-            f"{binding.identity_binding}; scope_sha256={origin.scope_digest}"
+        identity_binding=identity_binding_with_scope(
+            binding.identity_binding,
+            origin.scope_digest,
         ),
         usable_ranges=ranges,
         collector_version=WIDE_COLLECTOR_VERSION,
         parser_version=WIDE_PARSER_VERSION,
         requirement=requirement,
-        #: 결속 확인된 공식 웹 문서 «후보» 등급. 최종 확정은 장별 근거 생산부가 한다.
-        source_tier=SOURCE_TIER_1_OFFICIAL,
+        # DART hm_url 또는 canonical 공시 proof와 실제 이중 신원을 모두
+        # 확인한 root는 TIER1이다. 그 밖의 교차 도메인은 TIER3에 머문다.
+        source_tier=(
+            SOURCE_TIER_1_OFFICIAL
+            if binding.is_high_confidence
+            else SOURCE_TIER_3_TRUSTED
+        ),
+        domain_attestation_source_id=attestation_source_id,
+        domain_attestation_evidence=attestation_evidence,
+        domain_redirect_verification=redirect_verification,
+        domain_redirect_from_host=redirect_from_host,
+        domain_redirect_to_host=redirect_to_host,
     )
 
 
@@ -792,6 +1738,7 @@ def _run_ir_pdf_phase(
             grouped[doc_key].append(fragment)
 
         documents_added = 0
+        writer_ineligibility_reasons: set[str] = set()
         for doc_key in order:
             if total_ir_documents >= WIDE_MAX_IR_DOCUMENTS:
                 break
@@ -806,6 +1753,9 @@ def _run_ir_pdf_phase(
             state.documents.append(document)
             total_ir_documents += 1
             documents_added += 1
+            reason = formal_document_writer_ineligibility_reason(document)
+            if reason:
+                writer_ineligibility_reasons.add(reason)
 
         state_map = {"ok": ATTEMPT_STATE_OK, "none": ATTEMPT_STATE_MISSING, "failed": ATTEMPT_STATE_FAILED}
         reason_map = {"ok": "ir_pdf_ok", "none": "ir_pdf_none", "failed": "ir_pdf_failed"}
@@ -818,13 +1768,20 @@ def _run_ir_pdf_phase(
         # attempt 하나가 REQUIRED+광역으로 나가면, 다른 소스가 채운 근거
         # 까지 UNKNOWN으로 끌어내려 최종 게이트가 STOP_TRANSIENT_FAILURE로
         # 떨어졌다 — 이 상수(_BROAD_SLOT_REQUIREMENT)가 그걸 막는다.
+        attempt_reason = reason_map.get(result.state, "ir_pdf_failed")
+        if (
+            result.state == "ok"
+            and "official_ir_writer_metadata_incomplete"
+            in writer_ineligibility_reasons
+        ):
+            attempt_reason = "official_ir_writer_metadata_incomplete"
         state.add_attempt(
             kind="ir",
             source_kind=WIDE_SOURCE_KIND_IR_PDF,
             requirement=_BROAD_SLOT_REQUIREMENT,
             state=ir_attempt_state,
             slot_ids=(),
-            reason_code=reason_map.get(result.state, "ir_pdf_failed"),
+            reason_code=attempt_reason,
             elapsed_ms=elapsed_ms,
             bytes_downloaded=result.downloaded_pdf_bytes,
             documents_seen=documents_added,
@@ -952,7 +1909,18 @@ def _build_ir_document(
     document_id = _wide_document_id(canonical, origin)
     title = str(first.get("문서명") or "").strip() or origin.host
     published_on = str(first.get("문서일") or "").strip()
-    return WideDocumentIdentity(
+    (
+        attestation_source_id,
+        attestation_evidence,
+        redirect_verification,
+        redirect_from_host,
+        redirect_to_host,
+    ) = _profile_attestation_for_url(state, canonical)
+    scoped_identity_binding = identity_binding_with_scope(
+        binding.identity_binding,
+        origin.scope_digest,
+    )
+    document = WideDocumentIdentity(
         company_id=state.company_id,
         document_id=document_id,
         canonical_url=canonical,
@@ -963,10 +1931,10 @@ def _build_ir_document(
         collected_at=state.collected_at,
         content_sha256=content_sha256,
         identity_binding=(
-            f"{binding.identity_binding}; scope_sha256={origin.scope_digest}; "
+            f"{scoped_identity_binding}; "
             f"공식 HTML exact-link 외부 IR 첨부: {attachment_url}"
             if is_external_attachment
-            else f"{binding.identity_binding}; scope_sha256={origin.scope_digest}"
+            else scoped_identity_binding
         ),
         usable_ranges=ranges,
         collector_version=WIDE_COLLECTOR_VERSION,
@@ -980,7 +1948,40 @@ def _build_ir_document(
         source_tier=(
             SOURCE_TIER_3_TRUSTED if is_external_attachment else SOURCE_TIER_1_OFFICIAL
         ),
+        domain_attestation_source_id=attestation_source_id,
+        domain_attestation_evidence=attestation_evidence,
+        reporting_period=str(first.get(IR_REPORTING_PERIOD_FIELD) or "").strip(),
+        attachment_url=attachment_url,
+        ir_metadata_verification=str(
+            first.get(IR_METADATA_VERIFICATION_FIELD) or ""
+        ).strip(),
+        domain_redirect_verification=(
+            str(first.get(IR_DART_WWW_REDIRECT_FIELD) or "").strip()
+            or redirect_verification
+        ),
+        domain_redirect_from_host=(
+            str(first.get(IR_DART_WWW_REDIRECT_FROM_FIELD) or "").strip()
+            or redirect_from_host
+        ),
+        domain_redirect_to_host=(
+            str(first.get(IR_DART_WWW_REDIRECT_TO_FIELD) or "").strip()
+            or redirect_to_host
+        ),
     )
+    # 같은 공식 host의 PDF여도 anchor에서 발행일·보고기간을 exact로 확인하지
+    # 못했다면 Writer로 보내지 않는다. 수집 문서 자체는 OPTIONAL provenance로
+    # 남겨 자료 부족과 내부 배선 오류를 구분할 수 있게 한다.
+    if (
+        not is_external_attachment
+        and formal_document_writer_ineligibility_reason(document)
+        == "official_ir_writer_metadata_incomplete"
+    ):
+        document = replace(
+            document,
+            requirement=REQUIREMENT_OPTIONAL,
+            source_tier=SOURCE_TIER_3_TRUSTED,
+        )
+    return document
 
 
 def _priority_key(url: str) -> tuple[int, str]:
@@ -989,10 +1990,3 @@ def _priority_key(url: str) -> tuple[int, str]:
         if keyword in lowered:
             return (rank, url)
     return (len(_PRIORITY_KEYWORDS), url)
-
-
-def _source_kind_for(url: str) -> str:
-    lowered = urllib.parse.unquote(url).lower()
-    if any(marker in lowered for marker in _RECRUIT_MARKERS):
-        return WIDE_SOURCE_KIND_RECRUIT_PAGE
-    return WIDE_SOURCE_KIND_WEB_PAGE

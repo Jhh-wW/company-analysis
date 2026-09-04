@@ -132,18 +132,14 @@ def authorize_report_access(
             # 있다. 일반 손님에게 허용하는 새 locator 모양은 아래에서 32hex로
             # 엄격히 좁힌다. 단 공개 채널의 휴지통·차단은 관리자도 우회하지 않는다.
             if session is not None and session.is_admin:
-                if dashboard_store.report_is_trashed(
-                    conn, clean
-                ) or dashboard_store.report_is_blocked(conn, clean):
+                if dashboard_store.report_access_is_revoked(conn, clean):
                     return AccessDecision(False, None, "resource_revoked")
                 return AccessDecision(True, AccessRole.ADMIN, "current_admin")
 
             if _LOCATOR_RE.fullmatch(clean) is None:
                 return AccessDecision(False, None, "invalid_locator")
 
-            if dashboard_store.report_is_trashed(
-                conn, clean
-            ) or dashboard_store.report_is_blocked(conn, clean):
+            if dashboard_store.report_access_is_revoked(conn, clean):
                 return AccessDecision(False, None, "resource_revoked")
 
             legacy = store.legacy_access_for(conn, locator=clean, now=checked_at)

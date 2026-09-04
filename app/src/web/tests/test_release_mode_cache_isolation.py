@@ -43,7 +43,10 @@ from src.features.pipeline.tests.test_real_cache import FakeEngine
 from src.features.pipeline.tests.test_report_company_id_release_mode import (
     _보고서를_만든다,
 )
+from src.web.tests.test_release_authority_full_wiring import _build_full_report
 from src.features.report_delivery import artifact as delivery_artifact
+from src.features.report_delivery import authority as authority_store
+from src.features.report_delivery import singleflight
 from src.features.report_delivery import store as delivery_store
 from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
 from src.features.report_delivery.cache_identity import CacheLookupKey
@@ -58,6 +61,7 @@ from src.features.storage import reports as report_store
 from src.shared import engine_build_identity as build_identity_contract
 from src.shared import generation_coordination
 from src.shared.report_evidence.constants import ReleaseMode
+from src.shared.report_generation.models import assert_canonical_producer_evidence
 from src.shared.report_source_identity import ReportSourceIdentity
 from src.web import generation_singleflight, paid_runtime, report_delivery_adapter
 
@@ -103,7 +107,7 @@ def _저장소와_승인원장을_연다(monkeypatch: pytest.MonkeyPatch, tmp_pa
     monkeypatch.setattr(
         pdf_release_store,
         "load_automatic_release_record",
-        lambda *_args, **_kwargs: object(),
+        lambda *_args, **_kwargs: SimpleNamespace(record_sha256="d" * 64),
     )
 
 
@@ -133,6 +137,15 @@ def _진짜_산출물(monkeypatch: pytest.MonkeyPatch, release_mode: ReleaseMode
 
     FULL 보고서는 생산 증거가 실려야 저장·복원이 되므로 손으로 지어낼 수 없다.
     """
+    if release_mode is ReleaseMode.FULL:
+        # 현재 FULL 공개 안전계약까지 실제로 통과하는 공용 고정 생산기를 쓴다.
+        # 옛 `_보고서를_만든다` fixture는 문장별 다중 출처의 대표 문서 신원을
+        # 직접 조립해 현재 생산 경계를 대신 구현하므로 FULL 대조군으로 쓰지 않는다.
+        return _build_full_report(
+            company_id=_CORP,
+            build_identity_sha256=_BUILD_IDENTITY.epoch_digest,
+            evidence_generation_sha256=_source_digest(),
+        )
     fake = FakeEngine()
     callbacks = ProviderAttemptCallbacks(
         lambda _provider, _operation, _reserved: object(),
@@ -141,7 +154,15 @@ def _진짜_산출물(monkeypatch: pytest.MonkeyPatch, release_mode: ReleaseMode
         lambda _token, _observation: None,
     )
     with provider_budget.activate(100_000.0), attempt_context.activate(callbacks):
-        return _보고서를_만든다(fake, monkeypatch, release_mode=release_mode)
+        return _보고서를_만든다(
+            fake,
+            monkeypatch,
+            release_mode=release_mode,
+            # FULL producer packet은 이 저장본을 조회할 cache/lease와 같은
+            # 출처 세대를 가져야 한다. 서로 다른 상수를 손으로 넣으면
+            # 「정상 재사용」 대조군이 실제로는 위조된 저장본이 된다.
+            source_identity_digest=_source_digest(),
+        )
 
 
 def _저장본을_캐시에_넣는다(
@@ -150,6 +171,9 @@ def _저장본을_캐시에_넣는다(
     namespace,
     bucket: str,
     cache_namespace=None,
+    install_full_authority: bool = True,
+    full_authority_producer_sha256: str | None = None,
+    bind_cache: bool = True,
 ) -> tuple[ContentSnapshot, str]:
     """보고서를 불변 content·PDF로 저장하고 캐시 열쇠에 결속한다.
 
@@ -230,13 +254,42 @@ def _저장본을_캐시에_넣는다(
             delivery_id=delivery.delivery_id,
             artifact_id=artifact.artifact_id,
         )
-        delivery_store.bind_cache_entry(
-            conn,
-            key=_cache_key(key_namespace, bucket),
-            content=content,
-            artifact_id=artifact.artifact_id,
-            cached_at=dt.datetime.now(dt.timezone.utc),
-        )
+        if report.release_mode == ReleaseMode.FULL.value and install_full_authority:
+            evidence = report.generation_evidence
+            assert evidence is not None
+            authority_store.save_release_authority(
+                conn,
+                authority_store.ReleaseAuthority.issue_owner(
+                    public_id=delivery.public_id,
+                    delivery_id=delivery.delivery_id,
+                    company_id=evidence.company_id,
+                    billing_bucket_id=delivery.billing_bucket_id,
+                    content_snapshot_id=content.content_id,
+                    artifact_id=artifact.artifact_id,
+                    report_payload_sha256=content.payload_sha256,
+                    producer_evidence_sha256=(
+                        full_authority_producer_sha256
+                        or assert_canonical_producer_evidence(evidence)
+                    ),
+                    assessment_sha256=evidence.assessment_sha256,
+                    public_content_sha256=evidence.public_projection_sha256,
+                    public_manifest_sha256=evidence.public_manifest_sha256,
+                    evidence_generation_sha256=evidence.evidence_generation_sha256,
+                    build_identity_sha256=evidence.build_identity_sha256,
+                    automatic_release_sha256="d" * 64,
+                    charge_run_id="charge:" + delivery.public_id,
+                    charge_decision_sha256="e" * 64,
+                    issued_at=_CAPTURED,
+                ),
+            )
+        if bind_cache:
+            delivery_store.bind_cache_entry(
+                conn,
+                key=_cache_key(key_namespace, bucket),
+                content=content,
+                artifact_id=artifact.artifact_id,
+                cached_at=dt.datetime.now(dt.timezone.utc),
+            )
     return content, artifact.artifact_id
 
 
@@ -273,6 +326,44 @@ def _session(run_id: str, bucket: str) -> generation_singleflight.GenerationSess
         on_paid_phase=lambda _ticket: None,
         build_identity=_BUILD_IDENTITY,
     )
+
+
+def _완료_fanout을_심는다(
+    *,
+    bucket: str,
+    namespace,
+    content_snapshot_id: str,
+    artifact_id: str,
+) -> int:
+    """정상 owner가 남긴 것처럼 보이는 아직 유효한 COMPLETED 행을 만든다."""
+
+    key = singleflight.LeaseKey(
+        billing_bucket_id=bucket,
+        corp_id=_CORP,
+        cache_namespace_id=namespace.namespace_id,
+        source_identity_digest=_source_digest(),
+        engine_epoch_digest=_BUILD_IDENTITY.epoch_digest,
+    )
+    completed_at = generation_singleflight.clock.now_kst()
+    with storage_db.connect() as conn:
+        acquired = singleflight.acquire(
+            conn,
+            key=key,
+            owner_id="poisoned-completed-owner",
+            now=completed_at,
+            lease_ttl=dt.timedelta(minutes=15),
+        )
+        assert acquired.disposition is singleflight.AcquireDisposition.ACQUIRED
+        assert acquired.handle is not None
+        assert singleflight.complete(
+            conn,
+            handle=acquired.handle,
+            content_snapshot_id=content_snapshot_id,
+            artifact_id=artifact_id,
+            now=completed_at,
+            result_fanout_ttl=dt.timedelta(minutes=2),
+        )
+        return acquired.handle.fencing_token
 
 
 def _유료단계_관문만_확인한다(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -479,6 +570,275 @@ def test_두번째_FULL_요청은_FULL_저장본을_재사용한다(
     assert 재사용.artifact_id == artifact_id
     assert 재사용.report.release_mode == ReleaseMode.FULL.value
     assert not session.owns_generation, "재사용이면 owner가 되면 안 된다"
+
+
+def test_FULL_보고서의_생성근거세대가_cache출처와_다르면_격리하고_새로만든다(
+    monkeypatch: pytest.MonkeyPatch, bucket: str
+) -> None:
+    """본문 모드만 FULL인 위조 저장본을 정상 cache hit로 내보내지 않는다."""
+
+    wrong_generation = "d" * 64
+    assert wrong_generation != _source_digest()
+    mismatched_report = _build_full_report(
+        company_id=_CORP,
+        build_identity_sha256=_BUILD_IDENTITY.epoch_digest,
+        evidence_generation_sha256=wrong_generation,
+    )
+    namespace = _namespace(ReleaseMode.FULL)
+    _저장본을_캐시에_넣는다(
+        mismatched_report,
+        namespace=namespace,
+        bucket=bucket,
+    )
+    monkeypatch.setenv(real.REPORT_RELEASE_MODE_ENV_NAME, ReleaseMode.FULL.value)
+    session = _session("full-evidence-source-mismatch", bucket)
+
+    reused = session.coordinate(_CORP, namespace, _source_digest())
+
+    assert reused is None
+    assert session.owns_generation
+    assert "generation_evidence_source_mismatch" in _무효화_사유()
+    session.abandon()
+
+
+@pytest.mark.parametrize(
+    ("authority_state", "expected_reason"),
+    (
+        ("missing", "owner_authority_missing"),
+        ("corrupt", "owner_authority_corrupt"),
+        ("mismatch", "owner_authority_mismatch"),
+        ("approval_mismatch", "owner_authority_mismatch"),
+    ),
+)
+def test_FULL_cache의_OWNER권위가_없거나_손상되면_격리하고_정상miss로_내려간다(
+    authority_state: str,
+    expected_reason: str,
+    monkeypatch: pytest.MonkeyPatch,
+    bucket: str,
+) -> None:
+    report = _진짜_산출물(monkeypatch, ReleaseMode.FULL)
+    evidence = report.generation_evidence
+    assert evidence is not None
+    mismatched_producer = "f" * 64
+    assert mismatched_producer != assert_canonical_producer_evidence(evidence)
+    namespace = _namespace(ReleaseMode.FULL)
+    _저장본을_캐시에_넣는다(
+        report,
+        namespace=namespace,
+        bucket=bucket,
+        install_full_authority=authority_state != "missing",
+        full_authority_producer_sha256=(
+            mismatched_producer if authority_state == "mismatch" else None
+        ),
+    )
+    if authority_state == "corrupt":
+        with storage_db.connect() as conn:
+            conn.execute("DROP TRIGGER report_release_authorities_no_update")
+            conn.execute(
+                f"UPDATE {authority_store.TABLE_RELEASE_AUTHORITIES} "
+                "SET company_id = '99999999'"
+            )
+    if authority_state == "approval_mismatch":
+        monkeypatch.setattr(
+            pdf_release_store,
+            "load_automatic_release_record",
+            lambda *_args, **_kwargs: SimpleNamespace(record_sha256="a" * 64),
+        )
+    monkeypatch.setenv(real.REPORT_RELEASE_MODE_ENV_NAME, ReleaseMode.FULL.value)
+    session = _session(f"full-cache-authority-{authority_state}", bucket)
+
+    reused = session.coordinate(_CORP, namespace, _source_digest())
+
+    assert reused is None
+    assert session.owns_generation
+    assert expected_reason in _무효화_사유()
+    session.abandon()
+
+
+@pytest.mark.parametrize(
+    ("authority_state", "expected_reason"),
+    (
+        ("missing", "owner_authority_missing"),
+        ("corrupt", "owner_authority_corrupt"),
+        ("mismatch", "owner_authority_mismatch"),
+        ("approval_mismatch", "owner_authority_mismatch"),
+    ),
+)
+def test_FULL_COMPLETED_fanout의_OWNER권위오염은_같은요청에서_새owner로_takeover한다(
+    authority_state: str,
+    expected_reason: str,
+    monkeypatch: pytest.MonkeyPatch,
+    bucket: str,
+) -> None:
+    """독성 COMPLETED를 사용자 실패로 올리지 않고 즉시 격리·재생성한다."""
+
+    report = _진짜_산출물(monkeypatch, ReleaseMode.FULL)
+    evidence = report.generation_evidence
+    assert evidence is not None
+    mismatched_producer = "f" * 64
+    assert mismatched_producer != assert_canonical_producer_evidence(evidence)
+    namespace = _namespace(ReleaseMode.FULL)
+    content, artifact_id = _저장본을_캐시에_넣는다(
+        report,
+        namespace=namespace,
+        bucket=bucket,
+        install_full_authority=authority_state != "missing",
+        full_authority_producer_sha256=(
+            mismatched_producer if authority_state == "mismatch" else None
+        ),
+        bind_cache=False,
+    )
+    if authority_state == "corrupt":
+        with storage_db.connect() as conn:
+            conn.execute("DROP TRIGGER report_release_authorities_no_update")
+            conn.execute(
+                f"UPDATE {authority_store.TABLE_RELEASE_AUTHORITIES} "
+                "SET company_id = '99999999'"
+            )
+    if authority_state == "approval_mismatch":
+        monkeypatch.setattr(
+            pdf_release_store,
+            "load_automatic_release_record",
+            lambda *_args, **_kwargs: SimpleNamespace(record_sha256="a" * 64),
+        )
+    old_fencing_token = _완료_fanout을_심는다(
+        bucket=bucket,
+        namespace=namespace,
+        content_snapshot_id=content.content_id,
+        artifact_id=artifact_id,
+    )
+    invalidation_calls: list[tuple[str, str, str]] = []
+    original_invalidate = delivery_store.invalidate_cache_entry
+
+    def record_invalidation(conn, *, key, expected_content_snapshot_id,
+                            expected_artifact_id, reason_code, invalidated_at):
+        invalidation_calls.append(
+            (expected_content_snapshot_id, expected_artifact_id, reason_code)
+        )
+        return original_invalidate(
+            conn,
+            key=key,
+            expected_content_snapshot_id=expected_content_snapshot_id,
+            expected_artifact_id=expected_artifact_id,
+            reason_code=reason_code,
+            invalidated_at=invalidated_at,
+        )
+
+    monkeypatch.setattr(
+        delivery_store,
+        "invalidate_cache_entry",
+        record_invalidation,
+    )
+    monkeypatch.setenv(real.REPORT_RELEASE_MODE_ENV_NAME, ReleaseMode.FULL.value)
+    session = _session(f"full-completed-authority-{authority_state}", bucket)
+
+    reused = session.coordinate(_CORP, namespace, _source_digest())
+
+    assert reused is None
+    assert session.owns_generation
+    assert invalidation_calls == [
+        (content.content_id, artifact_id, expected_reason)
+    ]
+    with storage_db.connect() as conn:
+        row = conn.execute(
+            f"SELECT state, owner_id, fencing_token "
+            f"FROM {singleflight.TABLE_SINGLEFLIGHT_LEASES}"
+        ).fetchone()
+    assert row is not None
+    assert row["state"] == singleflight.LeaseState.ACTIVE.value
+    assert row["owner_id"] == session.run_id
+    assert int(row["fencing_token"]) > old_fencing_token
+    session.abandon()
+
+
+def test_FULL_COMPLETED_fanout의_근거세대오염도_cache와_같은사유로_격리하고_takeover한다(
+    monkeypatch: pytest.MonkeyPatch,
+    bucket: str,
+) -> None:
+    """끝난 fan-out의 producer/source mismatch는 사용자 실패로 굳히지 않는다.
+
+    장기 cache의 같은 손상은 ``generation_evidence_source_mismatch``로 격리한
+    뒤 정상 miss가 된다. COMPLETED fan-out도 이미 provider 실행이 끝난 terminal
+    행이므로 같은 사유로 만료하고 더 높은 fencing token의 새 owner를 얻는 것이
+    안전하다. 반면 DB/lock/I/O 오류는 이 시험의 범위가 아니며 기존 fail-closed
+    경로를 유지한다.
+    """
+
+    wrong_generation = "d" * 64
+    assert wrong_generation != _source_digest()
+    report = _build_full_report(
+        company_id=_CORP,
+        build_identity_sha256=_BUILD_IDENTITY.epoch_digest,
+        evidence_generation_sha256=wrong_generation,
+    )
+    namespace = _namespace(ReleaseMode.FULL)
+    content, artifact_id = _저장본을_캐시에_넣는다(
+        report,
+        namespace=namespace,
+        bucket=bucket,
+        # cache를 묶으면 앞선 cache 조회가 먼저 같은 손상을 격리한다. 여기서는
+        # COMPLETED fan-out 자체의 복구 경계를 직접 검증한다.
+        bind_cache=False,
+    )
+    old_fencing_token = _완료_fanout을_심는다(
+        bucket=bucket,
+        namespace=namespace,
+        content_snapshot_id=content.content_id,
+        artifact_id=artifact_id,
+    )
+    invalidation_calls: list[tuple[str, str, str]] = []
+    original_invalidate = delivery_store.invalidate_cache_entry
+
+    def record_invalidation(
+        conn,
+        *,
+        key,
+        expected_content_snapshot_id,
+        expected_artifact_id,
+        reason_code,
+        invalidated_at,
+    ):
+        invalidation_calls.append(
+            (expected_content_snapshot_id, expected_artifact_id, reason_code)
+        )
+        return original_invalidate(
+            conn,
+            key=key,
+            expected_content_snapshot_id=expected_content_snapshot_id,
+            expected_artifact_id=expected_artifact_id,
+            reason_code=reason_code,
+            invalidated_at=invalidated_at,
+        )
+
+    monkeypatch.setattr(
+        delivery_store,
+        "invalidate_cache_entry",
+        record_invalidation,
+    )
+    monkeypatch.setenv(real.REPORT_RELEASE_MODE_ENV_NAME, ReleaseMode.FULL.value)
+    session = _session("full-completed-generation-mismatch", bucket)
+
+    reused = session.coordinate(_CORP, namespace, _source_digest())
+
+    assert reused is None
+    assert session.owns_generation
+    assert invalidation_calls == [
+        (
+            content.content_id,
+            artifact_id,
+            "generation_evidence_source_mismatch",
+        )
+    ]
+    with storage_db.connect() as conn:
+        row = conn.execute(
+            f"SELECT state, owner_id, fencing_token "
+            f"FROM {singleflight.TABLE_SINGLEFLIGHT_LEASES}"
+        ).fetchone()
+    assert row is not None
+    assert row["state"] == singleflight.LeaseState.ACTIVE.value
+    assert row["owner_id"] == session.run_id
+    assert int(row["fencing_token"]) > old_fencing_token
+    session.abandon()
 
 
 def test_SHADOW_요청_경로는_바뀌지_않는다(

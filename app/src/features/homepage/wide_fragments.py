@@ -5,8 +5,8 @@
   라는 이유만으로 문화 사례가 있다고 주장하지 않는다.
 ★ URL 유형을 못 알아낸 REQUIRED 공식 문서(특히 ``/`` 메인)는 본문을 전체
   슬롯 어휘로 검사한다. 경로가 아니라 본문이 무엇을 증명하는지로 분류한다.
-★ 외부 exact-link IR 첨부는 provenance 문서로만 보존하며 필수 슬롯 조각을
-  만들지 않는다.
+★ 외부 exact-link IR 첨부와 신원만 맞은 교차 도메인 페이지는 provenance
+  문서로만 보존하며 Writer 슬롯 조각을 만들지 않는다.
 ★ ``slot_id``는 ``WideFragment``가 강제하는 허용 어휘(정본은
   `app/src/shared/report_evidence/policy.py`)만 나온다. comparison_*·
   limitation·historical_performance는 이 어휘에 없으므로 이 모듈에서
@@ -19,14 +19,11 @@
   조회 결과가 섞여도 조용히 통과할 수 있어, 그 가정 자체를 없앴다.
   ``build_fragments``는 이 명시 인자를 **공격 시험 전용**으로 유지한다
   — 「호출자가 일부러 다른 값을 넘기는 정당한 운영 시나리오」는 없다.
-  향후 운영 결합부도 아래
-  ``build_fragments_for_collection``을 써야 한다 — 수집 결과 자신에서
+  운영 결합부도 아래 ``build_fragments_for_collection``을 쓴다 — 수집 결과 자신에서
   company_id를 한 번만 꺼내 모든 문서에 그대로 실으므로, 호출 지점에서
   값을 잘못 넘길 방법이 구조적으로 없다(``build_fragments``를 직접
-  호출하며 손으로 company_id를 옮겨 적지 않는다). 현재 실서비스
-  ``features.pipeline.real``에는 이 넓은 수집 경로가 아직 연결되지 않았다
-  — 공시 수집만 ``TYPED_DART_COLLECTOR`` kill switch
-  (``real._typed_dart_collection_enabled``) 뒤에서 배선돼 있다.
+  호출하며 손으로 company_id를 옮겨 적지 않는다). 실서비스 FULL 조립부도
+  ``web.official_evidence_adapter``에서 이 함수만 호출한다.
 """
 
 from __future__ import annotations
@@ -41,12 +38,18 @@ from src.features.homepage.constants import (
     WIDE_REQUIRED_SLOT_IDS,
     WIDE_SLOT_BODY_KEYWORDS,
     WIDE_SOURCE_KIND_IR_PDF,
+    WIDE_SOURCE_KIND_RECRUIT_PAGE,
+    WIDE_SOURCE_KIND_WEB_PAGE,
 )
-from src.features.homepage.wide_domain import slot_ids_for_url
+from src.features.homepage.wide_domain import classify_official_page_url
 from src.features.homepage.wide_types import (
     WideCollectionResult,
     WideDocumentIdentity,
     WideFragment,
+)
+from src.shared.report_evidence.source_kind_policy import (
+    document_slots_for_formal_source_kind,
+    formal_document_is_writer_eligible,
 )
 
 #: 구간 본문에 후보 슬롯의 직접 신호 키워드가 있을 때의 점수.
@@ -77,13 +80,31 @@ def build_fragments(document: WideDocumentIdentity, *, company_id: str) -> tuple
     Returns:
         본문 신호가 확인된 슬롯의 ``WideFragment`` 튜플.
     """
-    page_slots = slot_ids_for_url(document.canonical_url)
-    # 공식 HTML이 exact-link로 가리킨 외부 첨부는 낮은 신뢰 provenance만
-    # 보존한다. URL·본문이 그럴듯해도 필수 슬롯 조각으로 승격하지 않는다.
-    if document.source_kind == WIDE_SOURCE_KIND_IR_PDF and document.requirement == "OPTIONAL":
+    page_classification = classify_official_page_url(document.canonical_url)
+    page_slots = page_classification.slot_ids
+    if (
+        document.source_kind
+        in {WIDE_SOURCE_KIND_WEB_PAGE, WIDE_SOURCE_KIND_RECRUIT_PAGE}
+        and document.source_kind != page_classification.source_kind
+    ):
+        return ()
+    # 수집된 formal 문서와 Writer 자격은 다르다. 종류별 신뢰·필수
+    # provenance 정본을 통과하지 못한 문서는 감사 차선에만 남긴다.
+    if not formal_document_is_writer_eligible(document):
         return ()
 
-    candidate_slots = page_slots or WIDE_REQUIRED_SLOT_IDS
+    # IR PDF의 URL(`/ir/...pdf`)은 문서 내용의 의미 범위를 말해 주지 않는다.
+    # HTML 페이지에만 URL 힌트를 쓰고 IR은 source_kind 정본의 광역 슬롯에서
+    # 실제 본문 신호를 찾는다. 그렇지 않으면 고객·매출 본문이 있어도 URL의
+    # `ir` 글자 때문에 과거/미래 슬롯으로만 축소되어 전부 사라진다.
+    uses_page_slot_hint = document.source_kind != WIDE_SOURCE_KIND_IR_PDF
+    if uses_page_slot_hint:
+        candidate_slots = page_slots or WIDE_REQUIRED_SLOT_IDS
+    else:
+        owned_slots = document_slots_for_formal_source_kind(document.source_kind)
+        candidate_slots = tuple(
+            slot_id for slot_id in WIDE_REQUIRED_SLOT_IDS if slot_id in owned_slots
+        )
     challenge_evidence = classify_challenge_evidence(document.usable_ranges)
 
     fragments: list[WideFragment] = []
@@ -98,7 +119,7 @@ def build_fragments(document: WideDocumentIdentity, *, company_id: str) -> tuple
             continue
         score = _SCORE_BODY_KEYWORD_MATCH
         reason_codes = (
-            ((_REASON_PAGE_TYPE_SIGNAL,) if page_slots else ())
+            ((_REASON_PAGE_TYPE_SIGNAL,) if page_slots and uses_page_slot_hint else ())
             + (_REASON_BODY_KEYWORD_MATCH,)
         )
 
@@ -130,8 +151,8 @@ def build_fragments(document: WideDocumentIdentity, *, company_id: str) -> tuple
 def build_fragments_for_collection(result: WideCollectionResult) -> tuple[WideFragment, ...]:
     """수집 결과의 모든 문서에서 fragment를 한 번에 만드는 얇은 편의 함수.
 
-    ★ 계약 generation=8 마지막 고리 — 향후 운영 결합부는
-      이 함수를 써야 한다(``build_fragments``에 지역 거부를 추가하는 대신
+    ★ 계약 generation=8 마지막 고리 — 운영 결합부는
+      이 함수를 쓴다(``build_fragments``에 지역 거부를 추가하는 대신
       구조로 막는다). ``result.company_id``를 정본으로 모든 문서에 그대로
       싣는다 — **documents에서 역산하지 않는다.** documents에서 역산하면
       문서 생성부에 버그가 생겨 문서들이 일제히 엉뚱한 회사 값을 갖게 될
@@ -143,8 +164,7 @@ def build_fragments_for_collection(result: WideCollectionResult) -> tuple[WideFr
       시점에 ValueError로 걸린다) — 그래서 여기서는 다시 검증하지 않고
       곧바로 신뢰해 쓴다.
 
-      현재 이 함수의 호출은 시험에만 있으며 실서비스 배선은 아직 없다.
-      이를 운영 호출이라고 표현하지 않는다.
+      실서비스 FULL 조립부도 이 함수로 공식 웹 문서 전체를 변환한다.
 
     Args:
         result: ``collect_official_web_documents``가 돌려준 수집 결과.

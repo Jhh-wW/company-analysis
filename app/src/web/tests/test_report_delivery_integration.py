@@ -24,6 +24,7 @@ from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
 from src.features.cost_tracking import store as cost_store
 from src.features.export_pdf import automatic_release as automatic_release_module
 from src.features.export_pdf import release_store as pdf_release_store
+from src.features.export_notion.notion import NotionExportResult
 from src.features.pipeline.demo import DemoPipeline, available_companies
 from src.features.pipeline.port import (
     CompanyCard,
@@ -1321,6 +1322,18 @@ def test_새_delivery의_결과와_PDF_GET은_저장본만_반복해서_읽는�
     monkeypatch.setattr(reports_router, "_candidate_for_report", forbidden_renderer)
     monkeypatch.setattr(reports_router, "prepare_pdf_release", forbidden_renderer)
     monkeypatch.setattr(reports_router, "automatic_release_pdf", forbidden_renderer)
+    monkeypatch.setattr(job_runtime, "_load_saved_report", forbidden_renderer)
+    notion_reports = []
+
+    def capture_notion(target, *_args, **_kwargs):
+        notion_reports.append(target)
+        return NotionExportResult(
+            success=True,
+            page_id="stored-delivery-page",
+            page_url="https://notion.example/stored-delivery-page",
+        )
+
+    monkeypatch.setattr(reports_router, "send_report_to_notion", capture_notion)
     job_runtime._JOBS.clear()  # 재시작 뒤에도 public_id 조회만으로 읽어야 한다.
 
     db_path = storage_db.default_db_path()
@@ -1336,14 +1349,26 @@ def test_새_delivery의_결과와_PDF_GET은_저장본만_반복해서_읽는�
             f"/download/pdf/{report_id}", follow_redirects=False
         )
         after = _database_dump(db_path)
+        session_token = client.cookies.get(auth_constants.SESSION_COOKIE_NAME)
+        assert session_token
+        notion = client.post(
+            f"/notion/{report_id}",
+            data={"csrf_token": auth_logic.csrf_token_for_session(session_token)},
+            follow_redirects=False,
+        )
 
     assert first_result.status_code == second_result.status_code == 200
     assert first_pdf.status_code == second_pdf.status_code == 200
+    assert notion.status_code == 200
     assert first_pdf.content == second_pdf.content == approved_bytes
     assert first_pdf.headers["x-pdf-sha256"] == approved_sha256
     assert first_pdf.headers["x-pdf-artifact-id"] == persisted.artifact.artifact_id
     assert second_pdf.headers["x-pdf-artifact-id"] == persisted.artifact.artifact_id
     assert renderer_calls == []
+    assert len(notion_reports) == 1
+    assert report_store.report_to_json(notion_reports[0]) == report_store.report_to_json(
+        persisted.report
+    )
     assert after == before
 
 
@@ -2388,8 +2413,10 @@ def test_출고본문계약차단은_저장장애503으로_바뀌지않고_GET�
         after = _database_dump(db_path)
 
     assert result.status_code == pdf.status_code == 409
-    assert "현재 보고서 기준을 통과한 근거가 충분하지 않아" in result.text
-    assert "현재 보고서 기준을 통과한 근거가 충분하지 않아" in pdf.text
+    assert "안전 검사를 통과하지 못해 보고서를 내보내지 않았습니다" in result.text
+    assert "회사 자료 문제인지 시스템 문제인지 정확히 나눌 수 없습니다" in result.text
+    assert "안전 검사를 통과하지 못해 보고서를 내보내지 않았습니다" in pdf.text
+    assert "회사 자료 문제인지 시스템 문제인지 정확히 나눌 수 없습니다" in pdf.text
     assert validation_calls == []
     assert after == before
 

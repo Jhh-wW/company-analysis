@@ -53,6 +53,9 @@ from src.features.budget.constants import (
 )
 from src.features.business_candidate.logic import CandidateResolution
 from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
+from src.features.final_gate_diagnostic.presentation import (
+    guidance_for_final_gate_reason,
+)
 from src.features.observability import admin_audit
 from src.features.pipeline.demo import DemoPipeline, available_companies
 from src.features.pipeline.port import CompanyLookupResult, Outcome, RunResult, UserInput
@@ -157,6 +160,16 @@ def _ctx(request: Request, **kwargs) -> dict:
     if report is not None:
         kwargs["public_citations"] = visible_citations(
             getattr(report, "citations", ())
+        )
+    result = kwargs.get("result")
+    if (
+        result is not None
+        and getattr(result, "outcome", None) is Outcome.GATE_STOPPED
+    ):
+        # 자유 문장 message가 닫힌 최종 사유와 어긋나도 화면은 한 권위만
+        # 따른다. 오래된 빈 사유는 presentation이 보수적인 기타 안내로 닫는다.
+        kwargs["gate_guidance"] = guidance_for_final_gate_reason(
+            getattr(result, "final_gate_reason", "")
         )
     token = request.cookies.get(auth_constants.SESSION_COOKIE_NAME)
     session = auth_logic.get_session(

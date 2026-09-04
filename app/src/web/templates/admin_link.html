@@ -291,8 +291,10 @@
         <span class="muted">run/public ID<br>{{ run.run_id }}</span>
         {% if run.report_id and run_report_states.get(run.run_id) == "available" %}
           <br><a href="/admin/reports/{{ run.report_id }}">관리자 검수로 열기</a>
-        {% elif run.report_id %}
-          <br><strong>저장 보고서 없음</strong>
+        {% elif run.report_id and run_report_states.get(run.run_id) == "missing" %}
+          <br><strong>저장소에서 찾을 수 없음</strong>
+        {% elif run.report_id and run_report_states.get(run.run_id) == "unavailable" %}
+          <br><strong>자동출고가 끝나지 않아 아직 열 수 없음</strong>
         {% endif %}
         {% if run.release_sha256 %}
           <br><span class="muted">release {{ run.release_sha256 }}</span>

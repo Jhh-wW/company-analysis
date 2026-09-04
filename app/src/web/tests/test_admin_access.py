@@ -31,13 +31,16 @@ from src.features.pipeline.demo import DemoPipeline
 from src.features.pipeline.canonical_demo import (
     DEMO_COMPANY as CANONICAL_DEMO_COMPANY,
 )
+from src.features.pipeline.port import Outcome, UserInput
+from src.features.report_access.models import ReportAudience
 from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import store as share_store
 from src.features.sharelink.constants import KEY_HEX_CHARS
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
+from src.shared import engine_build_identity as build_identity_contract
 from src.web import deployment_mode, main
-from src.web import job_runtime, runtime
+from src.web import job_runtime, report_publication, runtime
 from src.web.routers import admin as admin_router
 from src.web.routers import reports as reports_router
 
@@ -631,6 +634,37 @@ def _보고서를_만든다(admin: TestClient) -> str:
         if admin.get(f"/api/progress/{report_id}").json()["finished"]:
             break
     assert admin.get(f"/result/{report_id}").status_code == 200
+    return report_id
+
+
+def _자동출고전_보고서를_저장한다(*, report_id: str) -> str:
+    """데모 보고서를 생산 staging 경로까지만 저장해 ``unavailable``을 만든다."""
+
+    pipeline = DemoPipeline()
+    user_input = UserInput(
+        company=CANONICAL_DEMO_COMPANY,
+        job="",
+        region="인천",
+        posting_text="",
+    )
+    card = pipeline.find_company(user_input)
+    assert card is not None
+    result = pipeline.run(user_input, card)
+    assert result.outcome is Outcome.REPORT and result.report is not None
+    job = job_runtime.Job(
+        job_id=report_id,
+        user_input=user_input,
+        card=card,
+        result=result,
+        report_audience=ReportAudience.ADMIN,
+        engine_build_identity=(
+            build_identity_contract.process_engine_build_identity()
+        ),
+    )
+    assert job_runtime._save_report(job)
+    with storage_db.connect() as conn:
+        assert report_store.load(conn, report_id) is not None
+        assert not report_publication.report_is_published_or_legacy(conn, report_id)
     return report_id
 
 
@@ -1628,11 +1662,14 @@ def test_관리화면은_누구를_봤다고_과장하지않고_요청지표만_
 
 
 def test_관리자_LINK이력은_완료상태_비용_출고해시와_보고서링크를_보인다(
-    admin: TestClient, monkeypatch
+    admin: TestClient,
 ):
     raw_key = "abcdef0123456789abcdef0123456789"
     key_hash = share_store.key_hash_of(raw_key)
-    report_id = "2" * 32
+    # 링크를 보여도 되는지는 보고서 행의 존재뿐 아니라 실제 자동출고 완료까지
+    # 확인한다. object()로 load만 흉내 내면 제품에는 존재할 수 없는 반쪽 상태를
+    # 만들고 새 fail-closed 경계를 우회하므로, 실제 생성→저장→출고 경로를 밟는다.
+    report_id = _보고서를_만든다(admin)
     with storage_db.connect() as conn:
         assert share_store.insert_new(
             conn,
@@ -1668,11 +1705,6 @@ def test_관리자_LINK이력은_완료상태_비용_출고해시와_보고서�
             customer_charge_krw=990,
         )
 
-    monkeypatch.setattr(
-        admin_router.report_store,
-        "load",
-        lambda _conn, stored_id: object() if stored_id == report_id else None,
-    )
     detail = admin.get(f"/admin/link/{key_hash}")
 
     assert detail.status_code == 200
@@ -1683,6 +1715,131 @@ def test_관리자_LINK이력은_완료상태_비용_출고해시와_보고서�
     assert f'href="/admin/reports/{report_id}"' in detail.text
     assert "b" * 64 in detail.text
     assert raw_key not in detail.text
+
+
+def test_관리자_LINK완료이력도_보고서본체가_없으면_링크를_만들지_않는다(
+    admin: TestClient,
+):
+    """완료 상태와 출고 해시는 보고서 본체가 있다는 증명이 아니다."""
+
+    raw_key = "1234567890abcdef1234567890abcdef"
+    key_hash = share_store.key_hash_of(raw_key)
+    missing_report_id = "3" * 32
+    with storage_db.connect() as conn:
+        assert share_store.insert_new(
+            conn,
+            key=raw_key,
+            company="카카오",
+            job="마케팅",
+            now_iso="2026-08-21T15:00:00+09:00",
+        )
+        assert share_store.start_run(
+            conn,
+            key=raw_key,
+            run_id="missing-report-link-run",
+            started_at="2026-08-21T15:01:00+09:00",
+            input_company="네이버",
+            confirmed_company="NAVER",
+            company_id="00266961",
+        )
+        assert share_store.finish_run(
+            conn,
+            run_id="missing-report-link-run",
+            status=share_store.RUN_STATUS_AWAITING_RELEASE,
+            finished_at="2026-08-21T15:02:00+09:00",
+            report_id=missing_report_id,
+            internal_ai_cost_krw=321,
+            customer_charge_krw=0,
+        )
+        assert share_store.mark_released(
+            conn,
+            report_id=missing_report_id,
+            pdf_sha256="a" * 64,
+            release_sha256="b" * 64,
+            released_at="2026-08-21T15:03:00+09:00",
+            customer_charge_krw=990,
+        )
+
+    details = (
+        admin.get(f"/admin/link/{key_hash}"),
+        admin.get(f"/admin/link/{key_hash}/extend"),
+    )
+
+    for detail in details:
+        assert detail.status_code == 200
+        assert "NAVER" in detail.text
+        assert "완료" in detail.text
+        assert "AI 원가 321원" in detail.text
+        assert "고객 청구 990원" in detail.text
+        assert "b" * 64 in detail.text
+        assert "저장소에서 찾을 수 없음" in detail.text
+        assert f'href="/admin/reports/{missing_report_id}"' not in detail.text
+        assert raw_key not in detail.text
+    assert missing_report_id in details[0].text
+
+
+def test_관리자_LINK완료이력의_출고전_보고서는_없음과_구분해_링크를_막는다(
+    admin: TestClient,
+):
+    """본문은 있어도 자동출고 전이면 관리자가 정상 보고서처럼 열지 않는다."""
+
+    raw_key = "fedcba0987654321fedcba0987654321"
+    key_hash = share_store.key_hash_of(raw_key)
+    staged_report_id = _자동출고전_보고서를_저장한다(report_id="4" * 32)
+    with storage_db.connect() as conn:
+        assert share_store.insert_new(
+            conn,
+            key=raw_key,
+            company="카카오",
+            job="마케팅",
+            now_iso="2026-08-21T15:00:00+09:00",
+        )
+        assert share_store.start_run(
+            conn,
+            key=raw_key,
+            run_id="staged-report-link-run",
+            started_at="2026-08-21T15:01:00+09:00",
+            input_company="네이버",
+            confirmed_company="NAVER",
+            company_id="00266961",
+        )
+        assert share_store.finish_run(
+            conn,
+            run_id="staged-report-link-run",
+            status=share_store.RUN_STATUS_AWAITING_RELEASE,
+            finished_at="2026-08-21T15:02:00+09:00",
+            report_id=staged_report_id,
+            internal_ai_cost_krw=321,
+            customer_charge_krw=0,
+        )
+        # 일부 원장만 완료로 바뀐 장애 상태를 재현한다. 보고서 공개 판정은 이
+        # 표식을 믿지 않고 실제 staging/Delivery 상태를 다시 확인해야 한다.
+        assert share_store.mark_released(
+            conn,
+            report_id=staged_report_id,
+            pdf_sha256="a" * 64,
+            release_sha256="b" * 64,
+            released_at="2026-08-21T15:03:00+09:00",
+            customer_charge_krw=990,
+        )
+
+    details = (
+        admin.get(f"/admin/link/{key_hash}"),
+        admin.get(f"/admin/link/{key_hash}/extend"),
+    )
+
+    for detail in details:
+        assert detail.status_code == 200
+        assert "NAVER" in detail.text
+        assert "완료" in detail.text
+        assert "AI 원가 321원" in detail.text
+        assert "고객 청구 990원" in detail.text
+        assert "b" * 64 in detail.text
+        assert "자동출고가 끝나지 않아 아직 열 수 없음" in detail.text
+        assert "저장소에서 찾을 수 없음" not in detail.text
+        assert f'href="/admin/reports/{staged_report_id}"' not in detail.text
+        assert raw_key not in detail.text
+    assert staged_report_id in details[0].text
 
 
 @pytest.mark.parametrize(

@@ -23,6 +23,7 @@ from src.features.budget.constants import PAID_PHASE_LEASE_SEC, SPEND_PHASE_PIPE
 from src.features.pipeline.constants import ANTHROPIC_TIMEOUT_SEC
 from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
 from src.features.report_delivery import artifact as delivery_artifact
+from src.features.report_delivery import authority as authority_store
 from src.features.report_delivery import singleflight
 from src.features.report_delivery import store as delivery_store
 from src.features.report_delivery.cache_identity import CacheLookupKey
@@ -39,7 +40,6 @@ from src.shared.report_evidence.release_mode import (
     REPORT_RELEASE_MODE_ENV_NAME,
     parse_release_mode,
 )
-from src.shared.report_source_identity import ReportSourceIdentity
 from src.web import paid_runtime
 
 
@@ -70,6 +70,35 @@ OWNER_PROVIDER_ADMISSION_AGE: Final[dt.timedelta] = (
     OWNER_MAX_AGE - PROVIDER_IN_FLIGHT_GRACE
 )
 WAITER_MAX_AGE_SEC: Final[float] = float(PAID_PHASE_LEASE_SEC)
+
+
+def _assert_full_report_source_identity(
+    *,
+    report: Any,
+    source: Any,
+    preflight_identity_digest: str,
+    cache_key: CacheLookupKey | None = None,
+    reuse_singleflight_key: singleflight.LeaseKey | None = None,
+) -> None:
+    """FULL 저장본의 producer 세대와 실제 cache/lease 출처 세대를 맞춘다."""
+
+    if str(getattr(report, "release_mode", "") or "") != ReleaseMode.FULL.value:
+        return
+    # 순환 import를 피한다. report_completion은 웹 완료 경계에서만 쓰는
+    # canonical producer 검산이라 cache hit가 실제로 발견된 때만 적재한다.
+    from src.web import report_completion  # noqa: PLC0415
+
+    evidence = report_completion.require_release_evidence(report)
+    report_completion.assert_release_preflight_identity(
+        evidence=evidence,
+        preflight_identity_digest=preflight_identity_digest,
+    )
+    report_completion.assert_release_stored_source_identity(
+        evidence=evidence,
+        source=source,
+        cache_key=cache_key,
+        reuse_singleflight_key=reuse_singleflight_key,
+    )
 
 
 def _commit_connection(conn: Any) -> None:
@@ -190,6 +219,114 @@ class GenerationSingleflightUnavailable(
     generation_coordination.GenerationCoordinationError
 ):
     """lease/DB 무결성을 확인할 수 없어 provider를 열지 않는다."""
+
+
+class _FullOwnerAuthorityUnavailable(RuntimeError):
+    """FULL 재사용 후보에 상속 가능한 OWNER 권위가 없다."""
+
+    def __init__(self, reason_code: str, message: str) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
+def _require_full_owner_authority(
+    conn: Any,
+    *,
+    report: Any,
+    content: Any,
+    artifact_id: str,
+    billing_bucket_id: str,
+    automatic_release_sha256: str | None = None,
+) -> authority_store.ReleaseAuthority | None:
+    """FULL cache/fan-out 후보만 OWNER 권위에 결속하고 non-FULL은 그대로 둔다."""
+
+    if str(getattr(report, "release_mode", "") or "") != ReleaseMode.FULL.value:
+        return None
+    from src.web import report_completion  # noqa: PLC0415
+
+    try:
+        owner = authority_store.load_owner_authority(
+            conn,
+            content_snapshot_id=content.content_id,
+            artifact_id=artifact_id,
+        )
+    except authority_store.ReleaseAuthorityError as exc:
+        raise _FullOwnerAuthorityUnavailable(
+            "owner_authority_corrupt",
+            "FULL 재사용 원본의 OWNER 출고 권위가 손상됐습니다",
+        ) from exc
+    if owner is None:
+        raise _FullOwnerAuthorityUnavailable(
+            "owner_authority_missing",
+            "FULL 재사용 원본의 OWNER 출고 권위가 없습니다",
+        )
+    try:
+        evidence = report_completion.require_release_evidence(report)
+        report_completion.assert_owner_release_authority_identity(
+            authority=owner,
+            evidence=evidence,
+            billing_bucket_id=billing_bucket_id,
+            content=content,
+            artifact_id=artifact_id,
+            automatic_release_sha256=automatic_release_sha256,
+        )
+    except (RuntimeError, TypeError, ValueError) as exc:
+        raise _FullOwnerAuthorityUnavailable(
+            "owner_authority_mismatch",
+            "FULL 재사용 원본의 OWNER 권위가 생성 원본과 다릅니다",
+        ) from exc
+    return owner
+
+
+def _full_origin_automatic_release_sha256(
+    conn: Any,
+    *,
+    report: Any,
+    content_id: str,
+    artifact: Any,
+    billing_bucket_id: str,
+) -> str:
+    """COMPLETED 후보의 실제 자동승인 행을 찾아 OWNER 권위와 맞댄다."""
+
+    pointer = getattr(artifact, "blob_pointer", None)
+    if pointer is None:
+        raise _FullOwnerAuthorityUnavailable(
+            "owner_approval_missing",
+            "FULL 완료 원본의 PDF 내용주소가 없습니다",
+        )
+    from src.features.export_pdf import release_store as pdf_release_store  # noqa: PLC0415
+    from src.features.export_pdf.automatic_release import report_sha256  # noqa: PLC0415
+
+    try:
+        for origin in delivery_artifact.deliveries_for_artifact(
+            conn,
+            artifact_id=artifact.artifact_id,
+        ):
+            if (
+                origin.billing_bucket_id != billing_bucket_id
+                or origin.content_snapshot_id != content_id
+            ):
+                continue
+            record = pdf_release_store.load_automatic_release_record(
+                conn,
+                report_id=origin.public_id,
+                report_sha256=report_sha256(report),
+                pdf_sha256=pointer.sha256,
+                checker_version=artifact.version.checker_version,
+            )
+            if record is not None:
+                digest = str(getattr(record, "record_sha256", "")).strip()
+                if digest:
+                    return digest
+    except (RuntimeError, TypeError, ValueError) as exc:
+        raise _FullOwnerAuthorityUnavailable(
+            "owner_approval_corrupt",
+            "FULL 완료 원본의 자동승인 기록이 손상됐습니다",
+        ) from exc
+    raise _FullOwnerAuthorityUnavailable(
+        "owner_approval_missing",
+        "FULL 완료 원본의 자동승인 기록이 없습니다",
+    )
 
 
 class PaidGenerationAdmissionUnavailable(
@@ -444,11 +581,7 @@ class GenerationSession:
             raise GenerationSingleflightUnavailable(
                 "완료된 보고서의 출처 snapshot이 없습니다"
             )
-        pipeline_source_digest = ReportSourceIdentity(
-            dart_receipt_numbers=source.dart_receipt_nos,
-            financial_payload_digest=source.financial_payload_sha256,
-        ).cache_digest
-        if pipeline_source_digest != key.source_identity_digest:
+        if source.preflight_identity_digest != key.source_identity_digest:
             raise GenerationSingleflightUnavailable(
                 "lease와 보고서의 출처 신원이 다릅니다"
             )
@@ -475,6 +608,52 @@ class GenerationSession:
             raise GenerationSingleflightUnavailable(
                 "완료된 보고서의 공개 봉인이 저장본과 다릅니다"
             ) from exc
+        requested_mode = self._requested_release_mode()
+        if requested_mode is ReleaseMode.FULL and not (
+            cache_store.reusable_for_requested_release_mode(
+                str(getattr(report, "release_mode", "") or ""),
+                requested_mode,
+            )
+        ):
+            raise _FullOwnerAuthorityUnavailable(
+                "release_mode_mismatch",
+                "완료된 보고서의 릴리스 모드가 현재 요청과 다릅니다",
+            )
+        if requested_mode is ReleaseMode.FULL:
+            try:
+                _assert_full_report_source_identity(
+                    report=report,
+                    source=source,
+                    preflight_identity_digest=key.source_identity_digest,
+                    reuse_singleflight_key=key,
+                )
+            except (RuntimeError, TypeError, ValueError) as exc:
+                # 여기까지 왔으면 COMPLETED 행·content·source·artifact를 모두
+                # 정상적으로 읽었고, 실패한 것은 이미 읽힌 후보와 지금 요청의
+                # producer/source-generation 결속뿐이다. 장기 cache의 같은
+                # 손상은 격리 뒤 정상 miss로 내리므로(:865 아래), fan-out도
+                # 같은 사유로 격리해 새 fencing token owner가 이어받게 한다.
+                # DB/lock/I/O 오류는 이 try 밖에서 기존 fail-closed 경로를 타므로
+                # 완료 여부가 불확실한 상태에서 provider를 겹쳐 열지 않는다.
+                raise _FullOwnerAuthorityUnavailable(
+                    "generation_evidence_source_mismatch",
+                    "완료된 FULL 보고서와 lease의 근거 세대가 다릅니다",
+                ) from exc
+            automatic_release_sha256 = _full_origin_automatic_release_sha256(
+                conn,
+                report=report,
+                content_id=content.content_id,
+                artifact=artifact,
+                billing_bucket_id=key.billing_bucket_id,
+            )
+            _require_full_owner_authority(
+                conn,
+                report=report,
+                content=content,
+                artifact_id=artifact.artifact_id,
+                billing_bucket_id=key.billing_bucket_id,
+                automatic_release_sha256=automatic_release_sha256,
+            )
         cache_key = CacheLookupKey(
             billing_bucket_id=key.billing_bucket_id,
             corp_id=key.corp_id,
@@ -639,7 +818,7 @@ class GenerationSession:
         except (UnicodeDecodeError, TypeError, ValueError) as exc:
             invalidate("report_payload_invalid")
             return None
-        approval_found = False
+        approval_record = None
         try:
             for origin in delivery_artifact.deliveries_for_artifact(
                 conn,
@@ -655,12 +834,12 @@ class GenerationSession:
                     checker_version=metadata.version.checker_version,
                 )
                 if record is not None:
-                    approval_found = True
+                    approval_record = record
                     break
         except (ValueError, RuntimeError):
             invalidate("approval_record_corrupt")
             return None
-        if not approval_found:
+        if approval_record is None:
             invalidate("approval_record_missing")
             return None
         try:
@@ -674,6 +853,50 @@ class GenerationSession:
         except ValueError:
             invalidate("public_projection_mismatch")
             return None
+        requested_mode = self._requested_release_mode()
+        if requested_mode is ReleaseMode.FULL and not (
+            cache_store.reusable_for_requested_release_mode(
+                str(getattr(report, "release_mode", "") or ""),
+                requested_mode,
+            )
+        ):
+            invalidate("release_mode_mismatch")
+            return None
+        if requested_mode is ReleaseMode.FULL:
+            source = delivery_store.load_source_snapshot(
+                conn,
+                cached.content.source_snapshot_id,
+            )
+            if source is None:
+                invalidate("source_snapshot_missing")
+                return None
+            try:
+                _assert_full_report_source_identity(
+                    report=report,
+                    source=source,
+                    preflight_identity_digest=key.preflight_identity_digest,
+                    cache_key=key,
+                    reuse_singleflight_key=lease_key,
+                )
+            except (RuntimeError, TypeError, ValueError):
+                # 손상 cache를 실패 보고서로 내보내지 않고 격리한 뒤 정상 miss로
+                # 내려가 새 owner가 같은 현재 출처로 다시 만들게 한다.
+                invalidate("generation_evidence_source_mismatch")
+                return None
+            try:
+                _require_full_owner_authority(
+                    conn,
+                    report=report,
+                    content=cached.content,
+                    artifact_id=metadata.artifact_id,
+                    billing_bucket_id=key.billing_bucket_id,
+                    automatic_release_sha256=getattr(
+                        approval_record, "record_sha256", None
+                    ),
+                )
+            except _FullOwnerAuthorityUnavailable as exc:
+                invalidate(exc.reason_code)
+                return None
         return generation_coordination.ReusedGeneration(
             content_snapshot_id=cached.content.content_id,
             artifact_id=cached.artifact_id,
@@ -807,16 +1030,49 @@ class GenerationSession:
                         lease_ttl=self._bounded_owner_ttl(acquired_at),
                     )
                     if acquired.disposition is singleflight.AcquireDisposition.COMPLETED:
-                        reused = self._read_completed(
-                            conn,
-                            key=key,
-                            content_id=acquired.completed_content_id,
-                            artifact_id=acquired.completed_artifact_id,
-                        )
-                        with self._lock:
-                            self._key = key
-                            self._state = "reused"
-                        return reused
+                        try:
+                            reused = self._read_completed(
+                                conn,
+                                key=key,
+                                content_id=acquired.completed_content_id,
+                                artifact_id=acquired.completed_artifact_id,
+                            )
+                        except _FullOwnerAuthorityUnavailable as exc:
+                            quarantined_at = clock.now_kst()
+                            singleflight.expire_completed_result(
+                                conn,
+                                key=key,
+                                content_snapshot_id=acquired.completed_content_id,
+                                artifact_id=acquired.completed_artifact_id,
+                                now=quarantined_at,
+                            )
+                            delivery_store.invalidate_cache_entry(
+                                conn,
+                                key=cache_key,
+                                expected_content_snapshot_id=(
+                                    acquired.completed_content_id
+                                ),
+                                expected_artifact_id=acquired.completed_artifact_id,
+                                reason_code=exc.reason_code,
+                                invalidated_at=quarantined_at,
+                            )
+                            logger.warning(
+                                "FULL 완료 재사용 후보의 OWNER 권위를 격리합니다 "
+                                "reason=%s",
+                                exc.reason_code,
+                            )
+                            acquired = singleflight.acquire(
+                                conn,
+                                key=key,
+                                owner_id=self.run_id,
+                                now=quarantined_at,
+                                lease_ttl=self._bounded_owner_ttl(quarantined_at),
+                            )
+                        else:
+                            with self._lock:
+                                self._key = key
+                                self._state = "reused"
+                            return reused
                     if acquired.disposition is singleflight.AcquireDisposition.FAILED:
                         with self._lock:
                             self._key = key
@@ -993,10 +1249,11 @@ class GenerationSession:
                 source = delivery_store.load_source_snapshot(
                     conn, content.source_snapshot_id
                 )
-                if source is None or ReportSourceIdentity(
-                    dart_receipt_numbers=source.dart_receipt_nos,
-                    financial_payload_digest=source.financial_payload_sha256,
-                ).cache_digest != handle.key.source_identity_digest:
+                if (
+                    source is None
+                    or source.preflight_identity_digest
+                    != handle.key.source_identity_digest
+                ):
                     raise GenerationSingleflightUnavailable(
                         "owner의 content와 lease 출처 신원이 다릅니다"
                     )

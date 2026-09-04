@@ -148,6 +148,7 @@ _SCHEMA: Final[tuple[str, ...]] = (
         financial_payload_sha256    TEXT NOT NULL,
         official_document_ids_json  TEXT NOT NULL,
         adapter_versions_json       TEXT NOT NULL,
+        preflight_identity_digest   TEXT NOT NULL DEFAULT '',
         cache_usable                INTEGER NOT NULL CHECK(cache_usable IN (0, 1))
     )
     """,
@@ -376,6 +377,17 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             f"ALTER TABLE {TABLE_CONTENT_SNAPSHOTS} "
             "ADD COLUMN release_locked INTEGER NOT NULL DEFAULT 0"
         )
+    source_columns = {
+        str(row[1])
+        for row in conn.execute(
+            f'PRAGMA table_info("{TABLE_SOURCE_SNAPSHOTS}")'
+        ).fetchall()
+    }
+    if "preflight_identity_digest" not in source_columns:
+        conn.execute(
+            f"ALTER TABLE {TABLE_SOURCE_SNAPSHOTS} "
+            "ADD COLUMN preflight_identity_digest TEXT NOT NULL DEFAULT ''"
+        )
     delivery_columns = {
         str(row[1])
         for row in conn.execute(
@@ -436,6 +448,7 @@ def save_source_snapshot(conn: sqlite3.Connection, snapshot: SourceSnapshot) -> 
         snapshot.financial_payload_sha256,
         _json_tuple(tuple(snapshot.official_document_ids)),
         _json_tuple(tuple(snapshot.adapter_versions)),
+        snapshot.preflight_identity_digest,
         1 if snapshot.cache_usable else 0,
     )
     cursor = conn.execute(
@@ -443,8 +456,9 @@ def save_source_snapshot(conn: sqlite3.Connection, snapshot: SourceSnapshot) -> 
         INSERT OR IGNORE INTO {TABLE_SOURCE_SNAPSHOTS} (
             snapshot_id, identity_digest, captured_at, source_as_of,
             dart_receipt_nos_json, financial_payload_sha256,
-            official_document_ids_json, adapter_versions_json, cache_usable
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            official_document_ids_json, adapter_versions_json,
+            preflight_identity_digest, cache_usable
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         payload,
     )
@@ -454,7 +468,8 @@ def save_source_snapshot(conn: sqlite3.Connection, snapshot: SourceSnapshot) -> 
         f"""
         SELECT snapshot_id, identity_digest, captured_at, source_as_of,
                dart_receipt_nos_json, financial_payload_sha256,
-               official_document_ids_json, adapter_versions_json, cache_usable
+               official_document_ids_json, adapter_versions_json,
+               preflight_identity_digest, cache_usable
         FROM {TABLE_SOURCE_SNAPSHOTS} WHERE snapshot_id = ?
         """,
         (snapshot.snapshot_id,),
@@ -531,7 +546,8 @@ def load_source_snapshot(
         f"""
         SELECT snapshot_id, identity_digest, captured_at, source_as_of,
                dart_receipt_nos_json, financial_payload_sha256,
-               official_document_ids_json, adapter_versions_json, cache_usable
+               official_document_ids_json, adapter_versions_json,
+               preflight_identity_digest, cache_usable
         FROM {TABLE_SOURCE_SNAPSHOTS} WHERE snapshot_id = ?
         """,
         (str(snapshot_id).strip(),),
@@ -549,7 +565,7 @@ def load_source_snapshot(
         versions = tuple((str(item[0]), str(item[1])) for item in raw_versions)
     except (IndexError, TypeError) as exc:
         raise LifecycleStoreCorrupt("수집 adapter 버전이 손상됐습니다") from exc
-    if row[8] not in (0, 1):
+    if row[9] not in (0, 1):
         raise LifecycleStoreCorrupt("캐시 사용 표시가 손상됐습니다")
     try:
         return SourceSnapshot(
@@ -561,7 +577,8 @@ def load_source_snapshot(
             financial_payload_sha256=str(row[5]),
             official_document_ids=documents,
             adapter_versions=versions,
-            cache_usable=bool(row[8]),
+            preflight_identity_digest=str(row[8]),
+            cache_usable=bool(row[9]),
         )
     except (TypeError, ValueError) as exc:
         raise LifecycleStoreCorrupt("source snapshot metadata가 손상됐습니다") from exc
@@ -689,6 +706,12 @@ def bind_cache_entry(
         raise LifecycleStoreError("캐시 열쇠와 내용의 engine epoch가 다릅니다")
     if load_content_snapshot(conn, content.content_id) is None:
         raise LifecycleStoreError("내용 원본을 먼저 저장해야 캐시에 연결할 수 있습니다")
+    source = load_source_snapshot(conn, content.source_snapshot_id)
+    if (
+        source is None
+        or source.preflight_identity_digest != key.preflight_identity_digest
+    ):
+        raise LifecycleStoreError("캐시 열쇠와 생성 전 출처 신원이 다릅니다")
     clean_artifact_id = str(artifact_id).strip()
     artifact_table = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
@@ -822,6 +845,12 @@ def load_cache_lookup(
         or content.engine_epoch_digest != str(row[3])
     ):
         raise LifecycleStoreCorrupt("캐시와 내용 원본의 생성기·전체 출처 신원이 다릅니다")
+    source = load_source_snapshot(conn, content.source_snapshot_id)
+    if (
+        source is None
+        or source.preflight_identity_digest != key.preflight_identity_digest
+    ):
+        raise LifecycleStoreCorrupt("캐시와 생성 전 출처 신원이 다릅니다")
     artifact_id = str(row[2]).strip()
     if not policy.content_is_reusable(content, delivered_at=delivered_at):
         # 손상 판정이 아니라 나이 판정이다. 여기서 행을 지우지 않는다 —

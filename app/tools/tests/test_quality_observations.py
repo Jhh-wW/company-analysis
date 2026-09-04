@@ -15,7 +15,7 @@ from src.features.pipeline.port import Grade, Report
 from src.features.storage import db, reports as report_store
 from src.shared.report_evidence.constants import ReleaseMode
 from src.shared.report_generation.constants import ENGINE_V2_SCHEMA_VERSION
-from src.shared.report_quality.constants import STRICT_QUALITY_CONTRACT_VERSION
+from src.shared.report_quality.constants import LEGACY_STRICT_QUALITY_CONTRACT_VERSION
 from src.shared.report_quality.generation import GenerationQualityObservation
 from tools import quality_observations
 
@@ -23,7 +23,7 @@ from tools import quality_observations
 def _observation(*, release_allowed: bool) -> GenerationQualityObservation:
     return GenerationQualityObservation(
         mode="generation-shadow",
-        contract_version=STRICT_QUALITY_CONTRACT_VERSION,
+        contract_version=LEGACY_STRICT_QUALITY_CONTRACT_VERSION,
         quality_grade="부분 완성",
         safety_decision="공개 가능" if release_allowed else "공개 차단",
         publication_grade="부분 완성",
@@ -53,7 +53,7 @@ def _build_fixture_db(db_path: Path) -> None:
                 sections=[],
                 generated_at="2026-08-01T00:00:00",
                 schema_version=ENGINE_V2_SCHEMA_VERSION,
-                quality_contract_version=STRICT_QUALITY_CONTRACT_VERSION,
+                quality_contract_version=LEGACY_STRICT_QUALITY_CONTRACT_VERSION,
                 company_id="CORP-001",
                 release_mode=ReleaseMode.ENFORCE_NO_PARTIAL.value,
                 quality_observation=_observation(release_allowed=False),
@@ -72,7 +72,7 @@ def _build_fixture_db(db_path: Path) -> None:
                 sections=[],
                 generated_at="2026-08-02T00:00:00",
                 schema_version=ENGINE_V2_SCHEMA_VERSION,
-                quality_contract_version=STRICT_QUALITY_CONTRACT_VERSION,
+                quality_contract_version=LEGACY_STRICT_QUALITY_CONTRACT_VERSION,
                 company_id="CORP-002",
                 release_mode=ReleaseMode.ENFORCE_NO_PARTIAL.value,
                 quality_observation=_observation(release_allowed=True),

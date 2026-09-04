@@ -8,8 +8,16 @@ from __future__ import annotations
 from typing import Final
 
 from src.shared.report_evidence.constants import (
+    SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE,
+    SOURCE_KIND_OFFICIAL_IR_PDF,
     SOURCE_KIND_OFFICIAL_RECRUIT_PAGE,
     SOURCE_KIND_OFFICIAL_WEB_PAGE,
+)
+from src.shared.report_evidence.legacy_fragment_kinds import LEGACY_KIND_HOMEPAGE
+from src.shared.registered_domain import (
+    MULTI_LABEL_PUBLIC_SUFFIXES,
+    SINGLE_LABEL_PUBLIC_SUFFIXES,
+    TEST_FIXTURE_ONLY_SINGLE_LABEL_SUFFIXES,
 )
 
 # ── 접속 ─────────────────────────────────────────────────
@@ -131,8 +139,8 @@ MAX_IR_DOCUMENT_TITLE_CHARS: Final[int] = 200
 # ── 조각 모양 ────────────────────────────────────────────
 
 #: 조각의 「종류」 값. 1판 조각 모양(`{"종류","원문"}`)과 맞춘다.
-#: 정본: `analysis_engine/tools/run_pilot.py`의 `make_fragments`/`collect_news`
-FRAGMENT_KIND: Final[str] = "홈페이지"
+#: 이름 정본은 여러 수집기가 함께 쓰는 shared 근거 계약에 있다.
+FRAGMENT_KIND: Final[str] = LEGACY_KIND_HOMEPAGE
 
 # ── 우선순위 ─────────────────────────────────────────────
 
@@ -309,42 +317,10 @@ HTTPS_DEFAULT_PORT: Final[int] = 443
 #: ★ 완전한 Public Suffix List가 아니라 국내 기업 분석에 흔한 것만 담은
 #: 축약판이다 — 알려진 한계. 목록에 없는 두-칸 접미사는 한 칸만 떼는
 #: 보수적인 기본 동작으로 넘어간다 (아래 `_registrable_core_name` 참조).
-MULTI_LABEL_PUBLIC_SUFFIXES: Final[frozenset[str]] = frozenset(
-    {
-        "co.kr",
-        "or.kr",
-        "go.kr",
-        "ac.kr",
-        "ne.kr",
-        "pe.kr",
-        "re.kr",
-        "co.jp",
-        "co.uk",
-        "com.cn",
-    }
-)
-
 #: 도메인 끝 «한 칸」만 공개 접미사로 보는 경우 (일반 gTLD·국가 코드).
 #: 실제 회사가 등록해 쓸 수 있는 진짜 TLD만 담는다 - 아래
 #: TEST_FIXTURE_ONLY_SINGLE_LABEL_SUFFIXES 와 절대 섞지 않는다(정정 2 —
 #: 실제 커버리지 항목으로 오해되면 안 된다).
-SINGLE_LABEL_PUBLIC_SUFFIXES: Final[frozenset[str]] = frozenset(
-    {
-        "kr",
-        "com",
-        "net",
-        "org",
-        "co",
-        "io",
-        "biz",
-        "info",
-        "me",
-        "tv",
-        "asia",
-        "shop",
-    }
-)
-
 #: 오프라인 시험 픽스처 전용 TLD - 실제 등록 도메인 커버리지가 아니다.
 #: example 은 RFC 2606이 등록을 영구히 금지한 예약 TLD라 실제 회사가
 #: 등록해 쓸 수 없다(오탐 위험 0). fail-closed 수정 후 fixture가
@@ -352,8 +328,6 @@ SINGLE_LABEL_PUBLIC_SUFFIXES: Final[frozenset[str]] = frozenset(
 #: 도메인 자동결속)를 그대로 지나가게 하려고 별도 상수로 둔다(정정 2).
 #: SINGLE_LABEL_PUBLIC_SUFFIXES 와 절대 합치지
 #: 않고, 판정 시점에만(registrable_core_name) 두 집합을 함께 본다.
-TEST_FIXTURE_ONLY_SINGLE_LABEL_SUFFIXES: Final[frozenset[str]] = frozenset({"example"})
-
 # ── 넓은 공식 웹 수집 (Writer B, P-8da84a36) ────────────────
 #
 # 여러 공식 호스트(채용·IR·뉴스룸·정적 HTML)에 흩어진 공식 문서를 결속 근거와
@@ -364,6 +338,15 @@ TEST_FIXTURE_ONLY_SINGLE_LABEL_SUFFIXES: Final[frozenset[str]] = frozenset({"exa
 #: 도메인군 전체(root+apex/www 짝+같은 등록 도메인 하위호스트)에서 시도하는
 #: 최대 일반 웹 페이지 수(robots.txt·sitemap.xml 조회는 포함하지 않는다).
 WIDE_MAX_PAGES: Final[int] = 12
+
+#: HTML 한 페이지에서 일반 탐색 큐로 옮기는 링크 상한. 응답 바이트가 작아도
+#: 수만 개의 짧은 ``<a>``가 queue 정렬과 중복 검사를 폭증시키지 못하게 한다.
+WIDE_MAX_LINKS_PER_PAGE: Final[int] = 200
+
+#: HTML 한 페이지에서 보존할 개별 절대 URL 최대 길이. 페이지 응답 자체가
+#: bounded여도 한 href가 거의 전부를 차지하면 queue·정렬·로그 경계로 큰
+#: 문자열 하나가 계속 전파된다.
+WIDE_MAX_LINK_URL_CHARS: Final[int] = 2_048
 
 #: 도메인군 전체에서 내려받기를 시도하는 공식 IR PDF 최대 수.
 WIDE_MAX_IR_DOCUMENTS: Final[int] = 3
@@ -379,6 +362,38 @@ WIDE_MAX_TOTAL_BYTES: Final[int] = 6 * 1024 * 1024
 #: 결속 근거가 있어도 무한히 늘지 않도록 두는 호스트 수 상한
 #: (root 1개 + apex/www 짝 + 같은 등록 도메인 하위호스트 합계).
 WIDE_MAX_HOSTS: Final[int] = 8
+
+#: 법인명+등록번호를 확인하기 전 같은 host에서 격리 조회할 exact 후보 수.
+#: DART의 오래된 root와 공시 안의 회사소개 경로가 같은 host일 수 있다.
+#: host 하나당 첫 URL만 남기면 첫 화면에 등록번호가 없다는 이유로 뒤의 명시
+#: 회사소개 URL까지 버린다. root·회사소개·IR 정도는 확인하되, 전체 페이지
+#: 상한(``WIDE_MAX_PAGES``)과 함께 무한 후보 조회를 막는다.
+WIDE_MAX_IDENTITY_CANDIDATES_PER_HOST: Final[int] = 3
+
+#: DART root 첫 화면에 회사명만 있고 등록번호가 회사소개·개인정보 페이지에
+#: 따로 있는 소규모 사이트를 확인할 때 읽는 same-origin 보조 페이지 상한.
+#: 첫 화면의 exact 링크 중 닫힌 경로 어휘만 대상으로 하며 재귀 탐색하지 않는다.
+WIDE_MAX_ROOT_IDENTITY_SUPPLEMENT_PAGES: Final[int] = 3
+
+#: 위 보조 페이지 묶음의 UTF-8 바이트 합계 상한. 일반 수집 전체 6 MiB 상한과
+#: 별개로 먼저 적용해 신원 확인 하나가 전체 웹 예산을 독점하지 못하게 한다.
+WIDE_MAX_ROOT_IDENTITY_SUPPLEMENT_BYTES: Final[int] = 1 * 1024 * 1024
+
+#: root HTML에서 신원 보조 페이지로 인정하는 경로 표지. 링크 글자나 검색
+#: 결과를 믿지 않고 URL path만 검사하며, 같은 origin 안에서만 사용한다.
+WIDE_ROOT_IDENTITY_SUPPLEMENT_PATH_MARKERS: Final[tuple[str, ...]] = (
+    "company",
+    "about",
+    "corporate",
+    "profile",
+    "privacy",
+    "policy",
+    "terms",
+    "legal",
+    "회사",
+    "개인정보",
+    "이용약관",
+)
 
 #: sitemap.xml 하나에서 읽는 최대 바이트.
 WIDE_MAX_SITEMAP_BYTES: Final[int] = 2 * 1024 * 1024
@@ -397,8 +412,11 @@ WIDE_MIN_CHARS_PER_RANGE: Final[int] = 40
 
 #: 문서 identity의 source_kind 값.
 WIDE_SOURCE_KIND_WEB_PAGE: Final[str] = SOURCE_KIND_OFFICIAL_WEB_PAGE
-WIDE_SOURCE_KIND_IR_PDF: Final[str] = "official_ir_pdf"
+WIDE_SOURCE_KIND_IR_PDF: Final[str] = SOURCE_KIND_OFFICIAL_IR_PDF
 WIDE_SOURCE_KIND_RECRUIT_PAGE: Final[str] = SOURCE_KIND_OFFICIAL_RECRUIT_PAGE
+WIDE_SOURCE_KIND_IDENTITY_VERIFIED_WEB_PAGE: Final[str] = (
+    SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE
+)
 
 #: 문서·attempt의 requirement 값.
 WIDE_REQUIREMENT_REQUIRED: Final[str] = "REQUIRED"
@@ -427,28 +445,6 @@ WIDE_PRIORITY_HOST_KEYWORDS: Final[tuple[str, ...]] = (
     "press",
     "newsroom",
     "blog",
-)
-
-#: 공식 페이지에 링크돼 있어도 «회사의 다른 공식 채널»로 보지 않는 흔한
-#: 소셜/광고/분석 호스트 접미사. 후보 결속 대상에서 제외한다(품질 필터,
-#: SSRF 방어와는 무관 — 그 방어는 항상 safe_http가 담당한다).
-WIDE_EXCLUDED_LINKED_HOST_SUFFIXES: Final[tuple[str, ...]] = (
-    "facebook.com",
-    "instagram.com",
-    "youtube.com",
-    "youtu.be",
-    "twitter.com",
-    "x.com",
-    "linkedin.com",
-    "kakao.com",
-    "pf.kakao.com",
-    "band.us",
-    "google.com",
-    "googletagmanager.com",
-    "google-analytics.com",
-    "doubleclick.net",
-    "naver.com",
-    "channel.io",
 )
 
 #: 넓은 공식 웹 수집기가 attempt.slot_ids·조각 태그에 쓰는 «수집기 필수 슬롯»

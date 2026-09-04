@@ -270,7 +270,7 @@ def test_혼합_회사_입력이_섞여도_대상회사_후보와_판정에_영�
     foreign_attempt = make_attempt(
         company_id=foreign_company_id,
         attempt_id="attempt-foreign-mixed",
-        source_kind="official_homepage",
+        source_kind="official_web_page",
         slot_ids=collector_slots_for(unknown_section_id),
         state=CollectionState.MISSING.value,
         reason_code="official_homepage_missing",

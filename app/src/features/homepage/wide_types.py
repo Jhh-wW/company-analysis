@@ -88,6 +88,16 @@ class WideDocumentIdentity:
     #: 첨부는 TIER_3 낮은 신뢰 provenance다. 후자는 OPTIONAL이며 필수
     #: 슬롯 조각으로 승격하지 않는다.
     source_tier: str
+    #: 공개 Source까지 보존할 DART 기업개황 결속과 IR 전용 메타데이터.
+    #: 해당하지 않는 HTML/DART-sidecar 문서는 빈 문자열을 쓴다.
+    domain_attestation_source_id: str = ""
+    domain_attestation_evidence: str = ""
+    reporting_period: str = ""
+    attachment_url: str = ""
+    ir_metadata_verification: str = ""
+    domain_redirect_verification: str = ""
+    domain_redirect_from_host: str = ""
+    domain_redirect_to_host: str = ""
 
     def __post_init__(self) -> None:
         for name in (
@@ -106,6 +116,22 @@ class WideDocumentIdentity:
             _require_nonblank(getattr(self, name), name)
         if not isinstance(self.published_on, str):
             raise ValueError("published_on은 문자열이어야 합니다(모르면 빈 문자열)")
+        for name in (
+            "domain_attestation_source_id",
+            "domain_attestation_evidence",
+            "reporting_period",
+            "attachment_url",
+            "ir_metadata_verification",
+            "domain_redirect_verification",
+            "domain_redirect_from_host",
+            "domain_redirect_to_host",
+        ):
+            if not isinstance(getattr(self, name), str):
+                raise ValueError(f"{name}은 문자열이어야 합니다")
+        if bool(self.domain_attestation_source_id.strip()) != bool(
+            self.domain_attestation_evidence.strip()
+        ):
+            raise ValueError("도메인 attestation Source ID와 exact 원문은 함께 있어야 합니다")
         if not _SHA256_HEX.match(self.content_sha256):
             raise ValueError(
                 "content_sha256 형식이 올바르지 않습니다(64자리 소문자 16진수)"

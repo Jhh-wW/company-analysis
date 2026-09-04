@@ -6,6 +6,7 @@ import asyncio
 import threading
 import uuid
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -52,6 +53,16 @@ def _demo_report():
     return result.report
 
 
+def _stub_legacy_report(monkeypatch, report) -> None:
+    """Notion 단위시험도 생산의 strict legacy 입구를 가짜로 바꾼다."""
+
+    monkeypatch.setattr(
+        reports_router.report_delivery_adapter,
+        "load_legacy_public_report",
+        lambda _job_id: SimpleNamespace(report=report),
+    )
+
+
 @pytest.fixture(autouse=True)
 def _approved_pdf_release_boundary(monkeypatch):
     """이 파일은 Notion 멱등성을 보므로 PDF 승인 자체는 전용 시험에서 검증한다."""
@@ -66,7 +77,7 @@ def _approved_pdf_release_boundary(monkeypatch):
 @pytest.fixture
 def notion_admin(monkeypatch):
     report = _demo_report()
-    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
+    _stub_legacy_report(monkeypatch, report)
     session = auth_logic.create_session("admin@example.com", True)
     with TestClient(app) as client:
         client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
@@ -294,7 +305,7 @@ def test_클라이언트취소뒤에도_worker가_결과를_저장해_중복을_
         "require_admin_action",
         lambda _request, _token: None,
     )
-    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
+    _stub_legacy_report(monkeypatch, report)
     monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
 
     def delayed_success(*_args, **_kwargs):
@@ -380,7 +391,7 @@ def test_claim_commit직후_요청취소도_supervisor가_adapter와_finish를_�
         "require_admin_action",
         lambda _request, _token: None,
     )
-    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
+    _stub_legacy_report(monkeypatch, report)
     monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
 
     def claim_then_delay_return(*args, **kwargs):
@@ -540,7 +551,7 @@ def test_v2_Notion_POST는_409가_아니라_블록으로_전송한다(monkeypatc
     report = _sealed_v2_report()
     job_id = f"notion-v2-sealed-{uuid.uuid4().hex}"
     job_runtime._JOBS.pop(job_id, None)
-    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
+    _stub_legacy_report(monkeypatch, report)
     monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
     sent = []
 
@@ -600,7 +611,7 @@ def test_공개블록이_없는_옛_v2_저장본은_전송결과모름_대신_�
     report = replace(_sealed_v2_report(), public_projection=None)
     job_id = f"notion-v2-unsealed-{uuid.uuid4().hex}"
     job_runtime._JOBS.pop(job_id, None)
-    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
+    _stub_legacy_report(monkeypatch, report)
     monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
 
     def forbidden(*_args, **_kwargs):

@@ -7,15 +7,22 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import html
 import io
+import ipaddress
 import json
 import os
 import re
 import struct
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import zipfile
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -168,7 +175,7 @@ def default_counter_path() -> Path:
 def api_key() -> str:
     key = os.environ.get("DART_API_KEY", "").strip()
     if not key:
-        raise RuntimeError(
+        raise DartAuthenticationError(
             "DART_API_KEY가 없습니다 — analysis_engine/.env 에 'DART_API_KEY=발급키' 한 줄을 넣고, "
             "실행 전 환경변수로 로드하세요 (opendart.fss.or.kr 개인 즉시 발급·무료)"
         )
@@ -216,10 +223,510 @@ DOCUMENT_ZIP_TOTAL_UNCOMPRESSED_MAX_BYTES = 128 * 1024 * 1024
 DOCUMENT_ZIP_MAX_MEMBERS = 512
 DOCUMENT_ZIP_CENTRAL_DIRECTORY_MAX_BYTES = 4 * 1024 * 1024
 ZIP_MEMBER_MAX_COMPRESSION_RATIO = 200
+DOCUMENT_URL_SIDECAR_VERSION = "dart-document-official-url-candidates-v1"
+DOCUMENT_URL_SIDECAR_MAX_BYTES = 128 * 1024
+DOCUMENT_URL_SIDECAR_MAX_CANDIDATES = 12
+DOCUMENT_URL_SIDECAR_MEMBER_NAME_MAX_CHARS = 512
 _ZIP_END_SIGNATURE = b"PK\x05\x06"
 _ZIP_END_RECORD = struct.Struct("<4s4H2LH")
 _ZIP_END_MIN_BYTES = _ZIP_END_RECORD.size
 _ZIP_MAX_COMMENT_BYTES = (1 << 16) - 1
+_DOCUMENT_WEB_URL_PATTERN = re.compile(
+    r"(?<![\w@])(?:https?://|www\.)[^\s<>\"']{3,2048}",
+    re.IGNORECASE,
+)
+_DOCUMENT_URL_STRONG_LABEL_SIGNALS = (
+    "홈페이지",
+    "웹사이트",
+    "공식 사이트",
+    "공식사이트",
+    "website",
+    "homepage",
+)
+_DOCUMENT_URL_WEAK_LABEL_SIGNALS = ("url",)
+_DOCUMENT_NON_COMPANY_INFRA_HOST_SUFFIXES = (
+    "dart.fss.or.kr",
+    "opendart.fss.or.kr",
+    "fss.or.kr",
+    "w3.org",
+    "xbrl.or.kr",
+    "xml.or.kr",
+)
+_DOCUMENT_NON_HTML_URL_SUFFIXES = (
+    ".css",
+    ".js",
+    ".json",
+    ".xml",
+    ".xsd",
+    ".dtd",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+    ".ico",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".zip",
+    ".pdf",
+)
+_SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
+_DART_RECEIPT_NUMBER_RE = re.compile(r"[0-9]{14}")
+_DOCUMENT_URL_SIDECAR_LOCATION_RE = re.compile(
+    r"raw_xml_chars:([0-9]{1,10})-([0-9]{1,10})"
+)
+_DOCUMENT_URL_SIDECAR_TOP_LEVEL_KEYS = frozenset(
+    {"version", "rcept_no", "main_document_sha256", "candidates"}
+)
+_DOCUMENT_URL_SIDECAR_CANDIDATE_KEYS = frozenset(
+    {"url", "source_member_name", "source_location", "source_payload_sha256"}
+)
+_DOCUMENT_CACHE_LOCK_COUNT = 64
+_DOCUMENT_CACHE_LOCKS = tuple(
+    threading.Lock() for _index in range(_DOCUMENT_CACHE_LOCK_COUNT)
+)
+
+
+@dataclass(frozen=True)
+class DocumentUrlSidecarCandidate:
+    """DART ZIP 멤버에서 찾았지만 아직 회사 공식 여부는 모르는 URL."""
+
+    url: str
+    source_member_name: str
+    source_location: str
+    source_payload_sha256: str
+
+
+@dataclass(frozen=True)
+class DocumentUrlSidecarLoadResult:
+    """로컬 sidecar의 결속 검증 결과와 아직 미승격인 URL 후보."""
+
+    is_valid: bool
+    candidates: tuple[DocumentUrlSidecarCandidate, ...] = ()
+
+
+def _decode_document_member(raw: bytes) -> str:
+    for encoding in ("utf-8", "cp949", "euc-kr"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def is_document_xml_payload(raw: bytes) -> bool:
+    """확장자만 XML인 바이너리를 대표 공시나 URL 출처로 쓰지 않는다."""
+
+    text = _decode_document_member(raw).lstrip("\ufeff \t\r\n")
+    return text.startswith("<") and ">" in text[:4096]
+
+
+def _safe_sidecar_member_name(value: object) -> str:
+    """ZIP 이름을 경로로 사용하지 않는 제한된 provenance 문자열로 만든다."""
+
+    name = str(value or "").replace("\\", "/")
+    parts = name.split("/")
+    if (
+        not name
+        or len(name) > DOCUMENT_URL_SIDECAR_MEMBER_NAME_MAX_CHARS
+        or name.startswith("/")
+        or any(part in {"", ".", ".."} for part in parts)
+        or any(ord(character) < 32 for character in name)
+    ):
+        return ""
+    return name
+
+
+def normalize_document_web_url(value: object) -> str:
+    """공시 원문·sidecar가 함께 쓰는 닫힌 웹 URL 정규화 경계."""
+
+    if type(value) is not str:
+        return ""
+    candidate = value.strip()
+    if (
+        not candidate
+        or len(candidate) > 2048
+        or "\\" in candidate
+        or any(ord(character) < 32 for character in candidate)
+    ):
+        return ""
+    try:
+        parsed = urllib.parse.urlsplit(candidate)
+        scheme = parsed.scheme.casefold()
+        host = (
+            (parsed.hostname or "")
+            .rstrip(".")
+            .encode("idna")
+            .decode("ascii")
+            .casefold()
+        )
+        port = parsed.port
+    except (TypeError, ValueError, UnicodeError):
+        return ""
+    default_port = 80 if scheme == "http" else 443 if scheme == "https" else None
+    if (
+        default_port is None
+        or not host
+        or "." not in host
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, default_port)
+        or any(
+            host == suffix or host.endswith(f".{suffix}")
+            for suffix in _DOCUMENT_NON_COMPANY_INFRA_HOST_SUFFIXES
+        )
+        or parsed.path.casefold().endswith(_DOCUMENT_NON_HTML_URL_SUFFIXES)
+    ):
+        return ""
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    if address is not None and not address.is_global:
+        return ""
+    # default port의 표기 유무나 Unicode host 표기로 후보가 중복되지 않게
+    # authority를 직접 만든다. fragment는 공시 출처 위치와 무관해 버린다.
+    return urllib.parse.urlunsplit(
+        (scheme, host, parsed.path or "/", parsed.query, "")
+    )
+
+
+def _iter_ranked_document_web_url_candidates(
+    raw: bytes,
+    *,
+    member_name: str,
+) -> Iterator[tuple[int, int, DocumentUrlSidecarCandidate]]:
+    """멤버 한 건의 explicit URL을 위치·payload hash와 함께 하나씩 채점한다.
+
+    최종 sidecar는 12개뿐인데 중간 ``list``와 ``set``을 원문의 URL 수만큼
+    키우면, 압축은 작고 해제 후에는 URL이 매우 많은 XML 하나로 프로세스
+    메모리를 소진할 수 있다. 따라서 이 함수는 후보를 보관하지 않고
+    스트리밍하며, 아래 bounded top-k 정본만 메모리에 후보를 남긴다.
+    """
+
+    safe_member_name = _safe_sidecar_member_name(member_name)
+    if not safe_member_name:
+        return
+    decoded = _decode_document_member(raw)
+    payload_sha256 = hashlib.sha256(raw).hexdigest()
+    for match in _DOCUMENT_WEB_URL_PATTERN.finditer(decoded):
+        value = html.unescape(match.group(0)).rstrip(".,;:!?)]}〉》。·")
+        if value.casefold().startswith("www."):
+            value = f"https://{value}"
+        normalized = normalize_document_web_url(value)
+        if not normalized:
+            continue
+        parsed = urllib.parse.urlsplit(normalized)
+        context = decoded[
+            max(0, match.start() - 120) : min(len(decoded), match.end() + 120)
+        ].casefold()
+        score = 0
+        if any(
+            signal in context for signal in _DOCUMENT_URL_STRONG_LABEL_SIGNALS
+        ):
+            score += 100
+        elif any(
+            signal in context for signal in _DOCUMENT_URL_WEAK_LABEL_SIGNALS
+        ):
+            # XML tag/속성명에 흔한 ``URL`` 하나를 「공식 홈페이지」와 같은
+            # 강도로 보면 앞쪽 외부 링크 12개가 실제 홈페이지를 밀어낸다.
+            score += 10
+        if parsed.path in ("", "/") and not parsed.query:
+            score += 20
+        if match.group(0).casefold().startswith("www."):
+            score += 5
+        yield (
+            -score,
+            match.start(),
+            DocumentUrlSidecarCandidate(
+                url=normalized,
+                source_member_name=safe_member_name,
+                source_location=f"raw_xml_chars:{match.start()}-{match.end()}",
+                source_payload_sha256=payload_sha256,
+            ),
+        )
+
+
+def _ranked_candidate_key(
+    item: tuple[int, int, DocumentUrlSidecarCandidate],
+) -> tuple[int, str, int, str]:
+    return (
+        item[0],
+        item[2].source_member_name.casefold(),
+        item[1],
+        item[2].url,
+    )
+
+
+def _retain_bounded_ranked_candidate(
+    selected_by_url: dict[
+        str, tuple[int, int, DocumentUrlSidecarCandidate]
+    ],
+    item: tuple[int, int, DocumentUrlSidecarCandidate],
+    *,
+    max_candidates: int,
+) -> None:
+    """URL별 최선의 provenance 중 전역 top-k만 일정한 메모리로 보존한다."""
+
+    if max_candidates <= 0:
+        return
+    url = item[2].url
+    previous = selected_by_url.get(url)
+    if previous is not None:
+        if _ranked_candidate_key(item) < _ranked_candidate_key(previous):
+            selected_by_url[url] = item
+        return
+    if len(selected_by_url) < max_candidates:
+        selected_by_url[url] = item
+        return
+    worst_url, worst = max(
+        selected_by_url.items(),
+        key=lambda entry: _ranked_candidate_key(entry[1]),
+    )
+    if _ranked_candidate_key(item) < _ranked_candidate_key(worst):
+        del selected_by_url[worst_url]
+        selected_by_url[url] = item
+
+
+def _ranked_document_web_url_candidates(
+    raw: bytes,
+    *,
+    member_name: str,
+    max_candidates: int = DOCUMENT_URL_SIDECAR_MAX_CANDIDATES,
+) -> list[tuple[int, int, DocumentUrlSidecarCandidate]]:
+    """호환용 멤버 단위 bounded top-k 후보를 돌려준다."""
+
+    selected_by_url: dict[
+        str, tuple[int, int, DocumentUrlSidecarCandidate]
+    ] = {}
+    for item in _iter_ranked_document_web_url_candidates(
+        raw, member_name=member_name
+    ):
+        _retain_bounded_ranked_candidate(
+            selected_by_url,
+            item,
+            max_candidates=max_candidates,
+        )
+    return list(selected_by_url.values())
+
+
+def extract_document_web_url_candidates(
+    raw: bytes,
+    *,
+    member_name: str,
+    max_candidates: int = DOCUMENT_URL_SIDECAR_MAX_CANDIDATES,
+) -> tuple[DocumentUrlSidecarCandidate, ...]:
+    """대표 XML fallback도 sidecar와 똑같은 URL 정책을 쓰게 하는 정본."""
+
+    limit = max(0, min(int(max_candidates), DOCUMENT_URL_SIDECAR_MAX_CANDIDATES))
+    ranked = _ranked_document_web_url_candidates(
+        raw,
+        member_name=member_name,
+        max_candidates=limit,
+    )
+    ranked.sort(key=lambda item: (item[0], item[1], item[2].url))
+    return tuple(candidate for _score, _start, candidate in ranked[:limit])
+
+
+def document_url_sidecar_path(document_path: Path) -> Path:
+    """대표 XML 옆 versioned 공식 URL 후보 sidecar 경로."""
+
+    return document_path.with_name(
+        f"{document_path.stem}.official-urls-v1.json"
+    )
+
+
+def load_document_url_sidecar(
+    document_path: Path,
+    *,
+    rcept_no: str,
+    main_document: bytes,
+) -> DocumentUrlSidecarLoadResult:
+    """로컬 sidecar의 형식·접수번호·대표 XML 결속만 검증한다.
+
+    이 파일은 DART에서 받은 ZIP을 같은 프로세스가 풀며 만든 **로컬 cache**다.
+    작은 member 원문은 개인정보·용량 범위를 넓히지 않기 위해 저장하지 않으므로
+    각 ``source_payload_sha256``은 다운로드 당시 provenance이지, 이후 로컬에서
+    다시 인증할 수 있는 서명이나 원문 증명은 아니다. 따라서 여기서 통과한 URL도
+    그 자체로 공식 사이트가 아니다. 앱은 대상 페이지의 법인명+등록번호와
+    same-origin을 별도로 확인한 뒤에만 회사 자료로 승격해야 한다.
+
+    후보가 0개인 정상 sidecar와 깨진/missing sidecar를 cache 갱신 코드가 구분할
+    수 있도록 ``is_valid``를 별도로 돌려준다.
+    """
+
+    if _DART_RECEIPT_NUMBER_RE.fullmatch(str(rcept_no or "")) is None:
+        return DocumentUrlSidecarLoadResult(is_valid=False)
+    sidecar_path = document_url_sidecar_path(document_path)
+    try:
+        with sidecar_path.open("rb") as stream:
+            encoded = stream.read(DOCUMENT_URL_SIDECAR_MAX_BYTES + 1)
+    except OSError:
+        return DocumentUrlSidecarLoadResult(is_valid=False)
+    if len(encoded) > DOCUMENT_URL_SIDECAR_MAX_BYTES:
+        return DocumentUrlSidecarLoadResult(is_valid=False)
+    try:
+        payload = json.loads(encoded.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return DocumentUrlSidecarLoadResult(is_valid=False)
+    if (
+        type(payload) is not dict
+        or set(payload) != _DOCUMENT_URL_SIDECAR_TOP_LEVEL_KEYS
+        or payload.get("version") != DOCUMENT_URL_SIDECAR_VERSION
+        or payload.get("rcept_no") != rcept_no
+        or payload.get("main_document_sha256")
+        != hashlib.sha256(main_document).hexdigest()
+    ):
+        return DocumentUrlSidecarLoadResult(is_valid=False)
+    rows = payload.get("candidates")
+    if (
+        type(rows) is not list
+        or len(rows) > DOCUMENT_URL_SIDECAR_MAX_CANDIDATES
+    ):
+        return DocumentUrlSidecarLoadResult(is_valid=False)
+
+    candidates: list[DocumentUrlSidecarCandidate] = []
+    seen_urls: set[str] = set()
+    for row in rows:
+        if (
+            type(row) is not dict
+            or set(row) != _DOCUMENT_URL_SIDECAR_CANDIDATE_KEYS
+            or any(
+                type(row.get(key)) is not str
+                for key in _DOCUMENT_URL_SIDECAR_CANDIDATE_KEYS
+            )
+        ):
+            return DocumentUrlSidecarLoadResult(is_valid=False)
+        url = str(row["url"])
+        member_name = str(row["source_member_name"])
+        location = str(row["source_location"])
+        payload_sha256 = str(row["source_payload_sha256"])
+        normalized_url = normalize_document_web_url(url)
+        location_match = _DOCUMENT_URL_SIDECAR_LOCATION_RE.fullmatch(location)
+        if (
+            not normalized_url
+            or normalized_url != url
+            or _safe_sidecar_member_name(member_name) != member_name
+            or location_match is None
+            or int(location_match.group(2)) <= int(location_match.group(1))
+            or _SHA256_HEX_RE.fullmatch(payload_sha256) is None
+            or url in seen_urls
+        ):
+            return DocumentUrlSidecarLoadResult(is_valid=False)
+        seen_urls.add(url)
+        candidates.append(
+            DocumentUrlSidecarCandidate(
+                url=url,
+                source_member_name=member_name,
+                source_location=location,
+                source_payload_sha256=payload_sha256,
+            )
+        )
+    return DocumentUrlSidecarLoadResult(
+        is_valid=True,
+        candidates=tuple(candidates),
+    )
+
+
+def _read_valid_cached_document(path: Path) -> bytes | None:
+    """기존 대표 cache를 bounded read로 확인하고 유효한 XML만 돌려준다."""
+
+    try:
+        with path.open("rb") as stream:
+            document = stream.read(DOCUMENT_MEMBER_MAX_BYTES + 1)
+    except OSError:
+        return None
+    if (
+        len(document) > DOCUMENT_MEMBER_MAX_BYTES
+        or not is_document_xml_payload(document)
+    ):
+        return None
+    return document
+
+
+def _document_cache_lock(rcept_no: str) -> threading.Lock:
+    """같은 접수번호 backfill을 프로세스 안에서 한 번만 실행한다."""
+
+    return _DOCUMENT_CACHE_LOCKS[int(rcept_no) % _DOCUMENT_CACHE_LOCK_COUNT]
+
+
+def _write_private_bytes_atomic(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            temp_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = None
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        _unlink_cache_artifact(temp_path)
+
+
+def _unlink_cache_artifact(path: Path) -> None:
+    """보조 cache 정리 실패가 원래 다운로드 결과를 가리지 않게 한다."""
+
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _document_url_sidecar_bytes(
+    *,
+    rcept_no: str,
+    main_document: bytes,
+    ranked_candidates: list[tuple[int, int, DocumentUrlSidecarCandidate]],
+) -> bytes:
+    ranked_candidates.sort(
+        key=lambda item: (
+            item[0],
+            item[2].source_member_name.casefold(),
+            item[1],
+            item[2].url,
+        )
+    )
+    rows: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    for _score, _start, candidate in ranked_candidates:
+        if candidate.url in seen_urls:
+            continue
+        seen_urls.add(candidate.url)
+        rows.append(
+            {
+                "url": candidate.url,
+                "source_member_name": candidate.source_member_name,
+                "source_location": candidate.source_location,
+                "source_payload_sha256": candidate.source_payload_sha256,
+            }
+        )
+        if len(rows) >= DOCUMENT_URL_SIDECAR_MAX_CANDIDATES:
+            break
+    payload = {
+        "version": DOCUMENT_URL_SIDECAR_VERSION,
+        "rcept_no": rcept_no,
+        "main_document_sha256": hashlib.sha256(main_document).hexdigest(),
+        "candidates": rows,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(encoded) > DOCUMENT_URL_SIDECAR_MAX_BYTES:
+        raise DartResponseError("공시서류 URL 후보 sidecar가 허용 크기를 초과했습니다")
+    return encoded
 
 
 def _validate_zip_container(
@@ -356,17 +863,78 @@ def _read_zip_member(
     return data
 
 
-def download_document(rcept_no: str, dest_dir: Path,
-                      counter: UsageCounter | None = None) -> Path:
-    """공시서류 원본(document.xml)을 내려받아 첫 문서 파일을 저장한다. 있으면 재사용.
+def download_document(
+    rcept_no: str,
+    dest_dir: Path,
+    counter: UsageCounter | None = None,
+    *,
+    require_official_url_sidecar: bool = False,
+) -> Path:
+    """공시서류 대표 XML과 모든 XML의 URL 후보 sidecar를 한 호출로 저장한다.
 
-    zip 안에는 접수번호 이름의 XML(공시 원문)이 들어 있다. 오류 응답은 zip이 아닌
-    XML로 오므로 corpCode와 같은 방식으로 상태만 노출한다(키 노출 금지).
+    기존 호출자 계약대로 가장 큰 파일의 ``Path``를 반환한다. 단, 작은 표지·첨부
+    XML에만 공식 홈페이지가 적힐 수 있으므로 URL·멤버명·문자 위치·멤버 hash만
+    versioned JSON sidecar에 보존한다. 원문 전체나 응답 header·인증값은 싣지 않는다.
+    ``require_official_url_sidecar=True``인 FULL 정식 수집은 구버전 warm cache도
+    보조 파일까지 backfill하며, 실패를 조용히 자료 부족으로 바꾸지 않고 예외로
+    알린다. 기본값은 v1/SHADOW의 기존 대표 XML 재사용 계약을 보존한다.
+    오류 응답은 zip이 아닌 XML로 오므로 corpCode와 같은 방식으로 상태만 노출한다.
     """
+    if _DART_RECEIPT_NUMBER_RE.fullmatch(str(rcept_no or "")) is None:
+        raise DartResponseError("공시서류 DART 접수번호 형식이 올바르지 않습니다")
     out_path = dest_dir / f"{rcept_no}.xml"
-    if out_path.exists():
-        return out_path
-    key = api_key()
+    with _document_cache_lock(rcept_no):
+        # 프로세스 잠금만으로는 같은 영속 디스크를 쓰는 worker 둘의
+        # sidecar/XML 교차 교체를 막지 못한다. 사용량 계수기와 같은 OS 파일
+        # 잠금을 접수번호별 cache 경로에 걸어 두 파일의 생산 구간을 직렬화한다.
+        with usage_store._exclusive_lock(out_path):  # noqa: SLF001
+            cached_document = _read_valid_cached_document(out_path)
+            if cached_document is not None:
+                loaded_sidecar = load_document_url_sidecar(
+                    out_path,
+                    rcept_no=rcept_no,
+                    main_document=cached_document,
+                )
+                if loaded_sidecar.is_valid or not require_official_url_sidecar:
+                    return out_path
+
+            # FULL 정식 경계는 구버전 배포가 남긴 대표 XML만 있는 warm cache도
+            # sidecar를 한 번 채운다. v1/SHADOW는 기본값 False라 기존 XML을
+            # 그대로 재사용하며, 이 추가 네트워크/실패 의미가 소급 적용되지 않는다.
+            try:
+                key = api_key()
+            except RuntimeError:
+                if cached_document is not None and not require_official_url_sidecar:
+                    return out_path
+                raise
+            try:
+                return _download_document_uncached(
+                    rcept_no,
+                    dest_dir,
+                    counter=counter,
+                    key=key,
+                    require_official_url_sidecar=require_official_url_sidecar,
+                )
+            except (DartClientError, OSError):
+                # 어느 단계가 실패해도 기존 정상 XML은 훼손하지 않는다. FULL은
+                # 예외를 재전파해 「자료 부족」 오분류를 막고 다음 요청에서 재시도한다.
+                # 기존 모드는 대표 XML fallback을 유지한다.
+                if cached_document is not None and not require_official_url_sidecar:
+                    return out_path
+                raise
+
+
+def _download_document_uncached(
+    rcept_no: str,
+    dest_dir: Path,
+    *,
+    counter: UsageCounter | None,
+    key: str,
+    require_official_url_sidecar: bool,
+) -> Path:
+    """접수번호별 lock 안에서 DART ZIP을 받아 cache 쌍을 교체한다."""
+
+    out_path = dest_dir / f"{rcept_no}.xml"
     query = urllib.parse.urlencode({"crtfc_key": key, "rcept_no": rcept_no})
     (counter or UsageCounter()).tick()
     data = _read_url(
@@ -396,16 +964,90 @@ def download_document(rcept_no: str, dest_dir: Path,
             member_max_count=DOCUMENT_ZIP_MAX_MEMBERS,
             archive_label="공시서류 ZIP",
         )
-        # 사업보고서 zip은 본문+첨부 여러 파일 — 가장 큰 파일이 본문이다.
-        main = max(files, key=lambda info: info.file_size)
-        document = _read_zip_member(
-            archive,
-            main,
-            max_bytes=DOCUMENT_MEMBER_MAX_BYTES,
-            archive_label="공시서류 ZIP",
+        # 사업보고서 zip은 본문 XML과 PDF·이미지 첨부가 함께 올 수 있다.
+        # 전체 파일 중 가장 큰 것을 고르면 바이너리를 ``.xml``로 저장하고
+        # 평문 파서가 쓰레기 문자열을 근거처럼 읽는다. 대표도 XML 안에서만
+        # 고르고, XML이 하나도 없으면 형식을 추측하지 않고 닫는다.
+        xml_files = [
+            info for info in files if info.filename.casefold().endswith(".xml")
+        ]
+        if not xml_files:
+            raise DartResponseError("공시서류 ZIP에 XML 문서가 없습니다")
+        main: zipfile.ZipInfo | None = None
+        document = b""
+        invalid_xml_infos: set[int] = set()
+        for candidate_info in sorted(
+            xml_files,
+            key=lambda info: (-info.file_size, info.filename.casefold()),
+        ):
+            candidate_payload = _read_zip_member(
+                archive,
+                candidate_info,
+                max_bytes=DOCUMENT_MEMBER_MAX_BYTES,
+                archive_label="공시서류 ZIP",
+            )
+            if is_document_xml_payload(candidate_payload):
+                main = candidate_info
+                document = candidate_payload
+                break
+            invalid_xml_infos.add(id(candidate_info))
+        if main is None:
+            raise DartResponseError("공시서류 ZIP의 XML 문서 본문을 확인할 수 없습니다")
+        ranked_candidates_by_url: dict[
+            str, tuple[int, int, DocumentUrlSidecarCandidate]
+        ] = {}
+        for info in xml_files:
+            if id(info) in invalid_xml_infos:
+                continue
+            member = (
+                document
+                if info is main
+                else _read_zip_member(
+                    archive,
+                    info,
+                    max_bytes=DOCUMENT_MEMBER_MAX_BYTES,
+                    archive_label="공시서류 ZIP",
+                )
+            )
+            if not is_document_xml_payload(member):
+                continue
+            for ranked_candidate in _iter_ranked_document_web_url_candidates(
+                member,
+                member_name=info.filename,
+            ):
+                _retain_bounded_ranked_candidate(
+                    ranked_candidates_by_url,
+                    ranked_candidate,
+                    max_candidates=DOCUMENT_URL_SIDECAR_MAX_CANDIDATES,
+                )
+
+    ranked_candidates = list(ranked_candidates_by_url.values())
+
+    sidecar_path = document_url_sidecar_path(out_path)
+    sidecar_written = False
+    try:
+        sidecar = _document_url_sidecar_bytes(
+            rcept_no=rcept_no,
+            main_document=document,
+            ranked_candidates=ranked_candidates,
         )
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    out_path.write_bytes(document)
+        _write_private_bytes_atomic(sidecar_path, sidecar)
+        sidecar_written = True
+    except (OSError, DartResponseError, TypeError, ValueError) as error:
+        # URL 보조 metadata를 못 만들었다고 이미 검증한 대표 공시 원문까지
+        # 버리지는 않는다. 남은 sidecar는 사용되지 않게 제거하고, typed
+        # fetcher가 대표 XML만 다시 훑는 안전한 fallback을 쓴다.
+        _unlink_cache_artifact(sidecar_path)
+        if require_official_url_sidecar:
+            raise DartResponseError(
+                "공시서류 공식 URL sidecar를 안전하게 저장하지 못했습니다"
+            ) from error
+    try:
+        _write_private_bytes_atomic(out_path, document)
+    except OSError:
+        if sidecar_written:
+            _unlink_cache_artifact(sidecar_path)
+        raise
     return out_path
 
 
