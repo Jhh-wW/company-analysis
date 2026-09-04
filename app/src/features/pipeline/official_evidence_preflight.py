@@ -76,14 +76,31 @@ _DART_DOCUMENT_SOURCE_KINDS = frozenset(
 _INCOMPLETE_COLLECTION_STATES = frozenset(
     {CollectionState.FAILED, CollectionState.TRUNCATED}
 )
-# 부분 보고서도 반드시 갖춰야 하는 뼈대다. 이 세 장은 DART 사업보고서와
-# 재무 API만으로도 확인할 수 있으므로 회사 웹사이트 장애의 영향을 받지 않는다.
-_DART_PARTIAL_CORE_SECTION_IDS = frozenset(
-    {"identity", "business_model", "past_changes"}
-)
+# 부분 보고서는 실제 DART 원문 조각이 하나라도 결속된 경우에만 허용한다.
+# 빠진 장의 최종 사용 가능 여부는 뒤쪽 composer 품질 검사가 다시 판정한다.
 _WEB_FAILURE_SOURCE_KINDS = frozenset(
     {*OFFICIAL_WEB_SOURCE_KINDS, SOURCE_KIND_ROBOTS_TXT}
 )
+_WEB_IDENTITY_REJECTION_REASON_CODES = frozenset(
+    {"root_identity_mismatch", "cross_domain_identity_mismatch"}
+)
+
+
+def _has_usable_dart_evidence(result: OfficialEvidenceCollectionResult) -> bool:
+    """실제 본문 조각과 연결된 DART 문서가 하나 이상 있는지 확인한다."""
+
+    for candidate in result.candidates:
+        dart_document_ids = {
+            document.document_id
+            for document in candidate.documents
+            if document.source_kind in _DART_DOCUMENT_SOURCE_KINDS
+        }
+        if any(
+            fragment.document_id in dart_document_ids
+            for fragment in candidate.fragments
+        ):
+            return True
+    return False
 
 
 def _is_stable_legacy_document_identity(identity: str) -> bool:
@@ -167,23 +184,28 @@ def assess_official_evidence(
         for candidate in result.candidates
         for attempt in candidate.attempts
     )
-    incomplete_required_attempts = tuple(
+    web_identity_was_rejected = any(
+        attempt.reason_code in _WEB_IDENTITY_REJECTION_REASON_CODES
+        for candidate in result.candidates
+        for attempt in candidate.attempts
+    )
+    incomplete_attempts = tuple(
         attempt
         for candidate in result.candidates
         for attempt in candidate.attempts
-        if attempt.requirement is SourceRequirement.REQUIRED
-        and attempt.state in _INCOMPLETE_COLLECTION_STATES
+        if attempt.state in _INCOMPLETE_COLLECTION_STATES
     )
     dart_partial_fallback = (
         not integrity_is_broken
         and not required_dart_collection_incomplete
+        and not web_identity_was_rejected
+        and _has_usable_dart_evidence(result)
         and decision.status is GenerationGateStatus.STOP_TRANSIENT_FAILURE
-        and bool(incomplete_required_attempts)
+        and bool(incomplete_attempts)
         and all(
             attempt.source_kind in _WEB_FAILURE_SOURCE_KINDS
-            for attempt in incomplete_required_attempts
+            for attempt in incomplete_attempts
         )
-        and _DART_PARTIAL_CORE_SECTION_IDS.issubset(decision.ready_section_ids)
     )
     if integrity_is_broken:
         detail_code = FINAL_GATE_DETAIL_PREFLIGHT_PACKET_INVALID
