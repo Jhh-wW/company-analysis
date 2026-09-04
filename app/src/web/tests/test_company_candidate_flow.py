@@ -416,7 +416,7 @@ def _analysis_clock() -> _AnalysisClock:
     """TTL 경계 시험에 물릴 가짜 시계를 만든다.
 
     시작값은 **진짜 시계를 정수로 반올림한 값**이다. 조건 두 개를 «동시에»
-    만족해야 하기 때문이고, 2026-08-26에 둘 다 실측으로 확인했다.
+    만족해야 하기 때문이고, 둘 다 실측으로 확인했다.
 
     ① **진짜 시계와 가까울 것.** ``job_runtime._sweep_jobs``는 monkeypatch되지
        않아 «진짜» 시계를 본다. ``1000.0`` 같은 먼 값을 시드로 쓰면 기록을 만든
@@ -1343,12 +1343,11 @@ def test_카카오_LINK로_네이버와_YG를_차례로_검색확정생성해도
             now_iso="2026-08-21T10:00:00+09:00",
         )
 
-    client = TestClient(
+    with TestClient(
         main.app,
         base_url="https://testserver",
         headers={"Origin": "https://testserver"},
-    )
-    try:
+    ) as client:
         opened = client.get(f"/k/{raw_key}", follow_redirects=False)
         assert opened.status_code == 303
         assert client.cookies.get(KEY_COOKIE_NAME) == raw_key
@@ -1416,8 +1415,6 @@ def test_카카오_LINK로_네이버와_YG를_차례로_검색확정생성해도
             ("네이버", "NAVER"),
             ("YG", "와이지엔터테인먼트"),
         ]
-    finally:
-        client.close()
 
 
 def test_무료_DART_후보보강_응답오류는_외부상태만남기고_전역점검으로_번지지않는다(

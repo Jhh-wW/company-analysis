@@ -64,7 +64,9 @@ from src.features.composer.validate import (
 )
 from src.features.report_standard import PublishBlockedError, build_published_report
 from src.features.report_delivery.artifact import ArtifactInspectionStatus
+from src.features.report_delivery import authority as authority_store
 from src.features.report_delivery.cache_identity import CacheLookupKey
+from src.features.report_delivery import constants as delivery_constants
 from src.features.report_delivery.models import Delivery
 from src.features.report_delivery.singleflight import LeaseKey
 from src.features.report_delivery import store as delivery_store
@@ -73,11 +75,22 @@ from src.features.report_access.models import ReportAudience, ReportBindingResul
 from src.features.sharelink import store as share_store
 from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import tracks as share_tracks
+from src.features.sharelink.constants import (
+    LANDING_MADE_ON_DATE_TEMPLATE,
+    LANDING_OTHER_COMPANY_BUTTON,
+    LANDING_REPORT_MADE_ON_TEMPLATE,
+    RESULT_BACK_TO_LANDING_BUTTON,
+    RESULT_BACK_TO_LANDING_HREF,
+    RESULT_OTHER_COMPANY_HREF,
+    RESULT_REUSED_REPORT_NOTICE,
+    RESULT_STALE_REPORT_NOTICE,
+)
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
 from src.shared import engine_build_identity as build_identity_contract
 from src.shared.generation_cache_identity import GenerationCacheNamespace
-from src.web import job_runtime, report_delivery_adapter, request_helpers
+from src.shared.report_evidence.constants import ReleaseMode
+from src.web import job_runtime, report_completion, report_delivery_adapter, request_helpers
 from src.web.security import CSRF_TOKEN_MAX_CHARS
 
 
@@ -104,6 +117,15 @@ _DELIVERY_PUBLICATION_BLOCKED = "publication_contract_blocked"
 _DELIVERY_PDF_RENDER_BLOCKED = "pdf_render_contract_blocked"
 _DELIVERY_AUTOMATIC_GATE_BLOCKED = "automatic_release_gate_blocked"
 _DELIVERY_PDF_RELEASE_BLOCKED = "pdf_release_contract_blocked"
+#: 사용자 입력·보고서 내용이 아니라 서버 쪽 사정(재시작 스윕·관리자 대사)으로
+#: 닫힌 delivery 의무. 이 코드들은 「관리자에게 문의」가 아니라 재시도 안내를
+#: 낸다.
+_DELIVERY_RETRY_AVAILABLE_FAILURE_CODES = frozenset(
+    {
+        delivery_constants.STALE_DELIVERY_INTENT_FAILURE_CODE,
+        delivery_constants.MANUAL_SETTLEMENT_FAILURE_CODE,
+    }
+)
 _PUBLIC_STORE_MISSING = "missing"
 _PUBLIC_STORE_INCOMPLETE = "incomplete"
 _PUBLIC_STORE_UNREADABLE = "unreadable"
@@ -163,7 +185,7 @@ def _report_for_output(report: Report) -> Report:
 
     엔진 v2(composer) 보고서는 canonical 게이트 대상이 아니다 — v2 3검사
     (내부 키·인용-부록 1:1·요약 존재)만 통과하면 별도 공개본 투영 없이 정본
-    그대로 공개한다 (실행계획 04장 3-4절 2항). v1 경로는 기존 동작 그대로다.
+    그대로 공개한다. v1 경로는 기존 동작 그대로다.
     """
 
     if report.schema_version == ENGINE_V2_SCHEMA_VERSION:
@@ -192,9 +214,18 @@ def _approved_public_report(report_id: str, fallback: Report) -> Report | None:
         if not state.updated_at:
             return fallback
         payload_json = dashboard_store.approved_report_payload(conn, report_id=report_id)
-    if not payload_json:
-        return None
-    return report_store.report_from_json(payload_json)
+        if not payload_json:
+            return None
+        report = report_store.report_from_json(payload_json)
+        # 공개 봉인은 payload가 아니라 별도 표에 있다. 다시 붙이지
+        # 않으면 승인 snapshot 화면만 봉인 없이 그려져 채널이 갈라진다.
+        # 어긋나면 이 함수의 기존 방침대로 None으로 fail-closed 한다 —
+        # 원본 보고서가 대신 공개되는 일을 막는 것이 이 함수의 계약이다.
+        try:
+            return report_store.attach_public_projection(conn, report_id, report)
+        except ValueError:
+            logger.exception("승인 snapshot의 공개 봉인이 저장본과 다릅니다")
+            return None
 
 
 def _blocked_report_response(request: Request) -> Response:
@@ -215,8 +246,19 @@ def _blocked_report_response(request: Request) -> Response:
     return response
 
 
-def _notion_v2_unsupported_response(request: Request) -> Response:
-    """아직 변환기가 없는 엔진 v2를 외부 전송 실패로 가장하지 않는다."""
+def _notion_unsealed_v2_response(request: Request) -> Response:
+    """노션 형식으로 옮길 수 없는 옛 v2 저장본을 «전송 실패로 가장하지» 않는다.
+
+    ★ 이 자리에는 「엔진 v2는 노션을 지원하지 않는다」는 409가
+      있었다. 조각 S6이 v2 변환기를 만들었으므로 그 사유는 사라졌다.
+      다만 변환기는 생성 시점에 붙은 공개 블록을 읽는데, 그 블록이
+      없던 시절에 저장된 v2 보고서에는 그것이 없다(옛
+      저장본은 백필하지 않는다).
+    ★ 그 보고서를 그냥 통과시키면 옛 v1 변환기가 «출고 차단»으로 튕기고,
+      작업자가 그 예외를 「전송 결과를 확인하지 못했습니다」로 바꿔 기록한다.
+      한 번도 나간 적 없는 전송이 「결과 모름」으로 남는다 — 그래서 여기서
+      먼저, 사실대로 닫는다.
+    """
 
     response = request_helpers.templates.TemplateResponse(
         request=request,
@@ -224,13 +266,13 @@ def _notion_v2_unsupported_response(request: Request) -> Response:
         context=request_helpers._ctx(
             request,
             interruption_icon="ℹ️",
-            interruption_title="노션 내보내기를 지원하지 않습니다",
+            interruption_title="이 보고서는 노션으로 보낼 수 없습니다",
             interruption_message=(
-                "엔진 v2 보고서는 현재 웹 화면과 PDF 파일로만 제공합니다."
+                "예전 방식으로 만들어 둔 보고서라 노션 형식으로 옮길 수 없습니다."
             ),
             interruption_hint=(
-                "노션 연결이나 입력의 문제가 아닙니다. 노션용 변환기가 준비될 때까지 "
-                "웹 화면이나 PDF를 사용해 주세요."
+                "노션 연결이나 입력의 문제가 아닙니다. 이 보고서는 웹 화면과 PDF "
+                "파일로 보실 수 있고, 새로 만든 보고서는 노션으로 보낼 수 있습니다."
             ),
             retry_url=_ADMIN_DASHBOARD_URL,
             retry_label=_ADMIN_DASHBOARD_LABEL,
@@ -241,7 +283,7 @@ def _notion_v2_unsupported_response(request: Request) -> Response:
         status_code=409,
     )
     response.headers.update(SHARED_LINK_HEADERS)
-    response.headers["X-Notion-Export-Status"] = "unsupported-engine-v2"
+    response.headers["X-Notion-Export-Status"] = "unsupported-unsealed-report"
     return response
 
 
@@ -730,10 +772,12 @@ def _dashboard_publication_block(request: Request, report_id: str) -> Response |
 
 
 def _revoked_member_response(request: Request, *, unavailable: bool) -> Response:
+    # 화면 글자에는 코드 용어를 쓰지 않는다 — 손님이 겪은 일은 「초대받은 계정으로
+    # 들어왔다」이지 ``MEMBER``라는 갈래 이름이 아니다.
     message = (
-        "현재 MEMBER 권한이 없어 저장된 결과와 다운로드를 열 수 없습니다."
+        "현재 초대받은 계정이 아니어서 저장된 결과와 다운로드를 열 수 없습니다."
         if not unavailable
-        else "MEMBER 권한 상태를 확인할 수 없어 결과와 다운로드를 잠시 열지 않습니다."
+        else "초대받은 계정인지 확인할 수 없어 결과와 다운로드를 잠시 열지 않습니다."
     )
     # 권한 «상태를 못 읽은» 경우에만 같은 화면 재확인이 진짜 재시도다.
     # 권한이 없는 것이 확정된 경우는 다시 열어도 결과가 같으므로 홈으로 보낸다.
@@ -750,7 +794,7 @@ def _revoked_member_response(request: Request, *, unavailable: bool) -> Response
         name="progress_unavailable.html",
         context=request_helpers._ctx(
             request,
-            interruption_title="MEMBER 권한을 확인해 주세요",
+            interruption_title="초대받은 계정인지 확인해 주세요",
             interruption_message=message,
             interruption_hint="관리자에게 초대 상태를 문의해 주세요.",
             **retry_context,
@@ -832,6 +876,41 @@ def _delivery_unavailable_response(request: Request) -> Response:
     return job_runtime._retryable_response(response)
 
 
+def _delivery_retry_available_response(request: Request) -> Response:
+    """서버 쪽 사정으로 멈춘 새 보고서를 관리자 문의로 막다른 화면으로 만들지 않는다.
+
+    재시작 스윕·관리자 대사가 delivery 의무를 닫은 경우는
+    사용자 입력이나 보고서 내용의 문제가 아니라, 저장은 됐지만
+    최종 출고를 확정하지 못한 채 서버가 멈춘 것이다. «재시작»·«대사»·기계
+    실패 코드 같은 운영 용어를 화면에 그대로 노출하지 않고, 이용 횟수가
+    차감되지 않았다는 사실과 같은 회사를 다시 조사할 수 있다는 안내만 낸다.
+    기본 버튼(``retry_url``·``retry_label`` 생략)은 처음 화면으로 보낸다 —
+    같은 report_id 주소를 다시 열어도 이 상태는 그대로이므로 새 조사가
+    진짜 다음 행동이다.
+    """
+
+    response = request_helpers.templates.TemplateResponse(
+        request=request,
+        name="progress_unavailable.html",
+        context=request_helpers._ctx(
+            request,
+            interruption_icon="↻",
+            interruption_title="이 조사는 저장 중 중단됐습니다",
+            interruption_message=(
+                "서버 쪽 사정으로 이 조사의 마지막 확인이 끝나지 못했습니다. "
+                "이용 횟수는 차감되지 않았습니다."
+            ),
+            interruption_hint="같은 회사를 다시 조사할 수 있습니다.",
+            gate_reasons=(),
+            feedback_report_allowed=False,
+        ),
+        status_code=409,
+    )
+    response.headers.update(SHARED_LINK_HEADERS)
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
 def _legacy_pdf_unavailable_response(request: Request) -> Response:
     """당시 bytes를 저장하지 않은 PDF를 오늘 renderer로 위조하지 않는다."""
 
@@ -899,6 +978,8 @@ def _delivery_intent_response(
             PDFReleaseBlockedError("PDF 출고 계약이 중단됐습니다"),
             job_id=public_id,
         )
+    if intent.failure_code in _DELIVERY_RETRY_AVAILABLE_FAILURE_CODES:
+        return _delivery_retry_available_response(request)
     return _delivery_unavailable_response(request)
 
 
@@ -999,7 +1080,7 @@ def _pdf_review_pending_response(
     request_id = admin_audit.request_id(request)
     reasons = _gate_reasons(error)
     # ★ 「자동검사가 떨어진 것」과 「만들다가 실패한 것」은 다른 사건이다.
-    #   2026-08-28 우리은행 건에서 후자였는데 화면이 전자라고 말했다 —
+    #   우리은행 건에서 후자였는데 화면이 전자라고 말했다 —
     #   자동검사는 돌지도 않았다. 사용자도 관리자도 엉뚱한 곳을 보게 된다.
     # ★ 렌더 실패«만» 따로 말한다. 나머지 차단은 종전 문구를 그대로 둔다 —
     #   맨 예외를 싸잡아 「만들다 실패」라고 하면 그것 또한 틀린 말이 된다.
@@ -1302,6 +1383,27 @@ def finalize_new_report_delivery(
     )
     try:
         output_report = _report_for_output(report)
+        # FULL(release_mode=FULL)만 출고 권위(ReleaseAuthority)를 발급한다.
+        # demo·v1·SHADOW·ENFORCE_NO_PARTIAL은 release_evidence가 None으로
+        # 남아 아래 모든 발급·재검증 분기를 그대로 건너뛴다 —
+        # 「FULL 밖 동작은 불변이다」.
+        release_evidence = None
+        if output_report.release_mode == ReleaseMode.FULL.value:
+            release_evidence = report_completion.require_release_evidence(
+                output_report
+            )
+            # blob intent를 만들기 전에 회사 ID·epoch 결속을 먼저 닫는다
+            # (「blob intent 전에 exact 비교」 — 뒤로 미루면 어긋난 회사·epoch로
+            #  만든 blob이 이미 생긴 뒤에야 걸린다).
+            report_completion.assert_release_company_identity(
+                corp_id=corp_id,
+                output_report=output_report,
+                evidence=release_evidence,
+            )
+            report_completion.assert_release_build_identity(
+                evidence=release_evidence,
+                frozen_build_identity=frozen_build_identity,
+            )
         if intent.state == delivery_store.DELIVERY_INTENT_COMPLETE:
             existing = report_delivery_adapter.load_public_delivery(report_id)
             if (
@@ -1341,6 +1443,37 @@ def finalize_new_report_delivery(
                         raise report_delivery_adapter.DeliveryAdapterError(
                             "완료 delivery와 재시도의 정식 캐시 신원이 다릅니다"
                         )
+            if release_evidence is not None and not existing.delivery.cache_origin_content_id:
+                # COMPLETE 재시도도 cache_key 유무와 무관하게 회사·세대·
+                # content·artifact 결속을 다시 검사한다 — 응답만 잃은
+                # 재시도가 훼손된 결속을 그냥 통과시키지 않는다(P1-2).
+                # cache_origin_content_id가 있는(=재사용) delivery는 대상이
+                # 아니다 — REUSE 권위 발급은 이번 스코프 밖이라(owner만
+                # 발급한다) 재사용 delivery는 애초에 자기 authority가 없다.
+                with storage_db.connect_readonly_existing() as conn:
+                    if conn is None:
+                        raise report_delivery_adapter.DeliveryAdapterError(
+                            "완료 delivery의 출고 권위를 재확인할 저장소가 없습니다"
+                        )
+                    stored_authority = (
+                        authority_store.load_release_authority_by_public_id(
+                            conn, report_id
+                        )
+                    )
+                if (
+                    stored_authority is None
+                    or stored_authority.company_id != release_evidence.company_id
+                    or stored_authority.content_snapshot_id
+                    != existing.content.content_id
+                    or stored_authority.artifact_id != existing_artifact_id
+                    or stored_authority.billing_bucket_id
+                    != str(billing_bucket_id).strip()
+                    or stored_authority.build_identity_sha256
+                    != release_evidence.build_identity_sha256
+                ):
+                    raise report_delivery_adapter.DeliveryAdapterError(
+                        "완료 delivery의 저장된 출고 권위가 생성 증거와 다릅니다"
+                    )
             if public_access_run_id:
                 with storage_db.connect() as conn:
                     bind_public_access(conn, existing)
@@ -1454,9 +1587,10 @@ def finalize_new_report_delivery(
                 engine_build_identity=frozen_build_identity,
             )
             link_run = share_store.load_run_by_report_id(conn, report_id)
+            charge_run_id = link_run.run_id if link_run is not None else report_id
             charge = cost_store.mark_automatic_release(
                 conn,
-                run_id=(link_run.run_id if link_run is not None else report_id),
+                run_id=charge_run_id,
                 automatic_release_sha256=stored_record.record_sha256,
             )
             if link_run is not None:
@@ -1477,6 +1611,35 @@ def finalize_new_report_delivery(
                 ):
                     raise RuntimeError("LINK 자동출고 이력을 확정하지 못했습니다")
             bind_public_access(conn, public_delivery)
+            if release_evidence is not None:
+                # Content·Delivery·Artifact·자동승인·charge·LINK/PUBLIC
+                # binding까지 같은 거래에 쓴 뒤에만 출고 권위를 발급한다.
+                # 발급 직전에 epoch 3자(evidence·완료·저장된 Content)를
+                # 다시 확인한다 — 계약의 「epoch fence」다.
+                report_completion.assert_release_content_identity(
+                    evidence=release_evidence,
+                    frozen_build_identity=frozen_build_identity,
+                    content=public_delivery.content,
+                )
+                if public_delivery.artifact is None:
+                    raise report_delivery_adapter.DeliveryAdapterError(
+                        "FULL 출고 권위에 결속할 PDF artifact가 없습니다"
+                    )
+                authority = report_completion.issue_owner_release_authority(
+                    evidence=release_evidence,
+                    delivery=public_delivery.delivery,
+                    content=public_delivery.content,
+                    artifact_id=public_delivery.artifact.artifact_id,
+                    automatic_release=stored_record,
+                    charge_run_id=charge_run_id,
+                    charge_decision_sha256=cost_store.charge_decision_sha256(
+                        run_id=charge_run_id,
+                        automatic_release_sha256=stored_record.record_sha256,
+                        decision=charge,
+                    ),
+                    issued_at=completed_at,
+                )
+                authority_store.save_release_authority(conn, authority)
             conn.commit()
         return public_delivery
     except Exception as exc:
@@ -1505,6 +1668,20 @@ def finalize_new_report_delivery(
                 report_id,
                 **_pdf_gate_stop_codes(exc),
             )
+        else:
+            # 알려진 출고 차단이 아닌 예외(어댑터·저장소 오류 등)도 이 함수를
+            # 단독으로 부른 살아있는 프로세스에서 LINK 실행을
+            # awaiting_release에 방치하지 않는다 — 재시작을 기다리지 않고
+            # 그 자리에서 중단으로 닫는다. 정상 생산 경로(job_runtime._run_job)
+            # 는 이 분기가 없어도 report_available=False 로 이미 안전하지만
+            # (test_LINK_알수없는_예외도_fail_closed로_닫힌다 참고), 이 함수를
+            # _run_job 밖에서 단독 호출하는 경로가 생겨도 사각지대가 없도록
+            # 이 계층 자체에도 방어선을 둔다.
+            _mark_link_release_gate_stopped(
+                report_id,
+                stop_step="delivery_finalization",
+                stop_reason="delivery_finalization_failed",
+            )
         raise
 
 
@@ -1519,20 +1696,24 @@ def _is_admin_request(request: Request) -> bool:
 
 
 def _link_view_event_unavailable_response(request: Request) -> Response:
-    """정상 조회 사건을 확정하지 못하면 LINK 보고서를 fail-closed한다."""
+    """정상 조회 사건을 확정하지 못하면 초대 링크 보고서를 fail-closed한다.
+
+    ★ 화면 글자에는 코드 용어를 쓰지 않는다 — 손님은 받은 것을 「초대 링크」로
+      알고 있지 ``LINK``라는 갈래 이름을 모른다.
+    """
 
     response = request_helpers.templates.TemplateResponse(
         request=request,
         name="progress_unavailable.html",
         context=request_helpers._ctx(
             request,
-            interruption_title="LINK 보고서를 확인할 수 없습니다",
+            interruption_title="초대 링크 보고서를 확인할 수 없습니다",
             interruption_message=(
-                "이 LINK와 보고서의 연결 상태를 안전하게 확인하지 못해 "
+                "이 초대 링크와 보고서의 연결 상태를 안전하게 확인하지 못해 "
                 "현재는 결과를 열지 않습니다."
             ),
-            interruption_hint="잠시 후 같은 LINK로 다시 시도해 주세요.",
-            # 안내가 「같은 LINK로 다시 시도」이므로 재요청이 진짜 재시도다.
+            interruption_hint="잠시 후 같은 초대 링크로 다시 시도해 주세요.",
+            # 안내가 「같은 초대 링크로 다시 시도」이므로 재요청이 진짜 재시도다.
             **job_runtime.retry_or_exit(request, retry_label="다시 확인"),
         ),
         status_code=503,
@@ -1540,6 +1721,128 @@ def _link_view_event_unavailable_response(request: Request) -> Response:
     response.headers.update(SHARED_LINK_HEADERS)
     response.headers["Cache-Control"] = "no-store"
     return response
+
+
+@dataclass(frozen=True)
+class _LinkResultChrome:
+    """초대 링크 손님이 결과 화면 «표지 위»에서 보는 길 하나.
+
+    ★ 왜 라우터에서 만드는가 — 화면 틀 안에서 「결속 보고서인가」를 다시
+      따지면 같은 판단이 두 곳에 생긴다. 판단은 여기서 한 번만 하고 틀은
+      받은 글자를 그리기만 한다.
+    ★ 문구는 지어내지 않고 `sharelink/constants.py` 한 곳에서만 가져온다 —
+      랜딩과 결과 화면이 다른 말을 하면 같은 곳으로 가는 길인지 알 수 없다.
+    """
+
+    button_label: str
+    button_href: str
+    freshness_note: str
+
+
+def _link_report_made_on(report: Report) -> str:
+    """보고서 생성일을 「2026년 8월 19일」로 옮긴다 (한국시간).
+
+    ★ 표지·마스트헤드가 읽는 것과 **같은 필드**(``report.generated_at``)를 쓴다.
+    ★ 날짜를 읽을 수 없는 옛 저장본이면 빈 글자를 돌려주고 그 줄만 빠진다 —
+      날짜를 지어내는 것보다 안 보이는 편이 낫다.
+    """
+    raw = str(getattr(report, "generated_at", "") or "").strip()
+    if not raw:
+        return ""
+    try:
+        made = clock.business_date_from_iso(raw)
+    except (OverflowError, TypeError, ValueError):
+        return ""
+    return LANDING_MADE_ON_DATE_TEMPLATE.format(
+        year=made.year, month=made.month, day=made.day
+    )
+
+
+def _link_freshness_note(report: Report) -> str:
+    """결속 보고서가 «언제 자료인지», 아니면 오래됐는지 한 줄로 말한다.
+
+    ★ 신선도 기한은 새로 만들지 않고 첫 화면 랜딩과 **같은 기준**
+      (`job_runtime._link_expired`)을 쓴다 — 두 화면이 다른 날짜에 「오래됐다」고
+      말하면 손님이 어느 쪽을 믿어야 할지 알 수 없다.
+    ★ 기한이 지나도 자동으로 다시 조사하지 않는다.
+    """
+    if job_runtime._link_expired(report):
+        return RESULT_STALE_REPORT_NOTICE
+    made_on = _link_report_made_on(report)
+    if not made_on:
+        return ""
+    return LANDING_REPORT_MADE_ON_TEMPLATE.format(made_on=made_on)
+
+
+def _delivery_reuses_stored_report(public_id: str) -> bool:
+    """이 주소가 «이미 만들어 둔 보고서를 다시 보여주는» 것인지 본다.
+
+    ★ 판단 근거는 화면 값이 아니라 저장된 전달 기록의 출처 칸이다. 그 칸이
+      채워진 주소만 다시 보여주는 주소다.
+    ★ 읽지 못하면 «아니다»로 답한다 — 확실하지 않은 안내를 붙여 손님에게
+      틀린 날짜를 말하는 것보다 한 줄이 빠지는 편이 낫다.
+    """
+    clean = str(public_id).strip()
+    if not clean:
+        return False
+    try:
+        with storage_db.connect_readonly_existing() as conn:
+            if conn is None:
+                return False
+            stored = delivery_store.load_delivery_by_public_id(conn, clean)
+    except Exception:  # noqa: BLE001 - 안내 한 줄 때문에 결과 화면을 막지 않는다
+        logger.exception("보고서 전달 기록을 읽지 못했습니다 report_id=%s", clean)
+        return False
+    return stored is not None and bool(stored.cache_origin_content_id)
+
+
+def _reused_report_note(report: Report, *, public_id: str) -> str:
+    """다시 보여주는 보고서에만 «언제 만든 것인지» 한 줄을 붙인다.
+
+    ★ 날짜는 표지·마스트헤드가 읽는 것과 같은 필드에서 가져온다 — 화면마다
+      다른 날짜가 보이면 손님이 어느 쪽을 믿어야 할지 알 수 없다.
+    """
+    if not _delivery_reuses_stored_report(public_id):
+        return ""
+    made_on = _link_report_made_on(report)
+    if not made_on:
+        return ""
+    return RESULT_REUSED_REPORT_NOTICE.format(made_on=made_on)
+
+
+def _link_result_chrome(
+    report: Report,
+    *,
+    bound_report: bool,
+    public_id: str = "",
+) -> _LinkResultChrome:
+    """결속 보고서인지에 따라 «다른 길»과 «다른 안내»를 준다.
+
+    Args:
+        report: 지금 그리는 보고서.
+        bound_report: 그 보고서가 이 링크에 원래 묶여 있던 것인가.
+        public_id: 지금 열고 있는 보고서 주소. 비결속 가지에서 «다시 보여주는
+            보고서인지»를 저장 기록으로 확인하는 데 쓴다.
+
+    Returns:
+        결과 화면 표지 위에 그릴 안내 한 줄과 버튼 한 개.
+    """
+    if bound_report:
+        # 방금 온 곳으로 되돌아가는 버튼은 손님을 같은 자리에서 맴돌게 한다.
+        # 신선도 띠도 여기서만 단다 — 손님이 방금 직접 돌린 보고서에까지
+        # 「언제 만든 것인지 확인하라」고 말하면 군더더기다.
+        return _LinkResultChrome(
+            button_label=LANDING_OTHER_COMPANY_BUTTON,
+            button_href=RESULT_OTHER_COMPANY_HREF,
+            freshness_note=_link_freshness_note(report),
+        )
+    # 링크에 묶이지 않은 보고서는 손님이 방금 돌린 것이 아닐 수 있다.
+    # 그중 «이미 있던 것을 다시 보여주는» 경우에만 만든 날짜를 알린다.
+    return _LinkResultChrome(
+        button_label=RESULT_BACK_TO_LANDING_BUTTON,
+        button_href=RESULT_BACK_TO_LANDING_HREF,
+        freshness_note=_reused_report_note(report, public_id=public_id),
+    )
 
 
 def _render_result_page(
@@ -1555,10 +1858,18 @@ def _render_result_page(
     legacy_stored_at: str = "",
 ) -> Response:
     resolved_track = request_helpers._track_of(request)
+    # 초대 링크 손님에게만 «돌아갈 길»을 준다. 나머지 세 갈래의 결과 화면은
+    # 여기서 None이 되어 화면 틀이 아무것도 그리지 않는다 (바이트 불변).
+    link_result_chrome: _LinkResultChrome | None = None
     if resolved_track[0] is share_tracks.Track.LINK:
         current_link = request_helpers._current_share_link(request)
         if current_link is None:
             return _link_view_event_unavailable_response(request)
+        link_result_chrome = _link_result_chrome(
+            report,
+            bound_report=current_link.report_id == job.job_id,
+            public_id=job.job_id,
+        )
         # LINK에서 새로 생성한 보고서는 run history만 생성 사건으로
         # 남긴다. 최초 연결 보고서를 연 경우에만 별도 조회 사건이다.
         if not pure_delivery_read and current_link.report_id == job.job_id:
@@ -1638,6 +1949,7 @@ def _render_result_page(
                 legacy_readonly=legacy_readonly,
                 legacy_generated_at=legacy_generated_at,
                 legacy_stored_at=legacy_stored_at,
+                link_result_chrome=link_result_chrome,
             ),
         )
     )
@@ -1855,11 +2167,19 @@ async def send_to_notion(
     if delivery_expired:
         return job_runtime._expired_screen(request)
 
-    # 결과 화면에서 버튼을 숨기는 것만으로는 직접 POST를 막지 못한다. v2는
-    # 현재 Notion 변환기가 없으므로 PDF 후보 생성·승인 원장·멱등성 claim·외부
-    # adapter 중 어느 것도 건드리지 않고 제품 계약을 명시적으로 알린다.
-    if getattr(report, "schema_version", "") == ENGINE_V2_SCHEMA_VERSION:
-        return _notion_v2_unsupported_response(request)
+    # ★ 여기 있던 「엔진 v2는 노션을 지원하지 않는다」 409를
+    #   걷어냈다. 사유가 사라졌기 때문이다: v2 보고서는 이제 생성 시점에
+    #   공개 봉인 블록(``report.public_projection``)을 싣고, 노션 변환기가 그
+    #   블록만 읽어 화면·PDF와 같은 글자를 낸다.
+    #   아래 승인·멱등성·어댑터 경계는
+    #   v1과 «같은 것»을 그대로 탄다.
+    #   ★ 다만 그 블록이 없던 시절의 v2 저장본은 여전히 옮길 수 없다. 조용히
+    #   통과시키면 「전송 결과 모름」으로 기록되므로 사실대로 먼저 닫는다.
+    if (
+        getattr(report, "schema_version", "") == ENGINE_V2_SCHEMA_VERSION
+        and getattr(report, "public_projection", None) is None
+    ):
+        return _notion_unsealed_v2_response(request)
 
     if stored_delivery is None:
         # Delivery 이전 보고서만 과거 동적 승인 호환 경로를 쓴다. 새 Delivery는

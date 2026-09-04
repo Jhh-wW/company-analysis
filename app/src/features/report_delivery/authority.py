@@ -537,7 +537,13 @@ def save_release_authority(
         )
     except sqlite3.IntegrityError as exc:
         raise ReleaseAuthorityConflict("출고 권위를 실제 저장 객체에 결속하지 못했습니다") from exc
-    if cursor.rowcount != 1:
+    if cursor.rowcount == 1:
+        # 정확히 이번 INSERT가 처음 성공했을 때만 결속 표를 잠근다. 멱등
+        # 재시도(rowcount=0, 같은 값)에서 다시 잠그면 이미 release_locked=1인
+        # 행을 또 UPDATE하게 되어 store.py·artifact.py의 자기잠금 트리거
+        # 자체에 걸린다 — 그래서 "최초 성공"에서만 한 번 잠근다.
+        _lock_release_bindings(conn, authority)
+    else:
         existing = conn.execute(
             f"SELECT * FROM {TABLE_RELEASE_AUTHORITIES} WHERE authority_id = ?",
             (authority.authority_id,),
@@ -548,6 +554,35 @@ def save_release_authority(
     if stored != authority:
         raise ReleaseAuthorityCorrupt("저장 직후 같은 출고 권위를 다시 읽지 못했습니다")
     return stored
+
+
+def _lock_release_bindings(conn: sqlite3.Connection, authority: ReleaseAuthority) -> None:
+    """content·delivery·artifact 결속을 발급 즉시 잠가 이후 raw UPDATE를 막는다.
+
+    store.py·artifact.py 표의 ``release_locked`` 컬럼을 0에서 1로 뒤집는다.
+    ``WHERE ... release_locked = 0``로 이미 잠긴 행은 이 UPDATE의 대상에서
+    아예 제외한다 — REUSE 권위는 OWNER와 같은 content_snapshot_id·
+    artifact_id를 공유하므로(delivery_id만 새로 만든다), 대상에서 빼지
+    않으면 두 번째 잠금 시도가 각 표 자신의 BEFORE UPDATE 트리거에 걸린다.
+    각 표 자신의 트리거가 그 뒤 모든 실제 내용 변경 UPDATE를 막으므로,
+    호출자는 최초 성공 INSERT 때만 이 함수를 불러야 한다.
+    """
+
+    conn.execute(
+        f"UPDATE {lifecycle_store.TABLE_CONTENT_SNAPSHOTS} "
+        "SET release_locked = 1 WHERE content_id = ? AND release_locked = 0",
+        (authority.content_snapshot_id,),
+    )
+    conn.execute(
+        f"UPDATE {lifecycle_store.TABLE_DELIVERIES} "
+        "SET release_locked = 1 WHERE delivery_id = ? AND release_locked = 0",
+        (authority.delivery_id,),
+    )
+    conn.execute(
+        f"UPDATE {artifact_store.TABLE_ARTIFACTS} "
+        "SET release_locked = 1 WHERE artifact_id = ? AND release_locked = 0",
+        (authority.artifact_id,),
+    )
 
 
 def _from_row(row: sqlite3.Row | tuple[object, ...]) -> ReleaseAuthority:

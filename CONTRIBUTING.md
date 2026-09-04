@@ -24,13 +24,21 @@ cd app
 .\로컬데모켜기.ps1
 ```
 
-시험은 반드시 `app/` 폴더에서 돌린다. 저장소 루트에서 돌리면 파일명 충돌로 수집이
-중단된다(사유는 `pytest.ini` 주석 참고).
+`app/src`와 `analysis_engine/src`에 같은 이름의 시험 파일(예: `test_constants.py`,
+`test_logic.py`)이 있어서 한 pytest 세션에 같이 모으면 `import file mismatch`로 수집
+자체가 중단된다. 시험이 실패하는 게 아니라 한 개도 실행되지 않는다. 그래서 아래 네
+묶음을 각각 따로 돌린다. `.github/workflows/quality-gate.yml`이 CI에서 쓰는 명령과 같다.
 
 ```powershell
-cd app
-..\.venv\Scripts\python -m pytest -q -p no:cacheprovider
+$env:TLDEXTRACT_CACHE = "$PWD\.cache\tldextract"
+python -m pytest app/src app/tools/tests -q -m "not local_integration" --basetemp .pytest_tmp_ci_app
+python -m pytest analysis_engine/src -q --basetemp .pytest_tmp_ci_engine
+python -m pytest deploy/tests -q --basetemp .pytest_tmp_ci_deploy
+python -m pytest ops -q --basetemp .pytest_tmp_ci_ops
 ```
+
+`python`은 저장소 루트 가상환경의 것이어야 한다. 활성화하지 않았으면 네 줄의 `python`을
+`.\.venv\Scripts\python`으로 바꿔 쓴다.
 
 로컬 데모는 외부 유료 API를 호출하지 않는다. 실제 조사 모드는 사용자 승인과 별도
 비밀 설정 없이 실행하지 않는다. `.env`, DB, 로그, 다운로드 원문과 검수 산출물을
@@ -38,8 +46,9 @@ cd app
 
 ## 변경 원칙
 
-- 신규 보고서는 `company-report-v4-canonical` 필수 1~8장과 조건이 맞을 때의 9장만 공개한다.
-- 필수 1~8장 근거가 부족하면 문장·빈 장으로 대체하지 않고 `GATE_STOPPED`한다. 9장 비교만 성립하지 않으면 표준 부족 사유를 가진 `Grade.PARTIAL` 기본 보고서로 출고한다.
+- 신규 보고서는 `company-report-v4-canonical` 1~9장만 공개한다. 출시 모드(`REPORT_RELEASE_MODE=FULL`)에서는 9장도 필수다.
+- 어느 장이든 근거가 부족하면 문장·빈 장으로 대체하지 않는다. 얇은 장은 한 번만 보충하고, 그래도 기준에 못 미치면 그 장을 뺀 보고서를 내는 대신 `GATE_STOPPED`로 끝내며 이용 건수도 차감하지 않는다.
+- `Grade.PARTIAL` 기본 보고서는 연습 모드(`REPORT_RELEASE_MODE=SHADOW`)에서만 만든다. 출시 모드는 엄격 계약을 통과한 보고서만 `Grade.COMPLETE`로 봉인한다.
 - 수집, 작성, 캐시, 웹, PDF, Notion 중 어느 경로도 공통 출고 게이트를 우회하지 않는다.
 - `FactRecord` 또는 `Source` 필드를 바꾸면 저장 왕복과 모든 공개 렌더러 시험을 함께
   갱신한다.
@@ -49,28 +58,23 @@ cd app
 
 ## 시험
 
-테스트 임시 파일은 저장소 안의 명시적 basetemp에 둔다.
+테스트 임시 파일은 저장소 안의 명시적 basetemp에 둔다. 정본에 가까운 곳을 고쳤으면
+전체를 돌리기 전에 아래 핵심 묶음을 먼저 본다.
 
 ```powershell
 cd app
-.\.venv\Scripts\python -m pytest -q src/features/report_standard/tests src/features/provenance/tests `
+..\.venv\Scripts\python -m pytest -q src/features/report_standard/tests src/features/provenance/tests `
   src/features/company_performance/tests src/features/company_comparison/tests `
   src/features/pipeline/tests src/features/storage/tests `
   -m "not local_integration" `
   --basetemp=.pytest_tmp_core_review
-
-.\.venv\Scripts\python -m pytest -q -m "not local_integration" `
-  --basetemp=.pytest_tmp_full_review
 cd ..
-$env:TLDEXTRACT_CACHE="$PWD\app\.cache\tldextract"
-.\app\.venv\Scripts\python -m pytest -q analysis_engine/src `
-  --basetemp=app/.pytest_tmp_engine_review
 git diff --check
 ```
 
-저장소 밖의 과거 데모 15건·DART 전체 목록·검증된 공시 원문까지 준비한 환경에서만
-`python -m pytest -m local_integration`을 별도로 실행한다. 이 marker를 명시적으로
-선택했는데 자료가 없으면 통합 시험은 실패한다.
+전체는 「로컬 준비」의 네 묶음을 돌린다. 저장소 밖의 대용량 로컬 자료까지 준비한
+환경에서만 `-m local_integration`을 별도로 실행한다. 이 marker를 명시적으로 선택했는데
+자료가 없으면 통합 시험은 실패하며, 기본 회귀의 녹색으로 덮지 않는다.
 
 PDF 변경은 실제 canonical 보고서를 생성하고 모든 페이지 PNG를 직접 확인한다. PDF
 승인·다운로드 변경은 rollback, race, DB tamper, 실제 PDF/PNG 재해시 회귀도 실행한다.

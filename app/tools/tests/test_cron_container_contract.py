@@ -190,9 +190,14 @@ def test_render_v2_declares_safe_release_mode_in_blueprint() -> None:
     values = {item["key"]: item for item in web["envVars"]}
 
     assert values["ENGINE_V2"] == {"key": "ENGINE_V2", "value": "1"}
+    # ★ 결정으로 «계약이 바뀌었다» — 기대값 하향이 아니다.
+    #   여기서 「안전한 출고 모드」의 뜻이 바뀌었다. 연습 모드(SHADOW)는
+    #   품질 하한 미달을 관찰만 하고 보고서를 그대로 내보내면서 사용자
+    #   쿼터까지 깎았다 — 이름만 안전했다. 출시 값 FULL 은 부족한 장을 한 번
+    #   보충하고, 그래도 미달이면 무출고·무차감으로 멈춘다.
     assert values["REPORT_RELEASE_MODE"] == {
         "key": "REPORT_RELEASE_MODE",
-        "value": "SHADOW",
+        "value": "FULL",
     }
 
 

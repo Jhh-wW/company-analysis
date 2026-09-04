@@ -37,6 +37,7 @@ from src.features.composer.public_manifest import (
     PublicManifestError,
     build_public_structure_seal,
 )
+from src.shared.report_generation.public_projection import PublicProjectionError
 from src.features.composer.validate import V2ValidationError
 from src.features.pipeline.port import Grade, ReportTable
 from src.features.storage.reports import (
@@ -1504,7 +1505,19 @@ def test_renderer가_최종_공개본문_문단_요약을_위조하면_content_d
         return replace(report, sections=sections)
 
     monkeypatch.setattr(pipeline_module, "render_report", forge_public_content)
-    with pytest.raises(PublicManifestError, match="공개 content|본문|문단|요약"):
+    # ★ 지키는 것은 그대로다 — 위조된 공개 본문은 «어느 경우에도 출고되지
+    #   않는다». 막는 «자리»만 두 가지다(S3c, 실측):
+    #     · summary 위조 → 최종 공개 content digest 대조(PublicManifestError)
+    #     · prose·paragraph 위조 → 그보다 앞선 공개 봉인 builder의 I2
+    #       (「문단과 문장을 이어붙인 글자가 다릅니다」, PublicProjectionError)
+    #   S3c가 영수증에 장별 봉인 블록 지문을 실으면서 봉인 builder가 렌더 직후로
+    #   당겨졌고, 그 결과 문단/문장 불일치는 digest 대조보다 먼저 걸린다. 둘 다
+    #   fail-closed라 보호는 늘었지 줄지 않았다. 어느 쪽이든 통과하지 못한다는
+    #   사실을 여기서 단정한다.
+    with pytest.raises(
+        (PublicManifestError, PublicProjectionError),
+        match="공개 content|본문|문단|요약|I2",
+    ):
         _run_full()
 
 

@@ -51,7 +51,7 @@ def test_제목에_회사명_없으면_버린다():
 
 
 def test_동명_2곳이면_고유_단서가_있어야_채택():
-    # 나노솔루션형 — 동명 법인이 여럿이면 본문 단서 없이는 버린다 (조건 5 · 2026-08-14)
+    # 나노솔루션형 — 동명 법인이 여럿이면 본문 단서 없이는 버린다 (조건 5)
     args = ("나노솔루션, 신공장 착공", "나노솔루션", dt.date(2026, 3, 1), TODAY, 0)
     assert not news_ok(*args, homonym_count=2, identity_hint_found=False)
     assert news_ok(*args, homonym_count=2, identity_hint_found=True)

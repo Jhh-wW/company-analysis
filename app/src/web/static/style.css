@@ -4,11 +4,11 @@
 
 /* ══════════════════════════════════════════════════════
    폰트 — ★ CDN이 아니라 «직접 얹는다»
-   ⚠️ 왜 자체 호스팅인가 — 이 링크는 **회사 인사팀이 연다.**
-     사내망이 외부 CDN(jsdelivr 등)을 막으면 디자인이 통째로 깨진다.
+   ⚠️ 왜 자체 호스팅인가 — 사내망에서 외부 CDN(jsdelivr 등)이 차단돼도
+     화면이 깨지지 않게 글꼴을 직접 얹는다.
      1MB를 안고 가는 편이 «열었더니 글꼴이 깨져 있는» 것보다 낫다.
    ⚠️ 라이선스 — Freesentation·Prata 모두 **SIL Open Font License**로
-     상업적 사용·재배포가 허용된다 (2026-08-16 확인). 유료 폰트를 쓰지 않는다.
+     상업적 사용·재배포가 허용된다 (라이선스 확인). 유료 폰트를 쓰지 않는다.
    ══════════════════════════════════════════════════════ */
 @font-face {
   font-family: "Freesentation";
@@ -489,7 +489,7 @@ input:focus, textarea:focus, select:focus {
   color: var(--ink-3);
   font-family: var(--mono);
 }
-/* 근거 번호 (2026-08-16 사용자 지적: 「링크도 아니라서 어차피 못 읽어」).
+/* 근거 번호 — 번호만 있고 눌러 갈 곳이 없으면 읽는 사람이 출처를 확인할 수 없다.
    ★ 「조각 10·신규사업전망」이라는 **내부 이름을 감추고 번호만** 남긴다 —
      그 이름은 우리 안에서 쓰는 말이지 읽는 사람이 알 말이 아니다.
    ★ **누르면 아래 출처표로 간다.** 거기엔 보도일·매체·공시일이 적혀 있어
@@ -512,7 +512,7 @@ input:focus, textarea:focus, select:focus {
 tr:target > td { background: var(--paper-2); }
 tr:target > td:first-child { box-shadow: inset 3px 0 0 var(--ink-strong); }
 
-/* 작가 AI가 이어 쓴 글 (P-110) — 근거 대조 검증을 통과한 문장만 온다.
+/* 작가 AI가 이어 쓴 글 — 근거 대조 검증을 통과한 문장만 온다.
    ★ 읽는 글이라 목록보다 줄 간격을 넉넉히 준다. */
 .prose {
   margin: 4px 0 8px;
@@ -615,7 +615,7 @@ td.center { text-align: center; }
   font-weight: 600;
 }
 
-/* ── 숫자 표 (결정기록 D13) ────────────────────────────
+/* ── 숫자 표 ────────────────────────────
    재무·회계는 문장으로 바꾸지 않고 표 그대로 낸다.
    숫자가 많아 가로로 길어지므로 «표만» 가로로 밀리게 한다 — 페이지는 안 밀린다. */
 .numtable { margin: 10px 0 18px; }
@@ -797,7 +797,7 @@ td.center { text-align: center; }
 .dot.part { background: var(--part); }
 .dot.no { background: var(--no); }
 
-/* ── 칸별 채움률 (⑤, D11) — 세는 칸 6개가 각각 몇 %에서 채워지는지 ── */
+/* ── 칸별 채움률 — 세는 칸 6개가 각각 몇 %에서 채워지는지 ── */
 .fillbars { margin-top: 8px; }
 .fillbar-row { display: flex; align-items: center; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
 .fillbar-row:last-child { border-bottom: 0; }
@@ -823,7 +823,7 @@ td.center { text-align: center; }
 .cell-chip.suspect { background: var(--part-bg); color: var(--part); }
 
 /* ══════════════════════════════════════════════════════════
-   홈페이지 — 2026-08-17 기업분석 UI 기준
+   홈페이지 — 기업분석 UI 기준
    ----------------------------------------------------------
    이 범위 밖의 결과·확인·관리자 화면은 기존 스타일을 그대로 쓴다.
    기준: 무채색, 24px 컨테이너, 18px 상호작용 요소, 오류/삭제만 빨강.
@@ -1045,9 +1045,11 @@ td.center { text-align: center; }
 }
 .home-page .row2 { gap: 16px; }
 
+/* ★ 44px 이상 — 폰 엄지로 누르는 크기다 (설계 「사용자 화면흐름」 4절).
+   초대 링크 QR은 폰으로 찍으므로 첫 화면 버튼이 곧 랜딩 버튼이다. */
 .home-page .btn {
   display: inline-flex;
-  min-height: 42px;
+  min-height: 44px;
   align-items: center;
   justify-content: center;
   padding: 9px 16px;
@@ -1285,6 +1287,26 @@ td.center { text-align: center; }
   .home-page .btn { transition: none; }
 }
 
+/* ── 초대 링크 첫 화면(랜딩)의 카드 B — 「다른 회사 분석해 보기」 ──
+   ★ 왜 필요한가 — 카드 A(자기 회사 보고서)와 카드 B가 «똑같은 까만 버튼»이면
+     둘 중 무엇이 원래 보러 온 것인지 눈으로 구분되지 않는다. B는 덧붙는
+     선택지이므로 테두리만 있는 모양으로 낮춘다.
+   ★ 왜 class가 아니라 «순서»로 고르는가 — 화면 틀(`input.html`)의 카드 B에는
+     그 카드만 가리키는 class가 없다(실측). 틀은 이 변경의 소유가 아니므로
+     「두 번째 선택지 묶음」이라는 문서 구조로 고른다. 카드 A가 「준비 중」이라
+     버튼 없이 그려질 때도 묶음 자체는 두 개라 이 규칙은 그대로 맞는다.
+   ★ `.home-page .btn`보다 «뒤»에, 그리고 class를 더 겹쳐 특이도를 높인다 —
+     앞에 두거나 특이도가 낮으면 기본 버튼 규칙에 그대로 덮인다. */
+.home-page .link-landing .link-landing-choice + .link-landing-choice .btn {
+  border-color: var(--line);
+  background: #fff;
+  color: var(--ink);
+}
+.home-page .link-landing .link-landing-choice + .link-landing-choice .btn:hover {
+  border-color: var(--ink);
+  background: var(--paper-2);
+}
+
 /* ══════════════════════════════════════════════════════════
    보고서 결과 — 긴 글을 한 장의 문서처럼 읽는 화면
    ----------------------------------------------------------
@@ -1390,6 +1412,32 @@ td.center { text-align: center; }
   border-bottom: 1px solid var(--line);
 }
 .result-page .report-title-block { width: 100%; }
+/* 표지 다음 첫 본문 페이지 마스트헤드 — 표지(.report-cover, 가운데
+   큰 제목·실적 띠·핵심 요약)와 느낌이 겹치지 않도록 좌측 정렬의 얇은
+   두 줄 밴드로만 둔다. PDF(_masthead_flowables)와 같은 자리·같은 순서다. */
+.result-page .report-masthead {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  margin: 0 0 32px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+.result-page .report-masthead-title {
+  margin: 0 0 4px;
+  color: var(--ink);
+  font-size: clamp(20px, 2.6vw, 26px);
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -.03em;
+  word-break: keep-all;
+}
+.result-page .report-masthead-meta {
+  margin: 0;
+  color: var(--ink-3);
+  font-size: 13px;
+  line-height: 1.5;
+}
 /* 표지 실적 띠 — 정본: 디자인과_PDF_QA.md 6-1절.
    기존 결과 화면 토큰(--ink/--ink-3/--line/--surface, 카드 모서리 24px)만 쓴다.
    새 색을 만들지 않는다 — 표지에 색을 하나 더하면 장마다 강조색이 생긴다. */
@@ -1764,6 +1812,8 @@ td.center { text-align: center; }
 /* 3개년 «변화 요약» 줄 — 막대 위. 목업의 4장 요약 숫자와 같은 자리.
    ★ 값은 바로 아래 표의 첫 행·마지막 행에서만 나온다 — 독자가 눈으로
       재검산할 수 있게 근거(basis)를 값 옆에 같이 둔다. */
+/* 띠 제목 — 표지 띠 제목(.cover-metrics-title)과 같은 크기·색으로 맞춘다. */
+.result-page .ps-title { margin: 0 0 8px; color: var(--ink-3); font-size: 12.5px; letter-spacing: -.01em; }
 .result-page .period-summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
@@ -1885,8 +1935,7 @@ td.center { text-align: center; }
 /* «카드」로 판정된 흐름표(kind=card) — 화살표 없이 라벨:값 세로 목록으로
    낸다. 카드 한 장 자체는 .section-content-card를 그대로 재사용한다
    (같은 모양을 두 벌로 관리하면 한쪽만 고쳐 어긋나는 사고가 난다).
-   ★ result.html에 아직 이 kind 분기가 없다 — 추가되면 이 규칙이 바로
-   적용된다(팀장에게 소유권 요청, 진행 기록 참조). */
+   ★ result.html에 이 kind 분기가 아직 없다 — 추가되면 이 규칙이 적용된다. */
 .result-page .card-rows {
   display: flex;
   flex-direction: column;
@@ -2126,7 +2175,7 @@ td.center { text-align: center; }
   .result-page .btn { transition: none; }
 }
 
-/* PDF 전 페이지 내부 검수 — 공개 보고서와 구분되는 단색 운영 화면 */
+/* PDF 전 페이지 미리보기 화면 — 공개 보고서와 구분되는 단색 운영 화면 */
 .review-page { background: #f5f5f5; color: #171717; }
 .review-page .review-wrap { max-width: 1100px; padding: 48px 24px 96px; }
 .pdf-review {
@@ -2198,7 +2247,7 @@ td.center { text-align: center; }
 }
 .google-maps-content-attribution .GMP-attribution { white-space: nowrap; }
 
-/* 승인 전 관리자 운영 대시보드 검수 프레임: 기존 공통 간격·글꼴·색상만 사용한다. */
+/* 관리자 운영 대시보드 화면 틀: 기존 공통 간격·글꼴·색상만 사용한다. */
 .admin-frame-page { background: var(--surface-2); }
 .admin-frame .frame-heading { margin-bottom: 26px; }
 .admin-frame .frame-kicker,

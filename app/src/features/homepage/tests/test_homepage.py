@@ -1,6 +1,5 @@
 """홈페이지 수집 시험 — 가짜 `fetch`만 쓴다. 실제 접속은 하지 않는다.
 
-정본: 확정/03_수집/2_규칙/01_소스정책.md · 확정/03_수집/1_흐름/02_실패처리.md
 """
 
 from __future__ import annotations
@@ -190,6 +189,52 @@ def test_루트_접속_실패는_failed로_돌아온다():
     assert result.fragments == []
     assert "접속 실패" in result.detail
     assert result.candidate_scope_complete is False
+
+
+# ── HTTPS 전면 실패 → HTTP 재시도 (P0: robots 캐시는 scheme까지 구분해야 한다) ──
+#
+# 독립 검토 실측: robots 캐시 키를 host만으로 두면, 이 HTTP 재시도가
+# 같은 collect_homepage_fragments scope 안에서 돌기 때문에 HTTPS robots(허용)
+# 판정을 그대로 물려받아 HTTP robots.txt(전면 차단)를 다시 확인하지 않는다 —
+# 차단된 사이트를 평문으로 읽어버리는 사고다.
+
+
+def test_https_전면실패후_http_재시도는_http_robots를_다시_조회하고_차단을_지킨다():
+    """HTTPS robots는 허용, HTTPS 루트 페이지는 접속 실패, HTTP robots는 전면
+    차단인 사이트 — HTTP 재시도가 HTTPS의 「허용」 판정을 캐시로 물려받지 않고
+    HTTP robots.txt를 실제로 다시 조회해서 차단을 지켜야 한다."""
+    https_root = "https://company.example"
+    http_root = "http://company.example"
+    calls: list[str] = []
+
+    def fetch(url: str) -> str:
+        calls.append(url)
+        if url == f"{https_root}/robots.txt":
+            return "User-agent: *\nAllow: /\n"
+        if url == https_root:
+            raise HomepageFetchError("가짜 접속 실패: 루트")
+        if url == f"{http_root}/robots.txt":
+            return "User-agent: *\nDisallow: /\n"
+        if url == http_root:
+            return (
+                "<html><body><p>"
+                + ("읽으면 안 되는 차단된 본문입니다. " * 10)
+                + "</p></body></html>"
+            )
+        raise AssertionError(f"예상하지 않은 주소: {url}")
+
+    result = collect_homepage_fragments(https_root, fetch=fetch)
+
+    assert calls.count(f"{https_root}/robots.txt") == 1
+    assert calls.count(f"{http_root}/robots.txt") == 1, (
+        "HTTP robots.txt를 다시 조회하지 않았다 — HTTPS의 「허용」 판정이 HTTP로 "
+        f"샜다(P0). 실제 호출 순서: {calls}"
+    )
+    assert result.state == "failed", (
+        f"HTTP robots.txt가 전면 차단인데 state={result.state}로 성공 처리됨 "
+        f"(detail={result.detail!r}) — robots 차단을 지키지 못했다(P0)."
+    )
+    assert http_root not in calls  # robots가 막았으니 본문은 요청되지 않아야 한다
 
 
 def test_DART_apex의_실제_www이동만_재수집하고_조각에_검증표식을_붙인다():
@@ -693,7 +738,7 @@ def test_문서_확장자_링크는_따라가지_않는다():
     assert f"{ROOT}/brochure.pdf" not in calls
 
 
-# ── 인증서 이름 불일치 우회 (C안, 문제로그 P-46) ──────────
+# ── 인증서 이름 불일치 우회 (C안) ──────────
 #
 # 진짜 접속 없이, fetch·lookup_cert_names를 전부 가짜로 주입해 시험한다.
 
@@ -864,7 +909,7 @@ if __name__ == "__main__":
 
 # ── 8장「인재상과 일하는 방식」재료 우선순위 ────────────────
 #
-# 실측 배경(2026-08-25): (주)진영의 경영철학은 `/company/overview.php`에 있는데
+# 실측 배경: (주)진영의 경영철학은 `/company/overview.php`에 있는데
 # `company`로만 걸려 후보 42개 중 18번째였고 6쪽 예산 밖으로 밀렸다.
 # 아래 두 시험은 그 순서를 못 박는다 — 하나는 「들어와야 한다」, 하나는
 # 「그렇다고 아무 overview나 올리면 안 된다」는 반대쪽 못이다.
@@ -918,7 +963,7 @@ def test_경영철학_페이지를_연혁_조직도보다_먼저_읽는다():
 def test_회사와_무관한_overview는_회사소개보다_앞서지_않는다():
     """맨몸 `overview`를 맨 앞에 두면 안 된다는 반대쪽 못.
 
-    ★ 삼성전자 실측 반례(2026-08-25): `overview`를 1순위로 올렸더니
+    ★ 삼성전자 실측 반례: `overview`를 1순위로 올렸더니
       `/sustainability/accessibility/overview/`가 예산을 다 먹고, 경영이념
       (인재제일·최고지향·변화선도·정도경영·상생추구)이 실린
       `/about-us/brand-identity/brand-story/`를 놓쳤다.

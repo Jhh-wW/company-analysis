@@ -10,10 +10,7 @@ from src.features.report_recovery.constants import (
     MAX_TOTAL_AI_CALLS,
     PRIMARY_AI_CALLS,
 )
-from src.features.report_recovery.logic import (
-    decide_post_validation,
-    decide_preflight,
-)
+from src.features.report_recovery.logic import decide_post_validation
 from src.features.report_recovery.models import (
     RecoveryAction,
     RecoveryDecision,
@@ -23,11 +20,6 @@ from src.shared.generation_validation_receipt import (
     GenerationValidationReceipt,
     ValidationRound,
 )
-from src.shared.report_evidence.constants import (
-    GenerationGateStatus,
-    ReportExecutionOutcome,
-)
-from src.shared.report_evidence.models import GenerationGateDecision
 from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
 from src.shared.report_quality.models import (
     GenerationAssessment,
@@ -58,29 +50,6 @@ def _section_sha256s(prefix: str) -> tuple[tuple[str, str], ...]:
     return tuple(
         (section_id, _sha256(f"{prefix}:{section_id}"))
         for section_id in REQUIRED_EVIDENCE_SECTION_IDS
-    )
-
-
-def _gate(status: GenerationGateStatus) -> GenerationGateDecision:
-    required = REQUIRED_EVIDENCE_SECTION_IDS
-    if status is GenerationGateStatus.READY_FOR_GENERATION:
-        ready, insufficient, unknown = required, (), ()
-        outcome = None
-    elif status is GenerationGateStatus.STOP_INSUFFICIENT_EVIDENCE:
-        ready, insufficient, unknown = required[:-1], required[-1:], ()
-        outcome = ReportExecutionOutcome.INSUFFICIENT_EVIDENCE
-    else:
-        ready, insufficient, unknown = required[:-1], (), required[-1:]
-        outcome = ReportExecutionOutcome.TRANSIENT_FAILURE
-    return GenerationGateDecision(
-        company_id="corp-1",
-        status=status,
-        outcome=outcome,
-        required_section_ids=required,
-        ready_section_ids=ready,
-        insufficient_section_ids=insufficient,
-        unknown_section_ids=unknown,
-        reason_codes=(),
     )
 
 
@@ -155,6 +124,9 @@ def _primary(
         reviewer_calls=1,
         section_sha256s=_section_sha256s("primary-section"),
         evidence_packet_sha256s=_section_sha256s("evidence-packet"),
+        # 장별 봉인 블록 지문 — 보충 결속이 장부까지 비교하므로 정상
+        # 영수증에는 언제나 들어 있다.
+        section_block_sha256s=_section_sha256s("primary-block"),
     )
 
 
@@ -169,6 +141,7 @@ def _supplement(
     section_ids: tuple[str, ...] | None = None,
     section_sha256s: tuple[tuple[str, str], ...] | None = None,
     evidence_packet_sha256s: tuple[tuple[str, str], ...] | None = None,
+    section_block_sha256s: tuple[tuple[str, str], ...] | None = None,
 ) -> GenerationValidationReceipt:
     completed = section_ids or authorization.section_ids
     if section_sha256s is None:
@@ -177,6 +150,14 @@ def _supplement(
             result_sections[section_id] = _sha256(f"supplement:{section_id}")
         section_sha256s = tuple(
             (section_id, result_sections[section_id])
+            for section_id in REQUIRED_EVIDENCE_SECTION_IDS
+        )
+    if section_block_sha256s is None:
+        result_blocks = dict(primary.section_block_sha256s)
+        for section_id in completed:
+            result_blocks[section_id] = _sha256(f"supplement-block:{section_id}")
+        section_block_sha256s = tuple(
+            (section_id, result_blocks[section_id])
             for section_id in REQUIRED_EVIDENCE_SECTION_IDS
         )
     return GenerationValidationReceipt(
@@ -192,6 +173,7 @@ def _supplement(
         ),
         base_receipt_sha256=(base_receipt_sha256 or primary.receipt_sha256),
         supplemented_section_ids=completed,
+        section_block_sha256s=section_block_sha256s,
     )
 
 
@@ -203,49 +185,6 @@ def _recoverable(*section_ids: str) -> GenerationAssessment:
         ),
         underfilled=tuple(section_ids),
     )
-
-
-@pytest.mark.parametrize(
-    "status",
-    (
-        GenerationGateStatus.STOP_INSUFFICIENT_EVIDENCE,
-        GenerationGateStatus.STOP_TRANSIENT_FAILURE,
-    ),
-)
-def test_자료부족이나_조회장애는_AI전에_무차감중단한다(
-    status: GenerationGateStatus,
-) -> None:
-    decision = decide_preflight(_gate(status))
-
-    assert decision.action is RecoveryAction.STOP_NO_CHARGE
-    assert decision.projected_total_ai_calls == 0
-    assert not decision.publish_allowed
-    assert not decision.charge_allowed
-
-
-def test_아홉장이_ready일때만_기본10호출을_허용한다() -> None:
-    decision = decide_preflight(_gate(GenerationGateStatus.READY_FOR_GENERATION))
-
-    assert decision.action is RecoveryAction.RUN_PRIMARY
-    assert decision.observed_total_ai_calls == 0
-    assert decision.authorized_additional_ai_calls == PRIMARY_AI_CALLS == 10
-    assert decision.projected_total_ai_calls == 10
-
-
-def test_일부장만_ready인_축소게이트로_유료호출을_열수없다() -> None:
-    shortened = GenerationGateDecision(
-        company_id="corp-1",
-        status=GenerationGateStatus.READY_FOR_GENERATION,
-        outcome=None,
-        required_section_ids=("identity",),
-        ready_section_ids=("identity",),
-        insufficient_section_ids=(),
-        unknown_section_ids=(),
-        reason_codes=(),
-    )
-
-    with pytest.raises(ValueError, match="필수 아홉 장"):
-        decide_preflight(shortened)
 
 
 @pytest.mark.parametrize(
@@ -372,6 +311,39 @@ def test_품질사유가_아닌_회복결정에는_품질코드를_실을수없�
             reason_code="post_validation_safety_blocked",
             observed_total_ai_calls=PRIMARY_AI_CALLS,
             quality_problem_codes=("too_few_substantive_claims",),
+        )
+
+
+def test_RUN_PRIMARY_결정은_관측0회와_기본10호출_승인만_허용한다() -> None:
+    """decide_preflight를 지우며 함께 지웠던 시험이 이 불변식도 지키고 있었다.
+
+    production 호출자는 없어졌지만 ``RecoveryAction.RUN_PRIMARY``와 그 불변식은
+    자료구조에 여전히 남아 있다 — 자료구조가 규칙을 지킨다는 사실은 함수가
+    아니라 이 dataclass 자체를 직접 구성해 확인한다.
+    """
+
+    decision = RecoveryDecision(
+        action=RecoveryAction.RUN_PRIMARY,
+        reason_code="preflight_all_sections_ready",
+        observed_total_ai_calls=0,
+        authorized_additional_ai_calls=PRIMARY_AI_CALLS,
+    )
+    assert decision.projected_total_ai_calls == PRIMARY_AI_CALLS
+
+    with pytest.raises(ValueError, match="관측된 AI 호출이 없어야"):
+        RecoveryDecision(
+            action=RecoveryAction.RUN_PRIMARY,
+            reason_code="preflight_all_sections_ready",
+            observed_total_ai_calls=1,
+            authorized_additional_ai_calls=PRIMARY_AI_CALLS,
+        )
+
+    with pytest.raises(ValueError, match="9회 작성·1회 검수만"):
+        RecoveryDecision(
+            action=RecoveryAction.RUN_PRIMARY,
+            reason_code="preflight_all_sections_ready",
+            observed_total_ai_calls=0,
+            authorized_additional_ai_calls=PRIMARY_AI_CALLS - 1,
         )
 
 

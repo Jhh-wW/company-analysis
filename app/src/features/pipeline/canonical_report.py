@@ -1824,7 +1824,7 @@ def finalize_report(
     summary_ask: Callable[[str, dict[str, Any], int], tuple[dict[str, Any] | None, dict[str, Any]]],
     steps: list[dict[str, Any]],
 ) -> Report:
-    """검증된 1~8장과 조건부 9장에서 요약을 잠그고 최종 출고한다.
+    """검증된 1~9장에서 요약을 잠그고 최종 출고한다. 9장이 빠진 상태는 연습 모드(REPORT_RELEASE_MODE=SHADOW)에서만 생긴다.
 
     ``summary_ask``는 과거 호출자 호환용이다. 요약은 Reviewer 또는 원문 완전일치
     코드 검증을 통과한 FactRecord 문장을 바꾸지 않고 재사용하므로 추가 AI를

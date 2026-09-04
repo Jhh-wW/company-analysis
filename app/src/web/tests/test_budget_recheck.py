@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """비용 원장을 «다시 읽어» 유료 조사를 여는 경로를 못 박는다.
 
-★ 왜 이 파일이 생겼나 (2026-08-28)
+★ 왜 이 파일이 생겼나
   ─────────────────────────────────────────────────────────
   사용자 화면이 이렇게 말한다:
     「비용 기록을 확인할 수 없어 새 조사를 잠시 멈췄습니다.
@@ -10,7 +10,7 @@
   그런데 **관리자가 「확인」을 실행할 방법이 코드에 없었다.**
   `_BUDGET_STORE_HEALTHY` 를 True 로 되돌리는 곳이 기동 시 `_seed_ledger()` 한 곳뿐이라,
   운영 중 한 번 꺼지면 **서버를 재시작하기 전까지 모든 유료 조사가 막혔다.**
-  실제로 2026-08-28 에 그 일이 났다 — 조사 한 건이 성공한 «뒤» 다음 조사가 막혔고,
+  실제로 그 일이 났다 — 조사 한 건이 성공한 «뒤» 다음 조사가 막혔고,
   관리자 화면에는 풀 수단이 없었다.
 
 ★ 이 시험이 지키는 두 가지
@@ -150,7 +150,7 @@ def test_관리자_경로가_등록돼_있다() -> None:
     from src.web.routers import admin as admin_router
 
     # ⚠️ `app.routes` 를 보면 안 된다 — 이 앱은 라우터를 `_IncludedRouter` 로 감싸
-    #   붙이므로 개별 경로가 거기 안 드러난다(실측 2026-08-28). 라우터를 직접 본다.
+    #   붙이므로 개별 경로가 거기 안 드러난다(실측). 라우터를 직접 본다.
     경로들 = {
         (route.path, method)
         for route in admin_router.router.routes
@@ -165,7 +165,9 @@ def test_화면에_다시_읽는_버튼이_있다() -> None:
     from src.core import paths
 
     화면 = (
-        paths.APP_ROOT / "src" / "web" / "templates" / "admin_access.html"
+        # ★ 차단 배너가 비용 화면과 축소 화면이 함께 쓰는
+        #   조각으로 빠져나갔다. 버튼이 있는 곳은 이제 이 파일이다.
+        paths.APP_ROOT / "src" / "web" / "templates" / "_admin_spend_banners.html"
     ).read_text(encoding="utf-8")
 
     assert 'action="/admin/budget/recheck"' in 화면

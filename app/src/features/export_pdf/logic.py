@@ -69,19 +69,33 @@ from src.features.pipeline.port import Grade, Report, ReportSection, ReportTable
 from src.features.provenance.sources import Source, SourceKind, visible_citations
 from src.features.report_standard import build_published_report
 from src.features.report_standard.constants import SECTION_BY_ID, TIME_SECTION_IDS
-from src.features.report_standard.cover_metrics import CoverMetrics, cover_metrics
+from src.features.report_standard.cover_metrics import cover_metrics
 from src.features.report_standard.section_content import (
     SectionContentBlock,
+    masthead_lines,
     section_content_blocks,
     source_verification_label,
     summary_topic,
 )
+from src.features.report_standard.period_summary import PeriodSummaryItem
 from src.features.report_standard.visualization import (
     Card,
+    CardField,
     ChartPoint,
+    ChartSeries,
     composition_tone,
     TableVisualization,
     table_visualization,
+)
+from src.shared.report_generation.public_projection import (
+    PUBLIC_PROJECTION_VERSION,
+    PublicCoverMetricsBlock,
+    PublicPeriodSummaryBlock,
+    PublicReportProjection,
+    PublicSectionDisplay,
+    PublicTableBlock,
+    PublicVisualBlock,
+    build_report_digest,
 )
 from src.shared.report_quality.models import PublicationPolicy
 
@@ -124,6 +138,159 @@ def _partial_publication_copy(
         else "공식 근거로 확인된 항목만 수록했습니다."
     )
     return "검증된 부분 보고서(부분 완성)", detail
+
+
+def _grade_notice(
+    report: Report,
+    *,
+    projection: PublicReportProjection | None,
+    detailed: bool,
+) -> tuple[str, str]:
+    """공개 등급 고지 (제목, 본문). 고지가 없으면 두 값 다 빈 글자다.
+
+    ★ 봉인이 있으면 ``grade_notice`` 한 벌을 표지와 본문이 «똑같이» 쓴다.
+      지금까지 웹·PDF·Notion이 각자 사본을 들고 있었고 PDF 안에서도 표지와
+      본문이 다른 문장을 썼다 — 같은 정책을 서로 다른 말로 꾸미지 않도록
+      봉인 값 하나로 모은다. 그래서 이 갈래에서는 ``detailed``가
+      문구를 바꾸지 않는다.
+    """
+
+    if projection is not None:
+        title, detail = projection.grade_notice
+        return title, detail
+    if report.grade is not Grade.PARTIAL:
+        return "", ""
+    return _partial_publication_copy(report, detailed=detailed)
+
+
+def _cover_metric_rows(
+    report: Report,
+    *,
+    projection: PublicReportProjection | None,
+) -> tuple[str, str, tuple[tuple[str, str, str], ...]] | None:
+    """표지 실적 띠 (제목, 출처, (라벨,값,단위) 행들). 그릴 게 없으면 ``None``."""
+
+    if projection is not None:
+        block: PublicCoverMetricsBlock | None = projection.cover_metrics
+        if block is None or not block.items:
+            return None
+        return block.title, block.cite, block.items
+    metrics = cover_metrics(report)
+    if not metrics:
+        return None
+    return (
+        metrics.title,
+        metrics.cite,
+        tuple((item.label, item.value, item.unit) for item in metrics.items),
+    )
+
+
+def _public_projection(report: Report) -> PublicReportProjection | None:
+    """이 보고서가 «봉인 블록만 그리는» 갈래인지 판정한다.
+
+    ★ v2 FULL 보고서에는 composer가 렌더 뒤 한 번 만든 공개 봉인
+      (``report.public_projection``)이 붙어 있다. 붙어 있으면 PDF는 그 블록만
+      배치하고 파생 문구를 다시 계산하지 않는다 — 채널마다 다른 글자가 나오던
+      원인을 없앤다.
+    ★ 봉인이 없으면(``None``) v1 canonical·옛 v2 저장본이다. 그 갈래는 한
+      글자도 건드리지 않는다(옛 경로는 그대로 둔다).
+    """
+
+    if report.schema_version != ENGINE_V2_SCHEMA_VERSION:
+        return None
+    return report.public_projection
+
+
+def _chart_point_from_block(item: tuple[str, str, str, bool]) -> ChartPoint:
+    """봉인된 (label, display, ratio_text, below) 한 점을 도식 좌표로 되살린다.
+
+    ★ ``value``는 PDF 도식이 쓰지 않는다 — 막대 길이는 ``ratio``, 인쇄되는
+      글자는 ``display``에서 나온다. 봉인에 없는 값을 지어내지 않으려고 0.0으로
+      둔다(이 값이 화면에 나오면 그건 결함이다).
+    """
+
+    label, display, ratio_text, below = item
+    return ChartPoint(
+        label=label,
+        value=0.0,
+        display=display,
+        ratio=float(ratio_text),
+        below=below,
+    )
+
+
+def _visual_from_block(block: PublicVisualBlock) -> TableVisualization:
+    """봉인된 도식 블록을 그리기용 자료형으로 «옮기기만» 한다.
+
+    새 문자열을 만들지 않는다 — 라벨·값·읽는 법·비고가 전부 블록 값 그대로다.
+    ``table_visualization``(원본 표에서 다시 계산하는 순수 함수)은 이 갈래에서
+    부르지 않는다.
+    """
+
+    return TableVisualization(
+        kind=block.kind,
+        caption=block.caption,
+        unit=block.unit,
+        note=block.note,
+        reading=block.reading,
+        items=tuple(_chart_point_from_block(item) for item in block.items),
+        series=tuple(
+            ChartSeries(
+                label=label,
+                points=tuple(
+                    _chart_point_from_block(
+                        (
+                            str(point["label"]),
+                            str(point["display"]),
+                            str(point["ratio_text"]),
+                            bool(point["below"]),
+                        )
+                    )
+                    for point in points
+                ),
+                risk=bool(risk),
+            )
+            for label, risk, points in block.series
+        ),
+        flows=block.flows,
+        cards=tuple(
+            Card(
+                title=title,
+                fields=tuple(
+                    CardField(label=str(label), value=str(value))
+                    for label, value in fields["fields"]
+                ),
+            )
+            for title, fields in block.cards
+        ),
+    )
+
+
+def _period_summary_items_from_block(
+    block: PublicPeriodSummaryBlock,
+) -> tuple[PeriodSummaryItem, ...]:
+    """봉인된 3개년 띠 열 개 필드를 표시용 자료형으로 되살린다.
+
+    ★ ``PeriodSummaryItem``을 다시 쓰는 이유는 ``basis_text``(「2023년 5,665 →
+      2025년 5,940」) 한 줄을 «화면과 같은 한 곳»에서 만들기 위해서다. PDF가
+      그 문장을 따로 조립하면 웹과 갈라진다. 값은 전부 블록에서 온다.
+    """
+
+    return tuple(
+        PeriodSummaryItem(
+            label=item[0],
+            base_period=item[1],
+            base_value=item[2],
+            latest_period=item[3],
+            latest_value=item[4],
+            unit=item[5],
+            change=item[6],
+            change_kind=item[7],
+            direction=item[8],
+            note=item[9],
+        )
+        for item in block.items
+    )
 
 
 class PDFGenerationError(RuntimeError):
@@ -212,7 +379,7 @@ class _CompositionGraphic(Flowable):
     ★ 높이를 «항목 수로 계산»한다. 예전에는 31mm 고정이라 범례가 두 줄
       (항목 4개)까지만 들어갔다 — 6개가 되면 마지막 줄이 도식 밖으로 나가
       다음 문단과 겹친다.
-    ★ 범례 «한 줄»도 내용 길이에 맞춰 늘어난다(2026-08-25, 팀장 실측 —
+    ★ 범례 «한 줄»도 내용 길이에 맞춰 늘어난다(실측 —
       하이브 「MD 및 라이선싱 공식 상품(MD), IP 라이선싱 등」처럼 긴
       이름이 고정폭 한 줄(``canvas.drawString``)로 찍혀 옆 칸 글자와
       겹쳤다). 최소 높이는 예전 5.2mm 그대로라 짧은 이름의 모양은 안
@@ -410,7 +577,7 @@ _FLOW_ROW_PADDING_PT: Final[float] = 10.0
 class _FlowGraphic(Flowable):
     """표의 각 행을 3~4단계 왼쪽→오른쪽 흐름으로 표시한다.
 
-    ★ 줄 높이를 «내용 길이에 맞춰» 계산한다(2026-08-25, 카드 도입과 함께
+    ★ 줄 높이를 «내용 길이에 맞춰» 계산한다(카드 도입과 함께
       고침). 예전엔 18mm 고정이라 값이 길면 글자가 상자 밖으로 겹쳐
       나갔다 — 카드로 뺀 1·6·8장뿐 아니라 «진짜 흐름»으로 남긴 2·5·7장도
       AI가 긴 문장을 넣으면 같은 위험이 있었다. 최소 높이는 예전 18mm를
@@ -535,12 +702,15 @@ class _CoverContent(Flowable):
         styles: dict[str, ParagraphStyle],
         width: float,
         height: float,
+        projection: PublicReportProjection | None = None,
     ) -> None:
         super().__init__()
         self.report = report
         self.styles = styles
         self.width = width
         self.height = height
+        #: 봉인이 있으면 표지 고지·실적 띠·핵심 요약을 «이 블록에서만» 그린다.
+        self.projection = projection
 
     def wrap(self, avail_width: float, avail_height: float) -> tuple[float, float]:
         self.width = min(self.width, avail_width)
@@ -565,11 +735,10 @@ class _CoverContent(Flowable):
             meta.drawOn(canvas, 0, title_y - meta_height - 7)
             metadata_bottom = title_y - meta_height - 7
 
-        if self.report.grade is Grade.PARTIAL:
-            status_title, status_detail = _partial_publication_copy(
-                self.report,
-                detailed=False,
-            )
+        status_title, status_detail = _grade_notice(
+            self.report, projection=self.projection, detailed=False
+        )
+        if status_title or status_detail:
             status = Paragraph(
                 f"<b>{status_title}</b><br/>{status_detail}",
                 self.styles["cover_meta"],
@@ -577,13 +746,16 @@ class _CoverContent(Flowable):
             _, status_height = status.wrap(self.width, 18 * mm)
             status.drawOn(canvas, 0, metadata_bottom - status_height - 12)
 
-        # 표지 실적 띠 — 화면(result.html)과 «같은 순수 함수»가 고른 값만 쓴다.
-        # 값이 없으면 아무것도 그리지 않고 예전처럼 표지 여백으로 남긴다.
-        metrics = cover_metrics(self.report)
-        if metrics:
-            self._draw_cover_metrics(canvas, metrics)
+        # 표지 실적 띠 — 화면(result.html)과 «같은 값»만 쓴다. 봉인이 있으면
+        # 블록에서, 없으면(legacy) 예전처럼 순수 함수에서 고른다. 값이 없으면
+        # 아무것도 그리지 않고 예전처럼 표지 여백으로 남긴다.
+        metrics = _cover_metric_rows(self.report, projection=self.projection)
+        if metrics is not None:
+            self._draw_cover_metrics(canvas, *metrics)
 
-        summary = _summary_table(self.report, self.styles, self.width)
+        summary = _summary_table(
+            self.report, self.styles, self.width, projection=self.projection
+        )
         if summary is None:
             return
         summary_heading = Paragraph("핵심 요약", self.styles["heading"])
@@ -600,11 +772,18 @@ class _CoverContent(Flowable):
         _, table_height = summary.wrap(self.width, 70 * mm)
         summary.drawOn(canvas, 0, rule_y - 6 - table_height)
 
-    def _draw_cover_metrics(self, canvas: Canvas, metrics: CoverMetrics) -> None:
+    def _draw_cover_metrics(
+        self,
+        canvas: Canvas,
+        title_text: str,
+        cite: str,
+        items: tuple[tuple[str, str, str], ...],
+    ) -> None:
         """4장 실적표의 최신 사업연도 행을 표지 정본 좌표에 다시 보여 준다.
 
-        여기서 숫자를 만들지 않는다 — ``cover_metrics``가 표에서 글자 그대로
-        옮겨 온 값만 배치한다 (정본 6-1절 「새로 계산한 숫자 금지」).
+        여기서 숫자를 만들지 않는다 — 봉인 블록(또는 legacy 갈래의
+        ``cover_metrics``)이 표에서 글자 그대로 옮겨 온 값만 배치한다
+        (정본 6-1절 「새로 계산한 숫자 금지」).
         """
 
         # 선언 좌표가 아니라 «실제로 보이는 글자»가 정본 영역 안에 들어와야 한다.
@@ -617,7 +796,7 @@ class _CoverContent(Flowable):
         # 출처 번호는 4장 실적표와 «같은 것»을 쓴다. 표지에 새 출처를 만들지
         # 않으므로 부록 번호와 1:1이 깨지지 않는다.
         title = Paragraph(
-            _escape(_cited_text(metrics.title, metrics.cite)),
+            _escape(_cited_text(title_text, cite)),
             self.styles["cover_meta"],
         )
         _, title_height = title.wrap(self.width, 12 * mm)
@@ -628,18 +807,18 @@ class _CoverContent(Flowable):
         canvas.setLineWidth(_COVER_METRICS_RULE_PT)
         canvas.line(0, rule_y, self.width, rule_y)
 
-        column_width = self.width / len(metrics.items)
+        column_width = self.width / len(items)
         text_width = column_width - _COVER_METRICS_COLUMN_GAP_PT
-        for index, item in enumerate(metrics.items):
+        for index, (item_label, item_value, item_unit) in enumerate(items):
             label = Paragraph(
-                _escape(item.label), self.styles["cover_metric_label"]
+                _escape(item_label), self.styles["cover_metric_label"]
             )
             # 단위는 값보다 작게 붙인다 — 표지에서 크게 읽혀야 하는 것은 숫자다.
             value = Paragraph(
-                f"{_escape(item.value)} "
+                f"{_escape(item_value)} "
                 f'<font name="{constants.FONT_REGULAR}" '
                 f'size="{constants.SMALL_FONT_SIZE_PT}" '
-                f'color="{constants.COLOR_MUTED}">{_escape(item.unit)}</font>',
+                f'color="{constants.COLOR_MUTED}">{_escape(item_unit)}</font>',
                 self.styles["cover_metric_value"],
             )
             _, label_height = label.wrap(text_width, 10 * mm)
@@ -859,6 +1038,19 @@ def _styles() -> dict[str, ParagraphStyle]:
             textColor=ink,
             wordWrap="CJK",
         ),
+        # 표지 다음 첫 본문 페이지 맨 위 마스트헤드 회사명 줄.
+        # cover_title(31pt)보다 작고 heading(17pt)보다 큰 좌측 정렬 밴드다.
+        "masthead_title": ParagraphStyle(
+            "MastheadTitle",
+            parent=base["Title"],
+            fontName=constants.FONT_SEMIBOLD,
+            fontSize=constants.MASTHEAD_TITLE_FONT_SIZE_PT,
+            leading=constants.MASTHEAD_TITLE_LEADING_PT,
+            alignment=TA_LEFT,
+            textColor=ink,
+            spaceAfter=3,
+            wordWrap="CJK",
+        ),
         "heading": ParagraphStyle(
             "ReportHeading",
             parent=base["Heading2"],
@@ -1006,24 +1198,41 @@ def _cited_text(text: str, cite: str) -> str:
     return f"{text} {marker}" if marker else text
 
 
-def _split_wide_table(table: ReportTable, *, max_columns: int = 5) -> list[ReportTable]:
+#: 한 조각에 넣는 최대 열 수. 이보다 넓은 표는 첫 열을 반복하며 나눈다.
+_MAX_TABLE_COLUMNS: Final[int] = 5
+
+
+def _wide_table_column_groups(width: int, max_columns: int) -> list[list[int]]:
+    """넓은 표를 나눌 «값 열» 묶음. v1·v2가 같은 규칙으로 나누게 한 곳에 둔다."""
+
+    value_columns = list(range(1, width))
+    return [
+        value_columns[start : start + (max_columns - 1)]
+        for start in range(0, len(value_columns), max_columns - 1)
+    ]
+
+
+def _continued_caption(caption: str, index: int, total: int) -> str:
+    """둘째 조각부터 「(계속 2/3)」을 붙인다 — 첫 조각 캡션은 원문 그대로."""
+
+    return caption if index == 1 else f"{caption} (계속 {index}/{total})"
+
+
+def _split_wide_table(
+    table: ReportTable, *, max_columns: int = _MAX_TABLE_COLUMNS
+) -> list[ReportTable]:
     """일반표를 첫 열을 반복하는 최대 5열 표들로 나눈다."""
 
     width = len(table.headers)
     if width <= max_columns:
         return [table]
     chunks: list[ReportTable] = []
-    value_columns = list(range(1, width))
-    groups = [
-        value_columns[start : start + (max_columns - 1)]
-        for start in range(0, len(value_columns), max_columns - 1)
-    ]
+    groups = _wide_table_column_groups(width, max_columns)
     for index, group in enumerate(groups, start=1):
         columns = [0, *group]
-        suffix = "" if index == 1 else f" (계속 {index}/{len(groups)})"
         chunks.append(
             ReportTable(
-                caption=f"{table.caption}{suffix}",
+                caption=_continued_caption(table.caption, index, len(groups)),
                 headers=[table.headers[column] for column in columns],
                 rows=[[row[column] for column in columns] for row in table.rows],
                 cite=table.cite,
@@ -1089,7 +1298,7 @@ def _flow_card_table(
 
 def _add_flow_card_visualization(
     story: list[Flowable],
-    table: ReportTable,
+    table: ReportTable | PublicTableBlock,
     visual: TableVisualization,
     styles: dict[str, ParagraphStyle],
     width: float,
@@ -1162,11 +1371,39 @@ def _add_report_table(
         for chunk in chunks:
             _add_report_table(story, chunk, styles, width)
         return
-    caption = _cited_text(table.caption, table.cite)
-    story.append(Paragraph(_escape(caption), styles["small_bold"]))
+    _add_grid_table(
+        story,
+        caption=table.caption,
+        cite=table.cite,
+        headers=tuple(table.headers),
+        rows=tuple(tuple(row) for row in table.rows),
+        numeric=table.numeric,
+        styles=styles,
+        width=width,
+    )
+
+
+def _add_grid_table(
+    story: list[Flowable],
+    *,
+    caption: str,
+    cite: str,
+    headers: Sequence[str],
+    rows: Sequence[Sequence[str]],
+    numeric: bool,
+    styles: dict[str, ParagraphStyle],
+    width: float,
+) -> None:
+    """캡션 + 격자 표 한 장을 그린다 (v1·v2 공용 — 도식이 없을 때의 기본 모양).
+
+    값을 만들지 않는다. 넘겨받은 글자만 배치하므로 봉인 블록도 canonical 표도
+    «같은 코드»로 그려진다 — 두 벌로 갈라지면 채널이 조용히 어긋난다.
+    """
+
+    story.append(Paragraph(_escape(_cited_text(caption, cite)), styles["small_bold"]))
 
     max_columns = max(
-        [len(table.headers), *(len(row) for row in table.rows)],
+        [len(headers), *(len(row) for row in rows)],
         default=0,
     )
     if max_columns == 0:
@@ -1202,19 +1439,19 @@ def _add_report_table(
 
     data: list[list[Paragraph]] = []
     repeat_rows = 0
-    if table.headers:
+    if headers:
         header_styles = [
-            styles["table_head_numeric"] if table.numeric and index > 0 else styles["table_head"]
+            styles["table_head_numeric"] if numeric and index > 0 else styles["table_head"]
             for index in range(max_columns)
         ]
-        header_rows = chunk_row(table.headers, header_styles)
+        header_rows = chunk_row(headers, header_styles)
         data.extend(header_rows)
         repeat_rows = len(header_rows)
     body_styles = [
-        styles["table_numeric"] if table.numeric and index > 0 else styles["table"]
+        styles["table_numeric"] if numeric and index > 0 else styles["table"]
         for index in range(max_columns)
     ]
-    for row in table.rows:
+    for row in rows:
         data.extend(chunk_row(row, body_styles))
     if not data:
         return
@@ -1234,9 +1471,9 @@ def _add_report_table(
         ("TOPPADDING", (0, 0), (-1, -1), 6),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
     ]
-    if table.headers:
+    if headers:
         commands.append(("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(constants.COLOR_HEADER)))
-    if table.numeric and max_columns > 1:
+    if numeric and max_columns > 1:
         commands.append(("ALIGN", (1, 0), (-1, -1), "RIGHT"))
     report_table.setStyle(TableStyle(commands))
     story.extend([report_table, Spacer(1, 9)])
@@ -1252,27 +1489,31 @@ _PARAGRAPH_NUMBER_COLUMN_PT: Final[float] = 18.0
 _PARAGRAPH_NUMBER_GAP_PT: Final[float] = 5.0
 
 
-def _paragraph_number_markup(position: int) -> str:
+def _paragraph_number_markup(position: int | str) -> str:
     """웹(result.html의 ``.pno``)과 «같은 계산식»으로 문단 앞에 «1.» «2.»를 붙인다.
 
-    ★ 왜 코드가 붙이나 — v2-32와 같은 이유. 번호는 «표시 방식»이지
+    ★ 왜 코드가 붙이나 — 웹 문단 번호와 같은 이유. 번호는 «표시 방식»이지
       «사실»이 아니다. AI에게 시키면 번호가 본문 글자로 들어가 인용
       추적·중복 검사·부록 1:1 검사가 그 번호를 사실로 오인한다. 여기서
       붙이면 ``_escape(text)``가 받는 문장은 한 글자도 안 바뀐다.
     ★ PDF가 «다운로드 정본»이다 — 웹에만 있고 PDF에 없으면 「3번 문단
-      보세요」가 성립하지 않는다(팀장 실측: 웹 25개 · PDF 0개).
-    ★ 2026-08-25에 «장번호-문단번호»(예: 2-1)에서 «문단번호만»으로 바꿨다.
+      보세요」가 성립하지 않는다(실측: 웹 25개 · PDF 0개).
+    ★ 예전 «장번호-문단번호»(예: 2-1)에서 «문단번호만»으로 바꿨다.
       이유(사용자): 이미 「2. 사업 구조와 수익 모델」이라는 장 제목 아래에
       있으므로 장 번호를 문단마다 되풀이할 이유가 없다.
       부수 효과로 옛 quirk가 사라진다 — 전에는 ``display_number``가 비면
       웹이 «문단 자신의 0-기준 순번»을 장번호 자리에 대신 써서 「0-1」
       「1-2」 같은 번호가 나왔다. 이제 장번호를 아예 안 쓰므로 그 자리가
       없어졌고, 웹·PDF가 어긋날 여지도 같이 없어졌다.
+    ★ 정수를 주면 예전처럼 «여기서» 「1.」을 만든다(v1·legacy 갈래와, 웹과
+      형식이 같은지 맞대 보는 시험이 그렇게 부른다). 글자를 주면 봉인 블록이
+      이미 매긴 번호이므로 그대로 쓴다 — 봉인이 있는데 다시 세지 않는다.
     """
+    number_text = f"{position}." if isinstance(position, int) else position
     return (
         f'<font name="{constants.FONT_SEMIBOLD}" '
         f'size="{_PARAGRAPH_NUMBER_FONT_SIZE_PT}" '
-        f'color="{constants.COLOR_MUTED}">{position}.'
+        f'color="{constants.COLOR_MUTED}">{_escape(number_text)}'
         f"</font>"
     )
 
@@ -1282,8 +1523,14 @@ def _numbered_paragraph(
     text: str,
     styles: dict[str, ParagraphStyle],
     width: float,
+    *,
+    number_text: str = "",
 ) -> Table:
-    """번호와 본문을 실제 두 열로 놓아 모든 줄의 본문 시작선을 맞춘다."""
+    """번호와 본문을 실제 두 열로 놓아 모든 줄의 본문 시작선을 맞춘다.
+
+    ``number_text``가 있으면(v2 봉인 갈래) 그 번호를 «그대로» 쓴다 — 봉인이
+    이미 매긴 번호를 렌더가 다시 세면 웹·PDF가 갈라질 수 있다.
+    """
 
     number_style = ParagraphStyle(
         f"ReportParagraphNumber{position}",
@@ -1299,7 +1546,9 @@ def _numbered_paragraph(
         parent=styles["body"],
         spaceAfter=0,
     )
-    number = Paragraph(_paragraph_number_markup(position), number_style)
+    number = Paragraph(
+        _paragraph_number_markup(number_text or position), number_style
+    )
     body = Paragraph(_escape(text), body_style)
     number_column = min(_PARAGRAPH_NUMBER_COLUMN_PT, width)
     table = Table(
@@ -1454,13 +1703,241 @@ def _add_section_content_block(
         story.extend(card_flowables)
 
 
-def _section_heading(section: ReportSection) -> str:
+# ══════════════════════════════════════════════════════════
+# v2 봉인 갈래 — 블록을 «배치만» 한다
+# ══════════════════════════════════════════════════════════
+
+
+def _split_wide_projection_table(
+    table: PublicTableBlock,
+) -> list[tuple[str, tuple[str, ...], tuple[tuple[str, ...], ...]]]:
+    """봉인된 표를 v1과 «같은 규칙»으로 최대 5열 조각으로 나눈다.
+
+    나눈 조각은 (캡션, 머리글, 행들)뿐이다 — 봉인 블록을 새로 만들지 않는다.
+    봉인은 composer가 한 번 만든 것이고, 여기서 만든 값은 화면 배치용이다.
+    """
+
+    width = len(table.headers)
+    if width <= _MAX_TABLE_COLUMNS:
+        return [(table.caption, table.headers, table.rows)]
+    groups = _wide_table_column_groups(width, _MAX_TABLE_COLUMNS)
+    chunks: list[tuple[str, tuple[str, ...], tuple[tuple[str, ...], ...]]] = []
+    for index, group in enumerate(groups, start=1):
+        columns = [0, *group]
+        chunks.append(
+            (
+                _continued_caption(table.caption, index, len(groups)),
+                tuple(table.headers[column] for column in columns),
+                tuple(
+                    tuple(row[column] for column in columns) for row in table.rows
+                ),
+            )
+        )
+    return chunks
+
+
+def _add_projection_visualization(
+    story: list[Flowable],
+    table: PublicTableBlock,
+    visual: PublicVisualBlock,
+    styles: dict[str, ParagraphStyle],
+    width: float,
+) -> bool:
+    """봉인된 도식 하나를 그린다. 그릴 수 없는 종류면 거짓을 돌려 표로 넘긴다."""
+
+    chart = _visual_from_block(visual)
+    if chart.kind == "card":
+        _add_flow_card_visualization(story, table, chart, styles, width)
+        return True
+    if chart.kind == "composition":
+        graphic: Flowable = _CompositionGraphic(chart, width)
+    elif chart.kind == "trend":
+        graphic = _TrendGraphic(chart, width)
+    elif chart.kind == "flow":
+        graphic = _FlowGraphic(chart, table.headers, width)
+    else:
+        return False
+    caption = _cited_text(table.caption, table.cite)
+    source_note = _cited_text("자료", table.cite)
+    note = f"{source_note} · {chart.note}" if chart.note else source_note
+    flowables: list[Flowable] = [
+        Paragraph(_escape(caption), styles["small_bold"]),
+        Spacer(1, 3),
+        graphic,
+        Spacer(1, 5),
+    ]
+    # ★ 「읽는 법」 — 화면(result.html의 .chart-reading)에만 있던 줄을 PDF에도
+    #   낸다(설계 결정 D5). 다운로드본이 정본인데 그림 해석이 화면에만 있으면
+    #   같은 보고서가 채널마다 다른 이해도를 준다. 글자는 봉인 값 그대로다.
+    if chart.reading.strip():
+        flowables.extend(
+            [Paragraph(_escape(chart.reading), styles["small"]), Spacer(1, 4)]
+        )
+    flowables.extend([Paragraph(_escape(note), styles["small"]), Spacer(1, 12)])
+    story.append(KeepTogether(flowables))
+    return True
+
+
+def _add_projection_table(
+    story: list[Flowable],
+    table: PublicTableBlock,
+    visual: PublicVisualBlock | None,
+    styles: dict[str, ParagraphStyle],
+    width: float,
+) -> None:
+    if visual is not None and _add_projection_visualization(
+        story, table, visual, styles, width
+    ):
+        return
+    for caption, headers, rows in _split_wide_projection_table(table):
+        _add_grid_table(
+            story,
+            caption=caption,
+            cite=table.cite,
+            headers=headers,
+            rows=rows,
+            numeric=table.numeric,
+            styles=styles,
+            width=width,
+        )
+
+
+#: 3개년 변화 요약 띠의 열 폭 비율 — 지표·변화·근거(·비고). 비고가 있는
+#: 보고서에서만 넷째 칸을 쓴다(빈 칸을 남기지 않는다).
+_PERIOD_SUMMARY_WIDTHS: Final[tuple[float, float, float]] = (0.22, 0.18, 0.60)
+_PERIOD_SUMMARY_WIDTHS_WITH_NOTE: Final[tuple[float, float, float, float]] = (
+    0.18,
+    0.15,
+    0.42,
+    0.25,
+)
+
+
+def _add_projection_period_summary(
+    story: list[Flowable],
+    block: PublicPeriodSummaryBlock,
+    styles: dict[str, ParagraphStyle],
+    width: float,
+) -> None:
+    """3개년 변화 요약 띠 — 화면(.period-summary)이 그리던 줄을 PDF에도 낸다.
+
+    숫자를 만들지 않는다. 봉인된 열 개 필드를 배치하고, 계산 근거 한 줄만
+    화면과 «같은 함수»(``PeriodSummaryItem.basis_text``)로 잇는다.
+    """
+
+    items = _period_summary_items_from_block(block)
+    if not items:
+        return
+    with_note = any(item.note.strip() for item in items)
+    ratios = (
+        _PERIOD_SUMMARY_WIDTHS_WITH_NOTE if with_note else _PERIOD_SUMMARY_WIDTHS
+    )
+    rows: list[list[Paragraph]] = []
+    for item in items:
+        row = [
+            Paragraph(_escape(item.label), styles["table_head"]),
+            Paragraph(_escape(item.change), styles["small_bold"]),
+            Paragraph(_escape(item.basis_text), styles["table"]),
+        ]
+        if with_note:
+            row.append(Paragraph(_escape(item.note), styles["table"]))
+        rows.append(row)
+    band = Table(rows, colWidths=[width * ratio for ratio in ratios], hAlign="LEFT")
+    band.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                (
+                    "LINEBELOW",
+                    (0, 0),
+                    (-1, -2),
+                    0.45,
+                    colors.HexColor(constants.COLOR_LINE),
+                ),
+            ]
+        )
+    )
+    story.append(
+        KeepTogether(
+            [
+                Paragraph(
+                    _escape(_cited_text(block.title, block.cite)),
+                    styles["small_bold"],
+                ),
+                Spacer(1, 3),
+                band,
+                Spacer(1, 10),
+            ]
+        )
+    )
+
+
+def _add_projection_section(
+    story: list[Flowable],
+    display: PublicSectionDisplay,
+    styles: dict[str, ParagraphStyle],
+    width: float,
+    anchor: str,
+) -> None:
+    """장 하나를 봉인 블록 «만» 읽어 배치한다.
+
+    ★ ``.ledger``(FactRecord·fact_id·등급 기여)는 여기서 한 번도 읽지 않는다.
+      그건 감사 장부이지 공개 본문이 아니다 — 장부를 바꿔도 PDF 글자가
+      안 바뀐다는 성질이 이 갈래의 계약이다.
+    """
+
+    title = _section_heading(display)
+    heading_flowables: list[Flowable] = [
+        _OutlineAnchor(anchor, title, level=1),
+        Paragraph(_section_heading_markup(display), styles["heading"]),
+        _HorizontalRule(width),
+        Spacer(1, 10),
+    ]
+    if not (display.paragraphs or display.tables):
+        story.extend(heading_flowables)
+        return
+
+    visuals_by_index = {visual.table_index: visual for visual in display.visuals}
+    band: list[Flowable] = []
+    if display.period_summary is not None:
+        _add_projection_period_summary(band, display.period_summary, styles, width)
+
+    if display.paragraphs:
+        paragraphs = [
+            _numbered_paragraph(position, text, styles, width, number_text=ordinal)
+            for position, (ordinal, text) in enumerate(display.paragraphs, start=1)
+        ]
+        story.append(KeepTogether([*heading_flowables, paragraphs[0]]))
+        story.extend(paragraphs[1:])
+        story.extend(band)
+        table_start = 0
+    else:
+        first_content: list[Flowable] = list(band)
+        table_start = 0
+        if not first_content and display.tables:
+            _add_projection_table(
+                first_content, display.tables[0], visuals_by_index.get(0), styles, width
+            )
+            table_start = 1
+        story.append(KeepTogether([*heading_flowables, *first_content]))
+
+    for index in range(table_start, len(display.tables)):
+        _add_projection_table(
+            story, display.tables[index], visuals_by_index.get(index), styles, width
+        )
+
+
+def _section_heading(section: ReportSection | PublicSectionDisplay) -> str:
     if section.display_number:
         return f"{section.display_number}. {section.title}"
     return section_display_heading(section.cell, section.title)
 
 
-def _section_heading_markup(section: ReportSection) -> str:
+def _section_heading_markup(section: ReportSection | PublicSectionDisplay) -> str:
     title = _escape(_section_heading(section))
     if section.cell not in TIME_SECTION_IDS or not section.tag.strip():
         return title
@@ -1472,9 +1949,46 @@ def _section_heading_markup(section: ReportSection) -> str:
     )
 
 
-def _add_citations(story: list[Flowable], report: Report, styles: dict[str, ParagraphStyle]) -> None:
-    citations = _citations(report)
-    if not citations:
+def _add_citations(
+    story: list[Flowable],
+    report: Report,
+    styles: dict[str, ParagraphStyle],
+    *,
+    projection: PublicReportProjection | None = None,
+) -> None:
+    """부록 「출처와 검증 상태」 표.
+
+    봉인이 있으면 행 여섯 칸이 전부 봉인 값이다 — 특히 「사실 검증」 라벨을
+    렌더 시점에 다시 세지 않는다(``source_verification_label`` 미호출).
+    """
+
+    #: (번호, 자료 마크업, 기준일·상태, 사실 검증, 원문 위치, 본문 사용 장)
+    entries: list[tuple[str, str, str, str, str, str]]
+    if projection is not None:
+        entries = [
+            (
+                str(row.number),
+                _link_markup(row.label_display, row.url),
+                row.status_display,
+                row.verification_label,
+                row.location,
+                row.used_in_display,
+            )
+            for row in projection.citations
+        ]
+    else:
+        entries = [
+            (
+                str(source.number),
+                _source_label_markup(source),
+                _source_status(source),
+                source_verification_label(report, source.source_id),
+                source.location.strip() or "—",
+                _source_used_sections(source),
+            )
+            for source in _citations(report)
+        ]
+    if not entries:
         return
     story.extend(
         [
@@ -1497,18 +2011,15 @@ def _add_citations(story: list[Flowable], report: Report, styles: dict[str, Para
             Paragraph("본문 사용 장", styles["table_head"]),
         ]
     ]
-    for source in citations:
+    for number, label_markup, status, verification, location, used_in in entries:
         rows.append(
             [
-                Paragraph(_escape(str(source.number)), styles["table"]),
-                Paragraph(_source_label_markup(source), styles["table"]),
-                Paragraph(_escape(_source_status(source)), styles["table"]),
-                Paragraph(
-                    _escape(source_verification_label(report, source.source_id)),
-                    styles["table"],
-                ),
-                Paragraph(_escape(source.location.strip() or "—"), styles["table"]),
-                Paragraph(_escape(_source_used_sections(source)), styles["table"]),
+                Paragraph(_escape(number), styles["table"]),
+                Paragraph(label_markup, styles["table"]),
+                Paragraph(_escape(status), styles["table"]),
+                Paragraph(_escape(verification), styles["table"]),
+                Paragraph(_escape(location), styles["table"]),
+                Paragraph(_escape(used_in), styles["table"]),
             ]
         )
     table = Table(
@@ -1550,11 +2061,14 @@ def _source_label(source: Source) -> str:
     return label
 
 
-def _source_label_markup(source: Source) -> str:
-    """원문 URL이 있으면 무채색 밑줄 링크로, 없으면 같은 문서명으로 낸다."""
+def _link_markup(label_text: str, url_text: str) -> str:
+    """문서명을 원문 링크로 감싼다 — 링크로 못 만들면 같은 문서명 그대로.
 
-    label = _escape(_source_label(source))
-    url = source.url.strip()
+    v1(Source)과 v2(봉인된 부록 행)가 «같은 코드»로 같은 마크업을 만든다.
+    """
+
+    label = _escape(label_text)
+    url = url_text.strip()
     if not url.startswith(("https://", "http://")):
         return label
     escaped_url = html.escape(_normalize_pdf_text(url), quote=True)
@@ -1562,6 +2076,12 @@ def _source_label_markup(source: Source) -> str:
         f'<link href="{escaped_url}" color="{constants.COLOR_INK}">'
         f"<u>{label}</u></link>"
     )
+
+
+def _source_label_markup(source: Source) -> str:
+    """원문 URL이 있으면 무채색 밑줄 링크로, 없으면 같은 문서명으로 낸다."""
+
+    return _link_markup(_source_label(source), source.url)
 
 
 def _source_status(source: Source) -> str:
@@ -1614,24 +2134,48 @@ def _summary_table(
     report: Report,
     styles: dict[str, ParagraphStyle],
     width: float,
+    *,
+    projection: PublicReportProjection | None = None,
 ) -> Table | None:
-    if not report.summary_items:
+    """표지 「핵심 요약」 표.
+
+    봉인이 있으면 번호·주제어·장 번호를 «다시 만들지 않고» 봉인 값을 쓴다 —
+    세 채널이 각자 세던 것을 한 번만 세게 한 것이 봉인의 목적이다.
+    """
+
+    #: (번호, 주제어, 장 번호(없으면 빈 글자), 문장)
+    entries: list[tuple[str, str, str, str]]
+    if projection is not None:
+        entries = [
+            (row.ordinal, row.topic, row.section_display_number, row.text)
+            for row in projection.summary
+        ]
+    else:
+        entries = []
+        for index, item in enumerate(report.summary_items, start=1):
+            spec = SECTION_BY_ID.get(item.section_id)
+            entries.append(
+                (
+                    f"{index:02d}",
+                    summary_topic(item.section_id),
+                    "" if spec is None else spec.display_number,
+                    item.text.strip(),
+                )
+            )
+    if not entries:
         return None
     rows: list[list[Paragraph]] = []
-    for index, item in enumerate(report.summary_items, start=1):
-        spec = SECTION_BY_ID.get(item.section_id)
-        topic = summary_topic(item.section_id)
-        related = f"[{spec.display_number}장]" if spec is not None else ""
-        sentence = _escape(item.text.strip())
-        if related:
+    for ordinal, topic, display_number, text in entries:
+        sentence = _escape(text)
+        if display_number:
             sentence += (
                 f'&nbsp;&nbsp;<font name="{constants.FONT_REGULAR}" '
                 f'size="{constants.SMALL_FONT_SIZE_PT}" '
-                f'color="{constants.COLOR_MUTED}">{related}</font>'
+                f'color="{constants.COLOR_MUTED}">[{display_number}장]</font>'
             )
         rows.append(
             [
-                Paragraph(f"{index:02d}", styles["summary_number"]),
+                Paragraph(ordinal, styles["summary_number"]),
                 Paragraph(_escape(topic), styles["table_head"]),
                 Paragraph(sentence, styles["table"]),
             ]
@@ -1658,10 +2202,47 @@ def _summary_table(
     return table
 
 
+def _masthead_flowables(
+    report: Report,
+    styles: dict[str, ParagraphStyle],
+    width: float,
+) -> list[Flowable]:
+    """표지 다음 첫 본문 페이지 맨 위에 회사명 마스트헤드를 좌측 정렬 밴드로 그린다.
+
+    표지(``_CoverContent``)는 페이지 중앙께에 큰 제목·실적 띠·핵심 요약을
+    모아 두므로, 여기서는 같은 인상을 주지 않도록 두 줄 + 얇은 구분선짜리
+    작은 밴드로만 표시한다. 세 채널이 함께 쓰는 ``masthead_lines``의
+    문자열을 그대로 옮기고 새 문장을 짓지 않는다.
+    """
+
+    company_line, meta_line = masthead_lines(report)
+    return [
+        Paragraph(_escape(company_line), styles["masthead_title"]),
+        Paragraph(_escape(meta_line), styles["small"]),
+        _HorizontalRule(width),
+        Spacer(1, 12),
+    ]
+
+
+def _shortfall_reasons(
+    report: Report, *, projection: PublicReportProjection | None
+) -> tuple[str, ...]:
+    """미제공 사유 목록. 봉인이 있으면 봉인된 header 값을 쓴다."""
+
+    if projection is not None:
+        reasons = projection.header.get("shortfall_reasons", ())
+        if isinstance(reasons, (list, tuple)):
+            return tuple(str(reason) for reason in reasons)
+        return ()
+    return tuple(report.shortfall_reasons)
+
+
 def _document_header(
     report: Report,
     styles: dict[str, ParagraphStyle],
     width: float,
+    *,
+    projection: PublicReportProjection | None = None,
 ) -> list[Flowable]:
     """표지의 제목과 0장 핵심 요약을 만들고 본문을 다음 페이지에서 시작한다."""
 
@@ -1675,15 +2256,16 @@ def _document_header(
             styles,
             width,
             A4[1] - constants.PAGE_TOP_MARGIN_PT - constants.PAGE_BOTTOM_MARGIN_PT,
+            projection=projection,
         ),
         PageBreak(),
         _OutlineAnchor("report-body", "분석 본문", level=0),
+        *_masthead_flowables(report, styles, width),
     ]
-    if report.grade is Grade.PARTIAL:
-        partial_title, partial_detail = _partial_publication_copy(
-            report,
-            detailed=True,
-        )
+    partial_title, partial_detail = _grade_notice(
+        report, projection=projection, detailed=True
+    )
+    if partial_title or partial_detail:
         items.extend(
             [
                 _OutlineAnchor("partial-notice", "부분 보고서 안내", level=1),
@@ -1691,7 +2273,7 @@ def _document_header(
                 Paragraph(partial_detail, styles["body"]),
                 *[
                     Paragraph(f"- {_escape(reason)}", styles["body"])
-                    for reason in report.shortfall_reasons
+                    for reason in _shortfall_reasons(report, projection=projection)
                 ],
                 Spacer(1, 14),
             ]
@@ -1735,12 +2317,32 @@ def _page_furniture(canvas: Canvas, doc: SimpleDocTemplate) -> None:
     canvas.restoreState()
 
 
+def _content_manifest_metadata(
+    report: Report, *, projection: PublicReportProjection | None
+) -> tuple[str, str]:
+    """PDF 메타에 실을 (지문 버전, 지문) 한 쌍.
+
+    ★ 봉인이 있으면 ``PublicReportDigest.content_sha256``이다. 이 지문은 공개
+      본문뿐 아니라 감사 장부(FactRecord·fact_id·등급 기여)까지 덮으므로,
+      「글자는 같은데 장부가 다른」 PDF를 같은 공개물로 승인하지 못한다
+      (PDF 전용 별도 직렬화기였던 옛 지문 C를 대체한다).
+    ★ 봉인이 없는 v1·옛 v2 저장본은 옛 지문을 그대로 쓴다. 그 경로에는 대체할
+      봉인 자체가 없고, 값을 바꾸면 이미 나간 PDF의 bytes와 승인 해시가
+      달라진다(옛 경로는 그대로 둔다).
+    """
+
+    if projection is not None:
+        return PUBLIC_PROJECTION_VERSION, build_report_digest(projection).content_sha256
+    return CONTENT_MANIFEST_VERSION, public_content_manifest_sha256(report)
+
+
 def _add_accessibility_metadata(
     raw_pdf: bytes,
     title: str,
     *,
     author: str,
     subject: str,
+    content_manifest_version: str,
     content_manifest_sha256: str,
 ) -> bytes:
     """문서 제목·언어·제목 표시 설정을 추가한다(가짜 tagged 구조는 만들지 않는다)."""
@@ -1798,7 +2400,7 @@ def _add_accessibility_metadata(
             "/Title": title,
             "/Subject": subject,
             "/Author": author,
-            PDF_MANIFEST_VERSION_KEY: CONTENT_MANIFEST_VERSION,
+            PDF_MANIFEST_VERSION_KEY: content_manifest_version,
             PDF_MANIFEST_SHA256_KEY: content_manifest_sha256,
         }
     )
@@ -1835,10 +2437,12 @@ def _build_pdf(report: Report) -> bytes:
         # v2(엔진 v2 composer): v1 canonical 투영(build_published_report)은
         # v2 구조(빈 fact_records·다른 검증 방식)와 맞지 않아 태우지 않는다.
         # composer 자체 3검사(validate_v2)만 다시 확인하고 검증된 Report를
-        # 그대로 조립한다 (실행계획 04장 3-4절 2항 — v1 경로는 무변, 분기는
-        # schema_version 비교로만 나눈다).
+        # 그대로 조립한다 (v1 경로는 무변, 분기는 schema_version 비교로만
+        # 나눈다).
         validate_v2(report)
+        projection = _public_projection(report)
     else:
+        projection = None
         # 공개 내보내기는 저장 시점과 관계없이 현재 canonical 게이트를 다시 통과한다.
         # 구형 보고서를 호환 렌더링하면 폐기한 목차·직무 내용이 다시 노출될 수 있다.
         report = build_published_report(report)
@@ -1865,30 +2469,47 @@ def _build_pdf(report: Report) -> bytes:
     setattr(document, "report_author", author)
     setattr(document, "report_subject", subject)
     styles = _styles()
-    story: list[Flowable] = _document_header(report, styles, document.width)
-    for index, section in enumerate(report.sections):
-        _add_section(
-            story,
-            report,
-            section,
-            styles,
-            document.width,
-            f"section-{index}",
-        )
+    story: list[Flowable] = _document_header(
+        report, styles, document.width, projection=projection
+    )
+    if projection is not None:
+        # v2 FULL — 봉인 블록만 배치한다(장 순서는 봉인이 정본 아홉 장으로 고정).
+        for index, block in enumerate(projection.sections):
+            _add_projection_section(
+                story,
+                block.display,
+                styles,
+                document.width,
+                f"section-{index}",
+            )
+    else:
+        for index, section in enumerate(report.sections):
+            _add_section(
+                story,
+                report,
+                section,
+                styles,
+                document.width,
+                f"section-{index}",
+            )
 
-    _add_citations(story, report, styles)
+    _add_citations(story, report, styles, projection=projection)
     document.build(
         story,
         onFirstPage=_page_furniture,
         onLaterPages=_page_furniture,
         canvasmaker=_BrandedCanvas,
     )
+    manifest_version, manifest_sha256 = _content_manifest_metadata(
+        report, projection=projection
+    )
     return _add_accessibility_metadata(
         buffer.getvalue(),
         title,
         author=author,
         subject=subject,
-        content_manifest_sha256=public_content_manifest_sha256(report),
+        content_manifest_version=manifest_version,
+        content_manifest_sha256=manifest_sha256,
     )
 
 

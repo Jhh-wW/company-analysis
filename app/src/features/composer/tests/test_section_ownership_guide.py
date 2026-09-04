@@ -65,7 +65,7 @@ def test_비교_장은_자사_내용_재출력을_막는다():
 
 
 def test_인용_규칙에_장_참조_지침이_있다():
-    """값을 복사하지 말고 «그 장을 가리키라»는 정본 §10 규칙."""
+    """값을 복사하지 말고 «그 장을 가리키라»는 규칙."""
     assert "다른 장이 소유한" in CITATION_RULES_GUIDE
     assert "장 참조" in CITATION_RULES_GUIDE
 

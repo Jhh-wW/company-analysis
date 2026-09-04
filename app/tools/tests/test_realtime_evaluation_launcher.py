@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import shutil
@@ -15,8 +16,12 @@ import pytest
 
 APP_ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER = APP_ROOT / "실시간성능시험켜기.ps1"
-SCRIPT = LAUNCHER.read_text(encoding="utf-8")
+SCRIPT = LAUNCHER.read_text(encoding="utf-8-sig")
 WINDOWS_POWERSHELL = shutil.which("powershell.exe") if os.name == "nt" else None
+#: 계약 밖 -ReleaseMode를 만났을 때 실행기가 «스스로» 끝내는 코드. 파라미터 특성만으로
+#: 막았을 때 PowerShell 바인더가 대신 내는 1과 달라야, 부르는 쪽이 「실행기가 판단해서
+#: 막았다」와 「값을 넘기다 실패했다」를 구분할 수 있다.
+REFUSED_RELEASE_MODE_EXIT_CODE = 2
 PAID_PROVIDER_NAMES = (
     "DART_API_KEY",
     "ANTHROPIC_API_KEY",
@@ -156,6 +161,8 @@ payload = {
     "billing_ack": os.environ.get("GOOGLE_PLACES_BILLING_ACK"),
     "terms_ack": os.environ.get("GOOGLE_PLACES_TERMS_ACK"),
     "pipeline": os.environ.get("PIPELINE"),
+    "engine_v2": os.environ.get("ENGINE_V2"),
+    "release_mode": os.environ.get("REPORT_RELEASE_MODE"),
     "dotenv_disabled": os.environ.get("ANALYSIS_ENGINE_DISABLE_DOTENV"),
     "loopback_flags": all(value in sys.argv for value in (
         "--host", "127.0.0.1", "--workers", "1", "--no-access-log",
@@ -191,11 +198,17 @@ def _run_fake(
     *,
     paid: bool,
     provider_env_file: Path | None = None,
+    engine_v2: bool = False,
+    release_mode: str | None = None,
     delete_data_on_exit: bool = False,
 ) -> tuple[subprocess.CompletedProcess[bytes], list[Path]]:
     assert WINDOWS_POWERSHELL is not None
     launcher = app_copy / LAUNCHER.name
     switch = " -EnablePaidProviders" if paid else ""
+    if engine_v2:
+        switch += " -EngineV2"
+    if release_mode is not None:
+        switch += f" -ReleaseMode {_ps_literal(release_mode)}"
     if provider_env_file is not None:
         switch += f" -ProviderEnvFile {_ps_literal(provider_env_file)}"
     if delete_data_on_exit:
@@ -360,12 +373,12 @@ def test_delete_data_on_exit_removes_only_the_generated_run_directory(
 def test_launcher_can_turn_on_engine_v2() -> None:
     """★ v2를 켜는 «유일한» 경로를 못 박는다.
 
-    실측(v2-28 시점): 이 세 줄을 지워도 깨지는 시험이 없었다 —
+    실측: 이 세 줄을 지워도 깨지는 시험이 없었다 —
     ENGINE_V2를 자식에게 넘기는 «유일한» 실행기인데 무방비였다.
 
     ★ 이 시험은 «로컬에서 v2를 켤 수 있는가»만 본다.
       «배포에서 v2가 켜지는가»는 render.yaml이 소유하고
-      deploy/tests/test_deployment_contract.py가 따로 지킨다(v2-29에서 추가).
+      deploy/tests/test_deployment_contract.py가 따로 지킨다.
       두 시험이 각자 자기 경로를 지킨다 — 한 시험이 둘 다 지키면
       한쪽을 고칠 때 다른 쪽이 조용히 풀린다.
     """
@@ -377,3 +390,125 @@ def test_launcher_can_turn_on_engine_v2() -> None:
     assert '"ENGINE_V2"' in SCRIPT.split("$allowedChildEnvironmentNames")[1], (
         "ENGINE_V2가 자식 환경 허용 목록에 없습니다 — 실행기가 시작을 거부합니다"
     )
+
+
+def test_engine_v2_child_always_gets_the_report_release_mode() -> None:
+    """v2를 켜면서 출시 모드를 안 넘기면 조사가 AI 호출 전에 전부 멈춘다.
+
+    근거: 값이 비면 ``src/features/pipeline/real.py:3510-3514``가 ValueError를
+    던지고 그 갈래는 ``GATE_STOPPED``로 끝난다 — 성능을 잴 구간까지 못 간다.
+    """
+    assert '$allowedReleaseModes = @("SHADOW", "ENFORCE_NO_PARTIAL", "FULL")' in SCRIPT, (
+        "허용 값은 ReleaseMode 계약"
+        "(src/shared/report_evidence/constants.py:81-87)과 같아야 한다"
+    )
+    # 앱의 해석기는 소문자를 고쳐 읽지 않는다 — 대소문자를 관용하면 사람은 켰다고
+    # 믿는데 자식이 입력 계약으로 멈춘다. -cnotcontains가 그 «c»(대소문자 구분)다.
+    assert "$allowedReleaseModes -cnotcontains $ReleaseMode" in SCRIPT, (
+        "출시 모드는 대소문자까지 계약과 같은지 봐야 한다"
+    )
+    # 거부는 «0이 아닌» 종료 코드로 끝나야 부르는 쪽이 실패를 알아챈다.
+    assert "exit 2" in SCRIPT, "계약 밖 값을 거부하고도 성공으로 끝나면 안 된다"
+    assert '[string]$ReleaseMode = "FULL"' in SCRIPT
+    v2_branch = SCRIPT.split('$childEnvironment["ENGINE_V2"] = "1"')[1]
+    assert '$childEnvironment["REPORT_RELEASE_MODE"] = $ReleaseMode' in v2_branch, (
+        "ENGINE_V2=1을 켜는 갈래가 REPORT_RELEASE_MODE를 함께 넘겨야 한다"
+    )
+    child_allowlist = SCRIPT.split("$allowedChildEnvironmentNames")[1]
+    assert '"REPORT_RELEASE_MODE"' in child_allowlist, (
+        "자식 환경 허용 목록에 없으면 실행기가 시작을 거부합니다"
+    )
+
+
+@pytest.mark.skipif(
+    WINDOWS_POWERSHELL is None,
+    reason="Windows PowerShell 5.1 실제 자식 환경 시험",
+)
+def test_engine_v2_switch_carries_release_mode_to_the_child(tmp_path: Path) -> None:
+    """-EngineV2로 켠 자식이 ENGINE_V2와 출시 모드를 함께 받는다."""
+    app_copy = _copy_fake_app(tmp_path)
+    environment = _environment(tmp_path)
+
+    result, records = _run_fake(app_copy, environment, paid=False, engine_v2=True)
+
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert len(records) == 1
+    payload = json.loads(records[0].read_text(encoding="utf-8"))
+    assert payload["engine_v2"] == "1"
+    assert payload["release_mode"] == "FULL"
+
+
+@pytest.mark.skipif(
+    WINDOWS_POWERSHELL is None,
+    reason="Windows PowerShell 5.1 실제 자식 환경 시험",
+)
+def test_engine_v1_child_gets_no_release_mode(tmp_path: Path) -> None:
+    """v1 경로는 이 값을 읽지 않으므로 넘기지도 않는다."""
+    app_copy = _copy_fake_app(tmp_path)
+    environment = _environment(tmp_path)
+
+    result, records = _run_fake(app_copy, environment, paid=False)
+
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert len(records) == 1
+    payload = json.loads(records[0].read_text(encoding="utf-8"))
+    assert payload["engine_v2"] is None
+    assert payload["release_mode"] is None
+
+
+def test_launcher_is_utf8_with_bom_so_powershell_5_1_shows_korean() -> None:
+    """PowerShell 5.1은 BOM이 없으면 .ps1을 ANSI로 읽어 한국어 안내가 깨진다.
+
+    깨진 안내는 틀린 안내보다 나쁘다 — 사람이 무엇을 잘못했는지조차 알 수 없다.
+    """
+    assert LAUNCHER.read_bytes().startswith(codecs.BOM_UTF8)
+
+
+@pytest.mark.skipif(
+    WINDOWS_POWERSHELL is None,
+    reason="Windows PowerShell 5.1 실제 종료 코드 시험",
+)
+def test_unknown_release_mode_is_refused_readably_when_started_by_file(
+    tmp_path: Path,
+) -> None:
+    """-File로 평범하게 켠 사람도 «왜 거부됐는지»를 화면에서 읽을 수 있어야 한다.
+
+    값을 파라미터 특성만으로 막으면 PowerShell 바인더가 대신 끝낸다. 그때 사람에게
+    남는 것은 오류 덩어리뿐이고 종료 코드도 실행기가 정한 값이 아니다. 본문에서
+    검사해야 쓸 수 있는 값 안내와 «실행기가 정한» 종료 코드가 같이 나온다.
+    """
+    app_copy = _copy_fake_app(tmp_path)
+    environment = _environment(tmp_path)
+    launcher = app_copy / LAUNCHER.name
+
+    result = subprocess.run(
+        [
+            WINDOWS_POWERSHELL,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(launcher),
+            "-Port",
+            str(_available_port()),
+            "-EngineV2",
+            "-ReleaseMode",
+            "full",
+        ],
+        cwd=app_copy,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+
+    assert result.returncode == REFUSED_RELEASE_MODE_EXIT_CODE, (
+        "실행기가 스스로 거부하지 않았다 (바인더가 대신 끝냈거나 그냥 진행했다): "
+        f"종료 코드 {result.returncode}"
+    )
+    # 안내는 «사람이 보는 쪽»에 나와야 한다. 바인더 오류는 stderr로만 흘러간다.
+    for allowed in (b"SHADOW", b"ENFORCE_NO_PARTIAL", b"FULL"):
+        assert allowed in result.stdout, f"쓸 수 있는 값 {allowed!r}이 안내에 없다"
+    assert list(app_copy.rglob("child-environment.json")) == []

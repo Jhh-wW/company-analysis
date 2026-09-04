@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [ValidateRange(1024, 65535)]
     [int]$Port = 8020,
@@ -16,11 +16,35 @@ param(
     # 엔진 v2(composer 생성 경로)로 보고서를 만든다. 끄면 기존 v1 경로 그대로.
     [switch]$EngineV2,
 
+    # -EngineV2를 켰을 때 보고서를 «어느 출시 모드로» 만들지. 이 값이 비면 v2
+    # 경로는 AI를 부르기 전에 입력 계약으로 멈춰(src/features/pipeline/real.py:
+    # 3510-3514) 성능을 잴 구간까지 가지 못한다. 허용 값은 ReleaseMode 계약
+    # 그대로만 받는다 (src/shared/report_evidence/constants.py:81-87).
+    # ★ 값 검사는 [ValidateSet]이 아니라 아래 본문에서 «대소문자까지» 한다.
+    #   ValidateSet 위반은 «종료 오류»다. -File로 평범하게 켜면 실패(코드 1)로 끝나기는
+    #   하지만 화면에는 PowerShell 바인더의 오류 덩어리만 남고, 이 실행기를 try/catch로
+    #   감싸 부르는 쪽에서는 그 오류가 삼켜져 거부가 «성공»(코드 0)으로 보인다.
+    #   본문 검사는 어느 쪽으로 부르든 읽을 수 있는 안내를 남기고 0이 아닌 코드로
+    #   끝낸다. 대신 -ReleaseMode의 탭 자동완성을 잃는 것과 맞바꿨다.
+    [string]$ReleaseMode = "FULL",
+
     [switch]$DeleteDataOnExit
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+# ★ 출시 모드는 «대소문자까지» 계약과 같아야 한다 — 앱의 해석기는 소문자를 고쳐
+#   읽지 않으므로, "full"을 받아 주면 사람은 켰다고 믿는데 자식이 입력 계약으로 멈춘다.
+#   계약 밖 값이면 아무것도 시작하지 않고 0이 아닌 종료 코드로 끝낸다.
+$allowedReleaseModes = @("SHADOW", "ENFORCE_NO_PARTIAL", "FULL")
+if ($allowedReleaseModes -cnotcontains $ReleaseMode) {
+    Write-Host ""
+    Write-Host "-ReleaseMode 값을 쓸 수 없습니다: $ReleaseMode" -ForegroundColor Red
+    Write-Host ("쓸 수 있는 값은 {0} 입니다. 대문자 그대로 적습니다." -f ($allowedReleaseModes -join " · "))
+    Write-Host ""
+    exit 2
+}
 
 # OWASP least privilege 원칙에 따라 자식은 Windows/Python 실행에 필요한 OS 값과
 # 아래에서 명시한 평가 설정·provider key 이름만 받는다. 값은 출력하거나 저장하지 않는다.
@@ -381,6 +405,8 @@ $childEnvironment["BUSINESS_CANDIDATE_PROVIDER"] = "disabled"
 # 엔진 v2 스위치: 값이 정확히 "1"일 때만 real.py가 composer 경로로 분기한다.
 if ($EngineV2) {
     $childEnvironment["ENGINE_V2"] = "1"
+    # ★ 이 값이 없으면 조사가 AI 호출 전에 멈춰 성능시험이 아무것도 재지 못한다.
+    $childEnvironment["REPORT_RELEASE_MODE"] = $ReleaseMode
 }
 
 $allowedChildEnvironmentNames = $allowedParentNames + @(
@@ -391,7 +417,8 @@ $allowedChildEnvironmentNames = $allowedParentNames + @(
     "REALTIME_EVALUATION_PER_RUN_CAP_KRW", "REALTIME_EVALUATION_DAILY_CAP_KRW",
     "PROVENANCE_SEAL_SECRET",
     "ANALYSIS_ENGINE_DISABLE_DOTENV", "GOOGLE_PLACES_BILLING_ACK",
-    "GOOGLE_PLACES_TERMS_ACK", "BUSINESS_CANDIDATE_PROVIDER", "ENGINE_V2"
+    "GOOGLE_PLACES_TERMS_ACK", "BUSINESS_CANDIDATE_PROVIDER", "ENGINE_V2",
+    "REPORT_RELEASE_MODE"
 )
 foreach ($name in @($childEnvironment.Keys)) {
     if ($allowedChildEnvironmentNames -notcontains [string]$name) {

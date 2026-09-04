@@ -1,5 +1,177 @@
 {% extends "base.html" %}
-{% block title %}지원 LINK · 기업분석{% endblock %}
+{% block title %}초대 링크 · 기업분석{% endblock %}
 {% block bodyclass %}admin-frame-page{% endblock %}
 {% block wrapclass %}wide admin-frame{% endblock %}
-{% block content %}<header class="frame-heading"><p class="frame-kicker">관리자 전용</p><h1>지원 LINK</h1><p class="lede">개인정보·IP·UA·기기·봇 판정·원문 키를 수집하거나 표시하지 않습니다. 접속·생성 이력만 운영 목적으로 봅니다.</p></header>{% set dashboard_nav = "links" %}{% include "_admin_nav.html" %}<section class="frame-section"><div class="frame-section-heading"><div><p class="frame-eyebrow">발급 LINK</p><h2>지원 맥락과 요청 이력</h2></div><a class="btn ghost frame-desktop-only" href="/admin/access#company-links-title">LINK 발급 관리</a></div>{% if not dashboard_links_available %}<article class="card"><h2>확인 불가</h2><p>LINK 목록만 읽지 못했습니다. 0개라고 표시하지 않습니다.</p><a class="btn ghost" href="/admin">오늘 화면으로</a></article>{% else %}{% for link in dashboard_links %}<article class="card"><h2>{{ link.company }} · {{ link.job or "직무 미지정" }}</h2><p>접속 {{ link.opened_count }}회 · 최초 {{ link.first_opened_at or "아직 없음" }} · 최근 {{ link.last_opened_at or "아직 없음" }}{% if dashboard_link_unseen[link.key_hash] %} · 새 접속 {{ dashboard_link_unseen[link.key_hash] }}건{% endif %}</p><p>저장 보고서: {{ link.report_id or "없음" }} · {{ "철회됨" if link.is_revoked else "사용 가능 상태는 상세에서 재확인" }}</p><a class="btn" href="/admin/links/{{ link.key_hash }}">접속·생성 이력</a></article>{% else %}<article class="card"><p>발급된 LINK가 없습니다.</p><a class="btn ghost frame-desktop-only" href="/admin/access#company-links-title">LINK 발급하기</a></article>{% endfor %}{% endif %}</section><section class="frame-section frame-desktop-only"><article class="card"><h2>새 접속</h2><p>새 접속은 최근 요청 구간과 횟수만 남깁니다. 이전 접속자와 연결할 세부 정보는 저장하거나 표시하지 않습니다.</p></article></section>{% endblock %}
+
+{# 초대 링크 화면 (정보 구조 ②).
+
+   ★ 발급 폼·링크 목록은 `admin_access.html`에서 «글자 그대로»
+     옮겼다. 앞서 링크 목록이 이 화면과 `/admin/access` 두 곳에 있어서, 같은 대상을
+     보는 곳이 둘이었다. 이제 한 곳이다.
+   ★ 권한 검사는 라우트(require_admin)가 이미 했다. 여기서 다시 안 본다.
+   ★ 개인정보·IP·UA·기기·봇 판정·원문 키는 수집하지도 표시하지도 않는다. #}
+
+{% block content %}
+<header class="frame-heading">
+  <p class="frame-kicker">관리자 전용</p>
+  <h1>초대 링크</h1>
+  <p class="lede">로그인 없이 들어오는 초대 주소를 만들고, 상태와 접속 기록을 봅니다.</p>
+</header>
+{% set dashboard_nav = "links" %}{% include "_admin_nav.html" %}
+
+{% if access_error %}
+<div class="warn-line" role="alert" style="margin-bottom:16px">
+  <span>⚠️</span><span><strong>{{ access_error_title or "링크를 만들지 못했습니다." }}</strong><br>{{ access_error }}</span>
+</div>
+{% endif %}
+
+{% if paid_research_closed %}
+<div class="warn-line" role="status" style="margin-bottom:16px">
+  <span>⚠️</span><span><strong>지금 새 조사가 멈춰 있습니다.</strong><br>{{ paid_research_closed_reason }} <a href="/admin/costs">비용 화면에서 확인하기</a></span>
+</div>
+{% endif %}
+
+{# ══════════════════════════════════════════════════════════
+   링크 발급
+   ══════════════════════════════════════════════════════════ #}
+<div class="card">
+  <h2 id="company-links-title">링크 발급</h2>
+  <p class="muted" style="margin-top:6px">
+    {% if narrow_admin_no_forwarded %}
+    이 운영판에서는 새 초대 링크를 발급할 수 없습니다. 기존 이력이 있으면 아래에서 상태를
+    확인하거나 철회할 수 있습니다.
+    {% else %}
+    받은 사람은 <strong>로그인 없이</strong> 어느 회사든 분석할 수 있습니다.
+    지원 회사·직무는 전달 맥락을 나타내는 꼬리표이며 권한 제한이 아닙니다.
+    알려진 LINK 요청은 모든 접속 시각을 기록하지만 메신저 미리보기·보안 봇·실제 사람을
+    구별하지 않고 IP·User-Agent·기기 정보도 저장하지 않습니다.
+    비밀 주소와 QR은 발급 직후 <strong>화면에서 한 번만</strong> 보입니다. 그 화면을
+    닫으면 다시 볼 수 없습니다.
+    {% endif %}
+  </p>
+
+  {# ★ 꺼진 기능은 «눌리지 않는 버튼»이 아니라 안내 한 줄로만
+     보인다. 회색 버튼은 「되는데 왜 안 되지」라는 오해만 남긴다. #}
+  {% if narrow_admin_no_forwarded %}
+  <div class="warn-line" role="note" style="margin-top:14px"><span>ℹ️</span><span><strong>이 운영판에서는 초대 링크를 발급할 수 없습니다.</strong><br>이미 발급한 링크는 아래 목록에서 상태를 확인하고 철회할 수 있습니다.</span></div>
+  {% else %}
+  <form method="post" action="/admin/links/new" style="margin-top:14px">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="field">
+      <label for="link_company">지원 회사<span class="req">*</span></label>
+      <input id="link_company" name="company" required placeholder="예: 카카오"
+             maxlength="{{ company_max_chars }}"
+             value="{{ link_form.company if link_form else '' }}">
+    </div>
+    <div class="field">
+      <label for="link_job">지원 직무 <span class="muted">(선택)</span></label>
+      <input id="link_job" name="job" placeholder="예: 데이터 분석"
+             maxlength="{{ job_max_chars }}"
+             value="{{ link_form.job if link_form else '' }}">
+    </div>
+    <div class="field">
+      <label for="link_audience_label">표시 이름 <span class="muted">(선택)</span></label>
+      <input id="link_audience_label" name="audience_label"
+             placeholder="예: 하이브 인사팀"
+             maxlength="{{ company_max_chars }}"
+             value="{{ link_form.audience_label if link_form else '' }}">
+      <p class="muted" style="margin-top:5px">
+        링크가 많아졌을 때 관리 화면에서 알아보기 위한 이름입니다.
+        <strong>받는 사람에게는 보이지 않습니다.</strong>
+      </p>
+    </div>
+    <div class="field">
+      <label for="link_note">메모</label>
+      <input id="link_note" name="note" placeholder="예: 하반기 공채, 3/5 지원"
+             maxlength="{{ note_max_chars }}"
+             value="{{ link_form.note if link_form else '' }}">
+    </div>
+    <div class="field">
+      <label for="link_report">미리 만든 보고서 <span class="muted">(선택)</span></label>
+      <input id="link_report" name="report_reference"
+             maxlength="{{ reference_max_chars }}"
+             placeholder="결과 화면 주소 또는 32자리 ID"
+             value="{{ link_form.report_reference if link_form else '' }}">
+      <p class="muted" style="margin-top:5px">
+        연결하면 받은 사람이 링크를 눌렀을 때 조사 대기 없이 그 보고서가 바로 열립니다.
+        비워두면 지원 회사가 미리 채워진 편집 가능한 첫 화면으로 갑니다.
+        <strong>회사가 다른 보고서는 연결되지 않습니다.</strong> 다만 이름이 같은
+        다른 법인은 처음 연결할 때 걸러낼 수 없으니, 법인명과 주소를 한 번 더
+        확인하세요.
+      </p>
+    </div>
+    <button type="submit" class="btn">링크 만들기</button>
+  </form>
+  {% endif %}
+
+  {% if links %}
+  <p class="muted" id="company-link-close-note" style="margin-top:16px">
+    <strong>LINK 철회</strong>는 해당 <code>/k/…</code> 주소와 링크별 조사 권한을
+    즉시 막습니다. 이미 열어 본 사람이 별도로 저장한 <code>/result/…</code> 보고서
+    주소는 기존 공개 정책에 따라 보고서 생성 후 60일까지 열릴 수 있습니다.
+  </p>
+  <div class="data-table-scroll" role="region" tabindex="0"
+       aria-labelledby="company-links-title">
+  <table aria-labelledby="company-links-title">
+    <thead><tr>
+      <th scope="col">지원 맥락·상태</th><th scope="col">LINK 접속 기록</th>
+      <th scope="col">시작 보고서</th><th scope="col" aria-label="관리"></th>
+    </tr></thead>
+    <tbody>
+    {% for link in links %}
+    <tr>
+      <td>
+        <strong>{{ link.company }}</strong>
+        {% if link.job %}<br>{{ link.job }}{% endif %}
+        {% if link.audience_label %}<br>{{ link.audience_label }}{% endif %}
+        {% if link.note %}<br><span class="muted">{{ link.note }}</span>{% endif %}
+        <br><span class="muted">발급 {{ link_created_at_labels.get(link.key_hash, "—") }}</span>
+        <br><span class="muted">만료 {{ link_expiry_date_labels.get(link.key_hash, "—") }}</span>
+        <br><a href="/admin/links/{{ link.key_hash }}">접속·생성·보고서 이력</a>
+        {% if link.key_hash in revoked_link_keys %}<br><strong>철회됨</strong>
+        {% elif link.key_hash in expired_link_keys %}<br><strong>자동 만료됨</strong>
+        {% else %}<br><strong>사용 가능</strong>{% endif %}
+      </td>
+      <td>
+        {% if link.opened_count %}
+          <strong>{{ link.opened_count }}회</strong>{% if dashboard_link_unseen is defined and dashboard_link_unseen[link.key_hash] %} · <strong>새 접속 {{ dashboard_link_unseen[link.key_hash] }}건</strong>{% endif %}<br>
+          <span class="muted">최초 {{ link_first_opened_at_labels.get(link.key_hash, "—") }}<br>최근 {{ link_last_opened_at_labels.get(link.key_hash, "—") }}</span>
+        {% else %}
+          <span class="muted">요청 없음</span>
+        {% endif %}
+        {# ★ 접속 «횟수»는 이 표의 정본에서 오지만, 「관리자가 아직 안 본 새 접속」은
+           대시보드 쪽 읽기에서 온다. 그쪽을 못 읽었으면 조용히 빈칸으로 두지 않는다 —
+           빈칸은 「새 접속 0건」으로 읽힌다. #}
+        {% if dashboard_links_available is defined and not dashboard_links_available %}
+          <br><span class="muted"><strong>새 접속 확인 불가</strong></span>
+        {% endif %}
+      </td>
+      <td>
+        {% set report_state = report_states.get(link.key_hash, "unavailable") %}
+        {% if report_state == "active" %}⭕ 열림
+        {% elif report_state == "expired" %}<strong>만료됨</strong><br><span class="muted">재연결 필요</span>
+        {% elif report_state == "missing" %}<strong>찾을 수 없음</strong><br><span class="muted">재연결 필요</span>
+        {% elif report_state == "unavailable" %}<strong>확인 불가</strong><br><span class="muted">잠시 후 확인</span>
+        {% else %}<span class="muted">아직 없음</span>{% endif %}
+      </td>
+      <td>
+        {# ★ 여기서 바로 닫지 않는다 — 확인 화면에서 대상을 다시 보여 준 뒤에만
+           실행한다. #}
+        {% if link.key_hash not in revoked_link_keys %}
+        <a class="btn ghost" href="/admin/links/{{ link.key_hash }}/revoke"
+           aria-describedby="company-link-close-note">LINK 철회</a>
+        {% else %}<span class="muted">이력 보존 중</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="muted" style="margin-top:14px">아직 만든 링크가 없습니다.</p>
+  {% endif %}
+</div>
+
+<section class="frame-section frame-desktop-only"><article class="card"><h2>새 접속</h2><p>새 접속은 최근 요청 구간과 횟수만 남깁니다. 이전 접속자와 연결할 세부 정보는 저장하거나 표시하지 않습니다.</p></article></section>
+<aside class="frame-mobile-notice"><strong>모바일 운영 범위</strong><span>이 화면의 변경 작업은 PC에서만 합니다.</span></aside>
+{% endblock %}

@@ -20,11 +20,21 @@ from src.features.export_pdf import automatic_release
 from src.features.export_pdf.automatic_release import (
     AutomaticGateStopped,
     automatic_release_pdf,
+    content_manifest_matches,
     run_automatic_checks,
 )
-from src.features.export_pdf.release import prepare_pdf_release
+from src.features.export_pdf.content_manifest import (
+    CONTENT_MANIFEST_VERSION,
+    public_content_manifest_sha256,
+)
+from src.features.export_pdf.release import PdfReleaseCandidate, prepare_pdf_release
 from src.features.pipeline.demo import DemoPipeline, available_companies
 from src.features.pipeline.port import Outcome, UserInput
+from src.features.report_standard.public_projection import build_public_projection
+from src.shared.report_generation.public_projection import (
+    PUBLIC_PROJECTION_VERSION,
+    build_report_digest,
+)
 
 _AT = "2026-08-24T12:00:00+09:00"
 
@@ -294,3 +304,112 @@ def test_후보객체의_내용지문만_바꿔써도_PDF_bytes와_대조해_차
 
     assert checks[1].passed is False
     assert checks[2].passed is False
+
+
+# ══════════════════════════════════════════════════════════
+# 봉인(public_projection)이 있는 보고서 — 지문 대조는 새 digest를 본다
+# ══════════════════════════════════════════════════════════
+
+
+def _manifest_candidate(version: str, sha256: str) -> PdfReleaseCandidate:
+    """지문 두 칸만 채운 후보. ``content_manifest_matches``는 이 둘만 읽는다."""
+
+    return PdfReleaseCandidate(
+        pdf_bytes=b"",
+        pdf_sha256="",
+        pages=(),
+        content_manifest_version=version,
+        content_manifest_sha256=sha256,
+    )
+
+
+def test_봉인이_있으면_내용지문_대조가_projection_digest를_본다(cited_v2_report):
+    """봉인이 있으면 새 digest를, 없으면 옛 지문을 본다 — 섞이면 거부한다.
+
+    ★ 왜 여기서 갈라 보나 — 옛 지문(PDF 전용 별도 직렬화기)은 감사 장부를
+      덮는 방식이 봉인과 다르다. 「아는 버전이니 통과」로 두면 규칙이 다른 두
+      지문이 서로를 대신하게 된다.
+    """
+
+    sealed = replace(
+        cited_v2_report, public_projection=build_public_projection(cited_v2_report)
+    )
+    assert sealed.public_projection is not None
+    digest = build_report_digest(sealed.public_projection)
+    legacy_sha256 = public_content_manifest_sha256(cited_v2_report)
+    sealed_candidate = _manifest_candidate(
+        PUBLIC_PROJECTION_VERSION, digest.content_sha256
+    )
+    legacy_candidate = _manifest_candidate(CONTENT_MANIFEST_VERSION, legacy_sha256)
+
+    assert content_manifest_matches(sealed, sealed_candidate)
+    assert content_manifest_matches(cited_v2_report, legacy_candidate)
+
+    # ① 값이 다르면 거부 ② 옛 지문으로는 봉인 보고서를 통과시키지 못한다
+    #    ③ 봉인 지문으로는 봉인 없는 보고서를 통과시키지 못한다
+    assert not content_manifest_matches(
+        sealed, _manifest_candidate(PUBLIC_PROJECTION_VERSION, "f" * 64)
+    )
+    assert not content_manifest_matches(sealed, legacy_candidate)
+    assert not content_manifest_matches(cited_v2_report, sealed_candidate)
+    # 버전만 갈아 끼운 값도 «아는 버전»이라는 이유로 통과하지 않는다.
+    assert not content_manifest_matches(
+        sealed, _manifest_candidate(CONTENT_MANIFEST_VERSION, digest.content_sha256)
+    )
+
+
+@pytest.fixture(scope="module")
+def sealed_v2_report(cited_v2_report):
+    """봉인이 붙은 v2 보고서 — PDF도 이 봉인에서 그려진다."""
+
+    return replace(
+        cited_v2_report, public_projection=build_public_projection(cited_v2_report)
+    )
+
+
+@pytest.fixture(scope="module")
+def sealed_v2_candidate(sealed_v2_report):
+    # PDF 렌더는 비싸다 — 아래 시험들이 같은 후보를 나눠 쓴다 (읽기 전용).
+    return prepare_pdf_release(sealed_v2_report)
+
+
+def test_자동출고는_후보_digest를_projection_digest와_대조한다(
+    cited_v2_report, sealed_v2_report, sealed_v2_candidate
+):
+    """봉인된 보고서의 PDF는 봉인 digest를 싣고, 그 값으로 출고가 판정된다.
+
+    ★ 반대 경우 시험 — 같은 PDF를 «봉인이 없는» 보고서로 출고하려 하면 막혀야 한다.
+      막히지 않으면 지문 대조가 실은 아무것도 안 보고 있다는 뜻이다.
+    """
+
+    assert sealed_v2_report.public_projection is not None
+    digest = build_report_digest(sealed_v2_report.public_projection)
+
+    assert sealed_v2_candidate.content_manifest_version == PUBLIC_PROJECTION_VERSION
+    assert sealed_v2_candidate.content_manifest_sha256 == digest.content_sha256
+    assert sealed_v2_candidate.content_manifest_sha256 != public_content_manifest_sha256(
+        sealed_v2_report
+    )
+
+    checks, reasons = run_automatic_checks(
+        sealed_v2_report,
+        sealed_v2_candidate,
+        content_validator=lambda _report: (),
+    )
+    assert [check.passed for check in checks] == [True] * 4
+    assert reasons == ()
+
+    blocked_checks, blocked_reasons = run_automatic_checks(
+        cited_v2_report,
+        sealed_v2_candidate,
+        content_validator=lambda _report: (),
+    )
+    assert blocked_checks[2].passed is False
+    assert any("PDF 공개 내용" in reason for reason in blocked_reasons)
+    with pytest.raises(AutomaticGateStopped, match="PDF 공개 내용"):
+        automatic_release_pdf(
+            cited_v2_report,
+            sealed_v2_candidate,
+            released_at=_AT,
+            content_validator=lambda _report: (),
+        )

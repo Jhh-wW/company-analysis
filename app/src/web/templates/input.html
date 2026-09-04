@@ -15,6 +15,54 @@
 </div>
 {% endif %}
 
+{# ★ 초대 링크로 들어온 사람의 첫 화면 — 버튼 두 장.
+   예전에는 결속 보고서가 있으면 결과 화면으로 «직행»했다. 그러면 인사팀은
+   자기 회사 보고서만 보고 나가고 「다른 회사도 돌려 볼 수 있다」를 못 본다.
+   ★ 문구는 한 글자도 여기서 짓지 않는다 — 전부 sharelink/constants.py 상수다.
+   ★ link_landing 은 «살아 있는 초대 링크 쿠키»가 있으면 채워진다 — 비용
+     갈래와는 무관하다. 그래서 관리자·회원도 자기 QR을
+     찍으면 받는 사람과 똑같은 화면을 본다(시연이 되려면 그래야 한다).
+     쿠키가 없거나 그 링크가 닫혔으면 이 블록이 아예 안 그려져서, 그 손님의
+     첫 화면은 한 글자도 바뀌지 않는다. #}
+{% if link_landing %}
+<section class="card link-landing" id="link-landing"
+         aria-labelledby="link-landing-title">
+  <header class="form-header">
+    <h2 id="link-landing-title">{{ link_landing.title }}</h2>
+    <p>{{ link_landing.intro }}</p>
+  </header>
+
+  <div class="link-landing-choice">
+    {% if link_landing.report_url %}
+    <a class="btn wide" href="{{ link_landing.report_url }}"
+       aria-label="{{ link_landing.report_button }}">{{ link_landing.report_button }}</a>
+    {% if link_landing.made_on_note %}
+    <p class="link-landing-note">{{ link_landing.made_on_note }}</p>
+    {% endif %}
+    {% else %}
+    {# 만료·삭제·미결속은 사람에게 같은 뜻이다 — 자동 재조사는 하지 않는다. #}
+    <p class="link-landing-pending" role="status">
+      <strong>{{ link_landing.not_ready_note }}</strong><br>
+      {{ link_landing.not_ready_hint }}
+    </p>
+    {% endif %}
+  </div>
+
+  <div class="link-landing-choice">
+    {# ★ 이 화면만의 새 버튼 모양을 만들지 않는다 — `static/style.css`에 없는
+       class(`secondary` 등)를 적으면 화면에서는 아무 일도 안 일어난다.
+       카드 B를 시각적으로 구분하려면 style.css에 규칙이 필요하다(여기 범위 밖). #}
+    <a class="btn wide" href="#analysisForm">{{ link_landing.other_button }}</a>
+    <p class="link-landing-note">{{ link_landing.other_note }}</p>
+    {# 얼마까지 되는지 첫 화면에서 말한다. 다 썼으면 같은 자리에서 그 사실을
+       말한다 — 눌러 보고 나서야 알게 하면 안 된다. #}
+    {% if link_landing.budget_note %}
+    <p class="link-landing-note">{{ link_landing.budget_note }}</p>
+    {% endif %}
+  </div>
+</section>
+{% endif %}
+
 {% if image_error %}
 <div class="warn-line crit" role="alert" style="margin-bottom:18px">
   <span aria-hidden="true">⚠️</span><span>{{ image_error }}</span>
@@ -60,18 +108,10 @@
   </section>
   {% endif %}
 
-  {% if share_link %}
-  <div class="warn-line" id="share-context-note" role="status" style="margin-bottom:16px">
-    <span aria-hidden="true">🔗</span>
-    <span>
-      <strong>지원 맥락: {{ share_link.company }}{% if share_link.job %} · {{ share_link.job }}{% endif %}</strong><br>
-      위 회사·직무는 이 링크를 전달한 목적을 설명하는 꼬리표입니다.
-      아래 회사 이름은 자유롭게 바꿀 수 있습니다. 다른 회사를 검색해도 분석할 수 있으며,
-      비용과 권한은
-      계속 이 LINK에 기록됩니다.
-    </span>
-  </div>
-  {% endif %}
+  {# 옛 「지원 맥락」 배너는 지웠다. 살아 있는 초대 링크 쿠키가 있으면 위 랜딩이
+     항상 그려지므로 이 배너는 어떤 손님에게도 안 나왔고,
+     내부 용어(LINK)를 쓰고 있었다. 회사명 미리 채우기는
+     아래 입력칸의 value로 그대로 남아 있다. #}
 
   {# 샘플 선택은 경고가 아니라 폼을 빠르게 체험하는 보조 진입점이다.
      실제 조사 모드에서는 절대 노출하지 않는다. #}
@@ -133,7 +173,7 @@
     <input type="text" id="company" name="company" required autocomplete="off"
            maxlength="{{ company_max_chars }}"
            placeholder="예) 카카오페이" value="{{ prefill.company if prefill else '' }}"
-           {% if share_link %}aria-describedby="share-context-note"{% endif %}>
+           {% if link_landing %}aria-describedby="link-landing-title"{% endif %}>
   </div>
 
   <div class="field">

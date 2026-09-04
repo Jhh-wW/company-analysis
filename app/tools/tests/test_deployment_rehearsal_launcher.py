@@ -3,7 +3,7 @@
 이 실행기가 지켜야 하는 것은 두 가지다.
 1. 배포(render.yaml)와 같은 곳: PIPELINE=real, BETA_ADMIN_ONLY=1, 관리자 로그인 게이트.
 2. 로컬이라 다를 수밖에 없는 곳: 127.0.0.1 loopback, http 쿠키 예외, 로컬 배포 계약.
-   배포의 ``render-admin-real-no-forwarded-v1``을 로컬에 그대로 쓰면 모든 POST가
+   배포의 ``render-portfolio-link-v1``을 로컬에 그대로 쓰면 모든 POST가
    Origin 불일치로 거부된다(src/web/request_helpers.py:727-741).
 
 그리고 어느 쪽이든 «비밀값을 화면·파일에 남기지 않는» 경계는 동일하다.
@@ -32,6 +32,10 @@ SCRIPT_CODE = "\n".join(
     line for line in SCRIPT.splitlines() if not line.lstrip().startswith("#")
 )
 WINDOWS_POWERSHELL = shutil.which("powershell.exe") if os.name == "nt" else None
+#: 계약 밖 -ReleaseMode를 만났을 때 실행기가 «스스로» 끝내는 코드. 파라미터 특성만으로
+#: 막았을 때 PowerShell 바인더가 대신 내는 1과 달라야, 부르는 쪽이 「실행기가 판단해서
+#: 막았다」와 「값을 넘기다 실패했다」를 구분할 수 있다.
+REFUSED_RELEASE_MODE_EXIT_CODE = 2
 DEPLOYMENT_SECRET_NAMES = (
     "ANTHROPIC_API_KEY",
     "DART_API_KEY",
@@ -42,6 +46,8 @@ DEPLOYMENT_SECRET_NAMES = (
 )
 ADMIN_EMAIL_ARGUMENT = "Operator@Example.com"
 PARENT_ADMIN_EMAIL_SENTINEL = "parent-must-not-win@example.com"
+#: 부모 환경에 심어 두는 «다른» 출시 모드. 자식에 이 값이 보이면 부모가 이긴 것이다.
+PARENT_RELEASE_MODE_SENTINEL = "ENFORCE_NO_PARTIAL"
 
 
 # ══════════════════════════════════════════════════════════
@@ -82,8 +88,11 @@ def test_launcher_uses_local_contract_not_the_render_narrow_contract() -> None:
     로컬 브라우저는 http://127.0.0.1:<포트>를 보내므로 절대 같아질 수 없다.
     """
     assert '$childEnvironment["DEPLOYMENT_RUNTIME_CONTRACT"] = "local-web-v1"' in SCRIPT
-    assert "render-admin-real-no-forwarded-v1" not in SCRIPT_CODE
-    assert "render-admin-demo-no-forwarded-v1" not in SCRIPT_CODE
+    # 주석까지 본다 — 「배포는 이걸 쓴다」고 적어 둔 이름이 낡으면 읽는 사람이
+    # 지금 배포와 다른 계약을 기준으로 판단하게 된다.
+    assert "render-admin-real-no-forwarded-v1" not in SCRIPT
+    assert "render-admin-demo-no-forwarded-v1" not in SCRIPT
+    assert "render-portfolio-link-v1" in SCRIPT, "배포가 지금 쓰는 계약 이름"
     assert '$childEnvironment["DEPLOYMENT_EXPOSURE"] = "local"' in SCRIPT
     assert '$childEnvironment["DEPLOYMENT_PLATFORM"] = "local"' in SCRIPT
 
@@ -123,7 +132,7 @@ def test_launcher_enforces_the_child_environment_allowlist() -> None:
 def test_launcher_never_reads_or_prints_secret_files() -> None:
     """비밀 파일을 «몰래» 읽지 않고, 비밀값을 화면·파일에 남기지 않는다.
 
-    ★ 적대 검수가 잡은 «가짜 잣대» — 예전 이 시험은 `Get-Content`가
+    ★ 예전 이 시험은 «가짜 잣대»였다 — `Get-Content`가
       없다는 것만 봤다. 그런데 이 실행기는 파일을 `[System.IO.File]::
       ReadAllLines`로 읽으므로 그 단언은 «항상 참»이었다. 지키는 것이
       하나도 없는 시험이었다.
@@ -179,6 +188,43 @@ def test_launcher_isolates_run_data_and_can_delete_it() -> None:
     assert "-DeleteDataOnExit" in SCRIPT
     assert "ReparsePoint" in SCRIPT
     assert "app 폴더 밖을 가리켜 중단합니다" in SCRIPT
+
+
+def test_engine_v2_child_always_gets_the_report_release_mode() -> None:
+    """v2를 켜면서 출시 모드를 안 넘기면 조사가 AI 호출 전에 전부 멈춘다.
+
+    근거: 값이 비면 ``src/features/pipeline/real.py:3510-3514``가 ValueError를
+    던지고 그 갈래는 ``GATE_STOPPED``로 끝난다. 컨테이너 검증기도 같은 조합
+    (real + ENGINE_V2=1 + 값 없음)을 부팅 거부한다.
+    """
+    assert '$allowedReleaseModes = @("SHADOW", "ENFORCE_NO_PARTIAL", "FULL")' in SCRIPT, (
+        "허용 값은 ReleaseMode 계약"
+        "(src/shared/report_evidence/constants.py:81-87)과 같아야 한다"
+    )
+    # 앱의 해석기는 소문자를 고쳐 읽지 않는다 — 대소문자를 관용하면 사람은 켰다고
+    # 믿는데 자식이 입력 계약으로 멈춘다. -cnotcontains가 그 «c»(대소문자 구분)다.
+    assert "$allowedReleaseModes -cnotcontains $ReleaseMode" in SCRIPT, (
+        "출시 모드는 대소문자까지 계약과 같은지 봐야 한다"
+    )
+    # 거부는 «0이 아닌» 종료 코드로 끝나야 부르는 쪽이 실패를 알아챈다.
+    assert "exit 2" in SCRIPT, "계약 밖 값을 거부하고도 성공으로 끝나면 안 된다"
+    assert '[string]$ReleaseMode = "FULL"' in SCRIPT, (
+        "기본값이 배포와 같은 FULL이 아니면 리허설이 배포가 아니게 된다"
+    )
+    v2_branch = SCRIPT.split('$childEnvironment["ENGINE_V2"] = "1"')[1]
+    assert '$childEnvironment["REPORT_RELEASE_MODE"] = $ReleaseMode' in v2_branch, (
+        "ENGINE_V2=1을 켜는 갈래가 REPORT_RELEASE_MODE를 함께 넘겨야 한다"
+    )
+    child_allowlist = SCRIPT.split("$allowedChildEnvironmentNames = ")[1]
+    assert '"REPORT_RELEASE_MODE"' in child_allowlist, (
+        "자식 허용 목록에 없으면 실행기가 시작을 거부한다"
+    )
+
+
+def test_report_release_mode_never_comes_from_the_parent_environment() -> None:
+    """부모 값이 이기면 FULL을 켰다고 믿는 동안 다른 정책이 돈다."""
+    parent_allowlist = SCRIPT.split("$allowedParentNames = ")[1].split("\n")[0]
+    assert "REPORT_RELEASE_MODE" not in parent_allowlist
 
 
 def test_launcher_requires_explicit_spending_confirmation() -> None:
@@ -250,6 +296,8 @@ def _environment(tmp_path: Path) -> dict[str, str]:
         "ADMIN_EMAILS": PARENT_ADMIN_EMAIL_SENTINEL,
         # 배포 계약을 부모가 흉내 내도 자식은 로컬 계약만 받아야 한다.
         "DEPLOYMENT_RUNTIME_CONTRACT": "render-admin-real-no-forwarded-v1",
+        # 부모가 출시 모드를 심어도 자식은 인자·기본값만 써야 한다.
+        "REPORT_RELEASE_MODE": PARENT_RELEASE_MODE_SENTINEL,
         "PUBLIC_ORIGIN": "https://parent-must-not-win.example.com",
         "REHEARSAL_TEST_COMPANY": "JYP-sensitive-test-input",
     }
@@ -281,6 +329,7 @@ payload = {
     "pipeline": os.environ.get("PIPELINE"),
     "beta_admin_only": os.environ.get("BETA_ADMIN_ONLY"),
     "engine_v2": os.environ.get("ENGINE_V2"),
+    "release_mode": os.environ.get("REPORT_RELEASE_MODE"),
     "admin_emails": os.environ.get("ADMIN_EMAILS"),
     "google_redirect_uri": os.environ.get("GOOGLE_REDIRECT_URI"),
     "cookie_insecure": os.environ.get("AUTH_COOKIE_INSECURE"),
@@ -326,6 +375,7 @@ def _run_fake(
     confirm_spending: bool = True,
     google_redirect_uri: str | None = None,
     disable_engine_v2: bool = False,
+    release_mode: str | None = None,
     delete_data_on_exit: bool = False,
 ) -> tuple[subprocess.CompletedProcess[bytes], list[Path]]:
     assert WINDOWS_POWERSHELL is not None
@@ -337,6 +387,8 @@ def _run_fake(
         switch += f" -GoogleRedirectUri {_ps_literal(google_redirect_uri)}"
     if disable_engine_v2:
         switch += " -DisableEngineV2"
+    if release_mode is not None:
+        switch += f" -ReleaseMode {_ps_literal(release_mode)}"
     if delete_data_on_exit:
         switch += " -DeleteDataOnExit"
     command = (
@@ -380,6 +432,9 @@ def test_child_gets_deployment_conditions_with_admin_gate_on(tmp_path: Path) -> 
     assert payload["pipeline"] == "real"
     assert payload["beta_admin_only"] == "1"
     assert payload["engine_v2"] == "1"
+    assert payload["release_mode"] == "FULL", (
+        "v2를 켜면서 출시 모드를 안 넘기면 모든 조사가 AI 호출 전에 멈춘다"
+    )
     assert payload["cookie_insecure"] == "1"
     assert payload["dotenv_disabled"] == "1"
     assert payload["candidate_provider"] == "disabled"
@@ -546,6 +601,49 @@ def test_engine_v2_can_be_turned_off_for_comparison(tmp_path: Path) -> None:
     payload = json.loads(records[0].read_text(encoding="utf-8"))
     # real.py:209는 정확히 "1"일 때만 v2로 분기한다 — "0"은 v1과 같다.
     assert payload["engine_v2"] == "0"
+    # v1 경로는 이 값을 읽지 않는다. 부모가 심어 둔 값도 따라오면 안 된다.
+    assert payload["release_mode"] is None
+
+
+@pytest.mark.skipif(
+    WINDOWS_POWERSHELL is None,
+    reason="Windows PowerShell 5.1 실제 자식 환경 시험",
+)
+def test_release_mode_argument_reaches_the_child_and_beats_the_parent(
+    tmp_path: Path,
+) -> None:
+    """인자로 고른 출시 모드가 자식에 그대로 닿고, 부모 값은 무시된다."""
+    app_copy = _copy_fake_app(tmp_path)
+    environment = _environment(tmp_path)
+
+    result, records = _run_fake(
+        app_copy, environment, port=_available_port(), release_mode="SHADOW"
+    )
+
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert len(records) == 1
+    payload = json.loads(records[0].read_text(encoding="utf-8"))
+    assert payload["release_mode"] == "SHADOW"
+    assert payload["release_mode"] != PARENT_RELEASE_MODE_SENTINEL
+
+
+@pytest.mark.skipif(
+    WINDOWS_POWERSHELL is None,
+    reason="Windows PowerShell 5.1 실제 자식 환경 시험",
+)
+def test_unknown_release_mode_stops_before_child(tmp_path: Path) -> None:
+    """계약 밖 문자열을 다른 모드로 «추측»하지 않고 시작 자체를 거부한다."""
+    app_copy = _copy_fake_app(tmp_path)
+    environment = _environment(tmp_path)
+
+    result, records = _run_fake(
+        app_copy, environment, port=_available_port(), release_mode="full"
+    )
+
+    # 자식이 안 떴다는 것만 보면 «어떤» 실패든 통과한다 — 0이 아닌 종료 코드까지 본다.
+    assert result.returncode != 0, "계약 밖 값인데 실행기가 성공으로 끝났다"
+    assert records == []
+    assert not (app_copy / ".local_deployment_rehearsal_runs").exists()
 
 
 @pytest.mark.skipif(
@@ -616,8 +714,63 @@ def test_documentation_exists_and_hides_real_values() -> None:
     assert "배포리허설켜기.ps1" in text
     assert "-ConfirmRealSpending" in text
     assert "-AdminEmails" in text
+    assert "-ReleaseMode" in text, "출시 모드를 고르는 법이 문서에 없다"
+    assert "render-portfolio-link-v1" in text, "배포가 지금 쓰는 계약 이름"
+    assert "render-admin-real-no-forwarded-v1" not in text
     assert re.search(r"GOCSPX-[A-Za-z0-9_\-]{5,}", text) is None
     assert re.search(r"sk-ant-[A-Za-z0-9_\-]{5,}", text) is None
     assert (
         re.search(r"\d{6,}-[a-z0-9]{15,}\.apps\.googleusercontent\.com", text) is None
     )
+
+
+@pytest.mark.skipif(
+    WINDOWS_POWERSHELL is None,
+    reason="Windows PowerShell 5.1 실제 종료 코드 시험",
+)
+def test_unknown_release_mode_is_refused_readably_when_started_by_file(
+    tmp_path: Path,
+) -> None:
+    """-File로 평범하게 켠 사람도 «왜 거부됐는지»를 화면에서 읽을 수 있어야 한다.
+
+    값을 파라미터 특성만으로 막으면 PowerShell 바인더가 대신 끝낸다. 그때 사람에게
+    남는 것은 오류 덩어리뿐이고 종료 코드도 실행기가 정한 값이 아니다. 본문에서
+    검사해야 쓸 수 있는 값 안내와 «실행기가 정한» 종료 코드가 같이 나온다.
+    """
+    app_copy = _copy_fake_app(tmp_path)
+    environment = _environment(tmp_path)
+    launcher = app_copy / LAUNCHER.name
+
+    result = subprocess.run(
+        [
+            WINDOWS_POWERSHELL,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(launcher),
+            "-AdminEmails",
+            ADMIN_EMAIL_ARGUMENT,
+            "-Port",
+            str(_available_port()),
+            "-ConfirmRealSpending",
+            "-ReleaseMode",
+            "full",
+        ],
+        cwd=app_copy,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+
+    assert result.returncode == REFUSED_RELEASE_MODE_EXIT_CODE, (
+        "실행기가 스스로 거부하지 않았다 (바인더가 대신 끝냈거나 그냥 진행했다): "
+        f"종료 코드 {result.returncode}"
+    )
+    # 안내는 «사람이 보는 쪽»에 나와야 한다. 바인더 오류는 stderr로만 흘러간다.
+    for allowed in (b"SHADOW", b"ENFORCE_NO_PARTIAL", b"FULL"):
+        assert allowed in result.stdout, f"쓸 수 있는 값 {allowed!r}이 안내에 없다"
+    assert list(app_copy.rglob("child-environment.json")) == []

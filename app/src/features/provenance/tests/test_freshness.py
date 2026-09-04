@@ -29,7 +29,7 @@ def test_4_3에는_경고_두_줄이_붙는다():
     assert 붙은_경고 == DIRECTION_WARNING_LINES
 
 
-def test_경고_문구는_기획서_원문과_한_글자도_다르지_않다():
+def test_경고_문구는_기준_문서_원문과_한_글자도_다르지_않다():
     section = _section("4-3", lines=[("방향 문장", "1")])
     got = append_direction_warning(section)
     assert got.lines[-2][0] == "⚠️ 이 시점 이후 방향이 바뀌었을 수 있습니다."
@@ -70,7 +70,7 @@ def test_두_번_불러도_경고가_한_번만_붙는다():
 
 
 def test_표만_있어도_채워진_것으로_보고_경고를_붙인다():
-    """문장이 없어도 tables가 있으면 is_filled다 (D13) — 표에도 경고가 붙어야 한다."""
+    """문장이 없어도 tables가 있으면 is_filled다 — 표에도 경고가 붙어야 한다."""
     from src.features.pipeline.port import ReportTable
 
     표 = ReportTable(caption="c", headers=["a"], rows=[["1"]], cite="c")

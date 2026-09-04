@@ -3,7 +3,7 @@
 ★ `Report`는 `features/pipeline/port.py`의 것을 그대로 쓴다 — 여기서 새
   자료구조를 만들지 않는다. `sections`·`citations`까지 «전부» 되살아나야
   재내보내기(워드·노션)가 화면과 같은 문서를 다시 만들 수 있다
-  (정본 §3 저장 구간이 갖는 것 — "재내보내기가 화면과 «똑같은» 문서를
+  (저장 구간이 갖는 것 — "재내보내기가 화면과 «똑같은» 문서를
   다시 만들 수 있는 최소 집합").
 
 ★ S2(공고 원문 미저장) — 이 파일이 받는 것은 `Report` 객체 «하나뿐»이다.
@@ -11,7 +11,7 @@
   그래서 공고 원문은 «구조적으로» 이 파일을 거쳐 DB에 들어갈 길이 없다 —
   코드로 막는 게 아니라 자료구조에 자리 자체가 없다.
 
-정본: 확정/03_수집/2_규칙/03_캐시와저장.md §3 저장 구간이 갖는 것
+구간이 갖는 것
 """
 
 from __future__ import annotations
@@ -34,9 +34,16 @@ from src.features.pipeline.port import (
     SourceStatus,
     SummaryItem,
 )
-from src.features.provenance.sources import Source, SourceKind
+from src.features.provenance.sources import (
+    Source,
+    SourceKind,
+    stored_sources_seal_problem,
+)
 from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
-from src.features.storage.constants import TABLE_REPORTS
+from src.features.storage.constants import (
+    TABLE_REPORT_PUBLIC_PROJECTIONS,
+    TABLE_REPORTS,
+)
 from src.shared.report_quality.constants import STRICT_QUALITY_CONTRACT_VERSION
 from src.shared.report_quality.generation import (
     assert_observation_matches_assessment,
@@ -55,6 +62,12 @@ from src.shared.report_generation.models import (
     producer_evidence_to_dict,
 )
 from src.shared.report_evidence.constants import ReleaseMode
+from src.shared.report_generation.public_projection import (
+    PublicReportProjection,
+    build_report_digest,
+    public_report_projection_from_dict,
+    public_report_projection_to_dict,
+)
 
 # ══════════════════════════════════════════════════════════
 # 직렬화 — dataclass ↔ dict (JSON에 바로 쓸 수 있는 모양)
@@ -137,7 +150,7 @@ def _prose_lines_from_dict(
 
     ★ v1(canonical)은 옛 저장값에 이 필드가 없을 수 있다. 깨진 항목·출처
       없는 항목·옛 문자열 prose는 검증 여부를 증명할 수 없으므로 버리고,
-      근거 원문 보고서는 계속 연다(P-117·P-118) — v1은 줄마다 cite(부록
+      근거 원문 보고서는 계속 연다 — v1은 줄마다 cite(부록
       번호 표기)가 있어야 «검증된 표시용 글»로 본다.
     ★ v2(엔진 v2 composer)는 다르다: 인용 번호를 cite 필드가 아니라 문장
       텍스트 안 "[n]" 표기로 담고(render.sentence_display_text), «해석»
@@ -167,7 +180,7 @@ def _section_to_dict(section: ReportSection) -> dict[str, Any]:
         "cell": section.cell,
         "title": section.title,
         "lines": [[text, cite] for text, cite in section.lines],
-        # ★ 검증된 표시용 글도 저장해야 서버 재시작·워드·노션에서 화면과 같다(P-117).
+        # ★ 검증된 표시용 글도 저장해야 서버 재시작·워드·노션에서 화면과 같다.
         #   문장별 출처를 잃지 않도록 문자열 하나가 아니라 2열 목록으로 저장한다.
         "prose_lines": [[text, cite] for text, cite in section.prose_lines],
         # 회사 사실이 아닌 프로그램 제안 질문은 출처 문장과 별도 필드로 보존한다.
@@ -388,10 +401,22 @@ def _fact_from_dict(data: dict[str, Any]) -> FactRecord:
     return FactRecord(**{name: data[name] for name in _FACT_FIELDS if name in data})
 
 
+def public_projection_payload(projection: PublicReportProjection) -> dict[str, Any]:
+    """공개 봉인 projection을 저장 열에 넣을 JSON 객체로 만든다.
+
+    ★ 이 값은 보고서 payload에 «들어가지 않는다».
+      별도 표 ``report_public_projections``의 ``projection_json`` 열에만 들어간다.
+      두 문서를 나눠야 각자 저장 자원 상한 아래에 머무르고, 이미 승인된 PDF
+      출고 기록이 입력으로 쓰는 보고서 payload 바이트가 한 글자도 안 바뀐다.
+    """
+
+    return public_report_projection_to_dict(projection)
+
+
 def report_to_dict(report: Report) -> dict[str, Any]:
     """`Report` → JSON에 바로 쓸 수 있는 dict.
 
-    ★ 새 키를 «있을 때만» 넣는 이유 (2026-08-25) — 이 payload의 바이트가
+    ★ 새 키를 «있을 때만» 넣는 이유 — 이 payload의 바이트가
       `export_pdf.automatic_release.report_sha256` 의 입력이고, 그 해시가
       **이미 승인된 PDF 출고 기록**(`pdf_release_records`)에 박혀 있다.
       키를 무조건 넣으면 옛 보고서의 해시가 통째로 달라져 지난 승인이 전부
@@ -449,6 +474,11 @@ def report_to_dict(report: Report) -> dict[str, Any]:
         payload["quality_observation"] = generation_quality_observation_to_dict(
             report.quality_observation
         )
+    # ★ ``public_projection``은 «일부러» 여기 넣지 않는다.
+    #   봉인은 별도 표에 저장한다 — payload 바이트·노드 수를
+    #   예전과 똑같이 두려는 것이고, 그 동일성은
+    #   ``test_report_payload는_projection을_싣지_않아_바이트가_기존과_같다``가
+    #   지킨다.
     return payload
 
 
@@ -475,11 +505,17 @@ def report_from_dict(data: dict[str, Any]) -> Report:
         != STRICT_QUALITY_CONTRACT_VERSION
     ):
         raise ValueError("엄격 보고서의 schema 또는 품질 contract_version이 바뀌었습니다")
+    # ★ quality_observation은 이 「엄격 전용」 묶음에서 뺐다 —
+    #   SHADOW도 관측 전용으로 저장한다. generation_evidence·
+    #   public_structure_manifest·STRICT contract_version은 여전히 FULL/
+    #   ENFORCE 전용이다(그 셋은 실제로 strict 생산 증거·공개 봉인 절차를
+    #   거쳐야만 만들어질 수 있는 값이라 강등된 release_mode로 들어오면
+    #   신뢰할 수 없다. quality_observation은 SHADOW 생성 경로도 항상 스스로
+    #   계산하므로 같은 위험이 없다).
     if (
         not strict_reload
         and (
             data.get("generation_evidence") is not None
-            or data.get("quality_observation") is not None
             or str(data.get("public_structure_manifest", "")).strip()
             or str(data.get("quality_contract_version", ""))
             == STRICT_QUALITY_CONTRACT_VERSION
@@ -661,6 +697,157 @@ def _normalize_legacy_report(report: Report) -> Report:
 # ══════════════════════════════════════════════════════════
 
 
+# ══════════════════════════════════════════════════════════
+# 공개 봉인 projection — 보고서 payload와 «다른 표»
+# ══════════════════════════════════════════════════════════
+
+
+def save_public_projection(
+    conn: sqlite3.Connection,
+    report_id: str,
+    projection: Optional[PublicReportProjection],
+    *,
+    created_at: str,
+) -> None:
+    """보고서 하나의 공개 봉인을 전용 표에 쓴다(없으면 지운다).
+
+    ★ 반드시 보고서 본문과 «같은 거래»에서 불러야 한다. 이 함수는 commit을
+      하지 않는다 — 호출부(``save``·``insert_new``)가 이미 열려 있는 거래에
+      얹으므로, 이 쓰기가 실패하면 본문 행도 함께 되돌아간다.
+
+    ★ 봉인이 ``None``이면 옛 행을 «지운다». 남겨 두면 새로 덮어쓴 본문에 옛
+      봉인이 붙어, 화면이 지금 본문과 다른 글자를 그리게 된다.
+    """
+
+    if projection is None:
+        conn.execute(
+            f"DELETE FROM {TABLE_REPORT_PUBLIC_PROJECTIONS} WHERE report_id = ?",
+            (report_id,),
+        )
+        return
+    digest = build_report_digest(projection)
+    payload = json.dumps(
+        public_projection_payload(projection), ensure_ascii=False
+    )
+    validate_persisted_json_text(payload)
+    conn.execute(
+        f"""
+        INSERT INTO {TABLE_REPORT_PUBLIC_PROJECTIONS}
+            (report_id, projection_json, content_sha256, display_sha256, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(report_id) DO UPDATE SET
+            projection_json=excluded.projection_json,
+            content_sha256=excluded.content_sha256,
+            display_sha256=excluded.display_sha256,
+            created_at=excluded.created_at
+        """,
+        (
+            report_id,
+            payload,
+            digest.content_sha256,
+            digest.display_sha256,
+            created_at,
+        ),
+    )
+
+
+def load_public_projection(
+    conn: sqlite3.Connection, report_id: str
+) -> Optional[PublicReportProjection]:
+    """저장된 봉인을 되살리고 digest를 «재계산해» 대조한다.
+
+    저장된 digest를 그대로 믿지 않는 이유는 ``canonical.py``의 봉인 원칙과
+    같다 — 자기 자신만 검사하는 checksum은 본문과 digest를 «함께» 바꾼 위조를
+    못 막는다. 여기서 다시 계산해 열 값과 맞대면 저장 뒤에 손댄 흔적이
+    로드에서 닫힌다.
+
+    Returns:
+        봉인이 있으면 그 값, 없으면 ``None``. ``None``은 오류가 아니라
+        「이 보고서에는 봉인이 없다」는 **정의된 상태**다 — 이 표가 생기기 전
+        저장본과 SHADOW 보고서가 그렇다. 화면이 그 사실을 보고 판단한다.
+
+    Raises:
+        ValueError: 저장된 봉인이 구조·digest 대조를 통과하지 못할 때.
+    """
+
+    try:
+        row = conn.execute(
+            f"""SELECT projection_json, content_sha256, display_sha256
+            FROM {TABLE_REPORT_PUBLIC_PROJECTIONS} WHERE report_id = ?""",
+            (report_id,),
+        ).fetchone()
+    except sqlite3.OperationalError as error:
+        # 이 표가 생기기 전 만들어진 DB를 읽기 전용으로 여는 경우다. 읽기
+        # 전용 연결은 schema bootstrap을 하지 않으므로 표가 없을 수 있다.
+        # 그건 「봉인 없음」이지 오류가 아니다.
+        if "no such table" in str(error).lower():
+            return None
+        raise
+    if row is None:
+        return None
+    projection = public_report_projection_from_dict(
+        json.loads(str(row["projection_json"]))
+    )
+    digest = build_report_digest(projection)
+    if str(row["content_sha256"]) != digest.content_sha256:
+        raise ValueError("저장된 공개 봉인의 content 지문이 재계산 값과 다릅니다")
+    if str(row["display_sha256"]) != digest.display_sha256:
+        raise ValueError("저장된 공개 봉인의 display 지문이 재계산 값과 다릅니다")
+    return projection
+
+
+def attach_public_projection(
+    conn: sqlite3.Connection, report_id: str, report: Report
+) -> Report:
+    """보고서에 저장된 봉인을 붙이고 생성 증거와 맞대본다.
+
+    ★ 왜 증거와도 맞대나 — 위 ``load_public_projection``은 봉인 «자체»의
+      앞뒤만 본다. 다른 실행의 봉인을 digest 열까지 통째로 갈아 끼우면 그
+      검사는 통과한다. 생성 증거가 지목하는 지문과 맞대야 바꿔치기가 잡힌다.
+
+    ★ ``load()``만 이걸 부르는 게 아니다. 봉인은 payload가 아니라 별도 표에
+      있으므로, **payload 문자열에서 Report를 다시 만드는 경로**(공개 결과
+      화면이 읽는 delivery content snapshot, 관리자 승인 snapshot, 캐시 재사용)는
+      이 함수를 «명시적으로» 불러야 봉인이 붙는다. 안 부르면 봉인이 있는데도
+      화면은 「봉인 없음」으로 그린다. 자세한 경로 목록은
+      ``storage/tests/test_public_projection_storage.py``의
+      ``test_payload_문자열에서_되살린_보고서에는_봉인이_붙지_않는다`` docstring에 있다.
+
+    Returns:
+        봉인이 있으면 붙인 새 ``Report``, 없으면 받은 값 그대로.
+
+    Raises:
+        ValueError: 저장된 봉인이 구조·digest·생성 증거 대조를 통과하지 못할 때.
+    """
+
+    projection = load_public_projection(conn, report_id)
+    if projection is None:
+        return report
+    evidence = report.generation_evidence
+    # ★ 증거가 없으면 붙이지 않고 닫는다. 봉인의 진짜 권위는
+    #   생성 증거의 `public_projection_sha256`이다 — 증거가 없으면 「이 봉인이
+    #   이 보고서의 것」이라고 말해 주는 것이 아무것도 없고, 남는 검사는 봉인
+    #   스스로의 앞뒤가 맞는지뿐이라 DB에 직접 넣은 봉인도 통과한다.
+    #   정상 SHADOW·옛 저장본은 애초에 봉인 행이 없어 위에서 이미 돌아갔다.
+    if evidence is None:
+        raise ValueError("생성 증거가 없는 보고서에 저장된 공개 봉인이 있습니다")
+    if (
+        build_report_digest(projection).content_sha256
+        != evidence.public_projection_sha256
+    ):
+        raise ValueError("저장된 공개 봉인이 생성 증거의 지문과 다릅니다")
+    # ★ 여기까지의 검사는 전부 «열쇠 없는» 해시다 — 저장소에 직접 쓸 수 있는
+    #   쪽은 출처를 고친 뒤 지문을 다시 계산해 통과시킬 수 있다. 수집 도장만
+    #   저장소 밖 열쇠로 찍혀 있으므로, 읽는 경계에서 그 도장을 한 번 더 본다.
+    #   출처가 바뀐 본문은 그리지 않고 닫는다.
+    problem = stored_sources_seal_problem(
+        _citation_from_dict(dict(row.source)) for row in projection.citations
+    )
+    if problem:
+        raise ValueError(f"저장된 공개 봉인의 출처를 믿을 수 없습니다: {problem}")
+    return replace(report, public_projection=projection)
+
+
 def save(
     conn: sqlite3.Connection,
     report_id: str,
@@ -712,6 +899,10 @@ def save(
             engine_epoch_digest,
         ),
     )
+    # 같은 거래 — 봉인 쓰기가 실패하면 위 본문 행도 함께 되돌아간다.
+    save_public_projection(
+        conn, report_id, report.public_projection, created_at=stamp
+    )
 
 
 def insert_new(
@@ -747,7 +938,14 @@ def insert_new(
             engine_epoch_digest,
         ),
     )
-    return cursor.rowcount == 1
+    if cursor.rowcount != 1:
+        # 이미 있는 공개 보고서는 본문도 봉인도 덮지 않는다(append-only).
+        return False
+    # 같은 거래 — 봉인 쓰기가 실패하면 위 본문 행도 함께 되돌아간다.
+    save_public_projection(
+        conn, report_id, report.public_projection, created_at=stamp
+    )
+    return True
 
 
 def exists(conn: sqlite3.Connection, report_id: str) -> bool:
@@ -768,6 +966,112 @@ def engine_epoch_digest(conn: sqlite3.Connection, report_id: str) -> str:
     return "" if row is None else str(row["engine_epoch_digest"])
 
 
+def list_report_ids(
+    conn: sqlite3.Connection, *, since: str = "", until: str = ""
+) -> list[tuple[str, str]]:
+    """`payload_json`을 전혀 읽지 않고 `(report_id, created_at)` 목록만 돌려준다.
+
+    관측·집계용 도구가 「이 DB에 어떤 report_id들이 있는가」를 알아야 할 때 쓰는
+    최소 열거 공개 API다(`admin_dashboard`가 이 표를 직접
+    SQL로 열거하지 않도록 하기 위함).
+
+    ★ 필터·정렬 기준은 `created_at`(이 행이 저장된 시각)이다. `generated_at`
+      (보고서 자신이 담은 표시용 시각)이 아니다 — `created_at`은 `save()`가
+      항상 채우는 단조 증가 값이라 열거 순서가 안정적이다.
+    ★ 날짜만(``YYYY-MM-DD``) 받는다고 가정해 `substr(created_at, 1, 10)`로
+      비교한다. 그래야 시각까지 붙은 `created_at`이 같은 날짜의 날짜만 있는
+      `until`보다 사전식으로 «커서» 그날 하루가 통째로 빠지는 함정을 피한다.
+
+    Args:
+        conn: 이미 연결된 SQLite 연결(읽기 전용 연결도 가능).
+        since: `created_at` 날짜 하한(포함). 빈 문자열이면 제한 없음.
+        until: `created_at` 날짜 상한(포함). 빈 문자열이면 제한 없음.
+
+    Returns:
+        `(report_id, created_at)` 쌍의 목록. `created_at` 오름차순, 같으면
+        `report_id` 오름차순 — 입력 저장 순서와 무관하게 결정론적이다.
+    """
+
+    query = f"SELECT report_id, created_at FROM {TABLE_REPORTS}"
+    clauses: list[str] = []
+    params: list[str] = []
+    if since:
+        clauses.append("substr(created_at, 1, 10) >= ?")
+        params.append(since)
+    if until:
+        clauses.append("substr(created_at, 1, 10) <= ?")
+        params.append(until)
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY created_at, report_id"
+    rows = conn.execute(query, tuple(params)).fetchall()
+    return [(str(row[0]), str(row[1])) for row in rows]
+
+
+def load_corp_id(conn: sqlite3.Connection, report_id: str) -> str:
+    """이 보고서가 «어느 회사 것으로 저장됐는지»를 표의 열에서 직접 읽는다.
+
+    Args:
+        conn: `db.connect()`가 연 연결.
+        report_id: 찾을 보고서 번호.
+
+    Returns:
+        저장할 때 받은 회사 고유번호. 보고서가 없거나 그때 값이 비어 있었으면
+        빈 문자열.
+
+    ★ 왜 `load()`로 안 되나 — `load()`는 `payload_json`만 읽어 되살리고, 본문의
+      `company_id`는 출고 상태가 FULL일 때만 채워진다(`pipeline/real.py:3519`).
+      반면 이 열은 **출고 상태와 무관하게** 저장 경로가 항상 채운다
+      (`cache.save_layer1()` → `save()`의 `corp_id` 인자). 그래서 옛 저장본에서도
+      회사를 가르려면 본문이 아니라 이 열을 봐야 한다.
+    ★ 읽기 실패(예외)는 삼키지 않는다 — 부르는 쪽이 「확인 못 했다」를 「없다」와
+      다르게 다뤄야 하기 때문이다.
+    """
+
+    row = conn.execute(
+        f"SELECT corp_id FROM {TABLE_REPORTS} WHERE report_id = ?",
+        (str(report_id or "").strip(),),
+    ).fetchone()
+    if row is None:
+        return ""
+    return str(row[0] or "").strip()
+
+
+def resolve_company_id(
+    conn: sqlite3.Connection,
+    report_id: str,
+    report: Optional[Report] = None,
+) -> str:
+    """이 보고서의 회사 고유번호를 «열 우선, 본문 폴백»으로 읽는다.
+
+    Args:
+        conn: `db.connect()`가 연 연결.
+        report_id: 볼 보고서 번호.
+        report: 이미 되살려 둔 본문이 있으면 다시 안 읽으려고 받는다.
+
+    Returns:
+        고유번호. 열도 본문도 비었으면 빈 문자열. **읽기 실패는 예외로 나간다** —
+        부르는 쪽이 「확인 못 했다」와 「없다」를 다르게 다뤄야 하기 때문이다.
+
+    ★ 열을 먼저 보는 이유 — 본문의 `company_id`는 출고 상태가 FULL일 때만
+      채워진다. 저장 표의 `corp_id` 열은 출고 상태와 무관하게 채워진다.
+    ★ 열에서 값을 얻어도 **본문 읽기를 건너뛰지 않는다.** 「대상을 못 읽으면
+      거부한다」는 호출부의 fail-closed 계약을 이 함수가 느슨하게 만들지
+      않기 위해서다.
+    """
+
+    clean_report_id = str(report_id or "").strip()
+    if not clean_report_id:
+        return ""
+    column_value = load_corp_id(conn, clean_report_id)
+    current = report if report is not None else load(conn, clean_report_id)
+    if column_value:
+        return column_value
+    if current is None:
+        return ""
+    return str(getattr(current, "company_id", "") or "").strip()
+
+
 def load(conn: sqlite3.Connection, report_id: str) -> Optional[Report]:
     """`report_id`로 보고서를 현재 표시 규칙으로 불러온다. 없으면 `None`."""
     row = conn.execute(
@@ -775,4 +1079,5 @@ def load(conn: sqlite3.Connection, report_id: str) -> Optional[Report]:
     ).fetchone()
     if row is None:
         return None
-    return _normalize_legacy_report(report_from_json(row["payload_json"]))
+    report = _normalize_legacy_report(report_from_json(row["payload_json"]))
+    return attach_public_projection(conn, report_id, report)

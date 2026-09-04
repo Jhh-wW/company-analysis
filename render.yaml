@@ -1,5 +1,7 @@
 services:
   - type: web
+    # GitHub 저장소 이름은 company-analysis(2026-09-01 이전). Render 서비스
+    # 이름은 그대로 둔다 — 바꾸면 기존 URL이 바뀐다.
     name: company-analysis-beta
     runtime: docker
     # 실제 DART 118,747사 후보 색인이 512MiB를 넘어 Starter에서 재시작됐다.
@@ -19,7 +21,7 @@ services:
     # ⚠️ 결과: 종료 유예는 Render 기본값(30초)이다. 그런데 앱은
     #   HTTP 정리 20초 + 조사 drain 240초 + 취소 1초 를 «직렬»로 기대한다.
     #   즉 배포·재시작 중이던 조사는 정리를 끝내기 전에 잘릴 수 있다.
-    #   이건 v2-98 이 만든 문제가 아니라 master 배포본이 내내 있던 상태다.
+    #   이건 특정 변경이 만든 문제가 아니라 master 배포본이 내내 있던 상태다.
     #   근본 해결은 docs/architecture/deployment-contract.md 의 종료·교체 순서에 있다.
     # 첫 관리자 베타는 비용과 외부 변경을 통제하도록 수동 배포만 허용한다.
     autoDeployTrigger: off
@@ -45,11 +47,12 @@ services:
       - key: ENGINE_V2
         value: "1"
 
-      # 새 엄격 계약은 실제 모델 표본 검증 전에는 사용자 출고를 바꾸지 않는다.
+      # 품질 하한을 관찰만 하지 않고 실제로 지킨다. 부족한 장은 한 번 보충하고,
+      # 그래도 미달이면 보고서를 내지 않는다(차감도 없다).
       # 코드가 이 값의 누락을 fail-closed로 막으므로 Blueprint에도 반드시
-      # 명시한다. 제한 실측을 통과하기 전 FULL로 올리지 않는다.
+      # 명시한다.
       - key: REPORT_RELEASE_MODE
-        value: SHADOW
+        value: FULL
 
       # Render edge가 붙인 forwarded header는 전혀 신뢰하지 않는다. 앱은 고정된
       # 공개 HTTPS origin만 Host·CSRF·HSTS 판단에 사용한다.
@@ -58,7 +61,7 @@ services:
       - key: DEPLOYMENT_PLATFORM
         value: render
       - key: DEPLOYMENT_RUNTIME_CONTRACT
-        value: render-admin-real-no-forwarded-v1
+        value: render-portfolio-link-v1
       - key: PUBLIC_ORIGIN
         fromService:
           type: web

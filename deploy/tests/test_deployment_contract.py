@@ -390,8 +390,12 @@ def test_render_blueprint_turns_engine_v2_on_while_image_default_stays_v1() -> N
         "따옴표 없는 1은 YAML 정수로 읽힙니다 — value: \"1\"로 적어야 합니다"
     )
     assert render_values["ENGINE_V2"] == "1"
-    assert render_values["REPORT_RELEASE_MODE"] == "SHADOW", (
-        "실제 모델 표본을 검증하기 전에는 새 품질 규칙을 관찰만 해야 합니다"
+    # ★ 결정으로 «계약이 바뀌었다» — 기대값 하향이 아니다.
+    #   연습 모드(SHADOW)는 품질 하한 미달 보고서를 그대로 내보내면서
+    #   사용자 쿼터까지 깎았다. 출시부터는 부족한 장을 한 번 보충하고,
+    #   그래도 미달이면 무출고·무차감으로 멈춘다.
+    assert render_values["REPORT_RELEASE_MODE"] == "FULL", (
+        "출시 배포는 품질 하한을 관찰만 하지 않고 실제로 지켜야 합니다"
     )
 
     # render.yaml의 이름·값이 실제 분기 상수와 계속 같은지 함께 묶는다.
@@ -449,7 +453,7 @@ def test_render_blueprint_turns_engine_v2_on_while_image_default_stays_v1() -> N
 
 
 #: Render 가 디스크 서비스에 주는 종료 유예 기본값(초).
-#: Blueprint 로 늘릴 수 없다 — 늘리려 하면 동기화가 거부된다(2026-08-29 실측).
+#: Blueprint 로 늘릴 수 없다 — 늘리려 하면 동기화가 거부된다(실측).
 RENDER_DEFAULT_SHUTDOWN_SECONDS = 30
 
 
@@ -464,7 +468,7 @@ def test_render_shutdown_window_covers_serial_uvicorn_and_app_shutdown() -> None
     )
     render_values = {item["key"]: item.get("value") for item in web_service["envVars"]}
 
-    # ★ 2026-08-29 실측 — Render 는 «디스크가 붙은 서비스»에 이 값을 허용하지 않는다.
+    # ★ 실측 — Render 는 «디스크가 붙은 서비스»에 이 값을 허용하지 않는다.
     #   Blueprint 동기화가 이 오류로 거부됐다:
     #     services[0].maxShutdownDelaySeconds
     #     max shutdown delay is not supported for services with a disk
@@ -497,18 +501,38 @@ def test_render_shutdown_window_covers_serial_uvicorn_and_app_shutdown() -> None
     assert "Render 기본 30초" in runbook
     assert "Uvicorn HTTP 요청 정리 최대 20초" in runbook
     normalized_runbook = " ".join(runbook.split())
-    # ★ 2026-08-29 실측으로 «절차가 바뀌었다».
-    #   그날 배포는 Blueprint Sync 가 아니라 서비스 화면의 Manual Deploy 로 성공했다.
-    #   오히려 Blueprint 는 «다른 브랜치»(master)를 보고 있어 Sync 하면 옛 render.yaml 이
-    #   적용될 뻔했다. 그래서 런북은 이제 둘을 «구분»해야 한다.
-    assert "Manual Deploy" in normalized_runbook, "코드만 바뀐 경우의 절차가 있어야 한다"
-    assert "render.yaml` 이 바뀐 경우에만" in normalized_runbook, (
-        "Blueprint Sync 를 언제 쓰는지 구분해야 한다"
+    # ★ 배포 수단은 서비스 화면의 Manual Deploy «하나»다. 이 서비스의 Blueprint 는
+    #   지금 저장소를 가리키지 않아 Sync 가 «실패»하고, 새로 만들면 기존 서비스를
+    #   넘겨받지 않고 접미사 붙은 복제 서비스가 생긴다. 런북이 다시 Sync 를 지시하면
+    #   출시 당일 배포가 막히므로 두 문장을 함께 못 박는다.
+    assert "Manual Deploy → Deploy latest commit" in normalized_runbook, (
+        "배포 수단이 서비스 화면의 Manual Deploy 라는 것이 적혀 있어야 한다"
     )
-    assert "Blueprint 화면의 브랜치를 «반드시» 확인" in normalized_runbook, (
-        "★ 브랜치가 어긋나 있었다 — 이 경고가 사라지면 같은 사고가 다시 난다"
-    )
-    # 자동 배포가 켜졌다는 사실과 그 전제(push = 배포)도 런북에 있어야 한다.
+    assert (
+        "Blueprint 의 Manual Sync / Deploy Blueprint 는 실행하지 않는다"
+        in normalized_runbook
+    ), "Blueprint Sync 는 실패하므로 런북이 누르지 말라고 해야 한다"
+    # ★ 순서가 계약이다. 값을 먼저 올리면 «옛 코드»가 새 판정으로 도는 창이 생기고
+    #   연습 모드에서 만든 캐시를 재사용할 수 있다. 문장이 있는지가 아니라
+    #   «어느 것이 먼저 나오는지»를 본다.
+    for 순서_문장 in (
+        "새 커밋을 올린다",
+        "commit 값이 방금 올린 커밋인지 확인한다",
+        "Environment 탭",
+    ):
+        assert 순서_문장 in normalized_runbook, (
+            f"배포 순서 문장이 런북에서 사라졌다: {순서_문장}"
+        )
+    assert (
+        normalized_runbook.index("새 커밋을 올린다")
+        < normalized_runbook.index("commit 값이 방금 올린 커밋인지 확인한다")
+        < normalized_runbook.index("Environment 탭")
+    ), "Manual Deploy → /healthz 확인 → Environment 탭 편집 순서를 지켜야 한다"
+    # 출시에서 «무엇을» 편집하는지도 런북에 있어야 한다 — 이름이 빠지면 배포자가
+    # 대시보드에서 어느 값을 고쳐야 하는지 알 수 없다.
+    assert "REPORT_RELEASE_MODE=FULL" in normalized_runbook
+    assert "DEPLOYMENT_RUNTIME_CONTRACT=render-portfolio-link-v1" in normalized_runbook
+    # 자동 배포를 사람이 확인한다는 전제(push = 배포)도 런북에 있어야 한다.
     assert "Auto-Deploy" in normalized_runbook
     assert "push 는 「배포해도 되는 상태」일 때만" in normalized_runbook
 
@@ -516,16 +540,51 @@ def test_render_shutdown_window_covers_serial_uvicorn_and_app_shutdown() -> None
         REPOSITORY_ROOT / "app" / "docs" / "Render_배포.md"
     ).read_text(encoding="utf-8")
     normalized_render_guide = " ".join(render_guide.split())
+    # ★ 절차 변경 — 이 서비스의 Blueprint 는 지금 저장소를 가리키지 않아
+    #   Manual Sync 가 «실패한다». Blueprint Settings 에는 연결 저장소를 바꾸는 항목이
+    #   없고, 새 Blueprint 를 만들면 기존 서비스를 넘겨받지 않고 접미사 붙은 복제
+    #   서비스가 생긴다. 그래서 안내서는 Sync 를 «누르지 말라»고 해야 하고,
+    #   환경변수는 서비스 Environment 탭에서 직접 고친다.
     assert (
-        "Blueprint에서 **Manual Sync / Deploy Blueprint**"
+        "Blueprint Manual Sync / Deploy Blueprint를 실행하지 않는다"
         in normalized_render_guide
-    )
+    ), "Blueprint Sync 는 실패하므로 안내서가 누르지 말라고 해야 한다"
+    assert "Environment 탭에서 직접 편집" in normalized_render_guide
+    assert "출시 릴리스에서 바꾸는 값 두 개" in normalized_render_guide
+    # 옛 지시(Blueprint 에서 Sync 를 실행하라)가 되살아나면 배포가 다시 막힌다.
+    assert "Deploy Blueprint**를 실행한다" not in normalized_render_guide
+    assert "Deploy Blueprint**를 한 번 실행한다" not in normalized_render_guide
+    # ★ ①②의 «순서»가 계약이다. 값을 먼저 FULL 로 올리면 «옛 코드»가 FULL 로 돌면서
+    #   연습 모드에서 만든 캐시를 재사용할 수 있다. 문장이 있는지가 아니라
+    #   «어느 것이 먼저 나오는지»를 본다.
+    for 순서_문장 in (
+        "Manual Deploy로 새 커밋을 먼저 올린다",
+        "응답의 commit 값이 방금 올린 SHA인지 확인한다",
+        "Environment 탭에서 위 두 값을 편집한다",
+    ):
+        assert 순서_문장 in normalized_render_guide, (
+            f"출시 순서 문장이 안내서에서 사라졌다: {순서_문장}"
+        )
+    assert (
+        normalized_render_guide.index("Manual Deploy로 새 커밋을 먼저 올린다")
+        < normalized_render_guide.index("응답의 commit 값이 방금 올린 SHA인지 확인한다")
+        < normalized_render_guide.index("Environment 탭에서 위 두 값을 편집한다")
+    ), "Manual Deploy → /healthz 확인 → Environment 탭 편집 순서를 지켜야 한다"
 
-    historical_directive = (
-        REPOSITORY_ROOT / "app" / "docs" / "출시전_수정_지시서.md"
-    ).read_text(encoding="utf-8")
-    # ★ 2026-08-28 의 「정정」은 «틀렸다». Render 가 2026-08-29 에 실측으로 뒤집었다.
-    assert "종료 계약 재정정(2026-08-29)" in historical_directive
+    # ★ 종료 유예가 «왜» 30초인지는 옛 안내 문서가 아니라 배포값이 정본이다
+    #   (작업 메모 성격의 문서를 지우면서 옮겼다).
+    #   디스크가 붙어 있는 것이 maxShutdownDelaySeconds 를 못 쓰는 «이유»이고,
+    #   그 결과가 플랫폼 기본 30초다. 둘이 같이 있어야 위 단정이 뜻을 갖는다.
+    assert web_service["disk"]["mountPath"] == "/var/data", (
+        "디스크를 떼면 maxShutdownDelaySeconds 금지 이유가 사라진다 — 함께 재검토하라"
+    )
+    assert RENDER_DEFAULT_SHUTDOWN_SECONDS == 30, (
+        "플랫폼 기본값을 바꿔 이 시험을 통과시키지 마라"
+    )
+    blueprint_text = (REPOSITORY_ROOT / "render.yaml").read_text(encoding="utf-8")
+    assert "종료 유예는 Render 기본값(30초)이다" in blueprint_text, (
+        "배포자가 읽는 경고를 render.yaml 에서 지우지 마라"
+    )
 
 
 def test_render_reserves_only_half_the_persistent_disk_for_immutable_pdf_artifacts() -> None:
@@ -659,3 +718,127 @@ def test_report_release_mode_accepts_only_the_three_exact_application_values() -
     assert all(
         secret_value not in error for error in validator.validate(environment, "web")
     )
+
+
+# ══════════════════════════════════════════════════════════
+# 포트폴리오 링크 계약(render-portfolio-link-v1)
+# ══════════════════════════════════════════════════════════
+
+
+def _render_portfolio_link_environment() -> dict[str, str]:
+    """옛 render-admin-real-no-forwarded-v1과 같은 안전 조건 위에 엔진 v2·출고
+    모드까지 명시한, 통과해야 정상인 최소 환경."""
+
+    return {
+        "PIPELINE": "real",
+        "BETA_ADMIN_ONLY": "1",
+        "PORT": "10000",
+        "LOG_LEVEL": "info",
+        "GRACEFUL_SHUTDOWN_SECONDS": "20",
+        "DEPLOYMENT_EXPOSURE": "public",
+        "DEPLOYMENT_PLATFORM": "render",
+        "DEPLOYMENT_RUNTIME_CONTRACT": validator.RUNTIME_CONTRACT_RENDER_PORTFOLIO_LINK,
+        "FORWARDED_ALLOW_IPS": "",
+        "APP_DATA_ROOT": "/var/data",
+        "STORAGE_DB_PATH": "/var/data/storage.db",
+        "OBSERVABILITY_RECORDS_PATH": "/var/data/observability/runs.jsonl",
+        "TLDEXTRACT_CACHE": "/var/data/cache/tldextract",
+        "PUBLIC_ORIGIN": "https://portfolio.example",
+        "RENDER_EXTERNAL_URL": "https://portfolio.example",
+        "ADMIN_EMAILS": "admin@example.com",
+        "GOOGLE_CLIENT_ID": "google-client-id",
+        "GOOGLE_CLIENT_SECRET": "google-client-secret",
+        "GOOGLE_REDIRECT_URI": "https://portfolio.example/auth/callback",
+        "ANTHROPIC_API_KEY": "test-anthropic-key",
+        "DART_API_KEY": "test-dart-key",
+        "NAVER_CLIENT_ID": "test-naver-client-id",
+        "NAVER_CLIENT_SECRET": "test-naver-client-secret",
+        "PROVENANCE_SEAL_SECRET": "x" * 32,
+        "ENGINE_V2": "1",
+        "REPORT_RELEASE_MODE": "FULL",
+    }
+
+
+def test_포트폴리오_계약은_허용_목록에_있고_안전조건은_옛_계약과_같다() -> None:
+    """admin.py를 고치지 않고 손님 입구를 여는 새 계약. RUNTIME_CONTRACTS에
+    등록돼 있어야 컨테이너가 뜨고, forwarded 비신뢰·고정 origin·관리자 로그인 벽은
+    옛 관리자 실제 분석판과 같은 안전 조건이며, 엔진 v2·출고 모드는 이 계약에서만
+    선택이 아니라 필수로 강해진다(조용히 v1이나 미정 상태로 손님을 맞지 않는다)."""
+
+    assert (
+        validator.RUNTIME_CONTRACT_RENDER_PORTFOLIO_LINK in validator.RUNTIME_CONTRACTS
+    )
+
+    environment = _render_portfolio_link_environment()
+    assert validator.validate(environment, "web") == []
+
+    # 옛 관리자 계약과 같은 안전 조건 — 하나라도 어긋나면 거부한다.
+    demo_pipeline = dict(environment, PIPELINE="demo")
+    assert any("PIPELINE" in error for error in validator.validate(demo_pipeline, "web"))
+
+    open_admin = dict(environment, BETA_ADMIN_ONLY="0")
+    assert any(
+        "BETA_ADMIN_ONLY" in error for error in validator.validate(open_admin, "web")
+    )
+
+    trusts_forwarded = dict(environment, FORWARDED_ALLOW_IPS="1.1.1.1/32")
+    assert any(
+        "FORWARDED_ALLOW_IPS" in error
+        for error in validator.validate(trusts_forwarded, "web")
+    )
+
+    no_origin = {k: v for k, v in environment.items() if k != "PUBLIC_ORIGIN"}
+    assert any(
+        "PUBLIC_ORIGIN" in error for error in validator.validate(no_origin, "web")
+    )
+
+    # ★ 이 계약만의 강화 — ENGINE_V2가 정확히 "1"이 아니면 거부한다.
+    for broken in (
+        dict(environment, ENGINE_V2="0"),
+        {k: v for k, v in environment.items() if k != "ENGINE_V2"},
+    ):
+        errors = "\n".join(validator.validate(broken, "web"))
+        assert "ENGINE_V2" in errors
+
+    # ★ REPORT_RELEASE_MODE가 없으면 거부한다(옛 계약은 이 값을 아예 안 본다).
+    no_release_mode = {
+        k: v for k, v in environment.items() if k != "REPORT_RELEASE_MODE"
+    }
+    errors = "\n".join(validator.validate(no_release_mode, "web"))
+    assert "REPORT_RELEASE_MODE" in errors
+
+
+def test_포트폴리오_계약도_고정_no_proxy_headers_실행명령을_강제한다() -> None:
+    """render.yaml 실행 명령은 두 관리자 계약과 바이트 하나 다르지 않아야 한다."""
+
+    environment = _render_portfolio_link_environment()
+    good_command = [
+        "python",
+        "-m",
+        "uvicorn",
+        "src.web.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "${PORT:-10000}",
+        "--workers",
+        "1",
+        "--no-proxy-headers",
+        "--limit-concurrency",
+        "20",
+        "--backlog",
+        "32",
+        "--timeout-keep-alive",
+        "5",
+        "--timeout-graceful-shutdown",
+        "${GRACEFUL_SHUTDOWN_SECONDS:-20}",
+        "--log-level",
+        "${LOG_LEVEL:-info}",
+    ]
+    scope, errors = validator.validate_command(environment, good_command)
+    assert scope == "web"
+    assert errors == []
+
+    bypass_command = ["python", "-m", "uvicorn", "src.web.main:app", "--proxy-headers"]
+    _, errors = validator.validate_command(environment, bypass_command)
+    assert any(error.startswith("DEPLOYMENT_COMMAND:") for error in errors)

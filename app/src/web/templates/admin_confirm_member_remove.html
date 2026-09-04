@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}회원 빼기 확인 · 기업분석{% endblock %}
+{% block bodyclass %}admin-frame-page{% endblock %}
+{% block wrapclass %}wide admin-frame{% endblock %}
+
+{# 회원 빼기 확인 화면 — 위험한 일은 두 걸음으로 나눈다.
+
+   ★ 빼면 그 사람의 지금 로그인도 함께 끊긴다. 쓰던 중에 갑자기 튕기므로
+     누구를 빼는지 다시 보여 주고 확인을 받는다.
+   ★ 명단을 못 읽었을 때 「없는 사람」처럼 보이지 않게 그 사실을 그대로 말한다. #}
+
+{% block content %}
+<header class="frame-heading">
+  <p class="frame-kicker">관리자 전용</p>
+  <h1>이 회원을 정말 뺄까요?</h1>
+  <p class="lede">빼면 이 사람은 더 이상 들어올 수 없고, 지금 하고 있는 로그인도 끊깁니다.</p>
+</header>
+{% set dashboard_nav = "members" %}{% include "_admin_nav.html" %}
+
+<div class="card frame-desktop-only">
+  <h2>누구를 빼나요</h2>
+  {% if not member_available %}
+  <p class="warn-line" role="alert">
+    <span>⚠️</span><span><strong>초대 명단을 지금 읽지 못했습니다.</strong>
+    누구인지 확인하지 못한 채 빼지 마시고, 잠시 후 이 화면을 다시 열어주세요.</span>
+  </p>
+  {% elif member is none %}
+  <p class="warn-line" role="status">
+    <span>⚠️</span><span>이 주소는 지금 초대 명단에 없습니다. 이미 뺐거나 처음부터 초대하지 않은 주소입니다.</span>
+  </p>
+  <dl class="frame-action-summary">
+    <div><dt>주소</dt><dd>{{ member_email }}</dd></div>
+  </dl>
+  {% else %}
+  <dl class="frame-action-summary">
+    <div><dt>이름</dt><dd><strong>{{ member.display_name or "이름 미등록" }}</strong></dd></div>
+    <div><dt>주소</dt><dd>{{ member.email }}</dd></div>
+    {% if member.note %}<div><dt>메모</dt><dd>{{ member.note }}</dd></div>{% endif %}
+    <div><dt>초대한 때</dt><dd>{{ member_invited_at_label }}</dd></div>
+  </dl>
+  {% endif %}
+
+  <p class="muted" style="margin-top:16px">
+    다시 초대하면 이름과 메모는 그대로 살아납니다. 하지만 지금 쓰고 있던
+    로그인은 끊기므로 그 사람은 처음부터 다시 들어와야 합니다.
+  </p>
+
+  <div class="btn-row" style="margin-top:18px">
+    <form method="post" action="/admin/revoke">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="email" value="{{ member_email }}">
+      {# 이 화면이 발급한 1회용 표. 없으면 서버가 실행하지 않는다. #}
+      <input type="hidden" name="confirm_token" value="{{ confirm_token }}">
+      <button type="submit" class="btn">네, 명단에서 뺍니다</button>
+    </form>
+    <a class="btn ghost" href="/admin/members">아니요, 그대로 둡니다</a>
+  </div>
+</div>
+
+<aside class="frame-mobile-notice"><strong>모바일 운영 범위</strong><span>이 화면의 변경 작업은 PC에서만 합니다.</span></aside>
+{% endblock %}

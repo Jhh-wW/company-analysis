@@ -2,6 +2,7 @@
 # 원본 작업 폴더의 기획 과정·실험·캡처는 컴퓨터에 남아 있어도 Git에는 들어오지 않는다.
 /*
 !/.gitignore
+!/.gitattributes
 !/.dockerignore
 !/pytest.ini
 !/.github/
@@ -12,6 +13,7 @@
 !/README.md
 !/CONTRIBUTING.md
 !/SECURITY.md
+!/LICENSE
 !/docs/
 !/docs/**
 # ★ docs/ 는 위에서 통째로 열어 두므로, «저장소에 넣지 않기로 정한» 문서는
@@ -53,6 +55,7 @@
 !/app/tools/container_entrypoint.sh
 !/app/tools/run_canonical_pilot25.py
 !/app/tools/manage_pilot_quality.py
+!/app/tools/quality_observations.py
 !/app/tools/tests/
 
 # 현재 서비스에서 사용하지 않는 옛 기능

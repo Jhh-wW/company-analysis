@@ -119,7 +119,11 @@ class CollectedEvidenceDocument:
 
 @dataclass(frozen=True)
 class EvidenceFragment:
-    """출처 문서의 위치와 원문 해시에 묶인 장별 근거 한 조각."""
+    """출처 문서의 위치와 원문 해시에 묶인 장별 근거 한 조각.
+
+    한 원문 범위가 같은 장의 여러 질문에 답할 수 있다. 그때 원문을 슬롯마다
+    복제하지 않고 ``covered_slot_ids``로 커버리지만 함께 싣는다.
+    """
 
     company_id: str
     fragment_id: str
@@ -135,6 +139,7 @@ class EvidenceFragment:
     period_end: str = ""
     unit: str = ""
     company_scope: str = ""
+    covered_slot_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         for label, value in (
@@ -155,6 +160,11 @@ class EvidenceFragment:
         _require_reason_codes(
             self.reason_codes, label="근거 선택 사유 코드", allow_empty=False
         )
+        covered = self.covered_slot_ids or (self.slot_id,)
+        _require_unique_texts(covered, label="근거 조각이 채우는 의미 칸")
+        if self.slot_id not in covered:
+            raise ValueError("근거 조각이 채우는 의미 칸은 대표 의미 칸을 포함해야 합니다")
+        object.__setattr__(self, "covered_slot_ids", tuple(covered))
 
 
 @dataclass(frozen=True)
@@ -257,7 +267,7 @@ class ChapterEvidenceCandidates:
 
 @dataclass(frozen=True)
 class InjectedSlotFacts:
-    """Codex의 구조화 검증기가 한 의미 칸에 주입한 사실 ID."""
+    """구조화 검증기가 한 의미 칸에 주입한 사실 ID."""
 
     slot_id: str
     fact_ids: tuple[str, ...]
@@ -271,7 +281,7 @@ class InjectedSlotFacts:
 
 @dataclass(frozen=True)
 class SectionEvidenceBundle:
-    """Codex가 최종 판정한 한 장의 작성 입력."""
+    """구조화 검증기가 최종 판정한 한 장의 작성 입력."""
 
     company_id: str
     section_id: str
@@ -324,9 +334,10 @@ class SectionEvidenceBundle:
             raise ValueError("다른 장의 근거 조각을 최종 근거 묶음에 섞을 수 없습니다")
         unknown_fragment_slots = sorted(
             {
-                fragment.slot_id
+                slot_id
                 for fragment in self.fragments
-                if fragment.slot_id not in set(required)
+                for slot_id in fragment.covered_slot_ids
+                if slot_id not in set(required)
             }
         )
         if unknown_fragment_slots:

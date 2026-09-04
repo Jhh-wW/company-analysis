@@ -68,6 +68,7 @@ from src.features.storage import job_interruptions
 from src.features.storage import reports as report_store
 from src.shared import engine_build_identity as build_identity_contract
 from src.shared import generation_coordination
+from src.shared.report_evidence.constants import ReleaseMode
 from src.web import (
     evaluation_mode,
     generation_singleflight,
@@ -123,6 +124,26 @@ _PERSISTENCE_WARNING = (
     "지금 PDF도 내려받아 보관해 주세요."
 )
 
+# ── 조사 도중 초대 링크가 닫혔을 때 ─────────────────────────────
+# 관리자 이력·감사행에 남기는 사유 코드. 감사행 CHECK가 ASCII만 받으므로
+# 여기에 한국어를 넣으면 그 transaction 전체가 실패한다.
+LINK_STOP_REASON_REVOKED = "link_revoked"
+LINK_STOP_REASON_EXPIRED = "link_expired"
+LINK_STOP_REASON_UNKNOWN = "link_state_unknown"
+
+# 사용자 화면 안내. 우리 쪽 사정·내부 용어를 쓰지 않고 짧게만 말한다.
+LINK_REVOKED_RUN_STOPPED_MESSAGE = "이 링크의 사용이 중단되어 조사를 멈췄습니다."
+LINK_EXPIRED_RUN_STOPPED_MESSAGE = "이 링크의 기간이 지나 조사를 멈췄습니다."
+LINK_STATE_UNKNOWN_RUN_STOPPED_MESSAGE = (
+    "초대 링크 상태를 지금 확인할 수 없어 조사를 멈췄습니다. "
+    "잠시 후 다시 시도해 주세요."
+)
+_LINK_STOP_NOTICE_BY_REASON = {
+    LINK_STOP_REASON_REVOKED: LINK_REVOKED_RUN_STOPPED_MESSAGE,
+    LINK_STOP_REASON_EXPIRED: LINK_EXPIRED_RUN_STOPPED_MESSAGE,
+    LINK_STOP_REASON_UNKNOWN: LINK_STATE_UNKNOWN_RUN_STOPPED_MESSAGE,
+}
+
 
 def _commit_report_connection(conn: Any) -> None:
     """legacy 보고서 fence 직후 commit하며 시험은 실패를 이 seam에 주입한다."""
@@ -169,6 +190,29 @@ class JobExecutionDeadlineExceeded(RuntimeError):
     """한 작업이 전체 실행 절대 마감을 넘겨 더는 슬롯을 소유할 수 없음."""
 
 
+class LinkAccessClosedDuringRun(
+    generation_coordination.GenerationCoordinationError
+):
+    """조사 도중 초대 링크가 닫혀 다음 유료 단계에 들어가지 않는다.
+
+    ★ 사용자에게 보일 짧은 안내와 관리자 이력에 남길 ASCII 사유 코드를 «함께»
+      들고 다닌다. 둘을 따로 두면 화면에 코드가 새거나 감사행에 한국어가 들어간다.
+    ★ 조정 계약 예외를 상속한다. 이 중단은 유료 단계 진입 callback 안에서
+      일어나므로 lease 상실·취소와 «같은 종류»의 요청 전역 중단이고, 조사
+      본체(pipeline)는 웹 계층을 import하지 않고도 한 이름으로 알아볼 수 있어야
+      한다. 평범한 RuntimeError로 두면 장 하나의 실패로 삼켜져 조사가 끝까지
+      돌고 이력 사유가 「품질 미달」로 바뀐다(실측 결함).
+    """
+
+    def __init__(self, reason_code: str) -> None:
+        notice = _LINK_STOP_NOTICE_BY_REASON.get(reason_code)
+        if notice is None:
+            raise ValueError(f"모르는 초대 링크 중단 사유입니다: {reason_code!r}")
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+        self.notice = notice
+
+
 @dataclass
 class Job:
     """돌아가는 중인 요청 하나."""
@@ -182,15 +226,19 @@ class Job:
     current_step: str = ""
     finished: bool = False
     result: Optional[RunResult] = None
-    #: 끝난 시각 (`time.monotonic()`). 메모리 청소에 쓴다 (P-92).
+    #: 끝난 시각 (`time.monotonic()`). 메모리 청소에 쓴다.
     finished_at: float = 0.0
-    #: 어느 «열쇠 링크»로 들어온 요청인가 (P-94).
+    #: 어느 «열쇠 링크»로 들어온 요청인가.
     #: ★ 시작할 때 적어 둔다 — 끝난 뒤에는 요청 정보가 없어서 못 알아낸다.
     share_key: str = PUBLIC_BUCKET
     #: MEMBER 성공 3건 예약을 소유한 계정. 빈 값이면 관리자·LINK·공개 요청이다.
     member_email: str = ""
     #: LINK 실행 이력을 찾는 안전한 SHA-256 식별자. 원문 열쇠는 영속화하지 않는다.
     share_link_hash: str = ""
+    #: 초대 링크가 닫혀 멈춘 실행의 ASCII 사유 코드. 관리자 이력 전용.
+    link_stop_reason: str = ""
+    #: 같은 멈춤을 사용자에게 알리는 짧은 안내. 내부 용어를 쓰지 않는다.
+    link_stop_notice: str = ""
     #: 확인 카드·이미지 OCR에서 먼저 쓴 돈. 본조사 결과 비용과 마지막에 합친다.
     upfront_cost_krw: float = 0.0
     upfront_models: tuple[str, ...] = ()
@@ -601,7 +649,7 @@ async def _await_worker_before_execution_deadline(
     return worker.result()
 
 def _sweep_jobs(now: float) -> None:
-    """끝난 지 오래된 조사를 메모리에서 치운다 (P-92).
+    """끝난 지 오래된 조사를 메모리에서 치운다.
 
     Args:
         now: 지금 시각 (`time.monotonic()`).
@@ -662,6 +710,79 @@ def _job_is_paid(job: Job) -> bool:
     return bool(job.is_paid or job.paid_phase is not None)
 
 
+def _link_run_stop_reason(job: Job) -> str:
+    """이 조사의 초대 링크가 «지금도» 열려 있는지 저장소에서 다시 읽는다.
+
+    Returns:
+        멈춰야 하면 ASCII 사유 코드, 계속해도 되면 빈 문자열.
+
+    ★ 요청 시작 때 한 판정을 재사용하지 않는다 — 그게 이 검사의 존재 이유다.
+      유료 단계 수만큼 SELECT 한 번씩이라 캐시를 두지 않는다.
+    ★ 링크가 없는 회원·관리자·공개 조사에는 «아무 일도 하지 않는다» (빈 문자열).
+    ★ 읽기 전용 연결을 쓴다 (`report_access` 판정과 같은 방식). 판정 한 번이
+      journal 전환·schema bootstrap·commit을 끌고 오면, 매 유료 호출 앞에 붙는
+      이 검사가 조사 전체를 눈에 띄게 느리게 만든다 (실측: 기존 배경 조사
+      시험 4건이 그 지연만으로 취소 경합에 걸렸다).
+    """
+
+    if not job.share_link_hash:
+        return ""
+    try:
+        with storage_db.connect_readonly_existing() as conn:
+            link = (
+                None
+                if conn is None
+                else share_store.load_by_hash(conn, job.share_link_hash)
+            )
+    except Exception:  # noqa: BLE001 — 상태를 모르면 유료 단계에 들어가지 않는다
+        logger.exception(
+            "초대 링크 상태를 확인하지 못했습니다 job_id=%s", job.job_id
+        )
+        return LINK_STOP_REASON_UNKNOWN
+    if link is None:
+        # 철회는 행을 지우지 않고 표시만 남긴다(`share_store.delete`). 행 자체가
+        # 없다면 「닫혔다」가 아니라 「확인할 수 없다」이므로 단정하지 않는다.
+        logger.error(
+            "초대 링크 행을 찾지 못해 조사를 멈춥니다 job_id=%s", job.job_id
+        )
+        return LINK_STOP_REASON_UNKNOWN
+    if link.is_revoked:
+        return LINK_STOP_REASON_REVOKED
+    if share_logic.link_expired(link):
+        return LINK_STOP_REASON_EXPIRED
+    return ""
+
+
+def _require_open_share_link(job: Job) -> None:
+    """유료 단계에 들어가기 «직전» 훅. 닫혔으면 그 단계를 시작하지 않는다."""
+
+    reason = _link_run_stop_reason(job)
+    if reason:
+        raise LinkAccessClosedDuringRun(reason)
+
+
+def _link_guarded_callbacks(
+    job: Job,
+    callbacks: generation_coordination.GenerationCallbacks,
+) -> generation_coordination.GenerationCallbacks:
+    """지연 유료 단계 진입마다 초대 링크 상태를 «먼저» 다시 본다.
+
+    ★ 한도 원자 갱신(`PaidPhase.begin_phase`)보다 앞에 둔다. 닫힌 링크에 예약부터
+      잡아 놓고 되돌리는 대신 아예 들어가지 않아야 차감이 남지 않는다.
+    ★ 링크 없는 조사는 원래 callback을 «그대로» 돌려준다 — 회원·관리자·공개
+      갈래의 실행 경로는 한 바이트도 달라지지 않는다.
+    """
+
+    if not job.share_link_hash:
+        return callbacks
+
+    def guarded_ensure_paid_phase() -> None:
+        _require_open_share_link(job)
+        callbacks.ensure_paid_phase()
+
+    return replace(callbacks, ensure_paid_phase=guarded_ensure_paid_phase)
+
+
 def _install_job_paid_phase(job: Job, ticket: PaidPhase) -> None:
     """single-flight owner가 얻은 phase를 마감 주체인 Job에 즉시 인계한다."""
 
@@ -711,6 +832,10 @@ def _run_pipeline_worker(job: Job) -> RunResult:
 
     # 기존 단위시험·즉시 예약 호출자는 엣 경계를 그대로 통과한다.
     if job.paid_phase is not None:
+        # 이 갈래는 예약을 route에서 이미 잡았다. 그래도 provider를 부르기
+        # 직전에 초대 링크를 다시 본다 — 예약과 호출 사이가 이 pipeline의
+        # 유일한 「다음 유료 단계」이기 때문이다.
+        _require_open_share_link(job)
         return _call_paid_provider(
             job.paid_phase,
             runtime._PIPELINE.run,
@@ -727,6 +852,8 @@ def _run_pipeline_worker(job: Job) -> RunResult:
     if not bool(
         getattr(runtime._PIPELINE, "supports_deferred_paid_phase", False)
     ):
+        # 한도 원자 갱신이 일어나는 예약보다 «앞»에서 링크를 본다.
+        _require_open_share_link(job)
         ticket = _begin_paid_phase(
             run_id=job.job_id,
             phase=SPEND_PHASE_PIPELINE,
@@ -750,7 +877,9 @@ def _run_pipeline_worker(job: Job) -> RunResult:
     if session is None:  # pragma: no cover - capability 방어선
         raise RuntimeError("지연 본조사 조정 세션이 없습니다")
     try:
-        with generation_coordination.activate(session.callbacks):
+        with generation_coordination.activate(
+            _link_guarded_callbacks(job, session.callbacks)
+        ):
             return runtime._PIPELINE.run(
                 job.user_input,
                 job.card,
@@ -759,6 +888,17 @@ def _run_pipeline_worker(job: Job) -> RunResult:
     finally:
         # ContextVar token은 설치한 같은 worker thread에서 닫아야 한다.
         session.close_provider_context()
+
+
+def _report_requires_atomic_completion(report: Report) -> bool:
+    """FULL 생성물만 저장·출고 실패에도 메모리 결과를 그대로 두지 않는다.
+
+    demo·v1·SHADOW·ENFORCE_NO_PARTIAL은 이 계약 밖이며 audience와 무관하게
+    기존 동작(저장 실패 뒤에도 LINK·ADMIN 임시 미리보기가 메모리에 남는 것)을
+    그대로 유지한다 — 「FULL 밖 demo/non-FULL 동작은 불변이다」.
+    """
+
+    return report.release_mode == ReleaseMode.FULL.value
 
 
 def _apply_reused_delivery_origin(job: Job, result: RunResult) -> None:
@@ -772,6 +912,37 @@ def _apply_reused_delivery_origin(job: Job, result: RunResult) -> None:
         raise TypeError("재사용 보고서의 content와 artifact 결속이 불완전합니다")
     job.delivery_origin_content_id = origin_ids[0]
     job.delivery_origin_artifact_id = origin_ids[1]
+
+
+def _stopped_run_result(
+    job: Job,
+    stopped: BaseException,
+    *,
+    message: str,
+) -> RunResult:
+    """중단된 조사의 결과 1건. 이미 나간 AI 원가를 0원으로 지우지 않는다.
+
+    조사가 결과 대신 예외로 끝나면 그때까지 쓴 값은 예외에 실려 온다
+    (`features/pipeline/real.py`가 같은 이름으로 붙인다). 실어 오지 않았거나
+    계약 밖 값이면 아무것도 지어내지 않고 0원으로 둔다.
+    """
+
+    used = getattr(stopped, "stopped_run_usage", None)
+    if not isinstance(used, RunResult):
+        return RunResult(
+            outcome=Outcome.FAILED,
+            message=message,
+            # 이미 연 유료 단계가 있으면 그 비용을 0원으로 지우지 않는다.
+            billing_uncertain=job.paid_phase is not None,
+        )
+    return RunResult(
+        outcome=Outcome.FAILED,
+        message=message,
+        cost_krw=used.cost_krw,
+        model=used.model,
+        ai_cost_events=used.ai_cost_events,
+        billing_uncertain=used.billing_uncertain or job.paid_phase is not None,
+    )
 
 
 async def _run_job(job: Job) -> None:
@@ -855,15 +1026,22 @@ async def _run_job(job: Job) -> None:
                 billing_uncertain=job.paid_phase is not None,
             )
         raise
+    except LinkAccessClosedDuringRun as closed:
+        # 초대 링크가 조사 도중 닫혔다. 기술 실패가 아니므로 일반 오류
+        # 문구로 뭉개지 않고, 사용자에게는 짧은 안내를 그대로 보여 준다.
+        # 관리자 이력에는 아래 `_link_stop_reason_of`가 ASCII 사유 코드를 남긴다.
+        job.link_stop_reason = closed.reason_code
+        job.link_stop_notice = closed.notice
+        logger.info(
+            "초대 링크가 닫혀 조사를 멈췄습니다 job_id=%s reason=%s",
+            job.job_id,
+            closed.reason_code,
+        )
+        job.result = _stopped_run_result(job, closed, message=closed.notice)
     except Exception as exc:  # noqa: BLE001 — 어떤 실패든 화면은 살아 있어야 한다
         # ★ 사용자에게 내부 오류 내용을 보여주지 않는다 (경로·스택 노출 금지).
         logger.exception("파이프라인 실패 job_id=%s", job.job_id)
-        job.result = RunResult(
-            outcome=Outcome.FAILED,
-            message=PIPELINE_FAILED_MESSAGE,
-            # 진짜 알맹이가 계약 밖 예외를 냈다면 provider 호출 뒤였을 수 있다.
-            billing_uncertain=job.paid_phase is not None,
-        )
+        job.result = _stopped_run_result(job, exc, message=PIPELINE_FAILED_MESSAGE)
         del exc
     finally:
         if shutdown_cleanup_only:
@@ -887,7 +1065,7 @@ async def _run_job(job: Job) -> None:
                 if key not in job.done_steps:
                     job.done_steps.append(key)
             job.current_step = ""
-            # 14. 이력 1행 — 성공·실패 무관하게 남긴다 (기획서 08 관측).
+            # 14. 이력 1행 — 성공·실패 무관하게 남긴다.
             if (
                 job.result.billing_uncertain
                 and job.result.outcome is not Outcome.REPORT
@@ -899,7 +1077,9 @@ async def _run_job(job: Job) -> None:
                     job.result,
                     outcome=Outcome.FAILED,
                     report=None,
-                    message=PIPELINE_FAILED_MESSAGE,
+                    # 초대 링크가 닫혀 멈춘 것은 기술 실패가 아니다. 그 안내는
+                    # 이미 정직하고 짧으므로 일반 오류 문구로 덮지 않는다.
+                    message=job.link_stop_notice or PIPELINE_FAILED_MESSAGE,
                     charged=False,
                     # 실제 게이트가 본 닫힌 사유는 지우지 않는다.
                     # recording이 FAILED+billing_uncertain 조합으로
@@ -949,15 +1129,31 @@ async def _run_job(job: Job) -> None:
                         )
                 except Exception:  # noqa: BLE001 — 관측 누락이 보고서 저장을 막지 않는다
                     logger.exception("Anthropic 성공 관측을 저장하지 못했습니다")
-            record_run(
-                job.user_input,
-                job.result,
-                job.upfront_elapsed_sec + time.perf_counter() - started,
-                run_id=job.job_id,
-                expected_state=(
-                    lifecycle.STATE_RUNNING if _job_is_paid(job) else None
-                ),
+            # FULL 생성물은 파이프라인 완료 시점이 아니라 저장·출고 결과를
+            # 알고 난 뒤에만 lifecycle 최종 행을 남긴다. lifecycle의 final
+            # 상태는 되돌릴 수 없어서(lifecycle.finalize_once) 여기서 먼저
+            # 쓰면 이후 저장·출고가 깨져도 이력은 「완주」로 영구히 남는다.
+            # 이 판정은 지금 시점의 job.result만 보고
+            # 정한다 — 아래 실패 정리가 job.result를 FAILED로 되돌리면
+            # report가 사라져 이후에는 다시 판정할 수 없기 때문이다.
+            # ★ 내부 AI 원가 기록(cost_store.record_run_costs, 위)은 이
+            #   순서와 무관하게 그대로 파이프라인 직후에 남는다 — 옮기면 안
+            #   되는 것은 원가 기록이지 lifecycle 기록이 아니다.
+            requires_full_completion = (
+                job.result.outcome is Outcome.REPORT
+                and job.result.report is not None
+                and _report_requires_atomic_completion(job.result.report)
             )
+            if not requires_full_completion:
+                record_run(
+                    job.user_input,
+                    job.result,
+                    job.upfront_elapsed_sec + time.perf_counter() - started,
+                    run_id=job.job_id,
+                    expected_state=(
+                        lifecycle.STATE_RUNNING if _job_is_paid(job) else None
+                    ),
+                )
             delivery_required = False
             if job.result.outcome is Outcome.REPORT and job.result.report is not None:
                 job.delivery_issued_at = clock.now_kst()
@@ -975,18 +1171,20 @@ async def _run_job(job: Job) -> None:
                         "불변 보고서 delivery 의무 표식 실패 job_id=%s",
                         job.job_id,
                     )
+            # FULL 생성물은 audience와 무관하게 저장·출고 실패 뒤 메모리
+            # 결과를 그대로 남기지 않는다.
             report_saved = (
                 _save_report(job)
                 if job.result.outcome is not Outcome.REPORT or delivery_required
                 else False
             )
             if (
-                job.requires_public_report_grant
-                and job.result.outcome is Outcome.REPORT
+                job.result.outcome is Outcome.REPORT
                 and not report_saved
+                and (job.requires_public_report_grant or requires_full_completion)
             ):
-                # PUBLIC은 메모리 보고서만 보여 주는 임시 성공이 될 수 없다.
-                # grant 결속 실패는 저장 transaction을 되돌렸으므로 최종 결과도
+                # PUBLIC과 FULL 생성물은 메모리 보고서만 보여 주는 임시 성공이
+                # 될 수 없다. 저장 transaction이 되돌아갔으므로 최종 결과도
                 # 실패·무차감으로 닫아 출고 adapter가 호출될 여지를 없앤다.
                 job.delivery_persisted = False
                 if delivery_required:
@@ -994,7 +1192,7 @@ async def _run_job(job: Job) -> None:
                         await asyncio.to_thread(_fail_report_delivery, job)
                     except Exception:  # noqa: BLE001 — required 표식만으로도 공개는 닫힌다
                         logger.exception(
-                            "PUBLIC 권한 저장 실패의 delivery 표식 마감 실패 job_id=%s",
+                            "보고서 저장 실패의 delivery 표식 마감 실패 job_id=%s",
                             job.job_id,
                         )
                 job.result = replace(
@@ -1029,6 +1227,18 @@ async def _run_job(job: Job) -> None:
                             "불변 보고서 delivery 실패 표식 실패 job_id=%s",
                             job.job_id,
                         )
+                    if requires_full_completion:
+                        # FULL 원자 출고는 content·delivery·artifact·자동승인·
+                        # charge·권한 결속이 한 거래로 rollback됐다. 화면·PDF·
+                        # single-flight가 그 실패를 REPORT 성공으로 잘못 읽지
+                        # 않도록 audience와 무관하게 결과를 닫는다.
+                        job.result = replace(
+                            job.result,
+                            outcome=Outcome.FAILED,
+                            report=None,
+                            message=PIPELINE_FAILED_MESSAGE,
+                            charged=False,
+                        )
             elif job.result.outcome is Outcome.REPORT and delivery_required:
                 job.delivery_persisted = False
                 try:
@@ -1038,6 +1248,20 @@ async def _run_job(job: Job) -> None:
                         "보고서 저장 실패의 delivery 표식 마감 실패 job_id=%s",
                         job.job_id,
                     )
+            if requires_full_completion:
+                # 저장·출고 실패 정리가 위에서 이미 job.result를 FAILED로
+                # 되돌렸을 수 있다. lifecycle 최종 행은 이제야 실제 결과를
+                # 반영해 한 번만 쓴다 — 파이프라인 직후 값을 썼다가 나중에
+                # 다시 쓸 수는 없다(final 상태는 불변).
+                record_run(
+                    job.user_input,
+                    job.result,
+                    job.upfront_elapsed_sec + time.perf_counter() - started,
+                    run_id=job.job_id,
+                    expected_state=(
+                        lifecycle.STATE_RUNNING if _job_is_paid(job) else None
+                    ),
+                )
             if (
                 job.generation_session is not None
                 and not job.generation_abandoned
@@ -1093,7 +1317,7 @@ async def _run_job(job: Job) -> None:
                     job,
                     status=share_store.RUN_STATUS_STOPPED,
                     stop_step=_link_stop_step(job.result.outcome),
-                    stop_reason=_link_stop_reason(job.result.outcome),
+                    stop_reason=_link_stop_reason_of(job, job.result.outcome),
                 )
         finally:
             # 비용 마감과 이력 정리를 시도한 뒤에만 자리를 돌려준다. 중간에 어떤
@@ -1127,6 +1351,16 @@ def _link_stop_step(outcome: Outcome) -> str:
         Outcome.GATE_STOPPED: obs.END_STEP_GATE,
         Outcome.FAILED: obs.END_STEP_GENERATE,
     }.get(outcome, obs.END_STEP_GENERATE)
+
+
+def _link_stop_reason_of(job: Job, outcome: Outcome) -> str:
+    """링크가 닫혀 멈춘 실행은 파이프라인 종료값 대신 그 사유를 남긴다.
+
+    ★ 이 구분이 없으면 관리자 이력에 「생성 중 기술 오류」로 찍혀, 관리자가
+      자기가 방금 닫은 링크 때문이라는 걸 알 수 없다.
+    """
+
+    return job.link_stop_reason or _link_stop_reason(outcome)
 
 
 def _link_stop_reason(outcome: Outcome) -> str:
@@ -1194,7 +1428,7 @@ def _ensure_link_job_closed(job: Job) -> None:
                 status=share_store.RUN_STATUS_STOPPED,
                 finished_at=clock.iso_now_kst(),
                 stop_step=_link_stop_step(outcome),
-                stop_reason=_link_stop_reason(outcome),
+                stop_reason=_link_stop_reason_of(job, outcome),
                 internal_ai_cost_krw=(
                     job.result.cost_krw
                     if isinstance(job.result, RunResult)
@@ -1478,7 +1712,7 @@ def _save_report(job: Job) -> bool:
 
 
 def _shared(response: Response) -> Response:
-    """공유 링크 보호 헤더를 응답에 붙인다 (P-93).
+    """공유 링크 보호 헤더를 응답에 붙인다.
 
     Args:
         response: 이미 만들어진 응답.
@@ -1495,7 +1729,7 @@ def _shared(response: Response) -> Response:
     return response
 
 def _expired_screen(request: Request) -> HTMLResponse:
-    """기간이 지난 링크에 보여줄 화면 (P-93).
+    """기간이 지난 링크에 보여줄 화면.
 
     ★ 「없는 보고서」로 처리하지 않는다 — 있었는데 «기간이 지난» 것이고,
       그 둘은 사용자에게 완전히 다른 뜻이다.
@@ -1532,7 +1766,15 @@ def _load_saved_report(report_id: str) -> Optional[Report]:
                 )
                 if not approved_payload:
                     return None
-                return report_store.report_from_json(approved_payload)
+                # 공개 봉인은 payload가 아니라 별도 표에 있다.
+                # 다시 붙이지 않으면 재시작 뒤 조회에서만 봉인이 사라진다.
+                # 어긋나면 아래 except가 ReportStoreUnavailable로 닫는다
+                # (I3 fail-closed — 이 함수의 기존 오류 처리 그대로다).
+                return report_store.attach_public_projection(
+                    conn,
+                    report_id,
+                    report_store.report_from_json(approved_payload),
+                )
             return report_store.load(conn, report_id)
     except Exception as exc:  # noqa: BLE001
         logger.exception("보고서 불러오기 실패")
@@ -1910,8 +2152,10 @@ async def _start_with_reserved_slot(
                     link = share_store.load(conn, share_key)
                     active = (
                         link is not None
+                        # 저장된 만료일까지 본다. `start_run`도 같은 판정을
+                        # SQL로 한 번 더 거는 이중 방어다.
                         and not link.is_revoked
-                        and not share_logic.is_share_link_expired(link.created_at)
+                        and not share_logic.link_expired(link)
                     )
                     inserted = active and share_store.start_run(
                         conn,
@@ -1931,7 +2175,7 @@ async def _start_with_reserved_slot(
                     "LINK 생성 시작 이력을 저장하지 못했습니다 job_id=%s", run_id
                 )
                 return _storage_unavailable_response(request)
-        # 사진으로 올린 공고는 «여기서 처음» 서버에 들어온다 (기획서 D2 — 판정 통과 후).
+        # 사진으로 올린 공고는 «여기서 처음» 서버에 들어온다 (판정 통과 후).
         # ★ 원본 바이트를 파일·로그·결과 어디에도 남기지 않는다 (S2).
         posting_body = original_input.posting_text
         image_error = ""
@@ -2132,6 +2376,7 @@ async def _start_with_reserved_slot(
             )
 
         member_email = ""
+        member_success_limit = dashboard_store.MEMBER_DAILY_SUCCESS_LIMIT
         try:
             with storage_db.connect() as conn:
                 if dashboard_store.get_service_state(conn).status == dashboard_store.SERVICE_MAINTENANCE:
@@ -2156,12 +2401,26 @@ async def _start_with_reserved_slot(
                         raise RuntimeError(
                             "MEMBER 실행의 불변 계정 subject를 확인할 수 없습니다"
                         )
+                    # ★ 한도는 «이 친구의 값»이다. 이 요청이 읽은
+                    #   값을 막는 판단과 화면 문구 둘 다에 넘겨, 「막는 숫자」와
+                    #   「말하는 숫자」가 어긋나지 않게 한다.
+                    # ⚠️ 이 읽기는 예약 transaction «직전»이지 그 «안»이 아니다 —
+                    #   sqlite3 기본 isolation_level('')은 SELECT 앞에 BEGIN을 열지
+                    #   않는다 (실측: 읽은 직후 conn.in_transaction == False).
+                    #   동시 요청의 직렬화는 reserve_member_run의 BEGIN IMMEDIATE가
+                    #   맡고, 오늘 사용량은 그 안에서 다시 센다. 읽은 뒤 관리자가
+                    #   한도를 바꾸면 이 요청만 «읽은 값»으로 판정되는데, 이는 매
+                    #   요청 현재 값으로 다시 판정한다는 기존 원칙 그대로다.
+                    member_success_limit = dashboard_store.member_success_limit(
+                        conn, actor_email=member_email
+                    )
                     member_usage_reserved = dashboard_store.reserve_member_run(
                         conn,
                         run_id=run_id,
                         actor_email=member_email,
                         day=clock.today_kst().isoformat(),
                         now_iso=clock.iso_now_kst(),
+                        success_limit=member_success_limit,
                     )
                     if member_usage_reserved and not report_access_store.bind_member_run(
                         conn,
@@ -2176,7 +2435,9 @@ async def _start_with_reserved_slot(
             if not member_usage_reserved:
                 return request_helpers._throttled(
                     request,
-                    "오늘 성공한 보고서 3건을 모두 사용했습니다. 내일 다시 시도해 주세요.",
+                    request_helpers.member_success_limit_message(
+                        member_success_limit
+                    ),
                     "member-success-limit",
                 )
 

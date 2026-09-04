@@ -213,6 +213,31 @@ def test_네_공개채널은_모두_같은_authorize_report_access를_먼저_호
     assert calls == [report_id, report_id, report_id, report_id]
 
 
+def test_거절된_화면_세_채널은_모두_틀과_상단바를_갖춘다(monkeypatch):
+    """★ 결과 주소는 가장 자주 공유된다. 남에게 열릴 때 본문이 `<h1><p>` 두 줄이면
+    손님에게는 고장 난 페이지다 — 틀(`<!doctype`)과 상단바가 있어야 한다."""
+    report_id = "e" * 32
+
+    def deny(_request, locator, *, now=None):
+        del locator, now
+        return logic.AccessDecision(False, None, "not_owner")
+
+    monkeypatch.setattr(logic, "authorize_report_access", deny)
+    with TestClient(main.app, base_url="https://testserver") as client:
+        bodies = {
+            path: client.get(path, follow_redirects=False).text
+            for path in (
+                f"/result/{report_id}",
+                f"/download/pdf/{report_id}",
+                f"/progress/{report_id}",
+            )
+        }
+
+    for path, body in bodies.items():
+        assert body.lstrip().lower().startswith("<!doctype"), path
+        assert 'class="topbar"' in body, path
+
+
 def test_narrow_admin도_매요청_현재_admin_session으로_공개채널을_지난다(
     monkeypatch,
 ):

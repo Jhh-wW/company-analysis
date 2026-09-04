@@ -281,7 +281,7 @@ def extract_json_payload(raw: str) -> Optional[Any]:
 
     ★ 내용 검사가 아니다 — 「JSON으로 읽히는가」만 본다.
 
-    ★ 왜 «공개» 함수인가 (2026-08-25, 3-strikes) — 같은 규칙이 composer 안에
+    ★ 왜 «공개» 함수인가 (3-strikes) — 같은 규칙이 composer 안에
       **세 벌** 있었다: 여기, `verify.py`, `diagram_check.py`. 앞의 둘은 글자까지
       같았고, `diagram_check` 쪽만 «첫 `{`부터 마지막 `}`까지 자르기»만 하고
       맨 앞의 `json.loads` 시도를 빼먹은 채였다. 그래서 한 곳을 고쳐도 나머지
@@ -449,13 +449,13 @@ def _flow_row_from_item(
         return None
     if len(cells) != cell_count:
         return None
-    # ★ 빈 칸을 허용한다 (사용자 결정 2026-08-24). 예전에는 한 칸이라도
+    # ★ 빈 칸을 허용한다 (제품 결정). 예전에는 한 칸이라도
     #   비면 줄을 버렸는데, 8장 「확인된 사례」처럼 «없을 수 있는» 칸 때문에
     #   쓸 만한 줄이 통째로 사라졌다. 다만 «전부» 빈 줄은 아무 말도 하지
     #   않으므로 그때만 버린다.
     if not any(cell for cell in cells):
         return None
-    # ★ 칸 글자 수 상한을 없앴다 (사용자 결정). 24자는 너무 빡빡했다 —
+    # ★ 칸 글자 수 상한을 없앴다 (제품 결정). 24자는 너무 빡빡했다 —
     #   「글로벌 사업 확대에 따른 환율변동위험」이 이미 19자다.
     #   상한을 두었던 본래 이유는 「긴 주장이 표 안으로 숨어 문장 검증을
     #   피해 간다」였는데, 그 사이 도식 검증(diagram_check)이 생겨 표의
@@ -531,7 +531,7 @@ def _ask_and_parse(
     except AskFatalError:
         raise
     except Exception as error:  # noqa: BLE001 - 한 장의 실패가 보고서 전체를 멈추면 안 된다
-        # ★ 2026-08-29 — 여기가 «1차 원인»을 통째로 삼켰다. 서버 로그에는
+        # ★ 여기가 «1차 원인»을 통째로 삼켰다. 서버 로그에는
         #   2차 증상(ProviderBudgetUnavailable)만 남아 원인을 못 찾았다.
         #   ⚠️ 예외 «메시지»는 남기지 않는다 — provider 응답 본문이 섞일 수 있다.
         #     클래스 이름과 어느 장인지만 남긴다.
@@ -1251,7 +1251,7 @@ def _supplement_summary(
 ) -> tuple[ComposedSentence, ...]:
     """요약이 최소 문장 수에 못 미치면 본문 «확인» 문장으로 보충한다.
 
-    ★ 본문 재사용이 허용되는 유일한 경로다(계획 04장 3-3) —
+    ★ 본문 재사용이 허용되는 유일한 경로다(정본 기준) —
       빈 요약으로 인한 차단을 만들지 않기 위해서다.
     """
     chosen: list[ComposedSentence] = list(summary)
@@ -1275,7 +1275,7 @@ def compose_summary(
 ) -> ComposedReport:
     """본문 완성 후 핵심 요약 3~5문장을 새로 써서 채운 보고서를 돌려준다.
 
-    흐름(계획 04장 3-3):
+    흐름:
         ① 본문 전체를 주고 요약을 새로 쓰게 한다 (파싱 실패 시 1회 재요청).
         ② 본문 문장을 글자 그대로 옮긴 재탕을 코드로 검출 → 1회 재요청.
            재요청 결과에서도 재탕은 버리고, 쓸 것이 없으면 1차 생존 문장을 쓴다.

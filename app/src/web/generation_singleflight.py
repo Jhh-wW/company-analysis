@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -26,11 +27,18 @@ from src.features.report_delivery import singleflight
 from src.features.report_delivery import store as delivery_store
 from src.features.report_delivery.cache_identity import CacheLookupKey
 from src.features.report_delivery.models import DeliveryPolicy
+from src.features.report_delivery.policy import CacheMissReason
+from src.features.storage import cache as cache_store
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
 from src.shared import engine_build_identity as build_identity_contract
 from src.shared import generation_coordination
 from src.shared.generation_cache_identity import GenerationCacheNamespace
+from src.shared.report_evidence.constants import ReleaseMode
+from src.shared.report_evidence.release_mode import (
+    REPORT_RELEASE_MODE_ENV_NAME,
+    parse_release_mode,
+)
 from src.shared.report_source_identity import ReportSourceIdentity
 from src.web import paid_runtime
 
@@ -143,6 +151,39 @@ if MAX_AI_CALLS_PER_REQUEST * ANTHROPIC_TIMEOUT_SEC > (
     OWNER_PROVIDER_ADMISSION_AGE.total_seconds()
 ):  # pragma: no cover - 서로 다른 정본 상수가 어긋나면 import부터 실패한다.
     raise RuntimeError("provider 최악 대기보다 single-flight owner 상한이 짧습니다")
+
+
+def _attach_origin_public_projection(
+    conn: Any,
+    *,
+    artifact_id: str,
+    content_id: str,
+    billing_bucket_id: str,
+    report: Any,
+) -> Any:
+    """재사용하는 본문에 «원래 발급 Delivery»의 공개 봉인을 다시 붙인다.
+
+    봉인은 보고서 payload가 아니라 별도 표에 report_id로 저장한다.
+    재사용 경로가 손에 쥔 것은 content snapshot 문자열뿐이라
+    report_id가 없다 — 그 artifact를 실제로 발급받은 Delivery의 공개 ID가
+    그 자리다. 같은 통장·같은 내용 원본인 Delivery만 본다(다른 통장의 PDF를
+    우회로 가져오지 못하게 하는 ``deliveries_for_artifact``의 경계와 동일).
+
+    맞는 Delivery가 없으면 봉인을 붙이지 않고 그대로 돌려준다 — 그건 오류가
+    아니라 「봉인 없음」이라는 정의된 상태다. 봉인이 «있는데» 저장본과 어긋나면
+    ``attach_public_projection``이 ValueError를 올리고, 호출부가 그 경로의
+    기존 방식대로 닫는다(I3 fail-closed).
+    """
+
+    for origin in delivery_artifact.deliveries_for_artifact(
+        conn, artifact_id=artifact_id
+    ):
+        if origin.billing_bucket_id != billing_bucket_id:
+            continue
+        if origin.content_snapshot_id != content_id:
+            continue
+        return report_store.attach_public_projection(conn, origin.public_id, report)
+    return report
 
 
 class GenerationSingleflightUnavailable(
@@ -422,6 +463,18 @@ class GenerationSession:
             raise GenerationSingleflightUnavailable(
                 "완료된 보고서 내용을 읽지 못했습니다"
             ) from exc
+        try:
+            report = _attach_origin_public_projection(
+                conn,
+                artifact_id=artifact.artifact_id,
+                content_id=content.content_id,
+                billing_bucket_id=key.billing_bucket_id,
+                report=report,
+            )
+        except ValueError as exc:
+            raise GenerationSingleflightUnavailable(
+                "완료된 보고서의 공개 봉인이 저장본과 다릅니다"
+            ) from exc
         cache_key = CacheLookupKey(
             billing_bucket_id=key.billing_bucket_id,
             corp_id=key.corp_id,
@@ -443,6 +496,27 @@ class GenerationSession:
             generation_cache_eligible=cache_eligible,
         )
 
+    def _requested_release_mode(self) -> ReleaseMode | None:
+        """지금 요청이 «어떤 릴리스 모드로» 만들려는지. 모르면 ``None``.
+
+        ★ 왜 세션이 직접 읽나
+          이 값의 정본은 pipeline(`features/pipeline/real.py`)이 읽는 것과
+          같은 환경값 한 곳이다. 인자로 받으려면 `generation_coordination`의
+          callback 서명(shared)이나 세션 생성부(`web/job_runtime.py`)를 고쳐야
+          하는데 둘 다 이 변경의 소유가 아니다. 같은 환경값을 같은 파서로 읽으므로
+          두 곳이 갈릴 여지는 없다.
+        ★ 모르면 «예전 동작». 값이 없거나 계약 밖 문자열이면 `None`이고,
+          그때 아래 판정은 재사용을 그대로 허용한다. FULL 요청은 환경값이
+          반드시 있다(없거나 오타면 pipeline이 AI 호출 전에 막는다).
+        """
+        raw = os.environ.get(REPORT_RELEASE_MODE_ENV_NAME)
+        if not raw:
+            return None
+        try:
+            return parse_release_mode(raw)
+        except ValueError:
+            return None
+
     def _read_cached_release(
         self,
         conn: Any,
@@ -455,14 +529,12 @@ class GenerationSession:
             content_max_age=dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS),
             public_link_lifetime=dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS),
         )
-        cached = delivery_store.load_cache_hit(
+        lookup = delivery_store.load_cache_lookup(
             conn,
             key=key,
             policy=policy,
             delivered_at=clock.now_kst(),
         )
-        if cached is None:
-            return None
         lease_key = singleflight.LeaseKey(
             billing_bucket_id=key.billing_bucket_id,
             corp_id=key.corp_id,
@@ -471,13 +543,17 @@ class GenerationSession:
             engine_epoch_digest=key.engine_epoch_digest,
         )
 
-        def invalidate(reason_code: str) -> None:
+        def drop_cache_entry(
+            content_snapshot_id: str,
+            artifact_id: str,
+            reason_code: str,
+        ) -> None:
             invalidated_at = clock.now_kst()
             removed = delivery_store.invalidate_cache_entry(
                 conn,
                 key=key,
-                expected_content_snapshot_id=cached.content.content_id,
-                expected_artifact_id=cached.artifact_id,
+                expected_content_snapshot_id=content_snapshot_id,
+                expected_artifact_id=artifact_id,
                 reason_code=reason_code,
                 invalidated_at=invalidated_at,
             )
@@ -485,10 +561,36 @@ class GenerationSession:
                 singleflight.expire_completed_result(
                     conn,
                     key=lease_key,
-                    content_snapshot_id=cached.content.content_id,
-                    artifact_id=cached.artifact_id,
+                    content_snapshot_id=content_snapshot_id,
+                    artifact_id=artifact_id,
                     now=invalidated_at,
                 )
+
+        cached = lookup.hit
+        if cached is None:
+            if (
+                lookup.miss_reason is CacheMissReason.CONTENT_EXPIRED
+                and lookup.expired_content_snapshot_id
+                and lookup.expired_artifact_id
+            ):
+                # ★ 재사용 한도 나이를 지난 열쇠는 «읽지 않는 것»으로 끝내면
+                #   안 된다. 행이 남아 옛 본문을 계속 가리키면, 새로 만든
+                #   보고서를 같은 열쇠에 결속하는 마지막 단계에서 막혀
+                #   재조사가 몇 번을 다시 해도 같은 자리에서 실패한다.
+                #   여기서 사유를 남기고 지운 뒤 미적중으로 내려간다.
+                drop_cache_entry(
+                    lookup.expired_content_snapshot_id,
+                    lookup.expired_artifact_id,
+                    CacheMissReason.CONTENT_EXPIRED.value,
+                )
+            return None
+
+        def invalidate(reason_code: str) -> None:
+            drop_cache_entry(
+                cached.content.content_id,
+                cached.artifact_id,
+                reason_code,
+            )
 
         try:
             metadata = delivery_artifact.load_artifact_metadata(
@@ -560,6 +662,17 @@ class GenerationSession:
             return None
         if not approval_found:
             invalidate("approval_record_missing")
+            return None
+        try:
+            report = _attach_origin_public_projection(
+                conn,
+                artifact_id=metadata.artifact_id,
+                content_id=cached.content.content_id,
+                billing_bucket_id=key.billing_bucket_id,
+                report=report,
+            )
+        except ValueError:
+            invalidate("public_projection_mismatch")
             return None
         return generation_coordination.ReusedGeneration(
             content_snapshot_id=cached.content.content_id,
@@ -661,6 +774,25 @@ class GenerationSession:
                     conn.execute("BEGIN IMMEDIATE")
                     delivery_store.save_cache_namespace(conn, cache_namespace)
                     cached = self._read_cached_release(conn, key=cache_key)
+                    if cached is not None and not (
+                        cache_store.reusable_for_requested_release_mode(
+                            str(
+                                getattr(cached.report, "release_mode", "") or ""
+                            ),
+                            self._requested_release_mode(),
+                        )
+                    ):
+                        # ★ 여기서 «히트»로 인정하면 상태가 cache_reused로 굳고,
+                        #   그 뒤 호출자가 이 결과를 버려도 ensure_paid_phase()가
+                        #   owner/bypass가 아니라며 막아 요청이 통째로 실패한다.
+                        #   캐시 항목은 남아 있어 재시도도 같은 이유로 계속
+                        #   실패한다. 그래서 «버리기»가 아니라 «처음부터 미적중»
+                        #   으로 다뤄 그대로 owner 선정으로 내려간다(C6).
+                        logger.info(
+                            "요청 릴리스 모드와 다른 저장본이라 재사용하지 않고 "
+                            "새로 만듭니다"
+                        )
+                        cached = None
                     if cached is not None:
                         with self._lock:
                             self._key = key

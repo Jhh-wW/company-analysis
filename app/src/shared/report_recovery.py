@@ -3,6 +3,11 @@
 ``composer``와 옛 ``features.report_recovery`` facade가 함께 쓰는 순수 계약이다.
 기능 간 직접 import를 만들지 않기 위해 정본을 shared에 두며, provider나 렌더러를
 알지 않고 결속된 평가 영수증만으로 다음 행동을 결정한다.
+
+AI 호출 전 사전 게이트(자료 부족·조회 장애로 아예 시작하지 않는 판단)는
+이 모듈이 아니라 ``pipeline/real.py``의 ``GATE_STOPPED`` 발화점이 맡는다.
+이 모듈은 생성이 **끝난 뒤**의 검증 결과에서 공개·보충·무차감을 결정하는
+회복 정책만 담는다.
 """
 
 from __future__ import annotations
@@ -18,8 +23,6 @@ from src.shared.generation_validation_receipt import (
     canonical_sha256,
     require_sha256,
 )
-from src.shared.report_evidence.constants import GenerationGateStatus
-from src.shared.report_evidence.models import GenerationGateDecision
 from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
 from src.shared.report_quality.models import (
     GenerationAssessment,
@@ -291,32 +294,6 @@ def _authorization_for(
     )
 
 
-def decide_preflight(gate: GenerationGateDecision) -> RecoveryDecision:
-    """9장 근거가 모두 READY일 때만 첫 유료 묶음을 허용한다."""
-
-    if gate.required_section_ids != REQUIRED_EVIDENCE_SECTION_IDS:
-        raise ValueError("사전검사에는 정책 순서의 필수 아홉 장이 모두 필요합니다")
-    if gate.status is GenerationGateStatus.STOP_TRANSIENT_FAILURE:
-        return RecoveryDecision(
-            action=RecoveryAction.STOP_NO_CHARGE,
-            reason_code="preflight_evidence_unknown",
-        )
-    if gate.status is GenerationGateStatus.STOP_INSUFFICIENT_EVIDENCE:
-        return RecoveryDecision(
-            action=RecoveryAction.STOP_NO_CHARGE,
-            reason_code="preflight_evidence_insufficient",
-        )
-    if gate.status is not GenerationGateStatus.READY_FOR_GENERATION:
-        raise ValueError("알 수 없는 생성 게이트 상태입니다")
-    if not gate.can_call_ai:
-        raise ValueError("AI 허용 표식과 생성 게이트 상태가 다릅니다")
-    return RecoveryDecision(
-        action=RecoveryAction.RUN_PRIMARY,
-        reason_code="preflight_all_sections_ready",
-        authorized_additional_ai_calls=PRIMARY_AI_CALLS,
-    )
-
-
 def _decide_first_validation(
     receipt: GenerationValidationReceipt,
 ) -> RecoveryDecision:
@@ -408,6 +385,29 @@ def _validate_supplement_binding(
             raise ValueError("승인된 보충 장의 내용 지문이 바뀌지 않았습니다")
         if section_id not in approved and changed:
             raise ValueError("승인하지 않은 장이 보충 중 바뀌었습니다")
+    # ★ 위 비교만으로는 부족하다. `section_sha256s`는
+    #   pre-render 공개 content 봉인(지문 A)에서 오고 지문 A는 «보이는 것»만
+    #   덮는다. 그래서 보충 회차가 비대상 장의 글자는 그대로 두고 FactRecord나
+    #   등급 기여만 바꾸면 여기를 그냥 통과했다. `section_block_sha256s`는
+    #   display와 감사 장부를 함께 덮으므로 그 표류를 같은 규칙으로 닫는다.
+    # ★ 빈 값을 «통과»로 두지 않는다 — 그러면 다음 변경이 이 필드를 안 채우는
+    #   순간 보호가 조용히 사라진다.
+    if not primary_receipt.section_block_sha256s or not (
+        supplement_receipt.section_block_sha256s
+    ):
+        raise ValueError("보충 결속에는 두 회차의 장별 봉인 블록 지문이 필요합니다")
+    base_blocks = dict(primary_receipt.section_block_sha256s)
+    result_blocks = dict(supplement_receipt.section_block_sha256s)
+    for section_id in REQUIRED_EVIDENCE_SECTION_IDS:
+        changed = base_blocks[section_id] != result_blocks[section_id]
+        if section_id in approved and not changed:
+            raise ValueError(
+                "승인된 보충 장의 봉인 블록 지문이 바뀌지 않았습니다"
+            )
+        if section_id not in approved and changed:
+            raise ValueError(
+                "승인하지 않은 장의 봉인 블록이 보충 중 바뀌었습니다"
+            )
     if (
         supplement_receipt.assessment.contract_version
         != primary_receipt.assessment.contract_version
@@ -509,5 +509,4 @@ __all__ = [
     "SupplementAuthorization",
     "ValidationRound",
     "decide_post_validation",
-    "decide_preflight",
 ]

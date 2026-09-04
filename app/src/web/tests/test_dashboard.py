@@ -98,7 +98,9 @@ def test_admin_dashboard_has_no_public_json_and_refresh_is_admin_only(monkeypatc
     assert csrf
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
-    assert "오늘" in response.text and "문제·보고서" in response.text
+    # ★ 기대값 이전 — 메뉴 이름이 여섯 묶음으로 바뀌었다
+    #   (「문제·보고서」 → 「보고서」). 화면이 HTML로 그려진다는 계약은 그대로다.
+    assert "오늘 상태" in response.text and "보고서" in response.text
     assert fragment.status_code == 200 and fragment.headers["content-type"].startswith("text/html")
     assert settings.status_code == 200
 
@@ -503,12 +505,19 @@ def test_narrow_free_admin_demo_disables_deferred_actions(monkeypatch, tmp_path)
     with TestClient(main.app, base_url="https://demo.example") as client:
         _session(client, email="admin@example.com", is_admin=True)
         dashboard = client.get("/admin")
-        access = client.get("/admin/access")
+        links = client.get("/admin/links")
+        members = client.get("/admin/members")
 
-    assert dashboard.status_code == 200 and access.status_code == 200
-    assert "LINK 발급 불가" in access.text and "친구 초대 불가" in access.text
-    assert 'action="/admin/link/new"' not in access.text
-    assert 'action="/admin/invite"' not in access.text
+    assert dashboard.status_code == 200
+    assert links.status_code == 200 and members.status_code == 200
+    # ★ 꺼진 기능은 눌리지 않는 회색 버튼이 아니라
+    #   안내 한 줄로만 보인다. 버튼이 없다는 것과
+    #   안내가 있다는 것을 함께 못 박는다.
+    assert "이 운영판에서는 초대 링크를 발급할 수 없습니다." in links.text
+    assert "이 운영판에서는 친구를 초대할 수 없습니다." in members.text
+    assert "발급 불가" not in links.text and "초대 불가" not in members.text
+    assert 'action="/admin/links/new"' not in links.text
+    assert 'action="/admin/invite"' not in members.text
 
 
 def test_admin_real_contract_is_admin_only_and_disables_deferred_actions(
@@ -529,14 +538,19 @@ def test_admin_real_contract_is_admin_only_and_disables_deferred_actions(
         denied = client.get("/", follow_redirects=False)
         _session(client, email="admin@example.com", is_admin=True)
         dashboard = client.get("/admin")
-        access = client.get("/admin/access")
+        links = client.get("/admin/links")
+        members = client.get("/admin/members")
 
     assert denied.status_code == 303
     assert denied.headers["location"] == "/auth/login"
-    assert dashboard.status_code == 200 and access.status_code == 200
-    assert "LINK 발급 불가" in access.text and "친구 초대 불가" in access.text
-    assert 'action="/admin/link/new"' not in access.text
-    assert 'action="/admin/invite"' not in access.text
+    assert dashboard.status_code == 200
+    assert links.status_code == 200 and members.status_code == 200
+    # ★ 꺼진 기능은 회색 버튼이 아니라 안내 한 줄이다.
+    assert "이 운영판에서는 초대 링크를 발급할 수 없습니다." in links.text
+    assert "이 운영판에서는 친구를 초대할 수 없습니다." in members.text
+    assert "발급 불가" not in links.text and "초대 불가" not in members.text
+    assert 'action="/admin/links/new"' not in links.text
+    assert 'action="/admin/invite"' not in members.text
 
 
 def test_admin_dashboard_labels_three_minute_metric_as_response_not_accuracy(

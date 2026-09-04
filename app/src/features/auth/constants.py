@@ -2,8 +2,6 @@
 
 ★ 규칙 — 스코프·엔드포인트·쿠키 이름·유효시간·관리자 이메일을 코드 여기저기에
   숫자·문자열로 흩어 쓰지 않는다. 여기만 고치면 전체가 맞춰진다.
-
-정본: 기획서.ver2/확정/90_운영기록/03_결정기록_03_구현중.md (D15)
 """
 
 from __future__ import annotations
@@ -78,7 +76,11 @@ BETA_SHARE_PATH_PREFIXES: Final[tuple[str, ...]] = (
     "/download/pdf/",
 )
 
-# ── 권한 판단 (D15 — 구글 로그인은 「누구인가」, 이 목록은 「관리자인가」) ─
+#: 관리자 전용 로그인 벽에 «초대 명단 회원» 예외를 줄 때도, 이 경로만은 절대
+#: capability나 회원 세션으로 열리지 않는다 — 관리자 세션만 들어온다.
+ADMIN_PATH_PREFIX: Final[str] = "/admin"
+
+# ── 권한 판단 (구글 로그인은 「누구인가」, 이 목록은 「관리자인가」) ─
 #: 환경변수가 없으면 관리자는 0명이다. 배포에서 ENV_ADMIN_EMAILS를 반드시 넣는다.
 DEFAULT_ADMIN_EMAILS: Final[tuple[str, ...]] = ()
 

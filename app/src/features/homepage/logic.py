@@ -1,8 +1,7 @@
 """회사 홈페이지에서 「뭘 잘하나」 재료(조각)를 모은다.
 
-정본: 확정/03_수집/2_규칙/01_소스정책.md (2번 소스 — 회사 홈페이지)
-      확정/05_생성/2_규칙/02_유형별소스.md (2·4-2·4-3 칸의 홈페이지 소스)
-      확정/03_수집/1_흐름/02_실패처리.md (「없다」와 「못 가져옴」은 다르다)
+이 파일이 다루는 것 — 2번 소스(회사 홈페이지)다.
+「없다」와 「못 가져옴」은 다르다.
 
 ★ 네트워크 호출은 전부 `fetch` 인자로 주입받는다 (`Fetcher` 타입).
   기본값은 실제로 접속하는 `default_fetch`이지만, 시험에서는 가짜 함수를 넣어
@@ -40,6 +39,11 @@ from src.features.homepage.constants import (
     SINGLE_LABEL_PUBLIC_SUFFIXES,
     TIMEOUT_SEC,
     USER_AGENT,
+)
+from src.features.homepage.robots_cache import (
+    RobotsDecision,
+    cached_robots_decision,
+    robots_cache_key,
 )
 from src.features.homepage.safe_http import (
     HomepageResponseError,
@@ -114,7 +118,7 @@ class HomepageSecurityPolicyError(HomepageFetchError):
 class HomepageCertNameMismatchError(HomepageFetchError):
     """SSL 인증서에 적힌 이름이 접속 주소와 다를 때(hostname mismatch) 던진다.
 
-    ★ C안(문제로그 P-46)의 시작점. 이 예외를 받으면 인증서의 진짜 이름이
+    ★ C안의 시작점. 이 예외를 받으면 인증서의 진짜 이름이
       「같은 회사」로 보일 때만 검증을 켠 채 그 이름으로 1번 재시도한다
       (`_attempt_cert_fallback` 참조). 만료·자체서명 등 다른 인증서 오류는
       이 예외가 아니라 `HomepageFetchError`로 오므로 자동으로 재시도 대상에서
@@ -154,7 +158,7 @@ DartWwwRedirectProbe = Callable[[str, str], str]
 class HomepageCollectResult:
     """홈페이지 수집 결과 하나.
 
-    ★ 「자료 없음」과 「못 가져옴」을 반드시 구분한다 (정본 §「없다」와 「못 가져옴」은 다르다).
+    ★ 「자료 없음」과 「못 가져옴」을 반드시 구분한다 (「없다」와 「못 가져옴」은 다르다).
       state가 "failed"인 결과는 캐시하면 안 된다 — 그날만 사이트가 죽었을 수 있다.
     """
 
@@ -364,7 +368,7 @@ def _collect_homepage_fragments_impl(
     회사·기술 소개 페이지(`PRIORITY_PATH_KEYWORDS`)를 우선해서 읽고,
     robots.txt로 금지된 경로는 건너뛰며, 페이지 수·글자 수 상한을 지킨다.
 
-    ★ 인증서 이름 불일치(C안, 문제로그 P-46): 루트 접속에서
+    ★ 인증서 이름 불일치(C안): 루트 접속에서
       `HomepageCertNameMismatchError`가 나면, 인증서에 적힌 이름 중 원래
       주소와 «같은 회사」로 보이는 것이 있을 때만 그 이름으로 검증을 켠 채
       1번 재시도한다 (`_attempt_cert_fallback`). 다르면 그대로 실패로 남긴다.
@@ -656,7 +660,6 @@ def _normalize_url(raw: str) -> str:
     ★ **`https://`를 먼저 붙인다.** 전자공시의 `hm_url`은 대부분 스킴이 없다.
       `http://`를 붙이면 **암호화 없이** 읽게 되고, 그러면 중간에서 내용을
       바꿔치기해도 알 수 없다 — 그 거짓이 그대로 보고서에 「사실」로 들어간다.
-      (문제로그 P-52)
     """
     candidate = raw.strip()
     if not candidate:
@@ -787,33 +790,61 @@ def _attempt_cert_fallback(
 
 
 def _load_robots(base_url: str, fetch: Fetcher) -> robotparser.RobotFileParser:
-    """RFC 9309 실패 의미론으로 robots.txt를 한 번 확인한다.
+    """RFC 9309 실패 의미론으로 robots.txt를 확인한다.
 
     HTTP 4xx는 robots가 이용 불가한 것으로 보아 빈 규칙으로 진행한다. 서버 오류,
     DNS·timeout·응답 검증 실패는 규칙을 확인할 수 없는 상태이므로 전면 허용으로
     바꾸지 않고 호출자까지 실패를 전달한다.
+
+    ★ 같은 조사(scope) 안에서 이미 다른 수집기(공식 IR PDF·광역 웹)가 같은
+      **origin**(scheme+host+port)의 robots.txt를 확인했으면 새 네트워크
+      요청 없이 그 판정을 재사용한다(``robots_cache.cached_robots_decision``
+      — 최대 4회 중복 요청 실측). 캐시 키는 host가 아니라 origin
+      이다 — HTTPS 전면 실패 뒤 `_http_variant`로 HTTP 재시도할 때, HTTPS
+      robots 판정을 그대로 물려받으면 실제 HTTP robots.txt(예: 전면 차단)를
+      다시 확인하지 않아 차단된 사이트를 평문으로 읽어버린다(독립 검토
+      P0 실측 — ``robots_cache.py`` 모듈 docstring 참조).
     """
-    parser = robotparser.RobotFileParser()
     robots_url = urllib.parse.urljoin(base_url, "/robots.txt")
-    try:
-        text, effective_url, _verified = _fetch_page(fetch, robots_url)
-        if not _same_origin(robots_url, effective_url):
-            raise HomepageRobotsUnreachable(
-                "robots.txt가 다른 origin으로 이동했습니다"
+    host = (urllib.parse.urlsplit(robots_url).hostname or "").casefold()
+    cache_key = robots_cache_key(robots_url)
+
+    def loader() -> RobotsDecision:
+        parser = robotparser.RobotFileParser()
+        try:
+            text, effective_url, _verified = _fetch_page(fetch, robots_url)
+            if not _same_origin(robots_url, effective_url):
+                raise HomepageRobotsUnreachable(
+                    "robots.txt가 다른 origin으로 이동했습니다"
+                )
+        except HomepageCertNameMismatchError:
+            # ★ robots 판정이 아니라 「같은 회사의 다른 도메인」 재시도 신호다
+            #   (`_retry_alternate_host` 참조) — 캐시하지 않고 그대로 던진다.
+            raise
+        except HomepageRobotsUnavailable:
+            # ★ 주의: `RobotFileParser`는 `.parse()`를 한 번도 안 부르면 «미확인»
+            #   상태로 보고 `can_fetch()`가 오히려 «전부 금지»를 돌려준다
+            #   (표준 라이브러리 함정) — HTTP 4xx로 부재가 확인된 경우에만
+            #   빈 규칙으로 «확인 끝»을 표시한다.
+            text = ""
+        except (HomepageRobotsUnreachable, HomepageFetchError) as exc:
+            return RobotsDecision(
+                host=host,
+                parser=parser,
+                blocked=True,
+                reason_code="robots_unreachable",
+                detail=str(exc),
             )
-    except HomepageCertNameMismatchError:
-        raise
-    except HomepageRobotsUnavailable:
-        # ★ 주의: `RobotFileParser`는 `.parse()`를 한 번도 안 부르면 «미확인» 상태로
-        #   보고 `can_fetch()`가 오히려 «전부 금지»를 돌려준다 (표준 라이브러리 함정 —
-        #   HTTP 4xx로 부재가 확인된 경우에만 빈 규칙으로 «확인 끝»을 표시한다.
-        text = ""
-    except HomepageRobotsUnreachable:
-        raise
-    except HomepageFetchError as exc:
-        raise HomepageRobotsUnreachable(str(exc)) from exc
-    parser.parse(text.splitlines())  # 네트워크 접속 없이 주어진 글자만 해석한다
-    return parser
+        parser.parse(text.splitlines())  # 네트워크 접속 없이 주어진 글자만 해석한다
+        return RobotsDecision(host=host, parser=parser, blocked=False, reason_code="robots_ok")
+
+    decision = cached_robots_decision(cache_key, loader)
+    if decision.blocked:
+        detail_suffix = f": {decision.detail}" if decision.detail else ""
+        raise HomepageRobotsUnreachable(
+            f"robots.txt를 확인하지 못했습니다 (reason={decision.reason_code}){detail_suffix}"
+        )
+    return decision.parser
 
 
 def _load_origin_root(

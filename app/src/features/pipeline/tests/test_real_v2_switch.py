@@ -208,10 +208,12 @@ def test_요청중_raw스위치가_바뀌어도_namespace와분기는_동결된_
     seen_modes: list[real.engine_mode.EngineMode] = []
     original_namespace = real._generation_cache_namespace
 
-    def namespace_then_flip_raw(engine_arg, build_identity, generation_mode):
+    def namespace_then_flip_raw(engine_arg, build_identity, generation_mode, **kwargs):
         seen_modes.append(generation_mode)
         monkeypatch.setenv(real.ENGINE_V2_ENV_NAME, "0")
-        return original_namespace(engine_arg, build_identity, generation_mode)
+        return original_namespace(
+            engine_arg, build_identity, generation_mode, **kwargs
+        )
 
     monkeypatch.setattr(real, "_generation_cache_namespace", namespace_then_flip_raw)
 

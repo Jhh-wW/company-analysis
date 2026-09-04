@@ -23,6 +23,15 @@ FINAL_GATE_REASON_MISSING_IDENTITY_REVENUE: Final[str] = (
     "publish_missing_identity_revenue"
 )
 FINAL_GATE_REASON_OTHER_GATE: Final[str] = "other_gate"
+#: 공식 근거 사전 게이트(collector 재생 조각9, 이번 조각 범위 밖)가 붙이는
+#: 두 사유. 여기 shared에 미리 두어 조각9가 real.py에 배선할 때 사유코드를
+#: 임시 문자열로 짓지 않고 이 권위만 참조하게 한다.
+FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT: Final[str] = (
+    "official_evidence_insufficient"
+)
+FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT: Final[str] = (
+    "official_evidence_transient"
+)
 FINAL_GATE_DIAGNOSTIC_TABLE: Final[str] = "pipeline_final_gate_diagnostics"
 FINAL_GATE_DIAGNOSTIC_SCHEMA_VERSION: Final[int] = 1
 FINAL_GATE_DIAGNOSTIC_COLUMNS: Final[frozenset[str]] = frozenset(
@@ -36,6 +45,8 @@ SAFE_FINAL_GATE_REASONS: Final[frozenset[str]] = frozenset(
         FINAL_GATE_REASON_MISSING_REVENUE,
         FINAL_GATE_REASON_PUBLISH_BLOCKED,
         FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR,
+        FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT,
+        FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT,
         FINAL_GATE_REASON_OTHER_GATE,
     }
 )

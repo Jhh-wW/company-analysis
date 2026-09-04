@@ -662,7 +662,8 @@ _ARTIFACT_SCHEMA: Final[tuple[str, ...]] = (
         retention_policy_id  TEXT NOT NULL,
         retain_until         TEXT NOT NULL,
         legal_hold           INTEGER NOT NULL CHECK(legal_hold IN (0, 1)),
-        legacy_reference     TEXT NOT NULL
+        legacy_reference     TEXT NOT NULL,
+        release_locked       INTEGER NOT NULL DEFAULT 0 CHECK(release_locked IN (0, 1))
     )
     """,
     f"""
@@ -673,6 +674,21 @@ _ARTIFACT_SCHEMA: Final[tuple[str, ...]] = (
         artifact_id  TEXT NOT NULL REFERENCES {TABLE_ARTIFACTS}(artifact_id),
         PRIMARY KEY (delivery_id, channel)
     )
+    """,
+    # artifact 메타데이터도 완전히 content-addressed다(artifact_id는
+    # bytes_sha256·blob_key 등 나머지 컬럼의 canonical hash). 정상 코드는
+    # 이 표를 UPDATE하지 않으며, ReleaseAuthority가 발급된 뒤에는 raw SQL
+    # 우회도 막는다. authority가 아직 없는 행은 손상 재현 시험이 그대로
+    # UPDATE할 수 있게 둔다 — store.py의 같은 계약과 동일한 경계다. 다른
+    # 표를 참조하지 않는 자기완결 컬럼이다(store.py의 같은 설계 참고 —
+    # cross-table EXISTS 트리거는 ALTER TABLE RENAME 스키마 검증과 충돌한다).
+    f"""
+    CREATE TRIGGER IF NOT EXISTS report_delivery_artifacts_no_mutation_after_release
+    BEFORE UPDATE ON {TABLE_ARTIFACTS}
+    WHEN OLD.release_locked = 1
+    BEGIN
+        SELECT RAISE(ABORT, 'artifact metadata is bound to an issued release authority');
+    END
     """,
     f"""
     CREATE TABLE IF NOT EXISTS {TABLE_BLOB_INTENTS} (
@@ -795,6 +811,14 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
     for statement in _ARTIFACT_SCHEMA:
         conn.execute(statement)
+    artifact_columns = {
+        str(row[1])
+        for row in conn.execute(f'PRAGMA table_info("{TABLE_ARTIFACTS}")').fetchall()
+    }
+    if "release_locked" not in artifact_columns:
+        conn.execute(
+            f"ALTER TABLE {TABLE_ARTIFACTS} ADD COLUMN release_locked INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def ensure_artifact_schema(conn: sqlite3.Connection) -> None:

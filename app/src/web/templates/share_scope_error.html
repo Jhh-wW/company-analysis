@@ -1,17 +1,28 @@
 {% extends "base.html" %}
-{% block title %}LINK 사용 상태 확인 · 기업분석{% endblock %}
+{% block title %}초대 링크 사용 상태 · 기업분석{% endblock %}
 
 {% block content %}
 <section class="card" aria-labelledby="link-error-title">
   <div class="warn-line" role="alert">
     <span aria-hidden="true">⚠️</span>
     <div>
-      <h1 id="link-error-title" style="font-size:19px;margin-bottom:6px">LINK 사용 상태를 확인해 주세요</h1>
+      {# ★ 이 화면의 독자는 개발자가 아니다 — 내부 용어(LINK)를 쓰지 않는다
+         문구 자체는 request_helpers가 넘겨준다. #}
+      <h1 id="link-error-title" style="font-size:19px;margin-bottom:6px">초대 링크를 확인해 주세요</h1>
       <p>{{ scope_error }}</p>
     </div>
   </div>
+  {# ★ 첫 화면이 로그인 뒤에 있는 배포에서는 이 버튼이 손님을 구글 계정 선택
+       화면으로 보낸다. 로그인해도 들어올 수 없는 계정이라, 이 화면이 없애려던
+       막다른 길을 버튼 하나로 다시 만드는 셈이다.
+     → «지금 이 사람이 실제로 첫 화면을 열 수 있을 때»만 그린다. 판단은 부르는
+       쪽이 로그인 벽과 같은 기준으로 하고(`analysis._viewer_passes_login_wall`),
+       넘어온 값이 없으면 로그인 벽이 없는 배포로 본다.
+     ★ 버튼이 없을 때는 위의 연락 안내가 손님이 갈 수 있는 유일한 길이다. #}
+  {% if offer_first_screen|default(true) %}
   <div class="btn-row">
     <a class="btn" href="/">첫 화면으로 돌아가기</a>
   </div>
+  {% endif %}
 </section>
 {% endblock %}

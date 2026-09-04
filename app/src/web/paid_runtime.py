@@ -38,7 +38,9 @@ from src.features.observability.records import read_records
 from src.features.provider_health import constants as provider_health_constants
 from src.features.provider_health import store as provider_health_store
 from src.features.sharelink import logic as share_logic
+from src.features.sharelink import store as share_store
 from src.features.sharelink import tracks as share_tracks
+from src.features.sharelink.constants import LINK_TOTAL_BUDGET_KRW
 from src.features.storage import db as storage_db
 from src.web import evaluation_mode
 from src.web.recording import (
@@ -264,7 +266,7 @@ def _release_run_slot(stored_bucket: str) -> None:
 def paid_research_block() -> tuple[bool, str]:
     """유료 조사가 막혀 있는지와 «사람이 풀어야 하는 이유»를 돌려준다.
 
-    ★ 왜 여기 있나 (2026-08-28)
+    ★ 왜 여기 있나
       이 판정이 관리자 라우터 안에만 있어서 `/admin/access` 를 «직접 열어야만»
       보였다. 관리자 첫 화면(`/admin`)은 이 상태를 아예 안 읽어서,
       모든 유료 조사가 막힌 날에도 첫 화면은 「문제 없음」이었다.
@@ -313,7 +315,7 @@ def list_unresolved_spend(
     Returns:
         (미확정 항목들, 읽는 데 성공했나).
 
-    ★ 왜 필요한가 (2026-08-28)
+    ★ 왜 필요한가
       화면은 「관리자가 미확정 비용을 대사해야 다시 열립니다」라고 말하는데,
       **무엇이 걸려 있는지 볼 화면이 없었다.** 대사하라면서 대사할 대상을
       안 보여 주면 관리자는 아무것도 할 수 없다.
@@ -459,7 +461,7 @@ def recheck_budget_store() -> tuple[bool, str]:
       (같은 함수 머리말 참고). 돌아가는 조사를 미확정으로 만들면 **오히려 더 막힌다.**
       그래서 비어 있을 때만 돌린다.
 
-    ★ 왜 이 경로가 생겼나 (2026-08-28) — 화면은 사용자에게
+    ★ 왜 이 경로가 생겼나 — 화면은 사용자에게
       「비용 기록을 확인할 수 없어 새 조사를 잠시 멈췄습니다. **관리자 확인이 끝나야
       다시 열립니다.**」라고 말하는데, 정작 **관리자가 「확인」을 실행할 방법이 없었다.**
       `_BUDGET_STORE_HEALTHY` 를 True 로 되돌리는 곳이 기동 시 `_seed_ledger()` 한 곳뿐이라,
@@ -568,7 +570,7 @@ def _seed_ledger() -> None:
     """서버가 뜰 때 «오늘 이미 쓴 돈»을 이력에서 읽어 장부에 채운다.
 
     ★ 이게 없으면 서버를 껐다 켜는 것만으로 하루 상한이 풀린다.
-    ★ 데모 기록은 빼고 센다 — 데모는 0원이다 (P-84와 같은 규칙).
+    ★ 데모 기록은 빼고 센다 — 데모는 0원이다.
     """
     global _LEDGER, _LINK_SPEND, _BUDGET_STORE_HEALTHY, _UNRESOLVED_BUCKETS
     today = clock.today_kst()
@@ -762,6 +764,50 @@ def reap_expired_paid_phases() -> bool:
             _BUDGET_STORE_HEALTHY = False
             return False
 
+def _link_total_budget_inputs(
+    conn: sqlite3.Connection, share_key: str
+) -> tuple[Optional[float], float]:
+    """LINK 통장이면 «수명 전체» 상한과 이미 쓴 실측 원가를 돌려준다.
+
+    Args:
+        conn: 예약을 커밋할 연결. 같은 연결로 읽어 다른 저장소를 섞지 않는다.
+        share_key: 통장 원문.
+
+    Returns:
+        ``(수명 전체 상한, 지난 실측 원가)``. LINK가 아니면 ``(None, 0.0)``.
+
+    ★ LINK 갈래에서만 값을 준다 — MEMBER·ADMIN·PUBLIC은 사람 통장이거나 전체
+      통장이라 「링크 수명」이라는 개념 자체가 없다.
+      갈래를 가르는 것은 열쇠 모양(32자리 16진수)이다. 사람 통장에는 `user:`
+      접두어가 붙어 열쇠와 절대 겹치지 않는다 (`sharelink/constants.py` 참고).
+    ★ 바닥값은 비용 원장의 «단계 단위» 합을 함께 본다 — 회사 확인 단계는 조사
+      이력 행을 만들지 않아서, 생성 이력만 세면 확인 비용이 누적에서 통째로
+      빠진다. 하루 상한은 자정마다 되살아나므로 그 구멍은 링크 수명만큼 커진다.
+    ★ 두 값을 더하지 않고 «큰 쪽»을 쓴다 — 같은 조사가 원장과 생성 이력 양쪽에
+      적히므로 더하면 같은 돈을 두 번 센다. 전환 전에 끝난 옛 조사는 원장에는
+      없고 이력에만 있으므로, 큰 쪽을 고르면 어느 시기의 기록도 놓치지 않는다.
+    ★ 진행 중 예약은 여기서 세지 않는다 — 그건 예약을 커밋하는 transaction 안에서
+      `begin_phase`가 다시 센다. 여기서 같이 세면 동시 요청이 옛 숫자를 공유한다.
+    """
+    if not share_logic.is_valid_key(share_key):
+        return None, 0.0
+    key_hash = share_store.key_hash_of(share_key)
+    link = share_store.load_by_hash(conn, key_hash)
+    history_cost = share_store.link_run_cost_sum_krw(conn, key_hash=key_hash)
+    ledger = state_machine.load_bucket_lifetime_exposure(
+        conn, bucket_id=spend_store.bucket_id(share_key)
+    )
+    prior_cost = max(
+        history_cost, ledger.known_cost_krw + ledger.liability_krw
+    )
+    limit = (
+        link.effective_total_budget_krw
+        if link is not None
+        else LINK_TOTAL_BUDGET_KRW
+    )
+    return limit, prior_cost
+
+
 def _begin_paid_phase_locked(
     *,
     run_id: str,
@@ -805,6 +851,11 @@ def _begin_paid_phase_locked(
                     reserved_krw=requested,
                     lease_owner_id=_LEASE_OWNER_ID,
                 )
+                # LINK만 «수명 전체» 상한을 하나 더 받는다. 값이 None이면
+                # begin_phase가 누적 검사를 아예 건너뛴다 (다른 갈래의 동작 불변).
+                link_total_limit, link_prior_cost = _link_total_budget_inputs(
+                    conn, share_key
+                )
                 state_machine.begin_phase(
                     conn,
                     run_id=run_id,
@@ -818,6 +869,8 @@ def _begin_paid_phase_locked(
                         if evaluation_mode.enabled()
                         else None
                     ),
+                    bucket_total_limit_krw=link_total_limit,
+                    bucket_prior_cost_krw=link_prior_cost,
                     lease_owner_id=ticket.lease_owner_id,
                     lease_expires_at=_phase_lease_expires_at(),
                     started_at=started_at,

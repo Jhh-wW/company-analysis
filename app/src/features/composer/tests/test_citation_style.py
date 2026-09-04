@@ -90,7 +90,7 @@ def _render(composed, style):
 
 
 def test_기본값은_절충안이다():
-    """사용자가 두 방식을 나란히 보고 절충안으로 확정했다 (2026-08-24)."""
+    """사용자가 두 방식을 나란히 보고 절충안으로 확정했다."""
     assert DEFAULT_CITATION_STYLE == CITATION_STYLE_MERGED
 
 

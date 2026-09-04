@@ -1,20 +1,17 @@
 """`Report` → 노션 블록(JSON) 변환 — 순수 함수만 모은 곳.
 
 ★ 네트워크·시간·난수를 쓰지 않는다. 같은 `Report`를 넣으면 항상 같은 블록 목록이
-  나온다. 그래야 화면(result.html)과 「내용이 같은가」(P3 — 확정/07_출력/3_기준/
-  01_성공기준.md)를 코드로 비교할 수 있다.
+  나온다. 그래야 화면(result.html)과 「내용이 같은가」(P3)를
+  코드로 비교할 수 있다.
 
 ★ 배치 순서·문구는 `src/web/templates/result.html`을 그대로 옮겨 적었다.
   화면이 바뀌면 이 파일도 같이 고쳐야 한다 — 갈리면 화면이 이긴다
-  (확정/07_출력/1_흐름/01_세형태.md 「정본은 화면이다」).
-
-정본:
-  - 확정/07_출력/2_규칙/01_배치와근거표기.md
-  - 확정/07_출력/3_기준/01_성공기준.md (P3)
+  (「정본은 화면이다」).
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from src.core.citations import citation_marker
@@ -30,9 +27,18 @@ from src.features.pipeline.port import (
 from src.features.provenance.sources import Source, visible_citations
 from src.features.report_standard import SECTION_BY_ID, build_published_report
 from src.features.report_standard.section_content import (
+    masthead_lines,
     section_content_blocks,
     source_verification_label,
     summary_topic,
+)
+from src.shared.report_generation.public_projection import (
+    PublicCitationRow,
+    PublicCoverMetricsBlock,
+    PublicPeriodSummaryBlock,
+    PublicReportProjection,
+    PublicSectionDisplay,
+    PublicTableBlock,
 )
 
 #: 노션 블록 하나를 표현하는 dict. Notion API의 block object 형태를 그대로 따른다.
@@ -131,18 +137,37 @@ def _table_block(headers: list[str], rows: list[list[NotionCell]]) -> NotionBloc
 # ══════════════════════════════════════════════════════════
 
 
-def _lede_text(report: Report) -> str:
+def _lede_text(
+    *,
+    corp_type: str,
+    as_of_date: str,
+    analysis_period: str,
+    latest_performance_period: str,
+) -> str:
+    """부제 한 줄. v1은 ``Report``에서, v2는 봉인 header에서 같은 값을 넘긴다.
+
+    ★ 두 갈래가 «한 함수»를 쓴다 — 한쪽만 고치면 같은 보고서의 부제가 채널
+      안에서 갈라진다.
+    """
+
+    as_of = as_of_date.strip()
+    latest = latest_performance_period.strip()
     values = [
-        report.corp_type.strip(),
-        f"{report.as_of_date.strip()} 기준" if report.as_of_date.strip() else "",
-        report.analysis_period.strip(),
-        (
-            f"최신 실적 {report.latest_performance_period.strip()}"
-            if report.latest_performance_period.strip()
-            else ""
-        ),
+        corp_type.strip(),
+        f"{as_of} 기준" if as_of else "",
+        analysis_period.strip(),
+        f"최신 실적 {latest}" if latest else "",
     ]
     return " · ".join(value for value in values if value)
+
+
+def _report_lede_text(report: Report) -> str:
+    return _lede_text(
+        corp_type=report.corp_type,
+        as_of_date=report.as_of_date,
+        analysis_period=report.analysis_period,
+        latest_performance_period=report.latest_performance_period,
+    )
 
 
 # ══════════════════════════════════════════════════════════
@@ -151,7 +176,7 @@ def _lede_text(report: Report) -> str:
 
 
 def _table_blocks(table: ReportTable) -> list[NotionBlock]:
-    """숫자·회계 표 하나. 문장으로 바꾸지 않고 «표 그대로» 낸다 (결정기록 D13)."""
+    """숫자·회계 표 하나. 문장으로 바꾸지 않고 «표 그대로» 낸다."""
     marker = citation_marker(table.cite)
     caption = f"{table.caption} {marker}" if marker else table.caption
     blocks: list[NotionBlock] = [_paragraph(caption)]
@@ -179,7 +204,7 @@ def _section_blocks(report: Report, section: ReportSection) -> list[NotionBlock]
                 )
             )
     elif section.prose_lines:
-        # ★ 작가 내부 sid가 아니라 그 번호가 가리킨 실제 출처를 문장마다 표시한다(P-118).
+        # ★ 작가 내부 sid가 아니라 그 번호가 가리킨 실제 출처를 문장마다 표시한다.
         prose = " ".join(
             f"{text} {marker}" if (marker := citation_marker(cite)) else text
             for text, cite in section.prose_lines
@@ -190,11 +215,22 @@ def _section_blocks(report: Report, section: ReportSection) -> list[NotionBlock]
     return blocks
 
 
+def _heading_text(*, cell: str, display_number: str, title: str, tag: str) -> str:
+    """장 제목 한 줄. v1(``ReportSection``)과 v2(봉인 display)가 같이 쓴다."""
+
+    if display_number:
+        suffix = f"  {tag}" if tag else ""
+        return f"{display_number}. {title}{suffix}"
+    return section_display_heading(cell, title)
+
+
 def _section_heading(section: ReportSection) -> str:
-    if section.display_number:
-        tag = f"  {section.tag}" if section.tag else ""
-        return f"{section.display_number}. {section.title}{tag}"
-    return section_display_heading(section.cell, section.title)
+    return _heading_text(
+        cell=section.cell,
+        display_number=section.display_number,
+        title=section.title,
+        tag=section.tag,
+    )
 
 
 def _summary_blocks(report: Report) -> list[NotionBlock]:
@@ -212,8 +248,8 @@ def _summary_blocks(report: Report) -> list[NotionBlock]:
             ]
         )
     return [
-        _heading_2("핵심 요약"),
-        _table_block(["#", "짧은 제목", "요약", "관련 장"], rows),
+        _heading_2(constants.SUMMARY_HEADING),
+        _table_block(list(constants.SUMMARY_TABLE_HEADERS), rows),
     ]
 
 
@@ -243,12 +279,7 @@ def _source_list_blocks(report: Report) -> list[NotionBlock]:
         ]
         for source in sources
     ]
-    return [
-        _table_block(
-            ["#", "자료", "기준일·자료 상태", "사실 검증", "원문 위치", "본문 사용 장"],
-            rows,
-        )
-    ]
+    return [_table_block(list(constants.CITATION_TABLE_HEADERS), rows)]
 
 
 def _source_label(source: Source) -> str:
@@ -287,6 +318,233 @@ def _source_used_sections(source: Source) -> str:
 
 
 # ══════════════════════════════════════════════════════════
+# v2 — 공개 봉인 블록«만» 읽는 갈래
+# ══════════════════════════════════════════════════════════
+# ★ 아래 함수들은 ``report``를 «인수로 받지 않는다». 봉인 블록만 받는다.
+#   그래야 노션이 화면·PDF와 다른 값을 스스로 계산할 방법이 구조적으로
+#   없어진다 — 지금까지 갈라진 원인이 바로 그 「각자 계산」이었다
+# ★ 이 갈래는 «글자를 만들지 않는다». 블록 값을 그대로 배치하고, 표의 열
+#   이름처럼 보고서 내용이 아닌 라벨만 ``constants``에서 가져온다.
+
+
+def _v2_table_blocks(table: PublicTableBlock) -> list[NotionBlock]:
+    """봉인된 표 한 장 — 설명 줄 + 표 블록. 글자는 전부 블록 값이다."""
+
+    marker = citation_marker(table.cite)
+    caption = f"{table.caption} {marker}" if marker else table.caption
+    blocks: list[NotionBlock] = [_paragraph(caption)]
+    if table.headers:
+        blocks.append(
+            _table_block(
+                list(table.headers), [list(row) for row in table.rows]
+            )
+        )
+    return blocks
+
+
+def _v2_period_summary_blocks(
+    band: PublicPeriodSummaryBlock,
+) -> list[NotionBlock]:
+    """3개년 변화 요약 띠. 칸 값은 봉인된 문자열 그대로다."""
+
+    if not band.items:
+        return []
+    marker = citation_marker(band.cite)
+    caption = f"{band.title} {marker}" if marker else band.title
+    rows = [
+        [
+            label,
+            base_period,
+            base_value,
+            latest_period,
+            latest_value,
+            unit,
+            change,
+            note,
+        ]
+        for (
+            label,
+            base_period,
+            base_value,
+            latest_period,
+            latest_value,
+            unit,
+            change,
+            _change_kind,
+            _direction,
+            note,
+        ) in band.items
+    ]
+    blocks: list[NotionBlock] = []
+    if caption.strip():
+        blocks.append(_paragraph(caption))
+    blocks.append(_table_block(list(constants.PERIOD_SUMMARY_TABLE_HEADERS), rows))
+    return blocks
+
+
+def _v2_cover_metrics_blocks(
+    metrics: PublicCoverMetricsBlock | None,
+) -> list[NotionBlock]:
+    """표지 실적 띠. 순수 함수가 지표를 못 고르면 봉인에도 없고 여기도 없다."""
+
+    if metrics is None or not metrics.items:
+        return []
+    marker = citation_marker(metrics.cite)
+    caption = f"{metrics.title} {marker}" if marker else metrics.title
+    blocks: list[NotionBlock] = []
+    if caption.strip():
+        blocks.append(_paragraph(caption))
+    blocks.append(
+        _table_block(
+            list(constants.COVER_METRICS_TABLE_HEADERS),
+            [[label, value, unit] for label, value, unit in metrics.items],
+        )
+    )
+    return blocks
+
+
+def _v2_section_blocks(display: PublicSectionDisplay) -> list[NotionBlock]:
+    """장 하나 — 제목 → 문단 → 3개년 띠 → 표·읽는 법.
+
+    ★ 문단은 «문단 단위»로 낸다. 봉인이 이미 문단을 나눠 두었으므로 노션이
+      다시 이어 붙이거나 사실 카드 표로 바꾸지 않는다(G1).
+    ★ 도식은 표 블록 + ``reading`` 문단으로 낸다. 노션에는 막대 그림을 그릴
+      자리가 없어 «모양»은 다르지만 글자는 봉인 값 그대로다(G2).
+    ★ 3개년 띠를 표보다 «먼저» 놓는 것은 화면(result.html)이 막대 위에
+      두는 것과 같은 이유다 — 그림을 보기 전에 무엇이 얼마나 변했는지 먼저
+      읽게 한다. 봉인 블록에는 띠가 «어느 표»에서 나왔는지가 없으므로 장마다
+      한 번, 표 앞에 둔다.
+    """
+
+    blocks: list[NotionBlock] = [
+        _heading_2(
+            _heading_text(
+                cell=display.cell,
+                display_number=display.display_number,
+                title=display.title,
+                tag=display.tag,
+            )
+        )
+    ]
+    for _ordinal, text in display.paragraphs:
+        blocks.append(_paragraph(text))
+    if display.period_summary is not None:
+        blocks.extend(_v2_period_summary_blocks(display.period_summary))
+    visual_by_table = {visual.table_index: visual for visual in display.visuals}
+    for index, table in enumerate(display.tables):
+        blocks.extend(_v2_table_blocks(table))
+        visual = visual_by_table.get(index)
+        if visual is not None and visual.reading:
+            blocks.append(_paragraph(visual.reading))
+    return blocks
+
+
+def _v2_summary_blocks(projection: PublicReportProjection) -> list[NotionBlock]:
+    """핵심 요약 — 번호·주제어·장 번호를 노션이 다시 매기지 않는다."""
+
+    if not projection.summary:
+        return []
+    rows = [
+        [row.ordinal, row.topic, row.text, row.section_display_number]
+        for row in projection.summary
+    ]
+    return [
+        _heading_2(constants.SUMMARY_HEADING),
+        _table_block(list(constants.SUMMARY_TABLE_HEADERS), rows),
+    ]
+
+
+def _v2_citation_rows(rows: tuple[PublicCitationRow, ...]) -> list[list[NotionCell]]:
+    return [
+        [
+            str(row.number),
+            _rich_text(row.label_display, href=row.url),
+            row.status_display,
+            row.verification_label,
+            row.location,
+            row.used_in_display,
+        ]
+        for row in rows
+    ]
+
+
+def _v2_source_list_blocks(
+    projection: PublicReportProjection,
+) -> list[NotionBlock]:
+    """부록 — 번호 중복 제거·검증 라벨까지 봉인이 이미 끝낸 결과를 옮긴다."""
+
+    if not projection.citations:
+        return []
+    return [
+        _heading_2(constants.SOURCES_HEADING),
+        _paragraph(constants.SOURCES_SUBTITLE),
+        _table_block(
+            list(constants.CITATION_TABLE_HEADERS),
+            _v2_citation_rows(projection.citations),
+        ),
+    ]
+
+
+def _v2_header_text(header: Mapping[str, object], key: str) -> str:
+    return str(header.get(key, "") or "")
+
+
+def _v2_grade_notice_blocks(
+    projection: PublicReportProjection,
+) -> list[NotionBlock]:
+    """부분 보고서 고지 — 채널마다 다른 이름으로 부르지 않게 블록에서 읽는다.
+
+    ★ 예전에 노션만 같은 보고서를 더 후하게 불렀던 사고가 있었다. 이제
+      제목·설명 두 줄이 봉인에 들어 있어 세 채널이 같은 글자를 쓴다.
+    """
+
+    title, detail = projection.grade_notice
+    if not title:
+        return []
+    reasons = projection.header.get("shortfall_reasons") or ()
+    blocks: list[NotionBlock] = [_heading_2(title)]
+    if detail:
+        blocks.append(_paragraph(detail))
+    blocks.extend(_paragraph(str(reason)) for reason in reasons)
+    return blocks
+
+
+def _v2_blocks(report: Report, projection: PublicReportProjection) -> list[NotionBlock]:
+    """봉인 블록 하나만 읽어 노션 페이지 블록을 만든다.
+
+    ``report``는 마스트헤드 두 줄에만 쓴다 — ``masthead_lines()``는 웹·PDF·
+    노션이 «같은 두 줄»을 쓰라고 일부러 공유시킨 함수이고, 봉인
+    블록에는 아직 그 자리가 없다. 나머지 글자는 전부 ``projection``에서 온다.
+    """
+
+    header = projection.header
+    masthead_company, masthead_meta = masthead_lines(report)
+    blocks: list[NotionBlock] = [
+        _heading_2(masthead_company),
+        _paragraph(masthead_meta),
+        _heading_1(_v2_header_text(header, "company")),
+        _heading_1("분석 보고서"),
+    ]
+    blocks.extend(_v2_grade_notice_blocks(projection))
+    lede = _lede_text(
+        corp_type=_v2_header_text(header, "corp_type"),
+        as_of_date=_v2_header_text(header, "as_of_date"),
+        analysis_period=_v2_header_text(header, "analysis_period"),
+        latest_performance_period=_v2_header_text(
+            header, "latest_performance_period"
+        ),
+    )
+    if lede:
+        blocks.append(_paragraph(lede))
+    blocks.extend(_v2_cover_metrics_blocks(projection.cover_metrics))
+    blocks.extend(_v2_summary_blocks(projection))
+    for block in projection.sections:
+        blocks.extend(_v2_section_blocks(block.display))
+    blocks.extend(_v2_source_list_blocks(projection))
+    return blocks
+
+
+# ══════════════════════════════════════════════════════════
 # 전체 조립
 # ══════════════════════════════════════════════════════════
 
@@ -294,11 +552,8 @@ def _source_used_sections(source: Source) -> str:
 def build_page_title(report: Report) -> str:
     """노션 페이지 제목 — `회사명 분석 보고서 (YYYY-MM-DD)`.
 
-    정본: 확정/07_출력/2_규칙/01_배치와근거표기.md §파일명 규칙
-
     ★ 워드 파일명과 같은 근거로 `report.generated_at`을 쓴다(전송 시각이 아니다) —
       «다시 내보내기»를 해도 같은 제목이 나와야 한다
-      (확정/07_출력/1_흐름/01_세형태.md §다시 내보내기).
     """
     date_part = f" ({report.generated_at})" if report.generated_at else ""
     return f"{report.company} 분석 보고서{date_part}"
@@ -319,12 +574,28 @@ def build_blocks(report: Report, *, grade_note: str = "") -> list[NotionBlock]:
         노션 API가 받는 block object 목록. 100개를 넘으면 부르는 쪽(`notion.py`)이
         나눠 보낸다 — 이 함수는 나누지 않는다(순수 변환만 한다).
     """
+    # ★ 갈래는 «공개 봉인 블록이 있는가»로 나뉜다.
+    #   봉인이 있으면 그 블록«만» 읽는다 — 노션이 화면·PDF와 따로 계산할 여지를
+    #   없앤다. 봉인이 없는 저장본(v1·옛 v2)은 지금 경로 그대로다(§02-6).
+    projection = report.public_projection
+    if projection is not None:
+        return _v2_blocks(report, projection)
+
     # Notion도 화면·PDF와 같은 canonical 공개본만 표현한다.
     report = build_published_report(report)
 
-    blocks: list[NotionBlock] = [_heading_1(report.company), _heading_1("분석 보고서")]
+    # 표지 다음 첫 본문 페이지 맨 위 마스트헤드 — 웹·PDF와 같은
+    # masthead_lines() 문자열을 그대로 첫 두 블록으로 낸다. 새 사실을
+    # 만들지 않고, 아래 이어지는 회사명·보고서명 heading_1 쌍은 그대로 둔다.
+    masthead_company, masthead_meta = masthead_lines(report)
+    blocks: list[NotionBlock] = [
+        _heading_2(masthead_company),
+        _paragraph(masthead_meta),
+        _heading_1(report.company),
+        _heading_1("분석 보고서"),
+    ]
     if report.grade is Grade.PARTIAL:
-        # ★ 2026-08-29 — 노션만 정책과 «무관하게» 「검증된 부분 보고서」라고 불렀다.
+        # ★ 노션만 정책과 «무관하게» 「검증된 부분 보고서」라고 불렀다.
         #   같은 보고서를 웹·PDF 는 「안전 확인 중인 임시 부분 보고서」라고 부른다
         #   (`web/routers/reports.py::_report_grade_note`). 한 보고서가 채널마다
         #   다른 이름으로 불리면, 그중 하나는 반드시 사실보다 후하게 말하는 것이다.
@@ -351,7 +622,7 @@ def build_blocks(report: Report, *, grade_note: str = "") -> list[NotionBlock]:
                 *(_paragraph(reason) for reason in report.shortfall_reasons),
             ]
         )
-    lede = _lede_text(report)
+    lede = _report_lede_text(report)
     if lede:
         blocks.append(_paragraph(lede))
     blocks.extend(_summary_blocks(report))

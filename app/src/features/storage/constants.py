@@ -3,10 +3,10 @@
 ★ 규칙 — 표 이름·상한값·기본 경로를 코드 여기저기에 문자열·숫자로 박지 않는다.
    여기만 고치면 db.py·reports.py·cache.py·sessions.py가 전부 맞춰진다.
 
-정본:
-  - 확정/03_수집/2_규칙/03_캐시와저장.md    (캐시 키 · 저장 목록 9종 · 보관 상한)
-  - 확정/00_공통/2_규칙/01_도구정의.md §4   (S2 — 공고 원문 미저장)
-  - 확정/99_기준/2_규칙/01_안전과가드레일.md (S1·S2 「0건」)
+다루는 범위:
+  - 캐시 키 · 저장 목록 9종 · 보관 상한
+  - 공고 원문은 저장하지 않는다
+  - 개인정보·원본 잔존 0건
 """
 
 from __future__ import annotations
@@ -49,12 +49,18 @@ SQLITE_SYNCHRONOUS_LEVEL: Final[int] = 3
 
 # ── 표 이름 ──────────────────────────────────────────────
 TABLE_REPORTS: Final[str] = "reports"
+#: 공개 봉인 projection은 보고서 payload와 «다른 표»에 둔다.
+#: payload 안에 넣었더니 저장 JSON 노드 수가 1.98배가 되어
+#: `core/persisted_json.py`의 `MAX_DOCUMENT_NODES` 여유가 절반으로 줄고 관리자
+#: 수정 폼 상한(250,000자)을 넘었다. 나눠 두면 두 문서가 각자 상한 아래에 있고
+#: 옛 payload 바이트도 한 글자도 안 바뀐다.
+TABLE_REPORT_PUBLIC_PROJECTIONS: Final[str] = "report_public_projections"
 TABLE_LAYER1_CACHE: Final[str] = "layer1_cache"
 TABLE_LAYER2_CACHE: Final[str] = "layer2_cache"
 TABLE_ALIAS_CACHE: Final[str] = "alias_cache"
 TABLE_SESSIONS: Final[str] = "sessions"
 
-# ── 1층 캐시 보관 상한 (정본 §보관 상한) ─────────────────
+# ── 1층 캐시 보관 상한 ─────────────────
 #: 회사×직무당 최근 몇 건까지 남기나. 넘으면 지운다.
 #: 축출 순서는 `cache.py`의 `_evict_layer1_overflow` — 사업연도가 다른(신선도
 #: 만료로 보이는) 것을 먼저, 그다음 오래된 것부터.

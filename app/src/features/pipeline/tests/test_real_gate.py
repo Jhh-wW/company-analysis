@@ -1,4 +1,4 @@
-"""사전 게이트가 «있는 재료를 있다고» 세는지 검사한다 (문제로그 P-72).
+"""사전 게이트가 «있는 재료를 있다고» 세는지 검사한다.
 
 게이트는 생성 AI를 부르기 «전에» 0원으로 멈춰 세우는 장치다. 그래서 반대로
 **재료가 있는데 없다고 세면 멀쩡한 회사가 보고서를 못 받는다.**
@@ -35,7 +35,7 @@ def _engine_cell_sources() -> dict[str, tuple[str, ...]]:
 
 
 def test_1판_대응표에는_홈페이지가_없다():
-    """★ P-72의 근거. 이게 깨지면 1판이 바뀐 것이니 아래 보정을 다시 볼 것."""
+    """★ 이 보정의 근거. 이게 깨지면 1판이 바뀐 것이니 아래 보정을 다시 볼 것."""
     sources = _engine_cell_sources()
 
     쓰이는_종류 = {kind for kinds in sources.values() for kind in kinds}
@@ -51,7 +51,7 @@ def test_홈페이지_조각만_있어도_게이트가_그_칸을_인정한다()
     kinds = {HOMEPAGE_KIND}
 
     rough = {c: any(k in kinds for k in srcs) for c, srcs in sources.items()}
-    assert not any(rough.values()), "보정 «전»에는 아무 칸도 안 세어져야 한다 (P-72 재현)"
+    assert not any(rough.values()), "보정 «전»에는 아무 칸도 안 세어져야 한다 — 이게 깨지면 1판이 바뀐 것이다"
 
     for cell in HOMEPAGE_GATE_CELLS:
         if cell in rough:
@@ -63,7 +63,7 @@ def test_홈페이지_조각만_있어도_게이트가_그_칸을_인정한다()
 def test_보정하는_칸은_정본이_정한_세_칸뿐이다():
     """넓히면 게이트를 통과하는 요청이 늘어 **비용이 늘어난다.** 함부로 늘리지 않는다.
 
-    정본 05_생성/2_규칙/02_유형별소스.md — 2번(홈페이지·기술블로그) ·
+    2번(홈페이지·기술블로그) ·
     4-2(회사 채용 페이지) · 4-3(홈페이지 회사소개·IR).
     """
     assert set(HOMEPAGE_GATE_CELLS) == {"2", "4-2", "4-3"}

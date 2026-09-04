@@ -1,6 +1,6 @@
 """캐시가 «돌았다는 사실»이 사용자 눈에 보이는지 못 박는다.
 
-이 시험이 잡는 것 — **기능은 붙였는데 화면·이력이 옛말을 하는 경우** (문제로그 P-63).
+이 시험이 잡는 것 — **기능은 붙였는데 화면·이력이 옛말을 하는 경우**.
 캐시를 붙여도 이력이 「없음」 고정이면 대시보드 ⑤는 영영 0건이고,
 화면에 안내가 없으면 사용자는 방금 새로 조사한 줄 안다.
 
@@ -14,10 +14,27 @@
 
 from __future__ import annotations
 
+import contextlib
+import datetime as dt
+
+import pytest
+
 from src.core.constants import CACHE_HIT_LAYER1, CACHE_HIT_MESSAGE
+from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
 from src.features.observability import constants as obs
-from src.features.pipeline.port import Outcome, RunResult, UserInput
+from src.features.pipeline.port import Grade, Outcome, Report, RunResult, UserInput
+from src.features.report_delivery.cache_identity import CacheNamespace
+from src.features.report_delivery.models import (
+    ContentSnapshot,
+    Delivery,
+    DeliveryPolicy,
+)
+from src.features.report_delivery.source_identity import SourceSnapshot
+from src.features.sharelink.constants import RESULT_REUSED_REPORT_NOTICE
+from src.shared import engine_build_identity as build_identity_contract
 from src.web import recording
+from src.web import report_delivery_adapter
+from src.web.routers import reports as reports_router
 
 # ══════════════════════════════════════════════════════════
 # ① 이력 — 파이프라인이 실은 값이 그대로 실려야 한다
@@ -73,7 +90,7 @@ def test_결과화면_템플릿이_캐시일_때만_안내를_그린다():
     ).read_text(encoding="utf-8")
 
     assert "result.cache_hit" in template, (
-        "결과 화면이 캐시 여부를 안 읽습니다 — 캐시가 돌아도 사용자가 모릅니다 (P-63)"
+        "결과 화면이 캐시 여부를 안 읽습니다 — 캐시가 돌아도 사용자가 모릅니다"
     )
     assert "result.message" in template
 
@@ -88,3 +105,181 @@ def test_결과화면_출처표는_공통_공개citation_목록만_순회한다(
     assert "{% if public_citations %}" in template
     assert "{% for c in public_citations %}" in template
     assert "{% for c in report.citations %}" not in template
+
+
+# ══════════════════════════════════════════════════════════
+# ③ 결과 화면 — 다시 보여주는 보고서는 «만든 날짜»를 말해야 한다
+# ══════════════════════════════════════════════════════════
+
+
+def _저장된_전달기록(*, 다시_보여주는가: bool) -> Delivery:
+    """실제 발급 규칙을 그대로 태워 만든 전달 기록 한 벌."""
+
+    commit = "c" * 40
+    identity = build_identity_contract.EngineBuildIdentity(
+        deployment_revision=commit,
+        build_id=f"{build_identity_contract.ENGINE_BUILD_ID_CONTRACT_VERSION}:{commit}",
+    )
+    made = dt.datetime(2026, 8, 15, 10, 0, tzinfo=dt.timezone(dt.timedelta(hours=9)))
+    source = SourceSnapshot.capture(
+        dart_receipt_nos=("20260815000123",),
+        financial_payload=None,
+        financial_payload_sha256="d" * 64,
+        captured_at=made,
+        source_as_of=made.date(),
+        adapter_versions={"report_delivery": "test-v1"},
+    )
+    namespace = CacheNamespace.create(
+        product="company-analysis",
+        schema_version="company-report-v2-composer",
+        deployment_revision=commit,
+        image_digest=f"generator-build:{identity.build_id}",
+        requested_models={"pipeline": "claude-test"},
+        output_settings={"temperature": 0},
+    )
+    content = ContentSnapshot.create(
+        payload=b"reused-report-payload",
+        source_snapshot=source,
+        cache_namespace=namespace,
+        content_generated_at=made,
+        engine_epoch_digest=identity.epoch_digest,
+        actual_models=("claude-test",),
+    )
+    return Delivery.issue(
+        public_id="report-1",
+        billing_bucket_id="bucket-a",
+        content=content,
+        delivered_at=made + dt.timedelta(days=3),
+        policy=DeliveryPolicy(dt.timedelta(days=60), dt.timedelta(days=60)),
+        reused_from_cache=다시_보여주는가,
+    )
+
+
+def _저장기록을_대신_읽게_한다(monkeypatch, delivery: Delivery) -> None:
+    monkeypatch.setattr(
+        reports_router.storage_db,
+        "connect_readonly_existing",
+        lambda: contextlib.nullcontext(object()),
+    )
+    monkeypatch.setattr(
+        reports_router.delivery_store,
+        "load_delivery_by_public_id",
+        lambda _conn, _public_id: delivery,
+    )
+
+
+def _보고서(generated_at: str = "2026-08-15") -> Report:
+    return Report(
+        company="가나다전자",
+        job="",
+        corp_type="상장사",
+        grade=Grade.PARTIAL,
+        sections=[],
+        generated_at=generated_at,
+        schema_version="company-report-v2-composer",
+        as_of_date=generated_at,
+    )
+
+
+def test_다시_보여주는_보고서에는_원본을_만든_날짜가_붙는다(monkeypatch):
+    """안내가 없으면 손님은 «오늘 새로 조사한 것»으로 읽는다.
+
+    두 달 전 숫자로 자소서를 쓰면 통째로 어긋난다 — 날짜는 손님이 판단할 몫이다.
+    """
+    _저장기록을_대신_읽게_한다(monkeypatch, _저장된_전달기록(다시_보여주는가=True))
+
+    chrome = reports_router._link_result_chrome(
+        _보고서(),
+        bound_report=False,
+        public_id="report-1",
+    )
+
+    assert chrome.freshness_note == RESULT_REUSED_REPORT_NOTICE.format(
+        made_on="2026년 8월 15일"
+    )
+
+
+def test_새로_만든_보고서에는_다시_보여준다는_안내를_붙이지_않는다(monkeypatch):
+    """조건을 빼먹으면 방금 조사한 보고서에도 「다시 보여드립니다」가 붙는다."""
+    _저장기록을_대신_읽게_한다(monkeypatch, _저장된_전달기록(다시_보여주는가=False))
+
+    chrome = reports_router._link_result_chrome(
+        _보고서(),
+        bound_report=False,
+        public_id="report-1",
+    )
+
+    assert chrome.freshness_note == ""
+
+
+def test_다시_보여준다는_안내는_내부_용어를_쓰지_않는다():
+    """손님 화면에 만든 쪽 낱말이 새면 무슨 말인지 알 수 없다."""
+    for 내부어 in ("캐시", "cache", "delivery", "LINK", "MEMBER", "재사용"):
+        assert 내부어 not in RESULT_REUSED_REPORT_NOTICE
+
+
+# ══════════════════════════════════════════════════════════
+# ④ 다시 보여주는 주소는 «원본을 만든 날»에서 남은 기간만 이어받는다
+# ══════════════════════════════════════════════════════════
+
+
+def _만든날이_지난_본문(지난_기간: dt.timedelta) -> ContentSnapshot:
+    """전달 시각보다 ``지난_기간``만큼 앞서 만들어진 본문 한 벌."""
+
+    delivery = _저장된_전달기록(다시_보여주는가=True)
+    made = delivery.delivered_at - 지난_기간
+    return ContentSnapshot.create(
+        payload=b"reused-report-payload",
+        source_snapshot=SourceSnapshot.capture(
+            dart_receipt_nos=("20260815000123",),
+            financial_payload=None,
+            financial_payload_sha256="d" * 64,
+            captured_at=made,
+            source_as_of=made.date(),
+            adapter_versions={"report_delivery": "test-v1"},
+        ),
+        cache_namespace=CacheNamespace.create(
+            product="company-analysis",
+            schema_version="company-report-v2-composer",
+            deployment_revision="c" * 40,
+            image_digest="generator-build:test",
+            requested_models={"pipeline": "claude-test"},
+            output_settings={"temperature": 0},
+        ),
+        content_generated_at=made,
+        engine_epoch_digest=build_identity_contract.EngineBuildIdentity(
+            deployment_revision="c" * 40,
+            build_id=(
+                f"{build_identity_contract.ENGINE_BUILD_ID_CONTRACT_VERSION}:"
+                + "c" * 40
+            ),
+        ).epoch_digest,
+        actual_models=("claude-test",),
+    )
+
+
+def test_다시_보여주는_주소는_남은_기간만_받는다():
+    """전체 기간을 새로 주면 같은 보고서가 두 배까지 열려 있게 된다."""
+
+    지난_기간 = dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS - 1)
+    content = _만든날이_지난_본문(지난_기간)
+
+    남은_기간 = report_delivery_adapter._reused_link_lifetime(
+        content,
+        completed_at=content.content_generated_at + 지난_기간,
+    )
+
+    assert 남은_기간 == dt.timedelta(days=1)
+
+
+def test_공개_기간을_다_쓴_본문은_새_주소를_받지_못한다():
+    """0일짜리 주소를 만들어 두면 «열리자마자 닫힌 주소»가 남는다."""
+
+    지난_기간 = dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS)
+    content = _만든날이_지난_본문(지난_기간)
+
+    with pytest.raises(report_delivery_adapter.DeliveryAdapterError):
+        report_delivery_adapter._reused_link_lifetime(
+            content,
+            completed_at=content.content_generated_at + 지난_기간,
+        )

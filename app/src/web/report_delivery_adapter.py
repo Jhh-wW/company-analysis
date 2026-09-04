@@ -19,12 +19,17 @@ from src.features.export_pdf.automatic_release import report_sha256
 from src.features.export_pdf import constants as pdf_constants
 from src.features.export_pdf import release_store as pdf_release_store
 from src.features.pipeline.port import Report
-from src.features.provenance.sources import Source, SourceKind
+from src.features.provenance.sources import (
+    Source,
+    SourceKind,
+    stored_sources_seal_problem,
+)
 from src.features.report_delivery import artifact as delivery_artifact
 from src.features.report_delivery import retention as delivery_retention
 from src.features.report_delivery import singleflight as delivery_singleflight
 from src.features.report_delivery import store as delivery_store
 from src.features.report_delivery.cache_identity import CacheLookupKey, CacheNamespace
+from src.features.report_delivery.canonical import require_aware
 from src.features.report_delivery.models import (
     ContentSnapshot,
     Delivery,
@@ -124,6 +129,20 @@ def load_public_delivery_intent(
         if conn is None:
             return None
         return delivery_store.load_delivery_intent(conn, public_id)
+
+
+def delivery_exists(public_id: str) -> bool:
+    """PDF artifact 검사 없이 이 공개 ID에 실제 delivery가 있는지만 본다.
+
+    관리자 수동 대사(``/admin/delivery/settle``)가 이미 끝난 출고를 실패로
+    뒤집지 않으려면, ``load_public_delivery``의 artifact I/O·역직렬화 없이도
+    「진짜 출고가 있었는가」만 빠르게 판정할 수 있어야 한다.
+    """
+
+    with storage_db.connect_readonly_existing() as conn:
+        if conn is None:
+            return False
+        return delivery_store.load_delivery_by_public_id(conn, public_id) is not None
 
 
 def configured_artifact_backend() -> delivery_artifact.FilesystemArtifactBlobBackend:
@@ -286,6 +305,33 @@ def _content_generated_at(
             return parsed.replace(tzinfo=_KST)
         return fallback
     return parsed
+
+
+def _reused_link_lifetime(
+    content: ContentSnapshot,
+    *,
+    completed_at: dt.datetime,
+) -> dt.timedelta:
+    """다시 보여주는 주소에는 «본문을 만든 날»부터 세어 남은 기간만 준다.
+
+    새 주소마다 전체 기간을 새로 주면 같은 본문이 원래 기한을 훌쩍 넘겨
+    계속 열린다. 원본 주소는 닫혔는데 새 주소만 열려 있는 상태를 막는다.
+    """
+
+    try:
+        delivered = require_aware(completed_at, label="보고서 전달")
+        generated = require_aware(content.content_generated_at, label="내용 생성")
+    except ValueError as exc:
+        raise DeliveryAdapterError(
+            "다시 보여주는 출고의 시각에는 시간대가 필요합니다"
+        ) from exc
+    # DeliveryPolicy가 0 이하를 거부하므로 policy를 만들기 «전에» 판정한다.
+    remaining = dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS) - (delivered - generated)
+    if remaining <= dt.timedelta(0):
+        raise DeliveryAdapterError(
+            "보고서를 만든 날부터 센 공개 기간이 이미 끝나 다시 보여줄 수 없습니다"
+        )
+    return remaining
 
 
 def _source_ids(report: Report) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -458,7 +504,11 @@ def persist_approved_delivery(
         )
         policy = DeliveryPolicy(
             content_max_age=dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS),
-            public_link_lifetime=dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS),
+            public_link_lifetime=(
+                _reused_link_lifetime(content, completed_at=completed_at)
+                if reused_from_cache
+                else dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS)
+            ),
         )
         delivery = Delivery.issue(
             public_id=public_id,
@@ -665,6 +715,15 @@ def persist_reused_delivery(
         content_max_age=dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS),
         public_link_lifetime=dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS),
     )
+    # 새 주소의 만료는 원본 보고서를 만든 날에서 이어받는다. 조회용 policy와
+    # 나누어 두어야 캐시 적중 판정의 나이 기준은 그대로 유지된다.
+    reused_policy = DeliveryPolicy(
+        content_max_age=dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS),
+        public_link_lifetime=_reused_link_lifetime(
+            content,
+            completed_at=completed_at,
+        ),
+    )
     if cache_key is None:
         proof = reuse_singleflight_key
         if (
@@ -744,7 +803,7 @@ def persist_reused_delivery(
             billing_bucket_id=clean_bucket,
             content=content,
             delivered_at=completed_at,
-            policy=policy,
+            policy=reused_policy,
             reused_from_cache=True,
         )
         delivery_store.save_delivery(conn, delivery)
@@ -793,10 +852,39 @@ def load_public_delivery(public_id: str) -> PublicDelivery | None:
             if metadata is not None
             else None
         )
-    try:
-        report = report_store.report_from_json(content.payload.decode("utf-8"))
-    except (UnicodeDecodeError, TypeError, ValueError) as exc:
-        raise DeliveryAdapterError("delivery 본문 snapshot을 읽지 못했습니다") from exc
+        try:
+            report = report_store.report_from_json(content.payload.decode("utf-8"))
+        except (UnicodeDecodeError, TypeError, ValueError) as exc:
+            raise DeliveryAdapterError(
+                "delivery 본문 snapshot을 읽지 못했습니다"
+            ) from exc
+        # 공개 봉인은 payload가 아니라 별도 표에 있다. 여기서 다시
+        # 붙이지 않으면 «봉인이 있는데도» 화면은 봉인 없음으로 그린다.
+        # 붙이면서 digest 재계산과 생성 증거 대조가 함께 돌고, 어긋나면
+        # 보고서를 내주지 않는다(I3 fail-closed) — 이 경계에서 그리지 않는 것이
+        # 위조된 봉인으로 그리는 것보다 안전하다.
+        # ★ 봉인은 `report_id`로 저장된다. 여기 넘기는 `delivery.public_id`가
+        #   그 값과 같다는 것은 발급 경로의 관례다 — `routers/reports.py`가
+        #   `persist_reused_delivery`·`persist_approved_delivery`를 부를 때
+        #   언제나 `public_id=report_id`로 넣는다(현재 1464·1546행).
+        try:
+            report = report_store.attach_public_projection(
+                conn, delivery.public_id, report
+            )
+        except ValueError as exc:
+            raise DeliveryAdapterError(
+                "delivery 본문의 공개 봉인이 저장본과 다릅니다"
+            ) from exc
+        # ★ 조용한 「봉인 없음」을 금지한다. 위 관례가 깨져 공개 ID가
+        #   report_id와 다르면 조회가 빈손으로 돌아오고, 그 결과는 「이 보고서에
+        #   봉인이 없다」와 구별되지 않는다. 그런데 본문의 생성 증거는 「내 봉인의
+        #   지문은 이것」이라고 말하고 있다. 말과 실제가 다르면 그리지 않고
+        #   닫는다 — 화면이 봉인 없이 그리면 채널이 갈라진 채 나간다.
+        evidence = report.generation_evidence
+        if evidence is not None and report.public_projection is None:
+            raise DeliveryAdapterError(
+                "생성 증거가 가리키는 공개 봉인을 이 공개 ID로 찾지 못했습니다"
+            )
     return PublicDelivery(
         delivery=delivery,
         content=content,
@@ -840,6 +928,20 @@ def load_legacy_public_report(public_id: str) -> LegacyPublicReport | None:
         report = report_store.report_from_json(payload_json)
     except (KeyError, TypeError, ValueError) as exc:
         raise DeliveryAdapterError("과거 보고서 본문을 읽지 못했습니다") from exc
+    # ★ 격하 통로를 막는다 — 이 화면은 오늘의 검사와 화면 조립을 한 번도
+    #   부르지 않는 «과거 저장본 전용» 갈래다. 공개 봉인을 가진 본문이 여기로 내려오는
+    #   경우는 하나뿐이다: 정상 출고 기록이 사라졌을 때. 그건 옛 보고서가 아니라
+    #   손상이므로 과거 화면으로 대신 그리지 않고 닫는다.
+    evidence = report.generation_evidence
+    if evidence is not None and str(evidence.public_projection_sha256 or "").strip():
+        raise DeliveryAdapterError(
+            "공개 봉인을 가진 본문은 과거 저장본 화면으로 열지 않습니다"
+        )
+    # ★ 수집 도장이 찍힌 본문은 도장이 맞을 때만 연다. 도장 칸이 처음부터 빈
+    #   옛 저장본은 지금까지처럼 「읽기 전용」 고지와 함께 그대로 보여 준다.
+    problem = stored_sources_seal_problem(report.citations)
+    if problem:
+        raise DeliveryAdapterError(f"과거 보고서 본문을 믿을 수 없습니다: {problem}")
     return LegacyPublicReport(
         report=report,
         payload_json=payload_json,

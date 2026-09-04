@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}비용 · 기업분석{% endblock %}
+{% block bodyclass %}admin-frame-page{% endblock %}
+{% block wrapclass %}wide admin-frame{% endblock %}
+
+{# 비용·예산 화면 (정보 구조 ⑤).
+
+   ★ 차단 배너·미확정 대사·오늘 나간 돈 카드는 앞서
+     `admin_access.html` 한 화면에 링크·회원과 섞여 있었다. 여기로 «글자 그대로»
+     옮겼다. 옮기면서 바꾼 문구는 없다.
+   ★ 실제 원장과 현재 구성의 호출 전 예상비용 차단 기준을 함께 보여준다.
+     차단 기준은 청구액의 최댓값이 아니므로 둘을 같은 숫자로 표현하지 않는다. #}
+
+{% block content %}
+<header class="frame-heading">
+  <p class="frame-kicker">관리자 전용</p>
+  <h1>비용</h1>
+  <p class="lede">오늘 나간 돈과 새 조사를 막는 기준을 한곳에서 봅니다.</p>
+</header>
+{% set dashboard_nav = "costs" %}{% include "_admin_nav.html" %}
+
+{% include "_admin_spend_banners.html" %}
+
+
+{% if access_error %}
+<div class="warn-line" role="alert" style="margin-bottom:16px">
+  <span>⚠️</span><span><strong>{{ access_error_title or "비용 기록을 바꾸지 못했습니다." }}</strong><br>{{ access_error }}</span>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2 style="font-size:19px;margin-bottom:10px">
+    오늘 나간 돈 <span class="muted">— {{ business_day_label }}</span>
+  </h2>
+  <div class="hero-nums">
+    <div><b>{{ "{:,.0f}".format(spent_today) }}원</b><span>오늘 실제 지출</span></div>
+    <div><b>{{ "{:,.0f}".format(liability_today or 0) }}원</b><span>확인 전 보수부채</span></div>
+    <div><b>{{ "{:,.0f}".format(reservation_today or 0) }}원</b><span>현재 진행 예약</span></div>
+    <div><b>{{ "{:,.0f}".format(configured_stop_threshold_krw) }}원</b><span>구성상 차단 기준 합계</span></div>
+    <div><b>{{ active_link_count }}개</b><span>살아 있는 링크</span></div>
+    <div><b>{{ members|length }}명</b><span>초대한 친구</span></div>
+  </div>
+
+  {% if actual_over_threshold_krw > 0 or estimate_overrun_count > 0 %}
+  <div class="warn-line" role="status" style="margin-top:14px">
+    <span>⚠️</span>
+    <span>
+      <b>예상비용과 실제 청구 차이를 확인하세요.</b>
+      오늘 실제 지출은 <strong>{{ "{:,.0f}".format(spent_today) }}원</strong>입니다.
+      {% if actual_over_threshold_krw > 0 %}
+      현재 구성의 차단 기준 합계보다 <strong>{{ "{:,.0f}".format(actual_over_threshold_krw) }}원</strong> 큽니다.
+      {% endif %}
+      {% if estimate_overrun_count > 0 %}
+      호출 전 예상액보다 실제 provider 비용이 컸던 정산은
+      <strong>{{ estimate_overrun_count }}건</strong>, 관측 차액은
+      <strong>{{ "{:,.0f}".format(estimate_overrun_krw) }}원</strong>입니다.
+      {% endif %}
+    </span>
+  </div>
+  {% endif %}
+
+  <div class="warn-line" style="margin-top:14px">
+    <span>⚠️</span>
+    <span>
+      <b>전체 상한이 없습니다.</b>
+      지금 구성의 <strong>호출 전 예상비용 차단 기준 합계는 {{ "{:,.0f}".format(configured_stop_threshold_krw) }}원</strong>입니다
+      — 살아 있는 링크 {{ active_link_count }}개 × 3,000원 + {% if member_budget_customized %}초대한 친구 {{ members|length }}명 합계 {{ "{:,.0f}".format(member_budget_total_krw) }}원{% else %}초대한 친구 {{ members|length }}명 × {{ member_default_budget_label }}{% endif %} + 관리자 5,000원입니다.
+      유료 호출 전에 예상비용을 예약하고 각 통장 기준에 닿으면 새 호출을 차단합니다.
+      MEMBER는 이 금액 제한에 더해 한국시간 기준 성공 보고서 건수로도 제한하며, 따로 정하지 않은 친구는 성공 보고서 {{ member_default_success_limit }}건입니다.
+      다만 이 값은 실제 청구의 최댓값이 아닙니다. 실제 provider 토큰 집계와 가격·환율 차이로
+      확정 청구액이 예상 예약액이나 이 합계를 넘을 수 있습니다.
+      <br>줄이려면 <strong>안 쓰는 링크를 닫으세요.</strong>
+    </span>
+  </div>
+</div>
+<aside class="frame-mobile-notice"><strong>모바일 운영 범위</strong><span>이 화면의 변경 작업은 PC에서만 합니다.</span></aside>
+{% endblock %}

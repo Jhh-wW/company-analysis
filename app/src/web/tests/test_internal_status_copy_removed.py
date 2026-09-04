@@ -61,15 +61,47 @@ ALLOWED_EXPRESSIONS: dict[str, dict[str, str]] = {
         "성능시험": "모드 배지 — 실제 조사로 오해하지 않게 하는 고지",
     },
     "evaluation_consent_required.html": {
-        # 비용 동의 화면. ★ 이번 작업의 파일 소유권 밖이라 손대지 않았다. 문구를
-        # 「지금 화면에서 무엇이 되는지」로 바꾸는 것은 후속 정리 대상이다.
-        "성능시험": "소유권 밖 — 후속 정리 대상(2026-08-25 기록)",
+        # 비용 동의 화면에 아직 남아 있는 모드 이름. 「지금 이 화면에서 무엇이
+        # 되는지」로 바꾸는 것이 정리 방향이고, 그때까지 이 예외가 구멍을
+        # 한 화면·한 표현으로 좁혀 둔다.
+        "성능시험": "아직 사용자 문구로 바꾸지 않은 모드 이름",
     },
     "_posting_image_field.html": {
-        # 같은 이유로 소유권 밖. 「실조사에서는 이미지 원본을 …」 문장이 남아 있다.
-        "실조사": "소유권 밖 — 후속 정리 대상(2026-08-25 기록)",
+        # 「실조사에서는 이미지 원본을 …」 문장이 아직 남아 있다. 위와 같은
+        # 이유로 예외를 좁게 둔다.
+        "실조사": "아직 사용자 문구로 바꾸지 않은 모드 이름",
+    },
+    "not_found.html": {
+        # 「완료된 외부 조회 비용은 비용 원장에 기록될 수 있습니다」 두 곳.
+        # `test_company_candidate_flow.py`가 이 문장을 글자 그대로 못 박고 있어
+        # 문구와 그 단정을 **같은 커밋에서** 함께 바꿔야 한다. 그때까지 구멍을
+        # 한 화면·한 표현으로 좁혀 둔다.
+        "원장": "아직 사용자 문구로 바꾸지 않은 회계 용어",
     },
 }
+
+#: 손님 화면에 있으면 안 되는 «코드 용어». 위 목록이 우리 «사정»을 막는다면
+#: 이쪽은 우리 «어휘»를 막는다. 손님은 자기가 받은 것을 「초대 링크」로 알지
+#: 갈래 이름(LINK·MEMBER·PUBLIC)이나 회계 용어(원장)로 알지 않는다.
+GUEST_BANNED_EXPRESSIONS: dict[str, str] = {
+    "LINK": "갈래 이름 — 손님에게는 「초대 링크」다",
+    "MEMBER": "갈래 이름 — 손님에게는 「초대받은 계정」이다",
+    "PUBLIC": "갈래 이름 — 손님은 자기 갈래를 모른다",
+    "원장": "회계 용어 — 손님에게는 「사용 비용」이다",
+    "통장": "내부 비유 — 손님이 여는 계좌가 아니다",
+    "bucket": "코드 용어",
+    "capability": "코드 용어",
+}
+
+#: 코드 용어를 잠그는 손님 화면 목록. 늘릴 때는 그 화면이 실제로 통과하는지
+#: 확인하고 늘린다 — 통과 못 하는 파일을 넣으면 시험이 빨간불로 굳는다.
+GUEST_SCREEN_TEMPLATES: tuple[str, ...] = (
+    "throttled.html",
+    "share_unavailable.html",
+    "progress_unavailable.html",
+    "not_found.html",
+    "company_candidates.html",
+)
 
 #: 태그 안에 숨은 사람이 읽는 글자도 함께 본다 (툴팁·대체글·입력칸 안내).
 VISIBLE_ATTRIBUTES: tuple[str, ...] = (
@@ -81,7 +113,7 @@ VISIBLE_ATTRIBUTES: tuple[str, ...] = (
     "summary",
 )
 
-#: 실측 2026-09-01 기준 화면 템플릿은 38개다(고아 템플릿 5개를 지운 뒤).
+#: 실측 기준 화면 템플릿은 38개다(고아 템플릿 5개를 지운 뒤).
 #: 「일부만 보고 전수」를 막는 하한선 — 실측치에서 3개 여유를 둔 값이다.
 MINIMUM_SCANNED_TEMPLATES = 35
 
@@ -112,7 +144,7 @@ def test_실제_조사_모드에서도_실제조사_배지를_따로_보여주�
     text = visible_text(response.text)
 
     assert "실제 조사" not in text
-    # 실제 조사인데 「샘플 모드」라고 잘못 말해서도 안 된다 (P-79와 같은 종류의 사고).
+    # 실제 조사인데 「샘플 모드」라고 잘못 말해서도 안 된다 — 화면이 사실과 다른 말을 하는 사고다.
     assert "샘플 모드" not in text
 
 
@@ -218,7 +250,8 @@ def test_후보_메타칸_최소폭은_가장_긴_실제값이_한줄에_들어�
     assert match, "minmax(...px, 1fr) 형태를 찾지 못했다"
     min_width = int(match.group(1))
 
-    # 실측: 팀장이 실 배포본에서 잰 값 155px. 그보다 작으면 다시 낱글자가 갈린다.
+    # 실측: 배포본에서 「전자공시(DART) 기업개황」 한 줄이 차지한 폭 155px.
+    # 그보다 작으면 다시 낱글자가 갈린다.
     assert min_width >= 155
 
 
@@ -308,12 +341,122 @@ def test_관리자_접근관리_화면에도_내부_사정_표현이_없다(monk
 
     with TestClient(main.app, base_url="https://pilot.example") as web_client:
         _session(web_client, email="admin@example.com", is_admin=True)
-        access = web_client.get("/admin/access")
+        # ★ 한 화면이던 접근 관리가 링크·회원으로 나뉘었다.
+        #   둘 다 검사한다(한쪽만 보면 전수가 아니다).
+        links = web_client.get("/admin/links")
+        members = web_client.get("/admin/members")
 
-    assert access.status_code == 200
-    text = visible_text(access.text)
-    for phrase in BANNED_EXPRESSIONS:
-        assert phrase not in text, f"관리자 접근관리 화면에 「{phrase}」가 남아 있다"
+    assert links.status_code == 200 and members.status_code == 200
+    for 화면이름, 응답 in (("초대 링크", links), ("회원", members)):
+        text = visible_text(응답.text)
+        for phrase in BANNED_EXPRESSIONS:
+            assert phrase not in text, f"{화면이름} 화면에 「{phrase}」가 남아 있다"
     # 관리자가 실제로 할 수 있는 일(철회·해제)은 그대로 알려야 한다.
-    assert "이 운영판에서는 LINK를 발급할 수 없습니다." in text
-    assert "이 운영판에서는 친구를 초대할 수 없습니다." in text
+    # 「LINK」는 내부 용어라 사람 말로 바꿨다(요구 4).
+    assert "이 운영판에서는 초대 링크를 발급할 수 없습니다." in visible_text(links.text)
+    assert "이 운영판에서는 친구를 초대할 수 없습니다." in visible_text(members.text)
+
+
+def _guest_screen_bodies() -> dict[str, str]:
+    """손님이 막혔을 때 보는 화면 다섯 개를 **실제로 그려** 돌려준다.
+
+    ★ 왜 원본 글자가 아니라 렌더 결과인가 — 금지어는 틀(`base.html`)·라우터가
+      넘긴 값·조건 분기 어디에서든 들어올 수 있다. 원본만 훑으면 라우터가
+      건네준 문자열은 검사 밖이라, 실제로 그렇게 새어 나온 적이 있다.
+    """
+    from src.features.pipeline.port import UserInput  # noqa: PLC0415
+    from src.features.sharelink import tracks as share_tracks  # noqa: PLC0415
+    from src.features.sharelink import constants as share_constants  # noqa: PLC0415
+    from src.web import request_helpers  # noqa: PLC0415
+    from src.web.tests import test_guest_error_screens  # noqa: PLC0415
+
+    request = test_guest_error_screens._synthetic_request()
+    user_input = UserInput(company="가나다전자", job="", region="서울", posting_text="")
+
+    def render(name: str, **context) -> str:
+        return request_helpers.templates.TemplateResponse(
+            request=request,
+            name=name,
+            context=request_helpers._ctx(request, **context),
+        ).body.decode("utf-8")
+
+    bodies = {
+        "throttled.html(한도 소진)": request_helpers._throttled(
+            request,
+            share_constants.LINK_TOTAL_BUDGET_EXHAUSTED_MESSAGE,
+            f"budget-total:{share_tracks.Track.LINK.value}",
+        ).body.decode("utf-8"),
+        "throttled.html(초대 없음)": request_helpers._throttled(
+            request,
+            share_constants.PUBLIC_NOT_ALLOWED_MESSAGE,
+            f"budget:{share_tracks.Track.PUBLIC.value}",
+        ).body.decode("utf-8"),
+        "share_unavailable.html": render("share_unavailable.html"),
+        "progress_unavailable.html": request_helpers._report_access_denied_screen(
+            request, revoked=False, status_code=404
+        ).body.decode("utf-8"),
+        "progress_unavailable.html(신고 접수)": (
+            request_helpers._report_access_denied_screen(
+                request, revoked=True, status_code=409
+            ).body.decode("utf-8")
+        ),
+        "company_candidates.html": render(
+            "company_candidates.html",
+            user_input=user_input,
+            candidate_options=[],
+            candidate_search_cost_krw=50.0,
+        ),
+    }
+    # 이름 재입력 화면은 «남은 횟수»와 «다 쓴 뒤»의 문장이 서로 다르다. 둘 다 본다.
+    for 라벨, 소진 in (("남은 횟수", False), ("횟수 소진", True)):
+        bodies[f"not_found.html({라벨})"] = render(
+            "not_found.html",
+            user_input=user_input,
+            retry=0,
+            next_retry=1,
+            rejected=False,
+            exhausted=소진,
+            demo_companies=[],
+            evaluation_consent_grant="",
+            evaluation_workflow_id="",
+        )
+    return bodies
+
+
+def test_손님이_막혔을_때_보는_화면에_코드_용어가_없다():
+    """★ 전수 — 다섯 화면을 실제로 그려 사람이 읽는 글자만 훑는다."""
+    offenders: list[str] = []
+
+    for 화면이름, body in _guest_screen_bodies().items():
+        text = visible_text(body)
+        allowed = ALLOWED_EXPRESSIONS.get(화면이름.split("(")[0], {})
+        for phrase in (*GUEST_BANNED_EXPRESSIONS, *BANNED_EXPRESSIONS):
+            if phrase in text and phrase not in allowed:
+                offenders.append(f"{화면이름} 「{phrase}」")
+
+    assert not offenders, (
+        "손님 화면에 코드 용어가 남아 있다: "
+        + ", ".join(offenders)
+        + " — 손님이 실제로 겪은 말로 바꿔라"
+    )
+
+
+def test_손님_화면_원본에도_코드_용어가_없다():
+    """렌더가 지나가지 않는 분기까지 원본 글자로 한 번 더 훑는다.
+
+    ★ 아직 관리자 화면(`admin_*.html`)과 `stopped.html`에는 같은 어휘가 남아 있다.
+      그쪽은 보는 사람이 다르고 고칠 범위도 달라 여기서 같이 잠그지 않는다 —
+      «검사 범위를 넓혔다»고 말하려면 실제로 통과하는 범위여야 한다.
+    """
+    offenders: list[str] = []
+
+    for file_name in GUEST_SCREEN_TEMPLATES:
+        path = TEMPLATES / file_name
+        assert path.exists(), f"손님 화면 목록의 {file_name}이 없다"
+        text = _template_visible_text(path)
+        allowed = ALLOWED_EXPRESSIONS.get(file_name, {})
+        for phrase in GUEST_BANNED_EXPRESSIONS:
+            if phrase in text and phrase not in allowed:
+                offenders.append(f"{file_name} 「{phrase}」")
+
+    assert not offenders, "손님 화면 원본에 코드 용어가 남아 있다: " + ", ".join(offenders)

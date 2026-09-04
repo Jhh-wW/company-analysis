@@ -1,13 +1,13 @@
 """캐시 1층·2층 — 키 만들기, 조회·저장, 별칭 캐시.
 
-정본: 확정/03_수집/2_규칙/03_캐시와저장.md (이 파일의 유일한 정본)
+(이 파일의 유일한 정본)
 
 # 캐시 1층 — 회사(고유번호) × 직무 × 공고 지문 → 완성 보고서
 
 ★ 「회사(고유번호)」를 반드시 쓴다. 화면에 보이는 회사명 문자열이 아니다.
   이름은 같은데 다른 법인(계열사)이 실재하므로, 이름으로 키를 만들면
   「계열사 오인으로 오염된 캐시가 다음 사람에게 반환」되는 사고가 난다
-  (팀장 지시 — `01_식별/2_규칙/01_이름대조.md` 확인 카드 규칙 2 참고).
+  (확인 카드 규칙 2 — 이름이 아니라 고유번호로 가른다).
   이 파일의 모든 함수는 `corp_id`를 **필수 인자**로 받는다 — 회사명만으로는
   절대 캐시를 찾거나 채우지 못하게 만들어, 실수로 이름 문자열을 넘겨도
   타입은 맞아 버그를 코드 리뷰로만 잡아야 하는 상황을 최대한 줄였다.
@@ -26,11 +26,11 @@
   직접 조회하지 않는다 — storage는 네트워크를 만지지 않는다). 안 넘기면
   (`current_fiscal_year=None`) **신선하다고 보지 않는다** — 모르는 걸
   신선하다고 우겨서 남의 옛 보고서를 내보내는 사고보다, 캐시를 한 번 더
-  미스 처리해 재수집하는 쪽이 싸다(★ 팀장 확인 필요 — 정본에 이 경우가
-  명시돼 있지 않아 보수적으로 정했다. 04 게이트가 자리 잡으면 이 값은
-  거의 항상 채워져 들어올 것이다).
+  미스 처리해 재수집하는 쪽이 싸다(정본에 이 경우가 명시돼 있지 않아
+  보수적으로 정했다. 04 게이트가 자리 잡으면 이 값은 거의 항상 채워져
+  들어올 것이다).
 - 뉴스·방향(3년) 부분은 `provenance/freshness.is_stale()`을 그대로
-  불러 쓴다 — "코드는 한 벌"이라는 지시를 이 부분에서는 이미 지킬 수
+  불러 쓴다 — "코드는 한 벌"이라는 원칙을 이 부분에서는 이미 지킬 수
   있었다(이미 있는 코드이므로).
 - "종료연도가 명시된 계획(최장 5년)" 규칙은 **여기서 구현하지 않는다** —
   문장 안에서 "그 연도"를 읽어내는 건 텍스트 분석이 필요해 이 파일의
@@ -71,6 +71,7 @@ from src.features.storage.constants import (
     TABLE_REPORTS,
 )
 from src.shared import engine_build_identity as build_identity_contract
+from src.shared.report_evidence.constants import ReleaseMode
 from src.shared.report_source_identity import (
     ReportSourceIdentityError,
     require_financial_payload_digest,
@@ -181,7 +182,7 @@ def _normalize_text(text: str) -> str:
     """공백을 하나로 뭉치고 앞뒤를 자르고 대소문자를 통일한다.
 
     ★ 1층 키(직무)와 별칭 캐시 키(회사 통칭)가 같은 정규화 규칙을 쓴다
-      (정본 §1-b 별칭 캐시 — "층1 정규화 규칙과 동일").
+      (별칭 캐시 규칙 — "층1 정규화 규칙과 동일").
     """
     return _WHITESPACE.sub(" ", text.strip()).casefold()
 
@@ -199,7 +200,7 @@ def normalize_alias(typed_name: str) -> str:
 def posting_fingerprint(requirements: Iterable[str]) -> str:
     """요구역량 목록으로 공고 지문을 만든다.
 
-    정본 §1 캐시 키 — "요구역량 목록을 정규화(정렬·공백 제거)한 뒤 해시".
+    캐시 키 규칙 — "요구역량 목록을 정규화(정렬·공백 제거)한 뒤 해시".
 
     ★ 정렬하는 이유 — AI가 같은 공고를 다시 읽어도 문장을 뽑는 순서가
       매번 같다는 보장이 없다. 정렬해야 "내용이 같으면 지문도 같다"가 참이
@@ -228,7 +229,7 @@ def _is_layer1_fresh(
     if cached_fiscal_year != current_fiscal_year:
         return False
 
-    # ★ 「오늘」은 반드시 KST 다 (2026-08-27 실측으로 찾은 결함).
+    # ★ 「오늘」은 반드시 KST 다 (실측으로 찾은 결함).
     #   수집일(`collected_at`)은 저장할 때 KST 로 적는다(`real.py` 의 `today_kst()`).
     #   그런데 여기서 «서버 로컬 날짜»로 재면 서버가 UTC 일 때 하루가 어긋나,
     #   방금 저장한 자료가 «미래에 수집된 것»(age_days = -1)이 되어 캐시가 통째로 거절된다.
@@ -587,12 +588,16 @@ def _company_requirements(build_id: str, source_identity_digest: str) -> list[st
     ]
 
 
-def _v2_requirements(build_id: str, source_identity_digest: str) -> list[str]:
-    """v2 캐시 namespace — 스키마 + 코드 지문 + 실제 출처 지문.
+def _v2_requirements(
+    build_id: str,
+    source_identity_digest: str,
+    release_mode: Optional[ReleaseMode] = None,
+) -> list[str]:
+    """v2 캐시 namespace — 스키마 + 코드 지문 + 실제 출처 지문 + 릴리스 모드.
 
     ★ 코드 지문을 열쇠에 넣는 이유 (오늘 실측으로 당한 사고)
       캐시가 옛 보고서를 물고 오면 「엔진을 고쳐도 화면이 그대로」가 된다.
-      v2-26에서 «v2는 캐시를 아예 안 읽는다»로 막았지만, 그 대가로 같은
+      예전에는 «v2는 캐시를 아예 안 읽는다»로 막았지만, 그 대가로 같은
       회사를 두 번 조사하면 두 번 다 본조사 비용이 나갔다.
       지문을 열쇠에 넣으면 둘 다 해결된다 — 코드가 그대로면 적중해 돈을
       아끼고, 한 글자라도 바뀌면 저절로 불일치라 옛 결과가 절대 안 나온다.
@@ -603,11 +608,55 @@ def _v2_requirements(build_id: str, source_identity_digest: str) -> list[str]:
     source_requirement = _source_identity_requirement(source_identity_digest)
     if source_requirement is None:
         return []
-    return [
+    requirements = [
         f"schema:{ENGINE_V2_SCHEMA_VERSION}",
         f"build:{build_id}",
         source_requirement,
     ]
+    if release_mode is not None:
+        # ★ 릴리스 모드도 열쇠다 (C6 · F-CACHE). 모드는 «무엇을 만드는가»를
+        #   바꾸는 입력이라 schema·build 옆에 놓는다. 이게 없으면 같은 배포에서
+        #   모드만 바뀔 때 SHADOW 저장본과 FULL 저장본이 같은 칸을 놓고 다툰다.
+        #   모르는 경우(v1 요청·환경값 없음)에만 항목을 빼서 옛 저장본의 열쇠를
+        #   그대로 둔다 — 값을 지어내면 기존 캐시가 전부 미적중이 된다.
+        requirements.append(f"release_mode:{release_mode.value}")
+    return requirements
+
+
+def reusable_for_requested_release_mode(
+    stored_release_mode: str,
+    requested_release_mode: Optional[ReleaseMode],
+) -> bool:
+    """저장본을 «지금 요청의 릴리스 모드»로 다시 내보내도 되는지 판정한다.
+
+    ★ 왜 필요한가 (C6)
+      v2 캐시 열쇠(`_v2_requirements`)에는 release_mode가 없다. 재료는
+      schema·build_id·출처 지문뿐이고 build_id는 배포 commit에서만 나온다.
+      그래서 **같은 배포에서 모드만 바꾸면 열쇠가 그대로**이고, SHADOW로 만든
+      보고서가 FULL 요청에 그대로 나갈 수 있다. FULL은 봉인·생산 증거·품질
+      게이트를 통과한 산출물이라는 뜻인데, 그 게이트를 한 번도 지나지 않은
+      SHADOW 저장본이 FULL인 척 나가면 거짓 표기다.
+
+    ★ 왜 열쇠를 안 바꾸고 «대조»로 막나
+      열쇠에 release_mode를 넣으면 기존 저장본이 전부 미적중이 되어 다음
+      조사마다 본조사 비용이 새로 나간다. 대조는 잘못된 재사용만 골라 막고
+      맞는 재사용은 그대로 살린다.
+
+    Args:
+        stored_release_mode: 저장본 `Report.release_mode` 문자열. SHADOW
+            저장본은 옛 바이트를 지키려고 빈 문자열이다.
+        requested_release_mode: 지금 요청이 만들려는 모드. **모르면 `None`**
+            (v1 요청이거나 환경값이 없거나 못 읽은 경우) — 그때는 예전
+            동작을 그대로 둔다.
+
+    Returns:
+        재사용해도 되면 True.
+    """
+    # FULL 요청만 좁힌다. 비FULL 요청의 재사용은 예전 그대로다 — 사용자
+    # 결과·차감을 바꾸지 않는다는 SHADOW 정의를 건드리지 않기 위해서다.
+    if requested_release_mode is not ReleaseMode.FULL:
+        return True
+    return str(stored_release_mode or "") == ReleaseMode.FULL.value
 
 
 def get_v2_report_hit(
@@ -616,6 +665,7 @@ def get_v2_report_hit(
     corp_id: str,
     build_identity: build_identity_contract.EngineBuildIdentity,
     source_identity_digest: str,
+    release_mode: Optional[ReleaseMode] = None,
     current_fiscal_year: Optional[int] = None,
     today: Optional[dt.date] = None,
 ) -> Optional[Report]:
@@ -631,7 +681,9 @@ def get_v2_report_hit(
         )
     except (TypeError, ValueError):
         return None
-    requirements = _v2_requirements(identity.build_id, source_identity_digest)
+    requirements = _v2_requirements(
+        identity.build_id, source_identity_digest, release_mode
+    )
     if not identity.cache_usable or not requirements:
         return None
     report = get_layer1_hit(
@@ -657,6 +709,7 @@ def save_v2_report(
     report: Report,
     build_identity: build_identity_contract.EngineBuildIdentity,
     source_identity_digest: str,
+    release_mode: Optional[ReleaseMode] = None,
     fiscal_year: Optional[int] = None,
     now: Optional[dt.datetime] = None,
 ) -> Optional[str]:
@@ -674,7 +727,9 @@ def save_v2_report(
     build_identity = build_identity_contract.require_exact_engine_build_identity(
         build_identity
     )
-    requirements = _v2_requirements(build_identity.build_id, source_identity_digest)
+    requirements = _v2_requirements(
+        build_identity.build_id, source_identity_digest, release_mode
+    )
     if not build_identity.cache_usable or not requirements:
         return None
     if report.schema_version != ENGINE_V2_SCHEMA_VERSION:
@@ -700,7 +755,7 @@ def _evict_layer1_overflow(
 ) -> None:
     """회사×직무당 상한(`LAYER1_MAX_ENTRIES_PER_JOB`)을 넘으면 오래된 것부터 지운다.
 
-    정본 §보관 상한 — "축출 우선 대상: 사업연도가 바뀐(신선도 만료) 보고서".
+    보관 상한 규칙 — "축출 우선 대상: 사업연도가 바뀐(신선도 만료) 보고서".
     사업연도가 이번에 저장한 값과 다른 항목을 먼저, 그다음 오래된 것부터 지운다.
     """
     rows = conn.execute(
@@ -807,7 +862,7 @@ def save_alias(
 def invalidate_alias(conn: sqlite3.Connection, typed_name: str) -> None:
     """별칭 하나를 지운다.
 
-    ★ 정본 §1-b — "무효화·수명 = 미결(오클릭으로 오염된 별칭을 되돌릴 경로)".
+    ★ 별칭 캐시 규칙 — "무효화·수명 = 미결(오클릭으로 오염된 별칭을 되돌릴 경로)".
       1차는 이 수동 삭제 함수만 둔다. 자동 만료(수명)는 아직 값이 없다 —
       나중에 값이 정해지면 `load_alias`에 만료 검사를 추가해야 한다.
     """

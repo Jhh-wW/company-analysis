@@ -38,6 +38,8 @@ from src.features.composer.render import (
     render_report,
 )
 from src.features.composer.validate import V2ValidationError, v2_validation_problems
+from src.features.export_notion.notion import NotionExportResult
+from src.features.report_standard.public_projection import build_public_projection
 from src.web import job_runtime, report_delivery_adapter
 from src.web.main import app
 from src.web.routers import reports as reports_router
@@ -211,23 +213,39 @@ def test_v2_결과_화면은_장_제목과_인용_해석_표지를_담는다(
     assert "노션으로 보내기" not in body
 
 
-def test_v2_Notion_직접POST는_외부전송과_PDF출고없이_명시적_409다(
+def test_v2_Notion_직접POST는_더_이상_미지원_409가_아니다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """숨긴 버튼을 우회해도 구조적으로 실패하는 어댑터까지 가지 않는다."""
+    """엔진 v2 Notion 409를 푼다.
 
-    report = _v2_report()
-    job_id = f"result-v2-notion-unsupported-{uuid.uuid4().hex}"
+    ★ 이 시험은 원래 「v2 Notion POST는 명시적 409다」를 고정하고 있었다.
+      근거는 «노션용 변환기가 없다»였고, 그 409는 「변환기가 생길 때까지
+      유지」로 못 박혀 있었다. 그 변환기가 생겼으므로(v2는
+      공개 봉인 블록만 읽어 화면·PDF와 같은 글자를 낸다) 전제가 사라졌다.
+      그래서 «지운» 것이 아니라 «뒤집었다» — 지금은 같은 자리에서
+      「미지원 화면이 나오지 않는다」를 지킨다.
+    ★ 어댑터까지 실제로 나가는지는 ``test_notion_export_route.py``의
+      ``test_v2_Notion_POST는_409가_아니라_블록으로_전송한다``가 본다. 여기서는
+      옛 미지원 응답이 되살아나지 않는 것만 본다.
+    ★ 공개 블록이 «없던» 시절의 v2 저장본은 여전히 닫힌다 — 그 갈래는
+      ``test_notion_export_route.py``의 옛 저장본 시험이 지킨다.
+    """
+
+    base = _v2_report()
+    report = replace(base, public_projection=build_public_projection(base))
+    job_id = f"result-v2-notion-supported-{uuid.uuid4().hex}"
     job_runtime._JOBS.pop(job_id, None)
     monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
     monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
-
-    def forbidden(*_args, **_kwargs):
-        raise AssertionError("v2 미지원 응답 전에 PDF나 Notion 외부 경계를 호출했습니다")
-
-    monkeypatch.setattr(reports_router, "_release_state", forbidden)
-    monkeypatch.setattr(reports_router, "send_report_to_notion", forbidden)
-    monkeypatch.setattr(reports_router.notion_store, "report_digest", forbidden)
+    monkeypatch.setattr(
+        reports_router,
+        "send_report_to_notion",
+        lambda *_args, **_kwargs: NotionExportResult(
+            success=True,
+            page_id="v2-supported-page",
+            page_url="https://notion.example/v2-supported-page",
+        ),
+    )
 
     session = auth_logic.create_session("admin@example.com", True)
     csrf = auth_logic.csrf_token_for_session(session.token)
@@ -238,11 +256,10 @@ def test_v2_Notion_직접POST는_외부전송과_PDF출고없이_명시적_409�
             data={"csrf_token": csrf},
         )
 
-    assert response.status_code == 409
-    assert "노션 내보내기를 지원하지 않습니다" in response.text
-    assert "엔진 v2" in response.text
-    assert "웹 화면과 PDF" in response.text
-    assert response.headers["X-Notion-Export-Status"] == "unsupported-engine-v2"
+    assert response.status_code == 200
+    assert "노션 내보내기를 지원하지 않습니다" not in response.text
+    assert "노션용 변환기가 준비될 때까지" not in response.text
+    assert response.headers.get("X-Notion-Export-Status") != "unsupported-engine-v2"
 
 
 def test_v2_Notion_직접POST도_CSRF와_만료를_미지원보다_먼저_확인한다(

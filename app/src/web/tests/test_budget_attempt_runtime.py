@@ -504,7 +504,8 @@ def test_관리자_화면은_보수부채를_전역중단과_구분하고_명시
         session = auth_logic.create_session("admin@example.com", True)
         client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
         csrf = auth_logic.csrf_token_for_session(session.token)
-        page = client.get("/admin/access")
+        # ★ 기대값 이전 — 미확정 대사 배너는 `/admin/costs`에 있다.
+        page = client.get("/admin/costs")
         assert page.status_code == 200
         assert "이 한 건 때문에 모든 조사를 멈추지 않습니다" in page.text
         assert "실패 단서" in page.text

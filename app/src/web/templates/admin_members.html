@@ -1,16 +1,104 @@
 {% extends "base.html" %}
-{% block title %}친구 이용 · 기업분석{% endblock %}
+{% block title %}회원 · 기업분석{% endblock %}
 {% block bodyclass %}admin-frame-page{% endblock %}
 {% block wrapclass %}wide admin-frame{% endblock %}
+
+{# 회원 화면 (정보 구조 ③).
+
+   ★ 초대 폼·명단·빼기는 `admin_access.html`에서 «글자 그대로»
+     옮겼다. 앞서 명단이 이 화면과 `/admin/access` 두 곳에 나뉘어 있어서, 초대하려면
+     다른 화면으로 건너가야 했다. 이제 한 곳이다.
+   ★ 한 사람의 초대·한도·이용·설문을 같은 카드에서 본다. #}
+
 {% block content %}
-<header class="frame-heading"><p class="frame-kicker">관리자 전용</p><h1>친구</h1><p class="lede">MEMBER는 KST 하루 기준 성공한 보고서 3건을 이용합니다. 실패·취소·외부 오류는 사용 횟수로 확정하지 않습니다.</p></header>
+<header class="frame-heading"><p class="frame-kicker">관리자 전용</p><h1>회원</h1><p class="lede">초대한 사람만 구글 로그인 후 실제 조사를 할 수 있습니다. KST 하루 기준으로 <strong>그 사람에게 정해 둔</strong> 성공 보고서 건수와 비용 한도 안에서 이용합니다. 따로 정하지 않으면 하루 {{ dashboard_member_default_success }}건 · {{ dashboard_member_default_budget_label }}입니다. 실패·취소·외부 오류는 사용 횟수로 확정하지 않습니다.</p></header>
 {% set dashboard_nav = "members" %}{% include "_admin_nav.html" %}
+
+{% if access_error %}
+<div class="warn-line" role="alert" style="margin-bottom:16px">
+  <span>⚠️</span><span><strong>{{ access_error_title or "회원 명단을 바꾸지 못했습니다." }}</strong><br>{{ access_error }}</span>
+</div>
+{% endif %}
+
+{# ══════════════════════════════════════════════════════════
+   초대
+   ══════════════════════════════════════════════════════════ #}
+<section class="frame-section frame-desktop-only">
+<div class="card">
+  <h2 id="invited-members-title">친구 초대</h2>
+  <p class="muted" style="margin-top:6px">
+    {% if narrow_admin_no_forwarded %}
+    이 운영판에서는 관리자만 사이트 본문과 실제 조사에 들어올 수 있습니다.
+    외부 계정에는 새 이용 권한을 만들 수 없습니다.
+    {% else %}
+    <strong>여기 있는 사람만</strong> 구글 로그인 후 실제 조사를 할 수 있습니다
+    (따로 정하지 않은 친구는 한국시간 기준 비용 입장 상한 {{ member_default_budget_label }} + 성공 보고서 {{ member_default_success_limit }}건).
+    한도는 아래 각 사람 카드에서 따로 바꿀 수 있습니다.
+    <br>명단에 없으면 로그인해도 <strong>데모만</strong> 보입니다.
+    {% endif %}
+  </p>
+
+  {# ★ 꺼진 기능은 «눌리지 않는 버튼»이 아니라 안내 한 줄로만
+     보인다. 회색 버튼은 「되는데 왜 안 되지」라는 오해만 남긴다. #}
+  {% if narrow_admin_no_forwarded %}
+  <div class="warn-line" role="note" style="margin-top:14px"><span>ℹ️</span><span><strong>이 운영판에서는 친구를 초대할 수 없습니다.</strong><br>이미 초대한 사람은 아래 목록에서 확인하고 뺄 수 있습니다.</span></div>
+  {% else %}
+  <form method="post" action="/admin/invite" style="margin-top:14px">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="field">
+      <label for="invite_email">구글 계정 이메일<span class="req">*</span></label>
+      <input id="invite_email" name="email" type="email" required
+             placeholder="friend@gmail.com">
+    </div>
+    <div class="field">
+      <label for="invite_display_name">친구 이름 <span class="muted">(권장)</span></label>
+      <input id="invite_display_name" name="display_name" placeholder="예: 김민지">
+      <p class="muted" style="margin-top:5px">친구 화면에서 이메일과 함께 보여 후속 대화를 찾기 쉽게 합니다.</p>
+    </div>
+    <div class="field">
+      <label for="invite_note">메모</label>
+      <input id="invite_note" name="note" placeholder="예: 같은 스터디">
+    </div>
+    <button type="submit" class="btn">초대하기</button>
+  </form>
+  {% endif %}
+</div>
+</section>
+
+{# ══════════════════════════════════════════════════════════
+   명단 · 한도 · 오늘 이용
+   ══════════════════════════════════════════════════════════ #}
+<section class="frame-section frame-desktop-only">
+  <div class="frame-section-heading"><div><p class="frame-eyebrow">초대한 사람</p><h2>이름·이메일·오늘 이용</h2></div></div>
+  {% if not dashboard_members_available %}<article class="card"><h3>친구 명단 확인 불가</h3><p>읽지 못한 명단을 0명으로 표시하지 않습니다.</p></article>{% else %}
+  {% for member in dashboard_members %}
+  {% set limit = dashboard_member_limits.get(member.email) %}
+  <article class="card">
+    <h3>{{ member.display_name or "이름 미등록" }}</h3>
+    <p>{{ member.email }} · 초대 {{ member_invited_at_labels.get(member.email, member.invited_at) if member_invited_at_labels is defined else member.invited_at }}</p>
+    {% if member.note %}<p class="muted">{{ member.note }}</p>{% endif %}
+    {% if dashboard_member_usage_available and limit %}<p><strong>오늘 성공 {{ dashboard_member_usage.get(member.email, [0, 0])[0] }} / {{ limit.success }}건</strong> · 진행 예약 {{ dashboard_member_usage.get(member.email, [0, 0])[1] }}건 · 하루 비용 한도 {{ limit.budget_label }}</p>{% else %}<p><strong>오늘 이용 확인 불가</strong></p>{% endif %}
+    {% if limit and limit.reason %}<p class="muted">한도를 바꾼 이유: {{ limit.reason }}{% if limit.updated_at %} · {{ limit.updated_at }}{% endif %}</p>{% endif %}
+    {% if limit %}
+    {# ★ 여기서 바로 저장하지 않는다 — 적은 값을 확인 화면이 「지금 값 → 바꿀 값」
+       으로 다시 보여 주고, 이유도 거기서 한 번만 받는다. #}
+    <form class="frame-inline-form" method="get" action="/admin/members/{{ member.email }}/limit">
+      <label>하루 성공 건수 <input type="number" name="daily_success_limit" min="1" max="20" step="1" value="{{ limit.success }}"></label>
+      <label>하루 비용 한도(원) <input type="number" name="daily_budget_krw" min="0" max="20000" step="100" value="{{ '%.0f'|format(limit.budget_krw) }}"></label>
+      <label>바꾸는 이유 <input type="text" name="reason" maxlength="200"></label>
+      <button class="btn" type="submit">바꾸기 전 확인하기</button>
+      <p class="muted">바꾼 값은 다음 날에도 그대로 유지됩니다. 두 칸을 비우고 저장하면 기본값(하루 {{ dashboard_member_default_success }}건 · {{ dashboard_member_default_budget_label }})으로 되돌아갑니다.</p>
+    </form>
+    {% endif %}
+    <p style="margin-top:10px">
+      <a class="btn ghost" href="/admin/members/{{ member.email }}/remove">빼기</a>
+    </p>
+  </article>
+  {% else %}<article class="card"><p>아직 초대한 사람이 없습니다.</p></article>{% endfor %}{% endif %}
+</section>
+
 <section class="frame-section frame-desktop-only"><p class="frame-eyebrow">이용 기간</p><p><a class="btn {% if dashboard_member_period == 'all' %}ghost{% endif %}" href="/admin/members?period=all">전체</a> <a class="btn {% if dashboard_member_period == '7d' %}ghost{% endif %}" href="/admin/members?period=7d">최근 7일</a> <a class="btn {% if dashboard_member_period == '30d' %}ghost{% endif %}" href="/admin/members?period=30d">최근 30일</a></p><div class="frame-grid frame-grid-three">{% for company_type in ['listed', 'audited', 'undecided'] %}<article class="card"><h2>{{ dashboard_company_labels[company_type] }}</h2><p>성공 {{ dashboard_member_statistics.by_company[company_type].success }}건 · 실패 {{ dashboard_member_statistics.by_company[company_type].failed }}건</p></article>{% endfor %}</div></section>
 <section class="frame-section frame-desktop-only"><p class="frame-eyebrow">예약·정산과 비용</p><article class="card"><h2>실행 정산</h2><p>성공 확정 {{ dashboard_member_statistics.settled.used }}건 · 반환 {{ dashboard_member_statistics.settled.returned }}건 · 진행 예약 {{ dashboard_member_statistics.settled.reserved }}건</p><p>확정 내부 AI 비용 {{ '%.0f'|format(dashboard_member_statistics.confirmed_cost_krw) }}원 · 미확정 비용 실행 {{ dashboard_member_statistics.uncertain_cost_events }}건</p>{% if dashboard_member_statistics.recorded_runs == 0 %}<p class="muted">이 기간의 상세 실행 요약은 확인 불가입니다. 새 운영 이력부터 유형·결과·비용을 함께 보존합니다.</p>{% endif %}</article></section>
-<section class="frame-section frame-desktop-only">
-  <div class="frame-section-heading"><div><p class="frame-eyebrow">초대 MEMBER</p><h2>친구 이름·이메일</h2></div><a class="btn ghost" href="/admin/access#invited-members-title">친구 초대 관리</a></div>
-  {% if not dashboard_members_available %}<article class="card"><h3>친구 명단 확인 불가</h3><p>읽지 못한 명단을 0명으로 표시하지 않습니다.</p></article>{% else %}{% for member in dashboard_members %}<article class="card"><h3>{{ member.display_name or "이름 미등록" }}</h3><p>{{ member.email }} · 초대 {{ member.invited_at }}</p>{% if member.note %}<p class="muted">{{ member.note }}</p>{% endif %}{% if dashboard_member_usage_available %}<p><strong>오늘 성공 {{ dashboard_member_usage.get(member.email, [0, 0])[0] }} / 3건</strong> · 진행 예약 {{ dashboard_member_usage.get(member.email, [0, 0])[1] }}건</p>{% else %}<p><strong>오늘 이용 확인 불가</strong></p>{% endif %}</article>{% else %}<article class="card"><p>아직 초대한 MEMBER가 없습니다.</p><a class="btn ghost" href="/admin/access#invited-members-title">친구 초대하기</a></article>{% endfor %}{% endif %}
-</section>
 <section class="frame-section frame-desktop-only"><p class="frame-eyebrow">피드백</p><div class="frame-grid frame-grid-two"><article class="card"><h2>{{ dashboard_satisfaction }}</h2><p>별점 4~5점 / 목표 80% / 응답 {% if dashboard_survey_available %}{{ dashboard_survey_total }}건{% else %}확인 불가{% endif %}</p><p class="muted">5건 미만이면 비율 대신 자료 모으는 중으로 표시합니다. 개인 접속 정보는 보고서 검토 화면에서 관리자만 봅니다.</p></article><article class="card"><h2>{{ dashboard_three_minute_response }}</h2><p>3분 내 구분점 응답 / 측정 {% if dashboard_kpi_available %}{{ dashboard_kpi_measured }}건{% else %}확인 불가{% endif %}</p><p class="muted">결과 첫 열람부터 첫 설문 제출까지의 시간입니다. 답변의 근거 정확성은 관리자 검토가 필요합니다.</p></article></div></section>
 <section class="frame-section frame-desktop-only">
   <p class="frame-eyebrow">친구가 남긴 자세한 의견</p>
@@ -27,8 +115,8 @@
     {% if feedback.snapshot_available %}<a class="btn ghost" href="/admin/reports/{{ feedback.report_id }}/versions/{{ feedback.report_version }}">설문 당시 보고서 보기</a>{% else %}<p class="muted"><strong>당시 보고서 확인 불가</strong> · 이전 저장 형식이거나 SHA-256 결속을 확인할 수 없어 현재 보고서로 대신 보여주지 않습니다.</p>{% endif %}
   </article>
   {% else %}
-  <article class="card frame-empty-state"><h2>이 기간에 받은 자세한 의견이 없습니다</h2><p>친구가 결과 화면에서 설문을 보내면 회사와 정확한 보고서에 연결해 표시합니다.</p><a class="btn ghost" href="/admin/access#invited-members-title">친구 초대 관리</a></article>
+  <article class="card frame-empty-state"><h2>이 기간에 받은 자세한 의견이 없습니다</h2><p>친구가 결과 화면에서 설문을 보내면 회사와 정확한 보고서에 연결해 표시합니다.</p></article>
   {% endfor %}
 </section>
-<aside class="frame-mobile-notice"><strong>모바일 운영 범위</strong><span>친구 이용과 수정 작업은 PC에서만 확인합니다.</span></aside>
+<aside class="frame-mobile-notice"><strong>모바일 운영 범위</strong><span>이 화면의 변경 작업은 PC에서만 합니다.</span></aside>
 {% endblock %}

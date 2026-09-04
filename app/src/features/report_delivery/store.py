@@ -17,6 +17,7 @@ from src.features.report_delivery.canonical import (
     utc_text,
 )
 from src.features.report_delivery.models import ContentSnapshot, Delivery, DeliveryPolicy
+from src.features.report_delivery.policy import CacheMissReason
 from src.features.report_delivery.source_identity import SourceSnapshot
 from src.shared.engine_build_identity import epoch_digest_is_valid
 
@@ -98,6 +99,21 @@ class CachedRelease:
 
 
 @dataclass(frozen=True)
+class CacheLookup:
+    """캐시 조회 한 번의 «결과 또는 이유».
+
+    적중이면 `hit`만 채워지고, 미적중이면 `miss_reason`이 왜인지 말한다.
+    나이를 지나 못 쓴 경우에는 그 열쇠가 가리키던 두 원본 ID도 함께 준다 —
+    부른 쪽이 같은 열쇠를 지우려면 정확한 대상을 알아야 하기 때문이다.
+    """
+
+    hit: CachedRelease | None = None
+    miss_reason: CacheMissReason | None = None
+    expired_content_snapshot_id: str = ""
+    expired_artifact_id: str = ""
+
+
+@dataclass(frozen=True)
 class DeliveryIntent:
     """새 보고서는 불변 delivery 없이는 공개하지 않는다는 영속 표식."""
 
@@ -162,7 +178,14 @@ _SCHEMA: Final[tuple[str, ...]] = (
                                  REFERENCES {TABLE_CACHE_NAMESPACES}(namespace_id),
         content_generated_at     TEXT NOT NULL,
         actual_models_json       TEXT NOT NULL,
-        engine_epoch_digest      TEXT NOT NULL DEFAULT ''
+        engine_epoch_digest      TEXT NOT NULL DEFAULT '',
+        -- ReleaseAuthority.save_release_authority가 발급 직후 정확히 한 번
+        -- 0->1로만 뒤집는다(authority.py 소유). 이후 이 표 자체의 트리거가
+        -- 모든 UPDATE를 막는다 -- 다른 표를 참조하지 않는 자기완결 결속이라
+        -- authority.py·artifact.py가 아직 부팅되지 않은 단독 시험·부분
+        -- 마이그레이션에서도 안전하다.
+        release_locked            INTEGER NOT NULL DEFAULT 0
+                                 CHECK(release_locked IN (0, 1))
     )
     """,
     f"""
@@ -178,7 +201,9 @@ _SCHEMA: Final[tuple[str, ...]] = (
         billing_bucket_id        TEXT NOT NULL,
         delivered_at             TEXT NOT NULL,
         expires_at               TEXT NOT NULL,
-        cache_origin_content_id  TEXT NOT NULL
+        cache_origin_content_id  TEXT NOT NULL,
+        release_locked            INTEGER NOT NULL DEFAULT 0
+                                 CHECK(release_locked IN (0, 1))
     )
     """,
     f"""
@@ -211,6 +236,37 @@ _SCHEMA: Final[tuple[str, ...]] = (
         reason_code               TEXT NOT NULL,
         invalidated_at            TEXT NOT NULL
     )
+    """,
+    # 두 표 모두 완전히 content-addressed다(각 PK는 나머지 모든 컬럼의
+    # canonical hash). 정상 코드는 이 표들을 UPDATE하지 않으며(같은 표의
+    # 손상 재현 시험만 raw SQL로 직접 UPDATE한다), ReleaseAuthority가
+    # 발급된 뒤에는 그 raw SQL 우회조차 막는다. authority가 아직 없는 행은
+    # 기존 손상 재현 시험(test_delivery_store.py)이 그대로 UPDATE할 수
+    # 있게 둔다 — 이 트리거는 발급 "뒤"에만 적용된다.
+    #
+    # ★ 다른 표를 참조하지 않는다(자기 컬럼 release_locked만 본다). 처음에는
+    #   report_delivery_release_authorities를 EXISTS로 조회하는 트리거를
+    #   시도했는데, SQLite는 ALTER TABLE RENAME 때 스키마 전체 트리거
+    #   본문이 가리키는 표 이름을 다시 검증한다 — authority.py가 아직
+    #   부팅되지 않은 단독 호출(예: 이 표만 쓰는 시험, 부분 마이그레이션)에서
+    #   이 표들과 무관한 RENAME(_rebuild_bucket_scoped_cache_table)까지
+    #   "no such table"로 죽는 걸 실측으로 확인했다. 자기완결 컬럼이면 이
+    #   문제 자체가 생기지 않는다.
+    f"""
+    CREATE TRIGGER IF NOT EXISTS report_delivery_content_snapshots_no_mutation_after_release
+    BEFORE UPDATE ON {TABLE_CONTENT_SNAPSHOTS}
+    WHEN OLD.release_locked = 1
+    BEGIN
+        SELECT RAISE(ABORT, 'content snapshot is bound to an issued release authority');
+    END
+    """,
+    f"""
+    CREATE TRIGGER IF NOT EXISTS report_delivery_deliveries_no_mutation_after_release
+    BEFORE UPDATE ON {TABLE_DELIVERIES}
+    WHEN OLD.release_locked = 1
+    BEGIN
+        SELECT RAISE(ABORT, 'delivery is bound to an issued release authority');
+    END
     """,
 )
 
@@ -314,6 +370,22 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             f"ALTER TABLE {TABLE_CONTENT_SNAPSHOTS} "
             "ADD COLUMN engine_epoch_digest TEXT NOT NULL DEFAULT ''"
+        )
+    if "release_locked" not in content_columns:
+        conn.execute(
+            f"ALTER TABLE {TABLE_CONTENT_SNAPSHOTS} "
+            "ADD COLUMN release_locked INTEGER NOT NULL DEFAULT 0"
+        )
+    delivery_columns = {
+        str(row[1])
+        for row in conn.execute(
+            f'PRAGMA table_info("{TABLE_DELIVERIES}")'
+        ).fetchall()
+    }
+    if "release_locked" not in delivery_columns:
+        conn.execute(
+            f"ALTER TABLE {TABLE_DELIVERIES} "
+            "ADD COLUMN release_locked INTEGER NOT NULL DEFAULT 0"
         )
     expected_pk = (
         "billing_bucket_id",
@@ -693,7 +765,33 @@ def load_cache_hit(
     policy: DeliveryPolicy,
     delivered_at: dt.datetime,
 ) -> CachedRelease | None:
-    """사전 신원·나이·본문·최초 승인 PDF가 모두 맞을 때만 돌려준다."""
+    """사전 신원·나이·본문·최초 승인 PDF가 모두 맞을 때만 돌려준다.
+
+    미적중 이유가 필요하면 `load_cache_lookup`을 쓴다.
+    """
+
+    return load_cache_lookup(
+        conn,
+        key=key,
+        policy=policy,
+        delivered_at=delivered_at,
+    ).hit
+
+
+def load_cache_lookup(
+    conn: sqlite3.Connection,
+    *,
+    key: CacheLookupKey,
+    policy: DeliveryPolicy,
+    delivered_at: dt.datetime,
+) -> CacheLookup:
+    """캐시를 읽고, 못 쓰면 «왜 못 쓰는지»까지 돌려준다.
+
+    ★ 나이를 지난 열쇠를 조용히 `None`으로 닫으면 그 행이 옛 본문을 계속
+      가리킨 채 남는다. 그 뒤 새로 만든 보고서를 같은 열쇠에 결속할 때
+      `bind_cache_entry`가 「다른 내용을 덮어쓸 수 없다」로 막아 재생성이
+      반복해서 실패한다. 그래서 이유를 감추지 않고 위로 올린다.
+    """
 
     ensure_schema(conn)
     row = conn.execute(
@@ -714,7 +812,7 @@ def load_cache_hit(
         ),
     ).fetchone()
     if row is None:
-        return None
+        return CacheLookup(miss_reason=CacheMissReason.NOT_FOUND)
     content = load_content_snapshot(conn, str(row[1]))
     if content is None:
         raise LifecycleStoreCorrupt("캐시가 존재하지 않는 내용 원본을 가리킵니다")
@@ -724,15 +822,24 @@ def load_cache_hit(
         or content.engine_epoch_digest != str(row[3])
     ):
         raise LifecycleStoreCorrupt("캐시와 내용 원본의 생성기·전체 출처 신원이 다릅니다")
-    if not policy.content_is_reusable(content, delivered_at=delivered_at):
-        return None
     artifact_id = str(row[2]).strip()
+    if not policy.content_is_reusable(content, delivered_at=delivered_at):
+        # 손상 판정이 아니라 나이 판정이다. 여기서 행을 지우지 않는다 —
+        # 지우는 일은 원장에 사유를 남길 수 있는 `invalidate_cache_entry`의
+        # 몫이고, 이 함수는 읽기만 한다.
+        return CacheLookup(
+            miss_reason=CacheMissReason.CONTENT_EXPIRED,
+            expired_content_snapshot_id=content.content_id,
+            expired_artifact_id=artifact_id,
+        )
     if not artifact_id:
         raise LifecycleStoreCorrupt("캐시에 최초 승인 PDF artifact가 없습니다")
-    return CachedRelease(
-        content=content,
-        artifact_id=artifact_id,
-        preflight_identity_digest=key.preflight_identity_digest,
+    return CacheLookup(
+        hit=CachedRelease(
+            content=content,
+            artifact_id=artifact_id,
+            preflight_identity_digest=key.preflight_identity_digest,
+        )
     )
 
 
@@ -1015,6 +1122,21 @@ def load_delivery_by_public_id(
     return delivery
 
 
+def _delivery_intent_from_row(row: sqlite3.Row | tuple) -> DeliveryIntent:
+    """delivery 의무 한 행을 검증된 DTO로 바꾼다(조회 함수 여러 곳이 공유)."""
+
+    try:
+        return DeliveryIntent(
+            public_id=str(row[0]),
+            state=str(row[1]),
+            required_at=datetime_from_utc_text(row[2], label="delivery 의무 시작"),
+            updated_at=datetime_from_utc_text(row[3], label="delivery 의무 변경"),
+            failure_code=str(row[4]),
+        )
+    except (TypeError, ValueError) as exc:
+        raise LifecycleStoreCorrupt("delivery 의무 표식이 손상됐습니다") from exc
+
+
 def load_delivery_intent(
     conn: sqlite3.Connection,
     public_id: str,
@@ -1032,16 +1154,7 @@ def load_delivery_intent(
     ).fetchone()
     if row is None:
         return None
-    try:
-        intent = DeliveryIntent(
-            public_id=str(row[0]),
-            state=str(row[1]),
-            required_at=datetime_from_utc_text(row[2], label="delivery 의무 시작"),
-            updated_at=datetime_from_utc_text(row[3], label="delivery 의무 변경"),
-            failure_code=str(row[4]),
-        )
-    except (TypeError, ValueError) as exc:
-        raise LifecycleStoreCorrupt("delivery 의무 표식이 손상됐습니다") from exc
+    intent = _delivery_intent_from_row(row)
     if intent.public_id != clean_public_id:
         raise LifecycleStoreCorrupt("공개 ID와 delivery 의무 표식이 맞지 않습니다")
     if (
@@ -1050,6 +1163,43 @@ def load_delivery_intent(
     ):
         raise LifecycleStoreCorrupt("완료 delivery 의무에 실제 delivery가 없습니다")
     return intent
+
+
+def list_stale_required_delivery_intents(
+    conn: sqlite3.Connection,
+    *,
+    older_than: dt.datetime,
+) -> list[DeliveryIntent]:
+    """N분 넘게 ``required``로 정체된 delivery 의무만 재시작 스윕 대상으로 돌려준다.
+
+    ``_save_report`` 성공 직후 ~ 최종 출고 확정 사이에 프로세스가 죽으면 이
+    의무는 영원히 required로 남는다(§F1). 정상 진행 중인 요청까지 스윕이
+    건드리지 않도록 ``older_than``보다 새 의무는 제외한다. 같은 공개 ID에
+    실제 delivery가 이미 있으면(정상 경로라면 의무도 이미 complete여야
+    하지만 방어적으로 재확인) 절대 포함하지 않는다 — 실제 출고가 끝난
+    보고서를 스윕이 실패로 뒤집는 사고를 막기 위함이다.
+    """
+
+    ensure_schema(conn)
+    cutoff = require_aware(older_than, label="delivery 의무 정체 기준")
+    rows = conn.execute(
+        f"""
+        SELECT public_id, state, required_at, updated_at, failure_code
+        FROM {TABLE_DELIVERY_INTENTS}
+        WHERE state = ?
+        ORDER BY updated_at ASC, public_id ASC
+        """,
+        (DELIVERY_INTENT_REQUIRED,),
+    ).fetchall()
+    stale: list[DeliveryIntent] = []
+    for row in rows:
+        intent = _delivery_intent_from_row(row)
+        if intent.updated_at > cutoff:
+            continue
+        if load_delivery_by_public_id(conn, intent.public_id) is not None:
+            continue
+        stale.append(intent)
+    return stale
 
 
 def mark_delivery_required(

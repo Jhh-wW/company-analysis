@@ -1,4 +1,4 @@
-"""회사별 «열쇠 링크»가 실제로 도는지 못 박는다 (문제로그 P-94).
+"""회사별 «열쇠 링크»가 실제로 도는지 못 박는다.
 
 ★ 이 링크가 풀려는 문제 — 포트폴리오를 본 인사팀이 **로그인 없이** 도구를 눌러보게 하는 것.
   계정을 주면 로그인이 귀찮아 아무도 안 쓰고, 아무나 열어두면 돈이 무제한으로 샌다.
@@ -84,7 +84,7 @@ def _main_count(html: str) -> int:
 
 @pytest.fixture
 def client():
-    """★ 반드시 `with` — 아니면 뒤에서 도는 조사가 취소된다 (P-92 교훈)."""
+    """★ 반드시 `with` — 아니면 뒤에서 도는 조사가 취소된다 (교훈)."""
     runtime._PIPELINE = DemoPipeline()
     # 공유 쿠키는 배포 기본값대로 Secure다. HTTPS에서 실제 브라우저처럼 왕복시킨다.
     with TestClient(main.app, base_url="https://testserver") as client:
@@ -107,6 +107,12 @@ def _링크발급(
 def test_시험공개에서도_살아있는_링크는_자동출고본문과PDF만열고_관리자는_잠근다(
     client: TestClient, monkeypatch
 ):
+    """★ 기대값 이전 — `/k/`는 이제 결과가 아니라 첫 화면으로 보낸다.
+
+    이 시험이 지키는 것은 「살아 있는 링크가 본문과 PDF를 열고 관리 화면은
+    잠근다」이지 도착지가 아니다. 도착지는 랜딩으로 바뀌었으므로 결과 화면은
+    보고서 주소로 직접 연다. 랜딩 자체는 `test_link_landing.py`가 본다.
+    """
     report_id = uuid.uuid4().hex
     report = build_demo_report()
     with storage_db.connect() as conn:
@@ -131,13 +137,13 @@ def test_시험공개에서도_살아있는_링크는_자동출고본문과PDF�
         assert share_store.list_report_view_events_by_hash(
             conn, share_store.key_hash_of(_카카오열쇠)
         ) == []
-    result = client.get(opened.headers["location"], follow_redirects=False)
-    refreshed = client.get(opened.headers["location"], follow_redirects=False)
+    result = client.get(f"/result/{report_id}", follow_redirects=False)
+    refreshed = client.get(f"/result/{report_id}", follow_redirects=False)
     pdf = client.get(f"/download/pdf/{report_id}", follow_redirects=False)
     admin = client.get("/admin", follow_redirects=False)
 
     assert opened.status_code == 303
-    assert opened.headers["location"] == f"/result/{report_id}"
+    assert opened.headers["location"] == "/"
     assert result.status_code == 200
     assert refreshed.status_code == 200
     assert report.company in result.text
@@ -167,10 +173,13 @@ def test_LINK결과는_조회사건연결을_다시확인하지못하면_열지�
 
     opened = client.get(f"/k/{_카카오열쇠}", follow_redirects=False)
     monkeypatch.setattr(request_helpers, "_current_share_link", lambda _request: None)
-    result = client.get(opened.headers["location"], follow_redirects=False)
+    # 기대값 이전: `/k/`는 이제 첫 화면으로 보낸다. 이 시험의 대상은
+    # 결과 경로의 조회사건 재확인이므로 보고서 주소를 직접 연다.
+    result = client.get(f"/result/{report_id}", follow_redirects=False)
 
+    assert opened.headers["location"] == "/"
     assert result.status_code == 503
-    assert "LINK 보고서를 확인할 수 없습니다" in result.text
+    assert "초대 링크 보고서를 확인할 수 없습니다" in result.text
     with storage_db.connect() as conn:
         assert share_store.list_report_view_events_by_hash(
             conn, share_store.key_hash_of(_카카오열쇠)
@@ -343,8 +352,10 @@ def test_LINK_지원회사는_맥락으로_채우되_회사입력은_편집할�
     company_input = re.search(r'<input[^>]+id="company"[^>]*>', response.text)
     assert company_input is not None
     assert "readonly" not in company_input.group(0)
-    assert "지원 맥락" in response.text
-    assert "다른 회사를 검색해도" in response.text
+    # 기대값 이전: 초대 링크 손님의 첫 화면 문구가 인사팀 눈높이로 바뀌었다.
+    # 옛 배너는 내부 용어(LINK)를 썼다 — 첫 화면 금지어 목록에 있다.
+    assert "초대 링크로 들어오셨습니다" in response.text
+    assert "다른 회사 분석해 보기" in response.text
 
 
 # ══════════════════════════════════════════════════════════
@@ -446,13 +457,21 @@ def test_처음_열어본_시각은_안_덮인다(client: TestClient):
 
 
 def test_미리_구운_보고서로_바로_보낸다(client: TestClient):
-    """★ 인사팀이 «자기 회사» 보고서를 곧바로 보는 것 — 이 방식의 핵심이다."""
+    """★ 인사팀이 «자기 회사» 보고서를 곧바로 보는 것 — 이 방식의 핵심이다.
+
+    ★ 기대값 이전 — 결과로 «직행»하지 않고 첫 화면의 버튼 한 번으로
+      연다. 직행하면 「다른 회사도 돌려 볼 수 있다」를 영영 못 보기 때문이다.
+      「바로」는 그대로다: 조사 0회·0원이고 누르는 곳이 한 군데다.
+    """
     report_id = _보고서를_만든다(client)
     _링크발급(_카카오열쇠, CANONICAL_DEMO_COMPANY, report_id=report_id)
 
     response = client.get(f"/k/{_카카오열쇠}", follow_redirects=False)
+    랜딩 = client.get("/")
 
-    assert response.headers["location"] == f"/result/{report_id}"
+    assert response.headers["location"] == "/"
+    assert f'href="/result/{report_id}"' in 랜딩.text
+    assert f"{CANONICAL_DEMO_COMPANY} 보고서 보기" in 랜딩.text
 
 
 def test_안_구웠으면_첫_화면으로_보낸다(client: TestClient):
@@ -765,13 +784,21 @@ def test_연결보고서가_없어도_prefill과_안내로_간다(client: TestCl
 
 
 def test_시작보고서는_지원회사_꼬리표와_달라도_그대로_열린다(client: TestClient):
+    """★ 기대값 이전 — 도착지가 결과에서 첫 화면으로 바뀌었다.
+
+    이 시험이 지키는 것은 「회사 꼬리표가 달라도 묶인 보고서가 열린다」이다.
+    그래서 랜딩의 버튼이 그 보고서를 가리키는지까지 확인한다.
+    """
     report_id = _보고서를_만든다(client)  # canonical 진영 보고서
     _링크발급(_카카오열쇠, "다른회사", report_id=report_id)
 
     opened = client.get(f"/k/{_카카오열쇠}", follow_redirects=False)
+    랜딩 = client.get("/")
 
     assert opened.status_code == 303
-    assert opened.headers["location"] == f"/result/{report_id}"
+    assert opened.headers["location"] == "/"
+    assert f'href="/result/{report_id}"' in 랜딩.text
+    assert "다른회사 보고서 보기" in 랜딩.text
     with storage_db.connect() as conn:
         link = share_store.load(conn, _카카오열쇠)
     assert link.report_id == report_id
@@ -794,7 +821,7 @@ def test_robots는_capability_경로를_경로단위로_제외한다(client: Tes
 
 
 def test_한_링크가_다_써도_다른_링크는_돈다(client: TestClient, monkeypatch):
-    """★ P-94의 핵심 — 「전체 하나」가 아니라 「링크당」을 고른 이유다."""
+    """★ 이 규칙의 핵심 — 「전체 하나」가 아니라 「링크당」을 고른 이유다."""
     _링크발급(_카카오열쇠, "카카오")
     _링크발급(_네이버열쇠, "카카오")
     오늘 = clock.today_kst()
@@ -843,9 +870,9 @@ def test_열쇠_없는_손님도_상한을_받는다(client: TestClient, monkeyp
 
 
 # ══════════════════════════════════════════════════════════
-# ⑥ ★★ 로그인만으로는 «아무 권한도» 안 준다 (P-95)
+# ⑥ ★★ 로그인만으로는 «아무 권한도» 안 준다
 # ══════════════════════════════════════════════════════════
-# 사용자가 직접 지적해 잡힌 구멍이다 (2026-08-16):
+# 사용자가 직접 지적해 잡힌 구멍이다:
 #   「링크로 들어와서 그냥 구글로 로그인하면 어떻게 되나?」
 # 그때는 **아무나 로그인만 하면 하루 1,000원**을 쓸 수 있었다.
 
@@ -867,7 +894,7 @@ def _초대한다(email: str) -> None:
 def test_로그인만_하고_초대_안_됐으면_진짜_조사를_못_한다(
     client: TestClient, monkeypatch
 ):
-    """★ P-95 그 자체 — 인터넷의 아무나 로그인해서 돈 쓰는 것을 막는다."""
+    """★ 로그인만 하고 초대 안 됐으면 진짜 조사를 못 한다 — 인터넷의 아무나 로그인해서 돈 쓰는 것을 막는다."""
     monkeypatch.setattr(runtime, "_PIPELINE", object())          # 돈이 드는 것으로 본다
     _로그인시킨다(client, "stranger@gmail.com")
     form = {

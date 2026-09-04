@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib
 import importlib.util
 import itertools
@@ -31,7 +32,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Final, Iterable, Optional
 
-from src.core import paths
+from src.core import paths, typed_collector_switch
 from src.core.clock import subtract_years, today_kst
 from src.core.provider_gateway import attempt_context, gateway
 from src.core.provider_gateway.anthropic_adapter import AnthropicAdapter
@@ -96,6 +97,7 @@ from src.features.homepage.ir_pdf import (
     OFFICIAL_IR_FRAGMENT_KIND,
     collect_official_ir_fragments,
 )
+from src.features.homepage.safe_http import collection_cache_scope
 from src.features.provenance.citations import build_citations
 from src.features.provenance.sources import (
     Source,
@@ -216,17 +218,62 @@ _FINAL_GATE_REASON_KO: Final[dict[str, str]] = {
 ENGINE_V2_ENV_NAME: Final[str] = engine_mode.ENGINE_V2_ENV_NAME
 ENGINE_V2_ENV_ON: Final[str] = engine_mode.ENGINE_V2_ENV_ON
 
+#: 요청 전역 중단 예외에 실어 보내는 「그때까지 실제로 쓴 값」의 속성 이름.
+#: 중단은 결과를 돌려주지 않고 예외로 나가므로, 이 값을 같이 싣지 않으면 이미
+#: 나간 AI 원가가 원가 기록에서 0원으로 사라진다. 실행기가 같은 이름으로 읽는다.
+STOPPED_RUN_USAGE_ATTR: Final[str] = "stopped_run_usage"
+
+
+def _requested_release_mode(
+    generation_mode: engine_mode.EngineMode,
+) -> Optional[ReleaseMode]:
+    """지금 요청이 «어떤 릴리스 모드로» 보고서를 만들려는지 (C6 재사용 판정용).
+
+    ★ 「모르겠다」를 지어내지 않는다. v1 요청이거나 환경값이 없거나 계약 밖
+      문자열이면 `None`을 돌려주고, 재사용 판정은 예전 동작을 그대로 쓴다.
+      FULL 요청은 환경값이 반드시 있다 — 없으면 `_run_v2_composer`가 AI 호출
+      전에 입력 계약으로 막으므로, `None`을 관대하게 처리해도 FULL이 새는
+      구멍이 생기지 않는다.
+    """
+    if generation_mode is not engine_mode.EngineMode.V2:
+        return None
+    raw_release_mode = os.environ.get(REPORT_RELEASE_MODE_ENV_NAME)
+    if not raw_release_mode:
+        return None
+    try:
+        return parse_release_mode(raw_release_mode)
+    except ValueError:
+        return None
+
 
 def _generation_cache_namespace(
     engine: Any,
     build_identity: Any,
     generation_mode: engine_mode.EngineMode,
+    *,
+    release_mode: Optional[ReleaseMode],
 ) -> GenerationCacheNamespace | None:
     """캐시와 single-flight가 함께 쓰는 사전 생성기 신원을 만든다.
 
     배포 revision·모델·출력 설정은 provider 호출 전에 모두 확정된다.
     pipeline과 delivery가 서로 다른 문자열 해시를 만들지 않고 shared의
     ``GenerationCacheNamespace`` 한 벌을 ContentSnapshot까지 운반한다.
+
+    ★ release_mode도 신원의 일부다 (C6 · F-CACHE)
+      릴리스 모드는 «무엇을 만드는가»를 바꾸는 입력이다. FULL은 봉인·생산
+      증거·엄격 품질 게이트를 지난 산출물이고 SHADOW는 아니다. 모드가
+      열쇠에 없으면 같은 배포에서 모드만 바뀔 때 SHADOW 저장본과 FULL
+      저장본이 «같은 칸»을 놓고 다툰다 — FULL 요청이 SHADOW 결과를 물어
+      오거나(거짓 표기), 새로 만든 FULL을 옛 SHADOW 항목 열쇠에 결속하려다
+      `ImmutableRecordConflict`로 하드 실패한다(검토에서 재현).
+      namespace_id는 `settings_sha256`을 포함해 계산되고, single-flight
+      `LeaseKey`와 캐시 `CacheLookupKey`가 **둘 다** 이 namespace_id를
+      운반한다. 그래서 여기 한 곳에 넣으면 두 열쇠가 함께 갈라진다.
+      모드를 모르면(v1 요청·환경값 없음) 예전 열쇠 그대로 두어 기존
+      저장본을 계속 재사용한다.
+
+    Args:
+        release_mode: 지금 요청이 만들려는 릴리스 모드. 모르면 ``None``.
     """
 
     model = str(getattr(engine, "MODEL", "") or GENERATION_MODEL).strip()
@@ -251,13 +298,18 @@ def _generation_cache_namespace(
         schema_version = ENGINE_V2_SCHEMA_VERSION
     else:
         schema_version = CANONICAL_SCHEMA_VERSION
+    settings: dict[str, Any] = {"temperature": 0}
+    if release_mode is not None:
+        # 모르는 경우에만 키를 빼서 옛 저장본의 열쇠를 그대로 둔다. 값을
+        # 지어내 넣으면 v1 요청까지 전부 미적중이 된다.
+        settings["release_mode"] = release_mode.value
     return GenerationCacheNamespace.create(
         product="company-analysis",
         schema_version=schema_version,
         deployment_revision=revision,
         image_digest=image_digest,
         requested_models={"pipeline": model},
-        output_settings={"temperature": 0},
+        output_settings=settings,
     )
 
 #: v2 작가·검수 호출의 출력 token 상한. 작가는 장 하나(6~12문장 JSON)를 돌려준다.
@@ -398,7 +450,7 @@ _DART_PROFILE_ENRICHMENT_LIMIT = 5
 
 #: 1판은 모듈 전역 `_spent_usd`에 비용을 더한다. 보통 `import run_pilot`은
 #: `sys.modules`의 같은 객체를 돌려주므로 서버가 살아 있는 내내 모든 요청이 그 값을
-#: 공유한다(P-144). 요청마다 다른 이름으로 원본 파일을 실행해 module namespace 자체를
+#: 공유한다. 요청마다 다른 이름으로 원본 파일을 실행해 module namespace 자체를
 #: 갈라 놓는다. 잠금은 짧은 이름 발급에만 쓰며 조사 본체를 직렬화하지 않는다.
 _ENGINE_INSTANCE_IDS = itertools.count(1)
 _ENGINE_INSTANCE_ID_LOCK = threading.Lock()
@@ -512,7 +564,7 @@ class _MeteredEngine:
             if self._provider_call_count >= MAX_AI_CALLS_PER_REQUEST:
                 # ★ 돈이 아니라 «횟수»다 — 전용 타입으로 구분해 던진다.
                 #   composer 의 «선택적 다듬기»는 이 구분을 보고 포기하고
-                #   지금까지 만든 보고서로 끝낸다(2026-08-29 실측 근거는
+                #   지금까지 만든 보고서로 끝낸다(실측 근거는
                 #   composer/port.py::AskFatalError 주석 참조).
                 raise provider_budget.RequestCallLimitReached(
                     "한 요청의 AI 호출 횟수 상한을 넘었습니다"
@@ -824,7 +876,7 @@ class _MeteredMessages:
                     _log_billing_uncertain(stage, "settle_invariant_on_failure", invariant)
                     self._metered._billing_uncertain = True
                 raise error
-            # ★ 2026-08-29 — 여기서 «모든» 실패를 미확정으로 접으면, 타임아웃 한 번에
+            # ★ 여기서 «모든» 실패를 미확정으로 접으면, 타임아웃 한 번에
             #   보고서 전체가 날아간다(실측: 현대카드 본조사가 1초 만에 죽었다).
             #   provider 가 요청을 «받아들이지 않은» 것이 확실한 거절(400·401·403·404)은
             #   토큰을 만들지 않았으므로 0원으로 «확정» 마감한다. 그러면 같은 요청의
@@ -903,7 +955,7 @@ def _is_determinate_zero_cost(error: BaseException) -> bool:
 def _log_billing_uncertain(stage: str, reason: str, error: BaseException | None) -> None:
     """미확정으로 «왜» 접었는지 남긴다.
 
-    ★ 2026-08-29 이전에는 이 자리에 로그가 «하나도» 없어서, 조사가 통째로 죽어도
+    ★ 이전에는 이 자리에 로그가 «하나도» 없어서, 조사가 통째로 죽어도
       서버 로그에 흔적이 없었다(27장 결함 D).
     ⚠️ 예외 «메시지»는 남기지 않는다 — provider 응답 본문이 섞일 수 있다.
       클래스 이름과 상태코드만 남긴다.
@@ -956,7 +1008,7 @@ _OUTCOME_MAP: dict[str, Outcome] = {
 def _reject_outcome(status: str) -> Outcome:
     """판정 status 를 «화면 종류»로 옮긴다 — 데모와 «같은 규칙»(앞부분 맞추기).
 
-    ★ 왜 정확일치가 아닌가 (2026-08-27 실측 — 운영 결함이었다)
+    ★ 왜 정확일치가 아닌가 (실측 — 운영 결함이었다)
       `_OUTCOME_MAP` 의 열쇠는 run_pilot 의 `fin(...)` 이름인 「거부_거부A」인데,
       판정이 내놓는 값은 「거부A_공공기관」이라 열쇠가 「거부_거부A_공공기관」이 된다.
       정확일치로 찾으면 **둘 다 표에 없어** 기본값으로 떨어졌고, 그래서
@@ -977,7 +1029,7 @@ def _engine() -> Any:
     ★ 파일 맨 위에서 부르지 않는다. 엔진은 `anthropic`·`presidio` 같은
       무거운 프로그램을 요구하는데, 그게 안 깔려 있어도 **데모 화면은 떠야 한다.**
     ★ 평범한 `import run_pilot`을 쓰지 않는다. 그 방식은 서버 수명 동안 같은 module을
-      돌려줘 1판의 `_spent_usd`가 요청 사이에 누적된다(P-144).
+      돌려줘 1판의 `_spent_usd`가 요청 사이에 누적된다.
     """
     root = paths.PROJECT_ROOT / "analysis_engine"
     for extra in (root / "src", root / "tools"):
@@ -1090,10 +1142,10 @@ def _sections_from(
 ) -> tuple[list[ReportSection], list[str]]:
     """엔진이 고른 문장들을 항목별로 담는다.
 
-    ★ 표 덩어리는 여기서 버린다 (D12 · 문제로그 P-29).
+    ★ 표 덩어리는 여기서 버린다.
       엔진을 고치지 않고 «화면에 내보내기 직전»에 거른다.
-    ★ 회계기준 설명 문구도 여기서 버린다 (문제로그 P-40).
-    ★ 알맹이 검사(①-b) 결과도 여기서 반영한다 (문제로그 P-66).
+    ★ 회계기준 설명 문구도 여기서 버린다.
+    ★ 알맹이 검사(①-b) 결과도 여기서 반영한다.
       전에는 3회 다수결까지 내고 **결과를 통째로 버렸다.**
 
     Args:
@@ -1114,7 +1166,7 @@ def _sections_from(
         if cite == "공고":
             requirements.append(item.sentence)
             continue
-        # ★ 재무·회계 수치는 «표 그대로» 낸다 (결정기록 D13). 버리지 않는다.
+        # ★ 재무·회계 수치는 «표 그대로» 낸다. 버리지 않는다.
         table = parse_financial_table(item.sentence)
         if table is not None:
             tables.setdefault(item.block, []).append(table)
@@ -1122,7 +1174,7 @@ def _sections_from(
         if is_table_dump(item.sentence):
             dumped.add(item.block)
             continue
-        # 회계기준 설명 문구는 회사 이름을 바꿔도 말이 된다 (문제로그 P-40).
+        # 회계기준 설명 문구는 회사 이름을 바꿔도 말이 된다.
         if is_accounting_policy(item.sentence):
             policy_dropped.add(item.block)
             continue
@@ -1172,7 +1224,7 @@ _SOURCE_STATE_FAILED = "failed"
 def _has_failed_source(sources: list[SourceStatus]) -> bool:
     """소스 중 하나라도 «우리 쪽 실패»(⚠️)가 있는가.
 
-    ★ 정본 03_수집/1_흐름/02_실패처리.md — 「⚠️ 못 가져옴 → ❌ 저장 안 함」.
+    ★ 「⚠️ 못 가져옴 → ❌ 저장 안 함」.
       「홈페이지가 그날만 죽었을 수 있다. 캐시하면 다음 사람도, 그다음 사람도
       영영 X를 본다. 그 회사가 「자료 없는 회사」로 굳어버린다.」
       ❌ 없음(회사의 사실)은 저장해도 된다 — 실패와 섞지 않는다.
@@ -1223,7 +1275,7 @@ def _refresh_empty_reasons(
     news_step: dict[str, Any],
     specificity_rejected_cells: set[str] | None = None,
 ) -> list[ReportSection]:
-    """빈칸 사유를 «실제 수집 결과»로 다시 쓴다 (문제로그 P-67).
+    """빈칸 사유를 «실제 수집 결과»로 다시 쓴다.
 
     ★ 1판 엔진은 칸마다 고정 문구를 **조건 없이** 붙인다. 그래서 뉴스를 6건
       모아 놓고도 「채택된 기사 없음」이라고 말했다. 있는 것을 없다고 하면
@@ -1810,6 +1862,41 @@ class RealPipeline:
                 build_identity=build_identity,
                 generation_mode=generation_mode,
             )
+        except generation_coordination.GenerationCoordinationError as stopped:
+            if type(stopped) is generation_coordination.GenerationCoordinationError:
+                # 이 pipeline 안에서 직접 올리는 기본형 예외는 재사용 저장본 계약
+                # 위반 같은 fail-closed 조건이다. 요청 전역 중단(초대 링크 닫힘·
+                # lease 상실·대기 취소 — 전부 하위 클래스)과 달리 실행기에 넘길
+                # 전용 분기가 없으므로, 예전 계약대로 실패 결과로 닫는다. 비용은
+                # 아래 단일 출구가 싣는다(여기서 따로 return 하지 않는다).
+                logger.warning(
+                    "본조사를 계약 위반으로 닫습니다 — %s", stopped, exc_info=True
+                )
+                result = RunResult(
+                    outcome=Outcome.FAILED,
+                    message=_message(Outcome.FAILED),
+                )
+            else:
+                # 초대 링크 중단·lease 상실·대기 취소는 조사가 «못 한» 것이지
+                # 「품질이 모자란」 것이 아니다. 여기서 FAILED 결과로 바꾸면 실행기의
+                # 전용 중단 분기에 닿지 못해 이력 사유와 화면 문구가 뒤바뀐다.
+                # 그때까지 실제로 쓴 값만 예외에 실어 그대로 다시 던진다.
+                logger.info(
+                    "본조사를 요청 전역 사유로 중단했습니다 — %s",
+                    type(stopped).__name__,
+                )
+                setattr(
+                    stopped,
+                    STOPPED_RUN_USAGE_ATTR,
+                    RunResult(
+                        outcome=Outcome.FAILED,
+                        cost_krw=_request_spent_krw(engine),
+                        model=_request_model_label(engine),
+                        billing_uncertain=_request_billing_uncertain(engine),
+                        ai_cost_events=_request_cost_events(engine),
+                    ),
+                )
+                raise
         except Exception:  # noqa: BLE001 — AI 뒤 후속 코드가 터져도 쓴 돈은 0원이 아니다
             logger.exception("본조사 중 예기치 않은 실패가 발생했습니다")
             result = RunResult(
@@ -1909,13 +1996,13 @@ class RealPipeline:
         has_audit = any(
             "감사보고서" in (row.get("report_nm") or "") for row in audit_rows
         )
-        # ── 조건 2-b: 공개된 재무제표가 «실제로» 있나 (2026-08-27) ─────
+        # ── 조건 2-b: 공개된 재무제표가 «실제로» 있나 ─────
         #
         # ★ 왜 판정 «전»으로 올렸나 — 「감사보고서라는 이름의 공시가 없다」는
         #   「분석할 자료가 없다」가 아니다. 사업보고서를 내는 회사는 감사보고서를
         #   그 «안에» 첨부하므로 별도 공시가 안 생긴다(외부감사법 23조① 단서 —
         #   첨부해 내면 감사인이 제출한 것으로 «본다»).
-        #   실측 2026-08-27: 현대카드·우리은행·현대캐피탈·SC제일은행·토스·야놀자가
+        #   실측: 현대카드·우리은행·현대캐피탈·SC제일은행·토스·야놀자가
         #   그래서 거부됐는데, 재무 API 는 20~38개 계정을 정상으로 준다.
         #   이름난 비상장사 13곳을 재보니 7곳이 이 갈래로 되살아난다.
         #   → 물어야 할 것은 「감사보고서가 있나」가 아니라
@@ -1981,6 +2068,10 @@ class RealPipeline:
             financial_payload=financials,
         )
         current_fiscal_year = _current_fiscal_year(fin_years, filing)
+        # 재사용 판정에 쓸 «지금 요청의 릴리스 모드». 두 재사용 겹(아래
+        # coordination과 옛 1층 캐시)이 같은 값을 봐야 한 겹만 막히는 일이
+        # 없다(C6).
+        requested_release_mode = _requested_release_mode(generation_mode)
         # 불변 content+PDF 캐시는 옛 layer1보다 먼저 본다. 새 계약의 hit이면
         # 최초 원본 ID를 그대로 운반하고, miss면 같은 열쇠로 owner lease를
         # 먼저 얻는다. 옛 layer1에는 생성 당시 배포·모델·설정 신원이 없으므로
@@ -1991,12 +2082,32 @@ class RealPipeline:
             engine,
             build_identity,
             generation_mode,
+            release_mode=requested_release_mode,
         )
         reused_generation = generation_coordination.coordinate(
             corp_id=corp_code,
             cache_namespace=generation_namespace,
             preflight_identity_digest=source_identity.cache_digest,
         )
+        reused_release_mode = str(
+            getattr(getattr(reused_generation, "report", None), "release_mode", "")
+            or ""
+        )
+        if reused_generation is not None and not (
+            cache_store.reusable_for_requested_release_mode(
+                reused_release_mode, requested_release_mode
+            )
+        ):
+            # ★ 여기까지 오면 안 된다 (C6). 조정자는 요청 모드와 다른 저장본을
+            #   히트로 돌려주지 않고 미적중으로 닫아 owner 선정으로 내려간다
+            #   (`web/generation_singleflight.py`의 coordinate). 그런데도 여기
+            #   걸렸다면 조정자와 이 판정이 갈라진 것이다.
+            # ★ 값만 버리면 안 된다 — 조정자는 이미 「캐시 재사용」 상태로
+            #   굳었고, 그 상태에서는 유료 단계를 열 수 없어 요청이 뒤늦게
+            #   통째로 실패한다. 조용히 버리는 대신 닫고 끝낸다.
+            raise generation_coordination.GenerationCoordinationError(
+                "재사용 보고서가 이번 요청의 공개 기준으로 만들어지지 않았습니다"
+            )
         if reused_generation is not None:
             reused_report = reused_generation.report
             if not isinstance(reused_report, Report):
@@ -2081,6 +2192,7 @@ class RealPipeline:
                     current_fiscal_year=current_fiscal_year,
                     source_identity_digest=source_identity.cache_digest,
                     build_identity=build_identity,
+                    release_mode=requested_release_mode,
                 )
                 if generation_mode is engine_mode.EngineMode.V2
                 else _company_cache_lookup(
@@ -2112,6 +2224,13 @@ class RealPipeline:
                     "품질 관측이 없는 엄격 v2 cache는 다시 생성합니다"
                 )
                 cached = None
+            elif not cache_store.reusable_for_requested_release_mode(
+                str(cached.release_mode or ""), requested_release_mode
+            ):
+                logger.warning(
+                    "FULL 요청에는 FULL로 만든 저장본만 재사용합니다 — 새로 만듭니다"
+                )
+                cached = None
         if cached is not None:
             metrics = cached.generation_metrics
             tell("output")   # 6~10을 통째로 건너뛴다
@@ -2124,7 +2243,7 @@ class RealPipeline:
                 ),
                 # 수집 현황은 «그때 실제로 모은 것»을 그대로 보여준다.
                 sources=list(cached.sources),
-                # 정본 00_공통/2_규칙/04_할당량.md — 캐시 반환은 0 차감·무제한.
+                # 캐시 반환은 0 차감·무제한.
                 charged=False,
                 corp_type=cached.corp_type or judgment.corp_type,
                 fragments_collected=(
@@ -2139,7 +2258,7 @@ class RealPipeline:
                 cost_krw=_request_spent_krw(engine),
                 model=model,
                 # 화면 배지와 대시보드 ⑤가 이 값을 읽는다. 안 실으면 캐시가
-                # 돌아도 「재사용 0건」으로 보인다 (P-63과 같은 사고).
+                # 돌아도 「재사용 0건」으로 보인다 — 화면이 옛말을 하는 사고다.
                 cache_hit=CACHE_HIT_LAYER1,
                 dart_receipt_numbers=source_identity.dart_receipt_numbers,
                 financial_payload_digest=source_identity.financial_payload_digest,
@@ -2156,6 +2275,9 @@ class RealPipeline:
         frags, revenue_tables, filing_text = _collect(
             engine, client, profile, user_input, counter, steps,
             financials=financials, fin_years=fin_years, filing=filing,
+            # typed 공식 근거 수집은 v2·FULL·kill switch가 «전부» 켜졌을 때만
+            # 돈다. 판정은 `_typed_dart_collection_enabled`가 한다.
+            generation_mode=generation_mode, corp_code=corp_code,
         )
         sources = _sources_from(steps)
 
@@ -2797,7 +2919,7 @@ class RealPipeline:
         # ── 13 출력 ──────────────────────────────────────
         tell("output")
 
-        # ── 14 저장 — 1층 캐시 (정본 §3 저장 구간) ────────
+        # ── 14 저장 — 1층 캐시 (저장 구간) ────────
         # 회사분석 전용 버전 키로 저장해 옛 직무·공고 보고서와 섞이지 않는다.
         # ★ 우리 쪽 수집 실패(⚠️)가 낀 결과는 «저장하지 않는다» —
         #   그날만 죽은 소스 때문에 그 회사가 「자료 없는 회사」로 굳는다.
@@ -3051,7 +3173,7 @@ def _current_fiscal_year(
       그 회사들은 「사업연도를 모름」이 되어 **캐시가 영영 적중하지 않는다.**
     ★ 왜 «더 최신»인가 — 한쪽이 옛 연도에 멈춰 있어도(실측: 재무 API가
       2023에 멈춘 회사) 다른 쪽이 새 자료를 알아채면 캐시가 만료된다.
-      「작년 보고서가 계속 나가는」 구멍(정본 §2)을 막는 쪽으로 기운다.
+      「작년 보고서가 계속 나가는」 구멍(신선도 규칙)을 막는 쪽으로 기운다.
     ★ `dt.date.today().year - 1`로 **추측하지 않는다.** 사업보고서는 결산 뒤
       몇 달 지나야 올라오므로 1~3월에는 작년 자료가 없는 것이 정상이다.
       추측하면 그 기간 내내 오판해 캐시가 통째로 무효가 된다.
@@ -3112,6 +3234,7 @@ def _v2_cache_lookup(
     current_fiscal_year: Optional[int],
     source_identity_digest: str,
     build_identity: Any,
+    release_mode: Optional[ReleaseMode] = None,
 ) -> Optional[Report]:
     """엔진 v2 보고서 캐시를 조회한다 (지금 코드 지문이 같을 때만)."""
     if not corp_id:
@@ -3124,6 +3247,7 @@ def _v2_cache_lookup(
                 corp_id=corp_id,
                 build_identity=build_identity,
                 source_identity_digest=source_identity_digest,
+                release_mode=release_mode,
                 current_fiscal_year=current_fiscal_year,
             )
     except Exception:  # noqa: BLE001 — 캐시 실패가 조사를 막으면 안 된다
@@ -3152,6 +3276,7 @@ def _v2_cache_save(
     fiscal_year: Optional[int],
     source_identity_digest: str,
     build_identity: Any,
+    release_mode: Optional[ReleaseMode] = None,
 ) -> None:
     """v2 보고서를 «그 코드 지문»과 함께 저장한다.
 
@@ -3167,6 +3292,7 @@ def _v2_cache_save(
                 report=report,
                 build_identity=build_identity,
                 source_identity_digest=source_identity_digest,
+                release_mode=release_mode,
                 fiscal_year=fiscal_year,
             )
     except Exception:  # noqa: BLE001 — 저장 실패가 사용자를 막으면 안 된다
@@ -3244,6 +3370,14 @@ def _v2_ask_via_provider(
                     error, provider_budget.RequestCallLimitReached
                 ),
             ) from error
+        except generation_coordination.GenerationCoordinationError as error:
+            # 초대 링크 중단·lease 상실·대기 취소·유료 단계 예약 실패는 «이
+            # 요청 전역» 중단이다. 여기서 감싸지 않으면 composer의 문장 단위
+            # 삼킴이 이를 「이 장을 못 썼다」로 바꿔, 조사는 남은 장과 확인 단계를
+            # 돌고 사유가 「품질 미달」로 뒤바뀐다(실측 결함).
+            # 호출 «횟수» 상한이 아니라 요청 자체를 더 진행할 수 없는 상태이므로
+            # 선택적 단계를 건너뛰고 이어가지 않는다.
+            raise AskFatalError(error, call_limit=False) from error
         blocks = getattr(response, "content", None) or []
         return "".join(str(getattr(block, "text", "") or "") for block in blocks)
 
@@ -3303,6 +3437,7 @@ def _full_section_evidence_packets(
         if not text:
             continue
         source_url = str(raw.get("출처") or "").strip()
+        fragment_rcept_no = str(raw.get("문서ID") or "").strip()
         if text.startswith(DART_FINANCIAL_API_PREFIX):
             identity = document_identity_from_parts(
                 document_id=DART_FINANCIAL_API_DOCUMENT_ID,
@@ -3311,6 +3446,17 @@ def _full_section_evidence_packets(
             )
         elif source_url:
             identity = document_identity_from_parts(url=source_url)
+        elif _RCEPT_NO_RE.fullmatch(fragment_rcept_no):
+            # 조각이 «자기 공시»의 접수번호를 실었으면 그 문서로 묶는다(P1-A).
+            # 최신 공시 1건의 문서ID를 빌려 주면 다른 공시에서 온 조각이
+            # 엉뚱한 문서를 근거로 가리킨다. 접수번호 모양(14자리)일 때만
+            # 쓴다 — IR PDF의 sha256 문서ID·재무 API 문서ID는 이 자리에서
+            # 예전과 똑같이 동작해야 한다.
+            identity = document_identity_from_parts(
+                document_id=fragment_rcept_no,
+                host=DART_DOCUMENT_HOST,
+                url=DART_DOCUMENT_URL_TEMPLATE.format(document_id=fragment_rcept_no),
+            )
         elif filing_meta is not None and getattr(filing_meta, "document_id", ""):
             document_id = str(filing_meta.document_id)
             identity = document_identity_from_parts(
@@ -3499,7 +3645,13 @@ def _run_v2_composer(
             composition_tables=composition_tables_from_raw(revenue_tables),
             release_mode=release_mode,
             section_evidence_packets=section_evidence_packets,
-            company_id=(corp_id if release_mode is ReleaseMode.FULL else ""),
+            # 회사 신원은 릴리스 정책과 무관한 사실이다 — 이미 확인한 고유번호를
+            # 모드 때문에 버리지 않는다. 이 값이 비면 초대 링크에
+            # 보고서를 다시 묶을 때 회사 일치 검증이 이름 비교만 남아, 이름이
+            # 같고 고유번호가 다른 회사의 보고서가 그대로 묶인다
+            # (`web/routers/admin.py`의 `_link_company_id`가 묶인 보고서에서
+            # 이 값을 읽는다). corp_id를 확인하지 못했으면 예전처럼 빈 값이다.
+            company_id=corp_id,
             build_identity_sha256=build_identity_sha256,
         )
         if release_mode is not ReleaseMode.SHADOW:
@@ -3621,6 +3773,8 @@ def _run_v2_composer(
             fiscal_year=current_fiscal_year,
             source_identity_digest=source_identity_digest,
             build_identity=build_identity,
+            # 조회와 «같은 열쇠»로 저장해야 다음 조사에서 적중한다(C6).
+            release_mode=release_mode,
         )
     elif not cache_eligible:
         logger.info(
@@ -3662,7 +3816,7 @@ def _write_prose(
     steps: list[dict[str, Any]],
     model: str,
 ) -> tuple[list[ReportSection], set[str]]:
-    """11 작성 — 근거를 «하나의 글»로 잇는다 (P-110). AI 2회.
+    """11 작성 — 근거를 «하나의 글»로 잇는다. AI 2회.
 
     Args:
         engine: 1판 엔진 (`_ask`를 빌려 쓴다).
@@ -3723,7 +3877,7 @@ def _write_prose(
         steps.append({"step": writer.WRITE_STEP, "오류": f"{type(exc).__name__}: {str(exc)[:80]}"})
         return sections, set()
 
-    # ★ 검증 뒤에도 문장별 근거를 버리지 않는다(P-118). 문자열 하나로 합치면
+    # ★ 검증 뒤에도 문장별 근거를 버리지 않는다. 문자열 하나로 합치면
     #   내부 sid와 실제 출처의 연결이 끊겨 화면에서 근거 번호를 못 붙인다.
     prose_lines_by_cell = {}
     for cell, sentences in passed.items():
@@ -3761,7 +3915,7 @@ def _collect_news(
     profile: dict[str, Any],
     steps: list[dict[str, Any]],
 ) -> list[dict[str, str]]:
-    """6 수집 — 뉴스. **AI가 번호를 고르고 프로그램이 원문을 복사한다** (P-108).
+    """6 수집 — 뉴스. **AI가 번호를 고르고 프로그램이 원문을 복사한다**.
 
     Args:
         engine: 1판 엔진 (`search_news`·`_ask`를 빌려 쓴다).
@@ -3872,13 +4026,13 @@ def _homepage_url_same_host_only(raw: str) -> str:
     ★ 이름에 「수집기」가 없는 이유 — 조각 수집만 잠그면 소용이 없다. 화면(후보 목록·
       회사 확인 카드)도 같은 `workable_url()`을 부르므로, 한쪽만 잠그면 **사용자가
       보는 화면에 남의 회사 주소가 인쇄된 채로** 회사를 고르게 된다
-      (적대 검수 2026-08-25에 실제로 발견됐다). 네 곳이 이 하나를 공유한다.
+      (적대 검수에서 실제로 발견됐다). 네 곳이 이 하나를 공유한다.
 
     `workable_url()`은 실제로 열어 보고 «열리는 주소»를 준다. 자체서명 인증서
     때문에 https가 통째로 죽은 회사((주)진영 실측)에서 조각이 0개가 되는 것을
     막아 준다. 그런데 **리다이렉트를 따라가므로 다른 회사 host가 올 수 있다.**
 
-    ★ 실측(2026-08-25, 대기업 표본에서 3건) —
+    ★ 실측(대기업 표본에서 3건) —
         www.hyundai.co.kr → https://www.hyundaimotorgroup.com/ko/main/mainRecommend
         www.hyosung.co.kr → https://www.hyosung.com/kr/index
         www.hanjin.co.kr  → https://www.hanjin.com:443/kor/Main.do
@@ -3909,7 +4063,7 @@ def _homepage_url_same_host_only(raw: str) -> str:
     # 화면에서 이미 부른 주소면 «보통은» 재접속하지 않는다.
     # ⚠️ 「안 한다」가 아니라 「보통은 안 한다」다 — ①캐시가 256곳을 넘기면 밀려나고
     #   ②확인 화면을 거치지 않고 바로 본조사가 도는 경로가 있는지는 확정하지 못했다
-    #   (검수 2026-08-25). 빗나가도 접속 1회가 더 늘 뿐 안전성 문제는 아니다.
+    #   (검수). 빗나가도 접속 1회가 더 늘 뿐 안전성 문제는 아니다.
     candidate = homepage_link.workable_url(raw)
     if not candidate or _homepage_compare_host(candidate) != raw_host:
         return raw
@@ -3941,6 +4095,267 @@ def _homepage_url_for_display(raw: str) -> str:
     return homepage_link.browser_url(_homepage_url_same_host_only(raw))
 
 
+#: typed 수집기의 장(section_id) → v1 수집 조각 «종류».
+#: ★ 값은 v1이 이미 쓰는 종류만 골랐다. 새 이름을 만들면
+#:   `_full_section_evidence_packets`의 장 배정 표에도, composer 어휘에도
+#:   걸리지 않아 조각이 조용히 사라진다(작가가 못 본다).
+_TYPED_DART_SECTION_FRAGMENT_KIND: Final[dict[str, str]] = {
+    "identity": "사업내용",
+    "business_model": "사업내용",
+    "portfolio": "사업내용",
+    "past_changes": "MD&A",
+    "current_challenges": "MD&A",
+    "future_strategy": "신규사업전망",
+    "operations_partners": "사업내용",
+    "culture": "사업내용",
+    "competitive_position": "사업내용",
+}
+
+#: DART 접수번호(rcept_no)의 모양 — 14자리 숫자.
+#: typed 수집기의 문서ID는 `f"{source_kind}:{rcept_no}"`라 뒷부분만 접수번호다.
+_RCEPT_NO_RE: Final[re.Pattern[str]] = re.compile(r"\d{14}")
+
+#: typed 공식 근거 수집 결과를 남기는 단계 이름.
+#: ★ `_sources_from`이 읽는 이름들과 겹치지 않게 새로 만든다 — 겹치면 화면의
+#:   소스별 현황이 typed 결과로 덮인다.
+TYPED_DART_COLLECT_STEP: Final[str] = "6_수집_typed공시"
+
+
+def _typed_dart_collection_enabled(
+    generation_mode: Optional[engine_mode.EngineMode],
+) -> bool:
+    """typed 공식 근거 수집을 이번 요청에서 돌릴 것인가.
+
+    ★ 검사 «순서»가 계약이다.
+      1) v1이면 첫 줄에서 나간다 — v1 경로는 release mode도
+         `TYPED_DART_COLLECTOR`도 **읽지 않는다**(읽지 않으면 스위치가 동결도
+         되지 않아 「안 봤다」를 시험이 기계적으로 확인할 수 있다).
+      2) FULL이 아니면 나간다 — SHADOW·ENFORCE는 사용자 결과가 불변이어야
+         한다. release mode가 없거나 모르는 값이면 «FULL로 치지 않는다»;
+         그 계약 위반은 v2 composer가 GATE_STOPPED로 다룬다.
+      3) 그다음에야 kill switch를 본다.
+    """
+
+    if generation_mode is not engine_mode.EngineMode.V2:
+        return False
+    raw_release_mode = os.environ.get(REPORT_RELEASE_MODE_ENV_NAME)
+    if not raw_release_mode:
+        return False
+    try:
+        release_mode = parse_release_mode(raw_release_mode)
+    except ValueError:
+        return False
+    if release_mode is not ReleaseMode.FULL:
+        return False
+    return typed_collector_switch.typed_dart_collector_enabled()
+
+
+def _typed_dart_collector_modules() -> tuple[Any, Any, Any]:
+    """엔진 패키지의 typed 수집기 module 셋을 불러온다.
+
+    typed 수집기는 app이 아니라 ``analysis_engine/src`` 아래에 산다. `_engine()`이
+    이미 하는 것과 같은 방식으로 검색 경로를 얹되, **실제로 그 트리에서 온
+    module인지 파일 경로로 확인한다** — app의 `features` 패키지가 이름을 가리면
+    조용히 다른 코드를 부르는 대신 소리 나게 실패해야 한다(부르는 쪽이 강등으로
+    흡수한다).
+    """
+
+    engine_src = (paths.PROJECT_ROOT / "analysis_engine" / "src").resolve()
+    if str(engine_src) not in sys.path:
+        sys.path.insert(0, str(engine_src))
+    modules = tuple(
+        importlib.import_module(f"features.evidence_collection.{name}")
+        for name in ("collect", "dart_fetcher", "serialize")
+    )
+    for module in modules:
+        module_path = Path(getattr(module, "__file__", "") or "").resolve()
+        if engine_src not in module_path.parents:
+            raise ImportError(
+                "typed 수집기가 엔진 트리 밖에서 잡혔습니다: "
+                f"{module.__name__} -> {module_path}"
+            )
+    return modules
+
+
+def _typed_dart_harvest_mapping(
+    engine: Any,
+    counter: Any,
+    corp_code: str,
+    *,
+    collected_at: str,
+) -> dict[str, Any]:
+    """typed 공식 근거 수집을 실행하고 계약 Mapping으로 돌려준다.
+
+    DART 조회는 이 요청의 1판 엔진 함수(`get_json`·`download_document`)를 그대로
+    쓴다 — 별도 HTTP 경로를 새로 열지 않아 일일 한도·사용량 계수가 한 곳에 모인다.
+    """
+
+    collect_module, fetcher_module, serialize_module = _typed_dart_collector_modules()
+    fetcher = fetcher_module.DartRuntimeFetcher(
+        document_cache_dir=Path(str(engine.RAW_DIR)),
+        counter=counter,
+        get_json_fn=engine.get_json,
+        download_document_fn=engine.download_document,
+    )
+    harvest = collect_module.collect_dart_evidence(
+        fetcher, corp_code, now=collected_at
+    )
+    return serialize_module.harvest_to_mapping(harvest)
+
+
+def _collect_typed_dart(
+    engine: Any,
+    counter: Any,
+    corp_code: str,
+    frags: dict[int, dict[str, str]],
+    steps: list[dict[str, Any]],
+    *,
+    collected_at: str,
+) -> dict[int, dict[str, str]]:
+    """typed 공식 근거를 모아 v1 조각 묶음에 더한다. 실패는 강등으로 흡수한다.
+
+    ★ 예외 경계는 공식 IR 호출부(아래 `collect_official_ir_fragments` 감싸기)를
+      그대로 복사했다 — 미검증(LIVE_COLLECTION_UNVERIFIED) 수집기의 결함이
+      보고서를 강등 없이 `Outcome.FAILED`로 떨어뜨리면 안 되기 때문이다.
+      «자료 없음»이 아니라 «오류»로 적어 화면에서 둘이 섞이지 않게 한다.
+
+    ⚠️ 알려진 절충 — DART 일일 한도(`DartLimitReached`)도 여기서 흡수된다.
+      legacy `_collect`가 공시 원문 다운로드 실패를 이미 같은 방식으로 강등하고
+      있어(같은 함수 위쪽 `except (RuntimeError, OSError)`) 계약을 맞춘 것이다.
+      이 지점 뒤로 새 DART 호출은 없다.
+    """
+
+    try:
+        mapping = _typed_dart_harvest_mapping(
+            engine, counter, corp_code, collected_at=collected_at
+        )
+        merged, added = _merge_typed_dart_fragments(frags, mapping)
+    except Exception as exc:  # noqa: BLE001 - 수집기 결함도 자료 부재로 오인하지 않는다
+        steps.append(
+            {
+                "step": TYPED_DART_COLLECT_STEP,
+                "오류": f"{type(exc).__name__}: {str(exc)[:120]}",
+            }
+        )
+        return frags
+    steps.append(
+        {
+            "step": TYPED_DART_COLLECT_STEP,
+            "조각수": added,
+            "문서수": len(mapping.get("documents") or []),
+            "조회기록": len(mapping.get("attempts") or []),
+        }
+    )
+    return merged
+
+
+def _normalized_fragment_text_key(text: str) -> str:
+    """조각 원문의 중복 판정 열쇠 — 공백·개행을 정규화한 뒤 SHA-256.
+
+    ★ 왜 `(원문, 문서ID)`가 아닌가 (P1-A) — v1 공시 조각(`make_fragments`)에는
+      `문서ID` 키 «자체»가 없다. 그 조합을 열쇠로 쓰면 legacy 쪽이 항상
+      `(원문, "")`이 되어 어떤 typed 문서ID와도 일치하지 못하고, **같은 공시
+      문단이 두 번 실린다.** 원문만으로 판정하면 그 구멍이 닫힌다.
+    """
+
+    return hashlib.sha256(" ".join(text.split()).encode("utf-8")).hexdigest()
+
+
+def _typed_dart_document_index(
+    mapping: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """typed 수집 Mapping의 문서 목록을 document_id로 찾을 수 있게 만든다."""
+
+    documents = mapping.get("documents")
+    if not isinstance(documents, list):
+        return {}
+    return {
+        str(document.get("document_id") or ""): document
+        for document in documents
+        if isinstance(document, dict)
+    }
+
+
+def _typed_dart_legacy_fragments(mapping: dict[str, Any]) -> list[dict[str, str]]:
+    """typed 수집 Mapping → v1 수집 조각 모양(`{"종류","원문",…}`) 목록.
+
+    ★ 문서 신원을 못 만드는 조각은 «버린다». 접수번호를 확인하지 못한 채
+      넣으면 `_full_section_evidence_packets`가 최신 공시 1건의 문서ID를
+      빌려 주어, 다른 공시에서 온 조각이 엉뚱한 문서를 근거로 가리킨다.
+    """
+
+    fragments = mapping.get("fragments")
+    if not isinstance(fragments, list):
+        return []
+    documents = _typed_dart_document_index(mapping)
+    made: list[dict[str, str]] = []
+    for raw in fragments:
+        if not isinstance(raw, dict):
+            continue
+        text = str(raw.get("text") or "").strip()
+        kind = _TYPED_DART_SECTION_FRAGMENT_KIND.get(
+            str(raw.get("section_id") or "")
+        )
+        if not text or not kind:
+            continue
+        document_id = str(raw.get("document_id") or "")
+        rcept_no = document_id.rpartition(":")[2]
+        if not _RCEPT_NO_RE.fullmatch(rcept_no):
+            logger.warning(
+                "typed 공시 조각의 접수번호를 확인할 수 없어 버립니다: %s",
+                document_id[:64],
+            )
+            continue
+        document = documents.get(document_id, {})
+        published_on = str(document.get("published_on") or "")
+        made.append(
+            {
+                "종류": kind,
+                "원문": text,
+                "문서ID": rcept_no,
+                "문서명": str(document.get("title") or ""),
+                "원문위치": str(raw.get("location") or ""),
+                "문서일": (
+                    f"{published_on[:4]}-{published_on[4:6]}-{published_on[6:8]}"
+                    if re.fullmatch(r"\d{8}", published_on)
+                    else ""
+                ),
+            }
+        )
+    return made
+
+
+def _merge_typed_dart_fragments(
+    frags: dict[int, dict[str, str]],
+    mapping: dict[str, Any],
+) -> tuple[dict[int, dict[str, str]], int]:
+    """typed 공시 조각을 v1 조각 묶음 «뒤에» 더한다. 기존 번호는 안 건드린다.
+
+    Args:
+        frags: v1 수집이 만든 조각 묶음. 번호는 작가가 인용하는 주소라
+            덮어쓰지 않는다.
+        mapping: `serialize.harvest_to_mapping()` 산출.
+
+    Returns:
+        합친 조각 묶음과 실제로 더한 개수.
+    """
+
+    seen = {
+        _normalized_fragment_text_key(str(fragment.get("원문") or ""))
+        for fragment in frags.values()
+    }
+    merged = dict(frags)
+    added = 0
+    for fragment in _typed_dart_legacy_fragments(mapping):
+        key = _normalized_fragment_text_key(fragment["원문"])
+        if key in seen:
+            continue
+        seen.add(key)
+        merged[max(merged, default=0) + 1] = fragment
+        added += 1
+    return merged, added
+
+
 def _collect(
     engine: Any,
     client: Any,
@@ -3952,6 +4367,8 @@ def _collect(
     financials: Optional[dict[str, Any]],
     fin_years: list[int],
     filing: Optional[dict[str, Any]],
+    generation_mode: Optional[engine_mode.EngineMode] = None,
+    corp_code: str = "",
 ) -> tuple[dict[int, dict[str, str]], list[dict], str]:
     """6 수집 — 공시 원문 + 재무 API + 홈페이지를 조각으로 만든다. AI 0회.
 
@@ -3960,7 +4377,13 @@ def _collect(
             보려고 `run()`이 «이미» 불렀다. 두 번 부르면 DART 일일 한도만 깎는다.
         fin_years: 그때 실제로 자료가 있던 사업연도 목록 (단계 기록용).
         filing: 최신 공시 1건(보고서 이름·접수번호). 이것도 `run()`이 이미 받았다.
-            **출처 목록을 만들 때 쓴다** (P-24). 공시를 못 찾았으면 None.
+            **출처 목록을 만들 때 쓴다**. 공시를 못 찾았으면 None.
+        generation_mode: 이 요청이 운반한 엔진 모드. typed 공식 근거 수집을
+            켤지 정하는 데만 쓴다. 기본값(None)이면 v1과 똑같이 동작한다 —
+            기존 호출자·시험은 한 줄도 달라지지 않는다.
+        corp_code: 사용자가 확정한 8자리 DART 법인코드(`card.ref`). typed 수집은
+            회사별이라 이 값이 없으면 시작하지 않는다. `profile`에서 다시 읽지
+            않는다 — 회사 식별자는 한 곳에서만 온다.
 
     Returns:
         조각 목록, 구조화 표, 실제로 내려받은 자사 공식 원문. 마지막 값은
@@ -3978,7 +4401,7 @@ def _collect(
     frags = engine.make_fragments(filing_text, financials)
     # ★ 1판은 절 표제의 «첫 출현»만 본다. 그런데 사업보고서 첫 장이 «목차»라,
     #   「사업의 내용」의 첫 출현이 목차 줄이고 거기서 1,200자를 뜨면 통째로 목차가 된다.
-    #   실측 — 하이브 조각 9개 중 3개가 목차였고, 그래서 1·3·4번 칸이 비었다 (P-99).
+    #   실측 — 하이브 조각 9개 중 3개가 목차였고, 그래서 1·3·4번 칸이 비었다.
     #   1판은 안 고치고, 나온 조각 중 목차인 것만 «다음 출현»으로 다시 뜬다.
     # ⚠️ `getattr`로 받는다 — 1판이 이름을 바꾸거나 시험용 가짜 엔진을 끼울 때
     #   여기서 터지면 **조사 전체가 멈춘다.** 못 받으면 «고치지 않고» 넘어갈 뿐이다.
@@ -3991,8 +4414,8 @@ def _collect(
     if repaired:
         steps.append({"step": "6_수집_목차보정", "고친조각": repaired})
 
-    # ★ 1판이 «안 뜨는» 절을 더 모은다 (P-105) — 신규사업 전망·시장 특성·소송.
-    #   사용자 지적(「그냥 DART 뜯어온 거라 이럴 거면 DART를 직접 보지」)의 핵심 원인이
+    # ★ 1판이 «안 뜨는» 절을 더 모은다 — 신규사업 전망·시장 특성·소송.
+    #   결과가 전자공시 원문을 그대로 옮긴 것처럼 보이던 핵심 원인이
     #   **정작 필요한 절을 안 뜨던 것**이었다. 1판은 0줄 고치지 않고 «더할» 뿐이다.
     frags, added = filing_extra.add_to(
         frags, filing_text, getattr(engine, "FRAG_CHARS", filing_extra.DEFAULT_FRAG_CHARS)
@@ -4006,6 +4429,19 @@ def _collect(
     if relationship_added:
         steps.append(
             {"step": "6_수집_파트너관계", "더한조각": relationship_added}
+        )
+
+    # ── typed 공식 근거 수집 (FULL + kill switch 둘 다 켜졌을 때만) ──
+    # ★ 아래 한 줄이 kill switch다. 꺼져 있거나 v1·비FULL이면 여기서 그대로
+    #   빠져나가고, 이 함수의 나머지 legacy 경로는 바이트 하나 달라지지 않는다.
+    if _typed_dart_collection_enabled(generation_mode) and corp_code.strip():
+        frags = _collect_typed_dart(
+            engine,
+            counter,
+            corp_code.strip(),
+            frags,
+            steps,
+            collected_at=today_kst().isoformat(),
         )
 
     # 홈페이지를 붙이기 전 개수다. 출처 현황에서 이 값을 쓰지 않으면
@@ -4024,109 +4460,110 @@ def _collect(
         }
     )
 
-    # 회사 홈페이지 — 2번(뭘 잘하나)이 만성적으로 비는 원인이었다 (문제로그 P-35 · D14-7).
+    # 회사 홈페이지 — 2번(뭘 잘하나)이 만성적으로 비는 원인이었다.
     # ★ 실패를 「없음」과 반드시 구분한다. 섞으면 「이 회사는 자료가 없다」로 잘못 읽힌다.
-    homepage = collect_homepage_fragments(
-        _homepage_url_same_host_only(profile.get("hm_url", "")),
-        allow_dart_www_alias=True,
-    )
-    if homepage.state == "ok":
-        for frag in homepage.fragments:
-            # 최종 URL 검증 표식·문서 위치 등 수집기가 만든 provenance 메타데이터를
-            # 버리지 않는다. build_citations가 닫힌 Source 필드만 골라 쓴다.
-            frags[max(frags, default=0) + 1] = dict(frag)
-        steps.append(
-            {
-                "step": "6_수집_홈페이지",
-                "조각수": len(homepage.fragments),
-                "후보범위완전": homepage.candidate_scope_complete,
-            }
-        )
-    elif homepage.state == "failed":
-        steps.append(
-            {
-                "step": "6_수집_홈페이지",
-                "오류": homepage.detail,
-                "후보범위완전": False,
-            }
-        )
-    else:
-        steps.append(
-            {
-                "step": "6_수집_홈페이지",
-                "없음": homepage.detail,
-                "후보범위완전": homepage.candidate_scope_complete,
-            }
-        )
-
-    # DART 기업개황의 홈페이지와 정확히 같은 HTTPS host 안에서만 공식 IR
-    # PDF를 찾는다. PDF 파싱은 별도 프로세스·바이트/페이지/글자 상한 안에서
-    # 수행하며, 실패·상한 잘림은 "경쟁사 언급 없음"과 분리한다.
-    company_aliases = tuple(
-        dict.fromkeys(
-            value
-            for value in (
-                str(profile.get("corp_name_eng") or "").strip(),
-                str(profile.get("corp_eng_name") or "").strip(),
-                str(profile.get("stock_name") or "").strip(),
-            )
-            if value
-        )
-    )
-    try:
-        official_ir = collect_official_ir_fragments(
-            str(profile.get("hm_url") or ""),
-            company_name=str(profile.get("corp_name") or "").strip(),
-            company_aliases=company_aliases,
+    with collection_cache_scope():
+        homepage = collect_homepage_fragments(
+            _homepage_url_same_host_only(profile.get("hm_url", "")),
             allow_dart_www_alias=True,
         )
-    except Exception as exc:  # noqa: BLE001 - 수집기 결함도 자료 부재로 오인하지 않는다
-        steps.append(
-            {
-                "step": "6_수집_공식IR",
-                "오류": f"{type(exc).__name__}: {str(exc)[:120]}",
-                "후보범위완전": False,
-            }
-        )
-    else:
-        ir_scope_complete = bool(
-            getattr(official_ir, "candidate_scope_complete", False)
-        )
-        if official_ir.state == "ok":
-            for fragment in official_ir.fragments:
-                frags[max(frags, default=0) + 1] = dict(fragment)
+        if homepage.state == "ok":
+            for frag in homepage.fragments:
+                # 최종 URL 검증 표식·문서 위치 등 수집기가 만든 provenance 메타데이터를
+                # 버리지 않는다. build_citations가 닫힌 Source 필드만 골라 쓴다.
+                frags[max(frags, default=0) + 1] = dict(frag)
             steps.append(
                 {
-                    "step": "6_수집_공식IR",
-                    "조각수": len(official_ir.fragments),
-                    "문서시도": official_ir.attempted_documents,
-                    "PDF바이트": official_ir.downloaded_pdf_bytes,
-                    "상세": official_ir.detail,
-                    "후보범위완전": ir_scope_complete,
+                    "step": "6_수집_홈페이지",
+                    "조각수": len(homepage.fragments),
+                    "후보범위완전": homepage.candidate_scope_complete,
                 }
             )
-        elif official_ir.state == "failed":
+        elif homepage.state == "failed":
             steps.append(
                 {
-                    "step": "6_수집_공식IR",
-                    "오류": official_ir.detail,
-                    "문서시도": official_ir.attempted_documents,
-                    "PDF바이트": official_ir.downloaded_pdf_bytes,
+                    "step": "6_수집_홈페이지",
+                    "오류": homepage.detail,
                     "후보범위완전": False,
                 }
             )
         else:
             steps.append(
                 {
-                    "step": "6_수집_공식IR",
-                    "없음": official_ir.detail,
-                    "문서시도": official_ir.attempted_documents,
-                    "PDF바이트": official_ir.downloaded_pdf_bytes,
-                    "후보범위완전": ir_scope_complete,
+                    "step": "6_수집_홈페이지",
+                    "없음": homepage.detail,
+                    "후보범위완전": homepage.candidate_scope_complete,
                 }
             )
 
-    # ★ 매출 구성 비중 표 (P-112) — 사용자가 리포트 11건에서 고른 항목 ①.
+        # DART 기업개황의 홈페이지와 정확히 같은 HTTPS host 안에서만 공식 IR
+        # PDF를 찾는다. PDF 파싱은 별도 프로세스·바이트/페이지/글자 상한 안에서
+        # 수행하며, 실패·상한 잘림은 "경쟁사 언급 없음"과 분리한다.
+        company_aliases = tuple(
+            dict.fromkeys(
+                value
+                for value in (
+                    str(profile.get("corp_name_eng") or "").strip(),
+                    str(profile.get("corp_eng_name") or "").strip(),
+                    str(profile.get("stock_name") or "").strip(),
+                )
+                if value
+            )
+        )
+        try:
+            official_ir = collect_official_ir_fragments(
+                str(profile.get("hm_url") or ""),
+                company_name=str(profile.get("corp_name") or "").strip(),
+                company_aliases=company_aliases,
+                allow_dart_www_alias=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - 수집기 결함도 자료 부재로 오인하지 않는다
+            steps.append(
+                {
+                    "step": "6_수집_공식IR",
+                    "오류": f"{type(exc).__name__}: {str(exc)[:120]}",
+                    "후보범위완전": False,
+                }
+            )
+        else:
+            ir_scope_complete = bool(
+                getattr(official_ir, "candidate_scope_complete", False)
+            )
+            if official_ir.state == "ok":
+                for fragment in official_ir.fragments:
+                    frags[max(frags, default=0) + 1] = dict(fragment)
+                steps.append(
+                    {
+                        "step": "6_수집_공식IR",
+                        "조각수": len(official_ir.fragments),
+                        "문서시도": official_ir.attempted_documents,
+                        "PDF바이트": official_ir.downloaded_pdf_bytes,
+                        "상세": official_ir.detail,
+                        "후보범위완전": ir_scope_complete,
+                    }
+                )
+            elif official_ir.state == "failed":
+                steps.append(
+                    {
+                        "step": "6_수집_공식IR",
+                        "오류": official_ir.detail,
+                        "문서시도": official_ir.attempted_documents,
+                        "PDF바이트": official_ir.downloaded_pdf_bytes,
+                        "후보범위완전": False,
+                    }
+                )
+            else:
+                steps.append(
+                    {
+                        "step": "6_수집_공식IR",
+                        "없음": official_ir.detail,
+                        "문서시도": official_ir.attempted_documents,
+                        "PDF바이트": official_ir.downloaded_pdf_bytes,
+                        "후보범위완전": ir_scope_complete,
+                    }
+                )
+
+    # ★ 매출 구성 비중 표 — 사용자가 리포트 11건에서 고른 항목 ①.
     #   **11건이 «전부» 실은 유일한 만장일치 항목**이다.
     #   ⚠️ 지어낼 자리가 없다 — 공시가 비중을 이미 계산해 놓았고 우리는 베낄 뿐이다.
     revenue_cite = _first_fragment_cite(frags, kind="매출수주") or REVENUE_CITE
@@ -4149,7 +4586,7 @@ def _collect(
 def _region_matches(typed: str, address: str) -> bool:
     """입력 지역이 주소와 같은 곳인가.
 
-    「강원 강릉시」와 「강원도 강릉시 …」는 같은 곳이다 (문제로그 P-26).
+    「강원 강릉시」와 「강원도 강릉시 …」는 같은 곳이다.
     데모와 같은 규칙이라 그쪽 함수를 그대로 쓴다 — 두 벌로 나뉘면 반드시 어긋난다.
     """
     from src.features.pipeline.demo import _region_matches as shared  # noqa: PLC0415

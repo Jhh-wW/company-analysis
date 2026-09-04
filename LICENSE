@@ -1,0 +1,17 @@
+Copyright (c) 2026 Jhh-wW. All rights reserved.
+
+이 저장소는 포트폴리오 열람을 위해 공개되었습니다.
+소스 코드와 문서를 보는 것은 자유이지만, 복제·수정·재배포·상업적 이용은
+저작권자의 사전 허락 없이 할 수 없습니다.
+
+This repository is published for portfolio viewing only.
+You may read the source code and documents, but copying, modifying,
+redistributing, or using them commercially requires prior written
+permission from the copyright holder.
+
+번들 글꼴(Prata·Freesentation)은 SIL Open Font License 1.1을 따르며, 사본은
+app/src/web/static/fonts/OFL.txt와 app/src/features/export_pdf/fonts/OFL.txt에
+있습니다.
+The bundled fonts (Prata, Freesentation) are licensed under the SIL Open
+Font License 1.1; copies are at app/src/web/static/fonts/OFL.txt and
+app/src/features/export_pdf/fonts/OFL.txt.

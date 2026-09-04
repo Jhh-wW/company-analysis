@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import replace
 import io
 import re
 from typing import Any
@@ -18,6 +19,7 @@ from src.features.export_notion.logic import build_blocks
 from src.features.export_pdf.logic import build_pdf
 from src.features.pipeline.canonical_demo import build_demo_report
 from src.features.report_standard.section_content import (
+    masthead_lines,
     section_content_blocks,
     summary_topic,
 )
@@ -153,3 +155,28 @@ def test_요약_출처검증_9장_복수출처가_세_채널에_함께_남는다
         expected_caption = _compact(f"{block.title} [2] [6]")
         assert expected_caption in _compact(outputs["PDF"])
         assert expected_caption in _compact(outputs["Notion"])
+
+
+def test_마스트헤드_문자열은_웹_PDF_Notion이_같다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """표지 다음 첫 본문 페이지 마스트헤드 두 줄이 세 채널에서 같은 문자열이다.
+
+    ``as_of_date``를 ``generated_at``과 다른 날로 벌려 둔다. 마스트헤드
+    둘째 줄은 표지 메타(``_cover_metadata``)의 「내용 생성」과 같은
+    ``generated_at`` 필드를 읽어야 하는데, 두 필드가 우연히 같은 값이면
+    잘못된 필드를 읽는 회귀가 생겨도 이 시험이 못 잡는다.
+    """
+    report = replace(
+        build_demo_report(),
+        generated_at="2026-08-19",
+        as_of_date="2026-08-20",
+    )
+    company_line, meta_line = masthead_lines(report)
+    assert "2026-08-20" not in meta_line  # 잘못된 필드를 읽지 않는지 자기 점검
+
+    _web_document, _notion_blocks, outputs = _channel_outputs(report, monkeypatch)
+    for medium, output in outputs.items():
+        compact_output = _compact(output)
+        assert _compact(meta_line) in compact_output, f"{medium}에 마스트헤드 메타줄 누락"
+        assert _compact(company_line) in compact_output, f"{medium}에 회사명 누락"

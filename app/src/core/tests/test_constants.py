@@ -7,7 +7,7 @@ from src.core import constants as C
 
 def test_비용과판정_안전상수가_승인된값이다():
     assert C.MAX_RETRY_INPUT == 3
-    # ★ 2026-08-29 — 숫자를 박지 않는다. «왜 그 숫자인지»를 지킨다.
+    # ★ 숫자를 박지 않는다. «왜 그 숫자인지»를 지킨다.
     #   상한은 시간 규약이 정하는 천장을 넘을 수 없다(generation_singleflight.py:64).
     #   그리고 v2 가 한 보고서를 끝내는 데 필요한 최소 횟수보다 커야 한다.
     from src.features.budget.constants import PAID_PHASE_LEASE_SEC
@@ -22,7 +22,7 @@ def test_비용과판정_안전상수가_승인된값이다():
     # v2 최소 필요 횟수: 9개 장 + 문장검증 + 도식 + 요약작성 + 요약검증 + 회사식별
     V2_최소_필요 = 9 + 1 + 1 + 1 + 1 + 1
     assert C.MAX_AI_CALLS_PER_REQUEST >= V2_최소_필요, (
-        "★ 실측(2026-08-29): 15 로는 요약 직전에 상한을 넘겨 보고서가 통째로 실패했다"
+        "★ 실측: 15 로는 요약 직전에 상한을 넘겨 보고서가 통째로 실패했다"
     )
     assert C.MIN_FILLED_CELLS == 4
     assert C.VOTE_ROUNDS == 2
@@ -59,6 +59,17 @@ def test_진행_단계는_회사분석_흐름_7단계다():
     keys = [key for key, _ in C.PROGRESS_STEPS]
     assert len(set(keys)) == len(keys), "단계 키가 겹칩니다"
     assert "posting" not in keys
+
+
+def test_진행_단계_이름은_모으는_자료를_사실대로_말한다():
+    """뉴스 검색은 설계 단계에서 뺐다 — 단계 이름이 하지 않는 일을 말하면 안 된다."""
+    labels = [label for _key, label in C.PROGRESS_STEPS]
+
+    for label in labels:
+        for removed in C.REMOVED_PROGRESS_COPY_MARKERS:
+            assert removed not in label, f"단계 이름 「{label}」에 「{removed}」가 남아 있습니다"
+
+    assert dict(C.PROGRESS_STEPS)["collect"] == "공시·공식 자료 모으는 중"
 
 
 def test_모든_세는_칸에_이름이_있다():

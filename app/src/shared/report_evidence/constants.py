@@ -8,6 +8,26 @@ from typing import Final
 
 EVIDENCE_CONTRACT_VERSION: Final[str] = "report-evidence-v1"
 
+# 여러 feature와 실서비스 adapter가 함께 쓰는 문서 source_kind 정본. 홈페이지
+# feature가 만든 값을 pipeline이 문자열 복사로 추측하지 않게 shared에 둔다.
+SOURCE_KIND_OFFICIAL_WEB_PAGE: Final[str] = "official_web_page"
+SOURCE_KIND_OFFICIAL_RECRUIT_PAGE: Final[str] = "official_recruit_page"
+OFFICIAL_WEB_SOURCE_KINDS: Final[frozenset[str]] = frozenset(
+    {SOURCE_KIND_OFFICIAL_WEB_PAGE, SOURCE_KIND_OFFICIAL_RECRUIT_PAGE}
+)
+
+# 「그 출처 전체를 아예 확인할 수 없었다」는 site-probe 게이트 시도의
+# source_kind 정본(P1-B). robots.txt 차단은 그 호스트의 모든 후보 페이지
+# 조회를 원천 차단하는 유일한 지점 — 개별 후보 페이지 하나가 404거나
+# IR PDF가 없는 것과는 질이 다른 실패다. build_section_bundle이 requirement
+# («이 경로가 유일한 확인 길인가»)와 outcome-kind(«막힌 것인가, 없는
+# 것인가»)를 분리할 때, 「막힘」쪽 신호를 이 목록으로 좁혀서 본다 — 그러지
+# 않으면 흔한 개별 후보 페이지 실패(정상적으로도 자주 있는 일)까지
+# 매 슬롯을 UNKNOWN으로 끌어내려 「IR 1건 실패가 9장을 다 죽이던 P0」가
+# 되살아난다.
+SOURCE_KIND_ROBOTS_TXT: Final[str] = "robots_txt"
+SITE_PROBE_GATE_SOURCE_KINDS: Final[frozenset[str]] = frozenset({SOURCE_KIND_ROBOTS_TXT})
+
 
 class CollectionState(str, Enum):
     """외부 자료 한 경로를 확인한 결과."""

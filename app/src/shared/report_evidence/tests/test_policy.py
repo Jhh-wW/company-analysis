@@ -20,7 +20,7 @@ def test_근거정책은_아홉장을_정확히_한번씩_다룬다() -> None:
 
 
 @pytest.mark.parametrize("section_id", REQUIRED_EVIDENCE_SECTION_IDS)
-def test_수집칸과_codex주입칸은_겹치지_않고_전체필수칸을_정확히_나눈다(
+def test_수집칸과_주입칸은_겹치지_않고_전체필수칸을_정확히_나눈다(
     section_id: str,
 ) -> None:
     required = required_slots_for(section_id)

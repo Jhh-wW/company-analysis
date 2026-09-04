@@ -67,8 +67,8 @@ REQUIRED_EVIDENCE_SLOTS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
     ),
 }
 
-# 이 칸은 Claude 수집기가 임의 산문으로 채우지 않는다. Codex의 기존 3개년
-# 실적·동일조건 비교기가 검증된 FactRecord ID를 정확한 칸에 주입한다.
+# 이 칸은 근거 수집기가 임의 산문으로 채우지 않는다. 3개년 실적·동일조건
+# 비교를 맡은 구조화 검증기가 검증된 FactRecord ID를 정확한 칸에 주입한다.
 INJECTED_EVIDENCE_SLOTS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
     "past_changes": ("past_changes:historical_performance",),
     "competitive_position": (
@@ -92,7 +92,7 @@ def required_slots_for(section_id: str) -> tuple[str, ...]:
 
 
 def injected_slots_for(section_id: str) -> tuple[str, ...]:
-    """Codex 구조화 검증기가 채워야 할 칸."""
+    """구조화 검증기가 주입해 채워야 할 칸."""
 
     required = required_slots_for(section_id)
     injected = INJECTED_EVIDENCE_SLOTS_BY_SECTION.get(section_id, ())

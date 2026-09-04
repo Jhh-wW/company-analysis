@@ -1,4 +1,4 @@
-"""P-125·P-126 — 첫 유료 호출 전 차단과 단계 비용·재시작 복원을 묶어 본다.
+"""첫 유료 호출 전 차단과 단계 비용·재시작 복원을 묶어 본다.
 
 실제 AI는 한 번도 부르지 않는다. 회사 식별·OCR·본조사 모두 비용 숫자를 돌려주는
 가짜를 쓰며, 되돌리면 각 spy 호출 수나 총액이 바로 달라지게 한다.
@@ -26,7 +26,6 @@ from src.core import clock
 from src.features.budget import logic as budget_logic
 from src.features.budget import spend_store
 from src.features.budget.constants import (
-    MAX_CONCURRENT_PER_LINK,
     MAX_CONCURRENT_RUNS,
     PAID_PHASE_PROVIDER_BUDGET_KRW,
     SPEND_PHASE_IDENTIFY,
@@ -108,6 +107,13 @@ class FakePaidPipeline:
             cost_krw=self.pipeline_cost,
             model="pipeline-model",
         )
+
+
+#: ★ «같은 링크에 유료 단계가 여러 개 동시에 떠 있는» 상황을 재현하는 수.
+#:   링크 동시 실행 상한(1)과 «일부러 분리한 리터럴»이다. 상한을 그대로
+#:   쓰면 상한이 내려갈 때 이 시험들이 1스레드가 되어 경쟁 자체가 사라지고,
+#:   «정상 진행을 장애로 오인하지 않는다»는 불변식이 무방비가 된다.
+_동시_유료단계 = 3
 
 
 class BlockingLookupPipeline(FakePaidPipeline):
@@ -326,8 +332,14 @@ def test_같은_로그인계정의_두번째_식별은_provider전에_기다린�
     assert paid_runtime._RUNNING_BY_BUCKET == {}
 
 
-def test_같은_초대링크는_세명까지_식별하고_네번째는_기다린다(monkeypatch):
-    target = MAX_CONCURRENT_PER_LINK
+def test_같은_초대링크는_한_명만_식별하고_두번째는_기다린다(monkeypatch):
+    """★ 링크 동시 실행 3→1 — 기대값을 이전했다.
+
+    이전 이름: `test_같은_초대링크는_세명까지_식별하고_네번째는_기다린다`.
+    슬롯 상한과 같은 값이라도 «리터럴 1»로 적는다 — 생산 상수를 그대로
+    끌어다 쓰면 상한이 조용히 바뀌어도 시험이 통과하는 순환 검증이 된다.
+    """
+    target = 1
     pipeline = BlockingLookupPipeline(target=target)
     monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
     monkeypatch.setattr(request_helpers, "RATE_MAX_RUNS", 100)
@@ -340,9 +352,9 @@ def test_같은_초대링크는_세명까지_식별하고_네번째는_기다린
             futures = [pool.submit(_confirm, client) for client in clients[:target]]
             assert pipeline.all_entered.wait(timeout=10)
 
-            fourth = _confirm(clients[-1])
-            assert fourth.status_code == 429
-            assert "진행 중" in fourth.text
+            다음사람 = _confirm(clients[-1])
+            assert 다음사람.status_code == 429
+            assert "진행 중" in 다음사람.text
             assert pipeline.lookup_calls == target
 
             pipeline.release.set()
@@ -559,55 +571,55 @@ def test_레거시_이미지의_OCR_provider는_호출하지_않는다(monkeypat
 
     monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
     monkeypatch.setattr(job_runtime, "default_extract", timeout)
-    client = TestClient(main.app)
-    _발급(client)
-    token, ref = _확인값(_confirm(client).text)
+    with TestClient(main.app) as client:
+        _발급(client)
+        token, ref = _확인값(_confirm(client).text)
 
-    response = client.post(
-        "/run",
-        data=_run_form(token, ref),
-        files={"posting_images": ("posting.png", _VALID_PNG)},
-        follow_redirects=False,
-    )
+        response = client.post(
+            "/run",
+            data=_run_form(token, ref),
+            files={"posting_images": ("posting.png", _VALID_PNG)},
+            follow_redirects=False,
+        )
 
-    _기다린다(client, response)
+        _기다린다(client, response)
 
-    assert response.status_code == 303
-    assert paid_runtime._RUNNING == 0
-    assert pipeline.run_calls == 1
-    assert calls == 0
-    with storage_db.connect() as conn:
-        unresolved = spend_store.load_unresolved_day(conn, clock.today_kst())
-    assert spend_store.bucket_id(_LINK_A) not in unresolved
+        assert response.status_code == 303
+        assert paid_runtime._RUNNING == 0
+        assert pipeline.run_calls == 1
+        assert calls == 0
+        with storage_db.connect() as conn:
+            unresolved = spend_store.load_unresolved_day(conn, clock.today_kst())
+        assert spend_store.bucket_id(_LINK_A) not in unresolved
 
 
 def test_레거시_이미지의_OCR_계약은_회사분석_실행에_관여하지_않는다(monkeypatch):
     pipeline = FakePaidPipeline()
     monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
     monkeypatch.setattr(job_runtime, "default_extract", lambda _images: None)
-    client = TestClient(main.app, raise_server_exceptions=False)
-    _발급(client)
-    token, ref = _확인값(_confirm(client).text)
+    with TestClient(main.app, raise_server_exceptions=False) as client:
+        _발급(client)
+        token, ref = _확인값(_confirm(client).text)
 
-    response = client.post(
-        "/run",
-        data=_run_form(token, ref),
-        files={"posting_images": ("posting.png", _VALID_PNG)},
-        follow_redirects=False,
-    )
+        response = client.post(
+            "/run",
+            data=_run_form(token, ref),
+            files={"posting_images": ("posting.png", _VALID_PNG)},
+            follow_redirects=False,
+        )
 
-    _기다린다(client, response)
+        _기다린다(client, response)
 
-    assert response.status_code == 303
-    assert pipeline.run_calls == 1
-    assert paid_runtime._RUNNING == 0
-    assert paid_runtime._ACTIVE_PAID_PHASES == set()
-    assert (clock.today_kst().isoformat(), spend_store.bucket_id(_LINK_A)) not in (
-        paid_runtime._UNRESOLVED_BUCKETS
-    )
-    with storage_db.connect() as conn:
-        rows = spend_store.list_inflight_day(conn, clock.today_kst())
-    assert [(row.phase, row.bucket_id) for row in rows] == []
+        assert response.status_code == 303
+        assert pipeline.run_calls == 1
+        assert paid_runtime._RUNNING == 0
+        assert paid_runtime._ACTIVE_PAID_PHASES == set()
+        assert (clock.today_kst().isoformat(), spend_store.bucket_id(_LINK_A)) not in (
+            paid_runtime._UNRESOLVED_BUCKETS
+        )
+        with storage_db.connect() as conn:
+            rows = spend_store.list_inflight_day(conn, clock.today_kst())
+        assert [(row.phase, row.bucket_id) for row in rows] == []
 
 
 def test_본조사_provider예외는_알려진비용과_미확정표식을_함께_남긴다(monkeypatch):
@@ -625,23 +637,23 @@ def test_본조사_provider예외는_알려진비용과_미확정표식을_함�
 
     pipeline = UncertainPipeline()
     monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
-    client = TestClient(main.app)
-    _발급(client)
-    token, ref = _확인값(_confirm(client).text)
+    with TestClient(main.app) as client:
+        _발급(client)
+        token, ref = _확인값(_confirm(client).text)
 
-    job_id = _기다린다(
-        client,
-        client.post("/run", data=_run_form(token, ref), follow_redirects=False),
-    )
+        job_id = _기다린다(
+            client,
+            client.post("/run", data=_run_form(token, ref), follow_redirects=False),
+        )
 
-    assert job_runtime._JOBS[job_id].result.outcome is Outcome.FAILED
-    assert job_runtime._JOBS[job_id].result.cost_krw == 40.0
-    assert _confirm(client).status_code == 429
-    with storage_db.connect() as conn:
-        snapshot = spend_store.load_day(conn, clock.today_kst())
-        unresolved = spend_store.load_unresolved_day(conn, clock.today_kst())
-    assert snapshot.by_run[job_id] == 40.0
-    assert spend_store.bucket_id(_LINK_A) in unresolved
+        assert job_runtime._JOBS[job_id].result.outcome is Outcome.FAILED
+        assert job_runtime._JOBS[job_id].result.cost_krw == 40.0
+        assert _confirm(client).status_code == 429
+        with storage_db.connect() as conn:
+            snapshot = spend_store.load_day(conn, clock.today_kst())
+            unresolved = spend_store.load_unresolved_day(conn, clock.today_kst())
+        assert snapshot.by_run[job_id] == 40.0
+        assert spend_store.bucket_id(_LINK_A) in unresolved
 
 
 def test_비용원장_쓰기실패뒤에는_다음_AI호출을_닫는다(monkeypatch):
@@ -803,6 +815,9 @@ def test_식별_API예외는_알려진비용을_남기고_현재통장만_즉시
 
 
 def test_같은링크의_정상진행_세건은_장애표식으로_오인하지_않는다():
+    """★ 건수는 `_동시_유료단계`(리터럴 3) — 링크 동시 실행 상한(1)과
+    분리한다. 이 시험이 지키는 것은 자리 수가 아니라 «여러 inflight가 남아도
+    이 프로세스가 정상 실행 중이면 통장을 닫지 않는다»는 판정이다."""
     tickets = [
         paid_runtime._begin_paid_phase(
             run_id=f"healthy-{index}",
@@ -810,10 +825,10 @@ def test_같은링크의_정상진행_세건은_장애표식으로_오인하지_
             share_key=_LINK_A,
             cap_krw=PER_LINK_DAILY_BUDGET_KRW,
         )
-        for index in range(MAX_CONCURRENT_PER_LINK)
+        for index in range(_동시_유료단계)
     ]
     assert all(tickets)
-    assert len(paid_runtime._ACTIVE_PAID_PHASES) == MAX_CONCURRENT_PER_LINK
+    assert len(paid_runtime._ACTIVE_PAID_PHASES) == _동시_유료단계
     assert paid_runtime._UNRESOLVED_BUCKETS == set()
 
     first, *rest = tickets
@@ -823,7 +838,7 @@ def test_같은링크의_정상진행_세건은_장애표식으로_오인하지_
     # DB에는 두 inflight가 남아도 둘 다 이 프로세스가 정상 실행 중이므로
     # 재시작·API 예외와 같은 «결과 모름»으로 통장을 닫으면 안 된다.
     assert paid_runtime._UNRESOLVED_BUCKETS == set()
-    assert len(paid_runtime._ACTIVE_PAID_PHASES) == MAX_CONCURRENT_PER_LINK - 1
+    assert len(paid_runtime._ACTIVE_PAID_PHASES) == _동시_유료단계 - 1
 
     for ticket in rest:
         assert ticket is not None
@@ -833,6 +848,8 @@ def test_같은링크의_정상진행_세건은_장애표식으로_오인하지_
 
 
 def test_같은링크_세건을_다른스레드에서_함께마감해도_거짓미확정이_생기지않는다():
+    """★ 스레드 수는 `_동시_유료단계`(리터럴 3) — 링크 동시 실행 상한(1)을
+    쓰면 Barrier(1)이 되어 «동시 마감 경쟁»이 통째로 사라진다."""
     tickets = [
         paid_runtime._begin_paid_phase(
             run_id=f"concurrent-settle-{index}",
@@ -840,16 +857,16 @@ def test_같은링크_세건을_다른스레드에서_함께마감해도_거짓�
             share_key=_LINK_A,
             cap_krw=PER_LINK_DAILY_BUDGET_KRW,
         )
-        for index in range(MAX_CONCURRENT_PER_LINK)
+        for index in range(_동시_유료단계)
     ]
     assert all(tickets)
-    barrier = threading.Barrier(MAX_CONCURRENT_PER_LINK)
+    barrier = threading.Barrier(_동시_유료단계)
 
     def settle(ticket):
         barrier.wait(timeout=10)
         paid_runtime._settle_paid_phase(ticket, amount_krw=10.0, billing_uncertain=False)
 
-    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_PER_LINK) as pool:
+    with ThreadPoolExecutor(max_workers=_동시_유료단계) as pool:
         futures = [pool.submit(settle, ticket) for ticket in tickets]
         for future in futures:
             future.result(timeout=10)

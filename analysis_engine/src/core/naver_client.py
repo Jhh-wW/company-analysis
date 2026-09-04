@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """NAVER API HUB 뉴스 검색 클라이언트 — 키는 환경변수로만, 값은 로그·출력 금지.
 
-정본: https://api.ncloud-docs.com/docs/naver-api-hub-search-news (2026-08-15 확인)
+정본: https://api.ncloud-docs.com/docs/naver-api-hub-search-news
   GET https://naverapihub.apigw.ntruss.com/search/v1/news
   헤더 X-NCP-APIGW-API-KEY-ID / X-NCP-APIGW-API-KEY (구 오픈API에서 이사 — 헤더 이름이 다르다)
 무료 한도가 문서에 없어 로컬 계수기로 일 호출 수를 세고 보수 상한을 둔다 (429 = 한도 초과).

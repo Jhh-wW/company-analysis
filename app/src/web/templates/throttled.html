@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}잠시 후 다시 · 기업분석{% endblock %}
 
-{# 조사를 «시작하기 전에» 막았을 때 보여주는 화면 (문제로그 P-92).
+{# 조사를 «시작하기 전에» 막았을 때 보여주는 화면.
 
    ★ 여기서 지켜야 할 것 두 가지:
      ① **고장이 아니라는 것을 분명히** 한다. 「오류」처럼 보이면 사용자는
@@ -12,40 +12,66 @@
      그걸 피해 가는 방법을 알려주는 셈이 된다. #}
 
 {% block content %}
-{# ★ 2026-08-28 — 같은 말을 «세 번» 하고 있었다.
+{# ★ 같은 말을 «세 번» 하고 있었다.
      「관리자가 확인해야 다시 열립니다」가 두 번, 「저장된 보고서는 보실 수
      있습니다」도 두 번. 게다가 제목이 「잠시 기다려 주세요」인데 본문은
      «기다려도 안 풀린다»고 말했다.
-   → 왜 막혔는지 «한 줄»만 남기고 나머지를 지운다. #}
+   → 왜 막혔는지 «한 줄»만 남기고 나머지를 지운다.
+
+   ★ 제목·그림 글자·설명은 이 틀이 정하지 않고 **막은 쪽이 갈래에 맞게 넘겨준다**
+     (`request_helpers._throttle_screen`). 여기서 다시 갈래를 따지면 같은 판단이
+     두 곳에 생기고, 한쪽만 고쳐졌을 때 화면이 사실과 다른 말을 한다. #}
+{# ★ 제목이 본문 첫 문장을 그대로 앞세우는 갈래가 있다(누적 한도 소진). 넘어온 대로
+     그리면 손님은 같은 문장을 위아래로 두 번 읽고, 두 번째 줄에야 나오는 「그래도
+     볼 수 있는 것」을 놓친다.
+   → 제목으로 이미 말한 문장은 본문에서 뺀다. «갈래»를 따지지 않고 글자가 겹칠
+     때만 떼므로, 막는 쪽이 문구를 바꿔도 이 틀은 그대로 맞는다. #}
+{% set 제목 = throttle_title|default('잠시 기다려 주세요', true) %}
+{% set 본문 = throttle_message|default('', true) %}
+{% if 제목 and 본문.startswith(제목) %}{% set 본문 = 본문[제목|length:].lstrip('. ') %}{% endif %}
 <div class="card">
-  {% if throttle_is_fault %}
-  <div class="stopped-icon">⛔</div>
-  <h1>새 조사가 멈췄습니다</h1>
-  {% else %}
-  <div class="stopped-icon">⏳</div>
-  <h1>잠시 기다려 주세요</h1>
-  {% endif %}
+  <div class="stopped-icon" aria-hidden="true">{{ throttle_icon|default('⏳', true) }}</div>
+  <h1>{{ 제목 }}</h1>
 
   {# 왜 막혔는지 — 이 한 줄이 전부다. 여기서 되풀이하지 마라. #}
-  <p class="lede">{{ throttle_message }}</p>
+  {% if 본문 %}<p class="lede">{{ 본문 }}</p>{% endif %}
 
   {% if throttle_is_fault %}
     {% if support_reference %}
     <p class="muted" style="margin-top:12px">문의 번호 <code>{{ support_reference }}</code></p>
     {% endif %}
   {% else %}
+  {# 「고장이 아니다」는 막은 이유가 무엇이든 참이다 — 오류로 보이면 손님은 이 도구를
+     못 쓰는 물건으로 판단하고 떠난다.
+     ★ 뒤에 붙는 하루 상한 설명은 «하루 상한에 걸렸을 때만» 사실이다. 자리가 없어
+       밀렸거나 한도를 통째로 다 썼거나 초대가 없어 막힌 손님에게 말하면 틀린
+       이유를 알려주는 셈이 된다. #}
   <p class="muted" style="margin-top:14px">
     <strong>고장이 아닙니다.</strong>
+    {%- if throttle_explains_daily_cap %}
     이 도구는 조사할 때마다 실제 비용이 들어서,
     하루에 돌릴 수 있는 양을 미리 정해 두었습니다.
+    {%- endif %}
   </p>
   {% endif %}
 
+  {# 기다려도 안 열리는 갈래에는 «사람에게 닿는 길»을 준다. 없으면 막다른 길이다. #}
+  {% if throttle_contact_note %}
+  <p class="muted" style="margin-top:14px">{{ throttle_contact_note }}</p>
+  {% endif %}
+
   <div class="btn-row" style="margin-top:18px">
+    {# 이 손님의 초대 링크에 묶인 회사 보고서는 저장본이라 막힌 뒤에도 그대로
+       열린다. 열 수 있을 때만 첫 번째 길로 준다. #}
+    {% if throttle_bound_report_url %}
+    <a class="btn" href="{{ throttle_bound_report_url }}" style="line-height:1.6">{{ throttle_bound_report_label }}</a>
+    <a class="btn ghost" href="/" style="line-height:1.6">다른 회사 둘러보기</a>
+    {% else %}
     <a class="btn" href="/" style="line-height:1.6">다른 회사 둘러보기</a>
+    {% endif %}
   </div>
 
-  {# ★ 2026-08-28 실측 — 앞 판은 「첫 화면의 회사 버튼을 눌러보세요」라고 했는데
+  {# ★ 실측 — 앞 판은 「첫 화면의 회사 버튼을 눌러보세요」라고 했는데
      **그 버튼이 없다.** 실운영 모드에서는 첫 화면에 저장된 보고서로 가는 UI 가
      아예 안 그려진다(`input.html` 의 샘플 칩은 데모 모드 전용).
      회사명으로 찾아가는 공개 경로도 저장소 전체에 없다.

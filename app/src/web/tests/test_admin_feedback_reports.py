@@ -105,6 +105,7 @@ def test_list_renders_zero_inclusive_counts_rows_and_nav_entry(client: TestClien
     _login(client)
 
     response = client.get("/admin/feedback-reports")
+    today = client.get("/admin")
 
     assert response.status_code == 200
     assert "no-store" in response.headers["cache-control"]
@@ -115,9 +116,18 @@ def test_list_renders_zero_inclusive_counts_rows_and_nav_entry(client: TestClien
     assert open_id in response.text and reviewing_id in response.text
     assert "상세 보기" in response.text
     assert f'href="/admin/feedback-reports/{open_id}"' in response.text
-    # 관리자 메뉴에 신고 관리 진입점이 있다.
+    # 관리자에게 신고 관리 진입점이 있다.
+    # ★ 기대값 이전 — 여섯 묶음 정보 구조에서 신고 관리는
+    #   「보고서」 묶음에 든다. 그래서 메뉴에는 자기 이름이 아니라
+    #   「보고서」가 현재 위치로 표시되고, 진입점은 오늘 화면의 바로가기에 있다.
+    #   「들어갈 길이 있다」는 보장 자체는 그대로 지킨다.
     menu = response.text.split('<nav class="frame-menu"', 1)[1].split("</nav>", 1)[0]
-    assert ">신고 관리</a>" in menu
+    assert ">보고서</a>" in menu
+    assert menu.count('aria-current="page"') == 1
+    assert 'href="/admin/issues" aria-current="page"' in menu
+    assert today.status_code == 200
+    assert 'href="/admin/feedback-reports"' in today.text
+    assert "신고 관리" in today.text
 
 
 def test_list_filters_narrow_rows_and_bad_filter_shows_message(client: TestClient):

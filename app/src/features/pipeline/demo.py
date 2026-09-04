@@ -70,7 +70,7 @@ from src.features.pipeline.canonical_demo import (
 _DEMO_STEP_DELAY_SEC = 0.45
 
 #: 데모의 「회사 홈페이지」 수집 현황에 적는 사유.
-#: ★ 「아직 연결되지 않음」이라고 쓰면 안 된다 — 기능은 이미 붙어 있고(P-35),
+#: ★ 「아직 연결되지 않음」이라고 쓰면 안 된다 — 기능은 이미 붙어 있고,
 #:   없는 것은 «이 저장 기록»이다. 둘을 섞으면 사용자가 도구의 한계를 오해한다.
 DEMO_HOMEPAGE_DETAIL = "이 데모 기록을 만들 때는 안 읽었습니다 — 진짜 조사에서는 읽습니다"
 
@@ -96,7 +96,7 @@ _OUTCOME_MAP: dict[str, Outcome] = {
     "생성실패": Outcome.FAILED,
 }
 
-# 실패했을 때 사용자에게 보여줄 말 (뜻은 기획서, 문장은 여기)
+# 실패했을 때 사용자에게 보여줄 말 (뜻은 정본 기준, 문장은 여기)
 _OUTCOME_MESSAGE: dict[Outcome, str] = {
     Outcome.NOT_FOUND: (
         "입력하신 이름으로 회사를 찾지 못했습니다. "
@@ -106,7 +106,7 @@ _OUTCOME_MESSAGE: dict[Outcome, str] = {
         "공공기관·공기업은 채용 방식과 공개되는 자료의 성격이 달라 "
         "지금은 다루지 않고 있습니다."
     ),
-    # ★ 2026-08-27 정정 — 예전 문구는 「감사보고서를 낸 기록이 없습니다」였다.
+    # ★ 정정 — 예전 문구는 「감사보고서를 낸 기록이 없습니다」였다.
     #   그건 우리가 «찾은 방법»이지 사용자가 알아야 할 사실이 아니었고,
     #   더구나 틀렸다 — 사업보고서에 첨부해 내는 회사는 별도 감사보고서가 없다.
     #   지금은 감사보고서와 재무제표를 «둘 다» 확인하므로 결과만 말한다.
@@ -177,7 +177,7 @@ def _region_matches(typed: str, address: str) -> bool:
 
 
 def _in_report_order(sections: list[ReportSection]) -> list[ReportSection]:
-    """항목을 기획서의 정본 순서로 맞춘다.
+    """항목을 정본 순서로 맞춘다.
 
     기록 파일에 5번이 뒤에 붙어 있는 등 순서가 흐트러진 경우가 있어 화면에서 바로잡는다.
     정본에 없는 번호는 뒤에 원래 순서대로 붙인다 (버리지 않는다).
@@ -193,7 +193,7 @@ def _in_report_order(sections: list[ReportSection]) -> list[ReportSection]:
 def _outcome_of(raw: str) -> Outcome:
     """기존 조사 기록의 종료 문자열을 종료 종류로 옮긴다.
 
-    ★ 옮기는 «규칙»은 `port.outcome_for` 한 곳에 있다 (2026-08-27).
+    ★ 옮기는 «규칙»은 `port.outcome_for` 한 곳에 있다.
       예전에는 이 4줄을 진짜 파이프라인이 «다른 방법»으로 따로 갖고 있었고,
       그 차이가 운영 결함이 됐다. 표(`_OUTCOME_MAP`)는 데모 것이 따로 맞다.
     """
@@ -224,8 +224,6 @@ def _load_runs() -> tuple[dict, ...]:
 
 def _normalize(name: str) -> str:
     """이름 대조용으로 다듬는다. 법인격 표기와 공백을 지운다.
-
-    정본: 확정/01_식별/2_규칙/01_이름대조.md §층 1
     """
     cleaned = name.strip()
     for token in _LEGAL_ENTITY_TOKENS:
@@ -329,11 +327,11 @@ def _sources_of(record: dict) -> list[SourceStatus]:
         sources.append(SourceStatus("뉴스", "none", "여기까지 오지 못함"))
 
     # ★ 「아직 연결되지 않음」이라고 말하면 안 된다 — 홈페이지 수집은 **이미 붙어 있다**
-    #   (P-35 해소, `features/homepage/`). 없는 것은 «기능»이 아니라 이 저장 기록이다.
+    #   (해소, `features/homepage/`). 없는 것은 «기능»이 아니라 이 저장 기록이다.
     #   초기 조사 엔진이 이 기록을 만들 때는 홈페이지 수집이 없었을 뿐이다.
     #   기능이 붙었는데 화면이 옛말을 하면 사용자가 「이 도구는 홈페이지를 못 본다」고
-    #   잘못 안다 (P-49·P-63과 같은 사고).
-    # ★ ❌(없음)로 적지 않는 이유 — 회사에 홈페이지가 없다는 뜻이 되어 버린다 (P-45).
+    #   잘못 안다 — 기능은 붙었는데 화면이 옛말을 하는 사고다.
+    # ★ ❌(없음)로 적지 않는 이유 — 회사에 홈페이지가 없다는 뜻이 되어 버린다.
     sources.append(SourceStatus("회사 홈페이지", "failed", DEMO_HOMEPAGE_DETAIL))
     return sources
 
@@ -410,7 +408,7 @@ def _parse_report(text: str) -> tuple[list[ReportSection], list[str], str]:
         else:
             sentence, cite = body, ""
 
-        # ★ 재무·회계 수치는 «표 그대로» 낸다 (결정기록 D13). 버리지 않는다.
+        # ★ 재무·회계 수치는 «표 그대로» 낸다. 버리지 않는다.
         # 저장 MD의 `조각 N·종류`를 표로 바꾸면서 버리지 않는다. 화면·DOCX의
         # 표 캡션에는 내부 종류명이 아니라 아래 출처표를 가리키는 번호만 보인다.
         public_cite = citation_number(cite)
@@ -421,13 +419,13 @@ def _parse_report(text: str) -> tuple[list[ReportSection], list[str], str]:
             cur_tables.append(table)
             continue
 
-        # 그 밖의 표가 통째로 들어온 줄은 채우지 않는다 (문제로그 P-29).
+        # 그 밖의 표가 통째로 들어온 줄은 채우지 않는다.
         # 버린 사실을 사유로 남긴다 — 조용히 사라지면 왜 비었는지 알 수 없다.
         if is_table_dump(sentence):
             cur_reason = cur_reason or TABLE_DUMP_REASON
             continue
 
-        # 회계기준 설명 문구는 회사 이름을 바꿔도 말이 된다 (문제로그 P-40).
+        # 회계기준 설명 문구는 회사 이름을 바꿔도 말이 된다.
         # 자소서에 한 글자도 못 쓰므로 화면에 내보내기 직전에 버린다.
         if is_accounting_policy(sentence):
             cur_reason = cur_reason or ACCOUNTING_POLICY_REASON
@@ -474,7 +472,7 @@ def _news_citations(record: dict) -> dict[int, Source]:
 def _demo_citations(record: dict, sections: list[ReportSection]) -> list[Source]:
     """저장된 보고서에서 출처 목록을 «있는 것만» 만든다.
 
-    ★ 기존 조사 기록에는 **공시일이 없다** (문제로그 P-24·P-44).
+    ★ 기존 조사 기록에는 **공시일이 없다**.
       날짜를 지어내지 않는다 — 「어느 보고서 어느 절에서 왔나」만 정직하게 적는다.
       진짜 조사에서는 날짜까지 채워진다.
     ★ 뉴스는 예외다 — 보도일·언론사가 조각 원문에 남아 있어 그대로 옮긴다.
@@ -523,17 +521,15 @@ def _demo_citations(record: dict, sections: list[ReportSection]) -> list[Source]
 # ══════════════════════════════════════════════════════════
 # 4번(회사 상황) 재도출 — 저장된 뉴스 조각에서 «코드 규칙만으로» 고른다
 # ══════════════════════════════════════════════════════════
-# ★ 왜 필요한가 (문제로그 P-43)
+# ★ 왜 필요한가
 #   데모 15곳 중 13곳에서 4-1·4-2·4-3이 통째로 비었다. 그 탓에 8번 교차표가
 #   14곳에서 안 나온다. 자료가 없어서가 아니다 — 1판 프롬프트가 4축에 대해
 #   「회사가 직접 말한 문장만」이라고 지시해 **뉴스 후보 106문장을 한 번도
-#   안 골랐다.** 정본은 4-1을 「회사가 밝혔거나 **언론이 지적한** 과제」로 정했다
-#   (확정/05_생성/2_규칙/01_출력틀.md:20).
+#   안 골랐다.** 정본은 4-1을 「회사가 밝혔거나 **언론이 지적한** 과제」로 정했다.
 #
 # ★ 진짜 파이프라인은 이미 고쳤다(`spanselect/`가 지시문을 바꿨다). 그런데 데모는
 #   저장된 `.md`를 «재생»하므로 화면에서 아무것도 안 바뀐다. 그래서 6·7·8번을
-#   저장 기록에서 재도출하던 것과 **같은 자리·같은 방식**으로 4번도 재도출한다
-#   (결정 D14-3).
+#   저장 기록에서 재도출하던 것과 **같은 자리·같은 방식**으로 4번도 재도출한다.
 #
 # ★ AI를 부르지 않는다 (0원). 저장된 조각을 낱말 규칙으로만 배치한다.
 #   그래서 «진짜 AI가 고른 배치와는 다르다» — 그 사실을 화면에 밝힌다(아래 안내문).
@@ -559,7 +555,7 @@ _SENTENCE_TAIL_MARKS = ".!?…‥ "
 _SENTENCE_ENDERS: tuple[str, ...] = ("다", "음", "됨")
 
 #: 「이 회사는 무엇인가」를 설명하는 종결. 4-2(요즘 뭘 하고 있나)는 «하는 일»이지
-#: «무엇인가»가 아니다 (정본 05_생성/2_규칙/01_출력틀.md:21-22).
+#: «무엇인가»가 아니다.
 #: 실측 — 「…대한민국 1세대 산업용 로봇 제조 전문기업이다」가 4-2로 들어오던 문장.
 _IDENTITY_ENDINGS: tuple[str, ...] = (
     "기업이다", "회사이다", "회사다", "업체이다", "업체다", "제품이다", "브랜드다", "곳이다",
@@ -580,13 +576,13 @@ _BUSINESS_ACTION_MARKERS: tuple[str, ...] = (
     "도입", "구축", "탑재", "수출", "참가",
 )
 
-#: 「앞으로 어디로 가려 하나」(4-3)를 가리키는 표지. 정본 01_출력틀.md:23 「몇 년 뒤 방향」.
+#: 「앞으로 어디로 가려 하나」(4-3)를 가리키는 표지. 「몇 년 뒤 방향」.
 #: ⚠️ 일부러 뺀 낱말 — 「전망」: 증권가 전망은 «회사의 방향»이 아니다.
 _DIRECTION_MARKERS: tuple[str, ...] = (
     "계획", "예정", "추진", "방침", "목표", "전략", "나선다", "속도를 낸다",
 )
 
-#: 4번 세부 칸. 정본이 각 3개를 쓴다 (01_출력틀.md:20-23).
+#: 4번 세부 칸. 정본이 각 3개를 쓴다.
 _SITUATION_MAX_LINES = 3
 #: 4-1 「지금 뭐가 문제인가」 — ★ 데모는 이 칸을 코드로 채우지 않는다 (아래 사유 참고).
 _PROBLEM_CELL = "4-1"
@@ -596,7 +592,7 @@ _ACTION_CELL = "4-2"
 _DIRECTION_CELL = "4-3"
 
 #: 재도출한 칸 맨 앞에 붙이는 안내. ★ 빼지 않는다.
-#: 데모가 «어떻게 채웠는지»를 숨겨 사고가 난 적이 있다 (문제로그 P-45·P-54).
+#: 데모가 «어떻게 채웠는지»를 숨겨 사고가 난 적이 있다.
 #: 진짜 조사는 AI가 고르므로 여기서 나온 배치와 **다른 문장이 나온다.**
 _REDRAWN_NOTICE = (
     "※ 이 칸은 데모가 저장된 뉴스 기사에서 다시 고른 것입니다 — "
@@ -671,7 +667,7 @@ def _news_fragments(run_id: str) -> tuple[tuple[int, str], ...]:
     """4번 재료로 쓸 뉴스 조각. 시세·증시 기사는 «기사 통째로» 뺀다.
 
     ★ 시세 판정은 이미 있는 것을 그대로 쓴다 (`spanselect.logic`) — 두 벌로
-      나뉘면 반드시 어긋난다. 정본 03_수집/2_규칙/01_소스정책.md:79
+      나뉘면 반드시 어긋난다.
       「종목 나열 기사가 들어가면 주가가 빠졌습니다밖에 못 쓴다」.
 
     Returns:
@@ -721,13 +717,13 @@ def _news_sentences(text: str) -> list[str]:
         text: 조각 원문 (`"(2026-07-15 보도 · domain) 제목. 본문"` 꼴).
 
     Returns:
-        온전한 문장 목록. 뜻은 **다듬지 않는다** (정본 출력틀 규칙⑤).
-        ★ 앞머리의 «껍데기»(기사 말머리·목록 순번)만 뗀다 — 문제로그 P-74.
+        온전한 문장 목록. 뜻은 **다듬지 않는다** (정본 출력틀 규칙).
+        ★ 앞머리의 «껍데기»(기사 말머리·목록 순번)만 뗀다 —
           「[편집자주] 우리엔, 동물 전용 제품으로…」를 자소서에 그대로 못 쓴다.
           진짜 조사 경로(`spanselect`)와 **같은 함수**를 쓴다 — 규칙이 두 벌이 되면
           데모와 진짜 조사가 다른 문장을 내놓아 사용자가 헷갈린다.
 
-    ⚠️ **여기서 규칙을 새로 만들지 말 것 (문제로그 P-83).**
+    ⚠️ **여기서 규칙을 새로 만들지 말 것.**
       아래 종결형 검사는 데모만의 «두 번째 규칙»이었고, 실제로 새어나갔다 —
       「…수출 노선을 확보했다....」는 꼬리 점을 떼면 「다」로 끝나 통과해 버린다.
       그래서 **유료 조사에서는 걸러지는 문장이 무료 데모에는 그대로 실렸다.**
@@ -757,7 +753,7 @@ def _is_situation_material(sentence: str, subject: re.Pattern[str]) -> bool:
     Returns:
         회사가 주어이고 사업 활동이 드러나면 True.
     """
-    # 감사인 의견 문구는 4-1과 섞지 않는다 (정본 01_출력틀.md:79).
+    # 감사인 의견 문구는 4-1과 섞지 않는다.
     # ★ 판정은 이미 있는 것을 쓴다 — 새로 구현하지 않는다.
     if is_audit_opinion(sentence):
         return False
@@ -880,7 +876,7 @@ def _redraw_situation(
             remade.append(replace(section, lines=lines, empty_reason=""))
             continue
         # ★ 못 채운 칸의 사유를 «사실»로 바꾼다. 기사가 있는데 「기사 없음」이
-        #   남아 있으면 사용자가 그 회사를 포기한다 (문제로그 P-45·P-54).
+        #   남아 있으면 사용자가 그 회사를 포기한다.
         reason = (
             _PROBLEM_CELL_SKIPPED_REASON
             if section.cell == _PROBLEM_CELL
@@ -914,14 +910,14 @@ def _load_report(record: dict) -> Optional[Report]:
 
     sections, _legacy_requirements, generated_at = _parse_report(path.read_text(encoding="utf-8"))
     # ★ 4번(회사 상황)이 통째로 비었으면 저장된 뉴스 조각에서 «재도출»한다
-    #   (문제로그 P-43). AI를 부르지 않는다.
+    #   AI를 부르지 않는다.
     sections, redrawn_cells = _redraw_situation(record, sections)
 
     corp_type_raw = record.get("corp_type", "")
     corp_type = "비상장 외감" if "비상장" in corp_type_raw else "상장사"
 
-    # ★ 附(참고 숫자 — 1인평균급여액·평균근속연수)는 2026-08-27에 걷어냈다.
-    #   이 보고서는 「지원동기를 합격 퀄리티로 만드는 정보」만 담는다(사용자 지시).
+    # ★ 附(참고 숫자 — 1인평균급여액·평균근속연수)는 걷어냈다.
+    #   이 보고서는 「지원동기를 합격 퀄리티로 만드는 정보」만 담는다(제품 결정).
     #   옛 기록에 附이 남아 있어도 화면에 올리지 않는다.
     sections = [s for s in sections if s.cell in COMPANY_FACT_CELLS and s.cell != "附"]
 
@@ -929,14 +925,14 @@ def _load_report(record: dict) -> Optional[Report]:
     #   안내 줄이 교차표의 재료로 섞이면 근거 없는 행이 생긴다.
     sections = [_note_redrawn(s) if s.cell in redrawn_cells else s for s in sections]
 
-    # 4-3에 날짜·변경 경고 (W6 · D14-5)
+    # 4-3에 날짜·변경 경고
     sections = [append_direction_warning(s) if s.cell == "4-3" else s for s in sections]
 
     sections.append(build_company_use_section(sections))
 
     # ★ 등급은 «화면에 실제로 보이는 것»으로 다시 센다.
     #   기록에 저장된 판정(final_cells)을 그대로 쓰면, 표 덩어리를 비운 칸이
-    #   여전히 「채워짐」으로 남아 화면과 등급이 어긋난다 (문제로그 P-29).
+    #   여전히 「채워짐」으로 남아 화면과 등급이 어긋난다.
     cells = {s.cell: s.is_filled for s in sections if s.cell in COUNTED_CELLS}
     grade, reasons = grade_of(cells)
 
@@ -986,7 +982,7 @@ def _metrics_of(record: dict, report: Optional[Report]) -> dict:
         "fragments_cited": cited,
         "sentences_made": kept + deleted,
         "sentences_passed": kept,
-        # ★ 데모는 «0원»이다 (문제로그 P-84).
+        # ★ 데모는 «0원»이다.
         #   port.py의 약속은 「**이 요청에** 쓴 AI 비용」이고, 데모는 저장된 것을
         #   그대로 보여줄 뿐 AI를 한 번도 부르지 않는다. 실제로 나간 돈은 0이다.
         #   예전에는 기존 기록에 담긴 비용(`cost_usd`)을 그대로 실었다. 그래서

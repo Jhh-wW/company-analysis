@@ -1,6 +1,6 @@
 """애플리케이션 로그를 «실제로 남게» 하는 최상위(root) 로거 설정.
 
-★ 왜 이 파일이 필요한가 (2026-08-26 실측)
+★ 왜 이 파일이 필요한가 (실측)
   이 앱에는 최상위 로거 설정이 **어디에도 없었다.** `Dockerfile`이 uvicorn에
   넘기는 ``--log-level``은 uvicorn 자기 로거(``uvicorn``·``uvicorn.error``·
   ``uvicorn.access``)만 켜고 최상위 로거는 건드리지 않는다. 그래서 운영에서
@@ -23,7 +23,7 @@
 
 ★ 이 모듈은 feature를 import하지 않는다
   필터가 무엇인지 모르고, 조립 지점(``src/web/main.py``)이 넣어 준다.
-  feature 간 직접 import 금지 규칙(``rules/feature-atomic.md``)을 지키기 위해서다.
+  feature 간 직접 import 금지 규칙을 지키기 위해서다.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ _OWNED_HANDLER_MARK: Final[str] = "_기업분석_root_stream_handler"
 
 #: 최상위 수준을 내려도 **INFO를 주지 않을** 남의 라이브러리들.
 #:
-#: ★ 왜 필요한가 (2026-08-26 실측으로 시험이 잡아냈다)
+#: ★ 왜 필요한가 (실측으로 시험이 잡아냈다)
 #:   최상위 수준만 INFO로 내렸더니 ``httpx``가 **요청 URL을 통째로** 찍기 시작했고,
 #:   그 URL에 보고서 번호가 들어 있어 `test_admin_access.py`의
 #:   「감사 기록에 비밀이 새면 안 된다」 시험이 **빨간불**이 됐다.

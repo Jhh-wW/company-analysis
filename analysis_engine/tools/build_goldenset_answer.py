@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""골든셋 20곳 답안지 생성 — DART 기업개황 실측 (착수 순서: 핸드오프 할 일 3).
+"""골든셋 20곳 답안지 생성 — DART 기업개황 실측.
 
-후보 정본: 기획서.ver1/검증/05_골든셋_후보.md
+후보 목록의 정본은 이 파일의 ``GOLDEN`` 표다.
 원칙: 답안지는 도구 실행 **전에** 사람이 확정한다 — 이 스크립트는 「제안」 상태의 답안지를 만들고,
 사용자 승인 후 확정으로 바뀐다. 모든 DART 호출은 계수기(tick)와 로그를 거친다.
 """
@@ -23,7 +23,7 @@ from features.name_match.logic import build_index, match_layer1, normalize_name 
 
 RUN_ID = "골든셋_답안지_생성"
 CORPCODE_DIR = BASE / "data" / "corpcode"
-OUT_MD = BASE.parent / "기획서.ver1" / "검증" / "07_골든셋_답안지.md"
+OUT_MD = BASE / "local_output" / "골든셋_답안지.md"
 CALL_DELAY_SEC = 0.3  # 연속 호출 간 예의 지연
 CORP_CLS_KO = {"Y": "유가(상장)", "K": "코스닥(상장)", "N": "코넥스(상장)", "E": "기타(비상장)"}
 
@@ -133,9 +133,9 @@ def write_md(답안: list[dict], 호출수: int) -> None:
     L: list[str] = [
         "# 골든셋 답안지 — DART 기업개황 실측 (상태: **제안 · 사용자 승인 대기**)",
         "",
-        f"> 생성 {오늘} | 도구: `analysis_engine/tools/build_goldenset_answer.py` | 후보 정본: [05_골든셋_후보.md](05_골든셋_후보.md)",
+        f"> 생성 {오늘} | 도구: `analysis_engine/tools/build_goldenset_answer.py`",
         f"> DART 호출 {호출수}건 (계수기 `analysis_engine/logs/dart_usage.json` · 실행 로그 `logs/{RUN_ID}.jsonl`)",
-        "> **승인 규칙**: 사람이 확정해야 답안지가 된다. 승인 후 상태를 「확정」으로 바꾸고 착수 4(실데이터 대조)에 쓴다.",
+        "> **승인 규칙**: 사람이 확정해야 답안지가 된다. 승인 후 상태를 「확정」으로 바꾸고 실데이터 대조에 쓴다.",
         "",
         "## 답안지 본표",
         "",
@@ -191,7 +191,7 @@ def write_md(답안: list[dict], 호출수: int) -> None:
     L += ["", "## 다음 할 일", "",
           "1. 사용자: 본표·에스엠 12번 선택·부재 확인의 ⚠️ 항목을 승인/수정",
           "2. 승인되면 문서 머리 상태를 「확정」으로 변경 + 변경이력 기록",
-          "3. 착수 4 — 층1 이름대조·판정 사다리를 이 답안지 20건과 대조 실행", ""]
+          "3. 층1 이름대조·판정 사다리를 이 답안지 20건과 대조 실행", ""]
     OUT_MD.write_text("\n".join(L), encoding="utf-8")
 
 

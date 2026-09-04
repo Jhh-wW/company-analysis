@@ -13,6 +13,7 @@ from typing import Iterator
 import pytest
 
 from src.features.release_acceptance.logic import (
+    AcceptanceFailure,
     AcceptanceReport,
     CheckResult,
     CheckStatus,
@@ -22,6 +23,8 @@ from src.features.release_acceptance.logic import (
     build_child_environment,
     contains_sensitive_marker,
     extract_input_value,
+    extract_issued_share_url,
+    issued_share_link_from_screen,
     overall_status,
     render_korean_summary,
     storage_snapshot,
@@ -134,6 +137,62 @@ def test_html_input은_요청한_숨은값만_읽는다() -> None:
     )
     assert extract_input_value(html, "paid_attempt_token") == "attempt-1"
     assert extract_input_value(html, "missing") == ""
+
+
+#: 발급 결과 «화면»의 주소 칸 구조. 실제 템플릿(`web/templates/admin_link_issued.html`)
+#: 과 같은 앵커를 쓰며, 실제 렌더 결과로도 읽히는지는 web 쪽 시험이 함께 지킨다.
+_ISSUE_SCREEN_KEY = "0123456789abcdef0123456789abcdef"
+
+
+def _issue_screen_html(url: str, *, anchors: int = 1) -> str:
+    anchor = f'  <p id="issued-link-url" style="word-break:break-all">{url}</p>\n'
+    return (
+        "<!doctype html>\n<html lang=\"ko\"><body>\n"
+        "<div class=\"card\"><h2>받은 사람에게 전달할 주소</h2>\n"
+        + anchor * anchors
+        + '<svg class="segno"><path d="M0 0h1"/></svg>\n'
+        "</div></body></html>\n"
+    )
+
+
+def test_수락시험은_발급_화면의_주소_앵커에서_링크를_읽는다() -> None:
+    """★ 발급 응답이 텍스트 파일에서 HTML 화면 1장으로 바뀌었다.
+
+    본문 전체를 주소로 파싱하면 scheme이 빈 값이 되어 loopback 검사에서 튕긴다.
+    실서버 없이 이 파싱만 떼어 확인한다.
+    """
+    url = f"http://127.0.0.1:8123/k/{_ISSUE_SCREEN_KEY}"
+
+    assert extract_issued_share_url(_issue_screen_html(url)) == url
+    assert issued_share_link_from_screen(_issue_screen_html(url), port=8123) == (
+        f"/k/{_ISSUE_SCREEN_KEY}",
+        _ISSUE_SCREEN_KEY,
+    )
+
+
+def test_발급_화면에_주소_앵커가_없거나_비었거나_여럿이면_실패한다() -> None:
+    """★ 「못 읽었다」를 조용히 빈 값으로 넘기면 뒤에서 엉뚱한 이유로 깨진다."""
+    url = f"http://127.0.0.1:8123/k/{_ISSUE_SCREEN_KEY}"
+
+    with pytest.raises(AcceptanceFailure, match="찾지 못했습니다"):
+        extract_issued_share_url("<html><body><p>발급했습니다</p></body></html>")
+    with pytest.raises(AcceptanceFailure, match="비어 있습니다"):
+        extract_issued_share_url(_issue_screen_html("   "))
+    # 주소가 화면에 두 번 나오면 원문을 회수할 곳이 두 곳이 된다.
+    with pytest.raises(AcceptanceFailure, match="여러 개"):
+        extract_issued_share_url(_issue_screen_html(url, anchors=2))
+
+
+def test_발급_화면의_주소는_HTML_엔티티를_되돌려_읽는다() -> None:
+    """★ 템플릿은 자동 escape 한다 — `&amp;`를 그대로 두면 주소가 달라진다."""
+    escaped = f"http://127.0.0.1:8123/k/{_ISSUE_SCREEN_KEY}?a=1&amp;b=2"
+
+    assert extract_issued_share_url(_issue_screen_html(escaped)) == (
+        f"http://127.0.0.1:8123/k/{_ISSUE_SCREEN_KEY}?a=1&b=2"
+    )
+    # query가 붙은 주소는 capability 형식 검사에서 걸러진다.
+    with pytest.raises(AcceptanceFailure, match="capability 형식"):
+        issued_share_link_from_screen(_issue_screen_html(escaped), port=8123)
 
 
 def test_sqlite_snapshot은_비용0원과_단일보고서_근거를_읽는다(tmp_path) -> None:

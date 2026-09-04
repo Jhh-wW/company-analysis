@@ -719,7 +719,7 @@ def settle_inflight_as_reserved(
     Returns:
         (새로 적었나, 확정한 금액).
 
-    ★ 왜 `finish_inflight` 를 못 쓰나 (2026-08-28)
+    ★ 왜 `finish_inflight` 를 못 쓰나
       `finish_inflight` 는 `bucket` 을 «원문»으로 받아 `bucket_id()` 로 지문화해
       대조한다. 그런데 관리자는 원문 통장을 «가질 수 없다» — 재시작 뒤에는
       저장된 지문(`list_inflight_day`의 `bucket_id`)밖에 남지 않기 때문이다.

@@ -1,4 +1,4 @@
-"""손님을 «네 갈래»로 나누고 각자 다른 상한을 준다 (문제로그 P-94·P-95).
+"""손님을 «네 갈래»로 나누고 각자 다른 상한을 준다.
 
 ★ 왜 나누나 — 상한을 하나만 두면 포트폴리오용 링크 하나가 친구들 몫까지 먹는다.
   반대로 다 열어두면 인터넷의 아무나 돈을 쓴다.
@@ -10,7 +10,7 @@
 | `LINK`   | 열쇠 링크 방문자 | 3,000원 | `<열쇠>` |
 | `PUBLIC` | 그냥 들어온 사람  | **0원** | `(열쇠 없음)` |
 
-★ **로그인은 「누구인가」일 뿐 「써도 되는가」가 아니다** (P-95).
+★ **로그인은 「누구인가」일 뿐 「써도 되는가」가 아니다**.
   로그인만으로 갈래를 정하면, 아무나 구글 로그인해서 돈을 쓴다.
   초대 명단(`allowlist.py`)에 있어야 `MEMBER`가 된다.
 
@@ -58,7 +58,7 @@ def decide_track(
     Args:
         email: 로그인한 사람의 이메일. 로그인 안 했으면 빈 문자열.
         is_admin: 관리자 명단에 있는가.
-        is_member: **초대 명단에 있는가.** ★ 로그인 여부와 «다른» 값이다 (P-95).
+        is_member: **초대 명단에 있는가.** ★ 로그인 여부와 «다른» 값이다.
         share_key: 열쇠 링크로 들어왔다면 그 열쇠. 아니면 빈 문자열.
 
     Returns:
@@ -101,9 +101,26 @@ def bucket_of(track: Track, *, email: str, share_key: str) -> str:
     return PUBLIC_BUCKET
 
 
-def budget_of(track: Track) -> float:
+def budget_of(
+    track: Track, *, member_daily_budget_krw: float | None = None
+) -> float:
     """이 갈래의 비용 하루 입장 상한.
 
-    MEMBER에는 이 값과 별도로 성공 보고서 3건 제한도 함께 적용한다.
+    Args:
+        track: `decide_track()`이 정한 갈래.
+        member_daily_budget_krw: **이 친구 한 명에게만** 관리자가 따로 정해 둔
+            하루 비용 상한(원). `None`이면 갈래 기본값을 쓴다.
+            초대 명단(`allowlist.py`)의 `daily_budget_krw` 열이 정본이다.
+
+    Returns:
+        하루 비용 입장 상한(원).
+
+    MEMBER에는 이 값과 별도로 성공 보고서 건수 제한도 함께 적용한다.
+
+    ★ 회원값은 **MEMBER 갈래에만** 쓴다 — 이 인자가 LINK·ADMIN·PUBLIC에도 먹히면
+      명단에 있는 친구가 열쇠 링크로 들어왔을 때 링크 몫까지 자기 값으로 바꾼다.
+      갈래를 가르는 규칙은 `decide_track()`이 정본이고 여기서 뒤집지 않는다.
     """
+    if track is Track.MEMBER and member_daily_budget_krw is not None:
+        return float(member_daily_budget_krw)
     return BUDGET_BY_TRACK[track]

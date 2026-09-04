@@ -40,7 +40,7 @@ from src.features.report_standard.publish import validate_publishable
     ],
 )
 def test_화면에_HTML_기호가_새어나가지_않는다(raw, want):
-    """파일럿이 웹에서 긁어온 값이라 `&nbsp;` 같은 기호가 섞여 있다 (문제로그 P-27)."""
+    """파일럿이 웹에서 긁어온 값이라 `&nbsp;` 같은 기호가 섞여 있다."""
     assert _clean(raw) == want
 
 
@@ -52,7 +52,7 @@ def test_화면에_HTML_기호가_새어나가지_않는다(raw, want):
 @pytest.mark.parametrize(
     "typed, address, want",
     [
-        # 접미사만 다른 같은 곳 — 경고가 뜨면 안 된다 (문제로그 P-26)
+        # 접미사만 다른 같은 곳 — 경고가 뜨면 안 된다
         ("강원 강릉시", "강원도 강릉시 과학단지로 77-19", True),
         ("서울 성동구", "서울특별시 성동구 아차산로 84", True),
         ("인천 부평구", "인천광역시 부평구 갈산동", True),
@@ -106,7 +106,7 @@ def test_다른_회사는_다른_열쇠가_된다():
 @pytest.mark.parametrize(
     "raw, want",
     [
-        # ★ 왼쪽은 runs.jsonl에 실제로 찍힌 값이다 (문제로그 P-25)
+        # ★ 왼쪽은 runs.jsonl에 실제로 찍힌 값이다
         ("완료_성립미달", Outcome.REPORT),
         ("중단_식별실패", Outcome.NOT_FOUND),
         ("중단_게이트미달", Outcome.GATE_STOPPED),
@@ -133,7 +133,7 @@ def section(cell: str) -> ReportSection:
 
 
 def test_뒤죽박죽이어도_정본_순서로_맞춘다():
-    """저장된 md에서 5번이 9번 뒤에 붙어 있었다 (문제로그 P-28)."""
+    """저장된 md에서 5번이 9번 뒤에 붙어 있었다."""
     got = _in_report_order([section(c) for c in ["1", "9", "5", "4-1", "3"]])
     assert [s.cell for s in got] == ["1", "3", "4-1", "9", "5"]
 

@@ -1,4 +1,4 @@
-"""`/run`이 «돈과 횟수»를 실제로 막는지 못 박는다 (문제로그 P-92).
+"""`/run`이 «돈과 횟수»를 실제로 막는지 못 박는다.
 
 ★ 이 시험이 지키는 것 — **인터넷에 올려도 돈이 무제한으로 새지 않는다.**
   `budget/logic.py`의 시험은 «판단»이 맞는지만 본다. 판단이 맞아도
@@ -113,7 +113,7 @@ def _조사시작(
 def _열쇠로_들어온다(client: TestClient) -> None:
     """열쇠 링크 손님으로 만든다 (하루 3,000원 갈래).
 
-    ★ 열쇠 없이 들어온 손님은 이제 **상한이 0원**이라(P-95),
+    ★ 열쇠 없이 들어온 손님은 이제 **상한이 0원**이라,
       「예산을 다 썼다」를 시험하려면 «몫이 있는 갈래»여야 한다.
     """
     with storage_db.connect() as conn:
@@ -167,7 +167,7 @@ class _가짜진짜알맹이:
 
 
 def test_예산을_다_쓰면_조사를_거절한다(client: TestClient, monkeypatch):
-    """★ P-92 그 자체. 이게 없으면 배포하는 순간 돈이 무제한으로 샌다."""
+    """★ 예산을 다 쓰면 조사를 거절한다. 이게 없으면 배포하는 순간 돈이 무제한으로 샌다."""
     monkeypatch.setattr(runtime, "_PIPELINE", _가짜진짜알맹이())
     _열쇠로_들어온다(client)
     _예산을_다_쓴다(monkeypatch)
@@ -176,7 +176,7 @@ def test_예산을_다_쓰면_조사를_거절한다(client: TestClient, monkeyp
 
     assert response.status_code == 429
     assert "이 링크로 돌릴 수 있는 새 조사를 모두 사용" in response.text
-    # ★ 「이미 만든 보고서는 계속 열린다」를 «반드시» 같이 알린다 (2026-08-16 사용자 결정).
+    # ★ 「이미 만든 보고서는 계속 열린다」를 «반드시» 같이 알린다 (제품 결정).
     #   안 알리면 그냥 막힌 줄 알고, 포트폴리오의 핵심을 못 본 채 떠난다.
     assert "이미 만들어 둔 보고서는" in response.text
 
@@ -196,7 +196,7 @@ def test_막혔을_때_고장이_아니라고_말한다(client: TestClient, monk
 def test_원장이_깨져_막혔을_때는_고장이_아니라고_말하지_않는다(
     client: TestClient, monkeypatch
 ):
-    """★ 2026-08-28. 「고장이 아닙니다」를 «모든» 차단에 붙이고 있었다.
+    """★ 「고장이 아닙니다」를 «모든» 차단에 붙이고 있었다.
 
     비용 원장을 못 읽어 막힌 사용자도 그 말을 봤다 — **사실이 아니다.**
     그건 사람이 원장을 확인해야 풀리는 진짜 고장이고, 그때까지 새 조사는 안 된다.
@@ -216,7 +216,7 @@ def test_원장이_깨져_막혔을_때는_고장이_아니라고_말하지_않�
     assert "문의 번호" in text, "★ 신고할 번호가 없으면 관리자에게 안 닿는다"
     # 막다른 길은 여전히 만들지 않는다.
     assert "다른 회사 둘러보기" in text
-    # ★ 같은 말을 두 번 하지 않는다 (2026-08-28 — 세 번 하고 있었다).
+    # ★ 같은 말을 두 번 하지 않는다 (세 번 하고 있었다).
     assert text.count("관리자가 확인해야 다시 열립니다") == 1
     assert text.count("그대로 열립니다") == 1
     # ★ 없는 기능을 가리키지 않는다 — 첫 화면에 「회사 버튼」은 없다(실측).
@@ -326,17 +326,42 @@ def test_서로_다른_로그인_사용자_다섯명까지_자리를_잡는다()
     assert paid_runtime._RUNNING_BY_BUCKET == {}
 
 
-def test_같은_초대링크는_세명까지_자리를_잡는다():
-    자리 = [
-        paid_runtime._reserve_run_slot(share_tracks.Track.LINK, _열쇠)
-        for _ in range(MAX_CONCURRENT_PER_LINK)
-    ]
+def test_링크_동시_실행_상한은_리터럴_1이다():
+    """★ 초대 링크 하나가 동시에 쥐는 자리는 «한 자리»다.
 
-    assert all(자리)
+    누적 3,000원짜리 통장에 900원 본조사를 세 건 동시에 여는 것은 의미가 없다.
+    리터럴 1로 못 박는다 — 상한을 다른 상수와 견주면 값이 조용히 3으로
+    되돌아가도 시험이 그대로 통과한다.
+    """
+    assert MAX_CONCURRENT_PER_LINK == 1
+
+
+def test_같은_초대링크는_한_자리만_잡고_두번째부터_거절한다():
+    """★ 상한 경계 그 자체 — 1번째는 잡히고 2번째는 거절된다.
+
+    상한이 1로 정해지면서 기대값을 3→1로 이전했다.
+    이전 이름: `test_같은_초대링크는_세명까지_자리를_잡는다`.
+    """
+    첫자리 = paid_runtime._reserve_run_slot(share_tracks.Track.LINK, _열쇠)
+
+    assert 첫자리
     assert paid_runtime._reserve_run_slot(share_tracks.Track.LINK, _열쇠) is None
 
-    for bucket_id in 자리:
-        paid_runtime._release_run_slot(bucket_id or "")
+    paid_runtime._release_run_slot(첫자리 or "")
+    assert paid_runtime._RUNNING == 0
+    assert paid_runtime._RUNNING_BY_BUCKET == {}
+
+
+def test_자리를_돌려주면_같은_링크가_다시_한_자리를_잡는다():
+    """★ 반대 경우 시험 — 1로 줄인 것이 «영구 잠금»이 되면 그건 고장이다."""
+    첫자리 = paid_runtime._reserve_run_slot(share_tracks.Track.LINK, _열쇠)
+    assert 첫자리
+    paid_runtime._release_run_slot(첫자리 or "")
+
+    다음자리 = paid_runtime._reserve_run_slot(share_tracks.Track.LINK, _열쇠)
+    assert 다음자리
+
+    paid_runtime._release_run_slot(다음자리 or "")
     assert paid_runtime._RUNNING == 0
     assert paid_runtime._RUNNING_BY_BUCKET == {}
 

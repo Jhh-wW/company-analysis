@@ -1,0 +1,4 @@
+# 시험 golden 파일은 «렌더 결과 바이트 그대로»가 판정 기준이다.
+# -text  : core.autocrlf 줄끝 변환을 받지 않는다 (내려받아도 바이트가 같다)
+# -whitespace : 후행 공백은 렌더 결과의 일부라 오류로 세지 않는다
+app/src/web/tests/result_v1_article_golden.html -text -whitespace

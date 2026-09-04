@@ -5,7 +5,7 @@
     → render_report → (versioned 품질 shadow 판정) → (중복 검출 경고) → validate_v2
   각 단계의 규칙은 각 소유 파일(logic/verify/render/validate)에 있다.
 ★ AI 호출은 두 개의 주입 함수로만 한다 — 작가(writer_ask)와 검수(reviewer_ask)는
-  «다른 클로저»여야 한다 (Generator/Evaluator 분리, rules/harness.md).
+  «다른 클로저»여야 한다 (Generator/Evaluator 분리).
   provider 연결은 부르는 쪽(real.py)의 몫이다. 여기서 provider를 모른다.
 ★ 산문 정규식으로 값의 뜻을 추측하거나 FactRecord를 만들지 않는다. 다만 새
   공개 문장에 숫자가 있으면 구조화 의미 결속을 요구하고, 없으면 그 문장만 뺀다.
@@ -90,6 +90,7 @@ from src.shared.report_recovery import (
     SupplementAuthorization,
     decide_post_validation,
 )
+from src.shared.report_generation.public_projection import build_report_digest
 from src.shared.report_generation.canonical import (
     assert_report_matches_generation_evidence,
     public_content_digests,
@@ -113,8 +114,39 @@ from src.features.composer.structured_claims import (
 from src.features.composer.validate import V2ValidationError, validate_v2
 from src.features.composer.verify import verify_report, verify_sentences
 from src.features.pipeline.port import Grade, Report
+# ★ 경계 메모 — ``composer/render.py``·``port.py`` 머리말은 「composer는
+#   report_standard를 import 하지 않는다」고 적어 두었고, 그래서 그 두 파일은
+#   장 id·태그를 «복사»해 쓴다. 여기(pipeline.py)는 그 규칙의 예외다:
+#   공개 봉인 projection은 정의상 report_standard의 표시 순수 함수(도식·띠·
+#   검증 라벨)를 «한 번에 굳힌» 값이라, 값을 복사해 오면 두 벌이 갈라진다
+#   — 갈라지지 않게 하려고 만든 것이 이 봉인이므로 복사는 목적 자체를
+#   무너뜨린다. pipeline.py는 이미 ``features.pipeline.port``를 import하는
+#   조립 층이며, report_standard는 composer를 import하지 않아 순환도 없다.
+from src.features.report_standard.public_projection import build_public_projection
 
 logger = logging.getLogger(__name__)
+
+
+def _section_block_sha256s(rendered: Report) -> tuple[tuple[str, str], ...]:
+    """이 회차 렌더 결과의 장별 공개 봉인 블록 지문(정본 아홉 장 순서).
+
+    ★ 왜 영수증에 이 값을 싣나 — 보충 결속 검사가 쓰던
+      ``public_structure_seal.section_sha256s``는 pre-render 공개 content
+      봉인(지문 A)에서 오고 지문 A는 «보이는 것»만 덮는다. 그래서 보충 회차가
+      비대상 장의 글자는 그대로 두고 FactRecord나 등급 기여만 바꾸면 그 검사를
+      통과했다. ``block_sha256``은 display와 감사 장부를 함께 덮어 그 구멍을
+      닫는다.
+
+    ★ 여기서 만드는 projection은 «지문 계산용»이고 보고서에 싣지 않는다.
+      보고서에 실리는 봉인은 최종 등급까지 확정된 뒤 한 번만 만든다 — header가
+      달라도 장 블록은 같은 값이라 두 값이 어긋나지 않는다(그 동치는
+      ``test_영수증의_장별_블록_지문은_저장된_봉인과_같다``가 지킨다).
+    """
+
+    projection = build_public_projection(rendered)
+    return tuple(
+        (block.display.cell, block.block_sha256) for block in projection.sections
+    )
 
 
 @dataclass(frozen=True)
@@ -262,7 +294,7 @@ def _apply_generation_quality_label(
     함수를 호출하지 않으므로 새 코드가 이미 발급된 링크를 소급 차단하지 않는다.
     """
 
-    # ★ 2026-08-29 — 아래 문구들은 «독자»가 읽는다. 눈가림 독립 평가에서
+    # ★ 아래 문구들은 «독자»가 읽는다. 눈가림 독립 평가에서
     #   세 평가자가 모두 「내부 문구 노출」을 감점 1위로 지목했다:
     #   「claim」·「결속」 같은 개발자 어휘, 「완성 기준 40개」 같은 내부 임계값,
     #   「새 안전 검사」 같은 우리 일정 사정이 그대로 인쇄되고 있었다.
@@ -270,7 +302,7 @@ def _apply_generation_quality_label(
     # ⚠️ 정직성은 «깎지 않는다» — 개수·장 이름·비율은 전부 그대로 남긴다.
     #   숨기는 것과 쉬운 말로 바꾸는 것은 다르다. 시험이 그 경계를 지킨다.
     reasons = list(rendered.shortfall_reasons)
-    # ★ 2026-08-29 — 장마다 한 줄씩(최대 9줄) 거의 같은 문장을 찍던 것을 «한 줄»로
+    # ★ 장마다 한 줄씩(최대 9줄) 거의 같은 문장을 찍던 것을 «한 줄»로
     #   모은다. 빼는 정보는 없다 — 총 개수와 장 이름을 그대로 싣는다.
     #   눈가림 독립 평가에서 「제외 사유 나열문이 완결성·서술품질을 깎는다」는
     #   지적을 받았고, 읽는 사람에게 필요한 것은 «무엇이 몇 개 빠졌나»지
@@ -534,7 +566,7 @@ def run_v2(
         composition_tables: 2장에 실을 매출 구성표들(제품별·지역별 등). 주면
             표마다 «구성 도식»이 함께 나간다(도식 판정은
             report_standard/visualization.py 몫). 표는 여러 개일 수 있고
-            2장에 «전부» 붙는다 — 첫 표만 쓰지 않는다(2026-08-25 설계 변경).
+            2장에 «전부» 붙는다 — 첫 표만 쓰지 않는다(설계 변경).
         citation_style: 본문 인용 번호 표기 방식. 기본은 절충안이며,
             시험이 «문장마다 번호가 실리는가»를 볼 때 inline으로 고정한다.
         release_mode: SHADOW는 기존 생성·요약·공개 동작을 그대로 쓴다.
@@ -787,7 +819,7 @@ def run_v2(
             packet_union_ids,
             stage="numeric-safety",
         )
-    # ★ 2026-08-29 — 이 삭제는 보고서 «안»에만 적히고 서버 로그엔 흔적이 없었다.
+    # ★ 이 삭제는 보고서 «안»에만 적히고 서버 로그엔 흔적이 없었다.
     #   실측: 현대카드에서 최소 16문장이 여기서 사라졌는데 로그로는 안 보였다.
     if body_numeric_filtering.removed_section_counts:
         logger.warning(
@@ -907,12 +939,17 @@ def run_v2(
         filing_meta=filing_meta,
         composition_tables=composition_tables,
         citation_style=citation_style,
-        company_id=(str(company_id).strip() if release_mode is ReleaseMode.FULL else ""),
+        company_id=str(company_id).strip(),
         release_mode=("" if release_mode is ReleaseMode.SHADOW else release_mode.value),
         **seal_render_kwargs,
     )
+    primary_block_sha256s: tuple[tuple[str, str], ...] = ()
     if public_structure_seal is not None:
         assert_report_matches_public_structure(rendered, public_structure_seal)
+        # ★ 영수증 try 블록 «밖»에서 계산한다 — 안에서 하면 봉인 실패가
+        #   `except (TypeError, ValueError)`에 걸려 「영수증이 잘못됐다」는
+        #   엉뚱한 사유로 바뀐다. 봉인 실패는 봉인 실패로 드러나야 한다.
+        primary_block_sha256s = _section_block_sha256s(rendered)
 
     # ⑤-a 품질·공개 안전 shadow 판정 — 생성 시점에만 한 번 실행한다.
     # past_changes의 프로그램 생성 누적 증감률은 원자 fact_id·claim slot·원문
@@ -962,6 +999,7 @@ def run_v2(
                 ),
                 section_sha256s=public_structure_seal.section_sha256s,
                 evidence_packet_sha256s=prepared_evidence.packet_sha256s,
+                section_block_sha256s=primary_block_sha256s,
             )
             recovery_decision = decide_post_validation(primary_receipt)
         except (TypeError, ValueError) as error:
@@ -1146,6 +1184,8 @@ def run_v2(
                 rendered,
                 public_structure_seal,
             )
+            # 기본 경로와 같은 이유로 영수증 try 밖에서 계산한다.
+            supplement_block_sha256s = _section_block_sha256s(rendered)
             quality_candidate = build_generation_quality_candidate(
                 rendered,
                 final,
@@ -1175,6 +1215,7 @@ def run_v2(
                     evidence_packet_sha256s=prepared_evidence.packet_sha256s,
                     base_receipt_sha256=primary_receipt.receipt_sha256,
                     supplemented_section_ids=targets,
+                    section_block_sha256s=supplement_block_sha256s,
                 )
                 recovery_decision = decide_post_validation(
                     primary_receipt,
@@ -1262,6 +1303,25 @@ def run_v2(
                     "renderer actual 본문·문단·요약·표·출처·출고표시가 "
                     "pre-render 공개 content 봉인과 다릅니다"
                 )
+            # ⑤-b 공개 봉인 projection — 웹·PDF·Notion이 «그대로 배치만» 하면
+            # 되는 블록을 여기서 딱 한 번 만든다.
+            #
+            # ★ 왜 하필 이 자리인가 — 바로 위 ``replace``가 등급을 완성으로
+            #   다시 봉인한 «최종» 보고서라서다. 첫 seal 단정(렌더 직후) 자리에서
+            #   만들면 header에 입력 기본값 「부분」이 박히고 부분 보고서 고지
+            #   문구까지 딸려 들어가, 저장본은 완성인데 화면 블록만 부분이라고
+            #   말하는 보고서가 남는다. 보충 회복 경로도 이 자리로 합류하므로
+            #   두 경로가 한 번씩 봉인된다.
+            # ★ 왜 아직 생성 증거보다 앞인가 — 아래 GenerationProducerEvidence가
+            #   이 projection의 digest를 실어야 해서다. 반대로 두면 증거가
+            #   자기 자신을 해싱하는 순환이 된다.
+            # ★ 예외를 삼키지 않는다 — 봉인이 안 되는 보고서는 공개하지
+            #   않는다. try/except로 감싸 projection 없이 내보내면 채널이
+            #   갈라진 채 출고된다.
+            rendered = replace(
+                rendered,
+                public_projection=build_public_projection(rendered),
+            )
 
     # ``sentences_made``는 AI 호출 수가 아니라 공개 후보 문장 단위의 분모다.
     # extractive summary는 추가 AI 0회지만 보고서에 실리는 후보 다섯 단위이므로
@@ -1280,14 +1340,27 @@ def run_v2(
         quality_observation,
         generation_assessment,
     )
+    # ★ SHADOW도 관측값을 저장한다 — 예전에는 여기서 SHADOW만
+    #   None으로 비웠다. 그러면 「거짓 거절률」을 셀 대상 자체가 저장소에 하나도
+    #   안 남아 O-F3(관측 안 됨)를 영구히 못 풀었다. 이 값은 여전히 «관측
+    #   전용»이다 — release_allowed=False라도 SHADOW는 다음 줄들에서 여전히
+    #   REPORT로 나가고 차감도 그대로다(게이트는 C4가 별도 사람 결정 뒤에만
+    #   만든다). 이 필드가 채워진다고 판정 로직이 하나라도 바뀌지 않는다.
+    # ★ report_sha256 정정(독립 검토가 잡음) — 이 필드가 늘어나면
+    #   `export_pdf.automatic_release.report_sha256`(report_to_dict 전체 해시)은
+    #   «실제로 바뀐다». 그 해시를 비교하는 `web/routers/reports.py:_release_state`·
+    #   `generation_singleflight.py`·`report_delivery_adapter.py`는 release_mode로
+    #   안 걸러져 SHADOW도 그 경로를 탄다 — "SHADOW는 자동 PDF 출고가 없어 무관하다"는
+    #   448d10b 커밋 메시지의 근거는 틀렸다. 안전한 진짜 이유는 따로 있다: 저장된
+    #   보고서는 payload가 다시 안 바뀌므로 report_sha256(report)은 그 report_id의
+    #   평생 동안 항상 같은 값이다(자기일관적) — 「이 코드 이전 해시」와 「이후 해시」를
+    #   비교하는 경로가 아니다. 그래도 불일치가 나면 `_release_state`는
+    #   already_completed 저장값을 정본으로 흡수하고, singleflight/delivery adapter는
+    #   재사용을 포기(fail-safe)할 뿐 잘못된 값을 내보내지 않는다(fail-open 아님).
     rendered = replace(
         rendered,
         generation_metrics=generation_metrics,
-        quality_observation=(
-            quality_observation
-            if release_mode is not ReleaseMode.SHADOW
-            else None
-        ),
+        quality_observation=quality_observation,
     )
 
     # 성공 생산 증거는 최종 가시 출고 검증까지 통과한 뒤에만 만든다. 두 번째
@@ -1302,6 +1375,10 @@ def run_v2(
             or prepared_evidence is None
             or call_recorder is None
             or not validation_receipts
+            # 공개 봉인 projection이 없으면 증거가 「어떤 공개본을 냈는지」를
+            # 지목할 수 없다 — 지목 못 하는 증거로는 나중에 블록을 갈아 끼운
+            # 것을 잡지 못하므로 여기서 닫는다.
+            or rendered.public_projection is None
         ):
             raise V2ValidationError(("FULL 생산 증거 재료가 누락됐습니다",))
         generation_evidence = GenerationProducerEvidence(
@@ -1318,6 +1395,11 @@ def run_v2(
             public_content_sha256=(
                 public_structure_seal.public_content_sha256
             ),
+            # 이 값은 화면(display)뿐 아니라 그 장이 기여한 감사 장부까지
+            # 덮는다 — 장부만 바꾼 위조도 이 지문 하나로 드러난다.
+            public_projection_sha256=build_report_digest(
+                rendered.public_projection
+            ).content_sha256,
             section_sha256s=public_structure_seal.section_sha256s,
             evidence_packet_sha256s=prepared_evidence.packet_sha256s,
             validation_receipts=validation_receipts,

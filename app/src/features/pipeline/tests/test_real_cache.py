@@ -4,12 +4,12 @@
   바꿔 끼워, AI 호출 0회·0원으로 파이프라인 전체를 돌린다.
   (진짜로 돌리면 1건당 AI 최대 13회 = 실제 비용이 나간다.)
 
-★ 저장소는 `conftest.py`가 시험마다 임시 폴더로 바꿔 놓는다 (P-62) —
+★ 저장소는 `conftest.py`가 시험마다 임시 폴더로 바꿔 놓는다 —
   이 시험은 진짜 DB를 건드리지 않는다.
 
 이 시험이 잡는 것:
   - 같은 회사·같은 공고를 다시 조사할 때 **생성·검증 AI가 또 나가는 것**
-  - 공고가 다른데 **남의 옛 보고서가 나가는 것** (정본 §★ 사고 시나리오)
+  - 공고가 다른데 **남의 옛 보고서가 나가는 것** (사고 시나리오)
   - 사업연도가 바뀌었는데 **작년 보고서가 계속 나가는 것** (O9 신선도)
   - 캐시가 깨졌을 때 **조사 전체가 같이 죽는 것**
 """
@@ -116,6 +116,9 @@ def test_생성cache_namespace는_교대하는_raw환경도_한_snapshot만_쓴�
         SimpleNamespace(MODEL="snapshot-test-model"),
         identity,
         generation_mode,
+        # 이 시험이 보는 것은 배포 신원뿐이다. 모드를 모르는 경우(None)는
+        # 옛 열쇠 구성을 그대로 쓰므로 여기 단정이 흔들리지 않는다.
+        release_mode=None,
     )
 
     assert namespace is not None
@@ -141,6 +144,7 @@ def test_v1_롤백namespace도_같은_배포build_contract를_쓴다(
         SimpleNamespace(MODEL="rollback-test-model"),
         identity,
         generation_mode,
+        release_mode=None,
     )
 
     assert namespace is not None
@@ -671,7 +675,7 @@ class FakeEngine:
         ★ 예전에는 원문을 그대로 돌려주는 껍데기였다. 그때
           `test_공고_원문은_저장소에_들어가지_않는다`가 통과한 것은 지우개 덕이
           아니라, 가짜 생성기가 배치 안 된 요구역량을 **조용히 버렸기** 때문이다.
-          정본 「조용한 누락 금지」(05_생성/1_흐름/01_문장스팬선택.md:123-132)를
+          정본 「조용한 누락 금지」를
           지키자 그 구멍이 드러났다 — **시험이 엉뚱한 이유로 통과하고 있었다.**
           진짜 경로는 요구역량을 뽑기 «전에» 지우개를 돌린다 (`real.py` 5.5).
         """
@@ -831,7 +835,7 @@ class FakeEngine:
     def search_news(
         self, query: str, display: int = 10, sort: str = "date"
     ) -> list[SimpleNamespace]:
-        """네이버 뉴스 검색 흉내 (P-108).
+        """네이버 뉴스 검색 흉내.
 
         ★ 1판 `collect_news`를 대신한다 — 이제 `real.py`가 «검색»과 «고르기»를
           나눠서 한다. 고르기는 AI가 하므로 여기서는 «검색 결과»만 준다.
@@ -845,7 +849,7 @@ class FakeEngine:
     def collect_news(
         self, company: str, profile: dict[str, Any], homonym: int, steps: list[dict[str, Any]]
     ) -> list[dict[str, str]]:
-        """1판 방식(제목 일치). ★ `real.py`는 더 이상 이걸 부르지 않는다 (P-108).
+        """1판 방식(제목 일치). ★ `real.py`는 더 이상 이걸 부르지 않는다.
 
         1판에 «아직 남아 있는» 함수라 모양만 유지한다.
         """
@@ -856,7 +860,7 @@ class FakeEngine:
     def establishment(self, rough: dict[str, bool]) -> tuple[bool, list[str]]:
         return True, []
 
-    # ★ 8·9 생성은 이제 `spanselect.select_spans`가 맡는다 (P-43). `real.py`는
+    # ★ 8·9 생성은 이제 `spanselect.select_spans`가 맡는다. `real.py`는
     #   `generate_and_check`를 더 이상 부르지 않는다. 아래 셋은 그 대체 경로가
     #   1판에서 «빌려 쓰는» 부품들이다 — 이름이 틀리면 실행 시점에 터진다.
     BLOCK_ORDER = ("1", "2", "3", "4-1", "4-2", "4-3", "5", "6", "7", "8", "9")
@@ -1253,7 +1257,7 @@ def test_본조사_DART_공시목록오류는_감사보고서없음으로_거부
 def test_본조사_DART_013이고_재무제표도_없으면_공시없음으로_명확히거부한다(
     engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """★ 2026-08-27 계약 변경 — 옛 이름은 「013은 …추가호출하지않는다」였다.
+    """★ 계약 변경 — 옛 이름은 「013은 …추가호출하지않는다」였다.
 
     013(감사보고서 목록 비어 있음)은 「이름이 감사보고서인 공시가 없다」일 뿐
     「분석할 자료가 없다」가 아니다. 사업보고서를 내는 회사는 감사보고서를 그
@@ -1308,7 +1312,7 @@ def test_본조사_DART_013이고_재무제표도_없으면_공시없음으로_�
 def test_본조사_감사보고서가_없어도_재무제표가_있으면_그_사실을_판정에_넘긴다(
     engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """★ 현대카드·우리은행 부류 — 이 시험이 2026-08-27 수정의 «이유»다.
+    """★ 현대카드·우리은행 부류 — 이 시험이 수정의 «이유»다.
 
     실측: 현대카드는 3년간 331건을 공시하고 재무 API 가 38개 계정을 정상으로
     주는데도, 「감사보고서」라는 이름의 공시가 없다는 이유로 거부됐다.
@@ -2531,7 +2535,7 @@ def test_캐시로_돌려준_보고서가_처음_만든_것과_같다(engine: Fa
 
 
 def test_캐시_적중은_할당량을_안_깎는다(engine: FakeEngine) -> None:
-    """정본 00_공통/2_규칙/04_할당량.md — 「캐시 반환(1층 히트) → 0 · 무제한」."""
+    """「캐시 반환(1층 히트) → 0 · 무제한」."""
     first = _run()
     second = _run()
     assert first.charged is True
@@ -2561,7 +2565,7 @@ def test_v1은_배포commit을_모르면_provider전에_fail_closed한다(
 
 
 def test_캐시_적중이면_저장된_결과라고_밝힌다(engine: FakeEngine) -> None:
-    """사용자가 「방금 새로 조사한 것」으로 오해하면 안 된다 (P-63 교훈)."""
+    """사용자가 「방금 새로 조사한 것」으로 오해하면 안 된다 (교훈)."""
     first = _run()
     second = _run()
 
@@ -2638,12 +2642,12 @@ def test_공고_문장_순서만_바뀐_것은_같은_공고로_본다(engine: F
 
 
 # ══════════════════════════════════════════════════════════
-# 만료 — O9 신선도 (정본 §2)
+# 만료 — O9 신선도
 # ══════════════════════════════════════════════════════════
 
 
 def test_사업연도가_바뀌면_저장된_보고서를_안_쓴다(engine: FakeEngine) -> None:
-    """★ 없으면 「작년 보고서」가 영원히 나간다 (정본 §2가 막으려던 구멍)."""
+    """★ 없으면 「작년 보고서」가 영원히 나간다 (신선도 규칙이 막으려던 구멍)."""
     _run()
     calls_after_first = engine.generate_ai_calls
 
@@ -2867,7 +2871,7 @@ def test_수집_실패가_끼면_캐시에_저장하지_않는다(
     engine: FakeEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """★ 정본 03_수집/1_흐름/02_실패처리.md — 「⚠️ 못 가져옴 → ❌ 저장 안 함」.
+    """★ 「⚠️ 못 가져옴 → ❌ 저장 안 함」.
 
     그날만 죽은 소스 때문에 그 회사가 「자료 없는 회사」로 굳어버리면 안 된다.
     """

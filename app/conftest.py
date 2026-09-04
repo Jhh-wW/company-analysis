@@ -40,7 +40,7 @@ def _fresh_process_generation_identity():
 def _isolated_storage(tmp_path, monkeypatch):
     """모든 시험이 «임시 폴더»의 저장소와 이력을 쓰게 한다.
 
-    ★ 이력 격리는 나중에 채웠다 (문제로그 P-85). 그전에는 DB만 격리돼 있어
+    ★ 이력 격리는 나중에 채웠다. 그전에는 DB만 격리돼 있어
       **시험을 돌릴 때마다 진짜 이력 파일(`data/observability/runs.jsonl`)에
       기록이 쌓였다.** 실측 — 813건 중 대부분이 시험 찌꺼기였고, 관리 화면의
       「전체 처리 건수」가 사용자가 한 적 없는 조사를 세고 있었다.
@@ -55,7 +55,7 @@ def _isolated_storage(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _fresh_guards():
-    """시험마다 «갓 켠 서버»처럼 돈·횟수 상태를 비운다 (문제로그 P-92).
+    """시험마다 «갓 켠 서버»처럼 돈·횟수 상태를 비운다.
 
     ★ 왜 필요한가 — 횟수 제한(10분에 5건)은 «서버 하나»를 기준으로 센다.
       비우지 않으면 앞 시험이 쓴 횟수가 뒷 시험에 넘어가서,
@@ -80,9 +80,9 @@ def _fresh_guards():
     #   (`paid_runtime.py` 는 전부 `clock.today_kst()` 를 쓴다).
     #   여기서 «서버 로컬 날짜»를 쓰면 서버가 UTC 일 때 하루가 어긋나,
     #   시험이 만든 장부와 제품이 보는 장부가 «다른 날»이 된다.
-    #   실측(2026-08-27): `TZ=UTC0` 로 돌리면 이것 때문에 17건이 빨간불이었다.
+    #   실측: `TZ=UTC0` 로 돌리면 이것 때문에 17건이 빨간불이었다.
     paid_runtime._LEDGER = budget_logic.Ledger(day=clock.today_kst())
-    # ★ 예산은 «링크별»로 센다 (P-94) — 이것도 같이 비워야 한다.
+    # ★ 예산은 «링크별»로 센다 — 이것도 같이 비워야 한다.
     paid_runtime._LINK_SPEND = share_logic.DailySpend(day=clock.today_kst())
     paid_runtime._RUNNING = 0
     paid_runtime._RUNNING_BY_BUCKET.clear()

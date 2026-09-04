@@ -1,4 +1,4 @@
-"""시험이 «진짜 이력 파일»을 더럽히지 않는지 못 박는다 (문제로그 P-85).
+"""시험이 «진짜 이력 파일»을 더럽히지 않는지 못 박는다.
 
 ★ 이 시험이 잡는 것 — **시험을 돌릴 때마다 관리 화면의 건수가 늘어나는 것.**
   `conftest.py`가 저장소(DB)는 임시 폴더로 돌려놨는데 **이력만 빠져 있었다.**
@@ -29,7 +29,7 @@ from src.web.recording import records_path
 
 
 def test_시험_중에는_진짜_이력_파일을_안_쓴다():
-    """★ P-85 그 자체. `conftest.py`의 autouse 픽스처가 걸려 있어야 통과한다."""
+    """★ 시험 중에는 진짜 이력 파일을 안 쓴다. `conftest.py`의 autouse 픽스처가 걸려 있어야 통과한다."""
     진짜 = paths.APP_ROOT / obs.DEFAULT_RECORDS_RELATIVE_PATH
 
     지금 = records_path()

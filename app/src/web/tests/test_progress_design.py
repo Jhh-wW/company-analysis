@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
-from src.core.constants import PROGRESS_STEPS
+from src.core.constants import PROGRESS_STEPS, REMOVED_PROGRESS_COPY_MARKERS
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
 from src.web import job_runtime, main
@@ -56,6 +58,24 @@ def test_단계_카드_묶음은_실제_백엔드_단계_키와_정확히_일치
     )
     assert frozenset(flat) == analysis._COMPANY_ANALYSIS_PROGRESS_KEYS
     assert set(flat) <= {key for key, _label in PROGRESS_STEPS}
+
+
+def test_진행_화면이_알리는_단계_이름에_빼기로_한_문구가_없다():
+    """★ 화면까지 내려간 값을 본다 — 상수만 고치고 화면이 옛 이름을 쓰면 잡아야 한다.
+
+    단계 이름은 ``<script>`` 안 JSON으로 내려가므로 사람이 읽는 글자만 훑는
+    검사로는 못 잡는다. 그래서 그 JSON을 그대로 꺼내 되돌려 확인한다.
+    """
+    html = _render_progress_page("5" * 32, "샘플기업")
+
+    match = re.search(r"var STEP_LABELS = (.*);", html)
+    assert match, "진행 화면에서 단계 이름 목록을 찾지 못했다"
+    labels = json.loads(match.group(1))
+
+    assert labels, "단계 이름이 하나도 내려가지 않았다"
+    for key, label in labels.items():
+        for removed in REMOVED_PROGRESS_COPY_MARKERS:
+            assert removed not in label, f"{key} 단계 이름에 「{removed}」가 남아 있다"
 
 
 def test_진행_화면은_조사_대상_기업명을_보여준다():

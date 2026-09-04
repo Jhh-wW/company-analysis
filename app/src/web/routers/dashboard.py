@@ -21,11 +21,13 @@ from src.features.admin_dashboard import maintenance as dashboard_maintenance
 from src.features.admin_dashboard import store as dashboard_store
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
+from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
 from src.features.report_access import logic as report_access_logic
 from src.features.backup import status as backup_status
 from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import logic as share_logic
 from src.features.sharelink import store as share_store
+from src.features.sharelink import tracks as share_tracks
 from src.features.storage import constants as storage_constants
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
@@ -74,11 +76,15 @@ def _link_timestamp_label(value: str) -> str:
     return f"{local:%Y-%m-%d %H:%M} (한국시간)"
 
 
-def _link_expiry_label(created_at: str) -> str:
-    try:
-        issued = clock.business_date_from_iso(created_at)
-        expires = issued + dt.timedelta(days=share_logic.link_max_age_days_from_env())
-    except (OverflowError, TypeError, ValueError):
+def _link_expiry_label(created_at: str, *, expires_at: str = "") -> str:
+    """이 링크가 닫히는 날을 관리자 화면용으로 표시한다.
+
+    ★ 저장된 ``expires_at``이 있으면 그 값이 우선이다. 발급일 + 현재 수명으로만
+      계산하면 관리자가 미룬 날짜와 옛 규칙으로 굳은 날짜를 둘 다 못 보여 준다.
+    """
+
+    expires = share_logic.expiry_date_of(created_at, expires_at=expires_at)
+    if expires is None:
         return "확인 불가"
     return f"{expires:%Y-%m-%d} (한국시간 00:00부터 닫힘)"
 
@@ -90,6 +96,33 @@ def _dashboard_link_report_state(conn, link: share_store.ShareLink) -> str:
     if report is None:
         return "missing"
     return "expired" if job_runtime._link_expired(report) else "active"
+
+
+def _dashboard_link_company_id_state(
+    conn, link: share_store.ShareLink, report_state: str
+) -> str:
+    """결속 보고서의 회사 고유번호 상태.
+
+    Returns:
+        ``"none"``(결속 없음) · ``"present"``(있음) · ``"missing"``(없음) ·
+        ``"unknown"``(확인 못 함).
+
+    ★ 고유번호가 없으면 이후 재결속이 «이름»만 대조하게 되어, 이름이 같은 다른
+      법인이 그대로 들어온다. 관리자가 그 사실을 알아야 보고서를 다시 만든다.
+    ★ 「없다」와 「못 읽었다」를 나눈다 — 같은 침묵으로 두면 읽기가 깨진 동안
+      관리자는 아무 문제가 없다고 믿는다.
+    ★ 저장 표의 열과 본문이 둘 다 비었을 때만 ``"missing"``이다. 열만 차 있어도
+      대조는 된다.
+    """
+
+    if report_state not in ("active", "expired"):
+        return "none"
+    try:
+        resolved = report_store.resolve_company_id(conn, link.report_id)
+    except Exception:  # noqa: BLE001 — 안내 한 줄 때문에 상세 화면을 깨지 않는다
+        logger.error("결속 보고서의 회사 고유번호를 읽지 못했습니다")
+        return "unknown"
+    return "present" if resolved else "missing"
 
 
 def _admin_response(request: Request, response: Response) -> Response:
@@ -339,6 +372,59 @@ def _dashboard_read(label: str, fallback, reader):
         return fallback, False
 
 
+def _member_default_success_limit() -> int:
+    """한도를 따로 안 정한 친구가 쓰는 하루 성공 보고서 건수."""
+    return dashboard_store.MEMBER_DAILY_SUCCESS_LIMIT
+
+
+def _member_default_budget_krw() -> float:
+    """한도를 따로 안 정한 친구가 쓰는 하루 비용 상한(원)."""
+    return share_tracks.budget_of(share_tracks.Track.MEMBER)
+
+
+def _budget_label(amount_krw: float) -> str:
+    """화면에 쓰는 금액 표기. 천 단위 쉼표 + 「원」."""
+    return f"{amount_krw:,.0f}원"
+
+
+def _member_limit_rows(
+    members, *, available: bool
+) -> tuple[dict[str, dict[str, object]], bool]:
+    """친구별 «실제로 적용되는» 한도를 화면용으로 편다.
+
+    명단을 못 읽었으면 빈 표와 False를 돌려준다 — 못 읽은 명단을 「0명·0원」으로
+    보여주면 관리자가 노출이 없다고 오해한다.
+    """
+    if not available:
+        return {}, False
+    default_success = _member_default_success_limit()
+    default_budget = _member_default_budget_krw()
+    rows: dict[str, dict[str, object]] = {}
+    for member in members:
+        success = (
+            default_success
+            if member.daily_success_limit is None
+            else int(member.daily_success_limit)
+        )
+        budget_krw = (
+            default_budget
+            if member.daily_budget_krw is None
+            else float(member.daily_budget_krw)
+        )
+        rows[member.email] = {
+            "success": success,
+            "budget_krw": budget_krw,
+            "budget_label": _budget_label(budget_krw),
+            "reason": member.limit_reason,
+            "updated_at": member.limit_updated_at,
+            "customized": (
+                member.daily_success_limit is not None
+                or member.daily_budget_krw is not None
+            ),
+        }
+    return rows, True
+
+
 def _dashboard_context(request: Request) -> dict:
     """오늘 화면과 조각 새로고침이 같은 정본을 사용한다."""
     service, service_available = _dashboard_read(
@@ -395,11 +481,24 @@ def _dashboard_context(request: Request) -> dict:
             for member in members
         },
     )
+    # ★ 회원별 하루 한도 — 화면이 「전원 3건·3,000원」이라고 단정하면
+    #   한 명만 올렸을 때 관리자가 틀린 숫자를 보고 또 올린다. 합계도 인원 곱셈이
+    #   아니라 사람마다 다른 값의 «합»이어야 최악의 하루 지출을 바로 읽는다.
+    #   ★ 기본값 해석을 «여기서» 하는 이유 — 성공 건수 기본값은 admin_dashboard가,
+    #     비용 기본값은 sharelink가 각자 정본이다. 두 feature를 모두 아는 곳은
+    #     화면을 만드는 이 자리뿐이고, 명단 표는 「덮어쓴 값이 있나」만 기억한다.
+    member_limits, member_limits_available = _member_limit_rows(
+        members, available=members_available
+    )
+    member_budget_total_krw = sum(
+        float(item["budget_krw"]) for item in member_limits.values()
+    )
+    member_success_total = sum(int(item["success"]) for item in member_limits.values())
     incidents = sorted(incidents, key=lambda item: (str(item["created_at"]), int(item["id"])))
     operation_issues = sorted(
         operation_issues, key=lambda item: (str(item["created_at"]), str(item["operation_key"]))
     )
-    # ★ 유료 조사가 통째로 막혔는지 — 2026-08-28 까지 첫 화면이 이걸 «안 읽었다».
+    # ★ 유료 조사가 통째로 막혔는지 — 한동안 첫 화면이 이걸 «안 읽었다».
     #   모든 유료 조사가 닫힌 날에도 관리자 첫 화면은 「문제 없음」이었다.
     유료차단, 유료차단_사유 = paid_runtime.paid_research_block()
     service_dict = (
@@ -500,6 +599,14 @@ def _dashboard_context(request: Request) -> dict:
         dashboard_link_unseen=link_unseen,
         dashboard_member_usage=member_usage,
         dashboard_member_usage_available=member_usage_available,
+        dashboard_member_limits=member_limits,
+        dashboard_member_limits_available=member_limits_available,
+        dashboard_member_budget_total_label=_budget_label(member_budget_total_krw),
+        dashboard_member_success_total_label=f"{member_success_total}건",
+        dashboard_member_default_success=_member_default_success_limit(),
+        dashboard_member_default_budget_label=_budget_label(
+            _member_default_budget_krw()
+        ),
         dashboard_company_counts=member_company_counts,
         dashboard_company_counts_available=member_company_counts_available,
         dashboard_satisfaction=satisfaction,
@@ -909,69 +1016,94 @@ async def submit_error(
     return RedirectResponse(f"/result/{report_id}", status_code=303)
 
 
+def link_page_context(request: Request) -> dict:
+    """초대 링크 화면(정보 구조 ②)이 쓰는 대시보드 쪽 값.
+
+    ★ 링크 목록 «본문»은 이제 `routers/admin.py`의 접근 문맥이
+      정본이다. 여기서는 새 접속 건수처럼 대시보드만 아는 값을 얹는다.
+    """
+
+    return _dashboard_context(request)
+
+
+def member_page_context(request: Request) -> dict:
+    """회원 화면(정보 구조 ③)이 쓰는 대시보드 쪽 값 — 기간 통계·한도·설문."""
+
+    context = _dashboard_context(request)
+    period, start_day = _member_period(request)
+    with storage_db.connect() as conn:
+        member_statistics = dashboard_store.member_run_statistics(
+            conn, start_day=start_day
+        )
+        member_feedback = dashboard_store.list_member_feedback(
+            conn, start_day=start_day
+        )
+        period_survey_total, period_helpful = dashboard_store.survey_summary(
+            conn, start_day=start_day
+        )
+        period_kpi = dashboard_kpi.summary(conn, start_day=start_day)
+        member_profiles = share_allow.list_profiles(conn)
+    member_names = {
+        member.email: (member.display_name.strip() or "이름 미등록")
+        for member in member_profiles
+    }
+    feedback_rows = []
+    for item in member_feedback:
+        row = asdict(item)
+        row["display_name"] = member_names.get(item.actor_email, "이름 미등록")
+        feedback_rows.append(row)
+    context.update(
+        dashboard_member_period=period,
+        dashboard_member_statistics=member_statistics,
+        dashboard_member_feedback=feedback_rows,
+        dashboard_survey_total=period_survey_total,
+        dashboard_satisfaction=(
+            "자료 모으는 중"
+            if period_survey_total < 5
+            else f"{round(period_helpful * 100 / period_survey_total)}% "
+            f"({period_helpful}/{period_survey_total})"
+        ),
+        dashboard_kpi_measured=period_kpi.measured_responses,
+        dashboard_three_minute_response=(
+            "자료 모으는 중"
+            if period_kpi.measured_responses < 5
+            else f"{round(period_kpi.within_target * 100 / period_kpi.measured_responses)}% "
+            f"({period_kpi.within_target}/{period_kpi.measured_responses})"
+        ),
+    )
+    return context
+
+
 @router.get("/admin/members", response_class=HTMLResponse)
 async def members_page(request: Request):
+    """회원 화면 — 초대·명단·한도·이용·설문을 한곳에서 본다(정보 구조 ③).
+
+    ★ 초대 폼과 명단은 `/admin/access`에 따로 있었다. 화면
+      본문은 `routers/admin.py`가 그리고, 이 라우트는 권한만 판정한다.
+    """
+
     blocked = request_helpers.require_admin(request)
     if blocked is not None:
         return blocked
-    try:
-        context = _dashboard_context(request)
-        period, start_day = _member_period(request)
-        with storage_db.connect() as conn:
-            member_statistics = dashboard_store.member_run_statistics(conn, start_day=start_day)
-            member_feedback = dashboard_store.list_member_feedback(
-                conn, start_day=start_day
-            )
-            period_survey_total, period_helpful = dashboard_store.survey_summary(
-                conn, start_day=start_day
-            )
-            period_kpi = dashboard_kpi.summary(conn, start_day=start_day)
-            member_profiles = share_allow.list_profiles(conn)
-        member_names = {
-            member.email: (member.display_name.strip() or "이름 미등록")
-            for member in member_profiles
-        }
-        feedback_rows = []
-        for item in member_feedback:
-            row = asdict(item)
-            row["display_name"] = member_names.get(item.actor_email, "이름 미등록")
-            feedback_rows.append(row)
-        context.update(
-            dashboard_member_period=period,
-            dashboard_member_statistics=member_statistics,
-            dashboard_member_feedback=feedback_rows,
-            dashboard_survey_total=period_survey_total,
-            dashboard_satisfaction=(
-                "자료 모으는 중"
-                if period_survey_total < 5
-                else f"{round(period_helpful * 100 / period_survey_total)}% "
-                f"({period_helpful}/{period_survey_total})"
-            ),
-            dashboard_kpi_measured=period_kpi.measured_responses,
-            dashboard_three_minute_response=(
-                "자료 모으는 중"
-                if period_kpi.measured_responses < 5
-                else f"{round(period_kpi.within_target * 100 / period_kpi.measured_responses)}% "
-                f"({period_kpi.within_target}/{period_kpi.measured_responses})"
-            ),
-        )
-        response = request_helpers.templates.TemplateResponse(request=request, name="admin_members.html", context=context)
-    except Exception:
-        response = HTMLResponse("친구 이용 정보를 안전하게 읽지 못했습니다.", status_code=503)
-    return _admin_response(request, response)
+    from src.web.routers import admin as admin_router  # noqa: PLC0415
+
+    return admin_router.render_member_admin_page(request)
 
 
 @router.get("/admin/links", response_class=HTMLResponse)
 async def links_page(request: Request):
+    """초대 링크 화면 — 발급·목록·상태·철회를 한곳에서 본다(정보 구조 ②).
+
+    ★ 발급 폼은 `/admin/access`에, 목록은 여기에 나뉘어 있었다.
+      화면 본문은 `routers/admin.py`가 그리고, 이 라우트는 권한만 판정한다.
+    """
+
     blocked = request_helpers.require_admin(request)
     if blocked is not None:
         return blocked
-    try:
-        context = _dashboard_context(request)
-        response = request_helpers.templates.TemplateResponse(request=request, name="admin_links.html", context=context)
-    except Exception:
-        response = HTMLResponse("LINK 목록을 안전하게 읽지 못했습니다.", status_code=503)
-    return _admin_response(request, response)
+    from src.web.routers import admin as admin_router  # noqa: PLC0415
+
+    return admin_router.render_link_admin_page(request)
 
 
 @router.get("/admin/links/{key_hash}", response_class=HTMLResponse)
@@ -992,6 +1124,11 @@ async def link_detail(request: Request, key_hash: str):
             runs = share_store.list_runs_by_hash(conn, key_hash)
             report_state = (
                 "none" if link is None else _dashboard_link_report_state(conn, link)
+            )
+            link_company_id_state = (
+                "none"
+                if link is None
+                else _dashboard_link_company_id_state(conn, link, report_state)
             )
             run_report_states = {
                 run.run_id: (
@@ -1024,14 +1161,17 @@ async def link_detail(request: Request, key_hash: str):
                 dashboard_runs=runs,
                 dashboard_link_report_state=report_state,
                 dashboard_run_report_states=run_report_states,
-                dashboard_link_expired=share_logic.is_share_link_expired(
-                    link.created_at
-                ),
-                dashboard_result_share_days=share_logic.link_max_age_days_from_env(),
+                dashboard_link_expired=share_logic.link_expired(link),
+                dashboard_link_company_id_state=link_company_id_state,
+                # ★ 이 값은 «보고서 공개 기간»이지 LINK 수명이 아니다. 두 값이
+                #   60일로 같던 시절에는 LINK 수명을 넣어도 맞아 보였다.
+                dashboard_result_share_days=REPORT_LINK_MAX_AGE_DAYS,
                 dashboard_link_created_at_label=_link_timestamp_label(
                     link.created_at
                 ),
-                dashboard_link_expiry_label=_link_expiry_label(link.created_at),
+                dashboard_link_expiry_label=_link_expiry_label(
+                    link.created_at, expires_at=link.expires_at
+                ),
                 dashboard_link_first_opened_at_label=_link_timestamp_label(
                     link.first_opened_at
                 ),
@@ -1059,15 +1199,26 @@ async def link_detail(request: Request, key_hash: str):
                     "posting_discarded": "채용공고로 확인되지 않음",
                     "evidence_gate_stopped": "보고서 근거가 부족함",
                     "generation_failed": "생성 중 기술 오류",
+                    "posting_image_consent_required": "이미지 전송 동의가 필요함",
+                    "posting_image_read_failed": "공고 이미지를 읽지 못함",
+                    "posting_image_demo_unsupported": "데모에서 이미지 입력을 지원하지 않음",
+                    "posting_image_extraction_failed": "이미지 글자 추출에 실패함",
                     "daily_budget_unavailable": "LINK 일일 비용 한도를 사용할 수 없음",
                     "daily_budget_exhausted": "LINK 일일 비용 한도에 도달함",
                     "job_registration_failed": "생성 작업을 저장하지 못함",
                     "server_shutdown": "서버 종료로 시작하지 못함",
                     "shutdown_timeout": "서버 종료 제한시간을 넘김",
                     "server_restart": "서버 재시작으로 작업을 이어갈 수 없음",
+                    "server_restart_delivery_incomplete": "서버 재시작으로 자동출고 확인 전 중단됨",
+                    "admin_manual_settled": "관리자가 수동으로 대사해 중단됨",
                     "generation_start_failed": "생성 시작 중 기술 오류",
                     "generation_not_started": "생성을 시작하지 못함",
                     "automatic_release_gate_stopped": "자동출고 검사를 통과하지 못함",
+                    # admin.py 사본과 «같이» 고쳐야 한다. 한쪽만 고치면 그 화면만
+                    # 조용히 원문 코드로 보인다(test_link_stop_reason_label_parity).
+                    "link_revoked": "초대 링크의 사용이 중단됨",
+                    "link_expired": "초대 링크의 기간이 지남",
+                    "link_state_unknown": "초대 링크 상태를 확인하지 못함",
                 },
             ),
         )

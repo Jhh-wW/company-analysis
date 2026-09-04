@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Optional
 
 from fastapi import APIRouter, Form, Request
@@ -20,6 +22,8 @@ from fastapi.responses import (
 from src.core import clock, paths
 from src.core.constants import MAX_RETRY_INPUT, PROGRESS_STEPS
 from src.features.admin_dashboard import store as dashboard_store
+from src.features.auth import constants as auth_constants
+from src.features.auth import logic as auth_logic
 from src.features.budget import spend_store
 from src.features.budget.constants import (
     BUDGET_STORE_BLOCKED_MESSAGE,
@@ -44,6 +48,7 @@ from src.features.pipeline.port import (
 from src.features.provider_health import constants as provider_health_constants
 from src.features.provider_health import store as provider_health_store
 from src.features.sharelink import access_control as share_access
+from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import logic as share_logic
 from src.features.sharelink import store as share_store
 from src.features.sharelink import tracks as share_tracks
@@ -52,12 +57,27 @@ from src.features.sharelink.constants import (
     KEY_COOKIE_MAX_AGE_SEC,
     KEY_COOKIE_NAME,
     KEY_PATH_PREFIX,
+    LANDING_BUDGET_LEFT_TEMPLATE,
+    LANDING_INTRO,
+    LANDING_MADE_ON_DATE_TEMPLATE,
+    LANDING_OTHER_COMPANY_BUTTON,
+    LANDING_OTHER_COMPANY_NOTE,
+    LANDING_REPORT_BUTTON_TEMPLATE,
+    LANDING_REPORT_MADE_ON_TEMPLATE,
+    LANDING_REPORT_NOT_READY_NOTE,
+    LANDING_REPORT_NOT_READY_TEMPLATE,
+    LANDING_TITLE,
+    LINK_BUDGET_EXHAUSTED_MESSAGE,
+    LINK_TOTAL_BUDGET_EXHAUSTED_MESSAGE,
+    LINK_TOTAL_BUDGET_KRW,
+    PER_LINK_DAILY_BUDGET_KRW,
     PUBLIC_BUCKET,
 )
 from src.features.storage import db as storage_db
 from src.features.storage import job_interruptions
 from src.features.storage import reports as report_store
 from src.web import (
+    deployment_mode,
     evaluation_mode,
     job_runtime,
     paid_runtime,
@@ -244,16 +264,37 @@ def _observe_candidate_resolution(
 def _was_interrupted(job_id: str) -> bool:
     with storage_db.connect() as conn:
         return job_interruptions.exists(conn, job_id)
+
+
+#: 링크가 닫힌 사람이 갈 수 있는 유일한 길. 아래 안내 문구는 모두 이 줄로 끝난다.
+_LINK_CONTACT_NOTICE = "포트폴리오에 적힌 연락처로 알려 주시면 새 링크를 보내 드립니다."
+#: 링크가 안 열린 사람이 «처음 읽는 글»이다. 코드 용어(LINK·철회)부터 보면
+#: 「고장 났나」로 읽힌다.
+#: ★ 「철회」는 특히 쓰지 않는다 — 받는 사람에게 만료와 철회는 같은 뜻이고,
+#:   「누가 나를 잘랐나」로 읽힌다. 그래서 두 경우에 **같은 말**을 한다.
+#:   구분은 관리자 화면에서만 한다.
+_LINK_CLOSED_NOTICE = (
+    "이 초대 링크는 사용이 중단되어 첫 화면을 열었습니다. " + _LINK_CONTACT_NOTICE
+)
 _SHARE_NOTICE_BY_CODE = {
-    "invalid": "LINK가 올바르지 않아 일반 첫 화면을 열었습니다.",
-    "missing": "이 LINK는 닫혔거나 존재하지 않아 일반 첫 화면을 열었습니다.",
-    "expired": "이 LINK의 사용 기간이 지나 일반 첫 화면을 열었습니다.",
-    "revoked": "이 LINK가 철회되어 일반 첫 화면을 열었습니다.",
+    "invalid": (
+        "받으신 주소가 올바르지 않아 첫 화면을 열었습니다. "
+        "초대 링크를 다시 확인해 주세요."
+    ),
+    "missing": (
+        "이 초대 링크를 찾을 수 없어 첫 화면을 열었습니다. "
+        "받으신 링크를 다시 확인해 주세요."
+    ),
+    "expired": _LINK_CLOSED_NOTICE,
+    "revoked": _LINK_CLOSED_NOTICE,
+    # ★ 「지원 맥락이 표시된 입력 화면」이라고 말하지 않는다 — 초대 링크 손님에게는
+    #   그 배너 대신 랜딩이 보인다. 화면에 없는 것을 설명하면 손님은
+    #   없는 것을 찾는다.
     "report-missing": (
-        "연결된 기존 보고서를 찾을 수 없어 지원 맥락이 표시된 입력 화면을 열었습니다."
+        "연결된 기존 보고서를 찾을 수 없어 첫 화면을 열었습니다."
     ),
     "report-expired": (
-        "연결된 기존 보고서의 공유 기간이 지나 지원 맥락이 표시된 입력 화면을 열었습니다."
+        "연결된 기존 보고서의 공유 기간이 지나 첫 화면을 열었습니다."
     ),
 }
 _REPORT_NOTICE_BY_CODE = {
@@ -262,6 +303,31 @@ _REPORT_NOTICE_BY_CODE = {
         "주소가 오래됐거나 현재 볼 수 없는 상태일 수 있습니다."
     ),
 }
+
+#: 닫힌 초대 링크 손님에게 «직접» 보여 주는 안내 본문. 첫 화면으로 되돌려보내는
+#: 문구(`_SHARE_NOTICE_BY_CODE`)와 달리 이 화면이 종착지다.
+#: ★ 연락처 한 줄이 이 화면의 존재 이유다 — 손님이 갈 수 있는 다른 길이 없다.
+#: ★ 만료와 사용 중단은 받는 사람에게 같은 뜻이라 같은 말을 쓴다.
+_LINK_CLOSED_SCREEN_NOTICE = (
+    "이 초대 링크는 사용이 중단되어 더 이상 열리지 않습니다. " + _LINK_CONTACT_NOTICE
+)
+_LINK_MISSING_SCREEN_NOTICE = (
+    "이 초대 링크를 찾을 수 없습니다. 받으신 주소를 다시 확인해 주시고, "
+    + _LINK_CONTACT_NOTICE
+)
+_LINK_CLOSED_SCREEN_NOTICE_BY_CODE = {
+    "missing": _LINK_MISSING_SCREEN_NOTICE,
+    "expired": _LINK_CLOSED_SCREEN_NOTICE,
+    "revoked": _LINK_CLOSED_SCREEN_NOTICE,
+}
+#: 조사가 도는 중에 링크가 닫힌 사람이 진행 화면에서 읽는 문장.
+_LINK_CLOSED_PROGRESS_NOTICE = (
+    "이 초대 링크의 사용이 중단되어 조사를 멈췄습니다. " + _LINK_CONTACT_NOTICE
+)
+#: 진행 화면이 상태를 물어보는 경로. 안내를 화면이 아니라 JSON으로 줘야 하는
+#: 유일한 손님 경로다.
+_PROGRESS_API_PATH_PREFIX = "/api/progress/"
+_LINK_CLOSED_PROGRESS_CODE = "link_closed"
 
 
 def _clear_share_cookie(response, request: Request) -> None:
@@ -282,6 +348,169 @@ def _share_redirect_without_cookie(request: Request, status: str):
     response.headers["Referrer-Policy"] = "no-referrer"
     _clear_share_cookie(response, request)
     return response
+
+
+def _first_screen_needs_login() -> bool:
+    """이 배포에서 첫 화면이 로그인 뒤에 있는지."""
+
+    return (
+        auth_logic.beta_admin_only_from_env()
+        or deployment_mode.render_admin_no_forwarded()
+    )
+
+
+def _viewer_passes_login_wall(request: Request) -> bool:
+    """이 사람이 로그인 벽 너머 첫 화면까지 실제로 갈 수 있는지.
+
+    Args:
+        request: 닫힌 링크 안내를 받게 될 요청.
+
+    Returns:
+        첫 화면이 열리면 ``True``. 확인하지 못하면 ``False``(길을 주지 않는 쪽).
+
+    ★ 로그인 벽(`main.beta_admin_gate`)과 **같은 기준**으로 본다 — 관리자 세션이거나
+      초대 명단에 있는 회원이라야 첫 화면이 열린다. 여기서 따로 판단하면 화면은
+      「첫 화면으로 돌아가기」를 주는데 눌러 보면 구글 로그인으로 가는 일이 생긴다.
+    """
+
+    token = request.cookies.get(auth_constants.SESSION_COOKIE_NAME)
+    try:
+        session = auth_logic.get_session(token)
+    except Exception:  # noqa: BLE001 — 못 읽으면 «열리지 않는 사람»으로 본다
+        logger.exception("첫 화면을 열 수 있는지 확인하지 못했습니다")
+        return False
+    if session is None:
+        return False
+    if session.is_admin:
+        return True
+    try:
+        with storage_db.connect() as conn:
+            return share_allow.is_allowed(conn, session.email)
+    except Exception:  # noqa: BLE001 — 못 읽으면 초대 안 된 사람으로 본다
+        logger.exception("초대 명단을 못 읽어 첫 화면 안내를 보류했습니다")
+        return False
+
+
+def _link_closed_screen(
+    request: Request, status: str, *, offer_first_screen: bool
+) -> Response:
+    """닫힌 초대 링크 손님에게 연락 안내가 있는 화면을 «직접» 그린다.
+
+    첫 화면이 로그인 뒤에 있는 배포에서 `/?share_status=…`로 되돌려보내면 손님은
+    구글 계정 선택 화면에 도착한다. 로그인해도 들어올 수 없는 계정이라 그대로
+    막다른 길이고, 연락처 안내에도 닿지 못한다. 그래서 되돌려보내지 않고
+    여기서 끝낸다.
+
+    Args:
+        request: 닫힌 링크로 들어온 요청.
+        status: 왜 닫혔는지(`missing` | `expired` | `revoked`). 문구를 고른다.
+        offer_first_screen: 첫 화면으로 가는 버튼을 그릴지. 열리지 않는 사람에게
+            주면 막다른 길이 하나 늘 뿐이라 부르는 쪽이 실측해 넘긴다.
+
+    ★ 권한 쿠키는 여기서 건드리지 않는다 — 지울지는 부르는 쪽이 정한다.
+    """
+
+    return request_helpers.templates.TemplateResponse(
+        request=request,
+        name="share_scope_error.html",
+        context=request_helpers._ctx(
+            request,
+            scope_error=_LINK_CLOSED_SCREEN_NOTICE_BY_CODE.get(
+                status, _LINK_CLOSED_SCREEN_NOTICE
+            ),
+            offer_first_screen=offer_first_screen,
+        ),
+        status_code=410,
+    )
+
+
+def _share_link_closed_response(request: Request, status: str) -> Response:
+    """닫힌 링크 갈래 하나를 이 배포에서 손님이 실제로 볼 수 있는 응답으로."""
+
+    if not _first_screen_needs_login():
+        return _share_redirect_without_cookie(request, status)
+    response = _link_closed_screen(
+        request, status, offer_first_screen=_viewer_passes_login_wall(request)
+    )
+    # 열리지 않는 주소를 한 번 더 눌러도 이전 권한은 되살아나지 않는다.
+    _clear_share_cookie(response, request)
+    return response
+
+
+def _link_closed_progress_response() -> Response:
+    """진행 화면이 해석할 수 있는 모양으로 같은 안내를 돌려준다.
+
+    로그인 화면 HTML을 돌려주면 진행 화면은 JSON 해석에 실패해 「네트워크 문제」로
+    보여 준다. 이름(`error`·`retry_url`·`retryable`)은 `progress.html`의 poll이
+    읽는 것 그대로다.
+    """
+
+    return JSONResponse(
+        {
+            "error": _LINK_CLOSED_PROGRESS_NOTICE,
+            "code": _LINK_CLOSED_PROGRESS_CODE,
+            "retry_url": "/",
+            "retryable": False,
+        },
+        status_code=410,
+    )
+
+
+def closed_link_guest_response(request: Request) -> Optional[Response]:
+    """초대 링크가 도중에 닫힌 손님에게 로그인 화면 대신 안내를 돌려준다.
+
+    로그인 벽이 켜진 배포에서 링크가 닫히면, 권한 쿠키를 가진 손님의 모든 화면이
+    구글 로그인으로 튕긴다(``main.beta_admin_gate``). 이 함수는 그 마지막 갈림길
+    직전에 불려, 이유를 아는 손님에게만 이유를 말해 준다.
+
+    Args:
+        request: 로그인 벽에서 통과하지 못한 요청.
+
+    Returns:
+        보여 줄 안내 응답. 해당하지 않으면 ``None``(기존 로그인 안내 그대로).
+
+    ★ 발급된 적 없는 쿠키에는 아무 말도 하지 않는다 — 열쇠를 바꿔 가며 넣는 쪽에
+      링크의 있고 없음을 알려주지 않기 위해서다. 진행 상태도 그 링크로 시작한
+      조사일 때만 답한다.
+    ★ 닫힌 쿠키를 지우지 않는다. 그 쿠키는 아무 권한도 주지 않으면서
+      (`request_helpers._raw_share_key`) 왜 막혔는지 아는 유일한 단서다. 지우면
+      새로고침 한 번에 다시 구글 로그인으로 간다.
+    """
+
+    path = request.url.path
+    is_progress_api = path.startswith(_PROGRESS_API_PATH_PREFIX)
+    if not (
+        is_progress_api
+        or path in auth_constants.BETA_SHARE_PATHS
+        or path.startswith(auth_constants.BETA_SHARE_PATH_PREFIXES)
+    ):
+        return None
+    key = (request.cookies.get(KEY_COOKIE_NAME) or "").strip().lower()
+    if not share_logic.is_valid_key(key):
+        return None
+    try:
+        with storage_db.connect() as conn:
+            link = share_store.load(conn, key)
+            if link is None:
+                return None
+            if not link.is_revoked and not share_logic.link_expired(link):
+                return None
+            if not is_progress_api:
+                # 로그인 벽이 이 요청을 이미 「관리자도 회원도 아니다」로 판정한
+                # 뒤에만 여기까지 온다 — 첫 화면은 이 사람에게 열리지 않는다.
+                return _link_closed_screen(
+                    request,
+                    "revoked" if link.is_revoked else "expired",
+                    offer_first_screen=False,
+                )
+            job_id = path[len(_PROGRESS_API_PATH_PREFIX) :].strip("/")
+            run = share_store.load_run(conn, job_id) if job_id else None
+            if run is None or run.link_key_hash != link.key_hash:
+                return None
+            return _link_closed_progress_response()
+    except Exception:  # noqa: BLE001 — 못 읽으면 기존 로그인 안내를 그대로 둔다
+        logger.exception("닫힌 초대 링크 안내를 준비하지 못했습니다")
+        return None
 
 
 def _invalid_share_key_response(request: Request) -> Response:
@@ -316,6 +545,169 @@ def _share_rate_limited() -> Response:
     )
 
 
+@dataclass(frozen=True)
+class _LinkLanding:
+    """초대 링크로 들어온 사람이 첫 화면에서 보는 카드 두 장.
+
+    ★ 왜 화면 틀이 아니라 여기서 문구를 만드는가 — 틀 안에서 회사 이름을 붙이면
+      같은 말이 화면마다 조금씩 달라진다. 문구는 `sharelink/constants.py`의
+      상수 한 곳에서만 만들고, 틀은 그대로 그리기만 한다.
+    ★ `report_url`이 비어 있으면 카드 A는 버튼 대신 「준비 중」만 보인다.
+    """
+
+    company: str
+    title: str
+    intro: str
+    report_url: str
+    report_button: str
+    made_on_note: str
+    not_ready_note: str
+    not_ready_hint: str
+    other_button: str
+    other_note: str
+    budget_note: str
+
+
+def _landing_made_on(report) -> str:
+    """결속 보고서 생성일을 「2026년 8월 19일」로 옮긴다 (한국시간).
+
+    표지·마스트헤드가 읽는 것과 **같은 필드**(``report.generated_at``)를 쓴다.
+    날짜를 읽을 수 없는 옛 저장본이면 빈 글자를 돌려주고 그 줄만 빠진다 —
+    날짜를 지어내는 것보다 안 보이는 편이 낫다.
+    """
+    raw = str(getattr(report, "generated_at", "") or "").strip()
+    if not raw:
+        return ""
+    try:
+        made = clock.business_date_from_iso(raw)
+    except (OverflowError, TypeError, ValueError):
+        return ""
+    return LANDING_MADE_ON_DATE_TEMPLATE.format(
+        year=made.year, month=made.month, day=made.day
+    )
+
+
+def _bound_report_view(link) -> tuple[str, str]:
+    """결속 보고서를 «지금» 열 수 있으면 (결과 주소, 생성일 문구)를 돌려준다.
+
+    ★ 신선도 기한은 새로 만들지 않고 **기존 보고서 링크 수명**과 같은 기준을 쓴다
+      (`job_runtime._link_expired`, 기본 60일). 초대 링크 자체의 기본 수명
+      (`DEFAULT_LINK_MAX_AGE_DAYS`)도 60일이라 두 기준이 같은 값이다.
+    ★ 기한이 지났거나 보고서가 사라졌으면 «자동으로 다시 조사하지 않는다» —
+      사람 승인 없이 돈을 쓰는 일이다.
+    """
+    if not link.report_id:
+        return "", ""
+    try:
+        with storage_db.connect() as conn:
+            if dashboard_store.report_is_trashed(conn, link.report_id):
+                return "", ""
+            report = report_store.load(conn, link.report_id)
+    except Exception:  # noqa: BLE001 — 못 읽으면 「준비 중」으로 닫는다
+        logger.exception("초대 링크에 묶인 보고서 상태를 읽지 못했습니다")
+        return "", ""
+    if report is None or job_runtime._link_expired(report):
+        return "", ""
+    made_on = _landing_made_on(report)
+    return (
+        f"/result/{link.report_id}",
+        LANDING_REPORT_MADE_ON_TEMPLATE.format(made_on=made_on) if made_on else "",
+    )
+
+
+def _landing_amount(krw: float) -> str:
+    """남은 돈을 「2,999」처럼 쓴다.
+
+    ★ 반올림하지 않고 «버린다» — 실제보다 많이 남은 것처럼 보이면
+      「된다더니 안 된다」가 된다. 모자라게 보이는 쪽으로 틀린다.
+    """
+    return f"{math.floor(max(0.0, krw)):,}"
+
+
+def _landing_budget_note(bucket: str) -> str:
+    """이 링크로 «얼마까지» 되는지 한 줄. 다 썼으면 그 사실을 대신 말한다.
+
+    Args:
+        bucket: 이 초대 링크의 열쇠. 보는 사람이 아니라 **링크**의 남은 한도다.
+
+    ★ 하루 소진과 «수명 전체» 소진은 **다른 말**을 한다 — 하루 소진은 내일
+      열리지만 누적 소진은 내일도 안 열린다. 같은 말을 하면 헛되이 기다리게 된다.
+      문구는 새로 짓지 않고 `/run`이 막을 때 쓰는
+      것과 **같은 상수**를 쓴다 — 두 화면이 다른 말을 하면 손님이 헷갈린다.
+    ★ 상한은 보는 사람의 갈래가 아니라 **링크 갈래의 값**을 쓴다. 관리자가 자기
+      QR을 찍어도 화면에는 「받는 사람에게 남은 몫」이 보여야 시연이 된다.
+      관리자가 실제로 쓰는 돈은 관리자 통장에서 나가고,
+      그 판정은 `request_helpers._guard_run`이 따로 한다.
+    ★ 숫자를 못 읽으면 줄 자체를 빼고 «지어내지 않는다».
+    """
+    today = clock.today_kst()
+    # 제품이 실제로 세는 통장과 «같은 키»를 본다. 표시와 판정이 다른 키를 쓰면
+    # 화면 숫자와 실제 차단이 어긋난다 (`request_helpers._guard_run` 같은 규칙).
+    stored_bucket = spend_store.bucket_id(bucket)
+    if (
+        share_logic.spent_for(paid_runtime._LINK_SPEND, stored_bucket, today) <= 0
+        and share_logic.spent_for(paid_runtime._LINK_SPEND, bucket, today) > 0
+    ):
+        stored_bucket = bucket
+    daily_left = share_logic.budget_left(
+        paid_runtime._LINK_SPEND, stored_bucket, today, PER_LINK_DAILY_BUDGET_KRW
+    )
+    try:
+        with storage_db.connect() as conn:
+            key_hash = share_store.key_hash_of(bucket)
+            row = share_store.load_by_hash(conn, key_hash)
+            total_spent = share_store.link_total_spent_krw(conn, key_hash=key_hash)
+    except Exception:  # noqa: BLE001 — 못 읽으면 숫자를 지어내지 않고 줄을 뺀다
+        logger.exception("초대 링크의 남은 이용 한도를 읽지 못했습니다")
+        return ""
+    total_left = share_logic.total_budget_left(
+        total_spent,
+        row.effective_total_budget_krw if row is not None else LINK_TOTAL_BUDGET_KRW,
+    )
+    if total_left <= 0:
+        return LINK_TOTAL_BUDGET_EXHAUSTED_MESSAGE
+    if daily_left <= 0:
+        return LINK_BUDGET_EXHAUSTED_MESSAGE
+    return LANDING_BUDGET_LEFT_TEMPLATE.format(
+        daily=_landing_amount(daily_left), total=_landing_amount(total_left)
+    )
+
+
+def _link_landing(request: Request, link) -> Optional[_LinkLanding]:
+    """«유효한 초대 링크 쿠키»를 들고 온 사람에게 랜딩 카드를 만든다.
+
+    ★ 조건은 「비용 갈래가 LINK인가」가 **아니라** 「살아 있는 초대 링크 쿠키가
+      있는가」다. 관리자도 자기 QR을 찍으면 받는 사람과
+      같은 화면을 봐야 시연이 된다. 돈이 나가는 통장과 차단 판정은 그대로
+      갈래대로다 — **보이는 것과 세는 것은 다른 문제다.**
+    ★ 링크 쿠키가 없거나 이미 닫힌 링크면 ``link``가 ``None``이라 호출부에서
+      걸러진다. 그래서 관계없는 손님의 첫 화면은 한 글자도 바뀌지 않는다.
+    ★ 열쇠는 쿠키에서 그대로 읽는다. 같은 요청에서 ``link``를 찾아낸 것이 바로 이
+      쿠키 값이므로(`request_helpers._current_share_link`) DB를 다시 열지 않는다.
+    """
+    bucket = (request.cookies.get(KEY_COOKIE_NAME) or "").strip().lower()
+    report_url, made_on_note = _bound_report_view(link)
+    return _LinkLanding(
+        company=link.company,
+        title=LANDING_TITLE,
+        intro=LANDING_INTRO,
+        report_url=report_url,
+        report_button=LANDING_REPORT_BUTTON_TEMPLATE.format(company=link.company),
+        made_on_note=made_on_note,
+        not_ready_note=LANDING_REPORT_NOT_READY_TEMPLATE.format(
+            company=link.company
+        ),
+        not_ready_hint=LANDING_REPORT_NOT_READY_NOTE,
+        other_button=LANDING_OTHER_COMPANY_BUTTON,
+        other_note=LANDING_OTHER_COMPANY_NOTE,
+        budget_note=(
+            _landing_budget_note(bucket)
+            if share_logic.is_valid_key(bucket)
+            else ""
+        ),
+    )
+
+
 @router.get("/", response_class=HTMLResponse)
 async def input_page(request: Request):
     """회사명·직무·주소·공고를 받는 첫 화면."""
@@ -345,6 +737,9 @@ async def input_page(request: Request):
             demo_companies=available_companies(),
             demo_available=paths.demo_data_available(),
             share_link=share_link,
+            link_landing=(
+                None if share_link is None else _link_landing(request, share_link)
+            ),
             prefill=prefill,
             share_notice=notices,
             evaluation_workflow_id=evaluation_mode.issue_workflow_id(),
@@ -365,11 +760,11 @@ async def open_share_link(request: Request, key: str):
         with storage_db.connect() as conn:
             stored = share_store.load(conn, clean)
             if stored is None:
-                return _share_redirect_without_cookie(request, "missing")
+                return _share_link_closed_response(request, "missing")
             if stored.is_revoked:
-                return _share_redirect_without_cookie(request, "revoked")
-            if share_logic.is_share_link_expired(stored.created_at):
-                return _share_redirect_without_cookie(request, "expired")
+                return _share_link_closed_response(request, "revoked")
+            if share_logic.link_expired(stored):
+                return _share_link_closed_response(request, "expired")
 
             now_iso = clock.iso_now_kst()
             if not share_access.allow_request(clean, now_iso):
@@ -380,11 +775,11 @@ async def open_share_link(request: Request, key: str):
                 # 의미하므로 429를 돌려준다.
                 latest = share_store.load(conn, clean)
                 if latest is None:
-                    return _share_redirect_without_cookie(request, "missing")
+                    return _share_link_closed_response(request, "missing")
                 if latest.is_revoked:
-                    return _share_redirect_without_cookie(request, "revoked")
-                if share_logic.is_share_link_expired(latest.created_at):
-                    return _share_redirect_without_cookie(request, "expired")
+                    return _share_link_closed_response(request, "revoked")
+                if share_logic.link_expired(latest):
+                    return _share_link_closed_response(request, "expired")
                 return _share_rate_limited()
             link = stored
 
@@ -397,14 +792,17 @@ async def open_share_link(request: Request, key: str):
                         target = "/?share_status=report-missing"
                     elif job_runtime._link_expired(report):
                         target = "/?share_status=report-expired"
-                    else:
-                        target = f"/result/{link.report_id}"
+                    # ★ 결속 보고서가 멀쩡해도 결과로 «직행»하지 않는다 —
+                    #   첫 화면의 두 버튼(「{회사명} 보고서 보기」·「다른 회사
+                    #   분석해 보기」)을 보여 준 뒤 사람이 고르게 한다.
+                    #   직행하면 인사팀은
+                    #   「다른 회사도 된다」를 영영 못 본다. ``target``은 "/" 그대로다.
     except Exception:  # noqa: BLE001 — 인가 저장소 장애에서는 이전 권한도 정리한다
         logger.exception("LINK를 확인하거나 요청 기록을 저장하지 못했습니다")
         return _share_store_unavailable(request)
 
     if link is None:
-        return _share_redirect_without_cookie(request, "missing")
+        return _share_link_closed_response(request, "missing")
 
     response = RedirectResponse(target, status_code=303)
     response.headers["Referrer-Policy"] = "no-referrer"

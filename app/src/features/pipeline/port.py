@@ -22,6 +22,7 @@ from src.shared.report_generation.models import (
     GenerationProducerEvidence,
     GenerationRunMetrics,
 )
+from src.shared.report_generation.public_projection import PublicReportProjection
 from src.shared.report_quality.generation import GenerationQualityObservation
 from src.shared.span_selection_diagnostics import SpanSelectionRoundDiagnostic
 
@@ -33,7 +34,6 @@ StepReporter = Callable[[str], None]
 class Outcome(str, Enum):
     """요청이 어떻게 끝났는가.
 
-    정본: 확정/00_공통/1_흐름/01_전체흐름.md
     사람이 떨어지는 지점 6개 + 성공 1개.
     """
 
@@ -59,7 +59,7 @@ class Outcome(str, Enum):
 def outcome_for(raw: str, table: Mapping[str, Outcome]) -> Outcome:
     """종료 문자열을 «화면 종류»로 옮긴다 — 앞부분 맞추기.
 
-    ★ 왜 이 함수가 여기 있나 (2026-08-27 · 적대 검수 권고)
+    ★ 왜 이 함수가 여기 있나 (적대 검수 권고)
       ─────────────────────────────────────────────────────────
       진짜 파이프라인(`real.py`)과 데모(`demo.py`)가 **같은 뜻을 다른 방법으로**
       옮기고 있었다. 데모는 앞부분 맞추기, 진짜는 정확일치였다.
@@ -97,9 +97,9 @@ def outcome_for(raw: str, table: Mapping[str, Outcome]) -> Outcome:
 class Grade(str, Enum):
     """보고서를 얼마나 채웠는가.
 
-    정본: 확정/06_검증/1_흐름/02_성립판정과부분보고서.md
-    과거 저장본 호환을 위해 세 값을 유지한다. canonical(v4)는 검증된 1~8장과
-    조건부 9장까지 있으면 ``COMPLETE``, 9장만 빠지면 ``PARTIAL``로 출고한다.
+    과거 저장본 호환을 위해 세 값을 유지한다. 출시 모드
+    (``REPORT_RELEASE_MODE=FULL``)는 1~9장을 모두 갖춘 보고서만 ``COMPLETE``로
+    출고하고, 9장이 빠진 ``PARTIAL``은 연습 모드(``SHADOW``)에서만 만든다.
     """
 
     COMPLETE = "완성"
@@ -111,7 +111,6 @@ class Grade(str, Enum):
 class UserInput:
     """사용자가 입력 화면에서 넣은 것.
 
-    정본: 확정/01_식별/1_흐름/01_회사확정.md §입력 항목
     """
 
     company: str
@@ -129,7 +128,6 @@ class CompanyCard:
     ★ 이 화면이 「AI가 실재하는 다른 회사를 답하는 것」의 유일한 방어선이다.
       코드로는 못 막는다. 그래서 사람에게 반드시 확인받는다.
 
-    정본: 확정/01_식별/2_규칙/01_이름대조.md §확인 카드
     """
 
     #: 정식 법인명
@@ -141,7 +139,7 @@ class CompanyCard:
     #: YYYYMMDD 또는 사람이 읽는 형태
     founded: str
     homepage: str = ""
-    #: 실제로 «열리는» 주소 (P-114). 못 열면 빈 문자열이고 화면은 링크를 안 건다.
+    #: 실제로 «열리는» 주소. 못 열면 빈 문자열이고 화면은 링크를 안 건다.
     #: ★ `homepage`는 공시에 적힌 글자 그대로, 이것은 브라우저가 열 수 있는 모양이다.
     homepage_url: str = ""
     #: 주소가 안 맞을 때 띄울 경고. 차단하지 않는다.
@@ -188,7 +186,7 @@ class CompanyLookupResult:
 class ReportTable:
     """숫자 표 하나.
 
-    ★ 재무·회계 수치는 «문장으로 바꾸지 않고 표 그대로» 낸다 (결정기록 D13).
+    ★ 재무·회계 수치는 «문장으로 바꾸지 않고 표 그대로» 낸다.
       숫자를 억지로 문장으로 만들면 읽기만 나빠진다.
     """
 
@@ -275,7 +273,7 @@ class ReportSection:
     lines: list[tuple[str, str]] = field(default_factory=list)
     #: 비었을 때 「왜 비었는지」. 프로그램이 붙인다 (AI 아님).
     empty_reason: str = ""
-    #: 숫자 표. 문장 대신 이걸로 채울 수 있다 (D13).
+    #: 숫자 표. 문장 대신 이걸로 채울 수 있다.
     tables: list[ReportTable] = field(default_factory=list)
     #: 작가와 독립 검토를 통과한 공개 문장 및 실제 출처 표기.
     #: canonical 렌더러는 이것과 표만 표시하며 원문 ``lines``로 대체하지 않는다.
@@ -309,7 +307,6 @@ class SourceStatus:
     """소스별 수집 결과 한 줄.
 
     ⭕ 찾음 / ❌ 없음 / ⚠️ 못 가져옴 — 셋을 섞으면 오거부가 된다.
-    정본: 확정/03_수집/1_흐름/02_실패처리.md
     """
 
     name: str
@@ -518,7 +515,7 @@ class Report:
     #: **엔진 v2 전용** — 부록 번호(문자열) → 그 번호를 근거로 쓴 문장들의 등급 목록.
     #: 예: ``{"1": ["확인", "해석"], "11": ["확인"]}``
     #:
-    #: ★ 왜 필요한가 (2026-08-25, 적대 검수가 재현한 결함) — 부록의 「사실 검증」
+    #: ★ 왜 필요한가 (적대 검수가 재현한 결함) — 부록의 「사실 검증」
     #:   칸은 「이 자료에서 온 문장이 전부 «확인»인가」를 물어야 하는데, v2는
     #:   등급을 «화면 글자»(문장 끝 " — 해석" 표지)로만 내보낸다. 그런데
     #:   ``render.py`` 의 절충안 인용 규칙상 «해석» 문장의 ``[n]`` 은 숨겨지고,
@@ -563,6 +560,22 @@ class Report:
     #: 엄격 생성 당시 평가의 표시 projection. 권위는 generation_evidence 안의
     #: exact GenerationAssessment이며 이 값에서 평가를 역으로 꾸미지 않는다.
     quality_observation: GenerationQualityObservation | None = None
+    #: 웹·PDF·Notion이 «그대로 배치만» 하면 되는 공개 봉인 블록.
+    #: 생성 시점에 딱 한 번 만들어 여기 실린다 — 렌더러가 문자열을 새로
+    #: 만들지 않게 하려는 것이다. FULL 새 생성물만 채운다(SHADOW·
+    #: ENFORCE_NO_PARTIAL·옛 저장본은 ``None``).
+    #:
+    #: ★ 이 값은 보고서 payload에 **직렬화되지 않는다**(payload 노드 수가 두 배가
+    #:   되어 저장 자원 상한 여유를 반으로 깎았다). 저장 자리는 별도 표이고,
+    #:   채워지는 경로는 둘뿐이다:
+    #:     ① composer가 방금 만든 결과
+    #:     ② ``storage.reports.load()`` 또는
+    #:        ``storage.reports.attach_public_projection()``
+    #:   payload 문자열에서 되살린 ``Report``(delivery content snapshot·관리자
+    #:   승인 snapshot·캐시 재사용)는 ``None``이다. 그 경로에서 화면을 그리려면
+    #:   ②를 먼저 불러야 한다. ``None``은 「봉인 없음」이라는 정의된 상태이지
+    #:   오류가 아니다.
+    public_projection: PublicReportProjection | None = None
 
     @property
     def fact_ledger(self) -> list[FactRecord]:
@@ -576,7 +589,7 @@ class Report:
 
         데모와 옛 저장값은 `cells`에 공고 블록(5·8)이나 숨긴
         9번을 담을 수 있다. 값 전체를 세면 보이지 않는 칸 때문에
-        「6개 중 N개」 안내가 부풀어 오른다(P-119).
+        「6개 중 N개」 안내가 부풀어 오른다.
         """
         if self.schema_version:
             # report_standard는 port를 사용하므로 top-level import로 연결하면 순환한다.
@@ -611,7 +624,7 @@ class RunResult:
     charged: bool = False
     elapsed_sec: float = 0.0
 
-    # ── 이력 1행에 실릴 값 (기획서 08_관측/1_흐름/01_지표수집.md 「13종」) ──
+    # ── 이력 1행에 실릴 값 (「13종」) ──
     # ★ 여기 없으면 대시보드가 «영영 못 재는 지표»가 된다. 실패로 끝난 요청도
     #   여기까지는 채워야 「어디서 몇 개 모으다 멈췄나」를 알 수 있다.
     #: 회사 유형. 보고서가 안 나와도(거부·중단) 판정까지 갔으면 안다.
@@ -633,7 +646,7 @@ class RunResult:
     #: 저장해 둔 보고서를 재사용했나. "1층" | "2층" | ""(재사용 안 함)
     #: ★ 이 값이 없으면 대시보드 ⑤ 「캐시 재사용 N건」이 «영영 못 재는 지표»가 된다.
     #:   화면 표시와 이력 기록이 둘 다 이 값을 읽는다 — 기능만 붙이고 화면을
-    #:   안 고치면 사용자는 캐시가 도는지 모른다 (문제로그 P-63).
+    #:   안 고치면 사용자는 캐시가 도는지 모른다.
     cache_hit: str = ""
     #: 원문·개인정보 없이 stage/model/token/cache/batch/실제 원가만 담는다.
     ai_cost_events: tuple["AiCostEvent", ...] = ()

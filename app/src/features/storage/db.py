@@ -1,12 +1,11 @@
 """SQLite 연결 열기 · 표 만들기(마이그레이션).
 
-★ 새 의존성을 쓰지 않는다 — 파이썬 표준 `sqlite3`만 쓴다 (팀장 지시).
+★ 새 의존성을 쓰지 않는다 — 파이썬 표준 `sqlite3`만 쓴다.
 
 ★ 연결을 오래 들고 있지 않는다. 요청마다 짧게 열고 닫는다 — 웹 요청 코드가
   파이프라인을 `asyncio.to_thread`로 별도 스레드에서 돌리므로(port.py 참고),
   연결 하나를 여러 스레드가 나눠 쓰면 `sqlite3.ProgrammingError`가 난다.
-  짧게 열고 닫으면 스레드 안전성을 별도 잠금 코드 없이 얻는다 (자세한 근거는
-  최종 보고 §위험 요소 — 동시 접속).
+  짧게 열고 닫으면 스레드 안전성을 별도 잠금 코드 없이 얻는다.
 """
 
 from __future__ import annotations
@@ -187,6 +186,16 @@ _SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
         generated_at TEXT NOT NULL,
         created_at   TEXT NOT NULL,
         engine_epoch_digest TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    f"""
+    CREATE TABLE IF NOT EXISTS {constants.TABLE_REPORT_PUBLIC_PROJECTIONS} (
+        report_id       TEXT PRIMARY KEY
+                        REFERENCES {constants.TABLE_REPORTS}(report_id),
+        projection_json TEXT NOT NULL,
+        content_sha256  TEXT NOT NULL,
+        display_sha256  TEXT NOT NULL,
+        created_at      TEXT NOT NULL
     )
     """,
     f"""
@@ -437,7 +446,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     """표가 없으면 만들고, 있으면 그대로 둔다.
 
     ★ 열쇠 링크 표는 그 feature가 자기 모양을 갖고 있다 (`sharelink/store.py`).
-      여기서 다시 적으면 «같은 정의가 두 곳»이 되어 한쪽만 고쳐진다 (P-83과 같은 함정).
+      여기서 다시 적으면 «같은 정의가 두 곳»이 되어 한쪽만 고쳐진다 — 같은 정의가 두 곳이 되는 함정이다.
     """
     from src.features.sharelink import allowlist as share_allow  # noqa: PLC0415
     from src.features.sharelink import store as share_store  # noqa: PLC0415

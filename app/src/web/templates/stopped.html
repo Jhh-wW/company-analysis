@@ -12,7 +12,11 @@
     {% elif result.outcome.value == '회사_못찾음' %}회사를 정확히 확인하지 못했습니다
     {% elif result.outcome.value == '공고_폐기' %}회사 분석을 계속할 수 없습니다
     {% elif result.outcome.value == '게이트_중단' %}출고 전 자동 검증에서 보고서를 내보내지 않았습니다
-    {% else %}오류가 났습니다{% endif %}
+    {# ★ 마지막 갈래는 «기술 오류»만이 아니다 — 조사 도중 초대 링크가 닫히거나
+       기간이 지나도 여기로 온다. 그때 「오류가 났습니다」는 거짓말이라
+       두 경우 모두에 맞는 중립 제목을 쓴다. 무엇이 있었는지는 바로 아래
+       한 줄(result.message)이 그대로 말한다. #}
+    {% else %}조사를 멈췄습니다{% endif %}
   </h1>
   <p class="lede">
     {% if result.outcome.value == '공고_폐기' %}

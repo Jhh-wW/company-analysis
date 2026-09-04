@@ -46,7 +46,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    # Codex/CI의 pipe와 로컬 실행기의 UTF-8 로그 계약을 같게 둔다.
+    # CI의 pipe와 로컬 실행기의 UTF-8 로그 계약을 같게 둔다.
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if callable(reconfigure):

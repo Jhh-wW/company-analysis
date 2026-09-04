@@ -45,7 +45,7 @@ from src.features.pipeline.port import Report, ReportSection, ReportTable
 CONFIDENCE_CONFIRMED: Final[str] = "확정"
 CONFIDENCE_SUSPECTED: Final[str] = "의심"
 
-#: "문장"·"표" — 정본 §「같은 사실을 문장·표·그래프·카드 중 두 형식 이상으로
+#: "문장"·"표" — 「같은 사실을 문장·표·그래프·카드 중 두 형식 이상으로
 #: 반복하지 않는다」의 "형식"을 그대로 이름 붙인 것.
 FORMAT_PROSE: Final[str] = "문장"
 FORMAT_TABLE: Final[str] = "표"
@@ -336,7 +336,7 @@ def _reason(sections: set[str], formats: set[str]) -> str:
 
 
 def find_numeric_duplicates(report: Report) -> tuple[DuplicateFinding, ...]:
-    """정본 §「사실 단일 소유 원칙」 위반 «후보»를 값+단위(+기간) 기준으로 찾는다.
+    """「사실 단일 소유 원칙」 위반 «후보»를 값+단위(+기간) 기준으로 찾는다.
 
     ⛔ 예외를 던지지 않는다. 출고를 막지 않는다. 호출부(`validate_v2` 등)에
     배선돼 있지 않다 — 사람이 실측으로 오탐률을 본 뒤 막을지 정하기 위한

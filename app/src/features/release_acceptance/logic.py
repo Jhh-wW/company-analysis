@@ -229,6 +229,43 @@ class _InputParser(HTMLParser):
             self.value = values.get("value", "")
 
 
+class _IssuedShareUrlParser(HTMLParser):
+    """지정한 id를 가진 원소의 «글자»만 모은다.
+
+    ★ `convert_charrefs`(기본 켜짐)가 `&amp;` 같은 엔티티를 되돌려 준다.
+      템플릿은 자동 escape 하므로 이 되돌림 없이는 주소가 달라진다.
+    """
+
+    def __init__(self, anchor_id: str):
+        super().__init__()
+        self.anchor_id = anchor_id
+        self.anchor_count = 0
+        self.text = ""
+        self._depth = 0
+        self._anchor_tag = ""
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self._depth:
+            # ★ 같은 이름의 태그만 센다 — 안쪽에 `<br>` 같은 «닫는 짝이 없는»
+            #   태그가 있어도 깊이가 어긋나 문서 나머지를 삼키지 않는다.
+            if tag.lower() == self._anchor_tag:
+                self._depth += 1
+            return
+        values = {key.lower(): value or "" for key, value in attrs}
+        if values.get("id") == self.anchor_id:
+            self.anchor_count += 1
+            self._anchor_tag = tag.lower()
+            self._depth = 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._depth and tag.lower() == self._anchor_tag:
+            self._depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self._depth and self.anchor_count == 1:
+            self.text += data
+
+
 class _HrefParser(HTMLParser):
     def __init__(self, expected: str):
         super().__init__()
@@ -246,6 +283,52 @@ def extract_input_value(html: str, name: str) -> str:
     parser = _InputParser(name)
     parser.feed(html)
     return parser.value
+
+
+#: 발급 결과 화면에서 공유 링크 주소가 실리는 «유일한» 칸의 id.
+#: 화면 쪽 계약은 `web/templates/admin_link_issued.html`이 갖고 있다.
+ISSUED_SHARE_URL_ANCHOR_ID = "issued-link-url"
+
+
+def extract_issued_share_url(html: str) -> str:
+    """발급 결과 «화면»에서 공유 링크 주소를 읽는다.
+
+    ★ 왜 본문 전체를 주소로 읽으면 안 되나 — 발급 응답이 텍스트 파일 첨부에서
+      주소·QR을 함께 보여 주는 HTML 화면 1장으로 바뀌었다. 본문을 통째로
+      `urlsplit`에 넣으면 scheme이 빈 값이 되어 loopback 검사에서 튕긴다.
+
+    Raises:
+        AcceptanceFailure: 주소 칸이 없거나, 비어 있거나, 여러 개일 때.
+    """
+    parser = _IssuedShareUrlParser(ISSUED_SHARE_URL_ANCHOR_ID)
+    parser.feed(html)
+    if parser.anchor_count == 0:
+        raise AcceptanceFailure("발급 화면에서 공유 LINK 주소를 찾지 못했습니다")
+    if parser.anchor_count > 1:
+        # 원문이 화면에 두 번 실리면 회수해야 할 곳도 두 곳이 된다.
+        raise AcceptanceFailure("발급 화면에 공유 LINK 주소 칸이 여러 개입니다")
+    issued_url = parser.text.strip()
+    if not issued_url:
+        raise AcceptanceFailure("발급 화면의 공유 LINK 주소 칸이 비어 있습니다")
+    return issued_url
+
+
+def issued_share_link_from_screen(html: str, *, port: int) -> tuple[str, str]:
+    """발급 결과 화면에서 공유 링크 경로와 capability 원문을 읽는다.
+
+    Returns:
+        (`/k/<32자리>` 경로, capability 원문).
+    """
+    issued_url = extract_issued_share_url(html)
+    parsed = urllib.parse.urlsplit(issued_url)
+    if parsed.scheme != "http" or parsed.hostname not in {LOOPBACK_HOST, "localhost"}:
+        raise AcceptanceFailure("발급된 공유 LINK가 loopback HTTP 주소가 아닙니다")
+    if parsed.port != port:
+        raise AcceptanceFailure("발급된 공유 LINK가 수락시험 서버 포트를 가리키지 않습니다")
+    key_match = re.fullmatch(r"/k/([0-9a-f]{32})", parsed.path)
+    if key_match is None or parsed.query or parsed.fragment:
+        raise AcceptanceFailure("발급된 공유 LINK capability 형식이 올바르지 않습니다")
+    return parsed.path, key_match.group(1)
 
 
 def _has_href(html: str, expected: str) -> bool:
@@ -1007,20 +1090,13 @@ def _output_identity_action(
     # 다른 비밀이 섞였는지만 검사하고, 추출 직후부터 로그·DB·최종 출력에는 금지한다.
     tracker.observe(issued, "output:share-issue")
     _require_status(issued, 200, "공유 LINK 발급")
-    issued_url = _decode_html(issued).strip()
-    parsed = urllib.parse.urlsplit(issued_url)
-    if parsed.scheme != "http" or parsed.hostname not in {LOOPBACK_HOST, "localhost"}:
-        raise AcceptanceFailure("발급된 공유 LINK가 loopback HTTP 주소가 아닙니다")
-    if parsed.port != port:
-        raise AcceptanceFailure("발급된 공유 LINK가 수락시험 서버 포트를 가리키지 않습니다")
-    key_match = re.fullmatch(r"/k/([0-9a-f]{32})", parsed.path)
-    if key_match is None or parsed.query or parsed.fragment:
-        raise AcceptanceFailure("발급된 공유 LINK capability 형식이 올바르지 않습니다")
-    share_capability = key_match.group(1)
+    share_path, share_capability = issued_share_link_from_screen(
+        _decode_html(issued), port=port
+    )
     tracker.add_marker("공유 LINK capability", share_capability)
 
     visitor = HttpSession(port)
-    opened = visitor.request("GET", parsed.path)
+    opened = visitor.request("GET", share_path)
     # 이 응답 객체의 url은 클라이언트가 의도적으로 호출한 capability 요청 주소다.
     # 요청 자체를 유출로 세지 않되 body·headers(Location 포함)는 계속 검사한다.
     tracker.observe(

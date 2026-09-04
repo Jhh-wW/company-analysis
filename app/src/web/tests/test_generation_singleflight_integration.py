@@ -106,6 +106,7 @@ def _persist_shared_content(
     report: Report,
     *,
     artifact_root,
+    pdf_bytes: bytes = b"%PDF-1.4\n% single-flight immutable test\n",
 ) -> tuple[ContentSnapshot, delivery_artifact.ArtifactMetadata]:
     captured = dt.datetime(2026, 8, 28, 12, 0, tzinfo=dt.timezone(dt.timedelta(hours=9)))
     source = SourceSnapshot.capture(
@@ -129,7 +130,6 @@ def _persist_shared_content(
         delivery_store.save_cache_namespace(conn, _NAMESPACE)
         delivery_store.save_content_snapshot(conn, content)
         backend = delivery_artifact.FilesystemArtifactBlobBackend(artifact_root)
-        pdf_bytes = b"%PDF-1.4\n% single-flight immutable test\n"
         intent = delivery_artifact.create_blob_write_intent(
             conn,
             backend,
@@ -1115,4 +1115,162 @@ def test_첫provider뒤_heartbeat오류가나면_다음provider는_열지않는�
 
     assert provider_calls == 1
     session.close_provider_context()
+    session.abandon()
+
+
+def test_재사용_한도를_지난_캐시행은_사유를_남기고_지워져_재조사를_막지_않는다(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """오래된 캐시 열쇠가 남으면 재조사가 «저장 단계»에서 계속 막힌다.
+
+    나이를 지난 열쇠를 조용히 미적중으로만 닫으면 그 행이 옛 본문을 계속
+    가리킨다. 그러면 새로 만든 보고서를 같은 열쇠에 연결하는 마지막 단계가
+    「다른 내용을 덮어쓸 수 없다」로 막혀, 손님이 몇 번을 다시 눌러도 같은
+    자리에서 실패하고 그때마다 조사 비용만 나간다.
+    """
+
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path))
+    old_content, old_artifact = _persist_shared_content(
+        _report(),
+        artifact_root=tmp_path / "expired-cache-artifacts",
+    )
+    cache_key = CacheLookupKey.from_preflight(
+        billing_bucket_id="bucket-a",
+        corp_id="00126380",
+        namespace=_NAMESPACE,
+        preflight_identity_digest=_source_digest(),
+        preflight_cache_usable=True,
+        engine_epoch_digest=_BUILD_IDENTITY.epoch_digest,
+    )
+    with storage_db.connect() as conn:
+        delivery_store.bind_cache_entry(
+            conn,
+            key=cache_key,
+            content=old_content,
+            artifact_id=old_artifact.artifact_id,
+            cached_at=old_content.content_generated_at,
+        )
+
+    # 재사용 한도(60일)를 하루 넘긴 시점에서 같은 회사를 다시 조사한다.
+    expired_at = old_content.content_generated_at + dt.timedelta(days=61)
+    monkeypatch.setattr(generation_singleflight.clock, "now_kst", lambda: expired_at)
+
+    session = _session("expired-cache-owner", "bucket-a")
+    assert session.coordinate("00126380", _NAMESPACE, _source_digest()) is None
+    assert session.owns_generation
+    session.abandon()
+
+    with storage_db.connect() as conn:
+        invalidations = conn.execute(
+            f"""
+            SELECT content_snapshot_id, artifact_id, reason_code
+            FROM {delivery_store.TABLE_CACHE_INVALIDATIONS}
+            """
+        ).fetchall()
+        remaining = conn.execute(
+            f"SELECT COUNT(*) FROM {delivery_store.TABLE_CACHE_ENTRIES}"
+        ).fetchone()[0]
+    assert [tuple(row) for row in invalidations] == [
+        (old_content.content_id, old_artifact.artifact_id, "content_expired")
+    ], "만료된 캐시를 지운 사유가 원장에 남지 않았습니다"
+    assert remaining == 0, "나이를 지난 캐시 열쇠가 그대로 남아 있습니다"
+
+    # 다시 만든 보고서가 같은 열쇠에 연결돼야 재조사가 끝까지 간다.
+    fresh_report = Report(
+        company="테스트전자",
+        job="",
+        corp_type="상장사",
+        grade=Grade.PARTIAL,
+        sections=[],
+        generated_at="2026-10-28",
+        schema_version="company-report-v2-composer",
+        as_of_date="2026-10-28",
+    )
+    fresh_content, fresh_artifact = _persist_shared_content(
+        fresh_report,
+        artifact_root=tmp_path / "regenerated-cache-artifacts",
+        pdf_bytes=b"%PDF-1.4\n% regenerated after cache expiry\n",
+    )
+    with storage_db.connect() as conn:
+        delivery_store.bind_cache_entry(
+            conn,
+            key=cache_key,
+            content=fresh_content,
+            artifact_id=fresh_artifact.artifact_id,
+            cached_at=expired_at,
+        )
+        assert delivery_store.cache_entry_matches_exactly(
+            conn,
+            key=cache_key,
+            content_snapshot_id=fresh_content.content_id,
+            artifact_id=fresh_artifact.artifact_id,
+        )
+
+
+def test_만료된_캐시를_지울_때_같은_열쇠의_완료_결과도_함께_닫는다(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """열쇠만 지우고 완료 결과를 남기면 다음 요청이 옛 본문을 그대로 받는다.
+
+    완료 결과는 동시 요청끼리 잠깐 나눠 쓰라고 남기는 표식이다. 그 표식이
+    가리키는 본문이 이미 재사용 한도를 지났다면, 표식도 같이 닫아야 다음
+    손님이 새로 조사받는다.
+    """
+
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path))
+    content, artifact = _persist_shared_content(
+        _report(),
+        artifact_root=tmp_path / "expired-fanout-artifacts",
+    )
+    cache_key = CacheLookupKey.from_preflight(
+        billing_bucket_id="bucket-a",
+        corp_id="00126380",
+        namespace=_NAMESPACE,
+        preflight_identity_digest=_source_digest(),
+        preflight_cache_usable=True,
+        engine_epoch_digest=_BUILD_IDENTITY.epoch_digest,
+    )
+    lease_key = singleflight.LeaseKey(
+        billing_bucket_id="bucket-a",
+        corp_id="00126380",
+        cache_namespace_id=_NAMESPACE_ID,
+        source_identity_digest=_source_digest(),
+        engine_epoch_digest=_BUILD_IDENTITY.epoch_digest,
+    )
+    # 본문은 이미 한도를 지났는데 완료 표식만 방금 남은 상태를 만든다.
+    expired_at = content.content_generated_at + dt.timedelta(days=61)
+    with storage_db.connect() as conn:
+        delivery_store.bind_cache_entry(
+            conn,
+            key=cache_key,
+            content=content,
+            artifact_id=artifact.artifact_id,
+            cached_at=content.content_generated_at,
+        )
+        acquired = singleflight.acquire(
+            conn,
+            key=lease_key,
+            owner_id="stale-fanout-owner",
+            now=expired_at,
+            lease_ttl=dt.timedelta(minutes=15),
+        )
+        assert acquired.handle is not None
+        assert singleflight.complete(
+            conn,
+            handle=acquired.handle,
+            content_snapshot_id=content.content_id,
+            artifact_id=artifact.artifact_id,
+            now=expired_at,
+            result_fanout_ttl=generation_singleflight.RESULT_FANOUT_TTL,
+        )
+
+    monkeypatch.setattr(generation_singleflight.clock, "now_kst", lambda: expired_at)
+    session = _session("after-expiry-owner", "bucket-a")
+
+    assert session.coordinate("00126380", _NAMESPACE, _source_digest()) is None, (
+        "재사용 한도를 지난 본문을 완료 표식으로 다시 돌려줬습니다"
+    )
+    assert session.owns_generation
     session.abandon()

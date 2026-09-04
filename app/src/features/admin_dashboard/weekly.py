@@ -15,6 +15,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from src.core.constants import REPLAY_MODEL_MARK
 from src.features.admin_dashboard import store
 from src.features.observability import constants as observability_constants
 from src.features.observability import lifecycle
@@ -127,7 +128,14 @@ def _collect_weekly_data(conn, *, start: str, end: str) -> dict[str, list[tuple[
         successes = sum(
             record.end_step == observability_constants.END_STEP_COMPLETE for record in records
         )
-        costs = sum(record.cost_krw for record in records)
+        # ★ 비용만 데모 리플레이 기록을 뺀다. 데모는 저장된 결과를
+        #   되돌려 줄 뿐 AI를 안 부르므로 0원처럼 다뤄야 한다. 건수(len(records)·
+        #   successes)는 그대로 센다 — 데모도 «실행»은 실행이다. 지워졌던
+        #   observability/metrics.py의 build_dashboard와 같은 판정·같은 결정이다.
+        costs = sum(
+            record.cost_krw for record in records
+            if REPLAY_MODEL_MARK not in (record.model or "")
+        )
         overview.append((channel, len(records), successes, len(records) - successes, costs, "0"))
 
     new_issues = _issue_rows(conn, start=start, end=end)

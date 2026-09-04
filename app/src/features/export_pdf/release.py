@@ -37,6 +37,7 @@ from src.features.export_pdf.content_manifest import (
     PDF_MANIFEST_SHA256_KEY,
     PDF_MANIFEST_VERSION_KEY,
 )
+from src.shared.report_generation.public_projection import PUBLIC_PROJECTION_VERSION
 from src.features.export_pdf.logic import PDFGenerationError, build_pdf
 from src.features.pipeline.port import Report
 from src.features.provenance.sources import visible_citations
@@ -48,6 +49,18 @@ logger = logging.getLogger(__name__)
 #: ★ 보고서 값을 절대 섞지 않는다 — 이 문구는 공개 화면에 그려진다.
 RENDER_BLOCKED_REASON: Final[str] = "PDF 파일을 만드는 단계에서 멈췄습니다"
 RENDER_BLOCKED_MESSAGE: Final[str] = "PDF 전 페이지 검수 재료를 만들지 못했습니다"
+
+#: PDF 메타에 실릴 수 있는 «공개 내용 지문»의 버전 두 가지.
+#:
+#: ★ 봉인(``PublicReportProjection``)이 붙은 v2 FULL 보고서는
+#:   ``PUBLIC_PROJECTION_VERSION``, 봉인이 없는 v1·옛 v2 저장본은
+#:   ``CONTENT_MANIFEST_VERSION``을 싣는다. 여기서는 «아는 버전인가»만 본다 —
+#:   어느 쪽이 맞는 값인지는 보고서를 들고 있는 자동출고 검사
+#:   (``automatic_release.content_manifest_matches``)가 판정한다. 이 함수는
+#:   보고서 없이 PDF bytes와 후보만 맞대는 자리라 그 판정을 할 수 없다.
+KNOWN_CONTENT_MANIFEST_VERSIONS: Final[frozenset[str]] = frozenset(
+    {CONTENT_MANIFEST_VERSION, PUBLIC_PROJECTION_VERSION}
+)
 
 PNG_MAGIC: Final[bytes] = b"\x89PNG\r\n\x1a\n"
 SHA256_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
@@ -80,7 +93,7 @@ class PDFReleaseBlockedError(RuntimeError):
 class PdfRenderBlockedError(PDFReleaseBlockedError):
     """「PDF 후보 만들기」 자체가 실패했다 — 자동검사(4종)는 돌지도 않았다.
 
-    ★ 왜 «전용» 예외인가 (2026-08-28)
+    ★ 왜 «전용» 예외인가
       맨 ``PDFReleaseBlockedError`` 를 던지는 자리가 이 모듈에만 12곳이고
       대부분은 렌더 실패가 아니다(출고 승인 없음·장부 무결성 등).
       「사유가 없으면 렌더 실패」로 뭉뚱그리면 **화면이 또 틀린 말을 한다.**
@@ -93,7 +106,7 @@ class PdfRenderBlockedError(PDFReleaseBlockedError):
 def _render_blocked() -> PdfRenderBlockedError:
     """「PDF 만들기」 실패를 «사유 있는» 차단으로 바꾼다.
 
-    ★ 왜 필요한가 (2026-08-28 실측)
+    ★ 왜 필요한가 (실측)
       이 자리에서 던지던 맨 예외에는 ``reasons``가 없어서, 화면이
       「자동 출고 승인을 확인하지 못했습니다」라는 «다른 단계» 문구로 떨어졌다.
       자동검사(4종)는 돌지도 않았는데 자동검사가 막은 것처럼 보였다.
@@ -108,7 +121,7 @@ def _render_blocked() -> PdfRenderBlockedError:
 def _blocked(reason: str) -> PdfRenderBlockedError:
     """「PDF 후보 만들기」 구조 검사 실패 — «어느 검사»였는지를 로그에 남긴다.
 
-    ★ 왜 나눴나 (2026-08-28)
+    ★ 왜 나눴나
       이 검사들은 사유 없이 던져서, 화면도 로그도 「자동 출고 승인을
       확인하지 못했습니다」 한 줄뿐이었다 — **관리자가 원인을 찾을 수 없었다.**
 
@@ -350,7 +363,6 @@ def report_fact_id_ledger(report: Report) -> tuple[str, ...]:
     때문이다. 그래서 v2에서는 본문·요약이 실제로 표시하는 인용 번호 집합을
     장부로 삼는다: 인용이 바뀌면(추가·삭제·번호 변경) 이 장부도 바뀌어 해시
     결속이 깨진다 — v1의 fact_id 결속과 같은 역할을 하는 대체 결속이다.
-    실행계획 04장 3-4절 2항.
     """
 
     if report.schema_version == ENGINE_V2_SCHEMA_VERSION:
@@ -367,7 +379,7 @@ def prepare_pdf_release(report: Report, *, render_scale: float = 1.5) -> PdfRele
     v2(엔진 v2 composer) 보고서는 v1 canonical 게이트(``build_published_report``)
     를 건너뛰고 composer 자체 3검사(``validate_v2``)만 다시 확인한 뒤 검증된
     Report를 그대로 조립에 태운다. 사실 장부는 ``report_fact_id_ledger``가
-    만드는 인용 번호 기반 대체 결속을 쓴다 (실행계획 04장 3-4절 2항).
+    만드는 인용 번호 기반 대체 결속을 쓴다.
     """
 
     try:
@@ -765,7 +777,7 @@ def _candidate_integrity_problems(
                     candidate_manifest_sha256,
                 )
             ):
-                if actual_manifest_version != CONTENT_MANIFEST_VERSION:
+                if actual_manifest_version not in KNOWN_CONTENT_MANIFEST_VERSIONS:
                     problems.append("최종 PDF 공개 내용 지문 버전이 올바르지 않습니다")
                 if not is_valid_sha256(actual_manifest_sha256):
                     problems.append("최종 PDF 공개 내용 지문 형식이 올바르지 않습니다")

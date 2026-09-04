@@ -9,7 +9,6 @@
   canonical의 source_id·URL·발행처·원문 위치는 Markdown이 아니라 Report JSON
   등록부가 보존한다 — 시험(`tests/test_sources.py`, `storage/tests`)으로 각각 증명한다.
 
-정본: 확정/07_출력/2_규칙/01_배치와근거표기.md
 """
 
 from __future__ import annotations
@@ -416,7 +415,7 @@ class Source:
     """출처 목록 한 줄 — 문장 뒤 `[번호]`가 가리키는 실제 출처.
 
     ★ `number`는 **AI가 고른 조각 번호를 그대로 쓴다.** 여기서 새로 매기지
-      않는다 (정본 §근거 표기 — 번호).
+      않는다 (근거 표기 규칙 — 번호).
     """
 
     number: int
@@ -481,7 +480,7 @@ class Source:
 
     @property
     def is_valid(self) -> bool:
-        """뉴스는 보도일과 언론사 도메인이 반드시 있어야 한다 (정본 §근거 표기 — 뉴스)."""
+        """뉴스는 보도일과 언론사 도메인이 반드시 있어야 한다 (근거 표기 규칙 — 뉴스)."""
         if self.number <= 0 or not self.label.strip():
             return False
         if self.kind is SourceKind.NEWS:
@@ -631,6 +630,32 @@ def has_valid_provenance_seal(source: Source) -> bool:
         hashlib.sha256,
     ).hexdigest()
     return hmac.compare_digest(received, expected)
+
+
+def stored_sources_seal_problem(sources: Iterable[Source]) -> str:
+    """저장본에서 되살린 출처 목록의 수집 도장 상태를 한 줄로 알려준다.
+
+    ★ 왜 「하나도 없으면 통과」인가 — 도장이 생기기 전에 저장된 본문과
+      간이 실행 결과에는 도장 칸이 처음부터 비어 있다. 그건 변조가 아니라
+      정해진 상태이므로 문제로 세지 않는다.
+
+    ★ 왜 「하나라도 있으면 전부」인가 — 한 줄만 도장을 지워 검사를 피해 가는
+      길을 막기 위해서다. 도장을 쓰기 시작한 본문은 모든 줄이 도장을 갖는다.
+
+    Returns:
+        문제가 없으면 빈 문자열, 있으면 사람이 읽을 수 있는 한 줄 사유.
+    """
+
+    rows = list(sources)
+    if not any(str(item.provenance_seal or "").strip() for item in rows):
+        return ""
+    for item in rows:
+        if not has_valid_provenance_seal(item):
+            return (
+                f"{item.number}번 출처의 수집 도장이 없거나 "
+                "저장된 뒤 값이 바뀌었습니다"
+            )
+    return ""
 
 
 def official_domain_attestation_problem(
@@ -933,7 +958,7 @@ def count_missing_dates(sources: list[Source]) -> int:
     """출처일·수집일이 하나라도 빠진 공시 자료 개수 (C3).
 
     맨 아래 목록에 날짜가 한곳에 모이는 «딸려 오는 효과»를 여기서 쓴다
-    (정본 §근거 표기 — 딸려 오는 효과).
+    (근거 표기 규칙 — 딸려 오는 효과).
 
     ⚠️ 알려진 한계 — 마크다운으로 한 번 왕복(render → parse)하면, 날짜가
       하나도 없던 공시 항목은 겉모양이 '기타'와 똑같아져 더 이상 공시로

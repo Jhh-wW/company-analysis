@@ -5,7 +5,7 @@ on:
     # ★ 기본 브랜치를 반드시 포함한다. 전에 여기 적힌 이름이 실제 작업 브랜치와
     #   달라서 자동 시험이 «한 번도 돌지 않은» 적이 있다. 브랜치 이름을 바꾸면
     #   이 줄도 같이 바꿔야 한다.
-    branches: [main]
+    branches: [main, "release/**"]
   pull_request:
 
 permissions:

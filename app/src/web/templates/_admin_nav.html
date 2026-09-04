@@ -1,10 +1,20 @@
-<nav class="frame-menu" aria-label="운영 대시보드 메뉴">
-  <a href="/admin" {% if dashboard_nav == "today" %}aria-current="page"{% endif %}>오늘</a>
-  <a href="/admin/issues" {% if dashboard_nav == "issues" %}aria-current="page"{% endif %}>문제·보고서</a>
-  <a class="frame-desktop-link" href="/admin/members" {% if dashboard_nav == "members" %}aria-current="page"{% endif %}>친구</a>
-  <a class="frame-desktop-link" href="/admin/links" {% if dashboard_nav == "links" %}aria-current="page"{% endif %}>지원 LINK</a>
-  <a class="frame-desktop-link" href="/admin/feedback-reports" {% if dashboard_nav == "feedback" %}aria-current="page"{% endif %}>신고 관리</a>
-  <a class="frame-desktop-link" href="/admin/settings" {% if dashboard_nav == "settings" %}aria-current="page"{% endif %}><span aria-hidden="true">⚙</span> 설정</a>
+{# 관리자 메뉴 — 6묶음 정보 구조.
+
+   ★ 이름은 사람 말로 쓴다. 「LINK」·「MEMBER」 같은 내부 자료 이름을 메뉴에 두면
+     읽는 사람이 자기가 어디로 가는지 알 수 없다.
+   ★ PC와 폰이 «같은 여섯»을 본다. 앞서 넷은 `frame-desktop-link`로 폰에서 숨겨
+     있었는데, 그러면 폰에서는 갈 수 있는 화면이 둘뿐인 것처럼 보였다. 폰에서
+     «바꾸는» 일을 막는 것은 메뉴가 아니라 폼을 숨기는 규칙이다
+     (`style.css`의 `.admin-frame form { display: none; }`).
+   ★ 신고 관리는 「보고서」 묶음에 든다. 그래서 그 화면에서도
+     보고서 메뉴가 현재 위치로 표시된다. #}
+<nav class="frame-menu" aria-label="관리자 메뉴">
+  <a href="/admin" {% if dashboard_nav == "today" %}aria-current="page"{% endif %}>오늘 상태</a>
+  <a href="/admin/links" {% if dashboard_nav == "links" %}aria-current="page"{% endif %}>초대 링크</a>
+  <a href="/admin/members" {% if dashboard_nav == "members" %}aria-current="page"{% endif %}>회원</a>
+  <a href="/admin/issues" {% if dashboard_nav in ("issues", "feedback") %}aria-current="page"{% endif %}>보고서</a>
+  <a href="/admin/costs" {% if dashboard_nav == "costs" %}aria-current="page"{% endif %}>비용</a>
+  <a href="/admin/settings" {% if dashboard_nav == "settings" %}aria-current="page"{% endif %}>운영</a>
 </nav>
 {% if dashboard_service is defined and dashboard_service.status == "maintenance" %}
   <aside class="frame-service-alert" role="status" aria-label="전역 점검 상태">

@@ -62,22 +62,27 @@ def test_pc_dashboard_has_exactly_six_menus_and_contextual_access_actions():
         session = auth_logic.create_session("admin@example.com", True)
         client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
         response = client.get("/admin")
-        destination = client.get("/admin/access")
+        destination = client.get("/admin/access", follow_redirects=False)
         members = client.get("/admin/members")
         links = client.get("/admin/links")
+        costs = client.get("/admin/costs")
         settings = client.get("/admin/settings")
 
     assert response.status_code == 200
+    # ★ 여섯 묶음의 이름을 사람 말로 바꿨다.
+    #   옛 이름(오늘·문제·보고서·친구·지원 LINK·신고 관리·⚙ 설정)에서 옮겼다.
+    #   자세한 순서·주소·내부 용어 계약은 test_admin_information_architecture.py.
     menu = response.text.split('<nav class="frame-menu"', 1)[1].split("</nav>", 1)[0]
     assert menu.count("<a ") == 6
-    assert ">오늘</a>" in menu and ">문제·보고서</a>" in menu
-    assert ">친구</a>" in menu and ">지원 LINK</a>" in menu and "⚙" in menu
-    assert ">신고 관리</a>" in menu
+    assert ">오늘 상태</a>" in menu and ">보고서</a>" in menu
+    assert ">회원</a>" in menu and ">초대 링크</a>" in menu
+    assert ">비용</a>" in menu and ">운영</a>" in menu
     assert 'href="/admin/access"' not in menu
-    assert destination.status_code == 200
-    assert "초대·LINK 관리" in destination.text
-    assert "LINK 발급" in destination.text
-    assert "친구 초대" in destination.text
-    assert 'href="/admin/access#invited-members-title"' in members.text
-    assert 'href="/admin/access#company-links-title"' in links.text
-    assert 'href="/admin/access"' in settings.text
+    # ★ 한 화면이던 초대·LINK 관리가 링크·회원·비용 셋으로
+    #   나뉘었다. 옛 주소는 지우지 않고 링크 화면으로 303 한다.
+    assert destination.status_code == 303
+    assert destination.headers["location"] == "/admin/links"
+    assert "링크 발급" in links.text
+    assert "친구 초대" in members.text
+    assert costs.status_code == 200 and "오늘 나간 돈" in costs.text
+    assert 'href="/admin/costs"' in settings.text

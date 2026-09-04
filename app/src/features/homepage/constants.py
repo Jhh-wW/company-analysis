@@ -1,12 +1,16 @@
 """홈페이지 수집 기능이 쓰는 값. 전부 여기서만 바꾼다 (매직 넘버 금지).
 
-정본: 확정/03_수집/2_규칙/01_소스정책.md §2 회사 홈페이지
-      확정/05_생성/2_규칙/02_유형별소스.md (2·4-2·4-3 칸의 홈페이지 소스)
+이 파일이 다루는 것 — 2·4-2·4-3 칸이 쓰는 회사 홈페이지 소스.
 """
 
 from __future__ import annotations
 
 from typing import Final
+
+from src.shared.report_evidence.constants import (
+    SOURCE_KIND_OFFICIAL_RECRUIT_PAGE,
+    SOURCE_KIND_OFFICIAL_WEB_PAGE,
+)
 
 # ── 접속 ─────────────────────────────────────────────────
 
@@ -134,9 +138,9 @@ FRAGMENT_KIND: Final[str] = "홈페이지"
 
 #: 회사·기술 소개 페이지 우선순위 — 링크 주소에 이 글자가 들어 있으면
 #: 먼저 읽는다. 앞에 있는 것일수록 더 먼저다.
-#: 정본: 확정/05_생성/2_규칙/02_유형별소스.md — 2·4-2·4-3 칸은 홈페이지의
+#: 2·4-2·4-3 칸은 홈페이지의
 #: 회사소개·R&D·제품 소개가 재료다.
-#: 일반 홈페이지 HTML은 회사소개·사업과 P-106에서 필요성이 확인된
+#: 일반 홈페이지 HTML은 회사소개·사업과 실측으로 필요성이 확인된
 #: 비전·보도자료를 먼저 읽는다. IR 자료실과 PDF는 별도 공식 IR 수집기가
 #: 담당하므로, IR·주가·실적 목록이 6쪽 예산을 먼저 소진해 핵심 페이지를
 #: 놓치게 하면 안 된다.
@@ -145,13 +149,13 @@ FRAGMENT_KIND: Final[str] = "홈페이지"
 #:   경영철학·경영이념·핵심가치·인재상·윤리기준. 이 페이지들은 이름에
 #:   `about`·`business`가 없어 `company`(회사 공통 경로)로만 걸렸고, 그러면
 #:   연혁·조직도·CI/BI와 같은 순위가 되어 `MAX_PAGES`(6쪽) 예산 밖으로 밀린다.
-#:   실측((주)진영, 2026-08-25): 경영철학이 실린 `/company/overview.php`가
+#:   실측((주)진영): 경영철학이 실린 `/company/overview.php`가
 #:   후보 42개 중 18번째라 6쪽 안에 못 들어왔다. `MAX_PAGES`를 올리면 모든
 #:   회사의 수집 시간이 늘어나므로, 예산은 그대로 두고 «순서»만 바꾼다.
 #:
 #: ⚠️ 여기 앞쪽에 넣는 말은 «회사 소개 경로에서만 쓰이는» 것으로 제한한다.
 #:   흔한 일반 단어를 올리면 엉뚱한 페이지가 6쪽을 먼저 차지한다.
-#:   실측 반례(삼성전자, 2026-08-25): 맨 앞에 `overview`만 넣었더니
+#:   실측 반례(삼성전자): 맨 앞에 `overview`만 넣었더니
 #:   `/sustainability/accessibility/overview/`가 1등이 되어 접근성 하위
 #:   페이지가 예산을 다 먹었고, 경영이념(인재제일·최고지향·변화선도·정도경영·
 #:   상생추구)이 실린 `/about-us/brand-identity/brand-story/`를 **놓쳤다**.
@@ -286,9 +290,9 @@ EXCLUDED_EXTENSIONS: Final[tuple[str, ...]] = (
     ".mp3",
 )
 
-# ── 인증서 이름 불일치 우회 (C안, 문제로그 P-46) ────────────
+# ── 인증서 이름 불일치 우회 (C안) ────────────
 #
-# 사용자 결정 C안: 인증서 검증은 절대 끄지 않는다. 대신 인증서에 적힌
+# 제품 결정 C안: 인증서 검증은 절대 끄지 않는다. 대신 인증서에 적힌
 # 「진짜 이름」이 원래 주소와 «같은 회사」로 보일 때만 그 이름으로
 # 검증을 켠 채 다시 접속한다. 다르면(예: 호스팅 업체 기본 인증서) 포기한다.
 
@@ -321,6 +325,9 @@ MULTI_LABEL_PUBLIC_SUFFIXES: Final[frozenset[str]] = frozenset(
 )
 
 #: 도메인 끝 «한 칸」만 공개 접미사로 보는 경우 (일반 gTLD·국가 코드).
+#: 실제 회사가 등록해 쓸 수 있는 진짜 TLD만 담는다 - 아래
+#: TEST_FIXTURE_ONLY_SINGLE_LABEL_SUFFIXES 와 절대 섞지 않는다(정정 2 —
+#: 실제 커버리지 항목으로 오해되면 안 된다).
 SINGLE_LABEL_PUBLIC_SUFFIXES: Final[frozenset[str]] = frozenset(
     {
         "kr",
@@ -337,3 +344,218 @@ SINGLE_LABEL_PUBLIC_SUFFIXES: Final[frozenset[str]] = frozenset(
         "shop",
     }
 )
+
+#: 오프라인 시험 픽스처 전용 TLD - 실제 등록 도메인 커버리지가 아니다.
+#: example 은 RFC 2606이 등록을 영구히 금지한 예약 TLD라 실제 회사가
+#: 등록해 쓸 수 없다(오탐 위험 0). fail-closed 수정 후 fixture가
+#: company.example 같은 주소로 실제 코드 경로(등록 도메인 판정, 하위
+#: 도메인 자동결속)를 그대로 지나가게 하려고 별도 상수로 둔다(정정 2).
+#: SINGLE_LABEL_PUBLIC_SUFFIXES 와 절대 합치지
+#: 않고, 판정 시점에만(registrable_core_name) 두 집합을 함께 본다.
+TEST_FIXTURE_ONLY_SINGLE_LABEL_SUFFIXES: Final[frozenset[str]] = frozenset({"example"})
+
+# ── 넓은 공식 웹 수집 (Writer B, P-8da84a36) ────────────────
+#
+# 여러 공식 호스트(채용·IR·뉴스룸·정적 HTML)에 흩어진 공식 문서를 결속 근거와
+# 함께 모으는 별도 수집기(wide_collect.py 등)의 상한. 아래 숫자는 실사용
+# 트래픽으로 검증한 값이 아니라 «관측용 상한»이며, 이 값에 걸렸다고 해서
+# 정상 회사를 거절하는 근거로 쓰면 안 된다 — 상한 도달은 TRUNCATED로 남긴다.
+
+#: 도메인군 전체(root+apex/www 짝+같은 등록 도메인 하위호스트)에서 시도하는
+#: 최대 일반 웹 페이지 수(robots.txt·sitemap.xml 조회는 포함하지 않는다).
+WIDE_MAX_PAGES: Final[int] = 12
+
+#: 도메인군 전체에서 내려받기를 시도하는 공식 IR PDF 최대 수.
+WIDE_MAX_IR_DOCUMENTS: Final[int] = 3
+
+#: robots·sitemap·모든 페이지·모든 IR PDF를 합친 전체 수집 상한(초).
+WIDE_COLLECTION_TIMEOUT_SEC: Final[int] = 45
+
+#: 일반 웹 페이지 전체(여러 호스트 합계)에서 내려받는 최대 바이트.
+#: 페이지 수 상한보다 이 예산이 우선한다 — 큰 페이지 몇 개가 12쪽 예산을
+#: 다 쓰기 전에 시간·바이트로 먼저 멈출 수 있게 한다.
+WIDE_MAX_TOTAL_BYTES: Final[int] = 6 * 1024 * 1024
+
+#: 결속 근거가 있어도 무한히 늘지 않도록 두는 호스트 수 상한
+#: (root 1개 + apex/www 짝 + 같은 등록 도메인 하위호스트 합계).
+WIDE_MAX_HOSTS: Final[int] = 8
+
+#: sitemap.xml 하나에서 읽는 최대 바이트.
+WIDE_MAX_SITEMAP_BYTES: Final[int] = 2 * 1024 * 1024
+
+#: sitemap.xml에서 뽑아 후보 큐에 넣는 최대 URL 항목 수.
+WIDE_MAX_SITEMAP_ENTRIES: Final[int] = 200
+
+#: 문서 하나에서 보존하는 usable_ranges(본문 구간) 최대 개수.
+WIDE_MAX_USABLE_RANGES_PER_DOCUMENT: Final[int] = 40
+
+#: usable_ranges 구간 하나의 최대 글자 수.
+WIDE_MAX_CHARS_PER_RANGE: Final[int] = 1_500
+
+#: 구간으로 남기기엔 너무 짧은 글자 수(메뉴 부스러기 제외).
+WIDE_MIN_CHARS_PER_RANGE: Final[int] = 40
+
+#: 문서 identity의 source_kind 값.
+WIDE_SOURCE_KIND_WEB_PAGE: Final[str] = SOURCE_KIND_OFFICIAL_WEB_PAGE
+WIDE_SOURCE_KIND_IR_PDF: Final[str] = "official_ir_pdf"
+WIDE_SOURCE_KIND_RECRUIT_PAGE: Final[str] = SOURCE_KIND_OFFICIAL_RECRUIT_PAGE
+
+#: 문서·attempt의 requirement 값.
+WIDE_REQUIREMENT_REQUIRED: Final[str] = "REQUIRED"
+WIDE_REQUIREMENT_OPTIONAL: Final[str] = "OPTIONAL"
+
+#: attempt의 state 값. 「없다」와 「못 가져옴」은 반드시 구분한다.
+WIDE_ATTEMPT_OK: Final[str] = "OK"
+WIDE_ATTEMPT_MISSING: Final[str] = "MISSING"
+WIDE_ATTEMPT_FAILED: Final[str] = "FAILED"
+WIDE_ATTEMPT_TRUNCATED: Final[str] = "TRUNCATED"
+
+#: 원문 위치·수집기 계약에 함께 봉인할 버전 문자열.
+WIDE_COLLECTOR_VERSION: Final[str] = "homepage-wide-collector/2"
+WIDE_PARSER_VERSION: Final[str] = "homepage-wide-parser/2"
+
+#: 채용·IR·뉴스룸·블로그 호스트·경로를 먼저 살펴보게 하는 우선순위 키워드.
+WIDE_PRIORITY_HOST_KEYWORDS: Final[tuple[str, ...]] = (
+    "recruit",
+    "career",
+    "careers",
+    "jobs",
+    "채용",
+    "ir",
+    "investor",
+    "news",
+    "press",
+    "newsroom",
+    "blog",
+)
+
+#: 공식 페이지에 링크돼 있어도 «회사의 다른 공식 채널»로 보지 않는 흔한
+#: 소셜/광고/분석 호스트 접미사. 후보 결속 대상에서 제외한다(품질 필터,
+#: SSRF 방어와는 무관 — 그 방어는 항상 safe_http가 담당한다).
+WIDE_EXCLUDED_LINKED_HOST_SUFFIXES: Final[tuple[str, ...]] = (
+    "facebook.com",
+    "instagram.com",
+    "youtube.com",
+    "youtu.be",
+    "twitter.com",
+    "x.com",
+    "linkedin.com",
+    "kakao.com",
+    "pf.kakao.com",
+    "band.us",
+    "google.com",
+    "googletagmanager.com",
+    "google-analytics.com",
+    "doubleclick.net",
+    "naver.com",
+    "channel.io",
+)
+
+#: 넓은 공식 웹 수집기가 attempt.slot_ids·조각 태그에 쓰는 «수집기 필수 슬롯»
+#: 목록의 «사본»이다(장별).
+#: ★ 정본은 `app/src/shared/report_evidence/policy.py`다. 이 사본은 그 파일의
+#:   `REQUIRED_EVIDENCE_SLOTS_BY_SECTION`에서 `INJECTED_EVIDENCE_SLOTS_BY_SECTION`
+#:   을 뺀 값과 정확히 같다(실측). 정본이 바뀌면 이 사본도 다시 대조해야 한다.
+#: ★ `composer/constants.py`의 `CLAIM_SLOTS_BY_SECTION`과는 다른 목록이다.
+#:   `competitive_position:self_context`는 composer 목록에 없는 새 슬롯으로,
+#:   자사 강점·시장 내 위치를 회사 스스로 서술한 페이지 전용이다 — 비교
+#:   슬롯 5개는 이 수집기가 만들지 않는다(구조화 검증기가 다른 소스에서 별도 주입).
+WIDE_REQUIRED_SLOT_IDS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
+    "identity": ("identity:corporate_identity", "identity:business_definition"),
+    "business_model": (
+        "business_model:revenue_model",
+        "business_model:customer_type",
+        "business_model:value_exchange",
+    ),
+    "portfolio": ("portfolio:product_role", "portfolio:revenue_link"),
+    "past_changes": ("past_changes:completed_execution",),
+    "current_challenges": ("current_challenges:issue", "current_challenges:response"),
+    "future_strategy": ("future_strategy:stated_plan", "future_strategy:plan_status"),
+    "operations_partners": (
+        "operations_partners:value_chain",
+        "operations_partners:operating_role",
+    ),
+    "culture": ("culture:work_principle", "culture:verified_case"),
+    #: composer 목록에 없는 새 슬롯 — 자사 서술 원문 전용, 하나뿐이다.
+    "competitive_position": ("competitive_position:self_context",),
+}
+
+#: 위 dict을 평탄화한 전체 슬롯 목록(중복 없음) — attempt.slot_ids 참고·검증용.
+WIDE_REQUIRED_SLOT_IDS: Final[tuple[str, ...]] = tuple(
+    slot
+    for slots in WIDE_REQUIRED_SLOT_IDS_BY_SECTION.values()
+    for slot in slots
+)
+
+#: URL 안의 페이지 유형 키워드 → 후보 슬롯 집합. `wide_domain.slot_ids_for_url`과
+#: `wide_fragments.py`가 함께 재사용한다(같은 표 하나만 둔다 — 중복 금지).
+#: 첫 번째로 맞는 키워드 묶음을 쓰므로 튜플 순서가 우선순위다. 채용→culture,
+#: 제품→portfolio·business_model, 뉴스룸/IR/비전·전략→future_strategy·
+#: past_changes, 회사소개→identity·competitive_position:self_context.
+WIDE_SLOT_KEYWORD_MAP: Final[tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]] = (
+    (
+        ("recruit", "career", "careers", "jobs", "채용", "인재", "culture"),
+        WIDE_REQUIRED_SLOT_IDS_BY_SECTION["culture"],
+    ),
+    (
+        ("product", "products", "service", "tech", "portfolio"),
+        WIDE_REQUIRED_SLOT_IDS_BY_SECTION["portfolio"]
+        + WIDE_REQUIRED_SLOT_IDS_BY_SECTION["business_model"],
+    ),
+    (
+        ("news", "press", "newsroom", "blog", "ir", "investor", "vision", "strategy", "future"),
+        WIDE_REQUIRED_SLOT_IDS_BY_SECTION["future_strategy"]
+        + WIDE_REQUIRED_SLOT_IDS_BY_SECTION["past_changes"],
+    ),
+    (
+        ("about", "company", "overview"),
+        WIDE_REQUIRED_SLOT_IDS_BY_SECTION["identity"]
+        + WIDE_REQUIRED_SLOT_IDS_BY_SECTION["competitive_position"],
+    ),
+    (
+        ("business",),
+        WIDE_REQUIRED_SLOT_IDS_BY_SECTION["business_model"],
+    ),
+    (
+        ("partner", "partnership"),
+        WIDE_REQUIRED_SLOT_IDS_BY_SECTION["operations_partners"],
+    ),
+)
+
+#: 조각(fragment) 본문에서 슬롯 근거를 확인하는 직접 신호 키워드.
+#: URL 경로는 검사 범위를 좁힐 뿐, 이 본문 신호가 없으면 조각을 만들지
+#: 않는다(`wide_fragments.py`). 그래서 감사보고서의 숫자 표나 빈 회사소개
+#: 페이지가 URL 이름만으로 사업모델·문화 슬롯을 채울 수 없다.
+WIDE_SLOT_BODY_KEYWORDS: Final[dict[str, tuple[str, ...]]] = {
+    "identity:corporate_identity": ("설립", "연혁", "사명", "비전", "미션"),
+    "identity:business_definition": (
+        "사업영역", "주요사업", "주요 사업", "사업을 영위", "전문기업",
+        "제조·판매", "제조 및 판매",
+    ),
+    "business_model:revenue_model": (
+        "매출 구조", "수익 모델", "수익모델", "판매에서 발생", "판매로 매출",
+        "구독료", "이용료", "수수료",
+    ),
+    "business_model:customer_type": (
+        "고객사", "주요 고객", "기업 고객", "개인 고객", "b2b", "b2c",
+        "수요처", "이용자에게",
+    ),
+    "business_model:value_exchange": (
+        "가치를 제공", "서비스를 제공", "솔루션을 제공", "혜택을 제공",
+        "문제를 해결", "구독 서비스",
+    ),
+    "portfolio:product_role": (
+        "주력 제품", "핵심 제품", "대표 제품", "제품군", "서비스 라인업", "솔루션",
+    ),
+    "portfolio:revenue_link": ("매출 비중", "주력", "핵심 제품", "라인업"),
+    "past_changes:completed_execution": ("완료", "달성", "출시했", "런칭했", "성과"),
+    # current_challenges의 issue/response는 낱말표로 판정하지 않는다.
+    # challenge_evidence.py가 부정 영향-회사 행동-연결어 관계를 함께 본다.
+    "future_strategy:stated_plan": ("계획", "전략", "로드맵", "예정"),
+    "future_strategy:plan_status": ("진행중", "진행 중", "추진", "착수", "실행 단계"),
+    "operations_partners:value_chain": ("공급망", "밸류체인", "협력사", "원자재"),
+    "operations_partners:operating_role": ("직접 운영", "공동 운영", "제조", "생산"),
+    "culture:work_principle": ("핵심가치", "인재상", "일하는 방식", "원칙"),
+    "culture:verified_case": ("사례", "후기", "인터뷰", "스토리"),
+    "competitive_position:self_context": ("강점", "차별화", "경쟁력", "1위", "선도"),
+}

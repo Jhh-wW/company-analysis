@@ -8,6 +8,7 @@ import logging
 import os
 import sqlite3
 import time
+from dataclasses import dataclass
 from typing import Final, Optional
 from urllib.parse import urlsplit
 
@@ -15,7 +16,10 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
-from src.features.report_standard.period_summary import period_summary_from_table
+from src.features.report_standard.period_summary import (
+    PeriodSummaryItem,
+    period_summary_from_table,
+)
 from src.features.report_standard.visualization import composition_tone
 from src.features.report_access import logic as report_access_logic
 
@@ -59,13 +63,19 @@ from src.features.sharelink import store as share_store
 from src.features.sharelink import tracks as share_tracks
 from src.features.sharelink.constants import (
     KEY_COOKIE_NAME,
+    LANDING_REPORT_BUTTON_TEMPLATE,
     LINK_BUDGET_EXHAUSTED_MESSAGE,
+    LINK_TOTAL_BUDGET_EXHAUSTED_CONTACT,
+    LINK_TOTAL_BUDGET_EXHAUSTED_MESSAGE,
+    LINK_TOTAL_BUDGET_EXHAUSTED_TITLE,
+    LINK_TOTAL_BUDGET_KRW,
     PUBLIC_NOT_ALLOWED_MESSAGE,
 )
 from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
 from src.features.report_standard.cover_metrics import cover_metrics
 from src.features.report_standard.visualization import table_visualization
 from src.features.report_standard.section_content import (
+    masthead_lines,
     section_content_blocks,
     source_verification_label,
     summary_topic,
@@ -94,7 +104,27 @@ templates.env.globals["composition_tone"] = composition_tone
 
 # ★ 4장 «3개년 변화 요약» — 표 안의 두 값만으로 증감을 만든다.
 #   PDF와 «같은 함수»를 써야 화면과 인쇄물의 숫자가 안 어긋난다.
+#   ⚠️ 이 함수는 «봉인 없는» v1·옛 v2 저장본 갈래 전용이다. 봉인이 있는
+#      v2 화면은 이 함수를 부르지 않는다 — 띠는 이미 블록 안에 들어 있다.
 templates.env.globals["period_summary_from_table"] = period_summary_from_table
+
+
+def sealed_period_basis_text(item: tuple[str, ...]) -> str:
+    """봉인된 3개년 띠 한 칸의 «계산 근거 한 줄»을 만든다.
+
+    봉인 블록은 띠 한 칸을 열 개의 표시 문자열로만 담는다
+    (``PublicPeriodSummaryBlock``). 근거 줄(「2023년 5,665 → 2025년 5,940」)은
+    그 열 개에서 파생되는 값이라 블록에 따로 없다.
+
+    ★ 그 «모양»을 화면이 새로 지어내면 PDF와 갈라진다. 그래서 같은 열 개로
+      ``PeriodSummaryItem``을 되살려 이미 있는 ``basis_text`` 한 곳에서만
+      만든다 — 웹에 새 문구 규칙을 두지 않는다.
+    """
+
+    return PeriodSummaryItem(*item).basis_text
+
+
+templates.env.globals["sealed_period_basis_text"] = sealed_period_basis_text
 
 
 def company_analysis_input(*, company: str, region: str) -> UserInput:
@@ -140,7 +170,7 @@ def _ctx(request: Request, **kwargs) -> dict:
         "section_display_parts": section_display_parts,
         "canonical_schema_version": CANONICAL_SCHEMA_VERSION,
         "engine_v2_schema_version": ENGINE_V2_SCHEMA_VERSION,
-        # 내부 ``조각 N·종류``를 템플릿에서 직접 자르면 다른 출력과 다시 갈린다(P-127).
+        # 내부 ``조각 N·종류``를 템플릿에서 직접 자르면 다른 출력과 다시 갈린다.
         "citation_number": citation_number,
         # 본문에 박힌 [n]을 작은 위첨자 링크로 바꿔 인쇄하기 위한 분해기.
         # v1은 이미 .ref 위첨자를 쓰는데 v2만 평문 대괄호였다(사용자 신고).
@@ -156,7 +186,10 @@ def _ctx(request: Request, **kwargs) -> dict:
         "section_content_blocks": section_content_blocks,
         "source_verification_label": source_verification_label,
         "summary_topic": summary_topic,
-        # 검증된 본문 아래의 근거 원문 문구 — 세 출력 형태가 core 값을 같이 쓴다(P-117).
+        # 표지 다음 첫 본문 페이지 마스트헤드 두 줄. PDF·Notion과
+        # «같은 함수»여야 회사명·생성일 표기가 세 채널에서 안 어긋난다.
+        "masthead_lines": masthead_lines,
+        # 검증된 본문 아래의 근거 원문 문구 — 세 출력 형태가 core 값을 같이 쓴다.
         "raw_source_label": RAW_SOURCE_LABEL,
         "raw_source_note": RAW_SOURCE_NOTE,
         "max_retry": MAX_RETRY_INPUT,
@@ -188,6 +221,74 @@ def mark_public_get_readonly_existing(request: Request) -> None:
     """이 공개 GET의 공통 화면 조회도 기존 DB를 읽기만 하도록 표시한다."""
 
     setattr(request.state, _READONLY_EXISTING_REQUEST_STATE, True)
+
+
+#: 권한이 없어 못 여는 보고서 화면의 제목. 세 갈래(404·403·409)가 같은 제목을 쓴다 —
+#: 왜 못 여는지는 갈래마다 다르지만, 손님이 겪은 일은 「이 보고서가 안 열린다」 하나다.
+REPORT_ACCESS_DENIED_TITLE: Final[str] = "보고서를 열 수 없습니다"
+
+#: 그 화면에서 손님이 «지금 할 수 있는 일». 결과 주소는 가장 자주 공유되는 주소라,
+#: 남에게 열릴 때 여기서 길을 못 주면 그대로 막다른 길이 된다.
+REPORT_ACCESS_REOPEN_HINT: Final[str] = (
+    "받으신 초대 링크(QR)를 다시 열면 됩니다. "
+    "잘 안 되면 링크를 보내 주신 담당자에게 문의해 주세요."
+)
+
+#: 신고로 잠시 멈춘 보고서의 안내. 다시 열어도 결과가 같으므로 «다시 시도»가 아니라
+#: 언제 열리는지와 물어볼 곳을 알려 준다.
+REPORT_ACCESS_REVOKED_HINT: Final[str] = (
+    "확인이 끝나면 같은 주소로 다시 열립니다. "
+    "급하시면 링크를 보내 주신 담당자에게 문의해 주세요."
+)
+
+
+def _report_access_denied_screen(
+    request: Request, *, revoked: bool, status_code: int
+) -> Response:
+    """보고서 접근을 거절할 때 «틀을 갖춘» 안내 화면을 그린다.
+
+    Args:
+        request: 들어온 요청.
+        revoked: 신고 접수로 잠시 멈춘 보고서인가.
+        status_code: 그대로 내보낼 상태 코드(404·403·409).
+
+    ★ 앞서는 ``<h1><p>`` 두 줄짜리 조각이었다. 서체·상단바·돌아갈 길·물어볼 곳이
+      한 개도 없어, 남에게 공유된 결과 주소를 연 사람은 «고장 난 페이지»를 봤다.
+      같은 파일의 다른 거절 화면과 **같은 틀**을 쓴다.
+    ★ ↻(다시 하면 된다)를 쓰지 않는다 — 같은 주소를 다시 열어도 결과가 같다.
+    """
+
+    from src.web import job_runtime  # noqa: PLC0415
+
+    if revoked:
+        message = (
+            "오류 신고가 접수되어 결과·다운로드·공유를 잠시 멈췄습니다. "
+            "관리자가 원본과 출처를 확인한 뒤 직접 다시 공개합니다."
+        )
+        hint = REPORT_ACCESS_REVOKED_HINT
+        icon = "⛔"
+    else:
+        message = (
+            "보고서 번호만으로는 열람 권한이 되지 않습니다. "
+            "조사를 시작한 브라우저에서 열면 그대로 보실 수 있습니다."
+        )
+        hint = REPORT_ACCESS_REOPEN_HINT
+        icon = "ℹ️"
+    return templates.TemplateResponse(
+        request=request,
+        name="progress_unavailable.html",
+        context=_ctx(
+            request,
+            interruption_icon=icon,
+            interruption_title=REPORT_ACCESS_DENIED_TITLE,
+            interruption_message=message,
+            interruption_hint=hint,
+            retry_url=job_runtime.DEFAULT_EXIT_URL,
+            retry_label=job_runtime.DEFAULT_EXIT_LABEL,
+            retry_same_page=False,
+        ),
+        status_code=status_code,
+    )
 
 
 def require_report_access(
@@ -233,20 +334,11 @@ def require_report_access(
             status_code=status_code,
         )
     else:
-        if decision.reason == "resource_revoked":
-            response = HTMLResponse(
-                "<h1>보고서를 열 수 없습니다</h1>"
-                "<p>오류 신고가 접수되어 결과·다운로드·공유를 잠시 멈췄습니다. "
-                "관리자가 원본과 출처를 확인한 뒤 직접 다시 공개합니다.</p>",
-                status_code=status_code,
-            )
-        else:
-            response = HTMLResponse(
-                "<h1>보고서를 열 수 없습니다</h1>"
-                "<p>보고서 번호만으로는 열람 권한이 되지 않습니다. "
-                "조사를 시작한 브라우저나 현재 초대 계정·링크로 다시 열어 주세요.</p>",
-                status_code=status_code,
-            )
+        response = _report_access_denied_screen(
+            request,
+            revoked=decision.reason == "resource_revoked",
+            status_code=status_code,
+        )
     response.headers["Cache-Control"] = "private, no-store"
     store_status = {
         "store_missing": "missing",
@@ -338,13 +430,15 @@ def _load_active_share_link(
     if (
         link is None
         or link.is_revoked
-        or share_logic.is_share_link_expired(link.created_at)
+        # 발급일만 보면 저장된 만료일(옛 규칙으로 굳은 값·관리자가 미룬 값)을
+        # 둘 다 놓친다. 행을 통째로 넘겨 그 값을 빠뜨릴 수 없게 한다.
+        or share_logic.link_expired(link)
     ):
         return None
     return link
 
 def _current_share_link(request: Request):
-    """이 손님이 «어느 지원 맥락 LINK»로 들어왔는지 (P-94).
+    """이 손님이 «어느 지원 맥락 LINK»로 들어왔는지.
 
     Args:
         request: 들어온 요청.
@@ -429,7 +523,7 @@ def _track_of(request: Request) -> tuple[share_tracks.Track, str, float | None]:
     Returns:
         (갈래, 통장 이름, 하루 상한).
 
-    ★ **로그인만으로는 아무 권한도 안 준다** (P-95).
+    ★ **로그인만으로는 아무 권한도 안 준다**.
       구글 로그인은 「누구인가」만 알려준다. 「써도 되는가」는 **초대 명단**이 정한다.
       이걸 안 나누면 인터넷의 아무나 로그인해서 돈을 쓴다.
     ★ 명단을 못 읽으면 «초대 안 된 사람»으로 본다 — 안전한 쪽으로 틀린다.
@@ -452,16 +546,23 @@ def _track_of(request: Request) -> tuple[share_tracks.Track, str, float | None]:
     is_admin = bool(session is not None and session.is_admin)
 
     is_member = False
+    # ★ 관리자가 이 친구 «한 명»에게만 따로 정해 둔 하루 비용 상한.
+    #   None이면 갈래 기본값(3,000원)을 쓴다. 명단을 못 읽었을 때도 None으로 남아
+    #   기본값 쪽으로 떨어진다 — 못 읽은 것이 상한을 «푸는» 근거가 되면 안 된다.
+    member_daily_budget_krw: float | None = None
     if email and not is_admin:
         try:
             if _request_uses_readonly_existing(request):
                 with storage_db.connect_readonly_existing() as conn:
-                    is_member = bool(
-                        conn is not None and share_allow.is_allowed(conn, email)
+                    profile = (
+                        None if conn is None else share_allow.load(conn, email)
                     )
             else:
                 with storage_db.connect() as conn:
-                    is_member = share_allow.is_allowed(conn, email)
+                    profile = share_allow.load(conn, email)
+            is_member = profile is not None
+            if profile is not None:
+                member_daily_budget_krw = profile.daily_budget_krw
         except Exception:  # noqa: BLE001 — 못 읽으면 «안 된 사람»으로 본다
             logger.exception("초대 명단을 못 읽었습니다 — 초대 안 된 것으로 봅니다")
 
@@ -470,7 +571,9 @@ def _track_of(request: Request) -> tuple[share_tracks.Track, str, float | None]:
         email=email, is_admin=is_admin, is_member=is_member, share_key=key
     )
     bucket = share_tracks.bucket_of(track, email=email, share_key=key)
-    return track, bucket, share_tracks.budget_of(track)
+    return track, bucket, share_tracks.budget_of(
+        track, member_daily_budget_krw=member_daily_budget_krw
+    )
 
 
 def require_active_share_link(
@@ -497,9 +600,12 @@ def require_active_share_link(
             name="share_scope_error.html",
             context=_ctx(
                 request,
+                # ★ 「못 읽었다」와 「닫혔다」는 다르다 — 닫혔다고 단정하면
+                #   거짓말이 될 수 있다. 같은 화면을 쓰는 403 갈래와 어휘만
+                #   맞추고(「초대 링크」), 사실은 다르게 말한다.
                 scope_error=(
-                    "LINK 권한 상태를 지금 확인할 수 없습니다. "
-                    "잠시 후 같은 링크에서 다시 시도해 주세요."
+                    "초대 링크 상태를 지금 확인할 수 없습니다. "
+                    "잠시 뒤 같은 링크에서 다시 시도해 주세요."
                 ),
             ),
             status_code=503,
@@ -510,7 +616,13 @@ def require_active_share_link(
             name="share_scope_error.html",
             context=_ctx(
                 request,
-                scope_error="이 LINK는 만료됐거나 철회되어 더 이상 사용할 수 없습니다.",
+                # ★ 이 문구는 인사팀이 읽는다 — 내부 용어(LINK)와 「철회」를
+                #   쓰지 않는다. 받는 사람에게 만료와 철회는 같은 뜻이라
+                #   첫 화면 안내와 **같은 말**을 쓴다.
+                scope_error=(
+                    "이 초대 링크는 사용이 중단되어 더 이상 열리지 않습니다. "
+                    "포트폴리오에 적힌 연락처로 알려 주시면 새 링크를 보내 드립니다."
+                ),
             ),
             status_code=403,
         )
@@ -583,7 +695,7 @@ def _guard_run(
             "evaluation-preview",
         )
 
-    # ★ 예산은 «링크마다» 센다 (P-94, 2026-08-16 사용자 결정).
+    # ★ 예산은 «링크마다» 센다 (제품 결정).
     #   전체 상한은 두지 않는다 — 대신 링크 하나가 하루에 쓸 수 있는 몫을 정했다.
     #   ⚠️ 그러므로 **최악의 하루 지출 = 링크당 상한 × 살아 있는 링크 수**다.
     #     링크를 몇 개 뿌렸는지가 곧 예산이다 (관리 화면에서 확인).
@@ -610,23 +722,70 @@ def _guard_run(
         ) > 0
     ):
         stored_bucket = bucket
+    # ★ LINK만 «수명 전체» 누적 상한을 하나 더 본다.
+    #   하루 상한은 자정마다 되살아난다. 링크는 기본 60일을 사니까 하루 상한만
+    #   두면 링크 하나의 최악 노출이 상한 × 60이었다. 누적 상한이 그 곱셈을 끊는다.
+    #   MEMBER·ADMIN·PUBLIC은 사람·전체 통장이라 「수명」 개념이 없어 보지 않는다.
+    link_total_spent: Optional[float] = None
+    link_total_cap: Optional[float] = None
+    if costs_money and track is share_tracks.Track.LINK:
+        try:
+            with storage_db.connect() as conn:
+                link_key_hash = share_store.key_hash_of(bucket)
+                link_row = share_store.load_by_hash(conn, link_key_hash)
+                link_total_spent = share_store.link_total_spent_krw(
+                    conn, key_hash=link_key_hash
+                )
+        except Exception:
+            # 누적을 못 읽는데 열어 주면 저장소 장애가 곧 무제한 지출이 된다.
+            logger.exception("링크 누적 사용액을 읽지 못했습니다")
+            return _throttled(
+                request, BUDGET_STORE_BLOCKED_MESSAGE, "budget-store"
+            )
+        # 링크가 사라졌으면 기본 상한으로 본다. 못 찾았다고 상한을 푸는 쪽으로
+        # 떨어지면 안 된다 (링크 자체의 유효성은 다른 검사가 따로 본다).
+        link_total_cap = (
+            link_row.effective_total_budget_krw
+            if link_row is not None
+            else LINK_TOTAL_BUDGET_KRW
+        )
+    link_total_exhausted = (
+        link_total_spent is not None
+        and link_total_cap is not None
+        and not share_logic.can_start_within_total_budget(
+            link_total_spent, link_total_cap
+        )
+    )
     budget_exhausted = (
         costs_money
         and cap is not None
         and not share_logic.can_start_new_run(
-            paid_runtime._LINK_SPEND, stored_bucket, clock.today_kst(), cap
+            paid_runtime._LINK_SPEND,
+            stored_bucket,
+            clock.today_kst(),
+            cap,
+            total_spent_krw=link_total_spent,
+            total_cap_krw=link_total_cap,
         )
     )
     if track is share_tracks.Track.MEMBER:
         # MEMBER는 위에서 실패까지 포함한 비용 상한을 먼저 확인하고, 여기서는
-        # 성공 보고서 3건도 따로 확인한다. 빠른 사전 확인 뒤 Job 등록 직전의
+        # 성공 보고서 건수도 따로 확인한다. 빠른 사전 확인 뒤 Job 등록 직전의
         # SQLite reservation이 성공 건수의 동시 경쟁을 닫는다.
+        # ★ 건수는 «이 친구의 한도»다 — 관리자가 따로 안 정했으면 기존 3건이다.
+        #   화면 문구도 같은 숫자를 써야 「3건이라더니 왜 막지」가
+        #   안 생긴다.
         try:
             with storage_db.connect() as conn:
+                member_email = bucket.removeprefix("user:")
+                member_success_limit = dashboard_store.member_success_limit(
+                    conn, actor_email=member_email
+                )
                 member_available = dashboard_store.member_can_start(
                     conn,
-                    actor_email=bucket.removeprefix("user:"),
+                    actor_email=member_email,
                     day=clock.today_kst().isoformat(),
+                    success_limit=member_success_limit,
                 )
         except Exception:
             logger.exception("MEMBER 성공 보고서 사용량을 읽지 못했습니다")
@@ -634,7 +793,7 @@ def _guard_run(
         if not member_available:
             return _throttled(
                 request,
-                "오늘 성공한 보고서 3건을 모두 사용했습니다. 내일 다시 시도해 주세요.",
+                member_success_limit_message(member_success_limit),
                 "member-success-limit",
             )
     if count_start and not budget_logic.rate_ok(
@@ -661,15 +820,24 @@ def _guard_run(
     if budget_exhausted:
         # ★ 예산이 다 돼도 **이미 만들어 둔 보고서는 계속 열린다** —
         #   그건 파이프라인을 안 거치고 저장소에서 바로 꺼내므로 0원이다.
-        #   막는 것은 «새로 AI를 부르는 일»뿐이다 (2026-08-16 사용자 결정).
+        #   막는 것은 «새로 AI를 부르는 일»뿐이다 (제품 결정).
         # ★ 모르는 손님(상한 0원)에게는 «다른 말»을 한다 — 「다 썼다」가 아니라
         #   「이 기능은 초대받은 분만」이다. 사실이 다르면 안내도 달라야 한다.
-        message = (
-            PUBLIC_NOT_ALLOWED_MESSAGE
-            if track is share_tracks.Track.PUBLIC
-            else LINK_BUDGET_EXHAUSTED_MESSAGE
+        # ★ 누적 소진도 «다른 말»이다 — 하루 소진은 「내일 다시 열립니다」가 사실이지만
+        #   누적 소진은 내일도 안 열린다. 같은 말을 하면 헛되이 기다리게 한다.
+        if track is share_tracks.Track.PUBLIC:
+            return _throttled(
+                request, PUBLIC_NOT_ALLOWED_MESSAGE, f"budget:{track.value}"
+            )
+        if link_total_exhausted:
+            return _throttled(
+                request,
+                LINK_TOTAL_BUDGET_EXHAUSTED_MESSAGE,
+                f"budget-total:{track.value}",
+            )
+        return _throttled(
+            request, LINK_BUDGET_EXHAUSTED_MESSAGE, f"budget:{track.value}"
         )
-        return _throttled(request, message, f"budget:{track.value}")
 
     # ★ 통과할 때만 횟수를 적는다 — 거절당한 요청까지 세면
     #   「돈도 안 썼는데 차단」이 된다 (budget/logic.py 참고).
@@ -680,10 +848,135 @@ def _guard_run(
     return None
 
 #: 이 이유로 막힌 것은 «정상 동작이 아니라 고장»이다 — 화면이 그렇게 말해야 한다.
-#: 사람이 원장을 확인해야 풀리므로, 사용자에게 문의 번호를 줘야 신고가 닿는다.
+#: 사람이 비용 기록을 확인해야 풀리므로, 사용자에게 문의 번호를 줘야 신고가 닿는다.
 THROTTLE_FAULT_KINDS: Final[frozenset[str]] = frozenset(
     {"budget-store", "budget-unresolved", "member-usage-store"}
 )
+
+#: 기다리면 풀리는 차단의 제목. 「잠시 기다려 주세요」는 **정말 기다리면 열릴 때만**
+#: 참이다.
+THROTTLE_WAIT_TITLE: Final[str] = "잠시 기다려 주세요"
+
+#: 고장으로 막았을 때의 제목.
+THROTTLE_FAULT_TITLE: Final[str] = "새 조사가 멈췄습니다"
+
+#: 초대 없이 들어온 손님을 막았을 때의 제목. 기다린다고 열리는 것이 아니므로
+#: 「잠시 기다려 주세요」를 쓰지 않는다.
+THROTTLE_NOT_INVITED_TITLE: Final[str] = "새 조사를 시작할 수 없습니다"
+
+#: 누적 소진 갈래의 ``kind`` 앞머리. ``_guard_run``이 붙이는 값과 같아야 한다.
+THROTTLE_TOTAL_EXHAUSTED_PREFIX: Final[str] = "budget-total:"
+
+#: 하루 상한 갈래의 ``kind`` 앞머리.
+THROTTLE_DAILY_BUDGET_PREFIX: Final[str] = "budget:"
+
+#: 초대 없는 손님 갈래의 ``kind``.
+THROTTLE_NOT_INVITED_KIND: Final[str] = (
+    f"{THROTTLE_DAILY_BUDGET_PREFIX}{share_tracks.Track.PUBLIC.value}"
+)
+
+
+@dataclass(frozen=True)
+class _ThrottleScreen:
+    """왜 막았는지에 따라 달라지는 화면 조각.
+
+    ★ 왜 필요한가 — 막는 이유가 넷인데 화면은 하나였다. 그래서 「내일이면
+      열린다」가 참인 하루 상한의 틀에 «내일도 안 열리는» 누적 소진과
+      «초대가 있어야 열리는» 차단까지 실려, 화면이 사실과 다른 말을 했다.
+    """
+
+    #: 화면 제목.
+    title: str
+    #: 제목 옆 그림 글자. ⏳는 «기다리면 된다»는 뜻이라 아무 데나 쓰지 않는다.
+    icon: str = "⏳"
+    #: 「하루에 돌릴 수 있는 양을 미리 정해 두었습니다」를 붙일지.
+    #: 하루 상한에 걸렸을 때만 참이다.
+    explains_daily_cap: bool = False
+    #: 기다려도 안 열리는 갈래에 주는 «사람에게 닿는 길».
+    contact_note: str = ""
+
+
+def _throttle_screen(kind: str) -> _ThrottleScreen:
+    """막은 이유(``kind``)에 맞는 제목·설명을 고른다."""
+
+    if kind in THROTTLE_FAULT_KINDS:
+        return _ThrottleScreen(title=THROTTLE_FAULT_TITLE, icon="⛔")
+    if kind.startswith(THROTTLE_TOTAL_EXHAUSTED_PREFIX):
+        # 제목은 본문 첫 문장을 그대로 앞세운다 — 「기다려도 열리지 않는다」는 사실이
+        # 제목에서 먼저 보여야 하고, 본문은 「그래도 볼 수 있는 것」까지 한 번에
+        # 말해야 손님이 두 사실을 따로 찾지 않는다.
+        return _ThrottleScreen(
+            title=LINK_TOTAL_BUDGET_EXHAUSTED_TITLE,
+            icon="ℹ️",
+            contact_note=LINK_TOTAL_BUDGET_EXHAUSTED_CONTACT,
+        )
+    if kind == THROTTLE_NOT_INVITED_KIND:
+        return _ThrottleScreen(title=THROTTLE_NOT_INVITED_TITLE, icon="ℹ️")
+    if kind.startswith(THROTTLE_DAILY_BUDGET_PREFIX):
+        # 남은 예산 갈래는 하루 상한뿐이다 — 여기서만 그 설명이 사실이다.
+        return _ThrottleScreen(title=THROTTLE_WAIT_TITLE, explains_daily_cap=True)
+    return _ThrottleScreen(title=THROTTLE_WAIT_TITLE)
+
+
+def _throttle_bound_report(request: Request) -> tuple[str, str]:
+    """이 손님의 초대 링크에 묶인 회사 보고서를 «지금» 열 수 있으면 그 길을 준다.
+
+    Args:
+        request: 들어온 요청.
+
+    Returns:
+        (버튼 글자, 보고서 주소). 열 수 없으면 빈 글자 두 개.
+
+    ★ 「열 수 있는가」를 여기서 새로 판단하지 않는다 — 첫 화면 랜딩과 **같은
+      함수**를 부른다. 두 곳이 따로 판단하면 한 화면에서만 버튼이 사라진다.
+    ★ 못 읽어도 조용히 빈 값을 준다. 부르는 쪽은 이미 «막는 중»이라 여기서 또
+      실패하면 화면 자체가 안 뜬다.
+    """
+
+    link = _current_share_link(request)
+    company = str(getattr(link, "company", "") or "").strip() if link else ""
+    if not company:
+        return "", ""
+    from src.web.routers import analysis as analysis_router  # noqa: PLC0415
+
+    report_url, _made_on = analysis_router._bound_report_view(link)
+    if not report_url:
+        return "", ""
+    return LANDING_REPORT_BUTTON_TEMPLATE.format(company=company), report_url
+
+
+#: 한도 안내에 반드시 함께 나가는 «저장본도 오늘 몫을 쓴다»는 사실.
+#: ★ 왜 미리 말하는가 — 같은 회사를 다시 조사하면 새로 만들지 않고 저장본을 그대로
+#:   보여 주는데, 그래도 오늘 몫 1건은 줄어든다. 말하지 않으면 손님은 「보여만
+#:   줬는데 왜 줄지」로 읽고 남은 건수를 실제보다 많게 센 채 하루를 쓴다.
+#: ★ 순서를 지어낼 수 없다 — 자리는 조사를 시작할 때 잡고, 저장본을 보여 줄지는
+#:   그 뒤에 정해진다. 그래서 저장본이라고 몫을 돌려줄 수 없다.
+MEMBER_SUCCESS_REUSE_NOTICE: Final[str] = (
+    "같은 회사를 다시 조사하면 저장본을 보여 드리지만 오늘 몫 1건은 사용됩니다."
+)
+
+
+def member_success_limit_message(limit: int) -> str:
+    """오늘 성공 보고서 건수를 다 쓴 친구에게 보여줄 말.
+
+    Args:
+        limit: **그 친구의** 하루 성공 보고서 한도.
+
+    ★ 왜 함수로 빼는가 — 이 문장은 «막는 자리»가 두 곳이라 두 번 나온다.
+      실행 시작 전 사전 확인(`_guard_run`)과 Job 등록 직전의 예약 커밋
+      (`job_runtime._start_with_reserved_slot`)이다. 같은 문장을 두 곳에 따로
+      적어 두면 한쪽만 고쳐져서, 한도를 7건으로 올린 친구가 경쟁에서 밀렸을 때
+      「3건 다 썼다」는 틀린 말을 본다 — 같은 정의가 두 곳이 되는 함정이다.
+
+    ★ 저장본 안내를 여기 함께 붙이는 이유 — 회원이 자기 하루 한도를 보는 화면은
+      이 문장이 실리는 차단 화면뿐이다. 남은 건수를 미리 보여 주는 화면이 없으니,
+      「저장본도 몫을 쓴다」를 말할 자리도 여기밖에 없다.
+    """
+    return (
+        f"오늘 성공한 보고서 {int(limit)}건을 모두 사용했습니다. "
+        "내일 다시 시도해 주세요. "
+        f"{MEMBER_SUCCESS_REUSE_NOTICE}"
+    )
 
 
 def _throttled(request: Request, message: str, kind: str) -> HTMLResponse:
@@ -696,13 +989,18 @@ def _throttled(request: Request, message: str, kind: str) -> HTMLResponse:
 
     ★ 429는 대개 「지금은 안 된다」이지 「고장」이 아니다. 화면이 그걸 분명히 말한다.
 
-    ⚠️ 단, ``THROTTLE_FAULT_KINDS`` 는 진짜 고장이다 (2026-08-28).
+    ⚠️ 단, ``THROTTLE_FAULT_KINDS`` 는 진짜 고장이다.
       그때까지 이 화면은 **모든** 경우에 「고장이 아닙니다」라고 단언했고,
-      비용 원장이 깨져 막힌 사용자도 그 말을 봤다 — 사실이 아니고,
+      비용 기록이 깨져 막힌 사용자도 그 말을 봤다 — 사실이 아니고,
       신고할 번호도 없어 관리자에게 알릴 길이 없었다.
+
+    ⚠️ 제목·설명도 갈래마다 다르다(``_throttle_screen``). 하나로 두면 내일도
+      안 열리는 차단이 「잠시 기다려 주세요」 밑에 실려 손님을 헛되이 기다리게 한다.
     """
     logger.info("조사를 막았습니다: %s", kind)
     고장이다 = kind in THROTTLE_FAULT_KINDS
+    screen = _throttle_screen(kind)
+    bound_report_label, bound_report_url = _throttle_bound_report(request)
     response = templates.TemplateResponse(
         request=request,
         name="throttled.html",
@@ -711,6 +1009,12 @@ def _throttled(request: Request, message: str, kind: str) -> HTMLResponse:
             throttle_message=message,
             throttle_kind=kind,
             throttle_is_fault=고장이다,
+            throttle_title=screen.title,
+            throttle_icon=screen.icon,
+            throttle_explains_daily_cap=screen.explains_daily_cap,
+            throttle_contact_note=screen.contact_note,
+            throttle_bound_report_label=bound_report_label,
+            throttle_bound_report_url=bound_report_url,
             # 고장일 때만 문의 번호를 준다 — 정상 차단에는 필요 없는 잡음이다.
             support_reference=admin_audit.request_id(request) if 고장이다 else "",
         ),
@@ -820,7 +1124,7 @@ def require_admin(
     """관리자가 아니면 되돌릴 응답, 관리자면 None.
 
     ★ **매 요청마다 서버에서 다시 판정한다.** 버튼을 숨기는 것은 권한이 아니다
-      (기획서 07_출력/4_근거 §4 · 성공기준 P4 「0건 고정」).
+      (성공기준 P4 「0건 고정」).
     """
     token = request.cookies.get(auth_constants.SESSION_COOKIE_NAME)
     allowed = auth_logic.is_admin_session(token)
@@ -877,7 +1181,10 @@ def _effective_http_origin(
 def _csrf_origin_matches(request: Request) -> bool:
     """브라우저가 Origin을 보냈다면 요청의 전체 HTTP(S) 출처와 같아야 한다."""
     if (
-        deployment_mode.render_admin_no_forwarded()
+        # ★ 포트폴리오 링크 계약도 옛 관리자 계약과 같은 «forwarded 헤더 불신 +
+        #   고정 PUBLIC_ORIGIN 하나만 신뢰» 실행 모델이므로 render_admin_no_forwarded()
+        #   (친구 입구 차단 여부)가 아니라 이 더 넓은 판정으로 CSRF Origin을 고정한다.
+        deployment_mode.render_pinned_origin_no_forwarded()
         and request.method.upper() == "POST"
     ):
         # Render edge가 붙인 X-Forwarded-*는 읽지 않는다. 외부 HTTPS 출처는

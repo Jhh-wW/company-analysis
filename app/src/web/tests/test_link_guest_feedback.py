@@ -48,7 +48,7 @@ _카카오열쇠 = "a1b2c3d4e5f60718a1b2c3d4e5f60718"
 
 @pytest.fixture
 def client():
-    """★ 반드시 `with` — 아니면 뒤에서 도는 조사가 취소된다 (P-92 교훈)."""
+    """★ 반드시 `with` — 아니면 뒤에서 도는 조사가 취소된다 (교훈)."""
     runtime._PIPELINE = DemoPipeline()
     with TestClient(main.app, base_url="https://testserver") as client:
         yield client
@@ -94,11 +94,17 @@ def _신고_폼값(*, report_id: str, company: str, **overrides) -> dict:
 
 
 def test_LINK_손님도_결과화면에서_오류신고_버튼이_보인다(client: TestClient):
+    """★ 기대값 이전 — `/k/`는 이제 결과가 아니라 첫 화면으로 보낸다.
+
+    이 시험의 대상은 «결과 화면»의 오류 신고 버튼이므로, 첫 화면의 버튼을
+    누른 것과 같게 보고서 주소를 직접 연다. 랜딩은 `test_link_landing.py`가 본다.
+    """
     report_id = _저장된_보고서로_링크를_발급한다(_카카오열쇠)
 
     opened = client.get(f"/k/{_카카오열쇠}", follow_redirects=False)
-    result = client.get(opened.headers["location"])
+    result = client.get(f"/result/{report_id}")
 
+    assert opened.headers["location"] == "/"
     assert result.status_code == 200
     assert 'href="/feedback?stage=보고서&amp;company=' in result.text
     assert "오류 신고" in result.text
