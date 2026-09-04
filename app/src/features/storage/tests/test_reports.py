@@ -34,6 +34,7 @@ from src.shared.comparison_candidate_basis import (
 )
 from src.shared.report_quality.constants import QUALITY_CONTRACT_VERSION
 from src.shared.report_quality.generation import GenerationQualityObservation
+from src.shared.report_evidence.constants import SOURCE_KIND_OFFICIAL_IR_PDF
 
 
 def _full_report() -> Report:
@@ -587,11 +588,25 @@ def test_공식IR_실제첨부URL은_JSON왕복에서_보존된다() -> None:
             label="26년 2분기 IR자료",
             published_at="2026-08-12",
             collected_at="2026-08-24",
+            source_id="official-ir-2026-q2",
+            title="26년 2분기 IR자료",
+            publisher="가나다전자",
+            host="cdn.example",
+            url="https://cdn.example/alpha-q2.pdf",
+            document_id="official-ir-2026-q2",
+            location="PDF 본문",
+            source_type="회사 공식 IR",
+            fact_status="공식 발행일·보고기간 확정",
+            evidence_hashes=[evidence_text_hash("IR 원문")],
+            exact_evidence_hashes=[exact_evidence_text_hash("IR 원문")],
             reporting_period="2026-Q2",
             attachment_url="https://cdn.example/alpha-q2.pdf",
             domain_redirect_verification="https_apex_to_www_redirect",
             domain_redirect_from_host="alpha.example",
             domain_redirect_to_host="www.alpha.example",
+            formal_source_kind=SOURCE_KIND_OFFICIAL_IR_PDF,
+            identity_binding="typed-official-ir-binding",
+            document_content_sha256="d" * 64,
         )
     )
     original = Report(
@@ -607,6 +622,8 @@ def test_공식IR_실제첨부URL은_JSON왕복에서_보존된다() -> None:
 
     assert restored.citations == [source]
     restored_source = restored.citations[0]
+    assert restored_source.document_content_sha256 == "d" * 64
+    assert restored_source.is_canonical_valid
     assert has_valid_provenance_seal(restored_source)
     assert not has_valid_provenance_seal(
         replace(restored_source, reporting_period="2026-Q1")
@@ -617,6 +634,18 @@ def test_공식IR_실제첨부URL은_JSON왕복에서_보존된다() -> None:
     assert not has_valid_provenance_seal(
         replace(restored_source, domain_redirect_verification="검증되지_않음")
     )
+    assert not has_valid_provenance_seal(
+        replace(restored_source, document_content_sha256="e" * 64)
+    )
+    removed = seal_collected_source(
+        replace(
+            restored_source,
+            document_content_sha256="",
+            provenance_seal="",
+        )
+    )
+    assert has_valid_provenance_seal(removed)
+    assert not removed.is_canonical_valid
 
 
 def test_v3_roundtrip_preserves_semantic_metadata_fact_ledger_and_sources() -> None:

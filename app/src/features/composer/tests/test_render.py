@@ -15,6 +15,10 @@ from typing import Any, Optional
 
 from src.features.composer.constants import (
     CITATION_STYLE_INLINE,
+    DART_FINANCIAL_API_DOCUMENT_ID,
+    DART_FINANCIAL_API_HOST,
+    DART_FINANCIAL_API_PREFIX,
+    DART_FINANCIAL_API_URL,
     GRADE_CONFIRMED,
     GRADE_INTERPRETED,
     NOTICE_INSUFFICIENT_EVIDENCE,
@@ -26,6 +30,7 @@ from src.features.composer.port import (
     ComposedSection,
     ComposedSentence,
     PerformanceTable,
+    CollectedFragment,
     fragments_from_raw,
 )
 from src.features.composer.render import (
@@ -35,8 +40,13 @@ from src.features.composer.render import (
     sentence_display_text,
 )
 from src.features.pipeline.port import Grade
-from src.features.provenance.sources import Source, SourceKind
+from src.features.provenance.sources import (
+    Source,
+    SourceKind,
+    has_valid_provenance_seal,
+)
 from src.shared.report_quality.summary_binding import summary_verification_binding
+from src.shared.report_quality.source_identity import document_identity_from_parts
 
 
 # ══════════════════════════════════════════════════════════
@@ -279,6 +289,89 @@ def test_부록은_인용된_조각만_조각번호_그대로_싣는다():
     assert "사업내용" in filing.label
     homepage = by_number[2]
     assert homepage.collected_at == "2026-08-01"  # 원시 dict의 «문서일» 보존
+
+
+def test_렌더가_완성한_모든_출처는_저장용_수집도장을_갖는다():
+    report = _rendered()
+
+    assert report.citations
+    assert all(has_valid_provenance_seal(source) for source in report.citations)
+
+
+def test_formal_DART_공개출처의_발행자는_회사이고_DART는_host다():
+    """수집처 운영자와 공시 내용에 책임지는 발행 법인을 뒤섞지 않는다."""
+
+    receipt = "20260315000123"
+    url = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt}"
+    fragment = CollectedFragment(
+        fragment_id="1",
+        kind="typed-evidence-v1:dart_business_report",
+        text="가나다전자는 반도체 검사 장비 사업을 영위한다.",
+        source_url=url,
+        document_title="사업보고서 (2025.12)",
+        location="II. 사업의 내용",
+        document_date="2026-03-15",
+        document_identity=document_identity_from_parts(
+            document_id=receipt,
+            host="dart.fss.or.kr",
+            url=url,
+        ),
+    )
+    composed = ComposedReport(
+        sections=(
+            ComposedSection(
+                section_id="identity",
+                sentences=(
+                    _sentence(
+                        "반도체 검사 장비 사업을 영위한다.",
+                        ("1",),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    report = render_report("가나다전자", composed, (fragment,), None)
+
+    [source] = report.citations
+    assert source.kind is SourceKind.FILING
+    assert source.publisher == "가나다전자"
+    assert source.host == "dart.fss.or.kr"
+    assert source.document_id == receipt
+    assert source.url == url
+
+
+def test_DART_재무API_공개출처도_발행자는_회사이고_DART는_host다():
+    fragment = CollectedFragment(
+        fragment_id="1",
+        kind="재무",
+        text=(
+            f"{DART_FINANCIAL_API_PREFIX} "
+            "2025 매출액 1200 영업이익 100"
+        ),
+        document_identity=document_identity_from_parts(
+            document_id=DART_FINANCIAL_API_DOCUMENT_ID,
+            host=DART_FINANCIAL_API_HOST,
+            url=DART_FINANCIAL_API_URL,
+        ),
+    )
+    composed = ComposedReport(
+        sections=(
+            ComposedSection(
+                section_id="past_changes",
+                sentences=(_sentence("2025년 매출액은 1200이다.", ("1",)),),
+            ),
+        ),
+    )
+
+    report = render_report("가나다전자", composed, (fragment,), None)
+
+    [source] = report.citations
+    assert source.kind is SourceKind.FILING
+    assert source.publisher == "가나다전자"
+    assert source.host == DART_FINANCIAL_API_HOST
+    assert source.document_id == DART_FINANCIAL_API_DOCUMENT_ID
+    assert source.url == DART_FINANCIAL_API_URL
 
 
 def test_부록_사용_장_목록이_실제_인용_장과_같다():

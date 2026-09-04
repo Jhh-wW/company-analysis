@@ -19,7 +19,10 @@ import datetime as dt
 
 from src.features.pipeline.port import Report
 from src.features.report_delivery import authority as authority_store
+from src.features.report_delivery.cache_identity import CacheLookupKey
 from src.features.report_delivery.models import ContentSnapshot, Delivery
+from src.features.report_delivery.singleflight import LeaseKey
+from src.features.report_delivery.source_identity import SourceSnapshot
 from src.features.storage import reports as report_store
 from src.shared import engine_build_identity as build_identity_contract
 from src.shared.automatic_release_record import AutomaticReleaseRecord
@@ -109,6 +112,70 @@ def assert_release_build_identity(
         )
 
 
+def assert_release_preflight_identity(
+    *,
+    evidence: GenerationProducerEvidence,
+    preflight_identity_digest: str,
+) -> str:
+    """blob intent 전에 생성 근거와 cache/single-flight 출처 세대를 맞춘다.
+
+    ``evidence_generation_sha256``는 작가가 실제로 받은 9장 근거 packet의
+    세대이고, ``preflight_identity_digest``는 같은 packet을 만들기 전에
+    cache 조회와 owner lease에 쓴 세대다. 둘이 다르면 다른 자료로 만든
+    보고서를 이번 요청의 cache 원본처럼 출고하게 되므로 FULL은 빈 값도
+    허용하지 않는다.
+    """
+
+    preflight_digest = str(preflight_identity_digest).strip()
+    if (
+        not preflight_digest
+        or evidence.evidence_generation_sha256 != preflight_digest
+    ):
+        raise ReleaseIdentityMismatch(
+            "FULL 출고의 생성 근거 세대와 생성 전 출처 지문이 다릅니다"
+        )
+    return preflight_digest
+
+
+def assert_release_stored_source_identity(
+    *,
+    evidence: GenerationProducerEvidence,
+    source: SourceSnapshot,
+    cache_key: CacheLookupKey | None,
+    reuse_singleflight_key: LeaseKey | None,
+) -> None:
+    """저장 source·보고서 evidence·cache/lease 열쇠를 exact 대조한다.
+
+    사전 검사는 잘못 전달된 인자를 blob 전에 닫고, 이 검사는 adapter나 저장
+    배선이 다른 SourceSnapshot을 붙이는 경우를 같은 출고 거래 안에서 다시
+    닫는다. cache hit과 waiter는 둘 중 실제로 사용한 권위 열쇠도 같은 세대여야
+    한다.
+    """
+
+    generation_digest = evidence.evidence_generation_sha256
+    if (
+        not isinstance(source, SourceSnapshot)
+        or source.preflight_identity_digest != generation_digest
+    ):
+        raise ReleaseIdentityMismatch(
+            "FULL 출고의 저장된 출처와 생성 근거 세대가 다릅니다"
+        )
+    if (
+        cache_key is not None
+        and cache_key.preflight_identity_digest != generation_digest
+    ):
+        raise ReleaseIdentityMismatch(
+            "FULL 출고의 캐시 열쇠와 생성 근거 세대가 다릅니다"
+        )
+    if (
+        reuse_singleflight_key is not None
+        and reuse_singleflight_key.source_identity_digest != generation_digest
+    ):
+        raise ReleaseIdentityMismatch(
+            "FULL 출고의 single-flight 완료 열쇠와 생성 근거 세대가 다릅니다"
+        )
+
+
 def assert_release_content_identity(
     *,
     evidence: GenerationProducerEvidence,
@@ -170,11 +237,143 @@ def issue_owner_release_authority(
     )
 
 
+def _release_authority_source_identity(
+    *,
+    evidence: GenerationProducerEvidence,
+    content: ContentSnapshot,
+    artifact_id: str,
+    automatic_release_sha256: str,
+) -> dict[str, str]:
+    return {
+        "company_id": evidence.company_id,
+        "content_snapshot_id": content.content_id,
+        "artifact_id": str(artifact_id).strip(),
+        "report_payload_sha256": content.payload_sha256,
+        "producer_evidence_sha256": assert_canonical_producer_evidence(evidence),
+        "assessment_sha256": evidence.assessment_sha256,
+        "public_content_sha256": evidence.public_projection_sha256,
+        "public_manifest_sha256": evidence.public_manifest_sha256,
+        "evidence_generation_sha256": evidence.evidence_generation_sha256,
+        "build_identity_sha256": evidence.build_identity_sha256,
+        "automatic_release_sha256": str(automatic_release_sha256).strip(),
+    }
+
+
+def assert_release_authority_identity(
+    *,
+    authority: authority_store.ReleaseAuthority,
+    expected_kind: authority_store.ReleaseAuthorityKind,
+    evidence: GenerationProducerEvidence,
+    delivery: Delivery,
+    content: ContentSnapshot,
+    artifact_id: str,
+    automatic_release_sha256: str,
+) -> None:
+    """FULL 권위가 실제 producer·본문·PDF·승인 기록과 exact한지 다시 본다.
+
+    ``load_release_authority*``는 DB의 delivery/content/artifact 결속과 REUSE
+    원본 계보를 검증한다. 이 함수는 그 위에 현재 FULL 보고서의 canonical
+    producer evidence와 자동승인 기록까지 대조해, COMPLETE 재시도가 단지
+    같은 공개 ID의 권위 행이 있다는 이유만으로 성공하지 못하게 한다.
+    """
+
+    if type(authority) is not authority_store.ReleaseAuthority:
+        raise ReleaseIdentityMismatch("FULL 출고 권위 객체가 올바르지 않습니다")
+    expected = {
+        "kind": expected_kind,
+        "public_id": delivery.public_id,
+        "delivery_id": delivery.delivery_id,
+        "billing_bucket_id": delivery.billing_bucket_id,
+        **_release_authority_source_identity(
+            evidence=evidence,
+            content=content,
+            artifact_id=artifact_id,
+            automatic_release_sha256=automatic_release_sha256,
+        ),
+    }
+    if any(getattr(authority, name) != value for name, value in expected.items()):
+        raise ReleaseIdentityMismatch(
+            "FULL 출고 권위가 producer·본문·PDF·자동승인 원본과 다릅니다"
+        )
+
+
+def assert_owner_release_authority_identity(
+    *,
+    authority: authority_store.ReleaseAuthority,
+    evidence: GenerationProducerEvidence,
+    billing_bucket_id: str,
+    content: ContentSnapshot,
+    artifact_id: str,
+    automatic_release_sha256: str | None = None,
+) -> None:
+    """재사용 선택이 가리킨 OWNER 권위와 공유 원본 신원을 exact 대조한다."""
+
+    if type(authority) is not authority_store.ReleaseAuthority:
+        raise ReleaseIdentityMismatch("재사용할 OWNER 출고 권위 객체가 올바르지 않습니다")
+    expected = {
+        "kind": authority_store.ReleaseAuthorityKind.OWNER,
+        "billing_bucket_id": str(billing_bucket_id).strip(),
+        **_release_authority_source_identity(
+            evidence=evidence,
+            content=content,
+            artifact_id=artifact_id,
+            automatic_release_sha256=(
+                authority.automatic_release_sha256
+                if automatic_release_sha256 is None
+                else automatic_release_sha256
+            ),
+        ),
+    }
+    if any(getattr(authority, name) != value for name, value in expected.items()):
+        raise ReleaseIdentityMismatch(
+            "재사용할 OWNER 권위가 producer·본문·PDF·자동승인 원본과 다릅니다"
+        )
+
+
+def issue_reuse_release_authority(
+    *,
+    origin: authority_store.ReleaseAuthority,
+    evidence: GenerationProducerEvidence,
+    delivery: Delivery,
+    content: ContentSnapshot,
+    artifact_id: str,
+    automatic_release: AutomaticReleaseRecord,
+    charge_run_id: str,
+    charge_decision_sha256: str,
+    issued_at: dt.datetime,
+) -> authority_store.ReleaseAuthority:
+    """검증된 OWNER의 producer·본문·최초 PDF를 새 Delivery가 상속한다."""
+
+    assert_owner_release_authority_identity(
+        authority=origin,
+        evidence=evidence,
+        billing_bucket_id=delivery.billing_bucket_id,
+        content=content,
+        artifact_id=artifact_id,
+        automatic_release_sha256=automatic_release.record_sha256,
+    )
+    return authority_store.ReleaseAuthority.issue_reuse(
+        origin=origin,
+        public_id=delivery.public_id,
+        delivery_id=delivery.delivery_id,
+        billing_bucket_id=delivery.billing_bucket_id,
+        automatic_release_sha256=automatic_release.record_sha256,
+        charge_run_id=charge_run_id,
+        charge_decision_sha256=charge_decision_sha256,
+        issued_at=issued_at,
+    )
+
+
 __all__ = [
     "ReleaseIdentityMismatch",
     "assert_release_build_identity",
+    "assert_release_authority_identity",
+    "assert_owner_release_authority_identity",
     "assert_release_company_identity",
     "assert_release_content_identity",
+    "assert_release_preflight_identity",
+    "assert_release_stored_source_identity",
     "issue_owner_release_authority",
+    "issue_reuse_release_authority",
     "require_release_evidence",
 ]

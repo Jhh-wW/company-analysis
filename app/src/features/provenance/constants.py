@@ -17,6 +17,12 @@ from __future__ import annotations
 
 from typing import Final
 
+from src.shared.report_evidence.legacy_fragment_kinds import (
+    LEGACY_KIND_HOMEPAGE,
+    LEGACY_KIND_NEWS,
+    LEGACY_KIND_OFFICIAL_IR,
+)
+
 # ── 출처 목록 ────────────────────────────────────────────
 SOURCES_HEADER: Final[str] = "[출처]"
 
@@ -41,13 +47,11 @@ PLAN_MAX_YEARS: Final[int] = 5
 
 
 # ── 출처 재료 뽑기 (citations.py) ────────────────────────
-# 1판 엔진(analysis_engine/tools/run_pilot.py)이 수집 조각에 붙이는 "종류" 문자열.
-# ★ 여기서 새로 정의하지만 값 자체는 그쪽·`homepage/constants.py`의 FRAGMENT_KIND와
-#   같아야 한다 — 같은 전자공시·홈페이지 수집기의 산출물이기 때문이다.
-#   (feature 간 직접 import는 금지이므로 값만 맞춰 각자 갖고 있는다.)
-FRAGMENT_KIND_NEWS: Final[str] = "뉴스"
-FRAGMENT_KIND_HOMEPAGE: Final[str] = "홈페이지"
-FRAGMENT_KIND_OFFICIAL_IR: Final[str] = "공식 IR"
+# legacy 수집 조각에 붙이는 "종류" 문자열. feature끼리 직접 import하지 않고
+# shared 근거 계약의 한 정본을 함께 본다.
+FRAGMENT_KIND_NEWS: Final[str] = LEGACY_KIND_NEWS
+FRAGMENT_KIND_HOMEPAGE: Final[str] = LEGACY_KIND_HOMEPAGE
+FRAGMENT_KIND_OFFICIAL_IR: Final[str] = LEGACY_KIND_OFFICIAL_IR
 
 #: 원 기사 도메인을 못 뽑았을 때 1판 엔진이 넣는 자리표시자 (run_pilot.collect_news).
 #: 실제 도메인이 아니므로 출처로 그대로 옮기면 지어낸 값이 된다 — 만나면 비운다.

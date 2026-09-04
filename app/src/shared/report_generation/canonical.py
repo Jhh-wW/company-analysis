@@ -25,8 +25,8 @@ from src.shared.report_generation.models import (
     producer_evidence_from_dict,
     producer_evidence_to_dict,
 )
-from src.shared.report_quality.constants import STRICT_QUALITY_CONTRACT_VERSION
-from src.shared.report_quality.contract import contract_for_generation
+from src.shared.report_quality.constants import STRICT_QUALITY_CONTRACT_VERSIONS
+from src.shared.report_quality.contract import contract_for_stored_assessment
 from src.shared.report_quality.models import (
     PublicationPolicy,
     QualityGrade,
@@ -164,6 +164,9 @@ def _source_public_projection(source: object) -> dict[str, object]:
         "provenance_seal": str(source.get("provenance_seal") or ""),
         "provenance_role": str(source.get("provenance_role") or "citation"),
         "reporting_period": str(source.get("reporting_period") or ""),
+        "ir_metadata_verification": str(
+            source.get("ir_metadata_verification") or ""
+        ),
         "attachment_url": str(source.get("attachment_url") or ""),
         "domain_redirect_verification": str(
             source.get("domain_redirect_verification") or ""
@@ -173,6 +176,11 @@ def _source_public_projection(source: object) -> dict[str, object]:
         ),
         "domain_redirect_to_host": str(
             source.get("domain_redirect_to_host") or ""
+        ),
+        "formal_source_kind": str(source.get("formal_source_kind") or ""),
+        "identity_binding": str(source.get("identity_binding") or ""),
+        "document_content_sha256": str(
+            source.get("document_content_sha256") or ""
         ),
     }
 
@@ -373,7 +381,7 @@ def _actual_table_fields(
         "table_index": table_index,
         "kind": (
             "flow"
-            if str(_value(table, "presentation", "")) == "flow"
+            if str(_value(table, "presentation", "table")) == "flow"
             else "program"
         ),
         "caption": str(_value(table, "caption", "")),
@@ -381,7 +389,7 @@ def _actual_table_fields(
         "rows": rows,
         "cite": str(_value(table, "cite", "")),
         "numeric": bool(_value(table, "numeric", False)),
-        "presentation": str(_value(table, "presentation", "")),
+        "presentation": str(_value(table, "presentation", "table")),
         "display_unit": str(_value(table, "display_unit", "")),
         "raw_rows": [
             [str(cell) for cell in row]
@@ -577,11 +585,11 @@ def assert_report_matches_generation_evidence(
         raise PublicManifestError("FULL Report 공개 부족 사유가 남아 있습니다")
     contract_version = str(report_payload.get("quality_contract_version") or "")
     try:
-        contract = contract_for_generation(contract_version)
+        contract = contract_for_stored_assessment(contract_version)
     except ValueError as error:
         raise PublicManifestError("알 수 없는 품질 계약 버전입니다") from error
     if (
-        contract.version != STRICT_QUALITY_CONTRACT_VERSION
+        contract.version not in STRICT_QUALITY_CONTRACT_VERSIONS
         or contract_version != evidence.assessment.contract_version
     ):
         raise PublicManifestError("FULL 품질 계약이 평가 원본과 다릅니다")

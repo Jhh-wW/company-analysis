@@ -10,9 +10,17 @@ from __future__ import annotations
 
 import hashlib
 import urllib.parse
+from dataclasses import replace
 
 import pytest
 
+from src.features.chapter_evidence.constants import CompanyType
+from src.features.chapter_evidence.produce import produce_from_collection_envelopes
+from src.features.company_comparison.official_sources import (
+    dart_profile_attestation_material,
+)
+from src.features.composer import render as composer_render
+from src.features.composer.port import filing_meta_from_raw
 from src.features.homepage import wide_collect
 from src.features.homepage.constants import (
     WIDE_MAX_HOSTS,
@@ -28,8 +36,44 @@ from src.features.homepage.wide_collect import collect_official_web_documents
 from src.features.homepage.wide_evidence_mapping import to_evidence_mappings
 from src.features.homepage.wide_fetch import WideRawResponse, WideTransportError
 from src.features.homepage.wide_fragments import build_fragments, build_fragments_for_collection
+from src.features.pipeline.evidence_transport import build_section_evidence_packet_set
+from src.features.pipeline.official_evidence_transport_adapter import (
+    merge_official_evidence_fragments,
+)
+from src.features.provenance.sources import (
+    ensure_dart_profile_attesters,
+    full_typed_source_registry_problem,
+    has_valid_provenance_seal,
+    seal_collected_source,
+)
+from src.shared.report_evidence.legacy_fragment_kinds import LEGACY_FRAGMENT_KINDS
+from src.shared.report_evidence.runtime_port import OfficialEvidenceCollectionResult
+from src.web.official_evidence_adapter import (
+    provenance_documents_from_wide_envelope,
+)
+from src.shared.report_evidence.identity_verified_web import (
+    build_dart_filing_url_provenance,
+    parse_verified_dart_filing_subdomain_binding,
+)
 
 ROBOTS_ALLOW_ALL = "User-agent: *\nAllow: /\n"
+
+
+def _dart_provenance(candidate: str) -> tuple[str, str]:
+    receipt = "20260000000001"
+    return (
+        candidate,
+        build_dart_filing_url_provenance(
+            company_id="c1",
+            url=candidate,
+            source_document_id=f"dart_audit_report:{receipt}",
+            source_receipt_no=receipt,
+            source_member_name="cover.xml",
+            source_location="raw_xml_chars:10-40",
+            source_document_sha256="a" * 64,
+            source_payload_sha256="b" * 64,
+        ),
+    )
 
 
 class _FakeWideSite:
@@ -85,6 +129,10 @@ def _collect(site: _FakeWideSite, **overrides) -> object:
         transport=site.transport,
         ir_html_fetch=_no_ir,
         ir_pdf_fetch=_no_ir_pdf,
+        # 이 파일의 기존 단위시험은 root 결속 이후 robots·scope·상한을 따로
+        # 검증한다. 정식 운영의 root 신원 gate는 아래 전용 공격시험과 adapter
+        # 통합시험에서 실제로 켠다.
+        root_identity_verification_required=False,
     )
     kwargs.update(overrides)
     return collect_official_web_documents(**kwargs)
@@ -92,6 +140,20 @@ def _collect(site: _FakeWideSite, **overrides) -> object:
 
 def _body(text: str) -> str:
     return "<html><body><main><p>" + (text + " ") * 10 + "</p></main></body></html>"
+
+
+def _identity_body(text: str, *, number: str = "123-45-67890", extra: str = "") -> str:
+    """본문과 footer의 DART 신원 이중 표식을 함께 가진 공식 후보 페이지."""
+
+    return (
+        "<html><body><main><p>"
+        + (text + " ") * 10
+        + "</p>"
+        + extra
+        + "</main><footer>주식회사 와이즐리컴퍼니 · 사업자등록번호 "
+        + number
+        + "</footer></body></html>"
+    )
 
 
 # ── robots ────────────────────────────────────────────────
@@ -270,6 +332,152 @@ def test_등록_하위도메인은_자동결속되어_REQUIRED_문서가_된다(
     assert recruit_docs[0].source_kind == "official_recruit_page"
 
 
+def test_DART_root의_채용하위도메인_조각은_낮은수준_Source계약과_변조검사를_통과한다():
+    """하위도메인 proof의 packet·Source 단위계약과 부정 대조만 격리한다.
+
+    여기의 다른 장 legacy 조각은 packet 생성에 필요한 명시적 단위 fixture다.
+    실제 collector→공개 FULL 성공과 자동 attester 생성은 수동 보충이 없는
+    ``web/tests/test_public_boundary_full_evidence_e2e.py``가 소유한다.
+    """
+
+    profile = {
+        "status": "000",
+        "corp_code": "00126380",
+        "corp_name": "가나다전자",
+        "hm_url": "https://company.example/",
+    }
+    attestation_id, attestation_evidence = dart_profile_attestation_material(
+        profile=profile,
+        corp_code="00126380",
+        company_name="가나다전자",
+    )
+    root_html = (
+        "<html><body><main><p>가나다전자는 반도체 검사 장비를 제조하고 "
+        "기업 고객에게 판매하여 매출을 얻습니다.</p>"
+        '<a href="https://recruit.company.example/jobs">채용</a>'
+        "</main><footer>가나다전자 · 사업자등록번호 123-45-67890</footer>"
+        "</body></html>"
+    )
+    recruit_html = (
+        "<html><body><main><p>가나다전자는 책임을 핵심가치와 일하는 방식으로 "
+        "정하고 협업 프로젝트 사례를 운영해 개선한 기록을 공개합니다. "
+        "가나다전자는 책임을 핵심가치와 일하는 방식으로 정합니다.</p>"
+        "</main></body></html>"
+    )
+    pages = {
+        "https://company.example/robots.txt": _missing(
+            "https://company.example/robots.txt"
+        ),
+        "https://company.example/sitemap.xml": _missing(
+            "https://company.example/sitemap.xml"
+        ),
+        "https://company.example/": _page(root_html, "https://company.example/"),
+        "https://recruit.company.example/robots.txt": _missing(
+            "https://recruit.company.example/robots.txt"
+        ),
+        "https://recruit.company.example/sitemap.xml": _missing(
+            "https://recruit.company.example/sitemap.xml"
+        ),
+        "https://recruit.company.example/jobs": _page(
+            recruit_html,
+            "https://recruit.company.example/jobs",
+        ),
+    }
+    result = collect_official_web_documents(
+        company_id="00126380",
+        company_name="가나다전자",
+        root_homepage_url="https://company.example/",
+        company_registration_numbers=("123-45-67890",),
+        collected_at="2026-09-04",
+        domain_attestation_source_id=attestation_id,
+        domain_attestation_evidence=attestation_evidence,
+        transport=_FakeWideSite(pages).transport,
+        ir_html_fetch=_no_ir,
+        ir_pdf_fetch=_no_ir_pdf,
+    )
+    wide_fragments = build_fragments_for_collection(result)
+    envelope = to_evidence_mappings(result=result, fragments=wide_fragments)
+    candidates = produce_from_collection_envelopes(
+        company_id="00126380",
+        company_type=CompanyType.AUDIT_ONLY,
+        collection_envelopes=(envelope,),
+    )
+    official = OfficialEvidenceCollectionResult(
+        company_id="00126380",
+        candidates=candidates,
+    )
+    legacy = {
+        number: {"종류": kind, "원문": f"{kind}의 독립 회귀용 공식 원문입니다."}
+        for number, kind in enumerate(sorted(LEGACY_FRAGMENT_KINDS), start=1)
+    }
+    merged, _added = merge_official_evidence_fragments(legacy, official)
+    packet_set = build_section_evidence_packet_set(
+        corp_id="00126380",
+        source_generation_sha256=official.source_snapshot_sha256,
+        frags=merged,
+        filing_meta=filing_meta_from_raw(
+            {
+                "rcept_no": "20260315000123",
+                "report_nm": "사업보고서 (2025.12)",
+                "rcept_dt": "20260315",
+            }
+        ),
+    )
+    recruit_fragments = {
+        fragment
+        for packet in packet_set.packets
+        for fragment in packet.fragments
+        if "recruit.company.example" in fragment.source_url
+    }
+    assert recruit_fragments
+    fragment = sorted(recruit_fragments, key=lambda item: item.fragment_id)[0]
+    meta = composer_render._fragment_metas((fragment,))[0]  # noqa: SLF001
+    source = composer_render._build_source(  # noqa: SLF001
+        meta,
+        int(fragment.fragment_id),
+        "가나다전자",
+        ["culture"],
+    )
+    registry = ensure_dart_profile_attesters(
+        (source,),
+        company_name="가나다전자",
+    )
+    assert len(registry) == 2
+    attester = next(item for item in registry if item.provenance_role == "attestation_only")
+
+    assert source.host == "recruit.company.example"
+    assert has_valid_provenance_seal(source)
+    assert full_typed_source_registry_problem(
+        source,
+        registry,
+        reference_date="2026-09-04",
+    ) == ""
+
+    tampered = seal_collected_source(
+        replace(
+            source,
+            url="https://jobs.company.example/jobs",
+            host="jobs.company.example",
+            provenance_seal="",
+        )
+    )
+    assert full_typed_source_registry_problem(
+        tampered,
+        (tampered, attester),
+        reference_date="2026-09-04",
+    )
+    with pytest.raises(ValueError, match="중복 source_id"):
+        ensure_dart_profile_attesters((source, source), company_name="가나다전자")
+    forged_proof = seal_collected_source(
+        replace(source, domain_attestation_evidence="{}", provenance_seal="")
+    )
+    with pytest.raises(ValueError, match="의존성이 손상"):
+        ensure_dart_profile_attesters(
+            (forged_proof,),
+            company_name="가나다전자",
+        )
+
+
 def test_공식페이지의_외부_vendor_링크는_문서로_승격하거나_호출하지_않는다():
     pages = {
         "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
@@ -291,6 +499,778 @@ def test_공식페이지의_외부_vendor_링크는_문서로_승격하거나_�
     brand_docs = [doc for doc in result.documents if "brand-site.example" in doc.canonical_url]
     assert brand_docs == []
     assert not any("brand-site.example" in url for url in site.calls)
+
+
+def test_다른_등록도메인도_DART_법인명과_사업자번호를_실제본문에서_확인하면_수집한다():
+    """회사별 도메인 allowlist 없이 동일한 신원 규칙으로 새 자사몰을 살린다."""
+
+    root = "https://old-company.example"
+    shop = "https://wise-shop.example"
+    pages = {
+        f"{root}/robots.txt": _page(ROBOTS_ALLOW_ALL, f"{root}/robots.txt", "text/plain"),
+        f"{root}/sitemap.xml": _missing(f"{root}/sitemap.xml"),
+        f"{root}/": _page(
+            _body("과거 회사 안내 페이지") + f'<a href="{shop}/">새 공식 자사몰</a>',
+            f"{root}/",
+        ),
+        "https://www.old-company.example/robots.txt": _missing(
+            "https://www.old-company.example/robots.txt"
+        ),
+        "https://www.old-company.example/sitemap.xml": _missing(
+            "https://www.old-company.example/sitemap.xml"
+        ),
+        "https://www.old-company.example/": _missing(
+            "https://www.old-company.example/"
+        ),
+        f"{shop}/robots.txt": _missing(f"{shop}/robots.txt"),
+        f"{shop}/": _page(
+            _identity_body(
+                "면도용품과 생활용품을 제조 및 판매하는 주요 사업을 영위합니다",
+                extra='<a href="/products">제품군</a>',
+            ),
+            f"{shop}/",
+        ),
+        f"{shop}/products": _page(
+            _body("대표 제품과 제품군을 개인 고객에게 판매해 매출을 얻습니다"),
+            f"{shop}/products",
+        ),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_aliases=("Wisely Co., Ltd.",),
+        company_registration_numbers=("123-45-67890",),
+        root_homepage_url=root,
+    )
+
+    urls = {document.canonical_url for document in result.documents}
+    assert f"{shop}/" in urls
+    assert f"{shop}/products" in urls
+    cross_documents = [
+        document for document in result.documents if "wise-shop.example" in document.canonical_url
+    ]
+    assert cross_documents
+    assert all(document.requirement == "OPTIONAL" for document in cross_documents)
+    assert all(document.source_tier == "TIER_3_TRUSTED" for document in cross_documents)
+    assert all("등록번호" in document.identity_binding for document in cross_documents)
+    cross_ids = {document.document_id for document in cross_documents}
+    assert not any(
+        fragment.document_id in cross_ids
+        for fragment in build_fragments_for_collection(result)
+    )
+
+
+@pytest.mark.parametrize(
+    ("candidate_html", "wrong_reason"),
+    (
+        (
+            _body("주식회사 와이즐리컴퍼니의 상품을 소개합니다"),
+            "회사명만 일치",
+        ),
+        (
+            _identity_body("생활용품 판매", number="999-99-99999"),
+            "다른 사업자번호",
+        ),
+        (
+            _identity_body("생활용품 판매").replace(
+                "주식회사 와이즐리컴퍼니", "주식회사 다른컴퍼니"
+            ),
+            "다른 법인명",
+        ),
+    ),
+)
+def test_공식root가_직접_링크해도_강한_신원_둘중_하나가_없으면_승격하지_않는다(
+    candidate_html: str,
+    wrong_reason: str,
+):
+    del wrong_reason  # parametrized case 이름을 읽기 쉽게 남기는 설명값
+    root = "https://old-company.example"
+    candidate = "https://vendor.example"
+    pages = {
+        f"{root}/robots.txt": _missing(f"{root}/robots.txt"),
+        f"{root}/sitemap.xml": _missing(f"{root}/sitemap.xml"),
+        f"{root}/": _page(
+            _body("회사 안내") + f'<a href="{candidate}/">외부 링크</a>', f"{root}/"
+        ),
+        "https://www.old-company.example/robots.txt": _missing(
+            "https://www.old-company.example/robots.txt"
+        ),
+        "https://www.old-company.example/sitemap.xml": _missing(
+            "https://www.old-company.example/sitemap.xml"
+        ),
+        "https://www.old-company.example/": _missing(
+            "https://www.old-company.example/"
+        ),
+        f"{candidate}/robots.txt": _missing(f"{candidate}/robots.txt"),
+        f"{candidate}/": _page(candidate_html, f"{candidate}/"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("123-45-67890",),
+        root_homepage_url=root,
+    )
+
+    assert f"{candidate}/" in site.calls, "격리 exact 후보 한 건은 실제 본문을 확인한다"
+    assert not any("vendor.example" in doc.canonical_url for doc in result.documents)
+    mismatch = [
+        attempt
+        for attempt in result.attempts
+        if attempt.reason_code == "cross_domain_identity_mismatch"
+    ]
+    assert mismatch and all(attempt.requirement == "OPTIONAL" for attempt in mismatch)
+
+
+def test_전송계층이_범위밖_redirect를_놓쳐도_신원검증_경계가_다시_거절한다():
+    """법인명+번호를 복사한 외부 본문이 원래 후보 host를 결속할 수 없다."""
+
+    candidate = "https://official-candidate.example/company"
+    attacker = "https://attacker.example/copied-company"
+    calls: list[str] = []
+
+    def unsafe_transport(url: str, _url_allowed):
+        # 의도적으로 url_allowed를 무시하는 결함 있는 transport 대역이다.
+        # 조립 경계도 effective_url을 독립 확인해야 이 회귀를 막는다.
+        calls.append(url)
+        if url == "https://official-candidate.example/robots.txt":
+            return _missing(url)
+        if url == candidate:
+            return _page(
+                _identity_body("복사한 회사 소개와 대표 제품 정보"),
+                attacker,
+            )
+        raise WideTransportError(f"예상 밖 호출: {url}")
+
+    result = collect_official_web_documents(
+        company_id="c1",
+        company_name="주식회사 와이즐리컴퍼니",
+        root_homepage_url="",
+        collected_at="2026-08-31T00:00:00+00:00",
+        company_registration_numbers=("123-45-67890",),
+        official_candidate_urls=(candidate,),
+        root_identity_verification_required=True,
+        transport=unsafe_transport,
+        ir_html_fetch=_no_ir,
+        ir_pdf_fetch=_no_ir_pdf,
+    )
+
+    assert candidate in calls
+    assert result.documents == ()
+    assert any(
+        attempt.reason_code == "redirect_scope_mismatch"
+        and attempt.state == "FAILED"
+        for attempt in result.attempts
+    )
+
+
+def test_DART_sidecar_provenance만으로는_타사페이지를_공식으로_승격하지_않는다():
+    candidate = "https://directory.example/company/wisely"
+    pages = {
+        "https://directory.example/robots.txt": _missing(
+            "https://directory.example/robots.txt"
+        ),
+        candidate: _page(
+            _identity_body("다른 회사 정보", number="999-99-99999"),
+            candidate,
+        ),
+    }
+    site = _FakeWideSite(pages)
+
+    result = collect_official_web_documents(
+        company_id="c1",
+        company_name="주식회사 와이즐리컴퍼니",
+        root_homepage_url="",
+        collected_at="2026-08-31T00:00:00+00:00",
+        company_registration_numbers=("123-45-67890",),
+        official_candidate_provenance=(_dart_provenance(candidate),),
+        root_identity_verification_required=True,
+        transport=site.transport,
+        ir_html_fetch=_no_ir,
+        ir_pdf_fetch=_no_ir_pdf,
+    )
+
+    assert candidate in site.calls
+    assert result.documents == ()
+    assert any(
+        attempt.reason_code == "cross_domain_identity_mismatch"
+        for attempt in result.attempts
+    )
+
+
+def test_DART_sidecar로_검증한_root가_직접건_채용하위도메인은_strict_proof를_이어받는다():
+    root = "https://company.example/"
+    recruit = "https://recruit.company.example/jobs"
+    pages = {
+        "https://company.example/robots.txt": _missing(
+            "https://company.example/robots.txt"
+        ),
+        root: _page(
+            _identity_body(
+                "공식 회사 안내",
+                extra=f'<a href="{recruit}">채용</a>',
+            ),
+            root,
+        ),
+        "https://recruit.company.example/robots.txt": _missing(
+            "https://recruit.company.example/robots.txt"
+        ),
+        "https://recruit.company.example/sitemap.xml": _missing(
+            "https://recruit.company.example/sitemap.xml"
+        ),
+        recruit: _page(
+            _body(
+                "핵심가치와 일하는 방식을 협업 프로젝트 사례에 적용해 개선했습니다"
+            ),
+            recruit,
+        ),
+    }
+    result = collect_official_web_documents(
+        company_id="c1",
+        company_name="주식회사 와이즐리컴퍼니",
+        root_homepage_url="",
+        collected_at="2026-09-04",
+        company_registration_numbers=("123-45-67890",),
+        official_candidate_provenance=(_dart_provenance(root),),
+        root_identity_verification_required=True,
+        transport=_FakeWideSite(pages).transport,
+        ir_html_fetch=_no_ir,
+        ir_pdf_fetch=_no_ir_pdf,
+    )
+
+    recruit_document = next(
+        document
+        for document in result.documents
+        if document.canonical_url == recruit
+    )
+    proof = parse_verified_dart_filing_subdomain_binding(
+        recruit_document.identity_binding
+    )
+    assert proof is not None
+    assert proof.source_url == recruit
+    assert recruit_document.source_kind == "official_recruit_page"
+    assert recruit_document.requirement == "REQUIRED"
+    assert recruit_document.source_tier == "TIER_1_OFFICIAL"
+    assert any(
+        fragment.document_id == recruit_document.document_id
+        and "culture:work_principle" in fragment.covered_slot_ids
+        for fragment in build_fragments_for_collection(result)
+    )
+
+
+@pytest.mark.parametrize("missing", ("name", "registration_number"))
+def test_DARTproof가_있어도_법인명과_등록번호중_하나가_다르면_승격하지_않는다(
+    missing: str,
+):
+    candidate = "https://wise-shop.example/"
+    body = _identity_body(
+        "대표 제품과 판매 채널을 운영합니다",
+        number=("999-99-99999" if missing == "registration_number" else "123-45-67890"),
+    )
+    if missing == "name":
+        body = body.replace("주식회사 와이즐리컴퍼니", "주식회사 다른컴퍼니")
+    pages = {
+        "https://wise-shop.example/robots.txt": _missing(
+            "https://wise-shop.example/robots.txt"
+        ),
+        candidate: _page(body, candidate),
+    }
+    site = _FakeWideSite(pages)
+
+    result = collect_official_web_documents(
+        company_id="c1",
+        company_name="주식회사 와이즐리컴퍼니",
+        root_homepage_url="",
+        collected_at="2026-08-31T00:00:00+00:00",
+        company_registration_numbers=("123-45-67890",),
+        official_candidate_provenance=(_dart_provenance(candidate),),
+        root_identity_verification_required=True,
+        transport=site.transport,
+        ir_html_fetch=_no_ir,
+        ir_pdf_fetch=_no_ir_pdf,
+    )
+
+    assert result.documents == ()
+    assert any(
+        attempt.reason_code == "cross_domain_identity_mismatch"
+        for attempt in result.attempts
+    )
+
+
+def test_공유제3자host는_DARTproof와_복사신원이_있어도_조회하지_않는다():
+    candidate = "https://blog.naver.com/wisely"
+    pages = {}
+    site = _FakeWideSite(pages)
+
+    result = collect_official_web_documents(
+        company_id="c1",
+        company_name="주식회사 와이즐리컴퍼니",
+        root_homepage_url="",
+        collected_at="2026-08-31T00:00:00+00:00",
+        company_registration_numbers=("123-45-67890",),
+        official_candidate_provenance=(_dart_provenance(candidate),),
+        root_identity_verification_required=True,
+        transport=site.transport,
+        ir_html_fetch=_no_ir,
+        ir_pdf_fetch=_no_ir_pdf,
+    )
+
+    assert result.documents == ()
+    assert build_fragments_for_collection(result) == ()
+    assert site.calls == []
+
+
+def test_등록번호를_못받으면_예전처럼_다른_등록도메인을_0회호출한다():
+    root = "https://old-company.example"
+    candidate = "https://wise-shop.example"
+    pages = {
+        f"{root}/robots.txt": _missing(f"{root}/robots.txt"),
+        f"{root}/sitemap.xml": _missing(f"{root}/sitemap.xml"),
+        f"{root}/": _page(
+            _body("회사 안내") + f'<a href="{candidate}/">새 자사몰</a>', f"{root}/"
+        ),
+        "https://www.old-company.example/robots.txt": _missing(
+            "https://www.old-company.example/robots.txt"
+        ),
+        "https://www.old-company.example/sitemap.xml": _missing(
+            "https://www.old-company.example/sitemap.xml"
+        ),
+        "https://www.old-company.example/": _missing(
+            "https://www.old-company.example/"
+        ),
+    }
+    site = _FakeWideSite(pages)
+
+    _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=(),
+        root_homepage_url=root,
+    )
+
+    assert not any("wise-shop.example" in call for call in site.calls)
+
+
+def test_hm_url이_비어도_출처있는_후보가_강한_신원을_통과하면_수집한다():
+    candidate = "https://wise-shop.example"
+    pages = {
+        f"{candidate}/robots.txt": _missing(f"{candidate}/robots.txt"),
+        f"{candidate}/": _page(
+            _identity_body("대표 제품군을 개인 고객에게 판매해 매출을 얻습니다"),
+            f"{candidate}/",
+        ),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        root_homepage_url="",
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        official_candidate_urls=(f"{candidate}/",),
+    )
+
+    assert {document.canonical_url for document in result.documents} == {f"{candidate}/"}
+    assert any(
+        attempt.reason_code == "cross_domain_identity_verified"
+        for attempt in result.attempts
+    )
+    assert result.documents[0].source_tier == "TIER_3_TRUSTED"
+    assert build_fragments_for_collection(result) == ()
+
+
+def test_같은_host의_첫후보가_실패해도_뒤의_명시_회사소개_URL을_검증한다():
+    """첫 URL만 기억하면 자료가 있는데도 내부 수집기가 없다고 오판한다."""
+
+    origin = "https://wise-shop.example"
+    first = f"{origin}/about"
+    second = f"{origin}/company-info"
+    robots = f"{origin}/robots.txt"
+    pages = {
+        robots: _missing(robots),
+        first: _page(_body("제품 안내만 있고 법인 식별정보는 없는 화면"), first),
+        second: _page(
+            _identity_body("생활용품 대표 제품군과 주요 사업을 안내합니다"),
+            second,
+        ),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        root_homepage_url="",
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        official_candidate_urls=(first, second),
+    )
+
+    assert site.calls == [robots, first, second]
+    assert {document.canonical_url for document in result.documents} == {second}
+    assert any(
+        attempt.reason_code == "cross_domain_identity_mismatch"
+        for attempt in result.attempts
+    )
+    assert any(
+        attempt.reason_code == "cross_domain_identity_verified"
+        for attempt in result.attempts
+    )
+
+
+def test_hm_url과_출처있는_후보가_둘다_없으면_추측_URL을_만들거나_호출하지_않는다():
+    site = _FakeWideSite({})
+
+    result = _collect(
+        site,
+        root_homepage_url="",
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        official_candidate_urls=(),
+    )
+
+    assert result.documents == ()
+    assert result.attempts == ()
+    assert site.calls == []
+
+
+def test_서로다른_자사몰_채용_블로그도_같은_신원규칙으로만_수집한다():
+    root = "https://old-company.example"
+    channels = {
+        "https://wise-shop.example/": "주력 제품군과 서비스를 개인 고객에게 판매합니다",
+        "https://wise-careers.example/careers": "핵심가치를 적용해 고객 경험을 개선한 프로젝트 사례를 완료했습니다",
+        "https://wise-story.example/blog": "신제품 출시 전략과 향후 계획을 발표했습니다",
+    }
+    links = "".join(f'<a href="{url}">공식 채널</a>' for url in channels)
+    pages = {
+        f"{root}/robots.txt": _missing(f"{root}/robots.txt"),
+        f"{root}/sitemap.xml": _missing(f"{root}/sitemap.xml"),
+        f"{root}/": _page(_body("회사 안내") + links, f"{root}/"),
+        "https://www.old-company.example/robots.txt": _missing(
+            "https://www.old-company.example/robots.txt"
+        ),
+        "https://www.old-company.example/sitemap.xml": _missing(
+            "https://www.old-company.example/sitemap.xml"
+        ),
+        "https://www.old-company.example/": _missing(
+            "https://www.old-company.example/"
+        ),
+    }
+    for url, text in channels.items():
+        parsed = urllib.parse.urlsplit(url)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        pages[f"{origin}/robots.txt"] = _missing(f"{origin}/robots.txt")
+        pages[url] = _page(_identity_body(text), url)
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("123-45-67890",),
+        root_homepage_url=root,
+    )
+
+    collected = {document.canonical_url for document in result.documents}
+    assert set(channels) <= collected
+    assert next(doc for doc in result.documents if "careers" in doc.canonical_url).source_kind == (
+        "official_identity_verified_web_page"
+    )
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    (
+        "https://blog.naver.com/wisely",
+        "https://facebook.com/wisely",
+    ),
+)
+def test_강한_신원값이_있어도_공유플랫폼_소셜은_후보조회조차_하지_않는다(
+    candidate: str,
+):
+    site = _FakeWideSite({})
+
+    result = _collect(
+        site,
+        root_homepage_url="",
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        official_candidate_urls=(candidate,),
+    )
+
+    assert result.documents == ()
+    assert site.calls == []
+
+
+def test_DART의_낡은_HTTP후보는_같은_host_path_query의_HTTPS만_확인한다():
+    old_candidate = "http://wise-shop.example/company?tenant=wisely"
+    https_candidate = "https://wise-shop.example/company?tenant=wisely"
+    robots = "https://wise-shop.example/robots.txt"
+    pages = {
+        robots: _missing(robots),
+        https_candidate: _page(
+            _identity_body("생활용품 대표 제품군을 개인 고객에게 판매합니다"),
+            https_candidate,
+        ),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        root_homepage_url="",
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        official_candidate_urls=(old_candidate,),
+    )
+
+    assert site.calls == [robots, https_candidate]
+    assert old_candidate not in site.calls
+    assert {document.canonical_url for document in result.documents} == {
+        https_candidate
+    }
+
+
+@pytest.mark.parametrize("promote_verified_root", (True, False))
+@pytest.mark.parametrize(
+    ("requested_path", "effective_path"),
+    (("/company/", "/company/careers"),),
+)
+def test_신원검증후_redirect는_실제_landing_URL로_문서_attempt_조각을_한번만_분류한다(
+    promote_verified_root: bool,
+    requested_path: str,
+    effective_path: str,
+) -> None:
+    origin = "https://redirect-kind.example"
+    requested = f"{origin}{requested_path}"
+    effective = f"{origin}{effective_path}"
+    pages = {
+        f"{origin}/robots.txt": _missing(f"{origin}/robots.txt"),
+        f"{origin}/sitemap.xml": _missing(f"{origin}/sitemap.xml"),
+        requested: _page(
+            _identity_body(
+                "핵심가치와 일하는 방식을 제품 사업과 고객 경험에 적용합니다"
+            ),
+            effective,
+        ),
+    }
+    site = _FakeWideSite(pages)
+    result = _collect(
+        site,
+        root_homepage_url=requested if promote_verified_root else "",
+        official_candidate_urls=() if promote_verified_root else (requested,),
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        root_identity_verification_required=True,
+    )
+
+    document = next(item for item in result.documents if item.canonical_url == effective)
+    attempt = next(
+        item
+        for item in result.attempts
+        if item.reason_code
+        in {"root_identity_verified", "cross_domain_identity_verified"}
+    )
+    expected = wide_collect.classify_official_page_url(effective)
+    assert attempt.slot_ids == expected.slot_ids
+    if promote_verified_root:
+        assert document.source_kind == expected.source_kind
+        assert attempt.source_kind == expected.source_kind
+    else:
+        assert document.source_kind == "official_identity_verified_web_page"
+        assert attempt.source_kind == "official_identity_verified_web_page"
+    fragments = build_fragments_for_collection(result)
+    if promote_verified_root:
+        assert fragments
+        assert {
+            slot for fragment in fragments for slot in fragment.covered_slot_ids
+        } <= set(expected.slot_ids)
+    else:
+        # 강한 DART 계보가 없는 cross-domain 신원 일치는 감사 후보일 뿐
+        # Writer로 올리지 않는 기존 비용·신뢰 정책을 유지한다.
+        assert fragments == ()
+
+
+def test_재할당된_DART_root는_타사문구가_풍부해도_근거와_하위링크를_0건으로_막는다():
+    root = "https://reassigned.example"
+    product = f"{root}/products"
+    pages = {
+        f"{root}/robots.txt": _missing(f"{root}/robots.txt"),
+        f"{root}/": _page(
+            _identity_body(
+                "대표 제품과 제품군을 개인 고객에게 판매해 매출을 얻고 "
+                "핵심가치와 차별화 경쟁력으로 향후 전략을 추진합니다",
+                number="999-99-99999",
+                extra=f'<a href="{product}">제품</a>',
+            ).replace("주식회사 와이즐리컴퍼니", "주식회사 다른컴퍼니"),
+            f"{root}/",
+        ),
+        product: _page(_body("타사 대표 제품과 핵심 제품군"), product),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        root_homepage_url=root,
+        root_identity_verification_required=True,
+    )
+
+    assert result.documents == ()
+    assert product not in site.calls
+    assert any(
+        attempt.reason_code == "root_identity_mismatch"
+        and attempt.documents_seen == 0
+        for attempt in result.attempts
+    )
+
+
+def test_DART_root도_법인명과_등록번호가_함께_맞은뒤에만_REQUIRED가_된다():
+    root = "https://verified-root.example"
+    pages = {
+        f"{root}/robots.txt": _missing(f"{root}/robots.txt"),
+        f"{root}/": _page(
+            _identity_body("2018년에 설립해 생활용품을 제조 및 판매하는 주요 사업을 영위합니다"),
+            f"{root}/",
+        ),
+        f"{root}/sitemap.xml": _missing(f"{root}/sitemap.xml"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        root_homepage_url=root,
+        root_identity_verification_required=True,
+    )
+
+    document = next(doc for doc in result.documents if doc.canonical_url == f"{root}/")
+    assert document.source_kind == "official_web_page"
+    assert document.requirement == "REQUIRED"
+    assert "등록번호 이중 검증" in document.identity_binding
+    assert any(
+        attempt.reason_code == "root_identity_verified"
+        for attempt in result.attempts
+    )
+
+
+def test_DART_root와_same_origin_개인정보페이지에_신원이_나뉘어도_검증한다():
+    root = "https://split-identity.example"
+    privacy = f"{root}/privacy"
+    attacker = "https://attacker.example/privacy"
+    pages = {
+        f"{root}/robots.txt": _missing(f"{root}/robots.txt"),
+        f"{root}/": _page(
+            _body("주식회사 와이즐리컴퍼니 회사 소개와 생활용품 주요 사업")
+            + f'<a href="{privacy}">개인정보처리방침</a>'
+            + f'<a href="{attacker}">외부 개인정보 안내</a>',
+            f"{root}/",
+        ),
+        privacy: _page(
+            _body("개인정보 보호와 고객 정보 처리 원칙을 안내합니다")
+            + "<footer>사업자등록번호 123-45-67890</footer>",
+            privacy,
+        ),
+        f"{root}/sitemap.xml": _missing(f"{root}/sitemap.xml"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        root_homepage_url=root,
+        root_identity_verification_required=True,
+    )
+
+    urls = {document.canonical_url for document in result.documents}
+    assert f"{root}/" in urls
+    assert privacy in urls
+    assert attacker not in site.calls, "교차 origin 본문을 신원 보조 페이지로 읽지 않는다"
+    assert all(document.source_tier == "TIER_1_OFFICIAL" for document in result.documents)
+    assert any(
+        attempt.reason_code == "root_identity_verified"
+        for attempt in result.attempts
+    )
+
+
+def test_root_신원보조탐색은_닫힌_페이지수_상한을_넘지_않는다():
+    root = "https://bounded-identity.example"
+    supplement_urls = tuple(
+        f"{root}/{name}"
+        for name in ("company", "about", "privacy", "legal")
+    )
+    links = "".join(f'<a href="{url}">{url}</a>' for url in supplement_urls)
+    pages = {
+        f"{root}/robots.txt": _missing(f"{root}/robots.txt"),
+        f"{root}/": _page(
+            "<html><main>주식회사 와이즐리컴퍼니</main>" + links + "</html>",
+            f"{root}/",
+        ),
+        **{
+            url: _page("<html><footer>번호 없는 안내</footer></html>", url)
+            for url in supplement_urls
+        },
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        root_homepage_url=root,
+        root_identity_verification_required=True,
+    )
+
+    called_supplements = [url for url in site.calls if url in supplement_urls]
+    assert len(called_supplements) == 3
+    assert supplement_urls[3] not in called_supplements
+    assert result.documents == ()
+
+
+def test_등록번호가_없는_DART_root는_정식모드에서_네트워크_0회로_fail_closed한다():
+    site = _FakeWideSite({})
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=(),
+        root_homepage_url="https://unknown-owner.example/",
+        root_identity_verification_required=True,
+    )
+
+    assert result.documents == ()
+    assert site.calls == []
+    assert [attempt.reason_code for attempt in result.attempts] == [
+        "root_identity_unverifiable"
+    ]
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    (
+        "http://wise-shop.example:8080/company",
+        "https://user:secret@wise-shop.example/company",
+        "ftp://wise-shop.example/company",
+    ),
+)
+def test_HTTP승격도_사용자정보_비표준포트_다른프로토콜은_0회호출한다(
+    candidate: str,
+):
+    site = _FakeWideSite({})
+
+    result = _collect(
+        site,
+        root_homepage_url="",
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        official_candidate_urls=(candidate,),
+    )
+
+    assert result.documents == ()
+    assert result.attempts == ()
+    assert site.calls == []
 
 
 def test_도메인군_밖으로의_리다이렉트는_차단된다():
@@ -1428,6 +2408,77 @@ def test_유형이_잡히는_페이지_성공은_REQUIRED를_유지한다():
     assert set(about_attempt.slot_ids) != set(WIDE_REQUIRED_SLOT_IDS)
 
 
+@pytest.mark.parametrize(
+    ("requested_path", "effective_path", "body", "expected_kind", "expected_slots"),
+    (
+        (
+            "/about",
+            "/careers",
+            "핵심가치를 적용해 협업 프로젝트를 운영하고 개선한 사례입니다.",
+            "official_recruit_page",
+            set(WIDE_REQUIRED_SLOT_IDS_BY_SECTION["culture"]),
+        ),
+        (
+            "/careers",
+            "/about",
+            "2010년에 설립해 산업 장비를 제조하고 시장 점유율을 높였습니다.",
+            "official_web_page",
+            set(
+                WIDE_REQUIRED_SLOT_IDS_BY_SECTION["identity"]
+                + WIDE_REQUIRED_SLOT_IDS_BY_SECTION["competitive_position"]
+            ),
+        ),
+    ),
+)
+def test_성공_redirect는_effective_URL하나로_문서_attempt_fragment종류를_정한다(
+    requested_path,
+    effective_path,
+    body,
+    expected_kind,
+    expected_slots,
+):
+    requested_url = "https://company.example" + requested_path
+    effective_url = "https://company.example" + effective_path
+    pages = {
+        "https://company.example/robots.txt": _page(
+            ROBOTS_ALLOW_ALL,
+            "https://company.example/robots.txt",
+            "text/plain",
+        ),
+        "https://company.example/sitemap.xml": _missing(
+            "https://company.example/sitemap.xml"
+        ),
+        "https://company.example/": _page(
+            _body("루트 페이지 본문") + f'<a href="{requested_path}">이동</a>',
+            "https://company.example/",
+        ),
+        requested_url: _page(_body(body), effective_url),
+    }
+
+    result = _collect(_FakeWideSite(pages))
+    document = next(doc for doc in result.documents if doc.canonical_url == effective_url)
+    assert document.source_kind == expected_kind
+    fragments = tuple(
+        fragment
+        for fragment in build_fragments_for_collection(result)
+        if fragment.document_id == document.document_id
+    )
+    assert fragments
+    assert {
+        slot
+        for fragment in fragments
+        for slot in fragment.covered_slot_ids
+    } <= expected_slots
+    attempt = next(
+        attempt
+        for attempt in result.attempts
+        if attempt.source_kind == expected_kind
+        and set(attempt.slot_ids) == expected_slots
+        and attempt.documents_seen == 1
+    )
+    assert attempt.state == "OK"
+
+
 def test_ir_none은_OPTIONAL로_낮아진다(monkeypatch):
     def fake_collect_ir(homepage_url, **_kwargs):
         return OfficialIrCollectResult(state="none", fragments=[], downloaded_pdf_bytes=0)
@@ -1549,6 +2600,271 @@ def test_공식_HTML_exact_외부_IR첨부는_낮은신뢰_provenance만_남기�
     assert external_doc.source_tier == "TIER_3_TRUSTED"
     assert attachment_url in external_doc.identity_binding
     assert build_fragments(external_doc, company_id="c1") == ()
+    envelope = to_evidence_mappings(
+        result=result,
+        fragments=build_fragments_for_collection(result),
+    )
+    audit_row = next(
+        row
+        for row in envelope["provenance_documents"]
+        if row["document_id"] == external_doc.document_id
+    )
+    assert audit_row["canonical_url"] == attachment_url
+    assert audit_row["content_sha256"] == external_doc.content_sha256
+    assert not any(
+        row["document_id"] == external_doc.document_id
+        for row in envelope["documents"]
+    )
+
+
+def test_공식host_IR도_날짜와_기간이_없으면_provenance_only로_격리되어_packet을_막지않는다(
+    monkeypatch,
+):
+    """실제 wide 생산부터 packet까지 손으로 IR 근거를 보충하지 않는다."""
+
+    from src.shared.official_ir import IR_ATTACHMENT_URL_FIELD
+
+    company_id = "00126380"
+    company_name = "가나다전자"
+    root_url = "https://company.example/"
+    ir_url = "https://company.example/ir/no-date.pdf"
+    attestation_id, attestation_evidence = dart_profile_attestation_material(
+        profile={
+            "status": "000",
+            "corp_code": company_id,
+            "corp_name": company_name,
+            "hm_url": root_url,
+        },
+        corp_code=company_id,
+        company_name=company_name,
+    )
+
+    def fake_collect_ir(homepage_url, **_kwargs):
+        if homepage_url != root_url:
+            return OfficialIrCollectResult(
+                state="none", fragments=[], downloaded_pdf_bytes=0
+            )
+        return OfficialIrCollectResult(
+            state="ok",
+            fragments=[
+                {
+                    "종류": "공식 IR",
+                    "원문": "가나다전자는 기업 고객에게 장비를 판매해 매출을 얻습니다.",
+                    "출처": ir_url,
+                    IR_ATTACHMENT_URL_FIELD: ir_url,
+                    "문서ID": "same-host-ir-no-date",
+                    "문서명": "IR 사업 자료",
+                    # 문서일·기준기간·anchor 검증값이 실제로 없다.
+                }
+            ],
+            downloaded_pdf_bytes=100,
+        )
+
+    monkeypatch.setattr(wide_collect, "collect_official_ir_fragments", fake_collect_ir)
+    pages = {
+        "https://company.example/robots.txt": _page(
+            ROBOTS_ALLOW_ALL,
+            "https://company.example/robots.txt",
+            "text/plain",
+        ),
+        "https://company.example/sitemap.xml": _missing(
+            "https://company.example/sitemap.xml"
+        ),
+        root_url: _page(
+            _body("가나다전자는 장비를 제조하고 기업 고객에게 판매해 매출을 얻습니다."),
+            root_url,
+        ),
+    }
+    result = collect_official_web_documents(
+        company_id=company_id,
+        company_name=company_name,
+        root_homepage_url=root_url,
+        collected_at="2026-09-04",
+        domain_attestation_source_id=attestation_id,
+        domain_attestation_evidence=attestation_evidence,
+        root_identity_verification_required=False,
+        transport=_FakeWideSite(pages).transport,
+        ir_html_fetch=_no_ir,
+        ir_pdf_fetch=_no_ir_pdf,
+    )
+    ir_document = next(doc for doc in result.documents if doc.canonical_url == ir_url)
+    assert ir_document.requirement == "OPTIONAL"
+    assert ir_document.source_tier == "TIER_3_TRUSTED"
+    assert build_fragments(ir_document, company_id=company_id) == ()
+    ir_attempt = next(
+        attempt
+        for attempt in result.attempts
+        if attempt.reason_code == "official_ir_writer_metadata_incomplete"
+    )
+    assert ir_attempt.documents_seen == 1
+
+    fragments = build_fragments_for_collection(result)
+    envelope = to_evidence_mappings(result=result, fragments=fragments)
+    assert not any(
+        row["document_id"] == ir_document.document_id
+        for row in envelope["documents"]
+    )
+    assert envelope["provenance_documents"][0]["canonical_url"] == ir_url
+    candidates = produce_from_collection_envelopes(
+        company_id=company_id,
+        company_type=CompanyType.AUDIT_ONLY,
+        collection_envelopes=(envelope,),
+    )
+    official = OfficialEvidenceCollectionResult(
+        company_id=company_id,
+        candidates=candidates,
+        provenance_documents=provenance_documents_from_wide_envelope(
+            envelope,
+            company_id=company_id,
+        ),
+    )
+    legacy = {
+        number: {"종류": kind, "원문": f"{kind}의 독립 packet 바탕 원문입니다."}
+        for number, kind in enumerate(sorted(LEGACY_FRAGMENT_KINDS), start=1)
+    }
+    merged, _added = merge_official_evidence_fragments(legacy, official)
+    assert merged
+    assert all(str(row.get("출처") or "") != ir_url for row in merged.values())
+    packet_set = build_section_evidence_packet_set(
+        corp_id=company_id,
+        source_generation_sha256=official.source_snapshot_sha256,
+        frags=merged,
+        filing_meta=filing_meta_from_raw(
+            {
+                "rcept_no": "20260315000123",
+                "report_nm": "사업보고서 (2025.12)",
+                "rcept_dt": "20260315",
+            }
+        ),
+    )
+    assert packet_set.packets
+    assert official.independent_document_count == len(
+        {
+            document.content_sha256
+            for candidate in official.candidates
+            for document in candidate.documents
+        }
+    )
+
+
+def test_실제_IR_parser는_URL의_ir글자와_무관하게_본문의_여러장슬롯을_살린다():
+    """실제 HTML→PDF parser 결과를 URL 힌트가 과거·미래 장으로 자르지 않는다."""
+
+    import io
+
+    from pathlib import Path
+
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.pdfgen.canvas import Canvas
+
+    from src.features.homepage.ir_pdf import FetchedIrHtml, FetchedIrPdf
+
+    company_id = "00126380"
+    company_name = "Example Company"
+    root_url = "https://company.example/"
+    pdf_url = "https://company.example/ir/2026-q2.pdf"
+    profile = {
+        "status": "000",
+        "corp_code": company_id,
+        "corp_name": company_name,
+        "hm_url": root_url,
+    }
+    attestation_id, attestation_evidence = dart_profile_attestation_material(
+        profile=profile,
+        corp_code=company_id,
+        company_name=company_name,
+    )
+    pdf_buffer = io.BytesIO()
+    font_name = "WideCollectKoreanIr"
+    font_path = (
+        Path(__file__).resolve().parents[2]
+        / "export_pdf"
+        / "fonts"
+        / "Freesentation-Regular.ttf"
+    )
+    pdfmetrics.registerFont(TTFont(font_name, str(font_path)))
+    canvas = Canvas(pdf_buffer, pageCompression=0, invariant=1)
+    ir_sentences = (
+        "Example Company는 기업 고객사에 반도체 검사 솔루션을 제공하고 장비 판매로 매출을 얻습니다.",
+        "Example Company는 반도체 공정 추적 장비를 핵심 제품으로 두고 제품별 매출 비중을 공개합니다.",
+        "원재료 가격 상승으로 Example Company의 원가 부담이 커졌고, 이에 대응해 당사가 공급처를 다변화했습니다.",
+    )
+    for sentence in ir_sentences:
+        canvas.setFont(font_name, 12)
+        canvas.drawString(40, 800, sentence)
+        canvas.showPage()
+    canvas.save()
+    pdf_bytes = pdf_buffer.getvalue()
+
+    def ir_html(url, expected_hostname, url_allowed):
+        if url.endswith("/robots.txt"):
+            return FetchedIrHtml("", url)
+        if expected_hostname == "company.example" and url == root_url:
+            assert url_allowed(url)
+            return FetchedIrHtml(
+                '<a href="/ir/2026-q2.pdf">26년 2분기 IR자료 2026-08-12</a>',
+                root_url,
+            )
+        raise wide_collect.OfficialIrFetchError("가짜 IR HTML 없음")
+
+    def ir_pdf(url, expected_hostname, max_bytes, url_allowed):
+        assert url == pdf_url
+        assert expected_hostname == "company.example"
+        assert len(pdf_bytes) <= max_bytes
+        assert url_allowed(url)
+        return FetchedIrPdf(pdf_bytes, pdf_url, "application/pdf")
+
+    pages = {
+        "https://company.example/robots.txt": _missing(
+            "https://company.example/robots.txt"
+        ),
+        "https://company.example/sitemap.xml": _missing(
+            "https://company.example/sitemap.xml"
+        ),
+        root_url: _page(_body("Example Company official business"), root_url),
+    }
+    result = collect_official_web_documents(
+        company_id=company_id,
+        company_name=company_name,
+        root_homepage_url=root_url,
+        collected_at="2026-09-04",
+        domain_attestation_source_id=attestation_id,
+        domain_attestation_evidence=attestation_evidence,
+        root_identity_verification_required=False,
+        transport=_FakeWideSite(pages).transport,
+        ir_html_fetch=ir_html,
+        ir_pdf_fetch=ir_pdf,
+    )
+    ir_document = next(
+        document
+        for document in result.documents
+        if document.source_kind == "official_ir_pdf"
+    )
+    assert ir_document.canonical_url == pdf_url
+    assert ir_document.requirement == "REQUIRED"
+    assert ir_document.source_tier == "TIER_1_OFFICIAL"
+    wide_fragments = build_fragments_for_collection(result)
+    ir_fragments = [
+        fragment
+        for fragment in wide_fragments
+        if fragment.document_id == ir_document.document_id
+    ]
+    covered = {
+        slot_id
+        for fragment in ir_fragments
+        for slot_id in fragment.covered_slot_ids
+    }
+    assert {
+        "business_model:customer_type",
+        "business_model:revenue_model",
+        "business_model:value_exchange",
+        "portfolio:product_role",
+        "portfolio:revenue_link",
+        "current_challenges:issue",
+        "current_challenges:response",
+    } <= covered
+    assert {fragment.text for fragment in ir_fragments} == set(ir_sentences)
 
 
 def test_외부_IR첨부_fetch는_발견된_exact_URL_한건만_허용하고_redirect를_거절한다():

@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import pytest
 
+from src.features.homepage.constants import (
+    WIDE_MAX_LINKS_PER_PAGE,
+    WIDE_MAX_LINK_URL_CHARS,
+    WIDE_SOURCE_KIND_RECRUIT_PAGE,
+    WIDE_SOURCE_KIND_WEB_PAGE,
+)
+
 from src.features.homepage.wide_domain import (
     bind_linked_host,
     bind_registered_subdomain,
     bind_www_apex_alternate,
     canonicalize_url,
+    classify_official_page_url,
     is_excluded_linked_host,
     is_registered_subdomain,
     parse_official_origin,
@@ -135,6 +143,16 @@ def test_등록_하위도메인_결속은_결속근거를_남긴다():
     assert bound is not None
     assert bound.is_high_confidence is True
     assert "company.com" in bound.identity_binding
+
+
+def test_www가_DART_root여도_등록도메인의_실제하위host를_결속한다():
+    bound = bind_registered_subdomain(
+        "www.company.com",
+        "recruit.company.com",
+    )
+    assert bound is not None
+    assert bound.host == "recruit.company.com"
+    assert bound.is_high_confidence is True
 
 
 def test_다른_등록도메인은_결속되지_않는다():
@@ -410,6 +428,39 @@ def test_slot_ids_for_url은_알수없는_페이지면_빈_튜플():
     assert slot_ids_for_url("https://company.example/xyz-unrelated") == ()
 
 
+@pytest.mark.parametrize(
+    "url",
+    (
+        "https://careerplus.example/about",
+        "https://myjobs.example/",
+    ),
+)
+def test_회사host의_부분문자열은_채용_kind로_오탐하지_않는다(url: str):
+    classification = classify_official_page_url(url)
+
+    assert classification.source_kind == WIDE_SOURCE_KIND_WEB_PAGE
+    assert set(classification.slot_ids).isdisjoint(
+        {"culture:work_principle", "culture:verified_case"}
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "https://recruit.company.example/",
+        "https://company.example/careers",
+    ),
+)
+def test_실제채용_URL은_kind와_culture슬롯을_한번에_결정한다(url: str):
+    classification = classify_official_page_url(url)
+
+    assert classification.source_kind == WIDE_SOURCE_KIND_RECRUIT_PAGE
+    assert classification.slot_ids == (
+        "culture:work_principle",
+        "culture:verified_case",
+    )
+
+
 # ── wide_extract ─────────────────────────────────────────
 
 
@@ -446,6 +497,45 @@ def test_링크_추출은_문서_확장자를_뺀다():
     assert "https://company.com/about" in links
     assert not any(link.endswith(".pdf") for link in links)
     assert not any("javascript" in link for link in links)
+
+
+def test_한페이지의_링크폭탄은_닫힌_상한까지만_보존한다():
+    html = "".join(
+        f'<a href="/page-{index}">링크</a>'
+        for index in range(WIDE_MAX_LINKS_PER_PAGE + 500)
+    )
+
+    links = extract_links(html, "https://company.com/")
+
+    assert len(links) == WIDE_MAX_LINKS_PER_PAGE
+    assert links[0] == "https://company.com/page-0"
+    assert links[-1] == (
+        f"https://company.com/page-{WIDE_MAX_LINKS_PER_PAGE - 1}"
+    )
+
+
+def test_앞쪽_일반링크가_상한을_채워도_footer의_회사신원경로는_보존한다():
+    html = "".join(
+        f'<a href="/products/item-{index}">상품</a>'
+        for index in range(WIDE_MAX_LINKS_PER_PAGE + 500)
+    ) + '<footer><a href="/privacy">개인정보 처리방침</a></footer>'
+
+    links = extract_links(html, "https://company.com/")
+
+    assert len(links) == WIDE_MAX_LINKS_PER_PAGE
+    assert "https://company.com/privacy" in links
+
+
+def test_긴_href와_query가_붙은_문서확장자는_queue에_남기지_않는다():
+    html = (
+        f'<a href="/{"a" * WIDE_MAX_LINK_URL_CHARS}">긴 링크</a>'
+        '<a href="/report.pdf?download=1">PDF</a>'
+        '<a href="/company">회사</a>'
+    )
+
+    assert extract_links(html, "https://company.com/") == (
+        "https://company.com/company",
+    )
 
 
 def test_json_ld에서_문자열값만_뽑는다():
@@ -528,11 +618,11 @@ def test_시간초과는_FAILED로_분류된다():
     assert reason == "network_failed"
 
 
-def test_DNS_실패_메시지는_MISSING으로_분류된다():
+def test_DNS_실패_문장만으로_자료없음이라_단정하지_않는다():
     error = WideTransportError("UnsafeHomepageUrlError: 호스트 이름을 찾지 못했습니다")
     state, reason = classify_general_outcome(None, error)
-    assert state == "MISSING"
-    assert reason == "dns_missing"
+    assert state == "FAILED"
+    assert reason == "network_failed"
 
 
 def test_robots_200은_규칙을_해석해_진행한다():

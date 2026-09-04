@@ -29,19 +29,28 @@ from __future__ import annotations
 import re
 from typing import Final
 
-#: 표를 찾는 표제. ★ 회사마다 표기가 조금씩 다르므로 여러 개 둔다.
-PRODUCT_HEADS: Final[tuple[str, ...]] = (
-    "제품별 매출액",
-    "품목별 매출액",
-    "제품별 매출 실적",
-    "사업부문별 매출액",
-    "주요 제품 및 서비스의 현황",
+from src.shared.revenue_table_provenance import (
+    REVENUE_AXIS_PRODUCT,
+    REVENUE_AXIS_REGION,
+    REVENUE_CAPTION_BY_AXIS,
+    REVENUE_HEADERS,
+    REVENUE_HEADS_BY_AXIS,
+    REVENUE_MAX_ROWS,
+    REVENUE_NAME_NOISE,
+    REVENUE_ROW_RE,
 )
 
-REGION_HEADS: Final[tuple[str, ...]] = (
-    "지역별 매출액",
-    "지역별 매출 실적",
-    "매출지역별",
+#: 표를 찾는 표제. ★ 회사마다 표기가 조금씩 다르므로 여러 개 둔다.
+PRODUCT_HEADS: Final[tuple[str, ...]] = REVENUE_HEADS_BY_AXIS[
+    REVENUE_AXIS_PRODUCT
+]
+
+REGION_HEADS: Final[tuple[str, ...]] = REVENUE_HEADS_BY_AXIS[REVENUE_AXIS_REGION]
+
+#: 현재 표의 끝을 정하는 닫힌 표제 목록. 제품·지역 순서가 뒤집히거나 같은
+#: 표제가 다시 나와도 다음 occurrence가 현재 표의 경계가 된다.
+KNOWN_TABLE_HEADS: Final[tuple[str, ...]] = tuple(
+    dict.fromkeys((*PRODUCT_HEADS, *REGION_HEADS))
 )
 
 #: 표제를 찾은 뒤 살펴볼 길이(글자).
@@ -50,9 +59,7 @@ SCAN_CHARS: Final[int] = 2200
 
 #: 한 행 — 「…이름… 772,960 29.17%」.
 #: ★ 이름은 «최소한»으로 문다(non-greedy). 앞 행의 꼬리를 먹지 않게 하려는 것이다.
-ROW_RE: Final[re.Pattern[str]] = re.compile(
-    r"([^\d%]{2,40}?)\s+(\d{1,3}(?:,\d{3})+|\d{4,})\s+(\d{1,3}\.\d{1,2})\s*%"
-)
+ROW_RE: Final[re.Pattern[str]] = REVENUE_ROW_RE
 
 #: 이 말이 이름에 있으면 «합계 행»이다 — 표에 넣되 맨 끝에 둔다.
 TOTAL_WORDS: Final[tuple[str, ...]] = ("합계", "합 계", "총계", "계")
@@ -62,14 +69,10 @@ TOTAL_WORDS: Final[tuple[str, ...]] = ("합계", "합 계", "총계", "계")
 SUBTOTAL_WORDS: Final[tuple[str, ...]] = ("소계", "소 계")
 
 #: 표에 넣을 최대 행 수 (합계 제외).
-MAX_ROWS: Final[int] = 12
+MAX_ROWS: Final[int] = REVENUE_MAX_ROWS
 
 #: 이름에서 지워 버릴 찌꺼기 — 표 머리말이 행 이름에 섞여 들어온다.
-NAME_NOISE: Final[tuple[str, ...]] = (
-    "매 출 액", "매출액", "비 중", "비중", "구 분", "구분", "품 목", "품목",
-    "(단위 : 백만원)", "(단위: 백만원)", "단위 : 백만원", "연결재무제표 기준",
-    "매 출 지 역", "매출지역", "고객과의 계약에서 생기는 수익",
-)
+NAME_NOISE: Final[tuple[str, ...]] = REVENUE_NAME_NOISE
 
 #: ★ 이름 길이 상한을 두지 않는다 (제품 결정) — 예전에는 26자에서
 #:   말줄임(…)으로 «잘랐다». 「MD 및 라이선싱 공식 상품(MD), IP 라이…」처럼
@@ -80,11 +83,11 @@ NAME_NOISE: Final[tuple[str, ...]] = (
 #:   40자를 넘지 않는다 — 별도 상한이 없어도 무한정 길어지지 않는다.
 
 #: 표 제목.
-PRODUCT_CAPTION: Final[str] = "무엇을 팔아 번 돈인가 — 제품·서비스별 매출 비중"
-REGION_CAPTION: Final[str] = "어디서 번 돈인가 — 지역별 매출 비중"
+PRODUCT_CAPTION: Final[str] = REVENUE_CAPTION_BY_AXIS[REVENUE_AXIS_PRODUCT]
+REGION_CAPTION: Final[str] = REVENUE_CAPTION_BY_AXIS[REVENUE_AXIS_REGION]
 
 #: 열 이름.
-HEADERS: Final[tuple[str, str, str]] = ("구분", "매출액 (백만원)", "비중")
+HEADERS: Final[tuple[str, str, str]] = REVENUE_HEADERS
 
 #: 표 밑에 붙이는 말 — **프로그램이 붙인다.** AI가 아니다.
 FOOTNOTE: Final[str] = "공시에 적힌 비중을 그대로 옮긴 것입니다 (계산하지 않았습니다)"

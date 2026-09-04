@@ -106,3 +106,31 @@ def test_캐시지문은_공시나_재무_어느쪽이_바뀌어도_달라진다
         corrected_filing.cache_digest,
         corrected_finance.cache_digest,
     }) == 3
+
+
+def test_FULL_캐시지문은_공식자료_snapshot이_바뀌면_달라진다():
+    identity = ReportSourceIdentity(
+        dart_receipt_numbers=("20260315000123",),
+        financial_payload_digest="a" * 64,
+    )
+
+    first = identity.cache_digest_with_official_snapshot("b" * 64)
+    second = identity.cache_digest_with_official_snapshot("c" * 64)
+
+    assert len(first) == 64
+    assert first != second
+    assert first == identity.cache_digest_with_official_snapshot("b" * 64)
+
+
+def test_FULL_캐시지문은_기본신원이나_공식자료를_확정못하면_비운다():
+    complete = ReportSourceIdentity(
+        dart_receipt_numbers=("20260315000123",),
+        financial_payload_digest="a" * 64,
+    )
+    partial = ReportSourceIdentity(
+        dart_receipt_numbers=("20260315000123",),
+    )
+
+    assert complete.cache_digest_with_official_snapshot("") == ""
+    assert complete.cache_digest_with_official_snapshot("not-a-sha") == ""
+    assert partial.cache_digest_with_official_snapshot("b" * 64) == ""

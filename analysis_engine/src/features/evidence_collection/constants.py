@@ -20,6 +20,14 @@ from core.dart_client import (
     ZIP_MEMBER_MAX_COMPRESSION_RATIO,
 )
 
+# 8MiB 원문이 수백만 개의 짧은 줄·제목으로 조각나도 메모리
+# 객체를 무제한 만들지 않는 문서 단위 상한. 실제 사업보고서의
+# 제목 수보다 크게 잡되, 현재 엔진의 최대 입력에서도 유한하다.
+MAX_TEXT_SEGMENTS_PER_DOCUMENT: Final[int] = 4_096
+# 반복 상투문구 탐지 dict도 서로 다른 짧은 줄 수만큼 객체가 늘어난다.
+# 입력 바이트 상한만 믿지 않고 distinct line 색인을 별도로 닫는다.
+MAX_BOILERPLATE_DISTINCT_LINES_PER_DOCUMENT: Final[int] = 32_768
+
 # ══════════════════════════════════════════════════════════
 # 장·슬롯 어휘 — composer/constants.py 사본 (값 임의 변경 금지)
 # ══════════════════════════════════════════════════════════
@@ -184,6 +192,10 @@ VALID_COMPANY_TYPES: Final[frozenset[str]] = frozenset({
 #: CollectionAttempt.reason_code · EvidenceFragment.reason_codes 공통 형식.
 REASON_CODE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_.:-]{1,100}$")
 
+#: DART 전문에서 웹 후보를 무한히 꺼내 네트워크 예산을 잠식하지 않게 하는
+#: 수집 실행 전체 상한. 실제 접속은 app의 더 작은 host/page 상한을 다시 받는다.
+MAX_OFFICIAL_URL_CANDIDATES: Final[int] = 12
+
 # ══════════════════════════════════════════════════════════
 # 공시 종류(source_kind)와 조회 순서
 # ══════════════════════════════════════════════════════════
@@ -287,6 +299,17 @@ ALLOWED_HOST_ALLOWLIST: Final[frozenset[str]] = frozenset({
 # ══════════════════════════════════════════════════════════
 
 MIN_FRAGMENT_CHARS: Final[int] = 20
+# 일반 장문 차선도 입력 바이트 상한만으로는 안전하지 않다. 8MiB 안에
+# ``20자 문단+빈 줄``을 반복하면 수십만 Python 객체와 슬롯 채점 호출이
+# 생길 수 있으므로 문서별 객체 수·실제 보존 문자 합을 함께 제한한다.
+# 정상 사업보고서 전체를 자르지 않도록 short 관측 차선보다 충분히 크게 둔다.
+MAX_LONG_FRAGMENT_CANDIDATES_PER_DOCUMENT: Final[int] = 8_192
+MAX_LONG_FRAGMENT_CHARS_PER_DOCUMENT: Final[int] = 4 * 1024 * 1024
+# 일반 writer 조각 하한보다 짧은 독립 문장은 9장 같은 별도 생산기가 필요할
+# 수 있다. 전부 보존하면 8MiB의 ``a\n\n`` 입력 하나가 수백만 객체가 되므로
+# 문서당 개수·총문자 상한을 동시에 둔 관측 차선만 허용한다.
+MAX_SHORT_OBSERVATION_CANDIDATES_PER_DOCUMENT: Final[int] = 128
+MAX_SHORT_OBSERVATION_CHARS_PER_DOCUMENT: Final[int] = 2_048
 TOC_HEADING_MARKERS: Final[tuple[str, ...]] = ("목차",)
 #: 같은 문단이 문서 전체에서 이 횟수 이상 반복되면 상투 문구(면책 등)로 본다.
 BOILERPLATE_MIN_REPEAT_COUNT: Final[int] = 2
@@ -347,10 +370,23 @@ REASON_DOCUMENT_IDENTITY_MISMATCH: Final[str] = "document_identity_mismatch"
 #: 자료형 생성 검증(EvidenceCollectionError)이 문서 1건에서만 실패했을 때(P1-2) —
 #: harvest 전체를 무너뜨리지 않고 이 문서만 버린다.
 REASON_DOCUMENT_MODEL_INVALID: Final[str] = "document_model_invalid"
+#: OpenDART 목록의 접수일(``rcept_dt``)이 실제 달력의 YYYYMMDD가 아닐 때.
+#: 원문 부재가 아니라 외부 응답/내부 계약 이상이므로 REQUIRED+FAILED로 남긴다.
+REASON_FILING_RECEIPT_DATE_INVALID: Final[str] = "filing_receipt_date_invalid"
 #: 문서를 성공적으로 받았지만 채점 가능한(scored) 조각이 하나도 없어 최종
 #: documents/fragments에서 제외했을 때 — 「조회했다」는 사실은 이 attempt로
 #: 보존한다.
 REASON_DOCUMENT_NO_SCORED_EVIDENCE: Final[str] = "document_no_scored_evidence"
+REASON_DOCUMENT_SECTION_COUNT_EXCEEDED: Final[str] = (
+    "document_section_count_exceeded"
+)
+REASON_DOCUMENT_LINE_INDEX_EXCEEDED: Final[str] = "document_line_index_exceeded"
+REASON_DOCUMENT_FRAGMENT_COUNT_EXCEEDED: Final[str] = (
+    "document_fragment_count_exceeded"
+)
+REASON_DOCUMENT_FRAGMENT_CHARS_EXCEEDED: Final[str] = (
+    "document_fragment_chars_exceeded"
+)
 
 #: identity_binding 문자열 안에 넣는 검증 상태 값(P1-4) — fetcher가 문서
 #: 소유 회사 메타를 실제로 돌려줘 대조했는지, 메타가 아예 없어 대조하지

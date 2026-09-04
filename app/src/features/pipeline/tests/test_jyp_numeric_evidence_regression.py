@@ -21,6 +21,7 @@ from src.features.provenance.citations import build_citations
 from src.features.provenance.sources import (
     Source,
     evidence_text_hash,
+    has_valid_provenance_seal,
     seal_collected_source,
 )
 from src.features.report_standard.publish import validate_publishable
@@ -217,6 +218,9 @@ def test_JYP_실제원문과_3개년_DART값은_기존출고검증을_거쳐_보
     assert publish_calls == 1
     assert report.grade is Grade.PARTIAL
     assert validate_publishable(report).publishable is True
+    # finalize_report가 FactRecord에서 used_in을 다시 계산해도
+    # 수집 도장의 신원·원문 결속은 그대로 유효해야 한다.
+    assert all(has_valid_provenance_seal(source) for source in report.citations)
     sections = {section.cell: section for section in report.sections}
     assert {"identity", "business_model", "past_changes"}.issubset(sections)
     assert any(

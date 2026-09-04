@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -268,7 +269,11 @@ def test_v2_Notion_직접POST도_CSRF와_만료를_미지원보다_먼저_확인
     report = _v2_report()
     job_id = f"result-v2-notion-boundary-{uuid.uuid4().hex}"
     job_runtime._JOBS.pop(job_id, None)
-    monkeypatch.setattr(job_runtime, "_load_saved_report", lambda _job_id: report)
+    monkeypatch.setattr(
+        reports_router.report_delivery_adapter,
+        "load_legacy_public_report",
+        lambda _job_id: SimpleNamespace(report=report),
+    )
     expiry_checks: list[bool] = []
 
     def expired(_report):

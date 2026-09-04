@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hashlib import sha256
 from pathlib import Path
 
 from src.features.admin_dashboard.quality_observations import (
@@ -8,29 +9,121 @@ from src.features.admin_dashboard.quality_observations import (
 from src.features.pipeline.port import Grade, Report
 from src.features.storage import db, reports as report_store
 from src.features.storage.constants import TABLE_REPORTS
+from src.shared.report_claim_policy import claim_slots_for
 from src.shared.report_evidence.constants import ReleaseMode
 from src.shared.report_generation.constants import ENGINE_V2_SCHEMA_VERSION
-from src.shared.report_quality.constants import STRICT_QUALITY_CONTRACT_VERSION
-from src.shared.report_quality.generation import GenerationQualityObservation
+from src.shared.report_quality.constants import (
+    LEGACY_STRICT_QUALITY_CONTRACT_VERSION,
+)
+from src.shared.report_quality.contract import contract_for_generation
+from src.shared.report_quality.dto import (
+    ClaimFact,
+    ReportCandidate,
+    ReportSectionCandidate,
+    SourceDocument,
+)
+from src.shared.report_quality.generation import (
+    GenerationQualityObservation,
+    observe_generation,
+)
+from src.shared.report_quality.models import VerificationState
 
 
-def _observation(
-    *, release_allowed: bool = False, quality_grade: str = "부분 완성"
-) -> GenerationQualityObservation:
-    return GenerationQualityObservation(
-        mode="generation-shadow",
-        contract_version=STRICT_QUALITY_CONTRACT_VERSION,
-        quality_grade=quality_grade,
-        safety_decision="공개 차단" if not release_allowed else "공개 가능",
-        publication_grade=quality_grade,
-        release_allowed=release_allowed,
-        quality_shortfalls=(),
-        safety_problems=(),
-        substantive_claims=41,
-        verified_claims=21,
-        verified_ratio="0.5121951219512195121951219512",
-        document_sources=9,
+def _alphabetic_label(index: int) -> str:
+    """공개 claim에 수치 검산을 유발하는 숫자를 넣지 않는 고유 표식."""
+
+    value = index
+    label = ""
+    while True:
+        value, remainder = divmod(value, 26)
+        label = chr(ord("A") + remainder) + label
+        if value == 0:
+            return label
+        value -= 1
+
+
+def _observation(*, release_allowed: bool = False) -> GenerationQualityObservation:
+    """ENFORCE가 실제로 쓰는 보존된 strict v2 계약으로 관측값을 만든다.
+
+    이 시험의 관심사는 관리자 통계의 읽기 전용 동작이지만, 저장 fixture도
+    존재할 수 없는 버전 조합을 손으로 만들면 안 된다. 계약의 하한 숫자를
+    복사하지 않고 정본에서 읽고, 운영 평가기를 거쳐 일관된 관측값을 얻는다.
+    """
+
+    contract = contract_for_generation(LEGACY_STRICT_QUALITY_CONTRACT_VERSION)
+    section_ids = contract.required_section_ids
+    source_count = max(1, contract.min_document_sources)
+    source_rows: list[tuple[str, str, str]] = []
+    sources: list[SourceDocument] = []
+    for index in range(source_count):
+        source_id = f"source-{index}"
+        document_identity = f"document-{index}"
+        evidence_hash = sha256(
+            f"관리자 통계 시험 공식 원문 {index}".encode("utf-8")
+        ).hexdigest()
+        source_rows.append((source_id, document_identity, evidence_hash))
+        sources.append(
+            SourceDocument(
+                source_id=source_id,
+                document_identity=document_identity,
+                exact_evidence_hashes=(evidence_hash,),
+            )
+        )
+
+    fact_total = max(
+        contract.min_substantive_claims,
+        len(section_ids) * contract.min_claims_per_covered_section,
     )
+    section_fact_ids: dict[str, list[str]] = {
+        section_id: [] for section_id in section_ids
+    }
+    facts: list[ClaimFact] = []
+    for index in range(fact_total):
+        section_index = index % len(section_ids)
+        section_id = section_ids[section_index]
+        claim_slots = claim_slots_for(section_id)
+        claim_slot = claim_slots[(index // len(section_ids)) % len(claim_slots)]
+        source_id, document_identity, evidence_hash = source_rows[
+            index % source_count
+        ]
+        fact_id = f"fact-{index}"
+        section_fact_ids[section_id].append(fact_id)
+        facts.append(
+            ClaimFact(
+                fact_id=fact_id,
+                section_owner=section_id,
+                source_id=source_id,
+                source_identity=document_identity,
+                verification_state=(
+                    VerificationState.UNVERIFIED.value
+                    if not release_allowed and index == 0
+                    else VerificationState.VERIFIED.value
+                ),
+                claim_slot=claim_slot,
+                evidence_binding_valid=True,
+                claim=f"공식 원문으로 확인한 서로 다른 사실 {_alphabetic_label(index)}",
+                supporting_source_ids=(source_id,),
+                supporting_source_identities=(document_identity,),
+                supporting_evidence_hashes=(evidence_hash,),
+            )
+        )
+
+    observation = observe_generation(
+        ReportCandidate(
+            sections=tuple(
+                ReportSectionCandidate(
+                    section_id=section_id,
+                    fact_ids=tuple(section_fact_ids[section_id]),
+                )
+                for section_id in section_ids
+            ),
+            facts=tuple(facts),
+            sources=tuple(sources),
+        ),
+        contract_version=contract.version,
+    )
+    assert observation.release_allowed is release_allowed
+    return observation
 
 
 def _report_with_observation(
@@ -49,11 +142,11 @@ def _report_with_observation(
         company="가나다전자",
         job="",
         corp_type="상장사",
-        grade=Grade.PARTIAL,
+        grade=Grade(observation.publication_grade),
         sections=[],
         generated_at=generated_at,
         schema_version=ENGINE_V2_SCHEMA_VERSION,
-        quality_contract_version=STRICT_QUALITY_CONTRACT_VERSION,
+        quality_contract_version=LEGACY_STRICT_QUALITY_CONTRACT_VERSION,
         company_id=company_id,
         release_mode=ReleaseMode.ENFORCE_NO_PARTIAL.value,
         quality_observation=observation,

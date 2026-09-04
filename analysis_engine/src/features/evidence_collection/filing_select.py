@@ -1,9 +1,10 @@
 """관련 공시 묶음 선택 — 사업보고서 우선, 감사보고서 폴백, 정정공시 계보.
 
 network 호출부는 이 모듈이 정의하는 `DartFetcher` Protocol로 감싼다. 실제
-DART 연동은 다음 담당자가 `core/dart_client.py`를 재사용해 구현한다(이번
-슬라이스는 미검증 — LIVE_COLLECTION_UNVERIFIED). 시험은 이 Protocol을
-구현하는 가짜 객체와 로컬 fixture만 쓴다(실제 네트워크 접근 0건).
+DART 연동은 같은 feature의 ``dart_fetcher.py``가 ``core/dart_client.py``를
+재사용해 구현하고, app의 공식 근거 adapter가 생산 경계에서 주입한다. 시험은
+이 Protocol을 구현하는 가짜 객체와 로컬 fixture만 쓴다(실제 네트워크 접근
+0건).
 """
 
 from __future__ import annotations
@@ -15,7 +16,34 @@ from typing import Protocol
 
 from core.dart_client import DartAuthenticationError, DartLimitReached
 from features.evidence_collection import constants as c
+from features.evidence_collection.fetch_failure import (
+    is_recoverable_external_fetch_error,
+)
 from features.evidence_collection.models import CollectionAttempt
+
+
+_FETCH_RESULT_STATES = frozenset(
+    {
+        c.ATTEMPT_STATE_OK,
+        c.ATTEMPT_STATE_MISSING,
+        c.ATTEMPT_STATE_FAILED,
+    }
+)
+
+
+def _validate_fetch_result_common(
+    *, state: object, elapsed_ms: object, bytes_downloaded: object
+) -> None:
+    """주입 fetcher의 반환 계약을 자료 없음/외부 장애로 오인하지 않는다."""
+
+    if type(state) is not str or state not in _FETCH_RESULT_STATES:
+        raise ValueError(f"알 수 없는 DART fetch 결과 상태입니다: {state!r}")
+    for value, field_name in (
+        (elapsed_ms, "elapsed_ms"),
+        (bytes_downloaded, "bytes_downloaded"),
+    ):
+        if type(value) is not int or value < 0:
+            raise ValueError(f"DART fetch 결과의 {field_name}는 0 이상의 정수여야 합니다")
 
 
 @dataclass(frozen=True)
@@ -45,6 +73,29 @@ class FilingListResult:
     elapsed_ms: int = 0
     bytes_downloaded: int = 0
 
+    def __post_init__(self) -> None:
+        _validate_fetch_result_common(
+            state=self.state,
+            elapsed_ms=self.elapsed_ms,
+            bytes_downloaded=self.bytes_downloaded,
+        )
+        if type(self.rows) is not tuple or any(
+            type(row) is not RawFilingRow for row in self.rows
+        ):
+            raise TypeError("DART 목록 fetch 결과 rows는 RawFilingRow tuple이어야 합니다")
+        if self.state != c.ATTEMPT_STATE_OK and self.rows:
+            raise ValueError("실패·부재 DART 목록 fetch 결과에는 rows를 실을 수 없습니다")
+
+
+@dataclass(frozen=True)
+class DiscoveredDocumentUrl:
+    """DART 원문 payload에서 찾은 explicit 웹 주소와 원문 위치·해시."""
+
+    url: str
+    source_member_name: str
+    location: str
+    source_payload_sha256: str
+
 
 @dataclass(frozen=True)
 class DocumentFetchResult:
@@ -60,6 +111,31 @@ class DocumentFetchResult:
     #: 않기 위함이다. 값이 있고 요청 corp_code와 다르면 collect.py가 그
     #: 문서를 버린다.
     corp_code: str = ""
+    #: raw document.xml 안의 href/표시 문자열에서 찾은 URL 후보. 회사 공식
+    #: 여부는 여기서 판단하지 않고 app의 법인명+등록번호 검증기가 다시 확인한다.
+    official_url_candidates: tuple[DiscoveredDocumentUrl, ...] = ()
+
+    def __post_init__(self) -> None:
+        _validate_fetch_result_common(
+            state=self.state,
+            elapsed_ms=self.elapsed_ms,
+            bytes_downloaded=self.bytes_downloaded,
+        )
+        if type(self.text) is not str or type(self.corp_code) is not str:
+            raise TypeError("DART 문서 fetch 결과의 text·corp_code는 문자열이어야 합니다")
+        if type(self.official_url_candidates) is not tuple or any(
+            type(candidate) is not DiscoveredDocumentUrl
+            for candidate in self.official_url_candidates
+        ):
+            raise TypeError(
+                "DART 문서 fetch 결과 URL 후보는 DiscoveredDocumentUrl tuple이어야 합니다"
+            )
+        if self.state != c.ATTEMPT_STATE_OK and (
+            self.text or self.corp_code or self.official_url_candidates
+        ):
+            raise ValueError(
+                "실패·부재 DART 문서 fetch 결과에는 문서 payload를 실을 수 없습니다"
+            )
 
 
 class DartFetcher(Protocol):
@@ -106,9 +182,9 @@ def _normalize_report_name(name: str) -> str:
 
 
 def _safe_fetch_list(fetcher: DartFetcher, company_id: str, pblntf_ty: str) -> FilingListResult:
-    # fetcher는 외부에서 주입되는 경계다. 여기서 예외를 흡수하지 않으면 조회
-    # 실패 하나가 회사 전체 수집을 중단시킨다 — 「수집 장애」와 「자료 없음」을
-    # 분리하는 요구사항(7번)을 지키려면 이 경계에서 반드시 잡아야 한다.
+    # fetcher는 외부에서 주입되는 경계다. 확인된 외부 전송·응답·I/O 실패는
+    # 여기서 FAILED로 바꿔 「수집 장애」와 「자료 없음」을 분리한다. 반면
+    # 주입 포트 자체가 깨진 예외는 회사 자료 문제가 아니므로 전파한다.
     try:
         return fetcher.fetch_filing_list(company_id, pblntf_ty)
     except (DartLimitReached, DartAuthenticationError):
@@ -117,7 +193,11 @@ def _safe_fetch_list(fetcher: DartFetcher, company_id: str, pblntf_ty: str) -> F
         # 계속 진행해 같은 전역 장애를 회사마다 반복한다. 비용·운영 경계가
         # 즉시 멈출 수 있도록 원래 예외를 보존한다.
         raise
-    except Exception:  # noqa: BLE001 - fetcher 경계 흡수(위 사유)
+    except Exception as error:  # noqa: BLE001 - 닫힌 외부 오류만 아래서 흡수
+        if not is_recoverable_external_fetch_error(error):
+            # 주입 함수의 인자 계약·반환 모양·구현 불변식 오류는 외부 자료
+            # 실패가 아니다. 원래 예외를 보존해 상위가 내부 결함으로 분류한다.
+            raise
         return FilingListResult(state=c.ATTEMPT_STATE_FAILED)
 
 

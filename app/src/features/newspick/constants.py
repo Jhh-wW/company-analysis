@@ -32,6 +32,8 @@ from __future__ import annotations
 
 from typing import Final
 
+from src.shared.report_evidence.legacy_fragment_kinds import LEGACY_KIND_NEWS
+
 # ══════════════════════════════════════════════════════════
 # ① 얼마나 가져오고 얼마나 쓰나
 # ══════════════════════════════════════════════════════════
@@ -202,7 +204,7 @@ NAME_SUFFIXES: Final[tuple[str, ...]] = (
 )
 
 #: 조각 종류 이름. 1판과 «같아야» 한다 — 뒤쪽(문장 고르기)이 이 이름을 본다.
-FRAGMENT_KIND: Final[str] = "뉴스"
+FRAGMENT_KIND: Final[str] = LEGACY_KIND_NEWS
 
 #: 조각 원문 앞에 붙는 말머리. 1판과 같은 모양이다.
 #: ★ 여기 들어가는 날짜·매체는 **프로그램이** 붙인다. AI에게 안 시킨다.

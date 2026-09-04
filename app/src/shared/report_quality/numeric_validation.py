@@ -11,7 +11,7 @@ from typing import Protocol
 
 from src.shared.report_quality.dto import ClaimFact
 from src.shared.report_quality.numeric import numeric_fact_problems
-from src.shared.report_quality.source_identity import document_identity_from_parts
+from src.shared.report_quality.source_identity import fact_document_identity
 
 
 class VersionedNumericRecord(Protocol):
@@ -58,11 +58,7 @@ def validate_versioned_numeric_record(
     레거시 numeric_checks 정책을 적용한다.
     """
 
-    source_identity = document_identity_from_parts(
-        document_id=str(record.source_document_id or ""),
-        host=str(record.source_host or ""),
-        url=str(record.source_url or ""),
-    )
+    source_identity = fact_document_identity(record)
     verification_state = str(
         record.verification_status or record.status or ""
     ).strip()

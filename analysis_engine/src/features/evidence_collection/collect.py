@@ -8,10 +8,16 @@ DartEvidenceHarvest 하나를 만든다.
 from __future__ import annotations
 
 import hashlib
+import re
 import time
+from collections.abc import Callable
+from datetime import date
 
 from core.dart_client import DartAuthenticationError, DartLimitReached
 from features.evidence_collection import classify, constants as c, filing_select, relevance, segment
+from features.evidence_collection.fetch_failure import (
+    is_recoverable_external_fetch_error,
+)
 from features.evidence_collection.filing_select import DartFetcher, DocumentFetchResult, SelectedFiling
 from features.evidence_collection.models import (
     CollectedDocument,
@@ -19,20 +25,46 @@ from features.evidence_collection.models import (
     DartEvidenceHarvest,
     EvidenceCollectionError,
     EvidenceFragment,
+    OfficialUrlCandidate,
 )
 
 
+_DART_RECEIPT_DATE_RE = re.compile(r"\d{8}")
+
+
+def _published_on_from_receipt_date(raw: str) -> str:
+    """OpenDART YYYYMMDD 접수일을 공개 계약의 엄격 ISO 날짜로 바꾼다.
+
+    목록 선택·정정본 정렬은 OpenDART 원문 ``rcept_dt``를 그대로 사용한다.
+    문서 DTO를 만들 때만 변환해, 소비자가 같은 값을 서로 다르게 해석하지
+    않게 한다. 모양만 8자리이거나 불가능한 날짜는 조용히 보정하지 않는다.
+    """
+
+    if not isinstance(raw, str) or _DART_RECEIPT_DATE_RE.fullmatch(raw) is None:
+        raise EvidenceCollectionError("DART 접수일은 YYYYMMDD 8자리여야 합니다")
+    normalized = f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
+    try:
+        date.fromisoformat(normalized)
+    except ValueError as error:
+        raise EvidenceCollectionError("DART 접수일이 실제 달력 날짜가 아닙니다") from error
+    return normalized
+
+
 def _safe_fetch_document(fetcher: DartFetcher, rcept_no: str) -> DocumentFetchResult:
-    # filing_select._safe_fetch_list와 같은 이유로 이 경계에서 예외를 흡수한다
-    # (요구사항 7 — 「조회 실패」와 「자료 없음」 분리, 문서 1건 실패가 전체
-    # 수집을 죽이지 않게 한다).
+    # filing_select._safe_fetch_list와 같이, 확인된 외부 수집 실패만 이
+    # 경계에서 흡수한다(요구사항 7 — 「조회 실패」와 「자료 없음」 분리).
+    # 포트 배선·코드 계약 오류는 전체 실행을 내부 오류로 닫도록 전파한다.
     try:
         return fetcher.fetch_document_text(rcept_no)
     except (DartLimitReached, DartAuthenticationError):
         # 전역 한도·인증 실패를 문서 한 건 실패로 축소하지 않는다. 호출자가
         # 즉시 전체 실행을 멈춰 추가 DART 호출·후속 AI 비용을 막아야 한다.
         raise
-    except Exception:  # noqa: BLE001 - fetcher 경계 흡수(위 사유)
+    except Exception as error:  # noqa: BLE001 - 닫힌 외부 오류만 아래서 흡수
+        if not is_recoverable_external_fetch_error(error):
+            # callback 시그니처·반환 자료형·구현 불변식 오류를 회사의 자료
+            # 실패로 위장하지 않는다. app 경계가 내부 계약 오류로 닫는다.
+            raise
         return DocumentFetchResult(state=c.ATTEMPT_STATE_FAILED)
 
 
@@ -129,6 +161,7 @@ def collect_dart_evidence(
     *,
     now: str,
     deadline_seconds: float = c.DEFAULT_COLLECTION_DEADLINE_SECONDS,
+    short_observation_filter: Callable[[str], bool] | None = None,
 ) -> DartEvidenceHarvest:
     """company_id(corp_code) 하나에 대한 DART 근거수집 전체를 실행한다.
 
@@ -136,10 +169,10 @@ def collect_dart_evidence(
     않는다 — 시험이 시각을 고정할 수 있게).
 
     최종 ``fragments``에는 채점(scored)된 조각만 남는다(section_id·slot_id가
-    모두 채워진 것) — app 계약이 빈 값을 거절하기 때문이다. 무신호
-    문단은 harvest 밖으로 사라지지 않고 ``attempts``에 개수·사유 코드로
-    남는다. 같은 이유로 채점된 조각이 하나도 없는 문서는 ``documents``에도
-    올라가지 않는다 — 「조회했다」는 사실 자체는 attempt로 보존한다.
+    모두 채워진 것). 무신호 문단은 근거인 척 섞지 않고
+    ``unclassified_fragments``와 ``unclassified_documents``에 원문·위치·해시를
+    별도로 보존한다. 개수만 attempt에 남기고 원문을 버리던 옛 동작은 분류기
+    어휘가 좁은 내부 결함을 「회사 자료가 없음」으로 바꿨다.
 
     ``documents``·``fragments``·``attempts`` 전부가 이 함수에 넘긴
     ``company_id``를 자기 필드로 직접 싣는다(generation=8) — 만드는
@@ -153,17 +186,39 @@ def collect_dart_evidence(
     attempts: list[CollectionAttempt] = list(selection.attempts)
     documents: list[CollectedDocument] = []
     fragments: list[EvidenceFragment] = []
+    unclassified_documents: list[CollectedDocument] = []
+    unclassified_fragments: list[EvidenceFragment] = []
     # classify는 채점 여부와 무관하게 문서 전체 원문을 훑어야 한다(예:
     # 「매출액」 단독은 v1 키워드 어휘에서 일부러 뺐다 — relevance.py 주석
     # 참고 — 그래서 채점되지 않는 문단에도 있을 수 있다). fragments(=채점된
     # 것만)와는 별도로 모든 후보 문단 원문을 따로 모은다.
     classify_probe_texts: list[str] = []
+    official_url_candidates: list[OfficialUrlCandidate] = []
+    seen_official_candidate_urls: set[str] = set()
     seen_content_hashes: set[str] = set()
     total_bytes = 0
 
     for filing in selection.selected:
         if time.monotonic() > deadline_at:
             attempts.append(_deadline_attempt(company_id, filing))
+            continue
+
+        try:
+            published_on = _published_on_from_receipt_date(filing.rcept_dt)
+        except EvidenceCollectionError:
+            # 잘못된 접수일을 빈 날짜나 비슷한 값으로 보정하면 수집은 성공한
+            # 것처럼 보였다가 공개 Source 봉인에서 늦게 깨진다. DART 원자료
+            # 이상을 이 문서의 REQUIRED+FAILED로 즉시 남기고 호출도 하지 않는다.
+            attempts.append(
+                _document_attempt(
+                    company_id,
+                    filing,
+                    c.ATTEMPT_STATE_FAILED,
+                    c.REASON_FILING_RECEIPT_DATE_INVALID,
+                    DocumentFetchResult(state=c.ATTEMPT_STATE_FAILED),
+                    documents_seen=0,
+                )
+            )
             continue
 
         fetch_result = _safe_fetch_document(fetcher, filing.rcept_no)
@@ -203,6 +258,33 @@ def collect_dart_evidence(
 
         content_sha256 = hashlib.sha256(fetch_result.text.encode("utf-8")).hexdigest()
         document_id = f"{filing.source_kind}:{filing.rcept_no}"
+
+        # URL 발견 provenance는 평문 본문 중복 제거와 독립된 산출물이다.
+        # 태그를 지운 평문 SHA가 같아도 정정 XML의 href는 달라질 수 있으므로,
+        # duplicate ``continue``보다 먼저 receipt/location/raw hash를 보존한다.
+        # 여기서 공식 사이트로 승격하지 않으며 app이 실제 대상 HTML의
+        # 법인명+등록번호를 다시 확인한 후보만 사용한다.
+        for discovered in fetch_result.official_url_candidates:
+            if len(official_url_candidates) >= c.MAX_OFFICIAL_URL_CANDIDATES:
+                break
+            if discovered.url in seen_official_candidate_urls:
+                continue
+            try:
+                candidate = OfficialUrlCandidate(
+                    company_id=company_id,
+                    url=discovered.url,
+                    source_document_id=document_id,
+                    source_receipt_no=filing.rcept_no,
+                    source_member_name=discovered.source_member_name,
+                    source_location=discovered.location,
+                    source_document_sha256=content_sha256,
+                    source_payload_sha256=discovered.source_payload_sha256,
+                )
+            except EvidenceCollectionError:
+                continue
+            official_url_candidates.append(candidate)
+            seen_official_candidate_urls.add(discovered.url)
+
         if content_sha256 in seen_content_hashes:
             # 중복이면 total_bytes에 가산하지 않는다(P1-5) — 가산 후 중복
             # 판정을 하면 실제로 쓰이지 않는 바이트가 예산을 유령처럼
@@ -233,32 +315,149 @@ def collect_dart_evidence(
             ))
             continue
 
-        candidates = segment.segment_document(fetch_result.text)
-        classify_probe_texts.extend(candidate.text for candidate in candidates)
+        segmentation = segment.segment_document_with_status(fetch_result.text)
+        candidates = list(segmentation.candidates)
+        segmentation_truncation_reason = segmentation.truncation_reason
+        short_segmentation = segment.segment_short_observation_candidates_with_status(
+            fetch_result.text,
+            candidate_filter=short_observation_filter,
+        )
+        short_candidates = list(short_segmentation.candidates)
+        # 정식 호출자가 짧은 후보 의미를 filter로 선언했을 때만 그 scope의
+        # 완전성을 main attempt에 합친다. filter 없는 옛 v1/SHADOW 호출은
+        # 이 보조 관측 차선을 출고 근거로 의존하지 않으므로 소급 차단하지 않는다.
+        if short_observation_filter is not None and short_segmentation.truncation_reason:
+            segmentation_truncation_reason = (
+                segmentation_truncation_reason
+                or short_segmentation.truncation_reason
+            )
+        classify_probe_texts.extend(
+            candidate.text for candidate in (*candidates, *short_candidates)
+        )
+        short_observations = [
+            (candidate_index, candidate)
+            for candidate_index, candidate in enumerate(short_candidates)
+        ]
 
         scored: list[
-            tuple[segment.FragmentCandidate, tuple[relevance.SlotScore, ...]]
+            tuple[int, segment.FragmentCandidate, tuple[relevance.SlotScore, ...]]
         ] = []
-        unscored_count = 0
-        for candidate in candidates:
-            slot_scores = relevance.score_fragment_slots(
-                candidate.text, candidate.section_heading
+        unscored: list[tuple[int, segment.FragmentCandidate]] = []
+        allowed_slot_ids = frozenset(
+            c.SOURCE_KIND_SLOT_SCOPE[filing.source_kind]
+        )
+        for candidate_index, candidate in enumerate(candidates):
+            slot_scores, has_any_direct_signal = (
+                relevance.score_fragment_slots_with_signal(
+                    candidate.text,
+                    candidate.section_heading,
+                    allowed_slot_ids=allowed_slot_ids,
+                )
             )
             if not slot_scores:
-                unscored_count += 1
+                # 분류기가 뜻을 전혀 못 알아본 원문만 무분류 차선에 둔다.
+                # 반기·분기 자료가 회사 개요처럼 자기 소유 밖 슬롯의 신호를
+                # 가진 경우는 이미 분류된 문단이다. 이를 무분류로 바꾸면
+                # 후단이 classifier coverage gap으로 오판한다.
+                if not has_any_direct_signal:
+                    unscored.append((candidate_index, candidate))
             else:
-                scored.append((candidate, slot_scores))
+                scored.append((candidate_index, candidate, slot_scores))
+
+        unclassified_candidates = [
+            (f"unclassified{candidate_index}", candidate)
+            for candidate_index, candidate in unscored
+        ] + [
+            (f"short{candidate_index}", candidate)
+            for candidate_index, candidate in short_observations
+        ]
+
+        identity_binding = _identity_binding(company_id, filing, fetch_result)
+        try:
+            if unclassified_candidates:
+                unclassified_document = CollectedDocument(
+                    company_id=company_id,
+                    document_id=document_id,
+                    canonical_url=c.DART_DOCUMENT_URL_TEMPLATE.format(
+                        rcept_no=filing.rcept_no
+                    ),
+                    source_tier=c.SOURCE_TIER_OFFICIAL,
+                    source_kind=filing.source_kind,
+                    publisher=c.DART_PUBLISHER_NAME,
+                    title=filing.report_nm,
+                    published_on=published_on,
+                    collected_at=now,
+                    content_sha256=content_sha256,
+                    identity_binding=identity_binding,
+                    usable_ranges=segment.usable_ranges_from_candidates(
+                        [
+                            candidate
+                            for _suffix, candidate in unclassified_candidates
+                        ]
+                    ),
+                    collector_version=c.COLLECTOR_VERSION,
+                    parser_version=c.PARSER_VERSION,
+                    requirement=filing.requirement,
+                )
+                new_unclassified_fragments = [
+                    EvidenceFragment(
+                        company_id=company_id,
+                        fragment_id=(
+                            f"{document_id}:{candidate_suffix}"
+                        ),
+                        document_id=document_id,
+                        location=f"{candidate.start}-{candidate.end}",
+                        text_sha256=hashlib.sha256(
+                            candidate.text.encode("utf-8")
+                        ).hexdigest(),
+                        text=candidate.text,
+                        section_id="",
+                        slot_id="",
+                        score_millis=0,
+                        reason_codes=(c.REASON_NO_SIGNAL,),
+                        covered_slot_ids=(),
+                    )
+                    for candidate_suffix, candidate in unclassified_candidates
+                ]
+            else:
+                unclassified_document = None
+                new_unclassified_fragments = []
+        except EvidenceCollectionError:
+            attempts.append(_document_attempt(
+                company_id,
+                filing,
+                c.ATTEMPT_STATE_FAILED,
+                c.REASON_DOCUMENT_MODEL_INVALID,
+                fetch_result,
+            ))
+            continue
+
+        if unclassified_document is not None:
+            unclassified_documents.append(unclassified_document)
+            unclassified_fragments.extend(new_unclassified_fragments)
 
         if not scored:
-            # 채점 가능한 근거가 하나도 없다 — 문서 자체를 최종 산출에서
-            # 뺀다. 조회는 성공했다는 사실만 attempt로 남긴다.
-            # ★ item 2 정정 — fetch·분할·채점을
-            # 실제로 다 거쳤다(문서 전문을 훑었다) — 「이 공시를 다 읽었는데
-            # 그 슬롯 근거가 없었다」는 참인 진술이므로 광역 slot_ids +
-            # REQUIRED를 그대로 둔다(다운그레이드하지 않는다).
+            # 채점 가능한 근거가 하나도 없다 — 보고서 근거 documents에서는
+            # 빼되 무분류 차선에는 원문을 이미 보존했다.
+            # 후보 상한에 닿지 않은 경우에만 fetch·분할·채점을 실제로 다
+            # 거쳐 문서 전문을 훑었다. 그때만 광역 slot_ids + REQUIRED + OK가
+            # 정직하다. 상한에 닿은 경우는 아래에서 TRUNCATED로 갈린다.
+            # 후보/문자/제목 상한에 닿았으면 문서 뒷부분을 안 본 것이다.
+            # 일부에서 점수가 없었다는 사실을 «전문에 근거가 없다»는 OK로
+            # 확대하지 않고 TRUNCATED로 남겨 AI 전 진단이 내부 완전성 문제로
+            # 멈추게 한다.
             attempts.append(_document_attempt(
-                company_id, filing, c.ATTEMPT_STATE_OK, c.REASON_DOCUMENT_NO_SCORED_EVIDENCE, fetch_result,
-                documents_seen=len(candidates),
+                company_id,
+                filing,
+                (
+                    c.ATTEMPT_STATE_TRUNCATED
+                    if segmentation_truncation_reason
+                    else c.ATTEMPT_STATE_OK
+                ),
+                segmentation_truncation_reason
+                or c.REASON_DOCUMENT_NO_SCORED_EVIDENCE,
+                fetch_result,
+                documents_seen=len(candidates) + len(short_candidates),
             ))
             continue
 
@@ -266,9 +465,8 @@ def collect_dart_evidence(
         # 기록한다. 슬롯별 fragment는 아래에서 갈라지지만 provenance 구간을
         # 복제해 겹치게 만들지는 않는다.
         usable_ranges = segment.usable_ranges_from_candidates(
-            [candidate for candidate, _slot_scores in scored]
+            [candidate for _index, candidate, _slot_scores in scored]
         )
-        identity_binding = _identity_binding(company_id, filing, fetch_result)
 
         try:
             document = CollectedDocument(
@@ -279,7 +477,7 @@ def collect_dart_evidence(
                 source_kind=filing.source_kind,
                 publisher=c.DART_PUBLISHER_NAME,
                 title=filing.report_nm,
-                published_on=filing.rcept_dt,
+                published_on=published_on,
                 collected_at=now,
                 content_sha256=content_sha256,
                 identity_binding=identity_binding,
@@ -289,7 +487,7 @@ def collect_dart_evidence(
                 requirement=filing.requirement,
             )
             new_fragments = []
-            for candidate_index, (candidate, slot_scores) in enumerate(scored):
+            for candidate_index, candidate, slot_scores in scored:
                 # 한 원문 범위가 여러 슬롯을 직접 뒷받침해도 원문·토큰을
                 # 슬롯 수만큼 복제하지 않는다. 가장 높은 점수 슬롯을 대표로
                 # 두고 같은 장의 전체 커버리지를 ID 하나에 함께 봉인한다.
@@ -328,20 +526,41 @@ def collect_dart_evidence(
 
         documents.append(document)
         fragments.extend(new_fragments)
-        # ★ item 2 정정 — 「REQUIRED+OK+광역
-        # slot_ids」 조합 자체가 문제가 아니라, «그 조회가 실제로 문서
-        # 전문을 훑었는가»가 기준이다. 이 attempt는 fetch·분할·채점을
-        # 전부 거쳤으므로 광역 slot_ids를 그대로 쓰는 게 정직하다(「이
-        # 공시를 다 읽었는데 그 슬롯 근거가 없었다」는 참). 좁히지 않는다.
+        # 「REQUIRED+OK+광역 slot_ids」는 전문을 끝까지 훑은 경우에만
+        # 정직하다. 후보 상한에 닿았으면 부분 근거는 보존하되 이 attempt는
+        # TRUNCATED로 남겨 미검사 뒷부분을 없다고 주장하지 않는다.
         attempts.append(_document_attempt(
-            company_id, filing, c.ATTEMPT_STATE_OK, c.REASON_DOCUMENT_FETCH_OK, fetch_result,
+            company_id,
+            filing,
+            (
+                c.ATTEMPT_STATE_TRUNCATED
+                if segmentation_truncation_reason
+                else c.ATTEMPT_STATE_OK
+            ),
+            segmentation_truncation_reason or c.REASON_DOCUMENT_FETCH_OK,
+            fetch_result,
         ))
-        if unscored_count:
+        if unclassified_candidates and not segmentation_truncation_reason:
             # 이 attempt도 같은 fetch·분할·채점 파이프라인을 거쳤으므로
             # 광역+REQUIRED가 정직하다(위와 같은 이유) — 다운그레이드하지 않는다.
-            attempts.append(_unscored_fragments_attempt(company_id, filing, unscored_count))
+            attempts.append(
+                _unscored_fragments_attempt(
+                    company_id,
+                    filing,
+                    len(unclassified_candidates),
+                )
+            )
 
-    company_type = classify.classify_company_type(documents, classify_probe_texts, attempts=attempts)
+    # 회사 유형은 의미 칸 분류 성공 여부와 무관하게 실제로 연 문서 종류를
+    # 봐야 한다. 무분류 문서만 있었다고 상장/외감 여부까지 「모름」으로
+    # 되돌리지 않는다. 같은 document_id는 한 번만 넘긴다.
+    classification_documents = {
+        document.document_id: document
+        for document in (*documents, *unclassified_documents)
+    }
+    company_type = classify.classify_company_type(
+        classification_documents.values(), classify_probe_texts, attempts=attempts
+    )
 
     return DartEvidenceHarvest(
         company_id=company_id,
@@ -349,4 +568,7 @@ def collect_dart_evidence(
         documents=tuple(documents),
         fragments=tuple(fragments),
         attempts=tuple(attempts),
+        unclassified_documents=tuple(unclassified_documents),
+        unclassified_fragments=tuple(unclassified_fragments),
+        official_url_candidates=tuple(official_url_candidates),
     )

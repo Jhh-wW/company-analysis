@@ -33,7 +33,11 @@ from src.features.composer import logic as composer_logic
 from src.features.composer import verify as composer_verify
 from src.features.composer.constants import GRADE_CONFIRMED, SECTION_IDS
 from src.features.composer.port import AskFatalError
+from src.features.company_comparison.tests.test_logic import _v2_comparison_result
 from src.features.pipeline import real
+from src.features.pipeline.official_evidence_transport_adapter import (
+    merge_official_evidence_fragments,
+)
 from src.features.pipeline.port import (
     CompanyCard,
     CompanyLookupResult,
@@ -42,6 +46,9 @@ from src.features.pipeline.port import (
     UserInput,
 )
 from src.features.pipeline.tests.test_real_cache import FakeEngine
+from src.features.pipeline.tests.test_full_evidence_end_to_end import (
+    _official_evidence,
+)
 from src.features.sharelink import store as share_store
 from src.features.sharelink.constants import KEY_COOKIE_NAME
 from src.features.storage import db as storage_db
@@ -179,25 +186,34 @@ def test_요청_전역_중단은_작성기_삼킴_지점을_뚫고_나간다(이
 # ══════════════════════════════════════════════════════════
 
 
-def _full_조각() -> dict[int, dict[str, str]]:
-    """엄격 생성이 요구하는 아홉 장짜리 공식 자료 묶음."""
+def _full_생산입력(
+    engine: FakeEngine,
+) -> tuple[dict[int, dict[str, object]], dict[str, Any], dict[str, Any]]:
+    """중단 시험도 FULL의 공식문서·재무 생산 계약을 실제로 통과한다."""
 
-    표식 = "가나다라마바사아자"
-    끝맺음 = ("첫째", "둘째", "셋째", "넷째", "다섯째")
-    return {
-        번호: {
-            "종류": "공식 IR",
-            "원문": " ".join(
-                f"{글자} 회사 사업 고객 제품 전략 운영 문화 경쟁 과제 대응 "
-                f"협력 실적 {끝} 공식 자료에서 확인했다."
-                for 끝 in 끝맺음
-            ),
-            "출처": f"https://full.example/document/{번호}",
-            "문서명": f"공식 자료 {번호}",
-            "문서일": "2026-08-24",
-        }
-        for 번호, 글자 in enumerate(표식, start=1)
-    }
+    fragments, added = merge_official_evidence_fragments({}, _official_evidence())
+    assert added == 9
+    counter = object()
+    financials, _years = engine.fetch_financials(
+        _CORP_ID,
+        counter,
+        business_date=_기준일,
+    )
+    filing = engine.latest_report_rcept(
+        _CORP_ID,
+        "상장사",
+        counter,
+        business_date=_기준일,
+    )
+    produced = engine.make_fragments("", financials)
+    financial_fragment = next(
+        dict(fragment)
+        for fragment in produced.values()
+        if fragment.get("종류") == "재무"
+        and str(fragment.get("원문") or "").startswith("주요계정(DART API):")
+    )
+    fragments[max(fragments) + 1] = financial_fragment
+    return fragments, financials, filing
 
 
 def _작가_응답(장번호: int) -> str:
@@ -262,6 +278,7 @@ def test_v2_작성은_두번째_호출의_중단에서_즉시_멈춘다(
     가짜엔진.client.messages = 응답기
     engine, client = _계량_경계(가짜엔진)
     단계: list[dict[str, Any]] = []
+    fragments, financials, filing = _full_생산입력(가짜엔진)
 
     with generation_coordination.activate(
         _callbacks(_n번째_호출에서_멈춘다(2, 중단))
@@ -272,9 +289,9 @@ def test_v2_작성은_두번째_호출의_중단에서_즉시_멈춘다(
                 client=client,
                 company_name="가나다전자",
                 corp_type="상장사",
-                frags=_full_조각(),
-                financials=None,
-                filing=None,
+                frags=fragments,
+                financials=financials,
+                filing=filing,
                 revenue_tables=[],
                 sources=[],
                 business_date=_기준일,
@@ -285,6 +302,7 @@ def test_v2_작성은_두번째_호출의_중단에서_즉시_멈춘다(
                 source_identity_digest="a" * 64,
                 build_identity=_build_identity(),
                 generation_mode=_v2_모드(),
+                comparison_result=_v2_comparison_result(),
             )
 
     # 중단 사유가 그대로 밖으로 나온다 — 「출고 검증 실패」로 바뀌지 않는다.

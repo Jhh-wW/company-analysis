@@ -6,9 +6,16 @@ import time
 
 import pytest
 
-from core.dart_client import DartAuthenticationError, DartLimitReached
+from core.dart_client import (
+    DartAuthenticationError,
+    DartLimitReached,
+    DartResponseError,
+    DartTransportError,
+)
 from features.evidence_collection import constants as c
 from features.evidence_collection.filing_select import (
+    DiscoveredDocumentUrl,
+    DocumentFetchResult,
     FilingListResult,
     RawFilingRow,
     _pick_latest_with_lineage,
@@ -19,6 +26,36 @@ from features.evidence_collection.tests.fixtures.fake_fetcher import FakeFetcher
 
 def _row(rcept_no: str, report_nm: str, rcept_dt: str = "20250315") -> RawFilingRow:
     return RawFilingRow(rcept_no=rcept_no, report_nm=report_nm, rcept_dt=rcept_dt)
+
+
+@pytest.mark.parametrize("state", ["", "알수없음", c.ATTEMPT_STATE_TRUNCATED])
+def test_fetch_결과_state는_외부조회_경계의_닫힌값만_받는다(state: str) -> None:
+    """포트 오타를 회사 자료 없음이나 외부 장애로 바꿔 숨기지 않는다."""
+
+    with pytest.raises(ValueError, match="알 수 없는 DART fetch 결과 상태"):
+        FilingListResult(state=state)
+    with pytest.raises(ValueError, match="알 수 없는 DART fetch 결과 상태"):
+        DocumentFetchResult(state=state)
+
+
+def test_실패와_부재_fetch_결과에는_성공_payload를_실을수없다() -> None:
+    row = _row("20250315000001", "사업보고서 (2025.03)")
+    candidate = DiscoveredDocumentUrl(
+        url="https://example.com/company",
+        source_member_name="document.xml",
+        location="문서 1쪽",
+        source_payload_sha256="a" * 64,
+    )
+
+    with pytest.raises(ValueError, match="목록 fetch 결과에는 rows"):
+        FilingListResult(state=c.ATTEMPT_STATE_FAILED, rows=(row,))
+    with pytest.raises(ValueError, match="문서 fetch 결과에는 문서 payload"):
+        DocumentFetchResult(state=c.ATTEMPT_STATE_MISSING, text="남아 있는 원문")
+    with pytest.raises(ValueError, match="문서 fetch 결과에는 문서 payload"):
+        DocumentFetchResult(
+            state=c.ATTEMPT_STATE_FAILED,
+            official_url_candidates=(candidate,),
+        )
 
 
 def test_사업보고서가_있으면_그것을_고르고_감사보고서는_조회하지_않는다() -> None:
@@ -132,11 +169,62 @@ def test_상한을_넘는_후보는_TRUNCATED로_기록되고_제외된다(monke
     assert truncated_attempts[0].reason_code == c.REASON_CAP_REACHED
 
 
-def test_fetcher가_예외를_던져도_FAILED로_흡수하고_죽지_않는다() -> None:
+def test_fetcher의_표준_네트워크예외는_FAILED로_흡수하고_죽지_않는다() -> None:
     result = select_related_filings(RaisingFetcher(), "00126380")
 
     assert all(a.state == c.ATTEMPT_STATE_FAILED for a in result.attempts)
     assert result.selected == ()
+
+
+@pytest.mark.parametrize(
+    "external_error",
+    [
+        DartTransportError("가짜 DART 전송 실패"),
+        DartResponseError("가짜 DART 응답 실패"),
+        OSError("가짜 cache I/O 실패"),
+    ],
+)
+def test_목록조회_예상외부실패만_FAILED로_흡수한다(external_error) -> None:
+    class ExternalFailureFetcher:
+        def fetch_filing_list(
+            self, company_id: str, pblntf_ty: str
+        ) -> FilingListResult:
+            raise external_error
+
+        def fetch_document_text(self, rcept_no: str):
+            raise AssertionError("목록 실패라 문서 조회에 도달하면 안 됩니다")
+
+    result = select_related_filings(ExternalFailureFetcher(), "00126380")
+
+    assert result.selected == ()
+    assert result.attempts
+    assert all(attempt.state == c.ATTEMPT_STATE_FAILED for attempt in result.attempts)
+
+
+@pytest.mark.parametrize(
+    "contract_error",
+    [
+        TypeError("가짜 callback 시그니처 불일치"),
+        AttributeError("가짜 반환 자료형 불일치"),
+        KeyError("가짜 필수 필드 누락"),
+        AssertionError("가짜 구현 불변식 위반"),
+        ValueError("가짜 포트 값 계약 위반"),
+    ],
+)
+def test_목록조회_코드계약오류를_자료실패로_위장하지_않는다(
+    contract_error,
+) -> None:
+    class BrokenFetcher:
+        def fetch_filing_list(
+            self, company_id: str, pblntf_ty: str
+        ) -> FilingListResult:
+            raise contract_error
+
+        def fetch_document_text(self, rcept_no: str):
+            raise AssertionError("목록 오류에서 즉시 중단되어야 합니다")
+
+    with pytest.raises(type(contract_error)):
+        select_related_filings(BrokenFetcher(), "00126380")
 
 
 @pytest.mark.parametrize("fatal_error", [DartLimitReached("한도"), DartAuthenticationError("인증")])

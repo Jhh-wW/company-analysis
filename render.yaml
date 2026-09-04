@@ -1,7 +1,7 @@
 services:
   - type: web
-    # GitHub 저장소 이름은 company-analysis(2026-09-01 이전). Render 서비스
-    # 이름은 그대로 둔다 — 바꾸면 기존 URL이 바뀐다.
+    # GitHub 정본 저장소는 company-analysis다. Render 서비스 이름의 beta는
+    # 저장소 이름이 아니라 기존 공개 URL의 일부라 그대로 둔다.
     name: company-analysis-beta
     runtime: docker
     # 실제 DART 118,747사 후보 색인이 512MiB를 넘어 Starter에서 재시작됐다.

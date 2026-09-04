@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
+from features.evidence_collection import constants as c
 from features.evidence_collection.models import CollectedDocument, DocumentTextRange
-from features.evidence_collection.segment import segment_document, usable_ranges_from_candidates
+from features.evidence_collection.segment import (
+    segment_document,
+    segment_document_with_status,
+    segment_sections,
+    segment_short_observation_candidates,
+    segment_short_observation_candidates_with_status,
+    usable_ranges_from_candidates,
+)
 from features.evidence_collection.tests.fixtures.synthetic_documents import (
     LISTED_BUSINESS_REPORT_TEXT,
 )
@@ -52,7 +60,7 @@ def test_usable_ranges는_CollectedDocument에_그대로_들어간다() -> None:
         source_kind="dart_business_report",
         publisher="금융감독원 전자공시시스템(DART)",
         title="사업보고서",
-        published_on="20250315",
+        published_on="2025-03-15",
         collected_at="2026-08-31T00:00:00+09:00",
         content_sha256="a" * 64,
         identity_binding="corp_code=00126380;rcept_no=20250315000001",
@@ -109,3 +117,137 @@ def test_각_후보의_start_end는_실제_원문과_일치한다() -> None:
     for candidate in candidates:
         assert LISTED_BUSINESS_REPORT_TEXT[candidate.start:candidate.end] == candidate.text
         assert DocumentTextRange(candidate.start, candidate.end).end > candidate.start
+
+
+def test_짧은_경쟁문장은_writer와_분리된_bounded_관측차선에만_남는다() -> None:
+    sentence = "가나다전자는 베타전자와 경쟁합니다."
+    text = f"I. 사업의 내용\n\n{sentence}\n\n잡음\n"
+
+    assert not any(sentence in item.text for item in segment_document(text))
+    short = segment_short_observation_candidates(text)
+    assert [item.text for item in short if sentence in item.text] == [sentence]
+    assert text[short[0].start : short[0].end] == short[0].text
+
+
+def test_짧은_줄이_많아도_관측_후보와_제목_객체수는_상한이_있다() -> None:
+    noisy_paragraphs = "\n\n".join(
+        f"잡음{index:05d}" for index in range(20_000)
+    )
+    candidates = segment_short_observation_candidates(noisy_paragraphs)
+
+    assert len(candidates) <= c.MAX_SHORT_OBSERVATION_CANDIDATES_PER_DOCUMENT
+    assert (
+        sum(len(item.text.strip()) for item in candidates)
+        <= c.MAX_SHORT_OBSERVATION_CHARS_PER_DOCUMENT
+    )
+
+    heading_flood = "\n".join(
+        f"{index % 999 + 1}. x" for index in range(20_000)
+    )
+    assert len(segment_sections(heading_flood)) <= c.MAX_TEXT_SEGMENTS_PER_DOCUMENT
+
+
+def test_주입된_짧은후보_filter는_앞쪽_잡음예산과_무관하게_전문을_찾는다() -> None:
+    target = "가나다전자는 베타전자와 경쟁합니다."
+    noise = "\n\n".join(f"상품{index:05d}" for index in range(500))
+    text = f"{noise}\n\n{target}\n"
+
+    result = segment_short_observation_candidates_with_status(
+        text,
+        candidate_filter=lambda candidate: "경쟁" in candidate,
+    )
+
+    assert [candidate.text for candidate in result.candidates] == [target]
+    assert result.truncation_reason == ""
+    assert text[result.candidates[0].start : result.candidates[0].end] == target
+
+
+def test_주입된_짧은후보가_cap을_넘으면_전문완료로_위장하지_않는다(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(c, "MAX_SHORT_OBSERVATION_CANDIDATES_PER_DOCUMENT", 2)
+    text = "\n\n".join(
+        (
+            "가나다는 나다라와 경쟁합니다.",
+            "마바사는 사아자와 경쟁합니다.",
+            "차카타는 파하가와 경쟁합니다.",
+        )
+    )
+
+    result = segment_short_observation_candidates_with_status(
+        text,
+        candidate_filter=lambda candidate: "경쟁" in candidate,
+    )
+
+    assert len(result.candidates) == 2
+    assert result.truncation_reason == c.REASON_DOCUMENT_FRAGMENT_COUNT_EXCEEDED
+
+
+def test_목차_leader는_짧은_관측_차선에도_들어가지_않는다() -> None:
+    text = (
+        "I. 회사의 개요 ............ 3\n"
+        "II. 사업의 내용 ............ 5\n"
+        "\n"
+        "I. 사업의 내용\n\n"
+        "가나다전자는 베타전자와 경쟁합니다.\n"
+    )
+
+    candidates = segment_short_observation_candidates(text)
+    assert not any("............" in item.text for item in candidates)
+
+
+def test_장문_문단폭탄은_후보수_상한과_잘림사유를_함께_남긴다(monkeypatch) -> None:
+    monkeypatch.setattr(c, "MAX_LONG_FRAGMENT_CANDIDATES_PER_DOCUMENT", 3)
+    text = "\n\n".join(
+        f"서로 다른 장문 문단 {index} " + "가" * 30 for index in range(10)
+    )
+
+    result = segment_document_with_status(text)
+
+    assert len(result.candidates) == 3
+    assert result.truncation_reason == c.REASON_DOCUMENT_FRAGMENT_COUNT_EXCEEDED
+
+
+def test_장문_후보의_총문자_상한도_잘림사유를_남긴다(monkeypatch) -> None:
+    monkeypatch.setattr(c, "MAX_LONG_FRAGMENT_CANDIDATES_PER_DOCUMENT", 100)
+    monkeypatch.setattr(c, "MAX_LONG_FRAGMENT_CHARS_PER_DOCUMENT", 70)
+    text = "\n\n".join(("가" * 40, "나" * 40, "다" * 40))
+
+    result = segment_document_with_status(text)
+
+    assert len(result.candidates) == 1
+    assert result.truncation_reason == c.REASON_DOCUMENT_FRAGMENT_CHARS_EXCEEDED
+
+
+def test_서로다른_줄폭탄은_상투문구색인을_무한히_키우지_않는다(monkeypatch) -> None:
+    monkeypatch.setattr(c, "MAX_BOILERPLATE_DISTINCT_LINES_PER_DOCUMENT", 2)
+    text = "\n".join(
+        (
+            "첫 번째 서로 다른 충분히 긴 문장입니다.",
+            "두 번째 서로 다른 충분히 긴 문장입니다.",
+            "세 번째 서로 다른 충분히 긴 문장입니다.",
+        )
+    )
+
+    result = segment_document_with_status(text)
+
+    assert result.truncation_reason == c.REASON_DOCUMENT_LINE_INDEX_EXCEEDED
+
+
+def test_제목구간_상한도_OK가_아닌_잘림으로_관측한다(monkeypatch) -> None:
+    monkeypatch.setattr(c, "MAX_TEXT_SEGMENTS_PER_DOCUMENT", 2)
+    text = "\n".join(
+        (
+            "I. 첫 장",
+            "첫 장에 있는 충분히 긴 실제 본문 문장입니다.",
+            "II. 둘째 장",
+            "둘째 장에 있는 충분히 긴 실제 본문 문장입니다.",
+            "III. 셋째 장",
+            "셋째 장에 있는 충분히 긴 실제 본문 문장입니다.",
+        )
+    )
+
+    result = segment_document_with_status(text)
+
+    assert len(result.candidates) <= 2
+    assert result.truncation_reason == c.REASON_DOCUMENT_SECTION_COUNT_EXCEEDED

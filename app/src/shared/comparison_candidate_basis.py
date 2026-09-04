@@ -969,6 +969,47 @@ def comparison_source_sentence_has_marker(sentence: str) -> bool:
     )
 
 
+def comparison_source_candidate_support_terms(
+    sentence: str,
+    candidate_name: str,
+) -> tuple[str, ...]:
+    """후보 판별기가 이미 확인한 대상 alias와 경쟁 관계 표현을 보존한다.
+
+    일반 낱말 빈도나 조사 제거로 새 근거어를 추측하지 않는다. 닫힌 후보
+    판별기가 실제로 허용한 문장에서, 같은 닫힌 alias/관계 패턴이 확인한 두
+    문자열만 비교 맥락 Fact로 운반한다.
+    """
+
+    if not comparison_source_sentence_has_marker(sentence):
+        return ()
+    normalized = _normalized(sentence)
+    aliases = tuple(
+        alias
+        for alias in comparison_candidate_aliases(candidate_name)
+        if comparison_alias_is_in_sentence(alias, sentence)
+    )
+    if not aliases:
+        return ()
+    relation = next(
+        (
+            _normalized(marker)
+            for marker in sorted(_SOURCE_COMPETITION_MARKERS, key=len, reverse=True)
+            if _normalized(marker) in normalized
+        ),
+        "",
+    )
+    if not relation:
+        for pattern in (_ENGLISH_SOURCE_COMPETITION, _KOREAN_SOURCE_COMPETITION):
+            match = pattern.search(normalized)
+            if match is not None:
+                relation = _normalized(match.group(0))
+                break
+    alias = aliases[0]
+    if not relation or relation == alias:
+        return ()
+    return alias, relation
+
+
 def comparison_source_sentence_has_self_subject(
     sentence: str,
     self_company: str,
@@ -1110,7 +1151,7 @@ def parse_comparison_basis_v1(value: object) -> dict[str, str] | None:
         clean["version"] != COMPARISON_BASIS_VERSION
         or not _ID.fullmatch(clean["candidate_fact_id"])
         or not _ID.fullmatch(clean["candidate_source_id"])
-        or not re.fullmatch(r"\d{8}", clean["candidate_corp_code"])
+        or not re.fullmatch(r"[0-9]{8}", clean["candidate_corp_code"])
         or not re.fullmatch(r"[0-9a-f]{64}", clean["evidence_sha256"])
         or clean["overlap_dimension"] not in COMPARISON_OVERLAP_DIMENSIONS
         or not all(clean.values())
@@ -1156,8 +1197,8 @@ def parse_comparison_source_basis_v2(value: object) -> dict[str, str] | None:
         clean["version"] != COMPARISON_SOURCE_BASIS_VERSION
         or not _ID.fullmatch(clean["candidate_source_id"])
         or not _ID.fullmatch(clean["self_attestation_source_id"])
-        or not re.fullmatch(r"\d{8}", clean["self_corp_code"])
-        or not re.fullmatch(r"\d{8}", clean["candidate_corp_code"])
+        or not re.fullmatch(r"[0-9]{8}", clean["self_corp_code"])
+        or not re.fullmatch(r"[0-9]{8}", clean["candidate_corp_code"])
         or clean["source_kind"] not in {"공시", "기타"}
         or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", clean["source_date"])
         or not re.fullmatch(r"[0-9a-f]{64}", clean["evidence_sha256"])
@@ -1309,7 +1350,7 @@ def comparison_dart_profile_attestation_is_valid(
         or _normalized(source_publisher) != company
         or str(source_host or "").casefold().rstrip(".")
         != "opendart.fss.or.kr"
-        or not re.fullmatch(r"\d{8}", code)
+        or not re.fullmatch(r"[0-9]{8}", code)
         or str(source_document_id or "").strip() != code
     ):
         return False
@@ -1411,7 +1452,7 @@ def comparison_comparator_source_id(
     end = period.split("~", 1)[-1]
     year = end[:4] if re.match(r"^20\d{2}-", end) else ""
     code = str(corp_code or "").strip()
-    if not re.fullmatch(r"\d{8}", code) or not year or not scope_code:
+    if not re.fullmatch(r"[0-9]{8}", code) or not year or not scope_code:
         return ""
     digest = hashlib.sha256(
         _normalized(code + year + scope_code).encode("utf-8")

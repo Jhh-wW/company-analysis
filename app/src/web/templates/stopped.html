@@ -11,34 +11,29 @@
     {% elif result.outcome.value == '거부_공시없음' %}분석할 근거를 모을 수 없습니다
     {% elif result.outcome.value == '회사_못찾음' %}회사를 정확히 확인하지 못했습니다
     {% elif result.outcome.value == '공고_폐기' %}회사 분석을 계속할 수 없습니다
-    {% elif result.outcome.value == '게이트_중단' %}출고 전 자동 검증에서 보고서를 내보내지 않았습니다
-    {# ★ 마지막 갈래는 «기술 오류»만이 아니다 — 조사 도중 초대 링크가 닫히거나
-       기간이 지나도 여기로 온다. 그때 「오류가 났습니다」는 거짓말이라
-       두 경우 모두에 맞는 중립 제목을 쓴다. 무엇이 있었는지는 바로 아래
-       한 줄(result.message)이 그대로 말한다. #}
+    {% elif result.outcome.value == '게이트_중단' %}{{ gate_guidance.title }}
+    {# ★ GATE_STOPPED의 자유 문장 message는 내부 오류와 자료 부족을 섞을 수
+       있다. 제목·뜻·행동은 닫힌 final_gate_reason의 한 번역만 따른다. #}
     {% else %}조사를 멈췄습니다{% endif %}
   </h1>
   <p class="lede">
     {% if result.outcome.value == '공고_폐기' %}
       회사 이름과 주소를 확인한 뒤 다시 시도해 주세요.
+    {% elif result.outcome.value == '게이트_중단' %}
+      {{ gate_guidance.summary }}
     {% else %}{{ result.message }}{% endif %}
   </p>
 
   {% if result.outcome.value == '게이트_중단' %}
     <aside class="evidence-stop-note" aria-labelledby="evidence-stop-meaning">
       <h2 id="evidence-stop-meaning">이 결과의 뜻</h2>
-      <p>
-        회사에 강점이나 경쟁우위가 없다는 판정이 아닙니다.
-        현재 모은 공식 자료만으로는 검증된 결과를 만들 수 없다는 뜻입니다.
-      </p>
+      <p>{{ gate_guidance.meaning }}</p>
     </aside>
 
     <section class="evidence-stop-actions" aria-labelledby="evidence-stop-next">
       <h2 id="evidence-stop-next">다음에 할 수 있는 일</h2>
       <ol>
-        <li>입력한 정식 법인명과 시·군·구 주소가 맞는지 확인해 주세요.</li>
-        <li>입력과 공식 자료 상태가 그대로라면 같은 조건으로 반복해도 결과가 달라지지 않습니다.</li>
-        <li>못 가져온 자료가 정상화되거나 회사의 공식 공시·홈페이지 자료가 추가된 뒤 다시 조사해 주세요.</li>
+        {% for action in gate_guidance.actions %}<li>{{ action }}</li>{% endfor %}
       </ol>
     </section>
   {% endif %}
@@ -57,7 +52,7 @@
 
   <div class="btn-row">
     <a class="btn" href="/" style="line-height:1.6">
-      {% if result.outcome.value == '게이트_중단' %}회사·주소 확인하고 다시 시작{% else %}회사·주소 다시 입력{% endif %}
+      {% if result.outcome.value == '게이트_중단' %}{{ gate_guidance.primary_button_label }}{% else %}회사·주소 다시 입력{% endif %}
     </a>
     {% if result.outcome.value == '게이트_중단' and result.sources %}
       <a class="btn ghost" href="#stopped-sources-title" style="line-height:1.6">

@@ -19,6 +19,7 @@ from typing import Any, Mapping
 from src.features.provenance.sources import (
     Source,
     SourceKind,
+    build_dart_profile_attester_source,
     evidence_text_hash,
     exact_evidence_text_hash,
     seal_collected_source,
@@ -40,7 +41,7 @@ DART_SUCCESS_STATUS = "000"
 OFFICIAL_WEB_FRAGMENT_KINDS = frozenset({"홈페이지", "공식 IR"})
 VERIFIED_FINAL_URL_FIELD = "후보출처검증"
 VERIFIED_FINAL_URL_VALUE = "https_exact_dart_host"
-_CORP_CODE = re.compile(r"\d{8}")
+_CORP_CODE = re.compile(r"[0-9]{8}")
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,8 @@ class OfficialCandidateSentence:
 
     source: Source
     evidence_text: str
+    document_identity: str = ""
+    document_content_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -110,6 +113,44 @@ def _host(value: object) -> str:
         return ""
 
 
+def dart_profile_attestation_material(
+    *,
+    profile: Mapping[str, Any],
+    corp_code: str,
+    company_name: str,
+) -> tuple[str, str]:
+    """검증된 OpenDART 기업개황의 안정 Source ID와 exact subset을 만든다.
+
+    FULL typed 수집과 기존 비교 수집이 서로 JSON을 다시 만들면 회사 공식
+    도메인 결속이 경계 사이에서 달라진다. status·법인번호·정확한 법인명을
+    한 번 확인하고, 두 생산 경로가 같은 byte 문자열을 운반하게 한다.
+    """
+
+    code = str(corp_code or "").strip()
+    response_code = str(profile.get("corp_code") or "").strip()
+    profile_name = str(profile.get("corp_name") or "").strip()
+    raw_profile_url = str(profile.get("hm_url") or "").strip()
+    if (
+        str(profile.get("status") or "").strip() != DART_SUCCESS_STATUS
+        or not _CORP_CODE.fullmatch(code)
+        or response_code != code
+        or not profile_name
+        or _exact_name(profile_name) != _exact_name(company_name)
+    ):
+        return "", ""
+    evidence = json.dumps(
+        {
+            "corp_code": code,
+            "corp_name": profile_name,
+            "hm_url": raw_profile_url,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return f"dart-company-profile-{code}", evidence
+
+
 def bind_dart_profile_attestation(
     fragments: Mapping[int, Mapping[str, Any]],
     *,
@@ -127,18 +168,17 @@ def bind_dart_profile_attestation(
 
     copied = {number: dict(fragment) for number, fragment in fragments.items()}
     code = str(corp_code or "").strip()
-    response_code = str(profile.get("corp_code") or "").strip()
     profile_name = str(profile.get("corp_name") or "").strip()
     raw_profile_url = str(profile.get("hm_url") or "").strip()
     official_url = _official_https_url(raw_profile_url)
     official_host = _host(official_url)
-    if (
-        str(profile.get("status") or "").strip() != DART_SUCCESS_STATUS
-        or not _CORP_CODE.fullmatch(code)
-        or response_code != code
-        or not profile_name
-        or _exact_name(profile_name) != _exact_name(company_name)
-        or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(collected_on or ""))
+    source_id, evidence = dart_profile_attestation_material(
+        profile=profile,
+        corp_code=code,
+        company_name=company_name,
+    )
+    if not source_id or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}", str(collected_on or "")
     ):
         return ProfileAttestationResult(copied, None)
 
@@ -163,44 +203,12 @@ def bind_dart_profile_attestation(
         ):
             eligible_numbers.append(number)
 
-    evidence = json.dumps(
-        {
-            "corp_code": code,
-            "corp_name": profile_name,
-            # DART가 실제로 돌려준 최소 subset을 보존한다. HTTPS 정규화 값은
-            # 웹 결속 판단에만 쓰고 attestation 원문을 조용히 고쳐 쓰지 않는다.
-            "hm_url": raw_profile_url,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    source_id = f"dart-company-profile-{code}"
-    attester = seal_collected_source(
-        Source(
-            number=max(copied, default=0) + 1,
-            kind=SourceKind.FILING,
-            label=f"{profile_name} OpenDART 기업개황",
-            collected_at=collected_on,
-            source_id=source_id,
-            title="OpenDART 기업개황",
-            publisher=profile_name,
-            host="opendart.fss.or.kr",
-            url=(
-                "https://opendart.fss.or.kr/api/company.json?corp_code="
-                f"{code}"
-            ),
-            document_id=code,
-            location="기업개황 API · corp_code/corp_name/hm_url",
-            source_type="규제기관 공식 자료",
-            fact_status="기준일 현재 확인",
-            evidence_hashes=[evidence_text_hash(evidence)],
-            # FILING에는 도메인 자기증명 의미가 없고 registry 검사도 이 필드를
-            # 읽지 않는다. v2 출고 게이트가 exact 기업개황 subset을 attester seal과
-            # 함께 역검산할 수 있도록 내부 provenance payload로만 보존한다.
-            domain_attestation_evidence=evidence,
-            provenance_role="attestation_only",
-        )
+    attester = build_dart_profile_attester_source(
+        number=max(copied, default=0) + 1,
+        source_id=source_id,
+        evidence=evidence,
+        company_name=company_name,
+        collected_on=collected_on,
     )
     for number in eligible_numbers:
         copied[number].update(
@@ -237,7 +245,18 @@ def candidate_sentences_from_fragments(
                 and exact_evidence_text_hash(sentence)
                 in source.exact_evidence_hashes
             ):
-                out.append(OfficialCandidateSentence(source, sentence))
+                out.append(
+                    OfficialCandidateSentence(
+                        source,
+                        sentence,
+                        document_identity=str(
+                            fragment.get("_evidence_document_identity") or ""
+                        ).strip(),
+                        document_content_sha256=str(
+                            fragment.get("_evidence_document_content_sha256") or ""
+                        ).strip(),
+                    )
+                )
     return tuple(out)
 
 

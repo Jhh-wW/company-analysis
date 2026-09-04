@@ -297,6 +297,9 @@ def _homepage_source(
         collected_at=collected_at,
         published_at=published_at,
         reporting_period=reporting_period,
+        ir_metadata_verification=str(
+            frag.get(IR_METADATA_VERIFICATION_FIELD) or ""
+        ).strip(),
         attachment_url=str(frag.get(IR_ATTACHMENT_URL_FIELD) or "").strip(),
         domain_redirect_verification=str(
             frag.get(IR_DART_WWW_REDIRECT_FIELD) or ""

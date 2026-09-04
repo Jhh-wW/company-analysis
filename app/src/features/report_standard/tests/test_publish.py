@@ -26,6 +26,7 @@ from src.features.provenance.sources import (
     Source,
     SourceKind,
     evidence_text_hash,
+    has_valid_provenance_seal,
     render_sources,
     seal_collected_source,
 )
@@ -2119,6 +2120,8 @@ def test_실서비스_9장은_후보선정_source를_공개하고_used_in을_보
     assert all(candidate_source.number in block.source_numbers for block in blocks)
     assert "competitive_position" in published_candidate_source.used_in
     assert "identity" in published_candidate_source.used_in
+    # build_published_report의 최종 used_in 투영은 수집 봉인 범위 밖이다.
+    assert has_valid_provenance_seal(published_candidate_source)
 
 
 def test_공식웹_v2_순수경쟁후보는_JSON_재출고에도_attester를_보존하되_숨긴다() -> None:

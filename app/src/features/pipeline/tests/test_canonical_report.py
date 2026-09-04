@@ -34,6 +34,7 @@ from src.features.provenance.sources import (
     Source,
     SourceKind,
     evidence_text_hash,
+    has_valid_provenance_seal,
     seal_collected_source,
 )
 from src.features.spanselect.canonical import (
@@ -1186,6 +1187,9 @@ def test_assemble_report_locks_visible_claims_to_sources() -> None:
     assert all(fact.verification_status == "verified" for fact in report.fact_records)
     assert all(fact.evidence_binding for fact in report.fact_records)
     assert all(source.evidence_hashes for source in report.citations)
+    # assemble_report의 used_in 계산은 수집 provenance가 아니므로
+    # 정상 도장을 깨지 않아야 한다.
+    assert all(has_valid_provenance_seal(source) for source in report.citations)
     assert report.job == ""
     assert report.requirements == []
 

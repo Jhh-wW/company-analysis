@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from features.evidence_collection import constants as c
-from features.evidence_collection.relevance import score_fragment_slots, score_fragment_text
+from features.evidence_collection.relevance import (
+    score_fragment_slots,
+    score_fragment_slots_with_signal,
+    score_fragment_text,
+)
 from features.evidence_collection.segment import segment_document
 from features.evidence_collection.tests.fixtures.synthetic_documents import (
     LISTED_BUSINESS_REPORT_TEXT,
@@ -111,6 +115,17 @@ def test_실제형_공시의_각_문단도_한_장_경계_안에서만_배정된
     for candidate in segment_document(LISTED_BUSINESS_REPORT_TEXT):
         scores = score_fragment_slots(candidate.text, candidate.section_heading)
         assert len({score.section_id for score in scores}) <= 1
+
+
+def test_소유범위밖_신호는_근거가_아니지만_분류실패로도_세지_않는다() -> None:
+    scores, has_any_direct_signal = score_fragment_slots_with_signal(
+        "대표 제품은 정밀 센서이며 핵심 제품의 매출 비중을 관리한다.",
+        section_heading="II. 주요 제품",
+        allowed_slot_ids=frozenset(c.COLLECTOR_SLOTS_BY_SECTION["past_changes"]),
+    )
+
+    assert scores == ()
+    assert has_any_direct_signal is True
 
 
 def test_강한_보조_신호는_약한_수집기_신호에_밀리지_않는다() -> None:

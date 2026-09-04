@@ -341,6 +341,9 @@ def test_Notion_중단화면의_버튼을_그대로_열면_405가_아니다(gate
     report = gate_stopped
     job_id = uuid.uuid4().hex
     cookies, csrf = _admin_cookies()
+    # Notion도 결과/PDF와 같은 영속 delivery 판정을 읽는다. 폐기된 메모리
+    # 보고서 재검사 경로에 기대지 않고, 생산 실패가 남기는 intent를 만든다.
+    _persist_gate_failure(job_id)
 
     with TestClient(app, base_url="https://testserver") as client:
         blocked = client.post(

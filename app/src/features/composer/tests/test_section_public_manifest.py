@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import re
 from dataclasses import replace
@@ -13,6 +14,10 @@ import pytest
 from src.features.composer import pipeline as pipeline_module
 from src.features.composer import render as render_module
 from src.features.composer.constants import (
+    DART_FINANCIAL_API_DOCUMENT_ID,
+    DART_FINANCIAL_API_HOST,
+    DART_FINANCIAL_API_PREFIX,
+    DART_FINANCIAL_API_URL,
     FLOW_HEADERS_BY_SECTION,
     GRADE_CONFIRMED,
     SECTION_IDS,
@@ -35,11 +40,14 @@ from src.features.composer.port import (
 )
 from src.features.composer.public_manifest import (
     PublicManifestError,
+    _expected_source,
     build_public_structure_seal,
 )
+from src.features.revenuemix.logic import build as build_revenue_mix
 from src.shared.report_generation.public_projection import PublicProjectionError
 from src.features.composer.validate import V2ValidationError
 from src.features.pipeline.port import Grade, ReportTable
+from src.features.provenance.sources import has_valid_provenance_seal
 from src.features.storage.reports import (
     report_from_dict,
     report_from_json,
@@ -47,7 +55,10 @@ from src.features.storage.reports import (
     report_to_json,
 )
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
-from src.shared.report_evidence.constants import ReleaseMode
+from src.shared.report_evidence.constants import (
+    ReleaseMode,
+    SOURCE_KIND_DART_BUSINESS_REPORT,
+)
 from src.shared.report_generation.canonical import (
     assert_report_matches_generation_evidence,
     public_content_digests,
@@ -55,13 +66,142 @@ from src.shared.report_generation.canonical import (
 )
 from src.shared.report_generation.models import canonical_sha256
 from src.shared.report_quality.source_identity import document_identity_from_parts
+from src.shared.revenue_table_provenance import canonical_json
 
 
 _MARKS = "가나다라마바사아자"
-_ENDINGS = ("첫째", "둘째", "셋째", "넷째", "다섯째")
+# 기준 보고서(진영) 실측 총 54문장을 그대로 만드는 정상 FULL 도구다.
+# 특히 9장의 정책상 필수 여섯 칸을 결과값에 맞춰 생략하지 않는다.
+_ENDINGS = ("첫째", "둘째", "셋째", "넷째", "다섯째", "여섯째")
 _GROUPED_ITEM_RE = re.compile(
     r"\[(\d+)\] \(장: ([^,]+), 종류: ([^,]+), 인용: ([^)]+)\)"
 )
+_COMPOSITION_SOURCE = (
+    "제품별 매출액 구 분 2025년 제1기 매 출 액 비 중 "
+    "핵심 제품 7,000 70.00% 기타 3,000 30.00% 합계 10,000 100.00%"
+)
+
+
+@pytest.mark.parametrize("source_shape", ("filing", "financial_api"))
+def test_public_manifest의_DART_Source도_발행회사와_DART_host를_분리한다(
+    source_shape: str,
+) -> None:
+    company_name = "가나다전자"
+    if source_shape == "filing":
+        receipt = "20260315000123"
+        url = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt}"
+        fragment = CollectedFragment(
+            fragment_id="1",
+            kind="typed-evidence-v1:dart_business_report",
+            text="가나다전자는 반도체 검사 장비 사업을 영위한다.",
+            source_url=url,
+            document_title="사업보고서 (2025.12)",
+            location="II. 사업의 내용",
+            document_date="2026-03-15",
+            document_identity=document_identity_from_parts(
+                document_id=receipt,
+                host="dart.fss.or.kr",
+                url=url,
+            ),
+        )
+        expected_host = "dart.fss.or.kr"
+        expected_document_id = receipt
+    else:
+        fragment = CollectedFragment(
+            fragment_id="1",
+            kind="재무",
+            text=f"{DART_FINANCIAL_API_PREFIX} 2025 매출액 1200",
+            document_identity=document_identity_from_parts(
+                document_id=DART_FINANCIAL_API_DOCUMENT_ID,
+                host=DART_FINANCIAL_API_HOST,
+                url=DART_FINANCIAL_API_URL,
+            ),
+        )
+        expected_host = DART_FINANCIAL_API_HOST
+        expected_document_id = DART_FINANCIAL_API_DOCUMENT_ID
+
+    source = _expected_source(
+        fragment,
+        number=1,
+        company_name=company_name,
+        used_in=("identity",),
+        filing_meta=None,
+    )
+
+    # typed 수집 문서의 publisher는 자료를 제공한 DART로 남을 수 있지만,
+    # 공개 Source는 공시 내용의 책임 주체인 분석 대상 법인을 표시한다.
+    assert source.publisher == company_name
+    assert source.host == expected_host
+    assert source.document_id == expected_document_id
+
+
+@pytest.mark.parametrize(
+    "source_shape",
+    ("formal", "financial_api", "generic_url", "fallback", "legacy"),
+)
+def test_모든_Source분기는_문서전체지문을_한경계에서_봉인한다(
+    source_shape: str,
+) -> None:
+    company_name = "가나다전자"
+    text = f"{source_shape} 종류의 서로 다른 문서 전체 원문이다."
+    content_sha256 = "" if source_shape == "legacy" else hashlib.sha256(
+        text.encode("utf-8")
+    ).hexdigest()
+    common = {
+        "fragment_id": "1",
+        "kind": "회사 공식 자료",
+        "text": text,
+        "document_title": f"{source_shape} 원문",
+        "location": "본문",
+        "document_date": "2026-03-15",
+        "document_content_sha256": content_sha256,
+    }
+    if source_shape == "formal":
+        receipt = "20260315000123"
+        url = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt}"
+        fragment = CollectedFragment(
+            **common,
+            source_url=url,
+            document_identity=document_identity_from_parts(
+                document_id=receipt,
+                host="dart.fss.or.kr",
+                url=url,
+            ),
+            formal_source_kind=SOURCE_KIND_DART_BUSINESS_REPORT,
+            source_document_id=(
+                f"{SOURCE_KIND_DART_BUSINESS_REPORT}:{receipt}"
+            ),
+            source_publisher="금융감독원 전자공시시스템",
+            identity_binding=(
+                f"corp_code=00123456;rcept_no={receipt};identity_check=verified"
+            ),
+            source_collected_on="2026-09-04",
+        )
+    elif source_shape == "financial_api":
+        fragment = CollectedFragment(
+            **{
+                **common,
+                "text": f"{DART_FINANCIAL_API_PREFIX} {text}",
+            },
+        )
+    elif source_shape in {"generic_url", "legacy"}:
+        fragment = CollectedFragment(
+            **common,
+            source_url=f"https://company.example/{source_shape}",
+        )
+    else:
+        fragment = CollectedFragment(**common)
+
+    source = _expected_source(
+        fragment,
+        number=1,
+        company_name=company_name,
+        used_in=("identity",),
+        filing_meta=None,
+    )
+
+    assert source.document_content_sha256 == content_sha256
+    assert has_valid_provenance_seal(source)
 
 
 def _fragment_text(mark: str) -> str:
@@ -78,7 +218,14 @@ def _fragment_text(mark: str) -> str:
         "핵심 제품은 고객 제공을 거쳐 기업 고객에게 닿는다. "
         "보조 제품은 유통 협력을 거쳐 소비자에게 닿는다."
     )
-    return f"{common} {sentences} {flow}"
+    source_table = f" {_COMPOSITION_SOURCE}" if mark == _MARKS[1] else ""
+    return f"{common} {sentences} {flow}{source_table}"
+
+
+def _document_content_sha256(text: str) -> str:
+    """시험 원문 전체 바이트를 production 필드와 같은 SHA-256으로 고정한다."""
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _packets(*, two_flow_sources: bool = False):
@@ -86,30 +233,38 @@ def _packets(*, two_flow_sources: bool = False):
     generation = "a" * 64
     for index, section_id in enumerate(SECTION_IDS, start=1):
         url = f"https://manifest.example/document/{index}"
+        document_text = _fragment_text(_MARKS[index - 1])
         fragments = [
             CollectedFragment(
                 fragment_id=str(index),
                 kind="회사 공식 자료",
-                text=_fragment_text(_MARKS[index - 1]),
+                text=document_text,
                 source_url=url,
                 document_title=f"공식 자료 {index}",
                 document_identity=document_identity_from_parts(url=url),
+                document_content_sha256=_document_content_sha256(document_text),
+                supported_claim_slots=CLAIM_SLOTS_BY_SECTION[section_id],
             )
         ]
         if section_id == "business_model" and two_flow_sources:
+            secondary_text = (
+                document_text
+                + " 보조 제품은 유통 협력을 거쳐 소비자에게 닿는다."
+            )
             fragments.append(
                 CollectedFragment(
                     fragment_id="20",
                     kind="회사 공식 자료",
-                    text=(
-                        _fragment_text(_MARKS[index - 1])
-                        + " 보조 제품은 유통 협력을 거쳐 소비자에게 닿는다."
-                    ),
+                    text=secondary_text,
                     source_url="https://manifest.example/document/20",
                     document_title="공식 자료 이십",
                     document_identity=document_identity_from_parts(
                         url="https://manifest.example/document/20"
                     ),
+                    document_content_sha256=_document_content_sha256(
+                        secondary_text
+                    ),
+                    supported_claim_slots=CLAIM_SLOTS_BY_SECTION[section_id],
                 )
             )
         packets.append(
@@ -315,17 +470,55 @@ def _run_recovering_full(
 
 
 def _valid_composition_table() -> PerformanceTable:
+    raw = build_revenue_mix(_COMPOSITION_SOURCE, cite="[2]")[0]
     return PerformanceTable(
         caption="제품군 구성",
-        headers=("제품군", "비중"),
-        rows=(("핵심 제품", "70%"), ("기타", "30%")),
+        headers=("구분", "비중"),
+        rows=tuple((row[0], row[2]) for row in raw["rows"][:-1]),
         unit="%",
         cite="[2]",
-        evidence_rows=(
-            json.dumps({"제품군": "핵심 제품", "비중": "70%"}, ensure_ascii=False),
-            json.dumps({"제품군": "기타", "비중": "30%"}, ensure_ascii=False),
-        ),
+        raw_rows=tuple((row[0], row[2]) for row in raw["raw_rows"][:-1]),
+        evidence_rows=tuple(raw["evidence_rows"][:-1]),
     )
+
+
+def _composition_table_from_source(source: str) -> PerformanceTable:
+    raw = build_revenue_mix(source, cite="[2]")[0]
+    return PerformanceTable(
+        caption="제품군 구성",
+        headers=("구분", "비중"),
+        rows=tuple((row[0], row[2]) for row in raw["rows"][:-1]),
+        raw_rows=tuple((row[0], row[2]) for row in raw["raw_rows"][:-1]),
+        evidence_rows=tuple(raw["evidence_rows"][:-1]),
+        unit="%",
+        cite="[2]",
+    )
+
+
+def _packets_with_business_source(source: str):
+    packets = _packets()
+    replaced_packets = []
+    for packet in packets.packets:
+        if packet.section_id != "business_model":
+            replaced_packets.append(packet)
+            continue
+        fragment = packet.fragments[0]
+        combined_text = f"{fragment.text} {source}"
+        replaced_packets.append(
+            replace(
+                packet,
+                fragments=(
+                    replace(
+                        fragment,
+                        text=combined_text,
+                        document_content_sha256=_document_content_sha256(
+                            combined_text
+                        ),
+                    ),
+                ),
+            )
+        )
+    return replace(packets, packets=tuple(replaced_packets))
 
 
 def _replace_table(report, section_id: str, transform):
@@ -517,7 +710,7 @@ def test_보충뒤에도_얇으면_세번째호출없이_닫힌사유로_끝난�
     with pytest.raises(
         V2ValidationError,
         match="report_recovery:post_supplement_quality_failed",
-    ):
+    ) as caught:
         run_v2(
             "가나다전자",
             (),
@@ -533,6 +726,8 @@ def test_보충뒤에도_얇으면_세번째호출없이_닫힌사유로_끝난�
     assert len(writer.prompts) == 10
     assert len(reviewer.prompts) == 2
     assert writer.section_calls["identity"] == 2
+    assert "missing_required_public_claim_slots" in caught.value.problem_codes
+    assert "low_public_sentence_coverage" in caught.value.problem_codes
 
 
 def test_보충검수에서_안전실패하면_세번째회차없이_즉시중단한다():
@@ -667,6 +862,9 @@ def test_독립문서수가_부족하면_primary10회뒤_보충하지않는다()
                         text=shared_text,
                         source_url=shared_url,
                         document_identity=shared_identity,
+                        document_content_sha256=_document_content_sha256(
+                            shared_text
+                        ),
                     )
                     for fragment in packet.fragments
                 ),
@@ -967,7 +1165,7 @@ def test_packet_묶음검수응답이_깨져도_reviewer는_정확히_1회다():
     assert diagram.calls == 0
 
 
-def test_typed_packet의_문서일은_Source에_보존된다():
+def test_typed_packet의_문서일과_전체지문은_Source와_품질평가에_보존된다():
     original = _packets()
     first_packet = original.packets[0]
     first_fragment = replace(
@@ -986,6 +1184,17 @@ def test_typed_packet의_문서일은_Source에_보존된다():
     output, _writer, _reviewer, _diagram = _run_full(packets=packets)
     source = next(source for source in output.report.citations if source.number == 1)
     assert source.collected_at == "2026-08-30"
+    assert source.document_content_sha256 == first_fragment.document_content_sha256
+    expected_hashes = {
+        fragment.document_content_sha256
+        for packet in packets.packets
+        for fragment in packet.fragments
+    }
+    assert {
+        source.document_content_sha256 for source in output.report.citations
+    } == expected_hashes
+    assert len(expected_hashes) == 9
+    assert output.quality_observation.document_sources == 9
 
 
 def test_SHADOW_flat은_legacy_요약과_검수호출을_유지하고_manifest를_싣지_않는다():
@@ -1202,10 +1411,144 @@ def test_정상_구성표는_원자료_재검산과_manifest를_통과한다():
         if section.cell == "business_model"
         for table in section.tables
     )
-    assert table.rows[0] == ["핵심 제품", "70%"]
+    assert table.rows[0] == ["핵심 제품", "70.00%"]
     assert table.evidence_rows
     assert table.source_cites == ["[2]"]
     assert table.manifest_ref
+
+
+def test_공개행만_되풀이한_가짜_evidence_JSON은_인용원문_근거가_아니다():
+    valid = _valid_composition_table()
+    fabricated = replace(
+        valid,
+        evidence_rows=tuple(
+            canonical_json(dict(zip(valid.headers, row))) for row in valid.rows
+        ),
+    )
+
+    with pytest.raises(PublicManifestError, match="인용 원문|재검산"):
+        _run_full(composition_tables=(fabricated,))
+
+
+@pytest.mark.parametrize(("container", "field"), (("row", "start"), ("source", "sha256")))
+def test_매출구성_원문_offset이나_hash를_바꾸면_manifest가_막는다(
+    container: str, field: str
+):
+    valid = _valid_composition_table()
+    payload = json.loads(valid.evidence_rows[0])
+    if field == "start":
+        payload[container][field] += 1
+    else:
+        payload[container][field] = "0" * 64
+    forged = replace(
+        valid,
+        evidence_rows=(canonical_json(payload),) + valid.evidence_rows[1:],
+    )
+
+    with pytest.raises(PublicManifestError, match="인용 원문|재검산"):
+        _run_full(composition_tables=(forged,))
+
+
+def test_매출구성_원문행이_없는_다른_cite조각으로_바꾸면_막는다():
+    packets = _packets()
+    replaced_packets = tuple(
+        replace(
+            packet,
+            fragments=tuple(
+                replace(fragment, text=fragment.text.replace(_COMPOSITION_SOURCE, ""))
+                for fragment in packet.fragments
+            ),
+        )
+        if packet.section_id == "business_model"
+        else packet
+        for packet in packets.packets
+    )
+
+    with pytest.raises(PublicManifestError, match="인용 원문|재검산"):
+        _run_full(
+            composition_tables=(_valid_composition_table(),),
+            packets=replace(packets, packets=replaced_packets),
+        )
+
+
+def test_서로_다른_두_원문표의_행을_이어붙인_구성표는_막는다():
+    other_source = (
+        "제품별 매출액 구 분 2025년 제1기 매 출 액 비 중 "
+        "다른 제품 7,000 70.00% 기타 3,000 30.00% 합계 10,000 100.00%"
+    )
+    valid = _valid_composition_table()
+    other = _composition_table_from_source(other_source)
+    stitched = replace(
+        valid,
+        evidence_rows=(valid.evidence_rows[0], other.evidence_rows[1]),
+    )
+
+    with pytest.raises(PublicManifestError, match="인용 원문|재검산"):
+        _run_full(
+            composition_tables=(stitched,),
+            packets=_packets_with_business_source(other_source),
+        )
+
+
+def test_표시된_소수둘째자리에서_가능한_99점99_반올림은_허용한다():
+    source = (
+        "제품별 매출액 구 분 2025년 제1기 매 출 액 비 중 "
+        "제품가 3,333 33.33% 제품나 3,333 33.33% 제품다 3,333 33.33% "
+        "합계 9,999 100.00%"
+    )
+    table = _composition_table_from_source(source)
+
+    output, *_ = _run_full(
+        composition_tables=(table,),
+        packets=_packets_with_business_source(source),
+    )
+
+    assert output.report.public_structure_manifest
+
+
+def test_두_항목이라_3열_원표로_남아도_합계행과_원문근거를_검증한다():
+    source = (
+        "제품별 매출액 구 분 2025년 제1기 매 출 액 비 중 "
+        "제품가 7,000 70.00% 제품나 3,000 30.00% 합계 10,000 100.00%"
+    )
+    raw = build_revenue_mix(source, cite="[2]")[0]
+    table = PerformanceTable(
+        caption=raw["caption"],
+        headers=tuple(raw["headers"]),
+        rows=tuple(tuple(row) for row in raw["rows"]),
+        raw_rows=tuple(tuple(row) for row in raw["raw_rows"]),
+        evidence_rows=tuple(raw["evidence_rows"]),
+        cite="[2]",
+    )
+
+    output, *_ = _run_full(
+        composition_tables=(table,),
+        packets=_packets_with_business_source(source),
+    )
+
+    assert output.report.public_structure_manifest
+
+
+def test_표시반올림으로_설명할수없는_90퍼센트_부분표는_막는다():
+    source = (
+        "제품별 매출액 구 분 2025년 제1기 매 출 액 비 중 "
+        "제품가 4,000 40.00% 제품나 3,000 30.00% 제품다 2,000 20.00% "
+        "제품라 1,000 10.00% "
+        "합계 10,000 100.00%"
+    )
+    complete = _composition_table_from_source(source)
+    table = replace(
+        complete,
+        rows=complete.rows[:-1],
+        raw_rows=complete.raw_rows[:-1],
+        evidence_rows=complete.evidence_rows[:-1],
+    )
+
+    with pytest.raises(PublicManifestError, match="반올림 범위|비중 합계"):
+        _run_full(
+            composition_tables=(table,),
+            packets=_packets_with_business_source(source),
+        )
 
 
 def test_검증된_injected_fact_ID는_출처와_모든_공개셀까지_맞아야_통과한다():

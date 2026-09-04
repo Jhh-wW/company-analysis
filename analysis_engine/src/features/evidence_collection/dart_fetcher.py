@@ -3,15 +3,14 @@
 ★ 이 슬라이스는 지금까지 주입 Protocol과
 가짜 fetcher(tests/fixtures/fake_fetcher.py)만 있었고 실제 DART에 한 번도
 연결되지 않았다. 이 파일이 그 간극을 메운다: ``filing_select.DartFetcher``
-Protocol을 만족하는 실제 어댑터를 ``core/dart_client.py``의 함수 위에 얹는다
-(그 파일 자체는 고치지 않고 import만 한다 — core/dart_client.py의
-상한·상태 처리 패턴을 그대로 재사용한다).
+Protocol을 만족하는 실제 어댑터를 ``core/dart_client.py``의 함수 위에 얹는다.
+대표 XML·URL sidecar의 저장/검증 상한은 core 한 곳을 정본으로 재사용하고,
+이 소비 경계도 반환된 cache를 다시 bounded 검증한다.
 
-★ 이 슬라이스의 범위 — 여기까지다. 파이프라인 배선(운영 경로에서 실제로
-이 클래스를 만들어 ``collect_dart_evidence``에 주입하는 일)은 다른 담당
-몫이다(LIVE_COLLECTION_UNVERIFIED — 실제 네트워크로 시험하지 않았다).
-시험은 ``get_json``·``download_document``를 대신할 가짜 callable을
-주입한 종단 시험만 쓴다(``tests/test_dart_fetcher.py``).
+운영 파이프라인은 app의 공식 근거 adapter에서 이 클래스를 만들어
+``collect_dart_evidence``에 주입한다. 실네트워크로 시험하지는 않았고,
+``get_json``·``download_document``를 대신할 가짜 callable을 주입한 종단
+시험만 쓴다(``tests/test_dart_fetcher.py``).
 
 ★ 알려진 한계 — DART document.xml 응답 자체에는 구조화된 corp_code가 없다
 (실측: core/dart_client.download_document는 원문 zip을 그대로 풀어줄 뿐,
@@ -33,11 +32,16 @@ import datetime as dt
 import re
 import time
 from pathlib import Path
-from typing import Any, Callable, Final
+from typing import Any, Callable, Final, Protocol
 
 from core import dart_client
 from features.evidence_collection import constants as c
-from features.evidence_collection.filing_select import DocumentFetchResult, FilingListResult, RawFilingRow
+from features.evidence_collection.filing_select import (
+    DiscoveredDocumentUrl,
+    DocumentFetchResult,
+    FilingListResult,
+    RawFilingRow,
+)
 
 #: list.json 조회 창 — 최근 N년. survey_audit_reports.py·run_pilot.py의
 #: AUDIT_WINDOW_YEARS(3년, 「잠정 3년」)와 같은 값을 그대로 따른다 —
@@ -65,11 +69,33 @@ _INLINE_WHITESPACE_PATTERN = re.compile(r"[ \t\x0b\f\r]+")
 #: 태그가 촘촘히 붙어 나오면 개행이 과도하게 쌓인다 — 문단 구분(빈 줄)은
 #: 살리되 3개 이상 연속 개행은 2개로 눌러 둔다.
 _EXCESS_NEWLINE_PATTERN = re.compile(r"\n{3,}")
-
 #: get_json/download_document의 실제 함수 시그니처를 그대로 흉내낸 타입 —
 #: 시험이 실제 네트워크 없이 이 자리에 가짜 callable을 주입한다.
 GetJsonFn = Callable[[str, dict[str, Any], dart_client.UsageCounter], dict[str, Any]]
-DownloadDocumentFn = Callable[[str, Path, dart_client.UsageCounter], Path]
+
+
+class DownloadDocumentFn(Protocol):
+    """core 문서 다운로드의 strict sidecar keyword까지 보존하는 포트."""
+
+    def __call__(
+        self,
+        rcept_no: str,
+        dest_dir: Path,
+        counter: dart_client.UsageCounter | None = None,
+        *,
+        require_official_url_sidecar: bool = False,
+    ) -> Path: ...
+
+
+def _decode_document_bytes(raw: bytes) -> str:
+    """DART 원문 bytes를 손실 없는 첫 성공 인코딩으로 문자열화한다."""
+
+    for encoding in ("utf-8", "cp949", "euc-kr"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
 
 
 def _xml_to_plain_text(raw: bytes) -> str:
@@ -81,28 +107,89 @@ def _xml_to_plain_text(raw: bytes) -> str:
     없지만, 이 feature의 segment.py는 표제·문단을 줄바꿈으로 구분하므로
     태그는 개행으로 바꾼다(위 _TAG_PATTERN 주석 참고).
     """
-    for encoding in ("utf-8", "cp949", "euc-kr"):
-        try:
-            text = raw.decode(encoding)
-            break
-        except UnicodeDecodeError:
-            continue
-    else:
-        text = raw.decode("utf-8", errors="replace")
+    text = _decode_document_bytes(raw)
     text = _TAG_PATTERN.sub("\n", text)
     text = _INLINE_WHITESPACE_PATTERN.sub(" ", text)
     text = _EXCESS_NEWLINE_PATTERN.sub("\n\n", text)
     return text.strip()
 
 
+def _from_core_candidate(
+    candidate: dart_client.DocumentUrlSidecarCandidate,
+) -> DiscoveredDocumentUrl:
+    return DiscoveredDocumentUrl(
+        url=candidate.url,
+        source_member_name=candidate.source_member_name,
+        location=candidate.source_location,
+        source_payload_sha256=candidate.source_payload_sha256,
+    )
+
+
+def _extract_explicit_web_url_candidates(
+    raw: bytes,
+    *,
+    member_name: str,
+) -> tuple[DiscoveredDocumentUrl, ...]:
+    """대표 XML도 ZIP sidecar와 같은 URL 추출 정본을 사용한다."""
+
+    return tuple(
+        _from_core_candidate(candidate)
+        for candidate in dart_client.extract_document_web_url_candidates(
+            raw,
+            member_name=member_name,
+            max_candidates=c.MAX_OFFICIAL_URL_CANDIDATES,
+        )
+    )
+
+
+def _load_document_url_sidecar(
+    document_path: Path,
+    *,
+    rcept_no: str,
+    main_document: bytes,
+    require_valid: bool = False,
+) -> tuple[DiscoveredDocumentUrl, ...]:
+    """version·receipt·대표 XML hash에 맞는 닫힌 sidecar만 읽는다.
+
+    sidecar는 보조 발견 정보다. 없거나 한 필드라도 깨졌으면 후보 전체를
+    버린다. 호환 모드(``require_valid=False``)만 대표 XML fallback을 쓰고,
+    FULL 정식 모드는 이를 공식자료 수집 불완전으로 보고 예외를 올린다.
+    일부 행만 살리면 공격자가 malformed 행 사이에 URL을 끼워 넣어 검증
+    경계를 모호하게 만들 수 있다.
+
+    여기서 확인하는 것은 **형식·접수번호·옆 대표 XML과의 결속**이다. 작은
+    ZIP member의 원문은 개인정보·용량을 늘리지 않기 위해 보관하지 않으므로
+    ``source_payload_sha256``은 다운로드 당시 provenance이지 로컬에서 다시
+    인증하는 서명값이 아니다. 따라서 이 후보 하나만으로 공식 자료가 되지
+    않으며, app 수집기가 대상 HTML의 DART 법인명+등록번호와 same-origin을
+    별도로 확인한 뒤에만 승격한다.
+    """
+
+    loaded = dart_client.load_document_url_sidecar(
+        document_path,
+        rcept_no=rcept_no,
+        main_document=main_document,
+    )
+    if not loaded.is_valid:
+        if require_valid:
+            # 정식 FULL은 생산 함수가 sidecar를 만들었다는 호출 규약만 믿지
+            # 않는다. 시험 대역·향후 transport·동시 cache 교체가 그 규약을
+            # 어겨도 대표 XML fallback으로 조용히 자료 부족처럼 진행하지 않는다.
+            raise dart_client.DartResponseError(
+                "FULL DART 공시 cache의 공식 URL sidecar 결속을 확인할 수 없습니다"
+            )
+        return ()
+    return tuple(_from_core_candidate(candidate) for candidate in loaded.candidates)
+
+
 class DartRuntimeFetcher:
     """``filing_select.DartFetcher`` Protocol을 만족하는 실제 DART 어댑터.
 
-    조회 실패·한도 소진·인증 실패는 여기서 흡수하지 않는다 — 이 클래스를
-    호출하는 filing_select.py/collect.py의 ``_safe_fetch_*``가 이미
-    ``except Exception``으로 흡수하는 경계를 갖고 있으므로(요구사항 7),
-    여기서는 실제 상태를 정직하게 돌려주거나(예외 없는 실패) 예외를 그대로
-    올린다 — 이중으로 삼키면 원인 진단이 어려워진다.
+    조회 실패·한도 소진·인증 실패는 여기서 흡수하지 않는다. 호출하는
+    filing_select.py/collect.py의 ``_safe_fetch_*``는 DART 전송·응답·cache I/O
+    같은 닫힌 외부 실패만 FAILED로 바꾸고, TypeError·ValueError 같은 배선·
+    구현 오류는 상위 내부 오류로 재전파한다. 따라서 여기서는 실제 상태를
+    정직하게 돌려주거나 예외를 그대로 올린다.
     """
 
     def __init__(
@@ -113,6 +200,7 @@ class DartRuntimeFetcher:
         lookup_window_days: int = _LOOKUP_WINDOW_DAYS,
         get_json_fn: GetJsonFn = dart_client.get_json,
         download_document_fn: DownloadDocumentFn = dart_client.download_document,
+        require_official_url_sidecar: bool = False,
         clock: Callable[[], float] = time.monotonic,
         today: Callable[[], dt.date] | None = None,
     ) -> None:
@@ -121,6 +209,7 @@ class DartRuntimeFetcher:
         self._lookup_window_days = lookup_window_days
         self._get_json = get_json_fn
         self._download_document = download_document_fn
+        self._require_official_url_sidecar = require_official_url_sidecar
         self._clock = clock
         self._today = today
 
@@ -176,9 +265,53 @@ class DartRuntimeFetcher:
 
     def fetch_document_text(self, rcept_no: str) -> DocumentFetchResult:
         started = self._clock()
-        path = self._download_document(rcept_no, self._document_cache_dir, self._counter)
-        raw = path.read_bytes()
+        if self._require_official_url_sidecar:
+            path = self._download_document(
+                rcept_no,
+                self._document_cache_dir,
+                self._counter,
+                require_official_url_sidecar=True,
+            )
+        else:
+            path = self._download_document(
+                rcept_no,
+                self._document_cache_dir,
+                self._counter,
+            )
+        # 주입된 transport나 깨진 warm cache가 core의 저장 경계를 우회해도
+        # 여기서 파일 전체를 메모리에 올리지 않는다. 생산 기본 transport는
+        # 이미 같은 상한으로 검증하지만, 실제 소비자도 계약을 독립 검증해야
+        # cache 교체 시점의 손상·오배선을 자료 원문으로 읽지 않는다.
+        with path.open("rb") as stream:
+            raw = stream.read(dart_client.DOCUMENT_MEMBER_MAX_BYTES + 1)
+        if len(raw) > dart_client.DOCUMENT_MEMBER_MAX_BYTES:
+            raise dart_client.DartResponseError(
+                "DART 공시 대표 cache가 허용 크기를 초과했습니다"
+            )
+        if not dart_client.is_document_xml_payload(raw):
+            raise dart_client.DartResponseError(
+                "DART 공시 대표 cache가 XML 문서 형식이 아닙니다"
+            )
         text = _xml_to_plain_text(raw)
+        sidecar_candidates = _load_document_url_sidecar(
+            path,
+            rcept_no=rcept_no,
+            main_document=raw,
+            require_valid=self._require_official_url_sidecar,
+        )
+        representative_candidates = _extract_explicit_web_url_candidates(
+            raw,
+            member_name=path.name,
+        )
+        official_url_candidates: list[DiscoveredDocumentUrl] = []
+        seen_candidate_urls: set[str] = set()
+        for candidate in (*sidecar_candidates, *representative_candidates):
+            if candidate.url in seen_candidate_urls:
+                continue
+            seen_candidate_urls.add(candidate.url)
+            official_url_candidates.append(candidate)
+            if len(official_url_candidates) >= c.MAX_OFFICIAL_URL_CANDIDATES:
+                break
         elapsed_ms = max(0, int((self._clock() - started) * 1000))
         return DocumentFetchResult(
             state=c.ATTEMPT_STATE_OK,
@@ -189,4 +322,5 @@ class DartRuntimeFetcher:
             # 함 — 위 모듈 docstring 참고) — 「검증했다」고 거짓 주장하지
             # 않기 위해 항상 빈 문자열로 둔다.
             corp_code="",
+            official_url_candidates=tuple(official_url_candidates),
         )

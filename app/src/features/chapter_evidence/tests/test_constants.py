@@ -7,6 +7,7 @@ from src.features.chapter_evidence.constants import (
     DART_SOURCE_KIND_PREFIX,
     OFFICIAL_SOURCE_KIND_PREFIX,
     expected_required_path_prefix,
+    expected_required_source_kinds,
 )
 from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
 
@@ -24,6 +25,12 @@ def test_아홉장_세유형_전부_기대경로가_정의돼있다(
     prefix = expected_required_path_prefix(company_type, section_id)
 
     assert prefix in {DART_SOURCE_KIND_PREFIX, OFFICIAL_SOURCE_KIND_PREFIX}
+    exact_kinds = expected_required_source_kinds(company_type, section_id)
+    assert exact_kinds
+    assert all(
+        source_kind.startswith(prefix) for source_kind in exact_kinds
+    )
+    assert f"{prefix}fake" not in exact_kinds
 
 
 def test_undecided_회사유형은_기대경로_함수가_지원하지_않는다() -> None:

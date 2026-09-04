@@ -374,19 +374,19 @@ def build_wisely_type_fixture(*, company_id: str = "corp-wisely") -> dict[str, l
         make_document(
             company_id=company_id,
             document_id="official-shop-01",
-            source_kind="official_shop",
+            source_kind="official_web_page",
             title="자사몰 회사소개",
         ),
         make_document(
             company_id=company_id,
             document_id="official-careers-01",
-            source_kind="official_careers",
+            source_kind="official_recruit_page",
             title="채용 페이지",
         ),
         make_document(
             company_id=company_id,
             document_id="official-blog-01",
-            source_kind="official_blog",
+            source_kind="official_web_page",
             title="공식 블로그",
         ),
     ]
@@ -404,11 +404,11 @@ def build_wisely_type_fixture(*, company_id: str = "corp-wisely") -> dict[str, l
         attempts.extend(section_attempts)
 
     official_channel_by_section = {
-        "identity": ("official_shop", "official-shop-01"),
-        "portfolio": ("official_shop", "official-shop-01"),
-        "future_strategy": ("official_blog", "official-blog-01"),
-        "culture": ("official_careers", "official-careers-01"),
-        "competitive_position": ("official_blog", "official-blog-01"),
+        "identity": ("official_web_page", "official-shop-01"),
+        "portfolio": ("official_web_page", "official-shop-01"),
+        "future_strategy": ("official_web_page", "official-blog-01"),
+        "culture": ("official_recruit_page", "official-careers-01"),
+        "competitive_position": ("official_web_page", "official-blog-01"),
     }
     for section_id in OFFICIAL_ONLY_SECTIONS:
         source_kind, document_id = official_channel_by_section[section_id]
@@ -456,7 +456,7 @@ def build_no_homepage_fixture(*, company_id: str = "corp-no-homepage") -> dict[s
             build_unfilled_channel(
                 company_id=company_id,
                 section_id=section_id,
-                source_kind="official_homepage",
+                source_kind="official_web_page",
                 state=CollectionState.MISSING.value,
                 reason_code="official_homepage_dns_not_found",
             )
@@ -477,14 +477,14 @@ def build_javascript_render_failure_fixture(
     fixture["attempts"] = [
         attempt
         for attempt in fixture["attempts"]
-        if attempt["source_kind"] != "official_homepage"
+        if attempt["source_kind"] != "official_web_page"
     ]
     for section_id in OFFICIAL_ONLY_SECTIONS:
         fixture["attempts"].extend(
             build_unfilled_channel(
                 company_id=company_id,
                 section_id=section_id,
-                source_kind="official_homepage",
+                source_kind="official_web_page",
                 state=CollectionState.FAILED.value,
                 reason_code="official_homepage_render_timeout",
             )

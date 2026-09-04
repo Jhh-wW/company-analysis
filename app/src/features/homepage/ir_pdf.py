@@ -89,9 +89,10 @@ from src.shared.official_ir import (
     extract_official_ir_anchor_metadata,
     safe_https_attachment_url,
 )
+from src.shared.report_evidence.legacy_fragment_kinds import LEGACY_KIND_OFFICIAL_IR
 
 
-OFFICIAL_IR_FRAGMENT_KIND: Final[str] = "공식 IR"
+OFFICIAL_IR_FRAGMENT_KIND: Final[str] = LEGACY_KIND_OFFICIAL_IR
 VERIFIED_FINAL_URL_FIELD: Final[str] = "후보출처검증"
 VERIFIED_FINAL_URL_VALUE: Final[str] = "https_exact_dart_host"
 PDF_CONTENT_TYPE: Final[str] = "application/pdf"

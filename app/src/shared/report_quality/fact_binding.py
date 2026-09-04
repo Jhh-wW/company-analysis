@@ -122,3 +122,36 @@ def fact_evidence_binding(fact: Any) -> str:
         if value:
             payload[name] = list(value)
     return _binding_digest(payload)
+
+
+def fact_primary_source_metadata_mismatches(
+    fact: Any,
+    source: Any,
+) -> tuple[str, ...]:
+    """FactRecord의 대표 출처 투영과 등록부 Source의 다른 필드를 돌려준다.
+
+    프로그램 생산자는 Source를 참조하는 ID만 맞춘 뒤 제목·발행자·URL을 따로
+    바꿔 적을 수 없어야 한다. 이 비교표를 생성기마다 복제하면 새 출처 필드를
+    한 경로만 빼먹으므로, FactRecord가 실제로 운반하는 대표 출처 필드를 여기서
+    한 번에 대조한다. 값은 생산 경계에서 그대로 복사되므로 느슨한 유사 비교가
+    아니라 byte-exact 문자열 비교를 한다.
+    """
+
+    expected = {
+        "source_id": str(source.source_id),
+        "source_type": str(source.source_type),
+        "source_title": str(source.title or source.label),
+        "source_publisher": str(source.publisher),
+        "source_host": str(source.host),
+        "source_url": str(source.url),
+        "source_document_id": str(source.document_id),
+        "location": str(source.location),
+        "source_date": str(
+            source.published_at or source.disclosed_at or source.collected_at
+        ),
+    }
+    return tuple(
+        field_name
+        for field_name, expected_value in expected.items()
+        if str(getattr(fact, field_name, "")) != expected_value
+    )

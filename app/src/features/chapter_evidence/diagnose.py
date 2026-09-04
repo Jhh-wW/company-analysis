@@ -41,7 +41,7 @@ from __future__ import annotations
 from src.features.chapter_evidence.constants import (
     FAILURE_COLLECTION_STATES,
     CompanyType,
-    expected_required_path_prefix,
+    expected_required_source_kinds,
 )
 from src.shared.report_evidence.constants import (
     SITE_PROBE_GATE_SOURCE_KINDS,
@@ -69,10 +69,10 @@ def diagnose_candidate_readiness(
     # 회사유형을 아직 모르면 기대할 접두어 자체가 없다 — 가산 확인(3단계)을
     # 건너뛴다. expected_required_path_prefix는 undecided를 지원하지 않으므로
     # (알 수 없는 회사 유형으로 거부한다) 아예 호출하지 않는다.
-    expected_prefix = (
+    expected_source_kinds = (
         None
         if company_type is CompanyType.UNDECIDED
-        else expected_required_path_prefix(company_type, section_id)
+        else expected_required_source_kinds(company_type, section_id)
     )
 
     reasons: list[str] = []
@@ -131,8 +131,8 @@ def diagnose_candidate_readiness(
         # 4) — 계약 기준으로는 «정상 확인 후 부재». 회사유형별 기대 경로가
         # 있다면 그 경로가 실제로 관측됐는지 한 겹 더 확인해 더 조심하는
         # 쪽으로만 튼다(진단이 계약보다 덜 조심하게 두지 않는다).
-        if expected_prefix is not None and not any(
-            attempt.source_kind.startswith(expected_prefix)
+        if expected_source_kinds is not None and not any(
+            attempt.source_kind in expected_source_kinds
             for attempt in required_attempts
         ):
             any_unknown = True

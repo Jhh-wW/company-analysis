@@ -796,19 +796,35 @@ def test_jyp_fake_adapters_complete_signed_flow_but_legacy_report_is_gate_stoppe
         assert client.cookies.get(
             report_access_constants.PUBLIC_GRANT_COOKIE_NAME
         )
+        terminal_progress = None
         for _ in range(100):
-            if client.get(f"/api/progress/{job_id}").json()["finished"]:
+            progress = client.get(f"/api/progress/{job_id}")
+            progress_payload = progress.json()
+            if progress_payload.get("code") == "report_not_published":
+                # 검증에 실패한 legacy 본문은 ``finished + next_url``이라는
+                # 성공 신호를 내지 않는다. 진행 API 자체가 무차감 중단을
+                # terminal 409로 알려 브라우저가 정상 결과로 오인하지 않는다.
+                assert progress.status_code == 409
+                assert "이용 횟수는 차감되지 않았습니다" in progress_payload["error"]
+                terminal_progress = progress_payload
+                break
+            assert progress.status_code == 200, progress_payload
+            if progress_payload["finished"]:
                 break
             time.sleep(0.01)
         else:
             raise AssertionError("JYP fake 본조사가 끝나지 않았습니다")
+        assert terminal_progress is not None, "낮은 품질 보고서를 성공 완료로 알렸습니다"
         result = client.get(f"/result/{job_id}")
 
     # This paid-flow fixture intentionally returns the pre-canonical one-section
     # Report above. Consent, candidate resolution, and charging still complete,
     # but a partial/legacy report must never cross the public result boundary.
     assert result.status_code == 409
-    assert '<div class="stopped-icon">' in result.text
+    # stopped.html은 아이콘 내용을 조건부로 고르므로 여는 태그 뒤에 줄바꿈이
+    # 있다. 마크업 공백이 아니라 실제 중단 화면의 표식과 계약 문구를 본다.
+    assert 'class="stopped-icon"' in result.text
+    assert "안전 검사를 통과하지 못해 보고서를 내보내지 않았습니다" in result.text
     assert "JYP fake E2E 검증 문장" not in result.text
     assert pipeline.run_calls == 1
     assert transport_calls == 1

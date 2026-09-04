@@ -6,11 +6,21 @@ import time
 
 import pytest
 
-from core.dart_client import DartAuthenticationError, DartLimitReached
+from core.dart_client import (
+    DartAuthenticationError,
+    DartLimitReached,
+    DartResponseError,
+    DartTransportError,
+)
 from features.evidence_collection import collect as collect_module
 from features.evidence_collection import constants as c
 from features.evidence_collection.collect import collect_dart_evidence
-from features.evidence_collection.filing_select import DocumentFetchResult, FilingListResult, RawFilingRow
+from features.evidence_collection.filing_select import (
+    DiscoveredDocumentUrl,
+    DocumentFetchResult,
+    FilingListResult,
+    RawFilingRow,
+)
 from features.evidence_collection.models import EvidenceCollectionError
 from features.evidence_collection.serialize import harvest_to_mapping
 from features.evidence_collection.tests.fixtures.fake_fetcher import FakeFetcher
@@ -119,6 +129,93 @@ def test_감사보고서형_수집() -> None:
     assert not any(slot_id.startswith("business_model:") for slot_id in covered)
 
 
+@pytest.mark.parametrize(
+    ("pblntf_ty", "report_nm", "rcept_no", "rcept_dt", "text", "source_kind", "expected"),
+    (
+        (
+            "A",
+            "사업보고서 (2024.02)",
+            "20240229000001",
+            "20240229",
+            LISTED_BUSINESS_REPORT_TEXT,
+            c.SOURCE_KIND_BUSINESS_REPORT,
+            "2024-02-29",
+        ),
+        (
+            "F",
+            "감사보고서",
+            "20250401000001",
+            "20250401",
+            AUDIT_ONLY_REPORT_TEXT,
+            c.SOURCE_KIND_AUDIT_REPORT,
+            "2025-04-01",
+        ),
+        (
+            "A",
+            "반기보고서 (2025.06)",
+            "20250815000002",
+            "20250815",
+            "II. 위험관리\n원재료 가격 변동이 당면 과제이며 대응 대책을 추진하고 있다.",
+            c.SOURCE_KIND_SEMIANNUAL_REPORT,
+            "2025-08-15",
+        ),
+        (
+            "A",
+            "분기보고서 (2025.09)",
+            "20251114000003",
+            "20251114",
+            "II. 위험관리\n공급망 변동이 당면 과제이며 대응 대책을 추진하고 있다.",
+            c.SOURCE_KIND_QUARTERLY_REPORT,
+            "2025-11-14",
+        ),
+    ),
+)
+def test_DART_네_자료종류의_접수일은_생산_문서부터_ISO로_고정된다(
+    pblntf_ty: str,
+    report_nm: str,
+    rcept_no: str,
+    rcept_dt: str,
+    text: str,
+    source_kind: str,
+    expected: str,
+) -> None:
+    """OpenDART 원래 8자리는 유지하되 공개 경로에 들어갈 문서는 ISO다."""
+
+    row = RawFilingRow(rcept_no, report_nm, rcept_dt)
+    harvest = collect_dart_evidence(_fetcher(pblntf_ty, row, text), "00126380", now=_NOW)
+    document = next(item for item in harvest.documents if item.source_kind == source_kind)
+
+    assert row.rcept_dt == rcept_dt
+    assert document.published_on == expected
+    serialized = harvest_to_mapping(harvest)
+    serialized_document = next(
+        item for item in serialized["documents"] if item["source_kind"] == source_kind
+    )
+    assert serialized_document["published_on"] == expected
+
+
+@pytest.mark.parametrize("rcept_dt", ["20250229", "20251301", "2025-03-15", ""])
+def test_잘못된_DART_접수일은_문서를_받기_전에_REQUIRED_FAILED로_남긴다(
+    rcept_dt: str,
+) -> None:
+    row = RawFilingRow("20250315000001", "사업보고서 (2025.03)", rcept_dt)
+    fetcher = _fetcher("A", row, LISTED_BUSINESS_REPORT_TEXT)
+
+    harvest = collect_dart_evidence(fetcher, "00126380", now=_NOW)
+
+    assert fetcher.document_calls == []
+    assert harvest.documents == ()
+    invalid = [
+        attempt
+        for attempt in harvest.attempts
+        if attempt.reason_code == c.REASON_FILING_RECEIPT_DATE_INVALID
+    ]
+    assert len(invalid) == 1
+    assert invalid[0].state == c.ATTEMPT_STATE_FAILED
+    assert invalid[0].requirement == c.REQUIREMENT_REQUIRED
+    assert invalid[0].documents_seen == 0
+
+
 def test_한_DART_원문범위의_복수슬롯은_fragment_ID와_원문을_한번만_싣는다() -> None:
     row = RawFilingRow("20250315000011", "사업보고서 (2025.03)", "20250315")
     fetcher = _fetcher("A", row, _MULTI_SLOT_ONE_RANGE_TEXT)
@@ -167,6 +264,107 @@ def test_문서_조회_실패는_FAILED로_기록되고_문서를_만들지_않�
     ]
     assert len(fail_attempts) == 1
     assert fail_attempts[0].reason_code == c.REASON_DOCUMENT_FETCH_FAILED
+
+
+def test_문단후보_상한에_닿은_문서는_부분근거가_있어도_OK로_위장하지_않는다(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(c, "MAX_LONG_FRAGMENT_CANDIDATES_PER_DOCUMENT", 1)
+    row = RawFilingRow("20250315000021", "사업보고서", "20250315")
+    company_id = "00126380"
+    text = (
+        "I. 회사의 개요\n"
+        "당사는 정밀부품을 생산하는 주식회사이며 법인이다.\n\n"
+        "II. 사업의 내용\n"
+        "주요 매출은 제품 판매에서 발생하며 고객에게 서비스를 제공한다.\n"
+    )
+
+    harvest = collect_dart_evidence(
+        _fetcher("A", row, text), company_id, now=_NOW
+    )
+    document_attempt = next(
+        attempt
+        for attempt in harvest.attempts
+        if attempt.attempt_id.startswith("document:")
+    )
+
+    assert harvest.company_id == company_id
+    assert harvest.fragments  # 상한 전까지의 실제 부분 근거는 버리지 않는다.
+    assert document_attempt.state == c.ATTEMPT_STATE_TRUNCATED
+    assert (
+        document_attempt.reason_code
+        == c.REASON_DOCUMENT_FRAGMENT_COUNT_EXCEEDED
+    )
+    assert not any(
+        attempt.attempt_id.startswith("fragments:")
+        for attempt in harvest.attempts
+    )
+
+
+@pytest.mark.parametrize(
+    "external_error",
+    [
+        DartTransportError("가짜 DART 전송 실패"),
+        DartResponseError("가짜 DART 응답 실패"),
+        OSError("가짜 cache I/O 실패"),
+    ],
+)
+def test_문서조회_예상외부실패는_FAILED로_보존한다(external_error) -> None:
+    row = RawFilingRow("20250315000001", "사업보고서", "20250315")
+
+    class ExternalFailureFetcher(FakeFetcher):
+        def fetch_document_text(self, rcept_no: str) -> DocumentFetchResult:
+            self.document_calls.append(rcept_no)
+            raise external_error
+
+    fetcher = ExternalFailureFetcher(
+        list_responses_by_pblntf_ty={
+            "A": FilingListResult(state="OK", rows=(row,)),
+        }
+    )
+
+    harvest = collect_dart_evidence(fetcher, "00126380", now=_NOW)
+
+    failed = [
+        attempt
+        for attempt in harvest.attempts
+        if attempt.attempt_id.endswith(row.rcept_no)
+    ]
+    assert len(failed) == 1
+    assert failed[0].state == c.ATTEMPT_STATE_FAILED
+    assert failed[0].reason_code == c.REASON_DOCUMENT_FETCH_FAILED
+
+
+@pytest.mark.parametrize(
+    "contract_error",
+    [
+        TypeError("가짜 callback 시그니처 불일치"),
+        AttributeError("가짜 반환 자료형 불일치"),
+        KeyError("가짜 필수 필드 누락"),
+        AssertionError("가짜 구현 불변식 위반"),
+        ValueError("가짜 포트 값 계약 위반"),
+    ],
+)
+def test_문서조회_코드계약오류를_자료실패로_위장하지_않는다(
+    contract_error,
+) -> None:
+    row = RawFilingRow("20250315000001", "사업보고서", "20250315")
+
+    class BrokenFetcher(FakeFetcher):
+        def fetch_document_text(self, rcept_no: str) -> DocumentFetchResult:
+            self.document_calls.append(rcept_no)
+            raise contract_error
+
+    fetcher = BrokenFetcher(
+        list_responses_by_pblntf_ty={
+            "A": FilingListResult(state="OK", rows=(row,)),
+        }
+    )
+
+    with pytest.raises(type(contract_error)):
+        collect_dart_evidence(fetcher, "00126380", now=_NOW)
+
+    assert fetcher.document_calls == [row.rcept_no]
 
 
 def test_deadline이_처음부터_지난_상태면_목록_조회조차_시작하지_않는다() -> None:
@@ -219,6 +417,60 @@ def test_동일한_내용_SHA256은_문서_중복으로_제거한다() -> None:
     assert duplicate_attempts[0].state == c.ATTEMPT_STATE_OK
 
 
+def test_평문이_중복이어도_정정_XML의_새_URL후보는_영수증과_함께_남는다() -> None:
+    """본문 중복 제거가 raw href 발견까지 지우면 안 된다."""
+
+    business_row = RawFilingRow("20250315000001", "사업보고서 (2025.03)", "20250315")
+    semiannual_row = RawFilingRow("20250815000002", "반기보고서 (2025.06)", "20250815")
+    first_url = "https://old-official.example/"
+    corrected_url = "https://new-official.example/company"
+    fetcher = FakeFetcher(
+        list_responses_by_pblntf_ty={
+            "A": FilingListResult(state="OK", rows=(business_row, semiannual_row)),
+        },
+        document_responses_by_rcept_no={
+            business_row.rcept_no: DocumentFetchResult(
+                state="OK",
+                text=LISTED_BUSINESS_REPORT_TEXT,
+                official_url_candidates=(
+                    DiscoveredDocumentUrl(
+                        url=first_url,
+                        source_member_name="main.xml",
+                        location="raw_xml_chars:10-39",
+                        source_payload_sha256="a" * 64,
+                    ),
+                ),
+            ),
+            semiannual_row.rcept_no: DocumentFetchResult(
+                state="OK",
+                text=LISTED_BUSINESS_REPORT_TEXT,
+                official_url_candidates=(
+                    DiscoveredDocumentUrl(
+                        url=corrected_url,
+                        source_member_name="correction.xml",
+                        location="raw_xml_chars:50-94",
+                        source_payload_sha256="b" * 64,
+                    ),
+                ),
+            ),
+        },
+    )
+
+    harvest = collect_dart_evidence(fetcher, "00126380", now=_NOW)
+
+    assert len(harvest.documents) == 1
+    assert [candidate.url for candidate in harvest.official_url_candidates] == [
+        first_url,
+        corrected_url,
+    ]
+    corrected = harvest.official_url_candidates[1]
+    assert corrected.source_receipt_no == semiannual_row.rcept_no
+    assert corrected.source_document_id.endswith(semiannual_row.rcept_no)
+    assert corrected.source_member_name == "correction.xml"
+    assert corrected.source_location == "raw_xml_chars:50-94"
+    assert corrected.source_payload_sha256 == "b" * 64
+
+
 def test_다른_엔진_소유_슬롯은_실제_수집_산출물에도_0건이다() -> None:
     """산출 fragment에 이 슬롯이 0건임을 시험으로 고정한다.
 
@@ -246,7 +498,7 @@ def test_다른_엔진_소유_슬롯은_실제_수집_산출물에도_0건이다
 # ══════════════════════════════════════════════════════════
 
 
-def test_P0_1_무신호_조각은_harvest_fragments에도_직렬화_출력에도_안_남는다() -> None:
+def test_P0_1_무신호_조각은_근거와_분리된_차선에_원문까지_남는다() -> None:
     row = RawFilingRow("20250315000001", "사업보고서 (2025.03)", "20250315")
     fetcher = _fetcher("A", row, _MIXED_SIGNAL_TEXT)
 
@@ -254,17 +506,46 @@ def test_P0_1_무신호_조각은_harvest_fragments에도_직렬화_출력에도
 
     assert len(harvest.documents) == 1
     # 신호 문단은 가장 강한 회사정체성 장 안에서만 배정된다. 같은 문단의
-    # 「생산」 한 단어를 다른 장으로 복제하지 않으며, 무신호 문단도 여전히
-    # 하나도 fragments에 남지 않는다.
+    # 「생산」 한 단어를 다른 장으로 복제하지 않으며, 무신호 문단은 근거
+    # fragments에 섞이지 않고 별도 무분류 차선에 보존된다.
     assert {fragment.slot_id for fragment in harvest.fragments} == {
         "identity:corporate_identity",
     }
     assert all(f.section_id and f.slot_id for f in harvest.fragments)
+    assert len(harvest.unclassified_documents) == 1
+    assert len(harvest.unclassified_fragments) == 1
+    unclassified = harvest.unclassified_fragments[0]
+    assert "오늘 날씨가 맑고 하늘이 파랗다는" in unclassified.text
+    assert unclassified.section_id == ""
+    assert unclassified.slot_id == ""
+    assert unclassified.covered_slot_ids == ()
+    assert unclassified.reason_codes == (c.REASON_NO_SIGNAL,)
 
     mapping = harvest_to_mapping(harvest)
     for fragment in mapping["fragments"]:
         assert fragment["section_id"] != ""
         assert fragment["slot_id"] != ""
+    assert mapping["unclassified_fragments"] == [
+        {
+            "company_id": unclassified.company_id,
+            "fragment_id": unclassified.fragment_id,
+            "document_id": unclassified.document_id,
+            "location": unclassified.location,
+            "text_sha256": unclassified.text_sha256,
+            "text": unclassified.text,
+            "section_id": "",
+            "slot_id": "",
+            "covered_slot_ids": [],
+            "score_millis": 0,
+            "reason_codes": [c.REASON_NO_SIGNAL],
+            "period_start": "",
+            "period_end": "",
+            "unit": "",
+            "company_scope": "",
+        }
+    ]
+    assert len(mapping["unclassified_documents"]) == 1
+    assert mapping["unclassified_documents"][0]["exact_evidence_hashes"] == []
 
     observed = [
         a for a in harvest.attempts
@@ -273,6 +554,33 @@ def test_P0_1_무신호_조각은_harvest_fragments에도_직렬화_출력에도
     assert len(observed) == 1
     assert observed[0].state == c.ATTEMPT_STATE_OK
     assert observed[0].documents_seen == 1  # 무신호 문단 관측 개수
+
+
+def test_짧은_경쟁문장은_writer_근거로_승격하지_않고_정확_원문만_남긴다() -> None:
+    sentence = "가나다전자는 베타전자와 경쟁합니다."
+    row = RawFilingRow("20250315000001", "사업보고서 (2025.03)", "20250315")
+    fetcher = _fetcher("A", row, f"{sentence}\n\n잡음\n")
+
+    harvest = collect_dart_evidence(fetcher, "00126380", now=_NOW)
+
+    assert all(sentence not in fragment.text for fragment in harvest.fragments)
+    matches = [
+        fragment
+        for fragment in harvest.unclassified_fragments
+        if fragment.text == sentence
+    ]
+    assert len(matches) == 1
+    assert matches[0].section_id == ""
+    assert matches[0].slot_id == ""
+    assert matches[0].covered_slot_ids == ()
+    assert matches[0].score_millis == 0
+    start, end = (int(value) for value in matches[0].location.split("-", 1))
+    assert f"{sentence}\n\n잡음\n"[start:end] == sentence
+    mapping = harvest_to_mapping(harvest)
+    assert all(
+        document["exact_evidence_hashes"] == []
+        for document in mapping["unclassified_documents"]
+    )
 
 
 @pytest.mark.parametrize("fatal_error", [DartLimitReached("한도"), DartAuthenticationError("인증")])
@@ -325,19 +633,9 @@ def test_P0_2_확인된_부재는_MISSING으로_전송_장애는_FAILED로_끝�
     assert failed_attempts[0].reason_code == c.REASON_DOCUMENT_FETCH_FAILED
 
 
-def test_P0_2_알_수_없는_state는_fail_closed로_FAILED_처리한다() -> None:
-    row = RawFilingRow("20250315000001", "사업보고서 (2025.03)", "20250315")
-    fetcher = FakeFetcher(
-        list_responses_by_pblntf_ty={"A": FilingListResult(state="OK", rows=(row,))},
-        document_responses_by_rcept_no={row.rcept_no: DocumentFetchResult(state="알수없음")},
-    )
-
-    harvest = collect_dart_evidence(fetcher, "00126380", now=_NOW)
-
-    document_attempts = [a for a in harvest.attempts if a.attempt_id.startswith("document:")]
-    assert len(document_attempts) == 1
-    assert document_attempts[0].state == c.ATTEMPT_STATE_FAILED
-    assert document_attempts[0].reason_code == c.REASON_DOCUMENT_FETCH_FAILED
+def test_P0_2_알_수_없는_state는_외부장애로_위장하지_않고_계약오류가_난다() -> None:
+    with pytest.raises(ValueError, match="알 수 없는 DART fetch 결과 상태"):
+        DocumentFetchResult(state="알수없음")
 
 
 # ══════════════════════════════════════════════════════════
@@ -353,12 +651,46 @@ def test_P0_3_scored_근거가_없는_문서는_documents에서_제외되고_att
 
     assert harvest.documents == ()
     assert harvest.fragments == ()
+    assert len(harvest.unclassified_documents) == 1
+    assert len(harvest.unclassified_fragments) == 2
+    # 의미 분류 실패가 회사 유형 판정까지 지우지 않는다. 실제로 연 문서가
+    # 감사보고서였다는 관측은 무분류 차선의 문서 신원으로 남아 있다.
+    assert harvest.company_type == c.COMPANY_TYPE_AUDIT_ONLY
     no_evidence_attempts = [
         a for a in harvest.attempts if a.reason_code == c.REASON_DOCUMENT_NO_SCORED_EVIDENCE
     ]
     assert len(no_evidence_attempts) == 1
     assert no_evidence_attempts[0].state == c.ATTEMPT_STATE_OK
     assert no_evidence_attempts[0].documents_seen == 2  # 관측된 무신호 문단 개수
+
+
+def test_정식_짧은관측_filter가_cap에_닿으면_문서attempt는_TRUNCATED다(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(c, "MAX_SHORT_OBSERVATION_CANDIDATES_PER_DOCUMENT", 1)
+    row = RawFilingRow("20250401000001", "감사보고서", "20250401")
+    text = (
+        "I. 회사의 개요\n"
+        "당사는 정밀부품을 생산하는 주식회사이며 법인이다.\n\n"
+        "가나다는 나다라와 경쟁합니다.\n\n"
+        "마바사는 사아자와 경쟁합니다.\n"
+    )
+
+    harvest = collect_dart_evidence(
+        _fetcher("F", row, text),
+        "00164788",
+        now=_NOW,
+        short_observation_filter=lambda candidate: "경쟁" in candidate,
+    )
+
+    document_attempt = next(
+        attempt
+        for attempt in harvest.attempts
+        if attempt.attempt_id.startswith("document:")
+    )
+    assert document_attempt.state == c.ATTEMPT_STATE_TRUNCATED
+    assert document_attempt.reason_code == c.REASON_DOCUMENT_FRAGMENT_COUNT_EXCEEDED
+    assert any("나다라와 경쟁" in fragment.text for fragment in harvest.unclassified_fragments)
 
 
 # ══════════════════════════════════════════════════════════
@@ -633,6 +965,106 @@ def test_gen8_회사_A_수집_산출의_모든_fragment_attempt는_A의_company_
     mapping = harvest_to_mapping(harvest)
     assert all(f["company_id"] == company_a for f in mapping["fragments"])
     assert all(a["company_id"] == company_a for a in mapping["attempts"])
+
+
+def test_반기와_분기_문단은_자기_소유_슬롯만_생산하고_허용_신호는_보존한다() -> None:
+    """자료 종류별 슬롯 정본을 생산자가 지켜 앱의 뒤늦은 계약 오류를 막는다."""
+
+    business_row = RawFilingRow(
+        "20260315000001", "사업보고서 (2025.12)", "20260315"
+    )
+    semiannual_row = RawFilingRow(
+        "20260815000002", "반기보고서 (2026.06)", "20260815"
+    )
+    quarterly_row = RawFilingRow(
+        "20261115000003", "분기보고서 (2026.09)", "20261115"
+    )
+    semiannual_identity = (
+        "I. 회사의 개요\n"
+        "당사는 정밀부품을 생산하는 주식회사이며 법인이다."
+    )
+    semiannual_challenge = (
+        "II. 위험관리\n"
+        "원재료 가격 변동이 당면 과제이자 위험이며 대응 대책을 추진하고 있다."
+    )
+    quarterly_portfolio = (
+        "II. 주요 제품\n"
+        "대표 제품은 정밀 센서이며 핵심 제품의 매출 비중을 관리한다."
+    )
+    quarterly_change = (
+        "III. 요약재무정보\n"
+        "신규 생산라인 증설을 완료하여 공급 능력을 확대했다."
+    )
+    fetcher = FakeFetcher(
+        list_responses_by_pblntf_ty={
+            "A": FilingListResult(
+                state="OK",
+                rows=(business_row, semiannual_row, quarterly_row),
+            ),
+        },
+        document_responses_by_rcept_no={
+            business_row.rcept_no: DocumentFetchResult(
+                state="OK",
+                text=(
+                    "II. 사업의 내용\n"
+                    "주요 매출은 제품 판매에서 발생하며 고객사에 서비스를 제공한다."
+                ),
+            ),
+            semiannual_row.rcept_no: DocumentFetchResult(
+                state="OK",
+                text=f"{semiannual_identity}\n\n{semiannual_challenge}",
+            ),
+            quarterly_row.rcept_no: DocumentFetchResult(
+                state="OK",
+                text=f"{quarterly_portfolio}\n\n{quarterly_change}",
+            ),
+        },
+    )
+
+    harvest = collect_dart_evidence(fetcher, "00126380", now=_NOW)
+    supplements = [
+        fragment
+        for fragment in harvest.fragments
+        if fragment.document_id.startswith(
+            (c.SOURCE_KIND_SEMIANNUAL_REPORT, c.SOURCE_KIND_QUARTERLY_REPORT)
+        )
+    ]
+
+    assert supplements
+    for fragment in supplements:
+        source_kind = fragment.document_id.split(":", 1)[0]
+        assert set(fragment.covered_slot_ids) <= set(
+            c.SOURCE_KIND_SLOT_SCOPE[source_kind]
+        )
+    assert any(
+        fragment.document_id.startswith(c.SOURCE_KIND_SEMIANNUAL_REPORT)
+        and fragment.section_id == "current_challenges"
+        for fragment in supplements
+    )
+    assert any(
+        fragment.document_id.startswith(c.SOURCE_KIND_QUARTERLY_REPORT)
+        and fragment.section_id == "past_changes"
+        for fragment in supplements
+    )
+    assert all(
+        semiannual_identity not in fragment.text
+        and quarterly_portfolio not in fragment.text
+        for fragment in harvest.unclassified_fragments
+    )
+    supplement_attempts = [
+        attempt
+        for attempt in harvest.attempts
+        if attempt.attempt_id.startswith("document:")
+        and any(
+            marker in attempt.attempt_id
+            for marker in (
+                c.SOURCE_KIND_SEMIANNUAL_REPORT,
+                c.SOURCE_KIND_QUARTERLY_REPORT,
+            )
+        )
+    ]
+    assert len(supplement_attempts) == 2
+    assert all(attempt.state == c.ATTEMPT_STATE_OK for attempt in supplement_attempts)
 
 
 # ══════════════════════════════════════════════════════════

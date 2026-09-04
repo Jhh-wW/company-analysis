@@ -16,7 +16,7 @@ def _document(source_kind: str, requirement: str = c.REQUIREMENT_REQUIRED) -> Co
         source_kind=source_kind,
         publisher=c.DART_PUBLISHER_NAME,
         title="공시",
-        published_on="20250315",
+        published_on="2025-03-15",
         collected_at="2026-08-31T00:00:00+09:00",
         content_sha256="a" * 64,
         identity_binding="corp_code=00126380;rcept_no=20250315000001",

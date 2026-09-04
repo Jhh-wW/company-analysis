@@ -10,6 +10,9 @@ from src.features.company_comparison import logic as comparison_logic
 from src.features.business_candidate.dart_identity import DartCompanyRecord
 from src.features.company_comparison.logic import (
     ComparisonBlockedError,
+    ComparisonSourceConfigurationError,
+    ComparisonSourceInternalError,
+    ComparisonSourceTransientError,
     OfficialCompanyBundle,
     build_competitive_position,
     comparison_candidate_preflight_possible,
@@ -49,6 +52,47 @@ from src.shared.comparison_candidate_basis import (
     comparison_source_sentence_has_marker,
     comparison_source_sentence_has_self_subject,
 )
+
+
+def _v2_packet_set_for_bridge():
+    from src.features.composer.constants import SECTION_IDS
+    from src.features.composer.port import (
+        CollectedFragment,
+        SectionEvidencePacket,
+        SectionEvidencePacketSet,
+    )
+    from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
+    from src.shared.report_quality.source_identity import document_identity_from_parts
+
+    packets = []
+    for number, section_id in enumerate(SECTION_IDS, start=1):
+        fragment = CollectedFragment(
+            fragment_id=str(number),
+            kind="공식 공시",
+            text=f"{section_id} 공식 원문",
+            source_url=f"https://dart.fss.or.kr/{number}",
+            document_title=f"문서 {number}",
+            location="본문",
+            document_date="2026-03-15",
+            document_identity=document_identity_from_parts(
+                host="dart.fss.or.kr", document_id=f"2026031500{number:04d}"
+            ),
+            document_content_sha256=(f"{number:064x}"),
+            supported_claim_slots=tuple(CLAIM_SLOTS_BY_SECTION[section_id][:3]),
+        )
+        packets.append(
+            SectionEvidencePacket(
+                company_id="00000001",
+                evidence_generation_sha256="a" * 64,
+                section_id=section_id,
+                fragments=(fragment,),
+            )
+        )
+    return SectionEvidencePacketSet(
+        company_id="00000001",
+        evidence_generation_sha256="a" * 64,
+        packets=tuple(packets),
+    )
 
 
 COMPETITION_EVIDENCE = "주식회사 베타는 주식회사 알파의 경쟁사입니다."
@@ -263,6 +307,41 @@ def test_정상_양사공식원문은_동일조건_비교사실을_만든다() -
             {item.fact_id for item in report.fact_records},
         )
         assert fact_errors == [], fact_errors
+
+
+def test_DART_list에_reprt_code가_없어도_연차선택_내부표식으로_비교한다() -> None:
+    def actual_list_shape(bundle: OfficialCompanyBundle) -> OfficialCompanyBundle:
+        filing = dict(bundle.filing or {})
+        filing.pop("reprt_code", None)
+        filing["engine_selected_report_period_kind"] = "annual"
+        return replace(bundle, filing=filing)
+
+    self_bundle = actual_list_shape(
+        _bundle("00000001", "주식회사 알파", scale=2)
+    )
+    comparator = actual_list_shape(
+        _bundle(
+            "00000002",
+            "주식회사 베타",
+            scale=1,
+            operating_amount=50,
+        )
+    )
+
+    result = build_competitive_position(
+        _report(),
+        self_bundle=self_bundle,
+        catalog=CATALOG,
+        fetch_comparator=lambda record: (
+            comparator if record.corp_code == "00000002" else None
+        ),
+        collected_on="2026-08-19",
+    )
+
+    assert len(result.facts) == 2
+    assert all(
+        fact.comparison_period.endswith("2025-12-31") for fact in result.facts
+    )
 
 
 def test_성과지표가_비교사보다_낮으면_경쟁우위로_표시하지_않는다() -> None:
@@ -819,6 +898,60 @@ def test_한쪽_공식근거가_없으면_9장을_차단한다(fetcher) -> None:
             fetch_comparator=fetcher,
             collected_on="2026-08-19",
         )
+
+
+def test_비교사_DART_일시장애는_자료부족으로_삼키지_않는다() -> None:
+    def fail_transient(_record: DartCompanyRecord) -> OfficialCompanyBundle:
+        raise ComparisonSourceTransientError()
+
+    with pytest.raises(ComparisonSourceTransientError):
+        build_competitive_position(
+            _report(),
+            self_bundle=_bundle("00000001", "주식회사 알파"),
+            catalog=CATALOG,
+            fetch_comparator=fail_transient,
+            collected_on="2026-08-19",
+        )
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    (ComparisonSourceConfigurationError, ComparisonSourceInternalError),
+)
+def test_비교사_설정과_내부오류도_자료부족으로_삼키지_않는다(
+    error_type: type[RuntimeError],
+) -> None:
+    def fail_closed(_record: DartCompanyRecord) -> OfficialCompanyBundle:
+        raise error_type()
+
+    with pytest.raises(error_type):
+        build_competitive_position(
+            _report(),
+            self_bundle=_bundle("00000001", "주식회사 알파"),
+            catalog=CATALOG,
+            fetch_comparator=fail_closed,
+            collected_on="2026-08-19",
+        )
+
+
+@pytest.mark.parametrize("error", (TypeError("배선 오류"), ZeroDivisionError()))
+def test_비교사_callback의_예상밖_예외는_내부오류로_즉시_닫는다(
+    error: Exception,
+) -> None:
+    def fail_programming(_record: DartCompanyRecord) -> OfficialCompanyBundle:
+        raise error
+
+    with pytest.raises(ComparisonSourceInternalError) as caught:
+        build_competitive_position(
+            _report(),
+            self_bundle=_bundle("00000001", "주식회사 알파"),
+            catalog=CATALOG,
+            fetch_comparator=fail_programming,
+            collected_on="2026-08-19",
+        )
+
+    assert caught.value.__cause__ is error
+    assert "배선 오류" not in str(caught.value)
 
 
 def test_기간이_다르면_같은_계정이어도_비교하지_않는다() -> None:
@@ -1463,6 +1596,1393 @@ def _v2_comparison_result():
         candidate_source_registry=sources,
     )
     return result
+
+
+def _actual_v2_program():
+    from src.features.company_comparison.v2_bridge import (
+        attach_comparison_program_evidence,
+    )
+
+    competitive = next(
+        packet
+        for packet in attach_comparison_program_evidence(
+            _v2_packet_set_for_bridge(),
+            _v2_comparison_result(),
+        ).packets
+        if packet.section_id == "competitive_position"
+    )
+    assert competitive.program_evidence is not None
+    return competitive.program_evidence
+
+
+def test_v2_bridge는_실제_양사_fact_source와_다섯_의미칸을_봉인한다() -> None:
+    from src.features.company_comparison.v2_bridge import (
+        attach_comparison_program_evidence,
+    )
+    from src.features.provenance.sources import exact_evidence_text_hash
+
+    bridged = attach_comparison_program_evidence(
+        _v2_packet_set_for_bridge(),
+        _v2_comparison_result(),
+    )
+    competitive = next(
+        packet
+        for packet in bridged.packets
+        if packet.section_id == "competitive_position"
+    )
+    assert competitive.program_evidence is not None
+    program = competitive.program_evidence
+    assert {fact.claim_slot for fact in program.facts} == {
+        "competitive_position:comparison_target",
+        "competitive_position:comparison_metric",
+        "competitive_position:comparison_basis",
+        "competitive_position:comparison_judgment",
+        "competitive_position:limitation",
+    }
+    assert {source.publisher for source in program.registry_sources} >= {
+        "주식회사 알파",
+        "주식회사 베타",
+    }
+    assert all(has_valid_provenance_seal(source) for source in program.registry_sources)
+    assert all(
+        exact_evidence_text_hash(fragment.text)
+        in fragment.bound_source.exact_evidence_hashes
+        for fragment in program.source_fragments
+    )
+    assert all(fact.supporting_source_ids for fact in program.facts)
+    assert all(sentence.verified_fact_id for sentence in program.sentences)
+    context_facts = tuple(
+        fact
+        for fact in program.facts
+        if fact.claim_type == "competitive_comparison_context"
+    )
+    assert len(context_facts) == 4
+    assert all(fact.state_evidence not in fact.claim for fact in context_facts)
+    assert all(len(set(fact.evidence_support_terms)) >= 2 for fact in context_facts)
+    assert all(
+        fragment.document_content_sha256 == ""
+        for fragment in program.source_fragments
+        if fragment.kind == "공식 공시·재무 API"
+    )
+
+
+def test_v2_bridge는_비교_fact를_고친_가짜_프로그램근거를_거절한다() -> None:
+    from src.features.company_comparison.v2_bridge import (
+        attach_comparison_program_evidence,
+    )
+    from src.features.composer.port import VerifiedProgramEvidence
+
+    competitive = next(
+        packet
+        for packet in attach_comparison_program_evidence(
+            _v2_packet_set_for_bridge(),
+            _v2_comparison_result(),
+        ).packets
+        if packet.section_id == "competitive_position"
+    )
+    assert competitive.program_evidence is not None
+    program = competitive.program_evidence
+    with pytest.raises(ValueError, match="FactRecord"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=program.source_fragments,
+            registry_sources=program.registry_sources,
+            facts=(replace(program.facts[0], claim="근거 없이 바꾼 문장"), *program.facts[1:]),
+            sentences=program.sentences,
+        )
+
+
+def test_v2_bridge는_formal_Source와_조각의_문서전체지문_불일치를_거절한다() -> None:
+    from src.features.company_comparison.v2_bridge import (
+        attach_comparison_program_evidence,
+    )
+    from src.features.composer.port import VerifiedProgramEvidence
+    from src.shared.report_evidence.constants import (
+        SOURCE_KIND_DART_BUSINESS_REPORT,
+    )
+    from src.shared.report_quality.source_identity import (
+        bound_source_fragment_provenance,
+    )
+
+    competitive = next(
+        packet
+        for packet in attach_comparison_program_evidence(
+            _v2_packet_set_for_bridge(),
+            _v2_comparison_result(),
+        ).packets
+        if packet.section_id == "competitive_position"
+    )
+    assert competitive.program_evidence is not None
+    program = competitive.program_evidence
+    original_fragment = program.source_fragments[0]
+    original_source = original_fragment.bound_source
+    assert type(original_source) is Source
+    formal_source = seal_collected_source(
+        replace(
+            original_source,
+            formal_source_kind=SOURCE_KIND_DART_BUSINESS_REPORT,
+            identity_binding="typed-company-binding",
+            document_content_sha256="a" * 64,
+            provenance_seal="",
+        )
+    )
+    formal_projection = bound_source_fragment_provenance(formal_source)
+    formal_projection["document_content_sha256"] = "b" * 64
+    tampered_fragment = replace(
+        original_fragment,
+        bound_source=formal_source,
+        **formal_projection,
+    )
+    registry = tuple(
+        formal_source if source.source_id == original_source.source_id else source
+        for source in program.registry_sources
+    )
+
+    with pytest.raises(ValueError, match="document_content_sha256"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=(tampered_fragment, *program.source_fragments[1:]),
+            registry_sources=registry,
+            facts=program.facts,
+            sentences=program.sentences,
+        )
+
+
+def test_v2_bridge의_bound_Source는_packet과_program에_정확히_같아야한다() -> None:
+    from src.features.company_comparison.v2_bridge import (
+        attach_comparison_program_evidence,
+    )
+
+    competitive = next(
+        packet
+        for packet in attach_comparison_program_evidence(
+            _v2_packet_set_for_bridge(),
+            _v2_comparison_result(),
+        ).packets
+        if packet.section_id == "competitive_position"
+    )
+    assert competitive.program_evidence is not None
+    program_fragment_ids = {
+        fragment.fragment_id
+        for fragment in competitive.program_evidence.source_fragments
+    }
+    first_program_index = next(
+        index
+        for index, fragment in enumerate(competitive.fragments)
+        if fragment.fragment_id in program_fragment_ids
+    )
+    first_plain_index = next(
+        index
+        for index, fragment in enumerate(competitive.fragments)
+        if fragment.fragment_id not in program_fragment_ids
+    )
+    program_fragment = competitive.fragments[first_program_index]
+    plain_fragment = competitive.fragments[first_plain_index]
+
+    with pytest.raises(ValueError, match="프로그램 근거에 결속"):
+        replace(competitive, program_evidence=None)
+
+    missing = list(competitive.fragments)
+    missing[first_program_index] = replace(program_fragment, bound_source=None)
+    with pytest.raises(ValueError, match="프로그램 원문 조각"):
+        replace(competitive, fragments=tuple(missing))
+
+    extra = list(competitive.fragments)
+    extra[first_plain_index] = replace(
+        plain_fragment,
+        bound_source=program_fragment.bound_source,
+    )
+    with pytest.raises(ValueError, match="프로그램 원문 조각"):
+        replace(competitive, fragments=tuple(extra))
+
+    mismatched = list(competitive.fragments)
+    mismatched[first_program_index] = replace(
+        program_fragment,
+        text=program_fragment.text + " 변조",
+    )
+    with pytest.raises(ValueError, match="프로그램 원문 조각"):
+        replace(competitive, fragments=tuple(mismatched))
+
+
+def test_v2_bridge_program은_unsigned_tampered_registry_Source를_거절한다() -> None:
+    from src.features.company_comparison.v2_bridge import (
+        attach_comparison_program_evidence,
+    )
+    from src.features.composer.port import VerifiedProgramEvidence
+
+    competitive = next(
+        packet
+        for packet in attach_comparison_program_evidence(
+            _v2_packet_set_for_bridge(),
+            _v2_comparison_result(),
+        ).packets
+        if packet.section_id == "competitive_position"
+    )
+    assert competitive.program_evidence is not None
+    program = competitive.program_evidence
+    original_fragment = program.source_fragments[0]
+    original_source = original_fragment.bound_source
+    assert type(original_source) is Source
+
+    unsigned = replace(original_source, provenance_seal="")
+    unsigned_fragment = replace(original_fragment, bound_source=unsigned)
+    unsigned_registry = tuple(
+        unsigned if source.source_id == original_source.source_id else source
+        for source in program.registry_sources
+    )
+    with pytest.raises(ValueError, match="provenance 도장"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=(unsigned_fragment, *program.source_fragments[1:]),
+            registry_sources=unsigned_registry,
+            facts=program.facts,
+            sentences=program.sentences,
+        )
+
+    tampered = replace(original_source, title=original_source.title + " 변조")
+    tampered_fragment = replace(original_fragment, bound_source=tampered)
+    tampered_registry = tuple(
+        tampered if source.source_id == original_source.source_id else source
+        for source in program.registry_sources
+    )
+    with pytest.raises(ValueError, match="provenance 도장"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=(tampered_fragment, *program.source_fragments[1:]),
+            registry_sources=tampered_registry,
+            facts=program.facts,
+            sentences=program.sentences,
+        )
+
+    replacement = seal_collected_source(
+        replace(
+            original_source,
+            title=original_source.title + " 다른 등록부 값",
+            provenance_seal="",
+        )
+    )
+    assert has_valid_provenance_seal(replacement)
+    replacement_registry = tuple(
+        replacement if source.source_id == original_source.source_id else source
+        for source in program.registry_sources
+    )
+    with pytest.raises(ValueError, match="등록부의 봉인 값"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=program.source_fragments,
+            registry_sources=replacement_registry,
+            facts=program.facts,
+            sentences=program.sentences,
+        )
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    (
+        "source_id",
+        "source_type",
+        "source_title",
+        "source_publisher",
+        "source_host",
+        "source_url",
+        "source_document_id",
+        "location",
+        "source_date",
+    ),
+)
+def test_v2_program_Fact대표출처_모든메타는_Source와_정확히같아야한다(
+    field_name: str,
+) -> None:
+    from src.features.composer.port import VerifiedProgramEvidence
+
+    program = _actual_v2_program()
+    fact = program.facts[0]
+    forged = replace(
+        fact,
+        **{field_name: str(getattr(fact, field_name)) + "-FORGED"},
+        evidence_binding="",
+    )
+    forged = replace(forged, evidence_binding=fact_evidence_binding(forged))
+
+    with pytest.raises(ValueError, match="대표 출처 메타데이터"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=program.source_fragments,
+            registry_sources=program.registry_sources,
+            facts=(forged, *program.facts[1:]),
+            sentences=program.sentences,
+        )
+
+
+def test_v2_program은_Source와_fragment를_함께_재봉인해도_Fact위조를_거절한다() -> None:
+    from src.features.composer.port import VerifiedProgramEvidence
+    from src.shared.report_quality.source_identity import (
+        bound_source_fragment_provenance,
+    )
+
+    program = _actual_v2_program()
+    fragment = program.source_fragments[0]
+    source = fragment.bound_source
+    assert type(source) is Source
+    replacement = seal_collected_source(
+        replace(
+            source,
+            title=source.title + "-FORGED",
+            provenance_seal="",
+        )
+    )
+    replacement_fragment = replace(
+        fragment,
+        bound_source=replacement,
+        **bound_source_fragment_provenance(replacement),
+    )
+    replacement_registry = tuple(
+        replacement if item.source_id == source.source_id else item
+        for item in program.registry_sources
+    )
+
+    with pytest.raises(ValueError, match="대표 출처 메타데이터"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=(replacement_fragment, *program.source_fragments[1:]),
+            registry_sources=replacement_registry,
+            facts=program.facts,
+            sentences=program.sentences,
+        )
+
+
+def test_v2_program은_일관되게_재봉인한_nonformal_비공식_Source도_거절한다() -> None:
+    """HMAC·fragment·Fact를 함께 고쳐도 citation 자체가 공식이어야 한다."""
+
+    from src.features.composer.port import VerifiedProgramEvidence
+    from src.shared.report_quality.source_identity import (
+        bound_source_fragment_provenance,
+    )
+
+    program = _actual_v2_program()
+    fragment_index = next(
+        index
+        for index, fragment in enumerate(program.source_fragments)
+        if not fragment.bound_source.formal_source_kind
+    )
+    fragment = program.source_fragments[fragment_index]
+    source = fragment.bound_source
+    assert type(source) is Source
+    replacement = seal_collected_source(
+        replace(source, source_type="", provenance_seal="")
+    )
+    replacement_fragment = replace(
+        fragment,
+        bound_source=replacement,
+        **bound_source_fragment_provenance(replacement),
+    )
+    fragments = list(program.source_fragments)
+    fragments[fragment_index] = replacement_fragment
+    registry = tuple(
+        replacement if item.source_id == source.source_id else item
+        for item in program.registry_sources
+    )
+    facts = []
+    for fact in program.facts:
+        if fact.source_id != source.source_id:
+            facts.append(fact)
+            continue
+        changed = replace(fact, source_type="", evidence_binding="")
+        facts.append(
+            replace(changed, evidence_binding=fact_evidence_binding(changed))
+        )
+
+    with pytest.raises(ValueError, match="citation Source가 공식 출처"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=tuple(fragments),
+            registry_sources=registry,
+            facts=tuple(facts),
+            sentences=program.sentences,
+        )
+
+
+def test_v2_program_sentence인용_세열은_실제fragment순서와_exact여야한다() -> None:
+    from src.features.composer.port import VerifiedProgramEvidence
+    from src.shared.report_quality.source_identity import (
+        bound_source_fragment_provenance,
+    )
+
+    program = _actual_v2_program()
+    target_index = next(
+        index
+        for index, fact in enumerate(program.facts)
+        if len(fact.supporting_source_ids) > 1
+    )
+    fact = program.facts[target_index]
+    source_id = fact.supporting_source_ids[0]
+    fragment_index = next(
+        index
+        for index, fragment in enumerate(program.source_fragments)
+        if fragment.bound_source.source_id == source_id
+    )
+    fragment = program.source_fragments[fragment_index]
+    source = fragment.bound_source
+    assert type(source) is Source
+    second_hash = "f" * 64
+    replacement = seal_collected_source(
+        replace(
+            source,
+            exact_evidence_hashes=[*source.exact_evidence_hashes, second_hash],
+            provenance_seal="",
+        )
+    )
+    replacement_fragment = replace(
+        fragment,
+        bound_source=replacement,
+        **bound_source_fragment_provenance(replacement),
+    )
+    fragments = list(program.source_fragments)
+    fragments[fragment_index] = replacement_fragment
+    registry = tuple(
+        replacement if item.source_id == source.source_id else item
+        for item in program.registry_sources
+    )
+    hashes = list(fact.supporting_evidence_hashes)
+    hashes[0] = second_hash
+    forged_fact = replace(
+        fact,
+        supporting_evidence_hashes=hashes,
+        evidence_binding="",
+    )
+    forged_fact = replace(
+        forged_fact,
+        evidence_binding=fact_evidence_binding(forged_fact),
+    )
+    facts = list(program.facts)
+    facts[target_index] = forged_fact
+
+    with pytest.raises(ValueError, match="공개 문장과 사실·인용 결속"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=tuple(fragments),
+            registry_sources=registry,
+            facts=tuple(facts),
+            sentences=program.sentences,
+        )
+
+
+def test_v2_program은_claim만_바꿔_자기서명한_사실을_거절한다() -> None:
+    from src.features.composer.port import VerifiedProgramEvidence
+    from src.shared.report_quality.comparison_claims import (
+        comparison_context_claim_problems,
+    )
+
+    program = _actual_v2_program()
+    fact = program.facts[0]
+    forged = replace(
+        fact,
+        claim="근거 없이 세계 1위다",
+        evidence_binding="",
+    )
+    forged = replace(forged, evidence_binding=fact_evidence_binding(forged))
+    sentences = tuple(
+        replace(sentence, text=forged.claim)
+        if sentence.verified_fact_id == fact.fact_id
+        else sentence
+        for sentence in program.sentences
+    )
+
+    assert any(
+        "구조 필드의 정본" in problem
+        for problem in comparison_context_claim_problems(forged)
+    )
+    with pytest.raises(ValueError, match="claim·근거어·원문 결속"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=program.source_fragments,
+            registry_sources=program.registry_sources,
+            facts=(forged, *program.facts[1:]),
+            sentences=sentences,
+        )
+
+
+def test_v2_program은_원문단어를_비교법인으로_바꿔_자기서명할수없다() -> None:
+    from src.features.composer.port import VerifiedProgramEvidence
+    from src.shared.comparison_candidate_basis import (
+        comparison_source_candidate_support_terms,
+    )
+    from src.shared.report_quality.comparison_claims import (
+        comparison_context_claim_problems,
+        expected_comparison_context_claim,
+    )
+
+    program = _actual_v2_program()
+    fact_index = next(
+        index
+        for index, fact in enumerate(program.facts)
+        if fact.claim_slot == "competitive_position:comparison_target"
+    )
+    fact = program.facts[fact_index]
+    changed = replace(
+        fact,
+        comparison_target="경쟁",
+        evidence_support_terms=list(
+            comparison_source_candidate_support_terms(fact.state_evidence, "경쟁")
+        ),
+        evidence_binding="",
+    )
+    changed = replace(
+        changed,
+        claim=expected_comparison_context_claim(changed),
+        evidence_binding="",
+    )
+    changed = replace(changed, evidence_binding=fact_evidence_binding(changed))
+    assert comparison_context_claim_problems(changed) == ()
+    facts = list(program.facts)
+    facts[fact_index] = changed
+    sentences = tuple(
+        replace(sentence, text=changed.claim)
+        if sentence.verified_fact_id == fact.fact_id
+        else sentence
+        for sentence in program.sentences
+    )
+
+    with pytest.raises(ValueError, match="비교 대상과 비교사 공식 Source"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=program.source_fragments,
+            registry_sources=program.registry_sources,
+            facts=tuple(facts),
+            sentences=sentences,
+        )
+
+
+def test_v2_program은_비교사_state를_자사원문으로_바꿔_자기서명할수없다() -> None:
+    from src.features.composer.port import VerifiedProgramEvidence
+
+    program = _actual_v2_program()
+    fact_index = next(
+        index
+        for index, fact in enumerate(program.facts)
+        if fact.claim_type == "competitive_comparison"
+    )
+    fact = program.facts[fact_index]
+    changed = replace(
+        fact,
+        comparator_state_evidence=fact.state_evidence,
+        evidence_binding="",
+    )
+    changed = replace(changed, evidence_binding=fact_evidence_binding(changed))
+    facts = list(program.facts)
+    facts[fact_index] = changed
+
+    with pytest.raises(ValueError, match="비교사 state_evidence"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=program.source_fragments,
+            registry_sources=program.registry_sources,
+            facts=tuple(facts),
+            sentences=program.sentences,
+        )
+
+
+def test_v2_program은_DART원문과_다른_비교사원값을_일관재계산해도_거절한다() -> None:
+    from src.features.composer.port import VerifiedProgramEvidence
+    from src.shared.report_quality.comparison_claims import (
+        comparison_profitability_claim,
+    )
+    from src.shared.report_quality.comparison_numeric import (
+        comparison_numeric_problems,
+    )
+
+    program = _actual_v2_program()
+    fact_index = next(
+        index
+        for index, fact in enumerate(program.facts)
+        if fact.comparison_metric == "영업이익률"
+        and fact.claim_type == "competitive_comparison"
+    )
+    fact = program.facts[fact_index]
+    claim = comparison_profitability_claim(
+        comparison_target=fact.comparison_target,
+        difference="7.5",
+        direction="높았다",
+    )
+    changed = replace(
+        fact,
+        raw_value="2000;200;1000;25",
+        claim=claim,
+        display_value="자사 10.0%; 비교사 2.5%; 차이 7.5%p",
+        numeric_checks=[
+            "2000|1|0|2000",
+            "200|1|0|200",
+            "1000|1|0|1000",
+            "25|1|0|25",
+            "200|20|1|10.0",
+            "25|10|1|2.5",
+            "7.5|1|1|7.5",
+        ],
+        evidence_binding="",
+    )
+    changed = replace(changed, evidence_binding=fact_evidence_binding(changed))
+    numeric_problems = comparison_numeric_problems(changed)
+    assert numeric_problems is not None
+    assert "공식 비교 raw 원값이 양사 DART 계정 행의 당기금액과 다릅니다" in numeric_problems
+    facts = list(program.facts)
+    facts[fact_index] = changed
+    sentences = tuple(
+        replace(sentence, text=changed.claim)
+        if sentence.verified_fact_id == fact.fact_id
+        else sentence
+        for sentence in program.sentences
+    )
+
+    with pytest.raises(ValueError, match="DART 계정 행"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=program.source_fragments,
+            registry_sources=program.registry_sources,
+            facts=tuple(facts),
+            sentences=sentences,
+        )
+
+
+def test_v2_program은_실제수치축과_다른_metric맥락을_거절한다() -> None:
+    from src.features.composer.port import VerifiedProgramEvidence
+    from src.shared.report_quality.comparison_claims import (
+        expected_comparison_context_claim,
+    )
+
+    program = _actual_v2_program()
+    fact_index = next(
+        index
+        for index, fact in enumerate(program.facts)
+        if fact.claim_slot == "competitive_position:comparison_metric"
+    )
+    fact = program.facts[fact_index]
+    changed = replace(
+        fact,
+        comparison_metric="매출액·영업이익",
+        evidence_binding="",
+    )
+    changed = replace(
+        changed,
+        claim=expected_comparison_context_claim(changed),
+        evidence_binding="",
+    )
+    changed = replace(changed, evidence_binding=fact_evidence_binding(changed))
+    facts = list(program.facts)
+    facts[fact_index] = changed
+    sentences = tuple(
+        replace(sentence, text=changed.claim)
+        if sentence.verified_fact_id == fact.fact_id
+        else sentence
+        for sentence in program.sentences
+    )
+
+    with pytest.raises(ValueError, match="실제 수치 Fact 지표 집합"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=program.source_fragments,
+            registry_sources=program.registry_sources,
+            facts=tuple(facts),
+            sentences=sentences,
+        )
+
+
+def test_v2_program은_미사용_fragment를_남긴채_대상Fact를_지울수없다() -> None:
+    from src.features.composer.port import VerifiedProgramEvidence
+
+    program = _actual_v2_program()
+    target_fact = next(
+        fact
+        for fact in program.facts
+        if fact.claim_slot == "competitive_position:comparison_target"
+    )
+    facts = tuple(fact for fact in program.facts if fact is not target_fact)
+    sentences = tuple(
+        sentence
+        for sentence in program.sentences
+        if sentence.verified_fact_id != target_fact.fact_id
+    )
+
+    with pytest.raises(ValueError, match="원문 조각이 공개 Fact·문장 인용과 정확히"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=program.source_fragments,
+            registry_sources=program.registry_sources,
+            facts=facts,
+            sentences=sentences,
+        )
+
+
+def test_v2_program은_fact_id만_바꾼_동일수치사실로_분량을_부풀릴수없다() -> None:
+    from src.features.composer.port import VerifiedProgramEvidence
+
+    program = _actual_v2_program()
+    fact = next(
+        item
+        for item in program.facts
+        if item.comparison_metric == "매출 규모"
+        and item.claim_type == "competitive_comparison"
+    )
+    cloned = replace(fact, fact_id=fact.fact_id + "-clone", evidence_binding="")
+    cloned = replace(cloned, evidence_binding=fact_evidence_binding(cloned))
+    sentence = next(
+        item for item in program.sentences if item.verified_fact_id == fact.fact_id
+    )
+    cloned_sentence = replace(sentence, verified_fact_id=cloned.fact_id)
+
+    with pytest.raises(ValueError, match="같은 의미 사실을 중복"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=program.source_fragments,
+            registry_sources=program.registry_sources,
+            facts=(*program.facts, cloned),
+            sentences=(*program.sentences, cloned_sentence),
+        )
+
+
+def _rebind_program_facts(program, facts):
+    rebound = tuple(
+        replace(
+            replace(fact, evidence_binding=""),
+            evidence_binding=fact_evidence_binding(replace(fact, evidence_binding="")),
+        )
+        for fact in facts
+    )
+    claims_by_id = {fact.fact_id: fact.claim for fact in rebound}
+    sentences = tuple(
+        replace(sentence, text=claims_by_id[sentence.verified_fact_id])
+        if sentence.verified_fact_id in claims_by_id
+        else sentence
+        for sentence in program.sentences
+    )
+    return rebound, sentences
+
+
+@pytest.mark.parametrize(
+    ("field_name", "expected_problem"),
+    (
+        ("comparison_target", "비교 대상과 비교사 공식 Source"),
+        ("comparison_metric", "실제 수치 Fact 지표 집합"),
+        ("comparison_definition", "계정 정의"),
+        ("comparison_basis", "비교 후보 basis"),
+        ("comparison_period", "DART의 정확한 계정 행"),
+        ("comparison_scope", "comparison_scope"),
+        ("comparison_judgment", "comparison_judgment"),
+        ("comparison_conditions", "고객·제품·시장 범위"),
+    ),
+)
+def test_v2_program_비교구조_8필드는_공통허위값으로_재봉인해도_거절한다(
+    field_name: str,
+    expected_problem: str,
+) -> None:
+    """같은 거짓값을 여러 Fact에 복사해도 '서로 같음'만으로 통과할 수 없다."""
+
+    from src.features.composer.port import VerifiedProgramEvidence
+    from src.shared.report_quality.comparison_claims import (
+        expected_comparison_context_claim,
+    )
+
+    program = _actual_v2_program()
+    changed_facts = []
+    for fact in program.facts:
+        changes: dict[str, object] = {}
+        if field_name == "comparison_target":
+            changes[field_name] = "경쟁"
+        elif field_name == "comparison_metric":
+            if fact.claim_slot == "competitive_position:comparison_metric":
+                changes[field_name] = "세계시장 점유율"
+        elif field_name == "comparison_definition":
+            if fact.claim_type == "competitive_comparison_context":
+                changes[field_name] = "임의정의"
+                conditions = dict(fact.comparison_conditions)
+                conditions["self_definition"] = "임의정의"
+                conditions["comparator_definition"] = "임의정의"
+                changes["comparison_conditions"] = conditions
+        elif field_name == "comparison_basis":
+            changes[field_name] = "임의 비교 근거"
+        elif field_name == "comparison_period":
+            changes[field_name] = "2024-01-01~2024-12-31"
+            changes["period_start"] = "2024-01-01"
+            changes["period_end"] = "2024-12-31"
+            conditions = dict(fact.comparison_conditions)
+            conditions["self_period"] = "2024-01-01~2024-12-31"
+            conditions["comparator_period"] = "2024-01-01~2024-12-31"
+            changes["comparison_conditions"] = conditions
+        elif field_name == "comparison_scope":
+            changes[field_name] = "별도재무제표(OFS)"
+            conditions = dict(fact.comparison_conditions)
+            conditions["self_accounting_scope"] = "별도재무제표(OFS)"
+            conditions["comparator_accounting_scope"] = "별도재무제표(OFS)"
+            changes["comparison_conditions"] = conditions
+        elif field_name == "comparison_judgment":
+            changes[field_name] = "세계 1위"
+        else:
+            conditions = dict(fact.comparison_conditions)
+            conditions.update(
+                customer="임의고객",
+                product="임의제품",
+                market="임의시장",
+            )
+            changes[field_name] = conditions
+        changed = replace(fact, **changes)
+        if (
+            changed.claim_type == "competitive_comparison_context"
+            and field_name in {"comparison_target", "comparison_metric"}
+        ):
+            expected_claim = expected_comparison_context_claim(changed)
+            if expected_claim:
+                changed = replace(changed, claim=expected_claim)
+        changed_facts.append(changed)
+    facts, sentences = _rebind_program_facts(program, changed_facts)
+
+    with pytest.raises(ValueError, match=expected_problem):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=program.source_fragments,
+            registry_sources=program.registry_sources,
+            facts=facts,
+            sentences=sentences,
+        )
+
+
+def test_v2_program은_허용값이어도_수치의미와_다른_judgment를_거절한다() -> None:
+    from src.features.composer.port import VerifiedProgramEvidence
+
+    program = _actual_v2_program()
+    changed_facts = tuple(
+        replace(fact, comparison_judgment="competitive_advantage")
+        for fact in program.facts
+    )
+    facts, sentences = _rebind_program_facts(program, changed_facts)
+
+    with pytest.raises(ValueError, match="comparison_judgment"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=program.source_fragments,
+            registry_sources=program.registry_sources,
+            facts=facts,
+            sentences=sentences,
+        )
+
+
+def test_v2_program은_정상비교문장_뒤에_근거없는절을_붙일수없다() -> None:
+    from src.features.composer.port import VerifiedProgramEvidence
+
+    program = _actual_v2_program()
+    fact_index = next(
+        index
+        for index, fact in enumerate(program.facts)
+        if fact.claim_type == "competitive_comparison_context"
+    )
+    fact = program.facts[fact_index]
+    forged = replace(
+        fact,
+        claim=fact.claim + " 그러므로 세계 1위다.",
+        evidence_binding="",
+    )
+    forged = replace(forged, evidence_binding=fact_evidence_binding(forged))
+    facts = list(program.facts)
+    facts[fact_index] = forged
+    sentences = tuple(
+        replace(sentence, text=forged.claim)
+        if sentence.verified_fact_id == fact.fact_id
+        else sentence
+        for sentence in program.sentences
+    )
+
+    with pytest.raises(ValueError, match="비교 맥락 문장이 구조 필드의 정본"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=program.source_fragments,
+            registry_sources=program.registry_sources,
+            facts=tuple(facts),
+            sentences=sentences,
+        )
+
+
+def test_v2_program은_claim_state_sentence를_함께_바꾼_자기서명을_거절한다() -> None:
+    from src.features.composer.port import VerifiedProgramEvidence
+
+    program = _actual_v2_program()
+    fact = program.facts[0]
+    forged = replace(
+        fact,
+        claim="근거 없이 세계 1위라고 주장한다",
+        state_evidence="근거 없이 세계 1위라는 조작된 원문",
+        evidence_support_terms=["근거", "세계 1위"],
+        evidence_binding="",
+    )
+    forged = replace(forged, evidence_binding=fact_evidence_binding(forged))
+    sentences = tuple(
+        replace(sentence, text=forged.claim)
+        if sentence.verified_fact_id == fact.fact_id
+        else sentence
+        for sentence in program.sentences
+    )
+
+    with pytest.raises(ValueError, match="state_evidence가 Source 원문 등록부"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=program.source_fragments,
+            registry_sources=program.registry_sources,
+            facts=(forged, *program.facts[1:]),
+            sentences=sentences,
+        )
+
+
+@pytest.mark.parametrize("column", ("ids", "identities", "hashes"))
+def test_v2_program_supporting세열의_extra는_zip으로_숨길수없다(column: str) -> None:
+    from src.features.composer.port import VerifiedProgramEvidence
+
+    program = _actual_v2_program()
+    fact = program.facts[0]
+    changes: dict[str, object] = {}
+    if column == "ids":
+        changes["supporting_source_ids"] = [*fact.supporting_source_ids, "extra"]
+    elif column == "identities":
+        changes["supporting_source_identities"] = [
+            *fact.supporting_source_identities,
+            "url:https://extra.example/",
+        ]
+    else:
+        changes["supporting_evidence_hashes"] = [
+            *fact.supporting_evidence_hashes,
+            "e" * 64,
+        ]
+    forged = replace(fact, **changes, evidence_binding="")
+    forged = replace(forged, evidence_binding=fact_evidence_binding(forged))
+
+    with pytest.raises(ValueError, match="다중 출처 결속"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=program.source_fragments,
+            registry_sources=program.registry_sources,
+            facts=(forged, *program.facts[1:]),
+            sentences=program.sentences,
+        )
+
+
+def test_v2_program_fragment의_문서identity만_바꿔도_즉시_거절한다() -> None:
+    from src.features.composer.port import VerifiedProgramEvidence
+
+    program = _actual_v2_program()
+    forged = replace(
+        program.source_fragments[0],
+        document_identity="url:https://forged.example/other-doc",
+    )
+
+    with pytest.raises(ValueError, match="Source provenance"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=(forged, *program.source_fragments[1:]),
+            registry_sources=program.registry_sources,
+            facts=program.facts,
+            sentences=program.sentences,
+        )
+
+
+def test_v2_program은_같은장_다른slot_fragment로_Fact를_증명할수없다() -> None:
+    from src.features.composer.port import VerifiedProgramEvidence
+
+    program = _actual_v2_program()
+    fact = next(
+        item
+        for item in program.facts
+        if item.claim_slot == "competitive_position:comparison_target"
+    )
+    sentence = next(
+        item for item in program.sentences if item.verified_fact_id == fact.fact_id
+    )
+    fragment_id = sentence.citations[0]
+    fragment_index = next(
+        index
+        for index, item in enumerate(program.source_fragments)
+        if item.fragment_id == fragment_id
+    )
+    forged = replace(
+        program.source_fragments[fragment_index],
+        supported_claim_slots=("competitive_position:comparison_basis",),
+    )
+    fragments = list(program.source_fragments)
+    fragments[fragment_index] = forged
+
+    with pytest.raises(ValueError, match="공개 문장과 사실·인용 결속"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=tuple(fragments),
+            registry_sources=program.registry_sources,
+            facts=program.facts,
+            sentences=program.sentences,
+        )
+
+
+def test_v2_program_registry는_bound_citation과_직접attester로만_닫힌다() -> None:
+    from src.features.composer.port import VerifiedProgramEvidence
+
+    program = _actual_v2_program()
+    citation = next(
+        source for source in program.registry_sources if source.provenance_role == "citation"
+    )
+    attester = next(
+        source
+        for source in program.registry_sources
+        if source.provenance_role == "attestation_only"
+    )
+    unused_citation = seal_collected_source(
+        replace(
+            citation,
+            number=999,
+            source_id="unused-citation",
+            provenance_seal="",
+        )
+    )
+    with pytest.raises(ValueError, match="citation이 실제 인용"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=program.source_fragments,
+            registry_sources=(*program.registry_sources, unused_citation),
+            facts=program.facts,
+            sentences=program.sentences,
+        )
+
+    unused_attester = seal_collected_source(
+        replace(
+            attester,
+            number=998,
+            source_id="unused-attester",
+            provenance_seal="",
+        )
+    )
+    with pytest.raises(ValueError, match="attester가 직접 참조"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=program.source_fragments,
+            registry_sources=(*program.registry_sources, unused_attester),
+            facts=program.facts,
+            sentences=program.sentences,
+        )
+
+    without_attester = tuple(
+        source for source in program.registry_sources if source is not attester
+    )
+    with pytest.raises(ValueError, match="attester가 직접 참조"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=program.source_fragments,
+            registry_sources=without_attester,
+            facts=program.facts,
+            sentences=program.sentences,
+        )
+
+    with pytest.raises(ValueError, match="중복"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=program.source_fragments,
+            registry_sources=(*program.registry_sources, attester),
+            facts=program.facts,
+            sentences=program.sentences,
+        )
+
+
+def test_v2_program의_공식웹_후보는_DART도메인attester를_직접가리켜야한다() -> None:
+    from src.features.composer.port import VerifiedProgramEvidence
+    from src.shared.report_quality.comparison_basis import (
+        comparison_basis_v2_problems,
+    )
+    from src.shared.report_quality.source_identity import (
+        bound_source_fragment_provenance,
+    )
+
+    program = _actual_v2_program()
+    target_fact = next(
+        fact
+        for fact in program.facts
+        if fact.claim_slot == "competitive_position:comparison_target"
+    )
+    fragment_index = next(
+        index
+        for index, fragment in enumerate(program.source_fragments)
+        if fragment.bound_source.source_id == target_fact.source_id
+    )
+    fragment = program.source_fragments[fragment_index]
+    source = fragment.bound_source
+    assert type(source) is Source
+    assert source.kind is SourceKind.OTHER
+    assert source.domain_attestation_source_id
+    unbound_source = seal_collected_source(
+        replace(
+            source,
+            domain_attestation_source_id="",
+            domain_attestation_evidence="",
+            provenance_seal="",
+        )
+    )
+    unbound_fragment = replace(
+        fragment,
+        bound_source=unbound_source,
+        **bound_source_fragment_provenance(unbound_source),
+    )
+    fragments = list(program.source_fragments)
+    fragments[fragment_index] = unbound_fragment
+    registry = tuple(
+        unbound_source if item.source_id == source.source_id else item
+        for item in program.registry_sources
+    )
+    assert "비교 후보의 직접 DART 법인 attester 결속이 다릅니다" in (
+        comparison_basis_v2_problems(
+            program.facts[0],
+            {item.source_id: item for item in registry},
+        )
+    )
+
+    with pytest.raises(ValueError, match="공식 출처 등록부 계약"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=tuple(fragments),
+            registry_sources=registry,
+            facts=program.facts,
+            sentences=program.sentences,
+        )
+
+
+def test_v2_program은_wrong_role과_chained_attester를_거절한다() -> None:
+    from src.features.composer.port import VerifiedProgramEvidence
+    from src.shared.report_quality.source_identity import (
+        bound_source_fragment_provenance,
+    )
+
+    program = _actual_v2_program()
+    fragment = program.source_fragments[0]
+    citation = fragment.bound_source
+    assert type(citation) is Source
+    wrong_role = seal_collected_source(
+        replace(citation, provenance_role="attestation_only", provenance_seal="")
+    )
+    wrong_fragment = replace(
+        fragment,
+        bound_source=wrong_role,
+        **bound_source_fragment_provenance(wrong_role),
+    )
+    wrong_registry = tuple(
+        wrong_role if source.source_id == citation.source_id else source
+        for source in program.registry_sources
+    )
+    with pytest.raises(ValueError, match="citation이 실제 인용"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=(wrong_fragment, *program.source_fragments[1:]),
+            registry_sources=wrong_registry,
+            facts=program.facts,
+            sentences=program.sentences,
+        )
+
+    attester = next(
+        source
+        for source in program.registry_sources
+        if source.provenance_role == "attestation_only"
+    )
+    chained = seal_collected_source(
+        replace(
+            attester,
+            domain_attestation_source_id=attester.source_id,
+            provenance_seal="",
+        )
+    )
+    chained_registry = tuple(
+        chained if source.source_id == attester.source_id else source
+        for source in program.registry_sources
+    )
+    with pytest.raises(ValueError, match="연쇄 참조"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=program.source_fragments,
+            registry_sources=chained_registry,
+            facts=program.facts,
+            sentences=program.sentences,
+        )
+
+
+def test_v2_program_fragment와_Source의_formal상태가_양방향으로_같아야한다() -> None:
+    from src.features.composer.port import VerifiedProgramEvidence
+    from src.shared.report_evidence.constants import SOURCE_KIND_OFFICIAL_WEB_PAGE
+    from src.shared.report_quality.source_identity import (
+        bound_source_fragment_provenance,
+    )
+
+    program = _actual_v2_program()
+    fragment = program.source_fragments[0]
+    source = fragment.bound_source
+    assert type(source) is Source
+
+    fragment_only_formal = replace(
+        fragment,
+        formal_source_kind=SOURCE_KIND_OFFICIAL_WEB_PAGE,
+        source_document_id=source.document_id,
+        source_publisher=source.publisher,
+        identity_binding="typed-binding",
+        source_collected_on=source.collected_at,
+        document_content_sha256="a" * 64,
+    )
+    with pytest.raises(ValueError, match="Source provenance"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=(fragment_only_formal, *program.source_fragments[1:]),
+            registry_sources=program.registry_sources,
+            facts=program.facts,
+            sentences=program.sentences,
+        )
+
+    source_only_formal = seal_collected_source(
+        replace(
+            source,
+            formal_source_kind=SOURCE_KIND_OFFICIAL_WEB_PAGE,
+            identity_binding="typed-binding",
+            document_content_sha256="a" * 64,
+            provenance_seal="",
+        )
+    )
+    source_registry = tuple(
+        source_only_formal if item.source_id == source.source_id else item
+        for item in program.registry_sources
+    )
+    with pytest.raises(ValueError, match="Source provenance"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=(
+                replace(fragment, bound_source=source_only_formal),
+                *program.source_fragments[1:],
+            ),
+            registry_sources=source_registry,
+            facts=program.facts,
+            sentences=program.sentences,
+        )
+
+    invalid_formal_source = seal_collected_source(
+        replace(
+            source_only_formal,
+            source_type="날조된 공식 종류",
+            provenance_seal="",
+        )
+    )
+    invalid_formal_registry = tuple(
+        invalid_formal_source if item.source_id == source.source_id else item
+        for item in program.registry_sources
+    )
+    invalid_formal_fragment = replace(
+        fragment,
+        bound_source=invalid_formal_source,
+        **bound_source_fragment_provenance(invalid_formal_source),
+    )
+    with pytest.raises(ValueError, match="공식 출처 등록부 계약"):
+        VerifiedProgramEvidence(
+            section_id=program.section_id,
+            source_fragments=(invalid_formal_fragment, *program.source_fragments[1:]),
+            registry_sources=invalid_formal_registry,
+            facts=program.facts,
+            sentences=program.sentences,
+        )
+
+
+def test_일반_nonprogram_packet은_bound_Source없이_기존동작을_유지한다() -> None:
+    packets = _v2_packet_set_for_bridge()
+
+    assert all(
+        fragment.bound_source is None
+        for packet in packets.packets
+        for fragment in packet.fragments
+    )
+
+
+def test_v2_bridge의_양사_fact와_source는_실제_renderer와_수치검산까지_간다() -> None:
+    from src.features.company_comparison.v2_bridge import (
+        attach_comparison_program_evidence,
+    )
+    from src.features.composer.constants import SECTION_IDS
+    from src.features.composer.logic import _prepare_section_evidence_packets
+    from src.features.composer.port import ComposedReport, ComposedSection
+    from src.features.composer.quality_projection import _claim_fact
+    from src.features.composer.quality_projection import build_generation_quality_candidate
+    from src.features.composer.public_manifest import (
+        assert_report_matches_public_structure,
+        build_public_structure_seal,
+    )
+    from src.features.composer.render import render_report
+    from src.shared.report_quality.comparison_numeric import (
+        comparison_numeric_problems,
+    )
+    from src.shared.report_quality.assessment import assess_safety
+    from src.shared.report_quality.contract import contract_for_generation
+    from src.shared.report_quality.constants import STRICT_QUALITY_CONTRACT_VERSION
+
+    packet_set = attach_comparison_program_evidence(
+        _v2_packet_set_for_bridge(),
+        _v2_comparison_result(),
+    )
+    prepared = _prepare_section_evidence_packets(packet_set)
+    report = ComposedReport(
+        sections=tuple(
+            ComposedSection(
+                section_id=section_id,
+                sentences=tuple(
+                    prepared.program_evidence_by_section[section_id].sentences
+                    if section_id in prepared.program_evidence_by_section
+                    else ()
+                ),
+            )
+            for section_id in SECTION_IDS
+        )
+    )
+    seal = build_public_structure_seal(
+        report,
+        prepared.flat_union,
+        None,
+        filing_meta=None,
+        composition_tables=(),
+        table_presentation="table",
+        company_id=packet_set.company_id,
+        evidence_generation_sha256=packet_set.evidence_generation_sha256,
+        evidence_packet_sha256s=packet_set.packet_sha256s,
+        company_name="주식회사 알파",
+        corp_type="상장사",
+        generated_at="",
+        as_of_date="",
+        analysis_period="",
+        latest_performance_period="",
+        citation_style="inline",
+        program_registry_sources=prepared.program_sources,
+    )
+    rendered = render_report(
+        "주식회사 알파",
+        report,
+        prepared.flat_union,
+        None,
+        corp_type="상장사",
+        grade=Grade.COMPLETE,
+        citation_style="inline",
+        public_structure_seal=seal,
+        company_id=packet_set.company_id,
+        release_mode="FULL",
+        verified_program_facts=prepared.program_facts,
+        program_registry_sources=prepared.program_sources,
+    )
+    assert_report_matches_public_structure(rendered, seal)
+
+    assert {fact.fact_id for fact in rendered.fact_records} == {
+        fact.fact_id for fact in prepared.program_facts
+    }
+    assert {source.publisher for source in rendered.citations} >= {
+        "주식회사 알파",
+        "주식회사 베타",
+    }
+    numeric = tuple(
+        fact for fact in rendered.fact_records if fact.claim_type == "competitive_comparison"
+    )
+    assert numeric
+    assert all(comparison_numeric_problems(_claim_fact(fact)) == () for fact in numeric)
+    safety = assess_safety(
+        build_generation_quality_candidate(rendered, report),
+        contract_for_generation(STRICT_QUALITY_CONTRACT_VERSION),
+    )
+    assert safety.problems == ()
 
 
 def _v2_english_comparison_result(
@@ -2249,6 +3769,9 @@ def test_v2_parser는_비문자_제어문자_추가필드_전체길이_초과를
     extra = dict(payload)
     extra["unexpected"] = "field"
     variants.append(extra)
+    unicode_digits = dict(payload)
+    unicode_digits["candidate_corp_code"] = "０００００００２"
+    variants.append(unicode_digits)
     variants.append("{" + ("x" * 25_001) + "}")
 
     assert all(

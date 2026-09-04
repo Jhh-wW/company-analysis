@@ -67,14 +67,31 @@ from src.features.pipeline.port import (
 from src.features.provenance.sources import (
     Source,
     SourceKind,
+    bind_document_content_sha256,
+    ensure_dart_profile_attesters,
     evidence_text_hash,
     exact_evidence_text_hash,
+    full_typed_source_registry_problem,
+    has_valid_provenance_seal,
+    is_canonical_official_with_registry,
+    seal_collected_source,
 )
 from src.shared.report_quality.fact_binding import fact_evidence_binding
+from src.shared.report_quality.constants import HISTORICAL_PERFORMANCE_RATE_CLAIM_TYPE
 from src.shared.report_quality.numeric_validation import (
     validate_versioned_numeric_record,
 )
-from src.shared.report_quality.source_identity import document_identity
+from src.shared.report_quality.source_identity import (
+    bind_declared_document_identity_to_url,
+    document_identity,
+    document_identity_components,
+)
+from src.shared.report_evidence.source_kind_policy import (
+    formal_web_public_source_metadata,
+)
+from src.shared.report_evidence.constants import (
+    SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE,
+)
 from src.shared.report_generation.constants import ENGINE_V2_SCHEMA_VERSION
 from src.shared.report_quality.summary_binding import (
     summary_evidence_text,
@@ -149,6 +166,28 @@ class _FragmentMeta:
     #: 홈페이지 조각의 «문서일» — CollectedFragment 어댑터에는 없는 필드라
     #: 원시 dict를 받았을 때만 채워진다 (port.py는 3-1 소유라 손대지 않는다).
     document_date: str = ""
+    #: FULL packet이 봉인한 문서 신원. 공식 웹은 URL, DART는 접수번호와
+    #: URL을 함께 검산한 document identity다.
+    document_identity: str = ""
+    #: FULL typed 수집기가 계산한 문서 전체 원문 지문. 조각 지문으로 다시
+    #: 계산하지 않고 packet의 값을 Source까지 그대로 운반한다.
+    document_content_sha256: str = ""
+    formal_source_kind: str = ""
+    source_document_id: str = ""
+    source_publisher: str = ""
+    identity_binding: str = ""
+    source_collected_on: str = ""
+    domain_attestation_source_id: str = ""
+    domain_attestation_evidence: str = ""
+    reporting_period: str = ""
+    attachment_url: str = ""
+    ir_metadata_verification: str = ""
+    domain_redirect_verification: str = ""
+    domain_redirect_from_host: str = ""
+    domain_redirect_to_host: str = ""
+    #: 비교 생산기가 봉인한 원래 Source. 분석 대상 회사명으로 다시 만들면
+    #: 비교사 공시의 발행 주체가 자사로 바뀌므로 이 경우만 그대로 쓴다.
+    bound_source: object | None = None
     #: 전자공시 절(사업내용·MD&A 등)에서 떠 온 조각인가.
     #: ★ 조각 자체에 «출처»가 비어 있다는 모양 하나로만 정한다 — 종류 이름을
     #:   목록으로 검사하지 않는다(닫힌 목록 게이트 금지).
@@ -196,6 +235,52 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
             document_title=str(getattr(fragment, "document_title", "") or ""),
             location=str(getattr(fragment, "location", "") or ""),
             document_date=str(getattr(fragment, "document_date", "") or ""),
+            document_identity=str(
+                getattr(fragment, "document_identity", "") or ""
+            ).strip(),
+            document_content_sha256=str(
+                getattr(fragment, "document_content_sha256", "") or ""
+            ).strip(),
+            formal_source_kind=str(
+                getattr(fragment, "formal_source_kind", "") or ""
+            ).strip(),
+            source_document_id=str(
+                getattr(fragment, "source_document_id", "") or ""
+            ).strip(),
+            source_publisher=str(
+                getattr(fragment, "source_publisher", "") or ""
+            ).strip(),
+            identity_binding=str(
+                getattr(fragment, "identity_binding", "") or ""
+            ).strip(),
+            source_collected_on=str(
+                getattr(fragment, "source_collected_on", "") or ""
+            ).strip(),
+            domain_attestation_source_id=str(
+                getattr(fragment, "domain_attestation_source_id", "") or ""
+            ).strip(),
+            domain_attestation_evidence=str(
+                getattr(fragment, "domain_attestation_evidence", "") or ""
+            ).strip(),
+            reporting_period=str(
+                getattr(fragment, "reporting_period", "") or ""
+            ).strip(),
+            attachment_url=str(
+                getattr(fragment, "attachment_url", "") or ""
+            ).strip(),
+            ir_metadata_verification=str(
+                getattr(fragment, "ir_metadata_verification", "") or ""
+            ).strip(),
+            domain_redirect_verification=str(
+                getattr(fragment, "domain_redirect_verification", "") or ""
+            ).strip(),
+            domain_redirect_from_host=str(
+                getattr(fragment, "domain_redirect_from_host", "") or ""
+            ).strip(),
+            domain_redirect_to_host=str(
+                getattr(fragment, "domain_redirect_to_host", "") or ""
+            ).strip(),
+            bound_source=getattr(fragment, "bound_source", None),
             from_filing=not str(getattr(fragment, "source_url", "") or ""),
             from_financial_api=str(getattr(fragment, "text", "") or "").startswith(
                 DART_FINANCIAL_API_PREFIX
@@ -224,6 +309,21 @@ def _citation_numbers(metas: Sequence[_FragmentMeta]) -> dict[str, int]:
         numbers[fragment_id] = next_number
         next_number += 1
     return numbers
+
+
+def citation_numbers_for_fragments(
+    fragments: FragmentsInput,
+) -> dict[str, int]:
+    """렌더러가 실제 쓰는 조각 ID→공개 번호 정본을 읽기 전용으로 돌려준다.
+
+    생성 지표가 ``Report.citations`` 전체를 세면 직접 인용하지 않는
+    ``attestation_only`` Source나 프로그램 등록부의 보조 Source까지
+    「인용 조각」으로 부풀린다. 반대로 파이프라인이 번호 매김을 다시 구현하면
+    숫자가 아닌 fragment ID에서 렌더러와 어긋난다. 같은 feature의 이 얇은
+    공개 함수로 번호 정본 하나만 유지한다.
+    """
+
+    return _citation_numbers(_fragment_metas(fragments))
 
 
 # ══════════════════════════════════════════════════════════
@@ -561,15 +661,84 @@ def _build_source(
     exact_evidence_hash = exact_evidence_text_hash(meta.text)
     evidence_hashes = [normalized_evidence_hash] if normalized_evidence_hash else []
     exact_evidence_hashes = [exact_evidence_hash] if exact_evidence_hash else []
-    if meta.from_financial_api:
-        return Source(
+    if meta.bound_source is not None:
+        source = meta.bound_source
+        if (
+            type(source) is not Source
+            or not has_valid_provenance_seal(source)
+            or source.number != number
+            or str(source.number) != meta.fragment_id
+            or exact_evidence_hash not in source.exact_evidence_hashes
+            or document_identity(source) != meta.document_identity
+            or (
+                bool(meta.document_content_sha256)
+                and source.document_content_sha256 != meta.document_content_sha256
+            )
+        ):
+            raise ValueError("프로그램 비교 조각과 봉인 Source 결속이 깨졌습니다")
+        # used_in은 최종 FactRecord에서 계산하는 출고 투영이라
+        # 수집 봉인 payload에서 의도적으로 빠져 있다. 그 필드만
+        # 바꾸면 원래 수집 도장은 그대로 유효하다.
+        return replace(source, used_in=list(dict.fromkeys(used_in)))
+    # formal typed DART는 자기 공시 URL을 이미 갖는다. URL이 있다는 이유만으로
+    # 일반 웹 Source로 바꾸면 접수번호 identity가 사라지고 packet·manifest와
+    # 부록이 서로 다른 문서를 가리킨다. 선언 identity를 URL에서 다시 검산한
+    # 뒤 그 두 값을 Source에 그대로 보존한다.
+    bound_identity = bind_declared_document_identity_to_url(
+        meta.document_identity,
+        meta.source_url,
+    )
+    identity_host, identity_document_id = document_identity_components(
+        bound_identity
+    )
+    formal_web = formal_web_public_source_metadata(
+        source_kind=meta.formal_source_kind,
+        source_url=meta.source_url,
+        company_name=company_name,
+        identity_binding=meta.identity_binding,
+        domain_attestation_source_id=meta.domain_attestation_source_id,
+        domain_attestation_evidence=meta.domain_attestation_evidence,
+        reporting_period=meta.reporting_period,
+        attachment_url=meta.attachment_url,
+        ir_metadata_verification=meta.ir_metadata_verification,
+        domain_redirect_verification=meta.domain_redirect_verification,
+        domain_redirect_from_host=meta.domain_redirect_from_host,
+        domain_redirect_to_host=meta.domain_redirect_to_host,
+    )
+    if identity_host and identity_document_id:
+        source = Source(
+            number=number,
+            kind=SourceKind.FILING,
+            label=_source_label(meta, filing_meta),
+            disclosed_at=meta.document_date,
+            collected_at=meta.source_collected_on,
+            source_id=f"{V2_SOURCE_ID_PREFIX}{meta.fragment_id}",
+            title=meta.document_title,
+            # 공시 내용의 발행 책임 주체는 회사이며 DART는 host로 분리한다.
+            # 수집 DTO의 원자료 publisher와 공개 Source 의미는 같지 않다.
+            publisher=company_name,
+            host=identity_host,
+            url=meta.source_url,
+            document_id=identity_document_id,
+            location=meta.location or meta.kind,
+            source_type="공식 공시",
+            fact_status="공시 실제값",
+            used_in=list(used_in),
+            evidence_hashes=evidence_hashes,
+            exact_evidence_hashes=exact_evidence_hashes,
+            formal_source_kind=meta.formal_source_kind,
+            identity_binding=meta.identity_binding,
+        )
+    elif meta.from_financial_api:
+        source = Source(
             number=number,
             kind=SourceKind.FILING,
             label=DART_FINANCIAL_API_LABEL,
             collected_at=meta.document_date,
             source_id=f"{V2_SOURCE_ID_PREFIX}{meta.fragment_id}",
             title=DART_FINANCIAL_API_LABEL,
-            publisher="금융감독원",
+            # API 운영 주체가 아니라 이 재무 수치를 공시한 회사를 표시한다.
+            publisher=company_name,
             host=DART_FINANCIAL_API_HOST,
             url=DART_FINANCIAL_API_URL,
             document_id=DART_FINANCIAL_API_DOCUMENT_ID,
@@ -580,8 +749,50 @@ def _build_source(
             evidence_hashes=evidence_hashes,
             exact_evidence_hashes=exact_evidence_hashes,
         )
-    if not meta.from_filing:
-        return Source(
+    elif formal_web is not None:
+        source = Source(
+            number=number,
+            kind=SourceKind.OTHER,
+            label=_source_label(meta, filing_meta),
+            collected_at=meta.source_collected_on,
+            published_at=meta.document_date,
+            source_id=f"{V2_SOURCE_ID_PREFIX}{meta.fragment_id}",
+            title=meta.document_title,
+            publisher=company_name,
+            host=formal_web.host,
+            url=meta.source_url,
+            document_id=meta.source_document_id,
+            location=meta.location,
+            source_type=formal_web.source_type,
+            fact_status=(
+                "공식 발행일·보고기간 확정"
+                if formal_web.source_type == "회사 공식 IR"
+                and meta.document_date
+                else "기준일 현재 확인"
+            ),
+            used_in=list(used_in),
+            evidence_hashes=evidence_hashes,
+            exact_evidence_hashes=exact_evidence_hashes,
+            formal_source_kind=formal_web.formal_source_kind,
+            identity_binding=formal_web.identity_binding,
+            domain_attestation_source_id=formal_web.domain_attestation_source_id,
+            domain_attestation_evidence=formal_web.domain_attestation_evidence,
+            reporting_period=formal_web.reporting_period,
+            attachment_url=formal_web.attachment_url,
+            ir_metadata_verification=formal_web.ir_metadata_verification,
+            domain_redirect_verification=formal_web.domain_redirect_verification,
+            domain_redirect_from_host=formal_web.domain_redirect_from_host,
+            domain_redirect_to_host=formal_web.domain_redirect_to_host,
+        )
+    elif meta.formal_source_kind:
+        raise ValueError(
+            "typed 공식 웹의 자료종류·URL·회사 proof가 일치하지 않습니다: "
+            f"kind={meta.formal_source_kind!r}; "
+            f"attestation={bool(meta.domain_attestation_source_id and meta.domain_attestation_evidence)}; "
+            f"ir={bool(meta.reporting_period or meta.attachment_url or meta.ir_metadata_verification)}"
+        )
+    elif not meta.from_filing:
+        source = Source(
             number=number,
             kind=SourceKind.OTHER,
             label=_source_label(meta, filing_meta),
@@ -595,29 +806,62 @@ def _build_source(
             evidence_hashes=evidence_hashes,
             exact_evidence_hashes=exact_evidence_hashes,
         )
-    document_id = filing_meta.document_id if filing_meta is not None else ""
-    return Source(
-        number=number,
-        kind=SourceKind.FILING,
-        label=_source_label(meta, filing_meta),
-        disclosed_at=filing_meta.disclosed_at if filing_meta is not None else "",
-        collected_at=meta.document_date,
-        source_id=f"{V2_SOURCE_ID_PREFIX}{meta.fragment_id}",
-        title=filing_meta.title if filing_meta is not None else "",
-        publisher=company_name,
-        host=DART_DOCUMENT_HOST if document_id else "",
-        url=(
-            DART_DOCUMENT_URL_TEMPLATE.format(document_id=document_id)
-            if document_id
-            else ""
-        ),
-        document_id=document_id,
-        # 어느 절에서 떠 왔는지가 원문 안에서 찾아갈 위치다.
-        location=meta.location or meta.kind,
-        used_in=list(used_in),
-        evidence_hashes=evidence_hashes,
-        exact_evidence_hashes=exact_evidence_hashes,
-    )
+    else:
+        document_id = filing_meta.document_id if filing_meta is not None else ""
+        source = Source(
+            number=number,
+            kind=SourceKind.FILING,
+            label=_source_label(meta, filing_meta),
+            disclosed_at=filing_meta.disclosed_at if filing_meta is not None else "",
+            collected_at=meta.document_date,
+            source_id=f"{V2_SOURCE_ID_PREFIX}{meta.fragment_id}",
+            title=filing_meta.title if filing_meta is not None else "",
+            publisher=company_name,
+            host=DART_DOCUMENT_HOST if document_id else "",
+            url=(
+                DART_DOCUMENT_URL_TEMPLATE.format(document_id=document_id)
+                if document_id
+                else ""
+            ),
+            document_id=document_id,
+            # 어느 절에서 떠 왔는지가 원문 안에서 찾아갈 위치다.
+            location=meta.location or meta.kind,
+            used_in=list(used_in),
+            evidence_hashes=evidence_hashes,
+            exact_evidence_hashes=exact_evidence_hashes,
+        )
+    # v2의 일반 조각 Source는 수집 DTO가 아니라 이 변환 경계에서
+    # 처음 완성된다. 출처의 모든 필드와 원문 해시가 결정된 지금
+    # 봉인해야 저장·재로드에서 한 줄의 누락과 변조를 구분할 수 있다.
+    # 출처 종류별 분기에서 문서 전체 지문을 손으로 복사하지 않는다. 새 Source
+    # 종류가 생겨도 이 단일 경계를 반드시 거쳐 수집 지문을 그대로 봉인한다.
+    source = bind_document_content_sha256(source, meta.document_content_sha256)
+    sealed = seal_collected_source(source)
+    if meta.formal_source_kind:
+        if not sealed.is_canonical_valid:
+            raise ValueError(
+                "FULL typed 출처의 공개 필수 필드가 비었습니다: "
+                f"{meta.formal_source_kind}"
+            )
+        if not has_valid_provenance_seal(sealed):
+            raise ValueError(
+                "FULL typed 출처의 provenance 도장이 손상됐습니다: "
+                f"{meta.formal_source_kind}"
+            )
+        actual_document_identity = document_identity(sealed)
+        if actual_document_identity != meta.document_identity:
+            raise ValueError(
+                "FULL typed 출처의 공개 문서 신원이 packet과 다릅니다: "
+                f"{meta.formal_source_kind}; "
+                f"packet={meta.document_identity!r}; public={actual_document_identity!r}"
+            )
+        if (
+            meta.formal_source_kind
+            == SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE
+            and not is_canonical_official_with_registry(sealed, [sealed])
+        ):
+            raise ValueError("DART sidecar 공식 웹 출처의 공식성 proof가 손상됐습니다")
+    return sealed
 
 
 def _fact_from_structured_sentence(
@@ -669,7 +913,7 @@ def _fact_from_structured_sentence(
         subject_scope=claim.subject_scope,
         relationship_or_action=claim.metric,
         claim=sentence.text.strip(),
-        claim_type="historical_performance_rate",
+        claim_type=HISTORICAL_PERFORMANCE_RATE_CLAIM_TYPE,
         section_owner=section_id,
         time_state="past",
         as_of=as_of_date,
@@ -737,6 +981,8 @@ def render_report(
     public_structure_seal: Optional[PublicStructureSeal] = None,
     company_id: str = "",
     release_mode: str = "",
+    verified_program_facts: Sequence[FactRecord] = (),
+    program_registry_sources: Sequence[Source] = (),
 ) -> Report:
     """검증 끝난 ComposedReport를 웹·PDF 공용 pipeline Report로 바꾼다.
 
@@ -777,19 +1023,52 @@ def render_report(
     meta_by_number = {numbers[meta.fragment_id]: meta for meta in metas}
     metas_by_fragment = {meta.fragment_id: meta for meta in metas}
 
+    program_facts_by_id: dict[str, FactRecord] = {}
+    for fact in verified_program_facts:
+        if (
+            type(fact) is not FactRecord
+            or not fact.fact_id
+            or fact.fact_id in program_facts_by_id
+            or fact.status != "verified"
+            or fact.verification_status != "verified"
+            or fact.evidence_binding != fact_evidence_binding(fact)
+        ):
+            raise ValueError("프로그램 FactRecord 등록부가 손상됐습니다")
+        program_facts_by_id[fact.fact_id] = fact
+
     structured_facts_by_section: dict[str, list[FactRecord]] = {}
     seen_fact_ids: set[str] = set()
     for composed_section in report.sections:
         for sentence in composed_section.sentences:
-            fact = _fact_from_structured_sentence(
-                sentence,
-                section_id=composed_section.section_id,
-                company_name=company_name,
-                as_of_date=as_of_date,
-                metas_by_fragment=metas_by_fragment,
-                numbers=numbers,
-                filing_meta=filing_meta,
-            )
+            fact = None
+            if sentence.verified_fact_id:
+                candidate = program_facts_by_id.get(sentence.verified_fact_id)
+                cited_sources = tuple(
+                    getattr(metas_by_fragment.get(fragment_id), "bound_source", None)
+                    for fragment_id in sentence.citations
+                )
+                if (
+                    candidate is None
+                    or candidate.section_owner != composed_section.section_id
+                    or candidate.claim != sentence.text
+                    or candidate.claim_slot != sentence.planned_claim_slot
+                    or sentence.verification_state != "verified"
+                    or any(type(source) is not Source for source in cited_sources)
+                    or tuple(source.source_id for source in cited_sources)
+                    != tuple(candidate.supporting_source_ids)
+                ):
+                    raise ValueError("프로그램 공개 문장과 비교 FactRecord가 다릅니다")
+                fact = candidate
+            else:
+                fact = _fact_from_structured_sentence(
+                    sentence,
+                    section_id=composed_section.section_id,
+                    company_name=company_name,
+                    as_of_date=as_of_date,
+                    metas_by_fragment=metas_by_fragment,
+                    numbers=numbers,
+                    filing_meta=filing_meta,
+                )
             if fact is None:
                 citation_ids = tuple(
                     dict.fromkeys(
@@ -831,6 +1110,9 @@ def render_report(
             structured_facts_by_section.setdefault(
                 composed_section.section_id, []
             ).append(fact)
+
+    if set(program_facts_by_id) - seen_fact_ids:
+        raise ValueError("프로그램 FactRecord가 공개 본문에 1:1로 실리지 않았습니다")
 
     #: 부록 번호 → 그 번호를 인용한 장 id들 (v3 순서 유지)
     used_sections: dict[int, list[str]] = {}
@@ -1119,6 +1401,34 @@ def render_report(
         for number in sorted(used_sections)
         if number in meta_by_number
     ]
+    citations_by_id = {source.source_id: source for source in citations}
+    used_numbers = {source.number for source in citations}
+    for source in program_registry_sources:
+        if type(source) is not Source or not source.source_id:
+            raise ValueError("프로그램 Source 등록부 형식이 올바르지 않습니다")
+        previous = citations_by_id.get(source.source_id)
+        if previous is not None:
+            if previous != source:
+                raise ValueError("공개 비교 Source가 packet 등록부와 다릅니다")
+            continue
+        if source.number in used_numbers:
+            raise ValueError("프로그램 Source 번호가 공개 부록과 충돌합니다")
+        citations.append(source)
+        citations_by_id[source.source_id] = source
+        used_numbers.add(source.number)
+    complete_registry = ensure_dart_profile_attesters(
+        citations,
+        company_name=company_name,
+    )
+    citations = sorted(complete_registry, key=lambda source: source.number)
+    complete_registry = tuple(citations)
+    for source in complete_registry:
+        if problem := full_typed_source_registry_problem(
+            source,
+            complete_registry,
+            reference_date=as_of_date,
+        ):
+            raise ValueError(f"FULL typed 공개 출처 계약 위반: {problem}")
 
     return Report(
         company=company_name,

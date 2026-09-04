@@ -1,9 +1,8 @@
 """documents/fragments/attempts를 앱 공용 계약 필드 이름의 평범한 자료형으로 바꾼다.
 
-★ ``src.shared.report_evidence``는 여기서 **import하지 않는다** — 앱 공용
-  계약 스키마 객체를 직접 쓰는 것은 ``chapter_evidence``의 몫이다.
-  이 모듈은 필드 «이름»만 계약과 맞춘 dict·list·str·int를 만들 뿐,
-  계약 스키마 자체를 검증하거나 가져오지 않는다.
+★ 앱 공용 계약 스키마 객체는 여기서 만들지 않는다. 다만 수집 문서와
+  Writer 입력을 가르는 단일 정책 함수는 생산자·변환기·소비자가 함께 쓴다.
+  이 모듈은 필드 «이름»만 계약과 맞춘 dict·list·str·int를 만든다.
 ★ 문서의 canonical 본문 문자열은 ``"\\n".join(document.usable_ranges)``로
   정의한다 — ``WideDocumentIdentity.content_sha256``이 이미 이 문자열의
   해시이므로(``wide_collect.py`` 참조) 이 정의가 그 값과 항상 일치한다.
@@ -42,6 +41,10 @@ from src.features.homepage.wide_types import (
     WideDocumentIdentity,
     WideFragment,
 )
+from src.shared.report_evidence.source_kind_policy import (
+    formal_document_is_writer_eligible,
+    formal_document_writer_ineligibility_reason,
+)
 
 
 def to_evidence_mappings(
@@ -58,7 +61,8 @@ def to_evidence_mappings(
             저수준 ``build_fragments``)이 만든 조각을 모두 이어붙인 것.
 
     Returns:
-        ``{"company_id": str, "documents": [...], "fragments": [...], "attempts": [...]}``.
+        ``{"company_id": str, "documents": [...], "fragments": [...],
+        "attempts": [...], "provenance_documents": [...]}``.
         ``company_id``는 ``result.company_id``를 그대로 옮긴 것이고,
         documents가 0건이어도 남는다. 중첩 값은 전부 ``dict``·``list``·
         ``str``·``int``만 쓴다(``tuple``도 ``frozenset``도 없다) — 계약
@@ -68,15 +72,52 @@ def to_evidence_mappings(
         거절당하는 대신, 애초에 내보내지 않는다.
     """
     hashes_by_document = _exact_hashes_by_document(fragments)
+    bindings_by_document = _exact_bindings_by_document(fragments)
+    documents_by_id = {document.document_id: document for document in result.documents}
+    ineligible_fragment_document_ids = sorted(
+        {
+            fragment.document_id
+            for fragment in fragments
+            if fragment.document_id in documents_by_id
+            and not formal_document_is_writer_eligible(
+                documents_by_id[fragment.document_id]
+            )
+        }
+    )
+    if ineligible_fragment_document_ids:
+        raise ValueError(
+            "Writer 자격이 없는 formal 문서에 근거 조각이 붙었습니다: "
+            + ", ".join(ineligible_fragment_document_ids)
+        )
     return {
         "company_id": result.company_id,
         "documents": [
-            _document_mapping(document, hashes_by_document[document.document_id])
+            _document_mapping(
+                document,
+                hashes_by_document[document.document_id],
+                bindings_by_document[document.document_id],
+            )
             for document in result.documents
             if hashes_by_document.get(document.document_id)
         ],
         "fragments": [_fragment_mapping(fragment) for fragment in fragments],
         "attempts": [_attempt_mapping(attempt) for attempt in result.attempts],
+        # 원문을 Writer에 넣지는 않지만, exact URL·문서/hash·수집 proof는
+        # 감사용 별도 차선으로 보존한다. 이 배열은 chapter 후보/packet으로
+        # 합쳐지지 않으며 generation cache 지문에도 들어가지 않는다.
+        "provenance_documents": [
+            _provenance_document_mapping(
+                document,
+                exclusion_reason=(
+                    "writer_ineligible:"
+                    + formal_document_writer_ineligibility_reason(document)
+                    if not formal_document_is_writer_eligible(document)
+                    else "no_exact_evidence"
+                ),
+            )
+            for document in result.documents
+            if not hashes_by_document.get(document.document_id)
+        ],
     }
 
 
@@ -90,6 +131,25 @@ def _exact_hashes_by_document(fragments: tuple[WideFragment, ...]) -> dict[str, 
     for fragment in fragments:
         grouped.setdefault(fragment.document_id, set()).add(fragment.text_sha256)
     return {document_id: sorted(hashes) for document_id, hashes in grouped.items()}
+
+
+def _exact_bindings_by_document(
+    fragments: tuple[WideFragment, ...],
+) -> dict[str, list[dict[str, str]]]:
+    """원문 위치와 hash를 한 쌍으로 묶어 중간 Mapping 변조를 탐지한다."""
+
+    grouped: dict[str, set[tuple[str, str]]] = {}
+    for fragment in fragments:
+        grouped.setdefault(fragment.document_id, set()).add(
+            (fragment.location, fragment.text_sha256)
+        )
+    return {
+        document_id: [
+            {"location": location, "text_sha256": text_sha256}
+            for location, text_sha256 in sorted(bindings)
+        ]
+        for document_id, bindings in grouped.items()
+    }
 
 
 def canonical_text_of(document: WideDocumentIdentity) -> str:
@@ -114,7 +174,9 @@ def range_offsets_of(document: WideDocumentIdentity) -> list[dict[str, int]]:
 
 
 def _document_mapping(
-    document: WideDocumentIdentity, exact_evidence_hashes: list[str]
+    document: WideDocumentIdentity,
+    exact_evidence_hashes: list[str],
+    exact_evidence_bindings: list[dict[str, str]],
 ) -> dict[str, object]:
     return {
         "company_id": document.company_id,
@@ -132,10 +194,55 @@ def _document_mapping(
         "parser_version": document.parser_version,
         "requirement": document.requirement,
         "source_tier": document.source_tier,
+        "domain_attestation_source_id": document.domain_attestation_source_id,
+        "domain_attestation_evidence": document.domain_attestation_evidence,
+        "reporting_period": document.reporting_period,
+        "attachment_url": document.attachment_url,
+        "ir_metadata_verification": document.ir_metadata_verification,
+        "domain_redirect_verification": document.domain_redirect_verification,
+        "domain_redirect_from_host": document.domain_redirect_from_host,
+        "domain_redirect_to_host": document.domain_redirect_to_host,
         #: (계약 generation=7) — 이 문서로 실제 내보내는 fragment의
         #: text_sha256 전체(정렬·중복없음). 호출 시점에 이미 1개 이상임이
         #: 보장된다(``to_evidence_mappings``가 0개인 문서는 애초에 뺀다).
         "exact_evidence_hashes": exact_evidence_hashes,
+        # location을 같은 문서의 다른 구간으로 바꾸고 hash만 재사용하는
+        # 내부 배선 오류를 공식 adapter가 exact 비교할 수 있게 함께 보낸다.
+        "exact_evidence_bindings": exact_evidence_bindings,
+    }
+
+
+def _provenance_document_mapping(
+    document: WideDocumentIdentity,
+    *,
+    exclusion_reason: str,
+) -> dict[str, object]:
+    """Writer 비대상 formal 문서의 원문 없는 감사 envelope."""
+
+    return {
+        "company_id": document.company_id,
+        "document_id": document.document_id,
+        "canonical_url": document.canonical_url,
+        "source_kind": document.source_kind,
+        "publisher": document.publisher,
+        "title": document.title,
+        "published_on": document.published_on,
+        "collected_at": document.collected_at,
+        "content_sha256": document.content_sha256,
+        "identity_binding": document.identity_binding,
+        "collector_version": document.collector_version,
+        "parser_version": document.parser_version,
+        "requirement": document.requirement,
+        "source_tier": document.source_tier,
+        "exclusion_reason": exclusion_reason,
+        "domain_attestation_source_id": document.domain_attestation_source_id,
+        "domain_attestation_evidence": document.domain_attestation_evidence,
+        "reporting_period": document.reporting_period,
+        "attachment_url": document.attachment_url,
+        "ir_metadata_verification": document.ir_metadata_verification,
+        "domain_redirect_verification": document.domain_redirect_verification,
+        "domain_redirect_from_host": document.domain_redirect_from_host,
+        "domain_redirect_to_host": document.domain_redirect_to_host,
     }
 
 

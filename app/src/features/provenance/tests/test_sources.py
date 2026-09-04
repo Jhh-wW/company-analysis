@@ -10,6 +10,9 @@ import hmac
 import json
 
 from src.features.provenance import sources as sources_module
+from src.features.company_comparison.official_sources import (
+    bind_dart_profile_attestation,
+)
 
 import pytest
 
@@ -21,6 +24,7 @@ from src.features.provenance.sources import (
     count_missing_dates,
     evidence_text_hash,
     exact_evidence_text_hash,
+    full_typed_source_registry_problem,
     has_valid_provenance_seal,
     is_canonical_official_with_registry,
     official_domain_attestation_problem,
@@ -33,6 +37,21 @@ from src.features.provenance.sources import (
     stored_sources_seal_problem,
     visible_citations,
 )
+from src.shared.report_evidence.constants import (
+    FORMAL_DOCUMENT_SOURCE_KINDS,
+    OFFICIAL_WEB_SOURCE_KINDS,
+    SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE,
+    SOURCE_KIND_OFFICIAL_IR_PDF,
+    SOURCE_KIND_OFFICIAL_RECRUIT_PAGE,
+)
+from src.shared.report_evidence.identity_verified_web import (
+    build_dart_filing_url_provenance,
+    build_verified_dart_filing_official_web_binding,
+)
+from src.shared.report_evidence.profile_domain_attestation import (
+    build_registered_subdomain_profile_attestation,
+)
+from src.shared.official_ir import IR_METADATA_VERIFICATION_VALUE
 
 
 @pytest.mark.parametrize(
@@ -407,7 +426,9 @@ def test_DART_profile_JSON만_scheme없는_공식host를_안전하게_증명한�
             url=f"https://{website_host}/about",
             document_id="about",
             location="/about",
-            source_type="회사 공식 IR" if redirect_marker else "회사 공식 웹",
+            # apex→www proof는 IR 전용이 아니다. 일반 웹·채용도 같은 수집
+            # redirect 영수증을 타므로 fixture가 IR로 위장해 통과시키지 않는다.
+            source_type="회사 공식 웹",
             fact_status="기준일 현재 확인",
             evidence_hashes=[evidence_text_hash("당사는 장비를 공급한다.")],
             domain_attestation_source_id=attester.source_id,
@@ -421,6 +442,77 @@ def test_DART_profile_JSON만_scheme없는_공식host를_안전하게_증명한�
     )
 
     assert is_canonical_official_with_registry(website, [website, attester]) is expected
+
+
+def test_DART_profile의_실제_하위도메인은_attester_hash와_Source_seal까지_검산한다(
+) -> None:
+    bound = bind_dart_profile_attestation(
+        {},
+        profile={
+            "status": "000",
+            "corp_code": "00126380",
+            "corp_name": "가나다전자",
+            "hm_url": "https://company.example/",
+        },
+        corp_code="00126380",
+        company_name="가나다전자",
+        collected_on="2026-09-04",
+    )
+    assert bound.attester is not None
+    proof = build_registered_subdomain_profile_attestation(
+        bound.attester.domain_attestation_evidence,
+        source_url="https://recruit.company.example/jobs",
+    )
+    source = seal_collected_source(
+        Source(
+            number=1,
+            kind=SourceKind.OTHER,
+            label="가나다전자 채용",
+            collected_at="2026-09-04",
+            source_id="formal-recruit",
+            title="인재 채용",
+            publisher="가나다전자",
+            host="recruit.company.example",
+            url="https://recruit.company.example/jobs",
+            document_id="recruit-jobs",
+            location="채용 본문",
+            source_type="회사 공식 웹",
+            fact_status="기준일 현재 확인",
+            evidence_hashes=[evidence_text_hash("가나다전자는 인재를 채용한다.")],
+            exact_evidence_hashes=[
+                exact_evidence_text_hash("가나다전자는 인재를 채용한다.")
+            ],
+            domain_attestation_source_id=bound.attester.source_id,
+            domain_attestation_evidence=proof,
+            formal_source_kind=SOURCE_KIND_OFFICIAL_RECRUIT_PAGE,
+            identity_binding="DART 기업개황 root의 실제 등록 하위도메인",
+            document_content_sha256="d" * 64,
+        )
+    )
+    registry = (source, bound.attester)
+
+    assert is_canonical_official_with_registry(source, registry)
+    assert full_typed_source_registry_problem(
+        source,
+        registry,
+        reference_date="2026-09-04",
+    ) == ""
+
+    sibling_proof = build_registered_subdomain_profile_attestation(
+        bound.attester.domain_attestation_evidence,
+        source_url="https://jobs.company.example/jobs",
+    )
+    tampered = seal_collected_source(
+        replace(
+            source,
+            domain_attestation_evidence=sibling_proof,
+            provenance_seal="",
+        )
+    )
+    assert not is_canonical_official_with_registry(
+        tampered,
+        (tampered, bound.attester),
+    )
 
 
 def test_declared_official_other_cannot_self_promote_or_swap_to_fake_domain():
@@ -664,6 +756,34 @@ def test_도장이_없거나_어긋난_저장본_출처는_한_줄_사유로_걸
     assert "2번" in stored_sources_seal_problem(
         [sealed, replace(sealed_other, provenance_seal="")]
     )
+
+
+def test_사용장_투영은_수집봉인을_깨지_않지만_출처번호는_깨진다() -> None:
+    """used_in과 number를 구분해 봉인 후 변경의 정본 규칙을 잠근다."""
+
+    source = seal_collected_source(
+        Source(
+            number=1,
+            kind=SourceKind.FILING,
+            label="사업보고서",
+            disclosed_at="2026-03-15",
+            source_id="stored-usage-projection",
+            title="사업보고서",
+            publisher="가나다 주식회사",
+            host="dart.fss.or.kr",
+            url="https://dart.fss.or.kr/dsaf001/main.do?rcpNo=202603150001",
+            document_id="202603150001",
+            location="II. 사업의 내용",
+            source_type="공식 공시",
+            fact_status="실제",
+            evidence_hashes=["a" * 64],
+        )
+    )
+
+    assert has_valid_provenance_seal(
+        replace(source, used_in=["identity", "business_model"])
+    )
+    assert not has_valid_provenance_seal(replace(source, number=2))
 
 
 def test_기본_citation_HMAC은_legacy_payload와_byte_호환이다() -> None:
@@ -947,3 +1067,229 @@ def test_공시일이나_수집일이_하나라도_없으면_누락으로_센다
 def test_뉴스는_공시_날짜_누락_집계에서_빠진다():
     """뉴스의 보도일 검사는 is_valid가 이미 한다 — 이중으로 세지 않는다."""
     assert count_missing_dates([뉴스_출처]) == 0
+
+
+def _formal_verified_web_binding(url: str) -> str:
+    receipt = "20260315000123"
+    provenance = build_dart_filing_url_provenance(
+        company_id="00126380",
+        url=url,
+        source_document_id=f"dart_business_report:{receipt}",
+        source_receipt_no=receipt,
+        source_member_name="covers/homepage.xml",
+        source_location="raw_xml_chars:10-40",
+        source_document_sha256="a" * 64,
+        source_payload_sha256="b" * 64,
+    )
+    return build_verified_dart_filing_official_web_binding(
+        provenance_value=provenance,
+        company_id="00126380",
+        company_name="가나다전자",
+        company_registration_numbers=("123-45-67890",),
+        candidate_url=url,
+        effective_urls=(url,),
+        scope_sha256="c" * 64,
+        scope_allows=lambda candidate: candidate == url,
+        identity_evidence_sha256="d" * 64,
+        matched_name_sha256=hashlib.sha256("가나다전자".encode()).hexdigest(),
+        registration_number_sha256=hashlib.sha256(b"1234567890").hexdigest(),
+    )
+
+
+def _formal_source_registry(source_kind: str) -> tuple[Source, ...]:
+    receipt = "20260315000123"
+    if source_kind not in OFFICIAL_WEB_SOURCE_KINDS:
+        source = seal_collected_source(
+            Source(
+                number=1,
+                kind=SourceKind.FILING,
+                label="2025 사업보고서",
+                disclosed_at="2026-03-15",
+                collected_at="2026-09-04",
+                source_id=f"formal-{source_kind}",
+                title="2025 사업보고서",
+                publisher="가나다전자",
+                host="dart.fss.or.kr",
+                url=(
+                    "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=" + receipt
+                ),
+                document_id=receipt,
+                location="II. 사업의 내용",
+                source_type="공식 공시",
+                fact_status="공시 실제값",
+                evidence_hashes=[evidence_text_hash("공시 원문")],
+                exact_evidence_hashes=[exact_evidence_text_hash("공시 원문")],
+                formal_source_kind=source_kind,
+                identity_binding="typed-dart-company-binding",
+                document_content_sha256="d" * 64,
+            )
+        )
+        return (source,)
+
+    url = (
+        "https://company.example/ir/2026-q2.pdf"
+        if source_kind == SOURCE_KIND_OFFICIAL_IR_PDF
+        else "https://company.example/about"
+    )
+    if source_kind == SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE:
+        source = seal_collected_source(
+            Source(
+                number=1,
+                kind=SourceKind.OTHER,
+                label="회사 공식 홈페이지",
+                collected_at="2026-09-04",
+                source_id="formal-identity-web",
+                title="회사 공식 홈페이지",
+                publisher="가나다전자",
+                host="company.example",
+                url=url,
+                document_id="identity-root",
+                location="본문",
+                source_type="회사 공식 웹",
+                fact_status="기준일 현재 확인",
+                evidence_hashes=[evidence_text_hash("공식 홈페이지 원문")],
+                exact_evidence_hashes=[exact_evidence_text_hash("공식 홈페이지 원문")],
+                formal_source_kind=source_kind,
+                identity_binding=_formal_verified_web_binding(url),
+                document_content_sha256="d" * 64,
+            )
+        )
+        return (source,)
+
+    profile_evidence = json.dumps(
+        {
+            "corp_code": "00126380",
+            "corp_name": "가나다전자",
+            "hm_url": "https://company.example/",
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    attestation_result = bind_dart_profile_attestation(
+        {},
+        profile={
+            "status": "000",
+            "corp_code": "00126380",
+            "corp_name": "가나다전자",
+            "hm_url": "https://company.example/",
+        },
+        corp_code="00126380",
+        company_name="가나다전자",
+        collected_on="2026-09-04",
+    )
+    assert attestation_result.attester is not None
+    attester = seal_collected_source(
+        replace(
+            attestation_result.attester,
+            number=30,
+            provenance_seal="",
+        )
+    )
+    assert attester.domain_attestation_evidence == profile_evidence
+    is_ir = source_kind == SOURCE_KIND_OFFICIAL_IR_PDF
+    source = seal_collected_source(
+        Source(
+            number=1,
+            kind=SourceKind.OTHER,
+            label="회사 공식 자료",
+            collected_at="2026-09-04",
+            published_at="2026-08-20" if is_ir else "",
+            source_id=f"formal-{source_kind}",
+            title="회사 공식 자료",
+            publisher="가나다전자",
+            host="company.example",
+            url=url,
+            document_id=f"{source_kind}:document",
+            location="본문",
+            source_type="회사 공식 IR" if is_ir else "회사 공식 웹",
+            fact_status="공식 발행일·보고기간 확정" if is_ir else "기준일 현재 확인",
+            evidence_hashes=[evidence_text_hash("회사 공식 원문")],
+            exact_evidence_hashes=[exact_evidence_text_hash("회사 공식 원문")],
+            domain_attestation_source_id=attester.source_id,
+            domain_attestation_evidence=profile_evidence,
+            reporting_period="2026-Q2" if is_ir else "",
+            ir_metadata_verification=(
+                IR_METADATA_VERIFICATION_VALUE if is_ir else ""
+            ),
+            attachment_url=url if is_ir else "",
+            formal_source_kind=source_kind,
+            identity_binding="DART 기업개황 홈페이지 주소(root)",
+            document_content_sha256="d" * 64,
+        )
+    )
+    return (source, attester)
+
+
+@pytest.mark.parametrize("source_kind", sorted(FORMAL_DOCUMENT_SOURCE_KINDS))
+def test_formal_전종류_Source가_같은_등록부_계약과_seal을_통과한다(
+    source_kind: str,
+) -> None:
+    registry = _formal_source_registry(source_kind)
+
+    assert full_typed_source_registry_problem(
+        registry[0], registry, reference_date="2026-09-04"
+    ) == ""
+
+
+@pytest.mark.parametrize("source_kind", sorted(FORMAL_DOCUMENT_SOURCE_KINDS))
+def test_formal_전종류의_전체문서지문은_삭제하거나_바꾸면_등록부에서_막힌다(
+    source_kind: str,
+) -> None:
+    registry = _formal_source_registry(source_kind)
+    source = registry[0]
+
+    changed = replace(source, document_content_sha256="e" * 64)
+    assert not has_valid_provenance_seal(changed)
+    assert full_typed_source_registry_problem(
+        changed,
+        (changed, *registry[1:]),
+        reference_date="2026-09-04",
+    )
+
+    removed = seal_collected_source(
+        replace(source, document_content_sha256="", provenance_seal="")
+    )
+    assert has_valid_provenance_seal(removed)
+    assert not removed.is_canonical_valid
+    assert full_typed_source_registry_problem(
+        removed,
+        (removed, *registry[1:]),
+        reference_date="2026-09-04",
+    )
+
+    padded = seal_collected_source(
+        replace(
+            source,
+            document_content_sha256=f" {'d' * 64} ",
+            provenance_seal="",
+        )
+    )
+    assert not padded.is_canonical_valid
+    assert full_typed_source_registry_problem(
+        padded,
+        (padded, *registry[1:]),
+        reference_date="2026-09-04",
+    )
+
+
+@pytest.mark.parametrize("source_kind", sorted(FORMAL_DOCUMENT_SOURCE_KINDS))
+def test_formal_전종류는_의미필드를_바꿔_재봉인해도_등록부_검증에서_막힌다(
+    source_kind: str,
+) -> None:
+    registry = _formal_source_registry(source_kind)
+    source = registry[0]
+    if source_kind not in OFFICIAL_WEB_SOURCE_KINDS:
+        tampered = replace(source, source_type="회사 공식 웹")
+    elif source_kind == SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE:
+        tampered = replace(source, publisher="다른회사")
+    elif source_kind == SOURCE_KIND_OFFICIAL_IR_PDF:
+        tampered = replace(source, ir_metadata_verification="forged")
+    else:
+        tampered = replace(source, domain_attestation_evidence="변조된 근거")
+    tampered = seal_collected_source(replace(tampered, provenance_seal=""))
+    tampered_registry = (tampered, *registry[1:])
+
+    assert full_typed_source_registry_problem(
+        tampered, tampered_registry, reference_date="2026-09-04"
+    )

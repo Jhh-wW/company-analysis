@@ -45,6 +45,9 @@ def make_pipeline() -> object:
     """환경변수로 데모 또는 실제 조사 파이프라인을 고른다."""
     if os.environ.get(PIPELINE_ENV, "").strip().lower() == PIPELINE_REAL:
         from src.features.pipeline.real import RealPipeline  # noqa: PLC0415
+        from src.web.official_evidence_adapter import (  # noqa: PLC0415
+            ProductionOfficialEvidenceCollector,
+        )
 
         if evaluation_mode.enabled() and not evaluation_mode.paid_providers_enabled():
             logger.info(
@@ -56,7 +59,9 @@ def make_pipeline() -> object:
             )
         else:
             logger.warning("★ 진짜 파이프라인으로 돕니다 — AI 호출마다 비용이 발생합니다.")
-        return RealPipeline()
+        return RealPipeline(
+            official_evidence_collector=ProductionOfficialEvidenceCollector()
+        )
     return DemoPipeline()
 
 

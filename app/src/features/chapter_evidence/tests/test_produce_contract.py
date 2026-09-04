@@ -89,6 +89,7 @@ def test_다른_회사_문서는_한_건도_섞이지_않는다() -> None:
         assert "frag-foreign" not in {
             fragment.fragment_id for fragment in candidate.fragments
         }
+        assert "document_company_mismatch:1" in candidate.reason_codes
 
 
 def test_다른_회사_조각은_회사식별자_결속확인으로_걸러진다() -> None:

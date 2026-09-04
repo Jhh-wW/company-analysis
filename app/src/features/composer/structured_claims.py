@@ -509,7 +509,11 @@ def build_past_changes_numeric_claims(
         # claim_slot은 사실의 고유 번호가 아니라 원자 주장 범주다. 지표·기간을
         # 끼워 넣은 동적 문자열은 닫힌 9장 정책을 어기고, 검사기와 생성기의
         # 계약을 서로 다르게 만든다. 사실별 고유성은 아래 fact_id가 맡는다.
-        claim_slot = "past_changes:cumulative_change"
+        # 필수 의미칸 정책은 3개년 실적 구조화 검증기가
+        # ``past_changes:historical_performance``를 주입한다고 약속한다.
+        # 여기서 별도 ``cumulative_change``로 내면 표와 계산은 정상이어도
+        # FULL 사전/최종 게이트가 서로 다른 계약을 보게 된다.
+        claim_slot = "past_changes:historical_performance"
         operands = (
             NumericOperand(
                 role="start",

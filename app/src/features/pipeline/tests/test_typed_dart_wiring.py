@@ -97,7 +97,12 @@ class _TypedDartFakeEngine(FakeEngine):
         return super().get_json(endpoint, params, counter)
 
     def download_document(
-        self, rcept_no: str, raw_dir: Any, counter: Any
+        self,
+        rcept_no: str,
+        raw_dir: Any,
+        counter: Any,
+        *,
+        require_official_url_sidecar: bool = False,
     ) -> pathlib.Path:
         self.document_calls.append(rcept_no)
         from features.evidence_collection.tests.fixtures import (  # noqa: PLC0415
@@ -108,7 +113,10 @@ class _TypedDartFakeEngine(FakeEngine):
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"{rcept_no}.xml"
         path.write_text(
-            synthetic_documents.LISTED_BUSINESS_REPORT_TEXT, encoding="utf-8"
+            "<DOCUMENT>\n"
+            + synthetic_documents.LISTED_BUSINESS_REPORT_TEXT
+            + "\n</DOCUMENT>",
+            encoding="utf-8",
         )
         return path
 

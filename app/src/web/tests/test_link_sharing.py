@@ -30,7 +30,7 @@ from src.features.pipeline.demo import DemoPipeline
 from src.features.pipeline.port import Grade, Outcome, Report
 from src.features.report_standard import CANONICAL_SECTION_IDS
 from src.shared import engine_build_identity as build_identity_contract
-from src.web import main
+from src.web import main, report_delivery_adapter
 from src.web import job_runtime, runtime
 from src.web.routers import reports as reports_router
 from src.web.tests._visible_text import visible_text
@@ -135,20 +135,9 @@ def test_보고서_HTML은_form_Origin을_보존하는_same_origin정책이다(c
 
 
 def test_내려받기에도_같은_보호가_걸린다(
-    client: TestClient, approved_pdf_route
+    client: TestClient,
 ):
     job_id = _보고서를_만든다(client)
-    report = job_runtime._JOBS[job_id].result.report
-    assert report is not None
-    reports_router.finalize_new_report_delivery(
-        report_id=job_id,
-        corp_id="link-sharing-pdf-corp",
-        billing_bucket_id="public",
-        report=report,
-        actual_models=("deterministic-demo",),
-        reused_from_cache=False,
-        engine_build_identity=build_identity_contract.process_engine_build_identity(),
-    )
 
     response = client.get(f"/download/pdf/{job_id}")
     headers = response.headers
@@ -188,20 +177,30 @@ def test_삭제한_공유와_내려받기_설명이_화면에_없다(client: Tes
 def test_기간이_지난_링크는_안_열린다(client: TestClient, monkeypatch):
     """★ 기간이 지난 링크는 안 열린다."""
     job_id = _보고서를_만든다(client)
-    지난뒤 = dt.date.today() + dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS + 1)
-    monkeypatch.setattr(job_runtime.link_expiry, "is_expired", lambda *a, **k: True)
+    stored = report_delivery_adapter.load_public_delivery(job_id)
+    assert stored is not None
+    monkeypatch.setattr(
+        reports_router.clock,
+        "now_kst",
+        lambda: stored.delivery.expires_at + dt.timedelta(seconds=1),
+    )
 
     response = client.get(f"/result/{job_id}")
 
     assert response.status_code == 410, "410 Gone = 「있었는데 이제 없다」"
     assert "기간이 지난" in response.text
-    del 지난뒤
 
 
 def test_기간이_지나면_내려받기도_막힌다(client: TestClient, monkeypatch):
     """★ 화면만 막고 파일을 열어 두면 막은 게 아니다."""
     job_id = _보고서를_만든다(client)
-    monkeypatch.setattr(job_runtime.link_expiry, "is_expired", lambda *a, **k: True)
+    stored = report_delivery_adapter.load_public_delivery(job_id)
+    assert stored is not None
+    monkeypatch.setattr(
+        reports_router.clock,
+        "now_kst",
+        lambda: stored.delivery.expires_at + dt.timedelta(seconds=1),
+    )
 
     for path in (f"/download/{job_id}", f"/download/pdf/{job_id}"):
         response = client.get(path)
@@ -212,7 +211,13 @@ def test_기간이_지나면_내려받기도_막힌다(client: TestClient, monke
 def test_만료_화면이_막다른_길이_아니다(client: TestClient, monkeypatch):
     """★ 「없는 보고서」로 보이면 사용자는 자기가 잘못 왔다고 생각한다."""
     job_id = _보고서를_만든다(client)
-    monkeypatch.setattr(job_runtime.link_expiry, "is_expired", lambda *a, **k: True)
+    stored = report_delivery_adapter.load_public_delivery(job_id)
+    assert stored is not None
+    monkeypatch.setattr(
+        reports_router.clock,
+        "now_kst",
+        lambda: stored.delivery.expires_at + dt.timedelta(seconds=1),
+    )
 
     text = client.get(f"/result/{job_id}").text
 

@@ -27,7 +27,7 @@ import threading
 import time
 import urllib.parse
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Final, Iterable, Optional
@@ -55,7 +55,6 @@ from src.core.constants import (
     EMPTY_REASON_NO_MATERIAL,
     HOMEPAGE_GATE_CELLS,
     MAX_AI_CALLS_PER_REQUEST,
-    REVENUE_CITE,
     SUBSTANCE_FAILED_REASON,
     TABLE_DUMP_REASON,
     VOTE_ROUNDS,
@@ -70,6 +69,9 @@ from src.features.company_specificity.logic import (
 )
 from src.features.company_comparison import (
     ComparisonBlockedError,
+    ComparisonSourceConfigurationError,
+    ComparisonSourceInternalError,
+    ComparisonSourceTransientError,
     OfficialCompanyBundle,
     build_competitive_position,
 )
@@ -81,6 +83,7 @@ from src.features.company_comparison.official_sources import (
     OfficialCandidateSentence,
     bind_dart_profile_attestation,
     candidate_sentences_from_fragments,
+    dart_profile_attestation_material,
     register_candidate_sentence_evidence,
 )
 from src.features.business_candidate.dart_identity import (
@@ -109,10 +112,33 @@ from src.features.spanselect.constants import (
 )
 from src.shared.official_ir import verified_official_ir_fragment_is_usable
 from src.shared import engine_build_identity, generation_coordination
+from src.shared.company_identity import normalize_korean_registration_number
 from src.shared.generation_cache_identity import GenerationCacheNamespace
 from src.shared.report_source_identity import ReportSourceIdentity
 from src.shared.report_generation.constants import ENGINE_V2_SCHEMA_VERSION
-from src.shared.report_evidence.constants import ReleaseMode
+from src.shared.report_evidence.constants import (
+    CollectionState,
+    ReleaseMode,
+    SOURCE_KIND_OFFICIAL_IR_PDF,
+    SOURCE_KIND_OFFICIAL_RECRUIT_PAGE,
+    SOURCE_KIND_OFFICIAL_WEB_PAGE,
+)
+from src.shared.report_evidence.date_normalization import (
+    normalize_official_source_date,
+)
+from src.shared.report_evidence.runtime_port import (
+    OfficialEvidenceCollectionRequest,
+    OfficialEvidenceCollectionResult,
+    OfficialEvidenceCollector,
+)
+from src.shared.report_evidence.legacy_fragment_kinds import (
+    LEGACY_KIND_REVENUE_AND_ORDERS,
+)
+from src.shared.revenue_table_provenance import (
+    revenue_row_evidence_matches,
+    revenue_table_axis_matches,
+    revenue_table_source_excerpt,
+)
 from src.shared.report_evidence.release_mode import (
     REPORT_RELEASE_MODE_ENV_NAME,
     parse_release_mode,
@@ -130,6 +156,21 @@ from src.features.grading.logic import is_accounting_policy, is_table_dump
 from src.features.cost_tracking.store import AiCostEvent
 from src.features.pipeline.constants import ANTHROPIC_TIMEOUT_SEC, DART_SUCCESS_STATUS
 from src.features.pipeline import engine_mode
+from src.features.pipeline.evidence_transport import (
+    EvidenceTransportError,
+    build_section_evidence_packet_set,
+)
+from src.features.pipeline.comparison_transport import (
+    build_typed_comparison_candidate_inputs,
+)
+from src.features.pipeline.official_evidence_preflight import (
+    OfficialEvidencePreflight,
+    assess_official_evidence,
+    assess_packet_document_sources,
+)
+from src.features.pipeline.official_evidence_transport_adapter import (
+    merge_official_evidence_fragments,
+)
 from src.features.pipeline.port import (
     CompanyCard,
     CompanyLookupResult,
@@ -172,11 +213,19 @@ from src.features.spanselect.canonical import (
     select_canonical_spans,
 )
 from src.shared.final_gate_diagnostics import (
+    FINAL_GATE_DETAIL_EVIDENCE_MANIFEST_BINDING_INVALID,
+    FINAL_GATE_DETAIL_PREFLIGHT_PACKET_INVALID,
+    FINAL_GATE_DETAIL_PUBLIC_MANIFEST_BINDING_INVALID,
     FINAL_GATE_REASON_COMPARISON_BLOCKED,
+    FINAL_GATE_REASON_EVIDENCE_CLASSIFICATION_UNDETERMINED,
+    FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
     FINAL_GATE_REASON_MISSING_IDENTITY,
     FINAL_GATE_REASON_MISSING_IDENTITY_REVENUE,
     FINAL_GATE_REASON_MISSING_REVENUE,
     FINAL_GATE_REASON_OTHER_GATE,
+    FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT,
+    FINAL_GATE_REASON_OFFICIAL_EVIDENCE_CONFIGURATION,
+    FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT,
     FINAL_GATE_REASON_PUBLISH_BLOCKED,
     FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR,
     classify_v2_validation_final_gate_reason,
@@ -210,6 +259,13 @@ _FINAL_GATE_REASON_KO: Final[dict[str, str]] = {
     FINAL_GATE_REASON_MISSING_IDENTITY_REVENUE: (
         "정체성·수익 구조 필수 사실 미확보"
     ),
+    FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT: "공식 자료의 필수 근거 부족",
+    FINAL_GATE_REASON_OFFICIAL_EVIDENCE_CONFIGURATION: "공식 자료 접근 설정 오류",
+    FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT: "공식 자료 확인 중 일시 장애",
+    FINAL_GATE_REASON_EVIDENCE_CLASSIFICATION_UNDETERMINED: (
+        "공식 자료 의미 자동 확인 불확정"
+    ),
+    FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT: "내부 근거 연결 오류",
     FINAL_GATE_REASON_OTHER_GATE: "출고 전 자동 검증",
 }
 
@@ -1041,6 +1097,60 @@ def _engine() -> Any:
     return _load_isolated_engine_module(root / "tools" / "run_pilot.py")
 
 
+def _exception_chain(error: BaseException) -> tuple[BaseException, ...]:
+    """예외 문자열을 읽지 않고 cause/context 체인을 한 번만 순회한다."""
+
+    chain: list[BaseException] = []
+    current: BaseException | None = error
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    return tuple(chain)
+
+
+def _has_dart_error_type(error: BaseException, *class_names: str) -> bool:
+    """분석 엔진의 닫힌 DART 예외 자료형만 이름·모듈 신원으로 확인한다."""
+
+    expected = frozenset(class_names)
+    return any(
+        type(item).__module__ == "core.dart_client"
+        and type(item).__name__ in expected
+        for item in _exception_chain(error)
+    )
+
+
+def _comparison_source_failure_is_configuration(error: BaseException) -> bool:
+    """운영자가 인증키·권한을 고쳐야 하는 실패인지 판정한다."""
+
+    return any(
+        isinstance(item, ComparisonSourceConfigurationError)
+        for item in _exception_chain(error)
+    ) or _has_dart_error_type(error, "DartAuthenticationError")
+
+
+def _comparison_source_failure_is_transient(error: BaseException) -> bool:
+    """재시도로 회복 가능한 DART 운영 장애만 분리한다.
+
+    분석 엔진은 의존성 지연 로딩 때문에 앱 모듈에서 정적으로 import할 수 없다.
+    그래서 예외 문구(바뀔 수 있고 URL·응답을 포함할 수도 있음)가 아니라, 이미
+    로드된 실제 닫힌 예외 자료형을 모듈·클래스 신원으로 확인한다. 인증 실패는
+    설정 오류이고 일반 ``DartClientError`` 파생은 미등록 내부 오류이므로 이
+    함수가 참으로 만들지 않는다.
+    """
+
+    return any(
+        isinstance(item, ComparisonSourceTransientError)
+        for item in _exception_chain(error)
+    ) or _has_dart_error_type(
+        error,
+        "DartLimitReached",
+        "DartTransportError",
+        "DartResponseError",
+    )
+
+
 @lru_cache(maxsize=1)
 def _company_catalog() -> tuple[tuple[str, str], ...]:
     """전자공시 전체 법인의 기존 (고유번호, 표시명) 호환 목록.
@@ -1447,6 +1557,135 @@ def _first_fragment_cite(
     return ""
 
 
+class RevenueTableEvidenceBindingError(ValueError):
+    """매출 구성표와 그 표가 나온 공시 원문을 하나로 묶지 못했다."""
+
+
+def _bind_revenue_table_evidence_fragments(
+    frags: dict[int, dict[str, object]],
+    revenue_tables: list[dict[str, Any]],
+    *,
+    filing: Optional[dict[str, Any]],
+    filing_text: str,
+) -> tuple[dict[int, dict[str, object]], list[dict[str, Any]]]:
+    """표마다 정확한 원문 표 전체를 전용 숫자 인용 조각으로 붙인다.
+
+    ``revenuemix``가 행별로 보존한 원문 범위가 정본이다. 기존 ``매출수주``
+    조각의 첫 번호를 모든 표에 재사용하면 그 조각 안에 실제 표 행이 없을 수
+    있으므로, 제품별·지역별 표마다 excerpt를 자르거나 정규화하지 않고 별도
+    조각으로 보존한다. 어느 표라도 행 근거·문서 신원을 잃으면 조용히 표만
+    버리지 않고 작성기 호출 전에 내부 계약 오류로 닫는다.
+    """
+
+    merged: dict[int, dict[str, object]] = {
+        int(number): dict(raw) for number, raw in frags.items()
+    }
+    if not revenue_tables:
+        return merged, []
+
+    if type(filing_text) is not str or not filing_text:
+        raise RevenueTableEvidenceBindingError(
+            "매출 구성표를 실제 공시 원문에 다시 결속할 수 없습니다"
+        )
+
+    filing_raw = filing or {}
+    document_id = str(filing_raw.get("rcept_no") or "").strip()
+    if _RCEPT_NO_RE.fullmatch(document_id) is None:
+        raise RevenueTableEvidenceBindingError(
+            "매출 구성표의 공시 문서 식별자를 확인할 수 없습니다"
+        )
+    raw_document_date = str(filing_raw.get("rcept_dt") or "").strip()
+    document_date = (
+        f"{raw_document_date[:4]}-{raw_document_date[4:6]}-{raw_document_date[6:8]}"
+        if re.fullmatch(r"\d{8}", raw_document_date)
+        else ""
+    )
+    document_title = str(filing_raw.get("report_nm") or "").strip()
+
+    bound_tables: list[dict[str, Any]] = []
+    for table_index, raw_table in enumerate(revenue_tables, start=1):
+        if not isinstance(raw_table, dict):
+            raise RevenueTableEvidenceBindingError(
+                "매출 구성표 transport가 Mapping이 아닙니다"
+            )
+        raw_evidence_rows = raw_table.get("evidence_rows")
+        if not isinstance(raw_evidence_rows, (list, tuple)) or not raw_evidence_rows:
+            raise RevenueTableEvidenceBindingError(
+                "매출 구성표의 행별 원문 근거가 비었습니다"
+            )
+        evidence_rows = tuple(raw_evidence_rows)
+        if any(type(value) is not str for value in evidence_rows):
+            raise RevenueTableEvidenceBindingError(
+                "매출 구성표의 행별 원문 근거 형식이 올바르지 않습니다"
+            )
+        excerpt = revenue_table_source_excerpt(evidence_rows)
+        if not excerpt or excerpt != excerpt.strip():
+            raise RevenueTableEvidenceBindingError(
+                "매출 구성표의 원문 범위와 행 근거가 일치하지 않습니다"
+            )
+        if not revenue_table_axis_matches(
+            axis=raw_table.get("axis"),
+            caption=raw_table.get("caption"),
+            evidence_rows=evidence_rows,
+            cited_source_text=excerpt,
+        ):
+            raise RevenueTableEvidenceBindingError(
+                "매출 구성표의 구분축·표제·원문 범위가 일치하지 않습니다"
+            )
+        headers = raw_table.get("headers")
+        rows = raw_table.get("rows")
+        raw_rows = raw_table.get("raw_rows")
+        if (
+            not isinstance(headers, (list, tuple))
+            or not isinstance(rows, (list, tuple))
+            or not isinstance(raw_rows, (list, tuple))
+            or len(rows) != len(raw_rows)
+            or len(rows) != len(evidence_rows)
+            or len(rows) < 3
+        ):
+            raise RevenueTableEvidenceBindingError(
+                "매출 구성표의 공개 행과 원문 행 수가 일치하지 않습니다"
+            )
+        expected_row_count = len(rows) - 1
+        if any(
+            not revenue_row_evidence_matches(
+                evidence,
+                cited_source_text=excerpt,
+                filing_text=filing_text,
+                headers=headers,
+                public_row=rows[row_index],
+                raw_row=raw_rows[row_index],
+                expected_selected_index=row_index,
+                expected_row_count=expected_row_count,
+            )
+            for row_index, evidence in enumerate(evidence_rows)
+        ):
+            raise RevenueTableEvidenceBindingError(
+                "매출 구성표의 공개 값·원문 행·공시 범위가 일치하지 않습니다"
+            )
+
+        fragment_number = max(merged, default=0) + 1
+        caption = str(raw_table.get("caption") or "").strip()
+        merged[fragment_number] = {
+            "종류": LEGACY_KIND_REVENUE_AND_ORDERS,
+            "원문": excerpt,
+            "문서ID": document_id,
+            "문서명": document_title,
+            "문서일": document_date,
+            "원문위치": f"매출 구성 원문 표 {table_index} · {caption}".rstrip(" ·"),
+        }
+        table = copy.deepcopy(raw_table)
+        # ``axis``는 원문 근거를 검증하기 위한 transport 전용 값이다. 검증 뒤
+        # V1 공개 ReportTable 스키마에는 넘기지 않아 기존 출력 계약을 지킨다.
+        table.pop("axis", None)
+        table["cite"] = (
+            f"조각 {fragment_number}·{LEGACY_KIND_REVENUE_AND_ORDERS}"
+        )
+        bound_tables.append(table)
+
+    return merged, bound_tables
+
+
 def _used_citation_numbers(sections: list[ReportSection]) -> set[int]:
     """최종 화면에서 실제로 가리킨 조각 번호만 모은다."""
 
@@ -1587,6 +1826,88 @@ def _generation_cache_eligibility(
     return eligible, missing_sections, content_shortfall_reasons
 
 
+def _official_company_aliases(profile: dict[str, Any]) -> tuple[str, ...]:
+    """DART 기업개황의 공식 영문명·종목명만 순서대로 중복 제거한다."""
+
+    return tuple(
+        dict.fromkeys(
+            value
+            for value in (
+                str(profile.get("corp_name_eng") or "").strip(),
+                str(profile.get("corp_eng_name") or "").strip(),
+                str(profile.get("stock_name") or "").strip(),
+            )
+            if value
+        )
+    )
+
+
+def _official_company_registration_numbers(profile: dict[str, Any]) -> tuple[str, ...]:
+    """같은 company.json 응답의 사업자·법인등록번호만 정규화한다.
+
+    공식 웹 adapter가 company.json을 다시 호출하지 않게, 이미 회사 확인에
+    사용한 한 snapshot에서 식별정보를 함께 운반한다. DART가 빈 값이나 예상
+    밖 형식을 주면 낡아 재할당됐을 수 있는 ``hm_url``까지 포함해 공식 웹
+    승격을 포기한다. 이 경우 DART 공시 근거만 남기고 품질 사전검사가
+    충분성 여부를 결정한다.
+    """
+
+    numbers: list[str] = []
+    for field_name in ("bizr_no", "jurir_no"):
+        normalized = normalize_korean_registration_number(
+            profile.get(field_name)
+        )
+        if normalized and normalized not in numbers:
+            numbers.append(normalized)
+    return tuple(numbers)
+
+
+def _official_candidate_urls(profile: dict[str, Any]) -> tuple[str, ...]:
+    """DART profile이 별도 필드로 확인한 exact 공식 URL 후보만 돌려준다.
+
+    사용자 자유입력·검색 snippet·회사명으로 만든 추측 URL은 넣지 않는다.
+    ``hm_url``은 기존 root 필드가 운반하며, 여기서는 DART의 별도 ``ir_url``만
+    보조 후보로 둔다. 후보도 수집기에서 법인명+등록번호를 다시 확인해야 한다.
+    """
+
+    return tuple(
+        dict.fromkeys(
+            value
+            for value in (str(profile.get("ir_url") or "").strip(),)
+            if value
+        )
+    )
+
+
+def _official_evidence_stop_source(
+    preflight: OfficialEvidencePreflight,
+    *,
+    gate_reason: str,
+) -> SourceStatus:
+    """원문·URL·예외문 없이 공식 자료 사전검사 결과를 사용자에게 보인다."""
+
+    if gate_reason == FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT:
+        return SourceStatus(
+            "공식 근거 사전검사",
+            "failed",
+            "필수 공식 자료 경로를 끝까지 확인하지 못했습니다",
+        )
+    if gate_reason == FINAL_GATE_REASON_EVIDENCE_CLASSIFICATION_UNDETERMINED:
+        return SourceStatus(
+            "공식 근거 사전검사",
+            "failed",
+            "공식 자료는 읽었지만 필요한 내용인지 자동으로 확인하지 못했습니다",
+        )
+    return SourceStatus(
+        "공식 근거 사전검사",
+        "none",
+        (
+            f"독립 문서 {preflight.independent_document_count}건을 확인했지만 "
+            "완성 보고서의 최소 근거가 부족합니다"
+        ),
+    )
+
+
 class LocalDartProfileEnrichmentError(RuntimeError):
     """로컬 DART 후보의 선택 전 profile 보강만 실패했음을 표시한다."""
 
@@ -1612,6 +1933,16 @@ class RealPipeline:
 
     # corpCode 로컬 색인과 무료 DART 기업개황만 쓰며 AI/Places 비용은 만들지 않는다.
     business_candidate_provider_costs_money = False
+
+    def __init__(
+        self,
+        *,
+        official_evidence_collector: OfficialEvidenceCollector | None = None,
+    ) -> None:
+        # web 조립부는 production adapter를 주입한다. None은 v1·SHADOW와
+        # 외부 I/O를 쓰지 않는 기존 단위시험의 호환 경로다. 요청별 자료는
+        # 이 인스턴스에 저장하지 않아 여러 worker에서도 상태를 공유하지 않는다.
+        self._official_evidence_collector = official_evidence_collector
 
     def search_business_candidates(
         self, *, company: str, address_hint: str, limit: int, timeout_sec: float
@@ -1720,7 +2051,7 @@ class RealPipeline:
         만든다. 이름 식별 AI는 호출하지 않는다.
         """
         corp_code = str(candidate_ref or "").strip()
-        if re.fullmatch(r"\d{8}", corp_code) is None:
+        if re.fullmatch(r"[0-9]{8}", corp_code) is None:
             return CompanyLookupResult(card=None, failed=True)
 
         engine = _MeteredEngine(_engine())
@@ -2063,6 +2394,33 @@ class RealPipeline:
             counter,
             business_date=business_date,
         )
+        # FULL의 formal collector·비교 생산기·legacy 매출표가 같은
+        # 접수번호 원문을 각자 다운로드하던 경로를 요청 단위 정본
+        # artifact로 합친다. 엔진 내부 디스크 캐시에 숨지 않고,
+        # ``download_document`` 호출 자체가 접수번호당 1회만 발생한다.
+        downloaded_document_artifacts: dict[str, Any] = {}
+
+        def download_document_once(
+            receipt_number: str,
+            directory: Any,
+            request_counter: Any,
+            *,
+            require_official_url_sidecar: bool = False,
+        ) -> Any:
+            receipt = str(receipt_number or "").strip()
+            if receipt not in downloaded_document_artifacts:
+                # FULL은 첫 요청이 비교/legacy의 약한 호출이어도
+                # 항상 sidecar 검증까지 한 강한 artifact를 만든다. 그렇지
+                # 않으면 non-strict path를 나중의 strict 수집에 재사용해
+                # 공식 URL 출처 검사를 통과한 척하게 된다.
+                downloaded_document_artifacts[receipt] = engine.download_document(
+                    receipt,
+                    directory,
+                    request_counter,
+                    require_official_url_sidecar=True,
+                )
+            return downloaded_document_artifacts[receipt]
+
         source_identity = ReportSourceIdentity.capture(
             filing=filing,
             financial_payload=financials,
@@ -2072,6 +2430,382 @@ class RealPipeline:
         # coordination과 옛 1층 캐시)이 같은 값을 봐야 한 겹만 막히는 일이
         # 없다(C6).
         requested_release_mode = _requested_release_mode(generation_mode)
+        official_evidence: OfficialEvidenceCollectionResult | None = None
+        v2_comparison_result: Any = None
+        generation_source_identity_digest = source_identity.cache_digest
+        if (
+            generation_mode is engine_mode.EngineMode.V2
+            and requested_release_mode is ReleaseMode.FULL
+        ):
+            if self._official_evidence_collector is None:
+                # FULL의 의미가 조립 실수 하나로 옛 legacy 경로로 강등되면
+                # 같은 환경값인데도 호출 위치에 따라 안전 계약이 달라진다.
+                # 정식 collector가 없는 FULL은 cache/coordination/provider보다
+                # 먼저 닫고 회사 자료 부족으로 오표기하지 않는다.
+                return RunResult(
+                    outcome=Outcome.GATE_STOPPED,
+                    message=(
+                        "엄격 보고서에 필요한 공식 자료 수집기가 연결되지 않아 "
+                        "AI 작성 전에 멈췄습니다."
+                        + _stop_reason_note(
+                            FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
+                        )
+                    ),
+                    sources=[
+                        SourceStatus(
+                            "공식 근거 사전검사",
+                            "failed",
+                            "내부 공식 자료 수집 연결을 확인하지 못했습니다",
+                        )
+                    ],
+                    corp_type=judgment.corp_type,
+                    cost_krw=_request_spent_krw(engine),
+                    model=model,
+                    final_gate_reason=FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
+                    dart_receipt_numbers=source_identity.dart_receipt_numbers,
+                    financial_payload_digest=source_identity.financial_payload_digest,
+                )
+            # 캐시보다 먼저 실제 공식 자료 snapshot을 확인한다. 그렇지 않으면
+            # 홈페이지·IR이 바뀌어도 공시 접수번호와 재무값만 같은 동안 옛
+            # 보고서를 새 결과처럼 재사용한다. 아직 provider/유료 phase는 0회다.
+            tell("collect")
+            try:
+                (
+                    profile_attestation_source_id,
+                    profile_attestation_evidence,
+                ) = dart_profile_attestation_material(
+                    profile=profile,
+                    corp_code=corp_code,
+                    company_name=company_name,
+                )
+                official_evidence = self._official_evidence_collector.collect(
+                    OfficialEvidenceCollectionRequest(
+                        company_id=corp_code,
+                        company_name=company_name,
+                        company_aliases=_official_company_aliases(profile),
+                        root_homepage_url=str(profile.get("hm_url") or ""),
+                        company_registration_numbers=(
+                            _official_company_registration_numbers(profile)
+                        ),
+                        official_candidate_urls=_official_candidate_urls(profile),
+                        as_of_date=business_date,
+                        dart_document_cache_dir=Path(engine.RAW_DIR),
+                        dart_counter=counter,
+                        dart_get_json=engine.get_json,
+                        dart_download_document=download_document_once,
+                        domain_attestation_source_id=(
+                            profile_attestation_source_id
+                        ),
+                        domain_attestation_evidence=profile_attestation_evidence,
+                    )
+                )
+                official_preflight = assess_official_evidence(official_evidence)
+            except Exception as error:  # noqa: BLE001 - 닫힌 타입으로만 아래서 분류
+                # traceback에는 provider URL·응답 원문·인증 설명이 섞일 수 있다.
+                # 로그·영속 결과에는 닫힌 타입명과 안전 사유만 남긴다.
+                if _comparison_source_failure_is_configuration(error):
+                    failure_reason = FINAL_GATE_REASON_OFFICIAL_EVIDENCE_CONFIGURATION
+                    logger.error(
+                        "공식 근거 수집 DART 접근 설정 오류 kind=%s",
+                        type(error).__name__,
+                    )
+                    failure_message = (
+                        "공식 자료 접근 설정을 확인하지 못해 AI 작성 전에 "
+                        "멈췄습니다."
+                    )
+                    failure_detail = "운영자의 DART 접근 설정 확인이 필요합니다"
+                elif _comparison_source_failure_is_transient(error):
+                    failure_reason = FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT
+                    logger.warning(
+                        "공식 근거 수집 DART 일시 장애 kind=%s",
+                        type(error).__name__,
+                    )
+                    failure_message = (
+                        "공식 자료 제공처의 일시 장애로 확인을 끝내지 못해 "
+                        "AI 작성 전에 멈췄습니다."
+                    )
+                    failure_detail = "DART 공식 자료 확인을 지금 완료하지 못했습니다"
+                else:
+                    failure_reason = FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
+                    logger.error(
+                        "공식 근거 수집·계약 결속 내부 오류 kind=%s",
+                        type(error).__name__,
+                    )
+                    failure_message = (
+                        "공식 자료를 보고서에 연결하는 내부 검사를 통과하지 못해 "
+                        "AI 작성 전에 멈췄습니다."
+                    )
+                    failure_detail = "내부 근거 연결을 확인하지 못했습니다"
+                return RunResult(
+                    outcome=Outcome.GATE_STOPPED,
+                    message=failure_message + _stop_reason_note(failure_reason),
+                    sources=[
+                        SourceStatus(
+                            "공식 근거 사전검사",
+                            "failed",
+                            failure_detail,
+                        )
+                    ],
+                    corp_type=judgment.corp_type,
+                    cost_krw=_request_spent_krw(engine),
+                    model=model,
+                    final_gate_reason=failure_reason,
+                    dart_receipt_numbers=source_identity.dart_receipt_numbers,
+                    financial_payload_digest=source_identity.financial_payload_digest,
+                )
+
+            steps.append(
+                {
+                    "step": "6_수집_공식근거사전검사",
+                    "후보장": len(official_evidence.candidates),
+                    "준비장": len(official_preflight.decision.ready_section_ids),
+                    "독립문서수": official_preflight.independent_document_count,
+                    "판정": official_preflight.decision.status.value,
+                    "사유코드": official_preflight.detail_code,
+                }
+            )
+            if not official_preflight.can_call_ai:
+                gate_reason = classify_v2_validation_final_gate_reason(
+                    (official_preflight.detail_code,)
+                )
+                transient = gate_reason == FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT
+                classification_undetermined = (
+                    gate_reason
+                    == FINAL_GATE_REASON_EVIDENCE_CLASSIFICATION_UNDETERMINED
+                )
+                return RunResult(
+                    outcome=Outcome.GATE_STOPPED,
+                    message=(
+                        (
+                            "공식 자료의 필수 확인 경로를 끝까지 확인하지 못해 "
+                            if transient
+                            else (
+                                "공식 자료는 읽었지만 필요한 내용인지 자동으로 "
+                                "확인하지 못해 "
+                                if classification_undetermined
+                                else "공식 자료를 모두 확인했지만 완성 보고서의 "
+                                "최소 근거가 부족해 "
+                            )
+                        )
+                        + "확인되지 않은 내용을 만들지 않고 AI 작성 전에 멈췄습니다."
+                        + _stop_reason_note(gate_reason)
+                    ),
+                    sources=[
+                        _official_evidence_stop_source(
+                            official_preflight,
+                            gate_reason=gate_reason,
+                        )
+                    ],
+                    corp_type=judgment.corp_type,
+                    fragments_collected=sum(
+                        len(candidate.fragments)
+                        for candidate in official_evidence.candidates
+                    ),
+                    cost_krw=_request_spent_krw(engine),
+                    model=model,
+                    final_gate_reason=gate_reason,
+                    dart_receipt_numbers=source_identity.dart_receipt_numbers,
+                    financial_payload_digest=source_identity.financial_payload_digest,
+                )
+
+            generation_source_identity_digest = (
+                source_identity.cache_digest_with_official_snapshot(
+                    official_evidence.source_snapshot_sha256
+                )
+            )
+            if not generation_source_identity_digest:
+                return RunResult(
+                    outcome=Outcome.GATE_STOPPED,
+                    message=(
+                        "공식 자료의 생성 신원을 완전히 확인하지 못해 AI 작성 전에 "
+                        "멈췄습니다."
+                        + _stop_reason_note(
+                            FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
+                        )
+                    ),
+                    sources=[
+                        SourceStatus(
+                            "공식 근거 사전검사",
+                            "failed",
+                            "공식 자료 snapshot을 결속하지 못했습니다",
+                        )
+                    ],
+                    corp_type=judgment.corp_type,
+                    final_gate_reason=FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
+                )
+        if (
+            generation_mode is engine_mode.EngineMode.V2
+            and requested_release_mode is ReleaseMode.FULL
+        ):
+            # 9장도 나머지 장과 같은 생산 입력이다. 캐시 뒤·AI 뒤에 붙이면
+            # 비교 근거가 없어도 돈을 쓴 뒤 실패하고, 비교사 공시가 바뀌어도
+            # 자사 cache key가 그대로 남는다. 실제 공식 비교를 여기서 먼저
+            # 만들고 그 snapshot을 생성 신원에 포함한다.
+            assert official_evidence is not None
+            try:
+                v2_comparison_result = _prepare_v2_comparison_result(
+                    engine=engine,
+                    counter=counter,
+                    profile=profile,
+                    official_evidence=official_evidence,
+                    corp_code=corp_code,
+                    company_name=company_name,
+                    corp_type=judgment.corp_type,
+                    financials=financials,
+                    filing=filing,
+                    business_date=business_date,
+                    dart_download_document=download_document_once,
+                )
+                generation_source_identity_digest = _comparison_generation_digest(
+                    generation_source_identity_digest,
+                    v2_comparison_result,
+                )
+            except ComparisonBlockedError:
+                logger.info("엔진 v2 공식 양사 비교 사전검사 차단", exc_info=True)
+                steps.append(
+                    {
+                        "step": "v2_FULL_공식비교사전검사_차단",
+                        "사유코드": FINAL_GATE_REASON_COMPARISON_BLOCKED,
+                    }
+                )
+                return RunResult(
+                    outcome=Outcome.GATE_STOPPED,
+                    message=(
+                        "같은 조건으로 대조할 공식 양사 자료를 확인하지 못해 "
+                        "AI 작성 전에 멈췄습니다."
+                        + _stop_reason_note(FINAL_GATE_REASON_COMPARISON_BLOCKED)
+                    ),
+                    sources=[
+                        SourceStatus(
+                            "공식 양사 비교",
+                            "none",
+                            "동일 기간·범위·지표의 공식 양사 근거가 부족합니다",
+                        )
+                    ],
+                    corp_type=judgment.corp_type,
+                    cost_krw=_request_spent_krw(engine),
+                    model=model,
+                    final_gate_reason=FINAL_GATE_REASON_COMPARISON_BLOCKED,
+                    dart_receipt_numbers=source_identity.dart_receipt_numbers,
+                    financial_payload_digest=source_identity.financial_payload_digest,
+                )
+            except Exception as error:  # noqa: BLE001 - 아래서 외부 장애를 제한 분류
+                if _comparison_source_failure_is_configuration(error):
+                    # 인증키·권한은 사용자의 회사나 일시 네트워크 문제가 아니다.
+                    # 원문 예외문은 로그·화면·영속 사유 어디에도 복사하지 않는다.
+                    logger.error(
+                        "엔진 v2 공식 양사 비교 DART 접근 설정 오류 kind=%s",
+                        type(error).__name__,
+                    )
+                    steps.append(
+                        {
+                            "step": "v2_FULL_공식비교접근설정_차단",
+                            "사유코드": (
+                                FINAL_GATE_REASON_OFFICIAL_EVIDENCE_CONFIGURATION
+                            ),
+                        }
+                    )
+                    return RunResult(
+                        outcome=Outcome.GATE_STOPPED,
+                        message=(
+                            "공식 양사 자료의 접근 설정을 확인하지 못해 "
+                            "AI 작성 전에 멈췄습니다."
+                            + _stop_reason_note(
+                                FINAL_GATE_REASON_OFFICIAL_EVIDENCE_CONFIGURATION
+                            )
+                        ),
+                        sources=[
+                            SourceStatus(
+                                "공식 양사 비교",
+                                "failed",
+                                "운영자의 DART 접근 설정 확인이 필요합니다",
+                            )
+                        ],
+                        corp_type=judgment.corp_type,
+                        cost_krw=_request_spent_krw(engine),
+                        model=model,
+                        final_gate_reason=(
+                            FINAL_GATE_REASON_OFFICIAL_EVIDENCE_CONFIGURATION
+                        ),
+                        dart_receipt_numbers=source_identity.dart_receipt_numbers,
+                        financial_payload_digest=(
+                            source_identity.financial_payload_digest
+                        ),
+                    )
+                if _comparison_source_failure_is_transient(error):
+                    # 예외 문자열·URL·응답 원문은 로그·결과에 싣지 않는다.
+                    logger.warning(
+                        "엔진 v2 공식 양사 비교 DART 일시 장애 kind=%s",
+                        type(error).__name__,
+                    )
+                    steps.append(
+                        {
+                            "step": "v2_FULL_공식비교일시장애_차단",
+                            "사유코드": FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT,
+                        }
+                    )
+                    return RunResult(
+                        outcome=Outcome.GATE_STOPPED,
+                        message=(
+                            "공식 양사 자료를 확인하는 중 일시 장애가 발생해 "
+                            "AI 작성 전에 멈췄습니다."
+                            + _stop_reason_note(
+                                FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT
+                            )
+                        ),
+                        sources=[
+                            SourceStatus(
+                                "공식 양사 비교",
+                                "failed",
+                                "DART 공식 자료 확인을 지금 완료하지 못했습니다",
+                            )
+                        ],
+                        corp_type=judgment.corp_type,
+                        cost_krw=_request_spent_krw(engine),
+                        model=model,
+                        final_gate_reason=(
+                            FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT
+                        ),
+                        dart_receipt_numbers=source_identity.dart_receipt_numbers,
+                        financial_payload_digest=(
+                            source_identity.financial_payload_digest
+                        ),
+                    )
+                # 내부 계약 오류도 traceback을 남기지 않는다. 원인이 가진 외부
+                # 원문이나 URL이 예외 체인에 섞였을 수 있기 때문이다.
+                logger.error(
+                    "엔진 v2 공식 양사 비교 내부 연결 오류 kind=%s",
+                    type(error).__name__,
+                )
+                steps.append(
+                    {
+                        "step": "v2_FULL_공식비교transport_차단",
+                        "사유코드": FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
+                    }
+                )
+                return RunResult(
+                    outcome=Outcome.GATE_STOPPED,
+                    message=(
+                        "공식 양사 자료를 보고서 근거에 연결하는 내부 검사를 "
+                        "통과하지 못해 AI 작성 전에 멈췄습니다."
+                        + _stop_reason_note(
+                            FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
+                        )
+                    ),
+                    sources=[
+                        SourceStatus(
+                            "공식 양사 비교",
+                            "failed",
+                            "내부 비교 근거 연결을 확인하지 못했습니다",
+                        )
+                    ],
+                    corp_type=judgment.corp_type,
+                    cost_krw=_request_spent_krw(engine),
+                    model=model,
+                    final_gate_reason=FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
+                    dart_receipt_numbers=source_identity.dart_receipt_numbers,
+                    financial_payload_digest=source_identity.financial_payload_digest,
+                )
         # 불변 content+PDF 캐시는 옛 layer1보다 먼저 본다. 새 계약의 hit이면
         # 최초 원본 ID를 그대로 운반하고, miss면 같은 열쇠로 owner lease를
         # 먼저 얻는다. 옛 layer1에는 생성 당시 배포·모델·설정 신원이 없으므로
@@ -2087,7 +2821,7 @@ class RealPipeline:
         reused_generation = generation_coordination.coordinate(
             corp_id=corp_code,
             cache_namespace=generation_namespace,
-            preflight_identity_digest=source_identity.cache_digest,
+            preflight_identity_digest=generation_source_identity_digest,
         )
         reused_release_mode = str(
             getattr(getattr(reused_generation, "report", None), "release_mode", "")
@@ -2190,7 +2924,7 @@ class RealPipeline:
                 _v2_cache_lookup(
                     corp_id=corp_code,
                     current_fiscal_year=current_fiscal_year,
-                    source_identity_digest=source_identity.cache_digest,
+                    source_identity_digest=generation_source_identity_digest,
                     build_identity=build_identity,
                     release_mode=requested_release_mode,
                 )
@@ -2198,7 +2932,7 @@ class RealPipeline:
                 else _company_cache_lookup(
                     corp_id=corp_code,
                     current_fiscal_year=current_fiscal_year,
-                    source_identity_digest=source_identity.cache_digest,
+                    source_identity_digest=generation_source_identity_digest,
                     build_identity=build_identity,
                 )
             )
@@ -2272,13 +3006,68 @@ class RealPipeline:
 
         # ── 6 수집 (AI 0회) ──────────────────────────────
         tell("collect")
-        frags, revenue_tables, filing_text = _collect(
-            engine, client, profile, user_input, counter, steps,
-            financials=financials, fin_years=fin_years, filing=filing,
-            # typed 공식 근거 수집은 v2·FULL·kill switch가 «전부» 켜졌을 때만
-            # 돈다. 판정은 `_typed_dart_collection_enabled`가 한다.
-            generation_mode=generation_mode, corp_code=corp_code,
-        )
+        try:
+            frags, revenue_tables, filing_text = _collect(
+                engine, client, profile, user_input, counter, steps,
+                financials=financials, fin_years=fin_years, filing=filing,
+                # formal collector가 이미 typed DART를 수집했다면 legacy typed
+                # adapter를 다시 돌리지 않는다. 같은 DART 요청·원문을 두 번
+                # 가져오고 section/slot을 coarse kind로 잃는 옛 경로를 피한다.
+                generation_mode=(
+                    None if official_evidence is not None else generation_mode
+                ),
+                corp_code=corp_code,
+                formal_official_evidence=official_evidence,
+                dart_download_document=(
+                    download_document_once
+                    if official_evidence is not None
+                    else None
+                ),
+            )
+        except RevenueTableEvidenceBindingError:
+            logger.exception("매출 구성표와 공시 원문을 결속하지 못했습니다")
+            return RunResult(
+                outcome=Outcome.GATE_STOPPED,
+                message=(
+                    "매출 구성표를 공시 원문에 연결하는 내부 검사를 통과하지 "
+                    "못해 AI 작성 전에 멈췄습니다."
+                    + _stop_reason_note(FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT)
+                ),
+                sources=_sources_from(steps),
+                corp_type=judgment.corp_type,
+                cost_krw=_request_spent_krw(engine),
+                model=model,
+                final_gate_reason=FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
+            )
+        if official_evidence is not None:
+            try:
+                frags, added_official_fragments = merge_official_evidence_fragments(
+                    frags,
+                    official_evidence,
+                )
+            except (TypeError, ValueError):
+                logger.exception("공식 근거를 숫자 인용 transport로 옮기지 못했습니다")
+                return RunResult(
+                    outcome=Outcome.GATE_STOPPED,
+                    message=(
+                        "공식 자료를 보고서 인용에 연결하는 내부 검사를 통과하지 "
+                        "못해 AI 작성 전에 멈췄습니다."
+                        + _stop_reason_note(
+                            FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
+                        )
+                    ),
+                    sources=_sources_from(steps),
+                    corp_type=judgment.corp_type,
+                    fragments_collected=len(frags),
+                    final_gate_reason=FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
+                )
+            steps.append(
+                {
+                    "step": "6_수집_공식근거생성입력",
+                    "추가조각수": added_official_fragments,
+                    "전체조각수": len(frags),
+                }
+            )
         sources = _sources_from(steps)
 
         # ── 7 사전 게이트 — 원문 자체가 없으면 생성 전에 멈춘다 ──
@@ -2303,9 +3092,10 @@ class RealPipeline:
         # 수집(6)·법인 판정(5)이 끝났고 실적표 재료(financials)가 확보된 지점이다.
         # ENGINE_V2=1일 때만 composer 경로로 간다. 미설정이면 아래 v1 경로 그대로다.
         if generation_mode is engine_mode.EngineMode.V2:
-            # waiter는 위에서 이미 돌아갔다. owner(또는 부분 지문으로
-            # 공유를 포기한 요청)만 첫 provider 전에 phase를 연다.
-            generation_coordination.ensure_paid_phase()
+            # packet·표·문서 수처럼 코드만으로 판정할 수 있는 검사는 모두
+            # 유료 phase 밖에서 끝낸다. 실제 첫 provider 전송 경계인
+            # `_MeteredMessages.create`가 `ensure_paid_phase()`를 호출하므로,
+            # 여기서 미리 열면 AI 0회 사전검사 실패도 유료 단계로 기록된다.
             tell("generate")
             v2_result = _run_v2_composer(
                 engine=engine,
@@ -2324,9 +3114,10 @@ class RealPipeline:
                 steps=steps,
                 corp_id=corp_code,
                 current_fiscal_year=current_fiscal_year,
-                source_identity_digest=source_identity.cache_digest,
+                source_identity_digest=generation_source_identity_digest,
                 build_identity=build_identity,
                 generation_mode=generation_mode,
+                comparison_result=v2_comparison_result,
             )
             return replace(
                 v2_result,
@@ -2957,7 +3748,7 @@ class RealPipeline:
                 corp_id=corp_code,
                 report=report,
                 fiscal_year=current_fiscal_year,
-                source_identity_digest=source_identity.cache_digest,
+                source_identity_digest=generation_source_identity_digest,
                 build_identity=build_identity,
             )
 
@@ -3041,12 +3832,20 @@ def _load_official_comparator_bundle(
     record: DartCompanyRecord,
     *,
     business_date: Any,
+    dart_download_document: Any = None,
 ) -> OfficialCompanyBundle | None:
     """DART 고유번호 하나의 기업개황·연간 원문·주요계정을 별도로 받는다."""
 
     profile = engine.get_json("company.json", {"corp_code": record.corp_code}, counter)
     if not isinstance(profile, dict) or profile.get("status") != DART_SUCCESS_STATUS:
         return None
+    profile_corp_code = str(profile.get("corp_code") or "").strip()
+    if profile_corp_code != record.corp_code:
+        # 비교 후보 이름은 catalog, 원문·재무는 요청 corp_code, 표시 발행자는
+        # company.json에서 온다. 이 셋의 법인 신원이 갈라진 채 계속하면 다른
+        # 회사 이름으로 공식 수치를 봉인할 수 있다. 성공 응답의 corp_code가
+        # 없거나 다르면 「비교 자료가 없음」이 아니라 공급자/배선 계약 오류다.
+        raise ValueError("비교사 DART 기업개황의 법인 식별자가 요청과 다릅니다")
     official_name = str(profile.get("corp_name") or record.corp_name or "").strip()
     if not official_name:
         return None
@@ -3068,7 +3867,8 @@ def _load_official_comparator_bundle(
     )
     official_text = ""
     if filing:
-        path = engine.download_document(filing["rcept_no"], engine.RAW_DIR, counter)
+        downloader = dart_download_document or engine.download_document
+        path = downloader(filing["rcept_no"], engine.RAW_DIR, counter)
         official_text = engine.read_filing_text(path)
     return OfficialCompanyBundle(
         corp_code=record.corp_code,
@@ -3097,25 +3897,17 @@ def _attach_competitive_position(
 ) -> Report:
     """잠긴 1~8장 초안에 공식 양사 비교 9장을 붙여 내부 초안을 돌려준다."""
 
-    records = _records_from_candidate_catalog(_company_catalog())
-    self_bundle = OfficialCompanyBundle(
-        corp_code=self_corp_code,
-        company_name=self_company,
-        financials=self_financials,
-        filing=self_filing,
-        official_text=self_official_text,
-    )
-    comparison = build_competitive_position(
+    comparison = _build_competitive_position_result(
         report,
-        self_bundle=self_bundle,
-        catalog=records,
-        fetch_comparator=lambda record: _load_official_comparator_bundle(
-            engine,
-            counter,
-            record,
-            business_date=business_date,
-        ),
+        engine=engine,
+        counter=counter,
+        self_corp_code=self_corp_code,
+        self_company=self_company,
+        self_financials=self_financials,
+        self_filing=self_filing,
+        self_official_text=self_official_text,
         collected_on=collected_on,
+        business_date=business_date,
         official_candidate_sentences=official_candidate_sentences,
         candidate_source_registry=candidate_source_registry,
     )
@@ -3147,6 +3939,63 @@ def _attach_competitive_position(
     # 이 객체는 아직 요약도 최종 gate도 거치지 않은 내부 초안이다. 호출자가
     # 1~9장 전체로 finalize_report를 실행하기 전에는 저장·렌더링하면 안 된다.
     return draft
+
+
+def _build_competitive_position_result(
+    report: Report,
+    *,
+    engine: Any,
+    counter: Any,
+    self_corp_code: str,
+    self_company: str,
+    self_financials: Optional[dict[str, Any]],
+    self_filing: Optional[dict[str, Any]],
+    self_official_text: str,
+    collected_on: str,
+    business_date: Any,
+    official_candidate_sentences: tuple[OfficialCandidateSentence, ...] = (),
+    candidate_source_registry: tuple[Source, ...] = (),
+    dart_download_document: Any = None,
+) -> Any:
+    """V1 Report 부착과 분리한 공용 공식 비교 생산기."""
+
+    records = _records_from_candidate_catalog(_company_catalog())
+    self_bundle = OfficialCompanyBundle(
+        corp_code=self_corp_code,
+        company_name=self_company,
+        financials=self_financials,
+        filing=self_filing,
+        official_text=self_official_text,
+    )
+    def fetch_comparator(record: DartCompanyRecord) -> OfficialCompanyBundle | None:
+        try:
+            return _load_official_comparator_bundle(
+                engine,
+                counter,
+                record,
+                business_date=business_date,
+                dart_download_document=dart_download_document,
+            )
+        except Exception as error:  # noqa: BLE001 - 실제 DART 계보를 아래서 제한
+            if _comparison_source_failure_is_configuration(error):
+                # 잘못된 키·권한은 후보 하나의 자료 없음도 일시 장애도 아니다.
+                raise ComparisonSourceConfigurationError() from error
+            if _comparison_source_failure_is_transient(error):
+                # 원문·URL을 새 메시지에 복사하지 않고 타입 경계만 보존한다.
+                raise ComparisonSourceTransientError() from error
+            # ValueError·미등록 DartClientError 등은 builder가 후보별 실패로
+            # 삼키지 못하도록 내부 계약 표지로 올린다.
+            raise ComparisonSourceInternalError() from error
+
+    return build_competitive_position(
+        report,
+        self_bundle=self_bundle,
+        catalog=records,
+        fetch_comparator=fetch_comparator,
+        collected_on=collected_on,
+        official_candidate_sentences=official_candidate_sentences,
+        candidate_source_registry=candidate_source_registry,
+    )
 
 
 def _filing_fiscal_year(filing: Optional[dict[str, Any]]) -> Optional[int]:
@@ -3388,114 +4237,104 @@ def _full_section_evidence_packets(
     *,
     corp_id: str,
     source_identity_digest: str,
-    frags: dict[int, dict[str, str]],
+    frags: dict[int, dict[str, object]],
     filing_meta: Any,
 ) -> Any:
-    """운영 수집물을 gen8·evidence generation에 묶인 typed 아홉 장으로 만든다.
+    """legacy·typed 수집물을 단 하나의 fail-closed packet 경계로 옮긴다."""
 
-    URL 없는 전자공시 조각은 선택 공시의 실제 문서 신원이 있어야 한다. 임의
-    ``embedded:`` identity는 만들지 않으며 어느 장이 비면 생성기 호출 전에
-    packet 생성 자체가 실패한다.
-    """
-
-    from src.features.composer.constants import (  # noqa: PLC0415
-        DART_DOCUMENT_HOST,
-        DART_DOCUMENT_URL_TEMPLATE,
-        DART_FINANCIAL_API_DOCUMENT_ID,
-        DART_FINANCIAL_API_HOST,
-        DART_FINANCIAL_API_PREFIX,
-        DART_FINANCIAL_API_URL,
-        SECTION_IDS,
-    )
-    from src.features.composer.port import (  # noqa: PLC0415
-        CollectedFragment,
-        SectionEvidencePacket,
-        SectionEvidencePacketSet,
-    )
-    from src.shared.report_quality.source_identity import (  # noqa: PLC0415
-        document_identity_from_parts,
+    return build_section_evidence_packet_set(
+        corp_id=corp_id,
+        source_generation_sha256=source_identity_digest,
+        frags=frags,
+        filing_meta=filing_meta,
     )
 
-    # 닫힌 의미 장을 운영 수집 종류에 연결한다. 같은 공식 조각이 서로 다른
-    # 질문의 근거가 될 수는 있지만, 각 writer는 아래 허용 packet 밖의 조각을
-    # 볼 수 없다.
-    allowed_tokens: dict[str, tuple[str, ...]] = {
-        "identity": ("사업", "홈페이지", "공식 IR"),
-        "business_model": ("사업", "재무", "공식 IR"),
-        "portfolio": ("사업", "공식 IR"),
-        "past_changes": ("재무", "MD&A", "사업", "공식 IR"),
-        "current_challenges": ("MD&A", "신규사업", "뉴스", "공식 IR"),
-        "future_strategy": ("신규사업", "MD&A", "공식 IR"),
-        "operations_partners": ("사업", "공식 IR"),
-        "culture": ("홈페이지", "공식 IR", "사업"),
-        "competitive_position": ("사업", "재무", "뉴스", "공식 IR"),
-    }
-    normalized: list[CollectedFragment] = []
-    for number in sorted(frags):
-        raw = frags[number]
-        text = str(raw.get("원문") or "").strip()
-        if not text:
-            continue
-        source_url = str(raw.get("출처") or "").strip()
-        fragment_rcept_no = str(raw.get("문서ID") or "").strip()
-        if text.startswith(DART_FINANCIAL_API_PREFIX):
-            identity = document_identity_from_parts(
-                document_id=DART_FINANCIAL_API_DOCUMENT_ID,
-                host=DART_FINANCIAL_API_HOST,
-                url=DART_FINANCIAL_API_URL,
-            )
-        elif source_url:
-            identity = document_identity_from_parts(url=source_url)
-        elif _RCEPT_NO_RE.fullmatch(fragment_rcept_no):
-            # 조각이 «자기 공시»의 접수번호를 실었으면 그 문서로 묶는다(P1-A).
-            # 최신 공시 1건의 문서ID를 빌려 주면 다른 공시에서 온 조각이
-            # 엉뚱한 문서를 근거로 가리킨다. 접수번호 모양(14자리)일 때만
-            # 쓴다 — IR PDF의 sha256 문서ID·재무 API 문서ID는 이 자리에서
-            # 예전과 똑같이 동작해야 한다.
-            identity = document_identity_from_parts(
-                document_id=fragment_rcept_no,
-                host=DART_DOCUMENT_HOST,
-                url=DART_DOCUMENT_URL_TEMPLATE.format(document_id=fragment_rcept_no),
-            )
-        elif filing_meta is not None and getattr(filing_meta, "document_id", ""):
-            document_id = str(filing_meta.document_id)
-            identity = document_identity_from_parts(
-                document_id=document_id,
-                host=DART_DOCUMENT_HOST,
-                url=DART_DOCUMENT_URL_TEMPLATE.format(document_id=document_id),
-            )
-        else:
-            identity = ""
-        normalized.append(
-            CollectedFragment(
-                fragment_id=str(number),
-                kind=str(raw.get("종류") or "").strip(),
-                text=text,
-                source_url=source_url,
-                document_title=str(raw.get("문서명") or "").strip(),
-                location=str(raw.get("원문위치") or "").strip(),
-                document_date=str(raw.get("문서일") or "").strip(),
-                document_identity=identity,
-            )
-        )
-    packets = tuple(
-        SectionEvidencePacket(
-            company_id=corp_id,
-            evidence_generation_sha256=source_identity_digest,
-            section_id=section_id,
-            fragments=tuple(
-                fragment
-                for fragment in normalized
-                if any(token in fragment.kind for token in allowed_tokens[section_id])
-            ),
-        )
-        for section_id in SECTION_IDS
+
+def _packet_document_preflight_final_gate_reason(detail_code: str) -> str:
+    """문서 하한과 packet 결속 손상을 서로 다른 운영 사유로 바꾼n다."""
+
+    if detail_code == FINAL_GATE_DETAIL_PREFLIGHT_PACKET_INVALID:
+        return FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
+    return FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT
+
+
+def _prepare_v2_comparison_result(
+    *,
+    engine: Any,
+    counter: Any,
+    profile: dict[str, Any],
+    official_evidence: OfficialEvidenceCollectionResult,
+    corp_code: str,
+    company_name: str,
+    corp_type: str,
+    financials: Optional[dict[str, Any]],
+    filing: Optional[dict[str, Any]],
+    business_date: Any,
+    dart_download_document: Any = None,
+) -> Any:
+    """FULL 캐시·provider 전에 공식 양사 비교를 실제 생산한다."""
+
+    candidate_fragments, _added = merge_official_evidence_fragments(
+        {}, official_evidence
     )
-    return SectionEvidencePacketSet(
-        company_id=corp_id,
-        evidence_generation_sha256=source_identity_digest,
-        packets=packets,
+    candidate_fragments = register_candidate_sentence_evidence(
+        candidate_fragments
     )
+    candidate_sources, candidate_sentences = build_typed_comparison_candidate_inputs(
+        candidate_fragments,
+        result=official_evidence,
+        profile=profile,
+        corp_code=corp_code,
+        company_name=company_name,
+        collected_on=business_date.isoformat(),
+    )
+    if not filing or not str(filing.get("rcept_no") or "").strip():
+        raise ComparisonBlockedError("자사 비교용 공식 공시 접수번호가 없습니다")
+    downloader = dart_download_document or engine.download_document
+    self_path = downloader(
+        str(filing["rcept_no"]), engine.RAW_DIR, counter
+    )
+    self_official_text = str(engine.read_filing_text(self_path) or "")
+    comparison = _build_competitive_position_result(
+        Report(
+            company=company_name,
+            job="",
+            corp_type=corp_type,
+            grade=Grade.PARTIAL,
+            sections=[],
+            # 후보 registry는 아래 전용 인자로만 넘긴다. Report에도 미리 넣으면
+            # 공용 생산기가 「이미 상위 보고서에 있는 Source」로 보고 결과에서
+            # 빼는데, V2 bridge에는 그 상위 Report가 없어서 후보·attester가
+            # typed packet 직전에 사라진다.
+            citations=[],
+        ),
+        engine=engine,
+        counter=counter,
+        self_corp_code=corp_code,
+        self_company=company_name,
+        self_financials=financials,
+        self_filing=filing,
+        self_official_text=self_official_text,
+        collected_on=business_date.isoformat(),
+        business_date=business_date,
+        official_candidate_sentences=candidate_sentences,
+        candidate_source_registry=candidate_sources,
+        dart_download_document=dart_download_document,
+    )
+    return comparison
+
+
+def _comparison_generation_digest(
+    source_identity_digest: str, comparison: Any
+) -> str:
+    """비교사 원문·수치 변경도 FULL 캐시 신원에 포함한다."""
+
+    from src.shared.report_generation.models import canonical_sha256  # noqa: PLC0415
+
+    comparison_digest = canonical_sha256(comparison)
+    return hashlib.sha256(
+        f"{source_identity_digest}\x1f{comparison_digest}".encode("utf-8")
+    ).hexdigest()
 
 
 def _run_v2_composer(
@@ -3519,6 +4358,7 @@ def _run_v2_composer(
     source_identity_digest: str = "",
     build_identity: engine_build_identity.EngineBuildIdentity,
     generation_mode: engine_mode.EngineMode,
+    comparison_result: Any = None,
 ) -> RunResult:
     """엔진 v2: composer 경로로 보고서를 만든다.
 
@@ -3552,6 +4392,12 @@ def _run_v2_composer(
         performance_table_from_report_table,
     )
     from src.features.composer.validate import V2ValidationError  # noqa: PLC0415
+    from src.features.company_comparison.v2_bridge import (  # noqa: PLC0415
+        attach_comparison_program_evidence,
+    )
+    from src.shared.report_generation.canonical import (  # noqa: PLC0415
+        PublicManifestError,
+    )
 
     filing_identity = filing_meta_from_raw(filing)
     try:
@@ -3578,23 +4424,111 @@ def _run_v2_composer(
                 frags=frags,
                 filing_meta=filing_identity,
             )
-    except ValueError as exc:
-        logger.warning("엔진 v2 FULL 입력 계약 차단: %s", str(exc))
-        steps.append({"step": "v2_FULL_입력계약_차단", "사유": str(exc)})
+            if comparison_result is None:
+                raise ValueError("FULL 생성에 공식 양사 비교 생산물이 없습니다")
+            section_evidence_packets = attach_comparison_program_evidence(
+                section_evidence_packets,
+                comparison_result,
+            )
+    except EvidenceTransportError as exc:
+        gate_reason = classify_v2_validation_final_gate_reason((exc.detail_code,))
+        logger.warning(
+            "엔진 v2 FULL 근거 transport 차단: %s",
+            exc.detail_code,
+        )
+        steps.append(
+            {
+                "step": "v2_FULL_근거transport_차단",
+                "사유코드": exc.detail_code,
+            }
+        )
         return RunResult(
             outcome=Outcome.GATE_STOPPED,
             message=(
-                "엄격 생성에 필요한 회사별 근거 묶음을 완전히 확인하지 못해 "
-                "AI 작성 전에 멈췄습니다."
-                + _stop_reason_note(FINAL_GATE_REASON_PUBLISH_BLOCKED)
+                "회사 공식 자료를 보고서 장에 연결하는 내부 검사를 통과하지 "
+                "못해 AI 작성 전에 멈췄습니다."
+                + _stop_reason_note(gate_reason)
             ),
             sources=sources,
             corp_type=corp_type,
             fragments_collected=len(frags),
             cost_krw=_request_spent_krw(engine),
             model=model,
-            final_gate_reason=FINAL_GATE_REASON_PUBLISH_BLOCKED,
+            final_gate_reason=gate_reason,
         )
+    except ValueError:
+        # release mode 파싱·FULL build 설정·양사 비교 packet 결속은 모두
+        # 회사 자료의 품질이 아니라 우리 실행 경계의 입력/배선 계약이다.
+        # 이 ValueError를 publish_blocked로 접으면 운영 화면은 회사 자료가
+        # 부족한 것처럼 보이고 같은 내부 결함을 찾기 어려워진다. 사람용
+        # 예외문은 저장하지 않고 닫힌 내부 사유만 남긴다.
+        logger.warning("엔진 v2 FULL 입력 계약 차단", exc_info=True)
+        steps.append(
+            {
+                "step": "v2_FULL_입력계약_차단",
+                "사유코드": FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
+            }
+        )
+        return RunResult(
+            outcome=Outcome.GATE_STOPPED,
+            message=(
+                "엄격 생성에 필요한 회사별 근거 묶음을 완전히 확인하지 못해 "
+                "AI 작성 전에 멈췄습니다."
+                + _stop_reason_note(
+                    FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
+                )
+            ),
+            sources=sources,
+            corp_type=corp_type,
+            fragments_collected=len(frags),
+            cost_krw=_request_spent_krw(engine),
+            model=model,
+            final_gate_reason=FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
+        )
+
+    if release_mode is ReleaseMode.FULL:
+        assert section_evidence_packets is not None
+        document_preflight = assess_packet_document_sources(
+            section_evidence_packets
+        )
+        if not document_preflight.can_call_ai:
+            packet_contract_invalid = (
+                document_preflight.detail_code
+                == FINAL_GATE_DETAIL_PREFLIGHT_PACKET_INVALID
+            )
+            gate_reason = _packet_document_preflight_final_gate_reason(
+                document_preflight.detail_code
+            )
+            steps.append(
+                {
+                    "step": "v2_FULL_독립문서사전검사_차단",
+                    "독립문서수": document_preflight.independent_document_count,
+                    "사유코드": document_preflight.detail_code,
+                }
+            )
+            return RunResult(
+                outcome=Outcome.GATE_STOPPED,
+                message=(
+                    (
+                        "수집한 문서의 신원과 원문 지문을 하나로 "
+                        "결속하는 내부 검사를 통과하지 못해 AI 작성 전에 "
+                        "멈췄습니다."
+                        if packet_contract_invalid
+                        else (
+                            "수집한 공식 자료를 모두 합쳐도 완성 보고서의 "
+                            "독립 문서 최소 기준을 채울 수 없어 AI 작성 "
+                            "전에 멈췄습니다."
+                        )
+                    )
+                    + _stop_reason_note(gate_reason)
+                ),
+                sources=sources,
+                corp_type=corp_type,
+                fragments_collected=len(frags),
+                cost_krw=_request_spent_krw(engine),
+                model=model,
+                final_gate_reason=gate_reason,
+            )
 
     # 실적표 — v1과 같은 생성부(재사용). 없으면 None으로 계속 간다 (차단 아님).
     financial_cite = _first_fragment_cite(
@@ -3610,6 +4544,38 @@ def _run_v2_composer(
         if report_table is not None
         else None
     )
+    try:
+        composition_tables = composition_tables_from_raw(revenue_tables)
+        if len(composition_tables) != len(revenue_tables):
+            # 변환기는 과거 호환을 위해 빈 행·잘못된 Mapping을 건너뛸 수 있다.
+            # 생산 경로에서는 표 하나라도 조용히 사라지면 근거 없는 축소
+            # 보고서가 되므로, 입력과 출력의 1:1 보존을 별도로 강제한다.
+            raise ValueError("매출 구성표 변환 과정에서 표가 누락됐습니다")
+    except (TypeError, ValueError):
+        # 매출표의 공개 행·원문 행·행별 근거가 한 index로 이동하지 못하면
+        # 회사 자료 부족이 아니라 내부 transport 결함이다. provider closure를
+        # 만들기 전에 닫아 실제 AI 호출과 정상 차감을 모두 막는다.
+        logger.warning("엔진 v2 매출표 근거 transport 차단", exc_info=True)
+        steps.append(
+            {
+                "step": "v2_매출표근거transport_차단",
+                "사유코드": FINAL_GATE_DETAIL_PUBLIC_MANIFEST_BINDING_INVALID,
+            }
+        )
+        return RunResult(
+            outcome=Outcome.GATE_STOPPED,
+            message=(
+                "매출 구성표의 공개 값과 원문 근거를 같은 순서로 연결하지 "
+                "못해 AI 작성 전에 멈췄습니다."
+                + _stop_reason_note(FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT)
+            ),
+            sources=sources,
+            corp_type=corp_type,
+            fragments_collected=len(frags),
+            cost_krw=_request_spent_krw(engine),
+            model=model,
+            final_gate_reason=FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
+        )
     analysis_period, latest_performance_period = _performance_period_labels(
         report_table, filing
     )
@@ -3642,7 +4608,7 @@ def _run_v2_composer(
             # 전자공시 조각에는 조각 자체에 주소가 없다. 주소를 가진 것은
             # «떠 온 문서»이므로 그 신원을 함께 넘겨 부록에 원문 주소를 싣는다.
             filing_meta=filing_identity,
-            composition_tables=composition_tables_from_raw(revenue_tables),
+            composition_tables=composition_tables,
             release_mode=release_mode,
             section_evidence_packets=section_evidence_packets,
             # 회사 신원은 릴리스 정책과 무관한 사실이다 — 이미 확인한 고유번호를
@@ -3705,15 +4671,50 @@ def _run_v2_composer(
                             output.report.public_structure_manifest.encode("utf-8")
                         ),
                     )
+                except PublicManifestError:
+                    # 아래 공용 except가 같은 manifest 오류를 닫힌 내부 사유로
+                    # 분류한다. 사람 문구 하나짜리 V2ValidationError로 바꾸면
+                    # 발생 위치에 따라 publish_blocked로 오표기된다.
+                    raise
                 except (TypeError, ValueError) as error:
                     raise V2ValidationError(
-                        ("FULL 생성 생산 증거와 최종 보고서 결속이 깨졌습니다",)
+                        ("FULL 생성 생산 증거와 최종 보고서 결속이 깨졌습니다",),
+                        problem_codes=(
+                            FINAL_GATE_DETAIL_EVIDENCE_MANIFEST_BINDING_INVALID,
+                        ),
                     ) from error
     except AskFatalError as exc:
         # 예산 소진·billing-uncertain 같은 요청 전역 장애 — «출고 검증 실패»로
         # 오표기하지 않는다. 원인 예외를 그대로 다시 던져 v1과 같은 경로로
         # run()의 바깥 except가 FAILED로 정직하게 끝내게 한다.
         raise exc.cause from exc
+    except PublicManifestError:
+        # 행 원문·표 변형·공개 manifest 결속이 깨진 것은 회사 자료 부족이
+        # 아니라 우리 내부 배선 오류다. 예외문이나 원문은 영속 진단에 싣지 않는다.
+        gate_reason = classify_v2_validation_final_gate_reason(
+            (FINAL_GATE_DETAIL_PUBLIC_MANIFEST_BINDING_INVALID,)
+        )
+        logger.warning("엔진 v2 공개 manifest 결속 차단", exc_info=True)
+        steps.append(
+            {
+                "step": "v2_공개manifest_결속차단",
+                "사유코드": FINAL_GATE_DETAIL_PUBLIC_MANIFEST_BINDING_INVALID,
+            }
+        )
+        return RunResult(
+            outcome=Outcome.GATE_STOPPED,
+            message=(
+                "보고서 표와 원문을 연결하는 내부 검사를 통과하지 못해 "
+                "보고서를 내보내지 않았습니다."
+                + _stop_reason_note(gate_reason)
+            ),
+            sources=sources,
+            corp_type=corp_type,
+            fragments_collected=len(frags),
+            cost_krw=_request_spent_krw(engine),
+            model=model,
+            final_gate_reason=gate_reason,
+        )
     except V2ValidationError as exc:
         # v2 출고 3검사 실패 — 원문 없는 검증 사유만 운영 기록에 남긴다.
         # ★ 품질 하한(40건 실질 claim·8건 독립 문서·50% 검증 비율) 미달일
@@ -3721,7 +4722,12 @@ def _run_v2_composer(
         #   publish_blocked로 남는다(뭉뚱그림 금지). 분류 자체는
         #   src/shared/final_gate_diagnostics.py의 순수 함수 한 곳이
         #   권위다(shadow 진단 하네스와 공유).
-        gate_reason = classify_v2_validation_final_gate_reason(exc.problem_codes)
+        # composer 사전검사는 하위 호환 때문에 기계 코드를 ``problems``에
+        # 싣던 기간이 있었다. 닫힌 분류기는 완전 일치만 받으므로 두 통로를
+        # 합쳐도 사람 문구·URL이 사유로 오인되지 않는다.
+        gate_reason = classify_v2_validation_final_gate_reason(
+            (*exc.problem_codes, *exc.problems)
+        )
         logger.warning("엔진 v2 출고 검증 차단: %s", list(exc.problems))
         steps.append({"step": "v2_출고검증_차단", "사유": list(exc.problems)})
         return RunResult(
@@ -3795,8 +4801,19 @@ def _run_v2_composer(
         sources=sources,
         charged=True,  # 보고서가 나가면 1 차감 — v1과 같은 3분법
         corp_type=corp_type,
-        fragments_collected=len(frags),
-        fragments_cited=len(report.citations),
+        # composer의 최종 provenance 등록부에는 직접 인용되지 않는 소유권
+        # attester도 남는다. raw frags/부록 길이를 다시 세지 않고, 프로그램
+        # 비교 조각까지 포함해 같은 번호 정본으로 계산한 생성 지표를 운반한다.
+        fragments_collected=(
+            output.generation_metrics.fragments_collected
+            if output.generation_metrics is not None
+            else len(frags)
+        ),
+        fragments_cited=(
+            output.generation_metrics.fragments_cited
+            if output.generation_metrics is not None
+            else len(report.citations)
+        ),
         sentences_made=output.composed_sentences,
         sentences_passed=output.verified_sentences,
         cost_krw=_request_spent_krw(engine),
@@ -4113,7 +5130,7 @@ _TYPED_DART_SECTION_FRAGMENT_KIND: Final[dict[str, str]] = {
 
 #: DART 접수번호(rcept_no)의 모양 — 14자리 숫자.
 #: typed 수집기의 문서ID는 `f"{source_kind}:{rcept_no}"`라 뒷부분만 접수번호다.
-_RCEPT_NO_RE: Final[re.Pattern[str]] = re.compile(r"\d{14}")
+_RCEPT_NO_RE: Final[re.Pattern[str]] = re.compile(r"[0-9]{14}")
 
 #: typed 공식 근거 수집 결과를 남기는 단계 이름.
 #: ★ `_sources_from`이 읽는 이름들과 겹치지 않게 새로 만든다 — 겹치면 화면의
@@ -4307,7 +5324,9 @@ def _typed_dart_legacy_fragments(mapping: dict[str, Any]) -> list[dict[str, str]
             )
             continue
         document = documents.get(document_id, {})
-        published_on = str(document.get("published_on") or "")
+        published_on = normalize_official_source_date(
+            document.get("published_on")
+        )
         made.append(
             {
                 "종류": kind,
@@ -4315,11 +5334,7 @@ def _typed_dart_legacy_fragments(mapping: dict[str, Any]) -> list[dict[str, str]
                 "문서ID": rcept_no,
                 "문서명": str(document.get("title") or ""),
                 "원문위치": str(raw.get("location") or ""),
-                "문서일": (
-                    f"{published_on[:4]}-{published_on[4:6]}-{published_on[6:8]}"
-                    if re.fullmatch(r"\d{8}", published_on)
-                    else ""
-                ),
+                "문서일": published_on,
             }
         )
     return made
@@ -4356,6 +5371,109 @@ def _merge_typed_dart_fragments(
     return merged, added
 
 
+@dataclass(frozen=True)
+class _FormalOfficialSourceSummary:
+    """정식 수집 결과를 옛 출처 현황 형식으로만 보여 주는 읽기 전용 요약."""
+
+    state: str
+    detail: str
+    candidate_scope_complete: bool
+    fragment_count: int
+    attempted_documents: int = 0
+    downloaded_pdf_bytes: int = 0
+    fragments: tuple[dict[str, str], ...] = ()
+
+
+def _formal_official_web_summaries(
+    result: OfficialEvidenceCollectionResult,
+) -> tuple[_FormalOfficialSourceSummary, _FormalOfficialSourceSummary]:
+    """한 번 끝낸 정식 웹 수집을 홈페이지·IR 상태로만 투영한다.
+
+    이 요약의 ``fragments``는 의도적으로 항상 비어 있다. 실제 typed 조각은
+    뒤의 ``merge_official_evidence_fragments`` 한 경계에서만 숫자 인용으로
+    옮겨야 한다. 여기서 옛 조각처럼 다시 넣으면 동일 원문이 두 번호로 생기고,
+    캐시 snapshot에 없는 입력이 Writer에 섞인다.
+    """
+
+    documents: dict[str, Any] = {}
+    fragments: dict[str, Any] = {}
+    attempts: dict[str, Any] = {}
+    for candidate in result.candidates:
+        for document in candidate.documents:
+            documents.setdefault(document.document_id, document)
+        for fragment in candidate.fragments:
+            fragments.setdefault(fragment.fragment_id, fragment)
+        for attempt in candidate.attempts:
+            attempts.setdefault(attempt.attempt_id, attempt)
+
+    def summarize(
+        source_kinds: frozenset[str],
+        *,
+        missing_detail: str,
+        failed_detail: str,
+    ) -> _FormalOfficialSourceSummary:
+        matching_documents = {
+            document_id: document
+            for document_id, document in documents.items()
+            if document.source_kind in source_kinds
+        }
+        matching_fragments = {
+            fragment_id: fragment
+            for fragment_id, fragment in fragments.items()
+            if fragment.document_id in matching_documents
+        }
+        matching_attempts = {
+            attempt_id: attempt
+            for attempt_id, attempt in attempts.items()
+            if attempt.source_kind in source_kinds
+        }
+        failed = any(
+            attempt.state in {CollectionState.FAILED, CollectionState.TRUNCATED}
+            for attempt in matching_attempts.values()
+        )
+        # 시도도 문서도 없으면 공식 URL 자체를 열지 못한 경우까지 "끝까지
+        # 확인했다"고 단정할 수 없다. 성공/없음/실패를 캐시 판정에서 섞지 않는다.
+        scope_complete = bool(matching_attempts or matching_documents) and not failed
+        if failed:
+            state = "failed"
+            detail = failed_detail
+        elif matching_fragments:
+            state = "ok"
+            detail = "정식 공식 자료 수집 결과를 사용했습니다"
+        else:
+            state = "none"
+            detail = missing_detail
+        return _FormalOfficialSourceSummary(
+            state=state,
+            detail=detail,
+            candidate_scope_complete=scope_complete,
+            fragment_count=len(matching_fragments),
+            attempted_documents=sum(
+                attempt.documents_seen for attempt in matching_attempts.values()
+            ),
+            downloaded_pdf_bytes=sum(
+                attempt.bytes_downloaded for attempt in matching_attempts.values()
+            ),
+        )
+
+    homepage = summarize(
+        frozenset(
+            {
+                SOURCE_KIND_OFFICIAL_WEB_PAGE,
+                SOURCE_KIND_OFFICIAL_RECRUIT_PAGE,
+            }
+        ),
+        missing_detail="정식 공식 웹 수집에서 사용할 근거를 찾지 못했습니다",
+        failed_detail="정식 공식 웹 자료 확인을 끝까지 마치지 못했습니다",
+    )
+    official_ir = summarize(
+        frozenset({SOURCE_KIND_OFFICIAL_IR_PDF}),
+        missing_detail="정식 공식 IR 수집에서 사용할 근거를 찾지 못했습니다",
+        failed_detail="정식 공식 IR 자료 확인을 끝까지 마치지 못했습니다",
+    )
+    return homepage, official_ir
+
+
 def _collect(
     engine: Any,
     client: Any,
@@ -4369,6 +5487,8 @@ def _collect(
     filing: Optional[dict[str, Any]],
     generation_mode: Optional[engine_mode.EngineMode] = None,
     corp_code: str = "",
+    formal_official_evidence: Optional[OfficialEvidenceCollectionResult] = None,
+    dart_download_document: Any = None,
 ) -> tuple[dict[int, dict[str, str]], list[dict], str]:
     """6 수집 — 공시 원문 + 재무 API + 홈페이지를 조각으로 만든다. AI 0회.
 
@@ -4384,6 +5504,9 @@ def _collect(
         corp_code: 사용자가 확정한 8자리 DART 법인코드(`card.ref`). typed 수집은
             회사별이라 이 값이 없으면 시작하지 않는다. `profile`에서 다시 읽지
             않는다 — 회사 식별자는 한 곳에서만 온다.
+        formal_official_evidence: FULL 정식 수집기가 이미 만든 결과. 있으면 같은
+            홈페이지·IR을 legacy 수집기로 다시 열거나 옛 조각으로 다시 넣지
+            않고, 출처 현황용 안전 요약만 남긴다. 기본값은 기존 경로와 같다.
 
     Returns:
         조각 목록, 구조화 표, 실제로 내려받은 자사 공식 원문. 마지막 값은
@@ -4392,7 +5515,8 @@ def _collect(
     filing_text = ""
     if filing:
         try:
-            path = engine.download_document(filing["rcept_no"], engine.RAW_DIR, counter)
+            downloader = dart_download_document or engine.download_document
+            path = downloader(filing["rcept_no"], engine.RAW_DIR, counter)
             filing_text = engine.read_filing_text(path)
         except (RuntimeError, OSError) as exc:
             # 못 가져온 사실을 남긴다 — 조용히 넘어가면 「회사에 자료가 없다」로 잘못 읽힌다.
@@ -4434,7 +5558,15 @@ def _collect(
     # ── typed 공식 근거 수집 (FULL + kill switch 둘 다 켜졌을 때만) ──
     # ★ 아래 한 줄이 kill switch다. 꺼져 있거나 v1·비FULL이면 여기서 그대로
     #   빠져나가고, 이 함수의 나머지 legacy 경로는 바이트 하나 달라지지 않는다.
-    if _typed_dart_collection_enabled(generation_mode) and corp_code.strip():
+    # FULL의 정식 collector가 typed DART를 이미 받았으면 옛 kill-switch
+    # 경로를 두 번 타지 않는다. 같은 공시를 재다운로드하고
+    # 중복 조각을 넣는 것은 DART 한도·packet 신원 모두를 손상한다.
+    # formal이 없는 옛 direct/SHADOW 호출은 기존 kill-switch를 그대로 유지한다.
+    if (
+        formal_official_evidence is None
+        and _typed_dart_collection_enabled(generation_mode)
+        and corp_code.strip()
+    ):
         frags = _collect_typed_dart(
             engine,
             counter,
@@ -4462,20 +5594,33 @@ def _collect(
 
     # 회사 홈페이지 — 2번(뭘 잘하나)이 만성적으로 비는 원인이었다.
     # ★ 실패를 「없음」과 반드시 구분한다. 섞으면 「이 회사는 자료가 없다」로 잘못 읽힌다.
+    formal_homepage = None
+    formal_official_ir = None
+    if formal_official_evidence is not None:
+        formal_homepage, formal_official_ir = _formal_official_web_summaries(
+            formal_official_evidence
+        )
     with collection_cache_scope():
-        homepage = collect_homepage_fragments(
-            _homepage_url_same_host_only(profile.get("hm_url", "")),
-            allow_dart_www_alias=True,
+        homepage = (
+            formal_homepage
+            if formal_homepage is not None
+            else collect_homepage_fragments(
+                _homepage_url_same_host_only(profile.get("hm_url", "")),
+                allow_dart_www_alias=True,
+            )
         )
         if homepage.state == "ok":
             for frag in homepage.fragments:
                 # 최종 URL 검증 표식·문서 위치 등 수집기가 만든 provenance 메타데이터를
                 # 버리지 않는다. build_citations가 닫힌 Source 필드만 골라 쓴다.
                 frags[max(frags, default=0) + 1] = dict(frag)
+            homepage_fragment_count = int(
+                getattr(homepage, "fragment_count", len(homepage.fragments))
+            )
             steps.append(
                 {
                     "step": "6_수집_홈페이지",
-                    "조각수": len(homepage.fragments),
+                    "조각수": homepage_fragment_count,
                     "후보범위완전": homepage.candidate_scope_complete,
                 }
             )
@@ -4511,11 +5656,15 @@ def _collect(
             )
         )
         try:
-            official_ir = collect_official_ir_fragments(
-                str(profile.get("hm_url") or ""),
-                company_name=str(profile.get("corp_name") or "").strip(),
-                company_aliases=company_aliases,
-                allow_dart_www_alias=True,
+            official_ir = (
+                formal_official_ir
+                if formal_official_ir is not None
+                else collect_official_ir_fragments(
+                    str(profile.get("hm_url") or ""),
+                    company_name=str(profile.get("corp_name") or "").strip(),
+                    company_aliases=company_aliases,
+                    allow_dart_www_alias=True,
+                )
             )
         except Exception as exc:  # noqa: BLE001 - 수집기 결함도 자료 부재로 오인하지 않는다
             steps.append(
@@ -4532,10 +5681,13 @@ def _collect(
             if official_ir.state == "ok":
                 for fragment in official_ir.fragments:
                     frags[max(frags, default=0) + 1] = dict(fragment)
+                ir_fragment_count = int(
+                    getattr(official_ir, "fragment_count", len(official_ir.fragments))
+                )
                 steps.append(
                     {
                         "step": "6_수집_공식IR",
-                        "조각수": len(official_ir.fragments),
+                        "조각수": ir_fragment_count,
                         "문서시도": official_ir.attempted_documents,
                         "PDF바이트": official_ir.downloaded_pdf_bytes,
                         "상세": official_ir.detail,
@@ -4566,8 +5718,14 @@ def _collect(
     # ★ 매출 구성 비중 표 — 사용자가 리포트 11건에서 고른 항목 ①.
     #   **11건이 «전부» 실은 유일한 만장일치 항목**이다.
     #   ⚠️ 지어낼 자리가 없다 — 공시가 비중을 이미 계산해 놓았고 우리는 베낄 뿐이다.
-    revenue_cite = _first_fragment_cite(frags, kind="매출수주") or REVENUE_CITE
-    revenue_tables = revenuemix.build(filing_text, cite=revenue_cite)
+    revenue_tables = revenuemix.build(filing_text)
+    frags, revenue_tables = _bind_revenue_table_evidence_fragments(
+        frags,
+        revenue_tables,
+        filing=filing,
+        filing_text=filing_text,
+    )
+    dart_fragment_count += len(revenue_tables)
     if revenue_tables:
         steps.append({"step": "6_수집_매출구성", "표": len(revenue_tables)})
 

@@ -24,10 +24,14 @@ from src.features.homepage.constants import (
     MULTI_LABEL_PUBLIC_SUFFIXES,
     SINGLE_LABEL_PUBLIC_SUFFIXES,
     TEST_FIXTURE_ONLY_SINGLE_LABEL_SUFFIXES,
-    WIDE_EXCLUDED_LINKED_HOST_SUFFIXES,
     WIDE_PRIORITY_HOST_KEYWORDS,
+    WIDE_REQUIRED_SLOT_IDS_BY_SECTION,
+    WIDE_SOURCE_KIND_RECRUIT_PAGE,
+    WIDE_SOURCE_KIND_WEB_PAGE,
     WIDE_SLOT_KEYWORD_MAP,
 )
+from src.shared.report_evidence.identity_verified_web import is_disallowed_identity_host
+from src.shared.registered_domain import is_actual_registered_subdomain
 
 #: 판정 시점에만 두 집합을 함께 본다 — 정본 SINGLE_LABEL_PUBLIC_SUFFIXES 자체는
 #: 절대 합치지 않는다(정정 2). 오프라인 시험 픽스처(``.example`` 등)가
@@ -422,13 +426,7 @@ def is_registered_subdomain(root_host: str, candidate_host: str) -> bool:
 
 def is_excluded_linked_host(host: str) -> bool:
     """소셜·광고·분석 등 «회사의 다른 공식 채널」로 보지 않는 호스트인가."""
-    normalized = (host or "").lower().rstrip(".")
-    if not normalized:
-        return True
-    return any(
-        normalized == suffix or normalized.endswith(f".{suffix}")
-        for suffix in WIDE_EXCLUDED_LINKED_HOST_SUFFIXES
-    )
+    return is_disallowed_identity_host(host)
 
 
 @dataclass(frozen=True)
@@ -464,7 +462,13 @@ def bind_registered_subdomain(root_host: str, candidate_host: str) -> BoundHost 
     root_core = registrable_core_name(normalized_root)
     if not root_core or normalized_root not in (root_core, f"www.{root_core}"):
         return None
-    if not is_registered_subdomain(root_host, candidate_host):
+    # 같은 eTLD+1의 형제 host까지 허용하면 ``www.company.com``에서 발견한
+    # ``vendor.company.com``을 root의 자손으로 오인한다. 공개 Source가 나중에
+    # 다시 검산할 수 있는 «실제 자손» 관계만 수집 단계에서도 승인한다.
+    # DART root가 www 별칭이면 자손 관계의 기준은 www 자체가 아니라 그와
+    # 동치로 인정한 registrable apex다. 그래도 후보는 apex의 실제 자손이어야
+    # 하므로 a.company ↔ b.company 같은 임의 sibling 승격은 생기지 않는다.
+    if not is_actual_registered_subdomain(root_core, candidate_host):
         return None
     return BoundHost(
         host=candidate_host.casefold(),
@@ -571,8 +575,16 @@ def canonicalize_url(
     )
 
 
-def slot_ids_for_url(url: str) -> tuple[str, ...]:
-    """URL 안의 페이지 유형 키워드로 후보 슬롯 집합을 고른다(첫 일치 우선).
+@dataclass(frozen=True)
+class OfficialPageClassification:
+    """URL 하나에서 함께 결정한 formal 종류와 후보 슬롯."""
+
+    source_kind: str
+    slot_ids: tuple[str, ...]
+
+
+def classify_official_page_url(url: str) -> OfficialPageClassification:
+    """URL 하나에서 source_kind와 후보 슬롯을 원자적으로 판정한다.
 
     경로(+쿼리)는 모든 키워드로 대조하지만, 호스트 이름은 «하위 도메인으로
     써도 안전한» 키워드(``_HOST_SAFE_KEYWORDS``, recruit·ir·news 등)만
@@ -580,9 +592,9 @@ def slot_ids_for_url(url: str) -> tuple[str, ...]:
     도메인은 잡아내면서, company.example처럼 회사 도메인 자체에 우연히
     들어 있는 낱말(«company» 등)이 모든 페이지를 잘못 분류하지 않는다.
 
-    `wide_collect.py`(attempt.slot_ids)와 `wide_fragments.py`(조각 슬롯 태깅)가
-    같은 표(`constants.WIDE_SLOT_KEYWORD_MAP`)를 이 함수 하나로 공유한다 —
-    두 곳에 각각 다른 매핑을 두지 않는다.
+    채용 분류는 culture 슬롯과 항상 한 쌍이다. URL 전체 부분문자열로 종류를
+    따로 정하지 않으므로 ``careerplus.example``·``myjobs.example`` 같은
+    회사 도메인 이름이 우연히 채용 kind가 되는 일을 막는다.
     """
     parsed = urllib.parse.urlsplit(url)
     host_labels = frozenset((parsed.hostname or "").lower().split("."))
@@ -591,10 +603,25 @@ def slot_ids_for_url(url: str) -> tuple[str, ...]:
         path_and_query = f"{path_and_query}?{urllib.parse.unquote(parsed.query).lower()}"
 
     for keywords, slots in WIDE_SLOT_KEYWORD_MAP:
-        if any(keyword in path_and_query for keyword in keywords):
-            return slots
-        if any(
+        matched = any(keyword in path_and_query for keyword in keywords) or any(
             keyword in host_labels for keyword in keywords if keyword in _HOST_SAFE_KEYWORDS
-        ):
-            return slots
-    return ()
+        )
+        if matched:
+            return OfficialPageClassification(
+                source_kind=(
+                    WIDE_SOURCE_KIND_RECRUIT_PAGE
+                    if slots == WIDE_REQUIRED_SLOT_IDS_BY_SECTION["culture"]
+                    else WIDE_SOURCE_KIND_WEB_PAGE
+                ),
+                slot_ids=slots,
+            )
+    return OfficialPageClassification(
+        source_kind=WIDE_SOURCE_KIND_WEB_PAGE,
+        slot_ids=(),
+    )
+
+
+def slot_ids_for_url(url: str) -> tuple[str, ...]:
+    """호환 API — source_kind와 함께 계산된 슬롯만 반환한다."""
+
+    return classify_official_page_url(url).slot_ids

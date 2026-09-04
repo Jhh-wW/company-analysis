@@ -10,7 +10,11 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from src.shared.report_quality.contract import contract_for_generation
+from src.shared.report_evidence.policy import (
+    EVIDENCE_SLOT_POLICY_VERSION,
+    required_slots_for,
+)
+from src.shared.report_quality.contract import contract_for_stored_assessment
 from src.shared.report_quality.models import (
     GenerationAssessment,
     QualityAssessment,
@@ -80,7 +84,7 @@ def assert_complete_generation_assessment(
         )
     ):
         raise AssessmentIntegrityError("품질·안전 계약 버전 형식이 손상됐습니다")
-    contract = contract_for_generation(assessment.contract_version)
+    contract = contract_for_stored_assessment(assessment.contract_version)
     versions = {
         assessment.contract_version,
         quality.contract_version,
@@ -141,13 +145,29 @@ def assert_complete_generation_assessment(
     )
     if substantive < contract.min_substantive_claims:
         raise AssessmentIntegrityError("완성 판정의 실질 claim 수가 계약 하한보다 적습니다")
-    if verified != substantive:
+    interpretation_policy_enabled = any(
+        value is not None
+        for value in (
+            contract.max_interpreted_claims_per_section,
+            contract.max_interpreted_claims,
+            contract.max_interpreted_ratio,
+        )
+    )
+    if verified > substantive:
+        raise AssessmentIntegrityError("검증 사실 수가 전체 실질 claim 수보다 많습니다")
+    if not interpretation_policy_enabled and verified != substantive:
         raise AssessmentIntegrityError("공개 가능 완성본의 모든 claim이 검증되지 않았습니다")
     verified_ids = safety.verified_fact_ids
+    # 새 FULL에서 quality.verified_claims는 해석을 뺀 «검증 사실» 수다.
+    # safety.verified_fact_ids는 해석도 원문 결속·검수 상태를 통과해야 하므로
+    # 전체 실질 claim 수와 일치해야 한다. 과거 계약의 기존 뜻은 그대로 둔다.
+    expected_safety_verified = (
+        substantive if interpretation_policy_enabled else verified
+    )
     if (
         any(not value for value in verified_ids)
         or len(verified_ids) != len(set(verified_ids))
-        or len(verified_ids) != verified
+        or len(verified_ids) != expected_safety_verified
     ):
         raise AssessmentIntegrityError("검증 claim 수와 안전 판정의 fact 목록이 다릅니다")
     expected_ratio = Decimal(verified) / Decimal(substantive)
@@ -159,6 +179,42 @@ def assert_complete_generation_assessment(
         raise AssessmentIntegrityError("검증 claim 비율이 실제 개수와 다릅니다")
     if quality.verified_ratio < contract.min_verified_ratio:
         raise AssessmentIntegrityError("완성 판정의 검증 비율이 계약 하한보다 낮습니다")
+    if interpretation_policy_enabled:
+        interpreted = substantive - verified
+        interpreted_ratio = Decimal(interpreted) / Decimal(substantive)
+        if (
+            contract.max_interpreted_claims is not None
+            and interpreted > contract.max_interpreted_claims
+        ):
+            raise AssessmentIntegrityError("완성 판정의 해석 claim 수가 계약 상한보다 많습니다")
+        if (
+            contract.max_interpreted_ratio is not None
+            and interpreted_ratio > contract.max_interpreted_ratio
+        ):
+            raise AssessmentIntegrityError("완성 판정의 해석 claim 비율이 계약 상한보다 높습니다")
+        section_interpretation_counts = _ordered_counts(
+            quality.section_interpretation_counts,
+            required_section_ids=contract.required_section_ids,
+            label="장별 해석 claim 수",
+        )
+        if sum(section_interpretation_counts) != interpreted:
+            raise AssessmentIntegrityError(
+                "장별 해석 claim 합계가 전체 해석 claim 수와 다릅니다"
+            )
+        if (
+            contract.max_interpreted_claims_per_section is not None
+            and any(
+                count > contract.max_interpreted_claims_per_section
+                for count in section_interpretation_counts
+            )
+        ):
+            raise AssessmentIntegrityError(
+                "완성 판정의 한 장 해석 claim 수가 계약 상한보다 많습니다"
+            )
+    elif quality.section_interpretation_counts:
+        raise AssessmentIntegrityError(
+            "과거 품질 계약에는 장별 해석 claim 수를 새로 넣을 수 없습니다"
+        )
     if sources < contract.min_document_sources:
         raise AssessmentIntegrityError("완성 판정의 독립 문서 수가 계약 하한보다 적습니다")
 
@@ -172,11 +228,28 @@ def assert_complete_generation_assessment(
         required_section_ids=contract.required_section_ids,
         label="장별 공개 문장 수",
     )
-    if any(
+    required_slot_policy = contract.required_public_claim_slot_policy_version.strip()
+    if required_slot_policy:
+        if required_slot_policy != EVIDENCE_SLOT_POLICY_VERSION:
+            raise AssessmentIntegrityError("저장 평가의 필수 의미칸 정책 버전을 모릅니다")
+        expected_semantic_counts = tuple(
+            len(required_slots_for(section_id))
+            for section_id in contract.required_section_ids
+        )
+        if semantic_counts != expected_semantic_counts:
+            raise AssessmentIntegrityError("완성 판정에 공개되지 않은 필수 의미칸이 있습니다")
+    elif any(
         count < contract.min_claims_per_covered_section
-        for count in (*semantic_counts, *public_counts)
+        for count in semantic_counts
     ):
-        raise AssessmentIntegrityError("완성 판정에 장별 최소 claim 수 미달이 있습니다")
+        raise AssessmentIntegrityError("완성 판정에 장별 최소 의미 claim 수 미달이 있습니다")
+    public_sentence_floor = (
+        contract.min_public_sentences_per_section
+        if contract.min_public_sentences_per_section is not None
+        else contract.min_claims_per_covered_section
+    )
+    if any(count < public_sentence_floor for count in public_counts):
+        raise AssessmentIntegrityError("완성 판정에 장별 최소 공개 문장 수 미달이 있습니다")
 
 
 __all__ = [

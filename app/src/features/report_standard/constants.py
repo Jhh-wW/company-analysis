@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final
 
+from src.shared.report_quality.constants import COMPARISON_JUDGMENTS
+
 
 CANONICAL_SCHEMA_VERSION: Final[str] = "company-report-v4-canonical"
 
@@ -182,9 +184,6 @@ SECTION_TIME_STATES: Final[dict[str, frozenset[str]]] = {
     "competitive_position": frozenset({"standing"}),
 }
 
-COMPARISON_JUDGMENTS: Final[frozenset[str]] = frozenset(
-    {"competitive_advantage", "operating_characteristic"}
-)
 COMPARISON_JUDGMENT_LABELS: Final[dict[str, str]] = {
     "competitive_advantage": "경쟁우위",
     "operating_characteristic": "운영 특성",

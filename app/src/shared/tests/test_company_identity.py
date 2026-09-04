@@ -5,9 +5,26 @@ import pytest
 from src.shared.company_identity import (
     exact_company_names_equivalent,
     latin_acronym_korean,
+    normalize_korean_registration_number,
     normalized_latin_acronym,
     verified_official_company_names_equivalent,
 )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("123-45-67890", "1234567890"),
+        ("110111 1234567", "1101111234567"),
+        ("1234567890", "1234567890"),
+        ("１２３４５６７８９０", ""),
+        ("١٢٣٤٥٦٧٨٩٠", ""),
+        ("123\t45-67890", ""),
+        ("12345A67890", ""),
+    ],
+)
+def test_등록번호는_원문_ascii_숫자_공백_하이픈만_허용한다(value, expected):
+    assert normalize_korean_registration_number(value) == expected
 
 
 @pytest.mark.parametrize(

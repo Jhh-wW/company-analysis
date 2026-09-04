@@ -73,7 +73,7 @@ def test_기대경로가_아닌_출처의_시도는_확인으로_치지_않는�
     # 조심하게 튼다 — 그래서 사유 코드도 계약과 다른 expected_path_unobserved다.)
     wrong_path_attempt = _attempt(
         attempt_id="a1",
-        source_kind="official_homepage",
+        source_kind="official_web_page",
         slot_ids=("identity:corporate_identity",),
         state=CollectionState.MISSING,
     )
@@ -279,7 +279,7 @@ def test_회사유형에_따라_기대경로가_달라진다() -> None:
 
     official_attempt = _attempt(
         attempt_id="a2",
-        source_kind="official_homepage",
+        source_kind="official_web_page",
         slot_ids=("competitive_position:self_context",),
         state=CollectionState.MISSING,
     )
@@ -327,7 +327,7 @@ def test_undecided_회사유형은_기대경로_가산규칙을_적용하지_않
     # 확인 없이 계약과 완전히 같은 판정(정상 확인 후 부재)만 내야 한다.
     attempt = _attempt(
         attempt_id="a1",
-        source_kind="official_homepage",
+        source_kind="official_web_page",
         slot_ids=("competitive_position:self_context",),
         state=CollectionState.MISSING,
     )
@@ -362,3 +362,22 @@ def test_undecided_회사유형도_조회_실패는_여전히_unknown이다() ->
 
     assert readiness is EvidenceReadiness.UNKNOWN
     assert "required_path_failed:competitive_position:self_context" in reasons
+
+
+def test_접두어만_닮은_미등록조회는_정상_필수경로가_아니다() -> None:
+    fake_attempt = _attempt(
+        attempt_id="fake-source",
+        source_kind="official_fake",
+        slot_ids=("competitive_position:self_context",),
+        state=CollectionState.MISSING,
+    )
+
+    readiness, reasons = diagnose_candidate_readiness(
+        section_id="competitive_position",
+        company_type=CompanyType.AUDIT_ONLY,
+        filled_slot_ids=frozenset(),
+        attempts=(fake_attempt,),
+    )
+
+    assert readiness is EvidenceReadiness.UNKNOWN
+    assert "expected_path_unobserved:competitive_position:self_context" in reasons

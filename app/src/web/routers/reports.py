@@ -7,6 +7,7 @@ import sqlite3
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass, replace
+from enum import Enum
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -46,8 +47,10 @@ from src.features.export_notion.notion import (
     send_report_to_notion,
 )
 from src.features.feedback_report import constants as feedback_constants
+from src.features.final_gate_diagnostic import store as final_gate_diagnostic_store
 from src.features.grading.logic import grade_message
-from src.features.observability import admin_audit
+from src.features.observability import admin_audit, lifecycle
+from src.features.observability import constants as obs
 from src.features.pipeline.port import (
     CompanyCard,
     Grade,
@@ -90,7 +93,13 @@ from src.features.storage import reports as report_store
 from src.shared import engine_build_identity as build_identity_contract
 from src.shared.generation_cache_identity import GenerationCacheNamespace
 from src.shared.report_evidence.constants import ReleaseMode
-from src.web import job_runtime, report_completion, report_delivery_adapter, request_helpers
+from src.web import (
+    job_runtime,
+    report_completion,
+    report_delivery_adapter,
+    report_publication,
+    request_helpers,
+)
 from src.web.security import CSRF_TOKEN_MAX_CHARS
 
 
@@ -129,6 +138,44 @@ _DELIVERY_RETRY_AVAILABLE_FAILURE_CODES = frozenset(
 _PUBLIC_STORE_MISSING = "missing"
 _PUBLIC_STORE_INCOMPLETE = "incomplete"
 _PUBLIC_STORE_UNREADABLE = "unreadable"
+
+
+class _StoredPublicationPriority(str, Enum):
+    """공개 GET이 한 저장 snapshot에서 고르는 단 하나의 다음 경계."""
+
+    ACCESS_REVOKED = "access_revoked"
+    DELIVERY_INTENT = "delivery_intent"
+    STAGED_PENDING = "staged_pending"
+    OPEN = "open"
+
+
+def _stored_publication_priority(
+    *,
+    access_revoked: bool,
+    intent: delivery_store.DeliveryIntent | None,
+    report_exists: bool,
+    publication_lifecycle: str,
+    published_or_legacy: bool,
+) -> _StoredPublicationPriority:
+    """차단 상태가 겹쳐도 가장 구체적인 영속 권위를 먼저 고른다.
+
+    ``report_staged``는 dashboard 상태를 임시 ``blocked=1``로 만들기 때문에
+    일반 차단을 먼저 보면, 이미 FAILED로 닫힌 출고도 영원히 「확인 중」처럼
+    보인다. 권한 철회는 언제나 우선하되 그 다음은 FAILED/REQUIRED intent,
+    그 다음이 intent조차 없는 staging 대기다. COMPLETE/PUBLISHED는 아래의
+    불변 Delivery 읽기로 넘긴다.
+    """
+
+    if access_revoked:
+        return _StoredPublicationPriority.ACCESS_REVOKED
+    if (
+        intent is not None
+        and intent.state != delivery_store.DELIVERY_INTENT_COMPLETE
+    ):
+        return _StoredPublicationPriority.DELIVERY_INTENT
+    if report_exists and publication_lifecycle and not published_or_legacy:
+        return _StoredPublicationPriority.STAGED_PENDING
+    return _StoredPublicationPriority.OPEN
 
 
 @dataclass(frozen=True)
@@ -244,6 +291,38 @@ def _blocked_report_response(request: Request) -> Response:
     )
     response.headers.update(SHARED_LINK_HEADERS)
     return response
+
+
+def _stored_gate_stop_result(run_id: str) -> RunResult | None:
+    """재시작 뒤에도 닫힌 최종 사유로 중단 결과를 최소 복원한다.
+
+    최종 게이트 진단 표만 보면 비용 미확정 ``FAILED``도 섞일 수 있다. 같은
+    transaction에 저장된 lifecycle의 종료 단계가 실제 게이트인 경우에만
+    ``GATE_STOPPED``로 복원한다. 회사명·원문·수집 상세는 진단 원장에 저장하지
+    않았으므로 새로 지어내지 않는다.
+    """
+
+    with storage_db.connect_readonly_existing() as conn:
+        if conn is None:
+            return None
+        diagnostic = final_gate_diagnostic_store.read_for_run(conn, run_id)
+        if diagnostic is None:
+            return None
+        final_record = lifecycle.read_final(conn, run_id)
+    if final_record is None or final_record.end_step != obs.END_STEP_GATE:
+        return None
+    return RunResult(
+        outcome=Outcome.GATE_STOPPED,
+        charged=False,
+        corp_type=final_record.corp_type,
+        fragments_collected=final_record.fragments_collected,
+        fragments_cited=final_record.fragments_cited,
+        sentences_made=final_record.sentences_made,
+        sentences_passed=final_record.sentences_passed,
+        cost_krw=final_record.cost_krw,
+        model=final_record.model,
+        final_gate_reason=diagnostic.reason_code,
+    )
 
 
 def _notion_unsealed_v2_response(request: Request) -> Response:
@@ -590,6 +669,27 @@ async def _result_page_response(
             intent=delivery_intent,
         )
 
+    # 보고서가 만들어지지 않은 게이트 중단에는 Delivery가 없지만, 닫힌 사유와
+    # lifecycle은 같은 transaction에 남는다. 메모리가 비워진 재시작 뒤에도
+    # 권한 검사를 통과한 같은 주소에는 그 안전한 최소 안내를 복원한다.
+    try:
+        stored_gate_stop = _stored_gate_stop_result(job_id)
+    except Exception:  # noqa: BLE001 - 손상된 진단을 다른 사유로 추측하지 않는다
+        logger.exception("저장된 최종 게이트 진단을 읽지 못했습니다 run_id=%s", job_id)
+        return _delivery_unavailable_response(request)
+    if stored_gate_stop is not None:
+        response = request_helpers.templates.TemplateResponse(
+            request=request,
+            name="stopped.html",
+            context=request_helpers._ctx(
+                request,
+                result=stored_gate_stop,
+                show_quota_note=True,
+            ),
+        )
+        response.headers.update(SHARED_LINK_HEADERS)
+        return response
+
     # delivery/intent가 하나도 없는 행만 cutover 이전 legacy다. 메모리 Job을
     # 우선하면 재시작 전에는 오늘 renderer를 쓰고 재시작 뒤에는 다른 결과가
     # 나오는 시간 의존 버그가 생긴다. 공개 GET의 정본은 언제나 당시 DB payload다.
@@ -757,8 +857,17 @@ def _dashboard_publication_block(request: Request, report_id: str) -> Response |
                 and not share_allow.is_allowed(conn, session.email)
             ):
                 return _revoked_member_response(request, unavailable=False)
-            is_blocked = dashboard_store.report_is_blocked(conn, report_id)
-            is_trashed = dashboard_store.report_is_trashed(conn, report_id)
+            access_revoked = dashboard_store.report_access_is_revoked(
+                conn, report_id
+            )
+            delivery_intent = delivery_store.load_delivery_intent(conn, report_id)
+            report_exists = report_store.exists(conn, report_id)
+            publication_lifecycle = (
+                dashboard_store.report_publication_lifecycle(conn, report_id)
+            )
+            published_or_legacy = (
+                report_publication.report_is_published_or_legacy(conn, report_id)
+            )
     except Exception as error:  # noqa: BLE001 - moderation state uncertainty must fail closed
         logger.exception("관리 대시보드의 보고서 차단 상태를 읽지 못했습니다")
         return _dashboard_blocked_response(
@@ -766,8 +875,21 @@ def _dashboard_publication_block(request: Request, report_id: str) -> Response |
             unavailable=True,
             store_status=_public_store_failure_status(error),
         )
-    if is_blocked or is_trashed:
+    priority = _stored_publication_priority(
+        access_revoked=access_revoked,
+        intent=delivery_intent,
+        report_exists=report_exists,
+        publication_lifecycle=publication_lifecycle,
+        published_or_legacy=published_or_legacy,
+    )
+    if priority in {
+        _StoredPublicationPriority.ACCESS_REVOKED,
+        _StoredPublicationPriority.STAGED_PENDING,
+    }:
         return _dashboard_blocked_response(request, unavailable=False)
+    # FAILED/REQUIRED intent는 호출 경로(result/PDF/Notion)의 공통 intent
+    # 응답기가 저장된 실패 코드를 해석해야 한다. 여기서 일반 staging 화면으로
+    # 덮으면 결정적 실패를 일시 대기처럼 거짓 안내한다.
     return None
 
 
@@ -1404,6 +1526,10 @@ def finalize_new_report_delivery(
                 evidence=release_evidence,
                 frozen_build_identity=frozen_build_identity,
             )
+            report_completion.assert_release_preflight_identity(
+                evidence=release_evidence,
+                preflight_identity_digest=preflight_identity_digest,
+            )
         if intent.state == delivery_store.DELIVERY_INTENT_COMPLETE:
             existing = report_delivery_adapter.load_public_delivery(report_id)
             if (
@@ -1432,6 +1558,26 @@ def finalize_new_report_delivery(
                 raise report_delivery_adapter.DeliveryAdapterError(
                     "완료 delivery와 재사용 원본 신원이 다릅니다"
                 )
+            if release_evidence is not None:
+                with storage_db.connect_readonly_existing() as conn:
+                    if conn is None:
+                        raise report_delivery_adapter.DeliveryAdapterError(
+                            "완료 delivery의 출처 신원을 재확인할 저장소가 없습니다"
+                        )
+                    stored_source = delivery_store.load_source_snapshot(
+                        conn,
+                        existing.content.source_snapshot_id,
+                    )
+                if stored_source is None:
+                    raise report_delivery_adapter.DeliveryAdapterError(
+                        "완료 FULL delivery의 저장된 출처가 없습니다"
+                    )
+                report_completion.assert_release_stored_source_identity(
+                    evidence=release_evidence,
+                    source=stored_source,
+                    cache_key=cache_key,
+                    reuse_singleflight_key=reuse_singleflight_key,
+                )
             if cache_key is not None:
                 with storage_db.connect_readonly_existing() as conn:
                     if conn is None or not delivery_store.cache_entry_matches_exactly(
@@ -1443,13 +1589,10 @@ def finalize_new_report_delivery(
                         raise report_delivery_adapter.DeliveryAdapterError(
                             "완료 delivery와 재시도의 정식 캐시 신원이 다릅니다"
                         )
-            if release_evidence is not None and not existing.delivery.cache_origin_content_id:
-                # COMPLETE 재시도도 cache_key 유무와 무관하게 회사·세대·
-                # content·artifact 결속을 다시 검사한다 — 응답만 잃은
+            if release_evidence is not None:
+                # COMPLETE 재시도도 cache_key 유무와 무관하게 자기 OWNER/REUSE
+                # 권위와 자동승인·청구 결정을 exact 재검증한다. 응답만 잃은
                 # 재시도가 훼손된 결속을 그냥 통과시키지 않는다(P1-2).
-                # cache_origin_content_id가 있는(=재사용) delivery는 대상이
-                # 아니다 — REUSE 권위 발급은 이번 스코프 밖이라(owner만
-                # 발급한다) 재사용 delivery는 애초에 자기 authority가 없다.
                 with storage_db.connect_readonly_existing() as conn:
                     if conn is None:
                         raise report_delivery_adapter.DeliveryAdapterError(
@@ -1460,19 +1603,54 @@ def finalize_new_report_delivery(
                             conn, report_id
                         )
                     )
-                if (
-                    stored_authority is None
-                    or stored_authority.company_id != release_evidence.company_id
-                    or stored_authority.content_snapshot_id
-                    != existing.content.content_id
-                    or stored_authority.artifact_id != existing_artifact_id
-                    or stored_authority.billing_bucket_id
-                    != str(billing_bucket_id).strip()
-                    or stored_authority.build_identity_sha256
-                    != release_evidence.build_identity_sha256
+                    metadata = existing.artifact
+                    pointer = metadata.blob_pointer if metadata is not None else None
+                    if pointer is None:
+                        raise report_delivery_adapter.DeliveryAdapterError(
+                            "완료 delivery의 PDF 내용주소를 재확인할 수 없습니다"
+                        )
+                    stored_release = pdf_release_store.load_automatic_release_record(
+                        conn,
+                        report_id=report_id,
+                        report_sha256=report_sha256(existing.report),
+                        pdf_sha256=pointer.sha256,
+                        checker_version=metadata.version.checker_version,
+                    )
+                    if stored_authority is None or stored_release is None:
+                        raise report_delivery_adapter.DeliveryAdapterError(
+                            "완료 delivery의 저장된 출고 권위가 없습니다"
+                        )
+                    stored_charge = cost_store.load_automatic_release_charge(
+                        conn,
+                        run_id=stored_authority.charge_run_id,
+                        automatic_release_sha256=stored_release.record_sha256,
+                    )
+                if stored_charge is None:
+                    raise report_delivery_adapter.DeliveryAdapterError(
+                        "완료 delivery의 저장된 청구 결정을 확인할 수 없습니다"
+                    )
+                report_completion.assert_release_authority_identity(
+                    authority=stored_authority,
+                    expected_kind=(
+                        authority_store.ReleaseAuthorityKind.REUSE
+                        if existing.delivery.cache_origin_content_id
+                        else authority_store.ReleaseAuthorityKind.OWNER
+                    ),
+                    evidence=release_evidence,
+                    delivery=existing.delivery,
+                    content=existing.content,
+                    artifact_id=existing_artifact_id,
+                    automatic_release_sha256=stored_release.record_sha256,
+                )
+                if stored_authority.charge_decision_sha256 != (
+                    cost_store.charge_decision_sha256(
+                        run_id=stored_authority.charge_run_id,
+                        automatic_release_sha256=stored_release.record_sha256,
+                        decision=stored_charge,
+                    )
                 ):
                     raise report_delivery_adapter.DeliveryAdapterError(
-                        "완료 delivery의 저장된 출고 권위가 생성 증거와 다릅니다"
+                        "완료 delivery의 출고 권위와 청구 결정이 다릅니다"
                     )
             if public_access_run_id:
                 with storage_db.connect() as conn:
@@ -1507,6 +1685,21 @@ def finalize_new_report_delivery(
                     raise report_delivery_adapter.DeliveryAdapterError(
                         "owner의 최초 승인 PDF bytes를 읽지 못했습니다"
                     )
+                if release_evidence is not None:
+                    stored_source = delivery_store.load_source_snapshot(
+                        conn,
+                        public_delivery.content.source_snapshot_id,
+                    )
+                    if stored_source is None:
+                        raise report_delivery_adapter.DeliveryAdapterError(
+                            "재사용 FULL delivery의 저장된 출처가 없습니다"
+                        )
+                    report_completion.assert_release_stored_source_identity(
+                        evidence=release_evidence,
+                        source=stored_source,
+                        cache_key=cache_key,
+                        reuse_singleflight_key=reuse_singleflight_key,
+                    )
                 stored_record = pdf_release_store.save_automatic_release(
                     conn,
                     report_id=report_id,
@@ -1540,9 +1733,52 @@ def finalize_new_report_delivery(
                         customer_charge_krw=charge.amount_krw,
                     ):
                         raise RuntimeError("LINK 자동출고 이력을 확정하지 못했습니다")
+                if release_evidence is not None:
+                    if public_delivery.artifact is None:
+                        raise report_delivery_adapter.DeliveryAdapterError(
+                            "FULL 재사용 권위에 결속할 PDF artifact가 없습니다"
+                        )
+                    owner_authority = authority_store.load_owner_authority(
+                        conn,
+                        content_snapshot_id=public_delivery.content.content_id,
+                        artifact_id=public_delivery.artifact.artifact_id,
+                    )
+                    if owner_authority is None:
+                        raise report_delivery_adapter.DeliveryAdapterError(
+                            "FULL 재사용 원본의 OWNER 출고 권위가 없습니다"
+                        )
+                    reuse_authority = (
+                        report_completion.issue_reuse_release_authority(
+                            origin=owner_authority,
+                            evidence=release_evidence,
+                            delivery=public_delivery.delivery,
+                            content=public_delivery.content,
+                            artifact_id=public_delivery.artifact.artifact_id,
+                            automatic_release=stored_record,
+                            charge_run_id=(
+                                link_run.run_id if link_run is not None else report_id
+                            ),
+                            charge_decision_sha256=cost_store.charge_decision_sha256(
+                                run_id=(
+                                    link_run.run_id
+                                    if link_run is not None
+                                    else report_id
+                                ),
+                                automatic_release_sha256=stored_record.record_sha256,
+                                decision=charge,
+                            ),
+                            issued_at=completed_at,
+                        )
+                    )
+                    authority_store.save_release_authority(conn, reuse_authority)
                 # 실제 Delivery.expires_at을 확인하는 권한 fence가 출고·청구와
                 # 같은 transaction의 마지막 쓰기다. 실패하면 모두 rollback한다.
                 bind_public_access(conn, public_delivery)
+                dashboard_store.publish_staged_report(
+                    conn,
+                    report_id=report_id,
+                    now_iso=completed_at.isoformat(timespec="seconds"),
+                )
                 conn.commit()
             return public_delivery
         candidate = _candidate_for_report(report_id, output_report)
@@ -1586,6 +1822,21 @@ def finalize_new_report_delivery(
                 bind_cache_entry=cache_eligible,
                 engine_build_identity=frozen_build_identity,
             )
+            if release_evidence is not None:
+                stored_source = delivery_store.load_source_snapshot(
+                    conn,
+                    public_delivery.content.source_snapshot_id,
+                )
+                if stored_source is None:
+                    raise report_delivery_adapter.DeliveryAdapterError(
+                        "FULL delivery의 저장된 출처가 없습니다"
+                    )
+                report_completion.assert_release_stored_source_identity(
+                    evidence=release_evidence,
+                    source=stored_source,
+                    cache_key=cache_key,
+                    reuse_singleflight_key=reuse_singleflight_key,
+                )
             link_run = share_store.load_run_by_report_id(conn, report_id)
             charge_run_id = link_run.run_id if link_run is not None else report_id
             charge = cost_store.mark_automatic_release(
@@ -1640,6 +1891,14 @@ def finalize_new_report_delivery(
                     issued_at=completed_at,
                 )
                 authority_store.save_release_authority(conn, authority)
+            # raw 본문은 앞선 독립 transaction에서 공개 불가 staging으로만
+            # 저장됐다. Delivery·PDF·청구·권한·FULL 권위가 모두 준비된 이
+            # transaction에서만 관리자 projection도 정상으로 승격한다.
+            dashboard_store.publish_staged_report(
+                conn,
+                report_id=report_id,
+                now_iso=completed_at.isoformat(timespec="seconds"),
+            )
             conn.commit()
         return public_delivery
     except Exception as exc:
@@ -2127,30 +2386,40 @@ async def send_to_notion(
         return _delivery_unavailable_response(request)
 
     stored_delivery: _StoredPublicDelivery | None = None
-    if delivery_intent is not None:
-        if delivery_intent.state != delivery_store.DELIVERY_INTENT_COMPLETE:
-            return _delivery_intent_response(
-                request,
-                public_id=job_id,
-                intent=delivery_intent,
-            )
-        try:
-            stored_delivery = _stored_public_delivery(job_id)
-        except Exception:  # noqa: BLE001 - 승인 결속이 깨지면 외부로 내보내지 않는다
-            logger.exception("Notion 출고에서 저장된 delivery를 읽지 못했습니다 report_id=%s", job_id)
-            return _delivery_unavailable_response(request)
-        if stored_delivery is None:
-            return _delivery_unavailable_response(request)
+    if (
+        delivery_intent is not None
+        and delivery_intent.state != delivery_store.DELIVERY_INTENT_COMPLETE
+    ):
+        return _delivery_intent_response(
+            request,
+            public_id=job_id,
+            intent=delivery_intent,
+        )
+    # intent가 보존된 정상 경로뿐 아니라, 부분 정리·복구로 intent 행만 사라진
+    # 경우에도 Delivery가 있으면 반드시 그 최초 승인 저장본을 먼저 쓴다. 여기서
+    # raw reports/메모리로 내려가면 같은 공개 ID의 Notion 내용만 달라질 수 있다.
+    try:
+        stored_delivery = _stored_public_delivery(job_id)
+    except Exception:  # noqa: BLE001 - 승인 결속이 깨지면 외부로 내보내지 않는다
+        logger.exception("Notion 출고에서 저장된 delivery를 읽지 못했습니다 report_id=%s", job_id)
+        return _delivery_unavailable_response(request)
+    if stored_delivery is not None:
         report = stored_delivery.report
+    elif delivery_intent is not None:
+        # COMPLETE 표식만 있고 승인 content/PDF가 없으면 legacy로 격하하지 않는다.
+        return _delivery_unavailable_response(request)
     else:
-        job = job_runtime._JOBS.get(job_id)
-        if job is not None and job.result is not None:
-            report = job.result.report
-        else:
-            try:
-                report = job_runtime._load_saved_report(job_id)
-            except job_runtime.ReportStoreUnavailable:
-                return job_runtime._storage_unavailable_response(request)
+        # 결과·PDF와 같은 strict legacy loader만 쓴다. 생명주기·intent·Delivery
+        # 행이 함께 유실돼도 생성 증거/공개 봉인이 찍힌 신규 raw는 legacy가
+        # 아니다. ``_load_saved_report``는 재시작 진행 복구용이라 이 payload
+        # 시대 구분까지 맡지 않으며, 여기서 쓰면 Notion만 신규 raw를 내보내는
+        # 채널 분리가 생긴다.
+        try:
+            legacy = report_delivery_adapter.load_legacy_public_report(job_id)
+        except Exception:  # noqa: BLE001 - 손상·신규 raw를 과거 본문으로 격하하지 않는다
+            logger.exception("Notion 출고에서 과거 보고서 원본을 읽지 못했습니다 report_id=%s", job_id)
+            return _delivery_unavailable_response(request)
+        report = legacy.report if legacy is not None else None
     if report is None:
         return _report_unavailable_redirect()
     # 새 Delivery의 만료는 본문 생성일이 아니라 링크 발급 때 저장한 expires_at이

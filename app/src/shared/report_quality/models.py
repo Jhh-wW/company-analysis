@@ -31,6 +31,11 @@ class QualityProblemCode(str, Enum):
     TOO_FEW_SUBSTANTIVE_CLAIMS = "too_few_substantive_claims"
     LOW_VERIFIED_RATIO = "low_verified_ratio"
     TOO_FEW_DOCUMENT_SOURCES = "too_few_document_sources"
+    TOO_MANY_INTERPRETATION_CLAIMS_PER_SECTION = (
+        "too_many_interpretation_claims_per_section"
+    )
+    EXCESSIVE_INTERPRETATION_CLAIMS = "excessive_interpretation_claims"
+    MISSING_REQUIRED_PUBLIC_CLAIM_SLOTS = "missing_required_public_claim_slots"
 
 
 class ContractUse(str, Enum):
@@ -73,6 +78,13 @@ class QualityContract:
     min_document_sources: int
     max_notice_only_sections: int
     historical_read_policy: HistoricalReadPolicy
+    # ``None``은 발급 당시 이 규칙이 없었던 계약이다. 과거 영수증을 새
+    # 기준으로 소급 차단하지 않으면서 새 FULL 생성만 강제한다.
+    max_interpreted_claims_per_section: int | None = None
+    max_interpreted_claims: int | None = None
+    max_interpreted_ratio: Decimal | None = None
+    min_public_sentences_per_section: int | None = None
+    required_public_claim_slot_policy_version: str = ""
 
 
 @dataclass(frozen=True)
@@ -105,7 +117,13 @@ class QualityAssessment:
     # 원자 fact 수(``section_claim_counts``)와 섞지 않는다.
     section_public_sentence_counts: tuple[tuple[str, int], ...] = ()
     underfilled_sections: tuple[str, ...] = ()
+    # 의미 범주가 부족하거나 해석 문장이 넘쳐 «사실 중심으로 다시 써야 하는»
+    # 장. 영수증 wire 호환을 위해 기존 필드 이름을 유지한다.
     semantic_underfilled_sections: tuple[str, ...] = ()
+    # v3 COMPLETE 영수증이 장별 해석 상한을 스스로 재검산할 수 있게 하는
+    # 계약 순서의 실제 해석 수. 이 정보가 없으면 총량만 맞춘 위조 평가가
+    # 한 장에 해석을 몰아넣고도 새 지문을 만들 수 있다. v1/v2는 빈 값이다.
+    section_interpretation_counts: tuple[tuple[str, int], ...] = ()
     # 회복·출고 상태기계는 사람이 읽는 ``shortfall_reasons`` 문자열을 해석하지
     # 않고 이 닫힌 코드만 읽는다. 문구가 바뀌어도 행동이 달라지지 않는다.
     problem_codes: tuple[QualityProblemCode, ...] = ()

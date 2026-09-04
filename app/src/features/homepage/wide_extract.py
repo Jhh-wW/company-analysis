@@ -15,10 +15,14 @@ from xml.etree import ElementTree
 
 from src.features.homepage.constants import (
     EXCLUDED_EXTENSIONS,
+    PRIORITY_PATH_KEYWORDS,
     WIDE_MAX_CHARS_PER_RANGE,
+    WIDE_MAX_LINKS_PER_PAGE,
+    WIDE_MAX_LINK_URL_CHARS,
     WIDE_MAX_SITEMAP_ENTRIES,
     WIDE_MAX_USABLE_RANGES_PER_DOCUMENT,
     WIDE_MIN_CHARS_PER_RANGE,
+    WIDE_ROOT_IDENTITY_SUPPLEMENT_PATH_MARKERS,
 )
 
 #: 본문에서 아예 빼는 boilerplate 구획. usable_ranges는 이 태그 밖의
@@ -115,37 +119,85 @@ def extract_usable_ranges(raw_html: str) -> tuple[str, str]:
 
 
 class _LinkExtractor(HTMLParser):
-    """<a href="…"> 값만 모은다."""
+    """유효한 <a href>의 우선순위 top-k만 고정 메모리로 모은다.
 
-    def __init__(self) -> None:
+    단순히 앞 N개에서 멈추면 상품 링크가 많은 작은 쇼핑몰의 footer에 있는
+    회사소개·개인정보 페이지를 항상 잃는다. 전체 href를 저장하지 않으면서도
+    신원·보고서에 유용한 경로가 뒤에 나타나면 일반 링크를 밀어내게 한다.
+    """
+
+    def __init__(self, base_url: str) -> None:
         super().__init__()
-        self.hrefs: list[str] = []
+        self._base_url = base_url
+        self._next_index = 0
+        self._selected: dict[str, tuple[int, int]] = {}
+
+    @staticmethod
+    def _rank(url: str) -> int:
+        parsed = urllib.parse.urlsplit(url)
+        # hostname의 ``company`` 같은 흔한 낱말이 모든 링크를 같은 우선순위로
+        # 만들지 않게 실제 탐색 대상인 path/query만 채점한다.
+        lowered = urllib.parse.unquote(
+            urllib.parse.urlunsplit(("", "", parsed.path, parsed.query, ""))
+        ).casefold()
+        markers = (
+            *WIDE_ROOT_IDENTITY_SUPPLEMENT_PATH_MARKERS,
+            *PRIORITY_PATH_KEYWORDS,
+        )
+        return next(
+            (index for index, marker in enumerate(markers) if marker.casefold() in lowered),
+            len(markers),
+        )
+
+    @property
+    def links(self) -> tuple[str, ...]:
+        return tuple(
+            url
+            for url, (_rank, index) in sorted(
+                self._selected.items(), key=lambda item: item[1][1]
+            )
+        )
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
         if tag != "a":
             return
         href = dict(attrs).get("href")
-        if href:
-            self.hrefs.append(href)
+        if not href or href.strip().lower().startswith(
+            ("javascript:", "data:", "mailto:", "tel:")
+        ):
+            return
+        absolute = urllib.parse.urljoin(self._base_url, href).split("#", 1)[0]
+        if not absolute or len(absolute) > WIDE_MAX_LINK_URL_CHARS:
+            return
+        try:
+            parsed = urllib.parse.urlparse(absolute)
+        except ValueError:
+            return
+        if parsed.scheme not in ("http", "https"):
+            return
+        if any(parsed.path.casefold().endswith(ext) for ext in EXCLUDED_EXTENSIONS):
+            return
+        if absolute in self._selected:
+            return
+        index = self._next_index
+        self._next_index += 1
+        ranked = (self._rank(absolute), index)
+        if len(self._selected) < WIDE_MAX_LINKS_PER_PAGE:
+            self._selected[absolute] = ranked
+            return
+        worst_url, worst_rank = max(
+            self._selected.items(), key=lambda item: item[1]
+        )
+        if ranked < worst_rank:
+            del self._selected[worst_url]
+            self._selected[absolute] = ranked
 
 
 def extract_links(raw_html: str, base_url: str) -> tuple[str, ...]:
-    """페이지 안 <a href> 절대 URL 전부(호스트 제한 없음 — 호출자가 도메인군을 판정)."""
-    parser = _LinkExtractor()
+    """페이지 안 첫 N개 절대 URL(호스트 제한은 호출자가 판정)."""
+    parser = _LinkExtractor(base_url)
     parser.feed(raw_html)
-    links: list[str] = []
-    for href in parser.hrefs:
-        if href.strip().lower().startswith(("javascript:", "data:", "mailto:", "tel:")):
-            continue
-        absolute = urllib.parse.urljoin(base_url, href).split("#", 1)[0]
-        parsed = urllib.parse.urlparse(absolute)
-        if parsed.scheme not in ("http", "https"):
-            continue
-        if any(absolute.lower().endswith(ext) for ext in EXCLUDED_EXTENSIONS):
-            continue
-        if absolute not in links:
-            links.append(absolute)
-    return tuple(links)
+    return parser.links
 
 
 class _JsonLdExtractor(HTMLParser):

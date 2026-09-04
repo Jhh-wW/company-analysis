@@ -40,6 +40,21 @@ def test_프롬프트가_장별_claim_slot목록과_누락규칙을_함께_준�
     assert "맞지 않으면 빈 문자열" in prompt
 
 
+def test_FULL프롬프트는_임의두종류가아니라_필수의미칸을_모두요구한다() -> None:
+    prompt = build_section_prompt(
+        "테스트",
+        "business_model",
+        (),
+        None,
+        show_supported_claim_slots=True,
+    )
+
+    assert "FULL 필수 의미칸" in prompt
+    assert "business_model:revenue_model" in prompt
+    assert "business_model:customer_type" in prompt
+    assert "business_model:value_exchange" in prompt
+
+
 def test_작가의_확인은_독립검수전까지_verified가_아니다() -> None:
     parsed = parse_section_response(
         _response("identity:business_definition"), "identity"

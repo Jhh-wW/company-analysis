@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -17,6 +17,13 @@ class SourceDocument:
     source_id: str
     document_identity: str
     exact_evidence_hashes: tuple[str, ...] = ()
+    # 수집 경계에서 계산한 문서 *전체* 원문의 SHA-256. 조각별 해시나 URL은
+    # 같은 문서를 여러 건처럼 부풀릴 수 있으므로 새 FULL(v3)의 독립 문서 수는
+    # 이 값으로만 센다. 빈 기본값은 이 필드가 없던 과거 DTO 호출자 호환용이다.
+    document_content_sha256: str = ""
+    # 공식 비교 사실의 comparison_target을 실제 comparator Source 법인과
+    # 맞추기 위한 수집 당시 발행자. URL이나 본문 단어로 법인명을 추측하지 않는다.
+    publisher: str = ""
 
 
 @dataclass(frozen=True)
@@ -47,6 +54,26 @@ class ClaimFact:
     supporting_source_ids: tuple[str, ...] = ()
     supporting_source_identities: tuple[str, ...] = ()
     supporting_evidence_hashes: tuple[str, ...] = ()
+    #: 공식 양사 비교기만 쓰는 프로그램 검산 입력. 일반 NumericBinding은
+    #: 한 문서 신원만 소유하므로 양사 네 원값을 억지로 한 출처로 합치지 않는다.
+    claim_type: str = ""
+    legal_entity: str = ""
+    # 비교 맥락의 exact 문장 정본과 claim↔근거어↔원문 교집합을 최종 안전
+    # 평가에서도 같은 validator로 재검산하기 위한 손실 없는 생산 필드.
+    state_evidence: str = ""
+    evidence_support_terms: tuple[str, ...] = ()
+    comparison_target: str = ""
+    comparison_metric: str = ""
+    comparison_definition: str = ""
+    comparison_basis: str = ""
+    comparison_period: str = ""
+    comparison_scope: str = ""
+    comparison_judgment: str = ""
+    comparator_source_id: str = ""
+    comparator_state_evidence: str = ""
+    # 양사 비교 프로그램의 고객·제품·시장·기간·계정·회계범위 정합성을
+    # 개별 fact 검산 뒤에도 같은 shared validator로 재검산하기 위한 원본 맵.
+    comparison_conditions: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

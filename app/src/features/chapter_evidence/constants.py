@@ -9,7 +9,14 @@ from __future__ import annotations
 from enum import Enum
 from typing import Final
 
-from src.shared.report_evidence.constants import CollectionState
+from src.shared.report_evidence.constants import (
+    CollectionState,
+    OFFICIAL_WEB_SOURCE_KINDS,
+    SOURCE_KIND_DART_AUDIT_REPORT,
+    SOURCE_KIND_DART_BUSINESS_REPORT,
+    SOURCE_KIND_DART_QUARTERLY_REPORT,
+    SOURCE_KIND_DART_SEMIANNUAL_REPORT,
+)
 from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
 
 
@@ -99,12 +106,55 @@ REQUIRED_PATH_PREFIX_BY_COMPANY_TYPE: Final[dict[CompanyType, dict[str, str]]] =
     CompanyType.FINANCIAL: _REQUIRED_PATH_PREFIX_FINANCIAL,
 }
 
+# 접두어는 화면·옛 진단 호환 설명에만 남긴다. 실제 판정은 아래 닫힌 종류
+# 집합으로 한다. 그렇지 않으면 ``dart_typo``·``official_fake``도 정상 필수
+# 경로로 오인된다.
+_DART_REQUIRED_SOURCE_KINDS: Final[frozenset[str]] = frozenset(
+    {
+        SOURCE_KIND_DART_BUSINESS_REPORT,
+        SOURCE_KIND_DART_AUDIT_REPORT,
+        SOURCE_KIND_DART_SEMIANNUAL_REPORT,
+        SOURCE_KIND_DART_QUARTERLY_REPORT,
+    }
+)
+_OFFICIAL_REQUIRED_SOURCE_KINDS: Final[frozenset[str]] = OFFICIAL_WEB_SOURCE_KINDS
+
+REQUIRED_SOURCE_KINDS_BY_COMPANY_TYPE: Final[
+    dict[CompanyType, dict[str, frozenset[str]]]
+] = {
+    company_type: {
+        section_id: (
+            _DART_REQUIRED_SOURCE_KINDS
+            if prefix == DART_SOURCE_KIND_PREFIX
+            else _OFFICIAL_REQUIRED_SOURCE_KINDS
+        )
+        for section_id, prefix in by_section.items()
+    }
+    for company_type, by_section in REQUIRED_PATH_PREFIX_BY_COMPANY_TYPE.items()
+}
+
 
 def expected_required_path_prefix(company_type: CompanyType, section_id: str) -> str:
     """이 회사유형에서 이 장의 필수 슬롯을 정상 확인하는 source_kind 접두어."""
 
     try:
         by_section = REQUIRED_PATH_PREFIX_BY_COMPANY_TYPE[company_type]
+    except KeyError as error:
+        raise ValueError(f"알 수 없는 회사 유형입니다: {company_type!r}") from error
+    try:
+        return by_section[section_id]
+    except KeyError as error:
+        raise ValueError(f"알 수 없는 근거 장 식별자입니다: {section_id}") from error
+
+
+def expected_required_source_kinds(
+    company_type: CompanyType,
+    section_id: str,
+) -> frozenset[str]:
+    """회사유형·장에 허용된 필수 조회 종류를 정확 일치 집합으로 돌려준다."""
+
+    try:
+        by_section = REQUIRED_SOURCE_KINDS_BY_COMPANY_TYPE[company_type]
     except KeyError as error:
         raise ValueError(f"알 수 없는 회사 유형입니다: {company_type!r}") from error
     try:

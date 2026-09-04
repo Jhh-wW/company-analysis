@@ -348,6 +348,12 @@ FILING_LOOKUP_DEFAULT: Final[tuple[tuple[str, str], ...]] = (
 #: 본문으로 고른 1건과 별개로, 같은 조회에서 확인한 기재·첨부 정정까지
 #: completion 출처 지문에 싣는 비민감 필드. 원문·회사정보는 넣지 않는다.
 SOURCE_IDENTITY_RCEPT_NOS_KEY: Final[str] = "source_identity_rcept_nos"
+# DART list.json은 재무 API의 ``reprt_code``를 돌려주지 않는다. 원문 선택기가
+# 사업/감사보고서 annual 경로에서 실제로 골랐다는 사실을 공급자 필드인 척
+# 만들지 않고 별도 내부 신원으로 운반한다. 비교 생산기는 이 값과 report_nm,
+# 접수번호, 접수일, 완료 사업연도를 함께 확인한다.
+SELECTED_REPORT_PERIOD_KIND_KEY: Final[str] = "engine_selected_report_period_kind"
+SELECTED_REPORT_PERIOD_KIND_ANNUAL: Final[str] = "annual"
 
 
 def latest_report_rcept(
@@ -411,6 +417,7 @@ def _latest_of_kind(
     # 「[첨부정정]」 공시의 원본 zip엔 본문이 없고 고친 첨부만 있다 (로보스타 실측) — 본문 있는 공시 우선
     main_rows = [r for r in rows if "첨부정정" not in (r.get("report_nm") or "")]
     selected = dict(max(main_rows or rows, key=lambda r: r["rcept_no"]))
+    selected[SELECTED_REPORT_PERIOD_KIND_KEY] = SELECTED_REPORT_PERIOD_KIND_ANNUAL
     # 본문 zip은 첨부정정을 피해서 고르되, 정정 사실까지 출처 신원에서 지우면
     # 같은 원문 번호만 보고 옛 캐시가 살아난다. 조회 범위의 같은 보고서 종류
     # 접수번호를 전부 싣고, delivery 쪽에서 14자리·중복·순서를 다시 검산한다.

@@ -8,12 +8,21 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
+from datetime import date
 
+from core.dart_client import normalize_document_web_url
 from features.evidence_collection import constants as c
 
 _SHA256_HEX_LENGTH = 64
 _SHA256_HEX_CHARS = frozenset("0123456789abcdef")
+_DART_RECEIPT_RE = re.compile(r"[0-9]{14}")
+_DART_RAW_LOCATION_RE = re.compile(
+    r"raw_xml_chars:([0-9]{1,10})-([0-9]{1,10})"
+)
+_MAX_OFFICIAL_URL_LENGTH = 2048
+_MAX_SOURCE_MEMBER_NAME_LENGTH = 512
 
 
 class EvidenceCollectionError(ValueError):
@@ -43,6 +52,20 @@ def _require_sha256(value: str, field_name: str) -> str:
 def _require_nonnegative_int(value: int, field_name: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise EvidenceCollectionError(f"{field_name}은(는) 0 이상의 정수여야 합니다")
+    return value
+
+
+def _require_iso_date(value: str, field_name: str) -> str:
+    """공개 Source까지 그대로 전달할 문서 날짜를 엄격한 ISO 날짜로 잠근다."""
+
+    if not isinstance(value, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) is None:
+        raise EvidenceCollectionError(f"{field_name}은(는) YYYY-MM-DD 형식이어야 합니다")
+    try:
+        date.fromisoformat(value)
+    except ValueError as error:
+        raise EvidenceCollectionError(
+            f"{field_name}은(는) 실제 달력에 존재하는 날짜여야 합니다"
+        ) from error
     return value
 
 
@@ -109,6 +132,7 @@ class CollectedDocument:
             _require_nonempty(value, name)
         _require_choice(self.source_tier, c.VALID_SOURCE_TIERS, "source_tier")
         _require_choice(self.requirement, c.VALID_REQUIREMENTS, "requirement")
+        _require_iso_date(self.published_on, "published_on")
         _require_sha256(self.content_sha256, "content_sha256")
         object.__setattr__(
             self,
@@ -236,14 +260,78 @@ class CollectionAttempt:
 
 
 @dataclass(frozen=True)
+class OfficialUrlCandidate:
+    """DART 전문에서 발견했지만 아직 회사 공식 여부는 검증하지 않은 URL."""
+
+    company_id: str
+    url: str
+    source_document_id: str
+    source_receipt_no: str
+    source_member_name: str
+    source_location: str
+    source_document_sha256: str
+    source_payload_sha256: str
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.company_id, "company_id"),
+            (self.url, "url"),
+            (self.source_document_id, "source_document_id"),
+            (self.source_receipt_no, "source_receipt_no"),
+            (self.source_member_name, "source_member_name"),
+            (self.source_location, "source_location"),
+        ):
+            _require_nonempty(value, name)
+        if (
+            len(self.url) > _MAX_OFFICIAL_URL_LENGTH
+            or normalize_document_web_url(self.url) != self.url
+        ):
+            raise EvidenceCollectionError(
+                "공식 URL 후보가 DART 원문 URL 정본과 다릅니다"
+            )
+        if _DART_RECEIPT_RE.fullmatch(self.source_receipt_no) is None:
+            raise EvidenceCollectionError("공식 URL 후보의 DART 접수번호 형식이 올바르지 않습니다")
+        if not self.source_document_id.endswith(f":{self.source_receipt_no}"):
+            raise EvidenceCollectionError("공식 URL 후보의 문서와 DART 접수번호가 다릅니다")
+        member_name = self.source_member_name.replace("\\", "/")
+        if (
+            member_name != self.source_member_name
+            or len(member_name) > _MAX_SOURCE_MEMBER_NAME_LENGTH
+            or member_name.startswith("/")
+            or any(part in {"", ".", ".."} for part in member_name.split("/"))
+            or any(ord(character) < 32 for character in member_name)
+        ):
+            raise EvidenceCollectionError("공식 URL 후보의 ZIP 멤버 이름이 올바르지 않습니다")
+        location_match = _DART_RAW_LOCATION_RE.fullmatch(self.source_location)
+        if (
+            location_match is None
+            or int(location_match.group(2)) <= int(location_match.group(1))
+        ):
+            raise EvidenceCollectionError("공식 URL 후보의 원문 위치 형식이 올바르지 않습니다")
+        _require_sha256(self.source_document_sha256, "source_document_sha256")
+        _require_sha256(self.source_payload_sha256, "source_payload_sha256")
+
+
+@dataclass(frozen=True)
 class DartEvidenceHarvest:
-    """이번 수집 전체 결과 — 문서·조각·시도 기록을 한데 묶는다."""
+    """이번 수집 전체 결과 — 문서·조각·시도 기록을 한데 묶는다.
+
+    ``fragments``는 정확한 의미 칸까지 분류된, 보고서 근거로 쓸 수 있는
+    조각이다. ``unclassified_fragments``는 원문을 실제로 읽었지만 현재의
+    결정론 분류기가 어느 의미 칸인지 증명하지 못한 조각이다. 둘을 한 배열에
+    섞으면 뒤 단계가 무분류 문단을 근거로 오인하고, 후자를 버리면 분류기
+    어휘가 좁다는 내부 결함을 회사의 자료 부족으로 오인한다. 그래서 별도
+    차선으로 끝까지 보존한다.
+    """
 
     company_id: str
     company_type: str
     documents: tuple[CollectedDocument, ...]
     fragments: tuple[EvidenceFragment, ...]
     attempts: tuple[CollectionAttempt, ...]
+    unclassified_documents: tuple[CollectedDocument, ...] = ()
+    unclassified_fragments: tuple[EvidenceFragment, ...] = ()
+    official_url_candidates: tuple[OfficialUrlCandidate, ...] = ()
 
     def __post_init__(self) -> None:
         _require_nonempty(self.company_id, "company_id")
@@ -251,25 +339,55 @@ class DartEvidenceHarvest:
         document_ids = [doc.document_id for doc in self.documents]
         if len(document_ids) != len(set(document_ids)):
             raise EvidenceCollectionError("documents의 document_id가 중복됩니다")
-        fragment_ids = [fragment.fragment_id for fragment in self.fragments]
+        fragment_ids = [
+            fragment.fragment_id
+            for fragment in (*self.fragments, *self.unclassified_fragments)
+        ]
         if len(fragment_ids) != len(set(fragment_ids)):
-            raise EvidenceCollectionError("fragments의 fragment_id가 중복됩니다")
+            raise EvidenceCollectionError("분류·무분류 fragments의 fragment_id가 중복됩니다")
         known_document_ids = set(document_ids)
         for fragment in self.fragments:
             if fragment.document_id not in known_document_ids:
                 raise EvidenceCollectionError(
                     f"조각 {fragment.fragment_id}의 document_id가 documents에 없습니다"
                 )
+            if not fragment.section_id or not fragment.slot_id:
+                raise EvidenceCollectionError(
+                    f"분류 조각 {fragment.fragment_id}에 장·의미 칸이 없습니다"
+                )
+        unclassified_document_ids = [
+            document.document_id for document in self.unclassified_documents
+        ]
+        if len(unclassified_document_ids) != len(set(unclassified_document_ids)):
+            raise EvidenceCollectionError(
+                "unclassified_documents의 document_id가 중복됩니다"
+            )
+        known_unclassified_document_ids = set(unclassified_document_ids)
+        for fragment in self.unclassified_fragments:
+            if fragment.document_id not in known_unclassified_document_ids:
+                raise EvidenceCollectionError(
+                    "무분류 조각의 document_id가 unclassified_documents에 없습니다: "
+                    f"{fragment.fragment_id}"
+                )
+            if (
+                fragment.section_id
+                or fragment.slot_id
+                or fragment.covered_slot_ids
+                or fragment.score_millis != 0
+            ):
+                raise EvidenceCollectionError(
+                    f"무분류 조각 {fragment.fragment_id}에 근거 의미를 미리 붙일 수 없습니다"
+                )
         # ★ generation=8 — document·fragment·attempt 어느 하나라도 harvest의
         # company_id와 다르면 즉시 거절한다. 같은 document_id·같은 슬롯의
         # 「다른 회사」 조회 결과가 섞여 들어와도 대상 회사의 준비 판정을
         # 조용히 바꾸지 못하게 자료형이 직접 막는다(호출자 기억에 기대지 않음).
-        for document in self.documents:
+        for document in (*self.documents, *self.unclassified_documents):
             if document.company_id != self.company_id:
                 raise EvidenceCollectionError(
                     f"문서 {document.document_id}의 company_id가 harvest와 다릅니다"
                 )
-        for fragment in self.fragments:
+        for fragment in (*self.fragments, *self.unclassified_fragments):
             if fragment.company_id != self.company_id:
                 raise EvidenceCollectionError(
                     f"조각 {fragment.fragment_id}의 company_id가 harvest와 다릅니다"
@@ -279,3 +397,11 @@ class DartEvidenceHarvest:
                 raise EvidenceCollectionError(
                     f"시도 {attempt.attempt_id}의 company_id가 harvest와 다릅니다"
                 )
+        seen_candidates: set[tuple[str, str, str]] = set()
+        for candidate in self.official_url_candidates:
+            if candidate.company_id != self.company_id:
+                raise EvidenceCollectionError("공식 URL 후보의 company_id가 harvest와 다릅니다")
+            key = (candidate.url, candidate.source_document_id, candidate.source_location)
+            if key in seen_candidates:
+                raise EvidenceCollectionError("공식 URL 후보 provenance가 중복됩니다")
+            seen_candidates.add(key)

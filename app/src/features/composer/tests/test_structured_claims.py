@@ -22,6 +22,7 @@ from src.shared.report_quality.fact_binding import fact_evidence_binding
 from src.shared.report_quality.numeric_validation import (
     validate_versioned_numeric_record,
 )
+from src.shared.report_evidence.policy import injected_slots_for
 
 
 def _table() -> PerformanceTable:
@@ -261,7 +262,7 @@ def test_구조화_공개문장과_factrecord와_원문지문이_한번에_결�
         item.fact_id for item in rendered.fact_records
     ]
     assert fact.claim in rendered.sections[0].prose_lines[0][0]
-    assert fact.claim_slot == "past_changes:cumulative_change"
+    assert fact.claim_slot == "past_changes:historical_performance"
     assert fact.metric == "매출액"
     assert fact.sign == "positive"
     assert fact.unit == "%"
@@ -286,7 +287,7 @@ def test_주장범주는_공유해도_서로_다른_수치사실의_ID는_충돌
     assert len(claims) == 2
     assert {
         sentence.planned_claim_slot for sentence in claims
-    } == {"past_changes:cumulative_change"}
+    } == {"past_changes:historical_performance"}
     assert len(
         {
             sentence.structured_claim.fact_id
@@ -294,6 +295,15 @@ def test_주장범주는_공유해도_서로_다른_수치사실의_ID는_충돌
             if sentence.structured_claim is not None
         }
     ) == 2
+
+
+def test_구조화실적_생산자는_정본이_맡긴_필수의미칸을_정확히_채운다() -> None:
+    claims = build_past_changes_numeric_claims(_table(), _fragments(), _filing())
+
+    assert claims
+    assert {
+        sentence.planned_claim_slot for sentence in claims
+    } == set(injected_slots_for("past_changes"))
 
 
 def test_수치원문이_바뀌면_같은_범주여도_사실_ID가_바뀐다() -> None:

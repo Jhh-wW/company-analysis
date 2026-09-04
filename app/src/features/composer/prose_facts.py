@@ -21,6 +21,10 @@ from src.features.provenance.sources import Source, exact_evidence_text_hash
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_quality.evidence_support import prose_evidence_support_ready
 from src.shared.report_quality.fact_binding import fact_evidence_binding
+from src.shared.report_quality.constants import (
+    INTERPRETATION_CLAIM_TYPE,
+    VERIFIED_PROSE_CLAIM_TYPE,
+)
 from src.shared.report_quality.source_identity import document_identity
 
 
@@ -144,9 +148,9 @@ def build_verified_prose_fact(
     support_terms = _support_terms(claim, evidence)
     if not prose_evidence_support_ready(
         (
-            "verified_prose"
+            VERIFIED_PROSE_CLAIM_TYPE
             if sentence.grade == GRADE_CONFIRMED
-            else "evidence_based_interpretation"
+            else INTERPRETATION_CLAIM_TYPE
         ),
         support_terms,
     ):
@@ -166,9 +170,9 @@ def build_verified_prose_fact(
         relationship_or_action=claim_slot.split(":", 1)[-1],
         claim=claim,
         claim_type=(
-            "verified_prose"
+            VERIFIED_PROSE_CLAIM_TYPE
             if sentence.grade == GRADE_CONFIRMED
-            else "evidence_based_interpretation"
+            else INTERPRETATION_CLAIM_TYPE
         ),
         section_owner=section_id,
         time_state=_TIME_STATE_BY_SECTION.get(section_id, "present"),

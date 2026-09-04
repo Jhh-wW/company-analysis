@@ -14,6 +14,7 @@ from features.evidence_collection.models import (
     DocumentTextRange,
     EvidenceCollectionError,
     EvidenceFragment,
+    OfficialUrlCandidate,
 )
 
 _COMPANY_ID = "00126380"
@@ -32,7 +33,7 @@ def _make_document(**overrides: object) -> CollectedDocument:
         "source_kind": c.SOURCE_KIND_BUSINESS_REPORT,
         "publisher": c.DART_PUBLISHER_NAME,
         "title": "사업보고서",
-        "published_on": "20250315",
+        "published_on": "2025-03-15",
         "collected_at": "2026-08-31T00:00:00+09:00",
         "content_sha256": _sha256("본문"),
         "identity_binding": "corp_code=00126380;rcept_no=20250315000001",
@@ -101,6 +102,14 @@ def test_collected_document_빈_필드는_거부한다() -> None:
 def test_collected_document_sha256_형식_오류는_거부한다() -> None:
     with pytest.raises(EvidenceCollectionError):
         _make_document(content_sha256="not-a-hash")
+
+
+@pytest.mark.parametrize("published_on", ["20250315", "2025-02-29", "2025-13-01"])
+def test_collected_document_발행일은_실제_ISO_날짜만_허용한다(
+    published_on: str,
+) -> None:
+    with pytest.raises(EvidenceCollectionError):
+        _make_document(published_on=published_on)
 
 
 def test_fragment_text_sha256_불일치는_거부한다() -> None:
@@ -213,3 +222,119 @@ def test_harvest_정상_생성() -> None:
     assert harvest.documents[0].document_id == fragment.document_id
     assert harvest.fragments[0].company_id == _COMPANY_ID
     assert harvest.attempts[0].company_id == _COMPANY_ID
+
+
+def _make_official_url_candidate(**overrides: object) -> OfficialUrlCandidate:
+    receipt_no = "20250315000001"
+    fields = {
+        "company_id": _COMPANY_ID,
+        "url": "https://official.example/company",
+        "source_document_id": f"dart_business_report:{receipt_no}",
+        "source_receipt_no": receipt_no,
+        "source_member_name": "document.xml",
+        "source_location": "raw_xml_chars:120-154",
+        "source_document_sha256": _sha256("평문 본문"),
+        "source_payload_sha256": _sha256("원문 XML"),
+    }
+    fields.update(overrides)
+    return OfficialUrlCandidate(**fields)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"source_receipt_no": "123"},
+        {"source_document_id": "dart_business_report:20250315000002"},
+        {"source_member_name": "../other.xml"},
+        {"source_location": "plain_text:120-154"},
+        {"source_location": "raw_xml_chars:154-120"},
+        {"source_location": "raw_xml_chars:" + "9" * 5_000 + "-10"},
+        {"url": "https://user:secret@official.example/company"},
+        {"url": "https://127.0.0.1/company"},
+        {"url": "https://official.example:443/company"},
+        {"url": "https://official.example\\attacker.example/company"},
+    ),
+)
+def test_DART전문_URL후보는_접수번호_문서_원문위치에_결속된다(
+    overrides: dict[str, str],
+) -> None:
+    with pytest.raises(EvidenceCollectionError):
+        _make_official_url_candidate(**overrides)
+
+
+def test_DART전문_URL후보의_회사도_harvest와_같아야_한다() -> None:
+    candidate = _make_official_url_candidate(company_id="99999999")
+    with pytest.raises(EvidenceCollectionError, match="company_id"):
+        DartEvidenceHarvest(
+            company_id=_COMPANY_ID,
+            company_type=c.COMPANY_TYPE_LISTED,
+            documents=(),
+            fragments=(),
+            attempts=(),
+            official_url_candidates=(candidate,),
+        )
+
+
+def test_harvest_무분류_조각은_별도_문서와_빈_의미만_허용한다() -> None:
+    document = _make_document()
+    text = "현재 분류 어휘에 없는 사업 설명입니다."
+    unclassified = _make_fragment(
+        fragment_id="dart_business_report:20250315000001:unclassified0",
+        text=text,
+        text_sha256=_sha256(text),
+        section_id="",
+        slot_id="",
+        score_millis=0,
+        reason_codes=(c.REASON_NO_SIGNAL,),
+        covered_slot_ids=(),
+    )
+
+    harvest = DartEvidenceHarvest(
+        company_id=_COMPANY_ID,
+        company_type=c.COMPANY_TYPE_LISTED,
+        documents=(),
+        fragments=(),
+        attempts=(),
+        unclassified_documents=(document,),
+        unclassified_fragments=(unclassified,),
+    )
+    assert harvest.unclassified_fragments == (unclassified,)
+
+    with pytest.raises(EvidenceCollectionError, match="근거 의미"):
+        DartEvidenceHarvest(
+            company_id=_COMPANY_ID,
+            company_type=c.COMPANY_TYPE_LISTED,
+            documents=(),
+            fragments=(),
+            attempts=(),
+            unclassified_documents=(document,),
+            unclassified_fragments=(
+                _make_fragment(
+                    fragment_id="dart_business_report:20250315000001:unclassified1"
+                ),
+            ),
+        )
+
+
+def test_harvest_무분류_조각도_문서와_회사에_결속된다() -> None:
+    text = "현재 분류 어휘에 없는 사업 설명입니다."
+    unclassified = _make_fragment(
+        fragment_id="dart_business_report:20250315000001:unclassified0",
+        text=text,
+        text_sha256=_sha256(text),
+        section_id="",
+        slot_id="",
+        score_millis=0,
+        reason_codes=(c.REASON_NO_SIGNAL,),
+        covered_slot_ids=(),
+    )
+    with pytest.raises(EvidenceCollectionError, match="unclassified_documents"):
+        DartEvidenceHarvest(
+            company_id=_COMPANY_ID,
+            company_type=c.COMPANY_TYPE_LISTED,
+            documents=(),
+            fragments=(),
+            attempts=(),
+            unclassified_documents=(),
+            unclassified_fragments=(unclassified,),
+        )

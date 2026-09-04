@@ -185,12 +185,15 @@ _RECOVERABLE_QUALITY_CODES = frozenset(
         QualityProblemCode.LOW_SEMANTIC_COVERAGE,
         QualityProblemCode.LOW_PUBLIC_SENTENCE_COVERAGE,
         QualityProblemCode.TOO_FEW_SUBSTANTIVE_CLAIMS,
+        QualityProblemCode.TOO_MANY_INTERPRETATION_CLAIMS_PER_SECTION,
+        QualityProblemCode.MISSING_REQUIRED_PUBLIC_CLAIM_SLOTS,
     }
 )
 _NONRECOVERABLE_QUALITY_CODES = frozenset(
     {
         QualityProblemCode.LOW_VERIFIED_RATIO,
         QualityProblemCode.TOO_FEW_DOCUMENT_SOURCES,
+        QualityProblemCode.EXCESSIVE_INTERPRETATION_CLAIMS,
     }
 )
 
@@ -237,7 +240,7 @@ def _problem_sections(assessment: GenerationAssessment) -> tuple[str, ...]:
         _unique_sections(quality.underfilled_sections, label="공개 문장 부족 장"),
         _unique_sections(
             quality.semantic_underfilled_sections,
-            label="의미 범주 부족 장",
+            label="사실 중심 재작성 필요 장",
         ),
     )
     unordered = {section_id for group in groups for section_id in group}

@@ -9,6 +9,7 @@ from typing import Final
 
 DART_CORP_CODE_RE: Final[re.Pattern[str]] = re.compile(r"[0-9]{8}")
 STOCK_CODE_RE: Final[re.Pattern[str]] = re.compile(r"[0-9]{6}")
+KOREAN_REGISTRATION_NUMBER_LENGTHS: Final[frozenset[int]] = frozenset({10, 13})
 KOREAN_CORPORATE_MARKERS: Final[tuple[str, ...]] = (
     "(주)",
     "(유)",
@@ -96,6 +97,24 @@ def exact_company_name_key(value: object) -> str:
     """법인 표지와 구두점만 무시하고 단어 경계를 보존한 키를 만든다."""
 
     return "\x1f".join(_name_tokens(value))
+
+
+def normalize_korean_registration_number(value: object) -> str:
+    """공개 사업자/법인번호의 ASCII 숫자·공백·하이픈 표기만 정규화한다.
+
+    임의 글자를 모두 지운 뒤 우연히 10/13자리가 된 값을 받으면 서로 다른
+    입력이 같은 안정 식별번호로 합쳐진다. DART가 주는 일반적인 연속 숫자,
+    ``123-45-67890`` 및 공백 표기만 허용하고 나머지는 추측하지 않는다.
+    """
+
+    raw = str(value or "")
+    if not raw or any(
+        not ("0" <= character <= "9") and character not in {" ", "-"}
+        for character in raw
+    ):
+        return ""
+    digits = "".join(character for character in raw if "0" <= character <= "9")
+    return digits if len(digits) in KOREAN_REGISTRATION_NUMBER_LENGTHS else ""
 
 
 def exact_company_names_equivalent(left: object, right: object) -> bool:

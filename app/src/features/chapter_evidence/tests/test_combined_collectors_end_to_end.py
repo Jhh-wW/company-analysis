@@ -49,6 +49,10 @@ from src.shared.report_evidence.constants import (
 from src.shared.report_evidence.logic import assess_generation_gate, build_section_bundle
 from src.shared.report_evidence.models import InjectedSlotFacts
 from src.shared.report_evidence.policy import required_slots_for
+from src.shared.report_evidence.runtime_port import OfficialEvidenceCollectionResult
+from src.shared.report_evidence.source_kind_policy import (
+    document_slots_for_formal_source_kind,
+)
 
 _FROZEN_SECTION_IDS = (
     "identity",
@@ -488,3 +492,111 @@ def test_무신호_문단은_최종_Mapping으로_새어_나가지_않는다() -
     for fragment in mapping["fragments"]:
         assert fragment["section_id"]
         assert fragment["slot_id"]
+
+
+def test_사업_반기_분기_실제산출이_앱_공식결과_계약까지_통과한다() -> None:
+    """수동 envelope가 아니라 엔진 생산물로 자료종류별 슬롯 결속을 증명한다."""
+
+    from features.evidence_collection import collect, serialize  # noqa: PLC0415
+    from features.evidence_collection import constants as engine_constants  # noqa: PLC0415
+    from features.evidence_collection.filing_select import RawFilingRow  # noqa: PLC0415
+    from features.evidence_collection.tests.fixtures import fake_fetcher  # noqa: PLC0415
+
+    business = RawFilingRow(
+        "20260315000001", "사업보고서 (2025.12)", "20260315"
+    )
+    semiannual = RawFilingRow(
+        "20260815000002", "반기보고서 (2026.06)", "20260815"
+    )
+    quarterly = RawFilingRow(
+        "20261115000003", "분기보고서 (2026.09)", "20261115"
+    )
+    fetcher = fake_fetcher.FakeFetcher(
+        list_responses_by_pblntf_ty={
+            "A": fake_fetcher.FilingListResult(
+                state="OK", rows=(business, semiannual, quarterly)
+            ),
+        },
+        document_responses_by_rcept_no={
+            business.rcept_no: fake_fetcher.DocumentFetchResult(
+                state="OK",
+                text=(
+                    "II. 사업의 내용\n"
+                    "주요 매출은 제품 판매에서 발생하며 고객사에 서비스를 제공한다."
+                ),
+            ),
+            semiannual.rcept_no: fake_fetcher.DocumentFetchResult(
+                state="OK",
+                text=(
+                    "I. 회사의 개요\n"
+                    "당사는 정밀부품을 생산하는 주식회사이며 법인이다.\n\n"
+                    "II. 위험관리\n"
+                    "원재료 가격 변동이 당면 과제이자 위험이며 대응 대책을 추진한다."
+                ),
+            ),
+            quarterly.rcept_no: fake_fetcher.DocumentFetchResult(
+                state="OK",
+                text=(
+                    "II. 주요 제품\n"
+                    "대표 제품은 정밀 센서이며 핵심 제품의 매출 비중을 관리한다.\n\n"
+                    "III. 요약재무정보\n"
+                    "신규 생산라인 증설을 완료하여 공급 능력을 확대했다."
+                ),
+            ),
+        },
+    )
+
+    harvest = collect.collect_dart_evidence(
+        fetcher,
+        TARGET_COMPANY_ID,
+        now="2026-09-04",
+    )
+    mapping = serialize.harvest_to_mapping(harvest)
+    candidates = produce_from_collection_envelopes(
+        company_id=TARGET_COMPANY_ID,
+        company_type=mapping["company_type"],
+        collection_envelopes=(mapping,),
+    )
+    result = OfficialEvidenceCollectionResult(
+        company_id=TARGET_COMPANY_ID,
+        candidates=candidates,
+    )
+
+    assert result.independent_document_count == 3
+    supplemental_fragments = [
+        fragment
+        for candidate in result.candidates
+        for fragment in candidate.fragments
+        if fragment.document_id.startswith(
+            (
+                engine_constants.SOURCE_KIND_SEMIANNUAL_REPORT,
+                engine_constants.SOURCE_KIND_QUARTERLY_REPORT,
+            )
+        )
+    ]
+    assert supplemental_fragments
+    documents = {
+        document.document_id: document
+        for candidate in result.candidates
+        for document in candidate.documents
+    }
+    for fragment in supplemental_fragments:
+        assert set(fragment.covered_slot_ids) <= set(
+            document_slots_for_formal_source_kind(
+                documents[fragment.document_id].source_kind
+            )
+        )
+    assert any(
+        fragment.document_id.startswith(
+            engine_constants.SOURCE_KIND_SEMIANNUAL_REPORT
+        )
+        and fragment.section_id == "current_challenges"
+        for fragment in supplemental_fragments
+    )
+    assert any(
+        fragment.document_id.startswith(
+            engine_constants.SOURCE_KIND_QUARTERLY_REPORT
+        )
+        and fragment.section_id == "past_changes"
+        for fragment in supplemental_fragments
+    )

@@ -32,7 +32,6 @@ from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
 from src.features.storage.constants import TABLE_REPORT_PUBLIC_PROJECTIONS
 from src.features.admin_dashboard import store as dashboard_store
-from src.core import clock
 from src.shared import engine_build_identity as build_identity_contract
 from src.shared.report_generation.public_projection import (
     build_report_digest,
@@ -52,7 +51,9 @@ from src.web.tests.test_generation_singleflight_integration import (
 from src.core import deployment_identity
 from src.web.tests.test_release_authority_full_wiring import (
     _COMPANY_ID,
+    _PREFLIGHT_IDENTITY_DIGEST,
     _build_full_report,
+    _full_delivery_identity,
 )
 
 
@@ -149,6 +150,7 @@ def _finalized(report_id: str, monkeypatch, tmp_path):
         actual_models=("deterministic-reattach",),
         reused_from_cache=False,
         engine_build_identity=frozen,
+        **_full_delivery_identity(report, frozen),
     )
     return report
 
@@ -179,22 +181,40 @@ def test_봉인_digest_불일치는_공개_결과를_그리지_않는다(monkeyp
 # ══════════════════════════════════════════════════════════
 
 
-def _registered_approved_snapshot(report_id: str):
-    report, _frozen_identity = _stored_full_report(report_id)
+def _registered_approved_snapshot(report_id: str, monkeypatch, tmp_path):
+    """현재 FULL snapshot은 실제 출고 transaction으로만 승인한다.
+
+    공개 봉인이 있는 새 FULL raw를 ``register_report``만 호출해 legacy처럼
+    꾸미면, 생산 경계는 의도대로 미출고 staging으로 거절한다. 이 fixture도
+    본문·PDF·Delivery·PUBLISHED를 한 번에 확정하는 실제 생산 builder를 쓴다.
+    """
+
+    report, frozen = _stored_full_report(report_id)
     with storage_db.connect() as conn:
-        dashboard_store.register_report(
+        dashboard_store.stage_report(
             conn,
             report_id=report_id,
             corp_type=report.corp_type,
+            now_iso="2026-09-04T10:00:00+09:00",
             payload_json=report_store.report_to_json(report),
-            now_iso=clock.iso_now_kst(),
         )
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "approved-art"))
+    reports_router.finalize_new_report_delivery(
+        report_id=report_id,
+        corp_id=_COMPANY_ID,
+        billing_bucket_id=_BUCKET,
+        report=report,
+        actual_models=("deterministic-reattach",),
+        reused_from_cache=False,
+        engine_build_identity=frozen,
+        **_full_delivery_identity(report, frozen),
+    )
     return report
 
 
-def test_승인_snapshot_로드는_봉인을_붙인다() -> None:
+def test_승인_snapshot_로드는_봉인을_붙인다(monkeypatch, tmp_path) -> None:
     report_id = uuid.uuid4().hex
-    report = _registered_approved_snapshot(report_id)
+    report = _registered_approved_snapshot(report_id, monkeypatch, tmp_path)
 
     loaded = job_runtime._load_saved_report(report_id)
 
@@ -202,9 +222,9 @@ def test_승인_snapshot_로드는_봉인을_붙인다() -> None:
     assert loaded.public_projection == report.public_projection
 
 
-def test_승인_snapshot_라우터_갈래도_봉인을_붙인다() -> None:
+def test_승인_snapshot_라우터_갈래도_봉인을_붙인다(monkeypatch, tmp_path) -> None:
     report_id = uuid.uuid4().hex
-    report = _registered_approved_snapshot(report_id)
+    report = _registered_approved_snapshot(report_id, monkeypatch, tmp_path)
 
     loaded = reports_router._approved_public_report(report_id, None)
 
@@ -212,9 +232,11 @@ def test_승인_snapshot_라우터_갈래도_봉인을_붙인다() -> None:
     assert loaded.public_projection == report.public_projection
 
 
-def test_승인_snapshot의_봉인이_어긋나면_라우터가_보고서를_내주지_않는다() -> None:
+def test_승인_snapshot의_봉인이_어긋나면_라우터가_보고서를_내주지_않는다(
+    monkeypatch, tmp_path
+) -> None:
     report_id = uuid.uuid4().hex
-    _registered_approved_snapshot(report_id)
+    _registered_approved_snapshot(report_id, monkeypatch, tmp_path)
     _swap_stored_seal_for_another_run(report_id)
 
     assert reports_router._approved_public_report(report_id, None) is None
@@ -238,7 +260,9 @@ def test_singleflight_재사용은_봉인을_붙인다(monkeypatch, tmp_path) ->
     assert report.public_projection is not None
 
     content, artifact = _persist_shared_content(
-        report, artifact_root=tmp_path / "reattach-artifacts"
+        report,
+        artifact_root=tmp_path / "reattach-artifacts",
+        preflight_identity_digest=_PREFLIGHT_IDENTITY_DIGEST,
     )
     delivered_at = content.content_generated_at + dt.timedelta(hours=1)
     with storage_db.connect() as conn:
@@ -273,7 +297,7 @@ def test_singleflight_재사용은_봉인을_붙인다(monkeypatch, tmp_path) ->
         billing_bucket_id=_BUCKET,
         corp_id=_COMPANY_ID,
         cache_namespace_id=_NAMESPACE_ID,
-        source_identity_digest=_source_digest(),
+        source_identity_digest=_PREFLIGHT_IDENTITY_DIGEST,
         engine_epoch_digest=_BUILD_IDENTITY.epoch_digest,
     )
     with storage_db.connect() as conn:
@@ -292,7 +316,9 @@ def test_singleflight_재사용도_봉인이_어긋나면_닫는다(monkeypatch,
     report_id = uuid.uuid4().hex
     report = _build_full_report(build_identity_sha256=_BUILD_IDENTITY.epoch_digest)
     content, artifact = _persist_shared_content(
-        report, artifact_root=tmp_path / "reattach-bad-artifacts"
+        report,
+        artifact_root=tmp_path / "reattach-bad-artifacts",
+        preflight_identity_digest=_PREFLIGHT_IDENTITY_DIGEST,
     )
     with storage_db.connect() as conn:
         assert report_store.insert_new(
@@ -327,7 +353,7 @@ def test_singleflight_재사용도_봉인이_어긋나면_닫는다(monkeypatch,
         billing_bucket_id=_BUCKET,
         corp_id=_COMPANY_ID,
         cache_namespace_id=_NAMESPACE_ID,
-        source_identity_digest=_source_digest(),
+        source_identity_digest=_PREFLIGHT_IDENTITY_DIGEST,
         engine_epoch_digest=_BUILD_IDENTITY.epoch_digest,
     )
     with storage_db.connect() as conn:
@@ -386,7 +412,11 @@ def _delivery_under_other_public_id(
     그 관례가 깨진 상태를 흉내 낸 것이다.
     """
 
-    content, artifact = _persist_shared_content(report, artifact_root=artifact_root)
+    content, artifact = _persist_shared_content(
+        report,
+        artifact_root=artifact_root,
+        preflight_identity_digest=_PREFLIGHT_IDENTITY_DIGEST,
+    )
     with storage_db.connect() as conn:
         delivery = Delivery.issue(
             public_id=public_id,

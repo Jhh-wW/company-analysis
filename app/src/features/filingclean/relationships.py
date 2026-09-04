@@ -12,6 +12,7 @@ import unicodedata
 from typing import Any, Final
 
 from src.features.filingclean.logic import find_best_body_chunk
+from src.shared.report_evidence.legacy_fragment_kinds import LEGACY_KIND_BUSINESS_CONTENT
 
 
 MAX_RELATIONSHIP_FRAGMENTS: Final[int] = 3
@@ -306,7 +307,7 @@ def add_to(
         key = re.sub(r"[^0-9a-z가-힣]+", "", sentence.casefold())
         if any(key and key in prior for prior in existing):
             continue
-        out[next_id] = {"종류": "사업내용", "원문": sentence}
+        out[next_id] = {"종류": LEGACY_KIND_BUSINESS_CONTENT, "원문": sentence}
         existing.add(key)
         next_id += 1
         added += 1

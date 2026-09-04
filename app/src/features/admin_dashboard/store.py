@@ -93,6 +93,11 @@ REPORT_STATUSES: Final[frozenset[str]] = frozenset(
         REPORT_STATUS_NORMAL,
     }
 )
+# 보고서 본문 저장과 불변 Delivery 확정 사이의 짧은 구간을 수동 오류 처리의
+# ``pending``과 구별하는 append-only 사건 이름이다. 상태 열은 기존 CHECK를
+# 그대로 쓰되, 자동 승격은 이 사건이 마지막인 신규 1판에만 허용한다.
+REPORT_EVENT_STAGED: Final[str] = "report_staged"
+REPORT_EVENT_PUBLISHED: Final[str] = "report_published"
 
 SERVICE_NORMAL: Final[str] = "normal"
 SERVICE_MAINTENANCE: Final[str] = "maintenance"
@@ -1211,6 +1216,198 @@ def register_report(
             now_iso=now_iso,
         )
     return get_report_state(conn, clean_id)
+
+
+def stage_report(
+    conn: sqlite3.Connection,
+    *,
+    report_id: str,
+    corp_type: str,
+    now_iso: str,
+    payload_json: str,
+) -> ReportState:
+    """Delivery 확정 전 본문을 공개 불가 상태로 등록한다.
+
+    ``pending``은 기존 DB CHECK 안에서 쓸 수 있는 닫힌 상태지만, 일반 오류
+    신고와 달리 마지막 사건이 ``report_staged``다. 따라서 아래 자동 승격은
+    사람의 재검사 대기 보고서를 실수로 정상으로 되돌리지 않는다.
+    """
+
+    clean_id = _clean(report_id, maximum=128)
+    if not clean_id:
+        raise ValueError("보고서 ID가 필요합니다.")
+    if not payload_json:
+        raise ValueError("출고 전 보고서 원본이 필요합니다.")
+    existing = conn.execute(
+        f"SELECT report_id FROM {TABLE_REPORT_STATES} WHERE report_id = ?",
+        (clean_id,),
+    ).fetchone()
+    if existing is not None:
+        raise ValueError("이미 운영 상태가 있는 보고서를 다시 staging할 수 없습니다.")
+    company_type = company_type_from_report(corp_type)
+    conn.execute(
+        f"""INSERT INTO {TABLE_REPORT_STATES}
+        (report_id, status, blocked, company_type, version, updated_at, updated_by)
+        VALUES (?, ?, 1, ?, 1, ?, 'system')""",
+        (clean_id, REPORT_STATUS_PENDING, company_type, now_iso),
+    )
+    conn.execute(
+        f"""INSERT INTO {TABLE_REPORT_EVENTS}
+        (report_id, action, from_status, to_status, blocked, actor, reason, created_at)
+        VALUES (?, ?, '', ?, 1, 'system', 'delivery_required', ?)""",
+        (
+            clean_id,
+            REPORT_EVENT_STAGED,
+            REPORT_STATUS_PENDING,
+            now_iso,
+        ),
+    )
+    if not capture_report_snapshot(
+        conn,
+        report_id=clean_id,
+        version=1,
+        payload_json=payload_json,
+        actor="system",
+        now_iso=now_iso,
+    ):
+        raise ValueError("출고 전 보고서 원본을 동결하지 못했습니다.")
+    return get_report_state(conn, clean_id)
+
+
+def publish_staged_report(
+    conn: sqlite3.Connection,
+    *,
+    report_id: str,
+    now_iso: str,
+) -> bool:
+    """같은 Delivery 성공 transaction 안에서만 staging을 정상으로 승격한다.
+
+    상태 행이 없는 직접 Delivery 호출과 이미 정상인 legacy 호환 호출은 손대지
+    않는다. 상태 행이 있는데 전용 staging 사건이 아니면 사람의 수동 검수
+    상태이므로 조용히 정상화하지 않고 닫는다.
+    """
+
+    clean_id = _clean(report_id, maximum=128)
+    if not clean_id:
+        raise ValueError("보고서 ID가 필요합니다.")
+    row = conn.execute(
+        f"""SELECT status, blocked, version FROM {TABLE_REPORT_STATES}
+        WHERE report_id = ?""",
+        (clean_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    if str(row["status"]) == REPORT_STATUS_NORMAL and not bool(row["blocked"]):
+        return False
+    latest = conn.execute(
+        f"""SELECT action FROM {TABLE_REPORT_EVENTS}
+        WHERE report_id = ? ORDER BY id DESC LIMIT 1""",
+        (clean_id,),
+    ).fetchone()
+    if (
+        str(row["status"]) != REPORT_STATUS_PENDING
+        or not bool(row["blocked"])
+        or int(row["version"]) != 1
+        or latest is None
+        or str(latest["action"]) != REPORT_EVENT_STAGED
+        or not report_snapshot_exists(conn, report_id=clean_id, version=1)
+    ):
+        raise ValueError("출고 성공과 결속할 staging 보고서 상태가 아닙니다.")
+    conn.execute(
+        f"""UPDATE {TABLE_REPORT_STATES}
+        SET status=?, blocked=0, updated_at=?, updated_by='system'
+        WHERE report_id=?""",
+        (REPORT_STATUS_NORMAL, now_iso, clean_id),
+    )
+    conn.execute(
+        f"""INSERT INTO {TABLE_REPORT_EVENTS}
+        (report_id, action, from_status, to_status, blocked, actor, reason, created_at)
+        VALUES (?, ?, ?, ?, 0, 'system', 'delivery_complete', ?)""",
+        (
+            clean_id,
+            REPORT_EVENT_PUBLISHED,
+            REPORT_STATUS_PENDING,
+            REPORT_STATUS_NORMAL,
+            now_iso,
+        ),
+    )
+    return True
+
+
+def report_publication_lifecycle(
+    conn: sqlite3.Connection,
+    report_id: str,
+) -> str:
+    """가장 최근의 보고서 공개 생명주기 사건을 돌려준다.
+
+    옛 보고서에는 두 사건이 모두 없으므로 빈 문자열이다. 설문·오류·관리자 상태
+    변경은 공개 성공을 뜻하지 않으므로 이 두 사건 사이의 순서만 비교한다.
+    """
+
+    clean_id = _clean(report_id, maximum=128)
+    if not clean_id:
+        return ""
+    # 설문·오류·관리 상태 사건이 뒤에 붙더라도 staging 자체가 publish된 것은
+    # 아니다. 공개 생명주기 두 사건 중 마지막 것만 비교해야 intent 유실 때
+    # 신규 raw를 옛 legacy로 오인하지 않는다.
+    latest = conn.execute(
+        f"""SELECT action FROM {TABLE_REPORT_EVENTS}
+        WHERE report_id = ? AND action IN (?, ?)
+        ORDER BY id DESC LIMIT 1""",
+        (clean_id, REPORT_EVENT_STAGED, REPORT_EVENT_PUBLISHED),
+    ).fetchone()
+    return "" if latest is None else str(latest["action"])
+
+
+def report_is_unpublished_staging(
+    conn: sqlite3.Connection,
+    report_id: str,
+) -> bool:
+    """Delivery intent가 사라져도 신규 staging을 legacy로 오인하지 않는다."""
+
+    return (
+        report_publication_lifecycle(conn, report_id) == REPORT_EVENT_STAGED
+    )
+
+
+def report_access_is_revoked(
+    conn: sqlite3.Connection,
+    report_id: str,
+) -> bool:
+    """휴지통·수동 차단을 staging 예외와 한 SQLite snapshot에서 판정한다.
+
+    ``report_is_blocked``와 ``report_is_unpublished_staging``을 차례로 부르면
+    그 사이 Delivery 성공 transaction이 commit될 수 있다. 그러면 첫 조회는
+    staging의 ``blocked=1``을, 둘째 조회는 publish 사건을 읽어 방금 완료된
+    정상 보고서를 순간적으로 철회한다. 상관 하위 조회를 한 SELECT에 넣어 한
+    시점의 상태만 조합한다.
+    """
+
+    clean_id = _clean(report_id, maximum=128)
+    if not clean_id:
+        return False
+    row = conn.execute(
+        f"""SELECT
+            EXISTS(
+                SELECT 1 FROM {TABLE_REPORT_TRASH}
+                WHERE report_id = ? AND status IN (?, ?)
+            ) AS is_trashed,
+            COALESCE((
+                SELECT blocked FROM {TABLE_REPORT_STATES} WHERE report_id = ?
+            ), 0) AS is_blocked,
+            COALESCE((
+                SELECT action FROM {TABLE_REPORT_EVENTS}
+                WHERE report_id = ? ORDER BY id DESC LIMIT 1
+            ), '') AS latest_action
+        """,
+        (clean_id, TRASH_TRASHED, TRASH_PURGED, clean_id, clean_id),
+    ).fetchone()
+    if row is None:
+        return False
+    return bool(row["is_trashed"]) or (
+        bool(row["is_blocked"])
+        and str(row["latest_action"]) != REPORT_EVENT_STAGED
+    )
 
 
 def capture_report_snapshot(

@@ -20,7 +20,10 @@ from src.shared.generation_validation_receipt import (
     GenerationValidationReceipt,
     ValidationRound,
 )
-from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
+from src.shared.report_evidence.policy import (
+    REQUIRED_EVIDENCE_SECTION_IDS,
+    required_slots_for,
+)
 from src.shared.report_quality.models import (
     GenerationAssessment,
     QualityAssessment,
@@ -61,24 +64,68 @@ def _assessment(
     one_claim: tuple[str, ...] = (),
     notice_only: tuple[str, ...] = (),
     safety_blocked: bool = False,
+    substantive_claims: int | None = None,
+    verified_claims: int | None = None,
+    safety_verified_claims: int | None = None,
 ) -> GenerationAssessment:
     shortfalls = ("구조화 품질 부족",) if problem_codes else ()
     grade = QualityGrade.PARTIAL if problem_codes else QualityGrade.COMPLETE
+    substantive = (
+        substantive_claims
+        if substantive_claims is not None
+        else (35 if problem_codes else 45)
+    )
+    verified = verified_claims if verified_claims is not None else substantive
+    remaining_interpretations = max(0, substantive - verified)
+    interpretation_count_by_section = {
+        section_id: 0 for section_id in REQUIRED_EVIDENCE_SECTION_IDS
+    }
+    if remaining_interpretations and semantic_underfilled:
+        # 장별 해석 과다 회귀는 문제가 난 바로 그 장의 실제 개수를 봉인한다.
+        interpretation_count_by_section[semantic_underfilled[0]] = (
+            remaining_interpretations
+        )
+        remaining_interpretations = 0
+    for section_id in REQUIRED_EVIDENCE_SECTION_IDS:
+        if not remaining_interpretations:
+            break
+        count = min(2, remaining_interpretations)
+        interpretation_count_by_section[section_id] = count
+        remaining_interpretations -= count
     quality = QualityAssessment(
         contract_version=_CONTRACT_VERSION,
         grade=grade,
-        substantive_claims=35 if problem_codes else 45,
-        verified_claims=35 if problem_codes else 45,
-        verified_ratio=Decimal("1"),
+        substantive_claims=substantive,
+        verified_claims=verified,
+        verified_ratio=(
+            Decimal(verified) / Decimal(substantive)
+            if substantive
+            else Decimal(0)
+        ),
         document_sources=8,
         notice_only_sections=notice_only,
         one_claim_sections=one_claim,
         section_claim_counts=tuple(
-            (section_id, 5) for section_id in REQUIRED_EVIDENCE_SECTION_IDS
+            (section_id, len(required_slots_for(section_id)))
+            for section_id in REQUIRED_EVIDENCE_SECTION_IDS
         ),
         shortfall_reasons=shortfalls,
         section_public_sentence_counts=tuple(
-            (section_id, 5) for section_id in REQUIRED_EVIDENCE_SECTION_IDS
+            (
+                section_id,
+                4
+                if section_id == "identity"
+                else 6
+                if section_id == "competitive_position"
+                else 5,
+            )
+            for section_id in REQUIRED_EVIDENCE_SECTION_IDS
+        ),
+        # 기대값을 숫자로 맞추는 대신 helper가 만든 검증/해석 분할을 그대로
+        # 장별 정본으로 운반한다. COMPLETE 영수증은 이 합계를 다시 검산한다.
+        section_interpretation_counts=tuple(
+            (section_id, interpretation_count_by_section[section_id])
+            for section_id in REQUIRED_EVIDENCE_SECTION_IDS
         ),
         underfilled_sections=underfilled,
         semantic_underfilled_sections=semantic_underfilled,
@@ -93,7 +140,15 @@ def _assessment(
         ),
         verified_fact_ids=tuple(
             f"fact-{index}"
-            for index in range(1, quality.verified_claims + 1)
+            for index in range(
+                1,
+                (
+                    safety_verified_claims
+                    if safety_verified_claims is not None
+                    else quality.verified_claims
+                )
+                + 1,
+            )
         ),
         unverified_fact_ids=(),
         rejected_fact_ids=(),
@@ -232,6 +287,137 @@ def test_의미범주가_얇은장도_문구해석없이_보충대상이된다()
     assert decision.supplement_section_ids == ("business_model",)
 
 
+def test_한장_해석3개는_한번만_보충하고_남으면_무차감_STOP한다() -> None:
+    interpretation_heavy = _assessment(
+        problem_codes=(
+            QualityProblemCode.TOO_MANY_INTERPRETATION_CLAIMS_PER_SECTION,
+        ),
+        semantic_underfilled=("identity",),
+        substantive_claims=45,
+        verified_claims=42,
+        safety_verified_claims=45,
+    )
+    primary = _primary(interpretation_heavy)
+
+    first = decide_post_validation(primary)
+
+    assert first.action is RecoveryAction.RUN_SUPPLEMENTS
+    assert first.supplement_section_ids == ("identity",)
+    assert first.projected_total_ai_calls == 12
+    assert first.supplement_authorization is not None
+
+    still_heavy = _supplement(
+        primary,
+        first.supplement_authorization,
+        interpretation_heavy,
+    )
+    final = decide_post_validation(
+        primary,
+        supplement_authorization=first.supplement_authorization,
+        supplement_receipt=still_heavy,
+    )
+
+    assert final.action is RecoveryAction.STOP_NO_CHARGE
+    assert final.reason_code == "post_supplement_quality_failed"
+    assert final.observed_total_ai_calls == 12
+    assert final.authorized_additional_ai_calls == 0
+    assert final.supplement_authorization is None
+    assert final.publish_allowed is False
+    assert final.charge_allowed is False
+
+
+@pytest.mark.parametrize(
+    ("problem_code", "underfilled", "semantic_underfilled"),
+    (
+        (
+            QualityProblemCode.MISSING_REQUIRED_PUBLIC_CLAIM_SLOTS,
+            (),
+            ("business_model",),
+        ),
+        (
+            QualityProblemCode.LOW_PUBLIC_SENTENCE_COVERAGE,
+            ("identity",),
+            (),
+        ),
+    ),
+)
+def test_필수의미칸누락과_2문장장은_한번보충뒤에도남으면_무차감_STOP한다(
+    problem_code: QualityProblemCode,
+    underfilled: tuple[str, ...],
+    semantic_underfilled: tuple[str, ...],
+) -> None:
+    failed = _assessment(
+        problem_codes=(problem_code,),
+        underfilled=underfilled,
+        semantic_underfilled=semantic_underfilled,
+        substantive_claims=45,
+        verified_claims=45,
+        safety_verified_claims=45,
+    )
+    primary = _primary(failed)
+    first = decide_post_validation(primary)
+    assert first.action is RecoveryAction.RUN_SUPPLEMENTS
+    assert first.projected_total_ai_calls == 12
+    assert first.supplement_authorization is not None
+
+    supplement = _supplement(
+        primary,
+        first.supplement_authorization,
+        failed,
+    )
+    final = decide_post_validation(
+        primary,
+        supplement_authorization=first.supplement_authorization,
+        supplement_receipt=supplement,
+    )
+
+    assert final.action is RecoveryAction.STOP_NO_CHARGE
+    assert final.observed_total_ai_calls == 12
+    assert final.authorized_additional_ai_calls == 0
+    assert final.supplement_authorization is None
+    assert not final.publish_allowed
+    assert not final.charge_allowed
+
+
+def test_해석보충뒤_틀린수치가_남으면_세번째호출없이_무차감_STOP한다() -> None:
+    primary_assessment = _assessment(
+        problem_codes=(
+            QualityProblemCode.TOO_MANY_INTERPRETATION_CLAIMS_PER_SECTION,
+        ),
+        semantic_underfilled=("past_changes",),
+        substantive_claims=45,
+        verified_claims=42,
+        safety_verified_claims=45,
+    )
+    primary = _primary(primary_assessment)
+    first = decide_post_validation(primary)
+    assert first.supplement_authorization is not None
+    numerically_unsafe = _supplement(
+        primary,
+        first.supplement_authorization,
+        _assessment(
+            safety_blocked=True,
+            substantive_claims=45,
+            verified_claims=44,
+            safety_verified_claims=45,
+        ),
+    )
+
+    final = decide_post_validation(
+        primary,
+        supplement_authorization=first.supplement_authorization,
+        supplement_receipt=numerically_unsafe,
+    )
+
+    assert final.action is RecoveryAction.STOP_NO_CHARGE
+    assert final.reason_code == "post_supplement_safety_blocked"
+    assert final.observed_total_ai_calls == 12
+    assert final.authorized_additional_ai_calls == 0
+    assert final.supplement_authorization is None
+    assert not final.publish_allowed
+    assert not final.charge_allowed
+
+
 def test_얇은장이_세개면_비싼보충을_시작하지않는다() -> None:
     primary = _primary(_recoverable("identity", "culture", "portfolio"))
 
@@ -246,6 +432,7 @@ def test_얇은장이_세개면_비싼보충을_시작하지않는다() -> None:
     (
         QualityProblemCode.TOO_FEW_DOCUMENT_SOURCES,
         QualityProblemCode.LOW_VERIFIED_RATIO,
+        QualityProblemCode.EXCESSIVE_INTERPRETATION_CLAIMS,
     ),
 )
 def test_안전실패나_비회복품질은_즉시_무차감으로끝낸다(

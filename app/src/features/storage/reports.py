@@ -44,7 +44,11 @@ from src.features.storage.constants import (
     TABLE_REPORT_PUBLIC_PROJECTIONS,
     TABLE_REPORTS,
 )
-from src.shared.report_quality.constants import STRICT_QUALITY_CONTRACT_VERSION
+from src.shared.report_quality.constants import (
+    LEGACY_STRICT_QUALITY_CONTRACT_VERSION,
+    STRICT_QUALITY_CONTRACT_VERSION,
+    STRICT_QUALITY_CONTRACT_VERSIONS,
+)
 from src.shared.report_quality.generation import (
     assert_observation_matches_assessment,
     generation_quality_observation_from_dict,
@@ -279,6 +283,8 @@ def _citation_to_dict(citation: object) -> dict[str, Any]:
         payload["exact_evidence_hashes"] = list(citation.exact_evidence_hashes)
     if citation.reporting_period:
         payload["reporting_period"] = citation.reporting_period
+    if citation.ir_metadata_verification:
+        payload["ir_metadata_verification"] = citation.ir_metadata_verification
     if citation.attachment_url:
         payload["attachment_url"] = citation.attachment_url
     if citation.domain_redirect_verification:
@@ -287,6 +293,14 @@ def _citation_to_dict(citation: object) -> dict[str, Any]:
         payload["domain_redirect_from_host"] = citation.domain_redirect_from_host
     if citation.domain_redirect_to_host:
         payload["domain_redirect_to_host"] = citation.domain_redirect_to_host
+    if citation.formal_source_kind:
+        payload["formal_source_kind"] = citation.formal_source_kind
+    if citation.identity_binding:
+        payload["identity_binding"] = citation.identity_binding
+    # 이 필드가 생기기 전 저장 JSON과 digest는 빈 키를 추가하지 않는다.
+    # 새 typed formal Source는 수집기가 준 전체 문서 지문을 그대로 저장한다.
+    if citation.document_content_sha256:
+        payload["document_content_sha256"] = citation.document_content_sha256
     return payload
 
 
@@ -299,6 +313,7 @@ def _citation_from_dict(data: dict[str, Any]) -> Source:
         collected_at=data.get("collected_at", ""),
         published_at=data.get("published_at", ""),
         reporting_period=data.get("reporting_period", ""),
+        ir_metadata_verification=data.get("ir_metadata_verification", ""),
         attachment_url=data.get("attachment_url", ""),
         domain_redirect_verification=data.get("domain_redirect_verification", ""),
         domain_redirect_from_host=data.get("domain_redirect_from_host", ""),
@@ -336,6 +351,11 @@ def _citation_from_dict(data: dict[str, Any]) -> Source:
         ).strip(),
         provenance_seal=str(data.get("provenance_seal", "")).strip(),
         provenance_role=str(data.get("provenance_role", "citation")).strip(),
+        formal_source_kind=str(data.get("formal_source_kind", "")).strip(),
+        identity_binding=str(data.get("identity_binding", "")).strip(),
+        document_content_sha256=str(
+            data.get("document_content_sha256", "")
+        ).strip(),
     )
 
 
@@ -495,30 +515,38 @@ def report_from_dict(data: dict[str, Any]) -> Report:
     }
     if release_mode not in allowed_release_modes:
         raise ValueError(f"알 수 없는 저장 release_mode입니다: {release_mode!r}")
-    strict_reload = release_mode in {
-        ReleaseMode.ENFORCE_NO_PARTIAL.value,
-        ReleaseMode.FULL.value,
-    }
-    if strict_reload and (
+    enforce_reload = release_mode == ReleaseMode.ENFORCE_NO_PARTIAL.value
+    full_reload = release_mode == ReleaseMode.FULL.value
+    strict_reload = enforce_reload or full_reload
+    stored_contract_version = str(data.get("quality_contract_version", ""))
+    if enforce_reload and (
         schema_version != ENGINE_V2_SCHEMA_VERSION
-        or str(data.get("quality_contract_version", ""))
-        != STRICT_QUALITY_CONTRACT_VERSION
+        or stored_contract_version != LEGACY_STRICT_QUALITY_CONTRACT_VERSION
     ):
-        raise ValueError("엄격 보고서의 schema 또는 품질 contract_version이 바뀌었습니다")
+        raise ValueError(
+            "ENFORCE_NO_PARTIAL 보고서의 schema 또는 v2 품질 contract_version이 "
+            "바뀌었습니다"
+        )
+    if full_reload and (
+        schema_version != ENGINE_V2_SCHEMA_VERSION
+        or stored_contract_version not in STRICT_QUALITY_CONTRACT_VERSIONS
+    ):
+        raise ValueError(
+            "FULL 보고서의 schema 또는 품질 contract_version이 바뀌었습니다"
+        )
     # ★ quality_observation은 이 「엄격 전용」 묶음에서 뺐다 —
     #   SHADOW도 관측 전용으로 저장한다. generation_evidence·
-    #   public_structure_manifest·STRICT contract_version은 여전히 FULL/
-    #   ENFORCE 전용이다(그 셋은 실제로 strict 생산 증거·공개 봉인 절차를
-    #   거쳐야만 만들어질 수 있는 값이라 강등된 release_mode로 들어오면
+    #   generation_evidence·public_structure_manifest는 FULL 전용이고,
+    #   STRICT contract_version은 ENFORCE/FULL 전용이다. 실제 엄격 평가·공개
+    #   봉인을 거쳐야만 만들어질 수 있는 값이라 SHADOW로 강등돼 들어오면
     #   신뢰할 수 없다. quality_observation은 SHADOW 생성 경로도 항상 스스로
-    #   계산하므로 같은 위험이 없다).
+    #   계산하므로 같은 위험이 없다.
     if (
         not strict_reload
         and (
             data.get("generation_evidence") is not None
             or str(data.get("public_structure_manifest", "")).strip()
-            or str(data.get("quality_contract_version", ""))
-            == STRICT_QUALITY_CONTRACT_VERSION
+            or stored_contract_version in STRICT_QUALITY_CONTRACT_VERSIONS
         )
     ):
         raise ValueError("엄격 보고서의 release_mode가 누락되거나 낮아졌습니다")
@@ -643,6 +671,25 @@ def report_to_json(report: Report) -> str:
 def report_from_json(text: str) -> Report:
     """JSON 문자열 → `Report`."""
     return report_from_dict(json.loads(text))
+
+
+def _validated_report_json_for_write(report: Report) -> str:
+    """저장 뒤 ``load``할 수 있는 본문만, 만든 바로 그 JSON으로 돌려준다.
+
+    ``report_to_json``은 직렬화 가능성과 저장 자원 상한을 확인하지만 릴리스
+    모드·schema·품질 계약·FULL 생성 증거의 결속은 읽기 경계가 검사한다.
+    쓰기에서 그 검사를 건너뛰면 INSERT와 commit은 성공했는데 ``load``가 영원히
+    거부하는 행을 만들 수 있다. 따라서 SQL에 손대기 전에 JSON을 딱 한 번 만들고,
+    읽기 경계와 같은 역직렬화를 통과시킨 뒤 그 동일 문자열을 저장한다.
+
+    공개 projection은 별도 표의 기존 검증·동일 transaction 계약이 맡는다.
+    특히 과거 FULL 저장본에는 projection 행이 없을 수 있으므로 여기서 새 필수
+    조건을 만들지 않는다.
+    """
+
+    payload_json = report_to_json(report)
+    report_from_json(payload_json)
+    return payload_json
 
 
 def _normalize_legacy_report(report: Report) -> Report:
@@ -874,6 +921,9 @@ def save(
         report: 저장할 보고서.
         created_at: 저장 시각(ISO 8601). 생략하면 지금.
     """
+    # INSERT보다 먼저 읽기 경계와 같은 불변식을 확인한다. 아래 SQL과 봉인 쓰기
+    # 어느 쪽도 실행되기 전이므로 실패한 객체가 부분 저장될 수 없다.
+    payload_json = _validated_report_json_for_write(report)
     stamp = created_at or dt.datetime.now().isoformat(timespec="seconds")
     conn.execute(
         f"""
@@ -893,7 +943,7 @@ def save(
             report_id,
             corp_id,
             job,
-            report_to_json(report),
+            payload_json,
             report.generated_at,
             stamp,
             engine_epoch_digest,
@@ -920,6 +970,9 @@ def insert_new(
 
     if not build_identity_contract.epoch_digest_is_valid(engine_epoch_digest):
         raise ValueError("신규 공개 보고서에는 정상 engine epoch 영수증이 필요합니다")
+    # ``save``와 같은 쓰기 계약을 쓴다. append-only 공개 ID를 먼저 차지한 뒤
+    # 재로드 불능임을 발견하면 같은 ID로 정상 보고서를 다시 넣을 수도 없다.
+    payload_json = _validated_report_json_for_write(report)
     stamp = created_at or dt.datetime.now().isoformat(timespec="seconds")
     cursor = conn.execute(
         f"""
@@ -932,7 +985,7 @@ def insert_new(
             report_id,
             corp_id,
             job,
-            report_to_json(report),
+            payload_json,
             report.generated_at,
             stamp,
             engine_epoch_digest,

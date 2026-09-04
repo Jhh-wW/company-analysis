@@ -20,8 +20,20 @@ from src.features.chapter_evidence.tests.fixtures import (
 )
 from src.shared.report_evidence.constants import (
     CollectionState,
+    SOURCE_KIND_DART_AUDIT_REPORT,
+    SOURCE_KIND_DART_BUSINESS_REPORT,
+    SOURCE_KIND_DART_QUARTERLY_REPORT,
+    SOURCE_KIND_DART_SEMIANNUAL_REPORT,
     SourceRequirement,
     SourceTier,
+)
+
+
+_DART_KINDS = (
+    SOURCE_KIND_DART_BUSINESS_REPORT,
+    SOURCE_KIND_DART_AUDIT_REPORT,
+    SOURCE_KIND_DART_SEMIANNUAL_REPORT,
+    SOURCE_KIND_DART_QUARTERLY_REPORT,
 )
 from src.shared.report_evidence.models import (
     CollectedEvidenceDocument,
@@ -50,6 +62,39 @@ def test_이미_계약_인스턴스인_문서는_그대로_돌려준다() -> Non
     document = to_document(mapping)
 
     assert to_document(document) is document
+
+
+@pytest.mark.parametrize("source_kind", _DART_KINDS)
+@pytest.mark.parametrize("published_on", ("2024-02-29", "20240229"))
+def test_DART_4종_발행일은_ISO와_옛_compact를_같은_ISO로_운반한다(
+    source_kind: str,
+    published_on: str,
+) -> None:
+    mapping = make_document(
+        company_id="corp-1",
+        document_id="doc-1",
+        source_kind=source_kind,
+    )
+    mapping["published_on"] = published_on
+
+    assert to_document(mapping).published_on == "2024-02-29"
+
+
+@pytest.mark.parametrize("source_kind", _DART_KINDS)
+@pytest.mark.parametrize("published_on", ("2025-02-30", "20250230", "임의 문자열"))
+def test_DART_4종_발행일은_없는날짜와_임의문자열을_즉시_거부한다(
+    source_kind: str,
+    published_on: str,
+) -> None:
+    mapping = make_document(
+        company_id="corp-1",
+        document_id="doc-1",
+        source_kind=source_kind,
+    )
+    mapping["published_on"] = published_on
+
+    with pytest.raises(ValueError, match="공식 자료 날짜"):
+        to_document(mapping)
 
 
 def test_문서에_필수_항목이_빠지면_한국어_예외를_낸다() -> None:

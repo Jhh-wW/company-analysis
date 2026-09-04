@@ -1,7 +1,6 @@
 """DartEvidenceHarvest를 평범한 dict·list·str·int로 직렬화한다.
 
-향후 app 쪽 adapter는 이 Mapping을 그대로 계약 자료형으로 변환해야 한다.
-현재 실서비스 adapter는 아직 없다. frozen
+app의 공식 근거 adapter는 이 Mapping을 계약 자료형으로 변환한다. frozen
 dataclass·frozenset·tuple 같은 파이썬 전용 타입은 하나도 새지 않는다 —
 JSON으로 그대로 dump할 수 있는 모양만 돌려준다.
 
@@ -29,6 +28,7 @@ from features.evidence_collection.models import (
     DartEvidenceHarvest,
     DocumentTextRange,
     EvidenceFragment,
+    OfficialUrlCandidate,
 )
 
 
@@ -37,7 +37,9 @@ def _range_to_mapping(text_range: DocumentTextRange) -> dict[str, int]:
 
 
 def _document_to_mapping(
-    document: CollectedDocument, exact_evidence_hashes: list[str],
+    document: CollectedDocument,
+    exact_evidence_hashes: list[str],
+    exact_evidence_bindings: list[dict[str, str]],
 ) -> dict[str, object]:
     return {
         "company_id": document.company_id,
@@ -56,6 +58,10 @@ def _document_to_mapping(
         "parser_version": document.parser_version,
         "requirement": document.requirement,
         "exact_evidence_hashes": exact_evidence_hashes,
+        # hash 허용목록만으로는 같은 문서의 다른 위치로 조각을 옮겨도 잡지
+        # 못한다. 원문을 복제하지 않고도 location↔hash 쌍을 앱 경계가 exact
+        # 비교할 수 있게 생산 자리에서 함께 봉인한다.
+        "exact_evidence_bindings": exact_evidence_bindings,
     }
 
 
@@ -94,6 +100,23 @@ def _attempt_to_mapping(attempt: CollectionAttempt) -> dict[str, object]:
     }
 
 
+def _official_url_candidate_to_mapping(
+    candidate: OfficialUrlCandidate,
+) -> dict[str, str]:
+    """원문 전체 없이 URL 발견 provenance만 app 경계로 보낸다."""
+
+    return {
+        "company_id": candidate.company_id,
+        "url": candidate.url,
+        "source_document_id": candidate.source_document_id,
+        "source_receipt_no": candidate.source_receipt_no,
+        "source_member_name": candidate.source_member_name,
+        "source_location": candidate.source_location,
+        "source_document_sha256": candidate.source_document_sha256,
+        "source_payload_sha256": candidate.source_payload_sha256,
+    }
+
+
 def _exact_evidence_hashes_by_document_id(harvest: DartEvidenceHarvest) -> dict[str, list[str]]:
     """document_id별 fragment text_sha256을 정렬·중복 제거해 모은다."""
     hashes_by_document_id: dict[str, set[str]] = {}
@@ -101,6 +124,25 @@ def _exact_evidence_hashes_by_document_id(harvest: DartEvidenceHarvest) -> dict[
         hashes_by_document_id.setdefault(fragment.document_id, set()).add(fragment.text_sha256)
     return {
         document_id: sorted(hashes) for document_id, hashes in hashes_by_document_id.items()
+    }
+
+
+def _exact_evidence_bindings_by_document_id(
+    harvest: DartEvidenceHarvest,
+) -> dict[str, list[dict[str, str]]]:
+    """문서별 ``location``↔``text_sha256`` 직접 결속을 결정론 순서로 만든다."""
+
+    bindings_by_document_id: dict[str, set[tuple[str, str]]] = {}
+    for fragment in harvest.fragments:
+        bindings_by_document_id.setdefault(fragment.document_id, set()).add(
+            (fragment.location, fragment.text_sha256)
+        )
+    return {
+        document_id: [
+            {"location": location, "text_sha256": text_sha256}
+            for location, text_sha256 in sorted(bindings)
+        ]
+        for document_id, bindings in bindings_by_document_id.items()
     }
 
 
@@ -112,15 +154,33 @@ def harvest_to_mapping(harvest: DartEvidenceHarvest) -> dict[str, object]:
     지킨다). dataclass·frozenset·tuple은 하나도 남기지 않는다.
     """
     exact_hashes_by_document_id = _exact_evidence_hashes_by_document_id(harvest)
+    exact_bindings_by_document_id = _exact_evidence_bindings_by_document_id(harvest)
     return {
         "company_id": harvest.company_id,
         "company_type": harvest.company_type,
         "documents": [
             _document_to_mapping(
-                document, exact_hashes_by_document_id.get(document.document_id, []),
+                document,
+                exact_hashes_by_document_id.get(document.document_id, []),
+                exact_bindings_by_document_id.get(document.document_id, []),
             )
             for document in harvest.documents
         ],
         "fragments": [_fragment_to_mapping(fragment) for fragment in harvest.fragments],
+        # 보고서 근거 배열과 섞지 않는다. 현재 분류기가 뜻을 증명하지 못한
+        # 원문을 별도 차선으로 보존해, 뒤 단계가 자료 부족과 분류기 결함을
+        # 구분하거나 다음 분류기 버전으로 다시 판정할 수 있게 한다.
+        "unclassified_documents": [
+            _document_to_mapping(document, [], [])
+            for document in harvest.unclassified_documents
+        ],
+        "unclassified_fragments": [
+            _fragment_to_mapping(fragment)
+            for fragment in harvest.unclassified_fragments
+        ],
         "attempts": [_attempt_to_mapping(attempt) for attempt in harvest.attempts],
+        "official_url_candidates": [
+            _official_url_candidate_to_mapping(candidate)
+            for candidate in harvest.official_url_candidates
+        ],
     }

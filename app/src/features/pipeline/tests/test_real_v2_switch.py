@@ -22,6 +22,8 @@ from typing import Any
 import pytest
 
 import src.features.composer.pipeline as composer_pipeline
+import src.features.composer.port as composer_port
+import src.features.company_comparison.v2_bridge as comparison_bridge
 from src.core import deployment_identity
 from src.core.provider_gateway import attempt_context
 from src.core.provider_gateway.attempt_context import ProviderAttemptCallbacks
@@ -45,9 +47,14 @@ from src.features.pipeline.tests.test_real_cache import (
     POSTING,
     FakeEngine,
 )
+from src.features.pipeline.tests.test_official_evidence_runtime import (
+    _Collector as _OfficialEvidenceCollector,
+    _official_result,
+)
 from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
 from src.shared import generation_coordination
 from src.shared.final_gate_diagnostics import (
+    FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
     FINAL_GATE_REASON_PUBLISH_BLOCKED,
     FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR,
     QUALITY_FLOOR_PROBLEM_CODES,
@@ -622,17 +629,16 @@ def test_v2_출고검증과_회복실패는_닫힌사유의_GATE_STOPPED로_끝�
 # ══════════════════════════════════════════════════════════
 # ⑥ 품질 하한 사유 구분 — task 022 (모든 V2ValidationError를 하나로
 #    뭉뚱그리지 않는다: too_few_substantive_claims/too_few_document_sources/
-#    low_verified_ratio «세 코드일 때만» 새 최종 게이트 사유로 떼어낸다.
+#    low_verified_ratio와 해석 과다 두 코드를 품질 하한 사유로 떼어낸다.
 #    분류 자체는 src/shared/final_gate_diagnostics.py의 순수 함수 한 곳이
 #    권위다 — real.py는 그 함수를 호출만 한다.)
 # ══════════════════════════════════════════════════════════
 
 
-def test_품질하한_코드집합은_정확히_세_개다() -> None:
+def test_품질하한_코드집합은_필수의미칸과_해석폭주도_포함한다() -> None:
     """★ 앵커 시험 — task 022 정밀화. 새 사유로 분기하는 코드 집합이
     ``src.shared.final_gate_diagnostics.QUALITY_FLOOR_PROBLEM_CODES``
-    상수 하나로 뽑혀 있고, 그 값이 정확히 이 세 개(too_few_substantive_claims
-    · too_few_document_sources · low_verified_ratio)뿐임을 고정한다.
+    상수 하나로 뽑혀 있고, 기존 세 하한과 해석 과다 두 종류를 모두 고정한다.
     승인된 50% 검증 비율(low_verified_ratio)도 40건·8건과 같은 «수치
     품질 하한»이다 — 빼면 회사 규모가 작아 표본이 적은 케이스의 거짓
     거절 원인이 축소된다.
@@ -642,6 +648,9 @@ def test_품질하한_코드집합은_정확히_세_개다() -> None:
             "too_few_substantive_claims",
             "too_few_document_sources",
             "low_verified_ratio",
+            "too_many_interpretation_claims_per_section",
+            "excessive_interpretation_claims",
+            "missing_required_public_claim_slots",
         }
     )
     assert QUALITY_FLOOR_PROBLEM_CODES == frozenset(
@@ -649,6 +658,9 @@ def test_품질하한_코드집합은_정확히_세_개다() -> None:
             QualityProblemCode.TOO_FEW_SUBSTANTIVE_CLAIMS.value,
             QualityProblemCode.TOO_FEW_DOCUMENT_SOURCES.value,
             QualityProblemCode.LOW_VERIFIED_RATIO.value,
+            QualityProblemCode.TOO_MANY_INTERPRETATION_CLAIMS_PER_SECTION.value,
+            QualityProblemCode.EXCESSIVE_INTERPRETATION_CLAIMS.value,
+            QualityProblemCode.MISSING_REQUIRED_PUBLIC_CLAIM_SLOTS.value,
         }
     )
 
@@ -657,9 +669,8 @@ def test_품질하한_코드집합은_정확히_세_개다() -> None:
 def test_품질코드_전수에_대해_최종게이트사유_분기가_고정돼있다(
     code: QualityProblemCode,
 ) -> None:
-    """★ 앵커 시험 — task 022 정밀화. ``QualityProblemCode`` 7개 전수
-    (숫자 하한 3 · 구조 4)를 하나씩 돌며, 지정된 세 코드 «만» 새 사유를
-    받고 나머지 네(구조 코드)는 개별적으로 기존 publish_blocked를 그대로
+    """★ 앵커 시험 — ``QualityProblemCode`` 전수를 하나씩 돌며, 승인된
+    수치·해석 하한 코드만 새 사유를 받고 나머지 구조 코드는 publish_blocked를 그대로
     받는지 고정한다. 이 시험이 없으면 ``QualityProblemCode``에 코드가
     새로 추가돼도 이 분기 로직이 조용히 새 사유로 새 코드를 흘려보내도
     아무도 못 잡는다.
@@ -669,6 +680,9 @@ def test_품질코드_전수에_대해_최종게이트사유_분기가_고정돼
         QualityProblemCode.TOO_FEW_SUBSTANTIVE_CLAIMS,
         QualityProblemCode.TOO_FEW_DOCUMENT_SOURCES,
         QualityProblemCode.LOW_VERIFIED_RATIO,
+        QualityProblemCode.TOO_MANY_INTERPRETATION_CLAIMS_PER_SECTION,
+        QualityProblemCode.EXCESSIVE_INTERPRETATION_CLAIMS,
+        QualityProblemCode.MISSING_REQUIRED_PUBLIC_CLAIM_SLOTS,
     ):
         assert reason == FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR
     else:
@@ -677,9 +691,16 @@ def test_품질코드_전수에_대해_최종게이트사유_분기가_고정돼
 
 @pytest.mark.parametrize(
     "quality_floor_code",
-    ["too_few_substantive_claims", "too_few_document_sources", "low_verified_ratio"],
+    [
+        "too_few_substantive_claims",
+        "too_few_document_sources",
+        "low_verified_ratio",
+        "too_many_interpretation_claims_per_section",
+        "excessive_interpretation_claims",
+        "missing_required_public_claim_slots",
+    ],
 )
-def test_v2_품질하한_세_코드는_새_최종게이트사유로_구분된다(
+def test_v2_품질하한_각_코드는_새_최종게이트사유로_구분된다(
     monkeypatch: pytest.MonkeyPatch, quality_floor_code: str
 ) -> None:
     """40건(실질 claim)·8건(독립 문서)·50%(검증 비율) 하한 미달 «각각»이
@@ -734,7 +755,7 @@ def test_v2_다른_품질코드나_안전오류는_기존_publish_blocked를_유
 ) -> None:
     """★ 앵커 시험 — 구조 코드 4개(too_many_notice_only_sections ·
     one_claim_sections · low_semantic_coverage · low_public_sentence_coverage)
-    는 개별로도 섞여도 품질 하한 세 코드가 «없으면» 기존 publish_blocked
+    는 개별로도 섞여도 품질 하한 코드가 «없으면» 기존 publish_blocked
     사유 그대로다."""
     fake = FakeEngine()
     engine, client, frags, financials, filing = _branch_ingredients(fake)
@@ -903,11 +924,16 @@ def test_v2_real자체_transport_무결성_실패도_품질게이트_사유를_�
     assert "transport" in steps[-1]["사유"][0]
 
 
-def test_운영_FULL은_typed_packet과_실제_9_writer_1_bundled_reviewer를_운반한다(
+def test_운영_FULL_직접경로는_비교생산물이_없으면_provider_0회로_차단한다(
     engine: FakeEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """real 배선 자체를 fake AI로 끝까지 합성해 호출 장부와 transport를 잰다."""
+    """생산 비교를 건너뛴 수 없음을 direct 진입점에서 고정한다.
+
+    정상 성공 경로는 공개 worker E2E가 실제 DART 후보 발견→양사
+    비교→packet→봉인→저장을 우회 없이 소유한다. 이 direct 시험에
+    가짜 program evidence를 손으로 넣어 성공시키지 않는다.
+    """
 
     marks = "가나다라마바사아자"
     endings = ("첫째", "둘째", "셋째", "넷째", "다섯째")
@@ -1021,56 +1047,13 @@ def test_운영_FULL은_typed_packet과_실제_9_writer_1_bundled_reviewer를_�
         generation_mode=_frozen_v2_mode(),
     )
 
-    assert result.outcome is Outcome.REPORT
-    assert result.charged is True
-    assert result.report is not None
-    assert result.report.release_mode == ReleaseMode.FULL.value
-    assert result.generation_evidence is result.report.generation_evidence
-    assert result.generation_metrics is result.report.generation_metrics
-    assert result.quality_observation is result.report.quality_observation
-    assert result.generation_evidence is not None
-    assert result.generation_evidence.writer_calls == 9
-    assert result.generation_evidence.reviewer_calls == 1
-    assert (
-        result.generation_evidence.build_identity_sha256
-        == _build_identity().epoch_digest
-    )
-    assert [record.section_id for record in result.generation_evidence.call_ledger.records[:9]] == list(SECTION_IDS)
-    assert result.generation_evidence.call_ledger.records[-1].section_id == "bundled"
-    assert len(writer.prompts) == 9
-    assert len(reviewer.prompts) == 1
+    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.report is None
+    assert result.charged is False
+    assert result.final_gate_reason == FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
+    assert writer.prompts == []
+    assert reviewer.prompts == []
     assert diagram_calls == []
-    assert (
-        len(writer.prompts) + len(reviewer.prompts) + len(diagram_calls)
-        == len(result.generation_evidence.call_ledger.records)
-        == result.generation_evidence.writer_calls
-        + result.generation_evidence.reviewer_calls
-        == 10
-    )
-
-    # 같은 Report가 storage/cache 경계에서 돌아오면 네 지표·producer·관측을
-    # 원 실행값 그대로 RunResult에 다시 싣는다. 0으로 꾸미거나 문자열 등급에서
-    # 평가를 재구성하지 않는다.
-    monkeypatch.setattr(real.generation_coordination, "coordinate", lambda **_kwargs: None)
-    monkeypatch.setattr(real.generation_coordination, "is_active", lambda: False)
-    monkeypatch.setenv(real.ENGINE_V2_ENV_NAME, real.ENGINE_V2_ENV_ON)
-    monkeypatch.setattr(real, "_v2_cache_lookup", lambda **_kwargs: result.report)
-    monkeypatch.setattr(
-        real,
-        "_run_v2_composer",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("v2 cache hit 뒤에 생성기를 다시 부르면 안 됩니다")
-        ),
-    )
-    cached = _run()
-    assert cached.cache_hit
-    assert cached.generation_evidence is result.generation_evidence
-    assert cached.generation_metrics is result.generation_metrics
-    assert cached.quality_observation is result.quality_observation
-    assert cached.fragments_collected == result.generation_metrics.fragments_collected
-    assert cached.fragments_cited == result.generation_metrics.fragments_cited
-    assert cached.sentences_made == result.generation_metrics.sentences_made
-    assert cached.sentences_passed == result.generation_metrics.sentences_passed
 
 
 def test_운영_FULL_packet_입력이_불완전하면_provider와_composer_모두_0회다(
@@ -1167,6 +1150,168 @@ def test_운영_v2_release_mode_누락은_provider와_composer_전에_차단한�
     assert result.outcome is Outcome.GATE_STOPPED
     assert fake.client.messages.calls == 0
     assert result.charged is False
+    assert result.final_gate_reason == FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
+
+
+def test_운영_v2_release_mode_오타는_내부계약으로_provider_전에_차단한다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeEngine()
+    engine = real._MeteredEngine(fake)
+    client = real._metered_client(engine, fake._client())
+    _engine, _client, frags, financials, filing = _branch_ingredients(fake)
+    monkeypatch.setenv(real.REPORT_RELEASE_MODE_ENV_NAME, "FUL")
+    monkeypatch.setattr(
+        real,
+        "_v2_ask_via_provider",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("release mode 오타 차단 전에 provider를 만들면 안 됩니다")
+        ),
+    )
+
+    steps: list[dict[str, Any]] = []
+    result = real._run_v2_composer(
+        engine=engine,
+        client=client,
+        company_name="가나다전자",
+        corp_type="상장사",
+        frags=frags,
+        financials=financials,
+        filing=filing,
+        revenue_tables=[],
+        sources=[],
+        business_date=_DATE,
+        model="가짜모델",
+        steps=steps,
+        corp_id=CORP_ID,
+        current_fiscal_year=2025,
+        source_identity_digest="a" * 64,
+        build_identity=_build_identity(),
+        generation_mode=_frozen_v2_mode(),
+    )
+
+    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.final_gate_reason == FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
+    assert steps[-1] == {
+        "step": "v2_FULL_입력계약_차단",
+        "사유코드": FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
+    }
+    assert fake.client.messages.calls == 0
+    assert result.cost_krw == 0
+    assert result.charged is False
+
+
+def test_운영_FULL_비교packet_attach_ValueError는_내부계약으로_AI전에_차단한다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """비교 bridge 결함을 회사 자료/출고 품질 문제로 오표기하지 않는다."""
+
+    fake = FakeEngine()
+    engine = real._MeteredEngine(fake)
+    client = real._metered_client(engine, fake._client())
+    _engine, _client, frags, financials, filing = _branch_ingredients(fake)
+    monkeypatch.setenv(real.REPORT_RELEASE_MODE_ENV_NAME, ReleaseMode.FULL.value)
+    packet_sentinel = object()
+    monkeypatch.setattr(
+        real,
+        "_full_section_evidence_packets",
+        lambda **_kwargs: packet_sentinel,
+    )
+
+    attach_calls: list[tuple[object, object]] = []
+
+    def broken_attach(packets: object, comparison: object) -> object:
+        attach_calls.append((packets, comparison))
+        raise ValueError("시험용 비교 packet 배선 파손")
+
+    monkeypatch.setattr(
+        comparison_bridge,
+        "attach_comparison_program_evidence",
+        broken_attach,
+    )
+    monkeypatch.setattr(
+        real,
+        "_v2_ask_via_provider",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("비교 packet 배선 차단 전에 provider를 만들면 안 됩니다")
+        ),
+    )
+
+    comparison = object()
+    steps: list[dict[str, Any]] = []
+    result = real._run_v2_composer(
+        engine=engine,
+        client=client,
+        company_name="가나다전자",
+        corp_type="상장사",
+        frags=frags,
+        financials=financials,
+        filing=filing,
+        revenue_tables=[],
+        sources=[],
+        business_date=_DATE,
+        model="가짜모델",
+        steps=steps,
+        corp_id=CORP_ID,
+        current_fiscal_year=2025,
+        source_identity_digest="a" * 64,
+        build_identity=_build_identity(),
+        generation_mode=_frozen_v2_mode(),
+        comparison_result=comparison,
+    )
+
+    assert attach_calls == [(packet_sentinel, comparison)]
+    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.final_gate_reason == FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
+    assert steps[-1]["사유코드"] == FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
+    assert fake.client.messages.calls == 0
+    assert result.cost_krw == 0
+    assert result.charged is False
+
+
+def test_운영_v2_매출표_변환이_하나라도_누락하면_AI전에_차단한다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """호환 변환기의 조용한 skip을 생산 경로까지 허용하지 않는다."""
+
+    fake = FakeEngine()
+    metered = real._MeteredEngine(fake)
+    monkeypatch.setenv(real.REPORT_RELEASE_MODE_ENV_NAME, ReleaseMode.SHADOW.value)
+    monkeypatch.setattr(composer_port, "composition_tables_from_raw", lambda _raw: ())
+    monkeypatch.setattr(
+        real,
+        "_v2_ask_via_provider",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("매출표 누락 차단 전에 provider를 만들면 안 됩니다")
+        ),
+    )
+    steps: list[dict[str, Any]] = []
+
+    result = real._run_v2_composer(
+        engine=metered,
+        client=object(),
+        company_name="가나다전자",
+        corp_type="상장사",
+        frags={},
+        financials=None,
+        filing=None,
+        revenue_tables=[{"caption": "생산 경로에서 사라지면 안 되는 표"}],
+        sources=[],
+        business_date=_DATE,
+        model="가짜모델",
+        steps=steps,
+        corp_id=CORP_ID,
+        current_fiscal_year=2025,
+        source_identity_digest="a" * 64,
+        build_identity=_build_identity(),
+        generation_mode=_frozen_v2_mode(),
+    )
+
+    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.final_gate_reason == FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
+    assert result.charged is False
+    assert steps[-1]["step"] == "v2_매출표근거transport_차단"
+    assert fake.client.messages.calls == 0
 
 
 # ══════════════════════════════════════════════════════════

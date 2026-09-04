@@ -22,6 +22,7 @@ from src.shared.report_quality.models import (
     ReleaseDecision,
     SafetyAssessment,
 )
+from src.shared.report_quality.constants import STRICT_QUALITY_CONTRACT_VERSION
 
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -60,6 +61,23 @@ def _canonical_value(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, bool)):
         return value
     raise TypeError(f"생성 영수증에 지원하지 않는 값이 있습니다: {type(value)!r}")
+
+
+def _canonical_assessment_value(value: GenerationAssessment) -> dict[str, Any]:
+    """v3 추가 필드는 새 영수증에만 넣고 과거 wire bytes는 그대로 둔다."""
+
+    payload = _canonical_value(value)
+    if type(payload) is not dict:  # pragma: no cover - dataclass 계약 방어
+        raise TypeError("GenerationAssessment를 JSON 객체로 바꿀 수 없습니다")
+    quality = payload.get("quality")
+    if type(quality) is not dict:  # pragma: no cover - 정확한 타입은 호출부가 검사
+        raise TypeError("QualityAssessment를 JSON 객체로 바꿀 수 없습니다")
+    if value.contract_version != STRICT_QUALITY_CONTRACT_VERSION:
+        # report-quality-v1과 이미 발급된 v2 FULL의 canonical assessment에는
+        # 이 키가 존재하지 않았다. 빈 기본 필드를 직렬화하면 같은 저장본의
+        # assessment/receipt SHA-256이 달라지므로 과거 버전에서만 생략한다.
+        quality.pop("section_interpretation_counts", None)
+    return payload
 
 
 def canonical_sha256(payload: dict[str, Any]) -> str:
@@ -248,7 +266,7 @@ class GenerationValidationReceipt:
             raise ValueError("지원하지 않는 검증 회차입니다")
 
         assessment_sha256 = canonical_sha256(
-            {"generation_assessment": _canonical_value(self.assessment)}
+            {"generation_assessment": _canonical_assessment_value(self.assessment)}
         )
         receipt_sha256 = canonical_sha256(
             {
@@ -297,7 +315,7 @@ class GenerationValidationReceipt:
 _ASSESSMENT_KEYS = frozenset(
     {"contract_version", "quality", "safety", "publication_grade"}
 )
-_QUALITY_KEYS = frozenset(
+_LEGACY_QUALITY_KEYS = frozenset(
     {
         "contract_version",
         "grade",
@@ -314,6 +332,9 @@ _QUALITY_KEYS = frozenset(
         "semantic_underfilled_sections",
         "problem_codes",
     }
+)
+_QUALITY_KEYS = frozenset(
+    {*_LEGACY_QUALITY_KEYS, "section_interpretation_counts"}
 )
 _SAFETY_KEYS = frozenset(
     {
@@ -404,19 +425,19 @@ def generation_assessment_to_dict(value: GenerationAssessment) -> dict[str, Any]
         or type(value.safety) is not SafetyAssessment
     ):
         raise TypeError("정확한 GenerationAssessment·QualityAssessment·SafetyAssessment가 필요합니다")
-    payload = _canonical_value(value)
-    if type(payload) is not dict:  # pragma: no cover - dataclass 계약 방어
-        raise TypeError("GenerationAssessment를 JSON 객체로 바꿀 수 없습니다")
-    return payload
+    return _canonical_assessment_value(value)
 
 
 def generation_assessment_from_dict(data: Mapping[str, Any]) -> GenerationAssessment:
     """unknown/missing key와 느슨한 scalar 변환 없이 평가 원본을 복원한다."""
 
     raw = _require_exact_dict(data, keys=_ASSESSMENT_KEYS, label="GenerationAssessment")
+    # v3부터 장별 해석 수가 영수증 정본이다. 과거 v1/v2 저장 bytes는 키가
+    # 없던 모양 그대로 읽되, v3가 그 옛 모양으로 빠지는 것은 허용하지 않는다.
+    v3_wire = raw.get("contract_version") == STRICT_QUALITY_CONTRACT_VERSION
     quality_raw = _require_exact_dict(
         raw["quality"],
-        keys=_QUALITY_KEYS,
+        keys=_QUALITY_KEYS if v3_wire else _LEGACY_QUALITY_KEYS,
         label="QualityAssessment",
     )
     safety_raw = _require_exact_dict(
@@ -483,6 +504,15 @@ def generation_assessment_from_dict(data: Mapping[str, Any]) -> GenerationAssess
         ),
         semantic_underfilled_sections=_wire_strings(
             quality_raw["semantic_underfilled_sections"], label="의미 부족 장"
+        ),
+        section_interpretation_counts=(
+            _wire_pairs(
+                quality_raw["section_interpretation_counts"],
+                label="장별 해석 claim 수",
+                integer_value=True,
+            )
+            if v3_wire
+            else ()
         ),
         problem_codes=tuple(QualityProblemCode(value) for value in problem_codes_raw),
     )

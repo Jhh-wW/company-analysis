@@ -6,9 +6,29 @@ import re
 from decimal import Decimal
 
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
+from src.shared.report_evidence.policy import (
+    EVIDENCE_SLOT_POLICY_VERSION,
+    required_slots_for,
+)
 from src.shared.report_quality.contract import contract_for_generation
-from src.shared.report_quality.constants import STRICT_QUALITY_CONTRACT_VERSION
+from src.shared.report_quality.constants import (
+    COMPETITIVE_COMPARISON_CLAIM_TYPE,
+    COMPETITIVE_COMPARISON_CONTEXT_CLAIM_TYPE,
+    COMPARISON_PROGRAM_CLAIM_TYPES,
+    HISTORICAL_PERFORMANCE_RATE_CLAIM_TYPE,
+    INTERPRETATION_CLAIM_TYPE,
+    STRICT_FACTUAL_CLAIM_TYPES,
+    STRICT_PUBLIC_CLAIM_TYPES,
+    STRICT_QUALITY_CONTRACT_VERSION,
+    STRICT_QUALITY_CONTRACT_VERSIONS,
+)
+from src.shared.report_quality.comparison_claims import (
+    comparison_context_claim_problems,
+    comparison_program_problems,
+    comparison_target_source_problems,
+)
 from src.shared.report_quality.dto import ClaimFact, ReportCandidate, SourceDocument
+from src.shared.report_quality.comparison_numeric import comparison_numeric_problems
 from src.shared.report_quality.models import (
     GenerationAssessment,
     QualityAssessment,
@@ -136,6 +156,9 @@ def _source_registry(
                 re.fullmatch(r"[0-9a-f]{64}", value) is None for value in hashes
             ):
                 problems.append(f"source_id {source_id}의 원문 조각 해시가 손상됐습니다")
+            content_hash = source.document_content_sha256.strip()
+            if content_hash and re.fullmatch(r"[0-9a-f]{64}", content_hash) is None:
+                problems.append(f"source_id {source_id}의 문서 전체 해시가 손상됐습니다")
             registry[source_id] = source
     return registry, problems
 
@@ -202,6 +225,7 @@ def assess_safety(
     rejected: list[str] = []
     claim_owners: dict[tuple[str, str], str] = {}
     public_set = set(public_ids)
+    strict_claim_type_policy = contract.version == STRICT_QUALITY_CONTRACT_VERSION
     if candidate.has_unbound_summary_content:
         problems.append("요약에 본문 fact_id와 결속되지 않은 공개 내용이 있습니다")
     if len(candidate.summary_fact_ids) != len(set(candidate.summary_fact_ids)):
@@ -212,11 +236,54 @@ def assess_safety(
                 f"요약 fact_id {summary_fact_id}가 검증 본문의 부분집합이 아닙니다"
             )
 
+    if strict_claim_type_policy:
+        # 개별 문장만 맞아도 네 맥락과 실제 수치 축이 서로 다른 비교 대상을
+        # 말하면 9장 전체 뜻은 거짓이 된다. 최종 공개 fact 부분집합을 생산
+        # 경계와 같은 shared 프로그램 validator로 한 번 더 닫는다.
+        public_comparison_facts = tuple(
+            facts[fact_id]
+            for fact_id in dict.fromkeys(public_ids)
+            if fact_id in facts
+            and facts[fact_id].claim_type.strip() in COMPARISON_PROGRAM_CLAIM_TYPES
+        )
+        if public_comparison_facts:
+            problems.extend(
+                "비교 프로그램: " + problem
+                for problem in comparison_program_problems(public_comparison_facts)
+            )
+
     for fact_id in dict.fromkeys(public_ids):
         fact = facts.get(fact_id)
         if fact is None:
             problems.append(f"공개 fact_id {fact_id}가 사실 장부에 없습니다")
             continue
+        claim_type = fact.claim_type.strip()
+        if strict_claim_type_policy and claim_type not in STRICT_PUBLIC_CLAIM_TYPES:
+            # claim_type은 자유 메모가 아니라 «검증 사실/해석»을 가르는 품질
+            # 입력이다. 오타·빈 값·미래 값을 해석이 아닌 사실로 세면 해석
+            # 상한과 검증 비율을 동시에 우회하므로 새 FULL만 fail-closed한다.
+            problems.append(
+                f"{fact_id}의 공개 claim_type을 알 수 없습니다: {claim_type!r}"
+            )
+        if (
+            strict_claim_type_policy
+            and claim_type == COMPETITIVE_COMPARISON_CONTEXT_CLAIM_TYPE
+        ):
+            problems.extend(
+                f"{fact_id}: {problem}"
+                for problem in comparison_context_claim_problems(fact)
+            )
+        if strict_claim_type_policy and claim_type in {
+            COMPETITIVE_COMPARISON_CLAIM_TYPE,
+            COMPETITIVE_COMPARISON_CONTEXT_CLAIM_TYPE,
+        }:
+            problems.extend(
+                f"{fact_id}: {problem}"
+                for problem in comparison_target_source_problems(
+                    fact,
+                    sources.get(fact.comparator_source_id),
+                )
+            )
         owner_sections = {
             section.section_id
             for section in candidate.sections
@@ -279,7 +346,7 @@ def assess_safety(
         # source_id/URL만으로 원문을 승인하지 않는다. 모든 공개 fact가 정확한
         # 원문 조각 해시까지 세 열로 운반해야 같은 주소의 내용 교체도 잡힌다.
         if (
-            contract.version == STRICT_QUALITY_CONTRACT_VERSION
+            contract.version in STRICT_QUALITY_CONTRACT_VERSIONS
             and not all(supporting)
         ):
             problems.append(f"{fact_id}의 정확한 원문 조각 결속이 비었습니다")
@@ -313,7 +380,16 @@ def assess_safety(
                             f"{fact_id}의 보조 출처 {source_id} 원문 조각 해시가 다릅니다"
                         )
 
-        if _has_numeric_payload(fact):
+        has_numeric_payload = _has_numeric_payload(fact)
+        if (
+            strict_claim_type_policy
+            and claim_type == HISTORICAL_PERFORMANCE_RATE_CLAIM_TYPE
+            and not has_numeric_payload
+        ):
+            problems.append(
+                f"{fact_id}의 과거 실적 종류에 versioned NumericBinding이 없습니다"
+            )
+        if has_numeric_payload:
             numeric_labels = (
                 fact.metric,
                 fact.period_start,
@@ -325,6 +401,17 @@ def assess_safety(
             )
             if not all(str(value).strip() for value in numeric_labels):
                 problems.append(f"{fact_id}의 구조화 수치 이름표가 비었습니다")
+        # 비교 타입은 raw/display 숫자를 지워 검산 분기 자체를 건너뛰는 공격도
+        # 막아야 한다. 타입을 본 즉시 기존 비교 검산기를 호출하고, 별도의
+        # 계산기를 만들지 않는다.
+        numeric_problems = (
+            comparison_numeric_problems(fact)
+            if strict_claim_type_policy or has_numeric_payload
+            else None
+        )
+        if numeric_problems is not None:
+            problems.extend(f"{fact_id}: {problem}" for problem in numeric_problems)
+        elif has_numeric_payload:
             numeric_problems = validate_versioned_numeric_claim(fact)
             if numeric_problems is None:
                 problems.append(f"{fact_id}의 수치에 versioned NumericBinding이 없습니다")
@@ -362,27 +449,80 @@ def assess_quality(
     sources, _ = _source_registry(candidate)
     by_section = {section.section_id: section for section in candidate.sections}
     section_counts: list[tuple[str, int]] = []
+    section_interpretation_counts: list[tuple[str, int]] = []
     public_sentence_counts: list[tuple[str, int]] = []
     public_fact_ids: list[str] = []
     notice_only: list[str] = []
     one_claim: list[str] = []
+    required_slot_policy = contract.required_public_claim_slot_policy_version.strip()
+    strict_claim_type_policy = contract.version == STRICT_QUALITY_CONTRACT_VERSION
+    if required_slot_policy and required_slot_policy != EVIDENCE_SLOT_POLICY_VERSION:
+        raise ValueError(
+            "알 수 없는 공개 필수 의미칸 정책 버전입니다: "
+            + required_slot_policy
+        )
+    missing_required_slots: dict[str, tuple[str, ...]] = {}
     for section_id in contract.required_section_ids:
         section = by_section.get(section_id)
         fact_ids = tuple(dict.fromkeys(section.fact_ids)) if section is not None else ()
+        # v3 생성 계약 밖의 타입은 공개 문장에 보이더라도 품질을 채우는
+        # 실질 claim이 아니다. 안전 평가는 같은 항목을 BLOCKED로 돌려주며,
+        # 여기서는 분자·분모와 필수 의미칸을 함께 부풀리지 못하게 제외한다.
+        quality_fact_ids = tuple(
+            fact_id
+            for fact_id in fact_ids
+            if fact_id in facts
+            and (
+                not strict_claim_type_policy
+                or facts[fact_id].claim_type.strip() in STRICT_PUBLIC_CLAIM_TYPES
+            )
+        )
         claim_slots = {
             facts[fact_id].claim_slot.strip()
-            for fact_id in fact_ids
-            if fact_id in facts and facts[fact_id].claim_slot.strip()
+            for fact_id in quality_fact_ids
+            if facts[fact_id].claim_slot.strip()
         }
-        count = len(claim_slots)
+        if required_slot_policy:
+            required_slots = required_slots_for(section_id)
+            missing = tuple(
+                slot_id for slot_id in required_slots if slot_id not in claim_slots
+            )
+            if missing:
+                missing_required_slots[section_id] = missing
+            # v3의 장별 의미 count는 임의 범주 수가 아니라 정책상 필수 칸 중
+            # 실제 공개한 칸 수다. 그래서 unrelated slot으로 숫자를 부풀려도
+            # 영수증 무결성 재검산에서 required 개수에 도달할 수 없다.
+            count = len(required_slots) - len(missing)
+        else:
+            count = len(claim_slots)
         section_counts.append((section_id, count))
+        section_interpretation_counts.append(
+            (
+                section_id,
+                sum(
+                    1
+                    for fact_id in quality_fact_ids
+                    if facts[fact_id].claim_type.strip()
+                    == INTERPRETATION_CLAIM_TYPE
+                ),
+            )
+        )
         public_count = (
-            count
+            (
+                len(tuple(fact_id for fact_id in fact_ids if fact_id in facts))
+                if required_slot_policy
+                else count
+            )
             if section is None or section.public_sentence_count is None
             else max(0, int(section.public_sentence_count))
         )
+        if strict_claim_type_policy:
+            # public_sentence_count는 projection의 관측값이지 별도 사실 원장이
+            # 아니다. 같은 fact를 복제하거나 숫자만 크게 써도 고유한 공개
+            # 원자 사실 수보다 많이 인정하지 않는다.
+            public_count = min(public_count, len(quality_fact_ids))
         public_sentence_counts.append((section_id, public_count))
-        public_fact_ids.extend(fact_id for fact_id in fact_ids if fact_id in facts)
+        public_fact_ids.extend(quality_fact_ids)
         if section is None or section.notice_only or public_count == 0:
             notice_only.append(section_id)
         elif public_count == 1:
@@ -394,45 +534,72 @@ def assess_quality(
         if section.section_id in contract.required_section_ids:
             continue
         public_fact_ids.extend(
-            fact_id for fact_id in dict.fromkeys(section.fact_ids) if fact_id in facts
+            fact_id
+            for fact_id in dict.fromkeys(section.fact_ids)
+            if fact_id in facts
+            and (
+                not strict_claim_type_policy
+                or facts[fact_id].claim_type.strip() in STRICT_PUBLIC_CLAIM_TYPES
+            )
         )
 
     unique_public_ids = tuple(dict.fromkeys(public_fact_ids))
     substantive = len(unique_public_ids)
+    interpreted = sum(
+        1
+        for fact_id in unique_public_ids
+        if facts[fact_id].claim_type.strip() == INTERPRETATION_CLAIM_TYPE
+    )
+    interpretation_policy_enabled = any(
+        value is not None
+        for value in (
+            contract.max_interpreted_claims_per_section,
+            contract.max_interpreted_claims,
+            contract.max_interpreted_ratio,
+        )
+    )
+    # 과거 v1/v2 영수증의 verified는 발급 당시 뜻(검증 상태가 verified인
+    # 모든 claim)을 보존한다. 새 FULL은 «해석»을 검증 사실 수에서 분리해,
+    # 해석으로 50% 사실 하한을 부풀릴 수 없게 한다. 안전 평가는 해석에도
+    # 원문 결속과 verified 상태를 계속 요구한다.
     verified = sum(
         1
         for fact_id in unique_public_ids
         if facts[fact_id].verification_state == VerificationState.VERIFIED.value
+        and (
+            not strict_claim_type_policy
+            and (
+                not interpretation_policy_enabled
+                or facts[fact_id].claim_type.strip() != INTERPRETATION_CLAIM_TYPE
+            )
+            or strict_claim_type_policy
+            and facts[fact_id].claim_type.strip() in STRICT_FACTUAL_CLAIM_TYPES
+        )
     )
     ratio = (
         Decimal(verified) / Decimal(substantive)
         if substantive
         else Decimal(0)
     )
-    # URL만 다른 복제 페이지 여덟 개를 독립 문서 여덟 건으로 세면 출처 하한을
-    # 쉽게 부풀릴 수 있다. 정확한 근거 바이트 묶음이 같으면 신원이 달라도 한
-    # 문서로 센다. 아직 해시 계약이 없는 레거시 호출자만 identity로 폴백한다.
-    document_evidence_keys: set[tuple[str, ...]] = set()
+    # v3 FULL은 URL·문서 ID도 독립성의 증거로 믿지 않는다. 같은 원문을 URL
+    # 여덟 개에 복제하면 identity는 여덟 개가 될 수 있기 때문이다. 수집기가
+    # 원문 전체 바이트에서 계산해 봉인한 SHA-256만 독립 문서 key로 센다.
+    # v1은 이 필드가 생기기 전 생성 경로이므로 기존 identity 의미를 보존한다.
+    document_keys: set[str] = set()
+    content_hash_independence = contract.version == STRICT_QUALITY_CONTRACT_VERSION
     for fact_id in unique_public_ids:
         fact = facts[fact_id]
         source_ids = fact.supporting_source_ids or (fact.source_id,)
         for source_id in source_ids:
             source = sources.get(source_id)
-            if source is not None and source.document_identity:
-                evidence_hashes = tuple(
-                    sorted(
-                        dict.fromkeys(
-                            value.strip()
-                            for value in source.exact_evidence_hashes
-                            if value.strip()
-                        )
-                    )
-                )
-                document_evidence_keys.add(
-                    ("evidence", *evidence_hashes)
-                    if evidence_hashes
-                    else ("identity", source.document_identity)
-                )
+            if source is None:
+                continue
+            if content_hash_independence:
+                content_hash = source.document_content_sha256.strip()
+                if re.fullmatch(r"[0-9a-f]{64}", content_hash):
+                    document_keys.add(content_hash)
+            elif source.document_identity:
+                document_keys.add(source.document_identity.strip())
 
     shortfalls: list[str] = []
     problem_codes: list[QualityProblemCode] = []
@@ -446,21 +613,51 @@ def assess_quality(
         shortfalls.append(
             "실질 claim이 한 건뿐인 장이 있습니다: " + ", ".join(one_claim)
         )
-    low_semantic_coverage = [
-        section_id
-        for section_id, count in section_counts
-        if 0 < count < contract.min_claims_per_covered_section
-    ]
+    low_semantic_coverage = (
+        []
+        if required_slot_policy
+        else [
+            section_id
+            for section_id, count in section_counts
+            if 0 < count < contract.min_claims_per_covered_section
+        ]
+    )
     if low_semantic_coverage:
         problem_codes.append(QualityProblemCode.LOW_SEMANTIC_COVERAGE)
         shortfalls.append(
             "서로 다른 의미 claim 범주가 부족한 장이 있습니다: "
             + ", ".join(low_semantic_coverage)
         )
+    if missing_required_slots:
+        problem_codes.append(QualityProblemCode.MISSING_REQUIRED_PUBLIC_CLAIM_SLOTS)
+        details = "; ".join(
+            f"{section_id}({', '.join(slot_ids)})"
+            for section_id, slot_ids in missing_required_slots.items()
+        )
+        shortfalls.append("필수 의미 claim을 공개하지 않은 장이 있습니다: " + details)
+    interpretation_overfilled_sections = [
+        section_id
+        for section_id, count in section_interpretation_counts
+        if contract.max_interpreted_claims_per_section is not None
+        and count > contract.max_interpreted_claims_per_section
+    ]
+    if interpretation_overfilled_sections:
+        problem_codes.append(
+            QualityProblemCode.TOO_MANY_INTERPRETATION_CLAIMS_PER_SECTION
+        )
+        shortfalls.append(
+            "한 장의 해석 claim이 허용 개수를 넘었습니다: "
+            + ", ".join(interpretation_overfilled_sections)
+        )
+    public_sentence_floor = (
+        contract.min_public_sentences_per_section
+        if contract.min_public_sentences_per_section is not None
+        else contract.min_claims_per_covered_section
+    )
     low_coverage = [
         section_id
         for section_id, count in public_sentence_counts
-        if count < contract.min_claims_per_covered_section
+        if count < public_sentence_floor
     ]
     if low_coverage:
         problem_codes.append(QualityProblemCode.LOW_PUBLIC_SENTENCE_COVERAGE)
@@ -474,15 +671,39 @@ def assess_quality(
         shortfalls.append(
             f"실질 claim이 {substantive}건으로 하한 {contract.min_substantive_claims}건보다 적습니다"
         )
+    interpreted_ratio = (
+        Decimal(interpreted) / Decimal(substantive)
+        if substantive
+        else Decimal(0)
+    )
+    interpretation_total_excess = (
+        contract.max_interpreted_claims is not None
+        and interpreted > contract.max_interpreted_claims
+    )
+    interpretation_ratio_excess = (
+        contract.max_interpreted_ratio is not None
+        and interpreted_ratio > contract.max_interpreted_ratio
+    )
+    if interpretation_total_excess or interpretation_ratio_excess:
+        problem_codes.append(QualityProblemCode.EXCESSIVE_INTERPRETATION_CLAIMS)
+        limits: list[str] = []
+        if contract.max_interpreted_claims is not None:
+            limits.append(f"{contract.max_interpreted_claims}건")
+        if contract.max_interpreted_ratio is not None:
+            limits.append(f"{contract.max_interpreted_ratio:.0%}")
+        shortfalls.append(
+            f"해석 claim이 {interpreted}건({interpreted_ratio:.2%})으로 "
+            f"전체 허용 {' · '.join(limits)}를 넘었습니다"
+        )
     if ratio < contract.min_verified_ratio:
         problem_codes.append(QualityProblemCode.LOW_VERIFIED_RATIO)
         shortfalls.append(
             f"검증 claim 비율이 {ratio:.2%}로 하한 {contract.min_verified_ratio:.0%}보다 낮습니다"
         )
-    if len(document_evidence_keys) < contract.min_document_sources:
+    if len(document_keys) < contract.min_document_sources:
         problem_codes.append(QualityProblemCode.TOO_FEW_DOCUMENT_SOURCES)
         shortfalls.append(
-            f"독립 문서 출처가 {len(document_evidence_keys)}건으로 하한 {contract.min_document_sources}건보다 적습니다"
+            f"독립 문서 출처가 {len(document_keys)}건으로 하한 {contract.min_document_sources}건보다 적습니다"
         )
 
     grade = (
@@ -498,14 +719,28 @@ def assess_quality(
         substantive_claims=substantive,
         verified_claims=verified,
         verified_ratio=ratio,
-        document_sources=len(document_evidence_keys),
+        document_sources=len(document_keys),
         notice_only_sections=tuple(notice_only),
         one_claim_sections=tuple(one_claim),
         section_claim_counts=tuple(section_counts),
         shortfall_reasons=tuple(shortfalls),
         section_public_sentence_counts=tuple(public_sentence_counts),
         underfilled_sections=tuple(low_coverage),
-        semantic_underfilled_sections=tuple(low_semantic_coverage),
+        semantic_underfilled_sections=tuple(
+            section_id
+            for section_id in contract.required_section_ids
+            if section_id
+            in {
+                *low_semantic_coverage,
+                *missing_required_slots,
+                *interpretation_overfilled_sections,
+            }
+        ),
+        section_interpretation_counts=(
+            tuple(section_interpretation_counts)
+            if strict_claim_type_policy
+            else ()
+        ),
         problem_codes=tuple(dict.fromkeys(problem_codes)),
     )
 

@@ -257,3 +257,32 @@ def test_typed_조각이_없으면_frags가_바이트_그대로다() -> None:
 
     assert added == 0
     assert frags == _legacy_frags()
+
+
+@pytest.mark.parametrize("published_on", ("2024-02-29", "20240229"))
+def test_typed_DART_bridge는_신규_ISO와_옛_compact를_같은_날짜로_보존한다(
+    published_on: str,
+) -> None:
+    mapping = _typed_dart_mapping()
+    for document in mapping["documents"]:  # type: ignore[index]
+        document["published_on"] = published_on
+
+    made = real._typed_dart_legacy_fragments(mapping)  # noqa: SLF001
+
+    assert made
+    assert {item["문서일"] for item in made} == {"2024-02-29"}
+
+
+@pytest.mark.parametrize(
+    "published_on",
+    ("2025-02-30", "20250230", "임의 문자열"),
+)
+def test_typed_DART_bridge는_없는날짜와_임의문자열을_사용하지_않는다(
+    published_on: str,
+) -> None:
+    mapping = _typed_dart_mapping()
+    for document in mapping["documents"]:  # type: ignore[index]
+        document["published_on"] = published_on
+
+    with pytest.raises(ValueError, match="공식 자료 날짜"):
+        real._typed_dart_legacy_fragments(mapping)  # noqa: SLF001

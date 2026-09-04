@@ -59,10 +59,7 @@ def _financial_payload(amount: str = "1000000") -> dict[str, object]:
 
 
 def _preflight_digest(source: SourceSnapshot) -> str:
-    return ReportSourceIdentity(
-        dart_receipt_numbers=source.dart_receipt_nos,
-        financial_payload_digest=source.financial_payload_sha256,
-    ).cache_digest
+    return source.preflight_identity_digest
 
 
 def _store_artifact(
@@ -163,6 +160,164 @@ def test_new_dart_receipt_changes_source_identity(now: dt.datetime) -> None:
     )
 
     assert first.identity_digest != correction.identity_digest
+
+
+def test_옛_source행은_빈_preflight로_읽되_새cache권위로_승격하지_않는다(
+    conn: sqlite3.Connection,
+    namespace: CacheNamespace,
+    now: dt.datetime,
+) -> None:
+    """열 추가 전 발급본은 읽을 수 있지만 새 조사의 cache 원본은 아니다."""
+
+    receipts = ("20260828000123",)
+    finance_digest = financial_payload_digest(_financial_payload())
+    documents = ("dart.fss.or.kr:20260828000123",)
+    versions = (("dart", "2"),)
+    legacy_identity = canonical_digest(
+        {
+            "dart_receipt_nos": receipts,
+            "financial_payload_sha256": finance_digest,
+            "official_document_ids": documents,
+            "adapter_versions": versions,
+        }
+    )
+    snapshot_id = "source_" + canonical_digest(
+        {
+            "identity_digest": legacy_identity,
+            "captured_at": utc_text(now, label="출처 확인"),
+            "source_as_of": now.date().isoformat(),
+        }
+    )
+    # 배포 전 실제 표 모양: source 행에는 preflight 열 자체가 없었다.
+    conn.execute(
+        f"""
+        CREATE TABLE {TABLE_SOURCE_SNAPSHOTS} (
+            snapshot_id TEXT PRIMARY KEY,
+            identity_digest TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            source_as_of TEXT NOT NULL,
+            dart_receipt_nos_json TEXT NOT NULL,
+            financial_payload_sha256 TEXT NOT NULL,
+            official_document_ids_json TEXT NOT NULL,
+            adapter_versions_json TEXT NOT NULL,
+            cache_usable INTEGER NOT NULL CHECK(cache_usable IN (0, 1))
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        INSERT INTO {TABLE_SOURCE_SNAPSHOTS} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            snapshot_id,
+            legacy_identity,
+            utc_text(now, label="출처 확인"),
+            now.date().isoformat(),
+            json.dumps(receipts, ensure_ascii=False),
+            finance_digest,
+            json.dumps(documents, ensure_ascii=False),
+            json.dumps(versions, ensure_ascii=False),
+            1,
+        ),
+    )
+
+    ensure_schema(conn)
+    loaded = load_source_snapshot(conn, snapshot_id)
+
+    assert loaded is not None
+    assert loaded.identity_digest == legacy_identity
+    assert loaded.preflight_identity_digest == ""
+    with pytest.raises(CacheIdentityUnavailable, match="출처 신원"):
+        CacheLookupKey.from_preflight(
+            billing_bucket_id="historical-bucket",
+            corp_id="00126380",
+            namespace=namespace,
+            preflight_identity_digest=loaded.preflight_identity_digest,
+            preflight_cache_usable=loaded.cache_usable,
+            engine_epoch_digest="a" * 64,
+        )
+
+
+def test_공식자료결합지문은_최초저장부터_cache_key까지_같은값을쓴다(
+    conn: sqlite3.Connection,
+    namespace: CacheNamespace,
+    now: dt.datetime,
+    tmp_path: Path,
+) -> None:
+    base = ReportSourceIdentity(
+        dart_receipt_numbers=("20260828000123",),
+        financial_payload_digest=financial_payload_digest(_financial_payload()),
+    )
+    combined_digest = base.cache_digest_with_official_snapshot("c" * 64)
+    source = SourceSnapshot.capture(
+        dart_receipt_nos=base.dart_receipt_numbers,
+        financial_payload=None,
+        financial_payload_sha256=base.financial_payload_digest,
+        captured_at=now,
+        source_as_of=now.date(),
+        preflight_identity_digest=combined_digest,
+    )
+    content = ContentSnapshot.create(
+        payload=b'{"company":"combined-source"}',
+        source_snapshot=source,
+        cache_namespace=namespace,
+        content_generated_at=now,
+        engine_epoch_digest="a" * 64,
+    )
+    save_source_snapshot(conn, source)
+    save_cache_namespace(conn, namespace)
+    save_content_snapshot(conn, content)
+    artifact_id = _store_artifact(
+        conn,
+        content,
+        now=now,
+        root=tmp_path / "combined-source-artifacts",
+    )
+    combined_key = CacheLookupKey.from_preflight(
+        billing_bucket_id="bucket-combined",
+        corp_id="00126380",
+        namespace=namespace,
+        preflight_identity_digest=combined_digest,
+        preflight_cache_usable=True,
+        engine_epoch_digest=content.engine_epoch_digest,
+    )
+    bind_cache_entry(
+        conn,
+        key=combined_key,
+        content=content,
+        artifact_id=artifact_id,
+        cached_at=now,
+    )
+    assert load_source_snapshot(conn, source.snapshot_id) == source
+    assert load_cache_hit(
+        conn,
+        key=combined_key,
+        policy=DeliveryPolicy(dt.timedelta(days=60), dt.timedelta(days=60)),
+        delivered_at=now,
+    ) is not None
+
+    # DART·재무가 같아도 공식자료 snapshot을 뺀 옛 base 열쇠나 다른 공식자료
+    # 열쇠에는 이 content를 결속할 수 없다.
+    for wrong_digest in (
+        base.cache_digest,
+        base.cache_digest_with_official_snapshot("d" * 64),
+    ):
+        wrong_key = CacheLookupKey.from_preflight(
+            billing_bucket_id="bucket-wrong",
+            corp_id="00126380",
+            namespace=namespace,
+            preflight_identity_digest=wrong_digest,
+            preflight_cache_usable=True,
+            engine_epoch_digest=content.engine_epoch_digest,
+        )
+        with pytest.raises(LifecycleStoreError, match="생성 전 출처"):
+            bind_cache_entry(
+                conn,
+                key=wrong_key,
+                content=content,
+                artifact_id=artifact_id,
+                cached_at=now,
+            )
 
 
 def test_namespace_changes_for_revision_model_and_output_setting() -> None:

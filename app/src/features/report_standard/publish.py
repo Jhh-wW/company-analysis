@@ -57,8 +57,17 @@ from src.features.provenance.sources import (
     official_ir_source_is_usable,
     official_domain_attestation_problem,
     official_web_currentness_is_usable,
+    source_has_evidence_text,
     source_type_is_official_ir,
     source_type_is_official_web,
+)
+from src.shared.report_quality.evidence_support import (
+    evidence_support_term_mismatches,
+    normalized_support_terms,
+)
+from src.shared.report_quality.comparison_evidence import (
+    comparison_official_text,
+    comparison_shared_context,
 )
 from src.features.report_standard.constants import (
     CANONICAL_CLAIM_TYPES_BY_SECTION,
@@ -548,20 +557,6 @@ def _semantic_duplicate_key(fact: FactRecord) -> tuple[str, ...]:
     )
 
 
-def _comparison_official_text(evidence: str) -> str:
-    """비교 payload에서 공식 서술 원문만 꺼내고, 구형 원문은 그대로 쓴다."""
-
-    raw = str(evidence or "").strip()
-    try:
-        payload = json.loads(raw)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return raw
-    if not isinstance(payload, dict):
-        return ""
-    official_text = payload.get("official_text")
-    return str(official_text or "").strip()
-
-
 def _comparison_candidate_source_id(value: object) -> str:
     """v1/v2 근거의 후보 출처 ID. legacy/demo 문자열은 빈 값이다."""
 
@@ -870,32 +865,12 @@ def _comparison_candidate_basis_problems(
 def _derived_comparison_context(fact: FactRecord) -> dict[str, str]:
     """양사 공식 원문으로부터 고객·제품·시장 공통범위를 다시 계산한다."""
 
-    # company_comparison은 publish의 binding 함수를 사용하므로 모듈 import는
-    # 호출 시점으로 늦춰 순환 초기화를 피한다. 실제 비교 조립기와 동일한 추출기를
-    # 써야 조립 때의 조건과 출고 때 다시 계산한 조건이 어긋나지 않는다.
-    try:
-        from src.features.company_comparison.logic import (  # noqa: PLC0415
-            OfficialCompanyBundle,
-            _shared_context,
-        )
-
-        own = OfficialCompanyBundle(
-            corp_code="",
-            company_name=fact.legal_entity,
-            financials=None,
-            filing=None,
-            official_text=_comparison_official_text(fact.state_evidence),
-        )
-        comparator = OfficialCompanyBundle(
-            corp_code="",
-            company_name=fact.comparison_target,
-            financials=None,
-            filing=None,
-            official_text=_comparison_official_text(fact.comparator_state_evidence),
-        )
-        return _shared_context(own, comparator)
-    except (ImportError, TypeError, ValueError):
-        return {}
+    return comparison_shared_context(
+        self_company=fact.legal_entity,
+        self_text=comparison_official_text(fact.state_evidence),
+        comparator_company=fact.comparison_target,
+        comparator_text=comparison_official_text(fact.comparator_state_evidence),
+    )
 
 
 def _comparison_period_is_bound(period: str, evidence: str) -> bool:
@@ -950,18 +925,6 @@ def _comparison_scope_is_bound(scope: str, evidence: str) -> bool:
     return _normalized(clean_scope) in normalized_evidence
 
 
-def _canonical_comparison_period(value: object) -> str:
-    matches = re.findall(r"20\d{2}|\d{1,2}", str(value or ""))
-    if len(matches) < 6:
-        return ""
-    try:
-        start = date(int(matches[0]), int(matches[1]), int(matches[2]))
-        end = date(int(matches[3]), int(matches[4]), int(matches[5]))
-    except ValueError:
-        return ""
-    return f"{start.isoformat()}~{end.isoformat()}"
-
-
 def _structured_comparison_basis_is_bound(
     *, period: str, definition: str, scope: str, evidence: str
 ) -> bool:
@@ -979,46 +942,16 @@ def _structured_comparison_basis_is_bound(
             and _comparison_scope_is_bound(scope, evidence)
         )
 
-    financials = payload["financials"]
-    if financials.get("status") != "000" or str(
-        financials.get("reprt_code") or ""
-    ).strip() != "11011":
-        return False
-    raw_rows = financials.get("list")
-    if not isinstance(raw_rows, list):
-        return False
+    from src.shared.report_quality.comparison_evidence import (  # noqa: PLC0415
+        comparison_evidence_rows,
+    )
 
-    canonical_period = _canonical_comparison_period(period)
-    scope_match = re.search(r"\b(CFS|OFS)\b", scope, re.IGNORECASE)
-    definitions = [row.strip() for row in str(definition or "").split(";") if row.strip()]
-    if not canonical_period or scope_match is None or not definitions:
-        return False
-    scope_code = scope_match.group(1).upper()
-
-    expected_rows: list[tuple[str, str, str, str, str]] = []
-    for raw_definition in definitions:
-        fields = tuple(field.strip() for field in raw_definition.split("|"))
-        if len(fields) != 5 or any(not field for field in fields):
-            return False
-        expected_rows.append(fields)  # type: ignore[arg-type]
-
-    for metric_id, account_name, statement_kind, report_code, currency in expected_rows:
-        matches = [
-            row
-            for row in raw_rows
-            if isinstance(row, dict)
-            and str(row.get("account_id") or "").strip() == metric_id
-            and _normalized(row.get("account_nm")) == _normalized(account_name)
-            and str(row.get("sj_div") or "").strip().upper()
-            == statement_kind.upper()
-            and str(row.get("reprt_code") or "").strip() == report_code
-            and str(row.get("currency") or "").strip().upper() == currency.upper()
-            and str(row.get("fs_div") or "").strip().upper() == scope_code
-            and _canonical_comparison_period(row.get("thstrm_dt")) == canonical_period
-        ]
-        if len(matches) != 1:
-            return False
-    return True
+    return comparison_evidence_rows(
+        evidence=evidence,
+        period=period,
+        definition=definition,
+        scope=scope,
+    ) is not None
 
 
 def _temporal_lexical_problems(fact: FactRecord) -> list[str]:
@@ -1112,7 +1045,7 @@ def _location_is_bound(fact_location: str, source_location: str) -> bool:
 
 def _evidence_support_problems(fact: FactRecord) -> list[str]:
     problems: list[str] = []
-    terms = [_normalized(term) for term in fact.evidence_support_terms if _normalized(term)]
+    terms = list(normalized_support_terms(fact.evidence_support_terms))
     if (
         len(set(terms)) < 2
         and not historical_performance_numeric_evidence_is_bound(fact)
@@ -1120,13 +1053,14 @@ def _evidence_support_problems(fact: FactRecord) -> list[str]:
         problems.append(
             f"[evidence] {fact.fact_id}: claim과 원문을 잇는 서로 다른 근거어가 두 개 이상 필요합니다"
         )
-    claim = _normalized(fact.claim)
-    evidence = _normalized(fact.state_evidence)
-    for term in terms:
-        if len(_compact(term)) < 2 or term not in claim or term not in evidence:
-            problems.append(
-                f"[evidence] {fact.fact_id}: 근거어 '{term}'가 claim과 원문 근거 양쪽에 없습니다"
-            )
+    for term in evidence_support_term_mismatches(
+        fact.claim,
+        fact.state_evidence,
+        terms,
+    ):
+        problems.append(
+            f"[evidence] {fact.fact_id}: 근거어 '{term}'가 claim과 원문 근거 양쪽에 없습니다"
+        )
     if not fact.evidence_binding or fact.evidence_binding != fact_evidence_binding(fact):
         problems.append(
             f"[evidence] {fact.fact_id}: claim·원문·출처 결속 지문이 없거나 일치하지 않습니다"
@@ -1747,7 +1681,7 @@ def _fact_problems(
             problems.append(
                 f"[source] {fact.fact_id}: 원문 used_in에 실제 소유 장이 없습니다"
             )
-        if evidence_text_hash(fact.state_evidence) not in source.evidence_hashes:
+        if not source_has_evidence_text(source, fact.state_evidence):
             problems.append(
                 f"[evidence] {fact.fact_id}: state_evidence가 Source 원문 해시 등록부에 없습니다"
             )

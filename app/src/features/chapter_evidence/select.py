@@ -34,8 +34,14 @@ from src.features.chapter_evidence.constants import (
     DEFAULT_MAX_ESTIMATED_TOKENS_PER_SECTION,
 )
 from src.shared.report_evidence.models import CollectedEvidenceDocument, EvidenceFragment
-from src.shared.report_evidence.constants import SourceRequirement, SourceTier
+from src.shared.report_evidence.constants import (
+    SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE,
+    SOURCE_KIND_OFFICIAL_IR_PDF,
+)
 from src.shared.report_evidence.policy import collector_slots_for
+from src.shared.report_evidence.source_kind_policy import (
+    formal_document_is_writer_eligible,
+)
 
 
 @dataclass(frozen=True)
@@ -118,8 +124,10 @@ def select_section_fragments(
 
     eligible: list[EvidenceFragment] = []
     company_mismatch_count = 0
+    missing_document_count = 0
     unbound_count = 0
     low_trust_ir_count = 0
+    low_trust_external_page_count = 0
     for fragment in fragments:
         if fragment.section_id != section_id:
             continue
@@ -139,16 +147,19 @@ def select_section_fragments(
             continue
         document = own_documents_by_id.get(fragment.document_id)
         if document is None:
+            # 자료가 실제로 없는 것과 수집기가 조각의 원본 문서를 전달하지
+            # 않은 내부 배선 오류는 다르다. 조각을 fail-closed로 제외하되
+            # 후단 preflight가 내부 오류로 분류할 수 있게 흔적을 남긴다.
+            missing_document_count += 1
             continue
-        if (
-            document.source_kind == "official_ir_pdf"
-            and document.requirement is SourceRequirement.OPTIONAL
-            and document.source_tier is SourceTier.TIER_3_TRUSTED
-        ):
+        if not formal_document_is_writer_eligible(document):
             # 공식 HTML exact-link 외부 첨부는 provenance 후보일 뿐이다.
             # CDN 자료가 필수 슬롯을 채우는 근거로 승격되지 않게 통합
             # 경계에서도 한 번 더 fail-closed 한다.
-            low_trust_ir_count += 1
+            if document.source_kind == SOURCE_KIND_OFFICIAL_IR_PDF:
+                low_trust_ir_count += 1
+            else:
+                low_trust_external_page_count += 1
             continue
         # generation=7 결속 방어(fail-closed), 2층 — 조각의 text_sha256이
         # 원본 문서의 exact_evidence_hashes 허용 목록에 없으면 여기서
@@ -253,10 +264,17 @@ def select_section_fragments(
         reason_codes.append(f"duplicate_fragments_removed:{duplicate_count}")
     if company_mismatch_count:
         reason_codes.append(f"fragment_company_mismatch:{company_mismatch_count}")
+    if missing_document_count:
+        reason_codes.append(f"fragment_document_missing:{missing_document_count}")
     if unbound_count:
         reason_codes.append(f"fragment_not_bound_to_document:{unbound_count}")
     if low_trust_ir_count:
         reason_codes.append(f"low_trust_ir_fragment_ignored:{low_trust_ir_count}")
+    if low_trust_external_page_count:
+        reason_codes.append(
+            "low_trust_external_page_fragment_ignored:"
+            f"{low_trust_external_page_count}"
+        )
     for slot_id in oversized_slots:
         reason_codes.append(f"fragment_exceeds_budget:{slot_id}")
     if dropped_for_budget:

@@ -49,7 +49,7 @@ PUBLIC_PROJECTION_VERSION: Final[str] = "public-section-content-v1"
 _SHA256_HEX_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 
 #: canonical.py:124-177 ``_source_public_projection`` (private, import하지 않음)이
-#: 만드는 Source canonical dict와 같은 28개 키. 값 타입까지 재구현하지 않고
+#: 만드는 Source canonical dict와 같은 닫힌 키 집합. 값 타입까지 재구현하지 않고
 #: 키 집합 동일성만 이 레이어의 계약으로 고정한다.
 _PUBLIC_CITATION_SOURCE_FIELDS: Final[frozenset[str]] = frozenset(
     {
@@ -77,10 +77,14 @@ _PUBLIC_CITATION_SOURCE_FIELDS: Final[frozenset[str]] = frozenset(
         "provenance_seal",
         "provenance_role",
         "reporting_period",
+        "ir_metadata_verification",
         "attachment_url",
         "domain_redirect_verification",
         "domain_redirect_from_host",
         "domain_redirect_to_host",
+        "formal_source_kind",
+        "identity_binding",
+        "document_content_sha256",
     }
 )
 
@@ -589,7 +593,7 @@ class PublicCitationRow:
         _require_nonempty_str(self.verification_label, label="부록 행 verification_label")
         if not isinstance(self.source, Mapping) or set(self.source) != _PUBLIC_CITATION_SOURCE_FIELDS:
             raise PublicProjectionError(
-                "부록 행 source가 Source canonical dict 28필드와 다릅니다"
+                "부록 행 source가 Source canonical dict 닫힌 필드 집합과 다릅니다"
             )
         # tuple로 만들어 넣든 JSON 왕복으로 list가 되어 들어오든 저장 형태를
         # canonical_value 결과 하나로 고정한다 — 그래야 직접 생성한 값과
