@@ -2562,6 +2562,9 @@ class RealPipeline:
                     "독립문서수": official_preflight.independent_document_count,
                     "판정": official_preflight.decision.status.value,
                     "사유코드": official_preflight.detail_code,
+                    "DART부분보고서전환": (
+                        official_preflight.dart_partial_fallback
+                    ),
                 }
             )
             if not official_preflight.can_call_ai:
@@ -2606,6 +2609,19 @@ class RealPipeline:
                     final_gate_reason=gate_reason,
                     dart_receipt_numbers=source_identity.dart_receipt_numbers,
                     financial_payload_digest=source_identity.financial_payload_digest,
+                )
+
+            if official_preflight.dart_partial_fallback:
+                # FULL은 아홉 장·독립 문서 8건을 모두 요구한다. 홈페이지 장애인데
+                # DART 핵심 3장이 준비된 경우에는 이미 존재하는 SHADOW의 안전한
+                # PARTIAL 출고 계약으로만 전환한다. 근거 없는 장은 최종 검증에서
+                # 제외되고, FULL 표시나 FULL 생산 영수증을 가장하지 않는다.
+                requested_release_mode = ReleaseMode.SHADOW
+                steps.append(
+                    {
+                        "step": "6_수집_DART부분보고서전환",
+                        "사유": "회사 웹 경로 일시 장애",
+                    }
                 )
 
             generation_source_identity_digest = (
@@ -3118,6 +3134,7 @@ class RealPipeline:
                 build_identity=build_identity,
                 generation_mode=generation_mode,
                 comparison_result=v2_comparison_result,
+                release_mode_override=requested_release_mode,
             )
             return replace(
                 v2_result,
@@ -4359,6 +4376,7 @@ def _run_v2_composer(
     build_identity: engine_build_identity.EngineBuildIdentity,
     generation_mode: engine_mode.EngineMode,
     comparison_result: Any = None,
+    release_mode_override: Optional[ReleaseMode] = None,
 ) -> RunResult:
     """엔진 v2: composer 경로로 보고서를 만든다.
 
@@ -4401,12 +4419,15 @@ def _run_v2_composer(
 
     filing_identity = filing_meta_from_raw(filing)
     try:
-        raw_release_mode = os.environ.get(REPORT_RELEASE_MODE_ENV_NAME)
-        if raw_release_mode is None or raw_release_mode == "":
-            raise ValueError(
-                "엔진 v2 운영 경로는 보고서 release mode를 명시해야 합니다"
-            )
-        release_mode = parse_release_mode(raw_release_mode)
+        if release_mode_override is not None:
+            release_mode = release_mode_override
+        else:
+            raw_release_mode = os.environ.get(REPORT_RELEASE_MODE_ENV_NAME)
+            if raw_release_mode is None or raw_release_mode == "":
+                raise ValueError(
+                    "엔진 v2 운영 경로는 보고서 release mode를 명시해야 합니다"
+                )
+            release_mode = parse_release_mode(raw_release_mode)
         section_evidence_packets = None
         build_identity_sha256 = ""
         if release_mode is ReleaseMode.FULL:
