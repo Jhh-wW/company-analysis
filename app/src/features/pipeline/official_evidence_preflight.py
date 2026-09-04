@@ -81,6 +81,9 @@ _INCOMPLETE_COLLECTION_STATES = frozenset(
 _WEB_FAILURE_SOURCE_KINDS = frozenset(
     {*OFFICIAL_WEB_SOURCE_KINDS, SOURCE_KIND_ROBOTS_TXT}
 )
+_WEB_IDENTITY_REJECTION_REASON_CODES = frozenset(
+    {"root_identity_mismatch", "cross_domain_identity_mismatch"}
+)
 
 
 def _has_usable_dart_evidence(result: OfficialEvidenceCollectionResult) -> bool:
@@ -181,6 +184,11 @@ def assess_official_evidence(
         for candidate in result.candidates
         for attempt in candidate.attempts
     )
+    web_identity_was_rejected = any(
+        attempt.reason_code in _WEB_IDENTITY_REJECTION_REASON_CODES
+        for candidate in result.candidates
+        for attempt in candidate.attempts
+    )
     incomplete_attempts = tuple(
         attempt
         for candidate in result.candidates
@@ -190,6 +198,7 @@ def assess_official_evidence(
     dart_partial_fallback = (
         not integrity_is_broken
         and not required_dart_collection_incomplete
+        and not web_identity_was_rejected
         and _has_usable_dart_evidence(result)
         and decision.status is GenerationGateStatus.STOP_TRANSIENT_FAILURE
         and bool(incomplete_attempts)
