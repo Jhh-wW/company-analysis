@@ -38,6 +38,9 @@ LEGACY_KIND_LITIGATION: Final[str] = "소송·분쟁"
 LEGACY_KIND_AUDITOR_FINDING: Final[str] = "감사인지적"
 LEGACY_KIND_INTELLECTUAL_PROPERTY: Final[str] = "지적재산권"
 LEGACY_KIND_RISK_FACTOR: Final[str] = "위험요인"
+LEGACY_KIND_PRODUCT_SERVICE: Final[str] = "제품서비스"
+LEGACY_KIND_GOODS_CONTENT: Final[str] = "상품내용"
+LEGACY_KIND_SUBSIDIARY_BUSINESS: Final[str] = "종속회사사업"
 LEGACY_KIND_HOMEPAGE: Final[str] = "홈페이지"
 LEGACY_KIND_OFFICIAL_IR: Final[str] = "공식 IR"
 LEGACY_KIND_NEWS: Final[str] = "뉴스"
@@ -164,6 +167,9 @@ _LEGACY_SECTIONS_BY_FRAGMENT_KIND = {
     LEGACY_KIND_AUDITOR_FINDING: frozenset({"current_challenges"}),
     LEGACY_KIND_INTELLECTUAL_PROPERTY: frozenset({"portfolio"}),
     LEGACY_KIND_RISK_FACTOR: frozenset({"current_challenges"}),
+    LEGACY_KIND_PRODUCT_SERVICE: frozenset({"portfolio"}),
+    LEGACY_KIND_GOODS_CONTENT: frozenset({"portfolio"}),
+    LEGACY_KIND_SUBSIDIARY_BUSINESS: frozenset({"portfolio"}),
     LEGACY_KIND_HOMEPAGE: frozenset(
         {
             "identity",
