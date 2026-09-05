@@ -87,6 +87,7 @@ from src.shared.report_quality.source_identity import (
 from src.shared.revenue_table_provenance import (
     is_revenue_total_name,
     revenue_row_evidence_matches,
+    revenue_table_section_id_from_caption,
     revenue_table_evidence_identity,
 )
 
@@ -1489,11 +1490,13 @@ def build_public_structure_seal(
             and performance_table.rows
         ):
             program_slots.append((performance_table, table_presentation or "table"))
-        elif section.section_id == "business_model":
+        else:
             program_slots.extend(
                 (table, _COMPOSITION_PRESENTATION)
                 for table in composition_tables
                 if table.rows
+                and revenue_table_section_id_from_caption(table.caption)
+                == section.section_id
             )
         for table, presentation in program_slots:
             row_bindings = _validated_program_bindings(

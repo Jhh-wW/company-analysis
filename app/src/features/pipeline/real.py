@@ -137,6 +137,7 @@ from src.shared.report_evidence.legacy_fragment_kinds import (
 from src.shared.revenue_table_provenance import (
     revenue_row_evidence_matches,
     revenue_table_axis_matches,
+    revenue_table_section_id_from_caption,
     revenue_table_source_excerpt,
 )
 from src.shared.report_evidence.release_mode import (
@@ -3619,8 +3620,9 @@ class RealPipeline:
         tell("verify")
         # 구조화 표는 해당 장이 단독 소유한다. 같은 수치를 요약·다른 장에 복제하지 않는다.
         tables_by_section: dict[str, list[ReportTable]] = {}
-        if revenue_tables:
-            tables_by_section["business_model"] = [ReportTable(**table) for table in revenue_tables]
+        for table in revenue_tables:
+            section_id = revenue_table_section_id_from_caption(table.get("caption"))
+            tables_by_section.setdefault(section_id, []).append(ReportTable(**table))
 
         if performance_table is not None:
             tables_by_section["past_changes"] = [performance_table]

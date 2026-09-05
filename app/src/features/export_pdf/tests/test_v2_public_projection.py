@@ -27,6 +27,7 @@ import pdfplumber
 from pypdf import PdfReader
 
 from src.features.composer.constants import (
+    BUSINESS_FLOW_SECTION_ID,
     GRADE_CONFIRMED,
     GRADE_INTERPRETED,
     IDENTITY_TABLE_SECTION_ID,
@@ -40,7 +41,6 @@ from src.features.composer.port import (
     PerformanceTable,
 )
 from src.features.composer.render import (
-    COMPOSITION_TABLE_SECTION_ID,
     ENGINE_V2_SCHEMA_VERSION,
     render_report,
 )
@@ -144,7 +144,7 @@ def _composed() -> ComposedReport:
                     citations=("2",),
                 ),
             )
-        if section_id == COMPOSITION_TABLE_SECTION_ID:
+        if section_id == BUSINESS_FLOW_SECTION_ID:
             flow_rows = (
                 FlowRow(
                     cells=("음악 자산", "음반", "구독", "반복 수익"),
@@ -198,7 +198,7 @@ def _performance_table() -> PerformanceTable:
 
 
 def _composition_table() -> PerformanceTable:
-    """2장 구성표 — 100% 구성 도식(kind="composition")을 부른다."""
+    """3장 제품 구성표 — 100% 구성 도식(kind="composition")을 부른다."""
 
     return PerformanceTable(
         caption="2025년 부문별 매출 구성",
