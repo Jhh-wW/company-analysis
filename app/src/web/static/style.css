@@ -2,6 +2,93 @@
    공통 화면은 기존 디자인을 유지한다. 새 홈페이지 디자인은 파일 끝의
    `.home-page` 범위 안에서만 덮어써 결과·관리자 화면의 회귀를 막는다. */
 
+:root {
+  /* 보고서 디자인 토큰 v1 — PDF와 웹이 공유하는 단색 팔레트. */
+  --ink: #111111;
+  --ink-2: #333333;
+  --grey-6: #666666;
+  --grey-4: #999999;
+  --grey-2: #CCCCCC;
+  --grey-1: #F5F5F5;
+  --paper: #FBFBFB;
+  --white: #FFFFFF;
+  --chart-1: #B3B3B3;
+  --chart-2: #8C8C8C;
+  --chart-3: #666666;
+  --chart-4: #444444;
+  --chart-5: #222222;
+
+  /* 기존 비보고서 화면은 아래 호환 팔레트로 현재 모습을 유지한다. */
+  --legacy-ink: #222222;
+  --legacy-ink-strong: #1b1b1b;
+  --legacy-ink-2: #4f606b;
+  --legacy-ink-3: #637381;
+  --legacy-ink-4: #919eab;
+  --legacy-paper: #fafafb;
+  --legacy-paper-2: #f2f4f6;
+  --legacy-line: #d8dce1;
+  --legacy-line-soft: #e9ecef;
+  --black: #000000;
+  --neutral-1000: #0a0a0a;
+  --neutral-900: #171717;
+  --neutral-850: #303030;
+  --neutral-800: #3d3d3d;
+  --neutral-650: #5f5f5f;
+  --neutral-600: #6b6b6b;
+  --neutral-500: #737373;
+  --neutral-450: #8a8a8a;
+  --neutral-400: #949494;
+  --neutral-300: #a3a3a3;
+  --neutral-250: #b8b8b8;
+  --neutral-200: #cfcfcf;
+  --neutral-180: #d4d4d4;
+  --neutral-160: #d5d5d5;
+  --neutral-150: #dcdcdc;
+  --neutral-100: #e5e5e5;
+  --neutral-80: #eeeeee;
+  --neutral-50: #fafafa;
+  --neutral-attribution: #5e5e5e;
+  --ok: #2f6b4f;
+  --ok-bg: #eef4f1;
+  /* 진행 완료는 성공/승인을 뜻하지 않으므로 중립 회색으로 표시한다. */
+  --progress-done: #5f6368;
+  --part: #8a6a20;
+  --part-bg: #f7f3e9;
+  --no: #99413f;
+  --no-bg: #f7efef;
+  --risk: #e7000b;
+  --risk-text: #b00009;
+  --brand-mark-dot: #e7000b;
+  --warning-border: #826900;
+  --warning-bg: #fff8d9;
+  --warning-text: #544300;
+  --warning-text-strong: #302700;
+  --danger-border-soft: #dd9999;
+  --home-error-text: #d0000a;
+  --home-error-bg: #fff2f3;
+
+  --ink-strong: var(--ink);
+  --ink-3: var(--grey-6);
+  --ink-4: var(--grey-4);
+  --surface: var(--white);
+  --paper-2: var(--grey-1);
+  --line: var(--grey-2);
+  --line-soft: var(--grey-2);
+  --navy: var(--ink);
+  --navy-dark: var(--ink);
+  --navy-soft: var(--grey-1);
+  --navy-line: var(--grey-2);
+  --radius: 4px;
+  --shadow: 0 1px 2px rgba(34, 34, 34, .04), 0 10px 30px -20px rgba(34, 34, 34, .35);
+  --font: "Freesentation", "Malgun Gothic", "맑은 고딕", -apple-system,
+          BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", system-ui, sans-serif;
+  --display: "Prata", Georgia, "Times New Roman", serif;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, "D2Coding", monospace;
+  /* 직전 정사각형(.144em)의 90%: .144 * .9 = .1296em. */
+  --brand-mark-base-size: .12em;
+  --brand-mark-square-size: .1296em;
+}
+
 /* ══════════════════════════════════════════════════════
    폰트 — ★ CDN이 아니라 «직접 얹는다»
    ⚠️ 왜 자체 호스팅인가 — 사내망에서 외부 CDN(jsdelivr 등)이 차단돼도
@@ -35,42 +122,25 @@
   src: url("/static/fonts/Prata-Regular.woff2") format("woff2");
   font-weight: 400; font-style: normal; font-display: swap;
 }
-:root {
-  --ink: #222222;
-  --ink-strong: #1b1b1b;
-  --ink-2: #4f606b;
-  --ink-3: #637381;
-  --ink-4: #919eab;
-  --surface: #ffffff;
-  --paper: #fafafb;
-  --paper-2: #f2f4f6;
-  --line: #d8dce1;
-  --line-soft: #e9ecef;
-  --navy: #1b1b1b;
-  --navy-dark: #000000;
-  --navy-soft: #f2f4f6;
-  --navy-line: #d8dce1;
-  --ok: #2f6b4f;
-  --ok-bg: #eef4f1;
-  /* 진행 완료는 성공/승인을 뜻하지 않으므로 중립 회색으로 표시한다. */
-  --progress-done: #5f6368;
-  --part: #8a6a20;
-  --part-bg: #f7f3e9;
-  --no: #99413f;
-  --no-bg: #f7efef;
-  --brand-mark-dot: #e7000b;
-  /* 직전 정사각형(.144em)의 90%: .144 * .9 = .1296em. */
-  --brand-mark-base-size: .12em;
-  --brand-mark-square-size: .1296em;
-  --radius: 4px;
-  --shadow: 0 1px 2px rgba(34, 34, 34, .04), 0 10px 30px -20px rgba(34, 34, 34, .35);
-  --font: "Freesentation", "Malgun Gothic", "맑은 고딕", -apple-system,
-          BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", system-ui, sans-serif;
-  --display: "Prata", Georgia, "Times New Roman", serif;
-  --mono: ui-monospace, "Cascadia Mono", Consolas, "D2Coding", monospace;
-}
-
 * { box-sizing: border-box; }
+
+/* 결과와 홈페이지 이외의 화면은 D-2 변경 전 팔레트를 그대로 쓴다. */
+body:not(.home-page):not(.result-page) {
+  --ink: var(--legacy-ink);
+  --ink-strong: var(--legacy-ink-strong);
+  --ink-2: var(--legacy-ink-2);
+  --ink-3: var(--legacy-ink-3);
+  --ink-4: var(--legacy-ink-4);
+  --surface: var(--white);
+  --paper: var(--legacy-paper);
+  --paper-2: var(--legacy-paper-2);
+  --line: var(--legacy-line);
+  --line-soft: var(--legacy-line-soft);
+  --navy: var(--legacy-ink-strong);
+  --navy-dark: var(--black);
+  --navy-soft: var(--legacy-paper-2);
+  --navy-line: var(--legacy-line);
+}
 
 body {
   margin: 0;
@@ -252,7 +322,7 @@ input[type="text"], textarea, select {
   border-radius: 5px;
   font-family: var(--font);
   font-size: 14.5px;
-  background: #fff;
+  background: var(--white);
   color: var(--ink);
 }
 textarea { min-height: 150px; resize: vertical; line-height: 1.6; }
@@ -272,7 +342,7 @@ input:focus, textarea:focus, select:focus {
   border: 1px solid var(--navy);
   border-radius: 5px;
   background: var(--navy);
-  color: #fff;
+  color: var(--white);
   font-family: var(--font);
   font-size: 14.5px;
   font-weight: 700;
@@ -281,7 +351,7 @@ input:focus, textarea:focus, select:focus {
   text-align: center;
 }
 .btn:hover { background: var(--navy-dark); }
-.btn.ghost { background: #fff; color: var(--navy); }
+.btn.ghost { background: var(--white); color: var(--navy); }
 .btn.ghost:hover { background: var(--navy-soft); }
 .btn.wide { width: 100%; }
 .btn-row { display: flex; gap: 10px; margin-top: 20px; }
@@ -292,7 +362,7 @@ input:focus, textarea:focus, select:focus {
   border: 2px solid var(--navy);
   border-radius: var(--radius);
   overflow: hidden;
-  background: #fff;
+  background: var(--white);
 }
 .company-card .head {
   background: var(--navy-soft);
@@ -402,7 +472,7 @@ input:focus, textarea:focus, select:focus {
 .phase-cards li.done .mark {
   background: var(--progress-done);
   border-color: var(--progress-done);
-  color: #fff;
+  color: var(--white);
 }
 .phase-cards li.current { border-color: var(--navy); color: var(--navy); }
 .phase-cards li.current .phase-title { font-weight: 700; }
@@ -527,7 +597,7 @@ tr:target > td:first-child { box-shadow: inset 3px 0 0 var(--ink-strong); }
 /* 원문 접기 — ★ 원문을 «버리지 않았다»는 것이 눈에 보여야 한다 */
 .rawsrc {
   margin: 0 0 14px;
-  border-left: 3px solid var(--line, #dde);
+  border-left: 3px solid var(--line);
   padding-left: 10px;
 }
 .rawsrc > summary {
@@ -537,13 +607,13 @@ tr:target > td:first-child { box-shadow: inset 3px 0 0 var(--ink-strong); }
   padding: 3px 0;
   user-select: none;
 }
-.rawsrc > summary:hover { color: var(--ink-1, #223); }
+.rawsrc > summary:hover { color: var(--ink-strong); }
 .rawsrc ul { margin: 6px 0 4px; }
-.rawsrc li { font-size: 13.5px; color: var(--ink-2, #445); }
+.rawsrc li { font-size: 13.5px; color: var(--ink-2); }
 
 .empty {
   background: var(--no-bg);
-  border: 1px dashed #d99;
+  border: 1px dashed var(--danger-border-soft);
   border-radius: 4px;
   padding: 9px 12px;
   margin: 4px 0 12px;
@@ -574,7 +644,7 @@ td.center { text-align: center; }
 
 /* ── 데모 안내 ──────────────────────────────────────── */
 .demo-note {
-  background: #fff;
+  background: var(--white);
   border: 1px solid var(--navy-line);
   border-left: 3px solid var(--navy);
   border-radius: 5px;
@@ -589,7 +659,7 @@ td.center { text-align: center; }
   padding: 4px 11px;
   border: 1px solid var(--navy-line);
   border-radius: 99px;
-  background: #fff;
+  background: var(--white);
   cursor: pointer;
   font-family: var(--font);
   color: var(--ink-2);
@@ -607,7 +677,7 @@ td.center { text-align: center; }
      「지금 돈이 나가는 모드인가」를 훑어보고 알 수 없다. 안전에 관한 표시다. */
 .tag.real {
   background: var(--ink-strong);
-  color: #fff;
+  color: var(--white);
   border-color: var(--ink-strong);
   letter-spacing: -.01em;
   text-transform: none;
@@ -660,9 +730,9 @@ td.center { text-align: center; }
 /* 로컬 실시간 시험은 일반 실제 조사와도 구별한다. 글자까지 함께 써서 색만으로
    안전 상태를 전달하지 않는다. */
 .tag.evaluation {
-  border-color: #826900;
-  background: #fff8d9;
-  color: #544300;
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning-text);
   letter-spacing: -.01em;
   text-transform: none;
   font-family: var(--font);
@@ -672,10 +742,10 @@ td.center { text-align: center; }
 .evaluation-notice {
   margin: 0 0 22px;
   padding: 16px 18px;
-  border: 2px solid #826900;
+  border: 2px solid var(--warning-border);
   border-radius: 8px;
-  background: #fff8d9;
-  color: #302700;
+  background: var(--warning-bg);
+  color: var(--warning-text-strong);
 }
 .evaluation-notice.preview {
   border-color: var(--line);
@@ -758,7 +828,7 @@ td.center { text-align: center; }
 
 /* ── 지표 행 (② 보고서 품질 · ②-b AI 판정 검증) ── */
 .metric-row { border: 1px solid var(--line); border-radius: 5px; padding: 12px 15px;
-  margin-bottom: 10px; background: #fff; }
+  margin-bottom: 10px; background: var(--white); }
 .metric-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
 .metric-name { font-weight: 700; font-size: 14.5px; }
 .metric-std { font-size: 12px; color: var(--ink-3); }
@@ -776,7 +846,7 @@ td.center { text-align: center; }
 .badge-human { background: var(--ok-bg); color: var(--ok); border-color: var(--ok); }
 
 /* ── 단계별 이탈 (③) — 막대(<summary>)를 누르면 상세가 펼쳐진다. 순수 HTML, JS 없음. ── */
-.funnel-row { border: 1px solid var(--line); border-radius: 5px; margin-bottom: 8px; background: #fff; }
+.funnel-row { border: 1px solid var(--line); border-radius: 5px; margin-bottom: 8px; background: var(--white); }
 .funnel-row summary { display: flex; align-items: center; gap: 10px; padding: 10px 14px; cursor: pointer; }
 .funnel-row .sig { font-size: 14px; }
 .funnel-row .fname { min-width: 150px; font-weight: 700; font-size: 13.5px; }
@@ -809,7 +879,7 @@ td.center { text-align: center; }
 .tabbar input[type="radio"] { position: absolute; opacity: 0; pointer-events: none; }
 .tabbar label { display: inline-block; padding: 6px 16px; border: 1px solid var(--navy-line);
   border-radius: 99px; margin-right: 6px; margin-bottom: 10px; font-size: 13px; cursor: pointer; color: var(--ink-2); }
-.tabbar input:checked + label { background: var(--navy); border-color: var(--navy); color: #fff; }
+.tabbar input:checked + label { background: var(--navy); border-color: var(--navy); color: var(--white); }
 #tab-listed:checked ~ .scroll .recent-table tbody tr:not(.row-listed) { display: none; }
 #tab-unlisted:checked ~ .scroll .recent-table tbody tr:not(.row-unlisted) { display: none; }
 
@@ -895,12 +965,12 @@ td.center { text-align: center; }
 .home-page .topbar .tag.real {
   border-color: var(--ink);
   background: var(--ink);
-  color: #fafafa;
+  color: var(--neutral-50);
 }
 .home-page .topbar .tag.evaluation {
-  border-color: #826900;
-  background: #fff8d9;
-  color: #544300;
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning-text);
   font-weight: 700;
 }
 .home-page .topbar a {
@@ -1056,7 +1126,7 @@ td.center { text-align: center; }
   border: 1px solid var(--ink);
   border-radius: var(--home-control-radius);
   background: var(--ink);
-  color: #fafafa;
+  color: var(--neutral-50);
   font-family: inherit;
   font-size: 14px;
   font-weight: 500;
@@ -1102,14 +1172,14 @@ td.center { text-align: center; }
   overflow-wrap: anywhere;
 }
 .home-page button.chip:hover {
-  border-color: #cfcfcf;
+  border-color: var(--neutral-200);
   background: var(--paper-2);
   color: var(--ink);
 }
 .home-page .chip.report {
   border-color: var(--ink);
   background: var(--ink);
-  color: #fafafa;
+  color: var(--neutral-50);
 }
 .home-page button.chip.report:hover { background: var(--navy-dark); }
 .home-page .chip-company { min-width: 0; }
@@ -1203,7 +1273,7 @@ td.center { text-align: center; }
   height: 24px;
   border-radius: var(--home-control-radius);
   background: var(--no);
-  color: #fff;
+  color: var(--white);
 }
 .home-page .posting-image-bar {
   padding: 10px 14px;
@@ -1222,7 +1292,7 @@ td.center { text-align: center; }
   font-weight: 500;
 }
 .home-page .posting-image-attach:hover {
-  border-color: #cfcfcf;
+  border-color: var(--neutral-200);
   background: var(--paper);
   color: var(--ink);
 }
@@ -1299,7 +1369,7 @@ td.center { text-align: center; }
      앞에 두거나 특이도가 낮으면 기본 버튼 규칙에 그대로 덮인다. */
 .home-page .link-landing .link-landing-choice + .link-landing-choice .btn {
   border-color: var(--line);
-  background: #fff;
+  background: var(--white);
   color: var(--ink);
 }
 .home-page .link-landing .link-landing-choice + .link-landing-choice .btn:hover {
@@ -1314,20 +1384,6 @@ td.center { text-align: center; }
    기능 화면 전체에 새 스타일이 새지 않도록 `result-page` 안에 가둔다.
    ══════════════════════════════════════════════════════════ */
 .result-page {
-  --ink: #0a0a0a;
-  --ink-strong: #0a0a0a;
-  --ink-2: #303030;
-  --ink-3: #5f5f5f;
-  --ink-4: #737373;
-  --surface: #ffffff;
-  --paper: #f5f5f5;
-  --paper-2: #fafafa;
-  --line: #e5e5e5;
-  --line-soft: #eeeeee;
-  --navy: #0a0a0a;
-  --navy-dark: #171717;
-  --navy-soft: #f5f5f5;
-  --navy-line: #e5e5e5;
   --result-card-radius: 24px;
   --result-control-radius: 18px;
   background: var(--paper);
@@ -1363,7 +1419,7 @@ td.center { text-align: center; }
 .result-page .topbar .tag.real {
   border-color: var(--ink);
   background: var(--ink);
-  color: #fafafa;
+  color: var(--white);
 }
 .result-page .topbar a {
   color: var(--ink-3);
@@ -1408,35 +1464,57 @@ td.center { text-align: center; }
   flex-direction: column;
   align-items: flex-start;
   margin-bottom: 42px;
-  padding: 88px 0 36px;
-  border-bottom: 1px solid var(--line);
+  padding: clamp(48px, 8vw, 76px) clamp(24px, 5vw, 44px) 34px;
+  border-radius: 2px;
+  background: var(--ink);
+  color: var(--white);
 }
 .result-page .report-title-block { width: 100%; }
 /* 표지 다음 첫 본문 페이지 마스트헤드 — 표지(.report-cover, 가운데
    큰 제목·실적 띠·핵심 요약)와 느낌이 겹치지 않도록 좌측 정렬의 얇은
    두 줄 밴드로만 둔다. PDF(_masthead_flowables)와 같은 자리·같은 순서다. */
 .result-page .report-masthead {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
+  position: relative;
+  display: grid;
+  min-height: 40px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 20px;
   margin: 0 0 32px;
-  padding-bottom: 16px;
-  border-bottom: 1px solid var(--line);
+  padding: 8px 14px;
+  background: var(--ink);
+  color: var(--white);
 }
-.result-page .report-masthead-title {
-  margin: 0 0 4px;
-  color: var(--ink);
-  font-size: clamp(20px, 2.6vw, 26px);
-  font-weight: 600;
-  line-height: 1.2;
-  letter-spacing: -.03em;
+.result-page .report-masthead::before,
+.result-page .report-masthead::after {
+  min-width: 0;
+  line-height: 1.25;
   word-break: keep-all;
 }
-.result-page .report-masthead-meta {
-  margin: 0;
-  color: var(--ink-3);
+.result-page .report-masthead::before {
+  content: attr(data-report-title);
   font-size: 13px;
-  line-height: 1.5;
+  font-weight: 600;
+  letter-spacing: -.01em;
+}
+.result-page .report-masthead::after {
+  content: attr(data-report-date);
+  color: var(--grey-2);
+  font-size: 11px;
+  text-align: right;
+}
+.result-page .report-masthead-title,
+.result-page .report-masthead-meta {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 /* 표지 실적 띠 — 정본: 디자인과_PDF_QA.md 6-1절.
    기존 결과 화면 토큰(--ink/--ink-3/--line/--surface, 카드 모서리 24px)만 쓴다.
@@ -1447,27 +1525,28 @@ td.center { text-align: center; }
 }
 .result-page .cover-metrics-title {
   margin: 0 0 11px;
-  color: var(--ink-3);
-  font-size: 12.5px;
+  color: var(--grey-2);
+  font-size: 8.5px;
   letter-spacing: -.01em;
 }
 .result-page .cover-metrics-list {
   display: grid;
-  overflow: hidden;
+  gap: 10px;
   margin: 0;
   padding: 0;
-  border: 1px solid var(--line);
-  border-radius: var(--result-card-radius);
-  background: var(--surface);
+  background: transparent;
   grid-auto-columns: minmax(0, 1fr);
   grid-auto-flow: column;
 }
-.result-page .cover-metric { padding: 18px 22px 20px; }
-.result-page .cover-metric + .cover-metric { border-left: 1px solid var(--line); }
+.result-page .cover-metric {
+  padding: 15px 17px 17px;
+  border: .5px solid var(--grey-2);
+  background: var(--white);
+}
 .result-page .cover-metric dt {
-  color: var(--ink-3);
-  font-size: 12.5px;
-  font-weight: 650;
+  color: var(--grey-4);
+  font-size: 8.5px;
+  font-weight: 400;
   letter-spacing: -.02em;
 }
 .result-page .cover-metric dd {
@@ -1478,7 +1557,7 @@ td.center { text-align: center; }
   gap: 5px;
 }
 .result-page .cover-metric-value {
-  font-size: clamp(26px, 4vw, 34px);
+  font-size: 22px;
   font-weight: 600;
   line-height: 1.1;
   letter-spacing: -.035em;
@@ -1494,58 +1573,68 @@ td.center { text-align: center; }
 .result-page .report-summary h2 {
   margin: 0 0 12px;
   padding-bottom: 9px;
+  border-bottom-color: var(--grey-2);
+  color: var(--white);
   font-size: 18px;
+  font-weight: 400;
 }
 .result-page .report-summary ol {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
   margin: 0;
   padding: 0;
-  border: 1px solid var(--line);
   list-style: none;
 }
 .result-page .report-summary li {
   display: grid;
-  grid-template-columns: 52px 82px minmax(0, 1fr) 54px;
-  align-items: stretch;
+  min-width: 0;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
   margin: 0;
-  border-bottom: 1px solid var(--line);
+  padding: 13px;
+  border: .5px solid var(--grey-2);
+  background: var(--white);
 }
-.result-page .report-summary li:last-child { border-bottom: 0; }
 .result-page .summary-number,
 .result-page .summary-topic,
 .result-page .summary-text,
 .result-page .summary-section {
   display: flex;
-  min-height: 42px;
   align-items: center;
-  padding: 8px 11px;
+  padding: 0;
 }
 .result-page .summary-number {
+  width: 18px;
+  height: 18px;
   justify-content: center;
   background: var(--ink);
-  color: #fff;
+  color: var(--white);
+  font-size: 9px;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
 .result-page .summary-topic {
-  justify-content: center;
-  border-right: 1px solid var(--line);
-  background: var(--paper-2);
-  color: var(--ink-2);
-  font-size: 12px;
-  font-weight: 650;
+  color: var(--grey-4);
+  font-size: 8.5px;
+  font-weight: 400;
   letter-spacing: -.02em;
 }
-.result-page .summary-text { color: var(--ink-2); }
+.result-page .summary-text {
+  grid-column: 1 / -1;
+  color: var(--ink-2);
+  line-height: 1.55;
+}
 .result-page .summary-section {
   justify-content: center;
-  border-left: 1px solid var(--line);
-  color: var(--ink-3);
-  font-size: 12px;
+  color: var(--grey-4);
+  font-size: 9px;
 }
 .result-page h1 {
   margin: 0 0 8px;
-  color: var(--ink);
-  font-size: clamp(34px, 5vw, 46px);
+  color: var(--white);
+  font-size: 34px;
   font-weight: 600;
   line-height: 1.12;
   letter-spacing: -.05em;
@@ -1555,10 +1644,11 @@ td.center { text-align: center; }
 .result-page h1 > span { display: block; }
 .result-page .lede {
   margin: 0;
-  color: var(--ink-2);
+  color: var(--grey-2);
   font-size: 16px;
   line-height: 1.55;
 }
+.result-page .report-cover .muted { color: var(--grey-2); }
 .result-page .report-cache {
   display: inline-flex;
   margin: 16px 0 0;
@@ -1602,16 +1692,34 @@ td.center { text-align: center; }
   border-bottom: 1px solid var(--ink);
   color: var(--ink);
   font-size: 20px;
-  font-weight: 600;
+  font-weight: 400;
   line-height: 1.4;
   letter-spacing: -.035em;
 }
-.result-page h2 .no {
-  min-width: 24px;
-  color: var(--ink-4);
-  font-size: 15px;
-  font-variant-numeric: tabular-nums;
+.result-page h2 .section-badge {
+  /* 숫자 상자(.no)가 검은 네모를 직접 그린다. 이 빈 span은 마크업 골든 유지용이다. */
+  display: none;
 }
+.result-page h2 .no {
+  display: inline-flex;
+  width: 18px;
+  min-width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  margin-right: 10px;
+  padding: 0 1px;
+  background: var(--ink);
+  color: var(--white);
+  font-family: var(--font);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  letter-spacing: -.06em;
+  line-height: 1;
+  vertical-align: middle;
+}
+.result-page h2 .txt { font-weight: 400; }
 .result-page .section-tag {
   display: inline-flex;
   margin-left: 10px;
@@ -1739,7 +1847,7 @@ td.center { text-align: center; }
   font-family: "Prata", Georgia, serif;
   font-size: .82em;
   font-variant-numeric: tabular-nums;
-  color: #737373;
+  color: var(--neutral-500);
   letter-spacing: .02em;
   text-align: right;
   user-select: none;
@@ -1765,13 +1873,13 @@ td.center { text-align: center; }
 /* 구성 도식 무채색 계단 — «칸 수만큼» 색이 있어야 한다.
    ★ 왜 7단계인가 (하이브 실측): 옛 5단계에서는 6개 부문이 tone-0과 같은 색으로
       되돌아가 첫 칸과 여섯째 칸이 구별되지 않았다. PDF는 아예 색이 모자랐다. */
-.result-page .tone-0 { background: #0a0a0a; }
-.result-page .tone-1 { background: #3d3d3d; }
-.result-page .tone-2 { background: #6b6b6b; }
-.result-page .tone-3 { background: #949494; }
-.result-page .tone-4 { background: #b8b8b8; }
-.result-page .tone-5 { background: #dcdcdc; }
-.result-page .tone-6 { border: 1px solid #737373; background: #fff; }
+.result-page .tone-0 { background: var(--neutral-1000); }
+.result-page .tone-1 { background: var(--neutral-800); }
+.result-page .tone-2 { background: var(--neutral-600); }
+.result-page .tone-3 { background: var(--neutral-400); }
+.result-page .tone-4 { background: var(--neutral-250); }
+.result-page .tone-5 { background: var(--neutral-150); }
+.result-page .tone-6 { border: 1px solid var(--neutral-500); background: var(--white); }
 .result-page .chart-legend {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1840,7 +1948,7 @@ td.center { text-align: center; }
 }
 /* 방향은 «좋고 나쁨»이 아니라 수치의 방향이다. 그래서 색을 쓰되
    빨강은 «0선 아래로 내려간 것»에만 준다(추이 막대와 같은 규칙). */
-.result-page .period-summary li.dir-down .ps-change { color: #b00009; }
+.result-page .period-summary li.dir-down .ps-change { color: var(--risk-text); }
 .result-page .ps-basis {
   color: var(--ink-3);
   font-size: 11px;
@@ -1881,7 +1989,7 @@ td.center { text-align: center; }
   justify-content: center;
   border-bottom: 1px solid var(--line);
 }
-.result-page .trend-bar { display: block; width: min(34px, 64%); min-height: 2px; background: #0a0a0a; }
+.result-page .trend-bar { display: block; width: min(34px, 64%); min-height: 2px; background: var(--ink); }
 /* ★ 0선 «아래» 값 — 한 계열에 흑자와 적자가 섞였을 때.
    막대를 위에서 아래로 내려 긋고 빨강으로 칠해, 부호가 바뀐 해를
    한눈에 알아보게 한다. 예전에는 이런 표를 아예 안 그렸다(하이브 실측). */
@@ -1890,15 +1998,15 @@ td.center { text-align: center; }
   border-top: 1px solid var(--line);
   border-bottom: 0;
 }
-.result-page .trend-point.below .trend-bar { background: #e7000b; }
-.result-page .trend-point.below .trend-value { color: #b00009; }
+.result-page .trend-point.below .trend-bar { background: var(--risk); }
+.result-page .trend-point.below .trend-value { color: var(--risk-text); }
 .result-page .trend-panel.risk .trend-bar-wrap {
   align-items: flex-start;
   border-top: 1px solid var(--line);
   border-bottom: 0;
 }
-.result-page .trend-panel.risk .trend-bar { background: #e7000b; }
-.result-page .trend-panel.risk .trend-value { color: #b00009; }
+.result-page .trend-panel.risk .trend-bar { background: var(--risk); }
+.result-page .trend-panel.risk .trend-value { color: var(--risk-text); }
 .result-page .trend-label { padding-top: 4px; color: var(--ink-3); font-size: 11px; }
 .result-page .flow-rows { display: grid; gap: 10px; }
 .result-page .flow-row {
@@ -1932,6 +2040,51 @@ td.center { text-align: center; }
 }
 .result-page .flow-row small { margin-bottom: 4px; color: var(--ink-3); font-size: 10.5px; }
 .result-page .flow-row span { color: var(--ink); font-size: 12.5px; line-height: 1.45; }
+.result-page .flow-row[data-flow-style="chevron"] {
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 4px;
+}
+.result-page .flow-row[data-flow-style="chevron"] li {
+  min-height: 82px;
+  padding: 4px 15px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.result-page .flow-row[data-flow-style="chevron"] li::before {
+  position: absolute;
+  z-index: 0;
+  inset: 22px 0 0;
+  background: var(--chart-1);
+  clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 50%, calc(100% - 16px) 100%, 0 100%, 16px 50%);
+  content: "";
+}
+.result-page .flow-row[data-flow-style="chevron"] li:first-child::before {
+  clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 50%, calc(100% - 16px) 100%, 0 100%);
+}
+.result-page .flow-row[data-flow-style="chevron"] li:nth-child(2)::before { background: var(--chart-2); }
+.result-page .flow-row[data-flow-style="chevron"] li:nth-child(3)::before { background: var(--chart-3); }
+.result-page .flow-row[data-flow-style="chevron"] li:nth-child(4)::before { background: var(--chart-4); }
+.result-page .flow-row[data-flow-style="chevron"] li:nth-child(5)::before { background: var(--chart-5); }
+.result-page .flow-row[data-flow-style="chevron"] li::after { content: none; }
+.result-page .flow-row[data-flow-style="chevron"] small,
+.result-page .flow-row[data-flow-style="chevron"] span { position: relative; z-index: 1; }
+.result-page .flow-row[data-flow-style="chevron"] small {
+  align-self: stretch;
+  min-height: 18px;
+  margin: 0 0 4px;
+  color: var(--grey-4);
+  font-size: 8px;
+  line-height: 1.25;
+}
+.result-page .flow-row[data-flow-style="chevron"] span {
+  display: flex;
+  min-height: 50px;
+  align-items: center;
+  justify-content: center;
+  color: var(--white);
+  font-size: 11px;
+}
 /* «카드」로 판정된 흐름표(kind=card) — 화살표 없이 라벨:값 세로 목록으로
    낸다. 카드 한 장 자체는 .section-content-card를 그대로 재사용한다
    (같은 모양을 두 벌로 관리하면 한쪽만 고쳐 어긋나는 사고가 난다).
@@ -1945,15 +2098,16 @@ td.center { text-align: center; }
 .result-page .numtable .scroll,
 .result-page .report-scroll {
   overflow-x: auto;
-  border: 1px solid var(--line);
-  border-radius: 12px;
+  border: 0;
+  border-radius: 0;
   background: var(--surface);
   -webkit-overflow-scrolling: touch;
 }
 .result-page table {
   margin: 0;
-  border-collapse: separate;
-  border-spacing: 0;
+  border-top: 1px solid var(--ink);
+  border-bottom: 1px solid var(--ink);
+  border-collapse: collapse;
   color: var(--ink-2);
   font-size: 13.5px;
 }
@@ -1964,18 +2118,20 @@ td.center { text-align: center; }
   word-break: keep-all;
   overflow-wrap: break-word;
   border: 0;
-  border-bottom: 1px solid var(--line);
+  border-bottom: .5px solid var(--grey-2);
   text-align: left;
 }
 .result-page th + th,
-.result-page td + td { border-left: 1px solid var(--line); }
+.result-page td + td { border-left: .5px solid var(--grey-2); }
 .result-page tbody tr:last-child td { border-bottom: 0; }
 .result-page th {
-  background: var(--paper-2);
-  color: var(--ink);
+  background: var(--ink);
+  color: var(--white);
   font-weight: 600;
   white-space: nowrap;
 }
+.result-page tbody td:first-child { background: var(--grey-1); }
+.result-page td.num { text-align: right; }
 .result-page .numtable table { margin: 0; }
 .result-page .state-ok,
 .result-page .state-none,
@@ -2023,6 +2179,14 @@ td.center { text-align: center; }
   outline-offset: 3px;
 }
 
+@media (max-width: 720px) {
+  .result-page .report-masthead {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+  .result-page .report-masthead::after { text-align: left; }
+}
+
 @media (max-width: 700px) {
   .result-page .topbar {
     min-height: 0;
@@ -2045,19 +2209,13 @@ td.center { text-align: center; }
   .result-page .report-cover {
     min-height: 320px;
     margin-bottom: 34px;
-    padding: 64px 0 28px;
+    padding: 48px 22px 28px;
   }
   /* 좁은 화면에서는 칸을 세로로 쌓는다 — 가로로 두면 큰 숫자가 잘린다. */
   .result-page .cover-metrics { margin-top: 32px; }
   .result-page .cover-metrics-list { grid-auto-flow: row; }
-  .result-page .cover-metric + .cover-metric {
-    border-top: 1px solid var(--line);
-    border-left: 0;
-  }
   .result-page .report-summary { padding-top: 42px; }
-  .result-page .report-summary li {
-    grid-template-columns: 46px 70px minmax(0, 1fr) 48px;
-  }
+  .result-page .report-summary ol { grid-template-columns: 1fr; }
   .result-page .section-content-grid { grid-template-columns: 1fr; }
   .result-page h1 { font-size: clamp(30px, 10vw, 38px); }
   .result-page .lede { font-size: 15px; }
@@ -2084,17 +2242,6 @@ td.center { text-align: center; }
   .result-page .report-paper { padding: 24px 16px; }
   .result-page .report-cache { display: block; }
   .result-page .grade { padding: 12px 13px; }
-  .result-page .report-summary li {
-    grid-template-columns: 42px minmax(0, 1fr) 46px;
-  }
-  .result-page .summary-topic {
-    grid-column: 2 / 3;
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
-  }
-  .result-page .summary-text { grid-column: 2 / 3; }
-  .result-page .summary-number { grid-row: 1 / 3; }
-  .result-page .summary-section { grid-column: 3; grid-row: 1 / 3; }
   .result-page .section-content-card dl > div {
     grid-template-columns: 1fr;
     gap: 2px;
@@ -2103,8 +2250,8 @@ td.center { text-align: center; }
 
 @media print {
   .result-page {
-    background: #fff;
-    color: #000;
+    background: var(--white);
+    color: var(--black);
     font-size: 10.5pt;
     line-height: 1.55;
     -webkit-print-color-adjust: exact;
@@ -2130,8 +2277,26 @@ td.center { text-align: center; }
     margin: 0;
     padding: 54mm 0 0;
     border-bottom: 0;
+    border-radius: 0;
+    background: var(--white);
+    color: var(--ink);
     break-after: page;
   }
+  .result-page .report-cover h1 { color: var(--ink); }
+  .result-page .report-cover .lede,
+  .result-page .report-cover .muted { color: var(--grey-6); }
+  .result-page .report-summary h2 {
+    border-bottom-color: var(--ink);
+    color: var(--ink);
+  }
+  .result-page .cover-metrics-title { color: var(--grey-4); }
+  .result-page .report-masthead {
+    border-top: 1px solid var(--ink);
+    border-bottom: 1px solid var(--ink);
+    background: var(--white);
+    color: var(--ink);
+  }
+  .result-page .report-masthead::after { color: var(--grey-6); }
   /* 브라우저 인쇄에서도 띠는 제목과 핵심 요약 «사이»에 남는다.
      PDF 정본의 138~166mm 고정은 export_pdf가 좌표로 지킨다 — 브라우저 인쇄는
      글 길이에 따라 흐르므로 mm를 여기서 다시 주장하지 않는다. */
@@ -2166,8 +2331,8 @@ td.center { text-align: center; }
   .result-page .numtable table,
   .result-page .numtable table.texts,
   .result-page .report-scroll table { min-width: 0; }
-  .result-page .ref { color: #000; border-bottom: 0; }
-  .result-page .source-link { color: #000; }
+  .result-page .ref { color: var(--black); border-bottom: 0; }
+  .result-page .source-link { color: var(--black); }
   .result-page thead { display: table-header-group; }
 }
 
@@ -2176,25 +2341,25 @@ td.center { text-align: center; }
 }
 
 /* PDF 전 페이지 미리보기 화면 — 공개 보고서와 구분되는 단색 운영 화면 */
-.review-page { background: #f5f5f5; color: #171717; }
+.review-page { background: var(--grey-1); color: var(--neutral-900); }
 .review-page .review-wrap { max-width: 1100px; padding: 48px 24px 96px; }
 .pdf-review {
   padding: clamp(24px, 4vw, 48px);
-  border: 1px solid #e5e5e5;
+  border: 1px solid var(--neutral-100);
   border-radius: 24px;
-  background: #fff;
+  background: var(--white);
 }
 .pdf-review h1 { margin: 4px 0 12px; font-size: clamp(28px, 5vw, 42px); }
-.review-kicker { margin: 0; color: #5f5f5f; font-size: 13px; font-weight: 700; }
+.review-kicker { margin: 0; color: var(--neutral-650); font-size: 13px; font-weight: 700; }
 .review-hash {
   display: grid;
   grid-template-columns: 130px minmax(0, 1fr);
   margin: 24px 0 32px;
-  border-top: 1px solid #e5e5e5;
+  border-top: 1px solid var(--neutral-100);
 }
 .review-hash dt,
-.review-hash dd { margin: 0; padding: 10px 0; border-bottom: 1px solid #e5e5e5; }
-.review-hash dt { color: #5f5f5f; }
+.review-hash dd { margin: 0; padding: 10px 0; border-bottom: 1px solid var(--neutral-100); }
+.review-hash dt { color: var(--neutral-650); }
 .review-hash code,
 .review-pages code { overflow-wrap: anywhere; font-size: 12px; }
 .review-pages { display: grid; gap: 32px; }
@@ -2204,24 +2369,24 @@ td.center { text-align: center; }
   width: min(100%, 820px);
   height: auto;
   margin: 0 auto;
-  border: 1px solid #d5d5d5;
-  background: #fff;
+  border: 1px solid var(--neutral-160);
+  background: var(--white);
   box-shadow: 0 10px 30px -24px rgba(0, 0, 0, .45);
 }
-.review-pages figcaption { margin-top: 8px; color: #5f5f5f; text-align: center; }
-.review-status { margin: 28px 0; padding: 20px; border: 1px solid #d5d5d5; background: #fafafa; }
+.review-pages figcaption { margin-top: 8px; color: var(--neutral-650); text-align: center; }
+.review-status { margin: 28px 0; padding: 20px; border: 1px solid var(--neutral-160); background: var(--neutral-50); }
 .review-status h2 { margin: 0 0 14px; font-size: 18px; }
 .review-status ul { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
 .review-status li { display: grid; grid-template-columns: 80px minmax(0, 1fr); gap: 12px; }
-.review-status span { color: #5f5f5f; overflow-wrap: anywhere; }
-.review-separation-note { margin: 36px 0 0; padding: 14px 16px; border-left: 4px solid #171717; background: #f5f5f5; }
-.review-approval { display: grid; gap: 12px; margin-top: 20px; padding: 24px; border: 1px solid #d5d5d5; }
+.review-status span { color: var(--neutral-650); overflow-wrap: anywhere; }
+.review-separation-note { margin: 36px 0 0; padding: 14px 16px; border-left: 4px solid var(--neutral-900); background: var(--grey-1); }
+.review-approval { display: grid; gap: 12px; margin-top: 20px; padding: 24px; border: 1px solid var(--neutral-160); }
 .review-approval h2 { margin: 0; font-size: 20px; }
 .review-approval label { display: flex; gap: 10px; align-items: flex-start; }
 .review-approval .btn { margin-top: 8px; }
-.review-fact-list { display: grid; max-height: 320px; gap: 8px; padding: 12px; overflow-y: auto; border: 1px solid #e5e5e5; }
+.review-fact-list { display: grid; max-height: 320px; gap: 8px; padding: 12px; overflow-y: auto; border: 1px solid var(--neutral-100); }
 .review-fact-list code { overflow-wrap: anywhere; }
-.review-complete { margin-top: 32px; padding: 14px 16px; border: 1px solid #171717; }
+.review-complete { margin-top: 32px; padding: 14px 16px; border: 1px solid var(--neutral-900); }
 
 @media (max-width: 640px) {
   .review-page .review-wrap { padding: 24px 12px 64px; }
@@ -2237,8 +2402,8 @@ td.center { text-align: center; }
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #fff;
-  color: #5e5e5e;
+  background: var(--white);
+  color: var(--neutral-attribution);
   font-family: Roboto, sans-serif;
   font-size: 14px;
   font-style: normal;
