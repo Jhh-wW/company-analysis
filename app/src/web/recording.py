@@ -71,6 +71,8 @@ def record_run(
     *,
     run_id: str = "",
     end_step: str = "",
+    corp_code: str = "",
+    confirmed_company: str = "",
     expected_state: str | None = None,
 ) -> bool:
     """요청 하나를 이력 1행으로 남긴다.
@@ -144,6 +146,9 @@ def record_run(
                 final_gate_diagnostic_store.record_once(
                     conn,
                     run_id=record.run_id,
+                    corp_code=corp_code,
+                    confirmed_company=confirmed_company,
+                    end_step=record.end_step,
                     reason_code=result.final_gate_reason,
                     recorded_at=record.at,
                 )

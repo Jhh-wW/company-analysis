@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import json
 import re
 from pathlib import Path
 
@@ -78,7 +79,11 @@ def test_우아한형제들_XML은_연결_2개년과_근거_지문을_보존한�
     assert result.evidence.text_hash == hashlib.sha256(
         result.evidence.excerpt.encode("utf-8")
     ).hexdigest()
-    assert result.evidence.excerpt == table.evidence_rows[0]
+    row_evidence = json.loads(table.evidence_rows[0])
+    assert row_evidence["source"] == "audit_report_statement"
+    assert row_evidence["source_excerpt"] == result.evidence.excerpt
+    assert row_evidence["source_sha256"] == result.evidence.text_hash
+    assert row_evidence["row"] == dict(zip(table.headers, table.raw_rows[0]))
 
 
 def test_하이브_천원_원문은_API_대조값과_같고_최근_두_해만_낸다() -> None:

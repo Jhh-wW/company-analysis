@@ -87,6 +87,7 @@ from src.shared.report_quality.source_identity import (
 from src.shared.revenue_table_provenance import (
     is_revenue_total_name,
     revenue_row_evidence_matches,
+    revenue_table_section_id_from_caption,
     revenue_table_evidence_identity,
 )
 
@@ -344,6 +345,48 @@ def _generic_evidence_matches_row(
             if number != _decimal(evidence_value):
                 return False
         elif normalized != " ".join(str(evidence_value).split()):
+            return False
+    return True
+
+
+_AUDIT_REPORT_STATEMENT_SOURCE = "audit_report_statement"
+
+
+def _audit_report_statement_matches_table(
+    table: PerformanceTable,
+    evidence_rows: Sequence[str],
+    source: _FragmentBinding,
+) -> bool:
+    """감사보고서 fallback 표의 원수치와 실제 원문 span 지문을 함께 대조한다."""
+
+    if len(evidence_rows) != len(table.rows) or not table.raw_rows:
+        return False
+    for row, raw_row, evidence in zip(table.rows, table.raw_rows, evidence_rows):
+        try:
+            payload = json.loads(evidence)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return False
+        if not isinstance(payload, Mapping):
+            return False
+        excerpt = payload.get("source_excerpt")
+        digest = str(payload.get("source_sha256") or "")
+        if (
+            payload.get("source") != _AUDIT_REPORT_STATEMENT_SOURCE
+            or not isinstance(excerpt, str)
+            or not excerpt
+            or _sha256_text(excerpt) != digest
+            or digest != source.exact_evidence_hash
+            or not str(payload.get("source_location") or "").strip()
+        ):
+            return False
+        if not _generic_evidence_matches_row(
+            table.headers,
+            row,
+            raw_row,
+            evidence,
+            scale_divisor=table.scale_divisor,
+            scale_places=table.scale_places,
+        ):
             return False
     return True
 
@@ -671,7 +714,16 @@ def _validated_program_bindings(
         and bool(table.raw_rows)
         and dart_payload_matches_table(table, unique_evidence[0])
     )
-    if table.raw_rows and table.entity_scope and not is_dart_table:
+    is_audit_report_table = _audit_report_statement_matches_table(
+        table,
+        evidence_rows,
+        source,
+    )
+    if (
+        table.raw_rows
+        and table.entity_scope
+        and not (is_dart_table or is_audit_report_table)
+    ):
         raise PublicManifestError("프로그램 재무 표가 canonical numeric 검증에 실패했습니다")
     _validate_composition_total(table)
 
@@ -725,13 +777,17 @@ def _validated_program_bindings(
                     and table_identity == strict_table_identity
                 )
             else:
-                evidence_matches = is_dart_table or _generic_evidence_matches_row(
-                    table.headers,
-                    row,
-                    raw_row,
-                    evidence,
-                    scale_divisor=table.scale_divisor,
-                    scale_places=table.scale_places,
+                evidence_matches = (
+                    is_dart_table
+                    or is_audit_report_table
+                    or _generic_evidence_matches_row(
+                        table.headers,
+                        row,
+                        raw_row,
+                        evidence,
+                        scale_divisor=table.scale_divisor,
+                        scale_places=table.scale_places,
+                    )
                 )
             if not evidence_matches:
                 raise PublicManifestError(
@@ -1489,11 +1545,13 @@ def build_public_structure_seal(
             and performance_table.rows
         ):
             program_slots.append((performance_table, table_presentation or "table"))
-        elif section.section_id == "business_model":
+        else:
             program_slots.extend(
                 (table, _COMPOSITION_PRESENTATION)
                 for table in composition_tables
                 if table.rows
+                and revenue_table_section_id_from_caption(table.caption)
+                == section.section_id
             )
         for table, presentation in program_slots:
             row_bindings = _validated_program_bindings(

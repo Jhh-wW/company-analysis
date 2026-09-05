@@ -62,13 +62,16 @@ from src.features.homepage.official_identity import (
 )
 from src.shared.official_ir import (
     IR_ATTACHMENT_URL_FIELD,
+    IR_COVER_METADATA_MAX_PAGES,
     IR_DART_WWW_REDIRECT_FIELD,
     IR_DART_WWW_REDIRECT_FROM_FIELD,
     IR_DART_WWW_REDIRECT_TO_FIELD,
     IR_METADATA_VERIFICATION_FIELD,
+    IR_METADATA_VERIFICATION_VALUE_COVER,
     IR_REPORTING_PERIOD_FIELD,
     dart_homepage_exact_host,
     dart_www_redirect_is_valid,
+    extract_official_ir_cover_metadata,
     safe_https_attachment_url,
 )
 from src.shared.report_evidence.constants import SOURCE_KIND_ROBOTS_TXT
@@ -1939,6 +1942,28 @@ def _build_ir_document(
     document_id = _wide_document_id(canonical, origin)
     title = str(first.get("문서명") or "").strip() or origin.host
     published_on = str(first.get("문서일") or "").strip()
+    reporting_period = str(first.get(IR_REPORTING_PERIOD_FIELD) or "").strip()
+    ir_metadata_verification = str(
+        first.get(IR_METADATA_VERIFICATION_FIELD) or ""
+    ).strip()
+    if not (published_on and reporting_period):
+        cover_pages = tuple(
+            " ".join(
+                str(fragment.get("원문") or "").strip()
+                for fragment in fragments
+                if str(fragment.get("원문위치") or "").startswith(
+                    f"PDF p.{page_number} "
+                )
+            ).strip()
+            for page_number in range(1, IR_COVER_METADATA_MAX_PAGES + 1)
+        )
+        cover_published_on, cover_reporting_period = (
+            extract_official_ir_cover_metadata(cover_pages)
+        )
+        if cover_published_on and cover_reporting_period:
+            published_on = cover_published_on
+            reporting_period = cover_reporting_period
+            ir_metadata_verification = IR_METADATA_VERIFICATION_VALUE_COVER
     (
         attestation_source_id,
         attestation_evidence,
@@ -1980,11 +2005,9 @@ def _build_ir_document(
         ),
         domain_attestation_source_id=attestation_source_id,
         domain_attestation_evidence=attestation_evidence,
-        reporting_period=str(first.get(IR_REPORTING_PERIOD_FIELD) or "").strip(),
+        reporting_period=reporting_period,
         attachment_url=attachment_url,
-        ir_metadata_verification=str(
-            first.get(IR_METADATA_VERIFICATION_FIELD) or ""
-        ).strip(),
+        ir_metadata_verification=ir_metadata_verification,
         domain_redirect_verification=(
             str(first.get(IR_DART_WWW_REDIRECT_FIELD) or "").strip()
             or redirect_verification
@@ -1998,9 +2021,9 @@ def _build_ir_document(
             or redirect_to_host
         ),
     )
-    # 같은 공식 host의 PDF여도 anchor에서 발행일·보고기간을 exact로 확인하지
-    # 못했다면 Writer로 보내지 않는다. 수집 문서 자체는 OPTIONAL provenance로
-    # 남겨 자료 부족과 내부 배선 오류를 구분할 수 있게 한다.
+    # 같은 공식 host의 PDF여도 anchor나 앞쪽 표지에서 발행일·보고기간을 exact로
+    # 확인하지 못했다면 Writer로 보내지 않는다. 수집 문서 자체는 OPTIONAL
+    # provenance로 남겨 자료 부족과 내부 배선 오류를 구분할 수 있게 한다.
     if (
         not is_external_attachment
         and formal_document_writer_ineligibility_reason(document)

@@ -58,7 +58,10 @@ from src.shared.report_evidence.policy import (
 )
 from src.shared.report_evidence.runtime_port import OfficialEvidenceCollectionResult
 from src.shared.report_source_identity import ReportSourceIdentity
-from src.shared.revenue_table_provenance import revenue_table_source_excerpt
+from src.shared.revenue_table_provenance import (
+    revenue_table_section_id_from_caption,
+    revenue_table_source_excerpt,
+)
 
 
 _COMPANY_ID = "00123456"
@@ -354,7 +357,7 @@ def test_생산_매출원문은_보존하되_비교생산물없는_직접_FULL�
     assert generation_sha256
 
     # ④ legacy 종류 추측과 typed 장 메타데이터를 한 경계에서 검증해 정책 순서
-    # 아홉 packet으로 고정한다. 두 매출표 cite는 모두 2장 packet 안에 있어야 한다.
+    # 아홉 packet으로 고정한다. 각 매출표 cite는 축별 소유 장 packet에 있어야 한다.
     filing_meta = filing_meta_from_raw(_FILING)
     packets = real._full_section_evidence_packets(
         corp_id=_COMPANY_ID,
@@ -363,15 +366,14 @@ def test_생산_매출원문은_보존하되_비교생산물없는_직접_FULL�
         filing_meta=filing_meta,
     )
     assert tuple(packet.section_id for packet in packets.packets) == SECTION_IDS
-    business_packet = next(
-        packet for packet in packets.packets if packet.section_id == "business_model"
-    )
-    revenue_ids = {
-        str(number) for number in revenue_fragments
-    }
-    assert revenue_ids <= {
-        fragment.fragment_id for fragment in business_packet.fragments
-    }
+    for fragment_number, table in zip(revenue_fragments, bound_tables):
+        section_id = revenue_table_section_id_from_caption(table["caption"])
+        owner_packet = next(
+            packet for packet in packets.packets if packet.section_id == section_id
+        )
+        assert str(fragment_number) in {
+            fragment.fragment_id for fragment in owner_packet.fragments
+        }
 
     # ⑤ 이 낮은 수준 직접 호출은 실제 양사 비교 생산기를 거치지 않았다.
     # 시험이 comparison facts·evidence를 손으로 보충해 성공을 가장하지 않고,

@@ -53,9 +53,35 @@ FINAL_GATE_REASON_EVIDENCE_CLASSIFICATION_UNDETERMINED: Final[str] = (
     "evidence_classification_undetermined"
 )
 FINAL_GATE_DIAGNOSTIC_TABLE: Final[str] = "pipeline_final_gate_diagnostics"
-FINAL_GATE_DIAGNOSTIC_SCHEMA_VERSION: Final[int] = 1
+FINAL_GATE_DIAGNOSTIC_LEGACY_SCHEMA_VERSION: Final[int] = 1
+FINAL_GATE_DIAGNOSTIC_SCHEMA_VERSION: Final[int] = 2
+FINAL_GATE_DIAGNOSTIC_SUPPORTED_SCHEMA_VERSIONS: Final[frozenset[int]] = frozenset(
+    {
+        FINAL_GATE_DIAGNOSTIC_LEGACY_SCHEMA_VERSION,
+        FINAL_GATE_DIAGNOSTIC_SCHEMA_VERSION,
+    }
+)
+FINAL_GATE_DIAGNOSTIC_CORP_CODE_LENGTH: Final[int] = 8
+FINAL_GATE_DIAGNOSTIC_MAX_COMPANY_LENGTH: Final[int] = 200
+FINAL_GATE_DIAGNOSTIC_MAX_END_STEP_LENGTH: Final[int] = 64
+FINAL_GATE_DIAGNOSTIC_LEGACY_COLUMNS: Final[frozenset[str]] = frozenset(
+    {
+        "run_id",
+        "schema_version",
+        "reason_code",
+        "recorded_at",
+    }
+)
 FINAL_GATE_DIAGNOSTIC_COLUMNS: Final[frozenset[str]] = frozenset(
-    {"run_id", "schema_version", "reason_code", "recorded_at"}
+    {
+        "run_id",
+        "schema_version",
+        "corp_code",
+        "confirmed_company",
+        "end_step",
+        "reason_code",
+        "recorded_at",
+    }
 )
 SAFE_FINAL_GATE_REASONS: Final[frozenset[str]] = frozenset(
     {
