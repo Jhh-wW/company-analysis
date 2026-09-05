@@ -61,6 +61,7 @@ from src.core.constants import (
 )
 from src.core.pricing import detailed_usage_cost_krw
 from src.core.citations import citation_number
+from src.features.audit_financials.logic import parse_audit_financials
 from src.features.grading.constants import ACCOUNTING_POLICY_REASON
 from src.features.budget import provider_budget
 from src.features.company_performance.logic import build_three_year_table
@@ -208,6 +209,7 @@ from src.features.pipeline.canonical_report import (
     combine_validated_picks,
     finalize_report,
     historical_performance_bases_are_complete,
+    historical_performance_required_year_count,
     sections_from_picks as canonical_sections_from_picks,
     supplement_missing_minimum_claims_once,
     write_and_verify_sections,
@@ -250,6 +252,13 @@ from src.shared.span_selection_diagnostics import (
 )
 from src.features.storage import cache as cache_store
 from src.features.storage import db as storage_db
+
+
+_AUDIT_FINANCIALS_FRAGMENT_KIND = "감사보고서 재무"
+_AUDIT_FINANCIALS_SUCCESS = "성공"
+_AUDIT_FINANCIALS_DOCUMENT_MISSING = "접수번호 미확인"
+_AUDIT_FINANCIALS_EVIDENCE_MISMATCH = "원문지문 불일치"
+_AUDIT_FINANCIALS_INVALID_TABLE = "표 형식 불일치"
 
 logger = logging.getLogger(__name__)
 
@@ -1639,6 +1648,129 @@ def _first_fragment_cite(
     return ""
 
 
+def _latest_audit_statement_filing(
+    rows: Iterable[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    """일반 감사보고서를 우선하고, 없을 때만 연결감사보고서를 고른다."""
+
+    candidates = [dict(row) for row in rows if isinstance(row, dict)]
+
+    def select(*, consolidated: bool) -> Optional[dict[str, Any]]:
+        matched = []
+        for row in candidates:
+            report_name = str(row.get("report_nm") or "")
+            receipt_number = str(row.get("rcept_no") or "").strip()
+            is_consolidated = "연결감사보고서" in report_name
+            if (
+                "감사보고서" not in report_name
+                or is_consolidated != consolidated
+                or _RCEPT_NO_RE.fullmatch(receipt_number) is None
+            ):
+                continue
+            matched.append(row)
+        if not matched:
+            return None
+        main = [
+            row
+            for row in matched
+            if "첨부정정" not in str(row.get("report_nm") or "")
+        ]
+        return dict(max(main or matched, key=lambda row: str(row.get("rcept_no") or "")))
+
+    return select(consolidated=False) or select(consolidated=True)
+
+
+def _build_performance_table_with_audit_fallback(
+    *,
+    frags: dict[int, dict[str, Any]],
+    financials: Any,
+    filing: Optional[dict[str, Any]],
+    filing_text: str,
+    steps: list[dict[str, Any]],
+) -> tuple[ReportTable | None, bool]:
+    """API 표를 우선하고, 만들 수 없을 때만 감사보고서 표를 결속한다."""
+
+    financial_cite = _first_fragment_cite(
+        frags, kind="재무", text_prefix="주요계정(DART API):"
+    )
+    api_table = (
+        build_three_year_table(financials, cite=financial_cite)
+        if financial_cite
+        else None
+    )
+    if api_table is not None:
+        return api_table, False
+
+    filing_raw = filing or {}
+    receipt_number = str(filing_raw.get("rcept_no") or "").strip()
+    fragment_number = max(frags, default=0) + 1
+    cite = f"조각 {fragment_number}·{_AUDIT_FINANCIALS_FRAGMENT_KIND}"
+    try:
+        parsed = parse_audit_financials(str(filing_text or ""), cite=cite)
+    except Exception as exc:  # noqa: BLE001 - fallback 실패는 보고서 전체를 멈추지 않는다
+        diagnostic = f"파서예외:{type(exc).__name__}"
+        logger.warning("감사보고서 실적표 대체 파서가 실패했습니다: %s", diagnostic)
+        steps.append(
+            {
+                "step": "7_실적표_감사보고서_대체",
+                "접수번호": receipt_number,
+                "연도": [],
+                "진단": diagnostic,
+            }
+        )
+        return None, False
+
+    table = parsed.table
+    evidence = parsed.evidence
+    years = [str(row[0]) for row in table.rows if row] if table is not None else []
+    diagnostic = parsed.diagnostic_reason
+    if table is not None and _RCEPT_NO_RE.fullmatch(receipt_number) is None:
+        diagnostic = _AUDIT_FINANCIALS_DOCUMENT_MISSING
+        table = None
+    if table is not None and (
+        evidence is None
+        or not evidence.excerpt
+        or evidence.excerpt not in str(filing_text or "")
+        or hashlib.sha256(evidence.excerpt.encode("utf-8")).hexdigest()
+        != evidence.text_hash
+    ):
+        diagnostic = _AUDIT_FINANCIALS_EVIDENCE_MISMATCH
+        table = None
+
+    report_table = (
+        ReportTable(**table.to_report_table_payload()) if table is not None else None
+    )
+    if report_table is not None and not report_table.is_valid:
+        diagnostic = _AUDIT_FINANCIALS_INVALID_TABLE
+        report_table = None
+    if report_table is not None and evidence is not None:
+        raw_document_date = str(filing_raw.get("rcept_dt") or "").strip()
+        document_date = (
+            f"{raw_document_date[:4]}-{raw_document_date[4:6]}-{raw_document_date[6:8]}"
+            if re.fullmatch(r"\d{8}", raw_document_date)
+            else ""
+        )
+        frags[fragment_number] = {
+            "종류": _AUDIT_FINANCIALS_FRAGMENT_KIND,
+            "원문": evidence.excerpt,
+            "문서ID": receipt_number,
+            "문서명": str(filing_raw.get("report_nm") or "").strip(),
+            "문서일": document_date,
+            "원문위치": evidence.location,
+        }
+        diagnostic = _AUDIT_FINANCIALS_SUCCESS
+
+    steps.append(
+        {
+            "step": "7_실적표_감사보고서_대체",
+            "접수번호": receipt_number,
+            "연도": years if report_table is not None else [],
+            "진단": diagnostic or _AUDIT_FINANCIALS_INVALID_TABLE,
+        }
+    )
+    return report_table, report_table is not None
+
+
 class RevenueTableEvidenceBindingError(ValueError):
     """매출 구성표와 그 표가 나온 공시 원문을 하나로 묶지 못했다."""
 
@@ -2479,6 +2611,35 @@ class RealPipeline:
             counter,
             business_date=business_date,
         )
+        if build_three_year_table(
+            financials,
+            cite="조각 1·재무",
+        ) is None:
+            audit_filing = _latest_audit_statement_filing(audit_rows)
+            if audit_filing is not None:
+                source_identity_key = str(
+                    getattr(engine, "SOURCE_IDENTITY_RCEPT_NOS_KEY", "") or ""
+                )
+                period_kind_key = str(
+                    getattr(engine, "SELECTED_REPORT_PERIOD_KIND_KEY", "") or ""
+                )
+                period_kind_annual = str(
+                    getattr(engine, "SELECTED_REPORT_PERIOD_KIND_ANNUAL", "") or ""
+                )
+                if source_identity_key:
+                    audit_filing[source_identity_key] = sorted(
+                        {
+                            str(row.get("rcept_no") or "").strip()
+                            for row in audit_rows
+                            if _RCEPT_NO_RE.fullmatch(
+                                str(row.get("rcept_no") or "").strip()
+                            )
+                            is not None
+                        }
+                    )
+                if period_kind_key and period_kind_annual:
+                    audit_filing[period_kind_key] = period_kind_annual
+                filing = audit_filing
         # FULL의 formal collector·비교 생산기·legacy 매출표가 같은
         # 접수번호 원문을 각자 다운로드하던 경로를 요청 단위 정본
         # artifact로 합친다. 엔진 내부 디스크 캐시에 숨지 않고,
@@ -3197,6 +3358,18 @@ class RealPipeline:
                     "전체조각수": len(frags),
                 }
             )
+        performance_table, _ = (
+            _build_performance_table_with_audit_fallback(
+                frags=frags,
+                financials=financials,
+                filing=filing,
+                filing_text=filing_text,
+                steps=steps,
+            )
+        )
+        required_performance_year_count = historical_performance_required_year_count(
+            performance_table
+        )
         sources = _sources_from(steps)
 
         # ── 7 사전 게이트 — 원문 자체가 없으면 생성 전에 멈춘다 ──
@@ -3248,6 +3421,7 @@ class RealPipeline:
                 generation_mode=generation_mode,
                 comparison_result=v2_comparison_result,
                 release_mode_override=requested_release_mode,
+                prepared_performance_table=performance_table,
             )
             return replace(
                 v2_result,
@@ -3424,14 +3598,6 @@ class RealPipeline:
         # 프로그램이 DART 원수치로 만든 완료 FY 행에는 내부 fact_id 대신
         # 일회성 선택 참조를 붙인다. 모델은 이 참조만 basis_sids로 고르고,
         # 조립기가 검증된 표 FactRecord의 실제 ID로 치환한다.
-        financial_cite = _first_fragment_cite(
-            frags, kind="재무", text_prefix="주요계정(DART API):"
-        )
-        performance_table = (
-            build_three_year_table(financials, cite=financial_cite)
-            if financial_cite
-            else None
-        )
         performance_bases = historical_performance_basis_options(
             [performance_table] if performance_table is not None else []
         )
@@ -3445,18 +3611,28 @@ class RealPipeline:
             )
             if str(value or "").strip()
         )
-        if not historical_performance_bases_are_complete(performance_bases):
+        required_performance_year_text = (
+            "2개" if required_performance_year_count == 2 else "3개"
+        )
+        if not historical_performance_bases_are_complete(
+            performance_bases,
+            required_year_count=required_performance_year_count,
+        ):
             steps.append(
                 {
                     "step": "8_사실선택_사전중단",
-                    "사유": "연속 3개 완료 사업연도 실적표 없음",
+                    "사유": (
+                        f"연속 {required_performance_year_text} 완료 사업연도 "
+                        "실적표 없음"
+                    ),
                     "AI호출": 0,
                 }
             )
             return RunResult(
                 outcome=Outcome.GATE_STOPPED,
                 message=(
-                    "연속 3개 완료 사업연도의 공식 실적표를 확보하지 못해 "
+                    f"연속 {required_performance_year_text} 완료 사업연도의 공식 "
+                    "실적표를 확보하지 못해 "
                     "기본 보고서를 안전하게 만들 수 없습니다. AI를 반복 호출해도 "
                     "고칠 수 없는 조건이라 비용을 쓰기 전에 멈췄습니다."
                     + _stop_reason_note(
@@ -3535,6 +3711,9 @@ class RealPipeline:
                 basic_report_selection_subset(
                     cumulative_kept,
                     historical_performance_bases=performance_bases,
+                    required_performance_year_count=(
+                        required_performance_year_count
+                    ),
                 )
                 if validated_selection_rounds
                 else []
@@ -3546,6 +3725,7 @@ class RealPipeline:
             if round_subset and basic_report_selection_is_complete(
                 cumulative_kept,
                 historical_performance_bases=performance_bases,
+                required_performance_year_count=required_performance_year_count,
             ):
                 # 전체 계약이 성립하면 추가 선택 비용을 쓰지 않는다. Writer와
                 # 이후 출고 게이트가 실제로 보는 항목도 같은 안전 부분집합이다.
@@ -4530,6 +4710,7 @@ def _run_v2_composer(
     generation_mode: engine_mode.EngineMode,
     comparison_result: Any = None,
     release_mode_override: Optional[ReleaseMode] = None,
+    prepared_performance_table: ReportTable | None = None,
 ) -> RunResult:
     """엔진 v2: composer 경로로 보고서를 만든다.
 
@@ -4705,14 +4886,16 @@ def _run_v2_composer(
             )
 
     # 실적표 — v1과 같은 생성부(재사용). 없으면 None으로 계속 간다 (차단 아님).
-    financial_cite = _first_fragment_cite(
-        frags, kind="재무", text_prefix="주요계정(DART API):"
-    )
-    report_table = (
-        build_three_year_table(financials, cite=financial_cite)
-        if financial_cite
-        else None
-    )
+    report_table = prepared_performance_table
+    if report_table is None:
+        financial_cite = _first_fragment_cite(
+            frags, kind="재무", text_prefix="주요계정(DART API):"
+        )
+        report_table = (
+            build_three_year_table(financials, cite=financial_cite)
+            if financial_cite
+            else None
+        )
     performance_table = (
         performance_table_from_report_table(report_table)
         if report_table is not None
