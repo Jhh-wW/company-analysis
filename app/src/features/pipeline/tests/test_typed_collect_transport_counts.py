@@ -135,8 +135,11 @@ def test_transport_종류별_정확히_1회(
     )
     assert typed_step.get("조각수"), "typed 수집이 조각을 하나도 못 냈다(전제 붕괴)"
 
-    # DART — 목록은 공시종류당 1회, 원문은 접수번호당 1회.
-    assert collections.Counter(engine.list_calls) == collections.Counter({"A": 1})
+    # DART — W8부터 사업보고서(A)와 감사보고서(F)를 항상 함께 조회하되,
+    # 목록은 공시종류당 1회, 원문은 접수번호당 1회다.
+    assert collections.Counter(engine.list_calls) == collections.Counter(
+        {"A": 1, "F": 1}
+    )
     assert engine.document_calls == [TYPED_RCEPT_NO]
 
     # robots.txt — 세 수집기가 합쳐 host당 1회.

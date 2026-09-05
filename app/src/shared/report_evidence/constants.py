@@ -10,10 +10,13 @@ EVIDENCE_CONTRACT_VERSION: Final[str] = "report-evidence-v1"
 
 # 여러 feature와 실서비스 adapter가 함께 쓰는 source_kind 정본. 생산자별
 # 문자열을 소비자가 접두어로 추측하지 않게 공식 수집 경계의 닫힌 어휘를
-# 전부 여기 둔다. analysis_engine은 app을 import할 수 없으므로 DART 네 값의
+# 전부 여기 둔다. analysis_engine은 app을 import할 수 없으므로 DART 다섯 값의
 # 사본을 가지며, 별도 완전성 시험이 두 목록의 일치를 강제한다.
 SOURCE_KIND_DART_BUSINESS_REPORT: Final[str] = "dart_business_report"
 SOURCE_KIND_DART_AUDIT_REPORT: Final[str] = "dart_audit_report"
+SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT: Final[str] = (
+    "dart_consolidated_audit_report"
+)
 SOURCE_KIND_DART_SEMIANNUAL_REPORT: Final[str] = "dart_semiannual_report"
 SOURCE_KIND_DART_QUARTERLY_REPORT: Final[str] = "dart_quarterly_report"
 SOURCE_KIND_OFFICIAL_WEB_PAGE: Final[str] = "official_web_page"
@@ -39,6 +42,7 @@ FORMAL_DOCUMENT_SOURCE_KINDS: Final[frozenset[str]] = frozenset(
     {
         SOURCE_KIND_DART_BUSINESS_REPORT,
         SOURCE_KIND_DART_AUDIT_REPORT,
+        SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT,
         SOURCE_KIND_DART_SEMIANNUAL_REPORT,
         SOURCE_KIND_DART_QUARTERLY_REPORT,
         *OFFICIAL_WEB_SOURCE_KINDS,
