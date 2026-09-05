@@ -349,6 +349,48 @@ def _generic_evidence_matches_row(
     return True
 
 
+_AUDIT_REPORT_STATEMENT_SOURCE = "audit_report_statement"
+
+
+def _audit_report_statement_matches_table(
+    table: PerformanceTable,
+    evidence_rows: Sequence[str],
+    source: _FragmentBinding,
+) -> bool:
+    """감사보고서 fallback 표의 원수치와 실제 원문 span 지문을 함께 대조한다."""
+
+    if len(evidence_rows) != len(table.rows) or not table.raw_rows:
+        return False
+    for row, raw_row, evidence in zip(table.rows, table.raw_rows, evidence_rows):
+        try:
+            payload = json.loads(evidence)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return False
+        if not isinstance(payload, Mapping):
+            return False
+        excerpt = payload.get("source_excerpt")
+        digest = str(payload.get("source_sha256") or "")
+        if (
+            payload.get("source") != _AUDIT_REPORT_STATEMENT_SOURCE
+            or not isinstance(excerpt, str)
+            or not excerpt
+            or _sha256_text(excerpt) != digest
+            or digest != source.exact_evidence_hash
+            or not str(payload.get("source_location") or "").strip()
+        ):
+            return False
+        if not _generic_evidence_matches_row(
+            table.headers,
+            row,
+            raw_row,
+            evidence,
+            scale_divisor=table.scale_divisor,
+            scale_places=table.scale_places,
+        ):
+            return False
+    return True
+
+
 def _normalized_header(value: object) -> str:
     return " ".join(str(value).split())
 
@@ -672,7 +714,16 @@ def _validated_program_bindings(
         and bool(table.raw_rows)
         and dart_payload_matches_table(table, unique_evidence[0])
     )
-    if table.raw_rows and table.entity_scope and not is_dart_table:
+    is_audit_report_table = _audit_report_statement_matches_table(
+        table,
+        evidence_rows,
+        source,
+    )
+    if (
+        table.raw_rows
+        and table.entity_scope
+        and not (is_dart_table or is_audit_report_table)
+    ):
         raise PublicManifestError("프로그램 재무 표가 canonical numeric 검증에 실패했습니다")
     _validate_composition_total(table)
 
@@ -726,13 +777,17 @@ def _validated_program_bindings(
                     and table_identity == strict_table_identity
                 )
             else:
-                evidence_matches = is_dart_table or _generic_evidence_matches_row(
-                    table.headers,
-                    row,
-                    raw_row,
-                    evidence,
-                    scale_divisor=table.scale_divisor,
-                    scale_places=table.scale_places,
+                evidence_matches = (
+                    is_dart_table
+                    or is_audit_report_table
+                    or _generic_evidence_matches_row(
+                        table.headers,
+                        row,
+                        raw_row,
+                        evidence,
+                        scale_divisor=table.scale_divisor,
+                        scale_places=table.scale_places,
+                    )
                 )
             if not evidence_matches:
                 raise PublicManifestError(

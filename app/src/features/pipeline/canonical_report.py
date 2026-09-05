@@ -9,6 +9,7 @@ AI는 원문 번호 선택과 가독성 편집에만 관여한다. 핵심 요약
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, fields as dataclass_fields, replace
@@ -65,6 +66,9 @@ from src.features.writer import verify as writer_verify
 
 
 _NUMBER_RE = re.compile(r"(?<![A-Za-z가-힣])[-+]?\d[\d,]*(?:\.\d+)?\s*(?:%|％|원|억|만|명|개|건|회|배|곳|개국|도시|석)?")
+_DEFAULT_PERFORMANCE_YEAR_COUNT = 3
+_AUDIT_PERFORMANCE_YEAR_COUNT = 2
+_AUDIT_REPORT_STATEMENT_SOURCE = "audit_report_statement"
 _CAUSAL_TERMS = ("때문", "기여", "영향", "개선", "전환", "견인", "덕분")
 _DIRECT_CAUSAL_RE = re.compile(
     r"(?P<cause>[^.!?]{2,120}?)(?P<connector>때문에|덕분에|(?:으)?로 인해|이에 따라|"
@@ -479,10 +483,41 @@ def combine_validated_picks(
     return majority_picks(safe_rounds, minimum=1)
 
 
+def historical_performance_required_year_count(table: Any) -> int:
+    """검증 가능한 감사보고서 표식에만 2개년 정책을 적용한다."""
+
+    rows = tuple(getattr(table, "rows", ()) or ())
+    evidence_rows = tuple(getattr(table, "evidence_rows", ()) or ())
+    if (
+        len(rows) != _AUDIT_PERFORMANCE_YEAR_COUNT
+        or len(evidence_rows) != len(rows)
+    ):
+        return _DEFAULT_PERFORMANCE_YEAR_COUNT
+    for evidence in evidence_rows:
+        try:
+            payload = json.loads(str(evidence))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return _DEFAULT_PERFORMANCE_YEAR_COUNT
+        if not isinstance(payload, dict):
+            return _DEFAULT_PERFORMANCE_YEAR_COUNT
+        excerpt = payload.get("source_excerpt")
+        digest = str(payload.get("source_sha256") or "")
+        if (
+            payload.get("source") != _AUDIT_REPORT_STATEMENT_SOURCE
+            or not isinstance(excerpt, str)
+            or not excerpt
+            or hashlib.sha256(excerpt.encode("utf-8")).hexdigest() != digest
+        ):
+            return _DEFAULT_PERFORMANCE_YEAR_COUNT
+    return _AUDIT_PERFORMANCE_YEAR_COUNT
+
+
 def historical_performance_bases_are_complete(
     historical_performance_bases: Iterable[str],
+    *,
+    required_year_count: int = _DEFAULT_PERFORMANCE_YEAR_COUNT,
 ) -> bool:
-    """완료 사업연도 실적 참조가 정확히 연속 3개인지 코드로 확인한다."""
+    """완료 실적 참조가 정책이 요구한 수만큼 정확히 연속인지 확인한다."""
 
     values = {
         str(value or "").strip()
@@ -495,9 +530,11 @@ def historical_performance_bases_are_complete(
         if (match := re.fullmatch(r"historical-performance:(20\d{2})", value))
     )
     return (
-        len(values) == 3
-        and len(years) == 3
-        and years == list(range(years[0], years[0] + 3))
+        required_year_count
+        in {_DEFAULT_PERFORMANCE_YEAR_COUNT, _AUDIT_PERFORMANCE_YEAR_COUNT}
+        and len(values) == required_year_count
+        and len(years) == required_year_count
+        and years == list(range(years[0], years[0] + required_year_count))
     )
 
 
@@ -505,11 +542,12 @@ def basic_report_selection_subset(
     picks: Iterable[CanonicalPick],
     *,
     historical_performance_bases: Iterable[str],
+    required_performance_year_count: int = _DEFAULT_PERFORMANCE_YEAR_COUNT,
 ) -> list[CanonicalPick]:
     """Writer에 실제 넘길 최소 안전·참조 완결 부분집합을 만든다.
 
     최소 성립 조건은 검증된 공식 정체성 사실, 수익 구조, 프로그램이 별도 표로
-    제공하는 연속 3개년 완료 실적이다. 제품→수익 구조, 고객·시장, 완료 실행+변화 해석,
+    제공하는 정책상 연속 완료 실적이다. 제품→수익 구조, 고객·시장, 완료 실행+변화 해석,
     현재 과제+대응, 미래 계획, 운영 구조, 문화는 검증된 완결 묶음이 있을 때만
     장별 공개 상한 안에서 보탠다. 구조 validator를 완화하지 않으며, 선택 항목이
     많은 기존 완전 보고서는 같은 원문 순서와 상한을 유지한다.
@@ -521,7 +559,10 @@ def basic_report_selection_subset(
         for value in historical_performance_bases
         if str(value or "").strip()
     }
-    if not items or not historical_performance_bases_are_complete(performance_bases):
+    if not items or not historical_performance_bases_are_complete(
+        performance_bases,
+        required_year_count=required_performance_year_count,
+    ):
         return []
 
     by_section: dict[str, list[tuple[int, CanonicalPick]]] = defaultdict(list)
@@ -746,6 +787,7 @@ def basic_report_selection_is_minimum_usable(
     picks: Iterable[CanonicalPick],
     *,
     historical_performance_bases: Iterable[str],
+    required_performance_year_count: int = _DEFAULT_PERFORMANCE_YEAR_COUNT,
 ) -> bool:
     """검증된 부분 보고서의 최소 안전 부분집합이 성립하는지 판정한다."""
 
@@ -753,6 +795,7 @@ def basic_report_selection_is_minimum_usable(
         basic_report_selection_subset(
             picks,
             historical_performance_bases=historical_performance_bases,
+            required_performance_year_count=required_performance_year_count,
         )
     )
 
@@ -761,6 +804,7 @@ def basic_report_selection_is_complete(
     picks: Iterable[CanonicalPick],
     *,
     historical_performance_bases: Iterable[str],
+    required_performance_year_count: int = _DEFAULT_PERFORMANCE_YEAR_COUNT,
 ) -> bool:
     """기존 FULL 기본 보고서의 핵심 장과 참조가 모두 완결됐는지 판정한다.
 
@@ -772,6 +816,7 @@ def basic_report_selection_is_complete(
     subset = basic_report_selection_subset(
         picks,
         historical_performance_bases=historical_performance_bases,
+        required_performance_year_count=required_performance_year_count,
     )
     if not subset:
         return False
