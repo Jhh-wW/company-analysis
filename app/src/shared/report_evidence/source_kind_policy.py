@@ -219,6 +219,11 @@ _NEWS_SUPPLEMENTARY_SLOT_IDS: Final[frozenset[str]] = frozenset(
         "portfolio:customer_fit",
         "portfolio:revenue_link",
         "portfolio:lifecycle_stage",
+        # 5·6장은 회사·대표에게 귀속된 인용문만 허용한다(news_intake 매핑이 강제).
+        "current_challenges:issue",
+        "current_challenges:response",
+        "future_strategy:stated_plan",
+        "future_strategy:plan_status",
         "past_changes:completed_execution",
         "past_changes:cumulative_change",
         "past_changes:change_context",

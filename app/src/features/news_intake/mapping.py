@@ -14,6 +14,9 @@ from src.features.news_intake.models import (
 )
 from src.features.news_intake.select import normalize_company_name
 from src.shared.report_evidence.policy import collector_slots_for
+from src.shared.report_evidence.source_kind_policy import (
+    supplementary_slots_for_source_kind,
+)
 from src.shared.report_generation.models import exact_text_sha256
 from src.shared.report_quality.source_identity import canonical_url
 
@@ -106,13 +109,28 @@ def _has_attributed_quote(sentence: str, company_names: tuple[str, ...]) -> bool
 
 
 def _supported_slots(section_ids: tuple[str, ...]) -> tuple[str, ...]:
+    """장의 수집기 칸 중 보조 종류(news)가 주장할 수 있는 칸만 남긴다.
+
+    보조 목록 밖 칸을 실으면 transport 가 packet 전체를 거절하므로, 여기서
+    걸러 「탈락」으로 만든다. 남는 칸이 없는 장은 호출부가 조각에서 뺀다.
+    """
+
+    allowed = supplementary_slots_for_source_kind(c.SOURCE_KIND_NEWS)
     return tuple(
         dict.fromkeys(
             slot_id
             for section_id in section_ids
             for slot_id in collector_slots_for(section_id)
+            if slot_id in allowed
         )
     )
+
+
+def _sections_with_slots(
+    section_ids: tuple[str, ...], slot_ids: tuple[str, ...]
+) -> tuple[str, ...]:
+    covered = {slot_id.split(":", 1)[0] for slot_id in slot_ids}
+    return tuple(section_id for section_id in section_ids if section_id in covered)
 
 
 def _allowed_sections(
@@ -190,6 +208,11 @@ def map_news_fragments(
         )
         if not section_ids:
             continue
+        supported_slots = _supported_slots(section_ids)
+        section_ids = _sections_with_slots(section_ids, supported_slots)
+        if not section_ids:
+            excluded[c.EXCLUDED_NO_SUPPLEMENTARY_SLOT] += 1
+            continue
         key = (sentence, section_ids)
         if key in seen:
             excluded[c.EXCLUDED_DUPLICATE_SENTENCE] += 1
@@ -205,7 +228,7 @@ def map_news_fragments(
                 text=sentence,
                 text_sha256=text_sha256,
                 section_ids=section_ids,
-                supported_claim_slots=_supported_slots(section_ids),
+                supported_claim_slots=supported_slots,
                 document_id=document_id,
                 published_on=candidate.published_on,
                 source_kind=c.SOURCE_KIND_NEWS,

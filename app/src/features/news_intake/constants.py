@@ -132,6 +132,8 @@ EXCLUDED_INVALID_JSON: Final[str] = "classification_invalid_json"
 EXCLUDED_UNKNOWN_ID: Final[str] = "classification_unknown_id"
 EXCLUDED_DUPLICATE_ID: Final[str] = "classification_duplicate_id"
 EXCLUDED_UNKNOWN_SECTION: Final[str] = "classification_unknown_section"
+#: 장은 허용됐지만 보조 종류가 주장할 수 있는 의미 칸이 하나도 없어 뺀 문장.
+EXCLUDED_NO_SUPPLEMENTARY_SLOT: Final[str] = "no_supplementary_slot"
 EXCLUDED_TOO_MANY_SECTIONS: Final[str] = "classification_too_many_sections"
 EXCLUDED_UNKNOWN_KIND: Final[str] = "classification_unknown_kind"
 EXCLUDED_READY_SECTION: Final[str] = "ready_section"
