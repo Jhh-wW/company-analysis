@@ -218,7 +218,7 @@ def _fragment_text(mark: str) -> str:
         "핵심 제품은 고객 제공을 거쳐 기업 고객에게 닿는다. "
         "보조 제품은 유통 협력을 거쳐 소비자에게 닿는다."
     )
-    source_table = f" {_COMPOSITION_SOURCE}" if mark == _MARKS[1] else ""
+    source_table = f" {_COMPOSITION_SOURCE}" if mark == _MARKS[2] else ""
     return f"{common} {sentences} {flow}{source_table}"
 
 
@@ -470,20 +470,20 @@ def _run_recovering_full(
 
 
 def _valid_composition_table() -> PerformanceTable:
-    raw = build_revenue_mix(_COMPOSITION_SOURCE, cite="[2]")[0]
+    raw = build_revenue_mix(_COMPOSITION_SOURCE, cite="[3]")[0]
     return PerformanceTable(
         caption="제품군 구성",
         headers=("구분", "비중"),
         rows=tuple((row[0], row[2]) for row in raw["rows"][:-1]),
         unit="%",
-        cite="[2]",
+        cite="[3]",
         raw_rows=tuple((row[0], row[2]) for row in raw["raw_rows"][:-1]),
         evidence_rows=tuple(raw["evidence_rows"][:-1]),
     )
 
 
 def _composition_table_from_source(source: str) -> PerformanceTable:
-    raw = build_revenue_mix(source, cite="[2]")[0]
+    raw = build_revenue_mix(source, cite="[3]")[0]
     return PerformanceTable(
         caption="제품군 구성",
         headers=("구분", "비중"),
@@ -491,15 +491,15 @@ def _composition_table_from_source(source: str) -> PerformanceTable:
         raw_rows=tuple((row[0], row[2]) for row in raw["raw_rows"][:-1]),
         evidence_rows=tuple(raw["evidence_rows"][:-1]),
         unit="%",
-        cite="[2]",
+        cite="[3]",
     )
 
 
-def _packets_with_business_source(source: str):
+def _packets_with_portfolio_source(source: str):
     packets = _packets()
     replaced_packets = []
     for packet in packets.packets:
-        if packet.section_id != "business_model":
+        if packet.section_id != "portfolio":
             replaced_packets.append(packet)
             continue
         fragment = packet.fragments[0]
@@ -1374,7 +1374,7 @@ def test_empty_evidence_rows의_FORGED_PRODUCT_999퍼센트는_FULL에서_차단
         headers=("제품군", "비중"),
         rows=(("FORGED_PRODUCT", "999%"),),
         unit="%",
-        cite="[2]",
+        cite="[3]",
         evidence_rows=(),
     )
     with pytest.raises(PublicManifestError, match="evidence_rows|비중 합계"):
@@ -1408,12 +1408,12 @@ def test_정상_구성표는_원자료_재검산과_manifest를_통과한다():
     table = next(
         table
         for section in output.report.sections
-        if section.cell == "business_model"
+        if section.cell == "portfolio"
         for table in section.tables
     )
     assert table.rows[0] == ["핵심 제품", "70.00%"]
     assert table.evidence_rows
-    assert table.source_cites == ["[2]"]
+    assert table.source_cites == ["[3]"]
     assert table.manifest_ref
 
 
@@ -1459,7 +1459,7 @@ def test_매출구성_원문행이_없는_다른_cite조각으로_바꾸면_막�
                 for fragment in packet.fragments
             ),
         )
-        if packet.section_id == "business_model"
+        if packet.section_id == "portfolio"
         else packet
         for packet in packets.packets
     )
@@ -1486,7 +1486,7 @@ def test_서로_다른_두_원문표의_행을_이어붙인_구성표는_막는�
     with pytest.raises(PublicManifestError, match="인용 원문|재검산"):
         _run_full(
             composition_tables=(stitched,),
-            packets=_packets_with_business_source(other_source),
+            packets=_packets_with_portfolio_source(other_source),
         )
 
 
@@ -1500,7 +1500,7 @@ def test_표시된_소수둘째자리에서_가능한_99점99_반올림은_허�
 
     output, *_ = _run_full(
         composition_tables=(table,),
-        packets=_packets_with_business_source(source),
+        packets=_packets_with_portfolio_source(source),
     )
 
     assert output.report.public_structure_manifest
@@ -1511,19 +1511,19 @@ def test_두_항목이라_3열_원표로_남아도_합계행과_원문근거를_
         "제품별 매출액 구 분 2025년 제1기 매 출 액 비 중 "
         "제품가 7,000 70.00% 제품나 3,000 30.00% 합계 10,000 100.00%"
     )
-    raw = build_revenue_mix(source, cite="[2]")[0]
+    raw = build_revenue_mix(source, cite="[3]")[0]
     table = PerformanceTable(
         caption=raw["caption"],
         headers=tuple(raw["headers"]),
         rows=tuple(tuple(row) for row in raw["rows"]),
         raw_rows=tuple(tuple(row) for row in raw["raw_rows"]),
         evidence_rows=tuple(raw["evidence_rows"]),
-        cite="[2]",
+        cite="[3]",
     )
 
     output, *_ = _run_full(
         composition_tables=(table,),
-        packets=_packets_with_business_source(source),
+        packets=_packets_with_portfolio_source(source),
     )
 
     assert output.report.public_structure_manifest
@@ -1547,15 +1547,15 @@ def test_표시반올림으로_설명할수없는_90퍼센트_부분표는_막�
     with pytest.raises(PublicManifestError, match="반올림 범위|비중 합계"):
         _run_full(
             composition_tables=(table,),
-            packets=_packets_with_business_source(source),
+            packets=_packets_with_portfolio_source(source),
         )
 
 
 def test_검증된_injected_fact_ID는_출처와_모든_공개셀까지_맞아야_통과한다():
-    url = "https://manifest.example/document/2"
+    url = "https://manifest.example/document/3"
     identity = document_identity_from_parts(url=url)
     fragment = CollectedFragment(
-        fragment_id="2",
+        fragment_id="3",
         kind="회사 공식 자료",
         text="핵심 제품 70%, 기타 30%로 구성된다.",
         source_url=url,
@@ -1565,9 +1565,9 @@ def test_검증된_injected_fact_ID는_출처와_모든_공개셀까지_맞아�
     def sentence(fact_id: str, product: str, value: str) -> ComposedSentence:
         claim = StructuredClaim(
             fact_id=fact_id,
-            claim_slot="business_model:revenue_structure",
-            section_owner="business_model",
-            source_fragment_id="2",
+            claim_slot="portfolio:revenue_link",
+            section_owner="portfolio",
+            source_fragment_id="3",
             source_identity=identity,
             verification_state="verified",
             state_evidence=f"{product} {value}%",
@@ -1579,14 +1579,14 @@ def test_검증된_injected_fact_ID는_출처와_모든_공개셀까지_맞아�
         )
         return ComposedSentence(
             text=f"{product} 비중은 {value}%다.",
-            citations=("2",),
+            citations=("3",),
             grade=GRADE_CONFIRMED,
             planned_claim_slot=claim.claim_slot,
             verification_state="verified",
             structured_claim=claim,
         )
 
-    business_sentences = (
+    portfolio_sentences = (
         sentence("fact-product-70", "핵심 제품", "70"),
         sentence("fact-other-30", "기타", "30"),
     )
@@ -1594,7 +1594,7 @@ def test_검증된_injected_fact_ID는_출처와_모든_공개셀까지_맞아�
         sections=tuple(
             ComposedSection(
                 section_id=section_id,
-                sentences=business_sentences if section_id == "business_model" else (),
+                sentences=portfolio_sentences if section_id == "portfolio" else (),
             )
             for section_id in SECTION_IDS
         )
@@ -1604,7 +1604,7 @@ def test_검증된_injected_fact_ID는_출처와_모든_공개셀까지_맞아�
         headers=("제품군", "비중"),
         rows=(("핵심 제품", "70%"), ("기타", "30%")),
         unit="%",
-        cite="[2]",
+        cite="[3]",
         row_fact_ids=("fact-product-70", "fact-other-30"),
     )
 
@@ -1629,7 +1629,7 @@ def test_검증된_injected_fact_ID는_출처와_모든_공개셀까지_맞아�
         latest_performance_period="2026-06-30",
         citation_style="auto",
     )
-    assert seal.ref_for("business_model", 0)
+    assert seal.ref_for("portfolio", 0)
 
     forged = replace(
         table,

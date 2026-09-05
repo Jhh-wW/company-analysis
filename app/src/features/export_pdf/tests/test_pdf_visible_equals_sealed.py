@@ -33,6 +33,7 @@ import pdfplumber
 import pytest
 
 from src.features.composer.constants import (
+    BUSINESS_FLOW_SECTION_ID,
     GRADE_CONFIRMED,
     GRADE_INTERPRETED,
     IDENTITY_TABLE_SECTION_ID,
@@ -44,7 +45,7 @@ from src.features.composer.port import (
     ComposedSentence,
     FlowRow,
 )
-from src.features.composer.render import COMPOSITION_TABLE_SECTION_ID, render_report
+from src.features.composer.render import render_report
 from src.features.export_pdf import logic as pdf_logic
 
 # ★ 재료의 «표·조각·감사 장부» 부분은 봉인 PDF 시험이 이미 지어 두었다. 같은
@@ -107,7 +108,7 @@ def _composed_with_two_paragraphs() -> ComposedReport:
                     citations=("2",),
                 ),
             )
-        if section_id == COMPOSITION_TABLE_SECTION_ID:
+        if section_id == BUSINESS_FLOW_SECTION_ID:
             flow_rows = (
                 FlowRow(
                     cells=("음악 자산", "음반", "구독", "반복 수익"),
