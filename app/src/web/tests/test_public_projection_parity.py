@@ -666,21 +666,41 @@ def _render_from_stored_delivery(
     return response.text
 
 
-def test_봉인_있는_v2_부분보고서_고지는_봉인_문구를_쓴다(
+def test_봉인_있는_v2_부분보고서_고지를_화면이_그리지_않는다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """세 채널이 각자 들고 있던 고지 사본 대신 봉인이 고른 문구를 쓴다."""
+    """출시된 보고서에 만드는 과정 이야기를 싣지 않는다 (사용자 결정, 2026-09-05).
+
+    ★ 재료의 봉인에 옛 고지를 «도로 심어» 놓고 그린다. 이미 발행된 저장본은
+      지금도 그 글자를 들고 있어서, 「봉인이 비어서 안 나온 것」이 아니라
+      「화면이 안 읽어서 안 나온 것」임을 확인해야 한다.
+    """
 
     report = _sealed_v2_report()
     projection = report.public_projection
     assert projection is not None
-    title, detail = projection.grade_notice
-    assert title and detail, "재료가 잘못됐다 — 부분 보고서 고지가 비었다"
+    assert projection.grade_notice == ("", "")
 
-    body = _render_from_stored_delivery(report, monkeypatch, report_id="s5-grade-notice")
+    옛_고지 = (
+        "안전 확인 중인 임시 부분 보고서",
+        "확인되지 않은 숫자 문장은 제외했지만 모든 문장·표·도식의 새 "
+        "검증은 아직 끝나지 않았습니다. 아래에 남은 이유를 표시합니다.",
+    )
+    옛_저장본 = replace(
+        report,
+        public_projection=replace(projection, grade_notice=옛_고지),
+    )
+    title, detail = 옛_저장본.public_projection.grade_notice
+    assert title and detail, "재료에 옛 고지가 없다 — 시험이 무의미해진다"
 
-    assert f"<b>{title}</b>" in body
-    assert f"<p>{detail}</p>" in body
+    body = _render_from_stored_delivery(
+        옛_저장본, monkeypatch, report_id="s5-grade-notice"
+    )
+
+    assert title not in body
+    assert detail not in body
+    assert f"<b>{title}</b>" not in body
+    assert f"<p>{detail}</p>" not in body
 
 
 def _render_as_notion_ready_admin(

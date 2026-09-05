@@ -32,7 +32,7 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Final, Optional
 
-from src.features.pipeline.port import Grade, Report, ReportSection, ReportTable
+from src.features.pipeline.port import Report, ReportSection, ReportTable
 from src.features.provenance.sources import Source, visible_citations
 from src.features.report_standard.constants import SECTION_BY_ID
 from src.features.report_standard.cover_metrics import cover_metrics
@@ -74,7 +74,6 @@ from src.shared.report_generation.public_projection import (
     PublicTableBlock,
     PublicVisualBlock,
 )
-from src.shared.report_quality.models import PublicationPolicy
 
 
 # ══════════════════════════════════════════════════════════
@@ -134,20 +133,17 @@ _COLLECTED_SUFFIX: Final[str] = " 확인"
 #: 장 번호 표시 접미사(부록 「본문 사용 장」 칸).
 _SECTION_LABEL_SUFFIX: Final[str] = "장"
 
-#: 부분 보고서 고지 — 지금 웹·PDF·Notion 세 곳이 각자 들고 있는 문구를 한
-#: 곳으로 모은 것이다. 값은 PDF
-#: ``_partial_publication_copy(detailed=True)``에서 글자 그대로 옮겼다.
-#: S4·S5·S6이 각 채널의 사본을 지우고 이 블록을 읽게 된다.
-_LEGACY_SHADOW_NOTICE: Final[tuple[str, str]] = (
-    "안전 확인 중인 임시 부분 보고서",
-    "확인되지 않은 숫자 문장은 제외했지만 모든 문장·표·도식의 새 "
-    "검증은 아직 끝나지 않았습니다. 아래에 남은 이유를 표시합니다.",
-)
-_PARTIAL_NOTICE: Final[tuple[str, str]] = (
-    "검증된 부분 보고서(부분 완성)",
-    "공식 근거로 확인된 항목만 제공합니다. 아래 미제공 사유는 "
-    "해당 사실이 없다는 판정이 아닙니다.",
-)
+#: 부분 보고서 고지 — 이제 «항상 비어 있다».
+#:
+#: ★ 왜 비웠나 (사용자 결정, 2026-09-05): 서비스가 출시됐고 보고서는 더 이상
+#:   「임시」가 아니다. 「안전 확인 중」·「새 검증은 아직 끝나지 않았습니다」·
+#:   「확인하지 못했습니다」는 전부 «우리가 무엇을 아직 못 했는지»를 적은
+#:   과정·변명 문구다. 독자가 할 수 있는 일이 없는 정보는 화면에서 뺀다.
+#: ★ 지운 것은 «표시»뿐이다. 판정(등급·안전 결정)과 내부 사유
+#:   (``shortfall_reasons``·``safety_decision``·``publication_policy``)는
+#:   header에 그대로 실려 저장·관리자 화면·진단에서 계속 읽힌다.
+#: ★ 자리(``grade_notice`` 필드)는 남긴다 — 이미 봉인된 옛 저장본이 값을 갖고
+#:   있고, 그 봉인을 깨지 않은 채로 «채널이 그리지 않게» 하는 것이 목표다.
 _NO_NOTICE: Final[tuple[str, str]] = ("", "")
 
 #: 본문 표시 문장에 박힌 인용 번호 ``[1]``을 읽는다. ``section_content.py``의
@@ -280,13 +276,14 @@ def _summary_rows(report: Report) -> tuple[PublicSummaryRow, ...]:
 
 
 def _grade_notice(report: Report) -> tuple[str, str]:
-    """부분 보고서 고지 — 지금 세 채널이 각자 쓰던 문구를 한 곳에서 고른다."""
+    """독자용 고지는 만들지 않는다 — 항상 빈 고지를 봉인한다.
 
-    if report.grade is not Grade.PARTIAL:
-        return _NO_NOTICE
-    if report.publication_policy == PublicationPolicy.LEGACY_SHADOW_EXCEPTION.value:
-        return _LEGACY_SHADOW_NOTICE
-    return _PARTIAL_NOTICE
+    ★ 등급이나 정책을 «읽지 않는» 것이 요점이다. 정책마다 다른 문구를 고르던
+      갈래가 남아 있으면 언젠가 그중 하나가 다시 화면에 붙는다. 등급 판정
+      자체는 그대로다(``report.grade``·``publication_policy``는 header에 실린다).
+    """
+
+    return _NO_NOTICE
 
 
 # ══════════════════════════════════════════════════════════

@@ -354,33 +354,65 @@ def test_v2_PDF는_블록_밖_문자열을_만들지_않는다(monkeypatch):
         assert _squeezed(label) in text
 
 
-#: PDF가 «표지에서만» 쓰던 짧은 사본이다. 봉인을 쓰기 시작하면 이 문장은
-#: 어디에도 나오면 안 된다 — 같은 정책을 표지와 본문이 다른 말로 꾸미던 자리다.
+#: PDF가 «표지에서만» 쓰던 짧은 사본이다. 어디에도 나오면 안 된다.
 #: ★ 생산 상수를 import하지 않고 글자를 그대로 적는다. import로 묶으면 사본이
 #:   되살아나도 시험이 같이 따라가 아무것도 못 잡는다.
 _PDF_ONLY_COVER_COPY = "공식 근거로 확인된 항목만 수록했습니다."
 
+#: 2026-09-05 이전에 «이미 봉인되어 저장된» 보고서의 고지 글자. 새 보고서는
+#: 빈 고지를 봉인하지만, 옛 저장본의 봉인은 지금도 이 글자를 들고 있다.
+#: 그래서 「봉인이 비었으니 안 나온다」가 아니라 「봉인에 글자가 있어도 PDF가
+#: 읽지 않는다」를 확인해야 한다.
+_이미_봉인된_옛_고지 = (
+    "안전 확인 중인 임시 부분 보고서",
+    "확인되지 않은 숫자 문장은 제외했지만 모든 문장·표·도식의 새 "
+    "검증은 아직 끝나지 않았습니다. 아래에 남은 이유를 표시합니다.",
+)
 
-def test_v2_부분보고서_고지는_표지와_본문이_같은_봉인_문구를_쓴다():
-    """표지·본문·(웹) 세 곳의 사본을 봉인 `grade_notice` 하나로 모았는지 본다.
+#: 실제 파이프라인이 만드는 미제공 사유 모양의 표본.
+_사유_표본 = [
+    "표와 도식은 아직 하나씩 확인하지 못했습니다. "
+    "숫자를 그대로 인용하기 전에 부록의 원문을 함께 확인해 주세요.",
+]
 
-    ★ 반대 경우 시험에서 이 겹이 비어 있었다 — 고지를 봉인 대신 PDF 사본으로
-      되돌려도 시험이 하나도 깨지지 않았다(실측 178 passed). 그래서 넣는다.
+
+def test_v2_부분보고서_고지는_표지에도_본문에도_그리지_않는다():
+    """출시된 보고서에 만드는 과정 이야기를 싣지 않는다 (사용자 결정, 2026-09-05).
+
+    ★ 재료를 «옛 저장본»으로 만든다 — 봉인에 고지 글자를 도로 심어 두고 PDF를
+      낸다. 이렇게 해야 「봉인이 비어서 안 나온 것」과 「PDF가 안 읽어서 안 나온
+      것」이 갈린다. 앞의 것만 확인하면 이미 발행된 보고서는 계속 새어 나간다.
     """
 
     report = _v2_full_report()
-    projection = report.public_projection
-    assert projection is not None
-    notice_title, notice_detail = projection.grade_notice
-    assert notice_title and notice_detail, "재료가 부분 보고서가 아니다 — 시험이 무의미해진다"
+    assert report.public_projection is not None
+    # 새로 만든 봉인은 이제 고지를 담지 않는다.
+    assert report.public_projection.grade_notice == ("", "")
 
-    text = _squeezed(_visible_text(pdf_logic.build_pdf(report)))
+    # 옛 저장본 재현 — 사유를 담아 봉인을 다시 만들고, 그 봉인에 옛 고지를 심는다.
+    사유_있는_보고서 = replace(report, shortfall_reasons=list(_사유_표본))
+    옛_저장본 = replace(
+        사유_있는_보고서,
+        public_projection=replace(
+            build_public_projection(사유_있는_보고서),
+            grade_notice=_이미_봉인된_옛_고지,
+        ),
+    )
+    notice_title, notice_detail = 옛_저장본.public_projection.grade_notice
+    assert notice_title and notice_detail, "재료에 옛 고지가 없다 — 시험이 무의미해진다"
+    reasons = 옛_저장본.public_projection.header["shortfall_reasons"]
+    assert reasons, "재료에 미제공 사유가 없다 — 사유 누출 시험이 무의미해진다"
 
-    # 표지와 본문이 «같은» 문장을 쓴다(각 1회 = 2회).
-    assert text.count(_squeezed(notice_title)) >= 2
-    assert text.count(_squeezed(notice_detail)) >= 2
-    # PDF 표지 전용 사본은 사라졌다.
+    text = _squeezed(_visible_text(pdf_logic.build_pdf(옛_저장본)))
+
+    assert _squeezed(notice_title) not in text
+    assert _squeezed(notice_detail) not in text
+    for reason in reasons:
+        assert _squeezed(str(reason)) not in text
+    # PDF 표지 전용 사본도 그대로 사라진 상태다.
     assert _squeezed(_PDF_ONLY_COVER_COPY) not in text
+    # 본문은 그대로 나온다 — 고지 블록만 빠졌다.
+    assert _squeezed("핵심 요약") in text
 
 
 # ══════════════════════════════════════════════════════════

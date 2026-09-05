@@ -65,7 +65,7 @@ from src.features.export_pdf.content_manifest import (
     PDF_MANIFEST_VERSION_KEY,
     public_content_manifest_sha256,
 )
-from src.features.pipeline.port import Grade, Report, ReportSection, ReportTable
+from src.features.pipeline.port import Report, ReportSection, ReportTable
 from src.features.provenance.sources import Source, SourceKind, visible_citations
 from src.features.report_standard import build_published_report
 from src.features.report_standard.constants import SECTION_BY_ID, TIME_SECTION_IDS
@@ -97,7 +97,6 @@ from src.shared.report_generation.public_projection import (
     PublicVisualBlock,
     build_report_digest,
 )
-from src.shared.report_quality.models import PublicationPolicy
 
 _FONT_LOCK = threading.Lock()
 _ISO_DATE_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}(?:$|T|\s)")
@@ -109,58 +108,26 @@ _PDF_TEXT_REPLACEMENTS = (
 )
 
 
-def _legacy_shadow_publication(report: Report) -> bool:
-    return (
-        report.publication_policy
-        == PublicationPolicy.LEGACY_SHADOW_EXCEPTION.value
-    )
-
-
-def _partial_publication_copy(
-    report: Report,
-    *,
-    detailed: bool,
-) -> tuple[str, str]:
-    """표지와 본문이 같은 공개 정책을 서로 다른 말로 꾸미지 않게 한다."""
-
-    if _legacy_shadow_publication(report):
-        detail = (
-            "확인되지 않은 숫자 문장은 제외했지만 모든 문장·표·도식의 새 "
-            "검증은 아직 끝나지 않았습니다. 아래에 남은 이유를 표시합니다."
-            if detailed
-            else "모든 문장·표·도식의 새 검증은 아직 끝나지 않았습니다."
-        )
-        return "안전 확인 중인 임시 부분 보고서", detail
-    detail = (
-        "공식 근거로 확인된 항목만 제공합니다. 아래 미제공 사유는 "
-        "해당 사실이 없다는 판정이 아닙니다."
-        if detailed
-        else "공식 근거로 확인된 항목만 수록했습니다."
-    )
-    return "검증된 부분 보고서(부분 완성)", detail
-
-
 def _grade_notice(
     report: Report,
     *,
     projection: PublicReportProjection | None,
     detailed: bool,
 ) -> tuple[str, str]:
-    """공개 등급 고지 (제목, 본문). 고지가 없으면 두 값 다 빈 글자다.
+    """독자용 등급 고지는 더 이상 그리지 않는다 — 항상 빈 두 글자다.
 
-    ★ 봉인이 있으면 ``grade_notice`` 한 벌을 표지와 본문이 «똑같이» 쓴다.
-      지금까지 웹·PDF·Notion이 각자 사본을 들고 있었고 PDF 안에서도 표지와
-      본문이 다른 문장을 썼다 — 같은 정책을 서로 다른 말로 꾸미지 않도록
-      봉인 값 하나로 모은다. 그래서 이 갈래에서는 ``detailed``가
-      문구를 바꾸지 않는다.
+    ★ 왜 비웠나 (사용자 결정, 2026-09-05): 서비스가 출시됐다. 「안전 확인 중인
+      임시 부분 보고서」·「새 검증은 아직 끝나지 않았습니다」는 독자가 손쓸 수
+      없는 «우리 사정»이고, 「아래 미제공 사유는 …」은 이제 아래에 없는 목록을
+      가리키는 죽은 문장이다. 등급 판정과 사유 자료는 그대로 두고 표시만 뺀다.
+    ★ 인자를 남긴 이유: 봉인 있는 저장본(``projection``)과 legacy 저장본이
+      «같은 자리»를 지나가는지 부르는 쪽에서 계속 보이게 하려는 것이다. 옛
+      저장본의 봉인에는 아직 고지 글자가 들어 있으므로, 여기서 읽지 않는 것이
+      곧 «이미 발행된 보고서에서도 안 보인다»는 뜻이 된다.
     """
 
-    if projection is not None:
-        title, detail = projection.grade_notice
-        return title, detail
-    if report.grade is not Grade.PARTIAL:
-        return "", ""
-    return _partial_publication_copy(report, detailed=detailed)
+    del report, projection, detailed  # 판정은 그대로, 표시만 하지 않는다.
+    return "", ""
 
 
 def _cover_metric_rows(
@@ -727,24 +694,16 @@ class _CoverContent(Flowable):
         title_y = title_top_page - constants.PAGE_BOTTOM_MARGIN_PT - title_height
         title.drawOn(canvas, 0, title_y)
 
-        metadata_bottom = title_y
         metadata = _cover_metadata(self.report)
         if metadata:
             meta = Paragraph(_escape(metadata), self.styles["cover_meta"])
             _, meta_height = meta.wrap(self.width, 15 * mm)
             meta.drawOn(canvas, 0, title_y - meta_height - 7)
-            metadata_bottom = title_y - meta_height - 7
 
-        status_title, status_detail = _grade_notice(
-            self.report, projection=self.projection, detailed=False
-        )
-        if status_title or status_detail:
-            status = Paragraph(
-                f"<b>{status_title}</b><br/>{status_detail}",
-                self.styles["cover_meta"],
-            )
-            _, status_height = status.wrap(self.width, 18 * mm)
-            status.drawOn(canvas, 0, metadata_bottom - status_height - 12)
+        # ★ 표지 등급 고지를 지웠다 (사용자 결정, 2026-09-05). 「안전 확인 중인
+        #   임시 부분 보고서」는 출시 전의 과정 문구다. 고지가 서 있던 자리
+        #   (기준선 ``metadata_bottom``)도 같이 없앤다 — 이제 표지는 완성
+        #   보고서와 «같은» 배치이고, 남은 여백은 아래 실적 띠가 쓴다.
 
         # 표지 실적 띠 — 화면(result.html)과 «같은 값»만 쓴다. 봉인이 있으면
         # 블록에서, 없으면(legacy) 예전처럼 순수 함수에서 고른다. 값이 없으면
@@ -2224,19 +2183,6 @@ def _masthead_flowables(
     ]
 
 
-def _shortfall_reasons(
-    report: Report, *, projection: PublicReportProjection | None
-) -> tuple[str, ...]:
-    """미제공 사유 목록. 봉인이 있으면 봉인된 header 값을 쓴다."""
-
-    if projection is not None:
-        reasons = projection.header.get("shortfall_reasons", ())
-        if isinstance(reasons, (list, tuple)):
-            return tuple(str(reason) for reason in reasons)
-        return ()
-    return tuple(report.shortfall_reasons)
-
-
 def _document_header(
     report: Report,
     styles: dict[str, ParagraphStyle],
@@ -2262,22 +2208,11 @@ def _document_header(
         _OutlineAnchor("report-body", "분석 본문", level=0),
         *_masthead_flowables(report, styles, width),
     ]
-    partial_title, partial_detail = _grade_notice(
-        report, projection=projection, detailed=True
-    )
-    if partial_title or partial_detail:
-        items.extend(
-            [
-                _OutlineAnchor("partial-notice", "부분 보고서 안내", level=1),
-                Paragraph(partial_title, styles["heading"]),
-                Paragraph(partial_detail, styles["body"]),
-                *[
-                    Paragraph(f"- {_escape(reason)}", styles["body"])
-                    for reason in _shortfall_reasons(report, projection=projection)
-                ],
-                Spacer(1, 14),
-            ]
-        )
+    # ★ 본문 첫머리의 「부분 보고서 안내」 블록(제목·설명·미제공 사유 글머리표)을
+    #   지웠다 (사용자 결정, 2026-09-05). 「…문장 N개를 뺐습니다」·「자료가 적으니
+    #   다른 자료와 함께 보시길 권합니다」는 만드는 과정 이야기라 출시된 보고서에
+    #   싣지 않는다. 사유 자료(``report.shortfall_reasons``·봉인 header)는 그대로
+    #   저장되어 관리자 화면·진단에서 읽힌다 — 여기서는 «그리지 않을» 뿐이다.
     return items
 
 

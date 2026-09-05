@@ -15,11 +15,9 @@ from collections.abc import Mapping
 from typing import Any
 
 from src.core.citations import citation_marker
-from src.shared.report_quality.models import PublicationPolicy
 from src.core.constants import section_display_heading
 from src.features.export_notion import constants
 from src.features.pipeline.port import (
-    Grade,
     Report,
     ReportSection,
     ReportTable,
@@ -492,21 +490,19 @@ def _v2_header_text(header: Mapping[str, object], key: str) -> str:
 def _v2_grade_notice_blocks(
     projection: PublicReportProjection,
 ) -> list[NotionBlock]:
-    """부분 보고서 고지 — 채널마다 다른 이름으로 부르지 않게 블록에서 읽는다.
+    """부분 보고서 고지는 노션에도 그리지 않는다 — 항상 빈 목록이다.
 
-    ★ 예전에 노션만 같은 보고서를 더 후하게 불렀던 사고가 있었다. 이제
-      제목·설명 두 줄이 봉인에 들어 있어 세 채널이 같은 글자를 쓴다.
+    ★ 왜 비웠나 (사용자 결정, 2026-09-05): 출시된 서비스의 보고서에 「안전 확인
+      중」·「아직 끝나지 않았습니다」·「…문장 N개를 뺐습니다」 같은 만드는 과정
+      이야기를 싣지 않는다. 웹·PDF와 «같이» 빠져야 채널 동등성이 유지되므로
+      세 채널을 한 결정으로 함께 비운다.
+    ★ 봉인(``projection.grade_notice``)과 ``header['shortfall_reasons']``는
+      그대로 둔다. 이미 발행된 저장본의 봉인에는 옛 고지 글자가 남아 있는데,
+      여기서 «읽지 않는» 것이 그 보고서에서도 안 보이게 하는 방법이다.
     """
 
-    title, detail = projection.grade_notice
-    if not title:
-        return []
-    reasons = projection.header.get("shortfall_reasons") or ()
-    blocks: list[NotionBlock] = [_heading_2(title)]
-    if detail:
-        blocks.append(_paragraph(detail))
-    blocks.extend(_paragraph(str(reason)) for reason in reasons)
-    return blocks
+    del projection  # 봉인 값은 저장·진단용으로 남고, 독자 채널은 읽지 않는다.
+    return []
 
 
 def _v2_blocks(report: Report, projection: PublicReportProjection) -> list[NotionBlock]:
@@ -594,34 +590,11 @@ def build_blocks(report: Report, *, grade_note: str = "") -> list[NotionBlock]:
         _heading_1(report.company),
         _heading_1("분석 보고서"),
     ]
-    if report.grade is Grade.PARTIAL:
-        # ★ 노션만 정책과 «무관하게» 「검증된 부분 보고서」라고 불렀다.
-        #   같은 보고서를 웹·PDF 는 「안전 확인 중인 임시 부분 보고서」라고 부른다
-        #   (`web/routers/reports.py::_report_grade_note`). 한 보고서가 채널마다
-        #   다른 이름으로 불리면, 그중 하나는 반드시 사실보다 후하게 말하는 것이다.
-        #   여기서는 노션이 더 후했다 — 아직 표·도식을 확인하지 못한 보고서를
-        #   「검증된」이라고 불렀다. 웹·PDF 와 같은 기준으로 맞춘다.
-        확인_중 = (
-            report.publication_policy
-            == PublicationPolicy.LEGACY_SHADOW_EXCEPTION.value
-        )
-        blocks.extend(
-            [
-                _heading_2(
-                    "안전 확인 중인 임시 부분 보고서"
-                    if 확인_중
-                    else "검증된 부분 보고서(부분 완성)"
-                ),
-                _paragraph(
-                    "확인되지 않은 숫자 문장은 제외했지만 모든 문장·표·도식의 "
-                    "확인은 아직 끝나지 않았습니다."
-                    if 확인_중
-                    else "공식 근거로 확인된 항목만 담았습니다. "
-                    "확인되지 않은 내용은 추측해 채우지 않았습니다."
-                ),
-                *(_paragraph(reason) for reason in report.shortfall_reasons),
-            ]
-        )
+    # ★ 봉인 없는 저장본(v1)에서도 부분 보고서 고지 블록과 미제공 사유 문단을
+    #   그리지 않는다 (사용자 결정, 2026-09-05). 봉인 갈래
+    #   (``_v2_grade_notice_blocks``)와 «같은» 결정이어야 웹·PDF·노션 채널
+    #   동등성이 유지된다 — 한 채널만 남겨 두면 그 채널이 다시 혼자 다른 말을
+    #   하는 옛 사고로 돌아간다. ``report.shortfall_reasons``는 그대로 저장된다.
     lede = _report_lede_text(report)
     if lede:
         blocks.append(_paragraph(lede))

@@ -25,6 +25,7 @@ from src.features.pipeline.port import (
     ReportSection,
     ReportTable,
 )
+from src.features.report_standard import build_published_report
 from src.features.report_standard import cover_metrics as cover_metrics_module
 from src.features.report_standard import period_summary as period_summary_module
 from src.features.report_standard import visualization as visualization_module
@@ -281,17 +282,67 @@ class TestBuildBlocks:
         assert "안 쓰여야 하는 문구" not in all_text
         assert not any(block["type"] == "callout" for block in blocks)
 
-    def test_canonical_부분보고서는_등급과_미제공사유를_표시한다(self):
-        blocks = logic.build_blocks(_partial_v1_report())
+    def test_canonical_부분보고서도_등급고지와_미제공사유를_표시하지_않는다(self):
+        """출시된 보고서에 만드는 과정 이야기를 싣지 않는다 (사용자 결정, 2026-09-05).
+
+        ★ 재료가 실제로 부분 보고서이고 사유를 갖고 있는지부터 확인한다 —
+          사유가 애초에 없으면 「안 보인다」는 단언이 저절로 통과한다.
+        """
+
+        draft = _partial_v1_report()
+        published = build_published_report(draft)
+        assert published.grade is Grade.PARTIAL
+        assert any(
+            "8장 인재상과 일하는 방식" in reason
+            for reason in published.shortfall_reasons
+        ), "재료에 미제공 사유가 없다 — 시험이 무의미해진다"
+
+        blocks = logic.build_blocks(draft)
         all_text = "\n".join(
             _text_of(block)
             for block in blocks
             if "rich_text" in block[block["type"]]
         )
 
-        assert "검증된 부분 보고서(부분 완성)" in all_text
-        assert "공식 근거로 확인된 항목만" in all_text
-        assert "8장 인재상과 일하는 방식" in all_text
+        assert "검증된 부분 보고서(부분 완성)" not in all_text
+        assert "안전 확인 중인 임시 부분 보고서" not in all_text
+        assert "공식 근거로 확인된 항목만" not in all_text
+        assert "8장 인재상과 일하는 방식" not in all_text
+        # 본문은 그대로다 — 고지 블록만 빠졌다.
+        assert "핵심 요약" in all_text
+
+    def test_봉인에_옛_고지가_남아_있어도_노션이_그리지_않는다(self):
+        """이미 발행된 저장본의 봉인에는 옛 고지 글자가 그대로 들어 있다.
+
+        ★ 「봉인이 비어서 안 나온 것」과 「노션이 안 읽어서 안 나온 것」을
+          가른다. 앞의 것만 확인하면 옛 보고서는 계속 새어 나간다.
+        """
+
+        report = _sealed_v2_report()
+        assert report.public_projection is not None
+        assert report.public_projection.grade_notice == ("", "")
+
+        옛_고지 = (
+            "안전 확인 중인 임시 부분 보고서",
+            "확인되지 않은 숫자 문장은 제외했지만 모든 문장·표·도식의 새 "
+            "검증은 아직 끝나지 않았습니다. 아래에 남은 이유를 표시합니다.",
+        )
+        옛_저장본 = replace(
+            report,
+            public_projection=replace(
+                report.public_projection, grade_notice=옛_고지
+            ),
+        )
+
+        blocks = logic.build_blocks(옛_저장본)
+        all_text = "\n".join(
+            _text_of(block)
+            for block in blocks
+            if "rich_text" in block[block["type"]]
+        )
+
+        assert 옛_고지[0] not in all_text
+        assert 옛_고지[1] not in all_text
 
     def test_채워진_장은_문장_뒤에_출처_괄호를_붙인다(self):
         report = _make_report()
@@ -763,6 +814,10 @@ def test_v1_Notion_블록은_불변이다() -> None:
     ★ 기준값은 base 커밋 ``5b525ee``에서 이 표본으로 실제 뽑은 SHA-256이다.
       생산 상수·생산 함수에 묶지 않고 리터럴로 적는다 — 생산이 바뀌면 기준값도
       같이 바뀌어 회귀를 못 잡는 순환 검증이 되기 때문이다.
+    ★ 부분 보고서 기준값만 2026-09-05에 한 번 바꿨다. 등급 고지 블록과 미제공
+      사유 문단을 «일부러» 뺀 변경이라(사용자 결정) 옛 값이 그대로면 오히려
+      변경이 안 된 것이다. 완성 보고서 기준값은 그때 그대로 — 고지가 없던
+      보고서는 한 글자도 안 바뀌었다는 증거다.
     """
 
     full = _make_report()
@@ -773,7 +828,7 @@ def test_v1_Notion_블록은_불변이다() -> None:
         "e85efced9c3b2dd92698286129313f13f87acce01d4ec8daf267f0b314d59041"
     )
     assert _blocks_sha256(logic.build_blocks(partial)) == (
-        "9f1cba6c679e6287dbcc9e23bd144c617e52d531657d22346367daf271a11ea1"
+        "d92a443b7a6db9c84eb134b664cd2cdb58d027f36a451a6c0296563cec0db19d"
     )
 
 

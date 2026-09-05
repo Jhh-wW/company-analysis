@@ -348,20 +348,15 @@
 {% if not legacy_readonly and report.grade.value != '완성' %}
   <div class="grade ui-only {% if report.grade.value == '부분 완성' %}partial{% else %}incomplete{% endif %}">
     <div>
-      {#- 부분 보고서 고지도 봉인이 고른 문구를 쓴다 — 지금까지 웹·PDF·Notion이
-          각자 사본을 들고 있어 한쪽만 고치면 조용히 갈라졌다.
-          봉인이 「고지 없음」(빈 제목)이면 예전 안내를 그대로 쓴다. -#}
-      {%- if projection and projection.grade_notice[0] %}
-      <b>{{ projection.grade_notice[0] }}</b>
-      <p>{{ projection.grade_notice[1] }}</p>
-      {%- else %}
+      {#- 등급 «표시»만 남긴다 (사용자 결정, 2026-09-05).
+          지웠던 것: 봉인이 고른 고지 두 줄(`projection.grade_notice`)과
+          미제공 사유 글머리표(`report.shortfall_reasons`). 「안전 확인 중」·
+          「…문장 N개를 뺐습니다」·「자료가 적으니 다른 자료와 함께 보시길
+          권합니다」는 보고서를 만드는 과정 이야기라 출시된 서비스의 독자
+          화면에 싣지 않는다. PDF·노션도 «같이» 뺐다 — 한 채널만 남기면
+          채널 동등성이 깨진다.
+          사유 자료 자체는 저장·관리자 화면·진단용으로 그대로 살아 있다. -#}
       <b>{{ grade_note }}</b>
-      {%- endif %}
-      {% if report.shortfall_reasons %}
-        <ul>
-          {% for r in report.shortfall_reasons %}<li>{{ r }}</li>{% endfor %}
-        </ul>
-      {% endif %}
     </div>
   </div>
 {% endif %}

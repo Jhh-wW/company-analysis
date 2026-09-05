@@ -190,16 +190,29 @@ class _StoredPublicDelivery:
     release_record_sha256: str
 
 
+#: 부분 완성 보고서의 등급 표시. 화면 위쪽 ``.grade`` 띠에만 쓰는 «장식»이다.
+#:
+#: ★ 개수를 적지 않는다 — 레거시는 6칸, canonical은 9장이라 「N개 중 M개」가
+#:   보고서마다 다른 것을 세게 되고, 9장이 다 있는데 뜻이 모자란 부분본에서는
+#:   「9개 중 9개」라는 자기모순이 나온다.
+#: ★ 「검증된」·「안전 확인 중」처럼 정책마다 다른 수식어도 붙이지 않는다.
+#:   같은 보고서를 채널·정책마다 다른 이름으로 부르면 그중 하나는 반드시
+#:   사실보다 후하거나 박하게 말하는 것이 된다. 여기서는 «등급»만 말한다.
+_PARTIAL_GRADE_NOTE = "부분 완성 보고서"
+
+
 def _report_grade_note(report: Report) -> str:
-    """레거시 6칸과 canonical 장 수를 섞지 않은 완성도 안내를 돌려준다."""
+    """등급만 알리는 중립 문구를 돌려준다.
 
-    from src.shared.report_quality.models import PublicationPolicy  # noqa: PLC0415
+    ★ 왜 과정 문구를 뺐나 (사용자 결정, 2026-09-05): 서비스가 출시됐고 보고서는
+      더 이상 「임시」가 아니다. 「안전 확인 중인 임시 부분 보고서 — … 새 검증은
+      아직 끝나지 않았습니다」는 독자가 손쓸 수 없는 «우리 사정»이라 화면에서
+      뺀다. 등급 판정(``report.grade``)과 정책(``publication_policy``)은 그대로
+      저장되어 관리자 화면·진단에서 읽힌다.
+    """
 
-    if report.publication_policy == PublicationPolicy.LEGACY_SHADOW_EXCEPTION.value:
-        return (
-            "안전 확인 중인 임시 부분 보고서 — 확인되지 않은 숫자 문장은 "
-            "제외했지만 모든 문장·표·도식의 새 검증은 아직 끝나지 않았습니다."
-        )
+    if report.grade is Grade.PARTIAL:
+        return _PARTIAL_GRADE_NOTE
 
     if report.schema_version:
         from src.features.report_standard.constants import (  # noqa: PLC0415
@@ -208,11 +221,6 @@ def _report_grade_note(report: Report) -> str:
         )
 
         if report.schema_version == CANONICAL_SCHEMA_VERSION:
-            if report.grade is Grade.PARTIAL:
-                return (
-                    "검증된 부분 보고서(부분 완성) — "
-                    "공식 근거로 확인된 항목만 담았습니다."
-                )
             return grade_message(
                 report.grade,
                 report.filled_count,

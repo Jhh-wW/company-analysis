@@ -44,6 +44,10 @@ from src.features.storage import reports as report_store
 from src.web import job_runtime, report_delivery_adapter
 from src.web import main as web_main
 from src.web.routers.reports import _report_grade_note
+from src.web.tests._reader_notice_ban import (
+    READER_BANNED_EXPRESSIONS,
+    banned_hits_by_channel,
+)
 
 app = web_main.app
 
@@ -219,22 +223,34 @@ def test_canonical_부분본_완성도는_장_개수로_오해시키지_않는�
 
     note = _report_grade_note(partial)
 
-    assert "검증된 부분 보고서(부분 완성)" in note
-    assert "공식 근거로 확인된 항목만" in note
+    assert note == "부분 완성 보고서"
     assert "개 중" not in note
 
 
-def test_안전미통과_임시공개본을_웹이_검증완료라고_부르지_않는다() -> None:
-    report = replace(
-        canonical_report(),
-        grade=Grade.PARTIAL,
-        publication_policy="legacy-shadow-exception-v1",
+def test_등급_표시에_만드는_과정_문구를_섞지_않는다() -> None:
+    """정책이 legacy-shadow여도 등급 띠에 「안전 확인 중」·「임시」를 안 쓴다.
+
+    ★ 2026-09-05 사용자 결정: 출시된 서비스의 독자 화면에 «우리가 아직 무엇을
+      못 했는지»를 적지 않는다. 등급 «표시»는 그대로 남기고 과정 문구만 뺀다.
+    ★ 정책이 다른 두 보고서가 «같은» 문구를 받는지도 함께 본다. 갈래가 남아
+      있으면 언젠가 그중 하나가 다시 사정을 말하기 시작한다.
+    """
+
+    보통_부분본 = replace(canonical_report(), grade=Grade.PARTIAL)
+    안전미통과_부분본 = replace(
+        보통_부분본, publication_policy="legacy-shadow-exception-v1"
     )
 
-    note = _report_grade_note(report)
+    note = _report_grade_note(안전미통과_부분본)
 
-    assert "안전 확인 중인 임시 부분 보고서" in note
+    assert note == _report_grade_note(보통_부분본)
+    assert "안전 확인 중" not in note
+    assert "임시" not in note
+    assert "아직" not in note
+    assert "확인하지 못했" not in note
     assert "검증된 부분 보고서" not in note
+    # 판정 자체는 그대로 남는다 — 표시만 뺐다.
+    assert 안전미통과_부분본.publication_policy == "legacy-shadow-exception-v1"
 
 
 def test_9개_장이_모두_있는_의미_결손_부분본도_모순된_개수를_표시하지_않는다() -> None:
@@ -275,7 +291,7 @@ def test_9개_장이_모두_있는_의미_결손_부분본도_모순된_개수�
 
     note = _report_grade_note(partial)
 
-    assert "검증된 부분 보고서(부분 완성)" in note
+    assert note == "부분 완성 보고서"
     assert "9개 중 9개" not in note
     assert "비어 있는 항목" not in note
 
@@ -421,6 +437,68 @@ def test_세_출력은_표지_요약_의미장_출처를_같이_낸다(
     for medium, rendered in outputs.items():
         for text in expected:
             assert normalize(text) in normalize(rendered), f"{medium}에 누락: {text}"
+
+
+def test_세_출력_어디에도_부분보고서_고지와_미제공사유가_없다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """봉인 없는(v1) 저장본에서도 세 채널이 «같이» 고지를 뺐는지 본다.
+
+    ★ 2026-09-05 사용자 결정: 출시된 서비스의 독자 화면에 만드는 과정·변명
+      문구를 싣지 않는다. 한 채널만 남기면 그 채널이 혼자 다른 말을 한다.
+    ★ 사유 문장은 «지어내지 않고» 실제 출고 함수가 계산한 값을 그대로 쓴다.
+      직접 적어 넣으면 ``build_published_report``가 다시 계산해 덮어써서
+      「없다」가 저절로 통과한다.
+    """
+
+    report = canonical_report()
+    partial_draft = replace(
+        report,
+        sections=[
+            section for section in report.sections if section.cell != "culture"
+        ],
+        summary_items=[
+            item for item in report.summary_items if item.section_id != "culture"
+        ],
+        fact_records=[
+            fact for fact in report.fact_records if fact.section_owner != "culture"
+        ],
+    )
+    published = build_published_report(partial_draft)
+    assert published.grade is Grade.PARTIAL
+    assert published.shortfall_reasons, "재료에 미제공 사유가 없다 — 시험이 무의미해진다"
+
+    _html, outputs = _all_outputs(partial_draft, monkeypatch)
+
+    남은_사유 = {
+        medium: [
+            reason
+            for reason in published.shortfall_reasons
+            if normalize(reason) in normalize(rendered)
+        ]
+        for medium, rendered in outputs.items()
+    }
+    assert not any(남은_사유.values()), f"채널에 남은 미제공 사유: {남은_사유}"
+
+    남은_고지 = {
+        medium: [
+            phrase
+            for phrase in ("검증된 부분 보고서", "안전 확인 중인 임시 부분 보고서")
+            if normalize(phrase) in normalize(rendered)
+        ]
+        for medium, rendered in outputs.items()
+    }
+    assert not any(남은_고지.values()), f"채널에 남은 등급 고지: {남은_고지}"
+
+    걸린_표현 = banned_hits_by_channel(outputs)
+    assert not any(걸린_표현.values()), (
+        f"독자 채널에 남은 과정 문구: {걸린_표현} "
+        f"(금지 사유는 {READER_BANNED_EXPRESSIONS} 참조)"
+    )
+
+    # 본문은 그대로다 — 고지 블록만 빠졌다.
+    for medium, rendered in outputs.items():
+        assert normalize("핵심 요약") in normalize(rendered), f"{medium}에서 본문이 사라졌다"
 
 
 def test_시각화_원표의_label_value_unit_cite는_세_출력에서_같다(
