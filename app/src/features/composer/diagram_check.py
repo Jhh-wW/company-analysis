@@ -58,6 +58,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import unicodedata
 from collections.abc import Mapping, Sequence
 from typing import Callable, Final, Optional
 
@@ -65,6 +66,7 @@ from src.features.composer.constants import (
     FLOW_ARROW_SECTION_IDS,
     FLOW_HEADERS_BY_SECTION,
     PARSE_RETRY_LIMIT,
+    PORTFOLIO_TABLE_SECTION_ID,
     RETRY_REMINDER,
 )
 from src.features.composer.logic import extract_json_payload
@@ -130,6 +132,42 @@ _VERDICT_RESULT_KEY: Final[str] = "결과"
 VERDICT_TRUE: Final[str] = "참"
 VERDICT_FALSE: Final[str] = "거짓"
 
+#: 3장 이름 칸을 비운 이유를 실행 결과에서 식별하는 안정된 코드.
+PORTFOLIO_NAME_NOT_IN_SOURCE_CODE: Final[str] = (
+    "portfolio_name_not_in_source"
+)
+
+
+def _compact_surface(value: str) -> str:
+    """호환문자·대소문자·공백·구두점 차이만 없앤 표면 문자열."""
+
+    compact: list[str] = []
+    for char in str(value or ""):
+        for normalized in unicodedata.normalize("NFKC", char).casefold():
+            if normalized.isspace() or unicodedata.category(normalized).startswith(
+                "P"
+            ):
+                continue
+            compact.append(normalized)
+    return "".join(compact)
+
+
+def _portfolio_name_is_grounded(
+    name: str, source_texts: Sequence[str]
+) -> bool:
+    """3장 이름이 인용한 조각 하나의 표면 부분문자열인지 확인한다."""
+
+    if not name.strip():
+        return True
+    compact_name = _compact_surface(name)
+    if not compact_name:
+        return False
+    return any(
+        compact_name in _compact_surface(source_text)
+        for source_text in source_texts
+    )
+
+
 def _numbers_are_grounded(cell: str, source_text: str) -> Optional[str]:
     """칸 안의 수가 인용 원문에 있는가. 없으면 그 수를 돌려준다.
 
@@ -178,15 +216,42 @@ def _fragment_texts(fragments: Sequence[CollectedFragment]) -> dict[str, str]:
     return {str(fragment.fragment_id): fragment.text for fragment in fragments}
 
 
-def _source_text(row: FlowRow, texts: Mapping[str, str]) -> str:
-    return " ".join(
+def _source_texts(row: FlowRow, texts: Mapping[str, str]) -> tuple[str, ...]:
+    return tuple(
         texts.get(str(citation).strip(), "") for citation in row.citations
     )
 
 
+def _source_text(row: FlowRow, texts: Mapping[str, str]) -> str:
+    return " ".join(_source_texts(row, texts))
+
+
 # ══════════════════════════════════════════════════════════
-# ① 숫자 검사 (기계, AI 0회)
+# ① 이름·숫자 검사 (기계, AI 0회)
 # ══════════════════════════════════════════════════════════
+
+
+def _clear_ungrounded_portfolio_names(
+    rows: Sequence[FlowRow], texts: Mapping[str, str]
+) -> tuple[tuple[FlowRow, ...], list[str]]:
+    """인용 조각에 없는 3장 이름만 비우고 카드 줄은 유지한다."""
+
+    grounded: list[FlowRow] = []
+    rejected: list[str] = []
+    for row in rows:
+        name = row.cells[0] if row.cells else ""
+        if _portfolio_name_is_grounded(name, _source_texts(row, texts)):
+            grounded.append(row)
+            continue
+        grounded.append(
+            FlowRow(cells=("", *row.cells[1:]), citations=row.citations)
+        )
+        rejected.append(
+            f"{PORTFOLIO_NAME_NOT_IN_SOURCE_CODE}: 카드 «"
+            + " → ".join(row.cells)
+            + "»: 제품·서비스명이 인용 원문에 없음 — 이름 칸만 비움"
+        )
+    return tuple(grounded), rejected
 
 
 def _drop_invented_numbers(
@@ -462,10 +527,10 @@ def check_diagram_numbers(
     report: ComposedReport,
     fragments: Sequence[CollectedFragment],
 ) -> tuple[ComposedReport, tuple[str, ...]]:
-    """도식 수치가 인용 원문에 있는지만 AI 없이 검사한다.
+    """도식 수치와 3장 이름이 인용 원문에 있는지 AI 없이 검사한다.
 
     strict bundled reviewer와 legacy ``check_diagrams``가 이 한 구현을 함께
-    쓴다. 숫자 검산을 strict용으로 복제하면 두 경로의 처분이 다시 갈라진다.
+    쓴다. 결정론 검사를 strict용으로 복제하면 두 경로의 처분이 다시 갈라진다.
     """
 
     texts = _fragment_texts(fragments)
@@ -475,7 +540,13 @@ def check_diagram_numbers(
         if not section.flow_rows:
             rebuilt.append(section)
             continue
-        kept, dropped = _drop_invented_numbers(section.flow_rows, texts)
+        rows = section.flow_rows
+        if section.section_id == PORTFOLIO_TABLE_SECTION_ID:
+            rows, rejected = _clear_ungrounded_portfolio_names(rows, texts)
+            problems.extend(
+                f"[{section.section_id}] {reason}" for reason in rejected
+            )
+        kept, dropped = _drop_invented_numbers(rows, texts)
         problems.extend(f"[{section.section_id}] {reason}" for reason in dropped)
         rebuilt.append(
             ComposedSection(

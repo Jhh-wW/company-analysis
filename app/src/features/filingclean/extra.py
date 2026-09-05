@@ -15,13 +15,15 @@
   | **핵심감사사항** (나중에 더함) | 감사인이 이름을 걸고 짚은 급소 |
   | **주요 지적재산권** (나중에 더함) | 출원만 해 두고 아직 등록·매출이 없는 것 |
 
-★ 왜 이 넷인가 — 조사 근거
+★ 왜 이 절들인가 — 조사 근거
   · 증권사 리포트 9건 중 **8건**이 「앞으로 어디로 가나(신사업·수주·투자계획)」를
     **별도 섹션**으로 다룬다. 우리 4-3이 만성적으로 비던 재료가 바로 이것이다.
   · 실제 합격 자소서 3건이 전부 **「전략 선언·슬로건」**을 근거로 썼다 (숫자가 아니라).
     → 미션·비전.
   · 취업 가이드가 「사업보고서에서 꼭 볼 절」로 **우발부채(법적 리스크)**를 지목했다.
   · 증권사 리포트 7/9가 **산업·시장 맥락**을 다룬다 → 시장점유율.
+  · 3장 이름 카드는 제품·상품·자회사 이름이 필요하지만, 1판은 그 표제를 뜨지 않는다.
+    이름은 표의 행에 있으므로 이 세 절만 숫자 표여도 보존한다.
 
 ★ **1판은 0줄 고치지 않는다.** 1판이 만든 조각에 «더할» 뿐이다.
 """
@@ -35,17 +37,20 @@ from src.core.docshape import is_table_of_contents
 from src.features.filingclean.logic import starts_with_boilerplate
 from src.shared.report_evidence.legacy_fragment_kinds import (
     LEGACY_KIND_AUDITOR_FINDING,
+    LEGACY_KIND_GOODS_CONTENT,
     LEGACY_KIND_INTELLECTUAL_PROPERTY,
     LEGACY_KIND_LITIGATION,
     LEGACY_KIND_MARKET_SHARE,
     LEGACY_KIND_NEW_BUSINESS_OUTLOOK,
+    LEGACY_KIND_PRODUCT_SERVICE,
     LEGACY_KIND_RISK_FACTOR,
+    LEGACY_KIND_SUBSIDIARY_BUSINESS,
 )
 
 #: 새로 뜰 절 — {조각 종류: (찾을 표제들…)}.
 #: ★ 표제는 «여러 개» 둔다. 회사마다 표기가 다르다.
 #: ⚠️ 늘릴 때마다 실측으로 «무엇이 실제로 뜨는지» 확인할 것 —
-#:   표제만 맞고 내용이 표·목차면 아무 값어치가 없다.
+#:   이름 표 3종을 빼면 표제만 맞고 내용이 표·목차일 때 아무 값어치가 없다.
 EXTRA_SECTION_HEADS: Final[dict[str, tuple[str, ...]]] = {
     # 4-3(앞으로 어디로 가나)의 «주 재료». 증권사 리포트 8/9가 별도 섹션으로 다룬다.
     LEGACY_KIND_NEW_BUSINESS_OUTLOOK: (
@@ -145,6 +150,24 @@ EXTRA_SECTION_HEADS: Final[dict[str, tuple[str, ...]]] = {
         "지적재산권 보유",
         "지적재산권",
     ),
+    # 3장 이름 카드의 직접 재료. 제품명·브랜드명 표는 숫자 표여도 보존한다.
+    LEGACY_KIND_PRODUCT_SERVICE: (
+        "주요 제품 및 서비스",
+        "주요 제품 등의 현황",
+        "주요 제품·서비스",
+        "주요 제품 및 서비스 현황",
+    ),
+    # 금융업은 「제품」 대신 「상품」 표제를 쓴다.
+    LEGACY_KIND_GOODS_CONTENT: (
+        "주요 상품 및 서비스의 내용",
+        "주요 상품 및 서비스",
+    ),
+    # 법인 목록 자체가 아니라 자회사 이름과 실제 사업을 함께 주는 표만 받는다.
+    LEGACY_KIND_SUBSIDIARY_BUSINESS: (
+        "주요 종속회사의 업종 및 주요 사업",
+        "주요 종속회사",
+        "종속기업 현황",
+    ),
     LEGACY_KIND_RISK_FACTOR: (
         "사업위험",
         "사업 위험",
@@ -155,14 +178,14 @@ EXTRA_SECTION_HEADS: Final[dict[str, tuple[str, ...]]] = {
         "리스크 관리",
         "시장위험과 위험관리",
     ),
-    # ⚠️ **「계열·조직」은 넣지 않는다** — 실측으로 확인했다.
-    #   사용자 선택 ⑦(「지원하는 자리가 회사 어디에 붙나」)의 재료를 찾아
-    #   「계열회사의 현황」·「종속회사 현황」·「조직도」를 다 걸어 봤는데,
+    # ⚠️ **참조 안내뿐인 「계열·조직」은 여전히 넣지 않는다** — 실측으로 확인했다.
+    #   「계열회사의 현황」·「종속회사 현황」·「조직도」를 다 걸어 봤을 때
     #   하이브 사업보고서에서 실제로 나온 것은 이것뿐이었다:
     #     「계열회사의 현황은 '상세표-2. 계열회사 현황(상세)'를 **참조하시기 바랍니다**.
     #      … 해당사항 없습니다. 라. 회사와 계열회사간 임원 겸직 현황」
-    #   **알맹이가 아니라 «다른 표를 보라»는 안내문**이다. 「연결대상 종속회사 개황」도 0회.
-    #   쓸모없는 조각을 넣으면 AI가 쓸 재료를 고를 때 자리만 차지한다.
+    #   **알맹이가 아니라 «다른 표를 보라»는 안내문**이다. 이런 표제는 계속 제외한다.
+    #   반면 이번에는 3장 이름 카드에 자회사 이름이 필요하므로, 위의
+    #   「주요 종속회사의 업종 및 주요 사업」처럼 이름과 사업을 함께 주는 절만 받는다.
     #
     #   ★ 대신 ⑦의 실질적인 답은 **제품·서비스별 매출 표**가 준다 —
     #     「음반/음원 29% · 공연 29% · MD 22% · 콘텐츠 10%」를 보면
@@ -170,8 +193,8 @@ EXTRA_SECTION_HEADS: Final[dict[str, tuple[str, ...]]] = {
     #     법인 목록보다 지원자에게 값진 정보다.
 }
 
-#: 새 조각 하나의 길이(글자). 1판의 `FRAG_CHARS`와 같은 값을 기본으로 쓴다.
-#: ★ 다르게 잡으면 「1판 조각은 이만큼인데 새 조각만 길다」가 되어 AI가 편식한다.
+#: 기존 추가 절 하나의 길이(글자). 1판의 `FRAG_CHARS`와 같은 값을 기본으로 쓴다.
+#: 이름 표 3종만 행 이름을 보존하기 위해 아래 전용 상한까지 늘린다.
 DEFAULT_FRAG_CHARS: Final[int] = 1200
 
 #: 조각으로 인정할 최소 길이. 1판과 같은 기준(200자).
@@ -194,6 +217,23 @@ _TABLE_NUMBER_MIN: Final[int] = 6
 #:   목차 판정(`docshape.TOC_HEAD_CHARS`)에서 배운 것과 **같은 이유·같은 해법**이다.
 _TABLE_HEAD_CHARS: Final[int] = 400
 
+#: 제품·상품·자회사 이름 표는 긴 행을 보존하되 이 상한을 넘기지 않는다.
+NAME_TABLE_MAX_FRAG_CHARS: Final[int] = 3000
+
+#: 표 자체가 3장 이름 카드의 근거이므로 숫자 표 판정에서 제외할 종류.
+NAME_TABLE_SECTION_KINDS: Final[frozenset[str]] = frozenset(
+    {
+        LEGACY_KIND_PRODUCT_SERVICE,
+        LEGACY_KIND_GOODS_CONTENT,
+        LEGACY_KIND_SUBSIDIARY_BUSINESS,
+    }
+)
+
+#: 태그를 지우고 공백으로 뭉친 DART 원문에서 다음 번호·한글 소절 표제를 찾는다.
+_NEXT_SECTION_HEADING_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?<!\S)(?P<label>(?:[IVXLC]+|\d+(?:-\d+)*|[가-하])\.)\s+(?P<title>\S)"
+)
+
 
 def _looks_like_table(text: str) -> bool:
     """이 덩어리가 «표로 시작하는가» (새 조각을 받을지 판단용).
@@ -203,8 +243,31 @@ def _looks_like_table(text: str) -> bool:
     return len(_MONEY_RE.findall(text[:_TABLE_HEAD_CHARS])) >= _TABLE_NUMBER_MIN
 
 
+def _chunk_until_next_heading(
+    filing_text: str,
+    *,
+    start: int,
+    limit: int,
+    heads: tuple[str, ...],
+) -> str:
+    """현재 종류의 하위 표제는 넘기고 다음 절 표제 앞에서 자른다."""
+    end = min(len(filing_text), start + limit)
+    for match in _NEXT_SECTION_HEADING_RE.finditer(filing_text, start, end):
+        title_start = match.start("title")
+        if any(filing_text.startswith(head, title_start) for head in heads):
+            continue
+        end = match.start()
+        break
+    return filing_text[start:end].strip()
+
+
 def find_section(
-    filing_text: str, heads: tuple[str, ...], frag_chars: int
+    filing_text: str,
+    heads: tuple[str, ...],
+    frag_chars: int,
+    *,
+    keep_table: bool = False,
+    stop_at_next_heading: bool = False,
 ) -> str:
     """표제를 찾아 «쓸 만한» 본문 덩어리를 돌려준다.
 
@@ -212,27 +275,38 @@ def find_section(
         filing_text: 공시 원문 전체.
         heads: 찾을 표제 후보들.
         frag_chars: 조각 길이.
+        keep_table: 숫자 표로 시작해도 보존하는가.
+        stop_at_next_heading: 길이 상한보다 먼저 다음 표제가 나오면 거기서 자르는가.
 
     Returns:
         본문 덩어리. 못 찾으면 빈 문자열.
 
-    ★ 세 가지를 건너뛴다 — **목차 · 법적 면책 문구 · 표**.
+    ★ 기본으로 세 가지를 건너뛴다 — **목차 · 법적 면책 문구 · 표**.
       예전에 겪은 것을 여기서 «처음부터» 막는다.
       새 절을 뜨면서 같은 실수를 반복할 이유가 없다.
+      다만 이름 표 3종은 표의 행 자체가 재료라 호출자가 ``keep_table``로 보존한다.
     """
     for head in heads:
         for index, match in enumerate(re.finditer(re.escape(head), filing_text)):
             if index >= MAX_OCCURRENCES:
                 break
-            chunk = filing_text[match.start(): match.start() + frag_chars].strip()
+            if stop_at_next_heading:
+                chunk = _chunk_until_next_heading(
+                    filing_text,
+                    start=match.start(),
+                    limit=frag_chars,
+                    heads=heads,
+                )
+            else:
+                chunk = filing_text[match.start(): match.start() + frag_chars].strip()
             if len(chunk) <= MIN_CHUNK_CHARS:
                 continue
             if is_table_of_contents(chunk):
                 continue          # 목차 — 다음 출현으로
             if starts_with_boilerplate(chunk):
                 continue          # 법적 면책 문구
-            if _looks_like_table(chunk):
-                continue          # 숫자 나열 — 자소서에 못 쓴다
+            if not keep_table and _looks_like_table(chunk):
+                continue          # 일반 절의 숫자 나열은 자소서에 못 쓴다
             return chunk
     return ""
 
@@ -244,7 +318,7 @@ def collect(
 
     Args:
         filing_text: 공시 원문 전체.
-        frag_chars: 조각 길이.
+        frag_chars: 기존 추가 절의 조각 길이. 이름 표 3종은 전용 상한을 쓴다.
 
     Returns:
         {조각 종류: 원문}. 못 찾은 종류는 «아예 안 담는다**.
@@ -252,11 +326,18 @@ def collect(
     ★ 못 찾으면 빈 문자열을 담지 않고 «빼 버린다» — 빈 조각이 들어가면
       「재료가 있는데 안 쓰였다」로 잘못 읽힌다.
     """
-    if not filing_text:
+    if not filing_text or frag_chars <= 0:
         return {}
     out: dict[str, str] = {}
     for kind, heads in EXTRA_SECTION_HEADS.items():
-        chunk = find_section(filing_text, heads, frag_chars)
+        is_name_table = kind in NAME_TABLE_SECTION_KINDS
+        chunk = find_section(
+            filing_text,
+            heads,
+            NAME_TABLE_MAX_FRAG_CHARS if is_name_table else frag_chars,
+            keep_table=is_name_table,
+            stop_at_next_heading=is_name_table,
+        )
         if chunk:
             out[kind] = chunk
     return out
@@ -272,7 +353,7 @@ def add_to(
     Args:
         frags: 1판 `make_fragments()` 결과 (이미 앞선 보정을 거친 것).
         filing_text: 공시 원문 전체.
-        frag_chars: 조각 길이.
+        frag_chars: 기존 추가 절의 조각 길이. 이름 표 3종은 전용 상한을 쓴다.
 
     Returns:
         (합친 조각들, 더한 개수).

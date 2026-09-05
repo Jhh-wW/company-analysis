@@ -107,6 +107,12 @@ from src.features.homepage.ir_pdf import (
     collect_official_ir_fragments,
 )
 from src.features.homepage.safe_http import collection_cache_scope
+from src.features.product_names.constants import MAX_NAME_FRAGMENTS_PER_FILING
+from src.features.product_names.fragments import (
+    formal_source_kind_for_filing,
+    name_candidate_fragments,
+)
+from src.features.product_names.logic import collect_name_candidates
 from src.features.provenance.citations import build_citations
 from src.features.provenance.sources import (
     Source,
@@ -5944,6 +5950,49 @@ def _formal_official_web_summaries(
     return homepage, official_ir
 
 
+def _attach_name_candidate_fragments(
+    frags: dict[int, dict[str, object]],
+    *,
+    filing_text: str,
+    filing_meta: Any,
+    corp_id: str,
+    typed_fragments: Iterable[dict[str, object]],
+    steps: list[dict[str, Any]],
+) -> tuple[dict[int, dict[str, object]], int]:
+    """공시 이름 표를 같은 공시의 typed 신원에만 묶어 뒤에 더한다."""
+
+    typed_sources = tuple(typed_fragments)
+    source_kind = formal_source_kind_for_filing(
+        filing_meta=filing_meta,
+        corp_id=corp_id,
+        typed_fragments=typed_sources,
+    )
+    candidates = collect_name_candidates(filing_text, source_kind=source_kind)
+    made = name_candidate_fragments(
+        candidates,
+        filing_meta=filing_meta,
+        corp_id=corp_id,
+        typed_fragments=typed_sources,
+    )
+    merged = {number: dict(raw) for number, raw in frags.items()}
+    for raw in made:
+        merged[max(merged, default=0) + 1] = raw
+
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        counts[candidate.subject_kind] = counts.get(candidate.subject_kind, 0) + 1
+    steps.append(
+        {
+            "step": "7_이름후보",
+            "후보": len(candidates),
+            "조각": len(made),
+            "종류별": counts,
+            "상한적용": len(candidates) > MAX_NAME_FRAGMENTS_PER_FILING,
+        }
+    )
+    return merged, len(made)
+
+
 def _collect(
     engine: Any,
     client: Any,
@@ -6189,6 +6238,27 @@ def _collect(
     #   **11건이 «전부» 실은 유일한 만장일치 항목**이다.
     #   ⚠️ 지어낼 자리가 없다 — 공시가 비중을 이미 계산해 놓았고 우리는 베낄 뿐이다.
     revenue_tables = revenuemix.build(filing_text)
+    typed_name_sources: tuple[dict[str, object], ...] = tuple(
+        dict(raw) for raw in frags.values()
+    )
+    if formal_official_evidence is not None:
+        try:
+            formal_name_sources, _ = merge_official_evidence_fragments(
+                {}, formal_official_evidence
+            )
+        except (TypeError, ValueError):
+            # 실제 공식 근거 병합 경계가 아래 호출부에서 같은 오류를 닫아 기록한다.
+            formal_name_sources = {}
+        typed_name_sources += tuple(formal_name_sources.values())
+    frags, name_fragment_count = _attach_name_candidate_fragments(
+        frags,
+        filing_text=filing_text,
+        filing_meta=filing,
+        corp_id=corp_code,
+        typed_fragments=typed_name_sources,
+        steps=steps,
+    )
+    dart_fragment_count += name_fragment_count
     multi_year_tables, multi_year_diagnostics = (
         revenuemix.build_multi_year_with_diagnostics(filing_text)
     )
