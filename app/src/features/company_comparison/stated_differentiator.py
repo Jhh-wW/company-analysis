@@ -246,13 +246,9 @@ def add_stated_differentiator_fragments(
         updated_target if item.section_id == COMPETITIVE_SECTION_ID else item
         for item in result.candidates
     )
-    return OfficialEvidenceCollectionResult(
-        company_id=result.company_id,
-        candidates=updated_candidates,
-        unclassified_evidence=result.unclassified_evidence,
-        comparison_candidates=result.comparison_candidates,
-        provenance_documents=result.provenance_documents,
-    )
+    # 새 객체를 만들지 않고 replace 로 바꾼다 — 파이프라인이 넘긴 하위 타입
+    # (재판정 원문 차선 reclassify_source 를 실은 결과)의 다른 필드를 보존해야 한다.
+    return replace(result, candidates=updated_candidates)
 
 
 def register_stated_differentiator_sentence_evidence(
