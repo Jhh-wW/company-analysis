@@ -84,7 +84,6 @@ from src.features.report_standard.visualization import (
     CardField,
     ChartPoint,
     ChartSeries,
-    composition_tone,
     TableVisualization,
     table_visualization,
 )
@@ -282,6 +281,26 @@ class _BrandedCanvas(Canvas):
         # 고정되지 않는다. 강제로 1을 넣어 CreationDate/ModDate도 내용 결정적으로 만든다.
         kwargs["invariant"] = 1
         super().__init__(*args, **kwargs)
+        self._page_section_seen = False
+
+    def showPage(self) -> None:
+        """본문 상단 띠를 페이지 내용 뒤에 한 번만 그린다.
+
+        장 제목은 story를 실제로 배치해야 어느 페이지의 첫 제목인지 알 수 있다.
+        페이지 시작 콜백에서 미리 그리면 같은 페이지에서 장이 바뀔 때 낡은 제목과
+        새 제목이 PDF 텍스트에 함께 남는다. 페이지를 닫기 직전에 그리면 첫 장
+        제목이 기록된 뒤라 한 번의 정확한 머리말만 남는다.
+        """
+
+        if self.getPageNumber() > 1:
+            _draw_top_band(
+                self,
+                title=str(getattr(self, "_report_title", "분석 보고서")),
+                section_name=str(getattr(self, "_current_section_name", "")),
+                report_date=str(getattr(self, "_report_date", "")),
+            )
+        super().showPage()
+        self._page_section_seen = False
 
 
 class _OutlineAnchor(Flowable):
@@ -322,6 +341,70 @@ class _HorizontalRule(Flowable):
         canvas.line(0, self.height / 2, self.width, self.height / 2)
 
 
+class _SectionHeading(Flowable):
+    """번호 배지와 장 제목을 한 줄의 검색 가능한 글자로 그린다."""
+
+    def __init__(
+        self,
+        markup: str,
+        section_name: str,
+        badge_text: str,
+        style: ParagraphStyle,
+        width: float,
+    ) -> None:
+        super().__init__()
+        self.markup = markup
+        self.section_name = section_name
+        self.badge_text = badge_text
+        self.style = style
+        self.width = width
+        self.badge_width = (
+            constants.SECTION_APPENDIX_BADGE_WIDTH_PT
+            if badge_text == "부록"
+            else constants.SECTION_BADGE_SIZE_PT
+        )
+        self.paragraph = Paragraph(markup, style)
+        self.height = max(constants.SECTION_BADGE_SIZE_PT, style.leading)
+        self.keepWithNext = True
+        self.spaceBefore = style.spaceBefore
+        self.spaceAfter = style.spaceAfter
+
+    def wrap(self, avail_width: float, avail_height: float) -> tuple[float, float]:
+        self.width = min(self.width, avail_width)
+        _, paragraph_height = self.paragraph.wrap(self.width, avail_height)
+        self.height = max(constants.SECTION_BADGE_SIZE_PT, paragraph_height)
+        return self.width, self.height
+
+    def draw(self) -> None:
+        canvas = cast(Canvas, self.canv)
+        if not bool(getattr(canvas, "_page_section_seen", False)):
+            setattr(canvas, "_current_section_name", self.section_name)
+            setattr(canvas, "_page_section_seen", True)
+        # 배지 글자(위첨자)가 네모 가운데에 오도록: 가로는 문단을 글자 폭만큼 오른쪽으로,
+        # 세로는 네모를 실측 편차만큼 위로. 글자 순서·내용은 그대로라 추출 글자가 같다.
+        badge_text_width = pdfmetrics.stringWidth(
+            f"{self.badge_text}.",
+            constants.FONT_SEMIBOLD,
+            constants.SECTION_BADGE_FONT_SIZE_PT,
+        )
+        text_x = max(0.0, (self.badge_width - badge_text_width) / 2)
+        badge_y = (
+            self.height
+            - constants.SECTION_BADGE_SIZE_PT
+            + constants.SECTION_BADGE_TEXT_LIFT_PT
+        )
+        canvas.setFillColor(colors.HexColor(constants.COLOR_INK))
+        canvas.rect(
+            0,
+            badge_y,
+            self.badge_width,
+            constants.SECTION_BADGE_SIZE_PT,
+            fill=1,
+            stroke=0,
+        )
+        self.paragraph.drawOn(canvas, text_x, 0)
+
+
 #: 범례 한 줄의 «최소» 높이(짧은 이름은 이 값 그대로) + 막대~첫 줄 간격,
 #: 그리고 열 수. 항목이 늘면(줄 수) «그리고» 이름이 길면(줄 안 줄바꿈)
 #: 모두 높이가 늘어야 글이 겹치지 않는다.
@@ -338,12 +421,15 @@ _LEGEND_LABEL_INSET_PT: Final[float] = 17.0
 def _composition_color(
     palette: "tuple[str, ...]", index: int, count: int
 ) -> str:
-    """칸 번호에 색을 준다 — 화면과 «같은 규칙»을 쓴다.
+    """항목 수와 관계없이 밝은색에서 어두운색까지 팔레트를 고르게 쓴다."""
 
-    ★ 색 고르는 규칙은 report_standard.visualization에 «한 벌»만 둔다.
-      PDF가 따로 계산하면 화면과 인쇄물의 색이 조용히 어긋난다.
-    """
-    return palette[composition_tone(index, count)]
+    if not palette:
+        return constants.COLOR_CHART_DARK
+    last = max(count - 1, 0)
+    if last == 0:
+        return palette[-1]
+    position = round(max(0, min(index, last)) * (len(palette) - 1) / last)
+    return palette[position]
 
 
 class _CompositionGraphic(Flowable):
@@ -365,10 +451,10 @@ class _CompositionGraphic(Flowable):
         self.width = width
         self._legend_style = ParagraphStyle(
             "CompositionLegend",
-            fontName=constants.FONT_REGULAR,
-            fontSize=7.5,
-            leading=9.0,
-            textColor=colors.HexColor(constants.COLOR_MUTED),
+            fontName=constants.FONT_SEMIBOLD,
+            fontSize=8.0,
+            leading=9.5,
+            textColor=colors.HexColor(constants.COLOR_INK),
             wordWrap="CJK",
         )
         self._row_heights = self._measure_legend_row_heights()
@@ -403,7 +489,7 @@ class _CompositionGraphic(Flowable):
 
     def draw(self) -> None:
         canvas = cast(Canvas, self.canv)
-        palette = constants.COMPOSITION_PALETTE
+        palette = constants.CHART_PALETTE
         item_count = len(self.visual.items)
         bar_y = self.height - (9 * mm)
         bar_height = 7 * mm
@@ -479,10 +565,10 @@ class _TrendGraphic(Flowable):
         panel_height = self.height - (2 * mm)
         for series_index, series in enumerate(self.visual.series):
             x0 = series_index * (panel_width + gap)
-            canvas.setFillColor(colors.HexColor(constants.COLOR_HEADER))
+            canvas.setFillColor(colors.white)
             canvas.setStrokeColor(colors.HexColor(constants.COLOR_LINE))
-            canvas.setLineWidth(0.55)
-            canvas.roundRect(x0, 0, panel_width, panel_height, 4, fill=1, stroke=1)
+            canvas.setLineWidth(0.5)
+            canvas.rect(x0, 0, panel_width, panel_height, fill=1, stroke=1)
             canvas.setFillColor(colors.HexColor(constants.COLOR_INK))
             canvas.setFont(constants.FONT_SEMIBOLD, 7.7)
             title = series.label
@@ -515,8 +601,13 @@ class _TrendGraphic(Flowable):
             else:
                 axis_y = negative_axis if series.risk else positive_axis
             canvas.setStrokeColor(colors.HexColor(constants.COLOR_LINE))
-            canvas.setLineWidth(0.45)
+            canvas.setLineWidth(0.5)
+            canvas.setDash(1.5, 2.0)
+            for grid_index in range(1, 4):
+                grid_y = positive_axis + (chart_height * grid_index / 4)
+                canvas.line(x0 + 8, grid_y, x0 + panel_width - 8, grid_y)
             canvas.line(x0 + 8, axis_y, x0 + panel_width - 8, axis_y)
+            canvas.setDash()
             for point_index, point in enumerate(series.points):
                 center_x = x0 + 11 + (group_width * point_index) + (group_width / 2)
                 bar_height = chart_height * max(0.0, point.ratio) / 100.0
@@ -526,7 +617,13 @@ class _TrendGraphic(Flowable):
                 bar_y = axis_y - bar_height if draws_down else axis_y
                 canvas.setFillColor(
                     colors.HexColor(
-                        constants.COLOR_RISK if draws_down else constants.COLOR_CHART_DARK
+                        constants.COLOR_RISK
+                        if draws_down
+                        else _composition_color(
+                            constants.CHART_PALETTE,
+                            point_index,
+                            len(series.points),
+                        )
                     )
                 )
                 canvas.rect(
@@ -539,6 +636,7 @@ class _TrendGraphic(Flowable):
                 )
                 canvas.setFont(constants.FONT_SEMIBOLD, 7.5)
                 value_y = bar_y - 9 if draws_down else bar_y + bar_height + 3
+                canvas.setFillColor(colors.HexColor(constants.COLOR_INK))
                 _draw_text_with_fallback(
                     canvas,
                     center_x,
@@ -548,15 +646,15 @@ class _TrendGraphic(Flowable):
                     font_size=7.5,
                     alignment="center",
                 )
-                canvas.setFillColor(colors.HexColor(constants.COLOR_MUTED))
-                canvas.setFont(constants.FONT_REGULAR, 7.5)
+                canvas.setFillColor(colors.HexColor(constants.COLOR_WEAK))
+                canvas.setFont(constants.FONT_REGULAR, 8.0)
                 _draw_text_with_fallback(
                     canvas,
                     center_x,
                     labels_y,
                     point.label,
                     font_name=constants.FONT_REGULAR,
-                    font_size=7.5,
+                    font_size=8.0,
                     alignment="center",
                 )
 
@@ -568,10 +666,15 @@ _FLOW_MIN_ROW_HEIGHT_MM: Final[float] = 18.0
 #: 쓰는 5(좌우)·3(라벨-값 간격) 여백과 맞춰 둔다 — 안 맞으면 글자가
 #: 상자 테두리에 닿는다.
 _FLOW_ROW_PADDING_PT: Final[float] = 10.0
+_FLOW_CHEVRON_MIN_STEPS: Final[int] = 3
+_FLOW_CHEVRON_MAX_STEPS: Final[int] = 5
+_FLOW_CHEVRON_BODY_HEIGHT_MM: Final[float] = 14.0
+_FLOW_CHEVRON_GAP_PT: Final[float] = 2.0
+_FLOW_CHEVRON_TIP_PT: Final[float] = 10.0
 
 
 class _FlowGraphic(Flowable):
-    """표의 각 행을 3~4단계 왼쪽→오른쪽 흐름으로 표시한다.
+    """짧은 3~5단계 흐름은 쉐브론, 나머지는 안전한 상자로 표시한다.
 
     ★ 줄 높이를 «내용 길이에 맞춰» 계산한다(카드 도입과 함께
       고침). 예전엔 18mm 고정이라 값이 길면 글자가 상자 밖으로 겹쳐
@@ -589,14 +692,14 @@ class _FlowGraphic(Flowable):
         self._header_style = ParagraphStyle(
             "FlowHead",
             fontName=constants.FONT_SEMIBOLD,
-            fontSize=7.5,
+            fontSize=8.0,
             leading=9.5,
             alignment=TA_CENTER,
-            textColor=colors.HexColor(constants.COLOR_MUTED),
+            textColor=colors.HexColor(constants.COLOR_WEAK),
             wordWrap="CJK",
         )
-        self._value_style = ParagraphStyle(
-            "FlowValue",
+        self._box_value_style = ParagraphStyle(
+            "FlowBoxValue",
             fontName=constants.FONT_REGULAR,
             fontSize=7.5,
             leading=9.7,
@@ -604,7 +707,22 @@ class _FlowGraphic(Flowable):
             textColor=colors.HexColor(constants.COLOR_INK),
             wordWrap="CJK",
         )
-        self._row_heights = [self._measure_row_height(flow) for flow in visual.flows]
+        self._chevron_value_style = ParagraphStyle(
+            "FlowChevronValue",
+            fontName=constants.FONT_REGULAR,
+            fontSize=8.4,
+            leading=10.2,
+            alignment=TA_CENTER,
+            textColor=colors.white,
+            wordWrap="CJK",
+        )
+        self._chevron_rows = [self._uses_chevrons(flow) for flow in visual.flows]
+        self._row_heights = [
+            self._measure_row_height(flow, chevrons=uses_chevrons)
+            for flow, uses_chevrons in zip(
+                visual.flows, self._chevron_rows, strict=True
+            )
+        ]
         self.height = sum(self._row_heights) + (
             max(0, len(visual.flows) - 1) * self.row_gap
         )
@@ -613,12 +731,46 @@ class _FlowGraphic(Flowable):
         gap = 8 * mm
         return (self.width - (gap * (len(flow) - 1))) / len(flow)
 
-    def _measure_row_height(self, flow: Sequence[str]) -> float:
+    def _chevron_width(self, flow: Sequence[str]) -> float:
+        return (
+            self.width - (_FLOW_CHEVRON_GAP_PT * max(0, len(flow) - 1))
+        ) / max(1, len(flow))
+
+    def _uses_chevrons(self, flow: Sequence[str]) -> bool:
+        if not _FLOW_CHEVRON_MIN_STEPS <= len(flow) <= _FLOW_CHEVRON_MAX_STEPS:
+            return False
+        text_width = max(
+            8.0,
+            self._chevron_width(flow) - (_FLOW_CHEVRON_TIP_PT * 1.6),
+        )
+        two_lines = self._chevron_value_style.leading * 2
+        for value in flow:
+            body = Paragraph(_escape(value), self._chevron_value_style)
+            _, body_height = body.wrap(text_width, 1000 * mm)
+            if body_height > two_lines + 0.1:
+                return False
+        return True
+
+    def _measure_row_height(
+        self, flow: Sequence[str], *, chevrons: bool
+    ) -> float:
+        if chevrons:
+            header_width = max(8.0, self._chevron_width(flow) - 8)
+            header_height = max(
+                (
+                    Paragraph(_escape(self.headers[column]), self._header_style).wrap(
+                        header_width, 1000 * mm
+                    )[1]
+                    for column in range(len(flow))
+                ),
+                default=self._header_style.leading,
+            )
+            return header_height + 3 + (_FLOW_CHEVRON_BODY_HEIGHT_MM * mm)
         box_width = self._box_width(flow)
         tallest = _FLOW_MIN_ROW_HEIGHT_MM * mm
         for column, value in enumerate(flow):
             header = Paragraph(_escape(self.headers[column]), self._header_style)
-            body = Paragraph(_escape(value), self._value_style)
+            body = Paragraph(_escape(value), self._box_value_style)
             # 세로 공간을 사실상 무한대로 주고 «자연 높이»만 잰다 — 실제
             # 그리기는 이 높이로 만든 상자 안에서 다시 wrap()한다.
             _, header_height = header.wrap(box_width - 10, 1000 * mm)
@@ -631,38 +783,87 @@ class _FlowGraphic(Flowable):
         self.width = min(self.width, avail_width)
         return (self.width, self.height)
 
+    def _draw_box_row(
+        self, canvas: Canvas, flow: Sequence[str], y: float, row_height: float
+    ) -> None:
+        gap = 8 * mm
+        box_width = self._box_width(flow)
+        for column, value in enumerate(flow):
+            x = column * (box_width + gap)
+            canvas.setFillColor(
+                colors.HexColor(constants.COLOR_SURFACE if column % 2 else "#FFFFFF")
+            )
+            canvas.setStrokeColor(colors.HexColor(constants.COLOR_LINE))
+            canvas.setLineWidth(0.5)
+            canvas.rect(x, y, box_width, row_height, fill=1, stroke=1)
+            header = Paragraph(_escape(self.headers[column]), self._header_style)
+            body = Paragraph(_escape(value), self._box_value_style)
+            _, header_height = header.wrap(box_width - 10, row_height)
+            _, body_height = body.wrap(box_width - 10, row_height)
+            total_height = header_height + body_height + 3
+            body_y = y + ((row_height - total_height) / 2)
+            body.drawOn(canvas, x + 5, body_y)
+            header.drawOn(canvas, x + 5, body_y + body_height + 3)
+            if column < len(flow) - 1:
+                start = x + box_width + 3
+                end = x + box_width + gap - 3
+                arrow_y = y + (row_height / 2)
+                canvas.setStrokeColor(colors.HexColor(constants.COLOR_INK))
+                canvas.setLineWidth(0.8)
+                canvas.line(start, arrow_y, end, arrow_y)
+                canvas.line(end, arrow_y, end - 4, arrow_y + 3)
+                canvas.line(end, arrow_y, end - 4, arrow_y - 3)
+
+    def _draw_chevron_row(
+        self, canvas: Canvas, flow: Sequence[str], y: float, row_height: float
+    ) -> None:
+        chevron_height = _FLOW_CHEVRON_BODY_HEIGHT_MM * mm
+        box_width = self._chevron_width(flow)
+        tip = min(_FLOW_CHEVRON_TIP_PT, box_width * 0.18)
+        for column, value in enumerate(flow):
+            x = column * (box_width + _FLOW_CHEVRON_GAP_PT)
+            body_y = y
+            points = [
+                (x, body_y),
+                (x + box_width - tip, body_y),
+                (x + box_width, body_y + (chevron_height / 2)),
+                (x + box_width - tip, body_y + chevron_height),
+                (x, body_y + chevron_height),
+            ]
+            if column > 0:
+                points.append((x + tip, body_y + (chevron_height / 2)))
+            path = canvas.beginPath()
+            path.moveTo(*points[0])
+            for point in points[1:]:
+                path.lineTo(*point)
+            path.close()
+            canvas.setFillColor(
+                colors.HexColor(
+                    _composition_color(constants.CHART_PALETTE, column, len(flow))
+                )
+            )
+            canvas.drawPath(path, fill=1, stroke=0)
+
+            header = Paragraph(_escape(self.headers[column]), self._header_style)
+            _, header_height = header.wrap(box_width - 8, row_height - chevron_height)
+            header.drawOn(canvas, x + 4, body_y + chevron_height + 3)
+
+            text_width = max(8.0, box_width - (tip * 1.6))
+            body = Paragraph(_escape(value), self._chevron_value_style)
+            _, text_height = body.wrap(text_width, chevron_height)
+            text_x = x + ((box_width - text_width) / 2)
+            text_y = body_y + ((chevron_height - text_height) / 2)
+            body.drawOn(canvas, text_x, text_y)
+
     def draw(self) -> None:
         canvas = cast(Canvas, self.canv)
         for row_index, flow in enumerate(self.visual.flows):
-            gap = 8 * mm
             row_height = self._row_heights[row_index]
-            box_width = self._box_width(flow)
             y = self.height - sum(self._row_heights[: row_index + 1]) - (row_index * self.row_gap)
-            for column, value in enumerate(flow):
-                x = column * (box_width + gap)
-                canvas.setFillColor(
-                    colors.HexColor(constants.COLOR_HEADER if column % 2 else "#FFFFFF")
-                )
-                canvas.setStrokeColor(colors.HexColor(constants.COLOR_LINE))
-                canvas.setLineWidth(0.55)
-                canvas.roundRect(x, y, box_width, row_height, 4, fill=1, stroke=1)
-                header = Paragraph(_escape(self.headers[column]), self._header_style)
-                body = Paragraph(_escape(value), self._value_style)
-                _, header_height = header.wrap(box_width - 10, row_height)
-                _, body_height = body.wrap(box_width - 10, row_height)
-                total_height = header_height + body_height + 3
-                body_y = y + ((row_height - total_height) / 2)
-                body.drawOn(canvas, x + 5, body_y)
-                header.drawOn(canvas, x + 5, body_y + body_height + 3)
-                if column < len(flow) - 1:
-                    start = x + box_width + 3
-                    end = x + box_width + gap - 3
-                    arrow_y = y + (row_height / 2)
-                    canvas.setStrokeColor(colors.HexColor(constants.COLOR_INK))
-                    canvas.setLineWidth(0.8)
-                    canvas.line(start, arrow_y, end, arrow_y)
-                    canvas.line(end, arrow_y, end - 4, arrow_y + 3)
-                    canvas.line(end, arrow_y, end - 4, arrow_y - 3)
+            if self._chevron_rows[row_index]:
+                self._draw_chevron_row(canvas, flow, y, row_height)
+            else:
+                self._draw_box_row(canvas, flow, y, row_height)
 
 
 #: 표지 실적 띠가 들어가는 영역 (상단에서 mm).
@@ -675,18 +876,12 @@ _COVER_METRICS_BOTTOM_MM: Final[float] = 166.0
 #: 찍히므로(핵심 요약이 191mm를 쓰는 것과 같은 이유) 이만큼 안쪽에서 시작해야
 #: «실제로 보이는 글자»가 정본의 138mm 경계 안에 들어온다. 실측 1.5mm.
 _COVER_METRICS_ASCENDER_INSET_MM: Final[float] = 1.5
-#: 띠 값 글자 크기. 정본 6-1절의 15~18pt 범위이며 표지 제목(31pt)보다 작고
-#: 장 제목(17pt)을 넘지 않는다.
-_COVER_METRIC_VALUE_PT: Final[float] = 16.5
-_COVER_METRIC_VALUE_LEADING_PT: Final[float] = 20.0
-#: 제목 아래 구분선 — 표 테두리와 같은 0.55pt 회색 선을 쓴다.
-_COVER_METRICS_RULE_PT: Final[float] = 0.55
-#: 칸 사이 좌우 여백(pt). 값이 옆 칸 글자에 붙어 읽히지 않게 한다.
-_COVER_METRICS_COLUMN_GAP_PT: Final[float] = 8.0
 #: 제목·구분선·라벨·값 사이 세로 간격(pt).
 _COVER_METRICS_TITLE_GAP_PT: Final[float] = 3.0
 _COVER_METRICS_LABEL_GAP_PT: Final[float] = 7.0
 _COVER_METRICS_VALUE_GAP_PT: Final[float] = 2.0
+_COVER_METRICS_CARD_GAP_PT: Final[float] = 6.0
+_COVER_METRICS_CARD_PADDING_PT: Final[float] = 7.0
 
 
 class _CoverContent(Flowable):
@@ -744,21 +939,26 @@ class _CoverContent(Flowable):
         summary = _summary_table(
             self.report, self.styles, self.width, projection=self.projection
         )
-        if summary is None:
-            return
-        summary_heading = Paragraph("핵심 요약", self.styles["heading"])
-        _, heading_height = summary_heading.wrap(self.width, 20 * mm)
-        # Paragraph glyph ascender가 선언 좌표보다 약 0.75mm 위에 찍히므로 1mm
-        # 안쪽에 두어 실제 보이는 글자도 정본의 190mm 경계 안에 들어오게 한다.
-        summary_top_page = A4[1] - (191 * mm)
-        heading_y = summary_top_page - constants.PAGE_BOTTOM_MARGIN_PT - heading_height
-        summary_heading.drawOn(canvas, 0, heading_y)
-        rule_y = heading_y - 5
-        canvas.setStrokeColor(colors.HexColor(constants.COLOR_INK))
-        canvas.setLineWidth(1.0)
-        canvas.line(0, rule_y, self.width, rule_y)
-        _, table_height = summary.wrap(self.width, 70 * mm)
-        summary.drawOn(canvas, 0, rule_y - 6 - table_height)
+        if summary is not None:
+            summary_heading = Paragraph("핵심 요약", self.styles["cover_heading"])
+            _, heading_height = summary_heading.wrap(self.width, 20 * mm)
+            # Paragraph glyph ascender가 선언 좌표보다 약 0.75mm 위에 찍히므로 1mm
+            # 안쪽에 두어 실제 보이는 글자도 정본의 190mm 경계 안에 들어오게 한다.
+            summary_top_page = A4[1] - (191 * mm)
+            heading_y = summary_top_page - constants.PAGE_BOTTOM_MARGIN_PT - heading_height
+            summary_heading.drawOn(canvas, 0, heading_y)
+            rule_y = heading_y - 5
+            canvas.setStrokeColor(colors.white)
+            canvas.setLineWidth(1.0)
+            canvas.line(0, rule_y, self.width, rule_y)
+            _, table_height = summary.wrap(self.width, 70 * mm)
+            summary.drawOn(canvas, 0, rule_y - 6 - table_height)
+
+        footer = _cover_footer(self.report)
+        if footer:
+            footer_paragraph = Paragraph(_escape(footer), self.styles["cover_footer"])
+            _, footer_height = footer_paragraph.wrap(self.width, 10 * mm)
+            footer_paragraph.drawOn(canvas, 0, 13 - footer_height)
 
     def _draw_cover_metrics(
         self,
@@ -773,6 +973,8 @@ class _CoverContent(Flowable):
         ``cover_metrics``)이 표에서 글자 그대로 옮겨 온 값만 배치한다
         (정본 6-1절 「새로 계산한 숫자 금지」).
         """
+
+        items = items[:4]
 
         # 선언 좌표가 아니라 «실제로 보이는 글자»가 정본 영역 안에 들어와야 한다.
         # ascender 여유만큼 안쪽에서 시작한다 (핵심 요약이 191mm를 쓰는 것과 같다).
@@ -791,13 +993,22 @@ class _CoverContent(Flowable):
         title.drawOn(canvas, 0, band_top - title_height)
 
         rule_y = band_top - title_height - _COVER_METRICS_TITLE_GAP_PT
-        canvas.setStrokeColor(colors.HexColor(constants.COLOR_LINE))
-        canvas.setLineWidth(_COVER_METRICS_RULE_PT)
-        canvas.line(0, rule_y, self.width, rule_y)
-
-        column_width = self.width / len(items)
-        text_width = column_width - _COVER_METRICS_COLUMN_GAP_PT
+        card_bottom = (
+            A4[1]
+            - (_COVER_METRICS_BOTTOM_MM * mm)
+            - constants.PAGE_BOTTOM_MARGIN_PT
+        )
+        card_top = rule_y - 4
+        card_height = max(1.0, card_top - card_bottom)
+        card_width = (
+            self.width - (_COVER_METRICS_CARD_GAP_PT * (len(items) - 1))
+        ) / len(items)
+        text_width = card_width - (_COVER_METRICS_CARD_PADDING_PT * 2)
         for index, (item_label, item_value, item_unit) in enumerate(items):
+            card_x = index * (card_width + _COVER_METRICS_CARD_GAP_PT)
+            canvas.setStrokeColor(colors.white)
+            canvas.setLineWidth(0.5)
+            canvas.rect(card_x, card_bottom, card_width, card_height, fill=0, stroke=1)
             label = Paragraph(
                 _escape(item_label), self.styles["cover_metric_label"]
             )
@@ -806,16 +1017,20 @@ class _CoverContent(Flowable):
                 f"{_escape(item_value)} "
                 f'<font name="{constants.FONT_REGULAR}" '
                 f'size="{constants.SMALL_FONT_SIZE_PT}" '
-                f'color="{constants.COLOR_MUTED}">{_escape(item_unit)}</font>',
+                f'color="{constants.COLOR_LINE}">{_escape(item_unit)}</font>',
                 self.styles["cover_metric_value"],
             )
             _, label_height = label.wrap(text_width, 10 * mm)
             _, value_height = value.wrap(text_width, 14 * mm)
-            label_y = rule_y - _COVER_METRICS_LABEL_GAP_PT - label_height
-            label.drawOn(canvas, index * column_width, label_y)
+            label_y = card_top - _COVER_METRICS_CARD_PADDING_PT - label_height
+            label.drawOn(
+                canvas,
+                card_x + _COVER_METRICS_CARD_PADDING_PT,
+                label_y,
+            )
             value.drawOn(
                 canvas,
-                index * column_width,
+                card_x + _COVER_METRICS_CARD_PADDING_PT,
                 label_y - _COVER_METRICS_VALUE_GAP_PT - value_height,
             )
 
@@ -1100,9 +1315,9 @@ def _styles() -> dict[str, ParagraphStyle]:
             parent=base["Title"],
             fontName=constants.FONT_SEMIBOLD,
             fontSize=constants.TITLE_FONT_SIZE_PT,
-            leading=35.5,
+            leading=39.0,
             alignment=TA_LEFT,
-            textColor=ink,
+            textColor=colors.white,
             spaceAfter=8,
             wordWrap="CJK",
         ),
@@ -1113,7 +1328,7 @@ def _styles() -> dict[str, ParagraphStyle]:
             fontSize=7.7,
             leading=10.8,
             alignment=TA_LEFT,
-            textColor=muted,
+            textColor=colors.HexColor(constants.COLOR_LINE),
             spaceAfter=2,
             wordWrap="CJK",
         ),
@@ -1126,21 +1341,40 @@ def _styles() -> dict[str, ParagraphStyle]:
             fontSize=constants.CARD_FONT_SIZE_PT,
             leading=constants.CARD_LEADING_PT,
             alignment=TA_LEFT,
-            textColor=muted,
+            textColor=colors.HexColor(constants.COLOR_LINE),
             wordWrap="CJK",
         ),
         "cover_metric_value": ParagraphStyle(
             "CoverMetricValue",
             parent=base["BodyText"],
             fontName=constants.FONT_SEMIBOLD,
-            fontSize=_COVER_METRIC_VALUE_PT,
-            leading=_COVER_METRIC_VALUE_LEADING_PT,
+            fontSize=constants.COVER_METRIC_VALUE_FONT_SIZE_PT,
+            leading=25.0,
             alignment=TA_LEFT,
-            textColor=ink,
+            textColor=colors.white,
+            wordWrap="CJK",
+        ),
+        "cover_heading": ParagraphStyle(
+            "CoverHeading",
+            parent=base["Heading2"],
+            fontName=constants.FONT_REGULAR,
+            fontSize=constants.HEADING_FONT_SIZE_PT,
+            leading=24.0,
+            textColor=colors.white,
+            wordWrap="CJK",
+        ),
+        "cover_footer": ParagraphStyle(
+            "CoverFooter",
+            parent=base["BodyText"],
+            fontName=constants.FONT_REGULAR,
+            fontSize=8.0,
+            leading=10.0,
+            textColor=colors.HexColor(constants.COLOR_LINE),
+            alignment=TA_LEFT,
             wordWrap="CJK",
         ),
         # 표지 다음 첫 본문 페이지 맨 위 마스트헤드 회사명 줄.
-        # cover_title(31pt)보다 작고 heading(17pt)보다 큰 좌측 정렬 밴드다.
+        # cover_title(34pt)보다 작고 heading(20pt)보다 큰 좌측 정렬 밴드다.
         "masthead_title": ParagraphStyle(
             "MastheadTitle",
             parent=base["Title"],
@@ -1155,9 +1389,9 @@ def _styles() -> dict[str, ParagraphStyle]:
         "heading": ParagraphStyle(
             "ReportHeading",
             parent=base["Heading2"],
-            fontName=constants.FONT_SEMIBOLD,
+            fontName=constants.FONT_REGULAR,
             fontSize=constants.HEADING_FONT_SIZE_PT,
-            leading=21,
+            leading=24,
             textColor=ink,
             spaceBefore=18,
             spaceAfter=7,
@@ -1170,7 +1404,7 @@ def _styles() -> dict[str, ParagraphStyle]:
             fontName=constants.FONT_REGULAR,
             fontSize=constants.BODY_FONT_SIZE_PT,
             leading=constants.BODY_LEADING_PT,
-            textColor=ink,
+            textColor=muted,
             spaceAfter=7,
             wordWrap="CJK",
         ),
@@ -1180,7 +1414,7 @@ def _styles() -> dict[str, ParagraphStyle]:
             fontName=constants.FONT_REGULAR,
             fontSize=constants.BODY_FONT_SIZE_PT,
             leading=constants.BODY_LEADING_PT,
-            textColor=ink,
+            textColor=muted,
             alignment=TA_CENTER,
             spaceAfter=7,
             wordWrap="CJK",
@@ -1192,6 +1426,15 @@ def _styles() -> dict[str, ParagraphStyle]:
             fontSize=constants.SUBHEADING_FONT_SIZE_PT,
             leading=14.0,
             textColor=ink,
+            wordWrap="CJK",
+        ),
+        "card_title_on_ink": ParagraphStyle(
+            "ReportCardTitleOnInk",
+            parent=base["BodyText"],
+            fontName=constants.FONT_SEMIBOLD,
+            fontSize=constants.SUBHEADING_FONT_SIZE_PT,
+            leading=14.0,
+            textColor=colors.white,
             wordWrap="CJK",
         ),
         "card_label": ParagraphStyle(
@@ -1268,6 +1511,25 @@ def _styles() -> dict[str, ParagraphStyle]:
             fontSize=constants.TABLE_FONT_SIZE_PT,
             leading=constants.TABLE_LEADING_PT,
             textColor=ink,
+            alignment=TA_RIGHT,
+            wordWrap="CJK",
+        ),
+        "table_head_on_ink": ParagraphStyle(
+            "ReportTableHeadOnInk",
+            parent=base["BodyText"],
+            fontName=constants.FONT_SEMIBOLD,
+            fontSize=constants.TABLE_FONT_SIZE_PT,
+            leading=constants.TABLE_LEADING_PT,
+            textColor=colors.white,
+            wordWrap="CJK",
+        ),
+        "table_head_numeric_on_ink": ParagraphStyle(
+            "ReportTableHeadNumericOnInk",
+            parent=base["BodyText"],
+            fontName=constants.FONT_SEMIBOLD,
+            fontSize=constants.TABLE_FONT_SIZE_PT,
+            leading=constants.TABLE_LEADING_PT,
+            textColor=colors.white,
             alignment=TA_RIGHT,
             wordWrap="CJK",
         ),
@@ -1366,7 +1628,9 @@ def _flow_card_table(
         return None
     data: list[list[Paragraph]] = []
     commands: list[tuple[object, ...]] = [
-        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor(constants.COLOR_LINE)),
+        ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor(constants.COLOR_LINE)),
+        ("LINEABOVE", (0, 0), (-1, 0), 1.0, colors.HexColor(constants.COLOR_INK)),
+        ("LINEBELOW", (0, -1), (-1, -1), 1.0, colors.HexColor(constants.COLOR_INK)),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("LEFTPADDING", (0, 0), (-1, -1), 7),
         ("RIGHTPADDING", (0, 0), (-1, -1), 7),
@@ -1375,10 +1639,15 @@ def _flow_card_table(
     ]
     if card.title:
         data.append(
-            [Paragraph(_escape(card.title), styles["card_title"]), Paragraph("", styles["card_body"])]
+            [
+                Paragraph(_escape(card.title), styles["card_title_on_ink"]),
+                Paragraph("", styles["card_body"]),
+            ]
         )
         commands.append(("SPAN", (0, 0), (1, 0)))
-        commands.append(("LINEBELOW", (0, 0), (-1, 0), 0.6, colors.HexColor(constants.COLOR_LINE)))
+        commands.append(
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(constants.COLOR_HEADER))
+        )
     field_start = len(data)
     data.extend(
         [
@@ -1386,12 +1655,14 @@ def _flow_card_table(
             for field in card.fields
         ]
     )
-    # 마지막 줄 밑에는 선을 안 긋는다(바깥 BOX 테두리와 겹친다) — 줄이
-    # 하나뿐이면 그을 «가운데» 선도 없다.
-    if len(data) - field_start > 1:
-        commands.append(
-            ("LINEBELOW", (0, field_start), (-1, -2), 0.45, colors.HexColor(constants.COLOR_LINE))
+    commands.append(
+        (
+            "BACKGROUND",
+            (0, field_start),
+            (0, -1),
+            colors.HexColor(constants.COLOR_SURFACE),
         )
+    )
     card_table = Table(data, colWidths=[width * 0.29, width * 0.71], hAlign="LEFT")
     card_table.setStyle(TableStyle(commands))
     return card_table
@@ -1542,7 +1813,9 @@ def _add_grid_table(
     repeat_rows = 0
     if headers:
         header_styles = [
-            styles["table_head_numeric"] if numeric and index > 0 else styles["table_head"]
+            styles["table_head_numeric_on_ink"]
+            if numeric and index > 0
+            else styles["table_head_on_ink"]
             for index in range(max_columns)
         ]
         header_rows = chunk_row(headers, header_styles)
@@ -1565,7 +1838,9 @@ def _add_grid_table(
         hAlign="LEFT",
     )
     commands: list[tuple[object, ...]] = [
-        ("GRID", (0, 0), (-1, -1), 0.55, colors.HexColor(constants.COLOR_LINE)),
+        ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor(constants.COLOR_LINE)),
+        ("LINEABOVE", (0, 0), (-1, 0), 1.0, colors.HexColor(constants.COLOR_INK)),
+        ("LINEBELOW", (0, -1), (-1, -1), 1.0, colors.HexColor(constants.COLOR_INK)),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("LEFTPADDING", (0, 0), (-1, -1), 6),
         ("RIGHTPADDING", (0, 0), (-1, -1), 6),
@@ -1574,6 +1849,15 @@ def _add_grid_table(
     ]
     if headers:
         commands.append(("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(constants.COLOR_HEADER)))
+    if len(data) > repeat_rows:
+        commands.append(
+            (
+                "BACKGROUND",
+                (0, repeat_rows),
+                (0, -1),
+                colors.HexColor(constants.COLOR_SURFACE),
+            )
+        )
     if numeric and max_columns > 1:
         commands.append(("ALIGN", (1, 0), (-1, -1), "RIGHT"))
     report_table.setStyle(TableStyle(commands))
@@ -1684,7 +1968,13 @@ def _add_section(
     title = _section_heading(section)
     heading_flowables: list[Flowable] = [
         _OutlineAnchor(anchor, title, level=1),
-        Paragraph(_section_heading_markup(section), styles["heading"]),
+        _SectionHeading(
+            _section_heading_markup(section),
+            section.title,
+            _section_badge_text(section),
+            styles["heading"],
+            width,
+        ),
         _HorizontalRule(width),
         Spacer(1, 10),
     ]
@@ -1766,7 +2056,7 @@ def _add_section_content_block(
         caption = f"확인 범위 · {caption}"
     data: list[list[Paragraph]] = [
         [
-            Paragraph(_escape(caption), styles["card_title"]),
+            Paragraph(_escape(caption), styles["card_title_on_ink"]),
             Paragraph("", styles["card_body"]),
         ]
     ]
@@ -1786,9 +2076,11 @@ def _add_section_content_block(
         TableStyle(
             [
                 ("SPAN", (0, 0), (1, 0)),
-                ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor(constants.COLOR_LINE)),
-                ("LINEBELOW", (0, 0), (-1, 0), 0.6, colors.HexColor(constants.COLOR_LINE)),
-                ("LINEBELOW", (0, 1), (-1, -2), 0.45, colors.HexColor(constants.COLOR_LINE)),
+                ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor(constants.COLOR_LINE)),
+                ("LINEABOVE", (0, 0), (-1, 0), 1.0, colors.HexColor(constants.COLOR_INK)),
+                ("LINEBELOW", (0, -1), (-1, -1), 1.0, colors.HexColor(constants.COLOR_INK)),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(constants.COLOR_HEADER)),
+                ("BACKGROUND", (0, 1), (0, -1), colors.HexColor(constants.COLOR_SURFACE)),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 7),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 7),
@@ -1994,7 +2286,13 @@ def _add_projection_section(
     title = _section_heading(display)
     heading_flowables: list[Flowable] = [
         _OutlineAnchor(anchor, title, level=1),
-        Paragraph(_section_heading_markup(display), styles["heading"]),
+        _SectionHeading(
+            _section_heading_markup(display),
+            display.title,
+            _section_badge_text(display),
+            styles["heading"],
+            width,
+        ),
         _HorizontalRule(width),
         Spacer(1, 10),
     ]
@@ -2038,15 +2336,36 @@ def _section_heading(section: ReportSection | PublicSectionDisplay) -> str:
     return section_display_heading(section.cell, section.title)
 
 
+def _section_badge_text(section: ReportSection | PublicSectionDisplay) -> str:
+    if section.display_number:
+        return str(section.display_number).strip()
+    heading = _section_heading(section)
+    return heading.split(".", 1)[0].strip()
+
+
 def _section_heading_markup(section: ReportSection | PublicSectionDisplay) -> str:
-    title = _escape(_section_heading(section))
+    badge = _escape(_section_badge_text(section))
+    title = _escape(section.title)
+    prefix = (
+        f'<super><font name="{constants.FONT_SEMIBOLD}" '
+        f'size="{constants.SECTION_BADGE_FONT_SIZE_PT}" color="#FFFFFF">'
+        f"{badge}.</font></super>&nbsp;&nbsp;&nbsp;&nbsp;"
+    )
     if section.cell not in TIME_SECTION_IDS or not section.tag.strip():
-        return title
+        return f"{prefix}{title}"
     tag = _escape(section.tag.strip())
     return (
-        f'{title}&nbsp;&nbsp;<font name="{constants.FONT_REGULAR}" '
+        f'{prefix}{title}&nbsp;&nbsp;<font name="{constants.FONT_REGULAR}" '
         f'size="{constants.SMALL_FONT_SIZE_PT}" color="{constants.COLOR_MUTED}">'
         f"{tag}</font>"
+    )
+
+
+def _appendix_heading_markup() -> str:
+    return (
+        f'<super><font name="{constants.FONT_SEMIBOLD}" '
+        f'size="{constants.SECTION_BADGE_FONT_SIZE_PT}" color="#FFFFFF">'
+        "부록.</font></super>&nbsp;&nbsp;&nbsp;&nbsp;출처와 검증 상태"
     )
 
 
@@ -2097,19 +2416,25 @@ def _add_citations(
             # 않도록 본문 1~9장과 출처 원장을 페이지 경계로 분리한다.
             PageBreak(),
             _OutlineAnchor("sources", "부록. 출처와 검증 상태", level=0),
-            Paragraph("부록. 출처와 검증 상태", styles["heading"]),
+            _SectionHeading(
+                _appendix_heading_markup(),
+                "출처와 검증 상태",
+                "부록",
+                styles["heading"],
+                A4[0] - (constants.PAGE_MARGIN_PT * 2),
+            ),
             Paragraph(_escape(constants.CITATIONS_NOTE), styles["small"]),
         ]
     )
     width = A4[0] - (constants.PAGE_MARGIN_PT * 2)
     rows: list[list[Paragraph]] = [
         [
-            Paragraph("#", styles["table_head"]),
-            Paragraph("자료", styles["table_head"]),
-            Paragraph("기준일·자료 상태", styles["table_head"]),
-            Paragraph("사실 검증", styles["table_head"]),
-            Paragraph("원문 위치", styles["table_head"]),
-            Paragraph("본문 사용 장", styles["table_head"]),
+            Paragraph("#", styles["table_head_on_ink"]),
+            Paragraph("자료", styles["table_head_on_ink"]),
+            Paragraph("기준일·자료 상태", styles["table_head_on_ink"]),
+            Paragraph("사실 검증", styles["table_head_on_ink"]),
+            Paragraph("원문 위치", styles["table_head_on_ink"]),
+            Paragraph("본문 사용 장", styles["table_head_on_ink"]),
         ]
     ]
     for number, label_markup, status, verification, location, used_in in entries:
@@ -2139,8 +2464,11 @@ def _add_citations(
     table.setStyle(
         TableStyle(
             [
-                ("GRID", (0, 0), (-1, -1), 0.55, colors.HexColor(constants.COLOR_LINE)),
+                ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor(constants.COLOR_LINE)),
+                ("LINEABOVE", (0, 0), (-1, 0), 1.0, colors.HexColor(constants.COLOR_INK)),
+                ("LINEBELOW", (0, -1), (-1, -1), 1.0, colors.HexColor(constants.COLOR_INK)),
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(constants.COLOR_HEADER)),
+                ("BACKGROUND", (0, 1), (0, -1), colors.HexColor(constants.COLOR_SURFACE)),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 6),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 6),
@@ -2216,10 +2544,8 @@ def _source_used_sections(source: Source) -> str:
 
 def _cover_metadata(report: Report) -> str:
     display_date = _display_report_date(report)
-    generated_date = _display_generated_at(report)
     values = [
         f"기준일 {display_date}" if display_date else "",
-        f"내용 생성 {generated_date}" if generated_date else "",
         report.corp_type.strip(),
         report.analysis_period.strip(),
         (
@@ -2227,6 +2553,17 @@ def _cover_metadata(report: Report) -> str:
             if report.latest_performance_period.strip()
             else ""
         ),
+    ]
+    return " · ".join(value for value in values if value)
+
+
+def _cover_footer(report: Report) -> str:
+    """표지 하단에는 공개 근거와 결정된 생성일만 간결하게 표시한다."""
+
+    generated_date = _display_generated_at(report)
+    values = [
+        "공개 자료 기반",
+        f"생성일 {generated_date}" if generated_date else "",
     ]
     return " · ".join(value for value in values if value)
 
@@ -2289,9 +2626,9 @@ def _summary_table(
     table.setStyle(
         TableStyle(
             [
-                ("GRID", (0, 0), (-1, -1), 0.55, colors.HexColor(constants.COLOR_LINE)),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor(constants.COLOR_LINE)),
                 ("BACKGROUND", (0, 0), (0, -1), colors.HexColor(constants.COLOR_INK)),
-                ("ROWBACKGROUNDS", (1, 0), (-1, -1), [colors.white, colors.HexColor(constants.COLOR_HEADER)]),
+                ("BACKGROUND", (1, 0), (-1, -1), colors.white),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 6),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 6),
@@ -2358,6 +2695,48 @@ def _document_header(
     return items
 
 
+def _draw_top_band(
+    canvas: Canvas,
+    *,
+    title: str,
+    section_name: str,
+    report_date: str,
+) -> None:
+    """본문 페이지 위에 보고서명과 그 페이지의 첫 장 제목을 그린다."""
+
+    right_values = [
+        section_name.strip(),
+        f"기준일 {report_date}" if report_date.strip() else "",
+    ]
+    right_text = " · ".join(value for value in right_values if value)
+    band_height = constants.PAGE_HEADER_HEIGHT_PT
+    baseline_y = A4[1] - band_height + 7.0
+    canvas.saveState()
+    canvas.setFillColor(colors.HexColor(constants.COLOR_INK))
+    canvas.rect(0, A4[1] - band_height, A4[0], band_height, fill=1, stroke=0)
+    canvas.setFillColor(colors.white)
+    canvas.setFont(constants.FONT_REGULAR, constants.PAGE_HEADER_FONT_SIZE_PT)
+    _draw_text_with_fallback(
+        canvas,
+        constants.PAGE_MARGIN_PT,
+        baseline_y,
+        title,
+        font_name=constants.FONT_REGULAR,
+        font_size=constants.PAGE_HEADER_FONT_SIZE_PT,
+    )
+    if right_text:
+        _draw_text_with_fallback(
+            canvas,
+            A4[0] - constants.PAGE_MARGIN_PT,
+            baseline_y,
+            right_text,
+            font_name=constants.FONT_REGULAR,
+            font_size=constants.PAGE_HEADER_FONT_SIZE_PT,
+            alignment="right",
+        )
+    canvas.restoreState()
+
+
 def _page_furniture(canvas: Canvas, doc: SimpleDocTemplate) -> None:
     title = cast(str, getattr(doc, "report_title", "분석 보고서"))
     company = cast(str, getattr(doc, "report_company", ""))
@@ -2368,31 +2747,28 @@ def _page_furniture(canvas: Canvas, doc: SimpleDocTemplate) -> None:
     canvas.setTitle(title)
     canvas.setAuthor(author)
     canvas.setSubject(subject)
-    if doc.page > 1:
-        canvas.setFont(constants.FONT_REGULAR, constants.META_FONT_SIZE_PT)
-        canvas.setFillColor(colors.HexColor(constants.COLOR_MUTED))
-        y = A4[1] - 34
-        _draw_text_with_fallback(
-            canvas,
+    setattr(canvas, "_report_title", title)
+    setattr(canvas, "_report_date", report_date)
+    if doc.page == 1:
+        canvas.setFillColor(colors.HexColor(constants.COLOR_INK))
+        canvas.rect(0, 0, A4[0], A4[1], fill=1, stroke=0)
+        canvas.setStrokeColor(colors.white)
+        canvas.setLineWidth(0.75)
+        canvas.line(
             constants.PAGE_MARGIN_PT,
-            y,
-            title,
-            font_name=constants.FONT_REGULAR,
-            font_size=constants.META_FONT_SIZE_PT,
+            A4[1] - constants.PAGE_TOP_MARGIN_PT,
+            A4[0] - constants.PAGE_MARGIN_PT,
+            A4[1] - constants.PAGE_TOP_MARGIN_PT,
         )
-        if report_date:
-            _draw_text_with_fallback(
-                canvas,
-                A4[0] - constants.PAGE_MARGIN_PT,
-                y,
-                f"기준일 {report_date}",
-                font_name=constants.FONT_REGULAR,
-                font_size=constants.META_FONT_SIZE_PT,
-                alignment="right",
-            )
+        canvas.line(
+            constants.PAGE_MARGIN_PT,
+            constants.PAGE_BOTTOM_MARGIN_PT,
+            A4[0] - constants.PAGE_MARGIN_PT,
+            constants.PAGE_BOTTOM_MARGIN_PT,
+        )
+    else:
         canvas.setStrokeColor(colors.HexColor(constants.COLOR_LINE))
         canvas.setLineWidth(0.5)
-        canvas.line(constants.PAGE_MARGIN_PT, y - 8, A4[0] - constants.PAGE_MARGIN_PT, y - 8)
         footer_line_y = 32
         canvas.line(
             constants.PAGE_MARGIN_PT,
