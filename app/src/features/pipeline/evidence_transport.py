@@ -12,7 +12,9 @@ import json
 import re
 from collections.abc import Mapping
 from typing import Any, Final
+from urllib.parse import urlsplit
 
+from src.core.news_intake_switch import news_intake_enabled
 from src.features.composer.constants import (
     DART_DOCUMENT_HOST,
     DART_DOCUMENT_URL_TEMPLATE,
@@ -41,6 +43,7 @@ from src.shared.report_evidence.constants import (
     OFFICIAL_WEB_SOURCE_KINDS,
     SOURCE_KIND_OFFICIAL_IR_PDF,
     SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE,
+    SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS,
 )
 from src.shared.report_evidence.identity_verified_web import (
     verified_dart_filing_binding_allows_url,
@@ -51,9 +54,11 @@ from src.shared.report_evidence.profile_domain_attestation import (
 )
 from src.shared.report_evidence.source_kind_policy import (
     FORMAL_DOCUMENT_WRITER_TRUST_BY_SOURCE_KIND,
+    SUPPLEMENTARY_WRITER_TRUST,
     FormalSourceKindContractError,
     document_slots_for_formal_source_kind,
     formal_source_writer_ineligibility_reason,
+    supplementary_slots_for_source_kind,
 )
 from src.shared.report_quality.source_identity import (
     bind_declared_document_identity_to_url,
@@ -248,7 +253,10 @@ def _typed_metadata(
     str,
     str,
 ]:
-    if source_kind not in FORMAL_DOCUMENT_SOURCE_KINDS:
+    is_supplementary = source_kind in SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS
+    if source_kind not in FORMAL_DOCUMENT_SOURCE_KINDS and not (
+        is_supplementary and news_intake_enabled()
+    ):
         raise _unregistered_kind()
     missing = _TYPED_REQUIRED_KEYS - set(raw)
     if missing:
@@ -274,7 +282,11 @@ def _typed_metadata(
     if any(slot_id not in _SLOT_SECTION_OF for slot_id in slot_ids):
         raise _packet_invalid("typed 근거에 알 수 없는 의미 칸이 있습니다")
     try:
-        allowed_slot_ids = document_slots_for_formal_source_kind(source_kind)
+        allowed_slot_ids = (
+            supplementary_slots_for_source_kind(source_kind)
+            if is_supplementary
+            else document_slots_for_formal_source_kind(source_kind)
+        )
     except FormalSourceKindContractError as error:
         # 위의 exact source-kind 검사와 함께 유지하는 방어 심층화다. 정본 두
         # 부분이 나중에 어긋나도 등록되지 않은 종류를 packet에 넣지 않는다.
@@ -309,10 +321,18 @@ def _typed_metadata(
     document_id = _optional_text(raw, "문서ID")
     if not document_id:
         raise _packet_invalid("typed 근거의 원본 문서 ID가 비었습니다")
-    expected_identity = collected_document_identity(
-        source_kind=source_kind,
-        document_id=document_id,
-        url=source_url,
+    expected_identity = (
+        document_identity_from_parts(
+            document_id=document_id,
+            host=(urlsplit(source_url).hostname or ""),
+            url=source_url,
+        )
+        if is_supplementary
+        else collected_document_identity(
+            source_kind=source_kind,
+            document_id=document_id,
+            url=source_url,
+        )
     )
     if (
         not expected_identity
@@ -330,6 +350,7 @@ def _typed_metadata(
     identity_binding = _require_text(
         raw[RAW_EVIDENCE_IDENTITY_BINDING_KEY],
         field=RAW_EVIDENCE_IDENTITY_BINDING_KEY,
+        allow_empty=is_supplementary,
     )
     if (
         source_kind == SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE
@@ -376,7 +397,28 @@ def _typed_metadata(
     )
     if any(redirect_parts) and not all(redirect_parts):
         raise _packet_invalid("typed 근거의 redirect proof 세 필드가 갈렸습니다")
-    if source_kind in OFFICIAL_WEB_SOURCE_KINDS:
+    if is_supplementary:
+        if (
+            not source_url
+            or not _optional_text(raw, "문서일")
+            or not _optional_text(raw, "문서명")
+            or not _optional_text(raw, "원문위치")
+        ):
+            raise _packet_invalid(
+                "typed 보조 문서의 언론사·제목·날짜·URL·원문 위치가 비었습니다"
+            )
+        if any(
+            (
+                domain_attestation_source_id,
+                domain_attestation_evidence,
+                reporting_period,
+                attachment_url,
+                ir_metadata_verification,
+                *redirect_parts,
+            )
+        ):
+            raise _packet_invalid("typed 보조 문서에 공식 웹·IR provenance가 섞였습니다")
+    elif source_kind in OFFICIAL_WEB_SOURCE_KINDS:
         strict_url_proof = verified_dart_filing_binding_allows_url(
             identity_binding,
             source_url=source_url,
@@ -421,31 +463,35 @@ def _typed_metadata(
     ):
         raise _packet_invalid("typed DART 공시에 웹·IR provenance가 섞였습니다")
 
-    writer_tier, writer_requirement = (
-        FORMAL_DOCUMENT_WRITER_TRUST_BY_SOURCE_KIND[source_kind]
-    )
-    writer_problem = formal_source_writer_ineligibility_reason(
-        source_kind=source_kind,
-        source_tier=writer_tier,
-        requirement=writer_requirement,
-        canonical_url=source_url,
-        publisher=source_publisher,
-        published_on=_optional_text(raw, "문서일"),
-        collected_at=source_collected_on,
-        identity_binding=identity_binding,
-        domain_attestation_source_id=domain_attestation_source_id,
-        domain_attestation_evidence=domain_attestation_evidence,
-        reporting_period=reporting_period,
-        attachment_url=attachment_url,
-        ir_metadata_verification=ir_metadata_verification,
-        domain_redirect_verification=domain_redirect_verification,
-        domain_redirect_from_host=domain_redirect_from_host,
-        domain_redirect_to_host=domain_redirect_to_host,
-    )
-    if writer_problem:
-        raise _packet_invalid(
-            f"typed formal 문서가 Writer 자격을 잃었습니다: {writer_problem}"
+    if is_supplementary:
+        # 표를 실제 transport가 읽게 해 목록과 Writer 자격이 선언만 남지 않게 한다.
+        SUPPLEMENTARY_WRITER_TRUST[source_kind]
+    else:
+        writer_tier, writer_requirement = (
+            FORMAL_DOCUMENT_WRITER_TRUST_BY_SOURCE_KIND[source_kind]
         )
+        writer_problem = formal_source_writer_ineligibility_reason(
+            source_kind=source_kind,
+            source_tier=writer_tier,
+            requirement=writer_requirement,
+            canonical_url=source_url,
+            publisher=source_publisher,
+            published_on=_optional_text(raw, "문서일"),
+            collected_at=source_collected_on,
+            identity_binding=identity_binding,
+            domain_attestation_source_id=domain_attestation_source_id,
+            domain_attestation_evidence=domain_attestation_evidence,
+            reporting_period=reporting_period,
+            attachment_url=attachment_url,
+            ir_metadata_verification=ir_metadata_verification,
+            domain_redirect_verification=domain_redirect_verification,
+            domain_redirect_from_host=domain_redirect_from_host,
+            domain_redirect_to_host=domain_redirect_to_host,
+        )
+        if writer_problem:
+            raise _packet_invalid(
+                f"typed formal 문서가 Writer 자격을 잃었습니다: {writer_problem}"
+            )
 
     marker_payload = {
         "version": 3,
@@ -468,6 +514,8 @@ def _typed_metadata(
         "domain_redirect_from_host": domain_redirect_from_host,
         "domain_redirect_to_host": domain_redirect_to_host,
     }
+    if is_supplementary:
+        marker_payload["counts_toward_document_floor"] = False
     marker_digest = hashlib.sha256(
         json.dumps(
             marker_payload,
@@ -631,6 +679,9 @@ def build_section_evidence_packet_set(
             domain_redirect_verification=domain_redirect_verification,
             domain_redirect_from_host=domain_redirect_from_host,
             domain_redirect_to_host=domain_redirect_to_host,
+            counts_toward_document_floor=(
+                formal_source_kind not in SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS
+            ),
         )
         for section_id in section_ids:
             fragments_by_section[section_id].append(fragment)

@@ -8,6 +8,7 @@ import json
 
 import pytest
 
+from src.core import news_intake_switch
 from src.features.composer.constants import (
     DART_FINANCIAL_API_HOST,
     SECTION_IDS,
@@ -52,6 +53,7 @@ from src.shared.report_evidence.constants import (
     FORMAL_DOCUMENT_SOURCE_KINDS,
     SOURCE_KIND_DART_BUSINESS_REPORT,
     SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT,
+    SOURCE_KIND_NEWS,
     SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE,
     SOURCE_KIND_OFFICIAL_IR_PDF,
     SOURCE_KIND_OFFICIAL_RECRUIT_PAGE,
@@ -161,6 +163,32 @@ def _without_web_provenance(raw: dict[str, object]) -> dict[str, object]:
     ):
         copied[key] = ""
     return copied
+
+
+def _news_typed_raw() -> dict[str, object]:
+    source_url = "https://news.example/articles/contract-1"
+    raw = _typed_raw(
+        section_id="competitive_position",
+        slot_id="competitive_position:stated_differentiator",
+        source_kind=SOURCE_KIND_NEWS,
+        source_url=source_url,
+        document_id="contract-1",
+        document_identity=document_identity_from_parts(
+            document_id="contract-1",
+            host="news.example",
+            url=source_url,
+        ),
+    )
+    raw.update(
+        {
+            "원문": "가나다전자는 새 계약을 체결했다고 밝혔다.",
+            "문서명": "가나다전자 신규 계약",
+            "원문위치": "기사 본문 2문단",
+            RAW_EVIDENCE_IDENTITY_BINDING_KEY: "",
+            RAW_EVIDENCE_PUBLISHER_KEY: "OO경제",
+        }
+    )
+    return _without_web_provenance(raw)
 
 
 def _verified_web_binding(url: str) -> str:
@@ -403,6 +431,65 @@ def test_typed_문서원문hash는_packet까지_손실없이_결속된다() -> N
     fragment = _fragment_by_id(_build(frags), 99)
 
     assert fragment.document_content_sha256 == "c" * 64
+
+
+def test_뉴스보조조각은_스위치ON에서_transport되고_문서하한표식은_false다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+    monkeypatch.setenv(news_intake_switch.NEWS_INTAKE_ENV_NAME, "1")
+    frags = _all_legacy_frags()
+    frags[99] = _news_typed_raw()
+    try:
+        fragment = _fragment_by_id(_build(frags), 99)
+    finally:
+        news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+
+    assert fragment.formal_source_kind == SOURCE_KIND_NEWS
+    assert fragment.document_content_sha256 == "b" * 64
+    assert fragment.counts_toward_document_floor is False
+
+
+def test_뉴스보조조각은_스위치OFF에서_등록되지않은종류로_거절한다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+    monkeypatch.delenv(news_intake_switch.NEWS_INTAKE_ENV_NAME, raising=False)
+    try:
+        with pytest.raises(EvidenceTransportError) as caught:
+            _build({**_all_legacy_frags(), 99: _news_typed_raw()})
+    finally:
+        news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+
+    assert caught.value.detail_code == (
+        FINAL_GATE_DETAIL_PREFLIGHT_UNREGISTERED_FRAGMENT_KIND
+    )
+
+
+@pytest.mark.parametrize(
+    "slot_id",
+    [
+        "identity:corporate_identity",
+        "past_changes:historical_performance",
+        "competitive_position:comparison_metric",
+    ],
+)
+def test_뉴스보조조각은_정체성_수치_비교슬롯을_주장할수없다(
+    monkeypatch: pytest.MonkeyPatch, slot_id: str
+) -> None:
+    news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+    monkeypatch.setenv(news_intake_switch.NEWS_INTAKE_ENV_NAME, "1")
+    raw = _news_typed_raw()
+    section_id = slot_id.partition(":")[0]
+    raw[RAW_EVIDENCE_SECTION_IDS_KEY] = (section_id,)
+    raw[RAW_EVIDENCE_SLOT_IDS_KEY] = (slot_id,)
+    try:
+        with pytest.raises(EvidenceTransportError) as caught:
+            _build({**_all_legacy_frags(), 99: raw})
+    finally:
+        news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+
+    assert caught.value.detail_code == FINAL_GATE_DETAIL_PREFLIGHT_PACKET_INVALID
 
 
 def test_typed_의미칸은_packet까지_손실없이_운반되고_legacy는_추측하지_않는다() -> None:

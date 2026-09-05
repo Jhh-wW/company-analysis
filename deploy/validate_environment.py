@@ -23,8 +23,12 @@ WEB_AUTH_VARIABLES = (
 REAL_PIPELINE_VARIABLES = (
     "ANTHROPIC_API_KEY",
     "DART_API_KEY",
-    "NAVER_CLIENT_ID",
-    "NAVER_CLIENT_SECRET",
+)
+NEWS_INTAKE_ENV_NAME = "NEWS_INTAKE"
+NEWS_INTAKE_ON_VALUE = "1"
+NEWS_INTAKE_VARIABLES = (
+    "NCP_APIGW_API_KEY_ID",
+    "NCP_APIGW_API_KEY",
 )
 BACKUP_RUNTIME_VARIABLES = (
     "BACKUP_TRIGGER_SECRET",
@@ -822,6 +826,8 @@ def validate(
 
         if pipeline == "real":
             errors.extend(_required(environment, REAL_PIPELINE_VARIABLES))
+            if environment.get(NEWS_INTAKE_ENV_NAME) == NEWS_INTAKE_ON_VALUE:
+                errors.extend(_required(environment, NEWS_INTAKE_VARIABLES))
             seal = environment.get("PROVENANCE_SEAL_SECRET", "")
             if not seal.strip():
                 errors.append("PROVENANCE_SEAL_SECRET: 값이 필요합니다")
@@ -902,6 +908,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         for error in errors:
             print(f"- {error}", file=sys.stderr)
         return 78
+    if (
+        os.environ.get(NEWS_INTAKE_ENV_NAME) != NEWS_INTAKE_ON_VALUE
+        and any(not os.environ.get(name, "").strip() for name in NEWS_INTAKE_VARIABLES)
+    ):
+        print(
+            "경고: NEWS_INTAKE가 1이 아니므로 뉴스 검색 자격 증명 없이 시작합니다.",
+            file=sys.stderr,
+        )
     return 0
 
 

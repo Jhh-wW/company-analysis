@@ -69,9 +69,18 @@ Render에는 forwarded client IP를 신뢰하지 않는 좁은 계약이 세 개
   Dashboard의 예상 청구액을 다시 확인한다. 플랜·요금 숫자는 이 문서에 고정하지 않는다.
 - `PIPELINE=real`, `BETA_ADMIN_ONLY=1`, instance/worker 각각 1개를 유지한다. SQLite 단일
   writer 계약 때문에 scale-out하지 않는다.
-- `ADMIN_EMAILS`, Google OAuth 3개 값과 함께 `ANTHROPIC_API_KEY`, `DART_API_KEY`,
-  `NAVER_CLIENT_ID`, `NAVER_CLIENT_SECRET` 네 provider 비밀을 Render 환경변수로만 주입한다.
+- `ADMIN_EMAILS`, Google OAuth 3개 값과 함께 `ANTHROPIC_API_KEY`, `DART_API_KEY`를
+  Render 환경변수로만 주입한다. 뉴스 검색을 쓸 때는 아래 NAVER API HUB 비밀도 주입한다.
   실제 값은 저장소·문서·로그에 남기지 않는다.
+
+| 환경변수 | 용도 |
+|---|---|
+| `NCP_APIGW_API_KEY_ID` | NAVER API HUB Client ID |
+| `NCP_APIGW_API_KEY` | NAVER API HUB Client Secret |
+
+`NEWS_INTAKE`가 정확히 `"1"`이면 두 변수가 모두 필수이며 하나라도 빠지면 시작 검증에 실패한다.
+그 외에는 두 변수가 없어도 시작하며, 뉴스 검색을 사용하지 않는다는 경고만 한 줄 남긴다.
+
 - `PROVENANCE_SEAL_SECRET`은 32바이트 이상이어야 하며 재배포 뒤에도 같은 값을 보존한다.
 - `PUBLIC_ORIGIN`은 Blueprint가 web service의 `RENDER_EXTERNAL_URL`을 self-reference해
   고정한다. `GOOGLE_REDIRECT_URI`는 정확히 `<PUBLIC_ORIGIN>/auth/callback`이어야 한다.
@@ -108,7 +117,9 @@ gate의 승인 증거를 요구하지 않는다. 조건 하나라도 달라지�
 | 환경변수 | 켜면 달라지는 것 | 되돌리는 법 |
 |---|---|---|
 | `TYPED_DART_COLLECTOR` | DART 수집을 typed 수집기로 바꾼다. 실제 문서로 검증된 적이 없다. | 키를 지우고 재배포 |
+| `NEWS_INTAKE` | 언론 보도를 공식 자료와 분리된 보조 문서로 받아 산문 인용·부록에만 사용한다. 정확히 `"1"`일 때만 켜진다. | 키를 지우고 재배포 |
 | `EVIDENCE_RECLASSIFY` | 결정론 문지기가 채우지 못한 장의 근거를 AI가 한 번 재판정하고, 프로그램 검증을 통과한 정확 인용만 후보에 보탠다. | 키를 지우고 재배포 |
+| `NEWSROOM_DATE_AI` | 뉴스룸 목록의 글자 날짜가 프로그램 판정으로 확정되지 않을 때 AI 예비 1회와 원문 존재 대조를 허용한다. 프로그램 판정은 항상 켜져 있다. | 키를 지우고 재배포 |
 | `REVENUE_TABLE_V2` | 매출 구성표를 「제목 목록」이 아니라 「표 모양」으로 찾고, 3장 카드 작가 안내문을 새 문구로 바꾼다. 표가 나오는 회사가 늘어난다. **현재 출시 Blueprint에서 `"1"`로 켜져 있다**(검사판 재현·회귀 통과 뒤 결정). | 키를 지우고 재배포 |
 
 `REVENUE_TABLE_V2`를 끄면(키 삭제) 파서는 표제 목록(`제품별 매출액`·`지역별 매출액` 등)으로만
@@ -250,8 +261,10 @@ evidence/policy와 다시 대조한다. artifact나 parser가 없거나 결과�
 기본 `BETA_ADMIN_ONLY=1`이면 `ADMIN_EMAILS`, `GOOGLE_CLIENT_ID`,
 `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`가 모두 있어야 시작한다. `PIPELINE=real`은
 추가로 `PROVENANCE_SEAL_SECRET`(UTF-8 32바이트 이상), `ANTHROPIC_API_KEY`,
-`DART_API_KEY`, `NAVER_CLIENT_ID`, `NAVER_CLIENT_SECRET`을 요구한다. 검증 오류에는 변수명만
-나오고 값은 출력되지 않는다.
+`DART_API_KEY`를 요구한다. `NEWS_INTAKE="1"`로 NAVER API HUB 뉴스 검색을 켜면
+`NCP_APIGW_API_KEY_ID`, `NCP_APIGW_API_KEY`가 모두 필수이며 하나라도 빠지면 시작하지
+않는다. NEWS_INTAKE가 꺼져 있으면 두 키 없이 통과한다. 검증 오류에는 변수명만 나오고
+값은 출력되지 않는다.
 
 `BACKUP_S3_BUCKET`을 설정하면 외부 백업 구성으로 간주한다. 이 경우
 `BACKUP_TRIGGER_SECRET`, S3 전용 자격증명, `BACKUP_DATA_BOUNDARY_ID`,
