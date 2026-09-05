@@ -7,6 +7,16 @@ SQLite가 단계 전체 예상액을 먼저 예약하고, 이 모듈은 그 예�
 provider의 실제 token 집계는 사전 추정과 다를 수 있으므로 이 값은 청구액의 수학적
 hard ceiling이 아니다. 동시 요청이 모두 과거 지출만 보고 들어가는 경쟁을 막는 운영
 중단 기준이며, 실제 usage는 추정 초과 여부와 관계없이 원장에 전액 기록한다.
+
+★ 입력 token 예상은 «정확 계수가 있으면 그것을, 없으면 바이트 추정»을 쓴다.
+:func:`estimate_request_tokens` 는 payload를 UTF-8로 직렬화한 «바이트 수»를 token
+수로 삼는다. 한글은 글자당 3바이트여서 이 값은 실제 token 수보다 크게 잡히고,
+그만큼 호출 전 예약액도 부풀려진다(2026-09-05 사고 조사: 08-29~08-31 로컬 실행
+436건 대조에서 본조사 호출 예상비용이 실제 청구의 중앙 2.71배). 이 과대 예상이
+요청 로컬 예약액을 조기에 소진시켜 이미 완성된 보고서를 통째로 버리게 만들었다.
+그래서 provider tokenizer에게 직접 물어본 :func:`count_input_tokens` 값을 우선
+쓰고, 그 계수를 못 얻으면(SDK 부재·네트워크·응답 형식 변화) 예전 바이트 추정으로
+조용히 돌아간다 — 정확도를 위해 «호출 자체를 막는» 쪽으로 실패하지는 않는다.
 """
 
 from __future__ import annotations
@@ -14,12 +24,16 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import json
+import logging
 import math
 import threading
 from dataclasses import dataclass
 from typing import Any, Iterator
 
 from src.core.pricing import usage_cost_krw
+
+
+logger = logging.getLogger(__name__)
 
 
 # JSON 필드명·role·content block·structured-output schema처럼 사람이 넘긴 본문
@@ -76,6 +90,73 @@ def estimate_request_tokens(payload: Any) -> int:
             "provider 요청 크기를 추정할 수 없습니다"
         ) from exc
     return len(encoded) + REQUEST_ESTIMATE_MARGIN_TOKENS
+
+
+def count_input_tokens(
+    messages_resource: Any,
+    *,
+    model: str,
+    messages: list,
+    system: str | None = None,
+) -> int | None:
+    """provider tokenizer에게 이 요청의 입력 token 수를 직접 물어본다.
+
+    Anthropic SDK의 ``messages.count_tokens`` 는 과금 없이 실제 계수를 돌려주므로,
+    바이트 추정이 한글에서 만들어 내는 과대 예상을 없앨 수 있다.
+
+    ★ 실패는 모두 ``None`` 이다 — SDK가 없어 속성 자체가 없거나(AttributeError),
+    네트워크가 막혔거나, 응답 형식이 바뀌어도 «호출을 못 하게» 만들면 안 된다.
+    정확 계수는 예상액을 «더 정확히» 만드는 개선이지 호출의 전제 조건이 아니므로,
+    못 얻으면 호출자가 예전 바이트 추정으로 돌아가게 한다.
+    ★ 로그에는 한 줄만 남긴다. 예외문·프롬프트 원문은 사용자 문서 본문이므로
+    운영 로그에 실어 나르지 않는다.
+
+    Args:
+        messages_resource: SDK 클라이언트의 ``messages`` 리소스(``client.messages``).
+        model: 이 호출이 실제로 쓸 모델 이름.
+        messages: provider에 그대로 보낼 message 목록.
+        system: system 프롬프트. 값이 없으면 kwarg 자체를 넘기지 않는다 —
+            SDK가 ``None`` 을 «빈 system» 으로 받아 거절할 수 있기 때문이다.
+
+    Returns:
+        음이 아닌 정수 token 수. 계수를 신뢰할 수 없으면 ``None``.
+    """
+    try:
+        extra: dict[str, Any] = {"system": system} if system else {}
+        response = messages_resource.count_tokens(
+            model=model, messages=messages, **extra
+        )
+        counted = response.input_tokens
+        if isinstance(counted, bool) or not isinstance(counted, int) or counted < 0:
+            # 형식이 어긋난 계수를 그대로 쓰면 예약액이 0원이 되거나 폭주한다.
+            # 아래 except와 같은 «추정으로 복귀» 경로로 합류시킨다.
+            raise TypeError("provider 입력 토큰 계수가 음이 아닌 정수가 아닙니다")
+        return int(counted)
+    except Exception:  # noqa: BLE001 - 정확 계수 실패는 호출을 막을 이유가 아니다
+        logger.warning("provider 입력 토큰 계수를 얻지 못해 바이트 추정으로 대체합니다")
+        return None
+
+
+def estimate_request_tokens_exact(
+    payload: Any, *, exact_input_tokens: int | None
+) -> int:
+    """정확 계수가 있으면 그 값에, 없으면 바이트 추정에 방어 여유를 얹는다.
+
+    정확 계수에도 ``REQUEST_ESTIMATE_MARGIN_TOKENS`` 를 그대로 더하는 이유는,
+    이 값이 «예상 청구액»이 아니라 «호출 전에 잡아 두는 방어적 상한»이기 때문이다.
+    계수 시점과 실제 전송 사이에 schema·content block 같은 envelope가 더 붙을 수
+    있으므로 상한의 의미를 잃지 않도록 여유는 유지한다.
+
+    Args:
+        payload: 정확 계수가 없을 때 바이트 추정에 쓸 요청 payload.
+        exact_input_tokens: :func:`count_input_tokens` 결과. ``None`` 이면 복귀.
+
+    Returns:
+        요청 로컬 예약에 넣을 입력 token 상한.
+    """
+    if exact_input_tokens is None:
+        return estimate_request_tokens(payload)
+    return int(exact_input_tokens) + REQUEST_ESTIMATE_MARGIN_TOKENS
 
 
 def estimate_image_tokens(dimensions: list[tuple[int, int]]) -> int:

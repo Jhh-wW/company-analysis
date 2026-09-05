@@ -438,32 +438,34 @@ def _legacy_summary_stage(
 ) -> tuple[ComposedReport, int, NumericSafetyFiltering]:
     """기존 SHADOW 요약 경로를 글자·호출 순서까지 그대로 보존한다."""
 
-    summary_call_limited = False
+    # 호출 «횟수» 상한과 요청 로컬 «예약액» 소진을 함께 뜻한다 — 둘 다
+    # «이 요청 몫을 다 썼다»일 뿐 돈·계정 장애가 아니라서 처리가 같다.
+    summary_ask_limited = False
     try:
         with_summary = compose_summary(verified, writer_ask)
     except AskFatalError as error:
-        if not getattr(error, "call_limit", False):
+        if not getattr(error, "degradable", False):
             raise
-        summary_call_limited = True
+        summary_ask_limited = True
         with_summary = verified
         logger.warning(
-            "AI 호출 횟수 상한이라 핵심 요약을 «새로 쓰지» 못했다 — "
+            "요청 AI 한도에 닿아 핵심 요약을 «새로 쓰지» 못했다 — "
             "검증을 마친 본문 문장으로 채운다"
         )
     summary_draft_count = len(with_summary.summary)
 
     summary = with_summary.summary
-    if summary and not summary_call_limited:
+    if summary and not summary_ask_limited:
         try:
             summary = verify_sentences(
                 summary, fragments, performance_table, reviewer_ask
             )
         except AskFatalError as error:
-            if not getattr(error, "call_limit", False):
+            if not getattr(error, "degradable", False):
                 raise
             summary = ()
             logger.warning(
-                "AI 호출 횟수 상한이라 새 요약을 검증하지 못했다 — 검증하지 "
+                "요청 AI 한도에 닿아 새 요약을 검증하지 못했다 — 검증하지 "
                 "않은 요약을 내보내는 대신 본문 확인 문장으로 채운다"
             )
     if len(summary) < SUMMARY_MIN_SENTENCES:

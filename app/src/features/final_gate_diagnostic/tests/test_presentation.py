@@ -15,11 +15,16 @@ from src.shared.final_gate_diagnostics import (
     FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT,
     FINAL_GATE_REASON_PUBLISH_BLOCKED,
     FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR,
+    FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED,
     SAFE_FINAL_GATE_REASONS,
 )
 
 
-def test_여덟_사용자_상태를_서로_다르게_번역한다() -> None:
+def test_아홉_사용자_상태를_서로_다르게_번역한다() -> None:
+    """★ 이름의 «여덟»을 «아홉»으로 고친 이유: 요청 예약액 소진(운영 한도)이
+    아홉 번째 상태로 들어왔다. 자료 부족·품질 미달과 같은 안내로 묶으면
+    사용자가 멀쩡한 회사를 탓하게 되므로 별도 상태로 센다.
+    """
     cases = {
         FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT: (
             StoppedGuidanceState.INTERNAL_EVIDENCE_ERROR
@@ -41,6 +46,9 @@ def test_여덟_사용자_상태를_서로_다르게_번역한다() -> None:
         ),
         FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR: (
             StoppedGuidanceState.GENERATION_QUALITY_SHORTFALL
+        ),
+        FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED: (
+            StoppedGuidanceState.REQUEST_BUDGET_EXHAUSTED
         ),
         FINAL_GATE_REASON_PUBLISH_BLOCKED: StoppedGuidanceState.OTHER,
     }
@@ -89,3 +97,19 @@ def test_공식자료_설정오류는_사용자_재시도를_권하지_않는다
     assert "운영자" in rendered
     assert "회사명이나 주소를 바꾸지" in rendered
     assert "잠시 뒤" not in rendered
+
+
+def test_요청예산_소진은_기타_안내로_뭉뚱그리지_않는다() -> None:
+    """★ 실측 — 사유가 없던 동안 화면에는 「보고서를 만들다 오류가 났습니다」만
+    떴다. 운영 한도 문제라는 것과 «관리자에게 알린다»는 다음 행동이 보여야 한다.
+    """
+    기타 = guidance_for_final_gate_reason(FINAL_GATE_REASON_PUBLISH_BLOCKED)
+    guidance = guidance_for_final_gate_reason(
+        FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED
+    )
+
+    assert guidance.state is StoppedGuidanceState.REQUEST_BUDGET_EXHAUSTED
+    assert guidance.title != 기타.title
+    rendered = " ".join((guidance.title, guidance.summary, guidance.meaning, *guidance.actions))
+    assert "예산" in rendered
+    assert "관리자" in rendered

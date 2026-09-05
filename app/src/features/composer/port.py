@@ -70,13 +70,40 @@ class AskFatalError(Exception):
       포기하고 «지금까지 만든 것»으로 끝내는 편이 정직하고 안전하다 —
       다듬지 못한 문장은 재작성 대신 «제거»되므로 검증은 오히려 더 보수적이다.
       `call_limit=True` 가 그 구분을 나른다. 돈·계정 장애는 여전히 False 다.
+
+    ★ 예외의 예외 ② — «이 요청 하나에 미리 잡아 둔 예약액» 소진도 같다 (실측).
+      2026-09-05 본조사에서 요청 로컬 예약액(단계 예약 잔액)이 다음 호출
+      예상액을 감당하지 못하자 같은 결말이 났다 — 완성돼 가던 장이 통째로
+      버려지고 화면에는 사유 없는 「보고서를 만들다 오류가 났습니다」만 남았다.
+      이것은 «돈이 없다»가 아니라 «이 요청에 허락된 몫을 다 썼다»는 뜻이라
+      횟수 상한과 성질이 같다. `request_budget=True` 가 그 구분을 나른다.
+      일일·수명 상한과 계정 장애(ProviderBudgetUnavailable 등)는 요청을
+      멈추는 게 맞으므로 두 깃발 모두 False 로 남는다 — 안전선 불변.
+      선택적 단계의 강등 판정은 두 깃발을 합친 `degradable` 하나만 본다.
     """
 
-    def __init__(self, cause: BaseException, *, call_limit: bool = False) -> None:
+    def __init__(
+        self,
+        cause: BaseException,
+        *,
+        call_limit: bool = False,
+        request_budget: bool = False,
+    ) -> None:
         self.cause = cause
         #: 호출 «횟수» 상한이라 선택적 단계를 포기하고 이어가도 되는가.
         self.call_limit = bool(call_limit)
+        #: 요청 로컬 «예약액» 소진이라 선택적 단계를 포기하고 이어가도 되는가.
+        self.request_budget = bool(request_budget)
         super().__init__(str(cause))
+
+    @property
+    def degradable(self) -> bool:
+        """선택적 단계를 건너뛰고 «지금까지 만든 것»으로 끝내도 되는가.
+
+        두 깃발을 여기서 한 번만 합친다 — 강등 지점이 네 곳이라 각자
+        조건을 적으면 한 곳만 빠뜨려도 그 단계에서만 보고서가 버려진다.
+        """
+        return self.call_limit or self.request_budget
 
 
 @dataclass(frozen=True)

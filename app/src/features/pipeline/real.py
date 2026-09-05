@@ -228,6 +228,7 @@ from src.shared.final_gate_diagnostics import (
     FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT,
     FINAL_GATE_REASON_PUBLISH_BLOCKED,
     FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR,
+    FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED,
     classify_v2_validation_final_gate_reason,
 )
 from src.shared.span_selection_diagnostics import (
@@ -266,6 +267,7 @@ _FINAL_GATE_REASON_KO: Final[dict[str, str]] = {
         "공식 자료 의미 자동 확인 불확정"
     ),
     FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT: "내부 근거 연결 오류",
+    FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED: "이 조사에 배정된 AI 예산 소진",
     FINAL_GATE_REASON_OTHER_GATE: "출고 전 자동 검증",
 }
 
@@ -839,8 +841,19 @@ class _MeteredMessages:
             raise provider_budget.ProviderBudgetUnavailable(
                 "provider 출력 token 상한이 명시되지 않았습니다"
             )
-        estimated_input = provider_budget.estimate_request_tokens(
-            {"args": args, "kwargs": call_kwargs}
+        # 바이트 추정은 한글에서 글자당 3배로 부풀어 실제보다 훨씬 큰 예약액을
+        # 잡는다 — 그 과대 예약이 «아직 쓸 돈이 남았는데» 요청을 죽였다(실측).
+        # provider tokenizer에게 직접 물어 정확한 입력 계수를 쓰고, 못 얻으면
+        # 예전 바이트 추정으로 그대로 되돌아간다(호출을 막지 않는다).
+        exact_input_tokens = provider_budget.count_input_tokens(
+            self._messages,
+            model=model,
+            messages=call_kwargs.get("messages") or [],
+            system=call_kwargs.get("system"),
+        )
+        estimated_input = provider_budget.estimate_request_tokens_exact(
+            {"args": args, "kwargs": call_kwargs},
+            exact_input_tokens=exact_input_tokens,
         )
         if self._metered.prompt_cache_enabled:
             # A five-minute cache write is 1.25x normal input pricing.
@@ -4230,10 +4243,21 @@ def _v2_ask_via_provider(
             provider_budget.ProviderBudgetExceeded,
             provider_budget.ProviderBudgetUnavailable,
         ) as error:
+            # 요청 로컬 한도는 «돈이 없다»가 아니라 «이 요청 몫을 다 썼다»다.
+            # 횟수 상한(RequestCallLimitReached)과 예약액 소진
+            # (ProviderBudgetExceeded)을 각각 다른 깃발로 나르되, 둘 다
+            # composer의 선택적 단계에서는 강등 대상이다.
+            # ProviderBudgetUnavailable(일일·수명 상한·계정 장애·원장 실패)은
+            # 두 깃발 모두 False 로 남아 요청 전체를 멈춘다 — 안전선 불변.
+            call_limited = isinstance(
+                error, provider_budget.RequestCallLimitReached
+            )
             raise AskFatalError(
                 error,
-                call_limit=isinstance(
-                    error, provider_budget.RequestCallLimitReached
+                call_limit=call_limited,
+                request_budget=(
+                    isinstance(error, provider_budget.ProviderBudgetExceeded)
+                    and not call_limited
                 ),
             ) from error
         except generation_coordination.GenerationCoordinationError as error:
@@ -4705,7 +4729,36 @@ def _run_v2_composer(
                         ),
                     ) from error
     except AskFatalError as exc:
-        # 예산 소진·billing-uncertain 같은 요청 전역 장애 — «출고 검증 실패»로
+        # ★ 요청 로컬 예약액 소진(ProviderBudgetExceeded — 횟수 상한 포함)만은
+        #   «사유 없는 실패»로 끝내지 않는다. 예외로 나가면 run() 바깥 except가
+        #   Outcome.FAILED로 접어 화면에 「보고서를 만들다 오류가 났습니다」만
+        #   남는다(2026-09-05 실측). 회사 자료 문제도 우리 코드 결함도 아닌
+        #   운영 한도 문제이므로 닫힌 사유를 실어 GATE_STOPPED로 멈춘다.
+        if isinstance(exc.cause, provider_budget.ProviderBudgetExceeded):
+            spent = _request_spent_krw(engine)
+            logger.warning("엔진 v2 요청 예산 소진으로 중단", exc_info=True)
+            steps.append(
+                {
+                    "step": "v2_요청예산_소진",
+                    "사유코드": FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED,
+                    "지출원": round(spent),
+                }
+            )
+            return RunResult(
+                outcome=Outcome.GATE_STOPPED,
+                message=(
+                    "이 조사에 배정된 AI 예산을 다 써서 보고서를 "
+                    "완성하지 못했습니다."
+                    + _stop_reason_note(FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED)
+                ),
+                sources=sources,
+                corp_type=corp_type,
+                fragments_collected=len(frags),
+                cost_krw=spent,
+                model=model,
+                final_gate_reason=FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED,
+            )
+        # 그 밖의 요청 전역 장애(계정·원장·조정 실패)는 «출고 검증 실패»로
         # 오표기하지 않는다. 원인 예외를 그대로 다시 던져 v1과 같은 경로로
         # run()의 바깥 except가 FAILED로 정직하게 끝내게 한다.
         raise exc.cause from exc

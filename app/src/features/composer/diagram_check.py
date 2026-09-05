@@ -265,13 +265,14 @@ def _safe_ask(ask: Callable[[str], str], prompt: str) -> str:
     try:
         return ask(prompt) or ""
     except AskFatalError as error:
-        # ★ «호출 횟수 상한»은 예외의 예외다. 도식 검수는
-        #   못 하면 «관계 줄만» 빠지고 장·문장은 그대로 남는(이미 이 파일의
-        #   설계) 단계라, 여기서 요청 전체를 죽일 이유가 없다. 빈 응답으로
-        #   돌려 «검수 불능» 경로를 타면 미확인 화살표만 빠진다.
-        if getattr(error, "call_limit", False):
+        # ★ «요청 몫을 다 썼다»(호출 횟수 상한·요청 로컬 예약액 소진)는
+        #   예외의 예외다. 도식 검수는 못 하면 «관계 줄만» 빠지고 장·문장은
+        #   그대로 남는(이미 이 파일의 설계) 단계라, 여기서 요청 전체를 죽일
+        #   이유가 없다. 빈 응답으로 돌려 «검수 불능» 경로를 타면 미확인
+        #   화살표만 빠진다.
+        if getattr(error, "degradable", False):
             logger.warning(
-                "AI 호출 횟수 상한이라 도식 의미 검수를 건너뛴다 — "
+                "요청 AI 한도에 닿아 도식 의미 검수를 건너뛴다 — "
                 "미확인 경로만 빼고 보고서는 그대로 낸다"
             )
             return ""

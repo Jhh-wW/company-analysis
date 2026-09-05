@@ -1001,17 +1001,18 @@ def _semantic_review(
                     ask, rewrite_targets, frag_by_id, table_texts, table_evidence, final
                 )
             except AskFatalError as error:
-                # ★ 실측 — «호출 «횟수» 상한»만은 여기서 멈추지 않는다.
+                # ★ 실측 — «이 요청에 허락된 몫을 다 썼다»는 한도만은 여기서
+                #   멈추지 않는다(호출 «횟수» 상한·요청 로컬 «예약액» 소진).
                 #   재작성은 «거짓 판정 문장을 살려 보려는» 선택적 다듬기다.
                 #   못 하면 그 문장들은 재작성 대신 «제거»되므로 결과는 오히려
                 #   더 보수적이고, 이미 만든 나머지 장·문장은 멀쩡히 남는다.
                 #   이 갈래가 없던 동안에는 다듬기 한 번을 못 불렀다는 이유로
                 #   완성된 9개 장이 통째로 버려졌다(현대카드·우리은행 실측).
-                #   돈·계정 장애(call_limit=False)는 그대로 재전파한다.
-                if not getattr(error, "call_limit", False):
+                #   돈·계정 장애(degradable=False)는 그대로 재전파한다.
+                if not getattr(error, "degradable", False):
                     raise
                 logger.warning(
-                    "AI 호출 횟수 상한이라 «거짓» 판정 문장 %d개의 재작성을 "
+                    "요청 AI 한도에 닿아 «거짓» 판정 문장 %d개의 재작성을 "
                     "포기하고 제거한다 — 나머지 보고서는 그대로 낸다",
                     len(rewrite_targets),
                 )
