@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import json
 import sqlite3
@@ -869,3 +870,49 @@ def test_old_primary_key_is_rebuilt_so_two_buckets_can_bind_independently(
     second = load_cache_hit(conn, key=keys[1], policy=policy, delivered_at=now)
     assert first is not None and first.content == content
     assert second is not None and second.content == competitor
+
+
+def test_재무도장없는_회사도_접수번호가_있으면_생성전지문을_봉인하고_캐시는_끈다() -> None:
+    """감사보고서만 내는 비상장사(2026-09-05 인이지): DART 재무 API 013 → finance 지문 없음.
+
+    pipeline이 접수번호+공식 snapshot으로 만든 생성 전 지문을 출고 직전 출처
+    snapshot이 거절하면 AI 비용을 다 쓴 뒤 실패한다(실측 사고). 지문은 봉인하되
+    cache_usable은 False로 남겨 재무 도장 없는 보고서를 재사용하지 않는다.
+    """
+
+    from src.features.report_delivery.source_identity import SourceSnapshot
+
+    captured_at = dt.datetime(2026, 9, 5, 8, 30, tzinfo=dt.timezone.utc)
+    absent_digest = "a" * 64
+
+    source = SourceSnapshot.capture(
+        dart_receipt_nos=("20260406001240",),
+        financial_payload=None,
+        financial_payload_sha256="",
+        captured_at=captured_at,
+        source_as_of=dt.date(2025, 12, 31),
+        preflight_identity_digest=absent_digest,
+    )
+
+    assert source.preflight_identity_digest == absent_digest
+    assert source.financial_payload_sha256 == ""
+    assert source.cache_usable is False
+    # 저장 복원(__post_init__)도 같은 규칙으로 통과해야 한다.
+    restored = SourceSnapshot(**{
+        field.name: getattr(source, field.name) for field in dataclasses.fields(source)
+    })
+    assert restored == source
+
+
+def test_접수번호가_없으면_생성전지문을_봉인하지_않는다() -> None:
+    from src.features.report_delivery.source_identity import SourceSnapshot
+
+    with pytest.raises(ValueError, match="DART 접수번호 없이"):
+        SourceSnapshot.capture(
+            dart_receipt_nos=(),
+            financial_payload=None,
+            financial_payload_sha256="",
+            captured_at=dt.datetime(2026, 9, 5, 8, 30, tzinfo=dt.timezone.utc),
+            source_as_of=dt.date(2025, 12, 31),
+            preflight_identity_digest="a" * 64,
+        )
