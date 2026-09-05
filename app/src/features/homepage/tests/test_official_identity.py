@@ -7,6 +7,7 @@ import pytest
 from src.features.homepage.official_identity import (
     OfficialCompanyIdentity,
     normalize_registration_number,
+    verify_dart_root_company_identity_pages,
     verify_official_company_identity,
     verify_official_company_identity_pages,
 )
@@ -123,3 +124,65 @@ def test_JSON_LD_조직정보는_신원증거로_쓸수있다() -> None:
     """
 
     assert verify_official_company_identity(html, _identity()) is not None
+
+
+def test_DART_root묶음은_등록번호가_없어도_법인명만으로_승인한다() -> None:
+    """DART가 등록한 홈페이지 host는 이름만 맞으면 결속한다.
+
+    등록번호를 홈페이지 어디에도 적지 않는 회사((주)인이지 실측)를 위한
+    좁은 예외이며, 호출자가 hm_url host임을 보증한 경우에만 쓴다.
+    """
+
+    pages = (
+        "<html><main>주식회사 와이즐리컴퍼니 회사 소개</main></html>",
+        "<html><footer>개인정보처리방침 안내</footer></html>",
+    )
+
+    match = verify_dart_root_company_identity_pages(pages, _identity())
+
+    assert match is not None
+    assert len(match.evidence_sha256) == 64
+    assert match.registration_number_sha256 == ""
+    # 같은 입력을 이중 검증 함수에 주면 여전히 거절한다.
+    assert verify_official_company_identity_pages(pages, _identity()) is None
+
+
+def test_등록번호를_못받은_회사도_DART_root묶음은_법인명으로_승인한다() -> None:
+    identity = _identity(registration_numbers=())
+    pages = ("<html><main>주식회사 와이즐리컴퍼니 회사 소개</main></html>",)
+
+    assert identity.can_verify_cross_domain is False
+    assert verify_dart_root_company_identity_pages(pages, identity) is not None
+
+
+@pytest.mark.parametrize(
+    "pages",
+    (
+        # 법인명·별칭이 어디에도 없는 남의 사이트
+        ("<html><main>다른 회사의 공개 페이지</main></html>",),
+        # 등록번호만 베낀 디렉터리
+        ("<html><footer>사업자등록번호 123-45-67890</footer></html>",),
+        # 빈 묶음
+        (),
+    ),
+)
+def test_법인명이_없으면_DART_root묶음도_거절한다(pages: tuple[str, ...]) -> None:
+    assert verify_dart_root_company_identity_pages(pages, _identity()) is None
+
+
+def test_이름단독_영수증은_이중검증_영수증과_절대_같지_않다() -> None:
+    """접두어를 넣어 두 결속의 증거 해시가 겹치지 않게 한다."""
+
+    pages = (
+        "<html><main>주식회사 와이즐리컴퍼니</main>"
+        "<footer>사업자등록번호 123-45-67890</footer></html>",
+    )
+
+    dual = verify_official_company_identity_pages(pages, _identity())
+    name_only = verify_dart_root_company_identity_pages(pages, _identity())
+
+    assert dual is not None and name_only is not None
+    assert dual.evidence_sha256 != name_only.evidence_sha256
+    assert dual.matched_name_sha256 == name_only.matched_name_sha256
+    assert dual.registration_number_sha256 != ""
+    assert name_only.registration_number_sha256 == ""
