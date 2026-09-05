@@ -515,11 +515,18 @@ def test_v2도_배포commit을_모르면_provider진입부터_막는다(
 def test_v2_분기는_AskFatalError_원인을_그대로_다시_던진다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """예산 소진 같은 요청 전역 장애는 GATE_STOPPED(출고 검증 실패)가 아니라
-    원인 예외 그대로 재전파돼야 v1과 같은 FAILED 처리로 흐른다(실측 결함)."""
+    """계정·원장 장애 같은 요청 전역 장애는 GATE_STOPPED(출고 검증 실패)가
+    아니라 원인 예외 그대로 재전파돼야 v1과 같은 FAILED 처리로 흐른다(실측 결함).
+
+    ★ 원인을 ProviderBudgetExceeded에서 ProviderBudgetUnavailable로 바꾼 이유:
+      «이 요청 하나에 잡아 둔 예약액 소진»은 2026-09-05 실측 뒤 닫힌 사유를 단
+      GATE_STOPPED로 강등됐다(test_request_budget_degradation.py가 지킨다).
+      여기 남은 일일·수명 상한·계정 장애는 여전히 요청 전체를 멈춰야 하는
+      안전선이므로, 이 시험은 그 갈래를 그대로 지킨다.
+    """
     fake = FakeEngine()
     engine, client, frags, financials, filing = _branch_ingredients(fake)
-    cause = provider_budget.ProviderBudgetExceeded("이번 단계 예약 잔액을 넘었습니다")
+    cause = provider_budget.ProviderBudgetUnavailable("provider를 쓸 수 없습니다")
 
     def failing_run_v2(*_args: Any, **_kwargs: Any):
         raise AskFatalError(cause)
@@ -527,7 +534,7 @@ def test_v2_분기는_AskFatalError_원인을_그대로_다시_던진다(
     monkeypatch.setattr(composer_pipeline, "run_v2", failing_run_v2)
     steps: list[dict[str, Any]] = []
 
-    with pytest.raises(provider_budget.ProviderBudgetExceeded):
+    with pytest.raises(provider_budget.ProviderBudgetUnavailable):
         real._run_v2_composer(
             engine=engine,
             client=client,
@@ -549,14 +556,19 @@ def test_v2_분기는_AskFatalError_원인을_그대로_다시_던진다(
 def test_v2_요청전역_장애는_출고검증실패_아니라_v1과_같은_FAILED로_끝난다(
     engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """run() 전체를 통해 확인 — «검증 실패»로 오표기되지 않는다."""
+    """run() 전체를 통해 확인 — «검증 실패»로 오표기되지 않는다.
+
+    ★ 원인이 ProviderBudgetUnavailable인 이유는 위 시험 docstring과 같다 —
+      요청 로컬 예약액 소진만 닫힌 사유의 GATE_STOPPED로 갈라져 나갔고,
+      계정·원장 장애는 예전대로 FAILED로 끝나는 안전선이다.
+    """
     monkeypatch.setenv(real.ENGINE_V2_ENV_NAME, real.ENGINE_V2_ENV_ON)
 
     def failing_run_v2(*_args: Any, **kwargs: Any):
         # 실패 앞의 실제 provider 응답 비용은 소비자 차감과 별개로 남아야 한다.
         kwargs["writer_ask"]("비민감 선행 작성 호출")
         raise AskFatalError(
-            provider_budget.ProviderBudgetExceeded("이번 단계 예약 잔액을 넘었습니다")
+            provider_budget.ProviderBudgetUnavailable("provider를 쓸 수 없습니다")
         )
 
     monkeypatch.setattr(composer_pipeline, "run_v2", failing_run_v2)

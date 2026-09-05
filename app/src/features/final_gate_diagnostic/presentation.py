@@ -23,11 +23,12 @@ from src.shared.final_gate_diagnostics import (
     FINAL_GATE_REASON_OFFICIAL_EVIDENCE_CONFIGURATION,
     FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT,
     FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR,
+    FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED,
 )
 
 
 class StoppedGuidanceState(str, Enum):
-    """사용자가 다음 행동을 고를 수 있는 여덟 가지 중단 상태."""
+    """사용자가 다음 행동을 고를 수 있는 아홉 가지 중단 상태."""
 
     INTERNAL_EVIDENCE_ERROR = "internal_evidence_error"
     EVIDENCE_CLASSIFICATION_UNDETERMINED = "evidence_classification_undetermined"
@@ -36,6 +37,7 @@ class StoppedGuidanceState(str, Enum):
     EVIDENCE_INSUFFICIENT = "evidence_insufficient"
     COMPARISON_EVIDENCE_INSUFFICIENT = "comparison_evidence_insufficient"
     GENERATION_QUALITY_SHORTFALL = "generation_quality_shortfall"
+    REQUEST_BUDGET_EXHAUSTED = "request_budget_exhausted"
     OTHER = "other"
 
 
@@ -180,6 +182,23 @@ _GUIDANCE_BY_STATE: Final[Mapping[StoppedGuidanceState, StoppedGuidance]] = (
                 ),
                 primary_button_label="입력 화면으로 돌아가기",
             ),
+            StoppedGuidanceState.REQUEST_BUDGET_EXHAUSTED: StoppedGuidance(
+                state=StoppedGuidanceState.REQUEST_BUDGET_EXHAUSTED,
+                title="이 조사에 배정된 AI 예산을 다 써서 멈췄습니다",
+                summary=(
+                    "회사 자료가 많아 정해진 예산 안에서 보고서를 끝내지 "
+                    "못했습니다."
+                ),
+                meaning=(
+                    "회사 문제도, 자료 부족도 아닙니다. 조사 1건에 허용된 "
+                    "AI 비용 한도에 닿았습니다."
+                ),
+                actions=(
+                    "관리자에게 알려 주세요(한도 조정 대상).",
+                    "같은 회사를 바로 다시 시도하면 같은 결과가 날 수 있습니다.",
+                ),
+                primary_button_label="회사·주소 다시 입력",
+            ),
             StoppedGuidanceState.OTHER: StoppedGuidance(
                 state=StoppedGuidanceState.OTHER,
                 title="안전 검사를 통과하지 못해 보고서를 내보내지 않았습니다",
@@ -236,6 +255,10 @@ def guidance_for_final_gate_reason(reason_code: str) -> StoppedGuidance:
         state = StoppedGuidanceState.TRANSIENT_COLLECTION_ISSUE
     elif normalized == FINAL_GATE_REASON_COMPARISON_BLOCKED:
         state = StoppedGuidanceState.COMPARISON_EVIDENCE_INSUFFICIENT
+    elif normalized == FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED:
+        # 운영 한도 문제를 «자료 부족»이나 «품질 미달»로 안내하면 사용자가
+        # 멀쩡한 회사를 탓하게 된다. 별도 상태로 떼어 둔다.
+        state = StoppedGuidanceState.REQUEST_BUDGET_EXHAUSTED
     elif normalized in _EVIDENCE_INSUFFICIENT_REASONS:
         state = StoppedGuidanceState.EVIDENCE_INSUFFICIENT
     elif normalized in _GENERATION_QUALITY_REASONS:

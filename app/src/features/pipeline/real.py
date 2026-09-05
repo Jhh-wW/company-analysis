@@ -228,6 +228,7 @@ from src.shared.final_gate_diagnostics import (
     FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT,
     FINAL_GATE_REASON_PUBLISH_BLOCKED,
     FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR,
+    FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED,
     classify_v2_validation_final_gate_reason,
 )
 from src.shared.span_selection_diagnostics import (
@@ -266,6 +267,7 @@ _FINAL_GATE_REASON_KO: Final[dict[str, str]] = {
         "공식 자료 의미 자동 확인 불확정"
     ),
     FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT: "내부 근거 연결 오류",
+    FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED: "이 조사에 배정된 AI 예산 소진",
     FINAL_GATE_REASON_OTHER_GATE: "출고 전 자동 검증",
 }
 
@@ -645,8 +647,34 @@ class _MeteredEngine:
             object.__setattr__(self, "_prompt_cache", previous_cache)
 
 
+def _already_cache_marked_text_blocks(content: object) -> bool:
+    """호출자가 «이미 나눠서» 캐시 경계를 찍어 보낸 text 블록 목록인지 본다.
+
+    형식 검증은 str 경로와 같은 수준으로 유지한다 — dict이고 type이 text이며
+    text가 문자열인 블록만 인정한다. 그중 하나라도 cache_control이 있어야
+    «표식이 있다»로 친다.
+    """
+
+    if not isinstance(content, list) or not content:
+        return False
+    for block in content:
+        if not isinstance(block, dict):
+            return False
+        if block.get("type") != "text" or not isinstance(block.get("text"), str):
+            return False
+    return any(block.get("cache_control") is not None for block in content)
+
+
 def _prompt_cached_messages(messages: object) -> object:
-    """Mark exact user text as an ephemeral cache block without changing it."""
+    """Mark exact user text as an ephemeral cache block without changing it.
+
+    ★ composer(v2)는 «공유 앞부분만» 캐시하려고 프롬프트를 두 블록으로 미리
+      나눠 보낸다. 그런 요청까지 여기서 전체를 한 블록으로 다시 감싸면 장마다
+      달라지는 뒷부분이 같은 블록에 섞여, 매 호출 cache write만 나고 read가
+      0이 된다(= 캐시를 켠 값만 물고 아끼지는 못한다). 그래서 이미 경계가
+      찍힌 블록 목록은 그대로 통과시킨다.
+      str content(v1 span_selection)는 예전 동작 그대로 한 블록으로 감싼다.
+    """
 
     if not isinstance(messages, list) or not messages:
         raise provider_budget.ProviderBudgetUnavailable(
@@ -669,6 +697,10 @@ def _prompt_cached_messages(messages: object) -> object:
                     "cache_control": {"type": "ephemeral"},
                 }
             ]
+            marked = True
+        elif cloned.get("role") == "user" and _already_cache_marked_text_blocks(
+            content
+        ):
             marked = True
         copied.append(cloned)
     if not marked:
@@ -839,8 +871,19 @@ class _MeteredMessages:
             raise provider_budget.ProviderBudgetUnavailable(
                 "provider 출력 token 상한이 명시되지 않았습니다"
             )
-        estimated_input = provider_budget.estimate_request_tokens(
-            {"args": args, "kwargs": call_kwargs}
+        # 바이트 추정은 한글에서 글자당 3배로 부풀어 실제보다 훨씬 큰 예약액을
+        # 잡는다 — 그 과대 예약이 «아직 쓸 돈이 남았는데» 요청을 죽였다(실측).
+        # provider tokenizer에게 직접 물어 정확한 입력 계수를 쓰고, 못 얻으면
+        # 예전 바이트 추정으로 그대로 되돌아간다(호출을 막지 않는다).
+        exact_input_tokens = provider_budget.count_input_tokens(
+            self._messages,
+            model=model,
+            messages=call_kwargs.get("messages") or [],
+            system=call_kwargs.get("system"),
+        )
+        estimated_input = provider_budget.estimate_request_tokens_exact(
+            {"args": args, "kwargs": call_kwargs},
+            exact_input_tokens=exact_input_tokens,
         )
         if self._metered.prompt_cache_enabled:
             # A five-minute cache write is 1.25x normal input pricing.
@@ -4208,6 +4251,9 @@ def _v2_ask_via_provider(
     모델 고정이 전부 그 경계에서 적용된다. 구조화 출력(output_config)은 쓰지
     않는다: composer가 응답 문자열에서 직접 JSON을 관용 파싱하기 때문이다.
 
+    ★ 프롬프트가 «공유 앞부분» 길이를 실어 오면(composer의 CacheablePrompt)
+      그 경계로 두 블록을 만들어 앞부분만 캐시한다 — 아래 ask 주석 참조.
+
     ★ 예산 소진·billing-uncertain 차단은 «이 요청 전역» 장애다 — composer가
       문장 단위 실패로 삼키면 실제 원인이 «출고 검증 실패»로 오표기된다
       (실측 결함). AskFatalError로 감싸 던져 composer의 삼킴 지점들이
@@ -4218,22 +4264,58 @@ def _v2_ask_via_provider(
     from src.features.composer.port import AskFatalError  # noqa: PLC0415
 
     def ask(prompt: str) -> str:
+        # composer가 «아홉 장이 공유하는 앞부분»(회사 머리말 + 조각 전체)의
+        # 길이를 프롬프트에 실어 보내면(composer.logic.CacheablePrompt), 그
+        # 경계에서 두 블록으로 나눠 앞부분에만 캐시 표식을 찍는다. 프롬프트
+        # 캐시는 앞부분이 바이트 단위로 같을 때만 맞으므로, 장마다 달라지는
+        # 뒷부분을 같은 블록에 섞으면 매번 새로 써야 한다(실측: 호출 6번까지
+        # cache_read 0, 685원 소진).
+        # 표식이 없으면(재시도로 이어 붙인 평범한 str 등) 예전처럼 통짜로 보낸다.
+        text = str(prompt)
+        raw_prefix = getattr(prompt, "cache_prefix_chars", 0)
+        prefix_chars = raw_prefix if type(raw_prefix) is int and raw_prefix > 0 else 0
+        head, rest = text[:prefix_chars], text[prefix_chars:]
+        # 뒷부분이 비면(이론상 불가) 나눌 이유가 없다 — 통짜 str로 되돌린다.
+        use_prompt_cache = bool(head) and bool(rest)
+        content: Any = (
+            [
+                {
+                    "type": "text",
+                    "text": head,
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {"type": "text", "text": rest},
+            ]
+            if use_prompt_cache
+            else text
+        )
         try:
-            with _meter_stage(engine, stage):
+            with _meter_stage(engine, stage, prompt_cache=use_prompt_cache):
                 response = client.messages.create(
                     model=getattr(engine, "MODEL", "") or GENERATION_MODEL,
                     max_tokens=max_tokens,
                     temperature=0,  # 원문 인용 충실도 우선 (1판 _ask와 동일)
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=[{"role": "user", "content": content}],
                 )
         except (
             provider_budget.ProviderBudgetExceeded,
             provider_budget.ProviderBudgetUnavailable,
         ) as error:
+            # 요청 로컬 한도는 «돈이 없다»가 아니라 «이 요청 몫을 다 썼다»다.
+            # 횟수 상한(RequestCallLimitReached)과 예약액 소진
+            # (ProviderBudgetExceeded)을 각각 다른 깃발로 나르되, 둘 다
+            # composer의 선택적 단계에서는 강등 대상이다.
+            # ProviderBudgetUnavailable(일일·수명 상한·계정 장애·원장 실패)은
+            # 두 깃발 모두 False 로 남아 요청 전체를 멈춘다 — 안전선 불변.
+            call_limited = isinstance(
+                error, provider_budget.RequestCallLimitReached
+            )
             raise AskFatalError(
                 error,
-                call_limit=isinstance(
-                    error, provider_budget.RequestCallLimitReached
+                call_limit=call_limited,
+                request_budget=(
+                    isinstance(error, provider_budget.ProviderBudgetExceeded)
+                    and not call_limited
                 ),
             ) from error
         except generation_coordination.GenerationCoordinationError as error:
@@ -4705,7 +4787,36 @@ def _run_v2_composer(
                         ),
                     ) from error
     except AskFatalError as exc:
-        # 예산 소진·billing-uncertain 같은 요청 전역 장애 — «출고 검증 실패»로
+        # ★ 요청 로컬 예약액 소진(ProviderBudgetExceeded — 횟수 상한 포함)만은
+        #   «사유 없는 실패»로 끝내지 않는다. 예외로 나가면 run() 바깥 except가
+        #   Outcome.FAILED로 접어 화면에 「보고서를 만들다 오류가 났습니다」만
+        #   남는다(2026-09-05 실측). 회사 자료 문제도 우리 코드 결함도 아닌
+        #   운영 한도 문제이므로 닫힌 사유를 실어 GATE_STOPPED로 멈춘다.
+        if isinstance(exc.cause, provider_budget.ProviderBudgetExceeded):
+            spent = _request_spent_krw(engine)
+            logger.warning("엔진 v2 요청 예산 소진으로 중단", exc_info=True)
+            steps.append(
+                {
+                    "step": "v2_요청예산_소진",
+                    "사유코드": FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED,
+                    "지출원": round(spent),
+                }
+            )
+            return RunResult(
+                outcome=Outcome.GATE_STOPPED,
+                message=(
+                    "이 조사에 배정된 AI 예산을 다 써서 보고서를 "
+                    "완성하지 못했습니다."
+                    + _stop_reason_note(FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED)
+                ),
+                sources=sources,
+                corp_type=corp_type,
+                fragments_collected=len(frags),
+                cost_krw=spent,
+                model=model,
+                final_gate_reason=FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED,
+            )
+        # 그 밖의 요청 전역 장애(계정·원장·조정 실패)는 «출고 검증 실패»로
         # 오표기하지 않는다. 원인 예외를 그대로 다시 던져 v1과 같은 경로로
         # run()의 바깥 except가 FAILED로 정직하게 끝내게 한다.
         raise exc.cause from exc

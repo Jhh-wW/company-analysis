@@ -22,6 +22,11 @@ FINAL_GATE_REASON_MISSING_REVENUE: Final[str] = "publish_missing_revenue"
 FINAL_GATE_REASON_MISSING_IDENTITY_REVENUE: Final[str] = (
     "publish_missing_identity_revenue"
 )
+#: 이 조사 하나에 미리 잡아 둔 AI 예약액을 다 써서 필수 단계(장 작성)를
+#: 이어가지 못했을 때 붙는 사유. 회사 자료 부족도, 출고 검증 실패도 아니라
+#: 운영 한도 문제이므로 다른 사유와 뭉뚱그리지 않는다 — 사유가 없으면 화면이
+#: 「보고서를 만들다 오류가 났습니다」로만 끝나 원인을 아무도 모른다(실측).
+FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED: Final[str] = "request_budget_exhausted"
 FINAL_GATE_REASON_OTHER_GATE: Final[str] = "other_gate"
 #: 공식 근거 사전 게이트(collector 재생 조각9, 이번 조각 범위 밖)가 붙이는
 #: 두 사유. 여기 shared에 미리 두어 조각9가 real.py에 배선할 때 사유코드를
@@ -59,6 +64,7 @@ SAFE_FINAL_GATE_REASONS: Final[frozenset[str]] = frozenset(
         FINAL_GATE_REASON_OFFICIAL_EVIDENCE_CONFIGURATION,
         FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
         FINAL_GATE_REASON_EVIDENCE_CLASSIFICATION_UNDETERMINED,
+        FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED,
         FINAL_GATE_REASON_OTHER_GATE,
     }
 )

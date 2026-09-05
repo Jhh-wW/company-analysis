@@ -3,11 +3,13 @@ param(
     [ValidateRange(1024, 65535)]
     [int]$Port = 8020,
 
+    # 본조사 예약액(app/src/features/budget/constants.py PAID_PHASE_PROVIDER_BUDGET_KRW
+    # = 1,800원)보다 작으면 유료 호출 전에 전부 거절된다. 기본값은 그 위로 둔다.
     [ValidateRange(1, 100000)]
-    [double]$PerRunExpectedCostCapKrw = 1200,
+    [double]$PerRunExpectedCostCapKrw = 2000,
 
     [ValidateRange(1, 100000)]
-    [double]$DailyExpectedCostCapKrw = 2200,
+    [double]$DailyExpectedCostCapKrw = 5000,
 
     [switch]$EnablePaidProviders,
 

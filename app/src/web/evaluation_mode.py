@@ -29,8 +29,12 @@ ENV_PER_RUN_CAP_KRW: Final[str] = "REALTIME_EVALUATION_PER_RUN_CAP_KRW"
 ENV_DAILY_CAP_KRW: Final[str] = "REALTIME_EVALUATION_DAILY_CAP_KRW"
 ENV_DISABLE_ENGINE_DOTENV: Final[str] = "ANALYSIS_ENGINE_DISABLE_DOTENV"
 
-DEFAULT_PER_RUN_CAP_KRW: Final[float] = 1200.0
-DEFAULT_DAILY_CAP_KRW: Final[float] = 2200.0
+#: ★ 요청 하나의 입장 기준은 본조사 예약액(``PAID_PHASE_PROVIDER_BUDGET_KRW``
+#:   [본조사] = 1,800원)보다 커야 한다. 작으면 평가 서버가 유료 호출 «전에» 모든
+#:   본조사를 거절해 성능을 잴 구간까지 가지 못한다(2026-09-05 예약액 상향에 맞춤).
+#:   하루 기준은 본조사 두 건이 들어가도록 잡는다.
+DEFAULT_PER_RUN_CAP_KRW: Final[float] = 2000.0
+DEFAULT_DAILY_CAP_KRW: Final[float] = 5000.0
 MAX_CAP_KRW: Final[float] = 100_000.0
 LOCAL_BUCKET: Final[str] = "evaluation:loopback"
 CONSENT_VALUE: Final[str] = "yes"

@@ -278,6 +278,34 @@ def _render_already_written(already_written: Sequence[str]) -> str:
     return f"{ALREADY_WRITTEN_HEAD}{lines}{ALREADY_WRITTEN_GUIDE}"
 
 
+class CacheablePrompt(str):
+    """앞부분이 여러 호출에서 «바이트 동일»한 프롬프트 — 캐시 경계를 실어 나른다.
+
+    ★ 왜 str 하위형인가: 기존 경로(`ask(prompt: str)`·`exact_text_sha256(prompt)`·
+      `str(prompt)`·슬라이싱)를 한 줄도 안 고치고 그대로 쓰기 위해서다. 캐시를
+      쓸 수 있다는 «표식»만 얹는다.
+    ★ 왜 앞부분 길이를 실어 나르나: 프롬프트 캐시는 앞부분이 바이트 단위로
+      완전히 같을 때만 맞는다. 어디까지가 공유 앞부분인지는 프롬프트를 «만든»
+      쪽만 알고, 실제로 caching 블록을 나눠 보내는 쪽(provider 호출부)은
+      모른다. 그래서 글자 수로 경계를 넘긴다 — `prompt[:cache_prefix_chars]`가
+      공유 앞부분, `prompt[cache_prefix_chars:]`가 호출마다 달라지는 뒷부분이며
+      둘을 이어 붙이면 원래 프롬프트와 같다.
+    ★ 알아 둘 것: `prompt + RETRY_REMINDER`처럼 이어 붙이면 결과는 평범한 str이
+      되어 표식이 사라진다. 의도된 동작이다 — 재시도는 드물고, 그때는 캐시를
+      포기하고 통짜로 보내는 편이 경계를 잘못 잡는 것보다 안전하다.
+    """
+
+    #: 공유 앞부분의 «글자» 수. 바이트가 아니라 파이썬 문자열 인덱스다.
+    cache_prefix_chars: int
+
+    def __new__(cls, text: str, *, cache_prefix_chars: int) -> "CacheablePrompt":
+        if cache_prefix_chars < 0 or cache_prefix_chars > len(text):
+            raise ValueError("캐시 앞부분 길이는 0 이상 프롬프트 길이 이하여야 합니다")
+        prompt = super().__new__(cls, text)
+        prompt.cache_prefix_chars = cache_prefix_chars
+        return prompt
+
+
 def build_section_prompt(
     company_name: str,
     section_id: str,
@@ -286,12 +314,20 @@ def build_section_prompt(
     already_written: Sequence[str] = (),
     *,
     show_supported_claim_slots: bool = False,
+    shared_evidence_prefix: bool = False,
 ) -> str:
     """장 하나를 쓰게 하는 지시문 — 지침 + 조각 전체 + 실적표 + JSON 강제.
 
     Args:
         already_written: 앞 장들이 이미 쓴 문장. 같은 사실을 다시 쓰지 않도록
             보여 준다. 비어 있으면 블록을 넣지 않는다 (첫 장).
+        shared_evidence_prefix: 조각 블록을 «맨 앞»으로 옮겨 아홉 장이 같은
+            앞부분을 공유하게 한다. 글자는 한 자도 바뀌지 않고 블록 순서만
+            바뀌며, 반환값은 앞부분 길이를 실은 `CacheablePrompt`다.
+            기본값 False는 기존 문자열을 바이트 그대로 돌려준다.
+
+    Returns:
+        `shared_evidence_prefix`가 False면 평범한 str, True면 `CacheablePrompt`.
     """
     minimum, maximum = SECTION_SENTENCE_RANGES[section_id]
     claim_slots = CLAIM_SLOTS_BY_SECTION.get(section_id, ())
@@ -331,9 +367,16 @@ def build_section_prompt(
                     )
                 )
             )
-    parts = [
-        PROMPT_HEADER.format(company=company_name),
-        "\n",
+    header = PROMPT_HEADER.format(company=company_name)
+    # 조각 블록은 프롬프트에서 가장 큰 덩어리다. 아홉 장이 같은 조각을 보는
+    # flat 모드에서는 이 블록만 앞으로 옮겨도 앞부분이 장마다 같아진다.
+    # ★ 회사 이름과 조각으로만 정해진다 — section_id·already_written·실적표에
+    #   의존하면 앞부분이 장마다 달라져 캐시가 영영 안 맞는다.
+    fragments_block = _render_fragments(
+        fragments,
+        show_supported_claim_slots=show_supported_claim_slots,
+    )
+    section_parts = [
         SECTION_GUIDES[section_id],
         "\n\n",
         CITATION_RULES_GUIDE,
@@ -353,12 +396,17 @@ def build_section_prompt(
         FLOW_PROMPT_BY_SECTION.get(section_id, JSON_SCHEMA_GUIDE),
         _render_table(performance_table),
         _render_already_written(already_written),
-        _render_fragments(
-            fragments,
-            show_supported_claim_slots=show_supported_claim_slots,
-        ),
     ]
-    return "".join(parts)
+    if not shared_evidence_prefix:
+        # 기존 순서 그대로 — 이 경로의 결과는 바이트가 예전과 같아야 한다.
+        return "".join([header, "\n", *section_parts, fragments_block])
+    # 구분자는 원래 쓰던 것만 쓴다: 머리말 뒤의 "\n"은 그 자리에 두고, 조각
+    # 블록 뒤에 "\n"을 하나 넣어 장별 지시와 한 줄 띄운다.
+    shared_prefix = f"{header}\n{fragments_block}\n"
+    return CacheablePrompt(
+        shared_prefix + "".join(section_parts),
+        cache_prefix_chars=len(shared_prefix),
+    )
 
 
 # ══════════════════════════════════════════════════════════
@@ -1309,6 +1357,11 @@ def compose_sections(
                     prepared is not None
                     and prepared.enforce_claim_slot_support
                 ),
+                # flat 모드만 아홉 장이 «같은» 조각 전체를 본다 — 조각 블록을
+                # 앞으로 옮기면 앞부분이 장마다 같아져 캐시가 맞는다.
+                # packet 모드는 장마다 조각이 달라 공유 앞부분이 아예 없다.
+                # 켜 봐야 캐시 «쓰기» 할증만 물고 읽기가 없어 손해다.
+                shared_evidence_prefix=prepared is None,
             ),
             ask,
             reject_inline_citation_markers=prepared is not None,
@@ -1383,6 +1436,8 @@ def compose_selected_sections(
                 performance_table if section_id == "past_changes" else None,
                 (),
                 show_supported_claim_slots=prepared.enforce_claim_slot_support,
+                # packet 모드라 장마다 조각이 다르다 — 공유 앞부분이 없으므로
+                # 캐시 표식을 켜지 않는다(기본값 False 유지).
             ),
             ask,
             reject_inline_citation_markers=True,
@@ -1435,7 +1490,7 @@ SUMMARY_RULES_GUIDE: Final[str] = (
 )
 
 #: 요약 출력 JSON 안내 — 장별 JSON_SCHEMA_GUIDE와 같은 모양(키 상수 공유).
-#: (장별 안내문은 «아래 자료 목록» 문구가 있어 요약 프롬프트에는 안 맞아 따로 둔다.)
+#: (장별 안내문은 «자료 목록» 문구가 있어 요약 프롬프트에는 안 맞아 따로 둔다.)
 SUMMARY_JSON_GUIDE: Final[str] = (
     "출력 형식 — 설명·머리말 없이 아래 모양의 JSON만 출력한다:\n"
     f'{{"{RESPONSE_SENTENCES_KEY}": [{{"{RESPONSE_TEXT_KEY}": "<문장>", '

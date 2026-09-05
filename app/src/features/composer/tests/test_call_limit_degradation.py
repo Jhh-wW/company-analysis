@@ -13,10 +13,19 @@
   타입이라 구분할 수 없었다. 앞은 요청을 멈추는 게 맞고, 뒤는 손에 든
   보고서를 낼 수 있다.
 
+★ 같은 결말을 낸 두 번째 원인 (2026-09-05 실측, 하이브)
+  ─────────────────────────────────────────────────────────
+  이번에는 «횟수»가 아니라 «이 요청 하나에 미리 잡아 둔 예약액»이 떨어졌다.
+  685원을 쓴 시점에 다음 호출 예상액이 잔액을 넘자 같은 경로로 완성돼 가던
+  장이 통째로 버려지고 화면에는 사유 없는 같은 문장만 남았다.
+  둘 다 «이 요청 몫을 다 썼다»이지 «돈이 없다»가 아니므로 처리가 같아야 한다 —
+  `request_budget=True` 가 그 구분을 나르고, 강등 판정은 `degradable` 하나만 본다.
+
 ★ 이 시험이 지키는 것
   ① 횟수 상한이면 «선택적 다듬기»만 포기하고 보고서는 나온다 (3곳)
   ② 돈·계정 장애는 «여전히» 요청 전체를 멈춘다  ← 안전선
   ③ 새 예외는 기존 예산 예외의 «자식»이라 기존 처리는 하나도 안 바뀐다
+  ④ 요청 예약액 소진도 같은 3곳에서 살아남는다 (①과 같은 강등 대상)
 """
 
 from __future__ import annotations
@@ -36,6 +45,7 @@ from src.features.composer.verify import (
     REWRITE_PROMPT_HEADER,
     verify_report,
 )
+from src.features.composer.pipeline import run_v2
 from src.features.composer.port import (
     AskFatalError,
     CollectedFragment,
@@ -43,6 +53,13 @@ from src.features.composer.port import (
     ComposedSection,
     ComposedSentence,
     FlowRow,
+)
+# 요약 단계는 run_v2 전체를 돌려야 재현된다 — 가짜 작가·검수와 조각 표본을
+# 두 벌로 만들면 두 파일이 서로 다른 계약을 시험하게 되므로 그대로 빌려 쓴다.
+from src.features.composer.tests.test_pipeline import (
+    _FakeReviewer,
+    _FakeWriter,
+    _raw_fragments,
 )
 
 _원문 = "회사는 캐스팅·트레이닝을 내부에서 수행하고 음반 유통은 협력사와 함께한다."
@@ -92,6 +109,17 @@ def test_치명예외의_기본값은_돈문제다() -> None:
     assert AskFatalError(RuntimeError("x"), call_limit=True).call_limit is True
 
 
+def test_강등판정은_두_요청한도_깃발을_합친_하나만_본다() -> None:
+    """★ 강등 지점이 4곳이라 각자 조건을 적으면 한 곳만 빠뜨려도 새는다."""
+    assert AskFatalError(RuntimeError("x")).request_budget is False
+    assert AskFatalError(RuntimeError("x")).degradable is False
+    assert AskFatalError(RuntimeError("x"), call_limit=True).degradable is True
+    예약액소진 = AskFatalError(RuntimeError("x"), request_budget=True)
+    assert 예약액소진.request_budget is True
+    assert 예약액소진.call_limit is False, "깃발 둘을 서로 덮어쓰지 않는다"
+    assert 예약액소진.degradable is True
+
+
 # ══════════════════════════════════════════════════════════
 # ① 횟수 상한이면 도식 검수만 포기하고 보고서는 나온다
 # ══════════════════════════════════════════════════════════
@@ -119,6 +147,27 @@ def test_도식검수가_돈문제면_여전히_멈춘다() -> None:
 
     with pytest.raises(AskFatalError):
         check_diagrams(_보고서(_경로), _조각(), ask=ask)
+
+
+def test_도식검수가_요청예약액_소진이면_보고서는_살아남는다() -> None:
+    """★ 2026-09-05 실측 — 원인 예외는 위 «돈문제» 시험과 «같은 타입»이다.
+
+    갈리는 것은 오직 깃발이다. 요청 로컬 예약이 잡아 준 상한을 다 쓴 것이므로
+    선택적 검수만 건너뛰고 이미 만든 장·문장은 그대로 낸다.
+    """
+
+    def ask(prompt: str) -> str:
+        raise AskFatalError(
+            provider_budget.ProviderBudgetExceeded("단계 예약 잔액을 넘습니다"),
+            request_budget=True,
+        )
+
+    보고서, 사유 = check_diagrams(_보고서(_경로), _조각(), ask=ask)
+
+    장 = 보고서.sections[0]
+    assert len(장.sentences) == 1, "★ 문장이 사라지면 안 된다"
+    assert 장.flow_rows == (), "미확인 화살표는 빠진다(보수적)"
+    assert any("검수" in 이유 for 이유 in 사유)
 
 
 def test_도식검수가_정상이면_예전처럼_남는다() -> None:
@@ -204,6 +253,22 @@ def test_재작성이_돈문제면_여전히_멈춘다() -> None:
         verify_report(_검증할_보고서(), _조각(), None, ask)
 
 
+def test_재작성이_요청예약액_소진이면_참문장은_살아남는다() -> None:
+    """★ 2026-09-05 실측 — 예약액이 떨어졌다고 «참» 문장까지 버리지 않는다."""
+    ask = _판정하는_ask(
+        AskFatalError(
+            provider_budget.ProviderBudgetExceeded("단계 예약 잔액을 넘습니다"),
+            request_budget=True,
+        )
+    )
+
+    결과 = verify_report(_검증할_보고서(), _조각(), None, ask)
+
+    남은 = [문장.text for 절 in 결과.sections for 문장 in 절.sentences]
+    assert _참문장 in 남은, "★ 참 판정 문장이 사라지면 안 된다"
+    assert _거짓문장 not in 남은, "거짓 문장은 재작성 대신 제거된다(보수적)"
+
+
 # ══════════════════════════════════════════════════════════
 # ④ 재작성 호출은 «예산 안에서만» 쓴다 (넘치면 제거)
 # ══════════════════════════════════════════════════════════
@@ -273,3 +338,61 @@ def test_예산을_넘긴_거짓문장은_남지_않고_제거된다() -> None:
 
     남은 = [문장.text for 절 in 결과.sections for 문장 in 절.sentences]
     assert 남은 == [], "★ 거짓 판정 문장이 보고서에 남았다"
+
+
+# ══════════════════════════════════════════════════════════
+# ④ 요약 단계 — 요청 예약액 소진도 본문을 버리지 않는다
+# ══════════════════════════════════════════════════════════
+
+
+def test_요약이_요청예약액_소진이면_본문을_버리지_않는다() -> None:
+    """★ 요약은 «이미 검증된» 본문 문장으로 채울 길이 있다 (AI 0회).
+
+    2026-09-05 실측 — 예약액이 떨어진 것이 본문 9개 장을 버릴 이유가 되면 안 된다.
+    """
+
+    class _요약에서_예약액소진(_FakeWriter):
+        def __call__(self, prompt: str) -> str:
+            if "핵심 요약" in prompt:
+                raise AskFatalError(
+                    provider_budget.ProviderBudgetExceeded(
+                        "단계 예약 잔액을 넘습니다"
+                    ),
+                    request_budget=True,
+                )
+            return super().__call__(prompt)
+
+    output = run_v2(
+        "가나다전자",
+        _raw_fragments(),
+        None,
+        writer_ask=_요약에서_예약액소진(),
+        reviewer_ask=_FakeReviewer(),
+    )
+
+    보고서 = output.report
+    assert all(장.prose_lines for 장 in 보고서.sections), "★ 본문이 사라지면 안 된다"
+    assert 보고서.summary_items, "★ 요약은 본문 확인 문장으로 채워져야 한다"
+
+
+def test_요약이_계정장애면_여전히_요청_전체가_멈춘다() -> None:
+    """★ 안전선 — 깃발 없는 요청 전역 장애는 강등되지 않는다."""
+
+    class _요약에서_계정장애(_FakeWriter):
+        def __call__(self, prompt: str) -> str:
+            if "핵심 요약" in prompt:
+                raise AskFatalError(
+                    provider_budget.ProviderBudgetUnavailable(
+                        "provider를 쓸 수 없습니다"
+                    )
+                )
+            return super().__call__(prompt)
+
+    with pytest.raises(AskFatalError):
+        run_v2(
+            "가나다전자",
+            _raw_fragments(),
+            None,
+            writer_ask=_요약에서_계정장애(),
+            reviewer_ask=_FakeReviewer(),
+        )

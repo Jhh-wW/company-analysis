@@ -16,6 +16,7 @@ from src.shared.final_gate_diagnostics import (
     FINAL_GATE_REASON_OTHER_GATE,
     FINAL_GATE_REASON_PUBLISH_BLOCKED,
     FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR,
+    FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED,
     INTERNAL_EVIDENCE_CONTRACT_PROBLEM_CODES,
     OFFICIAL_EVIDENCE_INSUFFICIENT_PROBLEM_CODES,
     OFFICIAL_EVIDENCE_CONFIGURATION_PROBLEM_CODES,
@@ -39,6 +40,7 @@ def test_최종게이트_사유는_원문없는_안전코드로_닫혀있다() -
         FINAL_GATE_REASON_OFFICIAL_EVIDENCE_CONFIGURATION,
         FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
         FINAL_GATE_REASON_EVIDENCE_CLASSIFICATION_UNDETERMINED,
+        FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED,
         FINAL_GATE_REASON_OTHER_GATE,
     }
     assert SAFE_FINAL_GATE_REASONS == {
@@ -53,8 +55,39 @@ def test_최종게이트_사유는_원문없는_안전코드로_닫혀있다() -
         "official_evidence_configuration",
         "internal_evidence_contract",
         "evidence_classification_undetermined",
+        "request_budget_exhausted",
         "other_gate",
     }
+
+
+def test_요청예산_소진은_출고검증_분류기가_만들지_않는다() -> None:
+    """★ 이 사유는 «출고 검증 실패»가 아니라 예산 경계가 직접 붙인다.
+
+    분류기가 어떤 입력으로든 이 코드를 내놓으면, 품질·근거 문제로 멈춘 조사가
+    화면에서 «예산을 다 썼다»로 뒤바뀐다. 그 반대도 마찬가지라 두 통로를
+    섞지 않는다는 것을 여기서 못 박는다.
+    """
+    모든_문제코드 = (
+        *INTERNAL_EVIDENCE_CONTRACT_PROBLEM_CODES,
+        *OFFICIAL_EVIDENCE_CONFIGURATION_PROBLEM_CODES,
+        *OFFICIAL_EVIDENCE_TRANSIENT_PROBLEM_CODES,
+        *EVIDENCE_CLASSIFICATION_UNDETERMINED_PROBLEM_CODES,
+        *OFFICIAL_EVIDENCE_INSUFFICIENT_PROBLEM_CODES,
+        *QUALITY_FLOOR_PROBLEM_CODES,
+        # 사유 코드 자체를 문제 코드로 흘려 넣어도 승격되지 않아야 한다.
+        FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED,
+        "",
+    )
+
+    for 코드 in 모든_문제코드:
+        assert (
+            classify_v2_validation_final_gate_reason((코드,))
+            != FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED
+        )
+    assert (
+        classify_v2_validation_final_gate_reason(())
+        == FINAL_GATE_REASON_PUBLISH_BLOCKED
+    )
 
 
 # ══════════════════════════════════════════════════════════
