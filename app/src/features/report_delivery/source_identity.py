@@ -125,8 +125,14 @@ class SourceSnapshot:
             label="생성 전 출처",
             allow_empty=True,
         )
-        if preflight_digest and not (self.dart_receipt_nos and finance_digest):
-            raise ValueError("완전한 DART·재무 신원 없이 생성 전 출처 지문을 저장할 수 없습니다")
+        # ★ 재무 도장은 없어도 된다 — 감사보고서만 내는 비상장사는 DART 재무 API가
+        #   «자료 없음(013)»을 답해 finance_digest가 비고, pipeline은 접수번호+공식
+        #   snapshot만으로 생성 전 지문을 만든다(ReportSourceIdentity.
+        #   generation_digest_without_financials, 2026-09-05 인이지 실측). 그 지문을
+        #   여기서 거절하면 AI 비용을 다 쓴 뒤 출고 직전에 실패한다(실측 사고).
+        #   cache_usable은 아래에서 여전히 receipts·finance 둘 다 있을 때만 True다.
+        if preflight_digest and not self.dart_receipt_nos:
+            raise ValueError("DART 접수번호 없이 생성 전 출처 지문을 저장할 수 없습니다")
         expected_identity = _identity_digest(
             dart_receipt_nos=self.dart_receipt_nos,
             financial_payload_sha256=finance_digest,
@@ -198,8 +204,12 @@ class SourceSnapshot:
             label="생성 전 출처",
             allow_empty=True,
         )
-        if preflight_digest and not (receipts and finance_digest):
-            raise ValueError("완전한 DART·재무 신원 없이 생성 전 출처 지문을 저장할 수 없습니다")
+        # 재무 도장이 없는 회사(DART 재무 API 013)도 접수번호가 있으면 생성 전
+        # 지문을 그대로 봉인한다. 캐시 재사용은 cache_usable=False로 계속 막힌다.
+        # (__post_init__의 같은 규칙과 한 쌍 — 한쪽만 고치면 capture는 통과하고
+        #  저장 복원에서 다시 떨어진다.)
+        if preflight_digest and not receipts:
+            raise ValueError("DART 접수번호 없이 생성 전 출처 지문을 저장할 수 없습니다")
         identity_digest = _identity_digest(
             dart_receipt_nos=receipts,
             financial_payload_sha256=finance_digest,

@@ -570,15 +570,23 @@ def persist_approved_delivery(
         )
         if stored_source is None:
             raise DeliveryAdapterError("정식 캐시 보고서의 출처 snapshot이 없습니다")
-        if (
-            not stored_source.cache_usable
-            or stored_source.preflight_identity_digest
-            != str(preflight_identity_digest).strip()
-        ):
+        # 생성 전 지문 일치는 캐시 결속 여부와 무관하게 항상 확인한다.
+        if stored_source.preflight_identity_digest != str(
+            preflight_identity_digest
+        ).strip():
             raise DeliveryAdapterError(
                 "정식 캐시의 생성 전 출처 지문이 최초 pipeline 판정과 다릅니다"
             )
         if bind_cache_entry:
+            # ★ cache_usable(접수번호+재무 도장)은 정식 캐시에 «묶을 때만» 요구한다.
+            #   감사보고서만 내는 비상장사는 DART 재무 API가 013이라 재무 도장이
+            #   비고(2026-09-05 인이지 실측), pipeline은 cache_eligible=False로
+            #   넘긴다. 여기서 cache_usable을 무조건 요구하면 AI 비용을 다 쓴 뒤
+            #   출고 직전에 실패한다(실측 사고). 캐시 재사용은 그대로 막힌다.
+            if not stored_source.cache_usable:
+                raise DeliveryAdapterError(
+                    "재무 도장 없는 출처는 정식 캐시에 결속할 수 없습니다"
+                )
             delivery_store.bind_cache_entry(
                 conn,
                 key=CacheLookupKey.from_preflight(

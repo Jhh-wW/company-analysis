@@ -2707,3 +2707,59 @@ def test_기한이_지나면_원본과_재사용_주소가_함께_닫힌다(monk
         ]
 
     assert [response.status_code for response in 상태] == [410, 410, 410, 410]
+
+
+def test_재무API_자료없음_비상장사도_최종출고가_공개된다(monkeypatch, tmp_path: Path):
+    """2026-09-05 인이지: AI 작성까지 끝난 뒤 출처 snapshot이 빈 재무 도장을 거절해
+    「보고서 저장의 마지막 확인이 끝나지 않아」로 닫힌 사고의 회귀 시험.
+
+    pipeline이 접수번호+공식 snapshot으로 만든 생성 전 지문(재무 도장 없음)을
+    그대로 넘겨도 Delivery·PDF·publish가 한 거래로 확정되고 결과가 열려야 한다.
+    """
+
+    from src.shared.report_source_identity import ReportSourceIdentity as _Identity
+    from src.web import report_publication as _publication
+
+    report = _demo_report()
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "absent-financials"))
+    receipt = "20260406001240"
+    revision, image = _current_release_identity()
+    namespace = CacheNamespace.create(
+        product="company-analysis",
+        schema_version=report.schema_version or "legacy-report-schema",
+        deployment_revision=revision,
+        image_digest=image,
+        requested_models={"pipeline": "deterministic-demo"},
+        output_settings={"temperature": 0},
+    )
+    identity = _Identity(dart_receipt_numbers=(receipt,))
+    assert identity.cache_usable is False
+    preflight_digest = identity.generation_digest_without_financials("b" * 64)
+    assert preflight_digest
+    report_id = f"absent-{uuid.uuid4().hex}"
+
+    delivered = reports_router.finalize_new_report_delivery(
+        report_id=report_id,
+        corp_id="ineeji-like",
+        billing_bucket_id="same-bucket",
+        report=report,
+        actual_models=("deterministic-demo",),
+        reused_from_cache=False,
+        dart_receipt_numbers=(receipt,),
+        financial_payload_digest="",
+        cache_namespace=namespace,
+        preflight_identity_digest=preflight_digest,
+        cache_eligible=False,
+        engine_build_identity=_current_build_identity(),
+    )
+
+    assert delivered.artifact is not None
+    with storage_db.connect() as conn:
+        assert _publication.report_is_published_or_legacy(conn, report_id)
+        source = delivery_store.load_source_snapshot(
+            conn, delivered.content.source_snapshot_id
+        )
+    assert source is not None
+    assert source.preflight_identity_digest == preflight_digest
+    assert source.financial_payload_sha256 == ""
+    assert source.cache_usable is False
