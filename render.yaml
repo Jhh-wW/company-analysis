@@ -23,8 +23,13 @@ services:
     #   즉 배포·재시작 중이던 조사는 정리를 끝내기 전에 잘릴 수 있다.
     #   이건 특정 변경이 만든 문제가 아니라 master 배포본이 내내 있던 상태다.
     #   근본 해결은 docs/architecture/deployment-contract.md 의 종료·교체 순서에 있다.
-    # 첫 관리자 베타는 비용과 외부 변경을 통제하도록 수동 배포만 허용한다.
-    autoDeployTrigger: off
+    # main 에 커밋이 올라가면 바로 배포한다 (2026-09-06 부터).
+    #   첫 베타는 수동 배포만 허용했지만, 머지 뒤 사람이 버튼을 눌러야 해서
+    #   운영판이 main 보다 뒤처지는 일이 반복됐다. 대신 «머지 = 배포» 이므로
+    #   회귀 묶음 4개가 통과한 PR 만 main 에 합친다 (deploy/README.md).
+    #   Dashboard 의 Auto-Deploy 값이 이 파일과 같은지는 Blueprint Sync 가 켜져
+    #   있을 때만 보장된다 — 어긋나면 Dashboard 쪽을 On Commit 으로 맞춘다.
+    autoDeployTrigger: commit
 
     # SQLite·보고서·감사 기록을 재배포와 재시작 뒤에도 보존한다.
     disk:

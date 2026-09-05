@@ -410,7 +410,7 @@ def test_render_blueprint는_유료_관리자_실분석_한서비스만_좁게_�
 
     assert web["plan"] == "standard"
     assert web["numInstances"] == 1
-    assert web["autoDeployTrigger"] is False
+    assert web["autoDeployTrigger"] == "commit"
     assert web["disk"] == {
         "name": "company-analysis-data",
         "mountPath": "/var/data",
