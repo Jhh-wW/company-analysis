@@ -1223,10 +1223,21 @@ def test_root_신원보조탐색은_닫힌_페이지수_상한을_넘지_않는�
         root_identity_verification_required=True,
     )
 
-    called_supplements = [url for url in site.calls if url in supplement_urls]
+    # 결속에 성공하면 그 뒤 일반 수집이 남은 same-origin 페이지도 읽는다.
+    # 이 시험의 주제는 «신원 확인 단계»의 3쪽 상한이므로, 결속 직후 시작되는
+    # sitemap 탐색 앞까지만 잘라서 센다.
+    identity_phase_calls = site.calls[: site.calls.index(f"{root}/sitemap.xml")]
+    called_supplements = [
+        url for url in identity_phase_calls if url in supplement_urls
+    ]
     assert len(called_supplements) == 3
     assert supplement_urls[3] not in called_supplements
-    assert result.documents == ()
+    # 읽은 3쪽에 등록번호가 없어도 DART hm_url host는 법인명만으로 결속한다
+    # (2026-09-05 완화). 이 완화 전에는 여기서 문서가 0건이었다.
+    assert any(
+        attempt.reason_code == "root_identity_name_only"
+        for attempt in result.attempts
+    )
 
 
 def test_등록번호가_없는_DART_root는_정식모드에서_네트워크_0회로_fail_closed한다():
@@ -3090,3 +3101,166 @@ def test_홈페이지_주소가_비어있으면_빈_결과():
 
     assert result.documents == ()
     assert result.attempts == ()
+
+
+# ── DART hm_url host의 이름-단독 결속 ───────────────────────
+
+
+def test_DART_root는_등록번호가_홈페이지에_없어도_법인명만으로_결속한다():
+    """DART가 등록한 홈페이지 host는 이름만 맞으면 공식 웹으로 결속한다."""
+
+    root = "https://name-only-root.example"
+    pages = {
+        f"{root}/robots.txt": _missing(f"{root}/robots.txt"),
+        f"{root}/sitemap.xml": _missing(f"{root}/sitemap.xml"),
+        f"{root}/": _page(
+            _body(
+                "주식회사 와이즐리컴퍼니 · 생활용품을 제조 및 판매하는 "
+                "주요 사업을 영위합니다"
+            ),
+            f"{root}/",
+        ),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        root_homepage_url=root,
+        root_identity_verification_required=True,
+    )
+
+    document = next(doc for doc in result.documents if doc.canonical_url == f"{root}/")
+    assert document.source_kind == "official_web_page"
+    assert document.requirement == "REQUIRED"
+    assert "등록번호 미게시" in document.identity_binding
+    assert "이중 검증" not in document.identity_binding
+    assert any(
+        attempt.reason_code == "root_identity_name_only"
+        for attempt in result.attempts
+    )
+    assert not any(
+        attempt.reason_code == "root_identity_mismatch"
+        for attempt in result.attempts
+    )
+
+
+def test_같은_페이지도_교차도메인이면_이름만으로는_결속하지_않는다():
+    """DART hm_url host가 아닌 후보는 법인명+등록번호 이중 검증을 유지한다."""
+
+    candidate = "https://name-only-cross.example/"
+    pages = {
+        "https://name-only-cross.example/robots.txt": _missing(
+            "https://name-only-cross.example/robots.txt"
+        ),
+        candidate: _page(
+            _body(
+                "주식회사 와이즐리컴퍼니 · 생활용품을 제조 및 판매하는 "
+                "주요 사업을 영위합니다"
+            ),
+            candidate,
+        ),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        root_homepage_url="",
+        official_candidate_urls=(candidate,),
+        root_identity_verification_required=True,
+    )
+
+    assert result.documents == ()
+    assert any(
+        attempt.reason_code == "cross_domain_identity_mismatch"
+        for attempt in result.attempts
+    )
+    assert not any(
+        attempt.reason_code == "root_identity_name_only"
+        for attempt in result.attempts
+    )
+
+
+def test_보조_신원페이지_3쪽에도_번호가_없으면_법인명만으로_결속한다():
+    """(주)인이지 실측형 회귀 — 보강 조회는 성공했는데 번호가 0건인 경우."""
+
+    root = "https://ineeji-shaped.example"
+    supplement_paths = (
+        "/html/about/company.php",
+        "/html/guide/privacy.php",
+        "/html/guide/terms.php",
+    )
+    links = "".join(
+        f'<a href="{root}{path}">회사 정보</a>' for path in supplement_paths
+    )
+    pages = {
+        f"{root}/robots.txt": _missing(f"{root}/robots.txt"),
+        f"{root}/sitemap.xml": _missing(f"{root}/sitemap.xml"),
+        f"{root}/": _page(
+            _body("주식회사 와이즐리컴퍼니 회사 소개와 생활용품 주요 사업")
+            + links,
+            f"{root}/",
+        ),
+    }
+    for path in supplement_paths:
+        url = f"{root}{path}"
+        pages[url] = _page(
+            _body("회사 정보와 이용 약관을 안내합니다"),
+            url,
+        )
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        root_homepage_url=root,
+        root_identity_verification_required=True,
+    )
+
+    assert all(f"{root}{path}" in site.calls for path in supplement_paths)
+    assert any(
+        attempt.reason_code == "root_identity_name_only"
+        for attempt in result.attempts
+    )
+    document = next(doc for doc in result.documents if doc.canonical_url == f"{root}/")
+    assert "등록번호 미게시" in document.identity_binding
+
+
+def test_보조_신원페이지_조회가_실패하면_이름만으로_결속하지_않는다():
+    """자료를 다 못 본 상태에서 완화 경로를 열지 않는다."""
+
+    root = "https://ineeji-broken.example"
+    supplement = f"{root}/company"
+    pages = {
+        f"{root}/robots.txt": _missing(f"{root}/robots.txt"),
+        f"{root}/sitemap.xml": _missing(f"{root}/sitemap.xml"),
+        f"{root}/": _page(
+            _body("주식회사 와이즐리컴퍼니 회사 소개와 생활용품 주요 사업")
+            + f'<a href="{supplement}">회사 소개</a>',
+            f"{root}/",
+        ),
+        # supplement 자체는 pages에 없어 접속 실패가 된다.
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        root_homepage_url=root,
+        root_identity_verification_required=True,
+    )
+
+    assert result.documents == ()
+    assert any(
+        attempt.reason_code == "root_identity_supplement_failed"
+        for attempt in result.attempts
+    )
+    assert not any(
+        attempt.reason_code == "root_identity_name_only"
+        for attempt in result.attempts
+    )

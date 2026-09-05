@@ -56,6 +56,7 @@ from src.features.homepage.ir_pdf import (
 from src.features.homepage.official_identity import (
     OfficialCompanyIdentity,
     OfficialIdentityMatch,
+    verify_dart_root_company_identity_pages,
     verify_official_company_identity,
     verify_official_company_identity_pages,
 )
@@ -133,6 +134,12 @@ _PRIORITY_KEYWORDS: tuple[str, ...] = WIDE_PRIORITY_HOST_KEYWORDS + PRIORITY_PAT
 
 _DART_HOMEPAGE_DISCOVERY = "DART company.json hm_url"
 _DART_IR_DISCOVERY = "DART company.json ir_url"
+#: 법인명과 등록번호를 실제 본문에서 함께 확인한 기본 결속 라벨.
+_DUAL_VERIFIED_IDENTITY_LABEL = "DART 법인명+등록번호 이중 검증 공식 웹"
+#: DART가 기업개황에 직접 등록한 홈페이지 host라서 법인명만으로 결속한 라벨.
+#: 등록번호를 홈페이지에 게시하지 않는 회사를 위한 좁은 예외이며, 라벨을
+#: 따로 두어 운영 진단에서 두 결속을 구분한다.
+_ROOT_NAME_ONLY_IDENTITY_LABEL = "DART hm_url host 법인명 검증 공식 웹(등록번호 미게시)"
 #: : robots·sitemap·전체 truncation·IR처럼 «호스트/수집 전체」에 걸린
 #: attempt이거나, 일반 페이지인데 URL로 페이지 유형을 못 알아낸 attempt에
 #: 붙이는 fallback slot 집합. 앱 계약(CollectionAttempt)은 빈 slot_ids를
@@ -1047,6 +1054,8 @@ def _collect_identity_verified_candidate(
     binding: BoundHost | None = None
 
     match: OfficialIdentityMatch | None = None
+    # DART hm_url host의 root 묶음을 «법인명만» 확인해 결속했는지 여부.
+    name_only_root = False
     identity_responses: tuple[WideRawResponse, ...] = ()
     if page_state == ATTEMPT_STATE_OK and response is not None:
         # 실제 전송 구현은 매 redirect마다 같은 origin/path/query를 검사한다.
@@ -1081,6 +1090,20 @@ def _collect_identity_verified_candidate(
                 if match is None and supplement_failed:
                     page_state = ATTEMPT_STATE_FAILED
                     reason_code = "root_identity_supplement_failed"
+                elif match is None:
+                    # 등록번호를 홈페이지 어디에도 적지 않는 회사가 있다
+                    # ((주)인이지 2026-09-05 실측: root·회사소개·개인정보·
+                    # 약관 4쪽 모두 0건). 이 host는 DART 기업개황이 직접
+                    # 등록한 hm_url이므로, 사용자 결정에 따라 법인명 일치만
+                    # 으로 결속한다. hm_url이 낡아 다른 사이트를 가리킬
+                    # 위험은 남지만 법인명 토큰이 그대로 이어져야 한다는
+                    # 조건이 있어 낮다. 보강 조회가 하나라도 실패했으면
+                    # (위 갈래) 자료를 다 못 본 것이므로 열지 않는다.
+                    match = verify_dart_root_company_identity_pages(
+                        tuple(item.text for item in identity_responses),
+                        identity,
+                    )
+                    name_only_root = match is not None
         if page_state == ATTEMPT_STATE_OK and match is None:
             page_state = ATTEMPT_STATE_MISSING
             reason_code = (
@@ -1118,13 +1141,20 @@ def _collect_identity_verified_candidate(
             )
         )
         source_digest = provenance_digest(source_page_url or candidate_url)
+        # 이름-단독 결속도 DART가 보증한 host라는 계보는 같으므로 root의
+        # 기존 신뢰 등급을 그대로 쓴다. 대신 라벨과 사유 코드로 구분한다.
         is_high_confidence = bool(promote_verified_root or verified_filing_binding)
+        identity_label = (
+            _ROOT_NAME_ONLY_IDENTITY_LABEL
+            if name_only_root
+            else _DUAL_VERIFIED_IDENTITY_LABEL
+        )
         binding = BoundHost(
             host=host,
             identity_binding=(
                 verified_filing_binding
                 or (
-                    "DART 법인명+등록번호 이중 검증 공식 웹; "
+                    f"{identity_label}; "
                     f"discovery={source_binding}; "
                     f"discovery_sha256={source_digest}; "
                     f"identity_evidence_sha256={match.evidence_sha256}"
@@ -1165,7 +1195,7 @@ def _collect_identity_verified_candidate(
                 state.documents.append(document)
                 documents_seen += 1
         reason_code = (
-            "root_identity_verified"
+            ("root_identity_name_only" if name_only_root else "root_identity_verified")
             if promote_verified_root
             else (
                 "dart_filing_identity_verified"

@@ -8,6 +8,11 @@ DART 기업개황에서 받은 정확한 법인명과 안정 식별번호(사업
 도메인명·회사명을 손으로 적은 allowlist는 사용하지 않는다. 입력 URL은 검색
 결과 snippet이 아니라 상위의 출처 있는 발견 경로가 건넨 exact URL이어야 하며,
 여기서는 그 URL의 실제 본문을 다시 검증한다.
+
+예외는 하나다. DART 기업개황이 직접 등록한 홈페이지(``hm_url``)와 같은 host는
+등록번호를 홈페이지에 게시하지 않는 회사가 실제로 있어서
+``verify_dart_root_company_identity_pages``로 법인명만 확인해 결속한다. 이
+완화는 그 host에만 적용되며 다른 등록 도메인에는 절대 쓰지 않는다.
 """
 
 from __future__ import annotations
@@ -39,6 +44,9 @@ _CORPORATE_NUMBER_MARKERS = (
     "법인 번호",
 )
 _NUMBER_CONTEXT_CHARS = 48
+# DART hm_url host의 이름-단독 영수증 재료 앞에 붙이는 표식. 같은 페이지
+# 묶음이라도 이중 검증 영수증과 해시가 겹치지 않게 하기 위한 접두어다.
+_DART_ROOT_NAME_ONLY_EVIDENCE_PREFIX = "dart-root-name-only"
 
 
 @dataclass(frozen=True)
@@ -182,6 +190,50 @@ def _number_has_registry_marker(text: str, number: str) -> bool:
     return False
 
 
+def _identity_page_texts(raw_pages: tuple[str, ...]) -> tuple[str, ...] | None:
+    """페이지별 HTML을 따로 파싱해 사람이 읽는 글자만 NFKC로 정규화한다.
+
+    원문을 이어 붙이지 않고 페이지 단위로 나눠 돌려주므로, 한 페이지 끝의
+    표지와 다른 페이지 첫 숫자가 우연히 이어져 번호가 되는 일은 없다. 입력이
+    tuple이 아니거나 문자열 아닌 값·파싱 실패가 섞이면 ``None``으로 거절한다.
+    """
+
+    if not isinstance(raw_pages, tuple):
+        return None
+    texts: list[str] = []
+    for raw_html in raw_pages:
+        if not isinstance(raw_html, str):
+            return None
+        parser = _IdentityTextExtractor()
+        try:
+            parser.feed(raw_html)
+        except (TypeError, ValueError):
+            return None
+        texts.append(unicodedata.normalize("NFKC", parser.text))
+    return tuple(texts)
+
+
+def _matched_company_name(
+    texts: tuple[str, ...],
+    identity: OfficialCompanyIdentity,
+) -> str:
+    """어느 한 페이지에 법인명·별칭 토큰이 끊기지 않고 이어져 있는지 본다."""
+
+    for text in texts:
+        page_tokens = _name_token_rows(text)
+        matched_name = next(
+            (
+                name
+                for name in (identity.legal_name, *identity.aliases)
+                if _contains_name_tokens(page_tokens, name)
+            ),
+            "",
+        )
+        if matched_name:
+            return matched_name
+    return ""
+
+
 def verify_official_company_identity(
     raw_html: str,
     identity: OfficialCompanyIdentity,
@@ -211,34 +263,13 @@ def verify_official_company_identity_pages(
     robots·페이지/바이트 상한을 먼저 검증해야 한다.
     """
 
-    if not identity.can_verify_cross_domain or not isinstance(raw_pages, tuple):
+    if not identity.can_verify_cross_domain:
         return None
-    texts: list[str] = []
-    for raw_html in raw_pages:
-        if not isinstance(raw_html, str):
-            return None
-        parser = _IdentityTextExtractor()
-        try:
-            parser.feed(raw_html)
-        except (TypeError, ValueError):
-            return None
-        texts.append(unicodedata.normalize("NFKC", parser.text))
+    texts = _identity_page_texts(raw_pages)
     if not texts:
         return None
 
-    matched_name = ""
-    for text in texts:
-        page_tokens = _name_token_rows(text)
-        matched_name = next(
-            (
-                name
-                for name in (identity.legal_name, *identity.aliases)
-                if _contains_name_tokens(page_tokens, name)
-            ),
-            "",
-        )
-        if matched_name:
-            break
+    matched_name = _matched_company_name(texts, identity)
     if not matched_name:
         return None
 
@@ -263,4 +294,40 @@ def verify_official_company_identity_pages(
         registration_number_sha256=hashlib.sha256(
             matched_number.encode("ascii")
         ).hexdigest(),
+    )
+
+
+def verify_dart_root_company_identity_pages(
+    raw_pages: tuple[str, ...],
+    identity: OfficialCompanyIdentity,
+) -> OfficialIdentityMatch | None:
+    """DART가 등록한 홈페이지 host의 root 묶음을 법인명만으로 결속한다.
+
+    호출자는 이 origin이 DART 기업개황 ``hm_url``의 host(apex/www 짝 포함)임을
+    반드시 보증해야 한다. 그 계보가 없으면 이 함수를 부르면 안 된다. 등록번호를
+    홈페이지 어디에도 게시하지 않는 회사가 있어(2026-09-05 (주)인이지 실측:
+    root·회사소개·개인정보·약관 전부 0건) 이중 검증만으로는 DART가 직접 알려준
+    공식 홈페이지조차 결속하지 못하기 때문이다.
+
+    돌려주는 영수증은 ``registration_number_sha256``가 빈 문자열이고, 재료
+    앞에 전용 접두어를 넣어 이중 검증 영수증과 절대 같은 값이 나오지 않는다.
+    이 영수증은 교차 도메인(다른 host) 승인 근거로 쓸 수 없다.
+    """
+
+    texts = _identity_page_texts(raw_pages)
+    if not texts:
+        return None
+
+    matched_name = _matched_company_name(texts, identity)
+    if not matched_name:
+        return None
+
+    name_key = exact_company_name_key(matched_name)
+    material = "\0".join(
+        (_DART_ROOT_NAME_ONLY_EVIDENCE_PREFIX, name_key, "\0\0".join(texts))
+    ).encode("utf-8")
+    return OfficialIdentityMatch(
+        evidence_sha256=hashlib.sha256(material).hexdigest(),
+        matched_name_sha256=hashlib.sha256(name_key.encode("utf-8")).hexdigest(),
+        registration_number_sha256="",
     )
