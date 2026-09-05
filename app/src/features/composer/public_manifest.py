@@ -14,6 +14,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Final
+from urllib.parse import urlsplit
 
 from src.core.citations import citation_number
 from src.features.composer.constants import (
@@ -55,9 +56,11 @@ from src.features.provenance.sources import (
     full_typed_source_registry_problem,
     has_valid_provenance_seal,
     is_canonical_official_with_registry,
+    is_publishable_supplementary,
     seal_collected_source,
 )
 from src.shared.report_evidence.constants import (
+    SOURCE_KIND_NEWS,
     SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE,
 )
 from src.shared.report_evidence.source_kind_policy import (
@@ -1091,7 +1094,29 @@ def _expected_source(
         domain_redirect_from_host=fragment.domain_redirect_from_host,
         domain_redirect_to_host=fragment.domain_redirect_to_host,
     )
-    if identity_host and identity_document_id:
+    if fragment.formal_source_kind == SOURCE_KIND_NEWS:
+        news_host = str(urlsplit(fragment.source_url).hostname or "")
+        source = Source(
+            number=number,
+            kind=SourceKind.NEWS,
+            label=_expected_source_label(fragment, filing_meta),
+            collected_at=fragment.source_collected_on,
+            published_at=fragment.document_date,
+            domain=news_host,
+            source_id=f"{_SOURCE_ID_PREFIX}{fragment.fragment_id}",
+            title=fragment.document_title,
+            publisher=fragment.source_publisher,
+            host=news_host,
+            url=fragment.source_url,
+            document_id=fragment.source_document_id,
+            location=fragment.location,
+            source_type="언론 보도",
+            fact_status="외부 보도",
+            used_in=list(used_in),
+            evidence_hashes=evidence_hashes,
+            exact_evidence_hashes=exact_hashes,
+        )
+    elif identity_host and identity_document_id:
         source = Source(
             number=number,
             kind=SourceKind.FILING,
@@ -1239,6 +1264,13 @@ def _expected_source(
         ):
             raise PublicManifestError(
                 "DART sidecar 공식 웹 출처의 공식성 proof가 손상됐습니다"
+            )
+        if (
+            fragment.formal_source_kind == SOURCE_KIND_NEWS
+            and not is_publishable_supplementary(sealed, [sealed])
+        ):
+            raise PublicManifestError(
+                "FULL 보조 언론 출처의 공개 provenance가 손상됐습니다"
             )
     return sealed
 

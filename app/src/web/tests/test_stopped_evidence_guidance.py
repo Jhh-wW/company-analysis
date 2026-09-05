@@ -114,6 +114,30 @@ def test_정책상_쓰지_않은_뉴스와_일부만_탐색한_IR을_자료없�
     assert "❌ 없음" not in response.text
 
 
+def test_뉴스_수집을_켠_결과는_과정_설명_없이_확인_사실만_보인다() -> None:
+    job_id, job = _stopped_job()
+    assert job.result is not None
+    job.result = RunResult(
+        outcome=job.result.outcome,
+        message=job.result.message,
+        sources=[SourceStatus("뉴스", "ok", "언론 보도 3건 확인")],
+        final_gate_reason=job.result.final_gate_reason,
+    )
+    job_runtime._JOBS[job_id] = job
+    try:
+        with TestClient(main.app, base_url="https://testserver") as client:
+            bind_public_report_access(client, job_id)
+            response = client.get(f"/result/{job_id}")
+    finally:
+        job_runtime._JOBS.pop(job_id, None)
+
+    assert response.status_code == 200
+    assert "⭕ 찾음" in response.text
+    assert "언론 보도 3건 확인" in response.text
+    assert "정책상 미사용" not in response.text
+    assert "뉴스는 조사 대상에서 제외했습니다" not in response.text
+
+
 def test_확인한_자료가_없으면_존재하지_않는_자료표_링크를_만들지_않는다() -> None:
     job_id, job = _stopped_job(sources=False)
     job_runtime._JOBS[job_id] = job

@@ -914,7 +914,7 @@ def _source_category(source: Source) -> str:
     if source.kind is SourceKind.FILING:
         return "전자공시(DART)"
     if source.kind is SourceKind.NEWS:
-        return "뉴스"
+        return "언론"
     label = _normalize_pdf_text(source.label).casefold()
     if any(token in label for token in ("홈페이지", "웹사이트", "website", "homepage")):
         return "회사 홈페이지"

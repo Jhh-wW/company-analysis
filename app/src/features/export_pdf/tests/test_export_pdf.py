@@ -42,7 +42,7 @@ from src.features.pipeline.port import (
     ReportTable,
     SourceStatus,
 )
-from src.features.provenance.sources import render_sources
+from src.features.provenance.sources import Source, SourceKind, render_sources
 from src.features.report_standard import build_published_report
 from src.features.report_standard.constants import SECTION_SPECS
 
@@ -296,6 +296,23 @@ def test_표지_소스_요약은_수집현황이_아니라_실제_citations만_�
         sources=[SourceStatus(name="전자공시", state="ok", detail="성공")],
     )
     assert source_summary(no_citations) == "저장된 출처 없음"
+
+
+def test_언론_보조자료의_표지_분류는_기준서_용어를_쓴다() -> None:
+    report = replace(
+        _report(),
+        citations=[
+            Source(
+                number=1,
+                kind=SourceKind.NEWS,
+                label="신규 사업 기사",
+                published_at="2026-08-30",
+                domain="news.example.com",
+            )
+        ],
+    )
+
+    assert source_summary(report) == "언론 1건"
 
 
 def test_PDF_출처요약은_attestation_only를_사용자자료로_세지_않는다() -> None:
