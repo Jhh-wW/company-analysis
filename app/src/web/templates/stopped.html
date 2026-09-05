@@ -2,12 +2,14 @@
 {% block title %}보고서를 만들지 못했습니다 · 기업분석{% endblock %}
 
 {% block content %}
+{% set start_budget_reservation_denied = result.outcome.value == '게이트_중단' and result.final_gate_reason == 'start_budget_reservation_denied' %}
 <div class="card">
   <div class="stopped-icon">
     {% if result.outcome.value.startswith('거부') %}🚫{% else %}📭{% endif %}
   </div>
   <h1>
-    {% if result.outcome.value == '거부_공공기관' %}이 도구가 다루지 않는 기관입니다
+    {% if start_budget_reservation_denied %}오늘 조사 예산을 다 썼습니다
+    {% elif result.outcome.value == '거부_공공기관' %}이 도구가 다루지 않는 기관입니다
     {% elif result.outcome.value == '거부_공시없음' %}분석할 근거를 모을 수 없습니다
     {% elif result.outcome.value == '회사_못찾음' %}회사를 정확히 확인하지 못했습니다
     {% elif result.outcome.value == '공고_폐기' %}회사 분석을 계속할 수 없습니다
@@ -17,14 +19,16 @@
     {% else %}조사를 멈췄습니다{% endif %}
   </h1>
   <p class="lede">
-    {% if result.outcome.value == '공고_폐기' %}
+    {% if start_budget_reservation_denied %}
+      이 계정의 하루 조사 비용 한도에 도달해 조사를 시작하지 않았습니다. 자정(한국 시간)이 지나면 다시 할 수 있습니다. 이용 횟수는 차감되지 않았습니다.
+    {% elif result.outcome.value == '공고_폐기' %}
       회사 이름과 주소를 확인한 뒤 다시 시도해 주세요.
     {% elif result.outcome.value == '게이트_중단' %}
       {{ gate_guidance.summary }}
     {% else %}{{ result.message }}{% endif %}
   </p>
 
-  {% if result.outcome.value == '게이트_중단' %}
+  {% if result.outcome.value == '게이트_중단' and not start_budget_reservation_denied %}
     <aside class="evidence-stop-note" aria-labelledby="evidence-stop-meaning">
       <h2 id="evidence-stop-meaning">이 결과의 뜻</h2>
       <p>{{ gate_guidance.meaning }}</p>
@@ -38,13 +42,17 @@
     </section>
   {% endif %}
 
+  {% if auth_is_admin and start_budget_reservation_denied %}
+    <p class="muted">사유 코드 <code>{{ result.final_gate_reason }}</code></p>
+  {% endif %}
+
   {% if auth_is_admin and result.cost_krw > 0 %}
     <p class="muted">
       성공 보고서 횟수는 차감되지 않았습니다.
       여기까지 사용된 AI 비용 <strong>약 {{ "%.0f"|format(result.cost_krw) }}원</strong>은
       오늘 비용 원장에 기록됐습니다.
     </p>
-  {% elif show_quota_note is not sameas false %}
+  {% elif not start_budget_reservation_denied and show_quota_note is not sameas false %}
     <p class="muted">
       성공 보고서 횟수는 <strong>차감되지 않았습니다.</strong>
     </p>
@@ -52,7 +60,7 @@
 
   <div class="btn-row">
     <a class="btn" href="/" style="line-height:1.6">
-      {% if result.outcome.value == '게이트_중단' %}{{ gate_guidance.primary_button_label }}{% else %}회사·주소 다시 입력{% endif %}
+      {% if start_budget_reservation_denied %}처음 화면으로{% elif result.outcome.value == '게이트_중단' %}{{ gate_guidance.primary_button_label }}{% else %}회사·주소 다시 입력{% endif %}
     </a>
     {% if result.outcome.value == '게이트_중단' and result.sources %}
       <a class="btn ghost" href="#stopped-sources-title" style="line-height:1.6">
@@ -61,10 +69,10 @@
     {% endif %}
   </div>
 
-  <p class="muted" style="margin-top:16px">
+  {% if not start_budget_reservation_denied %}<p class="muted" style="margin-top:16px">
     이 판정이 틀렸다고 생각되면 알려주세요.
     <a href="/feedback?stage=생성중{% if job is defined and job %}&amp;company={{ job.user_input.company|urlencode }}&amp;report={{ job.job_id|urlencode }}{% endif %}">오류 신고</a>
-  </p>
+  </p>{% endif %}
 </div>
 
 {% if result.sources %}
