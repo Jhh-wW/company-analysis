@@ -275,6 +275,8 @@ class Job:
     #: drain의 stubborn 정리와 task 자체 finally가 경합해도 종료 이력·비용·슬롯
     #: 묶음을 두 번 실행하지 않게 하는 마지막 표식.
     shutdown_cleanup_completed: bool = False
+    #: 실패 진단 로그는 정상 finally와 강제 종료 정리가 경합해도 한 번만 남긴다.
+    failure_logged: bool = False
     #: 예약한 동시 실행 자리. 작업과 종료 정리가 같은 자리를 두 번 풀지 않게 쓴다.
     slot_bucket_id: str = ""
     slot_released: bool = False
@@ -1174,6 +1176,8 @@ async def _run_job(job: Job) -> None:
                     job.result,
                     job.upfront_elapsed_sec + time.perf_counter() - started,
                     run_id=job.job_id,
+                    corp_code=job.card.ref,
+                    confirmed_company=job.card.legal_name,
                     expected_state=(
                         lifecycle.STATE_RUNNING if _job_is_paid(job) else None
                     ),
@@ -1282,6 +1286,8 @@ async def _run_job(job: Job) -> None:
                     job.result,
                     job.upfront_elapsed_sec + time.perf_counter() - started,
                     run_id=job.job_id,
+                    corp_code=job.card.ref,
+                    confirmed_company=job.card.legal_name,
                     expected_state=(
                         lifecycle.STATE_RUNNING if _job_is_paid(job) else None
                     ),
@@ -1348,6 +1354,7 @@ async def _run_job(job: Job) -> None:
             # 예외가 나도 이 최외곽 finally는 실행되어 자리가 영구히 새지 않는다.
             # 화면의 ``finished``는 본문·PDF artifact 확정 시도보다 먼저
             # 열리지 않아야 최초 GET이 구형 재렌더 경로로 빠지지 않는다.
+            _log_failed_run(job)
             job.finished = True
             job.finished_at = time.monotonic()
             _ensure_link_job_closed(job)
@@ -1398,6 +1405,30 @@ def _link_stop_reason(outcome: Outcome) -> str:
         Outcome.GATE_STOPPED: "evidence_gate_stopped",
         Outcome.FAILED: "generation_failed",
     }.get(outcome, "generation_failed")
+
+
+def _log_failed_run(job: Job) -> None:
+    """중단·실패 실행을 회사 식별값과 닫힌 사유 코드 한 줄로 남긴다."""
+
+    result = job.result
+    if (
+        job.failure_logged
+        or not isinstance(result, RunResult)
+        or result.outcome not in {Outcome.GATE_STOPPED, Outcome.FAILED}
+    ):
+        return
+    job.failure_logged = True
+    reason_code = (
+        result.final_gate_reason
+        or job.link_stop_reason
+        or _link_stop_reason(result.outcome)
+    )
+    logger.warning(
+        "조사 실패를 기록했습니다 corp_code=%s company=%s reason_code=%s",
+        job.card.ref,
+        " ".join(job.card.legal_name.split()),
+        reason_code,
+    )
 
 
 def _finish_link_job(
@@ -2051,6 +2082,7 @@ def _force_shutdown_cleanup(job: Job) -> None:
         _release_job_slot(job)
     except BaseException:  # noqa: BLE001 — 한 작업 오류가 다른 작업 정리를 막지 않는다
         logger.exception("종료 중 조사 슬롯을 반환하지 못했습니다")
+    _log_failed_run(job)
     job.shutdown_cleanup_completed = True
 
 
