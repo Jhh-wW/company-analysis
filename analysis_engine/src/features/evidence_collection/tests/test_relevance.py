@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from features.evidence_collection import constants as c
 from features.evidence_collection.relevance import (
     score_fragment_slots,
@@ -10,6 +12,7 @@ from features.evidence_collection.relevance import (
 )
 from features.evidence_collection.segment import segment_document
 from features.evidence_collection.tests.fixtures.synthetic_documents import (
+    BANK_BUSINESS_REPORT_TEXT,
     LISTED_BUSINESS_REPORT_TEXT,
 )
 
@@ -190,3 +193,138 @@ def test_실제_문서를_분할해서_채점하면_서로_다른_장에_서로_
     for texts in texts_by_section.values():
         assert texts not in seen
         seen.append(texts)
+
+
+def _slot_ids_by_section(text: str) -> dict[str, set[str]]:
+    """전문을 분할·채점해 장별로 실제 채워진 슬롯 id를 모은다."""
+
+    filled: dict[str, set[str]] = {}
+    for candidate in segment_document(text):
+        for score in score_fragment_slots(candidate.text, candidate.section_heading):
+            filled.setdefault(score.section_id, set()).add(score.slot_id)
+    return filled
+
+
+def test_은행형_공시도_portfolio_필수칸을_채운다() -> None:
+    """「제품」이라는 말이 없어도 「주요 상품」·「부문별 영업실적」으로 채워야 한다.
+
+    실측 결함 회귀 — 제조업 어휘만 있던 시절 우리은행 2025 사업보고서는
+    portfolio 두 칸이 모두 0건이라 9장 게이트가 여기서 막혔다.
+    """
+    assert "제품" not in BANK_BUSINESS_REPORT_TEXT
+
+    filled = _slot_ids_by_section(BANK_BUSINESS_REPORT_TEXT)
+
+    assert set(c.COLLECTOR_SLOTS_BY_SECTION["portfolio"]) <= filled.get("portfolio", set())
+
+
+def test_은행형_공시도_culture_필수칸을_채운다() -> None:
+    """「핵심가치」·「행동강령」이 없어도 「윤리강령」·「조직문화」로 채워야 한다."""
+
+    assert "핵심가치" not in BANK_BUSINESS_REPORT_TEXT
+    assert "행동강령" not in BANK_BUSINESS_REPORT_TEXT
+
+    filled = _slot_ids_by_section(BANK_BUSINESS_REPORT_TEXT)
+
+    assert set(c.COLLECTOR_SLOTS_BY_SECTION["culture"]) <= filled.get("culture", set())
+
+
+def test_금융업_어휘를_넣어도_제조업_공시의_기존_배정은_그대로다() -> None:
+    """새 어휘가 기존 장을 빼앗지 않는지 — 제조업 원문의 필수 칸 전수 확인.
+
+    portfolio·culture만 보지 않고 수집기 필수 슬롯을 모두 세는 이유: 금융업
+    표현이 다른 장의 문단을 납치하면 그쪽 칸이 조용히 비기 때문이다.
+    """
+    filled = _slot_ids_by_section(LISTED_BUSINESS_REPORT_TEXT)
+
+    for section_id, required_slot_ids in c.COLLECTOR_SLOTS_BY_SECTION.items():
+        if section_id == "past_changes":
+            # historical_performance는 구조화 실적기 몫이라 원문 채점 대상이 아니다.
+            continue
+        assert set(required_slot_ids) <= filled.get(section_id, set()), section_id
+
+
+def test_제조업_제품_문단은_여전히_portfolio_제품역할로_간다() -> None:
+    scores = score_fragment_slots(
+        "핵심 제품은 메모리 모듈이며, 매출 기여가 가장 큰 주력 제품이다.",
+        section_heading="2. 주요 제품 및 서비스",
+    )
+
+    slot_ids = {score.slot_id for score in scores}
+    assert "portfolio:product_role" in slot_ids
+    assert "portfolio:revenue_link" in slot_ids
+
+
+def test_은행_위험관리_문단은_금융업_어휘로_portfolio에_새지_않는다() -> None:
+    """「내부통제」·「준법」·「여신」은 일부러 안 넣은 어휘다 — 그 사실을 고정한다.
+
+    이 세 단어는 은행 공시의 위험관리·약관 문단 어디에나 나와서, 키워드로
+    넣으면 current_challenges 문단 수십 건을 portfolio·culture로 끌고 간다(실측).
+    """
+    scores = score_fragment_slots(
+        (
+            "내부통제 기준에 따라 준법감시 조직을 두고 여신 심사 과정의 위험에 "
+            "대응하는 대책을 시행했다."
+        ),
+        section_heading="IV. 이사의 경영진단 및 분석의견",
+    )
+
+    assert scores
+    assert {score.section_id for score in scores} == {"current_challenges"}
+
+
+def test_은행형_공시의_회사개요_문단은_portfolio에_납치되지_않는다() -> None:
+    """「은행업」을 portfolio 어휘로 넣지 않았다는 사실을 고정한다(정체성 문단 보호)."""
+
+    scores = score_fragment_slots(
+        "당사는 은행법에 따라 설립된 주식회사이며, 정관상 목적사업은 은행업으로 등록되어 있다.",
+        section_heading="I. 회사의 개요",
+    )
+
+    assert scores
+    assert {score.section_id for score in scores} == {"identity"}
+
+
+def test_은행형_전문도_한_문단은_한_장_경계_안에서만_배정된다() -> None:
+    for candidate in segment_document(BANK_BUSINESS_REPORT_TEXT):
+        scores = score_fragment_slots(candidate.text, candidate.section_heading)
+        assert len({score.section_id for score in scores}) <= 1
+
+
+#: 금융업 어휘 하나하나가 «혼자서» 지정한 칸을 채우는지 — 어휘별 회귀 고정.
+#: 전문 fixture 시험은 한 문단에 신호가 여러 개라, 어휘 하나를 빼도 옆
+#: 어휘가 대신 걸려 초록불이 유지된다(음성 대조에서 실제로 확인). 그래서
+#: 어휘마다 신호가 하나뿐인 최소 문장을 따로 둔다.
+_금융업_어휘_최소문장 = (
+    ("주요 상품은 예금과 기업 대출이다.", "portfolio:product_role"),
+    ("기업금융을 핵심 사업 부문으로 삼고 있다.", "portfolio:product_role"),
+    ("부문별 영업실적은 이자부문이 가장 컸다.", "portfolio:revenue_link"),
+    ("이자이익은 전년보다 늘었다.", "portfolio:revenue_link"),
+    ("임직원 윤리강령을 제정했다.", "culture:work_principle"),
+    ("준법을 중시하는 조직문화를 정착시켰다.", "culture:work_principle"),
+)
+
+
+@pytest.mark.parametrize(("text", "expected_slot_id"), _금융업_어휘_최소문장)
+def test_금융업_어휘는_하나만_있어도_지정한_칸을_채운다(
+    text: str, expected_slot_id: str,
+) -> None:
+    scores = score_fragment_slots(text)
+
+    assert {score.slot_id for score in scores} == {expected_slot_id}
+
+
+def test_금융업_표제_상품_및_서비스도_portfolio_가산점을_받는다() -> None:
+    """DART 은행 서식은 「제품 및 서비스」 자리에 「상품 및 서비스」를 쓴다.
+
+    표제 힌트는 새 신호를 만들지 않고 이미 맞은 슬롯의 점수만 올리므로,
+    같은 문장을 표제 유무로만 비교해 가산점이 실제로 붙는지 확인한다.
+    """
+    text = "주요 상품은 예금과 기업 대출이다."
+    without_hint = score_fragment_text(text)
+    with_hint = score_fragment_text(text, section_heading="다. 주요 상품 및 서비스의 내용")
+
+    assert without_hint is not None and with_hint is not None
+    assert with_hint.score_millis > without_hint.score_millis
+    assert "heading_match:portfolio" in with_hint.reason_codes
+    assert not any(code.startswith("heading_match:") for code in without_hint.reason_codes)
