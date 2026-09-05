@@ -211,60 +211,94 @@ def test_robots가_4xx면_빈_규칙으로_진행한다():
     assert any(doc.canonical_url == "https://company.example/" for doc in result.documents)
 
 
-def test_robots가_401이면_본문을_긁지_않는다():
-    """robots 401은 인증 요구다 — 빈 규칙으로 진행하면 안 된다
-    (수집 흐름 전체를 통과시키는 회귀 방지)."""
+def test_robots가_401이면_빈_규칙으로_진행한다():
+    """RFC 9309 §2.3.1.3 — 401도 «unavailable»이라 「robots 없음」과 같다.
+
+    예전에는 401을 「명시적 거부」로 읽어 호스트 전체를 막았다. 인증이 걸린
+    robots.txt 하나 때문에 공개된 회사 홈페이지를 통째로 버리는 셈이었다.
+    """
     pages = {
         "https://company.example/robots.txt": WideRawResponse(
             status=401, text="", effective_url="https://company.example/robots.txt", content_type=""
         ),
+        "https://company.example/sitemap.xml": _missing("https://company.example/sitemap.xml"),
         "https://company.example/": _page(_body("루트 페이지 본문입니다"), "https://company.example/"),
     }
     site = _FakeWideSite(pages)
 
     result = _collect(site)
 
-    assert result.documents == ()
+    assert any(doc.canonical_url == "https://company.example/" for doc in result.documents)
     robots_attempts = [a for a in result.attempts if a.source_kind == "robots_txt"]
-    # apex/www 짝(www.company.example)도 별도로 robots를 확인하므로 2건이다
-    # (그 짝은 pages에 없어 접속 자체가 실패 — robots_unreachable). [0]은
-    # 생성 순서상 항상 primary(company.example)다.
-    assert len(robots_attempts) == 2
-    assert robots_attempts[0].state == "FAILED"
-    assert robots_attempts[0].reason_code == "robots_denied"
-    assert "https://company.example/" not in site.calls
+    # attempt는 생성 순서를 보존하므로 [0]이 항상 primary(company.example)다.
+    assert robots_attempts[0].state == "OK"
+    assert robots_attempts[0].reason_code == "robots_missing"
 
 
-def test_robots가_403이면_본문을_긁지_않는다():
+def test_robots가_403이면_빈_규칙으로_진행한다():
+    """RFC 9309 §2.3.1.3 + 2026-09-05 하이브 실측 — 이 수정의 원래 증상이다.
+
+    ``hybecorp.com``·``www.hybecorp.com``의 ``/robots.txt``는 S3(``Server:
+    AmazonS3``)가 404 대신 **403**을 돌려준다. 같은 호스트의 루트 페이지는
+    200으로 열리는데도, 403을 「명시적 거부」로 읽던 예전 분류 때문에 이
+    회사가 웹 수집에서 통째로 빠졌다. 403은 「크롤링하지 마라」가 아니라
+    「그런 파일이 없다」였다.
+    """
     pages = {
         "https://company.example/robots.txt": WideRawResponse(
             status=403, text="", effective_url="https://company.example/robots.txt", content_type=""
         ),
+        "https://company.example/sitemap.xml": _missing("https://company.example/sitemap.xml"),
         "https://company.example/": _page(_body("루트 페이지 본문입니다"), "https://company.example/"),
     }
     site = _FakeWideSite(pages)
 
     result = _collect(site)
 
-    assert result.documents == ()
-    assert "https://company.example/" not in site.calls
+    assert any(doc.canonical_url == "https://company.example/" for doc in result.documents)
+    assert "https://company.example/" in site.calls
+    robots_attempts = [a for a in result.attempts if a.source_kind == "robots_txt"]
+    assert robots_attempts[0].reason_code == "robots_missing"
 
 
-@pytest.mark.parametrize(
-    ("status", "expected_reason_code"),
-    [
-        (407, "robots_denied"),
-        (408, "robots_transient"),
-        (409, "robots_transient"),
-        (429, "robots_transient"),
-    ],
-)
-def test_robots_거부_일시장애_상태는_일반_전송_호출이_0회다(status, expected_reason_code):
-    """robots_decision의 단위 분류(407·408·409·429 전부 blocked)를
-    상태마다 실제 수집 전체로 증명한다.
-    「robots가 아닌」 전송 호출 수를 세어 정말 0인지 확인한다 — 특정 URL
-    문자열이 calls 안에 없다는 것만으로는 다른 형태의 우회 호출을 놓칠 수
-    있어, 407·429 두 상태만으로는 증명이 불완전하다."""
+@pytest.mark.parametrize("status", [400, 402, 405, 406, 407, 408, 409, 411, 429, 451])
+def test_robots_4xx_전_구간은_빈_규칙으로_진행한다(status):
+    """RFC 9309 §2.3.1.3은 400~499를 통째로 «unavailable»로 묶는다.
+
+    단위 분류(``robots_decision``)뿐 아니라 수집 흐름 전체가 실제로 본문까지
+    간다는 것을 상태마다 확인한다.
+
+    ★ 남은 위험: 429는 상대가 «속도를 줄여라»라고 말한 것인데도 여기서
+      진행한다. 구글의 robots.txt 처리 규칙은 4xx 중 429만 빼서 서버 오류처럼
+      다룬다. 예외를 넣으려면 robots_cache를 공유하는 세 수집기
+      (``wide_fetch``·``logic._load_robots``·``ir_pdf``)를 한 번에 바꿔야 한다.
+    """
+    pages = {
+        "https://company.example/robots.txt": WideRawResponse(
+            status=status, text="", effective_url="https://company.example/robots.txt", content_type=""
+        ),
+        "https://company.example/sitemap.xml": _missing("https://company.example/sitemap.xml"),
+        "https://company.example/": _page(_body("루트 페이지 본문입니다"), "https://company.example/"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(site)
+
+    assert any(
+        doc.canonical_url == "https://company.example/" for doc in result.documents
+    ), f"status={status}"
+    robots_attempt = next(a for a in result.attempts if a.source_kind == "robots_txt")
+    assert robots_attempt.reason_code == "robots_missing", f"status={status}"
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+def test_robots가_5xx면_일반_전송_호출이_0회다(status):
+    """RFC 9309 §2.3.1.4 — 5xx는 «unreachable»이라 완전 거부로 본다.
+
+    4xx를 열어 준 뒤에도 5xx는 fail-closed로 남아야 한다. 특정 URL 문자열이
+    calls 안에 없다는 것만으로는 다른 형태의 우회 호출을 놓칠 수 있어,
+    「robots가 아닌」 전송 호출 수를 세어 정말 0인지 확인한다.
+    """
     pages = {
         "https://company.example/robots.txt": WideRawResponse(
             status=status, text="", effective_url="https://company.example/robots.txt", content_type=""
@@ -279,15 +313,17 @@ def test_robots_거부_일시장애_상태는_일반_전송_호출이_0회다(st
     non_robots_calls = [c for c in site.calls if not c.endswith("robots.txt")]
     assert non_robots_calls == [], f"status={status}: robots 아닌 전송 호출이 있었다: {non_robots_calls}"
     robots_attempt = next(a for a in result.attempts if a.source_kind == "robots_txt")
-    assert robots_attempt.reason_code == expected_reason_code, f"status={status}"
+    assert robots_attempt.state == "FAILED", f"status={status}"
+    assert robots_attempt.reason_code == "robots_unreachable", f"status={status}"
 
 
-def test_robots가_그밖의_4xx면_본문을_긁지_않는다():
-    """400처럼 denied·transient·missing 어디에도 없는 4xx는 «명시적 부재로
-    진행」이 아니라 차단이어야 한다."""
+def test_robots_200이_전부_금지하면_본문을_긁지_않는다():
+    """상태코드가 아니라 «받아 온 규칙»이 막는 경우 — 이제 이것만이 진짜 거부다."""
     pages = {
-        "https://company.example/robots.txt": WideRawResponse(
-            status=400, text="", effective_url="https://company.example/robots.txt", content_type=""
+        "https://company.example/robots.txt": _page(
+            "User-agent: *\nDisallow: /\n",
+            "https://company.example/robots.txt",
+            "text/plain",
         ),
         "https://company.example/": _page(_body("루트 페이지 본문입니다"), "https://company.example/"),
     }
@@ -297,8 +333,6 @@ def test_robots가_그밖의_4xx면_본문을_긁지_않는다():
 
     assert result.documents == ()
     assert "https://company.example/" not in site.calls
-    robots_attempt = next(a for a in result.attempts if a.source_kind == "robots_txt")
-    assert robots_attempt.reason_code == "robots_unreachable"
 
 
 # ── 도메인군 ──────────────────────────────────────────────
@@ -1813,15 +1847,20 @@ def test_www가_사실상_apex로만_운영되어도_apex가_직접_방문되어
     assert apex_doc.requirement == "REQUIRED"
 
 
-def test_apex_www_짝중_하나만_robots가_거부해도_다른_하나는_독립적으로_수집된다():
-    """apex는 정상, www 짝은 robots가 거부(403) — www만 차단되고 apex는
-    영향받지 않아야 한다(하나가 막혀도 다른 하나는 독립적으로 진행된다)."""
+def test_apex_www_짝중_하나만_robots가_도달불가여도_다른_하나는_독립적으로_수집된다():
+    """apex는 정상, www 짝은 robots를 못 받음(503) — www만 차단되고 apex는
+    영향받지 않아야 한다(하나가 막혀도 다른 하나는 독립적으로 진행된다).
+
+    ★ 예전에는 여기에 403을 썼다. RFC 9309 §2.3.1.3에 맞춰 4xx가 「없음」이
+      된 뒤로 403은 더 이상 차단이 아니므로, 「한쪽만 막힌다」는 이 시험의
+      의도를 유지하려면 §2.3.1.4의 «unreachable»(5xx)을 써야 한다.
+    """
     pages = {
         "https://company.example/robots.txt": _page(ROBOTS_ALLOW_ALL, "https://company.example/robots.txt", "text/plain"),
         "https://company.example/sitemap.xml": _missing("https://company.example/sitemap.xml"),
         "https://company.example/": _page(_body("apex 루트 페이지 본문"), "https://company.example/"),
         "https://www.company.example/robots.txt": WideRawResponse(
-            status=403, text="", effective_url="https://www.company.example/robots.txt", content_type=""
+            status=503, text="", effective_url="https://www.company.example/robots.txt", content_type=""
         ),
     }
     site = _FakeWideSite(pages)

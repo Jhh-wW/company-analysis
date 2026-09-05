@@ -32,6 +32,9 @@ ALLOWED_PORTS: Final[frozenset[int]] = frozenset({80, 443, 8080, 8443})
 ALLOWED_CONTENT_TYPES: Final[frozenset[str]] = frozenset(
     {"text/html", "application/xhtml+xml", "text/plain"}
 )
+# TLS ClientHello에 실어 보내는 ALPN(연결을 열 때 «어떤 HTTP 버전으로 말할지» 미리
+# 알려 주는 TLS 확장) 목록. 우리는 HTTP/2를 쓰지 않으므로 http/1.1 하나만 알린다.
+TLS_ALPN_PROTOCOLS: Final[tuple[str, ...]] = ("http/1.1",)
 MAX_REDIRECTS: Final[int] = 4
 MAX_RESPONSE_BYTES: Final[int] = 2 * 1024 * 1024
 # ``HTTPResponse.read1``은 실제 소켓 읽기 한 번 안에서 돌아온다. 작은 조각마다 전체
@@ -403,6 +406,48 @@ def resolve_safe_target(
     )
 
 
+def build_tls_context() -> ssl.SSLContext:
+    """이 모듈의 모든 HTTPS 연결이 쓰는 TLS 설정을 한곳에서 만든다.
+
+    표준 :func:`ssl.create_default_context`의 인증서 검증·호스트 이름 검사·프로토콜
+    하한을 **그대로** 쓰고, 파이썬 표준 HTTPS 경로
+    (:func:`http.client._create_https_context`)가 추가로 켜는 두 가지만 맞춘다.
+    보안 옵션은 하나도 낮추지 않는다.
+
+    ★ 왜 필요한가 (2026-09-05 실측). 우리는 ``ssl.create_default_context()``를
+      직접 만들어 넘겼는데, 이 컨텍스트는 표준 HTTPS 경로가 켜는 두 손잡이가
+      빠져 있다. 그래서 ClientHello 지문이 브라우저·표준 파이썬과 달라지고,
+      CDN 봇 보호가 이를 걸러 **403**을 돌려준다. ``www.woowahan.com``
+      (Cloudflare)에서 같은 호스트·같은 UA·같은 HTTP 바이트인데 컨텍스트만
+      바꿔 403 ↔ 200이 갈리는 것을 반복 재현했다.
+
+      손잡이를 한 칸씩 분리한 실측 결과는 이렇다. **결정적인 쪽은 ALPN이 아니라
+      post_handshake_auth**였다(처음 진단은 ALPN으로 지목했으나,
+      ``_create_https_context``가 둘을 함께 켜는 바람에 생긴 오귀속이었다):
+
+      ==========================================  ======
+      컨텍스트                                     응답
+      ==========================================  ======
+      기본(둘 다 없음)                              403
+      ALPN만                                       403
+      post_handshake_auth만                        200
+      ALPN + post_handshake_auth (= 표준 경로)      200
+      ==========================================  ======
+
+    ``post_handshake_auth``는 TLS 1.3에서 «핸드셰이크 뒤에도 서버가 클라이언트
+    인증서를 요구할 수 있다»고 알리는 확장이다. 우리는 클라이언트 인증서를
+    아예 싣지 않으므로 실제로 내줄 것이 없고, 파이썬 표준 HTTPS가 모든 요청에
+    이미 켜 두는 기본값이라 새로 생기는 위험이 없다.
+    """
+
+    context = ssl.create_default_context()
+    context.set_alpn_protocols(list(TLS_ALPN_PROTOCOLS))
+    # None이면 이 빌드가 PHA를 지원하지 않는다는 뜻이라 건드리지 않는다.
+    if context.post_handshake_auth is not None:
+        context.post_handshake_auth = True
+    return context
+
+
 def safe_urlopen(
     request: urllib.request.Request,
     *,
@@ -421,7 +466,7 @@ def safe_urlopen(
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({}),
         _SafeHTTPHandler(deadline=budget),
-        _SafeHTTPSHandler(context=ssl.create_default_context(), deadline=budget),
+        _SafeHTTPSHandler(context=build_tls_context(), deadline=budget),
         _SafeRedirectHandler(url_allowed=url_allowed, deadline=budget),
     )
     response = opener.open(request, timeout=budget.remaining())
@@ -466,7 +511,7 @@ def safe_urlopen_exact_https_host(
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({}),
         _SafeHTTPHandler(deadline=budget),
-        _SafeHTTPSHandler(context=ssl.create_default_context(), deadline=budget),
+        _SafeHTTPSHandler(context=build_tls_context(), deadline=budget),
         _ExactHttpsHostRedirectHandler(
             normalized_hostname,
             url_allowed=url_allowed,

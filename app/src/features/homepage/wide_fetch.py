@@ -212,16 +212,10 @@ def classify_general_outcome(
     return "FAILED", f"page_failed_{response.status}"
 
 
-#: robots.txt가 «명시적으로 없다」로 인정하는 상태코드 — 정확히 이 둘뿐이다.
-#: 일반 응답 계약(``classify_general_outcome``)의 MISSING 판정(404·410)과
-#: 의미를 맞췄다 — 같은 파일 안에서 「없음」의 기준이 서로 다르면 안 된다.
-_ROBOTS_MISSING_STATUSES: Final[tuple[int, ...]] = (404, 410)
-
-#: 인증·권한 문제로 명시적으로 거부된 상태코드 — 「robots가 없다」가 아니다.
-_ROBOTS_DENIED_STATUSES: Final[tuple[int, ...]] = (401, 403, 407)
-
-#: 일시적 장애로 못 받은 상태코드 — 이것도 「robots가 없다」가 아니다.
-_ROBOTS_TRANSIENT_STATUSES: Final[tuple[int, ...]] = (408, 409, 429)
+#: RFC 9309 §2.3.1.3이 «unavailable»(이용 불가)로 묶는 구간 — 400~499 전체.
+#: 이 구간은 「robots.txt가 없다」와 같은 뜻이라 빈 규칙(전부 허용)으로 진행한다.
+_ROBOTS_UNAVAILABLE_STATUS_MIN: Final[int] = 400
+_ROBOTS_UNAVAILABLE_STATUS_MAX: Final[int] = 499
 
 
 def robots_decision(
@@ -231,23 +225,38 @@ def robots_decision(
     """robots.txt 조회 결과의 (outcome, reason_code)를 RFC 9309 의미론으로 정한다.
 
     outcome:
-      - ``"proceed_empty_rules"``: robots.txt가 명시적으로 없음(404·410만) —
-        빈 규칙(전부 허용)으로 진행.
       - ``"proceed_parsed"``: 200 — 받은 글자를 규칙으로 해석해 진행.
-      - ``"blocked"``: 그 외 전부 — fail-closed, 이 호스트는 본문을 한 번도
-        긁지 않는다(``WideRobotsPolicy.blocked``가 상위 호출자의 본문 fetch를
-        전부 건너뛴다).
+      - ``"proceed_empty_rules"``: 4xx 전체 — RFC 9309 §2.3.1.3의 «unavailable».
+        robots.txt가 없는 것과 같으므로 빈 규칙으로 진행.
+      - ``"blocked"``: 5xx·전송 실패(시간초과·DNS·TLS·연결 거부·경로 정책 거절) —
+        RFC 9309 §2.3.1.4의 «unreachable». fail-closed로 이 호스트의 본문을
+        한 번도 긁지 않는다.
 
-    ★ 이 분류를 좁힌 이유: 예전 구현은 401·403만 따로 빼고
-      «나머지 4xx 전체»(400·402·405·406·407·408·409·429 등)를 「명시적
-      부재 → 빈 규칙」으로 해석했다. 그래서 407(프록시 인증)·408(시간초과)·
-      429(속도 제한)까지 「robots가 없다」로 둔갑해 본문을 긁었고, 같은
-      파일의 일반 응답 계약(404·410만 MISSING)과도 의미가 모순됐다.
+    ★ 401·403·407을 「명시적 거부」로, 408·409·429를 「일시 장애」로 갈라 전부
+      차단하던 예전 분류를 4xx 한 덩어리로 되돌린 이유:
 
-      이제 「명시적 부재」는 정확히 404·410만 인정한다. 그 밖의 4xx는 원인별로
-      나눈다 — 401·403·407은 명시적 거부(``robots_denied``), 408·409·429는
-      일시 장애(``robots_transient``), 그 밖 전부는 도달 불가(``robots_unreachable``)
-      — 셋 다 ``blocked``라 본문 fetch로 이어지지 않는 점은 같다.
+      (1) 실측(2026-09-05) — robots.txt를 두지 않은 정적 호스팅(S3/CloudFront)이
+          404가 아니라 **403**을 돌려준다. 하이브 ``hybecorp.com``·
+          ``www.hybecorp.com``이 그랬고, 같은 호스트의 루트 페이지는 200으로
+          멀쩡히 열렸다. 즉 403은 「크롤링하지 마라」가 아니라 「그런 파일이
+          없다」는 뜻이었는데 우리는 그걸 회사 전체 차단으로 읽고 있었다.
+      (2) 표준 — RFC 9309 §2.3.1.3은 400~499를 통째로 «unavailable»로 묶고,
+          이때 크롤러가 자원에 접근해도 된다(MAY)고 정한다.
+      (3) 일관성 — 같은 scope의 홈페이지 수집기(``logic.py`` ``_load_robots``)와
+          공식 IR PDF 수집기는 이미 4xx 전체를 부재로 본다. 세 수집기가
+          ``robots_cache``를 **공유**하므로 여기만 다르게 판정하면 어느 수집기가
+          먼저 물었는지에 따라 결과가 달라진다.
+
+      사유 코드 ``robots_denied``·``robots_transient``는 이 수정으로 **없어졌다**
+      (저장소 전체에 생산자도 소비자도 남아 있지 않다). 진짜 거부는 이제 사유
+      코드가 아니라 규칙 평가로만 나타난다 — 받아 온 규칙이 우리 UA(또는 ``*``)를
+      Disallow하면 ``WideRobotsPolicy.can_fetch``가 그 URL을 건너뛴다(sitemap만
+      ``robots_disallowed``로 따로 표시한다).
+
+    ★ 사유 코드는 4xx 전체에 대해 ``robots_missing`` 하나로 통일한다. 상태코드를
+      사유 코드에 섞으면(``robots_missing_403`` 식) 이 값을 그대로 읽는 상위
+      집계·시험 계약이 상태코드마다 갈라진다. 어떤 4xx였는지는
+      ``WideRobotsPolicy.detail``에 남긴다.
     """
     if error is not None:
         return "blocked", "robots_unreachable"
@@ -255,12 +264,12 @@ def robots_decision(
         return "blocked", "robots_unreachable"
     if response.status == 200:
         return "proceed_parsed", "robots_ok"
-    if response.status in _ROBOTS_MISSING_STATUSES:
+    if (
+        _ROBOTS_UNAVAILABLE_STATUS_MIN
+        <= response.status
+        <= _ROBOTS_UNAVAILABLE_STATUS_MAX
+    ):
         return "proceed_empty_rules", "robots_missing"
-    if response.status in _ROBOTS_DENIED_STATUSES:
-        return "blocked", "robots_denied"
-    if response.status in _ROBOTS_TRANSIENT_STATUSES:
-        return "blocked", "robots_transient"
     return "blocked", "robots_unreachable"
 
 
@@ -272,6 +281,9 @@ class WideRobotsPolicy:
     parser: robotparser.RobotFileParser
     outcome: str
     reason_code: str
+    #: 사유 코드만으로는 뭉개지는 구체적 원인(예: ``"HTTP 403"``·``"TimeoutError: ..."``).
+    #: 4xx는 전부 ``robots_missing``으로 통일하므로, 몇 번이었는지는 여기에만 남는다.
+    detail: str = ""
 
     def can_fetch(self, url: str) -> bool:
         return self.parser.can_fetch(USER_AGENT, url)
@@ -279,6 +291,22 @@ class WideRobotsPolicy:
     @property
     def blocked(self) -> bool:
         return self.outcome == "blocked"
+
+
+def _robots_detail(
+    response: WideRawResponse | None,
+    error: WideTransportError | None,
+) -> str:
+    """사유 코드가 뭉개는 구체적 원인을 사람이 읽는 한 줄로 만든다.
+
+    4xx는 전부 ``robots_missing`` 하나로 통일되므로, 「403이라서 부재로 봤다」는
+    사실은 이 값에만 남는다. 진단할 때 이게 없으면 404와 403을 구분할 수 없다.
+    """
+    if error is not None:
+        return str(error)
+    if response is None:
+        return ""
+    return f"HTTP {response.status}"
 
 
 def load_robots_policy(
@@ -324,6 +352,7 @@ def load_robots_policy(
             parser=parser,
             blocked=(outcome == "blocked"),
             reason_code=reason_code,
+            detail=_robots_detail(response, error),
         )
 
     decision = cached_robots_decision(cache_key, loader)
@@ -332,6 +361,7 @@ def load_robots_policy(
         parser=decision.parser,
         outcome="blocked" if decision.blocked else "proceed_parsed",
         reason_code=decision.reason_code,
+        detail=decision.detail,
     )
 
 
