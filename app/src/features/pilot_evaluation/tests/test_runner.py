@@ -670,9 +670,11 @@ def _seed_prior_day_restart_unknown(
             started_at=P01_PAID_AT.astimezone(
                 timezone(timedelta(hours=9))
             ).isoformat(timespec="seconds"),
-            requested_cost_krw=900.0,
-            cap_krw=2_200.0,
-            run_cap_krw=1_200.0,
+            # 본조사 예약액(PAID_PHASE_PROVIDER_BUDGET_KRW[본조사] = 1,800원)과 같아야
+            # runner 가 «확정 비용 + 미확정 예약 = 예약액» 증거를 인정한다.
+            requested_cost_krw=1800.0,
+            cap_krw=5_000.0,
+            run_cap_krw=2_000.0,
         )
         spend_store.keep_inflight_with_known_spend(
             conn,

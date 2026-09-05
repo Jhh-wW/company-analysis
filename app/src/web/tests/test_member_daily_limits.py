@@ -10,7 +10,8 @@
   전달되는지를 그 함수로 직접 확인한다.
 
 ★ 기준값은 리터럴로 적는다 — 생산 상수를 가져와 자기 자신과 비교하면 값이 내려가는
-  회귀를 못 잡는다. 지금 계약: 회원 기본 하루 3,000원 · 성공 3건 · 본조사 예약 900원.
+  회귀를 못 잡는다. 지금 계약: 회원 기본 하루 3,000원 · 성공 3건 · 본조사 예약 1,800원
+  (2026-09-05 900→1,800 상향, 근거는 `budget/constants.py` 주석).
 """
 
 from __future__ import annotations
@@ -47,9 +48,9 @@ _친구 = "friend@example.com"
 _다른친구 = "other@example.com"
 _시각 = "2026-09-02T10:00:00+09:00"
 
-#: 본조사 한 번이 미리 잡는 예상액. `budget/constants.py`의 계약값과 같은 900원을
+#: 본조사 한 번이 미리 잡는 예상액. `budget/constants.py`의 계약값과 같은 1,800원을
 #: 리터럴로 적는다 — 상수를 import해 비교하면 그 값이 바뀌어도 시험이 조용히 따라간다.
-_본조사_예약액 = 900.0
+_본조사_예약액 = 1800.0
 
 #: 한도 안내에 반드시 함께 나와야 하는 문장. 생산 상수를 가져오지 않고 리터럴로
 #: 적는다 — 상수를 import해 비교하면 문장이 사라져도 시험이 조용히 따라간다.
@@ -102,18 +103,18 @@ def _유료원장_준비():
 
 
 def test_회원별_한도는_성공건수와_비용_둘_다_적용된다():
-    """성공 2건에서 3번째가 거절되고, 하루 900원이면 본조사 두 번째가 거절된다."""
+    """성공 2건에서 3번째가 거절되고, 하루 1,800원이면 본조사 두 번째가 거절된다."""
     _초대한다(_친구)
-    _한도를_정한다(_친구, 건수=2, 금액=900.0)
+    _한도를_정한다(_친구, 건수=2, 금액=1800.0)
     오늘 = clock.today_kst().isoformat()
 
     # (1) 비용 — 갈래 판정이 회원값을 상한으로 돌려준다.
     track, bucket, cap = request_helpers._track_of(_친구로_들어온_요청(_친구))
     assert track is share_tracks.Track.MEMBER
     assert bucket == f"user:{_친구}"
-    assert cap == 900.0
+    assert cap == 1800.0
 
-    # (2) 비용 — 그 상한이 예약 커밋 자리까지 간다. 900원짜리 본조사는 한 번만
+    # (2) 비용 — 그 상한이 예약 커밋 자리까지 간다. 1,800원짜리 본조사는 한 번만
     #     들어가고, 두 번째는 상한을 넘으므로 거절된다(기본 3,000원이면 통과했을 것).
     assert _본조사를_예약한다("run-cost-0", bucket=bucket, cap=cap)
     assert not _본조사를_예약한다("run-cost-1", bucket=bucket, cap=cap)
@@ -139,10 +140,12 @@ def test_한도를_안_정한_친구는_기존_3000원과_3건_그대로다():
     assert track is share_tracks.Track.MEMBER
     assert cap == 3000.0
 
-    # 3,000원이면 900원짜리 본조사가 세 번 들어가고 네 번째가 거절된다.
-    for number in range(3):
+    # 3,000원이면 1,800원짜리 본조사가 «정산 전 예약 기준»으로 한 번 들어가고
+    # 두 번째가 거절된다(1,800×2 > 3,000). 실제 운영은 첫 조사가 실제 지출로
+    # 정산된 뒤 두 번째가 들어가지만, 이 시험은 예약을 정산하지 않는다.
+    for number in range(1):
         assert _본조사를_예약한다(f"run-cost-{number}", bucket=bucket, cap=cap)
-    assert not _본조사를_예약한다("run-cost-3", bucket=bucket, cap=cap)
+    assert not _본조사를_예약한다("run-cost-1", bucket=bucket, cap=cap)
 
     with storage_db.connect() as conn:
         for number in range(3):
@@ -163,10 +166,10 @@ def test_한도를_올린_친구는_비용도_성공건수도_같이_올라간�
     _track, bucket, cap = request_helpers._track_of(_친구로_들어온_요청(_친구))
     assert cap == 4500.0
 
-    # 4,500원이면 900원 본조사가 다섯 번 들어간다(3,000원이었다면 네 번째에서 막혔다).
-    for number in range(5):
+    # 4,500원이면 1,800원 본조사가 두 번 들어간다(3,000원이었다면 두 번째에서 막혔다).
+    for number in range(2):
         assert _본조사를_예약한다(f"run-cost-{number}", bucket=bucket, cap=cap)
-    assert not _본조사를_예약한다("run-cost-5", bucket=bucket, cap=cap)
+    assert not _본조사를_예약한다("run-cost-2", bucket=bucket, cap=cap)
 
     with storage_db.connect() as conn:
         for number in range(5):
@@ -197,7 +200,7 @@ def test_비용_예약은_회원마다_다른_통장에서_따로_센다():
     """한 친구가 자기 몫을 다 써도 옆 친구의 예약은 그대로 열린다."""
     _초대한다(_친구)
     _초대한다(_다른친구)
-    _한도를_정한다(_친구, 건수=3, 금액=900.0)
+    _한도를_정한다(_친구, 건수=3, 금액=1800.0)
 
     _t1, 낮춘쪽_통장, 낮춘쪽_상한 = request_helpers._track_of(
         _친구로_들어온_요청(_친구)
@@ -471,8 +474,11 @@ def test_저장본을_다시_보여_준_실행도_오늘_몫_1건을_쓴다():
     assert _저장본_안내 in _막힌_화면_글자(_친구)
 
 
-def test_예약액_계약은_본조사_900원_그대로다():
-    """상한 경계 시험이 기대는 값이 바뀌면 위 시험들의 뜻도 바뀐다."""
+def test_예약액_계약은_본조사_1800원_그대로다():
+    """상한 경계 시험이 기대는 값이 바뀌면 위 시험들의 뜻도 바뀐다.
+
+    이전 이름: `test_예약액_계약은_본조사_900원_그대로다` (2026-09-05 상향).
+    """
     from src.features.budget.constants import PAID_PHASE_PROVIDER_BUDGET_KRW
 
     assert PAID_PHASE_PROVIDER_BUDGET_KRW[SPEND_PHASE_PIPELINE] == _본조사_예약액
