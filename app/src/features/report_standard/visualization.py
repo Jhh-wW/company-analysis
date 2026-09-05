@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Final
@@ -150,6 +151,14 @@ def composition_tone(index: int, count: int) -> int:
     return min(int(round(index * step)), COMPOSITION_TONE_STEPS - 2)
 
 from src.features.pipeline.port import ReportTable
+from src.features.report_standard.constants import (
+    RELATION_PAIR_CAPTION,
+    RELATION_PAIR_HEADERS,
+    RELATION_PAIR_LINE_HALF_UNITS,
+    RELATION_PAIR_MAX_ROWS,
+    RELATION_PAIR_MAX_TEXT_LINES,
+    RELATION_PAIR_MIN_ROWS,
+)
 
 
 _NUMBER_RE = re.compile(r"^[+-]?\d+(?:\.\d+)?$")
@@ -204,6 +213,14 @@ class Card:
 
 
 @dataclass(frozen=True)
+class RelationPair:
+    """5장 표의 한 행을 글자 변경 없이 옮긴 과제·대응 한 쌍."""
+
+    left: str
+    right: str
+
+
+@dataclass(frozen=True)
 class TableVisualization:
     kind: str
     caption: str
@@ -226,6 +243,10 @@ class TableVisualization:
     #: kind == "card"일 때만 채운다. 화살표로 이을 수 없는 흐름표를 라벨:값
     #: 카드로 낼 때 쓴다 — 자세한 이유는 _CARD_HEADER_SETS 주석 참조.
     cards: tuple[Card, ...] = ()
+    #: kind == "relation_pairs"일 때만 채운다. 봉인 블록은 기존 ``flows``
+    #: 그릇만 지원하므로 같은 두 문자열을 ``flows``에도 함께 싣는다. 새 공개
+    #: manifest 항목을 만들지 않고 표의 투영이라는 기존 원칙을 지키기 위해서다.
+    pairs: tuple[RelationPair, ...] = ()
 
 
 def _composition_reading(items: "tuple[ChartPoint, ...]") -> str:
@@ -482,6 +503,63 @@ def _flow_cards(
     )
 
 
+def _relation_text_line_count(value: str) -> int:
+    """원의 고정 폭에서 필요한 줄 수를 보수적인 전각 폭으로 센다."""
+
+    lines = 0
+    for logical_line in value.split("\n"):
+        units = sum(
+            2 if unicodedata.east_asian_width(character) in {"W", "F", "A"} else 1
+            for character in logical_line
+        )
+        lines += max(
+            1,
+            (units + RELATION_PAIR_LINE_HALF_UNITS - 1)
+            // RELATION_PAIR_LINE_HALF_UNITS,
+        )
+    return lines
+
+
+def _is_relation_pair_candidate(table: ReportTable) -> bool:
+    """5장 정본 캡션 또는 머리글을 가진 표만 관계도 후보로 본다."""
+
+    return (
+        str(table.caption) == RELATION_PAIR_CAPTION
+        or tuple(str(header) for header in table.headers) == RELATION_PAIR_HEADERS
+    )
+
+
+def _relation_pairs(table: ReportTable) -> TableVisualization | None:
+    """5장 과제·대응 2열 표를 원·선 관계도 명세로 그대로 투영한다."""
+
+    if tuple(str(header) for header in table.headers) != RELATION_PAIR_HEADERS:
+        return None
+    if not RELATION_PAIR_MIN_ROWS <= len(table.rows) <= RELATION_PAIR_MAX_ROWS:
+        return None
+
+    pairs: list[RelationPair] = []
+    for row in table.rows:
+        if len(row) != len(RELATION_PAIR_HEADERS):
+            return None
+        left, right = (str(value) for value in row)
+        if not left.strip() or not right.strip():
+            return None
+        if any(
+            _relation_text_line_count(value) > RELATION_PAIR_MAX_TEXT_LINES
+            for value in (left, right)
+        ):
+            return None
+        pairs.append(RelationPair(left=left, right=right))
+
+    flows = tuple((pair.left, pair.right) for pair in pairs)
+    return TableVisualization(
+        kind="relation_pairs",
+        caption=table.caption,
+        flows=flows,
+        pairs=tuple(pairs),
+    )
+
+
 def _flow(table: ReportTable) -> TableVisualization | None:
     # ★ 열 하한이 2다 — 5장 «과제 → 대응»은 두 칸짜리 흐름이다.
     #   렌더러(웹 .flow-row / PDF _FlowGraphic)는 열 수에 무관하게 그린다.
@@ -527,6 +605,10 @@ def table_visualization(table: ReportTable) -> TableVisualization | None:
     if presentation == "trend":
         return _trend(table)
     if presentation == "flow":
+        # 5장 후보는 관계도 조건을 못 채우면 일반 흐름도로 바꾸지 않고 원표로
+        # 남긴다. 두 줄 초과 문구를 다른 도형에 억지로 밀어 넣지 않기 위해서다.
+        if _is_relation_pair_candidate(table):
+            return _relation_pairs(table)
         return _flow(table)
     return None
 
@@ -536,6 +618,7 @@ __all__ = [
     "CardField",
     "ChartPoint",
     "ChartSeries",
+    "RelationPair",
     "TableVisualization",
     "table_visualization",
 ]

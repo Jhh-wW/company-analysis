@@ -14,6 +14,20 @@ from src.shared.report_quality.constants import COMPARISON_JUDGMENTS
 
 CANONICAL_SCHEMA_VERSION: Final[str] = "company-report-v4-canonical"
 
+# 5장 흐름표를 원·선 관계도로 바꿀 수 있는 닫힌 계약이다. ``ReportTable``에는
+# 장 id가 없으므로 composer가 실제로 내는 캡션·머리글을 함께 대조하고, 하나라도
+# 어긋나면 기존 표로 남긴다. 긴 문구를 임의로 줄이지 않기 위해 글자 폭은
+# 반각=1·전각=2인 보수적 단위로 세며, 원 안 두 줄을 넘으면 도식을 만들지 않는다.
+RELATION_PAIR_CAPTION: Final[str] = "과제와 대응"
+RELATION_PAIR_HEADERS: Final[tuple[str, str]] = (
+    "지금 겪는 과제",
+    "회사가 밝힌 대응",
+)
+RELATION_PAIR_MIN_ROWS: Final[int] = 2
+RELATION_PAIR_MAX_ROWS: Final[int] = 5
+RELATION_PAIR_MAX_TEXT_LINES: Final[int] = 2
+RELATION_PAIR_LINE_HALF_UNITS: Final[int] = 18
+
 
 @dataclass(frozen=True)
 class SectionSpec:

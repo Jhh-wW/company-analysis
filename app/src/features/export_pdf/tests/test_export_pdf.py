@@ -123,7 +123,7 @@ def test_pdf는_검색가능한_한글_본문과_모든_canonical_요소를_보�
         "(주)진영",
         "분석 보고서",
         "기준일 2026.08.19",
-        "내용 생성 2026.08.19",
+        "공개 자료 기반 · 생성일 2026.08.19",
         "핵심 요약",
         "1. 기업 정체성",
         "2. 사업 구조와 수익 모델",
@@ -171,7 +171,7 @@ def test_첫_페이지는_회사명과_보고서명을_줄바꿈해_표시한다
 
     assert "(주)진영\n분석 보고서" in first_page
     assert "기준일 2026.08.19" in first_page
-    assert "내용 생성 2026.08.19" in first_page
+    assert "공개 자료 기반 · 생성일 2026.08.19" in first_page
     assert "핵심 요약" in first_page
     assert "1. 기업 정체성" not in first_page
     assert "1. 기업 정체성" in second_page
