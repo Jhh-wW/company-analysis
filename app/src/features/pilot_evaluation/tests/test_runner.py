@@ -42,7 +42,7 @@ from src.features.pilot_evaluation.runner import (
 from src.features.pipeline.port import Outcome
 from src.features.storage import db as storage_db
 from src.shared.final_gate_diagnostics import (
-    FINAL_GATE_DIAGNOSTIC_SCHEMA_VERSION,
+    FINAL_GATE_DIAGNOSTIC_LEGACY_SCHEMA_VERSION,
     FINAL_GATE_DIAGNOSTIC_TABLE,
     FINAL_GATE_REASON_COMPARISON_BLOCKED,
 )
@@ -331,7 +331,7 @@ def _seed_running_gate_result(
                 f"INSERT INTO {FINAL_GATE_DIAGNOSTIC_TABLE} VALUES (?, ?, ?, ?)",
                 (
                     RUN_ID,
-                    FINAL_GATE_DIAGNOSTIC_SCHEMA_VERSION,
+                    FINAL_GATE_DIAGNOSTIC_LEGACY_SCHEMA_VERSION,
                     FINAL_GATE_REASON_COMPARISON_BLOCKED,
                     RUN_AT,
                 ),
@@ -452,7 +452,7 @@ def test_비게이트_종료에_게이트행이_있으면_다음_유료호출을
                 f"INSERT INTO {FINAL_GATE_DIAGNOSTIC_TABLE} VALUES (?, ?, ?, ?)",
                 (
                     RUN_ID,
-                    FINAL_GATE_DIAGNOSTIC_SCHEMA_VERSION,
+                    FINAL_GATE_DIAGNOSTIC_LEGACY_SCHEMA_VERSION,
                     FINAL_GATE_REASON_COMPARISON_BLOCKED,
                     RUN_AT,
                 ),

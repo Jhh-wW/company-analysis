@@ -44,6 +44,7 @@ def _stopped_job(
             address="서울특별시 중구",
             ceo="",
             founded="",
+            ref="00126380",
         ),
         finished=True,
         result=RunResult(
@@ -276,6 +277,8 @@ def test_서버_재시작으로_메모리가_비어도_저장된_내부사유를
         job.result,
         1.0,
         run_id=job_id,
+        corp_code=job.card.ref,
+        confirmed_company=job.card.legal_name,
     )
     assert job_id not in job_runtime._JOBS
 
@@ -300,6 +303,8 @@ def test_비용미확정_실패의_같은_진단을_게이트중단으로_잘못
         ),
         1.0,
         run_id=job_id,
+        corp_code="00126380",
+        confirmed_company="우리엔",
     )
 
     with TestClient(main.app, base_url="https://testserver") as client:

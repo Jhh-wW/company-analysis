@@ -36,7 +36,7 @@ from src.shared.automatic_release_record import (
     automatic_release_record_sha256,
 )
 from src.shared.final_gate_diagnostics import (
-    FINAL_GATE_DIAGNOSTIC_SCHEMA_VERSION,
+    FINAL_GATE_DIAGNOSTIC_LEGACY_SCHEMA_VERSION,
     FINAL_GATE_DIAGNOSTIC_TABLE,
     FINAL_GATE_REASON_COMPARISON_BLOCKED,
 )
@@ -304,7 +304,7 @@ def _create_storage(
                     f"INSERT INTO {FINAL_GATE_DIAGNOSTIC_TABLE} VALUES (?, ?, ?, ?)",
                     (
                         run_id,
-                        FINAL_GATE_DIAGNOSTIC_SCHEMA_VERSION,
+                        FINAL_GATE_DIAGNOSTIC_LEGACY_SCHEMA_VERSION,
                         FINAL_GATE_REASON_COMPARISON_BLOCKED,
                         AT,
                     ),
@@ -1014,7 +1014,7 @@ def test_비게이트_종료에_게이트행이_있으면_품질증거를_만들
             f"INSERT INTO {FINAL_GATE_DIAGNOSTIC_TABLE} VALUES (?, ?, ?, ?)",
             (
                 f"{1:032x}",
-                FINAL_GATE_DIAGNOSTIC_SCHEMA_VERSION,
+                FINAL_GATE_DIAGNOSTIC_LEGACY_SCHEMA_VERSION,
                 FINAL_GATE_REASON_COMPARISON_BLOCKED,
                 AT,
             ),

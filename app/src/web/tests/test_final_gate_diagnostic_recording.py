@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -16,6 +17,8 @@ from src.web import job_runtime, recording, runtime
 
 
 RUN_ID = "abcdef0123456789abcdef0123456789"
+CORP_CODE = "00126380"
+CONFIRMED_COMPANY = "가나다전자"
 
 
 def _round() -> SpanSelectionRoundDiagnostic:
@@ -59,6 +62,8 @@ def test_최종게이트와_기존원장이_같은실행시각으로_함께_남�
         _gate_result(),
         1.0,
         run_id=RUN_ID,
+        corp_code=CORP_CODE,
+        confirmed_company=CONFIRMED_COMPANY,
     )
 
     with sqlite3.connect(db_path) as conn:
@@ -83,12 +88,23 @@ def test_최종게이트와_기존원장이_같은실행시각으로_함께_남�
     assert span_diagnostic is not None
     assert gate_diagnostic == final_gate_store.PersistedFinalGateDiagnostic(
         run_id=RUN_ID,
-        schema_version=1,
+        schema_version=2,
+        corp_code=CORP_CODE,
+        confirmed_company=CONFIRMED_COMPANY,
+        end_step=obs.END_STEP_GATE,
         reason_code="publish_blocked",
         recorded_at=final_record.at,
     )
     assert span_diagnostic.recorded_at == final_record.at
-    assert columns == {"run_id", "schema_version", "reason_code", "recorded_at"}
+    assert columns == {
+        "run_id",
+        "schema_version",
+        "corp_code",
+        "confirmed_company",
+        "end_step",
+        "reason_code",
+        "recorded_at",
+    }
     assert not {
         "prompt",
         "response",
@@ -119,6 +135,8 @@ def test_최종게이트_저장실패는_lifecycle과_span도_같이_rollback한
         _gate_result(),
         1.0,
         run_id=RUN_ID,
+        corp_code=CORP_CODE,
+        confirmed_company=CONFIRMED_COMPANY,
     )
 
     with sqlite3.connect(db_path) as conn:
@@ -176,6 +194,7 @@ def test_기존_빈사유_게이트중단은_부속표없이_그대로_기록된
 
 def test_비용미확정_게이트중단도_worker에서_실패이력과_진단을_함께_남긴다(
     monkeypatch,
+    caplog,
 ) -> None:
     """게이트 결과를 FAILED로 보수적 정규해도 유료 호출 이력은 사라지지 않는다."""
 
@@ -203,6 +222,7 @@ def test_비용미확정_게이트중단도_worker에서_실패이력과_진단�
     )
     monkeypatch.setattr(runtime, "_PIPELINE", UncertainGatePipeline())
     monkeypatch.setattr(job_runtime, "_release_run_slot", lambda _bucket: None)
+    caplog.set_level(logging.WARNING, logger=job_runtime.__name__)
 
     asyncio.run(job_runtime._run_job(job))
 
@@ -217,4 +237,56 @@ def test_비용미확정_게이트중단도_worker에서_실패이력과_진단�
     assert final_record is not None
     assert final_record.end_step == obs.END_STEP_GENERATE
     assert diagnostic is not None
+    assert diagnostic.corp_code == "12345678"
+    assert diagnostic.confirmed_company == "저장하지 않을 회사"
+    assert diagnostic.end_step == obs.END_STEP_GENERATE
     assert diagnostic.reason_code == "publish_blocked"
+    diagnostic_logs = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == job_runtime.__name__
+        and record.getMessage().startswith("조사 실패를 기록했습니다")
+    ]
+    assert diagnostic_logs == [
+        "조사 실패를 기록했습니다 corp_code=12345678 "
+        "company=저장하지 않을 회사 reason_code=publish_blocked"
+    ]
+
+
+def test_일반_FAILED도_회사식별값과_안전한_기술사유를_한줄만_기록한다(
+    monkeypatch,
+    caplog,
+) -> None:
+    class FailedPipeline:
+        @staticmethod
+        def run(*_args, **_kwargs) -> RunResult:
+            return RunResult(outcome=Outcome.FAILED)
+
+    job = job_runtime.Job(
+        job_id="failed-run-with-company",
+        user_input=UserInput(company="입력 회사", job="회사분석", region=""),
+        card=CompanyCard(
+            legal_name="확정 회사",
+            typed_name="입력 회사",
+            address="",
+            ceo="",
+            founded="",
+            ref="00126380",
+        ),
+    )
+    monkeypatch.setattr(runtime, "_PIPELINE", FailedPipeline())
+    monkeypatch.setattr(job_runtime, "_release_run_slot", lambda _bucket: None)
+    caplog.set_level(logging.WARNING, logger=job_runtime.__name__)
+
+    asyncio.run(job_runtime._run_job(job))
+    job_runtime._log_failed_run(job)
+
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == job_runtime.__name__
+        and record.getMessage().startswith("조사 실패를 기록했습니다")
+    ] == [
+        "조사 실패를 기록했습니다 corp_code=00126380 "
+        "company=확정 회사 reason_code=generation_failed"
+    ]

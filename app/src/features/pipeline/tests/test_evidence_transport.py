@@ -51,6 +51,7 @@ from src.shared.report_evidence.legacy_fragment_kinds import (
 from src.shared.report_evidence.constants import (
     FORMAL_DOCUMENT_SOURCE_KINDS,
     SOURCE_KIND_DART_BUSINESS_REPORT,
+    SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT,
     SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE,
     SOURCE_KIND_OFFICIAL_IR_PDF,
     SOURCE_KIND_OFFICIAL_RECRUIT_PAGE,
@@ -601,6 +602,21 @@ def test_typed_DART는_접수번호와_URL이_같은_문서일때만_받는다()
     with pytest.raises(EvidenceTransportError) as caught:
         _build(frags)
     assert caught.value.detail_code == FINAL_GATE_DETAIL_PREFLIGHT_PACKET_INVALID
+
+
+def test_typed_연결감사보고서는_DART접수번호_문서신원을_유지한다() -> None:
+    raw = _typed_raw_for_formal_kind(
+        SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT
+    )
+    frags = _all_legacy_frags()
+    frags[99] = raw
+
+    fragment = _fragment_by_id(_build(frags), 99)
+
+    assert fragment.document_identity == f"document:dart.fss.or.kr:{_RCEPT_NO}"
+    assert fragment.source_document_id == (
+        f"{SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT}:{_RCEPT_NO}"
+    )
 
 
 def test_미등록_kind는_별도_닫힌_사유로_실패한다() -> None:

@@ -24,8 +24,11 @@ WINDOWS_RESERVED_STEM: Final[re.Pattern[str]] = re.compile(
 FONT_DIR: Final[Path] = Path(__file__).with_name("fonts")
 FONT_REGULAR_PATH: Final[Path] = FONT_DIR / "Freesentation-Regular.ttf"
 FONT_SEMIBOLD_PATH: Final[Path] = FONT_DIR / "Freesentation-SemiBold.ttf"
+FONT_FALLBACK_PATH: Final[Path] = FONT_DIR / "NotoSansKR-Regular.ttf"
 FONT_REGULAR: Final[str] = "FreesentationPDF"
 FONT_SEMIBOLD: Final[str] = "FreesentationPDF-SemiBold"
+FONT_FALLBACK: Final[str] = "NotoSansKRPDF"
+FONT_FALLBACK_MAX_BYTES: Final[int] = 6 * 1024 * 1024
 
 # 웹의 흑백 중심 토큰을 문서에서도 그대로 사용한다.
 COLOR_INK: Final[str] = "#171717"

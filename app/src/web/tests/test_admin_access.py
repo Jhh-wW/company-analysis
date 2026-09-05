@@ -1394,10 +1394,10 @@ def test_호출전_예상비용_차단기준을_실제청구_최댓값으로_과
     #   옮겨갔다. 보는 문장과 숫자는 그대로다.
     text = admin.get("/admin/costs").text
 
-    # 링크 1개(3,000) + MEMBER 1명(3,000) + 관리자(5,000) = 11,000원.
+    # 링크 1개(3,000) + MEMBER 1명(3,000) + 관리자(50,000) = 56,000원.
     # MEMBER에는 이 금액 상한과 성공 3건 제한이 함께 적용된다.
     assert "호출 전 예상비용 차단 기준 합계" in text
-    assert "11,000원" in text
+    assert "56,000원" in text
     assert "친구 1명 × 3,000원" in text
     assert "성공 보고서 3건" in text
     assert "기준에 닿으면 새 호출을 차단" in text
@@ -1450,7 +1450,7 @@ def test_실제비용이_예상과_차단기준을_넘으면_금액과_overrun�
             phase=SPEND_PHASE_PIPELINE,
             day=today,
             bucket="user:admin@example.com",
-            cost_krw=6_000.0,
+            cost_krw=51_000.0,
             created_at="2026-08-18T10:01:00+09:00",
         )
 
@@ -1460,10 +1460,10 @@ def test_실제비용이_예상과_차단기준을_넘으면_금액과_overrun�
 
     assert response.status_code == 200
     assert 'role="status"' in response.text
-    assert "오늘 실제 지출은 <strong>6,000원</strong>" in compact
+    assert "오늘 실제 지출은 <strong>51,000원</strong>" in compact
     assert "차단 기준 합계보다 <strong>1,000원</strong>" in compact
     assert "정산은 <strong>1건</strong>" in compact
-    assert "관측 차액은 <strong>5,900원</strong>" in compact
+    assert "관측 차액은 <strong>50,900원</strong>" in compact
     assert "최악의 하루 지출" not in response.text
 
 

@@ -70,6 +70,7 @@ from src.web.routers import reports as reports_router
 _COMPANY_ID = "00126380"
 _COMPARATOR_ID = "00999999"
 _MAIN_RECEIPT = "20260315000123"
+_AUDIT_RECEIPT = "20260314000100"
 _COMPARATOR_RECEIPT = "20260315000999"
 _HOME = "https://company.example/"
 _JOB_ID = "public-boundary-full-evidence-e2e"
@@ -465,11 +466,20 @@ class _ExternalServiceFixtures:
         self.document_download_sidecar_flags: list[bool] = []
         self.corpcode_downloads = 0
         self._main_path = self.RAW_DIR / f"{_MAIN_RECEIPT}.xml"
+        self._audit_path = self.RAW_DIR / f"{_AUDIT_RECEIPT}.xml"
         self._comparator_path = self.RAW_DIR / f"{_COMPARATOR_RECEIPT}.xml"
         self._corpcode_path = self.CORPCODE_DIR / "CORPCODE.xml"
         self._main_path.write_text(
             "<DOCUMENT>"
             + "".join(f"<P>{html.escape(value)}</P>" for value in _MAIN_FILING_PARAGRAPHS)
+            + "</DOCUMENT>",
+            encoding="utf-8",
+        )
+        self._audit_path.write_text(
+            "<DOCUMENT>"
+            + "".join(
+                f"<P>{html.escape(value)}</P>" for value in _MAIN_FILING_PARAGRAPHS
+            )
             + "</DOCUMENT>",
             encoding="utf-8",
         )
@@ -595,7 +605,7 @@ class _ExternalServiceFixtures:
                         {
                             "corp_code": corp_code or _COMPANY_ID,
                             "corp_name": "가나다전자",
-                            "rcept_no": "20260314000100",
+                            "rcept_no": _AUDIT_RECEIPT,
                             "report_nm": "감사보고서 (2025.12)",
                             "rcept_dt": "20260314",
                         }
@@ -641,6 +651,8 @@ class _ExternalServiceFixtures:
         self.document_download_sidecar_flags.append(require_official_url_sidecar)
         if rcept_no == _MAIN_RECEIPT:
             path = self._main_path
+        elif rcept_no == _AUDIT_RECEIPT:
+            path = self._audit_path
         elif rcept_no == _COMPARATOR_RECEIPT:
             path = self._comparator_path
         else:
@@ -867,13 +879,14 @@ def test_공개worker에서_매출원문_TYPED비교_FULL봉인_delivery재조�
     assert len(external_services.client.messages.writer_prompts) == 9
     assert len(external_services.client.messages.reviewer_prompts) == 1
     assert external_services.corpcode_downloads == 1
-    assert {_MAIN_RECEIPT, _COMPARATOR_RECEIPT} <= set(
+    assert {_MAIN_RECEIPT, _AUDIT_RECEIPT, _COMPARATOR_RECEIPT} <= set(
         external_services.document_downloads
     )
     # formal typed 수집·비교·legacy 보완수집이 같은 ZIP을 각각
     # 다시 내려받지 않는다. 실제 외부 다운로드 경계 호출을 세어
     # 디스크 cache가 중복 설계를 감추지 못하게 한다.
     assert external_services.document_downloads.count(_MAIN_RECEIPT) == 1
+    assert external_services.document_downloads.count(_AUDIT_RECEIPT) == 1
     assert external_services.document_downloads.count(_COMPARATOR_RECEIPT) == 1
     assert True in external_services.document_download_sidecar_flags
     assert {
@@ -1223,6 +1236,8 @@ def test_DART첨부의_공식URL이_실제_sidecar를_거쳐_FULL_delivery까지
             }
         ),
         _COMPARATOR_RECEIPT: zipped({"main.xml": comparator_document}),
+        # W8부터 사업보고서와 함께 감사보고서(F)도 항상 내려받는다.
+        _AUDIT_RECEIPT: zipped({"main.xml": main_document}),
     }
     downloaded_receipts: list[str] = []
 

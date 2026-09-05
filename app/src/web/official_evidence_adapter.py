@@ -15,10 +15,12 @@ from types import ModuleType
 from typing import Final
 
 from src.core import paths
+from src.core.evidence_reclassify_switch import evidence_reclassify_enabled
 from src.features.chapter_evidence.produce import produce_from_collection_envelopes
 from src.features.homepage.wide_collect import collect_official_web_documents
 from src.features.homepage.wide_evidence_mapping import to_evidence_mappings
 from src.features.homepage.wide_fragments import build_fragments_for_collection
+from src.features.pipeline.evidence_reclassify_step import attach_reclassify_source
 from src.shared.report_evidence.runtime_port import (
     OfficialComparisonCandidateEvidence,
     OfficialEvidenceCollectionRequest,
@@ -833,10 +835,18 @@ class ProductionOfficialEvidenceCollector:
             company_type=company_type,
             collection_envelopes=(dart_envelope, wide_envelope),
         )
-        return OfficialEvidenceCollectionResult(
+        result = OfficialEvidenceCollectionResult(
             company_id=request.company_id,
             candidates=candidates,
             unclassified_evidence=unclassified_evidence,
             comparison_candidates=comparison_candidates,
             provenance_documents=provenance_documents,
+        )
+        if not evidence_reclassify_enabled():
+            return result
+        return attach_reclassify_source(
+            result,
+            company_type=company_type,
+            dart_envelope=dart_envelope,
+            wide_envelope=wide_envelope,
         )

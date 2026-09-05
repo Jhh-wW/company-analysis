@@ -28,6 +28,22 @@ def _row(rcept_no: str, report_nm: str, rcept_dt: str = "20250315") -> RawFiling
     return RawFilingRow(rcept_no=rcept_no, report_nm=report_nm, rcept_dt=rcept_dt)
 
 
+def _six_candidate_fetcher() -> FakeFetcher:
+    return FakeFetcher(list_responses_by_pblntf_ty={
+        "A": FilingListResult(state="OK", rows=(
+            _row("20260315000001", "사업보고서 (2025.12)", "20260315"),
+            _row("20250301000002", "사업보고서 (2024.12)", "20250301"),
+            _row("20250320000003", "[기재정정]사업보고서 (2024.12)", "20250320"),
+            _row("20260815000004", "반기보고서 (2026.06)", "20260815"),
+            _row("20261115000005", "분기보고서 (2026.09)", "20261115"),
+        )),
+        "F": FilingListResult(state="OK", rows=(
+            _row("20260401000006", "감사보고서 (2025.12)", "20260401"),
+            _row("20260401000007", "연결감사보고서 (2025.12)", "20260401"),
+        )),
+    })
+
+
 @pytest.mark.parametrize("state", ["", "알수없음", c.ATTEMPT_STATE_TRUNCATED])
 def test_fetch_결과_state는_외부조회_경계의_닫힌값만_받는다(state: str) -> None:
     """포트 오타를 회사 자료 없음이나 외부 장애로 바꿔 숨기지 않는다."""
@@ -58,16 +74,23 @@ def test_실패와_부재_fetch_결과에는_성공_payload를_실을수없다()
         )
 
 
-def test_사업보고서가_있으면_그것을_고르고_감사보고서는_조회하지_않는다() -> None:
+def test_사업보고서와_감사보고서가_있으면_둘_다_고른다() -> None:
     fetcher = FakeFetcher(list_responses_by_pblntf_ty={
         "A": FilingListResult(state="OK", rows=(_row("20250315000001", "사업보고서 (2025.03)"),)),
+        "F": FilingListResult(state="OK", rows=(_row("20250401000002", "감사보고서 (2025.03)"),)),
     })
 
     result = select_related_filings(fetcher, "00126380")
 
-    assert result.selected[0].source_kind == c.SOURCE_KIND_BUSINESS_REPORT
-    assert result.selected[0].rcept_no == "20250315000001"
-    assert ("00126380", "F") not in fetcher.list_calls  # 감사보고서 폴백 미시도
+    assert [filing.source_kind for filing in result.selected] == [
+        c.SOURCE_KIND_BUSINESS_REPORT,
+        c.SOURCE_KIND_AUDIT_REPORT,
+    ]
+    assert [filing.rcept_no for filing in result.selected] == [
+        "20250315000001",
+        "20250401000002",
+    ]
+    assert fetcher.list_calls.count(("00126380", "F")) == 1
 
 
 def test_사업보고서가_없으면_감사보고서로_폴백한다() -> None:
@@ -151,19 +174,103 @@ def test_반기_분기보고서는_사업보고서와_같은_A_쿼리_결과를_
     }
 
 
-def test_상한을_넘는_후보는_TRUNCATED로_기록되고_제외된다(monkeypatch) -> None:
-    monkeypatch.setattr(c, "MAX_RELATED_FILINGS", 1)
+def test_연결감사보고서는_별도_후보로_살리고_연결사업보고서는_계속_제외한다() -> None:
     fetcher = FakeFetcher(list_responses_by_pblntf_ty={
         "A": FilingListResult(state="OK", rows=(
-            _row("20250315000001", "사업보고서 (2025.03)"),
-            _row("20250815000002", "반기보고서 (2025.06)"),
+            _row("20260315000001", "연결사업보고서 (2025.12)", "20260315"),
+        )),
+        "F": FilingListResult(state="OK", rows=(
+            _row("20260401000002", "감사보고서 (2025.12)", "20260401"),
+            _row("20260401000003", "연결감사보고서 (2025.12)", "20260401"),
         )),
     })
 
     result = select_related_filings(fetcher, "00126380")
 
-    assert len(result.selected) == 1
+    assert [filing.source_kind for filing in result.selected] == [
+        c.SOURCE_KIND_AUDIT_REPORT,
+        c.SOURCE_KIND_CONSOLIDATED_AUDIT_REPORT,
+    ]
+    assert not any(
+        filing.source_kind == c.SOURCE_KIND_BUSINESS_REPORT
+        for filing in result.selected
+    )
+
+
+def test_직전_연도_사업보고서는_OPTIONAL이며_정정본_계보를_유지한다() -> None:
+    fetcher = FakeFetcher(list_responses_by_pblntf_ty={
+        "A": FilingListResult(state="OK", rows=(
+            _row("20260315000001", "사업보고서 (2025.12)", "20260315"),
+            _row("20250301000002", "사업보고서 (2024.12)", "20250301"),
+            _row("20250320000003", "[기재정정]사업보고서 (2024.12)", "20250320"),
+        )),
+    })
+
+    result = select_related_filings(fetcher, "00126380")
+
+    assert [filing.rcept_no for filing in result.selected] == [
+        "20260315000001",
+        "20250320000003",
+    ]
+    previous = result.selected[1]
+    assert previous.source_kind == c.SOURCE_KIND_BUSINESS_REPORT
+    assert previous.requirement == c.REQUIREMENT_OPTIONAL
+    assert previous.lineage_original_rcept_no == "20250301000002"
+
+
+def test_후보_순서와_목록_조회_호출_상한을_고정한다() -> None:
+    fetcher = _six_candidate_fetcher()
+
+    result = select_related_filings(fetcher, "00126380")
+
+    assert [filing.rcept_no for filing in result.selected] == [
+        "20260315000001",  # 당기 사업보고서
+        "20260401000006",  # 당기 감사보고서
+        "20260401000007",  # 당기 연결감사보고서
+        "20250320000003",  # 직전 연도 사업보고서 정정본
+        "20260815000004",  # 반기보고서
+        "20261115000005",  # 분기보고서
+    ]
+    assert fetcher.list_calls == [("00126380", "A"), ("00126380", "F")]
+    assert len(fetcher.list_calls) <= 3
+
+
+def test_감사보고서만_있는_회사는_당기_연결_직전연도_최대_3건을_고른다() -> None:
+    fetcher = FakeFetcher(list_responses_by_pblntf_ty={
+        "A": FilingListResult(state="OK", rows=()),
+        "F": FilingListResult(state="OK", rows=(
+            _row("20260401000001", "감사보고서", "20260401"),
+            _row("20260401000002", "연결감사보고서", "20260401"),
+            _row("20250401000003", "감사보고서", "20250401"),
+        )),
+    })
+
+    result = select_related_filings(fetcher, "00164788")
+
+    assert [filing.source_kind for filing in result.selected] == [
+        c.SOURCE_KIND_AUDIT_REPORT,
+        c.SOURCE_KIND_CONSOLIDATED_AUDIT_REPORT,
+        c.SOURCE_KIND_AUDIT_REPORT,
+    ]
+    assert [filing.rcept_no for filing in result.selected] == [
+        "20260401000001",
+        "20260401000002",
+        "20250401000003",
+    ]
+    assert result.selected[-1].requirement == c.REQUIREMENT_OPTIONAL
+    assert result.truncated == ()
+
+
+def test_상한을_넘는_후보는_TRUNCATED로_기록되고_제외된다(monkeypatch) -> None:
+    assert c.MAX_RELATED_FILINGS == 6
+    monkeypatch.setattr(c, "MAX_RELATED_FILINGS", 5)
+    fetcher = _six_candidate_fetcher()
+
+    result = select_related_filings(fetcher, "00126380")
+
+    assert len(result.selected) == 5
     assert len(result.truncated) == 1
+    assert result.truncated[0].source_kind == c.SOURCE_KIND_QUARTERLY_REPORT
     truncated_attempts = [a for a in result.attempts if a.state == c.ATTEMPT_STATE_TRUNCATED]
     assert len(truncated_attempts) == 1
     assert truncated_attempts[0].reason_code == c.REASON_CAP_REACHED

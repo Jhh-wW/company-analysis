@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Final
 from urllib.parse import urlsplit
 
 from src.shared.official_ir import (
-    IR_METADATA_VERIFICATION_VALUE,
+    IR_METADATA_VERIFICATION_VALUES,
     official_ir_time_is_usable,
     reporting_period_is_valid,
     safe_https_attachment_url,
@@ -27,6 +27,7 @@ from src.shared.report_evidence.constants import (
     OFFICIAL_WEB_SOURCE_KINDS,
     SOURCE_KIND_DART_AUDIT_REPORT,
     SOURCE_KIND_DART_BUSINESS_REPORT,
+    SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT,
     SOURCE_KIND_DART_QUARTERLY_REPORT,
     SOURCE_KIND_DART_SEMIANNUAL_REPORT,
     SOURCE_KIND_OFFICIAL_IR_PDF,
@@ -157,7 +158,7 @@ def formal_web_public_source_metadata(
     if source_kind == SOURCE_KIND_OFFICIAL_IR_PDF:
         canonical_attachment = safe_https_attachment_url(attachment_url)
         if (
-            ir_metadata_verification.strip() != IR_METADATA_VERIFICATION_VALUE
+            ir_metadata_verification.strip() not in IR_METADATA_VERIFICATION_VALUES
             or not reporting_period_is_valid(reporting_period)
             or not canonical_attachment
             or canonical_attachment != attachment_url.strip()
@@ -203,6 +204,7 @@ FORMAL_DOCUMENT_SLOT_IDS_BY_SOURCE_KIND: Final = MappingProxyType(
     {
         SOURCE_KIND_DART_BUSINESS_REPORT: _ALL_COLLECTOR_SLOT_IDS,
         SOURCE_KIND_DART_AUDIT_REPORT: _ALL_COLLECTOR_SLOT_IDS,
+        SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT: _ALL_COLLECTOR_SLOT_IDS,
         SOURCE_KIND_DART_SEMIANNUAL_REPORT: _RECENT_FILING_SLOT_IDS,
         SOURCE_KIND_DART_QUARTERLY_REPORT: _RECENT_FILING_SLOT_IDS,
         SOURCE_KIND_OFFICIAL_WEB_PAGE: _ALL_COLLECTOR_SLOT_IDS,
@@ -232,6 +234,9 @@ FORMAL_DOCUMENT_TRUST_BY_SOURCE_KIND: Final = MappingProxyType(
         ),
         SOURCE_KIND_DART_AUDIT_REPORT: frozenset(
             {(SourceTier.TIER_1_OFFICIAL, SourceRequirement.REQUIRED)}
+        ),
+        SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT: frozenset(
+            {(SourceTier.TIER_1_OFFICIAL, SourceRequirement.OPTIONAL)}
         ),
         SOURCE_KIND_DART_SEMIANNUAL_REPORT: frozenset(
             {(SourceTier.TIER_1_OFFICIAL, SourceRequirement.OPTIONAL)}
@@ -271,6 +276,10 @@ FORMAL_DOCUMENT_WRITER_TRUST_BY_SOURCE_KIND: Final = MappingProxyType(
         SOURCE_KIND_DART_AUDIT_REPORT: (
             SourceTier.TIER_1_OFFICIAL,
             SourceRequirement.REQUIRED,
+        ),
+        SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT: (
+            SourceTier.TIER_1_OFFICIAL,
+            SourceRequirement.OPTIONAL,
         ),
         SOURCE_KIND_DART_SEMIANNUAL_REPORT: (
             SourceTier.TIER_1_OFFICIAL,
@@ -425,7 +434,7 @@ def formal_source_writer_ineligibility_reason(
         reference_date = str(collected_at or "").strip()[:10]
         if (
             str(ir_metadata_verification or "").strip()
-            != IR_METADATA_VERIFICATION_VALUE
+            not in IR_METADATA_VERIFICATION_VALUES
             or not reporting_period_is_valid(str(reporting_period or ""))
             or not canonical_attachment
             or canonical_attachment != canonical_source

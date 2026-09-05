@@ -204,6 +204,7 @@ MAX_OFFICIAL_URL_CANDIDATES: Final[int] = 12
 
 SOURCE_KIND_BUSINESS_REPORT: Final[str] = "dart_business_report"
 SOURCE_KIND_AUDIT_REPORT: Final[str] = "dart_audit_report"
+SOURCE_KIND_CONSOLIDATED_AUDIT_REPORT: Final[str] = "dart_consolidated_audit_report"
 SOURCE_KIND_SEMIANNUAL_REPORT: Final[str] = "dart_semiannual_report"
 SOURCE_KIND_QUARTERLY_REPORT: Final[str] = "dart_quarterly_report"
 
@@ -225,6 +226,12 @@ class FilingKindSpec(NamedTuple):
 FILING_KIND_SPECS: Final[tuple[FilingKindSpec, ...]] = (
     FilingKindSpec(SOURCE_KIND_BUSINESS_REPORT, "A", "사업보고서", REQUIREMENT_REQUIRED),
     FilingKindSpec(SOURCE_KIND_AUDIT_REPORT, "F", "감사보고서", REQUIREMENT_REQUIRED),
+    FilingKindSpec(
+        SOURCE_KIND_CONSOLIDATED_AUDIT_REPORT,
+        "F",
+        "연결감사보고서",
+        REQUIREMENT_OPTIONAL,
+    ),
     FilingKindSpec(SOURCE_KIND_SEMIANNUAL_REPORT, "A", "반기보고서", REQUIREMENT_OPTIONAL),
     FilingKindSpec(SOURCE_KIND_QUARTERLY_REPORT, "A", "분기보고서", REQUIREMENT_OPTIONAL),
 )
@@ -233,21 +240,24 @@ FILING_KIND_SPEC_BY_SOURCE_KIND: Final[dict[str, FilingKindSpec]] = {
     spec.source_kind: spec for spec in FILING_KIND_SPECS
 }
 
-#: 원본 1건만 고르는 «필수» 단계 — 사업보고서를 먼저 보고, 없을 때만 감사보고서로.
+#: 당기 연차 문서 — 사업보고서와 감사보고서가 모두 있으면 둘 다 고른다.
 PRIMARY_LOOKUP_ORDER: Final[tuple[str, ...]] = (SOURCE_KIND_BUSINESS_REPORT, SOURCE_KIND_AUDIT_REPORT)
+#: 연결감사보고서는 일반 감사보고서와 접수번호가 다른 별도 문서로 고른다.
+CONSOLIDATED_LOOKUP_ORDER: Final[tuple[str, ...]] = (SOURCE_KIND_CONSOLIDATED_AUDIT_REPORT,)
 #: 보충 자료 — 있으면 더하고 없어도 실패로 보지 않는다(OPTIONAL).
 SUPPLEMENT_LOOKUP_ORDER: Final[tuple[str, ...]] = (SOURCE_KIND_SEMIANNUAL_REPORT, SOURCE_KIND_QUARTERLY_REPORT)
 
 #: 「[첨부정정]」 공시의 원본 zip엔 본문이 없고 고친 첨부만 있다(survey_audit_reports.py
 #: 실측과 동일 근거) — 본문이 없으므로 통째로 후보에서 뺀다.
 EXCLUDED_REPORT_NAME_MARKERS: Final[tuple[str, ...]] = ("첨부정정",)
-#: 연결재무제표만 담은 별도 공시는 본문 성격이 달라 제외한다(run_pilot.py와 동일 안전선).
+#: 연결 공시는 전용 연결감사보고서 종류에서만 받는다. 사업보고서와 일반
+#: 감사보고서에서는 같은 문자열을 계속 제외해 종류 간 중복을 막는다.
 CONSOLIDATED_REPORT_NAME_MARKER: Final[str] = "연결"
 #: 내용을 고치는 «기재정정»만 정정 계보로 묶는다. 첨부만 고치는 정정과는 다른 표시다.
 CONTENT_CORRECTION_BRACKET_MARKER: Final[str] = "기재정정"
 
 #: 관련 문서 상한 — «관측용» 상수다. 정상 회사를 거절하는 근거로 쓰지 않는다.
-MAX_RELATED_FILINGS: Final[int] = 3
+MAX_RELATED_FILINGS: Final[int] = 6
 
 #: source_kind별로 그 공시가 «영향을 주는» 의미 칸의 대략적 범위.
 #: ★ 왜 굵은 단위인가 — 문단 단위 정밀 배정은 relevance.py가 조각마다 따로 한다.
@@ -263,6 +273,7 @@ _COLLECTOR_SLOTS_SORTED: Final[tuple[str, ...]] = tuple(sorted(COLLECTOR_SLOT_ID
 SOURCE_KIND_SLOT_SCOPE: Final[dict[str, tuple[str, ...]]] = {
     SOURCE_KIND_BUSINESS_REPORT: _COLLECTOR_SLOTS_SORTED,
     SOURCE_KIND_AUDIT_REPORT: _COLLECTOR_SLOTS_SORTED,
+    SOURCE_KIND_CONSOLIDATED_AUDIT_REPORT: _COLLECTOR_SLOTS_SORTED,
     SOURCE_KIND_SEMIANNUAL_REPORT: (
         COLLECTOR_SLOTS_BY_SECTION["past_changes"] + COLLECTOR_SLOTS_BY_SECTION["current_challenges"]
     ),

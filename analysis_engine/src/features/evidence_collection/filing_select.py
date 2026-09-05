@@ -1,4 +1,4 @@
-"""관련 공시 묶음 선택 — 사업보고서 우선, 감사보고서 폴백, 정정공시 계보.
+"""관련 공시 묶음 선택 — 연차 공시·직전 연도·정정공시 계보.
 
 network 호출부는 이 모듈이 정의하는 `DartFetcher` Protocol로 감싼다. 실제
 DART 연동은 같은 feature의 ``dart_fetcher.py``가 ``core/dart_client.py``를
@@ -175,6 +175,7 @@ _CORRECTION_PREFIX_PATTERN = re.compile(
 #: 비교한다(P2). 원공시·정정본 판정 자체(정규식 매칭)는 그대로다
 #: — 이건 어디까지나 「같은 이름인지」 비교 시의 공백 관용이다.
 _WHITESPACE_PATTERN = re.compile(r"\s+")
+_REPORT_YEAR_PATTERN = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
 
 
 def _normalize_report_name(name: str) -> str:
@@ -202,10 +203,10 @@ def _safe_fetch_list(fetcher: DartFetcher, company_id: str, pblntf_ty: str) -> F
 
 
 def _filter_rows(
-    rows: tuple[RawFilingRow, ...], name_keyword: str, company_id: str,
+    rows: tuple[RawFilingRow, ...], spec: c.FilingKindSpec, company_id: str,
 ) -> tuple[list[RawFilingRow], int]:
-    """이름 키워드·연결/정정 제외로 거르고, corp_code가 있는데 요청 회사와
-    다르면 문서를 조회하지도 않고 목록 단계에서 미리 버린다(item 3).
+    """이름 키워드·종류별 연결/정정 규칙으로 거르고, corp_code가 있는데
+    요청 회사와 다르면 문서를 조회하지도 않고 목록 단계에서 미리 버린다.
 
     corp_code가 없는 행은 지금처럼 통과시킨다(«확인 못 함»이지 «불일치»가
     아니다 — 실제 응답에 이 필드가 오는지 실측하지 못했다). 몇 건이
@@ -215,9 +216,12 @@ def _filter_rows(
     matched: list[RawFilingRow] = []
     identity_mismatch_count = 0
     for row in rows:
-        if name_keyword not in row.report_nm:
+        if spec.name_keyword not in row.report_nm:
             continue
-        if c.CONSOLIDATED_REPORT_NAME_MARKER in row.report_nm:
+        if (
+            c.CONSOLIDATED_REPORT_NAME_MARKER in row.report_nm
+            and spec.source_kind != c.SOURCE_KIND_CONSOLIDATED_AUDIT_REPORT
+        ):
             continue
         if any(marker in row.report_nm for marker in c.EXCLUDED_REPORT_NAME_MARKERS):
             continue
@@ -226,6 +230,27 @@ def _filter_rows(
             continue
         matched.append(row)
     return matched, identity_mismatch_count
+
+
+def _report_year(row: RawFilingRow) -> int | None:
+    """공시명에 적힌 보고 연도를 우선하고, 없으면 접수 연도를 쓴다."""
+
+    report_name = _CORRECTION_PREFIX_PATTERN.sub("", row.report_nm, count=1)
+    matched = _REPORT_YEAR_PATTERN.search(report_name)
+    raw_year = matched.group(1) if matched is not None else row.rcept_dt[:4]
+    return int(raw_year) if len(raw_year) == 4 and raw_year.isdigit() else None
+
+
+def _pick_previous_year_with_lineage(
+    rows: list[RawFilingRow], current: RawFilingRow,
+) -> tuple[RawFilingRow, str] | None:
+    """당기 바로 전 연도의 같은 종류 공시를 정정 계보 규칙으로 고른다."""
+
+    current_year = _report_year(current)
+    if current_year is None:
+        return None
+    previous_rows = [row for row in rows if _report_year(row) == current_year - 1]
+    return _pick_latest_with_lineage(previous_rows) if previous_rows else None
 
 
 def _pick_latest_with_lineage(rows: list[RawFilingRow]) -> tuple[RawFilingRow, str]:
@@ -297,7 +322,7 @@ def _attempt_for_list_query(
         )
         return attempt, [], 0
 
-    filtered, identity_mismatch_count = _filter_rows(result.rows, spec.name_keyword, company_id)
+    filtered, identity_mismatch_count = _filter_rows(result.rows, spec, company_id)
     if filtered:
         state = c.ATTEMPT_STATE_OK
         reason = c.REASON_LIST_QUERY_OK
@@ -366,11 +391,11 @@ def _deadline_list_attempt(company_id: str, spec: c.FilingKindSpec) -> Collectio
 def select_related_filings(
     fetcher: DartFetcher, company_id: str, *, deadline_at: float | None = None,
 ) -> FilingSelectionResult:
-    """관련 공시 묶음을 고른다 — 사업보고서 우선, 없으면 감사보고서(요구사항 1번).
+    """관련 공시 묶음을 정해진 문서 우선순위로 고른다.
 
-    반기·분기보고서는 있으면 보충으로 더한다(OPTIONAL). 상한(MAX_RELATED_FILINGS)을
-    넘는 후보는 TRUNCATED로 기록하고 뺀다 — 상한은 관측용이지 회사를 거절하는
-    근거가 아니다.
+    당기 사업보고서·감사보고서·연결감사보고서, 직전 연도 연차 문서,
+    반기·분기보고서 순서다. 사업보고서가 없으면 직전 연도 문서도 감사보고서에서
+    고른다. 상한(MAX_RELATED_FILINGS)을 넘는 후보는 TRUNCATED로 기록하고 뺀다.
 
     ``deadline_at``이 주어지면(``time.monotonic()`` 기준) 새 목록 조회를
     시작하기 «직전»마다 다시 확인한다(P1-3) — 이미 넘겼으면 그 조회는
@@ -379,9 +404,8 @@ def select_related_filings(
     """
     attempts: list[CollectionAttempt] = []
     candidates: list[SelectedFiling] = []
-    # pblntf_ty별 캐시 — 사업보고서(A)·반기(A)·분기(A)가 같은 pblntf_ty를
-    # 쓰므로 실제 DART 호출은 최대 2번(A·F)만 하고 나머지는 클라이언트 쪽에서
-    # report_nm 키워드로만 다시 나눈다(비용 상한 요구사항).
+    # pblntf_ty별 캐시 — 3년 조회 창에 직전 연도까지 들어 있으므로 실제 DART
+    # 호출은 최대 2번(A·F)만 하고 공시명·연도는 로컬에서 다시 나눈다.
     list_result_cache: dict[str, FilingListResult] = {}
 
     def fetch_cached(pblntf_ty: str) -> FilingListResult:
@@ -392,48 +416,75 @@ def select_related_filings(
     def deadline_exceeded() -> bool:
         return deadline_at is not None and time.monotonic() > deadline_at
 
-    for source_kind in c.PRIMARY_LOOKUP_ORDER:
+    primary_rows: dict[str, list[RawFilingRow]] = {}
+    current_primary: dict[str, RawFilingRow] = {}
+
+    def append_latest(spec: c.FilingKindSpec, filtered: list[RawFilingRow]) -> None:
+        chosen, lineage_original = _pick_latest_with_lineage(filtered)
+        candidates.append(SelectedFiling(
+            source_kind=spec.source_kind,
+            requirement=spec.requirement,
+            rcept_no=chosen.rcept_no,
+            report_nm=chosen.report_nm,
+            rcept_dt=chosen.rcept_dt,
+            lineage_original_rcept_no=lineage_original,
+        ))
+
+    def inspect_kind(source_kind: str) -> list[RawFilingRow]:
         spec = c.FILING_KIND_SPEC_BY_SOURCE_KIND[source_kind]
         if spec.pblntf_ty not in list_result_cache and deadline_exceeded():
             attempts.append(_deadline_list_attempt(company_id, spec))
-            continue
+            return []
         result = fetch_cached(spec.pblntf_ty)
         attempt, filtered, identity_mismatch_count = _attempt_for_list_query(company_id, spec, result)
         attempts.append(attempt)
         if identity_mismatch_count:
             attempts.append(_identity_mismatch_list_attempt(company_id, spec, identity_mismatch_count))
+        return filtered
+
+    for source_kind in c.PRIMARY_LOOKUP_ORDER:
+        spec = c.FILING_KIND_SPEC_BY_SOURCE_KIND[source_kind]
+        filtered = inspect_kind(source_kind)
+        primary_rows[source_kind] = filtered
         if filtered:
-            chosen, lineage_original = _pick_latest_with_lineage(filtered)
+            chosen, _ = _pick_latest_with_lineage(filtered)
+            current_primary[source_kind] = chosen
+            append_latest(spec, filtered)
+
+    for source_kind in c.CONSOLIDATED_LOOKUP_ORDER:
+        spec = c.FILING_KIND_SPEC_BY_SOURCE_KIND[source_kind]
+        filtered = inspect_kind(source_kind)
+        if filtered:
+            append_latest(spec, filtered)
+
+    previous_source_kind = next(
+        (
+            source_kind
+            for source_kind in c.PRIMARY_LOOKUP_ORDER
+            if source_kind in current_primary
+        ),
+        None,
+    )
+    if previous_source_kind is not None:
+        previous = _pick_previous_year_with_lineage(
+            primary_rows[previous_source_kind], current_primary[previous_source_kind],
+        )
+        if previous is not None:
+            previous_row, lineage_original = previous
             candidates.append(SelectedFiling(
-                source_kind=spec.source_kind,
-                requirement=spec.requirement,
-                rcept_no=chosen.rcept_no,
-                report_nm=chosen.report_nm,
-                rcept_dt=chosen.rcept_dt,
+                source_kind=previous_source_kind,
+                requirement=c.REQUIREMENT_OPTIONAL,
+                rcept_no=previous_row.rcept_no,
+                report_nm=previous_row.report_nm,
+                rcept_dt=previous_row.rcept_dt,
                 lineage_original_rcept_no=lineage_original,
             ))
-            break  # 사업보고서를 찾았으면 감사보고서 폴백은 시도하지 않는다
 
     for source_kind in c.SUPPLEMENT_LOOKUP_ORDER:
         spec = c.FILING_KIND_SPEC_BY_SOURCE_KIND[source_kind]
-        if spec.pblntf_ty not in list_result_cache and deadline_exceeded():
-            attempts.append(_deadline_list_attempt(company_id, spec))
-            continue
-        result = fetch_cached(spec.pblntf_ty)
-        attempt, filtered, identity_mismatch_count = _attempt_for_list_query(company_id, spec, result)
-        attempts.append(attempt)
-        if identity_mismatch_count:
-            attempts.append(_identity_mismatch_list_attempt(company_id, spec, identity_mismatch_count))
+        filtered = inspect_kind(source_kind)
         if filtered:
-            chosen, lineage_original = _pick_latest_with_lineage(filtered)
-            candidates.append(SelectedFiling(
-                source_kind=spec.source_kind,
-                requirement=spec.requirement,
-                rcept_no=chosen.rcept_no,
-                report_nm=chosen.report_nm,
-                rcept_dt=chosen.rcept_dt,
-                lineage_original_rcept_no=lineage_original,
-            ))
+            append_latest(spec, filtered)
 
     selected = candidates[: c.MAX_RELATED_FILINGS]
     overflow = candidates[c.MAX_RELATED_FILINGS:]

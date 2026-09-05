@@ -454,7 +454,7 @@ def test_누적_재확인은_LINK_갈래만_탄다(monkeypatch) -> None:
 
     for 통장, 상한 in (
         ("user:friend@example.com", 3000.0),
-        ("user:admin@example.com", 5000.0),
+        ("user:admin@example.com", 50000.0),
         ("(열쇠 없음)", 0.0),
     ):
         paid_runtime._begin_paid_phase(
