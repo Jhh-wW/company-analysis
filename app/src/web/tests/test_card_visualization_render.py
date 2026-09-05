@@ -92,6 +92,47 @@ def test_card_kind_renders_section_content_card_without_arrows() -> None:
     assert 'class="report-visual flow-chart"' not in body
 
 
+def _v2_relation_report() -> Report:
+    relation_table = ReportTable(
+        caption="과제와 대응",
+        headers=["지금 겪는 과제", "회사가 밝힌 대응"],
+        rows=[
+            ["원가 부담", "공정 효율화"],
+            ["고객 집중", "판매처 다변화"],
+        ],
+        cite="[1]",
+        presentation="flow",
+    )
+    section = ReportSection(
+        cell="current_challenges",
+        title="당면 과제와 대응",
+        tables=[relation_table],
+        display_number="5",
+    )
+    return Report(
+        company="관계도렌더테스트",
+        job="",
+        corp_type="",
+        sections=[section],
+        citations=[Source(number=1, kind=SourceKind.OTHER, label="테스트 출처")],
+        grade=Grade.COMPLETE,
+        schema_version=ENGINE_V2_SCHEMA_VERSION,
+        summary_items=[SummaryItem(text=f"요약 문장 {i}입니다.") for i in range(1, 4)],
+    )
+
+
+def test_relation_pairs_kind_renders_two_circle_pairs_without_a_table() -> None:
+    body = _render(_v2_relation_report())
+
+    assert 'class="report-visual relation-chart"' in body
+    assert body.count('class="relation-pair"') == 2
+    assert body.count('class="relation-node relation-left"') == 2
+    assert body.count('class="relation-node relation-right"') == 2
+    assert body.count('class="relation-arrow" aria-hidden="true"') == 2
+    for value in ("원가 부담", "공정 효율화", "고객 집중", "판매처 다변화"):
+        assert value in body
+
+
 def _v2_portfolio_report() -> Report:
     """3장 — «제목 칸이 있는» 카드(제품마다 카드 1장)를 검증하는 최소 보고서."""
     card_table = ReportTable(

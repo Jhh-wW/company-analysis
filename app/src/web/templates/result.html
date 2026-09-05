@@ -98,6 +98,22 @@
   {% if visual.reading %}<p class="chart-reading">{{ visual.reading }}</p>{% endif %}
   <p class="chart-note">자료{{ ref(t.cite) }} · {{ visual.note }}</p>
   </figure>
+  {% elif visual and visual.kind == 'relation_pairs' %}
+  <figure class="report-visual relation-chart" aria-labelledby="{{ table_id }}-caption">
+  <figcaption class="cap" id="{{ table_id }}-caption">
+  {{ t.caption }}{{ ref(t.cite) }}
+  </figcaption>
+  <ol class="relation-rows" aria-label="{{ t.caption }}">
+  {% for pair in visual.pairs %}
+  <li class="relation-pair">
+  <span class="relation-node relation-left">{{ pair.left }}</span>
+  <span class="relation-arrow" aria-hidden="true"></span>
+  <span class="relation-node relation-right">{{ pair.right }}</span>
+  </li>
+  {% endfor %}
+  </ol>
+  <p class="chart-note">자료{{ ref(t.cite) }}</p>
+  </figure>
   {% elif visual and visual.kind == 'card' %}
   {# ★ 흐름표(경로표)인데 칸끼리 이어지지 않는 속성 나열(1·6·8장 등) —
      화살표 대신 이미 검증된 .section-content-card(라벨:값 카드)를
@@ -126,7 +142,7 @@
   </figcaption>
   <div class="flow-rows">
   {% for flow in visual.flows %}
-  <ol class="flow-row">
+  <ol class="flow-row"{% if flow|length >= 3 and flow|length <= 5 %} data-flow-style="chevron"{% endif %}>
   {% for value in flow %}
   <li><small>{{ t.headers[loop.index0] }}</small><span>{{ value }}</span></li>
   {% endfor %}
@@ -143,7 +159,7 @@
   </div>
   <div class="scroll" tabindex="0" role="region" aria-labelledby="{{ table_id }}-caption">
   <table class="{{ 'nums' if t.numeric else 'texts' }}" aria-labelledby="{{ table_id }}-caption">
-  <thead><tr>{% for h in t.headers %}<th scope="col">{{ h }}</th>{% endfor %}</tr></thead>
+  <thead class="report-table-head"><tr>{% for h in t.headers %}<th scope="col">{{ h }}</th>{% endfor %}</tr></thead>
   <tbody>
   {% for row in t.rows %}
   <tr>
@@ -240,6 +256,22 @@
   {% if visual.reading %}<p class="chart-reading">{{ visual.reading }}</p>{% endif %}
   <p class="chart-note">자료{{ ref(t.cite) }} · {{ visual.note }}</p>
   </figure>
+  {% elif visual and visual.kind == 'relation_pairs' %}
+  <figure class="report-visual relation-chart" aria-labelledby="{{ table_id }}-caption">
+  <figcaption class="cap" id="{{ table_id }}-caption">
+  {{ t.caption }}{{ ref(t.cite) }}
+  </figcaption>
+  <ol class="relation-rows" aria-label="{{ t.caption }}">
+  {% for pair in visual.flows %}
+  <li class="relation-pair">
+  <span class="relation-node relation-left">{{ pair[0] }}</span>
+  <span class="relation-arrow" aria-hidden="true"></span>
+  <span class="relation-node relation-right">{{ pair[1] }}</span>
+  </li>
+  {% endfor %}
+  </ol>
+  <p class="chart-note">자료{{ ref(t.cite) }}</p>
+  </figure>
   {% elif visual and visual.kind == 'card' %}
   <figure class="report-visual card-chart" aria-labelledby="{{ table_id }}-caption">
   <figcaption class="cap" id="{{ table_id }}-caption">
@@ -265,7 +297,7 @@
   </figcaption>
   <div class="flow-rows">
   {% for flow in visual.flows %}
-  <ol class="flow-row">
+  <ol class="flow-row"{% if flow|length >= 3 and flow|length <= 5 %} data-flow-style="chevron"{% endif %}>
   {% for value in flow %}
   <li><small>{{ t.headers[loop.index0] }}</small><span>{{ value }}</span></li>
   {% endfor %}
@@ -282,7 +314,7 @@
   </div>
   <div class="scroll" tabindex="0" role="region" aria-labelledby="{{ table_id }}-caption">
   <table class="{{ 'nums' if t.numeric else 'texts' }}" aria-labelledby="{{ table_id }}-caption">
-  <thead><tr>{% for h in t.headers %}<th scope="col">{{ h }}</th>{% endfor %}</tr></thead>
+  <thead class="report-table-head"><tr>{% for h in t.headers %}<th scope="col">{{ h }}</th>{% endfor %}</tr></thead>
   <tbody>
   {% for row in t.rows %}
   <tr>
@@ -486,7 +518,9 @@
        (test_survives_restart.py)이 "본문 <h2> 개수 == 9개 장" 을 그대로 세므로,
        리터럴 <h2> 태그를 더 늘리면 그 시험이 깨진다. 스크린리더에는 여전히
        레벨 2 제목으로 읽히므로 접근성 요구(회사명은 헤딩 요소)는 그대로 지킨다. -#}
-  <div class="report-masthead">
+  <div class="report-masthead"
+       data-report-title="{{ report.company }} 분석 보고서"
+       data-report-date="{% if report.as_of_date %}{{ report.as_of_date }} 기준{% elif report.generated_at %}{{ report.generated_at }} 기준{% endif %}">
     <p class="report-masthead-title" role="heading" aria-level="2">{{ masthead[0] }}</p>
     <p class="report-masthead-meta">{{ masthead[1] }}</p>
   </div>
@@ -512,7 +546,7 @@
   {% for block in projection.sections %}
     {% set sec = block.display %}
     <section class="report-section" data-report-cell="{{ sec.cell }}">
-      <h2><span class="no">{{ sec.display_number or loop.index }}</span><span class="txt">{{ sec.title }}</span>{% if sec.tag %}<span class="section-tag">{{ sec.tag }}</span>{% endif %}</h2>
+      <h2><span class="no">{{ sec.display_number or loop.index }}</span><span class="txt">{{ sec.title }}</span><span class="section-badge" aria-hidden="true"></span>{% if sec.tag %}<span class="section-tag">{{ sec.tag }}</span>{% endif %}</h2>
       {% for ordinal, paragraph in sec.paragraphs %}
       <p class="prose"><span class="pno" aria-hidden="true">{{ ordinal }}</span><span class="prose-text">{{ inline_refs(paragraph) }}</span></p>
       {% endfor %}
@@ -528,13 +562,13 @@
    같은 번호를 두 번 내지 않는 일도 봉인이 이미 끝냈다. #}
 {% if projection.citations %}
   <section class="report-support" aria-labelledby="report-citations-title">
-    <h2 id="report-citations-title"><span class="no">부록</span><span class="txt">출처와 검증 상태</span></h2>
+    <h2 id="report-citations-title"><span class="no">부록</span><span class="txt">출처와 검증 상태</span><span class="section-badge" aria-hidden="true"></span></h2>
     <p class="muted section-note">
       본문 문장 끝의 번호가 아래 원문을 가리킵니다. 표시된 문장은 모두 인용 원문 대조와 수치 검증을 거쳤습니다.
     </p>
     <div class="scroll report-scroll" tabindex="0" role="region" aria-labelledby="report-citations-title">
       <table class="texts" aria-labelledby="report-citations-title">
-        <thead><tr><th scope="col" style="width:56px">#</th><th scope="col">자료</th><th scope="col">기준일·자료 상태</th><th scope="col">사실 검증</th><th scope="col">원문 위치</th><th scope="col">본문 사용 장</th></tr></thead>
+        <thead class="report-table-head"><tr><th scope="col" style="width:56px">#</th><th scope="col">자료</th><th scope="col">기준일·자료 상태</th><th scope="col">사실 검증</th><th scope="col">원문 위치</th><th scope="col">본문 사용 장</th></tr></thead>
         <tbody>
           {% for c in projection.citations %}
           <tr id="src{{ c.number }}">
@@ -567,7 +601,7 @@
   {% set v2_sections = report.sections|sort(attribute='display_number') %}
   {% for s in v2_sections %}
     <section class="report-section" data-report-cell="{{ s.cell }}">
-      <h2><span class="no">{{ s.display_number or loop.index }}</span><span class="txt">{{ s.title }}</span>{% if s.tag %}<span class="section-tag">{{ s.tag }}</span>{% endif %}</h2>
+      <h2><span class="no">{{ s.display_number or loop.index }}</span><span class="txt">{{ s.title }}</span><span class="section-badge" aria-hidden="true"></span>{% if s.tag %}<span class="section-tag">{{ s.tag }}</span>{% endif %}</h2>
       {# ★ 문단 단위로 낸다. 예전에는 한 장의 문장을 «전부 이어 붙여» 한
          문단으로 냈다 — 진영 2장은 8문장이 줄바꿈 없이 한 덩어리였다.
          prose_paragraphs가 없으면(옛 저장본) 예전처럼 이어 붙인다.
@@ -608,7 +642,7 @@
 
 {% if public_citations %}
   <section class="report-support" aria-labelledby="report-citations-title">
-    <h2 id="report-citations-title"><span class="no">부록</span><span class="txt">출처와 검증 상태</span></h2>
+    <h2 id="report-citations-title"><span class="no">부록</span><span class="txt">출처와 검증 상태</span><span class="section-badge" aria-hidden="true"></span></h2>
     {# 과거 저장본 갈래에서는 「모두 검증을 거쳤다」고 말하지 않는다 — 이 화면은
        저장 당시 본문을 그대로 보여 줄 뿐 오늘의 검사를 다시 돌리지 않으므로,
        같은 화면의 읽기 전용 고지와 서로 어긋나는 단언이 된다. #}
@@ -617,7 +651,7 @@
     </p>
     <div class="scroll report-scroll" tabindex="0" role="region" aria-labelledby="report-citations-title">
       <table class="texts" aria-labelledby="report-citations-title">
-        <thead><tr><th scope="col" style="width:56px">#</th><th scope="col">자료</th><th scope="col">기준일·자료 상태</th><th scope="col">원문 위치</th><th scope="col">본문 사용 장</th></tr></thead>
+        <thead class="report-table-head"><tr><th scope="col" style="width:56px">#</th><th scope="col">자료</th><th scope="col">기준일·자료 상태</th><th scope="col">원문 위치</th><th scope="col">본문 사용 장</th></tr></thead>
         <tbody>
           {% set v2_seen = namespace(numbers=[]) %}
           {% for c in public_citations %}
@@ -676,7 +710,7 @@
         {% set heading_number = heading_parts[0] %}
         {% set heading_title = heading_parts[1] %}
       {% endif %}
-      <h2><span class="no">{{ heading_number }}</span><span class="txt">{{ heading_title }}</span>{% if s.tag %}<span class="section-tag">{{ s.tag }}</span>{% endif %}</h2>
+      <h2><span class="no">{{ heading_number }}</span><span class="txt">{{ heading_title }}</span><span class="section-badge" aria-hidden="true"></span>{% if s.tag %}<span class="section-tag">{{ s.tag }}</span>{% endif %}</h2>
       {% if s.is_filled %}
         {% set detail_blocks = section_content_blocks(report, s) %}
         {% if detail_blocks %}
@@ -714,13 +748,13 @@
 {# ── 출처 목록 — 본문 문장 뒤 번호가 여기를 가리킨다 #}
 {% if public_citations %}
   <section class="report-support" aria-labelledby="report-citations-title">
-    <h2 id="report-citations-title"><span class="no">부록</span><span class="txt">출처와 검증 상태</span></h2>
+    <h2 id="report-citations-title"><span class="no">부록</span><span class="txt">출처와 검증 상태</span><span class="section-badge" aria-hidden="true"></span></h2>
     <p class="muted section-note">
       본문의 번호가 아래 원문을 가리킵니다.
     </p>
     <div class="scroll report-scroll" tabindex="0" role="region" aria-labelledby="report-citations-title">
       <table class="texts" aria-labelledby="report-citations-title">
-        <thead><tr><th scope="col" style="width:56px">#</th><th scope="col">자료</th><th scope="col">기준일·자료 상태</th><th scope="col">사실 검증</th><th scope="col">원문 위치</th><th scope="col">본문 사용 장</th></tr></thead>
+        <thead class="report-table-head"><tr><th scope="col" style="width:56px">#</th><th scope="col">자료</th><th scope="col">기준일·자료 상태</th><th scope="col">사실 검증</th><th scope="col">원문 위치</th><th scope="col">본문 사용 장</th></tr></thead>
         <tbody>
           {% set source_numbers = namespace(seen=[]) %}
           {% for c in public_citations %}
@@ -768,7 +802,6 @@
 {% endif %}
 {% endif %}
 </article>
-
 <aside class="report-support ui-only" aria-label="보고서 이용 안내와 의견 보내기">
   <p class="frame-eyebrow">이용 안내</p>
   <p>중요한 판단 전에는 각 항목의 원출처를 함께 확인해 주세요. 이상한 부분을 발견하면 아래에서 알려주실 수 있습니다.</p>
