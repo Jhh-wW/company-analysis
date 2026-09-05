@@ -2718,6 +2718,30 @@ class RealPipeline:
                 )
             )
             if not generation_source_identity_digest:
+                # ★ 감사보고서만 내는 비상장사처럼 DART 재무 API가 세 사업연도 모두
+                #   «자료 없음(013)»을 답한 회사는 재무 도장이 비어 캐시 신원이 서지
+                #   않는다(2026-09-05 인이지 실측: financial_payload_digest=''). 그건
+                #   내부 계약 실패가 아니라 회사 자료의 실제 상태다. 공식 접수번호와
+                #   공식 자료 snapshot만으로 생성 신원을 만들고, 캐시 재사용은 그대로
+                #   막는다(build_identity.cache_usable=False가 캐시 열쇠를 거절한다).
+                #   run_pilot.fetch_financials는 013이 아닌 오류를 예외로 터뜨리므로
+                #   여기서 None은 «못 물어봄»이 아니라 «없음»이다.
+                generation_source_identity_digest = (
+                    source_identity.generation_digest_without_financials(
+                        official_evidence.source_snapshot_sha256
+                    )
+                )
+                if generation_source_identity_digest:
+                    steps.append(
+                        {
+                            "step": "6_수집_생성신원_재무자료없음",
+                            "설명": (
+                                "DART 재무 API가 자료 없음을 답해 재무 도장 없이 "
+                                "생성 신원을 만들었습니다. 캐시 재사용은 하지 않습니다."
+                            ),
+                        }
+                    )
+            if not generation_source_identity_digest:
                 return RunResult(
                     outcome=Outcome.GATE_STOPPED,
                     message=(

@@ -134,3 +134,36 @@ def test_FULL_캐시지문은_기본신원이나_공식자료를_확정못하면
     assert complete.cache_digest_with_official_snapshot("") == ""
     assert complete.cache_digest_with_official_snapshot("not-a-sha") == ""
     assert partial.cache_digest_with_official_snapshot("b" * 64) == ""
+
+
+def test_재무자료없음_생성신원은_접수번호와_공식snapshot으로만_선다():
+    """감사보고서만 내는 비상장사(2026-09-05 인이지)는 재무 도장이 비어도 생성은 된다."""
+
+    absent = ReportSourceIdentity(dart_receipt_numbers=("20260406001240",))
+
+    first = absent.generation_digest_without_financials("b" * 64)
+
+    assert len(first) == 64
+    assert first == absent.generation_digest_without_financials("b" * 64)
+    assert first != absent.generation_digest_without_financials("c" * 64)
+    # 캐시 재사용 열쇠는 그대로 비어 있어야 한다 — 재무 도장 없는 옛 보고서를 돌려주지 않는다.
+    assert absent.cache_usable is False
+    assert absent.cache_digest_with_official_snapshot("b" * 64) == ""
+
+
+def test_재무자료없음_생성신원은_재무도장이_있거나_접수번호나_snapshot이_없으면_비운다():
+    complete = ReportSourceIdentity(
+        dart_receipt_numbers=("20260406001240",),
+        financial_payload_digest="a" * 64,
+    )
+    absent = ReportSourceIdentity(dart_receipt_numbers=("20260406001240",))
+    nothing = ReportSourceIdentity()
+
+    assert complete.generation_digest_without_financials("b" * 64) == ""
+    assert absent.generation_digest_without_financials("") == ""
+    assert absent.generation_digest_without_financials("not-a-sha") == ""
+    assert nothing.generation_digest_without_financials("b" * 64) == ""
+    # 재무 도장이 있는 완전 신원의 FULL 지문과 절대 같지 않다.
+    assert complete.cache_digest_with_official_snapshot(
+        "b" * 64
+    ) != absent.generation_digest_without_financials("b" * 64)
