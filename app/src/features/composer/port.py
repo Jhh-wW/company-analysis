@@ -1195,13 +1195,25 @@ def _composition_projection(
     identity_columns = tuple(range(len(headers)))
     if len(headers) <= 2:
         return headers, rows, identity_rows, identity_columns
-    ratio_index = next(
-        (
-            index
-            for index in range(len(headers) - 1, 0, -1)
-            if any(hint in headers[index] for hint in _RATIO_HEADER_HINTS)
-        ),
-        None,
+    ratio_indices = tuple(
+        index
+        for index in range(1, len(headers))
+        if any(hint in headers[index] for hint in _RATIO_HEADER_HINTS)
+    )
+    year_ratio_indices = tuple(
+        (int(match.group(0)), index)
+        for index in ratio_indices
+        if (match := re.search(r"(?<!\d)20\d{2}(?!\d)", headers[index]))
+        is not None
+    )
+    # 연도가 명시된 표는 열 순서가 아니라 가장 큰 연도를 고른다. 연도가 없는
+    # 기존 표는 오른쪽 비중 열을 고르던 순서를 그대로 유지한다.
+    ratio_index = (
+        max(year_ratio_indices)[1]
+        if year_ratio_indices
+        else ratio_indices[-1]
+        if ratio_indices
+        else None
     )
     if ratio_index is None:
         return headers, rows, identity_rows, identity_columns
@@ -1305,9 +1317,14 @@ def composition_tables_from_raw(tables: Any) -> tuple[PerformanceTable, ...]:
         )
         if not rows:
             continue
+        caption = str(item.get("caption") or "")
+        if len(headers) == 2:
+            selected_year = re.search(r"(?<!\d)(20\d{2})(?!\d)", headers[1])
+            if selected_year is not None:
+                caption = f"{caption} ({selected_year.group(1)}년 비중)"
         out.append(
             PerformanceTable(
-                caption=str(item.get("caption") or ""),
+                caption=caption,
                 headers=headers,
                 rows=rows,
                 unit=str(item.get("display_unit") or ""),

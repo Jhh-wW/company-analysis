@@ -41,6 +41,7 @@ from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
 from src.features.composer.constants import (
     BUSINESS_FLOW_SECTION_ID,
+    CHALLENGE_FLOW_SECTION_ID,
     GRADE_CONFIRMED,
     GRADE_INTERPRETED,
     IDENTITY_TABLE_SECTION_ID,
@@ -109,6 +110,12 @@ def _composed() -> ComposedReport:
             # 2장 칸 이름은 화살표 흐름 도식(kind="flow")을 부른다.
             flow_rows = (
                 FlowRow(cells=("음악 자산", "음반", "구독", "반복 수익"), citations=("1",)),
+            )
+        if section_id == CHALLENGE_FLOW_SECTION_ID:
+            # 5장 짝 표는 원·선 관계도(kind="relation_pairs")를 부른다.
+            flow_rows = (
+                FlowRow(cells=("원가 부담", "공정 효율화"), citations=("1",)),
+                FlowRow(cells=("고객 집중", "판매처 다변화"), citations=("1",)),
             )
         sections.append(
             ComposedSection(
@@ -241,7 +248,7 @@ def _sealed_v2_report(
     scope: str = _장부_전용_범위,
     relationship: str = _장부_전용_관계,
 ) -> Report:
-    """봉인이 붙은 v2 보고서 — 도식 네 종류·3개년 띠·표지 띠·부록이 모두 있다."""
+    """봉인이 붙은 v2 보고서 — 도식 다섯 종류·3개년 띠·표지 띠·부록이 모두 있다."""
 
     report = _unsealed_v2_report(scope=scope, relationship=relationship)
     return replace(report, public_projection=build_public_projection(report))
@@ -421,7 +428,17 @@ def test_웹_v2_결과페이지는_전역_순수함수를_호출하지_않는다
     assert _visible(projection.summary[0].text) in visible
     assert _visible(projection.citations[0].label_display) in visible
     도식 = [visual for block in projection.sections for visual in block.display.visuals]
-    assert {visual.kind for visual in 도식} >= {"composition", "trend", "flow", "card"}
+    assert {visual.kind for visual in 도식} >= {
+        "composition",
+        "trend",
+        "flow",
+        "card",
+        "relation_pairs",
+    }
+    assert 'class="report-visual relation-chart"' in article
+    assert article.count('class="relation-pair"') == 2
+    for value in ("원가 부담", "공정 효율화", "고객 집중", "판매처 다변화"):
+        assert _visible(value) in visible
     for visual in 도식:
         if visual.reading:
             assert _visible(visual.reading) in visible

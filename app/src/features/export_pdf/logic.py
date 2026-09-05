@@ -84,6 +84,7 @@ from src.features.report_standard.visualization import (
     CardField,
     ChartPoint,
     ChartSeries,
+    RelationPair,
     TableVisualization,
     table_visualization,
 )
@@ -671,6 +672,102 @@ _FLOW_CHEVRON_MAX_STEPS: Final[int] = 5
 _FLOW_CHEVRON_BODY_HEIGHT_MM: Final[float] = 14.0
 _FLOW_CHEVRON_GAP_PT: Final[float] = 2.0
 _FLOW_CHEVRON_TIP_PT: Final[float] = 10.0
+
+# 관계도는 2~5행을 세로로 놓는다. 32mm 원과 4mm 간격이면 다섯 쌍도 A4
+# 본문 높이 안에 들어가며, 8.5pt 두 줄을 억지로 줄이지 않아도 된다.
+_RELATION_NODE_DIAMETER_MM: Final[float] = 32.0
+_RELATION_ROW_GAP_MM: Final[float] = 4.0
+_RELATION_NODE_PADDING_PT: Final[float] = 7.0
+_RELATION_ARROW_MARGIN_PT: Final[float] = 8.0
+_RELATION_ARROW_HEAD_PT: Final[float] = 4.0
+_RELATION_FONT_SIZE_PT: Final[float] = 8.5
+_RELATION_LEADING_PT: Final[float] = 10.5
+
+
+class _RelationGraphic(Flowable):
+    """5장 과제·대응을 왼쪽 원, 가는 화살표, 오른쪽 원으로 그린다."""
+
+    def __init__(self, visual: TableVisualization, width: float) -> None:
+        super().__init__()
+        self.visual = visual
+        self.pairs = visual.pairs or tuple(
+            RelationPair(left=row[0], right=row[1])
+            for row in visual.flows
+            if len(row) == 2
+        )
+        self.width = width
+        self.diameter = _RELATION_NODE_DIAMETER_MM * mm
+        self.row_gap = _RELATION_ROW_GAP_MM * mm
+        self.height = (len(self.pairs) * self.diameter) + (
+            max(0, len(self.pairs) - 1) * self.row_gap
+        )
+        self._text_style = ParagraphStyle(
+            "RelationNode",
+            fontName=constants.FONT_REGULAR,
+            fontSize=_RELATION_FONT_SIZE_PT,
+            leading=_RELATION_LEADING_PT,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor(constants.COLOR_INK),
+            wordWrap="CJK",
+        )
+
+    def wrap(self, avail_width: float, avail_height: float) -> tuple[float, float]:
+        self.width = min(self.width, avail_width)
+        return (self.width, self.height)
+
+    def _draw_node(
+        self, canvas: Canvas, center_x: float, center_y: float, text: str, *, filled: bool
+    ) -> None:
+        radius = self.diameter / 2
+        canvas.setFillColor(
+            colors.HexColor(constants.COLOR_SURFACE) if filled else colors.white
+        )
+        canvas.setStrokeColor(colors.HexColor(constants.COLOR_INK))
+        canvas.setLineWidth(1.0)
+        canvas.circle(center_x, center_y, radius, fill=1, stroke=1)
+
+        text_width = self.diameter - (_RELATION_NODE_PADDING_PT * 2)
+        body = Paragraph(_escape(text), self._text_style)
+        _, text_height = body.wrap(text_width, self.diameter)
+        body.drawOn(
+            canvas,
+            center_x - (text_width / 2),
+            center_y - (text_height / 2),
+        )
+
+    def _draw_arrow(
+        self, canvas: Canvas, left_center: float, right_center: float, center_y: float
+    ) -> None:
+        radius = self.diameter / 2
+        start = left_center + radius + _RELATION_ARROW_MARGIN_PT
+        end = right_center - radius - _RELATION_ARROW_MARGIN_PT
+        canvas.setStrokeColor(colors.HexColor(constants.COLOR_INK))
+        canvas.setLineWidth(1.0)
+        canvas.line(start, center_y, end, center_y)
+        canvas.line(
+            end,
+            center_y,
+            end - _RELATION_ARROW_HEAD_PT,
+            center_y + _RELATION_ARROW_HEAD_PT,
+        )
+        canvas.line(
+            end,
+            center_y,
+            end - _RELATION_ARROW_HEAD_PT,
+            center_y - _RELATION_ARROW_HEAD_PT,
+        )
+
+    def draw(self) -> None:
+        canvas = cast(Canvas, self.canv)
+        left_center = self.width * 0.25
+        right_center = self.width * 0.75
+        for index, pair in enumerate(self.pairs):
+            center_y = self.height - (self.diameter / 2) - (
+                index * (self.diameter + self.row_gap)
+            )
+            self._draw_node(canvas, left_center, center_y, pair.left, filled=False)
+            self._draw_arrow(canvas, left_center, right_center, center_y)
+            self._draw_node(canvas, right_center, center_y, pair.right, filled=True)
 
 
 class _FlowGraphic(Flowable):
@@ -1712,6 +1809,8 @@ def _add_report_visualization(
         graphic: Flowable = _CompositionGraphic(visual, width)
     elif visual.kind == "trend":
         graphic = _TrendGraphic(visual, width)
+    elif visual.kind == "relation_pairs":
+        graphic = _RelationGraphic(visual, width)
     elif visual.kind == "flow":
         graphic = _FlowGraphic(visual, table.headers, width)
     else:
@@ -2146,6 +2245,8 @@ def _add_projection_visualization(
         graphic: Flowable = _CompositionGraphic(chart, width)
     elif chart.kind == "trend":
         graphic = _TrendGraphic(chart, width)
+    elif chart.kind == "relation_pairs":
+        graphic = _RelationGraphic(chart, width)
     elif chart.kind == "flow":
         graphic = _FlowGraphic(chart, table.headers, width)
     else:

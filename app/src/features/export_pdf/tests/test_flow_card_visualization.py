@@ -20,12 +20,15 @@ from reportlab.platypus import Flowable, KeepTogether, SimpleDocTemplate, Table
 from src.features.export_pdf.logic import (
     _FLOW_MIN_ROW_HEIGHT_MM,
     _FlowGraphic,
+    _RelationGraphic,
+    _add_projection_visualization,
     _add_report_visualization,
     _register_fonts,
     _styles,
 )
 from src.features.pipeline.port import ReportTable
 from src.features.report_standard.visualization import table_visualization
+from src.shared.report_generation.public_projection import PublicTableBlock, PublicVisualBlock
 
 _register_fonts()
 
@@ -72,6 +75,17 @@ _CAUSAL_FLOW_TABLE = ReportTable(
     presentation="flow",
 )
 
+_RELATION_TABLE = ReportTable(
+    caption="과제와 대응",
+    headers=["지금 겪는 과제", "회사가 밝힌 대응"],
+    rows=[
+        ["원가 부담", "공정 효율화"],
+        ["고객 집중", "판매처 다변화"],
+    ],
+    cite="[1]",
+    presentation="flow",
+)
+
 
 def test_card_kind_renders_a_table_not_a_flow_graphic() -> None:
     visual = table_visualization(_CARD_TABLE)
@@ -104,6 +118,61 @@ def test_causal_flow_kind_still_uses_flow_graphic() -> None:
         "e2e 시험(test_e2e_offline.py)이 요구하는 class=\"flow-row\"와 대응하는 "
         "PDF 쪽 그림이 사라졌습니다"
     )
+
+
+def test_relation_pairs_kind_uses_relation_graphic_and_prints_exact_cells() -> None:
+    visual = table_visualization(_RELATION_TABLE)
+    assert visual is not None and visual.kind == "relation_pairs"
+
+    story: list[Flowable] = []
+    handled = _add_report_visualization(story, _RELATION_TABLE, _styles(), _WIDTH)
+    assert handled is True
+    assert any(isinstance(item, _RelationGraphic) for item in _flatten(story))
+
+    pdf = _render(story)
+    with pdfplumber.open(io.BytesIO(pdf)) as document:
+        text = "\n".join(page.extract_text() or "" for page in document.pages)
+
+    for row in _RELATION_TABLE.rows:
+        for cell in row:
+            assert cell in text
+
+
+def test_sealed_relation_pairs_flows_are_drawn_without_recalculation() -> None:
+    table = PublicTableBlock(
+        caption=_RELATION_TABLE.caption,
+        headers=tuple(_RELATION_TABLE.headers),
+        rows=tuple(tuple(row) for row in _RELATION_TABLE.rows),
+        cite=_RELATION_TABLE.cite,
+        numeric=False,
+        presentation="flow",
+        display_unit="",
+        manifest_ref="a" * 64,
+    )
+    visual = PublicVisualBlock(
+        table_index=0,
+        kind="relation_pairs",
+        caption=_RELATION_TABLE.caption,
+        unit="",
+        note="",
+        reading="",
+        items=(),
+        series=(),
+        flows=tuple(tuple(row) for row in _RELATION_TABLE.rows),
+        cards=(),
+    )
+    story: list[Flowable] = []
+
+    handled = _add_projection_visualization(story, table, visual, _styles(), _WIDTH)
+
+    assert handled is True
+    assert any(isinstance(item, _RelationGraphic) for item in _flatten(story))
+    pdf = _render(story)
+    with pdfplumber.open(io.BytesIO(pdf)) as document:
+        text = "\n".join(page.extract_text() or "" for page in document.pages)
+    for row in _RELATION_TABLE.rows:
+        for cell in row:
+            assert cell in text
 
 
 def test_card_prints_label_left_value_right_without_arrows() -> None:
