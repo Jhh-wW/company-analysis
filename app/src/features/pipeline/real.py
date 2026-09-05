@@ -137,6 +137,7 @@ from src.shared.report_evidence.legacy_fragment_kinds import (
 from src.shared.revenue_table_provenance import (
     revenue_row_evidence_matches,
     revenue_table_axis_matches,
+    revenue_table_section_id_from_caption,
     revenue_table_source_excerpt,
 )
 from src.shared.report_evidence.release_mode import (
@@ -3619,8 +3620,9 @@ class RealPipeline:
         tell("verify")
         # 구조화 표는 해당 장이 단독 소유한다. 같은 수치를 요약·다른 장에 복제하지 않는다.
         tables_by_section: dict[str, list[ReportTable]] = {}
-        if revenue_tables:
-            tables_by_section["business_model"] = [ReportTable(**table) for table in revenue_tables]
+        for table in revenue_tables:
+            section_id = revenue_table_section_id_from_caption(table.get("caption"))
+            tables_by_section.setdefault(section_id, []).append(ReportTable(**table))
 
         if performance_table is not None:
             tables_by_section["past_changes"] = [performance_table]
@@ -4326,7 +4328,7 @@ def _v2_ask_via_provider(
     ★ 예산 소진·billing-uncertain 차단은 «이 요청 전역» 장애다 — composer가
       문장 단위 실패로 삼키면 실제 원인이 «출고 검증 실패»로 오표기된다
       (실측 결함). AskFatalError로 감싸 던져 composer의 삼킴 지점들이
-      재전파하게 하고(_run_v2_composer가 다시 풀어 v1과 같은 FAILED로 끝낸다).
+      재전파하게 하고(_run_v2_composer가 다시 풀어 실행기의 전용 중단 분기로 보낸다).
     """
     # composer는 v2 전용이라 지연 import한다 — v1 경로의 module 적재 비용을
     # 바꾸지 않기 위해서다.
@@ -4898,7 +4900,7 @@ def _run_v2_composer(
             )
         # 그 밖의 요청 전역 장애(계정·원장·조정 실패)는 «출고 검증 실패»로
         # 오표기하지 않는다. 원인 예외를 그대로 다시 던져 v1과 같은 경로로
-        # run()의 바깥 except가 FAILED로 정직하게 끝내게 한다.
+        # run()의 바깥 경계를 지나 실행기가 예외 종류에 맞는 중단 결과로 분류하게 한다.
         raise exc.cause from exc
     except PublicManifestError:
         # 행 원문·표 변형·공개 manifest 결속이 깨진 것은 회사 자료 부족이

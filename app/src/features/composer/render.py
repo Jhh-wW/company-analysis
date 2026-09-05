@@ -97,6 +97,7 @@ from src.shared.report_quality.summary_binding import (
     summary_evidence_text,
     summary_verification_binding,
 )
+from src.shared.revenue_table_provenance import revenue_table_section_id_from_caption
 
 logger = logging.getLogger(__name__)
 
@@ -113,11 +114,6 @@ INTERPRETATION_MARKER: Final[str] = f" — {GRADE_INTERPRETED}"
 
 #: 실적표가 실리는 장 — 04장 3-4절: 「4장은 기존 실적표·차트 재사용」
 PERFORMANCE_TABLE_SECTION_ID: Final[str] = "past_changes"
-
-#: 매출 구성표가 붙는 장. v1이 `real.py`에서 business_model에 붙이는 것과
-#: 같은 자리다 — 두 경로가 다른 장에 붙으면 같은 회사 보고서가 채널마다
-#: 달라진다.
-COMPOSITION_TABLE_SECTION_ID: Final[str] = "business_model"
 
 #: 구성표의 기본 표시 방식. `report_standard/visualization.py`가 이 값과
 #: 표 모양을 함께 보고 100% 누적 막대를 그릴지 정한다.
@@ -998,11 +994,8 @@ def render_report(
         grade: 표지 등급. 평가 전 생성물을 완성으로 간주하지 않아 기본은 부분 완성이다.
         table_presentation: 원본 pipeline ReportTable.presentation을 넘기면
             기존 차트(trend·composition)가 그대로 재사용된다. 기본은 일반 표.
-        composition_tables: 2장에 실을 매출 구성표들(제품별·지역별 등). v1은 이
-            표들을 이미 만들어 business_model 장에 «전부» 붙이는데 v2 호출부가
-            넘기지 않아 «표도 도식도» 사라져 있었다(실측 결함 — 9장 중 4장
-            하나만 표를 받았다). 표는 여러 개일 수 있고 각각 도식이 함께 나간다
-            — 첫 표만 쓰지 않는다(설계 변경). 비어 있으면 표 없이
+        composition_tables: 제품 축은 3장, 지역 축은 2장에 실을 매출 구성표들.
+            표는 여러 개일 수 있고 각각 도식이 함께 나간다. 비어 있으면 표 없이
             간다(억지로 만들지 않는다).
         citation_style: 본문 인용 번호 표기 방식. `inline`은 문장마다 번호를
             붙이고(기존), `merged`는 해석 문장의 번호를 빼고 같은 출처가 이어지는
@@ -1181,9 +1174,8 @@ def render_report(
         tables: list[ReportTable] = []
         # ★ 설계 변경 — 「한 장에 표는 하나」라는 암묵적 단수
         #   가정을 걷어냈다. slots는 이 장에 실릴 «프로그램표»(실적/구성) 목록
-        #   이다 — 4장은 실적표 하나, 2장은 구성표가 여러 개(제품별·지역별)일
-        #   수 있다. 여기 흐름표(경로표)까지 «같은 장에 함께» 실릴 수 있다
-        #   (예: 2장 = 흐름표 + 구성표 2개).
+        #   이다 — 4장은 실적표 하나, 2장은 지역 구성표, 3장은 제품 구성표를
+        #   받을 수 있다. 여기 흐름표(경로표)까지 «같은 장에 함께» 실릴 수 있다.
         slots: list[tuple[PerformanceTable, str]] = []
         if (
             section.section_id == PERFORMANCE_TABLE_SECTION_ID
@@ -1191,13 +1183,15 @@ def render_report(
             and performance_table.rows
         ):
             slots.append((performance_table, table_presentation))
-        elif section.section_id == COMPOSITION_TABLE_SECTION_ID:
+        else:
             slots.extend(
                 (table, COMPOSITION_PRESENTATION)
                 for table in composition_tables
                 if table.rows
+                and revenue_table_section_id_from_caption(table.caption)
+                == section.section_id
             )
-        # 흐름표를 내는 장(1·2·5·6·7·8장). 예전에는 「프로그램표 자리를 이미
+        # 흐름표를 내는 장(1·2·3·5·6·7·8장). 예전에는 「프로그램표 자리를 이미
         # 쓴 장은 건너뛴다」(slot is None)는 배타 조건이 있었는데, 2장처럼
         # 구성표와 흐름표가 «함께» 실리는 장이 생겨 그 조건을 없앴다 — 흐름표를
         # 먼저 넣고 프로그램표를 뒤에 붙인다(목업이 요구하는 「흐름 → 구성」

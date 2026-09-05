@@ -45,6 +45,10 @@ REVENUE_CAPTION_BY_AXIS: Final[dict[RevenueAxis, str]] = {
     REVENUE_AXIS_PRODUCT: "무엇을 팔아 번 돈인가 — 제품·서비스별 매출 비중",
     REVENUE_AXIS_REGION: "어디서 번 돈인가 — 지역별 매출 비중",
 }
+REVENUE_TABLE_SECTION_BY_AXIS: Final[dict[RevenueAxis, str]] = {
+    REVENUE_AXIS_PRODUCT: "portfolio",
+    REVENUE_AXIS_REGION: "business_model",
+}
 
 REVENUE_ROW_PROVENANCE_SCHEMA: Final[str] = "revenue-table-row-provenance-v2"
 REVENUE_EXTRACTOR_NAME: Final[str] = "revenuemix.regex"
@@ -483,6 +487,22 @@ def revenue_text_axis(value: str) -> Optional[RevenueAxis]:
     """
 
     return _text_axis(value)
+
+
+def revenue_table_section_id(axis: object) -> str:
+    """제품·지역 매출표 축이 단독 소유하는 장 id를 돌려준다."""
+
+    if type(axis) is not str or axis not in REVENUE_TABLE_SECTION_BY_AXIS:
+        raise ValueError("매출 구성표의 제품·지역 축을 확인할 수 없습니다")
+    return REVENUE_TABLE_SECTION_BY_AXIS[axis]  # type: ignore[index]
+
+
+def revenue_table_section_id_from_caption(caption: object) -> str:
+    """검증된 공개 캡션에서 축을 읽어 같은 장 소유권 규칙을 적용한다."""
+
+    if type(caption) is not str:
+        raise ValueError("매출 구성표의 캡션이 문자열이 아닙니다")
+    return revenue_table_section_id(revenue_text_axis(caption))
 
 
 def revenue_table_axis_matches(

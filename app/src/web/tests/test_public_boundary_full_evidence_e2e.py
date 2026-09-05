@@ -870,9 +870,16 @@ def test_공개worker에서_매출원문_TYPED비교_FULL봉인_delivery재조�
     business = next(
         section for section in report.sections if section.cell == "business_model"
     )
-    composition_tables = [
+    portfolio = next(
+        section for section in report.sections if section.cell == "portfolio"
+    )
+    business_composition_tables = [
         table for table in business.tables if table.presentation == "composition"
     ]
+    portfolio_composition_tables = [
+        table for table in portfolio.tables if table.presentation == "composition"
+    ]
+    composition_tables = business_composition_tables + portfolio_composition_tables
     assert len(composition_tables) == 2
     assert all(table.headers == ["구분", "비중"] for table in composition_tables)
     assert all(len(table.rows) == 3 for table in composition_tables)
@@ -889,6 +896,8 @@ def test_공개worker에서_매출원문_TYPED비교_FULL봉인_delivery재조�
     region_table = next(
         table for table in composition_tables if "지역별" in table.caption
     )
+    assert portfolio_composition_tables == [product_table]
+    assert business_composition_tables == [region_table]
     assert product_table.rows == [
         ["제품가", "50.00%"],
         ["제품나", "30.00%"],

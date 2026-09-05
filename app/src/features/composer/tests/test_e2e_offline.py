@@ -656,11 +656,10 @@ def test_v2_보고서가_PDF_바이트와_요구_구조까지_도달한다(
     assert leaked == [], leaked
 
 
-def test_2장에_구성표_2개가_있어도_v2_출고_게이트를_통과해_PDF까지_나온다(
+def test_제품표는_3장_지역표는_2장에서_v2_출고_게이트와_PDF를_통과한다(
     engine: _JypFakeEngine,
 ) -> None:
-    """★★ 과제 2 — 「지역별 표를 2장에 붙이면 중복 검사 게이트가 걸려 PDF 출고가
-    막힌다」는 우려를 «추론»이 아니라 «실행 결과»로 확인한다.
+    """제품·지역 구성표를 각 소유 장에 붙여 실제 무과금 출고 경계를 확인한다.
 
     ★ 중복 검사 게이트의 실체 — `report_standard/publish.py:2900
     validate_publishable()`(그 안의 `_semantic_duplicate_key` 등 `[duplicate]`
@@ -677,9 +676,9 @@ def test_2장에_구성표_2개가_있어도_v2_출고_게이트를_통과해_PD
       `web/routers/reports.py:106-119 _report_for_output()`도 같은 분기다.
     ★ 이 시험은 그 사실을 «본다»가 아니라 «돌려서» 증명한다 — 실제로 검증이
       끝난 v2 Report(JYP 리허설, 다른 시험에서 이미 PDF까지 통과가 검증된
-      바로 그 보고서)의 2장에 구성표 2개(제품별·지역별, 서로 다른 캡션)를
-      심고, «프로덕션 진입점»(`validate_v2`·`pdf_release.prepare_pdf_release`)
-      을 monkeypatch 없이 그대로 통과시킨다.
+      바로 그 보고서)의 3장에 제품표, 2장에 지역표를 심고, «프로덕션 진입점»
+      (`validate_v2`·`pdf_release.prepare_pdf_release`)을 monkeypatch 없이
+      그대로 통과시킨다.
     """
     import copy
 
@@ -689,11 +688,13 @@ def test_2장에_구성표_2개가_있어도_v2_출고_게이트를_통과해_PD
     result = _run(engine)
     report = copy.deepcopy(result.report)
     사업장 = next(s for s in report.sections if s.cell == "business_model")
+    제품장 = next(s for s in report.sections if s.cell == "portfolio")
     assert 사업장.tables == [], "이 fixture는 원래 2장에 표가 없다 — 전제가 깨졌다"
+    assert 제품장.tables == [], "이 fixture는 원래 3장에 표가 없다 — 전제가 깨졌다"
 
     # 인용 부록에 영향을 안 주려고 cite를 비운다(이 시험의 관심사는 «중복
     # 검사 게이트»뿐이다 — 인용-부록 1:1은 다른 시험이 이미 지킨다).
-    사업장.tables.append(
+    제품장.tables.append(
         ReportTable(
             caption="2025년 제품별 매출 구성",
             headers=["구분", "비중"],
@@ -713,6 +714,9 @@ def test_2장에_구성표_2개가_있어도_v2_출고_게이트를_통과해_PD
             presentation="composition",
         )
     )
+
+    assert [table.caption for table in 제품장.tables] == ["2025년 제품별 매출 구성"]
+    assert [table.caption for table in 사업장.tables] == ["2025년 지역별 매출 구성"]
 
     # ── 마디 1: v2 출고 게이트(validate_v2) — 예외가 나면 이 시험이 실패한다
     validate_v2(report)  # 예외를 던지지 않아야 통과다
