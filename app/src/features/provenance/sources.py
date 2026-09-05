@@ -27,6 +27,7 @@ from dataclasses import dataclass, field, replace
 from datetime import date
 from enum import Enum
 
+from src.core.news_intake_switch import news_intake_enabled
 from src.features.provenance.constants import OTHER_DATE_PREFIX, SOURCES_HEADER
 from src.shared.official_ir import (
     IR_METADATA_VERIFICATION_VALUE,
@@ -949,6 +950,26 @@ def is_canonical_official_with_registry(
         source.is_canonical_official
         and has_valid_provenance_seal(source)
         and not official_domain_attestation_problem(source, sources)
+    )
+
+
+def is_publishable_supplementary(
+    source: Source, registry: list[Source] | tuple[Source, ...]
+) -> bool:
+    """공개 산문 인용·부록에만 쓸 수 있는 봉인된 언론 보도인가."""
+
+    return bool(
+        news_intake_enabled()
+        and type(source) is Source
+        and source in registry
+        and source.provenance_role == "citation"
+        and source.kind is SourceKind.NEWS
+        and source.is_valid
+        and source.publisher.strip()
+        and source.title.strip()
+        and source.url.strip()
+        and _url_identity_is_bound(source)
+        and has_valid_provenance_seal(source)
     )
 
 

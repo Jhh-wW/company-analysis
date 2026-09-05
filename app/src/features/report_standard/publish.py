@@ -1811,7 +1811,10 @@ def _fact_problems(
                 f"[causality] {fact.fact_id}: causal_evidence가 결속된 원문 근거에 없습니다"
             )
     problems.extend(_numeric_problems(fact))
-    if fact.section_owner == "competitive_position":
+    if (
+        fact.section_owner == "competitive_position"
+        and fact.claim_type == "competitive_comparison"
+    ):
         comparison_fields = (
             fact.comparison_target,
             fact.comparison_definition,
@@ -1982,6 +1985,28 @@ def _fact_problems(
                 report_as_of,
             )
         )
+    if fact.claim_type == "stated_differentiator":
+        company_subject = _corporate_name(fact.legal_entity)
+        claim_subject = _corporate_name(fact.claim)
+        if not company_subject or not claim_subject.startswith(company_subject):
+            problems.append(
+                f"[differentiator] {fact.fact_id}: 회사 법인명이 문장의 주어여야 합니다"
+            )
+        if not _ISO_DATE.fullmatch(str(fact.source_date or "").strip()):
+            problems.append(
+                f"[differentiator] {fact.fact_id}: 발표일·출처 날짜가 필요합니다"
+            )
+        if source is None or _corporate_name(source.publisher) != company_subject:
+            problems.append(
+                f"[differentiator] {fact.fact_id}: 회사가 발행한 공식 출처가 필요합니다"
+            )
+        if any(
+            term in fact.claim
+            for term in ("우위", "열위", "더 낫", "경쟁력이 높", "경쟁력이 낮")
+        ):
+            problems.append(
+                f"[differentiator] {fact.fact_id}: 회사 선언에 작성자의 우열 판단을 섞을 수 없습니다"
+            )
     return problems
 
 
@@ -3020,11 +3045,20 @@ def build_published_report(report: Report) -> Report:
             report.as_of_date,
         )
         used_fact_ids.update(supported)
+        public_title = (
+            "회사가 밝힌 차별점"
+            if spec.section_id == "competitive_position"
+            and any(
+                facts[fact_id].claim_type == "stated_differentiator"
+                for fact_id in supported
+            )
+            else spec.title
+        )
         published_sections.append(
             replace(
                 section,
                 cell=spec.section_id,
-                title=spec.title,
+                title=public_title,
                 display_number=spec.display_number,
                 tag=spec.tag,
                 fact_ids=supported,

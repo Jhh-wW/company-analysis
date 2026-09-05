@@ -85,6 +85,11 @@ SLOT_DESCRIPTIONS: Final[dict[str, str]] = {
     "culture:work_principle": "전사 공통 가치와 행동 원칙",
     "culture:verified_case": "공식 자료로 확인되는 실제 조직 사례",
     "competitive_position:self_context": "시장 맥락 속 자사의 구체적 강점",
+    # 9장 재정의(2026-09-06): 회사가 공식 자료에서 스스로 밝힌 차별점. 진위·우열 판단이 아니라
+    # 「회사가 그렇게 밝혔다」는 문장만 해당한다.
+    "competitive_position:stated_differentiator": (
+        "회사가 공식 자료에서 스스로 밝힌 차별점(최초·유일·최다·1위·최대·독자 개발·특허 등, 주어는 회사)"
+    ),
 }
 
 ASSIGNMENTS_KEY: Final[str] = "assignments"

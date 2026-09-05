@@ -27,8 +27,10 @@ from src.shared.report_evidence.constants import (
     SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT,
     SOURCE_KIND_DART_QUARTERLY_REPORT,
     SOURCE_KIND_DART_SEMIANNUAL_REPORT,
+    SOURCE_KIND_NEWS,
     SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE,
     SOURCE_KIND_ROBOTS_TXT,
+    SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS,
     SourceRequirement,
     SourceTier,
 )
@@ -37,6 +39,9 @@ from src.shared.report_evidence.source_kind_policy import (
     FORMAL_DOCUMENT_SLOT_IDS_BY_SOURCE_KIND,
     FORMAL_DOCUMENT_TRUST_BY_SOURCE_KIND,
     FORMAL_DOCUMENT_WRITER_TRUST_BY_SOURCE_KIND,
+    SUPPLEMENTARY_SLOT_IDS_BY_SOURCE_KIND,
+    SUPPLEMENTARY_TRUST_BY_SOURCE_KIND,
+    SUPPLEMENTARY_WRITER_TRUST,
     formal_source_writer_ineligibility_reason,
 )
 
@@ -117,6 +122,49 @@ def test_닫힌종류목록과_슬롯소유권표가_빠짐없이_같다() -> No
     assert FORMAL_ATTEMPT_SOURCE_KINDS - FORMAL_DOCUMENT_SOURCE_KINDS == {
         SOURCE_KIND_ROBOTS_TXT
     }
+
+
+def test_보조종류표_세개는_formal과_겹치지_않고_뉴스한종류로_닫힌다() -> None:
+    assert SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS == {SOURCE_KIND_NEWS}
+    assert frozenset(SUPPLEMENTARY_SLOT_IDS_BY_SOURCE_KIND) == (
+        SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS
+    )
+    assert frozenset(SUPPLEMENTARY_TRUST_BY_SOURCE_KIND) == (
+        SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS
+    )
+    assert frozenset(SUPPLEMENTARY_WRITER_TRUST) == (
+        SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS
+    )
+    assert not FORMAL_DOCUMENT_SOURCE_KINDS & SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS
+
+
+def test_뉴스보조슬롯은_산문만_허용하고_정체성_수치_비교칸을_제외한다() -> None:
+    slots = SUPPLEMENTARY_SLOT_IDS_BY_SOURCE_KIND[SOURCE_KIND_NEWS]
+
+    assert {
+        "identity:business_definition",
+        "portfolio:product_role",
+        "past_changes:completed_execution",
+        "operations_partners:partnership",
+        "culture:leadership",
+        "competitive_position:stated_differentiator",
+    } <= slots
+    assert {
+        "identity:corporate_identity",
+        "business_model:regional_mix",
+        "past_changes:historical_performance",
+        "competitive_position:comparison_target",
+        "competitive_position:comparison_metric",
+        "competitive_position:comparison_basis",
+        "competitive_position:comparison_judgment",
+    }.isdisjoint(slots)
+    assert SUPPLEMENTARY_TRUST_BY_SOURCE_KIND[SOURCE_KIND_NEWS] == frozenset(
+        {(SourceTier.TIER_SUPPLEMENTARY, SourceRequirement.OPTIONAL)}
+    )
+    assert SUPPLEMENTARY_WRITER_TRUST[SOURCE_KIND_NEWS] == (
+        SourceTier.TIER_SUPPLEMENTARY,
+        SourceRequirement.OPTIONAL,
+    )
 
 
 def test_연결감사보고서는_감사보고서와_같은_슬롯과_등급의_OPTIONAL문서다() -> None:

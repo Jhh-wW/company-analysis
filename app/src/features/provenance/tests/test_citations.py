@@ -10,6 +10,7 @@ import datetime as dt
 
 import pytest
 
+from src.core import news_intake_switch
 from src.features.provenance.citations import build_citations
 from src.features.provenance.sources import (
     Source,
@@ -45,6 +46,72 @@ def test_실제_뉴스_원문에서_보도일과_도메인이_정확히_나온�
 def test_뉴스_라벨은_제목까지만_쓴다():
     [source] = build_citations({1: {"종류": "뉴스", "원문": 실제_뉴스_원문}}, filing=None, collected_on=수집일)
     assert source.label == "파마리서치, 하반기 리쥬란 교육…확대"
+
+
+def test_typed_뉴스는_prefix_대신_문서_메타데이터를_보존한다(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+    monkeypatch.setenv(news_intake_switch.NEWS_INTAKE_ENV_NAME, "1")
+    try:
+        [source] = build_citations(
+            {
+                7: {
+                    "종류": "뉴스",
+                    "원문": "prefix가 없는 보존 원문",
+                    "출처": "https://news.example.com/articles/n-7",
+                    "문서일": "2026-08-30",
+                    "발행처": "예시경제",
+                    "문서명": "회사의 신규 사업을 다룬 기사",
+                    "문서ID": "n-7",
+                    "원문위치": "본문 2문단",
+                }
+            },
+            filing=None,
+            collected_on=수집일,
+        )
+    finally:
+        news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+
+    assert source.kind is SourceKind.NEWS
+    assert source.published_at == "2026-08-30"
+    assert source.publisher == "예시경제"
+    assert source.title == "회사의 신규 사업을 다룬 기사"
+    assert source.url == "https://news.example.com/articles/n-7"
+    assert source.document_id == "n-7"
+    assert source.location == "본문 2문단"
+    assert source.domain == source.host == "news.example.com"
+
+
+def test_스위치OFF면_추가_메타가_있어도_legacy_prefix_결과를_유지한다(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+    monkeypatch.delenv(news_intake_switch.NEWS_INTAKE_ENV_NAME, raising=False)
+    try:
+        [source] = build_citations(
+            {
+                5: {
+                    "종류": "뉴스",
+                    "원문": 실제_뉴스_원문,
+                    "출처": "https://news.example.com/legacy",
+                    "문서일": "2026-08-30",
+                    "발행처": "새 언론사",
+                    "문서명": "새 제목",
+                    "문서ID": "legacy",
+                    "원문위치": "새 위치",
+                }
+            },
+            filing=None,
+            collected_on=수집일,
+        )
+    finally:
+        news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+
+    assert source.label == "파마리서치, 하반기 리쥬란 교육…확대"
+    assert source.published_at == "2025-03-12"
+    assert source.publisher == "mk.co.kr"
+    assert source.location == "기사 제목·본문 요약"
 
 
 def test_출처미상이면_도메인을_비운다():

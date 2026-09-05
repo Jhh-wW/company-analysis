@@ -309,6 +309,70 @@ def test_정상_양사공식원문은_동일조건_비교사실을_만든다() -
         assert fact_errors == [], fact_errors
 
 
+def test_v2_bridge는_회사선언만_있어도_9장_프로그램근거를_만든다() -> None:
+    from src.features.company_comparison.v2_bridge import (
+        attach_comparison_program_evidence,
+    )
+    from src.features.company_comparison.official_sources import (
+        OfficialCandidateSentence,
+    )
+    from src.features.composer.quality_projection import (
+        _sentence_fact_id,
+        _valid_fact_registries,
+    )
+    from src.features.provenance.sources import exact_evidence_text_hash
+
+    evidence = "당사는 세계 최초로 초정밀 센서를 독자 개발했습니다."
+    source = seal_collected_source(
+        replace(
+            _official_source(evidence),
+            provenance_seal="",
+            exact_evidence_hashes=[exact_evidence_text_hash(evidence)],
+        )
+    )
+    result = build_competitive_position(
+        _report(evidence),
+        self_bundle=OfficialCompanyBundle(
+            corp_code="00000001",
+            company_name="주식회사 알파",
+            financials=None,
+            filing=None,
+            official_text="",
+        ),
+        catalog=(),
+        fetch_comparator=lambda _record: None,
+        collected_on="2026-08-22",
+        official_candidate_sentences=(OfficialCandidateSentence(source, evidence),),
+        candidate_source_registry=(source,),
+    )
+    competitive = next(
+        packet
+        for packet in attach_comparison_program_evidence(
+            _v2_packet_set_for_bridge(), result
+        ).packets
+        if packet.section_id == "competitive_position"
+    )
+    assert competitive.program_evidence is not None
+    assert {fact.claim_slot for fact in competitive.program_evidence.facts} == {
+        "competitive_position:stated_differentiator",
+        "competitive_position:limitation",
+    }
+    assert not any(
+        fact.claim_type == "competitive_comparison"
+        for fact in competitive.program_evidence.facts
+    )
+    assert {
+        fact.claim_type for fact in competitive.program_evidence.facts
+    } == {"stated_differentiator"}
+    by_id, by_key = _valid_fact_registries(competitive.program_evidence.facts)
+    assert {
+        _sentence_fact_id(
+            "competitive_position", sentence, by_id=by_id, by_key=by_key
+        )
+        for sentence in competitive.program_evidence.sentences
+    } == {fact.fact_id for fact in competitive.program_evidence.facts}
+
+
 def test_DART_list에_reprt_code가_없어도_연차선택_내부표식으로_비교한다() -> None:
     def actual_list_shape(bundle: OfficialCompanyBundle) -> OfficialCompanyBundle:
         filing = dict(bundle.filing or {})

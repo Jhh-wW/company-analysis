@@ -1084,7 +1084,7 @@ def _matching_pairs(
     return pairs
 
 
-def build_competitive_position(
+def _build_official_comparison(
     report: Report,
     *,
     self_bundle: OfficialCompanyBundle,
@@ -1576,4 +1576,75 @@ def build_competitive_position(
         facts=tuple(facts),
         sources=tuple(sources_by_id.values()),
         candidates=candidates,
+    )
+
+
+def build_competitive_position(
+    report: Report,
+    *,
+    self_bundle: OfficialCompanyBundle,
+    catalog: Iterable[DartCompanyRecord],
+    fetch_comparator: Callable[[DartCompanyRecord], OfficialCompanyBundle | None],
+    collected_on: str,
+    max_comparators: int = MAX_COMPARATORS,
+    official_candidate_sentences: Iterable[OfficialCandidateSentence] = (),
+    candidate_source_registry: Sequence[Source] = (),
+) -> ComparisonBuildResult:
+    """회사 자기 선언을 필수 축으로, 동일 조건 비교를 선택 축으로 만든다."""
+
+    from src.features.company_comparison.stated_differentiator import (
+        build_stated_differentiator_result,
+    )
+
+    candidate_sentences = tuple(official_candidate_sentences)
+    source_registry = tuple(candidate_source_registry)
+    stated = build_stated_differentiator_result(
+        company_name=self_bundle.company_name or report.company,
+        official_candidate_sentences=candidate_sentences,
+        candidate_source_registry=source_registry,
+    )
+    try:
+        comparison = _build_official_comparison(
+            report,
+            self_bundle=self_bundle,
+            catalog=catalog,
+            fetch_comparator=fetch_comparator,
+            collected_on=collected_on,
+            max_comparators=max_comparators,
+            official_candidate_sentences=candidate_sentences,
+            candidate_source_registry=source_registry,
+        )
+    except ComparisonBlockedError:
+        if stated is None:
+            raise
+        return ComparisonBuildResult(
+            section=stated.section,
+            facts=stated.facts,
+            sources=stated.sources,
+            candidates=(),
+        )
+    if stated is None:
+        # 구버전 직접 호출은 동일 조건 비교 생산물을 계속 검사할 수 있다. 실제
+        # 파이프라인 부착 경계는 아래 결과에 자기 선언 fact가 없으면 9장을 막는다.
+        return comparison
+
+    sources_by_id = {
+        source.source_id: source
+        for source in (*stated.sources, *comparison.sources)
+    }
+    return ComparisonBuildResult(
+        section=replace(
+            stated.section,
+            prose_lines=[
+                *stated.section.prose_lines,
+                *comparison.section.prose_lines,
+            ],
+            fact_ids=[
+                *stated.section.fact_ids,
+                *comparison.section.fact_ids,
+            ],
+        ),
+        facts=(*stated.facts, *comparison.facts),
+        sources=tuple(sources_by_id.values()),
+        candidates=comparison.candidates,
     )

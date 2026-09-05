@@ -423,6 +423,8 @@ def assess_packet_document_sources(
     hashes_by_identity: dict[str, set[str]] = {}
     for packet in packets.packets:
         for fragment in packet.fragments:
+            if fragment.counts_toward_document_floor is False:
+                continue
             identity = fragment.document_identity.strip()
             if not identity:
                 continue

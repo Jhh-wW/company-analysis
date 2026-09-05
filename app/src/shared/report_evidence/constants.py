@@ -22,6 +22,7 @@ SOURCE_KIND_DART_QUARTERLY_REPORT: Final[str] = "dart_quarterly_report"
 SOURCE_KIND_OFFICIAL_WEB_PAGE: Final[str] = "official_web_page"
 SOURCE_KIND_OFFICIAL_RECRUIT_PAGE: Final[str] = "official_recruit_page"
 SOURCE_KIND_OFFICIAL_IR_PDF: Final[str] = "official_ir_pdf"
+SOURCE_KIND_NEWS: Final[str] = "news"
 #: DART root와 다른 등록 도메인이지만, 실제 HTML에서 DART 법인명과
 #: 사업자/법인등록번호를 함께 재검증한 보조 공식 페이지. 기존
 #: ``official_web_page``(DART root 계열 REQUIRED)와 타입을 나눠
@@ -47,6 +48,13 @@ FORMAL_DOCUMENT_SOURCE_KINDS: Final[frozenset[str]] = frozenset(
         SOURCE_KIND_DART_QUARTERLY_REPORT,
         *OFFICIAL_WEB_SOURCE_KINDS,
     }
+)
+
+# 언론 보도는 공개 산문의 인용·부록에만 쓰는 보조 문서다. 공식 문서 목록과
+# 합치면 숫자·표·회사 정체성·동일조건 비교까지 채울 수 있으므로 별도 닫힌
+# 목록으로 둔다.
+SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS: Final[frozenset[str]] = frozenset(
+    {SOURCE_KIND_NEWS}
 )
 
 # 「그 출처 전체를 아예 확인할 수 없었다」는 site-probe 게이트 시도의
@@ -95,6 +103,7 @@ class SourceTier(str, Enum):
     TIER_1_OFFICIAL = "TIER_1_OFFICIAL"
     TIER_2_PUBLIC = "TIER_2_PUBLIC"
     TIER_3_TRUSTED = "TIER_3_TRUSTED"
+    TIER_SUPPLEMENTARY = "TIER_SUPPLEMENTARY"
 
 
 class ReportExecutionOutcome(str, Enum):

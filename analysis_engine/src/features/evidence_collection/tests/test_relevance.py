@@ -241,7 +241,13 @@ def test_금융업_어휘를_넣어도_제조업_공시의_기존_배정은_그�
         if section_id == "past_changes":
             # historical_performance는 구조화 실적기 몫이라 원문 채점 대상이 아니다.
             continue
-        assert set(required_slot_ids) <= filled.get(section_id, set()), section_id
+        relevance_owned = set(required_slot_ids) - {
+            # 닫힌 회사 주어·선언 표지는 app의 공식 Source 등록부까지 본 뒤
+            # 결정론적으로 승격한다. relevance.py에는 회사 신원이 없으므로
+            # 이 슬롯을 키워드로 흉내 내지 않는다.
+            "competitive_position:stated_differentiator",
+        }
+        assert relevance_owned <= filled.get(section_id, set()), section_id
 
 
 def test_제조업_제품_문단은_여전히_portfolio_제품역할로_간다() -> None:

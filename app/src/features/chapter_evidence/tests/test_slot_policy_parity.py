@@ -55,10 +55,6 @@ _EXPECTED_SECTION_IDS: tuple[str, ...] = (
 #: 다른 두 값이 겹쳐 어느 쪽을 믿을지 모호해진다.
 _INJECTED_ONLY_SLOT_IDS: tuple[str, ...] = (
     "past_changes:historical_performance",
-    "competitive_position:comparison_target",
-    "competitive_position:comparison_metric",
-    "competitive_position:comparison_basis",
-    "competitive_position:comparison_judgment",
     "competitive_position:limitation",
 )
 

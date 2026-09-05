@@ -153,6 +153,10 @@ class _FixtureMessages(_JypFakeMessages):
         return super()._route(prompt)
 
     def _reclassify_payload(self, prompt: str) -> dict[str, object]:
+        # 9장 재정의 뒤에는 자기 선언 차별점이 없는 회사의 9장도 재판정 대상이 된다.
+        # 3장이 빈 장 목록에 없으면(9장만 묻는 프롬프트) 배정 없음으로 답한다.
+        if "portfolio:product_role" not in prompt:
+            return {"assignments": [], "removals": []}
         product_id = _candidate_id_containing(prompt, _PRODUCT_SENTENCES[0])
         revenue_id = _candidate_id_containing(prompt, _REVENUE_SENTENCES[0])
         accounting_id = _candidate_id_containing(prompt, _ACCOUNTING_BOILERPLATE)
@@ -524,9 +528,11 @@ def test_스위치ON이면_재판정뒤_3장이_READY이고_SHADOW로_끝까지_
     ), observations.reclassify
     assert "portfolio" in preflight.decision.ready_section_ids
     assert preflight.dart_partial_fallback is True
+    # 9장 재정의(자기 선언 차별점 필수) 뒤 감사보고서만 있는 회사는 9장이 미달이라
+    # 「준비된 장이 있는 부분 보고서」 사유로 내려간다.
     assert (
         preflight.dart_partial_reason
-        == DART_PARTIAL_REASON_TOO_FEW_DOCUMENTS_FOR_FULL
+        == DART_PARTIAL_REASON_INSUFFICIENT_WITH_READY_SECTIONS
     )
     assert result.report is not None
     assert parse_release_mode(result.report.release_mode) is ReleaseMode.SHADOW
@@ -661,6 +667,10 @@ def test_문지기만으로_3장이_READY면_재판정을_호출하지_않는다
     )
     assert "portfolio" in preflight.decision.ready_section_ids
     measured = observations.reclassify[-1]
-    assert measured["after"] == measured["before"]
-    assert measured["step"] is None
-    assert engine.client.messages.reclassify_calls == 0
+    # 3장은 문지기만으로 READY라 빈 장 목록에 없다. 9장(자기 선언 차별점 없음)만
+    # 재판정을 묻고, 배정이 없으니 3장 결과는 그대로다.
+    step = measured["step"]
+    assert isinstance(step, dict), step
+    assert step["빈장"] == ["competitive_position"]
+    assert step["채택"] == 0
+    assert engine.client.messages.reclassify_calls == 1

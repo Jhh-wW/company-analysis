@@ -2336,7 +2336,7 @@ def test_verified_sections_one_to_eight_publish_as_basic_report_without_comparis
     assert published.grade is Grade.PARTIAL
     assert len(published.sections) == 8
     assert published.shortfall_reasons
-    assert "9장 동종업계 비교" in published.shortfall_reasons[0]
+    assert "자기 선언형 차별점" in published.shortfall_reasons[0]
 
 
 def test_comparison_axes_must_equal_the_context_recomputed_from_both_sources() -> None:

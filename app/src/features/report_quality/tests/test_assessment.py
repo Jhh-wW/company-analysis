@@ -61,6 +61,7 @@ from src.shared.report_quality.comparison_claims import (
     comparison_target_claim,
 )
 from src.shared.report_quality.comparison_evidence import comparison_shared_context
+from src.shared.report_quality.constants import STATED_DIFFERENTIATOR_CLAIM_TYPE
 from src.shared.report_quality.generation import (
     assert_observation_matches_assessment,
     observe_generation,
@@ -534,16 +535,27 @@ def _valid_comparison_context_fact(
 
 
 def _candidate_with_all_public_claim_types() -> ReportCandidate:
-    """실제 공개 5종과 완전한 비교 프로그램을 포함한 정상 v3 후보."""
+    """실제 공개 6종과 완전한 비교 프로그램을 포함한 정상 v3 후보."""
 
-    candidate = _full_candidate()
+    candidate = _full_candidate(
+        {
+            section_id: (
+                3
+                if section_id == "identity"
+                else 7
+                if section_id == "competitive_position"
+                else 5
+            )
+            for section_id in STRICT_REQUIRED_QUALITY_SECTION_IDS
+        }
+    )
     facts = {fact.fact_id: fact for fact in candidate.facts}
     comparator = facts["identity-full-fact-1"]
     competitive = [
-        facts[f"competitive_position-full-fact-{index}"] for index in range(6)
+        facts[f"competitive_position-full-fact-{index}"] for index in range(7)
     ]
     profitability = _valid_profitability_comparison_fact(
-        competitive[5],
+        competitive[6],
         comparator=comparator,
     )
     metric_summary = comparison_metric_summary(
@@ -581,7 +593,7 @@ def _candidate_with_all_public_claim_types() -> ReportCandidate:
     )
     contexts = tuple(
         _valid_comparison_context_fact(
-            competitive[index + 1],
+            competitive[index + 2],
             base=profitability,
             comparator=comparator,
             slot=slot,
@@ -595,6 +607,13 @@ def _candidate_with_all_public_claim_types() -> ReportCandidate:
         )
     )
     replacements = {
+        competitive[1].fact_id: replace(
+            competitive[1],
+            claim_type=STATED_DIFFERENTIATOR_CLAIM_TYPE,
+            claim_slot="competitive_position:stated_differentiator",
+            claim="주식회사 알파는 세계 최초 센서를 독자 개발했다고 밝혔다.",
+            legal_entity="주식회사 알파",
+        ),
         "identity-full-fact-0": replace(
             facts["identity-full-fact-0"],
             claim_type=INTERPRETATION_CLAIM_TYPE,
@@ -903,8 +922,8 @@ def test_FULL_정상9장은_필수의미칸과_장당3문장을_모두통과한�
     assert result.quality.grade is QualityGrade.COMPLETE
 
 
-def test_FULL의_생산_claim_type_5종은_닫힌계약으로_정상통과한다() -> None:
-    """일반 산문·해석·실적·비교·비교맥락이 실제 v2 composer 공개 종류다."""
+def test_FULL의_생산_claim_type_6종은_닫힌계약으로_정상통과한다() -> None:
+    """일반 산문·해석·실적·비교·비교맥락·회사차별점이 공개 종류다."""
 
     candidate = _candidate_with_all_public_claim_types()
 

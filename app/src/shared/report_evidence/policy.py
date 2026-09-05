@@ -59,10 +59,7 @@ REQUIRED_EVIDENCE_SLOTS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
     ),
     "competitive_position": (
         "competitive_position:self_context",
-        "competitive_position:comparison_target",
-        "competitive_position:comparison_metric",
-        "competitive_position:comparison_basis",
-        "competitive_position:comparison_judgment",
+        "competitive_position:stated_differentiator",
         "competitive_position:limitation",
     ),
 }
@@ -72,10 +69,6 @@ REQUIRED_EVIDENCE_SLOTS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
 INJECTED_EVIDENCE_SLOTS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
     "past_changes": ("past_changes:historical_performance",),
     "competitive_position": (
-        "competitive_position:comparison_target",
-        "competitive_position:comparison_metric",
-        "competitive_position:comparison_basis",
-        "competitive_position:comparison_judgment",
         "competitive_position:limitation",
     ),
 }

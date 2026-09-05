@@ -453,9 +453,9 @@ WIDE_PRIORITY_HOST_KEYWORDS: Final[tuple[str, ...]] = (
 #:   `REQUIRED_EVIDENCE_SLOTS_BY_SECTION`에서 `INJECTED_EVIDENCE_SLOTS_BY_SECTION`
 #:   을 뺀 값과 정확히 같다(실측). 정본이 바뀌면 이 사본도 다시 대조해야 한다.
 #: ★ `composer/constants.py`의 `CLAIM_SLOTS_BY_SECTION`과는 다른 목록이다.
-#:   `competitive_position:self_context`는 composer 목록에 없는 새 슬롯으로,
-#:   자사 강점·시장 내 위치를 회사 스스로 서술한 페이지 전용이다 — 비교
-#:   슬롯 5개는 이 수집기가 만들지 않는다(구조화 검증기가 다른 소스에서 별도 주입).
+#:   competitive_position은 자사 맥락과 회사가 밝힌 차별점 원문을 받는다.
+#:   차별점은 회사 신원·공식 Source 등록부를 확인한 뒤 결정론적으로 승격하며,
+#:   동일 조건 비교 슬롯은 실제 비교 자료가 있을 때만 별도 구조화 검증기가 붙인다.
 WIDE_REQUIRED_SLOT_IDS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
     "identity": ("identity:corporate_identity", "identity:business_definition"),
     "business_model": (
@@ -472,8 +472,11 @@ WIDE_REQUIRED_SLOT_IDS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
         "operations_partners:operating_role",
     ),
     "culture": ("culture:work_principle", "culture:verified_case"),
-    #: composer 목록에 없는 새 슬롯 — 자사 서술 원문 전용, 하나뿐이다.
-    "competitive_position": ("competitive_position:self_context",),
+    #: 자사 맥락과 회사가 공식 자료에서 밝힌 차별점 원문.
+    "competitive_position": (
+        "competitive_position:self_context",
+        "competitive_position:stated_differentiator",
+    ),
 }
 
 #: 위 dict을 평탄화한 전체 슬롯 목록(중복 없음) — attempt.slot_ids 참고·검증용.
