@@ -11,6 +11,9 @@
 
 from __future__ import annotations
 
+import pytest
+
+import src.features.composer.constants as composer_constants
 from src.features.composer.constants import (
     CITATION_RULES_GUIDE,
     SECTION_GUIDES,
@@ -68,6 +71,27 @@ def test_인용_규칙에_장_참조_지침이_있다():
     """값을 복사하지 말고 «그 장을 가리키라»는 규칙."""
     assert "다른 장이 소유한" in CITATION_RULES_GUIDE
     assert "장 참조" in CITATION_RULES_GUIDE
+
+
+@pytest.mark.parametrize("revenue_table_v2", [False, True])
+def test_원단위_금액_금지_규칙은_수익표_스위치와_무관하게_프롬프트에_실린다(
+    monkeypatch: pytest.MonkeyPatch,
+    revenue_table_v2: bool,
+):
+    monkeypatch.setattr(
+        composer_constants,
+        "revenue_table_v2_enabled",
+        lambda: revenue_table_v2,
+    )
+
+    for section_id in SECTION_IDS:
+        prompt = build_section_prompt(
+            "가나다전자(주)", section_id, _fragments(), None
+        )
+
+        assert "금액은 억원(또는 조원) 단위 표시값으로만 쓴다" in prompt
+        assert "원 단위 전체 자릿수" in prompt
+        assert "원문이 원 단위면 억원으로 직접 환산하지 말고" in prompt
 
 
 def test_소유_경계가_실제_프롬프트에_실린다():
