@@ -8,6 +8,11 @@ from typing import Final, Mapping
 
 from src.shared.final_gate_diagnostics import (
     FINAL_GATE_DIAGNOSTIC_COLUMNS,
+    FINAL_GATE_DIAGNOSTIC_CORP_CODE_LENGTH,
+    FINAL_GATE_DIAGNOSTIC_LEGACY_COLUMNS,
+    FINAL_GATE_DIAGNOSTIC_LEGACY_SCHEMA_VERSION,
+    FINAL_GATE_DIAGNOSTIC_MAX_COMPANY_LENGTH,
+    FINAL_GATE_DIAGNOSTIC_MAX_END_STEP_LENGTH,
     FINAL_GATE_DIAGNOSTIC_SCHEMA_VERSION,
     FINAL_GATE_DIAGNOSTIC_TABLE,
     SAFE_FINAL_GATE_REASONS,
@@ -23,9 +28,7 @@ class FinalGateEvidenceError(RuntimeError):
     """최종 게이트 행이 lifecycle·종료값과 정확히 결속되지 않았다."""
 
 
-def validate_table_if_present(conn: sqlite3.Connection) -> bool:
-    """표가 있으면 exact schema를 검사하고, 없으면 생성하지 않는다."""
-
+def _table_columns(conn: sqlite3.Connection) -> frozenset[str] | None:
     exists = (
         conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
@@ -34,16 +37,66 @@ def validate_table_if_present(conn: sqlite3.Connection) -> bool:
         is not None
     )
     if not exists:
-        return False
-    columns = frozenset(
+        return None
+    return frozenset(
         str(row[1])
         for row in conn.execute(
             f"PRAGMA table_info({FINAL_GATE_DIAGNOSTIC_TABLE})"
         )
     )
-    if columns != FINAL_GATE_DIAGNOSTIC_COLUMNS:
-        raise FinalGateEvidenceError("최종 게이트 진단 표 필드가 다릅니다")
-    return True
+
+
+def validate_table_if_present(conn: sqlite3.Connection) -> bool:
+    """표가 있으면 exact schema를 검사하고, 없으면 생성하지 않는다."""
+
+    columns = _table_columns(conn)
+    if columns is None:
+        return False
+    if columns == FINAL_GATE_DIAGNOSTIC_LEGACY_COLUMNS:
+        return True
+    if columns == FINAL_GATE_DIAGNOSTIC_COLUMNS:
+        return True
+    raise FinalGateEvidenceError("최종 게이트 진단 표 필드가 다릅니다")
+
+
+def _validate_schema_bound_metadata(
+    *,
+    columns: frozenset[str],
+    schema_version: object,
+    metadata: tuple[object, ...],
+) -> None:
+    if type(schema_version) is not int:
+        raise FinalGateEvidenceError("지원하지 않는 최종 게이트 진단 형식입니다")
+    if columns == FINAL_GATE_DIAGNOSTIC_LEGACY_COLUMNS:
+        if schema_version != FINAL_GATE_DIAGNOSTIC_LEGACY_SCHEMA_VERSION:
+            raise FinalGateEvidenceError("지원하지 않는 최종 게이트 진단 형식입니다")
+        return
+    if schema_version == FINAL_GATE_DIAGNOSTIC_LEGACY_SCHEMA_VERSION:
+        if any(str(value) for value in metadata):
+            raise FinalGateEvidenceError("v1 최종 게이트 진단에 v2 필드가 있습니다")
+        return
+    if schema_version != FINAL_GATE_DIAGNOSTIC_SCHEMA_VERSION:
+        raise FinalGateEvidenceError("지원하지 않는 최종 게이트 진단 형식입니다")
+
+    corp_code, confirmed_company, end_step = map(str, metadata)
+    if (
+        len(corp_code) != FINAL_GATE_DIAGNOSTIC_CORP_CODE_LENGTH
+        or not corp_code.isascii()
+        or not corp_code.isdigit()
+    ):
+        raise FinalGateEvidenceError("최종 게이트 진단 회사 고유번호가 올바르지 않습니다")
+    if (
+        not confirmed_company
+        or confirmed_company != " ".join(confirmed_company.split())
+        or len(confirmed_company) > FINAL_GATE_DIAGNOSTIC_MAX_COMPANY_LENGTH
+    ):
+        raise FinalGateEvidenceError("최종 게이트 진단 확정 회사명이 올바르지 않습니다")
+    if (
+        not end_step
+        or end_step != end_step.strip()
+        or len(end_step) > FINAL_GATE_DIAGNOSTIC_MAX_END_STEP_LENGTH
+    ):
+        raise FinalGateEvidenceError("최종 게이트 진단 종료 단계가 올바르지 않습니다")
 
 
 def read_bound_reason(
@@ -57,9 +110,18 @@ def read_bound_reason(
     """종료값별 행 존재성과 lifecycle 시각을 한 SQLite snapshot에서 검사한다."""
 
     table_exists = validate_table_if_present(conn)
+    columns = _table_columns(conn) if table_exists else None
+    selected_columns = (
+        "run_id, schema_version, reason_code, recorded_at"
+        if columns == FINAL_GATE_DIAGNOSTIC_LEGACY_COLUMNS
+        else (
+            "run_id, schema_version, reason_code, recorded_at, "
+            "corp_code, confirmed_company, end_step"
+        )
+    )
     rows = (
         conn.execute(
-            f"SELECT run_id, schema_version, reason_code, recorded_at "
+            f"SELECT {selected_columns} "
             f"FROM {FINAL_GATE_DIAGNOSTIC_TABLE} WHERE run_id=?",
             (run_id,),
         ).fetchall()
@@ -84,14 +146,16 @@ def read_bound_reason(
     schema_version = row[1]
     reason_code = str(row[2])
     recorded_at = str(row[3])
+    metadata = tuple(row[4:])
     lifecycle_at = str(lifecycle_record.get("at", ""))
     if stored_run_id != run_id:
         raise FinalGateEvidenceError("최종 게이트 진단 실행 번호가 lifecycle과 다릅니다")
-    if (
-        type(schema_version) is not int
-        or schema_version != FINAL_GATE_DIAGNOSTIC_SCHEMA_VERSION
-    ):
-        raise FinalGateEvidenceError("지원하지 않는 최종 게이트 진단 형식입니다")
+    assert columns is not None
+    _validate_schema_bound_metadata(
+        columns=columns,
+        schema_version=schema_version,
+        metadata=metadata,
+    )
     if reason_code not in SAFE_FINAL_GATE_REASONS:
         raise FinalGateEvidenceError("허용되지 않은 최종 게이트 사유입니다")
     try:

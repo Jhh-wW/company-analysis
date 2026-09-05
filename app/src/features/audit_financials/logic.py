@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import date
@@ -11,6 +12,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
 from src.features.audit_financials.constants import (
+    AUDIT_REPORT_STATEMENT_SOURCE,
     DIAGNOSTIC_AMOUNT_NOT_FOUND,
     DIAGNOSTIC_METRIC_NOT_FOUND,
     DIAGNOSTIC_STATEMENT_NOT_FOUND,
@@ -495,6 +497,25 @@ def _evidence(candidate: _StatementCandidate) -> AuditEvidence:
     )
 
 
+def _row_evidence_payload(
+    evidence: AuditEvidence, headers: list[str], raw_row: list[str]
+) -> str:
+    """공개 행의 원수치와 실제 감사보고서 span 지문을 한 payload로 잠근다."""
+
+    return json.dumps(
+        {
+            "row": dict(zip(headers, raw_row)),
+            "source": AUDIT_REPORT_STATEMENT_SOURCE,
+            "source_excerpt": evidence.excerpt,
+            "source_location": evidence.location,
+            "source_sha256": evidence.text_hash,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def _attempt_candidate(candidate: _StatementCandidate, *, cite: str) -> _Attempt:
     header = candidate.search_text[: _metric_anchor(candidate.search_text)]
     unit = _extract_unit(header)
@@ -539,12 +560,13 @@ def _attempt_candidate(candidate: _StatementCandidate, *, cite: str) -> _Attempt
 
     scope_value = "consolidated" if candidate.scope == "연결" else "separate"
     closing_month = KOREAN_MONTHS[selected_periods[0].end.month]
+    headers = ["사업연도", *metrics]
     table = AuditPerformanceTable(
         caption=(
             f"전자공시 최근 두 사업연도 {candidate.scope} 주요 실적 "
             f"(결산월: {closing_month}, 단위: {DISPLAY_UNIT})"
         ),
-        headers=["사업연도", *metrics],
+        headers=headers,
         rows=rows,
         cite=cite,
         numeric=True,
@@ -552,7 +574,9 @@ def _attempt_candidate(candidate: _StatementCandidate, *, cite: str) -> _Attempt
         scale_divisor=f"{divisor:.0f}",
         scale_places=DISPLAY_PLACES,
         display_unit=DISPLAY_UNIT,
-        evidence_rows=[evidence.excerpt for _ in rows],
+        evidence_rows=[
+            _row_evidence_payload(evidence, headers, raw_row) for raw_row in raw_rows
+        ],
         entity_scope=scope_value,
         raw_unit=unit,
     )

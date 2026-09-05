@@ -2601,6 +2601,135 @@ def test_blocked_호스트는_IR_시도_0회(monkeypatch):
 # ── IR PDF 위임 ───────────────────────────────────────────
 
 
+def _collect_fake_ir_fragment_document(monkeypatch, *, cover_text: str):
+    from src.shared.official_ir import IR_ATTACHMENT_URL_FIELD
+
+    company_id = "00126380"
+    company_name = "가나다전자"
+    root_url = "https://company.example/"
+    ir_url = "https://company.example/ir/cover-date.pdf"
+    attestation_id, attestation_evidence = dart_profile_attestation_material(
+        profile={
+            "status": "000",
+            "corp_code": company_id,
+            "corp_name": company_name,
+            "hm_url": root_url,
+        },
+        corp_code=company_id,
+        company_name=company_name,
+    )
+
+    def fake_collect_ir(homepage_url, **_kwargs):
+        if homepage_url != root_url:
+            return OfficialIrCollectResult(
+                state="none", fragments=[], downloaded_pdf_bytes=0
+            )
+        return OfficialIrCollectResult(
+            state="ok",
+            fragments=[
+                {
+                    "종류": "공식 IR",
+                    "원문": cover_text,
+                    "출처": ir_url,
+                    IR_ATTACHMENT_URL_FIELD: ir_url,
+                    "문서ID": "same-host-ir-cover-date",
+                    "문서명": "IR 실적 발표 자료",
+                    "원문위치": "PDF p.1 1문단 · pypdf 6.16.1",
+                }
+            ],
+            downloaded_pdf_bytes=100,
+        )
+
+    monkeypatch.setattr(wide_collect, "collect_official_ir_fragments", fake_collect_ir)
+    pages = {
+        "https://company.example/robots.txt": _page(
+            ROBOTS_ALLOW_ALL,
+            "https://company.example/robots.txt",
+            "text/plain",
+        ),
+        "https://company.example/sitemap.xml": _missing(
+            "https://company.example/sitemap.xml"
+        ),
+        root_url: _page(
+            _body("가나다전자는 장비를 제조해 기업 고객에게 판매합니다."),
+            root_url,
+        ),
+    }
+    result = collect_official_web_documents(
+        company_id=company_id,
+        company_name=company_name,
+        root_homepage_url=root_url,
+        collected_at="2026-09-05",
+        domain_attestation_source_id=attestation_id,
+        domain_attestation_evidence=attestation_evidence,
+        root_identity_verification_required=False,
+        transport=_FakeWideSite(pages).transport,
+        ir_html_fetch=_no_ir,
+        ir_pdf_fetch=_no_ir_pdf,
+    )
+    document = next(doc for doc in result.documents if doc.canonical_url == ir_url)
+    return company_id, result, document
+
+
+def test_링크메타가_없는_IR은_앞쪽표지의_발행일과_기간으로_writer가_된다(
+    monkeypatch,
+):
+    from src.shared.official_ir import IR_METADATA_VERIFICATION_VALUE_COVER
+
+    company_id, result, document = _collect_fake_ir_fragment_document(
+        monkeypatch,
+        cover_text=(
+            "가나다전자 2025년 4분기 실적 발표 발행일 2026.03.12 "
+            "기업 고객에게 장비를 판매해 매출을 얻습니다."
+        ),
+    )
+
+    assert document.published_on == "2026-03-12"
+    assert document.reporting_period == "2025-Q4"
+    assert document.ir_metadata_verification == IR_METADATA_VERIFICATION_VALUE_COVER
+    assert document.requirement == "REQUIRED"
+    assert document.source_tier == "TIER_1_OFFICIAL"
+    assert build_fragments(document, company_id=company_id)
+    envelope = to_evidence_mappings(
+        result=result,
+        fragments=build_fragments_for_collection(result),
+    )
+    diagnostic_row = next(
+        row
+        for row in envelope["documents"]
+        if row["document_id"] == document.document_id
+    )
+    assert (
+        diagnostic_row["ir_metadata_verification"]
+        == IR_METADATA_VERIFICATION_VALUE_COVER
+    )
+    assert not any(
+        attempt.reason_code == "official_ir_writer_metadata_incomplete"
+        for attempt in result.attempts
+    )
+
+
+def test_무표식_날짜가_둘인_IR표지는_기존사유와_조각0개를_유지한다(monkeypatch):
+    company_id, result, document = _collect_fake_ir_fragment_document(
+        monkeypatch,
+        cover_text=(
+            "가나다전자 2025년 4분기 실적 발표 2026.03.12 수정 2026.03.13 "
+            "기업 고객에게 장비를 판매해 매출을 얻습니다."
+        ),
+    )
+
+    assert not document.published_on
+    assert not document.reporting_period
+    assert not document.ir_metadata_verification
+    assert document.requirement == "OPTIONAL"
+    assert document.source_tier == "TIER_3_TRUSTED"
+    assert build_fragments(document, company_id=company_id) == ()
+    assert any(
+        attempt.reason_code == "official_ir_writer_metadata_incomplete"
+        for attempt in result.attempts
+    )
+
+
 def test_공식_HTML_exact_외부_IR첨부는_낮은신뢰_provenance만_남기고_슬롯을_못채운다(
     monkeypatch,
 ):
@@ -2797,7 +2926,9 @@ def test_공식host_IR도_날짜와_기간이_없으면_provenance_only로_격�
     )
 
 
-def test_실제_IR_parser는_URL의_ir글자와_무관하게_본문의_여러장슬롯을_살린다():
+def test_실제_IR_parser는_URL의_ir글자와_무관하게_본문의_여러장슬롯을_살린다(
+    monkeypatch,
+):
     """실제 HTML→PDF parser 결과를 URL 힌트가 과거·미래 장으로 자르지 않는다."""
 
     import io
@@ -2809,6 +2940,16 @@ def test_실제_IR_parser는_URL의_ir글자와_무관하게_본문의_여러장
     from reportlab.pdfgen.canvas import Canvas
 
     from src.features.homepage.ir_pdf import FetchedIrHtml, FetchedIrPdf
+    from src.shared.official_ir import IR_METADATA_VERIFICATION_VALUE
+
+    def fail_cover_metadata(_pages):
+        raise AssertionError("anchor 메타데이터가 있으면 표지 폴백을 부르면 안 됩니다")
+
+    monkeypatch.setattr(
+        wide_collect,
+        "extract_official_ir_cover_metadata",
+        fail_cover_metadata,
+    )
 
     company_id = "00126380"
     company_name = "Example Company"
@@ -2894,6 +3035,7 @@ def test_실제_IR_parser는_URL의_ir글자와_무관하게_본문의_여러장
     assert ir_document.canonical_url == pdf_url
     assert ir_document.requirement == "REQUIRED"
     assert ir_document.source_tier == "TIER_1_OFFICIAL"
+    assert ir_document.ir_metadata_verification == IR_METADATA_VERIFICATION_VALUE
     wide_fragments = build_fragments_for_collection(result)
     ir_fragments = [
         fragment

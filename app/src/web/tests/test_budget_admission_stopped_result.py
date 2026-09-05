@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import uuid
 
@@ -34,7 +35,7 @@ def _job(job_id: str | None = None) -> job_runtime.Job:
             address="서울",
             ceo="",
             founded="",
-            ref="budget-test-company",
+            ref="00126380",
         ),
     )
 
@@ -68,6 +69,7 @@ def test_본조사_예약거절은_pipeline_provider를_부르기_전에_끝난�
 
 def test_본조사_예약거절은_새_사유와_AI비용_0원으로_기록된다(
     monkeypatch,
+    caplog,
 ) -> None:
     job = _job("budget-admission-denied")
 
@@ -78,6 +80,7 @@ def test_본조사_예약거절은_새_사유와_AI비용_0원으로_기록된�
 
     monkeypatch.setattr(job_runtime, "_run_pipeline_worker", _denied)
     monkeypatch.setattr(job_runtime, "_release_run_slot", lambda _bucket: None)
+    caplog.set_level(logging.WARNING, logger=job_runtime.__name__)
 
     asyncio.run(job_runtime._run_job(job))
 
@@ -110,7 +113,19 @@ def test_본조사_예약거절은_새_사유와_AI비용_0원으로_기록된�
     assert final_record.end_step == obs.END_STEP_GATE
     assert final_record.cost_krw == 0.0
     assert diagnostic is not None
+    assert diagnostic.corp_code == "00126380"
+    assert diagnostic.confirmed_company == "예산시험회사"
+    assert diagnostic.end_step == obs.END_STEP_GATE
     assert diagnostic.reason_code == FINAL_GATE_REASON_START_BUDGET_RESERVATION_DENIED
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == job_runtime.__name__
+        and record.getMessage().startswith("조사 실패를 기록했습니다")
+    ] == [
+        "조사 실패를 기록했습니다 corp_code=00126380 company=예산시험회사 "
+        f"reason_code={FINAL_GATE_REASON_START_BUDGET_RESERVATION_DENIED}"
+    ]
 
 
 def test_본조사_예약거절_화면은_오늘예산과_자정_행동만_안내한다() -> None:

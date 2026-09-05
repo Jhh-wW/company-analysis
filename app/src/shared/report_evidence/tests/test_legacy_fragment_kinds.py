@@ -39,6 +39,11 @@ from src.shared.report_evidence.legacy_fragment_kinds import (
     sections_for_legacy_fragment_kind,
     validate_legacy_fragment_kind_ownership,
 )
+from src.shared.revenue_table_provenance import (
+    REVENUE_AXIS_PRODUCT,
+    REVENUE_AXIS_REGION,
+    revenue_table_section_id,
+)
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[5]
@@ -149,6 +154,11 @@ def test_실제_CELL_SOURCES가_보내는_DART종류의_semantic장을_정본이
 
 
 def test_정확한_종류별_장_소유행렬을_고정한다() -> None:
+    revenue_sections = {
+        revenue_table_section_id(REVENUE_AXIS_PRODUCT),
+        revenue_table_section_id(REVENUE_AXIS_REGION),
+        "operations_partners",
+    }
     expected = {
         "사업내용": {
             "identity",
@@ -170,7 +180,7 @@ def test_정확한_종류별_장_소유행렬을_고정한다() -> None:
         },
         "특수관계자": {"operations_partners"},
         "판관비": {"past_changes"},
-        "매출수주": {"business_model", "operations_partners"},
+        "매출수주": revenue_sections,
         "신규사업전망": {"future_strategy"},
         "시장점유율": {"competitive_position"},
         "소송·분쟁": {"current_challenges"},

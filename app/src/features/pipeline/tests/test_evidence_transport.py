@@ -51,6 +51,7 @@ from src.shared.report_evidence.legacy_fragment_kinds import (
 from src.shared.report_evidence.constants import (
     FORMAL_DOCUMENT_SOURCE_KINDS,
     SOURCE_KIND_DART_BUSINESS_REPORT,
+    SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT,
     SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE,
     SOURCE_KIND_OFFICIAL_IR_PDF,
     SOURCE_KIND_OFFICIAL_RECRUIT_PAGE,
@@ -68,6 +69,11 @@ from src.shared.report_evidence.source_kind_policy import (
 from src.shared.report_quality.source_identity import (
     collected_document_identity,
     document_identity_from_parts,
+)
+from src.shared.revenue_table_provenance import (
+    REVENUE_AXIS_PRODUCT,
+    REVENUE_AXIS_REGION,
+    revenue_table_section_id,
 )
 
 
@@ -315,6 +321,23 @@ def test_실제_9번칸의_매출수주와_연구개발은_운영파트너packet
 
     operation_ids = {fragment.fragment_id for fragment in operations.fragments}
     assert expected_ids <= operation_ids
+
+
+def test_매출수주는_제품표와_지역표의_소유_장_packet에도_남는다() -> None:
+    frags = _all_legacy_frags()
+    fragment_id = next(
+        number
+        for number, raw in frags.items()
+        if raw["종류"] == LEGACY_KIND_REVENUE_AND_ORDERS
+    )
+
+    assert _sections_containing(_build(frags), fragment_id) == frozenset(
+        {
+            revenue_table_section_id(REVENUE_AXIS_PRODUCT),
+            revenue_table_section_id(REVENUE_AXIS_REGION),
+            "operations_partners",
+        }
+    )
 
 
 def test_typed는_공식IR_legacy_소유표가_아닌_봉인된_장에만_간다() -> None:
@@ -579,6 +602,21 @@ def test_typed_DART는_접수번호와_URL이_같은_문서일때만_받는다()
     with pytest.raises(EvidenceTransportError) as caught:
         _build(frags)
     assert caught.value.detail_code == FINAL_GATE_DETAIL_PREFLIGHT_PACKET_INVALID
+
+
+def test_typed_연결감사보고서는_DART접수번호_문서신원을_유지한다() -> None:
+    raw = _typed_raw_for_formal_kind(
+        SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT
+    )
+    frags = _all_legacy_frags()
+    frags[99] = raw
+
+    fragment = _fragment_by_id(_build(frags), 99)
+
+    assert fragment.document_identity == f"document:dart.fss.or.kr:{_RCEPT_NO}"
+    assert fragment.source_document_id == (
+        f"{SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT}:{_RCEPT_NO}"
+    )
 
 
 def test_미등록_kind는_별도_닫힌_사유로_실패한다() -> None:
