@@ -14,6 +14,7 @@
   - 그 계약의 «이름»은 새 이름 ``render-portfolio-link-v1``
   - typed DART 수집기는 실제 문서로 검증된 적이 없어 출시에서 끄고 간다
             (환경변수를 아예 «선언하지 않는» 것이 off다)
+  - 근거 재판정도 운영 검증 전이므로 같은 방식으로 끄고 간다
 """
 
 from __future__ import annotations
@@ -34,6 +35,8 @@ EXPECTED_RUNTIME_CONTRACT = "render-portfolio-link-v1"
 EXPECTED_RELEASE_MODE = "FULL"
 #: 출시에서 선언하지 않는 kill switch 이름.
 TYPED_COLLECTOR_ENV_NAME = "TYPED_DART_COLLECTOR"
+#: AI 근거 재판정 kill switch 이름. 선언하지 않는 것이 off다.
+EVIDENCE_RECLASSIFY_ENV_NAME = "EVIDENCE_RECLASSIFY"
 #: 1단계 매출표 범용 파서 kill switch 이름. 이것도 선언하지 않는 것이 off다.
 REVENUE_TABLE_V2_ENV_NAME = "REVENUE_TABLE_V2"
 
@@ -101,6 +104,16 @@ def test_TYPED_DART_COLLECTOR는_render_yaml에_없다() -> None:
     )
 
 
+def test_EVIDENCE_RECLASSIFY는_render_yaml에_없다() -> None:
+    """운영 검증 전인 AI 근거 재판정을 출시와 함께 켜지 않는다."""
+
+    render_values = _render_web_service_env()
+
+    assert EVIDENCE_RECLASSIFY_ENV_NAME not in render_values, (
+        "출시 릴리스는 근거 재판정을 끈 채로 나갑니다 — 검증 뒤 별도로 결정합니다"
+    )
+
+
 def test_REVENUE_TABLE_V2는_render_yaml에_정확히_1로_켜져_있다() -> None:
     """1단계 매출표 범용 파서·3장 카드 안내문을 출시에서 켠다.
 
@@ -123,6 +136,7 @@ def test_deploy_readme가_새_kill_switch를_적어_둔다() -> None:
     readme = (REPOSITORY_ROOT / "deploy" / "README.md").read_text(encoding="utf-8")
 
     assert REVENUE_TABLE_V2_ENV_NAME in readme
+    assert EVIDENCE_RECLASSIFY_ENV_NAME in readme
     assert "키를 지우고 재배포" in readme
 
 
