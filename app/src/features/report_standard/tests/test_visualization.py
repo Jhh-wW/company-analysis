@@ -8,6 +8,7 @@ from src.features.report_standard.visualization import (
     COMPOSITION_MIN_ITEMS,
     COMPOSITION_TONE_STEPS,
     CardField,
+    RelationPair,
     _CARD_HEADER_KEY_SETS,
     _CARD_HEADER_SETS,
     _CARD_LIMITATION_LABEL,
@@ -292,6 +293,71 @@ def test_flow_preserves_each_complete_left_to_right_row() -> None:
     )
 
 
+def _relation_table(rows: list[list[str]]) -> ReportTable:
+    return ReportTable(
+        caption="과제와 대응",
+        headers=["지금 겪는 과제", "회사가 밝힌 대응"],
+        rows=rows,
+        presentation="flow",
+    )
+
+
+def test_5장_짝_열과_2개_이상_행은_관계도_명세가_된다() -> None:
+    table = _relation_table(
+        [
+            ["원가 부담", "공정 효율화"],
+            ["고객 집중", "판매처 다변화"],
+        ]
+    )
+
+    visualization = table_visualization(table)
+
+    assert visualization is not None
+    assert visualization.kind == "relation_pairs"
+    assert visualization.pairs == (
+        RelationPair(left="원가 부담", right="공정 효율화"),
+        RelationPair(left="고객 집중", right="판매처 다변화"),
+    )
+    assert visualization.flows == tuple(tuple(row) for row in table.rows)
+
+
+def test_관계도는_표_셀_문자열을_한_글자도_바꾸지_않는다() -> None:
+    table = _relation_table(
+        [
+            [" 원가 부담 ", "공정\n효율화"],
+            ["고객 집중", "판매처 다변화"],
+        ]
+    )
+
+    visualization = table_visualization(table)
+
+    assert visualization is not None
+    assert [(pair.left, pair.right) for pair in visualization.pairs] == [
+        tuple(row) for row in table.rows
+    ]
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        _relation_table([["과제 하나", "대응 하나"]]),
+        _relation_table([[f"과제 {index}", f"대응 {index}"] for index in range(6)]),
+        _relation_table([["과제", ""], ["다른 과제", "다른 대응"]]),
+        _relation_table([["가" * 19, "대응"], ["과제", "다른 대응"]]),
+        ReportTable(
+            caption="과제와 대응",
+            headers=["지금 겪는 과제", "대응 열 없음"],
+            rows=[["과제", "대응"], ["다른 과제", "다른 대응"]],
+            presentation="flow",
+        ),
+    ],
+)
+def test_관계도_조건을_벗어나면_일반_흐름도가_아닌_원표로_남긴다(
+    table: ReportTable,
+) -> None:
+    assert table_visualization(table) is None
+
+
 def test_flow_keeps_rows_with_a_blank_cell() -> None:
     """★ 제품 결정 — 한 칸이 비었다고 표를 버리지 않는다.
 
@@ -532,7 +598,6 @@ def test_portfolio_blank_product_name_falls_back_to_no_title() -> None:
     [
         ["핵심 자산", "제품·서비스", "고객 행동·과금", "반복·확장 수익"],  # 2장 — e2e 시험이 flow-row를 요구
         ["무엇으로 시작하나", "회사가 하는 일", "누구에게 닿나"],  # 7장 — e2e 시험이 flow-row를 요구
-        ["지금 겪는 과제", "회사가 밝힌 대응"],  # 5장 — 문제→대응 방향성이 있어 화살표 유지
     ],
 )
 def test_genuinely_causal_headers_stay_as_arrow_flow(headers: list[str]) -> None:

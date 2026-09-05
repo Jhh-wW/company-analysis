@@ -25,6 +25,7 @@ import pytest
 
 from src.features.composer.constants import (
     BUSINESS_FLOW_SECTION_ID,
+    CHALLENGE_FLOW_SECTION_ID,
     CITATION_STYLE_INLINE,
     GRADE_CONFIRMED,
     GRADE_INTERPRETED,
@@ -110,6 +111,12 @@ def _composed(*, uncited_summary: bool = False) -> ComposedReport:
                     cells=("음악 자산", "음반", "구독", "반복 수익"),
                     citations=("1",),
                 ),
+            )
+        if section_id == CHALLENGE_FLOW_SECTION_ID:
+            # 5장 정본 2열·2행은 원·선 관계도(kind="relation_pairs")를 부른다.
+            flow_rows = (
+                FlowRow(cells=("원가 부담", "공정 효율화"), citations=("1",)),
+                FlowRow(cells=("고객 집중", "판매처 다변화"), citations=("1",)),
             )
         sections.append(
             ComposedSection(
@@ -266,7 +273,7 @@ def _report_section(report: Report, cell: str):
 
 
 def test_builder의_visual은_table_visualization_결과와_같다() -> None:
-    """구성·추이·흐름·카드 네 종류가 모두 순수 함수 값 그대로 봉인된다."""
+    """관계도를 포함한 다섯 종류가 모두 순수 함수 값 그대로 봉인된다."""
 
     report = _report()
     projection = build_public_projection(report)
@@ -324,9 +331,9 @@ def test_builder의_visual은_table_visualization_결과와_같다() -> None:
                 for card in chart.cards
             )
 
-    # 네 종류가 실제로 한 번씩 나왔는지 — 하나라도 빠지면 이 시험은 그 종류를
+    # 다섯 종류가 실제로 한 번씩 나왔는지 — 하나라도 빠지면 이 시험은 그 종류를
     # 지켜 주지 못한다.
-    assert set(kinds) == {"composition", "trend", "flow", "card"}
+    assert set(kinds) == {"composition", "trend", "flow", "card", "relation_pairs"}
 
 
 def test_builder의_도식_비율은_Decimal_문자열이고_float가_아니다() -> None:

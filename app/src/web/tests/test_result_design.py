@@ -31,7 +31,24 @@ from src.features.storage import db as storage_db
 
 
 STYLE = Path(__file__).parents[1] / "static" / "style.css"
+TEMPLATE = Path(__file__).parents[1] / "templates" / "result.html"
 _APPROVED_AT = "2026-08-19T21:30:00+09:00"
+
+_DESIGN_TOKENS_V1 = {
+    "--ink": "#111111",
+    "--ink-2": "#333333",
+    "--grey-6": "#666666",
+    "--grey-4": "#999999",
+    "--grey-2": "#CCCCCC",
+    "--grey-1": "#F5F5F5",
+    "--paper": "#FBFBFB",
+    "--white": "#FFFFFF",
+    "--chart-1": "#B3B3B3",
+    "--chart-2": "#8C8C8C",
+    "--chart-3": "#666666",
+    "--chart-4": "#444444",
+    "--chart-5": "#222222",
+}
 
 
 def _demo_report(*, with_table: bool = False):
@@ -180,6 +197,8 @@ def test_보고서만_전용_문서_레이아웃을_쓴다(monkeypatch):
     assert 'tabindex="-1"' in response.text
     assert '<article class="report-paper">' in response.text
     assert '<header class="report-cover">' in response.text
+    assert 'data-report-title="' + report.company + ' 분석 보고서"' in response.text
+    assert f'data-report-date="{report.as_of_date} 기준"' in response.text
     assert 'class="report-summary"' in response.text
     assert 'id="report-summary-title">핵심 요약</h2>' in response.text
     assert 'class="summary-number"' in response.text
@@ -190,7 +209,7 @@ def test_보고서만_전용_문서_레이아웃을_쓴다(monkeypatch):
     assert f"내용 생성 {report.generated_at}" in response.text
     assert 'class="report-section"' in response.text
     assert 'class="scroll report-scroll"' in response.text
-    assert 'id="report-citations-title"><span class="no">부록</span><span class="txt">출처와 검증 상태</span>' in response.text
+    assert 'id="report-citations-title"><span class="no">부록</span><span class="txt">출처와 검증 상태</span><span class="section-badge" aria-hidden="true"></span>' in response.text
     assert '<th scope="col">자료</th>' in response.text
     assert '<th scope="col">기준일·자료 상태</th>' in response.text
     assert '<th scope="col">사실 검증</th>' in response.text
@@ -201,6 +220,15 @@ def test_보고서만_전용_문서_레이아웃을_쓴다(monkeypatch):
     assert "확인된 회사 사실" not in response.text
     assert "프로그램이 제안" not in response.text
     assert "어디서 가져왔나" not in response.text
+
+    badge_values = re.findall(
+        r'<span class="no">([^<]+)</span><span class="txt">', response.text
+    )
+    expected_badges = [str(section.display_number) for section in report.sections]
+    assert badge_values == [*expected_badges, "부록"]
+    assert response.text.count(
+        '<span class="section-badge" aria-hidden="true"></span>'
+    ) == len(expected_badges) + 1
 
     # 자동출고된 같은 객체에는 수동 preview가 없고 활성 PDF 경로만 보인다.
     assert "아직 공개·공유·내보내기 승인 전" not in response.text
@@ -290,7 +318,8 @@ def test_보고서_표는_제목행과_가로스크롤_경계를_가진다(monke
             cookies={auth_constants.SESSION_COOKIE_NAME: session.token},
         ).text
 
-    assert "<thead>" in html and "<tbody>" in html
+    assert "<thead" in html and "<tbody>" in html
+    assert '<thead class="report-table-head">' in html
     assert 'scope="col"' in html
     assert any(
         f'data-report-cell="{section.cell}"' in html
@@ -354,10 +383,12 @@ def test_보고서_CSS는_모바일과_인쇄를_따로_보호한다():
     assert ".result-page .report-summary" in css
     assert ".result-page .summary-number" in css
     assert ".result-page .section-tag" in css
-    assert "--ink: #0a0a0a;" in css
-    assert "--surface: #ffffff;" in css
+    root = css[css.index(":root {") : css.index("}", css.index(":root {"))]
+    for name, value in _DESIGN_TOKENS_V1.items():
+        assert f"{name}: {value};" in root
     assert ".result-page .ui-only" in css
     assert ".result-page .report-actions" in css
+    assert "@media (max-width: 720px)" in css
     assert "@media (max-width: 700px)" in css
     assert "@media print" in css
     assert ".result-page .report-actions," in css
@@ -366,3 +397,37 @@ def test_보고서_CSS는_모바일과_인쇄를_따로_보호한다():
     assert "break-after: page;" in css
     assert "break-after: avoid-page;" in css
     assert "break-inside: avoid-page;" in css
+
+
+def test_보고서_표와_수치카드는_단색_토큰만_쓴다():
+    css = STYLE.read_text(encoding="utf-8")
+
+    assert ".result-page th {" in css
+    assert "background: var(--ink);" in css
+    assert "color: var(--white);" in css
+    assert "border-bottom: .5px solid var(--grey-2);" in css
+    assert ".result-page tbody td:first-child { background: var(--grey-1); }" in css
+    assert ".result-page td.num { text-align: right; }" in css
+    assert "border-top: 1px solid var(--ink);" in css
+    assert "border-bottom: 1px solid var(--ink);" in css
+    assert ".result-page .cover-metric {" in css
+    assert "font-size: 22px;" in css
+    assert ".result-page .summary-number {" in css
+
+
+def test_흐름표는_3단계부터_5단계까지만_쉐브론을_쓴다():
+    template = TEMPLATE.read_text(encoding="utf-8")
+    css = STYLE.read_text(encoding="utf-8")
+
+    condition = (
+        'class="flow-row"{% if flow|length >= 3 and flow|length <= 5 %} '
+        'data-flow-style="chevron"{% endif %}'
+    )
+    assert template.count(condition) == 2
+    assert '.result-page .flow-row[data-flow-style="chevron"]' in css
+    assert "clip-path: polygon(" in css
+    for index in range(1, 6):
+        assert f"var(--chart-{index})" in css
+    # 두 단계 이하는 기존 네모와 화살표 규칙으로 남아야 한다.
+    assert ".result-page .flow-row li:not(:last-child)::after" in css
+    assert 'content: "→";' in css

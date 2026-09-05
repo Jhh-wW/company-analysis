@@ -23,11 +23,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import html as html_lib
 import json
 import re
 import uuid
 from dataclasses import replace
+from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -39,6 +41,7 @@ from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
 from src.features.composer.constants import (
     BUSINESS_FLOW_SECTION_ID,
+    CHALLENGE_FLOW_SECTION_ID,
     GRADE_CONFIRMED,
     GRADE_INTERPRETED,
     IDENTITY_TABLE_SECTION_ID,
@@ -107,6 +110,12 @@ def _composed() -> ComposedReport:
             # 2장 칸 이름은 화살표 흐름 도식(kind="flow")을 부른다.
             flow_rows = (
                 FlowRow(cells=("음악 자산", "음반", "구독", "반복 수익"), citations=("1",)),
+            )
+        if section_id == CHALLENGE_FLOW_SECTION_ID:
+            # 5장 짝 표는 원·선 관계도(kind="relation_pairs")를 부른다.
+            flow_rows = (
+                FlowRow(cells=("원가 부담", "공정 효율화"), citations=("1",)),
+                FlowRow(cells=("고객 집중", "판매처 다변화"), citations=("1",)),
             )
         sections.append(
             ComposedSection(
@@ -239,7 +248,7 @@ def _sealed_v2_report(
     scope: str = _장부_전용_범위,
     relationship: str = _장부_전용_관계,
 ) -> Report:
-    """봉인이 붙은 v2 보고서 — 도식 네 종류·3개년 띠·표지 띠·부록이 모두 있다."""
+    """봉인이 붙은 v2 보고서 — 도식 다섯 종류·3개년 띠·표지 띠·부록이 모두 있다."""
 
     report = _unsealed_v2_report(scope=scope, relationship=relationship)
     return replace(report, public_projection=build_public_projection(report))
@@ -419,7 +428,17 @@ def test_웹_v2_결과페이지는_전역_순수함수를_호출하지_않는다
     assert _visible(projection.summary[0].text) in visible
     assert _visible(projection.citations[0].label_display) in visible
     도식 = [visual for block in projection.sections for visual in block.display.visuals]
-    assert {visual.kind for visual in 도식} >= {"composition", "trend", "flow", "card"}
+    assert {visual.kind for visual in 도식} >= {
+        "composition",
+        "trend",
+        "flow",
+        "card",
+        "relation_pairs",
+    }
+    assert 'class="report-visual relation-chart"' in article
+    assert article.count('class="relation-pair"') == 2
+    for value in ("원가 부담", "공정 효율화", "고객 집중", "판매처 다변화"):
+        assert _visible(value) in visible
     for visual in 도식:
         if visual.reading:
             assert _visible(visual.reading) in visible
@@ -604,6 +623,27 @@ def test_웹_v2는_ledger를_렌더하지_않는다(monkeypatch: pytest.MonkeyPa
 #: base 커밋(0acf798)의 템플릿이 그린 v1 보고서 본문. 봉인 도입이 옛 화면을
 #: 한 글자도 바꾸지 않았음을 증명한다.
 _V1_GOLDEN = Path(__file__).with_name("result_v1_article_golden.html")
+_V1_GOLDEN_TEXT_SHA256_BEFORE_D2 = (
+    "9b1a8447701cdc989157195942492a65b76266d03101906c73088b48115ae006"
+)
+
+
+class _TextExtractor(HTMLParser):
+    """태그와 속성을 버리고 사람이 읽는 텍스트 노드만 모은다."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(data)
+
+
+def _text_sha256(document: str) -> str:
+    parser = _TextExtractor()
+    parser.feed(document)
+    visible_text = " ".join(" ".join(parser.parts).split())
+    return hashlib.sha256(visible_text.encode("utf-8")).hexdigest()
 
 
 def _golden_bytes() -> bytes:
@@ -625,6 +665,14 @@ def test_v1_결과페이지_HTML은_바이트_불변이다(monkeypatch: pytest.M
     rendered = _article(body).encode("utf-8")
     assert b"\r" not in rendered, "화면 결과에 CR가 생기면 golden 대조 전제가 깨진다"
     assert rendered == _golden_bytes()
+
+
+def test_D2_골든_갱신은_텍스트를_한_글자도_바꾸지_않는다() -> None:
+    """배지·표 클래스·상단 띠 속성만 바뀌고 본문 텍스트는 이전과 같아야 한다."""
+
+    golden = _V1_GOLDEN.read_text(encoding="utf-8")
+
+    assert _text_sha256(golden) == _V1_GOLDEN_TEXT_SHA256_BEFORE_D2
 
 
 # ══════════════════════════════════════════════════════════
