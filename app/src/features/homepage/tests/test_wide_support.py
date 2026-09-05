@@ -37,6 +37,7 @@ from src.features.homepage.wide_fetch import (
     WideRawResponse,
     WideRobotsPolicy,
     WideTransportError,
+    _robots_detail,
     classify_general_outcome,
     fetch_sitemap,
     robots_decision,
@@ -635,24 +636,38 @@ def test_robots_404는_빈_규칙으로_진행한다():
     assert outcome == "proceed_empty_rules"
 
 
-# ── robots 401/403은 명시적 거부이지 「없음」이 아니다 ──────────
+# ── robots 4xx는 RFC 9309 §2.3.1.3의 «unavailable» = 「없음」이다 ──────────
+# 예전에는 401·403·407을 「명시적 거부」로, 408·409·429를 「일시 장애」로 갈라
+# 전부 호스트 통째 차단했다. 2026-09-05 실측에서 robots.txt를 두지 않은
+# S3/CloudFront 정적 호스팅(하이브 hybecorp.com)이 404가 아니라 403을 돌려주는
+# 것이 확인돼, 그 분류가 「파일 없음」을 「크롤링 금지」로 뒤집고 있었다.
 
 
-def test_robots_401은_차단된다():
-    """401은 인증 요구 — «robots가 없다»가 아니다."""
+def test_robots_401은_빈_규칙으로_진행한다():
+    """RFC 9309 §2.3.1.3 — 401도 «unavailable»이라 「robots 없음」과 같다.
+
+    401을 「명시적 거부」로 읽으면, 인증 걸린 경로 하나 때문에 회사 홈페이지
+    전체를 못 긁는다. 실제 금지는 규칙 본문의 Disallow로만 판단한다.
+    """
     outcome, reason = robots_decision(_response(401), None)
-    assert outcome == "blocked"
-    assert reason == "robots_denied"
+    assert outcome == "proceed_empty_rules"
+    assert reason == "robots_missing"
 
 
-def test_robots_403은_차단된다():
+def test_robots_403은_빈_규칙으로_진행한다():
+    """RFC 9309 §2.3.1.3 + 2026-09-05 하이브 실측.
+
+    ``hybecorp.com``·``www.hybecorp.com``의 ``/robots.txt``는 S3(``Server:
+    AmazonS3``)가 404 대신 **403**을 돌려준다. 같은 호스트의 루트 페이지는
+    200으로 열린다 — 즉 403은 「크롤링하지 마라」가 아니라 「그런 파일이
+    없다」였다. 이걸 차단으로 읽어 회사 하나가 통째로 수집에서 빠졌었다.
+    """
     outcome, reason = robots_decision(_response(403), None)
-    assert outcome == "blocked"
-    assert reason == "robots_denied"
+    assert outcome == "proceed_empty_rules"
+    assert reason == "robots_missing"
 
 
 def test_robots_404는_여전히_빈_규칙으로_진행한다():
-    """404·410처럼 진짜 «없음»을 뜻하는 4xx는 fail-closed 대상이 아니다."""
     outcome, reason = robots_decision(_response(404), None)
     assert outcome == "proceed_empty_rules"
     assert reason == "robots_missing"
@@ -664,55 +679,55 @@ def test_robots_410도_여전히_빈_규칙으로_진행한다():
 
 
 def test_robots_500은_차단된다():
-    outcome, _reason = robots_decision(_response(500), None)
+    """RFC 9309 §2.3.1.4 — 5xx는 «unreachable»이라 완전 거부로 본다."""
+    outcome, reason = robots_decision(_response(500), None)
     assert outcome == "blocked"
+    assert reason == "robots_unreachable"
+
+
+def test_robots_503도_도달불가로_차단된다():
+    """서버가 잠깐 죽은 것과 「규칙이 없다」는 전혀 다르다 — 5xx는 계속 fail-closed."""
+    outcome, reason = robots_decision(_response(503), None)
+    assert outcome == "blocked"
+    assert reason == "robots_unreachable"
 
 
 def test_robots_전송실패는_차단된다():
-    outcome, _reason = robots_decision(None, WideTransportError("시간초과"))
+    """시간초과·DNS·TLS 실패는 규칙을 확인할 길이 없으므로 전면 허용으로 바꾸지 않는다."""
+    outcome, reason = robots_decision(None, WideTransportError("시간초과"))
     assert outcome == "blocked"
+    assert reason == "robots_unreachable"
 
 
-# ── robots 상태 계약을 정확히 좁힌다 ────────────────
-# 「명시적 부재」는 404·410만 인정한다. 그 밖의 4xx는 원인별로
-# blocked(robots_denied/robots_transient/robots_unreachable)로 나눈다.
+# ── 4xx 전 구간이 한 덩어리다 ────────────────
+# RFC 9309 §2.3.1.3은 400~499를 통째로 «unavailable»로 묶는다. 같은 scope의
+# 홈페이지·공식 IR PDF 수집기도 이미 4xx 전체를 부재로 보고, 세 수집기가
+# robots_cache를 공유하므로 여기만 다르게 판정하면 먼저 물은 쪽이 이긴다.
 
 
-def test_robots_407도_명시적_거부로_차단된다():
-    """407(프록시 인증)도 401/403과 같은 «명시적 거부» — robots가 없다는
-    뜻이 아니다."""
-    outcome, reason = robots_decision(_response(407), None)
-    assert outcome == "blocked"
-    assert reason == "robots_denied"
+def test_robots_4xx는_전_구간이_빈_규칙으로_진행한다():
+    """407(프록시 인증)·408(시간초과)·409·429(속도 제한)를 포함한 400~499 전체.
 
-
-def test_robots_408은_일시장애로_차단된다():
-    outcome, reason = robots_decision(_response(408), None)
-    assert outcome == "blocked"
-    assert reason == "robots_transient"
-
-
-def test_robots_409는_일시장애로_차단된다():
-    outcome, reason = robots_decision(_response(409), None)
-    assert outcome == "blocked"
-    assert reason == "robots_transient"
-
-
-def test_robots_429는_일시장애로_차단된다():
-    """429(속도 제한)를 «robots 없음»으로 읽으면 안 된다 — 이 회사가
-    robots를 공개하지 않는다는 뜻이 아니라 일시적으로 못 받은 것이다."""
-    outcome, reason = robots_decision(_response(429), None)
-    assert outcome == "blocked"
-    assert reason == "robots_transient"
-
-
-def test_robots_그밖의_4xx는_도달불가로_차단된다():
-    """denied·transient·missing 목록 어디에도 없는 4xx(예: 400·402·405·406)는
-    robots_unreachable로 차단한다 — «명시적 부재로 진행」이 아니다."""
-    for status in (400, 402, 405, 406, 411, 451):
+    ★ 남은 위험: 429는 상대가 «속도를 줄여라»라고 말한 것인데도 여기서는
+      「규칙 없음」으로 진행한다. 구글의 robots.txt 처리 규칙은 4xx 중 429만
+      따로 빼서 서버 오류처럼 다룬다. 이 예외를 넣으려면 세 수집기
+      (``wide_fetch``·``logic._load_robots``·``ir_pdf``)를 한 번에 바꿔야
+      한다 — 공유 캐시 때문에 한 곳만 바꾸면 순서에 따라 결과가 갈린다.
+    """
+    for status in (400, 402, 405, 406, 407, 408, 409, 411, 429, 451, 499):
         outcome, reason = robots_decision(_response(status), None)
-        assert outcome == "blocked", f"status={status}"
-        assert reason == "robots_unreachable", f"status={status}"
+        assert outcome == "proceed_empty_rules", f"status={status}"
+        assert reason == "robots_missing", f"status={status}"
+
+
+def test_robots_사유코드는_4xx_전체가_같고_상태는_상세에_남는다():
+    """사유 코드를 상태코드별로 쪼개면(``robots_missing_403``) 이 값을 그대로
+    읽는 상위 집계 계약이 갈라진다. 대신 몇 번이었는지는 detail에 남긴다."""
+    for status in (403, 404, 451):
+        _outcome, reason = robots_decision(_response(status), None)
+        assert reason == "robots_missing"
+    assert _robots_detail(_response(403), None) == "HTTP 403"
+    assert _robots_detail(None, WideTransportError("시간초과")) == "시간초과"
 
 
 # ── sitemap 바이트 상한이 문자 상한이면 안 된다 ────────────────

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import http.client
 import socket
+import ssl
 import urllib.error
 import urllib.request
 from email.message import Message
@@ -11,8 +13,10 @@ from src.features.homepage import logic as homepage_logic
 from src.features.homepage import safe_http
 from src.features.homepage.logic import HomepageFetchError, default_fetch
 from src.features.homepage.safe_http import (
+    TLS_ALPN_PROTOCOLS,
     HomepageResponseError,
     UnsafeHomepageUrlError,
+    build_tls_context,
     read_limited_text,
     resolve_safe_target,
     validate_text_response,
@@ -443,6 +447,110 @@ def test_default_fetch_uses_same_timeout_for_open_and_body(monkeypatch) -> None:
         "open": homepage_logic.TIMEOUT_SEC,
         "body": homepage_logic.TIMEOUT_SEC,
     }
+
+
+# ── TLS ClientHello가 파이썬 표준 HTTPS와 같은 모양이어야 한다 ────────────────
+# 2026-09-05 실측: ``ssl.create_default_context()``를 그대로 넘기면 ClientHello
+# 지문이 표준 파이썬·브라우저와 달라져 CDN 봇 보호가 403으로 막는다
+# (``www.woowahan.com``, Cloudflare). 손잡이를 한 칸씩 분리한 결과 결정적인 쪽은
+# ALPN이 아니라 post_handshake_auth였다 — 기본 403 / ALPN만 403 /
+# post_handshake_auth만 200 / 둘 다 200.
+
+
+def test_TLS_컨텍스트는_ALPN에_http11을_알린다(monkeypatch) -> None:
+    """``ssl.SSLContext``에는 ALPN 목록을 되읽는 표준 getter가 없어서,
+    ``set_alpn_protocols`` 호출 자체를 가로채 단언한다."""
+    calls: list[list[str]] = []
+    real_setter = ssl.SSLContext.set_alpn_protocols
+
+    def record(self, protocols):
+        calls.append(list(protocols))
+        return real_setter(self, protocols)
+
+    monkeypatch.setattr(ssl.SSLContext, "set_alpn_protocols", record)
+
+    context = build_tls_context()
+
+    assert calls == [["http/1.1"]]
+    assert list(TLS_ALPN_PROTOCOLS) == ["http/1.1"]
+    assert isinstance(context, ssl.SSLContext)
+
+
+def test_TLS_컨텍스트는_post_handshake_auth를_켠다() -> None:
+    """★ 이 한 칸이 실제로 403을 200으로 바꿨다 — ALPN만으로는 여전히 403이었다.
+
+    TLS 1.3에서 «핸드셰이크 뒤에도 서버가 클라이언트 인증서를 요구할 수 있다」고
+    알리는 확장이다. 우리는 클라이언트 인증서를 싣지 않으므로 내줄 것이 없고,
+    파이썬 표준 HTTPS 경로(``http.client._create_https_context``)가 이미 모든
+    요청에 켜 두는 기본값이다.
+    """
+    context = build_tls_context()
+
+    assert context.post_handshake_auth is True
+
+
+def test_TLS_컨텍스트는_표준_HTTPS_경로와_같은_손잡이를_쓴다() -> None:
+    """직접 만든 컨텍스트가 표준 경로에서 다시 갈라지면 같은 증상이 되돌아온다."""
+    stdlib_context = http.client._create_https_context(11)
+    context = build_tls_context()
+
+    assert context.post_handshake_auth == stdlib_context.post_handshake_auth
+    assert context.verify_mode == stdlib_context.verify_mode
+    assert context.check_hostname == stdlib_context.check_hostname
+    assert context.minimum_version == stdlib_context.minimum_version
+
+
+def test_TLS_컨텍스트는_인증서_검증을_그대로_유지한다() -> None:
+    """ALPN을 붙이려다 검증을 끄면 안 된다 — 기본 컨텍스트와 같은 강도를 확인한다."""
+    context = build_tls_context()
+
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+
+
+def test_HTTPS_요청은_ALPN이_붙은_컨텍스트로_열린다(monkeypatch) -> None:
+    """상수·팩토리만 맞고 실제 요청 경로가 옛 컨텍스트를 쓰면 실측 증상이 그대로 남는다."""
+    seen: list[object] = []
+    real_handler = safe_http._SafeHTTPSHandler
+
+    class _RecordingHandler(real_handler):
+        def __init__(self, *, context=None, deadline=None):
+            seen.append(context)
+            super().__init__(context=context, deadline=deadline)
+
+    monkeypatch.setattr(safe_http, "_SafeHTTPSHandler", _RecordingHandler)
+    monkeypatch.setattr(
+        safe_http,
+        "resolve_safe_target",
+        lambda url, **_kwargs: safe_http.SafeTarget(
+            scheme="https", hostname="company.example", port=443, ip="93.184.216.34"
+        ),
+    )
+
+    alpn_calls: list[list[str]] = []
+    real_setter = ssl.SSLContext.set_alpn_protocols
+
+    def record(self, protocols):
+        alpn_calls.append(list(protocols))
+        return real_setter(self, protocols)
+
+    monkeypatch.setattr(ssl.SSLContext, "set_alpn_protocols", record)
+
+    class _StopOpen(Exception):
+        pass
+
+    def stop(*_args, **_kwargs):
+        raise _StopOpen
+
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", stop)
+
+    request = urllib.request.Request("https://company.example/robots.txt")
+    with pytest.raises(_StopOpen):
+        safe_http.safe_urlopen(request, timeout=1.0)
+
+    assert alpn_calls == [["http/1.1"]]
+    assert seen and isinstance(seen[0], ssl.SSLContext)
+    assert seen[0].post_handshake_auth is True
 
 
 @pytest.mark.parametrize(
