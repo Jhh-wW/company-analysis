@@ -647,8 +647,34 @@ class _MeteredEngine:
             object.__setattr__(self, "_prompt_cache", previous_cache)
 
 
+def _already_cache_marked_text_blocks(content: object) -> bool:
+    """호출자가 «이미 나눠서» 캐시 경계를 찍어 보낸 text 블록 목록인지 본다.
+
+    형식 검증은 str 경로와 같은 수준으로 유지한다 — dict이고 type이 text이며
+    text가 문자열인 블록만 인정한다. 그중 하나라도 cache_control이 있어야
+    «표식이 있다»로 친다.
+    """
+
+    if not isinstance(content, list) or not content:
+        return False
+    for block in content:
+        if not isinstance(block, dict):
+            return False
+        if block.get("type") != "text" or not isinstance(block.get("text"), str):
+            return False
+    return any(block.get("cache_control") is not None for block in content)
+
+
 def _prompt_cached_messages(messages: object) -> object:
-    """Mark exact user text as an ephemeral cache block without changing it."""
+    """Mark exact user text as an ephemeral cache block without changing it.
+
+    ★ composer(v2)는 «공유 앞부분만» 캐시하려고 프롬프트를 두 블록으로 미리
+      나눠 보낸다. 그런 요청까지 여기서 전체를 한 블록으로 다시 감싸면 장마다
+      달라지는 뒷부분이 같은 블록에 섞여, 매 호출 cache write만 나고 read가
+      0이 된다(= 캐시를 켠 값만 물고 아끼지는 못한다). 그래서 이미 경계가
+      찍힌 블록 목록은 그대로 통과시킨다.
+      str content(v1 span_selection)는 예전 동작 그대로 한 블록으로 감싼다.
+    """
 
     if not isinstance(messages, list) or not messages:
         raise provider_budget.ProviderBudgetUnavailable(
@@ -671,6 +697,10 @@ def _prompt_cached_messages(messages: object) -> object:
                     "cache_control": {"type": "ephemeral"},
                 }
             ]
+            marked = True
+        elif cloned.get("role") == "user" and _already_cache_marked_text_blocks(
+            content
+        ):
             marked = True
         copied.append(cloned)
     if not marked:
@@ -4221,6 +4251,9 @@ def _v2_ask_via_provider(
     모델 고정이 전부 그 경계에서 적용된다. 구조화 출력(output_config)은 쓰지
     않는다: composer가 응답 문자열에서 직접 JSON을 관용 파싱하기 때문이다.
 
+    ★ 프롬프트가 «공유 앞부분» 길이를 실어 오면(composer의 CacheablePrompt)
+      그 경계로 두 블록을 만들어 앞부분만 캐시한다 — 아래 ask 주석 참조.
+
     ★ 예산 소진·billing-uncertain 차단은 «이 요청 전역» 장애다 — composer가
       문장 단위 실패로 삼키면 실제 원인이 «출고 검증 실패»로 오표기된다
       (실측 결함). AskFatalError로 감싸 던져 composer의 삼킴 지점들이
@@ -4231,13 +4264,38 @@ def _v2_ask_via_provider(
     from src.features.composer.port import AskFatalError  # noqa: PLC0415
 
     def ask(prompt: str) -> str:
+        # composer가 «아홉 장이 공유하는 앞부분»(회사 머리말 + 조각 전체)의
+        # 길이를 프롬프트에 실어 보내면(composer.logic.CacheablePrompt), 그
+        # 경계에서 두 블록으로 나눠 앞부분에만 캐시 표식을 찍는다. 프롬프트
+        # 캐시는 앞부분이 바이트 단위로 같을 때만 맞으므로, 장마다 달라지는
+        # 뒷부분을 같은 블록에 섞으면 매번 새로 써야 한다(실측: 호출 6번까지
+        # cache_read 0, 685원 소진).
+        # 표식이 없으면(재시도로 이어 붙인 평범한 str 등) 예전처럼 통짜로 보낸다.
+        text = str(prompt)
+        raw_prefix = getattr(prompt, "cache_prefix_chars", 0)
+        prefix_chars = raw_prefix if type(raw_prefix) is int and raw_prefix > 0 else 0
+        head, rest = text[:prefix_chars], text[prefix_chars:]
+        # 뒷부분이 비면(이론상 불가) 나눌 이유가 없다 — 통짜 str로 되돌린다.
+        use_prompt_cache = bool(head) and bool(rest)
+        content: Any = (
+            [
+                {
+                    "type": "text",
+                    "text": head,
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {"type": "text", "text": rest},
+            ]
+            if use_prompt_cache
+            else text
+        )
         try:
-            with _meter_stage(engine, stage):
+            with _meter_stage(engine, stage, prompt_cache=use_prompt_cache):
                 response = client.messages.create(
                     model=getattr(engine, "MODEL", "") or GENERATION_MODEL,
                     max_tokens=max_tokens,
                     temperature=0,  # 원문 인용 충실도 우선 (1판 _ask와 동일)
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=[{"role": "user", "content": content}],
                 )
         except (
             provider_budget.ProviderBudgetExceeded,

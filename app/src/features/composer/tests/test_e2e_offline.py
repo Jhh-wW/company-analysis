@@ -164,6 +164,23 @@ _DEDUPE_REMOVED_BY_SECTION = {"identity": 1}
 # ══════════════════════════════════════════════════════════
 
 
+def _prompt_text(content: Any) -> str:
+    """provider에 보낸 user content를 프롬프트 원문으로 되돌린다.
+
+    ★ 작가 호출은 «아홉 장이 공유하는 앞부분 + 장별 뒷부분» 두 text 블록으로
+      나뉘어 온다(real.py의 프롬프트 캐시 배선). 이어 붙여야 예전과 같은 원문이
+      되고, 그래야 아래 라우팅이 장별 안내문을 알아본다.
+    """
+
+    if isinstance(content, list):
+        return "".join(
+            str(block.get("text") or "")
+            for block in content
+            if isinstance(block, dict)
+        )
+    return str(content or "")
+
+
 class _JypFakeMessages(_FakeMessages):
     """v2 작가·검수 프롬프트에 fixture JSON을 돌려주는 가짜 provider 경계.
 
@@ -216,7 +233,7 @@ class _JypFakeMessages(_FakeMessages):
     def create(self, **kwargs: Any) -> SimpleNamespace:
         response = super().create(**kwargs)
         messages = kwargs.get("messages") or [{}]
-        prompt = str(messages[0].get("content") or "")
+        prompt = _prompt_text(messages[0].get("content"))
         payload = self._route(prompt)
         if payload is not None:
             # _v2_ask_via_provider가 읽는 content 블록 계약을 그대로 흉내 낸다
