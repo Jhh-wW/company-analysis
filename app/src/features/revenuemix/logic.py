@@ -19,6 +19,9 @@ from src.features.revenuemix.constants import (
     HEADERS,
     KNOWN_TABLE_HEADS,
     MAX_ROWS,
+    MULTI_YEAR_CAPTION_BY_AXIS,
+    MULTI_YEAR_MAX_PERIODS,
+    MULTI_YEAR_RATIO_HEADER_FORMAT,
     PRODUCT_CAPTION,
     PRODUCT_HEADS,
     RATIO_HEAD_RE,
@@ -45,6 +48,7 @@ from src.shared.revenue_table_provenance import (
     REVENUE_AXIS_REGION,
     REVENUE_HEADS_BY_AXIS,
     RevenueAxis,
+    build_revenue_multi_year_row_evidence,
     build_revenue_row_evidence,
     displayed_percent_total_is_complete,
     is_revenue_total_name,
@@ -52,6 +56,9 @@ from src.shared.revenue_table_provenance import (
     normalize_revenue_name,
     revenue_amounts_sum_to_total,
     revenue_percent_total_is_complete_v2,
+    revenue_ratio_numeric_check,
+    revenue_row_pattern_v2,
+    revenue_signed_decimal,
     revenue_table_headers,
     revenue_text_axis,
     revenue_units_in,
@@ -120,6 +127,33 @@ class _ParsedRows:
     overflow: bool
 
 
+@dataclass(frozen=True)
+class _PeriodPair:
+    year: str
+    amount: str
+    ratio: str
+    amount_span: tuple[int, int]
+    ratio_span: tuple[int, int]
+
+
+@dataclass(frozen=True)
+class _MultiYearSourceRow:
+    name: str
+    periods: tuple[_PeriodPair, ...]
+    raw_match: str
+    start: int
+    end: int
+    name_span: tuple[int, int]
+    source_index: int
+
+
+@dataclass(frozen=True)
+class _ParsedMultiYearRows:
+    rows: tuple[_MultiYearSourceRow, ...]
+    total: Optional[_MultiYearSourceRow]
+    overflow: bool
+
+
 class RevenueTablePayload(TypedDict):
     """생산자가 보존하는 매출 구성표 transport.
 
@@ -135,6 +169,20 @@ class RevenueTablePayload(TypedDict):
     cite: str
     raw_rows: list[list[str]]
     evidence_rows: list[str]
+
+
+class MultiYearRevenueTablePayload(TypedDict):
+    """구분 행과 오름차순 연도 비중 열을 가진 구성 변화 transport."""
+
+    axis: RevenueAxis
+    caption: str
+    headers: list[str]
+    rows: list[list[str]]
+    cite: str
+    raw_rows: list[list[str]]
+    evidence_rows: list[str]
+    numeric_checks: list[list[str]]
+    raw_unit: str
 
 
 def _heading_occurrences(
@@ -297,10 +345,17 @@ def parse_rows(block: str) -> tuple[list[list[str]], Optional[list[str]]]:
     return rows, total
 
 
+def years_of(block: str) -> tuple[str, ...]:
+    """머리말의 연도를 원문 순서로, 중복 없이 최대 3개 읽는다."""
+
+    return tuple(dict.fromkeys(_YEAR_RE.findall(block)))[:MULTI_YEAR_MAX_PERIODS]
+
+
 def year_of(block: str) -> str:
-    """이 표가 몇 년치인지. 못 찾으면 빈 문자열."""
-    m = _YEAR_RE.search(block)
-    return m.group(1) if m else ""
+    """이 표의 첫 연도. 못 찾으면 빈 문자열."""
+
+    years = years_of(block)
+    return years[0] if years else ""
 
 
 def _build_v1(filing_text: str, cite: str = "") -> list[RevenueTablePayload]:
@@ -396,6 +451,16 @@ class RevenueTableDiagnostics(TypedDict):
     탈락_사유: dict[str, int]
 
 
+class MultiYearRevenueTableDiagnostics(TypedDict):
+    """다개년 후보와 연도별 검산 제외 결과."""
+
+    경로: str
+    후보_표_수: int
+    채택_표_수: int
+    탈락_사유: dict[str, int]
+    제외_연도: dict[str, list[str]]
+
+
 @dataclass(frozen=True)
 class _V2Candidate:
     axis: RevenueAxis
@@ -404,6 +469,21 @@ class _V2Candidate:
     header_end: int
     header: str
     parsed: _ParsedRows
+    score: int
+    fingerprint: str
+
+
+@dataclass(frozen=True)
+class _MultiYearCandidate:
+    axis: RevenueAxis
+    unit: str
+    header_start: int
+    header_end: int
+    header: str
+    years: tuple[str, ...]
+    selected_years: tuple[str, ...]
+    excluded_years: tuple[str, ...]
+    parsed: _ParsedMultiYearRows
     score: int
     fingerprint: str
 
@@ -493,6 +573,74 @@ def _parse_rows_v2(block: str, rows_start: int) -> _ParsedRows:
     return _ParsedRows(tuple(rows), total, overflow)
 
 
+def _source_row_multi_year(
+    match: re.Match[str],
+    rows_start: int,
+    source_index: int,
+    years: tuple[str, ...],
+) -> _MultiYearSourceRow:
+    """다개년 행 하나의 이름과 모든 금액·비중 쌍을 원문 좌표째 보존한다."""
+
+    match_start = match.start()
+    periods: list[_PeriodPair] = []
+    for index, year in enumerate(years):
+        amount_group = 2 + index * 2
+        ratio_group = amount_group + 1
+        periods.append(
+            _PeriodPair(
+                year=year,
+                amount=match.group(amount_group),
+                ratio=f"{match.group(ratio_group)}%",
+                amount_span=(
+                    match.start(amount_group) - match_start,
+                    match.end(amount_group) - match_start,
+                ),
+                ratio_span=(
+                    match.start(ratio_group) - match_start,
+                    match.end(ratio_group) - match_start,
+                ),
+            )
+        )
+    return _MultiYearSourceRow(
+        name=clean_name(match.group(1)),
+        periods=tuple(periods),
+        raw_match=match.group(0),
+        start=rows_start + match.start(),
+        end=rows_start + match.end(),
+        name_span=(
+            match.start(1) - match_start,
+            match.end(1) - match_start,
+        ),
+        source_index=source_index,
+    )
+
+
+def _parse_rows_multi_year(
+    block: str,
+    rows_start: int,
+    years: tuple[str, ...],
+) -> _ParsedMultiYearRows:
+    """머리말 연도 수와 쌍 수가 정확히 같은 행만 다개년 행으로 받는다."""
+
+    pattern = revenue_row_pattern_v2(len(years))
+    rows: list[_MultiYearSourceRow] = []
+    total: Optional[_MultiYearSourceRow] = None
+    overflow = False
+    for source_index, match in enumerate(pattern.finditer(block)):
+        source_row = _source_row_multi_year(match, rows_start, source_index, years)
+        name = source_row.name
+        if not name or _is(name, SUBTOTAL_WORDS):
+            continue
+        if is_revenue_total_name_v2(name):
+            total = source_row
+            break
+        if len(rows) >= MAX_ROWS:
+            overflow = True
+            continue
+        rows.append(source_row)
+    return _ParsedMultiYearRows(tuple(rows), total, overflow)
+
+
 def _v2_mentions_revenue(header: str, parsed: _ParsedRows) -> bool:
     """이 표가 «매출»을 말하고 있는지 본다.
 
@@ -502,6 +650,15 @@ def _v2_mentions_revenue(header: str, parsed: _ParsedRows) -> bool:
 
     tail = (parsed.total,) if parsed.total is not None else ()
     names = " ".join(row.public[0] for row in (*parsed.rows, *tail))
+    haystack = re.sub(r"\s+", "", f"{header} {names}")
+    return any(word in haystack for word in V2_REVENUE_WORDS)
+
+
+def _multi_year_mentions_revenue(
+    header: str, parsed: _ParsedMultiYearRows
+) -> bool:
+    tail = (parsed.total,) if parsed.total is not None else ()
+    names = " ".join(row.name for row in (*parsed.rows, *tail))
     haystack = re.sub(r"\s+", "", f"{header} {names}")
     return any(word in haystack for word in V2_REVENUE_WORDS)
 
@@ -587,6 +744,110 @@ def _v2_candidate(
         fingerprint=sha256_text(
             "|".join(
                 "\t".join(row.public) for row in (*parsed.rows, parsed.total)
+            )
+        ),
+    )
+
+
+def _multi_year_candidate(
+    filing_text: str,
+    run: tuple[int, int],
+    block_end: int,
+    reasons: dict[str, int],
+) -> Optional[_MultiYearCandidate]:
+    """후보를 연도별로 따로 검산하고 두 해 이상 남을 때만 채택한다."""
+
+    def reject(사유: str) -> None:
+        reasons[사유] = reasons.get(사유, 0) + 1
+
+    ratio_start, header_end = run
+    header_start = _v2_zone_start(filing_text, ratio_start)
+    header = filing_text[header_start:header_end]
+    all_years = tuple(dict.fromkeys(_YEAR_RE.findall(header)))
+    if len(all_years) < 2:
+        reject("비교 연도 부족")
+        return None
+    if len(all_years) > MULTI_YEAR_MAX_PERIODS:
+        reject("연도 열 초과")
+        return None
+    years = years_of(header)
+    parsed = _parse_rows_multi_year(
+        filing_text[header_end:block_end], header_end, years
+    )
+    if len(parsed.rows) < V2_MIN_ROWS:
+        reject("행 부족")
+        return None
+    if parsed.overflow:
+        reject("행 넘침")
+        return None
+    if parsed.total is None:
+        reject("합계 없음")
+        return None
+    if not _multi_year_mentions_revenue(header, parsed):
+        reject("매출 표현 없음")
+        return None
+
+    units = revenue_units_in(header)
+    if not units:
+        reject("단위 미확인")
+        return None
+    if len(units) > 1:
+        reject("단위 충돌")
+        return None
+    excerpt = filing_text[header_start:parsed.total.end]
+    axis = revenue_text_axis(excerpt)
+    header_axis = revenue_text_axis(header)
+    if axis is None or (header_axis is not None and header_axis != axis):
+        reject("축 불명")
+        return None
+
+    selected: list[str] = []
+    excluded: list[str] = []
+    for position, year in enumerate(years):
+        amounts_match = revenue_amounts_sum_to_total(
+            (row.periods[position].amount for row in parsed.rows),
+            parsed.total.periods[position].amount,
+        )
+        ratios_match = revenue_percent_total_is_complete_v2(
+            row.periods[position].ratio for row in parsed.rows
+        )
+        total_is_complete = (
+            revenue_signed_decimal(parsed.total.periods[position].ratio)
+            == Decimal(100)
+        )
+        if amounts_match and ratios_match and total_is_complete:
+            selected.append(year)
+        else:
+            excluded.append(year)
+            reasons["연도 검산 실패"] = reasons.get("연도 검산 실패", 0) + 1
+    if len(selected) < 2:
+        reject("유효 연도 부족")
+
+    all_rows = parsed.rows + (parsed.total,)
+    return _MultiYearCandidate(
+        axis=axis,
+        unit=units[0],
+        header_start=header_start,
+        header_end=header_end,
+        header=header,
+        years=years,
+        selected_years=tuple(selected),
+        excluded_years=tuple(excluded),
+        parsed=parsed,
+        score=_v2_score(
+            filing_text[max(0, header_start - V2_SCORE_LOOKBACK):header_end], axis
+        ),
+        fingerprint=sha256_text(
+            "|".join(
+                "\t".join(
+                    (row.name,)
+                    + tuple(
+                        value
+                        for period in row.periods
+                        for value in (period.amount, period.ratio)
+                    )
+                )
+                for row in all_rows
             )
         ),
     )
@@ -691,6 +952,166 @@ def _build_v2(
         "탈락_사유": reasons,
     }
     return tables, diagnostics
+
+
+def _multi_year_payload(
+    filing_text: str,
+    cite: str,
+    candidate: _MultiYearCandidate,
+) -> MultiYearRevenueTablePayload:
+    """연도별 검산을 통과한 비중만 오름차순 고유 열로 만든다."""
+
+    parsed = candidate.parsed
+    assert parsed.total is not None
+    selected_years = tuple(sorted(candidate.selected_years, key=int))
+    selected_positions = tuple(
+        candidate.years.index(year) for year in selected_years
+    )
+    headers = [HEADERS[0]] + [
+        MULTI_YEAR_RATIO_HEADER_FORMAT.format(year=year)
+        for year in selected_years
+    ]
+    source_rows = parsed.rows + (parsed.total,)
+    rows = [
+        [row.name]
+        + [row.periods[position].ratio for position in selected_positions]
+        for row in source_rows
+    ]
+    raw_rows = [
+        [row.name]
+        + [row.periods[position].amount for position in selected_positions]
+        for row in source_rows
+    ]
+    numeric_checks = [
+        [
+            revenue_ratio_numeric_check(row.periods[position].ratio)
+            for position in selected_positions
+        ]
+        for row in source_rows
+    ]
+    excerpt_start = candidate.header_start
+    excerpt_end = parsed.total.end
+
+    def period_spans(row: _MultiYearSourceRow) -> tuple[dict[str, tuple[int, int]], ...]:
+        return tuple(
+            {"amount": period.amount_span, "ratio": period.ratio_span}
+            for period in row.periods
+        )
+
+    evidence_rows = [
+        build_revenue_multi_year_row_evidence(
+            filing_text=filing_text,
+            header_start=candidate.header_start,
+            header_end=candidate.header_end,
+            excerpt_start=excerpt_start,
+            excerpt_end=excerpt_end,
+            row_raw_match=row.raw_match,
+            row_start=row.start,
+            row_end=row.end,
+            row_name_span=row.name_span,
+            row_period_spans=period_spans(row),
+            source_index=row.source_index,
+            selected_index=index,
+            public_row=rows[index],
+            raw_row=raw_rows[index],
+            numeric_checks=numeric_checks[index],
+            row_count=len(parsed.rows),
+            total_raw_match=parsed.total.raw_match,
+            total_start=parsed.total.start,
+            total_end=parsed.total.end,
+            total_name_span=parsed.total.name_span,
+            total_period_spans=period_spans(parsed.total),
+            years=candidate.years,
+            selected_years=selected_years,
+            axis=candidate.axis,
+            headers=headers,
+        )
+        for index, row in enumerate(source_rows)
+    ]
+    caption = MULTI_YEAR_CAPTION_BY_AXIS[candidate.axis]
+    return {
+        "axis": candidate.axis,
+        "caption": f"{caption} ({selected_years[0]}~{selected_years[-1]})",
+        "headers": headers,
+        "rows": rows,
+        "cite": cite,
+        "raw_rows": raw_rows,
+        "evidence_rows": evidence_rows,
+        "numeric_checks": numeric_checks,
+        "raw_unit": candidate.unit,
+    }
+
+
+def build_multi_year_with_diagnostics(
+    filing_text: str,
+    cite: str = "",
+) -> tuple[
+    list[MultiYearRevenueTablePayload],
+    MultiYearRevenueTableDiagnostics,
+]:
+    """공시 원문에서 2~3개년 구성 변화 표와 제외 연도를 함께 돌려준다."""
+
+    runs = _v2_header_runs(filing_text)
+    reasons: dict[str, int] = {}
+    candidates: list[_MultiYearCandidate] = []
+    seen: set[str] = set()
+    for index, run in enumerate(runs):
+        next_run = runs[index + 1] if index + 1 < len(runs) else None
+        block_end = min(
+            run[1] + V2_ROW_SCAN_CHARS,
+            _v2_zone_start(filing_text, next_run[0])
+            if next_run is not None
+            else len(filing_text),
+        )
+        if block_end <= run[1]:
+            continue
+        candidate = _multi_year_candidate(filing_text, run, block_end, reasons)
+        if candidate is None:
+            continue
+        if candidate.fingerprint in seen:
+            reasons["중복 표"] = reasons.get("중복 표", 0) + 1
+            continue
+        seen.add(candidate.fingerprint)
+        candidates.append(candidate)
+
+    tables: list[MultiYearRevenueTablePayload] = []
+    excluded_years: dict[str, list[str]] = {}
+    for axis in (REVENUE_AXIS_PRODUCT, REVENUE_AXIS_REGION):
+        same_axis = [item for item in candidates if item.axis == axis]
+        if not same_axis:
+            continue
+        eligible = [item for item in same_axis if len(item.selected_years) >= 2]
+        best_observed = min(
+            same_axis, key=lambda item: (-item.score, item.header_start)
+        )
+        if not eligible:
+            if best_observed.excluded_years:
+                excluded_years[axis] = list(best_observed.excluded_years)
+            continue
+        best = min(eligible, key=lambda item: (-item.score, item.header_start))
+        tables.append(_multi_year_payload(filing_text, cite, best))
+        if best.excluded_years:
+            excluded_years[axis] = list(best.excluded_years)
+    return tables, {
+        "경로": "v2-multi-year",
+        "후보_표_수": len(runs),
+        "채택_표_수": len(tables),
+        "탈락_사유": reasons,
+        "제외_연도": excluded_years,
+    }
+
+
+def build_multi_year(
+    filing_text: str, cite: str = ""
+) -> list[MultiYearRevenueTablePayload]:
+    """공시 원문에서 연도가 든 고유 열의 구성 변화 표를 만든다.
+
+    머리말에 비교 가능한 연도가 두 개 이상 없거나 연도별 검산 뒤 한 해만
+    남으면 단년 표와 중복되므로 빈 목록을 돌려준다. 기존 ``build()``와 달리
+    명시적으로 다개년 표를 요청하는 공개 함수라 rollout 스위치를 읽지 않는다.
+    """
+
+    return build_multi_year_with_diagnostics(filing_text, cite)[0]
 
 
 def build_with_diagnostics(

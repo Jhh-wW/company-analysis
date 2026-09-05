@@ -100,6 +100,24 @@ def _region_composition() -> PerformanceTable:
     )
 
 
+def _performance() -> PerformanceTable:
+    return PerformanceTable(
+        caption="최근 3개년 실적",
+        headers=("사업연도", "매출액"),
+        rows=(("2023", "100"), ("2024", "110"), ("2025", "120")),
+        cite="조각 1·매출수주",
+    )
+
+
+def _composition_change(caption: str) -> PerformanceTable:
+    return PerformanceTable(
+        caption=caption,
+        headers=("구분", "2025 비중"),
+        rows=(("가", "60%"), ("나", "30%"), ("다", "10%")),
+        cite="조각 1·매출수주",
+    )
+
+
 def _section_of(report, cell: str):
     for section in report.sections:
         if section.cell == cell:
@@ -184,6 +202,32 @@ def test_구성표는_다른_장에_번지지_않는다():
             PORTFOLIO_TABLE_SECTION_ID,
         }:
             assert section.tables == [], section.cell
+
+
+def test_4장은_실적표_뒤에_제품_지역_구성변화표를_붙인다():
+    report = render_report(
+        "가나다전자(주)",
+        _composed(),
+        _raw_fragments(),
+        _performance(),
+        table_presentation="trend",
+        composition_tables=(
+            _composition_change("제품·서비스별 매출 비중 변화 (2023~2025)"),
+            _composition_change("지역별 매출 비중 변화 (2023~2025)"),
+        ),
+    )
+
+    section = _section_of(report, "past_changes")
+    assert [table.caption for table in section.tables] == [
+        "최근 3개년 실적",
+        "제품·서비스별 매출 비중 변화 (2023~2025)",
+        "지역별 매출 비중 변화 (2023~2025)",
+    ]
+    assert [table.presentation for table in section.tables] == [
+        "trend",
+        COMPOSITION_PRESENTATION,
+        COMPOSITION_PRESENTATION,
+    ]
 
 
 # ══════════════════════════════════════════════════════════
