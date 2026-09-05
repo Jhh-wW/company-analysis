@@ -5,6 +5,9 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from src.features.chapter_evidence.constants import (
+    REQUIRED_SOURCE_KINDS_BY_COMPANY_TYPE,
+)
 from src.features.homepage.constants import (
     WIDE_SOURCE_KIND_IR_PDF,
     WIDE_SOURCE_KIND_IDENTITY_VERIFIED_WEB_PAGE,
@@ -21,6 +24,7 @@ from src.shared.report_evidence.constants import (
     OFFICIAL_WEB_SOURCE_KINDS,
     SOURCE_KIND_DART_AUDIT_REPORT,
     SOURCE_KIND_DART_BUSINESS_REPORT,
+    SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT,
     SOURCE_KIND_DART_QUARTERLY_REPORT,
     SOURCE_KIND_DART_SEMIANNUAL_REPORT,
     SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE,
@@ -40,6 +44,7 @@ from src.shared.report_evidence.source_kind_policy import (
 _DART_SOURCE_CONSTANT_NAMES = {
     "SOURCE_KIND_BUSINESS_REPORT",
     "SOURCE_KIND_AUDIT_REPORT",
+    "SOURCE_KIND_CONSOLIDATED_AUDIT_REPORT",
     "SOURCE_KIND_SEMIANNUAL_REPORT",
     "SOURCE_KIND_QUARTERLY_REPORT",
 }
@@ -76,6 +81,7 @@ def test_analysis_engine_DART종류가_앱정본과_정확히같다() -> None:
         {
             SOURCE_KIND_DART_BUSINESS_REPORT,
             SOURCE_KIND_DART_AUDIT_REPORT,
+            SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT,
             SOURCE_KIND_DART_SEMIANNUAL_REPORT,
             SOURCE_KIND_DART_QUARTERLY_REPORT,
         }
@@ -111,6 +117,28 @@ def test_닫힌종류목록과_슬롯소유권표가_빠짐없이_같다() -> No
     assert FORMAL_ATTEMPT_SOURCE_KINDS - FORMAL_DOCUMENT_SOURCE_KINDS == {
         SOURCE_KIND_ROBOTS_TXT
     }
+
+
+def test_연결감사보고서는_감사보고서와_같은_슬롯과_등급의_OPTIONAL문서다() -> None:
+    assert FORMAL_DOCUMENT_SLOT_IDS_BY_SOURCE_KIND[
+        SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT
+    ] == FORMAL_DOCUMENT_SLOT_IDS_BY_SOURCE_KIND[SOURCE_KIND_DART_AUDIT_REPORT]
+    assert FORMAL_DOCUMENT_TRUST_BY_SOURCE_KIND[
+        SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT
+    ] == frozenset(
+        {(SourceTier.TIER_1_OFFICIAL, SourceRequirement.OPTIONAL)}
+    )
+    assert FORMAL_DOCUMENT_WRITER_TRUST_BY_SOURCE_KIND[
+        SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT
+    ] == (SourceTier.TIER_1_OFFICIAL, SourceRequirement.OPTIONAL)
+
+
+def test_연결감사보고서는_회사유형별_REQUIRED종류에_들어가지_않는다() -> None:
+    assert all(
+        SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT not in source_kinds
+        for by_section in REQUIRED_SOURCE_KINDS_BY_COMPANY_TYPE.values()
+        for source_kinds in by_section.values()
+    )
 
 
 def test_신원검증웹은_완전한_DARTproof만_TIER1이_될수_있는_두조합이다() -> None:
