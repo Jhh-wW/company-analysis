@@ -128,7 +128,9 @@ def test_first_render_beta_defers_cron_entrypoints() -> None:
     assert all(service["type"] == "web" for service in blueprint["services"])
 
 
-def test_all_git_based_render_services_disable_automatic_deploys() -> None:
+def test_all_git_based_render_services_deploy_on_commit() -> None:
+    # 2026-09-06부터 main 커밋이 곧 배포다. 머지 뒤 사람이 버튼을 눌러야 해서
+    # 운영판이 main보다 뒤처지는 일이 반복돼 자동 배포로 바꿨다 (deploy/README.md).
     blueprint = yaml.load(
         (REPOSITORY_ROOT / "render.yaml").read_text(encoding="utf-8"),
         Loader=yaml.BaseLoader,
@@ -145,7 +147,7 @@ def test_all_git_based_render_services_disable_automatic_deploys() -> None:
     }
     assert not any(service["type"] == "cron" for service in git_based_services)
     assert all(
-        service.get("autoDeployTrigger") == "off"
+        service.get("autoDeployTrigger") == "commit"
         for service in git_based_services
     )
 
