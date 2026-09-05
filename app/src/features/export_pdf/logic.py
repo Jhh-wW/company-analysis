@@ -21,6 +21,7 @@ import threading
 import unicodedata
 import urllib.parse
 from collections import OrderedDict
+from functools import lru_cache
 from typing import Final, Iterable, Sequence, cast
 
 from pypdf import PdfReader, PdfWriter
@@ -99,6 +100,11 @@ from src.shared.report_generation.public_projection import (
 )
 
 _FONT_LOCK = threading.Lock()
+_FONT_PATHS = {
+    constants.FONT_REGULAR: constants.FONT_REGULAR_PATH,
+    constants.FONT_SEMIBOLD: constants.FONT_SEMIBOLD_PATH,
+    constants.FONT_FALLBACK: constants.FONT_FALLBACK_PATH,
+}
 _ISO_DATE_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}(?:$|T|\s)")
 _PDF_TEXT_REPLACEMENTS = (
     ("附", "참고"),
@@ -482,7 +488,14 @@ class _TrendGraphic(Flowable):
             title = series.label
             if self.visual.unit:
                 title = f"{title} ({self.visual.unit})"
-            canvas.drawString(x0 + 8, panel_height - 12, _single_line_pdf_text(title))
+            _draw_text_with_fallback(
+                canvas,
+                x0 + 8,
+                panel_height - 12,
+                title,
+                font_name=constants.FONT_SEMIBOLD,
+                font_size=7.7,
+            )
 
             labels_y = 6
             positive_axis = 17
@@ -526,10 +539,26 @@ class _TrendGraphic(Flowable):
                 )
                 canvas.setFont(constants.FONT_SEMIBOLD, 7.5)
                 value_y = bar_y - 9 if draws_down else bar_y + bar_height + 3
-                canvas.drawCentredString(center_x, value_y, _single_line_pdf_text(point.display))
+                _draw_text_with_fallback(
+                    canvas,
+                    center_x,
+                    value_y,
+                    point.display,
+                    font_name=constants.FONT_SEMIBOLD,
+                    font_size=7.5,
+                    alignment="center",
+                )
                 canvas.setFillColor(colors.HexColor(constants.COLOR_MUTED))
                 canvas.setFont(constants.FONT_REGULAR, 7.5)
-                canvas.drawCentredString(center_x, labels_y, _single_line_pdf_text(point.label))
+                _draw_text_with_fallback(
+                    canvas,
+                    center_x,
+                    labels_y,
+                    point.label,
+                    font_name=constants.FONT_REGULAR,
+                    font_size=7.5,
+                    alignment="center",
+                )
 
 
 #: 흐름 상자 한 칸의 «최소» 높이. 예전엔 이 값이 고정 높이였다 — 짧은
@@ -804,6 +833,10 @@ def _register_fonts() -> None:
             pdfmetrics.registerFont(
                 TTFont(constants.FONT_SEMIBOLD, str(constants.FONT_SEMIBOLD_PATH))
             )
+        if constants.FONT_FALLBACK not in registered:
+            pdfmetrics.registerFont(
+                TTFont(constants.FONT_FALLBACK, str(constants.FONT_FALLBACK_PATH))
+            )
         pdfmetrics.registerFontFamily(
             "FreesentationPDF",
             normal=constants.FONT_REGULAR,
@@ -938,14 +971,123 @@ def _normalize_pdf_text(value: object) -> str:
     return "".join(safe)
 
 
+@lru_cache(maxsize=None)
+def _font_codepoints(font_name: str) -> frozenset[int]:
+    """등록 대상 TTF의 cmap을 ReportLab 자체 판독기로 읽는다."""
+
+    path = _FONT_PATHS.get(font_name)
+    if path is None:
+        raise ValueError("지원하지 않는 PDF 글꼴 이름입니다")
+    font = TTFont(f"{font_name}-GlyphProbe", str(path))
+    return frozenset(font.face.charToGlyph)
+
+
+def _missing_glyphs(
+    value: object,
+    font_name: str = constants.FONT_REGULAR,
+) -> tuple[str, ...]:
+    """실제로 그릴 문자열에서 지정 글꼴이 못 그리는 문자를 순서대로 찾는다."""
+
+    codepoints = _font_codepoints(font_name)
+    missing: dict[str, None] = {}
+    for char in _normalize_pdf_text(value):
+        if char != "\n" and ord(char) not in codepoints:
+            missing.setdefault(char, None)
+    return tuple(missing)
+
+
+def _unsupported_glyphs(value: object) -> tuple[str, ...]:
+    """기본·대체 글꼴 어느 쪽에도 없는 문자를 순서대로 찾는다."""
+
+    fallback_codepoints = _font_codepoints(constants.FONT_FALLBACK)
+    return tuple(
+        char
+        for char in _missing_glyphs(value)
+        if ord(char) not in fallback_codepoints
+    )
+
+
+def _font_runs(text: str, font_name: str) -> tuple[tuple[str, str], ...]:
+    """기본 글꼴을 보존하고 누락 문자 구간에만 대체 글꼴을 배정한다."""
+
+    primary_codepoints = _font_codepoints(font_name)
+    fallback_codepoints = _font_codepoints(constants.FONT_FALLBACK)
+    runs: list[tuple[str, str]] = []
+    current_font = ""
+    current_text: list[str] = []
+    for char in text:
+        if char == "\n" or ord(char) in primary_codepoints:
+            next_font = font_name
+        elif ord(char) in fallback_codepoints:
+            next_font = constants.FONT_FALLBACK
+        else:
+            raise PDFGenerationError("PDF 글꼴에 없는 문자가 있습니다.")
+        if current_text and next_font != current_font:
+            runs.append((current_font, "".join(current_text)))
+            current_text = []
+        current_font = next_font
+        current_text.append(char)
+    if current_text:
+        runs.append((current_font, "".join(current_text)))
+    return tuple(runs)
+
+
 def _escape(value: object) -> str:
-    return html.escape(_normalize_pdf_text(value), quote=False).replace("\n", "<br/>")
+    text = _normalize_pdf_text(value)
+    if not _missing_glyphs(text):
+        return html.escape(text, quote=False).replace("\n", "<br/>")
+    markup: list[str] = []
+    for font_name, run in _font_runs(text, constants.FONT_REGULAR):
+        escaped = html.escape(run, quote=False).replace("\n", "<br/>")
+        if font_name == constants.FONT_FALLBACK:
+            markup.append(f'<font name="{constants.FONT_FALLBACK}">{escaped}</font>')
+        else:
+            markup.append(escaped)
+    return "".join(markup)
 
 
 def _single_line_pdf_text(value: object) -> str:
     """PDF Title·outline·표지 metadata처럼 한 줄이어야 하는 경계를 접는다."""
 
     return re.sub(r"\s+", " ", _normalize_pdf_text(value)).strip()
+
+
+def _draw_text_with_fallback(
+    canvas: Canvas,
+    x: float,
+    y: float,
+    value: object,
+    *,
+    font_name: str,
+    font_size: float,
+    alignment: str = "left",
+) -> None:
+    """canvas 단일 행도 기본 폭을 보존하며 누락 문자 구간만 대체해 그린다."""
+
+    text = _single_line_pdf_text(value)
+    missing = _missing_glyphs(text, font_name)
+    if not missing:
+        if alignment == "center":
+            canvas.drawCentredString(x, y, text)
+        elif alignment == "right":
+            canvas.drawRightString(x, y, text)
+        else:
+            canvas.drawString(x, y, text)
+        return
+
+    runs = _font_runs(text, font_name)
+    widths = [pdfmetrics.stringWidth(run, run_font, font_size) for run_font, run in runs]
+    total_width = sum(widths)
+    cursor_x = x
+    if alignment == "center":
+        cursor_x -= total_width / 2
+    elif alignment == "right":
+        cursor_x -= total_width
+    for (run_font, run), width in zip(runs, widths, strict=True):
+        canvas.setFont(run_font, font_size)
+        canvas.drawString(cursor_x, y, run)
+        cursor_x += width
+    canvas.setFont(font_name, font_size)
 
 
 def _styles() -> dict[str, ParagraphStyle]:
@@ -2230,10 +2372,23 @@ def _page_furniture(canvas: Canvas, doc: SimpleDocTemplate) -> None:
         canvas.setFont(constants.FONT_REGULAR, constants.META_FONT_SIZE_PT)
         canvas.setFillColor(colors.HexColor(constants.COLOR_MUTED))
         y = A4[1] - 34
-        canvas.drawString(constants.PAGE_MARGIN_PT, y, title)
+        _draw_text_with_fallback(
+            canvas,
+            constants.PAGE_MARGIN_PT,
+            y,
+            title,
+            font_name=constants.FONT_REGULAR,
+            font_size=constants.META_FONT_SIZE_PT,
+        )
         if report_date:
-            canvas.drawRightString(
-                A4[0] - constants.PAGE_MARGIN_PT, y, f"기준일 {report_date}"
+            _draw_text_with_fallback(
+                canvas,
+                A4[0] - constants.PAGE_MARGIN_PT,
+                y,
+                f"기준일 {report_date}",
+                font_name=constants.FONT_REGULAR,
+                font_size=constants.META_FONT_SIZE_PT,
+                alignment="right",
             )
         canvas.setStrokeColor(colors.HexColor(constants.COLOR_LINE))
         canvas.setLineWidth(0.5)
@@ -2247,8 +2402,23 @@ def _page_furniture(canvas: Canvas, doc: SimpleDocTemplate) -> None:
         )
         canvas.setFont(constants.FONT_REGULAR, constants.META_FONT_SIZE_PT)
         canvas.setFillColor(colors.HexColor(constants.COLOR_WEAK))
-        canvas.drawString(constants.PAGE_MARGIN_PT, 24, company)
-        canvas.drawRightString(A4[0] - constants.PAGE_MARGIN_PT, 24, str(doc.page))
+        _draw_text_with_fallback(
+            canvas,
+            constants.PAGE_MARGIN_PT,
+            24,
+            company,
+            font_name=constants.FONT_REGULAR,
+            font_size=constants.META_FONT_SIZE_PT,
+        )
+        _draw_text_with_fallback(
+            canvas,
+            A4[0] - constants.PAGE_MARGIN_PT,
+            24,
+            str(doc.page),
+            font_name=constants.FONT_REGULAR,
+            font_size=constants.META_FONT_SIZE_PT,
+            alignment="right",
+        )
     canvas.restoreState()
 
 
