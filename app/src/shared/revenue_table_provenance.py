@@ -13,6 +13,7 @@ import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 from typing import Final, Literal, Optional, TypeAlias
 
 
@@ -45,6 +46,10 @@ REVENUE_CAPTION_BY_AXIS: Final[dict[RevenueAxis, str]] = {
     REVENUE_AXIS_PRODUCT: "무엇을 팔아 번 돈인가 — 제품·서비스별 매출 비중",
     REVENUE_AXIS_REGION: "어디서 번 돈인가 — 지역별 매출 비중",
 }
+REVENUE_CHANGE_CAPTION_BY_AXIS: Final[dict[RevenueAxis, str]] = {
+    REVENUE_AXIS_PRODUCT: "제품·서비스별 매출 비중 변화",
+    REVENUE_AXIS_REGION: "지역별 매출 비중 변화",
+}
 REVENUE_TABLE_SECTION_BY_AXIS: Final[dict[RevenueAxis, str]] = {
     REVENUE_AXIS_PRODUCT: "portfolio",
     REVENUE_AXIS_REGION: "business_model",
@@ -54,6 +59,7 @@ REVENUE_ROW_PROVENANCE_SCHEMA: Final[str] = "revenue-table-row-provenance-v2"
 REVENUE_EXTRACTOR_NAME: Final[str] = "revenuemix.regex"
 REVENUE_EXTRACTOR_VERSION: Final[str] = "3"
 REVENUE_MAX_ROWS: Final[int] = 12
+REVENUE_MULTI_YEAR_MAX_PERIODS: Final[int] = 3
 REVENUE_HEADERS: Final[tuple[str, str, str]] = (
     "구분",
     "매출액 (백만원)",
@@ -157,11 +163,39 @@ def revenue_table_headers(unit: str) -> tuple[str, str, str]:
 #: 표는 은행 자금조달표뿐인데, 그건 매출표가 아니라서 받으면 오탐이 된다.
 REVENUE_ROW_SIGN_CHARS: Final[str] = "△▲▽▼-−"
 _V2_SIGN: Final[str] = r"[△▲▽▼\-−]?"
+_V2_AMOUNT: Final[str] = rf"{_V2_SIGN}(?:\d{{1,3}}(?:,\d{{3}})+|\d+)"
+_V2_RATIO: Final[str] = rf"{_V2_SIGN}\d{{1,3}}\.\d{{1,2}}"
+
+
+@lru_cache(maxsize=3)
+def revenue_row_pattern_v2(period_count: int) -> re.Pattern[str]:
+    """연속된 금액·비중 쌍을 정확히 ``period_count``개 무는 행 모양.
+
+    마지막의 부정 전방탐색은 머리말이 말한 연도 수보다 쌍이 더 많은 행을
+    앞부분만 잘라 받지 않게 한다. 연도 수보다 적은 행은 정규식 자체가 묻지
+    못하므로 호출자가 그 행을 추측해 채우지 않는다.
+    """
+
+    if type(period_count) is not int or period_count < 1:
+        raise ValueError("매출 구성표의 기간 수는 1 이상이어야 합니다")
+    pairs = r"\s+".join(
+        rf"({_V2_AMOUNT})\s+({_V2_RATIO})\s*%?"
+        for _ in range(period_count)
+    )
+    return re.compile(
+        rf"([^\d%]{{2,80}}?)\s+{pairs}"
+        rf"(?!\s+{_V2_AMOUNT}\s+{_V2_RATIO}\s*%?)"
+    )
+
+
+# 단년 ``build()``는 3개년 행의 맨 앞 쌍만 물어 온 기존 정규식을 그대로 쓴다.
+# 위의 정확 개수 정규식으로 바꾸면 같은 원문에서 기존 표가 사라진다.
 REVENUE_ROW_RE_V2: Final[re.Pattern[str]] = re.compile(
     r"([^\d%]{2,80}?)\s+"
-    rf"({_V2_SIGN}(?:\d{{1,3}}(?:,\d{{3}})+|\d+))\s+"
-    rf"({_V2_SIGN}\d{{1,3}}\.\d{{1,2}})\s*%?"
+    rf"({_V2_AMOUNT})\s+"
+    rf"({_V2_RATIO})\s*%?"
 )
+REVENUE_MULTI_YEAR_SELECTION: Final[str] = "all-period-pairs"
 
 #: 검증이 받아 주는 행 모양 후보. 생산자가 «어느 경로로 만들었든» 이 중
 #: 하나로 정확히 다시 잘려야 근거로 인정한다. 순서가 곧 우선순위다.
@@ -300,6 +334,18 @@ def revenue_signed_decimal(value: object) -> Decimal | None:
     return -number if negative else number
 
 
+def revenue_ratio_numeric_check(value: object) -> str:
+    """공시 비중 표시 하나를 레거시 결정론 검산식으로 보존한다."""
+
+    raw = str(value).strip().removesuffix("%").strip()
+    number = revenue_signed_decimal(raw)
+    if number is None:
+        raise ValueError("매출 비중을 수치 검산식으로 바꿀 수 없습니다")
+    places = len(raw.partition(".")[2]) if "." in raw else 0
+    shown = f"{number:.{places}f}"
+    return f"{shown}|1|{places}|{shown}"
+
+
 def revenue_amounts_sum_to_total(
     amounts: Iterable[object], total: object
 ) -> bool:
@@ -412,11 +458,15 @@ def revenue_table_source_excerpt(evidence_rows: Sequence[str]) -> str:
 
 
 def _caption_matches_axis(axis: RevenueAxis, caption: str) -> bool:
-    expected = REVENUE_CAPTION_BY_AXIS[axis]
-    return re.fullmatch(
-        rf"{re.escape(expected)}(?: \(20\d{{2}}년\))?",
-        str(caption).strip(),
-    ) is not None
+    single_year = REVENUE_CAPTION_BY_AXIS[axis]
+    change = REVENUE_CHANGE_CAPTION_BY_AXIS[axis]
+    return any(
+        re.fullmatch(pattern, str(caption).strip()) is not None
+        for pattern in (
+            rf"{re.escape(single_year)}(?: \(20\d{{2}}년\))?",
+            rf"{re.escape(change)} \(20\d{{2}}~20\d{{2}}\)",
+        )
+    )
 
 
 def _text_axis(value: str) -> RevenueAxis | None:
@@ -649,6 +699,135 @@ def build_revenue_row_evidence(
     return canonical_json(payload)
 
 
+def build_revenue_multi_year_row_evidence(
+    *,
+    filing_text: str,
+    header_start: int,
+    header_end: int,
+    excerpt_start: int,
+    excerpt_end: int,
+    row_raw_match: str,
+    row_start: int,
+    row_end: int,
+    row_name_span: tuple[int, int],
+    row_period_spans: Sequence[Mapping[str, tuple[int, int]]],
+    source_index: int,
+    selected_index: int,
+    public_row: Sequence[str],
+    raw_row: Sequence[str],
+    numeric_checks: Sequence[str],
+    row_count: int,
+    total_raw_match: str,
+    total_start: int,
+    total_end: int,
+    total_name_span: tuple[int, int],
+    total_period_spans: Sequence[Mapping[str, tuple[int, int]]],
+    years: Sequence[str],
+    selected_years: Sequence[str],
+    axis: RevenueAxis,
+    headers: Sequence[str],
+) -> str:
+    """다개년 공개 행에 모든 연도 쌍의 원문 좌표와 검산식을 붙인다.
+
+    단년 evidence의 JSON 모양은 발급된 봉인과 연결돼 있어 손대지 않는다.
+    다개년 전용 필드는 같은 상위 계약 안에서 ``period_pairs``로 분리하며,
+    공개 비중과 내부 금액 행은 같은 연도 열 순서로 각각 보존한다.
+    """
+
+    if not row_period_spans or len(row_period_spans) != len(years):
+        raise ValueError("다개년 매출 행의 연도와 원문 쌍 수가 다릅니다")
+    if len(total_period_spans) != len(years):
+        raise ValueError("다개년 매출 합계의 연도와 원문 쌍 수가 다릅니다")
+    if len(headers) != len(public_row) or len(headers) != len(raw_row):
+        raise ValueError("다개년 매출 행의 공개·원값 열 수가 다릅니다")
+    if len(numeric_checks) != len(selected_years):
+        raise ValueError("다개년 매출 행의 표시값 검산 수가 다릅니다")
+
+    def period_payloads(
+        raw_match: str,
+        period_spans: Sequence[Mapping[str, tuple[int, int]]],
+    ) -> list[dict[str, object]]:
+        return [
+            {
+                "year": str(year),
+                "amount": _span_payload(raw_match, *spans["amount"]),
+                "ratio": _span_payload(raw_match, *spans["ratio"]),
+            }
+            for year, spans in zip(years, period_spans)
+        ]
+
+    excerpt = filing_text[excerpt_start:excerpt_end]
+    row_first = row_period_spans[0]
+    total_first = total_period_spans[0]
+    payload = {
+        "schema": REVENUE_ROW_PROVENANCE_SCHEMA,
+        "extractor": {
+            "name": REVENUE_EXTRACTOR_NAME,
+            "version": REVENUE_EXTRACTOR_VERSION,
+        },
+        "source": {
+            "filing_sha256": sha256_text(filing_text),
+            "excerpt": excerpt,
+            "start": excerpt_start,
+            "end": excerpt_end,
+            "sha256": sha256_text(excerpt),
+        },
+        "table": {
+            "axis": axis,
+            "complete": True,
+            "row_count": row_count,
+            "max_rows": REVENUE_MAX_ROWS,
+            "years": [str(year) for year in years],
+            "selected_years": [str(year) for year in selected_years],
+            "header": {
+                "text": filing_text[header_start:header_end],
+                "start": header_start,
+                "end": header_end,
+                "excerpt_start": header_start - excerpt_start,
+                "excerpt_end": header_end - excerpt_start,
+                "sha256": sha256_text(filing_text[header_start:header_end]),
+            },
+            "total": {
+                "raw_match": total_raw_match,
+                "start": total_start,
+                "end": total_end,
+                "excerpt_start": total_start - excerpt_start,
+                "excerpt_end": total_end - excerpt_start,
+                "sha256": sha256_text(total_raw_match),
+                "raw_fields": {
+                    "name": _span_payload(total_raw_match, *total_name_span),
+                    "amount": _span_payload(total_raw_match, *total_first["amount"]),
+                    "ratio": _span_payload(total_raw_match, *total_first["ratio"]),
+                },
+                "period_pairs": period_payloads(total_raw_match, total_period_spans),
+            },
+        },
+        "row": {
+            "raw_match": row_raw_match,
+            "start": row_start,
+            "end": row_end,
+            "excerpt_start": row_start - excerpt_start,
+            "excerpt_end": row_end - excerpt_start,
+            "sha256": sha256_text(row_raw_match),
+            "raw_fields": {
+                "name": _span_payload(row_raw_match, *row_name_span),
+                "amount": _span_payload(row_raw_match, *row_first["amount"]),
+                "ratio": _span_payload(row_raw_match, *row_first["ratio"]),
+            },
+            "period_pairs": period_payloads(row_raw_match, row_period_spans),
+            "selection": REVENUE_MULTI_YEAR_SELECTION,
+            "source_index": source_index,
+            "selected_index": selected_index,
+            "public_raw_fields": dict(
+                zip(headers, (str(value) for value in raw_row))
+            ),
+            "numeric_checks": [str(value) for value in numeric_checks],
+        },
+        "public_fields": dict(zip(headers, (str(value) for value in public_row))),
+    }
+    return canonical_json(payload)
+
+
 def _integer(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
@@ -815,6 +994,291 @@ def _row_fields_match_a_known_shape(
     return False
 
 
+def _multi_year_period_values(
+    payload: object,
+    *,
+    raw_match: str,
+    fields: Mapping[str, object],
+    years: tuple[str, ...],
+) -> tuple[tuple[str, str], ...] | None:
+    """봉인된 다개년 쌍 좌표를 동적 행 정규식의 캡처와 맞춘다."""
+
+    if not isinstance(payload, Sequence) or isinstance(payload, (str, bytes)):
+        return None
+    periods = tuple(payload)
+    if len(periods) != len(years):
+        return None
+    structural_match = revenue_row_pattern_v2(len(years)).fullmatch(raw_match)
+    if structural_match is None:
+        return None
+    expected_first_fields = {
+        "name": _span_payload(
+            raw_match, structural_match.start(1), structural_match.end(1)
+        ),
+        "amount": _span_payload(
+            raw_match, structural_match.start(2), structural_match.end(2)
+        ),
+        "ratio": _span_payload(
+            raw_match, structural_match.start(3), structural_match.end(3)
+        ),
+    }
+    if fields != expected_first_fields:
+        return None
+
+    values: list[tuple[str, str]] = []
+    for index, (year, period) in enumerate(zip(years, periods)):
+        if not isinstance(period, Mapping) or set(period) != {"year", "amount", "ratio"}:
+            return None
+        amount_group = 2 + index * 2
+        ratio_group = amount_group + 1
+        expected = {
+            "year": year,
+            "amount": _span_payload(
+                raw_match,
+                structural_match.start(amount_group),
+                structural_match.end(amount_group),
+            ),
+            "ratio": _span_payload(
+                raw_match,
+                structural_match.start(ratio_group),
+                structural_match.end(ratio_group),
+            ),
+        }
+        if period != expected:
+            return None
+        values.append(
+            (structural_match.group(amount_group), f"{structural_match.group(ratio_group)}%")
+        )
+    return tuple(values)
+
+
+def _multi_year_revenue_row_evidence_matches(
+    payload: Mapping[str, object],
+    *,
+    excerpt: str,
+    source_start: int,
+    row: Mapping[str, object],
+    raw_match: str,
+    fields: Mapping[str, object],
+    headers: Sequence[str],
+    public_row: Sequence[str],
+    raw_row: Sequence[str] | None,
+    expected_selected_index: int | None,
+    expected_row_count: int | None,
+) -> bool:
+    """다개년 비중 행의 공개값·금액 원값·모든 원문 쌍을 함께 검증한다."""
+
+    expected_row_keys = {
+        "raw_match",
+        "start",
+        "end",
+        "excerpt_start",
+        "excerpt_end",
+        "sha256",
+        "raw_fields",
+        "period_pairs",
+        "selection",
+        "source_index",
+        "selected_index",
+        "public_raw_fields",
+        "numeric_checks",
+    }
+    if set(row) != expected_row_keys:
+        return False
+    source_index = _integer(row.get("source_index"))
+    selected_index = _integer(row.get("selected_index"))
+    if (
+        source_index is None
+        or selected_index is None
+        or source_index < 0
+        or selected_index < 0
+        or row.get("selection") != REVENUE_MULTI_YEAR_SELECTION
+        or (
+            expected_selected_index is not None
+            and selected_index != expected_selected_index
+        )
+    ):
+        return False
+
+    table = payload.get("table")
+    expected_table_keys = {
+        "axis",
+        "complete",
+        "row_count",
+        "max_rows",
+        "years",
+        "selected_years",
+        "header",
+        "total",
+    }
+    if not isinstance(table, Mapping) or set(table) != expected_table_keys:
+        return False
+    years_raw = table.get("years")
+    selected_raw = table.get("selected_years")
+    if (
+        not isinstance(years_raw, Sequence)
+        or isinstance(years_raw, (str, bytes))
+        or not isinstance(selected_raw, Sequence)
+        or isinstance(selected_raw, (str, bytes))
+    ):
+        return False
+    years = tuple(str(value) for value in years_raw)
+    selected_years = tuple(str(value) for value in selected_raw)
+    if (
+        not 2 <= len(years) <= REVENUE_MULTI_YEAR_MAX_PERIODS
+        or len(set(years)) != len(years)
+        or any(re.fullmatch(r"20\d{2}", year) is None for year in years)
+        or not 2 <= len(selected_years) <= len(years)
+        or len(set(selected_years)) != len(selected_years)
+        or any(year not in years for year in selected_years)
+        or selected_years != tuple(sorted(selected_years, key=int))
+    ):
+        return False
+
+    row_count = _integer(table.get("row_count"))
+    header_payload = table.get("header")
+    header_text = (
+        header_payload.get("text") if isinstance(header_payload, Mapping) else ""
+    )
+    table_axis = table.get("axis")
+    header_years = tuple(
+        dict.fromkeys(re.findall(r"(20\d{2})\s*년", str(header_text)))
+    )
+    if (
+        table_axis not in REVENUE_AXES
+        or not _header_axis_agrees(str(header_text), table_axis)  # type: ignore[arg-type]
+        or _text_axis(excerpt) != table_axis
+        or revenue_units_in(str(header_text)) == ()
+        or len(revenue_units_in(str(header_text))) != 1
+        or header_years != years
+        or table.get("complete") is not True
+        or table.get("max_rows") != REVENUE_MAX_ROWS
+        or row_count is None
+        or not 2 <= row_count <= REVENUE_MAX_ROWS
+        or (expected_row_count is not None and row_count != expected_row_count)
+        or selected_index > row_count
+    ):
+        return False
+    if not _header_span_matches(
+        header_payload,
+        excerpt=excerpt,
+        excerpt_absolute_start=source_start,
+    ):
+        return False
+
+    row_values = _multi_year_period_values(
+        row.get("period_pairs"),
+        raw_match=raw_match,
+        fields=fields,
+        years=years,
+    )
+    total_payload = table.get("total")
+    total_match = _raw_span_matches(
+        total_payload,
+        excerpt=excerpt,
+        excerpt_absolute_start=source_start,
+    )
+    if row_values is None or total_match is None or not isinstance(total_payload, Mapping):
+        return False
+    total_raw_match, total_fields = total_match
+    if set(total_payload) != {
+        "raw_match",
+        "start",
+        "end",
+        "excerpt_start",
+        "excerpt_end",
+        "sha256",
+        "raw_fields",
+        "period_pairs",
+    }:
+        return False
+    total_values = _multi_year_period_values(
+        total_payload.get("period_pairs"),
+        raw_match=total_raw_match,
+        fields=total_fields,
+        years=years,
+    )
+    if total_values is None:
+        return False
+
+    expected_headers = (REVENUE_HEADERS[0],) + tuple(
+        f"{year} {REVENUE_HEADERS[2]}" for year in selected_years
+    )
+    normalized_headers = tuple(" ".join(str(value).split()) for value in headers)
+    selected_positions = tuple(years.index(year) for year in selected_years)
+    name = _field_value(fields, "name", raw_match)
+    total_name = _field_value(total_fields, "name", total_raw_match)
+    if name is None or total_name is None or normalized_headers != expected_headers:
+        return False
+    expected_public = {
+        REVENUE_HEADERS[0]: normalize_revenue_name(name),
+        **{
+            f"{year} {REVENUE_HEADERS[2]}": row_values[position][1]
+            for year, position in zip(selected_years, selected_positions)
+        },
+    }
+    expected_raw = {
+        REVENUE_HEADERS[0]: normalize_revenue_name(name),
+        **{
+            f"{year} {REVENUE_HEADERS[2]}": row_values[position][0]
+            for year, position in zip(selected_years, selected_positions)
+        },
+    }
+    expected_checks = tuple(
+        revenue_ratio_numeric_check(row_values[position][1])
+        for position in selected_positions
+    )
+    raw_numeric_checks = row.get("numeric_checks")
+    if (
+        not isinstance(raw_numeric_checks, Sequence)
+        or isinstance(raw_numeric_checks, (str, bytes))
+        or payload.get("public_fields") != expected_public
+        or row.get("public_raw_fields") != expected_raw
+        or tuple(str(value) for value in raw_numeric_checks)
+        != expected_checks
+        or tuple(str(value) for value in public_row)
+        != tuple(expected_public[header] for header in normalized_headers)
+        or (
+            raw_row is not None
+            and tuple(str(value) for value in raw_row)
+            != tuple(expected_raw[header] for header in normalized_headers)
+        )
+    ):
+        return False
+
+    total_selected_ratios = (
+        revenue_signed_decimal(total_values[position][1])
+        for position in selected_positions
+    )
+    if any(value != Decimal(100) for value in total_selected_ratios):
+        return False
+    header_end = _integer(header_payload.get("end")) if isinstance(header_payload, Mapping) else None
+    row_start = _integer(row.get("start"))
+    row_end = _integer(row.get("end"))
+    total_start = _integer(total_payload.get("start"))
+    if (
+        header_end is None
+        or row_start is None
+        or row_end is None
+        or total_start is None
+        or _integer(total_payload.get("excerpt_end")) != len(excerpt)
+        or header_end > row_start
+    ):
+        return False
+    is_total_row = selected_index == row_count
+    if is_total_row:
+        return bool(
+            row_start == total_start
+            and row_end == _integer(total_payload.get("end"))
+            and is_revenue_total_name_v2(normalize_revenue_name(total_name))
+        )
+    return bool(
+        selected_index < row_count
+        and row_end <= total_start
+        and not is_revenue_total_name_v2(normalize_revenue_name(name))
+    )
+
+
 def revenue_row_evidence_matches(
     evidence: str,
     *,
@@ -889,6 +1353,20 @@ def revenue_row_evidence_matches(
     if row_match is None or not isinstance(row, Mapping):
         return False
     raw_match, fields = row_match
+    if row.get("selection") == REVENUE_MULTI_YEAR_SELECTION:
+        return _multi_year_revenue_row_evidence_matches(
+            payload,
+            excerpt=excerpt,
+            source_start=source_start,
+            row=row,
+            raw_match=raw_match,
+            fields=fields,
+            headers=headers,
+            public_row=public_row,
+            raw_row=raw_row,
+            expected_selected_index=expected_selected_index,
+            expected_row_count=expected_row_count,
+        )
     if not _row_fields_match_a_known_shape(raw_match, fields):
         return False
     source_index = _integer(row.get("source_index"))
