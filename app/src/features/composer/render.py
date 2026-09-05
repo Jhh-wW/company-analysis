@@ -1177,12 +1177,16 @@ def render_report(
         #   이다 — 4장은 실적표 하나, 2장은 지역 구성표, 3장은 제품 구성표를
         #   받을 수 있다. 여기 흐름표(경로표)까지 «같은 장에 함께» 실릴 수 있다.
         slots: list[tuple[PerformanceTable, str]] = []
-        if (
-            section.section_id == PERFORMANCE_TABLE_SECTION_ID
-            and performance_table is not None
-            and performance_table.rows
-        ):
-            slots.append((performance_table, table_presentation))
+        if section.section_id == PERFORMANCE_TABLE_SECTION_ID:
+            if performance_table is not None and performance_table.rows:
+                slots.append((performance_table, table_presentation))
+            slots.extend(
+                (table, COMPOSITION_PRESENTATION)
+                for table in composition_tables
+                if table.rows
+                and revenue_table_section_id_from_caption(table.caption)
+                == section.section_id
+            )
         else:
             slots.extend(
                 (table, COMPOSITION_PRESENTATION)
