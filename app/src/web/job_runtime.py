@@ -68,6 +68,9 @@ from src.features.storage import job_interruptions
 from src.features.storage import reports as report_store
 from src.shared import engine_build_identity as build_identity_contract
 from src.shared import generation_coordination
+from src.shared.final_gate_diagnostics import (
+    FINAL_GATE_REASON_START_BUDGET_RESERVATION_DENIED,
+)
 from src.shared.report_evidence.constants import ReleaseMode
 from src.web import (
     evaluation_mode,
@@ -138,6 +141,11 @@ LINK_EXPIRED_RUN_STOPPED_MESSAGE = "이 링크의 기간이 지나 조사를 멈
 LINK_STATE_UNKNOWN_RUN_STOPPED_MESSAGE = (
     "초대 링크 상태를 지금 확인할 수 없어 조사를 멈췄습니다. "
     "잠시 후 다시 시도해 주세요."
+)
+START_BUDGET_RESERVATION_DENIED_MESSAGE = (
+    "이 계정의 하루 조사 비용 한도에 도달해 조사를 시작하지 않았습니다. "
+    "자정(한국 시간)이 지나면 다시 할 수 있습니다. "
+    "이용 횟수는 차감되지 않았습니다."
 )
 _LINK_STOP_NOTICE_BY_REASON = {
     LINK_STOP_REASON_REVOKED: LINK_REVOKED_RUN_STOPPED_MESSAGE,
@@ -1027,6 +1035,21 @@ async def _run_job(job: Job) -> None:
                 billing_uncertain=job.paid_phase is not None,
             )
         raise
+    except generation_singleflight.PaidGenerationAdmissionUnavailable as denied:
+        # provider 호출 전 비용 예약이 거절된 것은 기술 실패가 아니다. 그때까지
+        # 실제로 쓴 값만 보존하되, 오늘 한도를 다 쓴 별도 결과로 닫아 같은 요청의
+        # 즉시 반복을 권하지 않는다.
+        logger.info("본조사 시작 전 하루 비용 예약이 거절됐습니다 job_id=%s", job.job_id)
+        job.result = replace(
+            _stopped_run_result(
+                job,
+                denied,
+                message=START_BUDGET_RESERVATION_DENIED_MESSAGE,
+            ),
+            outcome=Outcome.GATE_STOPPED,
+            final_gate_reason=FINAL_GATE_REASON_START_BUDGET_RESERVATION_DENIED,
+        )
+        del denied
     except LinkAccessClosedDuringRun as closed:
         # 초대 링크가 조사 도중 닫혔다. 기술 실패가 아니므로 일반 오류
         # 문구로 뭉개지 않고, 사용자에게는 짧은 안내를 그대로 보여 준다.
