@@ -23,11 +23,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import html as html_lib
 import json
 import re
 import uuid
 from dataclasses import replace
+from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -604,6 +606,27 @@ def test_웹_v2는_ledger를_렌더하지_않는다(monkeypatch: pytest.MonkeyPa
 #: base 커밋(0acf798)의 템플릿이 그린 v1 보고서 본문. 봉인 도입이 옛 화면을
 #: 한 글자도 바꾸지 않았음을 증명한다.
 _V1_GOLDEN = Path(__file__).with_name("result_v1_article_golden.html")
+_V1_GOLDEN_TEXT_SHA256_BEFORE_D2 = (
+    "9b1a8447701cdc989157195942492a65b76266d03101906c73088b48115ae006"
+)
+
+
+class _TextExtractor(HTMLParser):
+    """태그와 속성을 버리고 사람이 읽는 텍스트 노드만 모은다."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(data)
+
+
+def _text_sha256(document: str) -> str:
+    parser = _TextExtractor()
+    parser.feed(document)
+    visible_text = " ".join(" ".join(parser.parts).split())
+    return hashlib.sha256(visible_text.encode("utf-8")).hexdigest()
 
 
 def _golden_bytes() -> bytes:
@@ -625,6 +648,14 @@ def test_v1_결과페이지_HTML은_바이트_불변이다(monkeypatch: pytest.M
     rendered = _article(body).encode("utf-8")
     assert b"\r" not in rendered, "화면 결과에 CR가 생기면 golden 대조 전제가 깨진다"
     assert rendered == _golden_bytes()
+
+
+def test_D2_골든_갱신은_텍스트를_한_글자도_바꾸지_않는다() -> None:
+    """배지·표 클래스·상단 띠 속성만 바뀌고 본문 텍스트는 이전과 같아야 한다."""
+
+    golden = _V1_GOLDEN.read_text(encoding="utf-8")
+
+    assert _text_sha256(golden) == _V1_GOLDEN_TEXT_SHA256_BEFORE_D2
 
 
 # ══════════════════════════════════════════════════════════
