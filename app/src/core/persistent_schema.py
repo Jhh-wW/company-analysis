@@ -68,6 +68,10 @@ PERSISTENT_SCHEMA_BOOTSTRAPS: Final[tuple[PersistentSchemaBootstrap, ...]] = (
         "src/features/spanselect/diagnostic_store.py",
     ),
     PersistentSchemaBootstrap(
+        "근거 재판정 캐시", "src.features.storage.evidence_reclassify_cache",
+        "src/features/storage/evidence_reclassify_cache.py",
+    ),
+    PersistentSchemaBootstrap(
         "유료 파일럿 결속", "src.features.pilot_evaluation.schema",
         "src/features/pilot_evaluation/schema.py",
     ),
