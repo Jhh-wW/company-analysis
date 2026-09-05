@@ -574,8 +574,16 @@ def reclassify_official_evidence(
                             input_paragraph_hash=paragraph_hash,
                         ),
                     )
+                    # 캐시 store는 commit을 호출자에게 맡긴다. 명시 commit 연결은
+                    # 미확정 transaction이 남으면 종료 시 예외로 채택 결과까지 버리므로
+                    # 여기서 확정한다.
+                    conn.commit()
                 except Exception as error:  # noqa: BLE001 - cache 장애는 채택 결과를 버리지 않는다
                     save_failure = type(error).__name__
+                    try:
+                        conn.rollback()
+                    except Exception:  # noqa: BLE001 - rollback 실패도 채택 결과를 막지 않는다
+                        pass
     except Exception as error:  # noqa: BLE001 - DB 차선 실패는 보고서를 막지 않는다
         steps.append(
             _step(
