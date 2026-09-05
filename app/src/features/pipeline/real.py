@@ -19,6 +19,7 @@ import hashlib
 import importlib
 import importlib.util
 import itertools
+import json
 import logging
 import os
 import re
@@ -30,9 +31,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Final, Iterable, Optional
+from typing import Any, Callable, Final, Iterable, Optional
 
-from src.core import paths, typed_collector_switch
+from src.core import news_intake_switch, paths, typed_collector_switch
 from src.core.clock import subtract_years, today_kst
 from src.core.provider_gateway import attempt_context, gateway
 from src.core.provider_gateway.anthropic_adapter import AnthropicAdapter
@@ -107,6 +108,19 @@ from src.features.homepage.ir_pdf import (
     collect_official_ir_fragments,
 )
 from src.features.homepage.safe_http import collection_cache_scope
+from src.features.homepage.wide_extract import extract_usable_ranges
+from src.features.homepage.wide_fetch import (
+    default_wide_transport,
+    load_robots_policy,
+)
+from src.features.news_intake import (
+    NewsMappingResult,
+    build_diagnostics as build_news_intake_diagnostics,
+    classify_and_read as classify_and_read_news,
+    map_articles_to_fragments as map_news_articles_to_fragments,
+    needs_extended_window as news_needs_extended_window,
+    select_news_items,
+)
 from src.features.provenance.citations import build_citations
 from src.features.provenance.sources import (
     Source,
@@ -122,6 +136,7 @@ from src.shared.company_identity import normalize_korean_registration_number
 from src.shared.generation_cache_identity import GenerationCacheNamespace
 from src.shared.report_source_identity import ReportSourceIdentity
 from src.shared.report_generation.constants import ENGINE_V2_SCHEMA_VERSION
+from src.shared.report_generation.models import exact_text_sha256
 from src.shared.report_evidence.constants import (
     CollectionState,
     ReleaseMode,
@@ -129,6 +144,7 @@ from src.shared.report_evidence.constants import (
     SOURCE_KIND_OFFICIAL_RECRUIT_PAGE,
     SOURCE_KIND_OFFICIAL_WEB_PAGE,
 )
+from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
 from src.shared.report_evidence.date_normalization import (
     normalize_official_source_date,
 )
@@ -170,6 +186,23 @@ from src.features.pipeline.evidence_reclassify_step import (
     reclassify_official_evidence,
 )
 from src.features.pipeline.evidence_transport import (
+    RAW_EVIDENCE_ATTACHMENT_URL_KEY,
+    RAW_EVIDENCE_COLLECTED_ON_KEY,
+    RAW_EVIDENCE_COMPANY_ID_KEY,
+    RAW_EVIDENCE_DOCUMENT_CONTENT_SHA256_KEY,
+    RAW_EVIDENCE_DOCUMENT_IDENTITY_KEY,
+    RAW_EVIDENCE_DOMAIN_ATTESTATION_EVIDENCE_KEY,
+    RAW_EVIDENCE_DOMAIN_ATTESTATION_SOURCE_ID_KEY,
+    RAW_EVIDENCE_DOMAIN_REDIRECT_FROM_HOST_KEY,
+    RAW_EVIDENCE_DOMAIN_REDIRECT_TO_HOST_KEY,
+    RAW_EVIDENCE_DOMAIN_REDIRECT_VERIFICATION_KEY,
+    RAW_EVIDENCE_IDENTITY_BINDING_KEY,
+    RAW_EVIDENCE_IR_METADATA_VERIFICATION_KEY,
+    RAW_EVIDENCE_ORIGIN_FRAGMENT_IDS_KEY,
+    RAW_EVIDENCE_PUBLISHER_KEY,
+    RAW_EVIDENCE_REPORTING_PERIOD_KEY,
+    RAW_EVIDENCE_SECTION_IDS_KEY,
+    RAW_EVIDENCE_SLOT_IDS_KEY,
     EvidenceTransportError,
     build_section_evidence_packet_set,
 )
@@ -260,6 +293,7 @@ from src.shared.span_selection_diagnostics import (
 )
 from src.features.storage import cache as cache_store
 from src.features.storage import db as storage_db
+from src.shared.report_quality.source_identity import document_identity_from_parts
 
 
 _AUDIT_FINANCIALS_FRAGMENT_KIND = "감사보고서 재무"
@@ -269,6 +303,60 @@ _AUDIT_FINANCIALS_EVIDENCE_MISMATCH = "원문지문 불일치"
 _AUDIT_FINANCIALS_INVALID_TABLE = "표 형식 불일치"
 
 logger = logging.getLogger(__name__)
+
+#: 언론 보조 근거의 요청당 비용·입력 상한. 검색은 기본/확장 두 페이지만,
+#: 분류는 후보 메타데이터 한 묶음만 한 번 보낸다. 본문은 분류된 기사만
+#: 읽고 공개 조각은 옛 파일럿과 같은 여섯 문장·7,200자 안에서 멈춘다.
+NEWS_SEARCH_CALL_LIMIT: Final[int] = 2
+NEWS_SEARCH_PAGE_SIZE: Final[int] = 20
+NEWS_CLASSIFICATION_MAX_TOKENS: Final[int] = 1_000
+NEWS_FRAGMENT_COUNT_LIMIT: Final[int] = 6
+NEWS_FRAGMENT_TOTAL_CHARS_LIMIT: Final[int] = 7_200
+NEWS_SEARCH_NOT_CONFIGURED_CODE: Final[str] = "news_search_not_configured"
+NEWS_SEARCH_INTERNAL_ERROR_CODE: Final[str] = "news_search_internal_error"
+NEWS_INTAKE_INTERNAL_ERROR_CODE: Final[str] = "news_intake_internal_error"
+NEWS_CLASSIFICATION_INVALID_CODE: Final[str] = "classification_invalid_json"
+NEWS_BODY_FETCH_FAILED_CODE: Final[str] = "fetch_failed"
+NEWS_FRAGMENT_LIMIT_CODE: Final[str] = "fragment_limit"
+_NEWS_SEARCH_RESULT_OK: Final[str] = "success"
+_NEWS_SEARCH_FAILURE_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "news_search_authentication_failed",
+        "news_search_rate_limited",
+        "news_search_temporarily_unavailable",
+        "news_search_invalid_response",
+        "news_search_daily_cap",
+    }
+)
+_NEWS_CLASSIFICATION_SCHEMA: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "maxItems": NEWS_SEARCH_PAGE_SIZE,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "sections": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "items": {
+                            "type": "string",
+                            "enum": list(REQUIRED_EVIDENCE_SECTION_IDS),
+                        },
+                    },
+                    "kind": {"type": "string"},
+                },
+                "required": ["id", "sections", "kind"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["items"],
+    "additionalProperties": False,
+}
 
 #: 중단 안내에 병기할 최종 게이트 사유 코드 → 한국어 표기.
 #: 새 게이트가 아니다 — 이미 기록되는 닫힌 코드의 화면 표기 변환일 뿐이다.
@@ -382,6 +470,10 @@ def _generation_cache_namespace(
         # 모르는 경우에만 키를 빼서 옛 저장본의 열쇠를 그대로 둔다. 값을
         # 지어내 넣으면 v1 요청까지 전부 미적중이 된다.
         settings["release_mode"] = release_mode.value
+    if news_intake_switch.news_intake_enabled():
+        # OFF namespace는 예전 열쇠 그대로 둔다. ON만 별도 열쇠를 써서
+        # 뉴스가 없던 저장본을 새 보조 근거 결과처럼 재사용하지 않는다.
+        settings["news_intake"] = "1"
     return GenerationCacheNamespace.create(
         product="company-analysis",
         schema_version=schema_version,
@@ -1949,9 +2041,21 @@ def _sources_from(steps: list[dict[str, Any]]) -> list[SourceStatus]:
     else:
         sources.append(SourceStatus("전자공시", "none", "최근 3년 안에 낸 보고서가 없습니다"))
 
-    news = step("6_수집_뉴스")
+    news_intake = step("5b_뉴스_수집")
+    news = news_intake or step("6_수집_뉴스")
     if news is None:
         sources.append(SourceStatus("뉴스", "none", "여기까지 오지 못함"))
+    elif news_intake is not None and news.get("실패"):
+        sources.append(
+            SourceStatus("뉴스", "failed", "언론 보조 근거 수집을 일부 완료하지 못했습니다")
+        )
+    elif news_intake is not None:
+        taken, found = news.get("조각", 0), news.get("검색", 0)
+        sources.append(
+            SourceStatus("뉴스", "ok", f"검색 {found}건 중 조각 {taken}개 채택")
+            if taken
+            else SourceStatus("뉴스", "none", f"검색 {found}건 · 채택 조건 통과 0건")
+        )
     elif news.get("생략"):
         sources.append(SourceStatus("뉴스", "none", str(news["생략"])))
     elif news.get("오류"):
@@ -2160,11 +2264,19 @@ class RealPipeline:
         self,
         *,
         official_evidence_collector: OfficialEvidenceCollector | None = None,
+        news_search: Callable[..., Any] | None = None,
+        news_classify: Callable[[str], str] | None = None,
+        news_fetch_text: Callable[[str], str | None] | None = None,
     ) -> None:
         # web 조립부는 production adapter를 주입한다. None은 v1·SHADOW와
         # 외부 I/O를 쓰지 않는 기존 단위시험의 호환 경로다. 요청별 자료는
         # 이 인스턴스에 저장하지 않아 여러 worker에서도 상태를 공유하지 않는다.
         self._official_evidence_collector = official_evidence_collector
+        # 시험은 가짜 검색·분류·본문을 주입한다. 운영 기본값은 요청에서 만든
+        # 계량 client와 analysis_engine 검색기를 쓰며 인스턴스에는 결과를 남기지 않는다.
+        self._news_search = news_search
+        self._news_classify = news_classify
+        self._news_fetch_text = news_fetch_text
 
     def search_business_candidates(
         self, *, company: str, address_hint: str, limit: int, timeout_sec: float
@@ -2685,6 +2797,7 @@ class RealPipeline:
         # 없다(C6).
         requested_release_mode = _requested_release_mode(generation_mode)
         official_evidence: OfficialEvidenceCollectionResult | None = None
+        official_preflight: OfficialEvidencePreflight | None = None
         v2_comparison_result: Any = None
         generation_source_identity_digest = source_identity.cache_digest
         if (
@@ -3235,7 +3348,9 @@ class RealPipeline:
             # demo·순수 pipeline 단위 경로는 delivery 원본을 발급하지 않으므로
             # 기존 Report 캐시 호환을 유지한다. 실제 웹은 위 새 계약만 쓴다.
             cached = (
-                _v2_cache_lookup(
+                None
+                if news_intake_switch.news_intake_enabled()
+                else _v2_cache_lookup(
                     corp_id=corp_code,
                     current_fiscal_year=current_fiscal_year,
                     source_identity_digest=generation_source_identity_digest,
@@ -3382,6 +3497,45 @@ class RealPipeline:
                     "전체조각수": len(frags),
                 }
             )
+        if (
+            news_intake_switch.news_intake_enabled()
+            and official_preflight is not None
+        ):
+            # `_collect`의 OFF 호환 단계는 NEWS_INTAKE가 켜졌을 때만 새 진단으로
+            # 바꾼다. OFF에서는 기존 steps와 출력 바이트를 그대로 보존한다.
+            steps[:] = [
+                item for item in steps if item.get("step") != "6_수집_뉴스"
+            ]
+            ready_ids = set(official_preflight.decision.ready_section_ids)
+            news_raw_fragments = _collect_news_intake(
+                search_news=self._news_search or engine.search_news,
+                classify=(
+                    self._news_classify
+                    or _news_default_classifier(engine, client)
+                ),
+                fetch_text=self._news_fetch_text or _fetch_news_article_text,
+                company_name=company_name,
+                company_aliases=_official_company_aliases(profile),
+                company_domain=str(profile.get("hm_url") or ""),
+                executive_names=tuple(
+                    name.strip()
+                    for name in re.split(
+                        r"[,/·ㆍ]",
+                        str(profile.get("ceo_nm") or ""),
+                    )
+                    if name.strip()
+                ),
+                corp_id=corp_code,
+                section_ready={
+                    section_id: section_id in ready_ids
+                    for section_id in REQUIRED_EVIDENCE_SECTION_IDS
+                },
+                as_of=business_date,
+                collected_on=business_date.isoformat(),
+                steps=steps,
+            )
+            for raw_fragment in news_raw_fragments:
+                frags[max(frags, default=0) + 1] = raw_fragment
         performance_table, _ = (
             _build_performance_table_with_audit_fallback(
                 frags=frags,
@@ -5374,6 +5528,344 @@ def _write_prose(
         for s in sections
     ]
     return out, set(prose_lines_by_cell)
+
+
+def _news_origin_allowed(source_url: str) -> Callable[[str], bool]:
+    """기사와 같은 origin만 허용해 redirect에서 인증·본문 경계를 지킨다."""
+
+    try:
+        source = urllib.parse.urlsplit(source_url)
+        source_port = source.port
+    except ValueError:
+        return lambda _candidate: False
+    source_origin = (
+        source.scheme.casefold(),
+        (source.hostname or "").casefold().rstrip("."),
+        source_port,
+    )
+    if source_origin[0] not in {"http", "https"} or not source_origin[1]:
+        return lambda _candidate: False
+
+    def allowed(candidate: str) -> bool:
+        try:
+            parsed = urllib.parse.urlsplit(candidate)
+            candidate_origin = (
+                parsed.scheme.casefold(),
+                (parsed.hostname or "").casefold().rstrip("."),
+                parsed.port,
+            )
+        except ValueError:
+            return False
+        return candidate_origin == source_origin
+
+    return allowed
+
+
+def _fetch_news_article_text(source_url: str) -> str | None:
+    """robots·SSRF·응답 상한을 지킨 뒤 기사 본문 글자만 돌려준다."""
+
+    allowed_origin = _news_origin_allowed(source_url)
+    if not allowed_origin(source_url):
+        return None
+    parsed = urllib.parse.urlsplit(source_url)
+    robots_url = urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, "/robots.txt", "", "")
+    )
+    policy = load_robots_policy(
+        robots_url=robots_url,
+        host=str(parsed.hostname or ""),
+        fetch=default_wide_transport,
+        url_allowed=allowed_origin,
+    )
+    if policy.blocked or not policy.can_fetch(source_url):
+        return None
+
+    def allowed(candidate: str) -> bool:
+        return allowed_origin(candidate) and policy.can_fetch(candidate)
+
+    response = default_wide_transport(source_url, allowed)
+    if response.status != 200:
+        return None
+    ranges, _title = extract_usable_ranges(response.text)
+    text = "\n".join(ranges).strip()
+    return text or None
+
+
+def _news_default_classifier(engine: Any, client: Any) -> Callable[[str], str]:
+    """기존 계량 client를 거쳐 strict JSON 분류 응답 한 건을 만든다."""
+
+    def classify(prompt: str) -> str:
+        payload, _usage = engine._ask(
+            client,
+            prompt,
+            _NEWS_CLASSIFICATION_SCHEMA,
+            max_tokens=NEWS_CLASSIFICATION_MAX_TOKENS,
+        )
+        if not isinstance(payload, dict):
+            return ""
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    return classify
+
+
+def _limit_news_mapping(mapping: NewsMappingResult) -> tuple[NewsMappingResult, int]:
+    """문장 경계를 훼손하지 않고 뉴스 조각 수·총 글자 상한을 함께 지킨다."""
+
+    kept = []
+    kept_chars = 0
+    removed = 0
+    for fragment in mapping.fragments:
+        fragment_chars = len(fragment.text)
+        if (
+            len(kept) >= NEWS_FRAGMENT_COUNT_LIMIT
+            or kept_chars + fragment_chars > NEWS_FRAGMENT_TOTAL_CHARS_LIMIT
+        ):
+            removed += 1
+            continue
+        kept.append(fragment)
+        kept_chars += fragment_chars
+    if not removed:
+        return mapping, 0
+    exclusions = dict(mapping.exclusion_counts)
+    exclusions[NEWS_FRAGMENT_LIMIT_CODE] = (
+        exclusions.get(NEWS_FRAGMENT_LIMIT_CODE, 0) + removed
+    )
+    return (
+        NewsMappingResult(
+            fragments=tuple(kept),
+            exclusion_counts=exclusions,
+        ),
+        removed,
+    )
+
+
+def _news_raw_fragment(
+    fragment: Any,
+    *,
+    corp_id: str,
+    collected_on: str,
+    document_content_sha256: str,
+) -> dict[str, object]:
+    """N6 뉴스 조각을 보조 typed transport의 정확한 raw 필드로 옮긴다."""
+
+    host = (urllib.parse.urlsplit(fragment.url).hostname or "").casefold().rstrip(".")
+    document_identity = document_identity_from_parts(
+        document_id=fragment.document_id,
+        host=host,
+        url=fragment.url,
+    )
+    if not document_identity:
+        raise ValueError("뉴스 문서 신원을 만들 수 없습니다")
+    return {
+        "종류": fragment.source_kind,
+        "원문": fragment.text,
+        "출처": fragment.url,
+        "발행처": fragment.publisher,
+        "문서ID": fragment.document_id,
+        "문서명": fragment.title,
+        "문서일": fragment.published_on,
+        "원문위치": f"기사 본문 · {fragment.fragment_id}",
+        RAW_EVIDENCE_COMPANY_ID_KEY: corp_id,
+        RAW_EVIDENCE_SECTION_IDS_KEY: fragment.section_ids,
+        RAW_EVIDENCE_SLOT_IDS_KEY: fragment.supported_claim_slots,
+        RAW_EVIDENCE_ORIGIN_FRAGMENT_IDS_KEY: (fragment.fragment_id,),
+        RAW_EVIDENCE_DOCUMENT_IDENTITY_KEY: document_identity,
+        RAW_EVIDENCE_DOCUMENT_CONTENT_SHA256_KEY: document_content_sha256,
+        RAW_EVIDENCE_IDENTITY_BINDING_KEY: "",
+        RAW_EVIDENCE_PUBLISHER_KEY: fragment.publisher,
+        RAW_EVIDENCE_COLLECTED_ON_KEY: collected_on,
+        RAW_EVIDENCE_DOMAIN_ATTESTATION_SOURCE_ID_KEY: "",
+        RAW_EVIDENCE_DOMAIN_ATTESTATION_EVIDENCE_KEY: "",
+        RAW_EVIDENCE_REPORTING_PERIOD_KEY: "",
+        RAW_EVIDENCE_ATTACHMENT_URL_KEY: "",
+        RAW_EVIDENCE_IR_METADATA_VERIFICATION_KEY: "",
+        RAW_EVIDENCE_DOMAIN_REDIRECT_VERIFICATION_KEY: "",
+        RAW_EVIDENCE_DOMAIN_REDIRECT_FROM_HOST_KEY: "",
+        RAW_EVIDENCE_DOMAIN_REDIRECT_TO_HOST_KEY: "",
+    }
+
+
+def _collect_news_intake(
+    *,
+    search_news: Callable[..., Any],
+    classify: Callable[[str], str],
+    fetch_text: Callable[[str], str | None],
+    company_name: str,
+    company_aliases: tuple[str, ...],
+    company_domain: str,
+    executive_names: tuple[str, ...],
+    corp_id: str,
+    section_ready: dict[str, bool],
+    as_of: Any,
+    collected_on: str,
+    steps: list[dict[str, Any]],
+) -> list[dict[str, object]]:
+    """공식 근거의 빈 장에만 뉴스 보조 조각을 fail-open으로 더한다."""
+
+    if not news_needs_extended_window(section_ready):
+        steps.append(
+            {
+                "step": "5b_뉴스_수집",
+                "스위치": True,
+                "창": "기본",
+                "검색": 0,
+                "선별": 0,
+                "분류AI호출": 0,
+                "본문읽기": 0,
+                "조각": 0,
+                "실패": None,
+                "검색호출": 0,
+                "분류프롬프트글자": 0,
+                "조각글자": 0,
+                "상한잘림": 0,
+                "장별조각": {
+                    section_id: 0 for section_id in REQUIRED_EVIDENCE_SECTION_IDS
+                },
+                "제외": {},
+            }
+        )
+        return []
+
+    search_calls = 0
+    prompt_chars = 0
+    classification_calls = 0
+    failure_code: str | None = None
+    raw_items: list[Any] = []
+    try:
+        for page_index in range(NEWS_SEARCH_CALL_LIMIT):
+            search_calls += 1
+            try:
+                result = search_news(
+                    company_name,
+                    display=NEWS_SEARCH_PAGE_SIZE,
+                    start=1 + page_index * NEWS_SEARCH_PAGE_SIZE,
+                    sort="date",
+                )
+            except Exception:
+                failure_code = NEWS_SEARCH_INTERNAL_ERROR_CODE
+                break
+            state = str(getattr(result, "state", "") or "")
+            reason_code = str(getattr(result, "reason_code", "") or "")
+            if state != _NEWS_SEARCH_RESULT_OK:
+                if reason_code != NEWS_SEARCH_NOT_CONFIGURED_CODE:
+                    failure_code = (
+                        reason_code
+                        if reason_code in _NEWS_SEARCH_FAILURE_CODES
+                        else NEWS_SEARCH_INTERNAL_ERROR_CODE
+                    )
+                break
+            items = getattr(result, "items", ())
+            if not isinstance(items, (list, tuple)):
+                failure_code = NEWS_SEARCH_INTERNAL_ERROR_CODE
+                break
+            raw_items.extend(items)
+
+        selection = select_news_items(
+            company_name,
+            company_aliases,
+            raw_items,
+            as_of,
+            company_domain=company_domain,
+            executive_names=executive_names,
+            extended_window=True,
+        )
+
+        def counted_classify(prompt: str) -> str:
+            nonlocal classification_calls, prompt_chars
+            classification_calls += 1
+            prompt_chars = len(prompt)
+            return classify(prompt)
+
+        with collection_cache_scope():
+            classification = classify_and_read_news(
+                selection.candidates,
+                classify=counted_classify,
+                fetch_text=fetch_text,
+                section_ready=section_ready,
+            )
+        mapping = map_news_articles_to_fragments(
+            classification.articles,
+            company_name=company_name,
+            aliases=company_aliases,
+        )
+        mapping, truncated_count = _limit_news_mapping(mapping)
+        diagnostics = build_news_intake_diagnostics(
+            selection,
+            classification,
+            mapping,
+        )
+        exclusions = dict(diagnostics.exclusion_counts)
+        if failure_code is None and exclusions.get(NEWS_CLASSIFICATION_INVALID_CODE):
+            failure_code = NEWS_CLASSIFICATION_INVALID_CODE
+        elif failure_code is None and exclusions.get(NEWS_BODY_FETCH_FAILED_CODE):
+            failure_code = NEWS_BODY_FETCH_FAILED_CODE
+
+        document_hashes = {
+            article.candidate.source_url: exact_text_sha256(article.text)
+            for article in classification.articles
+        }
+        raw_fragments = [
+            _news_raw_fragment(
+                fragment,
+                corp_id=corp_id,
+                collected_on=collected_on,
+                document_content_sha256=document_hashes[fragment.document_id],
+            )
+            for fragment in mapping.fragments
+        ]
+        steps.append(
+            {
+                "step": "5b_뉴스_수집",
+                "스위치": True,
+                "창": "확장" if search_calls > 1 else "기본",
+                "검색": diagnostics.searched_count,
+                "선별": diagnostics.selected_count,
+                "분류AI호출": classification_calls,
+                "본문읽기": diagnostics.fetched_count,
+                "조각": len(mapping.fragments),
+                "실패": failure_code,
+                "검색호출": search_calls,
+                "분류프롬프트글자": prompt_chars,
+                "조각글자": sum(len(fragment.text) for fragment in mapping.fragments),
+                "상한잘림": truncated_count,
+                "장별조각": dict(diagnostics.fragment_counts_by_section),
+                "제외": exclusions,
+            }
+        )
+        if failure_code:
+            logger.warning(
+                "언론 보조 근거 수집 일부를 완료하지 못했습니다 code=%s",
+                failure_code,
+            )
+        return raw_fragments
+    except Exception as error:  # noqa: BLE001 - 뉴스 실패는 전체 보고서를 막지 않는다
+        logger.warning(
+            "언론 보조 근거 수집을 건너뜁니다 code=%s kind=%s",
+            NEWS_INTAKE_INTERNAL_ERROR_CODE,
+            type(error).__name__,
+        )
+        steps.append(
+            {
+                "step": "5b_뉴스_수집",
+                "스위치": True,
+                "창": "확장" if search_calls > 1 else "기본",
+                "검색": len(raw_items),
+                "선별": 0,
+                "분류AI호출": classification_calls,
+                "본문읽기": 0,
+                "조각": 0,
+                "실패": NEWS_INTAKE_INTERNAL_ERROR_CODE,
+                "검색호출": search_calls,
+                "분류프롬프트글자": prompt_chars,
+                "조각글자": 0,
+                "상한잘림": 0,
+                "장별조각": {
+                    section_id: 0 for section_id in REQUIRED_EVIDENCE_SECTION_IDS
+                },
+                "제외": {},
+            }
+        )
+        return []
 
 
 def _collect_news(

@@ -91,8 +91,8 @@ def _render_admin_real() -> dict[str, str]:
             ),
             "ANTHROPIC_API_KEY": "test-anthropic-key",
             "DART_API_KEY": "test-dart-key",
-            "NAVER_CLIENT_ID": "test-naver-client-id",
-            "NAVER_CLIENT_SECRET": "test-naver-client-secret",
+            "NCP_APIGW_API_KEY_ID": "test-ncp-key-id",
+            "NCP_APIGW_API_KEY": "test-ncp-key",
             "PROVENANCE_SEAL_SECRET": "x" * 32,
         }
     )
@@ -327,8 +327,6 @@ def test_Render_관리자_demo의_범위를_넓히는_설정은_거부한다(
         ),
         ("ANTHROPIC_API_KEY", "", "ANTHROPIC_API_KEY"),
         ("DART_API_KEY", "", "DART_API_KEY"),
-        ("NAVER_CLIENT_ID", "", "NAVER_CLIENT_ID"),
-        ("NAVER_CLIENT_SECRET", "", "NAVER_CLIENT_SECRET"),
         ("PROVENANCE_SEAL_SECRET", "short", "PROVENANCE_SEAL_SECRET"),
     ),
 )
@@ -446,8 +444,8 @@ def test_render_blueprint는_유료_관리자_실분석_한서비스만_좁게_�
         "GOOGLE_REDIRECT_URI",
         "ANTHROPIC_API_KEY",
         "DART_API_KEY",
-        "NAVER_CLIENT_ID",
-        "NAVER_CLIENT_SECRET",
+        "NCP_APIGW_API_KEY_ID",
+        "NCP_APIGW_API_KEY",
     ):
         assert values[name] == {"key": name, "sync": False}
     assert values["PROVENANCE_SEAL_SECRET"] == {

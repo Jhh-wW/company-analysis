@@ -163,12 +163,13 @@ def test_render_admin_real_requests_provider_secrets_but_defers_backup_and_notio
     provider_names = {
         "ANTHROPIC_API_KEY",
         "DART_API_KEY",
-        "NAVER_CLIENT_ID",
-        "NAVER_CLIENT_SECRET",
+        "NCP_APIGW_API_KEY_ID",
+        "NCP_APIGW_API_KEY",
     }
     assert provider_names <= names
     for name in provider_names:
         assert values[name] == {"key": name, "sync": False}
+    assert not {"NAVER_CLIENT_ID", "NAVER_CLIENT_SECRET"}.intersection(names)
 
     assert not names.intersection(
         {

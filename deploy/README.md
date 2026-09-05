@@ -78,7 +78,8 @@ Render에는 forwarded client IP를 신뢰하지 않는 좁은 계약이 세 개
 | `NCP_APIGW_API_KEY_ID` | NAVER API HUB Client ID |
 | `NCP_APIGW_API_KEY` | NAVER API HUB Client Secret |
 
-두 변수가 모두 미설정이면 뉴스 검색 단계는 건너뛴다.
+`NEWS_INTAKE`가 정확히 `"1"`이면 두 변수가 모두 필수이며 하나라도 빠지면 시작 검증에 실패한다.
+그 외에는 두 변수가 없어도 시작하며, 뉴스 검색을 사용하지 않는다는 경고만 한 줄 남긴다.
 
 - `PROVENANCE_SEAL_SECRET`은 32바이트 이상이어야 하며 재배포 뒤에도 같은 값을 보존한다.
 - `PUBLIC_ORIGIN`은 Blueprint가 web service의 `RENDER_EXTERNAL_URL`을 self-reference해
@@ -260,9 +261,10 @@ evidence/policy와 다시 대조한다. artifact나 parser가 없거나 결과�
 기본 `BETA_ADMIN_ONLY=1`이면 `ADMIN_EMAILS`, `GOOGLE_CLIENT_ID`,
 `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`가 모두 있어야 시작한다. `PIPELINE=real`은
 추가로 `PROVENANCE_SEAL_SECRET`(UTF-8 32바이트 이상), `ANTHROPIC_API_KEY`,
-`DART_API_KEY`를 요구한다. NAVER API HUB 뉴스 검색을 쓰려면
-`NCP_APIGW_API_KEY_ID`, `NCP_APIGW_API_KEY`를 추가한다. 미설정이면 뉴스 검색 단계는
-건너뛴다. 검증 오류에는 변수명만 나오고 값은 출력되지 않는다.
+`DART_API_KEY`를 요구한다. `NEWS_INTAKE="1"`로 NAVER API HUB 뉴스 검색을 켜면
+`NCP_APIGW_API_KEY_ID`, `NCP_APIGW_API_KEY`가 모두 필수이며 하나라도 빠지면 시작하지
+않는다. NEWS_INTAKE가 꺼져 있으면 두 키 없이 통과한다. 검증 오류에는 변수명만 나오고
+값은 출력되지 않는다.
 
 `BACKUP_S3_BUCKET`을 설정하면 외부 백업 구성으로 간주한다. 이 경우
 `BACKUP_TRIGGER_SECRET`, S3 전용 자격증명, `BACKUP_DATA_BOUNDARY_ID`,

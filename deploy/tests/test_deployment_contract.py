@@ -202,6 +202,22 @@ def test_backup_examples_expose_required_names_without_a_readiness_bypass() -> N
     assert "배포 버튼만 누르는 것으로 재해 복구가 완료되지 않는다" in blueprint_text
 
 
+def test_render_news_credentials_use_ncp_names_and_remain_secret() -> None:
+    blueprint = yaml.safe_load(
+        (REPOSITORY_ROOT / "render.yaml").read_text(encoding="utf-8")
+    )
+    web_service = next(
+        service for service in blueprint["services"] if service["type"] == "web"
+    )
+    env_vars = {item["key"]: item for item in web_service["envVars"]}
+
+    for name in validator.NEWS_INTAKE_VARIABLES:
+        assert env_vars[name]["sync"] is False
+        assert "value" not in env_vars[name]
+    assert "NAVER_CLIENT_ID" not in env_vars
+    assert "NAVER_CLIENT_SECRET" not in env_vars
+
+
 def test_real_environment_fails_closed_without_leaking_values() -> None:
     environment = _base_environment()
     environment["PIPELINE"] = "real"
@@ -213,12 +229,62 @@ def test_real_environment_fails_closed_without_leaking_values() -> None:
     for name in (
         "ANTHROPIC_API_KEY",
         "DART_API_KEY",
-        "NAVER_CLIENT_ID",
-        "NAVER_CLIENT_SECRET",
         "PROVENANCE_SEAL_SECRET",
     ):
         assert name in joined
+    assert "NCP_APIGW_API_KEY_ID" not in joined
+    assert "NCP_APIGW_API_KEY" not in joined
     assert environment["PROVENANCE_SEAL_SECRET"] not in joined
+
+
+def _valid_real_environment() -> dict[str, str]:
+    environment = _base_environment()
+    environment.update(
+        {
+            "PIPELINE": "real",
+            "ANTHROPIC_API_KEY": "test-anthropic-key",
+            "DART_API_KEY": "test-dart-key",
+            "PROVENANCE_SEAL_SECRET": "x" * 32,
+        }
+    )
+    return environment
+
+
+def test_news_credentials_are_optional_when_news_intake_is_off() -> None:
+    environment = _valid_real_environment()
+    environment["NEWS_INTAKE"] = "0"
+
+    assert validator.validate(environment, "web") == []
+    environment["NCP_APIGW_API_KEY_ID"] = "ignored-while-off"
+    assert validator.validate(environment, "web") == []
+
+
+def test_news_credentials_are_required_together_when_news_intake_is_on() -> None:
+    environment = _valid_real_environment()
+    environment.update(
+        {
+            "NEWS_INTAKE": "1",
+            "NCP_APIGW_API_KEY_ID": "test-key-id",
+            "NCP_APIGW_API_KEY": "test-key",
+        }
+    )
+
+    assert validator.validate(environment, "web") == []
+
+
+def test_news_intake_rejects_one_missing_credential() -> None:
+    environment = _valid_real_environment()
+    environment.update(
+        {
+            "NEWS_INTAKE": "1",
+            "NCP_APIGW_API_KEY_ID": "test-key-id",
+        }
+    )
+
+    errors = "\n".join(validator.validate(environment, "web"))
+
+    assert "NCP_APIGW_API_KEY" in errors
+    assert "NCP_APIGW_API_KEY_ID" not in errors
 
 
 def test_admin_login_and_persistence_paths_fail_closed() -> None:
@@ -751,8 +817,8 @@ def _render_portfolio_link_environment() -> dict[str, str]:
         "GOOGLE_REDIRECT_URI": "https://portfolio.example/auth/callback",
         "ANTHROPIC_API_KEY": "test-anthropic-key",
         "DART_API_KEY": "test-dart-key",
-        "NAVER_CLIENT_ID": "test-naver-client-id",
-        "NAVER_CLIENT_SECRET": "test-naver-client-secret",
+        "NCP_APIGW_API_KEY_ID": "test-ncp-key-id",
+        "NCP_APIGW_API_KEY": "test-ncp-key",
         "PROVENANCE_SEAL_SECRET": "x" * 32,
         "ENGINE_V2": "1",
         "REPORT_RELEASE_MODE": "FULL",
