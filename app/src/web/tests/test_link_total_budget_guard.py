@@ -448,7 +448,7 @@ def test_MEMBER_ADMIN_PUBLIC_갈래는_누적_상한을_보지_않는다(monkeyp
         _요청(),
         count_start=False,
         resolved_track=(
-            share_tracks.Track.ADMIN, "user:admin@example.com", 5000.0
+            share_tracks.Track.ADMIN, "user:admin@example.com", 50000.0
         ),
     )
     손님 = request_helpers._guard_run(
