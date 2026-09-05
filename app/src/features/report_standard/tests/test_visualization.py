@@ -232,6 +232,45 @@ def test_trend_with_mixed_signs_is_drawn_not_dropped() -> None:
     assert 아래 == {"2023": True, "2024": False, "2025": False}
 
 
+def test_구성변화표는_행이_여섯개_이하면_연도별_비중_추세로_그린다() -> None:
+    visualization = table_visualization(
+        ReportTable(
+            caption="제품별 매출 비중 변화",
+            headers=["구분", "2023 비중", "2024 비중", "2025 비중"],
+            rows=[
+                ["제품가", "40%", "50%", "60%"],
+                ["제품나", "40%", "35%", "30%"],
+                ["제품다", "20%", "15%", "10%"],
+            ],
+            presentation="trend",
+        )
+    )
+
+    assert visualization is not None
+    assert visualization.kind == "trend"
+    assert [series.label for series in visualization.series] == [
+        "2023 비중",
+        "2024 비중",
+        "2025 비중",
+    ]
+    assert [point.label for point in visualization.series[0].points] == [
+        "제품가",
+        "제품나",
+        "제품다",
+    ]
+
+
+def test_구성변화표는_행이_여섯개를_넘으면_그래프없이_표로_남긴다() -> None:
+    table = ReportTable(
+        caption="제품별 매출 비중 변화",
+        headers=["구분", "2023 비중", "2024 비중", "2025 비중"],
+        rows=[[f"제품{index}", "1%", "1%", "1%"] for index in range(7)],
+        presentation="trend",
+    )
+
+    assert table_visualization(table) is None
+
+
 def test_flow_preserves_each_complete_left_to_right_row() -> None:
     visualization = table_visualization(
         ReportTable(
