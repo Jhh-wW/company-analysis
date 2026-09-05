@@ -17,6 +17,7 @@ from src.shared.final_gate_diagnostics import (
     FINAL_GATE_REASON_PUBLISH_BLOCKED,
     FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR,
     FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED,
+    FINAL_GATE_REASON_START_BUDGET_RESERVATION_DENIED,
     INTERNAL_EVIDENCE_CONTRACT_PROBLEM_CODES,
     OFFICIAL_EVIDENCE_INSUFFICIENT_PROBLEM_CODES,
     OFFICIAL_EVIDENCE_CONFIGURATION_PROBLEM_CODES,
@@ -41,6 +42,7 @@ def test_최종게이트_사유는_원문없는_안전코드로_닫혀있다() -
         FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
         FINAL_GATE_REASON_EVIDENCE_CLASSIFICATION_UNDETERMINED,
         FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED,
+        FINAL_GATE_REASON_START_BUDGET_RESERVATION_DENIED,
         FINAL_GATE_REASON_OTHER_GATE,
     }
     assert SAFE_FINAL_GATE_REASONS == {
@@ -56,6 +58,7 @@ def test_최종게이트_사유는_원문없는_안전코드로_닫혀있다() -
         "internal_evidence_contract",
         "evidence_classification_undetermined",
         "request_budget_exhausted",
+        "start_budget_reservation_denied",
         "other_gate",
     }
 
