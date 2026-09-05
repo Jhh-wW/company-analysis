@@ -451,6 +451,11 @@ def test_DART와_공식웹_typed_mapping을_한_merge경계로_합친다(
 ) -> None:
     dart_envelope, wide_envelope = _split_wisely_envelopes()
     calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        official_evidence_adapter,
+        "evidence_reclassify_enabled",
+        lambda: True,
+    )
 
     class FakeDartRuntimeFetcher:
         def __init__(self, **kwargs) -> None:
@@ -546,6 +551,9 @@ def test_DART와_공식웹_typed_mapping을_한_merge경계로_합친다(
         wide_envelope,
     )
     assert result.independent_document_count == 4
+    assert result.reclassify_source is not None
+    assert result.reclassify_source.dart_envelope is dart_envelope
+    assert result.reclassify_source.wide_envelope is wide_envelope
 
     by_section = {candidate.section_id: candidate for candidate in result.candidates}
     assert {document.source_kind for document in by_section["business_model"].documents} == {
