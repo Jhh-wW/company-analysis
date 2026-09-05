@@ -3,7 +3,8 @@
 ★ 여기서 지키는 것:
   ① 출처 실존 — 실존하지 않는 조각을 인용한 문장만 제거된다.
   ② 수치 검증 — 단위 붙은 수치 실패는 제거, 맨 수치 실패는 해석 강등,
-     억원/원·%/비율 환산(ROUND_HALF_UP)은 통과. 실적표도 근거다.
+     억원·조원·%/비율 환산(ROUND_HALF_UP)은 통과. 원 단위 전체 금액은
+     근거 일치 여부와 무관하게 제거하고, 실적표도 근거로 쓴다.
   ③ 의미 검수 — 참=유지 / 애매=강등 / 거짓=재작성 1회 후 재검수.
      검수 불능·판정 누락이면 미확인 문장을 공개 후보에서 뺀다.
   ④ 라벨 정합 — 인용 없는 «확인»은 자동 강등, 해석 비율>50%는 경고 로그만.
@@ -291,18 +292,70 @@ def test_표_단위와_같은_단위면_확인으로_남는다():
     assert verified.sections[0].sentences[0].grade == GRADE_CONFIRMED
 
 
-def test_원_단위_전액_환산_표기도_통과한다():
-    # 5,695억원 == 569,500,000,000원 — 값이 정확히 일치하는 환산이다.
+@pytest.mark.parametrize("grade", [GRADE_CONFIRMED, GRADE_INTERPRETED])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "급여가 1,406,993,028원으로 전기보다 증가했다.",
+        "2024년 매출액은 569,500,000,000원이다.",
+    ],
+)
+def test_원_단위_전체_금액은_근거와_등급에_무관하게_공개에서_제외된다(
+    grade: str,
+    text: str,
+):
+    # 억원 표시값과 정확히 같은 값이어도 원 단위 전체 자릿수는 내부 장부에만 둔다.
     table = _billion_won_table()
     report = _report(
-        (_sentence("2024년 매출액은 569,500,000,000원이다.", ("1",)),)
+        (
+            _sentence(
+                text,
+                ("1",),
+                grade,
+            ),
+        )
     )
-    ask = _FakeVerifier([_all_true(1)])
+    ask = _FakeVerifier([])
 
     verified = verify_report(report, _raw_fragments(), table, ask)
 
-    assert len(verified.sections[0].sentences) == 1
-    assert verified.sections[0].sentences[0].grade == GRADE_CONFIRMED
+    assert verified.sections[0].sentences == ()
+    assert verified.sections[0].notice == NOTICE_ALL_SENTENCES_REJECTED
+    assert ask.review_prompts == []
+
+
+def test_재작성기가_원_단위_전체_금액을_만들어도_공개에서_제외된다():
+    report = _report(
+        (_sentence("가나다전자는 장비 외 사업도 영위한다.", ("1",)),)
+    )
+    ask = _FakeVerifier(
+        [_verdict_json({1: VERDICT_FALSE})],
+        rewrite_response="2024년 매출액은 168,312,345,678원이다.",
+    )
+
+    verified = verify_report(report, _raw_fragments(), None, ask)
+
+    assert verified.sections[0].sentences == ()
+    assert len(ask.rewrite_prompts) == 1
+    assert len(ask.review_prompts) == 1
+
+
+def test_억원_조원_퍼센트_표시값은_원단위_금액_검사에_걸리지_않는다():
+    report = _report(
+        (
+            _sentence("매출은 2,649억원이다.", (), GRADE_INTERPRETED),
+            _sentence("기업가치는 1.2조원 수준이다.", (), GRADE_INTERPRETED),
+            _sentence("영업이익률은 29.17%다.", (), GRADE_INTERPRETED),
+        )
+    )
+
+    verified = verify_report(report, _raw_fragments(), _table(), _FakeVerifier([]))
+
+    assert [sentence.text for sentence in verified.sections[0].sentences] == [
+        "매출은 2,649억원이다.",
+        "기업가치는 1.2조원 수준이다.",
+        "영업이익률은 29.17%다.",
+    ]
 
 
 def test_근거_전체에_단위정보가_없으면_확인불가로_강등된다_제거아님():

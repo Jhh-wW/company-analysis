@@ -36,7 +36,7 @@ _시각 = "2026-09-02T09:00:00+09:00"
 #: ★ 리터럴로 못 박는다 — 생산 상수를 import해 비교하면 값이 낮아져도 통과한다.
 _누적상한 = 3000.0
 _하루상한 = 3000.0
-_본조사예약 = 1800.0
+_본조사예약 = 1000.0
 
 #: ★ 동시성 시험의 스레드 수는 슬롯 상한과 «무관한 리터럴 3»으로 고정한다.
 #:   링크 동시 실행 상한이 3→1로 내려가도 «같은 순간에 여러 요청이 몰리는 경쟁»
@@ -49,17 +49,58 @@ _LEASE_EXPIRES_AT = "2026-09-02T10:00:00+09:00"
 
 
 def test_본조사_예약액_전제가_그대로다() -> None:
-    """★ 이 시험의 산수(잔여 1원 vs 1,800원)가 서 있는 바닥을 먼저 확인한다.
+    """★ 이 시험의 산수(잔여 1원 vs 1,000원)가 서 있는 바닥을 먼저 확인한다.
 
-    2026-09-05 본조사 예약액이 900→1,800원으로 올랐다(근거는 constants.py 주석).
+    2026-09-05 본조사 예약액을 실측에 따라 1,000원으로 내렸다.
 
-    링크 동시 실행 상한이 3→1로 내려가면서 기대값을 옮겼다.
-    이 파일의 «동시»는 상한이 아니라 `_동시스레드`(리터럴 3)로 재현하므로
-    잔여 1원에 1,800원 세 건이 몰리는 산수는 그대로 성립한다.
+    이 파일의 «동시»는 링크 슬롯 상한이 아니라 `_동시스레드`(리터럴 3)로
+    예약 transaction의 경쟁을 직접 재현한다.
     """
-    assert PAID_PHASE_PROVIDER_BUDGET_KRW[SPEND_PHASE_PIPELINE] == 1800.0
+    assert PAID_PHASE_PROVIDER_BUDGET_KRW[SPEND_PHASE_PIPELINE] == 1000.0
     assert MAX_CONCURRENT_PER_LINK == 1
     assert _동시스레드 == 3
+
+
+@pytest.mark.parametrize(("하루상한", "허용건수"), ((3000.0, 3), (5000.0, 5)))
+def test_본조사_예약액은_하루상한별_허용건수를_정확히_가른다(
+    tmp_path,
+    하루상한: float,
+    허용건수: int,
+) -> None:
+    """1,000원 예약은 3,000원에서 3건, 5,000원에서 5건까지 들어간다."""
+
+    conn = _새_원장(tmp_path)
+    try:
+        for 번호 in range(허용건수):
+            state_machine.begin_phase(
+                conn,
+                run_id=f"daily-fit-{번호}",
+                phase=SPEND_PHASE_PIPELINE,
+                day=_DAY,
+                bucket="user:daily-limit@example.com",
+                reservation_krw=_본조사예약,
+                bucket_limit_krw=하루상한,
+                run_limit_krw=None,
+                lease_owner_id=f"worker:{번호}",
+                lease_expires_at=_LEASE_EXPIRES_AT,
+                started_at=_시각,
+            )
+        with pytest.raises(state_machine.AdmissionLimitExceeded):
+            state_machine.begin_phase(
+                conn,
+                run_id="daily-over",
+                phase=SPEND_PHASE_PIPELINE,
+                day=_DAY,
+                bucket="user:daily-limit@example.com",
+                reservation_krw=_본조사예약,
+                bucket_limit_krw=하루상한,
+                run_limit_krw=None,
+                lease_owner_id="worker:over",
+                lease_expires_at=_LEASE_EXPIRES_AT,
+                started_at=_시각,
+            )
+    finally:
+        conn.close()
 
 
 def _링크와_지난_원가를_둔다(원가: float, *, key: str = _열쇠) -> str:
@@ -151,7 +192,7 @@ def _동시에_예약한다(개수: int, *, share_key: str = _열쇠) -> list:
 
 
 def test_같은_링크_동시_요청_3개는_누적_상한을_넘겨_예약하지_못한다() -> None:
-    """★ P1 그 자체. 잔여 1원인데 1,800원짜리 세 건이 동시에 들어온다.
+    """★ P1 그 자체. 잔여 1원인데 1,000원짜리 세 건이 동시에 들어온다.
 
     수정 전에는 셋 다 통과해 최종 누적이 5,699원이 됐다 (상한 초과 2,699원).
     """
@@ -162,16 +203,16 @@ def test_같은_링크_동시_요청_3개는_누적_상한을_넘겨_예약하�
     최종누적 = _누적()
 
     assert 최종누적 <= _누적상한, f"누적 상한을 넘겨 예약됐다: {최종누적}원"
-    assert [t for t in 표 if t is not None] == [], "잔여 1원에 1,800원이 들어갔다"
+    assert [t for t in 표 if t is not None] == [], "잔여 1원에 1,000원이 들어갔다"
     assert 최종누적 == 2999.0
 
 
 def test_동시_요청_중_남은_몫에_들어가는_한_건만_예약된다() -> None:
     """★ 반대 방향 시험 — 다 막아 버리면 그냥 고장이다.
 
-    잔여가 정확히 1,800원이면 «한 건»은 들어가야 하고, 나머지 둘은 막혀야 한다.
+    잔여가 정확히 1,000원이면 «한 건»은 들어가야 하고, 나머지 둘은 막혀야 한다.
     """
-    _링크와_지난_원가를_둔다(1200.0)
+    _링크와_지난_원가를_둔다(2000.0)
     _cutover()
 
     표 = _동시에_예약한다(_동시스레드)
@@ -181,22 +222,19 @@ def test_동시_요청_중_남은_몫에_들어가는_한_건만_예약된다() 
     assert _누적() == 3000.0
 
 
-def test_누적이_비어있으면_첫_한건은_들어간다() -> None:
+def test_누적이_비어있으면_정확히_세건이_들어간다() -> None:
     """★ 반대 경우 시험 — 누적 검사가 정상 사용까지 막지는 않는다.
 
-    이전 이름: `test_누적이_넉넉하면_동시_세건이_모두_들어간다`.
-    본조사 예약액이 900→1,800원으로 오르면서(2026-09-05) 링크 수명 상한 3,000원에는
-    두 건이 동시에 들어갈 수 없다(1,800×2 > 3,000). 그래서 «정상 사용을 막지 않는다»의
-    기대값은 «세 건 모두»가 아니라 «빈 통장에 첫 한 건은 반드시 들어간다»로 옮겼다.
-    링크 동시 실행 상한도 1이므로(`MAX_CONCURRENT_PER_LINK`) 제품 동작과도 맞는다.
+    본조사 예약액 1,000원 세 건은 링크 수명 상한 3,000원을 정확히 채운다.
+    슬롯 경계 밖의 동시 예약 transaction도 그 셋을 모두 받아야 한다.
     """
     _링크와_지난_원가를_둔다(0.0)
     _cutover()
 
     표 = _동시에_예약한다(_동시스레드)
 
-    assert len([t for t in 표 if t is not None]) == 1
-    assert _누적() == _본조사예약
+    assert len([t for t in 표 if t is not None]) == 3
+    assert _누적() == _누적상한
 
 
 # ══════════════════════════════════════════════════════════
@@ -260,13 +298,13 @@ def test_누적_재확인은_예약_트랜잭션_안에서_동시_스레드를_�
             for future in [pool.submit(예약, index) for index in range(개수)]
         ]
 
-    assert 결과 == [False] * 개수, "잔여 1원에 1,800원 예약이 들어갔다"
+    assert 결과 == [False] * 개수, "잔여 1원에 1,000원 예약이 들어갔다"
 
 
 def test_프로세스_락_없이도_남은_몫_한_건만_예약된다(tmp_path) -> None:
     """★ 막는 힘이 파이썬 락이 아니라 DB write transaction에서 나온다는 증거.
 
-    잔여가 정확히 1,800원일 때 «셋 중 하나»만 들어가야 한다. 파이썬 락 없이
+    잔여가 정확히 1,000원일 때 «셋 중 하나»만 들어가야 한다. 파이썬 락 없이
     이게 성립하면 worker가 여러 프로세스여도 천장이 지켜진다.
     """
     준비 = _새_원장(tmp_path)
@@ -288,7 +326,7 @@ def test_프로세스_락_없이도_남은_몫_한_건만_예약된다(tmp_path)
                 bucket_limit_krw=_하루상한,
                 run_limit_krw=None,
                 bucket_total_limit_krw=_누적상한,
-                bucket_prior_cost_krw=1200.0,   # 잔여 정확히 1,800원
+                bucket_prior_cost_krw=2000.0,   # 잔여 정확히 1,000원
                 lease_owner_id=f"worker:{index}",
                 lease_expires_at=_LEASE_EXPIRES_AT,
                 started_at=_시각,
@@ -383,7 +421,7 @@ def test_지난_날짜의_진행_예약도_누적에_센다(tmp_path) -> None:
                 bucket_limit_krw=_하루상한,
                 run_limit_krw=None,
                 bucket_total_limit_krw=_누적상한,
-                bucket_prior_cost_krw=1000.0,   # 1000 + 1800(어제) + 1800 > 3000
+                bucket_prior_cost_krw=1001.0,   # 1001 + 1000(어제) + 1000 > 3000
                 lease_owner_id="worker:two",
                 lease_expires_at=_LEASE_EXPIRES_AT,
                 started_at=_시각,
@@ -416,7 +454,7 @@ def test_누적_재확인은_LINK_갈래만_탄다(monkeypatch) -> None:
 
     for 통장, 상한 in (
         ("user:friend@example.com", 3000.0),
-        ("user:admin@example.com", 5000.0),
+        ("user:admin@example.com", 50000.0),
         ("(열쇠 없음)", 0.0),
     ):
         paid_runtime._begin_paid_phase(

@@ -278,7 +278,7 @@ def test_회원_비용_상한이_비어_있으면_기존_3000원을_쓴다():
 
 @pytest.mark.parametrize(
     ("갈래", "기존값"),
-    [(Track.ADMIN, 5000.0), (Track.LINK, 3000.0), (Track.PUBLIC, 0.0)],
+    [(Track.ADMIN, 50000.0), (Track.LINK, 3000.0), (Track.PUBLIC, 0.0)],
 )
 def test_회원값은_다른_갈래의_상한을_건드리지_않는다(갈래: Track, 기존값: float):
     """★ 반대 경우 시험 — 회원 한도 인자를 줘도 LINK·ADMIN·PUBLIC은 그대로다."""

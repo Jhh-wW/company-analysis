@@ -2,7 +2,9 @@
 
 ★ 모든 처분은 «문장 단위»다 — 제거 또는 «해석» 강등뿐이다.
   보고서·장 단위 차단을 만들지 않는다 (기준문서 4절).
-★ 규칙 4개 (04장 3-2절):
+★ 규칙 5개 (04장 3-2절과 공통 수치 표시 원칙):
+  ⓪ 공개 형식 — 천 단위 쉼표가 세 묶음 이상인 원 단위 전체 금액은
+     등급과 무관하게 그 문장을 제거한다.
   ① 출처 실존 — 인용 조각 id가 수집 목록에 없으면 그 문장 제거.
   ② 수치 검증 — «확인» 문장의 숫자는 인용 조각 원문·실적표에 있어야 한다.
      억원/원/%/배 환산은 ROUND_HALF_UP 재계산으로 허용 (publish.py의 철학 재사용,
@@ -18,8 +20,9 @@
 ★ 어떤 입력에서도 예외로 전체가 죽지 않는다 — 검증기 내부 오류 시
   안전을 확인하지 못한 AI 문장은 공개 후보에서 빼고 정직한 안내문을
   남긴다. 라벨만 «해석»으로 바꿔 의미 검사를 통과한 척하지 않는다.
-★ 닫힌 정규식 게이트 금지 — 여기의 정규식은 «숫자 토큰 추출» 전용이다.
-  문장 내용을 어휘·마커·어미로 거르는 검사는 일절 없다.
+★ 닫힌 정규식 게이트 금지 — 공개가 금지된 원 단위 전체 금액 표기 외에는
+  문장 내용을 어휘·마커·어미로 거르지 않는다. 나머지 정규식은
+  «숫자 토큰 추출» 전용이다.
 """
 
 from __future__ import annotations
@@ -174,6 +177,10 @@ _NUMBER_UNIT_RE: Final[re.Pattern[str]] = re.compile(
     r"(?:\s*(?P<mag>[조억만]))?"
     r"(?:\s*(?P<tail>원|%|퍼센트|배))?"
 )
+#: 공개 산문에 옮기면 안 되는 원 단위 전체 금액. 억원·조원 표시값은 잡지 않는다.
+_RAW_WON_AMOUNT_RE: Final[re.Pattern[str]] = re.compile(
+    r"\d{1,3}(?:,\d{3}){3,}\s*원"
+)
 _MAGNITUDE_SCALES: Final[dict[str, Decimal]] = {
     "조": Decimal(10) ** 12,
     "억": Decimal(10) ** 8,
@@ -262,6 +269,12 @@ def _extract_numbers(text: str) -> tuple[_SentenceNumber, ...]:
             )
         )
     return tuple(out)
+
+
+def _has_raw_won_amount(text: str) -> bool:
+    """공개 산문에 금지된 원 단위 전체 금액이 있는지 확인한다."""
+
+    return _RAW_WON_AMOUNT_RE.search(text) is not None
 
 
 def _evidence_number_pools(
@@ -452,6 +465,7 @@ def _machine_check(
     """
     kept: list[ComposedSentence] = []
     제거_인용실존: int = 0
+    제거_원단위금액: int = 0
     제거_수치근거: int = 0
     강등_수치근거: int = 0
     # ★ 이 강등은 «세지 않고» 있었다. 로그만 보면 원인이
@@ -462,6 +476,11 @@ def _machine_check(
         #   깨진 인용이 달린 문장은 지어낸 것과 구별할 방법이 없다.
         if any(citation not in frag_by_id for citation in sentence.citations):
             제거_인용실존 += 1
+            continue
+        # ⓪ 공개 형식 — 근거가 맞아도 원 단위 전체 자릿수는 내부 장부에만 둔다.
+        #   해석으로 라벨만 바꾸면 금액이 그대로 보이므로 문장 자체를 제외한다.
+        if _has_raw_won_amount(sentence.text):
+            제거_원단위금액 += 1
             continue
         # ④-a 라벨 정합 — 인용 없는 «확인»은 사실 주장을 뒷받침할 근거가 없다.
         #   제거가 아니라 «해석» 강등이다 (분석으로서의 가치는 남긴다).
@@ -479,11 +498,13 @@ def _machine_check(
                 sentence = _demoted(sentence)
         kept.append(sentence)
     logger.info(
-        "코드 검증 처분(문장 %d→%d): 인용 미실존 제거 %d · 단위 수치 미근거 제거 %d"
+        "코드 검증 처분(문장 %d→%d): 인용 미실존 제거 %d · 원 단위 전체 금액 제거 %d"
+        " · 단위 수치 미근거 제거 %d"
         " · 부수 수치 미근거 해석 강등 %d · 인용없는 확인→해석 강등 %d",
         len(sentences),
         len(kept),
         제거_인용실존,
+        제거_원단위금액,
         제거_수치근거,
         강등_수치근거,
         강등_라벨정합,
@@ -888,6 +909,9 @@ def _rewrite_and_recheck(
             final[item.number] = None
             continue
         candidate = replace(item.sentence, text=rewritten_text)
+        if _has_raw_won_amount(candidate.text):
+            final[item.number] = None
+            continue
         disposal = _numeric_disposal(candidate, frag_by_id, table_texts)
         if disposal == NUMERIC_REMOVE:
             final[item.number] = None

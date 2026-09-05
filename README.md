@@ -48,7 +48,7 @@ docs/               보고서 정본 기준 · 아키텍처 · ADR
 
 열람용으로 공개한 저장소입니다. 코드와 문서의 복제·수정·재배포·상업적 이용에는 저작권자의 허락이 필요합니다. 자세한 내용은 [LICENSE](LICENSE)에 있습니다.
 
-함께 담은 글꼴 Prata·Freesentation은 SIL Open Font License 1.1을 따릅니다. 사본은 [`app/src/web/static/fonts/OFL.txt`](app/src/web/static/fonts/OFL.txt)와 [`app/src/features/export_pdf/fonts/OFL.txt`](app/src/features/export_pdf/fonts/OFL.txt)에 있습니다.
+함께 담은 글꼴 Prata·Freesentation·Noto Sans KR은 SIL Open Font License 1.1을 따릅니다. 사본은 [`app/src/web/static/fonts/OFL.txt`](app/src/web/static/fonts/OFL.txt)와 [`app/src/features/export_pdf/fonts/OFL.txt`](app/src/features/export_pdf/fonts/OFL.txt)에 있습니다.
 
 ---
 

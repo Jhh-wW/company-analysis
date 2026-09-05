@@ -305,6 +305,19 @@ def _body_text_is_visually_present(
     return visible >= max(1, math.ceil(eligible * 0.5))
 
 
+def _page_has_missing_glyph(page: pdfium.PdfPage) -> bool:
+    """PDFium 문자 인덱스에 대응하는 Unicode 글자가 비면 누락 글리프로 본다."""
+
+    text_page = page.get_textpage()
+    try:
+        return any(
+            not text_page.get_text_range(index, 1)
+            for index in range(text_page.count_chars())
+        )
+    finally:
+        text_page.close()
+
+
 def _render_all_pages(pdf_bytes: bytes, *, scale: float) -> tuple[RenderedPdfPage, ...]:
     """PDFium으로 모든 페이지를 실제 PNG bytes까지 렌더링한다."""
 
@@ -323,6 +336,7 @@ def _render_all_pages(pdf_bytes: bytes, *, scale: float) -> tuple[RenderedPdfPag
                         image = bitmap.to_pil()
                         has_visible_content = _has_visible_page_content(image)
                         has_visible_body_text = _body_text_is_visually_present(page, image)
+                        has_missing_glyph = _page_has_missing_glyph(page)
                         output = io.BytesIO()
                         image.save(output, format="PNG")
                         png_bytes = output.getvalue()
@@ -335,6 +349,8 @@ def _render_all_pages(pdf_bytes: bytes, *, scale: float) -> tuple[RenderedPdfPag
                     raise _blocked("PDF 페이지 PNG 렌더 증거가 올바르지 않습니다")
                 if not has_visible_content:
                     raise _blocked("PDF 페이지가 시각적으로 비어 있어 출고할 수 없습니다")
+                if has_missing_glyph:
+                    raise _blocked("PDF에 글리프가 없는 문자가 있어 출고할 수 없습니다")
                 if not has_visible_body_text:
                     raise _blocked("PDF 본문 글자가 렌더 화면에서 보이지 않아 출고할 수 없습니다")
                 pages.append(

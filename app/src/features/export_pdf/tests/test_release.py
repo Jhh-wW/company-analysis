@@ -9,9 +9,12 @@ from dataclasses import replace
 import pytest
 from PIL import Image
 from reportlab.lib.pagesizes import A4
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen.canvas import Canvas
 
 from src.features.export_pdf.constants import (
+    FONT_REGULAR_PATH,
     PAGE_BOTTOM_MARGIN_PT,
     PAGE_TOP_MARGIN_PT,
 )
@@ -127,6 +130,19 @@ def _visually_blank_one_page_pdf() -> bytes:
     canvas = Canvas(output, invariant=1)
     canvas.setFillColorRGB(1, 1, 1)
     canvas.drawString(72, 720, "INVISIBLE WHITE TEXT")
+    canvas.showPage()
+    canvas.save()
+    return output.getvalue()
+
+
+def _missing_glyph_one_page_pdf() -> bytes:
+    font_name = "MissingGlyphProbe"
+    if font_name not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(TTFont(font_name, str(FONT_REGULAR_PATH)))
+    output = io.BytesIO()
+    canvas = Canvas(output, invariant=1)
+    canvas.setFont(font_name, 16)
+    canvas.drawString(72, 720, "ABC\u5229DEF")
     canvas.showPage()
     canvas.save()
     return output.getvalue()
@@ -426,6 +442,15 @@ def test_흰색글자만_있는_시각적_빈페이지를_prepare와_release에�
     )
     with pytest.raises(PDFReleaseBlockedError, match="다시 렌더"):
         release_pdf(candidate, _approval(candidate), released_at=_AT)
+
+
+def test_PDFium문자인덱스에_빈글자가_하나라도_있으면_누락글리프로_거부한다():
+    with pytest.raises(PDFReleaseBlockedError, match="글리프가 없는 문자"):
+        prepare_pdf_bytes(
+            _missing_glyph_one_page_pdf(),
+            render_scale=0.75,
+            expected_fact_ids=("missing-glyph",),
+        )
 
 
 def test_흰본문을_회색쪽번호로_숨긴_PDF를_prepare와_release에서_모두_거부한다():

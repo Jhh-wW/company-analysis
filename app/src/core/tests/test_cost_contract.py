@@ -136,7 +136,7 @@ def test_영속원장밖_수동파일럿은_secret과_provider보다_먼저_실�
 def test_운영한도와_paid_phase_호출계약은_정본에_명시한_상한만_쓴다():
     assert PER_LINK_DAILY_BUDGET_KRW == 3000.0
     assert PER_USER_DAILY_BUDGET_KRW == 3000.0
-    assert ADMIN_DAILY_BUDGET_KRW == 5000.0
+    assert ADMIN_DAILY_BUDGET_KRW == 50000.0
 
     definitions: dict[str, list[Path]] = {
         "DAILY_BUDGET_KRW": [],
