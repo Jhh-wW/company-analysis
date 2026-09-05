@@ -75,8 +75,10 @@ Render에는 forwarded client IP를 신뢰하지 않는 좁은 계약이 세 개
 - `PROVENANCE_SEAL_SECRET`은 32바이트 이상이어야 하며 재배포 뒤에도 같은 값을 보존한다.
 - `PUBLIC_ORIGIN`은 Blueprint가 web service의 `RENDER_EXTERNAL_URL`을 self-reference해
   고정한다. `GOOGLE_REDIRECT_URI`는 정확히 `<PUBLIC_ORIGIN>/auth/callback`이어야 한다.
-- `autoDeployTrigger: off`이므로 코드 push나 Blueprint 변경만으로 운영판이 배포되지 않는다.
-  비용·비밀값·환경 검증 뒤 Render Dashboard에서 수동 배포한다.
+- `autoDeployTrigger: commit`이므로 main에 커밋이 올라가면 곧 운영판 배포다. 따라서
+  PR은 회귀 묶음 4개(`app`, `analysis_engine`, `deploy/tests`, `ops`)가 통과한 뒤에만 main에 합친다.
+  Dashboard의 Auto-Deploy 값은 Blueprint Sync가 켜져 있을 때만 이 파일을 따라간다. 어긋나면
+  Dashboard → Settings → Build & Deploy → Auto-Deploy를 `On Commit`으로 맞춘다.
 - 영속 디스크는 재시작·재배포 뒤 데이터를 보존하지만 독립 외부 백업은 아니다. 현재 S3
   외부 백업 adapter와 cron은 BLOCKED이므로 관련 변수를 설정하지 않는다.
 

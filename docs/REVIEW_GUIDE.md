@@ -23,7 +23,7 @@
 | `app/src/web/` | HTTP·화면·라우팅과 기능 조립 |
 | `analysis_engine/` | 실제 회사 식별·자료 수집·판정 엔진 |
 | `deploy/` · `ops/` | 컨테이너·배포 계약, 운영 절차와 그 절차를 지키는 시험 |
-| `render.yaml` | web service 1개, `numInstances: 1`, `/var/data` 1GB 영속 디스크, `autoDeployTrigger: off` |
+| `render.yaml` | web service 1개, `numInstances: 1`, `/var/data` 1GB 영속 디스크, `autoDeployTrigger: commit` |
 | `.github/workflows/quality-gate.yml` | app·엔진·배포·운영 시험과 컨테이너 스모크 |
 
 기능 사이의 직접 import는 하지 않는다. 공유가 필요하면 `core/`를 거친다. 정기 작업 3개(외부

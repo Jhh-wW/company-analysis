@@ -107,6 +107,12 @@ from src.features.homepage.ir_pdf import (
     collect_official_ir_fragments,
 )
 from src.features.homepage.safe_http import collection_cache_scope
+from src.features.product_names.constants import MAX_NAME_FRAGMENTS_PER_FILING
+from src.features.product_names.fragments import (
+    formal_source_kind_for_filing,
+    name_candidate_fragments,
+)
+from src.features.product_names.logic import collect_name_candidates
 from src.features.provenance.citations import build_citations
 from src.features.provenance.sources import (
     Source,
@@ -1906,6 +1912,27 @@ def _bind_revenue_table_evidence_fragments(
         bound_tables.append(table)
 
     return merged, bound_tables
+
+
+def _report_tables_by_section(
+    revenue_tables: list[dict[str, Any]],
+    performance_table: ReportTable | None,
+) -> dict[str, list[ReportTable]]:
+    """실적표 뒤에 축별 단년·구성 변화 표를 소유 장 순서로 놓는다."""
+
+    tables_by_section: dict[str, list[ReportTable]] = {}
+    if performance_table is not None:
+        tables_by_section["past_changes"] = [performance_table]
+    for table in revenue_tables:
+        section_id = revenue_table_section_id_from_caption(table.get("caption"))
+        report_table_payload = dict(table)
+        # 셀별 검산식은 evidence_rows 안에 봉인돼 있다. ReportTable은 이 값을
+        # 별도 필드로 받지 않으므로 공개 표 transport에서는 중복 키를 뺀다.
+        report_table_payload.pop("numeric_checks", None)
+        tables_by_section.setdefault(section_id, []).append(
+            ReportTable(**report_table_payload)
+        )
+    return tables_by_section
 
 
 def _used_citation_numbers(sections: list[ReportSection]) -> set[int]:
@@ -3827,14 +3854,12 @@ class RealPipeline:
             )
 
         tell("verify")
-        # 구조화 표는 해당 장이 단독 소유한다. 같은 수치를 요약·다른 장에 복제하지 않는다.
-        tables_by_section: dict[str, list[ReportTable]] = {}
-        for table in revenue_tables:
-            section_id = revenue_table_section_id_from_caption(table.get("caption"))
-            tables_by_section.setdefault(section_id, []).append(ReportTable(**table))
-
-        if performance_table is not None:
-            tables_by_section["past_changes"] = [performance_table]
+        # 구조화 표는 해당 장이 단독 소유한다. 4장은 전사 실적을 먼저 보여 준 뒤
+        # 같은 기간의 제품·지역 구성 이동을 이어서 보여 준다.
+        tables_by_section = _report_tables_by_section(
+            revenue_tables,
+            performance_table,
+        )
 
         sections = canonical_sections_from_picks(
             kept,
@@ -5925,6 +5950,49 @@ def _formal_official_web_summaries(
     return homepage, official_ir
 
 
+def _attach_name_candidate_fragments(
+    frags: dict[int, dict[str, object]],
+    *,
+    filing_text: str,
+    filing_meta: Any,
+    corp_id: str,
+    typed_fragments: Iterable[dict[str, object]],
+    steps: list[dict[str, Any]],
+) -> tuple[dict[int, dict[str, object]], int]:
+    """공시 이름 표를 같은 공시의 typed 신원에만 묶어 뒤에 더한다."""
+
+    typed_sources = tuple(typed_fragments)
+    source_kind = formal_source_kind_for_filing(
+        filing_meta=filing_meta,
+        corp_id=corp_id,
+        typed_fragments=typed_sources,
+    )
+    candidates = collect_name_candidates(filing_text, source_kind=source_kind)
+    made = name_candidate_fragments(
+        candidates,
+        filing_meta=filing_meta,
+        corp_id=corp_id,
+        typed_fragments=typed_sources,
+    )
+    merged = {number: dict(raw) for number, raw in frags.items()}
+    for raw in made:
+        merged[max(merged, default=0) + 1] = raw
+
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        counts[candidate.subject_kind] = counts.get(candidate.subject_kind, 0) + 1
+    steps.append(
+        {
+            "step": "7_이름후보",
+            "후보": len(candidates),
+            "조각": len(made),
+            "종류별": counts,
+            "상한적용": len(candidates) > MAX_NAME_FRAGMENTS_PER_FILING,
+        }
+    )
+    return merged, len(made)
+
+
 def _collect(
     engine: Any,
     client: Any,
@@ -6170,6 +6238,31 @@ def _collect(
     #   **11건이 «전부» 실은 유일한 만장일치 항목**이다.
     #   ⚠️ 지어낼 자리가 없다 — 공시가 비중을 이미 계산해 놓았고 우리는 베낄 뿐이다.
     revenue_tables = revenuemix.build(filing_text)
+    typed_name_sources: tuple[dict[str, object], ...] = tuple(
+        dict(raw) for raw in frags.values()
+    )
+    if formal_official_evidence is not None:
+        try:
+            formal_name_sources, _ = merge_official_evidence_fragments(
+                {}, formal_official_evidence
+            )
+        except (TypeError, ValueError):
+            # 실제 공식 근거 병합 경계가 아래 호출부에서 같은 오류를 닫아 기록한다.
+            formal_name_sources = {}
+        typed_name_sources += tuple(formal_name_sources.values())
+    frags, name_fragment_count = _attach_name_candidate_fragments(
+        frags,
+        filing_text=filing_text,
+        filing_meta=filing,
+        corp_id=corp_code,
+        typed_fragments=typed_name_sources,
+        steps=steps,
+    )
+    dart_fragment_count += name_fragment_count
+    multi_year_tables, multi_year_diagnostics = (
+        revenuemix.build_multi_year_with_diagnostics(filing_text)
+    )
+    revenue_tables.extend(multi_year_tables)
     frags, revenue_tables = _bind_revenue_table_evidence_fragments(
         frags,
         revenue_tables,
@@ -6179,6 +6272,29 @@ def _collect(
     dart_fragment_count += len(revenue_tables)
     if revenue_tables:
         steps.append({"step": "6_수집_매출구성", "표": len(revenue_tables)})
+    selected_years = sorted(
+        {
+            match.group(0)
+            for table in multi_year_tables
+            for header in table["headers"][1:]
+            if (match := re.search(r"20\d{2}", header)) is not None
+        }
+    )
+    excluded_years = sorted(
+        {
+            year
+            for years in multi_year_diagnostics["제외_연도"].values()
+            for year in years
+        }
+    )
+    steps.append(
+        {
+            "step": "7_구성변화표",
+            "축": [table["axis"] for table in multi_year_tables],
+            "연도": selected_years,
+            "제외연도": excluded_years,
+        }
+    )
 
     steps.append(
         {

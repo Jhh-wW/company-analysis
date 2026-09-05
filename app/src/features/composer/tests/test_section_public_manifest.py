@@ -37,13 +37,17 @@ from src.features.composer.port import (
     SectionEvidencePacket,
     SectionEvidencePacketSet,
     StructuredClaim,
+    composition_tables_from_raw,
 )
 from src.features.composer.public_manifest import (
     PublicManifestError,
     _expected_source,
     build_public_structure_seal,
 )
-from src.features.revenuemix.logic import build as build_revenue_mix
+from src.features.revenuemix.logic import (
+    build as build_revenue_mix,
+    build_multi_year as build_multi_year_revenue_mix,
+)
 from src.shared.report_generation.public_projection import PublicProjectionError
 from src.features.composer.validate import V2ValidationError
 from src.features.pipeline.port import Grade, ReportTable
@@ -1466,6 +1470,96 @@ def test_정상_구성표는_원자료_재검산과_manifest를_통과한다():
     assert table.evidence_rows
     assert table.source_cites == ["[3]"]
     assert table.manifest_ref
+
+
+def test_3개년_구성변화표는_실적표_뒤에서_render와_manifest가_같다():
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "revenuemix"
+        / "tests"
+        / "fixtures"
+        / "hybe_product_and_region.txt"
+    ).read_text(encoding="utf-8")
+    url = "https://manifest.example/document/4"
+    fragment = CollectedFragment(
+        fragment_id="4",
+        kind="회사 공식 자료",
+        text=source,
+        source_url=url,
+        document_identity=document_identity_from_parts(url=url),
+    )
+    report = ComposedReport(
+        sections=tuple(
+            ComposedSection(section_id=section_id, sentences=())
+            for section_id in SECTION_IDS
+        )
+    )
+    performance = PerformanceTable(
+        caption="최근 3개년 실적",
+        headers=("사업연도", "매출액"),
+        rows=(("2023", "100"), ("2024", "110"), ("2025", "120")),
+        raw_rows=(("2023", "100"), ("2024", "110"), ("2025", "120")),
+        evidence_rows=(
+            canonical_json({"사업연도": "2023", "매출액": "100"}),
+            canonical_json({"사업연도": "2024", "매출액": "110"}),
+            canonical_json({"사업연도": "2025", "매출액": "120"}),
+        ),
+        cite="[4]",
+    )
+    composition_tables = composition_tables_from_raw(
+        build_multi_year_revenue_mix(source, cite="[4]")
+    )
+    packet_hashes = tuple(
+        (section_id, str(index) * 64)
+        for index, section_id in enumerate(SECTION_IDS, start=1)
+    )
+
+    seal = build_public_structure_seal(
+        report,
+        (fragment,),
+        performance,
+        filing_meta=None,
+        composition_tables=composition_tables,
+        table_presentation="trend",
+        company_id="00123456",
+        evidence_generation_sha256="a" * 64,
+        evidence_packet_sha256s=packet_hashes,
+        company_name="가나다전자",
+        corp_type="기업",
+        generated_at="2026-09-06T00:00:00+09:00",
+        as_of_date="2026-09-06",
+        analysis_period="2023~2025",
+        latest_performance_period="2025",
+        citation_style="auto",
+    )
+    rendered = render_module.render_report(
+        "가나다전자",
+        report,
+        (fragment,),
+        performance,
+        table_presentation="trend",
+        composition_tables=composition_tables,
+        public_structure_seal=seal,
+        company_id="00123456",
+    )
+
+    rendered_captions = [
+        table.caption
+        for section in rendered.sections
+        if section.cell == "past_changes"
+        for table in section.tables
+    ]
+    manifest_payload = json.loads(seal.canonical_json)
+    manifest_captions = [
+        table["caption"]
+        for table in manifest_payload["tables"]
+        if table["section_id"] == "past_changes"
+    ]
+    assert rendered_captions == manifest_captions == [
+        "최근 3개년 실적",
+        "제품·서비스별 매출 비중 변화 (2023~2025) (2025년 비중)",
+        "지역별 매출 비중 변화 (2023~2025) (2025년 비중)",
+    ]
 
 
 def test_공개행만_되풀이한_가짜_evidence_JSON은_인용원문_근거가_아니다():

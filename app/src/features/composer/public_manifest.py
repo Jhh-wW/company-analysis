@@ -1539,12 +1539,16 @@ def build_public_structure_seal(
                 )
             )
         program_slots: list[tuple[PerformanceTable, str]] = []
-        if (
-            section.section_id == "past_changes"
-            and performance_table is not None
-            and performance_table.rows
-        ):
-            program_slots.append((performance_table, table_presentation or "table"))
+        if section.section_id == "past_changes":
+            if performance_table is not None and performance_table.rows:
+                program_slots.append((performance_table, table_presentation or "table"))
+            program_slots.extend(
+                (table, _COMPOSITION_PRESENTATION)
+                for table in composition_tables
+                if table.rows
+                and revenue_table_section_id_from_caption(table.caption)
+                == section.section_id
+            )
         else:
             program_slots.extend(
                 (table, _COMPOSITION_PRESENTATION)
