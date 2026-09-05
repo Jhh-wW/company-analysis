@@ -2085,6 +2085,60 @@ td.center { text-align: center; }
   color: var(--white);
   font-size: 11px;
 }
+/* 5장 「과제 → 대응」 관계도. 값은 표 셀을 그대로 옮기며, 두 줄을 넘는
+   표는 판정 단계에서 도식으로 오지 않는다. 색은 D-2 토큰만 쓴다. */
+.result-page .relation-rows {
+  display: grid;
+  max-width: 480px;
+  gap: 10px;
+  margin: 0 auto;
+  padding: 0;
+  list-style: none;
+}
+.result-page .relation-pair {
+  display: grid;
+  grid-template-columns: 116px minmax(32px, 1fr) 116px;
+  align-items: center;
+  margin: 0;
+  break-inside: avoid;
+}
+.result-page .relation-node {
+  display: flex;
+  width: 116px;
+  height: 116px;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  overflow: hidden;
+  border: 1px solid var(--ink);
+  border-radius: 50%;
+  background: var(--white);
+  color: var(--ink);
+  font-size: 8.5pt;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  text-align: center;
+  white-space: pre-line;
+}
+.result-page .relation-right { background: var(--grey-1); }
+.result-page .relation-arrow {
+  position: relative;
+  height: 1px;
+  margin: 0 8px;
+  background: var(--ink);
+}
+.result-page .relation-arrow::after {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  width: 7px;
+  height: 7px;
+  border-top: 1px solid var(--ink);
+  border-right: 1px solid var(--ink);
+  content: "";
+  transform: translateY(-50%) rotate(45deg);
+  transform-origin: center;
+}
 /* «카드」로 판정된 흐름표(kind=card) — 화살표 없이 라벨:값 세로 목록으로
    낸다. 카드 한 장 자체는 .section-content-card를 그대로 재사용한다
    (같은 모양을 두 벌로 관리하면 한쪽만 고쳐 어긋나는 사고가 난다).

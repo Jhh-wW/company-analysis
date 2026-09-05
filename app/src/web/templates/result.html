@@ -98,6 +98,22 @@
   {% if visual.reading %}<p class="chart-reading">{{ visual.reading }}</p>{% endif %}
   <p class="chart-note">자료{{ ref(t.cite) }} · {{ visual.note }}</p>
   </figure>
+  {% elif visual and visual.kind == 'relation_pairs' %}
+  <figure class="report-visual relation-chart" aria-labelledby="{{ table_id }}-caption">
+  <figcaption class="cap" id="{{ table_id }}-caption">
+  {{ t.caption }}{{ ref(t.cite) }}
+  </figcaption>
+  <ol class="relation-rows" aria-label="{{ t.caption }}">
+  {% for pair in visual.pairs %}
+  <li class="relation-pair">
+  <span class="relation-node relation-left">{{ pair.left }}</span>
+  <span class="relation-arrow" aria-hidden="true"></span>
+  <span class="relation-node relation-right">{{ pair.right }}</span>
+  </li>
+  {% endfor %}
+  </ol>
+  <p class="chart-note">자료{{ ref(t.cite) }}</p>
+  </figure>
   {% elif visual and visual.kind == 'card' %}
   {# ★ 흐름표(경로표)인데 칸끼리 이어지지 않는 속성 나열(1·6·8장 등) —
      화살표 대신 이미 검증된 .section-content-card(라벨:값 카드)를
@@ -239,6 +255,22 @@
   </div>
   {% if visual.reading %}<p class="chart-reading">{{ visual.reading }}</p>{% endif %}
   <p class="chart-note">자료{{ ref(t.cite) }} · {{ visual.note }}</p>
+  </figure>
+  {% elif visual and visual.kind == 'relation_pairs' %}
+  <figure class="report-visual relation-chart" aria-labelledby="{{ table_id }}-caption">
+  <figcaption class="cap" id="{{ table_id }}-caption">
+  {{ t.caption }}{{ ref(t.cite) }}
+  </figcaption>
+  <ol class="relation-rows" aria-label="{{ t.caption }}">
+  {% for pair in visual.flows %}
+  <li class="relation-pair">
+  <span class="relation-node relation-left">{{ pair[0] }}</span>
+  <span class="relation-arrow" aria-hidden="true"></span>
+  <span class="relation-node relation-right">{{ pair[1] }}</span>
+  </li>
+  {% endfor %}
+  </ol>
+  <p class="chart-note">자료{{ ref(t.cite) }}</p>
   </figure>
   {% elif visual and visual.kind == 'card' %}
   <figure class="report-visual card-chart" aria-labelledby="{{ table_id }}-caption">
