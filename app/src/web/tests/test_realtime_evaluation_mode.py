@@ -160,7 +160,7 @@ def _set_evaluation_environment(monkeypatch, *, paid: bool) -> None:
     )
     monkeypatch.setenv(PIPELINE_ENV, PIPELINE_REAL)
     monkeypatch.setenv(evaluation_mode.ENV_DISABLE_ENGINE_DOTENV, "1")
-    # 본조사 예약액(1,800원)보다 커야 유료 단계가 입장한다(2026-09-05 상향).
+    # 본조사 예약액(1,000원)보다 커야 유료 단계가 입장한다(2026-09-05 실측).
     monkeypatch.setenv(evaluation_mode.ENV_PER_RUN_CAP_KRW, "2000")
     monkeypatch.setenv(evaluation_mode.ENV_DAILY_CAP_KRW, "2200")
     # 실제 로컬 실행기도 이 값을 넣는다. 요청 URL·server·peer가 모두 loopback일
