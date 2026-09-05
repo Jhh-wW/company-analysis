@@ -1173,8 +1173,23 @@ def get_report_state(conn: sqlite3.Connection, report_id: str) -> ReportState:
 
 
 def company_type_from_report(corp_type: str) -> str:
-    """저장 보고서의 정본 회사 유형을 대시보드용 세 분류로 고정한다."""
-    return _REPORT_CORP_TYPE_MAP.get(_clean(corp_type, maximum=40), COMPANY_UNDECIDED)
+    """저장 보고서의 정본 회사 유형을 대시보드용 세 분류로 고정한다.
+
+    ★ 띄어쓰기 차이는 「모름」이 아니다 (2026-09-05 실측)
+      판정 엔진이 한동안 「비상장외감」(띄어쓰기 없음)을 냈고, 그때 만들어진
+      보고서가 **그 글자 그대로 저장돼 있다.** 정확일치로만 찾으면 그 보고서들이
+      전부 「미정」으로 분류된다 — 유형을 «아는» 보고서인데 모른다고 적는 셈이다.
+      옛 저장본은 고칠 수 없으므로(이미 저장됐다) 읽는 쪽에서 받아 준다.
+    """
+    clean = _clean(corp_type, maximum=40)
+    known = _REPORT_CORP_TYPE_MAP.get(clean)
+    if known is not None:
+        return known
+    squeezed = "".join(clean.split())
+    for canonical, company_type in _REPORT_CORP_TYPE_MAP.items():
+        if squeezed and squeezed == "".join(canonical.split()):
+            return company_type
+    return COMPANY_UNDECIDED
 
 
 def register_report(

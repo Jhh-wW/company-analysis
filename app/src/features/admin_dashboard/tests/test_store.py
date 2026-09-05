@@ -794,3 +794,22 @@ def test_external_status_uses_existing_event_or_explicit_unavailable(tmp_path):
     assert cards[0]["error_at"] == "2026-08-22T10:02:00+09:00"
     assert cards[1]["status"] == "unavailable"
     assert cards[2]["status"] == "not_used"
+
+
+def test_company_type_from_report_maps_canonical_labels():
+    """정본 표기는 그대로, 모르는 표기는 「미정」이다."""
+    assert store.company_type_from_report("상장사") == store.COMPANY_LISTED
+    assert store.company_type_from_report("비상장 외감") == store.COMPANY_AUDITED
+    assert store.company_type_from_report("") == store.COMPANY_UNDECIDED
+    assert store.company_type_from_report("듣도보도못한유형") == store.COMPANY_UNDECIDED
+
+
+def test_company_type_from_report_accepts_legacy_unspaced_label():
+    """★ 판정 엔진이 한동안 「비상장외감」(띄어쓰기 없음)을 냈다 (2026-09-05 실측).
+
+    그때 만들어진 보고서가 그 글자 그대로 저장돼 있다. 정확일치로만 찾으면
+    유형을 «아는» 보고서인데 「미정」으로 세어, 대시보드가 옛 비상장 보고서를
+    통째로 잘못 분류한다. 옛 저장본은 고칠 수 없으니 읽는 쪽에서 받아 준다.
+    """
+    assert store.company_type_from_report("비상장외감") == store.COMPANY_AUDITED
+    assert store.company_type_from_report("  비상장  외감  ") == store.COMPANY_AUDITED

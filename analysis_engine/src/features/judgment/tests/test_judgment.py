@@ -138,3 +138,35 @@ def test_새_인자를_안_넘기면_예전과_똑같다():
     """기본값 False — 옛 호출부(run_pilot.py)가 바뀌지 않았음을 못 박는다."""
     assert decide("E", False, None, lookup).status == STATUS_REJECT_B
     assert decide("E", True, None, lookup).status == STATUS_ACCEPT
+
+
+# ══ 회사 «유형» 글자 (운영 결함 — 2026-09-05) ═══════════════════
+
+
+def test_비상장외감_표기는_앱_이력_정본과_한_글자도_다르지_않다():
+    """★ 이 시험이 생긴 이유 — 띄어쓰기 하나로 이력 기록이 통째로 빠졌다.
+
+    앱 이력 정본은 「비상장 외감」(띄어쓰기 있음)인데 판정이 「비상장외감」을
+    내서, 비상장 회사(현대카드·우리은행) 조사의 이력 1행이 허용값 검사에
+    걸렸다. 기록 실패는 조용히 삼켜지므로 보고서는 정상으로 나갔고,
+    실행 상태만 「진행 중」으로 남아 **아무도 몰랐다**.
+
+    ★ 상수를 서로 비교하지 «않고» 글자를 손으로 적어 둔다.
+      `TYPE_AUDITED == TYPE_AUDITED` 식으로 쓰면 값이 또 바뀌어도 초록불이다.
+    """
+    assert TYPE_AUDITED == "비상장 외감"
+
+
+def test_비상장_대상_판정은_정본_글자를_그대로_내놓는다():
+    """상수만 맞고 판정 결과가 다른 길로 새면 소용없다 — 결과값까지 못 박는다."""
+    감사보고서_갈래 = decide("E", True, "222-22-22222", lookup)
+    재무제표_갈래 = decide("E", False, None, lookup, has_financial_statements=True)
+
+    assert 감사보고서_갈래.corp_type == "비상장 외감"
+    assert 재무제표_갈래.corp_type == "비상장 외감"
+
+
+def test_상장사_표기도_이력_정본과_같다():
+    """상장사는 원래 멀쩡했다 — 고치다 같이 깨뜨리지 않았는지 본다."""
+    assert TYPE_LISTED == "상장사"
+    assert decide("Y", False, "111-11-11111", lookup).corp_type == "상장사"

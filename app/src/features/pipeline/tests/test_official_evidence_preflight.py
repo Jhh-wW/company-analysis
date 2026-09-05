@@ -274,6 +274,80 @@ def _with_dart_evidence(
     )
 
 
+def _without_section_evidence(
+    result: OfficialEvidenceCollectionResult,
+    section_ids: tuple[str, ...],
+    *,
+    identity_mismatch_section_id: str | None = None,
+) -> OfficialEvidenceCollectionResult:
+    """지정한 장의 근거를 지워 «확인은 했지만 자료가 없다»로 만든다.
+
+    우리은행 실측 모양을 그대로 옮긴다. REQUIRED 웹 경로는 정상 응답을 받았지만
+    의미 칸을 못 채워 MISSING이라 그 장은 UNKNOWN이 아니라 INSUFFICIENT가 된다.
+    신원 대조에 실패한 경로는 wide_collect가 OPTIONAL MISSING attempt만 남기고
+    문서는 하나도 내보내지 않으므로 documents를 붙이지 않는다.
+    """
+
+    candidates = []
+    for candidate in result.candidates:
+        if candidate.section_id not in section_ids:
+            candidates.append(candidate)
+            continue
+        slots = collector_slots_for(candidate.section_id)
+        attempts = [
+            CollectionAttempt(
+                company_id=_COMPANY_ID,
+                attempt_id=f"web:{candidate.section_id}",
+                source_kind=SOURCE_KIND_OFFICIAL_WEB_PAGE,
+                requirement=SourceRequirement.REQUIRED,
+                state=CollectionState.MISSING,
+                slot_ids=slots,
+                reason_code="no_keyword_signal",
+            )
+        ]
+        if candidate.section_id == identity_mismatch_section_id:
+            attempts.append(
+                CollectionAttempt(
+                    company_id=_COMPANY_ID,
+                    attempt_id=f"web-identity:{candidate.section_id}",
+                    source_kind=SOURCE_KIND_OFFICIAL_WEB_PAGE,
+                    requirement=SourceRequirement.OPTIONAL,
+                    state=CollectionState.MISSING,
+                    slot_ids=slots,
+                    reason_code="root_identity_mismatch",
+                )
+            )
+        candidates.append(
+            replace(
+                candidate,
+                documents=(),
+                fragments=(),
+                attempts=tuple(attempts),
+                candidate_readiness=EvidenceReadiness.INSUFFICIENT,
+            )
+        )
+    return OfficialEvidenceCollectionResult(
+        company_id=result.company_id,
+        candidates=tuple(candidates),
+    )
+
+
+def _identity_mismatch_attempt(
+    attempt_id: str, slots: tuple[str, ...]
+) -> CollectionAttempt:
+    """신원 대조 실패로 닫힌 웹 시도. wide_collect는 항상 OPTIONAL MISSING이다."""
+
+    return CollectionAttempt(
+        company_id=_COMPANY_ID,
+        attempt_id=attempt_id,
+        source_kind=SOURCE_KIND_OFFICIAL_WEB_PAGE,
+        requirement=SourceRequirement.OPTIONAL,
+        state=CollectionState.MISSING,
+        slot_ids=slots,
+        reason_code="root_identity_mismatch",
+    )
+
+
 def test_아홉장과_독립문서하한이_모두_차야_AI를_허용한다() -> None:
     preflight = assess_official_evidence(_result())
 
@@ -343,6 +417,7 @@ def test_DART핵심장이_있으면_홈페이지장애는_부분보고서로_전
 
     assert preflight.decision.status is GenerationGateStatus.STOP_TRANSIENT_FAILURE
     assert preflight.dart_partial_fallback is True
+    assert preflight.dart_partial_reason == "transient_web_failure"
     assert preflight.can_call_ai is True
     assert preflight.detail_code == ""
 
@@ -436,7 +511,376 @@ def test_robots_선택경로만_실패하면_DART_부분보고서를_허용한�
     assert preflight.detail_code == ""
 
 
+def test_INSUFFICIENT라도_DART근거와_READY_3장이상이면_부분보고서로_진행한다() -> None:
+    # 우리은행 실측 모양: 아홉 장 중 일곱 장이 READY인데 두 장의 자료가 없어
+    # STOP_INSUFFICIENT_EVIDENCE로 닫혔고, 남은 웹 경로는 신원 대조에 실패해
+    # MISSING만 남겼다. 예전에는 이 조합이 보고서 0건이었다.
+    observed = _without_section_evidence(
+        _with_dart_evidence(_result()),
+        ("portfolio", "culture"),
+        identity_mismatch_section_id="portfolio",
+    )
+
+    preflight = assess_official_evidence(observed)
+
+    assert preflight.decision.status is GenerationGateStatus.STOP_INSUFFICIENT_EVIDENCE
+    assert len(preflight.decision.ready_section_ids) == 7
+    assert preflight.decision.insufficient_section_ids == ("portfolio", "culture")
+    assert preflight.dart_partial_fallback is True
+    assert preflight.dart_partial_reason == "insufficient_with_ready_sections"
+    assert preflight.can_call_ai is True
+    assert preflight.detail_code == ""
+
+
+def test_READY가_최소_공개_장수_미만이면_INSUFFICIENT는_그대로_막힌다() -> None:
+    # 공개 가능한 부분 보고서의 최소 장 수는 3장이다. 경계 양쪽을 같이 본다 —
+    # 3장이면 열리고 2장이면 닫혀야, 하한이 실제로 판정에 쓰이는 것이 된다.
+    blocked_ids = (
+        "portfolio",
+        "past_changes",
+        "current_challenges",
+        "future_strategy",
+        "operations_partners",
+        "culture",
+    )
+    exactly_minimum = assess_official_evidence(
+        _without_section_evidence(
+            _with_dart_evidence(_result()),
+            blocked_ids,
+            identity_mismatch_section_id="portfolio",
+        )
+    )
+    below_minimum = assess_official_evidence(
+        _without_section_evidence(
+            _with_dart_evidence(_result()),
+            (*blocked_ids, "competitive_position"),
+            identity_mismatch_section_id="portfolio",
+        )
+    )
+
+    assert len(exactly_minimum.decision.ready_section_ids) == 3
+    assert exactly_minimum.dart_partial_fallback is True
+    assert exactly_minimum.can_call_ai is True
+
+    assert len(below_minimum.decision.ready_section_ids) == 2
+    assert below_minimum.dart_partial_fallback is False
+    assert below_minimum.dart_partial_reason == ""
+    assert below_minimum.can_call_ai is False
+    assert (
+        below_minimum.detail_code
+        == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INSUFFICIENT
+    )
+
+    # 하한 아래에서는 무분류 관측이 있을 때 내부 분류 범위 결함으로 닫는
+    # 기존 규칙도 그대로다.
+    below_minimum_source = _without_section_evidence(
+        _with_dart_evidence(_result()),
+        (*blocked_ids, "competitive_position"),
+        identity_mismatch_section_id="portfolio",
+    )
+    below_minimum_unclassified = assess_official_evidence(
+        OfficialEvidenceCollectionResult(
+            company_id=below_minimum_source.company_id,
+            candidates=below_minimum_source.candidates,
+            unclassified_evidence=UnclassifiedEvidenceObservation(
+                company_id=_COMPANY_ID,
+                document_count=1,
+                fragment_count=1,
+                observation_sha256="d" * 64,
+            ),
+        )
+    )
+
+    assert below_minimum_unclassified.dart_partial_fallback is False
+    assert (
+        below_minimum_unclassified.detail_code
+        == FINAL_GATE_DETAIL_PREFLIGHT_CLASSIFIER_COVERAGE_GAP
+    )
+
+
+def test_READY여도_독립문서가_정식_하한에_못미치면_부분보고서로_내린다() -> None:
+    # 우리은행 실측 모양: 아홉 장을 다 확인했지만 수집한 독립 문서가 DART 공시
+    # 3건뿐이다. 뒤에 합쳐질 문서를 최대로 더해도 완성 보고서의 독립 문서 8건에
+    # 닿지 못하므로, FULL로 들여보낸 뒤 packet 문서 검사에서 멈춰 보고서를 0건
+    # 내지 않고 사전검사에서 미리 부분 보고서로 내린다.
+    observed = _with_dart_evidence(_result(document_count=3))
+
+    preflight = assess_official_evidence(observed)
+
+    assert preflight.decision.status is GenerationGateStatus.READY_FOR_GENERATION
+    assert preflight.independent_document_count == 3
+    assert preflight.dart_partial_fallback is True
+    assert preflight.dart_partial_reason == "too_few_documents_for_full"
+    # 자료가 부족한 게 아니라 «완성 등급»만 못 미치는 상태다. AI 호출은 그대로
+    # 열려 있어야 부분 보고서가 실제로 만들어진다.
+    assert preflight.can_call_ai is True
+    assert preflight.detail_code == ""
+
+
+def test_늦게_더해질_문서를_합쳐_하한에_닿을_수_있으면_정식을_유지한다() -> None:
+    # 이 강등은 «도달 불가»가 확정된 회사에만 쓴다. packet에서 늦게 더해질 수
+    # 있는 문서(재무 API·매출 구성표·양사 비교 상대사)를 최대로 더해도 8건에
+    # 못 미치는 4건까지만 열리고, 8건에 닿을 수 있는 5건부터는 정식 경로를 그대로
+    # 둔다. 경계 양쪽을 같이 봐야 여유분이 실제로 판정에 쓰인다.
+    unreachable = assess_official_evidence(
+        _with_dart_evidence(_result(document_count=4))
+    )
+    reachable = assess_official_evidence(
+        _with_dart_evidence(_result(document_count=5))
+    )
+    plenty = assess_official_evidence(
+        _with_dart_evidence(_result(document_count=6))
+    )
+
+    assert unreachable.independent_document_count == 4
+    assert unreachable.dart_partial_fallback is True
+    assert unreachable.dart_partial_reason == "too_few_documents_for_full"
+
+    assert reachable.independent_document_count == 5
+    assert reachable.dart_partial_fallback is False
+    assert reachable.dart_partial_reason == ""
+    assert reachable.can_call_ai is True
+    assert reachable.detail_code == ""
+
+    assert plenty.independent_document_count == 6
+    assert plenty.dart_partial_fallback is False
+    assert plenty.dart_partial_reason == ""
+
+
+def test_문서하한_강등도_READY_3장_미만이면_열리지_않는다() -> None:
+    # 문서가 모자란다는 이유만으로 부분 보고서를 열지 않는다. 오늘의 게이트에서
+    # READY_FOR_GENERATION은 아홉 장 전부 READY와 같은 뜻이라, 확인하지 못한 장이
+    # 많은 이 모양은 세 번째 갈래가 아니라 INSUFFICIENT 갈래의 공개 최소 장 수
+    # 하한에서 닫힌다. 문서 하한 강등이 그 하한을 우회하지 않는지 함께 못 박는다.
+    blocked_ids = (
+        "portfolio",
+        "past_changes",
+        "current_challenges",
+        "future_strategy",
+        "operations_partners",
+        "culture",
+        "competitive_position",
+    )
+
+    preflight = assess_official_evidence(
+        _without_section_evidence(
+            _with_dart_evidence(_result(document_count=3)),
+            blocked_ids,
+            identity_mismatch_section_id="portfolio",
+        )
+    )
+
+    assert preflight.independent_document_count == 2
+    assert len(preflight.decision.ready_section_ids) == 2
+    assert preflight.dart_partial_fallback is False
+    assert preflight.dart_partial_reason == ""
+    assert preflight.can_call_ai is False
+    assert (
+        preflight.detail_code
+        == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INSUFFICIENT
+    )
+
+
+def test_갈래_우선순위는_transient_insufficient_document_floor_순이다() -> None:
+    # 세 모양 모두 독립 문서가 3건이라 문서 하한 조건 자체는 늘 참이다. 그런데도
+    # 조회 실패가 섞이면 일시 장애가, 확인은 끝났지만 자료가 없으면 자료 부족이
+    # 먼저 남아야 운영자가 «무엇 때문에 부분 보고서가 됐는지»를 헷갈리지 않는다.
+    base = _with_dart_evidence(_result(document_count=3))
+    candidates = list(base.candidates)
+    target_index = next(
+        index
+        for index, candidate in enumerate(candidates)
+        if candidate.section_id == "culture"
+    )
+    candidates[target_index] = replace(
+        candidates[target_index],
+        documents=(),
+        fragments=(),
+        attempts=(
+            CollectionAttempt(
+                company_id=_COMPANY_ID,
+                attempt_id="homepage:culture",
+                source_kind=SOURCE_KIND_OFFICIAL_WEB_PAGE,
+                requirement=SourceRequirement.REQUIRED,
+                state=CollectionState.FAILED,
+                slot_ids=collector_slots_for("culture"),
+                reason_code="document_fetch_failed",
+            ),
+        ),
+        candidate_readiness=EvidenceReadiness.UNKNOWN,
+    )
+    transient = assess_official_evidence(
+        OfficialEvidenceCollectionResult(
+            company_id=base.company_id,
+            candidates=tuple(candidates),
+        )
+    )
+    insufficient = assess_official_evidence(
+        _without_section_evidence(
+            _with_dart_evidence(_result(document_count=3)),
+            ("portfolio", "culture"),
+            identity_mismatch_section_id="portfolio",
+        )
+    )
+    document_floor = assess_official_evidence(
+        _with_dart_evidence(_result(document_count=3))
+    )
+
+    assert transient.independent_document_count == 3
+    assert transient.dart_partial_reason == "transient_web_failure"
+
+    assert insufficient.independent_document_count == 3
+    assert insufficient.dart_partial_reason == "insufficient_with_ready_sections"
+
+    assert document_floor.independent_document_count == 3
+    assert document_floor.dart_partial_reason == "too_few_documents_for_full"
+
+    assert {
+        transient.dart_partial_fallback,
+        insufficient.dart_partial_fallback,
+        document_floor.dart_partial_fallback,
+    } == {True}
+
+
+def test_DART근거가_결속되지_않으면_INSUFFICIENT_구제는_없다() -> None:
+    # 남은 장이 아무리 많아도 부분 보고서의 본문은 DART 원문이 받쳐야 한다.
+    observed = _without_section_evidence(
+        _result(),
+        ("portfolio", "culture"),
+        identity_mismatch_section_id="portfolio",
+    )
+
+    preflight = assess_official_evidence(observed)
+
+    assert len(preflight.decision.ready_section_ids) == 7
+    assert preflight.dart_partial_fallback is False
+    assert preflight.dart_partial_reason == ""
+    assert preflight.can_call_ai is False
+    assert (
+        preflight.detail_code
+        == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INSUFFICIENT
+    )
+
+
+def test_REQUIRED_DART_실패는_INSUFFICIENT_구제를_막는다() -> None:
+    # DART 필수 경로를 끝까지 확인하지 못한 상태를 «확인 완료»로 바꾸지 않는다.
+    observed = _without_section_evidence(
+        _with_dart_evidence(_result()),
+        ("portfolio", "culture"),
+        identity_mismatch_section_id="portfolio",
+    )
+    candidates = list(observed.candidates)
+    target_index = next(
+        index
+        for index, candidate in enumerate(candidates)
+        if candidate.section_id == "identity"
+    )
+    candidates[target_index] = replace(
+        candidates[target_index],
+        attempts=(
+            CollectionAttempt(
+                company_id=_COMPANY_ID,
+                attempt_id="document:dart_business_report:20260330000001",
+                source_kind=SOURCE_KIND_DART_BUSINESS_REPORT,
+                requirement=SourceRequirement.REQUIRED,
+                state=CollectionState.FAILED,
+                slot_ids=collector_slots_for("identity"),
+                reason_code="document_fetch_failed",
+            ),
+        ),
+    )
+
+    preflight = assess_official_evidence(
+        OfficialEvidenceCollectionResult(
+            company_id=observed.company_id,
+            candidates=tuple(candidates),
+        )
+    )
+
+    assert preflight.decision.status is GenerationGateStatus.STOP_INSUFFICIENT_EVIDENCE
+    assert len(preflight.decision.ready_section_ids) == 7
+    assert preflight.dart_partial_fallback is False
+    assert preflight.can_call_ai is False
+    assert (
+        preflight.detail_code
+        == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_TRANSIENT
+    )
+
+
+def test_신원대조_실패는_웹문서가_결속된_장에서만_INSUFFICIENT_구제를_막는다() -> None:
+    """차단 기준은 «신원 대조에 실패했나»가 아니라 «그 장에 웹 자료가 남았나»다.
+
+    wide_collect의 신원 대조 실패 경로는 fail-closed다. 문서를 만드는 자리가
+    ``match is not None`` 안에만 있어서 MISSING attempt만 남고 documents는 0건이
+    된다. 우리은행 실측도 그랬다 — 수집된 문서 12건이 전부 DART였고, 신원 불일치
+    시도가 남긴 문서·조각은 0건이었다. 그래서 그 사유만으로는 막지 않는다.
+    반대로 같은 장에 웹 문서가 이미 결속돼 있으면 어느 호스트에서 온 문장인지
+    이 계층이 구분할 수 없으므로 그때는 막는다. 두 경우를 한자리에서 대조한다 —
+    바뀌는 변수는 «불일치 attempt가 붙은 장에 웹 문서가 있는가» 하나뿐이다.
+    """
+
+    # (가) 우리은행형: 불일치 attempt가 붙은 portfolio는 문서를 하나도 안 남겼다.
+    unbound = _without_section_evidence(
+        _with_dart_evidence(_result()),
+        ("portfolio", "culture"),
+        identity_mismatch_section_id="portfolio",
+    )
+    mismatch_candidate = next(
+        candidate
+        for candidate in unbound.candidates
+        if candidate.section_id == "portfolio"
+    )
+    assert mismatch_candidate.documents == ()
+    assert mismatch_candidate.fragments == ()
+
+    passed = assess_official_evidence(unbound)
+
+    assert passed.dart_partial_fallback is True
+    assert passed.dart_partial_reason == "insufficient_with_ready_sections"
+    assert passed.can_call_ai is True
+    assert passed.detail_code == ""
+
+    # (나) 같은 fixture에서 웹 문서가 살아 있는 장에 같은 불일치 사유를 붙인다.
+    candidates = list(unbound.candidates)
+    target_index = next(
+        index
+        for index, candidate in enumerate(candidates)
+        if candidate.section_id == "business_model"
+    )
+    target = candidates[target_index]
+    assert target.documents[0].source_kind == SOURCE_KIND_OFFICIAL_WEB_PAGE
+    candidates[target_index] = replace(
+        target,
+        attempts=(
+            _identity_mismatch_attempt(
+                "web-identity:business-model",
+                collector_slots_for("business_model"),
+            ),
+        ),
+    )
+
+    blocked = assess_official_evidence(
+        OfficialEvidenceCollectionResult(
+            company_id=unbound.company_id,
+            candidates=tuple(candidates),
+        )
+    )
+
+    assert blocked.decision.status is GenerationGateStatus.STOP_INSUFFICIENT_EVIDENCE
+    assert len(blocked.decision.ready_section_ids) == 7
+    assert blocked.dart_partial_fallback is False
+    assert blocked.dart_partial_reason == ""
+    assert blocked.can_call_ai is False
+    assert (
+        blocked.detail_code
+        == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INSUFFICIENT
+    )
+
+
 def test_읽은원문을_분류못했으면_회사의_자료부족이_아니라_내부범위결함이다() -> None:
+    # 이 fixture에는 DART 문서와 결속된 조각이 없다(_result는 웹 문서만 만든다).
+    # 그래서 INSUFFICIENT 부분 보고서 갈래가 열리지 않고, 무분류 관측이 있으면
+    # 내부 분류 범위 결함으로 닫히는 원래 뜻이 그대로 유지된다.
     insufficient = _result(first_state=CollectionState.MISSING)
     observation = UnclassifiedEvidenceObservation(
         company_id=_COMPANY_ID,
@@ -457,6 +901,35 @@ def test_읽은원문을_분류못했으면_회사의_자료부족이_아니라_
         preflight.detail_code
         == FINAL_GATE_DETAIL_PREFLIGHT_CLASSIFIER_COVERAGE_GAP
     )
+
+
+def test_무분류관측이_있어도_DART부분보고서_조건을_채우면_진행한다() -> None:
+    # 분류 범위 결함은 «닫아야 할 만큼 나쁜가»가 아니라 «다른 안전한 출구가
+    # 있는가»로 갈린다. DART 원문이 받쳐 주고 공개 최소치를 넘는 장이 READY면
+    # 분류 못 한 조각을 근거로 승격하지 않은 채 부분 보고서로 내보낸다.
+    # 이 갈래가 없으면 우리은행처럼 7장이 READY여도 보고서가 0건이 된다.
+    partial = _without_section_evidence(
+        _with_dart_evidence(_result()),
+        ("portfolio", "culture"),
+        identity_mismatch_section_id="portfolio",
+    )
+    observed = OfficialEvidenceCollectionResult(
+        company_id=partial.company_id,
+        candidates=partial.candidates,
+        unclassified_evidence=UnclassifiedEvidenceObservation(
+            company_id=_COMPANY_ID,
+            document_count=1,
+            fragment_count=2,
+            observation_sha256="c" * 64,
+        ),
+    )
+
+    preflight = assess_official_evidence(observed)
+
+    assert preflight.dart_partial_fallback is True
+    assert preflight.dart_partial_reason == "insufficient_with_ready_sections"
+    assert preflight.detail_code == ""
+    assert preflight.can_call_ai is True
 
 
 def test_무분류관측이_있어도_조회실패가_섞이면_일시장애를_우선한다() -> None:

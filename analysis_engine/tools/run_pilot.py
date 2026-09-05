@@ -57,7 +57,7 @@ from core.dart_client import (  # noqa: E402
     UsageCounter, download_corpcode, download_document, get_json)
 from core.naver_client import search_news  # noqa: E402
 from features.name_match.logic import build_index, match_layer1, normalize_name  # noqa: E402
-from features.judgment.logic import decide  # noqa: E402
+from features.judgment.logic import TYPE_LISTED, decide  # noqa: E402
 from features.public_org.logic import load_public_org_registry, match_public_org  # noqa: E402
 from features.posting_gate.logic import layer2  # noqa: E402
 from features.privacy_filter.logic import erase  # noqa: E402
@@ -337,8 +337,13 @@ def identify(client: anthropic.Anthropic, company: str, address: str,
 #:
 #: ★ 감사보고서 폴백을 «지운 것이 아니다». 사업보고서를 안 내는 비상장 중소기업은
 #:   감사보고서가 유일한 원문이다. 순서만 바꿨다.
+#:
+#: ★ 열쇠를 글자로 박지 «않는다» — 판정이 내놓는 상수를 그대로 쓴다.
+#:   같은 값을 두 군데 적어 두면 한쪽만 바뀌었을 때 조용히 어긋난다
+#:   (실측: `TYPE_AUDITED` 의 띄어쓰기가 앱 이력 정본과 달라 비상장 회사의
+#:   조사 이력이 통째로 기록되지 않았다).
 FILING_LOOKUP_ORDER: Final[dict[str, tuple[tuple[str, str], ...]]] = {
-    "상장사": (("A", "사업보고서"),),
+    TYPE_LISTED: (("A", "사업보고서"),),
 }
 #: 상장사가 아닌 모든 구분(비상장 외감 등)이 쓰는 순서.
 FILING_LOOKUP_DEFAULT: Final[tuple[tuple[str, str], ...]] = (
