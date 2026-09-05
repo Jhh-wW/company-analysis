@@ -177,6 +177,15 @@ class V2RunOutput:
     generation_evidence: GenerationProducerEvidence | None = None
     #: cache/storage가 0으로 꾸미지 않고 다시 운반할 원 실행 계측.
     generation_metrics: GenerationRunMetrics | None = None
+    #: 도식 검증이 «뺀 줄»의 사유 목록 (원문 없음, 운영 진단용).
+    #:
+    #: ★ 왜 결과에 싣나 (2026-09-05 하이브 3장 카드 0건) — 이 사유는 지금까지
+    #:   서버 로그에만 남았다. 로컬 DB에 그 실행이 없어 「작가가 안 냈다」와
+    #:   「우리가 걸렀다」를 가를 방법이 아예 없었다. 결과에 실어야 다음
+    #:   진단을 저장된 실행 기록만으로 할 수 있다.
+    #: ★ 기본값이 빈 tuple이라 이 필드를 모르는 기존 호출·저장 경로는
+    #:   그대로 돈다(새 키 추가만, 읽기 호환 유지).
+    diagram_drop_reasons: tuple[str, ...] = ()
 
 
 class _CallLedgerRecorder:
@@ -929,6 +938,11 @@ def run_v2(
             stage="diagram",
         )
 
+    # ★ 사유를 로그«에만» 남기지 않는다 — 결과에도 실어 저장 경로가 나중에
+    #   그대로 읽을 수 있게 한다. 3장 카드가 0건이던 실행에서 「작가가 안
+    #   냈다」와 「우리가 걸렀다」를 가를 유일한 표식이 이 목록이었는데,
+    #   로그가 없으면 사후 진단이 불가능했다.
+    recorded_diagram_drop_reasons = tuple(diagram_problems)
     for problem in diagram_problems:
         logger.warning("도식 검증에서 뺀 경로 — %s", problem)
 
@@ -1606,6 +1620,7 @@ def run_v2(
         quality_observation=quality_observation,
         generation_evidence=generation_evidence,
         generation_metrics=generation_metrics,
+        diagram_drop_reasons=recorded_diagram_drop_reasons,
     )
 
 

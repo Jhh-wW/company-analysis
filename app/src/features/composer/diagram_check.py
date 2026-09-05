@@ -62,6 +62,7 @@ from collections.abc import Mapping, Sequence
 from typing import Callable, Final, Optional
 
 from src.features.composer.constants import (
+    FLOW_ARROW_SECTION_IDS,
     FLOW_HEADERS_BY_SECTION,
     PARSE_RETRY_LIMIT,
     RETRY_REMINDER,
@@ -86,6 +87,40 @@ logger = logging.getLogger(__name__)
 
 #: 검수 프롬프트 머리말. 시험이 «글자를 베끼지 않고» 이 상수를 그대로 쓴다.
 FLOW_REVIEW_PROMPT_HEADER: Final[str] = "[도식 검수]"
+
+#: 검수 프롬프트가 «한 줄»을 부르는 말. 장이 두 종류라 말도 두 개다.
+#:
+#: ★ 왜 나누나 (2026-09-05 하이브 실측) — 3장(portfolio)은 화살표가 없는
+#:   «카드» 장인데(FLOW_ARROW_SECTION_IDS 밖) 검수 프롬프트는 모든 줄을
+#:   「경로」라 부르며 「원문이 말하지 않은 상대에게 화살표를 그은 줄만
+#:   거짓이다」라고 판정 기준을 줬다. 카드에는 이을 상대가 없으므로 검수
+#:   AI가 찾을 수 없는 것을 찾다가 「거짓」을 낼 수 있다. 어휘를 갈라
+#:   카드에는 «칸마다 근거가 있나»를 묻는다.
+#: ★ 화살표 장 문구는 한 글자도 바꾸지 않는다 — 6개 흐름표는 지금 잘
+#:   나오고 있다. 카드 안내는 «카드 줄이 실제로 있을 때만» 덧붙인다.
+FLOW_REVIEW_ARROW_ROW_NOUN: Final[str] = "경로"
+FLOW_REVIEW_CARD_ROW_NOUN: Final[str] = "카드"
+
+#: 검수 프롬프트의 «줄머리» 모양. 시험이 번호를 읽을 때 글자를 베끼지 않게
+#: 여기서 만든다 — 같은 정규식이 시험 세 곳에 복사돼 있었다(3-strikes).
+FLOW_REVIEW_ROW_NUMBER_PATTERN: Final[str] = (
+    r"^\[(\d+)\] (?:"
+    + FLOW_REVIEW_ARROW_ROW_NOUN
+    + "|"
+    + FLOW_REVIEW_CARD_ROW_NOUN
+    + r")\(JSON 배열\):"
+)
+
+
+def flow_review_row_noun(section_id: str) -> str:
+    """그 장의 줄을 검수 프롬프트에서 뭐라 부를지."""
+
+    return (
+        FLOW_REVIEW_ARROW_ROW_NOUN
+        if section_id in FLOW_ARROW_SECTION_IDS
+        else FLOW_REVIEW_CARD_ROW_NOUN
+    )
+
 
 #: 검수 응답에서 읽는 키. 문장 검수(verify.py)와 같은 말을 쓴다 — 두 곳이
 #: 다른 낱말을 쓰면 프롬프트를 고칠 때 한쪽만 고치는 사고가 난다.
@@ -216,6 +251,9 @@ def _labelled_cells(section_id: str, row: FlowRow) -> list[str]:
 
 
 def _review_prompt(items: Sequence[tuple[int, str, FlowRow, str]]) -> str:
+    has_card_rows = any(
+        section_id not in FLOW_ARROW_SECTION_IDS for _n, section_id, _r, _s in items
+    )
     lines = [
         FLOW_REVIEW_PROMPT_HEADER,
         "아래는 보고서에 실릴 «사업 경로 도식»의 각 줄이다.",
@@ -235,12 +273,34 @@ def _review_prompt(items: Sequence[tuple[int, str, FlowRow, str]]) -> str:
         "★ 원문이 말하지 않은 상대에게 화살표를 그은 줄만 «거짓»이다",
         "  (원문은 제조를 돕는 기술 협력이라고만 했는데 「고객」에게 닿는다고",
         "  그린 경우).",
-        "",
-        "형식: 설명 없이 아래 JSON만 출력한다.",
-        '{"' + _VERDICT_KEY + '": [{"' + _VERDICT_NUMBER_KEY + '": 1, "'
-        + _VERDICT_RESULT_KEY + '": "' + VERDICT_TRUE + '"}]}',
-        "",
     ]
+    if has_card_rows:
+        # ★ 카드 장(3장 제품·서비스 등)은 화살표가 없다. 줄머리에 「카드」라
+        #   적어 두고, 카드에는 «칸마다 근거가 있나»를 묻는다. 이 안내는
+        #   카드 줄이 실제로 있을 때만 붙는다 — 화살표만 있는 검수의
+        #   프롬프트는 예전과 «글자 그대로» 같다.
+        lines.extend(
+            (
+                "",
+                f"★ 줄머리가 «{FLOW_REVIEW_CARD_ROW_NOUN}»인 줄에는 화살표가 없다.",
+                "  한 대상을 여러 칸으로 «설명»하는 묶음이다(예: 제품 이름 /",
+                "  범위 / 추진 근거 / 사업적 역할). 칸에서 칸으로 이어지는",
+                "  이동을 찾지 마라 — 그런 이동이 없다고 «거짓»으로 판정하면",
+                "  오심이다.",
+                f"★ «{FLOW_REVIEW_CARD_ROW_NOUN}» 줄의 판정 기준: 칸의 값이",
+                "  근거 원문이 말하는 그 대상의 설명인가. 원문이 말하지 않은",
+                "  것을 주장하는 칸이 하나라도 있으면 «거짓», 아니면 «참»이다.",
+            )
+        )
+    lines.extend(
+        (
+            "",
+            "형식: 설명 없이 아래 JSON만 출력한다.",
+            '{"' + _VERDICT_KEY + '": [{"' + _VERDICT_NUMBER_KEY + '": 1, "'
+            + _VERDICT_RESULT_KEY + '": "' + VERDICT_TRUE + '"}]}',
+            "",
+        )
+    )
     for number, section_id, row, source_text in items:
         # 경로·원문은 신뢰할 수 없는 데이터다. JSON 문자열로 봉인해
         # 안의 줄바꿈·가짜 번호·지시가 검수 프롬프트 구조를 바꾸지 못한다.
@@ -248,7 +308,8 @@ def _review_prompt(items: Sequence[tuple[int, str, FlowRow, str]]) -> str:
             _labelled_cells(section_id, row), ensure_ascii=False
         )
         source_json = json.dumps(source_text, ensure_ascii=False)
-        lines.append(f"[{number}] 경로(JSON 배열): {path_json}")
+        noun = flow_review_row_noun(section_id)
+        lines.append(f"[{number}] {noun}(JSON 배열): {path_json}")
         lines.append(f"    근거 원문(JSON 문자열): {source_json}")
     lines.extend(
         (
