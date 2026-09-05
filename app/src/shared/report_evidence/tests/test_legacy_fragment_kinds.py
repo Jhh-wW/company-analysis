@@ -18,6 +18,7 @@ from src.shared.report_evidence.legacy_fragment_kinds import (
     LEGACY_KIND_AUDITOR_FINDING,
     LEGACY_KIND_BUSINESS_CONTENT,
     LEGACY_KIND_FINANCIAL,
+    LEGACY_KIND_GOODS_CONTENT,
     LEGACY_KIND_HOMEPAGE,
     LEGACY_KIND_INTELLECTUAL_PROPERTY,
     LEGACY_KIND_LITIGATION,
@@ -26,12 +27,14 @@ from src.shared.report_evidence.legacy_fragment_kinds import (
     LEGACY_KIND_NEW_BUSINESS_OUTLOOK,
     LEGACY_KIND_NEWS,
     LEGACY_KIND_OFFICIAL_IR,
+    LEGACY_KIND_PRODUCT_SERVICE,
     LEGACY_KIND_RELATED_PARTY,
     LEGACY_KIND_RESEARCH_AND_DEVELOPMENT,
     LEGACY_KIND_REVENUE_AND_ORDERS,
     LEGACY_KIND_REVENUE_RECOGNITION,
     LEGACY_KIND_RISK_FACTOR,
     LEGACY_KIND_SG_AND_A,
+    LEGACY_KIND_SUBSIDIARY_BUSINESS,
     LEGACY_SECTIONS_BY_FRAGMENT_KIND,
     LegacyFragmentKindContractError,
     legacy_fragment_kind_is_owned_by,
@@ -69,6 +72,9 @@ _EXTRA_SECTION_KINDS = frozenset(
         LEGACY_KIND_AUDITOR_FINDING,
         LEGACY_KIND_INTELLECTUAL_PROPERTY,
         LEGACY_KIND_RISK_FACTOR,
+        LEGACY_KIND_PRODUCT_SERVICE,
+        LEGACY_KIND_GOODS_CONTENT,
+        LEGACY_KIND_SUBSIDIARY_BUSINESS,
     }
 )
 
@@ -108,7 +114,7 @@ def test_실제_생산자가_만드는_모든_종류가_정본에_정확히_등�
     )
 
     assert produced == LEGACY_FRAGMENT_KINDS
-    assert len(produced) == 17
+    assert len(produced) == 20
 
 
 def test_실제_CELL_SOURCES가_보내는_DART종류의_semantic장을_정본이_누락하지않는다() -> None:
@@ -187,6 +193,9 @@ def test_정확한_종류별_장_소유행렬을_고정한다() -> None:
         "감사인지적": {"current_challenges"},
         "지적재산권": {"portfolio"},
         "위험요인": {"current_challenges"},
+        "제품서비스": {"portfolio"},
+        "상품내용": {"portfolio"},
+        "종속회사사업": {"portfolio"},
         "홈페이지": {
             "identity",
             "business_model",
@@ -244,6 +253,20 @@ def test_신규사업전망은_부분문자열_사업때문에_다른_장으로_
     assert not legacy_fragment_kind_is_owned_by(
         LEGACY_KIND_NEW_BUSINESS_OUTLOOK, "past_changes"
     )
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        LEGACY_KIND_PRODUCT_SERVICE,
+        LEGACY_KIND_GOODS_CONTENT,
+        LEGACY_KIND_SUBSIDIARY_BUSINESS,
+    ],
+)
+def test_이름표_세_종류는_portfolio에만_허용된다(kind: str) -> None:
+    assert sections_for_legacy_fragment_kind(kind) == frozenset({"portfolio"})
+    assert legacy_fragment_kind_is_owned_by(kind, "portfolio")
+    assert not legacy_fragment_kind_is_owned_by(kind, "business_model")
 
 
 @pytest.mark.parametrize(
