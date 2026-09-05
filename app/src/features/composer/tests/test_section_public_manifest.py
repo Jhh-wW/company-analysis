@@ -54,10 +54,12 @@ from src.features.storage.reports import (
     report_to_dict,
     report_to_json,
 )
+from src.shared.official_ir import IR_METADATA_VERIFICATION_VALUE_COVER
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_evidence.constants import (
     ReleaseMode,
     SOURCE_KIND_DART_BUSINESS_REPORT,
+    SOURCE_KIND_OFFICIAL_IR_PDF,
 )
 from src.shared.report_generation.canonical import (
     assert_report_matches_generation_evidence,
@@ -201,6 +203,55 @@ def test_모든_Source분기는_문서전체지문을_한경계에서_봉인한�
     )
 
     assert source.document_content_sha256 == content_sha256
+    assert has_valid_provenance_seal(source)
+
+
+def test_표지메타표식_IR은_public_manifest_Source로_봉인된다() -> None:
+    company_name = "가나다전자"
+    company_id = "00126380"
+    url = "https://company.example/ir/2025-q4.pdf"
+    text = "가나다전자의 2025년 4분기 공식 실적 발표 자료다."
+    fragment = CollectedFragment(
+        fragment_id="1",
+        kind="typed-evidence-v1:official_ir_pdf",
+        text=text,
+        source_url=url,
+        document_title="2025년 4분기 IR 자료",
+        location="PDF p.1 1문단",
+        document_date="2026-03-12",
+        document_identity=document_identity_from_parts(url=url),
+        document_content_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        formal_source_kind=SOURCE_KIND_OFFICIAL_IR_PDF,
+        source_document_id="ir-cover-document-1",
+        source_publisher="company.example",
+        identity_binding="DART 기업개황과 같은 공식 host",
+        source_collected_on="2026-09-05",
+        domain_attestation_source_id=f"dart-company-profile-{company_id}",
+        domain_attestation_evidence=json.dumps(
+            {
+                "corp_code": company_id,
+                "corp_name": company_name,
+                "hm_url": "https://company.example/",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        reporting_period="2025-Q4",
+        attachment_url=url,
+        ir_metadata_verification=IR_METADATA_VERIFICATION_VALUE_COVER,
+    )
+
+    source = _expected_source(
+        fragment,
+        number=1,
+        company_name=company_name,
+        used_in=("business_model",),
+        filing_meta=None,
+    )
+
+    assert source.source_type == "회사 공식 IR"
+    assert source.ir_metadata_verification == IR_METADATA_VERIFICATION_VALUE_COVER
     assert has_valid_provenance_seal(source)
 
 

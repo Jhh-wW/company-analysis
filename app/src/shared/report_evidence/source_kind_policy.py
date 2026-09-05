@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Final
 from urllib.parse import urlsplit
 
 from src.shared.official_ir import (
-    IR_METADATA_VERIFICATION_VALUE,
+    IR_METADATA_VERIFICATION_VALUES,
     official_ir_time_is_usable,
     reporting_period_is_valid,
     safe_https_attachment_url,
@@ -157,7 +157,7 @@ def formal_web_public_source_metadata(
     if source_kind == SOURCE_KIND_OFFICIAL_IR_PDF:
         canonical_attachment = safe_https_attachment_url(attachment_url)
         if (
-            ir_metadata_verification.strip() != IR_METADATA_VERIFICATION_VALUE
+            ir_metadata_verification.strip() not in IR_METADATA_VERIFICATION_VALUES
             or not reporting_period_is_valid(reporting_period)
             or not canonical_attachment
             or canonical_attachment != attachment_url.strip()
@@ -425,7 +425,7 @@ def formal_source_writer_ineligibility_reason(
         reference_date = str(collected_at or "").strip()[:10]
         if (
             str(ir_metadata_verification or "").strip()
-            != IR_METADATA_VERIFICATION_VALUE
+            not in IR_METADATA_VERIFICATION_VALUES
             or not reporting_period_is_valid(str(reporting_period or ""))
             or not canonical_attachment
             or canonical_attachment != canonical_source
