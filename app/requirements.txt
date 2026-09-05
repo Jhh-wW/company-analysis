@@ -20,7 +20,7 @@ pdfplumber==0.11.10
 segno==1.6.6
 
 # 실제 조사와 이미지 글자 추출
-anthropic==0.122.0
+anthropic==1.2.0
 pillow==12.3.0
 
 # 채용공고 개인정보 삭제
