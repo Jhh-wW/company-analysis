@@ -10,8 +10,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from typing import Final
 
+from src.core.revenue_table_switch import revenue_table_v2_enabled
 from src.shared.report_quality.constants import (
     MAX_INTERPRETED_CLAIMS_PER_SECTION,
 )
@@ -194,7 +196,7 @@ CITATION_RULES_GUIDE: Final[str] = (
     "3. 나열식 개조가 아니라 읽히는 하나의 산문으로 잇는다.\n"
     "4. 근거가 부족하면 억지로 채우지 말고 쓸 수 있는 만큼만 쓴다.\n"
     "5. «글» 문장 본문 안에 [숫자]·[인용: …] 같은 대괄호 표기를 직접 쓰지 "
-    "않는다. 인용은 반드시 위 «인용» 배열로만 표시한다.\n"
+    "않는다. 인용은 반드시 «인용» 배열로만 표시한다.\n"
     "6. 다른 장이 소유한 수치·날짜·사례를 복사하지 않는다. 그 내용이 이 장의 "
     "설명에 꼭 필요하면 값을 옮기지 말고 «해당 수치는 4장 참조»처럼 결론만 쓰고 "
     "그 장을 가리킨다.\n"
@@ -681,9 +683,12 @@ CULTURE_TABLE_GUIDE: Final[str] = (
     "지어내지 않는다.\n"
 )
 
-#: 3장 표 요청. 기준 문서(03_핵심_제품서비스와_포트폴리오_역할/README.md)의
-#: 카드 필드를 옮기되 「2장 수익 분류 참조」·「해석 한계」 두 줄은 뺐다
+#: 3장 표 요청 — 옛 문구(스위치 ``REVENUE_TABLE_V2``가 꺼졌을 때).
+#: 기준 문서(03_핵심_제품서비스와_포트폴리오_역할/README.md)의 카드 필드를
+#: 옮기되 「2장 수익 분류 참조」·「해석 한계」 두 줄은 뺐다
 #: (constants.py의 PORTFOLIO_TABLE_HEADERS 주석에 이유가 있다).
+#: ★ 이 문구는 «되돌리기용»이라 한 글자도 고치지 않는다. 새 문구는 아래
+#:   PORTFOLIO_TABLE_GUIDE_V2다.
 PORTFOLIO_TABLE_GUIDE: Final[str] = (
     "\n이 장에서는 위 문장들과 «별도로», 지금 미는 제품·서비스를 표로도 낸다.\n"
     "표 규칙:\n"
@@ -711,6 +716,71 @@ PORTFOLIO_TABLE_GUIDE: Final[str] = (
     "- 중점 제품을 확인할 근거가 없으면 표를 통째로 비운다(빈 배열). "
     "지어내지 않는다.\n"
 )
+
+#: 3장 표 요청 — 새 문구(스위치 ``REVENUE_TABLE_V2``가 켜졌을 때).
+#:
+#: ★ 왜 바꾸나 (2026-09-05 하이브 실측) — 같은 보고서에서 흐름표 «6개»가
+#:   전부 렌더됐는데 3장만 0건이었다. 3장 본문에는 제품 이름(수퍼톤·드림
+#:   에이지·음반·음원·공연·MD)과 인용이 다 붙어 있었으므로 자료 부족이
+#:   아니다. 다른 6장 안내문에 없는 «이중 조건»이 3장에만 있었다:
+#:     ① 서로 다른 실제 «우선 신호»를 둘 이상 쓰라는 요구
+#:     ② 실행 신호가 없으면 그 제품을 줄에서 빼라는 요구
+#:   신호를 둘 «세는» 코드는 어디에도 없다(v2 grep 0건) — 작가에게만
+#:   높은 바를 세워 두고 아무도 안 지켜 주는 문장이었다. 그래서 조건을
+#:   「인용 조각에 매출 기여 확인 «또는» 실행 근거가 하나 이상」으로 낮춘다.
+#: ★ 숫자 금지를 «새로» 넣는다 — 도식 수치 검사(diagram_check._numbers_are_
+#:   grounded)는 칸 안의 수가 인용 원문에 글자 그대로 없으면 그 줄을 통째로
+#:   버린다. 3장 「중점 추진 근거」는 연도·퍼센트를 부르기 딱 좋은 칸이라
+#:   여기서 조용히 전멸할 수 있다. 검사를 «완화»하는 대신 작가가 애초에
+#:   수를 안 쓰게 한다 — 수치의 소유 장은 2장·4장 표다.
+#: ★ 캡션·머리글 4칸(PORTFOLIO_TABLE_CAPTION·PORTFOLIO_TABLE_HEADERS)은
+#:   건드리지 않는다. 문서·렌더러·카드 판정이 그 글자를 그대로 참조한다.
+PORTFOLIO_TABLE_GUIDE_V2: Final[str] = (
+    "\n이 장에서는 위 문장들과 «별도로», 지금 이 회사의 수익을 실제로 만드는 "
+    "제품·서비스를 표로도 낸다.\n"
+    "표 규칙:\n"
+    "- 제품·서비스 하나가 «한 줄»이다. 근거가 확인된 1~3개만 넣는다 — "
+    "숫자를 맞추려고 약한 후보를 추가하지 않는다.\n"
+    "- 각 줄은 «제품·서비스명 / 제품·서비스 범위 / 중점 추진 근거 / "
+    "사업적 역할» 네 칸이다.\n"
+    "- 「제품·서비스명」은 원문에 실제로 적힌 정확한 이름만 쓴다(상위 "
+    "제품군이나 다른 모델로 범위를 넓히지 않는다).\n"
+    "- 줄에 넣을 기준은 «하나»다 — 인용 조각에 매출 기여 확인 «또는» 실행 "
+    "근거(출시·판매·운영·수주·투자·유통 확대 중 하나)가 하나 이상 있으면 그 "
+    "제품을 줄에 넣는다. 근거를 두 개 모으려고 줄을 빼지 않는다.\n"
+    "- 「중점 추진 근거」에는 그 기준에 해당하는 근거를 인용 조각에 적힌 대로 "
+    "쓴다. 근거가 여럿이면 함께 써도 된다.\n"
+    "- ★ 이 표의 어느 칸에도 숫자·퍼센트·연도를 쓰지 않는다 — 수치는 2장·4장 "
+    "표가 소유한다. 「대형 투어를 전개」처럼 말로만 쓴다(수를 쓰면 그 줄이 "
+    "검증에서 통째로 빠진다).\n"
+    "- 「사업적 역할」에는 전체 포트폴리오에서 이 제품이 맡는 기능적 역할을 "
+    "쓴다. 근거가 뚜렷하면 «신규·성장·주력·안정» 중 하나로 분류해도 되지만, "
+    "이건 회사의 공식 분류가 아니라 «보고서 분류»다 — 회사가 쓴 말인 것처럼 "
+    "표현하지 않는다.\n"
+    "- 다른 장을 가리키는 안내 문구를 만들지 않는다(가리킬 대상이 우리 "
+    "구조에 없다).\n"
+    "- 해석의 한계·불확실성은 이 표의 칸이 아니다. 넣지 않는다(다른 절차가 "
+    "따로 처리한다).\n"
+    "- 줄은 최대 3개, 각 칸은 «짧은 구»로 쓴다(한 문장을 통째로 넣지 않는다).\n"
+    "- 줄마다 근거 조각 id를 «인용»에 넣는다. 근거가 없으면 그 줄을 넣지 않는다.\n"
+    "- 중점 제품을 확인할 근거가 없으면 표를 통째로 비운다(빈 배열). "
+    "지어내지 않는다.\n"
+)
+
+
+def portfolio_table_guide() -> str:
+    """3장 작가 안내문 — 스위치가 켜져 있으면 1단계 문구를 쓴다.
+
+    Returns:
+        스위치 ON이면 ``PORTFOLIO_TABLE_GUIDE_V2``, 아니면 옛 문구.
+    """
+
+    return (
+        PORTFOLIO_TABLE_GUIDE_V2
+        if revenue_table_v2_enabled()
+        else PORTFOLIO_TABLE_GUIDE
+    )
+
 
 #: 2장 흐름표 요청. 기준 문서(02_사업_구조와_수익_모델/README.md)의
 #: 「가치와 수익의 흐름: 핵심 자산 → 제품·서비스 → 고객 행동/과금 →
@@ -805,13 +875,11 @@ FLOW_CAPTION_BY_SECTION: Final[dict[str, str]] = {
     CULTURE_TABLE_SECTION_ID: CULTURE_TABLE_CAPTION,
 }
 
-#: 장 id → 프롬프트에서 «기본 스키마 안내 대신» 넣을 안내.
-FLOW_PROMPT_BY_SECTION: Final[dict[str, str]] = {
+#: 스위치와 무관하게 고정된 장별 안내문. 3장만 여기 없다 — 아래 매핑이
+#: 꺼낼 때 스위치를 본다.
+_STATIC_FLOW_PROMPTS: Final[dict[str, str]] = {
     IDENTITY_TABLE_SECTION_ID: (
         IDENTITY_TABLE_GUIDE + _flow_schema_guide(IDENTITY_TABLE_HEADERS)
-    ),
-    PORTFOLIO_TABLE_SECTION_ID: (
-        PORTFOLIO_TABLE_GUIDE + _flow_schema_guide(PORTFOLIO_TABLE_HEADERS)
     ),
     BUSINESS_FLOW_SECTION_ID: (
         BUSINESS_FLOW_GUIDE + _flow_schema_guide(BUSINESS_FLOW_HEADERS)
@@ -825,6 +893,49 @@ FLOW_PROMPT_BY_SECTION: Final[dict[str, str]] = {
         CULTURE_TABLE_GUIDE + _flow_schema_guide(CULTURE_TABLE_HEADERS)
     ),
 }
+
+#: 안내문이 있는 장의 순서. 예전 dict 순서를 그대로 지킨다 — 시험이
+#: `.values()`를 순회하므로 순서가 바뀌면 실패 메시지가 흔들린다.
+_FLOW_PROMPT_SECTION_IDS: Final[tuple[str, ...]] = (
+    IDENTITY_TABLE_SECTION_ID,
+    PORTFOLIO_TABLE_SECTION_ID,
+    BUSINESS_FLOW_SECTION_ID,
+    OPERATIONS_FLOW_SECTION_ID,
+    CHALLENGE_FLOW_SECTION_ID,
+    STRATEGY_TABLE_SECTION_ID,
+    CULTURE_TABLE_SECTION_ID,
+)
+
+
+class _FlowPromptBySection(Mapping[str, str]):
+    """장 id → 프롬프트에서 «기본 스키마 안내 대신» 넣을 안내.
+
+    ★ 왜 평범한 dict가 아닌가 — 3장 안내문은 스위치(``REVENUE_TABLE_V2``)에
+      따라 갈린다. dict 로 두면 «import 시점»에 스위치가 동결되어, 아직
+      스위치를 볼 이유가 없는 경로까지 전부 동결시킨다
+      (``frozen_revenue_table_switch()``가 「이 경로는 스위치를 한 번도
+      조회하지 않았다」를 확인하는 데 쓰인다). 값을 «꺼낼 때» 물어보면
+      그 일이 안 생기고, 시험이 스위치를 갈아 끼운 뒤 모듈을 reload 하지
+      않아도 된다.
+    ★ dict가 아니라 Mapping이라 쓰기가 막힌다 — 예전 dict도 Final이었지만
+      실제로는 수정할 수 있었다.
+    """
+
+    def __getitem__(self, section_id: str) -> str:
+        if section_id == PORTFOLIO_TABLE_SECTION_ID:
+            return portfolio_table_guide() + _flow_schema_guide(
+                PORTFOLIO_TABLE_HEADERS
+            )
+        return _STATIC_FLOW_PROMPTS[section_id]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(_FLOW_PROMPT_SECTION_IDS)
+
+    def __len__(self) -> int:
+        return len(_FLOW_PROMPT_SECTION_IDS)
+
+
+FLOW_PROMPT_BY_SECTION: Final[Mapping[str, str]] = _FlowPromptBySection()
 
 
 

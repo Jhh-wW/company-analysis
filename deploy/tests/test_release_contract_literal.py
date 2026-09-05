@@ -34,6 +34,8 @@ EXPECTED_RUNTIME_CONTRACT = "render-portfolio-link-v1"
 EXPECTED_RELEASE_MODE = "FULL"
 #: 출시에서 선언하지 않는 kill switch 이름.
 TYPED_COLLECTOR_ENV_NAME = "TYPED_DART_COLLECTOR"
+#: 1단계 매출표 범용 파서 kill switch 이름. 이것도 선언하지 않는 것이 off다.
+REVENUE_TABLE_V2_ENV_NAME = "REVENUE_TABLE_V2"
 
 
 def _render_web_service_env() -> dict[str, object]:
@@ -97,6 +99,29 @@ def test_TYPED_DART_COLLECTOR는_render_yaml에_없다() -> None:
     assert TYPED_COLLECTOR_ENV_NAME not in render_values, (
         "출시 릴리스는 typed 수집기를 끈 채로 나갑니다 — 출시 뒤 감독 실행 1건으로 결정합니다"
     )
+
+
+def test_REVENUE_TABLE_V2는_render_yaml에_없다() -> None:
+    """검사판 5곳으로만 확인한 새 매출표 파서를 출시와 함께 켜지 않는다.
+
+    이 스위치도 «선언하지 않는 것»이 off다. 켜면 표가 나오는 회사가 늘어나므로,
+    감독 실행으로 표 내용을 눈으로 확인한 뒤에 따로 결정한다.
+    """
+
+    render_values = _render_web_service_env()
+
+    assert REVENUE_TABLE_V2_ENV_NAME not in render_values, (
+        "출시 릴리스는 매출표 v2 파서를 끈 채로 나갑니다 — 감독 실행 뒤 따로 결정합니다"
+    )
+
+
+def test_deploy_readme가_새_kill_switch를_적어_둔다() -> None:
+    """켜고 끄는 방법이 문서에 없으면 되돌리는 사람이 코드를 읽어야 한다."""
+
+    readme = (REPOSITORY_ROOT / "deploy" / "README.md").read_text(encoding="utf-8")
+
+    assert REVENUE_TABLE_V2_ENV_NAME in readme
+    assert "키를 지우고 재배포" in readme
 
 
 def test_deploy_readme가_출시_계약_이름을_적어_둔다() -> None:

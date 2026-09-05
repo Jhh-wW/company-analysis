@@ -43,7 +43,10 @@ from src.features.composer.constants import (
     SECTION_IDS,
     SECTION_TITLES,
 )
-from src.features.composer.diagram_check import FLOW_REVIEW_PROMPT_HEADER
+from src.features.composer.diagram_check import (
+    FLOW_REVIEW_PROMPT_HEADER,
+    FLOW_REVIEW_ROW_NUMBER_PATTERN,
+)
 from src.features.composer.logic import (
     SUMMARY_MAX_SENTENCES,
     SUMMARY_MIN_SENTENCES,
@@ -90,8 +93,10 @@ _REVIEW_NUMBER_RE = re.compile(
     r"\[(\d+)\] \(등급: [^,\n]+, 인용:"
 )
 
-#: 도식 검수에서 경로 번호를 읽는 모양. 관계 글자는 보지 않는다.
-_FLOW_NUMBER_RE = re.compile(r"^\[(\d+)\] 경로\(JSON 배열\):", re.MULTILINE)
+#: 도식 검수에서 줄 번호를 읽는 모양. 관계 글자는 보지 않는다.
+#: ★ 모양을 여기에 베끼지 않는다 — 카드 장(3장 등)은 줄머리가 「카드」라
+#:   글자를 복사해 두면 카드 줄만 조용히 번호를 못 읽어 전부 탈락한다.
+_FLOW_NUMBER_RE = re.compile(FLOW_REVIEW_ROW_NUMBER_PATTERN, re.MULTILINE)
 
 #: 화면 노출이 금지된 영문 내부 키 모양 — validate.INTERNAL_KEY_SHAPE와 같은 판정
 _INTERNAL_KEY_RE = re.compile(r"[a-z][a-z0-9_]*")
@@ -946,6 +951,95 @@ def test_이음매_2장_사업_흐름표도_7장과_같은_사슬을_지나_화�
         "화면에 흐름도가 없습니다 — 표는 있는데 도식으로 안 그려졌습니다."
     )
     assert 흐름표.caption in body
+
+
+def test_이음매_3장_제품_카드도_같은_사슬을_지나_화면과_PDF까지_간다(
+    engine: _JypFakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """★★ 3장 카드가 «한 번도» 화면에 나온 적이 없다 — 그걸 여기서 잠근다.
+
+    2026-09-05 하이브 실행에서 흐름표 «6개»가 전부 렌더됐는데 3장만 0건
+    이었다. 그런데 저장소 어디에도 「3장 표가 실제로 렌더된다」를 끝까지
+    확인하는 시험이 없었다 — 있던 시험들은 전부 손으로 만든 FlowRow나
+    ReportTable에서 «시작»해서 프롬프트·파싱·검수를 건너뛴다. 그래서
+    3장이 0건이어도 아무 시험도 빨간불이 되지 않았다.
+
+    이 시험은 2장 시험과 «같은 사슬»(compose→parse→verify→dedupe→
+    check_diagrams→render→화면→PDF)을 3장으로 한 번 더 지난다. 3장은
+    화살표 장이 아니라 «카드» 장이라 화면 마크업도 다르다(card-chart).
+
+    ★ 칸에 숫자를 하나도 쓰지 않는다 — 그게 새 작가 안내문의 규칙이고,
+      도식 수치 검사(diagram_check)가 근거 원문에 없는 수를 보면 그 줄을
+      통째로 버리기 때문이다. 여기 칸 값은 전부 조각 10 원문의 말이다.
+    ★ 공유 fixture(_RESPONSES_FIXTURE)는 건드리지 않는다(다른 시험의 문장
+      수 계약이 깨진다) — 2장 시험과 같이 이 시험 안에서만 deepcopy로 심는다.
+    """
+    import copy
+
+    from src.features.composer.constants import (
+        PORTFOLIO_TABLE_CAPTION,
+        PORTFOLIO_TABLE_HEADERS,
+        PORTFOLIO_TABLE_SECTION_ID,
+    )
+
+    responses = copy.deepcopy(_RESPONSES_FIXTURE)
+    responses["장별_응답"][PORTFOLIO_TABLE_SECTION_ID]["경로표"] = [
+        {
+            "칸": [
+                "Stray Kids",
+                "북미·유럽·중남미 대형 투어",
+                "신보 출시와 구보 판매 확인",
+                "주력 그룹",
+            ],
+            "인용": ["10"],
+        },
+    ]
+    monkeypatch.setitem(globals(), "_RESPONSES_FIXTURE", responses)
+
+    result = _run(engine)
+    report = result.report
+    assert report is not None
+
+    # ── 마디 1: 엔진이 3장에 표를 실었는가 ──────────────
+    제품장 = next(
+        s for s in report.sections if s.cell == PORTFOLIO_TABLE_SECTION_ID
+    )
+    assert 제품장.tables, (
+        "3장에 표가 없습니다 — 작가가 낸 제품 카드가 엔진 안에서 사라졌습니다. "
+        "compose→verify→dedupe→check_diagrams 중 한 곳이 flow_rows를 버렸습니다."
+    )
+    카드표 = 제품장.tables[0]
+    assert 카드표.presentation == "flow", f"3장 표의 표현: {카드표.presentation!r}"
+    assert 카드표.caption == PORTFOLIO_TABLE_CAPTION
+    assert 카드표.headers == list(PORTFOLIO_TABLE_HEADERS)
+    assert len(카드표.rows) >= 1, "카드가 한 줄도 안 남았습니다 — 도식 검증이 다 버렸습니다"
+
+    # ── 마디 2: 화면이 그것을 «카드»로 그리는가 ──────────
+    #    3장은 화살표 장이 아니다 — flow-row가 아니라 card-chart로 나온다.
+    body = _v2_report_to_result_page(report, tmp_path / "portfolio-card-seam")
+    assert 'class="report-visual card-chart"' in body, (
+        "화면에 제품 카드가 없습니다 — 표는 있는데 카드로 안 그려졌습니다. "
+        "visualization._CARD_HEADER_KEY_SETS에 3장 머리글이 있는지 확인하세요."
+    )
+    assert 'class="section-content-card"' in body
+    assert 카드표.caption in body
+    assert "Stray Kids" in body
+
+    # ── 마디 3: PDF 투영까지 캡션이 살아 있는가 ──────────
+    #    9월 실행에서 이 캡션이 0건이었다는 것이 바로 «표가 없다»는 뜻이었다.
+    pdf_bytes = pdf_release.prepare_pdf_release(report).pdf_bytes
+    assert pdf_bytes.startswith(b"%PDF-")
+    dewrapped = "".join(
+        "\n".join(
+            page.extract_text() or ""
+            for page in PdfReader(io.BytesIO(pdf_bytes)).pages
+        ).splitlines()
+    )
+    assert _loose(PORTFOLIO_TABLE_CAPTION).search(dewrapped), (
+        "PDF에 3장 표 캡션이 없습니다 — 화면에는 있는데 PDF에서 사라졌습니다."
+    )
 
 
 # ══════════════════════════════════════════════════════════

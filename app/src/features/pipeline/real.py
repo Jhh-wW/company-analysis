@@ -4792,6 +4792,17 @@ def _run_v2_composer(
             company_id=corp_id,
             build_identity_sha256=build_identity_sha256,
         )
+        # 도식 검증이 뺀 줄의 사유를 실행 기록에도 남긴다. 3장 카드 0건 실측에서
+        # 「작가가 안 냈다」와 「우리가 걸렀다」를 가를 표식이 서버 로그에만 있어
+        # 저장된 실행 기록으로는 진단할 수 없었다.
+        dropped_diagram_reasons = tuple(getattr(output, "diagram_drop_reasons", ()))
+        if dropped_diagram_reasons:
+            steps.append(
+                {
+                    "step": "8_도식_검증_제외",
+                    "사유": list(dropped_diagram_reasons),
+                }
+            )
         if release_mode is not ReleaseMode.SHADOW:
             from src.shared.report_generation.models import (  # noqa: PLC0415
                 GenerationProducerEvidence,

@@ -30,7 +30,10 @@ from src.features.composer.constants import (
     SECTION_GUIDES,
     SECTION_IDS,
 )
-from src.features.composer.diagram_check import FLOW_REVIEW_PROMPT_HEADER
+from src.features.composer.diagram_check import (
+    FLOW_REVIEW_PROMPT_HEADER,
+    FLOW_REVIEW_ROW_NUMBER_PATTERN,
+)
 from src.features.composer.logic import (
     SUMMARY_MAX_SENTENCES,
     SUMMARY_MIN_SENTENCES,
@@ -87,8 +90,10 @@ _CITATION_MARKER_RE: Final[re.Pattern[str]] = re.compile(r"\[(\d+)\]")
 _REVIEW_NUMBER_RE: Final[re.Pattern[str]] = re.compile(
     r"\[(\d+)\] \(등급: [^,\n]+, 인용:"
 )
+#: ★ 줄머리 모양을 베끼지 않는다 — 카드 장(3장 등)은 「카드(JSON 배열)」라
+#:   글자를 복사해 두면 카드 줄만 번호를 못 읽어 조용히 전부 탈락한다.
 _FLOW_NUMBER_RE: Final[re.Pattern[str]] = re.compile(
-    r"^\[(\d+)\] 경로\(JSON 배열\):", re.MULTILINE
+    FLOW_REVIEW_ROW_NUMBER_PATTERN, re.MULTILINE
 )
 
 #: 시스템이 붙일 수 있는 안내문 전부 — «실질 문장» 집계에서 뺀다

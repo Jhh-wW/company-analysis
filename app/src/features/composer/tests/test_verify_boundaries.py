@@ -20,7 +20,10 @@ from pathlib import Path
 from typing import Any, Final, Optional, Sequence
 
 from src.features.composer.constants import GRADE_CONFIRMED, SECTION_GUIDES, SECTION_IDS
-from src.features.composer.diagram_check import FLOW_REVIEW_PROMPT_HEADER
+from src.features.composer.diagram_check import (
+    FLOW_REVIEW_PROMPT_HEADER,
+    FLOW_REVIEW_ROW_NUMBER_PATTERN,
+)
 from src.features.composer.logic import AskFn, SUMMARY_PROMPT_HEADER
 from src.features.composer.pipeline import V2RunOutput, run_v2
 from src.features.composer.render import (
@@ -49,8 +52,10 @@ _REVIEW_ITEM_RE: Final[re.Pattern[str]] = re.compile(
     r"\[(\d+)\] \(등급: [^,\n]+, 인용: [^\n]*\)\n"
     r"  문장\(JSON 문자열\): (.+)"
 )
+#: ★ 줄머리 모양을 베끼지 않는다 — 카드 장(3장 등)은 「카드(JSON 배열)」라
+#:   글자를 복사해 두면 카드 줄만 번호를 못 읽어 조용히 전부 탈락한다.
 _FLOW_ITEM_RE: Final[re.Pattern[str]] = re.compile(
-    r"^\[(\d+)\] 경로\(JSON 배열\):", re.MULTILINE
+    FLOW_REVIEW_ROW_NUMBER_PATTERN, re.MULTILINE
 )
 
 
