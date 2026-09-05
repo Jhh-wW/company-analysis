@@ -89,6 +89,7 @@ EXPECTED_TABLES = {
         "report_access_cutover",
         "report_access_legacy_resources",
     },
+    "src.features.storage.newsroom_date_cache": {"newsroom_date_cache"},
 }
 
 BASE_SCHEMA_OWNERS = {
