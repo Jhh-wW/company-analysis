@@ -21,6 +21,8 @@ SUBJECT_KINDS: Final[frozenset[str]] = frozenset(
 )
 
 MAX_NAME_CANDIDATES: Final[int] = 40
+# 조립기 프롬프트 길이는 곧 비용이므로 건당 300~400원 목표 안에서 제한한다.
+MAX_NAME_FRAGMENTS_PER_FILING: Final[int] = 12
 MIN_NAME_CHARS: Final[int] = 2
 MAX_NAME_CHARS: Final[int] = 100
 UNSPECIFIED_SOURCE_KIND: Final[str] = ""
