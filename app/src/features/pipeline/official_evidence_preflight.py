@@ -16,6 +16,9 @@ from src.features.composer.constants import (
     DART_FINANCIAL_API_HOST,
     DART_FINANCIAL_API_URL,
 )
+from src.features.report_standard.constants import (
+    MINIMUM_PUBLISHABLE_SECTION_COUNT,
+)
 from src.shared.final_gate_diagnostics import (
     FINAL_GATE_DETAIL_PREFLIGHT_CLASSIFIER_COVERAGE_GAP,
     FINAL_GATE_DETAIL_PREFLIGHT_DOCUMENT_SOURCES_INSUFFICIENT,
@@ -84,6 +87,12 @@ _WEB_FAILURE_SOURCE_KINDS = frozenset(
 _WEB_IDENTITY_REJECTION_REASON_CODES = frozenset(
     {"root_identity_mismatch", "cross_domain_identity_mismatch"}
 )
+# 부분 보고서로 전환한 갈래를 진단에 남기는 닫힌 두 값이다. 회사·URL·원문을
+# 담지 않으므로 steps 로그에 그대로 실어도 된다.
+DART_PARTIAL_REASON_TRANSIENT_WEB_FAILURE = "transient_web_failure"
+DART_PARTIAL_REASON_INSUFFICIENT_WITH_READY_SECTIONS = (
+    "insufficient_with_ready_sections"
+)
 
 
 def _has_usable_dart_evidence(result: OfficialEvidenceCollectionResult) -> bool:
@@ -98,6 +107,39 @@ def _has_usable_dart_evidence(result: OfficialEvidenceCollectionResult) -> bool:
         if any(
             fragment.document_id in dart_document_ids
             for fragment in candidate.fragments
+        ):
+            return True
+    return False
+
+
+def _identity_rejected_web_evidence_is_bound(
+    result: OfficialEvidenceCollectionResult,
+) -> bool:
+    """신원 대조에 실패한 웹 시도가 실제 웹 자료를 남긴 장이 있는지 본다.
+
+    ``wide_collect``의 신원 대조 실패 경로는 fail-closed다. 두 사유를 붙이는
+    자리(``wide_collect.py:1084-1091``)가 속한 ``_collect_identity_verified_
+    candidate``에서 문서를 만드는 블록은 ``match is not None`` 안에만 있어서
+    (``wide_collect.py:1092``·append는 1165), 신원 대조에 실패한 시도는 MISSING
+    attempt만 남기고 documents를 하나도 내보내지 않는다. 우리은행 실측도 같았다
+    — 수집 문서 12건이 전부 DART였고 불일치 시도가 남긴 문서·조각은 0건이다.
+
+    그렇다고 «불일치가 있으면 웹 문서가 없다»는 아니다. 신원이 확인돼 결속된
+    host는 다른 함수(``_visit_page``의 1424, ``_run_ir_pdf_phase``의 1753)에서
+    계속 문서를 만든다. 그래서 전역이 아니라 장 단위로 본다 — 불일치 시도가
+    붙은 그 장에 웹 종류의 문서가 실제로 결속돼 있을 때만 막는다. 그때는 어느
+    호스트에서 온 문장인지 이 계층이 구분할 수 없기 때문이다.
+    """
+
+    for candidate in result.candidates:
+        if not any(
+            attempt.reason_code in _WEB_IDENTITY_REJECTION_REASON_CODES
+            for attempt in candidate.attempts
+        ):
+            continue
+        if any(
+            document.source_kind in OFFICIAL_WEB_SOURCE_KINDS
+            for document in candidate.documents
         ):
             return True
     return False
@@ -121,6 +163,9 @@ class OfficialEvidencePreflight:
     independent_document_count: int
     detail_code: str = ""
     dart_partial_fallback: bool = False
+    # 어느 갈래로 부분 보고서 전환을 허용했는지 남긴다. 값은
+    # ``DART_PARTIAL_REASON_*`` 두 개뿐이고, 전환이 없으면 빈 문자열이다.
+    dart_partial_reason: str = ""
 
     @property
     def can_call_ai(self) -> bool:
@@ -149,6 +194,11 @@ def assess_official_evidence(
     일시 장애가 하나라도 있으면 ``transient``로 남긴다. 독립 문서 하한은
     재무 API·매출표까지 실제 packet에 합친 뒤 ``assess_packet_document_sources``
     가 검사한다. 여기서 formal 문서만 세어 미리 막으면 정상 후보도 과소평가한다.
+
+    아홉 장을 다 채우지 못했더라도 DART 근거가 결속돼 있으면 두 갈래로
+    부분 보고서(SHADOW)를 허용한다 — 웹 경로가 막힌 경우(갈래 1)와, 확인은
+    끝냈지만 일부 장의 자료가 없는 경우(갈래 2)다. 어느 갈래로 열렸는지는
+    ``dart_partial_reason``에 남는다.
     """
 
     candidates_by_id = {
@@ -195,16 +245,49 @@ def assess_official_evidence(
         for attempt in candidate.attempts
         if attempt.state in _INCOMPLETE_COLLECTION_STATES
     )
-    dart_partial_fallback = (
+    # 두 갈래 모두 «내부 배선은 멀쩡하고, 필수 DART 확인이 끝났고, 실제 DART
+    # 원문 조각이 결속돼 있다»를 전제로 한다. 이 셋 중 하나라도 깨지면 어떤
+    # 부분 보고서도 만들지 않는다.
+    dart_partial_prerequisites_hold = (
         not integrity_is_broken
         and not required_dart_collection_incomplete
-        and not web_identity_was_rejected
         and _has_usable_dart_evidence(result)
+    )
+    # (갈래 1) 회사 웹 경로가 «막혀서» 확인을 끝내지 못한 경우. 하이브 실측이
+    # 이 모양이었다 — robots.txt 거부로 FAILED가 나 STOP_TRANSIENT_FAILURE로
+    # 닫혔고, DART 근거로 SHADOW 부분 보고서가 정상 생성됐다.
+    transient_partial_fallback = (
+        dart_partial_prerequisites_hold
+        and not web_identity_was_rejected
         and decision.status is GenerationGateStatus.STOP_TRANSIENT_FAILURE
         and bool(incomplete_attempts)
         and all(
             attempt.source_kind in _WEB_FAILURE_SOURCE_KINDS
             for attempt in incomplete_attempts
+        )
+    )
+    # (갈래 2) 확인은 끝냈는데 일부 장의 자료가 없는 경우. 우리은행 실측이
+    # 이 모양이었다 — DART ir_url이 비어 공식 웹 후보가 없었고 남은 웹 경로는
+    # 전부 신원 대조에 실패해 MISSING으로 닫혔다. 아홉 장 중 일곱 장이 READY
+    # 인데도 갈래 1의 조건(FAILED/TRUNCATED)에 걸리지 않아 보고서가 0건
+    # 나왔다. 공개 가능한 최소 장 수를 넘겼다면 그 일곱 장은 실제로 확인된
+    # 자료이므로, FULL이 아니라 부분 보고서로 내보낸다. 하한은 부분 보고서
+    # 출고 계약과 같은 정본(MINIMUM_PUBLISHABLE_SECTION_COUNT)을 쓴다.
+    insufficient_partial_fallback = (
+        dart_partial_prerequisites_hold
+        and not _identity_rejected_web_evidence_is_bound(result)
+        and decision.status is GenerationGateStatus.STOP_INSUFFICIENT_EVIDENCE
+        and len(decision.ready_section_ids) >= MINIMUM_PUBLISHABLE_SECTION_COUNT
+    )
+    # 게이트 판정은 한 상태만 갖는다 — 두 갈래는 동시에 참이 될 수 없다.
+    dart_partial_fallback = transient_partial_fallback or insufficient_partial_fallback
+    dart_partial_reason = (
+        DART_PARTIAL_REASON_TRANSIENT_WEB_FAILURE
+        if transient_partial_fallback
+        else (
+            DART_PARTIAL_REASON_INSUFFICIENT_WITH_READY_SECTIONS
+            if insufficient_partial_fallback
+            else ""
         )
     )
     if integrity_is_broken:
@@ -221,6 +304,10 @@ def assess_official_evidence(
         # 읽었지만 의미 칸을 붙이지 못한 관측이 하나라도 있으면 회사를
         # 자료 부족으로 탓할 수 없다. 무분류 조각은 근거로 승격하지 않은 채
         # 내부 분류 범위 결함으로 닫아 선결제·AI 호출 전에 운영자에게 보낸다.
+        #
+        # 여기까지 왔다는 것은 갈래 2가 거짓이라는 뜻이다 — 즉 DART 근거가
+        # 결속되지 않았거나, READY 장이 공개 최소치보다 적거나, 신원 대조에
+        # 실패한 웹 자료가 실제로 섞여 있다. 그때만 이 두 사유로 닫는다.
         detail_code = (
             FINAL_GATE_DETAIL_PREFLIGHT_CLASSIFIER_COVERAGE_GAP
             if result.unclassified_evidence is not None
@@ -234,6 +321,7 @@ def assess_official_evidence(
         independent_document_count=result.independent_document_count,
         detail_code=detail_code,
         dart_partial_fallback=dart_partial_fallback,
+        dart_partial_reason=dart_partial_reason,
     )
 
 
