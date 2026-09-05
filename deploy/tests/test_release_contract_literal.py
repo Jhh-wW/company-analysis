@@ -101,17 +101,19 @@ def test_TYPED_DART_COLLECTOR는_render_yaml에_없다() -> None:
     )
 
 
-def test_REVENUE_TABLE_V2는_render_yaml에_없다() -> None:
-    """검사판 5곳으로만 확인한 새 매출표 파서를 출시와 함께 켜지 않는다.
+def test_REVENUE_TABLE_V2는_render_yaml에_정확히_1로_켜져_있다() -> None:
+    """1단계 매출표 범용 파서·3장 카드 안내문을 출시에서 켠다.
 
-    이 스위치도 «선언하지 않는 것»이 off다. 켜면 표가 나오는 회사가 늘어나므로,
-    감독 실행으로 표 내용을 눈으로 확인한 뒤에 따로 결정한다.
+    PR #21이 스위치 OFF로 먼저 배포됐고, 검사판 재현(하이브 2표·삼성전자 1·진영 2·
+    카카오 1·현대카드 1·우리은행 0)과 회귀 4묶음 통과를 확인한 뒤 켠다. 값은
+    정확히 문자열 "1"이어야 한다 — true·yes 같은 관용 표기는 코드가 OFF로 읽는다.
+    되돌릴 때는 이 키를 지우고 재배포한다.
     """
 
     render_values = _render_web_service_env()
 
-    assert REVENUE_TABLE_V2_ENV_NAME not in render_values, (
-        "출시 릴리스는 매출표 v2 파서를 끈 채로 나갑니다 — 감독 실행 뒤 따로 결정합니다"
+    assert render_values.get(REVENUE_TABLE_V2_ENV_NAME) == "1", (
+        "1단계 매출표 v2 스위치는 정확히 \"1\"로 선언돼야 켜집니다"
     )
 
 
