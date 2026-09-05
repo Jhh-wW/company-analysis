@@ -69,6 +69,11 @@ from src.shared.report_quality.source_identity import (
     collected_document_identity,
     document_identity_from_parts,
 )
+from src.shared.revenue_table_provenance import (
+    REVENUE_AXIS_PRODUCT,
+    REVENUE_AXIS_REGION,
+    revenue_table_section_id,
+)
 
 
 _CORP_ID = "00126380"
@@ -315,6 +320,23 @@ def test_실제_9번칸의_매출수주와_연구개발은_운영파트너packet
 
     operation_ids = {fragment.fragment_id for fragment in operations.fragments}
     assert expected_ids <= operation_ids
+
+
+def test_매출수주는_제품표와_지역표의_소유_장_packet에도_남는다() -> None:
+    frags = _all_legacy_frags()
+    fragment_id = next(
+        number
+        for number, raw in frags.items()
+        if raw["종류"] == LEGACY_KIND_REVENUE_AND_ORDERS
+    )
+
+    assert _sections_containing(_build(frags), fragment_id) == frozenset(
+        {
+            revenue_table_section_id(REVENUE_AXIS_PRODUCT),
+            revenue_table_section_id(REVENUE_AXIS_REGION),
+            "operations_partners",
+        }
+    )
 
 
 def test_typed는_공식IR_legacy_소유표가_아닌_봉인된_장에만_간다() -> None:

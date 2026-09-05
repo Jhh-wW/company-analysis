@@ -255,7 +255,8 @@ def test_스위치가_켜지면_3장_안내문이_칸에_숫자를_쓰지_말라
     지침 = FLOW_PROMPT_BY_SECTION[PORTFOLIO_TABLE_SECTION_ID]
 
     assert "숫자·퍼센트·연도를 쓰지 않는다" in 지침
-    assert "2장·4장" in 지침
+    assert "이 장의 별도 구성표" in 지침
+    assert "3개년 변화 수치는 4장" in 지침
 
 
 def test_스위치가_켜지면_3장_안내문이_수익을_만드는_제품이라고_말한다(
