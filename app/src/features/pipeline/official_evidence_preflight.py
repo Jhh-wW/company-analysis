@@ -207,6 +207,30 @@ class PacketDocumentSourcePreflight:
         return not self.detail_code
 
 
+def empty_collector_sections(
+    result: OfficialEvidenceCollectionResult,
+) -> tuple[dict[str, object], ...]:
+    """재판정 대상인 장과 비어 있는 수집 의미 칸을 정책 순서로 돌려준다."""
+
+    candidates_by_id = {
+        candidate.section_id: candidate for candidate in result.candidates
+    }
+    empty_sections: list[dict[str, object]] = []
+    for section_id in REQUIRED_EVIDENCE_SECTION_IDS:
+        bundle = build_section_bundle(
+            candidates_by_id[section_id],
+            required_slot_ids=collector_slots_for(section_id),
+        )
+        if bundle.missing_slot_ids:
+            empty_sections.append(
+                {
+                    "section_id": section_id,
+                    "missing_slot_ids": bundle.missing_slot_ids,
+                }
+            )
+    return tuple(empty_sections)
+
+
 def assess_official_evidence(
     result: OfficialEvidenceCollectionResult,
 ) -> OfficialEvidencePreflight:

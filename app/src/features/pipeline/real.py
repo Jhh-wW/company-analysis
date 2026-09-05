@@ -159,6 +159,9 @@ from src.features.grading.logic import is_accounting_policy, is_table_dump
 from src.features.cost_tracking.store import AiCostEvent
 from src.features.pipeline.constants import ANTHROPIC_TIMEOUT_SEC, DART_SUCCESS_STATUS
 from src.features.pipeline import engine_mode
+from src.features.pipeline.evidence_reclassify_step import (
+    reclassify_official_evidence,
+)
 from src.features.pipeline.evidence_transport import (
     EvidenceTransportError,
     build_section_evidence_packet_set,
@@ -2582,6 +2585,14 @@ class RealPipeline:
                         ),
                         domain_attestation_evidence=profile_attestation_evidence,
                     )
+                )
+                official_evidence = reclassify_official_evidence(
+                    official_evidence,
+                    client=client,
+                    connect_db=storage_db.connect_explicit_commit,
+                    model=model,
+                    steps=steps,
+                    generated_at=business_date.isoformat(),
                 )
                 official_preflight = assess_official_evidence(official_evidence)
             except Exception as error:  # noqa: BLE001 - 닫힌 타입으로만 아래서 분류
