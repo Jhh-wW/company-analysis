@@ -217,6 +217,44 @@ class ReportSourceIdentity:
         }
         return hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
 
+    def generation_digest_without_financials(
+        self,
+        official_snapshot_sha256: str,
+    ) -> str:
+        """재무 API 자료가 «없음»으로 확정된 회사의 생성 신원.
+
+        감사보고서만 내는 비상장사는 DART 주요계정 API가 세 사업연도 모두
+        «조회된 데이터 없음(013)»을 돌려준다(2026-09-05 인이지 실측). 그러면
+        ``financial_payload_digest``가 비어 ``cache_digest_with_official_snapshot``
+        이 빈 문자열을 돌리고, 운영은 이를 내부 계약 실패로 읽어 AI 작성 전에
+        멈췄다. 재무 자료가 없는 것은 회사 자료의 실제 상태이므로 공식 접수번호와
+        공식 자료 snapshot만으로 생성 신원을 세운다.
+
+        캐시 재사용 열쇠(``cache_digest``·``cache_usable``)는 그대로 비워 둔다 —
+        재무 도장 없는 신원으로 옛 보고서를 돌려주지 않기 위해서다. 이 지문은
+        생성 조정(single-flight)과 저장 신원에만 쓴다.
+
+        재무 도장이 «있는» 신원에는 쓰지 않는다(빈 문자열). 그 경우는
+        ``cache_digest_with_official_snapshot``가 정본이다.
+        """
+
+        if self.financial_payload_digest:
+            return ""
+        if not self.dart_receipt_numbers:
+            return ""
+        clean_snapshot = str(official_snapshot_sha256 or "").strip()
+        try:
+            require_financial_payload_digest(clean_snapshot, allow_empty=False)
+        except ReportSourceIdentityError:
+            return ""
+        payload = {
+            "version": 1,
+            "dart_receipt_numbers": list(self.dart_receipt_numbers),
+            "financial_payload_state": "absent",
+            "official_evidence_snapshot_sha256": clean_snapshot,
+        }
+        return hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
+
     @classmethod
     def capture(
         cls,

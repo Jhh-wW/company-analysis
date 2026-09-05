@@ -1267,3 +1267,66 @@ def test_비교사_기업개황_법인번호가_없거나_다르면_내부계약
 
     assert engine.posting_ai_calls == 0
     assert engine.generate_ai_calls == 0
+
+
+class _AuditOnlyEngine(FakeEngine):
+    """감사보고서만 내는 비상장사 흉내 — DART 재무 API가 세 해 모두 «자료 없음(013)».
+
+    2026-09-05 인이지 실측: ``fetch_financials``가 ``(None, [])``를 돌려
+    ``financial_payload_digest``가 비었고, 운영은 이를 «공식 자료 snapshot을
+    결속하지 못했습니다»(내부 계약 실패)로 읽어 AI 작성 전에 멈췄다.
+    """
+
+    def fetch_financials(
+        self, corp_code: str, counter: Any, *, business_date: Any = None
+    ) -> tuple[None, list[int]]:
+        return None, []
+
+    def latest_report_rcept(
+        self, corp_code: str, corp_type: str, counter: Any, *, business_date: Any = None
+    ) -> dict[str, Any]:
+        return {
+            "report_nm": "감사보고서 (2025.12)",
+            "rcept_no": "20260406001240",
+            "rcept_dt": "20260406",
+            "reprt_code": "11011",
+        }
+
+
+def test_FULL은_재무API_자료없음_비상장사도_snapshot결속_실패로_멈추지_않는다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """재무 도장이 없는 것은 회사 자료의 실제 상태다. 접수번호+공식 snapshot으로 생성한다."""
+
+    _freeze_runtime(
+        monkeypatch,
+        mode=real.engine_mode.EngineMode.V2,
+        release_mode=ReleaseMode.FULL,
+    )
+    engine = _AuditOnlyEngine()
+    official = _official_result()
+    collector = _Collector([official])
+    calls = _wire_runtime(monkeypatch, engine=engine)
+
+    result = _run(collector)
+
+    assert result.outcome is Outcome.REPORT, result.message
+    assert "snapshot을 결속하지 못했습니다" not in " ".join(
+        getattr(source, "detail", "") or "" for source in (result.sources or ())
+    )
+
+    filing = engine.latest_report_rcept(CORP_ID, "비상장 외감", engine.UsageCounter())
+    identity = ReportSourceIdentity.capture(filing=filing, financial_payload=None)
+    assert identity.cache_usable is False
+    assert identity.cache_digest_with_official_snapshot(official.source_snapshot_sha256) == ""
+    expected_digest = identity.generation_digest_without_financials(
+        official.source_snapshot_sha256
+    )
+    assert expected_digest
+    assert calls.coordinates[0]["preflight_identity_digest"] == expected_digest
+    assert calls.composers[0]["source_identity_digest"] == expected_digest
+
+    steps = calls.composers[0].get("steps") or []
+    assert any(
+        step.get("step") == "6_수집_생성신원_재무자료없음" for step in steps
+    ), [step.get("step") for step in steps]
