@@ -11,6 +11,7 @@ from pypdf import PdfReader
 from pypdf.generic import IndirectObject
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfgen.canvas import Canvas
 from reportlab.platypus import Paragraph, SimpleDocTemplate
 
 from src.core.constants import section_display_heading
@@ -18,16 +19,21 @@ from src.features.export_pdf import constants
 from src.features.export_pdf.logic import (
     PDFGenerationError,
     _add_report_table,
+    _draw_text_with_fallback,
     _grade_notice,
+    _missing_glyphs,
     _normalize_pdf_text,
+    _register_fonts,
     _single_line_pdf_text,
     _styles,
+    _unsupported_glyphs,
     build_ascii_filename,
     build_content_disposition,
     build_download_filename,
     build_pdf,
     source_summary,
 )
+from src.features.export_pdf.release import prepare_pdf_bytes
 from src.features.pipeline.canonical_demo import build_demo_report
 from src.features.pipeline.port import (
     Grade,
@@ -456,9 +462,57 @@ def test_폰트_라이선스_원문을_배포물과_함께_둔다() -> None:
     readme = (constants.FONT_DIR / "README.md").read_text(encoding="utf-8")
     assert "SIL OPEN FONT LICENSE Version 1.1" in license_text
     assert "Copyright (c) 2024 PT& / 피티앤" in license_text
+    assert "Copyright (c) 2014-2021 Adobe" in license_text
     assert "https://openfontlicense.org" in readme
+    assert "Sans2.004" in readme
     assert constants.FONT_REGULAR_PATH.stat().st_size > 100_000
     assert constants.FONT_SEMIBOLD_PATH.stat().st_size > 100_000
+    assert (
+        100_000
+        < constants.FONT_FALLBACK_PATH.stat().st_size
+        <= constants.FONT_FALLBACK_MAX_BYTES
+    )
+
+
+def test_기본글꼴에_없는_한자는_Noto_대체글꼴로_검색가능하게_그린다() -> None:
+    sentence = "인(人)간을 이(利)롭게 하는 인공지(知)능 예측서비스 기업"
+    assert _missing_glyphs(sentence) == ("利",)
+    assert _missing_glyphs(sentence, constants.FONT_FALLBACK) == ()
+    assert _unsupported_glyphs(sentence) == ()
+
+    pdf = build_pdf(replace(_report(), corp_type=sentence))
+    assert "".join(sentence.split()) in "".join(_text(pdf).split())
+    assert prepare_pdf_bytes(
+        pdf,
+        render_scale=0.75,
+        expected_fact_ids=("hanja-fallback",),
+    ).page_count > 0
+    assert any(
+        "NotoSansKR" in str(font.get("/BaseFont", ""))
+        for font in _font_objects(PdfReader(io.BytesIO(pdf), strict=True))
+    )
+
+    output = io.BytesIO()
+    _register_fonts()
+    canvas = Canvas(output, invariant=1)
+    canvas.setFont(constants.FONT_REGULAR, 12)
+    _draw_text_with_fallback(
+        canvas,
+        72,
+        720,
+        sentence,
+        font_name=constants.FONT_REGULAR,
+        font_size=12,
+    )
+    canvas.save()
+    canvas_pdf = output.getvalue()
+    canvas_text = PdfReader(io.BytesIO(canvas_pdf)).pages[0].extract_text() or ""
+    assert "".join(sentence.split()) in "".join(canvas_text.split())
+    assert prepare_pdf_bytes(
+        canvas_pdf,
+        render_scale=0.75,
+        expected_fact_ids=("canvas-hanja-fallback",),
+    ).page_count == 1
 
 
 def test_내장폰트_미지원_표시문자는_의미_같은_검색가능_텍스트로_정규화한다() -> None:
