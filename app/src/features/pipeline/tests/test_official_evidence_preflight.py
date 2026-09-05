@@ -598,6 +598,150 @@ def test_READY가_최소_공개_장수_미만이면_INSUFFICIENT는_그대로_�
     )
 
 
+def test_READY여도_독립문서가_정식_하한에_못미치면_부분보고서로_내린다() -> None:
+    # 우리은행 실측 모양: 아홉 장을 다 확인했지만 수집한 독립 문서가 DART 공시
+    # 3건뿐이다. 뒤에 합쳐질 문서를 최대로 더해도 완성 보고서의 독립 문서 8건에
+    # 닿지 못하므로, FULL로 들여보낸 뒤 packet 문서 검사에서 멈춰 보고서를 0건
+    # 내지 않고 사전검사에서 미리 부분 보고서로 내린다.
+    observed = _with_dart_evidence(_result(document_count=3))
+
+    preflight = assess_official_evidence(observed)
+
+    assert preflight.decision.status is GenerationGateStatus.READY_FOR_GENERATION
+    assert preflight.independent_document_count == 3
+    assert preflight.dart_partial_fallback is True
+    assert preflight.dart_partial_reason == "too_few_documents_for_full"
+    # 자료가 부족한 게 아니라 «완성 등급»만 못 미치는 상태다. AI 호출은 그대로
+    # 열려 있어야 부분 보고서가 실제로 만들어진다.
+    assert preflight.can_call_ai is True
+    assert preflight.detail_code == ""
+
+
+def test_늦게_더해질_문서를_합쳐_하한에_닿을_수_있으면_정식을_유지한다() -> None:
+    # 이 강등은 «도달 불가»가 확정된 회사에만 쓴다. packet에서 늦게 더해질 수
+    # 있는 문서(재무 API·매출 구성표·양사 비교 상대사)를 최대로 더해도 8건에
+    # 못 미치는 4건까지만 열리고, 8건에 닿을 수 있는 5건부터는 정식 경로를 그대로
+    # 둔다. 경계 양쪽을 같이 봐야 여유분이 실제로 판정에 쓰인다.
+    unreachable = assess_official_evidence(
+        _with_dart_evidence(_result(document_count=4))
+    )
+    reachable = assess_official_evidence(
+        _with_dart_evidence(_result(document_count=5))
+    )
+    plenty = assess_official_evidence(
+        _with_dart_evidence(_result(document_count=6))
+    )
+
+    assert unreachable.independent_document_count == 4
+    assert unreachable.dart_partial_fallback is True
+    assert unreachable.dart_partial_reason == "too_few_documents_for_full"
+
+    assert reachable.independent_document_count == 5
+    assert reachable.dart_partial_fallback is False
+    assert reachable.dart_partial_reason == ""
+    assert reachable.can_call_ai is True
+    assert reachable.detail_code == ""
+
+    assert plenty.independent_document_count == 6
+    assert plenty.dart_partial_fallback is False
+    assert plenty.dart_partial_reason == ""
+
+
+def test_문서하한_강등도_READY_3장_미만이면_열리지_않는다() -> None:
+    # 문서가 모자란다는 이유만으로 부분 보고서를 열지 않는다. 오늘의 게이트에서
+    # READY_FOR_GENERATION은 아홉 장 전부 READY와 같은 뜻이라, 확인하지 못한 장이
+    # 많은 이 모양은 세 번째 갈래가 아니라 INSUFFICIENT 갈래의 공개 최소 장 수
+    # 하한에서 닫힌다. 문서 하한 강등이 그 하한을 우회하지 않는지 함께 못 박는다.
+    blocked_ids = (
+        "portfolio",
+        "past_changes",
+        "current_challenges",
+        "future_strategy",
+        "operations_partners",
+        "culture",
+        "competitive_position",
+    )
+
+    preflight = assess_official_evidence(
+        _without_section_evidence(
+            _with_dart_evidence(_result(document_count=3)),
+            blocked_ids,
+            identity_mismatch_section_id="portfolio",
+        )
+    )
+
+    assert preflight.independent_document_count == 2
+    assert len(preflight.decision.ready_section_ids) == 2
+    assert preflight.dart_partial_fallback is False
+    assert preflight.dart_partial_reason == ""
+    assert preflight.can_call_ai is False
+    assert (
+        preflight.detail_code
+        == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INSUFFICIENT
+    )
+
+
+def test_갈래_우선순위는_transient_insufficient_document_floor_순이다() -> None:
+    # 세 모양 모두 독립 문서가 3건이라 문서 하한 조건 자체는 늘 참이다. 그런데도
+    # 조회 실패가 섞이면 일시 장애가, 확인은 끝났지만 자료가 없으면 자료 부족이
+    # 먼저 남아야 운영자가 «무엇 때문에 부분 보고서가 됐는지»를 헷갈리지 않는다.
+    base = _with_dart_evidence(_result(document_count=3))
+    candidates = list(base.candidates)
+    target_index = next(
+        index
+        for index, candidate in enumerate(candidates)
+        if candidate.section_id == "culture"
+    )
+    candidates[target_index] = replace(
+        candidates[target_index],
+        documents=(),
+        fragments=(),
+        attempts=(
+            CollectionAttempt(
+                company_id=_COMPANY_ID,
+                attempt_id="homepage:culture",
+                source_kind=SOURCE_KIND_OFFICIAL_WEB_PAGE,
+                requirement=SourceRequirement.REQUIRED,
+                state=CollectionState.FAILED,
+                slot_ids=collector_slots_for("culture"),
+                reason_code="document_fetch_failed",
+            ),
+        ),
+        candidate_readiness=EvidenceReadiness.UNKNOWN,
+    )
+    transient = assess_official_evidence(
+        OfficialEvidenceCollectionResult(
+            company_id=base.company_id,
+            candidates=tuple(candidates),
+        )
+    )
+    insufficient = assess_official_evidence(
+        _without_section_evidence(
+            _with_dart_evidence(_result(document_count=3)),
+            ("portfolio", "culture"),
+            identity_mismatch_section_id="portfolio",
+        )
+    )
+    document_floor = assess_official_evidence(
+        _with_dart_evidence(_result(document_count=3))
+    )
+
+    assert transient.independent_document_count == 3
+    assert transient.dart_partial_reason == "transient_web_failure"
+
+    assert insufficient.independent_document_count == 3
+    assert insufficient.dart_partial_reason == "insufficient_with_ready_sections"
+
+    assert document_floor.independent_document_count == 3
+    assert document_floor.dart_partial_reason == "too_few_documents_for_full"
+
+    assert {
+        transient.dart_partial_fallback,
+        insufficient.dart_partial_fallback,
+        document_floor.dart_partial_fallback,
+    } == {True}
+
+
 def test_DART근거가_결속되지_않으면_INSUFFICIENT_구제는_없다() -> None:
     # 남은 장이 아무리 많아도 부분 보고서의 본문은 DART 원문이 받쳐야 한다.
     observed = _without_section_evidence(
