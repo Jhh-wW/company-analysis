@@ -160,10 +160,7 @@ def test_다개년_행도_원문_payload_대조를_모두_통과한다() -> None
             evidence_rows=table["evidence_rows"],
             cited_source_text=excerpt,
         )
-        assert revenue_table_section_id_from_caption(table["caption"]) in {
-            "portfolio",
-            "business_model",
-        }
+        assert revenue_table_section_id_from_caption(table["caption"]) == "past_changes"
         for index, (row, raw_row, evidence) in enumerate(
             zip(table["rows"], table["raw_rows"], table["evidence_rows"])
         ):
@@ -177,6 +174,15 @@ def test_다개년_행도_원문_payload_대조를_모두_통과한다() -> None
                 expected_selected_index=index,
                 expected_row_count=len(table["rows"]) - 1,
             )
+
+
+def test_단년_캡션은_제품_3장과_지역_2장_소유를_유지한다() -> None:
+    tables = build(픽스처("hybe_product_and_region"))
+
+    assert [
+        revenue_table_section_id_from_caption(table["caption"])
+        for table in tables
+    ] == ["portfolio", "business_model"]
 
 
 @pytest.mark.parametrize(

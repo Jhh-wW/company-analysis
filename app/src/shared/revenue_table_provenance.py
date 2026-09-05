@@ -552,7 +552,12 @@ def revenue_table_section_id_from_caption(caption: object) -> str:
 
     if type(caption) is not str:
         raise ValueError("매출 구성표의 캡션이 문자열이 아닙니다")
-    return revenue_table_section_id(revenue_text_axis(caption))
+    axis = revenue_text_axis(caption)
+    if axis is not None:
+        change_caption = REVENUE_CHANGE_CAPTION_BY_AXIS[axis]
+        if caption == change_caption or caption.startswith(f"{change_caption} ("):
+            return "past_changes"
+    return revenue_table_section_id(axis)
 
 
 def revenue_table_axis_matches(
@@ -1208,7 +1213,7 @@ def _multi_year_revenue_row_evidence_matches(
     selected_positions = tuple(years.index(year) for year in selected_years)
     name = _field_value(fields, "name", raw_match)
     total_name = _field_value(total_fields, "name", total_raw_match)
-    if name is None or total_name is None or normalized_headers != expected_headers:
+    if name is None or total_name is None:
         return False
     expected_public = {
         REVENUE_HEADERS[0]: normalize_revenue_name(name),
@@ -1224,6 +1229,21 @@ def _multi_year_revenue_row_evidence_matches(
             for year, position in zip(selected_years, selected_positions)
         },
     }
+    if normalized_headers == expected_headers:
+        visible_headers = expected_headers
+    else:
+        projected_year = (
+            re.fullmatch(rf"(20\d{{2}}) {REVENUE_HEADERS[2]}", normalized_headers[1])
+            if len(normalized_headers) == 2
+            and normalized_headers[0] == REVENUE_HEADERS[0]
+            else None
+        )
+        if projected_year is None or projected_year.group(1) not in selected_years:
+            return False
+        visible_headers = (
+            REVENUE_HEADERS[0],
+            f"{projected_year.group(1)} {REVENUE_HEADERS[2]}",
+        )
     expected_checks = tuple(
         revenue_ratio_numeric_check(row_values[position][1])
         for position in selected_positions
@@ -1237,11 +1257,11 @@ def _multi_year_revenue_row_evidence_matches(
         or tuple(str(value) for value in raw_numeric_checks)
         != expected_checks
         or tuple(str(value) for value in public_row)
-        != tuple(expected_public[header] for header in normalized_headers)
+        != tuple(expected_public[header] for header in visible_headers)
         or (
             raw_row is not None
             and tuple(str(value) for value in raw_row)
-            != tuple(expected_raw[header] for header in normalized_headers)
+            != tuple(expected_raw[header] for header in visible_headers)
         )
     ):
         return False

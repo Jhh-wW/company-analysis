@@ -1900,6 +1900,27 @@ def _bind_revenue_table_evidence_fragments(
     return merged, bound_tables
 
 
+def _report_tables_by_section(
+    revenue_tables: list[dict[str, Any]],
+    performance_table: ReportTable | None,
+) -> dict[str, list[ReportTable]]:
+    """실적표 뒤에 축별 단년·구성 변화 표를 소유 장 순서로 놓는다."""
+
+    tables_by_section: dict[str, list[ReportTable]] = {}
+    if performance_table is not None:
+        tables_by_section["past_changes"] = [performance_table]
+    for table in revenue_tables:
+        section_id = revenue_table_section_id_from_caption(table.get("caption"))
+        report_table_payload = dict(table)
+        # 셀별 검산식은 evidence_rows 안에 봉인돼 있다. ReportTable은 이 값을
+        # 별도 필드로 받지 않으므로 공개 표 transport에서는 중복 키를 뺀다.
+        report_table_payload.pop("numeric_checks", None)
+        tables_by_section.setdefault(section_id, []).append(
+            ReportTable(**report_table_payload)
+        )
+    return tables_by_section
+
+
 def _used_citation_numbers(sections: list[ReportSection]) -> set[int]:
     """최종 화면에서 실제로 가리킨 조각 번호만 모은다."""
 
@@ -3798,14 +3819,12 @@ class RealPipeline:
             )
 
         tell("verify")
-        # 구조화 표는 해당 장이 단독 소유한다. 같은 수치를 요약·다른 장에 복제하지 않는다.
-        tables_by_section: dict[str, list[ReportTable]] = {}
-        for table in revenue_tables:
-            section_id = revenue_table_section_id_from_caption(table.get("caption"))
-            tables_by_section.setdefault(section_id, []).append(ReportTable(**table))
-
-        if performance_table is not None:
-            tables_by_section["past_changes"] = [performance_table]
+        # 구조화 표는 해당 장이 단독 소유한다. 4장은 전사 실적을 먼저 보여 준 뒤
+        # 같은 기간의 제품·지역 구성 이동을 이어서 보여 준다.
+        tables_by_section = _report_tables_by_section(
+            revenue_tables,
+            performance_table,
+        )
 
         sections = canonical_sections_from_picks(
             kept,
@@ -6116,6 +6135,10 @@ def _collect(
     #   **11건이 «전부» 실은 유일한 만장일치 항목**이다.
     #   ⚠️ 지어낼 자리가 없다 — 공시가 비중을 이미 계산해 놓았고 우리는 베낄 뿐이다.
     revenue_tables = revenuemix.build(filing_text)
+    multi_year_tables, multi_year_diagnostics = (
+        revenuemix.build_multi_year_with_diagnostics(filing_text)
+    )
+    revenue_tables.extend(multi_year_tables)
     frags, revenue_tables = _bind_revenue_table_evidence_fragments(
         frags,
         revenue_tables,
@@ -6125,6 +6148,29 @@ def _collect(
     dart_fragment_count += len(revenue_tables)
     if revenue_tables:
         steps.append({"step": "6_수집_매출구성", "표": len(revenue_tables)})
+    selected_years = sorted(
+        {
+            match.group(0)
+            for table in multi_year_tables
+            for header in table["headers"][1:]
+            if (match := re.search(r"20\d{2}", header)) is not None
+        }
+    )
+    excluded_years = sorted(
+        {
+            year
+            for years in multi_year_diagnostics["제외_연도"].values()
+            for year in years
+        }
+    )
+    steps.append(
+        {
+            "step": "7_구성변화표",
+            "축": [table["axis"] for table in multi_year_tables],
+            "연도": selected_years,
+            "제외연도": excluded_years,
+        }
+    )
 
     steps.append(
         {
