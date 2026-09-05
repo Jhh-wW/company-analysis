@@ -38,6 +38,7 @@ from src.core.citations import split_citation_markers, split_interpretation_mark
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
 from src.features.composer.constants import (
+    BUSINESS_FLOW_SECTION_ID,
     GRADE_CONFIRMED,
     GRADE_INTERPRETED,
     IDENTITY_TABLE_SECTION_ID,
@@ -50,7 +51,7 @@ from src.features.composer.port import (
     FlowRow,
     PerformanceTable,
 )
-from src.features.composer.render import COMPOSITION_TABLE_SECTION_ID, render_report
+from src.features.composer.render import render_report
 from src.features.pipeline.canonical_demo import build_demo_report
 from src.features.pipeline.port import FactRecord, Report
 from src.features.report_standard.public_projection import build_public_projection
@@ -102,7 +103,7 @@ def _composed() -> ComposedReport:
             flow_rows = (
                 FlowRow(cells=("글로벌 콘텐츠 기업", "음악·영상", "해석 없음"), citations=("2",)),
             )
-        if section_id == COMPOSITION_TABLE_SECTION_ID:
+        if section_id == BUSINESS_FLOW_SECTION_ID:
             # 2장 칸 이름은 화살표 흐름 도식(kind="flow")을 부른다.
             flow_rows = (
                 FlowRow(cells=("음악 자산", "음반", "구독", "반복 수익"), citations=("1",)),
@@ -146,7 +147,7 @@ def _performance_table() -> PerformanceTable:
 
 
 def _composition_table() -> PerformanceTable:
-    """2장 구성표 — 100% 구성 도식(kind="composition")을 부른다."""
+    """3장 제품 구성표 — 100% 구성 도식(kind="composition")을 부른다."""
 
     return PerformanceTable(
         caption="2025년 부문별 매출 구성",
