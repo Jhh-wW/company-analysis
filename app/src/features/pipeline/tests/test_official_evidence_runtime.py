@@ -152,6 +152,10 @@ def _official_result(
         )
         for section_id in REQUIRED_EVIDENCE_SECTION_IDS
     }
+    texts["competitive_position"] = (
+        "가나다전자는 독자 개발한 검사 기술을 회사의 차별점으로 발표했습니다. "
+        f"{variant} 경쟁력 장의 공식 회사 사실입니다."
+    )
     all_hashes = tuple(_sha(text) for text in texts.values())
     attestation_profile = profile or {
         "status": "000",
@@ -266,6 +270,7 @@ def _official_result_with_dart_comparison_sentence(
 
     base = _official_result(profile=profile)
     text = (
+        "가나다전자는 독자 개발한 반도체 검사 기술을 차별점으로 발표했다. "
         "가나다전자는 베타전자와 경쟁 관계인 반도체 검사 장비 전문기업이다. "
         "반도체 제조 고객 대상 검사 장비 시장에 제품을 공급한다."
     )
@@ -483,7 +488,17 @@ def test_FULL은_주입된_formal_collector를_캐시보다_먼저_부르고_typ
     assert len(calls.cache_lookups) == 1
     assert len(calls.legacy_collects) == 1
     assert calls.legacy_collects[0]["generation_mode"] is None
-    assert calls.legacy_collects[0]["formal_official_evidence"] is official
+    projected = calls.legacy_collects[0]["formal_official_evidence"]
+    assert projected is not official
+    competitive = next(
+        candidate
+        for candidate in projected.candidates
+        if candidate.section_id == "competitive_position"
+    )
+    assert any(
+        fragment.slot_id == "competitive_position:stated_differentiator"
+        for fragment in competitive.fragments
+    )
     assert len(calls.composers) == 1
     assert calls.paid_phase_count == 0
 
@@ -496,7 +511,7 @@ def test_FULL은_주입된_formal_collector를_캐시보다_먼저_부르고_typ
     expected_digest = ReportSourceIdentity.capture(
         filing=filing,
         financial_payload=financials,
-    ).cache_digest_with_official_snapshot(official.source_snapshot_sha256)
+    ).cache_digest_with_official_snapshot(projected.source_snapshot_sha256)
     assert expected_digest
     assert calls.coordinates[0]["preflight_identity_digest"] == expected_digest
     assert calls.cache_lookups[0]["source_identity_digest"] == expected_digest
@@ -508,7 +523,9 @@ def test_FULL은_주입된_formal_collector를_캐시보다_먼저_부르고_typ
         for raw in composer_fragments.values()
         if RAW_EVIDENCE_SECTION_IDS_KEY in raw
     ]
-    assert len(typed) == len(REQUIRED_EVIDENCE_SECTION_IDS)
+    # 9장은 원래 self_context 조각과 결정론으로 승격한 자기 선언 조각을
+    # 각각 보존하므로 장 수보다 typed 조각이 하나 많다.
+    assert len(typed) == len(REQUIRED_EVIDENCE_SECTION_IDS) + 1
     assert {raw["종류"] for raw in typed} == {SOURCE_KIND_OFFICIAL_WEB_PAGE}
     assert {raw[RAW_EVIDENCE_COMPANY_ID_KEY] for raw in typed} == {CORP_ID}
     assert {
@@ -1127,6 +1144,7 @@ def test_formal_DART문장은_실제_양사생산기와_typed_packet_bridge까�
         "competitive_position:comparison_basis",
         "competitive_position:comparison_judgment",
         "competitive_position:limitation",
+        "competitive_position:stated_differentiator",
     }
     candidate_fragments = tuple(
         fragment
@@ -1134,9 +1152,14 @@ def test_formal_DART문장은_실제_양사생산기와_typed_packet_bridge까�
         if fragment.document_content_sha256
         == comparison.candidates[0].document_content_sha256
     )
-    assert len(candidate_fragments) == 1
-    assert candidate_fragments[0].bound_source.kind.value == "공시"
-    assert not candidate_fragments[0].bound_source.domain_attestation_source_id
+    assert len(candidate_fragments) == 2
+    assert {fragment.bound_source.kind.value for fragment in candidate_fragments} == {
+        "공시"
+    }
+    assert all(
+        not fragment.bound_source.domain_attestation_source_id
+        for fragment in candidate_fragments
+    )
 
     from src.features.composer.port import VerifiedProgramEvidence
 
@@ -1319,8 +1342,9 @@ def test_FULL은_재무API_자료없음_비상장사도_snapshot결속_실패로
     identity = ReportSourceIdentity.capture(filing=filing, financial_payload=None)
     assert identity.cache_usable is False
     assert identity.cache_digest_with_official_snapshot(official.source_snapshot_sha256) == ""
+    projected = calls.legacy_collects[0]["formal_official_evidence"]
     expected_digest = identity.generation_digest_without_financials(
-        official.source_snapshot_sha256
+        projected.source_snapshot_sha256
     )
     assert expected_digest
     assert calls.coordinates[0]["preflight_identity_digest"] == expected_digest

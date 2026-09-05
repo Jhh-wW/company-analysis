@@ -597,7 +597,48 @@ def _competitive_blocks(
     facts: list[FactRecord], source_numbers: dict[str, int]
 ) -> list[SectionContentBlock]:
     out: list[SectionContentBlock] = []
+    stated_index = 0
     for fact in facts:
+        if (
+            fact.claim_type == "stated_differentiator"
+            and fact.claim_slot == "competitive_position:stated_differentiator"
+        ):
+            stated_index += 1
+            out.append(
+                SectionContentBlock(
+                    title=f"회사가 밝힌 차별점 {stated_index}",
+                    fields=(
+                        _field("발표 내용", fact.claim),
+                        _field(
+                            "발표일·출처",
+                            _joined((fact.source_date, fact.source_title)),
+                        ),
+                        _field(
+                            "확인 범위",
+                            _clean(
+                                fact.limitations or fact.limitation,
+                                "회사 공식 발표 표현 자체로 한정",
+                            ),
+                        ),
+                    ),
+                    fact_ids=(fact.fact_id,),
+                    source_numbers=_numbers((fact,), source_numbers),
+                )
+            )
+            continue
+        if (
+            fact.claim_type == "stated_differentiator"
+            and fact.claim_slot == "competitive_position:limitation"
+        ):
+            out.append(
+                SectionContentBlock(
+                    title="확인 범위",
+                    fields=(_field("발표 해석의 한계", fact.claim),),
+                    fact_ids=(fact.fact_id,),
+                    source_numbers=_numbers((fact,), source_numbers),
+                )
+            )
+            continue
         if fact.claim_type != "competitive_comparison":
             continue
         judgment = COMPARISON_JUDGMENT_LABELS.get(fact.comparison_judgment, "")

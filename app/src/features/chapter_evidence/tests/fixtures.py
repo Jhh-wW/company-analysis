@@ -53,16 +53,15 @@ _FROZEN_COLLECTOR_SLOTS: dict[str, tuple[str, ...]] = {
         "operations_partners:operating_role",
     ),
     "culture": ("culture:work_principle", "culture:verified_case"),
-    "competitive_position": ("competitive_position:self_context",),
+    "competitive_position": (
+        "competitive_position:self_context",
+        "competitive_position:stated_differentiator",
+    ),
 }
 
 _FROZEN_INJECTED_SLOTS: dict[str, tuple[str, ...]] = {
     "past_changes": ("past_changes:historical_performance",),
     "competitive_position": (
-        "competitive_position:comparison_target",
-        "competitive_position:comparison_metric",
-        "competitive_position:comparison_basis",
-        "competitive_position:comparison_judgment",
         "competitive_position:limitation",
     ),
 }
