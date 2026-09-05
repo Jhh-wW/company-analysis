@@ -69,9 +69,17 @@ Render에는 forwarded client IP를 신뢰하지 않는 좁은 계약이 세 개
   Dashboard의 예상 청구액을 다시 확인한다. 플랜·요금 숫자는 이 문서에 고정하지 않는다.
 - `PIPELINE=real`, `BETA_ADMIN_ONLY=1`, instance/worker 각각 1개를 유지한다. SQLite 단일
   writer 계약 때문에 scale-out하지 않는다.
-- `ADMIN_EMAILS`, Google OAuth 3개 값과 함께 `ANTHROPIC_API_KEY`, `DART_API_KEY`,
-  `NAVER_CLIENT_ID`, `NAVER_CLIENT_SECRET` 네 provider 비밀을 Render 환경변수로만 주입한다.
+- `ADMIN_EMAILS`, Google OAuth 3개 값과 함께 `ANTHROPIC_API_KEY`, `DART_API_KEY`를
+  Render 환경변수로만 주입한다. 뉴스 검색을 쓸 때는 아래 NAVER API HUB 비밀도 주입한다.
   실제 값은 저장소·문서·로그에 남기지 않는다.
+
+| 환경변수 | 용도 |
+|---|---|
+| `NCP_APIGW_API_KEY_ID` | NAVER API HUB Client ID |
+| `NCP_APIGW_API_KEY` | NAVER API HUB Client Secret |
+
+두 변수가 모두 미설정이면 뉴스 검색 단계는 건너뛴다.
+
 - `PROVENANCE_SEAL_SECRET`은 32바이트 이상이어야 하며 재배포 뒤에도 같은 값을 보존한다.
 - `PUBLIC_ORIGIN`은 Blueprint가 web service의 `RENDER_EXTERNAL_URL`을 self-reference해
   고정한다. `GOOGLE_REDIRECT_URI`는 정확히 `<PUBLIC_ORIGIN>/auth/callback`이어야 한다.
@@ -247,8 +255,9 @@ evidence/policy와 다시 대조한다. artifact나 parser가 없거나 결과�
 기본 `BETA_ADMIN_ONLY=1`이면 `ADMIN_EMAILS`, `GOOGLE_CLIENT_ID`,
 `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`가 모두 있어야 시작한다. `PIPELINE=real`은
 추가로 `PROVENANCE_SEAL_SECRET`(UTF-8 32바이트 이상), `ANTHROPIC_API_KEY`,
-`DART_API_KEY`, `NAVER_CLIENT_ID`, `NAVER_CLIENT_SECRET`을 요구한다. 검증 오류에는 변수명만
-나오고 값은 출력되지 않는다.
+`DART_API_KEY`를 요구한다. NAVER API HUB 뉴스 검색을 쓰려면
+`NCP_APIGW_API_KEY_ID`, `NCP_APIGW_API_KEY`를 추가한다. 미설정이면 뉴스 검색 단계는
+건너뛴다. 검증 오류에는 변수명만 나오고 값은 출력되지 않는다.
 
 `BACKUP_S3_BUCKET`을 설정하면 외부 백업 구성으로 간주한다. 이 경우
 `BACKUP_TRIGGER_SECRET`, S3 전용 자격증명, `BACKUP_DATA_BOUNDARY_ID`,
