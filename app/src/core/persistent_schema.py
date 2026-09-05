@@ -99,6 +99,10 @@ PERSISTENT_SCHEMA_BOOTSTRAPS: Final[tuple[PersistentSchemaBootstrap, ...]] = (
         "보고서 접근 grant", "src.features.report_access.store",
         "src/features/report_access/store.py",
     ),
+    PersistentSchemaBootstrap(
+        "뉴스룸 날짜 캐시", "src.features.storage.newsroom_date_cache",
+        "src/features/storage/newsroom_date_cache.py",
+    ),
 )
 
 

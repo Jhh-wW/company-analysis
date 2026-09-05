@@ -53,6 +53,46 @@ MAX_TOTAL_CHARS: Final[int] = 12_000
 #: 메뉴 몇 글자만 있는 페이지가 조각으로 잡히는 것을 막는다.
 MIN_FRAGMENT_CHARS: Final[int] = 80
 
+# ── 뉴스룸 글자 날짜 ────────────────────────────────────
+
+#: 프로그램 단계가 허용하는 날짜 모양. 임의 숫자열을 날짜로 승격하지 않도록
+#: 모양을 닫힌 목록으로 유지한다.
+NEWSROOM_DATE_PATTERNS: Final[tuple[str, ...]] = (
+    r"(?<!\d)(20\d{2})\s*\.\s*(\d{1,2})\s*\.\s*(\d{1,2})(?!\d)",
+    r"(?<!\d)(20\d{2})-(\d{1,2})-(\d{1,2})(?!\d)",
+    r"(?<!\d)(20\d{2})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일(?!\d)",
+    r"(?<!\d)(\d{2})\s*\.\s*(\d{1,2})\s*\.\s*(\d{1,2})(?!\d)",
+)
+
+#: AI 예비 판정에 넘기는 화면 글자 상한. 저장·존재 대조용 해시는 잘리지 않은
+#: 전체 화면 글자로 만들고, 비용이 드는 입력만 이 길이로 제한한다.
+NEWSROOM_DATE_AI_MAX_CHARS: Final[int] = 6_000
+#: AI가 게시일 후보와 함께 돌려줘야 하는 앞뒤 글자 수.
+NEWSROOM_DATE_CONTEXT_CHARS: Final[int] = 20
+#: 본문 SHA-256과 함께 캐시 키를 구성하는 프롬프트 계약 버전.
+NEWSROOM_DATE_PROMPT_VERSION: Final[str] = "newsroom-date-v1"
+#: 글 제목이 이 수보다 많을 때만 목록 페이지로 보고 AI 예비 단계를 허용한다.
+NEWSROOM_DATE_SINGLE_ARTICLE_TITLE_COUNT: Final[int] = 1
+
+#: 날짜 판정 출처와 사유 코드는 저장·진단에서 임의 문자열이 섞이지 않게 닫는다.
+NEWSROOM_DATE_ORIGINS: Final[frozenset[str]] = frozenset(
+    {"program", "ai_assisted"}
+)
+NEWSROOM_DATE_REASON_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "program_found",
+        "ai_verified",
+        "cache_hit",
+        "program_conflict",
+        "ai_skipped_switch_off",
+        "ai_not_in_page",
+        "ai_context_mismatch",
+        "ai_future_date",
+        "ai_unparseable",
+        "not_found",
+    }
+)
+
 # ── 공식 IR PDF 상한 ─────────────────────────────────────
 
 #: PDF 링크를 찾으려고 읽는 HTML 최대 쪽 수(루트 포함).

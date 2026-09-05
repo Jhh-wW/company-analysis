@@ -36,6 +36,8 @@ EXPECTED_RELEASE_MODE = "FULL"
 TYPED_COLLECTOR_ENV_NAME = "TYPED_DART_COLLECTOR"
 #: 1단계 매출표 범용 파서 kill switch 이름. 이것도 선언하지 않는 것이 off다.
 REVENUE_TABLE_V2_ENV_NAME = "REVENUE_TABLE_V2"
+#: 뉴스룸 글자 날짜의 AI 예비 단계. 프로그램 판정은 이 값과 무관하게 켜진다.
+NEWSROOM_DATE_AI_ENV_NAME = "NEWSROOM_DATE_AI"
 
 
 def _render_web_service_env() -> dict[str, object]:
@@ -101,6 +103,16 @@ def test_TYPED_DART_COLLECTOR는_render_yaml에_없다() -> None:
     )
 
 
+def test_NEWSROOM_DATE_AI는_render_yaml에_없다() -> None:
+    """실제 provider 연결 전에는 프로그램 날짜 판정만 출시한다."""
+
+    render_values = _render_web_service_env()
+
+    assert NEWSROOM_DATE_AI_ENV_NAME not in render_values, (
+        "뉴스룸 날짜 AI 예비 단계는 미선언 상태로 출시해야 합니다"
+    )
+
+
 def test_REVENUE_TABLE_V2는_render_yaml에_정확히_1로_켜져_있다() -> None:
     """1단계 매출표 범용 파서·3장 카드 안내문을 출시에서 켠다.
 
@@ -123,6 +135,7 @@ def test_deploy_readme가_새_kill_switch를_적어_둔다() -> None:
     readme = (REPOSITORY_ROOT / "deploy" / "README.md").read_text(encoding="utf-8")
 
     assert REVENUE_TABLE_V2_ENV_NAME in readme
+    assert NEWSROOM_DATE_AI_ENV_NAME in readme
     assert "키를 지우고 재배포" in readme
 
 
