@@ -36,6 +36,7 @@ from src.shared.report_quality.constants import (
     STRICT_QUALITY_CONTRACT_VERSION,
 )
 from src.shared.report_evidence.policy import required_slots_for
+from src.shared.revenue_table_provenance import revenue_table_section_id_from_caption
 from src.shared.report_quality.generation import (
     GenerationQualityObservation,
     LEGACY_SHADOW_PUBLICATION_REASON,
@@ -645,10 +646,9 @@ def run_v2(
             render_report에 그대로 전달된다.
         filing_meta: 내려받은 공시의 신원. 주면 부록 출처에 전자공시 원문
             주소가 실린다 (없으면 주소 없이 나간다).
-        composition_tables: 2장에 실을 매출 구성표들(제품별·지역별 등). 주면
+        composition_tables: 제품 축은 3장, 지역 축은 2장에 실을 매출 구성표들.
             표마다 «구성 도식»이 함께 나간다(도식 판정은
-            report_standard/visualization.py 몫). 표는 여러 개일 수 있고
-            2장에 «전부» 붙는다 — 첫 표만 쓰지 않는다(설계 변경).
+            report_standard/visualization.py 몫).
         citation_style: 본문 인용 번호 표기 방식. 기본은 절충안이며,
             시험이 «문장마다 번호가 실리는가»를 볼 때 inline으로 고정한다.
         release_mode: SHADOW는 기존 생성·요약·공개 동작을 그대로 쓴다.
@@ -739,17 +739,20 @@ def run_v2(
                 table_label="실적",
                 require_cite=True,
             )
-            _validate_table_citations_for_section(
-                composition_tables,
-                section_id="business_model",
-                allowed_fragment_ids=(
-                    prepared_evidence.allowed_fragment_ids_by_section[
-                        "business_model"
-                    ]
-                ),
-                table_label="구성",
-                require_cite=True,
-            )
+            composition_tables_by_section: dict[str, list[PerformanceTable]] = {}
+            for table in composition_tables:
+                section_id = revenue_table_section_id_from_caption(table.caption)
+                composition_tables_by_section.setdefault(section_id, []).append(table)
+            for section_id, section_tables in composition_tables_by_section.items():
+                _validate_table_citations_for_section(
+                    tuple(section_tables),
+                    section_id=section_id,
+                    allowed_fragment_ids=(
+                        prepared_evidence.allowed_fragment_ids_by_section[section_id]
+                    ),
+                    table_label="구성",
+                    require_cite=True,
+                )
         except (TypeError, ValueError) as error:
             if release_mode is ReleaseMode.FULL:
                 raise V2ValidationError(

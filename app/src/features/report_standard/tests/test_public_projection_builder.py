@@ -24,6 +24,7 @@ from decimal import Decimal
 import pytest
 
 from src.features.composer.constants import (
+    BUSINESS_FLOW_SECTION_ID,
     CITATION_STYLE_INLINE,
     GRADE_CONFIRMED,
     GRADE_INTERPRETED,
@@ -37,7 +38,7 @@ from src.features.composer.port import (
     FlowRow,
     PerformanceTable,
 )
-from src.features.composer.render import COMPOSITION_TABLE_SECTION_ID, render_report
+from src.features.composer.render import render_report
 from src.features.pipeline.port import FactRecord, Grade, Report
 from src.features.provenance.sources import visible_citations
 from src.features.report_standard.constants import SECTION_BY_ID
@@ -102,7 +103,7 @@ def _composed(*, uncited_summary: bool = False) -> ComposedReport:
                     citations=("2",),
                 ),
             )
-        if section_id == COMPOSITION_TABLE_SECTION_ID:
+        if section_id == BUSINESS_FLOW_SECTION_ID:
             # 2장 칸 이름은 화살표 흐름 도식(kind="flow")을 부른다.
             flow_rows = (
                 FlowRow(
@@ -163,7 +164,7 @@ def _performance_table() -> PerformanceTable:
 
 
 def _composition_table() -> PerformanceTable:
-    """2장 구성표 — 100% 구성 도식(kind="composition")을 부른다."""
+    """3장 제품 구성표 — 100% 구성 도식(kind="composition")을 부른다."""
 
     return PerformanceTable(
         caption="2025년 부문별 매출 구성",

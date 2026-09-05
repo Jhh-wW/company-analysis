@@ -17,6 +17,11 @@ from types import MappingProxyType
 from typing import Final
 
 from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
+from src.shared.revenue_table_provenance import (
+    REVENUE_AXIS_PRODUCT,
+    REVENUE_AXIS_REGION,
+    revenue_table_section_id,
+)
 
 
 LEGACY_KIND_BUSINESS_CONTENT: Final[str] = "사업내용"
@@ -147,7 +152,11 @@ _LEGACY_SECTIONS_BY_FRAGMENT_KIND = {
     LEGACY_KIND_RELATED_PARTY: frozenset({"operations_partners"}),
     LEGACY_KIND_SG_AND_A: frozenset({"past_changes"}),
     LEGACY_KIND_REVENUE_AND_ORDERS: frozenset(
-        {"business_model", "operations_partners"}
+        {
+            revenue_table_section_id(REVENUE_AXIS_PRODUCT),
+            revenue_table_section_id(REVENUE_AXIS_REGION),
+            "operations_partners",
+        }
     ),
     LEGACY_KIND_NEW_BUSINESS_OUTLOOK: frozenset({"future_strategy"}),
     LEGACY_KIND_MARKET_SHARE: frozenset({"competitive_position"}),
