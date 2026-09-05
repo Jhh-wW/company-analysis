@@ -1,12 +1,13 @@
 """검증된 회사 공식 IR PDF의 문서 시점 계약.
 
-수집일을 PDF 발행일로 대신하지 않는다. 회사의 공식 IR 상세페이지나
-링크 라벨에 들어 있던 ISO 발행일과 명시적 보고기간을 수집기가 함께
+수집일을 PDF 발행일로 대신하지 않는다. 회사의 공식 IR 상세페이지·링크
+라벨이나 PDF 표지에 들어 있던 발행일과 명시적 보고기간을 수집기가 함께
 봉인한 경우만 Writer와 canonical 출처 후보로 쓴다.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date
 import ipaddress
 import json
@@ -17,6 +18,10 @@ import urllib.parse
 
 IR_METADATA_VERIFICATION_FIELD = "IR문서메타검증"
 IR_METADATA_VERIFICATION_VALUE = "official_anchor_exact_date_period"
+IR_METADATA_VERIFICATION_VALUE_COVER = "official_cover_exact_date_period"
+IR_METADATA_VERIFICATION_VALUES = frozenset(
+    {IR_METADATA_VERIFICATION_VALUE, IR_METADATA_VERIFICATION_VALUE_COVER}
+)
 IR_REPORTING_PERIOD_FIELD = "기준기간"
 IR_ATTACHMENT_URL_FIELD = "첨부URL"
 IR_COLLECTED_ON_FIELD = "IR수집기준일"
@@ -25,8 +30,31 @@ IR_DART_WWW_REDIRECT_VALUE = "https_apex_to_www_redirect"
 IR_DART_WWW_REDIRECT_FROM_FIELD = "DARTwww원본host"
 IR_DART_WWW_REDIRECT_TO_FIELD = "DARTwww최종host"
 MAX_IR_PUBLICATION_LAG_DAYS = 190
+IR_COVER_METADATA_MAX_PAGES = 2
 
 _ISO_DATE = re.compile(r"20\d{2}-\d{2}-\d{2}")
+_COVER_DATE_TOKEN = (
+    r"20\d{2}\s*(?:년|[-./])\s*\d{1,2}\s*(?:월|[-./])\s*\d{1,2}\s*일?"
+)
+_COVER_DATE = re.compile(rf"(?<!\d)(?P<date>{_COVER_DATE_TOKEN})(?!\d)")
+_COVER_PUBLICATION_DATE = (
+    re.compile(
+        rf"(?:발행|작성|공시|게시)\s*일?\s*[:：]?\s*"
+        rf"(?P<date>{_COVER_DATE_TOKEN})(?!\d)"
+    ),
+    re.compile(
+        rf"(?<!\d)(?P<date>{_COVER_DATE_TOKEN})\s*"
+        rf"(?:발행|작성|공시|게시)\s*일?"
+    ),
+)
+_COVER_REFERENCE_DATE = (
+    re.compile(
+        rf"기준\s*일?\s*[:：]?\s*(?P<date>{_COVER_DATE_TOKEN})(?!\d)"
+    ),
+    re.compile(
+        rf"(?<!\d)(?P<date>{_COVER_DATE_TOKEN})\s*기준\s*일?"
+    ),
+)
 _REPORTING_PERIOD = re.compile(
     r"(?:20\d{2}-(?:Q[1-4]|H[12]|FY)|"
     r"20\d{2}-\d{2}-\d{2}/20\d{2}-\d{2}-\d{2})"
@@ -45,7 +73,8 @@ _ANCHOR_HALF = re.compile(
 )
 _ANCHOR_FY = re.compile(
     r"(?:(?<![A-Z0-9])FY\s*(?P<fy>20\d{2}|\d{2})(?!\d|\s*Q\s*[1-4])|"
-    r"(?<!\d)(?P<year>20\d{2}|\d{2})\s*년\s*(?:연간|연간실적|전체연도))",
+    r"(?<!\d)(?P<year>20\d{2}|\d{2})\s*년\s*"
+    r"(?:연간|연간실적|전체연도|사업연도))",
     re.I,
 )
 _ANCHOR_RANGE = re.compile(
@@ -73,21 +102,26 @@ def _iso_date(raw: str) -> str:
     return parsed.isoformat()
 
 
-def extract_official_ir_anchor_metadata(label: str) -> tuple[str, str]:
-    """공식 anchor 문구의 단일 ISO 날짜와 단일 보고기간만 반환한다.
+def _cover_iso_date(raw: str) -> str:
+    parts = re.findall(r"\d+", str(raw or ""))
+    if len(parts) != 3:
+        return ""
+    try:
+        parsed = date(int(parts[0]), int(parts[1]), int(parts[2]))
+    except ValueError:
+        return ""
+    return parsed.isoformat()
 
-    날짜나 기간이 서로 다른 값으로 두 번 이상 나오면 임의로 고르지 않고
-    빈 값을 돌려준다.
-    """
 
-    text = " ".join(str(label or "").split())
-    dates = {_iso_date(value) for value in _ISO_DATE.findall(text)} - {""}
+def _reporting_period_candidates(text: str) -> set[str]:
     periods: set[str] = set()
     for match in _ANCHOR_QUARTER[0].finditer(text):
         periods.add(f"{_four_digit_year(match.group('year')):04d}-Q{match.group('q')}")
     for pattern in _ANCHOR_QUARTER[1:]:
         for match in pattern.finditer(text):
-            periods.add(f"{_four_digit_year(match.group('year')):04d}-Q{match.group('q')}")
+            periods.add(
+                f"{_four_digit_year(match.group('year')):04d}-Q{match.group('q')}"
+            )
     for match in _ANCHOR_HALF.finditer(text):
         half = "1" if match.group("half") == "상" else "2"
         periods.add(f"{_four_digit_year(match.group('year')):04d}-H{half}")
@@ -99,10 +133,72 @@ def extract_official_ir_anchor_metadata(label: str) -> tuple[str, str]:
         end = _iso_date(match.group("end"))
         if start and end and start <= end:
             periods.add(f"{start}/{end}")
+    return periods
+
+
+def extract_official_ir_anchor_metadata(label: str) -> tuple[str, str]:
+    """공식 anchor 문구의 단일 ISO 날짜와 단일 보고기간만 반환한다.
+
+    날짜나 기간이 서로 다른 값으로 두 번 이상 나오면 임의로 고르지 않고
+    빈 값을 돌려준다.
+    """
+
+    text = " ".join(str(label or "").split())
+    dates = {_iso_date(value) for value in _ISO_DATE.findall(text)} - {""}
+    periods = _reporting_period_candidates(text)
     return (
         next(iter(dates)) if len(dates) == 1 else "",
         next(iter(periods)) if len(periods) == 1 else "",
     )
+
+
+def extract_official_ir_cover_metadata(pages: Sequence[str]) -> tuple[str, str]:
+    """PDF 앞쪽 표지 글자의 단일 발행일과 단일 보고기간만 반환한다.
+
+    발행 표지어가 붙은 날짜는 기준일·보고기간 범위 날짜와 구분한다. 그 밖의
+    서로 다른 날짜나 보고기간이 둘 이상이면 임의로 고르지 않는다.
+    """
+
+    text = " ".join(
+        " ".join(str(page or "").split())
+        for page in tuple(pages)[:IR_COVER_METADATA_MAX_PAGES]
+    ).strip()
+    dates = {
+        _cover_iso_date(match.group("date")) for match in _COVER_DATE.finditer(text)
+    } - {""}
+    publication_dates = {
+        _cover_iso_date(match.group("date"))
+        for pattern in _COVER_PUBLICATION_DATE
+        for match in pattern.finditer(text)
+    } - {""}
+    reference_dates = {
+        _cover_iso_date(match.group("date"))
+        for pattern in _COVER_REFERENCE_DATE
+        for match in pattern.finditer(text)
+    } - {""}
+    period_range_dates = {
+        value
+        for match in _ANCHOR_RANGE.finditer(text)
+        for value in (_iso_date(match.group("start")), _iso_date(match.group("end")))
+        if value
+    }
+
+    published_at = ""
+    if len(publication_dates) == 1:
+        candidate = next(iter(publication_dates))
+        other_dates = dates - {candidate}
+        if other_dates <= reference_dates | period_range_dates:
+            published_at = candidate
+    elif not publication_dates and len(dates) == 1 and not reference_dates:
+        published_at = next(iter(dates))
+
+    periods = _reporting_period_candidates(text)
+    if not periods and len(reference_dates) == 1:
+        reference_date = date.fromisoformat(next(iter(reference_dates)))
+        if (reference_date.month, reference_date.day) == (12, 31):
+            periods.add(f"{reference_date.year:04d}-FY")
+    reporting_period = next(iter(periods)) if len(periods) == 1 else ""
+    return published_at, reporting_period
 
 
 def reporting_period_is_valid(value: str) -> bool:
@@ -178,7 +274,7 @@ def verified_official_ir_fragment_is_usable(
         return False
     if (
         str(fragment.get(IR_METADATA_VERIFICATION_FIELD) or "").strip()
-        != IR_METADATA_VERIFICATION_VALUE
+        not in IR_METADATA_VERIFICATION_VALUES
         or not str(fragment.get("발행처") or "").strip()
         or not str(fragment.get("도메인근거SourceID") or "").strip()
         or not str(fragment.get("도메인근거원문") or "").strip()

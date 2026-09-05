@@ -40,15 +40,19 @@ from src.features.homepage.ir_pdf import (
 from src.features.homepage.safe_http import UnsafeHomepageUrlError
 from src.shared.official_ir import (
     IR_ATTACHMENT_URL_FIELD,
+    IR_COLLECTED_ON_FIELD,
     IR_DART_WWW_REDIRECT_FIELD,
     IR_DART_WWW_REDIRECT_FROM_FIELD,
     IR_DART_WWW_REDIRECT_TO_FIELD,
     IR_DART_WWW_REDIRECT_VALUE,
     IR_METADATA_VERIFICATION_FIELD,
     IR_METADATA_VERIFICATION_VALUE,
+    IR_METADATA_VERIFICATION_VALUE_COVER,
     IR_REPORTING_PERIOD_FIELD,
     extract_official_ir_anchor_metadata,
+    extract_official_ir_cover_metadata,
     official_ir_time_is_usable,
+    verified_official_ir_fragment_is_usable,
 )
 
 
@@ -73,6 +77,62 @@ def test_FY26_Q2_영문라벨은_연간이_아니라_2분기로_읽는다():
     assert extract_official_ir_anchor_metadata(
         "DATA & MATERIALS FY26 Q2 Earnings Result 2026-08-12"
     ) == ("2026-08-12", "2026-Q2")
+
+
+@pytest.mark.parametrize(
+    "date_text",
+    ("2026.03.12", "2026-03-12", "2026년 3월 12일", "2026. 3. 12"),
+)
+def test_IR표지의_날짜표현과_보고기간을_닫힌값으로_읽는다(date_text):
+    assert extract_official_ir_cover_metadata(
+        [f"가나다전자 2025년 4분기 실적 발표 발행일 {date_text}"]
+    ) == ("2026-03-12", "2025-Q4")
+
+
+def test_IR표지의_서로다른_무표식날짜는_임의로_고르지_않는다():
+    assert extract_official_ir_cover_metadata(
+        ["2025년 4분기 실적 발표 2026.03.12 수정 2026.03.13"]
+    ) == ("", "2025-Q4")
+
+
+def test_IR표지의_기준일은_사업연도힌트로만_쓰고_작성일을_발행일로_쓴다():
+    assert extract_official_ir_cover_metadata(
+        ["기준일 2025.12.31 / 작성 2026.02.10"]
+    ) == ("2026-02-10", "2025-FY")
+
+
+def test_IR표지메타는_앞의_두쪽만_읽는다():
+    assert extract_official_ir_cover_metadata(
+        [
+            "게시일 2026.03.12 / FY2025",
+            "가나다전자 실적 발표 자료",
+            "게시일 2026.03.13 / FY2024",
+        ]
+    ) == ("2026-03-12", "2025-FY")
+
+
+@pytest.mark.parametrize(
+    "verification",
+    (IR_METADATA_VERIFICATION_VALUE, IR_METADATA_VERIFICATION_VALUE_COVER),
+)
+def test_옛anchor와_새표지_메타표식은_옛IR조각관문을_통과한다(verification):
+    pdf_url = "https://company.example/ir/report.pdf"
+    fragment = {
+        "종류": "공식 IR",
+        "발행처": "company.example",
+        "도메인근거SourceID": "dart-company-profile-00126380",
+        "도메인근거원문": json.dumps({"hm_url": ROOT}),
+        "출처": pdf_url,
+        IR_ATTACHMENT_URL_FIELD: pdf_url,
+        "문서일": "2026-03-12",
+        IR_REPORTING_PERIOD_FIELD: "2025-Q4",
+        IR_METADATA_VERIFICATION_FIELD: verification,
+        IR_COLLECTED_ON_FIELD: "2026-09-05",
+    }
+
+    assert verified_official_ir_fragment_is_usable(
+        fragment, reference_date="2026-09-05"
+    )
 
 
 def test_IR자료실은_주가페이지보다_탐색우선순위가_높다():
