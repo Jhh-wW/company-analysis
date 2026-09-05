@@ -93,8 +93,8 @@ PARTIAL_ELIGIBLE_SECTION_IDS: Final[frozenset[str]] = frozenset(
 )
 
 COMPARISON_SHORTFALL_REASON: Final[str] = (
-    "양사 공식자료를 같은 지표·기간·범위로 맞추지 못해 9장 동종업계 비교는 "
-    "제공하지 않았습니다. 경쟁우위가 없다는 뜻은 아닙니다."
+    "회사 공식 자료에서 회사가 주어인 자기 선언형 차별점을 확인하지 못해 9장은 "
+    "제공하지 않았습니다. 차별점이 없다는 뜻은 아닙니다."
 )
 
 CURRENT_CHALLENGES_SHORTFALL_REASON: Final[str] = (
@@ -225,7 +225,9 @@ CANONICAL_CLAIM_TYPES_BY_SECTION: Final[dict[str, frozenset[str]]] = {
     "future_strategy": frozenset({"future_plan"}),
     "operations_partners": frozenset({"operating_core", "partner_role"}),
     "culture": frozenset({"official_value", "work_example"}),
-    "competitive_position": frozenset({"competitive_comparison"}),
+    "competitive_position": frozenset(
+        {"stated_differentiator", "competitive_comparison"}
+    ),
 }
 SUMMARY_MIN_ITEMS: Final[int] = 3
 SUMMARY_MAX_ITEMS: Final[int] = 5
@@ -261,7 +263,8 @@ RELATIONSHIP_KEY_LABELS: Final[dict[str, str]] = {
     # 8장 인재상과 일하는 방식
     "official_value": "회사의 공식 가치",
     "work_example": "공식 자료 기반 업무 사례",
-    # 9장 동종업계 비교
+    # 9장 회사가 밝힌 차별점과 선택적 동종업계 비교
+    "stated_differentiator": "회사 공식 자료에 적힌 자기 선언형 차별점",
     "competitive_comparison": "공식 자료 기반 동종업계 비교",
 }
 

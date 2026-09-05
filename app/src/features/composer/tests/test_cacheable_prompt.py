@@ -23,6 +23,7 @@ import pytest
 from src.features.composer.constants import (
     CITATION_RULES_GUIDE,
     CLAIM_SLOTS_BY_SECTION,
+    COMPETITIVE_POSITION_PARAGRAPH_PLAN,
     FLOW_PROMPT_BY_SECTION,
     FORBIDDEN_TOPICS_GUIDE,
     JSON_SCHEMA_GUIDE,
@@ -122,6 +123,11 @@ def _legacy_prompt(
             PROMPT_HEADER.format(company=company_name),
             "\n",
             SECTION_GUIDES[section_id],
+            (
+                COMPETITIVE_POSITION_PARAGRAPH_PLAN
+                if section_id == "competitive_position"
+                else ""
+            ),
             "\n\n",
             CITATION_RULES_GUIDE,
             FORBIDDEN_TOPICS_GUIDE,

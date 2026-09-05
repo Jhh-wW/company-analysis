@@ -708,6 +708,7 @@ class FakeEngine:
     def read_filing_text(self, path: str) -> str:
         return (
             "가나다전자는 베타전자와 경쟁 관계인 반도체 검사 장비 전문기업이다. "
+            "가나다전자는 세계 최초로 SmartX 검사 기술을 독자 개발했다고 밝혔다. "
             "국내외 반도체 제조 고객을 대상으로 SmartX 반도체 검사 장비 제품을 "
             "반도체 검사 장비 시장에 공급한다. 연결재무제표의 매출액과 영업이익을 공시한다."
         )
@@ -771,7 +772,10 @@ class FakeEngine:
         return {
             1: {
                 "종류": "사업내용",
-                "원문": "가나다전자는 베타전자와 경쟁 관계인 반도체 검사 장비 전문기업이다.",
+                "원문": (
+                    "가나다전자는 베타전자와 경쟁 관계인 반도체 검사 장비 전문기업이다. "
+                    "가나다전자는 세계 최초로 SmartX 검사 기술을 독자 개발했다고 밝혔다."
+                ),
                 "근거원문": [
                     "사업보고서 회사 개요: 홈페이지 https://www.ganada.example"
                 ],
@@ -1500,6 +1504,7 @@ def test_가짜엔진도_9장_양사공식원문과_동일비교조건을_정직
         fact
         for fact in report.fact_records
         if fact.section_owner == "competitive_position"
+        and fact.claim_type == "competitive_comparison"
     ]
     assert {fact.comparison_metric for fact in comparison_facts} == {
         "영업이익률",
@@ -2496,7 +2501,7 @@ def test_경쟁사비교_실패는_원문사유를_숨기고_기본보고서를_
     assert result.report.grade is Grade.PARTIAL
     assert result.final_gate_reason == ""
     assert internal_reason not in result.message
-    assert "9장 동종업계 비교" in result.message
+    assert "자기 선언" in result.message
 
 
 def test_정본출고_차단은_원문사유대신_닫힌코드만_반환한다(

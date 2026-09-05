@@ -69,10 +69,6 @@ _FROZEN_SECTION_IDS = (
 _GATE_SHAPE_ONLY_INJECTED_SLOTS = {
     "past_changes": ("past_changes:historical_performance",),
     "competitive_position": (
-        "competitive_position:comparison_target",
-        "competitive_position:comparison_metric",
-        "competitive_position:comparison_basis",
-        "competitive_position:comparison_judgment",
         "competitive_position:limitation",
     ),
 }
@@ -425,10 +421,20 @@ def test_gate_shape_only_가짜ID로_정상수집의_9장_게이트_모양만_RE
         reason for reason in decision.reason_codes if "required_path_unobserved" in reason
     ]
     assert unobserved == []
-    assert decision.status is GenerationGateStatus.READY_FOR_GENERATION
-    assert decision.can_call_ai is True
+    # 원시 collector만 실행한 단계에는 결정론 자기 선언 승격기가 아직 없다.
+    assert decision.status is GenerationGateStatus.STOP_INSUFFICIENT_EVIDENCE
+    assert decision.reason_codes == (
+        "competitive_position:evidence_absent_after_check:"
+        "competitive_position:stated_differentiator",
+    )
+    assert decision.can_call_ai is False
     for bundle in bundles:
-        assert bundle.readiness is EvidenceReadiness.READY
+        expected = (
+            EvidenceReadiness.INSUFFICIENT
+            if bundle.section_id == "competitive_position"
+            else EvidenceReadiness.READY
+        )
+        assert bundle.readiness is expected
 
 
 def test_광고문구만_있는_공식_root는_당면과제_종단판정이_READY가_아니다() -> None:

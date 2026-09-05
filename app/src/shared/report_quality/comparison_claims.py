@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import date
+import re
 from typing import Protocol
 
 from src.shared.comparison_candidate_basis import (
@@ -19,6 +21,7 @@ from src.shared.report_quality.constants import (
     COMPETITIVE_COMPARISON_CLAIM_TYPE,
     COMPETITIVE_COMPARISON_CONTEXT_CLAIM_TYPE,
     COMPARISON_PROGRAM_CLAIM_TYPES,
+    STATED_DIFFERENTIATOR_CLAIM_TYPE,
 )
 from src.shared.report_quality.comparison_evidence import (
     comparison_official_text,
@@ -37,6 +40,20 @@ COMPARISON_BASIS_SLOT = "competitive_position:comparison_basis"
 COMPARISON_JUDGMENT_SLOT = "competitive_position:comparison_judgment"
 COMPARISON_LIMITATION_SLOT = "competitive_position:limitation"
 COMPARISON_NUMERIC_METRICS = ("영업이익률", "매출 규모")
+STATED_DIFFERENTIATOR_SLOT = "competitive_position:stated_differentiator"
+STATED_DIFFERENTIATOR_FORBIDDEN_JUDGMENTS = (
+    "우위",
+    "열위",
+    "더 낫",
+    "경쟁력이 높",
+    "경쟁력이 낮",
+)
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_COMPANY_MARKER = re.compile(
+    r"\(\s*주\s*\)|㈜|주식회사",
+    flags=re.IGNORECASE,
+)
+_CLAIM_NOISE = re.compile(r"[\W_]+", re.UNICODE)
 
 
 class ComparisonContextFact(Protocol):
@@ -56,6 +73,11 @@ class ComparisonContextFact(Protocol):
     comparator_state_evidence: str
     comparison_judgment: str
     claim_type: str
+    source_id: str
+    source_publisher: str
+    source_url: str
+    source_document_id: str
+    source_date: str
 
 
 class ComparisonTargetSource(Protocol):
@@ -204,19 +226,68 @@ def comparison_target_source_problems(
     return tuple(problems)
 
 
+def _company_text(value: object) -> str:
+    return _CLAIM_NOISE.sub("", _COMPANY_MARKER.sub("", str(value or ""))).casefold()
+
+
+def _valid_iso_date(value: object) -> bool:
+    clean = str(value or "").strip()
+    try:
+        return bool(_ISO_DATE.fullmatch(clean) and date.fromisoformat(clean))
+    except ValueError:
+        return False
+
+
+def stated_differentiator_program_problems(
+    facts: Sequence[ComparisonContextFact],
+) -> tuple[str, ...]:
+    """혼합 프로그램의 회사 자기 선언을 주어·날짜·출처·비판정으로 닫는다."""
+
+    problems: list[str] = []
+    for fact in facts:
+        if fact.claim_type != STATED_DIFFERENTIATOR_CLAIM_TYPE:
+            continue
+        prefix = _company_text(fact.legal_entity)
+        if (
+            fact.claim_slot
+            not in {STATED_DIFFERENTIATOR_SLOT, COMPARISON_LIMITATION_SLOT}
+            or not prefix
+            or not _company_text(fact.claim).startswith(prefix)
+        ):
+            problems.append("회사 차별점 문장의 주어가 회사 법인명이 아닙니다")
+        if not _valid_iso_date(fact.source_date):
+            problems.append("회사 차별점에 발표일이 없습니다")
+        if (
+            not str(fact.source_id or "").strip()
+            or not (
+                str(fact.source_url or "").strip()
+                or str(fact.source_document_id or "").strip()
+            )
+            or not exact_company_names_equivalent(
+                fact.legal_entity,
+                fact.source_publisher,
+            )
+        ):
+            problems.append("회사 차별점에 회사 공식 출처가 없습니다")
+        if str(fact.comparison_judgment or "").strip() or any(
+            term in str(fact.claim or "")
+            for term in STATED_DIFFERENTIATOR_FORBIDDEN_JUDGMENTS
+        ):
+            problems.append("회사 차별점에 작성자의 우열 판정이 섞였습니다")
+    return tuple(dict.fromkeys(problems))
+
+
 def comparison_program_problems(
     facts: Sequence[ComparisonContextFact],
 ) -> tuple[str, ...]:
-    """비교 프로그램의 개별 사실들이 한 비교 장부를 공유하는지 검사한다."""
+    """혼합 프로그램에서 비교 사실 부분집합의 한 장부 여부를 검사한다."""
 
     comparison_facts = tuple(
         fact for fact in facts if fact.claim_type in COMPARISON_PROGRAM_CLAIM_TYPES
     )
+    problems = list(stated_differentiator_program_problems(facts))
     if not comparison_facts:
-        return ()
-    problems: list[str] = []
-    if len(comparison_facts) != len(facts):
-        problems.append("비교 프로그램에 다른 종류의 사실이 섞였습니다")
+        return tuple(problems)
 
     context_facts = tuple(
         fact
@@ -350,6 +421,9 @@ __all__ = [
     "COMPARISON_METRIC_SLOT",
     "COMPARISON_NUMERIC_METRICS",
     "COMPARISON_TARGET_SLOT",
+    "STATED_DIFFERENTIATOR_CLAIM_TYPE",
+    "STATED_DIFFERENTIATOR_FORBIDDEN_JUDGMENTS",
+    "STATED_DIFFERENTIATOR_SLOT",
     "comparison_basis_claim",
     "comparison_context_claim_problems",
     "comparison_limitation_claim",
@@ -361,4 +435,5 @@ __all__ = [
     "comparison_target_claim",
     "comparison_target_source_problems",
     "expected_comparison_context_claim",
+    "stated_differentiator_program_problems",
 ]

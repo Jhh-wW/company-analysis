@@ -36,6 +36,7 @@ COMPETITIVE_COMPARISON_CLAIM_TYPE: Final[str] = "competitive_comparison"
 COMPETITIVE_COMPARISON_CONTEXT_CLAIM_TYPE: Final[str] = (
     "competitive_comparison_context"
 )
+STATED_DIFFERENTIATOR_CLAIM_TYPE: Final[str] = "stated_differentiator"
 COMPARISON_PROGRAM_CLAIM_TYPES: Final[frozenset[str]] = frozenset(
     {
         COMPETITIVE_COMPARISON_CLAIM_TYPE,
@@ -51,6 +52,7 @@ STRICT_FACTUAL_CLAIM_TYPES: Final[frozenset[str]] = frozenset(
         HISTORICAL_PERFORMANCE_RATE_CLAIM_TYPE,
         COMPETITIVE_COMPARISON_CLAIM_TYPE,
         COMPETITIVE_COMPARISON_CONTEXT_CLAIM_TYPE,
+        STATED_DIFFERENTIATOR_CLAIM_TYPE,
     }
 )
 STRICT_PUBLIC_CLAIM_TYPES: Final[frozenset[str]] = frozenset(

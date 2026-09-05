@@ -264,7 +264,10 @@ def test_회사유형에_따라_기대경로가_달라진다() -> None:
     dart_attempt = _attempt(
         attempt_id="a1",
         source_kind="dart_audit_report",
-        slot_ids=("competitive_position:self_context",),
+        slot_ids=(
+            "competitive_position:self_context",
+            "competitive_position:stated_differentiator",
+        ),
         state=CollectionState.MISSING,
     )
 
@@ -280,7 +283,10 @@ def test_회사유형에_따라_기대경로가_달라진다() -> None:
     official_attempt = _attempt(
         attempt_id="a2",
         source_kind="official_web_page",
-        slot_ids=("competitive_position:self_context",),
+        slot_ids=(
+            "competitive_position:self_context",
+            "competitive_position:stated_differentiator",
+        ),
         state=CollectionState.MISSING,
     )
 
@@ -328,7 +334,10 @@ def test_undecided_회사유형은_기대경로_가산규칙을_적용하지_않
     attempt = _attempt(
         attempt_id="a1",
         source_kind="official_web_page",
-        slot_ids=("competitive_position:self_context",),
+        slot_ids=(
+            "competitive_position:self_context",
+            "competitive_position:stated_differentiator",
+        ),
         state=CollectionState.MISSING,
     )
 
@@ -340,7 +349,10 @@ def test_undecided_회사유형은_기대경로_가산규칙을_적용하지_않
     )
 
     assert readiness is EvidenceReadiness.INSUFFICIENT
-    assert reasons == ("evidence_absent_after_check:competitive_position:self_context",)
+    assert reasons == (
+        "evidence_absent_after_check:competitive_position:self_context",
+        "evidence_absent_after_check:competitive_position:stated_differentiator",
+    )
 
 
 def test_undecided_회사유형도_조회_실패는_여전히_unknown이다() -> None:
