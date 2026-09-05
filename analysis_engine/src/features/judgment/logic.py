@@ -27,13 +27,19 @@ STATUS_ACCEPT = "대상"
 STATUS_REJECT_A = "거부A_공공기관"
 STATUS_REJECT_B = "거부B_외감아님"
 TYPE_LISTED = "상장사"
-TYPE_AUDITED = "비상장외감"
+#: ★ 띄어쓰기가 «있다» — 앱 이력 정본과 한 글자도 달라선 안 된다
+#:   (`app/src/features/observability/constants.py` 의 CORP_TYPE_UNLISTED_AUDITED).
+#:   실측(2026-09-05 운영): 여기가 「비상장외감」이라 비상장 회사(현대카드·우리은행)
+#:   조사의 이력 1행이 허용값 검사에 걸려 전부 거부됐다. 기록 실패는 조용히
+#:   삼켜지므로 보고서는 나갔지만, 실행 상태가 「진행 중」으로 남고 대시보드·
+#:   하루 집계·게이트 진단이 통째로 빠졌다. 상장사는 글자가 같아 멀쩡했다.
+TYPE_AUDITED = "비상장 외감"
 
 
 @dataclass(frozen=True)
 class Judgment:
     status: str                  # 대상 / 거부A_공공기관 / 거부B_외감아님
-    corp_type: Optional[str]     # 상장사 / 비상장외감 / None
+    corp_type: Optional[str]     # 상장사 / 비상장 외감 / None
     reason: str                  # 사람이 읽는 판정 근거 한 줄
 
 

@@ -148,6 +148,9 @@ from src.features.filingclean import logic as filing_clean
 from src.features.filingclean import relationships as filing_relationships
 from src.features.newspick import constants as newspick
 from src.features.newspick import logic as newspick_logic
+# 회사 유형 표기의 «정본»은 이력 쪽에 있다. 여기서 값을 다시 적어 두면
+# 언젠가 한쪽만 바뀌어 이번과 같은 결함이 되풀이된다.
+from src.features.observability import constants as observability_constants
 from src.features.revenuemix import logic as revenuemix
 from src.features.writer import constants as writer
 from src.features.writer import logic as writer_logic
@@ -1120,6 +1123,41 @@ def _reject_outcome(status: str) -> Outcome:
       아는 것처럼 말하는 화면이 바로 이 결함의 정체였다.
     """
     return outcome_for(f"거부_{status}", _OUTCOME_MAP)
+
+
+def _canonical_corp_type(value: Optional[str]) -> str:
+    """회사 유형 표기를 이력 정본(`CORP_TYPE_VALUES`)에 맞춘다.
+
+    ★ 왜 필요한가 (2026-09-05 운영 실측)
+      엔진 판정은 「비상장외감」(띄어쓰기 없음)을 냈는데 이력 정본은
+      「비상장 외감」이라, **비상장 회사(현대카드·우리은행)의 이력 1행이
+      허용값 검사에 걸려 전부 거부됐다.** 기록 실패는 조용히 삼켜지므로
+      보고서는 정상으로 나갔지만 실행 상태가 「진행 중」으로 남고 대시보드·
+      하루 집계·게이트 진단이 통째로 빠졌다. 상장사는 글자가 같아 멀쩡했다.
+      → 이 값을 싣는 곳이 스무 곳이 넘는다. 각자 고치지 말고 **들어오는 자리**
+        에서 한 번만 맞춘다.
+
+    Args:
+        value: 판정 또는 저장본이 들고 있는 회사 유형. `None`일 수 있다.
+
+    Returns:
+        아는 표기면 정본 글자, 모르는 표기면 **받은 값 그대로**.
+
+    ★ 모르는 값을 빈칸으로 뭉개지 않는 이유 — 빈칸은 「02_판정에 이르지 못하고
+      끝났다」는 «다른 뜻»이다. 판정까지 갔는데 빈칸으로 적으면 이력이 거짓말을
+      한다. 모르는 값은 그대로 흘려보내 허용값 검사에서 소리 나게 둔다.
+    """
+    text = (value or "").strip()
+    if text in observability_constants.CORP_TYPE_VALUES:
+        return text
+    # 띄어쓰기만 다른 표기를 같은 것으로 본다 (「비상장외감」 → 「비상장 외감」).
+    squeezed = "".join(text.split())
+    for canonical in observability_constants.CORP_TYPE_VALUES:
+        if squeezed and squeezed == "".join(canonical.split()):
+            return canonical
+    if text:
+        logger.warning("이력 정본에 없는 회사 유형입니다: %r", text)
+    return text
 
 
 def _engine() -> Any:
@@ -2402,6 +2440,9 @@ class RealPipeline:
             lambda b: engine.match_public_org(b, registry),
             has_financial_statements=bool(fin_years),
         )
+        # 엔진 표기를 이력 정본 표기로 «여기서 한 번만» 맞춘다. 아래에서 이 값을
+        # 싣는 자리가 스무 곳이 넘어서, 각자 고치면 반드시 한 곳이 빠진다.
+        corp_type = _canonical_corp_type(judgment.corp_type)
         if judgment.status != "대상":
             outcome = _reject_outcome(judgment.status)
             return RunResult(
@@ -2418,7 +2459,7 @@ class RealPipeline:
                     if audit_no_data
                     else []
                 ),
-                corp_type=judgment.corp_type,
+                corp_type=corp_type,
                 cost_krw=_request_spent_krw(engine),
                 model=model,
             )
@@ -2433,7 +2474,7 @@ class RealPipeline:
         # financials·fin_years 는 위 「조건 2-b」에서 이미 받아 두었다 (두 번 안 받는다).
         filing = engine.latest_report_rcept(
             corp_code,
-            judgment.corp_type,
+            corp_type,
             counter,
             business_date=business_date,
         )
@@ -2501,7 +2542,7 @@ class RealPipeline:
                             "내부 공식 자료 수집 연결을 확인하지 못했습니다",
                         )
                     ],
-                    corp_type=judgment.corp_type,
+                    corp_type=corp_type,
                     cost_krw=_request_spent_krw(engine),
                     model=model,
                     final_gate_reason=FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
@@ -2589,7 +2630,7 @@ class RealPipeline:
                             failure_detail,
                         )
                     ],
-                    corp_type=judgment.corp_type,
+                    corp_type=corp_type,
                     cost_krw=_request_spent_krw(engine),
                     model=model,
                     final_gate_reason=failure_reason,
@@ -2642,7 +2683,7 @@ class RealPipeline:
                             gate_reason=gate_reason,
                         )
                     ],
-                    corp_type=judgment.corp_type,
+                    corp_type=corp_type,
                     fragments_collected=sum(
                         len(candidate.fragments)
                         for candidate in official_evidence.candidates
@@ -2655,15 +2696,19 @@ class RealPipeline:
                 )
 
             if official_preflight.dart_partial_fallback:
-                # FULL은 아홉 장·독립 문서 8건을 모두 요구한다. 홈페이지 장애인데
-                # DART 핵심 3장이 준비된 경우에는 이미 존재하는 SHADOW의 안전한
+                # FULL은 아홉 장·독립 문서 8건을 모두 요구한다. 사전검사가 부분
+                # 보고서 갈래(웹 경로 일시 장애 / 자료 일부 부족 / 정식 문서 하한
+                # 도달 불가)로 열어 준 경우에는 이미 존재하는 SHADOW의 안전한
                 # PARTIAL 출고 계약으로만 전환한다. 근거 없는 장은 최종 검증에서
                 # 제외되고, FULL 표시나 FULL 생산 영수증을 가장하지 않는다.
+                # ★ 사유는 사전검사가 고른 닫힌 코드를 그대로 싣는다 — 여기에 문구를
+                #   박아 두면 갈래가 늘 때마다 운영 기록이 거짓말을 한다(2026-09-05
+                #   우리은행: 웹 장애가 아닌데 «웹 경로 일시 장애»로 찍혔을 뻔했다).
                 requested_release_mode = ReleaseMode.SHADOW
                 steps.append(
                     {
                         "step": "6_수집_DART부분보고서전환",
-                        "사유": "회사 웹 경로 일시 장애",
+                        "사유코드": official_preflight.dart_partial_reason,
                     }
                 )
 
@@ -2689,7 +2734,7 @@ class RealPipeline:
                             "공식 자료 snapshot을 결속하지 못했습니다",
                         )
                     ],
-                    corp_type=judgment.corp_type,
+                    corp_type=corp_type,
                     final_gate_reason=FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
                 )
         if (
@@ -2709,7 +2754,7 @@ class RealPipeline:
                     official_evidence=official_evidence,
                     corp_code=corp_code,
                     company_name=company_name,
-                    corp_type=judgment.corp_type,
+                    corp_type=corp_type,
                     financials=financials,
                     filing=filing,
                     business_date=business_date,
@@ -2741,7 +2786,7 @@ class RealPipeline:
                             "동일 기간·범위·지표의 공식 양사 근거가 부족합니다",
                         )
                     ],
-                    corp_type=judgment.corp_type,
+                    corp_type=corp_type,
                     cost_krw=_request_spent_krw(engine),
                     model=model,
                     final_gate_reason=FINAL_GATE_REASON_COMPARISON_BLOCKED,
@@ -2780,7 +2825,7 @@ class RealPipeline:
                                 "운영자의 DART 접근 설정 확인이 필요합니다",
                             )
                         ],
-                        corp_type=judgment.corp_type,
+                        corp_type=corp_type,
                         cost_krw=_request_spent_krw(engine),
                         model=model,
                         final_gate_reason=(
@@ -2819,7 +2864,7 @@ class RealPipeline:
                                 "DART 공식 자료 확인을 지금 완료하지 못했습니다",
                             )
                         ],
-                        corp_type=judgment.corp_type,
+                        corp_type=corp_type,
                         cost_krw=_request_spent_krw(engine),
                         model=model,
                         final_gate_reason=(
@@ -2858,7 +2903,7 @@ class RealPipeline:
                             "내부 비교 근거 연결을 확인하지 못했습니다",
                         )
                     ],
-                    corp_type=judgment.corp_type,
+                    corp_type=corp_type,
                     cost_krw=_request_spent_krw(engine),
                     model=model,
                     final_gate_reason=FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
@@ -2943,7 +2988,7 @@ class RealPipeline:
                 ),
                 sources=list(reused_report.sources),
                 charged=False,
-                corp_type=reused_report.corp_type or judgment.corp_type,
+                corp_type=_canonical_corp_type(reused_report.corp_type) or corp_type,
                 fragments_collected=(
                     metrics.fragments_collected if metrics is not None else 0
                 ),
@@ -3038,7 +3083,7 @@ class RealPipeline:
                 sources=list(cached.sources),
                 # 캐시 반환은 0 차감·무제한.
                 charged=False,
-                corp_type=cached.corp_type or judgment.corp_type,
+                corp_type=_canonical_corp_type(cached.corp_type) or corp_type,
                 fragments_collected=(
                     metrics.fragments_collected if metrics is not None else 0
                 ),
@@ -3093,7 +3138,7 @@ class RealPipeline:
                     + _stop_reason_note(FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT)
                 ),
                 sources=_sources_from(steps),
-                corp_type=judgment.corp_type,
+                corp_type=corp_type,
                 cost_krw=_request_spent_krw(engine),
                 model=model,
                 final_gate_reason=FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
@@ -3116,7 +3161,7 @@ class RealPipeline:
                         )
                     ),
                     sources=_sources_from(steps),
-                    corp_type=judgment.corp_type,
+                    corp_type=corp_type,
                     fragments_collected=len(frags),
                     final_gate_reason=FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
                 )
@@ -3140,7 +3185,7 @@ class RealPipeline:
                     + _stop_reason_note(FINAL_GATE_REASON_OTHER_GATE)
                 ),
                 sources=sources,
-                corp_type=judgment.corp_type,
+                corp_type=corp_type,
                 fragments_collected=len(frags),
                 cost_krw=_request_spent_krw(engine),
                 model=model,
@@ -3160,7 +3205,7 @@ class RealPipeline:
                 engine=engine,
                 client=client,
                 company_name=company_name,
-                corp_type=judgment.corp_type,
+                corp_type=corp_type,
                 frags=frags,
                 financials=financials,
                 filing=filing,
@@ -3395,7 +3440,7 @@ class RealPipeline:
                     )
                 ),
                 sources=sources,
-                corp_type=judgment.corp_type,
+                corp_type=corp_type,
                 fragments_collected=len(frags),
                 sentences_made=0,
                 cost_krw=_request_spent_krw(engine),
@@ -3425,7 +3470,7 @@ class RealPipeline:
                     )
                 ),
                 sources=sources,
-                corp_type=judgment.corp_type,
+                corp_type=corp_type,
                 fragments_collected=len(frags),
                 sentences_made=0,
                 cost_krw=_request_spent_krw(engine),
@@ -3537,7 +3582,7 @@ class RealPipeline:
                     )
                 ),
                 sources=sources,
-                corp_type=judgment.corp_type,
+                corp_type=corp_type,
                 fragments_collected=len(frags),
                 sentences_made=sentences_made,
                 cost_krw=_request_spent_krw(engine),
@@ -3650,7 +3695,7 @@ class RealPipeline:
         try:
             report = assemble_report_draft(
                 company=company_name,
-                corp_type=judgment.corp_type,
+                corp_type=corp_type,
                 sections=sections,
                 written_claims=written_claims,
                 sources=all_citations,
@@ -3724,7 +3769,7 @@ class RealPipeline:
                     + _stop_reason_note(FINAL_GATE_REASON_COMPARISON_BLOCKED)
                 ),
                 sources=sources,
-                corp_type=judgment.corp_type,
+                corp_type=corp_type,
                 fragments_collected=len(frags),
                 sentences_made=sentences_made,
                 sentences_passed=len(written_claims),
@@ -3756,7 +3801,7 @@ class RealPipeline:
                     + _stop_reason_note(publish_gate_reason)
                 ),
                 sources=sources,
-                corp_type=judgment.corp_type,
+                corp_type=corp_type,
                 fragments_collected=len(frags),
                 sentences_made=sentences_made,
                 sentences_passed=len(written_claims),
@@ -3822,7 +3867,7 @@ class RealPipeline:
             ),
             sources=sources,
             charged=True,  # 보고서가 나가면 1 차감 (3분법 · D5 — 부분 보고서도 1)
-            corp_type=judgment.corp_type,
+            corp_type=corp_type,
             fragments_collected=len(frags),
             fragments_cited=len(report.citations),
             sentences_made=sentences_made,
