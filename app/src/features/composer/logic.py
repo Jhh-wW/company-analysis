@@ -55,6 +55,7 @@ from src.features.composer.constants import (
     RESPONSE_TEXT_KEY,
     RETRY_REMINDER,
     SECTION_GUIDES,
+    COMPETITIVE_POSITION_PARAGRAPH_PLAN,
     SECTION_IDS,
     SECTION_TITLES,
     SECTION_SENTENCE_RANGES,
@@ -378,6 +379,11 @@ def build_section_prompt(
     )
     section_parts = [
         SECTION_GUIDES[section_id],
+        (
+            COMPETITIVE_POSITION_PARAGRAPH_PLAN
+            if section_id == "competitive_position"
+            else ""
+        ),
         "\n\n",
         CITATION_RULES_GUIDE,
         FORBIDDEN_TOPICS_GUIDE,

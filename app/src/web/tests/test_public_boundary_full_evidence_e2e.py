@@ -28,6 +28,7 @@ import pytest
 from src.core import deployment_identity
 from src.core.constants import GENERATION_MODEL, PIPELINE_ENV, PIPELINE_REAL
 from src.features.composer.constants import GRADE_CONFIRMED, SECTION_IDS
+from src.features.composer.logic import SUMMARY_PROMPT_HEADER
 from src.features.composer.public_manifest import assert_stored_strict_manifest
 from src.features.homepage.ir_pdf import FetchedIrHtml, FetchedIrPdf
 from src.features.homepage.wide_fetch import WideRawResponse
@@ -98,12 +99,15 @@ _SHARED_MARKET_CONTEXT = (
     "국내 반도체 제조 고객사와 글로벌 반도체 생산 고객을 대상으로 검사 장비 "
     "제품과 공정 추적 서비스를 반도체 검사 장비 시장에 공급한다."
 )
+_STATED_DIFFERENTIATOR_SENTENCE = (
+    "가나다전자는 독자 개발한 공정 추적 기술을 차별점으로 밝히고 있다."
+)
 _MAIN_FILING_PARAGRAPHS = (
     "I. 회사의 개요",
     "가나다전자는 주식회사로 설립되어 반도체 검사 장비 사업을 영위하는 전문기업이다.",
     "II. 사업의 내용",
     "가나다전자는 베타전자와 경쟁합니다.",
-    f"가나다전자는 차별화된 공정 추적 경쟁력을 보유하고 있다. {_SHARED_MARKET_CONTEXT}",
+    f"{_STATED_DIFFERENTIATOR_SENTENCE} {_SHARED_MARKET_CONTEXT}",
     _REVENUE_TEXT,
     "공식 홈페이지 https://company.example/ 에서 회사와 제품 정보를 공개한다.",
 )
@@ -302,8 +306,11 @@ def _fake_ir_pdf_fetch(
 class _ProviderMessages:
     """실제 계량·attempt 경계 뒤에서만 응답하는 가짜 Anthropic messages."""
 
-    _review_item_re = re.compile(
+    _review_locked_item_re = re.compile(
         r"\[(\d+)\] \(장: ([^,]+), 종류: ([^,]+), 인용: ([^)]+)\)"
+    )
+    _review_legacy_item_re = re.compile(
+        r"\[(\d+)\] \(등급: ([^,]+), 인용: ([^)]+)\)"
     )
 
     def __init__(self) -> None:
@@ -331,30 +338,42 @@ class _ProviderMessages:
 
     def create(self, **kwargs: Any) -> SimpleNamespace:
         prompt = self._prompt(kwargs)
-        review_items = self._review_item_re.findall(prompt)
-        if review_items:
+        locked_review_items = self._review_locked_item_re.findall(prompt)
+        legacy_review_items = self._review_legacy_item_re.findall(prompt)
+        if locked_review_items or legacy_review_items:
             self.reviewer_prompts.append(prompt)
+            verdicts = (
+                [
+                    {
+                        "번호": int(number),
+                        "장": section_id,
+                        "근거": re.findall(r"조각 (\d+)", citations),
+                        "결과": "참",
+                    }
+                    for number, section_id, _kind, citations in locked_review_items
+                ]
+                if locked_review_items
+                else [
+                    {"번호": int(number), "결과": "참"}
+                    for number, _grade, _citations in legacy_review_items
+                ]
+            )
             text = json.dumps(
-                {
-                    "판정": [
-                        {
-                            "번호": int(number),
-                            "장": section_id,
-                            "근거": re.findall(r"조각 (\d+)", citations),
-                            "결과": "참",
-                        }
-                        for number, section_id, _kind, citations in review_items
-                    ]
-                },
+                {"판정": verdicts},
                 ensure_ascii=False,
             )
+        elif SUMMARY_PROMPT_HEADER in prompt:
+            text = json.dumps({"문장들": []}, ensure_ascii=False)
         else:
             sections = tuple(
                 section_id
                 for section_id in SECTION_IDS
                 if f"{section_id}:" in prompt
             )
-            assert len(sections) == 1, "작가·검수 이외의 AI 호출이 새로 생겼습니다"
+            assert len(sections) == 1, (
+                "작가·검수 이외의 AI 호출이 새로 생겼습니다: "
+                f"감지한 장={sections}"
+            )
             section_id = sections[0]
             self.writer_prompts.append(prompt)
             section_call = self.writer_section_calls.get(section_id, 0) + 1
@@ -376,20 +395,19 @@ class _ProviderMessages:
                 sentences = (_RECRUIT_SENTENCE, *sentences[1:])
             rows: list[dict[str, object]] = []
             for index, sentence in enumerate(sentences):
-                source_position = prompt.find(sentence)
-                assert source_position >= 0, "공식 웹 exact 원문이 장 packet에서 사라졌습니다"
-                preceding = re.findall(r"\[조각 (\d+)\]", prompt[:source_position])
-                assert preceding
-                fragment_id = preceding[-1]
                 supported = re.search(
-                    rf"\[조각 {re.escape(fragment_id)}\] \([^\n]*"
-                    r"지원 주장슬롯: ([^)]+)\)",
+                    r"\[조각 (\d+)\] \([^\n]*지원 주장슬롯: ([^)]+)\) "
+                    rf"{re.escape(sentence)}(?:\r?\n|$)",
                     prompt,
                 )
-                assert supported, "FULL 작가 prompt의 지원 슬롯 표식이 사라졌습니다"
+                assert supported is not None, (
+                    "공식 웹 exact 원문을 지원하는 typed 조각이 장 packet에서 "
+                    f"사라졌습니다: {section_id} / {sentence}"
+                )
+                fragment_id = supported.group(1)
                 slots = tuple(
                     value.strip()
-                    for value in supported.group(1).split(",")
+                    for value in supported.group(2).split(",")
                     if value.strip() in CLAIM_SLOTS_BY_SECTION[section_id]
                 )
                 assert slots, f"{section_id} 장에 작가가 쓸 수 있는 슬롯이 없습니다"
@@ -912,6 +930,7 @@ def test_공개worker에서_매출원문_TYPED비교_FULL봉인_delivery재조�
     competitive = next(
         section for section in report.sections if section.cell == "competitive_position"
     )
+    assert competitive.title == "회사가 밝힌 차별점"
     assert competitive.lines
     assert "베타전자" in " ".join(line[0] for line in competitive.lines)
     comparison_facts = [
@@ -920,6 +939,10 @@ def test_공개worker에서_매출원문_TYPED비교_FULL봉인_delivery재조�
         if fact.section_owner == "competitive_position"
     ]
     assert comparison_facts
+    assert any(
+        fact.claim_type == "stated_differentiator"
+        for fact in comparison_facts
+    )
     assert {
         "competitive_position:comparison_target",
         "competitive_position:comparison_metric",

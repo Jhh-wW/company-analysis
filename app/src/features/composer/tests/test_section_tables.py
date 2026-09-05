@@ -164,41 +164,29 @@ def test_9장은_표를_만들지_않는다():
     assert "competitive_position" not in FLOW_PROMPT_BY_SECTION
 
 
-def test_9장_제목과_지침이_경쟁우위를_말한다():
+def test_9장_제목과_지침이_회사자기선언을_말한다():
     from src.features.composer.constants import SECTION_GUIDES
 
-    assert "경쟁우위" in SECTION_TITLES["competitive_position"]
+    assert SECTION_TITLES["competitive_position"] == "회사가 밝힌 차별점"
     지침 = SECTION_GUIDES["competitive_position"]
-    assert "비교표" in 지침 and "쓰지 않는다" in 지침
+    assert "회사" in 지침 and "공식 출처" in 지침
 
 
-def test_9장_지침이_강점을_흐리게_쓰지_말라고_말한다():
-    """★ 제품 결정 — 「이런 장점이 있다」는 것 자체가 우위다.
-
-    처음엔 「선도적」·「최고 수준」 같은 말을 전부 근거 요구로 막았는데,
-    그러면 강점이 있어도 「~일 수도 있다」로 흐려져 우위가 안 보인다.
-    상대와 견줘 이겼다는 증거가 없어도 «가진 것»은 강점으로 쓴다.
-    """
+def test_9장_지침이_회사선언과_작성자판단을_분리한다():
     from src.features.composer.constants import SECTION_GUIDES
 
     지침 = SECTION_GUIDES["competitive_position"]
-    assert "강점이 있다」는 것 자체가 우위" in 지침
-    assert "흐리지 마라" in 지침
+    assert "사실 여부" in 지침
+    assert "우열을 작성자가 판단하지 않는다" in 지침
 
 
-def test_9장_지침이_순위_주장에만_근거를_요구한다():
-    """★ 느슨하게 풀되 «틀리면 거짓말이 되는 것»만 잠근다.
-
-    「업계 1위」는 사실 주장이라 틀리면 거짓이다. 「선도적」은 정도를
-    나타내는 말이라 근거만 있으면 쓸 수 있다 — 이 둘을 갈라야 한다.
-    """
+def test_9장_지침이_닫힌_선언표지와_금지평가어를_말한다():
     from src.features.composer.constants import SECTION_GUIDES
 
     지침 = SECTION_GUIDES["competitive_position"]
-    assert "업계 1위" in 지침, "순위 주장 예시가 사라졌습니다"
-    assert "선도적" in 지침, "정도를 나타내는 말의 예시가 사라졌습니다"
-    # 순위 쪽에만 근거를 요구하고, 정도 표현은 허용한다는 것이 남아 있는가
-    assert "그냥 써도 된다" in 지침
+    for marker in ("최초", "유일", "최다", "1위", "최대", "독자 개발", "특허"):
+        assert marker in 지침
+    assert "더 낫다" in 지침 and "쓰지 않는다" in 지침
 
 
 def test_9장_근거부족_지침이_출고품질계약과_같은_경계를_말한다():
@@ -209,9 +197,8 @@ def test_9장_근거부족_지침이_출고품질계약과_같은_경계를_말�
     )
 
     지침 = SECTION_GUIDES["competitive_position"]
-    assert "FULL 필수 의미칸" in 지침
     assert f"근거어를 최소 {MIN_PROSE_EVIDENCE_SUPPORT_TERMS}개" in 지침
-    assert "출고 검증이 부족한 보고서를 막게 한다" in 지침
+    assert "추측으로 채우지 않는다" in 지침
 
 
 # ══════════════════════════════════════════════════════════

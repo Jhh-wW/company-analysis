@@ -44,6 +44,10 @@ from src.shared.report_quality.constants import (
     COMPETITIVE_COMPARISON_CLAIM_TYPE,
     COMPETITIVE_COMPARISON_CONTEXT_CLAIM_TYPE,
 )
+from src.features.company_comparison.stated_differentiator import (
+    STATED_DIFFERENTIATOR_CLAIM_TYPE,
+    STATED_DIFFERENTIATOR_SLOT,
+)
 from src.shared.report_quality.comparison_basis import (
     comparison_basis_attester_source_ids,
 )
@@ -216,7 +220,7 @@ def _context_fact(
     )
 
 
-def attach_comparison_program_evidence(
+def _attach_comparison_only(
     packets: SectionEvidencePacketSet,
     comparison: ComparisonBuildResult,
 ) -> SectionEvidencePacketSet:
@@ -445,6 +449,205 @@ def attach_comparison_program_evidence(
         evidence_generation_sha256=packets.evidence_generation_sha256,
         packets=updated_packets,
     )
+
+
+def _stated_limitation_fact(base: FactRecord, source: Source) -> FactRecord:
+    claim = (
+        f"{base.legal_entity}가 공식 자료에서 밝힌 표현의 범위만 옮겼으며 "
+        f"'{base.claim}'에 대한 타사 비교 판정은 포함하지 않습니다."
+    )
+    return _reseal_fact(
+        base,
+        fact_id=_stable_fact_id(base, "stated_differentiator_limitation"),
+        claim=claim,
+        claim_type=STATED_DIFFERENTIATOR_CLAIM_TYPE,
+        relationship_or_action="회사 발표 표현의 한계",
+        claim_slot=_SLOT_LIMITATION,
+        raw_value="",
+        calculation="",
+        display_value="",
+        rounding_rule="",
+        numeric_checks=[],
+        comparison_target="",
+        comparison_metric="",
+        comparison_definition="",
+        comparison_basis="",
+        comparison_period="",
+        comparison_scope="",
+        comparison_judgment="",
+        comparator_source_id="",
+        comparator_state_evidence="",
+        comparator_evidence_support_terms=[],
+        comparison_conditions={},
+        **_source_fields(source),
+        **_support_fields((source,), (base.state_evidence,)),
+    )
+
+
+def _attach_stated_program_evidence(
+    packets: SectionEvidencePacketSet,
+    comparison: ComparisonBuildResult,
+    stated_facts: tuple[FactRecord, ...],
+) -> SectionEvidencePacketSet:
+    has_existing_program = any(
+        packet.section_id == COMPETITIVE_SECTION_ID
+        and packet.program_evidence is not None
+        for packet in packets.packets
+    )
+    maximum_number = max(
+        int(fragment.fragment_id)
+        for packet in packets.packets
+        for fragment in packet.fragments
+    )
+    original_sources = {source.source_id: source for source in comparison.sources}
+    sources_by_id: dict[str, Source] = {}
+    fragment_by_source_id: dict[str, CollectedFragment] = {}
+    facts: list[FactRecord] = []
+    next_number = maximum_number + 1
+    for fact in stated_facts:
+        original = original_sources.get(fact.source_id)
+        if original is None:
+            raise ValueError("회사 차별점 FactRecord의 공식 Source가 없습니다")
+        # 같은 원문 문서가 선택 비교의 자사 수치 Source로도 쓰일 수 있다.
+        # 프로그램 계약은 Source 하나와 exact fragment 하나를 1:1로 묶으므로,
+        # 자기 선언 문장은 문서 신원을 유지한 별도 citation Source로 투영한다.
+        stated_source_id = (
+            f"{original.source_id}:stated:"
+            f"{hashlib.sha256(fact.state_evidence.encode('utf-8')).hexdigest()[:16]}"
+        )
+        source = _with_exact_evidence(
+            replace(original, source_id=stated_source_id),
+            fact.state_evidence,
+            number=next_number,
+        )
+        next_number += 1
+        sources_by_id[source.source_id] = source
+        enriched = _reseal_fact(
+            fact,
+            claim_type=STATED_DIFFERENTIATOR_CLAIM_TYPE,
+            claim_slot=STATED_DIFFERENTIATOR_SLOT,
+            **_source_fields(source),
+            **_support_fields((source,), (fact.state_evidence,)),
+        )
+        facts.append(enriched)
+        fragment_by_source_id[source.source_id] = CollectedFragment(
+            fragment_id=str(source.number),
+            kind=source.source_type or source.kind.value,
+            text=fact.state_evidence,
+            **bound_source_fragment_provenance(source),
+            supported_claim_slots=(
+                STATED_DIFFERENTIATOR_SLOT,
+                _SLOT_LIMITATION,
+            ),
+            bound_source=source,
+        )
+
+    first = facts[0]
+    first_source = sources_by_id[first.source_id]
+    if not has_existing_program:
+        facts.append(_stated_limitation_fact(first, first_source))
+    direct_source_ids = set(fragment_by_source_id)
+    required_attester_ids = {
+        sources_by_id[source_id].domain_attestation_source_id.strip()
+        for source_id in direct_source_ids
+        if sources_by_id[source_id].domain_attestation_source_id.strip()
+    }
+    for attester_id in required_attester_ids:
+        attester = original_sources.get(attester_id)
+        if attester is None:
+            raise ValueError("회사 차별점 공식 Source의 attester가 없습니다")
+        sources_by_id[attester_id] = attester
+    registry_sources = tuple(
+        source
+        for source_id, source in sources_by_id.items()
+        if source_id in direct_source_ids | required_attester_ids
+    )
+    source_fragments = tuple(fragment_by_source_id.values())
+    sentences = tuple(
+        ComposedSentence(
+            text=fact.claim,
+            citations=tuple(
+                str(sources_by_id[source_id].number)
+                for source_id in fact.supporting_source_ids
+            ),
+            grade=GRADE_CONFIRMED,
+            planned_claim_slot=fact.claim_slot,
+            verification_state="verified",
+            verified_fact_id=fact.fact_id,
+        )
+        for fact in facts
+    )
+
+    updated_packets = []
+    for packet in packets.packets:
+        if packet.section_id != COMPETITIVE_SECTION_ID:
+            updated_packets.append(packet)
+            continue
+        existing = packet.program_evidence
+        if existing is None:
+            program = VerifiedProgramEvidence(
+                section_id=COMPETITIVE_SECTION_ID,
+                source_fragments=source_fragments,
+                registry_sources=registry_sources,
+                facts=tuple(facts),
+                sentences=sentences,
+            )
+        else:
+            merged_sources = {
+                source.source_id: source for source in existing.registry_sources
+            }
+            for source in registry_sources:
+                merged_sources.setdefault(source.source_id, source)
+            program = VerifiedProgramEvidence(
+                section_id=COMPETITIVE_SECTION_ID,
+                source_fragments=(*existing.source_fragments, *source_fragments),
+                registry_sources=tuple(merged_sources.values()),
+                facts=(*existing.facts, *facts),
+                sentences=(*existing.sentences, *sentences),
+            )
+        updated_packets.append(
+            replace(
+                packet,
+                fragments=(*packet.fragments, *source_fragments),
+                program_evidence=program,
+            )
+        )
+    return SectionEvidencePacketSet(
+        company_id=packets.company_id,
+        evidence_generation_sha256=packets.evidence_generation_sha256,
+        packets=tuple(updated_packets),
+    )
+
+
+def attach_comparison_program_evidence(
+    packets: SectionEvidencePacketSet,
+    comparison: ComparisonBuildResult,
+) -> SectionEvidencePacketSet:
+    """회사 자기 선언은 필수로, 동일 조건 비교는 있을 때만 typed 근거로 붙인다."""
+
+    stated_facts = tuple(
+        fact
+        for fact in comparison.facts
+        if fact.claim_type == STATED_DIFFERENTIATOR_CLAIM_TYPE
+    )
+    comparison_facts = tuple(
+        fact
+        for fact in comparison.facts
+        if fact.claim_type == COMPETITIVE_COMPARISON_CLAIM_TYPE
+    )
+    if not stated_facts:
+        # 과거 비교-only fixture와 저장 결과의 독립 브리지 검증은 유지한다.
+        # 실제 FULL 파이프라인은 이 함수에 오기 전에 자기 선언 fact를 필수 검사한다.
+        return _attach_comparison_only(packets, comparison)
+    if len(stated_facts) + len(comparison_facts) != len(comparison.facts):
+        raise ValueError("V2 FULL 9장에 알 수 없는 프로그램 사실이 섞였습니다")
+    updated = packets
+    if comparison_facts:
+        updated = _attach_comparison_only(
+            packets,
+            replace(comparison, facts=comparison_facts),
+        )
+    return _attach_stated_program_evidence(updated, comparison, stated_facts)
 
 
 __all__ = ["attach_comparison_program_evidence"]

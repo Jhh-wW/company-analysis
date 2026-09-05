@@ -35,19 +35,16 @@ def test_수집칸과_주입칸은_겹치지_않고_전체필수칸을_정확히
     assert all(slot_id.startswith(f"{section_id}:") for slot_id in required)
 
 
-def test_실적과_동일조건비교는_수집기_자기판정으로_채우지_않는다() -> None:
+def test_실적과_비교한계만_구조화검증기가_주입한다() -> None:
     assert injected_slots_for("past_changes") == (
         "past_changes:historical_performance",
     )
-    assert set(injected_slots_for("competitive_position")) == {
-        "competitive_position:comparison_target",
-        "competitive_position:comparison_metric",
-        "competitive_position:comparison_basis",
-        "competitive_position:comparison_judgment",
+    assert injected_slots_for("competitive_position") == (
         "competitive_position:limitation",
-    }
+    )
     assert collector_slots_for("competitive_position") == (
         "competitive_position:self_context",
+        "competitive_position:stated_differentiator",
     )
 
 
