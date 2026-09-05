@@ -33,9 +33,12 @@ from src.shared.revenue_table_provenance import (
     REVENUE_AXIS_PRODUCT,
     REVENUE_AXIS_REGION,
     REVENUE_CAPTION_BY_AXIS,
+    REVENUE_CHANGE_CAPTION_BY_AXIS,
     REVENUE_HEADERS,
     REVENUE_HEADS_BY_AXIS,
     REVENUE_MAX_ROWS,
+    REVENUE_MULTI_YEAR_MAX_PERIODS,
+    REVENUE_MULTI_YEAR_SELECTION,
     REVENUE_NAME_NOISE,
     REVENUE_RATIO_HEAD_RE,
     REVENUE_ROW_RE,
@@ -90,6 +93,13 @@ REGION_CAPTION: Final[str] = REVENUE_CAPTION_BY_AXIS[REVENUE_AXIS_REGION]
 
 #: 열 이름.
 HEADERS: Final[tuple[str, str, str]] = REVENUE_HEADERS
+
+#: 3개년 구성 변화 표 계약. 연도를 더 받더라도 최근 3개만 근거로 삼고,
+#: 머리말에 연도가 없으면 단년으로 처리해 변화 표를 만들지 않는다.
+MULTI_YEAR_MAX_PERIODS: Final[int] = REVENUE_MULTI_YEAR_MAX_PERIODS
+MULTI_YEAR_RATIO_HEADER_FORMAT: Final[str] = "{year} 비중"
+MULTI_YEAR_SELECTION: Final[str] = REVENUE_MULTI_YEAR_SELECTION
+MULTI_YEAR_CAPTION_BY_AXIS: Final[dict[str, str]] = REVENUE_CHANGE_CAPTION_BY_AXIS
 
 #: 표 밑에 붙이는 말 — **프로그램이 붙인다.** AI가 아니다.
 FOOTNOTE: Final[str] = "공시에 적힌 비중을 그대로 옮긴 것입니다 (계산하지 않았습니다)"
