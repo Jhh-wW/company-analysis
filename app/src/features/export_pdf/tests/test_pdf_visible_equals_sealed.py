@@ -25,9 +25,11 @@
 
 from __future__ import annotations
 
+import io
 import re
 from dataclasses import replace
 
+import pdfplumber
 import pytest
 
 from src.features.composer.constants import (
@@ -55,7 +57,6 @@ from src.features.export_pdf.tests.test_v2_public_projection import (
     _performance_table,
     _sealed,
     _squeezed,
-    _visible_text,
     _with_facts,
 )
 from src.features.pipeline.port import Report
@@ -251,13 +252,40 @@ def test_PDF_번호문단_목록은_봉인_문단_목록과_정확히_같다(
 # ══════════════════════════════════════════════════════════
 
 
+def _body_text_without_page_furniture(pdf_bytes: bytes) -> str:
+    """쪽 머리글·꼬리글을 걷어낸 본문 글자.
+
+    ★ 왜 걷어내나: 머리글(제목·기준일)과 꼬리글(회사명·쪽번호)은 «보고서 내용»이
+      아니라 쪽마다 다시 찍히는 장식이다(``logic._page_furniture``, 표지 다음
+      쪽부터). 한 장이 쪽 경계를 걸치면 그 장식이 문단 «사이»에 끼어들어, 내용은
+      한 글자도 안 바뀌었는데 「덩어리가 끊겼다」로 보인다.
+    ★ 걷어내도 이 시험이 지키는 것은 그대로다 — 장식이 아닌 «보고서 글자»가
+      문단 사이에 끼면 여전히 덩어리가 끊어진다.
+    ★ 자리로 지운다(첫 줄·마지막 줄). 글자로 지우면 본문에 우연히 같은 글자가
+      있을 때 본문까지 지운다.
+    """
+
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as document:
+        page_texts = [page.extract_text() or "" for page in document.pages]
+
+    kept: list[str] = []
+    for position, page_text in enumerate(page_texts):
+        lines = page_text.splitlines()
+        # 표지(첫 쪽)에는 머리글·꼬리글이 없다.
+        if position > 0 and len(lines) >= 2:
+            lines = lines[1:-1]
+        kept.append("\n".join(lines))
+    return "\n".join(kept)
+
+
 def test_PDF_글자에서_한_장의_문단들은_봉인_순서대로_붙어_나온다() -> None:
     """한 장의 문단 사이에 «다른 글자»가 끼면 깨진다.
 
     한 장의 문단들은 번호와 함께 잇달아 인쇄되므로, 공백을 걷어낸 글자에서
     ``번호+문단+번호+문단``이 **한 덩어리**로 나온다. 사이에 한 줄이 끼면
-    덩어리가 끊어진다. 장과 장 사이에는 쪽 꼬리글·머리글이 끼어들 수 있으므로
-    덩어리를 «장 단위»로 잡고, 덩어리끼리는 앞에서 뒤로만 찾아 순서를 지킨다.
+    덩어리가 끊어진다. 쪽 머리글·꼬리글은 보고서 내용이 아니라 쪽마다 다시
+    찍히는 장식이라 먼저 걷어내고(``_body_text_without_page_furniture``),
+    덩어리끼리는 앞에서 뒤로만 찾아 순서를 지킨다.
     """
 
     report = sealed_two_paragraph_report()
@@ -265,7 +293,7 @@ def test_PDF_글자에서_한_장의_문단들은_봉인_순서대로_붙어_나
     assert projection is not None
     assert_two_paragraphs_per_section(projection)
 
-    printed = _squeezed(_visible_text(pdf_logic.build_pdf(report)))
+    printed = _squeezed(_body_text_without_page_furniture(pdf_logic.build_pdf(report)))
 
     cursor = 0
     for block in projection.sections:

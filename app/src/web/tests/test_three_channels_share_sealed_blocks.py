@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import io
 import re
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -45,10 +46,15 @@ from src.features.export_pdf.tests.test_v2_public_projection import (
     _v2_full_report,
 )
 from src.features.pipeline.port import Report
+from src.features.report_standard.public_projection import build_public_projection
 from src.shared.report_generation.public_projection import build_report_digest
 from src.web import job_runtime
 from src.web import main as web_main
 from src.web.routers import reports as reports_router
+from src.web.tests._reader_notice_ban import (
+    READER_BANNED_EXPRESSIONS,
+    banned_hits_by_channel,
+)
 from src.web.tests._visible_text import visible_text
 
 
@@ -56,6 +62,25 @@ from src.web.tests._visible_text import visible_text
 #: ★ 생산 상수를 import하지 않고 **리터럴**로 적는다 — 상수를 같이 읽으면
 #:   라벨이 바뀌어도 시험이 함께 움직여 아무것도 못 잡는다.
 _FACT_VERIFICATION_LABEL = "사실 검증"
+
+#: 2026-09-05 이전에 «이미 봉인되어 저장된» 보고서가 들고 있는 고지 두 줄.
+#: 새 보고서는 빈 고지를 봉인하지만 옛 저장본의 봉인은 이 글자를 그대로 갖고
+#: 있다. 리터럴로 적는다 — 생산 상수를 읽으면 사본이 되살아나도 시험이 같이
+#: 따라가 아무것도 못 잡는다.
+_옛_고지 = (
+    "안전 확인 중인 임시 부분 보고서",
+    "확인되지 않은 숫자 문장은 제외했지만 모든 문장·표·도식의 새 "
+    "검증은 아직 끝나지 않았습니다. 아래에 남은 이유를 표시합니다.",
+)
+
+#: 실제 파이프라인이 만드는 미제공 사유 모양의 표본. 「뺐습니다」·「권합니다」·
+#: 「확인하지 못했」이 모두 들어 있어야 고지만 지우고 사유가 새는 경우를 잡는다.
+_옛_미제공_사유 = (
+    "원문과 맞춰 보지 못한 숫자·날짜 문장 3개를 뺐습니다 (1장 회사 정체성). "
+    "틀렸다는 뜻이 아니라 확인하지 못했다는 뜻입니다.",
+    "이 보고서가 참고한 원문 문서는 2개입니다. 자료가 적으니 다른 자료와 "
+    "함께 보시길 권합니다.",
+)
 
 #: 장부만 바꾼 두 번째 저장본이 쓰는 비공개 감사 문자열.
 _OTHER_PRIVATE_SCOPE = "또 다른 비공개 감사 문자열"
@@ -224,31 +249,25 @@ def test_3개년_띠_제목은_웹_PDF_노션에_모두_보인다(
 
 
 # ══════════════════════════════════════════════════════════
-# ② 부록 라벨·부분 보고서 고지 — 세 채널이 같은 글자를 쓴다
+# ② 부록 라벨은 세 채널이 같고, 부분 보고서 고지는 세 채널에 «다 없다»
 # ══════════════════════════════════════════════════════════
 
 
-def test_부록_사실검증_라벨과_고지_문장은_세_채널이_같다(
+def test_부록_사실검증_라벨은_세_채널이_같다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """열 이름과 고지 문장은 채널마다 사본을 들면 조용히 갈라진다."""
+    """열 이름은 채널마다 사본을 들면 조용히 갈라진다."""
 
     report = _v2_full_report()
     projection = report.public_projection
     assert projection is not None
-    notice_title, notice_detail = projection.grade_notice
-    assert (
-        notice_title and notice_detail
-    ), "재료가 부분 보고서가 아니다 — 고지 시험이 무의미해진다"
     assert projection.citations, "재료에 부록 행이 없다 — 라벨 시험이 무의미해진다"
 
     body = _render_from_stored_delivery(
         report, monkeypatch, report_id="f1q-shared-copy"
     )
-    # ★ 고지는 화면 장식(`ui-only`)이라 본문 `<article>` 밖에 있다. 그래서
-    #   이 시험만 페이지 전체의 보이는 글자를 본다 — 속성값은 여전히 안 센다.
     missing = _missing_by_channel(
-        [_FACT_VERIFICATION_LABEL, notice_title, notice_detail],
+        [_FACT_VERIFICATION_LABEL],
         {
             "웹": _web_page_text(body),
             "PDF": _pdf_text(report),
@@ -257,6 +276,74 @@ def test_부록_사실검증_라벨과_고지_문장은_세_채널이_같다(
     )
 
     assert not any(missing.values()), f"채널별 누락 문구: {missing}"
+
+
+def test_부분_보고서_고지와_미제공_사유는_세_채널_어디에도_없다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """출시된 보고서에 만드는 과정 이야기를 싣지 않는다 (사용자 결정, 2026-09-05).
+
+    ★ 재료를 «이미 발행된 옛 저장본»으로 만든다 — 봉인에 옛 고지 두 줄과
+      미제공 사유를 도로 심어 두고 세 채널을 그린다. 이렇게 해야
+      「봉인이 비어서 안 나온 것」과 「채널이 안 읽어서 안 나온 것」이 갈린다.
+      앞의 것만 확인하면 지금 저장돼 있는 보고서들은 계속 새어 나간다.
+    ★ 고지는 화면 장식(``ui-only``)이라 본문 ``<article>`` 밖에 있다. 그래서
+      웹은 페이지 전체의 보이는 글자를 본다 — 속성값은 여전히 안 센다.
+    """
+
+    report = _v2_full_report()
+    assert report.public_projection is not None
+    assert report.public_projection.grade_notice == ("", "")
+
+    사유_있는_보고서 = replace(report, shortfall_reasons=list(_옛_미제공_사유))
+    옛_저장본 = replace(
+        사유_있는_보고서,
+        public_projection=replace(
+            build_public_projection(사유_있는_보고서),
+            grade_notice=_옛_고지,
+        ),
+    )
+    봉인 = 옛_저장본.public_projection
+    assert 봉인.grade_notice == _옛_고지, "재료에 옛 고지가 없다 — 시험이 무의미해진다"
+    assert list(봉인.header["shortfall_reasons"]) == list(
+        _옛_미제공_사유
+    ), "재료에 미제공 사유가 없다 — 시험이 무의미해진다"
+
+    body = _render_from_stored_delivery(
+        옛_저장본, monkeypatch, report_id="f1q-no-notice"
+    )
+    채널별_글자 = {
+        "웹": _web_page_text(body),
+        "PDF": _pdf_text(옛_저장본),
+        "노션": _notion_plain_text(옛_저장본),
+    }
+
+    # ① 옛 고지 두 줄과 사유 문장이 통째로 사라졌다.
+    남은_문구 = {
+        채널: [
+            문구
+            for 문구 in (*_옛_고지, *_옛_미제공_사유)
+            if _squeezed(문구) in _squeezed(글자)
+        ]
+        for 채널, 글자 in 채널별_글자.items()
+    }
+    assert not any(남은_문구.values()), f"채널에 남은 고지·사유: {남은_문구}"
+
+    # ② 토씨를 바꿔 되살려도 잡히도록 «표현» 목록으로 한 번 더 센다.
+    #    세 채널을 «같은 목록»으로 검사한다 — 한 채널만 목록을 빠뜨리면
+    #    그 채널이 다시 혼자 사정을 말하기 시작한다.
+    걸린_표현 = banned_hits_by_channel(채널별_글자)
+    assert not any(걸린_표현.values()), (
+        f"독자 채널에 남은 과정 문구: {걸린_표현} "
+        f"(금지 사유는 {READER_BANNED_EXPRESSIONS} 참조)"
+    )
+
+    # ③ 본문은 그대로 나온다 — 고지 블록만 빠졌다.
+    for 채널, 글자 in 채널별_글자.items():
+        assert _squeezed("핵심 요약") in _squeezed(글자), f"{채널}에서 본문이 사라졌다"
+
+    # ④ 내부 자료는 그대로 저장돼 있다 — 표시만 뺐지 지운 것이 아니다.
+    assert list(봉인.header["shortfall_reasons"]) == list(_옛_미제공_사유)
 
 
 # ══════════════════════════════════════════════════════════

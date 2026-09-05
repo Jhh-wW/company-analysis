@@ -282,19 +282,22 @@ def test_정상_흐름이면_검증된_v2_Report가_나온다():
     assert report.quality_contract_version == output.quality_observation.contract_version
     assert report.safety_decision == "공개 차단"
     assert report.publication_policy == "legacy-shadow-exception-v1"
-    # ★ 이 줄의 문구를 바꿨다. 옛 문구는 「«새 안전 검사»에서 …
-    #   «새 구조로» 검증하는 작업은 아직 끝나지 않았습니다」로, 우리가 검증
-    #   방식을 바꾸는 중이라는 «우리 사정»이었고 바로 위 제목 줄과 겹쳤다.
-    #   지금은 제목이 말하지 않는 것 — «독자가 무엇을 하면 되는지» — 를 담는다.
-    #   ⚠️ 지키는 것은 «문구»가 아니라 «고지가 사라지지 않았는가»다.
+    # ★ 여기서 지키는 것은 «내부 사유가 그대로 저장되는가»다.
+    #   2026-09-05 사용자 결정으로 이 문장들은 웹·PDF·노션 «독자 화면»에서
+    #   빠졌지만, 생산은 그대로 유지한다 — 저장본·관리자 화면·진단이 읽는
+    #   자료이기 때문이다. 독자 채널에 안 나오는지는
+    #   `web/tests/test_three_channels_share_sealed_blocks.py`와
+    #   `web/tests/test_three_forms_match.py`가 같은 금지어 목록
+    #   (`web/tests/_reader_notice_ban.py`)으로 따로 지킨다.
+    #   ⚠️ 여기서 지키는 것은 «문구»가 아니라 «사유 기록이 사라지지 않았는가»다.
     assert any(
         "아직 하나씩 확인하지 못했습니다" in reason
         for reason in report.shortfall_reasons
-    ), "★ 「아직 다 확인하지 못했다」는 고지가 사라졌다"
+    ), "★ 「아직 다 확인하지 못했다」는 내부 사유 기록이 사라졌다"
     assert any(
         "원문을 함께 확인해 주세요" in reason
         for reason in report.shortfall_reasons
-    ), "★ 독자가 무엇을 하면 되는지가 사라졌다"
+    ), "★ 무엇을 하면 되는지를 적은 내부 사유 기록이 사라졌다"
     assert any(
         "fact_id와 결속되지 않은 공개 내용" in problem
         for problem in output.quality_observation.safety_problems

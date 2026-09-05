@@ -793,53 +793,72 @@ def test_builder는_장_제목_태그_번호를_report에서_그대로_옮긴다
 
 
 # ══════════════════════════════════════════════════════════
-# ⑦ 부분 보고서 고지 — 정책마다 «어느 문구»인지 글자로 못 박는다
+# ⑦ 부분 보고서 고지 — 정책과 «무관하게» 봉인에 담지 않는다
 # ══════════════════════════════════════════════════════════
 #
+# ★ 2026-09-05 사용자 결정: 출시된 서비스의 독자 화면에 만드는 과정·변명 문구를
+#   싣지 않는다. 그래서 봉인의 ``grade_notice`` 자리는 «항상 비어 있다».
+#   자리 자체는 남긴다 — 이미 발행된 저장본의 봉인에는 옛 글자가 들어 있고,
+#   그 봉인을 깨지 않은 채 채널이 «읽지 않게» 하는 것이 설계다.
 # ★ 기대값을 리터럴로 적는다. 생산 상수를 import해 같은 값끼리 비교하면 문구가
-#   바뀌어도 시험이 따라 바뀌어 아무것도 안 지킨다. 아래 두 문구는 PDF
-#   ``_partial_publication_copy(detailed=True)``가 지금 내는 글자 그대로다 —
-#   S4가 PDF 사본을 지우고 이 블록을 읽을 때 글자가 바뀌면 여기서 걸린다.
+#   되살아나도 시험이 따라 바뀌어 아무것도 안 지킨다. 아래 두 문구는 2026-09-05
+#   이전에 실제로 봉인되던 글자 그대로다 — 어느 갈래든 이 글자가 다시 나오면
+#   여기서 걸린다.
 
-_LEGACY_SHADOW_NOTICE_TEXT = (
+_지운_LEGACY_SHADOW_NOTICE_TEXT = (
     "안전 확인 중인 임시 부분 보고서",
     "확인되지 않은 숫자 문장은 제외했지만 모든 문장·표·도식의 새 "
     "검증은 아직 끝나지 않았습니다. 아래에 남은 이유를 표시합니다.",
 )
-_PARTIAL_NOTICE_TEXT = (
+_지운_PARTIAL_NOTICE_TEXT = (
     "검증된 부분 보고서(부분 완성)",
     "공식 근거로 확인된 항목만 제공합니다. 아래 미제공 사유는 "
     "해당 사실이 없다는 판정이 아닙니다.",
 )
 
 
-def test_legacy_shadow_정책이면_고지는_안전_확인_중_문구다() -> None:
+#: 실제 파이프라인이 만드는 미제공 사유 모양의 표본. 「뺐습니다」·「권합니다」가
+#: 들어 있어야 «고지를 지웠는데 사유만 새어 나가는» 경우를 잡을 수 있다.
+_사유_표본 = [
+    "원문과 맞춰 보지 못한 숫자·날짜 문장 3개를 뺐습니다 (1장 정체성). "
+    "틀렸다는 뜻이 아니라 확인하지 못했다는 뜻입니다.",
+    "이 보고서가 참고한 원문 문서는 2개입니다. 자료가 적으니 다른 자료와 "
+    "함께 보시길 권합니다.",
+]
+
+
+def test_legacy_shadow_정책이어도_봉인에_고지를_담지_않는다() -> None:
     report = replace(
         _report(),
         publication_policy=PublicationPolicy.LEGACY_SHADOW_EXCEPTION.value,
+        shortfall_reasons=list(_사유_표본),
     )
 
-    notice = build_public_projection(report).grade_notice
+    projection = build_public_projection(report)
 
-    assert notice == _LEGACY_SHADOW_NOTICE_TEXT
-    # 다른 갈래의 문구가 새어 들어오면 안 된다.
-    assert notice != _PARTIAL_NOTICE_TEXT
-    # 화면 문구에 «우리 사정»을 적지 않는다 — 독자가 알아야 할 것만 남긴다.
-    assert all("우리" not in part for part in notice)
+    assert projection.grade_notice == ("", "")
+    assert projection.grade_notice != _지운_LEGACY_SHADOW_NOTICE_TEXT
+    # ★ 내부 자료는 그대로다 — 표시만 뺐지 판정·사유를 지운 것이 아니다.
+    assert projection.header["publication_policy"] == (
+        PublicationPolicy.LEGACY_SHADOW_EXCEPTION.value
+    )
+    assert list(projection.header["shortfall_reasons"]) == _사유_표본
 
 
-def test_보통_부분_보고서면_고지는_검증된_부분_보고서_문구다() -> None:
-    report = _report()
+def test_보통_부분_보고서도_봉인에_고지를_담지_않는다() -> None:
+    report = replace(_report(), shortfall_reasons=list(_사유_표본))
     assert report.grade is Grade.PARTIAL
     assert report.publication_policy != (
         PublicationPolicy.LEGACY_SHADOW_EXCEPTION.value
     )
 
-    notice = build_public_projection(report).grade_notice
+    projection = build_public_projection(report)
 
-    assert notice == _PARTIAL_NOTICE_TEXT
-    assert notice != _LEGACY_SHADOW_NOTICE_TEXT
-    assert all("우리" not in part for part in notice)
+    assert projection.grade_notice == ("", "")
+    assert projection.grade_notice != _지운_PARTIAL_NOTICE_TEXT
+    # ★ 등급 판정과 사유는 header에 그대로 실려 저장·관리자 화면이 읽는다.
+    assert projection.header["grade"] == Grade.PARTIAL.value
+    assert list(projection.header["shortfall_reasons"]) == _사유_표본
 
 
 def test_완성_보고서면_부분_보고서_고지를_붙이지_않는다() -> None:

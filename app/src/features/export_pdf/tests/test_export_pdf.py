@@ -18,8 +18,8 @@ from src.features.export_pdf import constants
 from src.features.export_pdf.logic import (
     PDFGenerationError,
     _add_report_table,
+    _grade_notice,
     _normalize_pdf_text,
-    _partial_publication_copy,
     _single_line_pdf_text,
     _styles,
     build_ascii_filename,
@@ -37,6 +37,7 @@ from src.features.pipeline.port import (
     SourceStatus,
 )
 from src.features.provenance.sources import render_sources
+from src.features.report_standard import build_published_report
 from src.features.report_standard.constants import SECTION_SPECS
 
 
@@ -385,13 +386,15 @@ def test_partial_legacy_보고서는_PDF를_만들지_않고_fail_closed한다()
         build_pdf(invalid)
 
 
-def test_canonical_부분보고서는_PDF에도_등급과_미제공사유를_표시한다() -> None:
+def _partial_draft() -> Report:
+    """8장(culture)을 통째로 뺀 canonical 부분 보고서 — 미제공 사유가 생긴다."""
+
     report = _report()
     missing = "culture"
     removed_fact_ids = {
         fact.fact_id for fact in report.fact_records if fact.section_owner == missing
     }
-    partial_draft = replace(
+    return replace(
         report,
         sections=[section for section in report.sections if section.cell != missing],
         fact_records=[
@@ -402,25 +405,50 @@ def test_canonical_부분보고서는_PDF에도_등급과_미제공사유를_표
         ],
     )
 
+
+def test_canonical_부분보고서는_PDF에_등급고지와_미제공사유를_표시하지_않는다() -> None:
+    """출시된 보고서에 만드는 과정 이야기를 싣지 않는다 (사용자 결정, 2026-09-05).
+
+    ★ 지키는 것은 «없음»이다. 그래서 재료가 실제로 부분 보고서이고 미제공
+      사유를 «갖고 있는지»부터 확인한다 — 사유가 애초에 없으면 「안 보인다」는
+      단언이 저절로 통과해 아무것도 안 지킨다.
+    """
+
+    partial_draft = _partial_draft()
+    published = build_published_report(partial_draft)
+    assert published.grade is Grade.PARTIAL
+    assert any(
+        "8장 인재상과 일하는 방식" in reason for reason in published.shortfall_reasons
+    ), "재료에 미제공 사유가 없다 — 시험이 무의미해진다"
+
     text = _text(build_pdf(partial_draft))
 
-    assert "검증된 부분 보고서(부분 완성)" in text
-    assert "공식 근거로 확인된 항목만" in text
-    assert "8장 인재상과 일하는 방식" in text
+    assert "검증된 부분 보고서(부분 완성)" not in text
+    assert "공식 근거로 확인된 항목만" not in text
+    assert "부분 보고서 안내" not in text
+    assert "8장 인재상과 일하는 방식" not in text
+    # 보고서 본문은 그대로다 — 고지 블록만 빠졌다.
+    assert "핵심 요약" in text
 
 
-def test_안전미통과_임시공개본을_PDF가_검증완료라고_부르지_않는다() -> None:
+def test_안전미통과_임시공개본도_PDF에_고지를_그리지_않는다() -> None:
+    """정책이 legacy-shadow여도 「안전 확인 중인 임시 …」를 표지·본문에 안 쓴다."""
+
     report = replace(
-        _report(),
-        grade=Grade.PARTIAL,
+        _partial_draft(),
         publication_policy="legacy-shadow-exception-v1",
     )
 
-    title, detail = _partial_publication_copy(report, detailed=True)
+    title, detail = _grade_notice(report, projection=None, detailed=True)
+    assert (title, detail) == ("", "")
 
-    assert title == "안전 확인 중인 임시 부분 보고서"
-    assert "검증은 아직 끝나지 않았습니다" in detail
-    assert "검증된 부분 보고서" not in title
+    text = _text(build_pdf(report))
+
+    assert "안전 확인 중인 임시 부분 보고서" not in text
+    assert "검증은 아직 끝나지 않았습니다" not in text
+    assert "검증된 부분 보고서" not in text
+    # 판정 자체는 그대로 저장된다 — 표시만 뺐다.
+    assert report.publication_policy == "legacy-shadow-exception-v1"
 
 
 def test_폰트_라이선스_원문을_배포물과_함께_둔다() -> None:
