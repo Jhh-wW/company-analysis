@@ -101,10 +101,10 @@ CLAIM_SLOTS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
 #:   배정하면 같은 슬롯에 권위가 다른 두 값(원문 인용 vs 정확한 재무 수치)이
 #:   겹쳐 어느 쪽을 믿을지 모호해진다 — relevance.py가 이 슬롯을 아예
 #:   채점 대상에서 뺀 이유다.
-#: ★ competitive_position은 self_context 하나뿐 — 비교 대상·지표·근거·
-#:   판단 4개는 구조화 검증기가 채운다. self_context는 composer 45개 어휘에
-#:   «없던» 새 슬롯이다(「자사가 스스로 서술한 시장 내 위치·강점」). 아래
-#:   ALL_SLOT_IDS·SLOT_SECTION_OF에 합쳐 이 엔진이 인식하는 slot_id로 만든다.
+#: ★ competitive_position은 self_context와 stated_differentiator를 수집한다.
+#:   후자는 회사 신원·공식 Source 등록부를 확인하는 app의 결정론 투영기가
+#:   승격하므로 relevance.py가 키워드로 흉내 내지 않는다. 동일 조건 비교 4개
+#:   슬롯은 선택 사항이며 구조화 비교기가 실제 자료가 있을 때만 채운다.
 COLLECTOR_SLOTS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
     "identity": (
         "identity:corporate_identity", "identity:business_definition",
@@ -133,6 +133,7 @@ COLLECTOR_SLOTS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
     ),
     "competitive_position": (
         "competitive_position:self_context",
+        "competitive_position:stated_differentiator",
     ),
 }
 
@@ -141,7 +142,8 @@ COLLECTOR_SLOT_IDS: Final[frozenset[str]] = frozenset(
 )
 
 #: 이 엔진이 인식하는 전체 slot_id — composer 45개 어휘 ∪ 수집기 전용 신규
-#: 슬롯(self_context). EvidenceFragment·CollectionAttempt 검증은 이 합집합
+#: 슬롯(self_context·stated_differentiator). EvidenceFragment·CollectionAttempt
+#: 검증은 이 합집합
 #: 기준이다(보조 태그로 composer 슬롯을 붙이는 것도 허용하므로 45개를
 #: 빼지 않는다 — historical_performance·비교 4종도 «유효한 slot_id»이긴
 #: 하다, 다만 relevance.py가 스스로 배정하지 않을 뿐이다).

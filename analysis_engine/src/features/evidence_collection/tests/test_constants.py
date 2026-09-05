@@ -27,12 +27,15 @@ def test_collector_slots_by_section은_team_lead_통보값과_정확히_같다()
             "operations_partners:value_chain", "operations_partners:operating_role",
         ),
         "culture": ("culture:work_principle", "culture:verified_case"),
-        "competitive_position": ("competitive_position:self_context",),
+        "competitive_position": (
+            "competitive_position:self_context",
+            "competitive_position:stated_differentiator",
+        ),
     }
 
 
-def test_collector_slot_ids는_17개다() -> None:
-    assert len(c.COLLECTOR_SLOT_IDS) == 17
+def test_collector_slot_ids는_18개다() -> None:
+    assert len(c.COLLECTOR_SLOT_IDS) == 18
 
 
 def test_collector_slot_ids는_ALL_SLOT_IDS의_부분집합이다() -> None:
@@ -55,7 +58,7 @@ def test_past_changes_historical_performance는_수집기_슬롯이_아니다() 
 
 
 def test_competitive_position_비교_4종은_수집기_슬롯이_아니다() -> None:
-    """비교 대상·지표·근거·판단은 구조화 검증기가 채운다 — 수집기는 self_context 하나뿐."""
+    """동일 조건 비교는 선택 사항이고 수집기는 자기 맥락·선언 차별점을 받는다."""
     excluded = {
         "competitive_position:comparison_target",
         "competitive_position:comparison_metric",
@@ -66,6 +69,7 @@ def test_competitive_position_비교_4종은_수집기_슬롯이_아니다() -> 
     assert excluded.isdisjoint(c.COLLECTOR_SLOT_IDS)
     assert c.COLLECTOR_SLOTS_BY_SECTION["competitive_position"] == (
         "competitive_position:self_context",
+        "competitive_position:stated_differentiator",
     )
 
 

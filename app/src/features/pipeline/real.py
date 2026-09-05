@@ -87,6 +87,11 @@ from src.features.company_comparison.official_sources import (
     dart_profile_attestation_material,
     register_candidate_sentence_evidence,
 )
+from src.features.company_comparison.stated_differentiator import (
+    STATED_DIFFERENTIATOR_CLAIM_TYPE,
+    add_stated_differentiator_fragments,
+    register_stated_differentiator_sentence_evidence,
+)
 from src.features.business_candidate.dart_identity import (
     DartCompanyRecord,
     build_dart_company_index,
@@ -2748,6 +2753,12 @@ class RealPipeline:
                         domain_attestation_evidence=profile_attestation_evidence,
                     )
                 )
+                # 결정론 승격(9장 자기 선언)을 먼저 하고, 그래도 빈 칸만 AI 재판정에 맡긴다.
+                official_evidence = add_stated_differentiator_fragments(
+                    official_evidence,
+                    company_name=company_name,
+                    company_aliases=_official_company_aliases(profile),
+                )
                 official_evidence = reclassify_official_evidence(
                     official_evidence,
                     client=client,
@@ -2962,31 +2973,33 @@ class RealPipeline:
                     v2_comparison_result,
                 )
             except ComparisonBlockedError:
-                logger.info("엔진 v2 공식 양사 비교 사전검사 차단", exc_info=True)
+                logger.info("엔진 v2 회사 차별점 사전검사 차단", exc_info=True)
                 steps.append(
                     {
-                        "step": "v2_FULL_공식비교사전검사_차단",
-                        "사유코드": FINAL_GATE_REASON_COMPARISON_BLOCKED,
+                        "step": "v2_FULL_회사차별점사전검사_차단",
+                        "사유코드": FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT,
                     }
                 )
                 return RunResult(
                     outcome=Outcome.GATE_STOPPED,
                     message=(
-                        "같은 조건으로 대조할 공식 양사 자료를 확인하지 못해 "
+                        "회사 공식 자료에서 자기 선언형 차별점을 확인하지 못해 "
                         "AI 작성 전에 멈췄습니다."
-                        + _stop_reason_note(FINAL_GATE_REASON_COMPARISON_BLOCKED)
+                        + _stop_reason_note(
+                            FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT
+                        )
                     ),
                     sources=[
                         SourceStatus(
-                            "공식 양사 비교",
+                            "회사 공식 차별점",
                             "none",
-                            "동일 기간·범위·지표의 공식 양사 근거가 부족합니다",
+                            "회사 주어와 선언 표지가 있는 공식 원문이 부족합니다",
                         )
                     ],
                     corp_type=corp_type,
                     cost_krw=_request_spent_krw(engine),
                     model=model,
-                    final_gate_reason=FINAL_GATE_REASON_COMPARISON_BLOCKED,
+                    final_gate_reason=FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT,
                     dart_receipt_numbers=source_identity.dart_receipt_numbers,
                     financial_payload_digest=source_identity.financial_payload_digest,
                 )
@@ -3450,6 +3463,11 @@ class RealPipeline:
         comparison_preflight: bool | None = None
         try:
             preflight_fragments = register_candidate_sentence_evidence(frags)
+            preflight_fragments = register_stated_differentiator_sentence_evidence(
+                preflight_fragments,
+                company_name=company_name,
+                company_aliases=_official_company_aliases(profile),
+            )
             preflight_attestation = bind_dart_profile_attestation(
                 preflight_fragments,
                 profile=profile,
@@ -3855,6 +3873,11 @@ class RealPipeline:
         provenance_fragments = register_candidate_sentence_evidence(
             provenance_fragments
         )
+        provenance_fragments = register_stated_differentiator_sentence_evidence(
+            provenance_fragments,
+            company_name=company_name,
+            company_aliases=_official_company_aliases(profile),
+        )
         profile_attestation = bind_dart_profile_attestation(
             provenance_fragments,
             profile=profile,
@@ -3925,35 +3948,30 @@ class RealPipeline:
             # 경쟁 관계가 직접 적힌 DART 법인 1~3곳의 공식 원문을 별도로 받고,
             # 동일 지표·기간·연결범위인 수치가 있을 때만 9장을 붙인다.
             comparison_reasons: tuple[str, ...] = ()
-            if comparison_preflight is False:
-                comparison_reasons = (
-                    "사전검사에서 검증 가능한 동종업계 비교 후보를 찾지 못했습니다",
+            try:
+                report = _attach_competitive_position(
+                    report,
+                    engine=engine,
+                    counter=counter,
+                    self_corp_code=corp_code,
+                    self_company=company_name,
+                    self_financials=financials,
+                    self_filing=filing,
+                    self_official_text=filing_text,
+                    steps=steps,
+                    collected_on=business_date.isoformat(),
+                    business_date=business_date,
+                    official_candidate_sentences=official_candidate_sentences,
+                    candidate_source_registry=tuple(all_citations),
                 )
-            else:
-                try:
-                    report = _attach_competitive_position(
-                        report,
-                        engine=engine,
-                        counter=counter,
-                        self_corp_code=corp_code,
-                        self_company=company_name,
-                        self_financials=financials,
-                        self_filing=filing,
-                        self_official_text=filing_text,
-                        steps=steps,
-                        collected_on=business_date.isoformat(),
-                        business_date=business_date,
-                        official_candidate_sentences=official_candidate_sentences,
-                        candidate_source_registry=tuple(all_citations),
-                    )
-                except ComparisonBlockedError as exc:
-                    comparison_reasons = tuple(exc.reasons)
+            except ComparisonBlockedError as exc:
+                comparison_reasons = tuple(exc.reasons)
             if comparison_reasons:
                 # 비교 실패는 경쟁우위가 없다는 판정이 아니다. 검증된 1~8장은
                 # 기본 보고서로 유지하고, 빈 9장이나 추정 비교 문장은 만들지 않는다.
                 steps.append(
                     {
-                        "step": "12_경쟁사비교_조건부생략",
+                        "step": "12_회사차별점_조건부생략",
                         "사유": list(comparison_reasons),
                     }
                 )
@@ -3973,17 +3991,17 @@ class RealPipeline:
         except ComparisonBlockedError as exc:
             steps.append(
                 {
-                    "step": "12_경쟁사비교_출고차단",
+                    "step": "12_회사차별점_출고차단",
                     "사유": list(exc.reasons),
                 }
             )
             return RunResult(
                 outcome=Outcome.GATE_STOPPED,
                 message=(
-                    "양사 공식 원문을 같은 지표·기간·연결범위로 비교할 수 없어 "
-                    "보고서를 내보내지 않았습니다. 경쟁우위가 없다는 뜻이 아니라, "
+                    "회사 공식 자료에서 자기 선언형 차별점을 확인하지 못해 "
+                    "보고서를 내보내지 않았습니다. 차별점이 없다는 뜻이 아니라, "
                     "현재 공개 근거로는 확인할 수 없다는 뜻입니다."
-                    + _stop_reason_note(FINAL_GATE_REASON_COMPARISON_BLOCKED)
+                    + _stop_reason_note(FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT)
                 ),
                 sources=sources,
                 corp_type=corp_type,
@@ -3994,7 +4012,7 @@ class RealPipeline:
                 model=model,
                 span_selection_diagnostics=tuple(selection_diagnostics),
                 span_selection_result_reason=selection_result_reason_code,
-                final_gate_reason=FINAL_GATE_REASON_COMPARISON_BLOCKED,
+                final_gate_reason=FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT,
             )
         except PublishBlockedError as exc:
             # 출고 차단은 사용자 화면에서는 닫힌 문구로만 보이지만, 운영자가 같은
@@ -4233,9 +4251,16 @@ def _attach_competitive_position(
         official_candidate_sentences=official_candidate_sentences,
         candidate_source_registry=candidate_source_registry,
     )
+    if not any(
+        fact.claim_type == STATED_DIFFERENTIATOR_CLAIM_TYPE
+        for fact in comparison.facts
+    ):
+        raise ComparisonBlockedError(
+            "회사 공식 자료에서 자기 선언형 차별점을 확인하지 못했습니다"
+        )
     steps.append(
         {
-            "step": "12_경쟁사비교",
+            "step": "12_회사차별점",
             "후보": [item.record.corp_name for item in comparison.candidates],
             "확정사실": len(comparison.facts),
             "공식출처": len(comparison.sources),
@@ -4249,7 +4274,13 @@ def _attach_competitive_position(
             if section.cell != "competitive_position"
         ]
         + [comparison.section],
-        citations=[*report.citations, *comparison.sources],
+        citations=list(
+            {
+                source.source_id: source
+                for source in (*report.citations, *comparison.sources)
+                if isinstance(source, Source)
+            }.values()
+        ),
         fact_records=[
             fact
             for fact in report.fact_records
@@ -4641,6 +4672,11 @@ def _prepare_v2_comparison_result(
     candidate_fragments = register_candidate_sentence_evidence(
         candidate_fragments
     )
+    candidate_fragments = register_stated_differentiator_sentence_evidence(
+        candidate_fragments,
+        company_name=company_name,
+        company_aliases=_official_company_aliases(profile),
+    )
     candidate_sources, candidate_sentences = build_typed_comparison_candidate_inputs(
         candidate_fragments,
         result=official_evidence,
@@ -4649,13 +4685,13 @@ def _prepare_v2_comparison_result(
         company_name=company_name,
         collected_on=business_date.isoformat(),
     )
-    if not filing or not str(filing.get("rcept_no") or "").strip():
-        raise ComparisonBlockedError("자사 비교용 공식 공시 접수번호가 없습니다")
-    downloader = dart_download_document or engine.download_document
-    self_path = downloader(
-        str(filing["rcept_no"]), engine.RAW_DIR, counter
-    )
-    self_official_text = str(engine.read_filing_text(self_path) or "")
+    self_official_text = ""
+    if filing and str(filing.get("rcept_no") or "").strip():
+        downloader = dart_download_document or engine.download_document
+        self_path = downloader(
+            str(filing["rcept_no"]), engine.RAW_DIR, counter
+        )
+        self_official_text = str(engine.read_filing_text(self_path) or "")
     comparison = _build_competitive_position_result(
         Report(
             company=company_name,
@@ -4682,6 +4718,13 @@ def _prepare_v2_comparison_result(
         candidate_source_registry=candidate_sources,
         dart_download_document=dart_download_document,
     )
+    if not any(
+        fact.claim_type == STATED_DIFFERENTIATOR_CLAIM_TYPE
+        for fact in comparison.facts
+    ):
+        raise ComparisonBlockedError(
+            "회사 공식 자료에서 자기 선언형 차별점을 확인하지 못했습니다"
+        )
     return comparison
 
 
