@@ -127,6 +127,7 @@ from src.features.product_names.fragments import (
     name_candidate_fragments,
 )
 from src.features.product_names.logic import collect_name_candidates
+from src.shared.report_generation.models import exact_text_sha256
 from src.features.provenance.citations import build_citations
 from src.features.provenance.sources import (
     Source,
@@ -2894,11 +2895,25 @@ class RealPipeline:
                     )
                 )
                 # 결정론 승격(9장 자기 선언)을 먼저 하고, 그래도 빈 칸만 AI 재판정에 맡긴다.
-                official_evidence = add_stated_differentiator_fragments(
-                    official_evidence,
-                    company_name=company_name,
-                    company_aliases=_official_company_aliases(profile),
-                )
+                # 승격은 보조 추가물이다 — 실패하면 9장이 비는 것으로 끝나야 하고,
+                # 보고서 전체를 내부 오류로 멈춰서는 안 된다(2026-09-06 운영 실측).
+                try:
+                    official_evidence = add_stated_differentiator_fragments(
+                        official_evidence,
+                        company_name=company_name,
+                        company_aliases=_official_company_aliases(profile),
+                    )
+                except (KeyError, ValueError, TypeError) as promotion_error:
+                    logger.warning(
+                        "9장 자기 선언 승격을 건너뜁니다 kind=%s",
+                        type(promotion_error).__name__,
+                    )
+                    steps.append(
+                        {
+                            "step": "9장_자기선언_승격",
+                            "실패": type(promotion_error).__name__,
+                        }
+                    )
                 official_evidence = reclassify_official_evidence(
                     official_evidence,
                     client=client,
@@ -2935,9 +2950,12 @@ class RealPipeline:
                     failure_detail = "DART 공식 자료 확인을 지금 완료하지 못했습니다"
                 else:
                     failure_reason = FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
+                    # 종류만으로는 원인을 못 찾는다(2026-09-06 운영 실측). URL·긴 원문을
+                    # 가린 160자 요약을 함께 남긴다 — traceback·원문 전체는 여전히 남기지 않는다.
                     logger.error(
-                        "공식 근거 수집·계약 결속 내부 오류 kind=%s",
+                        "공식 근거 수집·계약 결속 내부 오류 kind=%s 요약=%s",
                         type(error).__name__,
+                        _safe_error_summary(error),
                     )
                     failure_message = (
                         "공식 자료를 보고서에 연결하는 내부 검사를 통과하지 못해 "
@@ -6442,6 +6460,60 @@ def _formal_official_web_summaries(
     return homepage, official_ir
 
 
+_URL_IN_MESSAGE_RE: Final[re.Pattern[str]] = re.compile(r"https?://\S+")
+_ERROR_SUMMARY_MAX_CHARS: Final[int] = 160
+
+
+def _safe_error_summary(error: BaseException) -> str:
+    """예외 메시지에서 URL을 가리고 공백을 접어 짧게 요약한다.
+
+    운영 로그에 traceback·외부 원문 전체를 남기지 않는 기존 원칙은 지키되,
+    「종류=ValueError」만으로는 원인을 좁힐 수 없어 검증 문구 정도는 남긴다.
+    """
+
+    text = " ".join(str(error).split())
+    text = _URL_IN_MESSAGE_RE.sub("<url>", text)
+    return text[:_ERROR_SUMMARY_MAX_CHARS]
+
+
+#: 이름 조각 사전 검증용 generation 표식. 실제 봉인에는 쓰지 않는다.
+_NAME_FRAGMENT_DRY_RUN_GENERATION: Final[str] = exact_text_sha256("이름후보 사전검증")
+
+
+def _name_fragments_passing_transport(
+    frags: dict[int, dict[str, object]],
+    made: list[dict[str, object]],
+    *,
+    corp_id: str,
+    filing_meta: Any,
+) -> tuple[list[dict[str, object]], dict[str, int]]:
+    """이름 조각을 실제 transport 검사에 미리 통과시켜 실패한 조각만 뺀다.
+
+    이름 조각은 보조 추가물이므로, 하나가 검사에 걸려 packet 조립 전체를 멈추게
+    두지 않는다. 실패 사유는 우리 검사 문구이므로 그대로 기록한다.
+    """
+
+    accepted: list[dict[str, object]] = []
+    rejected: dict[str, int] = {}
+    next_id = max(frags, default=0) + 1
+    for raw in made:
+        trial = {number: dict(item) for number, item in frags.items()}
+        trial[next_id] = raw
+        try:
+            build_section_evidence_packet_set(
+                corp_id=corp_id,
+                source_generation_sha256=_NAME_FRAGMENT_DRY_RUN_GENERATION,
+                frags=trial,
+                filing_meta=filing_meta,
+            )
+        except EvidenceTransportError as error:
+            reason = str(error) or error.detail_code
+            rejected[reason] = rejected.get(reason, 0) + 1
+            continue
+        accepted.append(raw)
+    return accepted, rejected
+
+
 def _attach_name_candidate_fragments(
     frags: dict[int, dict[str, object]],
     *,
@@ -6467,8 +6539,39 @@ def _attach_name_candidate_fragments(
         typed_fragments=typed_sources,
     )
     merged = {number: dict(raw) for number, raw in frags.items()}
-    for raw in made:
+    accepted: list[dict[str, object]] = []
+    rejected: dict[str, int] = {}
+    if made:
+        # packet 검사는 공시 dict가 아니라 FilingMeta를 받는다(본 조립과 같은 변환).
+        from src.features.composer.port import filing_meta_from_raw  # noqa: PLC0415 - 순환 import 회피
+
+        packet_meta = filing_meta_from_raw(filing_meta)
+        try:
+            # 기본 조각 자체가 검사를 못 넘으면 이름 조각 탓이 아니다 — 사유만 남기고 손대지 않는다.
+            build_section_evidence_packet_set(
+                corp_id=corp_id,
+                source_generation_sha256=_NAME_FRAGMENT_DRY_RUN_GENERATION,
+                frags=merged,
+                filing_meta=packet_meta,
+            )
+        except EvidenceTransportError as base_error:
+            logger.warning(
+                "기본 근거 조각이 transport 검사를 넘지 못해 이름 조각을 붙이지 않습니다: %s",
+                str(base_error) or base_error.detail_code,
+            )
+            rejected["기본조각: " + (str(base_error) or base_error.detail_code)] = len(made)
+        else:
+            accepted, rejected = _name_fragments_passing_transport(
+                merged, made, corp_id=corp_id, filing_meta=packet_meta
+            )
+    for raw in accepted:
         merged[max(merged, default=0) + 1] = raw
+    if rejected:
+        logger.warning(
+            "이름 조각 %d건이 transport 사전 검증에서 탈락했습니다: %s",
+            sum(rejected.values()),
+            "; ".join(sorted(rejected)),
+        )
 
     counts: dict[str, int] = {}
     for candidate in candidates:
@@ -6477,12 +6580,13 @@ def _attach_name_candidate_fragments(
         {
             "step": "7_이름후보",
             "후보": len(candidates),
-            "조각": len(made),
+            "조각": len(accepted),
             "종류별": counts,
             "상한적용": len(candidates) > MAX_NAME_FRAGMENTS_PER_FILING,
+            **({"탈락": rejected} if rejected else {}),
         }
     )
-    return merged, len(made)
+    return merged, len(accepted)
 
 
 def _collect(
